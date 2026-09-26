@@ -45,6 +45,8 @@ relaunch_cleanup() {
   for d in "${TASK_TMPS[@]:-}"; do
     [ -n "$d" ] && rm -rf "$d"
   done
+  # Each spawn's per-task git hooks directory is read-only.
+  chmod -R u+w "$TMP_ROOT" 2>/dev/null || true
   rm -rf "$TMP_ROOT"
 }
 trap relaunch_cleanup EXIT
@@ -1969,12 +1971,19 @@ if [ -f "$D/herdr-stopped" ]; then
 fi
 case "${1:-} ${2:-}" in
   'pane get')
+    # Only the pane this case says survived, in the recorded tab, and the pane
+    # a tab create minted can be read back, each until its tab is closed. Any
+    # other pane id is structurally gone, which is herdr's `pane_not_found`.
+    tab=
     if [ "${3:-}" = "$(cat "$D/herdr-pane")" ]; then
-      printf '{"result":{"pane":{"pane_id":"%s","foreground_cwd":"%s"}}}\n' \
-        "${3:-}" "$(cat "$D/cwd")"
+      tab=tab1
+    elif [ -f "$D/herdr-new-pane" ] && [ "${3:-}" = "$(cat "$D/herdr-new-pane")" ]; then
+      tab=tabnew
+    fi
+    if [ -n "$tab" ] && ! grep -qx "$tab" "$D/herdr-closed-tabs" 2>/dev/null; then
+      printf '{"result":{"pane":{"pane_id":"%s","workspace_id":"ws1","tab_id":"%s","cwd":"%s","foreground_cwd":"%s"}}}\n' \
+        "${3:-}" "$tab" "$(cat "$D/cwd")" "$(cat "$D/cwd")"
     else
-      # Only the pane this case says survived can be read back. Any other pane
-      # id is structurally gone, which is herdr's `pane_not_found`.
       printf '{"error":{"code":"pane_not_found"}}\n'
     fi
     exit 0 ;;
@@ -1994,10 +2003,10 @@ case "${1:-} ${2:-}" in
     # whose Herdr status authority still belongs to its previous session.
     if [ -f "$D/herdr-agent-registration" ]; then
       printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":4242,"foreground_processes":[]}}}\n' \
-        "$(cat "$D/herdr-pane")"
+        "${4:-}"
     else
       printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":4242,"foreground_processes":[{"pid":4243,"name":"claude","argv":["claude"],"cmdline":"claude"}]}}}\n' \
-        "$(cat "$D/herdr-pane")"
+        "${4:-}"
     fi
     exit 0 ;;
   'pane send-text')
@@ -2035,8 +2044,16 @@ case "${1:-} ${2:-}" in
     # record ends up naming is the one this call minted.
     printf '%s\n' "$*" >> "$D/herdr-created-tabs"
     printf '{"result":{"tab":{"tab_id":"tabnew"},"root_pane":{"pane_id":"%%9"}}}\n'
-    # From here on the new pane is the one that reads back.
-    printf '%s' '%9' > "$D/herdr-pane"
+    # From here on the new pane reads back too.
+    printf '%s' '%9' > "$D/herdr-new-pane"
+    exit 0 ;;
+  'tab close')
+    printf '%s\n' "${3:-}" >> "$D/herdr-closed-tabs"
+    exit 0 ;;
+  'session list')
+    # The presentation lock that serializes every pane close in a session is
+    # keyed by that session's socket.
+    printf '{"sessions":[{"name":"fmlab","running":true,"socket_path":"%s/herdr.sock"}]}\n' "$D"
     exit 0 ;;
 esac
 exit 0
@@ -2144,7 +2161,7 @@ test_herdr_relaunch_resumes_only_the_registered_pi_session() {
   pass "fm-spawn --relaunch: resumes the bound Pi session only for a Pi registration"
 }
 
-test_herdr_reclaim_adopts_a_pane_that_outlived_its_server() {
+test_herdr_reclaim_replaces_a_pane_that_outlived_its_server() {
   local dir out rc=0 log stray
   herdr_case_or_skip gone-herdr rl68 || {
     echo "skip - herdr reclaim needs jq (the herdr adapter parses JSON with it)"
@@ -2154,31 +2171,40 @@ test_herdr_reclaim_adopts_a_pane_that_outlived_its_server() {
 
   out=$(run_spawn "$dir" rl68 --relaunch --harness claude) || rc=$?
   log=$(cat "$dir/fake/herdr-log")
-  expect_code 0 "$rc" "a pane that outlived its stopped server is adoptable"$'\n'"$out"$'\n'"$log"
+  expect_code 0 "$rc" "a pane that outlived its stopped server is replaceable"$'\n'"$out"$'\n'"$log"
 
   assert_contains "$log" "server --session fmlab" \
     "the reclaim must bring the RECORDED session's server back before deciding anything"
   assert_contains "$log" "agent get %7 --session fmlab" \
     "the reclaim must re-read the recorded pane once its server is running"
   assert_not_contains "$log" "workspace create" \
-    "adopting a preserved pane must not create a workspace"
-  assert_not_contains "$log" "tab create" \
-    "adopting a preserved pane must not open a second tab beside it"
+    "replacing a preserved pane must not create a workspace"
+  # Herdr resumes an agent in the directory its pane was created in, so the
+  # surviving pane is replaced by one created in the worktree, in the same
+  # workspace, and then closed rather than left orphaned beside it.
+  assert_contains "$log" "tab create --workspace ws1 --cwd $dir/wt --label fm-rl68 --no-focus --session fmlab" \
+    "the replacement must be created in the recorded workspace and worktree"
+  assert_contains "$log" "tab close tab1 --session fmlab" \
+    "the superseded pane's tab must be closed once the record names its replacement"
   # Every call belongs to the session the record names. A rebind resolves its
   # container from the ambient session instead, which is how the preserved pane
   # ends up orphaned in a workspace nothing points at.
   stray=$(printf '%s\n' "$log" | grep -v -- '--session fmlab$' | grep -v '^status --json$' || true)
   [ -z "$stray" ] || fail "a herdr reclaim touched a session the record does not name: $stray"
-  assert_contains "$out" "window=fmlab:%7" "the reclaim should report the adopted endpoint"
-  [ "$(meta_field "$dir" rl68 herdr_pane_id)" = '%7' ] \
-    || fail "the adopted record's pane id changed, got $(meta_field "$dir" rl68 herdr_pane_id)"
-  [ "$(meta_field "$dir" rl68 herdr_tab_id)" = tab1 ] \
-    || fail "the adopted record's tab id changed, got $(meta_field "$dir" rl68 herdr_tab_id)"
-  [ "$(meta_field "$dir" rl68 window)" = 'fmlab:%7' ] \
-    || fail "the adopted record's endpoint moved, got $(meta_field "$dir" rl68 window)"
-  assert_contains "$log" "pane send-text %7 " \
-    "the replacement's launch brief must be delivered into the adopted pane"
-  pass "reclaim: a herdr pane that outlived its stopped server is adopted, never orphaned beside a new tab"
+  assert_contains "$out" "window=fmlab:%9" "the reclaim should report the replacement endpoint"
+  [ "$(meta_field "$dir" rl68 herdr_pane_id)" = '%9' ] \
+    || fail "the record should name the replacement pane, got $(meta_field "$dir" rl68 herdr_pane_id)"
+  [ "$(meta_field "$dir" rl68 herdr_tab_id)" = tabnew ] \
+    || fail "the record should name the replacement tab, got $(meta_field "$dir" rl68 herdr_tab_id)"
+  [ "$(meta_field "$dir" rl68 herdr_workspace_id)" = ws1 ] \
+    || fail "the replacement left the recorded workspace, got $(meta_field "$dir" rl68 herdr_workspace_id)"
+  [ "$(meta_field "$dir" rl68 window)" = 'fmlab:%9' ] \
+    || fail "the record's endpoint should be the replacement, got $(meta_field "$dir" rl68 window)"
+  assert_contains "$log" "pane send-text %9 " \
+    "the replacement's launch brief must be delivered into the replacement pane"
+  assert_not_contains "$log" "pane send-text %7 " \
+    "nothing may be typed into the superseded pane"
+  pass "reclaim: a herdr pane that outlived its stopped server is replaced in its workspace and worktree, never orphaned beside a new tab"
 }
 
 test_herdr_exit_reports_already_stopped_when_the_pane_outlived_its_server() {
@@ -2448,7 +2474,7 @@ test_tmux_refuses_a_session_that_cannot_be_found
 test_tmux_refuses_when_the_server_is_gone
 test_reclaim_refuses_an_unreadable_endpoint
 test_herdr_relaunch_resumes_only_the_registered_pi_session
-test_herdr_reclaim_adopts_a_pane_that_outlived_its_server
+test_herdr_reclaim_replaces_a_pane_that_outlived_its_server
 test_herdr_exit_reports_already_stopped_when_the_pane_outlived_its_server
 test_herdr_rebind_stays_in_the_recorded_session
 test_herdr_reclaim_refuses_an_agent_that_came_back

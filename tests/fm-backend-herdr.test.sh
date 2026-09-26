@@ -671,16 +671,62 @@ test_exhausted_settle_window_keeps_a_non_shell_foreground_live() {
   pass "herdr stale registration: an exhausted settle window still reads a non-shell foreground as live"
 }
 
+# named_standin <path>: make <path> a long-running process whose executable
+# name is <path>'s basename, and set NAMED_STANDIN_ARGS to the shell-quoted
+# arguments that keep it running for 300s. A symlink carries the name (a copied
+# platform binary fails code signing on macOS), but a multicall coreutils
+# `sleep` (uutils or busybox) dispatches on that name and exits at once, so the
+# host's `sleep` is used only when it survives the rename, then a compiled
+# spinner, then python3, which ignores its own name.
+named_standin() {  # <path>
+  local path=$1 dir pid bin cc
+  local -a args
+  dir=$(dirname "$path")
+  for bin in sleep cc python3; do
+    rm -f "$path"
+    case "$bin" in
+      sleep)
+        ln -s "$(command -v sleep)" "$path" 2>/dev/null || continue
+        args=(300)
+        ;;
+      cc)
+        cc=$(command -v cc 2>/dev/null || command -v gcc 2>/dev/null) || continue
+        if ! { printf '%s\n' '#include <unistd.h>' 'int main(void){sleep(300);return 0;}' > "$dir/.standin.c" &&
+          "$cc" -o "$dir/.standin" "$dir/.standin.c" 2>/dev/null &&
+          ln -s "$dir/.standin" "$path"; }; then
+          continue
+        fi
+        args=()
+        ;;
+      python3)
+        ln -s "$(command -v python3 2>/dev/null || echo /nonexistent)" "$path" 2>/dev/null || continue
+        args=(-c 'import time; time.sleep(300)')
+        ;;
+    esac
+    "$path" "${args[@]}" >/dev/null 2>&1 &
+    pid=$!
+    sleep 0.2
+    if kill -0 "$pid" 2>/dev/null; then
+      kill "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      NAMED_STANDIN_ARGS=
+      [ "${#args[@]}" -eq 0 ] || printf -v NAMED_STANDIN_ARGS ' %q' "${args[@]}"
+      return 0
+    fi
+    wait "$pid" 2>/dev/null || true
+  done
+  fail "no long-running stand-in survives being named $(basename "$path") (multicall coreutils, no C compiler, no python3)"
+}
+
 test_registered_agent_with_an_agent_descendant_outside_the_foreground_stays_alive() {
   local lab sleep_bin shell_pid out shell_verdict
   sleep_bin=$(command -v sleep) || fail "sleep not found"
   lab="$TMP_ROOT/stale-reg-descendant-bin"; mkdir -p "$lab"
-  # A symlink to a real long-running binary so the kernel records `pi` as the
-  # executable identity (a copied platform binary fails code signing on macOS).
-  ln -sf "$sleep_bin" "$lab/pi"
+  # A real long-running process the kernel records as `pi`.
+  named_standin "$lab/pi"
   # A real shell whose child is that agent-named process, while the canned
   # foreground view shows only the shell (a suspended or backgrounded agent).
-  sh -c "'$lab/pi' 300; :" &
+  sh -c "'$lab/pi'$NAMED_STANDIN_ARGS; :" &
   shell_pid=$!
   sleep 0.3
   out=$(stale_registration_case descendant idle "$(shell_only_process_info "$shell_pid")")
@@ -701,14 +747,13 @@ test_registered_agent_with_an_agent_descendant_outside_the_foreground_stays_aliv
 }
 
 test_agent_descendant_under_a_spaced_install_path_stays_alive() {
-  local lab sleep_bin shell_pid out
-  sleep_bin=$(command -v sleep) || fail "sleep not found"
+  local lab shell_pid out
   # The executable path the process table reports contains a space (the macOS
   # `/Library/Application Support/...` shape), so a field-split read of the
   # process table sees only a fragment of the name.
   lab="$TMP_ROOT/stale-reg-spaced-bin/Application Support/Some Dir"; mkdir -p "$lab"
-  ln -sf "$sleep_bin" "$lab/pi"
-  sh -c "'$lab/pi' 300; :" &
+  named_standin "$lab/pi"
+  sh -c "'$lab/pi'$NAMED_STANDIN_ARGS; :" &
   shell_pid=$!
   sleep 0.3
   out=$(stale_registration_case spaced-descendant idle "$(shell_only_process_info "$shell_pid")")

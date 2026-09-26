@@ -1064,7 +1064,7 @@ The CLI matrix was checked directly:
 | Capture | `herdr pane read <pane> --source recent --lines N` | Small N could return empty below viewport height; a 200-line request plus local trim was stable. |
 | Viewport capture | `herdr pane read <pane> --source visible` | Verified on 2026-09-17 against Herdr 0.8.0 (protocol 19): `herdr pane read --help` documents `--source <SOURCE>` with `[possible values: visible, recent, recent-unwrapped, detection]`; `--source visible` exited 0 and returned 51 lines (the viewport) while `--source recent --lines 200` returned 200. This is the viewport-only read behind `fm_backend_herdr_visible_capture`, which Kimi's trust-dialog gate requires. |
 | Native state | `herdr agent get <pane>` | Working and done transitions were visible on some harnesses; live Claude Code 2.1.236 on Herdr 0.8.0 kept `agent_status=idle` for an entire landed turn, including a multi-second tool call, so submit confirmation falls through to the shared composer verdict. Native `busy` remains positive activity evidence, while native `idle` cannot close a turn and the adapter's semantic lifecycle decides worker state. |
-| Restart | guarded named-session stop then start | Workspace, tab, pane, and labels persisted; the agent process and registration did not. |
+| Restart | guarded named-session stop then start | Workspace, tab, pane, labels, and each pane's creation directory persisted; on Herdr 0.9.1 a pane with a reported agent session was resumed in that saved directory (see "Worktree creation directory and restore"), while a pane without one kept no agent process or registration. |
 | Close | `herdr pane close <pane> --session <name>` | The exact one-pane task tab closed; closing a final tab could remove the workspace. |
 
 All destructive verification used `bin/fm-herdr-lab.sh` with a non-default `fm-lab-` name and a byte-identical default-session tripwire.
@@ -1171,6 +1171,30 @@ HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
 ```
 
 Observed guarantee: a restored no-agent tab was replaced create-before-close, while a registered live agent caused refusal.
+
+### Worktree creation directory and restore
+
+Measured 2026-09-26 on Linux (WSL2) against Herdr 0.9.1 in isolated `fm-lab-` sessions.
+Herdr saves each pane's creation directory, not its shell's later directory, together with the agent session a harness reports, and on restore types the harness's resume command in that saved directory; `resume_agents_on_restore` is on by default.
+`herdr pane get` returns that creation directory as `.cwd` beside the live `.foreground_cwd`.
+The guard spawns flat and projected workers through `bin/fm-spawn.sh` with a `claude` stand-in on `PATH`, reports an agent session for each pane, stops and re-provisions the lab session through `bin/fm-herdr-lab.sh`, and reads the stand-in's own record of where each resume ran:
+
+```sh
+HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
+  tests/fm-herdr-pane-worktree-restore-e2e.test.sh
+```
+
+```text
+ok - real herdr: fresh flat and projected spawns create their pane in the task's leased worktree
+ok - real herdr: Herdr saves each fresh worker's pane in its worktree
+ok - real herdr: a server restart restores and resumes every worker in its worktree
+ok - real herdr: a relaunch replaces the pane in the same workspace, created in the worktree
+ok - real herdr: after a relaunch a restart resumes the replacement's conversation in the worktree
+ok - real herdr: a spawn that aborts after taking its lease and pane returns the lease and closes the pane
+```
+
+On the same version, a pane restored with a resumed agent ignored later `herdr pane report-agent` and `report-agent-session` calls (`agent_not_found`), so its saved session stayed on the restored conversation after a newer one was reported.
+A relaunch therefore creates a fresh pane rather than reusing a surviving one, which the fifth line above proves resumes the replacement's conversation.
 
 ### Launcher workspace placement
 
@@ -1508,22 +1532,22 @@ Herdr is one of the two backends whose recovery-grade agent-state classifier the
 tests/fm-control-herdr-smoke.test.sh
 ```
 
-Observed output, refreshed 2026-09-10 on Herdr 0.9.0 after the stale-registration fix (the two stale-registration lines are recorded under "Stale agent registration" below):
+Observed output, refreshed 2026-09-26 on Herdr 0.9.1 on Linux (WSL2) after relaunch began replacing the pane (the two stale-registration lines are recorded under "Stale agent registration" below):
 
 ```text
 ok - real herdr: exit on a pane with no registered agent is idempotent success
-ok - real herdr 0.9.0: a gone session reads recoverable while a live pane and a malformed target do not
-ok - real herdr: a drifted agent-free shell returns to its worktree and reuses the same endpoint
+ok - real herdr 0.9.1: a gone session reads recoverable while a live pane and a malformed target do not
+ok - real herdr: a relaunch replaces a primary-created, drifted pane with one created in the worktree, in the same workspace
 ok - real herdr: interrupt refuses when herdr's own agent registry reports no agent
 ok - real herdr: interrupt delivers the harness's key and proves the agent survived it
 ok - real herdr: no control verb removed the endpoint or the task's local copy
-ok - real herdr 0.9.0: a registration Herdr keeps after its agent exits reads stale-agent and recovers as dead
+ok - real herdr 0.9.1: a registration Herdr keeps after its agent exits reads stale-agent and recovers as dead
 ok - real herdr: exit on a pane with a stale registration is idempotent success
-ok - real herdr: a stale registration no longer blocks relaunch, and the endpoint and local copy survive
-ok - real herdr: an agent that does not stop fails closed instead of being reported as stopped
+ok - real herdr: a stale registration no longer blocks relaunch, and the task keeps its workspace and local copy
+ok - real herdr: an agent behind an unproven composer fails closed instead of typing an exit command into it
 ```
 
-The registry read through `herdr pane report-agent` is the same source `fm_backend_herdr_agent_state` classifies, and since 2026-09-10 that registration counts as an agent only while `pane process-info` shows a harness process behind it, so the guard backs the registration with a real process named like a harness (a symlink to `sleep`) and then stops that process, with no real harness launched.
+The registry read through `herdr pane report-agent` is the same source `fm_backend_herdr_agent_state` classifies, and since 2026-09-10 that registration counts as an agent only while `pane process-info` shows a harness process behind it, so the guard backs the registration with a real process named like a harness (a compiled spinner, or a symlink to `sleep` or `python3` when the platform's `sleep` survives the rename) and then stops that process, with no real harness launched.
 That command is the guard that refreshes this record; run it after every Herdr upgrade rather than trusting the version above.
 
 For Pi on Herdr 0.9.0, `herdr agent get` reflects whether the agent process remains live; its registration does not persist merely because the pane and parent shell do.
@@ -1569,7 +1593,7 @@ endpoint in a session with no server missing
 malformed target                     unreadable
 ```
 
-The same run drove `bin/fm-spawn.sh --relaunch` against a real Herdr pane whose shell had been moved outside its recorded worktree: the shell was told once to return, ended in the recorded worktree, and the replacement was launched into the SAME pane, leaving one task tab.
+The same guard drives `bin/fm-spawn.sh --relaunch` against a real Herdr pane created in the primary checkout whose shell had been moved outside its recorded worktree: since 2026-09-26 the relaunch replaces that pane with one created in the recorded worktree, in the same workspace, and closes the old one, leaving one task tab.
 
 Herdr 0.8.x is not installed on this host, so protocol-20 coverage is structural plus the adapter fixture exercising both response shapes; it is not a live result.
 Refresh the live half, which fails naming the installed version, with:
@@ -1578,11 +1602,11 @@ Refresh the live half, which fails naming the installed version, with:
 tests/fm-control-herdr-smoke.test.sh
 ```
 
-Observed 2026-09-10:
+Observed 2026-09-26 on Herdr 0.9.1:
 
 ```text
-ok - real herdr 0.9.0: a gone session reads recoverable while a live pane and a malformed target do not
-ok - real herdr: a drifted agent-free shell returns to its worktree and reuses the same endpoint
+ok - real herdr 0.9.1: a gone session reads recoverable while a live pane and a malformed target do not
+ok - real herdr: a relaunch replaces a primary-created, drifted pane with one created in the worktree, in the same workspace
 ```
 
 `tests/fm-backend-herdr.test.sh` pins the logic portably by driving the two signals apart - the same failed pane read yields `missing` under a stopped server and `unreadable` under a running one - and asserts that the husk classifier still refuses on that identical read.
@@ -1653,7 +1677,7 @@ ok - real herdr 0.9.0 + pi 0.85.1: a running registered pi classifies alive at p
 ok - real herdr 0.9.0 + pi 0.85.1: the registration left behind by a quit pi reads stale-agent and recovers as dead
 ```
 
-`tests/fm-control-herdr-smoke.test.sh` proves the same shape through the control plane with no harness launched (the two `stale` lines under "Agent lifecycle control" above): a registration over a real agent-named process reads `alive`, stopping that process makes the pane read `stale-agent` and recover as `dead` while `agent get` still reports the record, `exit` then reports `already-stopped`, and `--relaunch` reuses the same endpoint with the local copy intact.
+`tests/fm-control-herdr-smoke.test.sh` proves the same shape through the control plane with no harness launched (the two `stale` lines under "Agent lifecycle control" above): a registration over a real agent-named process reads `alive`, stopping that process makes the pane read `stale-agent` and recover as `dead` while `agent get` still reports the record, `exit` then reports `already-stopped`, and `--relaunch` replaces the pane in the same workspace with the local copy intact.
 `tests/fm-backend-herdr.test.sh` pins the logic portably with canned `process-info` bodies over real processes, driving the signals apart: the identical shell-only foreground reads `stale-agent` for a childless shell and `live` when an agent-named process is still a descendant of that shell, a `working`, `done`, or `blocked` record over a shell-only pane reads the same as `idle`, an unreadable process view reads `unknown` and refuses husk closing, a transient prompt helper beside the shell settles into `stale-agent` on the next shell-only sample while a foreground that never settles within the bound still reads `live`, and `busy_state` verifies a `working` record before reporting busy.
 `tests/fm-crew-state.test.sh` pins the recovery classifier: a stale registration over a shell-only pane reports agent gone rather than alive or unreachable, and a stale `working` record never reports the pane working.
 A stale-registration pane is never a husk: create, reclaim, presentation recovery, and session cleanup keep refusing it, and only recovery reuses it.

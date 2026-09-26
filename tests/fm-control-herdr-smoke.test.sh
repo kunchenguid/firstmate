@@ -36,15 +36,36 @@ herdr_forget_inherited_pane
 SESSION="fm-lab-control-smoke-$$"
 export HERDR_SESSION="$SESSION"
 SCRATCH=
+CLEANED=0
+# Idempotent: fail() cleans up before exiting and the EXIT trap fires after it,
+# so a second teardown would otherwise report the already-consumed fleet-state
+# tripwire as if the lab had gone wrong.
 cleanup_all() {
-  [ -n "$SCRATCH" ] && rm -rf "$SCRATCH"
+  [ "$CLEANED" = 0 ] || return 0
+  CLEANED=1
+  if [ -n "$SCRATCH" ]; then
+    # Spawn leaves each state/<id>.git-hooks strip dir read-only.
+    find "$SCRATCH" -type d -exec chmod u+rwx {} + 2>/dev/null
+    rm -rf "$SCRATCH"
+  fi
   herdr_safe_stop_and_delete "$SESSION"
 }
 trap cleanup_all EXIT
-fm_herdr_lab_prepare "$SESSION" || fail "could not prepare isolated Herdr lab session"
 
 SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/fm-control-herdr.XXXXXX")
 SCRATCH=$(cd "$SCRATCH" && pwd)
+# A relaunch replaces the task's pane with a fresh one, whose shell inherits the
+# lab server's environment rather than anything typed into the old pane, so the
+# inert test harness is on the server's PATH from the start.
+FAKEBIN="$SCRATCH/fakebin"
+mkdir -p "$FAKEBIN"
+cat > "$FAKEBIN/codex" <<EOF
+#!/usr/bin/env bash
+: > "$SCRATCH/codex-launched"
+EOF
+chmod +x "$FAKEBIN/codex"
+export PATH="$FAKEBIN:$PATH"
+fm_herdr_lab_prepare "$SESSION" || fail "could not prepare isolated Herdr lab session"
 HOME_DIR="$SCRATCH/home"
 mkdir -p "$HOME_DIR/state" "$HOME_DIR/data/hsmoke"
 cat > "$HOME_DIR/data/hsmoke/brief.md" <<'EOF'
@@ -72,11 +93,14 @@ WT_REAL=$(cd "$WT" && pwd -P)
 . "$ROOT/bin/fm-backend.sh"
 fm_backend_source herdr || fail "fm_backend_source herdr failed"
 
+# The pane is created in the primary checkout, the shape every Herdr task
+# spawned before its pane was created in its worktree still has, so the first
+# relaunch below also proves such a task is repaired.
 CONTAINER_RAW=$(fm_backend_herdr_container_ensure "$WT") || fail "container_ensure failed"
 CONTAINER=${CONTAINER_RAW%%$'\t'*}
 SEEDED_TAB_ID=${CONTAINER_RAW#*$'\t'}
 WORKSPACE_ID=${CONTAINER#*:}
-TASK_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "fm-hsmoke" "$WT" "$SEEDED_TAB_ID") \
+TASK_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "fm-hsmoke" "$PROJ" "$SEEDED_TAB_ID") \
   || fail "create_task failed"
 read -r TAB_ID PANE_ID <<EOF
 $TASK_IDS
@@ -154,17 +178,7 @@ STATE=$(fm_backend_agent_state herdr "$SESSION:$PANE_ID")
   || version_fail "a malformed endpoint target does not stay unreadable"
 pass "real herdr $HERDR_VERSION: a gone session reads recoverable while a live pane and a malformed target do not"
 
-FAKEBIN="$SCRATCH/fakebin"
-mkdir -p "$FAKEBIN"
-cat > "$FAKEBIN/codex" <<EOF
-#!/usr/bin/env bash
-: > "$SCRATCH/codex-launched"
-EOF
-chmod +x "$FAKEBIN/codex"
-printf -v FAKEBIN_Q '%q' "$FAKEBIN"
 printf -v PROJ_Q '%q' "$PROJ"
-fm_backend_herdr_send_text_line "$SESSION:$PANE_ID" "export PATH=$FAKEBIN_Q:\$PATH" \
-  || fail "could not put the inert test harness on the pane PATH"
 fm_backend_herdr_send_text_line "$SESSION:$PANE_ID" "cd -- $PROJ_Q" \
   || fail "could not move the agent-free pane out of its recorded worktree"
 for _ in $(seq 1 20); do
@@ -174,6 +188,27 @@ done
 [ "$(fm_backend_herdr_current_path "$SESSION:$PANE_ID" 2>/dev/null || true)" = "$PROJ_REAL" ] \
   || fail "the real Herdr pane did not drift out of its recorded worktree"
 
+# assert_replaced_in_worktree <label>: the relaunch retired PANE_ID and the
+# record now names a replacement pane in the same workspace whose creation
+# directory - what Herdr saves and restores - is the task's worktree.
+assert_replaced_in_worktree() {
+  local label=$1 new_pane
+  new_pane=$(sed -n 's/^herdr_pane_id=//p' "$HOME_DIR/state/hsmoke.meta" | tail -1)
+  [ -n "$new_pane" ] && [ "$new_pane" != "$PANE_ID" ] \
+    || fail "$label kept pane $PANE_ID instead of replacing it"
+  [ "$(sed -n 's/^window=//p' "$HOME_DIR/state/hsmoke.meta" | tail -1)" = "$SESSION:$new_pane" ] \
+    || fail "$label did not record its replacement endpoint"
+  [ "$(herdr pane get "$PANE_ID" --session "$SESSION" 2>&1 | jq -r '.error.code // empty')" = pane_not_found ] \
+    || fail "$label left the superseded pane $PANE_ID open"
+  [ "$(herdr pane get "$new_pane" --session "$SESSION" 2>/dev/null | jq -r '.result.pane.cwd // empty')" = "$WT_REAL" ] \
+    || fail "$label created its replacement pane outside the worktree"
+  [ "$(herdr pane get "$new_pane" --session "$SESSION" 2>/dev/null | jq -r '.result.pane.workspace_id // empty')" = "$WORKSPACE_ID" ] \
+    || fail "$label moved the task out of its workspace"
+  [ "$(fm_backend_herdr_current_path "$SESSION:$new_pane" 2>/dev/null || true)" = "$WT_REAL" ] \
+    || fail "$label's replacement shell is not in its recorded worktree"
+  PANE_ID=$new_pane
+}
+
 OUT=$(env FM_HOME="$HOME_DIR" HERDR_SESSION="$SESSION" FM_SPAWN_NO_GUARD=1 \
   "$ROOT/bin/fm-spawn.sh" hsmoke --relaunch --harness codex) \
   || fail "a drifted, agent-free Herdr pane should be re-homed and relaunched: $OUT"
@@ -182,16 +217,11 @@ for _ in $(seq 1 20); do
   sleep 0.1
 done
 [ -e "$SCRATCH/codex-launched" ] || fail "the replacement harness was not launched"
-[ "$(fm_backend_herdr_current_path "$SESSION:$PANE_ID" 2>/dev/null || true)" = "$WT_REAL" ] \
-  || fail "the relaunched Herdr shell did not end up in its recorded worktree"
-[ "$(sed -n 's/^window=//p' "$HOME_DIR/state/hsmoke.meta" | tail -1)" = "$SESSION:$PANE_ID" ] \
-  || fail "the Herdr relaunch replaced its endpoint instead of reusing it"
-herdr pane get "$PANE_ID" --session "$SESSION" >/dev/null 2>&1 \
-  || fail "the Herdr relaunch removed the endpoint it was required to reuse"
+assert_replaced_in_worktree "the drifted pane's relaunch"
 awk -F= '$1 == "harness" {$0="harness=claude"} {print}' "$HOME_DIR/state/hsmoke.meta" \
   > "$HOME_DIR/state/hsmoke.meta.tmp"
 mv "$HOME_DIR/state/hsmoke.meta.tmp" "$HOME_DIR/state/hsmoke.meta"
-pass "real herdr: a drifted agent-free shell returns to its worktree and reuses the same endpoint"
+pass "real herdr: a relaunch replaces a primary-created, drifted pane with one created in the worktree, in the same workspace"
 
 if OUT=$(run_control hsmoke interrupt 2>&1); then
   fail "interrupt should refuse when herdr reports no agent on the pane: $OUT"
@@ -207,14 +237,48 @@ pass "real herdr: interrupt refuses when herdr's own agent registry reports no a
 # A registration alone no longer proves an agent (issue #4115): the adapter
 # verifies the pane's processes through the real `pane process-info` view. So
 # the registered agent is backed by a real agent-named foreground process - a
-# symlink to a long-running system binary named `claude`, the same construction
+# symlink named `claude` to a long-running stand-in, the same construction
 # tests/fm-tmux-agent-liveness.test.sh uses (a copied platform binary fails code
 # signing on macOS arm64; the symlink name is what the kernel records as argv[0]).
+# A multicall coreutils `sleep` (uutils or busybox) dispatches on argv[0] and
+# exits at once under that name, so, as there, a dedicated spinner is built and
+# the host's `sleep` is used only when it demonstrably survives the rename, with
+# python3 (which ignores its own name) as the last stand-in.
 AGENT_BIN="$SCRATCH/agentbin"
 mkdir -p "$AGENT_BIN"
-SLEEP_BIN=$(command -v sleep) || fail "sleep not found"
-ln -s "$SLEEP_BIN" "$AGENT_BIN/claude"
+STANDIN_ARGS=(900)
+standin_alive() {  # <path>
+  local pid
+  "$1" "${STANDIN_ARGS[@]}" >/dev/null 2>&1 &
+  pid=$!
+  sleep 0.2
+  kill -0 "$pid" 2>/dev/null || { wait "$pid" 2>/dev/null; return 1; }
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+}
+CC_BIN=$(command -v cc 2>/dev/null || command -v gcc 2>/dev/null || true)
+if [ -n "$CC_BIN" ] &&
+  printf '%s\n' '#include <unistd.h>' 'int main(void){int i;for(i=0;i<900;i++)sleep(1);return 0;}' > "$SCRATCH/standin.c" &&
+  "$CC_BIN" -o "$AGENT_BIN/standin" "$SCRATCH/standin.c" 2>/dev/null &&
+  ln -s "$AGENT_BIN/standin" "$AGENT_BIN/claude" &&
+  standin_alive "$AGENT_BIN/claude"; then
+  :
+else
+  rm -f "$AGENT_BIN/standin" "$AGENT_BIN/claude"
+  SLEEP_BIN=$(command -v sleep) || fail "sleep not found"
+  ln -s "$SLEEP_BIN" "$AGENT_BIN/claude"
+  if ! standin_alive "$AGENT_BIN/claude"; then
+    rm -f "$AGENT_BIN/claude"
+    STANDIN_ARGS=(-c 'import time; time.sleep(900)')
+    PYTHON_BIN=$(command -v python3 2>/dev/null || true)
+    if [ -z "$PYTHON_BIN" ] || ! ln -s "$PYTHON_BIN" "$AGENT_BIN/claude" || ! standin_alive "$AGENT_BIN/claude"; then
+      echo "skip: no long-running stand-in binary survives a rename (multicall coreutils, no C compiler, no python3)"
+      exit 0
+    fi
+  fi
+fi
 printf -v AGENT_Q '%q' "$AGENT_BIN/claude"
+printf -v STANDIN_ARGS_Q ' %q' "${STANDIN_ARGS[@]}"
 
 wait_process_state() {  # <expected> <tries>
   local expected=$1 tries=$2 i=0
@@ -227,7 +291,7 @@ wait_process_state() {  # <expected> <tries>
 }
 
 start_agent_process() {
-  fm_backend_herdr_send_text_line "$SESSION:$PANE_ID" "$AGENT_Q 900" \
+  fm_backend_herdr_send_text_line "$SESSION:$PANE_ID" "$AGENT_Q$STANDIN_ARGS_Q" \
     || fail "could not start the agent-named foreground process in the task pane"
   wait_process_state agent 50 \
     || version_fail "a real agent-named foreground process reads '$(fm_backend_herdr_pane_process_state "$SESSION" "$PANE_ID")' rather than 'agent' through pane process-info"
@@ -297,15 +361,12 @@ for _ in $(seq 1 20); do
   sleep 0.1
 done
 [ -e "$SCRATCH/codex-launched" ] || fail "the replacement harness was not launched after the stale registration"
-[ "$(sed -n 's/^window=//p' "$HOME_DIR/state/hsmoke.meta" | tail -1)" = "$SESSION:$PANE_ID" ] \
-  || fail "the relaunch replaced its endpoint instead of reusing it"
-herdr pane get "$PANE_ID" --session "$SESSION" >/dev/null 2>&1 \
-  || fail "the relaunch removed the endpoint it was required to reuse"
+assert_replaced_in_worktree "the stale-registration relaunch"
 [ -d "$WT" ] || fail "the relaunch must never remove the task's local copy"
 awk -F= '$1 == "harness" {$0="harness=claude"} {print}' "$HOME_DIR/state/hsmoke.meta" \
   > "$HOME_DIR/state/hsmoke.meta.tmp"
 mv "$HOME_DIR/state/hsmoke.meta.tmp" "$HOME_DIR/state/hsmoke.meta"
-pass "real herdr: a stale registration no longer blocks relaunch, and the endpoint and local copy survive"
+pass "real herdr: a stale registration no longer blocks relaunch, and the task keeps its workspace and local copy"
 
 # Last: the foreground process is a plain `sleep`, so the pane never draws any
 # recognized composer chrome. exit's composer-empty guard (bin/fm-control.sh)

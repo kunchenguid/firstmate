@@ -1181,6 +1181,11 @@ SPAWN_TASK_SET_LOCK_HELD=0
 SPAWN_TREEHOUSE_PROJECT_LOCK=
 SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
 SPAWN_SLOT_CLAIMED=0
+SPAWN_WT_LEASED=0
+HERDR_FLAT_ABORT_TARGET=
+HERDR_RELAUNCH_ABORT_TARGET=
+HERDR_RELAUNCH_OLD_TAB_ID=
+HERDR_RELAUNCH_OLD_PANE_ID=
 RELAUNCH_REPLACEMENT_PENDING=0
 RELAUNCH_REPLACEMENT_BUSY_GEN=
 RELAUNCH_REPLACEMENT_HARNESS=
@@ -1263,6 +1268,25 @@ spawn_abort_cleanup() {
     HERDR_PRESENTATION_ORDER_LOCK_HELD=0
     fm_lock_release "$HERDR_PRESENTATION_ORDER_LOCK" || true
   fi
+  # A fresh flat Herdr pane is launched into only after its record is
+  # published, which is also when the Treehouse project lock is released, so
+  # while that lock is held the pane holds nothing but a shell in the leased
+  # worktree. Close it so the lease returned below is not left under a stray
+  # shell.
+  if [ -n "$HERDR_FLAT_ABORT_TARGET" ] && [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" = 1 ]; then
+    fm_backend_herdr_kill "$HERDR_FLAT_ABORT_TARGET" 2>/dev/null || true
+  fi
+  HERDR_FLAT_ABORT_TARGET=
+  # A relaunch's replacement pane that never reached the published record is
+  # closed while it is still the agent-free shell it was created as, leaving
+  # the recorded pane exactly as the previous agent left it.
+  if [ -n "$HERDR_RELAUNCH_ABORT_TARGET" ]; then
+    fm_backend_herdr_parse_target "$HERDR_RELAUNCH_ABORT_TARGET" &&
+      [ "$(fm_backend_herdr_pane_agent_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")" = no-agent ] &&
+      fm_backend_herdr_kill "$HERDR_RELAUNCH_ABORT_TARGET" 2>/dev/null ||
+      echo "warning: could not close the unpublished replacement pane $HERDR_RELAUNCH_ABORT_TARGET after the aborted relaunch of $ID" >&2
+    HERDR_RELAUNCH_ABORT_TARGET=
+  fi
   if [ "$ORCA_ABORT_CLEANUP" = 1 ]; then
     ORCA_ABORT_CLEANUP=0
     if [ -n "${ORCA_TERMINAL:-}" ]; then
@@ -1331,6 +1355,21 @@ spawn_abort_cleanup() {
       fm_treehouse_slot_owner_release "$WT" "$ID" || true
     else
       echo "warning: leaving task $ID's slot claim on $WT in place; the Treehouse project lock is no longer held, so the next spawn's claim replaces it" >&2
+    fi
+  fi
+  # A durable lease this spawn took goes straight back to the pool while the
+  # project lock is still held: the record that would own the slot is not
+  # published yet, so nothing was launched in it. Treehouse returns it only if
+  # it still names this task as the holder. After publication the record owns
+  # the lease and teardown returns it; a record rolled back since then leaves
+  # the lease with nothing to return it, so that case is named instead.
+  if [ "$SPAWN_WT_LEASED" = 1 ] && [ -n "${WT:-}" ]; then
+    SPAWN_WT_LEASED=0
+    if [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" = 1 ]; then
+      (cd "$PROJ_ABS" && treehouse return --if-lease-holder "$ID" "$WT") </dev/null >/dev/null 2>&1 ||
+        echo "warning: could not return task $ID's leased Treehouse slot $WT after the aborted spawn; release it with: treehouse return --if-lease-holder $ID $WT" >&2
+    elif [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
+      echo "warning: task $ID's aborted spawn left Treehouse slot $WT leased with no task record to return it; release it with: treehouse return --if-lease-holder $ID $WT" >&2
     fi
   fi
   if [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" = 1 ]; then
@@ -1700,7 +1739,9 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
   # Two states are agent-free, and both license a relaunch:
   #   dead    - the endpoint exists and confidently holds no agent. The
-  #             endpoint is ADOPTED, so the task keeps its exact address.
+  #             endpoint is ADOPTED, so the task keeps its exact address -
+  #             except that on herdr its pane is replaced within the same
+  #             workspace (fm_backend_herdr_relaunch_create_pane).
   #   missing - the endpoint itself is gone. There is no endpoint AND therefore
   #             no agent, so a relaunch cannot adopt it: it CREATES a fresh
   #             endpoint in the recorded worktree and the published record
@@ -1713,7 +1754,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   # inferred from a failed read - and only HERDR can prove it:
   #   herdr - the recorded session's server is started, and the recorded pane is
   #           RE-READ through that session's own socket. `dead` means the pane
-  #           survived the restart and is adopted after all; `alive` means the
+  #           survived the restart and is handled as `dead`; `alive` means the
   #           agent came back and refuses; only a second `missing` proves the
   #           pane itself did not survive.
   #   tmux  - REFUSES, always. A task record carries no socket identity for its
@@ -3163,6 +3204,30 @@ validate_spawn_worktree() { # <source> <inspect-target>
   fi
 }
 
+# Herdr saves each pane's CREATION cwd, never its live one, and on a server
+# restart respawns the pane there and resumes its agent in it
+# (docs/herdr-backend.md "Restart and liveness behavior"). A pane created in the
+# project and moved into its slot by an interactive `treehouse get` therefore
+# comes back in the primary checkout. So a Herdr task takes its slot first,
+# through Treehouse's durable lease held under the task id, and its pane is then
+# created directly in that worktree. Runs under the Treehouse project lock that
+# serializes slot allocation, and spawn_abort_cleanup returns the lease if the
+# spawn aborts before its record is published.
+spawn_lease_worktree() {
+  local leased
+  if ! leased=$(cd "$PROJ_ABS" && treehouse get --lease --lease-holder "$ID" </dev/null); then
+    echo "error: treehouse get --lease could not lease a worktree for task $ID from '$PROJ_ABS'" >&2
+    return 1
+  fi
+  if [ -z "$leased" ]; then
+    echo "error: treehouse get --lease did not report a worktree for task $ID from '$PROJ_ABS'" >&2
+    return 1
+  fi
+  WT=$leased
+  SPAWN_WT_LEASED=1
+  validate_spawn_worktree "treehouse get --lease" "$PROJ_ABS"
+}
+
 # A pooled slot whose only deviation is a submodule gitlink is stale, not dirty:
 # an earlier refresh moved the superproject and left the submodule checkout on
 # the pin the previous base recorded. The refusal still stands and this gate
@@ -3410,6 +3475,34 @@ if [ "$RELAUNCH" -eq 1 ]; then
     T=$RELAUNCH_TARGET
     WT_TARGET=$T
     SES=${T%%:*}
+    if [ "$BACKEND" = herdr ] && [ "$KIND" != secondmate ]; then
+      # Herdr restores and resumes a pane in the directory it was CREATED in,
+      # so a worker relaunched into its old pane would come back after the
+      # next server restart wherever that pane began - the primary checkout,
+      # for a task spawned before its pane was created in its worktree. It
+      # also keeps resuming whichever conversation that pane last recorded. So
+      # the task keeps its workspace, label, and every recorded identity except
+      # the pane itself: a fresh pane is created beside the old one, in the
+      # recorded worktree, and the old one is retired only after the record
+      # below names the replacement (fm_backend_herdr_relaunch_retire_pane).
+      HERDR_RELAUNCH_IDS=$(fm_backend_herdr_relaunch_create_pane "$HERDR_SES" "$HERDR_PANE_ID" "$W" "$WT") || {
+        echo "error: task $ID's replacement pane could not be created in its recorded worktree '$WT'; its recorded pane was left as it was" >&2
+        exit 1
+      }
+      read -r HERDR_RELAUNCH_WORKSPACE_ID HERDR_RELAUNCH_OLD_TAB_ID HERDR_RELAUNCH_NEW_TAB_ID HERDR_RELAUNCH_NEW_PANE_ID <<EOF
+$HERDR_RELAUNCH_IDS
+EOF
+      HERDR_RELAUNCH_OLD_PANE_ID=$HERDR_PANE_ID
+      HERDR_RELAUNCH_ABORT_TARGET="$HERDR_SES:$HERDR_RELAUNCH_NEW_PANE_ID"
+      if [ "$HERDR_RELAUNCH_WORKSPACE_ID" != "$HERDR_WORKSPACE_ID" ]; then
+        echo "error: task $ID's recorded pane is in herdr workspace '$HERDR_RELAUNCH_WORKSPACE_ID', not its recorded workspace '$HERDR_WORKSPACE_ID'; refusing to relaunch against a record that no longer describes its endpoint" >&2
+        exit 1
+      fi
+      HERDR_TAB_ID=$HERDR_RELAUNCH_NEW_TAB_ID
+      HERDR_PANE_ID=$HERDR_RELAUNCH_NEW_PANE_ID
+      T="$HERDR_SES:$HERDR_PANE_ID"
+      WT_TARGET=$T
+    fi
   else
     # The recorded endpoint is authoritatively gone, so there is nothing to
     # adopt: create ONE fresh endpoint for the same task, opened directly in the
@@ -3517,9 +3610,16 @@ else
     # the per-home container instead of inheriting this launcher's.
     HERDR_LABEL_HOME=$FM_HOME
     HERDR_LAUNCHER_RELATIONSHIP=launcher-home
+    # The directory the task's pane is created in, which is the one Herdr
+    # restores it into: a secondmate's home, or the worktree leased for every
+    # other kind (spawn_lease_worktree).
+    HERDR_PANE_CWD=$PROJ_ABS
     if [ "$KIND" = secondmate ]; then
       HERDR_LABEL_HOME=$PROJ_ABS
       HERDR_LAUNCHER_RELATIONSHIP=other-home
+    else
+      spawn_lease_worktree || exit 1
+      HERDR_PANE_CWD=$WT
     fi
     HERDR_PRESENTATION_JOURNAL=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID")
     HERDR_PROJECTED=0
@@ -3545,7 +3645,7 @@ else
           FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_reclaim_task \
             "$HERDR_SES" "$HERDR_PRESENTATION_JOURNAL" "$ID" "$HERDR_LABEL_HOME" \
             "$HERDR_RECOVERY_WORKSPACE_ID" "$HERDR_RECOVERY_TAB_ID" "$HERDR_RECOVERY_PANE_ID" \
-            "$HERDR_PARENT_LABEL" "$W" "$PROJ_ABS"
+            "$HERDR_PARENT_LABEL" "$W" "$HERDR_PANE_CWD"
           HERDR_RECLAIM_STATUS=$?
           set -e
           case "$HERDR_RECLAIM_STATUS" in
@@ -3602,7 +3702,7 @@ else
             HERDR_PROJECTION_ID=$(fm_backend_herdr_projection_journal_create "$STATE" "$ID") || exit 1
             HERDR_PROJECTION_LABEL=$(fm_backend_herdr_projection_workspace_label "$ID" "$HERDR_PROJECTION_ID")
             if ! FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_create_task \
-              "$PROJ_ABS" "$HERDR_PROJECTION_LABEL" "$W"; then
+              "$HERDR_PANE_CWD" "$HERDR_PROJECTION_LABEL" "$W"; then
               if [ "${FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE:-0}" = 1 ]; then
                 HERDR_PROJECTION_ABORT_CLEANUP=1
                 HERDR_PROJECTION_ABORT_SESSION=$FM_BACKEND_HERDR_PROJECTION_SESSION
@@ -3655,7 +3755,7 @@ else
       HERDR_SEEDED_DEFAULT_TAB_ID=${HERDR_CONTAINER_RAW#*$'\t'}
       HERDR_SES=${CONTAINER%%:*}
       HERDR_WORKSPACE_ID=${CONTAINER#*:}
-      HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$PROJ_ABS" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
+      HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$HERDR_PANE_CWD" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
       read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
 $HERDR_TASK_IDS
 EOF
@@ -3665,6 +3765,7 @@ EOF
       exit 1
     fi
     T="$HERDR_SES:$HERDR_PANE_ID"
+    [ "$HERDR_PROJECTED" -eq 1 ] || [ "$KIND" = secondmate ] || HERDR_FLAT_ABORT_TARGET=$T
     ;;
   zellij)
     ZELLIJ_SES=$(fm_backend_zellij_container_ensure) || exit 1
@@ -4091,6 +4192,22 @@ if [ "$RELAUNCH" -eq 1 ]; then
     fi
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
+elif [ "$KIND" != secondmate ] && [ "$SPAWN_WT_LEASED" = 1 ]; then
+  # The pane was created in its leased worktree (spawn_lease_worktree), so there
+  # is no move to wait for. Prove its shell is actually there anyway, the way a
+  # relaunch proves an adopted pane is, since a shell startup file that changes
+  # directory would otherwise start the agent somewhere else.
+  lease_wt_real=$(real_path_or_raw "$WT")
+  lease_seen=
+  for _ in $(seq 1 20); do
+    lease_seen=$(spawn_current_path "$WT_TARGET" || true)
+    [ -z "$lease_seen" ] || [ "$(real_path_or_raw "$lease_seen")" != "$lease_wt_real" ] || break
+    sleep 0.5
+  done
+  if [ -z "$lease_seen" ] || [ "$(real_path_or_raw "$lease_seen")" != "$lease_wt_real" ]; then
+    echo "error: task $ID's pane was created in its leased worktree '$WT' but its shell reports '${lease_seen:-no path}'; refusing to launch an agent outside the copy holding its work; inspect window $T" >&2
+    exit 1
+  fi
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
@@ -4152,17 +4269,18 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
-
+fi
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # Claim the pool slot for this task. The interactive `treehouse get` sent to
-  # the pane above records only a process lease (Treehouse's durable
-  # `get --lease --lease-holder`, which bin/fm-home-seed.sh uses for secondmate
-  # homes, is not this path), so Treehouse cannot say which task a slot belongs
-  # to once that task's worker exits - and that is exactly when the slot is
-  # handed on and this task's worktree= line goes stale. The claim is what lets
-  # bin/fm-teardown.sh leave a slot that has since been reassigned untouched, so
-  # a slot that cannot be claimed is refused here, at the cheapest point, rather
-  # than launching a worker whose slot teardown could later release out from
-  # under its successor.
+  # a tmux, zellij, or cmux pane records only a process lease, so Treehouse
+  # cannot say which task a slot belongs to once that task's worker exits - and
+  # that is exactly when the slot is handed on and this task's worktree= line
+  # goes stale. A Herdr task's durable lease does name its task, but the claim
+  # is written for it too so bin/fm-teardown.sh reads one ownership record for
+  # every backend. The claim is what lets teardown leave a slot that has since
+  # been reassigned untouched, so a slot that cannot be claimed is refused here,
+  # at the cheapest point, rather than launching a worker whose slot teardown
+  # could later release out from under its successor.
   # Written under the Treehouse project lock held from before slot allocation
   # through metadata publication, so no other spawn or return sees a half-claim.
   if fm_treehouse_pool_slot "$PROJ_ABS" "$WT"; then
@@ -4851,6 +4969,28 @@ if [ "$RELAUNCH" -eq 1 ]; then
   RELAUNCH_REPLACEMENT_PENDING=0
   SPAWN_META_PUBLISH_STARTED=0
   SPAWN_META_TMP=
+  if [ -n "$HERDR_RELAUNCH_OLD_PANE_ID" ]; then
+    # The record now names the replacement pane, so it is no longer an abort
+    # leftover, and the superseded pane can go. Its presentation restart
+    # binding, when it had one, follows it to the replacement. Both are
+    # serialized with every other pane close in the session, and a failure
+    # here only leaves an agent-free pane or a stale binding behind, never the
+    # task without its endpoint.
+    HERDR_RELAUNCH_ABORT_TARGET=
+    if spawn_herdr_presentation_order_lock_acquire "$HERDR_SES"; then
+      fm_backend_herdr_relaunch_retire_pane "$HERDR_SES" "$HERDR_RELAUNCH_OLD_PANE_ID" \
+        "$HERDR_RELAUNCH_OLD_TAB_ID" "$HERDR_TAB_ID" ||
+        echo "warning: task $ID's superseded herdr pane $HERDR_SES:$HERDR_RELAUNCH_OLD_PANE_ID was left open; close it once it is confirmed agent-free" >&2
+      HERDR_PRESENTATION_JOURNAL=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID")
+      if [ -e "$HERDR_PRESENTATION_JOURNAL" ]; then
+        fm_backend_herdr_projection_journal_replace_endpoint "$HERDR_PRESENTATION_JOURNAL" "$ID" \
+          "$HERDR_RELAUNCH_OLD_TAB_ID" "$HERDR_RELAUNCH_OLD_PANE_ID" "$HERDR_TAB_ID" "$HERDR_PANE_ID" 2>/dev/null || true
+      fi
+      spawn_herdr_presentation_order_lock_release
+    else
+      echo "warning: task $ID's superseded herdr pane $HERDR_SES:$HERDR_RELAUNCH_OLD_PANE_ID was left open because the session's pane-close lock was unavailable" >&2
+    fi
+  fi
 fi
 # A dispatch or relaunch keeps the per-task meta lock through launch delivery.
 # The backlog mutation is deliberately the final fallible commit below, so

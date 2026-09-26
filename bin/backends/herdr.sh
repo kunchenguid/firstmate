@@ -1378,6 +1378,25 @@ fm_backend_herdr_pid_is_bare_shell() {  # <ps-bin> <pid>
   return 1
 }
 
+# fm_backend_herdr_pane_shell_pid: print the pid of <pane-id>'s own top-level
+# shell, whatever it is running, when pane process-info agrees on the pane id
+# and the operating system names that pid a recognized shell. A task pane is
+# created in its worktree, so teardown spares exactly this shell from its
+# worktree process reap (while still reaping its children, the agent among
+# them) and leaves the pane to the backend's own focus-safe close.
+fm_backend_herdr_pane_shell_pid() {  # <session> <pane-id>
+  local session=$1 pane=$2 info shell_pid ps_bin
+  info=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane" 2>/dev/null) || return 1
+  shell_pid=$(printf '%s' "$info" | jq -er --arg pane "$pane" '
+    select(.result.type == "pane_process_info" and .result.process_info.pane_id == $pane)
+    | .result.process_info.shell_pid | select(type == "number" and . > 1) | floor
+  ' 2>/dev/null) || return 1
+  ps_bin=${FM_HERDR_PS_BIN:-ps}
+  command -v "$ps_bin" >/dev/null 2>&1 || return 1
+  fm_backend_herdr_pid_is_bare_shell "$ps_bin" "$shell_pid" || return 1
+  printf '%s\n' "$shell_pid"
+}
+
 # fm_backend_herdr_pane_idle_shell_pid: print the shell pid of <pane-id> only
 # when the exact pane provably holds one lone idle recognized shell: pane
 # process-info agrees on the pane id, the shell pid is both the foreground
@@ -2225,13 +2244,12 @@ EOF
 #                 and its tab from `pane get`/`tab list`).
 #   no-agent    - `pane get` succeeds (the pane structurally exists) but `agent
 #                 get` responds with error code agent_not_found: nothing is
-#                 registered in it - exactly what a herdr session-layout restore
-#                 produces (verified empirically: `session stop` + fresh `herdr
-#                 server` restart leaves the pane alive, agent_status "unknown",
-#                 agent get -> agent_not_found - docs/herdr-backend.md "ID
-#                 stability across a server restart"), and what a future
-#                 `resume_agents_on_restore = false` restore would produce too
-#                 (a plain shell, never an agent).
+#                 registered in it - what a herdr session-layout restore
+#                 produces for a pane herdr does not resume an agent in
+#                 (`[session] resume_agents_on_restore = false`, or a pane with
+#                 no saved agent session): the pane comes back alive as a plain
+#                 shell and agent get -> agent_not_found (docs/herdr-backend.md
+#                 "Husks after a server restart").
 #   stale-agent - `agent get` reports a registered agent_status (working, idle,
 #                 done, or blocked) but fm_backend_herdr_pane_process_state
 #                 proves the pane is shell-only: the registered agent's process
@@ -2456,10 +2474,9 @@ fm_backend_herdr_agent_alive() {  # <target>
 # A same-labeled tab already existing no longer means an automatic refusal:
 # herdr persists and restores its whole session layout (workspaces/tabs/
 # panes) across a server restart, including a reboot, and a restored fm-<id>
-# task tab comes back a HUSK - a dead pane, or (today, and unconditionally
-# once a future `resume_agents_on_restore = false` config ships) a plain
-# agent-less shell sitting in the saved cwd, never the crewmate that used to
-# be there. Before this fix, every fleet respawn after such a restart needed
+# task tab can come back a HUSK - a dead pane, or a plain agent-less shell
+# sitting in the saved cwd when herdr does not resume the agent that used to be
+# there (docs/herdr-backend.md "Husks after a server restart"). Before this fix, every fleet respawn after such a restart needed
 # the operator to manually close each husk pane first before firstmate could
 # spawn into it again. fm_backend_herdr_tab_is_husk classifies the existing
 # tab's pane conservatively (dead or no-agent only; anything live or
@@ -2546,6 +2563,80 @@ EOF
     fi
   fi
   printf '%s %s' "$tab_id" "$pane_id"
+}
+
+# fm_backend_herdr_relaunch_create_pane: create the replacement pane for a
+# relaunch whose recorded pane still exists but holds no agent. Herdr saves a
+# pane's creation cwd and restores and resumes the pane there after a server
+# restart, so a relaunch that only moved the old pane's shell would still come
+# back wherever that pane was first created. The replacement tab is created in
+# the old pane's own workspace (flat container or presentation projection
+# alike), at <cwd>, with the same label, and without focus. The old pane is
+# left untouched: the caller retires it with fm_backend_herdr_relaunch_retire_pane
+# only once the task record names the replacement, so an abort in between
+# still leaves the recorded pane in place.
+# Refuses unless the old pane reads positively agent-free (no-agent or
+# stale-agent). Echoes "<workspace_id> <old_tab_id> <new_tab_id> <new_pane_id>".
+fm_backend_herdr_relaunch_create_pane() {  # <session> <old_pane> <label> <cwd>
+  local session=$1 old_pane=$2 label=$3 cwd=$4 info workspace old_tab state out tab_id pane_id
+  info=$(fm_backend_herdr_cli "$session" pane get "$old_pane" 2>/dev/null) || {
+    echo "error: herdr could not read pane $old_pane (session $session) to replace it" >&2
+    return 1
+  }
+  workspace=$(printf '%s' "$info" | jq -r --arg pane "$old_pane" 'select(.result.pane.pane_id == $pane) | .result.pane.workspace_id // empty' 2>/dev/null)
+  old_tab=$(printf '%s' "$info" | jq -r --arg pane "$old_pane" 'select(.result.pane.pane_id == $pane) | .result.pane.tab_id // empty' 2>/dev/null)
+  if [ -z "$workspace" ] || [ -z "$old_tab" ]; then
+    echo "error: herdr returned an ambiguous description of pane $old_pane (session $session); refusing to replace it" >&2
+    return 1
+  fi
+  state=$(fm_backend_herdr_pane_agent_state "$session" "$old_pane")
+  case "$state" in
+    no-agent|stale-agent) ;;
+    *)
+      echo "error: herdr pane $old_pane (session $session) reads '$state', not agent-free; refusing to replace it" >&2
+      return 1
+      ;;
+  esac
+  out=$(fm_backend_herdr_cli "$session" tab create --workspace "$workspace" --cwd "$cwd" --label "$label" --no-focus 2>/dev/null) || {
+    echo "error: herdr could not create a replacement tab for '$label' in workspace $workspace (session $session)" >&2
+    return 1
+  }
+  tab_id=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)
+  pane_id=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null)
+  if [ -z "$tab_id" ] || [ -z "$pane_id" ]; then
+    echo "error: could not parse tab/pane id from herdr tab create output" >&2
+    return 1
+  fi
+  printf '%s %s %s %s' "$workspace" "$old_tab" "$tab_id" "$pane_id"
+}
+
+# fm_backend_herdr_relaunch_retire_pane: close a relaunch's superseded pane
+# after the task record has moved to its replacement. The old pane must still
+# read agent-free (a pane already gone is success); anything else refuses and
+# leaves it alone. When the captain's active tab was the old one, focus moves
+# to the replacement tab rather than to whatever neighbour Herdr would pick.
+fm_backend_herdr_relaunch_retire_pane() {  # <session> <old_pane> <old_tab> <new_tab>
+  local session=$1 old_pane=$2 old_tab=$3 new_tab=$4 state focus refocus=0
+  state=$(fm_backend_herdr_pane_agent_state "$session" "$old_pane")
+  case "$state" in
+    dead) return 0 ;;
+    no-agent|stale-agent) ;;
+    *)
+      echo "warning: herdr pane $old_pane (session $session) reads '$state', not agent-free; leaving it open" >&2
+      return 1
+      ;;
+  esac
+  if focus=$(fm_backend_herdr_projection_focus_snapshot "$session" 2>/dev/null) &&
+    [ "${focus#*$'\t'}" = "$old_tab" ]; then
+    refocus=1
+  fi
+  fm_backend_herdr_cli "$session" tab close "$old_tab" >/dev/null 2>&1 || true
+  if [ "$(fm_backend_herdr_pane_presence_state "$session" "$old_pane")" != dead ]; then
+    echo "warning: herdr did not close superseded pane $old_pane (tab $old_tab, session $session)" >&2
+    return 1
+  fi
+  [ "$refocus" -eq 0 ] || fm_backend_herdr_cli "$session" tab focus "$new_tab" >/dev/null 2>&1 || true
+  return 0
 }
 
 # fm_backend_herdr_projection_create_task: create one disposable presentation

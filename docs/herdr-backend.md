@@ -658,9 +658,17 @@ No Herdr-specific copy of that protocol exists.
 ### Husks after a server restart
 
 Stopping and restarting a named Herdr server preserves workspace, tab, pane, and label ids.
-The underlying harness processes and live agent registrations do not survive.
-A restored same-labeled tab with a missing pane or no registered agent is a husk.
+The harness processes and live agent registrations themselves do not survive.
+Herdr saves each pane's creation directory, never the directory its shell later moved to, plus the agent session last reported in that pane.
+On restore it respawns the pane in that saved directory and, while `[session] resume_agents_on_restore` is on (the Herdr 0.9 default), types the agent's own resume command there.
 
+So a worker comes back in whatever directory its pane was created in.
+Spawn therefore leases the task's worktree with `treehouse get --lease --lease-holder <task-id>` before creating the pane, and creates the pane directly in it.
+A relaunch creates a fresh pane in the recorded worktree, in the same workspace and under the same label, and closes the old agent-free pane once the task record names the replacement, so a relaunched worker also resumes its own conversation in its worktree ([`agent-control.md`](agent-control.md) "Transactional relaunch").
+A task spawned by an earlier Firstmate, which created the pane in the project's primary checkout and then moved the shell with a typed `treehouse get`, keeps that saved directory until its next relaunch.
+Because the pane's own shell is rooted in the worktree too, teardown's worktree process reap spares exactly that shell and closes the pane through its focus-safe close before `treehouse return` terminates what is left in the worktree.
+
+A restored same-labeled tab with a missing pane, or with no agent because Herdr did not resume one, is a husk.
 Create replaces only a confidently dead or no-agent husk, creates the replacement before closing the old tab, and refuses live or unknown states.
 This prevents closing the workspace's last tab before a replacement exists.
 
@@ -669,7 +677,7 @@ This prevents closing the workspace's last tab before a replacement exists.
 A registration alone never proves an agent.
 Herdr keeps a Pi registration after the Pi process has exited to a plain shell, whenever a nested interactive shell sits under the pane's top shell.
 In that case `agent get` still reports `agent=pi` with its last status.
-That nested shell is the crew shape `treehouse get` leaves behind (measured on Herdr 0.9.0 - [verification](verification/runtime-backends.md) "Stale agent registration"; upstream issue #4115).
+That nested shell is the shape a typed `treehouse get` leaves behind, as in a task spawned before its pane was created directly in its worktree (measured on Herdr 0.9.0 - [verification](verification/runtime-backends.md) "Stale agent registration"; upstream issue #4115).
 
 So before a registered agent counts as live, the pane classifier reads `pane process-info` and the real process table.
 It uses the shared harness-process classifier in `bin/fm-agent-process-lib.sh`, the same rule the tmux adapter proves liveness with:
@@ -837,6 +845,7 @@ tests/fm-herdr-submit-confirm-live-e2e.test.sh
 tests/fm-backend-herdr-smoke.test.sh
 tests/fm-backend-herdr-prune-safety-e2e.test.sh
 tests/fm-backend-herdr-respawn-idem-e2e.test.sh
+tests/fm-herdr-pane-worktree-restore-e2e.test.sh
 tests/fm-backend-herdr-workspace-per-home-e2e.test.sh
 tests/fm-backend-herdr-launcher-workspace-e2e.test.sh
 tests/fm-backend-herdr-presentation-e2e.test.sh
