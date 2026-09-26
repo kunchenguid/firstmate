@@ -4010,6 +4010,22 @@ agy_spawn_fail() {  # <detail>
   rovo_endpoint_cleanup
 }
 
+# Universal floor against an inherited bash-preexec PROMPT_COMMAND (see
+# FM_BACKEND_PROMPT_COMMAND_SCRUB in bin/fm-backend.sh): the very first text
+# either backend sends into the pane, before treehouse get, a relaunch's
+# worktree recovery, and every export/launch send below. Covers a relaunch
+# reusing an existing pane exactly as it covers a fresh one - unsetting an
+# already-clear PROMPT_COMMAND is a no-op, so this is safe either way. tmux
+# and herdr are the only backends this brief scopes (each also asks its
+# backend to create the pane without the inherited value in the first place;
+# this line is the floor for when that per-pane override is unavailable or
+# unsupported).
+case "$BACKEND" in
+tmux | herdr)
+  spawn_send_text_line "$WT_TARGET" "$FM_BACKEND_PROMPT_COMMAND_SCRUB"
+  ;;
+esac
+
 if [ "$RELAUNCH" -eq 1 ]; then
   # No worktree is acquired: the recorded one is reused as-is. What must be
   # proven instead is that the adopted endpoint's shell is actually sitting in

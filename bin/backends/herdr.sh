@@ -2464,7 +2464,15 @@ fm_backend_herdr_create_task() {  # <container> <label> <cwd> <seeded_default_ta
 $dup_tabs
 EOF
   fi
-  out=$(fm_backend_herdr_cli "$session" tab create --workspace "$wsid" --cwd "$cwd" --label "$label" --no-focus 2>/dev/null) || return 1
+  # --env 'PROMPT_COMMAND=' overrides just this one tab's own launched-process
+  # environment (never a session-wide or server-wide table - see
+  # FM_BACKEND_PROMPT_COMMAND_SCRUB in bin/fm-backend.sh for why a fresh pane
+  # must not inherit an exported bash-preexec PROMPT_COMMAND string with no
+  # matching function definitions). An installed herdr without --env support
+  # falls back to the plain form, relying on the scrub line fm-spawn.sh sends
+  # next as the floor.
+  out=$(fm_backend_herdr_cli "$session" tab create --workspace "$wsid" --cwd "$cwd" --label "$label" --env 'PROMPT_COMMAND=' --no-focus 2>/dev/null) ||
+    out=$(fm_backend_herdr_cli "$session" tab create --workspace "$wsid" --cwd "$cwd" --label "$label" --no-focus 2>/dev/null) || return 1
   tab_id=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)
   pane_id=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null)
   if [ -z "$tab_id" ] || [ -z "$pane_id" ]; then
