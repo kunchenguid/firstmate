@@ -4544,20 +4544,23 @@ test_term_stops_a_watcher_blocked_inside_a_poll() {
 
 # Start a watcher, hold its .watcher-down.lock from a live foreign subshell,
 # and send exactly one TERM. Without <release-ticks> the lock stays held until
-# the watcher exits. With it, the holder serves its pid record through a FIFO
-# so the first read by the TERM'd watcher's cleanup marks real contention in
-# $dir/marker-lock-contended, then frees the lock <release-ticks> tenths of a
-# second later. The caller's environment reaches the watcher; its
-# wait_for_exit code lands in HELD_MARKER_LOCK_RC.
+# the watcher exits. With it, the watcher runs as a handling successor, whose
+# poll loop never takes the marker lock, and the holder arms a FIFO as its pid
+# record before the TERM, so the first read - by the TERM'd watcher's cleanup -
+# marks real contention in $dir/marker-lock-contended; the holder then frees
+# the lock <release-ticks> tenths of a second later. The caller's environment
+# reaches the watcher; its wait_for_exit code lands in HELD_MARKER_LOCK_RC.
 term_watcher_with_held_marker_lock() {  # <dir> [release-ticks]
-  local dir=$1 release_ticks=${2:-} state fakebin out capture_file window sig pid holder i
+  local dir=$1 release_ticks=${2:-} successor=0 state fakebin out capture_file window sig pid holder i
   state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-held-marker-lock"
   printf 'Working...' > "$capture_file"
   printf 'window=%s\nkind=ship\n' "$window" > "$state/heldlock.meta"
   printf 'working: implementing\n' > "$state/heldlock.status"
   sig=$(seen_sig "$state/heldlock.status"); printf '%s' "$sig" > "$state/.seen-heldlock_status"
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+  [ -z "$release_ticks" ] || successor=1
+  FM_WATCH_HANDLING_SUCCESSOR=$successor \
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
@@ -4566,14 +4569,8 @@ term_watcher_with_held_marker_lock() {  # <dir> [release-ticks]
   fi
   FM_STATE_OVERRIDE="$state" bash -c '
     . "$1" || exit 1
-    lock=$2 held=$3 release=$4 armed=$5 contended=$6 release_ticks=$7
+    lock=$2 held=$3 release=$4 contended=$5 release_ticks=$6
     fm_lock_try_acquire "$lock" || exit 1
-    : > "$held"
-    i=0
-    while [ -n "$release_ticks" ] && [ ! -e "$armed" ] && [ "$i" -lt 600 ]; do
-      sleep 0.1
-      i=$((i + 1))
-    done
     if [ -n "$release_ticks" ]; then
       record="$(fm_lock_link_owner "$lock")/pid"
       mkfifo "$record.fifo" && mv -f "$record.fifo" "$record" || exit 1
@@ -4585,6 +4582,7 @@ term_watcher_with_held_marker_lock() {  # <dir> [release-ticks]
         : > "$contended"
       ) &
       writer=$!
+      : > "$held"
       i=0
       while [ ! -e "$contended" ] && [ ! -e "$release" ] && [ "$i" -lt 600 ]; do
         sleep 0.1
@@ -4603,6 +4601,7 @@ term_watcher_with_held_marker_lock() {  # <dir> [release-ticks]
         i=$((i + 1))
       done
     else
+      : > "$held"
       i=0
       while [ ! -e "$release" ] && [ "$i" -lt 600 ]; do
         sleep 0.1
@@ -4611,7 +4610,7 @@ term_watcher_with_held_marker_lock() {  # <dir> [release-ticks]
     fi
     fm_lock_release "$lock"
   ' _ "$ROOT/bin/fm-wake-lib.sh" "$state/.watcher-down.lock" "$dir/marker-lock-held" \
-    "$dir/release-marker-lock" "$dir/marker-lock-armed" "$dir/marker-lock-contended" \
+    "$dir/release-marker-lock" "$dir/marker-lock-contended" \
     "$release_ticks" &
   holder=$!
   i=0
@@ -4624,7 +4623,6 @@ term_watcher_with_held_marker_lock() {  # <dir> [release-ticks]
     reap "$pid"; fail "the fixture could not take the downtime-marker lock"
   fi
   kill "$pid" 2>/dev/null || true
-  : > "$dir/marker-lock-armed"
   wait_for_exit "$pid" 100
   HELD_MARKER_LOCK_RC=$?
   : > "$dir/release-marker-lock"
@@ -6463,12 +6461,6 @@ test_paused_until_that_passed_is_rechecked_before_the_cadence() {
 # churn-deferral regression. The rest of this file is not a 3.2 snapshot suite.
 if [ -n "${FM_TEST_ONLY:-}" ]; then
   "$FM_TEST_ONLY"
-  exit 0
-fi
-
-# Run focused late-defined watcher scenarios without the full triage suite.
-if [ -n "${FM_TEST_ONLY_LATE:-}" ]; then
-  "$FM_TEST_ONLY_LATE"
   exit 0
 fi
 
