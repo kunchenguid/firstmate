@@ -1,0 +1,14 @@
+### fm-pi-branch-extension.test.sh :: test_away_unchanged_held_outcome_reaches_the_captain_once_until_a_new_event
+ok - Pi branch: an unchanged held outcome reaches the captain once across cadences, and a later red check on the task still does
+exit=0
+### fm-supervision-host.test.sh :: test_unchanged_held_outcome_reaches_the_captain_once_until_a_new_event
+ok - host: an unchanged held outcome reaches the captain once across cadences, and a later decision on the task still does
+exit=0
+### fm-inactive-reconcile.test.sh :: test_branch_ack_retires_inactive_outcome_receipt
+actionable: inactive terminal outcome awaiting captain presentation: child=child state=done pr=https://example.test/owner/repo/pull/1
+ok - a branch-actor acknowledgement retires the inactive-outcome receipt and later scans stay quiet
+all inactive reconciliation tests passed
+exit=0
+### fm-wake-queue.test.sh :: test_branch_ack_commits_secondmate_stall_receipts
+ok - a branch-actor acknowledgement commits secondmate stall receipts for exactly its granted rows
+exit=0

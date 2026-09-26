@@ -1,0 +1,18 @@
+HEAD 1: ok - host: waiting closes cannot carry the park past its boundary
+BASE 1: ok - host: waiting closes cannot carry the park past its boundary
+HEAD 2: not ok - fixture: closes did not arrive back to back: 1790381173	start	gen=host-4160-1790381173	primary=claude
+BASE 2: ok - host: waiting closes cannot carry the park past its boundary
+HEAD 3: ok - host: waiting closes cannot carry the park past its boundary
+BASE 3: ok - host: waiting closes cannot carry the park past its boundary
+BASE 4: not ok - fixture: closes did not arrive back to back: 1790381258	start	gen=host-86680-1790
+HEAD 4: not ok - fixture: closes did not arrive back to back: 1790381270	start	gen=host-11786-1790
+BASE 5: not ok - fixture: closes did not arrive back to back: 1790381289	start	gen=host-49377-1790
+HEAD 5: not ok - fixture: closes did not arrive back to back: 1790381311	start	gen=host-4083-17903
+BASE 6: not ok - fixture: closes did not arrive back to back: 1790381331	start	gen=host-48568-1790
+HEAD 6: not ok - fixture: closes did not arrive back to back: 1790381351	start	gen=host-94804-1790
+BASE 7: not ok - fixture: closes did not arrive back to back: 1790381368	start	gen=host-32330-1790
+HEAD 7: not ok - fixture: closes did not arrive back to back: 1790381384	start	gen=host-64524-1790
+BASE 8: ok - host: waiting closes cannot carry the park past its boundary
+HEAD 8: not ok - fixture: closes did not arrive back to back: 1790381422	start	gen=host-51080-1790
+BASE 9: not ok - fixture: closes did not arrive back to back: 1790381443	start	gen=host-1398-17903
+HEAD 9: not ok - fixture: closes did not arrive back to back: 1790381460	start	gen=host-46649-1790

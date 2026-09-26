@@ -1,0 +1,31 @@
+=== BASE f1ea9ed5
+## crew state (real fm-crew-state.sh): state: unknown · source: pane · harness state unavailable (unknown missing)
+## away record entered
+actionable: inactive terminal outcome awaiting captain presentation: child=held state=done pr=https://github.com/kunchenguid/treehouse/pull/153
+## cadence 1: queued inactive-outcome rows=1; pending receipts=1
+   drain presented: 1790379831	1	check	inactive-outcome:dc33e6d8a7ebb637b4b714194f846053	inactive terminal outcome awaiting captain presentation: child=held state=done pr=https://g
+   after branch turn: queued=0 branch presentations of the held outcome so far=1
+actionable: inactive terminal outcome awaiting captain presentation: child=held state=done pr=https://github.com/kunchenguid/treehouse/pull/153
+## cadence 2: queued inactive-outcome rows=1; pending receipts=1
+   drain presented: 1790379838	2	check	inactive-outcome:dc33e6d8a7ebb637b4b714194f846053	inactive terminal outcome awaiting captain presentation: child=held state=done pr=https://g
+   after branch turn: queued=0 branch presentations of the held outcome so far=2
+actionable: inactive terminal outcome awaiting captain presentation: child=held state=done pr=https://github.com/kunchenguid/treehouse/pull/153
+## cadence 3: queued inactive-outcome rows=1; pending receipts=1
+   drain presented: 1790379845	3	check	inactive-outcome:dc33e6d8a7ebb637b4b714194f846053	inactive terminal outcome awaiting captain presentation: child=held state=done pr=https://g
+   after branch turn: queued=0 branch presentations of the held outcome so far=3
+actionable: inactive terminal outcome awaiting captain presentation: child=held state=done pr=https://github.com/kunchenguid/treehouse/pull/153
+## cadence 4: queued inactive-outcome rows=1; pending receipts=1
+   drain presented: 1790379852	4	check	inactive-outcome:dc33e6d8a7ebb637b4b714194f846053	inactive terminal outcome awaiting captain presentation: child=held state=done pr=https://g
+   after branch turn: queued=0 branch presentations of the held outcome so far=4
+actionable: inactive terminal outcome awaiting captain presentation: child=held state=done pr=https://github.com/kunchenguid/treehouse/pull/153
+## cadence 5: queued inactive-outcome rows=1; pending receipts=1
+   drain presented: 1790379858	5	check	inactive-outcome:dc33e6d8a7ebb637b4b714194f846053	inactive terminal outcome awaiting captain presentation: child=held state=done pr=https://g
+   after branch turn: queued=0 branch presentations of the held outcome so far=5
+actionable: inactive terminal outcome awaiting captain presentation: child=held state=done pr=https://github.com/kunchenguid/treehouse/pull/153
+## cadence 6: queued inactive-outcome rows=1; pending receipts=1
+   drain presented: 1790379866	6	check	inactive-outcome:dc33e6d8a7ebb637b4b714194f846053	inactive terminal outcome awaiting captain presentation: child=held state=done pr=https://g
+   after branch turn: queued=0 branch presentations of the held outcome so far=6
+## new event: decision appended to the held task's status
+   queue after decision: signal held.status;
+   drain presented: 1790379870	7	signal	held.status	held: needs-decision [key=merge-153]: merge PR 153 now or hold it for the return? wake annotation: unread wake-EVENT since last 
+## FINAL branch presentations of the held outcome=6

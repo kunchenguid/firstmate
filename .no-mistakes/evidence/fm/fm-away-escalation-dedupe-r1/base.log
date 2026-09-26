@@ -1,0 +1,23 @@
+== [base-f1ea9ed5] lab FM_HOME=/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T//fm-lab.mLB5BU (child pane firstmate:fm-treehouse-apfs-clone-s1 on private fm-lab tmux socket)
+crew-state: state: done · source: status-log · PR https://github.com/kunchenguid/treehouse/pull/153 open/green/mergeable, held for captain return
+actionable: inactive terminal outcome awaiting captain presentation: child=treehouse-apfs-clone-s1 state=done pr=https://github.com/kunchenguid/treehouse/pull/153
+startup scan: queued inactive-outcome rows=1 pending receipts=0
+cycle 1: branch drain PRESENTED -> inactive terminal outcome awaiti
+actionable: inactive terminal outcome awaiting captain presentation: child=treehouse-apfs-clone-s1 state=done pr=https://github.com/kunchenguid/treehouse/pull/153
+  after cadence scan 1: queued=1 pending=0 presented-receipts=0
+cycle 2: branch drain PRESENTED -> inactive terminal outcome awaiti
+actionable: inactive terminal outcome awaiting captain presentation: child=treehouse-apfs-clone-s1 state=done pr=https://github.com/kunchenguid/treehouse/pull/153
+  after cadence scan 2: queued=1 pending=0 presented-receipts=0
+cycle 3: branch drain PRESENTED -> inactive terminal outcome awaiti
+actionable: inactive terminal outcome awaiting captain presentation: child=treehouse-apfs-clone-s1 state=done pr=https://github.com/kunchenguid/treehouse/pull/153
+  after cadence scan 3: queued=1 pending=0 presented-receipts=0
+cycle 4: branch drain PRESENTED -> inactive terminal outcome awaiti
+actionable: inactive terminal outcome awaiting captain presentation: child=treehouse-apfs-clone-s1 state=done pr=https://github.com/kunchenguid/treehouse/pull/153
+  after cadence scan 4: queued=1 pending=0 presented-receipts=0
+cycle 5: branch drain PRESENTED -> inactive terminal outcome awaiti
+actionable: inactive terminal outcome awaiting captain presentation: child=treehouse-apfs-clone-s1 state=done pr=https://github.com/kunchenguid/treehouse/pull/153
+  after cadence scan 5: queued=1 pending=0 presented-receipts=0
+cycle 6: branch drain PRESENTED -> inactive terminal outcome awaiti
+actionable: inactive terminal outcome awaiting captain presentation: child=treehouse-apfs-clone-s1 state=done pr=https://github.com/kunchenguid/treehouse/pull/153
+  after cadence scan 6: queued=1 pending=0 presented-receipts=0
+== [base-f1ea9ed5] RESULT: unchanged held PR presented 6 time(s) across 6 away cadences

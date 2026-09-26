@@ -1,0 +1,21 @@
+ok - report surface: only the branch actor's current turn may report, and only on the tasks its wake names
+ok - report surface: an outcome recorded after the captain returned is queued durably for main
+ok - dispatch entry: the host reads branch eligibility and the wake prompt from the Pi branch's own owner
+ok - host: an attended close reaches main exactly as the plain arm delivers it
+ok - host: an away wake is handled on the engine through the branch contract and never reaches main
+ok - host: an engine turn that records no outcome hands its durable wake to main
+ok - host: a captain return during an engine turn hands that turn's outcomes to main
+ok - host: an outcome recorded after the return reaches main even when its host dies at the turn's end
+ok - host: the next host stops the engine a killed predecessor left mid-turn and removes that turn's files
+ok - host: a turn that reports but leaves its granted rows queued hands the wake to main
+ok - host: a captain return during a failed engine turn still hands that turn's outcomes to main
+ok - host: an engine turn whose result is incomplete hands its wake to main
+ok - host: two engine errors latch the session, main keeps every away wake in the cooldown, a failed probe doubles it up to its cap, and a report recovers it silently
+ok - host: the latch changes nothing for an attended close or a home without config/supervision-host
+ok - host: an engine turn is bounded, and tool processes outside its process group are reaped
+ok - host: a restarted host stops, by recorded identity, the cycle a killed predecessor left running
+ok - host: the park ends itself with a boundary wake and a stopped watcher
+not ok - fixture: closes did not arrive back to back: 1790381097	start	gen=host-46362-1790381097	primary=claude
+1790381109	handled	turn=host-46362-1790381097.1	rc=0	reports=1	error=0 cost=0.25 conversation_cost=0.25 input=5 cache_read=100 cache_write=10 output=20 turns=3	signal: /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-supervision-host.nBa4CE/boundary-busy/state/demo.status
+1790381115	boundary	after 18s
+EXIT 1

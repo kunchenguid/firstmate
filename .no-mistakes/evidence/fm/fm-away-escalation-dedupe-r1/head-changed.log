@@ -1,0 +1,16 @@
+== [head-49a1aa57-changed] lab FM_HOME=/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T//fm-lab.PVc5KS (child pane firstmate:fm-treehouse-apfs-clone-s1 on private fm-lab tmux socket)
+crew-state: state: done · source: status-log · PR https://github.com/kunchenguid/treehouse/pull/153 open/green/mergeable, held for captain return
+actionable: inactive terminal outcome awaiting captain presentation: child=treehouse-apfs-clone-s1 state=done pr=https://github.com/kunchenguid/treehouse/pull/153
+startup scan: queued inactive-outcome rows=1 pending receipts=0
+cycle 1: branch drain PRESENTED -> inactive terminal outcome awaiti
+  after cadence scan 1: queued=0 pending=0 presented-receipts=0
+cycle 2: branch drain presented nothing
+  after cadence scan 2: queued=0 pending=0 presented-receipts=0
+cycle 3: branch drain presented nothing
+  after cadence scan 3: queued=0 pending=0 presented-receipts=0
+cycle 4: branch drain presented nothing
+  after cadence scan 4: queued=0 pending=0 presented-receipts=0
+== [head-49a1aa57-changed] RESULT: unchanged held PR presented 1 time(s) across 4 away cadences
+-- situation changes: the child reports a new PR (PR #154) and its turn ends again
+actionable: inactive terminal outcome awaiting captain presentation: child=treehouse-apfs-clone-s1 state=done pr=https://github.com/kunchenguid/treehouse/pull/154
+after change: queued=1; branch drain presents: child=treehouse-apfs-clone-s1 state=done pr=https://github.com/kunchenguid/treehouse/pull/154
