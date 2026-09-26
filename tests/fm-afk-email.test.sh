@@ -580,7 +580,15 @@ messages = {
     b"3": (
         b"From: John Poyser <johnpoyser@gmail.com>\r\nDate: Thu, 25 Sep 2026 00:00:00 +0000\r\n"
         b"Subject: authenticated captain\r\nAuthentication-Results: mx.google.com; dkim=pass header.d=gmail.com; dmarc=pass header.from=gmail.com\r\n"
+        b"Authentication-Results: mx.google.com; dkim=fail header.d=attacker.example\r\n"
         b"Content-Type: text/plain; charset=utf-8\r\n\r\nauthenticated captain body\r\n"
+    ),
+    b"4": (
+        b"From: johnpoyser@gmail.com\r\nDate: Thu, 25 Sep 2026 00:00:00 +0000\r\n"
+        b"Subject: receiver rejected forged pass\r\n"
+        b"Authentication-Results: mx.google.com; dkim=fail header.d=gmail.com; dmarc=fail header.from=gmail.com\r\n"
+        b"Authentication-Results: mx.google.com; dkim=pass header.d=gmail.com\r\n"
+        b"Content-Type: text/plain; charset=utf-8\r\n\r\nprivate forged Gmail pass body\r\n"
     ),
 }
 
@@ -596,7 +604,7 @@ class FakeMailbox:
 
     def uid(self, command, uid, spec):
         if command == "search":
-            return "OK", [b"1 2 3"]
+            return "OK", [b"1 2 3 4"]
         raw = messages[uid]
         with open(os.environ["FM_MAIL_TEST_FETCH_LOG"], "a", encoding="utf-8") as log:
             log.write(f"{uid.decode()}\t{spec}\n")
@@ -612,11 +620,13 @@ PY
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$REPO" \
     PYTHONPATH="$fakepy" FM_MAIL_TEST_FETCH_LOG="$fetch_log" "$REPO/bin/fm-mail.sh" read 2>&1) \
     || fail "read with an active away record failed: $out"
-  assert_contains "$out" 'authenticated captain body' 'authenticated owner mail remains readable while away'
+  assert_contains "$out" 'authenticated captain body' 'trusted pass above a sender copy permits the body read'
   assert_not_contains "$out" 'private attacker body' 'spoofed sender body is not printed while away'
   assert_not_contains "$out" 'private unauthenticated body' 'unauthenticated owner body is not printed while away'
+  assert_not_contains "$out" 'private forged Gmail pass body' 'sender-supplied pass below a failed receiver result is not printed'
   fetches=$(cat "$fetch_log")
-  assert_contains "$fetches" $'3\t(BODY.PEEK[])' 'authenticated owner body is fetched while away'
+  assert_contains "$fetches" $'3\t(BODY.PEEK[])' 'trusted pass above a sender copy permits the body read'
+  assert_not_contains "$fetches" $'4\t(BODY.PEEK[])' 'receiver failure above a forged pass blocks the body read'
   assert_not_contains "$fetches" $'1\t(BODY.PEEK[])' 'spoofed sender body is never fetched while away'
   assert_not_contains "$fetches" $'2\t(BODY.PEEK[])' 'unauthenticated sender body is never fetched while away'
 
@@ -627,10 +637,12 @@ PY
     || fail "read with a malformed away record failed: $out"
   assert_not_contains "$out" 'private attacker body' 'malformed away posture still hides spoofed sender bodies'
   assert_not_contains "$out" 'private unauthenticated body' 'malformed away posture still hides unauthenticated bodies'
+  assert_not_contains "$out" 'private forged Gmail pass body' 'malformed posture still rejects a sender pass below receiver failure'
   fetches=$(cat "$fetch_log")
   assert_contains "$fetches" $'3\t(BODY.PEEK[])' 'malformed posture still allows the authenticated owner body'
   assert_not_contains "$fetches" $'1\t(BODY.PEEK[])' 'malformed posture never fetches a spoofed sender body'
   assert_not_contains "$fetches" $'2\t(BODY.PEEK[])' 'malformed posture never fetches an unauthenticated body'
+  assert_not_contains "$fetches" $'4\t(BODY.PEEK[])' 'malformed posture never fetches a forged-pass body'
 
   rm "$home/state/.afk-contract"
   : > "$fetch_log"
@@ -639,10 +651,12 @@ PY
     || fail "attended read without an away record failed: $out"
   assert_contains "$out" 'private attacker body' 'attended read still shows bodies without an away record'
   assert_contains "$out" 'private unauthenticated body' 'attended read retains normal access without an away record'
+  assert_contains "$out" 'private forged Gmail pass body' 'attended read still shows bodies without away authentication gating'
   fetches=$(cat "$fetch_log")
   assert_contains "$fetches" $'1\t(BODY.PEEK[])' 'attended read fetches the first unseen body'
   assert_contains "$fetches" $'2\t(BODY.PEEK[])' 'attended read fetches the second unseen body'
   assert_contains "$fetches" $'3\t(BODY.PEEK[])' 'attended read fetches the third unseen body'
+  assert_contains "$fetches" $'4\t(BODY.PEEK[])' 'attended read fetches the fourth unseen body'
   pass "fm-mail read gates bodies to authenticated Gmail during away mode"
 }
 
@@ -736,11 +750,11 @@ mail = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mail)
 headers = {
     "1": b"From: outsider@example.com\r\nSubject: outside\r\n\r\n",
-    "2": b"From: johnpoyser@gmail.com\r\nAuthentication-Results: mx.google.com; dkim=pass header.d=gmail.com\r\nSubject: captain\r\n\r\n",
+    "2": b"From: johnpoyser@gmail.com\r\nAuthentication-Results: mx.google.com; dkim=pass header.d=gmail.com\r\nAuthentication-Results: mx.google.com; dkim=fail header.d=attacker.example\r\nSubject: captain\r\n\r\n",
     "3": b"From: johnpoyser@gmail.com\r\nAuthentication-Results: mx.google.com; dkim=pass header.i=@gmail.com\r\nSubject: oversized\r\n\r\n",
     "4": b"From: johnpoyser@gmail.com\r\nAuthentication-Results: mx.google.com; dkim=pass header.d=gmail.com\r\nSubject: long answer\r\n\r\n",
     "5": b"From: johnpoyser@gmail.com\r\nAuthentication-Results: mx.google.com; dmarc=pass header.from=gmail.com\r\nSubject: reply during config outage\r\n\r\n",
-    "6": b"From: johnpoyser@gmail.com\r\nAuthentication-Results: spoof.example; dkim=pass header.d=gmail.com\r\nAuthentication-Results: mx.google.com; dkim=pass header.d=gmail.com\r\nSubject: forged authentication\r\n\r\n",
+    "6": b"From: johnpoyser@gmail.com\r\nAuthentication-Results: mx.google.com; dkim=fail header.d=gmail.com; dmarc=fail header.from=gmail.com\r\nAuthentication-Results: mx.google.com; dkim=pass header.d=gmail.com\r\nSubject: forged authentication\r\n\r\n",
     "7": b"From: other@example.com\r\nAuthentication-Results: mx.google.com; dmarc=pass header.from=gmail.com\r\nSubject: other sender\r\n\r\n",
     "8": b"From: johnpoyser@gmail.com\r\nAuthentication-Results: mx.google.com; dkim=fail header.d=gmail.com; dmarc=fail header.from=gmail.com\r\nSubject: forged From\r\n\r\n",
     "9": b"From: johnpoyser@gmail.com\r\nAuthentication-Results: mx.google.com; dkim=pass header.d=attacker.com; dmarc=fail header.from=gmail.com\r\nSubject: unaligned signer\r\n\r\n",
@@ -826,7 +840,8 @@ with redirect_stdout(initial_output), redirect_stderr(initial_error):
 initial_lines = initial_output.getvalue().splitlines()
 initial_rows = {fields[0]: fields for fields in (line.split("\t") for line in initial_lines[1:])}
 assert set(initial_rows) == {"1", "2", "3", "4", "6", "7", "8", "9"}, initial_rows
-assert all(initial_rows[uid][4] == "ignored" for uid in ("1", "6", "7", "8", "9")), initial_rows
+assert all(initial_rows[uid][4] == "ignored" for uid in ("1", "7", "8", "9")), initial_rows
+assert initial_rows["6"][4] == "ignored", initial_rows["6"]
 assert initial_rows["3"][4] == "ok", initial_rows["3"]
 assert "body exceeds 256 KiB" in initial_rows["3"][3], initial_rows["3"]
 assert initial_rows["4"][4] == "ok", initial_rows["4"]

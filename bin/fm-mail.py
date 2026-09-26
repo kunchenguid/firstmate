@@ -173,10 +173,10 @@ def gmail_aligned(domain):
 
 
 def gmail_authentication_pass(message):
-    results = message.get_all('Authentication-Results', [])
-    if not results:
+    receiver_result = message.get('Authentication-Results')
+    if receiver_result is None:
         return False
-    clauses = str(results[0]).split(';')
+    clauses = str(receiver_result).split(';')
     authserv = clauses[0].strip().split()
     if not authserv or authserv[0].casefold() != 'mx.google.com':
         return False
