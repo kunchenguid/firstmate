@@ -123,20 +123,20 @@ case "$*" in
     jq -n --arg head "$(cat "$FORGE/head")" '{headRefOid:$head,reviewDecision:"APPROVED"}' ;;
   'pr view '*headRefOid*) cat "$FORGE/head" ;;
   'pr view '*state*) printf 'OPEN\n' ;;
-  'api repos/o/r/pulls/8')
+  'api repos/o/r/issues/'*'/events?'*) jq -s . "$FORGE/events.json" ;;
+  'api repos/o/r/issues/'*'/comments?'*) jq -s . "$FORGE/comments.json" ;;
+  'api repos/o/r/pulls/'*'/reviews?'*) jq -s . "$FORGE/reviews.json" ;;
+  'api repos/o/r/pulls/'*'/comments?'*) jq -s . "$FORGE/inline.json" ;;
+  'api repos/o/r/commits/'*'/check-runs?'*)
+    printf '[{"check_runs":[{"name":"test","id":1,"status":"completed","conclusion":"success","started_at":"2026-09-16T08:00:00Z"}]}]\n' ;;
+  'api repos/o/r/commits/'*'/statuses?'*) printf '[[]]\n' ;;
+  'api repos/o/r/pulls/'*)
     jq -n --arg head "$(cat "$FORGE/head")" --arg state "$(cat "$FORGE/state" 2>/dev/null || printf open)" '
       {state:(if $state == "open" then "open" else "closed" end),user:{login:"author"},head:{sha:$head},draft:false,
        mergeable:(if $state == "open" then true else null end),
        merged_at:(if $state == "merged" then "2026-09-16T07:00:00Z" else null end)}' ;;
-  'api repos/o/r/issues/9')
+  'api repos/o/r/issues/'*)
     jq -n --slurpfile labels "$FORGE/labels.json" '{state:"open",user:{login:"author"},labels:$labels[0]}' ;;
-  'api repos/o/r/issues/'*'/events?'*) jq -s . "$FORGE/events.json" ;;
-  'api repos/o/r/issues/'*'/comments?'*) jq -s . "$FORGE/comments.json" ;;
-  'api repos/o/r/pulls/8/reviews?'*) jq -s . "$FORGE/reviews.json" ;;
-  'api repos/o/r/pulls/8/comments?'*) jq -s . "$FORGE/inline.json" ;;
-  'api repos/o/r/commits/'*'/check-runs?'*)
-    printf '[{"check_runs":[{"name":"test","id":1,"status":"completed","conclusion":"success","started_at":"2026-09-16T08:00:00Z"}]}]\n' ;;
-  'api repos/o/r/commits/'*'/statuses?'*) printf '[[]]\n' ;;
   'api repos/o/r') printf '{"permissions":{"push":false}}\n' ;;
   *) printf 'unexpected gh fixture call: %s\n' "$*" >&2; exit 1 ;;
 esac
@@ -552,7 +552,14 @@ wrap_forge() { # home: log gh calls and apply per-call faults from $FORGE/fault
 set -eu
 printf '%s\n' "$*" >> "$FORGE/calls"
 fault=$(cat "$FORGE/fault" 2>/dev/null || true)
-case "$fault" in latency) sleep "${FORGE_LATENCY:-2}" ;; esac
+case "$fault" in
+  latency) sleep "${FORGE_LATENCY:-2}" ;;
+  slow)
+    if [ -f "$FORGE/slow" ]; then
+      latency=$(awk -v call="$*" 'index(call, $1) { print $2; exit }' "$FORGE/slow")
+      if [ -n "$latency" ]; then sleep "$latency"; fi
+    fi ;;
+esac
 case "$fault:$*" in
   # Advance once before the parallel read wave; its readers share this clock.
   reserve:'api repos/o/r/issues/9')
@@ -769,6 +776,156 @@ test_three_second_pr_reads_complete_fresh_in_one_cycle() { # 3-second reads: 8 s
   pass 'eight 3-second PR reads complete fresh within one 20-second poll cycle'
 }
 
+test_slow_url_is_retried_after_healthy_budget_consumption() { # a slow read must not be pinned behind a budget-consuming healthy read
+  local home
+  home=$(new_home slow-rotation)
+  forge_home "$home"
+  wrap_forge "$home"
+  {
+    printf -- '- [ ] healthy - Healthy https://github.com/o/r/issues/9 (repo: sample) (kind: ship)\n'
+    printf -- '- [ ] slow - Slow https://github.com/o/r/issues/10 (repo: sample) (kind: ship)\n'
+  } >> "$home/data/backlog.md"
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" poll >/dev/null || fail 'initial rotation poll failed'
+  printf 'issues/9 3\nissues/10 6\n' > "$home/forge/slow"
+  printf 'slow\n' > "$home/forge/fault"
+  : > "$home/forge/calls"
+  with_home "$home" env FM_CONTRIBUTIONS_BUDGET=20 "$ROOT/bin/fm-contributions.sh" poll >/dev/null \
+    || fail 'budget-consuming healthy poll failed'
+  grep -F 'api repos/o/r/issues/9' "$home/forge/calls" >/dev/null \
+    || fail 'the healthy contribution was not observed'
+  if grep -F 'api repos/o/r/issues/10' "$home/forge/calls" >/dev/null; then
+    fail 'the slow contribution ran in the same poll as a budget-consuming healthy read'
+  fi
+  : > "$home/forge/calls"
+  with_home "$home" env FM_CONTRIBUTIONS_BUDGET=20 "$ROOT/bin/fm-contributions.sh" poll >/dev/null \
+    || fail 'slow rotation poll failed'
+  grep -F 'api repos/o/r/issues/10' "$home/forge/calls" >/dev/null \
+    || fail 'a persistently slow contribution was never retried'
+  pass 'a slow contribution is retried on a later poll after a healthy read consumes the budget'
+}
+
+test_new_contribution_joins_rotation_without_starving_established() { # a later-linked URL must not hog the observation queue
+  local home poll
+  home=$(new_home new-rotation)
+  forge_home "$home"
+  wrap_forge "$home"
+  for poll in 1 2 3; do
+    with_home "$home" "$ROOT/bin/fm-contributions.sh" poll >/dev/null || fail "established poll $poll failed"
+  done
+  printf -- '- [ ] linked - Newly linked https://github.com/o/r/issues/10 (repo: sample) (kind: ship)\n' >> "$home/data/backlog.md"
+  # Latened reads leave less than the 15s reserve, so one contribution is served per poll.
+  printf 'repos/o/r/pulls/8 3\nrepos/o/r/issues/10 3\n' > "$home/forge/slow"
+  printf 'slow\n' > "$home/forge/fault"
+  : > "$home/forge/calls"
+  with_home "$home" env FM_CONTRIBUTIONS_BUDGET=20 "$ROOT/bin/fm-contributions.sh" poll >/dev/null \
+    || fail 'new rotation first poll failed'
+  grep -F 'api repos/o/r/issues/10' "$home/forge/calls" >/dev/null \
+    || fail 'the newly linked contribution was not observed'
+  : > "$home/forge/calls"
+  with_home "$home" env FM_CONTRIBUTIONS_BUDGET=20 "$ROOT/bin/fm-contributions.sh" poll >/dev/null \
+    || fail 'new rotation second poll failed'
+  grep -F 'api repos/o/r/pulls/8' "$home/forge/calls" >/dev/null \
+    || fail 'the newly linked contribution starved an established contribution'
+  pass 'a newly linked contribution joins the rotation without starving established ones'
+}
+
+test_attempt_recency_rotates_slow_and_new_urls() { # retries rotate across established and newly linked URLs
+  local home poll calls url seen=''
+  home=$(new_home attempt-recency)
+  forge_home "$home"
+  wrap_forge "$home"
+  grep -v 'pull/8' "$home/data/backlog.md" > "$home/backlog.next"
+  mv "$home/backlog.next" "$home/data/backlog.md"
+  rm "$home/data/delivery/contributions.json"
+  {
+    printf -- '- [ ] alpha - Alpha https://github.com/o/r/issues/9 (repo: sample) (kind: ship)\n'
+    printf -- '- [ ] bravo - Bravo https://github.com/o/r/issues/10 (repo: sample) (kind: ship)\n'
+    printf -- '- [ ] charlie - Charlie https://github.com/o/r/issues/11 (repo: sample) (kind: ship)\n'
+  } >> "$home/data/backlog.md"
+  for poll in 1 2 3 4; do
+    with_home "$home" "$ROOT/bin/fm-contributions.sh" poll >/dev/null || fail "initial rotation poll $poll failed"
+  done
+  printf -- '- [ ] linked - Newly linked https://github.com/o/r/issues/12 (repo: sample) (kind: ship)\n' >> "$home/data/backlog.md"
+  printf 'issues/9 1\nissues/10 6\nissues/11 6\nissues/12 1\n' > "$home/forge/slow"
+  printf 'slow\n' > "$home/forge/fault"
+  for poll in 1 2 3 4 5 6; do
+    : > "$home/forge/calls"
+    with_home "$home" env FM_CONTRIBUTIONS_BUDGET=20 "$ROOT/bin/fm-contributions.sh" poll >/dev/null \
+      || fail "attempt-recency poll $poll failed"
+    calls=$(cat "$home/forge/calls")
+    [ -n "$calls" ] || fail "attempt-recency poll $poll observed no contribution"
+    if [ "$poll" -eq 1 ]; then
+      case "$calls" in
+        *'api repos/o/r/issues/9'*'api repos/o/r/issues/10'*) ;;
+        *) fail "the healthy URL did not consume budget before a slow URL was retried: $calls" ;;
+      esac
+    fi
+    for url in issues/9 issues/10 issues/11 issues/12; do
+      case "$calls" in *"api repos/o/r/$url"*) seen="$seen $url" ;; esac
+    done
+  done
+  for url in issues/9 issues/10 issues/11 issues/12; do
+    case " $seen " in *" $url "*) ;; *) fail "attempt recency starved $url across six polls: $seen" ;; esac
+  done
+  pass 'attempt recency rotates established, newly linked, and persistent slow URLs despite budget-consuming reads'
+}
+
+test_budget_timeout_advances_attempt_rotation() { # every started observation advances recency, including budget timeout
+  local home first
+  home=$(new_home budget-rotation)
+  forge_home "$home"
+  wrap_forge "$home"
+  rm "$home/data/delivery/contributions.json"
+  grep -v 'pull/8' "$home/data/backlog.md" > "$home/backlog.next"
+  mv "$home/backlog.next" "$home/data/backlog.md"
+  {
+    printf -- '- [ ] alpha - Alpha https://github.com/o/r/issues/9 (repo: sample) (kind: ship)\n'
+    printf -- '- [ ] bravo - Bravo https://github.com/o/r/issues/10 (repo: sample) (kind: ship)\n'
+  } >> "$home/data/backlog.md"
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" poll >/dev/null \
+    || fail 'initial budget-rotation poll failed'
+  cp "$home/data/alpha/contributions.json" "$home/alpha.prior.json"
+  cp "$home/data/bravo/contributions.json" "$home/bravo.prior.json"
+  printf 'latency\n' > "$home/forge/fault"
+  with_home "$home" env FM_CONTRIBUTIONS_BUDGET=2 FORGE_LATENCY=6 \
+    "$ROOT/bin/fm-contributions.sh" poll >/dev/null || fail 'budget-timeout poll failed'
+  cmp -s "$home/alpha.prior.json" "$home/data/alpha/contributions.json" \
+    || fail 'a budget timeout changed alpha owner record'
+  cmp -s "$home/bravo.prior.json" "$home/data/bravo/contributions.json" \
+    || fail 'a budget timeout changed bravo owner record'
+  : > "$home/forge/calls"
+  with_home "$home" env FM_CONTRIBUTIONS_BUDGET=2 FORGE_LATENCY=6 \
+    "$ROOT/bin/fm-contributions.sh" poll >/dev/null || fail 'second budget-timeout poll failed'
+  first=$(head -n 1 "$home/forge/calls")
+  case "$first" in *'api repos/o/r/issues/10'*) ;; *) fail "budget-timed-out URL pinned the rotation: $first" ;; esac
+  pass 'a budget-timed-out observation advances rotation without changing owner records'
+}
+
+test_slow_read_with_budget_remaining_is_unmeasured() { # a read past its own five-second cap is slow, not unavailable
+  local home out
+  home=$(new_home slow-in-budget)
+  forge_home "$home"
+  wrap_forge "$home"
+  mutate_record "$home" delivery '.records[0].checked_at="2026-09-15T08:00:00Z"'
+  cp "$home/data/delivery/contributions.json" "$home/prior.json"
+  # Six-second reads cross the five-second per-read cap while the twenty-second
+  # poll budget still has room: the read is slow, not an unreachable forge.
+  printf 'latency\n' > "$home/forge/fault"
+  out=$(with_home "$home" env FM_CONTRIBUTIONS_BUDGET=20 FORGE_LATENCY=6 "$ROOT/bin/fm-contributions.sh" poll) \
+    || fail 'a slow but in-budget observation failed the poll'
+  [ -z "$out" ] || fail "a slow in-budget read was reported unavailable: $out"
+  cmp -s "$home/prior.json" "$home/data/delivery/contributions.json" \
+    || fail "a slow in-budget read rewrote the prior record: $(cat "$home/data/delivery/contributions.json")"
+  [ ! -s "$home/state/.wake-queue" ] || fail 'a slow in-budget read enqueued a wake'
+  : > "$home/forge/fault"
+  out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll) || fail 'slow-read recovery poll failed'
+  [ -z "$out" ] || fail "a recovered slow read printed: $out"
+  jq -e --arg now "$NOW" '.records[0] | .checked_at == $now and .error == null' \
+    "$home/data/delivery/contributions.json" >/dev/null \
+    || fail 'a recovered slow read was not recorded fresh on the next poll'
+  pass 'a slow in-budget read keeps the prior record, stays silent, and recovers next poll'
+}
+
 test_unavailable_forge_records_error_and_wakes_once_per_episode() { # genuine outage, two consecutive cycles
   local home out line='contributions: observation unavailable for https://github.com/o/r/pull/8'
   local error='"forge observation unavailable or changed during read"'
@@ -829,7 +986,7 @@ test_late_owner_keeps_failure_episode_suppressed() {
 }
 
 failures=0
-for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_done_task_open_pr_still_observed test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed; do
+for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_done_task_open_pr_still_observed test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_attempt_recency_rotates_slow_and_new_urls test_budget_timeout_advances_attempt_rotation test_slow_read_with_budget_remaining_is_unmeasured test_slow_url_is_retried_after_healthy_budget_consumption test_new_contribution_joins_rotation_without_starving_established test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed; do
   ( "$test_name" ) || failures=$((failures + 1))
 done
 [ "$failures" -eq 0 ] || fail "$failures contribution regressions"

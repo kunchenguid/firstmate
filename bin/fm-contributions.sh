@@ -37,13 +37,17 @@
 # an issue has two waves. Parallelizing each independent wave bounds either
 # observation to 3 * 5 = 15 seconds. poll reserves min(the configured budget,
 # 15) before starting a URL, so an in-progress normal-budget observation gets
-# all three waves and a later URL waits for the next oldest-checked-first poll.
+# all three waves and a later URL waits for the next poll, which serves the
+# least recently attempted URLs first from the durable rotation cursor.
 # A deliberately smaller configured budget remains bounded and may be
-# unmeasured, rather than being mislabeled unavailable. Each distinct URL is
-# observed once per poll and applied to every owner. A final observation applies
-# to every owner without another forge read. When the budget runs out
-# mid-observation, the poll ends with that URL's records untouched; only a
-# genuine forge failure or head change records an error.
+# unmeasured, rather than being mislabeled unavailable. A read that crosses its
+# own five-second slice while budget still remains is slow and unmeasured too:
+# its records stay untouched and it advances the rotation cursor, never reported
+# as an unreachable forge. Each distinct URL is observed once per poll
+# and applied to every owner. A final observation applies to every owner without
+# another forge read. When the budget runs out mid-observation, the poll ends
+# with that URL's records untouched; only a genuine forge failure or head change
+# records an error.
 # API failure leaves error evidence; an expired or absent observation is not
 # silence. FM_CONTRIBUTIONS_MAX_AGE (default 900 seconds) bounds freshness.
 # A URL whose last good observation is merged or closed is final: it is
@@ -189,10 +193,14 @@ forge() {
   if [ "$remaining" -le 5 ]; then bounded=1; else remaining=5; fi
   fm_run_timed "$remaining" env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
     gh "$@" 2> "$forge_err" || rc=$?
-  # A read killed at the budget's own deadline is budget exhaustion too.
+  # A read killed at the budget's own deadline is budget exhaustion; one killed
+  # at its own five-second slice while budget remained is only slow, so it is
+  # unmeasured rather than an unreachable forge.
   if [ "$rc" -eq 124 ] && [ "$bounded" -eq 1 ]; then
     BUDGET_EXHAUSTED=1
     : > "$TMP/budget-exhausted"
+  elif [ "$rc" -eq 124 ]; then
+    : > "$TMP/forge-slow"
   elif [ "$rc" -ne 0 ]; then
     : > "$TMP/forge-unavailable"
   fi
@@ -212,10 +220,10 @@ wait_forges() { # background forge pids from one independent read wave
 
 observe() { # canonical GitHub URL -> normalized JSON
   local url=$1 part number kind endpoint head after label
+  rm -f -- "$TMP/budget-exhausted" "$TMP/forge-unavailable" "$TMP/forge-slow"
   case "$url" in https://github.com/*) ;; *) return 1 ;; esac
   part=${url#https://github.com/}; number=${part##*/}; part=${part%/*}; kind=${part##*/}; part=${part%/*}
   case "$kind" in pull) endpoint="repos/$part/pulls/$number" ;; issues) endpoint="repos/$part/issues/$number" ;; *) return 1 ;; esac
-  rm -f -- "$TMP/budget-exhausted" "$TMP/forge-unavailable"
   forge api "$endpoint" > "$TMP/core.json" || return 1
   jq -e '(.state == "open" or .state == "closed") and (.user.login | type == "string")' "$TMP/core.json" >/dev/null || return 1
   if [ "$kind" = pull ]; then
@@ -325,18 +333,53 @@ settle_final() { # canonical-url task... : copy the URL's final observation to e
   done
 }
 
+read_attempts() {
+  local file="$STATE/.contributions-attempts.json"
+  if [ -f "$file" ] && [ ! -L "$file" ] \
+    && jq -e 'type == "object" and (.seq | type == "number") and (.urls | type == "object") and all(.urls[]; type == "number")' "$file" >/dev/null 2>&1; then
+    cp "$file" "$TMP/attempts.json"
+  else
+    printf '{"seq":0,"urls":{}}\n' > "$TMP/attempts.json"
+  fi
+}
+
+mark_attempt() { # url
+  jq --arg url "$1" '.seq += 1 | .urls[$url] = .seq' "$TMP/attempts.json" > "$TMP/attempts.next.json"
+  mv -- "$TMP/attempts.next.json" "$TMP/attempts.json"
+}
+
+write_attempts() { # keep only owned URLs and seed first-seen URLs at the current maximum
+  local device staged
+  cut -f1 "$TMP/known.tsv" | sort -u > "$TMP/known-urls"
+  jq -R -s 'split("\n") | map(select(length > 0))' "$TMP/known-urls" > "$TMP/known-urls.json"
+  device=$(fm_pr_file_device "$STATE")
+  fm_pr_regular_destination_on_device_or_absent "$STATE/.contributions-attempts.json" "$device" || fail 'unsafe attempt destination'
+  staged=$(umask 077; mktemp "$STATE/.contributions-attempts.XXXXXX")
+  jq --slurpfile known "$TMP/known-urls.json" '
+    .seq as $seq
+    | (.urls | with_entries(select(.key as $k | ($known[0] | index($k))))) as $kept
+    | .urls = (reduce ($known[0][]) as $k ($kept; if has($k) then . else .[$k] = $seq end))' \
+    "$TMP/attempts.json" > "$staged"
+  chmod 600 "$staged"
+  fm_pr_regular_destination_on_device_or_absent "$STATE/.contributions-attempts.json" "$device" || fail 'attempt destination changed'
+  mv -f -- "$staged" "$STATE/.contributions-attempts.json"
+}
+
 poll() {
   local task url old kind error observed
   local -a row
   acquire
   get_input
   read_saved
+  read_attempts
   [ "$ERRORS" -eq 0 ] || printf 'contributions: %s unreadable durable record(s)\n' "$ERRORS"
-  # One line per distinct URL: the URL, then every owning task.
-  jq_lib -nr --slurpfile input "$TMP/input.json" --slurpfile saved "$TMP/saved.json" '
-    known($input[0];$saved[0]) | map(. as $k | . + {at:([$saved[0][] | select(.task == $k.task) | .records[] | select(.url == $k.url) | .checked_at] | first // "")})
-    | group_by(.url) | map({url:.[0].url,at:(map(.at) | min),tasks:(map(.task) | unique)})
-    | sort_by(.at,.tasks[0],.url)[] | [.url] + .tasks | @tsv' > "$TMP/known.tsv"
+  # One line per distinct URL: the URL, then every owning task. Attempts order
+  # the queue by recency, so no read can pin its head.
+  jq_lib -nr --slurpfile input "$TMP/input.json" --slurpfile saved "$TMP/saved.json" \
+    --slurpfile attempts "$TMP/attempts.json" '
+    known($input[0];$saved[0]) | map(. as $k | . + {at:([$saved[0][] | select(.task == $k.task) | .records[] | select(.url == $k.url) | .checked_at] | first // ""),last:($attempts[0].urls[$k.url] // $attempts[0].seq)})
+    | group_by(.url) | map({url:.[0].url,at:(map(.at) | min),last:(map(.last) | max),tasks:(map(.task) | unique)})
+    | sort_by(.last,.at,.tasks[0],.url)[] | [.url] + .tasks | @tsv' > "$TMP/known.tsv"
   DEADLINE=$(( $(date +%s) + BUDGET ))
   OBSERVATION_RESERVE=$((BUDGET < 15 ? BUDGET : 15))
   BUDGET_EXHAUSTED=0
@@ -353,9 +396,19 @@ poll() {
     fi
     observed=0
     observe "$url" || observed=$?
+    # Every started observation advances rotation, even when its poll-budget
+    # timeout leaves the prior records untouched.
+    mark_attempt "$url"
     # An observation the budget cut short is unmeasured, not unavailable: keep
-    # every owner's prior record so the URL is observed first next poll.
+    # every owner's prior record and end this poll.
     [ "$BUDGET_EXHAUSTED" -eq 0 ] || break
+    # A read that crossed its own five-second slice while budget remained is
+    # slow, not an unreachable forge: keep every owner's prior record and never
+    # wake for it.
+    if [ "$observed" -ne 0 ] && [ ! -e "$TMP/forge-unavailable" ] \
+      && [ -e "$TMP/forge-slow" ]; then
+      continue
+    fi
     # Wake once per failure episode: only when no owner has a prior error.
     if [ "$observed" -ne 0 ] && jq -ne --slurpfile saved "$TMP/saved.json" --arg url "$url" --args \
       'all($ARGS.positional[] as $task | [$saved[0][] | select(.task == $task) | .records[] | select(.url == $url)] | first;
@@ -387,6 +440,7 @@ poll() {
       publish_pending "$task" "$url" "$TMP/row.json"
     done
   done < "$TMP/known.tsv"
+  write_attempts
 }
 
 arm() {
