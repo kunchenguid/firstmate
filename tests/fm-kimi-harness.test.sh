@@ -282,7 +282,7 @@ EOF
 }
 
 test_kimi_launch_then_send_is_verified() {
-  local id rec out rc launch pointer brief_real meta task_tmp launch_dir launch_file launch_base
+  local id rec out rc launch pointer brief_real meta task_tmp launch_dir launch_file launch_base capability capability_hash state_dir
   id="kimi-success-z1-$$"
   task_tmp="/tmp/fm-$id"
   KIMI_RUNTIME_TASK_TMP=$task_tmp
@@ -337,6 +337,14 @@ test_kimi_launch_then_send_is_verified() {
     "kimi spawn did not export its Go temp directory into the pane"
   assert_grep "export FM_TASK_ID=$id" "$CASE_DIR/tmux-calls.log" \
     "kimi spawn did not mark the pane with its task id"
+  capability=$(sed -n 's/.*export FM_TASK_CAPABILITY=\([0-9a-f]*\).*/\1/p' "$CASE_DIR/tmux-calls.log")
+  [ "${#capability}" -eq 32 ] || fail "kimi spawn did not deliver a private worker capability"
+  capability_hash=$(printf '%s' "$capability" | git -C / hash-object --stdin)
+  assert_grep "worker_capability_hash=$capability_hash" "$meta" \
+    "kimi spawn metadata did not bind the delivered worker capability"
+  state_dir=$(sed -n "s/.*export FM_TASK_STATE_DIR='\\([^']*\\)'.*/\\1/p" "$CASE_DIR/tmux-calls.log")
+  [ -n "$state_dir" ] && [ "$state_dir/$id.meta" -ef "$meta" ] \
+    || fail "kimi spawn did not deliver the task metadata state directory: $state_dir"
   assert_grep 'BEGIN FIRSTMATE KIMI TURN-END HOOK' "$HOME_DIR/.kimi-code/config.toml" \
     "kimi spawn did not install its guarded global hook region"
   assert_grep 'token=' "$WT_DIR/.fm-kimi-turnend" "kimi spawn did not write its token pointer"
