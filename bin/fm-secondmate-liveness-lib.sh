@@ -47,6 +47,13 @@
 # The attempt ledger (.secondmate-relaunch-<id>, one line per attempt plus one
 # per outcome) is both the durable relaunch record and the input to the
 # watcher's relaunch bound; teardown removes it.
+#
+# A remote host can stop serving work while every record on it still reads
+# healthy, and such a probe only ever reads as an inconclusive skip. The poll
+# probe is therefore bounded by FM_SECONDMATE_REMOTE_PROBE_TIMEOUT, marks a
+# remote probe that did not complete with FM_SM_LIVE_UNREACHABLE=1, and
+# .secondmate-unreachable-<id> counts such probes in a row (one line, the
+# count); any completed probe removes it, and teardown removes it too.
 
 set -u
 
@@ -81,6 +88,9 @@ fm_secondmate_liveness_unlock() {  # <id>
   fm_lock_release "$STATE/.secondmate-liveness-$1.lock" 2>/dev/null || true
 }
 
+FM_SM_LIVE_REMOTE_PROBE_TIMEOUT=${FM_SECONDMATE_REMOTE_PROBE_TIMEOUT:-}
+case "$FM_SM_LIVE_REMOTE_PROBE_TIMEOUT" in ''|*[!0-9]*|0) FM_SM_LIVE_REMOTE_PROBE_TIMEOUT=60 ;; esac
+
 fm_sm_live_first_line() {
   printf '%s\n' "$1" | sed -n '1s/[[:space:]]\{1,\}/ /g;1p'
 }
@@ -111,6 +121,22 @@ fm_secondmate_liveness_recent_attempts() {  # <id> <window-secs>
     "$ledger" 2>/dev/null
 }
 
+# Record one more consecutive remote probe that did not complete and print the
+# new count. Fails when the counter cannot be written.
+fm_secondmate_liveness_unreachable_note() {  # <id>
+  local file="$STATE/.secondmate-unreachable-$1" count
+  count=$(sed -n '1p' "$file" 2>/dev/null || true)
+  case "$count" in ''|*[!0-9]*) count=0 ;; esac
+  count=$((count + 1))
+  printf '%s\n' "$count" > "$file" 2>/dev/null || return 1
+  printf '%s\n' "$count"
+}
+
+# A completed probe ends the unreachable run.
+fm_secondmate_liveness_unreachable_clear() {  # <id>
+  rm -f -- "$STATE/.secondmate-unreachable-$1"
+}
+
 # fm_secondmate_liveness_probe <meta> <id> <full|poll>
 #
 # Read-only probe of one registered secondmate's recorded endpoint. Populates:
@@ -123,6 +149,7 @@ fm_secondmate_liveness_recent_attempts() {  # <id> <window-secs>
 #   FM_SM_LIVE_WHERE   backend=<b> or host=<h>, on relaunchable
 #   FM_SM_LIVE_REASON  exact skip suffix, on skipped
 #   FM_SM_LIVE_LINE    verbose already-live line body, on alive
+#   FM_SM_LIVE_UNREACHABLE  1 when a remote state probe did not complete
 #
 # `silent` means the meta records no endpoint at all - that shape is owned by
 # secondmate-provisioning recovery, not liveness.
@@ -132,7 +159,7 @@ fm_secondmate_liveness_recent_attempts() {  # <id> <window-secs>
 fm_secondmate_liveness_probe() {  # <meta> <id> <full|poll>
   local meta=$1 id=$2 mode=$3
   FM_SM_LIVE_STATUS=skipped FM_SM_LIVE_STATE=unknown FM_SM_LIVE_KILL=0
-  FM_SM_LIVE_CAUSE='' FM_SM_LIVE_WHERE='' FM_SM_LIVE_REASON='' FM_SM_LIVE_LINE=''
+  FM_SM_LIVE_CAUSE='' FM_SM_LIVE_WHERE='' FM_SM_LIVE_REASON='' FM_SM_LIVE_LINE='' FM_SM_LIVE_UNREACHABLE=0
   local window harness remote_host remote_rc out agent_state readiness_reason route_out remote_backend
   window=$(fm_meta_get "$meta" window)
   [ -n "$window" ] || { FM_SM_LIVE_STATUS=silent; return 0; }
@@ -155,17 +182,21 @@ fm_secondmate_liveness_probe() {  # <meta> <id> <full|poll>
         return 0
       fi
     fi
-    if out=$("$FM_SM_LIVE_LIB_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh state "$id" < /dev/null 2>/dev/null); then
+    if out=$(fm_run_timed "$FM_SM_LIVE_REMOTE_PROBE_TIMEOUT" \
+      "$FM_SM_LIVE_LIB_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh state "$id" < /dev/null 2>/dev/null); then
       remote_rc=0
     else
       remote_rc=$?
     fi
-    if [ "$remote_rc" -eq 255 ]; then
-      FM_SM_LIVE_REASON="remote host unavailable or endpoint state unknown; route preserved on $remote_host"
-      return 0
-    fi
     if [ "$remote_rc" -ne 0 ]; then
-      FM_SM_LIVE_REASON="remote endpoint probe unreadable on $remote_host"
+      FM_SM_LIVE_UNREACHABLE=1
+      if fm_timed_out "$remote_rc"; then
+        FM_SM_LIVE_REASON="remote endpoint probe did not complete within ${FM_SM_LIVE_REMOTE_PROBE_TIMEOUT}s on $remote_host"
+      elif [ "$remote_rc" -eq 255 ]; then
+        FM_SM_LIVE_REASON="remote host unavailable or endpoint state unknown; route preserved on $remote_host"
+      else
+        FM_SM_LIVE_REASON="remote endpoint probe unreadable on $remote_host"
+      fi
       return 0
     fi
     agent_state=$(printf '%s\n' "$out" | tail -1)
