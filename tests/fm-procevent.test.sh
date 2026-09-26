@@ -3302,6 +3302,148 @@ assert_contains "$out" "SESSION-ENDING MESSAGE: (none)" \
 assert_contains "$out" "ANNOTATIONS: (none)" "an empty board close invented annotations"
 pass "read distinguishes a feedback capture from an ended-with-nothing close"
 
+# --- Lavish frames queued feedback in TWO published shapes ------------------
+# The regression: a real 0.1.45 review captured six freeform comments, one of
+# which anchored a quoted text-range, so Lavish rendered the WHOLE batch as a
+# YAML-style prompts[6] list - and read, which understood only the flat CSV
+# frame, reported a complete EMPTY review, so every typed comment was silently
+# dropped. The recorded capture below (see tests/captures/lavish-0.1.45/) is
+# that batch with every human-readable string replaced by synthetic text; the
+# earlier CSV assertions in this section keep pinning the flat frame through
+# the same shared reader, so both shapes stay covered.
+YAML_CAPTURE="$ROOT/tests/captures/lavish-0.1.45/lavish-yaml-capture.result"
+[ -f "$YAML_CAPTURE" ] || fail "the recorded YAML-frame capture is missing from tests/captures/"
+out=$("$ROOT/bin/fm-procevent-lavish.sh" read "$YAML_CAPTURE") \
+  || fail "read failed on the recorded YAML-frame capture"
+assert_contains "$out" "declared_items: 6" "a YAML frame lost its declared count"
+assert_contains "$out" "presented_items: 6" "a YAML frame did not present every declared item"
+assert_contains "$out" "complete: yes" "a fully parsed YAML frame was not marked complete"
+assert_contains "$out" "annotation_count: 6" "a YAML frame did not count its annotations"
+assert_contains "$out" "lifecycle: feedback" "a YAML frame did not report its lifecycle"
+assert_contains "$out" "SESSION-ENDING MESSAGE: (none)" "a YAML frame invented a session-ending message"
+for n in 1 3 6 8 10 12; do
+  assert_contains "$out" "| synthetic prompt $n" "a typed comment was dropped from a YAML frame"
+done
+for t in 2 4 7 9 11 13; do
+  assert_contains "$out" "| synthetic text $t" "an annotated element was dropped from a YAML frame"
+done
+assert_contains "$out" "element_uid: 6" "a YAML annotation lost its element uid"
+assert_contains "$out" "element_selector: div#app-popup > div:nth-of-type(3) > div > ol > li:nth-of-type(2)" \
+  "a YAML annotation lost its selector"
+assert_contains "$out" $'tag: li\n' "a YAML annotation lost its element tag"
+assert_contains "$out" "target_type: text-range" "a quoted text-range annotation lost its target type"
+assert_contains "$out" $'target_text:\n| synthetic text 5' \
+  "a quoted text-range annotation lost the quoted text"
+assert_contains "$out" "malformed_items: 0" \
+  "a clean YAML frame did not report zero malformed items"
+pass "read presents every comment from the YAML-style frame"
+
+# The same shared reader must keep the flat CSV frame working beside the new
+# shape, asserted here explicitly rather than only through the older captures.
+cat > "$READ" <<'EOF'
+session:
+  file: /review.html
+  status: feedback
+  session_ended: true
+  ended_by: user
+prompts[2]{uid,prompt,selector,tag,text}:
+  "el-a","flat comment still read","section#call",note,"Flat annotation"
+  "","final flat message","",message,""
+EOF
+out=$(read_out) || fail "read failed on a flat CSV frame after the YAML reader landed"
+assert_contains "$out" "declared_items: 2" "the flat CSV frame lost its declared count"
+assert_contains "$out" "presented_items: 2" "the flat CSV frame dropped an item"
+assert_contains "$out" "| flat comment still read" "the flat CSV frame dropped a typed comment"
+assert_contains "$out" "SESSION-ENDING MESSAGE" "the flat CSV frame lost its message field"
+pass "read keeps the flat CSV frame beside the YAML-style frame"
+
+# A YAML frame can mix a session-ending message with keyed choice rows, and
+# answers/reconciles must read those rows from the same frame: keyed answers
+# were as silently droppable as freeform comments. Shape built from the live
+# 0.1.75 emission (double-quoted strings with backslash escapes).
+cat > "$READ" <<'EOF'
+session:
+  file: /review.html
+  status: feedback
+  session_ended: true
+  ended_by: user
+prompts[3]:
+  - uid: ""
+    prompt: "yaml message with, a comma and \"quotes\""
+    selector: ""
+    tag: message
+    text: Freeform message
+  - uid: ""
+    prompt: "Order proof: yes\n\nContext data:\n{\n  \"schema\": \"fm-bearings-answer.v1\",\n  \"question\": \"sample-yaml-choice\",\n  \"selection\": \"yes\",\n  \"note\": \"\"\n}"
+    selector: ""
+    tag: choice
+    text: "Order proof: yes"
+  - uid: ""
+    prompt: "Order proof: reconcile\n\nContext data:\n{\n  \"schema\": \"fm-bearings-answer.v1\",\n  \"question\": \"sample-yaml-hold\",\n  \"selection\": \"reconcile\",\n  \"note\": \"check the record first\"\n}"
+    selector: ""
+    tag: choice
+    text: "Order proof: reconcile"
+next_step: "apply the round"
+EOF
+out=$(read_out) || fail "read failed on a mixed YAML frame"
+assert_contains "$out" "declared_items: 3" "a mixed YAML frame lost its declared count"
+assert_contains "$out" "presented_items: 3" "a mixed YAML frame dropped an item"
+assert_contains "$out" "| yaml message with, a comma and \"quotes\"" \
+  "a YAML session-ending message was dropped"
+assert_contains "$out" "session_ending_message_count: 1" "a YAML message was miscounted"
+assert_contains "$out" "annotation_count: 2" "YAML choice rows were miscounted"
+assert_not_contains "$out" "Context data:" "a YAML choice row leaked its Context data as a comment"
+assert_contains "$out" "| Order proof: reconcile" "a YAML choice row lost its element text"
+answers_out=$("$ROOT/bin/fm-procevent-lavish.sh" answers "$READ") \
+  || fail "answers failed on a mixed YAML frame"
+assert_contains "$answers_out" $'sample-yaml-choice\tyes\tOrder proof: yes' \
+  "a keyed choice row was dropped from a YAML frame"
+reconciles_out=$("$ROOT/bin/fm-procevent-lavish.sh" reconciles "$READ") \
+  || fail "reconciles failed on a mixed YAML frame"
+assert_contains "$reconciles_out" $'sample-yaml-hold\tcheck the record first' \
+  "a reconcile selection was dropped from a YAML frame"
+answers_free=$("$ROOT/bin/fm-procevent-lavish.sh" answers "$YAML_CAPTURE") \
+  || fail "answers failed on a freeform-only YAML frame"
+[ -z "$answers_free" ] \
+  || fail "a freeform-only YAML frame invented keyed answers: $answers_free"
+pass "answers and reconciles read keyed rows from either frame shape"
+
+# A prompts frame that declares items but parses to none - or a prompts header
+# in neither published shape - must fail loudly instead of printing an empty
+# review, because that empty presentation is exactly how typed words vanish.
+cat > "$READ" <<'EOF'
+session:
+  file: /review.html
+  status: feedback
+  session_ended: true
+  ended_by: user
+prompts[2]:
+next_step: "the batch was garbled in transit"
+EOF
+if read_out >/dev/null 2>"$TMP_ROOT/yaml-empty.err"; then
+  fail "a YAML frame with no parseable items printed an empty review"
+fi
+assert_contains "$(cat "$TMP_ROOT/yaml-empty.err")" "none parsed" \
+  "the loud failure did not say the frame parsed to nothing"
+if "$ROOT/bin/fm-procevent-lavish.sh" answers "$READ" >/dev/null 2>&1; then
+  fail "answers certified a garbled frame as carrying no choices"
+fi
+cat > "$READ" <<'EOF'
+session:
+  file: /review.html
+  status: feedback
+  session_ended: true
+  ended_by: user
+prompts(2){uid}:
+  "a"
+EOF
+if read_out >/dev/null 2>"$TMP_ROOT/yaml-alien.err"; then
+  fail "a prompts header in neither published shape printed an empty review"
+fi
+assert_contains "$(cat "$TMP_ROOT/yaml-alien.err")" "neither published frame shape" \
+  "the loud failure did not name the unrecognized frame"
+pass "a garbled prompts frame fails loudly instead of presenting an empty review"
+
 # The runner's silence seam is generic and closed by default: an adapter with no
 # `silent` command must keep announcing, so adding the seam changed nothing for
 # every adapter that has no notion of a no-op.
