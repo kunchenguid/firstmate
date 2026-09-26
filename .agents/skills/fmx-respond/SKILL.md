@@ -133,7 +133,7 @@ Fetch narrowly and inspect it only to understand the thread or fulfill an author
 
 Reply in firstmate's own voice - the crisp, lightly nautical first-mate persona - but **public-facing**:
 
-- Apply the address and optional-flavor rules in [`AGENTS.md`](../../../AGENTS.md#firstmate) to these captain-directed public replies, within the public-safety limits above.
+- Apply the address prohibition and optional-flavor rules in [`AGENTS.md`](../../../AGENTS.md#firstmate), and its [outcome phrasing rules](../../../AGENTS.md#9-escalation-and-captain-etiquette), to these captain-directed public replies, within the public-safety limits above.
 - **Be concise by default: aim for a single message, two at the very most.** A short, sharp answer beats a wall of text. Write tight on purpose - one or two sentences.
 
 You do not hand-format threads or add "(1/n)" numbering yourself.
@@ -180,7 +180,7 @@ Treat `state/x-inbox/` as the source of truth and process **every** file you fin
       **Link here, in step 2c, before the step 2f inbox cleanup** - `bin/fm-x-link.sh` can copy both the mention's reply platform and explicit budget from the still-present inbox payload without a relay lookup.
       If that local context is incomplete it uses the durable resolution contract in `docs/configuration.md` and warns loudly, while the follow-up path refuses to post unless both values can be resolved authoritatively.
       **If intake routes the work to a second mate instead**, do not reach for the link: register the typed promised-final commitment bound to `secondmate:<id>` and brief the routed worker with its reporting command (step 3 of "acknowledge first, act, then follow up on completion", with the commands in "Promised final replies").
-      Then step 2d's reply is an **acknowledgement** ("on it, captain"), and genuine milestone updates plus the final outcome come later as follow-ups (see "Completion follow-up" below), with the terminal one posted using `--final` when no typed promised-final commitment exists.
+      Then step 2d's reply is an **acknowledgement** ("on it"), and genuine milestone updates plus the final outcome come later as follow-ups (see "Completion follow-up" below), with the terminal one posted using `--final` when no typed promised-final commitment exists.
       If the work completed in this turn (a backlog item filed, a question answered), there is no task to link and step 2d reports the outcome directly.
    d. **Compose the reply.** For a **question**, answer `.text` from the fleet state gathered in step 1. For an **actionable request that completed now**, report the outcome of step 2c (what was done, or - for escalated work - that it has been flagged for the captain). For an **actionable request that spawned a linked task**, acknowledge that you have the order and are on it - milestone updates and the final outcome follow later as completion follow-ups, so do not promise a result you do not yet have. Either way keep it short, in firstmate's voice, and public-safe.
       Conversation continuity: resolve referents like "this", "it", "that", "and then?" against **all** the conversation context the payload carries - `in_reply_to.text` (what `in_reply_to.author_handle` said just before, when present) plus the full `in_reply_to_chain` transcript, whose oldest-first order puts what was said most recently just before the mention at the end.
