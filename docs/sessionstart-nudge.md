@@ -213,10 +213,9 @@ These conditions therefore surface as follows:
 
 - A lock another session holds surfaces as digest text.
 - A truncated digest surfaces as digest text.
-- Broken GitHub auth surfaces through the deferred network result, inline or as a wake.
+- Broken registered-forge authentication, including GitHub and GitLab auth, surfaces through the deferred network result inline or as a wake.
 
 None of these becomes a refusal to open the session.
-Broken registered-forge authentication, including GitLab auth, surfaces through the deferred network result inline or as a wake.
 
 ## Harness transports
 
