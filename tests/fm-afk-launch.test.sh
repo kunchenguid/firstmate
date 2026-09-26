@@ -1082,6 +1082,18 @@ unit_supervision_host_quiet_check() {
   rm -rf "$st"
 }
 
+# The return checks an empty held set through the backlog reader; isolate that
+# dependency so these posture tests work even where tasks-axi is not installed.
+setup_empty_held_reader() {  # <case-dir>
+  mkdir -p "$1/fakebin"
+  cat > "$1/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = list ] && [ "${2:-}" = --state ] && [ "${3:-}" = held ] || exit 2
+printf 'count: 0\n'
+SH
+  chmod +x "$1/fakebin/tasks-axi"
+}
+
 # /afk then /quiet on a Claude home whose attended host runs: the away record
 # still parks main, so quiet-check and a quiet enter refuse and name it, and
 # once the /afk return archives it and its catch-up gate clears, /quiet is the
@@ -1098,8 +1110,9 @@ unit_supervision_host_quiet_after_afk() {
   printf '%s\n' '{"seq":1,"key":"k","tag":"captain","text":"watch the fleet"}' > "$st/state/.host-mirror.jsonl"
   cp "$ROOT/.tasks.toml" "$st/.tasks.toml"
   printf '## In flight\n\n## Queued\n\n## Done\n' > "$st/data/backlog.md"
+  setup_empty_held_reader "$st"
   in_home() {
-    FM_SUPERVISION_ENGINE_CLAUDE_BIN="$engine" FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$@" 2>&1
+    PATH="$st/fakebin:$PATH" FM_SUPERVISION_ENGINE_CLAUDE_BIN="$engine" FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$@" 2>&1
   }
 
   out=$(in_home "$LAUNCH" enter --words "back after lunch"); rc=$?
@@ -1150,8 +1163,9 @@ unit_supervision_host_quiet_after_afk_over_quiet_daemon() {
   printf '%s\n' "$$" > "$st/state/.lock"
   cp "$ROOT/.tasks.toml" "$st/.tasks.toml"
   printf '## In flight\n\n## Queued\n\n## Done\n' > "$st/data/backlog.md"
+  setup_empty_held_reader "$st"
   in_home() {
-    FM_SUPERVISION_ENGINE_CLAUDE_BIN="$engine" FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$@" 2>&1
+    PATH="$st/fakebin:$PATH" FM_SUPERVISION_ENGINE_CLAUDE_BIN="$engine" FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$@" 2>&1
   }
 
   out=$(in_home "$LAUNCH" quiet-check); rc=$?
