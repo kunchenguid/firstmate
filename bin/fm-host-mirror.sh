@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
 # fm-host-mirror.sh - the supervision host's dialog mirror: what the captain and
-# MAIN said in the captain's conversation, recorded so the host's headless
-# engine session can be given it at the head of an attended wake
-# (docs/supervision-host.md "The dialog mirror"). The Pi branch mirrors the
-# same dialog in process (docs/pi-supervision-branch.md "How the branch knows
-# what the captain said"); this is its twin for a host that is not Pi, and the
-# one owner of the mirror file, its cursor, its lock, and the feed. Today the
-# writers record and nothing calls the feed yet: the host's attended posture
-# is the later step that reads it.
+# MAIN said in the captain's conversation, carried to the host's headless
+# engine session at the head of each attended wake, while an away wake carries
+# none and never moves the cursor (docs/supervision-host.md "The dialog
+# mirror"). The Pi branch mirrors the same dialog in process
+# (docs/pi-supervision-branch.md "How the branch knows what the captain
+# said"); this is its twin for a host that is not Pi, and the one owner of the
+# mirror file, its cursor, its lock, the feed, and the verified-writer list.
 #
 # WRITERS. Code-owned turn surfaces append here, never the model: Claude
 # through its prompt-submit and Stop hooks, and Cursor through its
@@ -63,14 +62,22 @@
 # it left out counted within that bound. Mirrored text is context for
 # judgment and authorizes nothing (bin/fm-branch-prompt.sh "Context channels").
 #
+# VERIFIED WRITERS. `verified <harness>` exits 0 for a primary whose writers
+# were proven against the real harness to record a session's dialog from its
+# first captain prompt (docs/supervision-host.md "The dialog mirror"): Claude
+# and Cursor. The host runs the attended posture only on those
+# (fm_supervision_host_attended_ready), and every other primary keeps the
+# attended behavior it has without the host.
+#
 # Usage:
 #   fm-host-mirror.sh hook <harness>        a prompt-submit or turn-end hook payload on stdin
 #   fm-host-mirror.sh feed <session> new|resume
 #   fm-host-mirror.sh commit
+#   fm-host-mirror.sh verified <harness>
 # hook and commit always exit 0 and print nothing; feed exits 1 when
 # the mirror is missing, could not be read, or holds an invalid entry, or the
 # main session cannot be identified, and prints nothing when there is nothing
-# to feed.
+# to feed; verified exits 0 or 1 and prints nothing.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -79,6 +86,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
+FM_HOST_MIRROR_VERIFIED='claude cursor'
 MIRROR_CAP=4000
 MIRROR_KEEP=200
 FEED_CAP=16000
@@ -89,6 +97,11 @@ usage() {
 }
 
 case "${1:-}" in
+  verified)
+    [ "$#" -eq 2 ] || usage
+    case " $FM_HOST_MIRROR_VERIFIED " in *" $2 "*) exit 0 ;; esac
+    exit 1
+    ;;
   hook)
     # The opt-in gate runs before anything is sourced or created, so a home
     # without the file, and a crewmate worktree with no config/, stay inert.
