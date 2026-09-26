@@ -101,6 +101,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Box, Container, fuzzyFilter, Input, SelectList, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import { calmBranchOutcomeAttention } from "./lib/fm-calm-branch-outcomes.ts";
 import { registerFirstmateTool } from "./lib/fm-native-contract.ts";
 import { runCommandAsync } from "./lib/fm-async-exec.ts";
 import {
@@ -2165,11 +2166,25 @@ ${context.command}
     },
     renderResult: (result, options, theme, context) => {
       if (calmPresentation.stockExportRendering) throw new Error("Use Pi stock export rendering");
-      if (calmHides("tool-result")) return new Container();
       const output = result.content
         .filter((item) => item.type === "text")
         .map((item) => normalizeOutcomesToolOutput(item.text))
         .join("\n");
+      if (calmHides("tool-result")) {
+        const attention = calmBranchOutcomeAttention(output, context.isError === true);
+        if (attention.length === 0) return new Container();
+        return new Text(
+          attention
+            .map((line) =>
+              line.glyph
+                ? `${theme.fg("customMessageText", MERGE_NOTE_BOAT)} ${theme.fg("dim", line.text)}`
+                : theme.fg("dim", line.text),
+            )
+            .join("\n"),
+          1,
+          0,
+        );
+      }
       const shellState = context.state as OutcomesToolShellState;
       // Keep each line's ANSI scope independent, matching Pi's stock fallback.
       // Pi 0.84.4 no longer supplies an implicit reset at multiline boundaries.
