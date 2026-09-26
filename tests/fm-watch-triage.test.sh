@@ -2521,6 +2521,9 @@ test_own_work_wait_keeps_first_alert_then_long_cadence() {
     printf 'idle worker awaiting its own %s\n' "$wait_kind" > "$capture_file"
     printf 'window=%s\nkind=scout\nharness=grok\nbackend=tmux\n' "$window" > "$state/own-work.meta"
     printf 'paused: waiting for my %s to finish; resume on completion\n' "$wait_kind" > "$statusf"
+    # Age before the first observation: backdating later can change the birth
+    # time on macOS and accidentally turn this into a replacement declaration.
+    set_mtime "$(( $(date +%s) - 500 ))" "$statusf"
     sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-own-work_status"
     printf '%s' "$(hash_text "$(cat "$capture_file")")" > "$state/.hash-$key"
     printf '1\n' > "$state/.count-$key"
@@ -2552,9 +2555,9 @@ test_own_work_wait_keeps_first_alert_then_long_cadence() {
       ack_stopped_cycle "$state" || fail "could not acknowledge $wait_kind test stop"
     done
 
-    # A forgotten wait still gets a bounded recheck, rather than disappearing.
-    set_mtime "$(( $(date +%s) - 500 ))" "$statusf"
-    sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-own-work_status"
+    # Both the unchanged declaration and its first alert must be older than
+    # the 240s cadence for a forgotten wait to get its bounded recheck.
+    set_mtime "$(( $(date +%s) - 500 ))" "$state/.paused-resurfaced-$key"
     PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
       FM_FAKE_TMUX_CURRENT_COMMAND=grok \
       FM_FAKE_CREW_STATE='state: paused · source: status-log · waiting for own work' \
