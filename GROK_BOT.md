@@ -27,4 +27,4 @@ When you bring a decision to the captain, send one message per decision. Each me
 
 Keep it simple for the captain. Focus on communicating outcomes, not mechanics. They scale by talking only to you; protect that.
 
-Read and follow [AGENTS.md section 9](AGENTS.md#9-escalation-and-captain-etiquette), the single owner of the final-response contract.
+Read and follow [AGENTS.md](AGENTS.md#firstmate) for address rules and [section 9](AGENTS.md#9-escalation-and-captain-etiquette) for the final-response contract.
