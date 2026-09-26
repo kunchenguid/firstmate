@@ -32,9 +32,9 @@
 #       or the watchdog's parent changes, so an owner that dies while the
 #       watchdog is still starting is detected too. The timeout/gtimeout
 #       fallback does not track the owner: it bounds the command only by its
-#       deadline and grace, so a command whose owner dies runs on until that
-#       deadline. Exit status is the
-#       command's own, except 124 (the bound was hit) or 137 (GNU timeout's
+#       deadline and grace, so owner death alone does not stop the command.
+#       Exit status is the command's own, except 124 (the bound was hit) or
+#       137 (GNU timeout's
 #       status when its KILL had to fire); fm_timed_out accepts both. Both
 #       values must be positive integers (125 otherwise). The perl watchdog is
 #       preferred: once termination has begun it also KILLs whatever the group

@@ -47,8 +47,9 @@
 # in stable shard/root order. FM_LINT_JOBS=1 changes concurrency, not diagnostics
 # or exit selection.
 # --partition 1of2/2of2 splits the entire canonical inventory across
-# two CI runners, each with those same concurrency-limited workers. Partitions are complete,
-# disjoint, and byte-weight balanced; --list-files exposes their actual roots.
+# two CI runners, each with those same concurrency-limited workers.
+# Partitions are complete, disjoint, and byte-weight balanced; --list-files
+# exposes their actual roots.
 # Partition mode is always full source-aware analysis, never changed-only or
 # --fast, and does not accept explicit paths. Each partition also runs workflow
 # lint and backend-purity checks, keeping either invocation independently useful.
@@ -58,10 +59,11 @@
 # (FM_LINT_ROOT_SECONDS, default 1200), a terminate-then-kill cleanup grace
 # (FM_LINT_ROOT_GRACE, default 5), and a per-process address-space limit
 # (FM_LINT_ROOT_MEMORY_KIB, default 6291456 = 6 GiB of virtual address
-# space per analysis process). This is not a resident-memory ceiling; check
-# aggregate runner RSS in CI. The watchdog
-# is the shared bin/fm-timeout-lib.sh group-kill pattern, so a deadline or an
-# interrupt removes the whole owned tree. Bounds mode proves the watchdog can
+# space per analysis process). The sizing rationale and RSS reduction threshold
+# live beside ROOT_MEMORY_KIB below. This is not a resident-memory ceiling;
+# check aggregate runner RSS in CI. The watchdog uses the shared
+# bin/fm-timeout-lib.sh group-kill pattern, so a deadline or an interrupt
+# removes the owned process group. Bounds mode proves the watchdog can
 # actually bound a probe command and that the host accepts the memory limit
 # BEFORE any root starts; when either check fails the run refuses with a
 # named error, so a required-bounds run never lints uncapped. Without
@@ -77,7 +79,8 @@
 # <telemetry-without-.tsv>.roots.tsv (or <telemetry>.roots.tsv if there is no
 # .tsv suffix); otherwise it lives only in the
 # run's scratch dir. Reason values are ok, findings, timeout, memory,
-# signal:<sig>, limit-unavailable, or error:<rc>. In partition mode begin/end
+# signal:<sig>, limit-unavailable, or error:<rc>; OOM is classified as memory
+# only when the root output contains explicit evidence. In partition mode begin/end
 # lines also stream to stderr, and an abnormal root end is always reported
 # there.
 #
@@ -88,7 +91,7 @@
 #   fm-lint.sh                         lint the context-selected file set (see above)
 #   fm-lint.sh --fast [path]...       local lint with extended analysis disabled
 #   fm-lint.sh <path>...               lint explicit roots with the same config
-#   fm-lint.sh --jobs <1|2> [path]...  override bounded worker count
+#   fm-lint.sh --jobs <1|2> [path]...  override concurrent worker count
 #   fm-lint.sh --partition <1of2|2of2> lint one full-rigor canonical CI partition
 #   fm-lint.sh --telemetry <path> ...  write a quiet metrics snapshot
 #   fm-lint.sh --required-version      print the ShellCheck pin
@@ -195,8 +198,8 @@ fm_lint_classify_root() {  # <rc> <root-output-file>
   esac
 }
 
-# Run one canonical root as one bounded ShellCheck process, record its
-# lifecycle in the roots log, and append its diagnostics to the shard output.
+# Run one selected root in its own ShellCheck process, record its lifecycle
+# in the roots log, and append its diagnostics to the shard output.
 fm_lint_run_root() {  # <index> <path> <output-dir> <shard-index>
   local index=$1 path=$2 output_dir=$3 shard_index=$4
   local root_out="$output_dir/root.$shard_index.$index.out"
@@ -1003,8 +1006,8 @@ done
 
 fm_lint_root_weights > "$WEIGHTS" || exit $?
 
-# Largest-first deterministic greedy assignment keeps the two bounded workers
-# balanced without affecting replay order. Direct bytes are a stable portable
+# Largest-first deterministic greedy assignment balances the two worker
+# queues without affecting replay order. Direct bytes are a stable portable
 # proxy after the expensive dynamic adapter source fan-out is cut.
 WORKER_LOADS=(0 0)
 LC_ALL=C sort -t "$TAB" -k1,1nr -k2,2n "$WEIGHTS" > "$WEIGHTS.sorted"
