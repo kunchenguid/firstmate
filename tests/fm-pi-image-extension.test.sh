@@ -367,7 +367,7 @@ setCapabilities({ images: "kitty", trueColor: true, hyperlinks: false });
 const renderer = registered.entryRenderers.get(extension.FM_IMAGE_ENTRY_TYPE);
 const component = renderer({ type: "custom", customType: extension.FM_IMAGE_ENTRY_TYPE, data: entry.data }, { expanded: false }, plainTheme);
 assert.ok(component instanceof FmImageComponent);
-assert.ok(component.render(100)[1].startsWith("\u001b_G"));
+assert.ok(component.render(100)[1].startsWith("\u001b_G"), "/image is an explicit always-render override");
 assert.equal(renderer({ type: "custom", customType: extension.FM_IMAGE_ENTRY_TYPE, data: { path: 1 } }, { expanded: false }, plainTheme), undefined);
 
 const bad = fakeContext(dir);
@@ -407,9 +407,9 @@ const run = async (mode, protocol) => {
   return result;
 };
 const shown = await run("tui", "kitty");
-assert.match(shown.content[0].text, /through the kitty image protocol/);
+assert.match(shown.content[0].text, /appears inline when image display is enabled and supported, otherwise only its file path appears/);
 assert.ok(parseImageView(shown.details), "details carry a valid image view");
-assert.match((await run("tui", null)).content[0].text, /no inline image support/);
+assert.match((await run("tui", null)).content[0].text, /otherwise only its file path appears/);
 assert.match((await run("rpc", "kitty")).content[0].text, /Nothing was displayed/);
 await assert.rejects(
   tool.execute("call-2", { path: "absent.png" }, undefined, undefined, fakeContext(dir).ctx),
@@ -422,7 +422,11 @@ const component = tool.renderResult(shown, { expanded: false, isPartial: false }
 assert.ok(component instanceof FmImageComponent);
 assert.ok(component.render(100)[1].startsWith("\u001b_G"));
 assert.equal(tool.renderResult(shown, { expanded: false, isPartial: false }, plainTheme, context({ lastComponent: component })), component, "a rerender reuses the image component");
-assert.equal(tool.renderResult(shown, { expanded: false, isPartial: false }, plainTheme, context({ showImages: false })).render(100).length, 1);
+assert.equal(
+  tool.renderResult(shown, { expanded: false, isPartial: false }, plainTheme, context({ showImages: false })).render(100).length,
+  1,
+  "automatic tool images obey Pi's global image-display preference",
+);
 assert.deepEqual(tool.renderResult(shown, { expanded: false, isPartial: true }, plainTheme, context()).render(100), []);
 const failure = { content: [{ type: "text", text: "No such file: /x\u001b[2J.png" }], details: undefined };
 const failureLines = tool.renderResult(failure, { expanded: false, isPartial: false }, plainTheme, context({ isError: true })).render(100);

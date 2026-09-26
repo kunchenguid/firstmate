@@ -13,7 +13,7 @@
 // rendering component; Pi's TUI owns the terminal image protocol.
 // docs/inline-images.md owns the operator-facing behavior.
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Container, getCapabilities, Text } from "@earendil-works/pi-tui";
+import { Container, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import {
   describeImage,
@@ -27,14 +27,12 @@ import {
 export const FM_IMAGE_ENTRY_TYPE = "fm-image";
 export const FM_SHOW_IMAGE_TOOL = "fm_show_image";
 
-/** The model-facing outcome: plain text only, stating what the transcript shows. */
+/** The model-facing outcome: plain text only, stating what the transcript can show. */
 export function describeDisplayOutcome(view: FmImageView, mode: ExtensionContext["mode"]): string {
   const summary = describeImage(view);
   if (mode !== "tui") return `Nothing was displayed because Pi is running without a terminal UI (${mode} mode): ${summary}`;
   if (!view.display) return `Pi could not prepare a bounded inline copy, so the transcript shows only the file path: ${summary}`;
-  const protocol = getCapabilities().images;
-  if (!protocol) return `Pi detected no inline image support in this terminal, so the transcript shows only the file path: ${summary}`;
-  return `Showing the image inline through the ${protocol} image protocol, below its file path: ${summary}`;
+  return `Prepared the image for Pi's transcript renderer; it appears inline when image display is enabled and supported, otherwise only its file path appears: ${summary}`;
 }
 
 export default function registerFirstmateImageDisplay(pi: ExtensionAPI): void {
@@ -44,7 +42,7 @@ export default function registerFirstmateImageDisplay(pi: ExtensionAPI): void {
   });
 
   pi.registerCommand?.("image", {
-    description: "Show a local PNG, JPEG, or WebP image inline without sending it to the model: /image <path>",
+    description: "Explicitly show a local PNG, JPEG, or WebP image inline without sending it to the model: /image <path>",
     handler: async (args, ctx) => {
       const loaded = await loadImageForDisplay(args, ctx.cwd);
       if (!loaded.ok) {

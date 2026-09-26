@@ -5,10 +5,11 @@ The tracked `.pi/extensions/fm-image.ts` extension adds this for Pi only; every 
 
 ## Show an image
 
-- `/image <path>` shows one PNG, JPEG, or WebP file in the transcript.
+- `/image <path>` explicitly shows one PNG, JPEG, or WebP file in the transcript, even when Pi's global image-display preference is off.
   It is stored as a custom session entry, which Pi keeps out of model context, so it spends no model tokens.
 - The `fm_show_image` tool lets the agent show a generated image, screenshot, or other visual artifact the same way.
   The model receives only a text result naming the file and what the transcript shows, never the pixels; the agent uses `read` when it must inspect an image itself.
+  Tool images follow Pi's global image-display preference, so `/show-images` or `terminal.showImages = false` leaves only the path line.
 - A path can be absolute, relative to the working directory, start with `~/`, or be a local `file://` URL.
 
 Every shown image begins with a path line in Pi's own image format, such as `[Image: ~/shots/login.png [image/png] 1280x800]`, which Pi links to the file when the terminal supports hyperlinks.
@@ -17,7 +18,8 @@ The path line stays even when the image draws, so a terminal path that silently 
 ## How the image reaches the screen
 
 Pi's TUI owns the terminal image protocol.
-Its image component draws Kitty graphics, an iTerm2 inline image, or only the path line, from Pi's own terminal detection, its `PI_IMAGE_PROTOCOL` and `terminal.images` overrides, and its `terminal.showImages` switch in `/settings`; the extension writes no terminal escape of its own.
+Its image component draws Kitty graphics, an iTerm2 inline image, or only the path line, from Pi's own terminal detection and its `PI_IMAGE_PROTOCOL` and `terminal.images` overrides; the extension writes no terminal escape of its own.
+Pi's `terminal.showImages` switch in `/settings` governs automatic `fm_show_image` tool results, while the explicit `/image <path>` command is an always-render override.
 Kitty's transmission accepts PNG only, so the extension converts JPEG and WebP and hands Pi a bounded PNG copy.
 
 | Terminal path | What appears |
