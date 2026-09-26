@@ -244,8 +244,14 @@ HOME_LABEL=$(printf '%s' "$SNAP" | jq -er '.fm_home | strings | split("/") | (.[
   || { echo "fm-bearings-snapshot: invalid canonical snapshot" >&2; exit 1; }
 
 # --- optional live GitHub PR enrichment -------------------------------------
+# Accumulated candidate-PR rows travel by file and --slurpfile, never argv:
+# each jq argv argument is capped by the kernel's MAX_ARG_STRLEN (128 KiB), so a
+# large fleet's accumulated rows would kill the projection (the
+# fm-fleet-snapshot.sh transport pattern). One JSON array per fetched repo.
+PR_ROWS_FILE=$(mktemp "${TMPDIR:-/tmp}/fm-bearings-prs.XXXXXX") \
+  || { echo "fm-bearings-snapshot: temporary PR transport file creation failed" >&2; exit 1; }
+trap 'rm -f "$PR_ROWS_FILE"' EXIT
 PR_STATUS='not_requested (run: /bearings include PRs)'
-CANDIDATE_PRS='[]'
 PR_REPOS_TOTAL=0
 PR_REPOS_SHOWN=0
 PR_ROWS_CAPPED=0
@@ -287,7 +293,7 @@ $(printf '%s' "$SNAP" | jq -r '.tasks[] | select(.kind != "secondmate") | .paths
 EOF
 
     for repo in $repos; do PR_REPOS_TOTAL=$((PR_REPOS_TOTAL + 1)); done
-    nrepos=0; npr=0; nwarn=0; ncapped=0; rows='[]'
+    nrepos=0; npr=0; nwarn=0; ncapped=0
     pr_fetch_limit=$((FM_BEARINGS_PR_LIMIT + 1))
     # The task side of the mapping rides a temp file, not an argv element: a
     # fleet snapshot exceeds the ~128KB per-argument exec cap on large fleets,
@@ -322,17 +328,16 @@ EOF
               else "passing" end)
         } ] as $rows | {returned:($rows | length), rows:$rows[:$limit]}') || { nwarn=$((nwarn + 1)); continue; }
       returned=$(printf '%s' "$repo_result" | jq '.returned')
-      repo_rows=$(printf '%s' "$repo_result" | jq '.rows')
-      cnt=$(printf '%s' "$repo_rows" | jq 'length')
+      cnt=$(printf '%s' "$repo_result" | jq '.rows | length')
       [ "$returned" -gt "$FM_BEARINGS_PR_LIMIT" ] && ncapped=$((ncapped + 1))
       npr=$((npr + cnt))
-      rows=$(jq -n --argjson a "$rows" --argjson b "$repo_rows" '$a + $b')
+      printf '%s' "$repo_result" | jq -c '.rows' >> "$PR_ROWS_FILE" \
+        || { echo "fm-bearings-snapshot: PR transport file write failed" >&2; exit 1; }
     done
     rm -f "$tasks_file"
     PR_REPOS_SHOWN=$nrepos
     PR_ROWS_CAPPED=$ncapped
     PR_ROWS_MIN_TOTAL=$((npr + ncapped))
-    CANDIDATE_PRS=$rows
     warnnote=""
     [ "$nwarn" -gt 0 ] && warnnote="; ${nwarn} repo(s) unavailable"
     cappednote=""
@@ -380,7 +385,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   --argjson pr_rows_capped "$PR_ROWS_CAPPED" \
   --argjson pr_rows_min_total "$PR_ROWS_MIN_TOTAL" \
   --argjson return_catchup "$RETURN_CATCHUP" \
-  --argjson candidate_prs "$CANDIDATE_PRS" "$FM_LANDED_JQ_DEFS"'
+  --slurpfile candidate_pr_batches "$PR_ROWS_FILE" "$FM_LANDED_JQ_DEFS"'
   def trunc($n): if . == null then null else
     (tostring | gsub("\\s+"; " ") | if (length > $n) then (.[:$n] + "…") else . end) end;
   def fit($n):
@@ -438,7 +443,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
        | $groups[]
        | select(length > $i)
        | .[$i]][:$n];
-  ($fields | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(. != ""))) as $fl
+  ($candidate_pr_batches | add // []) as $candidate_prs
+  | ($fields | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(. != ""))) as $fl
   | (($fl | index("bodies")) != null) as $f_bodies
   | (($fl | index("paths")) != null) as $f_paths
   | (($fl | index("actions")) != null) as $f_actions
