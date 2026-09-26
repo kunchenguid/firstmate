@@ -110,6 +110,92 @@ ROWS
   pass "projects/ paths are scoped through the firstmate home for single-task spawn"
 }
 
+# A BARE project name is scoped through the home's projects/ too, never the
+# caller's cwd. The reported defect: a spawn issued with cwd = the firstmate
+# home resolved `portal` to $FM_HOME/portal - a stray directory sitting beside
+# projects/ - recorded it as meta.project, and the brief's worktree-isolation
+# assertion then refused the launch. The stray rows reproduce that exact shape:
+# a cwd holding a same-named decoy is what made the old caller-cwd-relative `cd`
+# succeed instead of failing loudly. A trailing slash is the same bare name and
+# must not reopen that cwd-relative path.
+test_bare_project_name_scoping() {
+  local label arg have_project have_decoy id home projects cwd out status expected
+  while IFS='|' read -r label arg have_project have_decoy id; do
+    [ -n "$label" ] || continue
+    home="$TMP_ROOT/$id home"
+    projects="$TMP_ROOT/$id projects"
+    cwd="$TMP_ROOT/$id cwd"
+    mkdir -p "$home/data" "$projects" "$cwd"
+    if [ "$have_decoy" = yes ]; then
+      mkdir -p "$cwd/alpha"
+      git -C "$cwd/alpha" init -q || fail "$label: could not initialize decoy fixture"
+    fi
+    if [ "$have_project" = yes ]; then
+      mkdir -p "$projects/alpha"
+      git -C "$projects/alpha" init -q || fail "$label: could not initialize project fixture"
+    fi
+    out=$(cd "$cwd" && FM_ROOT_OVERRIDE='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' FM_CONFIG_OVERRIDE='' \
+      FM_HOME="$home" FM_PROJECTS_OVERRIDE="$projects" FM_SPAWN_NO_GUARD=1 \
+      "$SPAWN" "$id" "$arg" codex --mode no-mistakes --yolo off 2>&1)
+    status=$?
+    [ "$status" -ne 0 ] || fail "$label: spawn should fail"
+    printf '%s\n' "$out" | grep -F "$cwd/alpha" >/dev/null \
+      && fail "$label: spawn adopted the same-named directory beside the projects root"
+    if [ "$have_project" = yes ]; then
+      expected="error: task $id has no brief at inaccessible data path $home/data/$id/brief.md"
+      printf '%s\n' "$out" | grep -F "$expected" >/dev/null \
+        || fail "$label: bare $arg was not resolved through the home before the brief check"
+      printf '%s\n' "$out" | grep -F "cd: $arg" >/dev/null \
+        && fail "$label: spawn resolved bare $arg from the caller cwd"
+    else
+      printf '%s\n' "$out" | grep -F "$projects/alpha" >/dev/null \
+        || fail "$label: a missing project was not refused against the home's projects root"
+    fi
+  done <<'ROWS'
+bare name resolves under the home's projects/|alpha|yes|no|nope-bare-z13
+bare name never adopts a cwd-relative stray|alpha|no|yes|nope-bare-stray-z14
+trailing slash resolves under the home's projects/|alpha/|yes|no|nope-slash-z15
+trailing slash never adopts a cwd-relative stray|alpha/|no|yes|nope-slash-stray-z16
+ROWS
+  pass "bare project names are scoped through the firstmate home, never the caller cwd"
+}
+
+# A <project-dir> that names no project at all must be REFUSED, never handed to
+# `cd`: bash treats an empty operand as a successful no-op, so the spawn would
+# silently adopt the caller's cwd as the project and record it as meta.project -
+# the same wrong answer the home-scoping above exists to stop. The batch row is
+# the realistic shape: a pair typed as `<id>=` (project name dropped) re-execs
+# the child with an empty second positional.
+test_empty_project_dir_arg_refused() {
+  local label shape id home projects cwd out status
+  while IFS='|' read -r label shape id; do
+    [ -n "$label" ] || continue
+    home="$TMP_ROOT/$id home"
+    projects="$TMP_ROOT/$id projects"
+    cwd="$TMP_ROOT/$id cwd"
+    mkdir -p "$home/data" "$projects" "$cwd"
+    if [ "$shape" = batch ]; then
+      out=$(cd "$cwd" && FM_ROOT_OVERRIDE='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' FM_CONFIG_OVERRIDE='' \
+        FM_HOME="$home" FM_PROJECTS_OVERRIDE="$projects" FM_SPAWN_NO_GUARD=1 \
+        "$SPAWN" "$id=" --harness codex --mode no-mistakes --yolo off 2>&1)
+    else
+      out=$(cd "$cwd" && FM_ROOT_OVERRIDE='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' FM_CONFIG_OVERRIDE='' \
+        FM_HOME="$home" FM_PROJECTS_OVERRIDE="$projects" FM_SPAWN_NO_GUARD=1 \
+        "$SPAWN" "$id" '' codex --mode no-mistakes --yolo off 2>&1)
+    fi
+    status=$?
+    [ "$status" -ne 0 ] || fail "$label: an empty project-dir should be refused"
+    printf '%s\n' "$out" | grep -F 'error: <project-dir> names no project' >/dev/null \
+      || fail "$label: the empty project-dir was not refused loudly"
+    printf '%s\n' "$out" | grep -F 'no brief at inaccessible data path' >/dev/null \
+      && fail "$label: spawn resolved past the empty project-dir and adopted the caller cwd"
+  done <<'ROWS'
+an empty <project-dir> is refused|direct|nope-empty-z17
+a batch pair with no project is refused|batch|nope-empty-batch-z18
+ROWS
+  pass "an empty project-dir argument is refused instead of adopting the caller cwd"
+}
+
 # A ship batch carries one shared delivery contract. Missing flags must stop the
 # whole batch before any pair is dispatched, so a batch can never launch workers
 # whose delivery posture was never decided.
@@ -148,3 +234,5 @@ test_batch_mode_boundaries
 test_batch_requires_the_shared_delivery_contract
 test_scout_batch_refuses_delivery_flags
 test_projects_path_scoping
+test_bare_project_name_scoping
+test_empty_project_dir_arg_refused

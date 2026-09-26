@@ -4,6 +4,13 @@
 # Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
 #        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
+#   <project-dir> names a project through the firstmate home: `projects/<name>`
+#   and a bare `<name>` (with or without a trailing slash) both resolve under
+#   this home's projects/ regardless of the caller's cwd. A bare `.` or `..`,
+#   and anything still carrying a slash - an absolute path, `./x`, `../x`,
+#   `a/b` - are taken literally and resolved against the caller's cwd. An
+#   argument naming no project at all (empty, or bare `/`) is refused rather
+#   than silently resolving to the caller's cwd.
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
 #   per task at intake (AGENTS.md section 7); data/projects.md holds the captain's
@@ -2706,11 +2713,30 @@ resolved_existing_dir() {
   cd "$path" && pwd -P
 }
 
+# A <project-dir> argument names a project through the firstmate home, never
+# through the caller's cwd: both `projects/<name>` and a bare `<name>` resolve
+# under $PROJECTS. A bare name used to fall through to the caller-cwd-relative
+# `cd` at the PROJ_ABS assignment, so a spawn issued from the firstmate home
+# silently adopted a same-named stray directory sitting beside projects/ (e.g.
+# $FM_HOME/portal instead of $FM_HOME/projects/portal) and recorded it as
+# meta.project; the brief's worktree-isolation assertion then refused the
+# launch. One trailing slash is stripped first, so `portal/` is the same bare
+# name as `portal` and cannot slip back onto that cwd-relative path. Anything
+# still carrying a slash after that - an absolute path, `./x`, `../x`, `a/b` -
+# stays a literal path resolved against the caller's cwd, as does a bare
+# `.`/`..`. An argument that names no project at all (empty, or bare `/`) is
+# REFUSED rather than passed to `cd`, which treats an empty operand as a
+# successful no-op and would silently adopt the caller's cwd as the project.
 resolve_project_dir_arg() {
-  local path=$1
+  local path=${1%/}
   case "$path" in
+  '')
+    echo "error: <project-dir> names no project: '$1'; pass a project name (portal), a projects/<name> path, or an explicit directory path" >&2
+    return 1
+    ;;
   projects/*) printf '%s/%s\n' "$PROJECTS" "${path#projects/}" ;;
-  *) printf '%s\n' "$path" ;;
+  . | .. | */*) printf '%s\n' "$path" ;;
+  *) printf '%s/%s\n' "$PROJECTS" "$path" ;;
   esac
 }
 
@@ -2890,7 +2916,8 @@ if [ "$KIND" = secondmate ]; then
     BRIEF="$DATA/$ID/brief.md"
   fi
 else
-  PROJ_ABS="$(cd "$(resolve_project_dir_arg "$PROJ")" && pwd)"
+  PROJ_DIR_ARG=$(resolve_project_dir_arg "$PROJ") || exit 1
+  PROJ_ABS="$(cd "$PROJ_DIR_ARG" && pwd)"
   WT=""
   BRIEF="$DATA/$ID/brief.md"
 fi
