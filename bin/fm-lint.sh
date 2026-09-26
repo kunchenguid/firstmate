@@ -858,12 +858,17 @@ fi
 # ShellCheck process, unbounded, for local developer lint.
 ROOT_SECONDS=${FM_LINT_ROOT_SECONDS:-1200}
 ROOT_GRACE=${FM_LINT_ROOT_GRACE:-5}
-# 6 GiB of address space per analysis process. ulimit -v caps virtual address
-# space, not resident memory; ShellCheck's GHC runtime reserves virtual
-# address space in addition to its working heap. The two address-space caps
-# do not bound aggregate resident use of the 16 GiB runner. A root that
-# exceeds the cap fails by name; the roots sidecar records each root's peak
-# RSS so roots approaching the budget stay visible as reduction candidates.
+# 6 GiB of virtual address space per analysis process. ulimit -v caps
+# address space, not resident memory, and ShellCheck's GHC runtime keeps
+# roughly a third of that space as reservation, so a 6 GiB cap yields about
+# a 4 GiB working heap budget per root. Measured on Linux during this
+# change: eleven real canonical roots ran out of memory under a 4 GiB cap
+# while the largest passing root peaked near 2.8 GiB resident. Address-space
+# caps do not bound aggregate resident use, but two 6 GiB caps plus the
+# runner's own footprint keep the 16 GiB job honest: a root that exceeds
+# the cap fails by name instead of growing until the runner dies, and the
+# roots sidecar records each root's peak RSS so roots approaching the
+# budget stay visible as reduction candidates.
 ROOT_MEMORY_KIB=${FM_LINT_ROOT_MEMORY_KIB:-6291456}
 for bound_pair in \
   "FM_LINT_ROOT_SECONDS=$ROOT_SECONDS" \
