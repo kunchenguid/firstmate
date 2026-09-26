@@ -269,7 +269,7 @@ if [ "$AUDIT" -eq 1 ]; then
   WORKER_STATE_KIND=$(printf '%s\n' "$WORKER_STATE" | sed -n 's/^state: \([^ ·]*\).*/\1/p')
 
   BACKEND=$(fm_backend_of_meta "$META")
-  TARGET=$(fm_backend_target_of_meta "$META")
+  TARGET=$(fm_backend_target_of_meta "$META" || true)
   REMOTE_HOST=$(fm_meta_get "$META" remote_host)
   if [ -n "$REMOTE_HOST" ]; then
     case "$WORKER_STATE" in

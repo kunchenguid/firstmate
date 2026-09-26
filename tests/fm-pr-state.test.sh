@@ -80,12 +80,14 @@ printf 'mode=no-mistakes\nbackend=cmux\nwindow=fixture\npr=https://github.com/o/
   "$HEAD" > "$AUDIT_STATE/audit-ready.meta"
 printf 'mode=direct-PR\nbackend=cmux\nwindow=fixture\npr=https://github.com/o/r/pull/7\npr_head=%s\n' \
   "$HEAD" > "$AUDIT_STATE/audit-direct.meta"
+printf 'mode=no-mistakes\npr=https://github.com/o/r/pull/7\npr_head=%s\n' \
+  "$HEAD" > "$AUDIT_STATE/audit-no-endpoint.meta"
 printf 'mode=no-mistakes\nbackend=cmux\nwindow=fixture\npr=https://gitlab.example.com/group/project/-/merge_requests/7\npr_head=%s\n' \
   "$HEAD" > "$AUDIT_STATE/audit-gitlab.meta"
 printf 'mode=no-mistakes\nbackend=cmux\nwindow=fixture\npr=https://gerrit.example.com/c/project/+/7\npr_head=%s\n' \
   "$HEAD" > "$AUDIT_STATE/audit-gerrit.meta"
 chmod 600 "$AUDIT_STATE/audit-ready.meta" "$AUDIT_STATE/audit-direct.meta" \
-  "$AUDIT_STATE/audit-gitlab.meta" "$AUDIT_STATE/audit-gerrit.meta"
+  "$AUDIT_STATE/audit-no-endpoint.meta" "$AUDIT_STATE/audit-gitlab.meta" "$AUDIT_STATE/audit-gerrit.meta"
 
 run_state() {
   PATH="$FAKEBIN:$PATH" "$SCRIPT" https://github.com/o/r/pull/7
@@ -289,6 +291,19 @@ test_audit_blocks_stale_head_draft_and_incomplete_worker() {
   pass "audit blocks stale heads, drafts, and workers that have not completed"
 }
 
+test_audit_without_endpoint_reports_unverified_instead_of_refusing() {
+  local out
+  out=$(run_audit audit-no-endpoint) \
+    || fail "an audit without a current endpoint was refused"
+  assert_contains "$out" 'WORKER ENDPOINT: unverified' \
+    "a missing backend target is explicit rather than fatal"
+  assert_contains "$out" 'WORKER STATE: state: done' \
+    "the worker state is still reported when the endpoint is unavailable"
+  assert_contains "$out" 'VERDICT: UNVERIFIED (required check status is unverified)' \
+    "missing endpoint evidence cannot produce a positive readiness verdict"
+  pass "an audit without an endpoint reports unverified evidence and a guarded verdict"
+}
+
 test_audit_requires_approval_for_merge() {
   local out
   out=$(FM_TEST_VIEW_REVIEW_DECISION=REVIEW_REQUIRED run_audit audit-direct) \
@@ -420,6 +435,7 @@ test_clean_pr_is_silent_and_ignores_skipped_checks
 test_terminal_state_is_the_whole_report
 test_audit_reports_live_pr_worker_and_decision_evidence
 test_audit_blocks_stale_head_draft_and_incomplete_worker
+test_audit_without_endpoint_reports_unverified_instead_of_refusing
 test_audit_respects_delivery_mode_and_check_status
 test_audit_requires_approval_for_merge
 test_audit_reports_non_github_forges_as_unverified
