@@ -1981,7 +1981,7 @@ Other harnesses on Herdr are unaffected by the edge-detector change.
 All seven live panes of the running default session - one Pi, four Claude, two plain shells - classified identically under the pre-fix and current classifiers.
 
 **Typed-submit confirmation is verified on tmux and Herdr only.**
-Zellij, cmux, and Orca share a submit core that never consults the busy footer, so a typed-plane Cursor send there lands but `fm-send` reports delivery unconfirmed and exits non-zero; ordinary text steers ride the durable inbox and exit 0 at enqueue.
+Zellij, cmux, and Orca share a submit core that never consults the busy footer, so a typed-plane Cursor send that passes the pre-type composer guard in the [`fm-send.sh` header](../../bin/fm-send.sh) lands but `fm-send` reports delivery unconfirmed and exits non-zero; ordinary text steers ride the durable inbox and exit 0 at enqueue.
 Teaching that shared core the same transition is deliberately separate work, because it changes the submit path for every harness on those three backends and needs its own live validation on each.
 
 The portable regression is `tests/fm-cursor-harness.test.sh`, the composer captures are pinned in `tests/fm-composer-lib.test.sh`, and the Herdr submit and footer behavior is pinned in `tests/fm-backend-herdr.test.sh`.

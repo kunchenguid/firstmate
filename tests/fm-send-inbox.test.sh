@@ -15,7 +15,10 @@
 #   5. A failed doorbell is still a sent steer (exit 0, record durable): the
 #      watcher's re-ring ladder owns delivery from the record on.
 #   6. Carve-outs keep the typed plane: a leading "/" (any harness), a leading
-#      "$" to codex, an explicit backend target, and the --key path.
+#      "$" to codex, an explicit backend target, and the --key path. A typed
+#      text send refuses before typing when the composer provably holds stale
+#      pending text (issue #1474), and keeps its behavior on an empty or
+#      unknown composer.
 #   7. A marked secondmate steer carries its marker + corr token in the record
 #      body, and the pending-reply expectation is marked delivered at enqueue.
 #   8. Pending-reply bookkeeping failure after enqueue never reports a
@@ -43,6 +46,11 @@ TMP_ROOT=$(cd "$TMP_ROOT" && pwd)
 # Stub tmux: logs literal typed text to FM_SEND_LOG and lets the submit and
 # composer paths reach clean verdicts. FM_FAKE_TMUX_COMPOSER=pending renders a
 # composer visibly holding text; FM_FAKE_TMUX_SEND_FAIL=1 fails send-keys.
+# FM_FAKE_TMUX_COMPOSER=stale-until-enter models a parked lane: the composer
+# holds a stale unsubmitted draft until an Enter key lands, after which the
+# harness has accepted whatever the composer held and the composer reads empty.
+# FM_FAKE_TMUX_COMPOSER=unknown-until-enter is the same lifecycle over a screen
+# the classifier cannot read. Non-literal keys are logged to FM_SEND_LOG.keys.
 make_stubs() { # <dir> -> echoes fakebin dir
   local dir=$1 fb="$1/fakebin"
   mkdir -p "$fb"
@@ -63,14 +71,23 @@ case "${1:-}" in
     done
     if [ "$literal" = 1 ]; then
       printf '%s\n' "${1:-}" >> "$FM_SEND_LOG"
+    else
+      printf '%s\n' "${1:-}" >> "$FM_SEND_LOG.keys"
+      [ "${1:-}" != Enter ] || : > "$FM_SEND_LOG.entered"
     fi
     exit 0 ;;
   display-message)
     for a in "$@"; do case "$a" in *cursor_y*) printf '1\n'; exit 0 ;; esac; done
     printf 'fakepane\n'; exit 0 ;;
   capture-pane)
-    if [ "${FM_FAKE_TMUX_COMPOSER:-}" = pending ]; then
+    composer=${FM_FAKE_TMUX_COMPOSER:-}
+    case "$composer" in
+      *-until-enter) [ ! -e "$FM_SEND_LOG.entered" ] || composer= ;;
+    esac
+    if [ "$composer" = pending ] || [ "$composer" = stale-until-enter ]; then
       printf '╭──────────────╮\n│ leftover txt │\n╰──────────────╯\n'
+    elif [ "$composer" = unknown-until-enter ]; then
+      printf 'transcript line\nanother transcript line\n'
     else
       printf '╭────╮\n│    │\n╰────╯\n'
     fi
@@ -107,6 +124,8 @@ run_send() { # <case-dir> <err-file> [env...] -- <fm-send args...>
   done
   shift
   : >"$dir/send.log"
+  : >"$dir/send.log.keys"
+  rm -f "$dir/send.log.entered"
   env PATH="$dir/fakebin:$PATH" \
     FM_ROOT_OVERRIDE="$dir/home" FM_HOME="$dir/home" FM_SEND_LOG="$dir/send.log" \
     FM_SEND_SETTLE=0 ${envs[@]+"${envs[@]}"} \
@@ -235,6 +254,65 @@ test_explicit_target_stays_typed() {
   [ -z "$(find "$dir/home/state" -maxdepth 1 -name '*.inbox' -print 2>/dev/null)" ] ||
     fail "an explicit target has no task record here and must not grow an inbox"
   pass "fm-send planes: an explicit backend target keeps the typed plane"
+}
+
+# Issue #1474: a parked lane whose composer holds a stale unsubmitted draft.
+# Typing a typed-plane payload onto it would submit the draft and the payload
+# concatenated, and the composer clearing after that Enter looks exactly like
+# a confirmed submit. The typed plane must refuse before typing anything.
+test_typed_send_refuses_stale_pending_composer() {
+  local dir err rc
+  # A slash command (typed plane on any harness) to a task selector.
+  dir=$(setup_case stale-slash)
+  err="$dir/send.err"
+  run_send "$dir" "$err" FM_FAKE_TMUX_COMPOSER=stale-until-enter -- t1 "/status"
+  rc=$?
+  expect_code 1 "$rc" "a typed send onto a provably pending composer must fail with exit 1"
+  [ ! -s "$dir/send.log" ] || fail "a refused typed send still typed text:"$'\n'"$(cat "$dir/send.log")"
+  [ ! -s "$dir/send.log.keys" ] || fail "a refused typed send still pressed keys:"$'\n'"$(cat "$dir/send.log.keys")"
+  assert_contains "$(cat "$err")" "sess:fm-t1" "the refusal should name the target"
+  assert_contains "$(cat "$err")" "pending" "the refusal should name the pending composer as the reason"
+  [ ! -d "$dir/home/state/t1.inbox" ] || fail "a refused typed send must not fall back to the inbox"
+  # An explicit backend target takes the same typed plane and the same refusal.
+  dir=$(setup_case stale-explicit)
+  err="$dir/send.err"
+  run_send "$dir" "$err" FM_FAKE_TMUX_COMPOSER=stale-until-enter -- sess:win "hello there"
+  rc=$?
+  expect_code 1 "$rc" "an explicit-target send onto a provably pending composer must fail with exit 1"
+  [ ! -s "$dir/send.log" ] || fail "a refused explicit-target send still typed text:"$'\n'"$(cat "$dir/send.log")"
+  assert_contains "$(cat "$err")" "sess:win" "the explicit-target refusal should name the target"
+  # A marked secondmate typed request is refused the same way and leaves no
+  # pending-reply expectation waiting on a reply to a message never sent.
+  dir=$(setup_case stale-secondmate)
+  err="$dir/send.err"
+  fm_write_secondmate_meta "$dir/home/state/domain.meta" "$dir/home" "sess:fm-domain"
+  run_send "$dir" "$err" FM_FAKE_TMUX_COMPOSER=stale-until-enter -- fm-domain "/status"
+  rc=$?
+  expect_code 1 "$rc" "a secondmate typed send onto a provably pending composer must fail with exit 1"
+  [ ! -s "$dir/send.log" ] || fail "a refused secondmate typed send still typed text:"$'\n'"$(cat "$dir/send.log")"
+  [ -z "$(find "$dir/home/state/pending-replies" -type f -not -name '.*' 2>/dev/null)" ] ||
+    fail "a refused typed send should discard the just-created pending-reply expectation"
+  pass "fm-send typed plane: a provably pending composer is refused before anything is typed"
+}
+
+test_typed_send_empty_and_unknown_composer_unchanged() {
+  local dir err rc
+  dir=$(setup_case typed-empty)
+  err="$dir/send.err"
+  run_send "$dir" "$err" -- t1 "/status"
+  rc=$?
+  expect_code 0 "$rc" "a typed send to an empty composer should still be confirmed"
+  assert_contains "$(cat "$dir/send.log")" "/status" "an empty composer should still receive the typed text"
+  # An unreadable composer verdict is not proof of pending text: the preflight
+  # must not refuse, and the send keeps its prior type-then-verify behavior.
+  dir=$(setup_case typed-unknown)
+  err="$dir/send.err"
+  run_send "$dir" "$err" FM_FAKE_TMUX_COMPOSER=unknown-until-enter -- t1 "/status"
+  rc=$?
+  expect_code 0 "$rc" "an unknown pre-send composer verdict should not block the typed send"
+  assert_contains "$(cat "$dir/send.log")" "/status" "an unknown composer should still receive the typed text"
+  assert_contains "$(cat "$dir/send.log.keys")" "Enter" "an unknown composer should still be submitted"
+  pass "fm-send typed plane: empty and unknown composers keep the type-then-verify behavior"
 }
 
 test_key_path_never_touches_inbox() {
@@ -418,6 +496,8 @@ test_pending_composer_skips_ring_advisorily
 test_failed_ring_is_still_sent
 test_harness_invocations_stay_typed
 test_explicit_target_stays_typed
+test_typed_send_refuses_stale_pending_composer
+test_typed_send_empty_and_unknown_composer_unchanged
 test_key_path_never_touches_inbox
 test_secondmate_marker_and_enqueue_delivery
 test_post_enqueue_bookkeeping_failure_is_not_retryable

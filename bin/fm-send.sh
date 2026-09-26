@@ -66,7 +66,14 @@
 # type the literal
 # text through the target backend's verified submit core: typed ONCE, then
 # Enter retried (never retyped) until the backend confirms a submit or reports
-# an inconclusive send. Typed-plane exit contract: 0 = submit confirmed;
+# an inconclusive send. Before typing, the target's composer is read once
+# through fm_backend_composer_state: an exact `pending` verdict (the composer
+# provably holds unsubmitted text, e.g. a parked draft) refuses with exit 1 and
+# nothing typed, because the payload would concatenate onto that text and the
+# composer clearing after Enter would read as a confirmed submit (#1474); any
+# other verdict, including `unknown`, proceeds unchanged. The --key path has no
+# such check: `--key Enter` is the documented way to submit pending text.
+# Typed-plane exit contract: 0 = submit confirmed;
 # 3 = the text was typed into the live endpoint and
 # Enter was sent, but the submit read-back stayed unconfirmed (verify the pane
 # before any resend, and never re-type blindly; a marked request's
@@ -1123,6 +1130,21 @@ else
     *) retries=${FM_SEND_RETRIES:-3} ;;
   esac
   sleep_s=${FM_SEND_SLEEP:-0.4}
+  # Pre-type composer check (issue #1474): a composer that PROVABLY holds
+  # pending text is a parked draft. Typing onto it would submit the draft and
+  # this payload concatenated, and the composer clearing after that Enter reads
+  # exactly like a confirmed submit. Refuse before typing anything. Only the
+  # exact `pending` verdict refuses: `pending-unproven`, `unknown`, and an
+  # unreadable pane keep the type-then-verify behavior below, because the
+  # classifier cannot positively identify every idle screen.
+  pre_state=$(fm_backend_composer_state "$TARGET_BACKEND" "$T" "$EXPECTED_LABEL" 2>/dev/null) ||
+    pre_state=unknown
+  if [ "$pre_state" = pending ]; then
+    fm_send_known_undelivered_cleanup ||
+      echo "error: known-undelivered pending-reply state could not be reset for $TARGET_TASK_ID" >&2
+    echo "error: text not sent to $T: its composer already holds pending unsubmitted text, and typing would concatenate onto it; nothing was typed. Inspect with fm-peek.sh, clear or submit that text, then resend (tried $RESOLUTION_TRIED)" >&2
+    exit 1
+  fi
   # Type once, submit, verify. Only exact empty confirms delivery; every other
   # verdict preserves the loud refusal boundary. Only LOCAL targets reach this
   # block: remote text rides the inbox leg above, and remote --key exits
