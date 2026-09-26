@@ -4,6 +4,7 @@
 # Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
 #        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
+#   A missing or empty task-id is refused before launch; a missing or empty project-dir is also refused for ship or scout spawns, including batch pairs, with an actionable argument error.
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
 #   per task at intake (AGENTS.md section 7); data/projects.md holds the captain's
@@ -771,6 +772,48 @@ done
   echo "error: --traceparent requires a non-empty value" >&2
   exit 1
 }
+validate_positional_shape() {
+  local first idpart pair pair_id pair_proj batch=0
+  [ "${#POS[@]}" -gt 0 ] && [ -n "${POS[0]:-}" ] || {
+    echo "error: spawn requires a task id positional argument (<task-id>)" >&2
+    return 1
+  }
+  if [ "$RELAUNCH" -eq 1 ] || [ "$KIND" = secondmate ]; then
+    return 0
+  fi
+  first=${POS[0]}
+  idpart=${first%%=*}
+  if [ "$first" != "$idpart" ]; then
+    case "$idpart" in
+    */*) ;;
+    *) batch=1 ;;
+    esac
+  fi
+  if [ "$batch" -eq 1 ]; then
+    for pair in "${POS[@]}"; do
+      case "$pair" in
+      *=*)
+        pair_id=${pair%%=*}
+        pair_proj=${pair#*=}
+        [ -n "$pair_id" ] || {
+          echo "error: spawn requires a task id positional argument (<task-id>)" >&2
+          return 1
+        }
+        [ -n "$pair_proj" ] || {
+          echo "error: ${KIND} spawn requires a project directory positional argument (<project-dir>)" >&2
+          return 1
+        }
+        ;;
+      esac
+    done
+  else
+    [ "${#POS[@]}" -gt 1 ] && [ -n "${POS[1]:-}" ] || {
+      echo "error: ${KIND} spawn requires a project directory positional argument (<project-dir>)" >&2
+      return 1
+    }
+  fi
+}
+validate_positional_shape || exit 1
 # A parent-delivered carrier replaces this home's own resolution, so it is
 # refused unless it is a secondmate spawn carrying a strictly valid W3C value.
 # Nothing else may reach the pane's TRACEPARENT export.
@@ -1445,7 +1488,10 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ "$BRANCH_PREFIX_SET" -eq 0 ] || shared_args+=(--branch-prefix "$BRANCH_PREFIX")
   for pair in "${POS[@]}"; do
     case "$pair" in
-    *=*) : ;;
+    *=*)
+      pair_id=${pair%%=*}
+      pair_proj=${pair#*=}
+      ;;
     *)
       echo "error: batch dispatch expects every argument as id=repo; got '$pair'" >&2
       rc=2
@@ -1456,14 +1502,15 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
       echo "error: batch dispatch does not support --secondmate; spawn each secondmate explicitly" >&2
       rc=2
       continue
-    elif [ "$KIND" = scout ]; then
-      if FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "${pair%%=*}" "${pair#*=}" "${shared_args[@]+"${shared_args[@]}"}" --scout; then :; else
-        echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2
+    fi
+    if [ "$KIND" = scout ]; then
+      if FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "$pair_id" "$pair_proj" "${shared_args[@]+"${shared_args[@]}"}" --scout; then :; else
+        echo "batch: FAILED to spawn $pair_id ($pair_proj)" >&2
         rc=1
       fi
     else
-      if FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "${pair%%=*}" "${pair#*=}" "${shared_args[@]+"${shared_args[@]}"}"; then :; else
-        echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2
+      if FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "$pair_id" "$pair_proj" "${shared_args[@]+"${shared_args[@]}"}"; then :; else
+        echo "batch: FAILED to spawn $pair_id ($pair_proj)" >&2
         rc=1
       fi
     fi
