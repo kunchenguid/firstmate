@@ -86,10 +86,12 @@
 # argument. Git is the ground truth, so the argument is never trusted on its
 # own word: a primary checkout (git dir == common dir), a worktree of an
 # unrelated repo, a subdirectory of a worktree, a plain directory, and a home
-# directory are each refused. Refusal is a non-zero exit, never a warning and
-# never a silent skip. When <project> is itself a linked worktree (a
-# secondmate home spawned from, rather than as, the primary checkout),
-# refusing outright would wedge a relaunch that is otherwise perfectly valid:
+# directory are each refused. On case-insensitive macOS, native path resolution
+# accepts an alternate letter-case spelling of the same checkout while keeping
+# the on-disk path spelling for the Claude config entry. Refusal is a non-zero
+# exit, never a warning and never a silent skip. When <project> is itself a
+# linked worktree (a secondmate home spawned from, rather than as, the
+# primary checkout), refusing outright would wedge a relaunch that is otherwise perfectly valid:
 # its own common dir already IS the primary checkout's own git dir (git's
 # git-common-dir answer never changes by which worktree asks), so the
 # checkout is derived structurally from it - its parent directory in the
@@ -204,7 +206,20 @@ esac
 
 refuse() { echo "error: refusing to pre-register Claude trust: $1" >&2; exit 1; }
 
-real_dir() { (cd -P -- "$1" 2>/dev/null && pwd -P); }
+# pwd -P resolves symlinks but on case-insensitive macOS retains the spelling
+# used for cd. Git may have recorded a different spelling of that same path;
+# native realpath recovers the on-disk name for structural comparisons and the
+# Claude config keys. Without node, keep the shell-only scope refusals: no
+# registration can succeed without node (the store writer checks it below).
+real_dir() {
+  local path
+  path=$(cd -P -- "$1" 2>/dev/null && pwd -P) || return 1
+  if command -v node >/dev/null 2>&1; then
+    node -e 'process.stdout.write(require("node:fs").realpathSync.native(process.argv[1]))' "$path" 2>/dev/null
+  else
+    printf '%s\n' "$path"
+  fi
+}
 
 # The fully resolved path of an existing file, or empty. Resolution runs in node
 # because it must follow a symlink chain to its final target, and node is
