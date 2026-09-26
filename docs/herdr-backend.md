@@ -165,8 +165,9 @@ Closing its last tab can remove the workspace, and the next spawn recreates it.
 
 ## Presentation spaces
 
-Each new crewmate or scout is placed in a disposable one-task workspace by default, on Herdr 0.8.0 and newer.
-This section calls that one-task workspace the projection.
+Each new crewmate or scout gets a one-task presentation workspace by default on Herdr 0.8.0 and newer.
+For a same-project task, that workspace is a durable Treehouse checkout opened as a Herdr worktree child; when the owning home represents another repository, it remains a disposable top-level workspace.
+This section calls either presentation shape the projection.
 Without the projection, tasks use the ordinary flat layout described under [Watching and task containers](#watching-and-task-containers).
 
 ### Setting values

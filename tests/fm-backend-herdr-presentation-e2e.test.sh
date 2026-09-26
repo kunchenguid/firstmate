@@ -1018,7 +1018,7 @@ cat > "$FAKEBIN/tasks-axi" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}" in
   --version)
-    printf 'tasks-axi 0.2.4\n'
+    printf 'tasks-axi 0.2.6\n'
     ;;
   update)
     printf 'options:\n  --archive-body\n'
