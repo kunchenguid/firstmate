@@ -98,6 +98,9 @@ This touches only the firstmate repo and its own worktrees, never anything under
   A dirty, offline, non-default, or uniquely diverged target is skipped and reported, never forced or stashed.
   Only a clean secondmate divergence whose complete local result is already present upstream may move without ancestry, and `reset --keep` still refuses conflicting working-tree changes.
   Nothing with unlanded work is ever discarded - this is prime directive #3.
+- **A checkout's own fixes never ride its default branch.**
+  `bin/fm-farm-patch.sh` is the supported way to keep them as a named patch set off the default branch and rebuild them on a new base, so the default branch stays an ancestor of `origin` and this path keeps advancing it.
+  A patched checkout is deliberately not this path's target.
 - **Only the firstmate repo and its worktrees** are touched, never `projects/`.
   It is the same sanctioned self-write as the fleet sync.
 - **Nothing with work in it is disrupted.**
