@@ -118,6 +118,18 @@ Scout teardown calls the read-only `verify` subcommand after checking for the re
 - No keyed status decision opened after the last `complete`.
 
 A keyed status decision opened after the last `complete` makes `verify` fail, and re-running `complete` is the repair.
+
+Both gates look for each entry in the home's closed-task archive as well as its live backlog, because `tasks-axi prune` moves closed tasks out of the backlog while an answered captain call stays exactly as durable, and resolving against the backlog alone made a correctly answered investigation fail its own gate forever.
+Only the lookup is widened, so an archived entry still has to carry a recorded answer to satisfy the gate; an archive the home cannot read refuses both gates by name rather than passing for want of evidence.
+Live rows take precedence: an entry's exact and legacy identities are both read from the live backlog before either is read from the archive, so an older archived row never shadows the current call, and an entry whose two identities are both only archived is refused as ambiguous.
+The lookup moves on to the archive or to the other identity only when tasks-axi reports the row as not found; any other live or archive read failure stops both gates by name.
+An archive read is bounded by `FM_BACKLOG_ROW_TIMEOUT_SECS` exactly as a live row read is, and a read that does not finish inside that bound stops the gate by name with status 124 rather than counting as an entry that is not archived.
+An id can be reused once its earlier call is archived, so the archive can hold more than one row for it; the lookup resolves to the newest row, because that is the one describing the call's current durable state and an older answered row would otherwise wave through a question the captain still owes.
+The archive is whichever file tasks-axi prunes into, read from its own `[markdown] archive` setting - a double- or single-quoted path, with or without an inline comment - and defaulting to `data/done-archive.md` when the setting is absent, so a project `[markdown] archive` setting never leaves the gate resolving against a different file than the one tasks-axi writes.
+A home-level setting in `~/.tasks-axi/config.toml` is not honoured yet, so a home that configures the archive only there still resolves against the default path.
+That setting is read from the configured data directory's parent, the root every backlog transition is addressed from, so a home whose data directory is relocated resolves against the archive its own backlog is pruned into.
+The archive is the markdown backend's own artifact, so this lookup applies to that backend alone; a configured non-markdown adapter keeps its closed rows in its own workspace, where the ordinary row read already finds them.
+That setting is read from the `[markdown]` table only, because an `archive` key belongs to the table heading above it: one in any other table, or in the root table before the first heading, is ignored by tasks-axi and reading it here would point the gate at a file tasks-axi never prunes into.
 The `--force` path remains the explicit captain-approved discard escape hatch.
 
 ## Cleanup never closes a captain call
@@ -514,6 +526,15 @@ The suite does not test the accepted merge-to-cleanup re-hold window or asynchro
 - A report-only unresolved captain call refuses `--none` completion before teardown can erase the source.
 - Non-forced scout teardown always requires the durable inventory verification.
 - The recorded-answer guard holds: a bare `tasks-axi done` close fails `verify` until `answer` records the captain's word, and an ordinary finished task cannot be dressed up as an answered call.
+
+### Archive resolution
+
+- Archive resolution works in both directions.
+  An answered call still passes `complete`, `verify`, and teardown after `prune` archives it, while an archived call closed with no recorded answer still fails.
+  An unreadable archive refuses by name, and a reused id resolves to its newest archived row rather than a stale answered one.
+- The configured archive is read for every TOML form tasks-axi honours, and a real `prune` into each configured path still satisfies the gate and teardown.
+- The archive setting is read from the `[markdown]` table only.
+  Decoy `archive` keys in the root table and in another table are ignored exactly as tasks-axi ignores them.
 
 ### Answers, stamps, and deferral
 

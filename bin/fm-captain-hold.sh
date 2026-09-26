@@ -182,6 +182,16 @@
 # the task's last status line - and on a 0 bounds repeated alarms from new pane
 # hashes for the decision.
 #
+# Both gates resolve every entry against this home's closed-task archive
+# (tasks-axi's `[markdown] archive`) as well as its live backlog, because
+# `tasks-axi prune` moves closed tasks out of the backlog and an answered
+# captain call is exactly as durable once it has moved. Resolution is the only
+# thing widened: a call closed with no recorded captain answer still fails the
+# gate wherever it lives. An archive this home cannot READ refuses both gates
+# by name, since a check that could not look must never be recorded as a check
+# that found nothing outstanding; an archive that does not exist yet is not an
+# error and simply carries no tasks.
+#
 # `diverged` is the read-only guard over the seam between the two records of
 # one captain call. See "record divergence" beside command_diverged below.
 #
@@ -390,6 +400,209 @@ task_show_or_fail() {  # <id> <absence-message>; sets show
   show=$TASK_SHOW_OUTPUT
 }
 
+# The closed-task archive beside this home's backlog, as an absolute path.
+# tasks-axi's own `[markdown] archive` setting is the owner; the default below
+# only covers a home whose config omits it.
+#
+# The archive is addressed from the configured data directory's parent, the
+# same root `tasks_axi` above mutates from, so a home whose data directory is
+# relocated keeps its backlog and its archive together. Reading FM_HOME instead
+# would point the gate at a different home's config than the one tasks-axi
+# prunes with.
+#
+# The setting must be read the way tasks-axi reads it, or the gate resolves
+# against a DIFFERENT file than the one tasks-axi prunes into and a correctly
+# answered call fails the gate anyway - the same defect this lookup exists to
+# remove, wearing a config-parsing disguise. tasks-axi honours a basic
+# (double-quoted) string, a literal (single-quoted) string, and an inline
+# comment after either, so all of those are read here. Matching the value by
+# its own quote delimiters rather than to end-of-line is what keeps a `#`
+# INSIDE the path from being mistaken for the start of a comment. An escaped
+# quote within a basic string is not decoded; that needs a real TOML parser,
+# and no such path has ever been configured here.
+#
+# The setting also has to be read from the table tasks-axi reads it from. An
+# `archive` key belongs to whichever table heading precedes it, so any other
+# table - or the root table above the first heading - is free to carry one of
+# its own, and tasks-axi ignores those. Taking the first `archive` line in the
+# file regardless of heading would point the gate at that unrelated value and
+# reopen the same miss, so only lines inside `[markdown]` are considered here.
+archive_path() {
+  local root configured=''
+  root=$(archive_root) || return 1
+  if [ -f "$root/.tasks.toml" ]; then
+    configured=$(awk '
+      /^[[:space:]]*\[/ {
+        heading = $0
+        sub(/^[[:space:]]*\[/, "", heading)
+        sub(/\].*$/, "", heading)
+        gsub(/[[:space:]]/, "", heading)
+        in_markdown = (heading == "markdown")
+        next
+      }
+      in_markdown { print }
+    ' "$root/.tasks.toml" | sed -n \
+      -e 's/^[[:space:]]*archive[[:space:]]*=[[:space:]]*"\([^"]*\)".*$/\1/p' \
+      -e "s/^[[:space:]]*archive[[:space:]]*=[[:space:]]*'\([^']*\)'.*\$/\1/p" \
+      | head -1)
+  fi
+  [ -n "$configured" ] || configured=data/done-archive.md
+  case "$configured" in
+    /*) printf '%s' "$configured" ;;
+    *) printf '%s/%s' "$root" "$configured" ;;
+  esac
+}
+
+# The tasks-axi working directory the archive is addressed from.
+archive_root() {
+  local data
+  data=$(fm_backlog_data_absolute "$DATA") || fail "data directory cannot be resolved: $DATA"
+  fm_backlog_root "$data" || fail "$FM_BACKLOG_TRANSITION_ERROR"
+}
+
+# The closed-task archive is the markdown backend's own artifact: `tasks-axi
+# prune` moves closed rows out of `backlog.md` into a second markdown file.
+# A configured non-markdown adapter keeps its closed rows in its own workspace,
+# where the ordinary `task_show` above already finds them, and addressing it
+# with `--file` would override that workspace exactly as `tasks_axi` above
+# warns. So every archive path here applies to the markdown backend alone,
+# and on any other backend the durable lookup is just `task_show`.
+archive_applies() {
+  local root backend
+  root=$(archive_root) || return 1
+  backend=$(fm_tasks_axi_backend "$root") || return 2
+  [ "$backend" = markdown ]
+}
+
+# An unreadable archive is missing evidence, not evidence of absence. Every
+# path that resolves captain calls against the archive calls this first, so
+# "the gate could not look" can never be recorded as "the captain owes
+# nothing". An archive that simply does not exist is not an error: this home
+# has pruned nothing yet, and the lookup below correctly finds no task.
+require_readable_archive() {
+  local archive status=0
+  archive_applies || status=$?
+  [ "$status" -ne 2 ] || fail "the backlog backend configuration cannot be read"
+  [ "$status" -eq 0 ] || return 0
+  archive=$(archive_path) || return 0
+  [ -e "$archive" ] || return 0
+  [ -r "$archive" ] \
+    || fail "cannot read the closed-task archive $archive; refusing to resolve captain calls against an archive this home cannot read"
+}
+
+# One task from the archive, parsed by tasks-axi rather than by a second reader
+# here, so the row format keeps exactly one owner. The archive holds the same
+# rows under dated `## Archived` headings, so they are restaged under the
+# section heading tasks-axi reads before it is asked for the task.
+#
+# An id can appear in more than one section: prune appends a section per run,
+# and a home is free to reuse an id for a later call. tasks-axi returns the
+# FIRST row carrying an id, so the sections are restaged newest-first. The
+# newest row is the one describing that call's current durable state; resolving
+# to an older one would let a long-settled answer stand in for a question the
+# captain still owes. Only an unindented `## ` line starts a section - row
+# bodies are indented - so splitting on that leaves each row with its body.
+restage_archive_newest_first() {  # <archive-path>
+  awk '
+    /^## / { section++; next }
+    { block[section] = block[section] $0 "\n" }
+    END { for (i = section; i >= 0; i--) printf "%s", block[i] }
+  ' "$1"
+}
+
+# Read one archived row into TASK_SHOW_OUTPUT. Status 1 means the row is not in
+# the archive; status 3 means the archive could not be read reliably. The staged
+# file IS the backlog for this read, so
+# tasks-axi is addressed directly rather than through `tasks_axi` above, whose
+# markdown branch would append this home's own `--file` on top of it.
+#
+# The read is bounded exactly as fm_backlog_row_show bounds a live row read,
+# and for the same reason task_show gives above: the archive grows without
+# bound and a gate over N inventory entries reaches this read once per entry,
+# so a backend that wedges parsing it would otherwise hang `complete`/`verify`
+# forever. A read that could not finish inside its bound is not absence, so it
+# stops the command by name with 124 rather than being spent as "not archived".
+archived_task_show() {  # <id>; sets TASK_SHOW_OUTPUT
+  local id=$1 root archive tmp out status=0 secs reason applies_status=0
+  archive_applies || applies_status=$?
+  case "$applies_status" in
+    0) : ;;
+    1) return 1 ;;
+    *)
+      printf 'fm-captain-hold: cannot read the backlog backend configuration while resolving %s\n' "$id" >&2
+      return 3
+      ;;
+  esac
+  root=$(archive_root) || return 1
+  archive=$(archive_path) || return 1
+  [ -e "$archive" ] || return 1
+  if [ ! -r "$archive" ]; then
+    printf 'fm-captain-hold: cannot read the closed-task archive %s while resolving %s\n' "$archive" "$id" >&2
+    return 3
+  fi
+  tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-captain-hold-archive.XXXXXX") \
+    || fail "cannot stage the closed-task archive for lookup"
+  if ! { printf '## In flight\n\n## Queued\n\n## Done\n'; restage_archive_newest_first "$archive"; } > "$tmp" 2>/dev/null; then
+    rm -f -- "$tmp"
+    fail "cannot stage the closed-task archive $archive for lookup"
+  fi
+  secs=$(fm_backlog_row_timeout_secs)
+  # shellcheck disable=SC2016  # Expansion is deliberately deferred to the child shell.
+  out=$(fm_run_timed "$secs" bash -c 'cd "$1" 2>/dev/null || exit 1; shift; exec tasks-axi show "$@"' \
+    _ "$root" "$id" --file "$tmp" --full 2>&1) || status=$?
+  rm -f -- "$tmp"
+  if [ "$status" -eq 124 ]; then
+    printf 'fm-captain-hold: %s\n' \
+      "tasks-axi show $id exceeded its ${secs}s backlog read bound reading the closed-task archive" >&2
+    exit 124
+  fi
+  if [ "$status" -ne 0 ]; then
+    printf '%s\n' "$out" | grep -q '^code: NOT_FOUND$' && return 1
+    reason=${out%%$'\n'*}
+    printf 'fm-captain-hold: %s\n' \
+      "${reason:-tasks-axi show $id failed while reading the closed-task archive}" >&2
+    return 3
+  fi
+  TASK_SHOW_OUTPUT=$out
+  return 0
+}
+
+# Read one live row for a durable lookup. Only tasks-axi's explicit NOT_FOUND
+# permits an archive or sibling-identity fallback; every other read failure is
+# missing evidence and must stop the resolution by name.
+durable_live_task_show() {  # <id>; sets TASK_SHOW_OUTPUT
+  local id=$1 status=0 reason
+  task_show "$id" || status=$?
+  [ "$status" -ne 0 ] || return 0
+  printf '%s\n' "$TASK_SHOW_OUTPUT" | grep -q '^code: NOT_FOUND$' && return 1
+  reason=${TASK_SHOW_OUTPUT%%$'\n'*}
+  printf 'fm-captain-hold: %s\n' \
+    "${reason:-tasks-axi show $id failed while reading the live backlog}" >&2
+  return 3
+}
+
+# The task carrying an id wherever it durably lives, read into
+# TASK_SHOW_OUTPUT. An answered captain call does not stay in the live backlog
+# forever - tasks-axi prune moves closed tasks into the archive - and it is
+# exactly as durable after that move. This widens WHERE a call is looked up and
+# nothing else: what counts as answered is still decided by verify_hold_durable,
+# so an archived call closed with no recorded captain answer keeps failing the
+# gate exactly as it did while live.
+#
+# Same shell rule as task_show, and for the same reason twice over: task_show
+# stops the whole command on a wedged backend, and a command substitution here
+# would catch that exit in the subshell and hand the archive a read bound to
+# spend as absence.
+task_show_durable() {  # <id>; sets TASK_SHOW_OUTPUT
+  local status=0
+  durable_live_task_show "$1" || status=$?
+  case "$status" in
+    0) return 0 ;;
+    1) archived_task_show "$1" ;;
+    *) return "$status" ;;
+  esac
+}
+
 show_field() {  # <show-output> <field>
   local output=$1 field=$2
   printf '%s\n' "$output" | sed -n "s/^  $field: //p" | head -1
@@ -513,8 +726,15 @@ resolution_block() {  # <mode>
 # Durable state of one captain call: an active captain hold (annotations
 # surviving even when a date gate has expired) or a recorded captain answer.
 verify_hold_durable() {  # <task-id>
-  local id=$1 show state hold_kind body
-  task_show "$id" || fail "captain-held task $id is absent from this home's configured backlog (data directory $DATA)"
+  local id=$1 show state hold_kind body status=0
+  task_show_durable "$id" || status=$?
+  case "$status" in
+    0) : ;;
+    1)
+      fail "captain-held task $id is absent from this home's configured backlog and its closed-task archive (data directory $DATA)"
+      ;;
+    *) exit "$status" ;;
+  esac
   show=$TASK_SHOW_OUTPUT
   state=$(show_field "$show" state)
   hold_kind=$(show_field_value "$show" hold_kind)
@@ -725,18 +945,57 @@ resolve_migrated_entry() {  # <origin-or-empty> <entry>
 # beads backend - the migrated row the markdown-to-beads hold migration wrote.
 # Prints "<resolved id> <how>", where <how> is exact, legacy, migrated-note or
 # migrated-prefix, so a caller can record which evidence carried the attestation.
+#
+# Current rows take precedence across identities: the exact and legacy ids are
+# both tried live before either is tried in the archive. This prevents an old
+# archived exact id from shadowing the current legacy call, and when both
+# identities are only archived the entry is refused as ambiguous. <how> still names
+# which IDENTITY carried the row, not which file it was found in, so an archived
+# row resolves as exact or legacy exactly as a live one does.
 resolve_entry() {  # <origin-or-empty> <entry>; prints "<id> <how>" or fails
-  local origin=$1 entry=$2 legacy migrated rc
-  if task_show "$entry"; then
-    printf '%s exact' "$entry"
-    return 0
-  fi
+  local origin=$1 entry=$2 legacy='' migrated rc status=0 archived_exact=0
+  durable_live_task_show "$entry" || status=$?
+  case "$status" in
+    0) printf '%s exact' "$entry"; return 0 ;;
+    1) : ;;
+    *) return "$status" ;;
+  esac
   if [ -n "$origin" ] && [ "$origin" != "$BINDING_ANY" ]; then
     legacy=$(legacy_hold_id "$origin" "$entry")
-    if task_show "$legacy"; then
-      printf '%s legacy' "$legacy"
-      return 0
-    fi
+    status=0
+    durable_live_task_show "$legacy" || status=$?
+    case "$status" in
+      0) printf '%s legacy' "$legacy"; return 0 ;;
+      1) : ;;
+      *) return "$status" ;;
+    esac
+  fi
+  status=0
+  archived_task_show "$entry" || status=$?
+  case "$status" in
+    0) archived_exact=1 ;;
+    1) : ;;
+    *) return "$status" ;;
+  esac
+  if [ -n "$legacy" ]; then
+    status=0
+    archived_task_show "$legacy" || status=$?
+    case "$status" in
+      0)
+        if [ "$archived_exact" = 1 ]; then
+          printf 'fm-captain-hold: %s is ambiguous: the closed-task archive carries both %s and its legacy identity %s\n' \
+            "$entry" "$entry" "$legacy" >&2
+          return 3
+        fi
+        printf '%s legacy' "$legacy"; return 0
+        ;;
+      1) : ;;
+      *) return "$status" ;;
+    esac
+  fi
+  if [ "$archived_exact" = 1 ]; then
+    printf '%s exact' "$entry"
+    return 0
   fi
   rc=0
   migrated=$(resolve_migrated_entry "$origin" "$entry") || rc=$?
@@ -1267,6 +1526,10 @@ command_answers() {
       skipped=$((skipped + 1))
       continue
     fi
+    if [ "$resolve_rc" = 3 ]; then
+      reason=$(tr -d '\n' < "$err")
+      fail "cannot resolve $key${reason:+: $reason}"
+    fi
     if [ "$resolve_rc" -ne 0 ]; then
       # resolve_entry runs in a command substitution, so task_show's exit
       # cannot stop this loop; only its status crosses back. 124 means the
@@ -1651,6 +1914,7 @@ command_complete() {
   fi
   keys=$(sorted_key_union "$previous" "$supplied")
   if [ -n "$keys" ]; then
+    require_readable_archive
     while IFS= read -r entry; do
       [ -n "$entry" ] || continue
       resolved=$(verify_entry_durable "$origin" "$entry") || exit $?
@@ -1712,6 +1976,7 @@ command_verify() {
   [ "$reviewed" = 1 ] || fail "origin $origin has no completed captain-call inventory"
   keys=$(meta_value "$meta" decision_keys)
   if [ -n "$keys" ]; then
+    require_readable_archive
     while IFS= read -r entry; do
       [ -n "$entry" ] || continue
       verify_entry_durable "$origin" "$entry" >/dev/null
