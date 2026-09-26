@@ -1,0 +1,40 @@
+ok - host: waiting closes cannot carry the park past its boundary
+ok - host: a close whose margin runs out while the successor starts reaches main at the boundary without a turn
+ok - host: the park's test clock is inert without the test marker
+
+=== boundary-busy: host output ===
+watcher: started pid=44675 (beacon fresh)
+watcher: started pid=47156 (beacon fresh) recovery-generation=46184.1790382888.LwtEPs
+signal: /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-supervision-host.9lGa9z/boundary-busy/state/demo.status
+supervision-host: cycle boundary - the host ended its park at its bound; drain, acknowledge, and end the turn, and the next park starts on its own
+=== host event log ===
+1790382886	start	gen=host-44355-1790382886	primary=claude
+1790382892	handled	turn=host-44355-1790382886.1	rc=0	reports=1	error=0 cost=0.25 conversation_cost=0.25 input=5 cache_read=100 cache_write=10 output=20 turns=3	signal: /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-supervision-host.9lGa9z/boundary-busy/state/demo.status
+1790382893	boundary	after 16s
+=== persisted wake queue ===
+1790382891	3	signal	demo.status	signal: /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-supervision-host.9lGa9z/boundary-busy/state/demo.status
+1790382891	4	signal	demo.status	signal: /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-supervision-host.9lGa9z/boundary-busy/state/demo.status
+
+=== boundary-late: host output ===
+watcher: started pid=52576 (beacon fresh)
+signal: /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-supervision-host.9lGa9z/boundary-late/state/demo.status
+supervision-host: cycle boundary - the host ended its park at its bound; drain, acknowledge, and end the turn, and the next park starts on its own
+=== host event log ===
+1790382893	start	gen=host-52314-1790382893	primary=claude
+1790382897	boundary	after 10s
+=== persisted wake queue ===
+1790382894	1	signal	demo.status	signal: /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-supervision-host.9lGa9z/boundary-late/state/demo.status
+1790382894	2	signal	demo.status	signal: /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-supervision-host.9lGa9z/boundary-late/state/demo.status
+
+=== clock-armed: host output ===
+supervision-host: cycle boundary - the host ended its park at its bound; drain, acknowledge, and end the turn, and the next park starts on its own
+=== host event log ===
+1790382898	start	gen=host-61092-1790382898	primary=claude
+1790382898	boundary	after 99999s
+
+=== clock-unmarked: host output ===
+watcher: started pid=61705 (beacon fresh)
+=== host event log ===
+1790382898	start	gen=host-61541-1790382898	primary=claude
+1790382903	handled	turn=host-61541-1790382898.1	rc=0	reports=1	error=0 cost=0.25 conversation_cost=0.25 input=5 cache_read=100 cache_write=10 output=20 turns=3	signal: /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-supervision-host.9lGa9z/clock-unmarked/state/demo.status
+=== persisted wake queue ===
