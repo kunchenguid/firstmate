@@ -39,7 +39,7 @@ Throwing from `session.idle` does not block `opencode run`, so the primary adapt
 The follow-up was verified in the interactive TUI.
 In a home with `config/supervision-host` the watch-arm plugin spawns the supervision host instead of `../../../bin/fm-watch-arm.sh`, with Claude's print mode as its headless engine; [`supervision-host.md`](../../../../../docs/supervision-host.md) owns the host.
 `opencode run` can exit before displaying a queued follow-up, so the adapter steps aside in headless mode.
-On native Windows, the operational-input adapter runs its Bash helper through `bash`; macOS and Linux invoke it directly.
+On native Windows, the session-start nudge, turn-end guard, both PreToolUse checks, and operational-input adapter run their Bash helpers through `bash`; macOS and Linux invoke those helpers directly.
 
 The companion `.opencode/plugins/fm-primary-watch-arm.js` owns normal TUI watcher supervision, wakes it with `client.session.promptAsync`, and coordinates with the guard before a blind-turn follow-up.
 The PreToolUse-equivalent watcher-arm seatbelt blocks by throwing from `tool.execute.before`.

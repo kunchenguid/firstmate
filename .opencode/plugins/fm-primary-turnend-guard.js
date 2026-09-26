@@ -44,7 +44,11 @@ function resolvePath(anchor) {
 
 function runGuard(root) {
   if (!root) return Promise.resolve({ code: 0, stderr: "" });
-  return runProcess(`${root}/bin/fm-turnend-guard.sh`, [], '{"stop_hook_active":false}');
+  const script = `${root}/bin/fm-turnend-guard.sh`;
+  const input = '{"stop_hook_active":false}';
+  return process.platform === "win32"
+    ? runProcess("bash", [script], input)
+    : runProcess(script, [], input);
 }
 
 async function letWatchArmRun(sessionID, client) {
