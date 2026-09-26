@@ -313,7 +313,7 @@ test_away_reentry_refuses_pending_return_gate() {
 test_return_is_mode_agnostic_for_quiet_mode() {
   # kunchenguid/firstmate#2356's /quiet off calls this exact script, unchanged
   # - it must behave identically whether state/.afk declares "away" or
-  # "quiet", since return_guard/return_reconcile only ever test presence.
+  # "quiet", since return_reconcile only ever tests presence.
   local dir out
   dir="$TMP_ROOT/quiet-mode-return"
   install_runner "$dir"
@@ -857,6 +857,46 @@ test_return_guard_refuses_while_the_record_exists() {
   pass "the read-only guard treats the away-posture record as active away mode without the legacy flag"
 }
 
+test_quiet_mode_is_present_for_the_guard_and_bearings() {
+  # Quiet mode keeps the captain present, so the guard does not ask for the
+  # return that /quiet off alone runs, and Bearings answers as when attended.
+  # Away mode, with the same flag and record, keeps refusing, and a pending
+  # return catch-up keeps its own exit status.
+  local dir out rc record
+  for record in without-record with-record; do
+    dir="$TMP_ROOT/guard-quiet-$record"
+    install_runner "$dir"
+    if [ "$record" = with-record ]; then
+      contract_in "$dir" enter >/dev/null 2>&1 || fail "could not write the away-posture record"
+    fi
+    printf 'quiet\n%s\n' "$(date +%s)" > "$dir/home/state/.afk"
+    out=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" "$dir/bin/fm-afk-return.sh" guard 2>&1) \
+      || fail "guard refused quiet mode $record: $out"
+    out=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" "$ROOT/bin/fm-bearings-snapshot.sh" --json 2>&1) \
+      || fail "Bearings refused quiet mode $record: $out"
+    printf '%s' "$out" | jq -e '.schema == "fm-bearings.v1"' >/dev/null \
+      || fail "Bearings produced no snapshot in quiet mode $record: $out"
+    [ "$(head -n 1 "$dir/home/state/.afk")" = quiet ] || fail "the guard or Bearings changed the quiet flag $record"
+
+    printf 'away\n%s\n' "$(date +%s)" > "$dir/home/state/.afk"
+    set +e
+    out=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" "$ROOT/bin/fm-bearings-snapshot.sh" --json 2>&1)
+    rc=$?
+    set -e
+    [ "$rc" -eq 3 ] || fail "Bearings should still refuse away mode $record (rc=$rc): $out"
+    assert_contains "$out" 'away mode is still active' "the away refusal $record did not name the away posture"
+  done
+
+  printf 'quiet\n%s\n' "$(date +%s)" > "$dir/home/state/.afk"
+  printf 'schema\tfm-afk-return.v1\nphase\tblocked\n' > "$dir/home/state/.afk-return-catchup"
+  set +e
+  out=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" "$dir/bin/fm-afk-return.sh" guard 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 4 ] || fail "a pending catch-up should keep its exit status in quiet mode (rc=$rc): $out"
+  pass "quiet mode is present for the guard and Bearings while away mode keeps refusing"
+}
+
 test_return_brief_health_leads_with_a_gap() {
   local dir out gap_line clean_line
   dir="$TMP_ROOT/brief-gap"
@@ -1000,6 +1040,7 @@ test_unreadable_status_file_keeps_catchup_gated
 test_statusless_leftover_record_keeps_catchup_gated_until_cleanup
 test_statusful_leftover_record_lets_catchup_clear
 test_return_guard_refuses_while_the_record_exists
+test_quiet_mode_is_present_for_the_guard_and_bearings
 test_return_brief_health_leads_with_a_gap
 test_return_brief_does_not_report_an_acked_watcher_down_marker_as_a_gap
 test_return_brief_without_a_record_reports_the_legacy_flag

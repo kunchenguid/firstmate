@@ -7,7 +7,8 @@
 #   fm-afk-return.sh begin    Same as the default command.
 #   fm-afk-return.sh check    Re-render the brief and close the gate only after blockers resolve.
 #   fm-afk-return.sh guard    Read-only consult: exit 3 while away mode is still
-#                            active, exit 4 while return catch-up is pending.
+#                            active (quiet mode is not away), exit 4 while
+#                            return catch-up is pending.
 #   fm-afk-return.sh catchup-summary  Read-only catch-up projection for a reporting surface.
 #
 # THE RETURN BRIEF (stdout, on begin and on every check) is rendered from durable
@@ -71,7 +72,7 @@ RETURN_GRACE=${FM_GUARD_GRACE:-300}
 CONTRACT="$SCRIPT_DIR/fm-afk-contract.sh"
 
 usage() {
-  sed -n '2,11p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,12p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 clean_field() {
@@ -288,9 +289,22 @@ catchup_summary() {
   printf '%s\t%s\n' "$count" "$reason"
 }
 
+# Quiet mode is a posture for a captain who stays present, so it is not an
+# away window the captain must return from before ordinary work; only an
+# explicit /quiet off runs the return. fm-wake-lib.sh's fm_afk_mode is the one
+# owner of that distinction. It is sourced only once the flag exists, so its
+# state-directory initialization never creates anything and the guard stays
+# read-only.
+quiet_posture() {
+  [ -e "$STATE/.afk" ] || return 1
+  # shellcheck source=bin/fm-wake-lib.sh
+  . "$SCRIPT_DIR/fm-wake-lib.sh"
+  [ "$(fm_afk_mode "$STATE")" = quiet ]
+}
+
 return_guard() {
   local reasons
-  if [ -e "$STATE/.afk" ] || fm_afk_contract_present "$STATE"; then
+  if { [ -e "$STATE/.afk" ] || fm_afk_contract_present "$STATE"; } && ! quiet_posture; then
     printf 'fm-afk-return: away mode is still active; run bin/fm-afk-return.sh before ordinary captain work\n' >&2
     return 3
   fi
