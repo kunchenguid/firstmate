@@ -2589,16 +2589,21 @@ effort_flag_for_harness() {
     ;;
   muse)
     # muse 0.1.0-R708.1 --reasoning-effort accepts none|minimal|low|medium|
-    # high|xhigh|ultra and defaults to high, so low..xhigh map straight across.
-    # ultra is muse's max-CLASS level, so firstmate's max maps onto it - but
-    # only ever as an EXPLICIT captain choice, never as a fallback, because
-    # AGENTS.md section 4 forbids selecting max without captain preference and
-    # the omitted effort here leaves muse on its own high default. muse's extra
-    # none/minimal levels sit below firstmate's shared vocabulary and are
-    # deliberately unreachable rather than remapped onto low.
+    # high|xhigh|max|ultra and defaults to high, so low..max map straight across.
+    # LOCAL PATCH 2026-09-17, captain-approved: max is passed THROUGH unchanged.
+    # The previous line remapped max -> ultra, written when muse 0.1.0 had no
+    # max level. muse 1.3.0 has both, and muse-spark-1.3-contributor does NOT
+    # support ultra - it silently degrades to xhigh rather than erroring, so
+    # every dispatch landed a tier below what the captain asked for. Verified
+    # in the worker pane footer, which prints the EFFECTIVE level; state/<id>.meta
+    # records only what was requested and read effort=max while workers ran xhigh.
+    # ultra stays reachable as its own level for models that do support it.
+    # max remains an EXPLICIT captain choice, never a fallback, per AGENTS.md
+    # section 4. muse's extra none/minimal levels sit below firstmate's shared
+    # vocabulary and are deliberately unreachable rather than remapped onto low.
     case "$effort" in
-    low | medium | high | xhigh) printf -- '--reasoning-effort %s ' "$(shell_quote "$effort")" ;;
-    max) printf -- '--reasoning-effort %s ' "$(shell_quote ultra)" ;;
+    low | medium | high | xhigh | max) printf -- '--reasoning-effort %s ' "$(shell_quote "$effort")" ;;
+    ultra) printf -- '--reasoning-effort %s ' "$(shell_quote ultra)" ;;
     esac
     ;;
     # rovo has no --effort flag on `run`; its effort mapping rides
