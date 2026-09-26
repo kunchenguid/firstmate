@@ -2040,6 +2040,98 @@ EOF
   pass "a terminal run with no live sibling is unchanged"
 }
 
+# The incident itself (2026-09-10 account-ansible-infra): run 1 failed at the
+# old head, the worker committed a fix and started run 2 at the new head, and
+# the legacy CLI's `axi status` still answered with the just-failed run 1. The
+# ledger is creation-ordered and scanned newest-first, so its LIVE answer
+# proves a NEWER run is in flight at this worktree's own head; the terminal
+# record is the corpse of a superseded validation and must not answer for it.
+test_superseded_terminal_record_yields_to_newer_live_run() {
+  reset_fakes
+  local outcome rc=0 d base_head live_head short_base short_live out
+  for outcome in failed cancelled; do
+    (
+      d=$(new_case "superseded-live-$outcome")
+      make_repo_on_branch "$d/wt" fm/feat-superseded
+      base_head=$(git -C "$d/wt" rev-parse HEAD)
+      git -C "$d/wt" commit -q --allow-empty -m 'fix after the failed run'
+      live_head=$(git -C "$d/wt" rev-parse HEAD)
+      short_base=$(git -C "$d/wt" rev-parse --short=7 "$base_head")
+      short_live=$(git -C "$d/wt" rev-parse --short=7 "$live_head")
+      make_fakebin "$d" >/dev/null
+      fm_write_meta "$d/state/superseded.meta" "window=fm:fm-superseded" "worktree=$d/wt" "kind=ship"
+      FM_FAKE_RUN_HEAD="$base_head"
+      FM_FAKE_AXI_STATUS="$(run_failed fm/feat-superseded | sed "s/outcome: failed/outcome: $outcome/")"
+      FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/feat-superseded ${short_live}  2026-09-10 13:43
+  ${outcome}     fm/feat-superseded ${short_base}  2026-09-10 13:39
+EOF
+)"
+      out=$(run_crew_state "$d" superseded)
+      assert_not_contains "$out" "state: failed" "a superseded $outcome record must not answer for the newer live run"
+      assert_contains "$out" "state: working" "the newer live run reports the running state"
+      assert_contains "$out" "validating (background run)" "coarse resolution keeps coarse run detail"
+      pass "superseded $outcome record yields to the newer live run"
+    ) || rc=1
+  done
+  [ "$rc" = 0 ] || fail "superseded terminal record vs newer live run"
+}
+
+# The same incident with the retry on the SAME head: run 1 failed at the
+# submitted head and run 2 runs at that unchanged head. The terminal record
+# binds by head equality, but the newest ledger row is the live replacement,
+# so the verdict must still come from the live row, not the corpse's outcome.
+test_superseded_terminal_record_same_head_yields_to_newer_live_run() {
+  reset_fakes
+  local d head short out
+  d=$(new_case superseded-same-head)
+  make_repo_on_branch "$d/wt" fm/feat-samehead
+  head=$(git -C "$d/wt" rev-parse HEAD)
+  short=$(git -C "$d/wt" rev-parse --short=7 "$head")
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/samehead.meta" "window=fm:fm-samehead" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_RUN_HEAD="$head"
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-samehead)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/feat-samehead ${short}  2026-09-10 13:43
+  failed     fm/feat-samehead ${short}  2026-09-10 13:39
+EOF
+)"
+  out=$(run_crew_state "$d" samehead)
+  assert_not_contains "$out" "state: failed" "a head-bound corpse must not answer for the live replacement"
+  assert_contains "$out" "state: working" "the live replacement at the same head reports the running state"
+  assert_contains "$out" "validating (background run)" "coarse resolution keeps coarse run detail"
+  pass "superseded terminal record at the same head yields to the live run"
+}
+
+# No widening the other way: when the newest binding row is itself terminal,
+# there is no superseding live run to prefer, so the terminal outcome still
+# reports for a branch whose latest run genuinely ended in failure.
+test_newest_terminal_row_keeps_the_terminal_verdict() {
+  reset_fakes
+  local d base_head live_head short_base short_live out
+  d=$(new_case superseded-terminal-newest)
+  make_repo_on_branch "$d/wt" fm/feat-superterm
+  base_head=$(git -C "$d/wt" rev-parse HEAD)
+  git -C "$d/wt" commit -q --allow-empty -m 'fix after the failed run'
+  live_head=$(git -C "$d/wt" rev-parse HEAD)
+  short_base=$(git -C "$d/wt" rev-parse --short=7 "$base_head")
+  short_live=$(git -C "$d/wt" rev-parse --short=7 "$live_head")
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/superterm.meta" "window=fm:fm-superterm" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_RUN_HEAD="$base_head"
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-superterm)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  failed     fm/feat-superterm ${short_live}  2026-09-10 13:43
+  failed     fm/feat-superterm ${short_base}  2026-09-10 13:39
+EOF
+)"
+  out=$(run_crew_state "$d" superterm)
+  assert_contains "$out" "state: failed" "a terminal newest row with no live run still reports failed"
+  assert_not_contains "$out" "state: working" "no live row means no supersession"
+  pass "newest terminal row keeps the terminal verdict"
+}
+
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status() {
   reset_fakes
   local d short; d=$(new_case coarse-ready-other-log)
@@ -5305,6 +5397,9 @@ test_unfetched_older_live_sibling_does_not_hide_failure
 test_only_terminal_rows_keep_newest_first_precedence
 test_unknown_status_row_keeps_newest_first_precedence
 test_terminal_run_without_live_sibling_is_unchanged
+test_superseded_terminal_record_yields_to_newer_live_run
+test_superseded_terminal_record_same_head_yields_to_newer_live_run
+test_newest_terminal_row_keeps_the_terminal_verdict
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
 test_other_branch_run_ignored
 test_unpushed_ship_done_is_blocked

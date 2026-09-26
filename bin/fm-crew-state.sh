@@ -81,6 +81,12 @@
 #      head-matching row and an anchored one, so any rule there would also catch
 #      head-tied rows, and a record whose head still equals or precedes the
 #      worktree HEAD keeps its original working reading, as it always has.
+#      A TERMINAL record the ledger answers with a LIVE newest binding row
+#      is the corpse of a superseded validation, not the branch's verdict:
+#      the ledger is creation-ordered, so that live row provably postdates it,
+#      and the verdict reads from the live row with coarse detail instead of
+#      the corpse's failed/cancelled outcome (2026-09-10 account-ansible-infra
+#      false-alarm; both legacy sites in this script own the mechanics).
 #      A record whose
 #      identity is proven by NEITHER head nor ledger anchor is not this
 #      worktree's run to report on: it leaves HAVE_RUN=0 so the pane and status
@@ -985,20 +991,25 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
         && { nm_run_head_matches_worktree || fm_nm_run_is_pipeline_owned_active "$RUN_OUT" \
           || { fm_nm_run_is_executing "$RUN_OUT" && ! nm_daemon_answered_down; }; }; then
         HAVE_RUN=1
-        # Without run ids, contradictory liveness cannot prove precedence.
-        # A live replacement also needs an id-addressed status read: a bare
-        # "running" row cannot tell working from waiting at a gate.
+        # The plain ledger is creation-ordered and scanned newest-first, so
+        # a LIVE answer here names a run NEWER than this terminal record:
+        # the worker restarted validation (2026-09-10 account-ansible-infra
+        # false-alarm: `axi status` answered the just-failed run while its
+        # replacement was already mid-test-step). The terminal TOON is a
+        # superseded corpse, so prefer the newer live row over its outcome,
+        # with coarse detail only - the id-less ledger cannot carry step or
+        # gate detail, and a parked replacement still reaches the supervisor
+        # through the crew's own status events.
         ledger_status=$(fm_nm_runs_status_for_worktree "$WT" "$CREW_BRANCH" "$(nm_runs_list)")
         if fm_nm_run_is_active "$RUN_OUT"; then
           if [ "$(fm_nm_run_status_class "$ledger_status")" = terminal ]; then
             emit unknown run-step "run records disagree; run ids: $(strip_quotes "$(nm_field id)"), competing identity unavailable"
           fi
         else
-          if [ "$(fm_nm_run_status_class "$ledger_status")" = live ]; then
-            emit unknown run-step "replacement run identity unavailable; run ids: $(strip_quotes "$(nm_field id)"), replacement unavailable"
-          elif [ -n "$ledger_status" ] \
-            && [ "$ledger_status" != "$(strip_quotes "$(nm_field status)")" ] \
-            && [ "$ledger_status" != "$(strip_quotes "$(nm_field outcome)")" ]; then
+          if [ "$(fm_nm_run_status_class "$ledger_status")" = live ] \
+            || { [ -n "$ledger_status" ] \
+              && [ "$ledger_status" != "$(strip_quotes "$(nm_field status)")" ] \
+              && [ "$ledger_status" != "$(strip_quotes "$(nm_field outcome)")" ]; }; then
             COARSE_STATUS=$ledger_status
             RUN_SOURCE=coarse
           fi
@@ -1013,12 +1024,21 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
         COARSE_STATUS=$(fm_nm_runs_status_for_worktree "$WT" "$CREW_BRANCH" "$(nm_runs_list)")
         if [ -n "$COARSE_STATUS" ]; then
           HAVE_RUN=1
-          # A branch-matching answer the strict rule rejected is this branch's
-          # own current run once the ledger proves the pipeline-owned
+          # A branch-matching answer the strict rule rejected is this
+          # branch's own current run once the ledger proves the pipeline-owned
           # continuation, so its axi TOON is the authoritative run detail
           # (RUN_SOURCE stays full); only a foreign-branch answer leaves
-          # coarse status-word detail.
-          [ "$run_branch" = "$CREW_BRANCH" ] || RUN_SOURCE=coarse
+          # coarse status-word detail. A TERMINAL branch-matching record is
+          # not that continuation: the ledger is creation-ordered and scanned
+          # newest-first, so a LIVE answer then names a NEWER run at this
+          # worktree's own head, and the terminal TOON is the corpse of a
+          # superseded validation (2026-09-10 account-ansible-infra) - the
+          # verdict must come from the live row, not the corpse's outcome.
+          if [ "$run_branch" != "$CREW_BRANCH" ] \
+            || { ! fm_nm_run_is_active "$RUN_OUT" \
+              && [ "$(fm_nm_run_status_class "$COARSE_STATUS")" = live ]; }; then
+            RUN_SOURCE=coarse
+          fi
         fi
       fi
     fi
