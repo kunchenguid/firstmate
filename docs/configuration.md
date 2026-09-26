@@ -1175,6 +1175,17 @@ Firstmate passes its profile line unless it states a reason to override, such as
 
 The live rule-match evidence is recorded in [`verification/dispatch-resolve.md`](verification/dispatch-resolve.md).
 
+### Jev decision log
+
+An opted-in resolver call that exits 0 attempts to append one decision record to the home's `state/jev-decisions.jsonl` and prints its `decision_id:` line if the append succeeds, whatever its status; the off path and exit-2 configuration errors are not calls and write nothing.
+The header of `bin/fm-jev-decisions.sh` owns the record schema; the digest fields do not expose the brief text or key.
+The outcome the supervisor actually took is a second record in the same file joined on `decision_id`: `bin/fm-spawn.sh` records the profile a fresh ship or scout spawn launched against the newest decision for that task only if it has no outcome yet, and firstmate records any other fate, such as holding a decision for the captain or declining to dispatch, with `bin/fm-jev-decisions.sh outcome`.
+`bin/fm-jev-decisions.sh report` prints the clear, ambiguous, escalate, and error rates and the followed or overridden counts per class, where a class is the full `when` text of the rule actually resolved after fallback, so an escalation class and a work-brief class are measured apart and any later threshold is set per class from this log rather than as one global number.
+The report prints no token or cost figure, because token counts alone support no spend claim.
+The log is measurement evidence and a replay corpus only: nothing reads it to grant permission, choose effort, wake or suppress a wake, mark work done, or decide state, and the watcher never reads it.
+The log is created with mode 600 before the first append; subsequent writes use a bounded lock wait.
+Writing it never changes a resolver outcome or blocks a spawn; a record that cannot be written is dropped.
+
 ## Toolchain
 
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with either an exact install command or manual instructions.

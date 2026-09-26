@@ -23,7 +23,7 @@ BASE_RULES="$TMP_ROOT/rules.json"
 RULES="$HOME_DIR/config/crew-dispatch.json"
 QUOTA="$TMP_ROOT/quota.json"
 BASE_PATH=$PATH
-mkdir -p "$HOME_DIR/config" "$LOG" "$NO_CURL_BIN"
+mkdir -p "$HOME_DIR/config" "$HOME_DIR/state" "$LOG" "$NO_CURL_BIN"
 for command_name in bash chmod cp dirname jq mktemp rm; do
   ln -s "$(command -v "$command_name")" "$NO_CURL_BIN/$command_name"
 done
@@ -173,7 +173,7 @@ run() {
 run_without_curl() {
   local __exit=$1 __out=$2 __err=$3 _out _code
   shift 3
-  _out=$(PATH="$NO_CURL_BIN" FM_HOME="$HOME_DIR" TYPESAFE_API_KEY="$KEY" "$TOOL" "$@" 2> "$TMP_ROOT/stderr")
+  _out=$(PATH="$NO_CURL_BIN" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$TMP_ROOT/no-curl-state" TYPESAFE_API_KEY="$KEY" "$TOOL" "$@" 2> "$TMP_ROOT/stderr")
   _code=$?
   printf -v "$__exit" '%s' "$_code"
   printf -v "$__out" '%s' "$_out"
@@ -183,6 +183,8 @@ run_without_curl() {
 KEY='test-key-9f1c2d3e-never-on-argv'
 code='' out='' err=''
 
+if [[ ${FM_TEST_DECISION_ONLY:-0} != 1 ]]; then
+if [ "${FM_TEST_DECISION_LOG_ONLY:-0}" != 1 ]; then
 # --- absent key: off, silent on stdout, no network, no quota read -----------
 reset_log
 write_response "$RESPONSE" rule_4 0.9
@@ -245,6 +247,12 @@ assert_not_contains "$body" 'SECRET-WHY-TEXT' "why text never leaves the machine
 assert_not_contains "$body" 'spendPriority' "quota never leaves the machine"
 assert_not_contains "$body" 'cursor-grok' "use profiles never leave the machine"
 pass "clear: one rule Choice request, key on the fd header only, spendPriority argmax over every candidate"
+LONG_WHEN="$(printf '%081d' 0)full-rule-identity"
+jq --arg when "$LONG_WHEN" '.rules[3].when = $when' "$BASE_RULES" > "$RULES"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_equals "$LONG_WHEN" "$(jq -r 'select(.kind == "decision") | .choice_when' "$HOME_DIR/state/jev-decisions.jsonl" | tail -n 1)" "decision stores the complete rule text"
+cp "$BASE_RULES" "$RULES"
 
 # --- rules are snapshotted and line output is injection-safe -------------------
 MUTATED_RULES="$TMP_ROOT/mutated-rules.json"
@@ -360,6 +368,7 @@ TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" '  status: clear' "a top rule below its own floor falls to a runner-up that clears its floor"
 assert_contains "$out" '  rule: rule_2 (The task generates images.)   confidence: 0.76' "the model's own pick stays visible"
 assert_contains "$out" '  fallback: rule_4 (A simple bug fix with a stated root cause.) probability 0.18 clears its floor 0.1; rule_2 probability 0.76 is below its floor 0.9' "the fallback names both floors"
+assert_equals 'The task generates images.|A simple bug fix with a stated root cause.|rule_4' "$(jq -r '[.choice_when,.resolved_when,.resolved] | join("|")' "$HOME_DIR/state/jev-decisions.jsonl" | tail -n 1)" "decision evidence retains the original pick and the resolved class"
 assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "the runner-up rule's profiles are resolved"
 assert_not_contains "$(cat "$LOG/body")" 'min_confidence' "the model never sees confidence floors"
 
@@ -808,6 +817,15 @@ printf '%s\n' '{"model":"jev","answers":{}}' > "$RESPONSE"
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" '  reason: response is not a rule Choice answer' "a malformed answer is an error outcome"
 reset_log
+before=$(jq -s 'length' "$HOME_DIR/state/jev-decisions.jsonl")
+write_response "$RESPONSE" rule_4 0.9
+jq '.answers.rule.choice = 4' "$RESPONSE" > "$TMP_ROOT/numeric-choice.json"
+mv "$TMP_ROOT/numeric-choice.json" "$RESPONSE"
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: error' "a numeric choice is an error outcome"
+assert_equals "$((before + 1))" "$(jq -s 'length' "$HOME_DIR/state/jev-decisions.jsonl")" "a malformed numeric choice writes exactly one decision"
+assert_equals 'error|number|null' "$(jq -r '[.status, (.choice | type), (.choice_when | tostring)] | join("|")' "$HOME_DIR/state/jev-decisions.jsonl" | tail -n 1)" "the decision preserves the malformed choice without inventing a rule"
+reset_log
 write_response "$RESPONSE" rule_4 0.9
 jq '.usage = "bad"' "$RESPONSE" > "$TMP_ROOT/malformed-usage.json"
 mv "$TMP_ROOT/malformed-usage.json" "$RESPONSE"
@@ -905,5 +923,70 @@ run code out err --help
 expect_code 0 "$code" "--help exits 0"
 assert_contains "$out" 'Usage:' "--help prints usage"
 pass "configuration errors exit 2 before any network call"
+
+fi
+fi
+# --- decision log: one envelope line per opted-in call, never the key --------
+JEV_LOG="$HOME_DIR/state/jev-decisions.jsonl"
+mkdir -p "$HOME_DIR/state" "$HOME_DIR/data/pager-fix"
+TASK_BRIEF="$HOME_DIR/data/pager-fix/brief.md"
+cp "$BRIEF" "$TASK_BRIEF"
+cp "$BASE_RULES" "$RULES"
+rm -f "$JEV_LOG"
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+run code out err "$TASK_BRIEF" --project pager
+assert_absent "$JEV_LOG" "an off resolver writes no decision record"
+TYPESAFE_API_KEY=$KEY run code out err "$TASK_BRIEF" --project pager
+expect_code 0 "$code" "a logged clear call exits 0"
+assert_contains "$out" '  status: clear' "logging leaves the clear outcome unchanged"
+id_line=$(grep '^  decision_id: ' <<<"$out")
+decision_id=${id_line#  decision_id: }
+assert_equals '1' "$(wc -l < "$JEV_LOG" | tr -d ' ')" "one clear call writes one line"
+record=$(cat "$JEV_LOG")
+assert_equals "$decision_id" "$(jq -r .decision_id <<<"$record")" "the printed decision_id names the logged record"
+assert_equals '1|decision|dispatch.rule|pager-fix|pager|whole' "$(jq -r '[.schema_version, .kind, .question_id, .task, .project, .brief_kind] | join("|")' <<<"$record")" "the envelope names its question, task, project, and brief kind"
+assert_equals 'jev-latest|jev-1.13.0|rule_4|rule_4|0.9|0.96|clear' "$(jq -r '[.model_requested, .model, .choice, .resolved, .confidence, .probabilities.rule_4, .status] | join("|")' <<<"$record")" "the envelope keeps the model version, answer, probabilities, and status"
+assert_equals 'A simple bug fix with a stated root cause.' "$(jq -r .choice_when <<<"$record")" "the envelope names the picked class by its option text"
+assert_equals 'true|true|true' "$(jq -r '[(.latency_ms | type == "number"), (.state_digest | test("^[0-9a-f]{64}$")), (.question_digest | test("^[0-9a-f]{64}$"))] | join("|")' <<<"$record")" "latency and both digests are recorded"
+expected_state_digest=$(jq -cS .state "$LOG/body" | { if command -v shasum >/dev/null 2>&1; then shasum -a 256; else sha256sum; fi; } | awk '{print $1}')
+assert_equals "$expected_state_digest" "$(jq -r .state_digest <<<"$record")" "the state digest is the digest of the exact state sent"
+assert_equals '{"harness":"cursor","model":"cursor-grok-4.6-medium"}' "$(jq -c .profile <<<"$record")" "the envelope keeps the resolver's profile"
+assert_not_contains "$record" "$KEY" "the decision log never holds the key"
+assert_not_contains "$record" 'off-by-one' "the decision log holds a digest, never the brief text"
+
+reset_log
+write_response "$RESPONSE" rule_4 0.4
+TYPESAFE_API_KEY=$KEY run code out err "$TASK_BRIEF" --project pager
+assert_equals 'ambiguous' "$(tail -n 1 "$JEV_LOG" | jq -r .status)" "an ambiguous call is logged with its status"
+assert_equals 'null' "$(tail -n 1 "$JEV_LOG" | jq -c .profile)" "a non-clear call logs no profile"
+
+reset_log
+TYPESAFE_API_KEY=$KEY FAKE_CURL_FAIL=1 run code out err "$TASK_BRIEF" --project pager
+assert_contains "$out" '  status: error' "a transport failure is still an error outcome"
+assert_contains "$out" '  decision_id: ' "an error outcome still prints its decision_id"
+assert_equals 'error|null|null' "$(tail -n 1 "$JEV_LOG" | jq -r '[.status, (.model | tostring), (.choice | tostring)] | join("|")')" "an error call is logged without an answer"
+
+rm -f "$RULES"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$TASK_BRIEF"
+assert_equals 'escalate|no rules to match|null' "$(tail -n 1 "$JEV_LOG" | jq -r '[.status, .reason, (.state_digest | tostring)] | join("|")')" "a no-rules call is logged with no state digest because nothing was sent"
+cp "$BASE_RULES" "$RULES"
+assert_equals '4' "$(wc -l < "$JEV_LOG" | tr -d ' ')" "every opted-in call wrote exactly one line"
+
+TYPESAFE_API_KEY=$KEY run code out err "$TASK_BRIEF" --bogus
+expect_code 2 "$code" "a usage error still exits 2"
+assert_equals '4' "$(wc -l < "$JEV_LOG" | tr -d ' ')" "a usage error is not a call and writes no line"
+
+chmod 500 "$HOME_DIR/state"
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+TYPESAFE_API_KEY=$KEY run code out err "$TASK_BRIEF" --project pager
+chmod 700 "$HOME_DIR/state"
+expect_code 0 "$code" "an unwritable log never changes the exit status"
+assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "an unwritable log never changes the outcome"
+assert_not_contains "$out" 'decision_id:' "an unwritten record prints no decision_id"
+rm -rf "$HOME_DIR/state" "$HOME_DIR/data"
+pass "decision log: one envelope per opted-in call with digests, answer, and status; logging never changes the outcome"
 
 printf '# all fm-dispatch-resolve tests passed\n'
