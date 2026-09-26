@@ -6,6 +6,7 @@
 #          exits 0.
 #          Silent = all good.
 #          Lines: "MISSING: <tool> (install: <command>)",
+#                 "OUTDATED: <tool> (installed: <version|unparseable>; requires <floor|capability>; upgrade: <command>)",
 #                 "PRESENTATION_UNAVAILABLE: lavish-axi (requires >=<floor>; install: <command>) - nonvisual work may proceed with plain-text decisions and reports; install or upgrade before using Lavish",
 #                 "MISSING_MANUAL: <tool> (instructions: <url>)", "NEEDS_GH_AUTH",
 #                 "BACKEND_INVALID: <name> (known: <names>)",
@@ -53,17 +54,22 @@
 #          A TANGLE line means the firstmate primary checkout (FM_ROOT) is stranded
 #          on a feature branch instead of its default branch - a crewmate's work
 #          landed in the primary instead of its own worktree; restore it per the line.
-#          treehouse is also MISSING when its installed version lacks
+#          A present-but-below-floor tool is OUTDATED, never MISSING: its line
+#          carries the installed version (or "unparseable") and the tool's own
+#          upgrade command, which runs no first-install-only step such as
+#          `setup hooks` or a `curl | sh` installer. MISSING stays for absent
+#          tools only.
+#          treehouse is OUTDATED when its installed version lacks
 #          "treehouse get --lease" support.
-#          no-mistakes is also MISSING when its installed version is older than
+#          no-mistakes is OUTDATED when its installed version is older than
 #          1.46.0 (structured pipeline attestation floor; see CONTRIBUTING.md).
 #          The AXI-family floor policy is owned beside GH_AXI_MIN and
-#          LAVISH_AXI_MIN below; the per-tool owners point there. An installed
-#          essential build below its floor reports MISSING like no-mistakes.
+#          LAVISH_AXI_MIN below; the per-tool owners point there.
 #          Missing or incompatible lavish-axi reports PRESENTATION_UNAVAILABLE:
 #          nonvisual dispatch continues with plain-text decisions and reports,
 #          but Lavish use still requires a compatible build at or above its floor.
-#          tasks-axi feature probes remain a separate defense-in-depth check.
+#          tasks-axi feature probes remain a separate defense-in-depth check, and
+#          a build failing one is OUTDATED like a below-floor build.
 #          tasks-axi and quota-axi are essential bootstrap tools.
 #          A compatible tasks-axi default backend is silent.
 #          quota-axi is required for the agent-owned dispatch-profile array
@@ -803,6 +809,19 @@ install_cmd() {
   esac
 }
 
+# A tool's own updater for the OUTDATED remediation. Every entry here runs no
+# first-install step, so an upgrade never re-runs a hook setup or an installer
+# script; a tool with no self-updater reuses its install command rather than an
+# invented one, and the header above owns that absent-versus-outdated split.
+upgrade_cmd() {
+  case "$1" in
+    treehouse) echo "treehouse update" ;;
+    no-mistakes) echo "no-mistakes update" ;;
+    gh-axi|quota-axi) echo "$1 update" ;;
+    *) install_cmd "$1" ;;
+  esac
+}
+
 manual_install_url() {
   case "$1" in
     herdr) echo "https://herdr.dev" ;;
@@ -867,6 +886,30 @@ tool_version_at_least() {  # <tool> <min-version>
   [ "$minor" -gt "$min_minor" ] && return 0
   [ "$minor" -eq "$min_minor" ] || return 1
   [ "$patch" -ge "$min_patch" ]
+}
+
+# The installed version an OUTDATED line reports, or "unparseable" when the tool
+# does not report exactly one major.minor.patch triple. It parses with the same
+# rule as tool_version_at_least so a version a floor would refuse is never
+# displayed as a clean one.
+tool_version() {  # <tool>
+  local tool=$1 output version
+  command -v "$tool" >/dev/null 2>&1 || { printf 'unparseable'; return 0; }
+  output=$("$tool" --version 2>/dev/null) || { printf 'unparseable'; return 0; }
+  version=$(printf '%s\n' "$output" | sed -nE 's/.*[vV]?([0-9]+)\.([0-9]+)\.([0-9]+).*/\1.\2.\3/p' | head -n 1)
+  [ -n "$version" ] || version=unparseable
+  printf '%s' "$version"
+}
+
+# The requirement a tasks-axi OUTDATED line reports: its version floor plus any
+# capability the shared probe (bin/fm-tasks-axi-lib.sh) requires that this build
+# lacks, so a build already at the floor still names the feature it is missing.
+tasks_axi_requirement() {
+  local req=$FM_TASKS_AXI_MIN missing_features=
+  fm_tasks_axi_update_has_archive_body || missing_features='update --archive-body'
+  fm_tasks_axi_mv_has_multi_id || missing_features="${missing_features:+$missing_features and }mv multi-ID"
+  [ -z "$missing_features" ] || req="$req with $missing_features"
+  printf '%s' "$req"
 }
 
 x_mode_write_if_changed() {
@@ -1394,22 +1437,22 @@ detect_local_tools() {
   # own worktrees); an orca home must not be told to upgrade a provider it never uses.
   if fm_backend_list_contains "$TOOLS" treehouse \
     && command -v treehouse >/dev/null 2>&1 && ! treehouse_supports_lease; then
-    echo "MISSING: treehouse (install: $(install_cmd treehouse))"
+    echo "OUTDATED: treehouse (installed: $(tool_version treehouse); requires --lease support; upgrade: $(upgrade_cmd treehouse))"
   fi
   if command -v no-mistakes >/dev/null 2>&1 && ! tool_version_at_least no-mistakes "$NO_MISTAKES_MIN"; then
-    echo "MISSING: no-mistakes (install: $(install_cmd no-mistakes))"
+    echo "OUTDATED: no-mistakes (installed: $(tool_version no-mistakes); requires $NO_MISTAKES_MIN; upgrade: $(upgrade_cmd no-mistakes))"
   fi
   if command -v gh-axi >/dev/null 2>&1 && ! tool_version_at_least gh-axi "$GH_AXI_MIN"; then
-    echo "MISSING: gh-axi (install: $(install_cmd gh-axi))"
+    echo "OUTDATED: gh-axi (installed: $(tool_version gh-axi); requires $GH_AXI_MIN; upgrade: $(upgrade_cmd gh-axi))"
   fi
   if ! tool_version_at_least lavish-axi "$LAVISH_AXI_MIN"; then
     echo "PRESENTATION_UNAVAILABLE: lavish-axi (requires >=$LAVISH_AXI_MIN; install: $(install_cmd lavish-axi)) - nonvisual work may proceed with plain-text decisions and reports; install or upgrade before using Lavish"
   fi
   if command -v quota-axi >/dev/null 2>&1 && ! fm_quota_axi_compatible; then
-    echo "MISSING: quota-axi (install: $(install_cmd quota-axi))"
+    echo "OUTDATED: quota-axi (installed: $(tool_version quota-axi); requires $FM_QUOTA_AXI_MIN; upgrade: $(upgrade_cmd quota-axi))"
   fi
   if command -v tasks-axi >/dev/null 2>&1 && ! fm_tasks_axi_compatible; then
-    echo "MISSING: tasks-axi (install: $(install_cmd tasks-axi))"
+    echo "OUTDATED: tasks-axi (installed: $(tool_version tasks-axi); requires $(tasks_axi_requirement); upgrade: $(upgrade_cmd tasks-axi))"
   fi
 }
 

@@ -1227,14 +1227,17 @@ A herdr, zellij, or cmux home is therefore never told `tmux` is missing, and the
 - When `config/crew-dispatch.json` exists, bootstrap also requires `jq` for dispatch profile validation.
 - When Relay is opted in, bootstrap also requires `curl` and `jq` before arming the relay poll shim.
 
-**Missing-tool diagnostics**
+**Missing and outdated tool diagnostics**
 
 `tasks-axi` and `quota-axi` are essential bootstrap tools in every profile.
+An absent tool reports `MISSING:` with its install command, while a present tool below its floor or missing a required capability reports `OUTDATED:` with its installed version (or `unparseable`), requirement, and upgrade command; [`bin/fm-bootstrap.sh`](../bin/fm-bootstrap.sh)'s header owns both exact line formats.
 
-- An absent or incompatible `tasks-axi` reports `MISSING: tasks-axi (install: npm install -g tasks-axi)`; when `config/backlog-backend` is not `manual`, a home with a configured non-markdown adapter or a markdown backlog refuses lifecycle mutation until compatible `tasks-axi` is on `PATH`, while a manual-backend home keeps its backlog hand-edited.
-- An absent or incompatible `gh-axi` reports `MISSING: gh-axi (install: npm install -g gh-axi && gh-axi setup hooks)`.
+- An absent `treehouse` reports `MISSING:` with its install command, while an installed build without `treehouse get --lease` support reports `OUTDATED:` with the `treehouse update` upgrade.
+- An absent `no-mistakes` reports `MISSING:` with its install command, while a version below 1.46.0 or an unparseable version reports `OUTDATED:` with the `no-mistakes update` upgrade.
+- An absent `tasks-axi` reports `MISSING: tasks-axi (install: npm install -g tasks-axi)` and a below-floor or feature-incompatible one reports `OUTDATED:` with its required version and any missing feature-probe capability, while retaining that same `npm install -g tasks-axi` upgrade; when `config/backlog-backend` is not `manual`, a home with a configured non-markdown adapter or a markdown backlog refuses lifecycle mutation until compatible `tasks-axi` is on `PATH`, while a manual-backend home keeps its backlog hand-edited.
+- An absent `gh-axi` reports `MISSING: gh-axi (install: npm install -g gh-axi && gh-axi setup hooks)` and an outdated one reports `OUTDATED:` with its `gh-axi update` upgrade.
 - An absent or incompatible `lavish-axi` reports `PRESENTATION_UNAVAILABLE` with its required floor, install command, and explicit text fallback; [`bootstrap-diagnostics`](../.agents/skills/bootstrap-diagnostics/SKILL.md) owns the response and compatibility check before visual use.
-- An absent or too-old `quota-axi` reports `MISSING: quota-axi (install: npm install -g quota-axi)`; firstmate cannot resolve a profile array without a compatible binary.
+- An absent `quota-axi` reports `MISSING: quota-axi (install: npm install -g quota-axi)` and an incompatible one reports `OUTDATED:` with its `quota-axi update` upgrade; firstmate cannot resolve a profile array without a compatible binary.
 
 **Checkout diagnostics**
 
