@@ -1823,6 +1823,11 @@ elif [ "$KIND" = secondmate ]; then
     ;;
   esac
 else
+  if [ "${#POS[@]}" -lt 2 ]; then
+    echo "error: a ship or scout spawn requires a <project-dir> positional after the task id (e.g. projects/<name>)" >&2
+    usage >&2
+    exit 2
+  fi
   PROJ=${POS[1]}
   ARG3=${POS[2]:-}
 fi
@@ -2842,7 +2847,13 @@ if [ "$KIND" = secondmate ]; then
     BRIEF="$DATA/$ID/brief.md"
   fi
 else
-  PROJ_ABS="$(cd "$(resolve_project_dir_arg "$PROJ")" && pwd)"
+  PROJ_RESOLVED=$(resolve_project_dir_arg "$PROJ")
+  if [ ! -d "$PROJ_RESOLVED" ]; then
+    echo "error: project directory '$PROJ' does not resolve to a directory (pass projects/<name> or a directory path)" >&2
+    usage >&2
+    exit 2
+  fi
+  PROJ_ABS="$(cd "$PROJ_RESOLVED" && pwd)"
   WT=""
   BRIEF="$DATA/$ID/brief.md"
 fi
