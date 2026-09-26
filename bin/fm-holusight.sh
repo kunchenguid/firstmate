@@ -75,12 +75,23 @@ enabled=$(printf '%s\n' "$settings" | sed -n 's/^enabled=//p' | head -n1)
 question=$(printf '%s\n' "$settings" | sed -n 's/^question=//p' | head -n1)
 timeout=$(printf '%s\n' "$settings" | sed -n 's/^timeout=//p' | head -n1)
 
-if [ "$enabled" != 1 ]; then
-  if [ "$BENCHMARK" -eq 1 ]; then
-    printf '%s\n' '{"schema":"firstmate.holusight-benchmark.v1","enabled":false,"disabled_result":"not_used","enabled_result":"not_used","token_delta":"unknown","usability":"not_used"}'
-  else
-    printf '%s\n' '### Holusight startup evidence' 'not-used: disabled for this project; no application-repository writes'
-  fi
+disabled_elapsed_ms=
+if [ "$BENCHMARK" -eq 1 ]; then
+  disabled_started_ns=$(python3 - <<'PY'
+import time
+print(time.monotonic_ns())
+PY
+)
+  :
+  disabled_finished_ns=$(python3 - <<'PY'
+import time
+print(time.monotonic_ns())
+PY
+)
+  disabled_elapsed_ms=$(( (disabled_finished_ns - disabled_started_ns) / 1000000 ))
+fi
+if [ "$enabled" != 1 ] && [ "$BENCHMARK" -eq 0 ]; then
+  printf '%s\n' '### Holusight startup evidence' 'not-used: disabled for this project; no application-repository writes'
   exit 0
 fi
 
@@ -96,7 +107,7 @@ resolve_holus() {
 HOLUS=$(resolve_holus)
 if [ -z "$HOLUS" ]; then
   if [ "$BENCHMARK" -eq 1 ]; then
-    printf '%s\n' '{"schema":"firstmate.holusight-benchmark.v1","enabled":true,"disabled_result":"not_used","enabled_result":"unavailable","token_delta":"unknown","usability":"unknown"}'
+    printf '{"schema":"firstmate.holusight-benchmark.v1","enabled":true,"disabled_result":"not_used","disabled_elapsed_ms":%s,"enabled_result":"unavailable","token_delta":"unknown","usability":"unknown"}\n' "$disabled_elapsed_ms"
   else
     printf '%s\n' '### Holusight startup evidence' 'not-used: existing local holus executable not discoverable; no install or indexing attempted'
   fi
@@ -110,7 +121,7 @@ PY
 )
 set +e
 output=$(HOLUS_EGRESS=0 HOLUSIGHT_EGRESS=0 FLEET_HOLUSIGHT_EGRESS=0 \
-  python3 - "$HOLUS" "$question" "$timeout" <<'PY'
+  python3 - "$HOLUS" "$question" "$timeout" "$PROJECT_ROOT" <<'PY'
 import subprocess
 import sys
 
@@ -119,7 +130,7 @@ try:
         [sys.argv[1], "evidence", sys.argv[2], "--mode", "auto", "--fields",
          "evidence.source,evidence.location,coverage,providers_checked,egress",
          "--format", "toon"],
-        capture_output=True, text=True, timeout=float(sys.argv[3]), check=False,
+        capture_output=True, text=True, timeout=float(sys.argv[3]), cwd=sys.argv[4], check=False,
     )
 except (OSError, subprocess.SubprocessError, ValueError):
     raise SystemExit(1)
@@ -140,7 +151,7 @@ elapsed_ms=$(( (finished_ns - started_ns) / 1000000 ))
 
 if [ "$BENCHMARK" -eq 1 ]; then
   if [ "$code" -eq 0 ]; then result=used; else result=unavailable; fi
-  printf '{"schema":"firstmate.holusight-benchmark.v1","enabled":true,"disabled_result":"not_used","enabled_result":"%s","enabled_elapsed_ms":%s,"token_delta":"unknown","usability":"unknown","egress":"not_allowed_by_firstmate"}\n' "$result" "$elapsed_ms"
+  printf '{"schema":"firstmate.holusight-benchmark.v1","enabled":true,"disabled_result":"not_used","disabled_elapsed_ms":%s,"enabled_result":"%s","enabled_elapsed_ms":%s,"token_delta":"unknown","usability":"unknown","egress":"not_allowed_by_firstmate"}\n' "$disabled_elapsed_ms" "$result" "$elapsed_ms"
   exit 0
 fi
 if [ "$code" -ne 0 ] || [ -z "$output" ]; then
