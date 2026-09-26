@@ -132,6 +132,7 @@ A captain who leaves while an attended turn runs turns its captain outcomes into
 Where the attended host runs - the readiness list above holds and the dialog mirror passes the feed's validation - quiet mode is a statement: no daemon, no away record, and no flag, because routine wakes already stay off main.
 While the [broken-session latch](#the-broken-session-latch) holds, until a probe succeeds, the check says instead that the session is paused, that routine wakes reach main until it recovers, and when it retries, and still nothing starts.
 In both cases a quiet entry refuses to write the away record, which would park a present captain's main.
+While an `/afk` away record is live there, the check and a quiet entry both refuse and name it: `/quiet` is the captain's return, so the `/afk` return and its catch-up gate run first, then the check again.
 Where the home opted in but a readiness item or the mirror is missing, the check names it and quiet mode enters through the daemon, as without the host.
 
 ## The dialog mirror
@@ -397,7 +398,7 @@ Each arm owner's own suite covers its host mode against a stub host.
 | `tests/fm-watch-checkpoint.test.sh` | The Codex checkpoint's host mode against a stub host. |
 | `tests/fm-supervision-instructions.test.sh` | The rendered protocol, including Grok's arm command. |
 | `tests/fm-host-mirror.test.sh` | The dialog mirror's writers through the tracked Claude and Cursor registrations, the opt-in gate, the feed, and the verified-writer list. |
-| `tests/fm-afk-launch.test.sh` | `/quiet`'s check on an opted-in home: the statement, the paused statement, each named missing item, and the quiet entry's refusal. |
+| `tests/fm-afk-launch.test.sh` | `/quiet`'s check on an opted-in home: the statement, the paused statement, each named missing item, the quiet entry's refusal, and the refusal under a live away record until the return. |
 | `tests/fm-afk-return.test.sh` | The return's drain-owned read-cursor advance through the away window on a host home, and none on Pi. |
 | `tests/fm-supervision-host-live-e2e.test.sh` | Runs a real engine turn; opt-in because it spends tokens. |
 | `tests/fm-host-mirror-live-e2e.test.sh` | Proves the Claude and Cursor mirror writers against the real harnesses; opt-in because it spends tokens. |

@@ -1080,6 +1080,59 @@ unit_supervision_host_quiet_check() {
   rm -rf "$st"
 }
 
+# /afk then /quiet on a Claude home whose attended host runs: the away record
+# still parks main, so quiet-check and a quiet enter refuse and name it, and
+# once the /afk return archives it and its catch-up gate clears, /quiet is the
+# statement again.
+unit_supervision_host_quiet_after_afk() {
+  local st engine out rc
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-quiet-away.XXXXXX")
+  mkdir -p "$st/state" "$st/config" "$st/data"
+  engine="$st/claude-engine"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$engine"
+  chmod +x "$engine"
+  printf 'claude\n' > "$st/config/supervision-host"
+  printf '%s\n' "$$" > "$st/state/.lock"
+  printf '%s\n' '{"seq":1,"key":"k","tag":"captain","text":"watch the fleet"}' > "$st/state/.host-mirror.jsonl"
+  cp "$ROOT/.tasks.toml" "$st/.tasks.toml"
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$st/data/backlog.md"
+  in_home() {
+    FM_SUPERVISION_ENGINE_CLAUDE_BIN="$engine" FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$@" 2>&1
+  }
+
+  out=$(in_home "$LAUNCH" enter --words "back after lunch"); rc=$?
+  [ "$rc" -eq 0 ] && [ -f "$st/state/.afk-contract" ] && [ ! -e "$st/state/.afk" ] \
+    || fail "/afk on an opted-in claude home must write the away record and no daemon flag (rc=$rc): $out"
+  cp "$st/state/.afk-contract" "$st/away-record"
+  out=$(in_home "$LAUNCH" quiet-check); rc=$?
+  if [ "$rc" -ne 2 ] || printf '%s' "$out" | grep -F 'Quiet mode needs nothing' >/dev/null \
+    || ! printf '%s' "$out" | grep -F 'away record (state/.afk-contract) is live' >/dev/null; then
+    fail "quiet-check under a live away record must refuse and name it (rc=$rc): $out"
+  fi
+  out=$(in_home env FM_AFK_MODE=quiet "$LAUNCH" enter --words "stay quiet"); rc=$?
+  if [ "$rc" -ne 3 ] || ! printf '%s' "$out" | grep -F 'away record (state/.afk-contract) is live' >/dev/null; then
+    fail "a quiet enter under a live away record must refuse and name it (rc=$rc): $out"
+  fi
+  cmp -s "$st/state/.afk-contract" "$st/away-record" && [ ! -e "$st/state/.afk" ] \
+    || fail "a refused quiet enter must leave the away record untouched and start nothing"
+  pass "supervision host: /quiet under a live away record refuses and names the record"
+
+  touch "$st/state/.last-watcher-beat"
+  out=$(in_home "$ROOT/bin/fm-afk-return.sh"); rc=$?
+  if [ "$rc" -ne 0 ] || [ -e "$st/state/.afk-contract" ] || [ -e "$st/state/.afk-return-catchup" ]; then
+    fail "the /afk return must archive the away record and clear its catch-up gate (rc=$rc): $out"
+  fi
+  out=$(in_home "$LAUNCH" quiet-check); rc=$?
+  if [ "$rc" -ne 0 ] || ! printf '%s' "$out" | grep -F 'Quiet mode needs nothing on this home' >/dev/null; then
+    fail "quiet-check after the return must say quiet mode needs nothing (rc=$rc): $out"
+  fi
+  out=$(in_home env FM_AFK_MODE=quiet "$LAUNCH" enter --words "stay quiet"); rc=$?
+  [ "$rc" -eq 3 ] && [ ! -e "$st/state/.afk-contract" ] && [ ! -e "$st/state/.afk" ] \
+    || fail "a quiet enter after the return must write nothing where the attended host runs (rc=$rc): $out"
+  pass "supervision host: after the /afk return and its catch-up gate, /quiet is the statement again"
+  rm -rf "$st"
+}
+
 unit_native_entry_preserves_prepared_state() {
   local st
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-native-entry.XXXXXX")
@@ -1541,6 +1594,7 @@ unit_native_lifecycle
 unit_supervision_host_claude_home_runs_no_away_daemon
 unit_supervision_host_other_harnesses_run_no_away_daemon
 unit_supervision_host_quiet_check
+unit_supervision_host_quiet_after_afk
 unit_native_entry_preserves_prepared_state
 unit_close_failure_preserves_record
 unit_record_publication_atomic

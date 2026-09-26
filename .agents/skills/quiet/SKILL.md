@@ -27,6 +27,7 @@ The only things quiet mode changes are which mode the flag declares and what exi
    When that line instead says the supervision session is paused after repeated engine errors, still enter nothing, and tell the captain plainly that routine updates reach them until it recovers, and when it next retries.
    `/quiet off` then needs nothing either.
    When it exits 1, continue with step 1; if it printed a line, first tell the captain plainly what keeps supervision from already being quiet here.
+   When it exits 2, its line names this home's live away record: `/quiet` then means the captain returned (`AGENTS.md` section 8), so enter nothing yet, run the `afk` skill's return first ("How to exit: the return": `bin/fm-afk-return.sh` archives the record, then pass its catch-up gate until `bin/fm-afk-return.sh check` succeeds), and then run `quiet-check` again and follow its result.
 
 1. **Enter the lifecycle through `bin/fm-afk-launch.sh`, exactly as `/afk`
    does, with `FM_AFK_MODE=quiet` set first.**

@@ -33,7 +33,11 @@
 # succeeds, `quiet-check` says instead that the session is paused, that routine
 # wakes reach main until it recovers, and when it retries. Either way a quiet
 # `enter` refuses there (exit 3) before writing anything, so a quiet entry
-# never leaves an away record that would park a present captain's main. Where
+# never leaves an away record that would park a present captain's main. While
+# the away record of an `/afk` on that home is live, `quiet-check` refuses
+# (exit 2) and a quiet `enter` refuses (exit 3), both naming the record: the
+# captain's return comes first (bin/fm-afk-return.sh and its catch-up gate),
+# then quiet-check again. Where
 # the home opted in but one of those is missing, `quiet-check` names what is
 # missing and quiet mode enters through the daemon as it does without the
 # host. A quiet daemon already running keeps running until `/quiet off`.
@@ -87,6 +91,8 @@
 #                              Exit 1 when quiet mode enters through `enter` and
 #                              the daemon, printing one line naming why only
 #                              where the home opted into the supervision host.
+#                              Exit 2 with one line naming the away record while
+#                              it is live on a home that opted in.
 #
 # Supported backends: herdr, tmux. Others (zellij, orca, cmux) have no verified
 # non-visible-launch primitive here yet and refuse loudly.
@@ -236,10 +242,11 @@ fm_afk_launch_host_primary() {  # <harness>
 }
 
 # True when quiet mode needs nothing on this home (the header's QUIET MODE).
-# Otherwise false, with FM_AFK_LAUNCH_QUIET_WHY naming what the attended host
-# lacks on a home that opted in, or empty where quiet mode is the daemon's as
-# it is without the host: no opt-in, another primary, or a quiet daemon that
-# already runs.
+# Returns 2 on a home that opted in while the away record is live, because the
+# captain's return comes first. Otherwise false, with FM_AFK_LAUNCH_QUIET_WHY
+# naming what the attended host lacks on a home that opted in, or empty where
+# quiet mode is the daemon's as it is without the host: no opt-in, another
+# primary, or a quiet daemon that already runs.
 fm_afk_launch_quiet_needs_nothing() {
   local harness config
   FM_AFK_LAUNCH_QUIET_WHY=
@@ -248,6 +255,7 @@ fm_afk_launch_quiet_needs_nothing() {
   fm_afk_launch_host_primary "$harness" || return 1
   config=${FM_CONFIG_OVERRIDE:-$FM_HOME/config}
   [ -f "$config/supervision-host" ] || return 1
+  ! fm_afk_contract_present "$FM_AFK_LAUNCH_STATE" || return 2
   # shellcheck source=bin/fm-supervision-engine-lib.sh
   . "$FM_AFK_LAUNCH_DIR/fm-supervision-engine-lib.sh" || return 1
   if ! fm_supervision_host_attended_ready "$config" "$harness"; then
@@ -261,8 +269,14 @@ fm_afk_launch_quiet_needs_nothing() {
 }
 
 fm_afk_launch_quiet_check() {
-  local retry
-  if ! fm_afk_launch_quiet_needs_nothing; then
+  local retry rc
+  fm_afk_launch_quiet_needs_nothing
+  rc=$?
+  if [ "$rc" -eq 2 ]; then
+    printf 'Quiet mode starts nothing on this home while its away record (state/.afk-contract) is live: the captain has returned, so run the /afk return (bin/fm-afk-return.sh), pass its catch-up gate, then run quiet-check again.\n'
+    return 2
+  fi
+  if [ "$rc" -ne 0 ]; then
     [ -z "$FM_AFK_LAUNCH_QUIET_WHY" ] \
       || printf 'Quiet mode is not already the ordinary posture on this home, because %s, so every attended wake reaches this conversation; quiet mode enters through the quiet daemon instead.\n' "$FM_AFK_LAUNCH_QUIET_WHY"
     return 1
@@ -346,9 +360,16 @@ fm_afk_launch_record_require() {
 
 fm_afk_launch_enter() {
   fm_afk_launch_catchup_pending && return 1
-  if [ "${FM_AFK_MODE:-}" = quiet ] && fm_afk_launch_quiet_needs_nothing; then
-    fm_afk_launch_log "quiet mode writes no away-posture record on this home, whose attended supervision host already is quiet mode; run bin/fm-afk-launch.sh quiet-check"
-    return 3
+  if [ "${FM_AFK_MODE:-}" = quiet ]; then
+    fm_afk_launch_quiet_needs_nothing
+    case $? in
+      0)
+        fm_afk_launch_log "quiet mode writes no away-posture record on this home, whose attended supervision host already is quiet mode; run bin/fm-afk-launch.sh quiet-check"
+        return 3 ;;
+      2)
+        fm_afk_launch_log "quiet mode refuses while this home's away record (state/.afk-contract) is live; run the /afk return (bin/fm-afk-return.sh) and pass its catch-up gate, then run bin/fm-afk-launch.sh quiet-check"
+        return 3 ;;
+    esac
   fi
   "$FM_AFK_CONTRACT_CMD" enter "$@" || return
   fm_afk_launch_host_engine_note
