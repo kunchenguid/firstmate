@@ -1114,7 +1114,7 @@ cmd_start_public() {
 }
 
 cmd_start() {
-  local id=${1-} adapter out rc claimed bound_rc published_capture=0 handled_capture=0 self_announcing=0 task_owner='' task_pending kind reply_round='' pending_round staged_reply=0 launch_floor
+  local id=${1-} adapter out rc claimed bound_rc published_capture=0 handled_capture=0 self_announcing=0 task_owner='' task_pending kind reply_round='' pending_round launch_floor
   local extension_owner=0 extension_load_state extension_sequence='' extension_request_id=''
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
   require_runner_group
@@ -1142,7 +1142,6 @@ cmd_start() {
     fi
   elif [ "$kind" = lavish-owned ]; then
     reply_round=$(lavish_rearm_round_locked "$id" 2>/dev/null || true)
-    lavish_rearm_round_locked "$id" staged >/dev/null 2>&1 && staged_reply=1
     task_pending=$(source_pending "$id" | head -1)
     if [ -n "$task_pending" ] && { [ -z "$reply_round" ] \
       || { fm_procevent_is_handled "$STATE" "$id" "$reply_round" \
@@ -1214,13 +1213,6 @@ cmd_start() {
   }
   fm_procevent_claim_acquire_locked "$id" "$FM_HOME" "$$" "$(source_file "$id")" "$STATE"
   claimed=$?
-  if [ "$claimed" -eq 0 ] && [ -n "$reply_round" ] && [ "$staged_reply" -eq 1 ] \
-    && ! fm_procevent_is_handled "$STATE" "$id" "$reply_round" \
-    && ! fm_procevent_mark_handled "$STATE" "$id" "$reply_round" >/dev/null 2>&1; then
-    fm_procevent_claim_release_locked "$id" "$FM_HOME" "$$" "$FM_PROCEVENT_CLAIM_TOKEN" 2>/dev/null || true
-    fm_procevent_source_lock_release "$id"
-    die "cannot acknowledge captured Lavish round: $id $reply_round"
-  fi
   fm_procevent_source_lock_release "$id"
   case "$claimed" in
     0) ;;
@@ -1374,7 +1366,7 @@ EOF
       fm_procevent_source_lock_release "$id"
       die "cannot retain the source output boundary: $id"
     }
-    if [ -n "$reply_round" ] && [ "$staged_reply" -eq 0 ] \
+    if [ -n "$reply_round" ] \
       && ! fm_procevent_is_handled "$STATE" "$id" "$reply_round" \
       && ! fm_procevent_mark_handled "$STATE" "$id" "$reply_round" >/dev/null 2>&1; then
       exec 5>&- 4<&-
@@ -2046,7 +2038,7 @@ generation_can_launch() {  # <source-id>
 # launch stamp advancing. Returns as soon as either appears. A fixed sleep is
 # not success.
 cmd_ensure_listening() {
-  local id=${1-} identity before mark stamp deadline window started_once=0 listening
+  local id=${1-} identity before mark stamp deadline window started_once=0 listening round_aware=0
   [ "$#" -eq 1 ] || usage
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
   window=$(fm_procevent_launch_confirm_seconds) \
@@ -2055,15 +2047,19 @@ cmd_ensure_listening() {
     || die "source is not registered: $id"
   identity=$(fm_pr_file_identity "$(source_file "$id")" 2>/dev/null) \
     || die "cannot identify the registration: $id"
+  lavish_rearm_round_locked "$id" >/dev/null 2>&1 && round_aware=1
   before=
-  if stamp=$(fm_procevent_launch_floor_stamp_path "$STATE" "$id" "$identity"); then
+  if [ "$round_aware" -eq 0 ] \
+    && stamp=$(fm_procevent_launch_floor_stamp_path "$STATE" "$id" "$identity"); then
     before=$(cat -- "$stamp" 2>/dev/null || true)
   fi
   deadline=$((SECONDS + 10#$window + 1))
   while :; do
     listening=0
     generation_is_listening "$id" "$identity" || listening=$?
-    [ "$listening" -ne 0 ] || return 0
+    if [ "$round_aware" -eq 0 ] && [ "$listening" -eq 0 ]; then
+      return 0
+    fi
     mark=
     if stamp=$(fm_procevent_launch_floor_stamp_path "$STATE" "$id" "$identity"); then
       mark=$(cat -- "$stamp" 2>/dev/null || true)

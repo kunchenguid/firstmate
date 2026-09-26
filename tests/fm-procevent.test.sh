@@ -855,10 +855,11 @@ cp "$HFREPLY/state/procevent-inbox/$freply_id.1.result" \
 cp "$HFREPLY/state/procevent-inbox/$freply_id.1.adapter" \
   "$HFREPLY/state/procevent-inbox/$freply_id.2.adapter"
 printf 'Confirmed in session.\n' > "$TMP_ROOT/firstmate-reply.txt"
-if PATH="$FREPLY_BIN:$PATH" FM_HOME="$HFREPLY" FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS=invalid \
+if PATH="$FREPLY_BIN:$PATH" FM_HOME="$HFREPLY" \
+  FM_PROCEVENT_OWNER_LEASE_SECONDS=invalid FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS=1 \
   "$ROOT/bin/fm-procevent-lavish.sh" arm "$FREPLY_ART" \
   --agent-reply-file "$TMP_ROOT/firstmate-reply.txt" >/dev/null 2>"$TMP_ROOT/firstmate-launch-fail.err"; then
-  fail "firstmate's Lavish re-arm accepted an invalid listener confirmation window"
+  fail "firstmate's Lavish re-arm reported ready before its owner guard started"
 fi
 assert_absent "$HFREPLY/state/procevent-inbox/$freply_id.1.handled" \
   "failed listener startup acknowledged firstmate's pending capture"
