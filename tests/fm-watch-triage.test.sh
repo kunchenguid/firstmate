@@ -2893,10 +2893,13 @@ test_live_paused_until_controls_recheck_time() {
 # drives it elsewhere with FM_TEST_PANE_COMMAND (the pane's foreground command)
 # and FM_TEST_TMUX_WINDOWS (the session inventory the recorded window must appear
 # in), which is how the dead-endpoint cases below reach `dead` and `missing`.
+# The lane's home is the case directory itself, so the backlog the threshold
+# consults is the case's own data/backlog.md: absent unless a case builds one.
 wedge_threshold_round() {  # <state> <fakebin> <out> <capture> <window> <verdict> <exit|absorb>
   local state=$1 fakebin=$2 out=$3 capture=$4 window=$5 verdict=$6 mode=$7 pid cycles=0
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture" \
     FM_CONFIG_OVERRIDE="$(dirname "$state")/config" \
+    FM_HOME="$(dirname "$state")" FM_DATA_OVERRIDE="$(dirname "$state")/data" \
     FM_FAKE_TMUX_CURRENT_COMMAND="${FM_TEST_PANE_COMMAND-grok}" \
     FM_FAKE_TMUX_WINDOWS="${FM_TEST_TMUX_WINDOWS-}" FM_FAKE_CREW_STATE="$verdict" \
     FM_WATCH_HANDLING_SUCCESSOR=1 \
@@ -3480,12 +3483,12 @@ resolved [key=nm-01RUNGATE-review]: firstmate chose the second fix' 2000)
 }
 
 # --- a wait record that does not carry every field is refused ----------------
-# wait_record joins its five fields with US and wedge_defer_wait parses them with
+# wait_record joins its six fields with US and wedge_defer_wait parses them with
 # `IFS=<us> read`, so consecutive delimiters yield genuinely EMPTY fields and no
 # field can shift left into another's position. That is what makes the deferral's
 # guard able to enforce the whole contract rather than a position-specific slice
 # of it: each field the recheck prints must be present, and a record carrying
-# more than its four delimiters is refused too, since `read` puts any surplus
+# more than its five delimiters is refused too, since `read` puts any surplus
 # into the final variable. Deferring on a record that is not what it claims is
 # what takes the ladder away, so every one of these must fall back to the
 # escalation the caller was about to make instead.
@@ -3552,10 +3555,10 @@ test_wedge_defer_refuses_a_half_filled_wait_record() {
   assert_malformed_record_kept_the_ladder "$MALFORMED_STATE" "a wait record with no action"
 
   # A record carrying a surplus delimiter: `read` puts everything past the last
-  # field into `anchor`, so the fields after the extra one are not the fields
+  # field into `cadence`, so the fields after the extra one are not the fields
   # they are read as.
   run_malformed_wait_record_round malformed-wait-record-surplus \
-    'printf "%s\\037%s\\037%s\\037%s\\037%s\\037%s" "declared wait" "awaiting external" external "confirm the wait still holds" "" extra'
+    'printf "%s\\037%s\\037%s\\037%s\\037%s\\037%s\\037%s" "declared wait" "awaiting external" external "confirm the wait still holds" "" "" extra'
   assert_malformed_record_kept_the_ladder "$MALFORMED_STATE" "a wait record with a surplus field"
 
   pass "a wait record missing a field the recheck must print, or carrying one it must not, is refused and the lane escalates exactly as it would have"
@@ -4117,6 +4120,430 @@ test_reheld_captain_call_starts_its_own_resurface_window() {
   pass "a released-then-re-held task is a distinct captain call whose first sight still alarms"
 }
 
+
+# --- an unchanged lane its backlog already settles stops re-escalating -------
+# The repeat the captain-call bound above never reaches: once a stale pane has
+# been surfaced, every further poll of the SAME unchanged hash runs the wedge
+# timer, which re-escalated a live idle lane as a possible wedge once per
+# FM_STALE_ESCALATE_SECS, climbing into demand-deep-inspection, for as long as
+# the pane stayed put. That was the second-mate wake loop on lanes whose
+# supervisor had already recorded that nothing was owed: held for the captain,
+# held on an external dependency, deliberately parked, or finished.
+# wedge_threshold_fixture is exactly that lane - already surfaced, the
+# suppressor holding its hash - here with a worker line that settles nothing and
+# a crew verdict with no positive working evidence, the reading those lanes had.
+# Each case pairs the settled direction with the direction that must still
+# escalate, so the bound cannot pass by deleting wedge detection.
+# Cost: an absorb round spends whole poll cycles, so only the repeated-scan
+# regression itself uses them. Elsewhere a settled lane is proven settled by the
+# recheck it owes once FM_PAUSE_RESURFACE_SECS is tiny - a recheck naming its
+# wait, never a possible wedge - which a round observes as soon as it exits.
+
+SETTLED_IDLE_VERDICT='state: working · source: status-log · still tidying the branch'
+
+# tasks-axi against a wedge fixture's own backlog.
+wedge_row_axi() {  # <case-dir> <tasks-axi args...>
+  local dir=$1
+  shift
+  (cd "$dir" && tasks-axi "$@" --file data/backlog.md) >/dev/null 2>&1
+}
+
+# Give a wedge fixture's task an In flight backlog row, then settle it as <row>
+# names: `captain` (a hold through bin/fm-captain-hold.sh, the only writer of a
+# captain call), `external`, `parked`, `done`, or `open` (left In flight unheld).
+settle_wedge_row() {  # <case-dir> <row>
+  local dir=$1 row=$2
+  mkdir -p "$dir/data"
+  cp "$ROOT/.tasks.toml" "$dir/.tasks.toml" || return 1
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$dir/data/backlog.md"
+  wedge_row_axi "$dir" add wedge 'delivered work' || return 1
+  wedge_row_axi "$dir" start wedge || return 1
+  case "$row" in
+    open) ;;
+    captain) run_hold "$dir" hold wedge --reason 'awaiting the captain on the merge' ;;
+    external) wedge_row_axi "$dir" hold wedge --reason 'waiting on the vendor' --kind external ;;
+    parked) wedge_row_axi "$dir" hold wedge --reason 'parked until the redesign lands' --kind parked ;;
+    'done') wedge_row_axi "$dir" 'done' wedge ;;
+    *) return 1 ;;
+  esac
+}
+
+# A settled-lane fixture: the wedge lane above, with a worker line that explains
+# nothing, and its backlog row settled as <row>. Prints the case directory.
+settled_wedge_fixture() {  # <name> <row>
+  local dir
+  dir=$(wedge_threshold_fixture "$1" 'working: still tidying the branch' 0) || return 1
+  settle_wedge_row "$dir" "$2" || return 1
+  printf '%s\n' "$dir"
+}
+
+# One round that must exit on the settled recheck a tiny cadence makes due
+# almost at once, proving the lane was settled rather than wedge-escalated.
+settled_recheck_round() {  # <case-dir> <human> <label>
+  local dir=$1 human=$2 label=$3 out="$1/watch.out"
+  : > "$out"
+  FM_TEST_PAUSE_RESURFACE=1 wedge_threshold_round "$dir/state" "$dir/fakebin" "$out" "$dir/pane.txt" \
+    test:fm-wedge "$SETTLED_IDLE_VERDICT" exit \
+    || fail "[$label] a settled lane never owed its recheck"
+  grep -F "$human" "$out" >/dev/null \
+    || fail "[$label] the settled recheck did not name who the wait is on ($human): $(cat "$out")"
+  grep -F 'possible wedge' "$out" >/dev/null \
+    && fail "[$label] a settled lane was wedge-escalated instead of rechecked: $(cat "$out")"
+  ack_stopped_cycle "$dir/state" || fail "[$label] could not acknowledge the settled recheck"
+}
+
+test_settled_backlog_lane_stops_reescalating_an_unchanged_pane() {
+  local spec row human action dir state fakebin out capture window key absorbs
+  command -v tasks-axi >/dev/null 2>&1 \
+    || { echo "skip: tasks-axi not found (settled backlog lane)"; return 0; }
+  window="test:fm-wedge"; key=$(printf '%s' "$window" | tr ':/.' '___')
+  for spec in \
+    'captain|awaiting the captain|answer the held decision or release the hold' \
+    'external|awaiting external|release the hold once the external wait clears' \
+    'parked|awaiting firstmate|release the hold when the work should resume' \
+    'done|awaiting firstmate|clean up the finished task'
+  do
+    row=${spec%%|*}; human=${spec#*|}; action=${human#*|}; human=${human%%|*}
+    dir=$(settled_wedge_fixture "settled-$row" "$row") \
+      || fail "[$row] could not build a settled backlog fixture"
+    state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+
+    # Repeated threshold scans of the unchanged pane: every one is absorbed.
+    wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$SETTLED_IDLE_VERDICT" absorb \
+      || fail "[$row] an unchanged settled lane re-escalated: $(cat "$out")"
+    [ "$(wedge_stale_wakes "$state" "$window")" -eq 0 ] \
+      || fail "[$row] an unchanged settled lane queued a wake: $(cat "$state/.wake-queue")"
+    [ ! -e "$state/.wedge-escalations-$key" ] \
+      || fail "[$row] an unchanged settled lane counted $(cat "$state/.wedge-escalations-$key") wedge escalation(s)"
+    absorbs=$(grep -c 'explains the quiet' "$state/.watch-triage.log" 2>/dev/null || echo 0)
+    [ "$absorbs" -ge 2 ] \
+      || fail "[$row] the round absorbed $absorbs threshold scan(s), so it proved no repeat: $(cat "$state/.watch-triage.log")"
+
+    # Bounded like every other absorb: once the unchanged pane has been settled
+    # for the long cadence it is rechecked once, naming who the wait is on and
+    # the action that clears it.
+    set_mtime "$(( $(date +%s) - 5000 ))" "$state/.waiting-since-$key" \
+      || fail "[$row] the settled lane recorded no wait anchor to age"
+    FM_TEST_PAUSE_RESURFACE=240 wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" \
+      "$SETTLED_IDLE_VERDICT" exit \
+      || fail "[$row] a settled lane past the recheck cadence was never rechecked"
+    grep -F "$human" "$out" >/dev/null \
+      || fail "[$row] the recheck did not name who the wait is on ($human): $(cat "$out")"
+    grep -F "$action" "$out" >/dev/null \
+      || fail "[$row] the recheck did not name the action that clears it: $(cat "$out")"
+    grep -F 'possible wedge' "$out" >/dev/null \
+      && fail "[$row] a settled lane was rechecked as a possible wedge: $(cat "$out")"
+    [ "$(wedge_stale_wakes "$state" "$window")" -eq 1 ] \
+      || fail "[$row] the recheck queued $(wedge_stale_wakes "$state" "$window") wakes instead of one"
+    ack_stopped_cycle "$state" || fail "[$row] could not acknowledge the settled recheck"
+  done
+
+  # After its recheck the lane is quiet again for a whole cadence.
+  : > "$out"
+  FM_TEST_PAUSE_RESURFACE=240 wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" \
+    "$SETTLED_IDLE_VERDICT" absorb \
+    || fail "a settled lane rechecked again inside its cadence: $(cat "$out")"
+
+  # The identical lane whose row is still open keeps the unchanged ladder.
+  dir=$(settled_wedge_fixture settled-open open) || fail "[open] could not build an open backlog fixture"
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$SETTLED_IDLE_VERDICT" exit \
+    || fail "[open] an unchanged lane with an open backlog row stopped wedge-escalating"
+  grep -F 'possible wedge, escalation 1' "$out" >/dev/null \
+    || fail "[open] the open lane did not escalate on the unchanged ladder: $(cat "$out")"
+  [ ! -e "$state/.waiting-since-$key" ] \
+    || fail "[open] an open backlog row left a settled wait anchor behind"
+  pass "an unchanged idle lane its backlog holds, parks, or finishes stops re-escalating and is rechecked on the long cadence, while an open one still escalates"
+}
+
+# While the away-posture record exists a captain hold is never rechecked, as on
+# every other captain-facing path, while a wait owed to anyone else still is.
+# The silent absorb restarts the idle timer, so the backlog and current-state
+# reads behind it keep their once-per-threshold bound rather than repeating on
+# every poll of the away window.
+test_settled_captain_hold_is_silent_while_away() {
+  local dir state fakebin out capture window key armed_timer
+  command -v tasks-axi >/dev/null 2>&1 \
+    || { echo "skip: tasks-axi not found (settled hold under away)"; return 0; }
+  window="test:fm-wedge"; key=$(printf '%s' "$window" | tr ':/.' '___')
+  dir=$(settled_wedge_fixture settled-away-captain captain) \
+    || fail "could not build a captain-held backlog fixture"
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  printf '%s\n' "$(( $(date +%s) - 2000 ))" > "$state/.stale-since-$key"
+  armed_timer=$(cat "$state/.stale-since-$key")
+  write_away_record "$state"
+  FM_TEST_PAUSE_RESURFACE=1 FM_TEST_STALE_ESCALATE=1000 wedge_threshold_round "$state" "$fakebin" "$out" \
+    "$capture" "$window" "$SETTLED_IDLE_VERDICT" absorb \
+    || fail "a captain hold was rechecked while the away-posture record existed: $(cat "$out")"
+  [ "$(wedge_stale_wakes "$state" "$window")" -eq 0 ] \
+    || fail "a captain hold woke the away captain: $(cat "$state/.wake-queue")"
+  [ ! -e "$state/.waiting-resurfaced-$key" ] \
+    || fail "an away-silenced captain hold armed the recheck throttle"
+  [ "$(cat "$state/.stale-since-$key")" != "$armed_timer" ] \
+    || fail "an away-silenced captain hold left the idle timer running, so its reads would repeat every poll"
+  grep -F 'never rechecked while the away-posture record exists' "$state/.watch-triage.log" >/dev/null \
+    || fail "the away-silenced captain hold was not recorded in the triage log"
+
+  # The recheck is owed again once the captain is back.
+  archive_away_record "$state"
+  settled_recheck_round "$dir" 'awaiting the captain' 'captain on return'
+
+  # A wait owed to someone else is not silenced by the record.
+  dir=$(settled_wedge_fixture settled-away-external external) \
+    || fail "could not build an externally held backlog fixture"
+  write_away_record "$dir/state"
+  settled_recheck_round "$dir" 'awaiting external' 'external while away'
+  pass "a settled captain hold is silent while away and rechecked on return, while an external hold is not silenced"
+}
+
+# Everything the settled bound must NOT swallow: a task that is genuinely working
+# and stops responding, a timed hold whose date passes, a hold lifted so the work
+# is actionable again, and a pane that changes.
+test_settled_backlog_lane_preserves_fresh_escalation() {
+  local dir state fakebin out capture window key
+  local working='state: working · source: run-step · ci running'
+  command -v tasks-axi >/dev/null 2>&1 \
+    || { echo "skip: tasks-axi not found (settled backlog escalation)"; return 0; }
+  window="test:fm-wedge"; key=$(printf '%s' "$window" | tr ':/.' '___')
+
+  # Genuinely working: the backlog says held, but the crew shows positive working
+  # evidence, so the quiet is not the hold's and the ladder stays.
+  dir=$(settled_wedge_fixture settled-but-working captain) \
+    || fail "[working] could not build a captain-held backlog fixture"
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  FM_TEST_PAUSE_RESURFACE=1 wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$working" exit \
+    || fail "[working] a held lane with a running step stopped wedge-escalating"
+  grep -F 'possible wedge, escalation 1' "$out" >/dev/null \
+    || fail "[working] a held lane with a running step lost the unchanged ladder: $(cat "$out")"
+  [ ! -e "$state/.waiting-since-$key" ] \
+    || fail "[working] a working lane left a settled wait anchor behind"
+
+  # A timed hold: settled while its date is ahead, escalating once it has passed.
+  dir=$(settled_wedge_fixture settled-timed open) || fail "[timed] could not build a backlog fixture"
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  wedge_row_axi "$dir" hold wedge --reason 'revisit after the freeze' --kind captain --until 2999-01-01 \
+    || fail "[timed] could not record a timed hold"
+  settled_recheck_round "$dir" 'awaiting the captain' 'timed hold ahead of its date'
+  wedge_row_axi "$dir" hold wedge --reason 'revisit after the freeze' --kind captain --until 2000-01-01 \
+    || fail "[timed] could not move the timed hold's date into the past"
+  : > "$out"
+  FM_TEST_PAUSE_RESURFACE=1 wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" \
+    "$SETTLED_IDLE_VERDICT" exit \
+    || fail "[timed] a lapsed timed hold kept the lane silent"
+  grep -F 'possible wedge, escalation 1' "$out" >/dev/null \
+    || fail "[timed] a lapsed timed hold did not restore the unchanged ladder: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "[timed] could not acknowledge the lapsed-hold escalation"
+
+  # Newly actionable: the captain answers and releases the hold.
+  dir=$(settled_wedge_fixture settled-released captain) \
+    || fail "[released] could not build a captain-held backlog fixture"
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  settled_recheck_round "$dir" 'awaiting the captain' 'held before release'
+  printf 'go ahead and merge\n' > "$dir/decision.txt"
+  run_hold "$dir" answer wedge --decision-file "$dir/decision.txt" --release \
+    || fail "[released] could not record the captain's releasing answer"
+  : > "$out"
+  FM_TEST_PAUSE_RESURFACE=1 wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" \
+    "$SETTLED_IDLE_VERDICT" exit \
+    || fail "[released] a released hold kept the lane silent"
+  grep -F 'possible wedge, escalation 1' "$out" >/dev/null \
+    || fail "[released] a released hold did not restore the unchanged ladder: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "[released] could not acknowledge the released-hold escalation"
+
+  # A changed pane is a new sighting: its first sight surfaces as it always has.
+  dir=$(settled_wedge_fixture settled-changed-pane parked) \
+    || fail "[changed] could not build a parked backlog fixture"
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  settled_recheck_round "$dir" 'awaiting firstmate' 'parked before the pane changed'
+  printf 'the worker printed something new' > "$capture"
+  : > "$out"
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$SETTLED_IDLE_VERDICT" exit \
+    || fail "[changed] a changed pane on a settled lane was never surfaced"
+  [ "$(wedge_stale_wakes "$state" "$window")" -eq 1 ] \
+    || fail "[changed] the changed pane queued $(wedge_stale_wakes "$state" "$window") wakes instead of one"
+  grep -Fx 'stale: test:fm-wedge' "$out" >/dev/null \
+    || fail "[changed] a changed pane was not surfaced as a new sighting: $(cat "$out")"
+  pass "a settled lane still escalates when it is genuinely working, its timed hold lapses, its hold is released, or its pane changes"
+}
+
+# --- the settled absorb on the busy over-age route still owes its recheck -----
+# The same wedge timer times a BUSY pane past FM_BUSY_TURN_MAX_SECS, and there
+# the hash it is handed is the freshly captured hash of a pane whose harness
+# footer ticks on every capture, so it is new on every poll. A settled absorb
+# whose recheck aged from anything keyed on that hash would remint its record at
+# every threshold, so the age would never reach the cadence and the absorb would
+# stay silent forever while restarting the idle timer - the forgotten wait a
+# bounded recheck exists to prevent.
+# One round against a busy, over-age lane whose own backlog row is held: the
+# watcher's own home, so the threshold's backlog read resolves to this case's
+# data/backlog.md, and a crew verdict with no positive working evidence.
+settled_busy_round() {  # <case-dir> <exit|absorb>
+  local dir=$1 mode=$2 pid
+  PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_WINDOW=test:fm-busy-settled \
+    FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" FM_FAKE_TMUX_CURRENT_COMMAND=pi \
+    FM_FAKE_CREW_STATE="$SETTLED_IDLE_VERDICT" FM_WATCH_HANDLING_SUCCESSOR=1 \
+    FM_HOME="$dir" FM_DATA_OVERRIDE="$dir/data" FM_CONFIG_OVERRIDE="$dir/config" \
+    FM_STATE_OVERRIDE="$dir/state" FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
+    FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=240 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH" >> "$dir/watch.out" 2>&1 &
+  pid=$!
+  if [ "$mode" = exit ]; then
+    wait_for_exit "$pid" 100 || { reap "$pid"; return 1; }
+    return 0
+  fi
+  wait_poll_cycle "$dir/state" "$pid" 300 || { reap "$pid"; return 1; }
+  reap "$pid"
+  return 0
+}
+
+test_settled_busy_over_age_lane_still_owes_its_recheck() {
+  local dir state out key window held_since reported
+  command -v tasks-axi >/dev/null 2>&1 \
+    || { echo "skip: tasks-axi not found (settled busy over-age lane)"; return 0; }
+  window=test:fm-busy-settled; key=$(printf '%s' "$window" | tr ':/.' '___')
+  dir=$(make_case settled-busy-over-age); state="$dir/state"; out="$dir/watch.out"
+  mkdir -p "$dir/config"
+  printf 'Working... (3600.1s)' > "$dir/pane.txt"
+  printf 'window=%s\nkind=ship\nharness=pi\nbackend=tmux\n' "$window" > "$state/wedge.meta"
+  record_pi_busy "$state" wedge
+  printf 'working: still tidying the branch\n' > "$state/wedge.status"
+  settle_wedge_row "$dir" captain || fail "could not hold the busy lane's backlog row"
+  held_since=$(( $(date +%s) - 172800 ))
+  backdate_captain_hold "$dir" "$held_since" || fail "could not backdate the busy lane's captain hold"
+  printf '%s' "$(seen_sig "$state/wedge.status")" > "$state/.seen-wedge_status"
+  # No completed turn was ever recorded, so the bound ages the spawn record.
+  touch -t 200001010000 "$state/wedge.meta"
+
+  # A threshold on the busy over-age route: the hold is absorbed rather than
+  # wedge-escalated, and the recheck it owes is recorded.
+  printf '%s\n' "$(( $(date +%s) - 500 ))" > "$state/.stale-since-$key"
+  settled_busy_round "$dir" absorb \
+    || fail "a busy over-age lane its backlog holds was wedge-escalated: $(cat "$out")"
+  [ "$(wedge_stale_wakes "$state" "$window")" -eq 0 ] \
+    || fail "a busy over-age lane its backlog holds queued a wake: $(cat "$state/.wake-queue")"
+  grep -F 'explains the quiet' "$state/.watch-triage.log" >/dev/null \
+    || fail "the busy over-age threshold never reached the settled absorb: $(cat "$state/.watch-triage.log")"
+  [ -e "$state/.waiting-since-$key" ] \
+    || fail "the settled absorb on the busy route recorded no recheck anchor"
+
+  # The footer ticks on (a hash never seen before) while the settlement and the
+  # worker's log stand unchanged, and the anchor is now older than the cadence:
+  # the recheck must come due anyway.
+  printf 'Working... (3721.4s)' > "$dir/pane.txt"
+  set_mtime "$(( $(date +%s) - 5000 ))" "$state/.waiting-since-$key"
+  printf '%s\n' "$(( $(date +%s) - 500 ))" > "$state/.stale-since-$key"
+  : > "$out"
+  settled_busy_round "$dir" exit \
+    || fail "a busy over-age lane whose footer ticks never owed its settled recheck: $(cat "$out")"
+  grep -F 'awaiting the captain' "$out" >/dev/null \
+    || fail "the settled recheck did not name who the wait is on: $(cat "$out")"
+  grep -F 'possible wedge' "$out" >/dev/null \
+    && fail "a settled busy over-age lane was rechecked as a possible wedge: $(cat "$out")"
+  # The anchor dates the watcher's own first verification, not the hold, so the
+  # age the recheck publishes must be the hold's own, two days, not the anchor's.
+  reported=$(wedge_reported_wait_secs "$out")
+  assert_reported_hold_age "$reported" "$held_since" "the busy over-age settled recheck" "$out"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the settled recheck"
+  pass "a settled lane on the busy over-age route still owes its bounded recheck and reports the hold's real age"
+}
+
+# Backdate a fixture's captain hold to <epoch>: the hold's own set stamp in the
+# markdown backlog, the one place bin/fm-captain-hold.sh records when a call
+# began. Succeeds only once fm-captain-hold.sh itself reads the backdated call.
+backdate_captain_hold() {  # <case-dir> <epoch>
+  local dir=$1 stamp
+  stamp=$(iso_utc_at "$2") || return 1
+  sed -i.bak "s/^  Captain hold set: .*Z\$/  Captain hold set: $stamp/" "$dir/data/backlog.md" || return 1
+  rm -f "$dir/data/backlog.md.bak"
+  [ "$(FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_DATA_OVERRIDE="$dir/data" \
+    FM_CONFIG_OVERRIDE="$dir/config" "$ROOT/bin/fm-captain-hold.sh" open wedge --identity 2>/dev/null)" \
+    = "$stamp#0" ]
+}
+
+# The published age must describe the hold itself: at least as old as the hold,
+# and no more than the few minutes a round can add. A number read from the
+# settlement marker instead would be minutes to hours, never days.
+assert_reported_hold_age() {  # <reported-secs> <held-since-epoch> <label> <watch-out>
+  local reported=$1 since=$2 label=$3 out=$4 lower upper
+  lower=$(( $(date +%s) - since - 600 ))
+  upper=$(( $(date +%s) - since ))
+  case "$reported" in
+    ''|*[!0-9]*) fail "$label published no wait age for a hold whose start is recorded: $(cat "$out")" ;;
+  esac
+  [ "$reported" -ge "$lower" ] && [ "$reported" -le "$upper" ] \
+    || fail "$label published ${reported}s, not the hold's own age of about ${upper}s: $(cat "$out")"
+}
+
+# The recheck publishes the wait's own age, read from the authoritative start its
+# backlog records, and nothing at all when the backlog records no start.
+test_settled_recheck_reports_the_real_wait_age() {
+  local dir out held_since
+  command -v tasks-axi >/dev/null 2>&1 \
+    || { echo "skip: tasks-axi not found (settled recheck age)"; return 0; }
+  dir=$(settled_wedge_fixture settled-age-captain captain) \
+    || fail "[captain] could not build a captain-held backlog fixture"
+  out="$dir/watch.out"
+  held_since=$(( $(date +%s) - 172800 ))
+  backdate_captain_hold "$dir" "$held_since" || fail "[captain] could not backdate the captain hold"
+  settled_recheck_round "$dir" 'awaiting the captain' 'captain age'
+  assert_reported_hold_age "$(wedge_reported_wait_secs "$out")" "$held_since" "[captain] the settled recheck" "$out"
+
+  # An external hold records no start to the second, so its recheck reports none.
+  dir=$(settled_wedge_fixture settled-age-external external) \
+    || fail "[external] could not build an externally held backlog fixture"
+  out="$dir/watch.out"
+  settled_recheck_round "$dir" 'awaiting external' 'external age'
+  [ -z "$(wedge_reported_wait_secs "$out")" ] \
+    || fail "[external] a hold with no recorded start published $(wedge_reported_wait_secs "$out")s as its age: $(cat "$out")"
+  pass "a settled recheck reports the captain hold's own age, and no age for a hold that records no start"
+}
+
+# The recheck window belongs to one wait on one agent. A relaunched agent - a new
+# busy incarnation token, minted by bin/fm-busy-event.sh arm exactly when the
+# agent is replaced - is a new lane to watch, so it starts its own window rather
+# than inheriting the old agent's already-elapsed one. The control half proves the
+# restart is the incarnation's doing: the same aged window with the SAME agent
+# still owes its recheck at once.
+test_settled_window_restarts_for_a_new_agent_incarnation() {
+  local dir state out key window
+  command -v tasks-axi >/dev/null 2>&1 \
+    || { echo "skip: tasks-axi not found (settled incarnation window)"; return 0; }
+  window="test:fm-wedge"; key=$(printf '%s' "$window" | tr ':/.' '___')
+  dir=$(settled_wedge_fixture settled-incarnation parked) \
+    || fail "could not build a parked backlog fixture"
+  state="$dir/state"; out="$dir/watch.out"
+  "$ROOT/bin/fm-busy-event.sh" arm "$state" wedge >/dev/null \
+    || fail "could not arm the lane's first agent incarnation"
+  settled_recheck_round "$dir" 'awaiting firstmate' 'first incarnation'
+
+  # Same agent, window aged past the cadence: the recheck is owed at once.
+  set_mtime "$(( $(date +%s) - 5000 ))" "$state/.waiting-since-$key"
+  set_mtime "$(( $(date +%s) - 5000 ))" "$state/.waiting-resurfaced-$key"
+  : > "$out"
+  FM_TEST_PAUSE_RESURFACE=240 wedge_threshold_round "$state" "$dir/fakebin" "$out" "$dir/pane.txt" "$window" \
+    "$SETTLED_IDLE_VERDICT" exit \
+    || fail "an aged window on the same agent never owed its recheck"
+  grep -F 'awaiting firstmate' "$out" >/dev/null \
+    || fail "the same-agent recheck did not name who the wait is on: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the same-agent recheck"
+
+  # The identical aged window after the agent is replaced: a fresh window, so
+  # nothing is owed yet and the window is dated from now.
+  set_mtime "$(( $(date +%s) - 5000 ))" "$state/.waiting-since-$key"
+  set_mtime "$(( $(date +%s) - 5000 ))" "$state/.waiting-resurfaced-$key"
+  "$ROOT/bin/fm-busy-event.sh" arm "$state" wedge >/dev/null \
+    || fail "could not arm the replacement agent's incarnation"
+  : > "$out"
+  FM_TEST_PAUSE_RESURFACE=240 wedge_threshold_round "$state" "$dir/fakebin" "$out" "$dir/pane.txt" "$window" \
+    "$SETTLED_IDLE_VERDICT" absorb \
+    || fail "a replaced agent inherited the old agent's elapsed window: $(cat "$out")"
+  [ "$(wedge_stale_wakes "$state" "$window")" -eq 0 ] \
+    || fail "a replaced agent's first settled threshold queued a wake: $(cat "$state/.wake-queue")"
+  [ "$(( $(date +%s) - $(file_mtime "$state/.waiting-since-$key") ))" -lt 600 ] \
+    || fail "the replaced agent's window was not dated from its own first verification"
+  pass "a relaunched agent starts its own settled window, while the same agent's aged window is owed at once"
+}
 
 
 test_secondmate_paused_resurfaces_in_normal_mode() {
@@ -6423,6 +6850,12 @@ test_open_captain_call_bounds_stale_churn
 test_stale_churn_without_a_captain_call_still_alarms
 test_failed_wake_append_does_not_arm_the_captain_hold_throttle
 test_reheld_captain_call_starts_its_own_resurface_window
+test_settled_backlog_lane_stops_reescalating_an_unchanged_pane
+test_settled_captain_hold_is_silent_while_away
+test_settled_backlog_lane_preserves_fresh_escalation
+test_settled_busy_over_age_lane_still_owes_its_recheck
+test_settled_recheck_reports_the_real_wait_age
+test_settled_window_restarts_for_a_new_agent_incarnation
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_captain_held_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed
