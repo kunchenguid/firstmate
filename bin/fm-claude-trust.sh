@@ -10,9 +10,13 @@
 #
 # Usage: fm-claude-trust.sh <worktree> <project>
 #        fm-claude-trust.sh --secondmate-home <home> <id>
+#        fm-claude-trust.sh --secondmate-root <root> <home> <id>
 #   <worktree>  the isolated task worktree this spawn launches into
 #   <project>   the primary checkout that worktree belongs to
-#   <home>      the seeded secondmate home this spawn launches into
+#   <home>      the seeded secondmate home this spawn launches into, or whose
+#               second mate starts in <root>
+#   <root>      the herdr workspace root a second mate starts in instead of its
+#               home (docs/configuration.md "Second-mate working directory")
 #   <id>        the secondmate id that home must already be marked for
 # Prints one line naming what it registered; refuses loudly on anything else.
 #
@@ -144,6 +148,17 @@
 # argument to gate external-imports consent against, so the two import flags
 # are never written there.
 #
+# SECONDMATE-ROOT MODE. A second mate whose herdr workspace reports a root
+# directory other than its home starts its pane in that root. The root is a
+# directory the captain chose for that workspace, so it has no firstmate shape
+# to test; the evidence is the same seed test run against <home> for <id>,
+# which proves the launch is a registered second mate's, plus the refusals every
+# mode shares (the filesystem root, the home directory, the Claude config
+# directory). Trust lands on <root> only, trust-only for the same reason as the
+# home mode, and a root the spawn did not read from that workspace never
+# reaches here because bin/fm-spawn.sh's resolve_secondmate_root is the only
+# caller.
+#
 # Only the launching user's own store is written. In worktree mode: the
 # projects entries for the worktree path and the resolved canonical project
 # path in ${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json, which must be a regular
@@ -174,6 +189,7 @@ unset CDPATH \
 usage() {
   echo "usage: fm-claude-trust.sh <worktree> <project>" >&2
   echo "       fm-claude-trust.sh --secondmate-home <home> <id>" >&2
+  echo "       fm-claude-trust.sh --secondmate-root <root> <home> <id>" >&2
   exit 2
 }
 
@@ -188,6 +204,15 @@ case "${1:-}" in
     SUB_ID=$3
     PROJ_ARG=
     SCOPE_NOUN="secondmate home"
+    ;;
+  --secondmate-root)
+    [ "$#" -eq 4 ] || usage
+    MODE=secondmate-root
+    TARGET_ARG=$2
+    SEED_ARG=$3
+    SUB_ID=$4
+    PROJ_ARG=
+    SCOPE_NOUN="secondmate workspace root"
     ;;
   '' | -h | --help)
     usage
@@ -224,6 +249,13 @@ TARGET_REAL=$(real_dir "$TARGET_ARG") || true
 if [ "$MODE" = worktree ]; then
   PROJ_REAL=$(real_dir "$PROJ_ARG") || true
   [ -n "$PROJ_REAL" ] || refuse "project '$PROJ_ARG' is not an accessible directory"
+fi
+# The seed test below always judges the secondmate home: the target itself in
+# secondmate-home mode, and the separately named home in secondmate-root mode.
+SEED_REAL=$TARGET_REAL
+if [ "$MODE" = secondmate-root ]; then
+  SEED_REAL=$(real_dir "$SEED_ARG") || true
+  [ -n "$SEED_REAL" ] || refuse "secondmate home '$SEED_ARG' is not an accessible directory"
 fi
 
 CONFIG_DIR=${CLAUDE_CONFIG_DIR:-${HOME:-}}
@@ -312,27 +344,27 @@ else
   # symlink is refused outright rather than followed, because a link is a way to
   # make some other file's bytes stand in for the seed, and a marker this user
   # does not own was planted by someone else.
-  [ -n "$SUB_ID" ] || refuse "no secondmate id was supplied, so '$TARGET_REAL' cannot be matched against its seed marker"
-  SUB_MARKER="$TARGET_REAL/.fm-secondmate-home"
+  [ -n "$SUB_ID" ] || refuse "no secondmate id was supplied, so '$SEED_REAL' cannot be matched against its seed marker"
+  SUB_MARKER="$SEED_REAL/.fm-secondmate-home"
   [ ! -L "$SUB_MARKER" ] || refuse "'$SUB_MARKER' is a symlink; a seeded secondmate home carries the marker as a regular file"
-  [ -f "$SUB_MARKER" ] || refuse "'$TARGET_REAL' carries no .fm-secondmate-home marker, so it is not a seeded secondmate home"
+  [ -f "$SUB_MARKER" ] || refuse "'$SEED_REAL' carries no .fm-secondmate-home marker, so it is not a seeded secondmate home"
   [ -O "$SUB_MARKER" ] || refuse "'$SUB_MARKER' is not owned by this user"
   SUB_MARKER_ID=$(cat "$SUB_MARKER" 2>/dev/null) || true
-  [ "$SUB_MARKER_ID" = "$SUB_ID" ] || refuse "'$TARGET_REAL' is marked for secondmate '${SUB_MARKER_ID:-unknown}', not '$SUB_ID'"
-  [ -f "$TARGET_REAL/AGENTS.md" ] || refuse "'$TARGET_REAL' has no AGENTS.md, so it is not a firstmate home"
-  [ -d "$TARGET_REAL/bin" ] || refuse "'$TARGET_REAL' has no bin/, so it is not a firstmate home"
+  [ "$SUB_MARKER_ID" = "$SUB_ID" ] || refuse "'$SEED_REAL' is marked for secondmate '${SUB_MARKER_ID:-unknown}', not '$SUB_ID'"
+  [ -f "$SEED_REAL/AGENTS.md" ] || refuse "'$SEED_REAL' has no AGENTS.md, so it is not a firstmate home"
+  [ -d "$SEED_REAL/bin" ] || refuse "'$SEED_REAL' has no bin/, so it is not a firstmate home"
   for sub_dir_name in data state config projects; do
-    sub_dir="$TARGET_REAL/$sub_dir_name"
+    sub_dir="$SEED_REAL/$sub_dir_name"
     if [ -L "$sub_dir" ] && [ ! -e "$sub_dir" ]; then
       refuse "'$sub_dir' is a broken symlink, so this home's $sub_dir_name directory cannot be shown to stay inside it"
     fi
     [ -e "$sub_dir" ] || continue
-    [ -d "$sub_dir" ] || refuse "'$sub_dir' is not a directory, so '$TARGET_REAL' is not a seeded secondmate home"
+    [ -d "$sub_dir" ] || refuse "'$sub_dir' is not a directory, so '$SEED_REAL' is not a seeded secondmate home"
     sub_dir_real=$(real_dir "$sub_dir") || true
     [ -n "$sub_dir_real" ] || refuse "'$sub_dir' cannot be resolved"
     case "$sub_dir_real" in
-      "$TARGET_REAL"/*) ;;
-      *) refuse "'$sub_dir' resolves to '$sub_dir_real', outside the home, so '$TARGET_REAL' is not a safe secondmate home" ;;
+      "$SEED_REAL"/*) ;;
+      *) refuse "'$sub_dir' resolves to '$sub_dir_real', outside the home, so '$SEED_REAL' is not a safe secondmate home" ;;
     esac
   done
 fi

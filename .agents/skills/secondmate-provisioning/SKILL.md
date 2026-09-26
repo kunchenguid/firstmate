@@ -86,6 +86,7 @@ Release happens only on explicit retirement or seed rollback, never on routine r
 `bin/fm-home-seed.sh` copies the charter into the secondmate home as `data/charter.md`.
 It also writes the gitignored `.fm-secondmate-parent` durable binding before the required `.fm-secondmate-home` identity marker; the parser header in [`bin/fm-secondmate-parent-lib.sh`](../../../bin/fm-secondmate-parent-lib.sh) owns the record contract, and both files must remain in place.
 `bin/fm-spawn.sh --secondmate` launches it through the secondmate harness path, resolving `config/secondmate-harness` -> `config/crew-harness` -> the primary's own harness unless an explicit per-spawn harness override is passed.
+On the Herdr backend the second mate starts in its Herdr workspace's root directory with `FM_HOME` naming its home, and a harness other than Claude refuses when that root differs from the home; [second-mate working directory](../../../docs/configuration.md#second-mate-working-directory) owns the rule, including which launches it covers and how the home's contract, skills, and hooks are carried.
 
 `config/secondmate-harness` may also pin a concrete model and effort for the secondmate agent, in the SAME file rather than a new one: the format is a single whitespace-separated line `<harness> [<model>] [<effort>]`, with only the first non-empty, non-comment line parsed.
 A bare `<harness>` (today's format, e.g. `claude`) behaves exactly as before - harness only, no model/effort flag - so this is fully backward-compatible.

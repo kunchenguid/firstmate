@@ -12,7 +12,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | Worker permissions, accounts, or environment | [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), and [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist) |
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), and [Calm preference](#calm-preference-configcalm) |
-| Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
+| Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) and [second-mate working directory](#second-mate-working-directory) |
 | Per-run overrides and tuning | [Environment variables](#environment-variables) |
 
 ## FM_HOME
@@ -696,6 +696,28 @@ After creating a secondmate, move existing main-backlog queued items that you ha
 Set `FM_SECONDMATE_CHARTER` to seed from inline charter text when no filled charter brief exists; set `FM_SECONDMATE_SCOPE` when the routing scope should differ from the charter text.
 
 The seeded home's `data/charter.md` owns the standard secondmate lifecycle and escalation contract; the route file points to it through the existing `home:` field instead of adding another pointer.
+
+### Second-mate working directory
+
+A local or remote second mate on the Herdr backend starts in the root directory its Herdr workspace reports, the workspace's `identity_cwd`, rather than in its home.
+Its records stay in its home: the launch sets `FM_HOME` to the home explicitly, puts the home's `bin/` first on `PATH`, and keeps the home as the task record's `worktree=`, and every Firstmate script resolves its home from `FM_HOME`, never from the working directory.
+The root is read from the `session.json` Herdr persists beside the socket that `herdr session list --json` reports for the session, because Herdr's socket API does not report it; [`fm_backend_herdr_workspace_root`](../bin/backends/herdr.sh) owns that read.
+
+The rule applies at every second-mate launch: a fresh `fm-spawn.sh --secondmate` spawn, the session-start liveness respawn, and a `fm-control.sh relaunch`, which moves the adopted pane to the root before starting the replacement.
+When the workspace reports no readable root, or reports the home itself, the second mate launches in its home exactly as before, and ordinary crewmates and scouts are unaffected.
+A root at the filesystem root, the user's home directory, or the Claude config directory cannot be trusted as a working directory, so the second mate launches in its home instead, with one warning naming the root, before any Herdr tab is opened.
+
+Starting outside the home loses the discovery a harness does from its working directory, so the launch carries the home's firstmate operating contract explicitly.
+Claude is the only harness with a verified way to do that:
+
+- `--append-system-prompt-file` carries the home's `AGENTS.md` behind a short preamble naming the home, the root, and the charter, and the charter still arrives as the first message.
+- `--add-dir <home>` loads the home's `.claude/skills/`.
+- `--settings` names a generated file holding the home's tracked `.claude/settings.json` hooks re-rooted from `$CLAUDE_PROJECT_DIR` to the home's absolute path, plus the ordinary per-launch settings, and a hook that cannot be re-rooted refuses the launch.
+- `--setting-sources user` keeps the root project's own hooks from running beside the home's.
+- The root is pre-registered in Claude's trust store through `fm-claude-trust.sh --secondmate-root`, after the same seed check the home mode applies to the home.
+
+The generated contract and settings files live in the home's gitignored `state/` as `.secondmate-root-contract.md` and `.secondmate-root-settings.json`, and every root launch rewrites them.
+Any other harness, or a raw launch command, refuses the launch with an error naming the root and the home when the root differs from the home; launch that second mate on Claude, or give its workspace the home as its root.
 
 ### Identity markers and upgrades
 
