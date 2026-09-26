@@ -98,7 +98,10 @@
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
 #      passed/checks-passed/passed-with-override/passed-with-skips -> done,
 #      failed -> failed, cancelled -> unknown (no verdict unless the green
-#      delivery safeguard below applies). passed-with-override is a passing outcome
+#      delivery safeguard below applies). A cancelled outcome takes precedence
+#      over an interrupted step's failed status or outstanding gate findings;
+#      it does not rewrite historical events or backlog records.
+#      passed-with-override is a passing outcome
 #      carrying an explicitly approved Test or CI exception (no-mistakes' own
 #      vocabulary), read identically to a clean passed. passed-with-skips is
 #      also a passing outcome (publication or CI verification was
@@ -111,11 +114,13 @@
 #      green, so a green PR is never silently read as still-validating. And a
 #      terminal failed or cancelled run whose only unfinished step is the ci
 #      monitor, after every substantive step completed (an explicitly skipped
-#      rebase is allowed) and the ci log's last marker reads
-#      checks green, also reads done (held-for-merge), never failed: a monitor
-#      whose only remaining job is to observe a human merge decision must not
+#      rebase is allowed) and the ci log's last marker reads checks green,
+#      also reads done only when the bounded forge read confirms the PR is
+#      open (held-for-merge) or merged. Closed, missing, unreadable, or skipped
+#      forge evidence leaves the original failed or unknown classification.
+#      A monitor whose only remaining job is to observe a merge decision must not
 #      convert the absence of that decision into a failure verdict
-#      (nm_failed_run_is_green_held_ci; 2026-09-05 jr-voice incident). In the
+#      (nm_reclassify_failed_run_as_held_green). In the
 #      coarse runs-ledger fallback (no steps table, no ci log), a terminal
 #      FAILED record whose daemon an explicit probe proves down reads unknown,
 #      never failed: an instrument failure must not read as work failure
@@ -749,9 +754,8 @@ EOF
   [ "$(nm_ci_checks_state)" = green ]
 }
 
-# Reclassify a terminal failed or cancelled run as done (held-for-merge) when
-# nm_failed_run_is_green_held_ci matches, surfacing the run's PR URL so the
-# supervisor reads the concrete review-ready outcome instead of a failure.
+# Apply the header's terminal-delivery safeguard. The earlier green log cannot
+# prove current PR disposition: a subsequent close can itself end the monitor.
 nm_reclassify_failed_run_as_held_green() {
   nm_failed_run_is_green_held_ci || return 1
   local disposition pr_url
