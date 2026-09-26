@@ -135,6 +135,7 @@ export default function (pi: ExtensionAPI) {
   // continuations, retries, or compaction that stay inside the same run.
   let agentRunActive = false;
   let workingShipShown = false;
+  let workingShipWidgetDisposed = false;
   // One animation instance per extension lifetime. Hiding the working widget freezes
   // this state; the next working period resumes it. session_start resets it so a fresh
   // Pi session starts at the normal initial position. Never module-global.
@@ -142,6 +143,8 @@ export default function (pi: ExtensionAPI) {
 
   // Single owner of Calm's working-row presentation choice. The widget is only created
   // or removed on a real transition, so repeated starts cannot duplicate its timer.
+  // The slot is shared with standalone Pi Calm; the dispose signal prevents turning
+  // Firstmate Calm off from clearing a widget that the other extension installed.
   const applyWorkingPresentation = (
     ui: ExtensionUIContext,
     forceStockVisibility = false,
@@ -149,12 +152,20 @@ export default function (pi: ExtensionAPI) {
     const showShip = agentRunActive && calmPresentationIsActive();
     if (showShip !== workingShipShown) {
       workingShipShown = showShip;
-      ui.setWidget(
-        CALM_WORKING_SHIP_WIDGET_KEY,
-        showShip
-          ? (tui) => createCalmWorkingShipWidget(tui, workingShipAnimation)
-          : undefined,
-      );
+      if (showShip) {
+        ui.setWidget(CALM_WORKING_SHIP_WIDGET_KEY, (tui) => {
+          workingShipWidgetDisposed = false;
+          const widget = createCalmWorkingShipWidget(tui, workingShipAnimation);
+          const dispose = widget.dispose;
+          widget.dispose = () => {
+            workingShipWidgetDisposed = true;
+            dispose();
+          };
+          return widget;
+        });
+      } else if (!workingShipWidgetDisposed) {
+        ui.setWidget(CALM_WORKING_SHIP_WIDGET_KEY, undefined);
+      }
       ui.setWorkingVisible(!showShip);
     } else if (forceStockVisibility && !showShip) {
       ui.setWorkingVisible(true);

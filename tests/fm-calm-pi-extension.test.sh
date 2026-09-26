@@ -3607,6 +3607,26 @@ const reset = () => {
 };
 const shipWidget = () => ui.widgets.get(CALM_WORKING_SHIP_WIDGET_KEY);
 
+let standaloneDisposed = false;
+const standaloneWidget = {
+  render: () => ["standalone boat"],
+  dispose: () => { standaloneDisposed = true; },
+};
+const firstmateWidget = {
+  render: () => ["firstmate boat"],
+  dispose: () => {},
+};
+ui.setWidget("calm-working-ship", () => standaloneWidget);
+ui.setWidget(CALM_WORKING_SHIP_WIDGET_KEY, () => firstmateWidget);
+const renderedDualInstallWidgets = [...ui.widgets.values()].map((widget) => widget.render(80));
+check(
+  standaloneDisposed &&
+    renderedDualInstallWidgets.length === 1 &&
+    renderedDualInstallWidgets[0][0] === "firstmate boat",
+  `dual Calm install rendered ${renderedDualInstallWidgets.length} working widgets instead of one`,
+);
+ui.setWidget(CALM_WORKING_SHIP_WIDGET_KEY, undefined);
+
 // --- Calm off leaves Pi's stock working behavior completely untouched -------------
 await fire("session_start", { reason: "startup" });
 reset();
@@ -3813,6 +3833,24 @@ await fire("agent_start");
 check(liveTimers === 1, "a later run did not use the boat after an idle Calm toggle");
 await fire("agent_settled");
 check(liveTimers === 0, "the later run did not clean up");
+
+await fire("agent_start");
+let survivingStandaloneDisposed = false;
+const survivingStandaloneWidget = {
+  render: () => ["standalone boat"],
+  dispose: () => { survivingStandaloneDisposed = true; },
+};
+ui.setWidget(CALM_WORKING_SHIP_WIDGET_KEY, () => survivingStandaloneWidget);
+reset();
+await calmCommand.handler("", ctx);
+check(
+  !survivingStandaloneDisposed &&
+    ui.widgets.size === 1 &&
+    ui.widgets.get(CALM_WORKING_SHIP_WIDGET_KEY) === survivingStandaloneWidget &&
+    ui.widgetOps.length === 0,
+  "turning Firstmate Calm off cleared the standalone working ship",
+);
+ui.setWidget(CALM_WORKING_SHIP_WIDGET_KEY, undefined);
 
 // --- The visual-only widget never touches session, transcript, or export data ------
 check(
