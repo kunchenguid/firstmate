@@ -105,16 +105,20 @@
 # reclaimed lock is renamed aside and removed whole, so temp records an
 # interrupted owner left behind can never wedge it.
 #
-# Worker starts are bounded per account, not per supervisor. Every Linux
+# Worker restarts are bounded per account, not per supervisor. Every Linux
 # restart supervisor charges FM_REMOTE_JOB_RESTART_BUDGET (default 12, at most
-# 100) before each serving child it spawns, its first included, and at most that
-# many starts land in any two consecutive FM_REMOTE_JOB_RESTART_WINDOW_SECONDS
-# (default 900) buckets across all supervisors together. The start that
-# exhausts the budget publishes worker.restart-suspended: every supervisor stops
-# instead of restarting, and the ensure path refuses to start a worker and fails
-# with a diagnostic naming the suspension, the worker log, and
-# fm-remote-doctor.sh --fix, which alone resumes restarts after collapsing
-# duplicate supervisors. A healthy worker keeps serving while suspended.
+# 100) once for each serving child that exits non-zero, a first child included,
+# before it would restart that child, and at most that many charges land in any
+# two consecutive FM_REMOTE_JOB_RESTART_WINDOW_SECONDS (default 900) buckets
+# across all supervisors together. A child that exits 0, such as one that found
+# a verified owner already serving, is never charged. The failure that exhausts
+# the budget publishes worker.restart-suspended: every supervisor stops instead
+# of restarting or starting a child, and the ensure path refuses to start a
+# worker and fails with a diagnostic naming the suspension, the worker log, and
+# the doctor's --fix, from the primary as fm-on.sh <route>
+# fm-remote-doctor.sh --fix and on the host by its absolute path under the
+# configured code root; that alone resumes restarts after collapsing duplicate
+# supervisors. A healthy worker keeps serving while suspended.
 
 FM_REMOTE_JOB_LABEL=dev.firstmate.remote-job
 FM_REMOTE_JOB_MAX_BYTES=${FM_REMOTE_JOB_MAX_BYTES:-1048576}
@@ -1026,32 +1030,35 @@ fm_remote_job_restart_budget_settings() {
 }
 
 # True while worker restarts are suspended on this account, with the loud
-# operator diagnostic in FM_REMOTE_JOB_ERROR.
-fm_remote_job_restart_suspended() {
-  local marker
+# operator diagnostic in FM_REMOTE_JOB_ERROR naming the doctor under
+# <remote-root> that clears it.
+fm_remote_job_restart_suspended() { # <remote-root>
+  local root=$1 marker
   [ -n "$FM_REMOTE_JOB_STATE" ] || return 1
   marker=$(fm_remote_job_restart_suspended_path)
   [ -e "$marker" ] || [ -L "$marker" ] || return 1
-  FM_REMOTE_JOB_ERROR="remote job worker restarts are suspended on this account: $FM_REMOTE_JOB_RESTART_BUDGET worker starts within $FM_REMOTE_JOB_RESTART_WINDOW_SECONDS seconds exhausted the account-wide restart budget, so no further worker or supervisor is started; the worker's own errors are in $FM_REMOTE_JOB_STATE/logs/$FM_REMOTE_JOB_LABEL.log; fix that cause, then run fm-on.sh <route> fm-remote-doctor.sh --fix"
+  FM_REMOTE_JOB_ERROR="remote job worker restarts are suspended on this account: $FM_REMOTE_JOB_RESTART_BUDGET failed worker exits within $FM_REMOTE_JOB_RESTART_WINDOW_SECONDS seconds exhausted the account-wide restart budget, so no further worker or supervisor is started; the worker's own errors are in $FM_REMOTE_JOB_STATE/logs/$FM_REMOTE_JOB_LABEL.log; fix that cause, then clear the suspension from the primary with fm-on.sh <route> fm-remote-doctor.sh --fix or on this host with $root/bin/fm-remote-doctor.sh --fix"
 }
 
-# Charge one serving-worker start against the account-wide restart budget.
-# Every restart supervisor charges before every child it spawns, its first
-# included, so the budget bounds worker starts across all supervisors together
-# rather than per supervisor. At most FM_REMOTE_JOB_RESTART_BUDGET starts land in
-# any two consecutive FM_REMOTE_JOB_RESTART_WINDOW_SECONDS buckets: each start
-# claims a slot directory with an atomic mkdir, and the current bucket offers
-# only the slots the previous bucket left unused. The start that finds no slot
-# publishes the suspension marker instead, which stops every supervisor's next
-# restart and every ensure's next start until fm_remote_job_restart_resume.
-fm_remote_job_restart_budget_charge() {
-  local dir now bucket entry name entry_bucket used_previous=0 slot limit tmp marker
+# Charge one failed serving child against the account-wide restart budget.
+# Every restart supervisor charges once for each child that exits non-zero, its
+# first included, before it would restart that child, so the budget bounds
+# failing workers across all supervisors together rather than per supervisor. A
+# child that exits 0 is never charged. At most FM_REMOTE_JOB_RESTART_BUDGET
+# charges land in any two consecutive FM_REMOTE_JOB_RESTART_WINDOW_SECONDS
+# buckets: each charge claims a slot directory with an atomic mkdir, and the
+# current bucket offers only the slots the previous bucket left unused. The
+# charge that finds no slot publishes the suspension marker instead, which stops
+# every supervisor's next restart and every ensure's next start until
+# fm_remote_job_restart_resume.
+fm_remote_job_restart_budget_charge() { # <remote-root>
+  local root=$1 dir now bucket entry name entry_bucket used_previous=0 slot limit tmp marker
   [ -n "$FM_REMOTE_JOB_STATE" ] || return 1
   fm_remote_job_restart_budget_settings || {
     FM_REMOTE_JOB_ERROR="remote job restart budget settings are invalid"
     return 1
   }
-  fm_remote_job_restart_suspended && return 1
+  fm_remote_job_restart_suspended "$root" && return 1
   dir=$(fm_remote_job_safe_child_dir "$FM_REMOTE_JOB_STATE" restart-budget) || {
     FM_REMOTE_JOB_ERROR="remote job restart budget state is unsafe"
     return 1
@@ -1084,7 +1091,7 @@ fm_remote_job_restart_budget_charge() {
   else
     rm -f -- "$tmp"
   fi
-  fm_remote_job_restart_suspended
+  fm_remote_job_restart_suspended "$root"
   return 1
 }
 
@@ -1374,7 +1381,7 @@ fm_remote_job_wait_for_probe() { # <remote-root> <account-home>
   while [ "$i" -lt 200 ]; do
     fm_remote_job_probe "$account_home" && fm_remote_job_worker_identity_matches "$root" "$account_home" && return 0
     # A suspension published while waiting means no worker is coming.
-    fm_remote_job_restart_suspended && return 1
+    fm_remote_job_restart_suspended "$root" && return 1
     i=$((i + 1))
     sleep 0.1
   done
@@ -1431,7 +1438,7 @@ fm_remote_job_start_linux_worker() { # <remote-root> <account-home>
     if fm_remote_job_worker_identity_matches "$root" "$account_home"; then return 0; fi
     # A suspended account starts nothing, so a worker on older code keeps
     # serving rather than being stopped with no replacement allowed.
-    fm_remote_job_restart_suspended && return 1
+    fm_remote_job_restart_suspended "$root" && return 1
     # The owner pid is the serving child; its restart supervisor sits above it
     # and would immediately replace a lone process kill, so stop the whole
     # worker tree through its isolated group.
@@ -1443,7 +1450,7 @@ fm_remote_job_start_linux_worker() { # <remote-root> <account-home>
     wait "$pid" 2>/dev/null || true
     FM_REMOTE_JOB_REPAIRED=1
   fi
-  fm_remote_job_restart_suspended && return 1
+  fm_remote_job_restart_suspended "$root" && return 1
   # Job control puts the worker tree in its own process group, so a later stop
   # can signal every descendant at once without ever reaching the caller's own
   # group. Without this the group of a leaked worker is the launching command's.

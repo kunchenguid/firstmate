@@ -249,12 +249,17 @@ for call in 1 2 3 4 5 6; do
 done
 STORM_ERR=$(cat "$TMP_ROOT/storm.err")
 assert_contains "$STORM_ERR" "restarts are suspended" "the exhausted budget did not fail loudly"
-assert_contains "$STORM_ERR" "fm-remote-doctor.sh --fix" "the suspension did not name its recovery"
+assert_contains "$STORM_ERR" "from the primary with fm-on.sh <route> fm-remote-doctor.sh --fix" "the suspension did not name the primary's recovery"
+assert_contains "$STORM_ERR" "on this host with $REMOTE_ROOT/bin/fm-remote-doctor.sh --fix" "the suspension did not name the host's recovery"
 assert_present "$STATE/worker.restart-suspended" "the exhausted budget published no suspension"
 wait_for_supervisors 0 10 || fail "$(supervisor_count) supervisors kept running after the budget was exhausted"
-STARTS=$(cat "$STATE"/logs/*.log 2>/dev/null | grep -c 'cannot acquire or safely reclaim worker ownership' || true)
-[ "$STARTS" -ge 1 ] || fail "the failing worker never ran, so this case proves nothing"
-[ "$STARTS" -le 4 ] || fail "$STARTS workers started across six ensures despite a budget of 4"
+STORM_LOG=$(cat "$STATE"/logs/*.log 2>/dev/null)
+assert_contains "$STORM_LOG" "$REMOTE_ROOT/bin/fm-remote-doctor.sh --fix; stopping the supervisor" "the stopping supervisor did not log the command that clears the suspension"
+STARTS=$(printf '%s\n' "$STORM_LOG" | grep -c 'cannot acquire or safely reclaim worker ownership' || true)
+[ "$STARTS" -ge 5 ] || fail "only $STARTS failing workers ran, so the budget of 4 was never exhausted by failures"
+[ "$STARTS" -le 5 ] || fail "$STARTS workers failed across six ensures despite a budget of 4"
+SLOTS=$(find "$STATE/restart-budget" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')
+[ "$SLOTS" -eq 4 ] || fail "the failing workers charged $SLOTS budget slots instead of exactly the budget of 4"
 pass "a worker that fails immediately stops at the account-wide bound across every supervisor"
 
 (export FM_REMOTE_JOB_RESTART_BUDGET=4; fm_remote_job_ensure_worker "$REMOTE_ROOT" "$ACCOUNT_HOME") &&
@@ -267,6 +272,33 @@ fm_remote_job_restart_resume || fail "the suspension could not be lifted"
 wait_for_supervisors 1 5 || fail "the resumed account did not run exactly one supervisor"
 run_probe_job
 pass "a suspension holds until resumed, then exactly one worker starts"
+
+# A heavily loaded host can leave a verified owner's heartbeat briefly stale,
+# so each ensure starts a redundant supervisor whose child finds that owner and
+# exits 0. Those starts are not failures and must never exhaust the budget.
+use_state benign-race
+(export FM_REMOTE_JOB_RESTART_BUDGET=3; fm_remote_job_ensure_worker "$REMOTE_ROOT" "$ACCOUNT_HOME") ||
+  fail "the benign-race fixture did not start"
+wait_for_supervisors 1 5 || fail "the benign-race fixture did not run exactly one supervisor"
+SERVING_WORKER=$(cat "$STATE/worker.pid")
+kill -STOP "$SERVING_WORKER"
+touch -t 200001010000 "$STATE/worker.ready"
+REDUNDANT=0
+for call in 1 2 3 4 5 6; do
+  REPAIRED=$(export FM_REMOTE_JOB_RESTART_BUDGET=3
+    fm_remote_job_start_linux_worker "$REMOTE_ROOT" "$ACCOUNT_HOME" && printf '%s\n' "$FM_REMOTE_JOB_REPAIRED") ||
+    { kill -CONT "$SERVING_WORKER"; fail "ensure call $call refused while a verified owner serves: $FM_REMOTE_JOB_ERROR"; }
+  [ "$REPAIRED" = 1 ] && REDUNDANT=$((REDUNDANT + 1))
+done
+wait_for_supervisors 1 10 || { kill -CONT "$SERVING_WORKER"; fail "$(supervisor_count) supervisors remained after the redundant ones should have exited"; }
+kill -CONT "$SERVING_WORKER"
+[ "$REDUNDANT" -eq 6 ] || fail "only $REDUNDANT of six ensures started a redundant supervisor, so this case proves nothing"
+assert_absent "$STATE/worker.restart-suspended" "redundant starts beside a verified owner suspended restarts"
+SLOTS=$(find "$STATE/restart-budget" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')
+[ "$SLOTS" -eq 0 ] || fail "redundant starts beside a verified owner consumed $SLOTS restart budget slots"
+[ "$(cat "$STATE/worker.pid")" = "$SERVING_WORKER" ] || fail "a redundant start replaced the verified owner"
+run_probe_job
+pass "redundant starts beside a verified owner with a stale heartbeat charge nothing"
 
 # --- 4. the supported recovery collapses duplicates to the lock owner --------
 

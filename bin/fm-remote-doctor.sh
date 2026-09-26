@@ -443,7 +443,7 @@ check_remote_job_supervision() {
   else
     record remote-job-supervisors "ok: no duplicate remote job workers serve this account's queue"
   fi
-  if remote_job_existing_state && fm_remote_job_restart_suspended; then
+  if remote_job_existing_state && fm_remote_job_restart_suspended "$FM_ROOT"; then
     record remote-job-restarts "fixable: $FM_REMOTE_JOB_ERROR" \
       "fix the cause the worker log names, then rerun this command with --fix to resume worker restarts"
   else
@@ -592,7 +592,7 @@ fix_remote_job_worker() {
       *'survived reaping'*) fix_report remote-job-supervisors failed "${line#warning: }" ;;
     esac
   done < <("$SCRIPT_DIR/fm-remote-job-reap-orphans.sh" --duplicates 2>&1 || true)
-  if remote_job_existing_state && fm_remote_job_restart_suspended; then
+  if remote_job_existing_state && fm_remote_job_restart_suspended "$FM_ROOT"; then
     if fm_remote_job_restart_resume; then
       fix_report remote-job-restarts applied "resumed worker restarts after the account-wide restart budget was exhausted"
     else

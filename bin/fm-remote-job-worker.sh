@@ -39,10 +39,14 @@
 # consecutive-failure backoff, but not that total restart guard, so a child
 # that dies just past the healthy threshold cannot restart without bound
 # either. fm-on's ensure path restarts a worker that gave up. Because that makes
-# a per-supervisor guard no bound on the host, every spawn, the first included,
-# is also charged against the library's account-wide restart budget, and a
-# supervisor whose charge is refused stops; the library header owns that bound
-# and the suspension it publishes.
+# a per-supervisor guard no bound on the host, every serving child that exits
+# non-zero, a first child included, is also charged against the library's
+# account-wide restart budget before the supervisor would restart it, and a
+# supervisor whose charge is refused stops. A child that exits 0, such as one
+# that found a verified owner already serving, is never charged, and a child
+# exiting 75 stops the supervisor uncharged. A supervisor that finds restarts
+# suspended starts no child. The library header owns that bound and the
+# suspension it publishes.
 set -u
 
 # A non-numeric override falls back to the default rather than crashing the
@@ -1169,8 +1173,8 @@ worker_supervise_linux() {
       worker_error "configured FM_ROOT $FM_ROOT no longer exists; stopping the abandoned worker supervisor"
       return 0
     fi
-    if ! fm_remote_job_restart_budget_charge; then
-      worker_error "${FM_REMOTE_JOB_ERROR:-the account-wide remote job restart budget is exhausted}; stopping the supervisor"
+    if fm_remote_job_restart_suspended "$FM_ROOT"; then
+      worker_error "$FM_REMOTE_JOB_ERROR; stopping the supervisor"
       return 1
     fi
     started=$SECONDS
@@ -1188,6 +1192,10 @@ worker_supervise_linux() {
     fi
     worker_supervisor_cleanup_dead_child "$account_home" "$WORKER_SUPERVISED_PID" || true
     WORKER_SUPERVISED_PID=
+    if ! fm_remote_job_restart_budget_charge "$FM_ROOT"; then
+      worker_error "${FM_REMOTE_JOB_ERROR:-the account-wide remote job restart budget is exhausted}; stopping the supervisor"
+      return 1
+    fi
     restarts=$((restarts + 1))
     if [ "$restarts" -ge "$FM_REMOTE_JOB_SUPERVISOR_MAX_RESTARTS" ]; then
       worker_error "remote job worker exited $restarts times; stopping the supervisor"
