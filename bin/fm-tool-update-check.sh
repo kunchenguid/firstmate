@@ -46,6 +46,8 @@
 # and stays silent in between. Each probe is bounded by
 # FM_TOOL_UPDATE_PROBE_SECS (default 5, valid 1..30) and a whole sweep by
 # FM_TOOL_UPDATE_BUDGET_SECS (default 20, valid 1..120).
+# FM_TOOL_UPDATE_READ_ONLY=1 bypasses the cadence record read and write for
+# callers such as Vigie that require a strictly read-only live probe.
 #
 # The sweep has to finish inside the watcher's own per check bound, because a run
 # the watcher kills prints nothing and writes no record, so it would repeat that
@@ -145,6 +147,15 @@ if [ "$BUDGET_SECS" -gt 120 ]; then
   printf 'fm-tool-update-check: FM_TOOL_UPDATE_BUDGET_SECS must be a whole number from 1 to 120\n' >&2
   exit 2
 fi
+
+READ_ONLY=${FM_TOOL_UPDATE_READ_ONLY:-0}
+case "$READ_ONLY" in
+  0|1) ;;
+  *)
+    printf 'fm-tool-update-check: FM_TOOL_UPDATE_READ_ONLY must be 0 or 1\n' >&2
+    exit 2
+    ;;
+esac
 
 # The smallest bound a probe can be given, because fm_run_timed treats a
 # non-positive bound as no bound.
@@ -693,7 +704,9 @@ action_check() {
 
   [ -f "$CONFIG" ] || return 0
 
-  record_read
+  if [ "$READ_ONLY" -eq 0 ]; then
+    record_read
+  fi
   now=$(record_epoch_now)
   if [ "$INTERVAL" -ne 0 ] && [ "$RECORD_EPOCH" -gt 0 ] \
     && [ "$now" -ge "$RECORD_EPOCH" ] && [ $((now - RECORD_EPOCH)) -lt "$INTERVAL" ]; then
@@ -735,7 +748,9 @@ action_check() {
   if [ -n "$line" ] && [ "$FINDINGS" != "$RECORD_REPORTED" ]; then
     printf '%s\n' "$line"
   fi
-  record_write "$FINDINGS" || true
+  if [ "$READ_ONLY" -eq 0 ]; then
+    record_write "$FINDINGS" || true
+  fi
   return 0
 }
 
