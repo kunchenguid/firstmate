@@ -1780,7 +1780,14 @@ task_captain_call_open() {  # <task>
   CAPTAIN_CALL_IDENTITY=
   [ -n "$task" ] || return 1
   CAPTAIN_CALL_IDENTITY=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-captain-hold.sh" \
-    open "$task" --identity 2>/dev/null) || return 1
+    open "$task" --identity --include-parked 2>/dev/null) || return 1
+  case "$CAPTAIN_CALL_IDENTITY" in
+    parked:*)
+      case "$("$FM_CREW_STATE_BIN" "$task" 2>/dev/null)" in
+        'state: parked '*'source: run-step'*) CAPTAIN_CALL_IDENTITY=; return 1 ;;
+      esac
+      ;;
+  esac
   return 0
 }
 
@@ -1834,15 +1841,22 @@ stale_wait_record() {  # <window-key>
 # Bound a due stale alarm for an ordinary crew task held for the captain.
 # Backlog-only secondmate holds are outside this guard because the earlier gate
 # preserves their no-backlog-read hot path.
-# While the away-posture record exists the bound is absolute: an open captain
-# call is never rechecked, whatever the throttle says, because nobody is there
-# to answer it and the return brief lists it.
+# A `parked` backlog hold (a desk disposition owed by the supervisor, not the
+# captain) takes the same first-sight-then-cadence bound, so an idle parked pane
+# stops re-alarming on every display tick.
+# While the away-posture record exists the bound is absolute for a captain call
+# only: it is never rechecked, whatever the throttle says, because nobody is
+# there to answer it and the return brief lists it. A parked hold keeps its
+# cadence, because it is not a captain call.
 captain_call_stale_bound() {  # <window-key> <task>
   local key=$1 task=$2
   STALE_WAIT_DECLARATION=
   task_captain_call_open "$task" || return 1
   STALE_WAIT_DECLARATION=$(captain_call_declaration "$task" "$CAPTAIN_CALL_IDENTITY")
-  afk_record_present && return 0
+  case "$CAPTAIN_CALL_IDENTITY" in
+    parked:*) ;;
+    *) afk_record_present && return 0 ;;
+  esac
   stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION"
 }
 
@@ -3007,9 +3021,15 @@ EOF
             printf '%s' "$h" > "$sf"
             triage_log "absorbed stale (captain-held, never rechecked while the away-posture record exists): $w"
           elif [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
-            fm_wake_append stale "$w" "stale: $w" || exit 1
-            printf '%s' "$h" > "$sf"
-            wake "stale: $w"
+            STALE_WAIT_DECLARATION=
+            if captain_call_stale_bound "$key" "$task" && [[ "$CAPTAIN_CALL_IDENTITY" = parked:* ]]; then
+              printf '%s' "$h" > "$sf"
+            else
+              fm_wake_append stale "$w" "stale: $w" || exit 1
+              stale_wait_record "$key"
+              printf '%s' "$h" > "$sf"
+              wake "stale: $w"
+            fi
           fi
         elif stale_is_terminal "$w" "$STATE"; then
           # The log's latest status event is captain-relevant - but that alone is not
