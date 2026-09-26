@@ -41,12 +41,13 @@
 # invocations in the core bin/ and bin/backends/ scripts so every configured
 # backlog backend follows the same tasks-axi lifecycle path.
 #
-# Lint defaults to two bounded workers over two stable logical shards, and each
-# worker runs ONE canonical root per ShellCheck process, so a run holds at most
-# JOBS concurrent ShellCheck processes. Diagnostics replay in stable shard/root
-# order. FM_LINT_JOBS=1 changes concurrency, not diagnostics or exit selection.
+# Lint defaults to two concurrency-limited workers over two stable logical
+# shards, and each worker runs ONE canonical root per ShellCheck process, so a
+# run holds at most JOBS concurrent ShellCheck processes. Diagnostics replay
+# in stable shard/root order. FM_LINT_JOBS=1 changes concurrency, not diagnostics
+# or exit selection.
 # --partition 1of2/2of2 splits the entire canonical inventory across
-# two CI runners, each with those same bounded workers. Partitions are complete,
+# two CI runners, each with those same concurrency-limited workers. Partitions are complete,
 # disjoint, and byte-weight balanced; --list-files exposes their actual roots.
 # Partition mode is always full source-aware analysis, never changed-only or
 # --fast, and does not accept explicit paths. Each partition also runs workflow
@@ -68,10 +69,11 @@
 # own ShellCheck process with identical diagnostics, just unbounded.
 #
 # Per-root evidence is incremental: workers append begin/end records (root,
-# mode, shard, start, end, duration, exit status, reason, peak RSS) to a roots
-# log as each root completes, so a mid-run kill still leaves the completed
-# record and names the root in flight as begun-but-unfinished. With --telemetry
-# the log is retained at <telemetry>.roots.tsv; otherwise it lives only in the
+# mode, shard, start, end, duration, exit status, reason, and peak RSS when
+# measured) to a roots log as each root completes, so a mid-run kill still
+# leaves the completed record and names the root in flight as
+# begun-but-unfinished. With --telemetry the log is retained at
+# <telemetry>.roots.tsv; otherwise it lives only in the
 # run's scratch dir. Reason values are ok, findings, timeout, memory,
 # signal:<sig>, limit-unavailable, or error:<rc>. In partition mode begin/end
 # lines also stream to stderr, and an abnormal root end is always reported
