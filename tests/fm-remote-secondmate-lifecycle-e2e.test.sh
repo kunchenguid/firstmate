@@ -333,11 +333,19 @@ if [ "\${1:-}" = clone ] && [ -n "\${FM_FAKE_CLONE_HOLD_DIR:-}" ] \
   hold_dest="\${!#}"
   "$REAL_GIT" "\$@" &
   hold_git=\$!
+  hold_state() { ps -o stat= -p "\$hold_git" 2>/dev/null | tr -d '[:space:]'; }
   while [ ! -d "\$hold_dest/.git/objects" ]; do
-    kill -0 "\$hold_git" 2>/dev/null || break
+    case "\$(hold_state)" in ''|Z*) wait "\$hold_git"; exit \$? ;; esac
     sleep 0.005
   done
   kill -STOP "\$hold_git" 2>/dev/null || true
+  while :; do
+    case "\$(hold_state)" in
+      T*) break ;;
+      ''|Z*) wait "\$hold_git"; exit \$? ;;
+    esac
+    sleep 0.005
+  done
   touch "$TMP_ROOT/race-clone.held"
   while [ ! -f "$TMP_ROOT/race-clone.release" ] && [ -d "$TMP_ROOT" ]; do sleep 0.02; done
   kill -CONT "\$hold_git" 2>/dev/null || true
@@ -407,6 +415,37 @@ if find "$TMP_ROOT" -maxdepth 1 -name '.fm-home-provisioning.*' -print -quit | g
   fail "raced provisioning left staging litter beside the home"
 fi
 pass "competing cleanup of the public home cannot reach a live provisioning clone"
+
+# A home that appears at the public path while the clone is staged must make
+# the provision die without adopting, altering, or nesting into that home.
+rm -f -- "$TMP_ROOT/race-clone.held" "$TMP_ROOT/race-clone.release"
+PATH="$FAKEBIN:$PATH" FM_HOME="$TMP_ROOT/appeared-home" FM_ROOT_OVERRIDE="$REMOTE_ROOT" \
+  FM_FAKE_CLONE_HOLD_DIR="$TMP_ROOT" \
+  "$REMOTE_ROOT/bin/fm-remote-home-provision.sh" < "$TMP_ROOT/race.manifest" \
+  > "$TMP_ROOT/appeared-provision.out" 2>&1 &
+appeared_provision=$!
+race_wait=0
+while [ ! -f "$TMP_ROOT/race-clone.held" ]; do
+  kill -0 "$appeared_provision" 2>/dev/null || fail "appeared-home provision exited before its clone could be held"
+  race_wait=$((race_wait + 1))
+  [ "$race_wait" -le 250 ] || fail "appeared-home provision clone never reached the held point"
+  sleep 0.02
+done
+mkdir "$TMP_ROOT/appeared-home"
+printf 'foreign\n' > "$TMP_ROOT/appeared-home/foreign"
+touch "$TMP_ROOT/race-clone.release"
+if wait "$appeared_provision"; then
+  fail "provision adopted a home that appeared while it was being provisioned"
+fi
+grep -qF "remote home appeared while it was being provisioned" "$TMP_ROOT/appeared-provision.out" \
+  || { sed 's/^/appeared-provision: /' "$TMP_ROOT/appeared-provision.out"; fail "appeared-home provision died for the wrong reason"; }
+[ "$(find "$TMP_ROOT/appeared-home" -mindepth 1 | wc -l | tr -d ' ')" -eq 1 ] \
+  && [ "$(cat "$TMP_ROOT/appeared-home/foreign")" = foreign ] \
+  || fail "provision altered a home that appeared while it was being provisioned"
+if find "$TMP_ROOT" -maxdepth 1 -name '.fm-home-provisioning.*' -print -quit | grep -q .; then
+  fail "appeared-home provisioning left staging litter beside the home"
+fi
+pass "a home that appears mid-provision makes the provision die without touching it"
 if [ "${FM_TEST_PROVISION_ONLY:-0}" = 1 ]; then
   echo "ALL TESTS PASSED"
   exit 0

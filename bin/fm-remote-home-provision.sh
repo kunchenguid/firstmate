@@ -183,11 +183,16 @@ else
   STAGE_HOME=$(mktemp -d "$HOME_PARENT/.fm-home-provisioning.XXXXXX") \
     || die "cannot create remote home staging directory"
   git clone --quiet -- "$FM_ROOT" "$STAGE_HOME" || die "could not clone the remote Firstmate home"
-  [ ! -e "$FM_HOME" ] && [ ! -L "$FM_HOME" ] \
-    || die "remote home appeared while it was being provisioned"
+  STAGE_SENTINEL="${STAGE_HOME##*/}.owner"
+  : > "$STAGE_HOME/$STAGE_SENTINEL" || die "cannot mark the remote home staging directory"
   mv -- "$STAGE_HOME" "$FM_HOME" || die "cannot install the remote home"
+  if [ ! -f "$FM_HOME/$STAGE_SENTINEL" ] || [ -L "$FM_HOME/$STAGE_SENTINEL" ]; then
+    STAGE_HOME="$FM_HOME/${STAGE_HOME##*/}"
+    die "remote home appeared while it was being provisioned"
+  fi
   STAGE_HOME=
   CREATED_HOME=1
+  rm -f -- "$FM_HOME/$STAGE_SENTINEL" || die "cannot clear the remote home staging sentinel"
 fi
 for operational_dir in data state config projects; do
   operational_path="$FM_HOME/$operational_dir"
