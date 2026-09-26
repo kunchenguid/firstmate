@@ -467,16 +467,15 @@ test_return_brief_composes_from_record_store_and_held_set() {
   pass "the return brief renders health, the words with the session account, waiting, could-not-fix, handled, and cost from durable records, and the gate shrinks to what the away session could not fix"
 }
 
-# On a supervision-host home off Pi the drain's BRANCH OUTCOMES section is
-# where main reads outcomes, and the brief just presented the away window's,
-# so the return advances the store's read cursor through the window's rows:
-# the first drain after it lists only newer outcomes instead of replaying the
-# window, while an unprocessed captain row still waits for main's
-# acknowledgement. On Pi the branch extension owns that cursor, so it stays.
-test_return_marks_the_window_read_on_a_host_home_only() {
-  local dir harness fakebin out n cursor
+# On a supervision-host home off Pi the drain's BRANCH OUTCOMES section is the
+# one presenter of branch outcomes and the one owner of their read cursor, so
+# the return brief counts the window's outcomes and points there instead of
+# listing them, and leaves the cursor alone. On Pi the brief lists them as
+# before.
+test_return_brief_points_at_the_drain_on_a_host_home_only() {
+  local dir harness fakebin out n
   for harness in claude pi; do
-    dir="$TMP_ROOT/window-read-$harness"
+    dir="$TMP_ROOT/window-pointer-$harness"
     install_runner "$dir"
     for f in fm-supervision-engine-lib.sh fm-harness.sh fm-cursor-lib.sh fm-gemini-lib.sh; do
       cp "$ROOT/bin/$f" "$dir/bin/"
@@ -486,7 +485,7 @@ test_return_marks_the_window_read_on_a_host_home_only() {
     mkdir -p "$fakebin"
     ln -s /bin/bash "$fakebin/$harness"
     contract_in "$dir" enter --words 'watch the fleet' >/dev/null 2>&1 || fail "could not record the away posture"
-    for n in 1 2 3 4 5 6 7 8 9 10; do
+    for n in 1 2 3 4 5 6; do
       outcome_in "$dir" append --task demo --verdict routine --summary "routine $n" >/dev/null || fail "could not seed routine $n"
     done
     outcome_in "$dir" append --task demo --verdict captain --summary 'PR ready for review' >/dev/null || fail "could not seed the captain row"
@@ -495,122 +494,20 @@ test_return_marks_the_window_read_on_a_host_home_only() {
     # shellcheck disable=SC2016 # the single-quoted script expands in the harness shell
     out=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" FM_CONFIG_OVERRIDE="$dir/home/config" \
       "$fakebin/$harness" -c '"$0" begin 2>&1' "$dir/bin/fm-afk-return.sh") || fail "$harness: the return did not clear: $out"
-    assert_contains "$out" 'demo: PR ready for review' "$harness: the brief did not present the window's captain outcome"
-    cursor=$(cat "$dir/home/state/.branch-outcomes-cursor" 2>/dev/null || true)
+    assert_contains "$out" '7 outcome(s) handled by the away session (6 routine, 1 escalated above)' "$harness: the brief must count the window's outcomes"
     if [ "$harness" = claude ]; then
-      [ "$cursor" = 11 ] || fail "a host home's return must mark the window read through its last row, got '${cursor:-none}'"
-      [ -n "$(outcome_in "$dir" unprocessed)" ] || fail "the return must leave the window's captain outcome unprocessed for main"
+      assert_contains "$out" "  1 captain outcome(s) escalated by the away session, presented in the drain's BRANCH OUTCOMES section" \
+        "a host home's brief must point at the drain for its captain outcomes"
+      assert_contains "$out" "the drain's BRANCH OUTCOMES section presents them" "a host home's brief must point at the drain"
+      assert_not_contains "$out" 'PR ready for review' "a host home's brief must leave the captain outcome to the drain"
+      assert_not_contains "$out" 'routine 6' "a host home's brief must leave the routine outcomes to the drain"
     else
-      [ -z "$cursor" ] || fail "a Pi home's return must leave the store's read cursor to the branch extension, got '$cursor'"
+      assert_contains "$out" '    - demo: PR ready for review' "a Pi home's brief must still list the captain outcome"
+      assert_contains "$out" '    - demo: routine 6' "a Pi home's brief must still list the latest routine outcomes"
     fi
+    [ ! -e "$dir/home/state/.branch-outcomes-cursor" ] || fail "$harness: the return moved the outcome store's read cursor"
   done
-  pass "the return marks the away window read where the drain presents outcomes off Pi, and leaves Pi's cursor alone"
-}
-
-# The return advances the read cursor only through what its brief presented:
-# every unread outcome, from before and during the away window alike, is one
-# list in store-sequence order with each row's time, captain rows and the
-# newest routine rows in full, and each contiguous run of older routine rows
-# in one line, in its place, that counts them and names their tasks - never
-# spanning a captain row - so each row is presented once and none is marked
-# read unseen, including one recorded in the same second as /afk.
-test_return_presents_every_unread_outcome_once() {
-  local dir fakebin out cursor n entered store t seen
-  dir="$TMP_ROOT/window-earlier"
-  install_runner "$dir"
-  for f in fm-supervision-engine-lib.sh fm-harness.sh fm-cursor-lib.sh fm-gemini-lib.sh; do
-    cp "$ROOT/bin/$f" "$dir/bin/"
-  done
-  : > "$dir/home/config/supervision-host"
-  fakebin="$dir/fakebin"
-  mkdir -p "$fakebin"
-  ln -s /bin/bash "$fakebin/claude"
-  for n in 1 2 3 4 5 6; do
-    outcome_in "$dir" append --task "early-$n" --verdict routine --summary "early routine $n" >/dev/null \
-      || fail "could not seed attended routine row $n"
-  done
-  outcome_in "$dir" append --task early-cap --verdict captain --summary 'needs a merge decision' >/dev/null \
-    || fail "could not seed the attended captain row"
-  outcome_in "$dir" append --task boundary --verdict routine --summary 'recorded as the captain left' >/dev/null \
-    || fail "could not seed the boundary row"
-  contract_in "$dir" enter --words 'watch the fleet' >/dev/null 2>&1 || fail "could not record the away posture"
-  entered=$(contract_in "$dir" field entered_epoch)
-  store="$dir/home/state/branch-outcomes.jsonl"
-  jq -c --argjson e "$entered" 'if .seq < 8 then .epoch = $e - 10 else .epoch = $e end' "$store" > "$store.new" \
-    && mv "$store.new" "$store" || fail "could not date the seeded rows"
-  for n in 1 2 3 4 5 6; do
-    outcome_in "$dir" append --task "away-$n" --verdict routine --summary "away routine $n" >/dev/null \
-      || fail "could not seed away row $n"
-  done
-  touch "$dir/home/state/.last-watcher-beat"
-  : > "$dir/home/state/.fake-drain"
-  # shellcheck disable=SC2016 # the single-quoted script expands in the harness shell
-  out=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" FM_CONFIG_OVERRIDE="$dir/home/config" \
-    "$fakebin/claude" -c '"$0" begin 2>&1' "$dir/bin/fm-afk-return.sh") || fail "the return did not clear: $out"
-  assert_contains "$out" '  1 captain outcome(s), listed in full under Outcomes since your last drain' "waiting on you must point at the captain row"
-  assert_contains "$out" '  14 outcome(s) no drain presented (13 routine, 1 captain), oldest first:' "the list must cover every unread row"
-  assert_contains "$out" "  - 6 earlier routine outcome(s) not listed in full, for: early-1, early-2, early-3, early-4, early-5, early-6
-  - [$(jq -rn --argjson e "$((entered - 10))" '$e | todate')] early-cap: needs a merge decision (captain; the next drain presents it until acknowledged)
-  - 2 earlier routine outcome(s) not listed in full, for: boundary, away-1
-  - [" "each run of collapsed routine rows must take its own place around the captain row"
-  for n in 2 3 4 5 6; do
-    assert_contains "$out" "] away-$n: away routine $n" "the newest routine rows must be listed in full"
-  done
-  [ "$(line_of "$out" 'for: boundary, away-1')" -lt "$(line_of "$out" 'away-2: away')" ] || fail "the list must run in store-sequence order: $out"
-  for t in early-1 early-2 early-3 early-4 early-5 early-6 early-cap boundary away-1 away-2 away-3 away-4 away-5 away-6; do
-    seen=$(printf '%s\n' "$out" | grep -oE -- "(^| )$t(:|,|\$)" | wc -l | tr -d ' ')
-    [ "$seen" = 1 ] || fail "row $t must be presented exactly once, seen $seen times: $out"
-  done
-  cursor=$(cat "$dir/home/state/.branch-outcomes-cursor" 2>/dev/null || true)
-  [ "$cursor" = 14 ] || fail "the return must mark read exactly the rows its brief presented, got '${cursor:-none}'"
-  pass "the return presents every unread outcome once, in store order, before marking it read"
-}
-
-# A read cursor the return could not advance leaves the presented outcomes
-# unread for the next drain to replay, so catch-up stays gated on that failure
-# until a check advances it.
-test_return_keeps_catchup_gated_when_the_read_cursor_cannot_advance() {
-  local dir fakebin out rc gate
-  dir="$TMP_ROOT/cursor-stuck"
-  install_runner "$dir"
-  for f in fm-supervision-engine-lib.sh fm-harness.sh fm-cursor-lib.sh fm-gemini-lib.sh; do
-    cp "$ROOT/bin/$f" "$dir/bin/"
-  done
-  gate="$dir/home/state/.afk-return-catchup"
-  : > "$dir/home/config/supervision-host"
-  fakebin="$dir/fakebin"
-  mkdir -p "$fakebin"
-  ln -s /bin/bash "$fakebin/claude"
-  outcome_in "$dir" append --task demo --verdict routine --summary 'rebased while away' >/dev/null || fail "could not seed the row"
-  mv "$dir/bin/fm-branch-outcome.sh" "$dir/bin/fm-branch-outcome.real.sh"
-  cat > "$dir/bin/fm-branch-outcome.sh" <<'EOF'
-#!/usr/bin/env bash
-[ "${1:-}" != mark-read ] || [ ! -e "$FM_HOME/cursor-stuck" ] || exit 1
-exec "$(dirname "$0")/fm-branch-outcome.real.sh" "$@"
-EOF
-  chmod +x "$dir/bin/fm-branch-outcome.sh"
-  : > "$dir/home/cursor-stuck"
-  touch "$dir/home/state/.last-watcher-beat"
-  : > "$dir/home/state/.fake-drain"
-  set +e
-  # shellcheck disable=SC2016 # the single-quoted script expands in the harness shell
-  out=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" FM_CONFIG_OVERRIDE="$dir/home/config" \
-    "$fakebin/claude" -c '"$0" begin 2>&1' "$dir/bin/fm-afk-return.sh")
-  rc=$?
-  set -e
-  [ "$rc" -eq 3 ] || fail "a read cursor that could not advance should keep catch-up gated (rc=$rc): $out"
-  [ -f "$gate" ] || fail "a read cursor that could not advance did not retain the return gate"
-  assert_contains "$out" 'outcome read cursor could not advance past the presented outcomes, catch-up stays gated' "the gate did not name the cursor failure"
-  [ ! -e "$dir/home/state/.branch-outcomes-cursor" ] || fail "the stuck cursor moved"
-  rm -f "$dir/home/cursor-stuck"
-  # shellcheck disable=SC2016 # the single-quoted script expands in the harness shell
-  out=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" FM_CONFIG_OVERRIDE="$dir/home/config" \
-    "$fakebin/claude" -c '"$0" check 2>&1' "$dir/bin/fm-afk-return.sh") || fail "catch-up did not clear once the cursor advanced: $out"
-  assert_contains "$out" 'catch-up clear' "the advanced cursor did not clear catch-up"
-  assert_not_contains "$out" 'outcome read cursor could not advance' "the cleared gate retained stale cursor evidence"
-  [ "$(cat "$dir/home/state/.branch-outcomes-cursor")" = 1 ] || fail "the check did not advance the cursor through the presented row"
-  [ ! -e "$gate" ] || fail "the advanced cursor left the return gate behind"
-  pass "a read cursor the return could not advance keeps catch-up gated until a check advances it"
+  pass "the return brief points at the drain for branch outcomes on a host home and leaves the read cursor to it, and a Pi home's brief is unchanged"
 }
 
 test_return_brief_lists_landed_work_awaiting_cleanup() {
@@ -1034,9 +931,7 @@ test_unreadable_superseded_archive_keeps_return_gated
 test_missing_final_archive_keeps_retained_contract_gated
 test_return_brief_composes_from_record_store_and_held_set
 test_return_brief_lists_landed_work_awaiting_cleanup
-test_return_marks_the_window_read_on_a_host_home_only
-test_return_presents_every_unread_outcome_once
-test_return_keeps_catchup_gated_when_the_read_cursor_cannot_advance
+test_return_brief_points_at_the_drain_on_a_host_home_only
 test_return_brief_keeps_refresh_history
 test_malformed_posture_record_keeps_catchup_gated
 test_missing_epoch_record_stays_required_after_disappearing

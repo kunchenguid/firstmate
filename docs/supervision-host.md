@@ -162,7 +162,7 @@ The host counts the wake handled only when all three hold:
 ### Where a handled wake's outcome goes
 
 Away, a handled wake never reaches main, whether its outcome was routine or captain.
-Captain outcomes wait in the outcome store, and the return brief (`bin/fm-afk-return.sh`) presents them.
+Captain outcomes wait in the outcome store, and after the return the drain's `BRANCH OUTCOMES` section presents them; the return brief (`bin/fm-afk-return.sh`) counts them and points there.
 Attended, see [Captain outcomes](#captain-outcomes).
 
 ### A captain who returns during a turn
@@ -194,9 +194,8 @@ The drain's header owns the section's bounds; these rules keep it bounded and in
 - Routine outcomes never open a main turn: the next drain lists the newest of them once, for awareness and with nothing to acknowledge, and collapses the rest into a count, while silent fleet reviews never appear.
 
 The section runs only for main on an opted-in home whose primary is not Pi, and never while the away record exists.
-The return brief presents every outcome no drain presented yet, from before and during the away window, as one list in store-sequence order with each row's time: captain outcomes and the newest routine ones in full, and each contiguous run of older routine ones in one line, in its place, that counts them and names their tasks.
-The return then advances the read cursor through exactly those rows, so no row it covers is silent; if that advance fails, the catch-up gate stays open with the failure as its evidence.
-The first drain after the return therefore lists only what arrived after the brief, plus each task's unacknowledged captain outcomes, one line per task.
+The drain is the only presenter of these outcomes and the only owner of their read cursor, the away window's included: the return brief counts the window's outcomes and points at the section instead of listing them.
+So a long away window costs one short drain, with each task's captain outcomes collapsed to one line and routine ones past the section's limit collapsed into a count, and once main acknowledges the captain outcomes no later drain shows anything from the window again.
 An unprocessed captain outcome is never adopted as processed, so a home that opts in mid-session cannot lose its first one.
 Anything main must act on while attended to move the work forward, such as a local-only branch to land or a pull request to merge, is a captain outcome on the host even when the captain asked not to hear about that work, reported once per unchanged situation (`bin/fm-branch-prompt.sh` "Verdict: routine or captain"), because a routine outcome opens no main turn.
 

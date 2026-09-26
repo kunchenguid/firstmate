@@ -156,35 +156,18 @@ window_start_epoch() {
 }
 
 # Reads the store through its owner so a malformed store refuses rather than
-# misleads. Where main processes outcomes through the drain's BRANCH OUTCOMES
-# section (the supervision host off Pi, fm_supervision_host_outcomes_drained),
-# STORE_ROWS is every unread outcome from the store's read cursor onward, in
-# store-sequence order, and PRESENTED_THROUGH is the newest of them, which the
-# brief presents; elsewhere STORE_ROWS is the away window's outcomes and the
-# branch extension owns the read cursor, so PRESENTED_THROUGH stays 0.
+# misleads.
 STORE_ROWS=
-PRESENTED_THROUGH=0
 store_rows_load() {  # <since-epoch>
-  local since=$1 raw host=0
+  local since=$1 raw
   STORE_ROWS=
-  PRESENTED_THROUGH=0
   [ -s "$STATE/branch-outcomes.jsonl" ] || return 0
   case "$since" in ''|*[!0-9]*) since=0 ;; esac
-  # shellcheck source=bin/fm-supervision-engine-lib.sh
-  if . "$SCRIPT_DIR/fm-supervision-engine-lib.sh" \
-    && fm_supervision_host_outcomes_drained "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"; then
-    host=1
-    since=0
-    raw=$("$SCRIPT_DIR/fm-branch-outcome.sh" unread 2>/dev/null) || return 1
-  else
-    raw=$("$SCRIPT_DIR/fm-branch-outcome.sh" list --recent 1000000 2>/dev/null) || return 1
-  fi
+  raw=$("$SCRIPT_DIR/fm-branch-outcome.sh" list --recent 1000000 2>/dev/null) \
+    || return 1
   STORE_ROWS=$(printf '%s\n' "$raw" | jq -r --argjson since "$since" \
-    'select(.epoch >= $since) | [.seq, .task, .verdict, (.statusEndpoint // 0), (.summary // ""), (.epoch | todate)] | @tsv' 2>/dev/null) \
+    'select(.epoch >= $since) | [.seq, .task, .verdict, (.statusEndpoint // 0), (.summary // "")] | @tsv' 2>/dev/null) \
     || { STORE_ROWS=; return 1; }
-  [ "$host" -eq 1 ] || return 0
-  PRESENTED_THROUGH=$(printf '%s\n' "$STORE_ROWS" \
-    | awk -F '\t' '$1 ~ /^[0-9]+$/ && $1 + 0 > max { max = $1 + 0 } END { print max + 0 }')
 }
 
 STATUS_SCAN_ERROR=
@@ -447,38 +430,19 @@ scan_landed_awaiting_cleanup() {  # -> <task>\t<url> rows
   done
 }
 
-# Every unread outcome the return marks read, one list in store-sequence
-# order with each row's time: captain rows and the newest routine rows in
-# full, and each contiguous run of older routine rows in one line, in its
-# place, that counts them and names their tasks, so no row the cursor covers
-# is silent and no line spans a captain row.
-render_outcome_list() {  # <rows>
-  printf '%s\n' "$1" | awk -F '\t' -v keep=5 '
-    function flush() {
-      if (run > 0) printf "  - %d earlier routine outcome(s) not listed in full, for: %s\n", run, tasks
-      run = 0; tasks = ""; split("", seen)
-    }
-    $1 ~ /^[0-9]+$/ { n++; task[n] = $2; verdict[n] = $3; line[n] = $5; time[n] = $6; if ($3 == "routine") r++ }
-    END {
-      hide = r - keep
-      for (i = 1; i <= n; i++) {
-        if (verdict[i] == "routine" && hide > 0) {
-          hide--
-          run++
-          if (!(task[i] in seen)) { seen[task[i]] = 1; tasks = tasks (tasks == "" ? "" : ", ") task[i] }
-          continue
-        }
-        flush()
-        printf "  - [%s] %s: %s%s\n", time[i], task[i], line[i], (verdict[i] == "captain" ? " (captain; the next drain presents it until acknowledged)" : "")
-      }
-      flush()
-    }'
-}
-
 render_return_brief() {  # <evidence-file> <blockers-file> <since-epoch>
   local evidence=$1 blockers=$2 since=$3 now record superseded superseded_at archive_dir stamp
-  local tag task key summary count routine captain live held_err last verb rows status url
+  local tag task key summary count routine captain live held_err last verb rows status url drained=0
   now=$(date +%s)
+  # Where main processes outcomes through the drain's BRANCH OUTCOMES section
+  # (the supervision host off Pi, docs/supervision-host.md "Captain outcomes"),
+  # the drain alone presents the window's outcomes and owns their read cursor,
+  # so the brief counts them and points there instead of listing them.
+  # shellcheck source=bin/fm-supervision-engine-lib.sh
+  if . "$SCRIPT_DIR/fm-supervision-engine-lib.sh" \
+    && fm_supervision_host_outcomes_drained "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"; then
+    drained=1
+  fi
   printf '=== Return brief'
   if [ -n "$since" ]; then
     printf ' (away %s -> %s, %s)' "$(epoch_to_iso "$since")" "$(epoch_to_iso "$now")" "$(format_duration $((now - since)))"
@@ -545,9 +509,10 @@ $(status_open_decisions "$status")
 EOF
   done
   rows=$(printf '%s\n' "$STORE_ROWS" | awk -F '\t' '$3 == "captain" { printf "  - %s: %s\n", $2, $5 }')
-  if [ -n "$rows" ] && [ "$PRESENTED_THROUGH" -gt 0 ]; then
+  if [ -n "$rows" ] && [ "$drained" -eq 1 ]; then
     count=$((count + 1))
-    printf '  %s captain outcome(s), listed in full under Outcomes since your last drain\n' "$(printf '%s\n' "$rows" | wc -l | tr -d ' ')"
+    printf '  %s captain outcome(s) escalated by the away session, presented in the drain'"'"'s BRANCH OUTCOMES section\n' \
+      "$(printf '%s\n' "$rows" | wc -l | tr -d ' ')"
   elif [ -n "$rows" ]; then
     count=$((count + 1))
     printf '  escalated by the away session:\n'
@@ -589,28 +554,22 @@ $(scan_landed_awaiting_cleanup)
 EOF
   [ "$count" -gt 0 ] || printf '  (nothing)\n'
 
+  # 6. handled while away. Every outcome the away session recorded in the
+  # store during the window counts as handled. On Pi the supervision branch,
+  # and on an opted-in home the supervision host (docs/supervision-host.md), took
+  # every safe actionable wake it could while main was parked; wakes it
+  # declined still fell back to main. The captain rows are listed above.
+  printf 'Handled while away:\n'
   routine=$(printf '%s\n' "$STORE_ROWS" | awk -F '\t' '$3 == "routine" { n++ } END { print n + 0 }')
   captain=$(printf '%s\n' "$STORE_ROWS" | awk -F '\t' '$3 == "captain" { n++ } END { print n + 0 }')
-  if [ "$PRESENTED_THROUGH" -gt 0 ]; then
-    # 6. where the drain presents outcomes, every unread one, before and
-    # during the away window, since the return marks them read.
-    printf 'Outcomes since your last drain:\n'
-    printf '  %s outcome(s) no drain presented (%s routine, %s captain), oldest first:\n' "$((routine + captain))" "$routine" "$captain"
-    render_outcome_list "$STORE_ROWS"
+  printf '  %s outcome(s) handled by the away session (%s routine, %s escalated above)\n' "$((routine + captain))" "$routine" "$captain"
+  if [ "$drained" -eq 1 ] && [ "$((routine + captain))" -gt 0 ]; then
+    printf '  the drain'"'"'s BRANCH OUTCOMES section presents them: each task'"'"'s captain outcomes on one line until you acknowledge them, routine ones once, past its limit as a count\n'
+  elif [ "$routine" -gt 0 ]; then
+    printf '  %s routine outcome(s) recorded; the latest:\n' "$routine"
+    printf '%s\n' "$STORE_ROWS" | awk -F '\t' '$3 == "routine" { printf "    - %s: %s\n", $2, $5 }' | tail -5
   else
-    # 6. handled while away. Every outcome the away session recorded in the
-    # store during the window counts as handled. On Pi the supervision branch,
-    # and on an opted-in home the supervision host (docs/supervision-host.md), took
-    # every safe actionable wake it could while main was parked; wakes it
-    # declined still fell back to main. The captain rows are listed above.
-    printf 'Handled while away:\n'
-    printf '  %s outcome(s) handled by the away session (%s routine, %s escalated above)\n' "$((routine + captain))" "$routine" "$captain"
-    if [ "$routine" -gt 0 ]; then
-      printf '  %s routine outcome(s) recorded; the latest:\n' "$routine"
-      printf '%s\n' "$STORE_ROWS" | awk -F '\t' '$3 == "routine" { printf "    - %s: %s\n", $2, $5 }' | tail -5
-    else
-      printf '  (no routine outcomes recorded in the store for this window)\n'
-    fi
+    printf '  (no routine outcomes recorded in the store for this window)\n'
   fi
 
   # 7. cost.
@@ -618,17 +577,6 @@ EOF
   for meta in "$STATE"/*.meta; do [ -f "$meta" ] && live=$((live + 1)); done
   printf 'Cost: %s supervision outcome(s) recorded (%s routine, %s captain); %s task(s) live at return.\n' \
     "$((routine + captain))" "$routine" "$captain" "$live"
-}
-
-# The brief just presented every unread outcome. Where main processes them
-# through the drain's BRANCH OUTCOMES section, advance the store's read cursor
-# through exactly those rows, so the first drain after the return lists only
-# what arrived after the brief instead of replaying the window; every
-# unprocessed captain row still waits there for main's acknowledgement
-# (bin/fm-wake-drain.sh).
-mark_window_presented() {
-  [ "$PRESENTED_THROUGH" -gt 0 ] || return 0
-  "$SCRIPT_DIR/fm-branch-outcome.sh" mark-read --through "$PRESENTED_THROUGH" >/dev/null 2>&1
 }
 
 return_reconcile() {
@@ -776,14 +724,7 @@ EOF
     append_evidence lifecycle "status file unreadable: $STATUS_SCAN_ERROR; catch-up stays gated" "$evidence"
     lifecycle_ok=0
   fi
-  if render_return_brief "$evidence" "$blockers" "$since"; then
-    if mark_window_presented; then
-      remove_evidence lifecycle 'outcome read cursor could not advance past the presented outcomes, catch-up stays gated' "$evidence" || lifecycle_ok=0
-    else
-      append_evidence lifecycle 'outcome read cursor could not advance past the presented outcomes, catch-up stays gated' "$evidence"
-      lifecycle_ok=0
-    fi
-  fi
+  render_return_brief "$evidence" "$blockers" "$since"
   if [ "$HELD_READ_FAILED" -eq 1 ]; then
     append_evidence lifecycle "held set unreadable: $HELD_READ_PATH; catch-up stays gated" "$evidence"
     lifecycle_ok=0

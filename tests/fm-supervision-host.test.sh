@@ -460,6 +460,52 @@ test_branch_outcomes_collapse_repeated_captain_outcomes_per_task() {
   pass "drain: repeated captain outcomes collapse per task, and the byte cap presents only the run its acknowledgement covers"
 }
 
+# The reference experience after a long away window: the drain is the only
+# presenter, so the first drain once the away record is gone shows the window
+# once - each task's captain outcomes collapsed to one line, routine ones past
+# the section's limit as a count - and once main acknowledges them, a second
+# drain shows nothing from the window.
+test_branch_outcomes_present_a_long_away_window_once() {
+  local home drained pad n target
+  home="$TMP_ROOT/drain-away-window"
+  mkdir -p "$home/state" "$home/config"
+  : > "$home/config/supervision-host"
+  FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" enter --words 'watch the fleet' >/dev/null 2>&1 \
+    || fail "fixture: could not record the away posture"
+  pad=$(awk 'BEGIN { for (i = 0; i < 200; i++) printf "z" }')
+  for n in $(seq 1 40); do
+    FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append --task "task-$((n % 4))" --verdict routine --summary "routine $n $pad" >/dev/null \
+      || fail "fixture: could not record routine outcome $n"
+    case "$n" in
+      10|20|30)
+        FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append --task alpha --verdict captain --summary "alpha still needs review $n" >/dev/null \
+          || fail "fixture: could not record alpha outcome $n" ;;
+    esac
+  done
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append --task beta --verdict captain --summary 'beta ready to merge' >/dev/null \
+    || fail "fixture: could not record the beta outcome"
+  drained=$(FM_HOME="$home" "$FAKE_CLAUDE" -c '"$0" 2>&1' "$ROOT/bin/fm-wake-drain.sh")
+  assert_not_contains "$drained" "BRANCH OUTCOMES" "a drain while away must leave the window's outcomes for the return"
+  FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" archive >/dev/null 2>&1 || fail "fixture: could not archive the away posture"
+
+  drained=$(FM_HOME="$home" "$FAKE_CLAUDE" -c '"$0" 2>&1' "$ROOT/bin/fm-wake-drain.sh")
+  assert_contains "$drained" "[seq 33, newest of 3 for this task] alpha: alpha still needs review 30" "a task's repeated captain outcomes must collapse to its newest"
+  [ "$(printf '%s\n' "$drained" | grep -c '] alpha: ')" -eq 1 ] || fail "a task's captain outcomes must take one line: $drained"
+  assert_contains "$drained" "[seq 44] beta: beta ready to merge" "another task's captain outcome must keep its own line"
+  assert_re '^\([0-9]+ earlier routine outcome\(s\) not shown; bin/fm-branch-outcome.sh list keeps them\)$' <(printf '%s\n' "$drained") \
+    "the window's routine overflow must collapse into one count"
+  assert_contains "$drained" "routine 40 $pad" "the newest routine outcome must be listed"
+  assert_not_contains "$drained" "routine 1 $pad" "the oldest routine outcome must collapse into the count"
+  [ "${#drained}" -lt 8000 ] || fail "a long away window must cost one short drain, got ${#drained} bytes"
+  target=$(printf '%s\n' "$drained" | sed -n 's/.*mark-processed --through \([0-9]*\);.*/\1/p')
+  [ "$target" = 44 ] || fail "one acknowledgement must cover every captain outcome of the window, got '${target:-none}'"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-processed --through "$target" >/dev/null 2>&1 || fail "the acknowledgement was refused"
+
+  drained=$(FM_HOME="$home" "$FAKE_CLAUDE" -c '"$0" 2>&1' "$ROOT/bin/fm-wake-drain.sh")
+  assert_not_contains "$drained" "BRANCH OUTCOMES" "a second drain must show nothing from the window"
+  pass "drain: a long away window costs one short drain, captain outcomes collapsed per task and routine overflow counted, and nothing from it is shown again"
+}
+
 # A drain that cannot print the section, because its output is already
 # closed, has presented nothing, so the rows stay unread for the next drain.
 test_branch_outcomes_stay_unread_when_the_drain_cannot_print() {
@@ -1743,6 +1789,7 @@ test_dispatch_entry_scopes_rows_and_renders_the_away_tail
 test_branch_outcomes_only_on_an_opted_in_home_off_pi
 test_branch_outcomes_put_captain_first_and_collapse_routine_overflow
 test_branch_outcomes_collapse_repeated_captain_outcomes_per_task
+test_branch_outcomes_present_a_long_away_window_once
 test_branch_outcomes_stay_unread_when_the_drain_cannot_print
 test_attended_routine_wake_is_handled_on_the_engine_and_stays_off_main
 test_attended_captain_outcome_reaches_main_through_branch_outcomes
