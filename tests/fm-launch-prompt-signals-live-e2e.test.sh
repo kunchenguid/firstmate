@@ -80,7 +80,7 @@ watcher_gate_not_busy() {  # <lab> <state> <target> <harness> <tail>
   FM_STATE_OVERRIDE="$state"
   FM_CONFIG_OVERRIDE="$lab/config"
   export FM_ROOT_OVERRIDE FM_HOME FM_STATE_OVERRIDE FM_CONFIG_OVERRIDE
-  # shellcheck source=bin/fm-watch.sh
+  # shellcheck source=/dev/null # Analyzed separately as a canonical root.
   . "$ROOT/bin/fm-watch.sh"
   if window_is_busy "$target" "$tail"; then
     fail "$harness: the watcher still treats the real parked prompt as busy"
