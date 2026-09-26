@@ -276,6 +276,8 @@
 #     root still exists, so the account's healthy LaunchAgent worker and every
 #     live remote secondmate worker are out of scope. Best effort: a sweep
 #     failure never blocks this teardown.
+#   Fix 4 - reap the closed tmux pane's surviving session members;
+#     bin/fm-pane-session-reap-lib.sh owns why and how.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -383,6 +385,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 }
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-pane-session-reap-lib.sh
+. "$SCRIPT_DIR/fm-pane-session-reap-lib.sh"
 # Supervision lease guard: post-landing cleanup is overlap territory between
 # the two Pi supervision actors; refuse while the OTHER actor holds this
 # task's live lease (contract: bin/fm-lease-lib.sh; no-op in homes without
@@ -3640,8 +3644,13 @@ elif [ "$BACKEND" = herdr ]; then
     echo "warning: herdr session presentation lock path is unavailable; skipping the pane close rather than closing unlocked" >&2
   fi
 elif [ "$BACKEND" != orca ] && [ "$TEARDOWN_WINDOWLESS" != 1 ]; then
-  fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" \
-    || endpoint_close_refusal "$ID" "$BACKEND" "$T" 1 || exit 1
+  PANE_SESSION=""
+  [ "$BACKEND" != tmux ] || PANE_SESSION=$(fm_pane_session_snapshot "$T")
+  if fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID"; then
+    fm_pane_session_reap "$PANE_SESSION" "$ID"
+  else
+    endpoint_close_refusal "$ID" "$BACKEND" "$T" 1 || exit 1
+  fi
 fi
 if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
   if [ "$(fm_backend_herdr_pane_agent_state "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE")" = dead ]; then
