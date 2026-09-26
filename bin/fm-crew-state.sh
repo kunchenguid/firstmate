@@ -754,9 +754,14 @@ EOF
 # supervisor reads the concrete review-ready outcome instead of a failure.
 nm_reclassify_failed_run_as_held_green() {
   nm_failed_run_is_green_held_ci || return 1
+  local disposition pr_url
+  disposition=$(passed_pr_detail)
+  case "$disposition" in
+    "run passed: PR open") RUN_DETAIL="checks green: PR held for merge (ci monitor ended)" ;;
+    "run passed: PR merged") RUN_DETAIL="checks green: PR merged (ci monitor ended)" ;;
+    *) return 1 ;;
+  esac
   RUN_STATE="done"
-  RUN_DETAIL="checks green: PR held for merge (ci monitor ended)"
-  local pr_url
   pr_url=$(strip_quotes "$(nm_field pr)")
   [ -n "$pr_url" ] && RUN_DETAIL="$RUN_DETAIL: $pr_url"
   return 0

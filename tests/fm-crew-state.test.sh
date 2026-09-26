@@ -1728,6 +1728,87 @@ test_cancelled_delivery_and_skipped_rebase() {
   [ "$failures" -eq 0 ] || fail "$failures cancelled delivery regressions"
 }
 
+test_terminal_green_delivery_disposition() {
+  local route provider disposition failures=0
+  for route in failed-outcome failed-status cancelled-outcome cancelled-status; do
+    for provider in github gitlab gerrit; do
+      for disposition in open merged closed unreadable skipped no-identity; do
+        (
+          reset_fakes
+          local d out url expected
+          d=$(new_case "disposition-$route-$provider-$disposition")
+          make_repo_on_branch "$d/wt" fm/disposition
+          make_fakebin "$d" >/dev/null
+          fm_write_meta "$d/state/delivery.meta" "window=fm:fm-delivery" "worktree=$d/wt" "kind=ship"
+          FM_FAKE_AXI_STATUS="$(run_failed_ci_orphan fm/disposition)"
+          case "$route" in
+            cancelled-*) FM_FAKE_AXI_STATUS=${FM_FAKE_AXI_STATUS//failed/cancelled} ;;
+          esac
+          case "$route" in
+            *-status) FM_FAKE_AXI_STATUS=$(printf '%s\n' "$FM_FAKE_AXI_STATUS" | sed '/^outcome:/d') ;;
+          esac
+          case "$provider" in
+            github) url=https://github.com/o/r/pull/203 ;;
+            gitlab) url=https://gitlab.com/o/r/-/merge_requests/203 ;;
+            gerrit) url=https://review.example.com/c/r/+/203 ;;
+          esac
+          FM_FAKE_AXI_STATUS=${FM_FAKE_AXI_STATUS//https:\/\/github.com\/o\/r\/pull\/203/$url}
+          FM_FAKE_PR_STATE=OPEN
+          FM_FAKE_PR_MERGED=false
+          FM_FAKE_PR_STATE_AXI=open
+          FM_FAKE_GLAB_STATE=opened
+          FM_FAKE_GERRIT_STATUS=NEW
+          case "$disposition" in
+            no-identity) FM_FAKE_AXI_STATUS=$(printf '%s\n' "$FM_FAKE_AXI_STATUS" | sed '/^[[:space:]]*pr:/d') ;;
+            merged)
+              FM_FAKE_PR_STATE=MERGED
+              FM_FAKE_PR_MERGED=true
+              FM_FAKE_PR_STATE_AXI=merged
+              FM_FAKE_GLAB_STATE=merged
+              FM_FAKE_GERRIT_STATUS=MERGED ;;
+            closed)
+              FM_FAKE_PR_STATE=CLOSED
+              FM_FAKE_PR_STATE_AXI=closed
+              FM_FAKE_GLAB_STATE=closed
+              FM_FAKE_GERRIT_STATUS=ABANDONED ;;
+            unreadable)
+              FM_FAKE_PR_READ_FAIL=1
+              FM_FAKE_GLAB_READ_FAIL=1
+              FM_FAKE_GERRIT_READ_FAIL=1 ;;
+          esac
+          FM_FAKE_CI_LOGS="all CI checks passed - still monitoring until merged or closed"
+          if [ "$disposition" = skipped ]; then
+            out=$(FM_CREW_STATE_NO_FORGE=1 FM_HOME="$d" run_crew_state "$d" delivery)
+          else
+            out=$(FM_HOME="$d" run_crew_state "$d" delivery)
+          fi
+          case "$disposition" in
+            open|merged)
+              assert_contains "$out" "state: done" "$route/$provider/$disposition: delivered work: $out"
+              if [ "$disposition" = open ]; then
+                assert_contains "$out" "held for merge" "open delivery awaits merge"
+              else
+                assert_contains "$out" "PR merged" "merged delivery has current evidence"
+                assert_not_contains "$out" "held for merge" "merged delivery is no longer held"
+              fi ;;
+            *)
+              expected=failed
+              case "$route" in
+                cancelled-*) expected=unknown
+                  assert_contains "$out" "run cancelled: no verdict" "cancellation retains no verdict" ;;
+              esac
+              assert_contains "$out" "state: $expected" "$route/$provider/$disposition: no unsupported delivery: $out"
+              assert_not_contains "$out" "held for merge" "unproven open delivery cannot await merge"
+              assert_not_contains "$out" "PR merged" "unproven merge cannot be claimed" ;;
+          esac
+          pass "$route/$provider/$disposition: terminal delivery uses current disposition"
+        ) || failures=$((failures + 1))
+      done
+    done
+  done
+  [ "$failures" -eq 0 ] || fail "$failures terminal delivery disposition regressions"
+}
+
 # Cancellation carries no verdict without the positive delivery safeguard.
 # Exercise both detailed routes, selected-run attribution, and the coarse ledger.
 test_cancelled_without_delivery_has_no_verdict() {
@@ -5380,7 +5461,8 @@ test_captured_inventory_replay
 test_captured_authority_transition
 test_captured_completed_history
 cancellation_failures=0
-for cancellation_test in test_cancelled_without_delivery_has_no_verdict \
+for cancellation_test in test_terminal_green_delivery_disposition \
+  test_cancelled_without_delivery_has_no_verdict \
   test_cancelled_fleet_inventory_is_unverified_not_contradictory \
   test_cancelled_delivery_and_skipped_rebase; do
   ("$cancellation_test") || cancellation_failures=$((cancellation_failures + 1))
