@@ -1677,11 +1677,9 @@ ${context.command}
     // intentionally at-least-once: fm_branch_processed remains the only
     // durable acknowledgement and rejects anything not listed in the active
     // request, so a duplicate can never advance the marker or lose an outcome.
-    const processingWasQueued = processing?.nextTurnQueued === true;
     if (processing) processing.nextTurnQueued = false;
     if (
       captainPromptOverlappedProcessing &&
-      (processingWasQueued || queuedProcessingContent === null) &&
       processing &&
       lastProcessingContent
     ) {
