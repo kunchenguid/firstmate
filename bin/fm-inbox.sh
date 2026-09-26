@@ -24,7 +24,7 @@
 #   fm-inbox.sh note [--request-id <id>] [--json] -   (body from stdin)
 #   fm-inbox.sh announce [--json] <id>
 #   fm-inbox.sh reply [--json] <id> <text>... | reply [--json] <id> -
-#   fm-inbox.sh receipts [--after <cursor>] [--all-pending] [--all-handled] [--all-replies]
+#   fm-inbox.sh receipts [--rebuild] [--after <cursor>] [--all-pending] [--all-handled] [--all-replies]
 #   fm-inbox.sh ready
 #   fm-inbox.sh say  [<file.wav>]       (default: audio on stdin)
 #   fm-inbox.sh status
@@ -58,6 +58,11 @@
 # acknowledgement, announcement, and any recorded reply. Default bounds omit
 # rather than implying the first page is everything; omitted[] names the
 # surface and how to reveal it, the same convention as fm-bearings-snapshot.sh.
+# Pages are served from a private SQLite projection (state/.inbox-receipts.sqlite3,
+# owned by bin/fm-inbox-receipts.py) that each note, reply, announcement and ack
+# refreshes for its one record after the first import, so a page's cost does not
+# grow with history. The files stay authoritative; `--rebuild` re-imports them
+# after an edit made outside this script.
 # `reply` is how the primary publishes its actual answer against a note id.
 # Each reply is stamped with a durable per-home sequence, so the receipts cursor
 # is a strict total order and two replies recorded in the same second are both
@@ -251,9 +256,16 @@ note_announced() {  # <id>
   [ -f "$ANNOUNCED_DIR/$1" ]
 }
 
+publish_receipt_record() {
+  python3 "$SELF_DIR/fm-inbox-receipts.py" "$STATE" "$FM_HOME" publish "$@"
+}
+
 mark_announced() {  # <id>
+  local staging
   mkdir -p "$ANNOUNCED_DIR"
-  printf '%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$ANNOUNCED_DIR/$1"
+  staging=$(mktemp "$ANNOUNCED_DIR/.staging-XXXXXX")
+  printf '%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$staging"
+  publish_receipt_record "$staging" "$ANNOUNCED_DIR/$1" "$1"
 }
 
 # true | false | unknown, for the note recorded at <path>.
@@ -417,7 +429,7 @@ publish_from_reservation() {  # <request-id> <source> <body> <extra>
   if [ ! -f "$INBOX/$id.note" ] && [ ! -f "$INBOX/handled/$id.note" ]; then
     tmp=$(mktemp "$INBOX/.staging-XXXXXX")
     write_note_file "$tmp" "$id" "$source" "$body" "$extra" "$request_id"
-    mv "$tmp" "$INBOX/$id.note"
+    publish_receipt_record "$tmp" "$INBOX/$id.note" "$id"
   fi
   printf '%s\n' "$id"
 }
@@ -454,7 +466,7 @@ queue_note() {
       finish_note_result replay "$id" "$request_id" "$json" "$strict" "$summary"
       return $?
     fi
-    mv "$tmp" "$INBOX/$id.note"
+    publish_receipt_record "$tmp" "$INBOX/$id.note" "$id"
     summary=$(note_summary_from_body "$body")
     finish_note_result created "$id" "$request_id" "$json" "$strict" "$summary"
     return $?
@@ -464,7 +476,7 @@ queue_note() {
   staging_name=$(basename "$tmp")
   id="$(date +%s)-${staging_name#.staging-}"
   write_note_file "$tmp" "$id" "$source" "$body" "$extra" ""
-  mv "$tmp" "$INBOX/$id.note"
+  publish_receipt_record "$tmp" "$INBOX/$id.note" "$id"
   summary=$(note_summary_from_body "$body")
   finish_note_result created "$id" "" "$json" "$strict" "$summary"
 }
@@ -631,7 +643,7 @@ cmd_reply() {
       *) printf '\n' ;;
     esac
   } >"$staging"
-  mv "$staging" "$REPLIES/$id"
+  publish_receipt_record "$staging" "$REPLIES/$id" "$id"
   fm_lock_release "$REPLY_SEQ_LOCK"
   if [ "$json" -eq 1 ]; then
     need_python
@@ -652,6 +664,15 @@ PY
 }
 
 cmd_receipts() {
+  if [ "${FM_INBOX_RECEIPT_OWNER:-}" != 1 ]; then
+    python3 "$SELF_DIR/fm-inbox-receipts.py" "$STATE" "$FM_HOME" receipts "$@"
+    return $?
+  fi
+  local record_id=""
+  if [ "${1:-}" = --record ]; then
+    record_id=$2
+    shift 2
+  fi
   local after="" all_pending=0 all_handled=0 all_replies=0
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -672,7 +693,7 @@ cmd_receipts() {
   python3 - "$INBOX" "$ANNOUNCED_DIR" "$REPLIES" "$FM_HOME" \
     "$RECEIPTS_PENDING_BOUND" "$RECEIPTS_HANDLED_BOUND" "$RECEIPTS_REPLIES_BOUND" \
     "$all_pending" "$all_handled" "$all_replies" "$after" \
-    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" <<'PY'
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$record_id" <<'PY'
 import json, os, sys
 from pathlib import Path
 
@@ -685,6 +706,7 @@ all_handled = sys.argv[9] == "1"
 all_replies = sys.argv[10] == "1"
 after = sys.argv[11]
 generated = sys.argv[12]
+record_id = sys.argv[13]
 
 # A record that vanishes between listing and reading - drain --ack moving a
 # note to handled/ - is skipped, and undecodable bytes are replaced, so one bad
@@ -715,7 +737,8 @@ def list_notes(folder):
     if not folder.is_dir():
         return []
     notes = []
-    for path in sorted(folder.glob("*.note"), key=lambda p: p.name, reverse=True):
+    paths = [folder / (record_id + ".note")] if record_id else sorted(folder.glob("*.note"), key=lambda p: p.name, reverse=True)
+    for path in paths:
         if path.name.startswith("."):
             continue
         record = parse_record(path)
@@ -1121,7 +1144,7 @@ cmd_drain() {
     local id
     for id in "$@"; do
       if [ -f "$INBOX/$id.note" ]; then
-        mv "$INBOX/$id.note" "$INBOX/handled/$id.note"
+        publish_receipt_record "$INBOX/$id.note" "$INBOX/handled/$id.note" "$id"
         printf 'acked %s\n' "$id"
       else
         printf 'already-acked %s\n' "$id"
