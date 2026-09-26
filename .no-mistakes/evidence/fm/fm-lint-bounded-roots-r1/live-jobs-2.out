@@ -1,0 +1,12 @@
+fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
+fm-lint.sh: full ShellCheck extended analysis enabled
+
+In /Users/kunchen/.no-mistakes/evidence/01M3EBME6HSHK9E1RSP24QDNJE/live-bad.sh line 3:
+printf "%s\n" $name
+              ^---^ SC2086 (info): Double quote to prevent globbing and word splitting.
+
+Did you mean:
+printf "%s\n" "$name"
+
+For more information:
+  https://www.shellcheck.net/wiki/SC2086 -- Double quote to prevent globbing ...

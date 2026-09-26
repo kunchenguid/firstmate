@@ -1,0 +1,28 @@
+REAL PINNED ROOTS
+fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
+fm-lint.sh: full ShellCheck extended analysis enabled
+
+In /Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M3EBME6HSHK9E1RSP24QDNJE/.lint-live.IpE0ku/defect.sh line 2:
+echo "$undefined"
+      ^--------^ SC2154 (warning): undefined is referenced but not assigned.
+
+For more information:
+  https://www.shellcheck.net/wiki/SC2154 -- undefined is referenced but not a...
+product_exit=1
+
+DIRECT SHELLCHECK SAME FLAGS
+
+In /Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M3EBME6HSHK9E1RSP24QDNJE/.lint-live.IpE0ku/defect.sh line 2:
+echo "$undefined"
+      ^--------^ SC2154 (warning): undefined is referenced but not assigned.
+
+For more information:
+  https://www.shellcheck.net/wiki/SC2154 -- undefined is referenced but not a...
+direct_exit=1
+
+ROOT RECORDS
+begin	2	/Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M3EBME6HSHK9E1RSP24QDNJE/.lint-live.IpE0ku/defect.sh	1	full	1790411620875
+begin	1	/Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M3EBME6HSHK9E1RSP24QDNJE/.lint-live.IpE0ku/clean.sh	0	full	1790411620875
+end	2	/Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M3EBME6HSHK9E1RSP24QDNJE/.lint-live.IpE0ku/defect.sh	1	full	1790411620875	1790411620901	26	1	findings	unavailable
+end	1	/Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M3EBME6HSHK9E1RSP24QDNJE/.lint-live.IpE0ku/clean.sh	0	full	1790411620875	1790411620975	100	0	ok	unavailable
+meta	result_exit	1

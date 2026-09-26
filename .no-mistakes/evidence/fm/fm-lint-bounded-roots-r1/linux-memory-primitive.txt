@@ -1,0 +1,9 @@
+--- control allocator without cap ---
+67108864 bytes allocated
+exit=0
+--- allocator through fm-lint internal root at 32 MiB ---
+Out of memory!
+panic: fold_constants JMPENV_PUSH returned 2 at -e line 1.
+exit=12
+--- pinned ShellCheck through fm-lint internal root at 6 GiB ---
+exit=0

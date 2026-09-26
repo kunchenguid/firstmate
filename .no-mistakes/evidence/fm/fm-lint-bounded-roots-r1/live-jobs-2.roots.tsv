@@ -1,0 +1,21 @@
+format	fm-lint-roots-v1
+meta	shellcheck_version	0.11.0
+meta	platform	Darwin arm64
+meta	image_os	unknown
+meta	image_version	unknown
+meta	mode	full
+meta	partition	all
+meta	jobs	2
+meta	bounds_enforced	0
+meta	root_deadline_seconds	unbounded
+meta	root_kill_grace_seconds	unbounded
+meta	root_memory_limit_kib	unbounded
+meta	timing_mechanism	none
+begin	1	/Users/kunchen/.no-mistakes/evidence/01M3EBME6HSHK9E1RSP24QDNJE/live-clean.sh	1	full	1790412178343
+begin	2	/Users/kunchen/.no-mistakes/evidence/01M3EBME6HSHK9E1RSP24QDNJE/live-bad.sh	0	full	1790412178343
+end	2	/Users/kunchen/.no-mistakes/evidence/01M3EBME6HSHK9E1RSP24QDNJE/live-bad.sh	0	full	1790412178343	1790412178418	75	1	findings	unavailable
+end	1	/Users/kunchen/.no-mistakes/evidence/01M3EBME6HSHK9E1RSP24QDNJE/live-clean.sh	1	full	1790412178343	1790412178430	87	0	ok	unavailable
+meta	roots_begun	2
+meta	roots_completed	2
+meta	roots_unfinished	0
+meta	result_exit	1

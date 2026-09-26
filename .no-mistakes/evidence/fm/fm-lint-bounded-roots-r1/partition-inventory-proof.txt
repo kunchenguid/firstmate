@@ -1,0 +1,5 @@
+partition 1 roots: 220
+partition 2 roots: 220
+shared roots: 0
+missing canonical roots: []
+unexpected roots: []

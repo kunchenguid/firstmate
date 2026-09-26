@@ -1,0 +1,15 @@
+--- Linux bounded clean root ---
+fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
+fm-lint.sh: full ShellCheck extended analysis enabled
+exit=0
+--- Linux bounded failing root ---
+fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
+fm-lint.sh: full ShellCheck extended analysis enabled
+
+In /work/.fm-linux.SzMJdS/bad.sh line 2:
+echo bad\ 
+        ^-- SC1101 (error): Delete trailing spaces after \ to break line (or use quotes for literal space).
+
+For more information:
+  https://www.shellcheck.net/wiki/SC1101 -- Delete trailing spaces after \ to...
+exit=1

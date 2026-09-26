@@ -1,0 +1,6 @@
+fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
+fm-lint.sh: full ShellCheck extended analysis enabled
+fm-lint: end /evidence/live-clean.sh reason=signal:5 rc=133 duration_ms=61 rss_kib=unavailable
+assertion failed [!mmap_result.is_error && mmap_result.value == kSlabAllocatorBase]: Could not mmap data for the VMTracker slab allocator: 12
+(VMAllocationTracker.cpp:313 init)
+ 

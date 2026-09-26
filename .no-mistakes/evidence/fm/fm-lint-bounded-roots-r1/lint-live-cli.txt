@@ -1,0 +1,24 @@
+--- real pinned ShellCheck explicit clean root ---
+fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
+fm-lint.sh: full ShellCheck extended analysis enabled
+exit=0
+--- real pinned ShellCheck explicit failing root ---
+fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
+fm-lint.sh: full ShellCheck extended analysis enabled
+
+In /Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M3EBME6HSHK9E1RSP24QDNJE/.fm-live.L15xuO/bad.sh line 2:
+echo bad\ 
+        ^-- SC1101 (error): Delete trailing spaces after \ to break line (or use quotes for literal space).
+
+For more information:
+  https://www.shellcheck.net/wiki/SC1101 -- Delete trailing spaces after \ to...
+exit=1
+--- CI-required bounded mode on unsupported macOS host ---
+fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
+fm-lint.sh: full ShellCheck extended analysis enabled
+fm-lint.sh: bounds required but per-root memory limit FM_LINT_ROOT_MEMORY_KIB=6291456 KiB is not enforceable on this host (ulimit -v).
+fm-lint.sh: refusing to lint uncapped under FM_LINT_REQUIRE_BOUNDS=1.
+exit=2
+--- malformed private root payload refuses no-memory mode ---
+fm-lint.sh: --internal-root memory limit must be a positive KiB count, got -
+exit=2

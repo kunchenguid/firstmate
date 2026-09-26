@@ -1,0 +1,5 @@
+canonical=440
+ union=440
+ overlap=0
+
+inventory_diff_rc=0

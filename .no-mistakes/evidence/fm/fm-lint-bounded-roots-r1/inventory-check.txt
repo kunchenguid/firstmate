@@ -1,0 +1,2 @@
+CI canonical roots: 440 partition 1: 220 partition 2: 220
+intersection: 0 missing: 0 unexpected: 0

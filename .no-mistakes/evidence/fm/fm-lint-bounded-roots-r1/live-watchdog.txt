@@ -1,0 +1,1 @@
+watchdog_rc=124 elapsed_seconds=2 unrelated_sentinel_alive=yes

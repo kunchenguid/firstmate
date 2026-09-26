@@ -1,0 +1,7 @@
+tiny_pinned_rc=133
+meta	bounds_enforced	1
+end	1	/evidence/live-clean.sh	0	full	1790412250496	1790412250557	61	133	signal:5	unavailable
+meta	result_exit	133
+536870912
+allocator_control_rc=0
+allocator_capped_rc=1
