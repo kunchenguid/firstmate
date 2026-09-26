@@ -566,6 +566,20 @@ See [`trace-context.md`](trace-context.md) for carrier semantics, supported rout
 
 See [`fleet-ledger.md`](fleet-ledger.md) for the opt-in setup, record contract, and limits.
 
+## Unowned temp scratch
+
+[`bin/fm-tmp-sweep.sh`](../bin/fm-tmp-sweep.sh) removes lane scratch under `/tmp` that no longer has an owner and that no live process is still using as its working directory.
+The daily sweep removes `/tmp/hhe*` entries, the exact directory `/tmp/jest_rs`, and Claude session directories at `/tmp/claude-1000/<project>/<session>`, once they are older than three days.
+A project directory directly under `/tmp/claude-1000` is removed only when it has no children left and every session under it was already eligible, or when it never had children and is itself older than three days.
+While a task record still exists, the daily sweep keeps names that belong to that task's `hhe` plus its issue number, so a live lane's scratch is left for teardown.
+Teardown calls the same script with the task id and removes names that are exactly that id, or that id followed by `-`, `.`, `_`, or `+`, with no age wait, still only when no live process working directory remains under them.
+A task id shorter than eight characters, or one that is not path-safe, does not get that prefix removal.
+The recorded per-task temp root (`tasktmp=`, normally `/tmp/fm-<task-id>/`) stays on teardown's existing removal and is not part of this sweep.
+The watcher runs the daily sweep at most once a day.
+`FM_TMP_SWEEP_INTERVAL` is the whole-second gap, default `86400`.
+Docker images and retired-harness data stores are outside this sweep.
+The script header owns the predicate, the live-process scan, and the stamp at `state/.tmp-sweep-stamp`.
+
 ## Turn-end pane-churn absorb (config/turnend-churn-absorb)
 
 The optional local, gitignored `config/turnend-churn-absorb` presence flag opts this home into a default-off third form of positive work evidence in watcher triage.
