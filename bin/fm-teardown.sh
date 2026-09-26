@@ -86,7 +86,15 @@
 # cleanup step, teardown verifies record exclusivity: no OTHER task record in
 # this home or any locally registered Firstmate home may name the same live path
 # in its worktree= or home=. One live path with two task records is the reuse
-# collision itself, whichever record is stale.
+# collision itself, whichever record is stale - except where the slot's own
+# claim names the other record's task, which makes that record the current owner
+# and this one the stale half (observed 2026-09-26: two merged ship tasks both
+# recording worktree=/home/pikos/.treehouse/icms-df8afa/4/icms, where refusing
+# both directions stranded both records). slot_claim_names_record_owner below
+# owns that bar. The bypass only stops this record from being read as a
+# collision: the claim is read again by the ownership determination below, so
+# every slot step stays skipped, and the surviving record keeps the slot and
+# tears down normally once this one is gone.
 # That scan alone cannot prove THIS record is the current owner, because the task
 # that took the slot next may leave no record it can reach - its own worker may
 # have exited and its record been cleaned up, or it may live in a home this
@@ -2336,6 +2344,43 @@ collect_local_firstmate_states() {
   done
 }
 
+# Does the slot's own owner claim name this other record's task, resolving the
+# two-record reuse collision in favour of the other record?
+#
+# The claim is the tiebreaker the record scan cannot supply. One live path named
+# by two task records is the reuse collision, and on the records alone there is
+# no way to tell which one is stale - the scan refuses both directions, so two
+# sequential users of one slot deadlock each other and neither record can be
+# cleaned up (observed 2026-09-26: two merged ship tasks both recording
+# worktree=/home/pikos/.treehouse/icms-df8afa/4/icms, neither teardown-able).
+#
+# The claim was written by bin/fm-spawn.sh under the same project lock that
+# allocates the slot, and it names the task that actually holds the slot now, so
+# a claim naming THIS other record's task is positive evidence that this record
+# is the stale half of the pair. That is the whole bar, and it is deliberately
+# narrow: the claim must read as reassignment (state `other`, so a claim naming
+# the tearing-down task proves nothing and keeps the refusal), and it must name
+# this exact other task rather than some third one. A claim naming a third task
+# says the slot moved on again and resolves nothing about this pair, so it keeps
+# the refusal. Missing, empty, unreadable, and ambiguous evidence all keep it.
+# The claimant's home is reported, never matched, for the reason
+# bin/fm-wake-lib.sh's own reader gives: a home that moved must not turn a real
+# collision into a bypass.
+#
+# The bypass only stops THIS record from being read as a collision; it decides
+# nothing about the slot. require_owned_worktree_slot_record still re-reads the
+# claim, still returns TEARDOWN_SLOT_REASSIGNED_RC, and teardown_owns_worktree
+# still keeps every slot step skipped, so the surviving record keeps the slot and
+# tears down normally once this one is gone.
+slot_claim_names_record_owner() {  # <worktree> <this-task-id> <other-task-id>
+  local worktree=$1 record_id=$2 other_id=$3
+  [ -n "$other_id" ] || return 1
+  [ "$other_id" != "$record_id" ] || return 1
+  fm_treehouse_slot_owner_state "$worktree" "$record_id" || return 1
+  [ "$FM_TREEHOUSE_SLOT_OWNER" = other ] || return 1
+  [ "$FM_TREEHOUSE_SLOT_OWNER_ID" = "$other_id" ]
+}
+
 require_exclusive_worktree_slot_record() {
   local record_meta=$1 record_id=$2 record_state=$3 worktree=$4
   local slot state_dir other other_id field other_path other_slot
@@ -2355,6 +2400,13 @@ require_exclusive_worktree_slot_record() {
         [ -n "$other_path" ] || continue
         other_slot=$(canonical_existing_dir "$other_path") || continue
         [ "$other_slot" = "$slot" ] || continue
+        # The other record is this slot's current owner, so this record is the
+        # stale half of the reuse pair rather than a live second holder. The
+        # claim evidence is read here only to drop this pair; every slot step
+        # is still skipped by the ownership determination that follows.
+        if slot_claim_names_record_owner "$worktree" "$record_id" "$other_id"; then
+          continue
+        fi
         echo "REFUSED: task $record_id's recorded worktree $slot is also task $other_id's recorded $field." >&2
         echo "Returning that pool slot would kill $other_id's processes and reset its copy, so nothing was changed - not even with --force." >&2
         echo "Reconcile whichever record is wrong (bin/fm-crew-state.sh $record_id; bin/fm-crew-state.sh $other_id), then re-run teardown." >&2
