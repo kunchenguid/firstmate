@@ -863,6 +863,34 @@ fi
 DOCTOR_WORKER_PID=
 pass "doctor refreshes stale worker identity before probing tools"
 
+new_case Linux with-herdr no-gui
+CASE_REMOTE_JOB_ACTIVE=
+CASE_PLATFORM_OVERRIDE=Linux
+rm -f "$CASE_BIN/sleep" "$CASE_BIN/uname"
+mkdir -p "$CASE_HOME/.local/bin" "$CASE_HOME/.firstmate/remote-job/jobs"
+for tool in herdr tasks-axi treehouse claude; do
+  ln -s "$CASE_BIN/$tool" "$CASE_HOME/.local/bin/$tool"
+done
+SUSPENDED="$CASE_HOME/.firstmate/remote-job/worker.restart-suspended"
+printf 'suspended_at=1\n' > "$SUSPENDED"
+doctor
+expect_code 1 "$DOCTOR_RC" "doctor accepted an account whose worker restarts are suspended"
+assert_contains "$DOCTOR_OUT" 'check remote-job-restarts=fixable: remote job worker restarts are suspended' \
+  "doctor did not report the restart suspension as fixable"
+assert_contains "$DOCTOR_OUT" 'check remote-job-supervisors=ok:' "doctor did not report the duplicate-worker check"
+doctor --fix
+expect_code 0 "$DOCTOR_RC" "--fix did not resume a suspended account"
+assert_contains "$DOCTOR_OUT" 'fix remote-job-restarts=applied:' "--fix did not report resuming worker restarts"
+assert_contains "$DOCTOR_OUT" 'check remote-job-restarts=ok:' "the resumed account was not confirmed"
+assert_contains "$DOCTOR_OUT" 'check remote-job-probe=ok:' "the resumed account did not start a ready worker"
+assert_absent "$SUSPENDED" "--fix left the restart suspension in place"
+(
+  # shellcheck source=bin/fm-remote-job-lib.sh
+  . "$ROOT/bin/fm-remote-job-lib.sh"
+  fm_remote_job_stop_worker_tree "$(cat "$CASE_HOME/.firstmate/remote-job/worker.pid")"
+) || true
+pass "doctor reports a restart suspension and --fix resumes exactly one worker"
+
 # --- the entrypoint symlink is recreated when it is missing ------------------
 
 new_case Linux with-herdr no-gui

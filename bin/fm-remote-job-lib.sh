@@ -82,6 +82,37 @@
 # it to stop itself once its root is pruned, and
 # bin/fm-remote-job-reap-orphans.sh uses it to reap workers that were already
 # orphaned that way.
+#
+# Every recorded process identity - the worker lock owner, a claim's owner,
+# supervisor, and group, and a staging owner - is fm_remote_job_process_start,
+# which renders the same value for every reader whatever its locale, time zone,
+# or later wall-clock steps; fm_remote_job_process_start_matches owns the
+# comparison, including records an older build wrote as bare ps lstart text.
+# An identity that depended on the reader's environment made the ensure path
+# fail to recognise a healthy worker the doctor had started under env -i, so it
+# added a restart supervisor on every fm-on call.
+#
+# The worker lock (worker.lock, holding pid, start, and command) is reclaimable
+# exactly when fm_remote_job_lock_reclaimable says so: its pid record is absent,
+# empty, or malformed, so it names nobody, or it names a process that is gone or
+# whose pid now belongs to a different process; and no serving worker has
+# refreshed worker.ready for 10 seconds; and the directory itself is 10 seconds
+# old. A live process holding the recorded pid whose identity cannot be read,
+# and a symlinked owner record, always preserve the lock, because that
+# uncertainty is what keeps two workers from serving one queue. A reclaimed lock
+# is renamed aside and removed whole, so temp records an interrupted owner left
+# behind can never wedge it.
+#
+# Worker starts are bounded per account, not per supervisor. Every Linux
+# restart supervisor charges FM_REMOTE_JOB_RESTART_BUDGET (default 12, at most
+# 100) before each serving child it spawns, its first included, and at most that
+# many starts land in any two consecutive FM_REMOTE_JOB_RESTART_WINDOW_SECONDS
+# (default 900) buckets across all supervisors together. The start that
+# exhausts the budget publishes worker.restart-suspended: every supervisor stops
+# instead of restarting, and the ensure path refuses to start a worker and fails
+# with a diagnostic naming the suspension, the worker log, and
+# fm-remote-doctor.sh --fix, which alone resumes restarts after collapsing
+# duplicate supervisors. A healthy worker keeps serving while suspended.
 
 FM_REMOTE_JOB_LABEL=dev.firstmate.remote-job
 FM_REMOTE_JOB_MAX_BYTES=${FM_REMOTE_JOB_MAX_BYTES:-1048576}
@@ -93,6 +124,8 @@ FM_REMOTE_JOB_REAP_SECONDS=${FM_REMOTE_JOB_REAP_SECONDS:-3600}
 FM_REMOTE_JOB_STAGE_REAP_SECONDS=${FM_REMOTE_JOB_STAGE_REAP_SECONDS:-600}
 FM_REMOTE_JOB_SEQ_CLAIM_REAP_SECONDS=86400
 FM_REMOTE_JOB_SEQ_CLAIM_REAP_INTERVAL=3600
+FM_REMOTE_JOB_RESTART_BUDGET=${FM_REMOTE_JOB_RESTART_BUDGET:-12}
+FM_REMOTE_JOB_RESTART_WINDOW_SECONDS=${FM_REMOTE_JOB_RESTART_WINDOW_SECONDS:-900}
 # shellcheck disable=SC2034 # Shared protocol constant consumed by the worker and sourcing callers.
 FM_REMOTE_JOB_PREEMPTED_EXIT=76
 FM_REMOTE_JOB_OPERATOR_PATH=
@@ -762,13 +795,12 @@ fm_remote_job_path_mtime() { # <path>
 }
 
 fm_remote_job_stage_owner_alive() { # <stage-dir>
-  local stage=$1 pid recorded_start actual_start
+  local stage=$1 pid recorded_start
   pid=$(fm_remote_job_read_single_line "$stage/.owner-pid" 64 2>/dev/null) || return 1
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
   [ "$pid" -gt 1 ] || return 1
   recorded_start=$(fm_remote_job_read_single_line "$stage/.owner-start" 256 2>/dev/null) || return 1
-  actual_start=$(fm_remote_job_process_start "$pid" 2>/dev/null) || return 1
-  [ "$recorded_start" = "$actual_start" ]
+  fm_remote_job_process_start_matches "$recorded_start" "$pid" 2>/dev/null
 }
 
 fm_remote_job_reap_stale() { # <account-home>
@@ -902,22 +934,174 @@ fm_remote_job_worker_ready_path() { printf '%s\n' "$FM_REMOTE_JOB_STATE/worker.r
 fm_remote_job_worker_identity_path() { printf '%s\n' "$FM_REMOTE_JOB_STATE/worker.identity"; }
 fm_remote_job_worker_lock_path() { printf '%s\n' "$FM_REMOTE_JOB_STATE/worker.lock"; }
 
-fm_remote_job_process_start() {
+fm_remote_job_ps_bin() {
+  if [ -x /bin/ps ]; then printf '/bin/ps\n'; elif [ -x /usr/bin/ps ]; then printf '/usr/bin/ps\n'; else return 1; fi
+}
+
+# ps renders lstart through the reader's own locale and time zone, so the same
+# process reads "Sat Sep 26" to a worker the doctor started under env -i and
+# "sob. 26 wrz" or another day to an SSH login shell. Only the pinned rendering
+# is comparable across the processes that record and re-read an identity.
+fm_remote_job_process_lstart() { # <pid> [pinned|ambient|c-locale]
   local pid=$1 ps_bin value
-  if [ -x /bin/ps ]; then ps_bin=/bin/ps; elif [ -x /usr/bin/ps ]; then ps_bin=/usr/bin/ps; else return 1; fi
-  value=$("$ps_bin" -p "$pid" -o lstart= 2>/dev/null) || return 1
+  ps_bin=$(fm_remote_job_ps_bin) || return 1
+  case "${2:-pinned}" in
+    ambient) value=$("$ps_bin" -p "$pid" -o lstart= 2>/dev/null) || return 1 ;;
+    c-locale) value=$(LC_ALL=C "$ps_bin" -p "$pid" -o lstart= 2>/dev/null) || return 1 ;;
+    *) value=$(LC_ALL=C TZ=UTC0 "$ps_bin" -p "$pid" -o lstart= 2>/dev/null) || return 1 ;;
+  esac
   [ -n "$value" ] || return 1
   case "$value" in *$'\n'*|*$'\r'*) return 1 ;; esac
   printf '%s\n' "$value"
 }
 
+# A process's start identity, identical for every reader regardless of its
+# environment. Where a Linux-compatible /proc exists this is stat field 22, the
+# start time in clock ticks since boot, bound to the boot id when one is
+# readable: a kernel fact no locale, time zone, or wall-clock step can change.
+# Elsewhere it is ps lstart pinned to the C locale and UTC.
+fm_remote_job_process_start() { # <pid>
+  local pid=$1 stat_line starttime boot_id='' value
+  local -a stat_fields
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  if [ -r "/proc/$pid/stat" ]; then
+    stat_line=$(cat "/proc/$pid/stat" 2>/dev/null) || return 1
+    read -r -a stat_fields <<< "${stat_line##*)}"
+    [ "${#stat_fields[@]}" -ge 20 ] || return 1
+    starttime=${stat_fields[19]}
+    case "$starttime" in ''|*[!0-9]*) return 1 ;; esac
+    if [ -r /proc/sys/kernel/random/boot_id ]; then
+      boot_id=$(tr -cd '0-9a-f-' < /proc/sys/kernel/random/boot_id 2>/dev/null || true)
+    fi
+    printf 'proc-starttime:%s:%s\n' "$starttime" "$boot_id"
+    return 0
+  fi
+  value=$(fm_remote_job_process_lstart "$pid") || return 1
+  printf 'lstart-utc:%s\n' "$value"
+}
+
+# Compare a recorded start identity with a live pid. Returns 0 when it is the
+# recorded process, 1 when that process is gone or the pid now names another
+# process, and 2 when a process holds the pid but its identity cannot be read,
+# which proves neither. A record written by an older build is bare lstart text
+# in whatever locale and time zone its writer had, so it is compared against
+# the two renderings such a writer used: this process's own environment and the
+# C locale under env -i.
+fm_remote_job_process_start_matches() { # <recorded> <pid>
+  local recorded=$1 pid=$2 actual legacy
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  if ! actual=$(fm_remote_job_process_start "$pid"); then
+    kill -0 "$pid" 2>/dev/null && return 2
+    return 1
+  fi
+  [ "$recorded" != "$actual" ] || return 0
+  case "$recorded" in proc-starttime:*|lstart-utc:*|'') return 1 ;; esac
+  legacy=$(fm_remote_job_process_lstart "$pid" ambient 2>/dev/null || true)
+  [ -z "$legacy" ] || [ "$recorded" != "$legacy" ] || return 0
+  legacy=$(fm_remote_job_process_lstart "$pid" c-locale 2>/dev/null || true)
+  [ -z "$legacy" ] || [ "$recorded" != "$legacy" ] || return 0
+  return 1
+}
+
 fm_remote_job_process_command() {
   local pid=$1 ps_bin value
-  if [ -x /bin/ps ]; then ps_bin=/bin/ps; elif [ -x /usr/bin/ps ]; then ps_bin=/usr/bin/ps; else return 1; fi
-  value=$("$ps_bin" -p "$pid" -o command= 2>/dev/null) || return 1
+  ps_bin=$(fm_remote_job_ps_bin) || return 1
+  # A narrow ambient COLUMNS would otherwise cut the command a later reader
+  # compares against.
+  value=$(COLUMNS=10000 LC_ALL=C "$ps_bin" -p "$pid" -o command= 2>/dev/null) || return 1
   [ -n "$value" ] || return 1
   case "$value" in *$'\n'*|*$'\r'*) return 1 ;; esac
   printf '%s\n' "$value"
+}
+
+fm_remote_job_restart_suspended_path() { printf '%s\n' "$FM_REMOTE_JOB_STATE/worker.restart-suspended"; }
+
+fm_remote_job_restart_budget_settings() {
+  case "$FM_REMOTE_JOB_RESTART_BUDGET" in ''|*[!0-9]*|0) return 1 ;; esac
+  [ "$FM_REMOTE_JOB_RESTART_BUDGET" -le 100 ] || return 1
+  case "$FM_REMOTE_JOB_RESTART_WINDOW_SECONDS" in ''|*[!0-9]*|0) return 1 ;; esac
+  [ "$FM_REMOTE_JOB_RESTART_WINDOW_SECONDS" -le 86400 ] || return 1
+}
+
+# True while worker restarts are suspended on this account, with the loud
+# operator diagnostic in FM_REMOTE_JOB_ERROR.
+fm_remote_job_restart_suspended() {
+  local marker
+  [ -n "$FM_REMOTE_JOB_STATE" ] || return 1
+  marker=$(fm_remote_job_restart_suspended_path)
+  [ -e "$marker" ] || [ -L "$marker" ] || return 1
+  FM_REMOTE_JOB_ERROR="remote job worker restarts are suspended on this account: $FM_REMOTE_JOB_RESTART_BUDGET worker starts within $FM_REMOTE_JOB_RESTART_WINDOW_SECONDS seconds exhausted the account-wide restart budget, so no further worker or supervisor is started; the worker's own errors are in $FM_REMOTE_JOB_STATE/logs/$FM_REMOTE_JOB_LABEL.log; fix that cause, then run fm-on.sh <route> fm-remote-doctor.sh --fix"
+}
+
+# Charge one serving-worker start against the account-wide restart budget.
+# Every restart supervisor charges before every child it spawns, its first
+# included, so the budget bounds worker starts across all supervisors together
+# rather than per supervisor. At most FM_REMOTE_JOB_RESTART_BUDGET starts land in
+# any two consecutive FM_REMOTE_JOB_RESTART_WINDOW_SECONDS buckets: each start
+# claims a slot directory with an atomic mkdir, and the current bucket offers
+# only the slots the previous bucket left unused. The start that finds no slot
+# publishes the suspension marker instead, which stops every supervisor's next
+# restart and every ensure's next start until fm_remote_job_restart_resume.
+fm_remote_job_restart_budget_charge() {
+  local dir now bucket entry name entry_bucket used_previous=0 slot limit tmp marker
+  [ -n "$FM_REMOTE_JOB_STATE" ] || return 1
+  fm_remote_job_restart_budget_settings || {
+    FM_REMOTE_JOB_ERROR="remote job restart budget settings are invalid"
+    return 1
+  }
+  fm_remote_job_restart_suspended && return 1
+  dir=$(fm_remote_job_safe_child_dir "$FM_REMOTE_JOB_STATE" restart-budget) || {
+    FM_REMOTE_JOB_ERROR="remote job restart budget state is unsafe"
+    return 1
+  }
+  now=$(date +%s)
+  bucket=$((now / FM_REMOTE_JOB_RESTART_WINDOW_SECONDS))
+  for entry in "$dir"/*; do
+    [ -d "$entry" ] && [ ! -L "$entry" ] || continue
+    name=${entry##*/}
+    entry_bucket=${name%%.*}
+    case "$entry_bucket" in ''|*[!0-9]*) continue ;; esac
+    if [ "$entry_bucket" -lt $((bucket - 1)) ]; then
+      rmdir "$entry" 2>/dev/null || true
+    elif [ "$entry_bucket" -eq $((bucket - 1)) ]; then
+      used_previous=$((used_previous + 1))
+    fi
+  done
+  limit=$((FM_REMOTE_JOB_RESTART_BUDGET - used_previous))
+  slot=1
+  while [ "$slot" -le "$limit" ]; do
+    if (umask 077; mkdir "$dir/$bucket.$slot") 2>/dev/null; then return 0; fi
+    slot=$((slot + 1))
+  done
+  marker=$(fm_remote_job_restart_suspended_path)
+  tmp=$(umask 077; mktemp "$FM_REMOTE_JOB_STATE/.restart-suspended.XXXXXX") || return 1
+  if printf 'suspended_at=%s\nbudget=%s\nwindow_seconds=%s\n' "$now" \
+    "$FM_REMOTE_JOB_RESTART_BUDGET" "$FM_REMOTE_JOB_RESTART_WINDOW_SECONDS" > "$tmp" &&
+    chmod 600 "$tmp" && mv -f -- "$tmp" "$marker"; then
+    :
+  else
+    rm -f -- "$tmp"
+  fi
+  fm_remote_job_restart_suspended
+  return 1
+}
+
+# Lift a suspension and forget the starts it counted. Only the operator's
+# repair path calls this, after the duplicate supervisors are collapsed.
+fm_remote_job_restart_resume() {
+  local marker dir entry
+  [ -n "$FM_REMOTE_JOB_STATE" ] || return 1
+  marker=$(fm_remote_job_restart_suspended_path)
+  if [ -e "$marker" ] || [ -L "$marker" ]; then
+    [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+    rm -f -- "$marker" || return 1
+  fi
+  dir="$FM_REMOTE_JOB_STATE/restart-budget"
+  [ -d "$dir" ] && [ ! -L "$dir" ] || return 0
+  for entry in "$dir"/*; do
+    [ -d "$entry" ] && [ ! -L "$entry" ] || continue
+    rmdir "$entry" 2>/dev/null || true
+  done
 }
 
 fm_remote_job_process_pgid() { # <pid>
@@ -1002,21 +1186,79 @@ fm_remote_job_read_single_line() {
   printf '%s\n' "$value"
 }
 
-fm_remote_job_lock_owner_matches_process() {
-  local account_home=$1 lock pid recorded_start actual_start recorded_command actual_command
-  fm_remote_job_prepare_state "$account_home" || return 1
+# Classify who holds the worker ownership lock. Returns 0 for a verified live
+# owner (FM_REMOTE_JOB_OWNER_PID names it); 1 when the recorded owner is
+# provably gone, because its process is absent or its pid now names a different
+# process; 3 when a live process holds the recorded pid but its identity cannot
+# be verified; 4 when the lock names nobody, because its pid record is absent,
+# empty, malformed, or oversized; and 5 when an owner record is a symlink or not
+# a regular file. Only 1 and 4 can ever make the lock reclaimable, and
+# fm_remote_job_lock_reclaimable owns the rest of that decision.
+fm_remote_job_lock_owner_status() { # <account-home>
+  local account_home=$1 lock pid file recorded_start recorded_command actual_command start_status
+  FM_REMOTE_JOB_OWNER_PID=
+  fm_remote_job_prepare_state "$account_home" || return 5
   lock=$(fm_remote_job_worker_lock_path)
-  [ -d "$lock" ] && [ ! -L "$lock" ] || return 1
-  pid=$(fm_remote_job_read_single_line "$lock/pid" 64) || return 1
-  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
-  [ "$pid" -gt 1 ] || return 1
-  recorded_start=$(fm_remote_job_read_single_line "$lock/start" 256) || return 1
-  actual_start=$(fm_remote_job_process_start "$pid") || return 1
-  [ "$recorded_start" = "$actual_start" ] || return 1
-  recorded_command=$(fm_remote_job_read_single_line "$lock/command" 8192) || return 1
-  actual_command=$(fm_remote_job_process_command "$pid") || return 1
+  [ -d "$lock" ] && [ ! -L "$lock" ] || return 5
+  for file in pid start command; do
+    [ ! -L "$lock/$file" ] || return 5
+    [ ! -e "$lock/$file" ] || [ -f "$lock/$file" ] || return 5
+  done
+  pid=$(fm_remote_job_read_single_line "$lock/pid" 64 2>/dev/null) || return 4
+  case "$pid" in ''|*[!0-9]*) return 4 ;; esac
+  [ "$pid" -gt 1 ] || return 4
+  if ! recorded_start=$(fm_remote_job_read_single_line "$lock/start" 256 2>/dev/null); then
+    kill -0 "$pid" 2>/dev/null && return 3
+    return 1
+  fi
+  fm_remote_job_process_start_matches "$recorded_start" "$pid"
+  start_status=$?
+  [ "$start_status" -ne 2 ] || return 3
+  [ "$start_status" -eq 0 ] || return 1
+  recorded_command=$(fm_remote_job_read_single_line "$lock/command" 8192 2>/dev/null) || return 3
+  actual_command=$(fm_remote_job_process_command "$pid") || return 3
   [ "$recorded_command" = "$actual_command" ] || return 1
   FM_REMOTE_JOB_OWNER_PID=$pid
+}
+
+fm_remote_job_lock_owner_matches_process() { # <account-home>
+  fm_remote_job_lock_owner_status "$1"
+}
+
+# A lock is reclaimable only when it protects nobody: its owner record names no
+# process (status 4) or names one that is provably gone (status 1), no serving
+# worker has refreshed the readiness heartbeat within its 10-second window, and
+# the directory itself has not changed for 10 seconds, so a worker between its
+# mkdir and its owner publication keeps it. A live owner whose identity cannot
+# be read (status 3) and a symlinked record (status 5) are never reclaimable:
+# that uncertainty is what keeps two workers from serving one queue.
+fm_remote_job_lock_reclaimable() { # <account-home> <owner-status>
+  local account_home=$1 status=$2 lock mtime now
+  case "$status" in 1|4) ;; *) return 1 ;; esac
+  fm_remote_job_probe "$account_home" && return 1
+  lock=$(fm_remote_job_worker_lock_path)
+  [ ! -e "$lock/quarantine" ] && [ ! -L "$lock/quarantine" ] || return 1
+  mtime=$(fm_remote_job_path_mtime "$lock" 2>/dev/null || true)
+  case "$mtime" in ''|*[!0-9]*) return 1 ;; esac
+  now=$(date +%s)
+  [ $((now - mtime)) -gt 10 ]
+}
+
+# Remove a reclaimable lock directory whole, whatever an interrupted owner left
+# in it. An owner killed between creating a temp record and renaming it into
+# place leaves .pid.*, .start.*, or .command.* behind, and a directory holding
+# any of them can never be removed with rmdir, which is how one power cut used
+# to wedge every later worker. The directory is first renamed aside in one
+# atomic step, so a replacement never observes it half-deleted, then removed.
+fm_remote_job_reclaim_lock_dir() { # <lock-dir>
+  local lock=$1 aside
+  [ -d "$lock" ] && [ ! -L "$lock" ] || return 1
+  aside=$(umask 077; mktemp -d "$FM_REMOTE_JOB_STATE/.reclaimed-lock.XXXXXX") || return 1
+  if ! mv -- "$lock" "$aside/lock" 2>/dev/null; then
+    rmdir "$aside" 2>/dev/null || true
+    return 1
+  fi
+  rm -rf -- "$aside"
 }
 
 fm_remote_job_worker_owned_alive() {
@@ -1102,6 +1344,8 @@ fm_remote_job_wait_for_probe() { # <remote-root> <account-home>
   local root=$1 account_home=$2 i=0
   while [ "$i" -lt 200 ]; do
     fm_remote_job_probe "$account_home" && fm_remote_job_worker_identity_matches "$root" "$account_home" && return 0
+    # A suspension published while waiting means no worker is coming.
+    fm_remote_job_restart_suspended && return 1
     i=$((i + 1))
     sleep 0.1
   done
@@ -1156,6 +1400,9 @@ fm_remote_job_start_linux_worker() { # <remote-root> <account-home>
   fm_remote_job_prepare_state "$account_home" || return 1
   if fm_remote_job_worker_owned_alive "$root" "$account_home"; then
     if fm_remote_job_worker_identity_matches "$root" "$account_home"; then return 0; fi
+    # A suspended account starts nothing, so a worker on older code keeps
+    # serving rather than being stopped with no replacement allowed.
+    fm_remote_job_restart_suspended && return 1
     # The owner pid is the serving child; its restart supervisor sits above it
     # and would immediately replace a lone process kill, so stop the whole
     # worker tree through its isolated group.
@@ -1167,6 +1414,7 @@ fm_remote_job_start_linux_worker() { # <remote-root> <account-home>
     wait "$pid" 2>/dev/null || true
     FM_REMOTE_JOB_REPAIRED=1
   fi
+  fm_remote_job_restart_suspended && return 1
   # Job control puts the worker tree in its own process group, so a later stop
   # can signal every descendant at once without ever reaching the caller's own
   # group. Without this the group of a leaked worker is the launching command's.

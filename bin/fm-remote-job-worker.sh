@@ -38,7 +38,11 @@
 # stays up for FM_REMOTE_JOB_SUPERVISOR_HEALTHY_SECONDS clears the
 # consecutive-failure backoff, but not that total restart guard, so a child
 # that dies just past the healthy threshold cannot restart without bound
-# either. fm-on's ensure path restarts a worker that gave up.
+# either. fm-on's ensure path restarts a worker that gave up. Because that makes
+# a per-supervisor guard no bound on the host, every spawn, the first included,
+# is also charged against the library's account-wide restart budget, and a
+# supervisor whose charge is refused stops; the library header owns that bound
+# and the suspension it publishes.
 set -u
 
 # A non-numeric override falls back to the default rather than crashing the
@@ -126,14 +130,6 @@ worker_publish_lock_owner() {
   mv -f -- "$pid_tmp" "$WORKER_LOCK/pid" || { rm -f -- "$pid_tmp" "$WORKER_LOCK/start" "$WORKER_LOCK/command"; return 1; }
 }
 
-worker_lock_recent() {
-  local mtime now
-  mtime=$(fm_remote_job_path_mtime "$WORKER_LOCK" 2>/dev/null || true)
-  case "$mtime" in ''|*[!0-9]*) return 0 ;; esac
-  now=$(date +%s)
-  [ $((now - mtime)) -le 10 ]
-}
-
 worker_quarantined_execution_stopped() { # <account-home>
   local account_home=$1 job state kind file pid
   fm_remote_job_regular_bounded "$WORKER_LOCK/quarantine" 256 || return 1
@@ -158,8 +154,12 @@ worker_recover_quarantine() { # <account-home>
   rm -f -- "$WORKER_LOCK/quarantine"
 }
 
+# Returns 0 once this process owns the lock, 2 when a verified live worker
+# already owns it, 3 when it stays quarantined, 4 when a live process holds the
+# recorded pid but its identity cannot be verified, and 1 otherwise. The shared
+# library owns which lock states are reclaimable and why.
 worker_acquire_lock() {
-  local account_home=$1 attempt=0
+  local account_home=$1 attempt=0 owner_status=1
   while [ "$attempt" -lt 150 ]; do
     if (umask 077; mkdir "$WORKER_LOCK") 2>/dev/null; then
       WORKER_LOCK_HELD=1
@@ -171,16 +171,17 @@ worker_acquire_lock() {
       worker_recover_quarantine "$account_home" || return 3
       continue
     fi
-    if fm_remote_job_lock_owner_matches_process "$account_home"; then return 2; fi
-    if fm_remote_job_probe "$account_home" || worker_lock_recent; then
-      attempt=$((attempt + 1))
-      sleep 0.1
+    fm_remote_job_lock_owner_status "$account_home"
+    owner_status=$?
+    [ "$owner_status" -ne 0 ] || return 2
+    if fm_remote_job_lock_reclaimable "$account_home" "$owner_status"; then
+      fm_remote_job_reclaim_lock_dir "$WORKER_LOCK" || return 1
       continue
     fi
-    [ ! -L "$WORKER_LOCK/pid" ] && [ ! -L "$WORKER_LOCK/start" ] && [ ! -L "$WORKER_LOCK/command" ] || return 1
-    rm -f -- "$WORKER_LOCK/pid" "$WORKER_LOCK/start" "$WORKER_LOCK/command" || return 1
-    rmdir "$WORKER_LOCK" || return 1
+    attempt=$((attempt + 1))
+    sleep 0.1
   done
+  [ "$owner_status" -ne 3 ] || return 4
   return 1
 }
 
@@ -316,14 +317,9 @@ worker_signal_process_or_group() { # process|group <signal> <pid>
 }
 
 worker_supervisor_identity_status() { # <job-dir> <pid>
-  local job=$1 pid=$2 recorded_start actual_start
+  local job=$1 pid=$2 recorded_start
   recorded_start=$(fm_remote_job_read_single_line "$job/.claim/supervisor_start" 256 2>/dev/null) || return 2
-  actual_start=$(fm_remote_job_process_start "$pid" 2>/dev/null) || {
-    worker_process_or_group_alive process "$pid" && return 2
-    return 1
-  }
-  [ "$recorded_start" = "$actual_start" ] && return 0
-  return 1
+  fm_remote_job_process_start_matches "$recorded_start" "$pid"
 }
 
 # A leaderless live group still belongs to the recorded execution: its PGID
@@ -332,15 +328,14 @@ worker_supervisor_identity_status() { # <job-dir> <pid>
 # recorded group stale; an unreadable live leader stays indeterminate so the
 # stop loop retries rather than signaling or declaring the group dead.
 worker_group_identity_status() { # <job-dir> <pid>
-  local job=$1 pid=$2 recorded_start actual_start file="$1/.claim/group_start"
+  local job=$1 pid=$2 recorded_start start_status file="$1/.claim/group_start"
   [ -e "$file" ] || [ -L "$file" ] || return 3
   recorded_start=$(fm_remote_job_read_single_line "$file" 256 2>/dev/null) || return 2
-  actual_start=$(fm_remote_job_process_start "$pid" 2>/dev/null) || {
-    kill -0 "$pid" 2>/dev/null && return 2
-    worker_process_or_group_alive group "$pid" && return 0
-    return 1
-  }
-  [ "$recorded_start" = "$actual_start" ] && return 0
+  fm_remote_job_process_start_matches "$recorded_start" "$pid"
+  start_status=$?
+  [ "$start_status" -eq 1 ] || return "$start_status"
+  kill -0 "$pid" 2>/dev/null && return 1
+  worker_process_or_group_alive group "$pid" && return 0
   return 1
 }
 
@@ -548,7 +543,7 @@ worker_claim() { # <job-dir>
 }
 
 worker_claim_owner_alive() { # <job-dir>
-  local job=$1 claim="$1/.claim" owner pid recorded_start actual_start
+  local job=$1 claim="$1/.claim" owner pid recorded_start
   [ -d "$claim" ] && [ ! -L "$claim" ] || return 1
   owner="$claim/owner"
   fm_remote_job_regular_bounded "$owner" 64 || return 1
@@ -556,8 +551,7 @@ worker_claim_owner_alive() { # <job-dir>
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
   if [ -e "$claim/owner_start" ] || [ -L "$claim/owner_start" ]; then
     recorded_start=$(fm_remote_job_read_single_line "$claim/owner_start" 256 2>/dev/null) || return 1
-    actual_start=$(fm_remote_job_process_start "$pid" 2>/dev/null) || return 1
-    [ "$recorded_start" = "$actual_start" ]
+    fm_remote_job_process_start_matches "$recorded_start" "$pid" 2>/dev/null
     return
   fi
   kill -0 "$pid" 2>/dev/null
@@ -1110,6 +1104,7 @@ main() {
     0) ;;
     2) exit 0 ;;
     3) worker_error "worker ownership is quarantined after an unconfirmed shutdown"; exit 75 ;;
+    4) worker_error "cannot acquire worker ownership: a live process holds the recorded owner pid and its identity cannot be verified, so the lock is preserved"; exit 1 ;;
     *) worker_error "cannot acquire or safely reclaim worker ownership"; exit 1 ;;
   esac
   trap worker_shutdown HUP INT TERM
@@ -1173,6 +1168,10 @@ worker_supervise_linux() {
     if worker_code_root_abandoned; then
       worker_error "configured FM_ROOT $FM_ROOT no longer exists; stopping the abandoned worker supervisor"
       return 0
+    fi
+    if ! fm_remote_job_restart_budget_charge; then
+      worker_error "${FM_REMOTE_JOB_ERROR:-the account-wide remote job restart budget is exhausted}; stopping the supervisor"
+      return 1
     fi
     started=$SECONDS
     "$SCRIPT_DIR/fm-remote-job-worker.sh" --serve &

@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
-# Reap remote job workers whose code root no longer exists.
+# Reap remote job workers that must not keep running: ones whose code root no
+# longer exists, and, on request, duplicate restart supervisors.
 #
-# Usage: fm-remote-job-reap-orphans.sh [--dry-run]
-#   --dry-run reports what would be reaped and signals nothing.
+# Usage: fm-remote-job-reap-orphans.sh [--duplicates] [--dry-run]
+#   --duplicates collapses this account's workers to the one that owns its
+#                worker lock instead of reaping pruned roots.
+#   --dry-run    reports what would be stopped and signals nothing.
 #
 # A remote job worker (bin/fm-remote-job-worker.sh) is launched from a specific
 # Firstmate code root: the account's own checkout under the LaunchAgent, a
@@ -10,25 +13,45 @@
 # worktree, or a test fixture root. When that root is pruned while the worker is
 # running, the worker is reparented to init and, on older builds, keeps polling
 # and logging indefinitely. Current workers stop themselves once their root is
-# gone (bin/fm-remote-job-worker.sh); this sweep is the belt-and-suspenders pass
-# that clears workers already orphaned that way, including ones started before
-# self-termination shipped.
+# gone (bin/fm-remote-job-worker.sh); the default sweep is the
+# belt-and-suspenders pass that clears workers already orphaned that way,
+# including ones started before self-termination shipped.
 #
-# The reap condition is exactly fm_remote_job_root_is_live failing for the root
-# named in the worker's own command line. That is deliberately the whole test:
-# a worker whose root is gone can never claim, validate, or execute another job,
-# and no healthy worker can present a missing root. The account's healthy
-# LaunchAgent worker, a live remote secondmate's worker, and any worker whose
-# checkout still exists are therefore never candidates, with no dependence on
-# log paths, process age, or which home is sweeping.
+# The default sweep's reap condition is exactly fm_remote_job_root_is_live
+# failing for the root named in the worker's own command line. A worker whose
+# root is gone can never claim, validate, or execute another job, and no healthy
+# worker can present a missing root. The account's healthy LaunchAgent worker, a
+# live remote secondmate's worker, and any worker whose checkout still exists
+# are therefore never candidates of the default sweep, with no dependence on log
+# paths, process age, or which home is sweeping.
+#
+# --duplicates is the supported recovery when restart supervisors have
+# multiplied on a host whose code root is live, which the default sweep never
+# touches. Its candidates are the top-level workers - restart supervisors, and
+# serving children whose supervisor is gone - bound to this account's queue
+# (FM_REMOTE_JOB_STATE_ROOT, else ~/.firstmate/remote-job), whatever code root
+# launched them. A worker is bound to a queue by the file its standard output
+# goes to: every Linux start path appends a worker tree's output to its own
+# queue's logs/dev.firstmate.remote-job.log, read through /proc/<pid>/fd/1 or
+# lsof, so another queue's workers and a launchd-run worker are never
+# candidates. The sweep keeps only the process that verifiably owns the queue's
+# worker lock, with the supervisor directly above it, and stops every other
+# candidate, so a host holding hundreds of supervisors is left with exactly one.
+# When no process verifiably owns the lock, nothing is healthy and every
+# candidate is stopped; fm-remote-doctor.sh --fix runs this collapse first and
+# then starts exactly one worker. The owner is read through the shared
+# library's identity check, so a duplicate is never mistaken for the owner, and
+# an absent queue has nothing to collapse.
 #
 # Only this user's processes are inspected, and this process, its own process
-# group, and any ancestor are never signalled. Each candidate is stopped through
+# group, and any ancestor are never signalled. Each candidate is re-read from
+# the live process immediately before it is signalled, so a recycled pid is
+# never signalled on the strength of a stale scan line, and is stopped through
 # the shared fm_remote_job_stop_worker_tree, so the whole worker tree goes at
 # once (TERM first, KILL only for a survivor) and a group whose leader is not
 # itself a worker is stopped as a single process instead.
 #
-# Prints one line per reaped or surviving candidate and nothing when there is
+# Prints one line per stopped or surviving candidate and nothing when there is
 # nothing to do. Exits 0 unless the process scan itself could not run, so a
 # caller can sweep without risking its own outcome.
 set -u
@@ -39,18 +62,22 @@ SCRIPT_DIR=$(CDPATH='' cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 . "$SCRIPT_DIR/fm-remote-job-lib.sh"
 
 DRY_RUN=0
+DUPLICATES=0
 REAP_SUFFIX=/bin/fm-remote-job-worker.sh
 
 reap_die() { printf 'fm-remote-job-reap-orphans: %s\n' "$1" >&2; exit 2; }
 
 reap_usage() {
   cat <<'TXT'
-Usage: fm-remote-job-reap-orphans.sh [--dry-run]
+Usage: fm-remote-job-reap-orphans.sh [--duplicates] [--dry-run]
 
 Stop every remote job worker whose Firstmate code root has been pruned. A
 worker whose root still exists - the account's LaunchAgent worker, a live
-remote secondmate's worker - is never a candidate. --dry-run reports the
-candidates and signals nothing. Read this script's header for the full rule.
+remote secondmate's worker - is never a candidate. --duplicates instead
+collapses the workers bound to this account's queue to the one that owns its
+worker lock, stopping every duplicate restart supervisor. --dry-run
+reports the candidates and signals nothing. Read this script's header for the
+full rule.
 TXT
 }
 
@@ -88,11 +115,13 @@ reap_is_self_or_ancestor() { # <pid>
   return 1
 }
 
-reap_orphans() {
-  local uid scan pid command live root own_pgid pgid
+# Print "<pid> <root> <command>" for every worker invocation this account runs,
+# never this process, its own process group, or an ancestor.
+reap_scan_workers() {
+  local uid scan pid command root own_pgid pgid
   uid=$(id -u 2>/dev/null || true)
   case "$uid" in ''|*[!0-9]*) reap_die "cannot resolve the current uid" ;; esac
-  scan=$(ps -u "$uid" -o pid=,command= 2>/dev/null) ||
+  scan=$(COLUMNS=10000 LC_ALL=C ps -u "$uid" -o pid=,command= 2>/dev/null) ||
     reap_die "cannot scan this account's processes for remote job workers"
   own_pgid=$(fm_remote_job_process_pgid "$$" 2>/dev/null || true)
   # ps pads the pid column to the widest pid on the host, so the fields are read
@@ -101,37 +130,124 @@ reap_orphans() {
     case "$pid" in ''|*[!0-9]*) continue ;; esac
     [ -n "$command" ] || continue
     root=$(reap_worker_root "$command") || continue
-    fm_remote_job_root_is_live "$root" && continue
     [ "$pid" != "$$" ] || continue
     reap_is_self_or_ancestor "$pid" && continue
     if [ -n "$own_pgid" ]; then
       pgid=$(fm_remote_job_process_pgid "$pid" 2>/dev/null || true)
       [ "$pgid" != "$own_pgid" ] || continue
     fi
-    # Re-read the command from the live process so a recycled pid cannot be
-    # signalled on the strength of a stale scan line.
-    live=$(fm_remote_job_process_command "$pid" 2>/dev/null || true)
-    read -r live <<< "$live"
-    [ "$live" = "$command" ] || continue
-    if [ "$DRY_RUN" -eq 1 ]; then
-      printf 'would reap abandoned remote job worker %s (pruned code root %s)\n' "$pid" "$root"
-      continue
-    fi
-    if fm_remote_job_stop_worker_tree "$pid"; then
-      printf 'reaped abandoned remote job worker %s (pruned code root %s)\n' "$pid" "$root"
-    else
-      printf 'warning: abandoned remote job worker %s survived reaping (pruned code root %s)\n' "$pid" "$root" >&2
-    fi
+    printf '%s\t%s\t%s\n' "$pid" "$root" "$command"
   done <<EOF
 $scan
 EOF
 }
 
-case "${1:-}" in
-  '') ;;
-  --dry-run) DRY_RUN=1; [ "$#" -eq 1 ] || reap_die "unexpected arguments" ;;
-  -h|--help) reap_usage; exit 0 ;;
-  *) reap_die "unexpected argument: $1" ;;
-esac
+# True while <pid> still runs exactly the scanned <command>.
+reap_still_running() { # <pid> <command>
+  local live
+  live=$(fm_remote_job_process_command "$1" 2>/dev/null || true)
+  read -r live <<< "$live"
+  [ "$live" = "$2" ]
+}
 
-reap_orphans
+reap_stop() { # <pid> <what> <root>
+  if [ "$DRY_RUN" -eq 1 ]; then
+    printf 'would reap %s %s (%s)\n' "$2" "$1" "$3"
+    return 0
+  fi
+  if fm_remote_job_stop_worker_tree "$1"; then
+    printf 'reaped %s %s (%s)\n' "$2" "$1" "$3"
+  else
+    printf 'warning: %s %s survived reaping (%s)\n' "$2" "$1" "$3" >&2
+  fi
+}
+
+reap_orphans() { # <scan>
+  local pid root command
+  while IFS=$'\t' read -r pid root command; do
+    [ -n "$pid" ] || continue
+    fm_remote_job_root_is_live "$root" && continue
+    reap_still_running "$pid" "$command" || continue
+    reap_stop "$pid" "abandoned remote job worker" "pruned code root $root"
+  done <<< "$1"
+}
+
+# This account's queue, canonical, or nothing when it does not exist yet. The
+# collapse never creates one.
+reap_state_root() {
+  local account_home root
+  account_home=$(fm_remote_job_canonical_existing_dir "${HOME:-/nonexistent}" 2>/dev/null) || return 1
+  root=${FM_REMOTE_JOB_STATE_ROOT:-$account_home/.firstmate/remote-job}
+  root=$(fm_remote_job_canonical_existing_dir "$root" 2>/dev/null) || return 1
+  [ -d "$root/jobs" ] && [ ! -L "$root/jobs" ] || return 1
+  printf '%s\n' "$root"
+}
+
+# The file a process writes its standard output to. Every Linux start path
+# sends a worker tree's output to its own queue's worker log, so this is what
+# binds a worker process to one account queue on either platform.
+reap_process_stdout() { # <pid>
+  local lsof_bin
+  if [ -e "/proc/$1/fd/1" ] || [ -L "/proc/$1/fd/1" ]; then
+    readlink "/proc/$1/fd/1" 2>/dev/null
+    return
+  fi
+  if [ -x /usr/sbin/lsof ]; then lsof_bin=/usr/sbin/lsof; else lsof_bin=$(command -v lsof 2>/dev/null) || return 1; fi
+  "$lsof_bin" -a -p "$1" -d 1 -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1
+}
+
+reap_duplicates() { # <scan>
+  local state_root log owner='' owner_parent='' pid root command ppid i count
+  local -a pids=() commands=() ppids=() tops=()
+  state_root=$(reap_state_root) || return 0
+  log="$state_root/logs/$FM_REMOTE_JOB_LABEL.log"
+  while IFS=$'\t' read -r pid root command; do
+    [ -n "$pid" ] || continue
+    [ "$(reap_process_stdout "$pid" 2>/dev/null || true)" = "$log" ] || continue
+    ppid=$(ps -p "$pid" -o ppid= 2>/dev/null | tr -d '[:space:]')
+    pids+=("$pid")
+    commands+=("$command")
+    ppids+=("$ppid")
+    case "$command" in *" --serve") ;; *) tops+=("$pid") ;; esac
+  done <<< "$1"
+  [ "${#pids[@]}" -gt 0 ] || return 0
+  if fm_remote_job_lock_owner_status "$(fm_remote_job_canonical_existing_dir "${HOME:-/nonexistent}")" 2>/dev/null; then
+    owner=$FM_REMOTE_JOB_OWNER_PID
+    ppid=$(ps -p "$owner" -o ppid= 2>/dev/null | tr -d '[:space:]')
+    case " ${tops[*]:-} " in *" $ppid "*) owner_parent=$ppid ;; esac
+  fi
+  i=0
+  count=${#pids[@]}
+  while [ "$i" -lt "$count" ]; do
+    pid=${pids[$i]}
+    command=${commands[$i]}
+    ppid=${ppids[$i]}
+    i=$((i + 1))
+    [ "$pid" != "$owner" ] && [ "$pid" != "$owner_parent" ] || continue
+    # A serving child still under a supervisor goes with that supervisor's
+    # tree, so only a child whose supervisor is gone is a candidate itself.
+    case "$command" in
+      *" --serve") case " ${tops[*]:-} " in *" $ppid "*) continue ;; esac ;;
+    esac
+    reap_still_running "$pid" "$command" || continue
+    reap_stop "$pid" "duplicate remote job worker" "queue $state_root"
+  done
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --dry-run) DRY_RUN=1 ;;
+    --duplicates) DUPLICATES=1 ;;
+    -h|--help) reap_usage; exit 0 ;;
+    *) reap_die "unexpected argument: $1" ;;
+  esac
+  shift
+done
+
+# Scanned here rather than in a pipeline so a failed scan exits this script.
+SCAN=$(reap_scan_workers) || exit 2
+if [ "$DUPLICATES" -eq 1 ]; then
+  reap_duplicates "$SCAN"
+else
+  reap_orphans "$SCAN"
+fi

@@ -46,9 +46,12 @@
 # exits non-zero.
 #
 # --fix is idempotent and closes only automatable gaps: it writes and reloads
-# both Firstmate-owned Aqua agents, starts the Linux workers where no Aqua agent
-# applies, recreates the entrypoint symlink, and may add an owned ~/.local/bin
-# wrapper for a required tool it can discover under nvm, asdf, or mise. It never
+# both Firstmate-owned Aqua agents, collapses duplicate remote job workers to
+# the one that owns the worker lock (bin/fm-remote-job-reap-orphans.sh
+# --duplicates), resumes worker restarts the account-wide restart budget
+# suspended, starts the Linux workers where no Aqua agent applies, recreates
+# the entrypoint symlink, and may add an owned ~/.local/bin wrapper for a
+# required tool it can discover under nvm, asdf, or mise. It never
 # installs packages, creates a login session, writes an auto-login password,
 # changes FileVault, stores an account password, or replaces a non-Firstmate
 # wrapper; those remain reported gaps.
@@ -419,6 +422,29 @@ check_remote_job_worker() {
   else
     record remote-job-probe "ok: the remote job worker published a fresh heartbeat"
   fi
+  check_remote_job_supervision
+}
+
+# Duplicate supervisors and a restart suspension are both host-wide states the
+# worker probe cannot see: a healthy worker can be serving while hundreds of
+# supervisors beside it churn, and a suspended account keeps serving until its
+# worker next needs a restart.
+check_remote_job_supervision() {
+  local duplicates count
+  duplicates=$("$SCRIPT_DIR/fm-remote-job-reap-orphans.sh" --duplicates --dry-run 2>/dev/null || true)
+  count=$(printf '%s' "$duplicates" | grep -c '^would reap duplicate' || true)
+  if [ "${count:-0}" -gt 0 ]; then
+    record remote-job-supervisors "fixable: $count duplicate remote job workers serve this account's queue beside the one that owns its worker lock" \
+      "rerun this command with --fix to collapse them to one worker"
+  else
+    record remote-job-supervisors "ok: no duplicate remote job workers serve this account's queue"
+  fi
+  if remote_job_existing_state && fm_remote_job_restart_suspended; then
+    record remote-job-restarts "fixable: $FM_REMOTE_JOB_ERROR" \
+      "fix the cause the worker log names, then rerun this command with --fix to resume worker restarts"
+  else
+    record remote-job-restarts "ok: worker restarts are within the account-wide restart budget"
+  fi
 }
 
 report_required_tools() {
@@ -551,7 +577,24 @@ repair_required_wrappers() {
   done
 }
 
+# Collapse duplicate supervisors, lift a restart suspension, then ensure
+# exactly one worker: the supported recovery for a host whose supervisors
+# multiplied, in the only order that cannot add another beside the survivors.
 fix_remote_job_worker() {
+  local line
+  while IFS= read -r line; do
+    case "$line" in
+      'reaped duplicate'*) fix_report remote-job-supervisors applied "${line#reaped }" ;;
+      *'survived reaping'*) fix_report remote-job-supervisors failed "${line#warning: }" ;;
+    esac
+  done < <("$SCRIPT_DIR/fm-remote-job-reap-orphans.sh" --duplicates 2>&1 || true)
+  if remote_job_existing_state && fm_remote_job_restart_suspended; then
+    if fm_remote_job_restart_resume; then
+      fix_report remote-job-restarts applied "resumed worker restarts after the account-wide restart budget was exhausted"
+    else
+      fix_report remote-job-restarts failed "could not clear $(fm_remote_job_restart_suspended_path)"
+    fi
+  fi
   if fm_remote_job_ensure_worker "$FM_ROOT" "${HOME:-}"; then
     [ "$FM_REMOTE_JOB_REPAIRED" -eq 0 ] || fix_report remote-job-worker applied "installed or reloaded $FM_REMOTE_JOB_LABEL"
     return 0
@@ -840,7 +883,7 @@ apply_fixes() { # <resolved-login-shell>
     i=$((i + 1))
     case "$value" in fixable:*) ;; *) continue ;; esac
     case "$name" in
-      remote-job-worker|remote-job-worker-loaded|remote-job-probe)
+      remote-job-worker|remote-job-worker-loaded|remote-job-probe|remote-job-supervisors|remote-job-restarts)
         [ "$remote_job_fixed" -eq 0 ] || continue
         remote_job_fixed=1
         fix_remote_job_worker || true
