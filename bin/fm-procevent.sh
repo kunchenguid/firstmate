@@ -8,6 +8,7 @@
 #   fm-procevent.sh register-task <adapter> <source-id> <task-id> -- <argv>...
 #   fm-procevent.sh register-extension <adapter> <source-id> --config-ref <reference>
 #   fm-procevent.sh start <source-id>
+#   fm-procevent.sh ensure-listening <source-id>
 #   fm-procevent.sh reconcile
 #   fm-procevent.sh classify <result-file>
 #   fm-procevent.sh handled <source-id> <sequence>
@@ -40,6 +41,15 @@
 #            bounded classification. Built-in results keep their existing
 #            script command; extension results must still match the exact bound
 #            package identity captured with them.
+# ensure-listening
+#            Confirm the current registration generation's listener is running.
+#            Starts one when nothing live is in the way, and returns only after
+#            that generation's live claim or its launch stamp says it started.
+#            The wait is the reconcile confirm window and ends early on evidence.
+#            No evidence within the window is a nonzero result. Exit 3 means a
+#            live listener from another registration generation still held the
+#            source when the window ended, so this generation cannot start until
+#            it is retired.
 # start      Claim the source, run its child to completion, durably capture the
 #            output, publish normalized wakes for pending results, then release
 #            the claim. It blocks for as long as the source blocks and is meant
@@ -1780,6 +1790,77 @@ confirm_launched_runners() {  # <source-id><TAB><registration-identity><TAB><lau
   [ "${#pending[@]}" -eq 0 ] || printf '%s\n' "${pending[@]}"
 }
 
+# 0 when this registration generation holds a live claim, 3 when another
+# generation does, 1 otherwise.
+generation_is_listening() {  # <source-id> <registration-identity>
+  local id=$1 identity=$2 state result=1
+  fm_procevent_source_lock_try_acquire "$id" || return 1
+  fm_procevent_claim_state_locked "$id"
+  state=$?
+  if [ "$state" -eq 0 ]; then
+    result=3
+    [ "$FM_PROCEVENT_CLAIM_REG_IDENTITY" != "$identity" ] || result=0
+  fi
+  fm_procevent_source_lock_release "$id"
+  return "$result"
+}
+
+# 0 when no live, uncertain, leaderless, terminal, or undisplaceable claim
+# blocks a launch, the same rule reconcile applies.
+generation_can_launch() {  # <source-id>
+  local id=$1 state result=1
+  fm_procevent_source_lock_try_acquire "$id" || return 1
+  fm_procevent_claim_state_locked "$id"
+  state=$?
+  if [ "$state" -eq 1 ] && ! fm_procevent_claim_undisplaceable_locked "$id"; then
+    result=0
+  fi
+  fm_procevent_source_lock_release "$id"
+  return "$result"
+}
+
+# Public readiness for one source. Same evidence reconcile uses after a launch:
+# a live claim bound to this registration generation, or that generation's
+# launch stamp advancing. Returns as soon as either appears. A fixed sleep is
+# not success.
+cmd_ensure_listening() {
+  local id=${1-} identity before mark stamp deadline window started_once=0 listening
+  [ "$#" -eq 1 ] || usage
+  fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
+  window=$(fm_procevent_launch_confirm_seconds) \
+    || die "FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS must be whole seconds from $FM_PROCEVENT_LAUNCH_CONFIRM_MIN_SECONDS to $FM_PROCEVENT_LAUNCH_CONFIRM_MAX_SECONDS"
+  [ -f "$(source_file "$id")" ] && [ ! -L "$(source_file "$id")" ] \
+    || die "source is not registered: $id"
+  identity=$(fm_pr_file_identity "$(source_file "$id")" 2>/dev/null) \
+    || die "cannot identify the registration: $id"
+  before=
+  if stamp=$(fm_procevent_launch_floor_stamp_path "$STATE" "$id" "$identity"); then
+    before=$(cat -- "$stamp" 2>/dev/null || true)
+  fi
+  deadline=$((SECONDS + 10#$window + 1))
+  while :; do
+    listening=0
+    generation_is_listening "$id" "$identity" || listening=$?
+    [ "$listening" -ne 0 ] || return 0
+    mark=
+    if stamp=$(fm_procevent_launch_floor_stamp_path "$STATE" "$id" "$identity"); then
+      mark=$(cat -- "$stamp" 2>/dev/null || true)
+    fi
+    if [ -n "$mark" ] && [ "$mark" != "$before" ]; then
+      return 0
+    fi
+    if [ "$started_once" -eq 0 ] && generation_can_launch "$id"; then
+      detach_runner "$id"
+      started_once=1
+    fi
+    [ "$SECONDS" -lt "$deadline" ] || break
+    sleep 0.05
+  done
+  [ "$listening" -ne 3 ] || return 3
+  printf 'error: listener is not running: %s\n' "$id" >&2
+  return 1
+}
+
 # Stop a runner and the child it is blocked on. A runner started by reconcile is
 # its own process group leader, so the group signal is what actually reaches the
 # blocking child - signalling only the runner would leave that child alive and
@@ -2339,6 +2420,7 @@ case "${1-}" in
   register-task)      shift; cmd_register_task "$@" ;;
   register-extension) shift; cmd_register_extension "$@" ;;
   start)              shift; cmd_start_public "$@" ;;
+  ensure-listening)   shift; cmd_ensure_listening "$@" ;;
   _start)             shift; cmd_start "$@" ;;
   _owner-watchdog)    shift; cmd_owner_watchdog "$@" ;;
   reconcile)          shift; cmd_reconcile "$@" ;;

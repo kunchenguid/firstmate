@@ -45,6 +45,9 @@
 #       (silent skip).
 #     Not linked: nothing to do, exit 0.
 #
+# An unknown dash-leading argument, a dash-leading task id, or more than one
+# text source is a usage error before the link is read or changed.
+#
 # --final marks this as the outcome reply: it always clears the link after a
 # successful post, even if follow-ups remain under the cap. Use it for the
 # final milestone (shipped, failed) so a task never leaves a stale link lying
@@ -84,6 +87,8 @@ usage: fm-x-followup.sh --check <task-id>
 
 Post a completion follow-up (up to 3 per link, within a 7-day window) for an
 X-mode-linked task and manage the link's follow-up counter.
+Unknown options and extra text arguments are refused before checking the link.
+Text beginning with '-' must be supplied through --text-file or stdin.
 
 Options:
   --check          Print the request_id when a follow-up is due.
@@ -111,8 +116,8 @@ esac
 [ "$MAX_COUNT" -ge 1 ] 2>/dev/null || MAX_COUNT=3
 
 # Parse mode: --check is detection-only; otherwise it is a post, with the text
-# source (--text-file <path> | -) deferred until after the link/window/cap
-# check so a missing or exhausted link never consumes stdin or posts.
+# source (--text-file <path> | -) validated before the link/window/cap
+# check; the text itself is read only when the link is eligible to post.
 MODE=post
 case "${1:-}" in
   --help|-h) help; exit 0 ;;
@@ -127,20 +132,25 @@ if [ "${1:-}" = --clear ]; then
   if [ "$#" -eq 4 ] && [ "${3:-}" = --expect-request ]; then
     EXPECT_REQUEST_SET=1
     EXPECT_REQUEST=${4-}
+    case "$EXPECT_REQUEST" in
+      ''|-*) usage; exit 2 ;;
+    esac
   elif [ "$#" -ne 2 ]; then
     usage
     exit 2
   fi
-  if [ -z "$ID" ]; then usage; exit 2; fi
+  case "$ID" in ''|-*) usage; exit 2 ;; esac
 elif [ "${1:-}" = --check ]; then
   MODE=check
   ID=${2:-}
-  if [ -z "$ID" ] || [ "$#" -gt 2 ]; then usage; exit 2; fi
+  if [ "$#" -gt 2 ]; then usage; exit 2; fi
+  case "$ID" in ''|-*) usage; exit 2 ;; esac
 else
   ID=${1:-}
-  if [ -z "$ID" ]; then usage; exit 2; fi
+  case "$ID" in ''|-*) usage; exit 2 ;; esac
   shift
   TS_ARGS=()
+  TEXT_SOURCES=0
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --final)
@@ -149,18 +159,32 @@ else
       --image)
         TS_ARGS+=("$1")
         shift
-        if [ "$#" -lt 1 ] || [ -z "$1" ]; then
-          echo "fm-x-followup: missing --image path" >&2
-          usage
-          exit 2
-        fi
+        case "${1:-}" in
+          ''|-*) echo "fm-x-followup: missing --image path" >&2; usage; exit 2 ;;
+        esac
         TS_ARGS+=("$1")
         ;;
-      *) TS_ARGS+=("$1") ;;
+      --text-file)
+        TS_ARGS+=("$1")
+        shift
+        case "${1:-}" in
+          ''|-*) echo "fm-x-followup: missing --text-file path" >&2; usage; exit 2 ;;
+        esac
+        TS_ARGS+=("$1")
+        TEXT_SOURCES=$((TEXT_SOURCES + 1))
+        ;;
+      -) TS_ARGS+=("$1"); TEXT_SOURCES=$((TEXT_SOURCES + 1)) ;;
+      -*) echo "fm-x-followup: unknown option '$1' (follow-up text comes only from --text-file or stdin)" >&2; usage; exit 2 ;;
+      *) TS_ARGS+=("$1"); TEXT_SOURCES=$((TEXT_SOURCES + 1)) ;;
     esac
     shift
   done
-  if [ "${#TS_ARGS[@]}" -lt 1 ]; then usage; exit 2; fi
+  if [ "$TEXT_SOURCES" -gt 1 ]; then
+    echo "fm-x-followup: unexpected extra arguments (exactly one text source: --text-file <path> or -)" >&2
+    usage
+    exit 2
+  fi
+  if [ "$TEXT_SOURCES" -lt 1 ]; then usage; exit 2; fi
 fi
 
 case "$ID" in
