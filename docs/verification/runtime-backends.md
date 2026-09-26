@@ -300,7 +300,7 @@ Herdr uses native registered-agent state and needs no process-name branch.
 Zellij has no verified recovery-grade agent process probe, while Orca and cmux do not support secondmate spawns, so those three retain their existing generic ordinary-launch semantics without a new liveness matcher.
 
 The current classifier matrix and its refresh guard are recorded in [Composer classification matrix](#composer-classification-matrix), with portable shape coverage in `tests/fm-composer-lib.test.sh` and `tests/fm-composer-ghost.test.sh`.
-Kimi pointer delivery and OpenCode 1.18.4 busy-queue behavior remain pinned by `tests/fm-kimi-harness.test.sh`, `tests/fm-tmux-submit-busy.test.sh`, and `tests/fm-composer-lib.test.sh`.
+Kimi pointer delivery and OpenCode 1.18.4 busy-queue behavior remain pinned by `tests/fm-kimi-harness.test.sh`, `tests/fm-tmux-submit-busy.test.sh`, and `tests/fm-composer-lib.test.sh`, and Kimi delivery is refreshed live by `FM_KIMI_DELIVERY_RESEND_LIVE=1 tests/fm-kimi-delivery-resend-live-e2e.test.sh`.
 Herdr's Claude idle-native submit confirmation is pinned by `tests/fm-backend-herdr.test.sh` and refreshed by `FM_HERDR_SUBMIT_CONFIRM_LIVE=1 tests/fm-herdr-submit-confirm-live-e2e.test.sh`.
 
 ### Cleanup endpoint identity
@@ -702,6 +702,7 @@ ok - live composer-matrix guard verified 8 live surface(s)
 All six installed harnesses' real idle composers reached a proven `empty` (Claude auto-updated to 2.1.227 between the audit and this rerun, so the shipped classifier is proven against the newer release as well), including Pi through the tmux foreground-process identity probe, Grok through the titled-bottom-border tolerance, and OpenCode through the left-bar shape; Codex and OpenCode first parked on vendor update-available modals that the strict classifier correctly refused until the guard's single non-submitting Escape dismissed them.
 The strict blank-row posture held live (a blank shell row deferred injection), and a zellij pane changing for reasons unrelated to submission never confirmed a delivery, replacing the retired content-diff heuristic's false positive.
 Kimi was not installed on the verification machine; its bordered shape is pinned by the portable byte-capture regressions in `tests/fm-composer-lib.test.sh`, which also carry the other five adapters' capability profiles for every harness under both a UTF-8 locale and `LC_ALL=C`.
+Kimi's first live composer verdicts, and the Kimi Code 2.1.1 contiguous footer that the bordered-shape classification now owns as furniture, are recorded in [2026-09-25 Kimi Code 2.1.1 delivery re-send and contiguous composer footer](#2026-09-25-kimi-code-211-delivery-re-send-and-contiguous-composer-footer).
 This guard is the refresh command after an upgrade to any matrix-covered harness; rerun it and update the versions above rather than trusting this table across releases.
 The 2026-08-23 steering-inbox doorbell run observed grok 1.0.5's idle composer classifying `unknown` (and sometimes pending-family), never `empty`.
 Issue #3436's recorded idle capture reproduced the cause on 2026-09-14: Grok 1.0.5 renders the titled bottom border three columns wider than its aligned top and content rows, so the cursorless Herdr profile rejected the otherwise complete box as ambiguous.
@@ -798,6 +799,34 @@ tests/fm-composer-codex-idle-live-e2e.test.sh
 
 The verification machine runs its fleet on Herdr and has no tmux installed, so on 2026-09-15 that guard reported `skip: live: tmux absent` there, and the Herdr capture above is this entry's live evidence.
 The guard also notes whether the starfield and the placeholder were actually drawn during its read, because codex need not animate them under every model or mode; a refresh on a tmux host should record that note beside the verdict rather than assume the starfield was exercised.
+
+### 2026-09-25 Kimi Code 2.1.1 delivery re-send and contiguous composer footer
+
+Verified on 2026-09-25 on macOS arm64 against Kimi Code 2.1.1 (brew kimi-code, node 26.10.0) running in Herdr 0.9.1 panes, every Herdr call routed through `bin/fm-herdr-lab.sh` in a named non-`default` lab.
+The 2026-09-25 incident's defect reproduced on 2.1.1 before the fix: with the ready signals visible, a pointer typed into the composer followed by one Enter left the text sitting unsubmitted at `context: 0%`, so the post-readiness startup input-swallow window still exists in 2.1.1, and a single re-sent Enter after the window closed submitted instantly and produced the requested reply.
+The same probe showed a second vendor drift: 2.1.1 draws its permission-tier status row (`Never Ask ...` / `Ask When Needed ...`) and its right-anchored `context: N% (used/limit)` meter as two contiguous rows directly below the composer box, where 2.0.x captures record a blank separator, and the cursorless staleness probe read them as unclaimed activity - so every kimi composer verdict on a cursorless backend (herdr, zellij) was `unknown`, the delivery gate could never confirm on 2.1.1 regardless of Enter timing, and the incident's failure needed no other cause.
+`bin/fm-composer-lib.sh` now owns those two rows as kimi footer furniture (`_fm_composer_row_is_kimi_footer`), which supersedes this section's older kimi-absent note for the bordered shape; the portable matrix proves idle reads `empty`, a held draft reads `pending`, and activity or a shell prompt below the footer still refuses.
+`bin/fm-spawn.sh`'s kimi delivery wait re-sends Enter - never retypes - on every poll the shared classifier still proves the composer holds the pointer, until the `FM_KIMI_DELIVERY_POLLS` budget is spent and never into an empty or unclassifiable composer, so a confirmed delivery is never followed by a stray Enter.
+A kimi gate failure after the pane and local copy exist still rolls the provisional task record back, so the backlog row stays queued and re-dispatchable; the pane, local copy, slot claim, and hook token it strands have no owner yet, which is separately filed work, and the live guard below cleans them up itself.
+The portable regressions are `tests/fm-kimi-harness.test.sh` (re-send past the submit budget, re-sends stopping with the poll budget, a rolled-back failure with no stray Enter, all driven through a stateful tmux fake drawing the 2.1.1 layout) and `tests/fm-composer-lib.test.sh` (`test_matrix_kimi_2_1_1_contiguous_footer`).
+The live guard below is the refresh command after a Kimi or Herdr upgrade; it submits real prompts, fails naming the harness and version, and prints which swallow outcome it observed:
+
+```sh
+FM_KIMI_DELIVERY_RESEND_LIVE=1 tests/fm-kimi-delivery-resend-live-e2e.test.sh
+```
+
+Observed output:
+
+```text
+ok - live kimi delivery: Kimi Code (2.1.1) on herdr 0.9.1 reads a held pointer pending and lands it on the re-sent Enter in isolated session fm-lab-kimi-delivery-re-12825-21677
+evidence: Kimi Code (2.1.1) on herdr 0.9.1 swallowed the first post-readiness Enter; the pointer sat unsubmitted in the composer
+ok - live kimi swallow re-check: Kimi Code (2.1.1) on herdr 0.9.1 swallowed the first Enter and the re-sent Enter still landed it
+ok - live kimi spawn: Kimi Code (2.1.1) on herdr 0.9.1 launches, delivers, and confirms its brief pointer through the real spawn
+ok - live kimi spawn failure: Kimi Code (2.1.1) on herdr 0.9.1 rolls the failed delivery's record back and its stranded pane, local copy, slot claim, and hook token clean up
+```
+
+Backend applicability was reviewed across every spawn adapter for the shared classifier change: tmux and herdr are live-verified here, zellij reads the same shapes through `dump-screen --ansi` and is covered by the portable matrix's `CAPS_STYLED_NOID` profile but was not re-run live, and orca plus cmux are not applicable because a kimi spawn is refused at preflight on both for want of a verified viewport-bounded capture.
+The composer verdict of every other harness is unchanged by the furniture declaration - it matches only kimi's own permission-tier labels and context meter below a bordered or left-bar envelope, strings no other harness draws - and the evidence is the full composer matrix suite plus the per-backend adapter suites running with identical pass counts and identical pre-existing failures as the base commit.
 
 ## Steering-inbox doorbell
 

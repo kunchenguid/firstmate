@@ -358,7 +358,7 @@
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
-# Kimi 2.0.0 also gates a fresh worktree on an interactive folder-trust dialog.
+# Kimi (2.0.0 through 2.1.1) also gates a fresh worktree on an interactive folder-trust dialog.
 # Its launch-readiness loop reads the visible viewport - so the spawn refuses at
 # preflight on a backend with no viewport-bounded capture - recognizes the
 # complete dialog, re-selects the already highlighted affirmative option on
@@ -367,6 +367,9 @@
 # each ready and dialog-free before the ordinary readiness gates can pass. A
 # blank viewport read proves nothing either way: it costs the poll and restarts
 # that count. A viewport read that fails outright fails readiness at once.
+# The delivery wait re-sends Enter on every poll the shared composer classifier
+# still proves the composer holds the brief pointer, never into an empty or
+# unclassifiable one, until the FM_KIMI_DELIVERY_POLLS budget is spent.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
 # muse installs no hook at all - its plugin engine is off in the default build - so
@@ -3900,11 +3903,37 @@ kimi_delivery_is_confirmed() { # <plain-pane-capture>
   return 1
 }
 
+# The delivery wait's re-send guard. Only a composer that provably still holds
+# the pointer (the shared classifier's pending verdicts) is evidence the last
+# Enter was swallowed. An empty composer is a submitted turn, and an
+# unclassifiable one proves nothing, so neither ever receives another Enter:
+# a confirmed or in-flight delivery is never followed by a stray keypress into
+# a live composer.
+kimi_composer_holds_unsubmitted_text() {
+  case "$(fm_backend_composer_state "$BACKEND" "$T" "$W" 2>/dev/null)" in
+    pending | pending-unproven) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Kimi's startup input-swallow window can outlive the whole submit retry
+# budget (observed on 2.0.2 behind herdr: readiness passed, the pointer sat
+# wrapped in the composer, and every Enter inside FM_KIMI_SUBMIT_RETRIES was
+# dropped, while a hand-sent Enter minutes later submitted instantly). The
+# delivery wait therefore re-sends Enter - never retypes - on every poll the
+# composer still provably holds the pointer, until kimi_delivery_is_confirmed
+# passes or the FM_KIMI_DELIVERY_POLLS budget is spent. The confirmation itself
+# stays exactly as strict.
 kimi_wait_for_delivery() {
   local pane i=0 max=${FM_KIMI_DELIVERY_POLLS:-40} interval=${FM_KIMI_POLL_INTERVAL:-0.5}
+  KIMI_DELIVERY_RESENDS_SENT=0
   while [ "$i" -lt "$max" ]; do
     pane=$(kimi_capture)
     kimi_delivery_is_confirmed "$pane" && return 0
+    if kimi_composer_holds_unsubmitted_text; then
+      spawn_send_key "$T" Enter || return 1
+      KIMI_DELIVERY_RESENDS_SENT=$((KIMI_DELIVERY_RESENDS_SENT + 1))
+    fi
     i=$((i + 1))
     [ "$i" -ge "$max" ] || sleep "$interval"
   done
@@ -5189,7 +5218,11 @@ if [ "$HARNESS" = kimi ]; then
     exit 1
   fi
   if ! kimi_wait_for_delivery; then
-    kimi_spawn_fail "kimi brief pointer delivery was not confirmed"
+    if [ "$KIMI_DELIVERY_RESENDS_SENT" -gt 0 ]; then
+      kimi_spawn_fail "kimi brief pointer delivery was not confirmed after $KIMI_DELIVERY_RESENDS_SENT re-sent Enter(s) while the composer still held the pointer"
+    else
+      kimi_spawn_fail "kimi brief pointer delivery was not confirmed"
+    fi
     exit 1
   fi
 fi
