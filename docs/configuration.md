@@ -968,8 +968,10 @@ This applies only to agents Firstmate launches; the captain's own primary Firstm
 
 Every claude launch's inline `--settings` JSON also carries `"attribution":{"commit":"","pr":"","sessionUrl":false}`, so a spawned worker never writes a Co-Authored-By trailer, Claude-Session link, or generated-with line into a commit or PR body regardless of which settings scopes end up loaded.
 Every fleet launch, Claude included, also receives a pane-scoped `GIT_CONFIG` `commit-msg` hook that strips known AI trailers at the commit object even when a runtime injects them after the typed message.
-On a git that runs config-defined hooks (2.54 and later) the strip is a `hook.<name>` config entry and the pane sets no `core.hooksPath`, so a project's own hooks run natively and a hook manager run inside a fleet pane (devenv git-hooks, lefthook's npm postinstall, `pre-commit install`, husky) installs into the repository's real hooks directory.
-On an older git the pane instead gets a read-only `core.hooksPath` at `state/<id>.git-hooks` that chains the project's hooks, and a hook manager run inside that pane fails instead of displacing the strip.
+The mode is decided when the pane starts, from every `git` on the pane's own `PATH`.
+When each of them runs config-defined hooks (2.54 and later) the strip is a `hook.<name>` config entry and the pane sets no `core.hooksPath`, so a project's own hooks run natively and a hook manager run inside a fleet pane (devenv git-hooks, lefthook's npm postinstall, `pre-commit install`, husky) installs into the repository's real hooks directory.
+When any of them is older the pane instead keeps a read-only `core.hooksPath` at `state/<id>.git-hooks` that chains the project's hooks, and a hook manager run inside that pane fails instead of displacing the strip.
+An older git that only reaches `PATH` after the pane started, such as one a devenv or direnv shell entered later puts first, commits without the strip.
 `bin/fm-git-strip-ai-trailers.sh` owns the identities, the mode choice, the install, and the chaining.
 Per-machine Cursor `cli-config.json` attribution-off is not this contract: it does not travel with Firstmate, defaults back to on when unset, and only feeds the CLI's request to the server, so it suppresses the trailer rather than preventing it.
 

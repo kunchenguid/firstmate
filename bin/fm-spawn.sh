@@ -417,9 +417,9 @@
 # it). Every spawn therefore gives the pane a GIT_CONFIG commit-msg hook, so
 # git strips known AI trailers at the commit object for every launched runtime,
 # Claude included as defense in depth. bin/fm-git-strip-ai-trailers.sh owns the
-# identities, the choice between a config-defined hook and a read-only
-# state/<id>.git-hooks core.hooksPath, and keeping the project's own hooks and
-# hook installers working. Author identity is not rewritten.
+# identities, the pane-start choice between a config-defined hook and a
+# read-only state/<id>.git-hooks core.hooksPath, and keeping the project's own
+# hooks and hook installers working. Author identity is not rewritten.
 # Publishing the record and moving this home's backlog item to In flight are one
 # step, not two: bin/fm-backlog-transition-lib.sh owns that invariant, and this
 # script performs the transition under the task's own meta lock before it reports
@@ -4650,11 +4650,12 @@ fi
 # Per-task commit-msg hook that strips AI commit trailers at the commit object.
 # Installed for every kind, including secondmate: Cursor and other non-Claude
 # runtimes inject the trailer after the typed message, so the typed message is
-# not the object. The installer prints the GIT_CONFIG_* export statement the
-# pane receives below: a config-defined hook where git supports one, so a
-# project's own hook manager installs into its real hooks directory, else a
-# read-only core.hooksPath at state/<id>.git-hooks that chains the project's
-# hooks. Real secondmate homes are firstmate clones; a launch whose worktree
+# not the object. The installer writes a read-only core.hooksPath at
+# state/<id>.git-hooks that chains the project's hooks and prints the
+# GIT_CONFIG_* statement the pane receives below. At every pane start that
+# statement switches to a config-defined hook when every git on the pane's PATH
+# runs one, so a project's own hook manager installs into its real hooks
+# directory. Real secondmate homes are firstmate clones; a launch whose worktree
 # is not git fails closed rather than shipping a runtime that cannot strip.
 GIT_HOOKS_DIR="$STATE_REAL/$ID.git-hooks"
 GIT_HOOKS_EXPORT=$("$FM_ROOT/bin/fm-git-strip-ai-trailers.sh" install "$GIT_HOOKS_DIR" "$WT") &&

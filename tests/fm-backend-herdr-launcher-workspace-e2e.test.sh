@@ -69,7 +69,7 @@ cleanup_all() {
   done
   WORKTREES=()
   "$HERDR_LAB_HELPER" teardown "$HERDR_LAB_SESSION" || status=$?
-  # A spawn on a git without config hooks leaves a read-only state/<id>.git-hooks.
+  # Spawn leaves each state/<id>.git-hooks strip dir read-only.
   find "$TMP_ROOT" -type d -exec chmod u+rwx {} + 2>/dev/null
   rm -rf "$TMP_ROOT"
   return "$status"

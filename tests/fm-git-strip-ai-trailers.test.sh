@@ -6,10 +6,13 @@
 # interface; tests drive git commit with the export statement install prints,
 # the same way a fleet-launched pane does.
 #
-# install picks one of two modes. "config" defines the strip as a config hook
-# and needs a git that runs config-defined hooks. "fallback" is the read-only
-# core.hooksPath directory for a git that does not; a git shim that rejects
-# git hook list stands in for such a git, so fallback runs on every host.
+# The pane statement picks one of two modes when the pane starts, from every
+# git on the pane's PATH. "config" defines the strip as a config hook and needs
+# each of those gits to run config-defined hooks. "fallback" keeps the
+# read-only core.hooksPath directory install writes. A git shim that ignores
+# hook.<name> config and rejects git hook list stands in for an older git, so
+# fallback runs on every host; install itself always runs with this host's git,
+# as a spawn with a newer git than its pane would.
 set -u
 
 # A fleet pane already carries the strip's GIT_CONFIG_* override. These cases
@@ -29,7 +32,11 @@ OLD_GIT_BIN="$TMP_ROOT/old-git-bin"
 mkdir -p "$OLD_GIT_BIN"
 cat >"$OLD_GIT_BIN/git" <<SH
 #!/usr/bin/env bash
-# A git from before config-defined hooks: git hook list is unknown.
+# A git from before config-defined hooks: git hook list is unknown and
+# hook.<name> config is ignored.
+case "\${GIT_CONFIG_KEY_0:-}" in
+hook.*) unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 GIT_CONFIG_KEY_1 GIT_CONFIG_VALUE_1 ;;
+esac
 prev=
 for arg in "\$@"; do
   if [ "\$prev" = hook ] && [ "\$arg" = list ]; then
@@ -42,19 +49,23 @@ exec $(printf '%q' "$REAL_GIT") "\$@"
 SH
 chmod 700 "$OLD_GIT_BIN/git"
 
-# Set PATH for <mode> in the current (sub)shell.
+# Set PATH for <mode> in the current (sub)shell. "mixed" puts the old git
+# after this host's own.
 use_mode_git() {  # <mode>
-  [ "$1" = fallback ] && PATH="$OLD_GIT_BIN:$PATH"
+  case "$1" in
+  fallback) PATH="$OLD_GIT_BIN:$PATH" ;;
+  mixed) PATH="$PATH:$OLD_GIT_BIN" ;;
+  esac
   return 0
 }
 
-# Run install for <mode> and keep its pane statement in PANE_ENV.
-pane_install() {  # <mode> <hooks-dir> <repo> [extra env assignments...]
-  local mode=$1 hooks=$2 repo=$3
-  shift 3
-  PANE_ENV=$(use_mode_git "$mode" && env "$@" "$STRIP" install "$hooks" "$repo") ||
-    fail "$mode install should succeed on a real git repo"
-  [ -n "$PANE_ENV" ] || fail "$mode install printed no pane statement"
+# Run install and keep its pane statement in PANE_ENV.
+pane_install() {  # <hooks-dir> <repo> [extra env assignments...]
+  local hooks=$1 repo=$2
+  shift 2
+  PANE_ENV=$(env "$@" "$STRIP" install "$hooks" "$repo") ||
+    fail "install should succeed on a real git repo"
+  [ -n "$PANE_ENV" ] || fail "install printed no pane statement"
 }
 
 # Run a command the way the pane would: the mode's git plus the pane statement.
@@ -87,12 +98,11 @@ SH
   chmod 700 "$1"
 }
 
-# True when install chose the config-hook mode for this host's own git.
+# True when every git on this host's PATH runs config-defined hooks.
 CONFIG_SUPPORTED=0
 probe_repo="$TMP_ROOT/probe"
 make_repo "$probe_repo"
-pane_install config "$TMP_ROOT/hooks-probe" "$probe_repo"
-[ -e "$TMP_ROOT/hooks-probe" ] || CONFIG_SUPPORTED=1
+[ -n "$("$STRIP" config-env "$probe_repo")" ] && CONFIG_SUPPORTED=1
 MODES=fallback
 if [ "$CONFIG_SUPPORTED" = 1 ]; then
   MODES="config fallback"
@@ -105,7 +115,7 @@ test_cursor_trailer_does_not_reach_the_commit_object() {  # <mode>
   repo="$TMP_ROOT/$mode-cursor-object"
   make_repo "$repo"
   hooks="$TMP_ROOT/$mode-hooks-cursor"
-  pane_install "$mode" "$hooks" "$repo"
+  pane_install "$hooks" "$repo"
   stage_change "$repo"
   in_pane "$mode" git -C "$repo" commit -q --trailer 'Co-authored-by: Cursor <cursoragent@cursor.com>' -m 'fix: keep the typed message clean'
   body=$(git -C "$repo" log -1 --format=%B)
@@ -122,7 +132,7 @@ test_human_coauthor_is_kept() {  # <mode>
   repo="$TMP_ROOT/$mode-human-coauthor"
   make_repo "$repo"
   hooks="$TMP_ROOT/$mode-hooks-human"
-  pane_install "$mode" "$hooks" "$repo"
+  pane_install "$hooks" "$repo"
   stage_change "$repo"
   in_pane "$mode" git -C "$repo" commit -q --trailer 'Co-authored-by: Cursor <cursoragent@cursor.com>' --trailer 'Co-authored-by: Jane Doe <jane@example.com>' -m 'fix: mixed trailers'
   body=$(git -C "$repo" log -1 --format=%B)
@@ -136,7 +146,7 @@ test_human_at_a_vendor_domain_is_kept() {  # <mode>
   repo="$TMP_ROOT/$mode-vendor-human"
   make_repo "$repo"
   hooks="$TMP_ROOT/$mode-hooks-vendor-human"
-  pane_install "$mode" "$hooks" "$repo"
+  pane_install "$hooks" "$repo"
   stage_change "$repo"
   in_pane "$mode" git -C "$repo" commit -q \
     --trailer 'Co-authored-by: Claude <noreply@anthropic.com>' \
@@ -162,7 +172,7 @@ exit 0
 SH
   chmod 700 "$orig/commit-msg"
   hooks="$TMP_ROOT/$mode-hooks-chain"
-  pane_install "$mode" "$hooks" "$repo"
+  pane_install "$hooks" "$repo"
   stage_change "$repo"
   in_pane "$mode" git -C "$repo" commit -q --trailer 'Co-authored-by: Cursor <cursoragent@cursor.com>' -m 'fix: chain'
   [ -f "$repo/.git/orig-commit-msg.ran" ] || fail "$mode: the worktree's previous commit-msg hook did not run"
@@ -179,7 +189,7 @@ test_relative_project_hookspath_still_runs() {  # <mode>
   write_marker_hook "$repo/.husky/_/pre-commit" husky-pre-commit
   git -C "$repo" config core.hooksPath .husky/_
   hooks="$TMP_ROOT/$mode-hooks-husky"
-  pane_install "$mode" "$hooks" "$repo"
+  pane_install "$hooks" "$repo"
   stage_change "$repo"
   in_pane "$mode" git -C "$repo" commit -q --trailer 'Co-authored-by: Cursor <cursoragent@cursor.com>' -m 'fix: husky relative'
   [ -f "$repo/husky-pre-commit.ran" ] || fail "$mode: the project's relative-hooksPath pre-commit hook did not run"
@@ -197,7 +207,7 @@ test_inherited_pane_env_does_not_decide_the_chain() {  # <mode>
   mkdir -p "$parent"
   write_marker_hook "$parent/pre-commit" parent-pre-commit
   hooks="$TMP_ROOT/$mode-hooks-nested"
-  pane_install "$mode" "$hooks" "$repo" \
+  pane_install "$hooks" "$repo" \
     GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0="$parent"
   stage_change "$repo"
   in_pane "$mode" git -C "$repo" commit -q -m 'fix: nested spawn'
@@ -212,7 +222,7 @@ test_project_hook_generated_after_install_still_runs() {  # <mode>
   make_repo "$repo"
   git -C "$repo" config core.hooksPath .husky/_
   hooks="$TMP_ROOT/$mode-hooks-late"
-  pane_install "$mode" "$hooks" "$repo"
+  pane_install "$hooks" "$repo"
   mkdir -p "$repo/.husky/_"
   write_marker_hook "$repo/.husky/_/pre-commit" late-pre-commit
   stage_change "$repo"
@@ -232,7 +242,7 @@ test_pane_env_does_not_reroute_another_repository() {  # <mode>
   write_marker_hook "$other/.git/hooks/pre-commit" other-pre-commit
   write_marker_hook "$repo/.git/hooks/pre-commit" task-pre-commit
   hooks="$TMP_ROOT/$mode-hooks-pane"
-  pane_install "$mode" "$hooks" "$repo"
+  pane_install "$hooks" "$repo"
   stage_change "$other"
   in_pane "$mode" git -C "$other" commit -q --trailer 'Co-authored-by: Cursor <cursoragent@cursor.com>' -m 'fix: other repo'
   [ -f "$other/other-pre-commit.ran" ] || fail "$mode: the other repository's own pre-commit hook did not run"
@@ -274,8 +284,7 @@ test_hook_installer_inside_the_pane_installs_and_runs() {
   hooks="$TMP_ROOT/installer-hooks"
   installer="$TMP_ROOT/hook-installer"
   write_hook_installer "$installer"
-  pane_install config "$hooks" "$wt"
-  [ -e "$hooks" ] && fail "config mode left a per-task hooks directory for installers to target"
+  pane_install "$hooks" "$wt"
   target=$(cd "$wt" && in_pane config "$installer") ||
     fail "a hook installer run inside the pane failed"
   common=$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir)
@@ -293,20 +302,20 @@ test_hook_installer_inside_the_pane_installs_and_runs() {
   pass "config: a hook installer in the pane writes the repository's hooks dir, its hooks run, and the strip still applies"
 }
 
-test_config_install_replaces_a_fallback_install() {
-  local repo hooks body
-  repo="$TMP_ROOT/config-over-fallback"
+test_an_old_git_anywhere_on_the_pane_path_keeps_the_strip() {
+  local repo hooks target
+  repo="$TMP_ROOT/old-git-later-on-path"
   make_repo "$repo"
-  hooks="$TMP_ROOT/hooks-config-over-fallback"
-  pane_install fallback "$hooks" "$repo"
-  [ -d "$hooks" ] || fail "fallback install did not create the per-task hooks dir"
-  pane_install config "$hooks" "$repo"
-  [ -e "$hooks" ] && fail "config install left the read-only fallback hooks dir behind"
+  hooks="$TMP_ROOT/hooks-old-git-later"
+  pane_install "$hooks" "$repo"
+  target=$(in_pane mixed git -C "$repo" rev-parse --path-format=absolute --git-path hooks)
+  [ "$target" = "$(CDPATH='' cd -- "$hooks" && pwd -P)" ] ||
+    fail "an old git later on the pane's PATH did not keep the core.hooksPath fallback: $target"
   stage_change "$repo"
-  in_pane config git -C "$repo" commit -q --trailer 'Co-authored-by: Cursor <cursoragent@cursor.com>' -m 'fix: after mode change'
+  in_pane mixed "$OLD_GIT_BIN/git" -C "$repo" commit -q --trailer 'Co-authored-by: Cursor <cursoragent@cursor.com>' -m 'fix: old git later on PATH'
   assert_not_contains "$(git -C "$repo" log -1 --format=%B)" "cursoragent@cursor.com" \
-    "config: Cursor trailer survived after replacing a fallback install"
-  pass "config: a relaunch on a config-hook git removes a read-only fallback dir and still strips"
+    "the AI trailer survived a commit by an old git that was not first on the pane's PATH"
+  pass "fallback: an old git anywhere on the pane's PATH keeps the core.hooksPath strip"
 }
 
 test_fallback_hook_manager_cannot_displace_the_strip() {
@@ -318,7 +327,7 @@ test_fallback_hook_manager_cannot_displace_the_strip() {
   repo="$TMP_ROOT/fallback-hook-manager"
   make_repo "$repo"
   hooks="$TMP_ROOT/fallback-hooks-manager"
-  pane_install fallback "$hooks" "$repo"
+  pane_install "$hooks" "$repo"
   target=$(in_pane fallback git -C "$repo" rev-parse --path-format=absolute --git-path hooks)
   [ "$target" = "$(CDPATH='' cd -- "$hooks" && pwd -P)" ] ||
     fail "fallback: a hook manager in the pane would resolve $target, not the strip dir $hooks"
@@ -340,8 +349,8 @@ test_fallback_reinstall_replaces_a_read_only_install() {
   repo="$TMP_ROOT/fallback-reinstall"
   make_repo "$repo"
   hooks="$TMP_ROOT/fallback-hooks-reinstall"
-  pane_install fallback "$hooks" "$repo"
-  pane_install fallback "$hooks" "$repo"
+  pane_install "$hooks" "$repo"
+  pane_install "$hooks" "$repo"
   stage_change "$repo"
   in_pane fallback git -C "$repo" commit -q --trailer 'Co-authored-by: Cursor <cursoragent@cursor.com>' -m 'fix: after reinstall'
   body=$(git -C "$repo" log -1 --format=%B)
@@ -371,8 +380,8 @@ for mode in $MODES; do
 done
 if [ "$CONFIG_SUPPORTED" = 1 ]; then
   test_hook_installer_inside_the_pane_installs_and_runs
-  test_config_install_replaces_a_fallback_install
 fi
+test_an_old_git_anywhere_on_the_pane_path_keeps_the_strip
 test_fallback_hook_manager_cannot_displace_the_strip
 test_fallback_reinstall_replaces_a_read_only_install
 test_strip_msgfile_alone_does_not_rewrite_author_fields

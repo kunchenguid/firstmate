@@ -1910,7 +1910,7 @@ home=$subhome
 projects=alpha
 EOF
   printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
-  # A spawn on a git without config hooks leaves this read-only strip dir.
+  # Every spawn leaves this read-only strip dir.
   mkdir -p "$subhome/state/aborted-child.git-hooks" ||
     fail "could not seed an aborted child's read-only strip dir"
   printf '#!/bin/sh\n' >"$subhome/state/aborted-child.git-hooks/commit-msg"
