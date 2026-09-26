@@ -102,7 +102,7 @@ render_board() {  # <home> <underway-json> <charted-json> [charted_more] [charte
     prs_live:false, captains_call:[], underway:$underway, landed:[],
     charted:$charted, charted_more:$more, charted_warning_more:$warning_more,
     underway_more:$underway_more}' > "$data"
-  PATH="$home/fakebin:$PATH" FM_HOME="$home" \
+  PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_BEARINGS_METRICS=off \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
     "$BOARD" build "$data" >/dev/null || fail "the board did not build"
@@ -119,7 +119,7 @@ render_full() {  # <home> <captains_call-json> <underway-json> <metrics-json>
     schema:"fm-bearings-board.v1", home:"render-home", generated:"2026-08-26T00:00Z",
     prs_live:false, captains_call:$captains_call, underway:$underway, landed:[],
     charted:$charted, metrics:$metrics}' > "$data"
-  PATH="$home/fakebin:$PATH" FM_HOME="$home" \
+  PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_BEARINGS_METRICS=off \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
     LAVISH_AXI_STATE_DIR="$home/lavish-state" \
@@ -229,21 +229,20 @@ test_present_metrics_render_real_values_and_absent_ones_say_no_data() {
   local home out
   home=$(make_home metrics-mixed)
   out=$(render_full "$home" '[]' '[]' '{
-    "cost_cumulative": {"spent": 90.71, "cap": 300.0},
+    "quota_session_used_percent": 30.2,
+    "quota_weekly_used_percent": 74,
     "cache_hit_rate": 72.5,
     "tool_error_rate": {"errors": 3, "total": 120}
   }')
   printf '%s' "$out" | jq -e '
     (.error == "")
-    and ([.statsCost[] | select(.label == "누적 비용") | .value] == ["$90.71 / $300.00"])
-    and ([.statsCost[] | select(.label == "누적 비용") | .noData] == [false])
-    and ([.statsCost[] | select(.label == "세션 비용") | .value] == ["데이터 없음"])
-    and ([.statsCost[] | select(.label == "세션 비용") | .noData] == [true])
-    and ([.statsCost[] | select(.label == "캐시 적중률") | .value] == ["72.5%"])
-    and ([.statsCost[] | select(.label == "도구 오류율") | .value] == ["3 / 120 (2.5%)"])
+    and ([.statsCost[] | select(.label == "5시간 쿼터 사용량") | .value] == ["30.2% / 100%"])
+    and ([.statsCost[] | select(.label == "7일 쿼터 사용량") | .value] == ["74% / 100%"])
+    and ([.statsCost[] | select(.label == "24시간 캐시 적중률") | .value] == ["72.5%"])
+    and ([.statsCost[] | select(.label == "24시간 도구 오류율") | .value] == ["3 / 120 (2.5%)"])
     and ([.statsFleet[] | select(.label == "컨텍스트 읽기 누락") | .value] == ["데이터 없음"])
   ' >/dev/null || fail "present metrics did not render real values or absent ones were not honestly labeled: $out"
-  pass "present metrics render real values, and metrics with no data source say so instead of a fabricated number"
+  pass "quota, cache, and tool metrics render sourced values while unobservable metrics say no data"
 }
 
 test_unanswered_questions_count_and_table_read_off_captains_call() {
@@ -314,7 +313,7 @@ test_zero_tool_calls_have_no_percentage() {
   local home out
   home=$(make_home zero-tool-calls)
   out=$(render_full "$home" '[]' '[]' '{"tool_error_rate":{"errors":0,"total":0}}')
-  printf '%s' "$out" | jq -e '[.statsCost[] | select(.label == "도구 오류율") | .value] == ["0 / 0 (-)"]' >/dev/null \
+  printf '%s' "$out" | jq -e '[.statsCost[] | select(.label == "24시간 도구 오류율") | .value] == ["0 / 0 (-)"]' >/dev/null \
     || fail "zero calls rendered a percentage: $out"
   pass "zero tool calls show unavailable percentage with real counts"
 }

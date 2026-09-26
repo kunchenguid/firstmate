@@ -483,10 +483,9 @@ __FM_BEARINGS_BOARD_DATA__
 
   document.getElementById("bb-provenance").textContent = data.schema + " · " + data.generated;
 
-  /* telemetry strips - honestly labeled "no data" when this fleet has no live
-     source for a metric, never a fabricated or always-zero number. */
+  /* Telemetry comes from local quota and transcript sources. Unobservable
+     metrics remain honestly labeled "no data". */
   var metrics = (data.metrics && typeof data.metrics === "object") ? data.metrics : {};
-  function money(n) { return "$" + Number(n).toFixed(2); }
   function pct(n) { return Math.round(n * 10) / 10 + "%"; }
   function btCard(container, label, valueText, noData, barFrac) {
     var t = el("div", "bt-stat" + (noData ? " bt-stat--nodata" : ""));
@@ -502,29 +501,29 @@ __FM_BEARINGS_BOARD_DATA__
     container.appendChild(t);
   }
   var statsCost = document.getElementById("bt-stats-cost");
-  if (metrics.cost_cumulative) {
-    btCard(statsCost, "누적 비용", money(metrics.cost_cumulative.spent) + " / " + money(metrics.cost_cumulative.cap),
-      false, metrics.cost_cumulative.spent / metrics.cost_cumulative.cap);
+  if (typeof metrics.quota_session_used_percent === "number") {
+    btCard(statsCost, "5시간 쿼터 사용량", pct(metrics.quota_session_used_percent) + " / 100%",
+      false, metrics.quota_session_used_percent / 100);
   } else {
-    btCard(statsCost, "누적 비용", "데이터 없음", true);
+    btCard(statsCost, "5시간 쿼터 사용량", "데이터 없음", true);
   }
-  if (metrics.cost_session) {
-    btCard(statsCost, "세션 비용", money(metrics.cost_session.spent) + " / " + money(metrics.cost_session.cap),
-      false, metrics.cost_session.spent / metrics.cost_session.cap);
+  if (typeof metrics.quota_weekly_used_percent === "number") {
+    btCard(statsCost, "7일 쿼터 사용량", pct(metrics.quota_weekly_used_percent) + " / 100%",
+      false, metrics.quota_weekly_used_percent / 100);
   } else {
-    btCard(statsCost, "세션 비용", "데이터 없음", true);
+    btCard(statsCost, "7일 쿼터 사용량", "데이터 없음", true);
   }
   if (typeof metrics.cache_hit_rate === "number") {
-    btCard(statsCost, "캐시 적중률", pct(metrics.cache_hit_rate), false);
+    btCard(statsCost, "24시간 캐시 적중률", pct(metrics.cache_hit_rate), false);
   } else {
-    btCard(statsCost, "캐시 적중률", "데이터 없음", true);
+    btCard(statsCost, "24시간 캐시 적중률", "데이터 없음", true);
   }
   if (metrics.tool_error_rate) {
     var terTotal = metrics.tool_error_rate.total;
     var terPct = terTotal > 0 ? pct((metrics.tool_error_rate.errors / terTotal) * 100) : "-";
-    btCard(statsCost, "도구 오류율", metrics.tool_error_rate.errors + " / " + terTotal + " (" + terPct + ")", false);
+    btCard(statsCost, "24시간 도구 오류율", metrics.tool_error_rate.errors + " / " + terTotal + " (" + terPct + ")", false);
   } else {
-    btCard(statsCost, "도구 오류율", "데이터 없음", true);
+    btCard(statsCost, "24시간 도구 오류율", "데이터 없음", true);
   }
 
   var statsFleet = document.getElementById("bt-stats-fleet");

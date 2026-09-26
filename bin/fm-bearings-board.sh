@@ -81,17 +81,15 @@
 # renders it as a labeled blocker column rather than folding it only into the
 # row subtitle.
 #
-# The top-level payload MAY carry an optional `metrics` object with any subset
-# of: `cost_cumulative`/`cost_session` ({spent,cap}, both positive numbers),
-# `cache_hit_rate` (0-100), `tool_error_rate` ({errors,total} counts, errors
-# <= total), `context_read_miss` (a non-negative count), `auto_continue`
-# ({rejected,api_error} counts), and `milestone_tasks` ({label,done,total}, a
-# non-empty label and done <= total). Every one of these keys is independently
-# optional: the composer fills in only what this fleet actually has a live
-# source for, and the board renders an explicit "no data" card for any key
-# left out rather than a fabricated or always-zero number. The Captain's Call
-# "unanswered questions" count and table need no `metrics` entry - the board
-# reads them directly off `captains_call`, which is always authoritative.
+# The builder replaces payload metrics with read-only sources at build time:
+# Claude subscription quota from `quota-axi --no-credential-refresh`, cache
+# token usage and tool errors from the last 24 hours of local Claude JSONL
+# transcripts, and fleet task counts from the payload's complete `landed` and
+# `underway` arrays.
+# Context-read misses and auto-continue outcomes have no observable source and
+# remain explicit "no data" cards. The Captain's Call "unanswered questions"
+# count and table need no `metrics` entry - the board reads them directly off
+# `captains_call`, which is always authoritative.
 # A Charted Next row MAY carry `filed`, the durable filed date (YYYY-MM-DD, or
 # that date with a UTC timestamp) the template orders the section by, newest
 # first; a row with no comparable date keeps its payload order after every dated
@@ -226,6 +224,8 @@ validate_payload() {  # <data.json>
         .metrics | type == "object"
         and ((has("cost_cumulative") | not) or (.cost_cumulative | cost_pair))
         and ((has("cost_session") | not) or (.cost_session | cost_pair))
+        and ((has("quota_session_used_percent") | not) or (.quota_session_used_percent | type == "number" and . >= 0 and . <= 100))
+        and ((has("quota_weekly_used_percent") | not) or (.quota_weekly_used_percent | type == "number" and . >= 0 and . <= 100))
         and ((has("cache_hit_rate") | not) or (.cache_hit_rate | type == "number" and . >= 0 and . <= 100))
         and ((has("tool_error_rate") | not) or (.tool_error_rate | error_pair))
         and ((has("context_read_miss") | not) or (.context_read_miss | nonneg_int))
@@ -408,7 +408,7 @@ await_source_owner() {  # <source-id>
 }
 
 command_build() {
-  local data=${1-} board json tmp sid extracted effective owner version pre_reopen_owner
+  local data=${1-} board json tmp sid extracted effective prepared owner version pre_reopen_owner sourced_metrics metrics_enabled
   [ "$#" -eq 1 ] || { usage >&2; exit 2; }
   command -v jq >/dev/null 2>&1 || fail "jq is required"
   [ -f "$data" ] || fail "board data does not exist: $data"
@@ -418,12 +418,38 @@ command_build() {
   [ "$(grep -cxF "$PLACEHOLDER" "$TEMPLATE")" -eq 1 ] \
     || fail "board template does not carry exactly one data slot: $TEMPLATE"
 
+  prepared=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-bearings-prepared.XXXXXX") \
+    || fail "cannot stage sourced board metrics"
+  sourced_metrics='{}'
+  metrics_enabled=1
+  if [ "${FM_BEARINGS_METRICS:-on}" = off ]; then
+    metrics_enabled=0
+  elif command -v node >/dev/null 2>&1; then
+    sourced_metrics=$(node "$SCRIPT_DIR/fm-bearings-metrics.mjs" 2>/dev/null) || sourced_metrics='{}'
+  fi
+  if ! jq --argjson sourced "$sourced_metrics" --argjson enabled "$metrics_enabled" '
+    . as $payload
+    | .metrics = ((if $enabled == 1 then $sourced else (.metrics // {}) end) + {
+        milestone_tasks: {
+          label: "fleet tasks",
+          done: ($payload.landed | length),
+          total: (($payload.landed | length) + ($payload.underway | length))
+        }
+      })
+  ' "$data" > "$prepared"; then
+    rm -f -- "$prepared"
+    fail "cannot attach sourced board metrics"
+  fi
+  validate_payload "$prepared" || { rm -f -- "$prepared"; fail "sourced board metrics do not satisfy $BOARD_SCHEMA"; }
+
   effective=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-bearings-payload.XXXXXX") \
     || fail "cannot stage the board payload"
-  if ! effective_payload "$data" "$effective"; then
+  if ! effective_payload "$prepared" "$effective"; then
+    rm -f -- "$prepared"
     rm -f -- "$effective"
     fail "cannot reconcile the board payload against landed work"
   fi
+  rm -f -- "$prepared"
   json=$(jq -c . "$effective") || { rm -f -- "$effective"; fail "cannot compact the board data"; }
   rm -f -- "$effective"
   # `<` never appears in JSON syntax outside strings, so escaping every
