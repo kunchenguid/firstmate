@@ -64,7 +64,7 @@ make_named_shells() {  # <dir> -> echoes <bindir>
 # --- 1. Detection --------------------------------------------------------------
 
 test_detection_anchored_name_and_marker_precedence() {
-  local bin out
+  local bin out without_marker
   bin=$(make_named_shells "$TMP_ROOT/named")
   # shellcheck disable=SC2016 # the quoted body expands inside the named shell
   out=$(env -u CLAUDECODE -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
@@ -83,9 +83,12 @@ test_detection_anchored_name_and_marker_precedence() {
   [ "$out" = omp ] || fail "FM_OMP_HARNESS under an omp ancestor must outrank an inherited CLAUDECODE, got '$out'"
   # ...and is inert when it leaks into a worker with no omp ancestor.
   # shellcheck disable=SC2016 # the quoted body expands inside the named shell
+  without_marker=$(env -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u FM_OMP_HARNESS CLAUDECODE=1 \
+    bash -c '"$1"; :' _ "$HARNESS")
+  # shellcheck disable=SC2016 # the quoted body expands inside the named shell
   out=$(env -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 FM_OMP_HARNESS=omp \
     bash -c '"$1"; :' _ "$HARNESS")
-  [ "$out" = claude ] || fail "a leaked FM_OMP_HARNESS without an omp ancestor must not relabel a claude worker, got '$out'"
+  [ "$out" = "$without_marker" ] || fail "a leaked FM_OMP_HARNESS without an omp ancestor changed detection from '$without_marker' to '$out'"
   pass "fm-harness: omp detects by its anchored name; the marker is a precedence override that needs real omp ancestry"
 }
 
@@ -577,6 +580,66 @@ EOF
   [ -z "$out" ] || fail "omp watch extension test printed output: $out"
   pass ".omp watch extension: fm_watch_arm_omp arms once, repeats as a no-op, and delivers an actionable close as one follow-up"
 }
+test_watch_extension_rearms_after_stale_shutdown() {
+  local repo home out status
+  repo="$TMP_ROOT/watch-wedge/repo"; home="$TMP_ROOT/watch-wedge/home"
+  install_omp_extension_fixture "$repo"
+  mkdir -p "$home/state"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'watcher: started pid=%s (beacon 0s) recovery-generation=gen-1\n' "$$"
+if [ ! -e "${FM_HOME:?}/state/.e2e-fired" ]; then
+  : > "$FM_HOME/state/.e2e-fired"
+  while [ ! -e "$FM_HOME/state/.release-close" ]; do sleep 0.05; done
+  printf 'signal: omp-stale-owner done\n'
+  exit 0
+fi
+sleep 30
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_OMP_ARM_READY_TIMEOUT_MS=3000 FM_WATCH_REARM_RETRY_LIMIT=1 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 \
+    EXT="$repo/.omp/extensions/fm-primary-omp-watch.ts" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+import { writeFileSync } from "node:fs";
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+function fakePi() {
+  const handlers = new Map();
+  const sent = [];
+  const api = {
+    on(e, h) { handlers.set(e, h); },
+    registerCommand() {},
+    registerTool(t) { api.tool = t; },
+    sendUserMessage(content) { sent.push(content); return undefined; },
+  };
+  return { handlers, api, sent };
+}
+const mod = await import(pathToFileURL(process.env.EXT).href);
+const main = fakePi();
+mod.default(main.api);
+if (!main.api.tool || main.api.tool.name !== "fm_watch_arm_omp") throw new Error("fm_watch_arm_omp was not registered");
+const first = await main.api.tool.execute();
+if (!/^watcher: started omp extension arm child 1;/.test(first.content[0].text)) throw new Error(`primary did not arm: ${first.content[0].text}`);
+const sub = fakePi();
+mod.default(sub.api);
+await sub.handlers.get("session_start")({}, {});
+await sub.handlers.get("session_shutdown")({}, {});
+writeFileSync(`${process.env.FM_HOME}/state/.release-close`, "");
+for (let i = 0; i < 50 && main.sent.length === 0; i++) await new Promise((r) => setTimeout(r, 100));
+if (main.sent.length !== 1 || !main.sent[0].includes("signal: omp-stale-owner done")) throw new Error(`primary lost actionable close: ${JSON.stringify(main.sent)}`);
+if (sub.sent.length !== 0) throw new Error(`subagent received primary wake: ${JSON.stringify(sub.sent)}`);
+const stillOwned = await main.api.tool.execute();
+if (!stillOwned.details?.ok || !/^watcher: unchanged - omp extension already owns an arm child/.test(stillOwned.content[0].text)) throw new Error(`primary lost ownership: ${stillOwned.content[0].text}`);
+await main.handlers.get("session_shutdown")({}, {});
+const healed = await main.api.tool.execute();
+if (!healed.details?.ok || !/^watcher: started omp extension arm child/.test(healed.content[0].text)) throw new Error(`re-arm wedged after stale shutdown: ${healed.content[0].text}`);
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "omp watch stale-shutdown re-arm: $out"
+  [ -z "$out" ] || fail "omp stale-shutdown test printed output: $out"
+  pass ".omp watch extension: actionable close survives subagent lifecycle and primary re-arms after shutdown"
+}
 
 # An opted-in home spawns the supervision host in the arm's place; its streamed
 # status line drives readiness and the handling handoff, and a handed-back
@@ -807,3 +870,4 @@ test_watch_extension_arms_and_delivers
 test_watch_extension_runs_the_supervision_host
 test_watch_extension_replays_a_host_only_boundary_across_replacement
 test_watch_extension_delivers_a_split_host_close_whole
+test_watch_extension_rearms_after_stale_shutdown
