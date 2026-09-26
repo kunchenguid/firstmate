@@ -37,10 +37,7 @@ exits it.
    `/afk`-shaped refresh call never resets quiet back to away underneath the
    captain.
 
-2. **Acknowledge** in `AGENTS.md` section 9 language: "Captain, quiet mode is
-   active; I will batch routine updates and surface only decisions, failures,
-   credentials, or review-ready work - ordinary chat will not exit this, say
-   `/quiet off` when you want normal per-wake responses back."
+2. **Acknowledge** in `AGENTS.md` section 9 language: "Quiet mode is active; I will batch routine updates and surface only decisions, failures, credentials, or review-ready work - ordinary chat will not exit this, say `/quiet off` when you want normal per-wake responses back."
 
 ## How to exit quiet mode
 
