@@ -4340,8 +4340,18 @@ if [ "$KIND" != secondmate ]; then
     j_stop=$(json_escape "touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event stop 2>/dev/null || true")
     j_stopfail=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event stop-failure 2>/dev/null || true")
     j_sessionend=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event session-end 2>/dev/null || true")
+    # Project-provided pre-commit proof: by convention an executable
+    # bin/check-changed in the worktree is run as a PreToolUse hook on Bash
+    # with --hook, so the project decides which commands it gates and blocks
+    # one by exiting 2. Without that file the settings stay exactly as before.
+    pretooluse=
+    if [ -f "$WT/bin/check-changed" ] && [ -x "$WT/bin/check-changed" ]; then
+      # shellcheck disable=SC2016  # Claude expands $CLAUDE_PROJECT_DIR when it runs the hook
+      j_check=$(json_escape '"$CLAUDE_PROJECT_DIR"/bin/check-changed --hook')
+      pretooluse=",\"PreToolUse\":[{\"matcher\":\"Bash\",\"hooks\":[{\"type\":\"command\",\"command\":\"$j_check\",\"timeout\":7200}]}]"
+    fi
     cat >"$WT/.claude/settings.local.json" <<EOF
-{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$j_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$j_stop"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"$j_stopfail"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$j_sessionend"}]}]}}
+{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$j_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$j_stop"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"$j_stopfail"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$j_sessionend"}]}]$pretooluse}}
 EOF
     exclude_path '.claude/settings.local.json'
     ;;
