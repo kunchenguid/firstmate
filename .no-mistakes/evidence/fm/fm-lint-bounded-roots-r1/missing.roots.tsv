@@ -1,0 +1,19 @@
+format	fm-lint-roots-v1
+meta	shellcheck_version	0.11.0
+meta	platform	Darwin arm64
+meta	image_os	unknown
+meta	image_version	unknown
+meta	mode	full
+meta	partition	all
+meta	jobs	2
+meta	bounds_enforced	0
+meta	root_deadline_seconds	unbounded
+meta	root_kill_grace_seconds	unbounded
+meta	root_memory_limit_kib	unbounded
+meta	timing_mechanism	none
+begin	1	/Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M3EBME6HSHK9E1RSP24QDNJE/.fm-lint-live.JIRYRJ/out of memory.sh	0	full	1790419884557
+end	1	/Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M3EBME6HSHK9E1RSP24QDNJE/.fm-lint-live.JIRYRJ/out of memory.sh	0	full	1790419884557	1790419884635	78	2	error:2	unavailable
+meta	roots_begun	1
+meta	roots_completed	1
+meta	roots_unfinished	0
+meta	result_exit	2

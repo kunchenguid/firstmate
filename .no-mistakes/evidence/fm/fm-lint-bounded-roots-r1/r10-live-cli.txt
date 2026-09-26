@@ -1,0 +1,53 @@
+=== local full-rigor explicit roots ===
+fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
+fm-lint.sh: full ShellCheck extended analysis enabled
+
+In /Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M3EBME6HSHK9E1RSP24QDNJE/.fm-test-D5VEgo/excerpt.sh line 2:
+shellcheck: out of memory $x
+                          ^-- SC2154 (warning): x is referenced but not assigned.
+                          ^-- SC2086 (info): Double quote to prevent globbing and word splitting.
+
+Did you mean:
+shellcheck: out of memory "$x"
+
+For more information:
+  https://www.shellcheck.net/wiki/SC2154 -- x is referenced but not assigned.
+  https://www.shellcheck.net/wiki/SC2086 -- Double quote to prevent globbing ...
+exit=1
+=== retained per-root records ===
+meta	shellcheck_version	0.11.0
+meta	platform	Darwin arm64
+meta	image_os	unknown
+meta	image_version	unknown
+meta	mode	full
+meta	partition	all
+meta	jobs	2
+meta	bounds_enforced	0
+meta	root_deadline_seconds	unbounded
+meta	root_kill_grace_seconds	unbounded
+meta	root_memory_limit_kib	unbounded
+meta	timing_mechanism	none
+begin	1	/Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M3EBME6HSHK9E1RSP24QDNJE/.fm-test-D5VEgo/clean.sh	1	full	1790419441552
+begin	2	/Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M3EBME6HSHK9E1RSP24QDNJE/.fm-test-D5VEgo/excerpt.sh	0	full	1790419441552
+end	2	/Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M3EBME6HSHK9E1RSP24QDNJE/.fm-test-D5VEgo/excerpt.sh	0	full	1790419441552	1790419441623	71	1	findings	unavailable
+end	1	/Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M3EBME6HSHK9E1RSP24QDNJE/.fm-test-D5VEgo/clean.sh	1	full	1790419441552	1790419441635	83	0	ok	unavailable
+meta	roots_begun	2
+meta	roots_completed	2
+meta	roots_unfinished	0
+meta	result_exit	1
+=== missing path containing memory phrase ===
+fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
+fm-lint.sh: full ShellCheck extended analysis enabled
+fm-lint: end /Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M3EBME6HSHK9E1RSP24QDNJE/.fm-test-D5VEgo/out of memory.sh reason=error:2 rc=2 duration_ms=73 rss_kib=unavailable
+/Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M3EBME6HSHK9E1RSP24QDNJE/.fm-test-D5VEgo/out of memory.sh: /Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M3EBME6HSHK9E1RSP24QDNJE/.fm-test-D5VEgo/out of memory.sh: openBinaryFile: does not exist (No such file or directory)
+exit=2
+end	1	/Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M3EBME6HSHK9E1RSP24QDNJE/.fm-test-D5VEgo/out of memory.sh	0	full	1790419441863	1790419441936	73	2	error:2	unavailable
+=== bounded mode fail closed on macOS ===
+fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
+fm-lint.sh: full ShellCheck extended analysis enabled
+fm-lint.sh: bounds required but per-root memory limit FM_LINT_ROOT_MEMORY_KIB=8388608 KiB is not enforceable on this host (ulimit -v).
+fm-lint.sh: refusing to lint uncapped under FM_LINT_REQUIRE_BOUNDS=1.
+exit=2
+=== invalid concurrency ===
+fm-lint.sh: jobs must be 1 or 2, got 3.
+exit=2

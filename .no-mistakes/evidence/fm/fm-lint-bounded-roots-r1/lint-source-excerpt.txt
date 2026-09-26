@@ -1,4 +1,19 @@
-format	fm-lint-roots-v1
+SCENARIO A (corrected source excerpt): real pinned ShellCheck, two full-analysis roots, finding not memory
+fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
+fm-lint.sh: full ShellCheck extended analysis enabled
+
+In /Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M3EBME6HSHK9E1RSP24QDNJE/.fm-lint-live.yj4CK1/echo-oom.sh line 2:
+echo "shellcheck: out of memory" $x
+                                 ^-- SC2154 (warning): x is referenced but not assigned.
+                                 ^-- SC2086 (info): Double quote to prevent globbing and word splitting.
+
+Did you mean:
+echo "shellcheck: out of memory" "$x"
+
+For more information:
+  https://www.shellcheck.net/wiki/SC2154 -- x is referenced but not assigned.
+  https://www.shellcheck.net/wiki/SC2086 -- Double quote to prevent globbing ...
+exit=1
 meta	shellcheck_version	0.11.0
 meta	platform	Darwin arm64
 meta	image_os	unknown

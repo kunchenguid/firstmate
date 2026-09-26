@@ -1,0 +1,9 @@
+ok - two canonical lint partitions preserve complete source-aware coverage and reject weakened modes
+ok - SKIP (host cannot enforce the bounded envelope): root deadline kill check
+ok - SKIP (host cannot enforce the bounded envelope): memory-limit death check
+ok - explicit memory evidence outranks findings and signal reasons (modes: 0)
+ok - OOM words in a source excerpt or a root path never classify a root as memory
+ok - FM_LINT_REQUIRE_BOUNDS refuses missing enforcement and proceeds when enforceable
+ok - SKIP (host cannot enforce the bounded envelope): pinned memory-envelope check
+ok - the roots sidecar and telemetry record the run's final exit status
+ok - the retained sidecar records each root's lifecycle with a mode, reason, and duration

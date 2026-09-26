@@ -1,0 +1,3 @@
+ok - a root pinned at the wall deadline fails by name, reaps its tree, and leaves the sentinel alive
+ok - a root refused by its enforced memory limit fails by name with a memory reason
+ok - the pinned ShellCheck both respects and survives under the memory envelope

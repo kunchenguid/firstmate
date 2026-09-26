@@ -1,0 +1,21 @@
+format	fm-lint-roots-v1
+meta	shellcheck_version	0.11.0
+meta	platform	Linux aarch64
+meta	image_os	unknown
+meta	image_version	unknown
+meta	mode	full
+meta	partition	all
+meta	jobs	2
+meta	bounds_enforced	1
+meta	root_deadline_seconds	1200
+meta	root_kill_grace_seconds	5
+meta	root_memory_limit_kib	8388608
+meta	timing_mechanism	perl
+begin	1	/repo/.fm-linux-baRCWw/fixtures/clean.sh	1	full	1790419533640
+begin	2	/repo/.fm-linux-baRCWw/fixtures/excerpt.sh	0	full	1790419533640
+end	1	/repo/.fm-linux-baRCWw/fixtures/clean.sh	1	full	1790419533640	1790419533761	121	0	ok	unavailable
+end	2	/repo/.fm-linux-baRCWw/fixtures/excerpt.sh	0	full	1790419533640	1790419533761	121	1	findings	unavailable
+meta	roots_begun	2
+meta	roots_completed	2
+meta	roots_unfinished	0
+meta	result_exit	1

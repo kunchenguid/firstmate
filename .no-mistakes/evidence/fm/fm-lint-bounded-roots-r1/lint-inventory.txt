@@ -1,0 +1,9 @@
+Real product --list-files canonical inventory and two partitions:
+     440 /Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M3EBME6HSHK9E1RSP24QDNJE/.fm-lint-inventory.AgiiI6/canonical
+     440 /Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M3EBME6HSHK9E1RSP24QDNJE/.fm-lint-inventory.AgiiI6/all
+     220 /Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M3EBME6HSHK9E1RSP24QDNJE/.fm-lint-inventory.AgiiI6/one
+     220 /Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M3EBME6HSHK9E1RSP24QDNJE/.fm-lint-inventory.AgiiI6/two
+    1320 total
+canonical vs all differences:
+duplicate partition entries:
+partition union vs full differences:

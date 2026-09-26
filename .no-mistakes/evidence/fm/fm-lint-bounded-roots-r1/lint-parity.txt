@@ -1,0 +1,16 @@
+jobs=1 exit=1; jobs=2 exit=1
+stdout diagnostics diff:
+job 1 diagnostics:
+In /Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M3EBME6HSHK9E1RSP24QDNJE/.fm-lint-parity.jPcxN0/bad.sh line 2:
+echo $unsafe
+     ^-----^ SC2154 (warning): unsafe is referenced but not assigned.
+     ^-----^ SC2086 (info): Double quote to prevent globbing and word splitting.
+echo "$unsafe"
+  https://www.shellcheck.net/wiki/SC2154 -- unsafe is referenced but not assi...
+  https://www.shellcheck.net/wiki/SC2086 -- Double quote to prevent globbing ...
+job 1 roots:
+end	1	/Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M3EBME6HSHK9E1RSP24QDNJE/.fm-lint-parity.jPcxN0/bad.sh	0	full	1790419939796	1790419939889	93	1	findings	unavailable
+end	2	/Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M3EBME6HSHK9E1RSP24QDNJE/.fm-lint-parity.jPcxN0/good.sh	1	full	1790419939917	1790419940003	86	0	ok	unavailable
+job 2 roots:
+end	1	/Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M3EBME6HSHK9E1RSP24QDNJE/.fm-lint-parity.jPcxN0/bad.sh	0	full	1790419940267	1790419940307	40	1	findings	unavailable
+end	2	/Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M3EBME6HSHK9E1RSP24QDNJE/.fm-lint-parity.jPcxN0/good.sh	1	full	1790419940266	1790419940355	89	0	ok	unavailable

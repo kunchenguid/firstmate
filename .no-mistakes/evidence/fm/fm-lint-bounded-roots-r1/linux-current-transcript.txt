@@ -1,0 +1,29 @@
+Linux pinned ShellCheck and enforced 8GiB root:
+fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
+fm-lint.sh: full ShellCheck extended analysis enabled
+exit=0
+meta	shellcheck_version	0.11.0
+meta	platform	Linux aarch64
+meta	image_os	unknown
+meta	image_version	unknown
+meta	mode	full
+meta	partition	all
+meta	jobs	2
+meta	bounds_enforced	1
+meta	root_deadline_seconds	1200
+meta	root_kill_grace_seconds	5
+meta	root_memory_limit_kib	8388608
+meta	timing_mechanism	perl
+begin	1	/repo/.fm-linux.L7PoaQ/good.sh	0	full	1790420007973
+end	1	/repo/.fm-linux.L7PoaQ/good.sh	0	full	1790420007973	1790420008039	66	0	ok	unavailable
+meta	roots_begun	1
+meta	roots_completed	1
+meta	roots_unfinished	0
+meta	result_exit	0
+Linux controlled allocator (128 MiB) without limit, then under 32 MiB ulimit:
+control allocation succeeded
+control_exit=0
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+MemoryError
+limited_exit=1

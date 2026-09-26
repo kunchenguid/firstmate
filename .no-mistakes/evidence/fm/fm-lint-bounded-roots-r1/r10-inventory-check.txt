@@ -1,0 +1,3 @@
+inventory=440 partition1=220 partition2=220
+overlap=0
+union=identical

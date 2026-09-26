@@ -1,0 +1,49 @@
+SCENARIO A: real pinned ShellCheck explicit roots; 2 jobs, full mode; diagnostics and retained root sidecar
+fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
+fm-lint.sh: full ShellCheck extended analysis enabled
+
+In /Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M3EBME6HSHK9E1RSP24QDNJE/.fm-lint-live.JIRYRJ/echo-oom.sh line 2:
+# shellcheck: out of memory
+^-- SC1073 (error): Couldn't parse this shellcheck directive. Fix to allow more checks.
+            ^-- SC1072 (error):  Fix any mentioned problems and try again.
+
+For more information:
+  https://www.shellcheck.net/wiki/SC1072 --  Fix any mentioned problems and t...
+  https://www.shellcheck.net/wiki/SC1073 -- Couldn't parse this shellcheck di...
+exit=1
+ROOT SIDECAR:
+meta	shellcheck_version	0.11.0
+meta	platform	Darwin arm64
+meta	image_os	unknown
+meta	image_version	unknown
+meta	mode	full
+meta	partition	all
+meta	jobs	2
+meta	bounds_enforced	0
+meta	root_deadline_seconds	unbounded
+meta	root_kill_grace_seconds	unbounded
+meta	root_memory_limit_kib	unbounded
+meta	timing_mechanism	none
+begin	2	/Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M3EBME6HSHK9E1RSP24QDNJE/.fm-lint-live.JIRYRJ/echo-oom.sh	0	full	1790419884280
+begin	1	/Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M3EBME6HSHK9E1RSP24QDNJE/.fm-lint-live.JIRYRJ/good.sh	1	full	1790419884280
+end	2	/Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M3EBME6HSHK9E1RSP24QDNJE/.fm-lint-live.JIRYRJ/echo-oom.sh	0	full	1790419884280	1790419884301	21	1	findings	unavailable
+end	1	/Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M3EBME6HSHK9E1RSP24QDNJE/.fm-lint-live.JIRYRJ/good.sh	1	full	1790419884280	1790419884303	23	0	ok	unavailable
+meta	roots_begun	2
+meta	roots_completed	2
+meta	roots_unfinished	0
+meta	result_exit	1
+SCENARIO B: missing file whose path contains out of memory
+fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
+fm-lint.sh: full ShellCheck extended analysis enabled
+fm-lint: end /Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M3EBME6HSHK9E1RSP24QDNJE/.fm-lint-live.JIRYRJ/out of memory.sh reason=error:2 rc=2 duration_ms=78 rss_kib=unavailable
+/Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M3EBME6HSHK9E1RSP24QDNJE/.fm-lint-live.JIRYRJ/out of memory.sh: /Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M3EBME6HSHK9E1RSP24QDNJE/.fm-lint-live.JIRYRJ/out of memory.sh: openBinaryFile: does not exist (No such file or directory)
+exit=2
+begin	1	/Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M3EBME6HSHK9E1RSP24QDNJE/.fm-lint-live.JIRYRJ/out of memory.sh	0	full	1790419884557
+end	1	/Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M3EBME6HSHK9E1RSP24QDNJE/.fm-lint-live.JIRYRJ/out of memory.sh	0	full	1790419884557	1790419884635	78	2	error:2	unavailable
+SCENARIO C: bounded mode fail-closed on host without ulimit -v
+fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
+fm-lint.sh: full ShellCheck extended analysis enabled
+fm-lint.sh: bounds required but per-root memory limit FM_LINT_ROOT_MEMORY_KIB=8388608 KiB is not enforceable on this host (ulimit -v).
+fm-lint.sh: refusing to lint uncapped under FM_LINT_REQUIRE_BOUNDS=1.
+exit=2
+no roots started

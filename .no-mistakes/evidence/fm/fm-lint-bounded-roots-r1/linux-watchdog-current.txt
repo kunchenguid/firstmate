@@ -1,0 +1,4 @@
+sentinel=7
+watchdog_exit=124 blocked_child=9
+blocked_alive=no
+sentinel_alive=yes
