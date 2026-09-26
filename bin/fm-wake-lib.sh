@@ -656,7 +656,8 @@ _fm_atomic_replace() {
 _fm_recovery_marker_write_locked() {
   # Mint and write with sequential assignments only: two sibling $() on one
   # command is a bash 5.2 parse-error landmine when a CHLD trap is set
-  # (docs/watcher-continuity.md; scout fm-watch-trap-parse-error-ci).
+  # (regression: test_recovery_mint_and_delivery_log_avoid_sibling_subst in
+  # tests/fm-wake-queue.test.sh).
   # Pid/date failures stay unchecked like the pre-fix sibling assignment so a
   # grammar-valid token is still minted and the durable wake row still appends.
   local marker=$1 kind=$2 generation=${3:-} status=${4:-pending} tmp pid epoch
