@@ -4542,9 +4542,13 @@ test_term_stops_a_watcher_blocked_inside_a_poll() {
 # the single-TERM stop; on timeout the publish is skipped and the singleton
 # stays behind as ordinary dead-pid evidence for the next arm to clear.
 
-test_term_stops_a_watcher_whose_cleanup_marker_lock_is_held() {
-  local dir state fakebin out capture_file window sig pid holder i rc
-  dir=$(make_case term-held-marker-lock); state="$dir/state"; fakebin="$dir/fakebin"
+# Start a watcher, hold its .watcher-down.lock from a live foreign subshell,
+# send exactly one TERM, and free the lock <release-ticks> tenths of a second
+# later (only after the watcher exits when empty). The caller's environment
+# reaches the watcher; its wait_for_exit code lands in HELD_MARKER_LOCK_RC.
+term_watcher_with_held_marker_lock() {  # <dir> [release-ticks]
+  local dir=$1 release_ticks=${2:-} state fakebin out capture_file window sig pid holder i
+  state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-held-marker-lock"
   printf 'Working...' > "$capture_file"
   printf 'window=%s\nkind=ship\n' "$window" > "$state/heldlock.meta"
@@ -4557,9 +4561,6 @@ test_term_stops_a_watcher_whose_cleanup_marker_lock_is_held() {
   if ! wait_poll_cycle "$state" "$pid"; then
     reap "$pid"; fail "the marker-lock watcher never completed a poll: $(cat "$out")"
   fi
-  # A live foreign holder keeps .watcher-down.lock across the TERM, so the
-  # watcher's EXIT cleanup can only finish by out-waiting its bounded acquire
-  # rather than spinning on the marker lock forever.
   FM_STATE_OVERRIDE="$state" bash -c '
     . "$1" || exit 1
     fm_lock_try_acquire "$2" || exit 1
@@ -4583,13 +4584,31 @@ test_term_stops_a_watcher_whose_cleanup_marker_lock_is_held() {
     reap "$pid"; fail "the fixture could not take the downtime-marker lock"
   fi
   kill "$pid" 2>/dev/null || true
+  if [ -n "$release_ticks" ]; then
+    i=0
+    while [ "$i" -lt "$release_ticks" ]; do
+      sleep 0.1
+      i=$((i + 1))
+    done
+    : > "$dir/release-marker-lock"
+  fi
   wait_for_exit "$pid" 100
-  rc=$?
+  HELD_MARKER_LOCK_RC=$?
   : > "$dir/release-marker-lock"
   wait "$holder" 2>/dev/null || true
-  [ "$rc" -ne 124 ] \
+  HELD_MARKER_LOCK_PID=$pid
+}
+
+test_term_stops_a_watcher_whose_cleanup_marker_lock_is_held() {
+  local dir state
+  dir=$(make_case term-held-marker-lock); state="$dir/state"
+  # A live foreign holder keeps .watcher-down.lock across the TERM, so the
+  # watcher's EXIT cleanup can only finish by out-waiting its bounded acquire
+  # rather than spinning on the marker lock forever.
+  term_watcher_with_held_marker_lock "$dir"
+  [ "$HELD_MARKER_LOCK_RC" -ne 124 ] \
     || fail "TERM did not stop a watcher whose downtime-marker lock was held"
-  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$pid" ] \
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$HELD_MARKER_LOCK_PID" ] \
     || fail "a watcher whose marker publish timed out lost its stale singleton evidence"
   FM_STATE_OVERRIDE="$state" bash -c '
     . "$1" && fm_recovery_transition "$2" clear-stale-lock "$3" downtime
@@ -4600,6 +4619,25 @@ test_term_stops_a_watcher_whose_cleanup_marker_lock_is_held() {
   ack_stopped_cycle "$state" \
     || fail "could not acknowledge the stop after the marker lock freed"
   pass "TERM stops a watcher whose downtime-marker lock is held, retaining stale evidence"
+}
+
+# The cleanup bound is decimal seconds: a zero spelled with leading zeros falls
+# back to the 2s default instead of giving up at once, and a leading-zero value
+# such as 08 is a real bound rather than an invalid octal literal. Either way a
+# marker lock freed shortly after the TERM lets the cleanup publish normally.
+test_cleanup_marker_lock_bound_is_decimal_with_zero_default() {
+  local bound dir state
+  for bound in 00 08; do
+    dir=$(make_case "term-marker-lock-bound-$bound"); state="$dir/state"
+    FM_WATCHER_CLEANUP_LOCK_BOUND=$bound term_watcher_with_held_marker_lock "$dir" 3
+    [ "$HELD_MARKER_LOCK_RC" -ne 124 ] \
+      || fail "TERM did not stop a watcher with cleanup lock bound $bound"
+    [ ! -e "$state/.watch.lock" ] \
+      || fail "cleanup lock bound $bound gave up before the marker lock freed"
+    ack_stopped_cycle "$state" \
+      || fail "could not acknowledge the stop under cleanup lock bound $bound"
+  done
+  pass "the cleanup marker-lock bound is decimal and zero falls back to the default"
 }
 
 # --- busy pane duration bound: a completed-turn age gate on top of busy -----
@@ -6466,6 +6504,7 @@ test_second_death_after_a_same_window_relaunch_reports_in_full
 test_identical_dead_display_of_a_successor_still_reports
 test_term_stops_a_watcher_blocked_inside_a_poll
 test_term_stops_a_watcher_whose_cleanup_marker_lock_is_held
+test_cleanup_marker_lock_bound_is_decimal_with_zero_default
 test_busy_pane_below_turn_age_bound_is_absorbed
 test_busy_pane_stable_hash_escalates_past_turn_age_bound
 test_busy_pane_changing_hash_escalates_past_turn_age_bound
