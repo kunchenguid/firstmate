@@ -1383,6 +1383,201 @@ test_already_gone_endpoint_still_completes_without_a_refusal() {
   pass "fm-teardown: an already-exited endpoint, and a server that is already gone, still complete cleanup silently"
 }
 
+# --- Worktreeless terminal cleanup -------------------------------------------
+#
+# The pool allocator legitimately moves a finished task's worktree= line onto
+# the task that next takes the slot, so a terminal ship/scout record can be
+# left with no worktree identity while the slot's new owner works live. The
+# cases below pin the carve-out's full gate set: terminal kind and status,
+# endpoint identity the shared validator accepts, a classifier-confirmed dead
+# endpoint, no worktree-shaped step, and unchanged refusals for every other
+# shape.
+
+# run_case_unforced <case> <id>: run teardown exactly as the real home would,
+# with no --force, so the scout deliverable and captain-call inventory gates
+# run on this path too.
+run_case_unforced() {  # <case> <id>
+  local dir=$1 id=$2
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+  FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
+    "$TEARDOWN" "$id"
+}
+
+# The exact record shape the allocator leaves behind: endpoint identity intact
+# and the worktree= line GONE, with the scout completion gates satisfied.
+write_worktreeless_scout_meta() {  # <case-dir> <id>
+  fm_write_meta "$1/home/state/$2.meta" \
+    "window=firstmate:fm-$2" "endpoint_task_id=$2" \
+    "project=$1/project" "kind=scout" "mode=no-mistakes" "yolo=off" \
+    "spawn_gen=s1.42.1" "decisions_reviewed=1" "decision_keys="
+}
+
+# A worktreeless record the carve-out declines must fall through to the shared
+# validator's refusal and change nothing but probe reads.
+assert_worktreeless_refused_untouched() {  # <case> <id> <description> [expect-empty-log]
+  local dir=$1 id=$2 description=$3 empty_log=${4:-} rc
+  set +e
+  run_case_unforced "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "$description: teardown unexpectedly succeeded"
+  assert_present "$dir/home/state/$id.meta" "$description: the record was removed anyway"
+  assert_present "$dir/worktree/sentinel" "$description: the pool slot's tree changed"
+  assert_grep "REFUSED: task $id has a missing, empty, or ambiguous worktree identity" "$dir/stderr" \
+    "$description: the shared validator's refusal did not stay the answer"
+  assert_no_grep "kill-window" "$dir/runtime.log" "$description: teardown attempted an endpoint close"
+  assert_no_grep "treehouse" "$dir/runtime.log" "$description: teardown ran a pool command"
+  if [ "$empty_log" = expect-empty-log ]; then
+    [ ! -s "$dir/runtime.log" ] \
+      || fail "$description: a runtime command ran before the refusal: $(cat "$dir/runtime.log")"
+  fi
+}
+
+test_worktreeless_terminal_record_finishes_cleanup_without_touching_the_slot() {
+  local dir id=workless-done owner=slot-owner-1 worker
+
+  dir=$(make_case worktreeless-terminal)
+  mark_case_as_treehouse_pool "$dir"
+  # The slot's CURRENT owner: a live task whose record names the worktree the
+  # closed task's record no longer does.
+  fm_write_meta "$dir/home/state/$owner.meta" \
+    "window=firstmate:fm-$owner" "endpoint_task_id=$owner" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=ship" "spawn_gen=s1.100.1"
+  claim_pool_slot "$dir" "$owner" "$dir/home"
+  ( cd "$dir/worktree" && exec sleep 30 ) &
+  worker=$!
+  # The closed task: terminal, deliverable and inventory complete, and no
+  # worktree= line at all.
+  mkdir -p "$dir/home/data/$id"
+  printf 'wireframes delivered\n' > "$dir/home/data/$id/report.md"
+  write_worktreeless_scout_meta "$dir" "$id"
+  printf '%s\n' "done: report written" > "$dir/home/state/$id.status"
+
+  run_case_unforced "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "worktreeless terminal teardown failed: $(cat "$dir/stderr")"
+
+  assert_grep "no worktree identity" "$dir/stdout" \
+    "worktreeless teardown did not report the carve-out completion"
+  assert_grep "tmux <kill-window> <-t> <=firstmate:=fm-$id>" "$dir/runtime.log" \
+    "worktreeless teardown did not close its own recorded endpoint"
+  assert_absent "$dir/home/state/$id.meta" "worktreeless teardown left the task record"
+  assert_absent "$dir/home/state/$id.status" "worktreeless teardown left the task status log"
+  assert_absent "$dir/home/state/$id.inbox" "worktreeless teardown left the task inbox"
+  assert_present "$dir/home/data/$id/report.md" "worktreeless teardown removed the scout deliverable"
+  # The slot and its live owner stay untouched: no read, kill, reset, or return.
+  assert_present "$dir/worktree/sentinel" "worktreeless teardown disturbed the live slot's tree"
+  assert_present "$dir/home/state/$owner.meta" "worktreeless teardown removed the slot owner's record"
+  grep -Fqx "task=$owner" "$dir/pool/1/.fm-slot-owner" \
+    || fail "worktreeless teardown rewrote the slot owner's claim: $(cat "$dir/pool/1/.fm-slot-owner")"
+  kill -0 "$worker" 2>/dev/null || fail "worktreeless teardown killed the slot owner's worker"
+  assert_no_grep "treehouse" "$dir/runtime.log" \
+    "worktreeless teardown ran a pool command: $(cat "$dir/runtime.log")"
+  kill "$worker" 2>/dev/null || true
+  wait "$worker" 2>/dev/null || true
+  pass "fm-teardown: a terminal record with no worktree identity finishes its own cleanup without touching the slot"
+}
+
+test_worktreeless_record_with_a_living_endpoint_refuses() {
+  local dir id=workless-live
+
+  dir=$(make_case worktreeless-live)
+  # The recorded window exists and its foreground reads as a live agent, so
+  # the classifier must not confirm the endpoint gone and the record must keep
+  # the shared refusal.
+  cat > "$dir/fakebin/tmux" <<SH
+#!/usr/bin/env bash
+printf 'tmux' >> "\${FM_RUNTIME_LOG:?}"
+printf ' <%s>' "\$@" >> "\${FM_RUNTIME_LOG:?}"
+printf '\n' >> "\${FM_RUNTIME_LOG:?}"
+case "\${1:-}" in
+  list-windows) printf 'fm-$id\n'; exit 0 ;;
+  display-message)
+    for a in "\$@"; do case "\$a" in *pane_current_command*) printf 'pi\n'; exit 0 ;; esac; done
+    exit 1 ;;
+esac
+exit 1
+SH
+  chmod +x "$dir/fakebin/tmux"
+  write_worktreeless_scout_meta "$dir" "$id"
+  printf '%s\n' "done: report written" > "$dir/home/state/$id.status"
+
+  assert_worktreeless_refused_untouched "$dir" "$id" "a living endpoint under a worktreeless record"
+  pass "fm-teardown: a worktreeless record whose endpoint still lives keeps the refusal"
+}
+
+test_worktreeless_record_without_terminal_status_refuses() {
+  local dir id=workless-blocked
+
+  dir=$(make_case worktreeless-blocked)
+  write_worktreeless_scout_meta "$dir" "$id"
+  printf '%s\n' "blocked: awaiting captain answer" > "$dir/home/state/$id.status"
+
+  assert_worktreeless_refused_untouched "$dir" "$id" "a non-terminal worktreeless record" expect-empty-log
+  pass "fm-teardown: a worktreeless record that is not terminal keeps the refusal"
+}
+
+test_worktreeless_kind_gates_and_ambiguity_still_refuse() {
+  local dir id=workless-second mate_rc dir2 id2=workless-ambiguous rc2
+
+  # A secondmate record is never teardown's to carve out: its retirement is a
+  # whole-home operation with its own contract, so the kind gate declines
+  # before any probe.
+  dir=$(make_case worktreeless-secondmate)
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "project=$dir/project" "kind=secondmate" "spawn_gen=s1.42.1"
+  set +e
+  run_case_unforced "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  mate_rc=$?
+  set -e
+  [ "$mate_rc" -ne 0 ] || fail "a worktreeless secondmate record unexpectedly tore down"
+  assert_present "$dir/home/state/$id.meta" "a refused secondmate record was removed anyway"
+
+  # An empty-valued or duplicated worktree= line is ambiguity, not absence, so
+  # the carve-out never engages and the shared refusal answers.
+  dir2=$(make_case worktreeless-ambiguous)
+  mkdir -p "$dir2/home/data/$id2"
+  printf 'findings\n' > "$dir2/home/data/$id2/report.md"
+  fm_write_meta "$dir2/home/state/$id2.meta" \
+    "window=firstmate:fm-$id2" "endpoint_task_id=$id2" "worktree=$dir2/worktree" \
+    "worktree=$dir2/other-worktree" "project=$dir2/project" "kind=scout" \
+    "spawn_gen=s1.42.1" "decisions_reviewed=1" "decision_keys="
+  printf '%s\n' "done: report written" > "$dir2/home/state/$id2.status"
+  set +e
+  run_case_unforced "$dir2" "$id2" > "$dir2/stdout" 2> "$dir2/stderr"
+  rc2=$?
+  set -e
+  [ "$rc2" -ne 0 ] || fail "an ambiguous worktree record unexpectedly tore down"
+  assert_present "$dir2/home/state/$id2.meta" "a refused ambiguous record was removed anyway"
+  assert_present "$dir2/worktree/sentinel" "an ambiguous record's worktree changed before refusal"
+  [ ! -s "$dir2/runtime.log" ] \
+    || fail "an ambiguous worktree record ran a runtime command: $(cat "$dir2/runtime.log")"
+
+  # An EMPTY-VALUED worktree= line is the same ambiguity: the line exists, so
+  # the carve-out's pending detection never engages, and the shared validator
+  # keeps its refusal for a value it cannot read.
+  local dir3 id3=workless-empty rc3
+  dir3=$(make_case worktreeless-empty-value)
+  mkdir -p "$dir3/home/data/$id3"
+  printf 'findings\n' > "$dir3/home/data/$id3/report.md"
+  fm_write_meta "$dir3/home/state/$id3.meta" \
+    "window=firstmate:fm-$id3" "endpoint_task_id=$id3" "worktree=" \
+    "project=$dir3/project" "kind=scout" \
+    "spawn_gen=s1.42.1" "decisions_reviewed=1" "decision_keys="
+  printf '%s\n' "done: report written" > "$dir3/home/state/$id3.status"
+  set +e
+  run_case_unforced "$dir3" "$id3" > "$dir3/stdout" 2> "$dir3/stderr"
+  rc3=$?
+  set -e
+  [ "$rc3" -ne 0 ] || fail "an empty-valued worktree record unexpectedly tore down"
+  assert_present "$dir3/home/state/$id3.meta" "a refused empty-value record was removed anyway"
+  assert_present "$dir3/worktree/sentinel" "an empty-value record's worktree changed before refusal"
+  [ ! -s "$dir3/runtime.log" ] \
+    || fail "an empty-value worktree record ran a runtime command: $(cat "$dir3/runtime.log")"
+
+  pass "fm-teardown: secondmate and ambiguous worktree records keep the shared refusal"
+}
+
 test_invalid_endpoint_records_refuse_before_mutation
 test_control_lock_contention_refuses_before_mutation
 test_non_pool_teardown_ignores_task_set_lock
@@ -1409,3 +1604,7 @@ test_project_lock_anchors_at_the_local_root_across_home_layouts
 test_remote_seeded_home_returns_its_uncontested_slot
 test_remote_seeded_home_still_refuses_a_slot_its_child_holds
 test_remote_layout_homes_serialize_on_one_project_lock
+test_worktreeless_terminal_record_finishes_cleanup_without_touching_the_slot
+test_worktreeless_record_with_a_living_endpoint_refuses
+test_worktreeless_record_without_terminal_status_refuses
+test_worktreeless_kind_gates_and_ambiguity_still_refuse

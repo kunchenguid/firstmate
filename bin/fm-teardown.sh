@@ -114,6 +114,23 @@
 # Why Treehouse's own state cannot answer this for crewmate slots, and why the
 # claim file sits on top of it, is owned by bin/fm-wake-lib.sh's slot-owner
 # claim comment.
+# Worktreeless terminal cleanup: the pool allocator can move a finished task's
+# worktree= line onto the task that next takes the slot, leaving a terminal
+# ship/scout record with no worktree identity while the slot's new owner works
+# live. Restoring the line collides with that owner's record, so an outright
+# refusal would strand the dead record and its endpoint forever. Teardown
+# therefore finishes the task's OWN cleanup - endpoint close, runtime records,
+# backlog - when the record carries no worktree= line at all, its kind is ship
+# or scout, the status log's current declaration is terminal (done or failed),
+# the shared endpoint validator accepts the endpoint identity on a probe copy
+# carrying a synthetic worktree line (the same shape trick the windowless
+# leftover above uses), and the recovery-grade classifier confirms that exact
+# endpoint dead or missing. Every other record keeps the shared validator's
+# refusal unchanged, including an ambiguous or empty-valued worktree= line.
+# Nothing worktree-shaped runs on this path: every slot, landed-work, and
+# return step already skips a record with no worktree path, the unlanded-work
+# check has no path to inspect, and the slot the task once used is not this
+# record's to name, let alone kill, reset, or return.
 # The recorded endpoint's exact task identity and the record's spawn incarnation
 # are validated separately
 # before cleanup. Its current working directory is only incidental process
@@ -521,6 +538,8 @@ TEARDOWN_BACKLOG_APPLIES=0
 TEARDOWN_BACKLOG_SKIP_REASON=
 TEARDOWN_WINDOWLESS=0
 TEARDOWN_WINDOWLESS_SHAPE=0
+TEARDOWN_WORKTREELESS=0
+TEARDOWN_WORKTREELESS_PENDING=0
 TEARDOWN_WINDOW_COUNT=$(LC_ALL=C grep -c '^window=' "$META" 2>/dev/null || true)
 TEARDOWN_BACKEND_COUNT=$(LC_ALL=C grep -c '^backend=' "$META" 2>/dev/null || true)
 case "$TEARDOWN_WINDOW_COUNT:$(fm_meta_get "$META" window)" in
@@ -544,6 +563,13 @@ case "$TEARDOWN_WINDOW_COUNT:$(fm_meta_get "$META" window)" in
         ;;
     esac
     ;;
+esac
+# The worktreeless-terminal carve-out (see the script header) applies only to a
+# ship/scout record that carries no worktree= line AT ALL. An empty-valued or
+# duplicated line is ambiguity, not absence, and keeps the shared validator's
+# refusal.
+case "$(LC_ALL=C grep -c '^worktree=' "$META" 2>/dev/null || true):$TEARDOWN_META_KIND" in
+  0:ship|0:scout) TEARDOWN_WORKTREELESS_PENDING=1 ;;
 esac
 if [ "$TEARDOWN_CLEANUP_RECOVERY" != orca ]; then
   if fm_backlog_transition_applies "$CONFIG" "$DATA" "$TEARDOWN_META_KIND"; then
@@ -1080,6 +1106,40 @@ else
 fi
 [ "$remote_teardown_rc" -eq 3 ] || exit "$remote_teardown_rc"
 
+# Does the worktreeless-terminal carve-out (see the script header) apply to
+# this record? Every gate is fail-closed: a current declaration that is not
+# terminal, an endpoint identity the shared validator refuses even on the
+# probe copy, or an endpoint the recovery-grade classifier cannot confidently
+# report dead or missing all decline, and the caller then runs the shared
+# validator on the real record so its refusal stays the answer.
+# The probe copy reuses the windowless leftover's shape trick in reverse: the
+# real record keeps its endpoint lines and gains one synthetic worktree line,
+# so the single validator owner still checks every piece of endpoint identity
+# - window, project, backend, task binding, per-backend shape - while the
+# missing worktree identity is the one check this record cannot pass. The
+# synthetic value never leaves this function's temp file.
+teardown_terminal_worktreeless_endpoint() {
+  local current verb shape
+  current=$(status_current_line "$STATE/$ID.status" "$TEARDOWN_META_KIND")
+  verb=$(status_line_verb "$current")
+  case "$verb" in
+    done|failed) ;;
+    *) return 1 ;;
+  esac
+  shape=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-teardown-worktreeless.XXXXXX") || return 1
+  { LC_ALL=C cat "$META" 2>/dev/null || true; printf 'worktree=leftover:fm-%s\n' "$ID"; } \
+    > "$shape"
+  if ! fm_backend_validate_task_endpoint "$shape" "$ID" >/dev/null 2>&1; then
+    rm -f "$shape"
+    return 1
+  fi
+  rm -f "$shape"
+  case "$(fm_backend_agent_state "$FM_BACKEND_VALIDATED_BACKEND" "$FM_BACKEND_VALIDATED_TARGET")" in
+    dead|missing) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # This is the first cleanup authorization check. It is metadata-only and must
 # complete before fm-guard, a backend command, file removal, branch deletion,
 # worktree return, registry change, or process termination can run.
@@ -1092,12 +1152,21 @@ T_ORCA=
 if [ "$TEARDOWN_WINDOWLESS" = 1 ]; then
   BACKEND=tmux
   T=
+elif [ "$TEARDOWN_WORKTREELESS_PENDING" = 1 ] \
+   && teardown_terminal_worktreeless_endpoint; then
+  # The carve-out's gates all held, so the record's own cleanup proceeds with
+  # no worktree identity at all: the endpoint close below still targets the
+  # exact recorded endpoint, and every slot, landed-work, and return step
+  # already skips an empty worktree.
+  TEARDOWN_WORKTREELESS=1
+  BACKEND=$FM_BACKEND_VALIDATED_BACKEND
+  T=$FM_BACKEND_VALIDATED_TARGET
 else
   fm_backend_validate_task_endpoint "$META" "$ID" || exit 1
   BACKEND=$FM_BACKEND_VALIDATED_BACKEND
   T=$FM_BACKEND_VALIDATED_TARGET
-  [ "$BACKEND" != orca ] || T_ORCA=$T
 fi
+[ "$BACKEND" != orca ] || T_ORCA=$T
 # The recorded backend, including every sibling its adapter sources, has to
 # be readable before the first destructive step. --force does not override
 # this. A forced descendant is proved in validate_firstmate_home_children_removal.
@@ -3792,6 +3861,8 @@ if [ -d "$STATE" ]; then
 fi
 if [ "$TEARDOWN_LEGACY_ACCEPTED" = 1 ]; then
   echo "teardown $ID complete (window ${T:-none}, worktree $WT, legacy record accepted without spawn_gen: endpoint $TEARDOWN_LEGACY_ENDPOINT, incarnation $TEARDOWN_META_SPAWN_GEN)"
+elif [ "$TEARDOWN_WORKTREELESS" = 1 ]; then
+  echo "teardown $ID complete (window ${T:-none}; no worktree identity on the record, so no pool slot was read, killed, reset, or returned)"
 elif teardown_owns_worktree; then
   echo "teardown $ID complete (window ${T:-none}, worktree $WT)"
 else
