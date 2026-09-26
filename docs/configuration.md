@@ -793,6 +793,18 @@ For Pi and pi-signed secondmate launches, `fm-spawn.sh` starts the selected exec
 
 For omp secondmate launches, `fm-spawn.sh` passes no `-e` at all: omp auto-discovers the home's tracked `.omp/extensions/` with no trust gate, and naming a discovered file with `-e` as well loads it twice; every omp launch instead carries the tracked `.omp/fm-worker-overlay.yml` posture overlay through `--config`, which [`fm-spawn.sh --help`](../bin/fm-spawn.sh) owns.
 
+## Codex configuration directory (config/codex-home)
+
+The optional local, gitignored `config/codex-home` selects the Codex configuration directory for workers launched from this Firstmate home, including scouts, secondmates, and relaunches.
+Create the directory and put its absolute path in that file, for example `/home/alex/.codex-firstmate`; provision the desired Codex login, MCP registrations, and skills there before launching workers.
+Project trust also lives in that directory: its `config.toml` `[projects]` trust entries must cover each dispatched repository's primary checkout (or a parent directory of it), or Codex workers stop at the directory-trust prompt before doing any work; Codex applies trust to the primary checkout a worktree belongs to, so trusting only the worktree roots (such as `~/.treehouse`) is not enough.
+Firstmate reads the setting on each launch and assigns `CODEX_HOME` directly to the Codex process, including when the worker environment allowlist is enabled.
+The setting takes precedence over the pane's ambient `CODEX_HOME` and does not depend on an interactive-shell function.
+An absent file preserves existing launches and environment inheritance; other harnesses receive no Codex assignment.
+Malformed or inaccessible settings refuse the spawn before any endpoint, worktree, or task record is created; [`fm-spawn.sh --help`](../bin/fm-spawn.sh) owns the exact file parsing and directory validation.
+The path is machine-local and is not propagated into secondmate homes; configure each home that launches Codex workers on its own machine.
+Existing processes keep their configuration directory until relaunched.
+
 ## Claude permission mode (config/claude-permission-mode)
 
 The optional local, gitignored `config/claude-permission-mode` selects the permission flag for every Claude worker launch: crewmates, scouts, Claude secondmates, and control-plane relaunches.
@@ -940,7 +952,7 @@ Choose the minimum additions for the authentication method actually in use:
 | --- | --- |
 | Provider login stored under the normal home directory | None for the environment contract; the same user still has access to that provider's stored login. |
 | Provider configured through environment variables | The exact credential and endpoint names required by that provider, for example `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`; a multi-provider tool needs each provider it will actually use. |
-| Custom provider store | Its configured location variables, such as `CODEX_HOME`, `GROK_HOME`, or `XDG_CONFIG_HOME`; Firstmate's existing explicit Claude and Muse store assignments still apply. |
+| Custom provider store | Its configured location variables, such as ambient `CODEX_HOME`, `GROK_HOME`, or `XDG_CONFIG_HOME`; Firstmate's explicit Claude, Muse, and configured [Codex directory](#codex-configuration-directory-configcodex-home) assignments survive filtering without an allowlist entry. |
 | Muse environment authentication | `META_API_KEY`, already present in the target tmux session environment; Firstmate's preflight requires the stored-login path on other backends. |
 | Git over SSH with an agent | `SSH_AUTH_SOCK`; add `GIT_SSH_COMMAND` only if the chosen transport requires that override. |
 | Git over SSH with a key file | No credential variable when normal SSH configuration selects the key; file permissions and any passphrase handling still apply. |

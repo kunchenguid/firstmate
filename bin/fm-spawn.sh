@@ -298,6 +298,15 @@
 #   This is an exec environment boundary, not a sandbox for the pane's startup
 #   shell, credential files, same-user processes, or later shell initialization.
 #   See docs/configuration.md for provider/Git setup and supported limits.
+# Codex configuration directory (config/codex-home):
+#   Optional readable regular file containing one absolute path to an existing
+#   readable directory, with an optional final newline. Spaces and shell
+#   metacharacters are literal; control characters, relative paths, empty files,
+#   and missing directories refuse the spawn before any mutation. Read on every
+#   spawn/relaunch. Codex launches alone receive a quoted CODEX_HOME assignment
+#   inside any launch-env-allowlist filter, independent of pane shell startup or
+#   daemon environment. An absent file preserves the existing launch behavior.
+#   This machine-local directory choice is not inherited into secondmate homes.
 # Claude permission mode (config/claude-permission-mode):
 #   One token selecting the permission flag every claude launch (ship, scout,
 #   secondmate, and relaunch) carries. Absent or `bypass` keeps today's
@@ -522,6 +531,30 @@ if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
     else error("expected environment names only") end
   ' "$CONFIG/launch-env-allowlist" 2>/dev/null); then
     echo "error: config/launch-env-allowlist must contain one environment name per line, blank lines, or # comments" >&2
+    exit 1
+  fi
+fi
+# Resolve the home-local Codex directory before endpoint/worktree creation.
+# Never evaluate its contents as shell syntax or expand ~ and variable names.
+CODEX_CONFIG_HOME=
+if ! CODEX_HOME_PRESENT=$(fm_config_source_present "$CONFIG/codex-home"); then
+  exit 1
+fi
+if [ "$CODEX_HOME_PRESENT" = 1 ]; then
+  if [ ! -f "$CONFIG/codex-home" ] || [ ! -r "$CONFIG/codex-home" ]; then
+    echo "error: config/codex-home must be a readable regular file containing one absolute directory path" >&2
+    exit 1
+  fi
+  if ! CODEX_CONFIG_HOME=$(jq -erRs '
+    sub("\n$"; "") |
+    if startswith("/") and (test("[\u0000-\u001f\u007f]") | not) then .
+    else error("expected one absolute directory path") end
+  ' "$CONFIG/codex-home" 2>/dev/null); then
+    echo "error: config/codex-home must contain one absolute directory path without control characters" >&2
+    exit 1
+  fi
+  if [ ! -d "$CODEX_CONFIG_HOME" ] || [ ! -r "$CODEX_CONFIG_HOME" ] || [ ! -x "$CODEX_CONFIG_HOME" ]; then
+    echo "error: config/codex-home must name an existing readable, searchable directory: $CODEX_CONFIG_HOME" >&2
     exit 1
   fi
 fi
@@ -4912,6 +4945,9 @@ if [ -n "$WORKER_ACCOUNT" ]; then
   esac
 elif [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
   LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
+fi
+if [ "$HARNESS" = codex ] && [ "$CODEX_HOME_PRESENT" = 1 ]; then
+  LAUNCH="CODEX_HOME=$(shell_quote "$CODEX_CONFIG_HOME") $LAUNCH"
 fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")

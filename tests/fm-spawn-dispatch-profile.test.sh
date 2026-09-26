@@ -1606,6 +1606,117 @@ test_non_claude_harness_ignores_claude_permission_mode() {
   pass "config/claude-permission-mode changes claude launches only"
 }
 
+# Execute the emitted command in a fresh noninteractive shell, so the assertion
+# observes the process environment rather than an assignment's source spelling.
+install_codex_home_probe() {
+  cat > "$FAKEBIN_DIR/$1" <<'SH'
+#!/bin/sh
+printf '%s\n' "${CODEX_HOME-unset}"
+SH
+  chmod +x "$FAKEBIN_DIR/$1"
+}
+
+codex_home_seen_by_launch() {
+  env -i PATH="$FAKEBIN_DIR:$PATH" HOME="$HOME_DIR/user-home" \
+    CODEX_HOME=/ambient/pane-store /bin/sh -c "$(cat "$LAUNCH_LOG")"
+}
+
+test_codex_home_reaches_process_for_every_task_kind_and_filter() {
+  local kind filter id rec out status expected seen
+  for kind in ship scout secondmate; do
+    for filter in absent enabled; do
+      id="codex-home-$kind-$filter"
+      rec=$(make_spawn_case "$id" codex "$id")
+      read_case_record "$rec"
+      # Shell syntax in a configured path must remain literal, including quotes.
+      # shellcheck disable=SC2016
+      expected="$CASE_DIR/"'codex '\'' $store $(echo injected)'
+      mkdir -p "$expected"
+      printf '%s\n' "$expected" > "$HOME_DIR/config/codex-home"
+      if [ "$filter" = enabled ]; then
+        : > "$HOME_DIR/config/launch-env-allowlist"
+      fi
+      case "$kind" in
+        ship) out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR"); status=$? ;;
+        scout) out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout); status=$? ;;
+        secondmate)
+          make_seeded_secondmate_home "$PROJ_DIR" "$id"
+          out=$(run_spawn "$HOME_DIR" "$PROJ_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --secondmate --harness codex)
+          status=$?
+          ;;
+      esac
+      expect_code 0 "$status" "$kind Codex spawn with filter=$filter should succeed: $out"
+      install_codex_home_probe codex
+      seen=$(codex_home_seen_by_launch) || fail "Codex launch command failed ($kind, $filter)"
+      [ "$seen" = "$expected" ] || fail "Codex received '$seen', expected literal '$expected' ($kind, $filter)"
+    done
+  done
+  pass "configured Codex home reaches ship, scout, and secondmate processes with and without filtering"
+}
+
+test_absent_codex_home_preserves_the_destination_environment() {
+  local id rec out status seen
+  id=codex-home-absent
+  rec=$(make_spawn_case "$id" codex "$id")
+  read_case_record "$rec"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "an unconfigured home should spawn Codex: $out"
+  install_codex_home_probe codex
+  seen=$(codex_home_seen_by_launch) || fail "unconfigured Codex launch failed"
+  [ "$seen" = /ambient/pane-store ] || fail "an absent setting overrode the pane's Codex home"
+  seen=$(env -i PATH="$FAKEBIN_DIR:$PATH" HOME="$HOME_DIR/user-home" /bin/sh -c "$(cat "$LAUNCH_LOG")")
+  [ "$seen" = unset ] || fail "an absent setting introduced a Codex home into an unset environment"
+  pass "absent Codex home preserves both ambient and unset destination environments"
+}
+
+test_codex_home_does_not_change_other_harnesses() {
+  local id rec out status seen
+  id=codex-home-claude
+  rec=$(make_spawn_case "$id" claude "$id")
+  read_case_record "$rec"
+  mkdir -p "$CASE_DIR/codex"
+  printf '%s' "$CASE_DIR/codex" > "$HOME_DIR/config/codex-home"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "Claude should still launch with a configured Codex home: $out"
+  install_codex_home_probe claude
+  seen=$(codex_home_seen_by_launch) || fail "Claude launch failed"
+  [ "$seen" = /ambient/pane-store ] || fail "a Codex-only setting changed Claude's environment"
+  pass "configured Codex home changes Codex launches only"
+}
+
+test_invalid_codex_home_refuses_before_endpoint_or_metadata() {
+  local variant id rec out status
+  for variant in empty relative multiline control nul missing-directory directory dangling-link; do
+    id="codex-home-invalid-$variant"
+    rec=$(make_spawn_case "$id" codex "$id")
+    read_case_record "$rec"
+    case "$variant" in
+      empty) : > "$HOME_DIR/config/codex-home" ;;
+      relative) printf 'relative/codex-firstmate\n' > "$HOME_DIR/config/codex-home" ;;
+      multiline) printf '%s\n\n' "$CASE_DIR" > "$HOME_DIR/config/codex-home" ;;
+      control) printf '%s\r\n' "$CASE_DIR" > "$HOME_DIR/config/codex-home" ;;
+      nul) printf '%s\000\n' "$CASE_DIR" > "$HOME_DIR/config/codex-home" ;;
+      missing-directory) printf '%s\n' "$CASE_DIR/missing" > "$HOME_DIR/config/codex-home" ;;
+      directory) mkdir "$HOME_DIR/config/codex-home" ;;
+      dangling-link) ln -s "$CASE_DIR/missing" "$HOME_DIR/config/codex-home" ;;
+    esac
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    status=$?
+    expect_code 1 "$status" "invalid Codex home ($variant) must refuse the spawn"
+    assert_contains "$out" 'config/codex-home' "refusal must identify the malformed setting"
+    [ ! -s "$LAUNCH_LOG" ] || fail "invalid Codex home launched an agent ($variant)"
+    assert_absent "$HOME_DIR/state/$id.meta" "invalid Codex home wrote task metadata ($variant)"
+  done
+  pass "invalid Codex directory settings refuse before launch or metadata"
+}
+
+test_codex_home_reaches_process_for_every_task_kind_and_filter
+test_absent_codex_home_preserves_the_destination_environment
+test_codex_home_does_not_change_other_harnesses
+test_invalid_codex_home_refuses_before_endpoint_or_metadata
+
 test_worker_launch_delivers_role_scope
 test_no_profile_keeps_claude_profile_defaults
 test_claude_launch_brief_publishes_record_doorbell

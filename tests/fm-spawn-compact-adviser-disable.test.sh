@@ -266,6 +266,8 @@ test_relaunch_rebuilds_the_switch() {
     mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects" "$dir/fake"
     touch "$home/state/.last-watcher-beat"
     [ "$setting" = absent ] || : > "$home/config/launch-env-allowlist"
+    mkdir -p "$dir/codex-config"
+    printf '%s\n' "$dir/codex-config" > "$home/config/codex-home"
     make_relaunch_stub "$dir"
     fm_git_worktree "$proj" "$wt" "wt-relaunch-$setting"
     fm_test_spawn_brief "$home" "$id"
@@ -309,8 +311,18 @@ $launch") \
       || fail "relaunch with allowlist=$setting: the replacement launch failed to run"
     assert_equals 1 "$seen" \
       "a relaunched agent with allowlist=$setting must start with the compact adviser disabled, exactly as a fresh spawn does"
+    cat > "$dir/fakebin/codex" <<'SH'
+#!/bin/sh
+printf '%s\n' "${CODEX_HOME-unset}"
+SH
+    seen=$(env -i HOME="$dir/user-home" PATH="$dir/fakebin:$PATH" \
+      CODEX_HOME=/stale/pane-store /bin/sh -c "$launch") \
+      || fail "relaunch with allowlist=$setting: the Codex directory probe failed"
+    assert_equals "$dir/codex-config" "$seen" \
+      "relaunch must read the current Codex directory setting even when the pane has a stale value"
   done
   pass "relaunch rebuilds the compact-adviser switch for the replacement agent in both allowlist postures"
+  pass "relaunch applies the current Codex home in both allowlist postures"
 }
 
 # A command-prefix assignment only covers the first simple command. A raw
