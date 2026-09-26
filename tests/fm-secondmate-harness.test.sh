@@ -956,6 +956,32 @@ SH
   pass "C9 spawn: secondmate launch pins supervision to its own harness"
 }
 
+# A secondmate pane inherits whatever environment its backend server held when
+# it started; an exported FM_ROOT naming the parent's home passes through the
+# pane verbatim, and bin/fm-wake-lib.sh honors an ambient FM_ROOT before its
+# script-dir default - so the launch prefix must pin FM_ROOT to the child's own
+# home, not merely clear the override names (observed 2026-09-21: a secondmate
+# drained the main home's wake queue because its env carried FM_ROOT=<main>).
+test_spawned_secondmate_pins_fm_root_to_its_own_home() {
+  local w sm sm_abs launchlog launch
+  w="$TMP_ROOT/spawn-fm-root-pin"
+  sm="$w/sm"
+  launchlog="$w/launch.log"
+  mkdir -p "$w/home/config"
+  printf 'codex\n' > "$w/home/config/secondmate-harness"
+  make_seeded_home "$sm" sm
+  sm_abs=$(cd "$sm" && pwd -P)
+
+  spawn_secondmate_capture "$w" sm "$sm" "$launchlog" >/dev/null 2>&1
+
+  launch=$(cat "$launchlog")
+  assert_contains "$launch" "FM_ROOT='$sm_abs'" \
+    "secondmate launch must pin FM_ROOT to its own home so a leaked ambient root cannot aim its wake/state resolution at the parent's home"
+  assert_not_contains "$launch" "FM_ROOT='$w/home'" \
+    "secondmate launch must never pin FM_ROOT to the primary home"
+  pass "C10 spawn: secondmate launch pins FM_ROOT to the child home"
+}
+
 # The harness fallback chain (secondmate-harness -> crew-harness -> own) still
 # resolves correctly with no model/effort tokens anywhere in the chain, and a
 # crew/scout (non-secondmate) launch is entirely unaffected by this feature: no
@@ -2657,6 +2683,7 @@ test_spawn_explicit_effort_overrides_secondmate_harness_token
 test_spawn_explicit_harness_does_not_inherit_secondmate_harness_tokens
 test_spawn_explicit_harness_uses_explicit_profile_axes
 test_spawned_secondmate_uses_its_harness_supervision_model
+test_spawned_secondmate_pins_fm_root_to_its_own_home
 test_spawn_fallback_chain_and_crew_scout_unaffected
 test_bootstrap_sweep_propagates_and_reconverges
 test_bootstrap_sweep_propagates_when_tracked_current
