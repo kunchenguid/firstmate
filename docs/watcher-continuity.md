@@ -445,6 +445,8 @@ It also checks that a newly appended keyed decision is classified without reread
 - The typed self-eviction failure.
 - Bounded and successor-linked lifecycle rows.
 - A SIGSTOP counterfactual that distinguishes a live PID from a stale beacon before classifying termination.
+- A dead steal mutex reclaimed in place stops at the fixed `.steal.steal` guard, never growing a third level, and an aged leftover chain from an older build does not block acquisition.
+- Two contenders racing the same dead, aged `.steal.steal` guard through an injected interleaving: exactly one reclaims it, the loser never touches the winner's guard.
 
 ### Claude auto-arm and turn-end guard
 
