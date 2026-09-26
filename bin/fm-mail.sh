@@ -111,19 +111,28 @@ IMAP_HOST="${FM_IMAP_HOST:-}"
 IMAP_PORT="${FM_IMAP_PORT:-993}"
 SMTP_HOST="${FM_SMTP_HOST:-}"
 SMTP_PORT="${FM_SMTP_PORT:-465}"
+validate_mail_port() {
+  local name=$1 value=$2 normalized=$2
+  case "$value" in
+    ''|*[!0123456789]*)
+      echo "fm-mail: $name must be an integer from 1 through 65535, got: $value" >&2
+      return 1
+      ;;
+  esac
+  while [ "${normalized#0}" != "$normalized" ]; do
+    normalized=${normalized#0}
+  done
+  if [ -z "$normalized" ] || [ "${#normalized}" -gt 5 ] || {
+    [ "${#normalized}" -eq 5 ] && [ "$normalized" -gt 65535 ];
+  }; then
+    echo "fm-mail: $name must be an integer from 1 through 65535, got: $value" >&2
+    return 1
+  fi
+  return 0
+}
 if [ "${1:-}" != afk-email ] || [ "${2:-}" != destination ]; then
-  case "$IMAP_PORT" in
-    ''|*[!0-9]*|0)
-      echo "fm-mail: FM_IMAP_PORT must be a positive integer, got: ${FM_IMAP_PORT:-}" >&2
-      exit 1
-      ;;
-  esac
-  case "$SMTP_PORT" in
-    ''|*[!0-9]*|0)
-      echo "fm-mail: FM_SMTP_PORT must be a positive integer, got: ${FM_SMTP_PORT:-}" >&2
-      exit 1
-      ;;
-  esac
+  validate_mail_port FM_IMAP_PORT "$IMAP_PORT" || exit 1
+  validate_mail_port FM_SMTP_PORT "$SMTP_PORT" || exit 1
 fi
 MAIL_MAX_WAKES="${FM_MAIL_POLL_MAX_WAKES:-20}"
 case "$MAIL_MAX_WAKES" in

@@ -2458,19 +2458,24 @@ PYEOF
   pass "fm-mail: read tolerates a None payload without crashing"
 }
 
-test_invalid_port_fails_cleanly() {
-  local out rc=0
-  out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=h FM_SMTP_HOST=h \
-    FM_IMAP_PORT=abc FM_HOME="$HOME_DIR" "$MAIL" status 2>&1) || rc=$?
-  expect_code 1 "$rc" "a non-numeric IMAP port must fail"
-  assert_contains "$out" "FM_IMAP_PORT" "invalid IMAP port names the variable"
-  assert_not_contains "$out" "ValueError" "invalid port must not leak a python traceback"
-  rc=0
-  out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=h FM_SMTP_HOST=h \
-    FM_SMTP_PORT=abc FM_HOME="$HOME_DIR" "$MAIL" status 2>&1) || rc=$?
-  expect_code 1 "$rc" "a non-numeric SMTP port must fail"
-  assert_contains "$out" "FM_SMTP_PORT" "invalid SMTP port names the variable"
-  pass "fm-mail: a non-numeric port fails cleanly in bash"
+test_ports_must_be_in_range() {
+  local name value out rc
+  for name in FM_IMAP_PORT FM_SMTP_PORT; do
+    for value in 0 65536 abc; do
+      rc=0
+      out=$(env FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=h FM_SMTP_HOST=h \
+        "$name=$value" FM_HOME="$HOME_DIR" "$MAIL" status 2>&1) || rc=$?
+      expect_code 1 "$rc" "$name=$value must fail"
+      assert_contains "$out" "$name must be an integer from 1 through 65535" "$name range error is explicit"
+      assert_not_contains "$out" "ValueError" "invalid port must not leak a python traceback"
+    done
+    for value in 1 65535; do
+      out=$(env FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=h FM_SMTP_HOST=h \
+        "$name=$value" FM_HOME="$HOME_DIR" "$MAIL" status 2>&1) \
+        || fail "$name=$value should be accepted: $out"
+    done
+  done
+  pass "fm-mail: IMAP and SMTP ports enforce the inclusive valid range"
 }
 
 test_poll_caps_wakes_per_run() {
@@ -2697,4 +2702,4 @@ test_body_preview_falls_back_from_empty_plain
 test_body_preview_tolerates_none_payload
 test_read_tolerates_none_payload
 test_read_surfaces_unfetchable_uid
-test_invalid_port_fails_cleanly
+test_ports_must_be_in_range

@@ -126,6 +126,27 @@ wait_for_file() {  # <path>
 
 
 # Pi entry requires the fixed owner destination; other harnesses keep hold-for-return.
+test_invalid_mail_ports_keep_afk_on_hold() {
+  local home out port value rc
+  for port in FM_IMAP_PORT FM_SMTP_PORT; do
+    for value in 0 65536; do
+      home=$(make_home "invalid-${port}-${value}" configured)
+      out=$(run_contract "$home" FM_TEST_HARNESS=pi "$port=$value" 2>&1) \
+        || fail "Pi entry with $port=$value failed unexpectedly: $out"
+      assert_contains "$out" 'No phone channel is configured' "$port=$value retains hold-for-return"
+      assert_not_contains "$out" 'email reach active' "$port=$value does not announce email reach"
+      [ "$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$REPO/bin/fm-afk-contract.sh" field reach_channels)" = none ] \
+        || fail "$port=$value selected email reach"
+      rc=0
+      out=$(env FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.example.test \
+        FM_SMTP_HOST=smtp.example.test FM_AFK_EMAIL_TO="$AFK_OWNER_EMAIL" \
+        "$port=$value" python3 "$REPO/bin/fm-afk-email.py" configured 2>&1) || rc=$?
+      [ "$rc" -ne 0 ] || fail "AFK shared configuration accepted $port=$value"
+    done
+  done
+  pass "invalid IMAP or SMTP ports keep Pi away mode on hold-for-return"
+}
+
 test_destination_is_required_for_pi_entry() {
   local home out
   home=$(make_home missing-destination)
@@ -1420,6 +1441,7 @@ SH
 
 test_destination_is_required_for_pi_entry
 # The active feature is tested with synthetic mail and a local fake SMTP command; no network or mailbox is used.
+test_invalid_mail_ports_keep_afk_on_hold
 test_batched_mail_redacts_secrets_and_replies_are_item_bound
 test_unreadable_token_state_keeps_reply_retryable
 test_unmatched_reply_request_id_is_untrusted_and_ackable

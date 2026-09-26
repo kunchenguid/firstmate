@@ -49,11 +49,22 @@ SECRET_ENV_RE = re.compile(
 )
 
 
+def valid_mail_port(value):
+    if not value.isascii() or not value.isdigit():
+        return False
+    normalized = value.lstrip("0")
+    return bool(normalized) and (
+        len(normalized) < 5 or len(normalized) == 5 and normalized <= "65535"
+    )
 
 
 def mail_configuration():
     required = ["FM_MAIL_USER", "FM_MAIL_PASS", "FM_IMAP_HOST", "FM_SMTP_HOST"]
     if any(not os.environ.get(name) for name in required):
+        return None
+    if not valid_mail_port(os.environ.get("FM_IMAP_PORT", "993")) or not valid_mail_port(
+        os.environ.get("FM_SMTP_PORT", "465")
+    ):
         return None
     recipient = os.environ.get("FM_AFK_EMAIL_TO", "").strip()
     addresses = getaddresses([recipient])
