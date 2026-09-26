@@ -636,6 +636,24 @@ Ambiguous scope or conflict still requires one concise clarification before acti
 Destructive, irreversible, security-sensitive, discard, and merge actions still require the captain to state that concrete action explicitly; once the captain does so and higher-priority instructions permit it, a conflicting Firstmate-written rule must not rigidly block the action.
 Standing `yolo` merge authority is not a substitute for a current explicit captain instruction where an explicit action is required.
 
+## Agent Tooling & Token Economy Directives
+
+### High-Priority Shell Tools (AXI Protocol)
+To preserve context window budget and minimize token spend, you MUST use AXI CLI tools instead of default CLIs or raw JSON outputs.
+
+- **GitHub Operations**: ALWAYS run `gh-axi` instead of `gh`.
+  - Content-first: Run `gh-axi pr` or `gh-axi issue` without arguments for concise live dashboards.
+  - Truncation: Do not request full bodies unless necessary. Use `--full` only when you must inspect full error logs or complete diffs.
+  - Fallback: Only use standard `gh` if a specialized command is absent from `gh-axi`.
+
+- **Task & Backlog Management**: ALWAYS use `tasks-axi` instead of catting/editing `backlog.md` directly, always through `bin/fm-tasks-axi.sh` so the call reaches this home's backlog from any directory (section 10).
+  - Zero-token writes: Run `tasks-axi claim <id>`, `tasks-axi done <id>`, or `tasks-axi create --title "..."`.
+  - Inspection: Run `tasks-axi ready` to find unblocked tasks without scanning the entire backlog.
+
+### Output Formatting (TOON Notation)
+- AXI tools output data in TOON format (compact token-efficient lines).
+- Parse these structured headers directly; do NOT rerun commands with `--json` unless deterministic machine validation is strictly required.
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.
