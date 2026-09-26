@@ -81,7 +81,7 @@ case "${1:-}" in
           printf 'zsh' > "$D/command"
           [ -z "${FM_FAKE_EXIT_TRANSPORT_FAIL_AFTER_STOP:-}" ] || exit 1
           ;;
-        *'encode launch-brief'*)
+        *'encode launch-brief'* | *'Firstmate operational input waiting: read'*)
           cat "$D/becomes" > "$D/command"
           [ -z "${FM_FAKE_LAUNCH_TRANSPORT_FAIL_AFTER_START:-}" ] || exit 1
           ;;
@@ -385,7 +385,7 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
   [ "$(journal_field "$dir" rl1 phase)" = complete ] \
     || fail "the transaction journal should end complete"
   assert_grep "/exit" "$dir/fake/literal" "the previous agent should have been exited"
-  assert_grep "encode launch-brief" "$dir/fake/literal" "the replacement should have been launched"
+  assert_grep "Firstmate operational input waiting: read" "$dir/fake/literal" "the replacement should have been launched"
   pass "fm-control relaunch: a same-harness relaunch replaces the agent in the same endpoint and worktree"
 }
 
@@ -866,7 +866,7 @@ test_wiring_removal_failure_refuses_before_replacement_arm() {
   assert_contains "$out" "could not retire claude wiring" \
     "the failure should identify prior wiring cleanup"
   [ -e "$hook" ] || fail "the fixture should retain the undeletable prior hook"
-  assert_no_grep "encode launch-brief" "$dir/fake/literal" \
+  assert_no_grep "Firstmate operational input waiting: read" "$dir/fake/literal" \
     "replacement launch must not be armed after wiring cleanup fails"
   [ "$(journal_field "$dir" rl29 phase)" = failed:launching ] \
     || fail "the transaction should record the partial launch failure"
@@ -2004,7 +2004,7 @@ case "${1:-} ${2:-}" in
       ". '"*"'") staged=${payload#". '"}; staged=${staged%"'"}; [ ! -f "$staged" ] || payload=$(cat "$staged") ;;
     esac
     case "$payload" in
-      *'encode launch-brief'*) : > "$D/herdr-agent-live" ;;
+      *'encode launch-brief'* | *'Firstmate operational input waiting: read'*) : > "$D/herdr-agent-live" ;;
     esac
     exit 0 ;;
   'workspace list')

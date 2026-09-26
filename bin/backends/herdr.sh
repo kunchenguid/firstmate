@@ -2997,9 +2997,15 @@ fm_backend_herdr_send_text_line() {  # <target> <text>
 # caller sends Enter separately. Mirrors tmux's `send-keys -t T -l text`.
 # Verified: `pane send-text` does NOT auto-submit (contrary to the addendum's
 # original guess); it behaves exactly like tmux's `-l` literal send.
+# The text is one CLI argument, so Linux refuses to exec any text above
+# 131,071 bytes (MAX_ARG_STRLEN, "Argument list too long"); a failed send
+# replays that stderr, or herdr's own, for the caller.
 fm_backend_herdr_send_literal() {  # <target> <text>
+  local err rc=0
   fm_backend_herdr_target_ready "$1" || return 1
-  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane send-text "$FM_BACKEND_HERDR_PANE" "$2" >/dev/null 2>&1
+  err=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane send-text "$FM_BACKEND_HERDR_PANE" "$2" 2>&1 >/dev/null) || rc=$?
+  [ "$rc" -eq 0 ] || [ -z "$err" ] || printf '%s\n' "$err" >&2
+  return "$rc"
 }
 
 # fm_backend_herdr_normalize_key: map firstmate's key vocabulary (Enter,

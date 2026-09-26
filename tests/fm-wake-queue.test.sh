@@ -253,9 +253,16 @@ foreign_stall_watch_leg() {  # <dir> <leg> <now> [observation]
       sleep 0.1
       i=$((i + 1))
     done
-    ! is_live_non_zombie "$pid" || kill -TERM "$pid" 2>/dev/null || true
+    # This leg tests the queue observation, not watcher shutdown/recovery.
+    # TERM can leave bash waiting in a child on some runners; stop the owned
+    # fixture process and clear only its watcher lifecycle state before the
+    # next leg starts against the same queue and progress marker.
+    ! is_live_non_zombie "$pid" || kill -KILL "$pid" 2>/dev/null || true
   fi
   wait_for_exit "$pid" 600 || true
+  if [ -n "$observation" ]; then
+    rm -rf -- "$dir/state/.watch.lock" "$dir/state/.watcher-down"
+  fi
   if [ -n "$observation" ]; then
     [ "$(cat "$marker" 2>/dev/null || true)" = "$observation" ] \
       || fail "watcher leg $leg did not record observation '$observation': $(cat "$marker" 2>/dev/null)"
@@ -1428,6 +1435,46 @@ test_main_drain_excludes_rows_already_granted_to_branch() {
   [ ! -e "$state/.branch-eligible-rows" ] || fail "branch acknowledgement retained its completed grant"
 
   pass "main drain and acknowledgement exclude an active branch grant"
+}
+
+# The away posture lets a branch grant name a check-kind row, so the branch
+# ack must close the same publish-before-receipt crash window the main ack
+# does: consuming a secondmate-wake-loop row commits its stall receipt under
+# exactly the granted sequences, keeping a later stall tick from re-alerting a
+# consumed notification.
+test_branch_ack_commits_secondmate_stall_receipts() {
+  local dir state epoch sequence generation receipt
+  dir=$(make_case secondmate-branch-stall)
+  state="$dir/state"
+  epoch=$(( $(date +%s) - 10 ))
+  append_wake "$state" check "secondmate-wake-loop-mate-$epoch-7" \
+    "check: secondmate wake-loop stalled: mate=mate row=7 idle=2s" \
+    || fail "could not seed the stall publication"
+  append_wake "$state" check "secondmate-wake-loop-mate-$epoch-9" \
+    "check: secondmate wake-loop stalled: mate=mate row=9 idle=3s" \
+    || fail "could not seed the ungranted stall publication"
+
+  FM_STATE_OVERRIDE="$state" "$GRANT" activate "$$" branch-stall \
+    || fail "branch owner activation failed"
+  FM_STATE_OVERRIDE="$state" "$GRANT" publish branch-stall 1 \
+    || fail "branch grant publication failed"
+
+  FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" > "$dir/branch.out" 2> "$dir/branch.err" \
+    || fail "branch drain failed: $(cat "$dir/branch.err")"
+  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$dir/branch.err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/branch.err")
+  [ -n "$sequence" ] && [ -n "$generation" ] || fail "branch drain omitted its acknowledgement boundary"
+  FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" \
+    --ack-through "$sequence" --recovery-generation "$generation" \
+    || fail "branch acknowledgement failed"
+
+  receipt="$state/.secondmate-wake-stall-receipts/mate/$epoch-7"
+  [ "$(cat "$receipt" 2>/dev/null || true)" = "$epoch-7" ] \
+    || fail "branch acknowledgement did not commit the consumed stall row's receipt"
+  receipt="$state/.secondmate-wake-stall-receipts/mate/$epoch-9"
+  [ ! -e "$receipt" ] \
+    || fail "branch acknowledgement committed a stall receipt for a row outside its grant"
+  pass "a branch-actor acknowledgement commits secondmate stall receipts for exactly its granted rows"
 }
 
 # The pending-warning condition and what a drain can actually present must name
@@ -2757,6 +2804,9 @@ make_secondmate_liveness_case() {
   home="$TMP_ROOT/$name-mate"
   mkdir -p "$dir/state" "$dir/config" "$dir/data" "$fakebin" \
     "$home/bin" "$home/data" "$home/state" "$home/config" "$home/projects"
+  # A secondmate home is a git checkout: the AI-trailer strip hook refuses a
+  # launch whose worktree is not git.
+  git init -q -b main "$home"
   printf 'sm1\n' > "$home/.fm-secondmate-home"
   printf '# Firstmate\n' > "$home/AGENTS.md"
   printf 'charter\n' > "$home/data/charter.md"
@@ -2907,6 +2957,7 @@ test_secondmate_liveness_tick_relaunches_every_dead_mate_before_waking() {
   state="$dir/state"
   home="$TMP_ROOT/liveness-several-mate2"
   mkdir -p "$home/bin" "$home/data" "$home/state" "$home/config" "$home/projects"
+  git init -q -b main "$home"
   printf 'sm2\n' > "$home/.fm-secondmate-home"
   printf '# Firstmate\n' > "$home/AGENTS.md"
   printf 'charter\n' > "$home/data/charter.md"
@@ -3107,6 +3158,7 @@ test_secondmate_liveness_tick_error_keeps_scanning_and_wakes() {
   state="$dir/state"
   home="$TMP_ROOT/liveness-mid-error-mate2"
   mkdir -p "$home/bin" "$home/data" "$home/state" "$home/config" "$home/projects"
+  git init -q -b main "$home"
   printf 'sm2\n' > "$home/.fm-secondmate-home"
   printf '# Firstmate\n' > "$home/AGENTS.md"
   printf 'charter\n' > "$home/data/charter.md"
@@ -3266,6 +3318,7 @@ test_enrichment_preserves_all_unread_lines_and_status_file_failures
 test_slow_annotation_does_not_block_append_and_deleted_file_fails_open
 test_branch_actor_scoped_ack_never_swallows_a_main_owned_row
 test_main_drain_excludes_rows_already_granted_to_branch
+test_branch_ack_commits_secondmate_stall_receipts
 test_main_is_never_told_to_drain_rows_only_the_branch_owns
 test_uncountable_queue_still_raises_the_pending_alarm
 test_unconsumable_rows_are_retired_instead_of_wedging_the_queue
