@@ -715,6 +715,28 @@ test_non_signature_fetch_failure_is_not_retried() {
   pass "a non-packed-refs.lock fetch failure keeps today's behavior (no retry)"
 }
 
+# The refresh hook belongs only to the running Firstmate code root, never to an
+# ordinary project that happens to ship an executable under the same filename.
+test_project_cannot_supply_poll_refresh_hook() {
+  local home clone work out
+  home=$(new_home)
+  clone=$(build_pair "$home" foreignhook)
+  work="$home/work-foreignhook"
+  mkdir "$work/bin"
+  printf '#!/usr/bin/env bash\ntouch "%s"\n' "$home/hook-executed" > "$work/bin/fm-pr-poll-refresh.sh"
+  chmod +x "$work/bin/fm-pr-poll-refresh.sh"
+  git -C "$work" add bin
+  git -C "$work" commit -qm add-untrusted-hook
+  git -C "$work" push -q origin main
+  out=$(run_sync "$home" foreignhook)
+  assert_contains "$out" 'foreignhook: synced' 'ordinary project still syncs'
+  [ "$(head_sha "$clone")" = "$(head_sha "$work")" ] || fail "ordinary project did not advance"
+  [ ! -e "$home/hook-executed" ] || fail "fleet sync executed a project-provided hook"
+  pass "ordinary project clones cannot supply merge-poll update hooks"
+}
+
+test_project_cannot_supply_poll_refresh_hook
+
 test_detached_clean_ancestor_recovers
 test_detached_unique_commit_is_stuck_untouched
 test_detached_clean_ancestor_with_diverged_local_default_is_stuck_untouched
