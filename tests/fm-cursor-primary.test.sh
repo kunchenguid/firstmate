@@ -130,6 +130,20 @@ printf 'stale: fixture-win late\n'
 exit 0
 SH
       ;;
+    continuity)
+      cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${FM_WATCH_CONTINUITY_REARM:-unset}" > "$FM_HOME/state/continuity-rearm"
+printf '%s\n' "$$" >> "$FM_HOME/state/arm-ran"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+if [ "${FM_WATCH_CONTINUITY_REARM:-0}" != 1 ]; then
+  printf 'check: rearm-resurface\n'
+  exit 0
+fi
+printf 'check: fixture-real\n'
+exit 0
+SH
+      ;;
   esac
   chmod +x "$dir/bin/fm-watch-arm.sh"
 }
@@ -274,6 +288,22 @@ test_park_silent_when_nothing_in_flight() {
   [ -z "$out" ] || fail "the park emitted a follow-up with nothing in flight: $out"
   [ ! -e "$dir/state/arm-ran" ] || fail "the park armed with nothing to supervise"
   pass "cursor park: silent no-op when no supervision is needed"
+}
+
+test_park_passes_continuity_rearm_to_the_arm() {
+  local dir out body
+  dir=$(make_primary_dir "$TMP_ROOT/park-continuity")
+  : > "$dir/state/task1.meta"
+  write_arm_fixture "$dir" continuity
+  out=$(run_park "$dir")
+  [ "$(cat "$dir/state/continuity-rearm" 2>/dev/null || true)" = 1 ] \
+    || fail "the park's arm did not observe the continuity re-arm switch: $(cat "$dir/state/continuity-rearm" 2>/dev/null || true)"
+  [ "$(kind_of_followup "$out")" = watcher ] \
+    || fail "a real check from the parked arm must still arrive as a follow-up, got: $out"
+  body=$(followup_of "$out")
+  case "$body" in *'check: fixture-real'*) ;; *) fail "the real check was not carried into the follow-up: $body" ;; esac
+  case "$body" in *'check: rearm-resurface'*) fail "the park delivered a manufactured recovery resurface: $body" ;; esac
+  pass "cursor park: the parked arm observes the continuity re-arm switch, and a real check still follows up"
 }
 
 test_park_delivers_actionable_wake_as_followup() {
@@ -777,6 +807,7 @@ test_pretool_guards_deduplicate_and_render_cursor_deny
 test_cd_guard_renders_cursor_deny
 test_park_silent_when_nothing_in_flight
 test_park_delivers_actionable_wake_as_followup
+test_park_passes_continuity_rearm_to_the_arm
 test_park_never_exits_two
 test_park_repair_nag_is_bounded
 test_park_repair_nag_requires_a_persisted_budget

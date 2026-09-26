@@ -323,12 +323,15 @@ while [ "$attempt" -lt "$ARM_ATTEMPTS" ]; do
   current_session_still_ours || exit 0
   attempt=$((attempt + 1))
   ARM_OUT=$(mktemp "$STATE/.cursor-park-output.XXXXXX") || ARM_OUT=
+  # The park's watcher arm is a continuity re-arm (FM_WATCH_CONTINUITY_REARM).
+  # docs/watcher-continuity.md owns why that start is not a new down stretch.
+  # The supervision host path is unchanged.
   if [ "$HOST_MODE" -eq 1 ]; then
     FM_SUPERVISION_HOST_PRIMARY=cursor "$SCRIPT_DIR/fm-supervision-host.sh" park >"${ARM_OUT:-/dev/null}" 2>&1 &
   elif [ -n "$ARM_OUT" ]; then
-    "$SCRIPT_DIR/fm-watch-arm.sh" >"$ARM_OUT" 2>&1 &
+    FM_WATCH_CONTINUITY_REARM=1 "$SCRIPT_DIR/fm-watch-arm.sh" >"$ARM_OUT" 2>&1 &
   else
-    "$SCRIPT_DIR/fm-watch-arm.sh" >/dev/null 2>&1 &
+    FM_WATCH_CONTINUITY_REARM=1 "$SCRIPT_DIR/fm-watch-arm.sh" >/dev/null 2>&1 &
   fi
   ARM_PID=$!
   while kill -0 "$ARM_PID" 2>/dev/null; do
