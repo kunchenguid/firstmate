@@ -33,7 +33,7 @@ fm_git_identity fmtest fmtest@example.com
 TMP_ROOT=$(fm_test_tmproot fm-secondmate-restart)
 mkdir -p "$TMP_ROOT"
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd -P)
-trap 'rm -rf -- "$TMP_ROOT"' EXIT
+trap 'fm_test_remove_tree "$TMP_ROOT"' EXIT
 
 # A session-provider stub that models the two things this pass depends on: the
 # harness exit command stops the agent, a launch brief starts the replacement,
@@ -76,6 +76,7 @@ case "${1:-}" in
             : > "$D/local-relaunch-during-remote"
           fi
           printf 'zsh' > "$D/command.$target"
+          [ ! -x "$D/on-exit" ] || "$D/on-exit"
           ;;
         *'encode launch-brief'* | *'Firstmate operational input waiting: read'*) cat "$D/becomes" > "$D/command.$target" ;;
         ': Firstmate instruction waiting: list '*)
@@ -281,6 +282,38 @@ test_persist_gates_and_asks_only_for_open_records() {
   assert_contains "$request" "Do NOT run the memory, learnings, or captain-preference sweeps" \
     "the request must exclude the memory curation half of stow"
   pass "T1 persist is a gate, and asks for open records and task status only"
+}
+
+# Hold a real restart between exit and replacement while the public watcher
+# performs its liveness tick against the now agent-free endpoint.
+test_liveness_yields_to_restart() {
+  local dir rc=0 out
+  dir=$(new_case liveness-restart)
+  add_local_mate "$dir" sm1
+  arm_answer "$dir" sm1
+  cat > "$dir/fake/on-exit" <<SH
+#!/usr/bin/env bash
+FM_POLL=1 FM_HEARTBEAT=999999 FM_SECONDMATE_LIVENESS_SECS=1 \
+  FM_STATE_OVERRIDE='$dir/home/state' '$ROOT/bin/fm-watch.sh' \
+  > '$dir/watch.out' 2> '$dir/watch.err' &
+pid=\$!
+for i in \$(seq 1 100); do
+  [ ! -e '$dir/home/state/.secondmate-liveness-tick' ] || break
+  /bin/sleep 0.1
+done
+/bin/sleep 2
+kill "\$pid" 2>/dev/null || true
+wait "\$pid" 2>/dev/null || true
+SH
+  chmod +x "$dir/fake/on-exit"
+  out=$(run_restart "$dir" sm1) || rc=$?
+  expect_code 0 "$rc" "restart should complete while the liveness tick defers"$'\n'"$out"
+  [ -e "$dir/home/state/.secondmate-liveness-tick" ] || fail "watcher never ran its liveness tick"
+  [ ! -e "$dir/home/state/.secondmate-relaunch-sm1" ] \
+    || fail "liveness raced the restart and consumed a recovery attempt: $(cat "$dir/watch.out" "$dir/watch.err")"
+  assert_not_contains "$(cat "$dir/watch.out" "$dir/watch.err")" 'auto-relaunch failed' "deferral must not report a false failure"
+  [ ! -d "$dir/home/state/.secondmate-liveness-sm1.lock" ] || fail "restart leaked its liveness lock"
+  pass "liveness yields to an in-progress public restart without attempting a competing spawn"
 }
 
 # --- T2: persist THEN restart, in that order --------------------------------
@@ -848,6 +881,7 @@ test_already_current_unprovable_mate_stays_on_the_nudge_path() {
 }
 
 test_persist_gates_and_asks_only_for_open_records
+test_liveness_yields_to_restart
 test_persist_precedes_restart
 test_arrived_answer_precedes_deadline_check
 test_answer_between_resolution_and_timeout_wins

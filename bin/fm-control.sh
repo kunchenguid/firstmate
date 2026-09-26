@@ -740,7 +740,7 @@ do_exit() {
       refuse_blocking_prompt "$dialog"
     fi
   fi
-  state=$(wait_agent_state "$EXIT_WAIT" dead) || {
+  state=$(wait_agent_state "$EXIT_WAIT" dead missing) || {
     # A submit can return before any read sees the picker: a native busy
     # verdict needs no composer read, and a cleared composer can be read
     # before the picker renders. Read the screen once more here.
@@ -751,6 +751,18 @@ do_exit() {
     fi
     die "exit-delivered $ID interrupt=$interrupt_result exit-command=delivered agent-state=$state exit=unconfirmed; the agent did not stop within ${EXIT_WAIT}s"
   }
+  if [ "$state" = missing ]; then
+    absence=$(fm_control_endpoint_absence_verdict "$BACKEND" "$T")
+    case "${absence%%$'\t'*}" in
+      gone)
+        retire_busy_incarnation
+        printf 'endpoint-gone'
+        return 0
+        ;;
+      dead) ;;
+      *) die "task $ID's endpoint disappeared after exit delivery, but ${absence#*$'\t'}; the agent's exit remains unconfirmed" ;;
+    esac
+  fi
   # The incarnation is over: retire its busy wiring so no stale record or
   # orphaned generation survives the agent that produced it.
   retire_busy_incarnation
