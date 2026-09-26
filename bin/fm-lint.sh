@@ -58,7 +58,7 @@
 # process runs under an enforced envelope: a wall deadline
 # (FM_LINT_ROOT_SECONDS, default 1200), a terminate-then-kill cleanup grace
 # (FM_LINT_ROOT_GRACE, default 5), and a per-process address-space limit
-# (FM_LINT_ROOT_MEMORY_KIB, default 8388608 = 8 GiB of virtual address
+# (FM_LINT_ROOT_MEMORY_KIB, default 12582912 = 12 GiB of virtual address
 # space per analysis process). The sizing rationale and RSS reduction threshold
 # live beside ROOT_MEMORY_KIB below. This is not a resident-memory ceiling;
 # check aggregate runner RSS in CI. The watchdog uses the shared
@@ -873,23 +873,22 @@ fi
 # ShellCheck process, unbounded, for local developer lint.
 ROOT_SECONDS=${FM_LINT_ROOT_SECONDS:-1200}
 ROOT_GRACE=${FM_LINT_ROOT_GRACE:-5}
-# 8 GiB of virtual address space per analysis process. ulimit -v caps
-# address space, not resident memory, and ShellCheck's GHC runtime keeps
-# about a third of that space as reservation, so an 8 GiB cap yields about
-# 5.3 GiB of usable heap per root. Measured on Linux during this change:
-# a 4 GiB cap left only about 2.7 GiB of working memory and eleven real
-# canonical roots ran out of memory under it; x86_64 then measured hungrier
-# than aarch64, so under a 6 GiB cap seven roots stopped at its ~4.0 GiB
-# usable wall while the largest passing root peaked near 3.9 GiB resident.
-# Address-space caps do not bound aggregate resident use, but two
-# concurrent roots at ~5.3 GiB usable each is ~10.7 GiB worst-case resident,
-# which fits inside the 16 GiB runner with its own footprint: a root that
-# exceeds the cap fails by name instead of growing until the runner dies.
+# 12 GiB of virtual address space per analysis process. ulimit -v caps
+# address space, not resident memory; ShellCheck's GHC runtime reserves about
+# a third of that space, leaving ~8 GiB usable heap per root. Measured x86_64
+# demand for the heaviest roots is near 5.5-6 GiB: the 8 GiB address-space
+# cap's ~5.33 GiB wall caught bin/fm-spawn.sh, bin/fm-teardown.sh,
+# tests/fm-pending-reply.test.sh, and
+# tests/fm-launch-prompt-signals-live-e2e.test.sh. CI runs one root per
+# lint job, so worst-case resident demand is ~8 GiB plus runner overhead,
+# inside the 16 GiB runner. Local lint defaults to two workers; two such
+# caps allow ~16 GiB resident plus host overhead, so use FM_LINT_JOBS=1 on
+# smaller local machines. A root that exceeds its cap fails by name.
 # Never disable, narrow, or redirect source-following to fit a root under
 # the cap. The roots sidecar records each root's peak RSS; roots peaking
 # above about 3 GiB resident are reduction candidates,
 # bin/fm-pending-reply-lib.sh first (its separate dedup fix is PR 5753).
-ROOT_MEMORY_KIB=${FM_LINT_ROOT_MEMORY_KIB:-8388608}
+ROOT_MEMORY_KIB=${FM_LINT_ROOT_MEMORY_KIB:-12582912}
 for bound_pair in \
   "FM_LINT_ROOT_SECONDS=$ROOT_SECONDS" \
   "FM_LINT_ROOT_GRACE=$ROOT_GRACE" \

@@ -57,6 +57,7 @@ jobs:
           # Fail closed rather than lint uncapped when a configured per-root
           # bound (wall deadline or memory rlimit) cannot be enforced here.
           FM_LINT_REQUIRE_BOUNDS: '1'
+          FM_LINT_JOBS: '1'
         run: |
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-lint"

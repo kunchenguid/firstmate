@@ -1694,7 +1694,7 @@ test_pinned_shellcheck_memory_limit() {
   [ "$rc" -eq 0 ] || fail "pinned ShellCheck did not lint under the default memory limit"$'\n'"$out"
   grep -q $'^meta\tbounds_enforced\t1$' "$roots_log" \
     || fail "the sidecar did not record enforced bounds"
-  grep -q $'^meta\troot_memory_limit_kib\t8388608$' "$roots_log" \
+  grep -q $'^meta\troot_memory_limit_kib\t12582912$' "$roots_log" \
     || fail "the sidecar did not record the applied memory limit"
   awk -F '\t' '$1 == "end" && $3 ~ /small\.sh$/ && $10 == "ok" { found=1 } END { exit !found }' \
     "$roots_log" || fail "the pinned root did not complete ok under the memory limit"
