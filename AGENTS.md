@@ -190,6 +190,7 @@ A lock-refused session must not spawn, steer, merge, drain the wake queue, repai
 The digest itself makes no external-network call and never waits for one.
 Every network check a session start owes - GitHub auth, dead-secondmate relaunch, secondmate convergence, pending handoff delivery, and project clone refresh - runs off the digest's blocking path in a bounded worker owned by `bin/fm-startup-network.sh` and is reported in the digest's own `NETWORK CHECKS` section.
 The locked startup inactive-outcome scan joins that worker so a slow local current-state read cannot block the digest; its findings use the ordinary durable wake queue.
+The locked worker also runs the report-only inventory of pool slots and processes that no current task record names; it never signals or cleans anything itself.
 When that section reports its checks still in progress it names exactly what is unconfirmed; treat none of those as passed until `bin/fm-startup-network.sh report` returns the finished result, while a failed or otherwise actionable result also arrives as a `check: startup-network` wake.
 
 1. **Lock** - acquires the per-home session lock first, before anything mutates shared state, then starts the deferred startup stage above.
@@ -595,7 +596,7 @@ The skill owns the guarded fleet update and restart procedure; it never touches 
 
 These skills are not captain-invocable; load them only at their precise triggers.
 
-- `bootstrap-diagnostics` - load whenever the session-start digest's bootstrap or network-checks section prints an actionable diagnostic line (`MISSING:`, `MISSING_MANUAL:`, `PRESENTATION_UNAVAILABLE:`, `BACKEND_INVALID:`, `NEEDS_GH_AUTH`, `TANGLE:`, `STARTUP_MEMORY_BUDGET:`, `CREW_DISPATCH: invalid`, `FLEET_SYNC:`, `NETWORK_CHECKS:`, `HOME_SUMMARY:`, `BACKLOG_RECONCILE:`, `SECONDMATE_SYNC:`, `SECONDMATE_LIVENESS:`, `SECONDMATE_HANDOFF:`, `NUDGE_SECONDMATES:`, or `FMX:`), or when `BOOTSTRAP_INFO:` says an interrupted backlog cleanup may have left an endpoint or local copy; silence and other `BOOTSTRAP_INFO:` facts need no load.
+- `bootstrap-diagnostics` - load whenever the session-start digest's bootstrap or network-checks section prints an actionable diagnostic line (`MISSING:`, `MISSING_MANUAL:`, `PRESENTATION_UNAVAILABLE:`, `BACKEND_INVALID:`, `NEEDS_GH_AUTH`, `TANGLE:`, `STARTUP_MEMORY_BUDGET:`, `CREW_DISPATCH: invalid`, `FLEET_SYNC:`, `NETWORK_CHECKS:`, `HOME_SUMMARY:`, `BACKLOG_RECONCILE:`, `SECONDMATE_SYNC:`, `SECONDMATE_LIVENESS:`, `SECONDMATE_HANDOFF:`, `NUDGE_SECONDMATES:`, `ORPHAN_PROCESS:`, `ORPHAN_SLOT:`, or `FMX:`), or when `BOOTSTRAP_INFO:` says an interrupted backlog cleanup may have left an endpoint or local copy; silence and other `BOOTSTRAP_INFO:` facts need no load.
 - `diagnostic-reasoning` - load before scoping a reported bug and before acting on a diagnostic report.
 - `ask-user-authority` - load before deciding any ask-user finding.
 - `quota-array-dispatch` - load before choosing among a matched crew-dispatch profile array from current quota-axi default TOON.
