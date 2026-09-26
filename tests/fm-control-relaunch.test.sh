@@ -2188,6 +2188,12 @@ test_herdr_exit_reports_already_stopped_when_the_pane_outlived_its_server() {
     return 0
   }
   dir=$HERDR_CASE_DIR
+  # missing -> dead: the endpoint was only unreachable and is there after all,
+  # holding no agent. That is do_exit's second already-stopped early return.
+  bash "$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" rl72 >/dev/null 2>&1 \
+    || fail "could not arm a busy incarnation for the herdr already-stopped exit case"
+  [ -f "$dir/home/state/rl72.busy-state" ] || fail "arming did not write a busy record"
+  [ -f "$dir/home/state/rl72.busy-gen" ] || fail "arming did not write a busy generation"
 
   out=$(run_control "$dir" rl72 exit) || rc=$?
   expect_code 0 "$rc" "a pane that outlived its stopped server holds no agent, which is success"$'\n'"$out"
@@ -2197,7 +2203,40 @@ test_herdr_exit_reports_already_stopped_when_the_pane_outlived_its_server() {
     "a pane that survived its server's restart was never gone"
   [ "$(meta_field "$dir" rl72 window)" = 'fmlab:%7' ] \
     || fail "exit must leave the recorded endpoint exactly as it found it"
-  pass "fm-control exit: a herdr pane that outlived its stopped server is already-stopped, not gone"
+  [ ! -e "$dir/home/state/rl72.busy-state" ] \
+    || fail "a herdr already-stopped exit left the task recorded busy with no agent behind it"
+  [ ! -e "$dir/home/state/rl72.busy-gen" ] \
+    || fail "a herdr already-stopped exit left an orphaned busy generation"
+  pass "fm-control exit: a herdr pane that outlived its stopped server is already-stopped, not gone, and stops pinging busy"
+}
+
+# missing -> gone: the pane did not survive, so do_exit's endpoint-gone early
+# return is the postcondition. Same busy-wiring trap as the already-stopped
+# paths: a success that reports the agent gone and leaves the incarnation
+# armed keeps the task classifying busy with nothing behind it.
+test_herdr_exit_reports_endpoint_gone_and_retires_busy_wiring() {
+  local dir out rc=0
+  herdr_case_or_skip gone-herdr-exit-busy rl78 fmlab '%none' || {
+    echo "skip - herdr exit needs jq (the herdr adapter parses JSON with it)"
+    return 0
+  }
+  dir=$HERDR_CASE_DIR
+  bash "$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" rl78 >/dev/null 2>&1 \
+    || fail "could not arm a busy incarnation for the endpoint-gone exit case"
+  [ -f "$dir/home/state/rl78.busy-state" ] || fail "arming did not write a busy record"
+  [ -f "$dir/home/state/rl78.busy-gen" ] || fail "arming did not write a busy generation"
+
+  out=$(run_control "$dir" rl78 exit) || rc=$?
+  expect_code 0 "$rc" "a destroyed herdr pane is gone, which is success"$'\n'"$out"
+  assert_contains "$out" "endpoint-gone" \
+    "a pane that did not survive its server is gone, not already-stopped"
+  assert_not_contains "$out" "already-stopped" \
+    "exit must not report already-stopped when the endpoint did not survive"
+  [ ! -e "$dir/home/state/rl78.busy-state" ] \
+    || fail "an endpoint-gone exit left the task recorded busy with no agent behind it"
+  [ ! -e "$dir/home/state/rl78.busy-gen" ] \
+    || fail "an endpoint-gone exit left an orphaned busy generation"
+  pass "fm-control exit: a gone herdr endpoint retires busy wiring, not just reports endpoint-gone"
 }
 
 test_herdr_rebind_stays_in_the_recorded_session() {
@@ -2450,6 +2489,7 @@ test_reclaim_refuses_an_unreadable_endpoint
 test_herdr_relaunch_resumes_only_the_registered_pi_session
 test_herdr_reclaim_adopts_a_pane_that_outlived_its_server
 test_herdr_exit_reports_already_stopped_when_the_pane_outlived_its_server
+test_herdr_exit_reports_endpoint_gone_and_retires_busy_wiring
 test_herdr_rebind_stays_in_the_recorded_session
 test_herdr_reclaim_refuses_an_agent_that_came_back
 test_herdr_reclaim_keeps_the_task_whole

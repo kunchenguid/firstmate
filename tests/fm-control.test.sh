@@ -778,6 +778,31 @@ test_already_stopped_exit_is_idempotent() {
   pass "fm-control exit: an already-stopped agent is idempotent success with no bytes sent"
 }
 
+# An agent that exited on its own still leaves a task pinging busy. The pane
+# is there holding only its shell (`dead`), which is do_exit's first early
+# return. fm_busy_classify reads the busy RECORD and never consults liveness,
+# so a success that reports already-stopped and touches nothing leaves the
+# task costing a supervision turn every few minutes.
+test_already_stopped_exit_retires_busy_wiring() {
+  local dir out rc
+  dir=$(new_case already-busy)
+  add_task "$dir" t1 claude
+  alive_as "$dir" zsh
+  bash "$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" t1 >/dev/null 2>&1 \
+    || fail "could not arm a busy incarnation for the already-stopped exit case"
+  [ -f "$dir/home/state/t1.busy-state" ] || fail "arming did not write a busy record"
+  [ -f "$dir/home/state/t1.busy-gen" ] || fail "arming did not write a busy generation"
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "exiting an already-stopped agent should succeed"$'\n'"$out"
+  assert_contains "$out" "already-stopped t1" "the outcome should say it was already stopped"
+  [ -z "$(literals "$dir")" ] || fail "an already-stopped agent must not be sent an exit command"
+  [ ! -e "$dir/home/state/t1.busy-state" ] \
+    || fail "an already-stopped exit left the task recorded busy with no agent behind it"
+  [ ! -e "$dir/home/state/t1.busy-gen" ] \
+    || fail "an already-stopped exit left an orphaned busy generation"
+  pass "fm-control exit: an agent that exited on its own stops pinging busy, not just reports already-stopped"
+}
+
 test_missing_tmux_endpoint_refuses_rather_than_claiming_a_stop() {
   local dir out rc
   dir=$(new_case gone)
@@ -1095,6 +1120,7 @@ test_verb_allowlist_is_closed
 test_resume_is_refused_with_its_reason
 test_relaunch_only_flags_are_rejected_on_other_verbs
 test_already_stopped_exit_is_idempotent
+test_already_stopped_exit_retires_busy_wiring
 test_missing_tmux_endpoint_refuses_rather_than_claiming_a_stop
 test_interrupt_refuses_when_no_agent_runs
 test_ambiguous_endpoint_refuses
