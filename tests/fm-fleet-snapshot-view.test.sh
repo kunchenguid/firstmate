@@ -1152,6 +1152,42 @@ EOF
   pass "home-summary excludes kind=secondmate from unowned_current and terminal_in_flight"
 }
 
+test_contribution_input_handles_backlog_larger_than_arg_max() {
+  local home arg_max pad status bytes
+  home=$(make_home arg-max-backlog)
+  arg_max=$(getconf ARG_MAX) || fail "getconf ARG_MAX failed"
+  case "$arg_max" in
+    ''|*[!0-9]*) fail "getconf ARG_MAX did not print a positive integer: $arg_max" ;;
+  esac
+  [ "$arg_max" -gt 0 ] || fail "getconf ARG_MAX was not positive: $arg_max"
+  pad=$((arg_max + 8192))
+  {
+    printf '%s\n' '## In flight'
+    printf '%s\n' '- [ ] huge-task - Huge Task (repo: alpha) (kind: ship) (since 2026-07-07)'
+    printf '  '
+    head -c "$pad" /dev/zero | tr '\0' 'x'
+    printf '\n\n## Queued\n\n## Done\n'
+  } > "$home/data/backlog.md" \
+    || fail "could not write an oversize backlog fixture"
+  FM_HOME="$home" "$SNAPSHOT" --contribution-input > "$home/out.json" 2>"$home/err"
+  status=$?
+  if grep -q 'Argument list too long' "$home/err" 2>/dev/null; then
+    fail "contribution-input passed fleet JSON through the argument vector: $(tr '\n' ' ' < "$home/err")"
+  fi
+  [ "$status" -eq 0 ] || fail "contribution-input exited $status with oversize backlog: $(tr '\n' ' ' < "$home/err")"
+  [ -s "$home/out.json" ] || fail "contribution-input wrote no JSON with oversize backlog: $(tr '\n' ' ' < "$home/err")"
+  jq -e '
+    .backlog.present == true
+      and (.backlog.records | any(.id == "huge-task" and .structured == true))
+      and (.tasks | type == "array")
+  ' "$home/out.json" >/dev/null \
+    || fail "contribution-input JSON was invalid or missing the oversize row"
+  bytes=$(wc -c < "$home/out.json" | tr -d ' ')
+  [ "$bytes" -gt "$arg_max" ] \
+    || fail "contribution-input JSON was $bytes bytes, not larger than ARG_MAX=$arg_max; the fixture did not exercise the argument-list path"
+  pass "contribution-input accepts a backlog larger than ARG_MAX"
+}
+
 test_empty_fleet_json
 test_fixture_snapshot_json
 test_home_summary_excludes_secondmate_from_child_inventory
@@ -1170,3 +1206,4 @@ test_scout_reports_include_teardown_reports
 test_backlog_tasks_axi_forms_and_overrides
 test_view_renders_snapshot
 test_view_renders_dead_secondmate_agent_status
+test_contribution_input_handles_backlog_larger_than_arg_max
