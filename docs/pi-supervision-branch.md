@@ -192,7 +192,6 @@ An acknowledgement that consumed nothing reports that plainly, with the exact co
 
 1. Two consecutive settled provider errors latch the branch broken.
    A one-line health note surfaces only on that initial trip.
-   Settled-turn lease cleanup lets main claim work the inactive branch held without a session restart.
 2. Main keeps every wake during a five-minute cooldown.
 3. After the cooldown, one wake may probe the branch while concurrent wakes still stay on main.
 4. Each probe that settles with another provider error doubles the next cooldown, up to one hour.
@@ -640,7 +639,7 @@ At that moment the branch reports any refusal instead of concluding there is "no
 
 - Prompt stability, including the landed-work cleanup instruction.
 - Store append-only behavior, the captain cursor barrier, and the processed marker's sequence bounds.
-- Leases, guards, and non-branch-home invariance.
+- Leases, guards, and non-branch-home invariance, including settled-turn release and main reclaim after no-report and provider-error settlements.
 - The away relocation: only under a valid live record, never for local-only landing, queued-only branch dispatch rather than orphaned in-flight recovery, the spend cap for both actors and its lock-held recheck, and the attended guarded-action behavior restored by archive or an invalid record.
 
 `tests/fm-afk-return.test.sh` covers the ordered cleanup-due section, its durable merge-marker requirement, and exclusion of both a done task without durable merge evidence and a persistent secondmate carrying that evidence.
