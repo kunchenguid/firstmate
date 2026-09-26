@@ -508,6 +508,53 @@ The lab home was deleted and the test entry was removed from the store and verif
 That automated spawn case runs against a fake claude, so it asserts the store entry and the launch command and nothing more; the live arms above are what establish that the entry actually suppresses the dialog.
 The composer-classification record below observes the same gate from the other side, where an untrusted worktree left Claude, Grok, and Muse unverified because the guard reads a first-launch trust dialog as an unreadable composer.
 
+## Claude Agent Teams launch opt-in
+
+Verified 2026-09-25 on Claude Code 2.1.280.
+`bin/fm-spawn.sh`'s `--agent-teams --teammate-mode in-process` opt-in turns the feature on with a launch-scoped `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` assignment plus Claude's own `--teammate-mode in-process`, because Claude's hidden `--agent-teams` spelling is not a registered command-line option.
+These print-mode probes stop at argument or input validation, before any model call.
+
+```sh
+claude --agent-teams --teammate-mode in-process -p </dev/null
+claude --teammate-mode in-process -p </dev/null
+claude --agent-teams --teammate-mode bogus -p </dev/null
+```
+
+```
+error: unknown option '--agent-teams'
+Error: Input must be provided either through stdin or as a prompt argument when using --print
+error: option '--teammate-mode <mode>' argument 'bogus' is invalid. Allowed choices are auto, tmux, iterm2, in-process.
+```
+
+A launch that forwarded `--agent-teams` would therefore exit at startup, while `--teammate-mode in-process` passes validation.
+
+The environment assignment was then observed to change the model-facing tool surface, with a control arm and a treatment arm that differed only in that assignment.
+Each arm made one small Haiku call and used no tools.
+
+```sh
+env -u CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS claude --teammate-mode in-process -p --model claude-haiku-4-5-20251001 --max-turns 1 --output-format stream-json --verbose '<reply ok>'
+env CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 claude --teammate-mode in-process -p --model claude-haiku-4-5-20251001 --max-turns 1 --output-format stream-json --verbose '<reply ok>'
+```
+
+```
+control:   tool count: 96  team tools: ['SendMessage', 'Task', 'TaskCreate', 'TaskGet', 'TaskList', 'TaskStop', 'TaskUpdate']
+treatment: tool count: 96  team tools: ['SendMessage', 'Task', 'TaskCreate', 'TaskGet', 'TaskList', 'TaskStop', 'TaskUpdate']
+```
+
+Neither `init` tool list held `TeamCreate` or `TeamDelete`, so on this version the tool-name list alone cannot tell the two arms apart.
+The same two arms, asked with `--output-format json` to list their `Agent` tool's top-level input parameters, reported different schemas.
+
+```
+control:   description, isolation, model, prompt, run_in_background, subagent_type
+treatment: description, isolation, model, name, prompt, run_in_background, subagent_type, team_name
+```
+
+That list is the model's own report of its schema, and it agrees with the installed CLI's `Agent` schema text, which describes `team_name` as "Deprecated; ignored. The session has a single implicit team." and `name` as making the spawned agent "addressable via SendMessage({to: name}) while running."
+On this version the opt-in therefore shows up as a `name`-capable `Agent` tool over one implicit team, not as separate team-management tools.
+The treatment arm also shows that the account-side feature gate was on for this account on that date; a session with the feature off cannot read that gate.
+
+`tests/fm-spawn-dispatch-profile.test.sh` pins the launch bytes and task record against a fake claude, and `tests/fm-control-relaunch.test.sh` pins the relaunch carry-over and pre-stop refusal; neither can prove the vendor behavior above, so rerun these probes after a Claude Code upgrade.
+
 ## Launch-prompt backstop signatures
 
 `bin/fm-busy-lib.sh`'s launch-prompt backstop (`fm_busy_launch_prompt_parked`) reclassifies a launch whose busy record is still pinned at the fm-spawn seed as `unknown launch-prompt`, rather than `busy fm-spawn`, when the captured pane matches that harness's own recognized trust, sign-in, or first-run dialog.

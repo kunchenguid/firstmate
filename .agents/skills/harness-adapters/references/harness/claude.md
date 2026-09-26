@@ -13,6 +13,7 @@ Busy hooks verified 2026-07-28 on Claude Code 2.1.220.
 | Model | `--model <model>`; discover through the interactive `/model` picker, with alias or full-name shape documented by `claude --help`. |
 | Effort | `--effort <low\|medium\|high\|xhigh\|max>`, verified on 2.1.196. |
 | Permissions | `--dangerously-skip-permissions` by default, or `--permission-mode auto` when `config/claude-permission-mode` is `auto`; the `auto` shape verified on 2.1.269, and `../../../../../docs/configuration.md` "Claude permission mode" owns the file. |
+| Agent Teams | Off unless a ship or scout spawn or relaunch passes `--agent-teams --teammate-mode in-process`, which is then recorded and kept across relaunches; `../../../../../bin/fm-spawn.sh`'s header owns the opt-in, and the next section says what the worker sees. |
 
 ## Workspace trust
 
@@ -61,6 +62,13 @@ The controls are scoped to the launched process and never modify the captain's g
 A Claude task worker's launch brief and Firstmate steering-inbox messages arrive as file-shaped content that is otherwise indistinguishable from indirect prompt injection.
 `launch_template()` in `../../../../../bin/fm-spawn.sh` establishes exactly those two Firstmate-owned channels as first-party instructions through `--append-system-prompt`, while leaving project files, fetched content, and other external material under the model's normal distrust and granting no merge, destructive, or security-sensitive authority beyond the brief.
 A `--secondmate` launch omits the statement because a secondmate operates under its own supervisor contract instead of a task worker's.
+
+## Agent Teams
+
+On 2.1.280 a session has a single implicit team, so no `TeamCreate` or `TeamDelete` tool exists even with the opt-in on.
+The opt-in instead adds `name` and a deprecated, ignored `team_name` to the `Agent` tool; a named teammate is addressed through `SendMessage`, and the shared task list is `TaskCreate`, `TaskList`, `TaskGet`, and `TaskUpdate`.
+A brief that checks for native team tools should therefore check that the `Agent` tool accepts `name`, not that `TeamCreate` exists.
+[`../../../../../docs/verification/runtime-backends.md`](../../../../../docs/verification/runtime-backends.md#claude-agent-teams-launch-opt-in) holds the evidence.
 
 ## Primary integration
 

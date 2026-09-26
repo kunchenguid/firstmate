@@ -118,6 +118,34 @@ fm_control_harness_supports_kind() {  # <harness> <kind>
   return 0
 }
 
+# Whether a task may launch with the per-task Claude Code Agent Teams opt-in
+# (bin/fm-spawn.sh's header owns that contract). Returns 0 when it may, and
+# otherwise prints the refusal reason and returns nonzero. in-process is the only
+# teammate mode, because the others may open terminal panes outside the task's
+# recorded endpoint; the feature is Claude's own; and a secondmate is a
+# supervisor, not a review worker. The launch owner asks this before any
+# endpoint, worktree, or record exists, and the control plane asks it before it
+# stops anything, so a refused opt-in never costs a running agent.
+fm_control_agent_teams_refusal() {  # <teammate-mode> <harness> <kind>
+  local mode=${1-} harness=${2-} kind=${3-}
+  if [ "$mode" != in-process ]; then
+    printf "teammate mode '%s' is not supported; only in-process keeps teammates inside the task's own recorded endpoint (tmux, iterm2, and auto may open panes Firstmate does not track)" "$mode"
+    return 1
+  fi
+  if [ "$harness" != claude ]; then
+    printf "Agent Teams is a Claude Code feature, but this launch runs harness '%s'" "$harness"
+    return 1
+  fi
+  case "$kind" in
+    ship|scout) ;;
+    *)
+      printf "Agent Teams is a per-task opt-in for a ship or scout worker, not a %s" "$kind"
+      return 1
+      ;;
+  esac
+  return 0
+}
+
 # The key that cancels a running turn. Escape for every adapter except grok,
 # whose Esc only moves focus to the scrollback; grok cancels on Ctrl+C.
 # gemini names its own key in the running turn's status row

@@ -1606,6 +1606,77 @@ test_non_claude_harness_ignores_claude_permission_mode() {
   pass "config/claude-permission-mode changes claude launches only"
 }
 
+# The Claude Agent Teams opt-in (bin/fm-spawn.sh header) is per task: a claude
+# scout that names both flags gains exactly the launch-scoped assignment, the
+# teammate-mode flag, and one record line; a task that does not name them keeps
+# today's launch and record; and every opt-in that cannot be honored refuses
+# before any endpoint or metadata exists.
+test_agent_teams_scout_launch_changes_only_the_opted_in_task() {
+  local rec id plain out status launch expected ordinary
+  id=teams-scout-z31
+  plain=teams-plain-z32
+  rec=$(make_spawn_case teams-scout claude "$id" "$plain")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout \
+    --agent-teams --teammate-mode in-process)
+  status=$?
+  expect_code 0 "$status" "a claude scout with the Agent Teams opt-in should spawn"$'\n'"$out"
+  assert_contains "$out" "spawned $id harness=claude kind=scout" "the opted-in scout did not report claude"
+  assert_contains "$out" "agent_teams=in-process" "the spawned line should name the opt-in"
+  assert_grep 'agent_teams=in-process' "$HOME_DIR/state/$id.meta" "the task record should carry the opt-in"
+  launch=$(cat "$LAUNCH_LOG")
+  ordinary=$(claude_expected_launch "$launch" "$HOME_DIR" "$id" --dangerously-skip-permissions)
+  expected=${ordinary/"CLAUDE_CODE_SEND_FEEDBACK=0 claude "/"CLAUDE_CODE_SEND_FEEDBACK=0 CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 claude "}
+  expected=${expected/"$CLAUDE_CONTROL_CHANNEL_FLAG "/"$CLAUDE_CONTROL_CHANNEL_FLAG --teammate-mode in-process "}
+  [ "$expected" != "$ordinary" ] || fail "the expected opted-in launch did not diverge from the ordinary one"
+  [ "$launch" = "$expected" ] || fail "the opt-in changed more than its assignment and teammate-mode flag"$'\n'"expected: $expected"$'\n'"actual:   $launch"
+  assert_not_contains "$launch" "--agent-teams" "the launch must not forward a flag Claude rejects"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$plain" "$PROJ_DIR" --scout)
+  status=$?
+  expect_code 0 "$status" "an ordinary claude scout should spawn"$'\n'"$out"
+  assert_not_contains "$out" "agent_teams" "an ordinary spawned line must not change"
+  launch=$(cat "$LAUNCH_LOG")
+  expected=$(claude_expected_launch "$launch" "$HOME_DIR" "$plain" --dangerously-skip-permissions)
+  [ "$launch" = "$expected" ] || fail "an ordinary scout launch changed"$'\n'"expected: $expected"$'\n'"actual:   $launch"
+  assert_no_grep 'agent_teams=' "$HOME_DIR/state/$plain.meta" "an ordinary task record must not gain an opt-in"
+  pass "fm-spawn: --agent-teams --teammate-mode in-process changes only the opted-in claude task"
+}
+
+test_agent_teams_unhonorable_opt_ins_refuse_before_endpoint_or_metadata() {
+  local rec id out status sm
+  id=teams-refuse-z33
+  rec=$(make_spawn_case teams-refuse claude "$id")
+  read_case_record "$rec"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+
+  agent_teams_refuse_case() {  # <expected-text> <spawn-args...>
+    local want=$1
+    shift
+    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$@")
+    status=$?
+    expect_code 1 "$status" "fm-spawn $* must refuse"$'\n'"$out"
+    assert_contains "$out" "$want" "fm-spawn $* refused for the wrong reason"
+    [ ! -s "$LAUNCH_LOG" ] || fail "fm-spawn $* launched something: $(cat "$LAUNCH_LOG")"
+    assert_absent "$HOME_DIR/state/$id.meta" "fm-spawn $* wrote a task record"
+  }
+  agent_teams_refuse_case "--agent-teams requires --teammate-mode in-process" "$id" "$PROJ_DIR" --scout --agent-teams
+  agent_teams_refuse_case "--teammate-mode applies only with --agent-teams" "$id" "$PROJ_DIR" --scout --teammate-mode in-process
+  agent_teams_refuse_case "teammate mode 'tmux' is not supported" "$id" "$PROJ_DIR" --scout --agent-teams --teammate-mode tmux
+  agent_teams_refuse_case "teammate mode 'auto' is not supported" "$id" "$PROJ_DIR" --scout --agent-teams --teammate-mode=auto
+  agent_teams_refuse_case "this launch runs harness 'codex'" "$id" "$PROJ_DIR" --scout --harness codex \
+    --agent-teams --teammate-mode in-process
+  agent_teams_refuse_case "cannot be added to a raw launch command" "$id" "$PROJ_DIR" --scout \
+    --harness "claude --dangerously-skip-permissions" --agent-teams --teammate-mode in-process
+  agent_teams_refuse_case "not a secondmate" "$id" "$sm" --secondmate --harness claude \
+    --agent-teams --teammate-mode in-process
+  agent_teams_refuse_case "spawn that task on its own rather than in a batch" "$id=$PROJ_DIR" --scout --harness claude \
+    --agent-teams --teammate-mode in-process
+  pass "fm-spawn: an Agent Teams opt-in that cannot be honored refuses before any endpoint or record"
+}
+
 test_worker_launch_delivers_role_scope
 test_no_profile_keeps_claude_profile_defaults
 test_claude_launch_brief_publishes_record_doorbell
@@ -1653,6 +1724,8 @@ test_claude_permission_mode_auto_swaps_only_the_permission_flag
 test_claude_permission_mode_auto_reaches_scout_launch
 test_claude_permission_mode_invalid_refuses_before_endpoint_or_metadata
 test_non_claude_harness_ignores_claude_permission_mode
+test_agent_teams_scout_launch_changes_only_the_opted_in_task
+test_agent_teams_unhonorable_opt_ins_refuse_before_endpoint_or_metadata
 test_non_claude_harness_ignores_config_dir
 test_claude_task_launch_carries_control_channel_authority
 test_claude_secondmate_launch_omits_task_control_channel_authority
