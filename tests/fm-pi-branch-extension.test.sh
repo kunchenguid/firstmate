@@ -897,8 +897,9 @@ if (sentToMain[1].options.deliverAs !== "nextTurn" || sentToMain[1].options.trig
 await fire("agent_end", {});
 await report.execute("call-3", { task: "task-9", verdict: "captain", summary: "PR https://example.com/pr/9 checks green, ready for review" }, undefined, undefined, {});
 // A captain outcome opens exactly ONE sequence-keyed processing turn: a
-// hidden, typed request that names the sequence and carries the exact stored
-// summary. No unkeyed turn ever opens, and routine delivery is untouched.
+// hidden, typed request that names the sequence/task identity. The exact
+// summary remains in the visible sequence-keyed entry instead of being loaded
+// again on every processing retry.
 const processingRequests = sentToMain.filter((sent) => sent.message.customType === "fm-branch-process");
 if (processingRequests.length !== 1) throw new Error(`captain delivery opened ${processingRequests.length} processing requests, not exactly one`);
 const processingRequest = processingRequests[0];
@@ -906,8 +907,8 @@ if (processingRequest.options.triggerTurn !== true || processingRequest.options.
   throw new Error(`the processing request must open one follow-up turn: ${JSON.stringify(processingRequest.options)}`);
 }
 if (processingRequest.message.display !== false) throw new Error("the processing request must stay hidden: the visible entry is the display");
-if (!processingRequest.message.content.includes("[seq 3] task-9: PR https://example.com/pr/9 checks green, ready for review")) {
-  throw new Error(`the processing request lost its sequence key or exact summary: ${processingRequest.message.content}`);
+if (!processingRequest.message.content.includes("[seq 3] task=task-9") || processingRequest.message.content.includes("PR https://example.com/pr/9")) {
+  throw new Error(`the processing request did not project to identity-only content: ${processingRequest.message.content}`);
 }
 if (sentToMain.some((sent) => sent.options.triggerTurn && sent.message.customType !== "fm-branch-process")) {
   throw new Error("an unkeyed turn opened on main");
@@ -1066,8 +1067,8 @@ EOF
 
   # The processing request must identify itself to main's model through the
   # real protocol executable: it is typed branch-outcome input whose body names
-  # the sequence, the exact outcome, the acknowledgement tool, and the fact
-  # that nothing but that acknowledgement closes it. Routine notes remain
+  # the sequence/task anchor, the acknowledgement tool, and the fact that
+  # nothing but that acknowledgement closes it. Routine notes remain
   # plain rendered text rather than typed operational input.
   local kind body
   kind=$(./bin/fm-operational-input.sh kind < "$home/state/delivered-processing-request") \
@@ -1076,8 +1077,11 @@ EOF
   body=$(./bin/fm-operational-input.sh body < "$home/state/delivered-processing-request") \
     || fail "the processing request envelope carries no readable body"
   case "$body" in
-    *"delivered automatically by the supervision branch."*"It was not typed by the captain."*"[seq 3] task-9: PR https://example.com/pr/9 checks green, ready for review"*) ;;
-    *) fail "the processing request body lost its self-description or the outcome itself: $body" ;;
+    *"delivered automatically by the supervision branch."*"It was not typed by the captain."*"call fm_branch_outcomes with exactly the listed sequences"*"[seq 3] task=task-9"*) ;;
+    *) fail "the processing request body lost its self-description or outcome identity: $body" ;;
+  esac
+  case "$body" in
+    *"PR https://example.com/pr/9 checks green, ready for review"*) fail "the processing request redundantly loaded the exact summary already held by the visible anchor: $body" ;;
   esac
   case "$body" in
     *"do not re-drain, re-run, or acknowledge the wake."*"call fm_branch_processed with through=3 exactly once."*"never counts as processing."*) ;;
@@ -1276,9 +1280,12 @@ if (processingRequests.length !== 2 || processingRequests[1].options.triggerTurn
   throw new Error(`the widened captain sequence set did not open one keyed turn at the run boundary: ${JSON.stringify(processingRequests)}`);
 }
 for (let seq = 2; seq <= 5; seq += 1) {
-  if (!processingRequests[1].message.content.includes(`[seq ${seq}] branch-driver: healthy resource report: CPU 12%, memory 41%`)) {
+  if (!processingRequests[1].message.content.includes(`[seq ${seq}] task=branch-driver`)) {
     throw new Error(`the widened processing request lost seq ${seq}: ${processingRequests[1].message.content}`);
   }
+}
+if (processingRequests[1].message.content.includes("healthy resource report: CPU 12%, memory 41%")) {
+  throw new Error(`the widened processing request reloaded repeated summary content: ${processingRequests[1].message.content}`);
 }
 if (!processingRequests[1].message.content.includes("through=5")) {
   throw new Error(`the widened processing request lost its highest acknowledgement key: ${processingRequests[1].message.content}`);
@@ -1353,8 +1360,11 @@ if (sentToMain.some((sent) => sent.message.customType !== "fm-branch-process")) 
 }
 // Recovery re-presents every still-unprocessed sequence in one keyed request.
 const recovered = sentToMain.at(-1)?.message.content ?? "";
-if (!recovered.includes(`[seq ${seq1}] email-intake: ${summary1}`) || !recovered.includes(`[seq ${seq2}] task-busy: ${summary2}`)) {
+if (!recovered.includes(`[seq ${seq1}] task=email-intake`) || !recovered.includes(`[seq ${seq2}] task=task-busy`)) {
   throw new Error(`reload did not re-present the unprocessed outcomes for processing: ${recovered}`);
+}
+if (recovered.includes(summary1) || recovered.includes(summary2)) {
+  throw new Error(`reload redundantly hydrated exact visible summaries: ${recovered}`);
 }
 
 // A second reload sees the cursor and must stay idempotent.
@@ -1453,7 +1463,7 @@ const request = requests()[0];
 if (request.options.triggerTurn !== true || request.options.deliverAs !== "followUp" || request.message.display !== false) {
   throw new Error(`the processing request must be one hidden follow-up turn: ${JSON.stringify(request)}`);
 }
-if (!request.message.content.includes(`[seq ${seq}] task-d: ${decision}`)) throw new Error(`the request lost its key or summary: ${request.message.content}`);
+if (!request.message.content.includes(`[seq ${seq}] task=task-d`) || request.message.content.includes(decision)) throw new Error(`the request did not preserve identity-only projection: ${request.message.content}`);
 if (JSON.stringify(unprocessedSeqs()) !== JSON.stringify([seq])) throw new Error(`delivery did not leave seq ${seq} unprocessed: ${unprocessedSeqs()}`);
 
 // Case A (timeline report 2026-08-31): the turn returns an EMPTY assistant
@@ -1463,7 +1473,7 @@ await runOf(() => mainEntries.push({ type: "message", message: { role: "assistan
 if (JSON.stringify(unprocessedSeqs()) !== JSON.stringify([seq])) throw new Error("an empty answer advanced the processed marker");
 if (requests().length !== 2) throw new Error(`an empty answer did not re-present the outcome: ${requests().length} requests`);
 if (requests()[1].options.triggerTurn !== true) throw new Error("the first re-presentation must open its own turn");
-if (!requests()[1].message.content.includes(`[seq ${seq}] task-d: ${decision}`)) throw new Error("the re-presentation changed the outcome");
+if (!requests()[1].message.content.includes(`[seq ${seq}] task=task-d`) || requests()[1].message.content.includes(decision)) throw new Error("the re-presentation changed the identity-only outcome reference");
 
 // Case B: the turn repeats an unrelated prior answer. Same result: the marker
 // holds, and the request is presented again - now riding the captain's next
@@ -1489,6 +1499,11 @@ if (requests().length !== 5 || requests()[4].options.triggerTurn !== true) throw
 if (mainEntries.filter((entry) => entry.customType === "fm-branch-visible-outcome" && entry.data.seq === seq).length !== 1) {
   throw new Error("re-presentation duplicated the visible entry");
 }
+// Simulate a compacted/recovered main context that no longer contains the
+// visible anchor. The identity-only request must recover the exact row from the
+// durable store and cannot treat the missing anchor as witnessed evidence.
+const visibleIndex = mainEntries.findIndex((entry) => entry.customType === "fm-branch-visible-outcome" && entry.data.seq === seq);
+mainEntries.splice(visibleIndex, 1);
 
 // Only the sequence-bound acknowledgement closes it.
 const nativeTools = new Map();
@@ -1512,6 +1527,28 @@ if (JSON.stringify(unprocessedSeqs()) !== JSON.stringify([seq])) throw new Error
 const tooFar = await processed.execute("ack-too-far", { through: seq + 100 }, undefined, undefined, {});
 if (!tooFar.isError) throw new Error("an acknowledgement beyond the read cursor was accepted");
 if (JSON.stringify(unprocessedSeqs()) !== JSON.stringify([seq])) throw new Error("a refused acknowledgement moved the marker");
+const unseen = await processed.execute("ack-unseen", { through: seq }, undefined, undefined, {});
+if (!unseen.isError || !unseen.content.some((item) => item.type === "text" && item.text.includes("load exact durable outcome evidence first"))) {
+  throw new Error(`an unseen compacted outcome could be acknowledged: ${JSON.stringify(unseen)}`);
+}
+if (JSON.stringify(unprocessedSeqs()) !== JSON.stringify([seq])) throw new Error("an unseen-evidence refusal moved the marker");
+const outcomes = nativeTools.get("fm_branch_outcomes");
+const exact = await outcomes.execute("read-exact", { sequences: String(seq) }, undefined, undefined, {});
+const exactText = exact.content.map((item) => item.text ?? "").join("\n");
+if (exact.isError || !exactText.includes(`"seq":${seq}`) || !exactText.includes(decision)) {
+  throw new Error(`exact durable outcome recovery failed after anchor compaction: ${JSON.stringify(exact)}`);
+}
+await fire("session_compact", {});
+const compactedAck = await processed.execute("ack-after-compact", { through: seq }, undefined, undefined, {});
+if (!compactedAck.isError || !compactedAck.content.some((item) => item.type === "text" && item.text.includes("load exact durable outcome evidence first"))) {
+  throw new Error(`compaction preserved stale acknowledgement evidence: ${JSON.stringify(compactedAck)}`);
+}
+if (JSON.stringify(unprocessedSeqs()) !== JSON.stringify([seq])) throw new Error("a post-compaction evidence refusal moved the marker");
+const reloaded = await outcomes.execute("read-exact-after-compact", { sequences: String(seq) }, undefined, undefined, {});
+const reloadedText = reloaded.content.map((item) => item.text ?? "").join("\n");
+if (reloaded.isError || !reloadedText.includes(`"seq":${seq}`) || !reloadedText.includes(decision)) {
+  throw new Error(`exact durable outcome reload failed after compaction: ${JSON.stringify(reloaded)}`);
+}
 const ack = await processed.execute("ack", { through: seq }, undefined, undefined, {});
 if (ack.isError) throw new Error(`acknowledgement failed: ${JSON.stringify(ack)}`);
 if (unprocessedSeqs().length !== 0) throw new Error("the acknowledgement did not close the sequence");
@@ -1542,7 +1579,7 @@ await replacementOffer.settlement;
 globalThis.__fmOnBranchPrompt = undefined;
 const seqE = seq + 1;
 const seqF = seq + 2;
-if (requests().length !== beforePair + 1 || !requests().at(-1).message.content.includes(`[seq ${seqE}] branch-driver:`)) {
+if (requests().length !== beforePair + 1 || !requests().at(-1).message.content.includes(`[seq ${seqE}] task=branch-driver`)) {
   throw new Error("the first newer captain outcome did not open its processing request");
 }
 const third = await report2.execute("captain-3", { task: "task-f", verdict: "captain", summary: "worker blocked on a missing credential" }, undefined, undefined, {});
@@ -1558,8 +1595,15 @@ if (JSON.stringify(unprocessedSeqs()) !== JSON.stringify([seqE, seqF])) {
 await runOf();
 if (requests().length !== beforePair + 2) throw new Error("the widened sequence was not presented at the run boundary");
 const latest = requests().at(-1).message.content;
-if (!latest.includes(`[seq ${seqE}] branch-driver:`) || !latest.includes(`[seq ${seqF}] task-f:`) || !latest.includes(`through=${seqF}`)) {
+if (!latest.includes(`[seq ${seqE}] task=branch-driver`) || !latest.includes(`[seq ${seqF}] task=task-f`) || !latest.includes(`through=${seqF}`)) {
   throw new Error(`the widened request did not cover every unprocessed sequence with the highest key: ${latest}`);
+}
+const exactPair = await outcomes.execute("read-exact-pair", { sequences: `${seqE},${seqF}` }, undefined, undefined, {});
+const exactPairText = exactPair.content.map((item) => item.text ?? "").join("\n");
+if (exactPair.isError || !exactPairText.includes(`"seq":${seqE}`) || !exactPairText.includes(`"seq":${seqF}`)
+    || !exactPairText.includes("PR https://example.com/pr/e is ready for review")
+    || !exactPairText.includes("worker blocked on a missing credential")) {
+  throw new Error(`exact multi-outcome recovery failed: ${JSON.stringify(exactPair)}`);
 }
 const beforePairRepeat = requests().length;
 await runOf();
@@ -1575,7 +1619,7 @@ if (
   requests().length !== beforeF + 1 ||
   requests().at(-1).options.triggerTurn !== true ||
   requests().at(-1).options.deliverAs !== "followUp" ||
-  !requests().at(-1).message.content.includes(`[seq ${seqF}] task-f:`)
+  !requests().at(-1).message.content.includes(`[seq ${seqF}] task=task-f`)
 ) {
   throw new Error("the changed remaining sequence set did not restart its triggered presentation budget");
 }
@@ -1736,8 +1780,8 @@ if (captainEntries.length !== 1 || captainEntries[0].data.summary !== "task-2 ha
 if (sentToMain.some((sent) => sent.options.triggerTurn && sent.message.customType !== "fm-branch-process")) {
   throw new Error("heartbeat outcome delivery opened an unkeyed model turn");
 }
-if (!sentToMain.some((sent) => sent.message.customType === "fm-branch-process" && sent.message.content.includes("task-2 has been stuck for an hour"))) {
-  throw new Error("a captain-worthy heartbeat finding did not open its keyed processing turn");
+if (!sentToMain.some((sent) => sent.message.customType === "fm-branch-process" && sent.message.content.includes("task=fleet") && !sent.message.content.includes("task-2 has been stuck for an hour"))) {
+  throw new Error("a captain-worthy heartbeat finding did not open its identity-only keyed processing turn");
 }
 
 // Every other fleet-wide or unresolvable wake (empty projects, not a

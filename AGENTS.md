@@ -97,8 +97,9 @@ When that section reports its checks still in progress it names exactly what is 
    When the lock could not be acquired and verified, the queue is left untouched because no session mutation is authorized, and the guard's tangle/watcher-liveness alarms still print in read-only advisory mode without drain, supervision repair, or checkout repair commands.
 4. **Supervision operating instructions** - after the wake queue and before both digests, the digest emits exactly one operating block for the detected primary harness, followed by the read-once contract that governs them.
    The script itself never starts supervision; the emitted harness protocol owns the exact wait or wake mechanism.
-5. **Fleet-state digest** - after that read-once contract and ahead of the context digest, the compact backlog listing owned by `bin/fm-session-start.sh`; every `state/<id>.meta`; a bounded tail of each task's `state/<id>.status` (labeled as wake-EVENT history, not current state, with the full log path printed for a deeper read); the away posture (`state/.afk-contract`, plus the `state/.afk` daemon flag where a daemon runs); and one cheap alive/dead read of each task's recorded backend endpoint.
+5. **Fleet-state digest** - after that read-once contract and ahead of the context digest, the de-duplicated compact backlog inventory owned by `bin/fm-session-start.sh`; one identity-complete summary for every `state/<id>.meta` with an explicit full-metadata path for omitted fields or ambiguity; the newest event from each task's `state/<id>.status` (labeled as wake-EVENT history, not current state, with the full log path printed for older history); the away posture (`state/.afk-contract`, plus the `state/.afk` daemon flag where a daemon runs); and one cheap alive/dead read of each task's recorded backend endpoint.
    That liveness line is a fast presence check only, not a full state read - when you need a crew's actual current state (a run-step, not just "is the pane there"), read it with `bin/fm-task-state.sh <id>`; the digest deliberately skips that deeper, slower read for every task so it stays fast and bounded.
+   The wake queue remains the owner of raw wake presentation, `OPEN DECISIONS`, `UNREAD STATUS`, and record divergence; the concise fleet inventory never licenses treating omitted metadata fields or older routine status events as already read. Read an individual source only when the startup disclosure or the current operation requires that detail.
 6. **Network checks** - after the fleet-state digest, the deferred stage's result, or an explicit statement of what it has not confirmed yet.
    A read-only session runs no network checks at all and says so.
 7. **Context digest and next step** - last of the bulk sections, the full contents of `data/projects.md`, `data/secondmates.md`, `data/captain.md`, `data/captain-shared.md`, and `data/learnings.md`, each clearly delimited, followed by the closing reminder.
@@ -134,7 +135,7 @@ A missing dependency, authentication failure, unsupported backend, or version re
 
 After the one session-start digest, reconcile reality with durable records before taking new work.
 Honor lock-refused read-only mode exactly as section 3 requires.
-Treat digest status tails as wake-event history and use targeted current-state reconciliation when the live state matters.
+Treat each digest's latest status event as wake-event history and use targeted current-state reconciliation when the live state matters.
 
 Reconcile only this home's recorded direct reports and their recorded backend inventory; never sweep a shared endpoint namespace for matching names or claim another home's work.
 For an ordinary direct report whose endpoint is dead or metadata has no window, load `stuck-crewmate-recovery` and preserve the recorded worktree and unlanded work while reconciling ownership.

@@ -173,6 +173,9 @@ Legacy visible type-8 text remains a `text` result.
 Textual `deep_research_content.finalAnswer` content - a non-empty string or an array carrying answer-bearing text - is redacted and recovered as a `text` result for the recorded task before its structured artifact classification is consulted.
 When a successful recorded task has no `finalAnswer`, the last non-empty completed step content in its task-bound visible type-8 message is also a `text` result.
 A supported non-empty `deep_research_content.finalAnswer` artifact becomes an `artifact` result whose private mode-`0600` boundary retains only a safe session-readback reference with artifact and supported-part counts.
+When artifact selection is actually needed, `bin/fm-remote-agent-ida.sh artifacts <task-id>` performs the official artifact-list read against the exact session and remote-task IDs already recorded for that Firstmate task.
+Before stdout, it projects the response to task/session identity, state revision, availability/truncation, artifact ID/name/type, table/text presence, and file name/MIME/URI/size.
+It rejects mismatched or malformed identity and never emits descriptions, tables, rows, text, scripts, embedded bodies, or raw provider errors; selected content remains an explicit later fetch.
 Malformed or unsupported structured results remain explicit errors, and artifact identifiers, names, file URIs, inline data, provider messages, and raw session JSON never enter the normalized result, report, status, log, or metadata boundary.
 If an existing durable iDA task contains `bytedcli_version`, a report may label it as legacy informational metadata; the value never participates in state validity or a lifecycle decision.
 It never embeds the prompt, credentials, raw provider streams, or private payloads.
@@ -204,7 +207,7 @@ A legacy `state/.afk` daemon flag still declines every wake offer, the away-post
 The branch's role stays bounded exactly as the captain-approved architecture set it: it cannot merge a PR, land local work, or freshly spawn, and every existing captain gate remains unchanged.
 Homes on any other primary harness never load this feature and are entirely unaffected.
 `AGENTS.md`'s `state/` inventory routes the branch's runtime files to their format and lifecycle owners.
-A captain-facing (verdict `captain`) branch outcome persists as one exact, sequence-keyed visible transcript entry and then opens one sequence-keyed processing turn on main, which stays open until main acknowledges that sequence through its `fm_branch_processed` tool.
+The [Pi supervision branch contract](pi-supervision-branch.md#two-stage-noise-filter) owns captain-outcome persistence, identity-only processing retries, exact durable-store loading, and the acknowledgement prerequisite.
 The branch prompt's "Verdict: routine or captain" section owns the distinction between captain-facing, unsolicited routine, and unchanged-review outcomes.
 The generated [Pi supervision protocol](supervision-protocols/pi.md) owns main's event ownership, acknowledgement duty, and conversational treatment for merged outcomes, while the persisted entry itself owns captain visibility.
 A no-change heartbeat outcome explicitly reported with `task=fleet` and `silent=true` is delivered silently with no rendered note, while every other routine outcome still appends a rendered, sailboat-prefixed note.
@@ -1131,7 +1134,7 @@ FM_BACKEND_HERDR_SUBMIT_POLLS=6  # herdr-only: agent-state samples spread across
 FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0.6  # herdr-only: minimum per-Enter confirmation budget before polling agent-state after an idle baseline
 FM_ZELLIJ_SESSION=firstmate  # zellij-only: named session for normal backend ops and test isolation (docs/zellij-backend.md)
 CMUX_SOCKET_PASSWORD=   # cmux-only: socket password fallback when config/cmux-socket-password is absent (docs/cmux-backend.md)
-FM_SESSION_START_STATUS_TAIL=5   # state/*.status lines printed per task in the session-start digest; each line is capped by bin/fm-line-cap-lib.sh
+FM_SESSION_START_TASK_CONCURRENCY=8   # concurrent per-task metadata, endpoint, remote-state, and latest-status reads in the session-start inventory; invalid or zero uses 8, values above 32 use 32
 FM_SESSION_START_QUEUED_LIMIT=20   # plain queued backlog rows in the session-start digest; in-flight, held, and blocked rows are never bounded and done rows are never listed
 FM_BACKLOG_ROW_TIMEOUT_SECS=10   # seconds bounding each backlog row read (bin/fm-backlog-transition-lib.sh); nonpositive or invalid values fall back to 10; the first bound hit latches the sweep so later reads return immediately, each still naming its own item
 FM_BOOTSTRAP_DETECT_ONLY=0   # internal/read-only session-start mode: skip bootstrap's mutating sweeps and print advisory TANGLE wording

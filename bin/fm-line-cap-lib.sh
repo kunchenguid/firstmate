@@ -4,7 +4,7 @@
 #
 # ONE OWNER for the bounded-line shape both digests use. The wake digest's
 # OPEN DECISIONS section (bin/fm-wake-drain.sh) and the session-start digest's
-# per-task status tails (bin/fm-session-start.sh) render the same kind of
+# per-task latest status events (bin/fm-session-start.sh) render the same kind of
 # content - an agent-written status line, which AGENTS.md section 8 treats as a
 # wake EVENT rather than current state - into a size-bounded view. An agent
 # reading both must recognize one truncation marker, and the two caps must not
@@ -12,8 +12,8 @@
 #
 # Callers keep their own composite policy: fm-wake-drain.sh still owns the
 # OPEN DECISIONS global byte cap and its "N more omitted" disclosure, and
-# fm-session-start.sh still owns how many tail lines it prints per task. This
-# file owns only the per-line cut.
+# fm-session-start.sh still owns which status event it prints per task. This file
+# owns only the per-line cut.
 #
 # The cap counts characters, so a plain-ASCII line - what status lines are in
 # practice - is bounded to the same number of bytes, and a multibyte character

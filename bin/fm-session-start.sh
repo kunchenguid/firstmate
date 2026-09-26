@@ -6,8 +6,8 @@
 # instead of the six-plus separate reads the old docs required: run
 # fm-bootstrap.sh, then separately read data/projects.md, data/secondmates.md,
 # data/captain.md, data/captain-shared.md, data/learnings.md, then run
-# fm-lock.sh, fm-wake-drain.sh, then read data/backlog.md, every state/*.meta,
-# and every state/*.status.
+# fm-lock.sh, fm-wake-drain.sh, then read data/backlog.md, selected identity
+# fields from every state/*.meta, and the newest event from every state/*.status.
 # Every one of those reads is UNCONDITIONAL at every session start, so they
 # belong in a script, not in N agent turns.
 #
@@ -43,16 +43,12 @@
 #                       detected primary harness.
 #   5. read-once contract - the do-not-re-read contract covering every source
 #                       represented by the two digests below.
-#   6. fleet digest   - a compact data/backlog.md identity/metadata listing,
-#                       every state/*.meta, provider-aware current task state,
-#                       a bounded state/*.status tail, state/.afk, and a cheap
-#                       endpoint-liveness read for local tasks: read-only,
-#                       always runs.
-#                       every state/*.meta, a bounded state/*.status tail,
-#                       the away posture (state/.afk-contract and the legacy
-#                       state/.afk daemon flag), and a cheap per-task
-#                       endpoint-liveness read:
-#                       read-only, always runs.
+#   6. fleet digest   - one de-duplicated compact backlog inventory, one
+#                       identity-complete summary for every state/*.meta, the
+#                       newest state/*.status event with a direct full-log
+#                       pointer, provider-aware current task state, the away
+#                       posture, and a cheap endpoint-liveness read for local
+#                       tasks: read-only, always runs.
 #   7. network checks - the result of the deferred network stage started back at
 #                       step 1, harvested WITHOUT waiting for it.
 #   8. context digest - data/projects.md, data/secondmates.md, data/captain.md,
@@ -135,10 +131,11 @@
 #   - `done` rows are never listed. Retained completion history belongs to the
 #     reporting surfaces (bin/fm-bearings-snapshot.sh, /ahoy), and at startup it
 #     is pure weight - 10 done rows cost 3.3KB in an observed main-home digest.
-#   - Every in-flight, held, and blocked row is listed IN FULL, with its
+#   - Every in-flight, held, and blocked row is listed with its identity,
 #     hold_kind/hold_reason and blocked_by. Those are the rows AGENTS.md
 #     sections 7 and 10 make actionable at startup, so they are never bounded
-#     away.
+#     away. A row in more than one category is printed once with all of its
+#     categories, rather than repeated under separate headings.
 #   - Only the plain queued (dispatchable-now) listing is bounded, by
 #     FM_SESSION_START_QUEUED_LIMIT, default 20. Anything it omits is disclosed
 #     with an exact remainder count and the command that shows the rest, so a
@@ -151,7 +148,8 @@
 # and hold_reason, never body. The groups are the tool's own filters
 # (`--state in_flight`, `--state held`, `--state queued --blocked`, and
 # `tasks-axi ready`), so this script never reimplements task state; the groups
-# can overlap, because an in-flight item that is also held appears under both.
+# can overlap; the inventory de-duplicates those memberships into one row and
+# labels that row with every matching category.
 # When manual mode is selected, or tasks-axi is unavailable or incompatible,
 # this script prints only backlog section headings and item title lines, so
 # title-line hold and blocked-by metadata remain visible while indented bodies
@@ -162,11 +160,11 @@
 # compatible tasks-axi is available, or `data/backlog.md` when the file body is
 # truly needed.
 #
-# STATUS TAILS: FM_SESSION_START_STATUS_TAIL bounds how many lines each task's
-# tail prints, and bin/fm-line-cap-lib.sh bounds how long each of those lines
-# may be. Both bounds are safe because the section prints every task's full
-# status log path, and AGENTS.md section 8 treats a status line as a wake EVENT
-# rather than current state - bin/fm-crew-state.sh owns current state.
+# LATEST STATUS EVENTS: each task contributes only its newest status line, and
+# bin/fm-line-cap-lib.sh bounds that line's length. This projection is safe
+# because the section prints every task's full status log path, and AGENTS.md
+# section 8 treats a status line as a wake EVENT rather than current state -
+# bin/fm-crew-state.sh owns current state.
 #
 # RUNTIME BOUND: the digest is now executed through a native session-open
 # adapter (see bin/fm-sessionstart-run.sh), which blocks either hook-driven
@@ -350,17 +348,18 @@ PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 
 # One tasks-axi compatibility verdict per session start. The probe costs three
 # tasks-axi subprocesses and this digest needs the same answer twice - here for
-# the backlog listing and again inside the fm-bootstrap.sh child, which reports
+# the backlog inventory and again inside the fm-bootstrap.sh child, which reports
 # an incompatible build as MISSING. Computing it once and handing it to that
 # child collapses six subprocesses to three. fm-tasks-axi-lib.sh owns both reuse
 # layers and the one-hop consumption rule that keeps the verdict out of any
 # agent's environment.
 if fm_tasks_axi_compatible; then TASKS_AXI_COMPATIBLE=1; else TASKS_AXI_COMPATIBLE=0; fi
 
-STATUS_TAIL=${FM_SESSION_START_STATUS_TAIL:-5}
-case "$STATUS_TAIL" in ''|*[!0-9]*) STATUS_TAIL=5 ;; esac
 QUEUED_LIMIT=${FM_SESSION_START_QUEUED_LIMIT:-20}
 case "$QUEUED_LIMIT" in ''|*[!0-9]*|0) QUEUED_LIMIT=20 ;; esac
+TASK_READ_CONCURRENCY=${FM_SESSION_START_TASK_CONCURRENCY:-8}
+case "$TASK_READ_CONCURRENCY" in ''|*[!0-9]*|0) TASK_READ_CONCURRENCY=8 ;; esac
+[ "$TASK_READ_CONCURRENCY" -le 32 ] || TASK_READ_CONCURRENCY=32
 BACKLOG_FIELDS=blocked_by,hold_kind,hold_reason
 
 RULE='================================================================================'
@@ -489,14 +488,40 @@ print_backlog_tasks_axi_compact() {
   elif ! ready=$(tasks-axi ready --file "$path" 2>&1); then
     err=$ready
   else
-    printf 'compact backlog listing (tasks-axi; done rows omitted; every in-flight, held, and blocked row shown in full; ready queued bounded to %s; task bodies omitted)\n' \
+    printf 'compact backlog inventory (tasks-axi; done rows omitted; in-flight, held, and blocked membership de-duplicated; ready queued bounded to %s; task bodies omitted)\n' \
       "$QUEUED_LIMIT"
-    printf '\nin flight:\n'
-    printf '%s\n' "$in_flight" | strip_axi_help
-    printf '\nheld (captain- or time-gated; an in-flight item that is also held appears in both groups):\n'
-    printf '%s\n' "$held" | strip_axi_help
-    printf '\nblocked queued:\n'
-    printf '%s\n' "$blocked" | strip_axi_help
+    printf '\nactive, held, and blocked (one row per task):\n'
+    {
+      printf '@@category=in_flight\n%s\n' "$in_flight"
+      printf '@@category=held\n%s\n' "$held"
+      printf '@@category=blocked\n%s\n' "$blocked"
+    } | awk '
+      /^@@category=/ { category = substr($0, 12); rows = 0; next }
+      /^tasks\[/ { rows = 1; next }
+      /^help\[/ { rows = 0; next }
+      rows && /^[[:space:]]/ {
+        row = $0
+        sub(/^[[:space:]]+/, "", row)
+        id = row
+        sub(/,.*/, "", id)
+        if (!(id in seen)) {
+          seen[id] = 1
+          order[++count] = id
+          record[id] = row
+          categories[id] = category
+        } else if (index("+" categories[id] "+", "+" category "+") == 0) {
+          categories[id] = categories[id] "+" category
+        }
+        next
+      }
+      END {
+        printf "tasks[%d]{categories,id,state,kind,repo,title,blocked_by,hold_kind,hold_reason}:\n", count
+        for (i = 1; i <= count; i++) {
+          id = order[i]
+          printf "  %s,%s\n", categories[id], record[id]
+        }
+      }
+    '
     printf '\nready queued (dispatchable now):\n'
     print_ready_queued_bounded "$ready"
     return 0
@@ -527,17 +552,113 @@ print_backlog_compact() {
   fi
 }
 
-print_status_tail() {
+print_latest_status() {
   local status=$1 line
-  printf 'status tail (last %s line(s), each capped at %s characters, wake-EVENT history, not current state; full log: %s):\n' \
-    "$STATUS_TAIL" "$FM_LINE_CAP_DEFAULT" "$status"
-  # A crewmate writes its own status lines, so their length is unbounded: one
-  # observed line ran 865 characters. Cap each one the way the wake digest's
-  # OPEN DECISIONS section does; the lede carries the state word and the key,
-  # and the full log path above reaches the rest.
+  printf 'latest status event (capped at %s characters, not current state; full log: %s):\n' \
+    "$FM_LINE_CAP_DEFAULT" "$status"
+  line=$(tail -n 1 "$status" 2>/dev/null || true)
+  if [ -n "$line" ]; then fm_cap_line "$line"; else printf '(present, empty)\n'; fi
+}
+
+print_meta_summary() { # <meta-file> <task-id>
+  local meta=$1 id=$2 line key value duplicate_keys=''
+  local executor='' provider='' kind='' harness='' backend='' window='' terminal=''
+  local project='' worktree='' spawn_gen='' remote_host='' remote_root=''
+  local executor_n=0 provider_n=0 kind_n=0 harness_n=0 backend_n=0 window_n=0 terminal_n=0
+  local project_n=0 worktree_n=0 spawn_gen_n=0 remote_host_n=0 remote_root_n=0 target status
   while IFS= read -r line || [ -n "$line" ]; do
-    fm_cap_line "$line"
-  done < <(tail -n "$STATUS_TAIL" "$status")
+    key=${line%%=*}
+    [ "$key" != "$line" ] || continue
+    value=${line#*=}
+    case "$key" in
+      executor) executor=$value; executor_n=$((executor_n + 1)) ;;
+      provider) provider=$value; provider_n=$((provider_n + 1)) ;;
+      kind) kind=$value; kind_n=$((kind_n + 1)) ;;
+      harness) harness=$value; harness_n=$((harness_n + 1)) ;;
+      backend) backend=$value; backend_n=$((backend_n + 1)) ;;
+      window) window=$value; window_n=$((window_n + 1)) ;;
+      terminal) terminal=$value; terminal_n=$((terminal_n + 1)) ;;
+      project) project=$value; project_n=$((project_n + 1)) ;;
+      worktree) worktree=$value; worktree_n=$((worktree_n + 1)) ;;
+      spawn_gen) spawn_gen=$value; spawn_gen_n=$((spawn_gen_n + 1)) ;;
+      remote_host) remote_host=$value; remote_host_n=$((remote_host_n + 1)) ;;
+      remote_root) remote_root=$value; remote_root_n=$((remote_root_n + 1)) ;;
+    esac
+  done < "$meta" 2>/dev/null || {
+    printf '\n--- %s ---\nmetadata: unreadable (full metadata: %s)\n' "$id" "$meta"
+    return 0
+  }
+  for key in executor provider kind harness backend window terminal project worktree spawn_gen remote_host remote_root; do
+    eval "value=\${${key}_n}"
+    [ "$value" -le 1 ] || duplicate_keys="${duplicate_keys}${duplicate_keys:+,}$key"
+  done
+  [ -n "$executor" ] || executor=local-agent
+  [ -n "$kind" ] || kind=ship
+  [ -n "$backend" ] || backend=tmux
+  if [ "$backend" = orca ] && [ -n "$terminal" ]; then target=$terminal; else target=$window; fi
+  printf '\n--- %s ---\n' "$id"
+  printf 'identity: executor=%s kind=%s' "$executor" "$kind"
+  [ -z "$provider" ] || printf ' provider=%s' "$provider"
+  [ -z "$harness" ] || printf ' harness=%s' "$harness"
+  printf ' backend=%s' "$backend"
+  [ -z "$target" ] || printf ' target=%s' "$target"
+  [ -z "$project" ] || printf ' project=%s' "$project"
+  [ -z "$worktree" ] || printf ' worktree=%s' "$worktree"
+  [ -z "$spawn_gen" ] || printf ' spawn_gen=%s' "$spawn_gen"
+  [ -z "$remote_host" ] || printf ' remote_host=%s' "$remote_host"
+  [ -z "$remote_root" ] || printf ' remote_root=%s' "$remote_root"
+  printf '\nmetadata detail: %s\n' "$meta"
+  [ -z "$duplicate_keys" ] || printf 'metadata ambiguity: duplicate key(s) %s; inspect the full metadata before acting.\n' "$duplicate_keys"
+
+  if [ "$executor" = cloud-worker ] || [ "$executor" = remote-agent ]; then
+    printf 'endpoint: not applicable (executor=%s provider=%s)\n' "$executor" "${provider:-unknown}"
+    FM_ROOT_OVERRIDE="$FM_ROOT" FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      FM_DATA_OVERRIDE="$DATA" FM_CONFIG_OVERRIDE="$CONFIG" \
+      "$SCRIPT_DIR/fm-task-state.sh" "$id" 2>/dev/null \
+      || printf 'state: unknown · source: cloud-readback · provider-aware state read failed\n'
+  elif [ -n "$window" ]; then
+    if fm_backend_target_exists "$backend" "${target:-$window}" "fm-$id"; then
+      printf 'endpoint: alive (backend=%s window=%s)\n' "$backend" "$window"
+    else
+      printf 'endpoint: dead (backend=%s window=%s)\n' "$backend" "$window"
+    fi
+  else
+    printf 'endpoint: unknown (no window recorded)\n'
+  fi
+
+  status="$STATE/$id.status"
+  if [ -f "$status" ]; then print_latest_status "$status"
+  else printf 'latest status event: (no status file yet: %s)\n' "$status"
+  fi
+}
+
+print_work_inventory() {
+  local tmp meta id slot=0 active=0 pid rc=0
+  local -a outputs=() pids=()
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-session-start-fleet.XXXXXX") || {
+    printf 'inventory unavailable: could not allocate private temporary storage\n'
+    return 0
+  }
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] || continue
+    id=$(basename "$meta" .meta)
+    outputs[slot]="$tmp/$slot.out"
+    print_meta_summary "$meta" "$id" >"${outputs[slot]}" &
+    pids[active]=$!
+    slot=$((slot + 1)); active=$((active + 1))
+    if [ "$active" -ge "$TASK_READ_CONCURRENCY" ]; then
+      for pid in "${pids[@]}"; do wait "$pid" || rc=1; done
+      pids=(); active=0
+    fi
+  done
+  if [ "$active" -gt 0 ]; then
+    for pid in "${pids[@]}"; do wait "$pid" || rc=1; done
+  fi
+  if [ "$slot" -eq 0 ]; then printf '(none)\n'; else
+    for meta in "${outputs[@]}"; do cat "$meta"; done
+  fi
+  [ "$rc" -eq 0 ] || printf 'inventory warning: one or more task summaries failed; inspect state/*.meta directly.\n'
+  rm -rf -- "$tmp"
 }
 
 hash_file_sha256() {
@@ -800,8 +921,9 @@ fi
 stage read-once
 section "READ-ONCE CONTRACT"
 cat <<'EOF'
-Everything below is printed in full for this session start: every state/*.meta,
-a compact data/backlog.md listing, a bounded tail of every state/*.status,
+Everything below represents these startup sources once: selected identity fields
+from every state/*.meta, a de-duplicated compact data/backlog.md inventory, the
+newest event from every state/*.status,
 data/projects.md, data/secondmates.md, data/captain.md, data/captain-shared.md,
 and data/learnings.md.
 Do NOT re-read any of them after reading this digest, and do NOT bulk-read
@@ -811,9 +933,8 @@ point of this command.
 Go to a source directly only when:
   - this digest flagged it ABSENT (then rebuild or create it per AGENTS.md),
   - its contents looked unparseable or corrupt,
-  - an individual full status log is needed for older wake-event history, or a
-    status line was capped and its tail matters (each task's full log path is
-    printed with its tail),
+  - omitted metadata fields or older status events are needed (each task prints
+    its full metadata and status-log paths), or a status line was capped,
   - a full task body is needed (bin/fm-tasks-axi.sh show <id> --full, or data/backlog.md),
   - the backlog listing disclosed omitted queued items and this turn needs them,
   - the NETWORK CHECKS section reported its checks still IN PROGRESS and this
@@ -829,47 +950,8 @@ stage fleet-state
 section "FLEET STATE"
 print_backlog_compact "$DATA/backlog.md" "data/backlog.md"
 
-subsection "Work under way (state/*.meta)"
-META_FOUND=0
-for meta in "$STATE"/*.meta; do
-  [ -f "$meta" ] || continue
-  META_FOUND=1
-  id=$(basename "$meta" .meta)
-  printf '\n--- %s ---\n' "$id"
-  cat "$meta"
-
-  executor=$(fm_meta_get "$meta" executor)
-  [ -n "$executor" ] || executor=local-agent
-  if [ "$executor" = cloud-worker ] || [ "$executor" = remote-agent ]; then
-    provider=$(fm_meta_get "$meta" provider)
-    printf 'endpoint: not applicable (executor=%s provider=%s)\n' "$executor" "${provider:-unknown}"
-    FM_ROOT_OVERRIDE="$FM_ROOT" FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
-      FM_DATA_OVERRIDE="$DATA" FM_CONFIG_OVERRIDE="$CONFIG" \
-      "$SCRIPT_DIR/fm-task-state.sh" "$id" 2>/dev/null \
-      || printf 'state: unknown · source: cloud-readback · provider-aware state read failed\n'
-  else
-    window=$(fm_meta_get "$meta" window)
-    target=$(fm_backend_target_of_meta "$meta")
-    if [ -n "$window" ]; then
-      backend=$(fm_backend_of_meta "$meta")
-      if fm_backend_target_exists "$backend" "${target:-$window}" "fm-$id"; then
-        printf 'endpoint: alive (backend=%s window=%s)\n' "$backend" "$window"
-      else
-        printf 'endpoint: dead (backend=%s window=%s)\n' "$backend" "$window"
-      fi
-    else
-      printf 'endpoint: unknown (no window recorded)\n'
-    fi
-  fi
-
-  status="$STATE/$id.status"
-  if [ -f "$status" ]; then
-    print_status_tail "$status"
-  else
-    printf 'status tail: (no status file yet: %s)\n' "$status"
-  fi
-done
-[ "$META_FOUND" -eq 1 ] || printf '(none)\n'
+subsection "Work under way (one concise row per state/*.meta)"
+print_work_inventory
 
 subsection "Orphan status logs (state/*.status without matching .meta)"
 ORPHAN_STATUS_FOUND=0
@@ -879,7 +961,7 @@ for status in "$STATE"/*.status; do
   [ -f "$STATE/$id.meta" ] && continue
   ORPHAN_STATUS_FOUND=1
   printf '\n--- %s ---\n' "$id"
-  print_status_tail "$status"
+  print_latest_status "$status"
 done
 [ "$ORPHAN_STATUS_FOUND" -eq 1 ] || printf '(none)\n'
 
