@@ -99,9 +99,11 @@
 # refreshed worker.ready for 10 seconds; and the directory itself is 10 seconds
 # old. A live process holding the recorded pid whose identity cannot be read,
 # and a symlinked owner record, always preserve the lock, because that
-# uncertainty is what keeps two workers from serving one queue. A reclaimed lock
-# is renamed aside and removed whole, so temp records an interrupted owner left
-# behind can never wedge it.
+# uncertainty is what keeps two workers from serving one queue. Reclaims are
+# serialized by the worker.lock.reclaim mutex and re-judge the lock while
+# holding it, so a lock created after an earlier judgement is never removed. A
+# reclaimed lock is renamed aside and removed whole, so temp records an
+# interrupted owner left behind can never wedge it.
 #
 # Worker starts are bounded per account, not per supervisor. Every Linux
 # restart supervisor charges FM_REMOTE_JOB_RESTART_BUDGET (default 12, at most
@@ -1248,17 +1250,44 @@ fm_remote_job_lock_reclaimable() { # <account-home> <owner-status>
 # in it. An owner killed between creating a temp record and renaming it into
 # place leaves .pid.*, .start.*, or .command.* behind, and a directory holding
 # any of them can never be removed with rmdir, which is how one power cut used
-# to wedge every later worker. The directory is first renamed aside in one
-# atomic step, so a replacement never observes it half-deleted, then removed.
-fm_remote_job_reclaim_lock_dir() { # <lock-dir>
-  local lock=$1 aside
-  [ -d "$lock" ] && [ ! -L "$lock" ] || return 1
-  aside=$(umask 077; mktemp -d "$FM_REMOTE_JOB_STATE/.reclaimed-lock.XXXXXX") || return 1
-  if ! mv -- "$lock" "$aside/lock" 2>/dev/null; then
-    rmdir "$aside" 2>/dev/null || true
-    return 1
+# to wedge every later worker. Reclaims are serialized by the worker.lock.reclaim
+# mutex, and the holder re-judges the lock immediately before renaming it aside
+# in one atomic step, so a lock another worker created after an earlier
+# judgement is less than 10 seconds old and survives. A mutex left by a killed
+# reclaimer is removed once it is 10 seconds old; two reclaimers judging the
+# same abandoned mutex stale at once can still both proceed. Returns 0 once the
+# lock is gone, 2 when it must be kept or another reclaim is in progress, and 1
+# on failure.
+fm_remote_job_reclaim_lock_dir() { # <account-home>
+  local account_home=$1 lock mutex mtime aside owner_status result=2
+  fm_remote_job_prepare_state "$account_home" || return 1
+  lock=$(fm_remote_job_worker_lock_path)
+  mutex="$lock.reclaim"
+  if ! (umask 077; mkdir "$mutex") 2>/dev/null; then
+    [ -d "$mutex" ] && [ ! -L "$mutex" ] || return 1
+    mtime=$(fm_remote_job_path_mtime "$mutex" 2>/dev/null || true)
+    case "$mtime" in ''|*[!0-9]*) return 2 ;; esac
+    [ $(($(date +%s) - mtime)) -gt 10 ] || return 2
+    rmdir -- "$mutex" 2>/dev/null || return 2
+    (umask 077; mkdir "$mutex") 2>/dev/null || return 2
   fi
-  rm -rf -- "$aside"
+  if [ -d "$lock" ] && [ ! -L "$lock" ]; then
+    fm_remote_job_lock_owner_status "$account_home"
+    owner_status=$?
+    if fm_remote_job_lock_reclaimable "$account_home" "$owner_status"; then
+      result=1
+      if aside=$(umask 077; mktemp -d "$FM_REMOTE_JOB_STATE/.reclaimed-lock.XXXXXX"); then
+        if mv -- "$lock" "$aside/lock" 2>/dev/null; then
+          rm -rf -- "$aside"
+          result=0
+        else
+          rmdir "$aside" 2>/dev/null || true
+        fi
+      fi
+    fi
+  fi
+  rmdir -- "$mutex" 2>/dev/null || true
+  return "$result"
 }
 
 fm_remote_job_worker_owned_alive() {

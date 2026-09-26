@@ -181,6 +181,38 @@ fm_remote_job_wait "$ACCOUNT_HOME" "$CLAIMED_ID" || fail "a job whose claim name
 [ "$FM_REMOTE_JOB_EXIT" -eq 0 ] || fail "the ownerless-claim job exited $FM_REMOTE_JOB_EXIT"
 pass "a job claim that names no owner is reclaimed and its job served"
 
+# Concurrent children after a power cut all judge the same stale lock
+# reclaimable; one reclaims it and a new owner takes the lock before a slower
+# reclaimer acts on its earlier judgement.
+use_state reclaim-race
+LOCK="$STATE/worker.lock"
+mkdir -m 700 "$LOCK"
+: > "$LOCK/.pid.AbC123"
+touch -t 200001010000 "$LOCK"
+fm_remote_job_lock_owner_status "$ACCOUNT_HOME"
+STALE_STATUS=$?
+fm_remote_job_lock_reclaimable "$ACCOUNT_HOME" "$STALE_STATUS" || fail "the stale ownerless lock was not judged reclaimable"
+fm_remote_job_reclaim_lock_dir "$ACCOUNT_HOME" || fail "the first reclaimer did not reclaim the stale lock"
+sleep 30 &
+HOLDER_PID=$!
+mkdir -m 700 "$LOCK"
+printf '%s\n' "$HOLDER_PID" > "$LOCK/pid"
+fm_remote_job_reclaim_lock_dir "$ACCOUNT_HOME"
+RECLAIM_STATUS=$?
+[ "$RECLAIM_STATUS" -eq 2 ] || fail "a reclaim acting on a stale judgement returned $RECLAIM_STATUS instead of keeping the fresh lock"
+[ "$(cat "$LOCK/pid" 2>/dev/null)" = "$HOLDER_PID" ] || fail "a late reclaim removed the fresh lock or its owner record"
+assert_absent "$LOCK.reclaim" "the reclaim left its mutex behind"
+mkdir -m 700 "$LOCK.reclaim"
+touch -t 200001010000 "$LOCK.reclaim"
+rm -rf -- "$LOCK"
+mkdir -m 700 "$LOCK"
+touch -t 200001010000 "$LOCK"
+fm_remote_job_reclaim_lock_dir "$ACCOUNT_HOME" || fail "a mutex abandoned by a killed reclaimer wedged reclaim"
+assert_absent "$LOCK" "the reclaim behind an abandoned mutex kept the stale lock"
+kill -KILL "$HOLDER_PID" 2>/dev/null || true
+HOLDER_PID=
+pass "a late reclaim keeps a fresh lock and an abandoned reclaim mutex never wedges reclaim"
+
 # --- 2b. a lock whose live owner cannot be verified is preserved --------------
 
 use_state unverifiable

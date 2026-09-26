@@ -175,8 +175,8 @@ worker_acquire_lock() {
     owner_status=$?
     [ "$owner_status" -ne 0 ] || return 2
     if fm_remote_job_lock_reclaimable "$account_home" "$owner_status"; then
-      fm_remote_job_reclaim_lock_dir "$WORKER_LOCK" || return 1
-      continue
+      fm_remote_job_reclaim_lock_dir "$account_home"
+      case $? in 0) continue ;; 2) ;; *) return 1 ;; esac
     fi
     attempt=$((attempt + 1))
     sleep 0.1
