@@ -559,7 +559,11 @@ fm_lock_claim() {
 fm_lock_try_create() {
   local lockdir=$1 allowed_steal_owner=${2:-} ownerdir
   FM_LOCK_OWNER_DIR=
-  ownerdir=$(fm_lock_owner_dir "$lockdir") || return 1
+  # This is the point where lock storage availability is distinguishable from
+  # ordinary contention: no owner directory could be created at all. Callers
+  # may propagate status 2 to avoid treating an unusable lock path as a held
+  # lock and recursively extending `.steal` forever.
+  ownerdir=$(fm_lock_owner_dir "$lockdir") || return 2
   if [ -e "$lockdir" ] || [ -L "$lockdir" ]; then
     fm_lock_discard_owner "$ownerdir"
     return 1
@@ -989,9 +993,14 @@ fm_lock_reap_dead_link() {
 # hold abandoned by this very process (a trap interrupted its critical section)
 # is reclaimed like fm_lock_try_acquire's self-held branch.
 fm_lock_try_acquire_steal_mutex() {  # <steal-lock>
-  local lockdir=$1 current
+  local lockdir=$1 current rc
   FM_LOCK_OWNER_DIR=
-  fm_lock_try_create "$lockdir" && return 0
+  if fm_lock_try_create "$lockdir"; then
+    return 0
+  else
+    rc=$?
+  fi
+  [ "$rc" -eq 2 ] && return 2
   fm_current_pid current || return 1
   fm_lock_reap_dead_link "$lockdir.steal" || true
   if [ "$(cat "$lockdir/pid" 2>/dev/null || true)" = "$current" ]; then
@@ -999,7 +1008,12 @@ fm_lock_try_acquire_steal_mutex() {  # <steal-lock>
   elif [ -e "$lockdir" ] || [ -L "$lockdir" ]; then
     fm_lock_reap_dead_link "$lockdir" || return 1
   fi
-  fm_lock_try_create "$lockdir"
+  if fm_lock_try_create "$lockdir"; then
+    return 0
+  else
+    rc=$?
+  fi
+  return "$rc"
 }
 
 fm_lock_try_acquire() {
@@ -1010,7 +1024,10 @@ fm_lock_try_acquire() {
 
   if fm_lock_try_create "$lockdir"; then
     return 0
+  else
+    rc=$?
   fi
+  [ "$rc" -eq 2 ] && return 2
 
   fm_current_pid current || return 1
   pid=$(cat "$lockdir/pid" 2>/dev/null || true)
@@ -1026,9 +1043,11 @@ fm_lock_try_acquire() {
     fm_lock_remove_path "$lockdir" || true
     if fm_lock_try_create "$lockdir"; then
       return 0
+    else
+      rc=$?
     fi
     FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
-    return 1
+    return "$rc"
   fi
   if fm_pid_alive "$pid"; then
     FM_LOCK_HELD_PID=$pid
@@ -1040,9 +1059,13 @@ fm_lock_try_acquire() {
   fi
 
   steal="$lockdir.steal"
-  if ! fm_lock_try_acquire_steal_mutex "$steal"; then
+  if fm_lock_try_acquire_steal_mutex "$steal"; then
+    :
+  else
+    rc=$?
     FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
     FM_LOCK_OWNER_DIR=
+    [ "$rc" -eq 2 ] && return 2
     return 1
   fi
   steal_owner=${FM_LOCK_OWNER_DIR:-}
@@ -1092,6 +1115,8 @@ fm_lock_try_acquire() {
     rc=0
     # shellcheck disable=SC2034 # Read by sourcing callers after lock acquisition.
     FM_LOCK_RECOVERED_PID=$cur
+  else
+    rc=$?
   fi
   if [ "$rc" -ne 0 ]; then
     # shellcheck disable=SC2034 # Read by callers after fm_lock_try_acquire returns.
@@ -1105,6 +1130,23 @@ fm_lock_try_acquire() {
 fm_lock_acquire_wait() {
   local lockdir=$1
   while ! fm_lock_try_acquire "$lockdir"; do
+    sleep 0.1
+  done
+}
+
+# Wait while a lock is owned by another process, but return an error if the
+# lock or its stale-owner recovery path cannot be created. Most callers rely
+# on the unbounded wait above; process-event source locks use this variant
+# because they live outside a Codex workspace and may be read-only in-sandbox.
+fm_lock_acquire_wait_or_fail_on_create_error() {
+  local lockdir=$1 rc
+  while :; do
+    if fm_lock_try_acquire "$lockdir"; then
+      return 0
+    else
+      rc=$?
+    fi
+    [ "$rc" -eq 2 ] && return 2
     sleep 0.1
   done
 }
