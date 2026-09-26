@@ -32,9 +32,10 @@
 #   no-mistakes-prod-only is a registry policy rather than a task mode and is
 #   refused as a flag value.
 #   --branch-prefix is the optional prefix selected at intake for this ship's
-#   immutable branch, defaulting to "fm/". It must agree with the branch recorded
-#   in the brief, and is refused on scouts, secondmates, and relaunches. When the
-#   selected branch does not match the project's registered prefix, the spawn
+#   immutable branch, defaulting to "fm/". The branch is derived by
+#   bin/fm-branch-name-lib.sh, the same derivation the brief uses, so the two never
+#   disagree. It must agree with the branch recorded in the brief, and is refused
+#   on scouts, secondmates, and relaunches. When the selected branch does not match the project's registered prefix, the spawn
 #   prints a one-line deviation notice and continues, because the registered
 #   prefix is the captain's standing preference and the brief agreement above
 #   already guarantees the worker's instructions match the branch.
@@ -607,6 +608,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
+# shellcheck source=bin/fm-branch-name-lib.sh
+. "$SCRIPT_DIR/fm-branch-name-lib.sh"
 # shellcheck source=bin/fm-trace-context-lib.sh
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh
@@ -1481,7 +1484,7 @@ fm_task_id_creation_valid "$ID" || {
   exit 2
 }
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" = ship ]; then
-  BRANCH="$BRANCH_PREFIX$ID"
+  BRANCH=$(fm_ship_branch_name "$BRANCH_PREFIX" "$ID" "$CONFIG")
   if ! git check-ref-format --branch "$BRANCH" >/dev/null 2>&1; then
     echo "error: --branch-prefix and task id must form a valid git branch (got '$BRANCH')" >&2
     exit 1
@@ -3050,8 +3053,9 @@ if [ "$KIND" = ship ]; then
   # announced, not refused: the brief-vs-spawn agreement above already
   # guarantees the worker's instructions match the branch this spawn selected.
   STANDING_BRANCH=$("$FM_ROOT/bin/fm-project-mode.sh" --branch-prefix "$PROJ_NAME" 2>/dev/null) || STANDING_BRANCH=
-  if [ "$BRANCH" != "$STANDING_BRANCH$ID" ]; then
-    echo "notice: $ID ships branch=$BRANCH while $PROJ_NAME registers the ship-branch prefix '$STANDING_BRANCH' (branch $STANDING_BRANCH$ID) - the task's branch and PR will read as firstmate-authored; proceed only on a current explicit captain instruction or an intake judgment you can state" >&2
+  STANDING_SHIP_BRANCH=$(fm_ship_branch_name "$STANDING_BRANCH" "$ID" "$CONFIG")
+  if [ "$BRANCH" != "$STANDING_SHIP_BRANCH" ]; then
+    echo "notice: $ID ships branch=$BRANCH while $PROJ_NAME registers the ship-branch prefix '$STANDING_BRANCH' (branch $STANDING_SHIP_BRANCH) - the task's branch and PR will read as firstmate-authored; proceed only on a current explicit captain instruction or an intake judgment you can state" >&2
   fi
 fi
 
