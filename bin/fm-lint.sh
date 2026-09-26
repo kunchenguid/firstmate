@@ -57,8 +57,9 @@
 # process runs under an enforced envelope: a wall deadline
 # (FM_LINT_ROOT_SECONDS, default 1200), a terminate-then-kill cleanup grace
 # (FM_LINT_ROOT_GRACE, default 5), and a per-process address-space limit
-# (FM_LINT_ROOT_MEMORY_KIB, default 6291456 = 6 GiB per analysis process, so
-# two concurrent roots stay inside a 16 GiB job with headroom). The watchdog
+# (FM_LINT_ROOT_MEMORY_KIB, default 6291456 = 6 GiB of virtual address
+# space per analysis process). This is not a resident-memory ceiling; check
+# aggregate runner RSS in CI. The watchdog
 # is the shared bin/fm-timeout-lib.sh group-kill pattern, so a deadline or an
 # interrupt removes the whole owned tree. Bounds mode proves the watchdog can
 # actually bound a probe command and that the host accepts the memory limit
@@ -73,7 +74,8 @@
 # measured) to a roots log as each root completes, so a mid-run kill still
 # leaves the completed record and names the root in flight as
 # begun-but-unfinished. With --telemetry the log is retained at
-# <telemetry>.roots.tsv; otherwise it lives only in the
+# <telemetry-without-.tsv>.roots.tsv (or <telemetry>.roots.tsv if there is no
+# .tsv suffix); otherwise it lives only in the
 # run's scratch dir. Reason values are ok, findings, timeout, memory,
 # signal:<sig>, limit-unavailable, or error:<rc>. In partition mode begin/end
 # lines also stream to stderr, and an abnormal root end is always reported
@@ -857,12 +859,9 @@ fi
 ROOT_SECONDS=${FM_LINT_ROOT_SECONDS:-1200}
 ROOT_GRACE=${FM_LINT_ROOT_GRACE:-5}
 # 6 GiB of address space per analysis process. ulimit -v caps virtual address
-# space, not resident memory, and ShellCheck's GHC runtime keeps roughly a
-# third of that space as reservation, so 6 GiB yields about a 4 GiB working
-# heap budget per root. Measured on Linux during this change: eleven real
-# canonical roots ran out of memory under a 4 GiB cap while the largest
-# passing root peaked near 2.8 GiB resident. Two 6 GiB roots plus the runner's
-# own footprint stay inside the 16 GiB job with headroom. A root that still
+# space, not resident memory; ShellCheck's GHC runtime reserves virtual
+# address space in addition to its working heap. The two address-space caps
+# do not bound aggregate resident use of the 16 GiB runner. A root that
 # exceeds the cap fails by name; the roots sidecar records each root's peak
 # RSS so roots approaching the budget stay visible as reduction candidates.
 ROOT_MEMORY_KIB=${FM_LINT_ROOT_MEMORY_KIB:-6291456}
@@ -953,7 +952,8 @@ OUTPUT_DIR="$TMP_ROOT/output"
 mkdir -p "$OUTPUT_DIR"
 
 # The roots log is the retained per-root lifecycle sidecar; beside --telemetry
-# it survives as <telemetry>.roots.tsv even when a run is killed mid-flight.
+# it survives as ${TELEMETRY%.tsv}.roots.tsv even when a run is killed
+# mid-flight.
 if [ -n "$TELEMETRY" ]; then
   ROOTS_LOG=${TELEMETRY%.tsv}.roots.tsv
 else
