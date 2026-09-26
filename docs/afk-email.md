@@ -55,6 +55,7 @@ With the exact destination but incomplete or invalid mail transport settings, aw
 
 
 
+
 No credential needs to be shared with Firstmate.
 
 ## Replies and limits
