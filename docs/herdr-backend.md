@@ -764,7 +764,7 @@ Polling runs every cycle and remains the permanent fallback when any of these is
 
 There is still one watcher process; the event reader is a bounded child of that watcher.
 
-`tests/fm-backend-herdr-eventwait-smoke.test.sh`, `tests/fm-transition-lib.test.sh`, and `tests/fm-supervision-events.test.sh` cover capability, subscribe-then-reconcile ordering, dedupe, exemptions, and polling fallback.
+`tests/fm-backend-herdr.test.sh`, `tests/fm-backend-herdr-eventwait-smoke.test.sh`, `tests/fm-transition-lib.test.sh`, and `tests/fm-supervision-events.test.sh` cover capability, subscribe-then-reconcile ordering, dedupe, exemptions, and polling fallback.
 
 ## Away-mode supervisor support
 
