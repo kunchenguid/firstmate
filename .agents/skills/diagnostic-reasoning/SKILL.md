@@ -43,6 +43,27 @@ Change one condition at a time where practical, and record whether the symptom a
 Seek disconfirming evidence deliberately: name what observation would falsify the leading explanation, run that check when feasible, and retain contradictory results instead of explaining them away.
 Compare the final explanation against the proven path and show why the proposed causal boundary accounts for both the failure and the success.
 
+## Shared database diagnostics
+
+Treat a database connection as shared state whenever a pooler, connection pool, or reusable client can return it to another caller.
+Keep read-only protection inside one explicit transaction and finish that transaction before releasing the connection.
+
+Use this form, keeping every diagnostic query on the same transaction client:
+
+```sql
+BEGIN;
+SET TRANSACTION READ ONLY;
+SET LOCAL statement_timeout = '60s';
+-- diagnostic queries
+ROLLBACK;
+```
+
+For `psql`, pass `--single-transaction --set=ON_ERROR_STOP=1` and put `SET TRANSACTION READ ONLY` plus any temporary settings in the SQL batch.
+For a client library, use its transaction callback with a read-only transaction option when available and do not run later queries through the pool after the callback returns.
+Never use `SET default_transaction_read_only = on`, `SET SESSION default_transaction_read_only = on`, or `SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY` on a pooled connection.
+A startup option such as `-c default_transaction_read_only=on` does not replace transaction scoping when the connection can be reused by a writer.
+Prefer a database role without write privileges for diagnostics when the provider supports one; transaction-scoped read-only state is an isolation rule, not a privilege boundary.
+
 ## Scope and act on the result
 
 A diagnosis brief should ask for the reproduction, trigger/mask/symptom separation, divergent and proven path comparison, relevant history, smallest counterfactual, and disconfirming evidence in the report.
