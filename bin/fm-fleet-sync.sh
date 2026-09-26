@@ -80,7 +80,7 @@ fi
 [ $# -le 1 ] || { usage; exit 1; }
 
 project_label() {
-  local entry matched= physical= named= exact= matches=0 physical_matches=0 name=
+  local entry matched='' physical='' named='' exact='' matches=0 physical_matches=0 name=''
   if [ "$(dirname "$PROJ")" -ef "$PROJECTS" ]; then
     name=$(basename "$PROJ")
     shopt -s nocasematch
