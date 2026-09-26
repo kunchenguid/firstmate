@@ -270,9 +270,12 @@ The parent is the placement and ordering reference the projection is bound under
 When Herdr identifies that exact parent as the source workspace for the task's exact physical project checkout, Firstmate preallocates the task's durable Treehouse lease and opens that linked checkout through `herdr worktree open --workspace <exact-parent>`.
 That same-repository path renders a primary-home or secondmate-home task one level below its exact owner in Herdr instead of placing it beside the owner as a sibling.
 The response must prove a fresh, not-already-open linked checkout whose workspace, tab, pane, checkout path, and source-parent worktree listing all agree exactly before the spawn may continue.
-The preallocated checkout receives the same Firstmate slot claim as the ordinary interactive Treehouse path, and an aborted spawn returns it under the existing project lock only after exact presentation cleanup has run.
+The preallocated checkout receives the same Firstmate slot claim as the ordinary interactive Treehouse path.
+An aborted spawn returns it under the existing project lock only after exact presentation cleanup has run.
+Herdr groups only linked Git worktree workspaces from the source workspace's repository, so it cannot nest a task from another project beneath that exact home.
 When the exact owning home represents another repository, Herdr cannot group the task checkout beneath it, so the established top-level disposable workspace path remains unchanged.
-A Holtek-project task launched by a home represented by a Firstmate-project workspace therefore remains top-level; Firstmate does not create per-project home spaces, adopt another repository's source workspace, or weaken exact-parent binding to make it look nested.
+A Holtek-project task launched by a home represented by a Firstmate-project workspace therefore remains a top-level sibling in a disposable workspace with the `└ ` corner label; the glyph and best-effort adjacency are not actual indentation.
+Firstmate does not create per-project home spaces, adopt another repository's source workspace, or weaken exact-parent binding to make it look nested.
 The exact owner remains the journal, placement, and ordering reference in either path, and projected children are never collapsed into that parent.
 The normal `fm-<id>` task tab is created in the exact new workspace returned by Herdr.
 Only the exact seeded default tab returned by the same workspace-create or worktree-open response can be pruned.
