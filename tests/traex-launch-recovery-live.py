@@ -38,15 +38,16 @@ wrapper=lab/'wrap/herdr'
 wrapper.write_text('''#!/usr/bin/env python3
 import os,subprocess,sys
 args=sys.argv[1:]
-lab=LAB; helper=HELPER; session=SESSION
-if os.environ.get('LAB_INSIDE')=='1':os.execv(REAL,[REAL]+args)
+lab=%r; helper=%r; session=%r
+if os.environ.get('LAB_INSIDE')=='1':os.execv(%r,[%r]+args)
 if '--session' in args:
  i=args.index('--session');assert args[i+1]==session;del args[i:i+2]
 if args[:2]==['pane','run'] and args[3]=='treehouse get':
- args[3]='cd '+WT+'; export PATH='+WRAP+':"$PATH"'
+ args[3]='cd '+%r+'; export PATH='+%r+':"$PATH"'
 env=dict(os.environ,LAB_INSIDE='1')
 sys.exit(subprocess.call([helper,'run',session]+args,env=env))
-'''.replace('LAB;',repr(str(lab))+';').replace('HELPER;',repr(helper)+';').replace('SESSION\n',repr(session)+'\n').replace('REAL',repr(shutil.which('herdr'))).replace('WT',repr(shlex.quote(str(wt)))).replace('WRAP',repr(shlex.quote(str(lab/'wrap')))))
+''' % (str(lab), helper, session, shutil.which('herdr'), shutil.which('herdr'),
+       shlex.quote(str(wt)), shlex.quote(str(lab/'wrap'))))
 wrapper.chmod(0o755)
 env=dict(os.environ,PATH=str(lab/'wrap')+':'+os.environ['PATH'],FM_HOME=str(home),FM_BACKEND='herdr',HERDR_SESSION=session,FM_SPAWN_NO_GUARD='1',TRAE_HOME=str(lab/'traex-home'),FM_BACKEND_HERDR_TRAEX_START_POLLS='40')
 for k in ('FM_ROOT_OVERRIDE','FM_STATE_OVERRIDE','FM_DATA_OVERRIDE','FM_CONFIG_OVERRIDE','FM_PROJECTS_OVERRIDE','HERDR_PANE_ID','HERDR_SOCKET_PATH','HERDR_ENV','HERDR_WORKSPACE_ID','HERDR_TAB_ID','TASKS_AXI_FILE','TASKS_AXI_BACKEND'):env.pop(k,None)

@@ -12,7 +12,10 @@ import subprocess
 import sys
 import time
 
-root, base = map(Path, sys.argv[1:])
+root, base = map(Path, sys.argv[1:3])
+harness = sys.argv[3] if len(sys.argv) > 3 else 'traex'
+versions = {'codex': '0.156.1', 'traex': '0.207.1'}
+assert harness in versions
 if sys.platform != 'linux':
     print('skip: Linux /proc required for the narrowly supported in-place recovery')
     sys.exit(0)
@@ -32,6 +35,7 @@ wrap.mkdir()
 reader = root / 'bin/fm-busy-transcript.py'
 event = root / 'bin/fm-busy-event.sh'
 env = dict(os.environ, FM_HOME=str(home), PATH=str(wrap) + ':' + os.environ['PATH'])
+env['FM_BUSY_RECOVERY_LOCK_WAIT_SECS'] = '1'
 for name in ('FM_STATE_OVERRIDE', 'FM_DATA_OVERRIDE', 'FM_CONFIG_OVERRIDE', 'FM_ROOT_OVERRIDE'):
     env.pop(name, None)
 
@@ -46,20 +50,20 @@ def snapshot_files():
 # A native executable with an exact launch argv and a real kernel lifetime.
 # The fake backend reports only its transport snapshot; recovery still reads
 # the executable, argv, env, cwd, ancestry, pgrp and start tick from /proc.
-native = base / 'traex'
+native = base / harness
 shutil.copy2(sys.executable, native)
 gen = call(event, 'arm', state, 'worker', '--state', 'unknown')
-meta = (f'harness=traex\nkind=scout\nworktree={cwd}\nproject={cwd}\n'
-        f'backend=herdr\nwindow=fm-lab-fixture:w1:p2\nbusy_gen={gen}\n'
+meta = (f'harness={harness}\nkind=scout\nworktree={cwd}\nproject={cwd}\n'
+        f'backend=herdr\nwindow=fm-lab-fixture:w1:p2\nbusy_gen={gen}\nspawn_gen=s-original\n'
         'launch_state=unconfirmed\n'
         'herdr_session=fm-lab-fixture\nherdr_workspace_id=w1\nherdr_tab_id=w1:t2\nherdr_pane_id=w1:p2\n')
 (state / 'worker.meta').write_text(meta)
-call('python3', reader, 'init', state, 'worker', 'traex', cwd, base / 'sessions', 'herdr', 'fm-lab-fixture:w1:p2')
+call('python3', reader, 'init', state, 'worker', harness, cwd, base / 'sessions', 'herdr', 'fm-lab-fixture:w1:p2')
 call('python3', reader, 'activate', state, 'worker')
 binding = (state / 'worker.busy-session').read_bytes()
 records = [
     {'type': 'session_meta', 'payload': {'id': 'session', 'session_id': 'session', 'cwd': str(cwd),
-        'source': 'cli', 'thread_source': 'user', 'originator': 'traex-tui', 'cli_version': '0.207.1'}},
+        'source': 'cli', 'thread_source': 'user', 'originator': harness + '-tui', 'cli_version': versions[harness]}},
     {'type': 'event_msg', 'payload': {'type': 'task_started', 'turn_id': 'turn', 'root_turn_id': 'turn'}},
     {'type': 'event_msg', 'payload': {'type': 'item_completed', 'thread_id': 'session', 'turn_id': 'turn',
         'item': {'type': 'UserMessage', 'content': [{'type': 'text', 'text': 'brief\nFIRSTMATE_BUSY_GENERATION=' + gen}]}}},
@@ -74,11 +78,11 @@ process = subprocess.Popen(argv, cwd=cwd, env=worker_env)
 daemon_argv = [str(native), '-c', 'import time; time.sleep(180)', 'app-server']
 daemon = subprocess.Popen(daemon_argv, cwd=cwd, env=worker_env)
 try:
-    pane = {'pane_id': 'w1:p2', 'tab_id': 'w1:t2', 'workspace_id': 'w1', 'agent': 'traex',
+    pane = {'pane_id': 'w1:p2', 'tab_id': 'w1:t2', 'workspace_id': 'w1', 'agent': harness,
             'foreground_cwd': str(cwd), 'terminal_id': 'term_original'}
     info = {'pane_id': 'w1:p2', 'shell_pid': os.getpid(), 'foreground_process_group_id': os.getpgid(process.pid),
-            'foreground_processes': [{'pid': process.pid, 'name': 'traex', 'argv': argv},
-                                     {'pid': daemon.pid, 'name': 'traex', 'argv': daemon_argv}]}
+            'foreground_processes': [{'pid': process.pid, 'name': harness, 'argv': argv},
+                                     {'pid': daemon.pid, 'name': harness, 'argv': daemon_argv}]}
     transport = base / 'transport.json'
     send_log = base / 'send.log'
     def set_transport(p=pane, i=info):
@@ -93,7 +97,7 @@ try:
                    'args=sys.argv[1:]\n'
                    'if args[:2]==["pane","get"]:\n print(json.dumps({"result":{"pane":data["pane"]}}))\n'
                    'elif args[:2]==["pane","process-info"]:\n print(json.dumps({"result":{"type":"pane_process_info","process_info":data["process_info"]}}))\n'
-                   'elif args[:2]==["agent","get"]:\n print(json.dumps({"result":{"agent":{"agent":"traex","agent_status":"idle","pane_id":data["pane"]["pane_id"],"cwd":data["pane"]["foreground_cwd"],"foreground_cwd":data["pane"]["foreground_cwd"]}}}))\n'
+                   'elif args[:2]==["agent","get"]:\n print(json.dumps({"result":{"agent":{"agent":data["pane"]["agent"],"agent_status":"idle","pane_id":data["pane"]["pane_id"],"cwd":data["pane"]["foreground_cwd"],"foreground_cwd":data["pane"]["foreground_cwd"]}}}))\n'
                    'elif args[:2]==["pane","read"]:\n print("╭────╮\\n│    │\\n╰────╯")\n'
                    'elif args[:2]==["pane","send-text"]:\n send_log.write_text(send_log.read_text() + args[3] + "\\n" if send_log.exists() else args[3] + "\\n")\n'
                    'elif args[:2]==["pane","send-keys"]:\n pass\n'
@@ -119,9 +123,14 @@ try:
     proof = check()
     assert snapshot_files() == before, 'preflight changed records'
     (base / 'proof.json').write_text(proof)
+    stale_lock = state / 'worker.busy-state.lock'
+    stale_lock.mkdir()
+    (stale_lock / 'pid').write_text('999999999\n')
+    assert check() == proof, 'stale writer lock changed the read-only receipt'
     apply()
+    assert not stale_lock.is_dir() and stale_lock.is_symlink() is False, 'recovered lock was not released'
     assert (state / 'worker.busy-gen').read_text().strip() == gen
-    assert 'spawn_gen=' not in (state / 'worker.meta').read_text()
+    assert 'spawn_gen=s-original' in (state / 'worker.meta').read_text()
     assert (state / 'worker.inbox/001.msg').read_text() == 'unchanged durable instruction\n'
     assert (state / 'worker.inbox/.rearm').read_text().strip() == '001.msg'
     watcher_env = dict(env, FM_STATE_OVERRIDE=str(state), FM_POLL='1', FM_SIGNAL_GRACE='1',
@@ -148,10 +157,23 @@ try:
     print('ok - read-only legacy preflight, original-generation restore and ordinary input fence')
     print('ok - a real same-name daemon does not replace exact root launch-argument provenance')
     reset()
+    live_holder = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
+    try:
+        stale_lock.mkdir()
+        (stale_lock / 'pid').write_text(str(live_holder.pid) + '\n')
+        assert check() == proof, 'live writer lock changed the read-only receipt'
+        apply(ok=False)
+        assert stale_lock.is_dir() and (stale_lock / 'pid').read_text().strip() == str(live_holder.pid)
+        assert not (state / 'worker.busy-gen').exists()
+    finally:
+        live_holder.terminate(); live_holder.wait()
+    apply()
+    print('ok - recovery reclaims a dead transcript lock but never steals a live owner')
+    reset()
     duplicate = subprocess.Popen(argv, cwd=cwd, env=worker_env)
     try:
         ambiguous = copy.deepcopy(info)
-        ambiguous['foreground_processes'].append({'pid': duplicate.pid, 'name': 'traex', 'argv': argv})
+        ambiguous['foreground_processes'].append({'pid': duplicate.pid, 'name': harness, 'argv': argv})
         set_transport(i=ambiguous)
         check(ok=False)
     finally:
@@ -162,12 +184,17 @@ try:
     # Replacement terminal, wrong live PID, stale gen, missing evidence.
     reset(); changed = copy.deepcopy(pane); changed['terminal_id'] = 'term_reused'; set_transport(changed)
     apply(ok=False); assert not (state / 'worker.busy-gen').exists()
+    for key, value in (('task', 'other-task'), ('state', str(base / 'other-home/state'))):
+        reset(); changed_proof = json.loads(proof); changed_proof[key] = value
+        (base / 'proof.json').write_text(json.dumps(changed_proof))
+        apply(ok=False); assert not (state / 'worker.busy-gen').exists()
+    (base / 'proof.json').write_text(proof)
     reset(); changed_info = copy.deepcopy(info); changed_info['foreground_processes'][0]['pid'] = os.getpid(); set_transport(i=changed_info)
     check(ok=False)
     reset(); (state / 'worker.busy-gen').write_text('g-replacement\n'); check(ok=False)
     reset(); (state / 'worker.meta').write_text(meta.replace(gen, 'g-other')); check(ok=False)
     reset(); (state / 'worker.busy-session').unlink(); check(ok=False)
-    reset(); (state / 'worker.meta').write_text(meta + 'spawn_gen=new-spawn\n'); apply(ok=False)
+    reset(); (state / 'worker.meta').write_text(meta.replace('spawn_gen=s-original', 'spawn_gen=new-spawn')); apply(ok=False)
     reset(); data = json.loads(binding); data['unaccounted_input'] = True
     (state / 'worker.busy-session').write_text(json.dumps(data)); check(ok=False)
     reset(); changed = copy.deepcopy(pane); changed['foreground_cwd'] = str(base); set_transport(changed); check(ok=False)
