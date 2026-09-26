@@ -3705,6 +3705,12 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
+# Names the lane created beside that root. bin/fm-tmp-sweep.sh owns the
+# predicate. A scan that cannot run removes nothing and must not fail cleanup.
+if [ -x "$SCRIPT_DIR/fm-tmp-sweep.sh" ]; then
+  "$SCRIPT_DIR/fm-tmp-sweep.sh" --task "$ID" --state "$STATE" \
+    || echo "warning: tmp scratch sweep for $ID did not complete" >&2
+fi
 # Retire only this Firstmate home's launch namespace. Its never-reused per-spawn
 # files leave the equal task-id namespace of every other home untouched.
 teardown_launch_home_token() {

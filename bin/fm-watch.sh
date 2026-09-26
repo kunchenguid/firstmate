@@ -287,6 +287,12 @@ HOME_SUMMARY_INTERVAL=${FM_HOME_SUMMARY_INTERVAL:-300}
 case "$HOME_SUMMARY_INTERVAL" in
   ''|*[!0-9]*|0) HOME_SUMMARY_INTERVAL=300 ;;
 esac
+# Daily unowned /tmp scratch sweep. bin/fm-tmp-sweep.sh owns the predicate
+# and the stamp; this interval only skips forking that script when not due.
+TMP_SWEEP_INTERVAL=${FM_TMP_SWEEP_INTERVAL:-86400}
+case "$TMP_SWEEP_INTERVAL" in
+  ''|*[!0-9]*|0) TMP_SWEEP_INTERVAL=86400 ;;
+esac
 SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trailing
                                       # signals (a status write, then the same turn's
                                       # turn-end hook) coalesce into one wake
@@ -2623,6 +2629,14 @@ while :; do
   # Opt-in fleet activity ledger (docs/fleet-ledger.md): pick up newly appended
   # status lines before this cycle can exit on a wake. Off costs one file test.
   [ ! -e "$CONFIG/fleet-ledger" ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" capture || true
+
+  # Unowned /tmp scratch (bin/fm-tmp-sweep.sh). At most once a day. A scan
+  # that cannot finish removes nothing; the stamp keeps the next cycle from
+  # retrying until the interval passes.
+  if [ -x "$SCRIPT_DIR/fm-tmp-sweep.sh" ] \
+    && [ "$(age_of "$STATE/.tmp-sweep-stamp")" -ge "$TMP_SWEEP_INTERVAL" ]; then
+    "$SCRIPT_DIR/fm-tmp-sweep.sh" --if-due --state "$STATE" >/dev/null 2>&1 || true
+  fi
 
   if [ "$(age_of "$STATE/home-summary.json")" -ge "$HOME_SUMMARY_INTERVAL" ]; then
     home_summary_refresh_detached
