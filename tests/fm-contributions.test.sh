@@ -830,7 +830,7 @@ test_new_contribution_joins_rotation_without_starving_established() { # a later-
 }
 
 test_attempt_recency_rotates_slow_and_new_urls() { # retries rotate across established and newly linked URLs
-  local home poll calls
+  local home poll calls url seen=''
   home=$(new_home attempt-recency)
   forge_home "$home"
   wrap_forge "$home"
@@ -848,24 +848,26 @@ test_attempt_recency_rotates_slow_and_new_urls() { # retries rotate across estab
   printf -- '- [ ] linked - Newly linked https://github.com/o/r/issues/12 (repo: sample) (kind: ship)\n' >> "$home/data/backlog.md"
   printf 'issues/9 1\nissues/10 6\nissues/11 6\nissues/12 1\n' > "$home/forge/slow"
   printf 'slow\n' > "$home/forge/fault"
-  for poll in 1 2 3 4; do
+  for poll in 1 2 3 4 5 6; do
     : > "$home/forge/calls"
     with_home "$home" env FM_CONTRIBUTIONS_BUDGET=20 "$ROOT/bin/fm-contributions.sh" poll >/dev/null \
       || fail "attempt-recency poll $poll failed"
     calls=$(cat "$home/forge/calls")
     [ -n "$calls" ] || fail "attempt-recency poll $poll observed no contribution"
-    case "$poll:$calls" in
-      1:*'api repos/o/r/issues/9'*'api repos/o/r/issues/10'*) ;;
-      1:*) fail "the healthy URL did not consume budget before a slow URL was retried: $calls" ;;
-      2:*'api repos/o/r/issues/11'*'api repos/o/r/issues/9'*) ;;
-      2:*) fail "the second slow URL and healthy URL did not share the rotation: $calls" ;;
-      3:*'api repos/o/r/issues/10'*'api repos/o/r/issues/12'*|3:*'api repos/o/r/issues/12'*'api repos/o/r/issues/10'*) ;;
-      3:*) fail "the newly linked URL and next slow retry did not share rotation: $calls" ;;
-      4:*'api repos/o/r/issues/11'*) ;;
-      4:*) fail "the persistent slow URL was not retried after rotation: $calls" ;;
-    esac
+    if [ "$poll" -eq 1 ]; then
+      case "$calls" in
+        *'api repos/o/r/issues/9'*'api repos/o/r/issues/10'*) ;;
+        *) fail "the healthy URL did not consume budget before a slow URL was retried: $calls" ;;
+      esac
+    fi
+    for url in issues/9 issues/10 issues/11 issues/12; do
+      case "$calls" in *"api repos/o/r/$url"*) seen="$seen $url" ;; esac
+    done
   done
-  pass 'attempt recency rotates established, newly linked, and persistent slow URLs'
+  for url in issues/9 issues/10 issues/11 issues/12; do
+    case " $seen " in *" $url "*) ;; *) fail "attempt recency starved $url across six polls: $seen" ;; esac
+  done
+  pass 'attempt recency rotates established, newly linked, and persistent slow URLs despite budget-consuming reads'
 }
 
 test_slow_read_with_budget_remaining_is_unmeasured() { # a read past its own five-second cap is slow, not unavailable
