@@ -707,6 +707,18 @@ An existing linked-worktree home that predates this rule advances through its ma
 
 A local standalone-clone home cannot receive a primary-local commit through that no-fetch sync, so it receives the rule through `/updatefirstmate`'s origin refresh instead.
 
+## Worker writing style
+
+`config/worker-writing-style.md` is an optional local, gitignored file that contains the writing rules for human-facing prose produced by workers.
+`bin/fm-brief.sh` injects its content under a `Worker writing style` heading in each ship, scout, and secondmate charter scaffold that it generates, independent of the selected harness or model.
+The rules cover chat, documentation, commit messages, pull request bodies, issue text, and code comments; code, identifiers, and test fixtures are outside this prose scope.
+Any secondmate home provisioned while `config/worker-writing-style.md` was absent or blank - including one provisioned after this support landed - is excluded, because its existing `data/charter.md` never mentions the file and launch relaunches that charter; such a home takes up the rules when it is next provisioned fresh.
+When the file is absent, or present with no non-blank content, the heading and content are both omitted, so generated briefs retain their existing content.
+Ship and scout briefs retain the rules copied when generated; launch does not refresh them.
+When the file is present with non-blank content at generation, a secondmate charter also instructs the worker to read its own `$FM_HOME/config/worker-writing-style.md` at every intake and use the embedded rules only when that file is absent.
+Secondmate inheritance and mandatory reread framing are owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md).
+Keep the file focused on writing style rather than general strategy or working preferences; `data/captain.md` remains the private owner of those broader preferences and is not injected into worker briefs.
+
 ## Harness support
 
 claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, and omp are empirically verified for crewmate and secondmate launches; gemini is verified for crewmate and scout launches only, and [README requirements](../README.md#requirements) own the set supported for the primary session.
