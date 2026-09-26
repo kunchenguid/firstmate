@@ -13,6 +13,9 @@
 # function names and precedence are unchanged from when this logic lived inline
 # in bin/fm-supervise-daemon.sh, so its unit tests (tests/fm-daemon.test.sh)
 # keep exercising the same names after the daemon sources this file.
+# Callers source bin/fm-backend.sh first: the $TMUX_PANE checks below defer to
+# its fm_backend_tmux_env_masked_by_herdr, the one owner of when inherited tmux
+# markers must not outrank herdr.
 
 # Default supervisor pane target/backend when nothing is configured or detected.
 # "firstmate:0" is a tmux session:window name, so the bare fallback (nothing
@@ -26,7 +29,10 @@ FM_SUPERVISOR_BACKEND_DEFAULT="tmux"
 #      herdr "<session>:<pane-id>" target (paired with discover_supervisor_backend
 #      to know which).
 #   2. $TMUX_PANE - tmux sets this in every pane's environment; inherited by a
-#      process launched from firstmate's own pane.
+#      process launched from firstmate's own pane. Skipped when herdr markers
+#      are present and $TMUX/$TMUX_PANE do not describe the pane this process
+#      runs in - variables a herdr server inherited from the tmux shell it was
+#      started in.
 #   3. $HERDR_ENV=1 + $HERDR_PANE_ID - herdr injects both into every process it
 #      manages a pane for; compose the "<session>:<pane-id>" target from
 #      $HERDR_SESSION (defaulting to "default", mirroring bin/backends/herdr.sh's
@@ -40,7 +46,7 @@ discover_supervisor_target() {
     printf '%s' "$FM_SUPERVISOR_TARGET"
     return 0
   fi
-  if [ -n "${TMUX_PANE:-}" ]; then
+  if [ -n "${TMUX_PANE:-}" ] && ! fm_backend_tmux_env_masked_by_herdr; then
     printf '%s' "$TMUX_PANE"
     return 0
   fi
@@ -57,7 +63,7 @@ discover_supervisor_target() {
 # which primitives (tmux vs herdr) to dispatch through. Priority mirrors
 # discover_supervisor_target and bin/fm-backend.sh's fm_backend_detect:
 #   1. FM_SUPERVISOR_BACKEND env (explicit override).
-#   2. $TMUX_PANE set - tmux.
+#   2. $TMUX_PANE set and not masked by herdr (as for the target) - tmux.
 #   3. $HERDR_ENV=1 (with $HERDR_PANE_ID present) - herdr.
 #   4. FM_SUPERVISOR_BACKEND_DEFAULT (tmux) - matches the target fallback. Returns 1.
 discover_supervisor_backend() {
@@ -65,7 +71,7 @@ discover_supervisor_backend() {
     printf '%s' "$FM_SUPERVISOR_BACKEND"
     return 0
   fi
-  if [ -n "${TMUX_PANE:-}" ]; then
+  if [ -n "${TMUX_PANE:-}" ] && ! fm_backend_tmux_env_masked_by_herdr; then
     printf 'tmux'
     return 0
   fi

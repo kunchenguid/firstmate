@@ -2913,8 +2913,8 @@ test_discover_supervisor_backend_precedence() {
   out=$(FM_SUPERVISOR_BACKEND=herdr TMUX_PANE='%9' HERDR_ENV=1 HERDR_PANE_ID=w1:p1 discover_supervisor_backend)
   [ "$out" = herdr ] || fail "explicit FM_SUPERVISOR_BACKEND override was not honored: $out"
 
-  out=$(FM_SUPERVISOR_BACKEND='' TMUX_PANE='%9' HERDR_ENV=1 HERDR_PANE_ID=w1:p1 discover_supervisor_backend)
-  [ "$out" = tmux ] || fail "TMUX_PANE should win over HERDR_ENV (tmux nested in herdr resolves to tmux): $out"
+  out=$(FM_SUPERVISOR_BACKEND='' TMUX_PANE='%9' HERDR_ENV='' HERDR_PANE_ID='' discover_supervisor_backend)
+  [ "$out" = tmux ] || fail "TMUX_PANE without herdr markers should resolve to tmux: $out"
 
   out=$(FM_SUPERVISOR_BACKEND='' TMUX_PANE='' HERDR_ENV=1 HERDR_PANE_ID=w1:p1 discover_supervisor_backend)
   [ "$out" = herdr ] || fail "HERDR_ENV=1 with HERDR_PANE_ID present should resolve to herdr: $out"
@@ -2932,8 +2932,8 @@ test_discover_supervisor_target_herdr() {
   out=$(FM_SUPERVISOR_TARGET=explicit:target TMUX_PANE='' HERDR_ENV=1 HERDR_PANE_ID=w1:p9 discover_supervisor_target)
   [ "$out" = "explicit:target" ] || fail "explicit FM_SUPERVISOR_TARGET override was not honored: $out"
 
-  out=$(FM_SUPERVISOR_TARGET='' TMUX_PANE='%3' HERDR_ENV=1 HERDR_PANE_ID=w1:p9 discover_supervisor_target)
-  [ "$out" = '%3' ] || fail "TMUX_PANE should win over herdr markers: $out"
+  out=$(FM_SUPERVISOR_TARGET='' TMUX_PANE='%3' HERDR_ENV='' HERDR_PANE_ID='' discover_supervisor_target)
+  [ "$out" = '%3' ] || fail "TMUX_PANE without herdr markers should be the target: $out"
 
   out=$(FM_SUPERVISOR_TARGET='' TMUX_PANE='' HERDR_ENV=1 HERDR_PANE_ID=w1:p9 HERDR_SESSION='' discover_supervisor_target)
   [ "$out" = "default:w1:p9" ] || fail "herdr target should default HERDR_SESSION to 'default': $out"
@@ -2947,6 +2947,59 @@ test_discover_supervisor_target_herdr() {
   [ "$out" = "firstmate:0" ] || fail "bare fallback should still print firstmate:0: $out"
 
   pass "discover_supervisor_target: override > TMUX_PANE > herdr '<session>:<pane-id>' composition > firstmate:0 fallback"
+}
+
+# Supervisor-pane discovery with tmux AND herdr markers follows
+# fm_backend_detect's rule: $TMUX_PANE outranks herdr only when $TMUX and
+# $TMUX_PANE describe the tmux pane this process runs in. A herdr server
+# started from a tmux shell leaves every herdr pane holding that shell's
+# $TMUX/$TMUX_PANE; escalations must then go to the herdr pane, not a tmux pane
+# that is gone or foreign. Uses a REAL tmux server on a private socket, and
+# runs the genuine nested case inside one of its panes.
+test_discover_supervisor_tmux_liveness_under_herdr() {
+  local dir sock live live_tmux live_pane out script
+  if ! command -v tmux >/dev/null 2>&1; then
+    echo "skip: tmux not found (supervisor tmux liveness under herdr)"
+    return 0
+  fi
+  dir=$(mktemp -d "${TMPDIR:-/tmp}/fmtx.XXXXXX")
+  sock="$dir/s"
+  live=$(fm_test_tmux_live_pane "$sock") || { rm -rf "$dir"; fail "could not start a private tmux server for the liveness cases"; }
+  live_tmux=${live% *}
+  live_pane=${live#* }
+
+  # Proven path: a genuine tmux pane nested in herdr stays the tmux supervisor.
+  script="$dir/nested.sh"
+  cat > "$script" <<SH
+. $(printf '%q' "$ROOT/bin/fm-backend.sh")
+. $(printf '%q' "$ROOT/bin/fm-supervisor-target-lib.sh")
+printf 'backend=%s\n' "\$(FM_SUPERVISOR_BACKEND='' HERDR_ENV=1 HERDR_PANE_ID=w1:p1 discover_supervisor_backend)"
+t=\$(FM_SUPERVISOR_TARGET='' HERDR_ENV=1 HERDR_PANE_ID=w1:p1 discover_supervisor_target)
+[ -n "\$TMUX_PANE" ] && [ "\$t" = "\$TMUX_PANE" ] && echo target=own-pane || echo "target=\$t"
+SH
+  out=$(fm_test_tmux_run_in_pane "$sock" "$script") || { tmux -S "$sock" kill-server >/dev/null 2>&1; rm -rf "$dir"; fail "could not run the nested case inside a tmux pane"; }
+  assert_contains "$out" "backend=tmux" "a genuine TMUX_PANE nested in herdr should resolve to tmux"$'\n'"$out"
+  assert_contains "$out" "target=own-pane" "a genuine TMUX_PANE nested in herdr should be the target"$'\n'"$out"
+
+  # Regression: a live tmux pane this process does not run in falls through.
+  out=$(FM_SUPERVISOR_BACKEND='' TMUX="$live_tmux" TMUX_PANE="$live_pane" HERDR_ENV=1 HERDR_PANE_ID=w2:p1 discover_supervisor_backend)
+  [ "$out" = herdr ] || fail "a foreign TMUX_PANE under herdr should resolve to herdr: $out"
+  out=$(FM_SUPERVISOR_TARGET='' TMUX="$live_tmux" TMUX_PANE="$live_pane" HERDR_ENV=1 HERDR_PANE_ID=w2:p1 HERDR_SESSION='' discover_supervisor_target)
+  [ "$out" = "default:w2:p1" ] || fail "a foreign TMUX_PANE under herdr should target the herdr pane: $out"
+
+  # Stale or dead inherited tmux markers under herdr fall through to herdr.
+  out=$(FM_SUPERVISOR_BACKEND='' TMUX="$live_tmux" TMUX_PANE='%999999' HERDR_ENV=1 HERDR_PANE_ID=w2:p1 discover_supervisor_backend)
+  [ "$out" = herdr ] || fail "a stale TMUX_PANE under herdr should resolve to herdr: $out"
+  out=$(FM_SUPERVISOR_TARGET='' TMUX="$dir/gone,1,0" TMUX_PANE='%1' HERDR_ENV=1 HERDR_PANE_ID=w2:p1 HERDR_SESSION='' discover_supervisor_target)
+  [ "$out" = "default:w2:p1" ] || fail "TMUX naming a dead server under herdr should target the herdr pane: $out"
+
+  # Explicit overrides still win over everything.
+  out=$(FM_SUPERVISOR_BACKEND=tmux TMUX="$live_tmux" TMUX_PANE='%999999' HERDR_ENV=1 HERDR_PANE_ID=w2:p1 discover_supervisor_backend)
+  [ "$out" = tmux ] || fail "explicit FM_SUPERVISOR_BACKEND override was not honored: $out"
+
+  tmux -S "$sock" kill-server >/dev/null 2>&1 || true
+  rm -rf "$dir"
+  pass "discover_supervisor_*: TMUX_PANE outranks herdr only for the pane this process runs in; stale or foreign tmux markers under herdr resolve to the herdr pane"
 }
 
 test_pane_is_busy_herdr_native_busy_state() {
@@ -3240,6 +3293,7 @@ test_fm_send_exits_nonzero_on_initial_send_failure
 test_fm_send_exits_nonzero_on_unproven_submit
 test_discover_supervisor_backend_precedence
 test_discover_supervisor_target_herdr
+test_discover_supervisor_tmux_liveness_under_herdr
 test_pane_is_busy_herdr_native_busy_state
 test_primary_busy_guard_is_harness_scoped
 test_pane_is_busy_defaults_to_tmux_when_backend_omitted
