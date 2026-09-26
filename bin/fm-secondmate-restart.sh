@@ -49,7 +49,9 @@
 # metadata from the identity the host confirmed, since the host-local verb can
 # only rewrite its own endpoint record. The restart decision, the profile, the
 # request text, the bound, the failure vocabulary, and this report are all
-# computed here in the primary and are identical for both.
+# computed here in the primary and are identical for both. The per-mate
+# liveness lock spans stop through replacement confirmation, so automatic
+# recovery yields throughout that interval without consuming an attempt.
 #
 # Nothing here forces, stashes, or discards anything. bin/fm-control.sh owns the
 # restart transaction, its checkpoint, its journal, and its rollback; a refusal
@@ -72,7 +74,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
 usage() {
-  sed -n '2,65{s/^# \{0,1\}//;p;}' "$0"
+  sed -n '2,70{s/^# \{0,1\}//;p;}' "$0"
 }
 
 case "${1:-}" in
@@ -90,6 +92,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-secondmate-restart-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-restart-lib.sh"
+# shellcheck source=bin/fm-secondmate-liveness-lib.sh
+. "$SCRIPT_DIR/fm-secondmate-liveness-lib.sh"
 # shellcheck source=bin/fm-secondmate-nudge-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-nudge-lib.sh"
 # shellcheck source=bin/fm-pending-reply-lib.sh
@@ -165,6 +169,16 @@ report_unreached() {  # <id> <reason>
 restart_mate() {  # <array-index>
   local i=$1 id restart_out restart_rc restart_reason ran_on
   id=${IDS[$i]}
+  # Serialize the entire stop-and-replace interval with automatic recovery.
+  # A tick skips while this worker owns the lock; a restart waits for an
+  # earlier recovery to finish before reading the endpoint it will replace.
+  # This parent-side lock covers remote restarts as well as local ones.
+  if ! fm_secondmate_liveness_lock "$id" wait; then
+    report_unreached "$id" "could not serialize the restart with secondmate recovery"
+    return
+  fi
+  # shellcheck disable=SC2064 # Bind the validated id before its local scope ends.
+  trap "fm_secondmate_liveness_unlock '$id'" EXIT
   if [ "${PLACEMENT[i]}" = remote ]; then
     restart_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
       "$SCRIPT_DIR/fm-remote-secondmate-relaunch.sh" \

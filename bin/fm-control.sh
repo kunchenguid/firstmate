@@ -645,9 +645,21 @@ do_exit() {
     || die "the exit command could not be sent to task $ID on $BACKEND"
   [ "$verdict" != send-failed ] \
     || die "the exit command could not be sent to task $ID on $BACKEND"
-  state=$(wait_agent_state "$EXIT_WAIT" dead) || {
+  state=$(wait_agent_state "$EXIT_WAIT" dead missing) || {
     die "exit-delivered $ID interrupt=$interrupt_result exit-command=delivered agent-state=$state exit=unconfirmed; the agent did not stop within ${EXIT_WAIT}s"
   }
+  if [ "$state" = missing ]; then
+    absence=$(fm_control_endpoint_absence_verdict "$BACKEND" "$T")
+    case "${absence%%$'\t'*}" in
+      gone)
+        retire_busy_incarnation
+        printf 'endpoint-gone'
+        return 0
+        ;;
+      dead) ;;
+      *) die "task $ID's endpoint disappeared after exit delivery, but ${absence#*$'\t'}; the agent's exit remains unconfirmed" ;;
+    esac
+  fi
   # The incarnation is over: retire its busy wiring so no stale record or
   # orphaned generation survives the agent that produced it.
   retire_busy_incarnation
