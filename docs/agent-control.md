@@ -117,7 +117,6 @@ Every transient or self-contradicting read stays `unreadable` or `ambiguous` and
 That proof has one owner for the whole control plane (`fm_control_endpoint_absence_verdict` in `bin/fm-control-lib.sh`), so `exit` and `relaunch` cannot reach two different answers about one endpoint.
 `exit` reports what the proof established and nothing more - see its row in the verb table above.
 The same proof applies when the pane disappears after delivery of the exit command.
-A secondmate restart reuses its validated home and the ordinary per-home spawn placement, creating a replacement pane when Herdr proves the old one gone.
 The persist-gated restart shares the automatic-recovery lock from stop through replacement confirmation; `bin/fm-secondmate-liveness-lib.sh` owns that serialization contract.
 
 What a reclaim is not:
