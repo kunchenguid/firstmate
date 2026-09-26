@@ -352,7 +352,9 @@ fm_lint_bounds_supported() {
 # FM_TEST_CHILD_PID), records its own pid on FM_TEST_STUB_PID, and then blocks;
 # a *hoarder* root runs a perl allocator that grows to 512 MiB and fails only
 # when perl itself reports that the allocation was refused, forwarding perl's
-# own error; an allocation that succeeds falls through like any other root.
+# own error and exiting with GHC's heap-exhaustion status 251, as ShellCheck
+# does when its runtime is refused memory; an allocation that succeeds falls
+# through like any other root.
 # Anything else records its path on FM_TEST_STUB_LOG and exits cleanly.
 fm_lint_stub_reactive_shellcheck() {
   local fakebin=$1
@@ -377,7 +379,7 @@ case "$target" in
     if [ "$alloc_rc" -ne 0 ]; then
       printf '%s\n' "$alloc_err" >&2
       case "$alloc_err" in
-        *"Out of memory"*) exit 2 ;;
+        *"Out of memory"*) exit 251 ;;
       esac
       exit "$alloc_rc"
     fi
@@ -1603,7 +1605,20 @@ SH
   reason=$(awk -F '\t' '$1 == "end" && $3 ~ /excerpt\.sh$/ { print $10 }' "$tmp/lint.roots.tsv")
   [ "$reason" = findings ] \
     || fail "a source excerpt quoting OOM text was classified '$reason', expected findings"$'\n'"$out"
-  pass "an echoed source excerpt quoting OOM text stays a findings result"
+
+  # A root whose path contains OOM words and cannot be opened fails with an
+  # ordinary file error that names the path on stderr; it is an error, not a
+  # memory death.
+  rc=0
+  out=$("$LINT" --telemetry "$tmp/missing.tsv" "$tmp/out of memory.sh" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a missing root unexpectedly passed"$'\n'"$out"
+  assert_contains "$out" "out of memory.sh" "the missing root's file error did not name its path"
+  reason=$(awk -F '\t' '$1 == "end" && $3 ~ /out of memory\.sh$/ { print $10 }' "$tmp/missing.roots.tsv")
+  case "$reason" in
+    error:*) ;;
+    *) fail "a missing root named with OOM words was classified '$reason', expected error"$'\n'"$out" ;;
+  esac
+  pass "OOM words in a source excerpt or a root path never classify a root as memory"
 }
 
 test_require_bounds_refuses_when_enforcement_is_missing() {
