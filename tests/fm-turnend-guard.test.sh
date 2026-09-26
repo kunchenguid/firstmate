@@ -1570,6 +1570,56 @@ test_hook_claude_mode_preserves_fresh_failed_progression() {
   pass "fm-turnend-guard --claude: fresh failed epochs preserve and advance monotonic fail-open progression"
 }
 
+# A failure episode is a bounded description of "supervision is broken while it
+# is needed", so its deduplication marker must not outlive that condition. When
+# the fleet goes quiet there is nothing left to supervise at all, which is a
+# STRONGER proof of health than a live watcher, so the episode closes there and
+# the NEXT failure is a new episode with its own last-resort notice. A marker
+# that survived this transition muted that notice for the life of the home, and
+# left the bounded block budget permanently unreset.
+test_hook_claude_mode_ended_supervision_need_closes_failure_episode() {
+  local dir out status guard_out guard_status count
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-episode-close-no-need")
+  : > "$dir/state/task1.meta"
+  install_integrated_autoarm "$dir"
+  write_integrated_failed_arm "$dir"
+
+  out=$(run_integrated_autoarm "$dir"); status=$?
+  expect_code 2 "$status" "the first exhausted auto-arm cycle must emit its one failure notice"
+  assert_contains "$out" "automatic supervision mechanism is broken" "the first episode's failure notice is missing"
+  assert_present "$dir/state/.claude-autoarm-failure-notified" "the failure episode did not record its notice marker"
+
+  # Deduplication WITHIN the episode is the marker's whole purpose and must
+  # keep working; it is the marker's lifetime, not its effect, that was wrong.
+  out=$(run_integrated_autoarm "$dir"); status=$?
+  expect_code 2 "$status" "a later failure in the same episode must retain the automatic retry handoff"
+  assert_not_contains "$out" "automatic supervision mechanism is broken" "the same episode repeated its operator notice"
+
+  # Prove the close over the whole episode record set, not just the notice.
+  : > "$dir/state/.claude-autoarm-failure-alarmed"
+  seed_claude_budget "$dir" 3 9
+
+  rm -f "$dir/state/task1.meta"
+  guard_out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); guard_status=$?
+  expect_code 0 "$guard_status" "a stop with nothing left to supervise must be allowed"
+  [ -z "$guard_out" ] || fail "the quiet-fleet stop produced output: $guard_out"
+  assert_absent "$dir/state/.claude-autoarm-failure-notified" "the ended supervision need left the failure notice marker"
+  assert_absent "$dir/state/.claude-autoarm-failure-alarmed" "the ended supervision need left the attended alarm marker"
+  assert_absent "$dir/state/.turnend-claude-blocks" "the ended supervision need left the bounded block budget"
+
+  # The point of the whole fix: the next genuine failure is audible again.
+  : > "$dir/state/task1.meta"
+  out=$(run_integrated_autoarm "$dir"); status=$?
+  expect_code 2 "$status" "a failure after the episode closed must hand back an automatic retry"
+  assert_contains "$out" "automatic supervision mechanism is broken" "the second episode's last-resort notice was muted by the first episode's marker"
+
+  guard_out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); guard_status=$?
+  expect_code 0 "$guard_status" "the new episode's first failed epoch must own its Stop handoff"
+  count=$(sed -n '2s/^count=//p' "$dir/state/.turnend-claude-blocks")
+  [ "$count" = 0 ] || fail "the new episode must start its bounded progression at zero, got $count"
+  pass "fm-turnend-guard --claude: an ended supervision need closes the failure episode so the next one notifies again"
+}
+
 test_hook_claude_mode_integrated_monotonic_fail_open() {
   local dir out status guard_out guard_status i pid identity count
   dir=$(make_primary_dir "$TMP_ROOT/hook-claude-integrated-fail-open")
@@ -2251,6 +2301,7 @@ test_hook_claude_mode_allows_on_open_generation_claim
 test_hook_claude_mode_blocks_on_stuck_generation_claim
 test_hook_claude_mode_terminal_fail_open_clears_abandoned_claim
 test_hook_claude_mode_preserves_fresh_failed_progression
+test_hook_claude_mode_ended_supervision_need_closes_failure_episode
 test_hook_claude_mode_integrated_monotonic_fail_open
 test_hook_claude_mode_frozen_epoch_reaches_bounded_fail_open
 test_hook_claude_mode_frozen_epoch_without_verified_failure_spends_budget_and_keeps_blocking
