@@ -105,15 +105,22 @@
 #                                 (tests); receives task_id and full message as args
 #   FM_PENDING_REPLY_NOW          optional fixed epoch for deterministic tests
 
+# This directive does double duty: it also binds _FM_PENDING_REPLY_LIB_DIR as
+# the bin/ source prefix so the deliberately undirected lazy sources below
+# still resolve for ShellCheck instead of warning SC1091.
 # shellcheck source=bin/fm-marker-lib.sh
 _FM_PENDING_REPLY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)" || _FM_PENDING_REPLY_LIB_DIR="."
 # shellcheck source=bin/fm-marker-lib.sh
 . "$_FM_PENDING_REPLY_LIB_DIR/fm-marker-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$_FM_PENDING_REPLY_LIB_DIR/fm-backend.sh"
-# shellcheck source=bin/fm-tmux-lib.sh
+# Deliberately undirected: this library consumes no symbols from
+# bin/fm-tmux-lib.sh, so following it under ShellCheck's external-source
+# traversal would expand that graph for zero cross-file checks.
 . "$_FM_PENDING_REPLY_LIB_DIR/fm-tmux-lib.sh"
-# shellcheck source=bin/fm-classify-lib.sh
+# Deliberately undirected: bin/fm-classify-lib.sh is already expanded inside
+# bin/fm-wake-lib.sh's single directed expansion below; a second directive
+# here would re-expand the same transitive graph.
 . "$_FM_PENDING_REPLY_LIB_DIR/fm-classify-lib.sh"
 
 FM_PENDING_REPLY_SCHEMA='fm-pending-reply.v1'
@@ -1132,7 +1139,9 @@ fm_pending_reply_close_escalation() {  # <state-dir> <corr_id>
   local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
   STATE=$state
   lock="$state/.pending-reply-$corr.lock"
-  # shellcheck source=bin/fm-wake-lib.sh
+  # Deliberately undirected: bin/fm-wake-lib.sh is expanded once at the
+  # fm_pending_reply_try_resolve site; each directed site would re-expand its
+  # whole transitive graph under ShellCheck's external-source traversal.
   . "$_FM_PENDING_REPLY_LIB_DIR/fm-wake-lib.sh"
   fm_lock_acquire_wait "$lock" || return 1
   _fm_pending_reply_close_escalation_locked "$@" || rc=$?
@@ -1198,7 +1207,9 @@ fm_pending_reply_maybe_escalate() {  # <state-dir> <corr_id>
   local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
   STATE=$state
   lock="$state/.pending-reply-$corr.lock"
-  # shellcheck source=bin/fm-wake-lib.sh
+  # Deliberately undirected: bin/fm-wake-lib.sh is expanded once at the
+  # fm_pending_reply_try_resolve site; each directed site would re-expand its
+  # whole transitive graph under ShellCheck's external-source traversal.
   . "$_FM_PENDING_REPLY_LIB_DIR/fm-wake-lib.sh"
   fm_lock_acquire_wait "$lock" || return 1
   _fm_pending_reply_maybe_escalate_locked "$@" || rc=$?
@@ -1353,7 +1364,10 @@ fm_pending_reply_restatement_copy_same_basename() {  # <state-dir> <corr_id> <se
   [ "$stranded" != "$parent_status" ] || return 1
   line=$(fm_pending_reply_find_resolve_line "$stranded" "$corr")
   [ -n "$line" ] || return 1
-  # shellcheck source=bin/fm-parent-channel-lib.sh
+  # Deliberately undirected: bin/fm-parent-channel-lib.sh is expanded once at
+  # the fm_pending_reply_detect_wrong_home site; each directed site would
+  # re-expand its whole transitive graph under ShellCheck's external-source
+  # traversal.
   . "$_FM_PENDING_REPLY_LIB_DIR/fm-parent-channel-lib.sh"
   fm_parent_channel_append_once "$parent_status" "$line"
 }
