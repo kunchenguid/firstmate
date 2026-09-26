@@ -74,13 +74,14 @@
 # "supervision-host:" line saying why main has this wake, after stopping the
 # successor cycle so main's next turn end starts from the same state as
 # without the host. Whenever the captain returned during an away engine turn
-# that recorded outcomes, handled or not, the return brief was rendered before
-# they existed, so the host exits with the close, one "supervision-host:" line
-# naming them, and one line per outcome, for main to relay. The host injects
-# nothing and has no delivery path of its own; the owner's existing wake path
-# is the only way main hears from it, and its fallback is always to exit with
-# the close's own reason line. That handoff is only a prompt: each outcome
-# recorded after the return is already a durable queued wake
+# that recorded visible outcomes, handled or not, the return brief was rendered
+# before they existed, so the host exits with the close, one "supervision-host:"
+# line naming them, and one line per visible outcome, for main to relay. The
+# host injects nothing and has no delivery path of its own; the owner's
+# existing wake path is the only way main hears from it, and its fallback is
+# always to exit with the close's own reason line. That handoff is only a
+# prompt: each non-silent outcome recorded after the return is already a
+# durable queued wake
 # (bin/fm-branch-report.sh), so it still reaches main when the host dies at the
 # turn's end or its owner drops the handoff, as a superseded Cursor park does.
 #
@@ -529,20 +530,32 @@ exit_to_main() {  # <why> [further lines]
   exit 0
 }
 
+# The visible outcomes one turn recorded, as a comma-separated store sequence
+# list. The outcome store (bin/fm-branch-outcome.sh) owns the rows.
+turn_visible_outcome_seqs() {  # <turn>
+  local seqs
+  seqs=$(awk -F '\t' -v turn="$1" '$1 == turn { printf "%s%s", sep, $2; sep = "," }' "$RECEIPTS" 2>/dev/null)
+  [ -n "$seqs" ] || return 0
+  "$SCRIPT_DIR/fm-branch-outcome.sh" list --recent 1000 2>/dev/null \
+    | jq -r --arg seqs "$seqs" '($seqs | split(",") | map(tonumber)) as $want
+        | select(.seq as $q | $want | index($q))
+        | select(.silent != true)
+        | .seq' 2>/dev/null \
+    | awk 'NF { printf "%s%s", sep, $0; sep = ", " }'
+}
+
 # True when the captain returned during this close's engine turn and that turn
-# recorded outcomes; sets RETURNED_SEQS to their store rows.
+# recorded visible outcomes; sets RETURNED_SEQS to their store rows.
 returned_during_turn() {
   RETURNED_SEQS=
   [ -n "$LAST_TURN" ] && [ "$TURN_POSTURE" = away ] && [ ! -f "$STATE/.afk-contract" ] || return 1
-  RETURNED_SEQS=$(awk -F '\t' -v turn="$LAST_TURN" '$1 == turn { printf "%s%s", sep, $2; sep = ", " }' "$RECEIPTS" 2>/dev/null)
+  RETURNED_SEQS=$(turn_visible_outcome_seqs "$LAST_TURN")
   [ -n "$RETURNED_SEQS" ]
 }
 
-# The outcomes one turn recorded, one "supervision-host:" line each, from its
-# receipts and the store (bin/fm-branch-outcome.sh owns the rows).
-turn_outcome_lines() {  # <turn>
-  local seqs
-  seqs=$(awk -F '\t' -v turn="$1" '$1 == turn { printf "%s%s", sep, $2; sep = "," }' "$RECEIPTS" 2>/dev/null)
+# One "supervision-host:" line per visible outcome selected above.
+turn_outcome_lines() {  # <visible sequence list>
+  local seqs=$1
   [ -n "$seqs" ] || return 0
   "$SCRIPT_DIR/fm-branch-outcome.sh" list --recent 1000 2>/dev/null \
     | jq -r --arg seqs "$seqs" '($seqs | split(",") | map(tonumber)) as $want
@@ -993,7 +1006,7 @@ while :; do
   fi
 
   # The captain returned during that turn: the return brief was rendered
-  # before its outcomes existed, so main relays them now, handled or not.
+  # before its visible outcomes existed, so main relays them now, handled or not.
   handle_wake "$REASON"
   HANDLE_RC=$?
   if [ "$HANDLE_RC" -eq 2 ]; then
@@ -1004,8 +1017,8 @@ while :; do
   fi
   if [ "$HANDLE_RC" -ne 0 ]; then
     if returned_during_turn; then
-      exit_to_main "the away session could not take this wake: $HANDLE_WHY; this wake is yours, and the captain returned during its turn, so relay the outcomes it recorded (store rows $RETURNED_SEQS, listed next and in bin/fm-branch-outcome.sh list) to the captain" \
-        "$(turn_outcome_lines "$LAST_TURN")${HEALTH_NOTE:+$'\n'$HEALTH_NOTE}"
+      exit_to_main "the away session could not take this wake: $HANDLE_WHY; this wake is yours, and the captain returned during its turn, so relay the visible outcomes it recorded (store rows $RETURNED_SEQS, listed next and in bin/fm-branch-outcome.sh list) to the captain" \
+        "$(turn_outcome_lines "$RETURNED_SEQS")${HEALTH_NOTE:+$'\n'$HEALTH_NOTE}"
     fi
     if [ "$TURN_POSTURE" = away ]; then
       exit_to_main "the away session could not take this wake: $HANDLE_WHY; this wake is yours" "$HEALTH_NOTE"
@@ -1013,8 +1026,8 @@ while :; do
     exit_to_main "the supervision session could not take this wake: $HANDLE_WHY; this wake is yours" "$HEALTH_NOTE"
   fi
   if returned_during_turn; then
-    exit_to_main "the captain returned while the away session was handling this wake, which it finished after the return brief was rendered; relay its outcomes (store rows $RETURNED_SEQS, listed next and in bin/fm-branch-outcome.sh list) to the captain" \
-      "$(turn_outcome_lines "$LAST_TURN")"
+    exit_to_main "the captain returned while the away session was handling this wake, which it finished after the return brief was rendered; relay its visible outcomes (store rows $RETURNED_SEQS, listed next and in bin/fm-branch-outcome.sh list) to the captain" \
+      "$(turn_outcome_lines "$RETURNED_SEQS")"
   fi
   # Attended captain outcomes are main's to process; away they wait for the
   # return, including when the captain left while this turn ran. The close

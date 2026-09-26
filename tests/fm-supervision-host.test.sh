@@ -38,7 +38,9 @@ FAKE_CLAUDE="$FAKEBIN/claude"
 #   hold-lease  the same, but leave the lease held (the host must release it)
 #   return      handle, but the captain returns (the record is archived) before
 #               the turn ends
+#   return-silent the same, but the routine outcome is silent
 #   return-fail the same, then exit nonzero without a result
+#   return-fail-silent the same, but the routine outcome is silent
 #   return-first the captain returns first, then handle, then block until the
 #               host is stopped (an owner killing its host at the turn's end)
 #   noack       the same as handle, but skip the acknowledgement
@@ -85,7 +87,7 @@ verdict=routine
 [ "$mode" != go-away ] || verdict=captain
 case "$mode" in
   fail) exit 3 ;;
-  handle|captain|held|hold-lease|return|return-fail|return-first|noack|emptyresult|go-away)
+  handle|captain|held|hold-lease|return|return-silent|return-fail|return-fail-silent|return-first|noack|chain|emptyresult|go-away)
     [ "$mode" != held ] || read -r _ < "$FM_HOME/stub-release"
     [ "$mode" != return-first ] || "$FM_REPO/bin/fm-afk-contract.sh" archive >> "$FM_HOME/engine-return.log" 2>&1
     [ "$mode" != go-away ] || "$FM_REPO/bin/fm-afk-contract.sh" enter --words 'gone mid-turn' >> "$FM_HOME/engine-return.log" 2>&1
@@ -95,16 +97,22 @@ case "$mode" in
         --summary "stub escalated: $(printf '%s\n' "$drain" | grep -v '^WAKE_' | tr '\n' ' ' | cut -c1-400)" \
         >> "$FM_HOME/engine-report.log" 2>&1
     else
-      "$FM_REPO/bin/fm-branch-report.sh" --task "$task" --verdict "$verdict" --summary "stub handled $task" \
-        >> "$FM_HOME/engine-report.log" 2>&1
+      report_args=(--task "$task" --verdict "$verdict" --summary "stub handled $task")
+      case "$mode" in
+        return-silent|return-fail-silent)
+          report_args=(--task "$task" --verdict routine --summary 'still working; nothing new has happened; no action was taken' --silent true)
+          ;;
+      esac
+      "$FM_REPO/bin/fm-branch-report.sh" "${report_args[@]}" >> "$FM_HOME/engine-report.log" 2>&1
     fi
     # shellcheck disable=SC2086 # the printed acknowledgement arguments
     [ -z "$ack" ] || [ "$mode" = noack ] || "$FM_REPO/bin/fm-wake-drain.sh" $ack >> "$FM_HOME/engine-ack.log" 2>&1
     [ "$mode" = hold-lease ] || "$FM_REPO/bin/fm-lease.sh" release "$task" >> "$FM_HOME/engine-lease.log" 2>&1
     case "$mode" in
-      return|return-fail) "$FM_REPO/bin/fm-afk-contract.sh" archive >> "$FM_HOME/engine-return.log" 2>&1 ;;
+      return|return-silent|return-fail|return-fail-silent) "$FM_REPO/bin/fm-afk-contract.sh" archive >> "$FM_HOME/engine-return.log" 2>&1 ;;
+      chain) printf 'working [at=%s]: chained %s\n' "$(date +%s)" "$n" >> "$STATE/demo.status" ;;
     esac
-    [ "$mode" != return-fail ] || exit 3
+    case "$mode" in return-fail|return-fail-silent) exit 3 ;; esac
     [ "$mode" != return-first ] || sleep "$FM_TEST_STUB_MAX_BLOCK_SECONDS"
     [ "$mode" != emptyresult ] || { printf '{}\n'; exit 0; }
     result
@@ -1250,6 +1258,37 @@ test_return_during_an_engine_turn_hands_its_outcomes_to_main() {
   pass "host: a captain return during an engine turn hands that turn's outcomes to main"
 }
 
+# Silent outcomes stay stored, but neither captain-return path names or relays
+# them when the host decides whether to hand the wake to main.
+test_silent_outcomes_are_not_relayed_when_the_captain_returns() {
+  local mode home host
+  for mode in return-silent return-fail-silent; do
+    home=$(make_home "away-$mode" away)
+    echo "$mode" > "$home/stub-mode"
+    start_host "$home"
+    wait_until 150 watcher_live "$home" || fail "$mode: the host never started a watcher cycle"
+    append_status "$home" 'no-change result during a captain return'
+
+    if [ "$mode" = return-silent ]; then
+      wait_until 250 handled_at_least "$home" 1 || fail "$mode: the wake was not handled"
+      [ ! -s "$home/host.rc" ] || fail "$mode: a silent-only outcome forced a captain handoff: $(cat "$home/host.out")"
+      watcher_live "$home" || fail "$mode: the host did not park on its successor"
+      host=$(awk -F '\t' '$1 == "host" { print $2 }' "$home/state/.supervision-host")
+      kill -TERM "$host"
+      wait_until 200 host_exited "$home" || fail "$mode: the host did not stop on TERM"
+    else
+      wait_until 250 host_exited "$home" || fail "$mode: the failed turn did not hand the wake to main"
+      assert_re '^supervision-host: the away session could not take this wake: the engine turn failed \(exit 3\); this wake is yours$' \
+        "$home/host.out" "$mode: the failed turn must still hand its wake to main"
+    fi
+    assert_no_re 'captain returned|store rows|^supervision-host: outcome ' "$home/host.out" \
+      "$mode: a silent outcome was referenced in the captain-return handoff"
+    assert_grep '"silent":true' "$home/state/branch-outcomes.jsonl" "$mode: the silent outcome was not retained in the store"
+    assert_absent "$home/state/.afk-contract" "$mode: the captain return was not archived"
+  done
+  pass "host: silent outcomes are excluded from both captain-return handoff paths"
+}
+
 # The live failure this guards: a Cursor park superseded by the captain's
 # return kills its host as the engine turn ends, so the host's own handoff is
 # never printed. The outcome still reaches main: the next host's first cycle
@@ -1972,6 +2011,7 @@ test_attended_wake_with_an_unreadable_mirror_reaches_main
 test_away_wake_is_handled_on_the_engine_and_never_reaches_main
 test_away_turn_without_a_report_hands_the_wake_to_main
 test_return_during_an_engine_turn_hands_its_outcomes_to_main
+test_silent_outcomes_are_not_relayed_when_the_captain_returns
 test_outcome_after_the_return_survives_a_host_killed_at_the_turn_end
 test_next_host_clears_a_turn_its_killed_predecessor_left
 test_report_without_acknowledgement_hands_the_wake_to_main
