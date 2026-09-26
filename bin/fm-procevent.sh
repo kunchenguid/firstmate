@@ -583,6 +583,7 @@ cmd_register_lavish_owner() {
   local adapter=${1-} id=${2-} task=${3-} sep=${4-} result pending pending_adapter
   local reply_source='' reply_dest='' stale arg i adopting=0 pending_owner prior_record='' current_kind
   local pending_rounds=0 firstmate_owner=0 reply_requested=0 first_pending='' reply_round='' expected_id
+  local legacy=0 claim_state stop_state legacy_reg_identity owner pid token identity
   local -a argv=()
   shift 4 2>/dev/null || usage
   [ "$adapter" = lavish ] || die "round-aware registration is reserved for the Lavish adapter"
@@ -641,6 +642,7 @@ cmd_register_lavish_owner() {
           fm_procevent_source_lock_release "$id"
           die "cannot adopt source $id: it is not the exact built-in legacy Lavish poll for this artifact"
         fi
+        legacy=1
       fi
     else
       if [ "$(source_kind "$id" 2>/dev/null || true)" != task-owned ]; then
@@ -684,6 +686,53 @@ cmd_register_lavish_owner() {
   elif [ "$adopting" -eq 0 ] && [ "$pending_rounds" -eq 0 ]; then
     fm_procevent_source_lock_release "$id"
     die "cannot re-arm source $id: task $task already holds this board and no captured round is waiting to be acknowledged"
+  fi
+  if [ "$legacy" -eq 1 ]; then
+    fm_procevent_claim_state_locked "$id"
+    claim_state=$?
+    case "$claim_state" in
+      0)
+        legacy_reg_identity=$(fm_pr_file_identity "$(source_file "$id")" 2>/dev/null || true)
+        if [ -z "$legacy_reg_identity" ] \
+          || [ "$FM_PROCEVENT_CLAIM_REG_IDENTITY" != "$legacy_reg_identity" ] \
+          || ! fm_procevent_claim_owned_by_state "$STATE" "$FM_HOME"; then
+          fm_procevent_source_lock_release "$id"
+          die "cannot safely hand off the live legacy Lavish listener: $id"
+        fi
+        owner=$FM_PROCEVENT_CLAIM_HOME
+        pid=$FM_PROCEVENT_CLAIM_PID
+        token=$FM_PROCEVENT_CLAIM_TOKEN
+        identity=$FM_PROCEVENT_CLAIM_IDENTITY
+        stop_runner_pid "$pid" "$identity"
+        stop_state=$?
+        if [ "$stop_state" -eq 2 ] \
+          || ! fm_procevent_claim_reclaim_locked "$id" "$owner" "$pid" "$token"; then
+          fm_procevent_source_lock_release "$id"
+          die "cannot safely hand off the live legacy Lavish listener: $id"
+        fi
+        rm -f -- "$(staging_file "$id" "$token")" "$(runner_file "$id")"
+        ;;
+      1)
+        if [ -e "$(fm_procevent_claim_path "$id")" ]; then
+          if fm_procevent_claim_undisplaceable_locked "$id"; then
+            fm_procevent_source_lock_release "$id"
+            die "cannot safely hand off the legacy Lavish listener: $id"
+          fi
+          owner=$FM_PROCEVENT_CLAIM_HOME
+          pid=$FM_PROCEVENT_CLAIM_PID
+          token=$FM_PROCEVENT_CLAIM_TOKEN
+          if ! fm_procevent_claim_reclaim_locked "$id" "$owner" "$pid" "$token"; then
+            fm_procevent_source_lock_release "$id"
+            die "cannot safely hand off the legacy Lavish listener: $id"
+          fi
+          rm -f -- "$(staging_file "$id" "$token")" "$(runner_file "$id")"
+        fi
+        ;;
+      *)
+        fm_procevent_source_lock_release "$id"
+        die "cannot safely hand off the legacy Lavish listener: $id"
+        ;;
+    esac
   fi
   # Each generation stages its reply under its own path, so nothing a failed
   # re-arm does can reach the reply the prior registration still references.

@@ -889,6 +889,78 @@ assert_absent "$HFREPLY/state/procevent/$freply_id.source" \
   || fail "firstmate's response was posted more than once"
 pass "firstmate-owned feedback receives one reply in the same Lavish session"
 
+HFLEGACY="$TMP_ROOT/hflegacy"; new_home "$HFLEGACY"
+LEGACY_BIN=$(fm_fakebin "$TMP_ROOT/lavish-firstmate-live-legacy-stub")
+LEGACY_COUNT="$TMP_ROOT/lavish-firstmate-live-legacy-count"
+LEGACY_LOG="$TMP_ROOT/lavish-firstmate-live-legacy-log"
+LEGACY_TRIGGER1="$TMP_ROOT/lavish-firstmate-live-legacy-trigger1"
+LEGACY_TRIGGER3="$TMP_ROOT/lavish-firstmate-live-legacy-trigger3"
+export LEGACY_COUNT LEGACY_LOG LEGACY_TRIGGER1 LEGACY_TRIGGER3
+cat > "$LEGACY_BIN/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+n=$(cat "$LEGACY_COUNT" 2>/dev/null || echo 0)
+n=$((n + 1))
+printf '%s\n' "$n" > "$LEGACY_COUNT"
+reply=
+shift 2
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --agent-reply) reply=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+printf 'poll%s reply: %s\n' "$n" "$reply" >> "$LEGACY_LOG"
+case "$n" in
+  1) trigger=$LEGACY_TRIGGER1 ;;
+  3) trigger=$LEGACY_TRIGGER3 ;;
+  *) trigger="$LEGACY_LOG.never" ;;
+esac
+while [ ! -e "$trigger" ]; do sleep 0.02; done
+if [ "$n" = 1 ]; then
+  printf 'session:\n  status: feedback\nprompts[1]{uid,prompt,selector,tag,text}:\n  "","","","message","legacy question"\n'
+else
+  printf 'session:\n  status: ended\n  ended_by: user\n'
+fi
+SH
+chmod +x "$LEGACY_BIN/lavish-axi"
+LEGACY_ART="$TMP_ROOT/firstmate-live-legacy.html"
+printf '<h1>legacy</h1>\n' > "$LEGACY_ART"
+lavish_session "$LEGACY_ART"
+legacy_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$LEGACY_ART")
+fm_test_track_procevent_home "$HFLEGACY"
+PATH="$LEGACY_BIN:$PATH" FM_HOME="$HFLEGACY" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$LEGACY_ART" >/dev/null
+wait_for_lines "$LEGACY_LOG" 1 || fail "live legacy fixture did not start"
+touch "$LEGACY_TRIGGER1"
+wait_capture "$HFLEGACY" "$legacy_id" || fail "live legacy fixture did not capture feedback"
+grep -v '^kind=' "$HFLEGACY/state/procevent/$legacy_id.source" \
+  > "$HFLEGACY/state/procevent/$legacy_id.source.legacy"
+mv "$HFLEGACY/state/procevent/$legacy_id.source.legacy" \
+  "$HFLEGACY/state/procevent/$legacy_id.source"
+chmod 0600 "$HFLEGACY/state/procevent/$legacy_id.source"
+PATH="$LEGACY_BIN:$PATH" pe "$HFLEGACY" reconcile >/dev/null
+wait_for_lines "$LEGACY_LOG" 2 || fail "legacy recovery listener did not start"
+printf 'Answered after handoff.\n' > "$TMP_ROOT/firstmate-live-legacy-reply.txt"
+PATH="$LEGACY_BIN:$PATH" FM_HOME="$HFLEGACY" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$LEGACY_ART" \
+  --agent-reply-file "$TMP_ROOT/firstmate-live-legacy-reply.txt" \
+  > "$TMP_ROOT/firstmate-live-legacy-arm.out"
+assert_contains "$(cat "$TMP_ROOT/firstmate-live-legacy-arm.out")" "armed: $legacy_id" \
+  "live legacy handoff did not confirm the reply-carrying listener"
+assert_not_contains "$(cat "$TMP_ROOT/firstmate-live-legacy-arm.out")" "still-listening" \
+  "live legacy handoff reported the superseded listener as successful"
+wait_for_lines "$LEGACY_LOG" 3 || fail "reply-carrying listener did not replace the live legacy listener"
+[ "$(tail -n 1 "$LEGACY_LOG")" = 'poll3 reply: Answered after handoff.' ] \
+  || fail "live legacy handoff did not post the reply in the session"
+touch "$LEGACY_TRIGGER3"
+for _ in $(seq 1 100); do
+  [ ! -e "$HFLEGACY/state/procevent/$legacy_id.source" ] && break
+  sleep 0.02
+done
+assert_absent "$HFLEGACY/state/procevent/$legacy_id.source" \
+  "ended live legacy handoff session stayed armed"
+pass "live legacy listener hands off to the reply generation"
+
 HFNOREPLY="$TMP_ROOT/hfnoreply"; new_home "$HFNOREPLY"
 NOREPLY_BIN=$(fm_fakebin "$TMP_ROOT/lavish-firstmate-no-reply-stub")
 NOREPLY_COUNT="$TMP_ROOT/lavish-firstmate-no-reply-count"
