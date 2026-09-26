@@ -522,6 +522,12 @@ fm_lock_remove_stray_owner_link() {
 
 fm_lock_claim_blocked_by_steal() {
   local lockdir=$1 allowed_steal_owner=${2:-} steal
+  # The steal guard `<lock>.steal.steal` has no steal mutex of its own (see
+  # fm_lock_try_acquire_steal_guard), so a leftover deeper level from an older
+  # build must never block claiming one.
+  case "$lockdir" in
+    *.steal.steal) return 1 ;;
+  esac
   steal="$lockdir.steal"
   [ -e "$steal" ] || [ -L "$steal" ] || return 1
   if [ -n "$allowed_steal_owner" ] && fm_lock_points_to_owner "$steal" "$allowed_steal_owner"; then
@@ -935,8 +941,70 @@ fm_recovery_marker_reopen_announced() {
   fm_recovery_transition "$1" reopen-announced
 }
 
+# The steal mutex `<lock>.steal` is itself reclaimed under the steal guard
+# `<lock>.steal.steal`, which is taken only by plain creation and never stolen
+# through a deeper level, so a process dying mid-steal (for example on a full
+# disk) can never grow the chain past two levels. A guard left by another
+# process is reclaimed only once it has aged past the guard grace; one this
+# process abandoned in an interrupted frame is reclaimed at once, as
+# fm_lock_try_acquire does. Either way the reclaim is fm_lock_claim_level.
+fm_lock_try_acquire_steal_guard() {
+  local guard=$1 pid owner current
+  fm_lock_try_create "$guard" && return 0
+  fm_current_pid current || return 1
+  owner=
+  if [ -L "$guard" ]; then
+    owner=$(fm_lock_link_owner "$guard" 2>/dev/null || true)
+  fi
+  pid=$(cat "$guard/pid" 2>/dev/null || true)
+  if [ "$pid" != "$current" ]; then
+    [ "$(fm_path_age "$guard")" -ge "${FM_GUARD_GRACE:-300}" ] || return 1
+    fm_lock_recheck_stale_owner "$guard" "$owner" "$pid" || return 1
+  fi
+  fm_lock_claim_level "$guard" "$owner" "$pid" || return 1
+  fm_lock_try_create "$guard"
+}
+
+# Reclaim a lock level checked as held by <owner>/<pid> with one atomic rename
+# into a fresh tombstone, so of any number of contenders acting on the same
+# check exactly one takes the lock object away. The tombstone is deleted only
+# when it still names that checked owner (the same owner link, or the same
+# plain directory recording the same pid). Anything else - a lock published
+# after the check - is put back only while the path is still absent (an owner
+# link through a no-clobber `ln -s`), and otherwise left in the tombstone; the
+# caller did not win either way.
+fm_lock_claim_level() {  # <lockdir> <owner> <pid>
+  local lockdir=$1 owner=$2 pid=$3 lock_abs tomb target same
+  lock_abs=$(fm_lock_abs_path "$lockdir") || return 1
+  tomb=$(mktemp -d "${lock_abs}.tomb.XXXXXX" 2>/dev/null) || return 1
+  if ! mv "$lockdir" "$tomb/lock" 2>/dev/null; then
+    rmdir "$tomb" 2>/dev/null || true
+    return 1
+  fi
+  same=false
+  if [ -n "$owner" ]; then
+    fm_lock_points_to_owner "$tomb/lock" "$owner" && same=true
+  elif [ -d "$tomb/lock" ] && [ ! -L "$tomb/lock" ]; then
+    same=true
+  fi
+  if [ "$same" = true ] && [ "$(cat "$tomb/lock/pid" 2>/dev/null || true)" = "$pid" ]; then
+    fm_lock_remove_path "$tomb/lock" || true
+    rmdir "$tomb" 2>/dev/null || true
+    return 0
+  fi
+  if [ -L "$tomb/lock" ]; then
+    target=$(readlink "$tomb/lock" 2>/dev/null) \
+      && ln -s "$target" "$lockdir" 2>/dev/null \
+      && rm -f "$tomb/lock"
+  elif [ ! -e "$lockdir" ] && [ ! -L "$lockdir" ]; then
+    mv "$tomb/lock" "$lockdir" 2>/dev/null
+  fi
+  rmdir "$tomb" 2>/dev/null || true
+  return 1
+}
+
 fm_lock_try_acquire() {
-  local lockdir=$1 pid steal cur rc steal_owner primary_owner current
+  local lockdir=$1 pid steal cur rc steal_owner primary_owner current acquire_steal
   FM_LOCK_HELD_PID=
   FM_LOCK_OWNER_DIR=
   FM_LOCK_RECOVERED_PID=
@@ -973,7 +1041,11 @@ fm_lock_try_acquire() {
   fi
 
   steal="$lockdir.steal"
-  if ! fm_lock_try_acquire "$steal"; then
+  case "$lockdir" in
+    *.steal) acquire_steal=fm_lock_try_acquire_steal_guard ;;
+    *) acquire_steal=fm_lock_try_acquire ;;
+  esac
+  if ! "$acquire_steal" "$steal"; then
     FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
     FM_LOCK_OWNER_DIR=
     return 1
