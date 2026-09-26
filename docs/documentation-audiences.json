@@ -105,6 +105,10 @@
     {
       "source": "docs/trace-context.md",
       "target": "docs/verification/trace-context.md"
+    },
+    {
+      "source": "docs/disk-reclaim.md",
+      "target": "docs/verification/disk-reclaim.md"
     }
   ],
   "surfaces": [
@@ -333,6 +337,10 @@
       "audience": "maintainer-architecture"
     },
     {
+      "path": "docs/disk-reclaim.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/extension-bindings.md",
       "audience": "maintainer-architecture"
     },
@@ -478,6 +486,10 @@
     },
     {
       "path": "docs/verification/dispatch-resolve.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/disk-reclaim.md",
       "audience": "maintainer-verification"
     },
     {
