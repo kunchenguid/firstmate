@@ -9,7 +9,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | --- | --- |
 | Firstmate's code, private files, or project location | [FM_HOME](#fm_home) and [operational home layout](#operational-home-layout-and-state) |
 | Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
-| Worker permissions, accounts, or environment | [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), and [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist) |
+| Worker permissions, accounts, environment, or repository evidence | [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist), and [Holusight startup evidence](#holusight-startup-evidence-configholusightjson) |
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
@@ -893,6 +893,17 @@ An absent or blank file changes nothing, while a present path that is not a read
 The text is static and never executed or expanded; secondmate charters never take it, and the file is local to each home rather than part of secondmate inherited configuration.
 
 `bin/fm-brief.sh`'s header owns the placement rule and its safety argument.
+
+## Holusight startup evidence (config/holusight.json)
+
+Worker ship and scout launches run `bin/fm-holusight.sh` before the selected runtime starts.
+The default is enabled, and `config/holusight.json` may set `projects.<name>.enabled` to `false` or `true` for an explicit per-project choice.
+The helper resolves only an existing `HOLUS_EXECUTABLE`, `~/.local/bin/holus`, or PATH executable, and never installs, indexes, or enables egress.
+It passes explicit egress-deny environment signals and returns bounded Holusight evidence in the private launch instructions without intentionally retaining Firstmate files in the application repository.
+Holusight owns its local usage-event schema and records real invocation outcomes when the CLI is available.
+An unavailable or disabled lookup is reported explicitly as `not-used`, while token and usability dimensions remain `unknown` unless the runtime exposes measurements.
+Run `bin/fm-holusight.sh benchmark <project-root> <project-name>` for a bounded local enabled-versus-disabled comparison.
+The configuration and launch mechanics are owned by `bin/fm-holusight.sh` and `bin/fm-spawn.sh`.
 
 ## Worker launch environment (config/launch-env-allowlist)
 

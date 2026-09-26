@@ -2908,6 +2908,33 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
     echo "error: could not publish current launch contract for $SOURCE_BRIEF" >&2
     exit 1
   fi
+  # Holusight startup evidence is obtained before the worker runtime starts.
+  # The helper resolves only an existing local executable, denies egress, and
+  # writes no files in the application worktree. Its output is part of the
+  # private launch brief, while Holusight owns its local usage-event schema.
+  if HOLUSIGHT_STARTUP=$(
+    FM_ROOT_OVERRIDE="$FM_ROOT" FM_HOME="$FM_HOME" FM_CONFIG_OVERRIDE="$CONFIG" \
+      "$FM_ROOT/bin/fm-holusight.sh" "$PROJ_ABS" "$(basename "$PROJ_ABS")" "$BRIEF"
+  ); then :; else
+    HOLUSIGHT_STARTUP=$'### Holusight startup evidence\nnot-used: startup lookup failed safely; no application-repository writes'
+  fi
+  # Keep startup evidence outside the captain-intent authorization block, whose
+  # owner intentionally consumes everything from its heading to end of brief.
+  FM_HOLUSIGHT_INSERT="$HOLUSIGHT_STARTUP" python3 - "$BRIEF" <<'PY'
+import os
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+text = path.read_text(encoding="utf-8")
+insert = os.environ["FM_HOLUSIGHT_INSERT"]
+marker = "## Captain intent authorized for --intent"
+if marker in text:
+    text = text.replace(marker, insert + "\n\n" + marker, 1)
+else:
+    text += "\n\n" + insert + "\n"
+path.write_text(text, encoding="utf-8")
+PY
 fi
 
 delivery_rigor_rank() { # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task mode
