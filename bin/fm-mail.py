@@ -201,6 +201,7 @@ def gmail_authentication_pass(message):
         return False
     clauses = str(receiver_result).split(';')
 
+
     authserv = clauses[0].strip().split()
     if not authserv or authserv[0].casefold() != 'mx.google.com':
         return False
