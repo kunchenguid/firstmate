@@ -402,6 +402,9 @@ family_for_basename() {
     fm-backend-cmux.test.sh|fm-backend-cmux-smoke.test.sh)
       printf '%s\n' cmux
       ;;
+    fm-backend-paseo.test.sh|fm-backend-paseo-smoke.test.sh)
+      printf '%s\n' paseo
+      ;;
     fm-backend-zellij.test.sh|fm-backend-zellij-smoke.test.sh)
       printf '%s\n' zellij
       ;;
@@ -435,7 +438,7 @@ expected_gate_skip_for_family() {
   case "$1" in
     real-herdr-gated) printf '%s\n' herdr ;;
     live-harness-optin) printf '%s\n' live-capability ;;
-    cmux|zellij|orca) printf '%s\n' optional-binary ;;
+    cmux|zellij|orca|paseo) printf '%s\n' optional-binary ;;
     snapshot-bearings) printf '%s\n' optional-binary ;;
     *) printf '%s\n' none ;;
   esac
@@ -456,6 +459,7 @@ snapshot-bearings
 cmux
 zellij
 orca
+paseo
 standalone
 unclassified
 EOF
@@ -686,6 +690,8 @@ tests/fm-ask-user-authority.test.sh 131
 tests/fm-backend-cmux-smoke.test.sh 33
 tests/fm-backend-cmux.test.sh 3498
 tests/fm-backend-orca.test.sh 23381
+tests/fm-backend-paseo-smoke.test.sh 40
+tests/fm-backend-paseo.test.sh 8000
 tests/fm-backend-tmux-smoke.test.sh 363
 tests/fm-backend-zellij-smoke.test.sh 21
 tests/fm-backend-zellij.test.sh 9064
@@ -1402,6 +1408,10 @@ families_for_changed_path() {
       ;;
     bin/backends/cmux*|tests/cmux-test-safety.sh)
       printf '%s\n' cmux
+      printf '%s\n' backend-dispatch
+      ;;
+    bin/backends/paseo*)
+      printf '%s\n' paseo
       printf '%s\n' backend-dispatch
       ;;
     bin/backends/orca*|bin/backends/tmux.sh)

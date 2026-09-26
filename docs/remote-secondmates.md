@@ -425,7 +425,7 @@ All remote secondmates on one host share `fm-remote` and retain separate `2ndmat
   Launch, liveness recovery, control, and retirement refuse it until an operator explicitly migrates it, instead of attempting a live cutover.
 - A launch after a host has drifted out of readiness fails with the doctor's own gap text instead of leaving a half-created endpoint.
 - Raw launch commands are not accepted for remote secondmates.
-- Backends that already refuse secondmate launch, currently Orca and cmux, remain unsupported on the remote host.
+- Backends that already refuse secondmate launch, currently Orca, cmux, and Paseo, remain unsupported on the remote host.
 
 ### Liveness recovery
 
