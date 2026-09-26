@@ -329,6 +329,11 @@
 #     __CLAUDEPERMFLAG__ the claude permission flag selected by config/claude-permission-mode
 #     __PIBIN__    quoted concrete Pi-family executable path resolved from PATH
 #     __PITUIMODE__ optional --tui-mode regular when that executable advertises it
+#     __PIRESUME__ optional relaunch-only `--session <reference>` that keeps a
+#                  Pi replacement on the session the endpoint's runtime already
+#                  reports (relaunch_resume_args below owns it; it supplies its
+#                  own leading space, and is empty on every fresh spawn and for
+#                  every other harness)
 #     __TURNEND__  absolute path to state/<task-id>.turn-ended (for harnesses whose
 #                  turn-end signal rides the launch command, e.g. codex -c notify=[...])
 #     __PIEXT__    absolute path to state/<task-id>.pi-ext.ts (pi turn-end extension,
@@ -2000,7 +2005,7 @@ launch_template() {
     ;;
   opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
   pi | pi-signed)
-    printf '%s' '__PIBIN____PITUIMODE__'
+    printf '%s' '__PIBIN____PITUIMODE____PIRESUME__'
     if [ "$kind" = secondmate ]; then
       printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     else
@@ -2472,6 +2477,49 @@ muse_worker_meta_api_key_present() {
 muse_credential_present() {
   local auth=$1
   [ -s "$auth" ] || muse_worker_meta_api_key_present
+}
+
+# relaunch_resume_args: the launch arguments that keep a RELAUNCH bound to the
+# agent session this endpoint's runtime already reports, so the runtime's own
+# status authority survives the replacement.
+#
+# Why this exists, and why it is relaunch-only: some runtimes bind a pane's
+# agent status to one session identity and ignore reports carrying another (the
+# defect fixed 2026-09-21 for Herdr-backed Pi workers - docs/herdr-backend.md
+# "Agent status authority and relaunch"). A fresh replacement session is
+# exactly such a report, so the pane freezes at the previous agent's last
+# reported state. Passing the SAME session back to the replacement keeps that
+# identity, and the authority with it; no fresh spawn needs this because nothing
+# is bound yet.
+#
+# The reference is read from the endpoint's own runtime record, never guessed
+# from what looks recent, and only for an adapter with a verified resume form
+# whose own agent label reported it
+# (bin/fm-control-lib.sh's fm_control_relaunch_resume_flag owns both rules, and
+# bin/backends/herdr.sh's fm_backend_herdr_pane_agent_session_ref owns the
+# read). Every other combination prints nothing, so the launch stays exactly
+# what it was before this existed: a fresh session.
+#
+# Prints the arguments with the single leading space that appends them to the
+# launch line, so an empty result leaves every other launch byte-identical.
+#
+# Only the Herdr backend is asked: it is the one adapter whose runtime records a
+# per-pane agent session, and on every other backend the pane carries no such
+# identity for a replacement to preserve. An unreadable registration - no
+# agent, a stale one, a malformed reference - degrades to that same
+# fresh-session launch rather than refusing, because nothing here is a safety
+# property; it preserves a display and supervision signal.
+relaunch_resume_args() {  # <harness> <backend> <target>
+  local harness=${1-} backend=${2-} target=${3-} identity agent ref flag
+  [ "$backend" = herdr ] || return 0
+  [ -n "$target" ] || return 0
+  fm_backend_herdr_parse_target "$target" || return 0
+  identity=$(fm_backend_herdr_pane_agent_session_ref "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE") || return 0
+  agent=${identity%%$'\t'*}
+  ref=${identity#*$'\t'}
+  flag=$(fm_control_relaunch_resume_flag "$harness" "$agent") || return 0
+  [ -n "$flag" ] && [ -n "$ref" ] || return 0
+  printf -- ' %s %s' "$flag" "$(shell_quote "$ref")"
 }
 
 model_flag_for_harness() {
@@ -4839,6 +4887,14 @@ MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT" "$MODEL") || exit 1
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
+# Relaunch session continuity. Computed here, where the adopted endpoint (T) is
+# known, and substituted only into the Pi-family template's `__PIRESUME__`
+# placeholder; an empty value leaves every other launch byte-identical.
+RESUME_ARGS=
+if [ "$RELAUNCH" -eq 1 ]; then
+  RESUME_ARGS=$(relaunch_resume_args "$HARNESS" "$BACKEND" "$T") || RESUME_ARGS=
+fi
+LAUNCH=${LAUNCH//__PIRESUME__/$RESUME_ARGS}
 LAUNCH=${LAUNCH//__CLAUDEPERMFLAG__/$CLAUDE_PERM_FLAG}
 if [ "$HARNESS" = rovo ]; then
   ROVOCONFIGOVERRIDE=$(rovo_config_override_flag "$EFFORT" "$DATA" "$STATE" "$ID") || {
