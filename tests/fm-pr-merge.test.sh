@@ -209,6 +209,18 @@ case "${1:-} ${2:-}" in
         > "$FM_TEST_AWAY_WORDS_AT_MERGE" 2>/dev/null \
         || printf 'no-live-record\n' > "$FM_TEST_AWAY_WORDS_AT_MERGE"
     fi
+    if [ -n "${FM_TEST_GH_MERGE_STDERR:-}" ]; then
+      printf '%s\n' "$FM_TEST_GH_MERGE_STDERR" >&2
+    fi
+    if [ -n "${FM_TEST_GH_MERGE_BLOCK_MARKER:-}" ]; then
+      : > "$FM_TEST_GH_MERGE_BLOCK_MARKER"
+      block_i=0
+      while [ ! -e "$FM_TEST_GH_MERGE_RELEASE" ] && [ "$block_i" -lt 250 ]; do
+        sleep 0.02
+        block_i=$((block_i + 1))
+      done
+      [ -e "$FM_TEST_GH_MERGE_RELEASE" ] || exit 124
+    fi
     if [ -n "${FM_TEST_GH_MERGE_OUTPUT:-}" ]; then
       printf '%s\n' "$FM_TEST_GH_MERGE_OUTPUT"
     else
@@ -452,6 +464,9 @@ run_pr_merge() {
   FM_TEST_GH_RUNS="$case_dir/github-runs.json" \
   FM_TEST_GH_MERGE_RC_FILE="$case_dir/github-merge-rc" \
   FM_TEST_GH_MERGE_OUTPUT="$(cat "$case_dir/github-merge-output" 2>/dev/null || true)" \
+  FM_TEST_GH_MERGE_STDERR="${FM_TEST_GH_MERGE_STDERR:-}" \
+  FM_TEST_GH_MERGE_BLOCK_MARKER="${FM_TEST_GH_MERGE_BLOCK_MARKER:-}" \
+  FM_TEST_GH_MERGE_RELEASE="${FM_TEST_GH_MERGE_RELEASE:-}" \
   FM_TEST_GH_GRAPHQL_FAIL="$case_dir/github-graphql-fail" \
   FM_TEST_GH_RULES_FAIL="$case_dir/github-rules-fail" \
   FM_TEST_GH_RULES_FAIL_BODY="$case_dir/github-rules-fail-body" \
@@ -559,6 +574,75 @@ test_merge_failure_propagates_after_recording() {
   assert_grep 'pr=https://github.com/example/repo/pull/13' "$case_dir/state/task-x1.meta" \
     "merge-fails: pr= should already be recorded even though the merge itself failed"
   pass "fm-pr-merge propagates a real merge failure without silently succeeding"
+}
+
+test_github_merge_stderr_is_live_while_the_child_is_blocked() {
+  local case_dir merge_pid rc i
+  case_dir=$(make_case github-live-merge-stderr)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 9191919191919191919191919191919191919191
+  printf '1\n' > "$case_dir/github-merge-rc"
+  printf 'forge stdout stayed captured\n' > "$case_dir/github-merge-output"
+  write_github_outcome "$case_dir" OPEN false false main
+  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/gh.log"
+
+  FM_TEST_GH_MERGE_STDERR='automic vault: human approval required' \
+  FM_TEST_GH_MERGE_BLOCK_MARKER="$case_dir/merge-blocked" \
+  FM_TEST_GH_MERGE_RELEASE="$case_dir/release-merge" \
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/91 \
+      > "$case_dir/stdout" 2> "$case_dir/stderr" &
+  merge_pid=$!
+
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -e "$case_dir/merge-blocked" ]; do
+    sleep 0.02
+    i=$((i + 1))
+  done
+  if [ ! -e "$case_dir/merge-blocked" ]; then
+    : > "$case_dir/release-merge"
+    wait "$merge_pid" 2>/dev/null || true
+    fail "github-live-merge-stderr: the fake merge child never blocked"
+  fi
+  if ! kill -0 "$merge_pid" 2>/dev/null; then
+    : > "$case_dir/release-merge"
+    wait "$merge_pid" 2>/dev/null || true
+    fail "github-live-merge-stderr: the merge wrapper exited before the temporal assertion"
+  fi
+  if ! grep -F 'automic vault: human approval required' "$case_dir/stderr" >/dev/null; then
+    : > "$case_dir/release-merge"
+    wait "$merge_pid" 2>/dev/null || true
+    fail "github-live-merge-stderr: child stderr was hidden while the merge was blocked"
+  fi
+  if [ ! -e "$case_dir/state/.control-task-x1.lock" ]; then
+    : > "$case_dir/release-merge"
+    wait "$merge_pid" 2>/dev/null || true
+    fail "github-live-merge-stderr: the lifecycle lock was not held during the merge"
+  fi
+  if [ ! -e "$case_dir/state/.afk-contract.lock" ]; then
+    : > "$case_dir/release-merge"
+    wait "$merge_pid" 2>/dev/null || true
+    fail "github-live-merge-stderr: the authority lock was not held during the merge"
+  fi
+
+  : > "$case_dir/release-merge"
+  set +e
+  wait "$merge_pid"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "github-live-merge-stderr: the fake forge failure should propagate"
+  assert_grep 'forge stdout stayed captured' "$case_dir/stderr" \
+    "github-live-merge-stderr: captured stdout was lost from the existing diagnostics"
+  assert_grep 'state=OPEN, merged=false, isInMergeQueue=false' "$case_dir/stderr" \
+    "github-live-merge-stderr: ordinary outcome reconciliation did not run"
+  assert_absent "$case_dir/state/.control-task-x1.lock" \
+    "github-live-merge-stderr: the lifecycle lock survived the failed merge"
+  assert_absent "$case_dir/state/.afk-contract.lock" \
+    "github-live-merge-stderr: the authority lock survived the failed merge"
+  assert_present "$case_dir/state/task-x1.check.sh" \
+    "github-live-merge-stderr: the merge poll was not left armed"
+  pass "fm-pr-merge streams forge stderr while preserving failure reconciliation and cleanup"
 }
 
 test_github_merged_outcome_is_verified() {
@@ -2224,6 +2308,7 @@ test_github_conflicting_queue_rules_report_ambiguity
 test_verified_merge_records_pr_and_head
 test_pr_metadata_is_recorded_before_the_forge_call
 test_merge_failure_propagates_after_recording
+test_github_merge_stderr_is_live_while_the_child_is_blocked
 test_github_open_unqueued_outcome_refuses
 test_github_unreadable_outcome_keeps_pr_bookkeeping
 test_github_refusal_quotes_the_forge_output

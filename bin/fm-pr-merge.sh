@@ -74,7 +74,10 @@
 # Every refusal that follows a merge command which returned success quotes that
 # command's own output, marked as the forge's text and kept apart from this
 # script's verdict, including the refusal for an outcome that cannot be read;
-# a merge command that failed keeps its original error surfaced raw and first.
+# a GitHub merge command keeps stderr live so an interactive authorization
+# request is visible while the command is blocked, while stdout stays captured
+# for the existing outcome diagnostics. If the command fails, its stderr was
+# already surfaced raw and first, before the captured stdout and local verdict.
 # GitLab adds no method flag at all: its merge method is the project's own
 # setting, which the merge API applies, and imposing squash there would override
 # that convention rather than mirror the GitHub default.
@@ -1333,7 +1336,7 @@ case "$PROVIDER" in
     merge_status=0
     merge_output=$(gh pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
       --match-head-commit "$FM_PR_MERGE_HEAD" \
-      "${merge_args[@]+"${merge_args[@]}"}" "$@" 2>&1) || merge_status=$?
+      "${merge_args[@]+"${merge_args[@]}"}" "$@") || merge_status=$?
     if [ "$merge_status" -eq 0 ]; then
       FM_PR_GITHUB_MERGE_ACCEPTED=true
       persist_accepted_merge_authority || exit 1
