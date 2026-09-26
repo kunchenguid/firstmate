@@ -233,7 +233,7 @@ fm_nm_select_run() {  # <branch> <axi-overview> <worktree> [timeout_secs]
     inrows { inrows = 0 }
     END {
       if (!found) print "unavailable"
-      else if (bad || counts != 1 || (seen+0) != (expected+0) || (seen+0) != (shown+0) || (total+0) < (shown+0))
+      else if (bad || counts != 1 || seen + 0 != expected + 0 || seen + 0 != shown + 0 || total + 0 < shown + 0)
         print "unknown|unreadable runs table; run ids: " ids
       else if ((shown+0) < (total+0)) print "incomplete|" ids
       else if (invalid_run) print "unknown|unreadable runs table; run ids: " ids

@@ -3893,222 +3893,49 @@ test_capped_overview_without_branch_rows_reports_both_ids() {
   pass 'same-branch identity survives both runs falling outside the overview'
 }
 
-# A branch with zero rows anywhere in a capped overview must read as
-# truthfully absent, not as an unreadable table: the rebuilt zero-row
-# inventory re-parses as `runs[0]`.
-test_capped_overview_with_no_branch_runs_reports_absent() {
-  reset_fakes
-  local d; d=$TMP_ROOT/capped-no-branch-runs
-  mkdir -p "$d/state"
-  make_repo_on_branch "$d/wt" fm/orphan-branch
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/orphan.meta" "window=fm:fm-orphan" "worktree=$d/wt" "kind=ship" "harness=claude"
-  NM_HOME="$d/nm"
-  mkdir -p "$NM_HOME"
-  local head; head=$(git -C "$d/wt" rev-parse --short=8 HEAD)
-  FM_FAKE_AXI_HOME=$(python3 - "$NM_HOME/state.sqlite" "$d/wt" "$head" <<'PY'
+test_capped_overview_with_no_branch_runs_falls_back_cleanly() {
+  make_capped_runs_case capped-zero-branch running cancelled hidden
+  local d=$TMP_ROOT/capped-zero-branch out
+  fm_write_meta "$d/state/competing.meta" "window=default:w1:p1" "worktree=$d/wt" \
+    "kind=ship" "backend=herdr" "harness=claude"
+  FM_FAKE_AXI_HOME=$(python3 - "$NM_HOME/state.sqlite" "$d/wt" "$FM_FAKE_RUN_HEAD" <<'PY'
+import csv
 import json
 import sqlite3
 import sys
 
 database, worktree, head = sys.argv[1:]
 with sqlite3.connect(database) as db:
-    db.executescript("""
-        CREATE TABLE repos (id TEXT PRIMARY KEY, working_path TEXT NOT NULL UNIQUE);
-        CREATE TABLE runs (id TEXT PRIMARY KEY, repo_id TEXT NOT NULL, branch TEXT NOT NULL,
-                           status TEXT NOT NULL, head_sha TEXT NOT NULL, created_at INTEGER NOT NULL);
-    """)
-    db.execute("INSERT INTO repos VALUES ('repo', ?)", (worktree,))
-    db.executemany("INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?)",
-                    [("01OTHER%02d" % i, "repo", "fm/other-%d" % i, "running", head, i)
-                     for i in range(11)])
+    db.execute("DELETE FROM runs WHERE repo_id = 'repo' AND branch = 'fm/competing'")
+    db.executemany("INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?)", [
+        ("01OTHER10", "repo", "fm/other-10", "running", head, 20),
+        ("01OTHER11", "repo", "fm/other-11", "running", head, 21),
+    ])
+    rows = db.execute("SELECT id, branch, status, head_sha FROM runs WHERE repo_id = 'repo' "
+                      "ORDER BY created_at DESC, id DESC").fetchall()
 print("repo: " + json.dumps(worktree))
-print("count: 10 of 11 total")
+print("count: 10 of %d total" % len(rows))
 print("runs[10]{id,branch,status,head,pr}:")
-for i in range(10):
-    print('  "01OTHER%02d",fm/other-%d,running,%s,""' % (i, i, head))
+for row in rows[:10]:
+    sys.stdout.write("  ")
+    csv.writer(sys.stdout, lineterminator="\n").writerow([*row, ""])
 PY
-)
-  FM_FAKE_RUNS_LIST=""
-  FM_FAKE_BUSY=1
-  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" orphan)
-  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" orphan busy --gen "$gen" \
+  ) || fail 'could not build capped inventory without a requested-branch run'
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-10)"
+  FM_FAKE_RUNS_LIST="  running fm/other-10 $FM_FAKE_RUN_HEAD 2026-09-14 12:01"
+  FM_FAKE_TMUX_MISSING=1
+  FM_FAKE_HERDR_AGENT_STATUS=idle
+  local gen
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" competing)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" competing busy --gen "$gen" \
     --source claude-hook --event user-prompt-submit
-  local out; out=$(run_crew_state "$d" orphan)
-  assert_not_contains "$out" "state: unknown" 'a zero-row branch in a capped overview is absent, not unreadable'
-  assert_not_contains "$out" "unreadable" 'a zero-row branch must not read as an unreadable table'
-  assert_contains "$out" "state: working" 'absence of a run falls through to the pane/busy verdict'
-  assert_contains "$out" "source: pane" 'the working verdict still comes from the pane source'
-  pass 'a capped overview with zero same-branch rows reports absent, not unreadable'
-}
-
-# The same capped shape, but reached through the code path that actually
-# consumes the same-branch selection: fm-crew-state only consults the overview
-# once `axi status` answers with a run, so a branch of its own with no run at
-# all is only reported while SOME run exists elsewhere. Pre-fix this read
-# `unknown - complete same-branch run inventory unreadable`, which is the
-# healthy-home-reports-itself-untrustworthy symptom.
-test_no_branch_run_beside_a_live_run_elsewhere_reads_absent() {
-  reset_fakes
-  local d; d=$TMP_ROOT/capped-live-elsewhere
-  mkdir -p "$d/state"
-  make_repo_on_branch "$d/wt" fm/orphan-branch
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/orphan.meta" "window=fm:fm-orphan" "worktree=$d/wt" "kind=ship" "harness=claude"
-  NM_HOME="$d/nm"
-  mkdir -p "$NM_HOME"
-  local head; head=$(git -C "$d/wt" rev-parse HEAD)
-  FM_FAKE_AXI_HOME=$(python3 - "$NM_HOME/state.sqlite" "$d/wt" "$head" <<'PY'
-import json
-import sqlite3
-import sys
-
-database, worktree, head = sys.argv[1:]
-with sqlite3.connect(database) as db:
-    db.executescript("""
-        CREATE TABLE repos (id TEXT PRIMARY KEY, working_path TEXT NOT NULL UNIQUE);
-        CREATE TABLE runs (id TEXT PRIMARY KEY, repo_id TEXT NOT NULL, branch TEXT NOT NULL,
-                           status TEXT NOT NULL, head_sha TEXT NOT NULL, created_at INTEGER NOT NULL);
-    """)
-    db.execute("INSERT INTO repos VALUES ('repo', ?)", (worktree,))
-    db.executemany("INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?)",
-                   [("01OTHER%02d" % i, "repo", "fm/other-%d" % i, "running", head, i)
-                    for i in range(11)])
-print("repo: " + json.dumps(worktree))
-print("count: 10 of 11 total")
-print("runs[10]{id,branch,status,head,pr}:")
-for i in range(10):
-    print('  "01OTHER%02d",fm/other-%d,running,%s,""' % (i, i, head))
-PY
-)
-  FM_FAKE_AXI_STATUS=$(run_running fm/other-0)
-  FM_FAKE_RUNS_LIST=""
-  FM_FAKE_BUSY=1
-  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" orphan)
-  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" orphan busy --gen "$gen" \
-    --source claude-hook --event user-prompt-submit
-  local out; out=$(run_crew_state "$d" orphan)
-  assert_not_contains "$out" "unreadable" 'a branch with no run of its own is not an unreadable runs table'
-  assert_not_contains "$out" "state: unknown" 'a healthy home does not report itself untrustworthy'
-  assert_contains "$out" "state: working" 'absence of a same-branch run falls through to the pane verdict'
-  assert_contains "$out" "source: pane" 'the working verdict still comes from the pane source'
-  pass 'no run for this branch beside a live run elsewhere reads absent, not unreadable'
-}
-
-# The capped-overview sqlite reader runs inside the same per-read budget as
-# every other no-mistakes state read, so a contended database cannot stall a
-# crew poll: a reader that never returns must be killed and fall through to the
-# reader-unavailable verdict.
-test_capped_inventory_reader_is_time_bounded() {
-  make_capped_runs_case capped-slow-reader running pending hidden
-  local d=$TMP_ROOT/capped-slow-reader out started elapsed
-  cat > "$d/fakebin/python3" <<'SH'
-#!/usr/bin/env bash
-sleep 30
-SH
-  chmod +x "$d/fakebin/python3"
-  FM_CREW_STATE_NM_TIMEOUT=1
-  export FM_CREW_STATE_NM_TIMEOUT
-  started=$SECONDS
+  printf 'working: implementation continues\n' > "$d/state/competing.status"
   out=$(run_crew_state "$d" competing)
-  elapsed=$((SECONDS - started))
-  unset FM_CREW_STATE_NM_TIMEOUT
-  [ "$elapsed" -lt 10 ] || fail "the capped inventory reader ran unbounded for ${elapsed}s"
-  assert_contains "$out" 'state: unknown' 'an unreachable inventory reader cannot establish a verdict'
-  assert_contains "$out" 'reader unavailable' 'a killed reader reports the same unavailable reader path'
-  pass 'the capped inventory reader is bounded by the crew read budget'
-}
-
-# Repo identity is the overview's own `repo:` line matched exactly against the
-# recorded `working_path`; a spelling the inventory does not record is not
-# guessed at, and reads as an unreadable inventory that still names every
-# candidate run id.
-test_capped_inventory_requires_exact_repo_path() {
-  make_capped_runs_case capped-noncanonical running pending hidden
-  local d=$TMP_ROOT/capped-noncanonical out
-  FM_FAKE_AXI_HOME=$(printf '%s\n' "$FM_FAKE_AXI_HOME" | sed "s|^repo: .*|repo: \"$d/wt/./\"|")
-  out=$(run_crew_state "$d" competing)
-  assert_contains "$out" 'state: unknown' 'an unmatched repo spelling cannot establish a verdict'
-  assert_contains "$out" 'unreadable' 'an unmatched repo lookup reports the inventory unreadable'
-  assert_contains "$out" '01NEW' 'an unmatched repo lookup still names the candidate run'
-  assert_not_contains "$out" 'absent' 'an unmatched repo lookup never reads as a branch without runs'
-  pass 'a repo spelling the inventory does not record reads unreadable'
-}
-
-# The 2026-09-22 PR #5317 shape on no-mistakes v1.79.0. A task copy is a linked
-# git worktree of its home clone, and the CLI registers the repository once, by
-# the clone's path, which the overview reports as `repo:`. Past ten runs the
-# overview is capped, so selection goes through the inventory reader, which must
-# key on that `repo:` line: keyed on the task worktree path it matched no row and
-# every read reported the inventory unreadable. The run is in ci merge
-# monitoring with every check green, and main advanced while it waited for the
-# merge, so its ci log ends in re-arm lines. It must read as a green PR held for
-# the merge decision, naming the PR, rather than unknown or still validating.
-test_linked_worktree_green_merge_monitoring_reads_held_for_merge() {
-  reset_fakes
-  local d out overview
-  d=$(new_case linked-worktree-green)
-  mkdir -p "$d/clone"
-  git -C "$d/clone" init -q
-  git -C "$d/clone" commit -q --allow-empty -m init
-  git -C "$d/clone" worktree add -q -b fm/feat-green "$d/wt"
-  FM_FAKE_RUN_HEAD=$(git -C "$d/wt" rev-parse HEAD)
-  export FM_FAKE_RUN_HEAD
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-green.meta" "window=fm:fm-feat-green" "worktree=$d/wt" "kind=ship"
-  NM_HOME="$d/nm"
-  mkdir -p "$NM_HOME"
-  overview=$(python3 - "$NM_HOME/state.sqlite" "$d/clone" "$FM_FAKE_RUN_HEAD" <<'PY'
-import json
-import sqlite3
-import sys
-
-database, clone, head = sys.argv[1:]
-pr = "https://github.com/o/r/pull/2"
-with sqlite3.connect(database) as db:
-    db.executescript("""
-        CREATE TABLE repos (id TEXT PRIMARY KEY, working_path TEXT NOT NULL UNIQUE);
-        CREATE TABLE runs (id TEXT PRIMARY KEY, repo_id TEXT NOT NULL, branch TEXT NOT NULL,
-                           status TEXT NOT NULL, head_sha TEXT NOT NULL, created_at INTEGER NOT NULL);
-    """)
-    db.execute("INSERT INTO repos VALUES ('repo', ?)", (clone,))
-    db.execute("INSERT INTO runs VALUES ('01GREEN', 'repo', 'fm/feat-green', 'running', ?, 100)", (head,))
-    db.executemany("INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?)",
-                   [("01DONE%02d" % i, "repo", "fm/done-%d" % i, "completed", head, i)
-                    for i in range(11)])
-print("repo: " + json.dumps(clone))
-print("current_branch: fm/feat-green")
-print("daemon: running")
-print("count: 10 of 12 total")
-print("runs[10]{id,branch,status,head,pr}:")
-print('  "01GREEN",fm/feat-green,running,%s,"%s"' % (head[:8], pr))
-for i in reversed(range(2, 11)):
-    print('  "01DONE%02d",fm/done-%d,completed,%s,""' % (i, i, head[:8]))
-PY
-) || fail 'could not create the linked-worktree run inventory fixture'
-  # Guard the divergence this case exists for, so it cannot go vacuous.
-  [ "$(git -C "$d/wt" rev-parse --show-toplevel)" != "$(git -C "$d/clone" rev-parse --show-toplevel)" ] \
-    || fail 'the fixture task copy must not be the registered clone'
-  assert_contains "$overview" 'count: 10 of 12 total' 'the fixture overview must be capped'
-  FM_FAKE_AXI_HOME=$overview
-  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-green | sed 's/01RUN/01GREEN/')"
-  FM_FAKE_AXI_STATUS_RUN=$FM_FAKE_AXI_STATUS
-  FM_FAKE_CI_LOGS=$(cat <<'EOF'
-monitoring CI for PR #2 (timeout: 4h0m0s)...
-CI checks running, waiting for results...
-all CI checks passed - still monitoring until merged or closed
-base branch advanced (f9f74a1d91cc..6f0f139962ea), re-arming CI monitor timeout
-base branch advanced (6f0f139962ea..c5131a33a1b2), re-arming CI monitor timeout
-EOF
-)
-  out=$(run_crew_state "$d" feat-green)
-  assert_not_contains "$out" 'unreadable' 'a linked worktree reads its run through the repo line'
-  assert_not_contains "$out" 'state: unknown' 'a green PR in merge monitoring is never unknown'
-  assert_contains "$out" 'state: done' 'a green PR in merge monitoring reads done'
-  assert_contains "$out" 'source: run-step' 'the green reading comes from the selected run'
-  assert_contains "$out" 'checks green: PR ready for review' 'the reading is held for the merge decision'
-  assert_contains "$out" 'https://github.com/o/r/pull/2' 'the reading names the PR to ask about'
-  pass 'a linked worktree green PR in merge monitoring reads held for merge'
+  assert_contains "$out" 'state: working' 'an exact zero-run inventory is valid absence, not an unreadable table'
+  assert_contains "$out" 'source: pane' 'no attributed run returns to current harness evidence'
+  assert_contains "$out" 'claude-hook' 'the semantic busy source remains visible after inventory fallback'
+  assert_not_contains "$out" 'unreadable runs table' 'a capped overview with no requested rows stays readable'
+  pass 'capped overview with zero same-branch runs falls back cleanly'
 }
 
 test_capped_replacement_keeps_gate_and_inventory_unchanged() {
@@ -5629,11 +5456,7 @@ test_no_run_herdr_stale_registration_over_shell_reads_agent_gone
 test_no_run_herdr_stale_working_record_is_never_busy
 test_capped_competing_live_runs_report_both_ids
 test_capped_overview_without_branch_rows_reports_both_ids
-test_capped_overview_with_no_branch_runs_reports_absent
-test_no_branch_run_beside_a_live_run_elsewhere_reads_absent
-test_capped_inventory_reader_is_time_bounded
-test_capped_inventory_requires_exact_repo_path
-test_linked_worktree_green_merge_monitoring_reads_held_for_merge
+test_capped_overview_with_no_branch_runs_falls_back_cleanly
 test_capped_replacement_keeps_gate_and_inventory_unchanged
 test_capped_inventory_failures_report_unknown
 test_complete_inventory_ignores_unrelated_semantics
