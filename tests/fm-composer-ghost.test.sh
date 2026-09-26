@@ -182,6 +182,31 @@ test_strip_ghost_keeps_muse_composer_colors() {
   pass "fm_tmux_strip_ghost keeps muse's near-threshold glyph and its typed text"
 }
 
+# --- claude's slash commands use truecolor syntax highlighting ---------------
+
+test_strip_ghost_keeps_claude_slash_command_colors() {
+  local out
+  # Claude Code syntax-highlights slash commands (/exit, /clear, etc.) in
+  # truecolor 38;2;87;105;247 (luminance ~115.8). With the 112 threshold,
+  # this real typed input survives ghost stripping.
+  out=$(printf '\xe2\x9d\xaf \033[38;2;87;105;247m/exit\033[0m\n' | fm_tmux_strip_ghost)
+  [ "$out" = "$(printf '\xe2\x9d\xaf /exit')" ] \
+    || fail "claude slash command was stripped as ghost text: '$out'"
+  pass "fm_tmux_strip_ghost keeps claude slash-command syntax-highlighted text"
+}
+
+test_claude_slash_command_is_pending() {
+  local dir fb capture
+  dir="$TMP_ROOT/claude-slash"; mkdir -p "$dir"
+  fb=$(make_fake_tmux "$dir")
+  capture="$dir/styled.txt"
+  printf '\xe2\x9d\xaf \033[38;2;87;105;247m/exit\033[0m\n' > "$capture"
+  PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=0 \
+    fm_pane_input_pending "fakepane" \
+    || fail "claude syntax-highlighted /exit was not detected as pending"
+  pass "fm_pane_input_pending: claude syntax-highlighted /exit is pending"
+}
+
 # --- fm_pane_input_pending: dim ghost is not pending ------------------------
 
 test_dim_ghost_only_composer_is_not_pending() {
@@ -686,10 +711,12 @@ test_strip_ghost_handles_combined_and_boundary_codes
 test_strip_ghost_keeps_colored_text_with_2_payloads
 test_strip_ghost_drops_dark_truecolor_ghost
 test_strip_ghost_keeps_muse_composer_colors
+test_strip_ghost_keeps_claude_slash_command_colors
 test_dim_ghost_only_composer_is_not_pending
 test_dim_ghost_inside_bordered_composer_is_not_pending
 test_normal_text_still_pending
 test_colored_text_with_2_payload_still_pending
+test_claude_slash_command_is_pending
 test_dark_truecolor_ghost_only_composer_is_not_pending
 test_dark_truecolor_bare_shell_prompt_is_unknown
 test_real_text_with_trailing_ghost_is_pending

@@ -3309,9 +3309,15 @@ fm_backend_herdr_queued_enter_busy() {  # <target> <allow-rendered>
 # captures. A literal payload wraps, and a tail-only capture of a complete
 # wrap would look like the truncation this proof exists to refuse. The bound
 # stays inside the selected composer extraction; it is not a whole-pane search.
+# Commands beginning with / or $ open autocomplete popup menus on Claude Code
+# that render below the prompt and push the prompt row up 15-25 lines; popup
+# headroom ensures the prompt row remains inside the captured tail.
 fm_backend_herdr_proof_lines() {  # <text>
   local text=$1 lines
   lines=$(( (${#text} / 40) + 8 ))
+  case "$text" in
+    '/'*|'$'*) lines=$((lines + 32)) ;;
+  esac
   if [ "$lines" -lt "$FM_COMPOSER_CAPTURE_LINES" ]; then
     lines=$FM_COMPOSER_CAPTURE_LINES
   fi

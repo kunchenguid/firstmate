@@ -5050,6 +5050,32 @@ test_send_text_submit_three_paste_placeholders_submit_the_long_payload() {
   pass "fm_backend_herdr_send_text_submit: three paste placeholders with no literal remainder submit the long payload"
 }
 
+# In Claude Code, typing /exit renders syntax-highlighted /exit (truecolor
+# 38;2;87;105;247, luminance ~115.8) followed by a slash-command autocomplete
+# popup menu spanning ~25 rows below the prompt. The capture must not truncate
+# the prompt row, and ghost stripping must not strip the syntax-highlighted command.
+test_send_text_submit_claude_slash_command_with_popup_submits_whole() {
+  local dir log resp fb out enter_count text fixture n
+  dir="$TMP_ROOT/submit-claude-slash-popup"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  text="/exit"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/2.out"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/4.out"
+  herdr_submit_claude_prefix "$resp" "$text"
+  fixture=$(printf '  \xe2\x9d\xaf \033[38;2;87;105;247m/exit\033[0m\n────────────────────────────────────────\n')
+  for ((n = 1; n <= 24; n++)); do
+    fixture+=$(printf '  /command%02d - Description\n' "$n")
+  done
+  printf '%s' "$fixture" > "$resp/4.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0.01 0.01' "$ROOT" "$text" )
+  [ "$out" = empty ] || fail "a Claude /exit command with syntax highlighting and a 25-line popup should be submitted, got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 1 ] || fail "the /exit command should be submitted once, sent $enter_count Enter(s)"
+  [ "$(herdr_ctrl_u_count "$log")" -eq 0 ] || fail "the /exit command must not be cleared with Ctrl+U"
+  pass "fm_backend_herdr_send_text_submit: Claude syntax-highlighted /exit with a trailing autocomplete popup is submitted whole"
+}
+
 # A non-Claude harness keeps the unproven type-then-Enter path: its composer
 # is never read before Enter, so a harness-specific placeholder or an
 # unselectable composer cannot turn a landed send into send-failed.
@@ -5882,6 +5908,7 @@ test_send_text_submit_lone_paste_placeholder_submits_the_long_payload
 test_send_text_submit_multiline_paste_placeholder_submits_the_long_payload
 test_send_text_submit_refuses_placeholder_followed_by_a_literal_remainder
 test_send_text_submit_three_paste_placeholders_submit_the_long_payload
+test_send_text_submit_claude_slash_command_with_popup_submits_whole
 test_send_text_submit_non_claude_skips_the_payload_proof
 test_dispatch_routes_herdr_backend
 test_dispatch_busy_state_unknown_for_tmux
