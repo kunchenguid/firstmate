@@ -753,6 +753,15 @@ printf '<h1>reply</h1>\n' > "$FREPLY_ART"
 lavish_session "$FREPLY_ART"
 freply_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$FREPLY_ART")
 fm_test_track_procevent_home "$HFREPLY"
+pe "$HFREPLY" register lavish "$freply_id" -- /bin/true >/dev/null
+if PATH="$FREPLY_BIN:$PATH" FM_HOME="$HFREPLY" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$FREPLY_ART" \
+  >"$TMP_ROOT/firstmate-foreign.out" 2>"$TMP_ROOT/firstmate-foreign.err"; then
+  fail "firstmate adopted an unrelated kindless registration"
+fi
+assert_contains "$(cat "$TMP_ROOT/firstmate-foreign.err")" "not the exact built-in legacy Lavish poll" \
+  "firstmate's legacy adoption accepted an unrelated source owner"
+pe "$HFREPLY" retire "$freply_id" >/dev/null
 printf 'stray reply\n' > "$TMP_ROOT/firstmate-stray-reply.txt"
 if PATH="$FREPLY_BIN:$PATH" FM_HOME="$HFREPLY" \
   "$ROOT/bin/fm-procevent-lavish.sh" arm "$FREPLY_ART" \
@@ -765,6 +774,13 @@ assert_contains "$(cat "$TMP_ROOT/firstmate-stray-reply.err")" "no captured roun
 PATH="$FREPLY_BIN:$PATH" FM_HOME="$HFREPLY" \
   "$ROOT/bin/fm-procevent-lavish.sh" arm "$FREPLY_ART" >/dev/null
 wait_for_lines "$FREPLY_LOG" 1 || fail "firstmate-owned Lavish listener did not start"
+if PATH="$FREPLY_BIN:$PATH" FM_HOME="$HFREPLY" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$FREPLY_ART" \
+  >"$TMP_ROOT/firstmate-idle-rearm.out" 2>"$TMP_ROOT/firstmate-idle-rearm.err"; then
+  fail "firstmate re-armed an active board without a captured round"
+fi
+assert_contains "$(cat "$TMP_ROOT/firstmate-idle-rearm.err")" "no captured round" \
+  "firstmate's idle re-arm refusal did not name the missing round"
 touch "$FREPLY_TRIGGER1"
 wait_capture "$HFREPLY" "$freply_id" \
   || fail "firstmate-owned Lavish feedback was not captured"
@@ -799,15 +815,30 @@ grep -v '^kind=' "$HFREPLY/state/procevent/$freply_id.source" \
 mv "$HFREPLY/state/procevent/$freply_id.source.legacy" \
   "$HFREPLY/state/procevent/$freply_id.source"
 chmod 0600 "$HFREPLY/state/procevent/$freply_id.source"
+cp "$HFREPLY/state/procevent-inbox/$freply_id.1.result" \
+  "$HFREPLY/state/procevent-inbox/$freply_id.2.result"
+cp "$HFREPLY/state/procevent-inbox/$freply_id.1.adapter" \
+  "$HFREPLY/state/procevent-inbox/$freply_id.2.adapter"
 printf 'Confirmed in session.\n' > "$TMP_ROOT/firstmate-reply.txt"
-PATH="$FREPLY_BIN:$PATH" FM_HOME="$HFREPLY" \
+if PATH="$FREPLY_BIN:$PATH" FM_HOME="$HFREPLY" FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS=invalid \
   "$ROOT/bin/fm-procevent-lavish.sh" arm "$FREPLY_ART" \
-  --agent-reply-file "$TMP_ROOT/firstmate-reply.txt" >/dev/null
-wait_for_lines "$FREPLY_LOG" 2 || fail "firstmate's Lavish reply listener did not start"
+  --agent-reply-file "$TMP_ROOT/firstmate-reply.txt" >/dev/null 2>"$TMP_ROOT/firstmate-launch-fail.err"; then
+  fail "firstmate's Lavish re-arm accepted an invalid listener confirmation window"
+fi
+assert_absent "$HFREPLY/state/procevent-inbox/$freply_id.1.handled" \
+  "failed listener startup acknowledged firstmate's pending capture"
+assert_absent "$HFREPLY/state/procevent-inbox/$freply_id.2.handled" \
+  "failed listener startup acknowledged a later legacy capture"
+[ "$(find "$HFREPLY/state/procevent" -maxdepth 1 -type f -name ".$freply_id.reply.*" | wc -l | tr -d ' ')" = 1 ] \
+  || fail "failed listener startup did not preserve exactly one staged reply"
 assert_grep 'kind=lavish-owned' "$HFREPLY/state/procevent/$freply_id.source" \
-  "re-arm did not upgrade the active firstmate-owned Lavish registration"
+  "re-arm failure did not preserve the upgraded firstmate-owned registration"
+PATH="$FREPLY_BIN:$PATH" pe "$HFREPLY" reconcile >/dev/null
+wait_for_lines "$FREPLY_LOG" 2 || fail "recovery did not start firstmate's staged Lavish reply listener"
 assert_present "$HFREPLY/state/procevent-inbox/$freply_id.1.handled" \
-  "posting firstmate's Lavish reply did not acknowledge its captured round"
+  "posting firstmate's Lavish reply did not acknowledge its FIFO captured round"
+assert_absent "$HFREPLY/state/procevent-inbox/$freply_id.2.handled" \
+  "one firstmate reply acknowledged more than one captured round"
 assert_grep 'poll2 reply: Confirmed in session.' "$FREPLY_LOG" \
   "firstmate's response was not posted to the active Lavish session"
 PATH="$FREPLY_BIN:$PATH" pe "$HFREPLY" reconcile >/dev/null
@@ -4638,50 +4669,6 @@ tout_elapsed=$(cat "$TMP_ROOT/timeout-arm/elapsed")
 [ "$tout_elapsed" -ge 2 ] \
   || fail "arm did not wait out the confirm window (${tout_elapsed}s)"
 pass "arm waits out the confirm window before reporting that the listener is not running"
-
-# Re-arming a firstmate-owned board publishes a new registration while the
-# earlier generation's listener still holds the claim. When that listener still
-# holds it as the confirm window ends, it keeps serving the board, so arm must
-# say so instead of reporting failure, and must never claim this generation is
-# the one listening.
-LIVE="$TMP_ROOT/live-rearm"
-mkdir -p "$LIVE/bin" "$LIVE/home/state"
-cp "$READY/bin/lavish-axi" "$LIVE/bin/lavish-axi"
-live_art="$LIVE/board.html"
-printf '<h1>live</h1>\n' > "$live_art"
-lavish_session "$live_art"
-live_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$live_art")
-fm_test_track_procevent_home "$LIVE/home"
-export READY_MARK="$LIVE/mark" READY_RELEASE="$LIVE/release"
-: > "$READY_MARK"
-PATH="$LIVE/bin:$PATH" FM_HOME="$LIVE/home" \
-  "$ROOT/bin/fm-procevent-lavish.sh" arm "$live_art" > "$LIVE/arm1.out"
-assert_contains "$(cat "$LIVE/arm1.out")" "armed: $live_id" "the first arm was not reported ready"
-wait_for_lines "$READY_MARK" 1 || fail "the first generation's listener never ran"
-set +e
-PATH="$LIVE/bin:$PATH" FM_HOME="$LIVE/home" FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS=1 \
-  "$ROOT/bin/fm-procevent-lavish.sh" arm "$live_art" > "$LIVE/arm2.out" 2> "$LIVE/arm2.err"
-live_rc=$?
-set -e
-[ "$live_rc" -eq 0 ] \
-  || fail "re-arm over a live earlier listener failed ($live_rc): $(cat "$LIVE/arm2.err")"
-assert_contains "$(cat "$LIVE/arm2.out")" "still-listening: $live_id" \
-  "re-arm did not say the earlier listener is still serving the board"
-assert_contains "$(cat "$LIVE/arm2.out")" "retired and armed again" \
-  "re-arm did not say how the new registration takes effect"
-assert_not_contains "$(cat "$LIVE/arm2.out")" "armed: $live_id" \
-  "re-arm reported ready for a registration whose own listener is not running"
-assert_not_contains "$(cat "$LIVE/arm2.err")" "error:" \
-  "re-arm over a live earlier listener printed an error"
-[ "$(pe "$LIVE/home" list | awk -v id="$live_id" '$1 == id { print $3 }')" = live ] \
-  || fail "re-arm disturbed the live earlier listener"
-sleep 0.3
-[ "$(wc -l < "$READY_MARK" | tr -d ' ')" = 1 ] \
-  || fail "re-arm started a second listener beside the live earlier one"
-touch "$READY_RELEASE"
-PATH="$LIVE/bin:$PATH" FM_HOME="$LIVE/home" \
-  "$ROOT/bin/fm-procevent-lavish.sh" retire "$live_art" >/dev/null 2>&1 || true
-pass "re-arm over a live earlier listener reports it still serving the board"
 
 # A worker re-arms as soon as its round is published, which can land while the
 # earlier generation's runner is still finishing and holding the claim. Once

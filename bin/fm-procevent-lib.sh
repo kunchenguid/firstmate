@@ -360,12 +360,14 @@ fm_procevent_source_lock_release() {
   fm_lock_release "$(fm_procevent_source_lock_path "$1")"
 }
 
-fm_procevent_registration_publish_with_kind_locked() {  # <state> <adapter> <source-id> <kind> <argv...>
-  local state=$1 adapter=$2 id=$3 kind=$4 reg dest tmp arg identity
-  shift 4
+fm_procevent_registration_publish_with_kind_locked() {  # <state> <adapter> <source-id> <kind> <reply-round> <argv...>
+  local state=$1 adapter=$2 id=$3 kind=$4 reply_round=$5 reg dest tmp arg identity
+  shift 5
   fm_procevent_adapter_valid "$adapter" || return 1
   fm_procevent_source_id_valid "$id" || return 1
   [ -z "$kind" ] || [ "$kind" = lavish-owned ] || return 1
+  case "$reply_round" in ''|*[!0-9]*) [ -z "$reply_round" ] || return 1 ;; esac
+  [ -z "$reply_round" ] || [ "$kind" = lavish-owned ] || return 1
   [ "$#" -ge 1 ] || return 1
   for arg in "$@"; do
     case "$arg" in *$'\n'*) return 1 ;; esac
@@ -378,6 +380,7 @@ fm_procevent_registration_publish_with_kind_locked() {  # <state> <adapter> <sou
   if {
     printf 'adapter=%s\n' "$adapter"
     [ -z "$kind" ] || printf 'kind=%s\n' "$kind"
+    [ -z "$reply_round" ] || printf 'reply_round=%s\n' "$reply_round"
     printf 'argc=%s\n' "$#"
     printf 'argv:\n'
     printf '%s\n' "$@"
@@ -395,13 +398,13 @@ fm_procevent_registration_publish_with_kind_locked() {  # <state> <adapter> <sou
 fm_procevent_registration_publish_locked() {  # <state> <adapter> <source-id> <argv...>
   local state=$1 adapter=$2 id=$3
   shift 3
-  fm_procevent_registration_publish_with_kind_locked "$state" "$adapter" "$id" '' "$@"
+  fm_procevent_registration_publish_with_kind_locked "$state" "$adapter" "$id" '' '' "$@"
 }
 
-fm_procevent_lavish_registration_publish_locked() {  # <state> <adapter> <source-id> <argv...>
-  local state=$1 adapter=$2 id=$3
-  shift 3
-  fm_procevent_registration_publish_with_kind_locked "$state" "$adapter" "$id" lavish-owned "$@"
+fm_procevent_lavish_registration_publish_locked() {  # <state> <adapter> <source-id> <reply-round> <argv...>
+  local state=$1 adapter=$2 id=$3 reply_round=$4
+  shift 4
+  fm_procevent_registration_publish_with_kind_locked "$state" "$adapter" "$id" lavish-owned "$reply_round" "$@"
 }
 
 # Publish one task-owned registration. The single source record persists across

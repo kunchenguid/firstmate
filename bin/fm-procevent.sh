@@ -409,12 +409,32 @@ source_owner_task() { source_field "$1" owner_task; }
 source_pending() {  # <source-id>
   fm_procevent_pending "$STATE" | awk -v id="$1" 'index($0, "/" id ".") { print }'
 }
+lavish_staged_reply_round_locked() {  # <source-id>
+  local id=$1 round reply
+  [ "$(source_kind "$id" 2>/dev/null || true)" = lavish-owned ] || return 1
+  round=$(source_field "$id" reply_round 2>/dev/null || true)
+  case "$round" in ''|*[!0-9]*) return 1 ;; esac
+  read_argv "$id" || return 1
+  [ "${#ARGV[@]}" -eq 5 ] || return 1
+  [ "${ARGV[0]}" = "$SCRIPT_DIR/fm-procevent-lavish.sh" ] || return 1
+  [ "${ARGV[1]}" = poll ] || return 1
+  [ "${ARGV[3]}" = --agent-reply-file ] || return 1
+  reply=${ARGV[4]}
+  [ -f "$reply" ] && [ ! -L "$reply" ] || return 1
+  printf '%s\n' "$round"
+}
+
 # The registration record is a worker-owned board's ONLY ownership evidence, so
 # it cannot be retired while a captured round of it is still unacknowledged.
 # Every retirement path asks here, with the source lock already held.
 source_retirement_blocked_locked() {  # <source-id>
-  [ "$(source_kind "$1" 2>/dev/null || true)" = task-owned ] || return 1
-  [ -n "$(source_pending "$1" | head -1)" ]
+  local id=$1 kind
+  kind=$(source_kind "$id" 2>/dev/null || true)
+  if [ "$kind" = task-owned ]; then
+    [ -n "$(source_pending "$id" | head -1)" ]
+    return
+  fi
+  [ "$kind" = lavish-owned ] && lavish_staged_reply_round_locked "$id" >/dev/null
 }
 runner_file()  { printf '%s/%s.runner\n' "$REG" "$1"; }
 staging_file() { printf '%s/.%s.%s.output\n' "$REG" "$1" "$2"; }
@@ -550,7 +570,7 @@ cmd_register() {
 cmd_register_lavish_owner() {
   local adapter=${1-} id=${2-} task=${3-} sep=${4-} result pending pending_adapter
   local reply_source='' reply_dest='' stale arg i adopting=0 pending_owner prior_record='' current_kind
-  local pending_rounds=0 firstmate_owner=0 reply_requested=0
+  local pending_rounds=0 firstmate_owner=0 reply_requested=0 first_pending='' reply_round='' expected_id
   local -a argv=()
   shift 4 2>/dev/null || usage
   [ "$adapter" = lavish ] || die "round-aware registration is reserved for the Lavish adapter"
@@ -569,6 +589,16 @@ cmd_register_lavish_owner() {
     case "$arg" in *$'\n'*) die "argv elements cannot contain newlines" ;; esac
     [ "$arg" = --agent-reply-file ] && reply_requested=1
   done
+  if [ "$firstmate_owner" -eq 1 ]; then
+    { [ "${#argv[@]}" -eq 3 ] || [ "${#argv[@]}" -eq 5 ]; } \
+      && [ "${argv[0]}" = "$SCRIPT_DIR/fm-procevent-lavish.sh" ] \
+      && [ "${argv[1]}" = poll ] \
+      && { [ "${#argv[@]}" -eq 3 ] || [ "${argv[3]}" = --agent-reply-file ]; } \
+      || die "register-lavish requires the built-in Lavish poll command"
+    expected_id=$("$SCRIPT_DIR/fm-procevent-lavish.sh" source-id "${argv[2]}" 2>/dev/null) \
+      || die "cannot verify the Lavish artifact for source $id"
+    [ "$expected_id" = "$id" ] || die "Lavish artifact does not match source id: $id"
+  fi
   [ -f "$(adapter_script "$adapter")" ] || die "no installed adapter for: $adapter"
   state_root_bind create || die "cannot safely prepare the process-event state root"
   if [ "$firstmate_owner" -eq 0 ]; then
@@ -589,6 +619,17 @@ cmd_register_lavish_owner() {
         fm_procevent_source_lock_release "$id"
         die "cannot arm $current_kind source $id as a firstmate-owned Lavish board"
       fi
+      if [ -z "$current_kind" ]; then
+        if [ "$(read_adapter "$id" 2>/dev/null || true)" != lavish ] \
+          || ! read_argv "$id" \
+          || [ "${#ARGV[@]}" -ne 3 ] \
+          || [ "${ARGV[0]}" != "${argv[0]}" ] \
+          || [ "${ARGV[1]}" != poll ] \
+          || [ "${ARGV[2]}" != "${argv[2]}" ]; then
+          fm_procevent_source_lock_release "$id"
+          die "cannot adopt source $id: it is not the exact built-in legacy Lavish poll for this artifact"
+        fi
+      fi
     else
       if [ "$(source_kind "$id" 2>/dev/null || true)" != task-owned ]; then
         fm_procevent_source_lock_release "$id"
@@ -606,6 +647,7 @@ cmd_register_lavish_owner() {
   while IFS= read -r pending; do
     [ -n "$pending" ] || continue
     pending_rounds=$((pending_rounds + 1))
+    [ -n "$first_pending" ] || first_pending=$pending
     pending_owner=$(fm_procevent_result_owner_task "$pending" 2>/dev/null || true)
     if [ "$pending_owner" != "$task" ]; then
       fm_procevent_source_lock_release "$id"
@@ -617,15 +659,19 @@ cmd_register_lavish_owner() {
       die "cannot re-arm terminal Lavish result $pending; stop and conclude the review"
     fi
   done < <(source_pending "$id")
-  if [ "$pending_rounds" -eq 0 ]; then
-    if [ "$firstmate_owner" -eq 1 ] && [ "$reply_requested" -eq 1 ]; then
+  if [ "$firstmate_owner" -eq 1 ]; then
+    if [ "$pending_rounds" -eq 0 ] && { [ "$adopting" -eq 0 ] || [ "$reply_requested" -eq 1 ]; }; then
       fm_procevent_source_lock_release "$id"
-      die "cannot post a Lavish reply with no captured round waiting to be acknowledged: $id"
+      die "cannot re-arm firstmate-owned Lavish source $id: no captured round is waiting for a reply"
     fi
-    if [ "$firstmate_owner" -eq 0 ] && [ "$adopting" -eq 0 ]; then
+    if [ "$pending_rounds" -gt 0 ] && [ "$reply_requested" -eq 0 ]; then
       fm_procevent_source_lock_release "$id"
-      die "cannot re-arm source $id: task $task already holds this board and no captured round is waiting to be acknowledged"
+      die "cannot acknowledge firstmate-owned Lavish source $id without a same-session reply"
     fi
+    [ -z "$first_pending" ] || reply_round=$(fm_procevent_result_sequence "$first_pending")
+  elif [ "$adopting" -eq 0 ] && [ "$pending_rounds" -eq 0 ]; then
+    fm_procevent_source_lock_release "$id"
+    die "cannot re-arm source $id: task $task already holds this board and no captured round is waiting to be acknowledged"
   fi
   # Each generation stages its reply under its own path, so nothing a failed
   # re-arm does can reach the reply the prior registration still references.
@@ -668,7 +714,7 @@ cmd_register_lavish_owner() {
     fi
   fi
   if [ "$firstmate_owner" -eq 1 ]; then
-    fm_procevent_lavish_registration_publish_locked "$STATE" "$adapter" "$id" "${argv[@]}"
+    fm_procevent_lavish_registration_publish_locked "$STATE" "$adapter" "$id" "$reply_round" "${argv[@]}"
   else
     fm_procevent_task_registration_publish_locked "$STATE" "$adapter" "$id" "$task" "${argv[@]}"
   fi || {
@@ -677,18 +723,18 @@ cmd_register_lavish_owner() {
     fm_procevent_source_lock_release "$id"
     die "cannot publish Lavish registration"
   }
-  # Re-arm is the owner's acknowledgement of every open nonterminal round.
-  # It deliberately does not inspect, acquire, release, or replace the claim.
-  while IFS= read -r pending; do
-    [ -n "$pending" ] || continue
-    result=$pending
-    fm_procevent_mark_handled "$STATE" "$id" "$(fm_procevent_result_sequence "$result")" >/dev/null 2>&1 || {
-      [ -z "$prior_record" ] || mv -f -- "$prior_record" "$(source_file "$id")"
-      [ -z "$reply_dest" ] || rm -f -- "$reply_dest"
-      fm_procevent_source_lock_release "$id"
-      die "cannot acknowledge captured round: $result"
-    }
-  done < <(source_pending "$id")
+  if [ "$firstmate_owner" -eq 0 ]; then
+    while IFS= read -r pending; do
+      [ -n "$pending" ] || continue
+      result=$pending
+      fm_procevent_mark_handled "$STATE" "$id" "$(fm_procevent_result_sequence "$result")" >/dev/null 2>&1 || {
+        [ -z "$prior_record" ] || mv -f -- "$prior_record" "$(source_file "$id")"
+        [ -z "$reply_dest" ] || rm -f -- "$reply_dest"
+        fm_procevent_source_lock_release "$id"
+        die "cannot acknowledge captured round: $result"
+      }
+    done < <(source_pending "$id")
+  fi
   [ -z "$prior_record" ] || rm -f -- "$prior_record"
   if [ "$adopting" -eq 1 ] || [ "$pending_rounds" -gt 0 ]; then
     for stale in "$REG/.$id.reply."*; do
@@ -1008,7 +1054,7 @@ cmd_start_public() {
 }
 
 cmd_start() {
-  local id=${1-} adapter out rc claimed bound_rc published_capture=0 handled_capture=0 self_announcing=0 task_owner='' task_pending kind
+  local id=${1-} adapter out rc claimed bound_rc published_capture=0 handled_capture=0 self_announcing=0 task_owner='' task_pending kind reply_round='' pending_round
   local extension_owner=0 extension_load_state extension_sequence='' extension_request_id=''
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
   require_runner_group
@@ -1026,13 +1072,29 @@ cmd_start() {
     die "registration names an invalid adapter"
   fi
   kind=$(source_kind "$id" 2>/dev/null || true)
-  if [ "$kind" = task-owned ] || [ "$kind" = lavish-owned ]; then
-    [ "$kind" != task-owned ] || task_owner=$(source_owner_task "$id" 2>/dev/null || true)
+  if [ "$kind" = task-owned ]; then
+    task_owner=$(source_owner_task "$id" 2>/dev/null || true)
     task_pending=$(source_pending "$id" | head -1)
     if [ -n "$task_pending" ]; then
       fm_procevent_source_lock_release "$id"
       printf 'round-open: %s\n' "$id"
       exit 0
+    fi
+  elif [ "$kind" = lavish-owned ]; then
+    reply_round=$(lavish_staged_reply_round_locked "$id" 2>/dev/null || true)
+    task_pending=$(source_pending "$id" | head -1)
+    if [ -n "$task_pending" ] && [ -z "$reply_round" ]; then
+      fm_procevent_source_lock_release "$id"
+      printf 'round-open: %s\n' "$id"
+      exit 0
+    fi
+    if [ -n "$task_pending" ] && ! fm_procevent_is_handled "$STATE" "$id" "$reply_round"; then
+      pending_round=$(fm_procevent_result_sequence "$task_pending" 2>/dev/null || true)
+      if [ "$pending_round" != "$reply_round" ]; then
+        fm_procevent_source_lock_release "$id"
+        printf 'round-open: %s\n' "$id"
+        exit 0
+      fi
     fi
   fi
   fm_procevent_extension_registration_load_locked "$STATE" "$id"
@@ -1079,6 +1141,13 @@ cmd_start() {
   }
   fm_procevent_claim_acquire_locked "$id" "$FM_HOME" "$$" "$(source_file "$id")" "$STATE"
   claimed=$?
+  if [ "$claimed" -eq 0 ] && [ -n "$reply_round" ] \
+    && ! fm_procevent_is_handled "$STATE" "$id" "$reply_round" \
+    && ! fm_procevent_mark_handled "$STATE" "$id" "$reply_round" >/dev/null 2>&1; then
+    fm_procevent_claim_release_locked "$id" "$FM_HOME" "$$" "$FM_PROCEVENT_CLAIM_TOKEN" 2>/dev/null || true
+    fm_procevent_source_lock_release "$id"
+    die "cannot acknowledge captured Lavish round: $id $reply_round"
+  fi
   fm_procevent_source_lock_release "$id"
   case "$claimed" in
     0) ;;
@@ -1621,7 +1690,7 @@ stranded_leaderless_detail() {  # <source-id>
 
 cmd_reconcile() {
   local rec id published started=0 stopped=0 uncertain=0 failed=0 claim owner pid token identity claim_state stop_state task_pending kind
-  local launch_identity launch_stamp launch_mark unconfirmed entry
+  local launch_identity launch_stamp launch_mark unconfirmed entry lavish_reply_round pending_round
   local -a launched=()
   # Rejected before anything is launched, and by name. A window this command
   # cannot use makes every launch unconfirmable, so validating it later would
@@ -1683,9 +1752,17 @@ cmd_reconcile() {
         fm_procevent_claim_state_locked "$id"
         claim_state=$?
         kind=$(source_kind "$id" 2>/dev/null || true)
-        if [ "$kind" = task-owned ] || [ "$kind" = lavish-owned ]; then
-          task_pending=$(source_pending "$id" | head -1)
-          if [ -n "$task_pending" ]; then
+        task_pending=$(source_pending "$id" | head -1)
+        if [ "$kind" = task-owned ] && [ -n "$task_pending" ]; then
+          fm_procevent_source_lock_release "$id"
+          continue
+        fi
+        if [ "$kind" = lavish-owned ] && [ -n "$task_pending" ]; then
+          lavish_reply_round=$(lavish_staged_reply_round_locked "$id" 2>/dev/null || true)
+          pending_round=$(fm_procevent_result_sequence "$task_pending" 2>/dev/null || true)
+          if [ -z "$lavish_reply_round" ] \
+            || { ! fm_procevent_is_handled "$STATE" "$id" "$lavish_reply_round" \
+              && [ "$pending_round" != "$lavish_reply_round" ]; }; then
             fm_procevent_source_lock_release "$id"
             continue
           fi
@@ -2070,7 +2147,7 @@ cmd_handled() {
 
 cmd_retire() {
   local id=${1-} condition=${2-} adapter='' sep='' expected_owner='' owner='' pid='' token='' identity='' stop_state owner_state
-  local extension_binding_digest='' round_owner=''
+  local extension_binding_digest='' round_owner='' kind=''
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
   case "$condition" in
     '') [ "$#" -eq 1 ] || usage ;;
@@ -2093,6 +2170,11 @@ cmd_retire() {
   esac
   fm_procevent_source_lock_acquire "$id" || die "cannot lock source: $id"
   if source_retirement_blocked_locked "$id"; then
+    kind=$(source_kind "$id" 2>/dev/null || true)
+    if [ "$kind" = lavish-owned ]; then
+      fm_procevent_source_lock_release "$id"
+      die "cannot retire firstmate-owned Lavish source $id while its staged reply is awaiting delivery"
+    fi
     round_owner=$(source_owner_task "$id")
     fm_procevent_source_lock_release "$id"
     die "cannot retire task-owned source $id while a captured round for task $round_owner is unacknowledged; acknowledge it with bin/fm-procevent.sh handled $id <sequence>"
