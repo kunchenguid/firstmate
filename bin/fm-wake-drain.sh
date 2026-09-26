@@ -6,6 +6,12 @@
 # newer branch outcome, OPEN DECISIONS, captain-call record divergence, and on
 # a supervision-host home the supervision session's new and unprocessed
 # outcomes (BRANCH OUTCOMES), then assert liveness.
+# Main also reports local secondmate checkout drift on every presentation,
+# including an empty queue, until the refs converge. It compares validated
+# direct-report homes with the primary's local default branch and each home's
+# cached origin default branch; no fetch, checkout mutation, or agent restart
+# occurs. Remote homes are not probed. This is an observation at drain time,
+# not a new wake, task state, or proof that a cached origin ref is up to date.
 #
 # Keep sequence-bound row consumption independent from generation-bound episode
 # retirement; docs/watcher-continuity.md owns the recovery contract.
@@ -26,6 +32,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/fm-lease-lib.sh"
 # shellcheck source=bin/fm-supervision-engine-lib.sh
 . "$SCRIPT_DIR/fm-supervision-engine-lib.sh"
+# shellcheck source=bin/fm-ff-lib.sh
+. "$SCRIPT_DIR/fm-ff-lib.sh"
 
 DRAIN_TMP=
 DRAIN_VIEW_TMP=
@@ -752,9 +760,35 @@ print_status_sections() {
   rm -f -- "$prepared"
 }
 
+print_secondmate_checkout_drift() {
+  [ "$ACTOR" = main ] || return 0
+  local default base id home window meta remote cached output=''
+  default=$(default_branch "$FM_ROOT" 2>/dev/null) || return 0
+  base=$(primary_head_commit "$FM_ROOT" 2>/dev/null) || base=''
+  while IFS='|' read -r id home window meta; do
+    [ -n "$id" ] || continue
+    remote=$(sed -n 's/^remote_host=//p' "$meta" | tail -1)
+    [ -z "$remote" ] || continue
+    validate_secondmate_home "$id" "$home" || continue
+    home=$VALIDATED_HOME
+    if [ -n "$base" ]; then
+      output=$(secondmate_checkout_drift "$home" "$id" "$base" "primary local $default")
+      [ -z "$output" ] || printf '%s\n' "$output"
+    fi
+    cached=$(git -C "$home" rev-parse --verify --quiet "refs/remotes/origin/$default^{commit}" 2>/dev/null) || cached=''
+    if [ -n "$cached" ] && [ "$cached" != "$base" ]; then
+      secondmate_checkout_drift "$home" "$id" "$cached" "cached origin/$default (not fetched)"
+    fi
+  done < <(live_secondmate_meta_records "$STATE" "$FM_HOME/data/secondmates.md")
+}
+
 print_status_presentation() {  # [<deduped-raw-rows>]
   local rows=${1:-} lock="$STATE/.status-presentation-lock" snapshot annotation_manifest fully_presented='' rc=0
-  local lock_rc holder_pid
+  local lock_rc holder_pid drift
+  drift=$(print_secondmate_checkout_drift)
+  if [ -n "$drift" ]; then
+    printf 'SECONDMATE CHECKOUT DRIFT (local refs only; review the parent guarded sync path; no home moved):\n%s\n' "$drift"
+  fi
   if fm_lock_acquire_wait_bounded "$lock" "$PRESENTATION_LOCK_TIMEOUT"; then
     :
   else
