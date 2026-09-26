@@ -537,6 +537,14 @@
       "audience": "operator-current"
     },
     {
+      "path": "herdr-checklist/README.md",
+      "audience": "public-product"
+    },
+    {
+      "path": "herdr-checklist/checklist-template.md",
+      "audience": "public-product"
+    },
+    {
       "path": "skills/stow/SKILL.md",
       "audience": "public-product"
     },
