@@ -6,6 +6,7 @@
 #        fm-control.sh <task-id> exit
 #        fm-control.sh <task-id> relaunch [--harness <name>] [--model <name>]
 #                                         [--effort <level>]
+#                                         [--agent-teams --teammate-mode in-process]
 #                                         (--note <text> | --note-file <path>)
 #
 # Why this exists, and how it differs from fm-send.sh. bin/fm-send.sh is the
@@ -72,6 +73,11 @@
 #              already recorded for it.
 #              A prefixed raw-command basename cannot reconstruct its launch
 #              command, so relaunch requires an explicit --harness for it.
+#              --agent-teams --teammate-mode in-process adds the per-task
+#              Claude Agent Teams opt-in (bin/fm-spawn.sh's header owns it) to
+#              a claude ship or scout. A task that already records it keeps it
+#              with no flags, so a relaunch onto any other harness refuses
+#              here, before the old agent stops.
 #              A replacement Claude or Pi profile must also pass this home's
 #              worker account pin (bin/fm-worker-account-lib.sh) here, so a pin
 #              that no longer resolves or is signed out refuses before the old
@@ -238,6 +244,9 @@ MODEL_SET=0
 EFFORT_SET=0
 NOTE=
 NOTE_SET=0
+AGENT_TEAMS_SET=0
+TEAMMATE_MODE=
+TEAMMATE_MODE_SET=0
 control_want_value=
 for control_arg in "$@"; do
   if [ -n "$control_want_value" ]; then
@@ -249,6 +258,7 @@ for control_arg in "$@"; do
       model) NEW_MODEL=$control_arg; MODEL_SET=1 ;;
       effort) NEW_EFFORT=$control_arg; EFFORT_SET=1 ;;
       note) NOTE=$control_arg; NOTE_SET=1 ;;
+      teammate_mode) TEAMMATE_MODE=$control_arg; TEAMMATE_MODE_SET=1 ;;
       note_file)
         [ -f "$control_arg" ] || die "--note-file '$control_arg' is not a readable file"
         NOTE=$(cat "$control_arg")
@@ -267,6 +277,9 @@ for control_arg in "$@"; do
     --effort=*) NEW_EFFORT=${control_arg#--effort=}; EFFORT_SET=1 ;;
     --note) control_want_value=note ;;
     --note=*) NOTE=${control_arg#--note=}; NOTE_SET=1 ;;
+    --agent-teams) AGENT_TEAMS_SET=1 ;;
+    --teammate-mode) control_want_value=teammate_mode ;;
+    --teammate-mode=*) TEAMMATE_MODE=${control_arg#--teammate-mode=}; TEAMMATE_MODE_SET=1 ;;
     --note-file) control_want_value=note_file ;;
     --note-file=*)
       [ -f "${control_arg#--note-file=}" ] || die "--note-file '${control_arg#--note-file=}' is not a readable file"
@@ -278,13 +291,19 @@ for control_arg in "$@"; do
 done
 if [ -n "$control_want_value" ]; then
   [ "$control_want_value" = note_file ] && die "--note-file requires a value"
+  [ "$control_want_value" = teammate_mode ] && die "--teammate-mode requires a value"
   die "--$control_want_value requires a value"
 fi
 
 if [ "$VERB" != relaunch ]; then
   [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] && [ "$NOTE_SET" = 0 ] \
-    || die "--harness, --model, --effort, and --note apply to 'relaunch' only"
+    && [ "$AGENT_TEAMS_SET" = 0 ] && [ "$TEAMMATE_MODE_SET" = 0 ] \
+    || die "--harness, --model, --effort, --agent-teams, --teammate-mode, and --note apply to 'relaunch' only"
 fi
+[ "$AGENT_TEAMS_SET" = 0 ] || [ "$TEAMMATE_MODE_SET" = 1 ] \
+  || die "--agent-teams requires --teammate-mode in-process, so where teammates run is always stated"
+[ "$TEAMMATE_MODE_SET" = 0 ] || [ "$AGENT_TEAMS_SET" = 1 ] \
+  || die "--teammate-mode applies only with --agent-teams"
 [ "$HARNESS_SET" = 0 ] || [ -n "$NEW_HARNESS" ] || die "--harness requires a non-empty value"
 [ "$MODEL_SET" = 0 ] || [ -n "$NEW_MODEL" ] || die "--model requires a non-empty value"
 [ "$EFFORT_SET" = 0 ] || [ -n "$NEW_EFFORT" ] || die "--effort requires a non-empty value"
@@ -681,6 +700,7 @@ PRIOR_EFFORT=
 TARGET_HARNESS=$HARNESS
 TARGET_MODEL=
 TARGET_EFFORT=
+TARGET_AGENT_TEAMS=
 
 journal_write() {  # <phase> [extra-line]...
   local phase=$1
@@ -851,6 +871,18 @@ resolve_relaunch_profile() {
   if [ "$TARGET_EFFORT" = ultra ]; then
     "$SCRIPT_DIR/fm-harness.sh" validate-native-effort "$TARGET_HARNESS" "$TARGET_MODEL" "$TARGET_EFFORT" || return 1
   fi
+  # A recorded Agent Teams opt-in carries into the replacement exactly as the
+  # launch owner carries it, so its refusal belongs here, before anything stops.
+  local agent_teams_refusal
+  if [ "$AGENT_TEAMS_SET" = 1 ]; then
+    TARGET_AGENT_TEAMS=$TEAMMATE_MODE
+  else
+    TARGET_AGENT_TEAMS=$(fm_meta_get "$META" agent_teams)
+  fi
+  if [ -n "$TARGET_AGENT_TEAMS" ] || [ "$AGENT_TEAMS_SET" = 1 ]; then
+    agent_teams_refusal=$(fm_control_agent_teams_refusal "$TARGET_AGENT_TEAMS" "$TARGET_HARNESS" "$KIND") \
+      || die "task $ID's Agent Teams opt-in refuses this relaunch: $agent_teams_refusal"
+  fi
   # The launch owner applies this home's worker account pin too, but only after
   # the old agent has been stopped, so a pin that no longer resolves or is
   # signed out must refuse here, while nothing has changed yet.
@@ -1008,6 +1040,7 @@ do_relaunch() {
   spawn_args=("$ID" --relaunch --harness "$TARGET_HARNESS")
   [ "$TARGET_MODEL" = default ] || spawn_args+=(--model "$TARGET_MODEL")
   [ "$TARGET_EFFORT" = default ] || spawn_args+=(--effort "$TARGET_EFFORT")
+  [ -z "$TARGET_AGENT_TEAMS" ] || spawn_args+=(--agent-teams --teammate-mode "$TARGET_AGENT_TEAMS")
   if FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" \
       "$SCRIPT_DIR/fm-spawn.sh" "${spawn_args[@]}" >/dev/null; then
     RELAUNCH_META_PUBLISHED=1
@@ -1041,7 +1074,7 @@ do_relaunch() {
 
   journal_write complete "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
   RELAUNCH_ACTIVE=0
-  echo "relaunched $ID harness=$TARGET_HARNESS from=$PRIOR_RECORDED_HARNESS model=$TARGET_MODEL effort=$TARGET_EFFORT backend=$BACKEND endpoint=$T worktree=$WT"
+  echo "relaunched $ID harness=$TARGET_HARNESS from=$PRIOR_RECORDED_HARNESS model=$TARGET_MODEL effort=$TARGET_EFFORT backend=$BACKEND endpoint=$T worktree=$WT${TARGET_AGENT_TEAMS:+ agent_teams=$TARGET_AGENT_TEAMS}"
 }
 
 # --- verbs ------------------------------------------------------------------

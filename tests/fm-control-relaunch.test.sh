@@ -736,6 +736,119 @@ test_same_harness_relaunch_keeps_the_profile_axes() {
   pass "fm-control relaunch: a same-harness relaunch keeps the profile axes it was running with"
 }
 
+# The Claude Agent Teams opt-in (bin/fm-spawn.sh's header) is per task: named
+# on relaunch it is added, recorded it is kept with no flags, never it stays
+# absent, and a replacement that would drop it refuses before anything stops.
+agent_teams_scout_task() {  # <case-dir> <id>
+  add_ship_task "$1" "$2" claude
+  sed 's/^kind=ship$/kind=scout/; /^mode=/d; /^yolo=/d' \
+    "$1/home/state/$2.meta" > "$1/home/state/$2.meta.tmp"
+  mv "$1/home/state/$2.meta.tmp" "$1/home/state/$2.meta"
+}
+
+test_relaunch_adds_the_named_agent_teams_opt_in() {
+  local dir out rc literal
+  dir=$(new_case teams-add rl-teams1)
+  agent_teams_scout_task "$dir" rl-teams1
+  out=$(run_control "$dir" rl-teams1 relaunch --agent-teams --teammate-mode in-process \
+    --note "relaunching with Agent Teams"); rc=$?
+  expect_code 0 "$rc" "a relaunch naming the Agent Teams opt-in should succeed"$'\n'"$out"
+  assert_contains "$out" "relaunched rl-teams1 harness=claude" "the outcome should name the replacement"
+  assert_contains "$out" "agent_teams=in-process" "the outcome should name the opt-in"
+  [ "$(meta_field "$dir" rl-teams1 agent_teams)" = in-process ] \
+    || fail "the relaunched record should carry the opt-in, got '$(meta_field "$dir" rl-teams1 agent_teams)'"
+  [ "$(meta_field "$dir" rl-teams1 kind)" = scout ] || fail "the relaunch must keep the scout kind"
+  literal=$(cat "$dir/fake/literal")
+  assert_contains "$literal" "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 claude " \
+    "the replacement launch should enable Agent Teams for that process only"
+  assert_contains "$literal" "--teammate-mode in-process " \
+    "the replacement launch should keep teammates in-process"
+  assert_not_contains "$literal" "--agent-teams" "the launch must not forward a flag Claude rejects"
+  pass "fm-control relaunch: --agent-teams --teammate-mode in-process adds the opt-in to that one task"
+}
+
+test_relaunch_keeps_a_recorded_agent_teams_opt_in() {
+  local dir out rc
+  dir=$(new_case teams-keep rl-teams2)
+  agent_teams_scout_task "$dir" rl-teams2
+  printf 'agent_teams=in-process\n' >> "$dir/home/state/rl-teams2.meta"
+  out=$(run_control "$dir" rl-teams2 relaunch --note "ordinary recovery relaunch"); rc=$?
+  expect_code 0 "$rc" "a relaunch of an opted-in task should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" rl-teams2 agent_teams)" = in-process ] \
+    || fail "a relaunch without flags must keep the recorded opt-in"
+  [ "$(grep -c '^agent_teams=' "$dir/home/state/rl-teams2.meta")" = 1 ] \
+    || fail "the republished record must carry the opt-in exactly once"
+  assert_contains "$(cat "$dir/fake/literal")" "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 claude " \
+    "a relaunch without flags must not silently drop Agent Teams"
+  assert_contains "$(cat "$dir/fake/literal")" "--teammate-mode in-process " \
+    "a relaunch without flags must keep teammates in-process"
+  pass "fm-control relaunch: a recorded Agent Teams opt-in survives a relaunch that does not name it"
+}
+
+test_ordinary_relaunch_gains_no_agent_teams() {
+  local dir out rc
+  dir=$(new_case teams-none rl-teams3)
+  agent_teams_scout_task "$dir" rl-teams3
+  out=$(run_control "$dir" rl-teams3 relaunch --note "ordinary relaunch"); rc=$?
+  expect_code 0 "$rc" "an ordinary relaunch should succeed"$'\n'"$out"
+  assert_not_contains "$out" "agent_teams" "an ordinary outcome line must not change"
+  [ -z "$(meta_field "$dir" rl-teams3 agent_teams)" ] \
+    || fail "an ordinary relaunch must not record an opt-in"
+  assert_not_contains "$(cat "$dir/fake/literal")" "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS" \
+    "an ordinary relaunch must not enable Agent Teams"
+  assert_not_contains "$(cat "$dir/fake/literal")" "--teammate-mode" \
+    "an ordinary relaunch must not choose a teammate mode"
+  pass "fm-control relaunch: a task that never opted in relaunches without Agent Teams"
+}
+
+test_agent_teams_relaunch_refusals_happen_before_stop() {
+  local dir out rc id meta
+  id=rl-teams4
+  dir=$(new_case teams-refuse "$id")
+  agent_teams_scout_task "$dir" "$id"
+  meta="$dir/home/state/$id.meta"
+  printf 'agent_teams=in-process\n' >> "$meta"
+  cp "$meta" "$dir/meta.before"
+
+  out=$(run_control "$dir" "$id" relaunch --harness codex --note "switching runtime"); rc=$?
+  expect_code 1 "$rc" "switching an opted-in task off claude must refuse"
+  assert_contains "$out" "Agent Teams opt-in refuses this relaunch" "the refusal should name the opt-in"
+  assert_contains "$out" "harness 'codex'" "the refusal should name the incompatible harness"
+
+  out=$(run_control "$dir" "$id" relaunch --agent-teams --teammate-mode tmux --note "pane teammates"); rc=$?
+  expect_code 1 "$rc" "a pane-opening teammate mode must refuse"
+  assert_contains "$out" "teammate mode 'tmux' is not supported" "the refusal should name the mode"
+
+  out=$(run_control "$dir" "$id" relaunch --agent-teams --note "half the pair"); rc=$?
+  expect_code 1 "$rc" "--agent-teams alone must refuse"
+  assert_contains "$out" "--agent-teams requires --teammate-mode in-process" "the refusal should name the missing flag"
+
+  out=$(run_control "$dir" "$id" exit --agent-teams --teammate-mode in-process); rc=$?
+  expect_code 1 "$rc" "the opt-in is a relaunch flag only"
+
+  cmp -s "$meta" "$dir/meta.before" || fail "a refused relaunch must leave the record byte-identical"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "a refused relaunch must leave the running agent alone"
+  [ -z "$(cat "$dir/fake/literal")" ] && [ -z "$(cat "$dir/fake/keys")" ] \
+    || fail "a refused relaunch must deliver no lifecycle input"
+  pass "fm-control relaunch: an Agent Teams opt-in that cannot be honored refuses before the agent stops"
+}
+
+test_spawn_relaunch_keeps_a_recorded_agent_teams_opt_in() {
+  local dir out
+  dir=$(new_case spawn-teams rl-teams5)
+  agent_teams_scout_task "$dir" rl-teams5
+  printf 'agent_teams=in-process\n' >> "$dir/home/state/rl-teams5.meta"
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_spawn "$dir" rl-teams5 --relaunch)
+  assert_contains "$out" "spawned rl-teams5 harness=claude kind=scout" "the direct relaunch should launch"
+  assert_contains "$out" "agent_teams=in-process" "the direct relaunch should report the kept opt-in"
+  [ "$(meta_field "$dir" rl-teams5 agent_teams)" = in-process ] \
+    || fail "the launch owner must keep a recorded opt-in on its own"
+  assert_contains "$(cat "$dir/fake/literal")" "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 claude " \
+    "the launch owner must not silently drop Agent Teams"
+  pass "fm-spawn --relaunch: the launch owner keeps a recorded Agent Teams opt-in without being told"
+}
+
 test_native_ultra_relaunch_preserves_profile_and_rejects_before_stop() {
   local dir out rc id=rl-ultra
   dir=$(new_case native-ultra "$id")
@@ -2348,6 +2461,11 @@ test_harness_switch_resolves_a_prefixed_recorded_harness
 test_prefixed_recorded_harness_requires_explicit_replacement
 test_same_harness_relaunch_keeps_the_profile_axes
 test_native_ultra_relaunch_preserves_profile_and_rejects_before_stop
+test_relaunch_adds_the_named_agent_teams_opt_in
+test_relaunch_keeps_a_recorded_agent_teams_opt_in
+test_ordinary_relaunch_gains_no_agent_teams
+test_agent_teams_relaunch_refusals_happen_before_stop
+test_spawn_relaunch_keeps_a_recorded_agent_teams_opt_in
 test_signed_out_worker_account_pin_refuses_before_stop
 test_worker_account_pin_follows_the_relaunch
 test_explicit_model_wins_over_the_recorded_one
