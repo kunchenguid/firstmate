@@ -53,12 +53,18 @@ If the worktree or ownership cannot be reconciled safely, leave all state intact
 Pivot after one bounded attempt returns unchanged, before a third retry, after a repeated fix, when a phase remains unchanged for 15 minutes without fresh evidence of progress, or when a fix has clearly consumed an outsized share of the turn's tokens or turns without resolving the issue.
 1. Read `bin/fm-crew-state.sh <task-id>` once, then inspect only one targeted pane, status excerpt, or validation result that can change the next action.
 2. Trace the repeated failure to its shared owner and inspect why the prior attempt failed; batch related corrections together.
-3. For recurring stalls or 15 minutes without progress, use `/superpowers` via `find-skills` and the skill store to find a skill suited to the issue.
-4. After the same fix or retry fails twice, invoke `/brainstorming` before retrying to generate alternative approaches.
-5. Choose a materially different approach instead of replaying a failed fix without new evidence.
-6. Verify the durable postcondition through its owning state or control path; command exit alone does not prove recovery.
-7. Invoke `/ultrawork` for its discipline: state the exact outcome and stop condition, make the smallest change that satisfies it, and verify against the real surface rather than intent alone.
-8. Invoke `/doctor` to rule out an environment or tooling cause driving the loop, such as a misconfigured MCP server, stale hook, broken permission rule, orphaned state file blocking teardown, or auto-mode permission denial misread as a code problem.
+3. Before using the escalation ladder, if `branch_sync.safety` is `blocked_recover_manual_reconciliation` and `next_action` contains no supported recovery command, run `bin/fm-mirror-refusal-check.sh <task-id>`.
+   Bypass all three tiers and spin a new branch only when the check exits successfully with `SAFE`; use its printed safe base, then start a new no-mistakes run on that branch. An inconclusive or unsafe result does not qualify for this bypass.
+4. **Tier 1 - skill, same harness.** When the same obstacle recurs for the second time, use `/superpowers` to find a skill matched to the failure signature, then apply that skill while keeping the current harness.
+   If no fitting skill exists, do only a light inline alternative search: present two or three materially different approaches and choose one; do not run the full `/brainstorming` design-document pipeline.
+5. **Tier 2 - harness.** After trying Tier 1, automatically switch from Codex to Claude with `bin/fm-control.sh <task-id> relaunch --harness claude` if either (a) the same no-mistakes run head recurs with the same finding signature, or (b) the evidence shows that diagnosis needs causal tracing across multiple files, such as repeated refactoring or conflict-resolution failures whose cause spans files.
+   Include a concise `--note` with the observed failure and attempted Tier 1 action when useful to preserve progress across relaunch.
+   This capability/depth trigger is separate from the existing Codex quota-exhaustion fallback: quota exhaustion is a resource trigger, while repeated failure signals or multi-file causal tracing indicate insufficient progress at the current reasoning depth; both can lead to Claude.
+6. **Tier 3 - captain.** If the same class of problem recurs after switching to Claude, escalate it through the existing captain-decision procedure; do not keep cycling harnesses.
+7. Choose a materially different approach instead of replaying a failed fix without new evidence.
+8. Verify the durable postcondition through its owning state or control path; command exit alone does not prove recovery.
+9. Use `/ultrawork` for its discipline: state the exact outcome and stop condition, make the smallest change that satisfies it, and verify against the real surface rather than intent alone.
+10. Use `/doctor` to rule out an environment or tooling cause driving the loop, such as a misconfigured MCP server, stale hook, broken permission rule, orphaned state file blocking teardown, or auto-mode permission denial misread as a code problem.
 
 A bounded `bin/fm-watch-checkpoint.sh` return proves only that checkpoint interval, not persistent supervision.
 For recurring watcher-down conditions, inspect `docs/watcher-continuity.md` and the block emitted by `bin/fm-supervision-instructions.sh` to identify the intended continuity owner and why it failed.
