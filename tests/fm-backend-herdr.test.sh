@@ -283,6 +283,39 @@ herdr_env() {  # <name>
   printf '%s\n%s\n' "$dir/log" "$dir/responses"
 }
 
+# --- socket identity ------------------------------------------------------------
+
+# Native Windows herdr reports C:\...\herdr.sock on both sides of the launcher
+# identity proof. A fake cygpath stands in for Git Bash's so the case runs on
+# every host; the socket directory need not exist.
+test_canonical_socket_path_accepts_windows_drive_path() {
+  local dir fb got
+  dir="$TMP_ROOT/socket-drive-path"; mkdir -p "$dir"
+  fb=$(fm_fakebin "$dir/bin")
+  cat > "$fb/cygpath" <<'SH'
+#!/usr/bin/env bash
+p=${!#}
+drive=$(printf '%s' "${p%%:*}" | tr '[:upper:]' '[:lower:]')
+rest=${p#*:}
+printf '/%s%s\n' "$drive" "${rest//\\//}"
+SH
+  chmod +x "$fb/cygpath"
+  got=$(PATH="$fb:$PATH" bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_canonical_socket_path "$1"' \
+    "$ROOT" 'C:\Users\u\AppData\Roaming\herdr-fm-missing\herdr.sock') \
+    || fail "a Windows drive-letter socket path was refused"
+  [ "$got" = /c/Users/u/AppData/Roaming/herdr-fm-missing/herdr.sock ] \
+    || fail "a Windows drive-letter socket path canonicalized to '$got'"
+  got=$(PATH="$fb:$PATH" bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_canonical_socket_path "$1"' \
+    "$ROOT" 'C:/Users/u/AppData/Roaming/herdr-fm-missing/herdr.sock') \
+    || fail "a forward-slash drive-letter socket path was refused"
+  [ "$got" = /c/Users/u/AppData/Roaming/herdr-fm-missing/herdr.sock ] \
+    || fail "two spellings of one Windows socket did not compare equal: '$got'"
+  if PATH="$fb:$PATH" bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_canonical_socket_path relative/herdr.sock' "$ROOT" >/dev/null; then
+    fail "a relative socket path was accepted"
+  fi
+  pass "fm_backend_herdr_canonical_socket_path: a Windows drive-letter socket path canonicalizes to its POSIX spelling"
+}
+
 # --- version_check / tool_check ----------------------------------------------
 
 test_version_check_accepts_current_protocol() {
@@ -5678,6 +5711,7 @@ test_wait_transition_clean_timeout_returns_1() {
 # shellcheck source=bin/fm-backend.sh
 . "$ROOT/bin/fm-backend.sh"
 
+test_canonical_socket_path_accepts_windows_drive_path
 test_version_check_accepts_current_protocol
 test_version_check_refuses_old_protocol
 test_version_check_refuses_missing_herdr
