@@ -2346,7 +2346,8 @@ FM_PORTABLE_QUALITY_SKILLS_LIVE=1 bash tests/fm-portable-quality-skills-live-e2e
 ```
 
 The live guard creates a bounded fixture under `.no-mistakes/portable-skills/live/fixture` whose discovery directories link to the canonical lot, without changing installed runtime configuration.
-Each subprocess has a 180-second bound, and its JSON output plus exact argv, working directory, version and exit code remain in `.no-mistakes/portable-skills/live/<runtime>-<skill>.log` and `.command.json` for local inspection.
+Each model invocation has a 180-second bound, and its JSON output plus exact argv, working directory, version and exit code remain in `.no-mistakes/portable-skills/live/<runtime>-<skill>.log` and `.command.json` for local inspection.
+The Codex discovery subprocess has a 30-second bound; version probes have no explicit timeout.
 Codex's token-free `debug prompt-input` output additionally records its actual skill catalogue and resolves the catalogue's aliased roots to the canonical entrypoint.
 The guard pairs successful reference reads with their tool requests and resolves their exact canonical paths.
 Claude's successful native slash expansion establishes entrypoint loading without requiring a redundant `Read` event.
