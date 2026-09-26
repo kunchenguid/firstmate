@@ -68,6 +68,11 @@ unset FM_TASK_ID
 # against an ambient override sets TASKS_AXI_FILE itself.
 unset TASKS_AXI_FILE TASKS_AXI_BACKEND
 
+# A locked startup runs bin/fm-orphan-inventory.sh, which reads the host's real
+# Treehouse pools by default. Point it at an absent root so no suite reports the
+# host's leftovers; tests/fm-orphan-inventory.test.sh opts back in explicitly.
+export FM_ORPHAN_POOL_ROOT="${TMPDIR:-/tmp}/fm-test-no-treehouse-pools.$$"
+
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034
