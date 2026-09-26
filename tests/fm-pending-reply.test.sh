@@ -1460,6 +1460,84 @@ test_mechanical_helper_writes_parent_channel() {
   pass "mechanical helper writes the parent channel from verb, corr, and note"
 }
 
+# The helper used to write corr= into the same bracket slot as [key=...], so a
+# worker that passed the documented key token as its own argument
+# (verb [key=slug] corr note) had that token parsed as the corr id and the
+# line never landed. A via-helper needs-decision then opened only under the
+# shared default key, which --resolve-key cannot close.
+test_helper_preserves_worker_decision_key() {
+  local home state sm_home corr fold expected rc line
+  home=$(setup_parent helper-decision-key)
+  state="$home/state"
+  sm_home=$(bind_local_mate "$home" mate)
+  export FM_PENDING_REPLY_NOW=11400
+  corr=$(fm_pending_reply_create "$home" "$state" mate "pick a wall color")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+
+  FM_HOME="$sm_home" "$REPORT" needs-decision "[key=color]" "$corr" "pick a color" \
+    || fail "helper must accept a [key=...] token next to the verb instead of treating it as the corr id"
+  grep -Fq "corr=$corr" "$state/mate.status" \
+    || fail "a keyed helper line must still carry the correlation id"
+  fold=$(status_open_decisions "$state/mate.status")
+  expected=$(printf 'color\tneeds-decision\tpick a color (via-helper)\n')
+  [ "$fold" = "$expected" ] \
+    || fail "via-helper needs-decision with a worker key must open that key, not default: got '$fold'"
+
+  printf 'resolved [key=color]: answered: blue\n' >> "$state/mate.status"
+  fold=$(status_open_decisions "$state/mate.status")
+  [ -z "$fold" ] \
+    || fail "resolved [key=color] must close the helper-opened decision: still '$fold'"
+
+  fm_pending_reply_try_resolve "$state" "$corr" \
+    || fail "the keyed helper line must still resolve the pending-reply expectation"
+
+  corr=$(fm_pending_reply_create "$home" "$state" mate "key with a colon on the verb")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  : > "$state/mate.status"
+  FM_HOME="$sm_home" "$REPORT" "needs-decision [key=verb-slot]:" "$corr" "from the verb" \
+    || fail "helper must split a trailing-colon [key=...]: off the verb"
+  fold=$(status_open_decisions "$state/mate.status")
+  expected=$(printf 'verb-slot\tneeds-decision\tfrom the verb (via-helper)\n')
+  [ "$fold" = "$expected" ] \
+    || fail "a trailing-colon key on the verb must open that key: got '$fold'"
+  grep -Fq "corr=$corr" "$state/mate.status" \
+    || fail "a trailing-colon verb key must not push the correlation id into the note"
+
+  corr=$(fm_pending_reply_create "$home" "$state" mate "doc pointer with a key")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  : > "$state/mate.status"
+  FM_HOME="$sm_home" "$REPORT" --doc needs-decision "[key=doc-key]" "$corr" \
+    data/x/report.md "see the report" \
+    || fail "helper --doc must accept a [key=...] token next to the verb"
+  fold=$(status_open_decisions "$state/mate.status")
+  expected=$(printf 'doc-key\tneeds-decision\tsee the report (data/x/report.md via-helper)\n')
+  [ "$fold" = "$expected" ] \
+    || fail "a keyed --doc helper line must open the worker key: got '$fold'"
+  grep -Fq "corr=$corr" "$state/mate.status" \
+    || fail "a keyed --doc helper line must still carry the correlation id"
+
+  corr=$(fm_pending_reply_create "$home" "$state" mate "keyless still default")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  : > "$state/mate.status"
+  FM_HOME="$sm_home" "$REPORT" needs-decision "$corr" "which vendor" \
+    || fail "unkeyed helper needs-decision must still write"
+  fold=$(status_open_decisions "$state/mate.status")
+  expected=$(printf 'default\tneeds-decision\twhich vendor (via-helper)\n')
+  [ "$fold" = "$expected" ] \
+    || fail "an unkeyed via-helper needs-decision must still open default: got '$fold'"
+
+  rc=0
+  FM_HOME="$sm_home" "$REPORT" needs-decision "[key=bad key]" "$corr" "malformed" \
+    2>/dev/null || rc=$?
+  [ "$rc" -ne 0 ] || fail "helper must reject a malformed [key=...] token"
+  line=$(tail -1 "$state/mate.status")
+  case "$line" in
+    *malformed*) fail "a rejected malformed key must not append a status line" ;;
+  esac
+
+  pass "helper preserves a worker [key=...] so a via-helper decision is closable"
+}
+
 test_remote_parent_replies_is_not_wrong_home() {
   local home state sm_home corr rec hits
   home=$(setup_parent remote-parent-replies)
@@ -1638,6 +1716,7 @@ test_same_basename_self_home_corr_resolves_on_tick
 test_same_basename_reply_resolves_after_recovery_failure
 test_child_status_wrong_home_is_not_copied
 test_mechanical_helper_writes_parent_channel
+test_helper_preserves_worker_decision_key
 test_remote_parent_replies_is_not_wrong_home
 test_local_parent_replies_is_wrong_home_evidence
 test_escalated_undelivered_correlation_stays_retryable
