@@ -13,6 +13,8 @@
 // provider requests. Cancellation writes the terminal result, never signals a
 // PID. Each child owns its deadline/heartbeat and exits on terminal observation.
 // Journals and snapshots are runner-owned, never writable by model tools.
+// runtime.json records initialized SDK/isolation/settings facts. Transport journal
+// entries retain only allowlisted error codes, never URLs, headers or raw causes.
 import * as fs from 'node:fs';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
@@ -107,6 +109,25 @@ export async function initializeNetwork(entry = sdkEntry()) {
   const network = await import(pathToFileURL(path.join(path.dirname(entry), 'core/http-dispatcher.js')).href);
   if (typeof network.configureHttpDispatcher !== 'function') throw Error('installed Pi HTTP initialization API unavailable');
   network.configureHttpDispatcher();
+}
+// Pi normalizes fetch failures to a message and drops Error.cause. Capture the
+// structural cause at the supported per-request fetch boundary before that loss.
+// Do not persist arbitrary strings from providers, proxies or AggregateErrors.
+function transportCodes(error) {
+  const allowed = new Set(['ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN',
+    'ENETUNREACH', 'EHOSTUNREACH', 'EPIPE', 'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT',
+    'UND_ERR_BODY_TIMEOUT', 'UND_ERR_SOCKET', 'UND_ERR_ABORTED', 'CERT_HAS_EXPIRED',
+    'DEPTH_ZERO_SELF_SIGNED_CERT', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE']);
+  const codes = new Set(), pending = [error], seen = new Set();
+  for (let n = 0; pending.length && n < 16; n++) {
+    const current = pending.shift();
+    if (!current || typeof current !== 'object' || seen.has(current)) continue;
+    seen.add(current);
+    if (allowed.has(current.code)) codes.add(current.code);
+    pending.push(current.cause);
+    if (Array.isArray(current.errors)) pending.push(...current.errors.slice(0, 8));
+  }
+  return [...codes];
 }
 export class ShortAgents {
   constructor(home, root = path.dirname(path.dirname(script))) {
@@ -215,7 +236,9 @@ export function reader(request, check = () => {}) {
 async function run(home, id) {
   const service = new ShortAgents(home), dir = service.dir(id), request = json(path.join(dir, 'request.json'));
   if (!publish(path.join(dir, 'started.json'), { nonce: request.nonce, pid: process.pid, ...(request.input.operations ? { identity: processIdentity(process.pid) } : {}), at: Date.now() })) return;
-  let session, timer, operating = false;
+  let session, timer, operating = false, stage = 'network-initialization';
+  let toolCalls = 0, requests = 0, reserved = 0;
+  const journal = event => fs.appendFileSync(path.join(dir, 'journal.jsonl'), JSON.stringify(event) + '\n', { mode: 0o600 });
   const stop = state => { service.finish(id, state, `${state}: execution stopped`); session?.dispose(); if (!operating) process.exit(0); };
   const check = () => {
     if (optional(path.join(dir, 'result.json'))) throw Error('terminal result already exists');
@@ -230,6 +253,7 @@ async function run(home, id) {
   try {
     check();
     await initializeNetwork(request.sdk);
+    stage = 'model-discovery';
     const sdk = await import(pathToFileURL(request.sdk).href);
     const runtime = await sdk.ModelRuntime.create();
     const model = (await runtime.getAvailable()).find(m => m.provider === request.input.provider && m.id === request.input.model);
@@ -243,7 +267,6 @@ async function run(home, id) {
       getAppendSystemPrompt: () => [], getAppendSystemPromptSources: () => [], extendResources() {}, async reload() {},
     };
     const executeRead = reader(request, check);
-    let toolCalls = 0, requests = 0, reserved = 0;
     const tool = { name: 'read_material', label: 'Read selected evidence', description: 'Read bytes from one immutable allowlisted text snapshot. No path access.',
       parameters: { type: 'object', properties: { material: { type: 'string' }, offset: { type: 'integer' }, bytes: { type: 'integer' } }, required: ['material'], additionalProperties: false },
       execute: async (...args) => {
@@ -270,11 +293,20 @@ async function run(home, id) {
       },
     });
     const activeTools = customTools.map(t => t.name);
+    stage = 'session-initialization';
+    const settingsManager = sdk.SettingsManager.inMemory({ compaction: { enabled: false }, cacheWarming: 'off', transport: 'sse', retry: { enabled: false, provider: { maxRetries: 0 } } });
     ({ session } = await sdk.createAgentSession({ cwd: dir, agentDir: dir, modelRuntime: runtime, model, thinkingLevel: 'off',
       resourceLoader, tools: activeTools, customTools, sessionManager: sdk.SessionManager.inMemory(dir),
-      settingsManager: sdk.SettingsManager.inMemory({ compaction: { enabled: false }, cacheWarming: { enabled: false }, transport: 'sse', retry: { enabled: false, provider: { maxRetries: 0 } } }),
+      settingsManager,
     }));
     if (session.getActiveToolNames().join(',') !== activeTools.join(',') || session.messages.length) throw Error('Pi context/tool isolation check failed');
+    const extensions = resourceLoader.getExtensions();
+    publish(path.join(dir, 'runtime.json'), { node: process.version,
+      pi: optional(path.join(path.dirname(request.sdk), '../package.json'))?.version ?? 'unknown',
+      provider: model.provider, model: model.id, extensions: extensions.extensions.map(e => e.path),
+      extensionErrors: extensions.errors.length, parentMessages: session.messages.length, tools: session.getActiveToolNames(),
+      cacheWarming: settingsManager.getCacheWarmingMode?.() ?? 'unknown', transport: 'sse', providerRetries: 0,
+    });
     // Reserve output allowance BEFORE every request, not after provider usage.
     // Up to 1024 tokens/request; unused reservations are intentionally not reused.
     // Input is bounded by request/material/tool byte limits, not billed tokens.
@@ -285,7 +317,18 @@ async function run(home, id) {
         service.finish(id, 'budget', 'model request/output token budget exhausted'); throw Error('model budget exhausted');
       }
       const maxTokens = Math.min(1024, request.input.budget.outputTokens - reserved); reserved += maxTokens;
-      return stream(selected, context, { ...options, maxTokens });
+      const requestNumber = requests, fetch = options?.fetch ?? globalThis.fetch;
+      return stream(selected, context, { ...options, maxTokens, fetch: async (...args) => {
+        let response;
+        try { response = await fetch(...args); }
+        catch (error) {
+          journal({ type: 'transport_error', request: requestNumber, phase: 'before_headers',
+            codes: transportCodes(error), toolsStarted: toolCalls });
+          throw error;
+        }
+        journal({ type: 'http_response', request: requestNumber, status: response.status });
+        return response;
+      } });
     };
     const prompt = JSON.stringify({ goal: request.input.goal, acceptance: request.input.acceptance,
       materials: request.materials.map(({ id, source, sha256 }) => ({ id, source, sha256 })), tools: activeTools, operations: request.input.operations?.steps, budget: request.input.budget });
@@ -308,6 +351,7 @@ async function run(home, id) {
       }
       if (event.type === 'message_end') fs.appendFileSync(path.join(dir, 'journal.jsonl'), JSON.stringify(event) + '\n', { mode: 0o600 });
     });
+    stage = 'model-execution';
     await session.prompt(prompt);
     const last = [...session.messages].reverse().find(m => m.role === 'assistant');
     if (!last || ['error', 'aborted'].includes(last.stopReason)) throw Error('Pi provider failed or aborted; inspect journal');
@@ -321,7 +365,8 @@ async function run(home, id) {
       try { progress = `${operationReceipts(dir).filter(r => r.state === 'completed').length}/${request.input.operations.steps.length} steps completed; `; }
       catch { progress = 'operation receipt is malformed; '; }
     }
-    service.finish(id, 'blocked', progress + cut(error.message, 512));
+    service.finish(id, 'blocked', progress + cut(error.message, 512),
+      { stage, requests, reservedOutputTokens: reserved, toolCalls });
   }
   finally { clearInterval(timer); session?.dispose(); }
   await service.notify(id).catch(() => {}); // durable result lets MAIN retry notification.

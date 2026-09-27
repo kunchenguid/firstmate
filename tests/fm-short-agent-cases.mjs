@@ -16,11 +16,15 @@ fs.mkdirSync(path.join(pkg,'dist/core'));
 fs.writeFileSync(path.join(pkg,'dist/core/http-dispatcher.js'),'export function configureHttpDispatcher() {}');
 fs.writeFileSync(path.join(pkg, 'dist/index.js'), `
 export const createExtensionRuntime = () => ({});
-export const ModelRuntime = { create: async () => ({getAvailable: async () => [{provider:'fixture',id:'fixture'}],streamSimple:async (_m,_c,opts)=> {if(!opts.maxTokens) throw Error('missing provider token cap');}}) };
+export const ModelRuntime = { create: async () => ({getAvailable: async () => [{provider:'fixture',id:'fixture'}],streamSimple:async (_m,_c,opts)=> {
+ if(!opts.maxTokens) throw Error('missing provider token cap');
+ if(_c.transport) await opts.fetch('https://unused.invalid');
+}}) };
 export const SessionManager = {inMemory: () => ({})};
-export const SettingsManager = {inMemory: x => x};
+export const SettingsManager = {inMemory: x => ({...x,getCacheWarmingMode:()=>x.cacheWarming})};
 export async function createAgentSession(o) {
  if(o.tools.join() !== 'read_material' || o.resourceLoader.getAgentsFiles().agentsFiles.length || o.resourceLoader.getExtensions().extensions.length) throw Error('isolation violated');
+ if(o.settingsManager.getCacheWarmingMode() !== 'off') throw Error('cache warming enabled');
  const messages=[], subscribers=[];
  return {session:{ messages, systemPrompt:o.resourceLoader.getSystemPrompt(), getActiveToolNames:()=>o.tools,
 
@@ -31,6 +35,13 @@ export async function createAgentSession(o) {
   if(goal==='oversize') for(const cb of subscribers) cb({type:'message_update',assistantMessageEvent:{type:'text_delta',delta:'x'.repeat(100)}});
   if(goal==='wait') await new Promise(r=>setTimeout(r,10000));
   if(goal==='delayed') await new Promise(r=>setTimeout(r,1000));
+  if(goal.startsWith('transport')) {
+   const nested=new Error('PRIVATE_PROXY_URL PRIVATE_TOKEN');nested.code='ECONNRESET';
+   const unknown=new Error('PRIVATE_CAUSE');unknown.code='PRIVATE_CODE';
+   const cause=new AggregateError([nested,unknown,nested],'PRIVATE_AGGREGATE');cause.cause=cause;
+   const fetch=async()=>{throw new TypeError('fetch failed',{cause});};
+   await o.modelRuntime.streamSimple({}, {transport:true}, {fetch});
+  }
   await o.modelRuntime.streamSimple({}, {}, {});
   if(goal==='modelbudget') await o.modelRuntime.streamSimple({}, {}, {});
   if(goal==='toolbudget') {for(let i=0;i<4;i++) await o.customTools[0].execute('a',{material:'m1'});}
@@ -54,6 +65,16 @@ const until = async (id, state) => {for(let n=0;n<200;n++){const s=service.statu
 const done=await until(accepted.id,'completed'); clearInterval(tick); assert.ok(ticks>20);
 const started=JSON.parse(fs.readFileSync(path.join(service.dir(accepted.id),'started.json')));
 assert.ok(started.at >= accepted.acceptedAt);
+const runtime=JSON.parse(fs.readFileSync(path.join(service.dir(accepted.id),'runtime.json')));
+assert.deepEqual(runtime.extensions,[]);assert.equal(runtime.cacheWarming,'off');assert.equal(runtime.parentMessages,0);
+const failed=service.submit(request('transport','transport'));
+const failure=await until(failed.id,'blocked');
+assert.equal(failure.requests,1);assert.equal(failure.toolCalls,0);assert.equal(failure.stage,'model-execution');
+const failureJournal=fs.readFileSync(path.join(service.dir(failed.id),'journal.jsonl'),'utf8');
+const failureEvents=failureJournal.trim().split('\n').map(JSON.parse);
+assert.deepEqual(failureEvents,[{type:'transport_error',request:1,phase:'before_headers',codes:['ECONNRESET'],toolsStarted:0}]);
+assert.ok(!failureJournal.includes('PRIVATE_'),'transport diagnostics exclude arbitrary causes and messages');
+assert.equal(service.submit(request('transport','transport')).finishedAt,failure.finishedAt,'no automatic or duplicate-key replay');
 assert.ok(!fs.existsSync(path.join(home,'projects')));
 assert.equal(fs.readdirSync(path.join(home,'state')).filter(x=>x.endsWith('.meta')).length,0);
 const fresh=new ShortAgents(home,root);assert.equal(fresh.status(accepted.id).state,'completed');

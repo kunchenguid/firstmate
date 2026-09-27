@@ -84,6 +84,9 @@ No actor string alone grants execution.
 `fm_short_task` accepts `status`, `result`, or `cancel` with the returned `id`.
 Terminal records contain a bounded summary and evidence directory; operation status also lists each recorded step's completion or refusal.
 The directory contains the independent starting context, model/tool journal, and per-step intent, owner output, and postcondition receipts.
+It also records the initialized Pi version, extension list, active tools, empty starting history, and effective cache-warming mode in `runtime.json`.
+The transport journal records HTTP status or allowlisted connection error codes before Pi reduces a fetch failure to its provider message; it excludes URLs, headers, and raw error causes.
+Blocked results retain the execution stage and request/tool counts, so a failure before any tool can be distinguished from a failure after an operation.
 Full logs stay there rather than entering MAIN's context.
 Short-task state directories are retained for inspection; there is no automatic cleanup.
 
@@ -103,6 +106,7 @@ Every child gets `read_material`, which accepts only a material ID and a bounded
 Only an explicitly granted operation task also gets the argument-free `run_operations` tool.
 Neither tool accepts shell commands, new paths, expanded grants, or arbitrary recovery choices.
 The child receives no parent messages, context files, skills, prompt templates, or arbitrary extensions.
+A plugin loaded by the interactive primary is therefore not loaded by the short-task child; installing or configuring a parent plugin does not change this boundary.
 
 Capture rejects directories, large files, symlink paths, hardlinks, common credential locations, and recognizable credential content.
 Select sanitized evidence: detecting every secret in ordinary prose is outside this boundary.
@@ -138,5 +142,6 @@ The operation suite doubles the model and forge; it does not perform an external
 Set `FM_SHORT_INSTALL_LIVE=1` for its optional verified ShellCheck install into a temporary directory.
 Run `FM_SHORT_HERDR_E2E=1 bash tests/fm-short-operations-herdr.test.sh` for cleanup through a generated named Herdr lab and its default-session safety tripwire.
 For the real-model guard, run `FM_SHORT_AGENT_LIVE_E2E=1 FM_SHORT_LIVE_PROVIDER=openai-codex FM_SHORT_LIVE_MODEL=gpt-5.6-luna bin/fm-test-run.sh tests/fm-short-agent-live-e2e.test.sh`.
-It loads the candidate extension, submits both task types, and checks that another parent prompt completes while each child runs.
+It loads the candidate extension, submits both task types, verifies a real fast-forward of a disposable local clone, and checks that another parent prompt completes while each child runs.
+It also reproduces a connection refusal using only child-process proxy variables, verifies that both task types stop before any operation, and checks the initialized SDK settings and extension isolation.
 [Runtime verification](verification/runtime-backends.md#pi-headless-short-tasks) records the current measured evidence and its limits.

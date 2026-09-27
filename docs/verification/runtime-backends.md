@@ -1111,28 +1111,36 @@ Structural liveness permits the task-bound transcript read but does not itself i
 
 ## Pi headless short tasks
 
-On 2026-09-26, Pi 0.87.1 and Node v22.22.2 passed the isolated SDK guard with authenticated `openai-codex/gpt-5.6-luna` for both read-only analysis and an authorized clone sync.
+On 2026-09-27, Pi 0.87.1 and Node v22.22.2 passed the isolated SDK guard with authenticated `openai-codex/gpt-5.6-luna` for both read-only analysis and an authorized fast-forward of a disposable local clone.
 Refresh with `FM_SHORT_AGENT_LIVE_E2E=1 FM_SHORT_LIVE_PROVIDER=openai-codex FM_SHORT_LIVE_MODEL=gpt-5.6-luna bin/fm-test-run.sh tests/fm-short-agent-live-e2e.test.sh`.
 Both submitted through the loaded candidate extension and returned before child completion; the parent answered another real-model prompt while each child was active.
 Both children excluded the parent-only sentinel.
+The installed SDK read back `cacheWarming: "off"`; each child's runtime record reported an empty extension list and zero starting parent messages.
 
 | Measurement | Read-only task | Sync operation |
 | --- | --- | --- |
-| Submission latency | 6 ms | 13 ms |
-| Parent reply after submission | 2007 ms | 1464 ms |
-| Parent reply before child completion | 4044 ms | 4201 ms |
+| Submission latency | 6 ms | 12 ms |
+| Parent reply after submission | 3500 ms | 1730 ms |
+| Parent reply before child completion | 2169 ms | 4827 ms |
 | Child model requests / tools | 2 / 1 read | 2 / 1 operation chain |
-| Child reported total tokens | 871 | 1062 |
-| Serialized terminal result | 509 bytes | 684 bytes |
+| Child reported total tokens | 839 | 1096 |
+| Serialized terminal result | 507 bytes | 686 bytes |
 
-The test harness invoked two submit tools and one read-only status tool; terminal observation was fixture polling, not a parent model polling loop.
-MAIN executed zero operation commands: the sync receipt identifies the child-owned script process as executor.
-The operation's submit input and response were 599 and 388 bytes.
-Serialized SDK parent messages grew from 2 to 3475 to 4256 bytes across the two unrelated parent prompts and extension activity.
+The test harness invoked two successful submit tools and one read-only status tool; terminal observation was fixture polling, not a parent model polling loop.
+MAIN executed zero operation commands: the sync receipt identifies the child-owned script process as executor, and readback verified the changed clone head and file contents.
+The operation's submit input and response were 577 and 366 bytes.
+Serialized SDK parent messages grew from 2 to 3453 to 4234 bytes across the two unrelated parent prompts and extension activity.
 The harness invokes submit directly through the loaded tool definition, so submit/result payloads are measured separately rather than inserted into that model history.
 Those bytes are not a billed-token estimate or a measurement of a full production conversation.
-The two parent requests used 880 reported tokens; all six real requests used 2813 tokens, including four child requests and two child tool calls.
+The two parent requests used 880 reported tokens; the six successful real requests used 2815 tokens, including four child requests and two child tool calls.
 These are single-run observations, not statistical p95 or a claim of general savings; this guard measures SDK responsiveness, not terminal repaint latency.
+
+Two additional submissions changed only the detached child's proxy environment to an unreachable loopback endpoint.
+The real provider returned `fetch failed` for both read-only and operation tasks; both ended `blocked` with one model request, zero tool calls, and no operation intent or receipt.
+The transport journal retained `codes: ["ECONNREFUSED"]`, while the original provider message contained no underlying code.
+Restoring the normal environment allowed the real fast-forward above without changing provider, model, or extension isolation.
+This demonstrates the diagnostic boundary and refusal behavior; it does not identify the cause of an earlier failure whose underlying transport evidence was not retained.
+The portable suites also cover nested/cyclic transport causes, secret exclusion, failure after a completed operation, and no replay after duplicate submission or reconciliation.
 
 `tests/fm-short-operations.test.sh` uses a model fixture, real Git owners/effects, and a controlled Codebase forge to exercise merge-plus-sync, detached-checkout recovery, duplicate submission, cancellation, authority/identity drift, malformed output, partial success, and concurrent resource ownership.
 It also proves that a lost merge response is reconciled by owner readback and that an owner killed after a possible effect is not replayed after restart.

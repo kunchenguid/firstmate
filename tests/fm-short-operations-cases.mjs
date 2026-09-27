@@ -14,7 +14,7 @@ fs.writeFileSync(path.join(pkg,'package.json'),JSON.stringify({name:'@earendil-w
 fs.writeFileSync(path.join(pkg,'dist/core/http-dispatcher.js'),'export function configureHttpDispatcher() {}');
 fs.writeFileSync(path.join(pkg,'dist/index.js'),`
 export const createExtensionRuntime=()=>({});
-export const ModelRuntime={create:async()=>({getAvailable:async()=>[{provider:'openai-codex',id:'gpt-5.6-luna'}],streamSimple:async()=>{}})};
+export const ModelRuntime={create:async()=>({getAvailable:async()=>[{provider:'openai-codex',id:'gpt-5.6-luna'}],streamSimple:async(_m,c,opts)=>{if(c.fail) await opts.fetch();}})};
 export const SessionManager={inMemory:()=>({})};
 export const SettingsManager={inMemory:x=>x};
 export async function createAgentSession(o) {
@@ -22,11 +22,14 @@ export async function createAgentSession(o) {
  return {session:{messages,systemPrompt:o.resourceLoader.getSystemPrompt(),getActiveToolNames:()=>o.tools,subscribe(){},dispose(){},getLastAssistantText:()=> 'complete',
  async prompt(prompt) {
   const p=JSON.parse(prompt);
+  const transportFailure=()=>o.modelRuntime.streamSimple({}, {fail:true}, {fetch:async()=>{throw new TypeError('fetch failed',{cause:Object.assign(new Error('hidden'),{code:'ECONNRESET'})});}});
+  if(p.goal==='transport-before') await transportFailure();
   if(p.goal.startsWith('delay')) await new Promise(r=>setTimeout(r,500));
   await o.modelRuntime.streamSimple({}, {}, {});
   const tool=o.customTools.find(t=>t.name==='run_operations');
   if(!tool) throw Error('operations absent');
   const first=await tool.execute('op',p.goal==='inject'?{command:'touch BAD'}:{});
+  if(p.goal==='transport-after') await transportFailure();
   if(p.goal==='repeat' && JSON.stringify(await tool.execute('again',{}))!==JSON.stringify(first)) throw Error('receipt replay changed');
   messages.push({role:'assistant',stopReason:'stop'});
  }}};
@@ -63,6 +66,20 @@ const child=JSON.parse(fs.readFileSync(path.join(service.dir(a.id),'started.json
 const receipt=JSON.parse(fs.readFileSync(path.join(service.dir(a.id),'operation-0.receipt.json')));assert.notEqual(receipt.executor.pid,process.pid);assert.equal(receipt.evidence.head,expected);
 assert.equal(new ShortAgents(home,root).submit(request).id,a.id);
 const replay=await terminal(a.id);assert.equal(replay.finishedAt,done.finishedAt);
+for(const when of ['before','after']) {
+ const input=req('transport-'+when,undefined,'transport-'+when), accepted=service.submit(input);
+ const failed=await terminal(accepted.id);assert.equal(failed.state,'blocked');
+ assert.equal(failed.toolCalls,when==='before'?0:1);assert.equal(failed.requests,when==='before'?1:2);
+ const dir=service.dir(accepted.id), receiptFile=path.join(dir,'operation-0.receipt.json');
+ assert.equal(fs.existsSync(path.join(dir,'operation-0.intent.json')),when==='after');
+ if(when==='after') assert.equal(JSON.parse(fs.readFileSync(receiptFile)).state,'completed');
+ const events=fs.readFileSync(path.join(dir,'journal.jsonl'),'utf8').trim().split('\n').map(JSON.parse);
+ assert.deepEqual(events.filter(e=>e.type==='transport_error').map(e=>e.toolsStarted),[when==='before'?0:1]);
+ const receiptBefore=fs.existsSync(receiptFile)?fs.readFileSync(receiptFile,'utf8'):null;
+ assert.equal(service.submit(input).finishedAt,failed.finishedAt);
+ await service.reconcile();
+ assert.equal(fs.existsSync(receiptFile)?fs.readFileSync(receiptFile,'utf8'):null,receiptBefore,'transport failure never replays effects');
+}
 const inject=service.submit(req('inject',undefined,'inject'));assert.equal((await terminal(inject.id)).state,'blocked');
 assert.ok(!fs.existsSync(path.join(service.dir(inject.id),'operation-0.intent.json')));
 const cancelled=service.submit(req('cancel',undefined,'delay'));service.cancel(cancelled.id);await wait(700);assert.equal(service.status(cancelled.id).state,'cancelled');assert.ok(!fs.existsSync(path.join(service.dir(cancelled.id),'operation-0.intent.json')));
