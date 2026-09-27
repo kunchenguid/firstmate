@@ -1205,6 +1205,25 @@ test_no_mistakes_pushed_unmerged_refuses() {
   pass "no-mistakes worktree with pushed but unmerged work is refused"
 }
 
+test_no_mistakes_pushed_with_open_pr_allowed() {
+  local case_dir rc
+  case_dir=$(make_case nm-pushed-open-pr)
+  write_meta "$case_dir" no-mistakes ship
+  printf 'pr=https://github.com/o/r/pull/7\n' >> "$case_dir/state/task-x1.meta"
+  wt_commit_file "$case_dir" feature.txt hello "contribution work"
+  seed_backlog_in_flight "$case_dir"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+
+  set +e
+  FM_HOME="$case_dir" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "nm-pushed-open-pr: teardown should proceed"
+  pass "pushed work with a recorded open PR is not refused"
+}
+
 test_no_mistakes_truly_unpushed_refuses() {
   local case_dir rc
   case_dir=$(make_case nm-unpushed)
@@ -6615,6 +6634,7 @@ test_reachable_work_needs_no_fetch
 test_hung_fetch_is_bounded_and_refuses
 test_gate_remote_is_not_refreshed_into_landed
 test_no_mistakes_pushed_unmerged_refuses
+test_no_mistakes_pushed_with_open_pr_allowed
 test_no_mistakes_truly_unpushed_refuses
 test_no_mistakes_mirror_only_branch_refuses
 test_local_only_force_overrides_unpushed

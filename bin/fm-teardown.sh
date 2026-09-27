@@ -43,11 +43,13 @@
 # that closes the call.
 # REFUSES if the worktree holds work that has not LANDED, because cleanup
 # hard-resets/removes the worktree and kills its processes. For a normal ship task,
-# work has landed only when its PR is merged and the forge (GitHub, Forgejo, or -
-# only when config/park-on-review or config/auto-land opts this home in - GitLab)
-# reports a PR head that contains the current local work, or its content is already
-# present in the up-to-date default branch. A pushed task branch is not landed
-# merely because it is reachable from a remote-tracking branch. This recognizes the common
+# work whose branch is pushed but has no PR recorded or found is refused, while a
+# pushed branch with an open PR (including an upstream-contribution PR from a fork)
+# may be cleaned up. Unpushed work has landed only when its PR is merged and the
+# forge (GitHub, Forgejo, or - only when config/park-on-review or config/auto-land
+# opts this home in - GitLab) reports a PR head that contains the current local
+# work, or its content is already present in the up-to-date default branch.
+# This recognizes the common
 # squash-merge-then-delete-branch flow, where the branch's own commits live nowhere
 # on a remote yet the change is fully in main. A task whose meta records
 # base_branch= (bin/fm-spawn.sh) runs that content check against origin's copy of
@@ -2260,7 +2262,7 @@ validate_worktree_teardown_safety() {
       branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
       TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY=$branch
     fi
-    if ! work_is_landed "$branch"; then
+    if ! work_is_landed "$branch" && { [ -n "$unpushed" ] || [ -z "$PR_URL" ]; }; then
       if [ -n "${CONTENT_LANDED_PROOF_ERROR:-}" ]; then
         echo "REFUSED: content-landed proof unavailable for worktree $WT: $CONTENT_LANDED_PROOF_ERROR." >&2
         echo "Restore or upgrade Git and retry the content check." >&2
@@ -2269,7 +2271,7 @@ validate_worktree_teardown_safety() {
       fi
       [ -n "$unpushed" ] && printf 'unpushed commits:\n%s\n' "$unpushed" >&2
       report_remote_refresh_failure
-      echo "Land the PR, merge the work into the default branch, or get the captain's explicit OK to discard, then --force." >&2
+      echo "Open a PR and land it, merge the work into the default branch, or get the captain's explicit OK to discard, then --force." >&2
       return 1
     fi
   fi
