@@ -193,6 +193,7 @@ fm_run_timed() {  # <seconds> <command...>
 fm_run_timed_capture() {  # <seconds> <command...>
   local seconds=$1 capture owner pid rc
   shift
+  # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
   FM_TIMED_CAPTURE=
   capture=$(mktemp "${TMPDIR:-/tmp}/fm-timed-capture.XXXXXX" 2>/dev/null) || return 125
   owner=$$
@@ -215,6 +216,7 @@ fm_run_timed_capture() {  # <seconds> <command...>
       break
     fi
   done
+  # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
   FM_TIMED_CAPTURE=$(cat "$capture" 2>/dev/null || true)
   rm -f "$capture" 2>/dev/null || true
   return "$rc"

@@ -269,7 +269,7 @@ test_rejects_malformed_bounds_before_running_anything() {
 }
 
 test_gnu_timeout_kills_a_term_ignoring_command_after_the_grace() {
-  local dir fb rc=0 started elapsed verdict
+  local dir fb status=0 started elapsed verdict
   if ! command -v timeout >/dev/null 2>&1; then
     pass "fm_exec_timed's GNU timeout fallback (skipped: no timeout binary on this host)"
     return 0
@@ -282,10 +282,10 @@ test_gnu_timeout_kills_a_term_ignoring_command_after_the_grace() {
     ln -s "$(command -v "$tool")" "$fb/$tool"
   done
   started=$SECONDS
-  exec_timed "$fb" 1 2 bash -c 'trap "" TERM; exec sleep 300' || rc=$?
+  exec_timed "$fb" 1 2 bash -c 'trap "" TERM; exec sleep 300' || status=$?
   elapsed=$((SECONDS - started))
-  verdict=$( . "$ROOT/bin/fm-timeout-lib.sh"; fm_timed_out "$rc" && echo expired)
-  [ "$verdict" = expired ] || fail "the GNU path's expiry status $rc is not a timed-out status"
+  verdict=$( . "$ROOT/bin/fm-timeout-lib.sh"; fm_timed_out "$status" && echo expired)
+  [ "$verdict" = expired ] || fail "the GNU path's expiry status $status is not a timed-out status"
   [ "$elapsed" -ge 3 ] || fail "the GNU path ended a TERM-ignoring command before bound plus grace (${elapsed}s)"
   [ "$elapsed" -lt 20 ] || fail "the GNU path did not kill a TERM-ignoring command after the grace (${elapsed}s)"
   pass "fm_exec_timed's GNU timeout fallback kills a TERM-ignoring command once the grace has passed"
