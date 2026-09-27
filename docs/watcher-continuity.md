@@ -186,6 +186,8 @@ So a finished, hung, or identity-mismatched claim cannot suppress that recovery 
 The recovery-episode contract below owns once-per-generation announcement.
 A handling successor does not re-announce.
 It enters its poll loop immediately and keeps scanning signals, stale panes, and checks.
+It also surfaces, once, any row another writer appended to the home's own queue after the last handover, such as a captain inbox note.
+Every actionable close records the queue sequence it handed over in `state/.watch-queue-handed` before printing, because the drain that follows presents every row queued up to then, so a row above that sequence has not reached the model yet ([`bin/fm-watch.sh`](../bin/fm-watch.sh) `queue_handover_surface` owns the rule).
 
 ### Manual recovery and other harnesses
 
@@ -447,6 +449,7 @@ They also prove that a legacy or handoff-phase watcher marker from an absent rep
 
 - The once-per-generation announcement bound with the real Pi extension against a refused handling handshake.
 - A handling successor that must surface a real crew event instead of going blind.
+- A handling successor that must surface a foreign queue append, such as a captain inbox note, exactly once and leave it to the daemon while away mode owns triage.
 
 `tests/fm-watch-triage.test.sh` proves TERM stops a watcher blocked inside a poll's pane capture and still releases its lock and records an acknowledgeable stop.
 It also exercises a single TERM with a live foreign downtime-marker lock holder, retained stale singleton and subsequent arm-style recovery, including decimal `08` and zero `00` cleanup bounds.

@@ -222,5 +222,109 @@ test_handling_successor_does_not_go_blind() {
   pass "a resurfacing handling successor stays alive and supervises instead of going blind"
 }
 
+foreign_watch_bg() {  # <dir> <out> <handling-successor 0|1> [extra env assignments...]
+  local dir=$1 out=$2 successor=$3
+  shift 3
+  env PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_SECONDMATE_LIVENESS_SECS=99999999 FM_WATCH_HANDLING_SUCCESSOR="$successor" \
+    "$@" "$WATCH" > "$out" 2>&1 &
+}
+
+# Append a captain inbox note to <dir>'s own queue and print its queue key.
+foreign_note() {  # <dir> <text>
+  local dir=$1
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_DATA_OVERRIDE="$dir/data" \
+    FM_CONFIG_OVERRIDE="$dir/config" "$ROOT/bin/fm-inbox.sh" note "$2" >/dev/null || return 1
+  awk -F '\t' 'END { print $4 }' "$dir/state/.wake-queue"
+}
+
+# 0 when <pid> is still blocking after two further completed poll cycles.
+stays_blocking() {  # <state> <pid>
+  local beat="$1/.last-watcher-beat" seen=0 last="" now i=0
+  rm -f "$beat"
+  while [ "$i" -lt 80 ]; do
+    kill -0 "$2" 2>/dev/null || return 1
+    if [ "$(uname)" = Darwin ]; then
+      now=$(stat -f %m "$beat" 2>/dev/null || true)
+    else
+      now=$(stat -c %Y "$beat" 2>/dev/null || true)
+    fi
+    if [ -n "$now" ] && [ "$now" != "$last" ]; then
+      seen=$((seen + 1))
+      last=$now
+      [ "$seen" -lt 3 ] || return 0
+    fi
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
+# T3: a row another writer appends to the home's own queue while a handling
+# successor blocks - a captain inbox note - must wake it within a poll, and
+# exactly once: neither the rows its predecessor already handed over nor the
+# surfaced row may make a later successor exit again while they stay queued.
+test_handling_successor_surfaces_a_foreign_append_once() {
+  local dir state out child first second
+  dir=$(make_case foreign-append-successor)
+  dir=$(cd "$dir" && pwd -P)
+  state="$dir/state"
+  out="$dir/watch.out"
+  mkdir -p "$dir/data" "$dir/config"
+
+  first=$(foreign_note "$dir" "first note") || fail "the first inbox note was not queued"
+  foreign_watch_bg "$dir" "$out" 0
+  child=$!
+  wait_for_exit "$child" 100 || fail "the predecessor did not hand over the queued note: $(cat "$out")"
+  grep -q '^check:' "$out" || fail "the predecessor closed without a wake: $(cat "$out")"
+
+  foreign_watch_bg "$dir" "$out" 1
+  child=$!
+  stays_blocking "$state" "$child" \
+    || fail "a handling successor re-surfaced a row its predecessor handed over: $(cat "$out")"
+
+  second=$(foreign_note "$dir" "second note") || fail "the second inbox note was not queued"
+  wait_for_exit "$child" 50 \
+    || fail "a handling successor kept blocking after an inbox note was queued: $(cat "$out")"
+  grep -Fx "check: undelivered queued wake: $second" "$out" >/dev/null \
+    || fail "the successor did not name exactly the newly queued note: $(cat "$out")"
+  grep -F "$first" "$out" >/dev/null \
+    && fail "the successor re-announced the note its predecessor handed over: $(cat "$out")"
+
+  foreign_watch_bg "$dir" "$out" 1
+  child=$!
+  stays_blocking "$state" "$child" \
+    || fail "a later successor surfaced the same queued note again: $(cat "$out")"
+  kill -TERM "$child" 2>/dev/null || true
+  wait "$child" 2>/dev/null || true
+  [ "$(grep -c "$(printf '\tcheck\tinbox:')" "$state/.wake-queue")" = 2 ] \
+    || fail "surfacing changed the durable queue: $(cat "$state/.wake-queue")"
+  pass "a handling successor surfaces a foreign queue append once, tied to its row sequence"
+}
+
+# T4: while the away-mode daemon owns triage the watcher stays one-shot on its
+# own reasons only, so a foreign append is left to the daemon.
+test_afk_successor_leaves_foreign_appends_to_the_daemon() {
+  local dir state out child
+  dir=$(make_case foreign-append-afk)
+  dir=$(cd "$dir" && pwd -P)
+  state="$dir/state"
+  out="$dir/watch.out"
+  mkdir -p "$dir/data" "$dir/config"
+  : > "$state/.afk"
+  foreign_watch_bg "$dir" "$out" 1
+  child=$!
+  stays_blocking "$state" "$child" || fail "the away-mode successor did not start blocking: $(cat "$out")"
+  foreign_note "$dir" "away note" >/dev/null || fail "the away-mode inbox note was not queued"
+  stays_blocking "$state" "$child" \
+    || fail "the away-mode watcher exited for a foreign append: $(cat "$out")"
+  kill -TERM "$child" 2>/dev/null || true
+  wait "$child" 2>/dev/null || true
+  pass "the away-mode watcher leaves a foreign queue append to the daemon"
+}
+
 test_handling_successor_does_not_go_blind
 test_unacknowledged_recovery_is_announced_once_per_generation
+test_handling_successor_surfaces_a_foreign_append_once
+test_afk_successor_leaves_foreign_appends_to_the_daemon

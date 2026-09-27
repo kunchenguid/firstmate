@@ -2055,6 +2055,24 @@ fm_wake_queued_keys_locked() {
     "$FM_WAKE_QUEUE" 2>/dev/null || true
 }
 
+# fm_wake_seq_read <output-variable>
+# Store the highest sequence fm_wake_append_locked has issued, or 0 when none is
+# recorded. Uses only the read builtin, so a per-poll caller forks nothing.
+fm_wake_seq_read() {
+  local _fm_seq=0
+  IFS= read -r _fm_seq < "$STATE/.wake-queue.seq" 2>/dev/null || true
+  case "$_fm_seq" in ''|*[!0-9]*) _fm_seq=0 ;; esac
+  printf -v "$1" '%s' "$((10#$_fm_seq))"
+}
+
+# fm_wake_keys_after_locked <sequence>
+# Print the distinct keys of queued rows whose sequence is above <sequence>,
+# oldest first, under an already-held FM_WAKE_QUEUE_LOCK.
+fm_wake_keys_after_locked() {
+  awk -F '\t' -v after="$1" 'NF >= 5 && $2 ~ /^[0-9]+$/ && $2 + 0 > after + 0 && !seen[$4]++ { print $4 }' \
+    "$FM_WAKE_QUEUE" 2>/dev/null || true
+}
+
 fm_wake_secondmate_progress_marker_write() { # <task> <observed-at> <oldest-row-key>
   local task=$1 observed_at=$2 oldest_row_key=$3 marker tmp
   case "$task" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
