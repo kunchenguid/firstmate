@@ -1576,12 +1576,15 @@ families_for_changed_path() {
       # they import. Selecting the loading suites by script, rather than
       # through the reference scan, keeps a plugin whose full path no test
       # names (the two seatbelt plugins) from dying as unmapped and avoids
-      # widening each consumer to its whole family.
+      # widening each consumer to its whole family. The live OpenCode E2E is
+      # named explicitly because it is the only suite that loads these plugins
+      # into a real OpenCode.
       printf '%s\n' __script__:fm-opencode-v2-plugins.test.sh
       printf '%s\n' __script__:fm-operational-input.test.sh
       printf '%s\n' __script__:fm-turnend-guard.test.sh
       printf '%s\n' __script__:fm-sessionstart-nudge.test.sh
       printf '%s\n' __script__:fm-pi-watch-extension.test.sh
+      printf '%s\n' live-harness-optin
       ;;
     bin/fm-sessionstart-run.sh|.claude/settings.json|.codex/hooks.json|\
     .pi/extensions/fm-primary-turnend-guard.ts)

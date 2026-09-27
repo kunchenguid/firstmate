@@ -1449,9 +1449,12 @@ test_changed_opencode_plugin_and_asset_select_their_suites() {
     || { rm -rf "$tmp"; fail "a changed .opencode plugin left --changed with no mapping"; }
   assert_contains "$listed" "tests/fm-opencode-v2-plugins.test.sh" \
     "a changed seatbelt plugin does not select the ported-plugin suite"
+  assert_contains "$listed" "tests/fm-harness-adapter-instructions-live-e2e.test.sh" \
+    "a changed ported plugin does not select the live-harness-optin suites"
 
   # A changed test asset is mapped by the suite that reads it rather than the
-  # generic tests/* refusal.
+  # generic tests/* refusal. Reset the plugin so only the asset is changed.
+  git -C "$repo" checkout -- .opencode/plugins/fm-primary-cd-check.js
   printf '\n' >>"$repo/tests/assets/fm-opencode-v1-plugin-adapter.mjs"
   listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD) \
     || { rm -rf "$tmp"; fail "a changed test asset left --changed with no mapping"; }
