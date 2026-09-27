@@ -580,8 +580,8 @@ test_no_mistakes_dod_ci_gate_feedback() {
   assert_present "$brief" "brief was not scaffolded"
   assert_grep "poll about once a minute with one poll per command" "$brief" \
     "no-mistakes DOD must give the CI-gate polling cadence as one poll per command"
-  assert_grep "never put a single wait longer than the ten-minute bound above into one command" "$brief" \
-    "no-mistakes DOD must bound a single CI-gate wait"
+  assert_grep "never put a single wait longer than your harness's command bound into one command" "$brief" \
+    "no-mistakes DOD must bound a single CI-gate wait by the harness command bound"
   assert_grep "Every poll reads the PR itself, not only its checks" "$brief" \
     "no-mistakes DOD must make every CI poll read the PR's reviews and comments"
   # shellcheck disable=SC2016  # single quotes are deliberate: the backticked gh api paths must stay literal
@@ -595,12 +595,13 @@ test_no_mistakes_dod_ci_gate_feedback() {
   # shellcheck disable=SC2016  # single quotes are deliberate: the backticked status line must stay literal
   assert_grep 'escalate it inline in a keyed status line - append `needs-decision [at=<epoch>] [key=pr-<n>-<comment-id>]' "$brief" \
     "no-mistakes DOD must escalate gateless review feedback inline as a keyed decision"
-  assert_grep "then keep polling about once a minute and wait for firstmate's reply instead of stopping; on dismiss, reply on the PR" "$brief" \
-    "no-mistakes DOD must keep polling behind gateless feedback and reply on the PR on dismiss"
-  assert_grep "A firstmate fix answer is applied at the run's next stopping point, never mid-run" "$brief" \
-    "no-mistakes DOD must apply a fix answer only at the run's next stopping point"
-  assert_grep "Never hand-commit while a run is active and never start a second run while one is active" "$brief" \
-    "no-mistakes DOD must forbid hand-commits and a second run while one is active"
+  assert_grep "for this decision only in place of rule 6's stop, keep polling about once a minute and wait for firstmate's reply instead of stopping; on dismiss, reply on the PR" "$brief" \
+    "no-mistakes DOD must name that a review-feedback decision replaces rule 6's stop and keeps polling"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticked respond command must stay literal
+  assert_grep 'A firstmate fix answer goes to the next parked gate, through `no-mistakes axi respond --action fix` adding the finding' "$brief" \
+    "no-mistakes DOD must route a fix answer to the next parked gate"
+  assert_no_grep "as a follow-up commit on your existing branch plus a new /no-mistakes run" "$brief" \
+    "no-mistakes DOD must not name a post-outcome follow-up run for review feedback"
   # shellcheck disable=SC2016  # single quotes are deliberate: the backticked done token must stay literal
   assert_grep 'never append `done:` while a `pr-<n>-<comment-id>` decision you opened is still unanswered' "$brief" \
     "no-mistakes DOD must hold done while a review-feedback decision is open"
@@ -610,8 +611,6 @@ test_no_mistakes_dod_ci_gate_feedback() {
   # shellcheck disable=SC2016  # single quotes are deliberate: the backticked blocked: token must stay literal
   assert_grep 'never report it as `blocked:` and never stop on it' "$brief" \
     "no-mistakes DOD must forbid blocked: for a maintainer-only wait"
-  assert_grep "Gate findings marked ask-user still follow rule 6 exactly, even when they only describe that external wait" "$brief" \
-    "no-mistakes DOD must keep ask-user rows on rule 6 even for an external wait"
   pass "fm-brief.sh: no-mistakes DOD reads and routes review feedback at the CI gate"
 }
 

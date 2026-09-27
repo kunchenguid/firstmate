@@ -91,11 +91,10 @@
 # `no-mistakes axi respond --action fix`, never dismissed as a non-required
 # check; feedback that lands while no gate is parked is a keyed
 # `needs-decision [key=pr-<n>-<comment-id>]` line carrying the comment inline
-# that the worker keeps polling behind until firstmate answers dismiss (reply
-# on the PR) or fix, which is applied only at the run's next stopping point (a
-# parked gate, or a follow-up commit plus a new run on the same branch after the
-# final outcome), and `done:` waits until no such decision is open and the PR
-# holds no unactioned feedback; a maintainer-only wait (fork-workflow approval,
+# that, for that decision only, replaces rule 6's stop: the worker keeps polling
+# behind it until firstmate answers dismiss (reply on the PR) or fix, which the
+# worker adds to the next parked gate, and `done:` waits until no such decision
+# is open and the PR holds no unactioned feedback; a maintainer-only wait (fork-workflow approval,
 # flaky-job rerun) is a `[key=nm-<run>-ci-wait]` declared-external-wait line,
 # keyed apart from the gate's own ask-user key so the worker's `resolved` never
 # folds away an escalation only firstmate may close, that the worker resumes
@@ -609,15 +608,13 @@ EOF
       fm_nm_driving_block "$forge"
       cat <<EOF
 
-At the CI gate, poll about once a minute with one poll per command, and never put a single wait longer than the ten-minute bound above into one command.
+At the CI gate, poll about once a minute with one poll per command, and never put a single wait longer than your harness's command bound into one command.
 Every poll reads the PR itself, not only its checks: \`gh pr checks <n>\`, then the PR's reviews, review comments, and issue comments (\`gh api repos/<owner>/<repo>/pulls/<n>/reviews\`, \`.../pulls/<n>/comments\`, and \`.../issues/<n>/comments\`).
 A failing review-bot check, a review-bot finding, or a maintainer comment asking for a change is work for the gate, never a non-required check to dismiss: when \`no-mistakes axi status\` shows a parked gate, feed each item to it with \`no-mistakes axi respond --action fix\`, adding any finding the gate does not list yet as \`no-mistakes axi respond --help\` describes, and let the fix round commit and push.
-When review feedback arrives and \`no-mistakes axi status\` shows no parked gate, escalate it inline in a keyed status line - append \`needs-decision [at=<epoch>] [key=pr-<n>-<comment-id>]: review feedback: {comment URL} {what it asks for}\` - then keep polling about once a minute and wait for firstmate's reply instead of stopping; on dismiss, reply on the PR.
-A firstmate fix answer is applied at the run's next stopping point, never mid-run: at a parked gate, through \`no-mistakes axi respond --action fix --add-finding\`; after the run's final outcome, as a follow-up commit on your existing branch plus a new /no-mistakes run on that same branch with the same \`--intent\`, driven to its outcome before \`done:\`.
-Never hand-commit while a run is active and never start a second run while one is active.
+When review feedback arrives and \`no-mistakes axi status\` shows no parked gate, escalate it inline in a keyed status line - append \`needs-decision [at=<epoch>] [key=pr-<n>-<comment-id>]: review feedback: {comment URL} {what it asks for}\` - then, for this decision only in place of rule 6's stop, keep polling about once a minute and wait for firstmate's reply instead of stopping; on dismiss, reply on the PR.
+A firstmate fix answer goes to the next parked gate, through \`no-mistakes axi respond --action fix\` adding the finding; the pipeline is still monitoring the PR through this wait.
 Before appending \`done:\`, re-read the PR's reviews and comments and route any unactioned feedback through those paths first; never append \`done:\` while a \`pr-<n>-<comment-id>\` decision you opened is still unanswered.
 A wait only a maintainer can clear - GitHub's fork-workflow approval (\`action_required\` with no job run) or a rerun of a flaky job - is an external wait under rule 4, not a blocker: append \`paused [at=<epoch>] [key=nm-<run>-ci-wait]: <what must happen>\` once, keep polling, and when it clears append \`resolved [at=<epoch>] [key=nm-<run>-ci-wait]: <how it cleared>\` yourself and continue; never report it as \`blocked:\` and never stop on it.
-Gate findings marked ask-user still follow rule 6 exactly, even when they only describe that external wait: choosing to wait them out is answering them yourself.
 
 After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), read the PR back from the forge and confirm it is not a draft $draft_check
 A draft cannot be merged, so a done report on one leaves the merge unasked.
