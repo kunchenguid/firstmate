@@ -896,6 +896,11 @@ safe_checkpoint() {
   wt_top_real=$(cd "$wt_top" 2>/dev/null && pwd -P) || wt_top_real=$wt_top
   [ "$wt_real" = "$wt_top_real" ] \
     || die "task $ID's recorded worktree $WT is not a worktree root (root is $wt_top); refusing to relaunch against an ambiguous checkout"
+  if [ "$BACKEND" = orca ]; then
+    fm_backend_source orca || die "could not load the Orca adapter"
+    fm_backend_orca_terminal_matches_worktree "$T" "$(fm_meta_get "$META" orca_worktree_id)" "$WT" \
+      || die "task $ID's Orca terminal does not prove ownership of its recorded worktree; refusing to relaunch"
+  fi
   if head=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null); then
     :
   elif head_ref=$(git -C "$WT" symbolic-ref -q HEAD 2>/dev/null); then

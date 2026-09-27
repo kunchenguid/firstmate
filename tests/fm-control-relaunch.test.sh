@@ -2392,11 +2392,13 @@ make_orca_relaunch_stub() {  # <case-dir>
 const fs = require('fs'), d = process.env.FM_FAKE_DIR;
 const read = name => fs.existsSync(`${d}/${name}`) ? fs.readFileSync(`${d}/${name}`,'utf8').trim() : '';
 exports.reply = (method, params) => {
-  const path = read('cwd'), worktreeId = `repo::${path}`, mode = read('orca-mode');
+  const path = read('cwd'), mode = read('orca-mode');
   const handle = params.terminal || 'term-new';
+  const owned = mode === 'foreign' && handle === 'term-old' ? `${path}-other` : path;
+  const worktreeId = `repo::${owned}`;
   const live = handle === 'term-new' || mode === 'live';
   const terminal = {handle, ptyId:`pty-${handle}`, incarnationId:`inc-${handle}`,
-    worktreeId, worktreePath:path, executionHostId:'local', connected:live, writable:live,
+    worktreeId, worktreePath:owned, executionHostId:'local', connected:live, writable:live,
     ...live ? {} : {exitCause:{kind:'operator_close'}}};
   let result;
   switch(method) {
@@ -2423,7 +2425,7 @@ const reply = require(path.resolve(__dirname,'../app.asar.unpacked/out/cli/runti
 let r;
 if (args[0] === 'status') r={ok:true,result:{runtime:{reachable:true,state:'ready'}}};
 else if (args[0] === 'worktree' && args[1] === 'show') r={ok:true,result:{worktree:{path:fs.readFileSync(`${d}/cwd`,'utf8').trim()}}};
-else if (args[1] === 'show') r=reply('terminal.show',{terminal:get('--terminal')});
+else if (args[1] === 'show') { try { r=reply('terminal.show',{terminal:get('--terminal')}); } catch (e) { r={ok:false,error:{message:e.message}}; } }
 else if (args[1] === 'create') {
   fs.appendFileSync(`${d}/orca-created`,get('--worktree')+'\n');
   r={ok:true,result:{terminal:{handle:'term-new'}}};
@@ -2452,11 +2454,12 @@ JS
 
 test_orca_stopped_relaunch_preserves_work_and_refuses_uncertainty() {
   local dir mode verb out rc before brief
-  for mode in live ambiguous stale; do
+  for mode in live ambiguous stale foreign; do
     dir=$(new_case "orca-$mode" orca-proof)
     add_ship_task "$dir" orca-proof
     make_orca_relaunch_stub "$dir"
     printf '%s' "$mode" > "$dir/fake/orca-mode"
+    [ "$mode" != foreign ] || mkdir -p "$dir/wt-other"
     before=$(cat "$dir/home/state/orca-proof.meta")
     brief=$(cat "$dir/home/data/orca-proof/brief.md")
     for verb in control spawn; do
@@ -2467,7 +2470,9 @@ test_orca_stopped_relaunch_preserves_work_and_refuses_uncertainty() {
         out=$(run_spawn "$dir" orca-proof --relaunch --harness codex) || rc=$?
       fi
       expect_code 1 "$rc" "Orca $mode must refuse $verb"$'\n'"$out"
-      if [ "$mode" = stale ]; then
+      if [ "$mode" = foreign ] || { [ "$mode" = stale ] && [ "$verb" = control ]; }; then
+        assert_contains "$out" ownership 'a terminal that cannot prove ownership of the recorded worktree must be refused before the transaction opens'
+      elif [ "$mode" = stale ]; then
         assert_contains "$out" unreadable 'refusal must reach the unreadable-state guard'
         assert_contains "$out" 'cannot be recovered through relaunch' 'an unresolvable handle must be named as unrecoverable'
         case "$out" in *"close the old Orca terminal"*) fail 'an unresolvable handle must not prescribe closing a terminal' ;; esac
@@ -2517,7 +2522,7 @@ test_orca_stopped_relaunch_preserves_work_and_refuses_uncertainty() {
   [ "$(cat "$dir/home/state/orca-proof.meta")" = "$before" ] || fail 'abort lost the prior endpoint record'
   [ "$(cat "$dir/wt/task.txt")" = 'preserve aborted work' ] || fail 'abort deleted the recorded checkout'
   [ ! -e "$dir/fake/orca-launched" ] || fail 'aborted publication launched an unrecorded worker'
-  pass 'Orca relaunch: replaces a proven stopped endpoint on Codex, preserves work and identity, and both entry points refuse live or ambiguous endpoints'
+  pass 'Orca relaunch: replaces a proven stopped endpoint on Codex, preserves work and identity, and both entry points refuse live, ambiguous, unresolvable, or foreign-owned endpoints byte-exact'
 }
 
 test_orca_stopped_relaunch_preserves_work_and_refuses_uncertainty

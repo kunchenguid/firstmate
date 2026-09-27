@@ -547,12 +547,17 @@ add_orca_task() {  # <case-dir> <id> <harness>
   } > "$dir/home/state/$id.meta.new"
   sed "s|^window=.*|window=fm-$id|" "$dir/home/state/$id.meta.new" > "$dir/home/state/$id.meta"
   rm -f "$dir/home/state/$id.meta.new"
+  printf 'wt-%s::/orca/wt-%s' "$id" "$id" > "$dir/fake/orca-worktree-id"
   cat > "$dir/fakebin/orca" <<'SH'
 #!/usr/bin/env bash
 set -u
 D=$FM_FAKE_DIR
 case "${1:-} ${2:-}" in
   'terminal read') printf '{"ok":true,"result":{"terminal":{"tail":["$ "]}}}\n' ;;
+  'terminal show')
+    printf '{"ok":true,"result":{"terminal":{"handle":"%s","executionHostId":"local","worktreeId":"%s","worktreePath":"%s"}}}\n' \
+      "$4" "$(cat "$D/orca-worktree-id")" "$(cat "$D/cwd")"
+    ;;
   'terminal send')
     case " $* " in
       *' --interrupt '*) printf 'C-c\n' >> "$D/keys" ;;

@@ -4133,7 +4133,10 @@ if [ "$RELAUNCH" -eq 1 ] && [ "$BACKEND" = orca ]; then
   # The terminal was just allocated in the verified Orca worktree above.
   # worktreePath is not a live cwd probe and must never justify reusing an old
   # shell. This branch is reachable only for the fresh-endpoint recovery.
-  [ "$RELAUNCH_REBIND" -eq 1 ] || exit 1
+  [ "$RELAUNCH_REBIND" -eq 1 ] || {
+    echo "error: task $ID's Orca relaunch reached worktree validation without a proven-gone endpoint to replace (state '$RELAUNCH_STATE'); Orca never adopts an existing shell, so refusing rather than launching into $T" >&2
+    exit 1
+  }
   validate_spawn_worktree "Orca relaunch" "$T"
 elif [ "$RELAUNCH" -eq 1 ]; then
   # No worktree is acquired: the recorded one is reused as-is. What must be
