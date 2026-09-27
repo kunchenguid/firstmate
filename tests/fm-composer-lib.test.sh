@@ -1041,6 +1041,11 @@ test_opencode_v2_status_bar_below_composer() {
   # a dead shell below the same idle composer still reads unknown.
   stale=$'  ┃\n  ┃\n  ┃  Build · DeepSeek V4.1 Flash DeepSeek\n  ╹▀▀▀▀\nvibhormittal@host repo %'
   assert_screen "opencode 2.0.18 above a dead shell is still unknown" unknown "$CAPS_STYLED" "$stale"
+  # The status-bar exemption belongs to opencode's left-bar shape only: a
+  # boxed composer above the same status text is not that furniture, so the
+  # row below it still proves the box stale.
+  box_status=$'╭────────────────────────╮\n│ ❯                      │\n╰────────────────────────╯\n'"$status"
+  assert_screen "opencode status text below a boxed composer is not furniture" unknown "$CAPS_STYLED" "$box_status"
   pass "opencode 2.0.18: its status bar below the composer is furniture, not a stale lower shape"
 }
 

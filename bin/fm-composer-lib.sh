@@ -1544,7 +1544,8 @@ _fm_composer_select_cursorless() {
     trimmed=$raw
     fm_composer_normalize_trim_var trimmed
     if [ -n "$trimmed" ] \
-       && ! _fm_composer_row_is_opencode_status "$trimmed" \
+       && ! { [ "$FM_COMPOSER_SELECTED_KIND" = leftbar ] \
+              && _fm_composer_row_is_opencode_status "$trimmed"; } \
        && ! fm_composer_row_has_edge "$trimmed"; then
       FM_COMPOSER_SELECTED_KIND=
       return 1
