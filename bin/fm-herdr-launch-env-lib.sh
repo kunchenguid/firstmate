@@ -25,13 +25,24 @@
 # pane environment from its own startup files.
 #
 # HOME and XDG_CONFIG_HOME ARE preserved, because they are caller-environment
-# settings rather than task-scoped overrides, and because herdr resolves its
-# config and sessions under them: refusing them would give the adapter two
-# different config roots - one for the launch, another for every ordinary call
-# - and let it report a server that its own caller can never reach.
+# settings rather than task-scoped overrides, and because on the installed
+# herdr 0.9.1 they relocate where herdr keeps its api socket, its sessions
+# directory and its log. Measured 2026-09-26 against that 0.9.1: a server
+# started with XDG_CONFIG_HOME pointed at a scratch directory reported "api
+# socket: /tmp/hct42205/herdr/sessions/sct/herdr.sock" in its own startup
+# output. Refusing those two names would therefore give the adapter two
+# different config roots - one for the launch, another for every ordinary
+# call - and let it report a server that its own caller can never reach.
 # bin/fm-remote-job-lib.sh launches its worker under an explicitly assigned
-# HOME and depends on that one coherent root. HERDR_CONFIG_PATH is the name
-# that is refused: it selects config.toml directly, so forwarding it would let
+# HOME and depends on that one coherent root.
+#
+# The older recorded observation that "On Herdr 0.7.3 the API socket is not
+# relocatable by HERDR_CONFIG_PATH, XDG_CONFIG_HOME, or HOME" is scoped to
+# 0.7.3 and is superseded by the 0.9.1 measurement above; it does not make
+# HERDR_CONFIG_PATH safe to forward.
+#
+# HERDR_CONFIG_PATH is the name that is refused, for a reason independent of
+# socket location: it selects config.toml directly, so forwarding it would let
 # a caller impose a persistent default_shell on a server that outlives it,
 # which is the exact outcome this boundary exists to prevent.
 #

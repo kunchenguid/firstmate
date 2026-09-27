@@ -191,8 +191,7 @@ test_provision_run_and_guarded_teardown() {
 test_provision_launches_the_lab_server_with_the_shared_clean_environment() {
   local name="fm-lab-launch-env-$$" recorded expected_shell leaked line
   local -a pane_env=() shell_args=()
-  expected_shell=$(id -u >/dev/null 2>&1 && getent passwd "$(id -u)" 2>/dev/null | head -1 | cut -d: -f7)
-  [ -n "$expected_shell" ] || expected_shell=$(awk -F: -v want="$(id -u)" '$3 == want { print $7; exit }' /etc/passwd 2>/dev/null)
+  expected_shell=$(fm_test_passwd_shell)
   [ -n "$expected_shell" ] && [ -x "$expected_shell" ] \
     || fail "uid $(id -u) has no usable passwd login shell on this host, so the lab pane-shell contract cannot be exercised"
 

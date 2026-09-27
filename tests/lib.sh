@@ -520,6 +520,47 @@ fm_touch_epoch() {
     || fail "fm_touch_epoch: touch -t $stamp failed for $*"
 }
 
+# --- the effective uid's own passwd record ------------------------------------
+
+# fm_test_passwd_field <field> <darwin-key>: one field of the EFFECTIVE uid's
+# own passwd record, read from the system the same way an operator would and
+# never from $SHELL, $HOME or $USER. <field> is the passwd column number and
+# <darwin-key> the Directory Services key that carries the same value.
+#
+# Both reads are needed because the two supported platforms keep the record in
+# different places: Linux answers through getent (or /etc/passwd directly),
+# while darwin keeps only system accounts in /etc/passwd and has no getent at
+# all, so a regular uid (501+) exists only in Directory Services. Resolving
+# just one of them would leave any assertion about the operator's real login
+# shell either vacuous or falsely failing on the other platform.
+#
+# Echoes nothing when this host exposes neither, so a caller that needs the
+# value can say so itself.
+fm_test_passwd_field() {  # <field> <darwin-key>
+  local field=$1 key=$2 uid line
+  uid=$(id -u 2>/dev/null) || return 0
+  line=""
+  if command -v getent >/dev/null 2>&1; then
+    line=$(getent passwd "$uid" 2>/dev/null | head -1)
+  fi
+  [ -n "$line" ] || line=$(awk -F: -v want="$uid" '$3 == want { print; exit }' /etc/passwd 2>/dev/null)
+  if [ -n "$line" ]; then
+    printf '%s\n' "$line" | cut -d: -f"$field"
+    return 0
+  fi
+  if command -v dscl >/dev/null 2>&1; then
+    dscl . -read "/Users/$(id -un)" "$key" 2>/dev/null | sed -n "s/^$key: //p" | head -1
+  fi
+}
+
+fm_test_passwd_shell() {
+  fm_test_passwd_field 7 UserShell
+}
+
+fm_test_passwd_home() {
+  fm_test_passwd_field 6 NFSHomeDirectory
+}
+
 # --- deterministic git identity and fixtures --------------------------------
 
 # fm_git_identity [name] [email]: export a fixed author/committer identity so

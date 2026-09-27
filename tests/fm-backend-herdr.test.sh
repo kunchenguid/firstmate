@@ -185,35 +185,6 @@ herdr_test_recorded_value() {  # <env-log> <name>
   sed -n "s/^$2=//p" "$1" | head -1
 }
 
-# herdr_test_passwd_field: one field of the EFFECTIVE uid's own passwd entry,
-# read from the system the same way an operator would and never from $SHELL,
-# $HOME or $USER. <field> is the passwd column number and <darwin-key> the
-# Directory Services key that carries it. Empty when this host exposes neither.
-herdr_test_passwd_field() {  # <field> <darwin-key>
-  local field=$1 key=$2 uid line
-  uid=$(id -u 2>/dev/null) || return 0
-  line=""
-  if command -v getent >/dev/null 2>&1; then
-    line=$(getent passwd "$uid" 2>/dev/null | head -1)
-  fi
-  [ -n "$line" ] || line=$(awk -F: -v want="$uid" '$3 == want { print; exit }' /etc/passwd 2>/dev/null)
-  if [ -n "$line" ]; then
-    printf '%s\n' "$line" | cut -d: -f"$field"
-    return 0
-  fi
-  if command -v dscl >/dev/null 2>&1; then
-    dscl . -read "/Users/$(id -un)" "$key" 2>/dev/null | sed -n "s/^$key: //p" | head -1
-  fi
-}
-
-herdr_test_passwd_shell() {
-  herdr_test_passwd_field 7 UserShell
-}
-
-herdr_test_passwd_home() {
-  herdr_test_passwd_field 6 NFSHomeDirectory
-}
-
 # make_herdr_statefake: a STATEFUL `herdr` stub that models the parts of herdr's
 # real container behavior the workspace-leak fix (and the default-tab-prune
 # safety fix) depend on, so a full spawn->teardown cycle can be replayed
@@ -1250,7 +1221,7 @@ test_server_ensure_gives_panes_the_passwd_login_shell_and_a_usable_path() {
   local -a pane_env=() shell_args=()
   dir="$TMP_ROOT/server-shell"; mkdir -p "$dir"; log="$dir/env"; marker="$dir/running"
   fb=$(make_herdr_server_launch_fakebin "$dir" "$log" "$marker")
-  expected=$(herdr_test_passwd_shell)
+  expected=$(fm_test_passwd_shell)
   [ -n "$expected" ] && [ -x "$expected" ] || fail "uid $(id -u) has no usable passwd login shell on this host, so the pane-shell contract cannot be exercised"
 
   # Tonight's real launcher: a misleading SHELL and a PATH truncated to the
@@ -1392,7 +1363,7 @@ test_server_ensure_keeps_required_variables_and_leaves_a_running_server_alone() 
   # its config: the effective uid's own passwd home, never nothing. Asked of
   # the shared helper directly, because that is the interface both launches
   # assemble their environment through.
-  passwd_home=$(herdr_test_passwd_home)
+  passwd_home=$(fm_test_passwd_home)
   [ -n "$passwd_home" ] && [ -d "$passwd_home" ] || fail "uid $(id -u) has no usable passwd home directory on this host, so the no-HOME fallback cannot be exercised"
   output=$(bash -c 'unset HOME XDG_CONFIG_HOME
     . "$0/bin/fm-herdr-launch-env-lib.sh"
