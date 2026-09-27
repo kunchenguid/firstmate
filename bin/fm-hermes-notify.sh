@@ -761,8 +761,18 @@ cmd_inbound() {
   if is_ack_request_text "$normalized" || [ "$(presence_mode)" = AWAY ]; then
     ack_key=$(sha256_text "receipt-ack:${chat_id}:${text}")
     ack_text='Received and routed to the inbox.'
-    if send_route_message receipt "$ack_key" "$ack_text" >/dev/null; then
-      printf 'acknowledgement:sent\n'
+    local ack_output
+    if ack_output=$(send_route_message receipt "$ack_key" "$ack_text"); then
+      case "$ack_output" in
+        skipped:*)
+          printf 'fm-hermes-notify: the receipt acknowledgment for chat %s was not delivered: %s\n' "$chat_id" "$ack_output" >&2
+          printf 'acknowledgement:failed\n'
+          exit_code=3
+          ;;
+        *)
+          printf 'acknowledgement:sent\n'
+          ;;
+      esac
     else
       printf 'fm-hermes-notify: the receipt acknowledgment for chat %s failed to send on Telegram; recorded as failed under state/hermes-notify/routes and not retried automatically\n' "$chat_id" >&2
       printf 'acknowledgement:failed\n'
