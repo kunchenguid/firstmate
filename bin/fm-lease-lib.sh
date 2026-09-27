@@ -65,8 +65,9 @@
 #     home that never runs a branch is unchanged byte for byte.
 #   - Role partition (fm_lease_forbid_branch): actions MAIN alone owns -
 #     merging a PR, landing local-only work, spawning workers, answering a
-#     decision - refuse the branch actor outright, lease or no lease, while
-#     the home is attended. While a confirmed, readable, live away-posture
+#     decision, retiring a secondmate - refuse the branch actor outright,
+#     lease or no lease, while the home is attended. While a confirmed,
+#     readable, live away-posture
 #     record exists (bin/fm-afk-contract.sh validate; docs/pi-supervision-
 #     branch.md "Postures"), main is parked and its STANDING authority
 #     relocates to the branch for exactly the actions whose guarded script
@@ -76,9 +77,10 @@
 #     captain's away words before invoking one. The
 #     relocation grants nothing beyond what main could do attended: it only
 #     changes which actor may reach the guarded script's own gate. An action
-#     that has no record-side gate of its own - landing local-only work - is
-#     never relocated and keeps refusing the branch in both postures. An
-#     archived, absent, unconfirmed, or unreadable record is absence: the
+#     that has no record-side gate of its own - landing local-only work or
+#     retiring a secondmate - is never relocated and keeps refusing the branch
+#     in both postures. An archived, absent, unconfirmed, or unreadable record
+#     is absence: the
 #     attended refusal, byte for byte. The record is validated immediately
 #     before the guarded script's first persistent side effect and the lock is
 #     not held across the operation, so a return's archive is never blocked by
