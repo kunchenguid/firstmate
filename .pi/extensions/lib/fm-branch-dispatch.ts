@@ -345,17 +345,29 @@ function readPresentationCursor(state: string): Map<string, { ident: string; off
 }
 
 // A second-mate signal is decision-owned when a line presented since the last
-// drain is a decision transition, or declares the key of a decision still open
-// in the log. A key-less line counts only by its verb.
+// drain is a decision, blocked, or captain-held line, resolves a decision open
+// just before it, or declares the key of a decision still open in the log. A
+// key-less line counts only by its verb.
 function spanIsDecisionOwned(
   open: ReadonlyMap<string, string>,
+  presented: readonly string[],
   span: readonly string[],
   resolveVerb: string,
   heldVerb: string,
+  reservedPrefixes: readonly string[],
 ): boolean {
-  return span.some((line) => {
+  return span.some((line, index) => {
     const verb = statusLineVerb(line);
-    if (["needs-decision", "blocked", resolveVerb, heldVerb].includes(verb)) return true;
+    if (["needs-decision", "blocked", heldVerb].includes(verb)) return true;
+    if (verb === resolveVerb) {
+      const prefix = [...presented, ...span.slice(0, index)];
+      const resolved = decisionKey(line);
+      if (
+        resolved &&
+        openDecisions(prefix, resolveVerb, heldVerb, reservedPrefixes).has(resolved) &&
+        !openDecisions([...prefix, line], resolveVerb, heldVerb, reservedPrefixes).has(resolved)
+      ) return true;
+    }
     const key = declaredDecisionKey(line);
     return key !== undefined && open.has(key);
   });
@@ -509,7 +521,14 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean, afk = fals
             const statusLines = nonBlankLines(contents.toString("utf8"));
             const open = openDecisions(statusLines, resolveVerb, heldVerb, reservedPrefixes);
             decisionOwned = spanRule
-              ? spanIsDecisionOwned(open, nonBlankLines(contents.subarray(spanOffset).toString("utf8")), resolveVerb, heldVerb)
+              ? spanIsDecisionOwned(
+                open,
+                nonBlankLines(contents.subarray(0, spanOffset).toString("utf8")),
+                nonBlankLines(contents.subarray(spanOffset).toString("utf8")),
+                resolveVerb,
+                heldVerb,
+                reservedPrefixes,
+              )
               : [...open.values()].includes("needs-decision") || statusLineVerb(statusLines.at(-1) ?? "") === heldVerb;
             staleDecisionCache.set(ownershipKey, { version, config, decisionOwned });
             if (staleDecisionCache.size > 512) {

@@ -4655,6 +4655,10 @@ expectRoute("same-key update behind a readable time stamp", hold,
   "working [at=10:30] [key=old-hold]: still gathering evidence\n", false);
 expectRoute("key-less blocked line", hold, "blocked: cannot reach the forge\n", false);
 expectRoute("resolution of an open decision", hold, "resolved [key=old-hold]: answered\n", false);
+expectRoute("key-less resolution beside an unrelated open hold", hold, "resolved: routine follow-up\n", true);
+expectRoute("key-less resolution of an open unkeyed decision", "needs-decision: pick an option\n",
+  "resolved: answered\n", false);
+expectRoute("keyed resolution of a never-open key", hold, "resolved [key=never-open]: nothing to close\n", true);
 expectRoute("captain-held declaration", "working: history\n", "captain-held [key=parked]: deferred to Monday\n", false);
 
 // The host decides the whole close through the offer rule, which must agree.
