@@ -141,6 +141,12 @@ herdr_submit_claude_prefix() {  # <resp-dir> <typed-text>
 # as running. Its control paths are baked into the generated script instead of
 # read from the environment, because fm_backend_herdr_server_ensure launches the
 # server through `env -i` and no caller variable survives that by design.
+#
+# It models one more real herdr fact: the server lives under the config root
+# the process resolves (XDG_CONFIG_HOME, else HOME/.config), so `status`
+# reports running only to a client that resolves the SAME root the launch did.
+# The marker therefore carries that root instead of being empty, and nothing is
+# ever written outside the test directory.
 make_herdr_server_launch_fakebin() {  # <dir> <env-log> <marker> -> echoes fakebin dir
   local dir=$1 log=$2 marker=$3 fb="$1/fakebin"
   mkdir -p "$fb"
@@ -150,9 +156,10 @@ make_herdr_server_launch_fakebin() {  # <dir> <env-log> <marker> -> echoes fakeb
     printf 'LOG=%q\n' "$log"
     printf 'MARKER=%q\n' "$marker"
     cat <<'SH'
+ROOT_SEEN="${XDG_CONFIG_HOME:-${HOME:-}/.config}"
 case "${1:-}" in
   status)
-    if [ -e "$MARKER" ]; then
+    if [ -e "$MARKER" ] && [ "$(cat "$MARKER")" = "$ROOT_SEEN" ]; then
       printf '{"server":{"running":true}}\n'
     else
       printf '{"server":{"running":false}}\n'
@@ -163,7 +170,7 @@ case "${1:-}" in
     # environment rather than a list the test already expected to find.
     { for name in $(compgen -e); do printf '%s=%s\n' "$name" "${!name}"; done; } | sort > "$LOG"
     printf 'args=%s\n' "$*" > "$LOG.args"
-    : > "$MARKER"
+    printf '%s\n' "$ROOT_SEEN" > "$MARKER"
     ;;
 esac
 SH
@@ -1328,19 +1335,23 @@ test_server_ensure_keeps_task_scoped_state_out_of_the_server_and_its_panes() {
 }
 
 test_server_ensure_keeps_required_variables_and_leaves_a_running_server_alone() {
-  local dir log marker fb output name expected_home
+  local dir log marker fb output name expected_home reported status
   dir="$TMP_ROOT/server-required"; mkdir -p "$dir"; log="$dir/env"; marker="$dir/running"
   fb=$(make_herdr_server_launch_fakebin "$dir" "$log" "$marker")
   expected_home=$(herdr_test_passwd_home)
   [ -n "$expected_home" ] || fail "uid $(id -u) has no passwd home directory on this host, so the config-root contract cannot be exercised"
-  PATH="$fb:$PATH" HOME="$dir/home" XDG_CONFIG_HOME="$dir/wrong-config" HERDR_CONFIG_PATH="$dir/herdr.toml" \
+  reported=$( PATH="$fb:$PATH" HOME="$dir/home" XDG_CONFIG_HOME="$dir/wrong-config" HERDR_CONFIG_PATH="$dir/herdr.toml" \
     LANG=en_US.UTF-8 TERM=xterm-256color COLORTERM=truecolor \
     DISPLAY=:0 WAYLAND_DISPLAY=wayland-1 XAUTHORITY="$dir/Xauthority" \
     XDG_RUNTIME_DIR="$dir/run" XDG_SESSION_TYPE=wayland SSH_AUTH_SOCK="$dir/ssh-agent" \
     HERDR_ENV=1 HERDR_PANE_ID=w9:p9 HERDR_TAB_ID=w9:t9 HERDR_WORKSPACE_ID=w9 \
     HERDR_SOCKET_PATH="$dir/launcher.sock" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_server_ensure fmtest' "$ROOT"
-  expect_code 0 $? "server_ensure should start when no server is running"
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_server_ensure fmtest' "$ROOT" 2>&1 )
+  status=$?
+  # The readiness poll has to watch the root the launch actually used: this
+  # server came up under the passwd root while the caller carries another one.
+  expect_code 0 "$status" "server_ensure should report the server it just started as running"
+  assert_not_contains "$reported" "did not report running" "server_ensure started the server under the passwd root, then watched the caller's root and called a healthy server dead"
   output=$(cat "$log")
   # HOME and XDG_CONFIG_HOME both relocate where herdr reads its config and
   # keeps its sessions, so a caller must not be able to move either one for a
@@ -1365,10 +1376,11 @@ test_server_ensure_keeps_required_variables_and_leaves_a_running_server_alone() 
     assert_not_contains "$output" "$name=" "the server inherited the launcher's own pane identity through $name"
   done
 
-  # An already-running server is never replaced.
-  : > "$dir/replaced-check"
+  # An already-running server is never replaced. This caller shares the running
+  # server's own config root, which is what the fast path at the top of the
+  # function reads.
   rm -f "$log" "$log.args"
-  PATH="$fb:$PATH" HOME="$dir/home" \
+  PATH="$fb:$PATH" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_server_ensure fmtest' "$ROOT"
   expect_code 0 $? "server_ensure should report success for an already-running server"
   [ ! -e "$log" ] || fail "server_ensure started a second herdr server for a session that already had one running"

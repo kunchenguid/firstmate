@@ -1687,6 +1687,13 @@ fm_backend_herdr_server_ensure() {  # <session>
   local uid login pw_line pw_shell pw_home raw
   local launch_home launch_path client_bin=herdr client_path name
   local -a launch_env=()
+  # Deliberately caller-relative, unlike the readiness poll below. This is the
+  # cheap fast path that every workspace, tab and pane call pays for, and every
+  # OTHER call in this adapter is caller-relative too, so answering it from the
+  # passwd root would not make a relocated caller coherent - it would only
+  # change which inconsistent answer it gets. A caller under another root
+  # therefore makes one redundant launch attempt, which herdr refuses on the
+  # already-bound socket before the poll confirms the server that is up.
   running=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null | jq -r '.server.running // false' 2>/dev/null)
   [ "$running" = "true" ] && return 0
 
@@ -1754,8 +1761,18 @@ fm_backend_herdr_server_ensure() {  # <session>
   (
     /usr/bin/env -i "${launch_env[@]}" "$client_path" server --session "$session" >/dev/null 2>&1 &
   ) || return 1
+  # The readiness poll has to look where the launch put the server: herdr
+  # resolves its config and sessions under XDG_CONFIG_HOME, else HOME, so a
+  # caller carrying either of those would have this poll watch a root the
+  # server was deliberately kept out of and report a healthy server dead after
+  # 10s. Only those two names are corrected, inside the substitution's own
+  # subshell; the client needs nothing else from the launch environment. Every
+  # other call in this adapter stays caller-relative, so a caller running under
+  # some other root still cannot reach this server afterwards - that refusal is
+  # the point, and this poll simply stops misreporting it as a failed start.
   for i in $(seq 1 20); do
-    running=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null | jq -r '.server.running // false' 2>/dev/null)
+    running=$(export HOME="$launch_home"; unset XDG_CONFIG_HOME
+      fm_backend_herdr_cli "$session" status --json 2>/dev/null | jq -r '.server.running // false' 2>/dev/null)
     [ "$running" = "true" ] && return 0
     sleep 0.5
   done
