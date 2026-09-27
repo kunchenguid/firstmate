@@ -973,7 +973,8 @@ Every fleet launch, Claude included, also receives a pane-scoped `GIT_CONFIG` `c
 That directory is read-only, so a hook manager run inside a fleet pane (lefthook's npm postinstall, `pre-commit install`) fails instead of displacing the strip; install a project's hooks from outside the pane, where the wrappers chain them.
 The strip reads a commit message, so it cannot see a PR title or body: those are typed into `gh` or `gh-axi` and never reach a git hook.
 A claude task worktree therefore also gets [`fm-attribution-pretool-check.sh`](../bin/fm-attribution-pretool-check.sh) as a Bash PreToolUse guard, which denies a commit or PR command carrying attribution before it runs, inline or in a message file it names, and allows reads such as `git log | grep Co-Authored-By` or `gh pr view`.
-Every ship and scout brief carries the matching rule, which is the only cover for a harness with no PreToolUse hook and for `git commit --no-verify`.
+The guard reads the command text, so it also denies an attributed `git commit --no-verify`, which skips every hook including the strip.
+Every ship and scout brief carries the matching rule, which is the only cover on a harness with no PreToolUse hook, including for `git commit --no-verify` there.
 Per-machine Cursor `cli-config.json` attribution-off is not this contract: it does not travel with Firstmate, defaults back to on when unset, and only feeds the CLI's request to the server, so it suppresses the trailer rather than preventing it.
 
 ## Crew dispatch profiles (config/crew-dispatch.json)

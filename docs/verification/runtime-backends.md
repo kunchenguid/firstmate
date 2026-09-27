@@ -517,7 +517,8 @@ A claude task worker launched with `"attribution":{"commit":"","pr":"","sessionU
 It reads a commit message, so it cannot reach a PR title or body: those are typed into `gh` or `gh-axi`.
 `bin/fm-attribution-pretool-check.sh` runs as a Bash PreToolUse hook in a claude task worktree's `.claude/settings.local.json` and denies the command instead, which covers both.
 
-It does not cover a harness with no PreToolUse hook, `git commit --no-verify` (which the strip still catches at commit-msg), or commits made by no-mistakes' own pipeline agents, which run in `~/.no-mistakes/worktrees` outside the task worktree.
+It reads the command text, so it also denies an attributed `git commit --no-verify`, which skips every hook including the strip.
+It does not cover a harness with no PreToolUse hook, where `--no-verify` leaves only the brief rule, or commits made by no-mistakes' own pipeline agents, which run in `~/.no-mistakes/worktrees` outside the task worktree.
 `tests/fm-attribution-pretool-check.test.sh` covers the matcher and a real spawn's registration; `tests/fm-attribution-guard-live-e2e.test.sh` drives real Claude Code.
 
 Verified 2026-09-25 on Claude Code 2.1.282 on macOS.

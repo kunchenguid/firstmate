@@ -29,10 +29,6 @@
 # Usage:
 #   <Claude PreToolUse JSON on stdin> | bin/fm-attribution-pretool-check.sh
 #   bin/fm-attribution-pretool-check.sh --command '<cmd>'
-#   bin/fm-attribution-pretool-check.sh --message-file <path>
-#
-# --message-file is a standalone mode for a project that wants to wire this as
-# its own commit-msg hook. firstmate does not: the strip above owns that layer.
 #
 # Exit/output contract:
 #   ALLOW - exit 0 and no output.
@@ -45,21 +41,19 @@ set -u
 
 usage() {
   cat <<'EOF'
-Usage: fm-attribution-pretool-check.sh [--command <cmd> | --message-file <path>]
+Usage: fm-attribution-pretool-check.sh [--command <cmd>]
 
 With no option, reads a Claude PreToolUse JSON payload on stdin and checks
 tool_input.command.
 Exits 2 with the reason on stderr when a command that writes a commit or PR
 message carries AI self-attribution (a Co-Authored-By trailer naming an AI,
 a "Generated with" line, or a Claude session link), inline or in a message file
-it passes, or when --message-file names a commit message that carries it;
-exits 0 otherwise.
+it passes; exits 0 otherwise.
 EOF
 }
 
 CMD=
 MODE=stdin
-MSG_FILE=
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --command)
@@ -68,12 +62,6 @@ while [ "$#" -gt 0 ]; do
       shift 2
       ;;
     --command=*) CMD=${1#--command=} MODE=command; shift ;;
-    --message-file)
-      [ "$#" -gt 1 ] || { echo "error: --message-file requires a value" >&2; exit 64; }
-      MSG_FILE=$2 MODE=message
-      shift 2
-      ;;
-    --message-file=*) MSG_FILE=${1#--message-file=} MODE=message; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "error: unknown argument: $1" >&2; usage >&2; exit 64 ;;
   esac
@@ -170,11 +158,6 @@ $2
 EOF
   exit 2
 }
-
-if [ "$MODE" = message ]; then
-  hits=$(attribution_lines "$(read_message_file "$MSG_FILE")") && deny "this commit message" "$hits"
-  exit 0
-fi
 
 if [ "$MODE" = stdin ]; then
   PAYLOAD=$(cat 2>/dev/null || true)
