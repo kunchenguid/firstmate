@@ -10,6 +10,7 @@ import { existsSync, lstatSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ContinuationReadbackOffer } from "./lib/fm-task-continuation.ts";
 import { encodeFirstmateOperationalInput, FIRSTMATE_SESSION_START_SETTLED_EVENT } from "./lib/fm-operational-input.ts";
 
 type PeriodicConfig = {
@@ -324,13 +325,31 @@ function activate(pi: ExtensionAPI, ctx: ExtensionContext): void {
   };
   activeGeneration = generation;
   generation.timer = setInterval(() => {
-    if (safeSettled(ctx)) pi.events.emit("firstmate:heartbeat-tick", {});
+    // Offer maintenance first; the continuation receiver rechecks idle/input
+    // after its asynchronous readback, so it cannot overtake user input.
     checkDue(pi, ctx);
+    if (safeSettled(ctx)) pi.events.emit("firstmate:heartbeat-tick", {});
   }, tickMs);
   checkDue(pi, ctx);
 }
 
 export default function periodicStow(pi: ExtensionAPI): void {
+  pi.events.on("firstmate:continuation-readback", (value: unknown) => {
+    const offer = value as ContinuationReadbackOffer;
+    if (!offer?.ctx || typeof offer.accept !== "function" || !isMainEligible()) return;
+    // A cold session may have had no persisted leaf at session_start. The first
+    // real settle boundary can activate the same clock before releasing its run.
+    if (!activeGeneration?.live) activate(pi, offer.ctx);
+    const generation = activeGeneration;
+    const identity = sessionIdentity(offer.ctx);
+    if (!generation?.live || !identity || generation.sessionId !== identity.id || generation.sessionFile !== identity.file) return;
+    offer.accept({
+      generation: generation.token, sessionId: identity.id, sessionFile: identity.file,
+      recheckMs: tickMs * 2,
+      current: () => activeGeneration === generation && generation.live,
+      canNotify: () => safeSettled(offer.ctx),
+    });
+  });
   pi.registerCommand("stow", {
     description: "Queue a coordinated manual stow in this main session",
     handler: async (_args, ctx) => {

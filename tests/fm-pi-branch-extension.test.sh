@@ -5939,6 +5939,81 @@ EOF
   pass "an extension-registered provider resolves in the isolated branch runtime"
 }
 
+test_continuation_defers_reserved_admission_at_ui_boundary() {
+  local repo home out rc
+  repo="$TMP_ROOT/continuation-ui-root"; home="$TMP_ROOT/continuation-ui-home"
+  install_pi_branch_extension_fixture "$repo"
+  mkdir -p "$home/state" "$home/data/task"
+  printf 'Verify UI-safe continuation.\n' >"$home/data/task/brief.md"
+  cat >"$repo/bin/fm-task-state.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = observe ]; then touch "$FM_HOME/observing"; sleep 0.3; fi
+exec "$REAL_ROOT/bin/fm-task-state.sh" "$@"
+SH
+  cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/"
+  set +e
+  out=$(PLUGIN="$repo/.pi/extensions/lib/fm-task-continuation.ts" REAL_ROOT="$ROOT" FM_ROOT_OVERRIDE="$repo" FM_HOME="$home" node --input-type=module 2>&1 <<'JS'
+import {appendFileSync,existsSync,readFileSync,writeFileSync,mkdirSync,unlinkSync} from 'node:fs';
+const home=process.env.FM_HOME,handlers=new Map(),events=new Map(),sent=[],entries=[];
+let blocking=false;
+const file=home+'/session.jsonl';
+writeFileSync(home+'/state/.lock',process.pid+'\n');
+writeFileSync(file,JSON.stringify({type:'session',id:'ui-regression',version:3})+'\n');
+const ctx={isIdle:()=>true,hasPendingMessages:()=>false,hasUI:false,ui:{getEditorText:()=>''},sessionManager:{getSessionFile:()=>file,getSessionId:()=> 'ui-regression',getLeafId:()=>entries.at(-1)?.id,getBranch:()=>entries,getEntries:()=>entries}};
+function persist(row){row={...row,id:'e'+entries.length,parentId:entries.at(-1)?.id??null,timestamp:new Date().toISOString()};entries.push(row);appendFileSync(file,JSON.stringify(row)+'\n');}
+const pi={on:(name,fn)=>handlers.set(name,[...(handlers.get(name)||[]),fn]),events:{on:(name,fn)=>events.set(name,[...(events.get(name)||[]),fn]),emit:(name,arg)=>{for(const fn of events.get(name)||[])fn(arg)}},registerTool(){},registerCommand(){},sendMessage:(message,options)=>{sent.push({message,options,blocking});persist({type:'custom_message',...message});},appendEntry:(customType,data)=>persist({type:'custom',customType,data})};
+const fire=async(name)=>{for(const fn of handlers.get(name)||[])await fn({},ctx)};
+const wait=async(predicate)=>{const until=Date.now()+10000;while(!predicate()&&Date.now()<until)await new Promise(r=>setTimeout(r,10));if(!predicate())throw Error('timed out');};
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+const {installTaskContinuation}=await import(process.env.PLUGIN);
+const periodic=(await import(process.env.REAL_ROOT+'/.pi/extensions/fm-periodic-stow.ts')).default;
+const continuation=installTaskContinuation(pi,{root:process.env.FM_ROOT_OVERRIDE,home,state:home+'/state',owns:()=>true});
+periodic(pi);
+await fire('session_start');
+await continuation.preserve(['task']);
+const record=()=>JSON.parse(readFileSync(home+'/data/task/lifecycle.json'));
+pi.events.emit('firstmate:heartbeat-tick',{});await sleep(100);
+if(existsSync(home+'/observing'))throw Error('cold session without leaf claimed a receiver');
+pi.appendEntry('seed',{});
+pi.events.emit('firstmate:heartbeat-tick',{});
+await wait(()=>existsSync(home+'/observing'));
+blocking=true;await fire('ui_prompt_start');
+await wait(()=>record().coordination);
+await sleep(700);
+if(sent.length)throw Error('notification crossed blocking UI boundary');
+const budget=Object.values(record().coordination.budgets)[0];
+if(budget.attempts!==1||!budget.reserved)throw Error('deferred reservation lost');
+await fire('session_shutdown');await fire('session_start');
+await fire('ui_prompt_start');
+pi.events.emit('firstmate:heartbeat-tick',{});await sleep(1000);
+if(sent.length||Object.values(record().coordination.budgets)[0].attempts!==1)throw Error('reload lost guard or reset budget');
+blocking=false;await fire('ui_prompt_end');
+pi.events.emit('firstmate:heartbeat-tick',{});
+await wait(()=>sent.length===1);
+if(sent[0].blocking||sent[0].message.details.admissions[0]!==budget.reserved)throw Error('safe release replaced reservation');
+pi.events.emit('firstmate:heartbeat-tick',{});await sleep(1000);
+if(sent.length!==1||Object.values(record().coordination.budgets)[0].attempts!==1)throw Error('safe release duplicated admission');
+await fire('session_shutdown');await fire('session_start');
+pi.events.emit('firstmate:heartbeat-tick',{});await sleep(1000);
+if(sent.length!==1)throw Error('delivered reservation replayed after reload');
+mkdirSync(home+'/data/task2');writeFileSync(home+'/data/task2/brief.md','Verify generation fencing.');
+await continuation.preserve(['task2']);
+unlinkSync(home+'/observing');
+pi.events.emit('firstmate:heartbeat-tick',{});await wait(()=>existsSync(home+'/observing'));
+await fire('session_shutdown');await fire('session_start');await sleep(1000);
+if(sent.length!==1)throw Error('old asynchronous readback notified the replacement generation');
+pi.events.emit('firstmate:heartbeat-tick',{});await wait(()=>sent.length===2);
+if(!sent[1].message.content.includes('task2: pending'))throw Error('new generation lost pending task');
+await fire('session_shutdown');
+console.log('UI race deferred one durable admission; release delivered it once; reload preserved guard, receipt and budget');
+JS
+  )
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "continuation UI boundary: $out"
+  pass "$out"
+}
+
 test_continuation_survives_ack_compaction_and_unrelated_input() {
   local repo home out rc
   repo="$TMP_ROOT/continuation-root"; home="$TMP_ROOT/continuation-home"
@@ -5946,10 +6021,21 @@ test_continuation_survives_ack_compaction_and_unrelated_input() {
   set +e
   out=$(PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module 2>&1 <<'JS'
-await eval(`(async () => { ${process.env.DRIVER_PRELUDE}; globalThis.test = {fire, outcomeScript, mainTools, defaultSessionCtx, sentToMain, home, piHandlers, bus}; })()`);
-const {fire, outcomeScript, mainTools, defaultSessionCtx, sentToMain, home, piHandlers, bus} = globalThis.test;
-const {mkdirSync, writeFileSync, readFileSync} = await import('node:fs');
+await eval(`(async () => { ${process.env.DRIVER_PRELUDE}; globalThis.test = {fire, outcomeScript, mainTools, defaultSessionCtx, sentToMain, home, piHandlers, bus, pi}; })()`);
+const {fire, outcomeScript, mainTools, defaultSessionCtx, sentToMain, home, piHandlers, bus, pi} = globalThis.test;
+const {appendFileSync, mkdirSync, writeFileSync, readFileSync} = await import('node:fs');
 const {spawnSync} = await import('node:child_process');
+writeFileSync(`${home}/state/.lock`, `${process.pid}\n`);
+const entries=[];
+const file=`${home}/main.jsonl`;
+writeFileSync(file,JSON.stringify({type:'session',version:3,id:'test-session'})+'\n');
+Object.assign(defaultSessionCtx,{isIdle:()=>true,hasPendingMessages:()=>false,hasUI:false,ui:{getEditorText:()=>''}});
+Object.assign(defaultSessionCtx.sessionManager,{getSessionId:()=> 'test-session',getLeafId:()=>entries.at(-1)?.id,
+  getBranch:()=>entries,getEntries:()=>entries});
+pi.appendEntry=(customType,data)=>{const e={type:'custom',id:`entry-${entries.length}`,parentId:entries.at(-1)?.id??null,customType,data};entries.push(e);appendFileSync(file,JSON.stringify(e)+'\n');};
+pi.appendEntry('test-seed',{});
+const periodic=await import(`${process.env.FM_ROOT_OVERRIDE}/.pi/extensions/fm-periodic-stow.ts`);
+periodic.default(pi);
 await fire('session_start', {}, defaultSessionCtx);
 mkdirSync(`${home}/data/prerequisite`,{recursive:true});
 writeFileSync(`${home}/data/prerequisite/brief.md`,'Apply prerequisite; verify operational acceptance.');
@@ -5965,16 +6051,22 @@ if(result.isError) throw Error(JSON.stringify(result));
 if(outcomeScript(['unprocessed'])!=='') throw Error('presentation acknowledgement was not consumed');
 const path=`${home}/data/prerequisite/lifecycle.json`;
 if(JSON.parse(readFileSync(path)).disposition!=='open') throw Error('ack erased pending goal');
-let clock=Date.now();const originalNow=Date.now;Date.now=()=>clock;
+
 async function beforeSettle() {
   const results=[];
   for(const handler of piHandlers.get('agent_before_settle')||[]) results.push(await handler({},defaultSessionCtx));
+  for(const entry of results.filter(Boolean).flatMap(r=>r.entries||[])) {
+    const persisted={...entry,id:`entry-${entries.length}`,timestamp:new Date().toISOString()};
+    entries.push(persisted);appendFileSync(file,JSON.stringify(persisted)+'\n');
+  }
   return {continued:results.some(r=>r?.continue===true),content:results.filter(Boolean).flatMap(r=>r.entries||[]).map(e=>e.content).join('\n')};
 }
 const first=await beforeSettle();
 if(!first.continued || !first.content.includes('prerequisite: pending')) throw Error(`missing continuation: ${JSON.stringify(first)}`);
 const ignored=await beforeSettle();
-if(!ignored.continued || !ignored.content.includes('prerequisite: pending')) throw Error('notification backoff allowed an ignored obligation to settle');
+if(ignored.continued) throw Error('settle bypassed persistent backoff');
+const received=JSON.parse(readFileSync(path));
+if(received.disposition!=='open' || received.coordination.receiver.owner!=='fm-periodic-stow') throw Error('settle did not retain actual coordinator receipt');
 const continuationMessages=()=>sentToMain.filter(sent=>sent.message.customType==='fm-task-continuation');
 async function waitForMessages(count) {
   for(let i=0;i<250 && continuationMessages().length<count;i+=1) await new Promise(resolve=>setTimeout(resolve,10));
@@ -5982,27 +6074,20 @@ async function waitForMessages(count) {
 }
 await fire('agent_settled',{},defaultSessionCtx);
 bus.emit('firstmate:heartbeat-tick');
-await waitForMessages(1);
-bus.emit('firstmate:heartbeat-tick');
-await new Promise(resolve=>setTimeout(resolve,30));
-if(continuationMessages().length!==1) throw Error('notification backoff replayed an unchanged reminder');
-clock+=31_000;
-bus.emit('firstmate:heartbeat-tick');
-await waitForMessages(2);
-clock+=61_000;
-bus.emit('firstmate:heartbeat-tick');
-await waitForMessages(3);
-if(continuationMessages()[2].options.deliverAs!=='nextTurn' || continuationMessages()[2].options.triggerTurn) throw Error('exhausted notification did not defer once to the next turn');
-await fire('agent_start',{},defaultSessionCtx);
-const exhausted=await beforeSettle();
-if(!exhausted.continued || !exhausted.content.includes('prerequisite: pending')) throw Error('notification exhaustion allowed a pending obligation to settle');
-await fire('agent_start',{},defaultSessionCtx);
-const subsequent=await beforeSettle();
-if(!subsequent.continued || !subsequent.content.includes('prerequisite: pending')) throw Error('a subsequent turn lost mandatory settlement enforcement');
+await new Promise(resolve=>setTimeout(resolve,100));
+if(continuationMessages().length) throw Error('tick bypassed settlement admission budget');
+await new Promise(resolve=>setTimeout(resolve,30_100));
+const second=await beforeSettle();
+if(!second.continued) throw Error('second paced admission missing');
+if((await beforeSettle()).continued) throw Error('second admission repeated');
+await fire('session_shutdown',{},defaultSessionCtx);
+await fire('session_start',{},defaultSessionCtx);
+if((await beforeSettle()).continued) throw Error('reload reset task budget');
 await fire('session_compact',{},defaultSessionCtx);
 await fire('before_agent_start',{prompt:'Separate request B: explain configuration.'},defaultSessionCtx);
 const next=await beforeSettle();
-if(!next.continued || !next.content.includes('prerequisite: pending') || !next.content.includes('Separate request B')) throw Error('later input or compaction dropped earlier obligation');
+if(!next.continued || !next.content.includes('Separate request B')) throw Error('independent input B was lost');
+if(next.content.includes('prerequisite: pending')) throw Error('independent input reset A budget');
 const tool=mainTools.find(t=>t.name==='fm_task_continuation');
 const listing=JSON.parse((await tool.execute('list',{action:'list'})).content[0].text);
 const input=listing.inputs.find(i=>i.text.includes('Separate request B'));
@@ -6015,7 +6100,7 @@ writeFileSync(`${home}/data/proposal.json`,JSON.stringify(r),{mode:0o600});
 const cmd=spawnSync(`${process.env.FM_ROOT_OVERRIDE}/bin/fm-task-state.sh`,['reconcile','prerequisite','--expected-revision',String(r.revision),'--record',`${home}/data/proposal.json`],{env:{...process.env,FM_SUPERVISION_ACTOR:'main'},encoding:'utf8'});
 if(cmd.status!==0) throw Error(cmd.stderr);
 if(!(await beforeSettle()).content.includes('prerequisite: pending')) throw Error('new actionable evidence suppressed');
-if(!(await beforeSettle()).continued) throw Error('unchanged pending evidence escaped settlement enforcement');
+if((await beforeSettle()).continued) throw Error('changed evidence bypassed backoff on repeat');
 // A real bound dependency stays silent; its release triggers one exact check.
 const {createHash}=await import('node:crypto');
 const sha=(p)=>createHash('sha256').update(readFileSync(p)).digest('hex');
@@ -6028,11 +6113,11 @@ blocked.next_action={id:'prerequisite.g1.a1',kind:'wait',phase:'prepared',expect
 writeFileSync(`${home}/data/proposal.json`,JSON.stringify(blocked));
 const block=spawnSync(`${process.env.FM_ROOT_OVERRIDE}/bin/fm-task-state.sh`,['reconcile','prerequisite','--expected-revision',String(blocked.revision),'--record',`${home}/data/proposal.json`],{env:{...process.env,FM_SUPERVISION_ACTOR:'main'},encoding:'utf8'});
 if(block.status!==0) throw Error(block.stderr);
-clock+=120_000;
+
 if((await beforeSettle()).continued) throw Error('genuine unchanged blocker resumed');
 writeFileSync(`${home}/data/release`,'exact authorization recorded');
 if(!(await beforeSettle()).content.includes('dependency evidence changed')) throw Error('dependency release lost continuation');
-if(!(await beforeSettle()).continued) throw Error('unchanged released blocker escaped settlement enforcement');
+if((await beforeSettle()).continued) throw Error('released dependency bypassed backoff on repeat');
 writeFileSync(`${home}/data/release`,'awaiting exact authorization');
 writeFileSync(`${home}/data/acceptance`,'Requested prerequisite and acceptance checks verified by main.');
 const acceptedReceipt=spawnSync(`${process.env.FM_ROOT_OVERRIDE}/bin/fm-task-state.sh`,['action','prerequisite','--action-id',blocked.next_action.id,'--phase','refused','--receipt-ref','data/acceptance','--receipt-sha256',sha(`${home}/data/acceptance`)],{env:{...process.env,FM_SUPERVISION_ACTOR:'main'},encoding:'utf8'});
@@ -6044,7 +6129,7 @@ writeFileSync(`${home}/data/proposal.json`,JSON.stringify(accepted));
 const accept=spawnSync(`${process.env.FM_ROOT_OVERRIDE}/bin/fm-task-state.sh`,['reconcile','prerequisite','--expected-revision',String(accepted.revision),'--record',`${home}/data/proposal.json`],{env:{...process.env,FM_SUPERVISION_ACTOR:'main'},encoding:'utf8'});
 if(accept.status!==0) throw Error(accept.stderr);
 if((await beforeSettle()).continued) throw Error('semantic acceptance remained settlement-blocked');
-Date.now=originalNow;
+
 await fire('session_shutdown',{},defaultSessionCtx);
 console.log('continuation survived ack, compaction and later input; changed evidence rechecks once, unchanged waits stay quiet');
 process.exit(0);
@@ -6107,4 +6192,5 @@ test_session_replacement_during_delivery_neither_loses_nor_duplicates
 test_store_failure_during_delivery_neither_loses_nor_duplicates
 test_mark_read_failure_keeps_routine_redelivery_and_captain_deduplication
 
+test_continuation_defers_reserved_admission_at_ui_boundary
 test_continuation_survives_ack_compaction_and_unrelated_input

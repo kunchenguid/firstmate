@@ -32,7 +32,11 @@ Uncertain effects remain readback work; the continuation observer never executes
 The Pi extension preserves separate input receipts through compaction, checks pending obligations before logical-run settlement, and uses the existing heartbeat coordinator's tick for bounded rechecks.
 Unchanged genuine blockers, healthy observed execution, accepted goals, and explicitly stopped goals stay quiet.
 Changing dependency evidence or a missing executor makes the precise retained obligation actionable again without re-presenting its already acknowledged outcome.
-The extension limits unchanged automatic prompts to two with backoff, retaining the pending record and one non-triggering next-turn reminder when that budget is exhausted.
+The extension limits unchanged automatic prompts to two with backoff, including settlement-triggered continuations.
+The canonical lifecycle record retains the budget across reload, compaction and unrelated input.
+Before releasing a logical Pi run, the existing heartbeat coordinator actually reads current obligations and persists a generation-bound receipt; the task remains pending, and that receipt proves coordination rather than execution or acceptance.
+The same clock continues bounded readback while exhausted budgets suppress unchanged model requests, allowing heartbeat maintenance and independent input to run.
+An admission deferred by UI, tool, input or compaction activity stays reserved in the existing owner until the complete safety check permits delivery; a persisted native message confirms delivery without spending another attempt.
 This safeguard applies while Pi is alive; it introduces no process-exit recovery, external watchdog, cleanup engine, or parallel lifecycle truth store.
 `tests/fm-task-handoff.test.sh`, `tests/fm-pi-branch-extension.test.sh`, and `tests/fm-periodic-stow-herdr-live-e2e.test.sh` exercise these boundaries through public interfaces.
 

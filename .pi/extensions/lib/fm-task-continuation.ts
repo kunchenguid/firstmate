@@ -1,7 +1,7 @@
 // Live-Pi consumer of the canonical task assessment owner. Never executes an
 // action: main coordinates, and the existing executor/lease/inbox owners act.
-import { randomUUID } from "node:crypto";
-import { existsSync, lstatSync, readdirSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { closeSync, existsSync, lstatSync, openSync, readSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
@@ -9,14 +9,27 @@ import { runCommandAsync } from "./fm-async-exec.ts";
 import { registerFirstmateTool } from "./fm-native-contract.ts";
 import { encodeFirstmateOperationalInputWith } from "./fm-operational-input.ts";
 
-type Observation = { task_id: string; state: string; reason: string; key: string };
+type Observation = { task_id: string; state: string; reason: string; key: string; revision?: number };
 type InputReceipt = { id: string; text: string; task?: string; answer?: string };
+type Admission = { content: string; admissions: string[]; canNotify: () => boolean };
 const INPUT_ENTRY = "fm-continuation-input";
+const PACING_ENTRY = "fm-continuation-input-pacing";
+const RECEIPT_ENTRY = "fm-continuation-receipt";
 const MESSAGE = "fm-task-continuation";
 const INTERVAL_MS = 30_000;
 const ATTEMPTS = 2;
 const BATCH = 8;
 const atom = (s: string) => /^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(s);
+
+// The existing heartbeat owner accepts and starts a bounded public readback.
+// Its receipt permits only logical-run release, not semantic task completion.
+export type ContinuationReceiver = {
+  generation: string; sessionId: string; sessionFile: string; recheckMs: number;
+  current: () => boolean; canNotify: () => boolean;
+};
+export type ContinuationReadbackOffer = {
+  ctx: ExtensionContext; accept: (receiver: ContinuationReceiver) => void;
+};
 
 export function installTaskContinuation(pi: ExtensionAPI, options: {
   root: string; home: string; state: string; owns: () => boolean;
@@ -24,15 +37,18 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
   const { root, home, state, owns } = options;
   const data = process.env.FM_DATA_OVERRIDE || join(home, "data");
   const inputs = new Map<string, InputReceipt>();
-  // Notification pacing only. Goal truth is exclusively lifecycle.json. No
-  // unchanged report, marker acknowledgement or session compaction resets it.
-  const pacing = new Map<string, { key: string; attempts: number; after: number; queued: boolean }>();
+  // Unrouted input pacing is session-owned. Task admission and semantic truth
+  // remain in the canonical lifecycle owner, independent of this runtime.
+  const pacing = new Map<string, { key: string; attempts: number; after: number; reserved?: string }>();
+  const submitted = new Set<string>();
+  const delivered = new Map<string, number>();
   let generation = 0;
-  let settlementBusy = false;
-  let notificationBusy = false;
+  let checking: Promise<Admission | undefined> | null = null;
+  let context: ExtensionContext | undefined;
   let streaming = false;
   let cursor = 0;
   let inputCursor = 0;
+  let scanScope: string[] = [];
 
   async function command(args: string[]) {
     const epoch = generation;
@@ -87,7 +103,7 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
       "bound release evidence, deadline and recovery trigger. Do not revive archived work or bypass authority.";
   }
 
-  async function collect(notification: boolean): Promise<{ obligations: string[]; notifications: string[]; deferred: string[] }> {
+  async function collect(): Promise<Observation[]> {
     const observations: Observation[] = [];
     const unrouted = [...inputs.values()].filter((value) => !value.task && !value.answer);
     for (let i = 0; i < Math.min(BATCH, unrouted.length); i++) {
@@ -98,93 +114,157 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
     inputCursor = unrouted.length ? (inputCursor + BATCH) % unrouted.length : 0;
     const ids = existsSync(data) ? readdirSync(data).filter((id) => atom(id) &&
       existsSync(join(data, id, "lifecycle.json"))).sort() : [];
+    scanScope = ids;
     for (let i = 0; i < Math.min(BATCH, ids.length); i++) {
       const id = ids[(cursor + i) % ids.length];
-      try {
-        if (lstatSync(join(data, id)).isSymbolicLink()) throw new Error("unsafe task directory");
-        observations.push(await command(["observe", id]));
-      } catch (error) {
-        const reason = String(error);
-        observations.push({ task_id: id, state: "unknown", reason, key: reason });
-      }
+      if (lstatSync(join(data, id)).isSymbolicLink()) throw new Error("unsafe task directory");
+      // Unknown/corrupt records are never converted into a fictitious receiver.
+      observations.push(await command(["observe", id]));
     }
     cursor = ids.length ? (cursor + BATCH) % ids.length : 0;
-    const obligations: string[] = [];
-    const notifications: string[] = [];
-    const deferred: string[] = [];
-    for (const item of observations) {
-      if (["accepted", "archived", "running", "blocked"].includes(item.state)) {
-        // Keep the fingerprint budget across transient healthy observations.
-        continue;
-      }
-      const line = `${item.task_id}: ${item.state}: ${item.reason}`;
-      obligations.push(line);
-      if (!notification) continue;
-      let pace = pacing.get(item.task_id);
-      if (!pace || pace.key !== item.key) {
-        pace = { key: item.key, attempts: 0, after: 0, queued: false };
-        pacing.set(item.task_id, pace);
-      }
-      if (Date.now() < pace.after) continue;
-      if (pace.attempts >= ATTEMPTS) {
-        if (!pace.queued) {
-          deferred.push(`${item.task_id}: ${item.state}: ${item.reason} [automatic retries exhausted; this obligation still requires an executor, evidenced blocker or semantic acceptance]`);
-          pace.queued = true;
-        }
-        continue;
-      }
-      pace.attempts++;
-      pace.after = Date.now() + INTERVAL_MS * 2 ** (pace.attempts - 1);
-      notifications.push(line +
-        (pace.attempts === ATTEMPTS ? " [bounded continuation attempts exhausted for unchanged evidence; resolve or escalate the concrete gap]" : ""));
-    }
-    return { obligations, notifications, deferred };
+    return observations;
   }
 
-  async function check(settlement = false): Promise<string | undefined> {
-    if (!owns() || (settlement ? settlementBusy : notificationBusy)) return;
-    if (settlement) settlementBusy = true;
-    else notificationBusy = true;
+  function readDelivery(entry: { customType?: string; details?: unknown; timestamp?: string | number }) {
+    if (entry.customType !== MESSAGE) return;
+    const ids = (entry.details as { admissions?: unknown })?.admissions;
+    const at = typeof entry.timestamp === "number" ? entry.timestamp : Date.parse(entry.timestamp || "");
+    if (!Array.isArray(ids) || !Number.isFinite(at)) return;
+    for (const id of ids) if (typeof id === "string") delivered.set(id, at);
+  }
+
+  async function receive(ctx: ExtensionContext, owner: ContinuationReceiver): Promise<Admission | undefined> {
     const epoch = generation;
-    const prior = new Map([...pacing].map(([id, pace]) => [id, { ...pace }]));
-    const restore = () => {
-      if (settlement) return;
-      pacing.clear();
-      for (const [id, pace] of prior) pacing.set(id, pace);
-    };
-    try {
-      const { obligations, notifications, deferred } = await collect(!settlement);
-      if (epoch !== generation || !owns()) { restore(); return; }
-      const lines = settlement ? obligations : [...notifications, ...deferred];
-      if (!lines.length) return;
-      const content = await encodeFirstmateOperationalInputWith(runCommandAsync, "branch-outcome", instruction(lines));
-      if (epoch !== generation || !owns()) { restore(); return; }
-      if (settlement || notifications.length) return content;
-      // One context reminder survives into the next ordinary turn after the
-      // automatic budget. It does not reopen presentation or spin a new run.
-      pi.sendMessage({ customType: MESSAGE, content, display: false }, { deliverAs: "nextTurn" });
-    } catch (error) { restore(); throw error; }
-    finally {
-      if (settlement) settlementBusy = false;
-      else notificationBusy = false;
+    const current = () => epoch === generation && owns() && owner.current();
+    if (!current()) throw new Error("readback receiver generation changed");
+    const started = Date.now();
+    // The receiver has actually begun and executed readback before this receipt.
+    const observations = await collect();
+    if (!current()) throw new Error("readback receiver generation changed");
+    const pending = observations.filter((item) => !["accepted", "archived", "running", "blocked"].includes(item.state));
+    if (!scanScope.length && !pending.length) return;
+    // Boundary drafts are persisted without message_end. Read the actual
+    // session branch before acknowledging their reserved admission.
+    for (const entry of ctx.sessionManager.getBranch()) {
+      if (entry.type === "custom_message") readDelivery(entry);
     }
+    const receipt = {
+      owner: "fm-periodic-stow", generation: owner.generation, session_id: owner.sessionId,
+      pid: process.pid, started_at_ms: started,
+      recheck_at_ms: Date.now() + Math.max(30_000, owner.recheckMs * Math.max(1, Math.ceil(scanScope.length / BATCH))),
+      scan_scope: scanScope, next_cursor: cursor,
+      recovery_trigger: "existing-heartbeat-clock: readback; changed evidence may admit coordination; effects use existing executor/handoff owners",
+      observations: pending.map(({ task_id, key, revision }) => ({ task_id, key, revision })),
+      delivered_admissions: Object.fromEntries(pending.flatMap((item) => [1, 2].flatMap((attempt) => {
+        const id = `n.${item.key}.${attempt}`;
+        return delivered.has(id) ? [[id, delivered.get(id)]] : [];
+      }))),
+    };
+    const offset = lstatSync(owner.sessionFile).size;
+    pi.appendEntry(RECEIPT_ENTRY, receipt);
+    const length = lstatSync(owner.sessionFile).size - offset;
+    if (length <= 0 || length > 32768) throw new Error("native readback receipt was not durably appended");
+    const fd = openSync(owner.sessionFile, "r");
+    const raw = Buffer.alloc(length);
+    try { if (readSync(fd, raw, 0, length, offset) !== length) throw new Error("short native receipt readback"); }
+    finally { closeSync(fd); }
+    const entry = JSON.parse(raw.toString("utf8"));
+    if (entry.customType !== RECEIPT_ENTRY || entry.data?.generation !== owner.generation) throw new Error("native receipt identity mismatch");
+    const proof = { session_file: owner.sessionFile, entry_id: entry.id, offset, length,
+      sha256: createHash("sha256").update(raw).digest("hex") };
+    const proofFile = join(data, `.continuation-${randomUUID()}.json`);
+    writeFileSync(proofFile, JSON.stringify(proof), { mode: 0o600, flag: "wx" });
+    const lines: string[] = [];
+    const admissions: string[] = [];
+    try {
+      for (const item of pending) {
+        if (!current()) throw new Error("readback receiver generation changed");
+        let admission: string | undefined;
+        if (item.task_id.startsWith("input:")) {
+          // Unrouted input is session-owned; tasks use only canonical CAS below.
+          let pace = pacing.get(item.task_id);
+          if (!pace || pace.key !== item.key) pace = { key: item.key, attempts: 0, after: 0 };
+          const at = pace.reserved ? delivered.get(pace.reserved) : undefined;
+          if (at !== undefined) {
+            pace.reserved = undefined;
+            pace.after = Math.max(pace.after, at + INTERVAL_MS * 2 ** (pace.attempts - 1));
+          }
+          if (!pace.reserved && pace.attempts < ATTEMPTS && Date.now() >= pace.after) {
+            pace.attempts++;
+            pace.after = Date.now() + INTERVAL_MS * 2 ** (pace.attempts - 1);
+            pace.reserved = `input.${item.key}.${pace.attempts}`;
+          }
+          pacing.set(item.task_id, pace);
+          pi.appendEntry(PACING_ENTRY, { id: item.task_id, ...pace });
+          admission = pace.reserved;
+        } else {
+          const coordinated = await command(["coordinate", item.task_id, "--expected-revision", String(item.revision), "--record", proofFile]);
+          // Read the canonical receiver back before releasing this logical run.
+          const retained = await command(["lifecycle", item.task_id]);
+          if (retained?.coordination?.receipt?.entry_id !== entry.id ||
+              retained.coordination.receiver.generation !== owner.generation) throw new Error("coordinator receipt readback changed");
+          admission = coordinated.admission;
+        }
+        if (admission && !submitted.has(admission) && !delivered.has(admission)) {
+          lines.push(`${item.task_id}: ${item.state}: ${item.reason}`);
+          admissions.push(admission);
+        }
+      }
+    } finally { unlinkSync(proofFile); }
+    if (!current()) throw new Error("readback receiver generation changed");
+    if (lines.length) {
+      const content = await encodeFirstmateOperationalInputWith(runCommandAsync, "branch-outcome", instruction(lines));
+      if (!current()) throw new Error("readback receiver generation changed");
+      return { content, admissions, canNotify: () => current() && owner.canNotify() };
+    }
+  }
+
+  async function check(ctx: ExtensionContext): Promise<Admission | undefined> {
+    while (checking) await checking;
+    if (!owns()) return;
+    let received: Promise<Admission | undefined> | undefined;
+    pi.events.emit("firstmate:continuation-readback", { ctx,
+      accept(owner: ContinuationReceiver) {
+        if (received) throw new Error("duplicate continuation receiver");
+        received = receive(ctx, owner);
+      },
+    } satisfies ContinuationReadbackOffer);
+    if (!received) throw new Error("existing heartbeat owner did not receive continuation readback");
+    checking = received;
+    try { return await received; }
+    finally { if (checking === received) checking = null; }
   }
 
   // The existing periodic coordinator is the sole clock, even while its
   // optional full maintenance pass is disabled. No parallel timer is created.
   pi.events.on("firstmate:heartbeat-tick", () => {
-    if (streaming) return;
+    if (streaming || !context || checking) return;
     const epoch = generation;
-    void check().then((content) => {
-      if (content && epoch === generation && owns()) pi.sendMessage(
-        { customType: MESSAGE, content, display: false }, { triggerTurn: true, deliverAs: "followUp" });
+    const ctx = context;
+    void check(ctx).then((admission) => {
+      // No await between the safety owner's complete judgment and submission.
+      // If unsafe, canonical reserved admission survives the next tick/reload.
+      if (admission && epoch === generation && admission.canNotify()) {
+        for (const id of admission.admissions) submitted.add(id);
+        pi.sendMessage({ customType: MESSAGE, content: admission.content, display: false,
+          details: { admissions: admission.admissions } }, { triggerTurn: true, deliverAs: "followUp" });
+      }
     }).catch(() => { /* Pending evidence remains available at the next tick. */ });
   });
 
   pi.on("session_start", (_event, ctx) => {
     generation++;
+    context = ctx;
+    inputs.clear();
+    pacing.clear();
+    delivered.clear();
     const entries = ctx?.sessionManager?.getBranch?.() ?? ctx?.sessionManager?.getEntries?.() ?? [];
     for (const entry of entries) {
+      if (entry.type === "custom_message") readDelivery(entry);
+      if (entry.type === "custom" && entry.customType === PACING_ENTRY) {
+        const pace = entry.data as { id: string; key: string; attempts: number; after: number; reserved?: string };
+        if (typeof pace?.id === "string") pacing.set(pace.id, pace);
+      }
       if (entry.type !== "custom" || entry.customType !== INPUT_ENTRY) continue;
       const value = entry.data as InputReceipt;
       if (typeof value?.id === "string" && typeof value.text === "string") inputs.set(value.id, value);
@@ -193,16 +273,23 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
   pi.on("session_shutdown", () => {
     generation++;
     streaming = false;
+    context = undefined;
   });
   pi.on("agent_start", () => {
     streaming = true;
-    for (const pace of pacing.values()) pace.queued = false;
   });
   pi.on("agent_settled", () => { streaming = false; });
-  pi.on("agent_before_settle", async () => {
-    const content = await check(true);
-    if (content) return { entries: [{ type: "custom_message" as const, customType: MESSAGE,
-      content, display: false }], continue: true };
+  pi.on("message_end", (event) => {
+    if (event.message.role === "custom") readDelivery(event.message);
+  });
+  pi.on("agent_before_settle", async (_event, ctx) => {
+    context = ctx;
+    const admission = await check(ctx);
+    if (admission) {
+      for (const id of admission.admissions) submitted.add(id);
+      return { entries: [{ type: "custom_message" as const, customType: MESSAGE,
+        content: admission.content, display: false, details: { admissions: admission.admissions } }], continue: true };
+    }
   });
 
   registerFirstmateTool(pi, {

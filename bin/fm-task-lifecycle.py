@@ -2,7 +2,18 @@
 """Task-local lifecycle record mechanics, called under the existing meta lock.
 
 Not a worker, queue or semantic acceptance engine.
-Public entry: fm-task-state.sh lifecycle|enroll|reconcile|action|observe TASK.
+Public entry: fm-task-state.sh lifecycle|enroll|reconcile|action|observe|coordinate TASK.
+coordinate --expected-revision N --record private.json records a native
+fm-periodic-stow readback receipt and admits at most two model requests per
+observation fingerprint, with 30/60-second backoff. Its independent coordination
+field is scheduling evidence only, never executor receipt, blocker or acceptance.
+The record binds session_file, entry_id, byte offset/length and sha256 to the
+actual fm-continuation-receipt custom entry. It retains every fingerprint budget
+across reload/compaction and refuses overflow rather than resetting it.
+Each budget may retain a reserved admission id while the native safety owner
+defers notification. Later readback of custom_message.details.admissions in
+the actual session branch acknowledges delivery and anchors the backoff to
+that message's timestamp. A deferred reservation consumes no extra attempt.
 Only main may mutate through the public entry; existing lease/meta locks own CAS.
 An open goal without a verified continuation remains due after presentation ack.
 Optional next_action.continuation has exactly one of these observation contracts:
@@ -46,6 +57,7 @@ import stat
 import sys
 import tempfile
 import subprocess
+import time
 
 SCHEMA = 'fm-task-lifecycle.v1'
 MAX_BYTES = 262144
@@ -188,6 +200,15 @@ class Task:
             require(bool(re.fullmatch('[a-f0-9]{64}', str(item.get('sha256')))), 'invalid evidence digest')
         if record['disposition'] == 'accepted':
             require(not assessment['remaining_gap'], 'accepted task still has a gap')
+        coordination = record.get('coordination')
+        if coordination is not None:
+            require(isinstance(coordination, dict) and isinstance(coordination.get('budgets'), dict), 'invalid readback coordination')
+            require(len(coordination['budgets']) <= 256, 'excessive readback history')
+            for key, budget in coordination['budgets'].items():
+                require(bool(re.fullmatch('[a-f0-9]{64}', key)) and isinstance(budget, dict), 'invalid readback fingerprint')
+                require(integer(budget.get('attempts')) and budget['attempts'] <= 2 and integer(budget.get('not_before_ms')), 'invalid readback pacing')
+                require(budget.get('reserved') is None or atom(budget['reserved']), 'invalid reserved admission')
+            require(isinstance(coordination.get('receipt'), dict) and isinstance(coordination.get('receiver'), dict), 'missing native readback receipt')
         action = record.get('next_action')
         if action is not None:
             require(isinstance(action, dict) and atom(action.get('id')), 'invalid action identity')
@@ -260,11 +281,85 @@ class Task:
             if os.path.exists(temporary):
                 os.unlink(temporary)
 
+    def coordinate(self, args):
+        """Record actual native readback receipt, not execution or acceptance.
+
+        The Pi clock receives/starts the readback and appends a session entry.
+        Validate that exact persisted entry under the existing task CAS. The
+        separate budget survives session/runtime changes and never edits action.
+        """
+        record = self.read()
+        require(record is not None and args.expected_revision == record['revision'], 'revision conflict')
+        proof = load(Path(args.record))
+        require(isinstance(proof, dict), 'missing coordinator session proof')
+        path = Path(proof.get('session_file', ''))
+        require(path.is_absolute(), 'absolute session file required')
+        st = path.lstat()
+        require(stat.S_ISREG(st.st_mode) and st.st_nlink == 1 and st.st_uid == os.getuid(), 'unsafe session file')
+        offset, size = proof.get('offset'), proof.get('length')
+        require(integer(offset) and integer(size, 1) and size <= 32768 and offset + size <= st.st_size, 'invalid session receipt range')
+        with path.open('rb') as stream:
+            header = json.loads(stream.readline(32768))
+            stream.seek(offset)
+            raw = stream.read(size)
+        require(digest(raw) == proof.get('sha256'), 'session receipt changed')
+        entry = json.loads(raw, object_pairs_hook=unique_object)
+        require(entry.get('type') == 'custom' and entry.get('customType') == 'fm-continuation-receipt' and entry.get('id') == proof.get('entry_id'), 'not a native continuation receipt')
+        receipt = entry.get('data', {})
+        require(receipt.get('owner') == 'fm-periodic-stow' and atom(receipt.get('generation')), 'invalid readback owner')
+        require(header.get('type') == 'session' and header.get('id') == receipt.get('session_id'), 'session identity changed')
+        pid = receipt.get('pid')
+        require(integer(pid, 2) and regular(self.state / '.lock').decode().strip() == str(pid), 'readback no longer owns the home lock')
+        os.kill(pid, 0)
+        parent = os.getpid()
+        for _ in range(32):
+            if parent == pid:
+                break
+            result = subprocess.run(['ps', '-o', 'ppid=', '-p', str(parent)], capture_output=True, text=True, check=False)
+            require(result.returncode == 0 and result.stdout.strip().isdigit(), 'cannot verify readback process')
+            parent = int(result.stdout.strip())
+            require(parent > 1, 'readback caller is outside owning Pi process')
+        require(parent == pid, 'readback process ancestry exceeded')
+        current_ms = int(time.time() * 1000)
+        started, recheck = receipt.get('started_at_ms'), receipt.get('recheck_at_ms')
+        require(integer(started) and integer(recheck) and started <= current_ms + 1000 and started <= recheck and current_ms <= recheck, 'expired readback receipt')
+        observation = self.observe()
+        require(any(item == {'task_id': self.id, 'key': observation['key'], 'revision': record['revision']}
+                    for item in receipt.get('observations', [])), 'receipt does not bind current readback')
+        require(observation['state'] not in ('accepted', 'archived', 'running', 'blocked'), 'readback already has an ordinary continuation')
+        coordination = record.get('coordination', {'budgets': {}})
+        budgets = coordination['budgets']
+        key = observation['key']
+        require(key in budgets or len(budgets) < 256, 'readback fingerprint history is full; explicit reconciliation required')
+        budget = budgets.setdefault(key, {'attempts': 0, 'not_before_ms': 0})
+        delivered = receipt.get('delivered_admissions', {}).get(budget.get('reserved'))
+        if delivered is not None:
+            require(integer(delivered) and delivered <= current_ms, 'invalid admission delivery readback')
+            budget.pop('reserved')
+            budget['not_before_ms'] = max(budget['not_before_ms'], delivered + 30000 * 2 ** (budget['attempts'] - 1))
+        if not budget.get('reserved') and budget['attempts'] < 2 and current_ms >= budget['not_before_ms']:
+            budget['attempts'] += 1
+            budget['not_before_ms'] = current_ms + 30000 * 2 ** (budget['attempts'] - 1)
+            budget['reserved'] = 'n.' + key + '.' + str(budget['attempts'])
+        admitted = bool(budget.get('reserved'))
+        record['coordination'] = {'budgets': budgets, 'observation_key': key,
+                                  'receipt': proof, 'receiver': receipt}
+        record['revision'] += 1
+        self.write(record)
+        return {'observation': observation, 'coordination': record['coordination'], 'admitted': admitted,
+                'admission': budget.get('reserved'),
+                'revision': record['revision']}
+
     def reconcile(self, args):
         prior = self.read(current=False)
         require(args.expected_revision == (prior['revision'] if prior else 0), 'revision conflict')
         candidate = load(Path(args.record))
         candidate['revision'] = args.expected_revision + 1
+        if prior and 'coordination' in prior:
+            require(candidate.get('coordination', prior['coordination']) == prior['coordination'], 'coordination belongs to the native readback owner')
+            candidate['coordination'] = prior['coordination']
+        else:
+            require('coordination' not in candidate, 'coordination requires an actual native readback receipt')
         self.validate(candidate)
         candidate_authority = self.authority_identity(candidate['assessment']['authority_ref'])
         for item in candidate['assessment']['evidence']:
@@ -457,7 +552,7 @@ class Task:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('operation', choices=('read', 'init', 'reconcile', 'action', 'observe'))
+    parser.add_argument('operation', choices=('read', 'init', 'reconcile', 'action', 'observe', 'coordinate'))
     parser.add_argument('task')
     parser.add_argument('--expected-revision', type=int)
     parser.add_argument('--record')
@@ -473,6 +568,9 @@ def main():
         elif args.operation == 'reconcile':
             require(integer(args.expected_revision) and args.record, 'reconcile needs revision and record')
             result = task.reconcile(args)
+        elif args.operation == 'coordinate':
+            require(integer(args.expected_revision) and args.record, 'coordinate needs revision and receipt record')
+            result = task.coordinate(args)
         elif args.operation == 'action':
             result = task.action(args)
         elif args.operation == 'observe':
