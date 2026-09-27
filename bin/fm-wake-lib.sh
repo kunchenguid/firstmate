@@ -1342,6 +1342,12 @@ fm_firstmate_root_home() {
 # under a previously shared root stays returnable and nothing has to be migrated;
 # tests/fm-treehouse-pool-isolation-live-e2e.test.sh pins both halves against the
 # real provider.
+#
+# When FM_HOME is set, the derived root is also refused if it lands inside the
+# active home or its root home: a Claude Code worker would then see that home's
+# own top-level CLAUDE.md as an external import target from inside its worktree
+# and re-trigger the import-approval prompt the default $HOME-based root avoids.
+# Set TREEHOUSE_ROOT outside those homes to clear the refusal.
 fm_treehouse_home_root() {  # <home>
   local home=$1 abs base slug hash derived active_home root_home
   abs=$(CDPATH='' cd -- "$home" 2>/dev/null && pwd -P) || return 1
