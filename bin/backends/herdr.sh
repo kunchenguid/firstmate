@@ -1649,18 +1649,104 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
 # headless (no TUI client) if not already running, mirroring tmux's `tmux
 # has-session || tmux new-session -d`. Verified: a bare socket CLI call does
 # NOT auto-start the server, so this must run before any workspace/tab/pane
-# call. The server outlives its launcher and passes its startup environment to
-# every later pane, so remove home, harness identity, and supervision selection
-# inherited from whichever agent happened to start it. Bounded poll for the
-# server to report running.
+# call. Bounded poll for the server to report running.
+#
+# The server outlives its launcher and hands its OWN startup environment to
+# every pane it ever opens, so the launch below inherits nothing at all: it
+# runs through `env -i` plus the explicit allowlist assembled here. A deny list
+# cannot hold that boundary. FM_CREW_STATE_META_OVERRIDE,
+# FM_CREW_STATE_STATUS_OVERRIDE and FM_SNAPSHOT_CACHE_DIR entered the codebase
+# long after the old unset list and nobody extended it, so a server started
+# from one task's shell made every later pane's worker-state read answer about
+# THAT task instead of the task it was asked about (measured 2026-09-26).
+#
+# SHELL always comes from the EFFECTIVE UID's own passwd entry, never from the
+# caller even when the caller has one. Herdr's default_shell is empty, which
+# `herdr --default-config` documents as "$SHELL, then /bin/sh", so a
+# non-interactive launcher with no SHELL gave every pane a non-login /bin/sh
+# with no startup config. PATH is a stable source-defined baseline for the same
+# reason: a launcher's truncated PATH left /usr/bin/core_perl (shasum)
+# unreachable in every pane. Both values are launcher contamination, so neither
+# is ever preserved; the operator's real login shell rebuilds the rest of the
+# pane environment from its own startup files.
+#
+# Only enumerated names are forwarded, never a glob. HOME must agree with the
+# caller's because the socket this function then polls lives under it. The
+# HERDR_* names herdr injects per PANE (HERDR_ENV, HERDR_PANE_ID, HERDR_TAB_ID,
+# HERDR_WORKSPACE_ID, HERDR_SOCKET_PATH) are the LAUNCHER's own pane identity
+# and are deliberately dropped; only herdr's own config selector survives, and
+# HERDR_SESSION is set here from <session>.
 fm_backend_herdr_server_ensure() {  # <session>
-  local session=$1 running out i
+  local session=$1 running i
+  local uid login pw_line pw_shell pw_home raw
+  local launch_home launch_path client_bin=herdr client_path name
+  local -a launch_env=()
   running=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null | jq -r '.server.running // false' 2>/dev/null)
   [ "$running" = "true" ] && return 0
+
+  # Resolved here, in the caller's own PATH, because the launch runs with the
+  # baseline PATH below. Session-scoped client selection is
+  # fm_backend_herdr_cli's contract; this is the same choice for the one call
+  # that cannot go through it.
+  if [ "${FM_BACKEND_HERDR_CLIENT_SESSION:-}" = "$session" ]; then
+    client_bin=$(fm_backend_herdr_bin)
+  fi
+  client_path=$(command -v "$client_bin" 2>/dev/null) || client_path=$client_bin
+
+  uid=$(id -u 2>/dev/null) || uid=""
+  login=$(id -un 2>/dev/null) || login=""
+  pw_shell=""
+  pw_home=""
+  if [ -n "$uid" ]; then
+    pw_line=""
+    if command -v getent >/dev/null 2>&1; then
+      pw_line=$(getent passwd "$uid" 2>/dev/null | head -1)
+    fi
+    [ -n "$pw_line" ] || pw_line=$(awk -F: -v want="$uid" '$3 == want { print; exit }' /etc/passwd 2>/dev/null)
+    if [ -n "$pw_line" ]; then
+      pw_home=$(printf '%s\n' "$pw_line" | cut -d: -f6)
+      pw_shell=$(printf '%s\n' "$pw_line" | cut -d: -f7)
+    elif [ -n "$login" ] && command -v dscl >/dev/null 2>&1; then
+      # darwin keeps only system accounts in /etc/passwd, so the real record
+      # lives in Directory Services. Bounded exactly like
+      # bin/fm-remote-doctor.sh's resolve_launch_agent_shell so a wedged
+      # directory service cannot hang a spawn.
+      if command -v perl >/dev/null 2>&1; then
+        raw=$(perl -e '$SIG{ALRM} = sub { exit 124 }; alarm 2; exec @ARGV' \
+          dscl . -read "/Users/$login" UserShell NFSHomeDirectory 2>/dev/null || true)
+      else
+        raw=$(dscl . -read "/Users/$login" UserShell NFSHomeDirectory 2>/dev/null || true)
+      fi
+      pw_shell=$(printf '%s\n' "$raw" | sed -n 's/^UserShell: //p' | head -1)
+      pw_home=$(printf '%s\n' "$raw" | sed -n 's/^NFSHomeDirectory: //p' | head -1)
+    fi
+  fi
+  if [ -z "$pw_shell" ] || [ ! -x "$pw_shell" ]; then
+    echo "warning: uid '${uid:-unknown}' has no usable passwd login shell; herdr panes fall back to /bin/sh" >&2
+    pw_shell=/bin/sh
+  fi
+
+  launch_home=${HOME:-$pw_home}
+  [ -n "$launch_home" ] || launch_home=/
+  launch_path="$launch_home/.local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin"
+  launch_env=("HOME=$launch_home" "SHELL=$pw_shell" "PATH=$launch_path" "HERDR_SESSION=$session")
+  if [ -n "$login" ]; then
+    launch_env+=("USER=$login" "LOGNAME=$login")
+  fi
+  # Enumerated one name at a time on purpose: a HERDR_* or LC_* wildcard here
+  # would recreate exactly the rot that killed the old unset list.
+  for name in TERM COLORTERM LANG LC_ALL LC_CTYPE TZ \
+    DISPLAY WAYLAND_DISPLAY XAUTHORITY XDG_RUNTIME_DIR XDG_SESSION_TYPE \
+    XDG_CONFIG_HOME SSH_AUTH_SOCK HERDR_CONFIG_PATH; do
+    if [ -n "${!name:-}" ]; then
+      launch_env+=("$name=${!name}")
+    fi
+  done
+
+  # /usr/bin/env, not `env`: the truncated caller PATH this launch exists to
+  # stop inheriting is also the PATH that would have to resolve it.
   (
-    unset FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE \
-      CURSOR_AGENT CURSOR_INVOKED_AS CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT FM_SUPERVISION_MODEL
-    fm_backend_herdr_cli "$session" server >/dev/null 2>&1 &
+    /usr/bin/env -i "${launch_env[@]}" "$client_path" server --session "$session" >/dev/null 2>&1 &
   ) || return 1
   for i in $(seq 1 20); do
     running=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null | jq -r '.server.running // false' 2>/dev/null)

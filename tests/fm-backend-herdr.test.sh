@@ -42,14 +42,19 @@ export FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0
 # of calls precisely. A missing response file means "succeed with empty
 # stdout" (mirrors send-text/send-keys/pane close/tab close, which are silent
 # on success in the real CLI - verified in herdr-verification-p2.md).
+# The long-lived `server` launch reaches this stub through `env -i`, so no test
+# variable survives for that one call; the generated defaults below (this
+# suite's `<dir>/log` and `<dir>/responses` convention) keep it logging and
+# consuming its response slot. A caller that names other paths still wins.
 make_herdr_fakebin() {  # <dir> -> echoes fakebin dir
   local dir=$1 fb="$1/fakebin"
   mkdir -p "$fb"
-  cat > "$fb/herdr" <<'SH'
-#!/usr/bin/env bash
-set -u
-LOG="${FM_HERDR_LOG:?}"
-RESP="${FM_HERDR_RESPONSES:?}"
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'set -u\n'
+    printf 'LOG="${FM_HERDR_LOG:-%s}"\n' "$dir/log"
+    printf 'RESP="${FM_HERDR_RESPONSES:-%s}"\n' "$dir/responses"
+    cat <<'SH'
 COUNT_FILE="$RESP/.count"
 next=$(( $(cat "$COUNT_FILE" 2>/dev/null || echo 0) + 1 ))
 {
@@ -75,6 +80,7 @@ fi
 [ -f "$RESP/$n.out" ] && cat "$RESP/$n.out"
 exit 0
 SH
+  } > "$fb/herdr"
   chmod +x "$fb/herdr"
   printf '%s\n' "$fb"
 }
@@ -126,36 +132,66 @@ herdr_submit_claude_prefix() {  # <resp-dir> <typed-text>
   printf '  \xe2\x9d\xaf %s\n' "$text" > "$resp/4.out"
 }
 
-# make_herdr_server_env_fakebin: a stateful server stub that records only the
-# long-lived server launch environment, then reports the server as running.
-make_herdr_server_env_fakebin() {  # <dir> -> echoes fakebin dir
-  local dir=$1 fb="$1/fakebin"
+# make_herdr_server_launch_fakebin: a stateful server stub that records the
+# COMPLETE environment of the long-lived server launch, then reports the server
+# as running. Its control paths are baked into the generated script instead of
+# read from the environment, because fm_backend_herdr_server_ensure launches the
+# server through `env -i` and no caller variable survives that by design.
+make_herdr_server_launch_fakebin() {  # <dir> <env-log> <marker> -> echoes fakebin dir
+  local dir=$1 log=$2 marker=$3 fb="$1/fakebin"
   mkdir -p "$fb"
-  cat > "$fb/herdr" <<'SH'
-#!/usr/bin/env bash
-set -u
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'set -u\n'
+    printf 'LOG=%q\n' "$log"
+    printf 'MARKER=%q\n' "$marker"
+    cat <<'SH'
 case "${1:-}" in
   status)
-    if [ -e "$FM_HERDR_SERVER_MARKER" ]; then
+    if [ -e "$MARKER" ]; then
       printf '{"server":{"running":true}}\n'
     else
       printf '{"server":{"running":false}}\n'
     fi
     ;;
   server)
-    {
-      for name in FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE CURSOR_AGENT CURSOR_INVOKED_AS CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT FM_SUPERVISION_MODEL FM_HERDR_SENTINEL HERDR_SESSION; do
-        eval 'value=${'"$name"'-<unset>}'
-        printf '%s=%s\n' "$name" "$value"
-      done
-      printf 'args=%s\n' "$*"
-    } > "$FM_HERDR_SERVER_ENV_LOG"
-    : > "$FM_HERDR_SERVER_MARKER"
+    # compgen -e is every EXPORTED name, so the log is the server's real
+    # environment rather than a list the test already expected to find.
+    { for name in $(compgen -e); do printf '%s=%s\n' "$name" "${!name}"; done; } | sort > "$LOG"
+    printf 'args=%s\n' "$*" > "$LOG.args"
+    : > "$MARKER"
     ;;
 esac
 SH
+  } > "$fb/herdr"
   chmod +x "$fb/herdr"
   printf '%s\n' "$fb"
+}
+
+# herdr_test_recorded_value: the value the recorded launch environment carries
+# for <name>, or empty when the launch did not carry it at all.
+herdr_test_recorded_value() {  # <env-log> <name>
+  sed -n "s/^$2=//p" "$1" | head -1
+}
+
+# herdr_test_passwd_shell: the login shell in the EFFECTIVE uid's own passwd
+# entry, resolved from the system the same way an operator would read it and
+# never from $SHELL or $USER. Empty when this host exposes no such entry.
+herdr_test_passwd_shell() {
+  local uid line
+  uid=$(id -u 2>/dev/null) || return 0
+  line=""
+  if command -v getent >/dev/null 2>&1; then
+    line=$(getent passwd "$uid" 2>/dev/null | head -1)
+  fi
+  [ -n "$line" ] || line=$(awk -F: -v want="$uid" '$3 == want { print; exit }' /etc/passwd 2>/dev/null)
+  if [ -n "$line" ]; then
+    printf '%s\n' "$line" | cut -d: -f7
+    return 0
+  fi
+  if command -v dscl >/dev/null 2>&1; then
+    dscl . -read "/Users/$(id -un)" UserShell 2>/dev/null | sed -n 's/^UserShell: //p' | head -1
+  fi
 }
 
 # make_herdr_statefake: a STATEFUL `herdr` stub that models the parts of herdr's
@@ -1189,25 +1225,134 @@ test_container_ensure_starts_server_and_workspace() {
   pass "fm_backend_herdr_container_ensure: version-gates, starts the server, ensures the firstmate workspace, echoes session:workspace_id + the seeded default tab id"
 }
 
-test_server_ensure_scrubs_home_and_harness_identity() {
-  local dir log marker fb output name
-  dir="$TMP_ROOT/server-env"; mkdir -p "$dir"; log="$dir/env"; marker="$dir/running"
-  fb=$(make_herdr_server_env_fakebin "$dir")
-  PATH="$fb:$PATH" FM_HERDR_SERVER_ENV_LOG="$log" FM_HERDR_SERVER_MARKER="$marker" FM_HERDR_SENTINEL=kept \
+test_server_ensure_gives_panes_the_passwd_login_shell_and_a_usable_path() {
+  local dir log marker fb expected recorded_shell recorded_path out
+  local -a pane_env=() shell_args=()
+  dir="$TMP_ROOT/server-shell"; mkdir -p "$dir"; log="$dir/env"; marker="$dir/running"
+  fb=$(make_herdr_server_launch_fakebin "$dir" "$log" "$marker")
+  expected=$(herdr_test_passwd_shell)
+  [ -n "$expected" ] && [ -x "$expected" ] || fail "uid $(id -u) has no usable passwd login shell on this host, so the pane-shell contract cannot be exercised"
+
+  # Tonight's real launcher: a misleading SHELL and a PATH truncated to the
+  # system directories, with no core_perl and no operator additions.
+  PATH="$fb:/usr/bin:/bin" SHELL="$dir/not-a-shell" HERDR_SESSION=fmtest \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_server_ensure fmtest' "$ROOT"
+  expect_code 0 $? "server_ensure should start under a launcher with a misleading SHELL and a truncated PATH"
+  recorded_shell=$(herdr_test_recorded_value "$log" SHELL)
+  [ "$recorded_shell" = "$expected" ] || fail "the server was launched with SHELL='$recorded_shell'; panes must get the passwd login shell '$expected'"
+  recorded_path=$(herdr_test_recorded_value "$log" PATH)
+  case "$recorded_path" in
+    */usr/bin*) ;;
+    *) fail "the server was launched with an unusable PATH: '$recorded_path'" ;;
+  esac
+  case "$recorded_path" in
+    *"$fb"*) fail "the server inherited the launcher's PATH ('$recorded_path' still carries the launcher-only directory '$fb')" ;;
+  esac
+
+  # A pane inherits exactly this environment, so run the recorded login shell
+  # under it and ask it for a tool that lives outside the system directories.
+  while IFS= read -r line; do pane_env+=("$line"); done < "$log"
+  if "$recorded_shell" -l -c 'exit 0' >/dev/null 2>&1; then
+    shell_args=(-l -c)
+  else
+    shell_args=(-c)
+  fi
+  out=$(env -i "${pane_env[@]}" "$recorded_shell" "${shell_args[@]}" 'command -v shasum' 2>/dev/null)
+  [ -n "$out" ] || fail "a pane of this server cannot run shasum; its PATH ('$recorded_path') and login shell leave it unreachable"
+
+  # The same guarantee with no SHELL at all, which is how the server was
+  # actually started tonight.
+  rm -f "$marker" "$log"
+  PATH="$fb:/usr/bin:/bin" HERDR_SESSION=fmtest \
+    bash -c 'unset SHELL; . "$0/bin/backends/herdr.sh"; fm_backend_herdr_server_ensure fmtest' "$ROOT"
+  expect_code 0 $? "server_ensure should start under a launcher with no SHELL at all"
+  recorded_shell=$(herdr_test_recorded_value "$log" SHELL)
+  [ "$recorded_shell" = "$expected" ] || fail "with no SHELL in the launcher the server was launched with SHELL='$recorded_shell' instead of the passwd login shell '$expected'"
+  pass "fm_backend_herdr_server_ensure: panes get the effective uid's passwd login shell and a usable PATH, never the launcher's"
+}
+
+test_server_ensure_keeps_task_scoped_state_out_of_the_server_and_its_panes() {
+  local dir log marker fb home out name
+  local -a pane_env=()
+  dir="$TMP_ROOT/server-task-leak"; home="$dir/home"; log="$dir/env"; marker="$dir/running"
+  mkdir -p "$home/state"
+  # One recorded task (task-b) and one that this home has no record of at all,
+  # so a state read that followed the wrong task answers with the wrong detail.
+  printf 'worktree=%s\nkind=ship\n' "$dir/gone-b" > "$home/state/task-b.meta"
+  printf 'working [at=1]: task-b\n' > "$home/state/task-b.status"
+  fb=$(make_herdr_server_launch_fakebin "$dir" "$log" "$marker")
+
+  # The launcher is a shell already pinned to task-b, exactly like the
+  # supervisor shell that started tonight's server.
+  out=$(FM_CREW_STATE_META_OVERRIDE="$home/state/task-b.meta" \
+    FM_CREW_STATE_STATUS_OVERRIDE="$home/state/task-b.status" \
+    FM_SNAPSHOT_CACHE_DIR="$dir/snapshot-cache" FM_HOME="$home" \
+    bash "$ROOT/bin/fm-crew-state.sh" task-a 2>&1)
+  assert_not_contains "$out" "task-a" "the pinned launcher shell should not be able to answer about task-a; this test's premise is gone"
+
+  PATH="$fb:$PATH" HERDR_SESSION=fmtest \
+    FM_CREW_STATE_META_OVERRIDE="$home/state/task-b.meta" \
+    FM_CREW_STATE_STATUS_OVERRIDE="$home/state/task-b.status" \
+    FM_SNAPSHOT_CACHE_DIR="$dir/snapshot-cache" \
     FM_HOME=/tmp/wrong-home FM_ROOT_OVERRIDE=/tmp/wrong-root FM_STATE_OVERRIDE=/tmp/wrong-state \
     FM_DATA_OVERRIDE=/tmp/wrong-data FM_PROJECTS_OVERRIDE=/tmp/wrong-projects FM_CONFIG_OVERRIDE=/tmp/wrong-config \
-    CURSOR_AGENT=1 CURSOR_INVOKED_AS=cursor-agent CLAUDECODE=1 PI_CODING_AGENT=true FM_PI_HARNESS=pi-signed GROK_AGENT=1 FM_SUPERVISION_MODEL=autoarm \
+    CURSOR_AGENT=1 CURSOR_INVOKED_AS=cursor-agent CLAUDECODE=1 PI_CODING_AGENT=true FM_PI_HARNESS=pi-signed \
+    GROK_AGENT=1 FM_SUPERVISION_MODEL=autoarm FM_TASK_ID=task-b FM_HERDR_SENTINEL=leaked \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_server_ensure fmtest' "$ROOT"
-  expect_code 0 $? "server_ensure should start under a polluted launcher environment"
-  output=$(cat "$log")
-  for name in FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE \
-    CURSOR_AGENT CURSOR_INVOKED_AS CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT FM_SUPERVISION_MODEL; do
-    assert_contains "$output" "$name=<unset>" "server_ensure leaked $name into the long-lived Herdr server"
+  expect_code 0 $? "server_ensure should start under a launcher pinned to another task"
+  for name in FM_CREW_STATE_META_OVERRIDE FM_CREW_STATE_STATUS_OVERRIDE FM_SNAPSHOT_CACHE_DIR \
+    FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE \
+    FM_TASK_ID CURSOR_AGENT CURSOR_INVOKED_AS CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT \
+    FM_SUPERVISION_MODEL FM_HERDR_SENTINEL; do
+    assert_not_contains "$(cat "$log")" "$name=" "the long-lived herdr server inherited $name from the task shell that happened to start it"
   done
-  assert_contains "$output" "FM_HERDR_SENTINEL=kept" "server_ensure removed an unrelated environment variable"
+
+  # A pane of that server is where the wrong answer was actually read.
+  while IFS= read -r line; do pane_env+=("$line"); done < "$log"
+  out=$(env -i "${pane_env[@]}" FM_HOME="$home" bash "$ROOT/bin/fm-crew-state.sh" task-a 2>&1)
+  assert_contains "$out" "task-a" "a state read in a pane of this server answered '$out' instead of following task-a"
+  pass "fm_backend_herdr_server_ensure: task-scoped state never reaches the long-lived server or its panes, so a pane's state read follows the task it was asked about"
+}
+
+test_server_ensure_keeps_required_variables_and_leaves_a_running_server_alone() {
+  local dir log marker fb output name
+  dir="$TMP_ROOT/server-required"; mkdir -p "$dir"; log="$dir/env"; marker="$dir/running"
+  fb=$(make_herdr_server_launch_fakebin "$dir" "$log" "$marker")
+  PATH="$fb:$PATH" HOME="$dir/home" HERDR_CONFIG_PATH="$dir/herdr.toml" \
+    LANG=en_US.UTF-8 TERM=xterm-256color COLORTERM=truecolor \
+    DISPLAY=:0 WAYLAND_DISPLAY=wayland-1 XAUTHORITY="$dir/Xauthority" \
+    XDG_RUNTIME_DIR="$dir/run" XDG_SESSION_TYPE=wayland SSH_AUTH_SOCK="$dir/ssh-agent" \
+    HERDR_ENV=1 HERDR_PANE_ID=w9:p9 HERDR_TAB_ID=w9:t9 HERDR_WORKSPACE_ID=w9 \
+    HERDR_SOCKET_PATH="$dir/launcher.sock" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_server_ensure fmtest' "$ROOT"
+  expect_code 0 $? "server_ensure should start when no server is running"
+  output=$(cat "$log")
+  assert_contains "$output" "HOME=$dir/home" "the server lost the HOME whose socket this ensure then polls"
+  assert_contains "$output" "HERDR_CONFIG_PATH=$dir/herdr.toml" "the server lost herdr's own config selection"
   assert_contains "$output" "HERDR_SESSION=fmtest" "server_ensure lost explicit Herdr session routing"
-  assert_contains "$output" "args=server --session fmtest" "server_ensure lost the trailing Herdr session flag"
-  pass "fm_backend_herdr_server_ensure: scrubs home and harness identity without disturbing unrelated environment or session routing"
+  assert_contains "$output" "LANG=en_US.UTF-8" "the server lost the operator's locale"
+  assert_contains "$output" "TERM=xterm-256color" "the server lost TERM"
+  assert_contains "$output" "COLORTERM=truecolor" "the server lost COLORTERM"
+  assert_contains "$output" "DISPLAY=:0" "the server lost DISPLAY, so no pane can reach the display"
+  assert_contains "$output" "WAYLAND_DISPLAY=wayland-1" "the server lost WAYLAND_DISPLAY"
+  assert_contains "$output" "XAUTHORITY=$dir/Xauthority" "the server lost XAUTHORITY, so DISPLAY alone is useless"
+  assert_contains "$output" "XDG_RUNTIME_DIR=$dir/run" "the server lost XDG_RUNTIME_DIR"
+  assert_contains "$output" "XDG_SESSION_TYPE=wayland" "the server lost XDG_SESSION_TYPE"
+  assert_contains "$output" "SSH_AUTH_SOCK=$dir/ssh-agent" "the server lost the operator's ssh agent, so pane git pushes break"
+  assert_contains "$(cat "$log.args")" "args=server --session fmtest" "server_ensure lost the trailing Herdr session flag"
+  # The launcher's OWN pane identity is not the new server's.
+  for name in HERDR_ENV HERDR_PANE_ID HERDR_TAB_ID HERDR_WORKSPACE_ID HERDR_SOCKET_PATH; do
+    assert_not_contains "$output" "$name=" "the server inherited the launcher's own pane identity through $name"
+  done
+
+  # An already-running server is never replaced.
+  : > "$dir/replaced-check"
+  rm -f "$log" "$log.args"
+  PATH="$fb:$PATH" HOME="$dir/home" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_server_ensure fmtest' "$ROOT"
+  expect_code 0 $? "server_ensure should report success for an already-running server"
+  [ ! -e "$log" ] || fail "server_ensure started a second herdr server for a session that already had one running"
+  pass "fm_backend_herdr_server_ensure: forwards the required herdr, locale, display and agent variables, drops the launcher's pane identity, and leaves a running server alone"
 }
 
 test_container_ensure_reuses_existing_workspace() {
@@ -5722,7 +5867,9 @@ test_workspace_ensure_refuses_an_ambiguous_label_with_no_launcher
 test_workspace_ensure_other_home_ignores_the_launcher_identity
 test_container_ensure_refuses_an_ambiguous_home_label
 test_container_ensure_starts_server_and_workspace
-test_server_ensure_scrubs_home_and_harness_identity
+test_server_ensure_gives_panes_the_passwd_login_shell_and_a_usable_path
+test_server_ensure_keeps_task_scoped_state_out_of_the_server_and_its_panes
+test_server_ensure_keeps_required_variables_and_leaves_a_running_server_alone
 test_container_ensure_reuses_existing_workspace
 test_container_ensure_creates_with_no_focus_flag
 test_container_ensure_uses_secondmate_home_label
