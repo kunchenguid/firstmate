@@ -1364,16 +1364,19 @@ fm_treehouse_pool_slot() {  # <project-dir> <worktree>
 # the given worktree, matching them safely by inode to avoid string collisions or
 # hardcoded symlink assumptions.
 fm_treehouse_canonical_path() {  # <worktree>
-  local worktree=$1 wt_inode p p_inode uname_s pool_json registry_paths
+  local worktree=$1 wt_inode p p_inode uname_s slot state_file registry_paths
   uname_s=$(uname -s 2>/dev/null || echo unknown)
   if [ "$uname_s" = Darwin ]; then
     wt_inode=$(/usr/bin/stat -f '%d:%i' "$worktree" 2>/dev/null) || return 1
   else
     wt_inode=$(stat -c '%d:%i' "$worktree" 2>/dev/null) || return 1
   fi
-  pool_json=$(CDPATH='' cd -- "$worktree" 2>/dev/null && treehouse status --json 2>/dev/null) || return 2
 
-  registry_paths=$(printf '%s\n' "$pool_json" | jq -r '.[].path' 2>/dev/null) || return 2
+  slot=$(CDPATH='' cd -- "$worktree" 2>/dev/null && pwd -P) || return 2
+  state_file=$(dirname "$(dirname "$slot")")/treehouse-state.json
+  [ -f "$state_file" ] || return 2
+
+  registry_paths=$(jq -r '.worktrees[].path' "$state_file" 2>/dev/null) || return 2
   while IFS= read -r p; do
     if [ "$uname_s" = Darwin ]; then
       p_inode=$(/usr/bin/stat -f '%d:%i' "$p" 2>/dev/null) || continue

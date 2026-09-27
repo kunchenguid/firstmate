@@ -5,7 +5,6 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 . "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 
-SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-treehouse-symlink)
 export FM_BACKEND=tmux
 
@@ -129,11 +128,11 @@ test_unavailable_registry_refused() {
   slot_root="$pool_real/slots"
   mkdir -p "$slot_root/1"
   git -C "$PROJECT_DIR" worktree add "$slot_root/1/project"
-  printf '{"worktrees":[{"name":"1","path":"%s"}]}' "$slot_root/1/project" \
-    > "$slot_root/treehouse-state.json"
+  # Write invalid JSON to treehouse state to simulate registry query failure
+  printf '{invalid-json' > "$slot_root/treehouse-state.json"
   POOL_DIR="$slot_root/1/project"
 
-  out=$(FM_TEST_TREEHOUSE_STATUS_EXIT=9 run_spawn "$id" --scout)
+  out=$(run_spawn "$id" --scout)
   status=$?
   [ "$status" -ne 0 ] || fail "spawn launched a worker while treehouse status was unavailable"
   assert_contains "$out" "could not query Treehouse registry" \
