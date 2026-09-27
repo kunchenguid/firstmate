@@ -78,10 +78,10 @@
 # that date with a UTC timestamp) the template orders the section by, newest
 # first; a row with no comparable date keeps its payload order after every dated
 # row. Anything else in that field refuses rather than sorting on garbage.
-# A Charted Next row MAY carry `about` (one-line task context), `link` (an
-# HTTPS report or PR URL), and `report_path` (a local, plain-text pickup pointer).
-# Context and path follow the Captain's Call optional-string rule, and `link`
-# follows the existing optional HTTPS URL rule. The required `reason` names
+# A Charted Next row MAY carry `about` (one-line task context), `pr_url` (a
+# recorded HTTPS PR URL), and `report_path` (a local, plain-text pickup pointer).
+# Context and path follow the Captain's Call optional-string rule, and `pr_url`
+# uses the HTTPS PR URL shape. The required `reason` names
 # the gate on non-dispatchable rows.
 #
 # The board path is stable - $FM_HOME/.lavish/bearings-board.html - so a
@@ -189,7 +189,10 @@ validate_payload() {  # <data.json>
       and ((has("kind") | not) or (.kind == "queued" or .kind == "warning"))
       and optional_filed
       and optional_string("about")
-      and optional_https_url("link")
+      and (has("link") | not)
+      and optional_https_url("pr_url")
+      and ((has("pr_url") | not)
+        or (.pr_url | test("^https://[^/?#]+/[^/?#]+/[^/?#]+/pull/[0-9]+(?:[/?#][^[:space:]]*)?$")))
       and optional_string("report_path")
       and (if .kind == "warning" then .dispatchable == false else true end);
     type == "object"

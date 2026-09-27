@@ -498,17 +498,17 @@ test_charted_context_is_optional_and_validated() {
   data="$home/payload.json"
   write_valid_payload "$data"
   run_board "$home" build "$data" >/dev/null || fail "a legacy charted row was refused"
-  jq '.charted[0] += {about:"Explain why",report_path:"data/sample/report.md",link:"https://github.com/example/sample/pull/2"}' \
+  jq '.charted[0] += {about:"Explain why",report_path:"data/sample/report.md",pr_url:"https://github.com/example/sample/pull/2/files"}' \
     "$data" > "$data.tmp" && mv "$data.tmp" "$data"
   run_board "$home" build "$data" >/dev/null || fail "valid charted context was refused"
   extract_payload "$home/.lavish/bearings-board.html" | jq -e '
     .charted[0] | .about == "Explain why" and .report_path == "data/sample/report.md"
-      and .link == "https://github.com/example/sample/pull/2"
+      and .pr_url == "https://github.com/example/sample/pull/2/files"
   ' >/dev/null || fail "the built board lost charted context"
-  for field in about report_path link; do
+  for field in about report_path pr_url; do
     write_valid_payload "$data"
     case "$field" in
-      link) value='"javascript:alert(1)"' ;;
+      pr_url) value='"javascript:alert(1)"' ;;
       *) value='42' ;;
     esac
     jq --arg field "$field" --argjson value "$value" '.charted[0][$field] = $value' \
@@ -517,10 +517,18 @@ test_charted_context_is_optional_and_validated() {
     [ "$rc" -ne 0 ] || fail "invalid charted $field was accepted"
   done
   write_valid_payload "$data"
-  jq '.charted[0].link = "http://example.com/unsafe"' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  jq '.charted[0].pr_url = "http://example.com/unsafe"' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
   set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
-  [ "$rc" -ne 0 ] || fail "a non-HTTPS charted link was accepted"
-  pass "charted context is backward compatible and rejects invalid fields and unsafe links"
+  [ "$rc" -ne 0 ] || fail "a non-HTTPS charted PR was accepted"
+  write_valid_payload "$data"
+  jq '.charted[0].pr_url = "https://reports.example.test/summary"' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+  [ "$rc" -ne 0 ] || fail "a report URL was accepted as a charted PR"
+  write_valid_payload "$data"
+  jq '.charted[0].link = "https://github.com/example/sample/pull/2"' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+  [ "$rc" -ne 0 ] || fail "the generic charted link alias was accepted"
+  pass "charted context accepts recorded PRs and rejects report links and aliases"
 }
 
 test_charted_kind_is_optional_and_accepts_both_values() {

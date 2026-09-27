@@ -718,7 +718,7 @@ __FM_BEARINGS_BOARD_DATA__
     } else {
       head.appendChild(el("span", "bb-pick-spacer"));
     }
-    var hasContext = !!(t.about || t.filed || t.link || t.report_path);
+    var hasContext = !!(t.about || t.filed || t.pr_url || t.report_path);
     var details = el(hasContext ? "details" : "div", "bb-charted-card__details");
     var summary = el(hasContext ? "summary" : "div", "bb-charted-card__summary" + (hasContext ? "" : " bb-charted-card__summary--static"));
     var main = el("div", "bb-row__main");
@@ -737,12 +737,12 @@ __FM_BEARINGS_BOARD_DATA__
       if (t.about) ctx.appendChild(ctxRow("about", t.about));
       if (!t.dispatchable) ctx.appendChild(ctxRow("waiting on", waiting));
       if (t.filed) ctx.appendChild(ctxRow("filed", t.filed));
-      if (!t.link && t.report_path) ctx.appendChild(ctxRow("report", t.report_path));
+      if (!t.pr_url && t.report_path) ctx.appendChild(ctxRow("report", t.report_path));
       context.appendChild(ctx);
-      if (t.link) {
-        var link = el("a", "bb-decision__link", t.link);
-        link.href = t.link; link.target = "_blank"; link.rel = "noopener";
-        context.appendChild(link);
+      if (t.pr_url) {
+        var pr = el("a", "bb-decision__link", t.pr_url);
+        pr.href = t.pr_url; pr.target = "_blank"; pr.rel = "noopener";
+        context.appendChild(pr);
       }
       details.appendChild(context);
     }

@@ -245,7 +245,7 @@ test_charted_cards_show_context_and_preserve_dispatch_rules() {
   home=$(make_home charted-context)
   out=$(render "$home" '[
     {"id":"ready","repo":"sample","title":"Ready work","reason":"queued","dispatchable":true,
-     "about":"Add the customer view","filed":"2026-08-01","link":"https://github.com/example/sample/pull/7"},
+     "about":"Add the customer view","filed":"2026-08-01","pr_url":"https://github.com/example/sample/pull/7"},
     {"id":"held","repo":"sample","title":"Held work","reason":"blocked on prep","dispatchable":false,
      "about":"Depends on the migration","filed":"2026-07-20"},
     {"id":"legacy","repo":"sample","title":"Legacy wait","reason":"until Friday","dispatchable":false},
