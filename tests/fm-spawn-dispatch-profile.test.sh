@@ -102,7 +102,8 @@ run_spawn() {
   # which would make launch assertions depend on the developer's environment.
   # A test opts in to the set case via FM_TEST_CLAUDE_CONFIG_DIR.
   CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
-    FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_PI_VERSION="${FM_TEST_PI_VERSION:-0.84.0}" \
+    FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_PANE_LOG="${FM_TEST_PANE_LOG:-}" \
+    FM_FAKE_PI_VERSION="${FM_TEST_PI_VERSION:-0.84.0}" \
     FM_FAKE_CURSOR_MODELS="${FM_TEST_CURSOR_MODELS:-}" \
     FM_FAKE_CURSOR_LIST_STATUS="${FM_TEST_CURSOR_LIST_STATUS:-0}" \
     GROK_HOME="$home/grok-home" \
@@ -879,6 +880,23 @@ test_batch_preserves_native_ultra() {
   assert_contains "$launch" "--codex-effort 'ultra'" "batch dropped native effort"
   assert_not_contains "$launch" "--thinking 'ultra'" "batch passed an invalid Pi level"
   pass "batch dispatch preserves native Ultra in metadata and launch flags"
+}
+
+test_pi_scout_launch_enters_recorded_worktree() {
+  local rec id out status
+  id=profile-pi-scout-cwd-z1
+  rec=$(make_spawn_case profile-pi-scout-cwd pi "$id")
+  read_case_record "$rec"
+
+  FM_TEST_PANE_LOG="$CASE_DIR/pane.log"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --scout --harness pi)
+  status=$?
+  unset FM_TEST_PANE_LOG
+  expect_code 0 "$status" "Pi scout spawn should succeed"
+  assert_grep "cd -- '$WT_DIR'" "$CASE_DIR/pane.log" \
+    "Pi scout spawn must enter the recorded worktree before launching the agent"
+  pass "Pi scout spawn enters the recorded worktree before launch"
 }
 
 test_pi_threads_model_and_max_effort() {
@@ -1775,6 +1793,7 @@ test_opencode_omits_variant_when_model_family_lacks_effort
 test_native_effort_validator_keeps_axes_separate
 test_native_pi_ultra_is_explicit_and_model_scoped
 test_batch_preserves_native_ultra
+test_pi_scout_launch_enters_recorded_worktree
 test_pi_threads_model_and_max_effort
 test_pi_tui_mode_probe_is_safe_for_old_and_new_pi
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity
