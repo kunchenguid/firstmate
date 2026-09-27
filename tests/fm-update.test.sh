@@ -740,6 +740,46 @@ test_jj_reread_baselines_on_working_copy() {
   pass "JJ9 the reread verdict baselines on the working copy for a behind bookmark"
 }
 
+# --- JJ10: a described non-empty working copy reports its description ---------
+test_jj_described_nonempty_reports_description() {
+  jj_available || { echo "skip: jj not found (jj colocated fixture)"; return 0; }
+  local w out
+  w=$(new_jj_world jj10)
+  printf 'wip edit\n' >> "$w/main/AGENTS.md"
+  jj -R "$w/main" describe -m wip >/dev/null 2>&1
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "firstmate: skipped: described working copy commit" \
+    "described working copy reported by its description"
+  assert_not_contains "$out" "firstmate: skipped: dirty working tree" \
+    "described content is not mislabeled as unlanded dirt"
+  grep -q 'wip edit' "$w/main/AGENTS.md" || fail "described work discarded"
+  [ "$(jj -R "$w/main" log -r '@' --no-graph -T 'description.first_line()' 2>/dev/null)" = "wip" ] \
+    || fail "described working-copy commit was left behind"
+  pass "JJ10 a described non-empty working copy reports the description reason"
+}
+
+# --- JJ11: a plain jj new above the base advances instead of wedging ----------
+test_jj_plain_new_above_base_advances() {
+  jj_available || { echo "skip: jj not found (jj colocated fixture)"; return 0; }
+  local w out
+  w=$(new_jj_world jj11)
+  jj -R "$w/main" new >/dev/null 2>&1
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "firstmate: updated " "plain parked chain above the base advanced"
+  assert_contains "$out" "reread-firstmate: no" "unchanged served files do not reread"
+  [ "$(jj -R "$w/main" log -r main --no-graph -T 'commit_id' 2>/dev/null)" = \
+    "$(jj -R "$w/main" log -r main@origin --no-graph -T 'commit_id' 2>/dev/null)" ] \
+    || fail "jj default bookmark moved off the base"
+  [ "$(jj -R "$w/main" log -r '@' --no-graph -T 'empty' 2>/dev/null)" = "true" ] \
+    || fail "jj working copy not clean after advance"
+  grep -q 'v1' "$w/main/AGENTS.md" || fail "jj files changed unexpectedly"
+  pass "JJ11 a plain jj new above the base advances instead of wedging"
+}
+
 # --- JJ8: current bookmark with a side-commit working copy is skipped --------
 test_jj_side_commit_wc_skipped() {
   jj_available || { echo "skip: jj not found (jj colocated fixture)"; return 0; }
@@ -769,6 +809,8 @@ test_jj_parked_outside_skipped
 test_jj_stale_parked_wc_advances
 test_jj_side_commit_wc_skipped
 test_jj_reread_baselines_on_working_copy
+test_jj_described_nonempty_reports_description
+test_jj_plain_new_above_base_advances
 
 test_updates_main_and_secondmate
 test_reread_gate_is_instruction_only
