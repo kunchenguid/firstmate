@@ -1491,8 +1491,8 @@ SH
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 const prelude = process.env.DRIVER_PRELUDE;
-await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, fire, settle, home, sentToMain, mainEntries, defaultSessionCtx }; })()`);
-const { dispatch, fire, settle, home, sentToMain, mainEntries, defaultSessionCtx } = globalThis.__t;
+await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, fire, settle, home, sentToMain, mainEntries, mainTools, outcomeScript, defaultSessionCtx }; })()`);
+const { dispatch, fire, settle, home, sentToMain, mainEntries, mainTools, outcomeScript, defaultSessionCtx } = globalThis.__t;
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 
 // Default-on: with no config/pi-supervision-branch grant file present at
@@ -1554,6 +1554,48 @@ const fleetRoutineMerge = sentToMain[sentToMain.length - 1];
 if (fleetRoutineMerge.message.display !== true) throw new Error("a fleet routine action must render");
 if (!fleetRoutineMerge.message.content.startsWith("⛵ fleet: reconciled the backlog after completed work")) {
   throw new Error(`fleet routine action note changed: ${fleetRoutineMerge.message.content}`);
+}
+writeFileSync(`${home}/state/task-9.status`, "working: check 1 worker still building\n");
+const taskNoChangeSummary = "The check 1 worker is still building. Nothing new has happened.";
+const sentBeforeSilentTask = sentToMain.length;
+const silentTaskResult = await heartbeatReport.execute(
+  "task-no-change",
+  { task: "task-9", verdict: "routine", summary: taskNoChangeSummary, silent: true },
+  undefined,
+  undefined,
+  {},
+);
+if (silentTaskResult.isError) throw new Error(`a silent task-level routine outcome was refused: ${JSON.stringify(silentTaskResult)}`);
+const taskNoChangeMerge = sentToMain[sentToMain.length - 1];
+if (sentToMain.length !== sentBeforeSilentTask + 1 || taskNoChangeMerge.message.display !== false) {
+  throw new Error("a silent task-level no-change outcome rendered a note or was not delivered");
+}
+const storedTaskNoChange = outcomeScript(["list", "--recent", "100"]).split("\n").filter(Boolean)
+  .map((line) => JSON.parse(line)).find((row) => row.task === "task-9" && row.summary === taskNoChangeSummary);
+if (!storedTaskNoChange || storedTaskNoChange.verdict !== "routine" || storedTaskNoChange.silent !== true) {
+  throw new Error("the silent task no-change outcome was not stored durably");
+}
+if (!existsSync(`${home}/state/.task-9.branch-outcome-index`)) {
+  throw new Error("the silent task outcome was omitted from the status-outcome backstop index");
+}
+const outcomesTool = mainTools.find((tool) => tool.name === "fm_branch_outcomes");
+const listedTaskNoChange = await outcomesTool.execute("read-silent-task", { recent: 100 }, undefined, undefined, {});
+if (listedTaskNoChange.isError || !listedTaskNoChange.content.some((item) => item.text.includes(taskNoChangeSummary))) {
+  throw new Error("fm_branch_outcomes did not expose the silent task no-change outcome");
+}
+const beforeCaptainSilent = outcomeScript(["list", "--recent", "100"]).trim();
+const captainSilent = await heartbeatReport.execute(
+  "captain-silent-refused",
+  { task: "fleet", verdict: "captain", summary: "captain outcomes stay visible", silent: true },
+  undefined,
+  undefined,
+  {},
+);
+if (!captainSilent.isError || !captainSilent.content.some((item) => item.text.includes("routine verdict"))) {
+  throw new Error("a captain outcome with silent=true was not refused");
+}
+if (outcomeScript(["list", "--recent", "100"]).trim() !== beforeCaptainSilent) {
+  throw new Error("refusing a silent captain outcome still stored it");
 }
 await heartbeatReport.execute(
   "task-routine",
