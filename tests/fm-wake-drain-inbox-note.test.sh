@@ -100,17 +100,23 @@ test_handled_note_is_not_renamed_at_ack() {
 }
 
 test_note_above_cutoff_is_not_named() {
-  local dir late_out late_id
+  local dir late_out late_id late_seq
   dir=$(make_case late-note)
   seed_and_drain "$dir" "first note" 2
-  run_inbox "$dir" drain --ack "$NOTE_ID" >/dev/null || fail "note acknowledgement failed"
   late_out=$(run_inbox "$dir" note "arrived after presentation") || fail "late note could not be queued"
   late_id=$(printf '%s\n' "$late_out" | awk '/^queued /{ print $2; exit }')
+  late_seq=$(awk -F '\t' -v key="inbox:$late_id" '$4 == key {print $2; exit}' "$dir/state/.wake-queue")
 
   run_ack "$dir"
   grep -F "inbox:$late_id" "$dir/state/.wake-queue" >/dev/null \
     || fail "the late note's unpresented wake row was consumed by the earlier acknowledgement"
-  pass "a note whose wake arrived after presentation keeps its row and is not named early"
+  grep -Fx "$late_seq" "$dir/state/.wake-main-rows" >/dev/null 2>&1 \
+    && fail "main claimed the unpresented late note"
+  FM_STATE_OVERRIDE="$dir/state" "$ROOT/bin/fm-wake-grant.sh" activate "$$" late-note >/dev/null || fail "grant activate failed"
+  FM_STATE_OVERRIDE="$dir/state" "$ROOT/bin/fm-wake-grant.sh" publish late-note "$late_seq" >/dev/null || fail "late note was not grantable"
+  FM_STATE_OVERRIDE="$dir/state" FM_SUPERVISION_ACTOR=branch "$DRAIN" > "$dir/late.out" 2> "$dir/late.err" || fail "branch drain failed"
+  grep -F "check: captain inbox note $late_id" "$dir/late.out" >/dev/null || fail "late note was not presented to branch"
+  pass "pending note stays claimed while a late arrival remains grantable"
 }
 
 test_branch_ack_releases_pending_note_for_next_grant() {
