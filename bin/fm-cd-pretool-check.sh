@@ -54,8 +54,9 @@ Usage: fm-cd-pretool-check.sh [--command <cmd>] [--claude|--cursor]
 
 With no --command, reads a PreToolUse-style JSON payload on stdin (Grok
 toolInput.command, or Claude/Codex tool_input.command).
-Fires only in the real primary firstmate checkout; it is a silent no-op in a
-crewmate/scout task worktree or any non-firstmate repo.
+Fires only in the real primary firstmate checkout. Outside that checkout,
+including a crewmate or scout task worktree, it uses the allow rendering
+and never denies.
 Exits 0 to allow a command, and exits 2 to deny one when no mode flag is set.
 With --claude or --cursor, allow and deny both exit 0 and print one JSON
 document on stdout. docs/arm-pretool-check.md owns those documents.

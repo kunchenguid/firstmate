@@ -103,9 +103,9 @@ Do not ship that Claude-only list in tracked project settings, because linked
 worktrees inherit it and legitimate crewmates would lose their delegation tools.
 This hook remains as the shipped guard for future delegation-shaped names
 outside any local fixed list.
-Fires only in a genuine firstmate primary home; it is a silent no-op in a
-crewmate/scout task worktree or any non-firstmate repo, where a worker using
-delegation tools is legitimate.
+Fires only in a genuine firstmate primary home. In a crewmate or scout task
+worktree or any non-firstmate repo it uses the allow rendering, where a
+worker using delegation tools is legitimate.
 Exits 0 to allow, and exits 2 to deny when no mode flag is set.
 With --claude, allow and deny both exit 0 and print one JSON document on
 stdout. docs/arm-pretool-check.md owns those documents.

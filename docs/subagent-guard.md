@@ -164,8 +164,7 @@ A tool removed from the schema stays removed, so a genuinely intended use of a l
 
 [`arm-pretool-check.md`](arm-pretool-check.md) owns the JSON documents and exit statuses.
 This checker has no `--cursor` mode, and its deny reason is prefixed `[subagent-dispatch]`.
-A `--claude` allow or fail-open prints `{}` and exits 0, because Cursor blocks a permission hook whose stdout is not JSON.
-Malformed or empty stdin, invalid JSON, a payload with no tool name, and missing `jq` for stdin transport all use that allow rendering.
+Malformed or empty stdin, invalid JSON, a payload with no tool name, and missing `jq` for stdin transport all use the allow rendering that document owns.
 
 The deny message names the real dispatch path.
 When `bin/fm-scout.sh` exists in the home the message first defers to the `AGENTS.md` intake classification, then routes work already classified as a scout there and authorized ship work with its bounded research to `bin/fm-brief.sh` then `bin/fm-spawn.sh`.
