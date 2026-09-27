@@ -31,18 +31,22 @@ PARENT_ROUTE_INBOX="$REMOTE_HOME/state/parent-route/ios.inbox"
 CLAIMS="$TMP_ROOT/claims"
 mkdir -p "$PARENT/data" "$PARENT/state" "$PARENT/config" "$PARENT/projects" "$REMOTE_ROOT" "$CLAIMS"
 cleanup() {
-  local worker_pid='' wait_attempt=0
+  local worker_pid=''
   touch "$TMP_ROOT/provision.release" "$TMP_ROOT/seed.release" "$TMP_ROOT/handoff.release" \
-    "$TMP_ROOT/inherit.release" "$TMP_ROOT/launch.release" 2>/dev/null || true
+    "$TMP_ROOT/inherit.release" "$TMP_ROOT/launch.release" "$TMP_ROOT/race-clone.release" 2>/dev/null || true
+  # A watcher leg cut short by a failed assertion is still polling the root.
+  if [ -n "${watch_pid:-}" ]; then
+    kill "$watch_pid" 2>/dev/null || true
+    wait "$watch_pid" 2>/dev/null || true
+  fi
   FM_HOME="$PARENT" FM_PROCEVENT_CLAIM_ROOT="$CLAIMS" \
     "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true
   if [ -f "$TMP_ROOT/remote-jobs/worker.pid" ]; then
     worker_pid=$(cat "$TMP_ROOT/remote-jobs/worker.pid")
-    kill "$worker_pid" 2>/dev/null || true
-    while kill -0 "$worker_pid" 2>/dev/null && [ "$wait_attempt" -lt 100 ]; do
-      wait_attempt=$((wait_attempt + 1))
-      sleep 0.05
-    done
+    # The published pid is the serving child; killing it alone lets its
+    # detached supervisor restart it while the fixture root is being removed.
+    . "$ROOT/bin/fm-remote-job-lib.sh"
+    fm_remote_job_stop_worker_tree "$worker_pid" || true
   fi
   rm -rf -- "$TMP_ROOT"
 }
@@ -318,12 +322,40 @@ seed_env() {
 REAL_GIT=$(command -v git)
 cat > "$FAKEBIN/git" <<SH
 #!/usr/bin/env bash
-if [ "\${1:-}" = clone ] && [ "\${!#}" = "$TMP_ROOT/concurrent-home" ]; then
-  printf 'clone\n' >> "$TMP_ROOT/provision-clones"
-  if mkdir "$TMP_ROOT/provision-first" 2>/dev/null; then
-    touch "$TMP_ROOT/provision.entered"
-    while [ ! -f "$TMP_ROOT/provision.release" ]; do sleep 0.02; done
-  fi
+if [ "\${1:-}" = clone ]; then
+  case "\${!#}" in
+    "$TMP_ROOT/concurrent-home"|"$TMP_ROOT"/.fm-home-provisioning.*)
+      printf 'clone\n' >> "$TMP_ROOT/provision-clones"
+      if mkdir "$TMP_ROOT/provision-first" 2>/dev/null; then
+        touch "$TMP_ROOT/provision.entered"
+        while [ ! -f "$TMP_ROOT/provision.release" ]; do sleep 0.02; done
+      fi
+      ;;
+  esac
+fi
+if [ "\${1:-}" = clone ] && [ -n "\${FM_FAKE_CLONE_HOLD_DIR:-}" ] \
+  && [ "\$(dirname "\${!#}")" = "\$FM_FAKE_CLONE_HOLD_DIR" ]; then
+  hold_dest="\${!#}"
+  "$REAL_GIT" "\$@" &
+  hold_git=\$!
+  hold_state() { ps -o stat= -p "\$hold_git" 2>/dev/null | tr -d '[:space:]'; }
+  while [ ! -d "\$hold_dest/.git/objects" ]; do
+    case "\$(hold_state)" in ''|Z*) wait "\$hold_git"; exit \$? ;; esac
+    sleep 0.005
+  done
+  kill -STOP "\$hold_git" 2>/dev/null || true
+  while :; do
+    case "\$(hold_state)" in
+      T*) break ;;
+      ''|Z*) wait "\$hold_git"; exit \$? ;;
+    esac
+    sleep 0.005
+  done
+  touch "$TMP_ROOT/race-clone.held"
+  while [ ! -f "$TMP_ROOT/race-clone.release" ] && [ -d "$TMP_ROOT" ]; do sleep 0.02; done
+  kill -CONT "\$hold_git" 2>/dev/null || true
+  wait "\$hold_git"
+  exit \$?
 fi
 exec "$REAL_GIT" "\$@"
 SH
@@ -358,6 +390,76 @@ wait "$provision_two" || fail "reconciled provisioning attempt failed"
 [ "$(grep -cF clone "$TMP_ROOT/provision-clones")" -eq 1 ] \
   || fail "reconciled provisioning cloned the already-published home"
 pass "overlapping remote home provisioning serializes through publication and rollback"
+
+# A competing cleanup aimed at the public home path must never reach a clone
+# that is still being written: the home clone is staged privately and published
+# by rename, so the racing rm -rf finds only an absent path.
+printf 'schema=fm-remote-home-provision.v1\nid_b64=%s\ncharter_b64=%s\nproject_count=0\n' \
+  "$(printf race | base64 | tr -d '\n')" \
+  "$(printf 'Cleanup-race provisioning charter.\n' | base64 | tr -d '\n')" \
+  > "$TMP_ROOT/race.manifest"
+PATH="$FAKEBIN:$PATH" FM_HOME="$TMP_ROOT/raced-home" FM_ROOT_OVERRIDE="$REMOTE_ROOT" \
+  FM_FAKE_CLONE_HOLD_DIR="$TMP_ROOT" \
+  "$REMOTE_ROOT/bin/fm-remote-home-provision.sh" < "$TMP_ROOT/race.manifest" \
+  > "$TMP_ROOT/race-provision.out" 2>&1 &
+race_provision=$!
+race_wait=0
+while [ ! -f "$TMP_ROOT/race-clone.held" ]; do
+  kill -0 "$race_provision" 2>/dev/null || fail "provision exited before its clone could be held"
+  race_wait=$((race_wait + 1))
+  [ "$race_wait" -le 250 ] || fail "provision clone never reached the held point"
+  sleep 0.02
+done
+rm -rf -- "$TMP_ROOT/raced-home"
+touch "$TMP_ROOT/race-clone.release"
+wait "$race_provision" \
+  || { sed 's/^/race-provision: /' "$TMP_ROOT/race-provision.out"; fail "competing home cleanup reached a live provisioning clone"; }
+[ "$(cat "$TMP_ROOT/raced-home/.fm-secondmate-home")" = race ] \
+  || fail "raced provisioning lost its published home marker"
+if [ "$(git -C "$TMP_ROOT/raced-home" rev-parse --show-toplevel 2>/dev/null)" = "$TMP_ROOT/raced-home" ] \
+  && [ "$(git -C "$TMP_ROOT/raced-home" rev-parse HEAD)" = "$(git -C "$REMOTE_ROOT" rev-parse HEAD)" ] \
+  && git -C "$TMP_ROOT/raced-home" fsck --full --no-progress >/dev/null 2>&1 \
+  && [ -z "$(git -C "$TMP_ROOT/raced-home" status --porcelain)" ] \
+  && cmp -s "$REMOTE_ROOT/AGENTS.md" "$TMP_ROOT/raced-home/AGENTS.md"; then
+  :
+else
+  fail "raced provisioning published an incomplete clone"
+fi
+if find "$TMP_ROOT" -maxdepth 1 -name '.fm-home-provisioning.*' -print -quit | grep -q .; then
+  fail "raced provisioning left staging litter beside the home"
+fi
+pass "competing cleanup of the public home cannot reach a live provisioning clone"
+
+# A home that appears at the public path while the clone is staged must make
+# the provision die without adopting, altering, or nesting into that home.
+rm -f -- "$TMP_ROOT/race-clone.held" "$TMP_ROOT/race-clone.release"
+PATH="$FAKEBIN:$PATH" FM_HOME="$TMP_ROOT/appeared-home" FM_ROOT_OVERRIDE="$REMOTE_ROOT" \
+  FM_FAKE_CLONE_HOLD_DIR="$TMP_ROOT" \
+  "$REMOTE_ROOT/bin/fm-remote-home-provision.sh" < "$TMP_ROOT/race.manifest" \
+  > "$TMP_ROOT/appeared-provision.out" 2>&1 &
+appeared_provision=$!
+race_wait=0
+while [ ! -f "$TMP_ROOT/race-clone.held" ]; do
+  kill -0 "$appeared_provision" 2>/dev/null || fail "appeared-home provision exited before its clone could be held"
+  race_wait=$((race_wait + 1))
+  [ "$race_wait" -le 250 ] || fail "appeared-home provision clone never reached the held point"
+  sleep 0.02
+done
+mkdir "$TMP_ROOT/appeared-home"
+printf 'foreign\n' > "$TMP_ROOT/appeared-home/foreign"
+touch "$TMP_ROOT/race-clone.release"
+if wait "$appeared_provision"; then
+  fail "provision adopted a home that appeared while it was being provisioned"
+fi
+grep -qF "remote home appeared while it was being provisioned" "$TMP_ROOT/appeared-provision.out" \
+  || { sed 's/^/appeared-provision: /' "$TMP_ROOT/appeared-provision.out"; fail "appeared-home provision died for the wrong reason"; }
+[ "$(find "$TMP_ROOT/appeared-home" -mindepth 1 | wc -l | tr -d ' ')" -eq 1 ] \
+  && [ "$(cat "$TMP_ROOT/appeared-home/foreign")" = foreign ] \
+  || fail "provision altered a home that appeared while it was being provisioned"
+if find "$TMP_ROOT" -maxdepth 1 -name '.fm-home-provisioning.*' -print -quit | grep -q .; then
+  fail "appeared-home provisioning left staging litter beside the home"
+fi
+pass "a home that appears mid-provision makes the provision die without touching it"
 if [ "${FM_TEST_PROVISION_ONLY:-0}" = 1 ]; then
   echo "ALL TESTS PASSED"
   exit 0
@@ -1143,9 +1245,11 @@ jq --arg p "$ios_pane" \
   || fail "the agent-free remote pane did not classify dead"
 
 tabs_before=$(grep -c '^tab create' "$HERDR_LOG" || true)
+# exec keeps $! the watcher itself rather than the function's subshell, so a
+# kill reaches the process that probes and writes into the fixture root.
 FM_STATE_OVERRIDE="$WATCH_STATE" FM_SECONDMATE_LIVENESS_SECS=1 FM_POLL=1 \
   FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
-  remote_env "$ROOT/bin/fm-watch.sh" \
+  remote_env exec "$ROOT/bin/fm-watch.sh" \
   > "$TMP_ROOT/watch-liveness.out" 2> "$TMP_ROOT/watch-liveness.err" &
 watch_pid=$!
 watch_wait=0
@@ -1159,6 +1263,7 @@ if kill -0 "$watch_pid" 2>/dev/null; then
 fi
 wait "$watch_pid" \
   || fail "the liveness watcher leg exited non-zero: $(cat "$TMP_ROOT/watch-liveness.err")"
+watch_pid=''
 grep -F 'check: secondmate ios auto-relaunched after remote endpoint dead on its configured host (host=remote-mac)' \
   "$TMP_ROOT/watch-liveness.out" >/dev/null \
   || fail "the dead remote secondmate was not auto-relaunched: $(cat "$TMP_ROOT/watch-liveness.out")"
@@ -1196,7 +1301,7 @@ ssh_before=$(cat "$SSH_COUNT" 2>/dev/null || printf '0')
 FM_FAKE_SSH_MODE=unreachable FM_STATE_OVERRIDE="$WATCH_STATE_UNREACHABLE" \
   FM_SECONDMATE_LIVENESS_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
   FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
-  remote_env "$ROOT/bin/fm-watch.sh" \
+  remote_env exec "$ROOT/bin/fm-watch.sh" \
   > "$TMP_ROOT/watch-unreachable.out" 2> "$TMP_ROOT/watch-unreachable.err" &
 watch_pid=$!
 sleep 4
@@ -1204,8 +1309,18 @@ kill -0 "$watch_pid" 2>/dev/null \
   || fail "the watcher exited against an unreachable remote secondmate: $(cat "$TMP_ROOT/watch-unreachable.out" "$TMP_ROOT/watch-unreachable.err")"
 kill "$watch_pid" 2>/dev/null || true
 wait "$watch_pid" 2>/dev/null || true
+watch_pid=''
+sleep 1
 ssh_after=$(cat "$SSH_COUNT" 2>/dev/null || printf '0')
 [ "$ssh_after" -gt "$ssh_before" ] || fail "the unreachable remote endpoint was never probed"
+# A watcher that survives this stop keeps probing into the fixture root until
+# the EXIT trap races its removal, so prove nothing polls past a few cycles.
+touch "$TMP_ROOT/watch-unreachable.stopped"
+sleep 3
+[ "$(cat "$SSH_COUNT" 2>/dev/null || printf '0')" = "$ssh_after" ] \
+  || fail "the stopped unreachable watcher kept probing the remote endpoint"
+[ -z "$(find "$WATCH_STATE_UNREACHABLE" -newer "$TMP_ROOT/watch-unreachable.stopped" -print)" ] \
+  || fail "the stopped unreachable watcher kept writing its state"
 [ ! -s "$WATCH_STATE_UNREACHABLE/.wake-queue" ] \
   || fail "an unreachable remote probe queued a wake: $(cat "$WATCH_STATE_UNREACHABLE/.wake-queue")"
 assert_absent "$WATCH_STATE_UNREACHABLE/.secondmate-relaunch-ios" \
@@ -1358,17 +1473,21 @@ printf 'confirmed:%s\n' "$retired_wake_corr" > "$PARENT/state/.backlog-handoff-i
 printf '%s\tattempt\n' "$(date +%s)" > "$PARENT/state/.secondmate-relaunch-ios"
 printf '%s\tdead\n' "$(date +%s)" > "$PARENT/state/.secondmate-relaunch-bound-ios"
 liveness_lock="$PARENT/state/.secondmate-liveness-ios.lock"
-( STATE="$PARENT/state" exec bash -c '. "$1" && fm_lock_acquire_wait "$2" && exec sleep 120' \
-    _ "$ROOT/bin/fm-wake-lib.sh" "$liveness_lock" ) &
+# The link is published before the claim finishes; signal only after acquire.
+# shellcheck disable=SC2016 # Positional parameters expand in the child shell.
+( STATE="$PARENT/state" exec bash -c '. "$1" && fm_lock_acquire_wait "$2" && touch "$3" && exec sleep 120' \
+    _ "$ROOT/bin/fm-wake-lib.sh" "$liveness_lock" "$TMP_ROOT/liveness.entered" ) &
 liveness_holder_pid=$!
 liveness_wait=0
-while [ ! -d "$liveness_lock" ]; do
+while [ ! -f "$TMP_ROOT/liveness.entered" ]; do
   kill -0 "$liveness_holder_pid" 2>/dev/null || fail "liveness lock holder exited before acquiring the lock"
   liveness_wait=$((liveness_wait + 1))
   [ "$liveness_wait" -le 250 ] || fail "liveness lock holder never acquired the lock"
   sleep 0.02
 done
-liveness_owner=$(cat "$liveness_lock/pid")
+liveness_owner=$liveness_holder_pid
+[ "$(cat "$liveness_lock/pid" 2>/dev/null)" = "$liveness_owner" ] \
+  || fail "liveness lock holder did not own its acquired lock"
 if remote_env "$ROOT/bin/fm-teardown.sh" ios > "$TMP_ROOT/teardown-liveness-busy.out" 2>&1; then
   fail "remote retirement proceeded under an active liveness episode"
 fi

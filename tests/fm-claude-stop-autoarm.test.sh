@@ -66,11 +66,13 @@ make_crewmate_worktree_dir() {
 }
 
 # Run the hook as a child of the fake harness holding the fixture home's
-# session lock. $1 = fixture dir. Any extra env assignments must be exported
-# before invocation. Captures stdout+stderr; exit code on stdout of the caller.
+# session lock. $1 = fixture dir. $2 = optional Stop payload, defaulting to a
+# bare Claude-shaped payload with no transcript_path. Any extra env
+# assignments must be exported before invocation. Captures stdout+stderr;
+# exit code on stdout of the caller.
 run_autoarm() {
-  local dir=$1 rc=0
-  printf '%s\n' '{"session_id":"sess-autoarm","stop_hook_active":false}' \
+  local dir=$1 payload=${2:-'{"session_id":"sess-autoarm","stop_hook_active":false}'} rc=0
+  printf '%s\n' "$payload" \
     | FM_HOME="$dir" "$FAKE_CLAUDE" -c '
         printf "%s\n" "$$" > "$FM_HOME/state/.lock"
         "$FM_HOME/bin/fm-claude-stop-autoarm.sh"
@@ -426,6 +428,41 @@ test_actionable_close_rewakes_with_reason() {
   [ ! -e "$dir/state/.claude-autoarm.lock" ] || fail "owner lock must be released after the cycle"
   [ -e "$dir/state/arm-ran" ] || fail "hook never foregrounded the arm wrapper"
   pass "auto-arm: actionable close translates to exactly one exit-2 rewake with reason"
+}
+
+# pi-code (Pi's Claude-hook compatibility extension) delivers a Claude-shaped
+# Stop payload but awaits the hook with no asyncRewake support, so the hook
+# must stand down or it wedges Pi's turn for the declared timeout (issue
+# #3343). The discriminator is the payload's transcript_path: pi-code stamps
+# Pi's own session file under .pi/, which a Claude transcript path never
+# contains, so the stand-down must not overmatch a genuine Claude payload or a
+# payload with no transcript_path at all.
+test_stands_down_only_on_pi_code_transcript_path() {
+  local dir out status
+
+  dir=$(make_primary_dir "$TMP_ROOT/picode-pi")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  out=$(run_autoarm "$dir" '{"session_id":"sess-pi","stop_hook_active":false,"transcript_path":"/home/u/.pi/agent/sessions/s.jsonl"}' 2>/dev/null); status=$?
+  expect_code 0 "$status" "hook must stand down silently on a pi-code-delivered transcript_path"
+  [ -z "$out" ] || fail "pi-code stand-down printed output: $out"
+  [ ! -e "$dir/state/arm-ran" ] || fail "hook armed on a pi-code-delivered payload"
+
+  dir=$(make_primary_dir "$TMP_ROOT/picode-claude")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  out=$(run_autoarm "$dir" '{"session_id":"sess-claude","stop_hook_active":false,"transcript_path":"/home/u/.claude/projects/-home-u--pi-proj/s.jsonl"}' 2>/dev/null); status=$?
+  expect_code 2 "$status" "a Claude-shaped transcript_path must still arm and rewake"
+  [ -e "$dir/state/arm-ran" ] || fail "hook did not arm with a Claude-shaped transcript_path present"
+
+  dir=$(make_primary_dir "$TMP_ROOT/picode-none")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a payload without transcript_path must still arm"
+  [ -e "$dir/state/arm-ran" ] || fail "hook did not arm without a transcript_path"
+
+  pass "auto-arm: stands down only on a pi-code-delivered transcript_path (/.pi/)"
 }
 
 test_actionable_close_with_live_successor_rewakes_once() {
@@ -858,6 +895,55 @@ test_abandoned_owner_claim_is_reclaimed_and_rearms() {
   assert_absent "$dir/state/.claude-autoarm.lock" "reclaimed cycle left an owner lock behind"
   assert_absent "$dir/state/.claude-autoarm.lock.steal" "reclaim left its serialization mutex behind"
   pass "auto-arm: an abandoned owner claim is reclaimed so a lapsed cycle re-arms"
+}
+
+# An interrupted reclaim leaves the abandoned-claim mutex linked to a dead
+# owner. The next reclaim must reap it directly, never by nesting another
+# .steal.steal mutex around it.
+test_abandoned_claim_reclaim_reaps_dead_steal_without_nesting() {
+  local dir out status pid holder lnbin lnlog i
+  dir=$(make_primary_dir "$TMP_ROOT/abandoned-claim-dead-steal")
+  : > "$dir/state/task1.meta"
+  write_arm_fixture "$dir" actionable
+  sleep 60 &
+  pid=$!
+  record_autoarm_owner "$dir" "$pid"
+  record_autoarm_epoch "$dir" 464 "$pid" rewake
+  FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1"
+    fm_lock_try_create "$2" || exit 7
+    exec sleep 30
+  ' _ "$dir/bin/fm-wake-lib.sh" "$dir/state/.claude-autoarm.lock.steal" >/dev/null 2>&1 &
+  holder=$!
+  i=0
+  while [ "$i" -lt 50 ] && [ ! -s "$dir/state/.claude-autoarm.lock.steal/pid" ]; do
+    sleep 0.02
+    i=$((i + 1))
+  done
+  kill -KILL "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  assert_present "$dir/state/.claude-autoarm.lock.steal" "fixture did not leave a dead-owner steal mutex"
+  lnbin="$dir/lnbin"
+  lnlog="$dir/ln.log"
+  mkdir -p "$lnbin"
+  cat > "$lnbin/ln" <<'SH'
+#!/usr/bin/env bash
+last=
+for arg do last=$arg; done
+printf '%s\n' "$last" >> "$FM_TEST_LN_LOG"
+exec /bin/ln "$@"
+SH
+  chmod +x "$lnbin/ln"
+  : > "$lnlog"
+  out=$(PATH="$lnbin:$PATH" FM_TEST_LN_LOG="$lnlog" run_autoarm "$dir" 2>/dev/null); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 2 "$status" "a dead-owner steal mutex must not keep an abandoned claim unrecoverable"
+  [ -e "$dir/state/arm-ran" ] || fail "dead-owner steal mutex left the home unarmed with work in flight"
+  ! grep -q '\.steal\.steal$' "$lnlog" \
+    || fail "reclaiming past a dead steal owner created a nested steal marker: $(tr '\n' ' ' < "$lnlog")"
+  assert_absent "$dir/state/.claude-autoarm.lock.steal" "reclaim left the dead steal mutex behind"
+  pass "auto-arm: an abandoned-claim reclaim reaps a dead steal mutex without nesting"
 }
 
 test_arming_claim_with_fresh_beacon_is_never_reclaimed() {
@@ -1489,6 +1575,7 @@ test_arms_for_registered_custom_check_without_inflight
 test_single_flight_admits_exactly_one_owner
 test_term_mid_arm_commits_failure_and_rewakes
 test_abandoned_owner_claim_is_reclaimed_and_rearms
+test_abandoned_claim_reclaim_reaps_dead_steal_without_nesting
 test_arming_claim_with_fresh_beacon_is_never_reclaimed
 test_fresh_arming_claim_with_stale_beacon_is_never_reclaimed
 test_claim_not_named_by_the_ledger_is_never_reclaimed
@@ -1515,3 +1602,4 @@ test_host_handback_carries_every_host_line
 test_host_stand_down_is_silent
 test_host_crash_is_retried_then_reported
 test_fm_lock_status_still_works_with_shared_lib
+test_stands_down_only_on_pi_code_transcript_path

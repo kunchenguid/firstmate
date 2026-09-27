@@ -290,7 +290,7 @@ ok - cursor primary: an away-mode escalation is delivered, confirmed, and proces
 The live run proved that session start acquires the fleet lock through Cursor's structural process identity in `bin/fm-cursor-lib.sh`; `tests/fm-session-lock-ancestry.test.sh` pins the same ancestry path portably.
 It also proved that Cursor's `autoarm` supervision model lets the mid-turn pull guard accept a fresh beacon after the between-turn watcher closes; `tests/fm-guard-stale-banner.test.sh` pins that model-aware verdict.
 The baton is claimed only by the next `stop`, so an actionable close before that claim can still produce one real follow-up from the sole existing park; durable wake handling is idempotent, and any older park still running after the claim stands down.
-Cursor's `beforeSubmitPrompt` step could close that exact window because it fires once on a real captain message and not on hook-driven follow-ups, but registering it is deliberately deferred alongside `preCompact`.
+The step is now registered for the dialog mirror, but still does not invalidate the park baton; [turnend-guard.md](../turnend-guard.md) owns the remaining pre-claim window and deferred fix.
 
 Away-mode delivery needed no daemon change once the composer reader was correct for Cursor; [`runtime-backends.md`](runtime-backends.md#composer) owns that evidence.
 
@@ -683,6 +683,63 @@ tests/fm-omp-harness.test.sh
 tests/fm-watch-checkpoint.test.sh
 tests/fm-supervision-instructions.test.sh
 tests/fm-afk-launch.test.sh
+```
+
+### Dialog mirror writers
+
+This supports [The dialog mirror](../supervision-host.md#the-dialog-mirror): the tracked Claude and Cursor registrations record the captain's prompt and main's reply, and Claude's Stop-hook rewake is not recorded as the captain's words.
+It was measured on 2026-09-25 on macOS 26.5.2 arm64 with Claude Code 2.1.282 (`haiku`) and cursor-agent 2026.09.23-86fc751, each in a disposable lab primary on a private tmux socket.
+
+```text
+$ FM_HOST_MIRROR_LIVE_E2E=1 tests/fm-host-mirror-live-e2e.test.sh
+ok - claude 2.1.282 (Claude Code): a turn the harness started itself was not mirrored as the captain's words
+ok - claude 2.1.282 (Claude Code): the tracked registrations mirrored the captain prompt and main reply
+ok - cursor 2026.09.23-86fc751: the tracked registrations mirrored the captain prompt and main reply
+ok - host mirror live: 2 harness(es) proved their writers
+```
+
+The run above exercised these payload fields:
+
+| Primary | Captain text | Main text |
+| --- | --- | --- |
+| Claude | `UserPromptSubmit` `.prompt` | `Stop` `.last_assistant_message` |
+| Cursor | `beforeSubmitPrompt` `.prompt` | `afterAgentResponse` `.text` |
+
+Deterministic entry point:
+
+```sh
+tests/fm-host-mirror.test.sh
+```
+
+### Attended posture
+
+This supports [Postures](../supervision-host.md#postures) and [Captain outcomes](../supervision-host.md#captain-outcomes): on a Claude primary the attended engine keeps routine outcomes off main, a captain outcome reaches main once and waits in the drain until acknowledged, a fresh captain outcome is never hidden behind a routine backlog, and the first drain after a return does not replay the away window.
+It was measured on 2026-09-25 on macOS arm64 with Claude Code 2.1.283 as primary and engine (`sonnet`) and Pi 0.82.0 workers on `openai-codex/gpt-5.6-sol`, in a disposable lab home on a private tmux socket.
+The routine backlog and most of the away window's rows were appended to the store through `bin/fm-branch-outcome.sh append` to reach the shape of a real long window; the engine recorded the rest, including every captain outcome that woke main.
+
+| Case | Observed |
+| --- | --- |
+| Routine outcome | `handled ... posture=attended`, no host exit, the host kept its pid, and main's pane was byte-identical before and after |
+| Captain outcome (a finished local-only worker) | `to-main branch-outcome: ... (store rows 3)`; main drained `BRANCH OUTCOMES`, landed the branch, and ran `mark-processed --through 3` |
+| Twelve waiting routine rows, then a fresh captain outcome | main's one drain printed `[seq 16]` first, then the four newest routine rows and `(8 earlier routine outcome(s) not shown; bin/fm-branch-outcome.sh list keeps them)` |
+| Return after an away window of 130 outcomes (123 routine, 7 captain over two tasks) | the first drain printed one line per task (`[seq 146, newest of 4 for this task]`, `[seq 147, newest of 3 for this task]`) and no routine rows; main processed through 147 in its return turn |
+
+Counted on a copy of that window's store, draining as main until the section is empty and running each printed acknowledgement, the drain before this change took 21 drains and 46,439 bytes of section text, and this one takes 1 drain (742 bytes after the return's drain advanced the read cursor).
+A Pi primary without `config/supervision-host` ran the same gated-worker session with the changed branch prompt: routine row 1, captain row 2 for the finished work, landing, and `fm_branch_processed` through 2, with no `BRANCH OUTCOMES` line in either conversation.
+
+```text
+$ FM_SUPERVISION_HOST_LIVE_E2E=1 tests/fm-supervision-host-live-e2e.test.sh
+# first turn: handled	turn=host-85573-1790386456.1	posture=away	rc=0
+# second turn: handled	turn=host-85573-1790386456.2	posture=away	rc=0
+ok - supervision host live (2.1.283 (Claude Code)): a real engine handles and resumes away wakes under the branch contract without waking main
+```
+
+Deterministic entry points:
+
+```sh
+tests/fm-supervision-host.test.sh
+tests/fm-afk-return.test.sh
+tests/fm-branch-supervision.test.sh
 ```
 
 ## Wedge-alarm channels

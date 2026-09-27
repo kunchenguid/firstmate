@@ -80,6 +80,16 @@ The operational inputs Calm classifies remain ordinary user-role messages.
 Pi's transcript layout renders their complete rows at zero height.
 The session-start nudge remains on its existing non-displayed custom-message path.
 
+### Queued Firstmate inputs on Pi
+
+While a turn runs, Calm also keeps those Firstmate inputs out of Pi's queued-message listing.
+The captain's own queued messages stay listed.
+Escape and the dequeue key return only the captain's queued messages to the editor.
+Hidden Firstmate inputs stay queued in their original order and are never shown as raw text or dropped.
+When Escape, or navigating the session tree, stops a run with Firstmate inputs still queued, Calm starts one new turn to deliver them.
+Calm then shows the one-line notice `Firstmate supervision continues in a new turn.`
+Inputs held behind a running compaction stay there until Pi sends them after compaction, so they start and announce no turn of their own.
+
 ### What stays unchanged on Pi
 
 Outside Pi's same-name built-in override collision described in [Pi compatibility](#pi-compatibility) below, Calm changes presentation only.
@@ -110,9 +120,16 @@ These are supported-API boundaries rather than hidden-content failures.
 Calm has no numeric Pi version minimum or maximum.
 It never refuses Pi solely because its version is newer than a previously verified version.
 
-When Calm loads, the collapsed-thinking and operational-user-row presentation adapters probe the exact Pi API seam they patch.
+When Calm loads, the collapsed-thinking, operational-user-row, and queued-operational-row presentation adapters probe the exact Pi API seam they patch.
 If Pi removes one of those seams, Calm logs a diagnostic naming the unavailable adapter and skips only that adapter.
-`/calm`, the other adapter, and unrelated Pi extensions remain available.
+`/calm`, the other adapters, and unrelated Pi extensions remain available.
+
+### Session check for queued inputs
+
+Keeping hidden queued inputs across Escape also needs members of Pi's live session, which exist only once a session runs.
+Calm checks them for each session on its first queued-listing draw, before hiding anything.
+A session missing any of them keeps its queued rows and Escape exactly as stock, and shows one warning.
+In that case `tests/fm-calm-pi-queue-retention-live-e2e.test.sh` fails naming the installed Pi version.
 
 ### Built-in tool override collisions
 
@@ -141,6 +158,7 @@ How Calm handles that shared slot depends on whether Calm was already on when th
 - `.pi/extensions/lib/fm-calm-visibility.ts` owns the visibility policy.
 - `.claude/mods/firstmate-calm/lib/fm-calm-preservation.ts` owns the shared substantive mid-turn text rule, which Pi imports through its tracked symlink.
 - `.pi/extensions/lib/fm-calm-operational-user-layout.ts` owns the zero-height operational-user row adapter.
+- `.pi/extensions/lib/fm-calm-pending-operational-layout.ts` owns the queued-row adapter and its session capability check.
 - `.pi/extensions/lib/fm-calm-working-ship.ts` owns Pi's animated working presentation over the sprite geometry both harnesses share in `.claude/mods/firstmate-calm/lib/fm-calm-working-ship-sprite.ts`.
 
 ### Pi regression entry points
@@ -149,6 +167,7 @@ How Calm handles that shared slot depends on whether Calm was already on when th
 tests/fm-calm-pi-extension.test.sh
 tests/fm-pi-branch-extension.test.sh
 tests/fm-pi-primary-types.test.sh
+tests/fm-calm-pi-queue-retention-live-e2e.test.sh
 FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh
 ```
 
@@ -212,9 +231,20 @@ A user row draws at zero height when the canonical operational-input parser reco
 - A from-firstmate routed message.
 - One of the narrow pre-protocol shapes kept for old transcripts.
 
-Every other user row stays visible, including near misses such as a quoted or ASCII-only marker.
+Other user rows, including near misses such as a quoted or ASCII-only marker, stay visible unless backed by an operational record as the next section describes.
 
 Assistant text follows the [shared per-block preservation rule](#shared-preservation-rule-for-assistant-text) above, including when `claude --continue` restores the transcript.
+
+### Record-backed operational doorbell
+
+Claude Code removes the U+2063 that starts those envelopes from every submitted prompt.
+Because of that, Firstmate delivers its away-mode escalations to a Claude Code primary as the record-backed doorbell `bin/fm-operational-input.sh` owns.
+The doorbell is a plain line naming a record under the home's `state/operational-inbox` that holds the envelope.
+
+Calm reads that record through the mod's file API and hides the doorbell row only when the record holds a current envelope.
+A doorbell-shaped line naming no such record therefore stays visible.
+A verbatim copy of a live doorbell line, pasted back while its record still exists, is treated as Firstmate's and hides.
+Record verdicts are cached until a drawing invalidation (including a `/calm` toggle), which rechecks pruned records on redraw.
 
 ### What stays unchanged on Claude Code
 
@@ -224,11 +254,19 @@ The mod never touches tool execution, prompts, or the stored transcript.
 
 ### Claude Code support bounds
 
-Each of these bounds of the Claude Code support is recorded with evidence in [`calm-mode-feasibility.md`](calm-mode-feasibility.md#2026-09-15-claude-code-21272-mods-feasibility-and-the-shipped-mod):
+The bounds of the Claude Code support below are recorded with evidence in [`calm-mode-feasibility.md`](calm-mode-feasibility.md#2026-09-15-claude-code-21272-mods-feasibility-and-the-shipped-mod).
+Evidence for 2.1.280 and the record-backed doorbell is also in its [2026-09-25 record](calm-mode-feasibility.md#2026-09-25-claude-code-21280-verification-and-the-record-backed-operational-doorbell) and [2.1.282 reproduction](calm-mode-feasibility.md#2026-09-25-claude-code-21282-reproduction-on-the-installed-build).
 
 - The function-hooks surface is early access and default-off.
   Claude Code states that its API may change between releases without notice.
-  The mod is verified on Claude Code 2.1.272 and refuses nothing newer.
+  The mod is verified on Claude Code 2.1.272, 2.1.280, and 2.1.282 and refuses nothing newer.
+- Firstmate's typed producers bound for a Claude Code pane ride the record-backed doorbell, so they hide like any operational row.
+  Those producers are the away-mode daemon's escalations and a worker's launch brief.
+  Only an envelope that reaches Claude Code some other way, as bare typed or launch-prompt text, arrives without its U+2063 and stays visible.
+- Every record write prunes operational-inbox records once they reach about seven days of elapsed age (the boundary is approximate).
+  Age alone does not remove a record without a later write.
+  Once its record is gone, a doorbell is no longer recognized.
+  It draws as a visible user row after Calm rechecks it (for example on `/calm` toggle or `claude --continue`), and `/ahoy` treats it as a captain boundary.
 - On the main-screen layout (not the fullscreen alternate screen), a toggle redraws the live screen by clearing and reprinting it.
   The terminal's own scrollback keeps the earlier rendering above it.
   The fullscreen layout has no such stale copy.
