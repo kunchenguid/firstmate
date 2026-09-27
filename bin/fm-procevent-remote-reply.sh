@@ -9,6 +9,7 @@
 #   fm-procevent-remote-reply.sh terminal <result-file>
 #   fm-procevent-remote-reply.sh self-announcing
 #   fm-procevent-remote-reply.sh source-id <secondmate-id>
+#   fm-procevent-remote-reply.sh launch-confirm-seconds
 #   fm-procevent-remote-reply.sh retire <secondmate-id>
 #
 # `arm` registers one blocking, non-destructive delta source for the remote
@@ -74,6 +75,13 @@ CURSOR_DIR="$STATE/remote-replies"
 REMOTE_LOG='state/parent-replies.status'
 WAIT_SECONDS=${FM_REMOTE_REPLY_WAIT_SECONDS:-55}
 MAX_DOC_BYTES=${FM_REMOTE_REPLY_MAX_DOC_BYTES:-262144}
+# This source's command crosses an SSH transport, so a launch can take longer
+# than the generic confirm window to prove it took the claim on a busy or waking
+# remote host. The runner waits the larger of this floor and
+# FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS, so a slow but healthy launch is confirmed
+# rather than announced as a failure. Set FM_REMOTE_REPLY_LAUNCH_CONFIRM_SECONDS
+# to tune it for one home.
+LAUNCH_CONFIRM_SECONDS=${FM_REMOTE_REPLY_LAUNCH_CONFIRM_SECONDS:-30}
 # fm-on.sh returns ssh's status unchanged, so 255 alone means unavailable
 # transport or unknown remote completion. Any other nonzero status is the remote
 # reader's own refusal of that path at that moment. The reader has no permanence
@@ -252,6 +260,12 @@ cmd_arm() {
 # honest watermark, and bin/fm-pending-reply-lib.sh consumes it so a missing
 # correlated report is judged only against a channel known to have caught up.
 WINDOW_CLOSED_EMPTY=75
+
+# Declare the confirm window a launch of this source needs. See the adapter
+# seam in bin/fm-procevent.sh, which names no adapter and asks here instead.
+cmd_launch_confirm_seconds() {
+  printf '%s\n' "$LAUNCH_CONFIRM_SECONDS"
+}
 
 cmd_source() {
   local id=${1:-} started rc=0
@@ -767,6 +781,7 @@ case "${1:-}" in
   terminal) shift; [ "$#" -eq 1 ] || usage; [ -s "$1" ] ;;
   self-announcing) shift; [ "$#" -eq 0 ] || usage; exit 0 ;;
   source-id) shift; [ "$#" -eq 1 ] || usage; source_id "$1" ;;
+  launch-confirm-seconds) shift; [ "$#" -eq 0 ] || usage; cmd_launch_confirm_seconds ;;
   retire) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_retire "$@" ;;
   retire-quiesce-locked) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; require_parent_lifecycle_lock "$1"; cmd_retire_quiesce_locked "$@" ;;
   retire-finalize-locked) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; require_parent_lifecycle_lock "$1"; cmd_retire_finalize_locked "$@" ;;
