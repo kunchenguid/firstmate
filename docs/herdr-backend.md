@@ -522,13 +522,16 @@ Herdr passes its server startup environment to every later pane, so a value reta
 A deny list cannot hold that boundary, because every variable added to Firstmate afterwards is inherited by default.
 The launch always takes `SHELL` from the effective uid's own passwd entry and supplies a stable baseline `PATH`, never the launcher's own values.
 A non-interactive launcher's missing `SHELL` and truncated `PATH` otherwise become every pane's shell and `PATH`.
-`HOME` and `XDG_CONFIG_HOME` are forwarded, because they are caller-environment settings rather than task-scoped overrides and because on the installed Herdr 0.9.1 they relocate the api socket, the sessions directory, and the log.
+`HOME`, `XDG_CONFIG_HOME`, and `HERDR_CONFIG_PATH` are forwarded, because they are caller-environment settings rather than task-scoped overrides and because on the installed Herdr 0.9.1 the first two relocate the api socket, the sessions directory, and the log.
 That was measured on 2026-09-26 against 0.9.1: a server started with `XDG_CONFIG_HOME` pointed at a scratch directory reported `api socket: /tmp/hct42205/herdr/sessions/sct/herdr.sock` in its own startup output.
-Refusing those two names would therefore leave the adapter launching under one config root while every ordinary call reads another, and reporting a server its own caller can never reach.
-The older recorded observation that the API socket is not relocatable by `HERDR_CONFIG_PATH`, `XDG_CONFIG_HOME`, or `HOME` is scoped to Herdr 0.7.3 and is superseded by the 0.9.1 measurement above, so it does not make `HERDR_CONFIG_PATH` safe to forward.
-The passwd home is only the floor for a launcher that carries no `HOME` at all, and the baseline `PATH`.
-`HERDR_CONFIG_PATH` is the name that is refused, for a reason independent of socket location: it selects `config.toml` directly, so forwarding it would let a caller impose a persistent `default_shell` on a server that outlives it, which is the outcome this boundary exists to prevent.
-It forwards the account name, temp directory, locale, terminal, display, session, and ssh-agent variables, plus the explicit session routing.
+Refusing them would leave the adapter launching under one config root while every ordinary call reads another, and reporting a server its own caller can never reach.
+The older recorded observation that the API socket is not relocatable by `HERDR_CONFIG_PATH`, `XDG_CONFIG_HOME`, or `HOME` is scoped to Herdr 0.7.3 and is superseded by the 0.9.1 measurement above.
+Config selection is therefore caller-controlled, whole stop, and the passwd login shell is the default this launch computes rather than an override-proof guarantee.
+A caller that deliberately points the server at a `config.toml` carrying `default_shell` governs that server's panes for the server's whole life, because absolute config isolation is impossible while caller-selected config roots must be preserved.
+What the boundary does deliver is unchanged by that: the long-lived server no longer inherits task-scoped overrides, and panes get the passwd login shell whenever the caller has not deliberately chosen otherwise.
+One home decides both `HOME` and the home entry in the baseline `PATH`: the launcher's own `HOME` when it has one, and otherwise the passwd home, which is consulted only as that floor.
+It also forwards the temp directory, locale, terminal, display, session, and ssh-agent variables, plus the explicit session routing.
+`USER` and `LOGNAME` are not forwarded at all: they are re-derived from `id -un`, so the launcher cannot rename the account its server runs as.
 The per-pane identity Herdr injects into the launcher describes that launcher's own pane and is dropped.
 `fm_herdr_launch_env` in `bin/fm-herdr-launch-env-lib.sh` is the single owner of the exact allowlist, and the lab server launch in `bin/fm-herdr-lab.sh` uses that same helper, so the two launches cannot drift.
 An already-running server is reused without restart or environment changes.

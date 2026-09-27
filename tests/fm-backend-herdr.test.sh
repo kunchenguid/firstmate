@@ -1217,16 +1217,24 @@ test_container_ensure_starts_server_and_workspace() {
 }
 
 test_server_ensure_gives_panes_the_passwd_login_shell_and_a_usable_path() {
-  local dir log marker fb expected recorded_shell recorded_path out
+  local dir log marker fb expected recorded_shell recorded_path out harness_path
   local -a pane_env=() shell_args=()
   dir="$TMP_ROOT/server-shell"; mkdir -p "$dir"; log="$dir/env"; marker="$dir/running"
   fb=$(make_herdr_server_launch_fakebin "$dir" "$log" "$marker")
   expected=$(fm_test_passwd_shell)
   [ -n "$expected" ] && [ -x "$expected" ] || fail "uid $(id -u) has no usable passwd login shell on this host, so the pane-shell contract cannot be exercised"
+  # Tonight's real launcher had a PATH truncated to the system directories,
+  # with no core_perl and no operator additions. What the assertions below
+  # actually prove is that the LAUNCH does not inherit whatever PATH the caller
+  # had, so the adapter's own tools stay resolvable: server_ensure's readiness
+  # poll pipes every status call through jq, and jq is not in /usr/bin on a
+  # Homebrew macOS or a mise/nix Linux host.
+  harness_path=$(command -v jq) || fail "this suite needs jq on PATH"
+  harness_path=$(dirname "$harness_path")
 
-  # Tonight's real launcher: a misleading SHELL and a PATH truncated to the
-  # system directories, with no core_perl and no operator additions.
-  PATH="$fb:/usr/bin:/bin" SHELL="$dir/not-a-shell" HERDR_SESSION=fmtest \
+  # A misleading SHELL, and a PATH carrying only the fake client, jq, and the
+  # system directories.
+  PATH="$fb:$harness_path:/usr/bin:/bin" SHELL="$dir/not-a-shell" HERDR_SESSION=fmtest \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_server_ensure fmtest' "$ROOT"
   expect_code 0 $? "server_ensure should start under a launcher with a misleading SHELL and a truncated PATH"
   recorded_shell=$(herdr_test_recorded_value "$log" SHELL)
@@ -1254,7 +1262,7 @@ test_server_ensure_gives_panes_the_passwd_login_shell_and_a_usable_path() {
   # The same guarantee with no SHELL at all, which is how the server was
   # actually started tonight.
   rm -f "$marker" "$log"
-  PATH="$fb:/usr/bin:/bin" HERDR_SESSION=fmtest \
+  PATH="$fb:$harness_path:/usr/bin:/bin" HERDR_SESSION=fmtest \
     bash -c 'unset SHELL; . "$0/bin/backends/herdr.sh"; fm_backend_herdr_server_ensure fmtest' "$ROOT"
   expect_code 0 $? "server_ensure should start under a launcher with no SHELL at all"
   recorded_shell=$(herdr_test_recorded_value "$log" SHELL)
@@ -1330,9 +1338,10 @@ test_server_ensure_keeps_required_variables_and_leaves_a_running_server_alone() 
   # sessions. Dropping them would split the adapter's config root in two.
   assert_contains "$output" "HOME=$caller_home" "the server lost the caller's HOME, so the adapter's later calls read a different config root than the launch used"
   assert_contains "$output" "XDG_CONFIG_HOME=$caller_config" "the server lost the caller's XDG_CONFIG_HOME, so its session root is not the one the caller reads"
-  # HERDR_CONFIG_PATH names config.toml directly, so a caller could otherwise
-  # impose a default_shell on a server that outlives it.
-  assert_not_contains "$output" "HERDR_CONFIG_PATH=" "the caller handed the long-lived server its own herdr config file, which can override the pane login shell for the server's whole life"
+  # Config selection is caller-controlled: HERDR_CONFIG_PATH names the same
+  # config.toml the forwarded roots already select, so refusing it would only
+  # split the root the launch and the caller read.
+  assert_contains "$output" "HERDR_CONFIG_PATH=$dir/herdr.toml" "the server lost the caller's explicit herdr config selection"
   assert_contains "$output" "TMPDIR=$dir/tmp" "the server lost TMPDIR, so its panes fall back from the per-user temp directory to a shared one"
   assert_contains "$output" "HERDR_SESSION=fmtest" "server_ensure lost explicit Herdr session routing"
   assert_contains "$output" "LANG=en_US.UTF-8" "the server lost the operator's locale"
@@ -1371,7 +1380,7 @@ test_server_ensure_keeps_required_variables_and_leaves_a_running_server_alone() 
     printf "%s\n" "${FM_HERDR_LAUNCH_ENV[@]}"' "$ROOT" 2>/dev/null)
   assert_contains "$output" "HOME=$passwd_home" "a launcher with no HOME left the long-lived server with no home to resolve its config under"
   assert_not_contains "$output" "XDG_CONFIG_HOME=" "the helper invented an XDG_CONFIG_HOME for a launcher that carries none"
-  pass "fm_backend_herdr_server_ensure: forwards the caller's config root and the required herdr, locale, display, temp and agent variables, refuses a caller-supplied herdr config file, drops the launcher's pane identity, and leaves a running server alone"
+  pass "fm_backend_herdr_server_ensure: forwards the caller's whole config selection and the required herdr, locale, display, temp and agent variables, drops the launcher's pane identity, and leaves a running server alone"
 }
 
 test_container_ensure_reuses_existing_workspace() {
