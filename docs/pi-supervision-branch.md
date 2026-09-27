@@ -35,7 +35,7 @@ Changing dependency evidence or a missing executor makes the precise retained ob
 The extension limits unchanged automatic prompts to two with backoff, including settlement-triggered continuations.
 The canonical lifecycle record retains the budget across reload, compaction and unrelated input.
 Before releasing a logical Pi run, the existing heartbeat coordinator actually reads current obligations and persists a generation-bound receipt; the task remains pending, and that receipt proves coordination rather than execution or acceptance.
-After two delivered requests without a verified continuation, the main session durably displays a coordination-failure escalation without starting another model turn, including when full heartbeat maintenance is disabled.
+After two delivered requests without a verified continuation, the main session durably presents one coordination-failure follow-up and starts an executable main turn, including when full heartbeat maintenance is disabled.
 The canonical budget retains its native delivery receipt across reload and compaction so the same failure is not repeatedly presented.
 The task stays open: the escalation is neither an executor receipt nor a fabricated task blocker, and main must assign an authorized executor, reconcile a real dependency, or assess acceptance when it resumes.
 The same clock continues bounded readback while exhausted budgets suppress unchanged model requests, allowing heartbeat maintenance and independent input to run.
