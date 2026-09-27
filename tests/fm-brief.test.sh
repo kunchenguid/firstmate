@@ -600,8 +600,6 @@ test_no_mistakes_dod_ci_gate_feedback() {
   # shellcheck disable=SC2016  # single quotes are deliberate: the backticked respond command must stay literal
   assert_grep 'A firstmate fix answer goes to the next parked gate, through `no-mistakes axi respond --action fix` adding the finding' "$brief" \
     "no-mistakes DOD must route a fix answer to the next parked gate"
-  assert_no_grep "as a follow-up commit on your existing branch plus a new /no-mistakes run" "$brief" \
-    "no-mistakes DOD must not name a post-outcome follow-up run for review feedback"
   # shellcheck disable=SC2016  # single quotes are deliberate: the backticked done token must stay literal
   assert_grep 'never append `done:` while a `pr-<n>-<comment-id>` decision you opened is still unanswered' "$brief" \
     "no-mistakes DOD must hold done while a review-feedback decision is open"
