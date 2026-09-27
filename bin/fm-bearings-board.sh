@@ -81,8 +81,10 @@
 # A Charted Next row MAY carry `about` (one-line task context), `pr_url` (a
 # recorded HTTPS PR URL), and `report_path` (a local, plain-text pickup pointer).
 # Context and path follow the Captain's Call optional-string rule, and `pr_url`
-# uses the HTTPS PR URL shape. The required `reason` names
-# the gate on non-dispatchable rows.
+# accepts only an HTTPS /<owner>/<repo>/pull/<number> URL. The required `reason`
+# names the gate on non-dispatchable rows. A card expands only when one of these
+# context fields or `filed` is present; without a PR link, the report path is
+# plain text.
 #
 # The board path is stable - $FM_HOME/.lavish/bearings-board.html - so a
 # re-invocation rebuilds the same file in place, which keeps the same Lavish

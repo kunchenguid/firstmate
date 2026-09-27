@@ -78,6 +78,8 @@
 #   --json           the same projected model as JSON (machine/debug; parity form)
 #   --include-prs    ALSO do live GitHub open-PR discovery + checks
 #   --fields <list>  opt in to dropped surfaces: bodies,paths,actions,endpoints
+#                    bodies includes structured main-home queued and done items,
+#                    plus main-home tasks projected as Charted Next gates.
 #   --all-in-flight  include every in-flight task
 #   --all-decisions  include every open decision and captain hold in the bounded snapshot
 #   --all-secondmates include every aggregated secondmate record
