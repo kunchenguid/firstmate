@@ -1145,6 +1145,7 @@ test_charted_main_context_and_links_surface() {
   This change connects the new board to the fleet.
 - [ ] queued-report - Queued research https://github.com/acme/firstmate/issues/15 data/queued-report/report.md (repo: firstmate) (kind: scout)
   Research the unresolved rollout choice.
+- [ ] queued-status - Returned change without a current PR (repo: firstmate) (kind: ship)
 
 ## Done
 EOF
@@ -1155,6 +1156,13 @@ EOF
     "pr=https://github.com/acme/firstmate/pull/13"
   record_claude_state "$home/state" held-work busy
   printf 'working: held rollout\n' > "$home/state/held-work.status"
+  mkdir -p "$home/projects/queued-status"
+  fm_write_meta "$home/state/queued-status.meta" \
+    "window=firstmate:fm-queued-status" "worktree=$home/projects/queued-status" \
+    "project=firstmate" "harness=claude" "kind=ship" "mode=no-mistakes"
+  record_claude_state "$home/state" queued-status idle
+  printf 'done: old PR https://github.com/acme/firstmate/pull/11\npaused: queued again\n' \
+    > "$home/state/queued-status.status"
   fakebin=$(make_fakebin "$home")
   json=$(FM_BEARINGS_RECORDED_PRS=1 run "$home" "$fakebin" --json --fields bodies)
   printf '%s' "$json" | jq -e '
@@ -1166,6 +1174,7 @@ EOF
     and (.bodies | any(.id == "queued-pr" and (.body | contains("connects the new board"))))
     and (.gates | any(.id == "queued-report" and .pr_url == null
       and .report_path == "data/queued-report/report.md" and (has("report_url") | not)))
+    and (.gates | any(.id == "queued-status" and .pr_url == null))
     and (.bodies | any(.id == "queued-report" and (.body | contains("unresolved rollout choice"))))
   ' >/dev/null || fail "visible main Charted Next gates lost bounded notes or recorded links: $json"
   mate_home=$(make_home charted-mate)
@@ -1173,8 +1182,16 @@ EOF
   mate=$(fixture_mate_home "$mate_home")
   sed -e '/^## Done$/i\- [ ] mate-queued - Queued report https://github.com/acme/firstmate/pull/14 data/mate-queued/report.md (repo: firstmate) (kind: scout)' \
     -e '/^## Done$/i\- [ ] mate-local - Queued research https://github.com/acme/firstmate/issues/16 data/mate-local/report.md (repo: firstmate) (kind: scout)' \
+    -e '/^## Done$/i\- [ ] mate-status - Returned change without a current PR (repo: firstmate) (kind: ship)' \
     "$mate/data/backlog.md" > "$mate/data/backlog.next"
   mv "$mate/data/backlog.next" "$mate/data/backlog.md"
+  mkdir -p "$mate/projects/mate-status"
+  fm_write_meta "$mate/state/mate-status.meta" \
+    "window=firstmate:fm-mate-status" "worktree=$mate/projects/mate-status" \
+    "project=firstmate" "harness=claude" "kind=ship" "mode=no-mistakes"
+  record_claude_state "$mate/state" mate-status idle
+  printf 'done: old PR https://github.com/acme/firstmate/pull/10\npaused: queued again\n' \
+    > "$mate/state/mate-status.status"
   fakebin=$(make_fakebin "$mate_home")
   json=$(run "$mate_home" "$fakebin" --json --fields bodies)
   printf '%s' "$json" | jq -e '
@@ -1183,6 +1200,7 @@ EOF
       and .report_path == "data/mate-queued/report.md"))
     and (.gates | any(.id == "mate-local" and .owner == "mate" and .pr_url == null
       and .report_path == "data/mate-local/report.md" and (has("report_url") | not)))
+    and (.gates | any(.id == "mate-status" and .owner == "mate" and .pr_url == null))
   ' >/dev/null || fail "secondmate Charted Next lost recorded pointers in its bounded summary: $json"
   pass "Charted Next carries main task notes and both homes' recorded pointers"
 }

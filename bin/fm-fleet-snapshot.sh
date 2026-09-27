@@ -1125,7 +1125,8 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
           repo:((.repo // null) | if . == null then null else trunc(120) end),
           kind:((.kind // null) | if . == null then null else trunc(40) end),
           since:((.since // null) | if . == null then null else trunc(40) end),
-          pr_url:(($queued.pr_url // ([ $tasks[] | select(.id == $queued.id and .kind != "secondmate")
+          pr_url:(($queued.pr_url // ([ $tasks[] | select(.id == $queued.id and .kind != "secondmate"
+            and .pr.source == "meta")
             | .pr.url | select(. != null) ][0] // null)) | if . == null then null else trunc(500) end),
           report_path:(($queued.report_path // ([ $tasks[] | select(.id == $queued.id and .kind != "secondmate"
             and .paths.report.present == true) | .paths.report.path ][0] // null))

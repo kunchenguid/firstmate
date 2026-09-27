@@ -584,7 +584,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
          | select((.hold_bucket == null) or ($all_decisions == 0))
          | as_gate("(main)")
          | .pr_url = ($record.pr_url // ([ $snap.tasks[]?
-             | select(.id == $record.id and .kind != "secondmate")
+             | select(.id == $record.id and .kind != "secondmate" and .pr.source == "meta")
              | .pr.url | select(. != null) ][0] // null))
          | .report_path = ($record.report_path // ([ $snap.scout_reports[]?
              | select(.id == $record.id) | .path ][0] // null)) ]
