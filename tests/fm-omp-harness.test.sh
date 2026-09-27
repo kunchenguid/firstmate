@@ -28,7 +28,13 @@
 #   6. The turn-end guard extension compels one continuation on exit 2 and
 #      stands down when the payload already carries stop_hook_active.
 #   7. The watch extension arms through fm_watch_arm_omp and delivers an
-#      actionable close as one follow-up.
+#      actionable close as one follow-up. After a plain agent_end it recovers a
+#      wake an interrupted run left unsent: a wake an Escape restored into the
+#      editor leaves the editor exactly and is delivered again once, and wakes
+#      an empty Enter stranded in omp's queue earn one distinct steer. A fake
+#      host cannot reproduce omp's restore, so only this policy is pinned here;
+#      FM_OMP_INTERRUPT_LIVE_E2E=1 tests/fm-omp-interrupt-live-e2e.test.sh
+#      re-checks the omp behavior it assumes.
 set -u
 
 # shellcheck source=tests/fixtures.sh
@@ -353,7 +359,7 @@ test_control_composer_and_model_tables() {
   [ "$(fm_control_exit_command omp)" = /quit ] || fail "omp exit command must be /quit"
   [ "$(fm_control_interrupt_key omp)" = Escape ] || fail "omp interrupt key must be Escape"
   [ "$(fm_control_interrupt_repeat omp)" = 1 ] || fail "omp interrupts on a single press"
-  [ -z "$(fm_control_interrupt_clear_key omp)" ] || fail "omp leaves its composer empty and needs no clear key"
+  [ -z "$(fm_control_interrupt_clear_key omp)" ] || fail "omp takes no clear key: a restored composer can hold the captain's queued text"
   [ "$(fm_control_harness_wiring_paths omp /wt /st id1)" = "/st/id1.omp-ext.ts" ] || fail "omp wiring path must be the state-resident extension"
   printf 'Working…\n' | fm_busy_lines_match omp || fail "omp busy regex must match the TUI ellipsis form"
   printf 'Working...\n' | fm_busy_lines_match omp && fail "omp busy regex must not match the three-dot form no supervised pane renders"
@@ -576,6 +582,194 @@ EOF
   expect_code 0 "$status" "omp watch extension contract: $out"
   [ -z "$out" ] || fail "omp watch extension test printed output: $out"
   pass ".omp watch extension: fm_watch_arm_omp arms once, repeats as a no-op, and delivers an actionable close as one follow-up"
+}
+
+# An arm fixture whose first cycle closes with one actionable reason while every
+# successor stays up, and whose handling confirmations and launches are logged.
+install_interrupt_arm_fixture() {  # <repo>
+  cat > "$1/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then
+  printf 'confirmed generation=%s\n' "$2" >> "${FM_ARM_LOG:?}"
+  exit 0
+fi
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+printf 'watcher: started pid=%s (beacon 0s) recovery-generation=gen-%s\n' "$$" "$$"
+if [ ! -e "${FM_HOME:?}/state/.e2e-fired" ]; then
+  : > "$FM_HOME/state/.e2e-fired"
+  sleep 1
+  printf 'signal: omp-interrupt done\n'
+  exit 0
+fi
+sleep 30
+SH
+  chmod +x "$1/bin/fm-watch-arm.sh"
+}
+
+# omp's Escape during a run moves every queued user message, the wake
+# included, into the editor ahead of the draft. After a plain agent_end the
+# extension removes exactly the wake's text and delivers that wake once more
+# through its pending pipeline.
+test_watch_extension_recovers_a_wake_an_escape_restored() {
+  local repo home log out status
+  repo="$TMP_ROOT/watch-escape/repo"; home="$TMP_ROOT/watch-escape/home"; log="$TMP_ROOT/watch-escape/arm.log"
+  install_omp_extension_fixture "$repo"
+  install_interrupt_arm_fixture "$repo"
+  mkdir -p "$home/state"
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_OMP_INTERRUPT_SETTLE_MS=20 FM_OMP_ARM_READY_TIMEOUT_MS=3000 \
+    FM_WATCH_REARM_RETRY_LIMIT=1 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 \
+    EXT="$repo/.omp/extensions/fm-primary-omp-watch.ts" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+import { writeFileSync, existsSync, readFileSync } from "node:fs";
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const handoff = `${process.env.FM_HOME}/state/extensions/omp-primary-watch/session-replacement-actionable.json`;
+const handlers = new Map(); let tool = null; const sent = []; const editorWrites = [];
+let idle = true; let queued = false; let editor = "";
+const ctx = {
+  isIdle: () => idle,
+  hasPendingMessages: () => queued,
+  ui: { getEditorText: () => editor, setEditorText: (text) => { editorWrites.push(text); editor = text; } },
+};
+const pi = {
+  on(e, h) { handlers.set(e, h); },
+  registerCommand() {},
+  registerTool(t) { tool = t; },
+  sendUserMessage(m, o) { sent.push({ m, o }); return undefined; },
+};
+const settle = () => new Promise((r) => setTimeout(r, 200));
+const end = (event) => handlers.get("agent_end")({ type: "agent_end", ...event }, ctx);
+const mod = await import(pathToFileURL(process.env.EXT).href);
+mod.default(pi);
+await tool.execute();
+for (let i = 0; i < 60 && sent.length < 1; i += 1) await new Promise((r) => setTimeout(r, 100));
+if (sent.length !== 1) throw new Error(`expected the first wake, saw ${JSON.stringify(sent)}`);
+const wake = sent[0].m;
+// The restore as omp writes it: a captain's queued message, the wake, then a
+// draft that carries its own blank lines and indentation.
+const captainQueued = "captain queued: check the deploy";
+const draft = "\n\ncaptain draft line one\n\n  indented line two\n";
+const restored = `${captainQueued}\n\n${wake}\n\n${draft}`;
+const expected = `${captainQueued}\n\n\n\n${draft}`;
+editor = restored;
+const unchanged = (why) => {
+  if (editorWrites.length !== 0 || sent.length !== 1 || editor !== restored) {
+    throw new Error(`${why}: editor writes ${JSON.stringify(editorWrites)}, sends ${sent.length}`);
+  }
+};
+await end({ willContinue: true });
+await settle();
+unchanged("a continuing agent_end must do nothing");
+idle = false;
+await end({});
+await settle();
+unchanged("an omp still busy after the settle wait must be left alone");
+idle = true; queued = true;
+await end({});
+await settle();
+unchanged("a restored wake with messages still queued is not the restore shape");
+queued = false;
+// Two settled runs in a row: only the latest check acts, once.
+await end({});
+await end({});
+for (let i = 0; i < 60 && sent.length < 2; i += 1) await new Promise((r) => setTimeout(r, 50));
+await settle();
+if (editorWrites.length !== 1 || editorWrites[0] !== expected) {
+  throw new Error(`the editor must lose exactly the wake text: ${JSON.stringify(editorWrites)}`);
+}
+if (sent.length !== 2 || sent[1].m !== wake || sent[1].o?.deliverAs !== "followUp") {
+  throw new Error(`the wake must go out once more as the same follow-up: ${JSON.stringify(sent.slice(1))}`);
+}
+const arms = readFileSync(process.env.FM_ARM_LOG, "utf8").split("\n").filter((row) => row.startsWith("arm="));
+if (arms.length !== 2) throw new Error(`redelivery must reuse the running successor, saw ${arms.length} arm launches`);
+// A later settled run whose editor no longer holds the wake sends nothing.
+await end({});
+await settle();
+if (sent.length !== 2 || editorWrites.length !== 1) throw new Error(`a recovered wake was acted on again: ${JSON.stringify(sent.slice(2))}`);
+// Once consumed, a copy of its text in the editor is never sent again.
+await handlers.get("message_start")({ type: "message_start", message: { role: "user", content: [{ type: "text", text: wake }] } }, ctx);
+editor = wake;
+await end({});
+await settle();
+if (sent.length !== 2 || editorWrites.length !== 1) throw new Error("a consumed wake must not be recovered");
+await handlers.get("session_shutdown")({}, {});
+if (existsSync(handoff)) throw new Error("a consumed redelivery must not ride the replacement handoff");
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "omp watch extension escape recovery: $out"
+  [ -z "$out" ] || fail "omp watch extension escape recovery test printed output: $out"
+  pass ".omp watch extension: a wake an Escape restored leaves the editor exactly and is delivered once more"
+}
+
+# omp's empty Enter during a run aborts without the restore, stranding the wake
+# in omp's queue behind its interrupt suppression. After a plain agent_end the
+# extension sends one distinct operational steer, never a second copy.
+test_watch_extension_steers_past_a_wake_an_empty_enter_stranded() {
+  local repo home log out status
+  repo="$TMP_ROOT/watch-enter/repo"; home="$TMP_ROOT/watch-enter/home"; log="$TMP_ROOT/watch-enter/arm.log"
+  install_omp_extension_fixture "$repo"
+  install_interrupt_arm_fixture "$repo"
+  mkdir -p "$home/state"
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_OMP_INTERRUPT_SETTLE_MS=20 FM_OMP_ARM_READY_TIMEOUT_MS=3000 \
+    FM_WATCH_REARM_RETRY_LIMIT=1 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 \
+    EXT="$repo/.omp/extensions/fm-primary-omp-watch.ts" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+import { writeFileSync, existsSync } from "node:fs";
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const handoff = `${process.env.FM_HOME}/state/extensions/omp-primary-watch/session-replacement-actionable.json`;
+const handlers = new Map(); let tool = null; const sent = []; const editorWrites = [];
+let idle = false; const editor = "";
+const ctx = {
+  isIdle: () => idle,
+  hasPendingMessages: () => true,
+  ui: { getEditorText: () => editor, setEditorText: (text) => { editorWrites.push(text); } },
+};
+const pi = {
+  on(e, h) { handlers.set(e, h); },
+  registerCommand() {},
+  registerTool(t) { tool = t; },
+  sendUserMessage(m, o) { sent.push({ m, o }); return undefined; },
+};
+const settle = () => new Promise((r) => setTimeout(r, 200));
+const end = () => handlers.get("agent_end")({ type: "agent_end" }, ctx);
+const userStart = (text) => handlers.get("message_start")({ type: "message_start", message: { role: "user", content: [{ type: "text", text }] } }, ctx);
+const mod = await import(pathToFileURL(process.env.EXT).href);
+mod.default(pi);
+await tool.execute();
+for (let i = 0; i < 60 && sent.length < 1; i += 1) await new Promise((r) => setTimeout(r, 100));
+if (sent.length !== 1) throw new Error(`expected the first wake, saw ${JSON.stringify(sent)}`);
+const wake = sent[0].m;
+await end();
+await settle();
+if (sent.length !== 1) throw new Error(`nothing may be sent while omp is not idle: ${JSON.stringify(sent.slice(1))}`);
+idle = true;
+await end();
+for (let i = 0; i < 40 && sent.length < 2; i += 1) await new Promise((r) => setTimeout(r, 50));
+if (sent.length !== 2) throw new Error(`expected one continuation steer, saw ${JSON.stringify(sent.slice(1))}`);
+const steer = sent[1];
+if (steer.o?.deliverAs !== "steer") throw new Error(`the continuation must be a steer: ${JSON.stringify(steer.o)}`);
+if (steer.m === wake || steer.m.includes("FIRSTMATE WATCHER WAKE:")) throw new Error(`the steer must not copy the wake: ${steer.m}`);
+if (!steer.m.startsWith("⁣FIRSTMATE_OP: v1 watcher: ")) throw new Error(`the steer must be typed operational input: ${steer.m}`);
+// The steer's own turn starts; a later settled run with the wake still
+// queued earns no second steer.
+await userStart(steer.m);
+await end();
+await settle();
+if (sent.length !== 2) throw new Error(`a stranded wake earns at most one steer: ${JSON.stringify(sent.slice(2))}`);
+if (sent.filter((item) => item.m === wake).length !== 1) throw new Error("the stranded wake must never be sent twice");
+if (editorWrites.length !== 0) throw new Error("an empty editor must not be written");
+// omp then delivers the stranded wake, which is consumed once.
+await userStart(wake);
+await handlers.get("session_shutdown")({}, {});
+if (existsSync(handoff)) throw new Error("the consumed stranded wake must not ride the replacement handoff");
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "omp watch extension empty-Enter recovery: $out"
+  [ -z "$out" ] || fail "omp watch extension empty-Enter recovery test printed output: $out"
+  pass ".omp watch extension: wakes an empty Enter stranded earn one distinct steer and are consumed once"
 }
 
 # An opted-in home spawns the supervision host in the arm's place; its streamed
@@ -804,6 +998,8 @@ test_control_composer_and_model_tables
 test_ownership_proof_is_omp_keyed
 test_turnend_guard_extension_compels_one_continuation
 test_watch_extension_arms_and_delivers
+test_watch_extension_recovers_a_wake_an_escape_restored
+test_watch_extension_steers_past_a_wake_an_empty_enter_stranded
 test_watch_extension_runs_the_supervision_host
 test_watch_extension_replays_a_host_only_boundary_across_replacement
 test_watch_extension_delivers_a_split_host_close_whole

@@ -126,9 +126,11 @@ fm_control_harness_supports_kind() {  # <harness> <kind>
 # rovo cancels on a single Escape too, printing "Agent cancelled" (verified,
 # 202609.1.2). agy cancels on a single Escape, printing the Interrupted row
 # with an idle composer and no repollution (verified live, agy 1.2.0 through
-# Herdr). omp (Oh My Pi) shares Pi's single Escape, empty composer
-# afterwards, and /quit exit (verified omp 18.1.2 in a PTY, re-verified 18.1.11
-# through Herdr).
+# Herdr). omp (Oh My Pi) shares Pi's single Escape and /quit exit (verified
+# omp 18.1.2 in a PTY, re-verified 18.1.11 through Herdr). Its composer is
+# empty afterwards only when nothing was queued: an Escape during a run moves
+# every queued user message, a captain's included, into the composer (omp
+# 18.3.0), so omp takes no clear key and `interrupt` reports that composer.
 fm_control_interrupt_key() {  # <harness>
   case "${1-}" in
     claude|codex|opencode|pi|pi-signed|omp|kimi|cursor|gemini|muse|rovo|agy|devin) printf 'Escape' ;;

@@ -2363,3 +2363,29 @@ A throwaway scout was spawned through `bin/fm-spawn.sh --scout --harness omp --m
 6. `bin/fm-control.sh <id> exit` stopped the agent and `bin/fm-teardown.sh` returned the worktree and closed the item.
 
 `FM_OMP_LIVE_E2E=1 tests/fm-omp-primary-live-e2e.test.sh` refreshes the primary evidence; the worker path above is refreshed by repeating the scout dispatch after any omp upgrade.
+
+### 2026-09-27 interrupted-run recovery
+
+The Interrupt row above holds only when nothing was queued.
+On omp 18.3.0 (Homebrew `omp/18.3.0`), Herdr 0.9.1, macOS arm64, and `openai-codex/gpt-6-astra` at `--thinking low`, a watcher wake queued behind a busy `sleep 60` tool turn reached two stalled states:
+
+- Escape moved the queued wakes into the composer (`composer=pending`), aborted the run, and submitted nothing.
+- An empty Enter aborted the run with an empty composer and left the wakes in omp's queue.
+
+In both cases the home's durable wake queue held its 3 rows until the watch extension's interrupted-run recovery (the `.omp/extensions/fm-primary-omp-watch.ts` header owns it) acted.
+omp 18.3.0 renders no queued follow-up rows during a tool call, so the guard gates on the watcher's delivery log instead.
+The guard stretches the recovery's settle wait to 8 seconds to observe each stalled state, then requires the queue to drain with no further key and the composer to read `empty`; the Enter case also requires the extension's continuation steer in omp's transcript.
+
+```sh
+HERDR_LAB_SESSION=$(bin/fm-herdr-lab.sh name <label>) FM_OMP_INTERRUPT_LIVE_E2E=1 tests/fm-omp-interrupt-live-e2e.test.sh
+```
+
+```text
+# escape precondition held: composer=pending, 3 durable rows
+ok - live omp interrupt recovery (escape): omp omp/18.3.0 (openai-codex/gpt-6-astra) through Herdr drained the wake with no further key and left an empty composer in isolated session fm-lab-fm-omp-wake-stal-24730-2734
+# enter precondition held: composer=empty, 3 durable rows
+ok - live omp interrupt recovery (enter): omp omp/18.3.0 (openai-codex/gpt-6-astra) through Herdr drained the wake with no further key and left an empty composer in isolated session fm-lab-fm-omp-wake-stal-24730-2734
+```
+
+`HERDR_LAB_SESSION` is optional; without it the guard names its own lab session.
+Rerun the guard after any omp upgrade; it fails naming the omp version if Escape stops restoring queued messages or an empty Enter stops stranding them.
