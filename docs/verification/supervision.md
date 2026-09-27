@@ -350,13 +350,14 @@ COMPLETE
 ```
 
 No live unattended Claude background session ran on the verifying machine: that topology is documented by the real process listings in issues #3902, #2314, #3398, and #4066, and the coverage above is the structural predicate plus those executable fixtures, not a live pass.
+[`sessionstart-nudge.md`](../sessionstart-nudge.md#shared-wrapper-and-safety) owns the nudge wrapper's separate ancestry check and its redundant-nudge behavior after helper-chain recycling.
 
 A primary hosted by `claude --continue` through `--bg-pty-host` was listed from inside its own session under Claude Code 2.1.281 on 2026-09-24 as tool shell, then `~/.local/share/claude/versions/2.1.281` (model loop), then `~/.local/share/claude/ClaudeCode.app/Contents/MacOS/claude --bg-pty-host`, then `~/.local/bin/claude daemon run --origin transient`, then `claude --continue` in a tmux pane.
-The front-end never runs the model loop, so session start runs with the whole chain above its tool shell.
-Before this section's same-session id existed, the lock recorded the outermost front-end with no id beside it, so once a helper recycle left the Stop hook's chain without the still-live front-end, the guard stood the primary down as a foreign session and the auto-arm stayed inert.
-The same suite now runs that exact executable shape as real processes: session start anchors the lock on the model loop, a recycle onto a model loop under an orphaned pty-host keeps arming with the lock reclaimed onto the new model loop, and a separate live session holding the lock still stands it down.
-Run against the pre-#4894 `bin/`, the first case reproduces the recorded outage, with the lock on the front-end and the guard's foreign-owner exit naming it.
-It ran on 2026-09-26 on macOS with bash 3.2.57 as the fake harness interpreter:
+The front-end never runs the model loop, so session start runs from the model loop's tool shell with the whole chain above it.
+Before #4894, the lock recorded the outermost front-end with no session id beside it, so once a helper recycle left the Stop hook's chain without the still-live front-end, the guard stood the primary down as a foreign session and the auto-arm stayed inert.
+The same suite now runs that executable shape as real processes: session start anchors the lock on the model loop, a recycle onto a new model loop under an orphaned pty-host keeps arming with the lock reclaimed onto that model loop, and a separate live session holding the lock still stands it down.
+Run against the pre-#4894 `bin/` with every assertion reporting instead of stopping, the first case reproduces the outage: the lock names the front-end with no session id, and after the recycle the Stop auto-arm stays inert, the guard takes the foreign-owner exit naming the front-end, and `bin/fm-lock.sh` refuses the session's own lock.
+It ran on 2026-09-27 on macOS with bash 3.2.57 as the fake harness interpreter:
 
 ```sh
 tests/fm-session-lock-ancestry.test.sh
@@ -366,7 +367,7 @@ tests/fm-session-lock-ancestry.test.sh
 ok - session-lock e2e: a primary hosted by claude --continue via bg-pty-host keeps supervision across a helper recycle
 ok - session-lock e2e: a bg-pty-hosted primary still stands down for a separate live session's lock
 ```
-[`sessionstart-nudge.md`](../sessionstart-nudge.md#shared-wrapper-and-safety) owns the nudge wrapper's separate ancestry check and its redundant-nudge behavior after helper-chain recycling.
+
 `tests/fm-watch-arm.test.sh` runs real watcher and arm cycles against durable on-disk state to verify that a delivered reason survives until post-handling acknowledgement and stops replaying after acknowledgement, while an unrelated queue append cannot make a watcher cycle that delivered nothing look successful.
 The same suite ingests a keyed remote-secondmate parent reply through the real adapter, establishes the incremental OPEN DECISIONS cursor, interrupts supervision, and proves re-arm replays every unacknowledged queue row plus the still-open decision through the ordinary drain path.
 It also covers decision-only recovery, interrupted handling, handling-window generation reuse, non-fatal moved-generation acknowledgement with sequence-bounded consumption, and a persistent successor remaining live after recovery is acknowledged.

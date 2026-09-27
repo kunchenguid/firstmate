@@ -813,23 +813,23 @@ test_e2e_background_session_keeps_its_lock_across_a_recycled_chain() {
 
 # --- end-to-end layer: a primary hosted by `claude --continue` via bg-pty-host --
 #
-# The shape a primary listed on 2026-09-24 from inside its own session, with
-# every executable spelled as Claude Code 2.1.281 spelled it:
+# The shape a primary listed from inside its own session, with every executable
+# spelled as Claude Code 2.1.281 spelled it:
 #
 #   tool shell
-#   <- .../share/claude/versions/2.1.281 --session-id <id> ...  (model loop)
+#   <- .../share/claude/versions/<ver> --session-id <id> ...    (model loop)
 #   <- .../ClaudeCode.app/Contents/MacOS/claude --bg-pty-host ... (pty-host)
 #   <- .../bin/claude daemon run --origin transient ...          (daemon)
 #   <- claude --continue                                          (front-end)
-#   <- -zsh <- tmux
 #
-# Unlike the fixture above, the front-end never runs the model loop, so it
-# never runs a hook or a tool shell: session start runs in the model loop's
-# tool shell with the whole chain above it. A later helper recycle replaced
-# the model loop with a new one under a pty-host that no longer descends from
-# the front-end, while the front-end stayed alive in its pane. The Stop hook of
-# that new model loop must still own the lock and keep supervision running; a
-# genuinely separate live session holding the lock must still stand it down.
+# Unlike the fixture above, the front-end never runs the model loop, so it never
+# runs a hook or a tool shell: session start runs in the model loop's tool shell
+# with the whole chain above it. A helper recycle then ends the daemon, the
+# pty-host, and the model loop, and starts a new pty-host and model loop that no
+# longer descend from the still-live front-end. That new model loop's Stop must
+# still own the lock, and a separate live session holding the lock must still
+# stand it down. The model loop serves hook firings with the bg-spare fixture
+# above, so fire_phase and the phase expectations apply unchanged.
 
 make_bg_pty_home() {  # <dir>
   local dir=$1
@@ -846,66 +846,36 @@ printf '%s\n' "$$" > "$FM_HOME/state/frontend-pid"
 while [ ! -e "$FM_HOME/state/stop-frontend" ]; do sleep 0.05; done
 exit 0
 SH
+  # Each helper waits for its child, so stopping the model loop ends the whole
+  # helper chain and no stopped process lingers as a zombie kill -0 still sees.
   cat > "$dir/daemon.sh" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$$" > "$FM_HOME/state/daemon-pid"
 FM_FIXTURE_GEN=1 FM_FIXTURE_SESSION_START=1 "$FM_FIXTURE_PTY_HOST" "$FM_HOME/ptyhost.sh" &
-host=$!
-while [ ! -e "$FM_HOME/state/stop-daemon" ]; do sleep 0.05; done
-wait "$host"
+wait
 exit 0
 SH
-  # Each parent reaps its child before exiting, so an init that does not reap
-  # orphans promptly can never leave the stopped model loop a zombie that
-  # kill -0 still reports alive.
   cat > "$dir/ptyhost.sh" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$$" > "$FM_HOME/state/ptyhost-$FM_FIXTURE_GEN-pid"
 "$FM_FIXTURE_MODEL_LOOP" "$FM_HOME/loop.sh" &
-loop=$!
-while [ ! -e "$FM_HOME/state/stop-$FM_FIXTURE_GEN" ]; do sleep 0.05; done
-wait "$loop"
+wait
 exit 0
 SH
-  # The model loop. Generation 1 runs session start in its own tool shell, as
-  # the primary did; every generation then serves hook firings until stopped.
   cat > "$dir/loop.sh" <<'SH'
 #!/usr/bin/env bash
-gen=$FM_FIXTURE_GEN
 unset CLAUDE_CODE_SESSION_ID CLAUDE_PID
 if [ "${FM_FIXTURE_SESSION_START:-0}" = 1 ]; then
-  CLAUDE_CODE_SESSION_ID=S1 CLAUDE_PID=$$ "$FM_HOME/bin/fm-lock.sh" > "$FM_HOME/state/start-lock.out" 2>&1
+  CLAUDE_CODE_SESSION_ID=$FM_FIXTURE_SESSION_ID CLAUDE_PID=$$ "$FM_HOME/bin/fm-lock.sh" > "$FM_HOME/state/start-lock.out" 2>&1
   printf '%s\n' "$?" > "$FM_HOME/state/start-lock.rc"
   ( . "$FM_HOME/bin/fm-session-lock-lib.sh" && fm_harness_ancestry_pids ) > "$FM_HOME/state/start-ancestry" 2>/dev/null
 fi
-printf '%s\n' "$$" > "$FM_HOME/state/loop-$gen-pid"
-n=1
-while [ ! -e "$FM_HOME/state/stop-$gen" ]; do
-  req="$FM_HOME/state/fire-$gen-$n"
-  if [ -f "$req" ]; then
-    out="$FM_HOME/state/phase-$gen-$n"
-    mkdir -p "$out"
-    unset CLAUDE_CODE_SESSION_ID CLAUDE_PID
-    # shellcheck disable=SC1090
-    . "$req"
-    ( . "$FM_HOME/bin/fm-session-lock-lib.sh" && fm_harness_ancestry_pids ) > "$out/ancestry" 2>/dev/null
-    printf '%s\n' '{"session_id":"fixture","stop_hook_active":true}' \
-      | "$FM_HOME/bin/fm-claude-stop-autoarm.sh" > "$out/hook.out" 2>&1
-    printf '%s\n' "$?" > "$out/hook.rc"
-    printf '%s\n' '{"session_id":"fixture","stop_hook_active":true}' \
-      | "$FM_HOME/bin/fm-turnend-guard.sh" --claude > "$out/guard.out" 2>&1
-    printf '%s\n' "$?" > "$out/guard.rc"
-    "$FM_HOME/bin/fm-lock.sh" > "$out/lock.out" 2>&1
-    printf '%s\n' "$?" > "$out/lock.rc"
-    cp "$FM_HOME/state/.lock" "$out/lock-after"
-    : > "$out/done"
-    n=$((n + 1))
-  fi
-  sleep 0.05
-done
+printf '%s\n' "$$" > "$FM_HOME/state/loop-$FM_FIXTURE_GEN-pid"
+# shellcheck disable=SC1091
+. "$FM_HOME/spare.sh"
 exit 0
 SH
-  # A separate live session: its own process, its own id, holding the lock.
+  # A separate live session: its own process, holding the lock as S1.
   cat > "$dir/foreign.sh" <<'SH'
 #!/usr/bin/env bash
 i=0
@@ -914,7 +884,7 @@ while [ "$i" -lt 200 ] && [ "$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ')" != 1 
   i=$((i + 1))
 done
 printf '%s\n' "$$" > "$FM_HOME/state/foreign-pid"
-CLAUDE_CODE_SESSION_ID=S2 CLAUDE_PID=$$ "$FM_HOME/bin/fm-lock.sh" > "$FM_HOME/state/foreign-lock.out" 2>&1
+CLAUDE_CODE_SESSION_ID=S1 CLAUDE_PID=$$ "$FM_HOME/bin/fm-lock.sh" > "$FM_HOME/state/foreign-lock.out" 2>&1
 printf '%s\n' "$?" > "$FM_HOME/state/foreign-lock.rc"
 while [ ! -e "$FM_HOME/state/stop-foreign" ]; do sleep 0.05; done
 exit 0
@@ -924,36 +894,21 @@ SH
 
 # Launch <script> under <bin> detached from this suite, so it is reparented to
 # init and the ancestry walk ends inside the fixture.
-launch_bg_pty_orphan() {  # <dir> <bin> <script> [<env-assignment>...]
-  local dir=$1 bin=$2 script=$3
-  shift 3
+launch_bg_pty_orphan() {  # <dir> <session-id> <bin> <script> [<env-assignment>...]
+  local dir=$1 session=$2 bin=$3 script=$4
+  shift 4
   env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID \
-    FM_HOME="$dir" FM_FIXTURE_CLAUDE="$NAMED_CLAUDE" FM_FIXTURE_PTY_HOST="$APP_BUNDLE_CLAUDE" \
-    FM_FIXTURE_MODEL_LOOP="$VERSIONED_CLAUDE" FM_POLL=1 FM_HEARTBEAT=999999 \
-    FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=0 "$@" \
+    FM_HOME="$dir" FM_FIXTURE_SESSION_ID="$session" FM_FIXTURE_CLAUDE="$NAMED_CLAUDE" \
+    FM_FIXTURE_PTY_HOST="$APP_BUNDLE_CLAUDE" FM_FIXTURE_MODEL_LOOP="$VERSIONED_CLAUDE" \
+    FM_POLL=1 FM_HEARTBEAT=999999 FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=0 "$@" \
     bash -c '"$0" "$1" &' "$bin" "$script"
 }
 
-bg_pty_fire() {  # <dir> <gen> <n> <hook-environment-script>
-  local dir=$1 gen=$2 n=$3 i=0
-  printf '%s\n' "$4" > "$dir/state/fire-$gen-$n.tmp"
-  mv "$dir/state/fire-$gen-$n.tmp" "$dir/state/fire-$gen-$n"
-  while [ "$i" -lt 600 ] && [ ! -e "$dir/state/phase-$gen-$n/done" ]; do
-    sleep 0.05
-    i=$((i + 1))
-  done
-  [ -e "$dir/state/phase-$gen-$n/done" ] || fail "bg-pty fixture never finished generation $gen phase $n"
-}
-
-bg_pty_value() {  # <dir> <gen> <n> <file>
-  tr -d '[:space:]' < "$1/state/phase-$2-$3/$4"
-}
-
-# Start the incident chain: front-end, daemon, pty-host, and a model loop that
-# runs session start. Prints nothing; the pids land in state/.
-start_bg_pty_session() {  # <dir>
+# Start the chain: front-end, daemon, pty-host, and a model loop that runs
+# session start as <session-id>.
+start_bg_pty_session() {  # <dir> <session-id>
   local dir=$1
-  launch_bg_pty_orphan "$dir" "$NAMED_CLAUDE" "$dir/frontend.sh"
+  launch_bg_pty_orphan "$dir" "$2" "$NAMED_CLAUDE" "$dir/frontend.sh"
   wait_for_file "$dir/state/start-lock.rc" "the model loop's session-start lock result"
   wait_for_file "$dir/state/loop-1-pid" "the first model loop"
   BG_FIXTURE_PIDS+=("$(tr -d '[:space:]' < "$dir/state/frontend-pid")" \
@@ -962,22 +917,23 @@ start_bg_pty_session() {  # <dir>
     "$(tr -d '[:space:]' < "$dir/state/loop-1-pid")")
 }
 
-# Recycle the helper chain: the daemon, the pty-host, and the model loop of
-# generation 1 end, a new pty-host and model loop start outside the front-end's
-# tree, and the front-end stays alive. Asserts the divergence itself.
-recycle_bg_pty_session() {  # <dir>
+# Recycle the helper chain: the first model loop stops and takes its pty-host
+# and daemon with it, a new pty-host and model loop start outside the
+# front-end's tree, and the front-end stays alive. The new model loop numbers
+# its hook firings from 1 again. Asserts the divergence itself.
+recycle_bg_pty_session() {  # <dir> <session-id>
   local dir=$1 frontend loop1 ptyhost2 i
   frontend=$(tr -d '[:space:]' < "$dir/state/frontend-pid")
   loop1=$(tr -d '[:space:]' < "$dir/state/loop-1-pid")
-  : > "$dir/state/stop-daemon"
-  : > "$dir/state/stop-1"
+  : > "$dir/state/stop-spare"
   i=0
   while [ "$i" -lt 200 ] && kill -0 "$loop1" 2>/dev/null; do
     sleep 0.05
     i=$((i + 1))
   done
   kill -0 "$loop1" 2>/dev/null && fail "the first model loop did not exit"
-  launch_bg_pty_orphan "$dir" "$APP_BUNDLE_CLAUDE" "$dir/ptyhost.sh" FM_FIXTURE_GEN=2
+  rm -rf "$dir/state/stop-spare" "$dir/state/fire-"* "$dir/state/phase-"*
+  launch_bg_pty_orphan "$dir" "$2" "$APP_BUNDLE_CLAUDE" "$dir/ptyhost.sh" FM_FIXTURE_GEN=2
   wait_for_file "$dir/state/loop-2-pid" "the replacement model loop"
   ptyhost2=$(tr -d '[:space:]' < "$dir/state/ptyhost-2-pid")
   BG_FIXTURE_PIDS+=("$ptyhost2" "$(tr -d '[:space:]' < "$dir/state/loop-2-pid")")
@@ -988,20 +944,19 @@ recycle_bg_pty_session() {  # <dir>
   done
   [ "$(ps -o ppid= -p "$ptyhost2" 2>/dev/null | tr -d ' ')" = 1 ] \
     || fail "the replacement pty-host was not reparented to init"
-  kill -0 "$frontend" 2>/dev/null || fail "the front-end died with the recycle, so the incident cannot be exercised"
+  kill -0 "$frontend" 2>/dev/null || fail "the front-end died with the recycle, so the recycled case cannot be exercised"
 }
 
 test_e2e_bg_pty_hosted_primary_keeps_supervision_across_a_recycle() {
   local dir frontend loop1 loop2
   dir="$TMP_ROOT/e2e-bg-pty-primary"
   make_bg_pty_home "$dir"
-  start_bg_pty_session "$dir"
+  start_bg_pty_session "$dir" S1
   frontend=$(tr -d '[:space:]' < "$dir/state/frontend-pid")
   loop1=$(tr -d '[:space:]' < "$dir/state/loop-1-pid")
 
-  # Session start ran with the front-end inside the contiguous chain, exactly as
-  # the listing showed, and anchored the lock on the model loop, not the
-  # outermost front-end that outlives it.
+  # Session start sees the front-end in its chain and still anchors the lock on
+  # the model loop, not on the outermost front-end that outlives it.
   grep -qx "$frontend" "$dir/state/start-ancestry" \
     || fail "session start did not see the front-end in its chain: $(tr '\n' ' ' < "$dir/state/start-ancestry")"
   expect_code 0 "$(tr -d '[:space:]' < "$dir/state/start-lock.rc")" \
@@ -1010,35 +965,23 @@ test_e2e_bg_pty_hosted_primary_keeps_supervision_across_a_recycle() {
     || fail "session start anchored the lock on $(cat "$dir/state/.lock"), expected the model loop $loop1 (front-end $frontend)"
   [ "$(tr -d '[:space:]' < "$dir/state/.lock-session")" = S1 ] \
     || fail "session start did not record its session id beside the lock"
+  cp "$dir/state/.lock-session" "$dir/sidecar-initial"
 
-  # Generation 1: the contiguous chain owns supervision.
-  bg_pty_fire "$dir" 1 1 'export CLAUDE_CODE_SESSION_ID=S1; export CLAUDE_PID=$$'
-  expect_code 2 "$(bg_pty_value "$dir" 1 1 hook.rc)" "contiguous chain: the Stop auto-arm did not rewake"
-  [ "$(arm_count "$dir")" = 2 ] || fail "contiguous chain: expected 2 arms, got $(arm_count "$dir")"
+  fire_phase "$dir" 1 'export CLAUDE_CODE_SESSION_ID=S1; export CLAUDE_PID=$$'
+  expect_phase_owned "$dir" 1 2 "$loop1" "contiguous chain"
 
-  recycle_bg_pty_session "$dir"
+  # The new model loop's Stop, with the front-end alive but no longer an
+  # ancestor: the same session reclaims the dead anchor onto the new model loop.
+  recycle_bg_pty_session "$dir" S1
   loop2=$(tr -d '[:space:]' < "$dir/state/loop-2-pid")
-
-  # Generation 2: the new model loop's Stop, with the front-end alive but no
-  # longer an ancestor - the state the primary was in from 16:48Z.
-  bg_pty_fire "$dir" 2 1 'export CLAUDE_CODE_SESSION_ID=S1; export CLAUDE_PID=$$'
-  if grep -qx "$frontend" "$dir/state/phase-2-1/ancestry"; then
+  fire_phase "$dir" 1 'export CLAUDE_CODE_SESSION_ID=S1; export CLAUDE_PID=$$'
+  if grep -qx "$frontend" "$dir/state/phase-1/ancestry"; then
     fail "the recycled chain still reached the front-end, so this phase proves nothing"
   fi
-  grep -qx "$loop2" "$dir/state/phase-2-1/ancestry" || fail "the hook's ancestry lost its own model loop"
-  if grep -q 'OWNED BY ANOTHER LIVE SESSION' "$dir/state/phase-2-1/guard.out"; then
-    fail "recycled chain: the turn-end guard stood this session down: $(cat "$dir/state/phase-2-1/guard.out")"
-  fi
-  expect_code 0 "$(bg_pty_value "$dir" 2 1 guard.rc)" "recycled chain: the turn-end guard did not allow the stop"
-  expect_code 2 "$(bg_pty_value "$dir" 2 1 hook.rc)" "recycled chain: the Stop auto-arm stayed inert: $(cat "$dir/state/phase-2-1/hook.out")"
-  [ "$(arm_count "$dir")" = 4 ] || fail "recycled chain: expected 4 arms, got $(arm_count "$dir")"
-  [ "$(epoch_outcome "$dir")" = rewake ] || fail "recycled chain: no rewake claim was recorded, got: $(epoch_outcome "$dir")"
-  expect_code 0 "$(bg_pty_value "$dir" 2 1 lock.rc)" "recycled chain: fm-lock.sh refused the session's own lock: $(cat "$dir/state/phase-2-1/lock.out")"
-  [ "$(bg_pty_value "$dir" 2 1 lock-after)" = "$loop2" ] \
-    || fail "recycled chain: the lock names $(bg_pty_value "$dir" 2 1 lock-after), expected the live model loop $loop2"
-  [ "$(tr -d '[:space:]' < "$dir/state/.lock-session")" = S1 ] || fail "recycled chain: the session id beside the lock changed"
+  grep -qx "$loop2" "$dir/state/phase-1/ancestry" || fail "the hook's ancestry lost its own model loop"
+  expect_phase_owned "$dir" 1 4 "$loop2" "recycled chain"
 
-  : > "$dir/state/stop-2"
+  : > "$dir/state/stop-spare"
   : > "$dir/state/stop-frontend"
   pass "session-lock e2e: a primary hosted by claude --continue via bg-pty-host keeps supervision across a helper recycle"
 }
@@ -1047,29 +990,21 @@ test_e2e_bg_pty_hosted_primary_stands_down_for_a_foreign_owner() {
   local dir foreign
   dir="$TMP_ROOT/e2e-bg-pty-foreign"
   make_bg_pty_home "$dir"
-  launch_bg_pty_orphan "$dir" "$NAMED_CLAUDE" "$dir/foreign.sh"
+  launch_bg_pty_orphan "$dir" S1 "$NAMED_CLAUDE" "$dir/foreign.sh"
   wait_for_file "$dir/state/foreign-lock.rc" "the foreign session's lock result"
   foreign=$(tr -d '[:space:]' < "$dir/state/foreign-pid")
   BG_FIXTURE_PIDS+=("$foreign")
   expect_code 0 "$(tr -d '[:space:]' < "$dir/state/foreign-lock.rc")" "the foreign session could not take the lock"
 
-  start_bg_pty_session "$dir"
+  start_bg_pty_session "$dir" S2
   expect_code 1 "$(tr -d '[:space:]' < "$dir/state/start-lock.rc")" \
     "session start took a lock another live session holds: $(cat "$dir/state/start-lock.out")"
 
-  recycle_bg_pty_session "$dir"
-  bg_pty_fire "$dir" 2 1 'export CLAUDE_CODE_SESSION_ID=S1; export CLAUDE_PID=$$'
-  expect_code 0 "$(bg_pty_value "$dir" 2 1 hook.rc)" "foreign owner: the Stop auto-arm did not stand down"
-  [ "$(arm_count "$dir")" = 0 ] || fail "foreign owner: a non-owner armed $(arm_count "$dir") time(s)"
-  expect_code 0 "$(bg_pty_value "$dir" 2 1 guard.rc)" "foreign owner: a non-owner Stop did not end safely"
-  grep -q "OWNED BY ANOTHER LIVE SESSION.*lock owner pid $foreign" "$dir/state/phase-2-1/guard.out" \
-    || fail "foreign owner: the guard did not name the live owner $foreign: $(cat "$dir/state/phase-2-1/guard.out")"
-  expect_code 1 "$(bg_pty_value "$dir" 2 1 lock.rc)" "foreign owner: fm-lock.sh accepted another session's lock"
-  grep -q "another live firstmate session holds the lock (pid $foreign, session S2)" "$dir/state/phase-2-1/lock.out" \
-    || fail "foreign owner: the refusal did not name the owner: $(cat "$dir/state/phase-2-1/lock.out")"
-  [ "$(bg_pty_value "$dir" 2 1 lock-after)" = "$foreign" ] || fail "foreign owner: a non-owner rewrote the lock"
+  recycle_bg_pty_session "$dir" S2
+  fire_phase "$dir" 1 'export CLAUDE_CODE_SESSION_ID=S2; export CLAUDE_PID=$$'
+  expect_phase_foreign "$dir" 1 0 "$foreign" "foreign owner"
 
-  : > "$dir/state/stop-2"
+  : > "$dir/state/stop-spare"
   : > "$dir/state/stop-frontend"
   : > "$dir/state/stop-foreign"
   pass "session-lock e2e: a bg-pty-hosted primary still stands down for a separate live session's lock"
