@@ -536,7 +536,7 @@ verify_interrupt_running() {
     after=$(agent_state)
     [ "$after" = alive ] \
       || die "task $ID's agent is '$after' after its interrupt key; an interrupt must leave the agent running"
-    proof=agent-alive
+    proof='agent-alive'
   fi
   printf '%s' "$proof"
 }
@@ -624,7 +624,7 @@ do_exit() {
   if [ -n "$hazard" ] && rendered_matches "$hazard"; then
     die "task $ID shows the $HARNESS revert picker, where typed text becomes a search and Enter reverts file changes; refusing to type the $cmd exit command. Close it with $(fm_control_interrupt_key "$HARNESS"), never Enter, then retry '$VERB'"
   fi
-  composer_state=$(fm_backend_composer_state "$BACKEND" "$T" "$LABEL" 2>/dev/null) \
+  composer_state=$(fm_backend_composer_state "$BACKEND" "$T" "$LABEL" "$HARNESS" 2>/dev/null) \
     || composer_state=unknown
   case "$composer_state" in
     empty) ;;

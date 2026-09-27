@@ -488,6 +488,40 @@ Observed output:
 fm-claude-stop-autoarm: ok
 ```
 
+### kiro-cli turn-end guard and session-start, 2026-09-19
+
+Verified against kiro-cli 2.22.1 (`/home/shiv/.local/bin/kiro-cli`, the agent CLI, not the `/usr/bin/kiro` IDE) over real PTY sessions.
+
+The interactive session is a four-frame contiguous run with a `bun` interpreter interposed between two `kiro-cli-chat` frames, so a tool subprocess and the `stop` hook share the same run:
+
+```text
+kiro-cli chat -a                                       (comm kiro-cli, outermost)
+  /home/shiv/.local/bin/kiro-cli-chat chat -a          (comm kiro-cli-chat)
+    /home/shiv/.local/share/kiro-cli/bun .../tui.js …  (comm bun, interposed)
+      /home/shiv/.local/bin/kiro-cli-chat acp …        (comm kiro-cli-chat, innermost)
+```
+
+Detection: run from inside a real kiro-cli tool subprocess carrying an inherited `CLAUDECODE=1`, `bin/fm-harness.sh` printed `kiro-cli` and `bin/fm-harness.sh ancestry` printed `comm kiro-cli` - the comm ancestry outranks the retained marker.
+
+Turn-end hook capability (PTY probes, one turn each):
+- The `stop` agent hook fires and is awaited synchronously (a 4-second sleeping hook ran to completion before the session accepted the next input).
+- `stop` hook exit 2 is a no-op: the turn ended normally and the hook was not re-fired (an exit-2 hook fired exactly once).
+- Neither the hook's stdout nor a `{"followup_message":...}` object is consumed as a continuation: a hook printing both never produced a second turn, and the stop hook fired exactly once.
+
+Conclusion: kiro-cli cannot block the turn end or deliver a follow-up, so `bin/fm-kiro-turnend-hook.sh`'s `Stop` branch is a re-arm backstop only; the 2026-09-21 entry below records the structural doorbell that replaced the foreground checkpoint as the primary path (`docs/turnend-guard.md`, `docs/supervision-protocols/kiro-cli.md`).
+
+Session-start / launch gate end-to-end: launching `kiro-cli chat --trust-all-tools --agent firstmate-kiro "<brief>"` under an isolated `KIRO_HOME` built by `bin/fm-spawn.sh`'s `build_kiro_home` (settings/cli.json `chat.disableTrustAllConfirmation=true`, `chat.allowAnimations=false`; `agents/firstmate-kiro.json` wiring the tracked `bin/fm-kiro-turnend-hook.sh`) produced:
+
+```text
+trust dialog rendered: False
+live TUI signal present: True
+stop hook fired: yes
+```
+
+`KIRO_HOME=<home> kiro-cli settings all` confirmed the isolated home is read (`chat.disableTrustAllConfirmation = true`, `chat.allowAnimations = false`). With `disableTrustAllConfirmation=false` the `--trust-all-tools` confirmation dialog renders with its selection defaulting to `❯ No, exit` and `Yes, I accept` reachable only by an arrow keypress firstmate's key plane cannot send, which is why `kiro_wait_for_launch` refuses rather than answering a rendered dialog. A second live probe confirmed the positional brief stays steerable and that the `stop` hook's environment carries no workspace root: `KIRO_WORKSPACE_ROOT` was unset and the hook saw only its own cwd, so the guarded hook falls back to `$PWD` and reads the cwd from the delivered payload.
+
+Regression coverage: `tests/fm-harness-precedence.test.sh` (kiro-cli comm ancestry names it and outranks a retained `CLAUDECODE`, while a leaked `KIRO_SESSION_ID` never claims identity), `tests/fm-session-lock-ancestry.test.sh` (the four-frame run is contiguous across the bun frame and anchors on its outermost frame), `tests/fm-supervision-instructions.test.sh` (kiro-cli renders the foreground-checkpoint protocol with the re-arm-backstop wording), and `tests/fm-kiro-harness.test.sh` (the launch gate and turn-end wiring over a fake backend). Refresh the live facts with the PTY probes above against the installed kiro-cli.
+
 ### Claude drops the exit 2 of a hook it timed out, 2026-09-23
 
 This supports the `bin/fm-claude-stop-autoarm.sh` header statement that a park outliving the hook timeout ends without a rewake.
@@ -505,6 +539,58 @@ The timeout hook trapped `TERM`, backgrounded `sleep 300`, waited, and on `TERM`
 | --- | --- | --- |
 | Control, exit 2 before the timeout | started +2, exited 2 at +12 | `Stop hook feedback` followed by the requested reply |
 | Timeout, exit 2 from the `TERM` handler | started +2, `TERM` and exit 2 at +32 | no `Stop hook feedback` and no reply, still idle at +111 |
+
+### kiro-cli V3 primary doorbell, trusted launch, and composer footer, 2026-09-21
+
+Verified against kiro-cli 2.22.1 (`/home/shiv/.local/bin/kiro-cli`) with the V3 engine (KAS 0.66.4) over real tmux panes, isolated `FM_HOME` labs, and the operator's login `HOME` for authentication; no production home was touched.
+
+Trust and tool grants: `allowedTools: ["*"]` is not trust.
+Two production V3 scouts launched with that wildcard agent and no trust flag read files and ran shell without asking, then parked on `fs_write`'s Replace in File with `Replace in File requires approval · trust [session]` (`Allow / Always allow / Deny`) until the operator answered by hand.
+The tracked primary agent and the per-task generator in `bin/fm-kiro-lib.sh` now name concrete tools (`execute_bash`, `fs_read`, `fs_write`, `code`, `grep`, `glob`, `web_fetch`, `web_search`, `introspect`, `session`, `report`, `tool_search`; `knowledge` excluded), and every Firstmate V3 launch carries `-a` (`kiro-cli chat --v3 -a --agent ...`), the same flag the operator's own working launch uses; `kiro-cli agent validate --path <generated agent>` accepts the generated file (run inside `tests/fm-kiro-harness.test.sh` whenever the CLI is installed).
+
+Live worker proof, all ten steps green:
+
+```text
+$ FM_KIRO_LIVE_E2E=1 FM_KIRO_LIVE_MODEL=claude-sonnet-5 FM_KIRO_LIVE_TIMEOUT=300 bash tests/fm-kiro-signals-live-e2e.test.sh
+ok - live: kiro-cli stop hook touched state/<id>.turn-ended at turn end
+ok - live: fm-harness.sh resolves the live pane's process tree as kiro-cli (comm kiro-cli)
+ok - live: V3 selected the generated project-scoped Firstmate agent
+ok - live: idle V3 composer is steerable
+ok - live: Kiro hooks bracket a steered tool turn as busy/progress/idle
+ok - live: the real V3 launch carries the trust flag
+ok - live: a fresh V3 worker read, ran shell, and replaced file content with no approval dialog
+ok - live: fm-control interrupt (Escape) preserves the pane
+ok - live: fm-control exit (/quit) stopped the agent from its bright idle placeholder
+ok - live: fm-teardown removed every kiro-cli artifact
+ok - kiro-cli live crewmate signals (turn-end, detection, busy/idle, control, teardown) passed
+```
+
+The trust step steers the fresh worker to create `trust-proof.txt` through the shell tool, change `ALPHA` to `OMEGA` through `fs_write`'s replace operation, and read it back; it fails on any rendered `requires approval` / `Always allow` / `trust [session]` text, on a turn that never reaches `Stop`, and on an unchanged file.
+The pane footer read `Trust All Tools active, confirmations are off` on the V3 engine, so `-a` is honored by V3 exactly as by V2.
+
+Live primary proof, the structural doorbell end to end:
+
+```text
+$ FM_KIRO_PRIMARY_LIVE_E2E=1 FM_KIRO_LIVE_MODEL=claude-sonnet-5 FM_KIRO_PRIMARY_READY_TIMEOUT=300 FM_KIRO_PRIMARY_WAKE_TIMEOUT=300 bash tests/fm-kiro-primary-live-e2e.test.sh
+ok - live primary: first-prompt SessionStart ran and published an idle Kiro endpoint
+ok - live primary: watcher doorbell started a turn whose hook context was handled and acknowledged
+ok - Kiro V3 primary structural continuity passed
+```
+
+`bin/fm-kiro-primary.sh` launched `chat --v3 -a --agent firstmate-kiro` under `state/.kiro-primary-home`; the project `SessionStart` hook ran the digest into context (the first reply was `PRIMARYREADY`) and published `state/.primary-endpoint`; a watcher wake appended to the durable queue and rang `: Firstmate wake waiting: ...` into the pane; the `UserPromptSubmit` hook attached the drained queue; and the model ran the drain's exact `fm-wake-drain.sh --ack-through 1 --recovery-generation <token>` command, whose token exists only in that attached context, emptying the queue.
+Hook-attached context is not rendered in the transcript, which is why the guard accepts the acknowledgement command as delivery proof.
+
+Provider behavior observed during these runs: Kiro's default `auto` model routing answered `Auto is experiencing high traffic. Try again, or select another model.` (`HTTP 429 ThrottlingException`, `INSUFFICIENT_MODEL_CAPACITY`) on four of five worker runs, while `claude-sonnet-5` and `gpt-5.6-luna` answered immediately (`chat --list-models --format json` lists the ids).
+Both live guards therefore accept `FM_KIRO_LIVE_MODEL` and name a provider refusal as such instead of reporting an adapter failure.
+
+Composer footer: an agent launched before the V3 wiring draws only `/copy to clipboard` below its idle composer, while V3 draws `/sessions to resume · /copy to clipboard`; the earlier default recognized only the V3 shape, so every `fm-control exit|relaunch` of a pre-V3 Kiro pane was refused as pending text on 2026-09-21 until `FM_COMPOSER_KIRO_FOOTER_RE` was overridden.
+Both shapes are now the anchored default in `bin/fm-composer-lib.sh`, pinned by `tests/fm-composer-lib.test.sh` and `tests/fm-kiro-harness.test.sh`.
+
+ACP evaluation (`kiro-cli --help`, `kiro-cli acp --help`, `kiro-cli chat --help`, 2.22.1): `kiro-cli acp` starts an Agent Client Protocol agent over stdio taking `--agent`, `--model`, `--effort`, `-a`, and `--agent-engine v3`; `chat --output-format stream-json` emits the run's ACP events as JSON Lines and implies `--no-interactive`; the V3 TUI itself drives its engine through an inner `kiro-cli-chat acp` frame.
+Neither surface is adopted: a stdio ACP agent has no pane to steer, observe, or ring and would need a Firstmate-side client plus a second permission and wake plane, and `stream-json` is one-shot; the steerable V3 TUI in a pane remains the verified surface for every kind.
+
+Regression coverage: `tests/fm-kiro-harness.test.sh` (V3 launch line with `-a`, wildcard-free concrete grants equal between the generated and tracked agents, `agent validate` when installed), `tests/fm-primary-endpoint.test.sh` (SessionStart publication and the `KIRO_PRIMARY_ENDPOINT` digest line, lock-bound ring, foreground and pending refusals, UserPromptSubmit context without early acknowledgement), `tests/fm-supervision-instructions.test.sh` (doorbell-first protocol with the checkpoint fallback), and `tests/fm-composer-lib.test.sh` (both footer shapes).
+Refresh the live facts with the two guards above.
 
 ## Watcher continuity
 

@@ -407,8 +407,7 @@ copy_shared_captain_file() {
 }
 
 propagate_shared_captain_preferences() {
-  local src_data=$1 dest_data=$2 src dest src_hash dest_hash dest_parent dest_home
-  local quarantine inherited_hash reason rc missing
+  local src_data=$1 dest_data=$2 src dest src_hash dest_hash dest_parent dest_home quarantine inherited_hash reason missing links rc
   [ -n "$src_data" ] || return 1
   [ -n "$dest_data" ] || return 1
   src="$src_data/$FM_SHARED_CAPTAIN_FILE"
@@ -419,7 +418,14 @@ propagate_shared_captain_preferences() {
 
   if [ -e "$src" ] || [ -L "$src" ]; then
     if ! shared_captain_file_safe_existing "$src"; then
-      reason="unsafe primary source"
+      links=
+      if [ -f "$src" ] && [ ! -L "$src" ]; then
+        links=$(fm_inherit_file_link_count "$src" 2>/dev/null || true)
+      fi
+      case "$links" in
+        ''|*[!0-9]*|0|1) reason="unsafe primary source" ;;
+        *) reason="primary source is hardlinked; recreate its inode with a byte-preserving copy to a sibling temporary file followed by mv" ;;
+      esac
       warn_inheritable_config_error "$FM_SHARED_CAPTAIN_REL" "$src" "$reason"
       record_inheritable_config_result "$FM_SHARED_CAPTAIN_REL" error "$reason"
       return 1

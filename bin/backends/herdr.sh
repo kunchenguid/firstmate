@@ -3167,8 +3167,8 @@ fm_backend_herdr_composer_identity() {  # <target> -> "<agent>\t<status>"
 # equally defeat this state read's pre-submit concat guard. The composer is
 # by definition inside the viewport, and `--source visible` needs none of the
 # small-N --lines workaround.
-fm_backend_herdr_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
-  local target=$1 cap caps verdict identity
+fm_backend_herdr_composer_state() {  # <target> [expected-label] [harness] -> empty|pending|pending-unproven|unknown
+  local target=$1 harness=${3:-} cap caps verdict identity
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   if cap=$(fm_backend_herdr_visible_capture_ansi "$target" 2>/dev/null); then
     caps=$(printf 'styled=1\ncursor=0\nidentity=1')
@@ -3178,12 +3178,12 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|pending-unprove
     printf 'unknown'
     return 0
   fi
-  verdict=$(fm_composer_classify_screen "$caps" "$cap")
+  verdict=$(fm_composer_classify_screen "$caps" "$cap" '' '' "$harness")
   if [ "$verdict" = need-identity ]; then
     if ! identity=$(fm_backend_herdr_composer_identity "$target" 2>/dev/null) || [ -z "$identity" ]; then
       identity='probe-absent'
     fi
-    verdict=$(fm_composer_classify_screen "$caps" "$cap" '' "$identity")
+    verdict=$(fm_composer_classify_screen "$caps" "$cap" '' "$identity" "$harness")
     [ "$verdict" != need-identity ] || verdict=unknown
   fi
   printf '%s' "$verdict"

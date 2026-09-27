@@ -288,15 +288,15 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 # whose Enter never landed, so on an agent not reported busy it is submitted
 # rather than skipped; skipping it would block every later ring. On both paths
 # a lost first Enter gets one confirmed retry.
-fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
-  local backend=$1 target=$2 rec=$3 label=${4:-} line cstate verdict
+fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label] [harness]
+  local backend=$1 target=$2 rec=$3 label=${4:-} harness=${5:-} line cstate verdict
   case "$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)" in
     dead|missing) return 3 ;;
   esac
   if ! line=$(fm_task_inbox_doorbell_line "$rec"); then
     return 2
   fi
-  cstate=$(fm_backend_composer_state "$backend" "$target" "$label" 2>/dev/null) || cstate=unknown
+  cstate=$(fm_backend_composer_state "$backend" "$target" "$label" "$harness" 2>/dev/null) || cstate=unknown
   case "$cstate" in
     pending)
       fm_task_inbox_composer_holds "$backend" "$target" "$line" "$label" \

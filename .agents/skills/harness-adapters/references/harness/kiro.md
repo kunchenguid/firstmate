@@ -1,0 +1,67 @@
+# Kiro CLI
+
+The Kiro CLI's `kiro-cli` TUI, verified as a CREWMATE, SCOUT, PRIMARY, and SECONDMATE adapter on 2026-09-20 with kiro-cli 2.22.1 on Linux.
+This is the Amazon-Q-lineage `kiro-cli` binary, NOT the `/usr/bin/kiro` Electron IDE, which never appears as a `kiro-cli` process.
+Verified for all four kinds: `../../../../../bin/fm-spawn.sh` accepts a `--secondmate` launch on it, and `../../../../../docs/supervision-protocols/kiro-cli.md` owns its primary wake protocol.
+
+## Operating facts
+
+| Fact | Value |
+|---|---|
+| Binary | Absolute `kiro-cli` from `PATH`, refused if absent; NOT `/usr/bin/kiro` (the Electron IDE). The process tree carries anchored names `kiro-cli`, an inner `kiro-cli-chat` wrapper, and a `bun` interpreter running the extracted `tui.js`. |
+| Launch | V3 (default): `chat --v3 -a --agent firstmate-kiro-<id> "<brief>"`, with the resolved absolute binary, per-task `KIRO_HOME`/`KIRO_DATA_DIR`/`KIRO_CHAT_LOG_FILE`, and task-specific project agent and hook symlinks whose regular-file targets live under that worker's `KIRO_HOME`; explicit `FM_KIRO_ENGINE=v2` falls back to `chat --v2 --trust-all-tools --agent firstmate-kiro-v2-<id>` with an embedded-hook agent inside `KIRO_HOME`. The trust flag is part of the correct launch on both engines (see "Turn end and trust"). The brief is a single firstmate-encoded positional query that auto-submits with no extra Enter and stays steerable (verified live on 2026-09-20: an 18 KB multi-line brief ran its first turn, the pane stayed alive on the idle `ask a question or describe a task` prompt, and a later typed message completed a second turn). The INTERACTIVE steerable TUI is used, not the `--no-interactive` one-shot, because every kind must stay alive to be steered and to drive `/no-mistakes` across turns. |
+| Busy state | Semantic hooks are the writer: `UserPromptSubmit` opens `busy kiro-hook`, `PreToolUse`/`PostToolUse` publish native progress, and `Stop` closes idle, all generation-bound through `../../../../../bin/fm-busy-event.sh` so a late hook from an older incarnation is rejected; the `kiro-regex` rendered-tail fallback in `../../../../../bin/fm-busy-lib.sh` remains for a pane whose generation is absent. |
+| Rendered tail | Busy shows the composer footer `Thinking... (esc to cancel)` beside a braille spinner and the status line `Kiro is working` (`Kiro is working · Type to steer · Ctrl+S to queue`); idle shows the `ask a question or describe a task` placeholder and neither anchor. Both anchors are ASCII that survive `KIRO_ASCII_MODE=1`; the spinner is locale-sensitive and is not a signal. |
+| Turn end | A first-class `stop` agent hook, kiro-cli's authoritative turn-end signal, firing at every turn end in both interactive and headless modes and carrying `KIRO_SESSION_ID` - the same Stop-hook shape as claude and cursor. The tracked `../../../../../bin/fm-kiro-turnend-hook.sh` serves BOTH the crewmate/primary turn-ended touch and the primary supervision re-arm backstop; see "Turn end and trust" below. |
+| Exit | `/quit`, one Enter (or `/exit`); both quit with save. `fm-control exit` types `/quit` only after the shared composer classifier reads the pane empty: kiro-cli's idle placeholder renders in a grey (RGB ~158) above the fleet ghost-strip ceiling, so `../../../../../bin/fm-composer-lib.sh` treats the exact `ask a question or describe a task` text as empty only under the recorded `kiro-cli` identity, and it treats the helper row below the composer as furniture in both of its shapes (V3's `/sessions to resume · /copy to clipboard` and the bare `/copy to clipboard` of an agent launched before the V3 wiring). |
+| Interrupt | Single `Escape` cancels the streaming turn and leaves the session alive (the busy footer reads `esc to cancel`); no clear key follows. A single `Ctrl+C` does NOT quit the new default TUI - `Ctrl+C` twice quits - so never rely on one `Ctrl+C` to abort a turn. |
+| Skill | `/<skill>`, for example `/no-mistakes`; kiro-cli discovers Firstmate's user skills. |
+| Autonomy | `-a`/`--trust-all-tools` auto-approves every tool call for the run and is part of every Firstmate launch; `--trust-tools=<names>` or empty trusts a narrower set. An agent file's `allowedTools` grants no useful wildcard: `["*"]` still stops on `fs_write`'s Replace in File with an approval dialog (verified live on 2026-09-21), so the tracked and generated agents name concrete tools and the launch flag carries the trust. |
+| Marker | None used for identity. kiro-cli publishes a rich `KIRO_*` environment family (`KIRO_SESSION_ID`, `KIRO_VERSION`, `KIRO_CLI_ACP_CLIENT_NAME`), but those are ordinary inheritable environment state, so `../../../../../bin/fm-harness.sh` identifies it by the anchored process names `kiro-cli`/`kiro-cli-chat` alone. |
+| Resume | `--resume-id <SESSION_ID>` resumes an exact session (verified); `--resume` (`-r`) resumes the cwd's most recent conversation; `chat --list-sessions --format json` enumerates sessions. Firstmate uses deterministic relaunch, so no verified pane-resume contract is required. |
+| Model | `--model <id>`; discover with `chat --list-models --format json`. |
+| Effort | `--effort <low\|medium\|high\|xhigh\|max>`, the full shared vocabulary (verified in `chat --help`); `max` is only ever reached through an explicit captain choice. |
+| Composer | Bare `›` prompt row with the `ask a question or describe a task` idle placeholder; steering confirms delivery through the `Kiro is working` / `esc to cancel` busy footer (`../../../../../bin/fm-composer-lib.sh`). |
+
+## Turn end and trust
+
+kiro-cli declares lifecycle hooks in an agent's JSON config, and the `stop` hook fires at the end of every turn in both interactive and headless modes, delivering `{hook_event_name:"stop", cwd, session_id, assistant_response}` on the hook script's STDIN with `KIRO_SESSION_ID` in the environment.
+Note that `KIRO_WORKSPACE_ROOT` was UNSET in live sessions; the hook falls back to `$PWD`, which is the launch directory.
+Everything Firstmate needs lives inside a per-task `KIRO_HOME` at `state/<id>.kiro-home`, which `../../../../../bin/fm-spawn.sh` rebuilds fresh on every spawn, so generated payloads and the turn-end pointer are not written into the project's own worktree and no captain-shared file is edited:
+
+- `settings/cli.json` carries `chat.disableTrustAllConfirmation=true`, which suppresses the `--trust-all-tools` startup confirmation dialog `--trust-all-tools` otherwise raises, plus `chat.allowAnimations=false` for a stable screen-scrape baseline.
+  The suppression is REQUIRED, not cosmetic: without it the dialog renders `Warning: Kiro is running in trust all tools mode` with its default selection on `No, exit` and the positional brief does NOT run until it is answered, which Firstmate's arrow-less key plane cannot do (verified live on 2026-09-20).
+- `agents/firstmate-kiro-v2-<id>.json` exists only for the explicit V2 fallback: the Firstmate-owned embedded-hook agent selected by `--agent`. On V3 the agent and hook payloads live under `KIRO_HOME/project/.kiro/`, while cwd-local `.kiro/agents/firstmate-kiro-<id>.json` and `.kiro/hooks/fm-firstmate-<id>.json` are regular byte-for-byte copies required by Kiro's workspace discovery, which ignores symlinked payloads. `../../../../../bin/fm-kiro-lib.sh` generates the same concrete tool list as the tracked primary agent `.kiro/agents/firstmate-kiro.json` (`execute_bash`, `fs_read`, `fs_write`, `code`, `grep`, `glob`, `web_fetch`, `web_search`, `introspect`, `session`, `report`, `tool_search`; `knowledge` excluded).
+- `agents/fm-turn-end.d/<token>` is the registry entry naming `state/<id>.turn-ended`, minted per task.
+- `../../../../../bin/fm-kiro-turnend-hook.sh` is the tracked, shared hook.
+  It is a guarded no-op for its turn-ended touch: it touches `state/<id>.turn-ended` ONLY when `FM_KIRO_TURNEND_POINTER` names the isolated-home pointer whose token matches the per-`KIRO_HOME` registry entry, with the old workspace pointer accepted only for migration, so a stray kiro-cli session under this `KIRO_HOME` that is not this task changes nothing.
+  For a PRIMARY or SECONDMATE session the same hook additionally serves as the supervision re-arm backstop, gated by `../../../../../bin/fm-primary-scope-lib.sh`'s `fm_primary_scope_matches`, so a linked crew/scout worktree stops after its turn-ended touch.
+
+`../../../../../bin/fm-teardown.sh` retires the whole `state/<id>.kiro-home` directory with `rm -rf` and it is rewritten fresh on relaunch, so no shared global registry cleanup is needed; `../../../../../bin/fm-control-lib.sh`'s turn-end auth path is therefore empty for kiro-cli, while its wiring paths list the isolated-home `.fm-kiro-turnend` pointer and the `state/<id>.kiro-turnend-token`.
+
+## Detection
+
+Detected by ancestry alone: `../../../../../bin/fm-harness.sh` matches the anchored process names `kiro-cli` and the inner `kiro-cli-chat`, never `*kiro*`, so `kiroshi` and an unrelated bare `bun` do not match.
+No environment marker is promoted: the `KIRO_*` family is inheritable environment state, not identity, and kiro-cli does not clear an inherited `CLAUDECODE` - but a structural kiro-cli ancestor outranks that retained marker, which `../../../../../bin/fm-harness.sh` decides without depending on the spawn's own launch-boundary marker clearing.
+kiro-cli IS in the session-lock name vocabulary in `../../../../../bin/fm-session-lock-lib.sh` (`^kiro-cli$` / `^kiro-cli-chat$`) so a session running on it can acquire this home's lock.
+Its interactive session is a contiguous four-frame run (`kiro-cli` -> `kiro-cli-chat` -> `bun` -> `kiro-cli-chat`) whose tool subprocesses and `stop` hook both descend from the innermost `acp` frame, so the lock walk reports the whole run and anchors on the stable OUTERMOST `kiro-cli` frame rather than the transient inner engine pid.
+
+## Worker busy state and turn end
+
+`../../../../../bin/fm-spawn.sh` arms a busy generation for kiro-cli and passes it to the hook as `FM_KIRO_BUSY_GEN`; `../../../../../bin/fm-kiro-turnend-hook.sh` applies `busy` on `UserPromptSubmit`, progress on `PreToolUse`/`PostToolUse`, and `idle` on `Stop`, each bound to the task by the isolated-home pointer and per-`KIRO_HOME` token before any state mutation (verified live on 2026-09-21 by `tests/fm-kiro-signals-live-e2e.test.sh`).
+`fm_busy_kiro_tail_busy` matches the `Thinking... (esc to cancel)` and `Kiro is working` anchors (with the `FM_BUSY_KIRO_REGEX` override) as the fallback when no generation is recorded, and `fm_busy_classify` reports `unknown kiro-regex` rather than idle when they are absent, because a long turn can scroll them out of the captured tail.
+The authoritative turn-end signal is the `stop` hook above, not this rendered fallback; `state/<id>.turn-ended` remains a wake notification for the watcher rather than current-state truth.
+
+## Primary integration
+
+SUPPORTED: `../../../../../docs/supervision-protocols/kiro-cli.md` owns the wake protocol.
+kiro-cli's `Stop` hook fires and is awaited synchronously, but exit 2 is a no-op on `Stop` and neither the hook's stdout nor a `followup_message` is consumed as a continuation (all verified live, kiro-cli 2.22.1), so it cannot block the turn end or force a follow-up and serves only as the watcher re-arm backstop.
+The structural path is external: `../../../../../bin/fm-kiro-primary.sh` launches the V3 primary with the tracked `.kiro/agents/firstmate-kiro.json` and `.kiro/hooks/fm-firstmate.json`, the `SessionStart` hook runs the digest into context and publishes the pane as `state/.primary-endpoint`, the background watcher rings one constant doorbell line into that pane after each actionable wake, and the `UserPromptSubmit` hook attaches the drained queue as that turn's context (`../../../../../bin/fm-primary-endpoint-lib.sh`); the foreground `../../../../../bin/fm-watch-checkpoint.sh` remains the fallback when no endpoint is published, and `../../../../../docs/turnend-guard.md` records the limitation.
+ACP: kiro-cli 2.22.1 exposes two client-driven surfaces (`kiro-cli acp`, an Agent Client Protocol agent over stdio taking `--agent`, `--model`, `--effort`, `-a`, and `--agent-engine v3`; and `chat --output-format stream-json`, which emits the run's ACP events as JSON Lines and implies `--no-interactive`), and the V3 TUI itself talks to its engine over an inner `kiro-cli-chat acp` frame.
+Firstmate does not drive ACP directly: a stdio ACP agent has no pane to steer, observe, or ring, so it would need a Firstmate-side ACP client, a second permission plane, and a second wake protocol beside the durable queue and doorbell, while `stream-json` is one-shot and cannot be steered across turns; the steerable V3 TUI in a pane therefore stays the verified surface, and its rendering is read through the shared composer and busy classifiers.
+
+## Current-state observability
+
+A Kiro coordination's `fm-crew-state` read can report `unknown` with `source=none` even while its live TUI and routed supervision cycle are healthy.
+This is a documented adapter limitation rather than a new state writer defect because Kiro exposes lifecycle hooks and rendered activity but no structured current-state publication that `fm-crew-state` can consume for the coordination pane.
+The watcher therefore relies on the Kiro hook signals, status events, endpoint liveness, and the coordination home's summary ledger rather than treating the Kiro panel as current-state authority.

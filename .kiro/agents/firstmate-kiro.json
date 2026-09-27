@@ -1,0 +1,41 @@
+{
+  "name": "firstmate-kiro",
+  "description": "Firstmate primary agent for Kiro CLI V3.",
+  "prompt": "Follow the repository AGENTS.md and the active session instructions exactly.",
+  "tools": [
+    "execute_bash",
+    "fs_read",
+    "fs_write",
+    "code",
+    "grep",
+    "glob",
+    "web_fetch",
+    "web_search",
+    "introspect",
+    "session",
+    "report",
+    "tool_search"
+  ],
+  "allowedTools": [
+    "execute_bash",
+    "fs_read",
+    "fs_write",
+    "code",
+    "grep",
+    "glob",
+    "web_fetch",
+    "web_search",
+    "introspect",
+    "session",
+    "report",
+    "tool_search"
+  ],
+  "excludedTools": ["knowledge"],
+  "includeMcpJson": true,
+  "includePowers": false,
+  "permissions": {
+    "rules": [
+      { "capability": "all", "effect": "allow" }
+    ]
+  }
+}

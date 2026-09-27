@@ -26,7 +26,7 @@ The tier is a property of the harness surface, not of the home.
 
 | Tier | What the adapter does | Used by |
 | --- | --- | --- |
-| Run | Executes `bin/fm-session-start.sh` through the native session-open adapter and gates its ordered digest into model context before the first turn. | Claude, `codex exec`, Pi / pi-signed, omp, Cursor |
+| Run | Executes `bin/fm-session-start.sh` through the native session-open adapter and gates its ordered digest into model context before the first turn. | Claude, `codex exec`, Pi / pi-signed, omp, Cursor, Kiro CLI V3 |
 | Nudge | Asks the agent to run the digest through the native adapter or the tracked session-start instruction. | Grok, OpenCode, and run-tier sources routed to the nudge |
 
 Codex's interactive TUI has no tracked session-open, compaction, or re-emit channel and is not covered by either tier.
@@ -43,6 +43,7 @@ Codex's interactive TUI has no tracked session-open, compaction, or re-emit chan
 | Grok | Nudge | [Grok](#grok) |
 | Cursor | Run | [Cursor](#cursor) |
 | omp | Run | [omp](#omp) |
+| Kiro CLI V3 | Run | [Kiro CLI V3](#kiro-cli-v3) |
 | Cursor compaction | Uncovered | [Cursor compaction](#cursor-compaction) |
 
 ### Why the run tier exists
@@ -359,6 +360,15 @@ So the source is derived following the Cursor precedent:
 
 A later in-process `clear` re-emits only when this lock owner completed a full startup.
 `before_agent_start` message delivery was verified to reach model context on 18.1.11.
+
+### Kiro CLI V3
+
+Kiro CLI V3 is a run-tier harness.
+`.kiro/hooks/fm-firstmate.json` registers project-scoped `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, and `Stop` hooks that invoke `bin/fm-kiro-turnend-hook.sh` with `FM_KIRO_PRIMARY_HOOK=1`.
+Its `SessionStart` branch runs `bin/fm-sessionstart-run.sh --source startup`, so native stdout context injection delivers the digest, and `bin/fm-kiro-primary.sh` is the launcher that selects the tracked agent.
+The same hook publishes the primary pane as `state/.primary-endpoint`, the structural doorbell the watcher rings after each actionable row; [`supervision-protocols/kiro-cli.md`](supervision-protocols/kiro-cli.md) owns that contract and its model-driven fallback.
+Delivery was verified live on kiro-cli 2.22.1 by `tests/fm-kiro-primary-live-e2e.test.sh`.
+The hook is inert outside primary scope, so a worker worktree inheriting the tracked file gains nothing from it, and the explicit V2 fallback has no `SessionStart` delivery.
 
 ### Cursor compaction
 

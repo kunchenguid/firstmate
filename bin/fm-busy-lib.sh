@@ -36,6 +36,8 @@
 #                    cancellation emits no Stop, so control invalidates to unknown.
 #   gemini-hook      Gemini agent hooks (BeforeAgent opens; AfterAgent and
 #                    SessionEnd close)
+#   kiro-hook        Kiro V2/V3 hooks (UserPromptSubmit opens, Stop closes,
+#                    PreToolUse/PostToolUse refresh native progress)
 #   codex-hook, codex-appserver  reserved: Codex, gated by
 #                    fm_busy_codex_semantic_source
 #   kimi-wire, kimi-hook  reserved: standalone Kimi, gated by fm_busy_kimi_verified
@@ -45,7 +47,8 @@
 #                    unknown invalidation fm-control writes after a Devin interrupt
 #   fm-recovery      a documented recovery reset after relaunch
 # Classifier-only sources (never written into a record):
-#   endpoint-gone, herdr-native, grok-regex, rovo-regex, agy-regex, muse-session-log,
+#   endpoint-gone, herdr-native, grok-regex, rovo-regex, agy-regex, kiro-regex,
+#   muse-session-log,
 #   cursor-transcript, missing, malformed, gen-mismatch, source-mismatch,
 #   kimi-unverified, codex-unverified, capture-failed, no-target, launch-prompt
 #
@@ -89,12 +92,15 @@
 # a real busy verdict once any hook has posted, and it defers to whatever
 # harness-specific trust pre-registration already exists (fm-claude-trust.sh,
 # GEMINI_CLI_TRUST_WORKSPACE) to stop the dialog from appearing at all.
-# Apart from the launch-prompt backstop above, Grok, Rovo, and AGY are the ONLY
+# Apart from the launch-prompt backstop above, Grok, Rovo, AGY, and kiro-cli are the ONLY
 # rendered-text busy fallbacks that survive the redesign, because none of their
 # structured lifecycles was credited-live-verified
 # in the approved audit (Rovo's clean ACP stopReason lives outside the TUI
 # path firstmate drives, see references/harness/rovo.md; agy 1.2.0 exposes no
-# hook surface at all, see references/harness/agy.md); each is scoped to
+# hook surface at all, see references/harness/agy.md; kiro-cli DOES have a
+# first-class stop hook, but that is its authoritative TURN-END signal - see
+# references/harness/kiro.md - while its busy state has no push writer, so busy
+# reads from the rendered tail); each is scoped to
 # its own harness= and can never classify another adapter. The delivery
 # guards in bin/fm-composer-lib.sh match rendered footers for submit
 # acknowledgement and away-mode supervisor injection only; neither is a
@@ -232,6 +238,7 @@ fm_busy_sources_for_harness() {  # <harness>
     opencode*) adapter=opencode-plugin ;;
     gemini*) adapter=gemini-hook ;;
     devin) adapter=devin-hook ;;
+    kiro-cli) adapter=kiro-hook ;;
     pi|pi-signed) adapter=pi-ext ;;
     omp) adapter=omp-ext ;;
     kimi*)
@@ -1008,6 +1015,26 @@ fm_busy_launch_prompt_parked() {  # <harness>
   esac
 }
 
+# fm_busy_kiro_tail_busy: the kiro-cli-only temporary rendered-tail fallback.
+# Consumes the tail on stdin; 0 when kiro-cli's verified busy signature matches.
+# kiro-cli's new default TUI renders two independent busy anchors while a turn
+# streams (scout report, kiro-cli 2.22.1): the composer footer
+# `Thinking... (esc to cancel)` beside a braille spinner, and the status line
+# `Kiro is working` (`› Kiro is working · Type to steer · Ctrl+S to queue`). The
+# idle pane shows neither, only the `ask a question or describe a task`
+# placeholder. Either anchor carries the busy verdict so no single vendor
+# string is load-bearing, and both are locale-independent ASCII that survive
+# KIRO_ASCII_MODE=1 (which degrades only the spinner blocks and box-drawing
+# glyphs, not this text). The braille spinner itself is deliberately NOT
+# matched: it is locale- and emoji-font-sensitive and disappears entirely under
+# ASCII mode. kiro-cli has no semantic busy writer, so this fallback is the only
+# pane-side source; it is never armed (fm_busy_sources_for_harness trusts
+# nothing for kiro-cli). FM_BUSY_KIRO_REGEX overrides the signature.
+fm_busy_kiro_tail_busy() {
+  grep -v '^[[:space:]]*$' | tail -12 \
+    | grep -qiE "${FM_BUSY_KIRO_REGEX:-Thinking\\.\\.\\.[[:space:]]*\\(esc to cancel\\)|Kiro is working}"
+}
+
 # fm_busy_classify: semantic classification for a task whose endpoint the
 # caller has already established as present. Prints "<verdict> <source>":
 # busy|idle|unknown plus the producing source (see header). Never probes
@@ -1162,6 +1189,37 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
         printf 'busy agy-regex'
       else
         printf 'unknown agy-regex'
+      fi
+      return 0
+      ;;
+    kiro-cli)
+      # A current generation means Kiro's semantic writer owns this task. A
+      # missing record in that state is corruption, not permission to demote to
+      # rendered text. The regex remains only for pre-conversion tasks whose
+      # generation was never armed.
+      if fm_busy_current_gen "$state" "$id" >/dev/null 2>&1; then
+        printf 'unknown missing'
+        return 0
+      fi
+      if [ -z "$tail40" ]; then
+        if command -v fm_backend_capture >/dev/null 2>&1; then
+          tail40=$(fm_backend_capture "$backend" "$target" 40 2>/dev/null) || {
+            printf 'unknown capture-failed'
+            return 0
+          }
+        else
+          printf 'unknown capture-failed'
+          return 0
+        fi
+      fi
+      # Best-effort like agy and rovo: a long turn can scroll the busy anchors
+      # out of the captured tail, so their absence means "can't tell," never a
+      # definitive idle. Converted tasks never reach this branch: their
+      # UserPromptSubmit/Stop hooks own the generation-bound state record.
+      if printf '%s' "$tail40" | fm_busy_kiro_tail_busy; then
+        printf 'busy kiro-regex'
+      else
+        printf 'unknown kiro-regex'
       fi
       return 0
       ;;

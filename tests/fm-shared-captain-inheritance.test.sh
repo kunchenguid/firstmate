@@ -300,6 +300,16 @@ test_unsafe_artifacts_and_failure_restore_readonly_mode() {
   [ "$rc" -ne 0 ] || fail "symlinked primary source should be rejected"
   assert_grep "unsafe primary source" "$err" "unsafe source error should be explicit"
   rm -f "$primary/data/captain-shared.md"
+
+  write_shared "$primary/data/captain-shared.md" "hardlinked primary source"
+  other="$primary/data/hardlink-copy"
+  ln "$primary/data/captain-shared.md" "$other"
+  err="$TMP_ROOT/unsafe-source-hardlink.err"
+  propagate_secondmate_inheritance "$primary" "$second" >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "hardlinked primary source should be rejected"
+  assert_grep "primary source is hardlinked" "$err"     "hardlinked source diagnostic should name the actual defect"
+  assert_grep "copy to a sibling temporary file followed by mv" "$err"     "hardlinked source diagnostic should name the inode-recreation repair"
+  rm -f "$primary/data/captain-shared.md" "$other"
   write_shared "$primary/data/captain-shared.md" "safe source"
 
   ln -s "$second/data/captain.md" "$second/data/captain-shared.md"

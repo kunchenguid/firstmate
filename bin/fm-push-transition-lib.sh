@@ -15,6 +15,8 @@ FM_PUSH_TRANSITION_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$FM_PUSH_TRANSITION_LIB_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-transition-lib.sh
 . "$FM_PUSH_TRANSITION_LIB_DIR/fm-transition-lib.sh"
+# shellcheck source=bin/fm-primary-endpoint-lib.sh
+. "$FM_PUSH_TRANSITION_LIB_DIR/fm-primary-endpoint-lib.sh"
 
 TRIAGE_LOG="$STATE/.watch-triage.log"
 TRIAGE_LOG_MAX_BYTES=${FM_WATCH_TRIAGE_LOG_MAX_BYTES:-262144}
@@ -102,6 +104,11 @@ wake() {
     watch_delivery_publish "$1" || true
     # shellcheck disable=SC2034 # Read by bin/fm-watch.sh's EXIT cleanup.
     FM_WATCH_DELIVERED_REASON=$1
+    # Kiro V3 cannot consume this background completion directly. Its
+    # SessionStart-published, lock-bound endpoint receives one constant
+    # doorbell for the newest queued row; every refusal is quiet because the
+    # row is already durable and the poll loop rings again once the pane idles.
+    fm_primary_endpoint_ring_pending "$STATE" "$FM_ROOT" "$FM_HOME" || true
   else
     output_status=1
   fi

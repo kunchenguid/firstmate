@@ -362,6 +362,11 @@
 #     __DEVINBIN__ resolved Devin executable
 #     __DEVINCONFIG__ private per-task Devin config with lifecycle hooks
 #     __AGYBIN__    resolved, agy-verified executable for an agy launch
+#     __KIROBIN__   resolved, kiro-cli-verified executable for a kiro-cli launch
+#     __KIROHOME__  per-task KIRO_HOME (state/<id>.kiro-home) carrying the
+#                   firstmate-owned settings, turn-end agent config, and registry
+#     __KIRODATADIR__ per-task KIRO_DATA_DIR under that KIRO_HOME
+#     __KIROCHATLOG__ per-task KIRO_CHAT_LOG_FILE under that KIRO_HOME
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
@@ -401,6 +406,23 @@
 # resolver because `cursor` is not the CLI name. A cursor SECONDMATE instead runs
 # the tracked project-scope .cursor/hooks.json in its own home, whose stop-hook
 # park owns that home's supervision (docs/supervision-protocols/cursor.md).
+# kiro-cli has a first-class `stop` agent hook that fires at every turn end in
+# both interactive and headless modes, so its turn-end is a real Stop-hook touch
+# rather than a screen-scrape. Everything lives inside a per-task KIRO_HOME at
+# state/<id>.kiro-home so generated payloads and the pointer are not written into
+# the project's own worktree and no captain-shared file is edited: settings/cli.json carries
+# chat.disableTrustAllConfirmation (suppressing the --trust-all-tools dialog,
+# which otherwise blocks the launch and cannot be answered by firstmate) and
+# chat.allowAnimations (a stable screen-scrape baseline), agents/<agent>.json is
+# the firstmate-owned agent selected with --agent, and the ONE tracked hook
+# bin/fm-kiro-turnend-hook.sh serves both the guarded turn-ended touch (gated by
+# the isolated-home pointer matching the per-KIRO_HOME registry token, with the
+# workspace pointer accepted only during migration, and the primary supervision re-arm backstop.
+# The whole state/<id>.kiro-home is retired by bin/fm-teardown.sh and rewritten on
+# every spawn.
+# kiro-cli launches the INTERACTIVE steerable TUI (not --no-interactive, which
+# exits after one turn) so it can be steered and drive /no-mistakes across turns;
+# its busy state is a screen-scrape fallback like grok.
 # claude is the one harness whose pre-launch setup can REFUSE the spawn: before
 # any per-task state exists, and before its worktree .claude/settings.local.json
 # hooks are written, every claude launch pre-registers the directory the pane
@@ -608,6 +630,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
+# shellcheck source=bin/fm-kiro-lib.sh
+. "$SCRIPT_DIR/fm-kiro-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
@@ -1822,7 +1846,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-  '' | claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin)
+  '' | claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin | kiro-cli)
     ARG3=${POS[1]:-}
     ;;
   *' '*)
@@ -2075,6 +2099,43 @@ launch_template() {
   # agy exposes no hook surface, so busy state is a rendered-tail fallback
   # (bin/fm-busy-lib.sh) and nothing is armed below.
   agy) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS __AGYBIN__ --prompt-interactive "$(__OPINPUT__ encode launch-brief < __BRIEF__)" __MODELFLAG____EFFORTFLAG__--dangerously-skip-permissions' ;;
+  # kiro-cli (Kiro CLI): `chat --trust-all-tools --agent __KIROAGENT__ "<brief>"`
+  # starts the supervised INTERACTIVE TUI with a firstmate-encoded positional
+  # brief that auto-submits with no send gate and stays steerable (verified live,
+  # kiro-cli 2.22.1: an 18 KB multi-line brief ran its first turn, the pane
+  # stayed alive on the idle `ask a question or describe a task` prompt, a later
+  # typed message completed a second turn, and the `stop` hook fired at each turn
+  # end). The INTERACTIVE TUI - not the headless `--no-interactive` one-shot,
+  # which exits after one turn - is what every firstmate session needs: a
+  # crewmate receives steering and drives `/no-mistakes` across many turns, and a
+  # primary owns supervision across turns. --trust-all-tools auto-approves every
+  # tool call, which unattended work needs.
+  # KIRO_HOME=__KIROHOME__ points kiro at a firstmate-owned home
+  # (verified: kiro reads <KIRO_HOME>/settings/cli.json and <KIRO_HOME>/agents/),
+  # kept out of the project's own .kiro/ and off any captain-shared file:
+  #   - settings/cli.json carries chat.disableTrustAllConfirmation=true, which
+  #     suppresses the once-per-store `--trust-all-tools` confirmation dialog
+  #     (VERIFIED LIVE to render as `Warning: Kiro is running in trust all tools
+  #     mode` with its default on `No, exit` when the key is absent, and to block
+  #     the positional brief until answered - a state firstmate's arrow-less key
+  #     plane cannot clear, so the key is required, not cosmetic), plus
+  #     chat.allowAnimations=false for a stable screen-scrape baseline;
+  #   - agents/__KIROAGENT__.json registers the firstmate-owned `stop` turn-end
+  #     hook selected with --agent __KIROAGENT__. That hook serves BOTH roles -
+  #     the crewmate/primary turn-ended touch guarded by the per-task
+  #     worktree pointer, and the primary supervision re-arm backstop - exactly
+  #     as one tracked script, bin/fm-kiro-turnend-hook.sh (see its header and
+  #     docs/turnend-guard.md).
+  # The KIRO_* scope variables pin this task's config store, data dir, and chat
+  # log to firstmate-owned per-task paths.
+  # The foreign primary markers are cleared for the same reason cursor clears
+  # them: kiro-cli does not scrub an inherited CLAUDECODE, and bin/fm-harness.sh
+  # must not read a kiro-cli worker as its launcher (though its anchored ancestry
+  # already outranks a retained marker). --model and --effort are natively
+  # supported (effort low|medium|high|xhigh|max, verified in chat --help). Busy
+  # state is a rendered-tail fallback (bin/fm-busy-lib.sh); nothing is armed as a
+  # busy writer.
+  kiro-cli) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u GEMINI_CLI -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u KIRO_ACP_NATIVE -u KIRO_ACP_PERMISSION_MODE -u KIRO_CLI_ACP_CLIENT_NAME -u KIRO_SESSION_ID FM_KIRO_HOOK=__KIROHOOK__ FM_KIRO_TASK_ID=__KIROTASK__ FM_KIRO_STATE=__KIROSTATE__ FM_KIRO_BUSY_GEN=__KIROBUSYGEN__ FM_KIRO_TURNEND_POINTER=__KIROPOINTER__ KIRO_HOME=__KIROHOME__ KIRO_DATA_DIR=__KIRODATADIR__ KIRO_CHAT_LOG_FILE=__KIROCHATLOG__ __KIROBIN__ chat __KIROENGINEFLAG____KIROTRUSTFLAG__--agent __KIROAGENT__ __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
   # grok (Grok Build TUI): a positional prompt starts the supervised interactive
   # session. --always-approve auto-approves every tool execution (verified: the
   # crewmate runs fully autonomously, no permission gate), which an unattended
@@ -2259,6 +2320,10 @@ esac
 # docs/supervision-protocols/ carries no agy wake protocol (agy 1.2.0).
 # devin has none either: only its worker lifecycle hooks are verified, and
 # docs/supervision-protocols/ carries no devin wake protocol (devin 3000.11.1).
+# kiro-cli is deliberately NOT in this set: it carries a first-class `stop` agent
+# hook and a verified primary supervision protocol
+# (docs/supervision-protocols/kiro-cli.md), so it runs a secondmate like any
+# other primary-capable adapter.
 if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = agy ] || [ "$HARNESS" = devin ]; }; then
   echo "error: $HARNESS is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
   exit 1
@@ -2322,6 +2387,12 @@ omp)
 agy)
   AGY_BIN=$(resolve_pi_executable agy) || {
     echo "error: agy executable not found on PATH; install Antigravity CLI or select a different verified harness" >&2
+    exit 1
+  }
+  ;;
+kiro-cli)
+  KIRO_BIN=$(resolve_pi_executable kiro-cli) || {
+    echo "error: kiro-cli executable not found on PATH; install the Kiro CLI or select a different verified harness. NOTE: this is /home/<user>/.local/bin/kiro-cli, NOT the /usr/bin/kiro Electron IDE" >&2
     exit 1
   }
   ;;
@@ -2411,6 +2482,85 @@ resolve_kimi_binary() {
   fi
   echo "error: kimi executable not found; searched PATH for 'kimi' and fallback '$fallback'" >&2
   return 1
+}
+
+# Resolve the kiro-cli agent CLI as an absolute path. This is the
+# /home/shiv/.local/bin/kiro-cli agent CLI (an Amazon Q CLI fork), NEVER the
+# /usr/bin/kiro Electron IDE - only `kiro-cli` is searched, never bare `kiro`.
+resolve_kiro_binary() {
+  local candidate dir fallback
+  candidate=$(command -v kiro-cli 2>/dev/null || true)
+  if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+    case "$candidate" in
+    /*)
+      printf '%s\n' "$candidate"
+      return 0
+      ;;
+    *)
+      dir=$(cd "$(dirname "$candidate")" 2>/dev/null && pwd -P) || dir=
+      if [ -n "$dir" ]; then
+        printf '%s/%s\n' "$dir" "$(basename "$candidate")"
+        return 0
+      fi
+      ;;
+    esac
+  fi
+  fallback="${HOME:-}/.local/bin/kiro-cli"
+  if [ -n "${HOME:-}" ] && [ -x "$fallback" ]; then
+    printf '%s\n' "$fallback"
+    return 0
+  fi
+  echo "error: kiro-cli executable not found; searched PATH for 'kiro-cli' and fallback '$fallback' (this is the agent CLI, not the /usr/bin/kiro IDE)" >&2
+  return 1
+}
+
+# Build the firstmate-owned isolated KIRO_HOME <dir> for ONE task with:
+#   settings/cli.json          - chat.disableTrustAllConfirmation=true (suppress
+#                                the --trust-all-tools startup dialog, VERIFIED
+#                                LIVE to otherwise render with its default on
+#                                "No, exit" and block the launch) and
+#                                chat.allowAnimations=false (freeze the spinner
+#                                to one static frame for a stable screen-scrape
+#                                baseline);
+#   agents/<agent>.json        - selects the firstmate-owned agent, granting all
+#                                tools to match --trust-all-tools and registering
+#                                the `stop` turn-end hook (bin/fm-kiro-turnend-hook.sh),
+#                                kept out of the project's own .kiro/;
+#   agents/fm-turn-end.d/<tok> - this task's registry entry naming
+#                                state/<id>.turn-ended. The shared hook touches
+#                                that file only when the workspace's
+#                                isolated-home .fm-kiro-turnend pointer carries
+#                                <tok>, so a stray kiro-cli session under this KIRO_HOME that
+#                                is not this task changes nothing (the grok/kimi
+#                                guard shape).
+# The whole state/<id>.kiro-home directory is rewritten fresh on every spawn and
+# retired by bin/fm-teardown.sh's `rm -rf`, so no separate registry cleanup is
+# needed (bin/fm-control-lib.sh's auth path is empty for kiro-cli).
+build_kiro_home() {  # <kiro-home-dir> <v2-agent-name> <turn-end-path> <token-out-var>
+  local home=$1 v2_agent=$2 turnend=$3 token_var=$4
+  local hook auth_dir auth_file old_umask
+  hook="$FM_ROOT/bin/fm-kiro-turnend-hook.sh"
+  [ -x "$hook" ] || {
+    echo "error: kiro-cli turn-end hook missing or not executable at $hook" >&2
+    return 1
+  }
+  rm -rf "$home" || return 1
+  fm_kiro_write_settings "$home" || return 1
+  if [ -n "$v2_agent" ]; then
+    fm_kiro_write_v2_agent "$home" "$v2_agent" || return 1
+  fi
+  auth_dir="$home/agents/fm-turn-end.d"
+  mkdir -p "$auth_dir" || return 1
+  old_umask=$(umask)
+  umask 077
+  auth_file=$(mktemp "$auth_dir/fm.XXXXXXXXXXXX") || {
+    umask "$old_umask"
+    return 1
+  }
+  umask "$old_umask"
+  printf '%s\n' "$turnend" > "$auth_file" || return 1
+  printf -v "$token_var" '%s' "${auth_file##*/}"
+  return 0
 }
 
 resolve_muse_binary() {
@@ -2545,7 +2695,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-  claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin)
+  claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin | kiro-cli)
     printf -- '--model %s ' "$(shell_quote "$model")"
     ;;
   esac
@@ -2586,6 +2736,16 @@ effort_flag_for_harness() {
     # omitted rather than passed as known-bad values (record-and-omit).
     case "$effort" in
     low | medium | high) printf -- '--effort %s ' "$(shell_quote "$effort")" ;;
+    esac
+    ;;
+  kiro-cli)
+    # kiro-cli 2.22.1 `chat --effort` accepts the full shared vocabulary
+    # low|medium|high|xhigh|max (verified in chat --help: "Initial effort level
+    # (e.g. low, medium, high, xhigh, max)"), so every level maps straight
+    # across. max is only ever reached through an explicit captain choice
+    # (AGENTS.md section 4); the fallback never selects it.
+    case "$effort" in
+    low | medium | high | xhigh | max) printf -- '--effort %s ' "$(shell_quote "$effort")" ;;
     esac
     ;;
   pi | pi-signed)
@@ -2702,6 +2862,47 @@ case "$LAUNCH" in
 *__ROVOBIN__*)
   ROVO_BIN=$(resolve_rovo_binary) || exit 1
   LAUNCH=${LAUNCH//__ROVOBIN__/$(shell_quote "$ROVO_BIN")}
+  ;;
+esac
+
+# Kiro CLI is V3-first. V3 takes its selected agent and expanded hooks from
+# task-specific files under the workspace .kiro/ tree; KIRO_HOME remains the
+# isolated settings/session/data boundary. FM_KIRO_ENGINE=v2 is the explicit
+# compatibility fallback and selects a distinct embedded-hook agent, never a
+# silent retry after a V3 failure.
+# Both engines launch trusted: the agent file's own capability policy is NOT
+# enough, because `allowedTools` grants no wildcard - a V3 agent declaring it
+# still stops on `fs_write`'s Replace in File with a human approval prompt -
+# so `-a`/`--trust-all-tools` is part of the correct launch (`kiro-cli chat -a
+# --v3`), exactly as the V2 fallback already carries it.
+case "$LAUNCH" in
+*__KIROBIN__*)
+  KIRO_BIN=$(resolve_kiro_binary) || exit 1
+  LAUNCH=${LAUNCH//__KIROBIN__/$(shell_quote "$KIRO_BIN")}
+  fm_backend_visible_capture_supported "$BACKEND" || {
+    echo "error: refusing kiro-cli spawn because backend '$BACKEND' has no verified viewport-bounded capture; Kiro startup and trust state cannot be ruled out from a scrollback-free read of the live pane" >&2
+    exit 1
+  }
+  KIRO_ENGINE=${FM_KIRO_ENGINE:-v3}
+  case "$KIRO_ENGINE" in
+    v3)
+      KIRO_AGENT_NAME=$(fm_kiro_v3_agent_name "$ID") || exit 1
+      KIRO_ENGINE_FLAG='--v3 '
+      KIRO_TRUST_FLAG='-a '
+      ;;
+    v2)
+      KIRO_AGENT_NAME=$(fm_kiro_v2_agent_name "$ID") || exit 1
+      KIRO_ENGINE_FLAG='--v2 '
+      KIRO_TRUST_FLAG='--trust-all-tools '
+      ;;
+    *)
+      echo "error: FM_KIRO_ENGINE must be v3 (default) or the explicit v2 compatibility fallback; got '$KIRO_ENGINE'" >&2
+      exit 2
+      ;;
+  esac
+  LAUNCH=${LAUNCH//__KIROENGINEFLAG__/$KIRO_ENGINE_FLAG}
+  LAUNCH=${LAUNCH//__KIROTRUSTFLAG__/$KIRO_TRUST_FLAG}
+  LAUNCH=${LAUNCH//__KIROAGENT__/$(shell_quote "$KIRO_AGENT_NAME")}
   ;;
 esac
 
@@ -4090,6 +4291,103 @@ rovo_endpoint_cleanup() {
   fm_backend_kill "$BACKEND" "$T" "$tab_id" "fm-$ID" 2>/dev/null && SPAWN_ENDPOINT_CLOSED=1 || true
 }
 
+# kiro-cli launch-then-confirm gate, in the kimi/rovo shape but with the
+# BOTH-CASES trust handling the cross-ship reconciliation requires
+# (docs/verification/supervision.md; issue steer-a33eee48). The
+# --trust-all-tools startup confirmation dialog renders ONLY when the resolved
+# KIRO_HOME does not carry chat.disableTrustAllConfirmation=true. build_kiro_home
+# writes that key, so a firstmate launch normally never sees the dialog and this
+# gate proceeds straight to the ordinary ready signal. If the dialog renders
+# anyway (a home missing the key), this gate REFUSES rather than answering it:
+# unlike kimi, kiro-cli's dialog defaults its selection to the NEGATIVE option
+# ("No, exit"), with "Yes, I accept" reachable only by an arrow keypress that
+# firstmate's Enter/Escape/Ctrl-C key plane cannot send, so a blind Enter would
+# END the session. Refusing keeps that a loud spawn failure that names the exact
+# missing setting, never a silent exit or a hang waiting for a dialog that will
+# not clear.
+kiro_visible_capture() {
+  fm_backend_visible_capture "$BACKEND" "$T" "$W" 2>/dev/null || return 1
+}
+
+kiro_trust_dialog_is_visible() { # <plain-viewport-capture>
+  local pane=$1
+  # Require the warning line AND the navigable options, so a mid-turn assistant
+  # response that merely mentions "trust all tools" cannot look like the dialog.
+  printf '%s\n' "$pane" | grep -Fq 'Kiro is running in trust all tools mode' || return 1
+  printf '%s\n' "$pane" | grep -Fq 'Yes, I accept' || return 1
+  printf '%s\n' "$pane" | grep -Fq 'No, exit' || return 1
+  return 0
+}
+
+kiro_tui_is_live() { # <plain-viewport-capture>
+  local pane=$1
+  # Any of kiro-cli's persistent chrome proves the interactive TUI is up and past
+  # the trust gate (all verified live, kiro-cli 2.22.1):
+  #   - the `Trust All Tools active, confirmations are off` status footer, the
+  #     most reliable anchor because it is persistent chrome present whether the
+  #     first turn is streaming or already finished;
+  #   - the idle composer placeholder `ask a question or describe a task`;
+  #   - the busy footer (`Thinking... (esc to cancel)` / `Kiro is working`, the
+  #     signature owned by bin/fm-busy-lib.sh);
+  #   - the per-turn footer `▸ Credits: … • Time: …`.
+  # The busy and per-turn anchors matter because the positional brief
+  # auto-submits: by the time firstmate's first poll lands the first turn may
+  # already be streaming, so an idle-placeholder-only predicate would refuse a
+  # perfectly healthy launch.
+  printf '%s\n' "$pane" | grep -Fq 'Trust All Tools active, confirmations are off' && return 0
+  printf '%s\n' "$pane" | grep -Fq 'ask a question or describe a task' && return 0
+  printf '%s\n' "$pane" | fm_busy_kiro_tail_busy && return 0
+  printf '%s\n' "$pane" | grep -qiE 'Credits:[^%]*Time:' && return 0
+  return 1
+}
+
+kiro_wait_for_launch() {
+  # ONE gate, because the brief rides the launch command and auto-submits: there
+  # is no separate "ready, then pointer, then delivery" sequence to sequence.
+  # The gate answers exactly two questions - is the trust dialog blocking, and
+  # did the TUI come up - and it uses the VIEWPORT-BOUNDED capture so a
+  # scrolled-away dialog frame can never be mistaken for the live screen.
+  local pane capture_rc i=0 max=${FM_KIRO_READY_POLLS:-60} interval=${FM_KIRO_POLL_INTERVAL:-0.5}
+  local live_captures=0
+  KIRO_LAUNCH_FAILURE_DETAIL='kiro-cli did not show a live TUI before the launch timeout'
+  while [ "$i" -lt "$max" ]; do
+    capture_rc=0
+    pane=$(kiro_visible_capture) || capture_rc=$?
+    if [ "$capture_rc" -ne 0 ]; then
+      KIRO_LAUNCH_FAILURE_DETAIL="kiro-cli launch could not read the visible viewport of backend '$BACKEND' (viewport capture exited $capture_rc), so the trust dialog could neither be ruled out nor the live TUI confirmed"
+      return 1
+    fi
+    if [ -n "$pane" ]; then
+      if kiro_trust_dialog_is_visible "$pane"; then
+        # The dialog rendered, which means the resolved KIRO_HOME did not carry
+        # chat.disableTrustAllConfirmation=true. firstmate cannot navigate to the
+        # non-default affirmative, so refuse loudly instead of sending a blind
+        # Enter that would exit the session.
+        KIRO_LAUNCH_FAILURE_DETAIL="kiro-cli rendered the --trust-all-tools confirmation dialog, whose default selection is 'No, exit' and whose 'Yes, I accept' option firstmate's key plane cannot reach; the resolved KIRO_HOME ($KIRO_HOME_DIR) must set chat.disableTrustAllConfirmation=true in settings/cli.json so the dialog is suppressed"
+        return 1
+      fi
+      # Two consecutive live captures, so a frame caught mid-redraw before the
+      # dialog paints cannot be mistaken for a live TUI.
+      if kiro_tui_is_live "$pane"; then
+        live_captures=$((live_captures + 1))
+        [ "$live_captures" -lt 2 ] || return 0
+      else
+        live_captures=0
+      fi
+    else
+      live_captures=0
+    fi
+    i=$((i + 1))
+    [ "$i" -ge "$max" ] || sleep "$interval"
+  done
+  return 1
+}
+
+kiro_spawn_fail() { # <detail>
+  printf 'failed: %s\n' "$1" >>"$STATE/$ID.status"
+  echo "error: $1; inspect window $T" >&2
+}
+
 # agy carries its brief on the launch command, so it needs no delivery gate,
 # but a worktree agy does not trust parks the TUI on the folder-trust dialog
 # and an unanswered dialog sends the turn into agy's scratch directory instead
@@ -4383,7 +4681,7 @@ if [ "$KIND" != secondmate ]; then
     ;;
   esac
   case "$HARNESS" in
-  claude* | opencode* | pi | pi-signed | omp)
+  claude* | opencode* | pi | pi-signed | omp | kiro-cli)
     BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
       echo "error: failed to arm the busy-state contract for $ID" >&2
       exit 1
@@ -5017,6 +5315,54 @@ devin)
   LAUNCH=${LAUNCH//__DEVINCONFIG__/"$(shell_quote "$STATE_REAL/$ID.devin-config.json")"}
   ;;
 agy) LAUNCH=${LAUNCH//__AGYBIN__/"$(shell_quote "$AGY_BIN")"} ;;
+kiro-cli)
+  # The ONE build site for the per-task KIRO_HOME, for EVERY kind (ship, scout,
+  # secondmate). It lands here because build_kiro_home needs STATE_REAL, TURNEND,
+  # and WT, all of which exist by now. It writes:
+  #   settings/cli.json        - chat.disableTrustAllConfirmation=true (the
+  #     --trust-all-tools dialog is VERIFIED LIVE to otherwise render with its
+  #     default on "No, exit" and block the launch) and chat.allowAnimations=false;
+  #   agents/__KIROAGENT__.json - the firstmate-owned V2 agent, when selected;
+  #   agents/fm-turn-end.d/<tok> - this task's registry entry naming $TURNEND;
+  #   project/.kiro/ - the V3 project agent and hooks, copied byte-for-byte as
+  #     regular files into the worktree because Kiro discovers V3 project
+  #     configuration from cwd while ignoring symlinked payloads.
+  # The isolated-home pointer below carries the matching token, so the shared hook
+  # touches state/<id>.turn-ended for THIS task only (the grok/kimi guard shape),
+  # and the same hook re-arms primary supervision for a primary/secondmate
+  # session (bin/fm-kiro-turnend-hook.sh header; docs/turnend-guard.md).
+  # A secondmate takes its turn-end wiring from here, so the crewmate-only wiring
+  # block below deliberately has no kiro-cli arm.
+  KIRO_HOME_DIR="$STATE_REAL/$ID.kiro-home"
+  KIRO_V2_AGENT_NAME=
+  if [ "$KIRO_ENGINE" = v2 ]; then
+    KIRO_V2_AGENT_NAME=$(fm_kiro_v2_agent_name "$ID") || exit 1
+  fi
+  KIRO_TURNEND_TOKEN=
+  if ! build_kiro_home "$KIRO_HOME_DIR" "$KIRO_V2_AGENT_NAME" "$TURNEND" KIRO_TURNEND_TOKEN; then
+    echo "error: could not build the isolated KIRO_HOME at $KIRO_HOME_DIR" >&2
+    exit 1
+  fi
+  if [ "$KIRO_ENGINE" = v3 ]; then
+    if ! fm_kiro_install_v3_project_config "$WT" "$ID" "$KIRO_HOME_DIR"; then
+      echo "error: could not install Kiro V3's isolated-home project agent and hooks without replacing existing project material under $WT/.kiro" >&2
+      exit 1
+    fi
+    exclude_path "$(fm_kiro_v3_agent_relpath "$ID")"
+    exclude_path "$(fm_kiro_v3_hook_relpath "$ID")"
+  fi
+  printf '%s\n' "$KIRO_TURNEND_TOKEN" >"$STATE_REAL/$ID.kiro-turnend-token"
+  printf 'token=%s\n' "$KIRO_TURNEND_TOKEN" >"$KIRO_HOME_DIR/.fm-kiro-turnend"
+  exclude_path '.fm-kiro-turnend'
+  LAUNCH=${LAUNCH//__KIROHOOK__/"$(shell_quote "$FM_ROOT/bin/fm-kiro-turnend-hook.sh")"}
+  LAUNCH=${LAUNCH//__KIROTASK__/"$(shell_quote "$ID")"}
+  LAUNCH=${LAUNCH//__KIROSTATE__/"$(shell_quote "$STATE_REAL")"}
+  LAUNCH=${LAUNCH//__KIROBUSYGEN__/"$(shell_quote "${BUSY_GEN:-}")"}
+  LAUNCH=${LAUNCH//__KIROPOINTER__/"$(shell_quote "$KIRO_HOME_DIR/.fm-kiro-turnend")"}
+  LAUNCH=${LAUNCH//__KIROHOME__/"$(shell_quote "$KIRO_HOME_DIR")"}
+  LAUNCH=${LAUNCH//__KIRODATADIR__/"$(shell_quote "$KIRO_HOME_DIR/data")"}
+  LAUNCH=${LAUNCH//__KIROCHATLOG__/"$(shell_quote "$KIRO_HOME_DIR/chat.log")"}
+  ;;
 esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
 # A record-backed launch brief is published into the state dir of the pane
@@ -5334,6 +5680,19 @@ if [ "$HARNESS" = agy ]; then
     else
       agy_spawn_fail "agy never showed its folder-trust dialog on an unregistered worktree in window $T, so the brief could not be confirmed to run there"
     fi
+    exit 1
+  fi
+fi
+if [ "$HARNESS" = kiro-cli ]; then
+  # The brief rides the launch command as a firstmate-encoded positional query
+  # that auto-submits, so nothing is typed into the pane here and there is no
+  # separate delivery phase to schedule. One gate must still pass before this
+  # spawn may report success: the --trust-all-tools dialog is NOT up (it blocks
+  # the launch and defaults to "No, exit", unreachable from firstmate's key
+  # plane, so kiro_wait_for_launch REFUSES rather than answering it) and the
+  # interactive TUI is genuinely live.
+  if ! kiro_wait_for_launch; then
+    kiro_spawn_fail "$KIRO_LAUNCH_FAILURE_DETAIL"
     exit 1
   fi
 fi

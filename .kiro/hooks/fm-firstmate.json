@@ -1,0 +1,45 @@
+{
+  "version": "v1",
+  "hooks": [
+    {
+      "name": "firstmate-session-start",
+      "trigger": "SessionStart",
+      "action": {
+        "type": "command",
+        "command": "FM_KIRO_PRIMARY_HOOK=1 \"${FM_KIRO_HOOK:-bin/fm-kiro-turnend-hook.sh}\""
+      }
+    },
+    {
+      "name": "firstmate-prompt-submit",
+      "trigger": "UserPromptSubmit",
+      "action": {
+        "type": "command",
+        "command": "FM_KIRO_PRIMARY_HOOK=1 \"${FM_KIRO_HOOK:-bin/fm-kiro-turnend-hook.sh}\""
+      }
+    },
+    {
+      "name": "firstmate-pre-tool",
+      "trigger": "PreToolUse",
+      "action": {
+        "type": "command",
+        "command": "FM_KIRO_PRIMARY_HOOK=1 \"${FM_KIRO_HOOK:-bin/fm-kiro-turnend-hook.sh}\""
+      }
+    },
+    {
+      "name": "firstmate-post-tool",
+      "trigger": "PostToolUse",
+      "action": {
+        "type": "command",
+        "command": "FM_KIRO_PRIMARY_HOOK=1 \"${FM_KIRO_HOOK:-bin/fm-kiro-turnend-hook.sh}\""
+      }
+    },
+    {
+      "name": "firstmate-stop",
+      "trigger": "Stop",
+      "action": {
+        "type": "command",
+        "command": "FM_KIRO_PRIMARY_HOOK=1 \"${FM_KIRO_HOOK:-bin/fm-kiro-turnend-hook.sh}\""
+      }
+    }
+  ]
+}

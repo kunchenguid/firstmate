@@ -269,7 +269,7 @@ cmd_relaunch() {
 }
 
 cmd_send() {
-  local id=$1 message=$2 delivery_mode=${3:-} rec ring_rc=0 meta meta_lock
+  local id=$1 message=$2 delivery_mode=${3:-} rec ring_rc=0 meta meta_lock harness
   validate_id "$id"
   [ -z "$delivery_mode" ] || [ "$delivery_mode" = fire-and-forget ] || die "invalid send delivery mode"
   validate_home "$id"
@@ -281,6 +281,7 @@ cmd_send() {
     fm_lock_release "$meta_lock"
     die "$REMOTE_ENDPOINT_ERROR"
   fi
+  harness=$(fm_meta_get "$meta" harness)
   # A remote steer is delivered by durable record, never by typing its payload
   # into the pane: write it into this secondmate's host-local steering inbox,
   # then ring the constant self-describing doorbell into the recorded pane,
@@ -303,7 +304,7 @@ cmd_send() {
       return 0
       ;;
   esac
-  fm_task_inbox_ring "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" "$rec" "fm-$id" || ring_rc=$?
+  fm_task_inbox_ring "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" "$rec" "fm-$id" "$harness" || ring_rc=$?
   case "$ring_rc" in
     1) printf 'notice: doorbell skipped (composer visibly holds pending text); the steer is durably recorded at %s\n' "$rec" >&2 ;;
     2) printf 'notice: doorbell did not reach %s; the steer is durably recorded at %s\n' "$REMOTE_ENDPOINT_TARGET" "$rec" >&2 ;;

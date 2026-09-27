@@ -6,6 +6,15 @@ This record contains reusable version-scoped evidence for active runtime guarant
 The backend guides own current setup, safety boundaries, and limitations.
 Exact task chronology, branch names, temporary homes, local paths, process ids, thread ids, and delivery transcripts remain in private reports or PR evidence.
 
+## Kiro CLI
+
+The live-harness-optin evidence below records a real Kiro coordination and its own routed worker cycle, not a simulator.
+The run used kiro-cli 2.22.1 on 2026-09-21 with model `gpt-5.6-luna` and effort `high`.
+The exact coordination launch command was `FM_HOME=/home/shiv/Projects/firstmate bin/fm-spawn.sh lloegrys-canary /home/shiv/Projects/firstmate-canary --harness kiro-cli --model gpt-5.6-luna --effort high --secondmate`.
+The coordination received routed work, wrote its own backlog and brief, dispatched and supervised its own scout, received the correlated routed return, and reconciled its own home.
+The scout produced `data/canary-inventory-r4/report.md` with 109 lines and 11,594 bytes, and the project clone remained unchanged.
+The live guard family that refreshes the Kiro lifecycle evidence is `FM_KIRO_LIVE_E2E=1 bash tests/fm-kiro-signals-live-e2e.test.sh`; the coordination result above is the recorded real-harness observation for this adapter.
+
 ## Harness detection precedence
 
 Firstmate's own harness comes from two kinds of evidence, and `bin/fm-harness.sh` owns how they combine: an environment marker names its harness, and the nearest harness process in the parent chain proves who owns the process tree.

@@ -1043,11 +1043,14 @@ crew_dispatch_validate() {
   typed_key=$TYPESAFE_API_KEY_PRIVATE
   [ -n "$typed_key" ] || typed_key=$(fmx_env_get TYPESAFE_API_KEY "$FM_HOME/.env")
   [ -z "$typed_key" ] || typed_active=true
-  if $typed_active; then
-    verified_harnesses=$(fm_control_harnesses | jq -Rsc 'split("\n") | map(select(length > 0))')
-  else
-    verified_harnesses='["claude","codex","opencode","pi","pi-signed","grok","kimi","cursor","agy","muse","rovo","omp","devin"]'
-  fi
+  # fm_control_harnesses is the ONE owner of the verified-adapter list, so the
+  # same profiles file gets the same verdict in every home. A second hand-written
+  # copy here used to apply whenever TYPESAFE_API_KEY was absent, which made a
+  # credential decide which adapters exist: a seeded secondmate home (never given
+  # a .env on purpose) rejected its own fleet-pinned kiro-cli and gemini as the
+  # captain's invalid configuration. The typed key still gates the resolver-only
+  # fields below through $typed, and nothing else.
+  verified_harnesses=$(fm_control_harnesses | jq -Rsc 'split("\n") | map(select(length > 0))')
   err=$(jq -r --argjson typed "$typed_active" --argjson verified_harnesses "$verified_harnesses" --arg provider_re "$FM_QUOTA_PROVIDER_ID_RE" '
     def verified($h): $verified_harnesses | index($h);
     def provider_id($p): ($p | type) == "string" and ($p | test($provider_re));

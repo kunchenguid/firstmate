@@ -399,6 +399,46 @@ test_matrix_cursor_reverse_video_placeholder_remnant() {
   pass "matrix: cursor's reverse-video placeholder remnant reads empty; real typed text stays pending"
 }
 
+test_matrix_kiro_bright_placeholder_is_harness_scoped() {
+  # Real kiro-cli 2.22.1 V2/V3: the idle placeholder is RGB ~158, above the
+  # fleet-wide ghost ceiling, and V3 draws a helper footer directly below it.
+  # Only a caller that already owns harness=kiro-cli may treat the exact text
+  # as furniture; another harness typing the same bytes must remain pending.
+  local idle typed wrong_case v3 plain old old_plain typed_tail
+  idle=$'transcript line
+'"${ESC}[38;2;158;158;158m› ask a question or describe a task ↵${ESC}[0m"
+  typed=$'transcript line
+'"${ESC}[38;2;230;230;230m› fix the failing test${ESC}[0m"
+  wrong_case=$'transcript line
+'"${ESC}[38;2;158;158;158m› Ask a question or describe a task ↵${ESC}[0m"
+  v3="$idle"$'
+                                                                 /sessions to resume · /copy to clipboard'
+  plain=$'transcript line
+› ask a question or describe a task ↵
+                                                                 /sessions to resume · /copy to clipboard'
+  # The pre-V3 wiring draws the same helper row with only `/copy to clipboard`.
+  old="$idle"$'\n                                                                 /copy to clipboard'
+  old_plain=$'transcript line
+› ask a question or describe a task ↵
+                                                                 /copy to clipboard'
+  # Non-vacuousness: the rule is anchored, so a row that merely contains the
+  # phrase is still real typed text and must stay pending.
+  typed_tail="$idle"$'\n                                                                 /copy to clipboard the last reply'
+
+  assert_screen "kiro bright idle placeholder on tmux" empty "$CAPS_TMUX" "$idle" 1 '' kiro-cli
+  assert_screen "kiro typed text on tmux" pending "$CAPS_TMUX" "$typed" 1 '' kiro-cli
+  assert_screen "kiro placeholder is case exact" pending "$CAPS_TMUX" "$wrong_case" 1 '' kiro-cli
+  assert_screen "same text without a Kiro identity" pending "$CAPS_TMUX" "$idle" 1
+  assert_screen "same text attributed to another harness" pending "$CAPS_TMUX" "$idle" 1 '' codex
+  assert_screen "kiro V3 idle plus helper footer on cursorless styled backend" empty     "$CAPS_STYLED_NOID" "$v3" '' '' kiro-cli
+  assert_screen "kiro V3 idle plus helper footer on cursorless plain backend" empty     "$CAPS_PLAIN" "$plain" '' '' kiro-cli
+  assert_screen "kiro pre-V3 idle plus bare footer on cursorless styled backend" empty "$CAPS_STYLED_NOID" "$old" '' '' kiro-cli
+  assert_screen "kiro pre-V3 idle plus bare footer on cursorless plain backend" empty "$CAPS_PLAIN" "$old_plain" '' '' kiro-cli
+  assert_screen "kiro typed row containing the footer phrase stays pending" pending "$CAPS_STYLED_NOID" "$typed_tail" '' '' kiro-cli
+  assert_screen "plain Kiro-looking bytes without identity stay unknown" unknown "$CAPS_PLAIN" "$plain"
+  pass "matrix: Kiro's exact bright placeholder is empty only under its harness identity"
+}
+
 test_matrix_herdr_halfblock_rule_bounds_bare_wrap() {
   # Herdr draws a composer's rules with half-block glyphs (▄ above, ▀ below)
   # rather than the box-drawing family. Without treating those as edges, a bare
@@ -975,6 +1015,7 @@ test_composer_footer_zone_refuses_rather_than_allows
 test_matrix_codex_dim_hint_row
 test_matrix_muse_truecolor_glyph_survives_signal_loss
 test_matrix_cursor_reverse_video_placeholder_remnant
+test_matrix_kiro_bright_placeholder_is_harness_scoped
 test_matrix_herdr_halfblock_rule_bounds_bare_wrap
 test_matrix_omp_status_row_bounds_bare_composer
 test_matrix_codex_idle_starfield_furniture

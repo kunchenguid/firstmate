@@ -74,6 +74,40 @@ export const Type = {
 JS
 }
 
+test_pi_descendant_does_not_replace_lock_owner_marker() {
+  local repo home plugin owner_pid out status
+  repo="$TMP_ROOT/pi-marker-descendant-root"
+  home="$TMP_ROOT/pi-marker-descendant-home"
+  owner_pid=$$
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_TEST_PI_OWNER_PID="$owner_pid" /usr/bin/node --input-type=module 2>&1 <<'EOF'
+import { createHash } from "node:crypto";
+import { readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const plugin = process.env.PLUGIN;
+const state = `${process.env.FM_HOME}/state`;
+const marker = `${state}/.pi-watch-extension-loaded`;
+const ownerPid = process.env.FM_TEST_PI_OWNER_PID;
+const version = `sha256:${createHash("sha256").update(readFileSync(plugin)).digest("hex")}`;
+writeFileSync(`${state}/.lock`, `${ownerPid}\n`);
+writeFileSync(marker, `${version}\n${ownerPid}\n`);
+const extension = await import(pathToFileURL(plugin).href);
+extension.default({});
+if (readFileSync(marker, "utf8").split(/\r?\n/)[1] !== ownerPid) {
+  console.error("descendant extension replaced the lock owner's watcher marker");
+  process.exit(1);
+}
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "a Pi watcher descendant must preserve its lock owner's marker"
+  [ -z "$out" ] || fail "Pi watcher descendant marker test printed output: $out"
+  pass "Pi watcher descendants preserve the lock owner's marker"
+}
+
 test_pi_extension_reports_external_healthy_watcher() {
   local repo home plugin out status
   repo="$TMP_ROOT/pi-external-healthy-root"
@@ -4393,6 +4427,7 @@ EOF
   pass "OpenCode healthy arm output does not suppress the turn-end guard"
 }
 
+test_pi_descendant_does_not_replace_lock_owner_marker
 test_pi_extension_reports_external_healthy_watcher
 test_pi_tool_returns_agent_tool_result
 test_pi_redundant_tool_call_is_owned_noop

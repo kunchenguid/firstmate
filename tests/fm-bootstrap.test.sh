@@ -1105,7 +1105,7 @@ test_crew_dispatch_active_rules_are_verbose_bootstrap_info() {
 }
 
 test_crew_dispatch_validation() {
-  local label body expect mode case_dir fakebin out child_env n
+  local label body expect mode case_dir fakebin out keyed_out child_env n
   n=0
   while IFS='^' read -r label body mode expect; do
     [ -n "$label" ] || continue
@@ -1217,15 +1217,34 @@ ROWS
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   [ -z "$out" ] || fail "no-key bootstrap must accept the verified devin worker adapter, got: $out"
-  printf '%s\n' '{"rules":[{"when":"gemini work","use":{"harness":"gemini","model":"gemini-3.8-flash-high","provider":"google"}}]}' > "$case_dir/home/config/crew-dispatch.json"
+  # One owner for the verified-adapter list: the same profiles file must get the
+  # same verdict with and without the typed key, or a home seeded without a .env
+  # (every secondmate) rejects the fleet's newest adapters as invalid captain
+  # configuration. A returning second list fails here.
+  printf '%s\n' '{"rules":[{"when":"gemini work","use":{"harness":"gemini","model":"gemini-3.8-flash-high","provider":"google"}},{"when":"kiro work","use":{"harness":"kiro-cli","model":"claude-sonnet-5","effort":"high","provider":"kiro"}}]}' > "$case_dir/home/config/crew-dispatch.json"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
-  [ "$out" = 'CREW_DISPATCH: invalid config/crew-dispatch.json - unverified harness: gemini' ] \
-    || fail "no-key bootstrap must preserve its former verified-harness baseline, got: $out"
+  [ -z "$out" ] \
+    || fail "a home with no typed key must accept every verified adapter, got: $out"
   printf '%s\n' 'TYPESAFE_API_KEY=test-key' > "$case_dir/home/.env"
+  keyed_out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$keyed_out" = "$out" ] \
+    || fail "the typed key changed the verified-harness verdict: keyed='$keyed_out' unkeyed='$out'"
+  # Non-vacuousness: an unverified adapter is still refused in both homes, so the
+  # agreement above is not an empty check that accepts everything.
+  printf '%s\n' '{"rules":[{"when":"anything","use":{"harness":"spaceship","model":"m","effort":"high"}}]}' > "$case_dir/home/config/crew-dispatch.json"
+  keyed_out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  rm -f "$case_dir/home/.env"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
-  [ -z "$out" ] || fail "typed resolution should add verified Gemini crewmate routing, got: $out"
+  [ "$out" = 'CREW_DISPATCH: invalid config/crew-dispatch.json - unverified harness: spaceship' ] \
+    || fail "an unverified adapter must still be refused without the typed key, got: $out"
+  [ "$keyed_out" = "$out" ] \
+    || fail "the typed key changed an unverified-adapter verdict: keyed='$keyed_out' unkeyed='$out'"
+  # Leave a valid profiles file for the environment-key case below.
+  printf '%s\n' '{"rules":[{"when":"kiro work","use":{"harness":"kiro-cli","model":"claude-sonnet-5","effort":"high","provider":"kiro"}}]}' > "$case_dir/home/config/crew-dispatch.json"
 
   rm -f "$case_dir/home/.env"
   : > "$case_dir/child-env.log"
@@ -1236,7 +1255,7 @@ ROWS
   child_env=$(cat "$case_dir/child-env.log")
   [ -n "$child_env" ] || fail "bootstrap child environment probe did not run"
   assert_not_contains "$child_env" 'secret-present' "bootstrap children never inherit the typesafe key"
-  pass "bootstrap gates resolver fields and additive harnesses on the typed key"
+  pass "bootstrap gates resolver fields on the typed key while one owner fixes the verified-adapter list"
 }
 
 test_bootstrap_reporting
