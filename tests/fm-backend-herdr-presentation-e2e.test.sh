@@ -297,6 +297,7 @@ EOF
       "$HERDR_LAB_HELPER" teardown "$HERDR_LAB_SESSION" >/dev/null 2>&1 || true
     LAB_READY=0
   fi
+  find "$TMP_ROOT" -type d -name '*.git-hooks' -exec chmod u+w {} + 2>/dev/null || true
   rm -rf "$TMP_ROOT"
 }
 trap cleanup_all EXIT
@@ -1406,8 +1407,25 @@ spawn_task "$PRIMARY_WAVE_ID" "$HOME_DIR" "$RECOVERY_PROJECT_DIR" > "$TMP_ROOT/p
 PRIMARY_WAVE_PID=$!
 spawn_task "$BRAVO_WAVE_ID" "$SECOND_HOME_B" "$RECOVERY_PROJECT_DIR" > "$TMP_ROOT/bravo-wave-resume.out" 2> "$TMP_ROOT/bravo-wave-resume.err" &
 BRAVO_WAVE_PID=$!
-wait "$PRIMARY_WAVE_PID" || fail "concurrent primary recovery failed: $(cat "$TMP_ROOT/primary-wave-resume.err")"
-wait "$BRAVO_WAVE_PID" || fail "concurrent secondmate recovery failed: $(cat "$TMP_ROOT/bravo-wave-resume.err")"
+PRIMARY_WAVE_STATUS=0
+BRAVO_WAVE_STATUS=0
+wait "$PRIMARY_WAVE_PID" || PRIMARY_WAVE_STATUS=$?
+wait "$BRAVO_WAVE_PID" || BRAVO_WAVE_STATUS=$?
+if [ "$PRIMARY_WAVE_STATUS" -ne 0 ] && [ "$BRAVO_WAVE_STATUS" -ne 0 ]; then
+  fail "both concurrent recoveries refused: $(cat "$TMP_ROOT/primary-wave-resume.err") $(cat "$TMP_ROOT/bravo-wave-resume.err")"
+fi
+if [ "$PRIMARY_WAVE_STATUS" -ne 0 ]; then
+  grep -Fq 'could not acquire its session lock; refusing a concurrent resume' "$TMP_ROOT/primary-wave-resume.err" \
+    || fail "concurrent primary recovery failed unexpectedly: $(cat "$TMP_ROOT/primary-wave-resume.err")"
+  spawn_task "$PRIMARY_WAVE_ID" "$HOME_DIR" "$RECOVERY_PROJECT_DIR" > "$TMP_ROOT/primary-wave-resume.out" 2> "$TMP_ROOT/primary-wave-resume.err" \
+    || fail "primary recovery retry after lock refusal failed: $(cat "$TMP_ROOT/primary-wave-resume.err")"
+fi
+if [ "$BRAVO_WAVE_STATUS" -ne 0 ]; then
+  grep -Fq 'could not acquire its session lock; refusing a concurrent resume' "$TMP_ROOT/bravo-wave-resume.err" \
+    || fail "concurrent secondmate recovery failed unexpectedly: $(cat "$TMP_ROOT/bravo-wave-resume.err")"
+  spawn_task "$BRAVO_WAVE_ID" "$SECOND_HOME_B" "$RECOVERY_PROJECT_DIR" > "$TMP_ROOT/bravo-wave-resume.out" 2> "$TMP_ROOT/bravo-wave-resume.err" \
+    || fail "secondmate recovery retry after lock refusal failed: $(cat "$TMP_ROOT/bravo-wave-resume.err")"
+fi
 PRIMARY_WAVE_NEW_WT=$(remember_meta_worktree "$PRIMARY_WAVE_META")
 BRAVO_WAVE_NEW_WT=$(remember_meta_worktree "$BRAVO_WAVE_META")
 PRIMARY_WAVE_NEW_PANE=$(grep '^herdr_pane_id=' "$PRIMARY_WAVE_META" | cut -d= -f2-)

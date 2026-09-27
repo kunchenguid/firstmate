@@ -25,7 +25,7 @@ set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all; exit 1; }
+fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
 
 command -v herdr >/dev/null 2>&1 || { echo "skip: herdr not found"; exit 0; }
@@ -39,11 +39,12 @@ SESSION="fm-lab-control-smoke-$$"
 export HERDR_SESSION="$SESSION"
 SCRATCH=
 cleanup_all() {
+  [ -z "$SCRATCH" ] || chmod u+w "$SCRATCH/home/state/hsmoke.git-hooks" 2>/dev/null || true
   [ -n "$SCRATCH" ] && rm -rf "$SCRATCH"
   herdr_safe_stop_and_delete "$SESSION"
 }
 trap cleanup_all EXIT
-fm_herdr_lab_prepare "$SESSION" || fail "could not prepare isolated Herdr lab session"
+fm_herdr_lab_provision "$SESSION" || fail "could not provision isolated Herdr lab session"
 
 SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/fm-control-herdr.XXXXXX")
 SCRATCH=$(cd "$SCRATCH" && pwd)
@@ -214,9 +215,9 @@ pass "real herdr: interrupt refuses when herdr's own agent registry reports no a
 # signing on macOS arm64; the symlink name is what the kernel records as argv[0]).
 AGENT_BIN="$SCRATCH/agentbin"
 mkdir -p "$AGENT_BIN"
-SLEEP_BIN=$(command -v sleep) || fail "sleep not found"
-ln -s "$SLEEP_BIN" "$AGENT_BIN/claude"
-printf -v AGENT_Q '%q' "$AGENT_BIN/claude"
+PYTHON_BIN=$(command -v python3) || fail "python3 not found"
+ln -s "$PYTHON_BIN" "$AGENT_BIN/claude"
+printf -v AGENT_CMD '%q -c %q' "$AGENT_BIN/claude" 'import time; time.sleep(900)'
 
 wait_process_state() {  # <expected> <tries>
   local expected=$1 tries=$2 i=0
@@ -229,10 +230,10 @@ wait_process_state() {  # <expected> <tries>
 }
 
 start_agent_process() {
-  fm_backend_herdr_send_text_line "$SESSION:$PANE_ID" "$AGENT_Q 900" \
+  fm_backend_herdr_send_text_line "$SESSION:$PANE_ID" "$AGENT_CMD" \
     || fail "could not start the agent-named foreground process in the task pane"
   wait_process_state agent 50 \
-    || version_fail "a real agent-named foreground process reads '$(fm_backend_herdr_pane_process_state "$SESSION" "$PANE_ID")' rather than 'agent' through pane process-info"
+    || version_fail "a real agent-named foreground process reads '$(fm_backend_herdr_pane_process_state "$SESSION" "$PANE_ID")' rather than 'agent' through pane process-info: $(herdr pane process-info --pane "$PANE_ID" --session "$SESSION" 2>&1 | tr -d '\n'); pane: $(fm_backend_herdr_capture "$SESSION:$PANE_ID" 12 2>&1 | tr -d '\n')"
 }
 
 start_agent_process
@@ -321,7 +322,7 @@ if OUT=$(run_control hsmoke exit 2>&1); then
   fail "exit should fail closed when the agent's composer is not proven empty: $OUT"
 fi
 case "$OUT" in
-  *"not proven empty"*) : ;;
+  *"not proven empty"*|*"visibly holds pending text"*) : ;;
   *) fail "the exit failure should say the composer is not proven empty, got: $OUT" ;;
 esac
 pass "real herdr: an agent behind an unproven composer fails closed instead of typing an exit command into it"
@@ -345,7 +346,7 @@ REPROJ_TAB_RAW=$(herdr tab create --workspace "$REPROJ_PWS" --cwd "$WT" --label 
 REPROJ_TAB=$(printf '%s' "$REPROJ_TAB_RAW" | jq -r '.result.tab.tab_id // empty')
 REPROJ_PANE=$(printf '%s' "$REPROJ_TAB_RAW" | jq -r '.result.root_pane.pane_id // empty')
 [ -n "$REPROJ_TAB" ] && [ -n "$REPROJ_PANE" ] || fail "flat reproject tab creation returned no ids"
-fm_backend_herdr_send_text_line "$SESSION:$REPROJ_PANE" "$AGENT_Q 900" \
+fm_backend_herdr_send_text_line "$SESSION:$REPROJ_PANE" "$AGENT_CMD" \
   || fail "could not start the agent-named process in the flat tab"
 OLD_PANE_ID=$PANE_ID
 PANE_ID=$REPROJ_PANE
