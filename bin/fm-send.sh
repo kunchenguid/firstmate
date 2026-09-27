@@ -199,13 +199,14 @@
 # in this home's status log per status_open_decisions (bin/fm-classify-lib.sh), or
 # a still-open captain-held task resolved as above. A key in neither is refused
 # before sending, so a mistyped key cannot deliver an answer while silently
-# orphaning the decision. A failed or unconfirmed send never closes a key; a
-# delivered answer whose closing append fails exits nonzero with the exact
-# manual close command, leaving the decision open to re-surface (the safe
-# direction). A send without the flag never closes anything: a routine steer,
-# working:, or done: event still cannot clear a captain decision. The flag is
-# refused with --key, with an explicit backend target (no task ledger in this
-# home), and with an empty message.
+# orphaning the decision, and the refusal names whether the status log never
+# opened that key or already closed it, and with which verb. A failed or
+# unconfirmed send never closes a key; a delivered answer whose closing append
+# fails exits nonzero with the exact manual close command, leaving the decision
+# open to re-surface (the safe direction). A send without the flag never closes
+# anything: a routine steer, working:, or done: event still cannot clear a
+# captain decision. The flag is refused with --key, with an explicit backend
+# target (no task ledger in this home), and with an empty message.
 #
 # After a successful TYPED-plane submit fm-send pauses FM_SEND_SETTLE seconds
 # (default 1, 0 disables) before returning: submit confirmation only proves the
@@ -643,7 +644,14 @@ if [ -n "$RESOLVE_KEYS" ]; then
       RESOLVE_HOLD_KEYS="${RESOLVE_HOLD_KEYS}${RESOLVE_HOLD_KEYS:+ }$resolved_hold_id"
       continue
     fi
-    echo "error: --resolve-key '$k': no open decision or blocker with that key in $RESOLVE_STATUS_FILE, and no captain-held task '$k' or '$RESOLVE_TASK_ID-decision-$k' still open (already closed or mistyped). Re-check the OPEN DECISIONS listing, then resend without that key or with the right one; nothing was sent." >&2
+    # Name why the status log does not hold the key open, from the same fold's
+    # per-key history, so the operator looks for the real cause.
+    resolve_closer=$(status_key_closing_verb "$RESOLVE_STATUS_FILE" "$k")
+    case "$resolve_closer" in
+    '') resolve_why="no line in $RESOLVE_STATUS_FILE opens a decision or blocker under that exact key (a mistyped key, or an opening line the status fold rejected)" ;;
+    *) resolve_why="its decision in $RESOLVE_STATUS_FILE was already closed by a keyed $resolve_closer line" ;;
+    esac
+    echo "error: --resolve-key '$k': $resolve_why, and no captain-held task '$k' or '$RESOLVE_TASK_ID-decision-$k' is still open to answer. Re-check the OPEN DECISIONS listing, then resend without that key or with the right one; nothing was sent." >&2
     exit 1
   done
   # The decision-answer partition (the header's "Answering a decision"

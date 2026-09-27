@@ -395,8 +395,8 @@ test_closing_verb_filters_unrelated_history_without_subshell_growth() {
   pass "per-key reads retain resolutions without subprocess work growing with unrelated history"
 }
 
-test_closing_verb_filter_preserves_terminal_chronology() {
-  local dir f kind want tag terminal expected
+test_closing_verb_ignores_terminal_lines_for_every_kind() {
+  local dir f kind want tag terminal
   dir=$(case_dir closing-verb-terminals)
   f="$dir/task.status"
   for kind in ship scout secondmate; do
@@ -411,46 +411,44 @@ test_closing_verb_filter_preserves_terminal_chronology() {
           failed) printf 'failed corr=0123456789abcdef [key=other]: task failed\n' >> "$f" ;;
         esac
         printf 'note: cleanup complete\n' >> "$f"
-        expected=$terminal
-        [ "$kind" != secondmate ] || expected=blocked
-        [ "$(status_key_closing_verb "$f" "$want")" = "$expected" ] || fail "$kind/$want lost $terminal chronology"
+        [ "$(status_key_closing_verb "$f" "$want")" = blocked ] || fail "$kind/$want: a $terminal line closed an unanswered blocker"
         printf 'needs-decision: [key=%s] reopened\nnote: more cleanup\n' "$want" >> "$f"
         [ "$(status_key_closing_verb "$f" "$want")" = needs-decision ] || fail "$kind/$want lost a post-terminal reopening"
       done
     done
   done
-  pass "per-key filtering retains ship/scout terminals, reopenings, and secondmate blockers"
+  pass "per-key history keeps blockers open past every kind's terminal line and retains reopenings"
 }
 
 test_closing_verb_filters_unrelated_history_without_subshell_growth
 test_closing_verb_honors_overridden_transition_verbs
-test_closing_verb_filter_preserves_terminal_chronology
+test_closing_verb_ignores_terminal_lines_for_every_kind
 
-test_bare_prose_cannot_impersonate_a_terminal_declaration() {
+# A keyed decision stays open until a line carrying its exact key closes it: the
+# owning task's own done:/failed: line never closes it, for any task kind, and a
+# resolved line with that key does.
+test_terminal_line_never_closes_a_keyed_decision() {
   local dir f kind word open
-  dir=$(case_dir prose-terminal)
+  dir=$(case_dir terminal-keeps-decision)
   open=$(printf 'route\tneeds-decision\tA or B?\n')
-  for kind in ship scout; do
+  for kind in ship scout secondmate; do
     for word in 'done' failed; do
       f="$dir/$kind-$word.status"
       printf 'kind=%s\n' "$kind" > "$dir/$kind-$word.meta"
-      printf 'needs-decision [key=route]: A or B?\npaused: waiting on the vendor\nSteps remaining:\n %s\n' \
-        "$word" > "$f"
-      assert_fold "$f" "$open" "$kind: bare '$word' prose"
+      printf 'needs-decision [key=route]: A or B?\n%s: real outcome\nnote: cleanup complete\n' "$word" > "$f"
+      assert_fold "$f" "$open" "$kind: a $word line"
       [ "$(status_key_closing_verb "$f" route)" = needs-decision ] \
-        || fail "$kind: bare '$word' prose closed a still-open key"
-      f="$dir/$kind-$word-real.status"
-      printf 'kind=%s\n' "$kind" > "$dir/$kind-$word-real.meta"
-      printf 'needs-decision [key=route]: A or B?\n%s: real outcome\n' "$word" > "$f"
-      assert_fold "$f" '' "$kind: genuine $word supersedes"
-      [ "$(status_key_closing_verb "$f" route)" = "$word" ] \
-        || fail "$kind: genuine $word no longer supersedes the open key"
+        || fail "$kind: a $word line closed a still-open key"
+      printf 'resolved [key=route]: A\n' >> "$f"
+      assert_fold "$f" '' "$kind: resolution after a $word line"
+      [ "$(status_key_closing_verb "$f" route)" = resolved ] \
+        || fail "$kind: the keyed resolution after a $word line did not close the key"
     done
   done
-  pass "prose without a colon cannot impersonate a ship or scout terminal declaration"
+  pass "a terminal line never closes a keyed decision, and its keyed resolution does"
 }
 
-test_bare_prose_cannot_impersonate_a_terminal_declaration
+test_terminal_line_never_closes_a_keyed_decision
 
 test_bare_prose_cannot_open_or_close_a_decision() {
   local dir f word blocked

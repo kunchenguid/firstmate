@@ -17,6 +17,8 @@ make_fakebin() {  # <dir>
   fb=$(fm_fakebin "$1")
   cat > "$fb/no-mistakes" <<'SH'
 #!/usr/bin/env bash
+run="${FM_HOME:?}/nm-runs/${PWD##*/}"
+[ "${1:-}" = axi ] && [ -f "$run" ] && cat "$run"
 exit 0
 SH
   cat > "$fb/tmux" <<'SH'
@@ -942,18 +944,19 @@ test_open_decision_clears_on_keyed_resolution() {
   pass "durable fold clears a decision only on a keyed resolution"
 }
 
-# A COMPLETED scout report must never be read as a pending decision. A scout that
-# raised a needs-decision and then finished (done) - its report delivered, its
-# decision either answered or captured in the report for the captain - must surface
-# only as a report POINTER, not a reopened pending decision, even when the report
-# body and the stale status line contain decision-like prose. This is the Lavish-103
-# defect: a terminal single-owner task's stale, never-keyed-resolved needs-decision
-# must not linger as pending. Decisions come purely from the keyed fold reconciled
-# against the crew lifecycle; report prose never opens or reopens a decision.
+# A COMPLETED scout's report surfaces only as a report POINTER: its prose never
+# opens or reopens a decision. A decision the scout raised and nobody
+# answered is not hidden by its done line, though; it stays open until its own key
+# is closed. Likewise a ship whose latest event is its done line still surfaces its
+# unanswered decision in the task hints and the home-summary rollup.
 test_completed_scout_report_is_pointer_not_pending() {
   local home fakebin out kind terminal id phase single mate single_state mate_state
   home=$(make_home completed-scout)
   mkdir -p "$home/projects/scout-wt" "$home/data/lavish-103"
+  # The ship's done line names a head published outside its copy, so the
+  # ship's done-line verification accepts it and only the decision is at issue.
+  fm_git_init_commit "$home/projects/ship-wt" >/dev/null
+  git -C "$home/projects/ship-wt" update-ref refs/remotes/origin/fm/pin-ship HEAD
   fm_write_meta "$home/state/lavish-103.meta" \
     "window=firstmate:fm-lavish-103" \
     "worktree=$home/projects/scout-wt" \
@@ -962,23 +965,45 @@ test_completed_scout_report_is_pointer_not_pending() {
     "kind=scout" \
     "mode=scout"
   record_claude_idle "$home/state" lavish-103
-  # Stale needs-decision, then the scout finished (done). No keyed resolution.
+  # Decision under the default key, then the scout finished (done).
   printf 'needs-decision: adopt approach A or B for Lavish issue 103\n' > "$home/state/lavish-103.status"
   printf 'done: report ready at data/lavish-103/report.md\n' >> "$home/state/lavish-103.status"
-  # Completed report whose PROSE reads like the decision.
-  printf '# Lavish 103\nThe open question is whether to adopt approach A or B.\nThis needs a captain decision. Recommendation: A.\n' > "$home/data/lavish-103/report.md"
+  # Completed report whose PROSE reads like another decision.
+  printf '# Lavish 103\nThe open question is whether to adopt approach C or D.\nThis needs a captain decision. Recommendation: C.\n' > "$home/data/lavish-103/report.md"
+  fm_write_meta "$home/state/pin-ship.meta" \
+    "window=firstmate:fm-pin-ship" \
+    "worktree=$home/projects/ship-wt" \
+    "project=firstmate" \
+    "harness=claude" \
+    "kind=ship"
+  record_claude_idle "$home/state" pin-ship
+  printf 'needs-decision [key=ci-nochecks]: repo has no CI checks, merge anyway?\ndone: PR checks green\n' \
+    > "$home/state/pin-ship.status"
   fakebin=$(make_fakebin "$home")
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
   printf '%s' "$out" | jq -e '
     .tasks[] | select(.id == "lavish-103")
     | .current_state.state == "done"
-      and .hints.pending_decision == false
-      and (.hints.open_decisions | length) == 0
+      and .hints.pending_decision == true
+      and (.hints.open_decisions | map(.key)) == ["default"]
       and .hints.scout_report_present == true
-  ' >/dev/null || fail "a completed scout report must be a pointer, not a pending decision: $out"
+  ' >/dev/null || fail "a completed scout's report must be a pointer while its decision stays open: $out"
+  printf '%s' "$out" | jq -e '
+    .tasks[] | select(.id == "pin-ship")
+    | .current_state.state == "done"
+      and .hints.pending_decision == true
+      and (.hints.open_decisions | map(.key)) == ["ci-nochecks"]
+  ' >/dev/null || fail "a finished ship must keep its unanswered keyed decision open: $out"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary)
+  printf '%s' "$out" | jq -e '
+    (.decisions_open | map({id,key}) | sort_by(.id)) ==
+      [{id:"lavish-103",key:"default"},{id:"pin-ship",key:"ci-nochecks"}]
+  ' >/dev/null || fail "home summary must roll up a finished task's unanswered decision: $out"
 
-  # Same terminal-supersession contract across ship/scout/secondmate, both snapshot
-  # modes, and reopen/resolve after cleanup.
+  # A keyed decision still open when a ship, scout, or secondmate finishes stays
+  # open in both snapshot modes until its own key is closed, even after cleanup;
+  # only the current state differs, because a single-owner task's terminal line
+  # ends its work.
   home=$(make_home terminal-cleanup)
   mkdir -p "$home/projects/task"
   fakebin=$(make_fakebin "$home")
@@ -995,9 +1020,9 @@ test_completed_scout_report_is_pointer_not_pending() {
   done
   for phase in terminal reopened resolved; do
     case "$phase" in
-      terminal) single='[]'; mate='["access","choice"]'; single_state=unknown; mate_state=parked ;;
-      reopened) single='["access","new-choice"]'; mate='["access","choice","new-choice"]'; single_state=parked; mate_state=parked ;;
-      resolved) single='[]'; mate='["choice"]'; single_state=unknown; mate_state=parked ;;
+      terminal) single='["access","choice"]'; mate=$single; single_state=unknown; mate_state=parked ;;
+      reopened) single='["access","choice","new-choice"]'; mate=$single; single_state=parked; mate_state=parked ;;
+      resolved) single='["choice"]'; mate=$single; single_state=unknown; mate_state=parked ;;
     esac
     for kind in ship scout secondmate; do
       for terminal in 'done' failed; do
@@ -1017,20 +1042,70 @@ test_completed_scout_report_is_pointer_not_pending() {
           and .current_state.state == (if $persistent then $mate_state else $single_state end)
           and .hints.blocked_event == (if $persistent then $mate else $single end | index("access") != null)
           and .hints.pending_decision == (if $persistent then $mate else $single end | any(. != "access")))
-    ' >/dev/null || fail "$phase snapshot revived a completed decision or lost a current one: $out"
+    ' >/dev/null || fail "$phase snapshot dropped an unanswered decision or kept a closed one: $out"
     out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary)
     printf '%s' "$out" | jq -e --argjson single "$single" --argjson mate "$mate" '
       (.decisions_open | map({id,key}) | sort_by(.id,.key)) ==
         (([ ("ship-done","ship-failed","scout-done","scout-failed") as $id | $single[] | {id:$id,key:.} ]
           + [ ("secondmate-done","secondmate-failed") as $id | $mate[] | {id:$id,key:.} ]) | sort_by(.id,.key))
-    ' >/dev/null || fail "$phase home summary revived a completed decision or lost a current one: $out"
+    ' >/dev/null || fail "$phase home summary dropped an unanswered decision or kept a closed one: $out"
   done
-  pass "a completed scout's stale decision surfaces as a report pointer, not pending"
+  pass "a completed scout's report is a pointer while unanswered keyed decisions outlive every terminal line"
+}
+
+# A ship's run-step read decides whether its unanswered keyed decision surfaces:
+# only a run showing the crew working clears it, while a completed run (done) or
+# an unreadable outcome (unknown) keeps it open in the task hints and the
+# home-summary rollup.
+test_run_step_state_decides_open_decision_clearing() {
+  local home fakebin out id outcome head last
+  home=$(make_home run-step-decisions)
+  mkdir -p "$home/nm-runs"
+  for id in run-done run-unknown run-working; do
+    fm_git_init_commit "$home/projects/$id" >/dev/null
+    git -C "$home/projects/$id" checkout -q -b "fm/$id"
+    head=$(git -C "$home/projects/$id" rev-parse HEAD)
+    fm_write_meta "$home/state/$id.meta" \
+      "window=firstmate:fm-$id" "worktree=$home/projects/$id" \
+      "project=firstmate" "harness=claude" "kind=ship" "mode=no-mistakes"
+    record_claude_idle "$home/state" "$id"
+    case "$id" in
+      run-done) outcome=$'status: completed\n  pr: ""\noutcome: checks-passed'; last='done: PR checks green' ;;
+      run-unknown) outcome=$'status: completed\n  pr: ""\noutcome: mystery'; last='done: PR checks green' ;;
+      run-working) outcome=$'status: running\n  pr: ""'; last='working: validating the pin' ;;
+    esac
+    printf 'needs-decision [key=ci-nochecks]: repo has no CI checks, merge anyway?\n%s\n' "$last" \
+      > "$home/state/$id.status"
+    printf 'run:\n  id: "01RUN%s"\n  branch: fm/%s\n  head: "%s"\n  findings: none\n  %s\n' \
+      "$id" "$id" "$head" "$outcome" > "$home/nm-runs/$id"
+  done
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .tasks as $tasks
+    | [ "run-done", "run-unknown", "run-working" ]
+    | map(. as $id | $tasks[] | select(.id == $id) | .current_state | [.state, .source])
+      == [["done","run-step"],["unknown","run-step"],["working","run-step"]]
+  ' >/dev/null || fail "run-step fixtures must read done, unknown, and working from the run: $out"
+  printf '%s' "$out" | jq -e '
+    . as $root
+    | def task($id): ($root.tasks[] | select(.id == $id));
+    all(("run-done","run-unknown"); task(.)
+        | .hints.pending_decision == true
+          and (.hints.open_decisions | map(.key)) == ["ci-nochecks"])
+      and task("run-working").hints.pending_decision == false
+      and (task("run-working").hints.open_decisions | length) == 0
+  ' >/dev/null || fail "only a working run-step read may clear an unanswered decision: $out"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary)
+  printf '%s' "$out" | jq -e '
+    (.decisions_open | map({id,key}) | sort_by(.id)) ==
+      [{id:"run-done",key:"ci-nochecks"},{id:"run-unknown",key:"ci-nochecks"}]
+  ' >/dev/null || fail "home summary must keep a done or unknown run's unanswered decision: $out"
+  pass "only a working run-step read clears an unanswered decision"
 }
 
 # The complementary safety property: a scout still PARKED at a decision (its last
-# event is the needs-decision, it has not finished) DOES stay pending. The terminal
-# clear must not over-fire on a live, undecided scout.
+# event is the needs-decision, it has not finished) DOES stay pending.
 test_parked_scout_decision_stays_pending() {
   local home fakebin out
   home=$(make_home parked-scout)
@@ -1052,7 +1127,7 @@ test_parked_scout_decision_stays_pending() {
       and (.hints.open_decisions | length) == 1
       and .hints.open_decisions[0].key == "q1"
   ' >/dev/null || fail "a scout still parked at a decision must stay pending: $out"
-  pass "a scout still parked at a decision stays pending (terminal clear does not over-fire)"
+  pass "a scout still parked at a decision stays pending"
 }
 
 # Home-summary validity treats persistent secondmates as registered homes, not
@@ -1165,6 +1240,7 @@ test_secondmate_open_decision_survives_live_endpoint
 test_open_decision_transfers_to_captain_hold
 test_open_decision_clears_on_keyed_resolution
 test_completed_scout_report_is_pointer_not_pending
+test_run_step_state_decides_open_decision_clearing
 test_parked_scout_decision_stays_pending
 test_scout_reports_include_teardown_reports
 test_backlog_tasks_axi_forms_and_overrides

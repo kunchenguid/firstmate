@@ -127,8 +127,9 @@
 #      (nm_daemon_probe_down).
 #   3. Reconcile the status log through fm-classify-lib.sh's status_current_line:
 #      open decisions survive unrelated events and continuation prose cannot
-#      hide a declaration. Ship/scout terminal declarations supersede stale log
-#      decisions. If it says needs-decision/blocked but
+#      hide a declaration, while a ship's or scout's own terminal declaration
+#      outranks decisions opened before it (that function owns the rule; those
+#      decisions stay open). If it says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
 #      agree, and are reported as parked. A `blocked:` line that reports a

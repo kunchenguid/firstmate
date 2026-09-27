@@ -315,10 +315,56 @@ test_routine_steer_never_closes() {
   printf '%s' "$out" | grep -F '[key=schema]' >/dev/null \
     || fail "a routine steer or later working line cleared an unanswered captain decision: $out"
   printf 'done: task complete\nnote: cleanup complete\n' >> "$home/state/t3.status"
-  run_send "$fb" "$home" "$log" t3 --resolve-key schema "answer to a stale decision" > "$dir/terminal.out" 2> "$dir/terminal.err"; rc=$?
-  expect_code 1 "$rc" "an answer to a terminally superseded decision must refuse"
-  [ ! -e "$home/state/t3.inbox/002.msg" ] || fail "a stale decision answer was delivered"
-  pass "fm-send preserves decisions through routine work and refuses superseded terminal decisions"
+  out=$(drain_out "$home")
+  printf '%s' "$out" | grep -F '[key=schema]' >/dev/null \
+    || fail "a later done line cleared an unanswered captain decision: $out"
+  pass "fm-send preserves decisions through routine steers, working lines, and done lines"
+}
+
+# The task finishing never closes a decision it raised: the decision stays in
+# OPEN DECISIONS after the done: line and is still answerable through
+# --resolve-key, while a keyed resolved line does close it and a later answer
+# is refused naming that close as the reason.
+test_decision_survives_done_and_stays_answerable() {
+  local dir fb log home rc out err key=nm-01M38NPKKB7XAK5R6ARXEJQCXB-ci-nochecks
+  dir="$TMP_ROOT/after-done"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"; err="$dir/send.err"
+  home=$(setup_home after-done)
+  fm_write_meta "$home/state/t1.meta" "window=sess:fm-t1" "kind=ship"
+  printf 'needs-decision [key=%s]: ask-user findings=f1\ndone: PR checks green\n' "$key" > "$home/state/t1.status"
+
+  out=$(drain_out "$home")
+  printf '%s' "$out" | grep -F "t1 [key=$key] needs-decision" >/dev/null \
+    || fail "a done line dropped the unanswered decision from OPEN DECISIONS: $out"
+  run_send "$fb" "$home" "$log" t1 --resolve-key "$key" "the finding is moot"; rc=$?
+  expect_code 0 "$rc" "an answer to a decision raised before done must be accepted"
+  grep -qF 'the finding is moot' "$home/state/t1.inbox/001.msg" \
+    || fail "the answer after done was not delivered"
+  grep -F "resolved [key=$key]" "$home/state/t1.status" >/dev/null \
+    || fail "the answer after done did not close the decision: $(cat "$home/state/t1.status")"
+  out=$(drain_out "$home")
+  if printf '%s' "$out" | grep -F 'OPEN DECISIONS' >/dev/null; then
+    fail "the answered decision still lists as open: $out"
+  fi
+
+  home=$(setup_home resolved-before)
+  fm_write_meta "$home/state/t1.meta" "window=sess:fm-t1" "kind=ship"
+  printf 'needs-decision [key=%s]: ask-user findings=f1\nresolved [key=%s]: moot\ndone: PR checks green\n' \
+    "$key" "$key" > "$home/state/t1.status"
+  out=$(drain_out "$home")
+  if printf '%s' "$out" | grep -F 'OPEN DECISIONS' >/dev/null; then
+    fail "a decision closed by its keyed resolution still lists as open: $out"
+  fi
+  : > "$log"
+  env PATH="$fb:$PATH" \
+    FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" t1 --resolve-key "$key" "a second answer" >/dev/null 2>"$err"; rc=$?
+  expect_code 1 "$rc" "an answer to an already resolved decision must refuse"
+  assert_contains "$(cat "$err")" "already closed by a keyed resolved line" \
+    "the refusal must name the resolution that already closed the key"
+  assert_not_contains "$(cat "$err")" "mistyped" "the refusal must not blame a typo for a closed key"
+  [ ! -d "$home/state/t1.inbox" ] || fail "a refused answer still enqueued an inbox record"
+  pass "fm-send --resolve-key: a decision outlives done and stays answerable, and only its keyed close ends it"
 }
 
 test_not_open_key_refuses_before_send() {
@@ -335,6 +381,8 @@ test_not_open_key_refuses_before_send() {
     "$SEND" t4 --resolve-key mistyped "the answer" >/dev/null 2>"$err"; rc=$?
   [ "$rc" -ne 0 ] || fail "a not-open key should refuse"
   assert_contains "$(cat "$err")" "--resolve-key 'mistyped'" "the refusal should name the bad key"
+  assert_contains "$(cat "$err")" "no line in $home/state/t4.status opens a decision or blocker under that exact key" \
+    "the refusal should say the key was never opened"
   assert_contains "$(cat "$err")" "nothing was sent" "the refusal should state nothing was sent"
   [ ! -s "$log" ] || fail "a refused answer still typed text: $(cat "$log")"
   [ ! -d "$home/state/t4.inbox" ] || fail "a refused answer still enqueued an inbox record"
@@ -911,6 +959,7 @@ test_separate_resolve_key_answers_do_not_rewake
 test_colon_first_key_position_is_answerable
 test_answer_starts_work_never_orphans
 test_routine_steer_never_closes
+test_decision_survives_done_and_stays_answerable
 test_not_open_key_refuses_before_send
 test_failed_ring_still_closes_at_enqueue
 test_failed_enqueue_does_not_close

@@ -1278,7 +1278,7 @@ EOF
   pass "resolved findings and decision-like prose do not create captain-held tasks"
 }
 
-test_terminal_single_owner_status_decision_does_not_block_empty_inventory() {
+test_unanswered_status_decision_blocks_empty_inventory_after_terminal() {
   local home id open secondmate
   home=$(make_home stale-terminal-decision)
   id=sample-terminal-review
@@ -1290,23 +1290,23 @@ test_terminal_single_owner_status_decision_does_not_block_empty_inventory() {
   printf '# Terminal sample review\n\nNo unresolved captain choice remains.\n' > "$home/data/$id/report.md"
   open=$(bash -c '. "$1"; status_open_decisions "$2"' _ \
     "$ROOT/bin/fm-classify-lib.sh" "$home/state/$id.status")
-  [ -z "$open" ] || fail "the shared fold retained a pre-terminal blocker"
-  run_captain "$home" complete "$id" --none >/dev/null \
-    || fail "terminal single-owner stale status decision blocked empty inventory completion"
-  run_captain "$home" verify "$id" >/dev/null \
-    || fail "terminal single-owner stale status decision blocked inventory verification"
-  printf 'blocked [key=access]: reopened\nnote: more cleanup\n' >> "$home/state/$id.status"
-  if run_captain "$home" complete "$id" --none > "$home/reopened.out" 2> "$home/reopened.err"; then
-    fail "completion accepted a genuinely reopened post-terminal decision"
+  [ "$open" = $'access\tblocked\twaiting' ] || fail "the shared fold dropped an unanswered blocker at the terminal line: $open"
+  if run_captain "$home" complete "$id" --none > "$home/terminal.out" 2> "$home/terminal.err"; then
+    fail "completion attested --none over an unanswered decision the task raised before finishing"
   fi
-  if run_captain "$home" verify "$id" > "$home/reopened-verify.out" 2> "$home/reopened-verify.err"; then
-    fail "verification accepted a genuinely reopened post-terminal decision"
+  if run_captain "$home" verify "$id" > "$home/terminal-verify.out" 2> "$home/terminal-verify.err"; then
+    fail "verification accepted an unanswered decision the task raised before finishing"
   fi
-  printf 'resolved [key=access]: answered\nfailed: investigation ended\nnote: final cleanup\n' >> "$home/state/$id.status"
-  run_captain "$home" complete "$id" --none >/dev/null || fail "resolved reopening blocked completion"
-  run_captain "$home" verify "$id" >/dev/null || fail "resolved reopening blocked verification"
-  run_teardown "$home" "$id" >/dev/null 2> "$home/terminal-teardown.err" \
-    || fail "terminal single-owner stale status decision blocked teardown: $(cat "$home/terminal-teardown.err")"
+  if run_teardown "$home" "$id" > "$home/terminal-teardown.out" 2> "$home/terminal-teardown.err"; then
+    fail "cleanup discarded an unanswered decision the task raised before finishing"
+  fi
+  assert_contains "$(cat "$home/terminal-teardown.err")" 'captain-call completion gate' \
+    "cleanup refused for a reason other than the unanswered decision"
+  printf 'resolved [key=access]: answered\nnote: final cleanup\n' >> "$home/state/$id.status"
+  run_captain "$home" complete "$id" --none >/dev/null || fail "the keyed resolution did not clear completion"
+  run_captain "$home" verify "$id" >/dev/null || fail "the keyed resolution did not clear verification"
+  run_teardown "$home" "$id" >/dev/null 2> "$home/resolved-teardown.err" \
+    || fail "a resolved status decision blocked teardown: $(cat "$home/resolved-teardown.err")"
 
   secondmate=sample-secondmate
   write_origin_meta "$home" "$secondmate" secondmate
@@ -1316,7 +1316,7 @@ test_terminal_single_owner_status_decision_does_not_block_empty_inventory() {
     > "$home/secondmate-terminal.out" 2> "$home/secondmate-terminal.err"; then
     fail "secondmate terminal status decision was incorrectly cleared"
   fi
-  pass "terminal single-owner stale status decisions do not block empty inventory"
+  pass "an unanswered status decision blocks empty inventory until its key is resolved, even after the task finishes"
 }
 
 test_secondmate_hold_stays_in_authoritative_home() {
@@ -4046,7 +4046,7 @@ test_deferral_leaves_captains_call_until_due
 test_out_of_band_close_is_recordable
 test_visual_review_uses_shared_completion_owner
 test_none_inventory_and_resolved_prose_do_not_create_holds
-test_terminal_single_owner_status_decision_does_not_block_empty_inventory
+test_unanswered_status_decision_blocks_empty_inventory_after_terminal
 test_secondmate_hold_stays_in_authoritative_home
 test_secondmate_home_publishes_holds_and_answers
 test_secondmate_reconcile_publishes_before_request_retirement

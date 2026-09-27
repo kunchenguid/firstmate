@@ -568,10 +568,14 @@ status_event_recorded() {  # <status-file> <new-status-line>
 # after a later, unrelated event": a subsequent done/paused/working line silently
 # masks a still-open needs-decision. status_open_decisions is the ONE authoritative
 # statement of the status-fold contract that fixes this - a needs-decision/blocked
-# line OPENS a keyed decision, and an explicit resolution or a verified
+# line OPENS a keyed decision, and only an explicit resolution or a verified
 # captain-held backlog transfer referencing that key CLOSES it.
-# Ship/scout terminal declarations supersede stale log decisions; a secondmate's
-# terminal event may describe other work and cannot close an unrelated decision.
+# No other event closes one, for any task kind: a later working:, done:, or
+# failed: line - even the owning ship's or scout's own completion - leaves the
+# decision open, so a captain call raised mid-task still surfaces after the task
+# finishes and can still be answered through fm-send's --resolve-key. How a
+# finished task's CURRENT STATE reads is a separate rule that status_current_line
+# owns, and it never removes a decision from this set.
 # Who WRITES the closing line is owned elsewhere: the answering firstmate closes
 # at answer time through fm-send's --resolve-key (bin/fm-send.sh header), and a
 # worker self-closes only a blocker that cleared without an answer (bin/fm-brief.sh
@@ -826,8 +830,8 @@ _fm_status_kind() {
   case "$kind" in ship|scout|secondmate) printf '%s' "$kind" ;; *) printf unknown ;; esac
 }
 
-_fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb> <kind>
-  local open=$1 line=$2 resolve=$3 held=$4 kind=$5 verb key note unstamped
+_fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb>
+  local open=$1 line=$2 resolve=$3 held=$4 verb key note unstamped
   # Both colon tests below ask where the head ends, the same question the note
   # and key readers ask, so they read the same unstamped copy those readers do.
   # A worker-written time tag must never decide whether a decision opens or
@@ -848,9 +852,6 @@ _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb
     *) printf '%s' "$open"; return 0 ;;
   esac
   status_line_verb "$line" verb
-  case "$unstamped" in
-    *:*) case "$verb:$kind" in done:ship|done:scout|failed:ship|failed:scout) return 0 ;; esac ;;
-  esac
   case "$verb" in
     needs-decision|blocked|"$resolve"|"$held") ;;
     *) printf '%s' "$open"; return 0 ;;
@@ -875,29 +876,26 @@ _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb
 
 # Fold the WHOLE status stream into the set of decisions still open. Prints one
 # TAB-separated "<key>\t<verb>\t<summary>" line per still-open decision, in
-# most-recently-opened-last order; prints nothing when none are open. Reads the
-# status file, plus its sibling `.meta` for the task kind the terminal rule needs
-# when the caller passes no <kind>; no globals beyond the optional
-# FM_CLASSIFY_RESOLVE_VERB override. This is the durable open-set the fleet
-# snapshot and any point-in-time consumer must use instead of trusting the last
-# status line.
+# most-recently-opened-last order; prints nothing when none are open. Reads only
+# the status file; no globals beyond the optional FM_CLASSIFY_RESOLVE_VERB
+# override. This is the durable open-set the fleet snapshot and any
+# point-in-time consumer must use instead of trusting the last status line.
 # The scan_open_decisions wrapper below enumerates a whole directory rather than
 # a single caller-chosen path, so a status file that is itself a symlink (e.g.
 # escaping the state directory) is rejected outright with a plain [ -L ] check
 # before any read - a cheap builtin, unlike fm_wake_latest_event's O_NOFOLLOW
 # subprocess read, which exists for that function's much narrower payload-driven
 # path resolution rather than this directory-local glob.
-status_open_decisions() {  # <status-file> [<kind>]
-  local f=$1 kind=${2:-} line resolve held open='' verb
+status_open_decisions() {  # <status-file>
+  local f=$1 line resolve held open='' verb
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
-  kind=$(_fm_status_kind "$f" "$kind")
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
   held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
   while IFS= read -r line || [ -n "$line" ]; do
     status_line_verb "$line" verb
     case "$verb" in
-      needs-decision|blocked|done|failed|"$resolve"|"$held")
-        open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held" "$kind")
+      needs-decision|blocked|"$resolve"|"$held")
+        open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held")
         ;;
     esac
   done < "$f"
@@ -905,20 +903,42 @@ status_open_decisions() {  # <status-file> [<kind>]
 }
 
 # Resolve the log's current declaration at one boundary for crew-state consumers.
-# Any decision the fold still holds open wins over unrelated events, and the
-# fold's most recently opened record supplies it; a standing declared wait, then
-# the latest recognized event, stands when nothing is open.
+# A decision still open wins over unrelated events, and the most recently opened
+# one supplies it; a standing declared wait, then the latest recognized event,
+# stands when none applies.
+# A ship's or scout's own colon-bearing done:/failed: line ends its work, so a
+# decision opened BEFORE that line no longer describes where the task is: only a
+# decision opened after the latest such line can supply the current state. A
+# secondmate's terminal event may describe other work, so it never ends one.
+# This is a current-state reading only: every earlier decision stays open in
+# status_open_decisions until its key is closed.
 # Actual run/pane evidence is still reconciled by fm-crew-state.sh.
-status_current_line() {  # <status-file> <kind>
-  local open key verb note current=''
-  open=$(status_open_decisions "$1" "$2")
+status_current_line() {  # <status-file> [<kind>]
+  local f=$1 kind line resolve held since='' verb key note current='' unstamped
+  if [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ]; then
+    kind=$(_fm_status_kind "$f" "${2:-}")
+    resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
+    held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
+    while IFS= read -r line || [ -n "$line" ]; do
+      status_line_verb "$line" verb
+      case "$verb" in
+        done|failed)
+          _fm_status_unstamped "$line" unstamped
+          case "$kind:$unstamped" in ship:*:*|scout:*:*) since='' ;; esac
+          ;;
+        needs-decision|blocked|"$resolve"|"$held")
+          since=$(_fm_decision_fold_line "$since" "$line" "$resolve" "$held")
+          ;;
+      esac
+    done < "$f"
+  fi
   while IFS=$'\t' read -r key verb note; do
     case "$verb" in ?*) current="$verb [key=$key]: $note" ;; esac
   done <<EOF
-$open
+$since
 EOF
-  [ -n "$current" ] || current=$(status_declared_wait_line "$1")
-  [ -n "$current" ] || current=$(last_status_line "$1")
+  [ -n "$current" ] || current=$(status_declared_wait_line "$f")
+  [ -n "$current" ] || current=$(last_status_line "$f")
   printf '%s\n' "$current"
 }
 
@@ -994,37 +1014,31 @@ EOF
 # TRANSITIONS rather than its whole lifetime length - status files are only ever
 # appended to, and this runs per open task on every supervision presentation.
 # The pre-select deliberately over-includes: it takes any line whose leading word
-# could be a fold verb (including the ship/scout terminals, which carry no key
-# token), and the fold alone decides which of them really moves the set. A line
-# whose leading word is followed by neither whitespace, a colon, nor a bracket
-# tag cannot be a transition, because the fold's own declaration guard rejects it.
+# could be a fold verb, and the fold alone decides which of them really moves
+# the set. A line whose leading word is followed by neither whitespace, a colon,
+# nor a bracket tag cannot be a transition, because the fold's own declaration
+# guard rejects it.
 status_key_closing_verb() {  # <status-file> <key>
-  local f=$1 want=$2 line resolve held open='' was verb='' kind event candidates
+  local f=$1 want=$2 line resolve held open='' was verb='' event candidates
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
   [ -n "$want" ] || return 0
-  kind=$(_fm_status_kind "$f")
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
   held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
   candidates=$(grep -E \
-    "^[[:space:]]*(needs-decision|blocked|done|failed|$resolve|$held)[[:space:]:[]" \
+    "^[[:space:]]*(needs-decision|blocked|$resolve|$held)[[:space:]:[]" \
     "$f") || [ "$?" -eq 1 ] || candidates=$(cat "$f")
   while IFS= read -r line || [ -n "$line" ]; do
     status_line_verb "$line" event
-    case "$event:$kind" in
-      done:ship|done:scout|failed:ship|failed:scout) ;;
-      *)
-        case "$event" in
-          needs-decision|blocked|"$resolve"|"$held") ;;
-          *) continue ;;
-        esac
-        if [ "$want" != default ]; then
-          case "$line" in *"[key=$want]"*) ;; *) continue ;; esac
-        fi
-        ;;
+    case "$event" in
+      needs-decision|blocked|"$resolve"|"$held") ;;
+      *) continue ;;
     esac
+    if [ "$want" != default ]; then
+      case "$line" in *"[key=$want]"*) ;; *) continue ;; esac
+    fi
     was=0
     _fm_open_set_has "$open" "$want" && was=1
-    open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held" "$kind")
+    open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held")
     if [ "$was" = 1 ] && ! _fm_open_set_has "$open" "$want"; then
       verb=$event
     fi
@@ -1083,12 +1097,11 @@ EOF
 # of how much new unrelated log content has since been folded in. Only a line the
 # shared fold rule retires removes one.
 #
-# The cursor format is `version` (FM_OPEN_DECISIONS_FOLD_VERSION plus the task
-# kind, as `<n>:<kind>`), `offset`, `ident`, then the folded open set.
+# The cursor format is `version` (FM_OPEN_DECISIONS_FOLD_VERSION), `offset`,
+# `ident`, then the folded open set.
 # FM_OPEN_DECISIONS_FOLD_VERSION must be bumped whenever
 # _fm_decision_fold_line semantics change, so persisted state from an older
-# interpretation is discarded and rebuilt from byte 0; the kind suffix does the
-# same when a task kind changes, because kind changes the fold below.
+# interpretation is discarded and rebuilt from byte 0.
 #
 # Cursor invalidation is deliberately minimal, matching how status files are
 # ACTUALLY used in this repo: every one is created once (`>`) and only ever
@@ -1143,10 +1156,14 @@ _fm_open_decisions_cursor_path() {  # <status-file>
 # malformed worker stamp whose colons used to pose as the head/note separator
 # no longer opens or closes anything; cursors folded under that reading are
 # discarded.
+# 10: a ship's or scout's done/failed line no longer closes any decision, so the
+# fold no longer depends on task kind and the version drops its kind suffix; a
+# cursor that dropped decisions at a terminal line is discarded and refolded,
+# which resurfaces every decision nobody closed.
 # Version 4 was already spent on the bracketed-tag parser change above, and a
 # cursor persisted under that reading predates this one, so it must still be
 # discarded and rebuilt from byte 0 under the new reading.
-FM_OPEN_DECISIONS_FOLD_VERSION=9
+FM_OPEN_DECISIONS_FOLD_VERSION=10
 
 # Portable device:inode identity for the rotation/recreation check below.
 _fm_open_decisions_file_ident() {  # <file> -> strongest available identity
@@ -1221,10 +1238,8 @@ _fm_status_read_span() {  # <status-file> <start-offset> <byte-length>
 status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>]
   local f=$1 captured_end=${2:-} cf offset ident open='' trusted_open='' cursor_data first rest offset_line ident_line
   local version='' size actual_size cur_ident resolve held chunk_file chunk_size line cursor_dirty=0
-  local target_cursor kind fold_version
+  local target_cursor fold_version=$FM_OPEN_DECISIONS_FOLD_VERSION
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
-  kind=$(_fm_status_kind "$f")
-  fold_version="$FM_OPEN_DECISIONS_FOLD_VERSION:$kind"
   cf=$(_fm_open_decisions_cursor_path "$f")
   offset=0
   ident=''
@@ -1314,7 +1329,7 @@ status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>]
     resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
     held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
     while IFS= read -r line || [ -n "$line" ]; do
-      open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held" "$kind")
+      open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held")
     done < "$chunk_file"
     rm -f "$chunk_file"
     offset=$size
@@ -1841,9 +1856,8 @@ EOF
 # a caller explicitly requests a migration snapshot.
 status_open_decisions_cursor_offset() {  # <status-file>
   local f=$1 cf offset=0 ident='' version='' cursor_data first rest open=''
-  local offset_line ident_line cur_ident size fold_version
+  local offset_line ident_line cur_ident size fold_version=$FM_OPEN_DECISIONS_FOLD_VERSION
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 1
-  fold_version="$FM_OPEN_DECISIONS_FOLD_VERSION:$(_fm_status_kind "$f")"
   cf=$(_fm_open_decisions_cursor_path "$f")
   if [ -e "$cf" ] || [ -L "$cf" ]; then
     [ -f "$cf" ] && [ -r "$cf" ] && [ ! -L "$cf" ] || return 1
@@ -2270,16 +2284,14 @@ $1
 EOF
 }
 
-_fm_status_open_decision_origins() {  # <status-file> [<kind>]
+_fm_status_open_decision_origins() {  # <status-file>
   local f=$1 line open='' after key verb note number=0 origins=''
-  local resolve held kind
-  kind=$(_fm_status_kind "$f" "${2:-}")
+  local resolve held
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
   held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
   while IFS= read -r line || [ -n "$line" ]; do
     number=$((number + 1))
-    after=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held" "$kind")
-    [ -n "$after" ] || origins=''
+    after=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held")
     key=$(_fm_decision_key "$line") || { open=$after; continue; }
     verb=$(status_line_verb "$line")
     note=$(status_line_note "$line")
@@ -2364,7 +2376,7 @@ status_span_first_actionable_record() {  # <status-file> <start-offset> [record-
           continue
         }
         if [ "$folded" -eq 0 ]; then
-          origins=$(_fm_status_open_decision_origins "$chunk_file" "$(_fm_status_kind "$f")") || { failed=1; break; }
+          origins=$(_fm_status_open_decision_origins "$chunk_file") || { failed=1; break; }
           folded=1
         fi
         live_line=$(while IFS=$(printf '\t') read -r _key _line; do
