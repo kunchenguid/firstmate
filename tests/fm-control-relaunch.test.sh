@@ -2470,11 +2470,13 @@ test_orca_stopped_relaunch_preserves_work_and_refuses_uncertainty() {
         out=$(run_spawn "$dir" orca-proof --relaunch --harness codex) || rc=$?
       fi
       expect_code 1 "$rc" "Orca $mode must refuse $verb"$'\n'"$out"
-      if [ "$mode" = foreign ] || { [ "$mode" = stale ] && [ "$verb" = control ]; }; then
+      if [ "$mode" = foreign ]; then
         assert_contains "$out" ownership 'a terminal that cannot prove ownership of the recorded worktree must be refused before the transaction opens'
+        case "$out" in *"cannot be recovered through relaunch"*) fail 'a readable foreign worktree must not be reported as an unresolvable handle' ;; esac
       elif [ "$mode" = stale ]; then
         assert_contains "$out" unreadable 'refusal must reach the unreadable-state guard'
         assert_contains "$out" 'cannot be recovered through relaunch' 'an unresolvable handle must be named as unrecoverable'
+        case "$out" in *ownership*) fail 'an unresolvable handle must not be reported as a worktree ownership mismatch' ;; esac
         case "$out" in *"close the old Orca terminal"*) fail 'an unresolvable handle must not prescribe closing a terminal' ;; esac
       else
         if [ "$mode" = ambiguous ]; then

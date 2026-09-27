@@ -1796,10 +1796,18 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
   if [ "$BACKEND" = orca ]; then
     ORCA_WORKTREE_ID=$(fm_meta_get "$RELAUNCH_META" orca_worktree_id)
-    fm_backend_orca_terminal_matches_worktree "$RELAUNCH_TARGET" "$ORCA_WORKTREE_ID" "$RELAUNCH_WT" || {
-      echo "error: the recorded Orca terminal does not prove ownership of task $ID's recorded worktree; preserving the task" >&2
-      exit 1
-    }
+    fm_backend_orca_terminal_matches_worktree "$RELAUNCH_TARGET" "$ORCA_WORKTREE_ID" "$RELAUNCH_WT" && RELAUNCH_ORCA_OWNED=0 || RELAUNCH_ORCA_OWNED=$?
+    case "$RELAUNCH_ORCA_OWNED" in
+      0) ;;
+      2)
+        echo "error: task $ID's Orca endpoint reads 'unreadable'; a relaunch requires a fully stopped old terminal, and $(fm_control_orca_recovery_step unreadable)" >&2
+        exit 1
+        ;;
+      *)
+        echo "error: the recorded Orca terminal does not prove ownership of task $ID's recorded worktree; preserving the task" >&2
+        exit 1
+        ;;
+    esac
   fi
   if [ "$KIND" = secondmate ]; then
     FIRSTMATE_HOME=$(fm_meta_get "$RELAUNCH_META" home)

@@ -473,6 +473,25 @@ test_worktree_and_terminal_helpers_parse_json() {
   pass "Orca lifecycle helpers: register repo, create worktree, create terminal, parse stable ids"
 }
 
+test_terminal_matches_worktree_distinguishes_unreadable_from_foreign() {
+  local wt status expected
+  orca_case terminal-ownership
+  wt="$CASE_DIR/wt"
+  mkdir -p "$wt" "$CASE_DIR/other"
+  printf '{"ok":true,"result":{"terminal":{"handle":"term-1","executionHostId":"local","worktreeId":"repo::%s","worktreePath":"%s"}}}\n' "$wt" "$wt" > "$RESP/1.out"
+  printf '{"ok":true,"result":{"terminal":{"handle":"term-1","executionHostId":"local","worktreeId":"repo::%s","worktreePath":"%s"}}}\n' "$CASE_DIR/other" "$CASE_DIR/other" > "$RESP/2.out"
+  printf '{"ok":false,"error":{"code":"terminal_handle_stale","message":"terminal handle stale"}}\n' > "$RESP/3.out"
+  printf '1\n' > "$RESP/4.exit"
+  printf 'not json\n' > "$RESP/5.out"
+  for expected in 0 1 2 2 2; do
+    PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+      bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_terminal_matches_worktree term-1 "repo::$1" "$1"' "$ROOT" "$wt" 2>/dev/null
+    status=$?
+    [ "$status" -eq "$expected" ] || fail "terminal ownership read $(cat "$RESP/.count") should exit $expected, got $status"
+  done
+  pass "fm_backend_orca_terminal_matches_worktree: 0 for the owning terminal, 1 for a readable foreign worktree, 2 when Orca produces no terminal reading"
+}
+
 test_worktree_create_removes_worktree_when_path_missing() {
   local out status
   orca_case lifecycle-missing-path
@@ -1445,6 +1464,7 @@ test_worktree_path_resolves_id
 test_dispatcher_sources_orca_and_routes_primitives
 test_json_get_ignores_undocumented_terminal_id_shapes
 test_worktree_and_terminal_helpers_parse_json
+test_terminal_matches_worktree_distinguishes_unreadable_from_foreign
 test_worktree_create_removes_worktree_when_path_missing
 test_spawn_preserves_orca_metadata_when_pathless_worktree_cleanup_fails
 test_spawn_writes_orca_metadata_and_launches_harness

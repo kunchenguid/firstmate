@@ -44,14 +44,19 @@ fm_backend_orca_agent_state() {  # <terminal-handle>
 # Verify the recorded worktree identity before creating any replacement, and
 # verify the newly minted terminal belongs to it before delivering a launch.
 # worktreePath is allocation identity, never an existing shell's current cwd.
+# Exit 1 is a successful read proving a different worktree; exit 2 means Orca
+# produced no terminal reading for the handle at all.
 fm_backend_orca_terminal_matches_worktree() {  # <handle> <worktree-id> <path>
   local out
-  out=$(orca terminal show --terminal "$1" --json) || return 1
+  out=$(orca terminal show --terminal "$1" --json) || return 2
   printf '%s' "$out" | node -e '
 const fs = require("fs");
+let d;
+try { d = JSON.parse(fs.readFileSync(0, "utf8")); } catch { process.exit(2); }
+const t = d?.result?.terminal;
+if (d?.ok !== true || !t) process.exit(2);
 try {
-  const d = JSON.parse(fs.readFileSync(0, "utf8")), t = d.result?.terminal;
-  process.exit(d.ok === true && t?.handle === process.argv[1] &&
+  process.exit(t.handle === process.argv[1] &&
     t.executionHostId === "local" && t.worktreeId === process.argv[2] &&
     fs.realpathSync(t.worktreePath) === fs.realpathSync(process.argv[3]) ? 0 : 1);
 } catch { process.exit(1); }

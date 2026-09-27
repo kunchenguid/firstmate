@@ -886,7 +886,7 @@ resolve_relaunch_profile() {
 # refuses outright when any of it cannot be established.
 CHECKPOINT_LINES=()
 safe_checkpoint() {
-  local wt_real wt_top wt_top_real head head_ref head_ref_status status_output dirty children marker child_meta
+  local wt_real wt_top wt_top_real head head_ref head_ref_status status_output dirty children marker child_meta owned
   CHECKPOINT_LINES=()
   [ -n "$WT" ] || die "task $ID has no recorded worktree; refusing to relaunch without a recorded local copy to preserve"
   [ -d "$WT" ] || die "task $ID's recorded worktree $WT is missing; refusing to relaunch and lose track of its work"
@@ -898,8 +898,12 @@ safe_checkpoint() {
     || die "task $ID's recorded worktree $WT is not a worktree root (root is $wt_top); refusing to relaunch against an ambiguous checkout"
   if [ "$BACKEND" = orca ]; then
     fm_backend_source orca || die "could not load the Orca adapter"
-    fm_backend_orca_terminal_matches_worktree "$T" "$(fm_meta_get "$META" orca_worktree_id)" "$WT" \
-      || die "task $ID's Orca terminal does not prove ownership of its recorded worktree; refusing to relaunch"
+    fm_backend_orca_terminal_matches_worktree "$T" "$(fm_meta_get "$META" orca_worktree_id)" "$WT" && owned=0 || owned=$?
+    case "$owned" in
+      0) ;;
+      2) die "task $ID's Orca endpoint reads 'unreadable' and no lifecycle command was sent; $(fm_control_orca_recovery_step unreadable)" ;;
+      *) die "task $ID's Orca terminal does not prove ownership of its recorded worktree; refusing to relaunch" ;;
+    esac
   fi
   if head=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null); then
     :
