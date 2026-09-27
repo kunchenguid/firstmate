@@ -2,7 +2,7 @@
 
 Audience: maintainer verification.
 
-This record supports six active guarantees for promised public replies made through the myfirstmate relay:
+This record supports four active guarantees for promised public replies made through the myfirstmate relay:
 
 1. A promised final reply survives compaction and restart, reconciles from disk alone, and lands in the original thread exactly once.
 2. A home that never opted into the relay pays nothing for any of it.
@@ -25,6 +25,7 @@ bash tests/fm-public-followup.test.sh
 ```
 
 ```
+ok - the suite's seeding never reaches a backlog named by ambient TASKS_AXI_FILE/BACKEND
 ok - outcome text is collapsed to one line, bounded by codepoint, and never corrupts characters
 ok - restart end-to-end: typed result reconciles from disk and delivers one reply to the original thread
 ok - duplicate terminal results, restart replay, and repeated delivery are all no-ops
@@ -34,17 +35,8 @@ ok - a dry-run records no public delivery and leaves the commitment retryable
 ok - a late success receipt closes the exact attempt with no second post, and a mismatched attempt is refused
 ok - typed terminal cleanup clears the legacy link without posting
 ok - a delivery interrupted between post and receipt refuses to repost
-ok - a child home reports typed results but can never become the outward-post owner
 ok - typed delivery refuses to post when its cleanup registration is missing
-ok - local seeding publishes durable parent state before its identity marker
-ok - a lost launch-time parent binding is recovered from the durable local record
-ok - a durable local parent record does not bypass a genuinely missing parent-side registration
-ok - unknown durable parent fields remain forward-compatible
-ok - conflicting live and durable parent bindings fail closed
-ok - unsafe durable parent records fail closed before cleanup
-ok - a NUL-bearing durable parent record fails closed before cleanup
 ok - relay-disabled unmarked teardown runs no public-followup work
-ok - a marked child proceeds without tasks-axi when its parent relay is disabled
 ok - traversal-shaped registrations are rejected before path construction or posting
 ok - pending keeps registrations when tasks-axi returns malformed JSON
 ok - the retained private request context keeps the original thread deliverable after inbox cleanup

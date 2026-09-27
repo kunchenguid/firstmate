@@ -548,12 +548,6 @@ Observed guarantees: a contended presentation lock refused the teardown before t
 
 The same fixtures verified three further boundaries on 2026-07-29: missing or malformed endpoint identity and an unparseable pane presence refused record removal with everything retained; the SIGKILL escalation re-read the exact pane's process information and refused to signal when a different shell pid owned the pane, falling back to the plain close with the original process untouched; and a reposition whose removal then failed on every path restored the exact original workspace order through a second verified move and reported the close as failed.
 
-
-Observed output:
-
-```text
-```
-
 ### Composer and operational input
 
 Real captures verified these active distinctions:
@@ -566,11 +560,6 @@ Real captures verified these active distinctions:
 - Codex 0.154's idle braille starfield rows are composer furniture, with the dated Herdr evidence and refresh command in [Composer classification matrix](#composer-classification-matrix).
 
 `tests/fm-composer-ghost.test.sh`, `tests/fm-composer-lib.test.sh`, and the Herdr composer cases pin the exact captured ANSI bytes.
-The U+2063 operational and routed-request separators were exercised through a real Pi-on-Herdr path; the byte-exact active regression is:
-
-```sh
-FM_SEND_MARKER_HERDR_E2E=1 \
-```
 
 ### Native blocked event
 
