@@ -2415,6 +2415,56 @@ assert_contains "$zp_out" "failed=0" \
 pe "$HZP" retire zeropad-src >/dev/null 2>&1 || true
 pass "a zero-padded launch confirm window is honored as base 10"
 
+# --- an adapter may declare the confirm window its transport needs -----------
+# A launch can take longer than the configured window to prove it took its
+# claim when it crosses a slow or busy transport, and announcing that as a
+# failure wakes firstmate about a source that is in fact working. An adapter
+# may therefore declare the floor its transport needs, and reconcile waits the
+# larger of that floor and FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS. The fixture
+# adapter declares its floor from a file, and a fake `ps` delays the runner
+# before it claims, so the launch is genuinely slow but healthy - the exact
+# situation the incident described.
+HAC="$TMP_ROOT/hac"; new_home "$HAC"
+fm_test_track_procevent_home "$HAC"
+cat > "$ADAPTER_ROOT/bin/fm-procevent-latent.sh" <<'SH'
+#!/usr/bin/env bash
+# Fixture adapter: declares the confirm floor in FM_HOME/state/latent-floor.
+case "${1-}" in
+  launch-confirm-seconds) cat "$FM_HOME/state/latent-floor" ;;
+  *) exit 2 ;;
+esac
+SH
+chmod +x "$ADAPTER_ROOT/bin/fm-procevent-latent.sh"
+AC_TRIGGER="$TMP_ROOT/latent-trigger"
+printf '12\n' > "$HAC/state/latent-floor"
+AC_REAL_PS=$(command -v ps)
+AC_SLOW_BIN=$(fm_fakebin "$TMP_ROOT/latent-slow-bin")
+cat > "$AC_SLOW_BIN/ps" <<SH
+#!/usr/bin/env bash
+sleep 3
+exec "$AC_REAL_PS" "\$@"
+SH
+chmod +x "$AC_SLOW_BIN/ps"
+pe_adapter "$HAC" register latent latent-src -- "$BLOCKER" "$AC_TRIGGER" "latent" >/dev/null
+ac_rc=0
+ac_out=$(PATH="$AC_SLOW_BIN:$PATH" FM_ROOT_OVERRIDE="$ADAPTER_ROOT" \
+  FM_PROCEVENT_UNDER_TEST="$ROOT/bin/fm-procevent.sh" FM_HOME="$HAC" \
+  FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS=1 "$ROOT/bin/fm-procevent.sh" reconcile) || ac_rc=$?
+assert_contains "$ac_out" "started=1" \
+  "a slow but healthy launch under an adapter-declared window was not started: $ac_out"
+assert_contains "$ac_out" "failed=0" \
+  "a slow but healthy launch under an adapter-declared window was reported failed: $ac_out"
+[ "$ac_rc" -eq 0 ] || fail "reconcile exited non-zero for a slow but healthy launch: $ac_out"
+[ "$(launch_failed_wake_count "$HAC" latent-src)" = 0 ] \
+  || fail "a slow but healthy launch produced a false failure wake: $ac_out"
+: > "$AC_TRIGGER"
+for _ in $(seq 1 100); do
+  [ ! -e "$FM_PROCEVENT_CLAIM_ROOT/latent-src.claim" ] && break
+  sleep 0.1
+done
+pe_adapter "$HAC" retire latent-src >/dev/null 2>&1 || true
+pass "an adapter-declared confirm window keeps a slow but healthy launch from a false failure"
+
 # --- an unusable confirm window is refused by name --------------------------
 # A window this command cannot use makes every launch unconfirmable. Reported
 # from inside the confirmation it comes out as a fleet of healthy runners that

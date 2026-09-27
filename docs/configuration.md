@@ -2140,19 +2140,23 @@ The generation's first launch is immediate, later launches share its monotonic p
 
 **Confirm detached launches**
 
-`FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS` (default 3, range 1..600) bounds how long `reconcile` waits for the runners it just started to prove they are running: never less than the configured value, and at most one second more, because the wait is measured on a whole-second clock.
+`FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS` (default 3, range 1..600) is the base window `reconcile` and `ensure-listening` wait for the runners they just started to prove they are running: never less than the configured value, and at most one second more, because the wait is measured on a whole-second clock.
 
+- One more adapter seam lets a source declare the floor its own transport needs: `bin/fm-procevent-<adapter>.sh launch-confirm-seconds` prints whole seconds and exits 0, and the runner waits the larger of that floor and the configured window.
+  A missing command, an error, a non-number, or a value outside 1..600 leaves the configured window in force, so an adapter with no such knowledge needs no change.
+  `bin/fm-procevent-remote-reply.sh` declares a larger floor because its command crosses an SSH transport that a busy or waking remote host can delay past the default window, and its own `FM_REMOTE_REPLY_LAUNCH_CONFIRM_SECONDS` tunes it.
 - Starting a runner is detached and its errors are not visible to the caller, so `reconcile` reports a start only after the source is observed owned or its launch-pacing stamp has advanced or appeared, and reports every unconfirmed launch as `failed=` and a non-zero exit instead.
 - Both signals are durable evidence a runner claimed: ownership is the only evidence a runner still blocked on its source ever shows, and the stamp - written after the claim and before the source command runs, and removed only by registration replacement - covers a runner that claimed, ran and exited between two polls.
 - A healthy launch therefore confirms on the first poll and the window only bounds a launch that has not yet proved itself - one that died before claiming, or one merely too slow to claim inside the window; confirmation cannot tell those apart, and a launch that proves itself on a later cycle closes its failure episode without a retraction wake.
-- All of a cycle's launches share one window, so a home full of sources that cannot start costs the same bounded wait as one.
+- All of a cycle's launches share one window - the largest floor any launched source declares - so a home full of sources that cannot start costs the same bounded wait as one.
 
 **Keep confirmation below the watcher interval**
 
-Keep this window well below `FM_POLL`.
-`bin/fm-watch.sh` runs `reconcile` once per supervision cycle, so a source that cannot start makes every cycle wait up to the confirm window before the rest of that cycle runs.
+Keep the configured window well below `FM_POLL`.
+`bin/fm-watch.sh` runs `reconcile` once per supervision cycle, so a source that cannot start makes every cycle wait up to the window in force before the rest of that cycle runs.
 
-Raising the confirm window lengthens every supervision cycle and delays wake delivery by up to that much.
+Raising the window lengthens every supervision cycle and delays wake delivery by up to that much, and an adapter-declared floor may legitimately exceed `FM_POLL` for a source whose transport needs it.
+A healthy launch still settles on the first poll, so only a launch that has not proved itself spends that time.
 
 **Report launch failures**
 

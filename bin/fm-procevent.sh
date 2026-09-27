@@ -73,8 +73,10 @@
 #            Every launch is counted as `started` only after the source is
 #            observed owned or its launch-pacing stamp has moved, `failed`
 #            otherwise, and any failure also makes this command exit non-zero.
-#            One bounded window covers a whole cycle's launches
-#            (FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS; docs/configuration.md).
+#            One bounded window covers a whole cycle's launches: the largest of
+#            FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS and any floor a launched
+#            source's adapter declares for its own transport
+#            (docs/configuration.md, "Confirm detached launches").
 #            A launch that fails to confirm is also announced as a durable
 #            `check` wake, once per failure episode - keyed by the registration
 #            identity it ran under and ended by a later launch of that source
@@ -394,6 +396,26 @@ adapter_self_announcing() {  # <adapter>
   "$script" self-announcing >/dev/null 2>&1
 }
 
+# Ask an adapter how long a launch of its source may take to prove it took the
+# claim. The adapter is the only party that knows whether its source crosses a
+# slow or busy transport, so this is one more adapter seam of the same kind
+# (see the confirm note above): exit 0 with whole seconds on stdout raises that
+# adapter's confirm window to at least that value, and every other response - a
+# missing command, an error, a non-number, or a value outside the accepted
+# range - leaves the configured window in force, exactly as an adapter with no
+# such knowledge needs. An external registration has no built-in script here
+# and so keeps the configured window.
+adapter_launch_confirm_seconds() {  # <adapter>
+  local script value
+  script=$(adapter_script "$1")
+  [ -f "$script" ] && [ ! -L "$script" ] || return 1
+  value=$("$script" launch-confirm-seconds 2>/dev/null) || return 1
+  case "$value" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$value" -ge "$FM_PROCEVENT_LAUNCH_CONFIRM_MIN_SECONDS" ] || return 1
+  [ "$value" -le "$FM_PROCEVENT_LAUNCH_CONFIRM_MAX_SECONDS" ] || return 1
+  printf '%s\n' "$value"
+}
+
 source_file()  { printf '%s/%s.source\n' "$REG" "$1"; }
 source_field() {  # <source-id> <field>
   sed -n "s/^$2=//p" "$(source_file "$1")" | head -1
@@ -471,6 +493,21 @@ read_adapter() {  # <source-id>
   local f; f=$(source_file "$1")
   [ -f "$f" ] && [ ! -L "$f" ] || return 1
   sed -n 's/^adapter=//p' "$f" | head -1
+}
+
+# The window one source's launch may take to prove itself: the configured window
+# raised to the floor the source's adapter declares when its transport needs
+# longer. A source with no readable adapter, or an adapter that declares
+# nothing, keeps exactly the configured window. The configured value is
+# validated here, so a caller can report an unusable one by name.
+source_launch_confirm_window() {  # <source-id>
+  local id=$1 window adapter floor
+  window=$(fm_procevent_launch_confirm_seconds) || return 1
+  adapter=$(read_adapter "$id" 2>/dev/null || true)
+  if [ -n "$adapter" ] && floor=$(adapter_launch_confirm_seconds "$adapter"); then
+    [ "$((10#$floor))" -le "$((10#$window))" ] || window=$floor
+  fi
+  printf '%s\n' "$window"
 }
 
 # Read the stored argv into the ARGV array. One argument per line after the
@@ -1749,9 +1786,19 @@ launch_entry_listed() {  # <entry> <newline-separated entries>
 # Every launch shares ONE window rather than taking a window each, so a whole
 # fleet of failing sources costs a watcher cycle the same bounded wait as one.
 confirm_launched_runners() {  # <source-id><TAB><registration-identity><TAB><launch-stamp-before>...
-  local deadline window entry id rest identity before state stamp mark
+  local deadline window entry id rest identity before state stamp mark candidate
   local -a pending=("$@") remaining=()
   window=$(fm_procevent_launch_confirm_seconds) || return 1
+  # A launch may belong to an adapter whose transport is slower than the
+  # configured window, so the whole cycle's shared window is the largest floor
+  # any launched source declares. A healthy launch still settles on the first
+  # poll and only a launch that has not proved itself spends any of it.
+  for entry in "${pending[@]+"${pending[@]}"}"; do
+    [ -n "$entry" ] || continue
+    id=${entry%%$'\t'*}
+    candidate=$(source_launch_confirm_window "$id") || continue
+    [ "$((10#$candidate))" -le "$((10#$window))" ] || window=$candidate
+  done
   # A zero-padded window is a valid value to its validator, which reads base 10;
   # reading it as octal here would silently shorten the window or abort this
   # subshell under `set -u` and report every launch as failed.
@@ -1832,7 +1879,7 @@ cmd_ensure_listening() {
   local id=${1-} identity before mark stamp deadline window started_once=0 listening
   [ "$#" -eq 1 ] || usage
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
-  window=$(fm_procevent_launch_confirm_seconds) \
+  window=$(source_launch_confirm_window "$id") \
     || die "FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS must be whole seconds from $FM_PROCEVENT_LAUNCH_CONFIRM_MIN_SECONDS to $FM_PROCEVENT_LAUNCH_CONFIRM_MAX_SECONDS"
   [ -f "$(source_file "$id")" ] && [ ! -L "$(source_file "$id")" ] \
     || die "source is not registered: $id"
