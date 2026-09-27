@@ -59,6 +59,18 @@
 # caller has not deliberately chosen otherwise - which is exactly the measured
 # 2026-09-26 incident, an empty config plus no SHELL.
 #
+# SSH_AUTH_SOCK, DISPLAY, WAYLAND_DISPLAY, XAUTHORITY, XDG_RUNTIME_DIR and
+# XDG_SESSION_TYPE are the one group here that are NOT host facts: they are
+# handles owned by a login session, and they can go stale the moment that
+# session ends, on a server that outlives it. A pane's login shell does not
+# correct them - nothing in a profile resets SSH_AUTH_SOCK, and nothing resets
+# a forwarded DISPLAY. Concretely: a server born from an SSH shell keeps that
+# connection's agent socket for its whole life, so an agent's `git push` in
+# any of its panes silently loses agent-backed authentication and falls back
+# to on-disk keys. They are forwarded anyway, because a pane needs a display
+# and a runtime directory to be useful and absent handles break more workflows
+# today than stale ones do. That is a deliberate trade, not a closed hazard.
+#
 # Only enumerated names are forwarded, never a glob. The HERDR_* names herdr
 # injects per PANE (HERDR_ENV, HERDR_PANE_ID, HERDR_TAB_ID, HERDR_WORKSPACE_ID,
 # HERDR_SOCKET_PATH) are the LAUNCHER's own pane identity and are deliberately

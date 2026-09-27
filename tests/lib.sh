@@ -548,8 +548,12 @@ fm_test_passwd_field() {  # <field> <darwin-key>
     printf '%s\n' "$line" | cut -d: -f"$field"
     return 0
   fi
-  if command -v dscl >/dev/null 2>&1; then
-    dscl . -read "/Users/$(id -un)" "$key" 2>/dev/null | sed -n "s/^$key: //p" | head -1
+  # Bounded exactly like the read this function is the oracle for
+  # (bin/fm-herdr-launch-env-lib.sh), so a wedged Directory Services makes the
+  # suites fail on an empty answer instead of hanging forever.
+  if command -v dscl >/dev/null 2>&1 && command -v perl >/dev/null 2>&1; then
+    perl -e '$SIG{ALRM} = sub { exit 124 }; alarm 2; exec @ARGV' \
+      dscl . -read "/Users/$(id -un)" "$key" 2>/dev/null | sed -n "s/^$key: //p" | head -1
   fi
 }
 

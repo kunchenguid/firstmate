@@ -401,14 +401,20 @@ fm_backend_herdr_cli() {  # <session> <herdr-subcommand-and-args...>
   # stderr is buffered (stdout streams untouched) so a protocol_mismatch
   # refusal can be recognized and retried once on a compatible client; see
   # "client selection" below. A failed command's stderr is replayed verbatim.
-  # The long-lived `server` launch is exec'd straight through: buffering its
-  # stderr would hold this call open for the server's whole lifetime. No
-  # production path reaches this branch today - both server launches go through
-  # bin/fm-herdr-launch-env-lib.sh's `/usr/bin/env -i` assembly instead - so it
-  # is kept only so a future `server` subcommand cannot silently hang here.
+  # `server` is refused, not routed. This was the one surviving path in the
+  # adapter that accepted it, and what it did - start a long-lived server with
+  # the caller's whole inherited environment - is the precise shape this
+  # boundary exists to forbid: it would re-leak FM_CREW_STATE_META_OVERRIDE,
+  # FM_CREW_STATE_STATUS_OVERRIDE and FM_SNAPSHOT_CACHE_DIR into a process that
+  # outlives its caller, and with no SHELL it would hand every pane /bin/sh
+  # again, silently. fm_herdr_lab_cli already refuses `server` the same way.
+  # The check stays written out here rather than folded into the generic path
+  # for the original reason: buffering a long-lived launch's stderr would hold
+  # this call open for the server's whole lifetime, so `server` must never
+  # reach the buffered call below even to fail there.
   if [ "${1:-}" = server ]; then
-    HERDR_SESSION="$session" "$client_bin" "$@" --session "$session"
-    return $?
+    echo "error: fm_backend_herdr_cli forbids starting a herdr server; use fm_backend_herdr_server_ensure, which launches it through the shared clean environment" >&2
+    return 1
   fi
   failed_bin=$client_bin
   { err=$(HERDR_SESSION="$session" "$failed_bin" "$@" --session "$session" 2>&1 1>&3 3>&-) || rc=$?; } 3>&1

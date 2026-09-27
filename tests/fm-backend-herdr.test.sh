@@ -879,8 +879,8 @@ if [ "${1:-} ${2:-}" = "status --json" ]; then
   else
     printf '{"client":{"version":"0.8.2","protocol":20},"server":{"running":true,"protocol":22,"compatible":false}}\n'
   fi
-elif [ "$session" = fresh ] && [ "${1:-}" = server ]; then
-  printf 'path-default-server\n'
+elif [ "$session" = fresh ] && [ "${1:-}" = workspace ]; then
+  printf 'path-default-workspace\n'
 elif [ "$session" = modern ] && [ -e "$FM_HERDR_PAIR_DIR/switched" ]; then
   printf 'legacy\n'
 else
@@ -900,8 +900,8 @@ if [ "${1:-} ${2:-}" = "status --json" ]; then
   else
     printf '{"client":{"version":"0.9.0","protocol":22},"server":{"running":true,"protocol":22,"compatible":true}}\n'
   fi
-elif [ "$session" = fresh ] && [ "${1:-}" = server ]; then
-  printf 'selected-server\n'
+elif [ "$session" = fresh ] && [ "${1:-}" = workspace ]; then
+  printf 'selected-workspace\n'
 elif [ "$session" = modern ] && [ ! -e "$FM_HERDR_PAIR_DIR/switched" ]; then
   printf 'modern\n'
 else
@@ -913,18 +913,36 @@ SH
   out=$(run_with_clients "$dir" "$dir/stale:$dir/current" \
     'fm_backend_herdr_cli modern pane get w1:p1 > "$FM_HERDR_PAIR_DIR/modern.out" || exit 1
      fm_backend_herdr_cli fresh status --json > "$FM_HERDR_PAIR_DIR/fresh-status.out" || exit 1
-     fm_backend_herdr_cli fresh server > "$FM_HERDR_PAIR_DIR/server.out" || exit 1
+     fm_backend_herdr_cli fresh workspace list > "$FM_HERDR_PAIR_DIR/fresh.out" || exit 1
      touch "$FM_HERDR_PAIR_DIR/switched"
      fm_backend_herdr_cli modern pane get w1:p1 > "$FM_HERDR_PAIR_DIR/legacy.out" || exit 1
-     printf "%s|%s|%s|%s|%s" "$(cat "$FM_HERDR_PAIR_DIR/modern.out")" "$(jq -r .server.running "$FM_HERDR_PAIR_DIR/fresh-status.out")" "$(cat "$FM_HERDR_PAIR_DIR/server.out")" "$(cat "$FM_HERDR_PAIR_DIR/legacy.out")" "${FM_BACKEND_HERDR_BIN:-PATH-default}"')
-  [ "$out" = 'modern|false|path-default-server|legacy|PATH-default' ] \
+     printf "%s|%s|%s|%s|%s" "$(cat "$FM_HERDR_PAIR_DIR/modern.out")" "$(jq -r .server.running "$FM_HERDR_PAIR_DIR/fresh-status.out")" "$(cat "$FM_HERDR_PAIR_DIR/fresh.out")" "$(cat "$FM_HERDR_PAIR_DIR/legacy.out")" "${FM_BACKEND_HERDR_BIN:-PATH-default}"')
+  [ "$out" = 'modern|false|path-default-workspace|legacy|PATH-default' ] \
     || fail "a selected client should stay scoped to its session while forced reselection still returns to the PATH default, got: $out"
-  assert_contains "$(cat "$dir/stale.log")" 'server --session fresh' "a stopped second session should start with the PATH-default client"
-  assert_not_contains "$(cat "$dir/current.log")" 'server --session fresh' "another session's selected client must not start the stopped session"
+  assert_contains "$(cat "$dir/stale.log")" 'workspace list --session fresh' "a second session with a stopped server should resolve to the PATH-default client"
+  assert_not_contains "$(cat "$dir/current.log")" 'workspace list --session fresh' "another session's selected client must not answer for the stopped session"
   [ "$(grep -c 'pane get w1:p1' "$dir/current.log")" -eq 2 ] \
     || fail "the selected client should be retried after its own server compatibility changes: $(cat "$dir/current.log")"
   assert_contains "$(cat "$dir/stale.log")" 'pane get w1:p1' "the changed session call should retry on the newly compatible PATH-default client"
   pass "herdr client selection: selected clients remain scoped to their session"
+}
+
+# The adapter's only remaining `server` acceptance point. Starting a
+# long-lived server here would hand it the caller's whole inherited
+# environment, which is exactly what fm_backend_herdr_server_ensure's `env -i`
+# assembly exists to prevent, so the wrapper refuses instead of routing.
+test_cli_refuses_to_start_a_long_lived_server() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/cli-server-refusal"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_cli fmtest server' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "fm_backend_herdr_cli accepted 'server', which starts a long-lived server carrying the caller's whole environment"
+  assert_contains "$out" "forbids starting a herdr server" "the refusal did not name what is forbidden"
+  assert_contains "$out" "fm_backend_herdr_server_ensure" "the refusal did not name what to use instead"
+  [ ! -s "$log" ] || fail "the refusal still reached the herdr client: $(cat "$log")"
+  pass "fm_backend_herdr_cli: refuses to start a long-lived server instead of launching one with the caller's inherited environment"
 }
 
 # shellcheck disable=SC2016
@@ -5878,6 +5896,7 @@ test_projection_reclaim_rollback_refuses_a_stale_registration
 test_busy_state_never_reports_a_shell_only_pane_busy
 test_cli_caches_the_selected_client_within_a_process
 test_cli_scopes_the_selected_client_to_its_session
+test_cli_refuses_to_start_a_long_lived_server
 test_cli_unrelated_failure_never_triggers_reselection
 test_cli_single_client_pays_no_selection_read
 test_client_status_reads_both_status_shapes
