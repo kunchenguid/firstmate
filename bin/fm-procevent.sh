@@ -1381,7 +1381,9 @@ EOF
         fm_procevent_source_lock_release "$id"
         die "cannot retain the adapter readiness boundary: $id"
       }
-      FM_PROCEVENT_ADAPTER_READY_FD=3 "${ARGV[@]}" >&5 5>&- 4<&- 2>/dev/null &
+      FM_PROCEVENT_ADAPTER_READY_FD=3 \
+        FM_PROCEVENT_ADAPTER_OWNER="firstmate-$CLAIM_TOKEN" \
+        "${ARGV[@]}" >&5 5>&- 4<&- 2>/dev/null &
     else
       "${ARGV[@]}" >&5 5>&- 4<&- 2>/dev/null &
     fi

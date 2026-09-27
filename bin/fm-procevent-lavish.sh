@@ -361,10 +361,21 @@ poll_iteration_floor_wait() {
   ' "$1" "$2"
 }
 
+poll_owner_is_listening() {
+  lavish-axi 2>/dev/null | awk -v owner="$1" '
+    BEGIN { suffix = "," owner }
+    length($0) >= length(suffix) && substr($0, length($0) - length(suffix) + 1) == suffix {
+      found = 1
+      exit
+    }
+    END { exit !found }
+  '
+}
+
 cmd_poll() {
   local artifact=${1-} delay attempt=0 response status_file cleanup_command rc filter_rc iteration_started
   local pipeline_status pipeline_pid reply_file='' ready_fd=${FM_PROCEVENT_ADAPTER_READY_FD-}
-  local reply_text='' reply_pending=0
+  local poll_owner=${FM_PROCEVENT_ADAPTER_OWNER-} reply_text='' reply_pending=0
   [ -n "$artifact" ] || usage
   if [ "$#" -eq 3 ] && [ "${2-}" = --agent-reply-file ]; then
     reply_file=$3
@@ -411,23 +422,35 @@ cmd_poll() {
     fi
     if [ -n "$ready_fd" ]; then
       [ "$ready_fd" = 3 ] || die "invalid process-event adapter readiness boundary"
+      case "$poll_owner" in ''|*[!A-Za-z0-9._-]*) die "invalid process-event adapter owner" ;; esac
       : > "$status_file" || die "cannot stage the poll status"
       exec 6> "$status_file" || die "cannot retain the poll status"
       if [ "$reply_pending" -eq 1 ]; then
-        { lavish-axi poll "$artifact" --agent-reply "$reply_text"; printf '%s\n' "$?" >&6; } \
+        { lavish-axi poll "$artifact" --owner "$poll_owner" --agent-reply "$reply_text"; printf '%s\n' "$?" >&6; } \
           | poll_response_filter "$response" &
       else
-        { lavish-axi poll "$artifact"; printf '%s\n' "$?" >&6; } \
+        { lavish-axi poll "$artifact" --owner "$poll_owner"; printf '%s\n' "$?" >&6; } \
           | poll_response_filter "$response" &
       fi
       pipeline_pid=$!
-      printf 'ready\n' >&3 || die "cannot confirm adapter readiness"
-      exec 3>&-
-      ready_fd=
+      while kill -0 "$pipeline_pid" 2>/dev/null; do
+        if poll_owner_is_listening "$poll_owner"; then
+          printf 'ready\n' >&3 || die "cannot confirm adapter readiness"
+          exec 3>&-
+          ready_fd=
+          break
+        fi
+        sleep 0.01
+      done
       wait "$pipeline_pid"
       filter_rc=$?
       exec 6>&-
       IFS= read -r rc < "$status_file" || die "cannot read the poll status"
+      if [ -n "$ready_fd" ] && [ "$rc" -eq 0 ]; then
+        printf 'ready\n' >&3 || die "cannot confirm adapter readiness"
+        exec 3>&-
+        ready_fd=
+      fi
     else
       if [ "$reply_pending" -eq 1 ]; then
         lavish-axi poll "$artifact" --agent-reply "$reply_text" | poll_response_filter "$response"

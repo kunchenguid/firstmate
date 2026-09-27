@@ -758,21 +758,37 @@ FREPLY_LOG="$TMP_ROOT/lavish-firstmate-replies"
 FREPLY_TRIGGER1="$TMP_ROOT/lavish-firstmate-trigger1"
 FREPLY_TRIGGER2="$TMP_ROOT/lavish-firstmate-trigger2"
 FREPLY_TRIGGER3="$TMP_ROOT/lavish-firstmate-trigger3"
-export FREPLY_COUNT FREPLY_LOG FREPLY_TRIGGER1 FREPLY_TRIGGER2 FREPLY_TRIGGER3
+FREPLY_OWNERS="$TMP_ROOT/lavish-firstmate-reply-owners"
+export FREPLY_COUNT FREPLY_LOG FREPLY_TRIGGER1 FREPLY_TRIGGER2 FREPLY_TRIGGER3 FREPLY_OWNERS
 cat > "$FREPLY_BIN/lavish-axi" <<'SH'
 #!/usr/bin/env bash
+if [ "$#" -eq 0 ]; then
+  for owner_file in "$FREPLY_OWNERS"/*; do
+    [ -f "$owner_file" ] || continue
+    printf '  %s,open,"",0,%s\n' "$(cat "$owner_file")" "${owner_file##*/}"
+  done
+  exit
+fi
+artifact=$2
 n=$(cat "$FREPLY_COUNT" 2>/dev/null || echo 0)
 n=$((n + 1))
 printf '%s\n' "$n" > "$FREPLY_COUNT"
-reply=
+reply= owner=
 shift 2
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --agent-reply) reply=$2; shift 2 ;;
+    --owner) owner=$2; shift 2 ;;
     *) shift ;;
   esac
 done
+if [ -n "$reply" ]; then sleep 0.2; fi
 printf 'poll%s reply: %s\n' "$n" "$reply" >> "$FREPLY_LOG"
+if [ -n "$owner" ]; then
+  mkdir -p "$FREPLY_OWNERS"
+  printf '%s\n' "$artifact" > "$FREPLY_OWNERS/$owner"
+  trap 'rm -f -- "$FREPLY_OWNERS/$owner"' EXIT
+fi
 trigger_var=FREPLY_TRIGGER$n
 trigger=${!trigger_var}
 while [ ! -e "$trigger" ]; do sleep 0.02; done
@@ -915,7 +931,8 @@ assert_contains "$(cat "$TMP_ROOT/firstmate-reply-2-arm.out")" "armed: $freply_i
   "second FIFO reply did not confirm its own listener"
 assert_not_contains "$(cat "$TMP_ROOT/firstmate-reply-2-arm.out")" "still-listening" \
   "second FIFO reply reported the superseded listener as successful"
-wait_for_lines "$FREPLY_LOG" 3 || fail "second FIFO reply listener did not start"
+assert_grep 'poll3 reply: Second FIFO response.' "$FREPLY_LOG" \
+  "second FIFO re-arm returned before Lavish accepted its reply request"
 assert_present "$HFREPLY/state/procevent-inbox/$freply_id.2.handled" \
   "second FIFO reply did not acknowledge its capture"
 assert_grep 'poll3 reply: Second FIFO response.' "$FREPLY_LOG" \
@@ -937,21 +954,37 @@ LEGACY_COUNT="$TMP_ROOT/lavish-firstmate-live-legacy-count"
 LEGACY_LOG="$TMP_ROOT/lavish-firstmate-live-legacy-log"
 LEGACY_TRIGGER1="$TMP_ROOT/lavish-firstmate-live-legacy-trigger1"
 LEGACY_TRIGGER3="$TMP_ROOT/lavish-firstmate-live-legacy-trigger3"
-export LEGACY_COUNT LEGACY_LOG LEGACY_TRIGGER1 LEGACY_TRIGGER3
+LEGACY_OWNERS="$TMP_ROOT/lavish-firstmate-live-legacy-owners"
+export LEGACY_COUNT LEGACY_LOG LEGACY_TRIGGER1 LEGACY_TRIGGER3 LEGACY_OWNERS
 cat > "$LEGACY_BIN/lavish-axi" <<'SH'
 #!/usr/bin/env bash
+if [ "$#" -eq 0 ]; then
+  for owner_file in "$LEGACY_OWNERS"/*; do
+    [ -f "$owner_file" ] || continue
+    printf '  %s,open,"",0,%s\n' "$(cat "$owner_file")" "${owner_file##*/}"
+  done
+  exit
+fi
+artifact=$2
 n=$(cat "$LEGACY_COUNT" 2>/dev/null || echo 0)
 n=$((n + 1))
 printf '%s\n' "$n" > "$LEGACY_COUNT"
-reply=
+reply= owner=
 shift 2
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --agent-reply) reply=$2; shift 2 ;;
+    --owner) owner=$2; shift 2 ;;
     *) shift ;;
   esac
 done
+if [ -n "$reply" ]; then sleep 0.2; fi
 printf 'poll%s reply: %s\n' "$n" "$reply" >> "$LEGACY_LOG"
+if [ -n "$owner" ]; then
+  mkdir -p "$LEGACY_OWNERS"
+  printf '%s\n' "$artifact" > "$LEGACY_OWNERS/$owner"
+  trap 'rm -f -- "$LEGACY_OWNERS/$owner"' EXIT
+fi
 case "$n" in
   1) trigger=$LEGACY_TRIGGER1 ;;
   3) trigger=$LEGACY_TRIGGER3 ;;
@@ -1006,9 +1039,32 @@ pass "live legacy listener hands off to the reply generation"
 HFACKFAIL="$TMP_ROOT/hfackfail"; new_home "$HFACKFAIL"
 ACKFAIL_BIN=$(fm_fakebin "$TMP_ROOT/lavish-firstmate-ack-fail-stub")
 ACKFAIL_COUNT="$TMP_ROOT/lavish-firstmate-ack-fail-count"
-export ACKFAIL_COUNT
+ACKFAIL_OWNERS="$TMP_ROOT/lavish-firstmate-ack-fail-owners"
+export ACKFAIL_COUNT ACKFAIL_OWNERS
 cat > "$ACKFAIL_BIN/lavish-axi" <<'SH'
 #!/bin/sh
+if [ "$#" -eq 0 ]; then
+  for owner_file in "$ACKFAIL_OWNERS"/*; do
+    [ -f "$owner_file" ] || continue
+    printf '  %s,open,"",0,%s\n' "$(cat "$owner_file")" "${owner_file##*/}"
+  done
+  exit
+fi
+artifact=$2
+owner=
+shift 2
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --owner) owner=$2; shift 2 ;;
+    --agent-reply) shift 2 ;;
+    *) shift ;;
+  esac
+done
+if [ -n "$owner" ]; then
+  mkdir -p "$ACKFAIL_OWNERS"
+  printf '%s\n' "$artifact" > "$ACKFAIL_OWNERS/$owner"
+  trap 'rm -f -- "$ACKFAIL_OWNERS/$owner"' EXIT
+fi
 n=$(cat "$ACKFAIL_COUNT" 2>/dev/null || echo 0)
 n=$((n + 1))
 printf '%s\n' "$n" > "$ACKFAIL_COUNT"
@@ -1051,20 +1107,35 @@ NOREPLY_COUNT="$TMP_ROOT/lavish-firstmate-no-reply-count"
 NOREPLY_LOG="$TMP_ROOT/lavish-firstmate-no-reply-log"
 NOREPLY_TRIGGER1="$TMP_ROOT/lavish-firstmate-no-reply-trigger1"
 NOREPLY_TRIGGER2="$TMP_ROOT/lavish-firstmate-no-reply-trigger2"
-export NOREPLY_COUNT NOREPLY_LOG NOREPLY_TRIGGER1 NOREPLY_TRIGGER2
+NOREPLY_OWNERS="$TMP_ROOT/lavish-firstmate-no-reply-owners"
+export NOREPLY_COUNT NOREPLY_LOG NOREPLY_TRIGGER1 NOREPLY_TRIGGER2 NOREPLY_OWNERS
 cat > "$NOREPLY_BIN/lavish-axi" <<'SH'
 #!/usr/bin/env bash
+if [ "$#" -eq 0 ]; then
+  for owner_file in "$NOREPLY_OWNERS"/*; do
+    [ -f "$owner_file" ] || continue
+    printf '  %s,open,"",0,%s\n' "$(cat "$owner_file")" "${owner_file##*/}"
+  done
+  exit
+fi
+artifact=$2
 n=$(cat "$NOREPLY_COUNT" 2>/dev/null || echo 0)
 n=$((n + 1))
 printf '%s\n' "$n" > "$NOREPLY_COUNT"
-reply=
+reply= owner=
 shift 2
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --agent-reply) reply=$2; shift 2 ;;
+    --owner) owner=$2; shift 2 ;;
     *) shift ;;
   esac
 done
+if [ -n "$owner" ]; then
+  mkdir -p "$NOREPLY_OWNERS"
+  printf '%s\n' "$artifact" > "$NOREPLY_OWNERS/$owner"
+  trap 'rm -f -- "$NOREPLY_OWNERS/$owner"' EXIT
+fi
 printf 'poll%s reply: %s\n' "$n" "$reply" >> "$NOREPLY_LOG"
 trigger_var=NOREPLY_TRIGGER$n
 trigger=${!trigger_var}
