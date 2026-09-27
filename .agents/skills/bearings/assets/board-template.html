@@ -718,7 +718,7 @@ __FM_BEARINGS_BOARD_DATA__
     } else {
       head.appendChild(el("span", "bb-pick-spacer"));
     }
-    var hasContext = !!(t.about || !t.dispatchable || t.filed || t.link || t.report_path);
+    var hasContext = !!(t.about || t.filed || t.link || t.report_path);
     var details = el(hasContext ? "details" : "div", "bb-charted-card__details");
     var summary = el(hasContext ? "summary" : "div", "bb-charted-card__summary" + (hasContext ? "" : " bb-charted-card__summary--static"));
     var main = el("div", "bb-row__main");

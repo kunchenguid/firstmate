@@ -149,7 +149,7 @@ Default fields: schema, home, generated, prs, in_flight{id,kind,state,repo,name,
   secondmates{id,state,doing,provenance,freshness,age_seconds,contradiction,reason},
   secondmate_reconcile{id,spawn_gen,host,kind,ids},
   decisions_open{id,key,verb,summary,owner}, landed{id,what,artifact,owner},
-  gates{id,title,blocked_by,reason,owner,filed,pr_url?,report_url?,report_path?},
+  gates{id,title,blocked_by,reason,owner,filed,pr_url?,report_path?},
   reports{id,path}, recorded_prs{id,url},
   unhealthy_endpoints{...} (only when non-empty), omitted{surface,reveal}.
 Default gates are selected newest filed first before their bound; undated gates
@@ -433,9 +433,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
      blocked_by:((.unresolved_blocker_ids // []) | if length > 0 then join(",") else "-" end | trunc(120)),
      reason:(hold_gate_reason | trunc(40)), owner:$owner,
      filed:((.since // null) | trunc(40)),
-     pr_url:(.pr_url // null), report_url:(.report_url // ((.links // [])
-       | map(select(startswith("https://") and (test("/pull/[0-9]+") | not))) | .[0] // null)),
-     report_path:(.report_path // null)};
+     pr_url:(.pr_url // null), report_path:(.report_path // null)};
   def round_robin_landed($n):
     . as $groups
     | [range(0; (($groups | map(length) | max) // 0)) as $i

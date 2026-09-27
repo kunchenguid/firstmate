@@ -252,29 +252,28 @@ test_charted_cards_show_context_and_preserve_dispatch_rules() {
     {"id":"warning","repo":"sample","title":"Inventory warning","reason":"","dispatchable":false,"kind":"warning"},
     {"id":"report","repo":"sample","title":"Report wait","reason":"pending","dispatchable":false,
      "report_path":"data/report/report.md"},
-    {"id":"report-url","repo":"sample","title":"Published report","reason":"pending","dispatchable":false,
-     "link":"https://reports.example.test/first","report_path":"data/report/report.md"},
     {"id":"secondmate","repo":"sample","title":"Remote wait","reason":"pending","dispatchable":false}
   ]')
   printf '%s' "$out" | jq -e '
-    (.charted | length) == 7 and all(.charted[]; .expandable)
-      and (.charted[0] | .pickable and .context.about == "Add the customer view"
+    (.charted | length) == 6
+      and (.charted[0] | .expandable and .pickable and .context.about == "Add the customer view"
         and .context.filed == "2026-08-01"
         and .link == "https://github.com/example/sample/pull/7"
         and (.context | has("waiting on") | not) and (.badges | length) == 0)
-      and (.charted[1] | (.pickable | not) and (.sub | contains("blocked on prep"))
+      and (.charted[1] | .expandable and (.pickable | not) and (.sub | contains("blocked on prep"))
         and .context["waiting on"] == "blocked on prep"
         and .context.about == "Depends on the migration")
-      and (.charted[2] | (.pickable | not) and .context["waiting on"] == "until Friday")
-      and (.charted[3] | (.pickable | not) and .context["waiting on"] == "Needs repair"
+      and (.charted[2] | (.expandable | not) and (.pickable | not)
+        and (.sub | contains("until Friday")) and .context == {})
+      and (.charted[3] | (.expandable | not) and (.pickable | not)
+        and (.sub | contains("Needs repair")) and .context == {}
         and [.badges[].text] == ["needs repair"])
-      and (.charted[4] | .context.report == "data/report/report.md" and .link == "")
-      and (.charted[5] | .link == "https://reports.example.test/first"
-        and (.context | has("report") | not))
-      and (.charted[6] | (.context | has("about") | not))
+      and (.charted[4] | .expandable and .context.report == "data/report/report.md" and .link == "")
+      and (.charted[5] | (.expandable | not) and (.context | has("about") | not)
+        and (.sub | contains("pending")))
   ' >/dev/null || fail "charted cards lost context, report text or dispatch behavior: $out"
-  [ "$(charted_next_count "$out")" = 6 ] || fail "charted cards changed the queued tally: $out"
-  pass "charted cards expand into context and keep dispatch eligibility and warning counts"
+  [ "$(charted_next_count "$out")" = 5 ] || fail "charted cards changed the queued tally: $out"
+  pass "charted cards expand only with context and keep dispatch eligibility and warning counts"
 }
 
 test_charted_next_reads_newest_filed_first() {
