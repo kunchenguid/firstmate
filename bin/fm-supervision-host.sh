@@ -14,8 +14,9 @@
 # (bin/fm-turnend-guard-cursor.sh), the OpenCode TUI plugin
 # (.opencode/plugins/fm-primary-watch-arm.js), the omp watch extension
 # (.omp/extensions/fm-primary-omp-watch.ts), Grok's model-owned background arm
-# (docs/supervision-protocols/grok.md), and Codex's foreground checkpoint
-# (bin/fm-watch-checkpoint.sh). To that owner it IS an arm: it prints the
+# (docs/supervision-protocols/grok.md), Codex's foreground checkpoint
+# (bin/fm-watch-checkpoint.sh), and Codex's idle supervisor
+# (bin/fm-codex-idle-continuity.sh). To that owner it IS an arm: it prints the
 # arm's own lines and exits only when main is needed, and stays parked across
 # every close it handled itself. Each owner passes its harness as
 # FM_SUPERVISION_HOST_PRIMARY, which the engine carries as the primary pin.

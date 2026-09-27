@@ -168,9 +168,10 @@ for f in "$ROOT"/bin/*; do ln -s "$f" "$STUB/bin/${f##*/}"; done
 rm "$STUB/bin/fm-watch-arm.sh"
 cat > "$STUB/bin/fm-watch-arm.sh" <<EOF
 #!/bin/sh
-[ "\${1:-}" = --stop ] && exit 0
+[ "\${1:-}" = --stop ] && { printf 'x\n' >> '$STUB/stops'; exit 0; }
 printf 'x\n' >> '$STUB/arms'
 case "\$(cat '$STUB/mode')" in
+  away) : > '$SSTATE/.afk'; printf 'watcher: started pid=1 (beacon fresh)\nsignal: demo away close\n' ;;
   handover) printf 'watcher: attached pid=1 (beacon 0s)\nwatcher: FAILED - cycle ended without an actionable reason\n' ;;
   taken) printf 'watcher: started pid=1 (beacon fresh)\nwatcher: FAILED - watcher cycle exited 143 without an actionable reason\n' ;;
   broken) printf 'watcher: FAILED - no live watcher with a fresh beacon\n' ;;
@@ -224,6 +225,61 @@ stub_stop
 wait_until 75 at_least_arms 6 || fail "a successful checkpoint did not re-enable idle continuity"
 wait_until 75 test ! -d "$SLOCK" || fail "the re-enabled supervisor never gave up on the broken watcher"
 [ "$(giveups)" -eq 2 ] || fail "the next failure episode queued $(giveups) give-up checks in total instead of 2"
+printf 'ok - a broken watcher queues one give-up check per failure episode, and a successful checkpoint ends the episode\n'
+
+rm -f "$SSTATE/.codex-idle-continuity-failure-notified"
+printf 'away\n' > "$STUB/mode"
+: > "$STUB/arms"
+: > "$STUB/queue"
+: > "$STUB/stops"
+stub_stop
+wait_until 75 at_least_arms 1 || fail "the away-mode case never armed"
+wait_until 75 test ! -d "$SLOCK" || fail "away mode that started mid-cycle did not end the supervisor"
+[ ! -s "$STUB/queue" ] || fail "a close that returned in away mode reached the thread: $(cat "$STUB/queue")"
+[ ! -s "$STUB/stops" ] || fail "the supervisor stopped the watcher the away daemon owns"
+[ "$(arms)" -eq 1 ] || fail "the supervisor armed again in away mode: $(arms) arms"
+rm -f "$SSTATE/.afk"
+printf 'ok - a close that returns after away mode started is not queued and leaves the watcher alone\n'
+
+HOST_STUB="$STUB/host-calls"
+rm "$STUB/bin/fm-supervision-host.sh"
+cat > "$STUB/bin/fm-supervision-host.sh" <<EOF
+#!/bin/sh
+printf '%s %s\n' "\$FM_SUPERVISION_HOST_PRIMARY" "\$*" >> '$HOST_STUB'
+case "\$(cat '$STUB/mode')" in
+  host) [ "\$(wc -l < '$HOST_STUB')" -gt 1 ] && exec sleep 600
+    printf 'watcher: started pid=1 (beacon fresh)\nsupervision-host: outcome 1 for demo [done]: merged\nsupervision-host: cycle boundary - bound\n' ;;
+  standdown) printf 'supervision-host stood down: another session holds the fleet lock\n' ;;
+esac
+EOF
+chmod +x "$STUB/bin/fm-supervision-host.sh"
+mkdir -p "$STUB/config"
+: > "$STUB/config/supervision-host"
+host_calls() { [ "$(wc -l < "$HOST_STUB" 2>/dev/null | tr -d ' ')" -ge "$1" ]; }
+queued() { [ -s "$STUB/queue" ]; }
+printf 'host\n' > "$STUB/mode"
+: > "$STUB/arms"
+: > "$STUB/queue"
+: > "$HOST_STUB"
+stub_stop
+wait_until 75 host_calls 2 || fail "the host-opted supervisor did not park through the supervision host"
+wait_until 25 queued || fail "the host's wake never reached the thread"
+[ "$(sed -n 1p "$HOST_STUB")" = "codex park" ] || fail "the host was not parked as the codex primary: $(cat "$HOST_STUB")"
+[ "$(arms)" -eq 0 ] || fail "a host-opted home armed the plain watcher $(arms) times"
+[ "$(cat "$STUB/queue")" = "supervision-host: outcome 1 for demo [done]: merged" ] \
+  || fail "the host close was queued as: $(cat "$STUB/queue")"
+FM_ROOT_OVERRIDE="$STUB" FM_HOME="$STUB" "$STUB/bin/fm-codex-idle-continuity.sh" --handover </dev/null \
+  || fail "handover of the host-parked supervisor failed"
+printf 'standdown\n' > "$STUB/mode"
+: > "$STUB/queue"
+: > "$STUB/stops"
+: > "$HOST_STUB"
+stub_stop
+wait_until 75 host_calls 1 || fail "the stand-down case never parked"
+wait_until 75 test ! -d "$SLOCK" || fail "a host that stood down did not end the supervisor"
+[ "$(wc -l < "$HOST_STUB" | tr -d ' ')" -eq 1 ] || fail "the supervisor parked again after the host stood down"
+[ ! -s "$STUB/queue" ] || fail "a stand-down reached the thread: $(cat "$STUB/queue")"
+[ ! -s "$STUB/stops" ] || fail "a stand-down stopped the watcher its new owner holds"
 kill "$owner" 2>/dev/null || true
 wait "$owner" 2>/dev/null || true
-printf 'ok - a broken watcher queues one give-up check per failure episode, and a successful checkpoint ends the episode\n'
+printf 'ok - a host-opted home parks through the supervision host and stands down with it\n'

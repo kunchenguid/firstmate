@@ -17,6 +17,13 @@
 # `codex queue`. FM_CODEX_IDLE_QUEUE, when set, receives that text on stdin
 # instead. FM_CODEX_IDLE_OWNER_PID overrides the Codex ancestor walk.
 #
+# A home that opted into config/supervision-host parks through
+# `fm-supervision-host.sh park` in place of the arm, as the in-turn
+# checkpoint does. A host that stood down ends the supervisor without
+# stopping the watcher. Away mode is checked again whenever an arm closes and
+# before the next one starts: an away-mode close is not queued and the
+# watcher is not stopped, because the away daemon owns triage from then on.
+#
 # An idle home, away mode, a child worktree, or a stop that is still the
 # first one in the turn does not start a supervisor. A live supervisor is
 # left in place. This script never prints on the spawn path: the guard's
@@ -40,6 +47,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 LOCK="$STATE/.codex-idle-continuity.lock"
 FAILURE_NOTICE="$STATE/.codex-idle-continuity-failure-notified"
 ARM="$SCRIPT_DIR/fm-watch-arm.sh"
@@ -138,11 +146,11 @@ queue_text() {
 }
 
 actionable_text() {
-  awk '/^(signal:|stale:|check:|heartbeat(:|$))/'
+  awk '/^(signal:|stale:|check:|heartbeat(:|$)|supervision-host:)/ && !/^supervision-host: cycle boundary/'
 }
 
 handed_over() {
-  awk '/^watcher: attached / { found = 1 }
+  awk '/^(watcher: attached |supervision-host: cycle boundary)/ { found = 1 }
     /^watcher: FAILED - watcher cycle exited [0-9]+ / { if ($7 + 0 > 128) found = 1 }
     END { exit !found }'
 }
@@ -153,6 +161,11 @@ end_supervision() {
     wait "$arm_pid" 2>/dev/null || true
   fi
   "$ARM" --stop >/dev/null 2>&1 || true
+  rm -rf "$LOCK"
+  exit 0
+}
+
+leave_watcher() {
   rm -rf "$LOCK"
   exit 0
 }
@@ -169,9 +182,13 @@ supervise() {
   # shellcheck source=bin/fm-supervision-lib.sh
   . "$SCRIPT_DIR/fm-supervision-lib.sh"
   while kill -0 "$owner" 2>/dev/null; do
-    [ -e "$STATE/.afk" ] && break
+    [ -e "$STATE/.afk" ] && leave_watcher
     fm_supervision_needed "$STATE" || break
-    "$ARM" >"$LOCK/arm.out" 2>&1 &
+    if [ -f "$CONFIG/supervision-host" ]; then
+      FM_SUPERVISION_HOST_PRIMARY=codex "$SCRIPT_DIR/fm-supervision-host.sh" park >"$LOCK/arm.out" 2>&1 &
+    else
+      "$ARM" >"$LOCK/arm.out" 2>&1 &
+    fi
     arm_pid=$!
     while kill -0 "$arm_pid" 2>/dev/null; do
       if ! kill -0 "$owner" 2>/dev/null; then
@@ -183,6 +200,8 @@ supervise() {
     done
     wait "$arm_pid" || true
     arm_pid=
+    [ -e "$STATE/.afk" ] && leave_watcher
+    grep -q '^supervision-host stood down:' "$LOCK/arm.out" && leave_watcher
     text=$(actionable_text < "$LOCK/arm.out" || true)
     if [ -n "$text" ]; then
       fails=0
