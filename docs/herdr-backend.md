@@ -514,7 +514,8 @@ Workspace and tab ids support verification and cleanup but are not inferred from
 ### Named server and session routing
 
 The adapter starts and polls a named server before workspace, tab, pane, or agent calls.
-Every Herdr invocation goes through `fm_backend_herdr_cli`, which sets the environment and passes an explicit trailing `--session <name>`.
+Every Herdr invocation except that server launch goes through `fm_backend_herdr_cli`, which sets the environment and passes an explicit trailing `--session <name>`.
+That helper refuses `server` itself, so the clean launch described below is the only way the adapter starts one.
 An environment variable alone is not reliable when another Herdr server is running.
 
 When the selected named server is not running, the adapter launches it through `env -i` with an explicit allowlist, so it inherits nothing else the launcher happened to carry.
@@ -522,6 +523,8 @@ Herdr passes its server startup environment to every later pane, so a value reta
 A deny list cannot hold that boundary, because every variable added to Firstmate afterwards is inherited by default.
 The launch always takes `SHELL` from the effective uid's own passwd entry and supplies a stable baseline `PATH`, never the launcher's own values.
 A non-interactive launcher's missing `SHELL` and truncated `PATH` otherwise become every pane's shell and `PATH`.
+That baseline `PATH` is self-sufficient rather than a floor a login profile later tops up, because Herdr 0.9.1 starts a pane's shell interactive but not login, so `/etc/profile.d` never runs in a pane.
+It therefore carries the perl script directories a login profile would have supplied, after the standard system directories; directories a host does not have are inert.
 `HOME`, `XDG_CONFIG_HOME`, and `HERDR_CONFIG_PATH` are forwarded, because they are caller-environment settings rather than task-scoped overrides and because on the installed Herdr 0.9.1 the first two relocate the api socket, the sessions directory, and the log.
 That was measured on 2026-09-26 against 0.9.1: a server started with `XDG_CONFIG_HOME` pointed at a scratch directory reported `api socket: /tmp/hct42205/herdr/sessions/sct/herdr.sock` in its own startup output.
 Refusing them would leave the adapter launching under one config root while every ordinary call reads another, and reporting a server its own caller can never reach.
