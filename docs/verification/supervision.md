@@ -140,8 +140,8 @@ Push-source passes polled `state/<id>.busy-state`; pull-source passes used the p
 | Harness | Version verified | Semantic source | Observed result |
 | --- | --- | --- | --- |
 | Pi | 0.82.0 | Extension `agent_start` / `agent_settled` with `ctx.isIdle()` | The spawn seed `busy source=fm-spawn`, then `busy source=pi-ext event=agent-start`, then `idle source=pi-ext event=agent-settled`; the turn-end marker was still touched. |
-| Codex | codex-cli 0.156.1 | Bound structured transcript | 2026-09-25 default interactive TUI: busy during a turn and foreground tool, idle after completion, API failure and interrupt, dead after process or endpoint exit. Local simulated provider; see the guard below. |
-| TraeX | 0.207.1 internal | Bound structured transcript | Same guard and lifecycle coverage; native Herdr unknown did not mask the transcript. |
+| Codex | codex-cli 0.157.1 | Bound structured transcript | 2026-09-27 default interactive TUI: multiple exact in-turn input receipts preserved busy and then settled idle without invented root starts; the guard also retained lifecycle, failure, interrupt, process-exit, and endpoint-exit coverage. Local simulated provider; see the guard below. |
+| TraeX | 0.207.1 internal | Bound structured transcript | The same 2026-09-27 input-receipt and lifecycle guard passed; native Herdr unknown did not mask the transcript. |
 
 The 2026-09-27 Codex 0.157.1 and TraeX 0.207.1 in-turn steering refresh, including the before/after consumption evidence and current guard, is recorded in [runtime backend verification](runtime-backends.md#in-turn-transcript-input-consumption).
 
