@@ -417,9 +417,10 @@ The same pass also persists open-work record state the session is holding - fili
 It is deliberately not a reconciliation of durable records against repository or PR reality: its input is the volatile context, so it can only preserve what the session still knows, and no reconciliation that outlives a session exists today.
 Task-scoped notes use `bin/fm-tasks-axi.sh show <id> --full` followed by `bin/fm-tasks-axi.sh update <id> --body-file <path>`, adding `--archive-body` when the prior body should remain recoverable.
 The stow pass never writes a skill, but a separately executed, captain-approved migration may move conditional knowledge into a user-owned local skill excluded from the Firstmate clone; changes to Firstmate's tracked skills remain deliberate repository work through the normal PR pipeline.
-When a home explicitly enables periodic stow, the Pi main-session extension only registers one due request, waits for `agent_settled` plus empty tool, queue, editor, UI, and compaction state, and offers a stable `run_id` back to that same session as a follow-up.
+When a home explicitly enables heartbeat maintenance through the compatible `config/periodic-stow.json` filename, the Pi main-session extension registers one due request for its archival, continuation, and knowledge duties, waits for `agent_settled` plus empty tool, queue, editor, UI, and compaction state, and offers a stable `run_id` back to that same session as a follow-up.
 `bin/fm-stow-run.sh` binds the physical home, session file, session-tree fingerprint, generation, compare-and-swap revision, fixed cutoff, prepared operations, readback receipts, and bounded redelivery; it never decides what knowledge to keep and never treats message delivery or `agent_end` as success.
-The extension is default-off, creates no cron entry, daemon, or agent, grants the supervision branch no memory-write authority, and preserves unresolved partial work instead of claiming a cross-file transaction.
+The full maintenance pass is default-off, but the same in-process timer still drives bounded [live task continuation](pi-supervision-branch.md#live-task-continuation) while Pi remains alive; it creates no cron entry, daemon, or agent, grants the supervision branch no memory-write authority, and preserves unresolved partial work instead of claiming a cross-file transaction.
+[`configuration.md`](configuration.md#heartbeat-maintenance-configperiodic-stowjson) owns the opt-in, scheduling, and heartbeat-receipt contract.
 
 ## Local clones stay fresh
 

@@ -38,3 +38,7 @@ commands:
 test:
   evidence:
     store_in_repo: true
+
+# Review findings require an explicit decision.
+auto_fix:
+  review: 0

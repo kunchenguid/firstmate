@@ -56,6 +56,7 @@ install_pi_branch_extension_fixture() {
   cp "$EXT" "$repo/.pi/extensions/fm-branch-supervision.ts"
   cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$repo/.pi/extensions/lib/fm-branch-dispatch.ts"
   cp "$ROOT/.pi/extensions/lib/fm-native-contract.ts" "$repo/.pi/extensions/lib/fm-native-contract.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-task-continuation.ts" "$repo/.pi/extensions/lib/fm-task-continuation.ts"
   cp "$ROOT/.pi/extensions/lib/fm-async-exec.ts" "$repo/.pi/extensions/lib/fm-async-exec.ts"
   cp "$ROOT/.pi/extensions/lib/fm-branch-model-picker.ts" "$repo/.pi/extensions/lib/fm-branch-model-picker.ts"
   cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$repo/.pi/extensions/lib/fm-calm-visibility.ts"
@@ -1522,11 +1523,11 @@ bus.emit("firstmate:native-tools", {
   register: (tool) => nativeTools.set(tool.name, tool),
   allowMessageType: (type) => messageTypes.add(type),
 });
-if ([...nativeTools.keys()].sort().join(",") !== "fm_branch_outcomes,fm_branch_processed") throw new Error("native discovery exposed unrelated tools");
+if ([...nativeTools.keys()].sort().join(",") !== "fm_branch_outcomes,fm_branch_processed,fm_task_continuation") throw new Error("native discovery exposed unrelated tools");
 for (const tool of mainTools) {
   if (nativeTools.get(tool.name)?.execute !== tool.execute) throw new Error("native controls lost the original guards");
 }
-if ([...messageTypes].sort().join(",") !== "firstmate-sessionstart-nudge,fm-branch-merge,fm-branch-process") throw new Error("operational message allowlist changed");
+if ([...messageTypes].sort().join(",") !== "firstmate-sessionstart-nudge,fm-branch-merge,fm-branch-process,fm-heartbeat-request,fm-stow-request,fm-task-continuation") throw new Error("operational message allowlist changed");
 const processed = nativeTools.get("fm_branch_processed");
 if (!processed) throw new Error("main did not receive its acknowledgement tool");
 const routineAck = await processed.execute("ack-routine", { through: routineSeq }, undefined, undefined, {});
@@ -2075,7 +2076,7 @@ for (let i = 0; i < 250 && !globalThis.__fmPromptStarted; i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 10));
 }
 if (!globalThis.__fmPromptStarted) {
-  throw new Error("a co-present needs-decision row vetoed the accepted routine branch prompt");
+  throw new Error(`a co-present needs-decision row vetoed the accepted routine branch prompt: ${await Promise.race([offer.settlement.then(() => "settled", e => String(e)), Promise.resolve("still pending")])}`);
 }
 const snapshot = readFileSync(`${home}/state/.branch-eligible-rows`, "utf8").trim().split("\n");
 if (!snapshot.includes("1") || snapshot.includes("2")) {
@@ -4665,6 +4666,7 @@ test_branch_dispatch_classifies_main_only_rows_and_writes_the_eligible_snapshot(
   mkdir -p "$repo/.pi/extensions/lib" "$home/state" "$home/projects/approved"
   cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$repo/.pi/extensions/lib/fm-branch-dispatch.ts"
   cp "$ROOT/.pi/extensions/lib/fm-native-contract.ts" "$repo/.pi/extensions/lib/fm-native-contract.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-task-continuation.ts" "$repo/.pi/extensions/lib/fm-task-continuation.ts"
   cp "$ROOT/.pi/extensions/lib/fm-async-exec.ts" "$repo/.pi/extensions/lib/fm-async-exec.ts"
   cp "$ROOT/.pi/extensions/lib/fm-branch-model-picker.ts" "$repo/.pi/extensions/lib/fm-branch-model-picker.ts"
   printf 'project=%s/projects/approved\nwindow=fm-window\n' "$home" > "$home/state/task-a.meta"
@@ -5242,6 +5244,7 @@ test_outcomes_tool_uses_stock_execution_and_export_consumers() {
   cp "$EXT" "$fixture/.pi/extensions/fm-branch-supervision.ts"
   cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$fixture/.pi/extensions/lib/fm-branch-dispatch.ts"
   cp "$ROOT/.pi/extensions/lib/fm-native-contract.ts" "$fixture/.pi/extensions/lib/fm-native-contract.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-task-continuation.ts" "$fixture/.pi/extensions/lib/fm-task-continuation.ts"
   cp "$ROOT/.pi/extensions/lib/fm-async-exec.ts" "$fixture/.pi/extensions/lib/fm-async-exec.ts"
   cp "$ROOT/.pi/extensions/lib/fm-branch-model-picker.ts" "$fixture/.pi/extensions/lib/fm-branch-model-picker.ts"
   cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$fixture/.pi/extensions/lib/fm-calm-visibility.ts"
@@ -5936,6 +5939,378 @@ EOF
   pass "an extension-registered provider resolves in the isolated branch runtime"
 }
 
+continuation_ui_boundary_case() {
+  local repo home out rc mode=$1
+  repo="$TMP_ROOT/continuation-ui-root-$mode"; home="$TMP_ROOT/continuation-ui-home-$mode"
+  install_pi_branch_extension_fixture "$repo"
+  mkdir -p "$home/state" "$home/data/task"
+  printf 'Verify UI-safe continuation.\n' >"$home/data/task/brief.md"
+  cat >"$repo/bin/fm-task-state.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = observe ]; then touch "$FM_HOME/observing"; sleep 0.3; fi
+exec "$REAL_ROOT/bin/fm-task-state.sh" "$@"
+SH
+  cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/"
+  set +e
+  out=$(FM_TEST_CONTINUATION_DELIVERY="$mode" PLUGIN="$repo/.pi/extensions/lib/fm-task-continuation.ts" REAL_ROOT="$ROOT" FM_ROOT_OVERRIDE="$repo" FM_HOME="$home" node --input-type=module 2>&1 <<'JS'
+import {appendFileSync,existsSync,readFileSync,writeFileSync,mkdirSync,unlinkSync} from 'node:fs';
+const home=process.env.FM_HOME,handlers=new Map(),events=new Map(),sent=[],entries=[];
+const mode=process.env.FM_TEST_CONTINUATION_DELIVERY;
+let blocking=false,idle=mode!=='settle';
+const file=home+'/session.jsonl';
+writeFileSync(home+'/state/.lock',process.pid+'\n');
+writeFileSync(file,JSON.stringify({type:'session',id:'ui-regression',version:3})+'\n');
+const ctx={isIdle:()=>idle,hasPendingMessages:()=>false,hasUI:false,ui:{getEditorText:()=>''},sessionManager:{getSessionFile:()=>file,getSessionId:()=> 'ui-regression',getLeafId:()=>entries.at(-1)?.id,getBranch:()=>entries,getEntries:()=>entries}};
+function persist(row){row={...row,id:'e'+entries.length,parentId:entries.at(-1)?.id??null,timestamp:new Date().toISOString()};entries.push(row);appendFileSync(file,JSON.stringify(row)+'\n');}
+const pi={on:(name,fn)=>handlers.set(name,[...(handlers.get(name)||[]),fn]),events:{on:(name,fn)=>events.set(name,[...(events.get(name)||[]),fn]),emit:(name,arg)=>{for(const fn of events.get(name)||[])fn(arg)}},registerTool(){},registerCommand(){},sendMessage:(message,options)=>{sent.push({message,options,blocking});persist({type:'custom_message',...message});},appendEntry:(customType,data)=>persist({type:'custom',customType,data})};
+const fire=async(name)=>{const results=[];for(const fn of handlers.get(name)||[])results.push(await fn({},ctx));return results;};
+const wait=async(predicate)=>{const until=Date.now()+10000;while(!predicate()&&Date.now()<until)await new Promise(r=>setTimeout(r,10));if(!predicate())throw Error('timed out');};
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+const {installTaskContinuation}=await import(process.env.PLUGIN);
+const periodic=(await import(process.env.REAL_ROOT+'/.pi/extensions/fm-periodic-stow.ts')).default;
+const continuation=installTaskContinuation(pi,{root:process.env.FM_ROOT_OVERRIDE,home,state:home+'/state',owns:()=>true});
+periodic(pi);
+await fire('session_start');
+await continuation.preserve(['task']);
+const record=()=>JSON.parse(readFileSync(home+'/data/task/lifecycle.json'));
+pi.events.emit('firstmate:heartbeat-tick',{});await sleep(100);
+if(existsSync(home+'/observing'))throw Error('cold session without leaf claimed a receiver');
+pi.appendEntry('seed',{});
+const settling=mode==='settle'?fire('agent_before_settle'):Promise.resolve([]);
+if(mode!=='settle')pi.events.emit('firstmate:heartbeat-tick',{});
+await wait(()=>existsSync(home+'/observing'));
+blocking=true;await fire('ui_prompt_start');
+await wait(()=>record().coordination);
+if((await settling).some(x=>x?.continue===true))throw Error('settle crossed blocking UI boundary');
+idle=true;
+await sleep(700);
+if(sent.length)throw Error('notification crossed blocking UI boundary');
+const budget=Object.values(record().coordination.budgets)[0];
+if(budget.attempts!==1||!budget.reserved)throw Error('deferred reservation lost');
+await fire('session_shutdown');await fire('session_start');
+await fire('ui_prompt_start');
+pi.events.emit('firstmate:heartbeat-tick',{});await sleep(1000);
+if(sent.length||Object.values(record().coordination.budgets)[0].attempts!==1)throw Error('reload lost guard or reset budget');
+blocking=false;await fire('ui_prompt_end');
+pi.events.emit('firstmate:heartbeat-tick',{});
+await wait(()=>sent.length===1);
+if(sent[0].blocking||sent[0].message.details.admissions[0]!==budget.reserved)throw Error('safe release replaced reservation');
+pi.events.emit('firstmate:heartbeat-tick',{});await sleep(1000);
+if(sent.length!==1||Object.values(record().coordination.budgets)[0].attempts!==1)throw Error('safe release duplicated admission');
+await fire('session_shutdown');await fire('session_start');
+pi.events.emit('firstmate:heartbeat-tick',{});await sleep(1000);
+if(sent.length!==1)throw Error('delivered reservation replayed after reload');
+mkdirSync(home+'/data/task2');writeFileSync(home+'/data/task2/brief.md','Verify generation fencing.');
+await continuation.preserve(['task2']);
+unlinkSync(home+'/observing');
+pi.events.emit('firstmate:heartbeat-tick',{});await wait(()=>existsSync(home+'/observing'));
+await fire('session_shutdown');await fire('session_start');await sleep(1000);
+if(sent.length!==1)throw Error('old asynchronous readback notified the replacement generation');
+pi.events.emit('firstmate:heartbeat-tick',{});await wait(()=>sent.length===2);
+if(!sent[1].message.content.includes('task2: pending'))throw Error('new generation lost pending task');
+await fire('session_shutdown');
+console.log(mode+': UI race deferred one durable admission; release delivered it once; reload preserved guard, receipt and budget');
+JS
+  )
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "continuation UI boundary: $out"
+  pass "$out"
+}
+
+test_continuation_defers_reserved_admission_at_ui_boundary() {
+  continuation_ui_boundary_case heartbeat
+  continuation_ui_boundary_case settle
+}
+
+test_continuation_retries_definite_send_failure_and_isolates_stale_tasks() {
+  local repo home out rc
+  repo="$TMP_ROOT/continuation-failure-root"; home="$TMP_ROOT/continuation-failure-home"
+  install_pi_branch_extension_fixture "$repo"
+  mkdir -p "$home/state" "$home/data/healthy-one"
+  printf 'Keep the first healthy task progressing.\n' >"$home/data/healthy-one/brief.md"
+  cat >"$repo/bin/fm-task-state.sh" <<'SH'
+#!/usr/bin/env bash
+exec "$REAL_ROOT/bin/fm-task-state.sh" "$@"
+SH
+  cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/"
+  set +e
+  out=$(PLUGIN="$repo/.pi/extensions/lib/fm-task-continuation.ts" REAL_ROOT="$ROOT" FM_ROOT_OVERRIDE="$repo" FM_HOME="$home" node --input-type=module 2>&1 <<'JS'
+import {createHash} from 'node:crypto';
+import {spawnSync} from 'node:child_process';
+import {appendFileSync,mkdirSync,readFileSync,writeFileSync} from 'node:fs';
+const home=process.env.FM_HOME,handlers=new Map(),events=new Map(),entries=[],effects=[];
+const file=home+'/session.jsonl';
+let sendMode='fail-before';
+writeFileSync(home+'/state/.lock',process.pid+'\n');
+writeFileSync(file,JSON.stringify({type:'session',id:'failure-regression',version:3})+'\n');
+const ctx={isIdle:()=>true,hasPendingMessages:()=>false,hasUI:false,ui:{getEditorText:()=>''},sessionManager:{getSessionFile:()=>file,getSessionId:()=> 'failure-regression',getLeafId:()=>entries.at(-1)?.id,getBranch:()=>entries,getEntries:()=>entries}};
+function persist(row){row={...row,id:'e'+entries.length,parentId:entries.at(-1)?.id??null,timestamp:new Date().toISOString()};entries.push(row);appendFileSync(file,JSON.stringify(row)+'\n');return row;}
+const pi={on:(name,fn)=>handlers.set(name,[...(handlers.get(name)||[]),fn]),events:{on:(name,fn)=>events.set(name,[...(events.get(name)||[]),fn]),emit:(name,arg)=>{for(const fn of events.get(name)||[])fn(arg)}},registerTool(){},registerCommand(){},appendEntry:(customType,data)=>persist({type:'custom',customType,data}),sendMessage(message,options){
+  if(sendMode==='fail-before')throw Error('definite pre-delivery refusal');
+  effects.push({message,options});persist({type:'custom_message',...message});
+  if(sendMode==='persist-throw')throw Error('transport result uncertain after persistence');
+}};
+const fire=async(name)=>{for(const fn of handlers.get(name)||[])await fn({},ctx);};
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+const wait=async(predicate,label)=>{const until=Date.now()+10000;while(!predicate()&&Date.now()<until)await sleep(10);if(!predicate())throw Error('timed out: '+label);};
+const tickUntil=async(predicate,label)=>{const until=Date.now()+10000;while(!predicate()&&Date.now()<until){pi.events.emit('firstmate:heartbeat-tick',{});await sleep(25);}if(!predicate())throw Error('timed out: '+label);};
+const record=task=>JSON.parse(readFileSync(`${home}/data/${task}/lifecycle.json`));
+const sha=path=>createHash('sha256').update(readFileSync(path)).digest('hex');
+const {installTaskContinuation}=await import(process.env.PLUGIN);
+const periodic=(await import(process.env.REAL_ROOT+'/.pi/extensions/fm-periodic-stow.ts')).default;
+const continuation=installTaskContinuation(pi,{root:process.env.FM_ROOT_OVERRIDE,home,state:home+'/state',owns:()=>true});
+periodic(pi);
+await fire('session_start');pi.appendEntry('seed',{});
+await continuation.preserve(['healthy-one']);
+pi.events.emit('firstmate:heartbeat-tick',{});
+await wait(()=>record('healthy-one').coordination,'failed submission reservation');
+await sleep(100);
+if(effects.length)throw Error('definite pre-delivery failure produced an effect');
+sendMode='success';pi.events.emit('firstmate:heartbeat-tick',{});
+await wait(()=>effects.length===1,'successful retry');
+const firstAdmission=effects[0].message.details.admissions[0];
+pi.events.emit('firstmate:heartbeat-tick',{});await sleep(300);
+if(effects.length!==1||effects[0].message.details.admissions[0]!==firstAdmission)throw Error('successful retry was not delivered exactly once');
+
+for(const task of ['healthy-two','stale']){mkdirSync(`${home}/data/${task}`);writeFileSync(`${home}/data/${task}/brief.md`,task+' initial brief\n');}
+await continuation.preserve(['healthy-two','stale']);
+writeFileSync(`${home}/data/stale/brief.md`,'stale changed brief\n');
+continuation.capture('Already collected input must continue through this batch.','batch-input');
+const receiptCursor=()=>entries.filter(e=>e.customType==='fm-continuation-receipt').at(-1)?.data.next_cursor;
+const cursorBefore=receiptCursor();
+pi.events.emit('firstmate:heartbeat-tick',{});
+await wait(()=>effects.some(e=>e.message.details?.kind==='lifecycle-reconciliation'),'stale reconciliation');
+const reconciliation=effects.find(e=>e.message.details?.kind==='lifecycle-reconciliation');
+if(reconciliation.message.details.task!=='stale'||!reconciliation.message.content.includes('explicit reconciliation required'))throw Error('stale task did not surface a scoped reconciliation obligation');
+if(record('stale').coordination)throw Error('stale task invented a coordination receiver');
+const cursorAfterReconciliation=receiptCursor();
+if(cursorAfterReconciliation===cursorBefore)throw Error('stale observation did not advance the bounded cursor');
+
+sendMode='persist-throw';pi.events.emit('firstmate:heartbeat-tick',{});
+await wait(()=>effects.some(e=>e.message.customType==='fm-task-continuation'&&e.message.content.includes('healthy-two: pending')),'healthy batch after stale task');
+const batch=effects.find(e=>e.message.customType==='fm-task-continuation'&&e.message.content.includes('healthy-two: pending'));
+if(!batch.message.content.includes('Already collected input must continue through this batch.'))throw Error('stale task discarded already-collected input');
+if(!record('healthy-two').coordination)throw Error('stale task prevented healthy task coordination');
+const effectCount=effects.length;
+sendMode='success';pi.events.emit('firstmate:heartbeat-tick',{});await sleep(500);
+if(effects.length!==effectCount)throw Error('uncertain persisted delivery was replayed');
+if(receiptCursor()===cursorAfterReconciliation)throw Error('healthy follow-up did not keep the bounded cursor moving');
+
+await fire('session_shutdown');await fire('session_start');await fire('session_compact');
+pi.events.emit('firstmate:heartbeat-tick',{});await sleep(300);
+if(effects.length!==effectCount)throw Error('reload or compaction replayed delivered reconciliation');
+const reconciliationPace=entries.filter(e=>e.customType==='fm-continuation-input-pacing'&&e.data.id==='reconcile:stale').at(-1);
+if(!reconciliationPace?.data.escalatedAt||reconciliationPace.data.recoveryAttempts!==0)throw Error('delivered reconciliation did not retain paced responsibility');
+reconciliationPace.data.recoveryAfter=Date.now()-1;
+await fire('session_shutdown');await fire('session_start');
+await tickUntil(()=>effects.some(e=>e.message.details?.kind==='lifecycle-reconciliation'&&e.message.details.admissions.some(id=>id.startsWith('r.'))),'paced reconciliation recovery');
+const recovery=effects.findLast(e=>e.message.details?.kind==='lifecycle-reconciliation'&&e.message.details.admissions.some(id=>id.startsWith('r.')));
+if(!recovery.message.details.tasks.includes('stale')||!recovery.message.content.includes('Persistent recovery:'))throw Error('unchanged refusal lost persistent recovery responsibility');
+const recoveryCount=effects.length;
+await fire('session_shutdown');await fire('session_start');await fire('session_compact');
+pi.events.emit('firstmate:heartbeat-tick',{});await sleep(300);
+if(effects.length!==recoveryCount)throw Error('reload or compaction replayed delivered reconciliation recovery');
+
+const stale=record('stale'),brief=`${home}/data/stale/brief.md`;
+stale.brief_sha256=sha(brief);
+stale.assessment.outcome='Changed brief explicitly reconciled; execution remains pending.';
+stale.assessment.remaining_gap='Coordinate the reconciled task through its canonical lifecycle.';
+stale.assessment.authority_ref=brief;
+stale.assessment.evidence=[{ref:brief,sha256:sha(brief)}];
+const proposal=`${home}/data/stale-reconciliation.json`;
+writeFileSync(proposal,JSON.stringify(stale),{mode:0o600});
+const reconciled=spawnSync(`${process.env.REAL_ROOT}/bin/fm-task-state.sh`,['reconcile','stale','--expected-revision',String(stale.revision),'--record',proposal],{env:{...process.env,FM_SUPERVISION_ACTOR:'main'},encoding:'utf8'});
+if(reconciled.status!==0)throw Error(`actual reconciliation refused: ${reconciled.stderr}`);
+await tickUntil(()=>effects.slice(recoveryCount).some(e=>e.message.customType==='fm-task-continuation'&&e.message.content.includes('stale: pending')),'canonical progress after reconciliation');
+if(effects.slice(recoveryCount).some(e=>e.message.details?.kind==='lifecycle-reconciliation'&&e.message.details.tasks.includes('stale')))throw Error('successful observation retained stale reconciliation recovery');
+
+for(const task of ['changed-generation','ambiguous-identity','healthy-three']){
+  mkdirSync(`${home}/data/${task}`);writeFileSync(`${home}/data/${task}/brief.md`,task+' brief\n');
+}
+writeFileSync(`${home}/state/changed-generation.meta`,'spawn_gen=g1\n');
+writeFileSync(`${home}/state/ambiguous-identity.meta`,'spawn_gen=g1\n');
+await continuation.preserve(['changed-generation','ambiguous-identity','healthy-three']);
+writeFileSync(`${home}/state/changed-generation.meta`,'spawn_gen=g2\n');
+writeFileSync(`${home}/state/ambiguous-identity.meta`,'spawn_gen=g1\nspawn_gen=g1\n');
+const refusalStart=effects.length;
+await tickUntil(()=>effects.slice(refusalStart).some(e=>e.message.details?.kind==='lifecycle-reconciliation'),'generation and identity refusals');
+const refusals=effects.slice(refusalStart).find(e=>e.message.details?.kind==='lifecycle-reconciliation');
+if(!refusals.message.details.tasks.includes('changed-generation')||!refusals.message.content.includes('stale execution generation'))throw Error('changed-generation refusal was weakened');
+if(!refusals.message.details.tasks.includes('ambiguous-identity')||!refusals.message.content.includes('duplicate execution identity'))throw Error('ambiguous-identity refusal was weakened');
+if(record('changed-generation').coordination||record('ambiguous-identity').coordination)throw Error('refused identities invented canonical receivers');
+await tickUntil(()=>effects.slice(refusalStart).some(e=>e.message.customType==='fm-task-continuation'&&e.message.content.includes('healthy-three: pending')),'healthy neighbor after identity refusals');
+await fire('session_shutdown');
+console.log('send failures dedupe; stale reconciliation recovers across reload and compaction while strict refusals preserve healthy progress');
+JS
+  )
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "continuation delivery failure and stale batch: $out"
+  pass "$out"
+}
+
+test_continuation_survives_ack_compaction_and_unrelated_input() {
+  local repo home out rc
+  repo="$TMP_ROOT/continuation-root"; home="$TMP_ROOT/continuation-home"
+  install_pi_branch_extension_fixture "$repo"
+  set +e
+  out=$(PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module 2>&1 <<'JS'
+await eval(`(async () => { ${process.env.DRIVER_PRELUDE}; globalThis.test = {fire, outcomeScript, mainTools, defaultSessionCtx, sentToMain, home, piHandlers, bus, pi}; })()`);
+const {fire, outcomeScript, mainTools, defaultSessionCtx, sentToMain, home, piHandlers, bus, pi} = globalThis.test;
+const {appendFileSync, mkdirSync, writeFileSync, readFileSync} = await import('node:fs');
+const {spawnSync} = await import('node:child_process');
+writeFileSync(`${home}/state/.lock`, `${process.pid}\n`);
+const entries=[];
+const file=`${home}/main.jsonl`;
+writeFileSync(file,JSON.stringify({type:'session',version:3,id:'test-session'})+'\n');
+Object.assign(defaultSessionCtx,{isIdle:()=>true,hasPendingMessages:()=>false,hasUI:false,ui:{getEditorText:()=>''}});
+Object.assign(defaultSessionCtx.sessionManager,{getSessionId:()=> 'test-session',getLeafId:()=>entries.at(-1)?.id,
+  getBranch:()=>entries,getEntries:()=>entries});
+pi.appendEntry=(customType,data)=>{const e={type:'custom',id:`entry-${entries.length}`,parentId:entries.at(-1)?.id??null,customType,data};entries.push(e);appendFileSync(file,JSON.stringify(e)+'\n');};
+pi.appendEntry('test-seed',{});
+const periodic=await import(`${process.env.FM_ROOT_OVERRIDE}/.pi/extensions/fm-periodic-stow.ts`);
+periodic.default(pi);
+await fire('session_start', {}, defaultSessionCtx);
+mkdirSync(`${home}/data/prerequisite`,{recursive:true});
+writeFileSync(`${home}/data/prerequisite/brief.md`,'Apply prerequisite; verify operational acceptance.');
+writeFileSync(`${home}/state/prerequisite.meta`,'spawn_gen=g1\nkind=ship\n');
+const seq=Number(outcomeScript(['append','--task','prerequisite','--verdict','captain','--summary','Merged prerequisite needs an operator.']));
+await fire('turn_end',{},defaultSessionCtx);
+await fire('agent_settled',{},defaultSessionCtx);
+const reader=mainTools.find(t=>t.name==='fm_branch_outcomes');
+const ack=mainTools.find(t=>t.name==='fm_branch_processed');
+await reader.execute('read',{sequences:String(seq)});
+const result=await ack.execute('ack',{through:seq});
+if(result.isError) throw Error(JSON.stringify(result));
+if(outcomeScript(['unprocessed'])!=='') throw Error('presentation acknowledgement was not consumed');
+const path=`${home}/data/prerequisite/lifecycle.json`;
+if(JSON.parse(readFileSync(path)).disposition!=='open') throw Error('ack erased pending goal');
+
+async function beforeSettle() {
+  const results=[];
+  for(const handler of piHandlers.get('agent_before_settle')||[]) results.push(await handler({},defaultSessionCtx));
+  for(const entry of results.filter(Boolean).flatMap(r=>r.entries||[])) {
+    const persisted={...entry,id:`entry-${entries.length}`,timestamp:new Date().toISOString()};
+    entries.push(persisted);appendFileSync(file,JSON.stringify(persisted)+'\n');
+  }
+  return {continued:results.some(r=>r?.continue===true),content:results.filter(Boolean).flatMap(r=>r.entries||[]).map(e=>e.content).join('\n')};
+}
+const first=await beforeSettle();
+if(!first.continued || !first.content.includes('prerequisite: pending')) throw Error(`missing continuation: ${JSON.stringify(first)}`);
+const ignored=await beforeSettle();
+if(ignored.continued) throw Error('settle bypassed persistent backoff');
+const received=JSON.parse(readFileSync(path));
+if(received.disposition!=='open' || received.coordination.receiver.owner!=='fm-periodic-stow') throw Error('settle did not retain actual coordinator receipt');
+const continuationMessages=()=>sentToMain.filter(sent=>sent.message.customType==='fm-task-continuation');
+async function waitForMessages(count) {
+  for(let i=0;i<250 && continuationMessages().length<count;i+=1) await new Promise(resolve=>setTimeout(resolve,10));
+  if(continuationMessages().length<count) throw Error(`missing continuation notification ${count}: ${JSON.stringify(continuationMessages())}`);
+}
+await fire('agent_settled',{},defaultSessionCtx);
+bus.emit('firstmate:heartbeat-tick');
+await new Promise(resolve=>setTimeout(resolve,100));
+if(continuationMessages().length) throw Error('tick bypassed settlement admission budget');
+await new Promise(resolve=>setTimeout(resolve,30_100));
+const second=await beforeSettle();
+if(!second.continued) throw Error('second paced admission missing');
+const exhausted=await beforeSettle();
+if(!exhausted.continued) throw Error('exhausted task did not start executable main coordination');
+if(!exhausted.content.includes('Continuation needs executable main coordination:')) throw Error('exhausted task was silently abandoned');
+const escalationEntries=()=>entries.filter(e=>e.customType==='fm-task-continuation-escalation');
+if(escalationEntries().length!==1 || !escalationEntries()[0].display) throw Error('missing visible native escalation');
+await beforeSettle();
+const escalated=JSON.parse(readFileSync(path));
+if(!Object.values(escalated.coordination.budgets)[0].escalated_at_ms || escalated.next_action!==null) throw Error('escalation readback missing or invented task action');
+await fire('session_shutdown',{},defaultSessionCtx);
+await fire('session_start',{},defaultSessionCtx);
+if((await beforeSettle()).continued) throw Error('reload reset task budget or duplicated executable escalation');
+if(escalationEntries().length!==1) throw Error('reload duplicated escalation');
+await fire('session_compact',{},defaultSessionCtx);
+await fire('before_agent_start',{prompt:'Separate request B: explain configuration.'},defaultSessionCtx);
+const next=await beforeSettle();
+if(!next.continued || !next.content.includes('Separate request B')) throw Error('independent input B was lost');
+if(next.content.includes('prerequisite: pending')) throw Error('independent input reset A budget');
+if(escalationEntries().length!==1) throw Error('compaction or independent input duplicated escalation');
+const tool=mainTools.find(t=>t.name==='fm_task_continuation');
+const listing=JSON.parse((await tool.execute('list',{action:'list'})).content[0].text);
+const input=listing.inputs.find(i=>i.text.includes('Separate request B'));
+const answer=await tool.execute('answer',{action:'answer',input:input.id,answer:'Configuration uses the documented per-home file.'});
+if(answer.isError) throw Error(JSON.stringify(answer));
+if(JSON.parse(readFileSync(path)).disposition!=='open') throw Error('retry budget exhaustion closed goal');
+// Unchanged evidence survives exhausted ordinary attempts. Only the existing
+// heartbeat may deliver a later recovery, and UI safety still takes priority.
+const recoveryDue=Object.values(JSON.parse(readFileSync(path)).coordination.budgets)[0].recovery_not_before_ms;
+let draft='draft';defaultSessionCtx.ui.getEditorText=()=>draft;
+await new Promise(resolve=>setTimeout(resolve,Math.max(0,recoveryDue-Date.now()+100)));
+if((await beforeSettle()).continued) throw Error('settle immediately executed paced recovery');
+const reservedRecovery=Object.values(JSON.parse(readFileSync(path)).coordination.budgets)[0];
+if(reservedRecovery.attempts!==2||reservedRecovery.recovery_attempts!==1||!reservedRecovery.recovery_reserved) throw Error('recovery reset original attempts or lost reservation');
+bus.emit('firstmate:heartbeat-tick');await new Promise(resolve=>setTimeout(resolve,500));
+if(sentToMain.some(x=>x.message.details?.admissions?.includes(reservedRecovery.recovery_reserved))) throw Error('recovery interrupted editor input');
+const originalSend=pi.sendMessage;
+pi.sendMessage=(message,options)=>{
+ originalSend(message,options);
+ const persisted={type:'custom_message',...message,id:`entry-${entries.length}`,timestamp:new Date().toISOString()};
+ entries.push(persisted);appendFileSync(file,JSON.stringify(persisted)+'\n');
+};
+draft='';bus.emit('firstmate:heartbeat-tick');
+for(let i=0;i<200&&!sentToMain.some(x=>x.message.details?.admissions?.includes(reservedRecovery.recovery_reserved));i++) await new Promise(r=>setTimeout(r,10));
+if(!sentToMain.some(x=>x.message.details?.admissions?.includes(reservedRecovery.recovery_reserved)&&x.options.triggerTurn)) throw Error('paced recovery did not start an executable turn');
+await beforeSettle();
+await fire('session_shutdown',{},defaultSessionCtx);await fire('session_start',{},defaultSessionCtx);
+await fire('session_compact',{},defaultSessionCtx);
+if((await beforeSettle()).continued) throw Error('reload/compaction replayed recovery');
+const recovered=Object.values(JSON.parse(readFileSync(path)).coordination.budgets)[0];
+if(recovered.attempts!==2||recovered.recovery_attempts!==1||recovered.recovery_reserved||recovered.recovery_not_before_ms<=Date.now()+110000) throw Error('recovery did not retain separate durable backoff');
+// A material observation changes the fingerprint and earns one fresh check.
+const r=JSON.parse(readFileSync(path));r.assessment.remaining_gap='Apply now-authorized prerequisite, then validate.';
+writeFileSync(`${home}/data/proposal.json`,JSON.stringify(r),{mode:0o600});
+const cmd=spawnSync(`${process.env.FM_ROOT_OVERRIDE}/bin/fm-task-state.sh`,['reconcile','prerequisite','--expected-revision',String(r.revision),'--record',`${home}/data/proposal.json`],{env:{...process.env,FM_SUPERVISION_ACTOR:'main'},encoding:'utf8'});
+if(cmd.status!==0) throw Error(cmd.stderr);
+if(!(await beforeSettle()).content.includes('prerequisite: pending')) throw Error('new actionable evidence suppressed');
+if((await beforeSettle()).continued) throw Error('changed evidence bypassed backoff on repeat');
+// A real bound dependency stays silent; its release triggers one exact check.
+const {createHash}=await import('node:crypto');
+const sha=(p)=>createHash('sha256').update(readFileSync(p)).digest('hex');
+writeFileSync(`${home}/data/release`,'awaiting exact authorization');
+const blocked=JSON.parse(readFileSync(path));
+blocked.next_action_seq=2;
+blocked.next_action={id:'prerequisite.g1.a1',kind:'wait',phase:'prepared',expected_execution_generation:'g1',attempts:0,attempt_limit:2,
+  recheck_at:'2026-01-01T00:00:00Z',deadline:'2099-01-01T00:00:00Z',payload_ref:'data/release',payload_sha256:sha(`${home}/data/release`),receipt_ref:null,
+  continuation:{type:'blocker',owner:'dependency-owner',dependency:'exact operation authorization',release_ref:'data/release',release_sha256:sha(`${home}/data/release`),recovery_trigger:'evidence-change'}};
+writeFileSync(`${home}/data/proposal.json`,JSON.stringify(blocked));
+const block=spawnSync(`${process.env.FM_ROOT_OVERRIDE}/bin/fm-task-state.sh`,['reconcile','prerequisite','--expected-revision',String(blocked.revision),'--record',`${home}/data/proposal.json`],{env:{...process.env,FM_SUPERVISION_ACTOR:'main'},encoding:'utf8'});
+if(block.status!==0) throw Error(block.stderr);
+
+if((await beforeSettle()).continued) throw Error('genuine unchanged blocker resumed');
+writeFileSync(`${home}/data/release`,'exact authorization recorded');
+if(!(await beforeSettle()).content.includes('dependency evidence changed')) throw Error('dependency release lost continuation');
+if((await beforeSettle()).continued) throw Error('released dependency bypassed backoff on repeat');
+writeFileSync(`${home}/data/release`,'awaiting exact authorization');
+writeFileSync(`${home}/data/acceptance`,'Requested prerequisite and acceptance checks verified by main.');
+const acceptedReceipt=spawnSync(`${process.env.FM_ROOT_OVERRIDE}/bin/fm-task-state.sh`,['action','prerequisite','--action-id',blocked.next_action.id,'--phase','refused','--receipt-ref','data/acceptance','--receipt-sha256',sha(`${home}/data/acceptance`)],{env:{...process.env,FM_SUPERVISION_ACTOR:'main'},encoding:'utf8'});
+if(acceptedReceipt.status!==0) throw Error(acceptedReceipt.stderr);
+const accepted=JSON.parse(readFileSync(path));
+accepted.disposition='accepted';accepted.assessment.remaining_gap='';accepted.assessment.outcome='Requested prerequisite verified';
+accepted.assessment.evidence.push({ref:'data/acceptance',sha256:sha(`${home}/data/acceptance`)});
+writeFileSync(`${home}/data/proposal.json`,JSON.stringify(accepted));
+const accept=spawnSync(`${process.env.FM_ROOT_OVERRIDE}/bin/fm-task-state.sh`,['reconcile','prerequisite','--expected-revision',String(accepted.revision),'--record',`${home}/data/proposal.json`],{env:{...process.env,FM_SUPERVISION_ACTOR:'main'},encoding:'utf8'});
+if(accept.status!==0) throw Error(accept.stderr);
+if((await beforeSettle()).continued) throw Error('semantic acceptance remained settlement-blocked');
+
+await fire('session_shutdown',{},defaultSessionCtx);
+console.log('continuation survived ack, compaction and later input; changed evidence rechecks once, unchanged waits stay quiet');
+process.exit(0);
+JS
+  )
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "continuation extension public behavior: $out"
+  pass "$out"
+}
+
 test_outcomes_tool_uses_stock_execution_and_export_consumers
 test_real_pi_picker_primitives_stay_bounded_and_searchable
 test_branch_dispatch_two_stage_filter_and_prefix_contract
@@ -5986,3 +6361,7 @@ test_delivery_keeps_the_event_loop_live_and_ordered
 test_session_replacement_during_delivery_neither_loses_nor_duplicates
 test_store_failure_during_delivery_neither_loses_nor_duplicates
 test_mark_read_failure_keeps_routine_redelivery_and_captain_deduplication
+
+test_continuation_defers_reserved_admission_at_ui_boundary
+test_continuation_retries_definite_send_failure_and_isolates_stale_tasks
+test_continuation_survives_ack_compaction_and_unrelated_input

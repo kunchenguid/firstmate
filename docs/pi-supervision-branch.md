@@ -20,6 +20,31 @@ The supervision branch itself is Pi-only by construction:
   A home on any harness that already has an outcome store still receives the shared drain compatibility recovery described in [Lost-wake outcome backstop](#lost-wake-outcome-backstop).
 - It does not change which harness is primary and never moves a home to Pi.
 
+## Live task continuation
+
+Presentation acknowledgement does not establish task acceptance.
+The main session retains an enrolled task's goal assessment in the canonical `data/<task>/lifecycle.json` owner, exposed by `bin/fm-task-state.sh`; `bin/fm-task-lifecycle.py --help` owns its schema and compare-and-swap transitions.
+Enrollment is limited to current task briefs named by an input route, wake claim, or processed outcome, with no historical fleet migration.
+Main records semantic acceptance, an explicit stopped disposition, a named executor with observed receipt/start, or a genuine blocker with responsible owner and observable release evidence.
+A queued handoff, successful send, provider terminal state, reported plan, or PR result cannot independently establish acceptance.
+The existing durable handoff owner retains lease conflicts and deduplicates retries by the original id.
+Attempted and uncertain effects remain readback work; the continuation observer never executes a payload or grants new authority.
+The Pi extension preserves separate input receipts through compaction, checks pending obligations before logical-run settlement, and uses the existing heartbeat coordinator's tick for bounded rechecks.
+Unchanged genuine blockers, healthy observed execution, accepted goals, and explicitly stopped goals stay quiet.
+Changing dependency evidence or a missing executor makes the precise retained obligation actionable again without re-presenting its already acknowledged outcome.
+The extension limits unchanged automatic prompts to two with backoff, including settlement-triggered continuations.
+The canonical lifecycle record retains the budget across reload, compaction and unrelated input.
+Before releasing a logical Pi run, the existing heartbeat coordinator actually reads current obligations and persists a generation-bound receipt; the task remains pending, and that receipt proves coordination rather than execution or acceptance.
+After two delivered requests without a verified continuation, the main session durably presents one initial coordination-failure follow-up and starts an executable main turn, including when full heartbeat maintenance is disabled.
+The initial request budget stays exhausted, but if the durable observation remains unchanged after that turn, the same clock schedules deduplicated recovery turns with increasing delay until authoritative observation changes; reload, compaction, and unrelated input preserve that pace.
+A lifecycle observation refusal never infers a receiver or execution state: it presents an explicit reconciliation request and follows the same persisted recovery pacing until canonical observation succeeds.
+The task stays open: the escalation is neither an executor receipt nor a fabricated task blocker, and main must assign an authorized executor, reconcile a real dependency, or assess acceptance when it resumes.
+Between due recovery turns, the same clock continues bounded readback without blocking heartbeat maintenance or independent input.
+An admission deferred by UI, tool, input or compaction activity stays reserved in the existing owner until the complete safety check permits delivery; a persisted native message confirms delivery without spending another attempt.
+Both timer delivery and the final before-settle submission recheck those protections after asynchronous readback; before-settle does not require the still-active logical run to become idle.
+This safeguard applies while Pi is alive; it introduces no process-exit recovery, external watchdog, cleanup engine, or parallel lifecycle truth store.
+`tests/fm-task-handoff.test.sh`, `tests/fm-pi-branch-extension.test.sh`, and `tests/fm-periodic-stow-herdr-live-e2e.test.sh` exercise these boundaries through public interfaces.
+
 ## Components and their owners
 
 - Wake dispatch: `.pi/extensions/fm-primary-pi-watch.ts` stays the dispatcher; `.pi/extensions/lib/fm-branch-dispatch.ts` owns the offer handshake and row eligibility, while [`watcher-continuity.md`](watcher-continuity.md#per-actor-acknowledgement) owns the per-actor consume contract.

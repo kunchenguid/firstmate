@@ -43,6 +43,7 @@ cp "$ROOT/.pi/extensions/lib/fm-calm-operational-user-layout.ts" "$TMP_ROOT/.pi/
 cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$TMP_ROOT/.pi/extensions/lib/fm-calm-visibility.ts"
 cp "$ROOT/.pi/extensions/lib/fm-calm-working-ship.ts" "$TMP_ROOT/.pi/extensions/lib/fm-calm-working-ship.ts"
 cp "$ROOT/.pi/extensions/lib/fm-native-contract.ts" "$TMP_ROOT/.pi/extensions/lib/fm-native-contract.ts"
+cp "$ROOT/.pi/extensions/lib/fm-task-continuation.ts" "$TMP_ROOT/.pi/extensions/lib/fm-task-continuation.ts"
 cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$TMP_ROOT/.pi/extensions/lib/fm-operational-input.ts"
 cp "$ROOT/.pi/extensions/lib/fm-feishu-native-channel.ts" "$TMP_ROOT/.pi/extensions/lib/fm-feishu-native-channel.ts"
 cp "$ROOT/bin/fm-feishu-state.d.mts" "$TMP_ROOT/bin/fm-feishu-state.d.mts"

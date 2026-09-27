@@ -1,6 +1,6 @@
 ---
 name: stow
-description: Sweep the current session for uncaptured durable knowledge, file it to disk, persist the open work records this session knows are unfiled or now wrong, and curate the home's tiered, decaying startup memory before a context reset. Use when the captain invokes /stow (e.g. "/stow", "stow what you've learned"), before a session reset or context compaction, or periodically to keep operational memory current.
+description: Sweep the current session for uncaptured durable knowledge, file it to disk, persist the open work records this session knows are unfiled or now wrong, and curate the home's tiered, decaying startup memory before a context reset. Use when the captain invokes /stow (e.g. "/stow", "stow what you've learned"), before a session reset or context compaction, or for the knowledge duty of an authorized heartbeat.
 user-invocable: true
 metadata:
   internal: true
@@ -266,12 +266,17 @@ State what reset-safe means in the same breath as the claim: nothing this sessio
 It is never a claim that the home's durable records are correct, because this pass checks no record the session did not name.
 Do not hide an over-budget result behind a reset-safe claim.
 
-## Coordinated periodic or recoverable invocation
+## Coordinated heartbeat or recoverable invocation
+
+Automatic maintenance is the heartbeat coordinator described in [`docs/configuration.md`](../../../docs/configuration.md#heartbeat-maintenance-configperiodic-stowjson), replacing only periodic stow.
+An `fm-heartbeat-request` uses this skill for knowledge curation and open-record persistence; its task archival and continuation duties remain with the existing guarded task owners named by the coordinator.
+It adds no archive authority, never changes pinned preferences automatically, and uses the same provenance, privacy, retention, budget, and verified-write rules below.
+Manual and pre-compaction stow still execute the complete skill.
 
 When an `fm-stow-request` custom message supplies a `run_id`, this complete skill remains the content owner, while `bin/fm-stow-run.sh` owns the durable request and run lifecycle.
 Treat message delivery and `agent_end` as neither consumption nor completion: call the requested `begin` or `recover` operation with the current state revision before planning, and call `finish` only after writing and reading back the machine receipt.
 If user work, known background validation, a write-critical step, retry, queued input, or compaction still has priority, call `defer` with the concrete reason instead of beginning or continuing a step.
-Unknown session-message types remain candidate material for the ordinary relevance test, while `fm-stow-request` delivery and coordinator bookkeeping are never knowledge merely because they exist; do not turn a coordinated pass into task archival or repository-state inspection.
+Unknown session-message types remain candidate material for the ordinary relevance test, while `fm-stow-request`, `fm-heartbeat-request`, and `fm-task-continuation` delivery and coordinator bookkeeping are never knowledge merely because they exist; do not turn a coordinated pass into task archival or repository-state inspection.
 
 Build one fixed plan under `data/stow-runs/<run_id>/` before the first mutation.
 For every file or owned-record mutation, record a stable operation id, original digest, and target digest through `step --phase prepared`, perform the owner-governed write, read it back, and record `step --phase verified` only when the actual digest equals the planned target.

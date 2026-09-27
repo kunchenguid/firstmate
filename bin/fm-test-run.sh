@@ -1305,7 +1305,10 @@ families_for_changed_path() {
       printf '%s\n' "__script__:fm-aime-cloud-worker.test.sh"
       printf '%s\n' "__script__:fm-remote-agent.test.sh"
       ;;
-    bin/fm-stow-run.sh)
+    bin/fm-task-lifecycle.py|bin/fm-task-lifecycle-lib.sh)
+      printf '%s\n' "__script__:fm-task-handoff.test.sh" "__script__:fm-pi-branch-extension.test.sh"
+      ;;
+    bin/fm-stow-run.sh|bin/fm-heartbeat-receipt.py)
       printf '%s\n' "__script__:fm-periodic-stow.test.sh"
       printf '%s\n' real-herdr-gated
       ;;
@@ -1356,6 +1359,10 @@ families_for_changed_path() {
       # Whether an arriving outcome still lets the captain type is a fact only
       # a real Pi TUI can answer, so the live guards are selected too.
       printf '%s\n' live-harness-optin
+      ;;
+    .pi/extensions/lib/fm-task-continuation.ts)
+      printf '%s\n' __script__:fm-pi-branch-extension.test.sh __script__:fm-pi-primary-types.test.sh
+      printf '%s\n' __script__:fm-periodic-stow-herdr-live-e2e.test.sh
       ;;
     .pi/extensions/fm-periodic-stow.ts)
       printf '%s\n' __script__:fm-periodic-stow.test.sh

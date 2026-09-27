@@ -286,7 +286,7 @@ const pi = {
     list.push(handler);
     handlers.set(name, list);
   },
-  events: { on() {} },
+  events: { on() {}, emit() {} },
   registerCommand(name, options) { commands.set(name, options.handler); },
   sendMessage(message, options) { messages.push({ message, options }); },
 };
@@ -353,12 +353,21 @@ await new Promise((resolve) => setTimeout(resolve, 6));
 await emit("agent_settled");
 await new Promise((resolve) => setTimeout(resolve, 6));
 await emit("agent_settled");
-if (messages.length !== 3) throw new Error(`expected three bounded offers, got ${messages.length}`);
-const ids = new Set(messages.map((item) => item.message.details.run_id));
+const requests = messages.filter((item) => item.message.customType === "fm-heartbeat-request");
+if (requests.some((item) => item.message.display !== false)) throw new Error("automatic maintenance did not use silent heartbeat delivery");
+if (requests.length !== 3) throw new Error(`expected three bounded offers, got ${requests.length}`);
+const ids = new Set(requests.map((item) => item.message.details.run_id));
 if (ids.size !== 1) throw new Error("redelivery changed run_id");
 if (messages.some((item) => item.options.deliverAs !== "followUp" || item.options.triggerTurn !== true)) {
   throw new Error("delivery did not preserve follow-up semantics");
 }
+await new Promise((resolve) => setTimeout(resolve, 6));
+await emit("agent_settled");
+const escalations = messages.filter((item) => item.message.customType === "fm-heartbeat-escalation");
+if (escalations.length !== 1 || !escalations[0].message.display) throw new Error("exhausted heartbeat did not start one executable main handoff");
+await new Promise((resolve) => setTimeout(resolve, 6));
+await emit("agent_settled");
+if (messages.filter((item) => item.message.customType === "fm-heartbeat-escalation").length !== 1) throw new Error("exhausted heartbeat duplicated its reserved handoff");
 await commands.get("stow")("", ctx);
 await emit("session_before_compact", { type: "session_before_compact" });
 const status = JSON.parse((await import("node:fs")).readFileSync(`${process.env.FM_HOME}/state/stow/state.json`, "utf8"));
@@ -366,12 +375,100 @@ if (!status.active.reasons.includes("manual") || !status.active.reasons.includes
   throw new Error("manual and precompact reasons did not deduplicate into the active run");
 }
 await emit("session_shutdown", { type: "session_shutdown", reason: "quit" });
-console.log(JSON.stringify({ messages: messages.length, notices: notices.length, attempts: status.active.attempts }));
+console.log(JSON.stringify({ messages: requests.length, escalations: escalations.length, notices: notices.length, attempts: status.active.attempts }));
 EOF
   ) || fail "Pi coordinator lifecycle failed: $out"
   [ "$(printf '%s' "$out" | tail -1 | jq -r '.messages')" -eq 3 ] || fail "bounded redelivery evidence missing: $out"
   [ "$(printf '%s' "$out" | tail -1 | jq -r '.attempts')" -eq 3 ] || fail "durable attempt count missing: $out"
-  pass "Pi coordinator stays default-off, waits for tools, queues, and editor input, then redelivers one run at most three times"
+  [ "$(printf '%s' "$out" | tail -1 | jq -r '.escalations')" -eq 1 ] || fail "executable heartbeat handoff missing: $out"
+  pass "Pi coordinator bounds heartbeat delivery and hands exhaustion to one executable main turn"
+}
+
+test_heartbeat_requires_three_verified_duties() {
+  local home session out run rev receipt proof hash
+  home=$(new_home heartbeat)
+  session=$(seed_session "$home" session)
+  out=$(request_run "$home" "$session" heartbeat) || fail "heartbeat request failed: $out"
+  run=$(printf '%s' "$out" | jq -r '.run_id')
+  rev=$(printf '%s' "$out" | jq -r '.revision')
+  out=$(run_main "$home" deliver --run-id "$run" --generation generation-1 --expected-revision "$rev") || fail "heartbeat delivery failed"
+  rev=$(printf '%s' "$out" | jq -r '.revision')
+  out=$(run_main "$home" begin --run-id "$run" --session-id session-1 --generation generation-1 \
+    --target-entry-id entry-1 --branch-fingerprint aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --expected-revision "$rev") || fail "heartbeat begin failed"
+  rev=$(printf '%s' "$out" | jq -r '.revision')
+  mkdir -p "$home/data/stow-runs/$run"
+  receipt="data/stow-runs/$run/receipt.json"
+  proof="data/stow-runs/$run/readback.md"
+  printf '%s\n' 'No accepted landed archive candidates; all continuations evidenced; pinned knowledge unchanged.' >"$home/$proof"
+  hash=$(sha256sum "$home/$proof" | awk '{print $1}')
+  jq -cn --arg run "$run" '{version:1,run_id:$run,generation:"generation-1",outcome:"succeeded",budget:{ok:true},local_steps:[],cascade:[],preflight:{complete:true,homes:[]}}' >"$home/$receipt"
+  if run_main "$home" finish --run-id "$run" --generation generation-1 --receipt-ref "$receipt" --interval-seconds 3600 --expected-revision "$rev" >/dev/null; then
+    fail "heartbeat completed without its three duty readbacks"
+  fi
+  [ "$(FM_HOME="$home" "$RUN" status | jq -r '.active.run_id')" = "$run" ] || fail "failed heartbeat lost its obligation"
+  jq --arg ref "$proof" --arg hash "$hash" '.heartbeat={archival:{status:"unchanged",evidence_ref:$ref,sha256:$hash},continuation:{status:"complete",evidence_ref:$ref,sha256:$hash},knowledge:{status:"unchanged",evidence_ref:$ref,sha256:$hash}}' "$home/$receipt" >"$home/next.json"
+  mv "$home/next.json" "$home/$receipt"
+  printf 'changed' >>"$home/$proof"
+  if run_main "$home" finish --run-id "$run" --generation generation-1 --receipt-ref "$receipt" --interval-seconds 3600 --expected-revision "$rev" >/dev/null; then
+    fail "heartbeat accepted changed readback evidence"
+  fi
+  printf '%s\n' 'No accepted landed archive candidates; all continuations evidenced; pinned knowledge unchanged.' >"$home/$proof"
+  out=$(run_main "$home" finish --run-id "$run" --generation generation-1 --receipt-ref "$receipt" --interval-seconds 3600 --expected-revision "$rev") || fail "verified heartbeat refused: $out"
+  [ "$(FM_HOME="$home" "$RUN" status | jq -r '.active')" = null ] || fail "verified heartbeat remains active"
+  pass "heartbeat retains failed duties and completes only with three unchanged bound readbacks"
+}
+
+test_heartbeat_persistent_recovery_keeps_budget_and_identity() {
+  local home session out run rev id next_id due base_path clockbin
+  home=$(new_home paced-recovery); session=$(seed_session "$home" session)
+  clockbin="$home/clockbin"; mkdir -p "$clockbin"
+  base_path=$PATH
+  # Advance only the fixture wall clock; no production timing override exists.
+  printf '2000000000\n' >"$home/clock"
+  cat >"$clockbin/date" <<'DATE'
+#!/usr/bin/env python3
+from datetime import datetime, timezone
+from pathlib import Path
+import sys
+value=int((Path(__file__).parent.parent/'clock').read_text())
+print(value if sys.argv[-1]=='+%s' else datetime.fromtimestamp(value,timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'))
+DATE
+  chmod +x "$clockbin/date"
+  PATH="$clockbin:$base_path"
+  out=$(request_run "$home" "$session" heartbeat) || fail "heartbeat request: $out"
+  run=$(printf '%s' "$out" | jq -r .run_id)
+  rev=$(printf '%s' "$out" | jq -r .revision)
+  for _ in 1 2 3 4; do
+    out=$(run_main "$home" deliver --run-id "$run" --generation gen-1 --expected-revision "$rev") || fail "offer: $out"
+    rev=$(printf '%s' "$out" | jq -r .revision)
+  done
+  id=$(printf '%s' "$out" | jq -r .escalation_id)
+  out=$(run_main "$home" delivery --run-id "$run" --generation gen-1 --operation-id "$id" --expected-revision "$rev") || fail "receipt: $out"
+  rev=$(printf '%s' "$out" | jq -r .revision)
+  for _ in 1 2 3; do
+    out=$(run_main "$home" deliver --run-id "$run" --generation gen-reloaded --expected-revision "$rev") || fail "cooldown: $out"
+    [ "$(printf '%s' "$out" | jq -r .outcome)" = escalated ] || fail "reload bypassed deadline"
+  done
+  printf '2000000060\n' >"$home/clock"
+  out=$(run_main "$home" deliver --run-id "$run" --generation gen-reloaded --expected-revision "$rev") || fail "recovery: $out"
+  rev=$(printf '%s' "$out" | jq -r .revision); next_id=$(printf '%s' "$out" | jq -r .escalation_id)
+  [ "$next_id" = "$id.r.1" ] || fail "first recovery identity: $out"
+  out=$(run_main "$home" deliver --run-id "$run" --generation gen-third --expected-revision "$rev") || fail "reservation rebind: $out"
+  rev=$(printf '%s' "$out" | jq -r .revision)
+  [ "$(printf '%s' "$out" | jq -r .escalation_id)" = "$next_id" ] || fail "generation replaced undelivered recovery"
+  out=$(run_main "$home" begin --run-id "$run" --session-id session-1 --generation gen-third --target-entry-id entry-1 \
+    --branch-fingerprint aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --expected-revision "$rev") || fail "begin recovery: $out"
+  rev=$(printf '%s' "$out" | jq -r .revision)
+  out=$(run_main "$home" delivery --run-id "$run" --generation gen-third --operation-id "$next_id" --expected-revision "$rev") || fail "recovery receipt: $out"
+  rev=$(printf '%s' "$out" | jq -r .revision)
+  due=$(FM_HOME="$home" "$RUN" status | jq -r .active.recovery_not_before)
+  [ "$due" = 2000000180 ] || fail "recovery backoff was not anchored to delivery: $due"
+  printf '%s\n' "$due" >"$home/clock"
+  out=$(run_main "$home" deliver --run-id "$run" --generation gen-third --expected-revision "$rev") || fail "second recovery: $out"
+  [ "$(printf '%s' "$out" | jq -r .escalation_id)" = "$id.r.2" ] || fail "unfinished heartbeat stopped recovering"
+  FM_HOME="$home" "$RUN" status | jq -e '.active.attempts==3 and .active.recovery_attempts==2 and .active.phase=="running" and .last_result==null' >/dev/null || fail "recovery fabricated progress or reset budget"
+  PATH=$base_path
+  pass "heartbeat persists paced recovery across generations without resetting attempts or fabricating progress"
 }
 
 test_status_is_read_only_and_default_idle
@@ -382,3 +479,7 @@ test_later_cutoff_is_promoted_after_completed_run
 test_disable_withdraws_only_unconsumed_periodic_work
 test_receipts_and_corrupt_state_fail_closed
 test_pi_coordinator_waits_for_safe_settle_and_bounds_redelivery
+
+test_heartbeat_requires_three_verified_duties
+
+test_heartbeat_persistent_recovery_keeps_budget_and_identity

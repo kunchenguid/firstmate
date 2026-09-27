@@ -211,6 +211,9 @@ if [ -n "$TARGET_META" ]; then
   if [ -n "$LEASE_GUARD_TASK" ]; then
     fm_lease_guard "$LEASE_GUARD_TASK" "steer (fm-send)"
     trap 'fm_lease_guard_release' EXIT
+    # shellcheck source=bin/fm-task-lifecycle-lib.sh
+    . "$SCRIPT_DIR/fm-task-lifecycle-lib.sh"
+    fm_task_lifecycle_execution_guard "$LEASE_GUARD_TASK" || exit 1
   fi
 fi
 

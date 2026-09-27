@@ -6,6 +6,29 @@ This record supports current session-start, turn-end, watcher-continuity, and we
 Operator behavior and active limits remain in the linked current guides.
 Task-specific chronology, temporary paths, run identifiers, and delivery transcripts remain in private reports or PR evidence.
 
+## Live continuation and heartbeat
+
+Verified on 2026-09-26 with Pi 0.87.1 and pi-openai-codex-compat 0.0.16 in a named isolated Herdr session, using the actual candidate extensions and a deterministic offline provider.
+The public regression and real-host commands are:
+
+```sh
+bash tests/fm-task-handoff.test.sh
+bash tests/fm-pi-branch-extension.test.sh
+bash tests/fm-periodic-stow.test.sh
+bash tests/fm-pi-primary-types.test.sh
+FM_PERIODIC_STOW_HERDR_LIVE=1 bash tests/fm-periodic-stow-herdr-live-e2e.test.sh
+```
+
+The live guard's terminal assertion is:
+
+```text
+ok - real Pi 0.87.1 with pi-openai-codex-compat 0.0.16 accepted heartbeat and retained live continuation through provider success and compaction
+```
+
+It verifies Pi's actual before-settle continuation entry and actual compaction while the same process remains alive; controlled fixtures separately prove semantic assessment, exact executor receipts, dependency release, uncertain effects, and three-duty heartbeat receipts.
+The guarded lab helper verifies the default fleet is unchanged after teardown.
+This is not a process-exit recovery or production fleet exercise.
+
 ## Native session-start delivery
 
 The cross-harness transport pass ran on 2026-07-17 with Codex 0.144.4 and Pi 0.80.10.

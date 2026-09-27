@@ -10,6 +10,8 @@
 #     --expected-revision N
 #   FM_HOME=/path/to/home fm-stow-run.sh deliver --run-id UUID \
 #     --generation TOKEN --expected-revision N
+#   FM_HOME=/path/to/home fm-stow-run.sh delivery --run-id UUID \
+#     --generation TOKEN --operation-id ID --expected-revision N
 #   FM_HOME=/path/to/home fm-stow-run.sh step --run-id UUID --generation TOKEN \
 #     --operation-id ID --phase prepared|verified --plan-ref RELATIVE_PATH \
 #     --before-sha256 SHA256 --target-sha256 SHA256 [--actual-sha256 SHA256] \
@@ -27,6 +29,15 @@
 # accepted, not that stow succeeded. Exit 2 is bad input/configuration, 3 is an
 # ownership or compare-and-swap conflict, and 4 is durable I/O/verification
 # failure. This script owns coordination evidence only; it never edits memory.
+# reason=heartbeat replaces the automatic periodic producer, retaining the same
+# run/CAS/step/pending owner. Successful/skipped heartbeat receipts additionally
+# require heartbeat.{archival,continuation,knowledge}, each with status
+# complete|unchanged and an evidence_ref (home data/state) plus its sha256.
+# fm-heartbeat-receipt.py validates those evidence bindings, not goal semantics.
+# Exhausted heartbeat offers retain their original attempt budget and use
+# separately counted recovery deliveries with 60-second exponential backoff
+# capped at 15 minutes. Delivery never proves execution or completion.
+# Manual/precompact and legacy in-flight periodic runs keep their old contract.
 set -u
 umask 077
 
@@ -97,15 +108,20 @@ state_filter='
     (.next_due_at == null or (.next_due_at | type == "string")) and
     (.pending == null or
       (.pending | type == "object" and
-        (.reasons | type == "array") and (.reasons | all(. == "periodic" or . == "manual" or . == "precompact" or . == "cascade")) and
+        (.reasons | type == "array") and (.reasons | all(. == "periodic" or . == "heartbeat" or . == "manual" or . == "precompact" or . == "cascade")) and
         (.target_session_id | type == "string") and (.target_session_file | type == "string") and
         (.target_entry_id | type == "string") and (.branch_fingerprint | test("^[0-9a-f]{64}$")))) and
     (.active == null or
       (.active | type == "object" and (.run_id | type == "string") and
-        (.reasons | type == "array") and (.reasons | all(. == "periodic" or . == "manual" or . == "precompact" or . == "cascade")) and
+        (.reasons | type == "array") and (.reasons | all(. == "periodic" or . == "heartbeat" or . == "manual" or . == "precompact" or . == "cascade")) and
         (.session_id | type == "string") and (.session_file | type == "string") and
         (.generation == null or (.generation | type == "string")) and
         (.offered_generation == null or (.offered_generation | type == "string")) and
+        (.escalation_id == null or (.escalation_id | type == "string" and test("^e\\.[A-Za-z0-9._:-]{1,255}$"))) and
+        (.escalation_generation == null or (.escalation_generation | type == "string")) and
+        (.escalation_delivered_at == null or (.escalation_delivered_at | type == "string")) and
+        ((.recovery_attempts // 0) | type == "number" and . >= 0 and . <= 9007199254740991 and floor == .) and
+        (.recovery_not_before == null or (.recovery_not_before | type == "number" and . >= 0 and floor == .)) and
         (.phase == "requested" or .phase == "running" or .phase == "partial" or .phase == "blocked") and
         (.attempts | type == "number" and . >= 0 and . <= 3 and floor == .) and
         (.cutoff_entry_id | type == "string") and (.branch_fingerprint | test("^[0-9a-f]{64}$")) and
@@ -254,7 +270,7 @@ case "$COMMAND" in
     printf '%s\n' "$STATE" | jq -c '. + {outcome:(if .active then .active.phase elif .pending then "pending" else "idle" end)}'
     ;;
   request)
-    case "$reason" in periodic|manual|precompact|cascade) ;; *) die 2 invalid-reason "unsupported request reason" ;; esac
+    case "$reason" in heartbeat|periodic|manual|precompact|cascade) ;; *) die 2 invalid-reason "unsupported request reason" ;; esac
     if ! valid_id "$session_id" || ! valid_id "$target_entry_id" || ! valid_sha "$branch_fingerprint"; then
       die 2 invalid-request "invalid session, entry, or branch fingerprint"
     fi
@@ -287,7 +303,8 @@ case "$COMMAND" in
         .pending=null |
         .active={run_id:$run,reasons:[$r],session_id:$sid,session_file:$sf,generation:null,
           phase:"requested",cutoff_entry_id:$eid,branch_fingerprint:$fp,offered_generation:null,plan_ref:null,
-          receipt_ref:null,attempts:0,steps:[],defer_reason:null,started_at:$now,parent_run_id:null}
+          receipt_ref:null,attempts:0,escalation_id:null,escalation_generation:null,
+          escalation_delivered_at:null,steps:[],defer_reason:null,started_at:$now,parent_run_id:null}
       ')
     commit_state "$STATE"
     printf '%s\n' "$STATE" | jq -c '{version:1,outcome:"requested",run_id:.active.run_id,revision:.revision,phase:.active.phase}'
@@ -328,14 +345,71 @@ case "$COMMAND" in
     [ "$(printf '%s' "$STATE" | jq -r '.active.run_id // ""')" = "$run_id" ] \
       || die 3 stale-run "run_id does not own the active run"
     active_phase=$(printf '%s' "$STATE" | jq -r '.active.phase')
-    case "$active_phase" in requested|partial) ;; *) die 3 invalid-phase "only requested or partial runs may be delivered" ;; esac
+    heartbeat_run=$(printf '%s' "$STATE" | jq -r '[.active.reasons[]|select(.=="heartbeat")]|length>0')
+    case "$active_phase" in
+      requested|partial) ;;
+      running) [ "$heartbeat_run" = true ] || die 3 invalid-phase "only heartbeat runs may recover at an idle boundary" ;;
+      *) die 3 invalid-phase "run cannot be delivered from $active_phase" ;;
+    esac
     attempts=$(printf '%s' "$STATE" | jq -r '.active.attempts')
-    [ "$attempts" -lt 3 ] || die 3 delivery-exhausted "the same run_id has already been offered three times"
+    if [ "$attempts" -ge 3 ]; then
+      heartbeat_run=$(printf '%s' "$STATE" | jq -r '[.active.reasons[]|select(.=="heartbeat")]|length>0')
+      [ "$heartbeat_run" = true ] || die 3 delivery-exhausted "the same run_id has already been offered three times"
+      escalation_id=$(printf '%s' "$STATE" | jq -r --arg run "$run_id" '.active.escalation_id // ("e."+$run)')
+      delivered_at=$(printf '%s' "$STATE" | jq -r '.active.escalation_delivered_at // ""')
+      if [ -n "$delivered_at" ]; then
+        # Legacy receipts derive the first deadline from their actual delivery.
+        due=$(printf '%s' "$STATE" | jq -r '.active.recovery_not_before // ((.active.escalation_delivered_at|fromdateiso8601)+60)')
+        if [ "$(date -u +%s)" -lt "$due" ]; then
+          printf '%s\n' "$STATE" | jq -c '{version:1,outcome:"escalated",run_id:.active.run_id,revision:.revision,
+            attempts:.active.attempts,escalation_id:.active.escalation_id}'
+          exit 0
+        fi
+        recovery_attempts=$(printf '%s' "$STATE" | jq -r '.active.recovery_attempts // 0')
+        [ "$recovery_attempts" -lt 9007199254740991 ] || die 4 recovery-exhausted "recovery counter exhausted"
+        recovery_attempts=$((recovery_attempts + 1))
+        escalation_id="e.$run_id.r.$recovery_attempts"
+        STATE=$(printf '%s' "$STATE" | jq -c --argjson count "$recovery_attempts" '
+          .active.recovery_attempts=$count | .active.escalation_delivered_at=null')
+      fi
+      if [ -n "$delivered_at" ] || [ "$(printf '%s' "$STATE" | jq -r '.active.escalation_generation // ""')" != "$generation" ]; then
+        STATE=$(printf '%s' "$STATE" | jq -c --arg gen "$generation" --arg id "$escalation_id" --argjson rev "$next_revision" '
+          .revision=$rev | .active.offered_generation=$gen | .active.escalation_id=$id |
+          .active.escalation_generation=$gen
+        ')
+        commit_state "$STATE"
+      fi
+      printf '%s\n' "$STATE" | jq -c '{version:1,outcome:"escalate",run_id:.active.run_id,revision:.revision,
+        attempts:.active.attempts,escalation_id:.active.escalation_id}'
+      exit 0
+    fi
     STATE=$(printf '%s' "$STATE" | jq -c --arg gen "$generation" --argjson rev "$next_revision" '
       .revision=$rev | .active.offered_generation=$gen | .active.attempts=(.active.attempts+1)
     ')
     commit_state "$STATE"
     printf '%s\n' "$STATE" | jq -c '{version:1,outcome:"deliver",run_id:.active.run_id,revision:.revision,attempts:.active.attempts}'
+    ;;
+  delivery)
+    require_revision
+    if ! valid_id "$run_id" || ! valid_id "$generation" || ! valid_id "$operation_id"; then
+      die 2 invalid-identity "run_id, generation, and operation_id are required"
+    fi
+    [ "$(printf '%s' "$STATE" | jq -r '.active.run_id // ""')" = "$run_id" ] \
+      || die 3 stale-run "run_id does not own the active run"
+    [ "$(printf '%s' "$STATE" | jq -r '.active.escalation_id // ""')" = "$operation_id" ] \
+      || die 3 stale-delivery "operation_id does not own the escalation"
+    [ "$(printf '%s' "$STATE" | jq -r '.active.escalation_generation // ""')" = "$generation" ] \
+      || die 3 stale-generation "generation does not own the escalation"
+    if [ "$(printf '%s' "$STATE" | jq -r '.active.escalation_delivered_at // ""')" = "" ]; then
+      STATE=$(printf '%s' "$STATE" | jq -c --arg now "$now" --argjson rev "$next_revision" '
+        .revision=$rev | .active.escalation_delivered_at=$now |
+        .active.recovery_not_before=(($now|fromdateiso8601) +
+          ([900, (60 * pow(2; ([.active.recovery_attempts // 0, 4]|min)))]|min))
+      ')
+      commit_state "$STATE"
+    fi
+    printf '%s\n' "$STATE" | jq -c '{version:1,outcome:"delivered",run_id:.active.run_id,revision:.revision,
+      attempts:.active.attempts,escalation_id:.active.escalation_id}'
     ;;
   step)
     require_revision
@@ -415,7 +489,12 @@ case "$COMMAND" in
       select(.version==1 and .run_id==$run and .generation==$gen) | .outcome |
       select(.=="succeeded" or .=="skipped" or .=="partial" or .=="blocked")
     ' "$RECEIPT" 2>/dev/null) || die 4 invalid-receipt "receipt identity or outcome is invalid"
-    periodic_run=$(printf '%s' "$STATE" | jq -r '[.active.reasons[]|select(.=="periodic")]|length>0')
+    periodic_run=$(printf '%s' "$STATE" | jq -r '[.active.reasons[]|select(.=="periodic" or .=="heartbeat")]|length>0')
+    heartbeat_run=$(printf '%s' "$STATE" | jq -r '[.active.reasons[]|select(.=="heartbeat")]|length>0')
+    if [ "$heartbeat_run" = true ] && { [ "$receipt_outcome" = succeeded ] || [ "$receipt_outcome" = skipped ]; }; then
+      python3 "$ROOT/bin/fm-heartbeat-receipt.py" "$HOME_CANON" "$RECEIPT" \
+        || die 4 unfinished-heartbeat "all three heartbeat duties require verified evidence; unfinished duties remain active"
+    fi
     if [ "$receipt_outcome" = succeeded ]; then
       jq -e '
         .budget.ok==true and
@@ -470,7 +549,8 @@ case "$COMMAND" in
             {run_id:$next,reasons:.pending.reasons,session_id:.pending.target_session_id,
               session_file:.pending.target_session_file,generation:null,phase:"requested",
               cutoff_entry_id:.pending.target_entry_id,branch_fingerprint:.pending.branch_fingerprint,
-              offered_generation:null,plan_ref:null,receipt_ref:null,attempts:0,steps:[],
+              offered_generation:null,plan_ref:null,receipt_ref:null,attempts:0,escalation_id:null,
+              escalation_generation:null,escalation_delivered_at:null,steps:[],
               defer_reason:null,started_at:$now,parent_run_id:$completed}
             else null end) |
           .pending=null
@@ -481,7 +561,7 @@ case "$COMMAND" in
     ;;
   disable)
     active_phase=$(printf '%s' "$STATE" | jq -r '.active.phase // ""')
-    periodic_only=$(printf '%s' "$STATE" | jq -r '(.active != null) and (.active.phase=="requested") and ((.active.reasons|length)>0) and ([.active.reasons[]|select(.!="periodic")]|length==0)')
+    periodic_only=$(printf '%s' "$STATE" | jq -r '(.active != null) and (.active.phase=="requested") and ((.active.reasons|length)>0) and ([.active.reasons[]|select(.!="periodic" and .!="heartbeat")]|length==0)')
     if [ "$periodic_only" = true ]; then
       STATE=$(printf '%s' "$STATE" | jq -c --argjson rev "$next_revision" '.revision=$rev|.active=null|.pending=null')
       commit_state "$STATE"

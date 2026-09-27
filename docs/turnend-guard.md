@@ -36,6 +36,7 @@ A stale beacon, dead daemon, or identity mismatch never establishes supervision 
 
 Pi's internal follow-up remains separate from Feishu input and is never projected into the Feishu outbox.
 Pi also requires `.pi/extensions/fm-primary-pi-watch.ts` for extension-owned watcher continuity.
+The separate [live task continuation boundary](pi-supervision-branch.md#live-task-continuation) checks retained goals before settlement; a healthy watcher alone is not task completion.
 Codex follows its bounded foreground checkpoint protocol; native hook coverage is version- and surface-dependent, with interactive startup limitations documented in [native startup](sessionstart-nudge.md).
 TraeX is worker-only and has no primary integration.
 No adapter manufactures supervision with a shell ampersand.
