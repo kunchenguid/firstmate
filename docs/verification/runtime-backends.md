@@ -393,6 +393,34 @@ Removing the `--force` arm makes the forced generic case refuse; honoring `--for
 Restoring `fm_backend_orca_kill`'s swallowed tool check makes the CLI-absent adapter case report success.
 Dropping the retention-is-not-durable line makes the refusal claim a retention teardown does not own.
 
+## Pi project trust
+
+Verified 2026-09-17 on Pi 0.85.1 with real interactive sessions in three fresh linked worktrees and an isolated `PI_CODING_AGENT_DIR`.
+The credentialed live guard created one project-local Pi skill so the unseen-path control reached Pi's real project-trust decision, then sent prompts whose expected reply did not occur in the prompt text.
+
+```sh
+FM_PI_TRUST_LIVE_E2E=1 \
+  FM_PI_TRUST_LIVE_MODEL=llmgateway/kimi-k3 \
+  bin/fm-test-run.sh tests/fm-pi-trust-live-e2e.test.sh
+```
+
+```text
+ok - real Pi 0.85.1 shows the project-trust dialog in an unregistered linked worktree
+ok - real Pi 0.85.1 --approve bypasses the dialog for one run without persisting trust
+ok - real Pi 0.85.1 reaches its brief without the trust dialog after pre-registration
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0
+```
+
+The control pane stopped at `Trust project folder?` and named its fresh worktree before processing a prompt.
+The second arm proved Candidate A: `--approve` suppressed the dialog and processed the prompt, but left no path decision in `trust.json` after that run.
+The treatment arm used `bin/fm-pi-trust.sh` to write `"<absolute treatment worktree>": true`, launched without `--approve`, rendered no dialog anywhere in pane history, and returned the requested reply.
+
+`bin/fm-spawn.sh` uses the durable pre-registration rather than the viable launch flag.
+This is the stronger control because it writes the same store as Pi's interactive Trust answer and does not make unattended task startup depend on the continued meaning of an upstream one-run flag.
+The helper requires a linked worktree that shares the supplied project's git common directory, preserves unrelated store keys, replaces the store atomically, retries one detected concurrent store move, confirms the entry from a fresh read, and refuses the launch if any step fails.
+`tests/fm-pi-trust.test.sh` pins those behaviors and the primary-checkout, unrelated-repository, subdirectory, plain-directory, and home-directory refusals without invoking Pi.
+The live guard is the refresh command after a Pi upgrade because only a real Pi session can prove that either trust mechanism still suppresses the vendor dialog.
+
 ## Claude workspace trust
 
 Verified 2026-09-03 on Claude Code 2.1.259.
