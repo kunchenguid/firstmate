@@ -1355,6 +1355,8 @@ test_recovery_requires_host_exit_and_exact_incarnation() {
   local client scenario expected out
   orca_case recovery-state
   client="$CASE_DIR/app.asar.unpacked/out/cli/runtime"
+  out=$(PATH="$FB:$PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state orca term-proof' "$ROOT")
+  [ "$out" = unverified ] || fail "Orca without its bundled client: expected unverified, got $out"
   mkdir -p "$client"
   cat > "$client/client.js" <<'JS'
 let reads = 0;
@@ -1394,13 +1396,26 @@ JS
       stopped) expected=missing ;;
       live) expected=alive ;;
       shell|unknown-process|synthetic-exit|still-live) expected=ambiguous ;;
+      old-host) expected=unverified ;;
       *) expected=unreadable ;;
     esac
     out=$(PATH="$FB:$PATH" FM_ORCA_SCENARIO="$scenario" \
       bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state orca term-proof' "$ROOT")
     [ "$out" = "$expected" ] || fail "Orca $scenario: expected $expected, got $out"
   done
-  pass "Orca recovery: confirmed exit permits replacement; live, ambiguous, stale and unreachable endpoints fail closed"
+  out=$(PATH="$FB:$PATH" FM_ORCA_SCENARIO=stopped ORCA_ENVIRONMENT=elsewhere \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state orca term-proof' "$ROOT")
+  [ "$out" = unverified ] || fail "Orca pinned to a remote environment: expected unverified, got $out"
+  out=$(PATH="$FB:$PATH" FM_ORCA_SCENARIO=stopped \
+    bash -c '. "$0/bin/fm-backend.sh"; . "$0/bin/fm-control-lib.sh"; fm_backend_source orca; fm_control_endpoint_absence_verdict orca term-proof' "$ROOT")
+  [ "$out" = $'gone\t' ] || fail "confirmed exit should prove absence, got '$out'"
+  out=$(PATH="$FB:$PATH" FM_ORCA_SCENARIO=old-host \
+    bash -c '. "$0/bin/fm-backend.sh"; . "$0/bin/fm-control-lib.sh"; fm_backend_source orca; fm_control_endpoint_absence_verdict orca term-proof' "$ROOT")
+  case "$out" in
+    unproven$'\t'*prerequisites*) ;;
+    *) fail "an unverified Orca reading must stay unproven for recovery, got '$out'" ;;
+  esac
+  pass "Orca recovery: confirmed exit permits replacement; live, ambiguous, stale and unreachable endpoints fail closed; absent prerequisites read unverified and never prove absence"
 }
 
 test_recovery_requires_host_exit_and_exact_incarnation

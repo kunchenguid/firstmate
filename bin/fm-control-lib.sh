@@ -301,6 +301,14 @@ fm_control_backend_state_verified() {  # <backend>
   return 1
 }
 
+# The one operator action that turns a refused Orca endpoint into a
+# recoverable one. Orca's proof covers full terminal exits only, so a live
+# agent or the shell it leaves behind is refused until the operator closes the
+# old terminal itself; Firstmate never closes a live terminal on its own.
+fm_control_orca_recovery_step() {
+  printf 'close the old Orca terminal itself (not just the agent inside it) so Orca records a full terminal exit, then retry; Firstmate never closes a live terminal for you, and a handle Orca no longer resolves cannot be recovered through relaunch'
+}
+
 # fm_control_endpoint_absence_verdict: the ONE owner of the per-backend proof
 # that an endpoint reading `missing` is actually GONE rather than merely
 # unreachable from this seat. Call it only for a `missing` raw state.
@@ -334,6 +342,8 @@ fm_control_backend_state_verified() {  # <backend>
 #   orca CAN prove a full local terminal exit. fm-orca-probe.mjs owns its
 #     incarnation-bound host inventory and exit evidence. A stale handle or a
 #     connected shell never licenses replacement; recheck the same handle.
+#     Only the operator closes the old terminal; this plane never closes a
+#     live terminal to manufacture that proof (fm_control_orca_recovery_step).
 #   tmux CANNOT. `list-windows -a` describes only the server the CURRENT
 #     process addresses (its TMUX_TMPDIR/socket), and a task's record does not
 #     carry the endpoint's socket identity - so a different but running server
@@ -369,6 +379,7 @@ fm_control_endpoint_absence_verdict() {  # <backend> <target>
       case "$(fm_backend_orca_agent_state "$target")" in
         missing) printf 'gone\t' ;;
         alive) printf 'alive\t' ;;
+        unverified) printf 'unproven\tthis Orca install lacks the recovery probe prerequisites (a local runtime at 1.4.212 or newer with its bundled runtime client)' ;;
         *) printf 'unproven\tthe recorded Orca terminal incarnation has no fresh, local host-confirmed exit proof' ;;
       esac
       ;;

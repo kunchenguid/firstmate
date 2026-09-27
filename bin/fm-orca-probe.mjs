@@ -1,8 +1,14 @@
 #!/usr/bin/env node
 // Read-only Orca recovery evidence. Usage: fm-orca-probe.mjs <orca-cli> <handle>
-// Prints missing, unreadable, ambiguous, or process<TAB><foreground process>.
+// Prints missing, unreadable, ambiguous, unverified, or process<TAB><foreground process>.
 // The shell adapter owns harness-name classification. No connected shell is
 // declared dead: Orca's legacy child-process boolean cannot prove that absence.
+//
+// `unverified` is the reading Orca gave before it had a classifier, and it is
+// reserved for an install where this probe cannot run at all: no bundled
+// client, a runtime below the recovery floor, or a non-local Orca. A probe
+// that ran and failed, or whose reads contradicted each other, is `unreadable`.
+// Neither reading proves anything, so every recovery proof still refuses.
 //
 // terminal.show is presentation, not process authority. Pair an exact handle's
 // incarnation with terminal.list(requireFreshPtyLiveness) on its execution host.
@@ -22,11 +28,19 @@ import { createRequire } from 'node:module';
 const [cli, handle] = process.argv.slice(2);
 const require = createRequire(import.meta.url);
 const nonempty = value => typeof value === 'string' && value.length > 0 && !/[\r\n\t]/.test(value);
+const unverified = reason => Object.assign(Error(reason), { unverified: true });
 let runtimeId;
 try {
-  if (!cli || !nonempty(handle) || process.env.ORCA_ENVIRONMENT || process.env.ORCA_PAIRING_CODE || process.env.ORCA_REMOTE_PAIRING) throw Error('local Orca required');
+  if (!cli || !nonempty(handle)) throw Error('probe arguments');
+  if (process.env.ORCA_ENVIRONMENT || process.env.ORCA_PAIRING_CODE || process.env.ORCA_REMOTE_PAIRING) throw unverified('local Orca required');
   const clientPath = resolve(dirname(realpathSync(cli)), '../app.asar.unpacked/out/cli/runtime/client.js');
-  const { RuntimeClient } = require(clientPath);
+  let RuntimeClient;
+  try {
+    ({ RuntimeClient } = require(clientPath));
+  } catch {
+    throw unverified('bundled client unavailable');
+  }
+  if (typeof RuntimeClient !== 'function') throw unverified('bundled client unavailable');
   const client = new RuntimeClient(undefined, 8000, null, null);
   const call = async (method, params) => {
     const reply = await client.call(method, params);
@@ -37,9 +51,9 @@ try {
   };
   const status = await call('status.get', {});
   const version = /^(\d+)\.(\d+)\.(\d+)$/.exec(status.appVersion ?? '');
-  if (status.graphStatus !== 'ready' || !version ||
-      Number(version[1]) < 1 || (Number(version[1]) === 1 &&
-      (Number(version[2]) < 4 || (Number(version[2]) === 4 && Number(version[3]) < 212)))) throw Error('unverified Orca version');
+  if (status.graphStatus !== 'ready' || !version) throw Error('runtime not ready');
+  if (Number(version[1]) < 1 || (Number(version[1]) === 1 &&
+      (Number(version[2]) < 4 || (Number(version[2]) === 4 && Number(version[3]) < 212)))) throw unverified('Orca version below the recovery floor');
   const read = async () => {
     const terminal = (await call('terminal.show', { terminal: handle })).terminal;
     if (terminal?.handle !== handle || terminal.executionHostId !== 'local' ||
@@ -81,6 +95,6 @@ try {
   }
   if (after.exitCause?.kind !== before.exitCause?.kind) throw Error('exit changed');
   console.log(verdict);
-} catch {
-  console.log('unreadable');
+} catch (err) {
+  console.log(err?.unverified === true ? 'unverified' : 'unreadable');
 }

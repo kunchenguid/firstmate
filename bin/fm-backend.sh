@@ -973,7 +973,8 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
 #   missing    - the recorded endpoint is authoritatively absent.
 #   ambiguous  - the endpoint exists but its process cannot be attributed.
 #   unreadable - a target or inventory read failed or contradicted itself.
-#   unverified - this backend has no recovery classifier.
+#   unverified - this backend has no recovery classifier, or (Orca) the
+#                classifier's own prerequisites are absent on this install.
 # Only `dead` and `missing` license recovery. Every `alive` is proven at
 # process level through the shared classifier in bin/fm-agent-process-lib.sh,
 # never from a registration or a rendered title alone. The tmux adapter
@@ -985,8 +986,9 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
 # `missing` only in this recovery-grade view. Zellij remains unverified because
 # its secondmate ghost-tab and agent-process recovery path has not been
 # empirically validated. Orca's incarnation-bound host probe can prove a full
-# terminal exit (`missing`); a connected shell remains ambiguous, never dead.
-# Orca and cmux do not support secondmate spawns.
+# terminal exit (`missing`); a connected shell remains ambiguous, never dead,
+# and an install without the probe's prerequisites reads `unverified` as it did
+# before the probe existed. Orca and cmux do not support secondmate spawns.
 fm_backend_agent_state() {  # <backend> <target>
   local backend=$1 target=$2
   fm_backend_source "$backend" || { printf 'unverified'; return 0; }

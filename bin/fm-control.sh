@@ -118,7 +118,11 @@
 #     than reported as successful blind.
 #     Orca admits only already-confirmed full terminal exits; a live-agent
 #     exit/relaunch remains refused because a surviving shell is not proven
-#     agent-free. Recovery reuses the task's recorded Orca worktree.
+#     agent-free, and the operator closes the old terminal - this plane never
+#     does. Recovery reuses the task's recorded Orca worktree. An Orca install
+#     without the probe's prerequisites reads `unverified`, so `interrupt`
+#     keeps its pre-recovery behaviour there and only the stop-proving verbs
+#     refuse.
 #   - An ambiguous or unreadable endpoint state refuses; only a positively
 #     classified state acts.
 #   - A composer that visibly holds pending text refuses before an exit command
@@ -536,10 +540,14 @@ verify_interrupt_running() {
   if fm_control_backend_state_verified "$BACKEND"; then
     # An interrupt cancels a turn; it must never have stopped the agent. This
     # is the postcondition that separates a landed interrupt from an accident.
+    # A backend whose classifier cannot run on this install (Orca without its
+    # probe prerequisites) can only vouch for the endpoint, as before.
     after=$(agent_state)
-    [ "$after" = alive ] \
-      || die "task $ID's agent is '$after' after its interrupt key; an interrupt must leave the agent running"
-    proof=agent-alive
+    case "$after" in
+      alive) proof=agent-alive ;;
+      unverified) ;;
+      *) die "task $ID's agent is '$after' after its interrupt key; an interrupt must leave the agent running" ;;
+    esac
   fi
   printf '%s' "$proof"
 }
@@ -603,13 +611,17 @@ do_exit() {
           ;;
       esac
       ;;
-    *) die "task $ID's endpoint reads '$state' rather than a positively classified state; refusing to send a lifecycle command into an unattributed endpoint" ;;
+    *)
+      [ "$BACKEND" != orca ] \
+        || die "task $ID's Orca endpoint reads '$state' rather than a positively classified state; no lifecycle command was sent. Recovery requires a fully stopped old terminal: $(fm_control_orca_recovery_step)"
+      die "task $ID's endpoint reads '$state' rather than a positively classified state; refusing to send a lifecycle command into an unattributed endpoint"
+      ;;
   esac
   # Orca's proof covers full terminal exits, not the shell left by /quit.
   # Keep the pre-existing live-agent stop refusal; enabling recovery must not
   # send a command whose resulting shell we cannot prove agent-free.
   [ "$BACKEND" != orca ] \
-    || die "task $ID has a live Orca agent; recovery requires a host-confirmed full terminal exit, so no lifecycle input was sent"
+    || die "task $ID has a live Orca agent and no lifecycle input was sent; recovery requires a fully stopped old terminal, so $(fm_control_orca_recovery_step)"
   # A busy agent is interrupted first before the exit command is submitted.
   case "$(busy_verdict)" in
     busy*)
@@ -1065,10 +1077,11 @@ case "$VERB" in
     case "$state" in
       alive) ;;
       unverified)
-        # No recovery-grade classifier on this backend. Interrupt is
-        # non-destructive and its endpoint-existence postcondition is still
-        # real, so it proceeds - the printed proof names exactly what was
-        # verified rather than implying more.
+        # No recovery-grade classifier on this backend, or (Orca) none that can
+        # run on this install. Interrupt is non-destructive and its
+        # endpoint-existence postcondition is still real, so it proceeds - the
+        # printed proof names exactly what was verified rather than implying
+        # more.
         ;;
       dead|missing) die "no agent is running at task $ID's recorded endpoint (state: $state); there is nothing to interrupt" ;;
       *) die "task $ID's endpoint reads '$state' rather than a positively classified state; refusing to send a lifecycle key into an unattributed endpoint" ;;

@@ -534,21 +534,78 @@ test_harness_kind_capability() {
   pass "fm-control-lib: adapter capability is per task kind, not per adapter alone"
 }
 
-test_orca_refuses_an_unreadable_endpoint_interrupt() {
+# An Orca install whose CLI lacks the bundled runtime client the recovery probe
+# needs (every Orca before 1.4.212): the fake answers the CLI reads and sends
+# the control plane makes, and nothing else exists beside it.
+add_orca_task() {  # <case-dir> <id> <harness>
+  local dir=$1 id=$2 harness=$3
+  add_task "$dir" "$id" "$harness" ship orca "term-$id"
+  {
+    cat "$dir/home/state/$id.meta"
+    echo "terminal=term-$id"
+    echo "orca_worktree_id=wt-$id::/orca/wt-$id"
+  } > "$dir/home/state/$id.meta.new"
+  sed "s|^window=.*|window=fm-$id|" "$dir/home/state/$id.meta.new" > "$dir/home/state/$id.meta"
+  rm -f "$dir/home/state/$id.meta.new"
+  printf 'wt-%s::/orca/wt-%s' "$id" "$id" > "$dir/fake/orca-worktree-id"
+  cat > "$dir/fakebin/orca" <<'SH'
+#!/usr/bin/env bash
+set -u
+D=$FM_FAKE_DIR
+case "${1:-} ${2:-}" in
+  'terminal read') printf '{"ok":true,"result":{"terminal":{"tail":["$ "]}}}\n' ;;
+  'terminal show')
+    printf '{"ok":true,"result":{"terminal":{"handle":"%s","executionHostId":"local","worktreeId":"%s","worktreePath":"%s"}}}\n' \
+      "$4" "$(cat "$D/orca-worktree-id")" "$(cat "$D/cwd")"
+    ;;
+  'terminal send')
+    case " $* " in
+      *' --interrupt '*) printf 'C-c\n' >> "$D/keys" ;;
+      *' --enter '*) printf 'Enter\n' >> "$D/keys" ;;
+    esac
+    printf '{"ok":true}\n'
+    ;;
+  *) printf '{"ok":false,"error":{"message":"unexpected orca %s"}}\n' "$*"; exit 1 ;;
+esac
+SH
+  chmod +x "$dir/fakebin/orca"
+}
+
+test_orca_refuses_an_escape_harness_interrupt() {
   local dir out rc
   dir=$(new_case orca-escape)
-  add_task "$dir" t1 claude ship orca "term-1"
-  # Orca records its endpoint as terminal=, which endpoint validation requires.
-  {
-    cat "$dir/home/state/t1.meta"
-    echo "terminal=term-1"
-    echo "orca_worktree_id=wt-1::/orca/wt-1"
-  } > "$dir/home/state/t1.meta.new"
-  sed 's|^window=.*|window=fm-t1|' "$dir/home/state/t1.meta.new" > "$dir/home/state/t1.meta"
+  add_orca_task "$dir" t1 claude
   out=$(run_control "$dir" t1 interrupt); rc=$?
-  expect_code 1 "$rc" "an Escape harness on orca should refuse"
-  assert_contains "$out" "unreadable" "refusal should name the missing endpoint proof"
-  pass "fm-control interrupt: an unreadable Orca endpoint receives no lifecycle key"
+  expect_code 1 "$rc" "an Escape harness on orca should refuse"$'\n'"$out"
+  assert_contains "$out" "cannot deliver" "refusal should name the undeliverable key"
+  [ -z "$(keys_sent "$dir")" ] || fail "orca must receive no key for an Escape harness"
+  pass "fm-control interrupt: a backend that cannot deliver the harness's key refuses instead of sending another"
+}
+
+# Without the recovery probe's prerequisites Orca reads `unverified`, exactly as
+# it did before it had a classifier, so a deliverable interrupt still lands and
+# reports endpoint proof only; the stop-proving verbs refuse on that same
+# reading and send nothing.
+test_orca_without_probe_prerequisites_keeps_legacy_interrupt() {
+  local dir out rc
+  dir=$(new_case orca-legacy)
+  add_orca_task "$dir" t1 grok
+  out=$(run_control "$dir" t1 interrupt); rc=$?
+  expect_code 0 "$rc" "a C-c harness on orca without the probe should still interrupt"$'\n'"$out"
+  assert_contains "$out" "interrupt-delivered t1" "the interrupt should report delivery"
+  assert_contains "$out" "verified=endpoint" "only endpoint proof is available without the probe"
+  [ "$(keys_sent "$dir")" = "C-c" ] || fail "orca should receive exactly one interrupt, got '$(keys_sent "$dir")'"
+  : > "$dir/fake/keys"
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 1 "$rc" "exit on orca without the probe must refuse"$'\n'"$out"
+  assert_contains "$out" "unverified" "the exit refusal should name the unverified reading"
+  assert_contains "$out" "close the old Orca terminal" "the exit refusal should name the operator's recovery step"
+  out=$(run_control "$dir" t1 relaunch --note x); rc=$?
+  expect_code 1 "$rc" "relaunch on orca without the probe must refuse"$'\n'"$out"
+  assert_contains "$out" "close the old Orca terminal" "the relaunch refusal should name the operator's recovery step"
+  [ -z "$(keys_sent "$dir")" ] || fail "a refused stop verb must send no key"
+  [ -z "$(literals "$dir")" ] || fail "a refused stop verb must send no text"
+  pass "fm-control: Orca without the recovery probe keeps its legacy interrupt and refuses the stop-proving verbs"
 }
 
 test_unverified_state_backends_refuse_stop_verbs() {
@@ -1083,7 +1140,8 @@ test_relaunch_resume_flag_is_per_adapter_and_reference_owner
 test_prefixed_recorded_harness_reaches_each_control_verb
 test_backend_key_capability_matrix
 test_harness_kind_capability
-test_orca_refuses_an_unreadable_endpoint_interrupt
+test_orca_refuses_an_escape_harness_interrupt
+test_orca_without_probe_prerequisites_keeps_legacy_interrupt
 test_unverified_state_backends_refuse_stop_verbs
 test_state_verified_backends
 test_window_label_is_refused_with_the_exact_id

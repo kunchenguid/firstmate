@@ -63,6 +63,10 @@ Recovery requires Orca runtime `appVersion` 1.4.212 or newer and the installed C
 The CLI does not expose the fresh-inventory and process-inspection reads, so `bin/fm-orca-probe.mjs` uses that bundled client for narrowly scoped, read-only local RPCs without installing another package or reading transport credentials itself.
 A missing client, unsupported version, or incompatible response fails closed; normal spawn retains its existing readiness gate.
 Live-agent exit/relaunch and recovery into an existing shell remain unsupported.
+Recovery therefore requires a fully stopped old terminal, and closing it is the operator's step: close the recorded terminal itself in the Orca app or with `orca terminal close --terminal <handle>`, then run the relaunch.
+Quitting the agent is not enough, because the shell it leaves behind reads `ambiguous`, and a terminal still holding the agent reads `alive`; both refuse without sending any input.
+Firstmate never closes a live terminal on its own to manufacture that proof.
+If Orca no longer resolves the old handle, the probe reads `unreadable` by design and the task cannot be recovered through `relaunch`.
 
 Cleanup keeps all shared Firstmate safety checks.
 A scout still requires its report and completed decision inventory.
@@ -81,6 +85,7 @@ Reinstall the CLI and rerun; [`verification/runtime-backends.md`](verification/r
 - Secondmate spawns are unsupported.
 - Escape is unsupported.
 - Ordinary spawn uses runtime readiness; recovery additionally enforces the version and bundled-client requirements above.
+  Where those are absent the endpoint reads `unverified`, exactly as it did before recovery existed, so `interrupt` keeps its pre-recovery behaviour there and only `exit` and `relaunch` refuse.
 - Only the verified terminal-handle and worktree result fields are accepted; speculative response shapes are rejected.
 - Orca's worktree shape is unverified against the spawn-time Claude workspace-trust check in `bin/fm-claude-trust.sh`, which refuses any path that is not a linked git worktree sharing the project's git common dir, so a claude spawn on Orca fails loudly at that check rather than launching if Orca clones instead of linking.
 

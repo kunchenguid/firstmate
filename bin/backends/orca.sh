@@ -17,13 +17,18 @@
 # Full terminal exits are recoverable; a connected shell is deliberately not
 # classified dead because Orca cannot prove the absence of background agents.
 # The probe owns the exact incarnation/host evidence and bundled-client bridge.
+# An install where the probe cannot run at all (no CLI, no node, no bundled
+# client, a runtime below the recovery floor) reads `unverified`, exactly as
+# Orca read before it had a classifier, so verbs that never needed recovery
+# proof keep their behaviour there while every recovery proof still refuses.
 fm_backend_orca_agent_state() {  # <terminal-handle>
   local cli evidence process
-  cli=$(command -v orca) || { printf 'unreadable'; return 0; }
+  cli=$(command -v orca) || { printf 'unverified'; return 0; }
+  command -v node >/dev/null 2>&1 || { printf 'unverified'; return 0; }
   evidence=$(node "$(dirname -- "${BASH_SOURCE[0]}")/../fm-orca-probe.mjs" "$cli" "$1" 2>/dev/null) \
     || { printf 'unreadable'; return 0; }
   case "$evidence" in
-    missing|ambiguous|unreadable) printf '%s' "$evidence" ;;
+    missing|ambiguous|unreadable|unverified) printf '%s' "$evidence" ;;
     process$'\t'*)
       process=${evidence#*$'\t'}
       if [ "$(fm_agent_process_classify "$process" "$process" '')" = agent ]; then

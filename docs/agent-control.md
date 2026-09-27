@@ -118,6 +118,10 @@ An unreachable endpoint can still hold the live agent a rebind would duplicate, 
   It never creates or releases a worktree; an aborted launch before metadata publication closes only its newly created terminal.
   A connected shell remains ambiguous because Orca's child-process boolean cannot prove that no background agent survives.
   Live-agent `exit` and `relaunch` therefore remain refused without sending lifecycle input.
+  Recovery requires a fully stopped old terminal, and closing it is the operator's step: close the recorded terminal itself (in the Orca app, or `orca terminal close --terminal <handle>`), then relaunch.
+  Firstmate never closes a live terminal on its own, and quitting the agent alone leaves an `ambiguous` shell that still refuses.
+  A handle Orca no longer resolves reads `unreadable` and cannot be recovered through `relaunch`.
+  An install without the probe's prerequisites (a local runtime at 1.4.212 or newer with its bundled runtime client) reads `unverified`, as Orca did before it had a classifier, so `interrupt` proceeds on endpoint proof alone there while both stop-proving verbs refuse.
 - **tmux cannot.** `list-windows -a` describes only the tmux server the *current process* addresses (its `TMUX_TMPDIR`/socket), and a task record carries no socket identity for its endpoint.
   A different but running server would answer "not anywhere" about a window it was never able to see, so a server-wide read cannot tell a destroyed window from one on a server this process cannot address.
   There is no read available that closes that gap, so tmux always refuses - for a renamed session, a moved window, a foreign socket, and a dead server alike.
