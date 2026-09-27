@@ -1670,11 +1670,17 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
 # is ever preserved; the operator's real login shell rebuilds the rest of the
 # pane environment from its own startup files.
 #
-# Only enumerated names are forwarded, never a glob. HOME must agree with the
-# caller's because the socket this function then polls lives under it. The
-# HERDR_* names herdr injects per PANE (HERDR_ENV, HERDR_PANE_ID, HERDR_TAB_ID,
-# HERDR_WORKSPACE_ID, HERDR_SOCKET_PATH) are the LAUNCHER's own pane identity
-# and are deliberately dropped; only herdr's own config selector survives, and
+# HOME comes from that same passwd entry for the same reason, and the caller's
+# XDG_CONFIG_HOME is never forwarded: both relocate where herdr reads
+# config.toml and keeps its sessions, so honouring either would let a caller
+# redirect a server that outlives it. A caller running under some other HOME
+# therefore cannot move this server, and the poll below reports that refusal
+# rather than adopting the caller's location.
+#
+# Only enumerated names are forwarded, never a glob. The HERDR_* names herdr
+# injects per PANE (HERDR_ENV, HERDR_PANE_ID, HERDR_TAB_ID, HERDR_WORKSPACE_ID,
+# HERDR_SOCKET_PATH) are the LAUNCHER's own pane identity and are deliberately
+# dropped; only herdr's own explicit config selector survives, and
 # HERDR_SESSION is set here from <session>.
 fm_backend_herdr_server_ensure() {  # <session>
   local session=$1 running i
@@ -1726,7 +1732,7 @@ fm_backend_herdr_server_ensure() {  # <session>
     pw_shell=/bin/sh
   fi
 
-  launch_home=${HOME:-$pw_home}
+  launch_home=${pw_home:-${HOME:-}}
   [ -n "$launch_home" ] || launch_home=/
   launch_path="$launch_home/.local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin"
   launch_env=("HOME=$launch_home" "SHELL=$pw_shell" "PATH=$launch_path" "HERDR_SESSION=$session")
@@ -1737,7 +1743,7 @@ fm_backend_herdr_server_ensure() {  # <session>
   # would recreate exactly the rot that killed the old unset list.
   for name in TERM COLORTERM LANG LC_ALL LC_CTYPE TZ \
     DISPLAY WAYLAND_DISPLAY XAUTHORITY XDG_RUNTIME_DIR XDG_SESSION_TYPE \
-    XDG_CONFIG_HOME SSH_AUTH_SOCK HERDR_CONFIG_PATH; do
+    SSH_AUTH_SOCK HERDR_CONFIG_PATH; do
     if [ -n "${!name:-}" ]; then
       launch_env+=("$name=${!name}")
     fi

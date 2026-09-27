@@ -520,8 +520,9 @@ An environment variable alone is not reliable when another Herdr server is runni
 When the selected named server is not running, the adapter launches it through `env -i` with an explicit allowlist, so it inherits nothing else the launcher happened to carry.
 Herdr passes its server startup environment to every later pane, so a value retained here reaches panes long after the launching task is gone.
 A deny list cannot hold that boundary, because every variable added to Firstmate afterwards is inherited by default.
-The launch always takes `SHELL` from the effective uid's own passwd entry and supplies a stable baseline `PATH`, never the launcher's own, because a non-interactive launcher's missing `SHELL` and truncated `PATH` otherwise become every pane's shell and `PATH`.
-It forwards `HOME`, the account name, locale, terminal, display, session, ssh-agent, and Herdr config-selection variables, plus the explicit session routing.
+The launch always takes `SHELL` and `HOME` from the effective uid's own passwd entry and supplies a stable baseline `PATH`, never the launcher's own values.
+A non-interactive launcher's missing `SHELL` and truncated `PATH` otherwise become every pane's shell and `PATH`, and a caller's `HOME` or `XDG_CONFIG_HOME` otherwise relocates where Herdr reads `config.toml` and keeps its sessions, so neither of those two is forwarded.
+It forwards the account name, locale, terminal, display, session, ssh-agent, and explicit Herdr config-selection variables, plus the explicit session routing.
 The per-pane identity Herdr injects into the launcher describes that launcher's own pane and is dropped.
 `fm_backend_herdr_server_ensure` in `bin/backends/herdr.sh` is the single owner of the exact allowlist.
 An already-running server is reused without restart or environment changes.

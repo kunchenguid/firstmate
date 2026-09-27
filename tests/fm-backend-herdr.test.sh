@@ -52,7 +52,11 @@ make_herdr_fakebin() {  # <dir> -> echoes fakebin dir
   {
     printf '#!/usr/bin/env bash\n'
     printf 'set -u\n'
+    # The parameter expansions are the GENERATED script's, so they stay literal
+    # here and are resolved when the stub runs.
+    # shellcheck disable=SC2016
     printf 'LOG="${FM_HERDR_LOG:-%s}"\n' "$dir/log"
+    # shellcheck disable=SC2016
     printf 'RESP="${FM_HERDR_RESPONSES:-%s}"\n' "$dir/responses"
     cat <<'SH'
 COUNT_FILE="$RESP/.count"
@@ -174,11 +178,12 @@ herdr_test_recorded_value() {  # <env-log> <name>
   sed -n "s/^$2=//p" "$1" | head -1
 }
 
-# herdr_test_passwd_shell: the login shell in the EFFECTIVE uid's own passwd
-# entry, resolved from the system the same way an operator would read it and
-# never from $SHELL or $USER. Empty when this host exposes no such entry.
-herdr_test_passwd_shell() {
-  local uid line
+# herdr_test_passwd_field: one field of the EFFECTIVE uid's own passwd entry,
+# read from the system the same way an operator would and never from $SHELL,
+# $HOME or $USER. <field> is the passwd column number and <darwin-key> the
+# Directory Services key that carries it. Empty when this host exposes neither.
+herdr_test_passwd_field() {  # <field> <darwin-key>
+  local field=$1 key=$2 uid line
   uid=$(id -u 2>/dev/null) || return 0
   line=""
   if command -v getent >/dev/null 2>&1; then
@@ -186,12 +191,20 @@ herdr_test_passwd_shell() {
   fi
   [ -n "$line" ] || line=$(awk -F: -v want="$uid" '$3 == want { print; exit }' /etc/passwd 2>/dev/null)
   if [ -n "$line" ]; then
-    printf '%s\n' "$line" | cut -d: -f7
+    printf '%s\n' "$line" | cut -d: -f"$field"
     return 0
   fi
   if command -v dscl >/dev/null 2>&1; then
-    dscl . -read "/Users/$(id -un)" UserShell 2>/dev/null | sed -n 's/^UserShell: //p' | head -1
+    dscl . -read "/Users/$(id -un)" "$key" 2>/dev/null | sed -n "s/^$key: //p" | head -1
   fi
+}
+
+herdr_test_passwd_shell() {
+  herdr_test_passwd_field 7 UserShell
+}
+
+herdr_test_passwd_home() {
+  herdr_test_passwd_field 6 NFSHomeDirectory
 }
 
 # make_herdr_statefake: a STATEFUL `herdr` stub that models the parts of herdr's
@@ -1315,10 +1328,12 @@ test_server_ensure_keeps_task_scoped_state_out_of_the_server_and_its_panes() {
 }
 
 test_server_ensure_keeps_required_variables_and_leaves_a_running_server_alone() {
-  local dir log marker fb output name
+  local dir log marker fb output name expected_home
   dir="$TMP_ROOT/server-required"; mkdir -p "$dir"; log="$dir/env"; marker="$dir/running"
   fb=$(make_herdr_server_launch_fakebin "$dir" "$log" "$marker")
-  PATH="$fb:$PATH" HOME="$dir/home" HERDR_CONFIG_PATH="$dir/herdr.toml" \
+  expected_home=$(herdr_test_passwd_home)
+  [ -n "$expected_home" ] || fail "uid $(id -u) has no passwd home directory on this host, so the config-root contract cannot be exercised"
+  PATH="$fb:$PATH" HOME="$dir/home" XDG_CONFIG_HOME="$dir/wrong-config" HERDR_CONFIG_PATH="$dir/herdr.toml" \
     LANG=en_US.UTF-8 TERM=xterm-256color COLORTERM=truecolor \
     DISPLAY=:0 WAYLAND_DISPLAY=wayland-1 XAUTHORITY="$dir/Xauthority" \
     XDG_RUNTIME_DIR="$dir/run" XDG_SESSION_TYPE=wayland SSH_AUTH_SOCK="$dir/ssh-agent" \
@@ -1327,7 +1342,12 @@ test_server_ensure_keeps_required_variables_and_leaves_a_running_server_alone() 
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_server_ensure fmtest' "$ROOT"
   expect_code 0 $? "server_ensure should start when no server is running"
   output=$(cat "$log")
-  assert_contains "$output" "HOME=$dir/home" "the server lost the HOME whose socket this ensure then polls"
+  # HOME and XDG_CONFIG_HOME both relocate where herdr reads its config and
+  # keeps its sessions, so a caller must not be able to move either one for a
+  # server that outlives it.
+  assert_contains "$output" "HOME=$expected_home" "the server took its HOME from the caller instead of the effective uid's passwd entry, so a caller can still move its config and session root"
+  assert_not_contains "$output" "HOME=$dir/home" "the caller's HOME redirected the long-lived server"
+  assert_not_contains "$output" "XDG_CONFIG_HOME=" "the caller's XDG_CONFIG_HOME redirected the long-lived server's config and session root"
   assert_contains "$output" "HERDR_CONFIG_PATH=$dir/herdr.toml" "the server lost herdr's own config selection"
   assert_contains "$output" "HERDR_SESSION=fmtest" "server_ensure lost explicit Herdr session routing"
   assert_contains "$output" "LANG=en_US.UTF-8" "the server lost the operator's locale"
@@ -1352,7 +1372,7 @@ test_server_ensure_keeps_required_variables_and_leaves_a_running_server_alone() 
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_server_ensure fmtest' "$ROOT"
   expect_code 0 $? "server_ensure should report success for an already-running server"
   [ ! -e "$log" ] || fail "server_ensure started a second herdr server for a session that already had one running"
-  pass "fm_backend_herdr_server_ensure: forwards the required herdr, locale, display and agent variables, drops the launcher's pane identity, and leaves a running server alone"
+  pass "fm_backend_herdr_server_ensure: forwards the required herdr, locale, display and agent variables, refuses a caller's relocated config root, drops the launcher's pane identity, and leaves a running server alone"
 }
 
 test_container_ensure_reuses_existing_workspace() {
