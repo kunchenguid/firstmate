@@ -848,19 +848,19 @@ A Pi root can hold several provider logins at once, so the root alone does not s
 A pinned Pi launch therefore needs `--model <provider>/<id>` naming a declared provider, and Firstmate also passes `--provider <that provider>` so Pi cannot resolve the model under another signed-in provider.
 An unqualified model or an undeclared provider refuses.
 Firstmate never guesses a provider.
-Raw Pi launch commands are no longer supported.
+Raw Pi launch commands are not supported.
 A raw command runs verbatim and cannot receive `--provider`, so it refuses.
 Launch with `--harness pi` or `--harness pi-signed` and `--model <provider>/<id>` instead.
 
 ### Launch scope and sign-in checks
 
-When a file is present, every launch of that runner from this home uses it: ships, scouts, local secondmate agents, raw Claude launch commands, and relaunches.
+Every launch of a runner from this home uses that runner's file: ships, scouts, local secondmate agents, raw Claude launch commands, and relaunches.
 A raw Claude launch command refuses if its leading assignments set `CLAUDE_CONFIG_DIR` or a credential that a pinned launch unsets, such as `ANTHROPIC_API_KEY`.
 The assignment would override the pin.
 The refusal names the variable.
 Remove that assignment from the raw command, or ask the captain to change `config/claude-account`.
 A raw command counts as a Claude launch only when its first word after any leading assignments is `claude`.
-A raw launch through a wrapper, such as `env claude` or `npx @anthropic-ai/claude-code`, is not recognised as Claude and gets no account check, as before this change.
+A raw launch through a wrapper, such as `env claude` or `npx @anthropic-ai/claude-code`, is not recognised as Claude and gets no account check.
 
 Before any worker endpoint, local copy, or task record exists, and before a relaunch stops the running worker, Firstmate asks the runner itself whether the pinned account is signed in: `claude auth status` for Claude, and `pi auth check --provider <provider> --json --no-refresh` for Pi, falling back to `pi --list-models <provider>` for a provider an extension registers.
 The check runs with only `HOME`, `PATH`, `TMPDIR`, `USER`, `LOGNAME`, and the pinned root in its environment, so a credential variable in firstmate's own environment cannot answer for an empty root.
