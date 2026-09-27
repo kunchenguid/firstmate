@@ -132,13 +132,13 @@ test_a_warning_row_reads_as_a_repair_not_as_queued_work() {
   printf '%s' "$out" | jq -e '
     (.charted | length) == 2
       and (.charted[0] | .title == "Queued work"
-        and [.badges[] | .text] == ["waiting"] and .pickable == true)
+        and .badges == [] and .pickable == true)
       and (.charted[1] | .title == "Main inventory integrity"
         and [.badges[] | .text] == ["needs repair"]
         and [.badges[] | .tone] == ["danger"]
         and .pickable == false)
   ' >/dev/null || fail "a warning row did not read differently from queued work: $out"
-  pass "a warning row badges needs repair while queued work keeps waiting"
+  pass "a warning row badges needs repair while ready work stays pickable"
 }
 
 test_warnings_are_excluded_from_the_charted_next_count() {
@@ -197,10 +197,10 @@ test_an_omitted_kind_keeps_the_existing_queued_rendering() {
   [ "$(charted_next_count "$out")" = 4 ] \
     || fail "an omitted kind changed the charted next tally: $out"
   printf '%s' "$out" | jq -e '
-    ([.charted[0].badges[] | .text] == ["waiting"])
+    (.charted[0].badges == [])
       and (.charted[1].badges == [])
-  ' >/dev/null || fail "an omitted kind changed the existing queued badges: $out"
-  pass "an omitted kind renders exactly as queued work always did"
+  ' >/dev/null || fail "an omitted kind showed a waiting badge on ready work: $out"
+  pass "an omitted kind keeps ready work free of waiting badges"
 }
 
 test_an_underway_row_leads_with_the_task_name_and_keeps_its_run_status() {
@@ -242,26 +242,32 @@ test_charted_cards_show_context_and_preserve_dispatch_rules() {
   local home out
   home=$(make_home charted-context)
   out=$(render "$home" '[
-    {"id":"ready","repo":"sample","title":"Ready work","reason":"","dispatchable":true,
+    {"id":"ready","repo":"sample","title":"Ready work","reason":"queued","dispatchable":true,
      "about":"Add the customer view","filed":"2026-08-01","link":"https://github.com/example/sample/pull/7"},
     {"id":"held","repo":"sample","title":"Held work","reason":"blocked on prep","dispatchable":false,
-     "about":"Depends on the migration","waiting_on":"Migration must land first","filed":"2026-07-20"},
+     "about":"Depends on the migration","filed":"2026-07-20"},
     {"id":"legacy","repo":"sample","title":"Legacy wait","reason":"until Friday","dispatchable":false},
-    {"id":"warning","repo":"sample","title":"Inventory warning","reason":"","dispatchable":false,"kind":"warning"}
+    {"id":"warning","repo":"sample","title":"Inventory warning","reason":"","dispatchable":false,"kind":"warning"},
+    {"id":"report","repo":"sample","title":"Report wait","reason":"pending","dispatchable":false,
+     "report_path":"data/report/report.md"},
+    {"id":"secondmate","repo":"sample","title":"Remote wait","reason":"pending","dispatchable":false}
   ]')
   printf '%s' "$out" | jq -e '
-    (.charted | length) == 4 and all(.charted[]; .expandable)
+    (.charted | length) == 6 and all(.charted[]; .expandable)
       and (.charted[0] | .pickable and .context.about == "Add the customer view"
         and .context.filed == "2026-08-01"
-        and .link == "https://github.com/example/sample/pull/7")
-      and (.charted[1] | (.pickable | not) and (.sub | contains("Migration must land first"))
-        and .context["waiting on"] == "Migration must land first"
+        and .link == "https://github.com/example/sample/pull/7"
+        and (.context | has("waiting on") | not) and (.badges | length) == 0)
+      and (.charted[1] | (.pickable | not) and (.sub | contains("blocked on prep"))
+        and .context["waiting on"] == "blocked on prep"
         and .context.about == "Depends on the migration")
       and (.charted[2] | (.pickable | not) and .context["waiting on"] == "until Friday")
       and (.charted[3] | (.pickable | not) and .context["waiting on"] == "Needs repair"
         and [.badges[].text] == ["needs repair"])
-  ' >/dev/null || fail "charted cards lost context, legacy fallback or dispatch behavior: $out"
-  [ "$(charted_next_count "$out")" = 3 ] || fail "charted cards changed the queued tally: $out"
+      and (.charted[4] | .context.report == "data/report/report.md" and .link == "")
+      and (.charted[5] | (.context | has("about") | not))
+  ' >/dev/null || fail "charted cards lost context, report text or dispatch behavior: $out"
+  [ "$(charted_next_count "$out")" = 5 ] || fail "charted cards changed the queued tally: $out"
   pass "charted cards expand into context and keep dispatch eligibility and warning counts"
 }
 

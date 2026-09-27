@@ -149,7 +149,8 @@ Default fields: schema, home, generated, prs, in_flight{id,kind,state,repo,name,
   secondmates{id,state,doing,provenance,freshness,age_seconds,contradiction,reason},
   secondmate_reconcile{id,spawn_gen,host,kind,ids},
   decisions_open{id,key,verb,summary,owner}, landed{id,what,artifact,owner},
-  gates{id,title,blocked_by,reason,owner,filed}, reports{id,path}, recorded_prs{id,url},
+  gates{id,title,blocked_by,reason,owner,filed,pr_url?,report_path?},
+  reports{id,path}, recorded_prs{id,url},
   unhealthy_endpoints{...} (only when non-empty), omitted{surface,reveal}.
 Default gates are selected newest filed first before their bound; undated gates
   retain input order after dated gates.
@@ -431,7 +432,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
     {id, title:(.title | trunc(60)),
      blocked_by:((.unresolved_blocker_ids // []) | if length > 0 then join(",") else "-" end | trunc(120)),
      reason:(hold_gate_reason | trunc(40)), owner:$owner,
-     filed:((.since // null) | trunc(40))};
+     filed:((.since // null) | trunc(40)),
+     pr_url:(.pr_url // null), report_path:(.report_path // null)};
   def round_robin_landed($n):
     . as $groups
     | [range(0; (($groups | map(length) | max) // 0)) as $i
@@ -443,6 +445,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   | (($fl | index("paths")) != null) as $f_paths
   | (($fl | index("actions")) != null) as $f_actions
   | (($fl | index("endpoints")) != null) as $f_endpoints
+  | . as $snap
   | ([ .backlog.records[] | select(landed_record)
        | {id, title, kind, hold_kind, pr_url, report_path, local_note, completion,
           home:"(main)", home_id:"(main)"} ]) as $main_done
@@ -579,7 +582,12 @@ MODEL=$(printf '%s' "$SNAP" | jq \
               (.state == "in_flight" and .current_role == "held" and ($working_ids | index($record.id) | not))))
          | select(.captain_actionable != true)
          | select((.hold_bucket == null) or ($all_decisions == 0))
-         | as_gate("(main)") ]
+         | as_gate("(main)")
+         | .pr_url = ($record.pr_url // ([ $snap.tasks[]?
+             | select(.id == $record.id and .kind != "secondmate")
+             | .pr.url | select(. != null) ][0] // null))
+         | .report_path = ($record.report_path // ([ $snap.scout_reports[]?
+             | select(.id == $record.id) | .path ][0] // null)) ]
      + [ (.secondmate_current.records // [])[] as $m
          | select($m.provenance.selected == "structured-home")
          | $m.queued[]?
@@ -591,6 +599,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
        | select(($all_reports == 1) or (($rel_ids | index($r.id)) != null))
        | {id, path} ]) as $reports_all
   | ([ .tasks[] | select(.kind != "secondmate" and .pr.url != null and .pr.source == "meta") | {id, url:.pr.url} ]) as $recorded_prs_all
+  | ($gates_all | map(select(.owner == "(main)") | .id)) as $main_gate_ids
   | def filed_epoch:
       (.filed // null) as $filed
       | if ($filed | type) != "string" then null
@@ -601,8 +610,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
       | sort_by((.value | filed_epoch) as $epoch
           | if $epoch == null then [1, 0, .key] else [0, -$epoch, .key] end)
       | map(.value);
-    . as $snap
-  | {
+    {
       schema: "fm-bearings.v1",
       home: $home,
       generated: $now,
@@ -653,7 +661,9 @@ MODEL=$(printf '%s' "$SNAP" | jq \
            {unhealthy_endpoints:(if $all_unhealthy == 1 then $unhealthy_all else $unhealthy_all[:$unhealthy_n] end)}
          else {} end)
   | . + (if $include_prs == 1 then {candidate_prs:$candidate_prs} else {} end)
-  | . + (if $f_bodies then {bodies:[ $snap.backlog.records[] | select(.structured and (.state == "queued" or .state == "done")) | {id, body:((.body_excerpt // .raw // "-") | trunc(200))} ]} else {} end)
+  | . + (if $f_bodies then {bodies:[ $snap.backlog.records[]
+      | select(.structured and (.state == "queued" or .state == "done" or (.id as $id | $main_gate_ids | index($id) != null)))
+      | {id, body:((.body_excerpt // .raw // "-") | trunc(200))} ]} else {} end)
   | . + (if $f_paths then {paths:[ $snap.tasks[] | {id, worktree:(.paths.worktree.path // "-"), home:(.paths.home.path // "-"), status:.paths.status_log.path, report:.paths.report.path} ]} else {} end)
   | . + (if $f_actions then {actions:[ $snap.tasks[] | {id, watch:(.actions.watch // .actions.send // "-"), steer:(.actions.steer // .actions.send // "-")} ]} else {} end)
   | . + (if $f_endpoints then {endpoints:[ $snap.tasks[] | {id, backend, target:(.endpoint.target // "-"), exists:.endpoint.exists, agent:.endpoint.agent_alive} ]} else {} end)

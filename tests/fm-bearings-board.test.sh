@@ -498,14 +498,14 @@ test_charted_context_is_optional_and_validated() {
   data="$home/payload.json"
   write_valid_payload "$data"
   run_board "$home" build "$data" >/dev/null || fail "a legacy charted row was refused"
-  jq '.charted[0] += {about:"Explain why",waiting_on:"Wait for approval",link:"https://github.com/example/sample/pull/2"}' \
+  jq '.charted[0] += {about:"Explain why",report_path:"data/sample/report.md",link:"https://github.com/example/sample/pull/2"}' \
     "$data" > "$data.tmp" && mv "$data.tmp" "$data"
   run_board "$home" build "$data" >/dev/null || fail "valid charted context was refused"
   extract_payload "$home/.lavish/bearings-board.html" | jq -e '
-    .charted[0] | .about == "Explain why" and .waiting_on == "Wait for approval"
+    .charted[0] | .about == "Explain why" and .report_path == "data/sample/report.md"
       and .link == "https://github.com/example/sample/pull/2"
   ' >/dev/null || fail "the built board lost charted context"
-  for field in about waiting_on link; do
+  for field in about report_path link; do
     write_valid_payload "$data"
     case "$field" in
       link) value='"javascript:alert(1)"' ;;

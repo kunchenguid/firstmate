@@ -1111,7 +1111,7 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
         active_children:$active_all[:$child_n],
         decisions_open:$decisions_all[:$decisions_n],
         holds:$holds_all[:$queued_n],
-        queued:([$queued_all[] | {id:(.id | trunc(120)),title:(.title | trunc(120)),
+        queued:([$queued_all[] | . as $queued | {id:(.id | trunc(120)),title:(.title | trunc(120)),
           blocked_by:((.blocked_by // null) | if . == null then null else trunc(120) end),
           blocked_by_ids:((.blocked_by_ids // []) | map(trunc(120))),
           unresolved_blocker_ids:((.unresolved_blocker_ids // []) | map(trunc(120))),
@@ -1124,7 +1124,12 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
           captain_actionable:(.captain_actionable // false),
           repo:((.repo // null) | if . == null then null else trunc(120) end),
           kind:((.kind // null) | if . == null then null else trunc(40) end),
-          since:((.since // null) | if . == null then null else trunc(40) end)}]
+          since:((.since // null) | if . == null then null else trunc(40) end),
+          pr_url:(($queued.pr_url // ([ $tasks[] | select(.id == $queued.id and .kind != "secondmate")
+            | .pr.url | select(. != null) ][0] // null)) | if . == null then null else trunc(500) end),
+          report_path:(($queued.report_path // ([ $tasks[] | select(.id == $queued.id and .kind != "secondmate"
+            and .paths.report.present == true) | .paths.report.path ][0] // null))
+            | if . == null then null else trunc(500) end)}]
           | ((map(select(.captain_actionable != true)) | newest_filed_first)
              + (map(select(.captain_actionable == true)) | newest_filed_first))
           | .[:$queued_n]),

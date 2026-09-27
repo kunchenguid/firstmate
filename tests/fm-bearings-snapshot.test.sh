@@ -1132,6 +1132,57 @@ test_report_pointers_surface() {
   pass "current report pointers surface"
 }
 
+test_charted_main_context_and_links_surface() {
+  local home fakebin json mate_home mate
+  home=$(make_home charted-context)
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] held-work - Held rollout (repo: firstmate) (kind: ship) (hold: await release) (hold-kind: captain) (hold-until: 2026-08-01)
+  Rollout needs the verified migration first.
+
+## Queued
+- [ ] queued-pr - Queued change https://github.com/acme/firstmate/pull/12 (repo: firstmate) (kind: ship)
+  This change connects the new board to the fleet.
+- [ ] queued-report - Queued research data/queued-report/report.md (repo: firstmate) (kind: scout)
+  Research the unresolved rollout choice.
+
+## Done
+EOF
+  mkdir -p "$home/projects/held-work"
+  fm_write_meta "$home/state/held-work.meta" \
+    "window=firstmate:fm-held-work" "worktree=$home/projects/held-work" \
+    "project=firstmate" "harness=claude" "kind=ship" "mode=no-mistakes" \
+    "pr=https://github.com/acme/firstmate/pull/13"
+  record_claude_state "$home/state" held-work busy
+  printf 'working: held rollout\n' > "$home/state/held-work.status"
+  fakebin=$(make_fakebin "$home")
+  json=$(FM_BEARINGS_RECORDED_PRS=1 run "$home" "$fakebin" --json --fields bodies)
+  printf '%s' "$json" | jq -e '
+    (.gates | any(.id == "held-work" and .owner == "(main)"
+      and .pr_url == "https://github.com/acme/firstmate/pull/13"))
+    and (.bodies | any(.id == "held-work" and (.body | contains("verified migration"))))
+    and (.gates | any(.id == "queued-pr"
+      and .pr_url == "https://github.com/acme/firstmate/pull/12"))
+    and (.bodies | any(.id == "queued-pr" and (.body | contains("connects the new board"))))
+    and (.gates | any(.id == "queued-report" and .report_path == "data/queued-report/report.md"))
+    and (.bodies | any(.id == "queued-report" and (.body | contains("unresolved rollout choice"))))
+  ' >/dev/null || fail "visible main Charted Next gates lost bounded notes or recorded links: $json"
+  mate_home=$(make_home charted-mate)
+  write_fixture "$mate_home"
+  mate=$(fixture_mate_home "$mate_home")
+  sed '/^## Done$/i\- [ ] mate-queued - Queued report https://github.com/acme/firstmate/pull/14 data/mate-queued/report.md (repo: firstmate) (kind: scout)' \
+    "$mate/data/backlog.md" > "$mate/data/backlog.next"
+  mv "$mate/data/backlog.next" "$mate/data/backlog.md"
+  fakebin=$(make_fakebin "$mate_home")
+  json=$(run "$mate_home" "$fakebin" --json --fields bodies)
+  printf '%s' "$json" | jq -e '
+    (.gates | any(.id == "mate-queued" and .owner == "mate"
+      and .pr_url == "https://github.com/acme/firstmate/pull/14"
+      and .report_path == "data/mate-queued/report.md"))
+  ' >/dev/null || fail "secondmate Charted Next lost recorded pointers in its bounded summary: $json"
+  pass "Charted Next carries main task notes and both homes' recorded pointers"
+}
+
 test_queued_item_prose_never_hides_it() {
   local home fakebin json
   home=$(make_home superseded); write_fixture "$home"
@@ -3401,6 +3452,7 @@ test_main_captain_readiness_matches_secondmate_projection
 test_completed_scout_report_not_pending
 test_open_decision_surfaces_end_to_end
 test_report_pointers_surface
+test_charted_main_context_and_links_surface
 test_queued_item_prose_never_hides_it
 test_include_prs_is_the_only_fetch_path
 test_include_prs_maps_custom_branch_prefix_to_task

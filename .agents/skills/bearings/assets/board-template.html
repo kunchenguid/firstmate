@@ -275,6 +275,7 @@ a { color: inherit; text-decoration: none; }
 .bb-charted-card__context { padding: 2px 14px 14px 42px; border-top: 1px solid var(--border-soft); }
 .bb-charted-card__context .bb-ctx { margin-top: 10px; }
 .bb-charted-card__context .bb-ctx__row { grid-template-columns: 88px minmax(0,1fr); }
+.bb-charted-card__context .bb-ctx__v { overflow-wrap: anywhere; }
 .bb-charted-card__context .bb-decision__link { margin-top: 10px; }
 /* margin:0 kills the UA default checkbox margin so picker rows and spacer rows
    share one text left edge */
@@ -719,20 +720,19 @@ __FM_BEARINGS_BOARD_DATA__
     var summary = el("summary", "bb-charted-card__summary");
     var main = el("div", "bb-row__main");
     main.appendChild(el("div", "bb-row__title", t.title));
-    /* The collapsed line explains an unavailable checkbox as well as naming
-       the repo. Legacy payloads keep their required reason as the fallback. */
-    var waiting = t.waiting_on || t.reason || (isWarning(t) ? "Needs repair" : "Not ready to dispatch");
+    var waiting = t.reason || (isWarning(t) ? "Needs repair" : "Not ready to dispatch");
     var chSub = t.repo || t.id;
     main.appendChild(el("div", "bb-row__sub", (!t.dispatchable || isWarning(t)) ? waiting + " · " + chSub : chSub));
     summary.appendChild(main);
     if (isWarning(t)) summary.appendChild(badge("danger", "needs repair"));
-    else if (!t.dispatchable || t.reason || t.waiting_on) summary.appendChild(badge("warn", "waiting"));
+    else if (!t.dispatchable) summary.appendChild(badge("warn", "waiting"));
     details.appendChild(summary);
     var context = el("div", "bb-charted-card__context");
     var ctx = el("div", "bb-ctx");
     if (t.about) ctx.appendChild(ctxRow("about", t.about));
-    if (t.waiting_on || t.reason || !t.dispatchable) ctx.appendChild(ctxRow("waiting on", waiting));
+    if (!t.dispatchable) ctx.appendChild(ctxRow("waiting on", waiting));
     if (t.filed) ctx.appendChild(ctxRow("filed", t.filed));
+    if (!t.link && t.report_path) ctx.appendChild(ctxRow("report", t.report_path));
     context.appendChild(ctx);
     if (t.link) {
       var link = el("a", "bb-decision__link", t.link);
