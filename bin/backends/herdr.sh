@@ -2074,6 +2074,50 @@ fm_backend_herdr_explicit_close_pane_confirmed() {  # <session> <pane_id>
   [ "$presence" = dead ]
 }
 
+# fm_backend_herdr_tab_presence_state: classify one exact tab get response
+# as dead|present|unknown from its JSON body, never from process exit status.
+fm_backend_herdr_tab_presence_state() {  # <session> <tab_id>
+  local session=$1 tab_id=$2 out code found
+  out=$(fm_backend_herdr_cli "$session" tab get "$tab_id" 2>&1)
+  code=$(printf '%s' "$out" | jq -r '.error.code // empty' 2>/dev/null)
+  if [ -n "$code" ]; then
+    [ "$code" = "tab_not_found" ] && printf 'dead' || printf 'unknown'
+    return 0
+  fi
+  found=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)
+  [ "$found" = "$tab_id" ] && printf 'present' || printf 'unknown'
+}
+
+# fm_backend_herdr_projection_close_empty_tab_focus_preserving: close one exact
+# empty projection tab after a pane close left the tab behind. The caller must
+# already have proven the tab is the matching agent-free task tab and must hold
+# the presentation lock. A live viewer of the target tab is never displaced;
+# a non-target close restores the exact prior focus after the close.
+fm_backend_herdr_projection_close_empty_tab_focus_preserving() {  # <session> <workspace> <tab>
+  local session=$1 workspace=$2 tab=$3 before active_tab info target_tab target_workspace pane_count
+  local foreground_rc=0 skip_restore=0 after
+  before=$(fm_backend_herdr_projection_focus_snapshot "$session") || return 1
+  active_tab=${before#*$'\t'}
+  info=$(fm_backend_herdr_cli "$session" tab get "$tab" 2>/dev/null) || return 1
+  target_tab=$(printf '%s' "$info" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)
+  target_workspace=$(printf '%s' "$info" | jq -r '.result.tab.workspace_id // empty' 2>/dev/null)
+  pane_count=$(printf '%s' "$info" | jq -r '.result.tab.pane_count // empty' 2>/dev/null)
+  [ "$target_tab" = "$tab" ] && [ "$target_workspace" = "$workspace" ] \
+    && [ "$pane_count" = 0 ] || return 1
+  if [ "$tab" = "$active_tab" ]; then
+    fm_backend_herdr_foreground_client_present "$session" || foreground_rc=$?
+    [ "$foreground_rc" -eq 1 ] || return 1
+    skip_restore=1
+  fi
+  fm_backend_herdr_cli "$session" tab close "$tab" >/dev/null 2>&1 || return 1
+  [ "$(fm_backend_herdr_tab_presence_state "$session" "$tab")" = dead ] || return 1
+  if [ "$skip_restore" -eq 0 ]; then
+    fm_backend_herdr_projection_focus_restore "$session" "$before" "empty tab close" || return 2
+  fi
+  after=$(fm_backend_herdr_projection_focus_snapshot "$session") || return 1
+  [ "$skip_restore" -eq 1 ] || [ "$after" = "$before" ]
+}
+
 # fm_backend_herdr_pane_process_state: what the operating system says is
 # running in <pane_id>, as one of agent|shell|other|unreadable, from `pane
 # process-info` plus the real process table. This is the process-level proof

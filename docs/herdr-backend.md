@@ -295,6 +295,7 @@ The worker remains on the ordinary flat or Herdr-current-order path.
 
 Normal task metadata remains the sole endpoint authority after creation.
 Cleanup closes only the exact recorded task pane and never calls `workspace close`.
+When Herdr leaves the exact projected tab empty after that pane disappears, locked session-start cleanup may close that exact empty tab, but never an ambiguous or non-empty tab.
 
 Herdr 0.7.5's explicit close moves focus to a neighbor whenever it empties a non-focused workspace.
 Its pane-death removal preserves the focused workspace whenever the dying workspace sits behind it or the focused workspace is last.
@@ -405,21 +406,22 @@ A candidate must meet all of these conditions:
 
 - The title must contain exactly one token occurrence across the named-session snapshot.
 - The title must equal the title derived from exactly one valid presentation journal in this home's own `state/`.
-- A version 2 journal additionally must bind this exact physical home, named session, workspace, tab, and pane.
+- A version 2 journal additionally must bind this exact physical home, named session, workspace, and tab, and it must bind the pane when one remains.
 - The task's ordinary metadata must be absent.
-- The candidate must have exactly one tab and exactly one pane.
+- The candidate must have exactly one tab and exactly one pane, or exactly one empty tab and zero panes left by a completed pane close.
+- An empty-tab candidate must still have the exact workspace and tab binding from a version 2 journal when one is present.
 
 Firstmate then cleans up the candidate in this order:
 
 1. Acquire the existing task-id spawn lock, and then the shared named-session presentation lock.
 2. Inside both locks, take one exact snapshot.
 3. Require one unambiguous non-target focus and the exact title, token, tab, and pane shape.
-4. Positively confirm no registered agent.
-5. Read Herdr's process information for the exact named-session pane and apply the process proof below.
-6. Immediately revalidate the same journal, metadata absence, workspace title and token uniqueness, one-tab and one-pane topology, exact pane relationship, absent agent, process proof, and non-target focus.
-7. Call the existing exact-pane focus-preserving close helper.
-   It closes only that pane, never a workspace.
-8. Retire the matching journal only after the exact pane is positively confirmed gone.
+4. Positively confirm no registered agent when a pane remains.
+5. Read Herdr's process information for the exact named-session pane and apply the process proof below when a pane remains.
+6. Immediately revalidate the same journal, metadata absence, workspace title and token uniqueness, one-tab and one-pane or empty-tab topology, exact endpoint relationship, absent agent when a pane exists, process proof when a pane exists, and non-target focus.
+7. Call the existing exact-pane focus-preserving close helper for a one-pane candidate, or the exact empty-tab focus-preserving close helper for an empty-tab candidate.
+   Neither helper grants cleanup authority to an ambiguous object.
+8. Retire the matching journal only after the exact pane or empty tab is positively confirmed gone.
 
 The process proof requires all of these:
 
