@@ -61,8 +61,8 @@ codex_ancestor() {
   fi
   pid=$PPID
   while [ -n "$pid" ] && [ "$pid" -gt 1 ]; do
-    comm=$(ps -p "$pid" -o comm= 2>/dev/null | awk '{print $1}') || comm=
-    case "$comm" in
+    comm=$(ps -p "$pid" -o comm= 2>/dev/null) || comm=
+    case "$(basename -- "$comm" 2>/dev/null)" in
       codex) printf '%s\n' "$pid"; return 0 ;;
     esac
     pid=$(ps -p "$pid" -o ppid= 2>/dev/null | tr -d '[:space:]') || pid=

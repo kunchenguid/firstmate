@@ -82,6 +82,52 @@ wait "$owner" 2>/dev/null || true
 
 printf 'ok - codex idle continuity re-arms a single-shot source only for a live owner\n'
 
+# macOS reports argv[0] in `ps -o comm=`, so an npm Codex ancestor shows up as
+# the full vendor path of its native binary.
+REAL_PS=$(command -v ps)
+FAKE_PS="$TMP_ROOT/fake-ps"
+mkdir -p "$FAKE_PS"
+cat > "$FAKE_PS/ps" <<PS
+#!/bin/sh
+pid= prev= comm=
+for a in "\$@"; do
+  [ "\$prev" = -p ] && pid=\$a
+  [ "\$a" = comm= ] && comm=1
+  prev=\$a
+done
+if [ -n "\$comm" ] && [ -n "\$pid" ] && [ "\$pid" = "\$(cat '$TMP_ROOT/fake-codex-pid' 2>/dev/null)" ]; then
+  printf '%s\n' /opt/node/lib/node_modules/@openai/codex/vendor/aarch64-apple-darwin/codex/codex
+  exit 0
+fi
+exec '$REAL_PS' "\$@"
+PS
+chmod +x "$FAKE_PS/ps"
+hits_before=$(hits)
+PATH="$FAKE_PS:$PATH" FM_ROOT_OVERRIDE="$HOME_DIR" FM_HOME="$HOME_DIR" FM_CODEX_IDLE_QUEUE="$QUEUE_BIN" FM_POLL=1 \
+  bash -c 'printf "%s\n" "$$" > "$1"; printf "%s" "$2" | "$3" >/dev/null; exec sleep 60' \
+  _ "$TMP_ROOT/fake-codex-pid" "$payload" "$CONT" &
+owner=$!
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+  [ "$(cat "$HOME_DIR/state/.codex-idle-continuity.lock/owner" 2>/dev/null)" = "$owner" ] && break
+  sleep 0.5
+done
+[ "$(cat "$HOME_DIR/state/.codex-idle-continuity.lock/owner" 2>/dev/null)" = "$owner" ] \
+  || fail "a Codex ancestor whose comm is a full path ending in /codex did not start the supervisor"
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do
+  [ "$(hits)" -gt "$hits_before" ] && break
+  sleep 0.5
+done
+[ "$(hits)" -gt "$hits_before" ] || fail "supervisor under a full-path Codex ancestor did not reconcile the source"
+kill "$owner" 2>/dev/null || true
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  [ ! -d "$HOME_DIR/state/.codex-idle-continuity.lock" ] && break
+  sleep 0.5
+done
+[ ! -d "$HOME_DIR/state/.codex-idle-continuity.lock" ] || fail "supervisor survived its full-path Codex owner"
+wait "$owner" 2>/dev/null || true
+
+printf 'ok - a Codex ancestor reported by its full binary path owns idle continuity\n'
+
 # Later turns: a perpetual source keeps supervision needed without actionable
 # closes, so only handovers end the supervisor's arm cycles below.
 TURNS="$TMP_ROOT/turns"
