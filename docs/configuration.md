@@ -298,6 +298,19 @@ The command's closing message reports both choices as they will take effect.
 
 Both choices are local to each Firstmate home and are not part of secondmate inherited configuration, the same as the Calm preference; a secondmate home pins its own supervision model and effort with its own `/supervision-model`.
 
+## Claude Code supervision branch (state/.branch-mod-mode, config/classifier-model)
+
+On a Claude Code primary, the `fm-branch-mod` plugin runs the same supervision branch as a persistent background agent inside the captain's `claude` process; [docs/claude-supervision-branch.md](claude-supervision-branch.md) owns its behaviour, launch settings, version pin, and bounds.
+The mod is opt-in per home and inert everywhere else: it loads only through `--plugin-dir`, refuses to load on any Claude Code version other than its pin, and every `bin/` piece it relies on is switched by the presence of `state/.branch-mod-mode`.
+That file's presence is the whole switch and its content is ignored: create it to route eligible wakes to the branch, and remove it to switch the mod and its `bin/` pieces off together.
+A text-only classifier gates applicable attended task wakes before the branch, and each task wake routed to the branch carries the deterministic new-status-lines note; [docs/claude-supervision-branch.md](claude-supervision-branch.md) owns the routing exceptions and evidence rules.
+`config/classifier-model` below is read by both hosts: the Claude Code mod and the Pi extension run the same shared classifier core ([docs/pi-supervision-branch.md](pi-supervision-branch.md) "Pre-branch classifier" owns the Pi integration).
+`config/classifier-model` names the model the classifier tries first; absent means the host default - `haiku` on Claude Code, the supervision branch's own model on Pi (`config/supervision-branch-model` when pinned, else main's session model) - and a configured name that does not resolve on the host adds one fallback attempt on that default.
+The model actually used, after any fallback, is written into every record of `state/branch-mod-classifications.jsonl`, the durable classification log `bin/fm-branch-classifier-score.sh` scores.
+The branch agent's own model comes from `config/supervision-branch-model`, shared with the Pi branch above, defaulting to `sonnet`; `config/supervision-branch-effort` is Pi-only, because the mod runs the branch's model steps at low effort.
+`state/.branch-mod-counters`, `state/.branch-mod-passed`, `state/branch-mod-events.jsonl`, and `state/.<task>.classifier-offset` are the mod's own runtime records, listed with their owners in `AGENTS.md`'s `state/` inventory.
+None of these files is inherited by secondmate homes.
+
 ## Supervision host (config/supervision-host)
 
 The optional local, gitignored `config/supervision-host` enables a supervision host for this home.
@@ -305,6 +318,7 @@ The host runs the supervision branch's contract on a headless engine session bes
 [docs/supervision-host.md](supervision-host.md) defines its design, current scope, and verified engines.
 A Claude, Cursor, OpenCode, omp, Grok, or Codex primary can run the host.
 With the file present, the primary's arm owner runs the host in place of the watcher arm.
+The one exception is a home that also enables the Claude Code supervision-branch mod (`state/.branch-mod-mode`): the two opt-ins are mutually exclusive, the host steps aside to the plain watcher arm, and [docs/claude-supervision-branch.md](claude-supervision-branch.md) "Mutual exclusion with the supervision host" owns what happens.
 The host handles wakes on the engine while `state/.afk-contract` exists, and also while attended on a Claude or Cursor primary, whose dialog mirror is verified ([supervision-host.md](supervision-host.md#postures)).
 On that home, `/afk` launches no away daemon; `/quiet` still does.
 The file also gates the primary's dialog-mirror hooks (`bin/fm-host-mirror.sh`), which record on a Claude or Cursor primary ([supervision-host.md](supervision-host.md#the-dialog-mirror)).

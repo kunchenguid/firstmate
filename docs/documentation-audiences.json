@@ -109,6 +109,14 @@
   ],
   "surfaces": [
     {
+      "path": ".claude/mods/fm-branch-mod/agents/fm-branch.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".claude/mods/fm-branch-mod/classifier-system.txt",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/afk/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -306,6 +314,10 @@
     },
     {
       "path": "docs/calm.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "docs/claude-supervision-branch.md",
       "audience": "operator-current"
     },
     {

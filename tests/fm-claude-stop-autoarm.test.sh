@@ -1434,6 +1434,24 @@ test_host_absent_flag_keeps_the_arm() {
   pass "auto-arm: without config/supervision-host the hook runs the arm exactly as before"
 }
 
+test_branch_mod_alone_keeps_the_arm() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/host-mod-alone")
+  mkdir -p "$dir/config"
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  write_host_fixture "$dir" boundary
+  # Only the branch mod's opt-in: the host's step-aside cannot be reached
+  # because the owner still selects the plain arm without config/supervision-host.
+  : > "$dir/state/.branch-mod-mode"
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a home with only the branch mod opt-in must still rewake from the arm"
+  assert_present "$dir/state/arm-ran" "a home with only the branch mod opt-in did not run the arm"
+  [ ! -e "$dir/state/host-ran" ] || fail "a home with only the branch mod opt-in ran the supervision host"
+  assert_contains "$out" "stale: fixture-win actionable" "the arm's reason must still reach the rewake"
+  pass "auto-arm: with only the branch mod opt-in the hook runs the arm exactly as before"
+}
+
 test_host_boundary_rewakes_with_the_host_line() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/host-boundary")
@@ -1595,6 +1613,7 @@ test_afk_mid_cycle_suppresses_rewake
 test_active_in_marked_secondmate_home
 test_long_poll_grace_reaches_arm_wrapper
 test_host_absent_flag_keeps_the_arm
+test_branch_mod_alone_keeps_the_arm
 test_host_boundary_rewakes_with_the_host_line
 test_host_handback_under_away_record_is_not_a_return
 test_plain_arm_banner_keeps_its_wake_line_cap

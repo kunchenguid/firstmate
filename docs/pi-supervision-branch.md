@@ -89,7 +89,7 @@ On an opted-in non-Pi home, the supervision host runs the branch beside the prim
 ### Wake dispatch
 
 `.pi/extensions/fm-primary-pi-watch.ts` stays the dispatcher.
-`.pi/extensions/lib/fm-branch-dispatch.ts` owns the offer handshake and row eligibility.
+`.pi/extensions/lib/fm-branch-dispatch.ts` owns the offer handshake and binds row eligibility from the shared fold `lib/fm-branch-eligibility.ts`.
 [`watcher-continuity.md`](watcher-continuity.md#per-actor-acknowledgement) owns the per-actor consume contract.
 
 A successful row grant transfers ownership of exactly the currently branch-eligible rows to the branch.
@@ -117,7 +117,7 @@ A decision-owned event surfaced by `bin/fm-watch.sh`'s signal path gets the same
 
 For a stale row, `scopeForUnreadWake` folds the mapped task's status log.
 It excludes the row when any `needs-decision` remains open or the current meaningful declaration is `captain-held`.
-An unreadable or symlinked status log fails the scope closed rather than influencing routing.
+A ship or scout task whose log ends in `done:` or `failed:` has no open decisions left (the bash v8 terminal close). A missing status log reads as an empty fold; an unreadable or symlinked one vetoes the whole scan instead, so its row stays with main rather than routing to the branch on an unreadable log.
 
 Before cross-referencing them, the dispatcher resolves trigger keys and every currently unread excluded decision row to task identity.
 The cross-reference then applies two rules:
@@ -179,7 +179,7 @@ While a signal or stale prompt is open, `fm_branch_report` accepts only the task
 - A signal row resolves by its status-log key.
 - A stale row resolves through the task record naming that endpoint.
 
-A report for any other task id, `fleet` included, is refused before the store is touched.
+A report for any other task id, `fleet` included, is refused before the store is touched with the corrective re-report instruction - a normal tool result carrying the same wording the mod renders, per the unified-seams ruling below.
 That way, a task remembered from an earlier wake cannot become a delivered outcome.
 A heartbeat review is not scoped by task.
 
@@ -189,17 +189,19 @@ An acknowledgement that consumed nothing reports that plainly, with the exact co
 
 #### Broken-branch latch and recovery
 
-1. Two consecutive settled provider errors latch the branch broken.
+1. Two consecutive settled failures - a provider error, or a settled prompt with no report, the same counting rule both hosts use - latch the branch broken.
    A one-line health note surfaces only on that initial trip.
 2. Main keeps every wake during a five-minute cooldown.
 3. After the cooldown, one wake may probe the branch while concurrent wakes still stay on main.
-4. Each probe that settles with another provider error doubles the next cooldown, up to one hour.
+4. Each probe that settles with another failure doubles the next cooldown up to one hour, while a probe wake the classifier passes to main before it reaches the branch releases the probe slot without extending the cooldown, so the next admitted wake is the probe.
 
 A prompt from the current branch generation and model or effort selection can clear the latch.
-It must append a durable `fm_branch_report` and then settle without a provider error.
-That clears both the latch and the provider-error streak and surfaces a one-line recovery note.
-If a provider error settles after that report, the error wins instead: it re-latches the branch and extends the cooldown.
+It must append a durable `fm_branch_report` and then settle error-free.
+That clears both the latch and the failure streak and surfaces a one-line recovery note.
+If a settled failure after that report wins instead, it re-latches the branch and extends the cooldown.
 A session replacement or branch model or effort change resets the recovery state immediately.
+
+Before any row is claimed, every attended accepted wake passes the pre-branch classifier described in "Pre-branch classifier" below; the away posture skips it.
 
 ### Branch model and effort selection
 
@@ -447,6 +449,25 @@ Its "PR identity: copy or abstain" section owns where a PR URL in a summary or t
 
 Main can read the durable outcome store on demand through its `fm_branch_outcomes` tool.
 
+## Pre-branch classifier
+
+Pi joins the classifier capability rather than staying Claude-only: both hosts run one shared core, the `lib/fm-branch-classifier.ts` module, whose canonical copy lives under the Claude mod's `lib/` with the repo's tracked `lib/` entry symlinking to it - the loader's realpath-containment rule forces that direction (see [claude-supervision-branch.md](claude-supervision-branch.md)).
+
+Every accepted attended wake with branch-eligible rows first sweeps and checks the durable passed-rows guard.
+If that guard does not return the wake to main and the eligible rows name a task, the extension classifies before claiming any row: the ordinary path makes one `completeSimple` call on the model named by `config/classifier-model`, with no thinking and `maxTokens` 200, over the wake's reason line and a bash-gathered evidence bundle from `bin/fm-wake-evidence.sh <task>`.
+The bundle uses the same evidence cursor as the mod, `state/.<task>.classifier-offset`, which teardown removes, and the same truncated-bundle rule: a bundle that does not carry the whole new span is `uncertain` without a model call, so the wake goes to main.
+A taskless wake such as a heartbeat fleet review is never classified.
+Unconfigured, the Pi default is the branch's own model - `config/supervision-branch-model` when pinned, else main's session model, the same follow-main default the branch build applies - resolved by name before any completion call, so the default path never issues a failing `haiku` call first.
+The one-shot fallback for a configured name that does not resolve, and the recorded model, are owned by [configuration.md](configuration.md) "Claude Code supervision branch".
+The classifier's model runtime is separate from the branch's and is resolved lazily; a completion failure outside the not-found class is a non-routine verdict, not an exception.
+The branch is constructed before the classifier runs, so a branch construction failure rejects the wake to main unclassified - the same fallback as the mod's latched pass.
+Only a confident `routine` verdict lets the wake reach the branch grant; `captain`, `uncertain`, a malformed answer, and a failed call pass the rows to main: the settlement rejects (the watcher's catch keeps its wake-to-main path), one durable covering captain row per eligible task is appended with the shared cover argv and immediately marked read and processed, and the rows are recorded in `state/.branch-mod-passed` - the same guard file the mod writes - until main acknowledges them.
+While a row is still queued, every later wake carrying it rejects without a classifier call; rows that have left the queue are swept from the guard at the next accepted attended wake, so a stale guard cannot wedge the branch.
+Every classifier call appends one record to `state/branch-mod-classifications.jsonl`, the same log `bin/fm-branch-classifier-score.sh` scores, with the same byte-stable record shape on both hosts.
+A failed log append is absorbed and never changes routing.
+
+The away posture skips the classifier entirely: the branch takes every row while the record exists, exactly as its row-exclusions lift there.
+
 ## Heartbeat routing
 
 The cheap bash-level heartbeat scan absorbs a genuinely no-op pass before it reaches Pi, unchanged from before.
@@ -621,7 +642,7 @@ At that moment the branch reports any refusal instead of concluding there is "no
 
 `tests/fm-pi-branch-extension.test.sh` covers:
 
-- Dispatch, and signal and stale report scoping with unscoped heartbeat reports.
+- Dispatch, and signal and stale report scoping with unscoped heartbeat reports, and the unified refusal wording and shape.
 - The new branch conversation at every main session start with continuation inside one session, and the mirror re-anchor that pairs with it.
 - Requested-versus-unsolicited delivery, exact visible entry content, and no unkeyed model turn.
 - The sequence-keyed processing request and its acknowledgement.
@@ -630,9 +651,9 @@ At that moment the branch reports any refusal instead of concluding there is "no
 - Idle and busy main state, and incident-shaped compaction and unrelated-assistant context.
 - Cold-start post-lock recovery, crash-before-cursor reload recovery, and repeated-reload idempotency.
 - Mirroring.
-- Post-construction provider-error and no-report fallback, the consecutive-error latch, cooldown probe, exponential backoff, report-plus-settlement recovery, and report-before-error re-latch.
+- Post-construction provider-error and no-report fallback, the unified failure latch (provider errors and report-less error-free turns count alike), cooldown probe, the probe slot released without a cooldown extension when the classifier routes the probe wake to main, exponential backoff, report-plus-settlement recovery, and report-before-error re-latch.
 - Cache key, and model and effort selection.
-- In `test_branch_dispatch_classifies_main_only_rows_and_writes_the_eligible_snapshot`: decision-owned signal and stale rows' exclusion from `eligibleSeqs`, their presence in `needsDecisionKeys`, task alias resolution, reserved-key configuration, status-log race and symlink refusal, non-vetoing behavior for unrelated eligible rows, and decision-only queues reading as ordinary main-only absence.
+- In `test_branch_dispatch_classifies_main_only_rows_and_writes_the_eligible_snapshot`: decision-owned signal and stale rows' exclusion from `eligibleSeqs`, their presence in `needsDecisionKeys`, task alias resolution, reserved-key configuration, status-log race refusal, a symlinked status log vetoing the scan, non-vetoing behavior for unrelated eligible rows, and decision-only queues reading as ordinary main-only absence.
 
 `tests/fm-branch-supervision.test.sh` covers:
 
@@ -650,6 +671,14 @@ At that moment the branch reports any refusal instead of concluding there is "no
 - A needs-decision or captain-held key refuses the attended branch before anything is sent.
 - A `blocked:` key stays ordinary steering.
 - The record relocates the answer.
+
+`tests/fm-branch-eligibility.test.sh` pins the four-fold equivalence of the wake-eligibility and open-decision classification: one fixture set of status logs, wake-queue rows, and task metas driven through the bash fold (`status_open_decisions`), the Pi extension's `scopeForUnreadWake`, the mod's exported `scopeForUnreadWake` bound through its exported `bind` (both exports are behavior-neutral and exist for this test), and the shared module `lib/fm-branch-eligibility.ts`, asserting byte-identical normalised scope JSON wherever the folds agree.
+`lib/fm-branch-eligibility.ts` is the shared fold both TypeScript folds adopt - the bash v8 rule plus the guards the ports carry, with bash's behaviour wherever bash has one - re-exporting the canonical core under the mod's `lib/` and adding the `node:fs` bindings, and its leg must be byte-equal to the bash fold on every fixture.
+The Pi extension consumes the shared module: `.pi/extensions/lib/fm-branch-dispatch.ts` delegates its `scopeForUnreadWake` to it and its inline fold is deleted, so the Pi branch's eligibility verdicts come from the same code the equivalence test proves equal to bash.
+That wiring deliberately aligns the Pi branch with the bash v8 fold: a ship or scout task whose status log ends in `done:` or `failed:` stops keeping earlier decisions open and stops being a decision-owned stale row on Pi, a missing status log reads as bash's empty fold, an unreadable or symlinked one refuses the whole scan instead of folding empty, and a torn-epoch queue row now refuses the scan exactly as the mod does.
+Bash contributes the fold truth alone because no bash-side eligible-row scan exists: the mod consumes the shared module too - the canonical copy `.claude/mods/fm-branch-mod/lib/fm-branch-eligibility.ts` it imports directly (pure core only - a hooks module may import nothing but its own files), bound to its host stat seam, which answers a missing log as absent (bash's empty fold) and a symlinked or unreadable one as refused (the scan veto). Fold-level parity with bash holds on every fixture; the scan is deliberately stricter than the fold for refused logs, pinned by `tests/fm-branch-eligibility.test.sh`.
+Two further supervision behaviors are extracted the same way (A4), their remaining seams unified by the captain's 2026-09-20 ruling ("D* - use mod"): `lib/fm-branch-report-sequence.ts` owns the report/processed decision core (report validation and scope verdicts, outcome-sequence parsing, the settlement argv builders and the module-owned settlement path (call order and failure meanings), and the module-owned failure and success wordings both hosts render byte-identically), and the refusal and failure strings that stay host-rendered (the task-scope refusal, the through validation, the mark-read and mark-processed failures, the processed success tail) carry the mod's byte-identical wording on both hosts, with the task-scope refusal a normal tool result on both; the mod's duplicate-report guard remains its only report-sequence seam; the shared fixture suite pins the mod's bytes and `tests/fm-pi-branch-extension.test.sh` pins the same bytes against the real Pi extension; `lib/fm-branch-provider-latch.ts` owns the failure latch machine (the unified predicate - a provider error or a report-less error-free turn is one failure on both hosts - threshold, base and capped exponential cooldown, one recovery probe per cooldown where the host policy enables it, success recovery, and explicit reset) with each host declaring its policy and rendering its own captain-facing strings.
+`tests/fm-branch-report-sequence.test.sh` drives one fixture transcript through the lib, the mod's exported `serveReport`/`serveProcessed` bound to a mock host, and both latch policies, asserting verdict, argv, and unified-text equality and the exact pinned latch schedules on a fixed clock.
 
 For the away posture:
 

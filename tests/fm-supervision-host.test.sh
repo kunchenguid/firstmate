@@ -1139,6 +1139,122 @@ test_attended_latch_keeps_closes_on_main_and_records_recovery_off_main() {
   pass "host: attended, two engine errors latch the session, main keeps every close unchanged in the cooldown, a failed probe doubles it up to its cap, and a routine probe's recovery stays in the ledger, off main"
 }
 
+# --- branch-mod mutual exclusion ----------------------------------------------
+
+drain_and_ack() {  # <home>
+  local home=$1
+  FM_HOME="$home" "$ROOT/bin/fm-wake-drain.sh" > /dev/null 2> "$home/drain.err" \
+    || fail "fixture: main's drain failed: $(cat "$home/drain.err")"
+  ack_drain_err "$home/state" "$home/drain.err" > /dev/null 2>&1 \
+    || fail "fixture: main's acknowledgement failed: $(cat "$home/drain.err")"
+}
+
+notice_count() {  # <home> -> grep -c of the conflict notice in the last host.out
+  grep -c '^supervision-host: the Claude Code supervision-branch mod is also enabled' "$1/host.out" 2> /dev/null || true
+}
+
+enable_mod() { : > "$1/state/.branch-mod-mode"; }
+
+test_both_optins_step_the_host_aside_to_the_plain_arm() {
+  local home
+  home=$(make_home mod-conflict away)
+  enable_mod "$home"
+  start_host "$home"
+  wait_until 150 watcher_live "$home" \
+    || fail "mod conflict: the stepped-aside arm never started a watcher cycle: $(cat "$home/host.out")"
+  append_status "$home" 'fixture finished' 'done'
+  wait_until 200 host_exited "$home" \
+    || fail "mod conflict: the stepped-aside arm never delivered the close: $(cat "$home/host.out")"
+  expect_code 0 "$(cat "$home/host.rc")" "the stepped-aside arm's close must exit 0 for the owner"
+  [ "$(notice_count "$home")" -eq 1 ] \
+    || fail "mod conflict: the conflict notice must appear exactly once: $(cat "$home/host.out")"
+  assert_re '^watcher: started pid=' "$home/host.out" "mod conflict: the cycle must be the ordinary arm's"
+  assert_re '^signal: .*demo.status' "$home/host.out" "mod conflict: the close must reach main exactly as the plain arm delivers it"
+  assert_absent "$home/state/.supervision-host" "mod conflict: the host must not leave its pid record"
+  assert_absent "$home/state/.supervision-host-engine" "mod conflict: no engine conversation may exist"
+  ! ls "$home"/engine-call.* > /dev/null 2>&1 || fail "mod conflict: an engine turn ran"
+  assert_present "$home/state/.supervision-host-mod-conflict" "mod conflict: the notice marker must be recorded"
+  assert_grep 'demo.status' "$home/state/.wake-queue" "mod conflict: the wake must stay queued for main"
+  drain_and_ack "$home"
+
+  # The same episode again: the marker suppresses the notice, the arm remains.
+  rm -f "$home/host.out" "$home/host.rc"
+  start_host "$home"
+  wait_until 150 watcher_live "$home" \
+    || fail "mod conflict: the second run never armed: $(cat "$home/host.out")"
+  append_status "$home" 'second close' 'done'
+  wait_until 200 host_exited "$home" \
+    || fail "mod conflict: the second run never delivered a close: $(cat "$home/host.out")"
+  [ "$(notice_count "$home")" -eq 0 ] \
+    || fail "mod conflict: the notice must not repeat within one episode: $(cat "$home/host.out")"
+  drain_and_ack "$home"
+
+  # The mod leaves: the next host run proceeds as itself and clears the marker.
+  rm -f "$home/state/.branch-mod-mode" "$home/host.out" "$home/host.rc"
+  start_host "$home"
+  wait_until 150 watcher_live "$home" \
+    || fail "mod left: the host never started a watcher cycle: $(cat "$home/host.out")"
+  assert_absent "$home/state/.supervision-host-mod-conflict" "mod left: the ended conflict marker must be cleared"
+  append_status "$home" 'away work'
+  wait_until 250 handled_at_least "$home" 1 \
+    || fail "mod left: the host did not handle the wake on the engine: $(cat "$home/host.out"; cat "$home/state/.supervision-host.log" 2> /dev/null)"
+  [ "$(grep -c '^supervision-host:' "$home/host.out")" -eq 0 ] \
+    || fail "mod left: a host without the mod must not print host lines: $(cat "$home/host.out")"
+  kill -TERM "$(awk -F '\t' '$1 == "host" { print $2 }' "$home/state/.supervision-host")"
+  wait_until 200 host_exited "$home" || fail "mod left: the host did not stop on TERM"
+
+  # The conflict returns: a fresh episode surfaces it once more.
+  enable_mod "$home"
+  rm -f "$home/host.out" "$home/host.rc"
+  start_host "$home"
+  wait_until 150 watcher_live "$home" \
+    || fail "conflict renewed: the arm never armed: $(cat "$home/host.out")"
+  append_status "$home" 'back again' 'done'
+  wait_until 200 host_exited "$home" \
+    || fail "conflict renewed: the arm never delivered a close: $(cat "$home/host.out")"
+  [ "$(notice_count "$home")" -eq 1 ] \
+    || fail "conflict renewed: the renewed conflict must be surfaced once: $(cat "$home/host.out")"
+  pass "host: with the branch mod enabled the host steps aside to the plain arm and surfaces the conflict once per episode"
+}
+
+test_step_aside_forwards_the_arms_restart_flag_and_env() {
+  local home tree
+  home=$(make_home mod-flags attended)
+  tree="$home/bin"
+  mkdir "$tree"
+  ln -s "$ROOT/bin/"*.sh "$tree/" || fail "fixture: could not link the bin tree"
+  rm "$tree/fm-watch-arm.sh"
+  # The step-aside exec's the arm beside itself, so a stub arm records the
+  # exact argv and environment the real arm would receive; the host is invoked
+  # carrying the branch-actor marks, so the recorded marks can only read unset
+  # if the host itself scrubbed them.
+  cat > "$tree/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'argv=%s\n' "$*" > "$FM_HOME/state/arm-received"
+printf 'predecessor=%s\n' "${FM_WATCH_PREDECESSOR_ARM_PID:-}" >> "$FM_HOME/state/arm-received"
+printf 'actor=%s\n' "${FM_SUPERVISION_ACTOR:-unset}" >> "$FM_HOME/state/arm-received"
+printf 'turn=%s\n' "${FM_BRANCH_REPORT_TURN:-unset}" >> "$FM_HOME/state/arm-received"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+SH
+  chmod +x "$tree/fm-watch-arm.sh"
+  enable_mod "$home"
+
+  FM_HOME="$home" FM_WATCH_PREDECESSOR_ARM_PID=4242 \
+    FM_SUPERVISION_ACTOR=branch FM_BRANCH_REPORT_TURN=1 \
+    "$tree/fm-supervision-host.sh" park --restart > "$home/host.out" 2>&1
+  assert_re '^argv=--restart$' "$home/state/arm-received" "the step-aside must forward --restart to the plain arm"
+  assert_re '^predecessor=4242$' "$home/state/arm-received" "the owner's predecessor arm must survive into the exec"
+  assert_re '^actor=unset$' "$home/state/arm-received" "the branch-actor marks must not leak into the exec'd arm"
+  assert_re '^turn=unset$' "$home/state/arm-received" "the branch report turn must not leak into the exec'd arm"
+  assert_re '^watcher: started pid=' "$home/host.out" "the owner must see the arm's own status line"
+
+  rm -f "$home/state/arm-received" "$home/state/.supervision-host-mod-conflict" "$home/host.out"
+  FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_BRANCH_REPORT_TURN=1 \
+    "$tree/fm-supervision-host.sh" park > "$home/host.out" 2>&1
+  assert_re '^argv=$' "$home/state/arm-received" "a plain park must exec the arm with no positional"
+  pass "host: the step-aside execs the plain arm with --restart forwarded, the owner predecessor kept, and the actor marks cleared"
+}
+
 test_away_wake_is_handled_on_the_engine_and_never_reaches_main() {
   local home lock_pid session first second pid watcher
   home=$(make_home away-handled away)
@@ -1981,4 +2097,6 @@ test_first_cycle_status_streams_and_owner_options_reach_it
 test_unchanged_held_outcome_reaches_the_captain_once_until_a_new_event
 test_unverified_engine_hands_every_away_wake_to_main
 test_host_outside_the_lock_owner_stands_down
+test_both_optins_step_the_host_aside_to_the_plain_arm
+test_step_aside_forwards_the_arms_restart_flag_and_env
 test_superseded_host_leaves_the_owner_untouched

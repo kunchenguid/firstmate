@@ -28,11 +28,14 @@ install_pi_watch_extension_fixture() {
   local repo=$1
   mkdir -p \
     "$repo/.pi/extensions/lib" \
+    "$repo/lib" \
     "$repo/node_modules/@earendil-works/pi-coding-agent" \
     "$repo/node_modules/@earendil-works/pi-tui" \
     "$repo/node_modules/typebox"
   cp "$EXT" "$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$repo/.pi/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/lib/fm-branch-eligibility.ts" "$repo/lib/fm-branch-eligibility.ts"
+  cp "$ROOT/lib/fm-branch-eligibility-core.ts" "$repo/lib/fm-branch-eligibility-core.ts"
   cp "$ROOT/.pi/extensions/lib/fm-native-contract.ts" "$repo/.pi/extensions/lib/fm-native-contract.ts"
   cp "$ROOT/.pi/extensions/lib/fm-async-exec.ts" "$repo/.pi/extensions/lib/fm-async-exec.ts"
   cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$repo/.pi/extensions/lib/fm-calm-visibility.ts"

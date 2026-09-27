@@ -217,6 +217,41 @@ test_secondmate_home_is_in_scope() {
   pass "a marked secondmate home is guarded even though it is a linked worktree"
 }
 
+test_branch_mod_monitor_needs_its_own_command() {
+  local rc=0 mod_loop="cd /fm && A=\"/fm/bin/fm-watch-arm.sh\"; while :; do out=\$(\$A 2>&1); done"
+  : > "$STATE/.branch-mod-mode"
+  # The mod's own continuity loop passes: description and command both match.
+  : > "$OUT"; : > "$ERR"
+  printf '%s' "{\"tool_name\":\"Monitor\",\"tool_input\":{\"description\":\"fm-branch-mod watcher continuity\",\"command\":$(printf '%s' "$mod_loop" | jq -R .)}}" \
+    | FM_ROOT_OVERRIDE="$PRIMARY" FM_HOME="$PRIMARY" FM_STATE_OVERRIDE="$STATE" \
+      "$CHECK" --claude > "$OUT" 2> "$ERR" || rc=$?
+  [ "$rc" -eq 0 ] || fail "the mod's own continuity Monitor must pass, got exit $rc: $(cat "$ERR")"
+  [ ! -s "$OUT" ] && [ ! -s "$ERR" ] || fail "the mod Monitor allow wrote output"
+  # The same description with any other command stays refused.
+  rc=0
+  : > "$OUT"; : > "$ERR"
+  printf '%s' '{"tool_name":"Monitor","tool_input":{"description":"fm-branch-mod watcher continuity","command":"sleep 99999"}}' \
+    | FM_ROOT_OVERRIDE="$PRIMARY" FM_HOME="$PRIMARY" FM_STATE_OVERRIDE="$STATE" \
+      "$CHECK" --claude > "$OUT" 2> "$ERR" || rc=$?
+  [ "$rc" -eq 2 ] || fail "a foreign command under the mod description must be refused, got exit $rc"
+  # The description alone, with no command at all, stays refused.
+  rc=0
+  : > "$OUT"; : > "$ERR"
+  printf '%s' '{"tool_name":"Monitor","tool_input":{"description":"fm-branch-mod watcher continuity"}}' \
+    | FM_ROOT_OVERRIDE="$PRIMARY" FM_HOME="$PRIMARY" FM_STATE_OVERRIDE="$STATE" \
+      "$CHECK" --claude > "$OUT" 2> "$ERR" || rc=$?
+  [ "$rc" -eq 2 ] || fail "the mod description with no command must be refused, got exit $rc"
+  # Without the opt-in file even the mod's own loop stays refused.
+  rc=0
+  rm -f "$STATE/.branch-mod-mode"
+  : > "$OUT"; : > "$ERR"
+  printf '%s' "{\"tool_name\":\"Monitor\",\"tool_input\":{\"description\":\"fm-branch-mod watcher continuity\",\"command\":$(printf '%s' "$mod_loop" | jq -R .)}}" \
+    | FM_ROOT_OVERRIDE="$PRIMARY" FM_HOME="$PRIMARY" FM_STATE_OVERRIDE="$STATE" \
+      "$CHECK" --claude > "$OUT" 2> "$ERR" || rc=$?
+  [ "$rc" -eq 2 ] || fail "the mod loop without the opt-in file must be refused, got exit $rc"
+  pass "the branch-mod Monitor exclusion needs the opt-in file with the mod's own fm-watch-arm.sh command"
+}
+
 test_stdin_transports_and_output_shapes() {
   local rc=0
   : > "$OUT"; : > "$ERR"
@@ -286,6 +321,7 @@ test_deny_message_defers_to_intake_classification
 test_escape_hatch_allows_deliberate_use
 test_task_worktree_and_non_firstmate_repo_are_inert
 test_secondmate_home_is_in_scope
+test_branch_mod_monitor_needs_its_own_command
 test_stdin_transports_and_output_shapes
 test_malformed_transport_fails_open
 test_missing_jq_stdin_transport_fails_open

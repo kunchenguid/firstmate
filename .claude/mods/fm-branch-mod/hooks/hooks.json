@@ -1,0 +1,4 @@
+{
+  "description": "Firstmate supervision-branch hooks module: pinned to one Claude Code version, activated per home by state/.branch-mod-mode, otherwise a complete no-op",
+  "modules": ["./branch.ts"]
+}
