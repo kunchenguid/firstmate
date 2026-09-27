@@ -1854,6 +1854,90 @@ test_reconcile_stale_agent_never_clears_live_agent() {
   pass "herdr stale-authority reconciliation: a genuine live agent never reaches the clear operation"
 }
 
+# reconcile_stale_result: drive fm_backend_herdr_reconcile_stale_agent against
+# a canned persistent nested-shell pane (the true treehouse get shape: the
+# pane shell pid differs from the nested foreground shell pid, whose cmdline
+# is the bare shell path) and a scripted agent-get sequence.
+# <dir> holds info.json (process-info), presence.json (pane get) and
+# seq/<n>.out (agent get, consumed in order, seq/last.out repeats).
+# Prints "<result>:<agent-get reads>:<clear calls>:<sleeps>".
+reconcile_stale_result() {  # <dir> <task-dir> [polls] [interval]
+  local dir=$1 task_dir=$2 polls=${3:-5} interval=${4:-0}
+  ROOT="$ROOT" DIR="$dir" TASK_DIR="$task_dir" POLLS="$polls" INTERVAL="$interval" bash -c '
+    . "$ROOT/bin/backends/herdr.sh"
+    fm_backend_herdr_cli() {
+      case "$2 $3" in
+        "pane get") cat "$DIR/presence.json" ;;
+        "pane process-info") cat "$DIR/info.json" ;;
+        "agent get")
+          n=$(cat "$DIR/seq/.count" 2>/dev/null || echo 0)
+          n=$((n + 1)); echo "$n" > "$DIR/seq/.count"
+          if [ -f "$DIR/seq/$n.out" ]; then cat "$DIR/seq/$n.out"
+          else cat "$DIR/seq/last.out"; fi
+          ;;
+      esac
+    }
+    fm_backend_herdr_clear_agent_authority() { printf "clear\n" >> "$DIR/clear.log"; return 0; }
+    fm_backend_herdr_system_sleep() { printf "%s\n" "$*" >> "$DIR/sleep.log"; }
+    export FM_BACKEND_HERDR_RECONCILE_CLEAR_POLLS="$POLLS"
+    export FM_BACKEND_HERDR_RECONCILE_CLEAR_INTERVAL="$INTERVAL"
+    export FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=2
+    fm_backend_herdr_reconcile_stale_agent fmtest:w2:p1 "$TASK_DIR" >/dev/null 2>&1
+    printf "%s:%s:%s:%s" "${FM_BACKEND_HERDR_RECONCILE_RESULT:-unset}" \
+      "$(cat "$DIR/seq/.count" 2>/dev/null || echo 0)" \
+      "$(wc -l < "$DIR/clear.log" 2>/dev/null | tr -d " " || echo 0)" \
+      "$(wc -l < "$DIR/sleep.log" 2>/dev/null | tr -d " " || echo 0)"
+  '
+}
+
+reconcile_nested_fixture() {  # <dir> <task-dir> <extra-foreground-json-or-empty>
+  local dir=$1 task_dir=$2 extra=${3:-} rows
+  mkdir -p "$dir/seq" "$task_dir"
+  : > "$dir/clear.log"; : > "$dir/sleep.log"; rm -f "$dir/seq/.count"
+  rows=$(jq -cn --arg cwd "$task_dir" --argjson extra "${extra:-null}" '
+    [{pid:200,name:"zsh",argv:["/bin/zsh"],argv0:"zsh",cmdline:"/bin/zsh",cwd:$cwd}]
+    + (if $extra == null then [] else [$extra] end)
+  ')
+  jq -cn --argjson rows "$rows" '{result:{type:"pane_process_info",process_info:{pane_id:"w2:p1",shell_pid:100,foreground_process_group_id:200,foreground_processes:$rows}}}' > "$dir/info.json"
+  printf '{"result":{"pane":{"pane_id":"w2:p1"}}}\n' > "$dir/presence.json"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$dir/seq/live.out"
+  printf '{"error":{"code":"agent_not_found"}}\n' > "$dir/seq/gone.out"
+}
+
+test_reconcile_repairs_nested_stale_after_slow_release() {
+  local dir="$TMP_ROOT/reconcile-nested-slow" task_dir="$TMP_ROOT/task-worktree-nested" out
+  reconcile_nested_fixture "$dir" "$task_dir"
+  cp "$dir/seq/live.out" "$dir/seq/1.out"
+  cp "$dir/seq/live.out" "$dir/seq/2.out"
+  cp "$dir/seq/gone.out" "$dir/seq/last.out"
+  out=$(reconcile_stale_result "$dir" "$task_dir")
+  # 3 agent-get reads (2 stale, 1 converged), 1 clear, 3 stubbed sleeps:
+  # 1 between the proof's two stability samples plus 1 between each poll read.
+  [ "$out" = "repaired:3:1:3" ] || fail "a nested-shell stale registration with a slow release did not repair by waiting: $out"
+  pass "herdr stale-authority reconciliation: a nested-shell stale registration repairs once the slow release converges"
+}
+
+test_reconcile_reports_failed_when_clear_never_converges() {
+  local dir="$TMP_ROOT/reconcile-nested-hung" task_dir="$TMP_ROOT/task-worktree-hung" out
+  reconcile_nested_fixture "$dir" "$task_dir"
+  cp "$dir/seq/live.out" "$dir/seq/last.out"
+  out=$(reconcile_stale_result "$dir" "$task_dir" 3)
+  # 3 agent-get reads that never converge, 1 clear, 3 stubbed sleeps:
+  # 1 between the proof's two stability samples plus 1 between each poll read.
+  [ "$out" = "failed:3:1:3" ] || fail "a clear that never converges did not report failed: $out"
+  pass "herdr stale-authority reconciliation: an accepted clear that never converges still reports failed"
+}
+
+test_reconcile_never_clears_unexpected_nested_process() {
+  local dir="$TMP_ROOT/reconcile-nested-unexpected" task_dir="$TMP_ROOT/task-worktree-unexpected" out extra
+  extra=$(jq -cn --arg cwd "$task_dir" '{pid:201,name:"sleep",argv:["sleep","300"],argv0:"sleep",cmdline:"sleep 300",cwd:$cwd}')
+  reconcile_nested_fixture "$dir" "$task_dir" "$extra"
+  cp "$dir/seq/gone.out" "$dir/seq/last.out"
+  out=$(reconcile_stale_result "$dir" "$task_dir")
+  [ "$out" = "unsafe:0:0:1" ] || fail "a nested shell with an unattributed process was not refused without clearing: $out"
+  pass "herdr stale-authority reconciliation: a nested shell with an unattributed process still refuses"
+}
+
 test_projection_close_plain_without_move_requires_structured_removal() {
   local dir log out status
   dir="$TMP_ROOT/close-plain-unconfirmed"; mkdir -p "$dir"
@@ -4596,6 +4680,9 @@ test_idle_shell_proof_refuses_a_background_job_on_the_pane_terminal
 test_foreground_shell_proof_accepts_nested_task_shell_only_after_stable_reads
 test_foreground_shell_proof_refuses_live_and_ambiguous_processes
 test_reconcile_stale_agent_never_clears_live_agent
+test_reconcile_repairs_nested_stale_after_slow_release
+test_reconcile_reports_failed_when_clear_never_converges
+test_reconcile_never_clears_unexpected_nested_process
 test_projection_close_plain_without_move_requires_structured_removal
 test_projection_close_ambiguous_positions_fall_back_to_plain_close
 test_projection_close_move_failure_falls_back_to_plain_close

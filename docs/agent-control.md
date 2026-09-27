@@ -130,7 +130,8 @@ Switching harness is therefore one ordinary relaunch rather than a separate mech
 - `resume` acts only on a durable suspension record: a task with no record is refused, and one that reads alive despite a record is a contradiction the operator must resolve, not a resume target.
 - An ambiguous or unreadable endpoint state refuses.
   Only a positively classified state acts.
-  On Herdr, a stale registered agent is cleared only after repeated structured reads prove the exact pane contains one recognized bare foreground shell in the recorded worktree; a live agent is never cleared, and a mismatched process is never sent exit text.
+  On Herdr, a stale registered agent is cleared only after repeated structured reads prove the exact pane contains one recognized bare foreground shell in the recorded worktree - the pane's own shell or a persistent nested task shell, which carry the same proof; a live agent is never cleared, and a mismatched process is never sent exit text.
+  Herdr applies an accepted clear asynchronously, so the repair waits a bounded time for the registry to report agent-free before it counts as repaired.
 - `fm-spawn --relaunch` independently refuses unless the recorded endpoint is positively agent-free and its shell is sitting in the recorded worktree, so a replacement can never join a live agent or start outside the copy holding the work.
 
 ## Capability matrix

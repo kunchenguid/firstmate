@@ -2144,13 +2144,26 @@ fm_backend_herdr_clear_agent_authority() {  # <session> <pane_id>
 
 # fm_backend_herdr_reconcile_stale_agent: clear a stale registration only when
 # the recorded Herdr pane is independently proved to be a stable bare
-# foreground shell in the recorded task directory.
+# foreground shell in the recorded task directory. That shell may be the
+# pane's own shell or a persistent nested task shell (treehouse get leaves
+# one behind every ship pane): the proof compares the foreground group
+# against the foreground shell pid itself, never against the pane shell pid,
+# so both shapes carry the same strength of proof - one recognized shell,
+# in the recorded directory, stable across repeated reads, with no
+# agent-identified and no unattributed process. Herdr only auto-releases a
+# detected agent when the foreground returns to the pane's own shell, so a
+# worker that exits inside the nested shell keeps its registration
+# indefinitely; this reconciliation is that pane's recovery plane.
 # shellcheck disable=SC2034 # the result is consumed by fm-control.sh
 # A live foreground agent is reported as not-stale and never reaches the clear
 # API. An unexpected or mismatched process is unsafe and must not fall through
-# to typing an exit command into an ordinary shell.
+# to typing an exit command into an ordinary shell. Herdr applies an accepted
+# clear asynchronously - the registry can keep reporting the stale agent for
+# several seconds - so the repair is verified by a bounded convergence wait,
+# not by a single immediate re-read that would report failed on a repair
+# still converging.
 fm_backend_herdr_reconcile_stale_agent() {  # <target> <task-dir>
-  local target=$1 task_dir=${2:-} state
+  local target=$1 task_dir=${2:-}
   FM_BACKEND_HERDR_RECONCILE_RESULT=unsafe
   fm_backend_herdr_parse_target "$target" || return 1
   if ! fm_backend_herdr_pane_shell_foreground_pid \
@@ -2163,12 +2176,38 @@ fm_backend_herdr_reconcile_stale_agent() {  # <target> <task-dir>
     FM_BACKEND_HERDR_RECONCILE_RESULT=failed
     return 1
   fi
-  state=$(fm_backend_herdr_pane_agent_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")
-  if [ "$state" = no-agent ]; then
+  if fm_backend_herdr_reconcile_clear_converged "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE"; then
     FM_BACKEND_HERDR_RECONCILE_RESULT=repaired
     return 0
   fi
   FM_BACKEND_HERDR_RECONCILE_RESULT=failed
+  return 1
+}
+
+# fm_backend_herdr_reconcile_clear_converged: poll one cleared pane until its
+# registry reports agent-free. The first read is immediate, so a clear that
+# converges at once costs no extra wait; later reads sleep
+# FM_BACKEND_HERDR_RECONCILE_CLEAR_INTERVAL (default 0.5s) up to
+# FM_BACKEND_HERDR_RECONCILE_CLEAR_POLLS reads (default 120, about 60s).
+# The bound covers the measured release distribution for an auto-detected
+# record, not a guess: on pinned Herdr 0.7.4 an accepted clear of a stale
+# detected agent converged after 13, 14, 14.5, 16, 17, and 19 seconds on an
+# idle machine, and past 20 seconds under CI load, while seeded records
+# converge at once. The pane status, the agent list, and agent get flip
+# together, so no earlier signal can shorten the wait. Any state other than
+# no-agent keeps polling, and exhausting the bound without converging
+# refuses, so a clear the server accepted but never applied still reports
+# failed, never repaired.
+fm_backend_herdr_reconcile_clear_converged() {  # <session> <pane-id>
+  local session=$1 pane_id=$2
+  local attempts=${FM_BACKEND_HERDR_RECONCILE_CLEAR_POLLS:-120} state
+  while [ "$attempts" -gt 0 ]; do
+    state=$(fm_backend_herdr_pane_agent_state "$session" "$pane_id")
+    [ "$state" = no-agent ] && return 0
+    attempts=$((attempts - 1))
+    [ "$attempts" -gt 0 ] || break
+    fm_backend_herdr_system_sleep "${FM_BACKEND_HERDR_RECONCILE_CLEAR_INTERVAL:-0.5}"
+  done
   return 1
 }
 
