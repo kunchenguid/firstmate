@@ -4659,6 +4659,8 @@ expectRoute("key-less resolution beside an unrelated open hold", hold, "resolved
 expectRoute("key-less resolution of an open unkeyed decision", "needs-decision: pick an option\n",
   "resolved: answered\n", false);
 expectRoute("keyed resolution of a never-open key", hold, "resolved [key=never-open]: nothing to close\n", true);
+expectRoute("resolution after a bare resolved word left the unkeyed decision open",
+  "needs-decision: choose\nresolved\n", "resolved: answered\n", false);
 expectRoute("captain-held declaration", "working: history\n", "captain-held [key=parked]: deferred to Monday\n", false);
 
 // The host decides the whole close through the offer rule, which must agree.

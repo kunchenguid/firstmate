@@ -289,9 +289,11 @@ function openDecisions(
   resolveVerb: string,
   heldVerb: string,
   reservedPrefixes: readonly string[],
+  open = new Map<string, "needs-decision" | "blocked">(),
 ): Map<string, "needs-decision" | "blocked"> {
-  const open = new Map<string, "needs-decision" | "blocked">();
   for (const line of lines) {
+    const unstamped = statusLineUnstamped(line);
+    if (!unstamped.includes(":") && !/\[key=.*\]/.test(unstamped)) continue;
     const verb = statusLineVerb(line);
     if (!["needs-decision", "blocked", resolveVerb, heldVerb].includes(verb)) continue;
     const key = decisionKey(line);
@@ -356,21 +358,18 @@ function spanIsDecisionOwned(
   heldVerb: string,
   reservedPrefixes: readonly string[],
 ): boolean {
-  return span.some((line, index) => {
+  const before = openDecisions(presented, resolveVerb, heldVerb, reservedPrefixes);
+  for (const line of span) {
     const verb = statusLineVerb(line);
     if (["needs-decision", "blocked", heldVerb].includes(verb)) return true;
-    if (verb === resolveVerb) {
-      const prefix = [...presented, ...span.slice(0, index)];
-      const resolved = decisionKey(line);
-      if (
-        resolved &&
-        openDecisions(prefix, resolveVerb, heldVerb, reservedPrefixes).has(resolved) &&
-        !openDecisions([...prefix, line], resolveVerb, heldVerb, reservedPrefixes).has(resolved)
-      ) return true;
-    }
+    const resolved = verb === resolveVerb ? decisionKey(line) : null;
+    const wasOpen = resolved !== null && before.has(resolved);
+    openDecisions([line], resolveVerb, heldVerb, reservedPrefixes, before);
+    if (resolved !== null && wasOpen && !before.has(resolved)) return true;
     const key = declaredDecisionKey(line);
-    return key !== undefined && open.has(key);
-  });
+    if (key !== undefined && open.has(key)) return true;
+  }
+  return false;
 }
 
 export function scopeForUnreadWake(state: string, heartbeat: boolean, afk = false, attendedHost = false): UnreadWakeScope {
