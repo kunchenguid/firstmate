@@ -90,7 +90,7 @@ write_fixture_inventory() {
   cat > "$repo/docs/documentation-audiences.json" <<'JSON'
 {
   "version": 1,
-  "scope": {"trackedPatterns": ["*.md", "*.mdx", "*.rst", "*.txt", "docs/examples/*"]},
+  "scope": {"trackedPatterns": ["*.md", "*.mdx", "*.rst", "*.txt", "docs/examples/*", ":(exclude).validation-tmp/**"]},
   "allowedAudiences": ["public-product", "operator-current", "maintainer-verification"],
   "setupAudiences": ["public-product", "operator-current"],
   "readmeSetupTargets": ["docs/setup.md"],
@@ -100,6 +100,7 @@ write_fixture_inventory() {
   "surfaces": [
     {"path": "README.md", "audience": "public-product"},
     {"path": "docs/evidence.md", "audience": "maintainer-verification"},
+    {"path": "docs/evidence.txt", "audience": "maintainer-verification"},
     {"path": "docs/policy.md", "audience": "operator-current"},
     {"path": "docs/setup.md", "audience": "operator-current"}
   ]
@@ -110,6 +111,7 @@ JSON
 test_local_links_and_no_keyword_heuristic() {
   local repo="$TMP_ROOT/fixture"
   mkdir -p "$repo/docs"
+  mkdir -p "$repo/.validation-tmp"
   git -C "$repo" init -q
   printf '%s\n' '[Setup](docs/setup.md) [Policy](docs/policy.md)' > "$repo/README.md"
   printf '%s\n' '# Setup' > "$repo/docs/setup.md"
@@ -123,8 +125,12 @@ test_local_links_and_no_keyword_heuristic() {
 
 Observed version 1.2.3 on branch `fm/example`.
 MD
+  printf '%s\n' 'Retained validation output is not maintained documentation.' \
+    > "$repo/.validation-tmp/evidence.txt"
+  printf '%s\n' 'Maintained documentation text remains classified.' \
+    > "$repo/docs/evidence.txt"
   write_fixture_inventory "$repo"
-  git -C "$repo" add README.md docs
+  git -C "$repo" add -f README.md docs .validation-tmp/evidence.txt
   "$CHECK" --root "$repo" >/dev/null \
     || fail "structural checker rejected legitimate maintainer evidence prose"
 
@@ -132,7 +138,7 @@ MD
     > "$repo/README.md"
   git -C "$repo" add README.md
   run_expect_failure "unresolved local link" "$CHECK" --root "$repo"
-  pass "local links resolve while dates, versions, commands, and incident prose remain semantically reviewed"
+  pass "local links resolve, maintained text stays classified, and retained validation evidence stays out of scope"
 }
 
 test_repository_inventory_passes

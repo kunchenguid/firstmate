@@ -49,11 +49,14 @@
 #   its own step, because a backend's `missing` also covers an endpoint that is
 #   merely unreachable from here - and it is only available on HERDR, which must
 #   still read the recorded pane as gone once that session's server is running
-#   again. A tmux `missing` always refuses: a task record carries no socket
-#   identity for its endpoint, so no read here can tell a destroyed window from
-#   one on a tmux server this process cannot address. An endpoint that turns out
-#   to have survived refuses too. The worktree is reused untouched either way; a
-#   rebind is a recovery, never a teardown. Only a crewmate or scout rebinds: a
+#   again. A tmux `missing` always refuses on ordinary relaunch: a task record
+#   carries no socket identity for its endpoint, so no read here can tell a
+#   destroyed window from one on a tmux server this process cannot address.
+#   The sole exception is the journal-bound, operator-attested handoff for
+#   paseo-backend-adapter, which creates a unique session only after fm-control
+#   checks its recorded endpoint, branch, HEAD, worktree, and confirmations.
+#   An endpoint that turns out to have survived refuses too. The worktree is
+#   reused untouched either way; a rebind is a recovery, never a teardown. Only a crewmate or scout rebinds: a
 #   secondmate whose endpoint is gone is respawned by its own owner
 #   (`--secondmate`, driven by the session-start liveness sweep).
 #   The replacement still never starts outside the copy
@@ -1107,6 +1110,7 @@ RELAUNCH_REPLACEMENT_BUSY_GEN=
 RELAUNCH_REPLACEMENT_HARNESS=
 RELAUNCH_REPLACEMENT_STATE=
 RELAUNCH_REPLACEMENT_WT=
+HANDOFF_ENDPOINT_CREATED=0
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 
@@ -1161,6 +1165,13 @@ spawn_abort_cleanup() {
         --gen "$RELAUNCH_REPLACEMENT_BUSY_GEN"; then
         echo "warning: could not retire replacement busy generation after aborted relaunch of $ID" >&2
       fi
+    fi
+  fi
+  if [ "$HANDOFF_ENDPOINT_CREATED" = 1 ] \
+    && [ "$SPAWN_META_PUBLISH_STARTED" != 1 ]; then
+    HANDOFF_ENDPOINT_CREATED=0
+    if ! fm_backend_kill tmux "$T" 2>/dev/null; then
+      echo "warning: could not retire the unbound handoff endpoint $T; the original task record and worktree remain authoritative" >&2
     fi
   fi
   if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] &&
@@ -1562,6 +1573,8 @@ RELAUNCH_PRIOR_HARNESS=
 # 1 when the recorded endpoint is authoritatively gone and this relaunch must
 # create a fresh one for the task rather than adopt its recorded address.
 RELAUNCH_REBIND=0
+RELAUNCH_HANDOFF=0
+HANDOFF_NEW_SESSION=
 if [ "$RELAUNCH" -eq 1 ]; then
   [ "${#POS[@]}" -eq 1 ] || {
     echo "error: --relaunch takes the task id only; its project or home comes from the task's own record" >&2
@@ -1595,6 +1608,71 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: backend '$BACKEND' has no recovery-grade agent-state classifier, so a relaunch cannot prove the previous agent exited; refusing rather than risking two agents in one endpoint" >&2
     exit 1
   }
+  if [ -n "${FM_CONTROL_HANDOFF_TX:-}" ]; then
+    [ "$SPAWN_CONTROL_PARENT" = 1 ] || {
+      echo "error: operator-attested handoff must be launched by its active fm-control transaction; refusing to rebind the task" >&2
+      exit 1
+    }
+    fm_control_handoff_journal_authorizes "$STATE" "$ID" "$FM_CONTROL_HANDOFF_TX" || {
+      echo "error: operator-attested handoff is not authorized by the current control transaction; refusing to rebind the task" >&2
+      exit 1
+    }
+    [ "${FM_CONTROL_RELAUNCH_TX:-}" = "$FM_CONTROL_HANDOFF_TX" ] || {
+      echo "error: handoff transaction does not match the relaunch transaction; refusing to rebind the task" >&2
+      exit 1
+    }
+    HANDOFF_EXPECTED_ENDPOINT=$(fm_control_handoff_journal_value "$STATE" "$ID" handoff_expected_endpoint)
+    HANDOFF_EXPECTED_WORKTREE=$(fm_control_handoff_journal_value "$STATE" "$ID" handoff_expected_worktree)
+    HANDOFF_EXPECTED_HEAD=$(fm_control_handoff_journal_value "$STATE" "$ID" handoff_expected_head)
+    HANDOFF_EXPECTED_BRANCH=$(fm_control_handoff_journal_value "$STATE" "$ID" handoff_expected_branch)
+    HANDOFF_NEW_SESSION=$(fm_control_handoff_journal_value "$STATE" "$ID" handoff_new_session)
+    HANDOFF_EXPECTED=$(fm_control_handoff_expected_endpoint "$ID") || {
+      echo "error: task $ID is not eligible for operator-attested endpoint handoff" >&2
+      exit 1
+    }
+    [ "$BACKEND" = tmux ] && [ "$RELAUNCH_TARGET" = "$HANDOFF_EXPECTED" ] \
+      && [ "$HANDOFF_EXPECTED_ENDPOINT" = "$HANDOFF_EXPECTED" ] || {
+        echo "error: recorded endpoint does not match the pinned legacy handoff identity" >&2
+        exit 1
+      }
+    [ "$(fm_meta_get "$RELAUNCH_META" harness)" = codex ] \
+      && [ "$(fm_meta_get "$RELAUNCH_META" kind)" = ship ] \
+      && [ "$(fm_meta_get "$RELAUNCH_META" mode)" = no-mistakes ] \
+      && [ "$(fm_meta_get "$RELAUNCH_META" yolo)" = off ] \
+      && [ "$(basename "$(fm_meta_get "$RELAUNCH_META" project)")" = firstmate ] || {
+        echo "error: task record does not match the pinned codex ship identity for handoff" >&2
+        exit 1
+      }
+    [ "$HANDOFF_EXPECTED_BRANCH" = "$(fm_control_handoff_expected_branch "$ID")" ] || {
+      echo "error: handoff journal branch does not match the pinned legacy branch" >&2
+      exit 1
+    }
+    RELAUNCH_WT=$(fm_meta_get "$RELAUNCH_META" worktree)
+    HANDOFF_WT_REAL=$(cd "$RELAUNCH_WT" 2>/dev/null && pwd -P) || {
+      echo "error: recorded local copy cannot be resolved for the handoff" >&2
+      exit 1
+    }
+    [ "$HANDOFF_WT_REAL" = "$HANDOFF_EXPECTED_WORKTREE" ] || {
+      echo "error: recorded local copy changed after handoff authorization; refusing to launch" >&2
+      exit 1
+    }
+    HANDOFF_BRANCH=$(git -C "$RELAUNCH_WT" branch --show-current 2>/dev/null || true)
+    HANDOFF_HEAD=$(git -C "$RELAUNCH_WT" rev-parse --verify HEAD 2>/dev/null || true)
+    [ "$HANDOFF_BRANCH" = "$HANDOFF_EXPECTED_BRANCH" ] \
+      && [ "$HANDOFF_HEAD" = "$HANDOFF_EXPECTED_HEAD" ] || {
+        echo "error: recorded local copy branch or HEAD changed after handoff authorization; refusing to launch" >&2
+        exit 1
+      }
+    if [ "$HANDOFF_NEW_SESSION" = "${RELAUNCH_TARGET%%:*}" ] \
+      || ! fm_backend_endpoint_atom_valid "$HANDOFF_NEW_SESSION"; then
+        echo "error: handoff target session is invalid or reuses the old endpoint session" >&2
+        exit 1
+    fi
+    RELAUNCH_HANDOFF=1
+  elif [ -n "${FM_CONTROL_HANDOFF_TX+x}" ]; then
+    echo "error: an empty handoff transaction is invalid; refusing to rebind the task" >&2
+    exit 1
+  fi
   # Two states are agent-free, and both license a relaunch:
   #   dead    - the endpoint exists and confidently holds no agent. The
   #             endpoint is ADOPTED, so the task keeps its exact address.
@@ -1613,7 +1691,8 @@ if [ "$RELAUNCH" -eq 1 ]; then
   #           survived the restart and is adopted after all; `alive` means the
   #           agent came back and refuses; only a second `missing` proves the
   #           pane itself did not survive.
-  #   tmux  - REFUSES, always. A task record carries no socket identity for its
+  #   tmux  - REFUSES, always, except for the pinned operator-attested legacy
+  #           handoff below. A task record carries no socket identity for its
   #           endpoint, and a server-wide inventory describes only the server
   #           this process addresses, so no read available here can tell "gone"
   #           from "on a server I cannot see". A tmux `missing` therefore stays
@@ -1625,7 +1704,13 @@ if [ "$RELAUNCH" -eq 1 ]; then
   # control plane - fm_control_endpoint_absence_verdict - so `exit` and
   # `relaunch` cannot reach two different answers about one endpoint.
   RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
-  if [ "$RELAUNCH_STATE" = missing ]; then
+  if [ "$RELAUNCH_HANDOFF" = 1 ]; then
+    [ "$RELAUNCH_STATE" = missing ] || {
+      echo "error: attested handoff requires the original endpoint to remain missing; it now reads '$RELAUNCH_STATE', so refusing to create another endpoint" >&2
+      exit 1
+    }
+    RELAUNCH_REBIND=1
+  elif [ "$RELAUNCH_STATE" = missing ]; then
     RELAUNCH_ABSENCE=$(fm_control_endpoint_absence_verdict "$BACKEND" "$RELAUNCH_TARGET")
     case "${RELAUNCH_ABSENCE%%$'\t'*}" in
       gone) RELAUNCH_STATE=missing ;;
@@ -3150,7 +3235,16 @@ if [ "$RELAUNCH" -eq 1 ]; then
   # uncommitted changes are exactly as the previous agent left them, and nothing
   # below may touch them.
   [ "$KIND" = secondmate ] || WT=$RELAUNCH_WT
-  if [ "$RELAUNCH_REBIND" -eq 0 ]; then
+  if [ "$RELAUNCH_HANDOFF" -eq 1 ]; then
+    # This branch is reachable only with the durable, task-pinned attestation
+    # emitted by fm-control's handoff verb. Give the replacement a unique
+    # session so a later return of the old endpoint cannot alias the new one.
+    SES=$HANDOFF_NEW_SESSION
+    WID=$(fm_backend_tmux_create_handoff_task "$SES" "$W" "$WT") || exit 1
+    T="$SES:$W"
+    WT_TARGET=$WID
+    HANDOFF_ENDPOINT_CREATED=1
+  elif [ "$RELAUNCH_REBIND" -eq 0 ]; then
     # Adopt the recorded endpoint instead of creating one. This is what keeps a
     # relaunch a REPLACEMENT rather than a second copy of the task: no new
     # terminal, no second worktree, and every uncommitted change left exactly
@@ -4574,6 +4668,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fi
   RELAUNCH_REPLACEMENT_PENDING=0
   SPAWN_META_PUBLISH_STARTED=0
+  HANDOFF_ENDPOINT_CREATED=0
   SPAWN_META_TMP=
 fi
 # A dispatch or relaunch keeps the per-task meta lock through launch delivery.

@@ -12,16 +12,17 @@
 # verbs addressed to an exact task id, with the per-harness mechanics owned
 # here rather than improvised per harness in agent prose.
 #
-# This file owns three capability tables plus their pure artifact-path tables,
-# and ONE named exception to that purity - fm_control_endpoint_absence_verdict,
-# the single owner of the per-backend endpoint-absence proof, which does run
-# backend reads. Everything else has no side effects, runs no backend command,
-# and reads no state, so sourcing this file is still free and the tables can be
-# read by a test as a pure contract:
+# This file owns three capability tables plus their artifact-path tables, and
+# two named exceptions to purity: fm_control_endpoint_absence_verdict, the
+# single owner of the per-backend endpoint-absence proof, and the task-pinned
+# handoff-journal validator used by fm-control and fm-spawn. The absence proof
+# runs backend reads, the journal validator reads state, and neither mutates.
+# The tables can be read by a test as a pure contract, and sourcing this file
+# is still free:
 #
 #   1. Verb allowlist. There is no arbitrary-text and no generic raw-key entry
 #      point on the control plane; a caller either names an allowlisted verb or
-#      is refused.
+#      is refused. The attended handoff is pinned to one legacy task id.
 #   2. Per-harness control mechanics: which key interrupts a running turn, how
 #      many times it must be sent, whether the composer needs clearing after
 #      that key, which adapter-owned cancellation acknowledgement is observable,
@@ -51,14 +52,78 @@ fm_control_verbs() {
 interrupt
 exit
 relaunch
+handoff
 EOF
 }
 
 fm_control_verb_allowed() {  # <verb>
   case "${1-}" in
-    interrupt|exit|relaunch) return 0 ;;
+    interrupt|exit|relaunch|handoff) return 0 ;;
   esac
   return 1
+}
+
+# The one-time operator-attested handoff exists only for the stranded legacy
+# Paseo backend task. It is deliberately not a general way around a backend's
+# endpoint-absence proof.
+fm_control_attested_handoff_task_allowed() {  # <task-id>
+  [ "${1-}" = paseo-backend-adapter ]
+}
+
+fm_control_handoff_expected_endpoint() {  # <task-id>
+  fm_control_attested_handoff_task_allowed "${1-}" || return 1
+  printf '%s\n' 'firstmate:fm-paseo-backend-adapter'
+}
+
+fm_control_handoff_expected_branch() {  # <task-id>
+  fm_control_attested_handoff_task_allowed "${1-}" || return 1
+  printf '%s\n' 'fm/paseo-backend-adapter'
+}
+
+# The launcher accepts this exception only while the matching control
+# transaction is at its launching phase and carries every identity and
+# operator-attestation field written by fm-control.
+fm_control_handoff_journal_authorizes() {  # <state-dir> <task-id> <tx>
+  local state=$1 id=$2 tx=$3 journal value count expected_endpoint expected_branch
+  fm_control_attested_handoff_task_allowed "$id" || return 1
+  [ -n "$tx" ] || return 1
+  expected_endpoint=$(fm_control_handoff_expected_endpoint "$id") || return 1
+  expected_branch=$(fm_control_handoff_expected_branch "$id") || return 1
+  journal="$state/$id.control-relaunch"
+  [ -f "$journal" ] && [ ! -L "$journal" ] || return 1
+  for value in v1 "task=$id" phase=launching "relaunch_tx=$tx" \
+      handoff=attested-v1 \
+      "handoff_expected_endpoint=$expected_endpoint" \
+      "handoff_expected_branch=$expected_branch" \
+      handoff_worker_attested=stopped \
+      handoff_run_attested=terminal; do
+    count=$(grep -Fxc -- "$value" "$journal" 2>/dev/null || true)
+    [ "$count" = 1 ] || return 1
+  done
+  for value in handoff_expected_worktree handoff_expected_head handoff_new_session; do
+    count=$(grep -c "^$value=" "$journal" 2>/dev/null || true)
+    [ "$count" = 1 ] || return 1
+    count=$(sed -n "s/^$value=//p" "$journal")
+    [ -n "$count" ] || return 1
+  done
+  value=$(sed -n 's/^handoff_expected_head=//p' "$journal")
+  [ "${#value}" -eq 40 ] || return 1
+  case "$value" in *[!0-9a-f]*) return 1 ;; esac
+  value=$(sed -n 's/^handoff_new_session=//p' "$journal")
+  case "$value" in fm-handoff-paseo-backend-adapter-[a-zA-Z0-9-]*) ;; *) return 1 ;; esac
+  return 0
+}
+
+fm_control_handoff_journal_value() {  # <state-dir> <task-id> <key>
+  local journal="$1/$2.control-relaunch" key=$3 count
+  case "$key" in
+    handoff_expected_endpoint|handoff_expected_worktree|handoff_expected_head|handoff_expected_branch|handoff_new_session) ;;
+    *) return 1 ;;
+  esac
+  [ -f "$journal" ] && [ ! -L "$journal" ] || return 1
+  count=$(grep -c "^$key=" "$journal" 2>/dev/null || true)
+  [ "$count" = 1 ] || return 1
+  sed -n "s/^$key=//p" "$journal"
 }
 
 # The harnesses whose control mechanics are verified. Mirrors AGENTS.md

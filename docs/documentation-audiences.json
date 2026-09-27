@@ -6,9 +6,10 @@
       "*.mdx",
       "*.rst",
       "*.txt",
-      "docs/examples/*"
+      "docs/examples/*",
+      ":(exclude).validation-tmp/**"
     ],
-    "description": "Tracked Markdown-like prose, including symlinked aliases, plus copyable documentation examples. Script headers, executable configuration, generated JSON evidence, and legal text keep their existing code/config/legal owners."
+    "description": "Tracked Markdown-like prose, including symlinked aliases, plus copyable documentation examples. Retained validation evidence under .validation-tmp is excluded. Script headers, executable configuration, generated JSON evidence, and legal text keep their existing code/config/legal owners."
   },
   "allowedAudiences": [
     "public-product",

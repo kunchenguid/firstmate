@@ -26,7 +26,14 @@ from urllib.parse import unquote, urlsplit
 
 MARKDOWN_LINK_RE = re.compile(r"!?\[[^\]]*\]\(([^)]+)\)")
 HTML_LINK_RE = re.compile(r"\b(?:href|src)=[\"']([^\"']+)[\"']", re.IGNORECASE)
-REQUIRED_TRACKED_PATTERNS = ["*.md", "*.mdx", "*.rst", "*.txt", "docs/examples/*"]
+REQUIRED_TRACKED_PATTERNS = [
+    "*.md",
+    "*.mdx",
+    "*.rst",
+    "*.txt",
+    "docs/examples/*",
+    ":(exclude).validation-tmp/**",
+]
 
 
 class CheckError(Exception):

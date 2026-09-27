@@ -106,6 +106,25 @@ fm_backend_tmux_create_task() {  # <session> <window-name> <proj-abs> -> prints 
   printf '%s\n' "$wid"
 }
 
+# Create one task window in a new, transaction-unique session for the
+# operator-attested legacy handoff. Unlike container_ensure, this never adopts
+# the caller's ambient session or the old endpoint's session name.
+fm_backend_tmux_create_handoff_task() {  # <session> <window-name> <proj-abs> -> prints window id
+  local ses=$1 wname=$2 proj_abs=$3 wid
+  fm_backend_endpoint_atom_valid "$ses" || {
+    echo "error: invalid tmux handoff session name '$ses'" >&2
+    return 1
+  }
+  if tmux has-session -t "$ses" 2>/dev/null; then
+    echo "error: handoff session $ses already exists; refusing to adopt it" >&2
+    return 1
+  fi
+  wid=$(tmux new-session -dP -F '#{window_id}' -s "$ses" -n "$wname" -c "$proj_abs") || return 1
+  tmux set-window-option -t "$wid" automatic-rename off 2>/dev/null || true
+  tmux set-window-option -t "$wid" allow-rename off 2>/dev/null || true
+  printf '%s\n' "$wid"
+}
+
 # fm_backend_tmux_current_path: the live pane's current working directory, or
 # empty on any tmux error. Mirrors fm-spawn.sh's worktree-discovery poll:
 # `tmux display-message -p -t "$T" '#{pane_current_path}'`.

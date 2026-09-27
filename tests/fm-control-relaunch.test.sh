@@ -17,6 +17,8 @@
 #   6. fm-spawn --relaunch refuses on its own: a live agent, a contradicting
 #      flag, an extra positional, or a backend that cannot prove the previous
 #      agent exited.
+#   7. The legacy handoff is bound to its recorded endpoint, branch, HEAD, and
+#      worktree; dirty or uncommitted work remains in that same local copy.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -139,18 +141,34 @@ case "${1:-}" in
     fi
     [ -f "$D/windows" ] && cat "$D/windows"; exit 0 ;;
   new-session)
-    # Nothing in the relaunch path may ever create a session; recording the
-    # call is how a refusal test proves that.
     shift
     ses=
+    name=
     while [ $# -gt 0 ]; do
       case "$1" in
         -s) ses=${2:-}; shift 2 ;;
+        -n) name=${2:-}; shift 2 ;;
         *) shift ;;
       esac
     done
     printf '%s\n' "$ses" >> "$D/created-sessions"
+    printf '%s\n' "$name" > "$D/windows"
+    printf '%s' "$ses" > "$D/session-name"
+    printf 'zsh' > "$D/command"
+    printf '@99\n'
     exit 0 ;;
+  has-session)
+    ses=
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -t) ses=${2:-}; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    if [ -f "$D/created-sessions" ] && grep -Fxq "$ses" "$D/created-sessions"; then
+      exit 0
+    fi
+    exit 1 ;;
   new-window)
     # Model the one thing an endpoint re-creation depends on: the window now
     # appears in the session inventory, so the very next agent-state read stops
@@ -227,6 +245,41 @@ EOF
   TASK_TMPS+=("/tmp/fm-$id")
 }
 
+# add_legacy_handoff_task builds the one pinned identity accepted by the
+# operator-attested handoff, using an isolated Firstmate-shaped fixture.
+add_legacy_handoff_task() {
+  local dir=$1 id=paseo-backend-adapter home="$1/home" proj="$1/firstmate" wt="$1/wt"
+  fm_git_worktree "$proj" "$wt" fixture-handoff
+  git -C "$wt" branch -m fm/paseo-backend-adapter
+  mkdir -p "$home/data/$id"
+  cat > "$home/data/$id/brief.md" <<EOF
+# Task
+## Captain's intent
+Continue the existing Firstmate backend task safely.
+
+## Firstmate spec
+Use only the recorded Firstmate worktree.
+
+Delivery contract: mode=no-mistakes
+EOF
+  {
+    echo 'window=firstmate:fm-paseo-backend-adapter'
+    echo "endpoint_task_id=$id"
+    echo "worktree=$wt"
+    echo "project=$proj"
+    echo 'harness=codex'
+    echo 'kind=ship'
+    echo 'mode=no-mistakes'
+    echo 'yolo=off'
+    echo "tasktmp=$dir/tasktmp"
+    echo 'model=default'
+    echo 'effort=default'
+  } > "$home/state/$id.meta"
+  : > "$dir/fake/windows"
+  printf '%s' firstmate > "$dir/fake/session-name"
+  printf '%s' "$wt" > "$dir/fake/cwd"
+}
+
 run_control() {  # <case-dir> <args...>
   local dir=$1; shift
   # A claude spawn pre-registers workspace trust in the launching user's own
@@ -247,6 +300,27 @@ run_control() {  # <case-dir> <args...>
     FM_FAKE_META_WRITER_READY="${FM_FAKE_META_WRITER_READY:-}" \
     FM_FAKE_TRACE_EXPORTED="${FM_FAKE_TRACE_EXPORTED:-}" \
     "$CONTROL" "$@" 2>&1
+}
+
+run_attested_handoff_with_answers() {  # <case-dir> <worker-answer> <run-answer> <args...>
+  local dir=$1 worker_answer=$2 run_answer=$3; shift 3
+  mkdir -p "$dir/user-home"
+  {
+    printf '%s\n' "$worker_answer"
+    printf '%s\n' "$run_answer"
+  } | env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SESSION -u HERDR_SOCKET_PATH \
+    -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID \
+    PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+    HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' \
+    FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
+    FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=0.05 FM_CONTROL_LAUNCH_WAIT=0.05 \
+    "$CONTROL" "$@" 2>&1
+}
+
+run_attested_handoff() {  # <case-dir> <args...>
+  local dir=$1; shift
+  run_attested_handoff_with_answers "$dir" \
+    'STOP paseo-backend-adapter' 'TERMINAL paseo-backend-adapter' "$@"
 }
 
 run_spawn() {  # <case-dir> <args...>
@@ -621,6 +695,38 @@ test_relaunch_requires_a_note_for_a_ship_task() {
   [ -z "$(cat "$dir/fake/literal")" ] || fail "a refused relaunch must send nothing"
   [ "$(cat "$dir/fake/command")" = claude ] || fail "a refused relaunch must not stop the agent"
   pass "fm-control relaunch: a ship task refuses without the progress note its replacement needs"
+}
+
+test_relaunch_rejects_whitespace_only_notes() {
+  local dir out rc mode id whitespace before_meta before_brief
+  local -a note_args
+  whitespace=$' \t\n'
+  for mode in note note-file; do
+    id="blank-$mode"
+    dir=$(new_case "blank-note-$mode" "$id")
+    add_ship_task "$dir" "$id" claude
+    before_meta=$(cat "$dir/home/state/$id.meta")
+    before_brief=$(cat "$dir/home/data/$id/brief.md")
+    if [ "$mode" = note ]; then
+      note_args=(--note "$whitespace")
+    else
+      printf '%s' "$whitespace" > "$dir/whitespace-note"
+      note_args=(--note-file "$dir/whitespace-note")
+    fi
+
+    out=$(run_control "$dir" "$id" relaunch "${note_args[@]}"); rc=$?
+    expect_code 1 "$rc" "a ship relaunch with a whitespace-only $mode should refuse"
+    assert_contains "$out" "requires --note" "the refusal should name the missing note"
+    [ "$(cat "$dir/home/state/$id.meta")" = "$before_meta" ] \
+      || fail "a refused whitespace-only $mode relaunch changed task metadata"
+    [ "$(cat "$dir/home/data/$id/brief.md")" = "$before_brief" ] \
+      || fail "a refused whitespace-only $mode relaunch changed task instructions"
+    [ -z "$(cat "$dir/fake/literal")" ] \
+      || fail "a refused whitespace-only $mode relaunch sent lifecycle input"
+    [ "$(cat "$dir/fake/command")" = claude ] \
+      || fail "a refused whitespace-only $mode relaunch stopped the current agent"
+  done
+  pass "fm-control relaunch: whitespace-only --note and --note-file values refuse before mutation"
 }
 
 # --- 2. harness switch -------------------------------------------------------
@@ -1773,6 +1879,196 @@ strand_endpoint() {  # <case-dir> <id>
   : > "$1/fake/windows"
 }
 
+test_operator_attested_handoff_rebinds_only_the_pinned_task_and_keeps_dirty_work() {
+  local dir id=paseo-backend-adapter head tracked tracked_before untracked_before out rc window
+  dir=$(new_case handoff-success paseo-backend-adapter)
+  add_legacy_handoff_task "$dir"
+  head=$(git -C "$dir/wt" rev-parse HEAD)
+  tracked=$(git -C "$dir/wt" ls-files | head -1)
+  printf '\nlocal unpublished edit\n' >> "$dir/wt/$tracked"
+  printf 'uncommitted new file\n' > "$dir/wt/untracked-handoff.txt"
+  tracked_before=$(cat "$dir/wt/$tracked")
+  untracked_before=$(cat "$dir/wt/untracked-handoff.txt")
+
+  out=$(run_attested_handoff "$dir" "$id" handoff \
+    --expect-endpoint firstmate:fm-paseo-backend-adapter \
+    --expect-worktree "$dir/wt" --expect-head "$head" \
+    --note 'The old endpoint is unreachable after reboot; continue only in this recorded copy.'); rc=$?
+  expect_code 0 "$rc" "an exact attended handoff should launch one replacement"$'\n'"$out"
+  assert_contains "$out" "handed-off $id from=firstmate:fm-paseo-backend-adapter to=fm-handoff-paseo-backend-adapter-" \
+    "the outcome should name both endpoint identities"
+  window=$(meta_field "$dir" "$id" window)
+  case "$window" in fm-handoff-paseo-backend-adapter-*:fm-paseo-backend-adapter) ;; *) fail "the record did not bind the replacement to a unique session: $window" ;; esac
+  [ "$(meta_field "$dir" "$id" worktree)" = "$dir/wt" ] || fail "handoff changed the recorded local copy"
+  [ "$(meta_field "$dir" "$id" endpoint_task_id)" = "$id" ] || fail "handoff changed task identity"
+  [ "$(git -C "$dir/wt" rev-parse HEAD)" = "$head" ] || fail "handoff changed the unlanded local commit"
+  [ "$(cat "$dir/wt/$tracked")" = "$tracked_before" ] || fail "handoff changed a tracked dirty file"
+  [ "$(cat "$dir/wt/untracked-handoff.txt")" = "$untracked_before" ] || fail "handoff lost an untracked file"
+  [ "$(journal_field "$dir" "$id" phase)" = complete ] || fail "handoff journal did not finish"
+  [ "$(journal_field "$dir" "$id" worktree_dirty)" = yes ] || fail "handoff journal did not record dirty state"
+  [ "$(journal_field "$dir" "$id" handoff_worker_attested)" = stopped ] || fail "journal omitted the worker attestation"
+  [ "$(journal_field "$dir" "$id" handoff_run_attested)" = terminal ] || fail "journal omitted the run-state attestation"
+  assert_grep "${window%%:*}" "$dir/fake/created-sessions" "handoff did not create its unique endpoint session"
+  assert_contains "$(cat "$dir/home/data/$id/brief.md")" "old endpoint is unreachable" "the replacement note was not preserved"
+  pass "operator-attested handoff: exact task rebinds once while tracked and untracked work stays intact"
+}
+
+test_operator_attested_handoff_rejects_whitespace_only_notes() {
+  local dir id=paseo-backend-adapter head out rc mode whitespace before_meta before_brief
+  local -a note_args
+  whitespace=$' \t\n'
+  for mode in note note-file; do
+    dir=$(new_case "handoff-blank-note-$mode" "$id")
+    add_legacy_handoff_task "$dir"
+    head=$(git -C "$dir/wt" rev-parse HEAD)
+    before_meta=$(cat "$dir/home/state/$id.meta")
+    before_brief=$(cat "$dir/home/data/$id/brief.md")
+    if [ "$mode" = note ]; then
+      note_args=(--note "$whitespace")
+    else
+      printf '%s' "$whitespace" > "$dir/whitespace-note"
+      note_args=(--note-file "$dir/whitespace-note")
+    fi
+
+    out=$(run_attested_handoff "$dir" "$id" handoff \
+      --expect-endpoint firstmate:fm-paseo-backend-adapter \
+      --expect-worktree "$dir/wt" --expect-head "$head" "${note_args[@]}"); rc=$?
+    expect_code 1 "$rc" "a handoff with a whitespace-only $mode should refuse"
+    assert_contains "$out" "requires --note" "the refusal should name the missing recovery note"
+    [ "$(cat "$dir/home/state/$id.meta")" = "$before_meta" ] \
+      || fail "a refused whitespace-only $mode handoff changed task metadata"
+    [ "$(cat "$dir/home/data/$id/brief.md")" = "$before_brief" ] \
+      || fail "a refused whitespace-only $mode handoff changed task instructions"
+    assert_absent "$dir/fake/created-sessions" \
+      "a refused whitespace-only $mode handoff created a replacement endpoint"
+  done
+  pass "operator-attested handoff: whitespace-only --note and --note-file values refuse before mutation"
+}
+
+test_operator_attested_handoff_refuses_a_caller_supplied_journal() {
+  local dir id=paseo-backend-adapter tx=forged-handoff-tx endpoint branch worktree head session out rc before_meta
+  dir=$(new_case handoff-forged-journal "$id")
+  add_legacy_handoff_task "$dir"
+  endpoint=$(fm_control_handoff_expected_endpoint "$id")
+  branch=$(fm_control_handoff_expected_branch "$id")
+  worktree=$(cd "$dir/wt" && pwd -P)
+  head=$(git -C "$dir/wt" rev-parse HEAD)
+  session=fm-handoff-paseo-backend-adapter-forged
+  before_meta=$(cat "$dir/home/state/$id.meta")
+  cat > "$dir/home/state/$id.control-relaunch" <<EOF
+v1
+task=$id
+phase=launching
+relaunch_tx=$tx
+handoff=attested-v1
+handoff_expected_endpoint=$endpoint
+handoff_expected_worktree=$worktree
+handoff_expected_head=$head
+handoff_expected_branch=$branch
+handoff_worker_attested=stopped
+handoff_run_attested=terminal
+handoff_new_session=$session
+EOF
+
+  out=$(FM_CONTROL_HANDOFF_TX="$tx" FM_CONTROL_RELAUNCH_TX="$tx" \
+    run_spawn "$dir" "$id" --relaunch); rc=$?
+  expect_code 1 "$rc" "a direct spawn with caller-supplied handoff evidence should refuse"$'\n'"$out"
+  assert_contains "$out" "must be launched by its active fm-control transaction" \
+    "the refusal should identify the missing control transaction"
+  [ "$(cat "$dir/home/state/$id.meta")" = "$before_meta" ] \
+    || fail "a caller-supplied handoff journal changed task metadata"
+  assert_absent "$dir/fake/created-sessions" \
+    "a caller-supplied handoff journal created a replacement endpoint"
+  pass "operator-attested handoff: direct spawn cannot authorize itself with a journal"
+}
+
+test_operator_attested_handoff_refuses_identity_conflicts_without_mutation() {
+  local mode dir id=paseo-backend-adapter head out rc before_meta before_brief expect_endpoint expect_wt expect_head
+  for mode in endpoint recorded-endpoint worktree path-alias head branch project harness delivery duplicate; do
+    dir=$(new_case "handoff-conflict-$mode" paseo-backend-adapter)
+    add_legacy_handoff_task "$dir"
+    head=$(git -C "$dir/wt" rev-parse HEAD)
+    expect_endpoint=firstmate:fm-paseo-backend-adapter
+    expect_wt="$dir/wt"
+    expect_head=$head
+    case "$mode" in
+      endpoint) expect_endpoint=firstmate:fm-other ;;
+      recorded-endpoint) sed -i.bak 's#^window=firstmate:fm-paseo-backend-adapter$#window=firstmate:fm-other#' "$dir/home/state/$id.meta"; rm -f "$dir/home/state/$id.meta.bak" ;;
+      worktree) expect_wt="$dir/other-copy" ;;
+      path-alias) ln -s "$dir/wt" "$dir/wt-alias"; expect_wt="$dir/wt-alias" ;;
+      head) expect_head=0000000000000000000000000000000000000000 ;;
+      branch) git -C "$dir/wt" branch -m fm/other-branch ;;
+      project) sed -i.bak "s#^project=$dir/firstmate\$#project=$dir/other-project#" "$dir/home/state/$id.meta"; rm -f "$dir/home/state/$id.meta.bak" ;;
+      harness) sed -i.bak 's/^harness=codex$/harness=claude/' "$dir/home/state/$id.meta"; rm -f "$dir/home/state/$id.meta.bak" ;;
+      delivery) sed -i.bak 's/^mode=no-mistakes$/mode=manual/' "$dir/home/state/$id.meta"; rm -f "$dir/home/state/$id.meta.bak" ;;
+      duplicate)
+        cat > "$dir/home/state/other-owner.meta" <<EOF
+window=firstmate:fm-other-owner
+endpoint_task_id=other-owner
+worktree=$dir/wt
+project=$dir/firstmate
+harness=codex
+kind=ship
+mode=no-mistakes
+yolo=off
+EOF
+        ;;
+    esac
+    before_meta=$(cat "$dir/home/state/$id.meta")
+    before_brief=$(cat "$dir/home/data/$id/brief.md")
+    out=$(run_attested_handoff "$dir" "$id" handoff \
+      --expect-endpoint "$expect_endpoint" --expect-worktree "$expect_wt" \
+      --expect-head "$expect_head" --note 'must not be applied'); rc=$?
+    expect_code 1 "$rc" "a contradictory $mode identity must refuse"$'\n'"$out"
+    [ "$(cat "$dir/home/state/$id.meta")" = "$before_meta" ] || fail "$mode conflict changed task metadata"
+    [ "$(cat "$dir/home/data/$id/brief.md")" = "$before_brief" ] || fail "$mode conflict changed task instructions"
+    assert_absent "$dir/fake/created-sessions" "$mode conflict created a replacement endpoint"
+  done
+  pass "operator-attested handoff: pinned identity and duplicate-owner conflicts fail before mutation"
+}
+
+test_operator_attested_handoff_refuses_a_live_endpoint_and_bad_confirmation() {
+  local dir id=paseo-backend-adapter head before_meta before_brief out rc
+  dir=$(new_case handoff-live-endpoint paseo-backend-adapter)
+  add_legacy_handoff_task "$dir"
+  head=$(git -C "$dir/wt" rev-parse HEAD)
+  before_meta=$(cat "$dir/home/state/$id.meta")
+  before_brief=$(cat "$dir/home/data/$id/brief.md")
+  printf '%s\n' fm-paseo-backend-adapter > "$dir/fake/windows"
+  printf 'codex' > "$dir/fake/command"
+  out=$(run_attested_handoff "$dir" "$id" handoff \
+    --expect-endpoint firstmate:fm-paseo-backend-adapter \
+    --expect-worktree "$dir/wt" --expect-head "$head" --note 'must refuse'); rc=$?
+  expect_code 1 "$rc" "a live recorded endpoint must refuse even with operator confirmation"
+  assert_contains "$out" "requires the original endpoint to read missing" "live endpoint refusal should name the condition"
+  [ "$(cat "$dir/home/state/$id.meta")" = "$before_meta" ] || fail "live endpoint refusal changed task metadata"
+  assert_absent "$dir/fake/created-sessions" "live endpoint refusal created a second endpoint"
+
+  : > "$dir/fake/windows"
+  out=$(run_attested_handoff_with_answers "$dir" 'NO' 'TERMINAL paseo-backend-adapter' "$id" handoff \
+    --expect-endpoint firstmate:fm-paseo-backend-adapter \
+    --expect-worktree "$dir/wt" --expect-head "$head" --note 'must refuse'); rc=$?
+  expect_code 1 "$rc" "a missing worker attestation must refuse"
+  assert_contains "$out" "handoff confirmation did not match" "refusal should name the failed confirmation"
+  [ "$(cat "$dir/home/state/$id.meta")" = "$before_meta" ] || fail "bad confirmation changed task metadata"
+  [ "$(cat "$dir/home/data/$id/brief.md")" = "$before_brief" ] || fail "bad confirmation changed task instructions"
+  assert_absent "$dir/fake/created-sessions" "bad confirmation created an endpoint"
+  pass "operator-attested handoff: a live endpoint and incorrect confirmation both fail closed"
+}
+
+test_operator_attested_handoff_is_not_available_to_other_tasks() {
+  local dir out rc
+  dir=$(new_case handoff-other-task unrelated1)
+  add_ship_task "$dir" unrelated1 codex firstmate
+  out=$(run_attested_handoff "$dir" unrelated1 handoff \
+    --expect-endpoint firstmate:fm-unrelated1 --expect-worktree "$dir/wt" \
+    --expect-head "$(git -C "$dir/wt" rev-parse HEAD)" --note 'must refuse'); rc=$?
+  expect_code 1 "$rc" "the one-task handoff must refuse all other ids"
+  assert_contains "$out" "limited to the stranded paseo-backend-adapter task" "refusal did not name its narrow scope"
+  assert_absent "$dir/fake/created-sessions" "an unrelated task created an endpoint"
+  pass "operator-attested handoff: unrelated task ids stay on ordinary guarded recovery"
+}
+
 # Every tmux `missing` refuses on BOTH verbs, whatever produced it. tmux is the
 # one verified backend whose absence cannot be proven from a task record: the
 # record carries no socket identity for the endpoint, and any inventory
@@ -2261,6 +2557,7 @@ test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions
 test_relaunch_requires_a_note_for_a_ship_task
+test_relaunch_rejects_whitespace_only_notes
 test_harness_switch_moves_the_record_and_clears_prior_wiring
 test_harness_switch_does_not_carry_the_old_profile_axes
 test_harness_switch_resolves_a_prefixed_recorded_harness
@@ -2320,3 +2617,9 @@ test_herdr_reclaim_of_a_secondmate_names_its_own_owner
 test_herdr_rebind_failure_from_a_plain_shell_names_the_real_cause
 test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it
 test_relaunch_moves_a_drifted_item_back_in_flight
+test_operator_attested_handoff_rebinds_only_the_pinned_task_and_keeps_dirty_work
+test_operator_attested_handoff_rejects_whitespace_only_notes
+test_operator_attested_handoff_refuses_a_caller_supplied_journal
+test_operator_attested_handoff_refuses_identity_conflicts_without_mutation
+test_operator_attested_handoff_refuses_a_live_endpoint_and_bad_confirmation
+test_operator_attested_handoff_is_not_available_to_other_tasks

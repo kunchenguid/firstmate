@@ -7,6 +7,10 @@
 #        fm-control.sh <task-id> relaunch [--harness <name>] [--model <name>]
 #                                         [--effort <level>]
 #                                         (--note <text> | --note-file <path>)
+#        fm-control.sh paseo-backend-adapter handoff
+#          --expect-endpoint firstmate:fm-paseo-backend-adapter
+#          --expect-worktree <recorded-worktree> --expect-head <sha>
+#          (--note <text> | --note-file <path>)
 #
 # Why this exists, and how it differs from fm-send.sh. bin/fm-send.sh is the
 # DATA plane: conversational text for the agent to read, always routing-marked
@@ -55,9 +59,9 @@
 #              names, and the task's record rebinds to it; that is how a task
 #              whose terminal was destroyed is reclaimed by the home that owns
 #              it, rather than being stranded with a parked approval nobody can
-#              answer. Reclaim is HERDR-ONLY for the reason `exit` gives above:
-#              a tmux `missing` cannot be proven absent from a task record, so
-#              it refuses.
+#              answer. A tmux `missing` endpoint remains unproven; the
+#              one-task operator-attested `handoff` exception below does not
+#              change that proof limit.
 #              An explicit `default` model or effort clears that
 #              axis for the replacement. With no explicit axis, a secondmate
 #              re-resolves its durable config/secondmate-harness pin (harness
@@ -76,6 +80,12 @@
 #              the prior durable record in place and reports the concrete
 #              state; it never leaves a half-transitioned task claiming to be
 #              running.
+#   handoff   Attended, journaled exception for only the pinned
+#              paseo-backend-adapter task. Requires the pinned endpoint, exact
+#              worktree and HEAD, a note, and both operator confirmations. It
+#              creates one unique tmux session based on operator attestations,
+#              not endpoint-absence proof; see docs/agent-control.md for the
+#              full procedure and safety limits.
 #
 # Teardown and discard are NOT verbs here and never will be. `exit` stops an
 # agent and preserves everything else; removing a worktree, killing an
@@ -174,6 +184,10 @@ die() {  # <message>
   exit 1
 }
 
+contains_non_whitespace() {  # <text>
+  [[ "$1" =~ [^[:space:]] ]]
+}
+
 CONTROL_LOCK=
 CONTROL_LOCK_HELD=0
 RELAUNCH_ACTIVE=0
@@ -223,6 +237,9 @@ MODEL_SET=0
 EFFORT_SET=0
 NOTE=
 NOTE_SET=0
+HANDOFF_EXPECT_ENDPOINT=
+HANDOFF_EXPECT_WORKTREE=
+HANDOFF_EXPECT_HEAD=
 control_want_value=
 for control_arg in "$@"; do
   if [ -n "$control_want_value" ]; then
@@ -239,6 +256,9 @@ for control_arg in "$@"; do
         NOTE=$(cat "$control_arg")
         NOTE_SET=1
         ;;
+      expect_endpoint) HANDOFF_EXPECT_ENDPOINT=$control_arg ;;
+      expect_worktree) HANDOFF_EXPECT_WORKTREE=$control_arg ;;
+      expect_head) HANDOFF_EXPECT_HEAD=$control_arg ;;
     esac
     control_want_value=
     continue
@@ -258,6 +278,12 @@ for control_arg in "$@"; do
       NOTE=$(cat "${control_arg#--note-file=}")
       NOTE_SET=1
       ;;
+    --expect-endpoint) control_want_value=expect_endpoint ;;
+    --expect-endpoint=*) HANDOFF_EXPECT_ENDPOINT=${control_arg#--expect-endpoint=} ;;
+    --expect-worktree) control_want_value=expect_worktree ;;
+    --expect-worktree=*) HANDOFF_EXPECT_WORKTREE=${control_arg#--expect-worktree=} ;;
+    --expect-head) control_want_value=expect_head ;;
+    --expect-head=*) HANDOFF_EXPECT_HEAD=${control_arg#--expect-head=} ;;
     *) die "unexpected argument '$control_arg'" ;;
   esac
 done
@@ -266,9 +292,22 @@ if [ -n "$control_want_value" ]; then
   die "--$control_want_value requires a value"
 fi
 
-if [ "$VERB" != relaunch ]; then
+if [ "$VERB" = relaunch ]; then
+  [ -z "$HANDOFF_EXPECT_ENDPOINT" ] && [ -z "$HANDOFF_EXPECT_WORKTREE" ] && [ -z "$HANDOFF_EXPECT_HEAD" ] \
+    || die "--expect-endpoint, --expect-worktree, and --expect-head apply to the legacy 'handoff' only"
+elif [ "$VERB" = handoff ]; then
+  [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] \
+    || die "--harness, --model, and --effort apply to 'relaunch' only"
+  [ -n "$HANDOFF_EXPECT_ENDPOINT" ] && [ -n "$HANDOFF_EXPECT_WORKTREE" ] && [ -n "$HANDOFF_EXPECT_HEAD" ] \
+    || die "handoff requires --expect-endpoint, --expect-worktree, and --expect-head"
+  if [ "$NOTE_SET" != 1 ] || ! contains_non_whitespace "$NOTE"; then
+    die "handoff requires --note (or --note-file) so the replacement receives the recovery context"
+  fi
+else
   [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] && [ "$NOTE_SET" = 0 ] \
     || die "--harness, --model, --effort, and --note apply to 'relaunch' only"
+  [ -z "$HANDOFF_EXPECT_ENDPOINT" ] && [ -z "$HANDOFF_EXPECT_WORKTREE" ] && [ -z "$HANDOFF_EXPECT_HEAD" ] \
+    || die "handoff identity flags apply to the legacy 'handoff' only"
 fi
 [ "$HARNESS_SET" = 0 ] || [ -n "$NEW_HARNESS" ] || die "--harness requires a non-empty value"
 [ "$MODEL_SET" = 0 ] || [ -n "$NEW_MODEL" ] || die "--model requires a non-empty value"
@@ -287,6 +326,9 @@ if ! fm_task_id_creation_valid "$RAW_ID"; then
   die "'$RAW_ID' is not a valid task id"
 fi
 ID=$RAW_ID
+if [ "$VERB" = handoff ] && ! fm_control_attested_handoff_task_allowed "$ID"; then
+  die "operator-attested handoff is limited to the stranded paseo-backend-adapter task"
+fi
 # Supervision lease guard: lifecycle control is overlap territory between the
 # two Pi supervision actors; refuse while the OTHER actor holds this task's
 # live lease (contract: bin/fm-lease-lib.sh; no-op in homes without leases).
@@ -330,6 +372,7 @@ LABEL="fm-$ID"
 RECORDED_HARNESS=$(fm_meta_get "$META" harness)
 KIND=$(fm_meta_get "$META" kind)
 WT=$(fm_meta_get "$META" worktree)
+PROJ=$(fm_meta_get "$META" project)
 [ -n "$KIND" ] || KIND=ship
 
 HARNESS=$(fm_control_harness_family "$RECORDED_HARNESS") \
@@ -579,6 +622,12 @@ JOURNAL="$STATE/$ID.control-relaunch"
 META_PRIOR="$JOURNAL.meta-prior"
 BRIEF_PRIOR="$JOURNAL.brief-prior"
 NOTE_FILE="$JOURNAL.note"
+HANDOFF_MODE=0
+[ "$VERB" != handoff ] || HANDOFF_MODE=1
+HANDOFF_EXPECTED_WORKTREE=
+HANDOFF_EXPECTED_HEAD=
+HANDOFF_EXPECTED_BRANCH=
+HANDOFF_NEW_SESSION=
 RELAUNCH_META_PUBLISHED=0
 RELAUNCH_AGENT_CONFIRMED=0
 RELAUNCH_TX=
@@ -612,6 +661,16 @@ journal_write() {  # <phase> [extra-line]...
     echo "to_harness=$TARGET_HARNESS"
     echo "to_model=$TARGET_MODEL"
     echo "to_effort=$TARGET_EFFORT"
+    if [ "$HANDOFF_MODE" = 1 ]; then
+      echo "handoff=attested-v1"
+      echo "handoff_expected_endpoint=$HANDOFF_EXPECT_ENDPOINT"
+      echo "handoff_expected_worktree=$HANDOFF_EXPECTED_WORKTREE"
+      echo "handoff_expected_head=$HANDOFF_EXPECTED_HEAD"
+      echo "handoff_expected_branch=$HANDOFF_EXPECTED_BRANCH"
+      echo "handoff_worker_attested=stopped"
+      echo "handoff_run_attested=terminal"
+      echo "handoff_new_session=$HANDOFF_NEW_SESSION"
+    fi
     local line
     for line in "$@"; do
       echo "$line"
@@ -667,6 +726,14 @@ relaunch_rollback() {
       esac
       ;;
     exited|launching)
+      if [ "$HANDOFF_MODE" = 1 ] \
+         && [ "$RELAUNCH_AGENT_CONFIRMED" != 1 ] \
+         && [ "$RELAUNCH_META_PUBLISHED" != 1 ] \
+         && { [ -z "$RELAUNCH_TX" ] || [ "$(fm_meta_get "$META" control_relaunch_tx)" != "$RELAUNCH_TX" ]; }; then
+        journal_write "failed:$RELAUNCH_PHASE" "rollback=handoff-record-and-worktree-preserved" || true
+        echo "error: handoff of $ID did not confirm a replacement; its original task record and local worktree remain preserved at $WT" >&2
+        return 0
+      fi
       if [ "$RELAUNCH_AGENT_CONFIRMED" = 1 ]; then
         journal_write "failed:$RELAUNCH_PHASE" "rollback=none-new-agent-confirmed" || true
         echo "error: $ID's replacement is running on $TARGET_HARNESS, but transaction completion could not be persisted; its published record was retained for reconciliation" >&2
@@ -864,6 +931,84 @@ record_note() {
   esac
 }
 
+handoff_confirm() {  # <prompt> <required-response>
+  local prompt=$1 expected=$2 answer
+  printf '%s ' "$prompt" >&2
+  IFS= read -r answer || die "handoff confirmation was not provided"
+  [ "$answer" = "$expected" ] || die "handoff confirmation did not match; no task files or endpoint were changed"
+}
+
+validate_attested_handoff_identity() {
+  local expected_endpoint expected_branch recorded_mode recorded_yolo wt_real expected_wt_real branch head
+  fm_control_attested_handoff_task_allowed "$ID" \
+    || die "operator-attested handoff is limited to the stranded paseo-backend-adapter task"
+  expected_endpoint=$(fm_control_handoff_expected_endpoint "$ID")
+  expected_branch=$(fm_control_handoff_expected_branch "$ID")
+  [ "$HANDOFF_EXPECT_ENDPOINT" = "$expected_endpoint" ] \
+    || die "handoff endpoint expectation '$HANDOFF_EXPECT_ENDPOINT' does not match the pinned legacy endpoint '$expected_endpoint'"
+  [ "$BACKEND" = tmux ] && [ "$T" = "$expected_endpoint" ] \
+    || die "handoff requires the recorded tmux endpoint $expected_endpoint"
+  [ "$RECORDED_HARNESS" = codex ] && [ "$KIND" = ship ] \
+    || die "handoff requires the recorded codex ship task identity"
+  recorded_mode=$(fm_meta_get "$META" mode)
+  recorded_yolo=$(fm_meta_get "$META" yolo)
+  [ "$recorded_mode" = no-mistakes ] && [ "$recorded_yolo" = off ] \
+    || die "handoff requires the recorded no-mistakes, yolo-off delivery identity"
+  [ "$(basename "$PROJ")" = firstmate ] \
+    || die "handoff project identity is not Firstmate"
+  [ -n "$WT" ] && [ -d "$WT" ] \
+    || die "handoff task has no available recorded local copy"
+  [ "$HANDOFF_EXPECT_WORKTREE" = "$WT" ] \
+    || die "--expect-worktree must match the exact path recorded for the local copy"
+  wt_real=$(cd "$WT" 2>/dev/null && pwd -P) \
+    || die "recorded local copy cannot be resolved"
+  case "$wt_real$HANDOFF_EXPECT_WORKTREE" in *$'\n'*|*$'\r'*|*$'\t'*)
+    die "handoff worktree identity contains a control character"
+    ;;
+  esac
+  expected_wt_real=$(cd "$HANDOFF_EXPECT_WORKTREE" 2>/dev/null && pwd -P) \
+    || die "--expect-worktree '$HANDOFF_EXPECT_WORKTREE' cannot be resolved"
+  [ "$wt_real" = "$expected_wt_real" ] \
+    || die "expected worktree '$expected_wt_real' does not match the exact recorded local copy '$wt_real'"
+  branch=$(git -C "$WT" branch --show-current 2>/dev/null) \
+    || die "recorded local copy branch cannot be inspected"
+  [ "$branch" = "$expected_branch" ] \
+    || die "recorded local copy is on branch '${branch:-detached}', not the pinned legacy branch '$expected_branch'"
+  head=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) \
+    || die "recorded local copy HEAD cannot be inspected"
+  case "$HANDOFF_EXPECT_HEAD" in *[!0-9a-f]*|'') die "--expect-head must be a full lowercase commit id" ;; esac
+  [ "${#HANDOFF_EXPECT_HEAD}" = 40 ] \
+    || die "--expect-head must be a full lowercase commit id"
+  [ "$head" = "$HANDOFF_EXPECT_HEAD" ] \
+    || die "recorded local copy HEAD '$head' does not match --expect-head '$HANDOFF_EXPECT_HEAD'"
+  HANDOFF_EXPECTED_WORKTREE=$wt_real
+  HANDOFF_EXPECTED_HEAD=$head
+  HANDOFF_EXPECTED_BRANCH=$branch
+}
+
+handoff_refuse_duplicate_task_owner() {
+  local candidate candidate_id other_worktree other_real other_backend other_target
+  for candidate in "$STATE"/*.meta; do
+    [ -e "$candidate" ] || [ -L "$candidate" ] || continue
+    [ "$candidate" = "$META" ] && continue
+    [ -f "$candidate" ] && [ ! -L "$candidate" ] \
+      || die "task record '$candidate' is unreadable; refusing to hand off while duplicate ownership cannot be ruled out"
+    candidate_id=$(basename "$candidate" .meta)
+    fm_backend_validate_task_endpoint "$candidate" "$candidate_id" >/dev/null \
+      || die "task record '$candidate' has ambiguous endpoint identity; refusing to hand off while duplicate ownership cannot be ruled out"
+    other_backend=$FM_BACKEND_VALIDATED_BACKEND
+    other_target=$FM_BACKEND_VALIDATED_TARGET
+    other_worktree=$(fm_backend_meta_exact_value "$candidate" worktree) \
+      || die "task record '$candidate' has ambiguous worktree identity; refusing to hand off while duplicate ownership cannot be ruled out"
+    other_real=$(cd "$other_worktree" 2>/dev/null && pwd -P) \
+      || die "task record '$candidate' worktree cannot be resolved; refusing to hand off while duplicate ownership cannot be ruled out"
+    if [ "$other_real" = "$HANDOFF_EXPECTED_WORKTREE" ] \
+       || { [ "$other_backend" = "$BACKEND" ] && [ "$other_target" = "$HANDOFF_EXPECT_ENDPOINT" ]; }; then
+      die "task record '$candidate' already claims this endpoint or local copy; refusing a duplicate worker owner"
+    fi
+  done
+}
+
 do_relaunch() {
   local exit_result state note_line
   local -a spawn_args
@@ -871,13 +1016,21 @@ do_relaunch() {
   require_state_verified_backend relaunch
   resolve_relaunch_profile
 
+  if [ "$HANDOFF_MODE" = 1 ]; then
+    validate_attested_handoff_identity
+    handoff_refuse_duplicate_task_owner
+    [ "$TARGET_HARNESS" = codex ] \
+      || die "the legacy handoff preserves the recorded codex harness"
+  fi
+
   case "$KIND" in
     ship|scout)
       RELAUNCH_BRIEF="$DATA/$ID/brief.md"
       [ -f "$RELAUNCH_BRIEF" ] \
         || die "task $ID has no instructions at $RELAUNCH_BRIEF; refusing to relaunch a worker with nothing to work from"
-      [ "$NOTE_SET" = 1 ] && [ -n "$NOTE" ] \
-        || die "relaunch of a $KIND task requires --note (or --note-file): the replacement worker inherits the local copy but none of the conversation, so it must be told what happened"
+      if [ "$NOTE_SET" != 1 ] || ! contains_non_whitespace "$NOTE"; then
+        die "relaunch of a $KIND task requires --note (or --note-file): the replacement worker inherits the local copy but none of the conversation, so it must be told what happened"
+      fi
       ;;
     secondmate)
       # The charter in the secondmate's own home is its instruction source and
@@ -895,6 +1048,22 @@ do_relaunch() {
     note_line="note=none"
   fi
   safe_checkpoint
+  if [ "$HANDOFF_MODE" = 1 ]; then
+    [ "$(agent_state)" = missing ] \
+      || die "attested handoff requires the original endpoint to read missing; a live, dead, ambiguous, or unreadable endpoint refuses"
+    HANDOFF_NEW_SESSION="fm-handoff-paseo-backend-adapter-${BASHPID:-$$}-$(date -u +%Y%m%d%H%M%S)-$RANDOM"
+    handoff_confirm \
+      "Confirm the original worker has stopped (type STOP paseo-backend-adapter):" \
+      'STOP paseo-backend-adapter'
+    handoff_confirm \
+      "Confirm the no-mistakes run is terminal and no active run owns the branch (type TERMINAL paseo-backend-adapter):" \
+      'TERMINAL paseo-backend-adapter'
+    [ "$(agent_state)" = missing ] \
+      || die "the original endpoint changed while handoff was being confirmed; no replacement was launched"
+    safe_checkpoint
+    [ "${CHECKPOINT_LINES[0]#worktree_head=}" = "$HANDOFF_EXPECTED_HEAD" ] \
+      || die "recorded local copy HEAD changed during handoff confirmation"
+  fi
   cp -p "$META" "$META_PRIOR" || die "could not preserve task $ID's durable record before relaunching"
   RELAUNCH_ACTIVE=1
   journal_write checkpoint "${CHECKPOINT_LINES[@]}" "$note_line"
@@ -902,20 +1071,39 @@ do_relaunch() {
   record_note
   journal_write noted "${CHECKPOINT_LINES[@]}" "$note_line"
 
-  journal_write stopping "${CHECKPOINT_LINES[@]}" "$note_line"
-  exit_result=$(do_exit)
-  journal_write exited "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
+  if [ "$HANDOFF_MODE" = 1 ]; then
+    exit_result=operator-attested-stopped
+  else
+    journal_write stopping "${CHECKPOINT_LINES[@]}" "$note_line"
+    exit_result=$(do_exit)
+    journal_write exited "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
+  fi
 
   # The launch owner (fm-spawn --relaunch) clears the previous incarnation's
   # per-task harness wiring before arming the new one, so nothing to do here.
   RELAUNCH_TX="${BASHPID:-$$}.$(date -u +%Y%m%dT%H%M%SZ).$RANDOM"
-  journal_write launching "${CHECKPOINT_LINES[@]}" "$note_line" "relaunch_tx=$RELAUNCH_TX"
+  journal_write launching "${CHECKPOINT_LINES[@]}" "$note_line" "relaunch_tx=$RELAUNCH_TX" "exit_result=$exit_result"
   spawn_args=("$ID" --relaunch --harness "$TARGET_HARNESS")
   [ "$TARGET_MODEL" = default ] || spawn_args+=(--model "$TARGET_MODEL")
   [ "$TARGET_EFFORT" = default ] || spawn_args+=(--effort "$TARGET_EFFORT")
-  if FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" \
+  if [ "$HANDOFF_MODE" = 1 ]; then
+    if FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" FM_CONTROL_HANDOFF_TX="$RELAUNCH_TX" \
+        "$SCRIPT_DIR/fm-spawn.sh" "${spawn_args[@]}" >/dev/null; then
+      RELAUNCH_META_PUBLISHED=1
+    else
+      [ "$(fm_meta_get "$META" control_relaunch_tx)" != "$RELAUNCH_TX" ] \
+        || RELAUNCH_META_PUBLISHED=1
+      die "the replacement agent for $ID could not be launched on $TARGET_HARNESS"
+    fi
+  elif FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" \
       "$SCRIPT_DIR/fm-spawn.sh" "${spawn_args[@]}" >/dev/null; then
     RELAUNCH_META_PUBLISHED=1
+  else
+    [ "$(fm_meta_get "$META" control_relaunch_tx)" != "$RELAUNCH_TX" ] \
+      || RELAUNCH_META_PUBLISHED=1
+    die "the replacement agent for $ID could not be launched on $TARGET_HARNESS"
+  fi
+  if [ "$RELAUNCH_META_PUBLISHED" = 1 ]; then
     # $T was resolved from the record before the launch. When the recorded
     # endpoint was gone, the launch owner created a fresh one and republished
     # the record pointing at it, so every postcondition below must be read from
@@ -933,10 +1121,6 @@ do_relaunch() {
     else
       die "the replacement agent for $ID was launched, but task $ID's republished record no longer passes endpoint validation (the refusal above names the row), so this transaction cannot say which endpoint to confirm it on; reconcile $META before any further control action"
     fi
-  else
-    [ "$(fm_meta_get "$META" control_relaunch_tx)" != "$RELAUNCH_TX" ] \
-      || RELAUNCH_META_PUBLISHED=1
-    die "the replacement agent for $ID could not be launched on $TARGET_HARNESS"
   fi
 
   state=$(wait_agent_state "$LAUNCH_WAIT" alive) || {
@@ -946,7 +1130,11 @@ do_relaunch() {
 
   journal_write complete "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
   RELAUNCH_ACTIVE=0
-  echo "relaunched $ID harness=$TARGET_HARNESS from=$PRIOR_RECORDED_HARNESS model=$TARGET_MODEL effort=$TARGET_EFFORT backend=$BACKEND endpoint=$T worktree=$WT"
+  if [ "$HANDOFF_MODE" = 1 ]; then
+    echo "handed-off $ID from=$HANDOFF_EXPECT_ENDPOINT to=$T harness=$TARGET_HARNESS backend=$BACKEND worktree=$WT"
+  else
+    echo "relaunched $ID harness=$TARGET_HARNESS from=$PRIOR_RECORDED_HARNESS model=$TARGET_MODEL effort=$TARGET_EFFORT backend=$BACKEND endpoint=$T worktree=$WT"
+  fi
 }
 
 # --- verbs ------------------------------------------------------------------
@@ -973,6 +1161,9 @@ case "$VERB" in
     echo "$result $ID harness=$HARNESS backend=$BACKEND endpoint=$T worktree=$WT"
     ;;
   relaunch)
+    do_relaunch
+    ;;
+  handoff)
     do_relaunch
     ;;
 esac
