@@ -2385,6 +2385,135 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
   pass "relaunch heals an item that drifted out of In flight while the task stayed live"
 }
 
+make_orca_relaunch_stub() {  # <case-dir>
+  local dir=$1 client="$1/app.asar.unpacked/out/cli/runtime"
+  mkdir -p "$client"
+  cat > "$client/client.js" <<'JS'
+const fs = require('fs'), d = process.env.FM_FAKE_DIR;
+const read = name => fs.existsSync(`${d}/${name}`) ? fs.readFileSync(`${d}/${name}`,'utf8').trim() : '';
+exports.reply = (method, params) => {
+  const path = read('cwd'), worktreeId = `repo::${path}`, mode = read('orca-mode');
+  const handle = params.terminal || 'term-new';
+  const live = handle === 'term-new' || mode === 'live';
+  const terminal = {handle, ptyId:`pty-${handle}`, incarnationId:`inc-${handle}`,
+    worktreeId, worktreePath:path, executionHostId:'local', connected:live, writable:live,
+    ...live ? {} : {exitCause:{kind:'operator_close'}}};
+  let result;
+  switch(method) {
+    case 'status.get': result = {graphStatus:'ready',appVersion:'1.4.212'}; break;
+    case 'terminal.show': result = {terminal}; break;
+    case 'terminal.list': result = {terminals:live ? [terminal] : [], truncated:false,hostScope:{hostIds:['local']}}; break;
+    case 'terminal.wait': result = {wait:{handle,condition:'exit',satisfied:true,status:'exited',exitCode:mode === 'ambiguous' ? -1 : 0,exitCause:{kind:'operator_close'}}}; break;
+    case 'terminal.inspectProcess': result = {process:{foregroundProcess:read('orca-launched') || mode === 'live' ? 'codex' : 'zsh'}}; break;
+    default: throw Error(`unexpected ${method}`);
+  }
+  return {ok:true,result,_meta:{runtimeId:'runtime-proof'}};
+};
+exports.RuntimeClient = class { async call(method, params) {
+  // Inventory covers the exact old or replacement handle that was just read.
+  if (method === 'terminal.show') this.handle = params.terminal;
+  return exports.reply(method, {...params,terminal:params.terminal || this.handle});
+}};
+JS
+  cat > "$dir/fakebin/orca" <<'JS'
+#!/usr/bin/env node
+const fs = require('fs'), path = require('path'), args=process.argv.slice(2), d=process.env.FM_FAKE_DIR;
+const get = flag => args[args.indexOf(flag)+1];
+const reply = require(path.resolve(__dirname,'../app.asar.unpacked/out/cli/runtime/client.js')).reply;
+let r;
+if (args[0] === 'status') r={ok:true,result:{runtime:{reachable:true,state:'ready'}}};
+else if (args[0] === 'worktree' && args[1] === 'show') r={ok:true,result:{worktree:{path:fs.readFileSync(`${d}/cwd`,'utf8').trim()}}};
+else if (args[1] === 'show') r=reply('terminal.show',{terminal:get('--terminal')});
+else if (args[1] === 'create') {
+  fs.appendFileSync(`${d}/orca-created`,get('--worktree')+'\n');
+  r={ok:true,result:{terminal:{handle:'term-new'}}};
+} else if (args[1] === 'close') {
+  fs.appendFileSync(`${d}/orca-closed`,get('--terminal')+'\n');r={ok:true};
+} else if (args[1] === 'read') r={ok:true,result:{terminal:{tail:['╭────╮','│    │','╰────╯']}}};
+else if (args[1] === 'send') {
+  let text=get('--text');
+  if (text?.startsWith(". '") && text.endsWith("'")) text=fs.readFileSync(text.slice(3,-1),'utf8');
+  fs.appendFileSync(`${d}/literal`,text+'\n');
+  if (text?.includes('encode launch-brief')) fs.writeFileSync(`${d}/orca-launched`,'yes');
+  r={ok:true};
+} else throw Error(`unexpected Orca mutation ${args.join(' ')}`);
+console.log(JSON.stringify(r));
+JS
+  chmod +x "$dir/fakebin/orca"
+  printf 'stopped' > "$dir/fake/orca-mode"
+  {
+    echo 'backend=orca'
+    echo 'terminal=term-old'
+    echo "orca_worktree_id=repo::$dir/wt"
+  } >> "$dir/home/state/orca-proof.meta"
+  sed 's/^window=.*/window=fm-orca-proof/' "$dir/home/state/orca-proof.meta" > "$dir/meta"
+  mv "$dir/meta" "$dir/home/state/orca-proof.meta"
+}
+
+test_orca_stopped_relaunch_preserves_work_and_refuses_uncertainty() {
+  local dir mode verb out rc before brief
+  for mode in live ambiguous; do
+    dir=$(new_case "orca-$mode" orca-proof)
+    add_ship_task "$dir" orca-proof
+    make_orca_relaunch_stub "$dir"
+    printf '%s' "$mode" > "$dir/fake/orca-mode"
+    before=$(cat "$dir/home/state/orca-proof.meta")
+    brief=$(cat "$dir/home/data/orca-proof/brief.md")
+    for verb in control spawn; do
+      rc=0
+      if [ "$verb" = control ]; then
+        out=$(run_control "$dir" orca-proof relaunch --harness codex --note 'resume the preserved task') || rc=$?
+      else
+        out=$(run_spawn "$dir" orca-proof --relaunch --harness codex) || rc=$?
+      fi
+      expect_code 1 "$rc" "Orca $mode must refuse $verb"$'\n'"$out"
+      if [ "$mode" = ambiguous ]; then
+        assert_contains "$out" ambiguous 'refusal must reach the uncertain-state guard'
+      elif [ "$verb" = spawn ]; then
+        assert_contains "$out" alive 'spawn must identify the live agent before refusing'
+      else
+        assert_contains "$out" 'live Orca agent' 'control must preserve the live-agent stop refusal'
+      fi
+      [ "$(cat "$dir/home/state/orca-proof.meta")" = "$before" ] || fail 'Orca refusal changed metadata'
+      [ "$(cat "$dir/home/data/orca-proof/brief.md")" = "$brief" ] || fail 'Orca refusal changed instructions'
+      [ ! -e "$dir/fake/orca-created" ] || fail 'Orca refusal created another terminal'
+      [ ! -s "$dir/fake/literal" ] || fail 'Orca refusal sent terminal input'
+    done
+  done
+  dir=$(new_case orca-stopped orca-proof)
+  add_ship_task "$dir" orca-proof
+  make_orca_relaunch_stub "$dir"
+  printf 'unfinished work\n' > "$dir/wt/task.txt"
+  printf 'keep pending steer\n' > "$dir/home/state/orca-proof.pending"
+  out=$(run_control "$dir" orca-proof relaunch --harness codex --note 'resume the preserved task'); rc=$?
+  expect_code 0 "$rc" "confirmed Orca stop must permit replacement"$'\n'"$out"
+  [ "$(meta_field "$dir" orca-proof terminal)" = term-new ] || fail 'Orca replacement handle not published'
+  [ "$(meta_field "$dir" orca-proof orca_worktree_id)" = "repo::$dir/wt" ] || fail 'Orca worktree identity changed'
+  [ "$(meta_field "$dir" orca-proof worktree)" = "$dir/wt" ] || fail 'Orca worktree path changed'
+  [ "$(meta_field "$dir" orca-proof harness)" = codex ] || fail 'Orca harness switch not recorded'
+  [ "$(cat "$dir/wt/task.txt")" = 'unfinished work' ] || fail 'Orca recovery discarded work'
+  [ "$(cat "$dir/home/state/orca-proof.pending")" = 'keep pending steer' ] || fail 'Orca recovery discarded task state'
+  [ "$(wc -l < "$dir/fake/orca-created" | tr -d ' ')" = 1 ] || fail 'Orca recovery created more than one terminal'
+  [ ! -e "$dir/fake/orca-closed" ] || fail 'Orca recovery closed an unrelated endpoint'
+  dir=$(new_case orca-abort orca-proof)
+  add_ship_task "$dir" orca-proof
+  make_orca_relaunch_stub "$dir"
+  printf 'preserve aborted work\n' > "$dir/wt/task.txt"
+  before=$(cat "$dir/home/state/orca-proof.meta")
+  make_mv_failure_stub "$dir"
+  rc=0
+  out=$(FM_REAL_MV="$(command -v mv)" FM_FAKE_META_PUBLISH_MV_FAIL="$dir/home/state/orca-proof.meta" \
+    run_control "$dir" orca-proof relaunch --harness codex --note 'resume after failure') || rc=$?
+  expect_code 1 "$rc" 'Orca metadata publication failure must abort'
+  [ -e "$dir/fake/orca-created" ] || fail 'publication failure did not reach replacement allocation'
+  [ "$(cat "$dir/fake/orca-closed")" = term-new ] || fail 'abort must close only its replacement shell'
+  [ "$(cat "$dir/home/state/orca-proof.meta")" = "$before" ] || fail 'abort lost the prior endpoint record'
+  [ "$(cat "$dir/wt/task.txt")" = 'preserve aborted work' ] || fail 'abort deleted the recorded checkout'
+  [ ! -e "$dir/fake/orca-launched" ] || fail 'aborted publication launched an unrecorded worker'
+  pass 'Orca relaunch: replaces a proven stopped endpoint on Codex, preserves work and identity, and both entry points refuse live or ambiguous endpoints'
+}
+
+test_orca_stopped_relaunch_preserves_work_and_refuses_uncertainty
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven

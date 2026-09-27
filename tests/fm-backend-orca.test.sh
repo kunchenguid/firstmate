@@ -1348,6 +1348,62 @@ test_dispatcher_sources_orca_and_routes_primitives() {
   pass "fm-backend dispatcher: accepts orca and routes capture through bin/backends/orca.sh"
 }
 
+# Recovery uses the installed Orca client's transport boundary, not a fake
+# classifier. Each scenario independently changes a host response; the adapter
+# must combine identity, inventory and exit evidence itself.
+test_recovery_requires_host_exit_and_exact_incarnation() {
+  local client scenario expected out
+  orca_case recovery-state
+  client="$CASE_DIR/app.asar.unpacked/out/cli/runtime"
+  mkdir -p "$client"
+  cat > "$client/client.js" <<'JS'
+let reads = 0;
+exports.RuntimeClient = class {
+  async call(method, params) {
+    const scenario = process.env.FM_ORCA_SCENARIO;
+    const connected = ['live', 'shell', 'unknown-process'].includes(scenario);
+    const terminal = {handle:'term-proof', ptyId:'pty-proof', incarnationId:'inc-proof',
+      worktreeId:'repo::/work/proof', worktreePath:'/work/proof', executionHostId:'local',
+      connected, writable:connected, orphaned:!connected,
+      ...connected ? {} : {exitCause:{kind:'operator_close'}}};
+    let result;
+    if (method === 'status.get') {
+      result = {graphStatus:'ready', appVersion:scenario === 'old-host' ? '1.4.211' : '1.4.212'};
+    } else if (method === 'terminal.show') {
+      if (scenario === 'stale') throw Error('terminal_handle_stale');
+      if (scenario === 'remote') terminal.executionHostId = 'ssh:elsewhere';
+      if (scenario === 'incarnation-race' && reads++ > 0) terminal.incarnationId = 'new-incarnation';
+      result = {terminal};
+    } else if (method === 'terminal.list') {
+      if (scenario === 'unreachable') throw Error('terminal_liveness_unavailable');
+      const listed = connected || scenario === 'still-live' ? [terminal] : [];
+      result = {terminals:listed, truncated:scenario === 'truncated',
+        hostScope:{hostIds:scenario === 'omitted-host' ? [] : ['local']}};
+    } else if (method === 'terminal.wait') {
+      result = {wait:{handle:'term-proof', condition:'exit', satisfied:true, status:'exited',
+        exitCode:scenario === 'synthetic-exit' ? -1 : 0, exitCause:{kind:'operator_close'}}};
+    } else if (method === 'terminal.inspectProcess') {
+      result = {process:{foregroundProcess:scenario === 'live' ? 'codex' : scenario === 'shell' ? 'zsh' : 'sleep', hasChildProcesses:false}};
+    } else throw Error(`unexpected read: ${method}`);
+    return {ok:true, result, _meta:{runtimeId:scenario === 'runtime-race' && method === 'terminal.wait' ? 'new-runtime' : 'runtime-proof'}};
+  }
+};
+JS
+  for scenario in stopped live shell unknown-process synthetic-exit still-live stale remote incarnation-race runtime-race unreachable truncated omitted-host old-host; do
+    case "$scenario" in
+      stopped) expected=missing ;;
+      live) expected=alive ;;
+      shell|unknown-process|synthetic-exit|still-live) expected=ambiguous ;;
+      *) expected=unreadable ;;
+    esac
+    out=$(PATH="$FB:$PATH" FM_ORCA_SCENARIO="$scenario" \
+      bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state orca term-proof' "$ROOT")
+    [ "$out" = "$expected" ] || fail "Orca $scenario: expected $expected, got $out"
+  done
+  pass "Orca recovery: confirmed exit permits replacement; live, ambiguous, stale and unreachable endpoints fail closed"
+}
+
+test_recovery_requires_host_exit_and_exact_incarnation
 test_capture_reads_terminal_tail_json
 test_capture_falls_back_to_text_fields
 test_capture_fails_on_orca_error_json

@@ -1753,6 +1753,41 @@ The real lifecycle smoke proved spawn, metadata, nested-subshell worktree discov
 
 ## Orca
 
+### Stopped-worker recovery
+
+Verified on 2026-09-27 UTC with Orca 1.4.212, codex-cli 0.157.0, and Node 24.21.0 on macOS arm64.
+The live guard operates inside its current isolated Orca worktree, creates only its own terminals and private fixture state, and leaves worktree allocation and release untouched.
+
+```sh
+FM_ORCA_RECOVERY_LIVE=1 bin/fm-test-run.sh tests/fm-orca-recovery-live-e2e.test.sh
+```
+
+```text
+ok - Orca live recovery (codex-cli 0.157.0): live refusal, confirmed full exit, Codex replacement processed instructions, checkout preserved
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=21194
+```
+
+The stopped terminal returned `connected=false`, `writable=false`, `orphaned=true`, and `exitCause.kind=operator_close`; its independent exit wait returned `satisfied=true`, `status=exited`, and `exitCode=0`.
+The host inventory excluded that PTY, and the original handle continued to resolve to the same runtime and incarnation.
+The replacement ran the real `fm-control.sh relaunch --harness codex` path and executed its launch instructions, with HEAD, the existing diff, and uncommitted fixture contents preserved.
+
+The installed Orca source confirms that `onPtyExit` can disconnect a terminal after an unverified stop with exit code `-1`, and that terminal titles and agent registrations are insufficient process evidence.
+It also confirms that `terminal.list` with `requireFreshPtyLiveness=true` refuses when it cannot refresh the execution-host inventory, and that `terminal.inspectProcess` reads the owning PTY provider rather than the rendered title.
+Those two reads are exposed by the bundled runtime client but absent from this version's public CLI command surface.
+[`agent-control.md`](../agent-control.md#reclaiming-a-task-whose-endpoint-is-gone) owns the recovery boundary; `bin/fm-orca-probe.mjs` owns the versioned bridge and response checks.
+
+Portable regressions:
+
+```sh
+bin/fm-test-run.sh tests/fm-backend-orca.test.sh tests/fm-control-relaunch.test.sh tests/fm-control.test.sh
+```
+
+The adapter regression distinguishes confirmed exit from live processes, connected shells, synthetic exit, stale handles, changed runtime or incarnation, remote or omitted hosts, truncated inventory, unavailable transport, and older runtimes.
+The transactional regression drives both relaunch entry points, requires refusal before input or allocation for unsafe endpoints, and checks that a stopped task switches harness while retaining its worktree and task state.
+It also injects a metadata-publication failure and requires cleanup of only the replacement terminal, preserving the prior record and uncommitted work.
+
+### Readiness and response shapes
+
 Real readiness was verified against `/usr/local/bin/orca` with `/Applications/Orca.app` bundle version 1.4.116.
 
 ```sh

@@ -534,7 +534,7 @@ test_harness_kind_capability() {
   pass "fm-control-lib: adapter capability is per task kind, not per adapter alone"
 }
 
-test_orca_refuses_an_escape_harness_interrupt() {
+test_orca_refuses_an_unreadable_endpoint_interrupt() {
   local dir out rc
   dir=$(new_case orca-escape)
   add_task "$dir" t1 claude ship orca "term-1"
@@ -547,8 +547,8 @@ test_orca_refuses_an_escape_harness_interrupt() {
   sed 's|^window=.*|window=fm-t1|' "$dir/home/state/t1.meta.new" > "$dir/home/state/t1.meta"
   out=$(run_control "$dir" t1 interrupt); rc=$?
   expect_code 1 "$rc" "an Escape harness on orca should refuse"
-  assert_contains "$out" "cannot deliver" "refusal should name the undeliverable key"
-  pass "fm-control interrupt: a backend that cannot deliver the harness's key refuses instead of sending another"
+  assert_contains "$out" "unreadable" "refusal should name the missing endpoint proof"
+  pass "fm-control interrupt: an unreadable Orca endpoint receives no lifecycle key"
 }
 
 test_unverified_state_backends_refuse_stop_verbs() {
@@ -582,11 +582,12 @@ test_unverified_state_backends_refuse_stop_verbs() {
   pass "fm-control: a backend that cannot prove an agent stopped refuses exit and relaunch"
 }
 
-test_state_verified_backends_are_exactly_tmux_and_herdr() {
+test_state_verified_backends() {
   fm_control_backend_state_verified tmux || fail "tmux has a recovery-grade classifier"
   fm_control_backend_state_verified herdr || fail "herdr has a recovery-grade classifier"
+  fm_control_backend_state_verified orca || fail "Orca has a recovery-grade classifier"
   local backend
-  for backend in zellij orca cmux; do
+  for backend in zellij cmux; do
     fm_control_backend_state_verified "$backend" \
       && fail "$backend has no recovery-grade classifier and must not claim one"
   done
@@ -1082,9 +1083,9 @@ test_relaunch_resume_flag_is_per_adapter_and_reference_owner
 test_prefixed_recorded_harness_reaches_each_control_verb
 test_backend_key_capability_matrix
 test_harness_kind_capability
-test_orca_refuses_an_escape_harness_interrupt
+test_orca_refuses_an_unreadable_endpoint_interrupt
 test_unverified_state_backends_refuse_stop_verbs
-test_state_verified_backends_are_exactly_tmux_and_herdr
+test_state_verified_backends
 test_window_label_is_refused_with_the_exact_id
 test_explicit_endpoint_is_refused
 test_unknown_task_is_refused

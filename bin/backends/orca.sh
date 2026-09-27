@@ -11,6 +11,47 @@
 # every backend so the decision cannot drift.
 # shellcheck source=bin/fm-composer-lib.sh
 . "$(dirname -- "${BASH_SOURCE[0]}")/../fm-composer-lib.sh"
+# shellcheck source=bin/fm-agent-process-lib.sh
+. "$(dirname -- "${BASH_SOURCE[0]}")/../fm-agent-process-lib.sh"
+
+# Full terminal exits are recoverable; a connected shell is deliberately not
+# classified dead because Orca cannot prove the absence of background agents.
+# The probe owns the exact incarnation/host evidence and bundled-client bridge.
+fm_backend_orca_agent_state() {  # <terminal-handle>
+  local cli evidence process
+  cli=$(command -v orca) || { printf 'unreadable'; return 0; }
+  evidence=$(node "$(dirname -- "${BASH_SOURCE[0]}")/../fm-orca-probe.mjs" "$cli" "$1" 2>/dev/null) \
+    || { printf 'unreadable'; return 0; }
+  case "$evidence" in
+    missing|ambiguous|unreadable) printf '%s' "$evidence" ;;
+    process$'\t'*)
+      process=${evidence#*$'\t'}
+      if [ "$(fm_agent_process_classify "$process" "$process" '')" = agent ]; then
+        printf 'alive'
+      else
+        printf 'ambiguous'
+      fi
+      ;;
+    *) printf 'unreadable' ;;
+  esac
+}
+
+# Verify the recorded worktree identity before creating any replacement, and
+# verify the newly minted terminal belongs to it before delivering a launch.
+# worktreePath is allocation identity, never an existing shell's current cwd.
+fm_backend_orca_terminal_matches_worktree() {  # <handle> <worktree-id> <path>
+  local out
+  out=$(orca terminal show --terminal "$1" --json) || return 1
+  printf '%s' "$out" | node -e '
+const fs = require("fs");
+try {
+  const d = JSON.parse(fs.readFileSync(0, "utf8")), t = d.result?.terminal;
+  process.exit(d.ok === true && t?.handle === process.argv[1] &&
+    t.executionHostId === "local" && t.worktreeId === process.argv[2] &&
+    fs.realpathSync(t.worktreePath) === fs.realpathSync(process.argv[3]) ? 0 : 1);
+} catch { process.exit(1); }
+' "$1" "$2" "$3"
+}
 
 fm_backend_orca_tool_check() {
   command -v orca >/dev/null 2>&1 || { echo "error: backend=orca selected but the 'orca' CLI is not installed" >&2; return 1; }

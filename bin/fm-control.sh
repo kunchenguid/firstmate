@@ -113,9 +113,12 @@
 #   - A backend that cannot deliver the harness's interrupt key is refused
 #     (Orca's terminal API has no Escape).
 #   - `exit` and `relaunch` require a backend with a recovery-grade agent-state
-#     classifier (tmux, herdr), because without one the "the agent stopped"
-#     postcondition cannot be proven. zellij, orca, and cmux are refused rather
+#     classifier (tmux, herdr, limited Orca), because without one the "the agent stopped"
+#     postcondition cannot be proven. zellij and cmux are refused rather
 #     than reported as successful blind.
+#     Orca admits only already-confirmed full terminal exits; a live-agent
+#     exit/relaunch remains refused because a surviving shell is not proven
+#     agent-free. Recovery reuses the task's recorded Orca worktree.
 #   - An ambiguous or unreadable endpoint state refuses; only a positively
 #     classified state acts.
 #   - A composer that visibly holds pending text refuses before an exit command
@@ -602,6 +605,11 @@ do_exit() {
       ;;
     *) die "task $ID's endpoint reads '$state' rather than a positively classified state; refusing to send a lifecycle command into an unattributed endpoint" ;;
   esac
+  # Orca's proof covers full terminal exits, not the shell left by /quit.
+  # Keep the pre-existing live-agent stop refusal; enabling recovery must not
+  # send a command whose resulting shell we cannot prove agent-free.
+  [ "$BACKEND" != orca ] \
+    || die "task $ID has a live Orca agent; recovery requires a host-confirmed full terminal exit, so no lifecycle input was sent"
   # A busy agent is interrupted first before the exit command is submitted.
   case "$(busy_verdict)" in
     busy*)
@@ -876,6 +884,11 @@ safe_checkpoint() {
   wt_top_real=$(cd "$wt_top" 2>/dev/null && pwd -P) || wt_top_real=$wt_top
   [ "$wt_real" = "$wt_top_real" ] \
     || die "task $ID's recorded worktree $WT is not a worktree root (root is $wt_top); refusing to relaunch against an ambiguous checkout"
+  if [ "$BACKEND" = orca ]; then
+    fm_backend_source orca || die "could not load the Orca adapter"
+    fm_backend_orca_terminal_matches_worktree "$T" "$(fm_meta_get "$META" orca_worktree_id)" "$WT" \
+      || die "task $ID's Orca terminal does not prove ownership of its recorded worktree; refusing to relaunch"
+  fi
   if head=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null); then
     :
   elif head_ref=$(git -C "$WT" symbolic-ref -q HEAD 2>/dev/null); then

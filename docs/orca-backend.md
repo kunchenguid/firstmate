@@ -57,6 +57,13 @@ A bare shell row is `unknown`, not an empty agent composer, and plain-text captu
 The watcher has no native Orca busy signal, so each harness adapter's semantic lifecycle supplies worker state.
 Grok alone retains its isolated rendered-tail fallback.
 
+Recovery through `fm-control.sh <id> relaunch --harness <name> --note '<progress>'` supports confirmed full terminal exits under the contract in [`agent-control.md`](agent-control.md#reclaiming-a-task-whose-endpoint-is-gone).
+It preserves the existing Orca worktree and task identity while replacing only the terminal binding.
+Recovery requires Orca runtime `appVersion` 1.4.212 or newer and the installed CLI's bundled `RuntimeClient` module.
+The CLI does not expose the fresh-inventory and process-inspection reads, so `bin/fm-orca-probe.mjs` uses that bundled client for narrowly scoped, read-only local RPCs without installing another package or reading transport credentials itself.
+A missing client, unsupported version, or incompatible response fails closed; normal spawn retains its existing readiness gate.
+Live-agent exit/relaunch and recovery into an existing shell remain unsupported.
+
 Cleanup keeps all shared Firstmate safety checks.
 A scout still requires its report and completed decision inventory.
 A ship still refuses dirty or unlanded work.
@@ -73,7 +80,7 @@ Reinstall the CLI and rerun; [`verification/runtime-backends.md`](verification/r
 - The app must be running and report ready.
 - Secondmate spawns are unsupported.
 - Escape is unsupported.
-- Orca exposes no stable CLI version or protocol marker, so readiness is the compatibility gate rather than a version floor.
+- Ordinary spawn uses runtime readiness; recovery additionally enforces the version and bundled-client requirements above.
 - Only the verified terminal-handle and worktree result fields are accepted; speculative response shapes are rejected.
 - Orca's worktree shape is unverified against the spawn-time Claude workspace-trust check in `bin/fm-claude-trust.sh`, which refuses any path that is not a linked git worktree sharing the project's git common dir, so a claude spawn on Orca fails loudly at that check rather than launching if Orca clones instead of linking.
 
@@ -84,6 +91,8 @@ tests/fm-backend-orca.test.sh
 tests/fm-backend.test.sh
 tests/fm-bootstrap.test.sh
 tests/fm-teardown-endpoint-safety.test.sh
+tests/fm-control-relaunch.test.sh
+FM_ORCA_RECOVERY_LIVE=1 bin/fm-test-run.sh tests/fm-orca-recovery-live-e2e.test.sh
 ```
 
 [`verification/runtime-backends.md`](verification/runtime-backends.md#orca) records the real readiness and response-shape smoke.

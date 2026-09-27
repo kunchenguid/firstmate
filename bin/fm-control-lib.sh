@@ -289,14 +289,14 @@ fm_control_backend_supports_key() {  # <backend> <key>
   return 1
 }
 
-# Whether <backend> has a recovery-grade agent-state classifier. Only tmux and
-# herdr implement fm_backend_agent_state; zellij, orca, and cmux report
+# Whether <backend> has a recovery-grade agent-state classifier. tmux, herdr
+# and Orca implement fm_backend_agent_state; zellij and cmux report
 # `unverified`, so no reading of theirs can prove an agent stopped. The control
 # plane refuses a stop-proving verb there instead of reporting an unprovable
 # transition as success.
 fm_control_backend_state_verified() {  # <backend>
   case "${1-}" in
-    tmux|herdr) return 0 ;;
+    tmux|herdr|orca) return 0 ;;
   esac
   return 1
 }
@@ -331,6 +331,9 @@ fm_control_backend_state_verified() {  # <backend>
 #     passes `--session <session>`, so the recheck starts and reads the session
 #     the RECORD names, through that session's own socket. The answer is about
 #     the task's endpoint and nothing else.
+#   orca CAN prove a full local terminal exit. fm-orca-probe.mjs owns its
+#     incarnation-bound host inventory and exit evidence. A stale handle or a
+#     connected shell never licenses replacement; recheck the same handle.
 #   tmux CANNOT. `list-windows -a` describes only the server the CURRENT
 #     process addresses (its TMUX_TMPDIR/socket), and a task's record does not
 #     carry the endpoint's socket identity - so a different but running server
@@ -358,6 +361,15 @@ fm_control_endpoint_absence_verdict() {  # <backend> <target>
         alive) printf 'alive\t' ;;
         missing) printf 'gone\t' ;;
         *) printf 'unproven\tthe recorded herdr session'"'"'s server could not be started, or its pane could not be classified once it was running' ;;
+      esac
+      ;;
+    orca)
+      # A fresh exact-incarnation host inventory plus confirmed exit, never a
+      # missing/stale handle or a presentation-only disconnected flag.
+      case "$(fm_backend_orca_agent_state "$target")" in
+        missing) printf 'gone\t' ;;
+        alive) printf 'alive\t' ;;
+        *) printf 'unproven\tthe recorded Orca terminal incarnation has no fresh, local host-confirmed exit proof' ;;
       esac
       ;;
     *)
