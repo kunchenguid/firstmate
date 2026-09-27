@@ -40,9 +40,10 @@ fm_agent_process_classify_name() {  # <path> [argv0] -> agent|shell|other
     # cannot carry it either: ~/.local/bin/muse-bin-<version> has no `muse` path
     # COMPONENT, so the fm_harness_path_name fallback below never fires for it.
     muse|muse-bin-*) printf 'agent' ;;
-    # omp (Oh My Pi) is anchored for the same reason as muse: its live process
-    # name is the bare word `omp` (verified, omp 18.1.11) and a glob would claim
-    # unrelated commands such as ompd or comp.
+    # Native omp (Oh My Pi) is anchored for the same reason as muse: its live
+    # process name is the bare word `omp` (verified, omp 18.1.11), and a glob
+    # would claim unrelated commands such as ompd or comp. Bun scripts are
+    # handled by fm_omp_process_matches below.
     *claude*|*codex*|*opencode*|*grok*|*kimi*|*rovo*|pi|pi-signed|pi-launcher|Pi|omp) printf 'agent' ;;
     # agy (Antigravity CLI) is anchored for the same reason as muse and omp: its
     # live process name is the bare word `agy` (verified, agy 1.2.0: a Go-compiled

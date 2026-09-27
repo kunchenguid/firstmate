@@ -2412,7 +2412,8 @@ Its native App Server peer and watcher-close process are deterministic fixtures;
 ## Oh My Pi (omp)
 
 omp runs crewmate, scout, secondmate, and primary work; [`supervision.md`](supervision.md#omp-oh-my-pi-native-delivery-2026-09-05) owns the primary evidence.
-The evidence below was produced on 2026-09-05 against omp 18.1.11 (`~/.local/bin/omp`, a Bun-compiled single binary) on macOS 26 arm64 through the Herdr backend with the `openai-codex/gpt-6-astra` model, building on the 2026-09-02 adapter investigation against 18.1.2.
+The adapter evidence began on 2026-09-05 against omp 18.1.11 (`~/.local/bin/omp`, a Bun-compiled single binary) on macOS 26 arm64 through Herdr with the `openai-codex/gpt-6-astra` model, building on the 2026-09-02 adapter investigation against 18.1.2.
+The Bun-script process identity addendum below was verified on 2026-09-27 with omp 18.3.1.
 
 ### Process identity and markers
 
