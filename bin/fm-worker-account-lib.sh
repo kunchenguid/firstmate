@@ -137,7 +137,7 @@ fm_worker_account_resolve() {
       want="'ordinary' or one absolute account directory on line 1 and the providers this home may spend on line 2"
       ;;
     esac
-    echo "error: config/$file is absent, so this $harness launch has no explicit account selection: create $cfg with $want (see docs/configuration.md \"Worker account pin\"); Firstmate does not spend an ambient or $fallback login when that file is absent" >&2
+    echo "error: config/$file is absent, so this $harness launch has no explicit account selection: ask the captain to create $cfg with $want (see docs/configuration.md \"Worker account pin\"); Firstmate does not spend an ambient or $fallback login when that file is absent" >&2
     return 1
     ;;
   4) return 1 ;;

@@ -130,6 +130,7 @@ test_absent_account_refuses_claude_and_pi() {
   out=$(spawn_ship "$id"); rc=$?
   expect_code 1 "$rc" "a Claude spawn with no account file should refuse: $out"
   assert_refused_before_launch "$id" "$out" "config/claude-account is absent"
+  assert_contains "$out" "ask the captain to create $HOME_DIR/config/claude-account" "the refusal should leave the account choice to the captain"
   assert_contains "$out" "does not spend an ambient" "the refusal should say the ambient login is not spent"
 
   new_case absent-pi pi
