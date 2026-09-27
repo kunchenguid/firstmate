@@ -5,7 +5,10 @@
 # refusal instead of an unbounded run when nothing on the host can enforce the
 # bound. Most cases pin the perl watchdog, the preferred mechanism and the only
 # one a stock macOS host has, under a PATH that holds no timeout variant; the
-# GNU fallback case runs only where a real timeout exists.
+# GNU fallback case runs only where a real timeout exists. The
+# fm_run_timed_capture cases pin the capturing form a long-lived supervisor
+# uses: status and output pass through, the bound holds, and a stop signal to
+# the caller lands while the call is still running.
 # shellcheck disable=SC2016 # each bounded bash -c script expands its own arguments
 set -u
 
@@ -300,6 +303,90 @@ test_timed_out_names_exactly_the_bound_statuses() {
   pass "fm_timed_out accepts 124 and 137 and nothing else"
 }
 
+# A caller shaped like bin/fm-watch.sh: native fatal TERM with an EXIT trap.
+# /bin/bash is preferred because macOS ships bash 3.2 there, the shell that
+# defers a fatal TERM for as long as a command substitution is being read.
+CAPTURE_BASH=bash
+[ -x /bin/bash ] && CAPTURE_BASH=/bin/bash
+
+test_capture_passes_status_and_output_through() {
+  local out
+  out=$(TMPDIR="$TMP_ROOT" "$CAPTURE_BASH" -c '
+    . "$1/bin/fm-timeout-lib.sh"
+    fm_run_timed_capture 10 bash -c "printf \"one\ntwo\n\n\"; exit 255"
+    printf "rc=%s out=[%s]\n" "$?" "$FM_TIMED_CAPTURE"
+    fm_run_timed_capture 10 bash -c "printf ok"
+    printf "rc=%s out=[%s]\n" "$?" "$FM_TIMED_CAPTURE"
+  ' _ "$ROOT")
+  [ "$out" = "$(printf 'rc=255 out=[one\ntwo]\nrc=0 out=[ok]')" ] \
+    || fail "fm_run_timed_capture did not pass status and output through: $out"
+  pass "fm_run_timed_capture passes a command's status and stdout through"
+}
+
+test_capture_holds_the_bound() {
+  local out start elapsed
+  start=$(date +%s)
+  out=$(TMPDIR="$TMP_ROOT" "$CAPTURE_BASH" -c '
+    . "$1/bin/fm-timeout-lib.sh"
+    fm_run_timed_capture 1 bash -c "printf partial; sleep 30"
+    rc=$?
+    fm_timed_out "$rc" && printf "bound rc=%s\n" "$rc"
+  ' _ "$ROOT")
+  elapsed=$(( $(date +%s) - start ))
+  [ "$out" = 'bound rc=124' ] || fail "fm_run_timed_capture did not report the bound: $out"
+  [ "$elapsed" -le 10 ] || fail "fm_run_timed_capture did not hold its bound (took ${elapsed}s)"
+  pass "fm_run_timed_capture reports 124 at the bound (${elapsed}s against a 30s hang)"
+}
+
+test_capture_keeps_waiting_through_a_trapped_signal() {
+  local out
+  out=$(TMPDIR="$TMP_ROOT" "$CAPTURE_BASH" -c '
+    . "$1/bin/fm-timeout-lib.sh"
+    trap "printf usr1-" USR1
+    ( sleep 1; kill -USR1 $$ ) &
+    fm_run_timed_capture 10 bash -c "sleep 2; printf done; exit 7"
+    printf "rc=%s out=%s\n" "$?" "$FM_TIMED_CAPTURE"
+  ' _ "$ROOT")
+  [ "$out" = 'usr1-rc=7 out=done' ] \
+    || fail "a trapped signal cut fm_run_timed_capture short instead of letting the call finish: $out"
+  pass "fm_run_timed_capture keeps waiting for the call's own status through a trapped signal"
+}
+
+test_capture_lets_a_stop_signal_land_mid_call() {
+  local dir caller start elapsed i=0
+  dir="$TMP_ROOT/capture-term"
+  mkdir -p "$dir/tmp"
+  TMPDIR="$dir/tmp" "$CAPTURE_BASH" -c '
+    . "$1/bin/fm-timeout-lib.sh"
+    trap "printf cleaned > \"$2/exit-trap\"" EXIT
+    trap - TERM
+    fm_run_timed_capture 3 bash -c "printf started > \"$2/started\"; sleep 20"
+    printf survived > "$2/survived"
+  ' _ "$ROOT" "$dir" &
+  caller=$!
+  wait_for_file "$dir/started"
+  start=$(date +%s)
+  kill -TERM "$caller"
+  while kill -0 "$caller" 2>/dev/null && [ "$i" -lt 100 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  elapsed=$(( $(date +%s) - start ))
+  kill -0 "$caller" 2>/dev/null && fail "the caller outlived its TERM while the bounded call was running"
+  wait "$caller" 2>/dev/null || true
+  [ "$elapsed" -le 2 ] || fail "TERM took ${elapsed}s to end a caller blocked in fm_run_timed_capture"
+  [ -s "$dir/exit-trap" ] || fail "the caller's EXIT trap did not run on TERM"
+  [ ! -e "$dir/survived" ] || fail "the caller kept running after its TERM"
+  # The abandoned call finishes on its own bound and removes its capture file.
+  i=0
+  while [ -n "$(ls -A "$dir/tmp")" ] && [ "$i" -lt 100 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -z "$(ls -A "$dir/tmp")" ] || fail "an abandoned bounded call left its capture file behind: $(ls -A "$dir/tmp")"
+  pass "a TERM to a caller blocked in fm_run_timed_capture lands at once (${elapsed}s) and leaves no capture file"
+}
+
 test_passes_the_command_status_and_output_through
 test_term_ends_a_cooperative_command_at_the_bound
 test_kill_ends_a_term_ignoring_command_after_the_grace
@@ -313,3 +400,7 @@ test_refuses_rather_than_running_unbounded
 test_rejects_malformed_bounds_before_running_anything
 test_gnu_timeout_kills_a_term_ignoring_command_after_the_grace
 test_timed_out_names_exactly_the_bound_statuses
+test_capture_passes_status_and_output_through
+test_capture_holds_the_bound
+test_capture_keeps_waiting_through_a_trapped_signal
+test_capture_lets_a_stop_signal_land_mid_call

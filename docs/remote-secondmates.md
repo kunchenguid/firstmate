@@ -43,8 +43,9 @@ Every path that provisions or launches one refuses a host that is not ready for 
 
 - On every call, it also disables agent forwarding, forwarding setup, and configured `SendEnv` patterns.
 - It arms bounded SSH dead-peer detection, so a vanished host (a reboot, a dropped link) fails within a bounded window instead of hanging indefinitely.
+- It bounds connection setup with a connect timeout and runs SSH in batch mode, so the alias must log in without any prompt: an unlocked or agent-held key, and a host key already in `known_hosts`.
 
-Its [script header](../bin/fm-on.sh) owns the keepalive defaults and environment overrides.
+Its [script header](../bin/fm-on.sh) owns the keepalive and connect-timeout defaults and environment overrides.
 
 ### Remote clone and entrypoint
 

@@ -50,6 +50,18 @@
 #       than run unbounded: there is no bash fallback, because a monitor-mode
 #       watchdog cannot replace the caller.
 #
+#   fm_run_timed_capture <seconds> <command> [args...]
+#       fm_run_timed, with the command's stdout captured into
+#       FM_TIMED_CAPTURE (trailing newlines stripped, as a command substitution
+#       would) and the same exit status. Use it instead of
+#       `out=$(fm_run_timed ...)` in a long-lived supervisor: bash 3.2 defers a
+#       fatal TERM while the shell is reading a command substitution, so a
+#       stopper's TERM would wait for the whole bounded call, whereas this
+#       helper runs the call in the background and blocks in `wait`, which a
+#       signal interrupts at once. A supervisor killed mid-call leaves the
+#       bounded call to finish on its own bound; the capture file is removed
+#       by whichever side outlives the other.
+#
 #   fm_timed_out <status>
 #       0 iff <status> is how fm_run_timed or fm_exec_timed reports the bound.
 #
@@ -176,6 +188,36 @@ fm_run_timed() {  # <seconds> <command...>
     bash) fm_run_bash_timeout "$seconds" "$@" ;;
     *) return 124 ;;
   esac
+}
+
+fm_run_timed_capture() {  # <seconds> <command...>
+  local seconds=$1 capture owner pid rc
+  shift
+  FM_TIMED_CAPTURE=
+  capture=$(mktemp "${TMPDIR:-/tmp}/fm-timed-capture.XXXXXX" 2>/dev/null) || return 125
+  owner=$$
+  (
+    fm_run_timed "$seconds" "$@" > "$capture"
+    rc=$?
+    kill -0 "$owner" 2>/dev/null || rm -f "$capture" 2>/dev/null
+    exit "$rc"
+  ) &
+  pid=$!
+  while :; do
+    if wait "$pid"; then
+      rc=0
+    else
+      rc=$?
+    fi
+    # A trapped signal interrupts wait with a status above 128 while the call
+    # still runs; keep waiting for the call's own status.
+    if [ "$rc" -le 128 ] || ! kill -0 "$pid" 2>/dev/null; then
+      break
+    fi
+  done
+  FM_TIMED_CAPTURE=$(cat "$capture" 2>/dev/null || true)
+  rm -f "$capture" 2>/dev/null || true
+  return "$rc"
 }
 
 fm_timed_out() {  # <status>

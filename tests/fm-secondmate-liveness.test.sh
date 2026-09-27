@@ -634,6 +634,7 @@ EOF
   cat > "$fakebin/ssh" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "${FM_FAKE_SSH_LOG:?}"
+[ -z "${FM_FAKE_SSH_SLEEP:-}" ] || sleep "$FM_FAKE_SSH_SLEEP"
 [ -z "${FM_FAKE_REMOTE_REPLY:-}" ] || printf '%s\n' "$FM_FAKE_REMOTE_REPLY"
 exit "${FM_FAKE_REMOTE_RC:-0}"
 SH
@@ -702,6 +703,24 @@ test_remote_poll_probe_unreachable_preserves_route() {
   pass "poll probe: unreachable or inconclusive remote reads preserve the route"
 }
 
+# A host that stops answering (a peer gone quiet after the primary slept, or a
+# remote job queue that never reaches the probe) must not hold the watcher's
+# poll: the probe is hard-bounded, and hitting the bound is unknown state with
+# the route preserved - never a dead endpoint.
+test_remote_poll_probe_times_out_as_unknown() {
+  local w out start elapsed
+  w=$(make_remote_probe_world probe-timeout)
+  start=$(date +%s)
+  out=$(probe_remote "$w" poll FM_FAKE_SSH_SLEEP=30 FM_FAKE_REMOTE_REPLY=dead FM_SECONDMATE_PROBE_TIMEOUT=1)
+  elapsed=$(( $(date +%s) - start ))
+  [ "$out" = 'skipped|unknown|0|||remote endpoint probe timed out after 1s on lab-host; route preserved' ] \
+    || fail "a probe past its bound must preserve the route as unknown, got: $out"
+  [ "$elapsed" -le 10 ] || fail "the remote probe was not bounded (took ${elapsed}s against a 30s hang)"
+  [ "$(wc -l < "$w/ssh.log" | tr -d ' ')" -eq 1 ] \
+    || fail "a timed-out probe must not retry the remote call: $(cat "$w/ssh.log")"
+  pass "poll probe: a remote call past FM_SECONDMATE_PROBE_TIMEOUT is unknown with the route preserved (${elapsed}s)"
+}
+
 test_tmux_agent_state_classifies
 test_tmux_agent_state_rejects_malformed_targets_before_probe
 test_herdr_agent_state_preserves_husk_classifier
@@ -721,5 +740,6 @@ test_sweep_skips_mate_whose_liveness_lock_is_held
 test_sweep_refuses_relaunch_on_ledger_errors
 test_remote_poll_probe_maps_states
 test_remote_poll_probe_unreachable_preserves_route
+test_remote_poll_probe_times_out_as_unknown
 
 echo "# all fm-secondmate-liveness tests passed"
