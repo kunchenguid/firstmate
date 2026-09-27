@@ -76,6 +76,10 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-cursor-lib.sh"
 # shellcheck source=bin/fm-gemini-lib.sh
 . "$SCRIPT_DIR/fm-gemini-lib.sh"
+# fm-session-lock-lib.sh owns the bare-interpreter script-path identity helper
+# used by the interpreter arm below; it is side-effect free on source.
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
 
 # Print the harness named by a verified environment marker, or nothing when no
 # marker is present. Markers only report what the environment CLAIMS; detect_own
@@ -112,22 +116,30 @@ harness_marker() {
   # additionally clears foreign markers at rovo's launch boundary as defense in depth.
   [ "${ATLASSIAN_AGENT_TYPE:-}" = "rovo" ] && { echo rovo; return; }
   [ "${ROVODEV_CLI:-}" = "1" ] && { echo rovo; return; }
-  # omp (Oh My Pi) publishes NO harness-identity marker of its own: verified on
-  # omp 18.1.11 that PI_CODING_AGENT is absent from the binary and that the
-  # default profile sets neither PI_CODING_AGENT_DIR nor OMP_PROFILE in the
-  # process environment. FM_OMP_HARNESS=omp is therefore a Firstmate-OWNED
-  # launch marker, established by bin/fm-spawn.sh at the omp launch boundary
-  # (which also clears every foreign marker) and by the README's primary launch
-  # command. It is a PRECEDENCE override, never evidence on its own: it wins
-  # over an inherited CLAUDECODE only when an omp process is genuinely in the
-  # ancestry, so `FM_OMP_HARNESS=omp omp` started from a Claude pane identifies
-  # as omp, while the same variable leaking from an omp secondmate into that
-  # home's claude worker (whose ancestry holds no omp) changes nothing. The
-  # anchored ancestry arm below covers a plain hand-started `omp` by itself.
+  # omp (Oh My Pi) published no harness-identity marker of its own through
+  # 18.1.11 (verified: PI_CODING_AGENT absent from the binary, and the default
+  # profile sets neither PI_CODING_AGENT_DIR nor OMP_PROFILE); from 18.3.1 it
+  # publishes OMPCODE=1 on its tool subprocesses while STILL setting
+  # CLAUDECODE=1 for compatibility, so OMPCODE is tested BEFORE the claude
+  # marker, exactly like cursor/gemini/rovo above. An inherited OMPCODE leaking
+  # into a real claude session is still corrected by detect_own: ancestry
+  # finds the comm-strength claude ancestor and overrules the marker.
+  # FM_OMP_HARNESS=omp remains a Firstmate-OWNED launch marker, established by
+  # bin/fm-spawn.sh at the omp launch boundary (which also clears every
+  # foreign marker) and by the README's primary launch command. It is a
+  # PRECEDENCE override, never evidence on its own: it wins over an inherited
+  # CLAUDECODE only when an omp process is genuinely in the ancestry, so
+  # `FM_OMP_HARNESS=omp omp` started from a Claude pane identifies as omp,
+  # while the same variable leaking from an omp secondmate into that home's
+  # claude worker (whose ancestry holds no omp) changes nothing. The ancestry
+  # walk below covers a plain hand-started `omp` either way the vendor ships
+  # it: the anchored `omp` comm match through 18.1.11, and the omp script path
+  # under the bun interpreter from 18.3.1.
   if [ "${FM_OMP_HARNESS:-}" = omp ] && ancestry_names_omp; then
     echo omp
     return
   fi
+  [ "${OMPCODE:-}" = "1" ] && { echo omp; return; }
   [ "${CLAUDECODE:-}" = "1" ] && { echo claude; return; }
   if [ "${PI_CODING_AGENT:-}" = "true" ]; then
     if [ "${FM_PI_HARNESS:-}" = pi-signed ]; then echo pi-signed; else echo pi; fi
@@ -155,14 +167,17 @@ harness_marker() {
   return 0
 }
 
-# True when an exact `omp` process sits within eight parents of this one. The
-# same anchored match as the ancestry walk below, kept separate so the marker
-# precedence above can demand real process evidence before trusting FM_OMP_HARNESS.
+# True when an omp process sits within eight parents of this one - either the
+# anchored `omp` comm match (omp through 18.1.11) or the omp script path under
+# its bun interpreter (`args omp`, omp from 18.3.1). The same evidence as the
+# ancestry walk below, kept separate so the marker precedence above can demand
+# real process evidence before trusting FM_OMP_HARNESS.
 ancestry_names_omp() {
-  local pid=$$ comm
+  local pid=$$
   for _ in 1 2 3 4 5 6 7 8; do
-    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
-    [ "$(basename -- "$comm")" = omp ] && return 0
+    case "$(harness_process_verdict "$pid")" in
+      "comm omp" | "args omp") return 0 ;;
+    esac
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
     [ -n "$pid" ] && [ "$pid" -gt 1 ] || return 1
   done
@@ -178,7 +193,7 @@ ancestry_names_omp() {
 #          (any node process holding a harness-shaped path matches it), so it is
 #          used only when no marker is present.
 harness_process_verdict() {  # <pid>
-  local pid=$1 comm args argv0
+  local pid=$1 comm args argv0 name
   comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 0
   argv0=$(fm_cursor_argv0_for_pid "$pid" "$comm" 2>/dev/null || true)
   if fm_cursor_process_matches "$comm" '' "$argv0"; then
@@ -220,11 +235,14 @@ harness_process_verdict() {  # <pid>
     # is why detect_own keeps a marker that agrees on the family.
     pi-signed) echo "comm pi"; return ;;
     pi) echo "comm pi"; return ;;
-    # omp is a Bun-compiled single binary whose process name is exactly `omp`
-    # (verified, omp 18.1.11: `ps -o comm=` reports omp from both its `!`
-    # bash path and the model's bash tool). Anchored, never *omp*, so ompd,
-    # comp, and similar unrelated commands are not misread as this harness.
-    # It sits above the node*|python* interpreter fallback deliberately: the
+    # omp's process name was exactly `omp` through 18.1.11, when it shipped as
+    # a Bun-compiled single binary (verified on 18.1.11: `ps -o comm=` reports
+    # omp from both its `!` bash path and the model's bash tool). From 18.3.1
+    # omp is a Bun script, so the live process's comm reads `bun` and identity
+    # comes from the interpreter arm's script path below; this anchored arm
+    # stays for the older releases. Anchored, never *omp*, so ompd, comp, and
+    # similar unrelated commands are not misread as this harness. It sits
+    # above the node*|python*|bun* interpreter fallback deliberately: the
     # optional claude-bridge extension runs a nested executable literally
     # named `claude` with its own node child, and that fallback's *claude*
     # args glob would otherwise claim it if that subtree were ever walked.
@@ -239,11 +257,21 @@ harness_process_verdict() {  # <pid>
     # detected by ancestry alone.
     agy) echo "comm agy"; return ;;
     devin) echo "comm devin"; return ;;
-    node*|python*)
-      # Bare interpreter: match the harness name in its script path.
+    node*|python*|bun*)
+      # Bare interpreter: match the harness name in its script path. The exact
+      # script-token check runs BEFORE the substring globs deliberately:
+      # fm-spawn launches omp as `bun <omp path> --model <provider>/<id>`, and
+      # a model like anthropic/claude-sonnet-4 would make *claude* answer first.
       args=$(ps -o args= -p "$pid" 2>/dev/null)
       if fm_gemini_args_are_gemini "$args"; then
         echo "args gemini"
+        return
+      fi
+      if name=$(fm_harness_interpreter_script_name "$args"); then
+        # pi-signed is reported as pi, matching the comm arm above: ancestry
+        # can only ever prove the family.
+        [ "$name" = pi-signed ] && name=pi
+        echo "args $name"
         return
       fi
       case "$args" in

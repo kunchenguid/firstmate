@@ -52,6 +52,27 @@ fm_harness_path_name() {  # <path>
   return 1
 }
 
+# Print the exact harness name carried by the script a bare interpreter was
+# handed - the first argument after argv[0] that does not start with `-` - via
+# fm_harness_path_name, or return 1. Only that one token is checked, never
+# every token: the script is the interpreter's identity, and checking every
+# token would let any harness-shaped path argument claim one. `bun --smol
+# /opt/homebrew/bin/omp` reads omp; `bun run dev` reads nothing, because `run`
+# is the script token.
+fm_harness_interpreter_script_name() {  # <args>
+  local -a argv=()
+  local i
+  read -r -a argv <<< "$1"
+  for ((i = 1; i < ${#argv[@]}; i++)); do
+    case "${argv[i]}" in
+      -*) continue ;;
+    esac
+    fm_harness_path_name "${argv[i]}"
+    return
+  done
+  return 1
+}
+
 # True when the process described by command name $1 and full argument string $2
 # is a verified harness. Sets FM_HARNESS_IS_CLAUDE for the ancestry walk.
 #
@@ -62,7 +83,7 @@ fm_harness_path_name() {  # <path>
 #      argv[0] in `ps -o comm=`, while procps on Linux reports the kernel exec
 #      name and ignores argv[0] entirely, so a version-named Claude Code binary
 #      is identified by its install path on macOS and by argv[0] on Linux.
-#   3. a bare interpreter (node, python) running a harness script path.
+#   3. a bare interpreter (node, python, bun) running a harness script path.
 #   4. Cursor's own structural identity, owned by bin/fm-cursor-lib.sh.
 FM_HARNESS_IS_CLAUDE=0
 fm_harness_process_matches() {  # <comm> <args>
@@ -78,9 +99,14 @@ fm_harness_process_matches() {  # <comm> <args>
     case "$name" in claude) FM_HARNESS_IS_CLAUDE=1 ;; esac
     return 0
   fi
-  # Bare interpreter (e.g. node): match the harness name in its script path.
+  # Bare interpreter (e.g. node, bun): match the exact harness name in the one
+  # script token it was handed first, then the looser whole-args pattern.
   case "$comm" in
-    *node*|*python*)
+    *node*|*python*|*bun*)
+      if name=$(fm_harness_interpreter_script_name "$args"); then
+        case "$name" in claude) FM_HARNESS_IS_CLAUDE=1 ;; esac
+        return 0
+      fi
       if printf '%s' "$args" | grep -qE "$FM_HARNESS_RE"; then
         case "$args" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
         return 0

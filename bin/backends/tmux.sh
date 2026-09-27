@@ -321,7 +321,7 @@ fm_backend_tmux_foreground_argv0s() {  # <target>
 # distinguish a truly idle pane from a rewritten process title.
 fm_backend_tmux_agent_state() {  # <target>
   local target=$1 comm session window windows inventory_status
-  local foreground argv0s name pid fg_seen=0 fg_shell=0 fg_other=0
+  local foreground argv0s name pid args fg_seen=0 fg_shell=0 fg_other=0
   case "$target" in
     *:*:*|'':*|*:'') printf 'unreadable'; return 0 ;;
     *:*) ;;
@@ -374,6 +374,24 @@ EOF
   while IFS= read -r pid; do
     [ -n "$pid" ] || continue
     if fm_gemini_pid_is_gemini "$pid"; then
+      printf 'alive'
+      return 0
+    fi
+  done <<EOF
+$(fm_backend_tmux_foreground_pids "$target")
+EOF
+
+  # omp from 18.3.1 runs as `bun <omp path>`, so no comm or argv[0] surface
+  # names it, and the pane's foreground group can hold a subshell beside the
+  # bun process - the shape that previously read `ambiguous`. Attribute it from
+  # the interpreter's script path; an unrelated bun or node stays `other`.
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    name=$(LC_ALL=C ps -p "$pid" -o comm= 2>/dev/null) || continue
+    name=${name#"${name%%[![:space:]]*}"}
+    args=$(LC_ALL=C ps -p "$pid" -o args= 2>/dev/null) || continue
+    args=${args#"${args%%[![:space:]]*}"}
+    if fm_agent_process_interpreter_runs_harness "$name" "$args"; then
       printf 'alive'
       return 0
     fi

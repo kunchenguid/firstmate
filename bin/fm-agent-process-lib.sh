@@ -37,9 +37,10 @@ fm_agent_process_classify_name() {  # <path> [argv0] -> agent|shell|other
     # cannot carry it either: ~/.local/bin/muse-bin-<version> has no `muse` path
     # COMPONENT, so the fm_harness_path_name fallback below never fires for it.
     muse|muse-bin-*) printf 'agent' ;;
-    # omp (Oh My Pi) is anchored for the same reason as muse: its live process
-    # name is the bare word `omp` (verified, omp 18.1.11) and a glob would claim
-    # unrelated commands such as ompd or comp.
+    # omp (Oh My Pi) is anchored for the same reason as muse: a glob would
+    # claim unrelated commands such as ompd or comp. The bare `omp` name was
+    # the live process through 18.1.11; from 18.3.1 omp runs under `bun` and
+    # is attributed by the interpreter rule below instead.
     *claude*|*codex*|*opencode*|*grok*|*kimi*|*rovo*|pi|pi-signed|pi-launcher|Pi|omp) printf 'agent' ;;
     # agy (Antigravity CLI) is anchored for the same reason as muse and omp: its
     # live process name is the bare word `agy` (verified, agy 1.2.0: a Go-compiled
@@ -71,6 +72,28 @@ fm_agent_process_classify_name() {  # <path> [argv0] -> agent|shell|other
   esac
 }
 
+# fm_agent_process_interpreter_runs_harness: true when the process is a bare
+# interpreter (node, python, bun) running a harness's exact script path - omp
+# from 18.3.1 runs as `bun /opt/homebrew/bin/omp`, so neither its name nor its
+# argv[0] carries an identity and the script token is what attributes it.
+# Identity comes from the script path, never from the interpreter name, so an
+# unrelated `bun run dev` or `node server.js` stays `other`, the same way the
+# cursor rule keeps an unrelated node pane other.
+fm_agent_process_interpreter_runs_harness() {  # <name> <args>
+  local name=${1:-} args=${2:-} candidate
+  for candidate in "$name" "${args%%[[:space:]]*}"; do
+    candidate=${candidate##*/}
+    candidate=${candidate#-}
+    case "$candidate" in
+      node*|python*|bun*)
+        fm_harness_interpreter_script_name "$args" >/dev/null
+        return
+        ;;
+    esac
+  done
+  return 1
+}
+
 # fm_agent_process_classify: one process, from every identity surface a
 # backend can hand over, as agent|shell|other. Any single surface naming a
 # verified harness carries `agent`, because a false negative is the one outcome
@@ -96,6 +119,10 @@ fm_agent_process_classify() {  # <name> <argv0> <args> [pid] -> agent|shell|othe
     [ "$by_argv0" != agent ] || { printf 'agent'; return 0; }
   else
     by_argv0=$by_name
+  fi
+  if [ -n "$args" ] && fm_agent_process_interpreter_runs_harness "$name" "$args"; then
+    printf 'agent'
+    return 0
   fi
   if [ -n "$pid" ] && fm_gemini_pid_is_gemini "$pid"; then
     printf 'agent'

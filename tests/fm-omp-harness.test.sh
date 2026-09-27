@@ -13,8 +13,10 @@
 # catches vendor drift against a real omp. Neither replaces the other.
 #
 # The load-bearing contracts:
-#   1. omp publishes no marker; the anchored process name `omp` is the ancestry
-#      evidence, and ompd/comp never identify.
+#   1. omp publishes OMPCODE=1 on tool subprocesses from 18.3 (nothing of its
+#      own before); the anchored process name `omp` or the omp script path
+#      under its bun interpreter is the ancestry evidence, and ompd/comp never
+#      identify.
 #   2. FM_OMP_HARNESS=omp is a precedence override that needs a real omp
 #      ancestor: it beats an inherited CLAUDECODE under omp and is inert when it
 #      leaks into a worker whose ancestry holds no omp.
@@ -89,11 +91,88 @@ test_detection_anchored_name_and_marker_precedence() {
   pass "fm-harness: omp detects by its anchored name; the marker is a precedence override that needs real omp ancestry"
 }
 
+test_detection_omp_under_bun_interpreter() {
+  # From 18.3.1 omp is a Bun script (`#!/usr/bin/env bun`), so the live process
+  # is `bun <omp install path>` and identity comes from the interpreter's
+  # script path. A bash symlink stands in for bun and a script file for the
+  # omp entrypoint, and the invocation carries a claude-shaped --model token
+  # like a real fm-spawn launch, which the retired substring glob would have
+  # claimed first. The script's trailing `; :` is kept for symmetry with the
+  # -c bodies above, though `bash <script>` never exec-optimizes anyway.
+  local world="$TMP_ROOT/bun-interp" bin script out
+  bin="$world/bin"
+  mkdir -p "$bin" "$world/install/bin" "$world/app"
+  ln -sf /bin/bash "$bin/bun"
+  ln -sf /bin/bash "$bin/claude"
+  script="$world/install/bin/omp"
+  # shellcheck disable=SC2016 # ${FM_T_VERB...} expands inside the script
+  cat > "$script" <<'SH'
+#!/usr/bin/env bash
+"$FM_T_HARNESS" ${FM_T_VERB+"$FM_T_VERB"}; :
+SH
+  chmod +x "$script"
+  # shellcheck disable=SC2016 # ${FM_T_VERB...} expands inside the script
+  cat > "$world/app/server.js" <<'SH'
+#!/usr/bin/env bash
+"$FM_T_HARNESS" ${FM_T_VERB+"$FM_T_VERB"}; :
+SH
+  chmod +x "$world/app/server.js"
+
+  out=$(env -u CLAUDECODE -u FM_OMP_HARNESS -u OMPCODE -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+    FM_T_HARNESS="$HARNESS" \
+    "$bin/bun" "$script" --model anthropic/claude-sonnet-4)
+  [ "$out" = omp ] || fail "bun running the omp script must detect as omp even with a claude-shaped --model token, got '$out'"
+  out=$(env -u CLAUDECODE -u FM_OMP_HARNESS -u OMPCODE -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+    FM_T_HARNESS="$HARNESS" FM_T_VERB=ancestry \
+    "$bin/bun" "$script")
+  [ "$out" = "args omp" ] || fail "the ancestry walk must attribute bun running the omp script at args strength, got '$out'"
+  out=$(env -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u OMPCODE \
+    CLAUDECODE=1 FM_OMP_HARNESS=omp FM_T_HARNESS="$HARNESS" \
+    "$bin/bun" "$script" --model anthropic/claude-sonnet-4)
+  [ "$out" = omp ] || fail "FM_OMP_HARNESS under a bun-omp ancestor must outrank an inherited CLAUDECODE, got '$out'"
+  out=$(env -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u FM_OMP_HARNESS \
+    CLAUDECODE=1 OMPCODE=1 FM_T_HARNESS="$HARNESS" \
+    "$bin/bun" "$script")
+  [ "$out" = omp ] || fail "OMPCODE must outrank an inherited CLAUDECODE under a bun-omp ancestor, got '$out'"
+  # A decoy bun running an unrelated script never identifies as omp.
+  out=$(env -u CLAUDECODE -u FM_OMP_HARNESS -u OMPCODE -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+    FM_T_HARNESS="$HARNESS" \
+    "$bin/bun" "$world/app/server.js")
+  [ "$out" != omp ] || fail "bun running an unrelated script must never detect as omp"
+  # OMPCODE alone names omp when the walk finds no harness (a marker is the
+  # only evidence there is).
+  # shellcheck disable=SC2016 # the quoted body expands inside the named shell
+  out=$(env -u CLAUDECODE -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+    OMPCODE=1 bash -c '"$1"; :' _ "$HARNESS")
+  [ "$out" = omp ] || fail "OMPCODE alone must detect as omp, got '$out'"
+  # ...but a real claude comm ancestor still overrules an inherited OMPCODE.
+  # shellcheck disable=SC2016 # the quoted body expands inside the named shell
+  out=$(env -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+    OMPCODE=1 CLAUDECODE=1 "$bin/claude" -c '"$1"; :' _ "$HARNESS")
+  [ "$out" = claude ] || fail "a real claude ancestor must overrule an inherited OMPCODE, got '$out'"
+  pass "fm-harness: omp under bun detects by its script path, and OMPCODE is the 18.3+ marker"
+}
+
 test_lock_identity_and_liveness_classification() {
   fm_harness_process_matches omp '' || fail "session-lock identity must accept the exact omp name"
   fm_harness_process_matches /usr/local/bin/omp 'omp --cwd /x' || fail "session-lock identity must accept an omp path"
   ! fm_harness_process_matches ompd '' || fail "session-lock identity must not accept ompd"
   ! fm_harness_process_matches comp '' || fail "session-lock identity must not accept comp"
+  # omp under bun (18.3.1): the interpreter's one script token carries the
+  # identity, so a bun flag before it is fine while `run dev` or an unrelated
+  # script - even under a harness-shaped path argument - never claims omp.
+  fm_harness_process_matches /opt/homebrew/Cellar/bun/1.3.14/bin/bun \
+    '/opt/homebrew/Cellar/bun/1.3.14/bin/bun /opt/homebrew/bin/omp --cwd /x' \
+    || fail "session-lock identity must accept bun running the omp script"
+  fm_harness_process_matches /opt/homebrew/Cellar/bun/1.3.14/bin/bun \
+    '/opt/homebrew/Cellar/bun/1.3.14/bin/bun --smol /opt/homebrew/bin/omp' \
+    || fail "session-lock identity must accept an interpreter flag before the omp script"
+  ! fm_harness_process_matches /opt/homebrew/Cellar/bun/1.3.14/bin/bun \
+    '/opt/homebrew/Cellar/bun/1.3.14/bin/bun run dev' \
+    || fail "session-lock identity must not accept 'bun run dev'"
+  ! fm_harness_process_matches /opt/homebrew/Cellar/bun/1.3.14/bin/bun \
+    '/opt/homebrew/Cellar/bun/1.3.14/bin/bun /srv/app/server.js --out /tmp/pi/x' \
+    || fail "session-lock identity must not accept an unrelated bun script under a harness-shaped path"
   # shellcheck source=bin/fm-backend.sh
   . "$ROOT/bin/fm-backend.sh"
   fm_backend_source tmux || fail "fm_backend_source tmux failed"
@@ -794,6 +873,7 @@ EOF
 }
 
 test_detection_anchored_name_and_marker_precedence
+test_detection_omp_under_bun_interpreter
 test_lock_identity_and_liveness_classification
 test_spawn_launch_line_and_worker_wiring
 test_spawn_model_validation_scoped_to_listed_providers

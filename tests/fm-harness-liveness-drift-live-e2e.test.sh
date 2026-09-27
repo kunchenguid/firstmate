@@ -111,7 +111,10 @@ SKIPPED=
 # cursor matters for the same reason muse does, from the other direction: it
 # runs as a bundled node script, so its pane title is a bare `node` that no name
 # pattern can own, and identity has to come from its install path or argv[0].
-for harness in claude codex opencode pi pi-signed grok kimi cursor muse; do
+# omp matters for a third shape: from 18.3.1 it is a Bun script, so the live
+# process is `bun <omp path>` and identity comes from the script path the
+# interpreter was handed, never from a comm surface.
+for harness in claude codex opencode pi pi-signed grok kimi cursor muse omp; do
   if ! bin_path=$(resolve_harness_binary "$harness"); then
     SKIPPED="$SKIPPED $harness"
     note "skip: $harness is not installed on this machine, so its classification is unverified here"
@@ -124,11 +127,15 @@ for harness in claude codex opencode pi pi-signed grok kimi cursor muse; do
   target="$SESSION:$harness"
   # cursor blocks on a workspace-trust prompt in a directory it has never seen,
   # which would hang this probe rather than classify anything; --trust is the
-  # same flag fm-spawn passes for the same reason.
+  # same flag fm-spawn passes for the same reason. omp parks on a fresh-profile
+  # provider-login wizard instead, suppressed by the same OMP_SKIP_SETUP
+  # boundary variable fm-spawn sets at launch.
   launch_args=""
   [ "$harness" = cursor ] && launch_args="--trust"
+  launch_e=
+  [ "$harness" = omp ] && launch_e="OMP_SKIP_SETUP=1"
   # shellcheck disable=SC2086  # deliberate: an empty value must add no argument
-  "$REAL_TMUX" -L "$SOCKET" new-window -d -t "$SESSION:" -n "$harness" -c "$LAB/wt" -- "$bin_path" $launch_args \
+  "$REAL_TMUX" -L "$SOCKET" new-window -d ${launch_e:+-e "$launch_e"} -t "$SESSION:" -n "$harness" -c "$LAB/wt" -- "$bin_path" $launch_args \
     || fail "$harness ($version): could not launch a window for the liveness probe"
 
   state=
@@ -153,6 +160,14 @@ for harness in claude codex opencode pi pi-signed grok kimi cursor muse; do
   # the family; only the launch-boundary marker selects the signed identity.
   expect_harness=$harness
   [ "$harness" = pi-signed ] && expect_harness=pi
+  # omp's live process is the bun interpreter, so `args` is the strongest
+  # verdict any vantage on its path can carry - no comm-strength vantage
+  # exists. That is sufficient for omp specifically: its tool subprocesses
+  # publish OMPCODE=1, which bin/fm-harness.sh tests before CLAUDECODE, so a
+  # retained CLAUDECODE cannot rename the session, and bin/fm-spawn.sh clears
+  # CLAUDECODE at omp's launch boundary besides.
+  expect_strength="comm"
+  [ "$harness" = omp ] && expect_strength="args"
   pane_pid=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t "$target" '#{pane_pid}' 2>/dev/null | tr -d ' ')
   [ -n "$pane_pid" ] || fail "$harness ($version): could not read the pane pid for the detection probe"
   # Probe from BELOW the pane process, not the pane process alone. The shipped
@@ -179,10 +194,10 @@ for harness in claude codex opencode pi pi-signed grok kimi cursor muse; do
   # is normally a child of the agent binary rather than a sibling of it, so it can
   # be the deepest descendant and sit ON this path. That ambiguity is the sole source
   # of the false failure; a comm-strength verdict carries the real process name and
-  # cannot be produced that way. The comm-strength REQUIREMENT is unchanged - some
-  # vantage on the path must still name the expected harness at comm strength,
+  # cannot be produced that way. The required verdict is `$expect_strength
+  # $expect_harness`: comm strength for every harness that owns its process name,
   # because detect_own hands an args-strength verdict straight back to a retained
-  # foreign marker.
+  # foreign marker - omp excepted, for the reason stated above.
   # The native binary can take a moment to appear, so poll for it.
   pane_tty=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t "$target" '#{pane_tty}' 2>/dev/null | tr -d ' ')
   verdicts=
@@ -198,7 +213,7 @@ for harness in claude codex opencode pi pi-signed grok kimi cursor muse; do
     fi
     # shellcheck disable=SC2086  # deliberate: the foreground pids are separate arguments
     verdicts=$("$ROOT/bin/fm-harness.sh" ancestry-descent "$pane_pid" $fg_pids 2>/dev/null || true)
-    case "$verdicts" in *"comm $expect_harness"*) break ;; esac
+    case "$verdicts" in *"$expect_strength $expect_harness"*) break ;; esac
     sleep 0.2
   done
 
@@ -207,22 +222,22 @@ for harness in claude codex opencode pi pi-signed grok kimi cursor muse; do
   [ -n "$verdicts" ] || fail \
     "DETECTION DRIFT: $harness $version is running but the ancestry walk reports nothing from the pane process or any vantage below it, so firstmate cannot identify this session at all. $drift_context Teach bin/fm-harness.sh's harness_ancestry the name this release actually reports."
 
-  SAW_COMM=0
+  SAW_EXPECTED=0
   while read -r strength named; do
     [ -n "$strength" ] || continue
-    [ "$strength" = comm ] || continue
-    [ "$named" = "$expect_harness" ] || fail \
-      "DETECTION DRIFT: $harness $version is running but a comm-strength vantage point on the upward path through its own session resolves to '$named', not '$expect_harness'. bin/fm-harness.sh lets a structural ancestor outrank an environment marker, so an unmatched process name can resolve to a DIFFERENT harness further up the tree instead of merely losing a fast path. $drift_context Teach bin/fm-harness.sh's harness_ancestry the name this release actually reports."
-    SAW_COMM=1
+    if [ "$strength" = comm ] && [ "$named" != "$expect_harness" ]; then
+      fail "DETECTION DRIFT: $harness $version is running but a comm-strength vantage point on the upward path through its own session resolves to '$named', not '$expect_harness'. bin/fm-harness.sh lets a structural ancestor outrank an environment marker, so an unmatched process name can resolve to a DIFFERENT harness further up the tree instead of merely losing a fast path. $drift_context Teach bin/fm-harness.sh's harness_ancestry the name this release actually reports."
+    fi
+    [ "$strength $named" = "$expect_strength $expect_harness" ] && SAW_EXPECTED=1
   done <<EOF
 $verdicts
 EOF
 
-  [ "$SAW_COMM" = 1 ] || fail \
-    "DETECTION DRIFT: $harness $version is identified only at interpreter-args strength, from no vantage point on the upward path through its session at comm strength. detect_own hands an args-strength verdict back to a retained foreign marker, so a stale CLAUDECODE would silently rename this session even though this guard sees the right identity. $drift_context Restore a process name bin/fm-harness.sh's harness_ancestry can match structurally, or teach it the name this release reports."
+  [ "$SAW_EXPECTED" = 1 ] || fail \
+    "DETECTION DRIFT: $harness $version is running but no vantage point on the upward path through its session reports '$expect_strength $expect_harness'. $drift_context Teach bin/fm-harness.sh's harness_ancestry the name this release actually reports."
 
   note "$harness $version: ancestry verdicts=[$(printf '%s' "$verdicts" | tr '\n' ';')]"
-  pass "harness detection: $harness $version is identified by the ancestry walk at comm strength"
+  pass "harness detection: $harness $version is identified by the ancestry walk at $expect_strength strength"
   CHECKED=$((CHECKED + 1))
 done
 

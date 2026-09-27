@@ -89,8 +89,9 @@ fi
 ln -s "$STANDIN_BIN" "$LAB/bin/claude-link"
 ln -s "$STANDIN_BIN" "$LAB/bin/pi"
 ln -s "$STANDIN_BIN" "$LAB/bin/notaharness"
-# omp (Oh My Pi) is a single binary whose live process name is the bare word
-# `omp`; the two decoys are the substrings an unanchored glob would misread.
+# omp (Oh My Pi) shipped as a single binary whose live process name is the
+# bare word `omp` through 18.1.11; the two decoys are the substrings an
+# unanchored glob would misread.
 ln -s "$STANDIN_BIN" "$LAB/bin/omp"
 ln -s "$STANDIN_BIN" "$LAB/bin/ompd"
 ln -s "$STANDIN_BIN" "$LAB/bin/comp"
@@ -221,9 +222,11 @@ done
 pass "tmux liveness: unrelated muse-containing command names stay ambiguous"
 
 # --- omp's bare binary name -------------------------------------------------
-# omp (Oh My Pi) runs as a single binary whose live process name is exactly
-# `omp`, with no path component to fall back on, so the anchored name is the
-# only signal and the two decoys prove it never widens into a substring match.
+# Through 18.1.11 omp (Oh My Pi) ran as a single binary whose live process name
+# was exactly `omp`, with no path component to fall back on, so the anchored
+# name is the only signal and the two decoys prove it never widens into a
+# substring match. From 18.3.1 omp is a Bun script under `bun`; that shape is
+# covered by the interpreter section below.
 
 new_window omp "$LAB/bin/omp" 900
 wait_for_state "$SESSION:omp" alive \
@@ -236,6 +239,94 @@ for decoy in ompd comp; do
     || fail "'$decoy' merely contains 'omp' and must not classify as a live agent pane"
 done
 pass "tmux liveness: unrelated omp-containing command names stay ambiguous"
+
+# --- omp under its bun interpreter -------------------------------------------
+# From 18.3.1 omp is a Bun script, so the live process is `bun <omp path>` and
+# neither the pane title nor the foreground comms ever reads `omp`: the
+# interpreter's script path is the only identity surface left, and it must
+# never widen into claiming an unrelated bun or node command. These panes run
+# `bun <script> ...`, so they need a stand-in that ignores its arguments - the
+# compiled C standin does, while a host `sleep` fallback exits on the script
+# path; on the rare host where only `sleep` survives these cases skip and the
+# function-level assertions below still run.
+ln -s "$STANDIN_BIN" "$LAB/bin/bun"
+mkdir -p "$LAB/opt/bin"
+: > "$LAB/opt/bin/omp"
+: > "$LAB/opt/bin/ompd"
+
+# Same probe shape as standin_alive, but carrying the arguments the bun cases
+# hand the stand-in, so the check proves the stand-in survives extra argv.
+standin_alive_args() {  # <path> <args...>
+  local bin=$1 pid
+  shift
+  "$bin" "$@" >/dev/null 2>&1 &
+  pid=$!
+  sleep 0.2
+  kill -0 "$pid" 2>/dev/null || { wait "$pid" 2>/dev/null; return 1; }
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+}
+
+if standin_alive_args "$STANDIN_BIN" "$LAB/opt/bin/omp" 60; then
+  new_window bun-omp "$LAB/bin/bun" "$LAB/opt/bin/omp" --cwd "$LAB/wt"
+  wait_for_state "$SESSION:bun-omp" alive \
+    || fail "bun running the omp script path must classify alive"
+  # The alive verdict must come from the script-path rule ALONE: assert the
+  # name surfaces stay blind, loudly, so this case can never go vacuous.
+  title_classifies_agent "$SESSION:bun-omp" \
+    && fail "bun-omp: the pane title must not attribute it, or the script-path rule is not what carried the verdict"
+  comms_classify_agent "$SESSION:bun-omp" \
+    && fail "bun-omp: the foreground comms must not attribute it, or the script-path rule is not what carried the verdict"
+  pass "tmux liveness: omp under its bun interpreter classifies alive from the script path alone"
+
+  new_window bun-dev "$LAB/bin/bun" run dev
+  wait_for_state "$SESSION:bun-dev" ambiguous \
+    || fail "'bun run dev' carries no harness script path and must stay ambiguous"
+  new_window bun-ompd "$LAB/bin/bun" "$LAB/opt/bin/ompd"
+  wait_for_state "$SESSION:bun-ompd" ambiguous \
+    || fail "an omp-shaped substring in the script path under bun must stay ambiguous"
+  pass "tmux liveness: unrelated bun commands stay ambiguous"
+
+  # The treehouse shape: the pane command is a subshell that keeps bun in the
+  # same foreground process group, so the group holds a shell AND a non-shell
+  # and reads ambiguous without the script rule. The trailing `; :` keeps sh
+  # from exec-optimizing the bun invocation away.
+  # shellcheck disable=SC2016 # the quoted body expands inside the subshell
+  new_window bun-omp-sh /bin/sh -c '"$0" "$1" 900; :' "$LAB/bin/bun" "$LAB/opt/bin/omp"
+  fg_shell=0 fg_other=0
+  for _ in $(seq 1 100); do
+    fg_shell=0 fg_other=0
+    while IFS= read -r fg_name; do
+      [ -n "$fg_name" ] || continue
+      case "$(fm_agent_process_classify_name "$fg_name")" in
+        shell) fg_shell=1 ;;
+        *) fg_other=1 ;;
+      esac
+    done <<EOF
+$(fm_backend_tmux_foreground_comms "$SESSION:bun-omp-sh")
+EOF
+    [ "$fg_shell" -eq 1 ] && [ "$fg_other" -eq 1 ] && break
+    sleep 0.1
+  done
+  [ "$fg_shell" -eq 1 ] && [ "$fg_other" -eq 1 ] \
+    || fail "the subshell-plus-bun foreground shape never formed, so the alive verdict below proves nothing (comms: $(fm_backend_tmux_foreground_comms "$SESSION:bun-omp-sh" | tr '\n' ' '))"
+  wait_for_state "$SESSION:bun-omp-sh" alive \
+    || fail "a subshell holding bun <omp path> in the same foreground group must classify alive"
+  pass "tmux liveness: a subshell plus bun <omp path> in one foreground group classifies alive"
+else
+  echo "skip: the stand-in binary does not ignore a script argument, so the bun-interpreter pane cases cannot run"
+fi
+
+# The same rule at function level, the surface Herdr's process-info caller
+# feeds: comm and argv[0] both read `bun`, so only the flattened args carry
+# the omp script path - and a claude-shaped --model token must not divert it.
+[ "$(fm_agent_process_classify bun bun 'bun /opt/homebrew/bin/omp --model anthropic/claude-sonnet-4')" = agent ] \
+  || fail "fm_agent_process_classify must read bun <omp path> as agent, even with a claude-shaped model token"
+[ "$(fm_agent_process_classify bun bun 'bun run dev')" = other ] \
+  || fail "fm_agent_process_classify must keep 'bun run dev' other"
+[ "$(fm_agent_process_classify node node 'node /srv/app/server.js')" = other ] \
+  || fail "fm_agent_process_classify must keep an unrelated node script other"
+pass "tmux liveness: the shared classifier attributes a bare interpreter by its script path only"
 
 # --- a version name blinds one source ---------------------------------------
 # Giving a genuine harness-named executable the version-string argv[0] that

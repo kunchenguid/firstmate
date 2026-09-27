@@ -238,6 +238,31 @@ pi-signed
 0.82.0
 ```
 
+### 2026-09-26 omp 18.3.1 under the bun interpreter
+
+omp 18.3.1 ships `/opt/homebrew/bin/omp` as a Bun script (`#!/usr/bin/env bun`) rather than the single compiled binary 18.1.11 was, so its live process is `bun /opt/homebrew/bin/omp ...` and no comm, argv[0], or pane-title surface names omp.
+The classifier now attributes a bare interpreter (node, python, bun) from the exact harness component of the one script path it was handed, and the drift guard includes omp with `args` as its required detection strength.
+Run on macOS 26.6.2 arm64, tmux 3.7c, bun 1.3.14, with no prompt submitted:
+
+```sh
+FM_HARNESS_LIVENESS_DRIFT=1 bash tests/fm-harness-liveness-drift-live-e2e.test.sh
+```
+
+Bounded observed output:
+
+```text
+# omp omp/18.3.1: title='bun' foreground=[bun ]
+ok - harness liveness: omp omp/18.3.1 classifies alive
+# omp omp/18.3.1: ancestry verdicts=[args omp]
+ok - harness detection: omp omp/18.3.1 is identified by the ancestry walk at args strength
+# unverified on this machine (not installed): codex pi-signed kimi muse
+# checked 6 installed harness(es)
+```
+
+The same run classified claude 2.1.268, opencode 1.18.31, pi 0.85.1, grok 1.0.41, and cursor 2026.09.15-d2fe57e `alive` and identified each at comm strength.
+Args strength is sufficient for omp because the installed 18.3.1 bundle sets `OMPCODE=1` alongside `CLAUDECODE=1` in its tool-subprocess environment, and `bin/fm-harness.sh` tests `OMPCODE` before `CLAUDECODE`.
+`tests/fm-tmux-agent-liveness.test.sh` and `tests/fm-omp-harness.test.sh` are the portable regressions for the interpreter rule, including an unrelated `bun run dev` staying ambiguous and a subshell sharing the foreground group with `bun <omp path>` reading alive.
+
 ### Harness-adapter instruction routing
 
 Two checks keep the evidence boundaries separate.
