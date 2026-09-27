@@ -1115,32 +1115,22 @@ On 2026-09-27, Pi 0.87.1 and Node v22.22.2 passed the isolated SDK guard with au
 Refresh with `FM_SHORT_AGENT_LIVE_E2E=1 FM_SHORT_LIVE_PROVIDER=openai-codex FM_SHORT_LIVE_MODEL=gpt-5.6-luna bin/fm-test-run.sh tests/fm-short-agent-live-e2e.test.sh`.
 Both submitted through the loaded candidate extension and returned before child completion; the parent answered another real-model prompt while each child was active.
 Both children excluded the parent-only sentinel.
-The installed SDK read back `cacheWarming: "off"`; each child's runtime record reported an empty extension list and zero starting parent messages.
-
-| Measurement | Read-only task | Sync operation |
-| --- | --- | --- |
-| Submission latency | 6 ms | 12 ms |
-| Parent reply after submission | 3500 ms | 1730 ms |
-| Parent reply before child completion | 2169 ms | 4827 ms |
-| Child model requests / tools | 2 / 1 read | 2 / 1 operation chain |
-| Child reported total tokens | 839 | 1096 |
-| Serialized terminal result | 507 bytes | 686 bytes |
-
-The test harness invoked two successful submit tools and one read-only status tool; terminal observation was fixture polling, not a parent model polling loop.
-MAIN executed zero operation commands: the sync receipt identifies the child-owned script process as executor, and readback verified the changed clone head and file contents.
-The operation's submit input and response were 577 and 366 bytes.
-Serialized SDK parent messages grew from 2 to 3453 to 4234 bytes across the two unrelated parent prompts and extension activity.
-The harness invokes submit directly through the loaded tool definition, so submit/result payloads are measured separately rather than inserted into that model history.
-Those bytes are not a billed-token estimate or a measurement of a full production conversation.
-The two parent requests used 880 reported tokens; the six successful real requests used 2815 tokens, including four child requests and two child tool calls.
-These are single-run observations, not statistical p95 or a claim of general savings; this guard measures SDK responsiveness, not terminal repaint latency.
+The installed SDK read back `cacheWarming: "off"` and disabled compaction; each child loaded only `pi-openai-codex-compat@0.0.16`, with zero extension errors and zero starting parent messages.
+Both children persisted the plugin's native response markers, proving execution by its registered provider rather than package presence alone.
+Each successful child used two model requests and one tool call, while MAIN executed zero operation commands.
+The sync receipt identifies the child-owned script executor, and readback verified the changed clone head and file contents.
+The real SDK's separate zero-request initialization probe also verifies removal of plugin management tools, ignored parent/project extensions and context files, and the actual request handler's fixed verbosity and disabled provider web-search behavior.
+Detailed timing and usage remain in the guard's `evidence.json`; these are single-run SDK responsiveness observations, not statistical latency or a terminal repaint measurement.
+The harness invokes submit directly through the loaded tool definition, so it does not measure a full production primary conversation.
 
 Two additional submissions changed only the detached child's proxy environment to an unreachable loopback endpoint.
 The real provider returned `fetch failed` for both read-only and operation tasks; both ended `blocked` with one model request, zero tool calls, and no operation intent or receipt.
 The transport journal retained `codes: ["ECONNREFUSED"]`, while the original provider message contained no underlying code.
 Restoring the normal environment allowed the real fast-forward above without changing provider, model, or extension isolation.
 This demonstrates the diagnostic boundary and refusal behavior; it does not identify the cause of an earlier failure whose underlying transport evidence was not retained.
-The portable suites also cover nested/cyclic transport causes, secret exclusion, failure after a completed operation, and no replay after duplicate submission or reconciliation.
+The portable suites also cover nested/cyclic transport causes, secret exclusion, failure after a completed operation, refusal of provider-internal HTTP replay, and no operation replay after duplicate submission or reconciliation.
+Plugin admission tests reject missing or mismatched packages, failed loading, extra discovered extensions and unexpected tool registrations.
+Short sessions initialize the plugin compaction handlers but disable automatic compaction and end on output limits; this guard does not perform a primary `/compact`.
 
 `tests/fm-short-operations.test.sh` uses a model fixture, real Git owners/effects, and a controlled Codebase forge to exercise merge-plus-sync, detached-checkout recovery, duplicate submission, cancellation, authority/identity drift, malformed output, partial success, and concurrent resource ownership.
 It also proves that a lost merge response is reconciled by owner readback and that an owner killed after a possible effect is not replayed after restart.
@@ -1151,6 +1141,11 @@ The cleanup guard covers both an already absent copy and a real existing clean l
 The existing-copy case starts with a durable lease and a commit reachable from the disposable remote default branch, then observes the real owner return the slot from `leased` to `available`, clear its lease, and remove the exact endpoint and task record.
 It verifies the returned copy remains clean at the landed head, another slot retains its lease identity, head, untracked sentinel and task metadata, and every unrelated pane remains present.
 The saved `landed-cleanup-evidence.json` combines pre/post Treehouse and Herdr readbacks with the bound child-owner receipt; MAIN executes zero cleanup commands.
+On 2026-09-27, the same Herdr guard also passed a real `fm-captain-hold.sh complete` update followed by short-task scout cleanup, with a doubled model and real completion/cleanup owners.
+It first records an empty reviewed inventory, then records the source task's pending choice, and verifies one effective audit pair with the superseded assignments retained.
+A second completion update after short-task binding refuses execution before any guarded effect.
+A freshly bound request then removes only the synthetic scout's endpoint and metadata, preserving its report and both pending captain-held choices; `audit-cleanup-evidence.json` retains the before/after metadata, refusal and completed receipt.
+The portable operation suite separately accepts only monotone legacy completion audit pairs, refuses repeated identity fields and malformed audit history, and refuses post-bind edits even when the final effective inventory is unchanged.
 The fixture chains use one model fixture invocation and one operation tool per chain; fixture responses are not real-provider token evidence.
 The optional install also repeats the tool call to prove receipt reuse without reinstalling.
 The portable read-only companion is `tests/fm-short-agent.test.sh`; [the operator guide](../short-agents.md) owns current use and limits.

@@ -59,8 +59,9 @@ try {
   assert.ok(started.at>=returnedAt,'child started after submit returned');
   assert.ok(!context.includes(sentinel));assert.ok(!journal.includes(sentinel));assert.equal(contextRecord.parentMessages,0);
   assert.deepEqual(contextRecord.tools,['read_material']);assert.match(journal,/"type":"read"/);
+  const pluginResult=JSON.parse(fs.readFileSync(path.join(dir,'plugin-result.json')));assert.ok(pluginResult.nativeResponses >= 2);assert.equal(pluginResult.extensionErrors,0);assert.deepEqual(pluginResult.tools,['read_material']);
   const runtimeRecord=JSON.parse(fs.readFileSync(path.join(dir,'runtime.json')));
-  assert.equal(runtimeRecord.cacheWarming,'off');assert.deepEqual(runtimeRecord.extensions,[]);assert.equal(runtimeRecord.extensionErrors,0);
+  assert.equal(runtimeRecord.cacheWarming,'off');assert.equal(runtimeRecord.extensions.length,1);assert.deepEqual(runtimeRecord.plugin,{name:'pi-openai-codex-compat',version:'0.0.16'});assert.equal(runtimeRecord.providerRegistered,true);assert.equal(runtimeRecord.extensionErrors,0);
   assert.ok(!fs.existsSync(path.join(home,'projects')));
   const evidence={pi:JSON.parse(fs.readFileSync(path.join(path.dirname(sdkEntry()),'../package.json'))).version,node:process.version,model:{provider:model.provider,id:model.id},home,
     submitMs:returnedAt-began,runnerStartedAfterReturnMs:started.at-returnedAt,parentReplyMs:parentReplyAt-returnedAt,stateAtPrompt,
@@ -117,6 +118,7 @@ try {
   const opDir=service.dir(opAccepted.id),opContext=JSON.parse(fs.readFileSync(path.join(opDir,'context.json')));
   assert.deepEqual(opContext.tools,['read_material','run_operations']);
   assert.equal(opContext.parentMessages,0);assert.ok(!JSON.stringify(opContext).includes(sentinel));
+  const opPlugin=JSON.parse(fs.readFileSync(path.join(opDir,'plugin-result.json')));assert.ok(opPlugin.nativeResponses >= 2);assert.equal(opPlugin.extensionErrors,0);assert.deepEqual(opPlugin.tools,['read_material','run_operations']);
   const opReceipt=JSON.parse(fs.readFileSync(path.join(opDir,'operation-0.receipt.json')));
   assert.notEqual(opReceipt.executor.pid,process.pid);
   assert.equal(git('-C',project,'rev-parse','HEAD'),expectedHead,'real operation advances the isolated clone');
@@ -124,7 +126,7 @@ try {
   const usage=dir=>fs.readFileSync(path.join(dir,'journal.jsonl'),'utf8').trim().split('\n').map(JSON.parse).filter(x=>x.message?.role==='assistant').map(x=>x.message.usage);
   evidence.operation={beforeHead,afterHead:expectedHead,submitMs:opReturned-opBegan,parentReplyMs:opReply-opReturned,parentReplyAt:opReply,childFinishedAt:opResult.finishedAt,mainExecutionCalls:0,coordinationToolCalls:1,observerPolling:'test harness only',requestBytes:Buffer.byteLength(JSON.stringify(opInput)),submitResponseBytes:Buffer.byteLength(opSubmit.content[0].text),resultBytes:Buffer.byteLength(JSON.stringify(opResult)),result:opResult,receipt:opReceipt,usage:usage(opDir)};
   evidence.parentContext={measure:"serialized SDK parent messages; submit tools invoked by test harness, so tool payloads are separately counted, not injected into parent history",initialBytes:parentBeforeBytes,afterReadOnlyBytes:parentBeforeOperationBytes,afterOperationBytes:Buffer.byteLength(JSON.stringify(session.messages))};
-  evidence.readOnlyUsage=usage(dir);
+  evidence.readOnlyUsage=usage(dir);evidence.pluginBehavior={readOnly:pluginResult,operation:opPlugin};
   evidence.parentUsage=session.messages.filter(x=>x.role==='assistant').map(x=>x.usage);
   fs.writeFileSync(path.join(tmp,'evidence.json'),JSON.stringify(evidence,null,2));console.log(JSON.stringify(evidence));
 } finally {await session.extensionRunner.emit({type:'session_shutdown',reason:'quit'});session.dispose();}

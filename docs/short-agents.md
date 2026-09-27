@@ -75,6 +75,7 @@ Cleanup does not imply a later clone sync; include that separately when authoriz
 Unsupported actions refuse explicitly.
 
 Before effects, the guarded owners revalidate the immutable task, generation, grant expiry, exact arguments, bound child process, and resource ownership.
+Legacy completion audit history is accepted only under the narrow metadata compatibility checks in [`bin/fm-short-operations.mjs`](../bin/fm-short-operations.mjs); repeated identity fields still refuse, and the entire metadata record remains bound against changes after submission.
 Per-resource reservations and the existing owner locks coordinate MAIN, BRANCH, and short executors without serializing independent clones.
 Task and merge reservations are home-local; they do not provide cross-host forge locking.
 No actor string alone grants execution.
@@ -85,6 +86,7 @@ No actor string alone grants execution.
 Terminal records contain a bounded summary and evidence directory; operation status also lists each recorded step's completion or refusal.
 The directory contains the independent starting context, model/tool journal, and per-step intent, owner output, and postcondition receipts.
 It also records the initialized Pi version, extension list, active tools, empty starting history, and effective cache-warming mode in `runtime.json`.
+Successful model execution also writes `plugin-result.json` with the exact package version, handler error count, active tools and native provider response count; these counts contain no response bodies.
 The transport journal records HTTP status or allowlisted connection error codes before Pi reduces a fetch failure to its provider message; it excludes URLs, headers, and raw error causes.
 Blocked results retain the execution stage and request/tool counts, so a failure before any tool can be distinguished from a failure after an operation.
 Full logs stay there rather than entering MAIN's context.
@@ -106,7 +108,12 @@ Every child gets `read_material`, which accepts only a material ID and a bounded
 Only an explicitly granted operation task also gets the argument-free `run_operations` tool.
 Neither tool accepts shell commands, new paths, expanded grants, or arbitrary recovery choices.
 The child receives no parent messages, context files, skills, prompt templates, or arbitrary extensions.
-A plugin loaded by the interactive primary is therefore not loaded by the short-task child; installing or configuring a parent plugin does not change this boundary.
+The sole extension exception is the explicitly loaded `pi-openai-codex-compat@0.0.16` package under the original Pi agent directory's `npm/node_modules`.
+The child verifies its exact identity, version and entrypoint and fails closed on missing, mismatched or failed initialization; it never installs packages.
+[`bin/fm-short-plugin.mjs`](../bin/fm-short-plugin.mjs) owns this supported SDK loader path, its resource override, and the fixed child-only plugin settings.
+All plugin shell, filesystem and network tool registrations and management commands are removed before session construction; unexpected tool registrations refuse initialization.
+Plugin config and installation identity use the child directory, while the already initialized model runtime retains its original authentication source.
+No global settings, installed package or parent session is changed.
 
 Capture rejects directories, large files, symlink paths, hardlinks, common credential locations, and recognizable credential content.
 Select sanitized evidence: detecting every secret in ordinary prose is outside this boundary.
@@ -117,7 +124,9 @@ Wall time, tool calls, provider requests, and reserved output tokens are bounded
 Each request reserves up to 1024 output tokens without refunding unused allowance.
 A conservative streamed-byte guard also stops transports that ignore an upstream output limit; input is byte-bounded separately.
 The output allowance is not a total billed-token cap, and abort cannot guarantee exact billing.
-Automatic provider retries, compaction, and cache warming are disabled.
+Automatic compaction and cache warming are disabled, including the plugin threshold override.
+SSE uses zero transport retries, and each model stream may issue only one HTTP request, so plugin-internal retries or continuations cannot silently bypass the request reservation.
+An output-limit response ends the child before the plugin can trigger a continuation turn.
 [`bin/fm-short-agent.mjs`](../bin/fm-short-agent.mjs) and its `--help` own exact request limits.
 
 Reloading MAIN leaves children running and reconciles results when the extension starts again.

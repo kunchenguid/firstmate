@@ -138,7 +138,10 @@
 # erase a source before this gate has succeeded: every recorded inventory
 # entry must still be durable and no keyed status decision may be open.
 # Metadata compatibility: the attestation keeps the historical
-# `decisions_reviewed=1` and `decision_keys=` keys, and an inventory entry that
+# `decisions_reviewed=1` and `decision_keys=` keys as one current pair.
+# Superseded audit assignments remain as comments in the same file; completion
+# atomically replaces the pair under the metadata lock, retaining all prior ids.
+# An inventory entry that
 # names no existing task resolves through the legacy `<origin>-decision-<entry>`
 # identity, so pre-collapse metadata written by fm-decision-hold.sh verifies
 # unchanged. An entry that exists as a task id is always that task. On the
@@ -417,6 +420,25 @@ sorted_key_union() {  # <comma-list> <newline-or-space-separated-new-keys>
 
 meta_value() {  # <meta> <key>
   grep "^$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2- || true
+}
+
+record_completion_meta() {  # <locked meta> <verified comma-separated inventory>
+  local meta=$1 keys=$2 tmp
+  if [ "$(meta_value "$meta" decisions_reviewed)" = 1 ] \
+    && [ "$(meta_value "$meta" decision_keys)" = "$keys" ] \
+    && [ "$(grep -c '^decisions_reviewed=' "$meta")" = 1 ] \
+    && [ "$(grep -c '^decision_keys=' "$meta")" = 1 ]; then
+    return 0
+  fi
+  tmp=$(umask 077; mktemp "${meta}.completion.XXXXXX") || fail "cannot stage completion metadata"
+  # Keep the full old audit trail, without leaving repeated effective fields.
+  if ! cp -p "$meta" "$tmp" \
+    || ! sed -E 's/^(decisions_reviewed|decision_keys)=/# previous completion: &/' "$meta" > "$tmp" \
+    || ! printf '\ndecisions_reviewed=1\ndecision_keys=%s\n' "$keys" >> "$tmp" \
+    || ! mv -f "$tmp" "$meta"; then
+    rm -f "$tmp"
+    fail "cannot record completion metadata"
+  fi
 }
 
 origin_open_decisions() {  # <origin-id>
@@ -1636,7 +1658,9 @@ command_complete() {
     done
   fi
   if [ "$has_meta" = 1 ]; then
-    previous=$(meta_value "$meta" decision_keys)
+    # Old completion owners appended audit pairs. Retain every inventoried id
+    # when producing the canonical current pair, not merely the latest line.
+    previous=$(grep '^decision_keys=' "$meta" | cut -d= -f2- | tr '\n' ',' | sed 's/,$//' || true)
   fi
   keys=$(sorted_key_union "$previous" "$supplied")
   if [ -n "$keys" ]; then
@@ -1661,9 +1685,7 @@ EOF
   fi
 
   if [ "$has_meta" = 1 ]; then
-    if [ "$(meta_value "$meta" decisions_reviewed)" != 1 ] || [ "$previous" != "$keys" ]; then
-      printf 'decisions_reviewed=1\ndecision_keys=%s\n' "$keys" >> "$meta"
-    fi
+    record_completion_meta "$meta" "$keys"
     fm_lock_release "$CAPTAIN_META_LOCK"
     CAPTAIN_META_LOCK_HELD=0
 

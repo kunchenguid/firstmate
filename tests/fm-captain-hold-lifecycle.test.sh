@@ -676,6 +676,8 @@ test_completion_gate_attests_and_transfers() {
   tasks_in "$home" add "$id" "Investigate sample systems" --kind scout --repo sample --start >/dev/null \
     || fail "could not create investigation backlog fixture"
   write_origin_meta "$home" "$id"
+  run_captain "$home" complete "$id" --none >/dev/null || fail "initial empty review failed"
+  before=$(shasum -a 256 "$home/state/$id.meta" | awk '{print $1}')
   cat > "$home/state/$id.status" <<'EOF'
 working: report drafted
 needs-decision [key=route]: choose route north or route south
@@ -691,8 +693,8 @@ EOF
   if run_captain "$home" complete "$id" --none > "$home/none.out" 2> "$home/none.err"; then
     fail "--none attested while captain calls were still open in the status stream"
   fi
-  assert_no_grep "decisions_reviewed=1" "$home/state/$id.meta" \
-    "failed completion recorded a false completion attestation"
+  after=$(shasum -a 256 "$home/state/$id.meta" | awk '{print $1}')
+  [ "$before" = "$after" ] || fail "failed completion changed the previous attestation"
   if run_captain "$home" complete "$id" sample-route-call > "$home/absent.out" 2> "$home/absent.err"; then
     fail "completion accepted an inventory entry that names no task"
   fi
@@ -725,6 +727,13 @@ EOF
     || fail "captain-held bookkeeping closes re-woke their own home"
   assert_grep "decisions_reviewed=1" "$home/state/$id.meta" "completion attestation missing"
   assert_grep "decision_keys=sample-route-call" "$home/state/$id.meta" "inventory was not recorded as task ids"
+  [ "$(grep -c '^decisions_reviewed=' "$home/state/$id.meta")" = 1 ] || fail "completion duplicated the reviewed flag"
+  [ "$(grep -c '^decision_keys=' "$home/state/$id.meta")" = 1 ] || fail "completion duplicated the current inventory"
+  assert_grep '# previous completion: decision_keys=' "$home/state/$id.meta" "completion discarded the earlier empty inventory"
+  before=$(shasum -a 256 "$home/state/$id.meta" | awk '{print $1}')
+  run_captain "$home" complete "$id" sample-route-call >/dev/null || fail "completion retry failed"
+  after=$(shasum -a 256 "$home/state/$id.meta" | awk '{print $1}')
+  [ "$before" = "$after" ] || fail "idempotent completion changed metadata"
   open=$(bash -c '. "$1"; status_open_decisions "$2"' _ \
     "$ROOT/bin/fm-classify-lib.sh" "$home/state/$id.status")
   [ -z "$open" ] || fail "captain-held transfer did not close the live status decisions: $open"

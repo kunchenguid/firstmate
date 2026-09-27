@@ -1,3 +1,4 @@
+import { pluginFixture } from './fm-short-plugin-fixture.mjs';
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import path from 'node:path';
@@ -15,18 +16,20 @@ fs.writeFileSync(path.join(pkg, 'package.json'), '{"name":"@earendil-works/pi-co
 fs.mkdirSync(path.join(pkg,'dist/core'));
 fs.writeFileSync(path.join(pkg,'dist/core/http-dispatcher.js'),'export function configureHttpDispatcher() {}');
 fs.writeFileSync(path.join(pkg, 'dist/index.js'), `
+${pluginFixture(pkg)}
 export const createExtensionRuntime = () => ({});
-export const ModelRuntime = { create: async () => ({getAvailable: async () => [{provider:'fixture',id:'fixture'}],streamSimple:async (_m,_c,opts)=> {
+export const ModelRuntime = { create: async () => ({provider:{},getProvider(){return this.provider;},getAvailable: async () => [{provider:'fixture',id:'fixture'}],streamSimple:async (_m,_c,opts)=> {
  if(!opts.maxTokens) throw Error('missing provider token cap');
  if(_c.transport) await opts.fetch('https://unused.invalid');
+ if(_c.replay) {await opts.fetch();await opts.fetch();}
 }}) };
-export const SessionManager = {inMemory: () => ({})};
+export const SessionManager = {inMemory: () => ({getBranch:()=>[]})};
 export const SettingsManager = {inMemory: x => ({...x,getCacheWarmingMode:()=>x.cacheWarming})};
 export async function createAgentSession(o) {
- if(o.tools.join() !== 'read_material' || o.resourceLoader.getAgentsFiles().agentsFiles.length || o.resourceLoader.getExtensions().extensions.length) throw Error('isolation violated');
+ if(o.tools.join() !== 'read_material' || o.resourceLoader.getAgentsFiles().agentsFiles.length || o.resourceLoader.getExtensions().extensions.length!==1) throw Error('isolation violated');
  if(o.settingsManager.getCacheWarmingMode() !== 'off') throw Error('cache warming enabled');
  const messages=[], subscribers=[];
- return {session:{ messages, systemPrompt:o.resourceLoader.getSystemPrompt(), getActiveToolNames:()=>o.tools,
+ return {session:{ messages, systemPrompt:o.resourceLoader.getSystemPrompt(), getActiveToolNames:()=>o.tools,async bindExtensions(options){if(process.env.FM_FIXTURE_BIND_ERROR)options.onError({event:'session_start',error:'fixture'});o.modelRuntime.provider={};},
 
  subscribe: cb=>subscribers.push(cb),dispose(){},getLastAssistantText:()=> 'answer 42 m1',
  async prompt(prompt){
@@ -42,6 +45,7 @@ export async function createAgentSession(o) {
    const fetch=async()=>{throw new TypeError('fetch failed',{cause});};
    await o.modelRuntime.streamSimple({}, {transport:true}, {fetch});
   }
+  if(goal==='provider-replay') await o.modelRuntime.streamSimple({}, {replay:true}, {fetch:async()=>({status:200})});
   await o.modelRuntime.streamSimple({}, {}, {});
   if(goal==='modelbudget') await o.modelRuntime.streamSimple({}, {}, {});
   if(goal==='toolbudget') {for(let i=0;i<4;i++) await o.customTools[0].execute('a',{material:'m1'});}
@@ -66,7 +70,10 @@ const done=await until(accepted.id,'completed'); clearInterval(tick); assert.ok(
 const started=JSON.parse(fs.readFileSync(path.join(service.dir(accepted.id),'started.json')));
 assert.ok(started.at >= accepted.acceptedAt);
 const runtime=JSON.parse(fs.readFileSync(path.join(service.dir(accepted.id),'runtime.json')));
-assert.deepEqual(runtime.extensions,[]);assert.equal(runtime.cacheWarming,'off');assert.equal(runtime.parentMessages,0);
+assert.equal(runtime.extensions.length,1);assert.equal(runtime.cacheWarming,'off');assert.equal(runtime.parentMessages,0);
+process.env.FM_FIXTURE_BIND_ERROR='1';
+const bindFailure=service.submit(request('bind-failure'));delete process.env.FM_FIXTURE_BIND_ERROR;
+const bindResult=await until(bindFailure.id,'blocked');assert.equal(bindResult.stage,'plugin-initialization');assert.equal(bindResult.requests,0);assert.equal(bindResult.toolCalls,0);
 const failed=service.submit(request('transport','transport'));
 const failure=await until(failed.id,'blocked');
 assert.equal(failure.requests,1);assert.equal(failure.toolCalls,0);assert.equal(failure.stage,'model-execution');
@@ -74,6 +81,9 @@ const failureJournal=fs.readFileSync(path.join(service.dir(failed.id),'journal.j
 const failureEvents=failureJournal.trim().split('\n').map(JSON.parse);
 assert.deepEqual(failureEvents,[{type:'transport_error',request:1,phase:'before_headers',codes:['ECONNRESET'],toolsStarted:0}]);
 assert.ok(!failureJournal.includes('PRIVATE_'),'transport diagnostics exclude arbitrary causes and messages');
+const replay=service.submit(request('provider-replay','provider-replay'));
+const replayResult=await until(replay.id,'blocked');assert.equal(replayResult.requests,1);assert.equal(replayResult.toolCalls,0);
+assert.deepEqual(fs.readFileSync(path.join(service.dir(replay.id),'journal.jsonl'),'utf8').trim().split('\n').map(JSON.parse),[{type:'http_response',request:1,status:200}]);
 assert.equal(service.submit(request('transport','transport')).finishedAt,failure.finishedAt,'no automatic or duplicate-key replay');
 assert.ok(!fs.existsSync(path.join(home,'projects')));
 assert.equal(fs.readdirSync(path.join(home,'state')).filter(x=>x.endsWith('.meta')).length,0);
