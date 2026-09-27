@@ -30,8 +30,9 @@
 # can grant merge authority. Captain-actor prose requires an existing live hold;
 # an eligible merge remains a captain call, never an automatic forge action.
 #
-# poll consumes fm-fleet-snapshot.sh --contribution-input, a local-only read,
-# and spends at most FM_CONTRIBUTIONS_BUDGET seconds on forge reads (default 20,
+# poll consumes fm-fleet-snapshot.sh --contribution-input, a local-only read
+# whose failure fails the command rather than measuring empty coverage, and
+# spends at most FM_CONTRIBUTIONS_BUDGET seconds on forge reads (default 20,
 # 1..25). Every read is capped at five seconds. A pull observation has three
 # dependent waves: core, six independent reads, then the closing head read;
 # an issue has two waves. Parallelizing each independent wave bounds either
@@ -131,7 +132,8 @@ read_saved() {
 }
 
 get_input() {
-  "$SCRIPT_DIR/fm-fleet-snapshot.sh" --contribution-input > "$TMP/input.json"
+  "$SCRIPT_DIR/fm-fleet-snapshot.sh" --contribution-input > "$TMP/input.json" \
+    || fail 'canonical contribution input unavailable'
 }
 
 project() {
