@@ -1259,6 +1259,95 @@ beads_sync_fixture() {
   printf '%s %s\n' "$fakebin" "$dir/control"
 }
 
+# beads_sync_publisher_fixture <name>: a sync fixture whose PUBLISHER is a stub
+# under the test's own control, so the sweep's delegation, relay, and bounding
+# can be driven precisely without the real publisher's own steps. Prints
+# "<fakebin> <control> <stub>". Control files:
+#   backup.argv    every argv the stub publisher saw (written by the stub)
+#   backup.lines   the BEADS_BACKUP: lines it prints (default: one verified line)
+#   backup.rc      exit status it returns (default 0)
+#   backup.sleep   seconds it hangs before answering (default 0)
+beads_sync_publisher_fixture() {
+  local dir="$TMP_ROOT/$1" fakebin stub
+  mkdir -p "$dir"
+  fakebin=$(fm_fakebin "$dir")
+  add_beads_task_mock_sync "$fakebin" "$dir/control"
+  printf '%s' '[{"name":"mini1"}]' > "$dir/control/remotes.json"
+  stub="$dir/fm-beads-remote-backup.sh"
+  cat > "$stub" <<SH
+#!/usr/bin/env bash
+set -u
+control="$dir/control"
+printf '%s\n' "\$*" >> "\$control/backup.argv"
+hang=\$(cat "\$control/backup.sleep" 2>/dev/null || printf '%s' 0)
+[ "\$hang" = 0 ] || sleep "\$hang"
+cat "\$control/backup.lines" 2>/dev/null || true
+exit "\$(cat "\$control/backup.rc" 2>/dev/null || printf '%s' 0)"
+SH
+  chmod +x "$stub"
+  printf 'BEADS_BACKUP: pushed-verified: %s\n' \
+    "'mini1' now shares local main (aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa)" > "$dir/control/backup.lines"
+  printf '%s %s %s\n' "$fakebin" "$dir/control" "$stub"
+}
+
+# beads_sync_publisher_end_to_end_fixture <name>: the same shape, but the sweep
+# keeps its REAL publisher (bin/fm-beads-remote-backup.sh) and only the store
+# CLI and the reachability probe are faked. This is what proves the actual
+# wiring rather than a stub's imitation of it. Prints "<fakebin> <control>".
+# Extra control files beyond add_beads_task_mock_sync's:
+#   argv.log      every argv the fake task CLI saw (written by the fake)
+#   remotes.txt   `task dolt remote list` output (default: the approved entry)
+#   push.rc / fetch.rc / commit.rc   exit statuses (default 0)
+#   local.hash / remote.hash   what the two head reads answer
+#   curl.code     HTTP code the reachability probe sees (default 401)
+beads_sync_publisher_end_to_end_fixture() {
+  local dir="$TMP_ROOT/$1" fakebin
+  mkdir -p "$dir"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/control"
+  printf '%s' '[{"name":"mini1"}]' > "$dir/control/remotes.json"
+  cat > "$fakebin/task" <<SH
+#!/usr/bin/env bash
+set -u
+control="$dir/control"
+printf '%s\n' "\$*" >> "\$control/argv.log"
+read_control() { # <file> <default>
+  if [ -f "\$control/\$1" ]; then cat "\$control/\$1"; else printf '%s' "\$2"; fi
+}
+case "\${1:-} \${2:-}" in
+  'dolt remote')
+    if [ "\${4:-}" = --json ]; then printf '%s\n' '[{"name":"mini1"}]'; exit 0; fi
+    read_control remotes.txt 'mini1                http://100.102.238.78:3310/tasks'; exit 0 ;;
+  'dolt remote add') printf 'added'; exit 0 ;;
+  'dolt commit') read_control commit.out ''; exit "\$(read_control commit.rc 0)" ;;
+esac
+if [ "\${1:-}" = sql ]; then
+  case "\${2:-}" in
+    'select 1') exit 0 ;;
+    'call dolt_push'*) exit "\$(read_control push.rc 0)" ;;
+    'call dolt_fetch'*) exit "\$(read_control fetch.rc 0)" ;;
+    # The real store keeps the remote-tracking branch in dolt_remote_branches
+    # and answers zero rows for it out of dolt_branches; reproducing that here
+    # is what makes the separation real rather than incidental.
+    *dolt_remote_branches*) read_control remote.hash 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'; exit 0 ;;
+    *"remotes/"*) printf '(0 rows)\n'; exit 0 ;;
+    *"where name='main'"*) read_control local.hash 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'; exit 0 ;;
+  esac
+  exit 1
+fi
+exit 1
+SH
+  chmod +x "$fakebin/task"
+  cat > "$fakebin/curl" <<SH
+#!/usr/bin/env bash
+control="$dir/control"
+if [ -f "\$control/curl.code" ]; then cat "\$control/curl.code"; else printf '%s' 401; fi
+exit 0
+SH
+  chmod +x "$fakebin/curl"
+  printf '%s %s\n' "$fakebin" "$dir/control"
+}
+
 # Test: fm_beads_store_reachable() decides purely on whether the CLI answers a
 # read. It must never infer a store from the filesystem: the `task` wrapper pins
 # BEADS_DIR for the whole federation, so a home with no local .beads/ directory
@@ -1547,182 +1636,263 @@ test_beads_sync_names_a_clock_it_cannot_read() {
   pass "fm_beads_sync_once names a clock it cannot read instead of bounding against it"
 }
 
-# Test: a genuine commit failure is reported. The default auto-commit policy is
-# off, so a failed commit leaves this home's writes in the Dolt working set;
-# swallowing it would let the push line announce success over exactly the
-# durability gap routine sync exists to close.
-test_beads_sync_reports_a_genuine_commit_failure() {
-  local fakebin control out
-  read -r fakebin control <<< "$(beads_sync_fixture sync-commit-fails)"
-  printf '%s' '[{"name":"origin"}]' > "$control/remotes.json"
-  printf '1' > "$control/commit.rc"
-  printf 'error: cannot commit: schema skew detected\n' > "$control/commit.out"
+# Test: the remote leg is DELEGATED, not reimplemented. The store has no Dolt
+# `origin` and the client holds no mesh credential, so the sweep must never
+# issue its own `task dolt push`/`pull`; it hands the whole leg to the approved
+# publisher and relays that publisher's outcomes instead. This asserts the
+# delegation, the relay, and the absence of every client-side Dolt remote
+# command in one pass, because a sweep that pushed by itself would still pass a
+# relay-only assertion.
+test_beads_sync_delegates_the_remote_leg_and_relays_every_outcome() {
+  local fakebin control stub out
+  read -r fakebin control stub <<< "$(beads_sync_publisher_fixture sync-delegates)"
+  printf '%s\n' \
+    "BEADS_BACKUP: repaired: re-added the 'mini1' Dolt remote (http://100.102.238.78:3310/tasks)" \
+    "BEADS_BACKUP: pushed-verified: 'mini1' now shares local main (aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa)" \
+    > "$control/backup.lines"
 
-  if out=$(PATH="$fakebin:$PATH" fm_beads_sync_once 2>&1); then
-    fail "a genuine commit failure was reported as a successful sync, got: $out"
+  out=$(PATH="$fakebin:$PATH" FM_BEADS_SYNC_BACKUP_BIN="$stub" fm_beads_sync_once 2>&1) ||
+    fail "a healthy delegated sync must succeed, got: $out"
+  case "$out" in
+    *"BEADS_SYNC: pushed-verified: 'mini1' now shares local main (aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa)"*) ;;
+    *) fail "the publisher's terminal outcome was not relayed, got: $out" ;;
+  esac
+  case "$out" in
+    *"BEADS_SYNC: repaired: re-added the 'mini1' Dolt remote"*) ;;
+    *) fail "only some of the publisher's outcomes were relayed, got: $out" ;;
+  esac
+  case "$out" in
+    *'BEADS_BACKUP:'*) fail "the publisher's own prefix leaked into the sweep's vocabulary, got: $out" ;;
+  esac
+  [ "$(cat "$control/backup.argv")" = "--repair" ] ||
+    fail "the sweep did not delegate to the publisher's --repair mode, got: $(cat "$control/backup.argv")"
+  grep -Fxq 'dolt push' "$control/calls.log" &&
+    fail "the sweep issued a client-side bare 'task dolt push' on the default remote"
+  grep -Fxq 'dolt pull' "$control/calls.log" &&
+    fail "the sweep issued a client-side bare 'task dolt pull' from the default remote"
+  grep -Fq 'dolt commit' "$control/calls.log" &&
+    fail "the sweep committed outside the approved publisher"
+  pass "fm_beads_sync_once delegates its whole remote leg to the approved publisher and relays its outcomes"
+}
+
+# Test: the dropped pull leg is reported out loud, not silently absent. A reader
+# who remembers the old commit/push/pull shape - and the agent handling the
+# bootstrap diagnostic - must be able to tell an intentional removal from a step
+# that quietly stopped running.
+test_beads_sync_reports_the_dropped_pull_leg() {
+  local fakebin control stub out
+  read -r fakebin control stub <<< "$(beads_sync_publisher_fixture sync-pull-dropped)"
+
+  out=$(PATH="$fakebin:$PATH" FM_BEADS_SYNC_BACKUP_BIN="$stub" fm_beads_sync_once 2>&1) ||
+    fail "a healthy delegated sync must succeed, got: $out"
+  case "$out" in
+    *'BEADS_SYNC: pull dropped:'*) ;;
+    *) fail "the sweep dropped its pull leg without saying so, got: $out" ;;
+  esac
+  case "$out" in
+    *'single write authority'*) ;;
+    *) fail "the dropped-pull line did not name why the leg is gone, got: $out" ;;
+  esac
+  pass "fm_beads_sync_once reports its dropped pull leg instead of removing it silently"
+}
+
+# Test: a failing publisher is relayed AND propagated. Best-effort means the
+# caller continues, never that a failure is swallowed, so the named outcome must
+# reach the output and the exit status must reach the caller.
+test_beads_sync_relays_a_failing_publisher_and_propagates_its_status() {
+  local fakebin control stub out
+  read -r fakebin control stub <<< "$(beads_sync_publisher_fixture sync-push-fails)"
+  printf '%s\n' \
+    "BEADS_BACKUP: commit-failed: 'task dolt commit' exited non-zero; continuing to push previously committed work: schema skew detected" \
+    "BEADS_BACKUP: push-failed: 'dolt_push' to 'mini1' failed: transport down" \
+    > "$control/backup.lines"
+  printf '1' > "$control/backup.rc"
+
+  if out=$(PATH="$fakebin:$PATH" FM_BEADS_SYNC_BACKUP_BIN="$stub" fm_beads_sync_once 2>&1); then
+    fail "a failed publisher was reported as a successful sync, got: $out"
   fi
   case "$out" in
-    *'commit failed'*) ;;
-    *) fail "sync did not report the failing commit, got: $out" ;;
+    *'BEADS_SYNC: push-failed:'*) ;;
+    *) fail "sync did not relay the publisher's failure, got: $out" ;;
   esac
   case "$out" in
-    *'schema skew detected'*) ;;
-    *) fail "the commit failure did not carry the CLI's own reason, got: $out" ;;
+    *'transport down'*) ;;
+    *) fail "the relayed failure did not carry the publisher's own reason, got: $out" ;;
   esac
-  assert_grep "dolt push" "$control/calls.log" \
-    "a failed commit abandoned the push instead of degrading best-effort"
-  pass "fm_beads_sync_once reports a genuine commit failure instead of calling the sweep a success"
+  case "$out" in
+    *'BEADS_SYNC: commit-failed:'*) ;;
+    *) fail "sync dropped an earlier publisher outcome, got: $out" ;;
+  esac
+  pass "fm_beads_sync_once relays a failing publisher and never calls the sweep a success"
 }
 
-# Test: the other side of that separation. A clean working set is a success:
-# `task dolt commit` prints that it found nothing and exits 0, so the routine
-# sweep must stay silent rather than crying wolf on every session that wrote
-# nothing. The fixture, not this test's prose, is what fixes that contract.
-test_beads_sync_treats_a_clean_working_set_as_nothing_to_do() {
-  local fakebin control out
-  read -r fakebin control <<< "$(beads_sync_fixture sync-commit-clean)"
-  printf '%s' '[{"name":"origin"}]' > "$control/remotes.json"
-  printf '0' > "$control/commit.rc"
-  printf 'Nothing to commit.\n' > "$control/commit.out"
+# Test: a publisher that fails WITHOUT printing an outcome still gets exactly one
+# bounded line. Silence here would be the worst case - a remote leg that failed
+# and said nothing - so the sweep synthesizes a diagnostic from the exit status
+# rather than letting an empty output read like a clean run.
+test_beads_sync_names_a_publisher_that_produced_no_outcome() {
+  local fakebin control stub out
+  read -r fakebin control stub <<< "$(beads_sync_publisher_fixture sync-publisher-silent)"
+  : > "$control/backup.lines"
+  printf '127' > "$control/backup.rc"
 
-  out=$(PATH="$fakebin:$PATH" fm_beads_sync_once 2>&1) ||
-    fail "a clean working set was reported as a sync failure, got: $out"
-  case "$out" in
-    *'BEADS_SYNC: commit'*) fail "a clean working set was reported at all, got: $out" ;;
-  esac
-  case "$out" in
-    *'pushed local commits'*) ;;
-    *) fail "sync stopped short of the push after a clean working set, got: $out" ;;
-  esac
-  pass "fm_beads_sync_once treats a clean working set as nothing to do, not as a failure"
-}
-
-# Test: the exit status alone decides, and the CLI's wording never does. A
-# commit that fails while printing the clean-working-set sentence is still a
-# failure, because the writes it did not commit are still stranded in the Dolt
-# working set. Matching on that wording is how a real durability gap would be
-# swallowed as routine quiet, and it is the exact bug this asserts against.
-test_beads_sync_classifies_the_commit_on_exit_status_not_wording() {
-  local fakebin control out
-  read -r fakebin control <<< "$(beads_sync_fixture sync-commit-liar)"
-  printf '%s' '[{"name":"origin"}]' > "$control/remotes.json"
-  printf '1' > "$control/commit.rc"
-  printf 'Nothing to commit.\n' > "$control/commit.out"
-
-  if out=$(PATH="$fakebin:$PATH" fm_beads_sync_once 2>&1); then
-    fail "a non-zero commit was excused by its wording, got success: $out"
+  if out=$(PATH="$fakebin:$PATH" FM_BEADS_SYNC_BACKUP_BIN="$stub" fm_beads_sync_once 2>&1); then
+    fail "a publisher that failed silently was reported as a successful sync, got: $out"
   fi
   case "$out" in
-    *'commit failed'*) ;;
-    *) fail "sync excused a failing commit because of what it printed, got: $out" ;;
+    *"BEADS_SYNC: remote leg failed: 'fm-beads-remote-backup.sh' exited 127"*) ;;
+    *) fail "sync did not name the mute publisher and its status, got: $out" ;;
   esac
-  pass "fm_beads_sync_once classifies the commit on its exit status, never on its wording"
+  pass "fm_beads_sync_once names a publisher that failed without reporting an outcome"
 }
 
-# Test: the happy path commits, pushes, then pulls, in that order. Commit comes
-# first because the auto-commit policy leaves writes in the working set, and
-# push comes before pull because durability is the gap being closed.
-test_beads_sync_commits_pushes_then_pulls() {
-  local fakebin control out sequence
-  read -r fakebin control <<< "$(beads_sync_fixture sync-success)"
-  printf '%s' '[{"name":"origin"}]' > "$control/remotes.json"
-
-  out=$(PATH="$fakebin:$PATH" fm_beads_sync_once 2>&1) ||
-    fail "a fully healthy sync must succeed, got: $out"
-  case "$out" in
-    *'pushed local commits'*) ;;
-    *) fail "sync did not report the push, got: $out" ;;
-  esac
-  case "$out" in
-    *'pulled remote commits'*) ;;
-    *) fail "sync did not report the pull, got: $out" ;;
-  esac
-  sequence=$(grep -o 'dolt [a-z]*' "$control/calls.log" | tr '\n' ' ')
-  [ "$sequence" = 'dolt remote dolt commit dolt push dolt pull ' ] ||
-    fail "sync ran the wrong order of Dolt steps, got: $sequence"
-  pass "fm_beads_sync_once commits, then pushes, then pulls against a configured remote"
-}
-
-# Test: a failing push degrades best-effort - it is reported, the pull still
-# runs, and the caller gets a non-zero status to report as a diagnostic. Sync is
-# a background convenience, so one broken step must neither abandon the rest of
-# the sweep nor be silently swallowed.
-test_beads_sync_failure_degrades_best_effort() {
+# Test: an unresolvable publisher is its own named skip, not a bare 127 from the
+# bounded runner. firstmate must never conclude the remote is fine because the
+# helper that talks to it was missing from the code root.
+test_beads_sync_reports_a_missing_publisher() {
   local fakebin control out
-  read -r fakebin control <<< "$(beads_sync_fixture sync-push-fails)"
-  printf '%s' '[{"name":"origin"}]' > "$control/remotes.json"
-  printf '1' > "$control/push.rc"
+  read -r fakebin control <<< "$(beads_sync_fixture sync-publisher-missing)"
+  printf '%s' '[{"name":"mini1"}]' > "$control/remotes.json"
 
-  if out=$(PATH="$fakebin:$PATH" fm_beads_sync_once 2>&1); then
-    fail "a failed push must be reported as a failure, got success: $out"
+  if out=$(PATH="$fakebin:$PATH" FM_BEADS_SYNC_BACKUP_BIN="$TMP_ROOT/definitely-absent-publisher.sh" \
+    fm_beads_sync_once 2>&1); then
+    fail "a missing publisher was reported as a successful sync, got: $out"
   fi
   case "$out" in
-    *'push failed'*) ;;
-    *) fail "sync did not name the failing step, got: $out" ;;
+    *'the approved Dolt publisher is not executable at'*) ;;
+    *) fail "sync did not name the missing publisher, got: $out" ;;
   esac
-  assert_grep "dolt pull" "$control/calls.log" \
-    "a failed push abandoned the pull instead of degrading best-effort"
-  pass "fm_beads_sync_once reports a failed push, keeps going, and never swallows the failure"
+  assert_no_grep 'dolt push' "$control/calls.log" \
+    "sync pushed without the approved publisher that owns the credential path"
+  pass "fm_beads_sync_once names a missing approved publisher instead of guessing at a remote"
 }
 
-# Test: a hanging remote is bounded, so sync can never wedge the session start
-# sweep that calls it. The bound is the reason sync is safe to run routinely.
-test_beads_sync_bounds_a_hanging_remote() {
-  local fakebin control out started elapsed
-  read -r fakebin control <<< "$(beads_sync_fixture sync-hangs)"
-  printf '%s' '[{"name":"origin"}]' > "$control/remotes.json"
-  printf '30' > "$control/push.sleep"
+# Test: a hanging publisher is bounded, so the remote leg can never wedge the
+# session-start sweep that calls it. The bound is the reason the delegation is
+# safe to run routinely.
+test_beads_sync_bounds_a_hanging_publisher() {
+  local fakebin control stub out started elapsed
+  read -r fakebin control stub <<< "$(beads_sync_publisher_fixture sync-hangs)"
+  printf '%s' '30' > "$control/backup.sleep"
 
   started=$(date +%s)
-  if out=$(PATH="$fakebin:$PATH" FM_BEADS_SYNC_TIMEOUT=1 fm_beads_sync_once 2>&1); then
-    fail "a timed-out push must be reported as a failure, got success: $out"
+  if out=$(PATH="$fakebin:$PATH" FM_BEADS_SYNC_BACKUP_BIN="$stub" FM_BEADS_SYNC_TIMEOUT=1 \
+    fm_beads_sync_once 2>&1); then
+    fail "a timed-out remote leg must be reported as a failure, got success: $out"
   fi
   elapsed=$(( $(date +%s) - started ))
   case "$out" in
-    *'timed out after 1s'*) ;;
+    *'remote leg failed: timed out after 1s'*) ;;
     *) fail "sync did not report the bound being hit, got: $out" ;;
   esac
   [ "$elapsed" -lt 15 ] ||
-    fail "sync waited ${elapsed}s on a hanging remote instead of honouring its bound"
-  pass "fm_beads_sync_once bounds a hanging remote so it cannot wedge the sweep that calls it"
+    fail "sync waited ${elapsed}s on a hanging publisher instead of honouring its bound"
+  pass "fm_beads_sync_once bounds a hanging publisher so it cannot wedge the sweep that calls it"
 }
 
-# Test: the bound that matters to the caller is the one on the WHOLE sweep. Three
-# per-step bounds can sum to three times the caller's own budget, so a blackholed
-# remote could starve every other sweep sharing it. Here the per-step bound is
-# generous and the sweep budget is small: the first slow step consumes it, and
-# the remaining steps must be reported skipped rather than started.
-test_beads_sync_bounds_the_whole_sweep_not_each_step() {
-  local fakebin control out started elapsed
-  read -r fakebin control <<< "$(beads_sync_fixture sync-budget)"
-  printf '%s' '[{"name":"origin"}]' > "$control/remotes.json"
-  printf '30' > "$control/commit.sleep"
+# Test: the bound that matters is the one on the WHOLE sweep, not the generous
+# per-step one. A blackholed remote must not be able to spend the per-step bound
+# three times over and starve every other sweep sharing the caller's budget, so
+# the remote leg is given whatever remains of the sweep budget and nothing more.
+test_beads_sync_takes_the_leg_bound_from_the_sweep_budget_not_the_per_step_bound() {
+  local fakebin control stub out started elapsed
+  read -r fakebin control stub <<< "$(beads_sync_publisher_fixture sync-budget)"
+  printf '%s' '30' > "$control/backup.sleep"
 
   started=$(date +%s)
-  if out=$(PATH="$fakebin:$PATH" FM_BEADS_SYNC_TIMEOUT=45 FM_BEADS_SYNC_BUDGET=2 \
-    fm_beads_sync_once 2>&1); then
+  if out=$(PATH="$fakebin:$PATH" FM_BEADS_SYNC_BACKUP_BIN="$stub" FM_BEADS_SYNC_TIMEOUT=45 \
+    FM_BEADS_SYNC_BUDGET=2 fm_beads_sync_once 2>&1); then
     fail "a sweep that spent its whole budget must be reported as a failure, got: $out"
   fi
   elapsed=$(( $(date +%s) - started ))
   [ "$elapsed" -lt 15 ] ||
-    fail "the sweep ran ${elapsed}s against a 2s budget, so only the per-step bound applied"
+    fail "the remote leg ran ${elapsed}s against a 2s sweep budget, so only the per-step bound applied"
+  # The bound is whatever remained of the 2s sweep budget when the leg started,
+  # so it is 2s or 1s depending on where the second boundary fell - never the 45s
+  # per-step bound, which is what the elapsed assertion below proves.
   case "$out" in
-    *'push skipped: the 2s sync budget was spent'*) ;;
-    *) fail "sync did not report the push skipped for a spent sweep budget, got: $out" ;;
+    *'remote leg failed: timed out after 1s'* | *'remote leg failed: timed out after 2s'*) ;;
+    *) fail "sync did not report the sweep budget as the leg's bound, got: $out" ;;
   esac
-  case "$out" in
-    *'pull skipped: the 2s sync budget was spent'*) ;;
-    *) fail "sync did not report the pull skipped for a spent sweep budget, got: $out" ;;
-  esac
-  if grep -q 'dolt push' "$control/calls.log"; then
-    fail "sync started a push it had no budget left to run"
-  fi
-  pass "fm_beads_sync_once bounds the whole sweep, not merely each step within it"
+  pass "fm_beads_sync_once bounds the remote leg by the sweep budget, not by the per-step bound"
 }
 
-# Test: the budget covers the sweep's FIRST command, not merely the three steps
+# Test: a budget already spent at entry is reported on its own line rather than
+# silently skipping the leg. A caller that hands over a deadline it has already
+# used up must get a diagnostic, not an empty success that reads like a sync.
+test_beads_sync_reports_a_budget_already_spent_at_entry() {
+  local fakebin control stub out
+  read -r fakebin control stub <<< "$(beads_sync_publisher_fixture sync-budget-spent)"
+
+  if out=$(PATH="$fakebin:$PATH" FM_BEADS_SYNC_BACKUP_BIN="$stub" FM_BEADS_SYNC_BUDGET=40 \
+    fm_beads_sync_once "$(( $(date +%s) - 5 ))" 2>&1); then
+    fail "a sweep with no budget left was reported as success, got: $out"
+  fi
+  case "$out" in
+    *'sync budget was spent before the Dolt remote list could be read'*) ;;
+    *) fail "sync did not report the exhausted budget, got: $out" ;;
+  esac
+  assert_absent "$control/backup.argv" \
+    "sync delegated to the publisher with no budget left to run it"
+  pass "fm_beads_sync_once reports a budget already spent instead of skipping the leg silently"
+}
+
+# Test: the real end-to-end wiring. This one deliberately uses NO override, so
+# the sweep resolves bin/fm-beads-remote-backup.sh as its publisher, and it
+# drives that real script against a fake task CLI and a fake curl. It asserts the
+# two facts the whole task exists for: the approved remote is the one named, and
+# no client-side bare push or pull ever reaches the store's CLI.
+test_beads_sync_drives_the_real_publisher_to_the_approved_remote() {
+  local fakebin control out
+  read -r fakebin control <<< "$(beads_sync_publisher_end_to_end_fixture sync-approved-remote)"
+
+  out=$(PATH="$fakebin:$PATH" fm_beads_sync_once 2>&1) ||
+    fail "the real publisher against a healthy fixture must succeed, got: $out"
+  case "$out" in
+    *"BEADS_SYNC: pushed-verified: 'mini1' now shares local main (aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa)"*) ;;
+    *) fail "the real publisher's verified outcome was not relayed, got: $out" ;;
+  esac
+  grep -Fq "call dolt_push('mini1','main','--user','brainsync')" "$control/argv.log" ||
+    fail "the approved remote was not named explicitly on the server-side push, got: $(cat "$control/argv.log")"
+  grep -Fq "call dolt_fetch('mini1','main','--user','brainsync')" "$control/argv.log" ||
+    fail "head equality was not verified by a post-push fetch, got: $(cat "$control/argv.log")"
+  grep -Fxq 'dolt push' "$control/argv.log" &&
+    fail "a client-side bare 'task dolt push' reached the store's CLI"
+  grep -Fxq 'dolt pull' "$control/argv.log" &&
+    fail "a client-side bare 'task dolt pull' reached the store's CLI"
+  grep -Fq -- '--force' "$control/argv.log" &&
+    fail "the sync reached for a force operation"
+  pass "fm_beads_sync_once drives the approved publisher, which names mini1 explicitly and never uses the default remote"
+}
+
+# Test: head equality is verified and divergence is REPORTED, never reconciled
+# by force. The local store is the single write authority, so a remote that
+# disagrees is an operator decision; every automatic answer to it (force-push,
+# overwrite, reset) would discard history.
+test_beads_sync_surfaces_publisher_divergence_without_force_pushing() {
+  local fakebin control out
+  read -r fakebin control <<< "$(beads_sync_publisher_end_to_end_fixture sync-diverged)"
+  printf '%s' 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' > "$control/remote.hash"
+
+  if out=$(PATH="$fakebin:$PATH" fm_beads_sync_once 2>&1); then
+    fail "diverged heads were reported as a successful sync, got: $out"
+  fi
+  case "$out" in
+    *"BEADS_SYNC: diverged: 'mini1' main (bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb) differs from local main (aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa)"*) ;;
+    *) fail "sync did not report the divergence for an operator, got: $out" ;;
+  esac
+  case "$out" in
+    *'never a force-push'*) ;;
+    *) fail "the divergence line did not refuse the force-push, got: $out" ;;
+  esac
+  grep -Fq -- '--force' "$control/argv.log" &&
+    fail "the sync tried to reconcile diverged heads with a force"
+  pass "fm_beads_sync_once reports diverged heads for an operator and never force-pushes"
+}
+
+# Test: the budget covers the sweep's FIRST command, not merely the remote leg
 # it names. A Dolt server that accepts the connection and then never answers
-# hangs the remote listing, which runs before any step does, so leaving that
+# hangs the remote listing, which runs before the leg does, so leaving that
 # probe outside the budget lets the sweep spend unbounded wall clock without a
 # single bounded step running and without any diagnostic at all - the budget
 # would be a claim rather than a bound.
@@ -1749,7 +1919,10 @@ test_beads_sync_bounds_the_probe_that_precedes_its_steps() {
       fail "a listing that never answered was reported as a home that has no remote: $out" ;;
   esac
   if grep -q 'dolt commit' "$control/calls.log"; then
-    fail "sync started its steps after a remote listing it never got an answer from"
+    fail "sync committed after a remote listing it never got an answer from"
+  fi
+  if [ -e "$control/backup.argv" ]; then
+    fail "sync delegated to the publisher after a remote listing it never got an answer from"
   fi
   pass "fm_beads_sync_once bounds the probe that precedes its steps, not only the steps"
 }
@@ -1877,13 +2050,16 @@ test_beads_bootstrap_verifies_rather_than_trusting_exit_status
 test_beads_sync_is_inert_without_a_configured_remote
 test_beads_sync_separates_an_unreadable_remote_list_from_an_empty_one
 test_beads_sync_reports_a_missing_jq_rather_than_assuming_no_remote
-test_beads_sync_reports_a_genuine_commit_failure
-test_beads_sync_treats_a_clean_working_set_as_nothing_to_do
-test_beads_sync_classifies_the_commit_on_exit_status_not_wording
-test_beads_sync_commits_pushes_then_pulls
-test_beads_sync_failure_degrades_best_effort
-test_beads_sync_bounds_a_hanging_remote
-test_beads_sync_bounds_the_whole_sweep_not_each_step
+test_beads_sync_delegates_the_remote_leg_and_relays_every_outcome
+test_beads_sync_reports_the_dropped_pull_leg
+test_beads_sync_relays_a_failing_publisher_and_propagates_its_status
+test_beads_sync_names_a_publisher_that_produced_no_outcome
+test_beads_sync_reports_a_missing_publisher
+test_beads_sync_bounds_a_hanging_publisher
+test_beads_sync_takes_the_leg_bound_from_the_sweep_budget_not_the_per_step_bound
+test_beads_sync_reports_a_budget_already_spent_at_entry
+test_beads_sync_drives_the_real_publisher_to_the_approved_remote
+test_beads_sync_surfaces_publisher_divergence_without_force_pushing
 test_beads_sync_bounds_the_probe_that_precedes_its_steps
 test_beads_sync_remote_state_timeout_lib_absent_is_unreadable
 test_beads_sync_once_timeout_lib_absent_emits_diagnostic

@@ -40,11 +40,13 @@ Use option A, a Dolt remote on a private git remote that the captain designates,
 
 The destination is the captain's decision: since 2026-09-06 that is mini1, reached over Tailscale at the `mini1` Dolt remote, and the local store remains the single write authority with sync as a durability step.
 Adding a Dolt remote publishes the task store to that destination, and the store carries the fleet's own working notes, so firstmate does not choose where that lands.
-The routine sync sweep pushes to the configured remote when it answers and names the single-machine posture out loud only when no remote is configured.
+The routine sync sweep pushes to the approved `mini1` remote through [`bin/fm-beads-remote-backup.sh`](../bin/fm-beads-remote-backup.sh) rather than driving Dolt itself, and names the single-machine posture out loud only when no remote is configured at all.
+That delegation is what keeps the destination and the credential path in one place: a client-side `task dolt push` cannot reach the approved copy, both because the store has no Dolt `origin` and because the client holds no mesh credential, while the publisher pushes through the Dolt server's own environment.
+The sweep has no client-side pull leg; the publisher's post-push fetch is the verification, and the local store stays the single write authority.
 
 The captain answered the one open question, which git remote should hold the fleet's task data, by designating mini1.
 A private repository the captain already owned was the expected hosted answer, and a self-hosted or LAN-only Dolt remote was the equally workable alternative where publishing to a hosted forge was unwanted.
-The approved mini1 copy is kept healthy by [`bin/fm-beads-remote-backup.sh`](../bin/fm-beads-remote-backup.sh), which re-verifies and repairs the wiring (remote present, push works, permissions private) and is suitable for the routine sync sweep to call; that script's header owns its exact contract.
+The approved mini1 copy is kept healthy by [`bin/fm-beads-remote-backup.sh`](../bin/fm-beads-remote-backup.sh), which re-verifies and repairs the wiring (remote present, push works, permissions private) and is the publisher the routine sync sweep delegates its remote leg to; that script's header owns its exact contract and its outcome vocabulary.
 
 ## Provisioning a machine that has no store
 

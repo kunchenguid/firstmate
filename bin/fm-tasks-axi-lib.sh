@@ -346,29 +346,81 @@ fm_beads_require_lock_lib() {
   _FM_BEADS_LOCK_LIB_LOADED=1
 }
 
-# fm_beads_sync_once - best-effort commit, push, then pull against the
-# configured Dolt remote, printing one BEADS_SYNC: line per outcome.
+# fm_beads_sync_backup_bin - the approved Dolt publisher this sweep delegates
+# its remote leg to.
 #
-# BEST-EFFORT IS THE CONTRACT, NOT A WEAKNESS. Every step is hard-bounded by
-# fm_run_timed (exit 124 means the bound was hit), the three steps together are
-# bounded by FM_BEADS_SYNC_BUDGET, and every failure is a reported diagnostic,
-# so an unreachable remote, a stalled network, or a broken Dolt server degrades
-# to a printed line and never wedges the caller or eats a budget it shares. The
+# There is exactly one destination, one credential path, and one head test, and
+# they live in bin/fm-beads-remote-backup.sh alone: the remote name, its URL, and
+# the mesh user are resolved inside that script, so the routine sweep holds no
+# second definition of them that could drift away from the approved copy.
+#
+# FM_BEADS_SYNC_BACKUP_BIN overrides the path for tests and for a home that pins
+# a different publisher; it is this sweep's own knob, deliberately distinct from
+# the publisher's own FM_BEADS_BACKUP_* environment.
+#
+# A path that cannot be resolved is reported by the caller rather than guessed at,
+# because silently skipping the remote leg is the failure this whole delegation
+# exists to end.
+#
+# The directory is resolved from this library's own location, the same way
+# fm_beads_require_timeout_lib resolves its sibling, so a partially-synced remote
+# code root cannot make the sweep reach for a publisher it does not have.
+fm_beads_sync_backup_bin() {
+  local lib_dir
+  if [ -n "${FM_BEADS_SYNC_BACKUP_BIN:-}" ]; then
+    printf '%s\n' "$FM_BEADS_SYNC_BACKUP_BIN"
+    return 0
+  fi
+  lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || return 1
+  printf '%s/fm-beads-remote-backup.sh\n' "$lib_dir"
+}
+
+# fm_beads_sync_once - best-effort commit, publish, and head verification
+# against the approved Dolt remote, printing one BEADS_SYNC: line per outcome.
+#
+# BEST-EFFORT IS THE CONTRACT, NOT A WEAKNESS. The remote leg is hard-bounded by
+# fm_run_timed (exit 124 means the bound was hit), the whole sweep by
+# FM_BEADS_SYNC_BUDGET, and every failure is a reported diagnostic, so an
+# unreachable remote, a stalled network, or a broken Dolt server degrades to a
+# printed line and never wedges the caller or eats a budget it shares. The
 # function returns non-zero only to tell the caller a step failed; the caller's
-# own work continues either way.
+# own work continues either way, and the non-zero status it returns is the
+# publisher's own: the sweep relays both, so no outcome is re-classified here.
 #
-# Order is commit, push, pull. The commit comes first because the default
-# `--dolt-auto-commit` policy is `off`, so a home's writes sit in the Dolt
-# working set and a push without it would publish nothing. Push precedes pull
-# because durability - getting this home's own commits off this machine - is
-# the gap being closed, and a pull failure must not prevent that.
+# THE REMOTE LEG IS DELEGATED, NEVER REIMPLEMENTED. A bare `task dolt push`
+# resolves to Dolt's implicit default remote (`origin`), which this store has
+# never had, so the sweep used to fail every session with `remote 'origin' not
+# found`. Naming the approved remote explicitly on the client side is not the fix
+# either: the client holds no mesh credential, so it fails with `root has not
+# been granted CLONE_ADMIN`. The only path that authenticates is the server-side
+# one bin/fm-beads-remote-backup.sh already uses, where the credential comes from
+# the Dolt server's own environment through
+# `call dolt_push('<remote>','main','--user','<mesh-user>')`. This sweep therefore
+# hands its whole remote leg to that publisher's --repair mode and relays its
+# BEADS_BACKUP: outcomes unchanged, so the routine path and the approved publisher
+# cannot disagree about the destination, the credential, or the head test.
+# firstmate never holds the mesh password, and no `origin` remote is ever added.
+#
+# The old client-side pull leg is deliberately GONE rather than reimplemented. It
+# carried the same authorization problem, and pulling remote commits into a store
+# documented as the single write authority is the direction the topology forbids.
+# The publisher's own post-push `dolt_fetch` is the fetch-only verification that
+# replaces it, and the sweep prints one explicit line saying so rather than
+# dropping the leg silently.
+#
+# Order is the publisher's: commit, push, then fetch-and-compare. The commit comes
+# first because the default `--dolt-auto-commit` policy is `off`, so a home's
+# writes sit in the Dolt working set and a push without it would publish nothing,
+# and durability - getting this home's own commits off this machine - is the gap
+# being closed.
 #
 # The deadline is established before the FIRST command runs, and the caller may
 # supply one it has already been spending against, so every probe and every step
 # the sweep runs is inside one budget rather than the budget covering only the
-# three steps it happens to name.
+# steps it happens to name.
 fm_beads_sync_once() { # [deadline epoch]
-  local rc=0 step_rc remote_state commit_out deadline bound now
+  local rc=0 step_rc remote_state deadline bound now
+  local backup_bin backup_name backup_out relayed line
   command -v task >/dev/null 2>&1 || {
     echo "BEADS_SYNC: skipped: task CLI not found"
     return 1
@@ -406,66 +458,63 @@ fm_beads_sync_once() { # [deadline epoch]
       ;;
   esac
 
-  # Each step captures its status with `|| step_rc=$?` rather than a bare call
-  # followed by `$?`, so a failing step is exempt from `set -e` no matter which
-  # caller sourced this library. Best-effort must not depend on the caller
+  # The publisher is resolved before the budget is spent on it, so a missing or
+  # non-executable publisher is one named line rather than a bare 127 from
+  # fm_run_timed that reads like the remote itself failed.
+  backup_bin=$(fm_beads_sync_backup_bin) || backup_bin=
+  if [ -z "$backup_bin" ] || [ ! -x "$backup_bin" ]; then
+    echo "BEADS_SYNC: skipped: the approved Dolt publisher is not executable at ${backup_bin:-<unresolved>}, so the remote leg cannot run"
+    return 1
+  fi
+  backup_name=${backup_bin##*/}
+
+  # One bounded call carries the whole remote leg, because that is what the
+  # publisher is: it commits the working set, pushes through the mesh user,
+  # fetches, and compares heads, reporting each of those as a BEADS_BACKUP:
+  # outcome. Its status is captured with `|| step_rc=$?` rather than a bare call
+  # followed by `$?`, so a failing publisher is exempt from `set -e` no matter
+  # which caller sourced this library. Best-effort must not depend on the caller
   # happening to invoke this function inside an `if` or a `|| true`.
-  #
-  # `task dolt commit` exits 0 whether it committed or found a clean working
-  # set, so the exit status alone separates success from failure and no vendor
-  # wording is parsed to decide it. A non-zero status means this home's writes
-  # are still sitting uncommitted in the Dolt working set, which is reported
-  # rather than swallowed: leaving it silent is what would let the push line
-  # below announce success over exactly that durability gap. Push still runs
-  # either way, since previously committed work may still be unpushed.
   if bound=$(fm_beads_sync_step_bound "$deadline"); then
     step_rc=0
-    commit_out=$(fm_run_timed "$bound" task dolt commit 2>&1) || step_rc=$?
+    backup_out=$(fm_run_timed "$bound" "$backup_bin" --repair 2>&1) || step_rc=$?
+
+    # Every publisher outcome becomes one BEADS_SYNC: line, with the payload
+    # carried verbatim: the publisher's header is the single owner of that
+    # vocabulary, so re-spelling it here would be the second copy that drifts.
+    # Output that is not a publisher outcome is never relayed line by line; it
+    # is folded into one bounded diagnostic below, so a broken publisher cannot
+    # flood a session-start digest.
+    relayed=0
+    while IFS= read -r line; do
+      case "$line" in
+        'BEADS_BACKUP: '*)
+          printf 'BEADS_SYNC: %s\n' "${line#BEADS_BACKUP: }"
+          relayed=1
+          ;;
+      esac
+    done <<< "$backup_out"
+
     if [ "$step_rc" -eq 124 ]; then
-      echo "BEADS_SYNC: commit failed: timed out after ${bound}s"
+      echo "BEADS_SYNC: remote leg failed: timed out after ${bound}s"
       rc=1
     elif [ "$step_rc" -ne 0 ]; then
-      echo "BEADS_SYNC: commit failed: 'task dolt commit' exited $step_rc: $(fm_beads_diag_line "$commit_out")"
       rc=1
+      if [ "$relayed" -eq 0 ]; then
+        echo "BEADS_SYNC: remote leg failed: '$backup_name' exited $step_rc: $(fm_beads_diag_line "$backup_out")"
+      fi
+    elif [ "$relayed" -eq 0 ]; then
+      echo "BEADS_SYNC: remote leg failed: '$backup_name' exited 0 without reporting an outcome"
     fi
   else
-    echo "BEADS_SYNC: commit skipped: the ${FM_BEADS_SYNC_BUDGET}s sync budget was spent"
+    echo "BEADS_SYNC: remote leg skipped: the ${FM_BEADS_SYNC_BUDGET}s sync budget was spent"
     rc=1
   fi
 
-  if bound=$(fm_beads_sync_step_bound "$deadline"); then
-    step_rc=0
-    fm_run_timed "$bound" task dolt push >/dev/null 2>&1 || step_rc=$?
-    if [ "$step_rc" -eq 0 ]; then
-      echo "BEADS_SYNC: pushed local commits to the configured Dolt remote"
-    elif [ "$step_rc" -eq 124 ]; then
-      echo "BEADS_SYNC: push failed: timed out after ${bound}s"
-      rc=1
-    else
-      echo "BEADS_SYNC: push failed: 'task dolt push' exited $step_rc"
-      rc=1
-    fi
-  else
-    echo "BEADS_SYNC: push skipped: the ${FM_BEADS_SYNC_BUDGET}s sync budget was spent"
-    rc=1
-  fi
-
-  if bound=$(fm_beads_sync_step_bound "$deadline"); then
-    step_rc=0
-    fm_run_timed "$bound" task dolt pull >/dev/null 2>&1 || step_rc=$?
-    if [ "$step_rc" -eq 0 ]; then
-      echo "BEADS_SYNC: pulled remote commits into the local store"
-    elif [ "$step_rc" -eq 124 ]; then
-      echo "BEADS_SYNC: pull failed: timed out after ${bound}s"
-      rc=1
-    else
-      echo "BEADS_SYNC: pull failed: 'task dolt pull' exited $step_rc"
-      rc=1
-    fi
-  else
-    echo "BEADS_SYNC: pull skipped: the ${FM_BEADS_SYNC_BUDGET}s sync budget was spent"
-    rc=1
-  fi
+  # The dropped pull leg is reported rather than silently absent: a reader who
+  # remembers the old commit/push/pull shape must be able to tell an intentional
+  # removal from a step that quietly stopped running.
+  echo "BEADS_SYNC: pull dropped: the approved publisher fetches to verify one shared head, and this store is the single write authority, so the sweep never pulls remote commits into it"
 
   return "$rc"
 }

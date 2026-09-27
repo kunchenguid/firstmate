@@ -112,17 +112,25 @@ Provisioning uses `bd bootstrap`, the non-destructive verb, and never `bd init -
 `bin/fm-tasks-axi-lib.sh`'s `fm_beads_bootstrap_store` additionally refuses to bootstrap whenever the store already answers a read, because bootstrap's own detection inspects the `.beads/` directory and reports a healthy Dolt server-mode store as absent, which would otherwise create a fresh empty database beside the live one.
 
 Routine sync is a mutating sweep in bootstrap's deferred network phase (beads backend only, real runs only), so it never sits on the blocking path of session start and a slow remote cannot delay a session.
-It runs `task dolt commit`, then `task dolt push`, then `task dolt pull`, in that order: commit first because bd's `--dolt-auto-commit` policy defaults to `off` and leaves writes in the Dolt working set, and push before pull because getting this home's own commits off the machine is the gap being closed.
-Each step is bounded by `FM_BEADS_SYNC_TIMEOUT` (default 45 seconds) and the whole sweep by `FM_BEADS_SYNC_BUDGET`, which the sweep sets to a third of the network stage's own `FM_STARTUP_NETWORK_TIMEOUT`; a step with no budget left is reported skipped rather than started.
-That budget starts before the sweep's first command, and the store-reachability read and the Dolt remote listing that precede the three steps run under it too, so a Dolt server that accepts a connection and never answers cannot spend more than the budget without a single bounded step having run.
-That sweep-wide bound is why the per-step bounds cannot sum past the stage budget and starve the other network sweeps, and it is also why beads sync runs last among them.
+It delegates its entire remote leg to [`bin/fm-beads-remote-backup.sh`](../bin/fm-beads-remote-backup.sh)'s `--repair` mode and relays that script's `BEADS_BACKUP:` outcomes as `BEADS_SYNC:` lines.
+Delegation, not reimplementation, is the point: a bare `task dolt push` resolves to Dolt's implicit default remote (`origin`), which this store has never had, and naming the approved remote explicitly on the client side does not fix it either because the client holds no mesh credential.
+The publisher is the only path that authenticates, through the Dolt server's own environment, and because the remote name, URL, and mesh user live there alone the routine sweep and the approved backup cannot disagree about the destination.
+Inside that one call the order is commit, then push, then fetch-and-compare: commit first because bd's `--dolt-auto-commit` policy defaults to `off` and leaves writes in the Dolt working set, and push before the head check because getting this home's own commits off the machine is the gap being closed.
+There is deliberately no client-side pull leg: it carried the same authorization problem, and pulling remote commits into a store documented as the single write authority is the direction the topology forbids.
+The publisher's own post-push `dolt_fetch` is the fetch-only verification that replaces it, and the sweep prints one explicit line saying so rather than dropping the leg silently.
+The whole remote leg is bounded by `FM_BEADS_SYNC_TIMEOUT` (default 45 seconds) and the whole sweep by `FM_BEADS_SYNC_BUDGET`, which the sweep sets to a third of the network stage's own `FM_STARTUP_NETWORK_TIMEOUT`; a leg with no budget left is reported skipped rather than started.
+That budget starts before the sweep's first command, and the store-reachability read and the Dolt remote listing that precede the remote leg run under it too, so a Dolt server that accepts a connection and never answers cannot spend more than the budget without a single bounded step having run.
+That sweep-wide bound is why the remote leg cannot sum past the stage budget and starve the other network sweeps, and it is also why beads sync runs last among them.
 The sweep runs at most once per `FM_BEADS_SYNC_MIN_INTERVAL` (default 900 seconds), stamped at `state/.beads-sync-last` when the sweep is attempted rather than when it succeeds, so a broken remote backs off instead of being retried by every session that starts.
 A store that does not answer skips the sweep entirely without stamping, because that outage is already reported by the local phase and syncing against it can accomplish nothing; sync then resumes on the first session after the store recovers.
-Sync is best-effort throughout: a failing step is reported as a `BEADS_SYNC:` line, the remaining steps still run, and bootstrap itself still succeeds, because an unreachable remote must never block dispatch.
-Best-effort never means silent, though. `task dolt commit` exits 0 whether it committed or found a clean working set, so any non-zero exit is reported as a commit failure on the exit status alone rather than on parsed vendor wording, and a push line can never announce success over writes that are still stranded uncommitted.
+Sync is best-effort throughout: a failing leg is reported as a `BEADS_SYNC:` line and bootstrap itself still succeeds, because an unreachable remote must never block dispatch.
+Best-effort never means silent, though. The publisher's commit step exits 0 whether it committed or found a clean working set, so any non-zero exit is reported as a commit failure on the exit status alone rather than on parsed vendor wording, and a verification line can never announce success over writes that are still stranded uncommitted.
 Likewise, a remote listing that cannot be read at all is reported as its own distinct skip rather than as the no-remote line below, since a home that is silently not syncing to a configured remote is the opposite of a home that has none.
 
-The approved Dolt remote is the captain's decision: since 2026-09-06 that is `mini1`, and [`bin/fm-beads-remote-backup.sh`](../bin/fm-beads-remote-backup.sh) owns the verify/repair contract the routine sync sweep calls; with none configured the sweep reports that the store is single-machine only and does nothing else.
+Homes that have no Dolt remote at all still report that the store is single-machine only and do nothing else.
+An approved remote that is configured but points somewhere else, or that does not answer, is reported as its own outcome rather than being overwritten or worked around, and a head that differs from the local one is reported for an operator and never force-pushed.
+
+The approved Dolt remote is the captain's decision: since 2026-09-06 that is `mini1`, and [`bin/fm-beads-remote-backup.sh`](../bin/fm-beads-remote-backup.sh) owns the verify/repair contract the routine sync sweep calls; its header is also the single owner of the `BEADS_BACKUP:` outcome vocabulary the sweep relays.
 [`docs/beads-sync-topology.md`](beads-sync-topology.md) owns that recommendation, its trade-offs, and the decision that enables off-machine durability.
 
 ### Beads resilience layer (state/.beads-mirror-*.json, state/.beads-write-queue)
@@ -709,8 +717,9 @@ FM_BOOTSTRAP_DETECT_ONLY=0   # internal/read-only session-start mode: skip boots
 FM_BOOTSTRAP_NETWORK=all   # internal session-start phase split: all, skip (local steps only), or only (network steps only); see bin/fm-bootstrap.sh
 FM_STARTUP_NETWORK_TIMEOUT=120   # seconds bounding the whole deferred network stage; hitting it prints an actionable NETWORK_CHECKS line
 FM_TASKS_AXI_COMPATIBLE=   # internal one-hop handoff of an already-computed tasks-axi compatibility verdict (0 or 1); consumed when bin/fm-tasks-axi-lib.sh is sourced
-FM_BEADS_SYNC_TIMEOUT=45   # beads backend only: seconds bounding each Dolt sync step, so an unreachable remote cannot stall the sweep
-FM_BEADS_SYNC_BUDGET=40   # beads backend only: seconds bounding the WHOLE sync sweep, probes included, so the per-step bounds cannot sum past the caller's own budget; the bootstrap sweep overrides it to a third of FM_STARTUP_NETWORK_TIMEOUT
+FM_BEADS_SYNC_TIMEOUT=45   # beads backend only: seconds bounding the Dolt remote leg, so an unreachable remote cannot stall the sweep
+FM_BEADS_SYNC_BUDGET=40   # beads backend only: seconds bounding the WHOLE sync sweep, probes included, so the leg cannot sum past the caller's own budget; the bootstrap sweep overrides it to a third of FM_STARTUP_NETWORK_TIMEOUT
+FM_BEADS_SYNC_BACKUP_BIN=/path/to/publisher.sh   # beads backend only: override the Dolt publisher the sweep delegates its remote leg to (default: bin/fm-beads-remote-backup.sh beside the library)
 FM_BEADS_SYNC_MIN_INTERVAL=900   # beads backend only: seconds between store sync sweeps, stamped at state/.beads-sync-last on attempt
 FM_GUARD_READ_ONLY=0    # internal/read-only guard mode: keep alarms but suppress drain, supervision repair, and checkout repair commands
 FM_GUARD_CONTINUE_LINE='This is a supervision warning only; the guarded operation WILL still run.'   # banner continuation line; fm-send.sh overrides it to name the requested message specifically
