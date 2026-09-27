@@ -2150,6 +2150,82 @@ EOF
   pass "Pi watcher arm distinguishes all session lock ownership states"
 }
 
+test_pi_descendant_load_preserves_exact_owner_markers() {
+  local repo prelock_home stale_home locked_home loader child_pid lock_pid dead_pid out status
+  repo="$TMP_ROOT/pi-marker-owner-root"
+  prelock_home="$TMP_ROOT/pi-marker-owner-prelock-home"
+  stale_home="$TMP_ROOT/pi-marker-owner-stale-home"
+  locked_home="$TMP_ROOT/pi-marker-owner-locked-home"
+  loader="$repo/load-primary-extensions.mjs"
+  mkdir -p "$prelock_home/state" "$stale_home/state" "$locked_home/state"
+  install_pi_watch_extension_fixture "$repo"
+  cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$repo/.pi/extensions/fm-primary-turnend-guard.ts"
+  cat > "$loader" <<'JS'
+import { writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const pi = {
+  on() {},
+  registerCommand() {},
+  registerTool() {},
+  sendUserMessage: async () => {},
+  events: { on() {} },
+};
+const turnend = await import(pathToFileURL(`${process.env.FM_ROOT_OVERRIDE}/.pi/extensions/fm-primary-turnend-guard.ts`).href);
+const watch = await import(pathToFileURL(`${process.env.FM_ROOT_OVERRIDE}/.pi/extensions/fm-primary-pi-watch.ts`).href);
+turnend.default(pi);
+watch.default(pi);
+writeFileSync(process.env.FM_CHILD_PID_FILE, `${process.pid}\n`);
+JS
+
+  out=$(FM_HOME="$prelock_home" FM_ROOT_OVERRIDE="$repo" \
+    FM_CHILD_PID_FILE="$prelock_home/child.pid" node "$loader" 2>&1)
+  status=$?
+  expect_code 0 "$status" "Pi primary extensions must publish their markers before the session lock exists"
+  [ -z "$out" ] || fail "Pi pre-lock marker publication printed output: $out"
+  child_pid=$(cat "$prelock_home/child.pid")
+  [ "$(sed -n '2p' "$prelock_home/state/.pi-turnend-extension-loaded")" = "$child_pid" ] \
+    || fail "Pi turn-end extension lost pre-lock marker publication"
+  [ "$(sed -n '2p' "$prelock_home/state/.pi-watch-extension-loaded")" = "$child_pid" ] \
+    || fail "Pi watcher extension lost pre-lock marker publication"
+
+  sleep 0 &
+  dead_pid=$!
+  wait "$dead_pid" 2>/dev/null || true
+  ! kill -0 "$dead_pid" 2>/dev/null || fail "stale lock fixture PID $dead_pid is still alive"
+  printf '%s\n' "$dead_pid" > "$stale_home/state/.lock"
+  printf 'old-turnend\n%s\n' "$dead_pid" > "$stale_home/state/.pi-turnend-extension-loaded"
+  printf 'old-watch\n%s\ngeneration=3 phase=active\n' "$dead_pid" > "$stale_home/state/.pi-watch-extension-loaded"
+  out=$(FM_HOME="$stale_home" FM_ROOT_OVERRIDE="$repo" \
+    FM_CHILD_PID_FILE="$stale_home/child.pid" node "$loader" 2>&1)
+  status=$?
+  expect_code 0 "$status" "Pi primary extensions must republish markers over a dead prior session lock"
+  [ -z "$out" ] || fail "Pi stale-lock marker publication printed output: $out"
+  child_pid=$(cat "$stale_home/child.pid")
+  [ "$(sed -n '2p' "$stale_home/state/.pi-turnend-extension-loaded")" = "$child_pid" ] \
+    || fail "Pi turn-end extension did not replace a dead prior owner marker"
+  [ "$(sed -n '2p' "$stale_home/state/.pi-watch-extension-loaded")" = "$child_pid" ] \
+    || fail "Pi watcher extension did not replace a dead prior owner marker"
+
+  lock_pid=$$
+  printf '%s\n' "$lock_pid" > "$locked_home/state/.lock"
+  printf 'owner-turnend\n%s\n' "$lock_pid" > "$locked_home/state/.pi-turnend-extension-loaded"
+  printf 'owner-watch\n%s\ngeneration=7 phase=active\n' "$lock_pid" > "$locked_home/state/.pi-watch-extension-loaded"
+  cp "$locked_home/state/.pi-turnend-extension-loaded" "$locked_home/expected-turnend"
+  cp "$locked_home/state/.pi-watch-extension-loaded" "$locked_home/expected-watch"
+
+  out=$(FM_HOME="$locked_home" FM_ROOT_OVERRIDE="$repo" \
+    FM_CHILD_PID_FILE="$locked_home/child.pid" node "$loader" 2>&1)
+  status=$?
+  expect_code 0 "$status" "a descendant Pi extension load must not replace exact lock-owner markers"
+  [ -z "$out" ] || fail "Pi descendant marker publication printed output: $out"
+  cmp -s "$locked_home/expected-turnend" "$locked_home/state/.pi-turnend-extension-loaded" \
+    || fail "Pi descendant replaced the exact turn-end extension owner marker"
+  cmp -s "$locked_home/expected-watch" "$locked_home/state/.pi-watch-extension-loaded" \
+    || fail "Pi descendant replaced the exact watcher extension owner marker"
+  pass "Pi primary extensions preserve exact lock-owner markers while retaining pre-lock and stale-lock publication"
+}
+
 test_pi_session_transition_generation_owner() {
   local repo home plugin child_pid_file child_marker_file marker_root arm_log fail_once out status
   repo="$TMP_ROOT/pi-session-transition-root"
@@ -4418,6 +4494,7 @@ test_pi_empty_close_retries_instead_of_disappearing
 test_pi_established_empty_close_honors_retry_limit
 test_pi_actionable_close_rechecks_session_lock
 test_pi_arm_distinguishes_session_lock_ownership
+test_pi_descendant_load_preserves_exact_owner_markers
 test_pi_session_transition_generation_owner
 test_pi_session_replacement_carries_inflight_actionable_close
 test_pi_streaming_followup_is_replayed_after_replacement
