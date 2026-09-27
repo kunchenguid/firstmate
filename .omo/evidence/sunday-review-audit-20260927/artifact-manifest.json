@@ -1,0 +1,110 @@
+[
+  {
+    "path": "/Users/irene/Developer/kunchenguid_repos/firstmate/.omo/evidence/sunday-review-audit-20260927/prior-report.json",
+    "bytes": 2970
+  },
+  {
+    "path": "/Users/irene/Developer/kunchenguid_repos/firstmate/.omo/evidence/sunday-review-audit-20260927/prior-coverage-instruction-surface.log",
+    "bytes": 35361
+  },
+  {
+    "path": "/Users/irene/Developer/kunchenguid_repos/firstmate/.omo/evidence/sunday-review-audit-20260927/REPORT.md",
+    "bytes": 5174
+  },
+  {
+    "path": "/Users/irene/Developer/kunchenguid_repos/firstmate/.omo/evidence/sunday-review-audit-20260927/historical-runs.json",
+    "bytes": 23119
+  },
+  {
+    "path": "/Users/irene/Developer/kunchenguid_repos/firstmate/.omo/evidence/sunday-review-audit-20260927/coordinator-source.txt",
+    "bytes": 14474
+  },
+  {
+    "path": "/Users/irene/Developer/kunchenguid_repos/firstmate/.omo/evidence/sunday-review-audit-20260927/git-status.txt",
+    "bytes": 1245
+  },
+  {
+    "path": "/Users/irene/Developer/kunchenguid_repos/firstmate/.omo/evidence/sunday-review-audit-20260927/prior-coverage-runtime.log",
+    "bytes": 174
+  },
+  {
+    "path": "/Users/irene/Developer/kunchenguid_repos/firstmate/.omo/evidence/sunday-review-audit-20260927/prior-coverage-manifest.log",
+    "bytes": 64
+  },
+  {
+    "path": "/Users/irene/Developer/kunchenguid_repos/firstmate/.omo/evidence/sunday-review-audit-20260927/runner-source.txt",
+    "bytes": 638
+  },
+  {
+    "path": "/Users/irene/Developer/kunchenguid_repos/firstmate/.omo/evidence/sunday-review-audit-20260927/prior-coverage-drift.log",
+    "bytes": 5053
+  },
+  {
+    "path": "/Users/irene/Developer/kunchenguid_repos/firstmate/.omo/evidence/sunday-review-audit-20260927/launchd.txt",
+    "bytes": 1905
+  },
+  {
+    "path": "/Users/irene/Developer/kunchenguid_repos/firstmate/.omo/evidence/sunday-review-audit-20260927/prior-coverage-artifact.log",
+    "bytes": 151
+  },
+  {
+    "path": "/Users/irene/Developer/kunchenguid_repos/firstmate/.omo/evidence/sunday-review-audit-20260927/failure-events.jsonl",
+    "bytes": 783
+  },
+  {
+    "path": "/Users/irene/Developer/kunchenguid_repos/firstmate/.omo/evidence/sunday-review-audit-20260927/prior-coverage-mirrors.log",
+    "bytes": 1152
+  },
+  {
+    "path": "/Users/irene/Developer/kunchenguid_repos/firstmate/.omo/evidence/sunday-review-audit-20260927/phase-artifact-times.json",
+    "bytes": 946
+  },
+  {
+    "path": "/Users/irene/Developer/kunchenguid_repos/firstmate/.omo/evidence/sunday-review-audit-20260927/coverage-invocations.json",
+    "bytes": 1278
+  },
+  {
+    "path": "/Users/irene/Developer/kunchenguid_repos/firstmate/.omo/evidence/sunday-review-audit-20260927/fresh-report.json",
+    "bytes": 1699
+  },
+  {
+    "path": "/Users/irene/Developer/kunchenguid_repos/firstmate/.omo/evidence/sunday-review-audit-20260927/state-discord-review-sunday-document-governance-doctrine.json",
+    "bytes": 663
+  },
+  {
+    "path": "/Users/irene/Developer/kunchenguid_repos/firstmate/.omo/evidence/sunday-review-audit-20260927/state-sunday-document-governance.json",
+    "bytes": 158
+  },
+  {
+    "path": "/Users/irene/Developer/kunchenguid_repos/firstmate/.omo/evidence/sunday-review-audit-20260927/prior-coverage-pointers.log",
+    "bytes": 64
+  },
+  {
+    "path": "/Users/irene/Developer/kunchenguid_repos/firstmate/.omo/evidence/sunday-review-audit-20260927/fresh/coverage-mirrors.log",
+    "bytes": 1152
+  },
+  {
+    "path": "/Users/irene/Developer/kunchenguid_repos/firstmate/.omo/evidence/sunday-review-audit-20260927/fresh/coverage-pointers.log",
+    "bytes": 64
+  },
+  {
+    "path": "/Users/irene/Developer/kunchenguid_repos/firstmate/.omo/evidence/sunday-review-audit-20260927/fresh/coverage-artifact.log",
+    "bytes": 151
+  },
+  {
+    "path": "/Users/irene/Developer/kunchenguid_repos/firstmate/.omo/evidence/sunday-review-audit-20260927/fresh/coverage-instruction-surface.log",
+    "bytes": 35361
+  },
+  {
+    "path": "/Users/irene/Developer/kunchenguid_repos/firstmate/.omo/evidence/sunday-review-audit-20260927/fresh/coverage-manifest.log",
+    "bytes": 64
+  },
+  {
+    "path": "/Users/irene/Developer/kunchenguid_repos/firstmate/.omo/evidence/sunday-review-audit-20260927/fresh/coverage-drift.log",
+    "bytes": 5053
+  },
+  {
+    "path": "/Users/irene/Developer/kunchenguid_repos/firstmate/.omo/evidence/sunday-review-audit-20260927/fresh/coverage-runtime.log",
+    "bytes": 174
+  }
+]

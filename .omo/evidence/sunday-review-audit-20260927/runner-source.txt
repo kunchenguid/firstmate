@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Sunday document governance runs once through this weekly batch.
+set -uo pipefail
+
+LOG_DIR=/Users/irene/Developer/IMAC/AutomationSync/runtime/logs
+
+cd /Users/irene/Developer/IMAC || exit
+/Users/irene/Developer/IMAC/AutomationSync/prompts/cron-env-guard.sh "sunday-document-governance" ~/.claude/prompts/discord-bot.env "DISCORD_BOT_TOKEN,NOTION_TOKEN" -- /Users/irene/.claude/prompts/cron-alert-wrapper.sh "sunday-document-governance" /Users/irene/anaconda3/bin/python3 /Users/irene/Developer/IMAC/AutomationSync/sunday_document_governance.py >> "$LOG_DIR/sunday-document-governance.log" 2>&1
+cd - >/dev/null || exit

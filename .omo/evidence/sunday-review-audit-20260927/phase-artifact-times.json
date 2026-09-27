@@ -1,0 +1,47 @@
+[
+  {
+    "name": "coverage-mirrors.log",
+    "mtime": "2026-09-27T07:37:27.218459",
+    "size": 1152
+  },
+  {
+    "name": "coverage-pointers.log",
+    "mtime": "2026-09-27T07:37:25.498929",
+    "size": 64
+  },
+  {
+    "name": "coverage-artifact.log",
+    "mtime": "2026-09-27T07:36:49.854907",
+    "size": 151
+  },
+  {
+    "name": "snapshot.json",
+    "mtime": "2026-09-27T07:36:49.781552",
+    "size": 302352
+  },
+  {
+    "name": "organized.json",
+    "mtime": "2026-09-13T16:20:43.662571",
+    "size": 545944
+  },
+  {
+    "name": "coverage-instruction-surface.log",
+    "mtime": "2026-09-27T07:37:27.763665",
+    "size": 35361
+  },
+  {
+    "name": "coverage-manifest.log",
+    "mtime": "2026-09-27T07:37:27.100609",
+    "size": 64
+  },
+  {
+    "name": "coverage-drift.log",
+    "mtime": "2026-09-27T07:37:27.519498",
+    "size": 5053
+  },
+  {
+    "name": "coverage-runtime.log",
+    "mtime": "2026-09-27T07:37:27.172874",
+    "size": 174
+  }
+]

@@ -1,0 +1,87 @@
+command=['launchctl', 'print', 'gui/501/com.irene.cron.sunday-weekly-batch']
+exit=0
+gui/501/com.irene.cron.sunday-weekly-batch = {
+	active count = 0
+	path = /Users/irene/Developer/IMAC/launchd/com.irene.cron.sunday-weekly-batch.plist
+	type = LaunchAgent
+	state = not running
+
+	program = /bin/bash
+	arguments = {
+		/bin/bash
+		/Users/irene/Developer/IMAC/local-bin/sunday-weekly-batch-runner.sh
+	}
+
+	inherited environment = {
+		SSH_AUTH_SOCK => /var/run/com.apple.launchd.Rg47iCUDGY/Listeners
+	}
+
+	default environment = {
+		PATH => /usr/bin:/bin:/usr/sbin:/sbin
+	}
+
+	environment = {
+		OSLogRateLimit => 64
+		PATH => /Users/irene/anaconda3/bin:/Users/irene/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+		HOME => /Users/irene
+		XPC_SERVICE_NAME => com.irene.cron.sunday-weekly-batch
+	}
+
+	domain = gui/501 [100003]
+	asid = 100003
+	minimum runtime = 10
+	exit timeout = 5
+	runs = 1
+	last exit code = 0
+
+	event triggers = {
+		com.irene.cron.sunday-weekly-batch.268435540 => {
+			keepalive = 0
+			service = com.irene.cron.sunday-weekly-batch
+			stream = com.apple.launchd.calendarinterval
+			monitor = com.apple.UserEventAgent-Aqua
+			descriptor = {
+				"Minute" => 0
+				"Hour" => 0
+				"Weekday" => 0
+			}
+		}
+	}
+
+	event channels = {
+		"com.apple.launchd.calendarinterval" = {
+			port = 0xf17c3
+			active = 0
+			managed = 1
+			reset = 0
+			hide = 0
+			watching = 1
+		}
+	}
+
+	resource coalition = {
+		ID = 146245
+		type = resource
+		state = active
+		active count = 1
+		name = com.irene.cron.sunday-weekly-batch
+	}
+
+	jetsam coalition = {
+		ID = 146246
+		type = jetsam
+		state = active
+		active count = 1
+		name = com.irene.cron.sunday-weekly-batch
+	}
+
+	spawn type = daemon (3)
+	jetsam priority = 40
+	jetsam memory limit (active) = (unlimited)
+	jetsam memory limit (inactive) = (unlimited)
+	jetsamproperties category = daemon
+	jetsam thread limit = 32
+	cpumon = default
+
+	properties = inferred program
+}
