@@ -1023,6 +1023,28 @@ test_queued_enter_verdict_does_not_convert_other_states() {
   pass "fm_composer_queued_enter_verdict: only proven pending is converted"
 }
 
+test_opencode_v2_status_bar_below_composer() {
+  # Real opencode 2.0.18 through Herdr (captured live 2026-09-28): the left-bar
+  # composer's floor row is followed by a harness status bar ending in the
+  # fixed `ctrl+p commands` hint, idle and busy alike. The left-bar staleness
+  # probe read that bar as a lower live shape and rejected the whole pane as
+  # `unknown`, so a parked worker's verified exit could not be typed.
+  local idle typed busy stale status
+  status=$'  ~/.treehouse/x:fm/fm-branch  186.6K (19%) · 0.12  ctrl+p commands'
+  idle=$'  ┃\n  ┃\n  ┃\n  ┃  Build · DeepSeek V4.1 Flash DeepSeek\n  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n'"$status"
+  assert_screen "opencode 2.0.18 idle, status bar below the composer" empty "$CAPS_STYLED" "$idle"
+  typed=$'  ┃\n  ┃  fix the composer classifier\n  ┃\n  ┃  Build · DeepSeek V4.1 Flash DeepSeek\n  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n'"$status"
+  assert_screen "opencode 2.0.18 typed, status bar below the composer" pending "$CAPS_STYLED" "$typed"
+  busy=$'  ┃\n  ┃  ⠋ echo hi\n  ┃\n  ┃  Build · DeepSeek V4.1 Flash DeepSeek\n  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n   ■■■■⬝⬝⬝⬝ esc interrupt  448.4K (45%) · 0.37  ctrl+p commands'
+  assert_screen "opencode 2.0.18 busy, status bar below the composer" pending "$CAPS_STYLED" "$busy"
+  # The new status-bar rule must not blind the probe to a genuine lower shape:
+  # a dead shell below the same idle composer still reads unknown.
+  stale=$'  ┃\n  ┃\n  ┃  Build · DeepSeek V4.1 Flash DeepSeek\n  ╹▀▀▀▀\nvibhormittal@host repo %'
+  assert_screen "opencode 2.0.18 above a dead shell is still unknown" unknown "$CAPS_STYLED" "$stale"
+  pass "opencode 2.0.18: its status bar below the composer is furniture, not a stale lower shape"
+}
+
 test_queued_enter_verdict_busy_pending_is_empty
 test_queued_enter_verdict_idle_pending_stays_pending
 test_queued_enter_verdict_does_not_convert_other_states
+test_opencode_v2_status_bar_below_composer

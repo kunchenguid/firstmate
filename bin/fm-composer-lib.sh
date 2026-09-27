@@ -475,6 +475,14 @@ FM_COMPOSER_IDLE_RE_DEFAULT='^Type a message\.\.\.$|^Ask anything(\.\.\.|…)|^P
 # ("Build · GPT-5.5 Fast OpenAI · high"). It is composer furniture, not typed
 # text, and only the run's LAST row is ever matched against it.
 FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT='^(Build|Plan)[[:space:]]+·[[:space:]]+'
+# Opencode draws a status bar on the row BELOW its left-bar composer's floor
+# row: an idle or busy cell, a context/cost cell, and the fixed `ctrl+p
+# commands` hint (`… <path>:<branch>  <ctx> (auto) · <cost>  ctrl+p commands`
+# idle; `■■■■⬝⬝ esc interrupt  <ctx> · <cost>  ctrl+p commands` while busy;
+# verified live through Herdr on opencode 2.0.18). It is harness furniture
+# below the envelope, never a second live composer, so the left-bar staleness
+# probe must pass it instead of reading it as a stale-shape proof.
+FM_COMPOSER_OPENCODE_STATUS_RE_DEFAULT='ctrl\+p commands'
 # Claude draws its permission-mode hint on its own row directly below the
 # composer (` ⏵⏵ bypass permissions on (shift+tab to cycle)`, ` ⏵⏵ accept edits
 # on`, ` ⏸ plan mode on`; verified live through Herdr on claude 2.1.236). The
@@ -1202,6 +1210,13 @@ _fm_composer_row_is_omp_status() {  # <trimmed-row>
   fm_composer_idle_matches "$1" "${FM_COMPOSER_OMP_STATUS_RE:-$FM_COMPOSER_OMP_STATUS_RE_DEFAULT}" sensitive
 }
 
+# _fm_composer_row_is_opencode_status: 0 when the trimmed row is opencode's
+# status bar below its left-bar composer (FM_COMPOSER_OPENCODE_STATUS_RE_DEFAULT
+# above) - harness furniture, never a live composer below the envelope.
+_fm_composer_row_is_opencode_status() {  # <trimmed-row>
+  fm_composer_idle_matches "$1" "${FM_COMPOSER_OPENCODE_STATUS_RE:-$FM_COMPOSER_OPENCODE_STATUS_RE_DEFAULT}" insensitive
+}
+
 # _fm_composer_row_is_pi_status: 0 when the trimmed row is Pi's dollar-first
 # footer stats row (FM_COMPOSER_PI_STATUS_RE_DEFAULT above). Furniture below
 # the separated pair; a `$` cost cell must not count as a dead-shell prompt.
@@ -1528,7 +1543,9 @@ _fm_composer_select_cursorless() {
     raw=$(_fm_composer_screen_row "$next" "$plain")
     trimmed=$raw
     fm_composer_normalize_trim_var trimmed
-    if [ -n "$trimmed" ] && ! fm_composer_row_has_edge "$trimmed"; then
+    if [ -n "$trimmed" ] \
+       && ! _fm_composer_row_is_opencode_status "$trimmed" \
+       && ! fm_composer_row_has_edge "$trimmed"; then
       FM_COMPOSER_SELECTED_KIND=
       return 1
     fi
