@@ -128,15 +128,15 @@ test_unavailable_registry_refused() {
   slot_root="$pool_real/slots"
   mkdir -p "$slot_root/1"
   git -C "$PROJECT_DIR" worktree add "$slot_root/1/project"
-  # Write invalid JSON to treehouse state to simulate registry query failure
+  # Write invalid JSON to treehouse state to simulate an unreadable registry.
   printf '{invalid-json' > "$slot_root/treehouse-state.json"
   POOL_DIR="$slot_root/1/project"
 
   out=$(run_spawn "$id" --scout)
   status=$?
-  [ "$status" -ne 0 ] || fail "spawn launched a worker while treehouse status was unavailable"
+  [ "$status" -ne 0 ] || fail "spawn launched a worker while the Treehouse registry was unreadable"
   assert_contains "$out" "could not query Treehouse registry" \
-    "spawn did not distinguish a failed treehouse status query from a missing registry slot"
+    "spawn did not distinguish an unreadable registry from a missing registry slot"
   [ ! -e "$HOME_DIR/state/$id.meta" ] \
     || fail "spawn published task metadata after the Treehouse registry query failed"
 
