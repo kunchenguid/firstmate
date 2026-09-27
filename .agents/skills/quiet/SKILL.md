@@ -35,15 +35,15 @@ exits it.
 
 1. **Enter the lifecycle through `bin/fm-afk-launch.sh`, exactly as `/afk`
    does, with `FM_AFK_MODE=quiet` set first.**
-   Follow the `afk` skill's "What it does" steps 1-3 verbatim (terminal-
-   backed vs harness-native entry, daemon-already-running refresh, never
-   arming a separate `fm-watch.sh`) with one addition: export
+   Follow the `afk` skill's record entry, daemon launch, and announcement steps,
+   except that on an opted-in host home its `/afk` no-daemon rule does not apply
+   after `quiet-check` exits 1. Never arm a separate `fm-watch.sh`. Export
    `FM_AFK_MODE=quiet` in the shell that invokes `bin/fm-afk-launch.sh enter`
    and `start` (or `start-native`), so the record notes quiet mode and
    `state/.afk`'s first line reads `quiet` instead of `away`.
    On a home with `config/supervision-host`, launch the daemon on the path
-   this harness uses without the host, although `/afk` launches none there;
-   `start` and `start-native` take quiet mode from the record `enter` wrote.
+   this harness uses without the host; `start` and `start-native` take quiet
+   mode from the record `enter` wrote.
    Leaving `FM_AFK_MODE` unset on a bare refresh of an already-running quiet
    daemon is also correct and does nothing wrong: `fm_afk_flag_write`
    preserves the on-disk mode when no explicit mode is given, so a plain
