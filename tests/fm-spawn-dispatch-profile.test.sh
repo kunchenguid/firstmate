@@ -1360,7 +1360,13 @@ test_launch_environment_allowlist() {
 printf '%s\n' "${FM_TEST_AMBIENT_SENTINEL-unset}" "${FM_TEST_ALLOWED-unset}" \
   "${FM_TEST_EMPTY-unset}" "${FM_TEST_UNSET-unset}" "$HOME" "$PATH" "$TERM" "$TMUX" "$GOTMPDIR"
 SH
-    out=$(FM_TEST_AMBIENT_SENTINEL=synthetic-unrelated \
+    # This test's throwaway pane-shell $HOME lives under $HOME_DIR (the probes
+    # below need it there to read the launch's ambient PATH), which the spawn
+    # guard against a Treehouse root inside a Firstmate home would otherwise
+    # reject once fm-spawn derives its default root from that same $HOME; give
+    # it an explicit root outside both homes so this test measures the
+    # allowlist, not that unrelated guard.
+    out=$(FM_TEST_AMBIENT_SENTINEL=synthetic-unrelated TREEHOUSE_ROOT="$CASE_DIR/treehouse-root" \
       run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
       "$id" "$PROJ_DIR" --harness "/bin/sh '$probe'")
     status=$?
