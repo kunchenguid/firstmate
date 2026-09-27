@@ -278,8 +278,10 @@ route_lock_path() {  # <class> <key>
 # acknowledgment (which, for an explicit ack-request, must send regardless of
 # presence). Never gates on presence itself - callers decide that. Prints
 # `duplicate: ...`, `skipped: ...`, or `sent: ...` and returns 0 on every
-# non-delivery-failure outcome; prints nothing on stdout and returns 1 on a
-# `hermes send` failure, leaving the durable record at status=failed.
+# non-delivery-failure outcome, always leaving a durable record behind
+# (status=skipped when Telegram isn't configured on this home); prints
+# nothing on stdout and returns 1 on a `hermes send` failure, leaving the
+# durable record at status=failed.
 send_route_message() {  # <class> <key> <message>
   local class=$1 key=$2 message=$3 digest record tmp chat_id lock rc=0
   message=$(truncate_to_max_bytes "$message")
@@ -296,6 +298,11 @@ send_route_message() {  # <class> <key> <message>
   fi
   chat_id=$(resolve_telegram_chat_id) || { fm_lock_release "$lock"; return 1; }
   if [ -z "$chat_id" ]; then
+    tmp=$(mktemp "$NOTIFY_DIR/routes/.staging-XXXXXX") || { fm_lock_release "$lock"; return 1; }
+    {
+      printf 'class=%s\nkey=%s\ndigest=%s\nstatus=skipped\n' "$class" "$key" "$digest"
+    } >"$tmp"
+    mv "$tmp" "$record"
     printf 'skipped: hermes/telegram not configured on this home\n'
     fm_lock_release "$lock"
     return 0
