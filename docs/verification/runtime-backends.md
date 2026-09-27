@@ -2327,3 +2327,30 @@ A throwaway scout was spawned through `bin/fm-spawn.sh --scout --harness omp --m
 6. `bin/fm-control.sh <id> exit` stopped the agent and `bin/fm-teardown.sh` returned the worktree and closed the item.
 
 `FM_OMP_LIVE_E2E=1 tests/fm-omp-primary-live-e2e.test.sh` refreshes the primary evidence; the worker path above is refreshed by repeating the scout dispatch after any omp upgrade.
+
+## Cairn local runtime
+
+Verified on 2026-09-27 with Cairn 2.13.4 build 70 on macOS 26.6.2 using a branded development app, a disposable Cairn home, and a disposable First Mate home.
+The repeatable adapter checks were:
+
+```sh
+tests/fm-backend-cairn.test.sh
+bin/fm-lint.sh
+bin/fm-doc-audience-check.sh
+```
+
+They reported `cairn backend test: OK`, ShellCheck 0.11.0 and actionlint 1.7.12 with three valid workflow files, and `fm-doc-audience-check: ok surfaces=110 local_links=662`.
+The Cairn checkout passed `./scripts/check.sh --test DeveloperAPIControlTests` with 11 cases and completed `./scripts/build.sh && ./scripts/install.sh`; `./scripts/verify-installed.sh --stale-only` reported a fresh installed app.
+
+| Live check | Observed result |
+| --- | --- |
+| Spawn and binding | One background workspace and one pane were created; the recorded home used the same physical path on both sides. |
+| Terminal identity | A shell printed `CAIRN_INSTANCE_STATE_DIR` and `CAIRN_WORKSPACE_ID`; First Mate selected `cairn` inside that shell without a client override. |
+| Input and capture | Literal text and Enter reached the pane; a fresh client connection captured the resulting output and classified the bare shell as `dead`. |
+| Duplicate launch | Repeating the authenticated spawn returned the same workspace and pane IDs; First Mate refused a second unrecorded task launch. |
+| Safety bounds | Wrong-pane input and a capture request above 2,000 lines were refused; focus remained on the foreground app. |
+| Stop | The one-pane endpoint stopped and disappeared from the workspace inventory. |
+
+The live run did not add a second user pane or restart the app.
+The fake-client suite covers the teardown preflight refusal when another pane is present and preserves the unreadable-endpoint verdict.
+Each live client call opened a new authenticated connection; a full app restart remains to be checked when the user relaunches the branded instance.

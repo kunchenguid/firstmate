@@ -3531,6 +3531,13 @@ fi
 # kind=secondmate: a secondmate home's own runtime lifecycle is owned by the
 # dedicated process-event and firstmate-home removal machinery further below,
 # not by task-worktree cleanup.
+if [ "$BACKEND" = cairn ]; then
+  fm_backend_source cairn || exit 1
+  fm_backend_cairn_stop_preflight "$T" || {
+    echo "REFUSED: Cairn endpoint for $ID is unavailable or has additional panes; preserving task records and worktree." >&2
+    exit 1
+  }
+fi
 if [ "$KIND" != secondmate ] && teardown_owns_worktree; then
   conclude_task_no_mistakes_run "$WT"
   reap_task_worktree_processes worktree "$WT" "$TASK_TMP"

@@ -67,8 +67,8 @@ FM_BACKEND_CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 # cmux is EXPERIMENTAL and spawn-capable, session-provider-only like
 # herdr/zellij - verified against the real 0.64.17 binary (docs/cmux-backend.md).
 # codex-app remains deliberately absent; see docs/codex-app-backend.md.
-FM_BACKEND_KNOWN="tmux herdr zellij orca cmux"
-FM_BACKEND_SPAWN="tmux herdr zellij orca cmux"
+FM_BACKEND_KNOWN="tmux herdr zellij orca cmux cairn"
+FM_BACKEND_SPAWN="tmux herdr zellij orca cmux cairn"
 
 # fm_backend_list_contains: whitespace-delimited membership without relying on
 # shell word splitting. fm-backend.sh is normally sourced by bash scripts, but
@@ -152,6 +152,17 @@ fm_backend_detect() {
     FM_BACKEND_DETECT_SIGNAL=HERDR_ENV
     printf 'herdr'
     return 0
+  fi
+  if [ -n "${CAIRN_INSTANCE_STATE_DIR:-}" ] \
+    && [ -n "${CAIRN_WORKSPACE_ID:-}" ]; then
+    fm_backend_source cairn >/dev/null 2>&1 || return 1
+    if fm_backend_cairn_detect; then
+      FM_BACKEND_DETECTED=cairn
+      FM_BACKEND_DETECT_SIGNAL=CAIRN_INSTANCE_STATE_DIR
+      printf 'cairn'
+      return 0
+    fi
+    return 1
   fi
   if [ -n "${CMUX_WORKSPACE_ID:-}" ]; then
     FM_BACKEND_DETECTED=cmux
@@ -270,6 +281,11 @@ fm_backend_name() {
     printf '%s' "$detected"
     return 0
   fi
+  if [ -n "${CAIRN_INSTANCE_STATE_DIR:-}" ] \
+    || [ -n "${CAIRN_WORKSPACE_ID:-}" ]; then
+    echo "error: Cairn runtime markers are present but this app instance and workspace could not be verified; refusing backend fallback" >&2
+    return 1
+  fi
   printf 'tmux'
 }
 
@@ -311,6 +327,7 @@ fm_backend_required_tools() {  # <backend>
     herdr)  printf '%s' 'herdr jq treehouse' ;;
     zellij) printf '%s' 'zellij jq treehouse' ;;
     cmux)   printf '%s' 'cmux jq treehouse' ;;
+    cairn)  printf '%s' 'jq treehouse' ;;
     orca)   printf '%s' 'orca' ;;
     *) return 1 ;;
   esac
@@ -325,6 +342,7 @@ fm_backend_required_tool_available() {  # <backend> <tool>
       fm_backend_source cmux >/dev/null 2>&1 || return 1
       fm_backend_cmux_bin >/dev/null 2>&1
       ;;
+    cairn:jq) command -v jq >/dev/null 2>&1 ;;
     *) command -v "$tool" >/dev/null 2>&1 ;;
   esac
 }
@@ -544,6 +562,18 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
         return 1
       fi
       ;;
+    cairn)
+      [ "$binding" = "$id" ] || return 1
+      fm_backend_source cairn || return 1
+      fm_backend_cairn_parse_target "$window" || return 1
+      [ "$CAIRN_TARGET_TASK" = "$id" ] || return 1
+      recorded_session=$(fm_backend_meta_exact_value "$meta" cairn_instance_pid) || return 1
+      case "$recorded_session" in ''|*[!0-9]*) return 1 ;; esac
+      [ "$CAIRN_TARGET_STATE" = "$(fm_backend_meta_exact_value "$meta" cairn_instance_state_dir)" ] || return 1
+      [ "$CAIRN_TARGET_HOME" = "$(fm_backend_meta_exact_value "$meta" cairn_home)" ] || return 1
+      [ "$CAIRN_TARGET_WORKSPACE" = "$(fm_backend_meta_exact_value "$meta" cairn_workspace_id)" ] || return 1
+      [ "$CAIRN_TARGET_PANE" = "$(fm_backend_meta_exact_value "$meta" cairn_pane_id)" ] || return 1
+      ;;
   esac
   # shellcheck disable=SC2034 # Output globals are consumed by sourcing callers.
   FM_BACKEND_VALIDATED_BACKEND=$backend
@@ -622,7 +652,7 @@ fm_backend_source_readable() {  # <path>
 }
 
 fm_backend_source() {  # <name>
-  local name=$1 adapter rel path siblings
+  local name=$1 adapter rel sibling_path siblings
   fm_backend_validate "$name" || return 1
   adapter="$FM_BACKEND_LIB_DIR/backends/$name.sh"
   case "$name" in
@@ -641,16 +671,18 @@ fm_backend_source() {  # <name>
     cmux)
       siblings="fm-backend-hometag-lib.sh fm-composer-lib.sh"
       ;;
+    cairn)
+      siblings="fm-composer-lib.sh fm-agent-process-lib.sh"
+      ;;
     *)
       return 1
       ;;
   esac
   fm_backend_source_readable "$adapter" || return 1
-  # shellcheck disable=SC2086 # sibling names are a fixed space-separated list
-  for rel in $siblings; do
-    path="$FM_BACKEND_LIB_DIR/$rel"
-    fm_backend_source_readable "$path" || return 1
-  done
+  while IFS= read -r rel; do
+    sibling_path="$FM_BACKEND_LIB_DIR/$rel"
+    fm_backend_source_readable "$sibling_path" || return 1
+  done < <(printf '%s\n' "$siblings" | tr ' ' '\n')
   case "$name" in
     tmux)
       if [ -z "${_FM_BACKEND_TMUX_SOURCED:-}" ]; then
@@ -685,6 +717,13 @@ fm_backend_source() {  # <name>
         # shellcheck source=/dev/null
         . "$adapter" || return 1
         _FM_BACKEND_CMUX_SOURCED=1
+      fi
+      ;;
+    cairn)
+      if [ -z "${_FM_BACKEND_CAIRN_SOURCED:-}" ]; then
+        # shellcheck source=/dev/null
+        . "$adapter" || return 1
+        _FM_BACKEND_CAIRN_SOURCED=1
       fi
       ;;
   esac
@@ -758,6 +797,7 @@ fm_backend_capture() {  # <backend> <target> <lines> [expected-label]
     zellij) fm_backend_zellij_capture "$@" ;;
     orca) fm_backend_orca_capture "$@" ;;
     cmux) fm_backend_cmux_capture "$@" ;;
+    cairn) fm_backend_cairn_capture "$@" ;;
     *) echo "error: no capture implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
@@ -769,7 +809,7 @@ fm_backend_capture() {  # <backend> <target> <lines> [expected-label]
 # reads only the viewport, but that has not been observed on a real cmux, and
 # the adapter's own capture opts into history with `--scrollback`. orca's
 # `terminal read --limit` is a history read with no viewport mode.
-FM_BACKEND_VISIBLE_CAPTURE="tmux herdr zellij"
+FM_BACKEND_VISIBLE_CAPTURE="tmux herdr zellij cairn"
 
 # fm_backend_visible_capture_supported: whether <backend> can read the visible
 # viewport WITHOUT scrollback. Callers that must not mistake a scrolled-away
@@ -803,6 +843,7 @@ fm_backend_send_key() {  # <backend> <target> <key> [expected-label]
     zellij) fm_backend_zellij_send_key "$@" ;;
     orca) fm_backend_orca_send_key "$@" ;;
     cmux) fm_backend_cmux_send_key "$@" ;;
+    cairn) fm_backend_cairn_send_key "$@" ;;
     *) echo "error: no send-key implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
@@ -820,6 +861,7 @@ fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sl
     zellij) fm_backend_zellij_send_text_submit "$@" ;;
     orca) fm_backend_orca_send_text_submit "$@" ;;
     cmux) fm_backend_cmux_send_text_submit "$@" ;;
+    cairn) fm_backend_cairn_send_text_submit "$@" ;;
     *) echo "error: no send-text implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
@@ -847,6 +889,7 @@ fm_backend_kill() {  # <backend> <target>
     zellij) fm_backend_zellij_kill "$@" ;;
     orca) fm_backend_orca_kill "$@" ;;
     cmux) fm_backend_cmux_kill "$@" ;;
+    cairn) fm_backend_cairn_kill "$@" ;;
     *) echo "error: no kill implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
@@ -910,6 +953,7 @@ fm_backend_composer_state() {  # <backend> <target> [expected-label] -> empty|pe
     orca) fm_backend_orca_composer_state "$@" ;;
     cmux) fm_backend_cmux_composer_state "$@" ;;
     zellij) fm_backend_zellij_composer_state "$@" ;;
+    cairn) fm_backend_cairn_composer_state "$@" ;;
     *) printf 'unknown' ;;
   esac
 }
@@ -959,6 +1003,10 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
       fm_backend_source cmux || return 1
       fm_backend_cmux_target_ready "$target" "$expected_label"
       ;;
+    cairn)
+      fm_backend_source cairn || return 1
+      fm_backend_cairn_target_exists "$target"
+      ;;
     *)
       return 1
       ;;
@@ -991,6 +1039,7 @@ fm_backend_agent_state() {  # <backend> <target>
   case "$backend" in
     tmux) fm_backend_tmux_agent_state "$target" ;;
     herdr) fm_backend_herdr_agent_state "$target" ;;
+    cairn) fm_backend_cairn_agent_state "$target" ;;
     *) printf 'unverified' ;;
   esac
 }
