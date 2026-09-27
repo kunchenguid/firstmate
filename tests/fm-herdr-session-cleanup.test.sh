@@ -92,6 +92,7 @@ fixture_workspaces() {
   title=$(cat "$FIXTURE_DIR/title")
   tabs=$(cat "$FIXTURE_DIR/tabs")
   panes=$(cat "$FIXTURE_DIR/panes")
+  [ ! -e "$FIXTURE_DIR/empty-tab" ] || panes=0
   printf '[{"workspace_id":"w1","label":"firstmate","focused":%s,"active_tab_id":"w1:t1","tab_count":1,"pane_count":1},' \
     "$( [ "$(cat "$FIXTURE_DIR/active-tab")" = w1:t1 ] && printf true || printf false )"
   fixture_workspace_json "$title" "$tabs" "$panes"
@@ -102,13 +103,16 @@ fixture_workspaces() {
 }
 
 fixture_tabs() {
-  local count i
+  local count i pane_count
   count=$(cat "$FIXTURE_DIR/tabs")
   printf '['
   i=1
   while [ "$i" -le "$count" ]; do
     [ "$i" -eq 1 ] || printf ','
-    printf '{"tab_id":"%s:t%s","workspace_id":"%s","focused":false,"label":"fm-task"}' "$WS" "$i" "$WS"
+    pane_count=1
+    [ ! -e "$FIXTURE_DIR/empty-tab" ] || pane_count=0
+    printf '{"tab_id":"%s:t%s","workspace_id":"%s","focused":false,"pane_count":%s,"label":"fm-task"}' \
+      "$WS" "$i" "$WS" "$pane_count"
     i=$((i + 1))
   done
   printf ']'
@@ -116,6 +120,7 @@ fixture_tabs() {
 
 fixture_panes() {
   local count i
+  [ ! -e "$FIXTURE_DIR/empty-tab" ] || { printf '[]'; return; }
   count=$(cat "$FIXTURE_DIR/panes")
   printf '['
   i=1
@@ -129,12 +134,12 @@ fixture_panes() {
 }
 
 fm_backend_herdr_cli() {
-  local _session=$1 first=${2:-} second=${3:-} title tabs panes
+  local _session=$1 first=${2:-} second=${3:-} target=${4:-} title tabs panes
   shift
   [ ! -e "$FIXTURE_DIR/error-${first}-${second}" ] || return 1
   if [ -e "$FIXTURE_DIR/closed" ]; then
     case "$first $second" in
-      "pane get") printf '%s\n' '{"error":{"code":"pane_not_found"}}' >&2; return 1 ;;
+      "pane get"|"tab get") printf '%s\n' '{"error":{"code":"'"$first"'_not_found"}}' >&2; return 1 ;;
       "workspace list") printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate","focused":true,"active_tab_id":"w1:t1","tab_count":1,"pane_count":1}]}}'; return 0 ;;
     esac
   fi
@@ -161,6 +166,15 @@ fm_backend_herdr_cli() {
     "pane get")
       printf '{"result":{"pane":{"pane_id":"%s","tab_id":"%s","workspace_id":"%s"}}}\n' "$PANE" "$TAB" "$WS"
       ;;
+    "tab get")
+      if [ "$target" = w1:t1 ]; then
+        printf '%s\n' '{"result":{"tab":{"tab_id":"w1:t1","workspace_id":"w1","pane_count":1}}}'
+      elif [ -e "$FIXTURE_DIR/empty-tab" ]; then
+        printf '{"result":{"tab":{"tab_id":"%s","workspace_id":"%s","pane_count":0}}}\n' "$TAB" "$WS"
+      else
+        printf '{"result":{"tab":{"tab_id":"%s","workspace_id":"%s","pane_count":1}}}\n' "$TAB" "$WS"
+      fi
+      ;;
     "agent get")
       case "$(cat "$FIXTURE_DIR/agent")" in
         absent) printf '%s\n' '{"error":{"code":"agent_not_found"}}' >&2; return 1 ;;
@@ -181,6 +195,11 @@ fm_backend_herdr_cli() {
       ;;
     "pane close")
       : > "$FIXTURE_DIR/closed"
+      printf '%s\n' "pane close $PANE" >> "$CLOSE_LOG"
+      ;;
+    "tab close")
+      : > "$FIXTURE_DIR/closed"
+      printf '%s\n' "tab close $TAB" >> "$CLOSE_LOG"
       ;;
     *) return 1 ;;
   esac
@@ -269,6 +288,16 @@ fm_herdr_session_cleanup >/dev/null 2>&1
 [ ! -e "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] || fail "matching v2 cleanup kept the journal"
 [ "$(wc -l < "$CLOSE_LOG" | tr -d ' ')" = 1 ] || fail "matching v2 cleanup did not close exactly once"
 pass "v2 cleanup requires and accepts the exact journal endpoint binding"
+reset_fixture
+: > "$FIXTURE_DIR/empty-tab"
+fm_herdr_session_cleanup >/dev/null 2>&1
+[ ! -e "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] || fail "empty task tab cleanup kept the journal"
+[ "$(cat "$CLOSE_LOG")" = "tab close $TAB" ] || fail "empty task tab cleanup did not close the exact tab: $(cat "$CLOSE_LOG")"
+pass "empty task tab cleanup closes the exact agent-free tab"
+reset_fixture
+: > "$FIXTURE_DIR/empty-tab"
+printf '%s\n' "$TAB" > "$FIXTURE_DIR/active-tab"
+assert_preserved "active empty task tab"
 reset_fixture; : > "$FM_STATE_OVERRIDE/$ID.meta"; assert_preserved "current task metadata"
 reset_fixture; printf 'live\n' > "$FIXTURE_DIR/agent"; assert_preserved "registered agent"
 reset_fixture; printf 'unknown\n' > "$FIXTURE_DIR/agent"; assert_preserved "unknown agent"
