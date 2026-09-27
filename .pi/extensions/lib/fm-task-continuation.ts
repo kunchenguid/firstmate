@@ -194,11 +194,34 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
     const escalations: Admission["escalations"] = [];
     try {
       for (const item of reconciliations) {
+        const paceId = `reconcile:${item.task_id}`;
+        let pace = pacing.get(paceId);
+        if (!pace || pace.key !== item.key) pace = { key: item.key, attempts: ATTEMPTS, after: 0 };
         const id = `q.${item.key}`;
-        if (!submitted.has(id) && !delivered.has(id)) {
+        pace.escalatedAt ??= delivered.get(id);
+        if (pace.escalatedAt === undefined && !submitted.has(id)) {
           escalations.push({ id, task: item.task_id,
             reason: `lifecycle observation refused; explicit reconciliation required: ${item.reason}`, reconciliation: true });
+        } else if (pace.escalatedAt !== undefined) {
+          pace.recoveryAttempts ??= 0;
+          pace.recoveryAfter ??= pace.escalatedAt + 60_000;
+          const at = pace.recoveryReserved ? delivered.get(pace.recoveryReserved) : undefined;
+          if (at !== undefined) {
+            pace.recoveryReserved = undefined;
+            pace.recoveryAfter = Math.max(pace.recoveryAfter, at + Math.min(900_000, 60_000 * 2 ** Math.min(pace.recoveryAttempts, 4)));
+          }
+          if (!pace.recoveryReserved && Date.now() >= pace.recoveryAfter) {
+            if (pace.recoveryAttempts >= Number.MAX_SAFE_INTEGER) throw new Error("reconciliation recovery counter exhausted");
+            pace.recoveryReserved = `r.${item.key}.${++pace.recoveryAttempts}`;
+          }
+          if (pace.recoveryReserved && !submitted.has(pace.recoveryReserved)) {
+            escalations.push({ id: pace.recoveryReserved, task: item.task_id,
+              reason: `lifecycle observation still refuses explicit reconciliation: ${item.reason}`,
+              recovery: true, reconciliation: true });
+          }
         }
+        pacing.set(paceId, pace);
+        pi.appendEntry(PACING_ENTRY, { id: paceId, ...pace });
       }
       for (const item of pending) {
         if (!current()) throw new Error("readback receiver generation changed");

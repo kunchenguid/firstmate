@@ -6036,6 +6036,8 @@ SH
   cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/"
   set +e
   out=$(PLUGIN="$repo/.pi/extensions/lib/fm-task-continuation.ts" REAL_ROOT="$ROOT" FM_ROOT_OVERRIDE="$repo" FM_HOME="$home" node --input-type=module 2>&1 <<'JS'
+import {createHash} from 'node:crypto';
+import {spawnSync} from 'node:child_process';
 import {appendFileSync,mkdirSync,readFileSync,writeFileSync} from 'node:fs';
 const home=process.env.FM_HOME,handlers=new Map(),events=new Map(),entries=[],effects=[];
 const file=home+'/session.jsonl';
@@ -6052,7 +6054,9 @@ const pi={on:(name,fn)=>handlers.set(name,[...(handlers.get(name)||[]),fn]),even
 const fire=async(name)=>{for(const fn of handlers.get(name)||[])await fn({},ctx);};
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 const wait=async(predicate,label)=>{const until=Date.now()+10000;while(!predicate()&&Date.now()<until)await sleep(10);if(!predicate())throw Error('timed out: '+label);};
+const tickUntil=async(predicate,label)=>{const until=Date.now()+10000;while(!predicate()&&Date.now()<until){pi.events.emit('firstmate:heartbeat-tick',{});await sleep(25);}if(!predicate())throw Error('timed out: '+label);};
 const record=task=>JSON.parse(readFileSync(`${home}/data/${task}/lifecycle.json`));
+const sha=path=>createHash('sha256').update(readFileSync(path)).digest('hex');
 const {installTaskContinuation}=await import(process.env.PLUGIN);
 const periodic=(await import(process.env.REAL_ROOT+'/.pi/extensions/fm-periodic-stow.ts')).default;
 const continuation=installTaskContinuation(pi,{root:process.env.FM_ROOT_OVERRIDE,home,state:home+'/state',owns:()=>true});
@@ -6092,8 +6096,52 @@ const effectCount=effects.length;
 sendMode='success';pi.events.emit('firstmate:heartbeat-tick',{});await sleep(500);
 if(effects.length!==effectCount)throw Error('uncertain persisted delivery was replayed');
 if(receiptCursor()===cursorAfterReconciliation)throw Error('healthy follow-up did not keep the bounded cursor moving');
+
+await fire('session_shutdown');await fire('session_start');await fire('session_compact');
+pi.events.emit('firstmate:heartbeat-tick',{});await sleep(300);
+if(effects.length!==effectCount)throw Error('reload or compaction replayed delivered reconciliation');
+const reconciliationPace=entries.filter(e=>e.customType==='fm-continuation-input-pacing'&&e.data.id==='reconcile:stale').at(-1);
+if(!reconciliationPace?.data.escalatedAt||reconciliationPace.data.recoveryAttempts!==0)throw Error('delivered reconciliation did not retain paced responsibility');
+reconciliationPace.data.recoveryAfter=Date.now()-1;
+await fire('session_shutdown');await fire('session_start');
+await tickUntil(()=>effects.some(e=>e.message.details?.kind==='lifecycle-reconciliation'&&e.message.details.admissions.some(id=>id.startsWith('r.'))),'paced reconciliation recovery');
+const recovery=effects.findLast(e=>e.message.details?.kind==='lifecycle-reconciliation'&&e.message.details.admissions.some(id=>id.startsWith('r.')));
+if(!recovery.message.details.tasks.includes('stale')||!recovery.message.content.includes('Persistent recovery:'))throw Error('unchanged refusal lost persistent recovery responsibility');
+const recoveryCount=effects.length;
+await fire('session_shutdown');await fire('session_start');await fire('session_compact');
+pi.events.emit('firstmate:heartbeat-tick',{});await sleep(300);
+if(effects.length!==recoveryCount)throw Error('reload or compaction replayed delivered reconciliation recovery');
+
+const stale=record('stale'),brief=`${home}/data/stale/brief.md`;
+stale.brief_sha256=sha(brief);
+stale.assessment.outcome='Changed brief explicitly reconciled; execution remains pending.';
+stale.assessment.remaining_gap='Coordinate the reconciled task through its canonical lifecycle.';
+stale.assessment.authority_ref=brief;
+stale.assessment.evidence=[{ref:brief,sha256:sha(brief)}];
+const proposal=`${home}/data/stale-reconciliation.json`;
+writeFileSync(proposal,JSON.stringify(stale),{mode:0o600});
+const reconciled=spawnSync(`${process.env.REAL_ROOT}/bin/fm-task-state.sh`,['reconcile','stale','--expected-revision',String(stale.revision),'--record',proposal],{env:{...process.env,FM_SUPERVISION_ACTOR:'main'},encoding:'utf8'});
+if(reconciled.status!==0)throw Error(`actual reconciliation refused: ${reconciled.stderr}`);
+await tickUntil(()=>effects.slice(recoveryCount).some(e=>e.message.customType==='fm-task-continuation'&&e.message.content.includes('stale: pending')),'canonical progress after reconciliation');
+if(effects.slice(recoveryCount).some(e=>e.message.details?.kind==='lifecycle-reconciliation'&&e.message.details.tasks.includes('stale')))throw Error('successful observation retained stale reconciliation recovery');
+
+for(const task of ['changed-generation','ambiguous-identity','healthy-three']){
+  mkdirSync(`${home}/data/${task}`);writeFileSync(`${home}/data/${task}/brief.md`,task+' brief\n');
+}
+writeFileSync(`${home}/state/changed-generation.meta`,'spawn_gen=g1\n');
+writeFileSync(`${home}/state/ambiguous-identity.meta`,'spawn_gen=g1\n');
+await continuation.preserve(['changed-generation','ambiguous-identity','healthy-three']);
+writeFileSync(`${home}/state/changed-generation.meta`,'spawn_gen=g2\n');
+writeFileSync(`${home}/state/ambiguous-identity.meta`,'spawn_gen=g1\nspawn_gen=g1\n');
+const refusalStart=effects.length;
+await tickUntil(()=>effects.slice(refusalStart).some(e=>e.message.details?.kind==='lifecycle-reconciliation'),'generation and identity refusals');
+const refusals=effects.slice(refusalStart).find(e=>e.message.details?.kind==='lifecycle-reconciliation');
+if(!refusals.message.details.tasks.includes('changed-generation')||!refusals.message.content.includes('stale execution generation'))throw Error('changed-generation refusal was weakened');
+if(!refusals.message.details.tasks.includes('ambiguous-identity')||!refusals.message.content.includes('duplicate execution identity'))throw Error('ambiguous-identity refusal was weakened');
+if(record('changed-generation').coordination||record('ambiguous-identity').coordination)throw Error('refused identities invented canonical receivers');
+await tickUntil(()=>effects.slice(refusalStart).some(e=>e.message.customType==='fm-task-continuation'&&e.message.content.includes('healthy-three: pending')),'healthy neighbor after identity refusals');
 await fire('session_shutdown');
-console.log('definite send failure retried once; uncertain delivery did not replay; stale task preserved healthy batch progress');
+console.log('send failures dedupe; stale reconciliation recovers across reload and compaction while strict refusals preserve healthy progress');
 JS
   )
   rc=$?
