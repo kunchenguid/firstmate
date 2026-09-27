@@ -115,12 +115,14 @@
 # send/dedup mechanism `route` uses (`send_route_message`, under an internal
 # "receipt" class not exposed through the `route` CLI), keyed on the inbound
 # chat id and text so a retried or duplicate capture of the same message
-# never sends twice. A delivery failure prints `acknowledgement:failed`,
-# durably leaves `status=failed` under `state/hermes-notify/routes/`, and
-# exits 3 exactly like a failed presence-mode confirmation - it is never
-# retried automatically; a later, independent `inbound` call for the same
-# message (a genuine retried capture) will attempt again because a failed
-# record never matches the duplicate check.
+# never sends twice. Both a genuine delivery failure and a Telegram-not-
+# configured-on-this-home skip print `acknowledgement:failed` and exit 3
+# exactly like a failed presence-mode confirmation, distinguished only in
+# the durable record they leave under `state/hermes-notify/routes/`
+# (`status=failed` for the former, `status=skipped` for the latter); neither
+# is retried automatically, and a later, independent `inbound` call for the
+# same message (a genuine retried capture) will attempt again because
+# neither record matches the duplicate check.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
