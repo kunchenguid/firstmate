@@ -31,7 +31,7 @@ SEND_INTERVAL = 60
 MAX_BATCH_ITEMS = 25
 MAX_BATCH_BYTES = 24000
 MAX_REPLY_CHARS = 8000
-OWNER_EMAIL = "johnpoyser@gmail.com"
+OWNER_EMAIL = Path(__file__).resolve().with_name("fm-afk-owner-email").read_text(encoding="ascii").strip()
 TOKEN_RE = re.compile(r"^FM-AFK-[A-Za-z0-9_-]{16}$")
 
 

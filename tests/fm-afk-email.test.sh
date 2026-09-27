@@ -200,6 +200,62 @@ PY
   pass "Pi entry requires the fixed destination while other harnesses retain hold-for-return"
 }
 
+test_shared_owner_source_drives_configuration_and_sender_auth() {
+  local owner home fakepy fetch_log out fetches
+  owner=shared-owner@example.test
+  printf '%s\n' "$owner" > "$REPO/bin/fm-afk-owner-email"
+  home=$(make_home shared-owner configured "$owner")
+  out=$(run_contract "$home" FM_TEST_HARNESS=pi 2>&1) || fail "Pi setup did not use the shared owner value: $out"
+  assert_contains "$out" 'email reach active.' 'setup accepts the destination from the canonical owner source'
+  [ "$(run_email "$home" configured)" = "$owner" ] \
+    || fail "AFK configuration did not use the shared owner value"
+
+  fakepy="$TMP_ROOT/shared-owner-python"
+  mkdir -p "$fakepy"
+  cat > "$fakepy/sitecustomize.py" <<'PY'
+import imaplib
+import os
+
+owner = os.environ["FM_TEST_OWNER"]
+message = (
+    f"From: {owner}\r\n"
+    "Authentication-Results: mx.google.com; dkim=pass header.d=gmail.com\r\n"
+    "Content-Type: text/plain; charset=utf-8\r\n\r\n"
+    "shared canonical owner body\r\n"
+).encode()
+
+class FakeMailbox:
+    def login(self, *_): pass
+    def select(self, *_): pass
+    def logout(self): pass
+
+    def uid(self, command, uid, spec):
+        if command == "search":
+            return "OK", [b"1"]
+        with open(os.environ["FM_TEST_FETCH_LOG"], "a", encoding="utf-8") as log:
+            log.write(f"{uid.decode()}\t{spec}\n")
+        raw = message
+        if spec == "(BODY.PEEK[HEADER])":
+            raw = raw.split(b"\r\n\r\n", 1)[0] + b"\r\n\r\n"
+        elif spec != "(BODY.PEEK[])":
+            raise AssertionError(f"unexpected fetch: {spec}")
+        return "OK", [(b"fetch response", raw)]
+
+imaplib.IMAP4_SSL = lambda *args, **kwargs: FakeMailbox()
+PY
+  fetch_log="$TMP_ROOT/shared-owner.fetches"
+  out=$(env -u FM_MAIL_USER -u FM_MAIL_PASS -u FM_IMAP_HOST -u FM_IMAP_PORT \
+    -u FM_SMTP_HOST -u FM_SMTP_PORT -u FM_AFK_EMAIL_TO \
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$REPO" \
+    PYTHONPATH="$fakepy" FM_TEST_OWNER="$owner" FM_TEST_FETCH_LOG="$fetch_log" \
+    "$REPO/bin/fm-mail.sh" read 2>&1) || fail "shared-owner read failed: $out"
+  assert_contains "$out" 'shared canonical owner body' 'mail read authenticates the shared owner value'
+  fetches=$(cat "$fetch_log")
+  assert_contains "$fetches" '(BODY.PEEK[])' 'shared owner body was fetched after authentication'
+  cp "$ROOT/bin/fm-afk-owner-email" "$REPO/bin/fm-afk-owner-email"
+  pass "AFK configuration and mail authentication use the shared owner value"
+}
+
 test_batched_mail_redacts_secrets_and_replies_are_item_bound() {
   local home out entered body reply_body token1 token2 sent1 sent2 inbox note note_id verification
 
@@ -1455,6 +1511,7 @@ SH
 
 
 test_destination_is_required_for_pi_entry
+test_shared_owner_source_drives_configuration_and_sender_auth
 # The active feature is tested with synthetic mail and a local fake SMTP command; no network or mailbox is used.
 test_invalid_mail_ports_keep_afk_on_hold
 test_batched_mail_redacts_secrets_and_replies_are_item_bound

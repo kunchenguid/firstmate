@@ -26,6 +26,7 @@ import smtplib
 from email.header import decode_header, make_header
 from email.message import EmailMessage
 from email.utils import formatdate, getaddresses
+from pathlib import Path
 
 USER = os.environ['FM_MAIL_USER']
 PW = os.environ['FM_MAIL_PASS']
@@ -54,7 +55,7 @@ socket.setdefaulttimeout(MAIL_TIMEOUT)
 MAX_PREVIEW = 200
 READ_LIMIT = 20
 MAX_AFK_BODY_BYTES = 256 * 1024
-AFK_OWNER_EMAIL = 'johnpoyser@gmail.com'
+OWNER_EMAIL = Path(__file__).resolve().with_name('fm-afk-owner-email').read_text(encoding='ascii').strip()
 
 
 class AfkBodyFetchError(Exception):
@@ -304,7 +305,7 @@ def cmd_read():
                     continue
                 mi = email.message_from_bytes(header_bytes)
                 trusted_sender = (
-                    from_is_configured(dec(mi.get('From')), AFK_OWNER_EMAIL)
+                    from_is_configured(dec(mi.get('From')), OWNER_EMAIL)
                     and gmail_authentication_pass(mi)
                 )
                 if not trusted_sender:
@@ -604,7 +605,7 @@ def cmd_poll_list():
                 subj = clean(dec(mi.get('Subject')))
                 fr = clean(dec(mi.get('From')))
                 ignored = afk_email_active and (
-                    not from_is_configured(fr, AFK_OWNER_EMAIL)
+                    not from_is_configured(fr, OWNER_EMAIL)
                     or not gmail_authentication_pass(mi)
                 )
                 if afk_enabled and not ignored and from_is_configured(fr, recipient):

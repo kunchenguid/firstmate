@@ -524,7 +524,7 @@ fm_afk_contract_archive_target() {  # <record> [superseded-stamp]
 # follows the header's AWAY OR QUIET rules.
 fm_afk_contract_cmd_enter() {
   local record legacy now now_epoch session_entered session_entered_epoch staged archived archived_tmp standing=''
-  local harness destination require_owner_destination
+  local harness destination owner_email require_owner_destination
   record=$(fm_afk_contract_path)
   legacy=$(fm_afk_contract_legacy_proposal_path)
   FM_AFK_CONTRACT_ENTRY_MODE=away
@@ -539,11 +539,20 @@ fm_afk_contract_cmd_enter() {
     require_owner_destination=1
   fi
   if [ "$require_owner_destination" -eq 1 ]; then
+    if [ ! -r "$FM_AFK_CONTRACT_DIR/fm-afk-owner-email" ]; then
+      fm_afk_contract_log 'away-email owner identity is unavailable; refusing entry'
+      return 1
+    fi
+    owner_email=$(<"$FM_AFK_CONTRACT_DIR/fm-afk-owner-email")
+    if [ -z "$owner_email" ]; then
+      fm_afk_contract_log 'away-email owner identity is unavailable; refusing entry'
+      return 1
+    fi
     destination=$(
       "$FM_AFK_CONTRACT_DIR/fm-mail.sh" afk-email destination 2>/dev/null || true
     )
-    if [ "$destination" != 'johnpoyser@gmail.com' ]; then
-      fm_afk_contract_log 'FM_AFK_EMAIL_TO must be exactly johnpoyser@gmail.com for Pi away mode; refusing entry'
+    if [ "$destination" != "$owner_email" ]; then
+      fm_afk_contract_log "FM_AFK_EMAIL_TO must be exactly $owner_email for Pi away mode; refusing entry"
       return 1
     fi
   fi
