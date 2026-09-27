@@ -324,18 +324,34 @@ test_a_pin_governs_only_its_own_runner() {
   pass "a Claude account file does not select a Codex or Pi launch"
 }
 
+# fake_npx: an npx that runs the Claude fake for the claude-code package.
+fake_npx() {
+  cat > "$FAKEBIN/npx" <<'NPX'
+#!/usr/bin/env bash
+[ "$1" = @anthropic-ai/claude-code ] || exit 127
+shift
+exec claude "$@"
+NPX
+  chmod +x "$FAKEBIN/npx"
+}
+
 test_raw_claude_command_receives_the_pin() {
-  local out rc id=acct-raw
+  local out rc id=acct-raw n=0 cmd
   new_case raw-claude claude
+  fake_npx
   signed_in_claude_root "$CASE/work"
   printf '%s\n' "$CASE/work" > "$HOME_DIR/config/claude-account"
-  out=$(spawn_ship "$id" --harness "claude --print raw"); rc=$?
-  expect_code 0 "$rc" "a raw Claude spawn under a signed-in pin should succeed: $out"
-  assert_contains "$out" "account=$CASE/work" "a raw Claude spawn should report the pin"
-  run_pane
-  assert_grep "CLAUDE_CONFIG_DIR=$CASE/work" "$CASE/claude-worker" "a raw Claude worker should run under the pinned root"
-  assert_grep "ANTHROPIC_API_KEY=unset" "$CASE/claude-worker" "a raw Claude worker must not keep an ambient API key"
-  pass "a raw Claude launch command receives the home's pin"
+  for cmd in "claude --print raw" "env claude --print raw" "npx @anthropic-ai/claude-code --print raw"; do
+    n=$((n + 1))
+    rm -f "$CASE/claude-worker"
+    out=$(spawn_ship "$id-$n" --harness "$cmd"); rc=$?
+    expect_code 0 "$rc" "a raw '$cmd' spawn under a signed-in pin should succeed: $out"
+    assert_contains "$out" "account=$CASE/work" "a raw '$cmd' spawn should report the pin"
+    run_pane
+    assert_grep "CLAUDE_CONFIG_DIR=$CASE/work" "$CASE/claude-worker" "a raw '$cmd' worker should run under the pinned root"
+    assert_grep "ANTHROPIC_API_KEY=unset" "$CASE/claude-worker" "a raw '$cmd' worker must not keep an ambient API key"
+  done
+  pass "a raw Claude launch command, direct or through env or npx, receives the home's pin"
 }
 
 test_raw_claude_account_override_refuses_under_a_pin() {
@@ -350,20 +366,29 @@ test_raw_claude_account_override_refuses_under_a_pin() {
     assert_refused_before_launch "$id-${var%%=*}" "$out" "the raw launch command sets ${var%%=*}"
     assert_contains "$out" "remove ${var%%=*} from the raw command, or ask the captain to change config/claude-account" \
       "the refusal should say how to proceed"
+    out=$(spawn_ship "$id-env-${var%%=*}" --harness "env $var claude --print raw"); rc=$?
+    expect_code 1 "$rc" "a raw env Claude command setting ${var%%=*} must refuse under a pin"
+    assert_refused_before_launch "$id-env-${var%%=*}" "$out" "the raw launch command sets ${var%%=*}"
   done
   assert_absent "$CASE/claude-worker" "a refused raw override must never start Claude"
   pass "a pinned home refuses a raw Claude command that overrides the account"
 }
 
 test_raw_claude_without_an_account_file_refuses() {
-  local out rc id=acct-raw-unpinned
+  local out rc id=acct-raw-unpinned n=0 cmd
   new_case raw-unpinned claude
+  fake_npx
   rm -f "$HOME_DIR/config/claude-account"
   mkdir -p "$CASE/other"
-  out=$(spawn_ship "$id" --harness "CLAUDE_CONFIG_DIR=$CASE/other ANTHROPIC_API_KEY=override-key claude --print raw"); rc=$?
-  expect_code 1 "$rc" "a raw Claude command with no account file should refuse: $out"
-  assert_refused_before_launch "$id" "$out" "config/claude-account is absent"
-  pass "a raw Claude command written as VAR=value claude cannot bypass a missing account file"
+  for cmd in "CLAUDE_CONFIG_DIR=$CASE/other ANTHROPIC_API_KEY=override-key claude --print raw" \
+    "env claude --print raw" "npx @anthropic-ai/claude-code --print raw"; do
+    n=$((n + 1))
+    out=$(spawn_ship "$id-$n" --harness "$cmd"); rc=$?
+    expect_code 1 "$rc" "a raw '$cmd' with no account file should refuse: $out"
+    assert_refused_before_launch "$id-$n" "$out" "config/claude-account is absent"
+  done
+  assert_absent "$CASE/claude-worker" "a refused raw launch must never start Claude"
+  pass "a raw Claude command, direct or through env or npx, cannot bypass a missing account file"
 }
 
 test_local_secondmate_reads_the_launching_home_pin() {

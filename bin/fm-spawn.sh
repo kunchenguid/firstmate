@@ -326,8 +326,9 @@
 #   through those credentials is refused until the file names an account. A
 #   pinned Pi launch needs --model
 #   <provider>/<id> for a declared provider and also carries --provider, and a
-#   raw Pi command refuses. A raw launch through a wrapper such as env or npx
-#   is not recognised as Claude and gets no account check. The pin is
+#   raw Pi command refuses. A raw command is Claude or Pi when any word is
+#   claude or pi or names @anthropic-ai/claude-code, so a launch through a
+#   wrapper such as env or npx takes the same pin. The pin is
 #   recorded as account= (and Pi's account_provider=) in the task record and
 #   on the spawned line.
 #   A local secondmate reads this launching home's file; pins are never
@@ -2214,6 +2215,15 @@ case "$ARG3" in
       break
       ;;
     esac
+  done
+  # A wrapped Claude or Pi launch (env claude, npx @anthropic-ai/claude-code)
+  # is still that runner, so it takes the same account pin as a direct one.
+  for word in $LAUNCH; do
+    case "$word" in
+    *@anthropic-ai/claude-code | *@anthropic-ai/claude-code@*) HARNESS=claude ;;
+    *) case "$(basename -- "$word")" in claude | pi) HARNESS=$(basename -- "$word") ;; *) continue ;; esac ;;
+    esac
+    break
   done
   ;;
 '')
