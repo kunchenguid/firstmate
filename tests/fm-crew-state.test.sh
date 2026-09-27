@@ -49,6 +49,8 @@ set -u
 . "$ROOT/bin/fm-classify-lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-pr-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-nm-run-lib.sh"
 
 CREW_STATE="$ROOT/bin/fm-crew-state.sh"
 TMP_ROOT=$(fm_test_tmproot fm-crew-state)
@@ -4338,6 +4340,82 @@ test_capped_without_sqlite_preserves_available_ids() {
   pass 'R5 capped lookup without SQLite support preserves available ids'
 }
 
+# A valid complete zero-run table - the exact shape the capped-inventory sqlite
+# reader rebuilds for a branch with zero runs, and what a fresh repo's overview
+# reports - must take the existing absent/no-run path. With no row present the
+# row counter stays at awk's uninitialized empty value, so the END comparisons
+# must be numeric: the pre-fix string comparison read this valid table as an
+# unreadable runs table, which is the 2026-09-27 pock-store-submit1 symptom.
+test_valid_zero_run_table_reads_absent() {
+  local zero complete out
+  zero=$(printf 'count: 0 of 0 total\nruns[0]{id,branch,status,head,pr}:\n')
+  out=$(fm_nm_select_run fm/zero-run "$zero" "$TMP_ROOT")
+  assert_equals absent "$out" 'a valid complete zero-run table reads absent'
+  # A complete nonempty inventory with no row for the branch proves the same
+  # absence; a capped one must not decide anything without the inventory reader.
+  complete=$(printf 'count: 1 of 1 total\nruns[1]{id,branch,status,head,pr}:\n  "01OTHER",fm/other,running,deadbeef,""\n')
+  out=$(fm_nm_select_run fm/zero-run "$complete" "$TMP_ROOT")
+  assert_equals absent "$out" 'a complete inventory without the branch proves absence'
+  out=$(fm_nm_select_run fm/zero-run "$(printf 'count: 1 of 9 total\nruns[1]{id,branch,status,head,pr}:\n  "01OTHER",fm/other,running,deadbeef,""\n')" "$TMP_ROOT")
+  case "$out" in
+    unknown\|*) : ;;
+    *) fail "a capped inventory without the branch must stay unknown, got: $out" ;;
+  esac
+  pass 'a valid zero-run table reads absent; a capped one stays unknown'
+}
+
+# The zero-run absent path must stay conservative: a header/row disagreement,
+# a structurally incomplete zero-row table, and a missing count line are all
+# unreadable rather than absent, so a truncated or corrupted inventory can
+# never masquerade as a truthful no-run.
+test_malformed_zero_row_tables_stay_unreadable() {
+  local shape out
+  # The header claims zero rows while a row is present.
+  shape=$(printf 'count: 1 of 1 total\nruns[0]{id,branch,status,head,pr}:\n  "01A",fm/zero-run,running,deadbeef,""\n')
+  out=$(fm_nm_select_run fm/zero-run "$shape" "$TMP_ROOT")
+  assert_contains "$out" 'unreadable runs table' 'an inconsistent zero-row header is unreadable'
+  assert_not_contains "$out" 'absent' 'an inconsistent zero-row header never reads absent'
+  # The header claims two rows but no row is present.
+  shape=$(printf 'count: 2 of 2 total\nruns[2]{id,branch,status,head,pr}:\n')
+  out=$(fm_nm_select_run fm/zero-run "$shape" "$TMP_ROOT")
+  assert_contains "$out" 'unreadable runs table' 'a structurally incomplete zero-row table is unreadable'
+  assert_not_contains "$out" 'absent' 'a structurally incomplete zero-row table never reads absent'
+  # The count line is missing entirely.
+  shape=$(printf 'runs[0]{id,branch,status,head,pr}:\n')
+  out=$(fm_nm_select_run fm/zero-run "$shape" "$TMP_ROOT")
+  assert_contains "$out" 'unreadable runs table' 'a zero-row table without a count line is unreadable'
+  pass 'malformed zero-row tables stay unreadable, never absent'
+}
+
+# The same truly-empty complete inventory, read the way the crew report reads
+# it (axi status answers with a no-run TOON and the bare axi overview is then
+# consulted), must fall through to the pane/busy verdict instead of unknown:
+# this is the downstream shape of the 2026-09-27 store-preparation
+# misclassification, where a worker legitimately waiting on a captain decision
+# was repeatedly reported unreadable.
+test_complete_empty_inventory_crew_state_is_not_unknown() {
+  reset_fakes
+  local d gen out
+  d=$TMP_ROOT/complete-empty-inventory
+  mkdir -p "$d/state"
+  make_repo_on_branch "$d/wt" fm/fresh-branch
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/fresh.meta" "window=fm:fm-fresh-branch" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS=$(printf 'current_branch: fm/fresh-branch\nruns_on_current_branch: 0\ncount: 0 of 0 total\nruns[0]{id,branch,status,head,pr}:\n')
+  FM_FAKE_AXI_HOME=$(printf 'repo: %s\ncount: 0 of 0 total\nruns[0]{id,branch,status,head,pr}:\n' "$d/wt")
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=1
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" fresh)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" fresh busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  out=$(run_crew_state "$d" fresh)
+  assert_not_contains "$out" "unreadable" 'a truly empty complete inventory is not an unreadable table'
+  assert_not_contains "$out" "state: unknown" 'a branch with no run anywhere does not read unknown'
+  assert_contains "$out" "state: working" 'absence of a run falls through to the pane/busy verdict'
+  assert_contains "$out" "source: pane" 'the working verdict still comes from the pane source'
+  pass 'a complete empty inventory crew read falls through to the pane verdict'
+}
+
 test_live_to_terminal_inventory_disagreement_is_unknown() {
   make_competing_runs_case live-to-terminal running cancelled
   local d=$TMP_ROOT/live-to-terminal out
@@ -5646,6 +5724,9 @@ test_complete_inventory_without_python_keeps_gate
 test_complete_ambiguity_without_python_names_both_ids
 test_capped_without_python_preserves_available_ids
 test_capped_without_sqlite_preserves_available_ids
+test_valid_zero_run_table_reads_absent
+test_malformed_zero_row_tables_stay_unreadable
+test_complete_empty_inventory_crew_state_is_not_unknown
 test_live_to_terminal_inventory_disagreement_is_unknown
 test_uninitialized_busy_worker_uses_pane
 test_uninitialized_idle_worker_uses_status
