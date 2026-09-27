@@ -1776,16 +1776,6 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fi
   MODE=$(fm_meta_get "$RELAUNCH_META" mode)
   YOLO=$(fm_meta_get "$RELAUNCH_META" yolo)
-  PR_URL=$(fm_meta_get "$RELAUNCH_META" pr)
-  PR_HEAD=$(fm_meta_get "$RELAUNCH_META" pr_head)
-  if [ -n "$PR_URL" ] && fm_pr_url_parse "$PR_URL" &&
-    [ "$FM_PR_PROVIDER" = github ] && fm_pr_head_valid "$PR_HEAD"; then
-    PR_URL=$FM_PR_URL
-    PR_ACTIVE=1
-  else
-    PR_URL=
-    PR_HEAD=
-  fi
   if [ "$KIND" = ship ]; then
     BRANCH=$(fm_meta_get "$RELAUNCH_META" branch)
     [ -n "$BRANCH" ] || BRANCH="fm/$ID"
@@ -4309,28 +4299,6 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
-  if [ "$PR_ACTIVE" -eq 1 ]; then
-    prepare_existing_pr_branch "$WT" || exit 1
-  fi
-fi
-if [ "$PR_ACTIVE" -eq 1 ] && [ -z "$PR_BRANCH" ]; then
-  PR_BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
-  [ -n "$PR_BRANCH" ] || {
-    echo "error: task $ID's pull-request worktree is not on a named branch; refusing relaunch" >&2
-    exit 1
-  }
-fi
-if [ "$PR_ACTIVE" -eq 1 ]; then
-  BRANCH=$PR_BRANCH
-fi
-if [ "$PR_ACTIVE" -eq 1 ]; then
-  {
-    printf '\n# Existing pull-request follow-up\n'
-    printf 'This task is already checked out on the existing pull-request branch %s for %s. Do not run the generic git checkout -b fm/%s setup or create another branch. Keep working on the current branch so the validation and push update that pull request.\n' "$PR_BRANCH" "$PR_URL" "$ID"
-  } >>"$BRIEF" || {
-    echo "error: could not append the existing pull-request branch instructions" >&2
-    exit 1
-  }
 fi
 
 # Re-assert the durable task copy after either treehouse acquisition or endpoint

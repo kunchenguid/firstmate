@@ -390,26 +390,6 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
   pass "fm-control relaunch: a same-harness relaunch replaces the agent in the same endpoint and worktree"
 }
 
-test_pr_relaunch_preserves_the_existing_branch_name() {
-  local dir out rc
-  dir=$(new_case pr-branch-relaunch rl-pr)
-  add_ship_task "$dir" rl-pr
-  printf '%s\n' \
-    'pr=https://github.com/example/repo/pull/19' \
-    'pr_head=0123456789abcdef0123456789abcdef01234567' \
-    >> "$dir/home/state/rl-pr.meta"
-  printf 'zsh' > "$dir/fake/command"
-
-  out=$(run_spawn "$dir" rl-pr --relaunch --harness claude); rc=$?
-  expect_code 0 "$rc" "a PR-backed relaunch should preserve its existing branch"$'\n'"$out"
-  [ "$(meta_field "$dir" rl-pr branch)" = task-rl-pr ] \
-    || fail "a PR-backed relaunch left the branch unset or changed it"
-  assert_contains "$(cat "$dir/home/data/rl-pr/launch-brief.md")" \
-    "existing pull-request branch task-rl-pr" \
-    "the replacement instructions should name the existing PR branch"
-  pass "fm-spawn relaunch: a PR-backed task keeps its existing branch name"
-}
-
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text() {
   local dir out rc
   dir=$(new_case pending-exit rl43)
@@ -2407,7 +2387,6 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
 }
 
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
-test_pr_relaunch_preserves_the_existing_branch_name
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
 test_relaunch_from_linked_home_preserves_recorded_worktree
