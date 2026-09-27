@@ -420,6 +420,8 @@ herdr tab get "$REPROJ_TAB" --session "$SESSION" >/dev/null 2>&1 \
   && fail "reproject left the old flat tab behind"
 [ "$(herdr pane list --workspace "$REPROJ_NEW_WS" --session "$SESSION" 2>/dev/null | jq -r '.result.panes | length')" = 1 ] \
   || fail "the new child does not hold exactly one task pane"
+[ ! -e "$HOME_DIR/state/hreproj.control-reproject" ] \
+  || fail "a completed reproject retained an unresolved-move receipt"
 pass "real herdr $HERDR_VERSION: reproject moves a live flat tab to an ordered child with its agent, process, and focus intact"
 
 fm_backend_herdr_kill "$SESSION:$PANE_ID" 2>/dev/null || true

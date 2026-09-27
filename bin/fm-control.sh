@@ -1090,7 +1090,6 @@ reproject_receipt_write() {  # <phase>
 
 reproject_rollback() {
   [ "$REPROJECT_ACTIVE" = 1 ] || return 0
-  [ "$REPROJECT_PHASE" != complete ] || return 0
   REPROJECT_ACTIVE=0
   case "$REPROJECT_PHASE" in
     moved)
@@ -1126,7 +1125,6 @@ reproject_publish_meta() {  # <session> <workspace> <tab> <pane>
     /^herdr_workspace_id=/ { $0 = "herdr_workspace_id=" workspace; seen_workspace = 1 }
     /^herdr_tab_id=/ { $0 = "herdr_tab_id=" tab; seen_tab = 1 }
     /^herdr_pane_id=/ { $0 = "herdr_pane_id=" pane; seen_pane = 1 }
-    /^control_reproject_tx=/ { next }
     { print }
     END {
       if (!seen_window) print "window=" window
@@ -1289,14 +1287,14 @@ do_reproject() {
   [ "$post_grade" = "$pre_grade" ] \
     || die "task $ID moved to $validated but its endpoint reads '$post_grade' instead of '$pre_grade'; rerun 'reproject' to resume, or reconcile $META before any further control action"
   T=$validated
-  REPROJECT_PHASE=complete
-  reproject_receipt_write complete \
-    || die "task $ID reprojected to $validated but its receipt could not close; the record is authoritative"
+  [ "${FM_BACKEND_HERDR_PROJECTION_ORDERED:-0}" = 1 ] \
+    || die "task $ID moved and rebound to $validated, but its child ordering is unresolved; rerun 'reproject' to resume"
   REPROJECT_SESSION_LOCK_HELD=0
   fm_lock_release "$REPROJECT_SESSION_LOCK" || true
   REPROJECT_META_LOCK_HELD=0
   fm_lock_release "$REPROJECT_META_LOCK" || true
   REPROJECT_ACTIVE=0
+  rm -f "$REPROJECT_RECEIPT" "$REPROJECT_RECEIPT.tmp" 2>/dev/null || true
   echo "reprojected $ID harness=$HARNESS backend=$BACKEND endpoint=$T workspace=$REPROJECT_NEW_WORKSPACE worktree=$WT"
 }
 

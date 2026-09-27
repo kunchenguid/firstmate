@@ -3680,6 +3680,7 @@ test_projection_recreate_missing_child_advances_binding() {
         return 0
       }
       fm_backend_herdr_projection_order_best_effort() { return 0; }
+      fm_backend_herdr_projection_order_preflight() { return 0; }
       fm_backend_herdr_projection_live_binding_matches() { return 0; }
       fm_backend_herdr_projection_recreate_missing_task \
         fmtest "$JOURNAL" recreate-r1 "$HOME_DIR" w9 w9:t9 w9:p9 firstmate fm-recreate-r1 /tmp/project || exit 1
@@ -3978,6 +3979,153 @@ test_projection_move_error_without_move_retries_once() {
   [ "$out" = w3:p2 ] && [ "$(wc -l < "$dir/calls")" -eq 2 ] || fail "unmoved retry did not issue exactly one additional move"
   [ "$(sed -n 's/^pane_id=//p' "$journal")" = w3:p2 ] || fail "unmoved retry did not bind the journal"
   pass "herdr presentation reproject: proven unmoved errors retry once"
+}
+
+test_projection_recreate_ambiguous_journal_write_retries_projected() {
+  local dir home state journal token out
+  dir="$TMP_ROOT/projection-ambiguous-journal"; home="$dir/home"; state="$dir/state"
+  mkdir -p "$home" "$state"
+  token=$(bash -c '
+    . "$0/bin/backends/herdr.sh"
+    token=$(fm_backend_herdr_projection_journal_create "$1" ambiguous-journal) || exit 1
+    label=$(fm_backend_herdr_projection_workspace_label ambiguous-journal "$token")
+    fm_backend_herdr_projection_journal_write_v2 "$1/ambiguous-journal.herdr-presentation" ambiguous-journal "$token" "$2" fmtest w9 w9:t9 w9:p9 w1 firstmate "$label" fm-ambiguous-journal || exit 1
+    printf "%s" "$token"
+  ' "$ROOT" "$state" "$(cd "$home" && pwd -P)") || fail "could not create ambiguous journal fixture"
+  journal="$state/ambiguous-journal.herdr-presentation"
+  out=$(ROOT="$ROOT" JOURNAL="$journal" HOME_DIR="$home" CREATED="$dir/created" bash -c '
+    . "$ROOT/bin/backends/herdr.sh"
+    fm_backend_herdr_pane_presence_state() { printf dead; }
+    fm_backend_herdr_workspace_presence_state() { printf dead; }
+    fm_backend_herdr_server_ensure() { return 0; }
+    fm_backend_herdr_cli() {
+      case "$*" in
+        *"workspace list"*) printf "{\"result\":{\"workspaces\":[{\"workspace_id\":\"w1\",\"label\":\"firstmate\"}]}}\n" ;;
+        *) return 1 ;;
+      esac
+    }
+    fm_backend_herdr_launcher_identity() { return 2; }
+    fm_backend_herdr_projection_parent_workspace_exact() { printf w1; }
+    fm_backend_herdr_projection_focus_snapshot() { printf "w1\tw1:t1"; }
+    fm_backend_herdr_projection_order_best_effort() { return 0; }
+    fm_backend_herdr_projection_live_binding_matches() { return 0; }
+    fm_backend_herdr_projection_cleanup_exact() { return 0; }
+    fm_backend_herdr_projection_create_task() {
+      if [ -e "$CREATED" ]; then ws=w4; else ws=w3; : > "$CREATED"; fi
+      FM_BACKEND_HERDR_PROJECTION_SESSION=fmtest
+      FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID=$ws
+      FM_BACKEND_HERDR_PROJECTION_TAB_ID=$ws:t2
+      FM_BACKEND_HERDR_PROJECTION_PANE_ID=$ws:p2
+      FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID=$ws:p1
+      return 0
+    }
+    fm_backend_herdr_projection_journal_write_v2() {
+      bash -c '\'' . "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_journal_write_v2 "$@" '\'' "$ROOT" "$@" || return 1
+      [ "$6" != w3 ]
+    }
+    if fm_backend_herdr_projection_recreate_missing_task fmtest "$JOURNAL" ambiguous-journal "$HOME_DIR" w9 w9:t9 w9:p9 firstmate fm-ambiguous-journal /tmp/project 2>/dev/null; then first=0; else first=$?; fi
+    [ "$first" = 1 ] || exit 2
+    fm_backend_herdr_projection_recreate_missing_task fmtest "$JOURNAL" ambiguous-journal "$HOME_DIR" w9 w9:t9 w9:p9 firstmate fm-ambiguous-journal /tmp/project || exit 3
+    printf "%s" "$FM_BACKEND_HERDR_PROJECTION_PANE_ID"
+  ') || fail "ambiguous journal write allowed flat fallback or blocked projected retry"
+  [ "$out" = w4:p2 ] && [ "$(sed -n 's/^pane_id=//p' "$journal")" = w4:p2 ] \
+    || fail "ambiguous journal retry did not bind the projected replacement"
+  pass "herdr presentation recreation: ambiguous journal publication retries projected"
+}
+
+test_projection_move_preflights_order_and_rebinds_unordered_child() {
+  local dir home state journal token out
+  dir="$TMP_ROOT/projection-order-rebind"; home="$dir/home"; state="$dir/state"
+  mkdir -p "$home" "$state"
+  token=$(bash -c '
+    . "$0/bin/backends/herdr.sh"
+    token=$(fm_backend_herdr_projection_journal_create "$1" order-rebind) || exit 1
+    label=$(fm_backend_herdr_projection_workspace_label order-rebind "$token")
+    fm_backend_herdr_projection_journal_write_v2 "$1/order-rebind.herdr-presentation" order-rebind "$token" "$2" fmtest w9 w9:t9 w9:p9 w1 firstmate "$label" fm-order-rebind || exit 1
+    printf "%s" "$token"
+  ' "$ROOT" "$state" "$(cd "$home" && pwd -P)") || fail "could not create order-rebind fixture"
+  journal="$state/order-rebind.herdr-presentation"
+  out=$(ROOT="$ROOT" JOURNAL="$journal" HOME_DIR="$home" TOKEN="$token" MOVED="$dir/moved" ORDERED="$dir/ordered" CALLS="$dir/calls" bash -c '
+    . "$ROOT/bin/backends/herdr.sh"
+    fm_backend_herdr_cli() {
+      case "$*" in
+        *"workspace list"*)
+          if [ -e "$ORDERED" ]; then
+            printf "{\"result\":{\"workspaces\":[{\"workspace_id\":\"w1\",\"label\":\"firstmate\"},{\"workspace_id\":\"w3\",\"label\":\"└ order-rebind · p:%s\"},{\"workspace_id\":\"w2\",\"label\":\"notes\"}]}}\n" "$TOKEN"
+          elif [ -e "$MOVED" ]; then
+            printf "{\"result\":{\"workspaces\":[{\"workspace_id\":\"w1\",\"label\":\"firstmate\"},{\"workspace_id\":\"w2\",\"label\":\"notes\"},{\"workspace_id\":\"w3\",\"label\":\"└ order-rebind · p:%s\"}]}}\n" "$TOKEN"
+          else
+            printf "{\"result\":{\"workspaces\":[{\"workspace_id\":\"w1\",\"label\":\"firstmate\"},{\"workspace_id\":\"w2\",\"label\":\"notes\"}]}}\n"
+          fi ;;
+        *"pane get w1:p2"*) printf "{\"result\":{\"pane\":{\"workspace_id\":\"w1\",\"tab_id\":\"w1:t2\",\"pane_id\":\"w1:p2\"}}}\n" ;;
+        *"pane move"*) printf "move\n" >> "$CALLS"; : > "$MOVED"; printf "{\"result\":{\"move_result\":{\"pane\":{\"workspace_id\":\"w3\",\"tab_id\":\"w3:t2\",\"pane_id\":\"w3:p2\"}}}}\n" ;;
+        *"tab list --workspace w3"*) printf "{\"result\":{\"tabs\":[{\"tab_id\":\"w3:t2\",\"label\":\"fm-order-rebind\"}]}}\n" ;;
+        *"pane list --workspace w3"*) printf "{\"result\":{\"panes\":[{\"pane_id\":\"w3:p2\",\"tab_id\":\"w3:t2\"}]}}\n" ;;
+        *"agent get"*) printf "{\"result\":{\"agent\":{\"agent\":\"codex\"}}}\n" ;;
+        *"pane process-info"*) printf "{\"result\":{\"process_info\":{\"shell_pid\":4242}}}\n" ;;
+        *) return 1 ;;
+      esac
+    }
+    fm_backend_herdr_pane_agent_state() { printf live; }
+    fm_backend_herdr_launcher_identity() { return 2; }
+    fm_backend_herdr_projection_parent_workspace_exact() { printf w1; }
+    fm_backend_herdr_projection_focus_snapshot() { printf "w1\tw1:t1"; }
+    fm_backend_herdr_projection_focus_restore() { return 0; }
+    fm_backend_herdr_workspace_move_capable() { [ "$CAPABLE" = yes ]; }
+    fm_backend_herdr_presentation_session_socket_path() { printf /socket; }
+    fm_backend_herdr_projection_order_best_effort() { [ "$MODE" != recover ] || : > "$ORDERED"; return 0; }
+    CAPABLE=no; MODE=fail
+    if fm_backend_herdr_projection_reproject_live_tab fmtest "$JOURNAL" order-rebind "$HOME_DIR" w1 w1:t2 w1:p2 firstmate fm-order-rebind 2>/dev/null; then first=0; else first=$?; fi
+    [ "$first" = 1 ] && [ ! -e "$MOVED" ] || exit 2
+    CAPABLE=yes
+    fm_backend_herdr_projection_reproject_live_tab fmtest "$JOURNAL" order-rebind "$HOME_DIR" w1 w1:t2 w1:p2 firstmate fm-order-rebind || exit 3
+    [ "$FM_BACKEND_HERDR_PROJECTION_ORDERED" = 0 ] && [ "$FM_BACKEND_HERDR_PROJECTION_PANE_ID" = w3:p2 ] || exit 4
+    MODE=recover
+    fm_backend_herdr_projection_reproject_live_tab fmtest "$JOURNAL" order-rebind "$HOME_DIR" w3 w3:t2 w3:p2 firstmate fm-order-rebind w3 w3:t2 w3:p2 1 || exit 5
+    [ "$FM_BACKEND_HERDR_PROJECTION_ORDERED" = 1 ] || exit 6
+    printf "%s" "$FM_BACKEND_HERDR_PROJECTION_PANE_ID"
+  ') || fail "ordering preflight or unordered live rebind failed"
+  [ "$out" = w3:p2 ] && [ "$(wc -l < "$dir/calls")" -eq 1 ] \
+    && [ "$(sed -n 's/^pane_id=//p' "$journal")" = w3:p2 ] \
+    || fail "ordering recovery moved the live pane twice or lost its journal binding"
+  pass "herdr presentation reproject: ordering refusal precedes move and failed ordering keeps live binding"
+}
+
+test_projection_recreate_preflights_required_ordering() {
+  local dir home state journal token out
+  dir="$TMP_ROOT/projection-recreate-order-preflight"; home="$dir/home"; state="$dir/state"
+  mkdir -p "$home" "$state"
+  token=$(bash -c '
+    . "$0/bin/backends/herdr.sh"
+    token=$(fm_backend_herdr_projection_journal_create "$1" order-preflight) || exit 1
+    label=$(fm_backend_herdr_projection_workspace_label order-preflight "$token")
+    fm_backend_herdr_projection_journal_write_v2 "$1/order-preflight.herdr-presentation" order-preflight "$token" "$2" fmtest w9 w9:t9 w9:p9 w1 firstmate "$label" fm-order-preflight || exit 1
+    printf "%s" "$token"
+  ' "$ROOT" "$state" "$(cd "$home" && pwd -P)") || fail "could not create recreation ordering fixture"
+  journal="$state/order-preflight.herdr-presentation"
+  out=$(ROOT="$ROOT" JOURNAL="$journal" HOME_DIR="$home" CREATED="$dir/created" bash -c '
+    . "$ROOT/bin/backends/herdr.sh"
+    fm_backend_herdr_pane_presence_state() { printf dead; }
+    fm_backend_herdr_workspace_presence_state() { printf dead; }
+    fm_backend_herdr_server_ensure() { return 0; }
+    fm_backend_herdr_cli() {
+      case "$*" in
+        *"workspace list"*) printf "{\"result\":{\"workspaces\":[{\"workspace_id\":\"w1\",\"label\":\"firstmate\"},{\"workspace_id\":\"w2\",\"label\":\"notes\"}]}}\n" ;;
+        *) return 1 ;;
+      esac
+    }
+    fm_backend_herdr_launcher_identity() { return 2; }
+    fm_backend_herdr_projection_parent_workspace_exact() { printf w1; }
+    fm_backend_herdr_projection_focus_snapshot() { printf "w1\tw1:t1"; }
+    fm_backend_herdr_workspace_move_capable() { return 1; }
+    fm_backend_herdr_projection_create_task() { : > "$CREATED"; return 0; }
+    if fm_backend_herdr_projection_recreate_missing_task fmtest "$JOURNAL" order-preflight "$HOME_DIR" w9 w9:t9 w9:p9 firstmate fm-order-preflight /tmp/project 2>/dev/null; then rc=0; else rc=$?; fi
+    printf "%s" "$rc"
+  ') || fail "recreation ordering preflight could not run"
+  [ "$out" = 1 ] && [ ! -e "$dir/created" ] \
+    && [ "$(sed -n 's/^workspace_id=//p' "$journal")" = w9 ] \
+    || fail "recreation mutated or allowed flat fallback without required ordering"
+  pass "herdr presentation recreation: required ordering is checked before creation"
 }
 
 # --- workspace_find: scoped to THIS home's own label, not just any match ----
@@ -6158,6 +6306,9 @@ test_projection_recreate_refuses_uncertain_workspace_and_retry
 test_projection_recreate_recovers_journal_ahead
 test_projection_recreate_adopts_journal_ahead_shell
 test_projection_move_error_without_move_retries_once
+test_projection_recreate_ambiguous_journal_write_retries_projected
+test_projection_move_preflights_order_and_rebinds_unordered_child
+test_projection_recreate_preflights_required_ordering
 test_workspace_find_matches_only_this_homes_own_label
 test_list_live_scoped_to_this_homes_workspace_only
 test_parse_target

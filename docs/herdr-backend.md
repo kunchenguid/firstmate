@@ -400,6 +400,7 @@ A live or unknown recorded or token-matched endpoint refuses duplicate launch.
 The pane keeps its live process, agent registration, and working directory; only its workspace, tab, and pane ids change.
 The move is allowed only for a Herdr ship or scout task with an existing version 2 journal, a positively classified live endpoint inside its owning parent, a live parent match, no token duplicate, and an unambiguous focus snapshot, all under the task control lock and the named-session presentation lock.
 A crash-recovery receipt at `state/<id>.control-reproject` records the move phase and any response-derived new endpoint; a rerun verifies whether the pane moved and either resumes the rebind or safely retries an unmoved pane.
+If ordering fails after a move, the record and journal still bind the live child, and the receipt remains until a rerun verifies its position.
 The new child is never closed as rollback, because closing it would kill the live worker the verb exists to preserve.
 A dead or unverified endpoint, a missing journal, a secondmate kind, or a non-Herdr backend refuses before any move.
 
