@@ -71,7 +71,7 @@
 #   secondmate whose endpoint is gone is respawned by its own owner
 #   (`--secondmate`, driven by the session-start liveness sweep).
 #   Every fresh ship/scout launch and replacement explicitly enters the recorded
-#   worktree immediately before trust setup and brief delivery, and a post-launch
+#   worktree immediately before trust setup and brief delivery, and a pre-launch
 #   cwd check refuses any endpoint that still reports another copy; a Herdr shell
 #   that has drifted out of the recorded worktree is told once to return, and
 #   only a shell that will not go refuses.
@@ -1776,6 +1776,16 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fi
   MODE=$(fm_meta_get "$RELAUNCH_META" mode)
   YOLO=$(fm_meta_get "$RELAUNCH_META" yolo)
+  PR_URL=$(fm_meta_get "$RELAUNCH_META" pr)
+  PR_HEAD=$(fm_meta_get "$RELAUNCH_META" pr_head)
+  if [ -n "$PR_URL" ] && fm_pr_url_parse "$PR_URL" &&
+    [ "$FM_PR_PROVIDER" = github ] && fm_pr_head_valid "$PR_HEAD"; then
+    PR_URL=$FM_PR_URL
+    PR_ACTIVE=1
+  else
+    PR_URL=
+    PR_HEAD=
+  fi
   if [ "$KIND" = ship ]; then
     BRANCH=$(fm_meta_get "$RELAUNCH_META" branch)
     [ -n "$BRANCH" ] || BRANCH="fm/$ID"
@@ -3867,10 +3877,9 @@ spawn_enter_recorded_worktree() {
   }
 }
 
-# The pane cwd check above proves the shell handoff, but the foreground process
-# can still be launched by a backend-specific restore or wrapper. Re-read after
-# launch so the worker itself, not only its terminal, is proven to start in the
-# recorded copy before the task is reported as launched.
+# Verify the endpoint's cwd after the explicit handoff but before any harness
+# starts. Zellij and cmux implement this read with a shell probe, so keeping it
+# before launch prevents the probe from becoming input to a live worker.
 spawn_assert_agent_worktree() {
   local expected seen i
   [ "$KIND" = secondmate ] && return 0
@@ -4300,6 +4309,28 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
+  if [ "$PR_ACTIVE" -eq 1 ]; then
+    prepare_existing_pr_branch "$WT" || exit 1
+  fi
+fi
+if [ "$PR_ACTIVE" -eq 1 ] && [ -z "$PR_BRANCH" ]; then
+  PR_BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+  [ -n "$PR_BRANCH" ] || {
+    echo "error: task $ID's pull-request worktree is not on a named branch; refusing relaunch" >&2
+    exit 1
+  }
+fi
+if [ "$PR_ACTIVE" -eq 1 ]; then
+  BRANCH=$PR_BRANCH
+fi
+if [ "$PR_ACTIVE" -eq 1 ]; then
+  {
+    printf '\n# Existing pull-request follow-up\n'
+    printf 'This task is already checked out on the existing pull-request branch %s for %s. Do not run the generic git checkout -b fm/%s setup or create another branch. Keep working on the current branch so the validation and push update that pull request.\n' "$PR_BRANCH" "$PR_URL" "$ID"
+  } >>"$BRIEF" || {
+    echo "error: could not append the existing pull-request branch instructions" >&2
+    exit 1
+  }
 fi
 
 # Re-assert the durable task copy after either treehouse acquisition or endpoint
@@ -4307,6 +4338,7 @@ fi
 # started, so a later host restart inherits the task worktree rather than the
 # tab's original project directory.
 spawn_enter_recorded_worktree
+spawn_assert_agent_worktree
 
 # Pre-register Claude's workspace trust for the directory this launch starts in,
 # at the first point that directory is known and before any per-task state is
@@ -5380,7 +5412,6 @@ if [ "$HARNESS" = agy ]; then
     exit 1
   fi
 fi
-spawn_assert_agent_worktree
 
 if [ "$KIND" = secondmate ] && [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" != 1 ]; then
   if ! fm_config_reread_discard_pending "$PROJ_ABS" "$ID" "$FM_HOME"; then
