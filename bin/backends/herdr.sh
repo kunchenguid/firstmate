@@ -2940,7 +2940,7 @@ fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <h
 fm_backend_herdr_projection_recreate_missing_task() {  # <session> <journal> <task-id> <home> <meta-workspace> <meta-tab> <meta-pane> <parent-label> <task-label> <cwd>
   local session=$1 journal=$2 id=$3 home=$4 meta_workspace=$5 meta_tab=$6 meta_pane=$7
   local parent_label=$8 task_label=$9 cwd=${10}
-  local canonical_home token list wsids count wsid panes pane_ids pane state
+  local canonical_home token list state
   local parent_ws launcher_status launcher_ws focus_before
   local old_herdr_session new_session new_workspace new_tab new_pane new_seeded_pane create_status
   FM_BACKEND_HERDR_PROJECTION_TAB_ID=""
@@ -3000,38 +3000,16 @@ fm_backend_herdr_projection_recreate_missing_task() {  # <session> <journal> <ta
     echo "error: could not parse herdr workspaces while inspecting the presentation for $id; refusing duplicate launch" >&2
     return 1
   fi
-  wsids=$(printf '%s' "$list" | jq -r --arg suffix " · p:$token" '.result.workspaces[]? | select((.label | type) == "string" and (.label | endswith($suffix))) | .workspace_id' 2>/dev/null)
-  count=$(printf '%s\n' "$wsids" | awk 'NF { n += 1 } END { print n + 0 }')
-  if [ "$count" -gt 0 ]; then
-    while IFS= read -r wsid; do
-      [ -n "$wsid" ] || continue
-      panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$wsid" 2>/dev/null) || {
-        echo "error: could not inspect herdr presentation workspace $wsid for $id; refusing duplicate launch" >&2
-        return 1
-      }
-      if ! printf '%s' "$panes" | jq -e '(.result.panes | type) == "array"' >/dev/null 2>&1; then
-        echo "error: could not parse herdr presentation workspace $wsid for $id; refusing duplicate launch" >&2
-        return 1
-      fi
-      pane_ids=$(printf '%s' "$panes" | jq -r '.result.panes[]? | .pane_id' 2>/dev/null)
-      while IFS= read -r pane; do
-        [ -n "$pane" ] || continue
-        state=$(fm_backend_herdr_pane_agent_state "$session" "$pane")
-        case "$state" in
-          dead|no-agent) ;;
-          *)
-            echo "error: duplicate herdr presentation for $id has a $state pane; refusing duplicate launch" >&2
-            return 1
-            ;;
-        esac
-      done <<EOF
-$pane_ids
-EOF
-    done <<EOF
-$wsids
-EOF
-    echo "warning: duplicate herdr presentation token for $id is quarantined; spawning flat" >&2
-    return 2
+  if fm_backend_herdr_projection_token_risk "$session" "$list" "$token" "$id"; then
+    :
+  else
+    case $? in
+      2)
+        echo "warning: duplicate herdr presentation token for $id is quarantined; spawning flat" >&2
+        return 2
+        ;;
+      *) return 1 ;;
+    esac
   fi
   parent_ws=$FM_BACKEND_HERDR_JOURNAL_PARENT_WORKSPACE_ID
   if ! printf '%s' "$list" | jq -e --arg ws "$parent_ws" --arg label "$parent_label" '(.result.workspaces | type) == "array" and ([.result.workspaces[] | select(.workspace_id == $ws and .label == $label)] | length) == 1' >/dev/null 2>&1; then
@@ -3141,51 +3119,40 @@ EOF
 # Return 0 means moved, verified, ordered, and journal-bound; the new endpoint
 # is in FM_BACKEND_HERDR_PROJECTION_SESSION/WORKSPACE_ID/TAB_ID/PANE_ID.
 # Return 1 means refused before any move, with nothing mutated.
-# Return 2 means the pane moved but the rebind could not complete: the worker
-# is safe in its new child and the caller must finish the record rebind
-# (idempotent resume) rather than move again. A live worker is never closed
+# Return 2 means a move was issued or previously retained but the rebind could
+# not complete: the caller must retain its receipt and resume without moving
+# again. A live worker is never closed
 # as rollback; only a pre-move refusal rolls back to doing nothing.
 fm_backend_herdr_projection_reproject_live_tab() {  # <session> <journal> <task-id> <home> <meta-workspace> <meta-tab> <meta-pane> <parent-label> <task-label>
   local session=$1 journal=$2 id=$3 home=$4 meta_workspace=$5 meta_tab=$6 meta_pane=$7
   local parent_label=$8 task_label=$9
-  local canonical_home token list wsids count wsid panes pane_ids pane state
+  local canonical_home token list state
   local parent_ws launcher_status launcher_ws focus_before
-  local pane_info old_ws old_tab old_pane old_shell old_agent old_status
-  local move_out new_pane new_tab new_workspace new_agent new_shell
-  local workspace_label version
+  local pane_info old_ws old_tab old_pane old_shell old_agent
+  local move_out move_status new_pane new_tab new_workspace new_agent new_shell
+  local workspace_label
   FM_BACKEND_HERDR_PROJECTION_SESSION=""
   FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID=""
   FM_BACKEND_HERDR_PROJECTION_TAB_ID=""
   FM_BACKEND_HERDR_PROJECTION_PANE_ID=""
   fm_backend_herdr_projection_journal_snapshot "$journal" "$id" || return 1
-  version=$FM_BACKEND_HERDR_JOURNAL_VERSION
+  [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 2 ] || {
+    echo "error: herdr presentation journal for $id has no exact live binding; refusing live move" >&2
+    return 1
+  }
   token=$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID
   canonical_home=$(fm_backend_herdr_projection_home_identity "$home") || {
     echo "error: herdr presentation home for $id could not be resolved exactly; refusing live move" >&2
     return 1
   }
-  case "$version" in
-    1) ;;
-    2)
-      if [ "$FM_BACKEND_HERDR_JOURNAL_HOME" != "$canonical_home" ] \
-        || [ "$FM_BACKEND_HERDR_JOURNAL_SESSION" != "$session" ] \
-        || [ "$FM_BACKEND_HERDR_JOURNAL_PARENT_LABEL" != "$parent_label" ] \
-        || [ "$FM_BACKEND_HERDR_JOURNAL_TASK_LABEL" != "$task_label" ]; then
-        echo "error: herdr presentation binding for $id does not match its exact home, session, or parent; refusing live move" >&2
-        return 1
-      fi
-      ;;
-    *)
-      echo "error: malformed herdr presentation journal for $id; refusing live move" >&2
-      return 1
-      ;;
-  esac
-  # Resolve the owning parent before touching anything: v2 carries its exact
-  # workspace id, while v1 falls back to a unique home-label lookup.
-  parent_ws=""
-  if [ "$version" = 2 ]; then
-    parent_ws=$FM_BACKEND_HERDR_JOURNAL_PARENT_WORKSPACE_ID
+  if [ "$FM_BACKEND_HERDR_JOURNAL_HOME" != "$canonical_home" ] \
+    || [ "$FM_BACKEND_HERDR_JOURNAL_SESSION" != "$session" ] \
+    || [ "$FM_BACKEND_HERDR_JOURNAL_PARENT_LABEL" != "$parent_label" ] \
+    || [ "$FM_BACKEND_HERDR_JOURNAL_TASK_LABEL" != "$task_label" ]; then
+    echo "error: herdr presentation binding for $id does not match its exact home, session, or parent; refusing live move" >&2
+    return 1
   fi
+  parent_ws=$FM_BACKEND_HERDR_JOURNAL_PARENT_WORKSPACE_ID
   list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || {
     echo "error: could not list herdr workspaces for $id; refusing live move" >&2
     return 1
@@ -3194,43 +3161,38 @@ fm_backend_herdr_projection_reproject_live_tab() {  # <session> <journal> <task-
     echo "error: could not parse herdr workspaces for $id; refusing live move" >&2
     return 1
   fi
-  if [ -n "$parent_ws" ]; then
-    if ! printf '%s' "$list" | jq -e --arg ws "$parent_ws" --arg label "$parent_label" '([.result.workspaces[] | select(.workspace_id == $ws and .label == $label)] | length) == 1' >/dev/null 2>&1; then
-      echo "error: herdr presentation parent for $id is absent or ambiguous; refusing live move" >&2
-      return 1
-    fi
-  else
-    parent_ws=$(printf '%s' "$list" | jq -r --arg label "$parent_label" '[.result.workspaces[]? | select(.label == $label)] | if length == 1 then .[0].workspace_id else empty end' 2>/dev/null)
-    if [ -z "$parent_ws" ]; then
-      echo "error: herdr presentation parent for $id is absent or ambiguous; refusing live move" >&2
-      return 1
-    fi
+  if ! printf '%s' "$list" | jq -e --arg ws "$parent_ws" --arg label "$parent_label" '([.result.workspaces[] | select(.workspace_id == $ws and .label == $label)] | length) == 1' >/dev/null 2>&1; then
+    echo "error: herdr presentation parent for $id is absent or ambiguous; refusing live move" >&2
+    return 1
   fi
-  if [ "$version" = 2 ]; then
-    workspace_label=$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL
-  else
-    workspace_label=$(fm_backend_herdr_projection_workspace_label "$id" "$token") || {
-      echo "error: herdr presentation label for $id could not be derived; refusing live move" >&2
-      return 1
-    }
-  fi
+  workspace_label=$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL
   # A rerun after a completed rebind finds the journal already bound to the
   # recorded live child. Adopt it without moving when the live shape agrees.
-  if [ "$version" = 2 ] \
-    && [ "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID" = "$meta_workspace" ] \
+  if [ "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID" = "$meta_workspace" ] \
     && [ "$FM_BACKEND_HERDR_JOURNAL_TAB_ID" = "$meta_tab" ] \
     && [ "$FM_BACKEND_HERDR_JOURNAL_PANE_ID" = "$meta_pane" ] \
-    && fm_backend_herdr_projection_live_binding_matches "$session" "$token" "$meta_workspace" "$meta_tab" "$meta_pane" "$parent_ws" "$parent_label" "$workspace_label" "$task_label"; then
+    && fm_backend_herdr_projection_live_binding_matches "$session" "$token" "$meta_workspace" "$meta_tab" "$meta_pane" "$parent_ws" "$parent_label" "$workspace_label" "$task_label" \
+    && [ "$(fm_backend_herdr_pane_agent_state "$session" "$meta_pane")" = live ]; then
     FM_BACKEND_HERDR_PROJECTION_SESSION=$session
     FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID=$meta_workspace
     FM_BACKEND_HERDR_PROJECTION_TAB_ID=$meta_tab
     FM_BACKEND_HERDR_PROJECTION_PANE_ID=$meta_pane
     return 0
   fi
+  if [ -n "${10:-}" ] && [ -n "${11:-}" ] && [ -n "${12:-}" ]; then
+    fm_backend_herdr_projection_reproject_resume "$session" "$journal" "$id" "$canonical_home" "$token" \
+      "${10}" "${11}" "${12}" "$parent_ws" "$parent_label" "$workspace_label" "$task_label" && return 0
+    echo "error: retained herdr move for $id could not be verified; refusing another move" >&2
+    return 2
+  fi
   # The recorded flat endpoint must currently resolve to a live pane. A pane
   # get that already follows a previous move lands in the idempotent resume
   # path instead of moving again.
   pane_info=$(fm_backend_herdr_cli "$session" pane get "$meta_pane" 2>/dev/null) || {
+    if [ "${13:-0}" = 1 ]; then
+      fm_backend_herdr_projection_reproject_resume_uncertain "$session" "$list" "$journal" "$id" "$canonical_home" "$token" "$parent_ws" "$parent_label" "$workspace_label" "$task_label" && return 0
+      return 2
+    fi
     echo "error: herdr presentation pane for $id could not be read; refusing live move" >&2
     return 1
   }
@@ -3248,8 +3210,12 @@ fm_backend_herdr_projection_reproject_live_tab() {  # <session> <journal> <task-
     # id to its current record, whose own pane id is the live one. Verify that
     # record is the task's own child and finish the journal rebind instead of
     # moving again.
-    fm_backend_herdr_projection_reproject_resume "$session" "$journal" "$id" "$canonical_home" "$token" "$version" "$old_ws" "$old_tab" "$old_pane" "$parent_ws" "$parent_label" "$workspace_label" "$task_label" && return 0
+    fm_backend_herdr_projection_reproject_resume "$session" "$journal" "$id" "$canonical_home" "$token" "$old_ws" "$old_tab" "$old_pane" "$parent_ws" "$parent_label" "$workspace_label" "$task_label" && return 0
     echo "error: herdr presentation pane for $id already moved but the rebind could not complete; the worker is retained, resume the rebind" >&2
+    return 2
+  fi
+  if [ "${13:-0}" = 1 ]; then
+    echo "error: previous herdr move for $id remains uncertain; refusing another move" >&2
     return 2
   fi
   if [ "$meta_workspace" != "$parent_ws" ]; then
@@ -3258,45 +3224,15 @@ fm_backend_herdr_projection_reproject_live_tab() {  # <session> <journal> <task-
   fi
   # No live workspace may already carry this token; the stale v2 child is
   # gone, so any live match is foreign or duplicated.
-  wsids=$(printf '%s' "$list" | jq -r --arg suffix " · p:$token" '.result.workspaces[]? | select((.label | type) == "string" and (.label | endswith($suffix))) | .workspace_id' 2>/dev/null)
-  count=$(printf '%s\n' "$wsids" | awk 'NF { n += 1 } END { print n + 0 }')
-  if [ "$count" -gt 0 ]; then
-    while IFS= read -r wsid; do
-      [ -n "$wsid" ] || continue
-      panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$wsid" 2>/dev/null) || {
-        echo "error: could not inspect herdr presentation workspace $wsid for $id; refusing live move" >&2
-        return 1
-      }
-      if ! printf '%s' "$panes" | jq -e '(.result.panes | type) == "array"' >/dev/null 2>&1; then
-        echo "error: could not parse herdr presentation workspace $wsid for $id; refusing live move" >&2
-        return 1
-      fi
-      pane_ids=$(printf '%s' "$panes" | jq -r '.result.panes[]? | .pane_id' 2>/dev/null)
-      while IFS= read -r pane; do
-        [ -n "$pane" ] || continue
-        state=$(fm_backend_herdr_pane_agent_state "$session" "$pane")
-        case "$state" in
-          dead|no-agent) ;;
-          *)
-            echo "error: duplicate herdr presentation for $id has a $state pane; refusing live move" >&2
-            return 1
-            ;;
-        esac
-      done <<EOF
-$pane_ids
-EOF
-    done <<EOF
-$wsids
-EOF
-    echo "error: duplicate herdr presentation token for $id is quarantined; refusing live move" >&2
+  if fm_backend_herdr_projection_token_risk "$session" "$list" "$token" "$id"; then
+    :
+  else
+    echo "error: duplicate or unverified herdr presentation token for $id; refusing live move" >&2
     return 1
   fi
-  # The pane must hold something worth moving: a registered agent, a stale
-  # registration over a shell, or a bare shell. An unreadable or vanished
-  # pane refuses; a vanished one belongs to relaunch, not to a move.
   state=$(fm_backend_herdr_pane_agent_state "$session" "$meta_pane")
   case "$state" in
-    live|stale-agent|no-agent) ;;
+    live) ;;
     dead)
       echo "error: herdr presentation pane for $id is gone; use relaunch rather than a live move" >&2
       return 1
@@ -3306,7 +3242,6 @@ EOF
       return 1
       ;;
   esac
-  old_status=$state
   old_agent=$(fm_backend_herdr_cli "$session" agent get "$meta_pane" 2>/dev/null | jq -r '.result.agent.agent // empty' 2>/dev/null)
   old_shell=$(fm_backend_herdr_cli "$session" pane process-info --pane "$meta_pane" 2>/dev/null | jq -er '.result.process_info.shell_pid | select(type == "number" and . > 1) | floor' 2>/dev/null) || old_shell=""
   set +e
@@ -3337,22 +3272,21 @@ EOF
     echo "error: herdr presentation move for $id could not capture exact focus; refusing live move" >&2
     return 1
   }
-  if [ "$version" = 2 ]; then
-    workspace_label=$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL
-  else
-    workspace_label=$(fm_backend_herdr_projection_workspace_label "$id" "$token") || {
-      echo "error: herdr presentation label for $id could not be derived; refusing live move" >&2
-      return 1
-    }
-  fi
-  if ! move_out=$(fm_backend_herdr_cli "$session" pane move "$meta_pane" --new-workspace --label "$workspace_label" --tab-label "$task_label" --no-focus 2>/dev/null); then
-    fm_backend_herdr_projection_focus_restore "$session" "$focus_before" "live-tab move" || true
-    echo "error: herdr presentation move for $id failed without relocating the pane; nothing changed" >&2
-    return 1
-  fi
+  workspace_label=$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL
+  move_status=0
+  move_out=$(fm_backend_herdr_cli "$session" pane move "$meta_pane" --new-workspace --label "$workspace_label" --tab-label "$task_label" --no-focus 2>/dev/null) || move_status=$?
   new_pane=$(printf '%s' "$move_out" | jq -r '.result.move_result.pane.pane_id // empty' 2>/dev/null)
   new_tab=$(printf '%s' "$move_out" | jq -r '.result.move_result.pane.tab_id // empty' 2>/dev/null)
   new_workspace=$(printf '%s' "$move_out" | jq -r '.result.move_result.pane.workspace_id // empty' 2>/dev/null)
+  FM_BACKEND_HERDR_PROJECTION_SESSION=$session
+  FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID=$new_workspace
+  FM_BACKEND_HERDR_PROJECTION_TAB_ID=$new_tab
+  FM_BACKEND_HERDR_PROJECTION_PANE_ID=$new_pane
+  if [ "$move_status" -ne 0 ]; then
+    fm_backend_herdr_projection_focus_restore "$session" "$focus_before" "live-tab move" || true
+    echo "error: herdr presentation move for $id returned an uncertain result; resume the rebind" >&2
+    return 2
+  fi
   if [ -z "$new_pane" ] || [ -z "$new_tab" ] || [ -z "$new_workspace" ] || [ "$new_workspace" = "$parent_ws" ]; then
     fm_backend_herdr_projection_focus_restore "$session" "$focus_before" "live-tab move" || true
     echo "error: herdr presentation move for $id returned an ambiguous relocation; the worker may have moved, so resume rather than retry" >&2
@@ -3374,7 +3308,7 @@ EOF
     echo "error: herdr presentation move for $id lost its agent registration; the worker process is retained in its new child, resume the rebind" >&2
     return 2
   fi
-  if [ -z "$new_agent" ] && [ "$old_status" = live ]; then
+  if [ -z "$new_agent" ]; then
     echo "error: herdr presentation move for $id lost its live agent registration; the worker process is retained in its new child, resume the rebind" >&2
     return 2
   fi
@@ -3383,12 +3317,7 @@ EOF
     echo "error: herdr presentation move for $id did not converge to an exact child; the worker is retained, resume the rebind" >&2
     return 2
   fi
-  if [ "$version" = 1 ]; then
-    fm_backend_herdr_projection_journal_bind "$journal" "$id" "$canonical_home" "$session" "$new_workspace" "$new_tab" "$new_pane" "$parent_ws" "$parent_label" "$workspace_label" "$task_label" || {
-      echo "error: herdr presentation move for $id could not publish its binding; the worker is retained, resume the rebind" >&2
-      return 2
-    }
-  elif ! fm_backend_herdr_projection_journal_write_v2 "$journal" "$id" "$token" "$canonical_home" "$session" "$new_workspace" "$new_tab" "$new_pane" "$parent_ws" "$parent_label" "$workspace_label" "$task_label"; then
+  if ! fm_backend_herdr_projection_journal_write_v2 "$journal" "$id" "$token" "$canonical_home" "$session" "$new_workspace" "$new_tab" "$new_pane" "$parent_ws" "$parent_label" "$workspace_label" "$task_label"; then
     echo "error: herdr presentation move for $id could not publish its binding; the worker is retained, resume the rebind" >&2
     return 2
   fi
@@ -3405,24 +3334,22 @@ EOF
 # current child. Verifies that child is the task's own single-pane projection
 # with no agent ambiguity and binds the journal to it. Return 0 when bound,
 # 2 when retained but unverifiable.
-fm_backend_herdr_projection_reproject_resume() {  # <session> <journal> <task-id> <home> <token> <version> <cur-workspace> <cur-tab> <cur-pane> <parent-workspace> <parent-label> <workspace-label> <task-label>
-  local session=$1 journal=$2 id=$3 canonical_home=$4 token=$5 version=$6
-  local cur_workspace=$7 cur_tab=$8 cur_pane=$9 parent_ws=${10} parent_label=${11}
-  local workspace_label=${12} task_label=${13} state
+fm_backend_herdr_projection_reproject_resume() {  # <session> <journal> <task-id> <home> <token> <cur-workspace> <cur-tab> <cur-pane> <parent-workspace> <parent-label> <workspace-label> <task-label>
+  local session=$1 journal=$2 id=$3 canonical_home=$4 token=$5
+  local cur_workspace=$6 cur_tab=$7 cur_pane=$8 parent_ws=$9 parent_label=${10}
+  local workspace_label=${11} task_label=${12} state
   fm_backend_herdr_projection_order_best_effort "$session" "$cur_workspace" "$parent_label" "$parent_ws"
   if ! fm_backend_herdr_projection_live_binding_matches "$session" "$token" "$cur_workspace" "$cur_tab" "$cur_pane" "$parent_ws" "$parent_label" "$workspace_label" "$task_label"; then
     return 2
   fi
   state=$(fm_backend_herdr_pane_agent_state "$session" "$cur_pane")
   case "$state" in
-    live|stale-agent|no-agent) ;;
+    live) ;;
     *)
       return 2
       ;;
   esac
-  if [ "$version" = 1 ]; then
-    fm_backend_herdr_projection_journal_bind "$journal" "$id" "$canonical_home" "$session" "$cur_workspace" "$cur_tab" "$cur_pane" "$parent_ws" "$parent_label" "$workspace_label" "$task_label" || return 2
-  elif ! fm_backend_herdr_projection_journal_write_v2 "$journal" "$id" "$token" "$canonical_home" "$session" "$cur_workspace" "$cur_tab" "$cur_pane" "$parent_ws" "$parent_label" "$workspace_label" "$task_label"; then
+  if ! fm_backend_herdr_projection_journal_write_v2 "$journal" "$id" "$token" "$canonical_home" "$session" "$cur_workspace" "$cur_tab" "$cur_pane" "$parent_ws" "$parent_label" "$workspace_label" "$task_label"; then
     return 2
   fi
   FM_BACKEND_HERDR_PROJECTION_SESSION=$session
@@ -3432,14 +3359,59 @@ fm_backend_herdr_projection_reproject_resume() {  # <session> <journal> <task-id
   return 0
 }
 
+fm_backend_herdr_projection_reproject_resume_uncertain() {
+  local session=$1 list=$2 journal=$3 id=$4 home=$5 token=$6 parent_ws=$7 parent_label=$8
+  local workspace_label=$9 task_label=${10} ws panes tab pane
+  ws=$(printf '%s' "$list" | jq -r --arg label "$workspace_label" '
+    [.result.workspaces[] | select(.label == $label)] |
+    if length == 1 then .[0].workspace_id else empty end
+  ' 2>/dev/null) || return 2
+  [ -n "$ws" ] && [ "$ws" != "$parent_ws" ] || return 2
+  panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$ws" 2>/dev/null) || return 2
+  tab=$(printf '%s' "$panes" | jq -r 'if (.result.panes | type) == "array" and (.result.panes | length) == 1 then .result.panes[0].tab_id // empty else empty end' 2>/dev/null) || return 2
+  pane=$(printf '%s' "$panes" | jq -r 'if (.result.panes | type) == "array" and (.result.panes | length) == 1 then .result.panes[0].pane_id // empty else empty end' 2>/dev/null) || return 2
+  [ -n "$tab" ] && [ -n "$pane" ] || return 2
+  fm_backend_herdr_projection_reproject_resume "$session" "$journal" "$id" "$home" "$token" \
+    "$ws" "$tab" "$pane" "$parent_ws" "$parent_label" "$workspace_label" "$task_label"
+}
+
 # fm_backend_herdr_projection_recovery_allows_flat: inspect an existing
 # journal's exact token matches without adopting, reusing, renaming, closing,
 # or deleting anything.
 # Missing matches safely degrade to the normal flat workspace.
 # One or more matches allow flat fallback only when every pane is positively
 # dead or agent-free; a live or unknown pane refuses a duplicate launch.
+fm_backend_herdr_projection_token_risk() {  # <session> <workspace-list-json> <token> <task-id>
+  local session=$1 list=$2 token=$3 id=$4 wsids wsid panes pane_ids pane state
+  wsids=$(printf '%s' "$list" | jq -r --arg suffix " · p:$token" \
+    '.result.workspaces[]? | select((.label | type) == "string" and (.label | endswith($suffix))) | .workspace_id' 2>/dev/null) || return 1
+  [ -n "$wsids" ] || return 0
+  while IFS= read -r wsid; do
+    [ -n "$wsid" ] || continue
+    panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$wsid" 2>/dev/null) || return 1
+    printf '%s' "$panes" | jq -e '(.result.panes | type) == "array"' >/dev/null 2>&1 || return 1
+    pane_ids=$(printf '%s' "$panes" | jq -r '.result.panes[]? | .pane_id' 2>/dev/null) || return 1
+    while IFS= read -r pane; do
+      [ -n "$pane" ] || continue
+      state=$(fm_backend_herdr_pane_agent_state "$session" "$pane")
+      case "$state" in
+        dead|no-agent) ;;
+        *)
+          echo "error: duplicate herdr presentation for $id has a $state pane; refusing duplicate launch or move" >&2
+          return 1
+          ;;
+      esac
+    done <<EOF
+$pane_ids
+EOF
+  done <<EOF
+$wsids
+EOF
+  return 2
+}
+
 fm_backend_herdr_projection_recovery_allows_flat() {  # <session> <journal> <task-id>
-  local session=$1 journal=$2 id=$3 token list wsids count wsid panes pane_ids pane state
+  local session=$1 journal=$2 id=$3 token list
   token=$(fm_backend_herdr_projection_journal_token "$journal" "$id") || {
     echo "error: malformed herdr presentation journal for $id; refusing duplicate launch" >&2
     return 1
@@ -3456,45 +3428,18 @@ fm_backend_herdr_projection_recovery_allows_flat() {  # <session> <journal> <tas
     echo "error: could not parse herdr workspaces while inspecting the quarantined presentation for $id" >&2
     return 1
   fi
-  wsids=$(printf '%s' "$list" | jq -r --arg suffix " · p:$token" \
-    '.result.workspaces[]? | select((.label | type) == "string" and (.label | endswith($suffix))) | .workspace_id' 2>/dev/null)
-  count=$(printf '%s\n' "$wsids" | awk 'NF { n += 1 } END { print n + 0 }')
-  if [ "$count" -eq 0 ]; then
-    echo "warning: no exact herdr presentation token match for $id; leaving any stale space untouched and spawning flat" >&2
+  if fm_backend_herdr_projection_token_risk "$session" "$list" "$token" "$id"; then
+    echo "warning: no exact herdr presentation token match for $id; spawning flat" >&2
     return 0
+  else
+    case $? in
+      2)
+        echo "warning: quarantined herdr presentation for $id is dead or agent-free; exact bound reclaim may proceed, otherwise spawning flat" >&2
+        return 0
+        ;;
+      *) return 1 ;;
+    esac
   fi
-  if [ "$count" -gt 1 ]; then
-    echo "warning: $count exact herdr presentation token matches for $id are quarantined; inspecting only for duplicate-agent risk" >&2
-  fi
-  while IFS= read -r wsid; do
-    [ -n "$wsid" ] || continue
-    panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$wsid" 2>/dev/null) || {
-      echo "error: could not inspect herdr presentation workspace $wsid for $id; refusing duplicate launch" >&2
-      return 1
-    }
-    if ! printf '%s' "$panes" | jq -e '(.result.panes | type) == "array"' >/dev/null 2>&1; then
-      echo "error: could not parse herdr presentation workspace $wsid for $id; refusing duplicate launch" >&2
-      return 1
-    fi
-    pane_ids=$(printf '%s' "$panes" | jq -r '.result.panes[]? | .pane_id' 2>/dev/null)
-    while IFS= read -r pane; do
-      [ -n "$pane" ] || continue
-      state=$(fm_backend_herdr_pane_agent_state "$session" "$pane")
-      case "$state" in
-        dead|no-agent) : ;;
-        live|stale-agent|unknown)
-          echo "error: quarantined herdr presentation for $id has a $state pane; refusing duplicate launch" >&2
-          return 1
-          ;;
-      esac
-    done <<EOF
-$pane_ids
-EOF
-  done <<EOF
-$wsids
-EOF
-  echo "warning: quarantined herdr presentation for $id is dead or agent-free; exact bound reclaim may proceed, otherwise spawning flat" >&2
-  return 0
 }
 
 # fm_backend_herdr_projection_endpoint_matches_journal: read-only correlation

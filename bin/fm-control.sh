@@ -1098,7 +1098,7 @@ reproject_rollback() {
   REPROJECT_ACTIVE=0
   case "$REPROJECT_PHASE" in
     moved)
-      echo "error: reproject of $ID stopped after its pane moved; the worker is safe in its new child and the receipt records the new endpoint for resume" >&2
+      echo "error: reproject of $ID stopped with an unresolved move; the worker and receipt are retained for resume" >&2
       ;;
     *)
       rm -f "$REPROJECT_RECEIPT" "$REPROJECT_RECEIPT.tmp" "$REPROJECT_META_PRIOR" "$REPROJECT_JOURNAL_PRIOR" 2>/dev/null || true
@@ -1147,7 +1147,7 @@ reproject_publish_meta() {  # <session> <workspace> <tab> <pane>
 
 do_reproject() {
   local pre_grade pre_info pre_followed meta_ws meta_tab meta_pane session parent_label task_label
-  local journal status new_target post_grade validated
+  local journal status new_target post_grade validated prior_phase prior_session prior_ws prior_tab prior_pane
   local attempt
   [ "$BACKEND" = herdr ] \
     || die "task $ID runs on the $BACKEND backend, which has no verified move-existing-pane primitive; 'reproject' is herdr-only"
@@ -1183,27 +1183,54 @@ do_reproject() {
   journal=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID")
   [ -f "$journal" ] && [ ! -L "$journal" ] \
     || die "task $ID has no presentation journal; 'reproject' rebinds an existing projection, it does not invent one"
+  prior_phase=""
+  prior_session=""; prior_ws=""; prior_tab=""; prior_pane=""
+  if [ -f "$REPROJECT_RECEIPT" ] && [ ! -L "$REPROJECT_RECEIPT" ]; then
+    prior_phase=$(fm_meta_get "$REPROJECT_RECEIPT" phase)
+    if [ "$prior_phase" = moved ]; then
+      prior_session=$(fm_meta_get "$REPROJECT_RECEIPT" new_session)
+      prior_ws=$(fm_meta_get "$REPROJECT_RECEIPT" new_workspace)
+      prior_tab=$(fm_meta_get "$REPROJECT_RECEIPT" new_tab)
+      prior_pane=$(fm_meta_get "$REPROJECT_RECEIPT" new_pane)
+      [ -z "$prior_session" ] || [ "$prior_session" = "$session" ] \
+        || die "task $ID's retained move names a different session; refusing to move again"
+      REPROJECT_ACTIVE=1
+      REPROJECT_PHASE=moved
+      REPROJECT_NEW_SESSION=$prior_session
+      REPROJECT_NEW_WORKSPACE=$prior_ws
+      REPROJECT_NEW_TAB=$prior_tab
+      REPROJECT_NEW_PANE=$prior_pane
+      if [ -z "$prior_ws" ] || [ -z "$prior_tab" ] || [ -z "$prior_pane" ]; then
+        prior_ws=""; prior_tab=""; prior_pane=""
+      fi
+    fi
+  fi
   # Grade the endpoint Herdr currently resolves the recorded pane to. After a
   # previous move Herdr follows the old id to the relocated record, so grade
   # that record; the backend entry re-verifies the same follow before binding.
-  pre_info=$(fm_backend_herdr_cli "$session" pane get "$meta_pane" 2>/dev/null) \
-    || die "task $ID's endpoint could not be read; 'reproject' requires a positively classified live or idle endpoint"
+  pre_info=$(fm_backend_herdr_cli "$session" pane get "${prior_pane:-$meta_pane}" 2>/dev/null) || pre_info=""
   pre_followed=$(printf '%s' "$pre_info" | jq -r '.result.pane.pane_id // empty' 2>/dev/null)
-  [ -n "$pre_followed" ] \
-    || die "task $ID's endpoint reads unreadable; 'reproject' requires a positively classified live or idle endpoint"
-  pre_grade=$(fm_backend_agent_state "$BACKEND" "$session:$pre_followed")
+  if [ -z "$pre_followed" ] && [ "$prior_phase" = moved ] && [ -z "$prior_pane" ]; then
+    pre_grade=alive
+  else
+    [ -n "$pre_followed" ] \
+      || die "task $ID's endpoint could not be read; 'reproject' requires a positively live endpoint"
+    pre_grade=$(fm_backend_agent_state "$BACKEND" "$session:$pre_followed")
+  fi
   case "$pre_grade" in
-    alive|dead) ;;
-    *) die "task $ID's endpoint reads '$pre_grade'; 'reproject' requires a positively classified live or idle endpoint" ;;
+    alive) ;;
+    *) die "task $ID's endpoint reads '$pre_grade'; 'reproject' requires a positively live endpoint" ;;
   esac
-  cp -p "$META" "$REPROJECT_META_PRIOR" \
-    || die "could not preserve task $ID's record before reprojecting"
-  cp -p "$journal" "$REPROJECT_JOURNAL_PRIOR" \
-    || die "could not preserve task $ID's presentation journal before reprojecting"
-  REPROJECT_ACTIVE=1
-  REPROJECT_PHASE=intent
-  reproject_receipt_write intent \
-    || die "could not record task $ID's reproject receipt before moving"
+  if [ "$prior_phase" != moved ]; then
+    cp -p "$META" "$REPROJECT_META_PRIOR" \
+      || die "could not preserve task $ID's record before reprojecting"
+    cp -p "$journal" "$REPROJECT_JOURNAL_PRIOR" \
+      || die "could not preserve task $ID's presentation journal before reprojecting"
+    REPROJECT_ACTIVE=1
+    REPROJECT_PHASE=intent
+    reproject_receipt_write intent \
+      || die "could not record task $ID's reproject receipt before moving"
+  fi
   REPROJECT_META_LOCK=$(fm_meta_lock_path "$META") \
     || die "could not resolve task $ID's record lock; refusing a live move without it"
   fm_lock_acquire_wait "$REPROJECT_META_LOCK"
@@ -1223,7 +1250,8 @@ do_reproject() {
     || die "task $ID's session presentation lock is contended; refusing to move a live worker under contention"
   set +e
   fm_backend_herdr_projection_reproject_live_tab "$session" "$journal" "$ID" "$FM_HOME" \
-    "$meta_ws" "$meta_tab" "$meta_pane" "$parent_label" "$task_label"
+    "$meta_ws" "$meta_tab" "$meta_pane" "$parent_label" "$task_label" \
+    "$prior_ws" "$prior_tab" "$prior_pane" "$( [ "$prior_phase" = moved ] && printf 1 || printf 0 )"
   status=$?
   set -e
   case "$status" in
@@ -1235,6 +1263,9 @@ do_reproject() {
       REPROJECT_NEW_PANE=$FM_BACKEND_HERDR_PROJECTION_PANE_ID
       ;;
     1)
+      if [ "$prior_phase" = moved ]; then
+        die "task $ID's previous move remains unresolved; its receipt and prior copies are retained"
+      fi
       die "task $ID was not moved; see the refusal above"
       ;;
     *)
@@ -1246,7 +1277,7 @@ do_reproject() {
         REPROJECT_NEW_PANE=$FM_BACKEND_HERDR_PROJECTION_PANE_ID
       fi
       reproject_receipt_write moved || true
-      die "task $ID's pane moved but the rebind did not complete; the worker is safe - rerun 'reproject' to resume"
+      die "task $ID's move outcome is unresolved; the worker is retained - rerun 'reproject' to resume"
       ;;
   esac
   [ -n "$REPROJECT_NEW_SESSION" ] && [ -n "$REPROJECT_NEW_WORKSPACE" ] \

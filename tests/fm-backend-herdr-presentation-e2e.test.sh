@@ -1317,6 +1317,29 @@ lab workspace get "$RELAUNCH_OLD_WSID" >/dev/null 2>&1 \
   && fail "the stopped relaunch fixture workspace is still present"
 RELAUNCH_ORDER_BEFORE=$(lab workspace list | jq -r '.result.workspaces[].workspace_id')
 RELAUNCH_FOCUS=$(focus_snapshot)
+RELAUNCH_OLD_TAB=$(grep '^herdr_tab_id=' "$RELAUNCH_META" | cut -d= -f2-)
+RELAUNCH_REAL_MV=$(command -v mv)
+mkdir -p "$TMP_ROOT/relaunch-failbin"
+cat > "$TMP_ROOT/relaunch-failbin/mv" <<'SH'
+#!/usr/bin/env bash
+last="${@: -1}"
+[ "$last" = "$FM_FAIL_META" ] && exit 1
+exec "$FM_REAL_MV" "$@"
+SH
+chmod +x "$TMP_ROOT/relaunch-failbin/mv"
+if PATH="$TMP_ROOT/relaunch-failbin:$PATH" FM_REAL_MV="$RELAUNCH_REAL_MV" FM_FAIL_META="$RELAUNCH_META" \
+  FM_GATE_REFUSE_BYPASS=1 FM_SPAWN_NO_GUARD=1 FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" \
+  "$ROOT/bin/fm-spawn.sh" "$RELAUNCH_ID" --relaunch --harness "sh -c 'while :; do sleep 60; done'" \
+  > "$TMP_ROOT/relaunch-abort.out" 2> "$TMP_ROOT/relaunch-abort.err"; then
+  fail "missing-child relaunch should fail when its record cannot publish"
+fi
+[ "$(grep '^herdr_workspace_id=' "$RELAUNCH_META" | cut -d= -f2-)" = "$RELAUNCH_OLD_WSID" ] \
+  && [ "$(grep '^workspace_id=' "$HOME_DIR/state/$RELAUNCH_ID.herdr-presentation" | cut -d= -f2-)" = "$RELAUNCH_OLD_WSID" ] \
+  && [ "$(grep '^tab_id=' "$HOME_DIR/state/$RELAUNCH_ID.herdr-presentation" | cut -d= -f2-)" = "$RELAUNCH_OLD_TAB" ] \
+  || fail "prepublication abort left the journal ahead of the prior task record"
+[ "$(lab workspace list | jq -r --arg token "$RELAUNCH_TOKEN" '[.result.workspaces[] | select(.label | endswith(" · p:" + $token))] | length')" = 0 ] \
+  || fail "prepublication abort retained a replacement token workspace"
+pass "real Herdr lab: a prepublication abort restores the old binding and permits retry"
 FM_GATE_REFUSE_BYPASS=1 FM_SPAWN_NO_GUARD=1 FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" \
   "$ROOT/bin/fm-spawn.sh" "$RELAUNCH_ID" --relaunch --harness "sh -c 'while :; do sleep 60; done'" \
   > "$TMP_ROOT/relaunch-resume.out" 2> "$TMP_ROOT/relaunch-resume.err" \

@@ -3736,6 +3736,71 @@ test_projection_recreate_refuses_live_old_pane() {
   pass "herdr presentation recreation: a still-present old pane refuses without mutation"
 }
 
+test_projection_move_error_retains_endpoint_and_resumes() {
+  local dir home state token journal out
+  dir="$TMP_ROOT/projection-move-error"; home="$dir/home"; state="$dir/state"
+  mkdir -p "$home" "$state"
+  token=$(bash -c '
+    . "$0/bin/backends/herdr.sh"
+    token=$(fm_backend_herdr_projection_journal_create "$1" move-error) || exit 1
+    label=$(fm_backend_herdr_projection_workspace_label move-error "$token")
+    fm_backend_herdr_projection_journal_write_v2 "$1/move-error.herdr-presentation" move-error "$token" "$2" fmtest w9 w9:t9 w9:p9 w1 firstmate "$label" fm-move-error || exit 1
+    printf "%s" "$token"
+  ' "$ROOT" "$state" "$(cd "$home" && pwd -P)") || fail "could not create move-error journal"
+  journal="$state/move-error.herdr-presentation"
+  out=$(ROOT="$ROOT" JOURNAL="$journal" HOME_DIR="$home" CALLS="$dir/calls" bash -c '
+    . "$ROOT/bin/backends/herdr.sh"
+    fm_backend_herdr_cli() {
+      printf "%s\n" "$*" >> "$CALLS"
+      case "$*" in
+        *"workspace list"*) printf "{\"result\":{\"workspaces\":[{\"workspace_id\":\"w1\",\"label\":\"firstmate\"}]}}\n" ;;
+        *"pane get w1:p2"*) printf "{\"result\":{\"pane\":{\"workspace_id\":\"w1\",\"tab_id\":\"w1:t2\",\"pane_id\":\"w1:p2\"}}}\n" ;;
+        *"pane move"*) printf "{\"result\":{\"move_result\":{\"pane\":{\"workspace_id\":\"w3\",\"tab_id\":\"w3:t2\",\"pane_id\":\"w3:p2\"}}}}\n"; return 1 ;;
+        *) return 1 ;;
+      esac
+    }
+    fm_backend_herdr_pane_agent_state() { printf live; }
+    fm_backend_herdr_launcher_identity() { return 2; }
+    fm_backend_herdr_projection_parent_workspace_exact() { printf w1; }
+    fm_backend_herdr_projection_focus_snapshot() { printf "w1\tw1:t1"; }
+    fm_backend_herdr_projection_focus_restore() { return 0; }
+    fm_backend_herdr_projection_order_best_effort() { return 0; }
+    fm_backend_herdr_projection_live_binding_matches() { return 0; }
+    if fm_backend_herdr_projection_reproject_live_tab fmtest "$JOURNAL" move-error "$HOME_DIR" w1 w1:t2 w1:p2 firstmate fm-move-error; then first=0; else first=$?; fi
+    [ "$first" = 2 ] || exit 3
+    [ "$FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID" = w3 ] && [ "$FM_BACKEND_HERDR_PROJECTION_TAB_ID" = w3:t2 ] && [ "$FM_BACKEND_HERDR_PROJECTION_PANE_ID" = w3:p2 ] || { printf "move ids: %s %s %s\n" "$FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID" "$FM_BACKEND_HERDR_PROJECTION_TAB_ID" "$FM_BACKEND_HERDR_PROJECTION_PANE_ID" >&2; exit 4; }
+    fm_backend_herdr_projection_reproject_live_tab fmtest "$JOURNAL" move-error "$HOME_DIR" w1 w1:t2 w1:p2 firstmate fm-move-error w3 w3:t2 w3:p2 1 || { printf "resume ids: %s %s %s\n" "$FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID" "$FM_BACKEND_HERDR_PROJECTION_TAB_ID" "$FM_BACKEND_HERDR_PROJECTION_PANE_ID" >&2; exit 5; }
+    printf "%s" "$FM_BACKEND_HERDR_PROJECTION_PANE_ID"
+  ' 2>"$dir/errors") || fail "move error did not retain and resume the exact moved endpoint: $(cat "$dir/errors")"
+  [ "$out" = w3:p2 ] || fail "move resume returned the wrong pane: $out"
+  [ "$(sed -n 's/^pane_id=//p' "$journal")" = w3:p2 ] || fail "move resume did not rebind the journal"
+  [ "$(grep -c 'pane move' "$dir/calls")" = 1 ] || fail "move resume issued a duplicate pane move"
+  bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_projection_journal_write_v2 "$1" move-error "$2" "$3" fmtest w9 w9:t9 w9:p9 w1 firstmate "└ move-error · p:$2" fm-move-error
+  ' "$ROOT" "$journal" "$token" "$(cd "$home" && pwd -P)" || fail "could not reset the no-output move fixture"
+  out=$(ROOT="$ROOT" JOURNAL="$journal" HOME_DIR="$home" TOKEN="$token" CALLS="$dir/calls" bash -c '
+    . "$ROOT/bin/backends/herdr.sh"
+    fm_backend_herdr_cli() {
+      printf "%s\n" "$*" >> "$CALLS"
+      case "$*" in
+        *"workspace list"*) printf "{\"result\":{\"workspaces\":[{\"workspace_id\":\"w1\",\"label\":\"firstmate\"},{\"workspace_id\":\"w3\",\"label\":\"└ move-error · p:%s\"}]}}\n" "$TOKEN" ;;
+        *"pane get w1:p2"*) return 1 ;;
+        *"pane list --workspace w3"*) printf "{\"result\":{\"panes\":[{\"pane_id\":\"w3:p2\",\"tab_id\":\"w3:t2\"}]}}\n" ;;
+        *) return 1 ;;
+      esac
+    }
+    fm_backend_herdr_pane_agent_state() { printf live; }
+    fm_backend_herdr_projection_order_best_effort() { return 0; }
+    fm_backend_herdr_projection_live_binding_matches() { return 0; }
+    fm_backend_herdr_projection_reproject_live_tab fmtest "$JOURNAL" move-error "$HOME_DIR" w1 w1:t2 w1:p2 firstmate fm-move-error "" "" "" 1 || exit 1
+    printf "%s" "$FM_BACKEND_HERDR_PROJECTION_PANE_ID"
+  ') || fail "no-output move error did not recover its unique live token child"
+  [ "$out" = w3:p2 ] || fail "no-output move recovery returned the wrong pane: $out"
+  [ "$(grep -c 'pane move' "$dir/calls")" = 1 ] || fail "no-output move recovery issued a duplicate pane move"
+  pass "herdr presentation reproject: a moved-then-error result retains exact ids and resumes once"
+}
+
 # --- workspace_find: scoped to THIS home's own label, not just any match ----
 
 test_workspace_find_matches_only_this_homes_own_label() {
@@ -5909,6 +5974,7 @@ test_projection_reclaim_replaces_only_exact_husk_and_advances_binding
 test_projection_recovery_is_read_only_and_refuses_live_duplicate_risk
 test_projection_recreate_missing_child_advances_binding
 test_projection_recreate_refuses_live_old_pane
+test_projection_move_error_retains_endpoint_and_resumes
 test_workspace_find_matches_only_this_homes_own_label
 test_list_live_scoped_to_this_homes_workspace_only
 test_parse_target
