@@ -50,35 +50,35 @@ test_symlinked_pool_slot() {
   read_case_record "$rec"
 
   # Create a real pool directory
-  pool_real="$CASE_DIR/real-pool"
+  pool_real="$CASE_DIR/real pool"
   mkdir -p "$pool_real"
 
   # Symlink to the real pool to simulate relocated treehouse
-  pool_symlink="$CASE_DIR/symlink-pool"
+  pool_symlink="$CASE_DIR/symlink pool"
   ln -s "$pool_real" "$pool_symlink"
 
   # Slot inside the real pool
   slot_root="$pool_real/slots"
   mkdir -p "$slot_root/1"
   git -C "$PROJECT_DIR" worktree add "$slot_root/1/project"
-  
+
   # Write treehouse state using the SYMLINKED path
   slot_symlink="$pool_symlink/slots/1/project"
   printf '{"worktrees":[{"name":"1","path":"%s"}]}\n' "$slot_symlink" \
     > "$slot_root/treehouse-state.json"
-    
+
   # Pass the real physical worktree path to spawn (which is what spawn sees after cd)
   POOL_DIR="$slot_root/1/project"
-  
+
   out=$(run_spawn "$id" --scout)
   status=$?
   expect_code 0 "$status" "spawn from a symlinked Treehouse slot should launch"$'\n'"$out"
-  
+
   # Assert the recorded path is the canonical symlink path, not the real one
   assert_grep "worktree=$slot_symlink" "$HOME_DIR/state/$id.meta" \
     "spawn did not record the canonical symlinked Treehouse path: $(cat "$HOME_DIR/state/$id.meta")"
-    
-  pass "a symlinked Treehouse slot records the canonical registry path"
+
+  pass "a spaced symlinked Treehouse slot records the canonical registry path"
 }
 
 test_unmanaged_pool_slot_refused() {
@@ -95,19 +95,19 @@ test_unmanaged_pool_slot_refused() {
   slot_root="$pool_real/slots"
   mkdir -p "$slot_root/1"
   git -C "$PROJECT_DIR" worktree add "$slot_root/1/project"
-  
+
   # Write treehouse state but do NOT include this path!
   printf '{"worktrees":[{"name":"1","path":"/some/other/path"}]}\n' \
     > "$slot_root/treehouse-state.json"
-    
+
   POOL_DIR="$slot_root/1/project"
-  
+
   out=$(run_spawn "$id" --scout)
   status=$?
   [ "$status" -ne 0 ] || fail "spawn launched a worker on a slot not present in treehouse registry"
   assert_contains "$out" "could not resolve Treehouse registry path" \
     "spawn did not refuse the unmanaged worktree with the correct error"
-    
+
   pass "an unmanaged Treehouse slot is refused at spawn time"
 }
 
