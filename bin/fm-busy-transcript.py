@@ -5,6 +5,7 @@ Usage: init STATE ID HARNESS CWD SESSIONS BACKEND TARGET
        activate STATE ID
        read STATE ID HARNESS BACKEND TARGET
        fence-target STATE BACKEND TARGET
+       fence-text STATE BACKEND TARGET (exact submitted text on stdin)
        check-target STATE BACKEND TARGET
        recover-check STATE ID ORIGINAL_TERMINAL ORIGINAL_PID
        recover-apply STATE ID RECEIPT (internal fm-busy-event recovery writer)
@@ -25,10 +26,16 @@ Binding is sticky: inode replacement, truncation or rewriting any observed prefi
 is unknown, never permission to choose a different session. Duplicate candidates
 are unknown at discovery; after binding only that exact file is read. No timestamps or rendered output decide state.
 
-Before scripted input, fence-target records the observed start count under the
-same lock. An old terminal cannot settle a pending submission: each submission
-requires a new task_started. Mid-turn steering coalesced by the vendor can remain
-unknown after completion; there is deliberately no timeout-to-idle fallback.
+Before known text input, fence-text records its SHA-256 and the last observed
+ordinal under the same lock. Only a later exact typed UserMessage in the bound
+thread's active turn consumes it, once, in submission order. Busy observation
+does not prove delivery; idle requires every pending input to be consumed.
+Key-only fence-target and old required_starts records retain their conservative
+root-start watermark. Legacy unaccounted_input has no reconstructable receipt
+and remains unknown. A failed pre-input read now refuses transport; a complete
+retry can observe state without inventing an input. No timeout clears a fence.
+last_refusal retains only a bounded stage/category, never exception or input
+text; stderr exposes the same categories even when identity prevents writing.
 Unreadable/corrupt evidence, unverified versions and logs over 32 MiB fail closed.
 This is a pull source, not a busy-state event writer or turn-end notifier.
 """
@@ -43,7 +50,7 @@ import sys
 import time
 
 
-VERSIONS = {"codex": "0.156.1", "traex": "0.207.1"}
+VERSIONS = {"codex": ("0.156.1", "0.157.1"), "traex": ("0.207.1",)}
 LIMIT = 32 * 1024 * 1024
 
 
@@ -53,6 +60,28 @@ class Unknown(Exception):
 
 class BrokenBinding(Unknown):
     pass
+
+
+REFUSALS = {"identity-mismatch", "malformed-record", "partial-record",
+            "transient-read", "missing-evidence", "lock-busy",
+            "unconsumed-input", "legacy-unaccounted-input", "pending-capacity"}
+
+
+def refusal(error):
+    if isinstance(error, BrokenBinding):
+        return "identity-mismatch"
+    if isinstance(error, OSError):
+        return "transient-read"
+    if isinstance(error, subprocess.SubprocessError):
+        return "identity-mismatch"
+    if isinstance(error, Unknown):
+        return str(error) if str(error) in REFUSALS else "identity-mismatch"
+    return "malformed-record"
+
+
+def note_refusal(data, stage, reason):
+    data["last_refusal"] = {"stage": stage, "reason": reason}
+    print("transcript " + stage + " refused: " + reason, file=sys.stderr)
 
 
 def require(ok, reason=""):
@@ -109,7 +138,7 @@ class Lock:
                 return self
             except FileExistsError:
                 time.sleep(0.05)
-        raise Unknown()
+        raise Unknown("lock-busy")
 
     def __exit__(self, *_):
         if self.inherited:
@@ -252,7 +281,7 @@ def identity(payload, data):
         payload.get("source") == "cli"
         and payload.get("thread_source") == "user"
         and payload.get("originator") == data["harness"] + "-tui"
-        and payload.get("cli_version") == VERSIONS[data["harness"]]
+        and payload.get("cli_version") in VERSIONS[data["harness"]]
         and payload.get("id") == payload.get("session_id")
         and isinstance(payload.get("id"), str)
         and bool(payload.get("id"))
@@ -275,7 +304,8 @@ def inspect(path, data):
         require(stat.st_size <= LIMIT)
         stream.seek(0)
         raw = stream.read(LIMIT + 1)
-    require(len(raw) <= LIMIT and raw.endswith(b"\n"))
+    require(len(raw) <= LIMIT, "malformed-record")
+    require(raw.endswith(b"\n"), "partial-record")
     records = [json.loads(line) for line in raw.splitlines()]
     sid = head["payload"]["id"]
     marker = "FIRSTMATE_BUSY_GENERATION=" + data["gen"]
@@ -298,9 +328,11 @@ def inspect(path, data):
     seen = set()
     state = "unknown"
     previous = -1
+    users = []
+    user_ids = set()
     for record in records:
         ordinal = record.get("ordinal")
-        require(type(ordinal) is int and ordinal > previous)
+        require(type(ordinal) is int and ordinal > previous, "malformed-record")
         previous = ordinal
         payload = record.get("payload", {})
         if record.get("type") == "session_meta":
@@ -308,6 +340,19 @@ def inspect(path, data):
         if record.get("type") != "event_msg":
             continue
         event = payload.get("type")
+        if event == "item_completed" and payload.get("item", {}).get("type") == "UserMessage":
+            require(payload.get("thread_id") == sid and payload.get("turn_id") == turn
+                    and state == "busy", "identity-mismatch")
+            item_id = payload["item"].get("id")
+            require(isinstance(item_id, str) and bool(item_id) and item_id not in user_ids,
+                    "malformed-record")
+            user_ids.add(item_id)
+            content = payload["item"]["content"]
+            require(isinstance(content, list), "malformed-record")
+            # Non-text inputs cannot prove consumption of a text submission.
+            if all(part.get("type") == "text" and isinstance(part.get("text"), str) for part in content):
+                text = "\n".join(part["text"] for part in content)
+                users.append({"ordinal": ordinal, "digest": hashlib.sha256(text.encode()).hexdigest()})
         if event not in ("task_started", "task_complete", "turn_aborted"):
             continue
         tid = payload.get("turn_id")
@@ -324,7 +369,8 @@ def inspect(path, data):
     require(first_user.get("turn_id") in seen)
     return {"path": str(path), "sid": sid, "dev": stat.st_dev, "ino": stat.st_ino,
             "size": len(raw), "digest": hashlib.sha256(raw).hexdigest(),
-            "raw": raw, "starts": len(seen), "state": state}
+            "raw": raw, "starts": len(seen), "state": state,
+            "ordinal": previous, "users": users}
 
 
 def observe(data):
@@ -357,9 +403,38 @@ def observe(data):
             if candidate:
                 candidates.append(candidate)
                 require(len(candidates) == 1)
-        require(len(candidates) == 1)
+        require(len(candidates) == 1, "missing-evidence")
         current = candidates[0]
     data["bound"] = {key: current[key] for key in ("path", "sid", "dev", "ino", "size", "digest")}
+    return current
+
+
+def account_inputs(data, current):
+    pending = data.get("pending_inputs", [])
+    cursor = data.get("input_cursor", -1)
+    require(isinstance(pending, list) and len(pending) <= 256
+            and type(cursor) is int and -1 <= cursor <= current["ordinal"], "malformed-record")
+    for item in pending:
+        require(isinstance(item, dict) and type(item.get("after")) is int
+                and 0 <= item["after"] <= current["ordinal"]
+                and isinstance(item.get("digest"), str) and len(item["digest"]) == 64
+                and all(c in "0123456789abcdef" for c in item["digest"]), "malformed-record")
+    consumed = 0
+    for item in pending:
+        match = next((user for user in current["users"]
+                      if user["ordinal"] > max(cursor, item["after"])
+                      and user["digest"] == item["digest"]), None)
+        if match is None:
+            break
+        cursor = match["ordinal"]
+        consumed += 1
+    data["pending_inputs"] = pending[consumed:]
+    data["input_cursor"] = cursor
+
+
+def observe_accounted(data):
+    current = observe(data)
+    account_inputs(data, current)
     return current
 
 
@@ -367,21 +442,24 @@ def read(state, task, harness, backend, target):
     with Lock(state, task):
         data = load(state, task)
         require((data["harness"], data["backend"], data["target"]) == (harness, backend, target))
-        require(not data.get("unaccounted_input"))
         try:
-            current = observe(data)
-        except BrokenBinding:
-            data["broken_binding"] = True
+            require(not data.get("unaccounted_input"), "legacy-unaccounted-input")
+            current = observe_accounted(data)
+        except (Unknown, OSError, ValueError, KeyError, TypeError, AttributeError) as error:
+            if isinstance(error, BrokenBinding):
+                data["broken_binding"] = True
+            note_refusal(data, "read", refusal(error))
             save(state / (task + ".busy-session"), data)
             raise
         verdict = current["state"]
-        if current["starts"] < data.get("required_starts", 0) and verdict == "idle":
+        if (data["pending_inputs"] or current["starts"] < data.get("required_starts", 0)) and verdict == "idle":
             verdict = "unknown"
+            note_refusal(data, "read", "unconsumed-input")
         save(state / (task + ".busy-session"), data)
         print(verdict + " " + harness + "-transcript")
 
 
-def fence(state, backend, target, check_only=False):
+def fence(state, backend, target, check_only=False, text=None):
     tasks = set()
     # Metadata makes a missing or damaged sidecar a refusal, not a silent
     # opt-out from identity checking. Unmanaged legacy endpoints stay outside
@@ -417,13 +495,19 @@ def fence(state, backend, target, check_only=False):
             if check_only or not data.get("input_enabled"):
                 continue
             try:
-                current = observe(data)
-            except (Unknown, OSError, ValueError, KeyError, TypeError, AttributeError):
-                # No watermark can account for this submission. Persist unknown
-                # rather than blessing an old completion if the log reappears.
-                data["unaccounted_input"] = True
-            else:
-                data["required_starts"] = max(data.get("required_starts", 0), current["starts"]) + 1
+                current = observe_accounted(data)
+                if text is None:
+                    data["required_starts"] = max(data.get("required_starts", 0), current["starts"]) + 1
+                else:
+                    require(len(data["pending_inputs"]) < 256, "pending-capacity")
+                    data["pending_inputs"].append({"after": current["ordinal"],
+                        "digest": hashlib.sha256(text.encode()).hexdigest()})
+            except (Unknown, OSError, ValueError, KeyError, TypeError, AttributeError) as error:
+                if isinstance(error, BrokenBinding):
+                    data["broken_binding"] = True
+                note_refusal(data, "fence", refusal(error))
+                save(path, data)
+                raise
             save(path, data)
 
 
@@ -489,6 +573,10 @@ def main():
         read(state, *args)
     elif command == "fence-target":
         fence(state, *args)
+    elif command == "fence-text":
+        text = sys.stdin.read(LIMIT + 1)
+        require(bool(text) and len(text) <= LIMIT, "malformed-record")
+        fence(state, *args, text=text)
     elif command == "check-target":
         fence(state, *args, check_only=True)
     else:
@@ -499,6 +587,7 @@ if __name__ == "__main__":
     try:
         main()
     except (Unknown, OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError) as error:
+        print("transcript refused: " + refusal(error), file=sys.stderr)
         if len(sys.argv) > 4 and sys.argv[1] == "read":
             print("unknown " + sys.argv[4] + "-transcript")
         else:

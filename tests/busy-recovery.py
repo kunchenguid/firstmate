@@ -66,7 +66,7 @@ records = [
         'source': 'cli', 'thread_source': 'user', 'originator': harness + '-tui', 'cli_version': versions[harness]}},
     {'type': 'event_msg', 'payload': {'type': 'task_started', 'turn_id': 'turn', 'root_turn_id': 'turn'}},
     {'type': 'event_msg', 'payload': {'type': 'item_completed', 'thread_id': 'session', 'turn_id': 'turn',
-        'item': {'type': 'UserMessage', 'content': [{'type': 'text', 'text': 'brief\nFIRSTMATE_BUSY_GENERATION=' + gen}]}}},
+        'item': {'type': 'UserMessage', 'id': 'initial-user', 'content': [{'type': 'text', 'text': 'brief\nFIRSTMATE_BUSY_GENERATION=' + gen}]}}},
     {'type': 'event_msg', 'payload': {'type': 'task_complete', 'turn_id': 'turn'}},
 ]
 log = logs / 'rollout-worker.jsonl'

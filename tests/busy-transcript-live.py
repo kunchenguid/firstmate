@@ -4,6 +4,7 @@
 Only the isolated subprocess serves HTTP. The driving process has no listener.
 All Herdr operations go through the caller's guarded lab helper.
 """
+import hashlib
 import http.server
 import json
 import os
@@ -27,8 +28,14 @@ def serve(root, lab, tool):
 
     class Provider(http.server.BaseHTTPRequestHandler):
         def do_POST(self):
-            self.rfile.read(int(self.headers.get('Content-Length', '0')))
+            request = json.loads(self.rfile.read(int(self.headers.get('Content-Length', '0'))))
             mode = control.read_text().strip()
+            if mode == 'steer':
+                outputs = {item.get('call_id') for item in request.get('input', []) if item.get('type') == 'function_call_output'}
+                if 'call_active_turn_ack' in outputs:
+                    mode = 'success'
+                elif 'call_active_turn_hold' in outputs:
+                    mode = 'ack-many'
             with (lab / (tool + '-requests.jsonl')).open('a') as stream:
                 stream.write(json.dumps({'at': time.time(), 'mode': mode, 'path': self.path}) + '\n')
             if mode == 'failure':
@@ -42,16 +49,24 @@ def serve(root, lab, tool):
             self.send_header('Content-Type', 'text/event-stream')
             self.end_headers()
             rid, mid = 'resp_' + uuid.uuid4().hex, 'msg_' + uuid.uuid4().hex
-            if mode in ('tool', 'ack'):
-                control.write_text('success')
+            if mode in ('tool', 'ack', 'steer', 'ack-many'):
+                if mode not in ('steer', 'ack-many'):
+                    control.write_text('success')
                 name = 'Bash' if tool == 'traex' else 'exec_command'
                 args = {'command': 'sleep 6; exit 7'} if tool == 'traex' else {'cmd': 'sleep 6; exit 7', 'yield_time_ms': 10000}
-                if mode == 'ack':
+                if mode == 'steer':
+                    hold = 'for i in $(seq 1 600); do [ ! -f ' + shlex.quote(str(lab / (tool + '-steers-sent'))) + ' ] || exit 0; sleep .1; done; exit 8'
+                    args = {'command': hold} if tool == 'traex' else {'cmd': hold, 'yield_time_ms': 30000}
+                if mode in ('ack', 'ack-many'):
                     inbox = lab / ('home/state/' + tool + '.inbox')
                     command_text = 'cat ' + shlex.quote(str(inbox / '001.msg')) + '; mkdir -p ' + shlex.quote(str(inbox / 'handled')) + '; mv ' + shlex.quote(str(inbox / '001.msg')) + ' ' + shlex.quote(str(inbox / 'handled/001.msg'))
-                    args = {'command': command_text} if tool == 'traex' else {'cmd': command_text, 'yield_time_ms': 10000}
+                    if mode == 'ack-many':
+                        command_text = 'for f in ' + shlex.quote(str(inbox)) + '/*.msg; do [ -f "$f" ] || continue; cat "$f"; mv "$f" ' + shlex.quote(str(inbox / 'handled')) + '/; done; for i in $(seq 1 600); do [ ! -f ' + shlex.quote(str(lab / (tool + '-steers-release'))) + ' ] || exit 0; sleep .1; done; exit 8'
+                    args = {'command': command_text} if tool == 'traex' else {'cmd': command_text, 'yield_time_ms': 30000}
                 item = {'type': 'function_call', 'id': mid, 'call_id': 'call_' + uuid.uuid4().hex,
                         'name': name, 'arguments': json.dumps(args), 'status': 'completed'}
+                if mode in ('steer', 'ack-many'):
+                    item['call_id'] = 'call_active_turn_hold' if mode == 'steer' else 'call_active_turn_ack'
             else:
                 item = {'type': 'message', 'id': mid, 'role': 'assistant', 'status': 'completed',
                         'content': [{'type': 'output_text', 'text': 'FM_LIVE_OK', 'annotations': []}]}
@@ -281,6 +296,54 @@ esac
             assert handled.read_bytes() == record_bytes
             wait('idle ' + tool + '-transcript')
             print('ok - ' + tool + ' recovered steering read and acknowledged one durable message', flush=True)
+            # More than one doorbell is consumed inside one vendor root turn.
+            baseline = json.loads((state / (tool + '.busy-session')).read_text())
+            transcript = Path(baseline['bound']['path'])
+            before = transcript.read_bytes()
+            mode.write_text('steer')
+            send('Start the bounded steering exercise.')
+            wait('busy ' + tool + '-transcript')
+            for number in ('002', '003'):
+                rec = inbox / (number + '.msg')
+                rec.write_text('schema=fm-task-inbox.v1\n--\nHarmless instruction ' + number + '.\n')
+                command('bash', '-c', ring_script, '_', root, target, rec, tool, env=recovery_env)
+            (lab / (tool + '-steers-sent')).touch()
+            for _ in range(200):
+                if all((inbox / ('handled/' + n + '.msg')).exists() for n in ('002', '003')):
+                    break
+                time.sleep(.2)
+            else:
+                raise AssertionError('in-turn durable instructions were not acknowledged')
+            busy = control('read')
+            (lab / (tool + '-steers-release')).touch()
+            wait('idle ' + tool + '-transcript')
+            settled = control('read')
+            after = transcript.read_bytes()
+            events = []
+            for line in after.splitlines():
+                row = json.loads(line)
+                payload = row.get('payload', {})
+                item = payload.get('item', {})
+                if row.get('type') == 'event_msg' and (payload.get('type') in ('task_started', 'task_complete', 'turn_aborted') or item.get('type') == 'UserMessage'):
+                    events.append({'ordinal': row['ordinal'], 'event': payload['type'],
+                        'turn': payload.get('turn_id'), 'item_type': item.get('type'),
+                        'content_hash': hashlib.sha256(json.dumps(item.get('content', []), sort_keys=True).encode()).hexdigest()})
+            evidence = {'tool': tool, 'busy': busy, 'settled': settled,
+                        'before_hash': hashlib.sha256(before).hexdigest(),
+                        'after_hash': hashlib.sha256(after).hexdigest(), 'events': events}
+            (lab / (tool + '-steering-evidence.json')).write_text(json.dumps(evidence, indent=2))
+            print('steering evidence - ' + json.dumps(evidence), flush=True)
+            assert busy == 'busy ' + tool + '-transcript', busy
+            assert settled == 'idle ' + tool + '-transcript', settled
+            new = [json.loads(line) for line in after[len(before):].splitlines()]
+            starts = [r['payload']['turn_id'] for r in new if r.get('type') == 'event_msg' and r.get('payload', {}).get('type') == 'task_started']
+            users = [r['payload'] for r in new if r.get('type') == 'event_msg' and r.get('payload', {}).get('item', {}).get('type') == 'UserMessage']
+            assert len(starts) == 1 and len(users) == 3 and all(u['turn_id'] == starts[0] for u in users), (starts, users)
+            acknowledgements = [r for r in new if (r.get('type'), r.get('payload', {}).get('type')) == (('response_item', 'function_call') if tool == 'codex' else ('event_msg', 'exec_command_end')) and r['payload'].get('call_id') == 'call_active_turn_ack']
+            assert len(acknowledgements) == 1, 'expected exactly one acknowledgement execution'
+            for number in ('002', '003'):
+                assert (inbox / ('handled/' + number + '.msg')).read_text() == 'schema=fm-task-inbox.v1\n--\nHarmless instruction ' + number + '.\n'
+            print('ok - ' + tool + ' multiple in-turn steering receipts settle without invented starts', flush=True)
             mode.write_text('hold')
             send('Hold the simulated response.')
             wait('busy ' + tool + '-transcript')
