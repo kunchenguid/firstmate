@@ -6,7 +6,11 @@ import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.js";
 const COORDINATOR_KEY = "__firstmateOpenCodeWatchArm";
 // OpenCode v2 deprecated session.idle/session.status; the turn boundary is the
 // session.execution.* lifecycle (verified 2026-09-27 against OpenCode 2.0.18).
-const TURN_END_EVENT_TYPES = new Set(["session.execution.succeeded", "session.execution.failed"]);
+const TURN_END_EVENT_TYPES = new Set([
+  "session.execution.succeeded",
+  "session.execution.failed",
+  "session.execution.interrupted",
+]);
 
 let skipNextTurnEnd = false;
 

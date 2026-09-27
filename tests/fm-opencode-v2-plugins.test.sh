@@ -303,6 +303,18 @@ const ran = `${fixture}/state/guard-ran`;
   await waitFor(() => promptCalls.length === 2);
   if (!existsSync(ran)) throw new Error("the guard script did not run on the third (failed) turn end");
   unlinkSync(ran);
+
+  // session.execution.interrupted is a terminal boundary like the others: the
+  // next turn end (this failed turn's own forced follow-up) is skipped once,
+  // and the interrupt after that re-guards.
+  pushEvent({ type: "session.execution.interrupted", data: { sessionID: "s1" } });
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  if (promptCalls.length !== 2) throw new Error("the forced follow-up's own interrupt was not skipped");
+  if (existsSync(ran)) throw new Error("the guard script ran on the skipped interrupt");
+  pushEvent({ type: "session.execution.interrupted", data: { sessionID: "s1" } });
+  await waitFor(() => promptCalls.length === 3);
+  if (!existsSync(ran)) throw new Error("the guard script did not run on the interrupted turn end");
+  unlinkSync(ran);
 }
 
 // Case 2: a watch-arm coordinator reports it already handled continuity, so
@@ -324,7 +336,7 @@ JS
   } >"$TMP_ROOT/turnend-guard.mjs"
   out=$(FIXTURE="$fixture" run_node "$TMP_ROOT/turnend-guard.mjs" 2>&1) || fail "turnend-guard: $out"
   assert_contains "$out" "turnend-guard-ok" "the turnend-guard check did not complete"
-  pass "fm-primary-turnend-guard triggers only on session.execution.succeeded/.failed (never .started), reads v2 event.data.sessionID, defers to an armed watch-arm coordinator, and otherwise runs the guard script and injects the encoded blind-turn follow-up exactly once per firing, skipping its own forced turn end"
+  pass "fm-primary-turnend-guard triggers on session.execution.succeeded/.failed/.interrupted (never .started), reads v2 event.data.sessionID, defers to an armed watch-arm coordinator, and otherwise runs the guard script and injects the encoded blind-turn follow-up exactly once per firing, skipping its own forced turn end"
 }
 
 # --- fm-primary-watch-arm.js (wiring only; continuity spawning is covered by

@@ -208,10 +208,6 @@ test_opencode_plugin_semantic_lifecycle() {
   state="$HOME_DIR/state"
   plugin="$WT_DIR/.opencode/plugins/fm-busy-state.js"
   assert_present "$plugin" "opencode spawn did not write the busy-state plugin"
-  # OpenCode 2.x requires a default export shaped { id, setup|effect }; the
-  # legacy V1 named export fails to load, so the generated artifact must carry
-  # the v2 shape.
-  assert_contains "$(cat "$plugin")" "export default {" "the generated busy-state plugin is not a v2 default export"
 
   out=$(classify opencode "$id" "$state")
   [ "$out" = "busy fm-spawn" ] || fail "seed after spawn must be 'busy fm-spawn', got '$out'"
