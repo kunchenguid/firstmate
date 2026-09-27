@@ -8,7 +8,7 @@ Add `references/common/dispatch.md` for configured profile precedence.
 `../../../bin/fm-spawn.sh` accepts concrete `--harness`, `--model`, and `--effort` values selected at intake; scripts never parse natural-language dispatch rules.
 The tool reference records verified flags, accepted values, omission behavior, and discovery.
 
-Effort precedence is a per-task captain instruction, then applicable dispatch profile or secondmate pin, then the fallback below.
+Effort precedence is a per-task captain instruction, then an applicable dispatch profile, then the fallback below.
 Never replace either higher-precedence value.
 Use the fallback only when neither specifies effort.
 

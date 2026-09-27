@@ -4,8 +4,7 @@
 # Design: data/fm-backend-design-d7/herdr-addendum.md ("Interface mapping",
 # decisions D1-D6) and the empirical verification recorded in
 # data/fm-backend-design-d7/herdr-verification-p2.md (real herdr v0.7.1,
-# protocol 14, macOS aarch64), refined by docs/herdr-backend.md's
-# "workspace-per-home" pass (AGENTS.md task herdr-sm-spaces-k4). Herdr is a
+# protocol 14, macOS aarch64), refined by docs/herdr-backend.md. Herdr is a
 # session provider ONLY (D3): the worktree provider stays treehouse, exactly
 # like tmux. Sourced only through bin/fm-backend.sh's fm_backend_source in
 # normal operation; the unit tests source it directly, so the FM_HOME fallback
@@ -13,9 +12,8 @@
 #
 # Default container shape (D4, decided empirically - see
 # herdr-verification-p2.md "Task container shape", refined by
-# docs/herdr-backend.md "Default task container shape"): ONE herdr workspace PER
-# FIRSTMATE HOME (the primary, and each secondmate, gets its own), ONE herdr TAB
-# per task inside its home's workspace. The default-on presentation projection
+# docs/herdr-backend.md "Default task container shape"): one `firstmate`
+# workspace and one Herdr tab per task. The default-on presentation projection
 # creates a disposable workspace for a clean fresh task instead unless the home
 # opts out. That
 # workspace is a non-authoritative visual projection containing only the normal
@@ -65,9 +63,7 @@
 # global before sourcing fm-backend.sh (which sources this file), so this
 # never overrides a real invocation. It exists only so this file's own unit
 # tests, which source it directly without that preamble, resolve to a sane
-# default (the firstmate repo root - never a secondmate home, so
-# fm_backend_herdr_workspace_label falls through to "firstmate" exactly like
-# pre-P3 behavior when a test does not care about home-specific labeling).
+# default (the firstmate repo root).
 FM_BACKEND_HERDR_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-${FM_ROOT:-$FM_BACKEND_HERDR_ROOT}}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
@@ -135,10 +131,6 @@ FM_BACKEND_HERDR_PRESENTATION_FLOOR_MARKER_PREFIX=".herdr-presentation-floor-"
 # ->blocked edge and a reconnect level-reconcile never re-delivers a still-
 # blocked pane. Mirrors bin/fm-watch.sh's .stale-<key> naming.
 FM_BACKEND_HERDR_ESCALATED_PREFIX=".herdr-escalated-"
-# .fm-secondmate-home is written by bin/fm-home-seed.sh (AGENTS.md section 6)
-# at a seeded secondmate home's root, containing exactly that secondmate's id.
-# The primary firstmate home never carries this marker.
-FM_BACKEND_HERDR_SECONDMATE_MARKER=".fm-secondmate-home"
 # The presentation projection is intentionally separate from the authoritative
 # task endpoint record.
 # A per-task journal lives under state/ as <id>.herdr-presentation.
@@ -344,28 +336,8 @@ fm_backend_herdr_presentation_enabled() {  # <config-dir> [<state-dir>]
   fm_backend_herdr_presentation_default_supported "$state_dir"
 }
 
-# fm_backend_herdr_workspace_label: the per-firstmate-HOME herdr workspace
-# label (docs/herdr-backend.md "Default task container shape"). The PRIMARY home (no
-# secondmate marker) resolves to the constant "firstmate", byte-identical to
-# every pre-existing task's recorded label - no forced migration. A SECONDMATE
-# home resolves to "2ndmate-<secondmate-id>", so its tasks land in their own
-# workspace, obviously distinguishable from the primary's (and from every
-# other secondmate's) in herdr's spaces sidebar. Read fresh from FM_HOME on
-# every call rather than cached at source time: FM_HOME is the home's own
-# durable identity, not env plumbing threaded through a call chain, so the
-# label is automatically stable across every respawn/recovery for the life of
-# that home. fm-spawn.sh briefly shadows FM_HOME to a secondmate's own home
-# when the PRIMARY spawns that secondmate (its own process's FM_HOME still
-# names the primary at that point) - see fm-spawn.sh's herdr case arm.
+# fm_backend_herdr_workspace_label: the stable workspace label for this home.
 fm_backend_herdr_workspace_label() {
-  local marker="$FM_HOME/$FM_BACKEND_HERDR_SECONDMATE_MARKER" id
-  if [ -f "$marker" ]; then
-    id=$(tr -d '[:space:]' < "$marker" 2>/dev/null)
-    if [ -n "$id" ]; then
-      printf '2ndmate-%s' "$id"
-      return 0
-    fi
-  fi
   printf 'firstmate'
 }
 
@@ -422,10 +394,8 @@ fm_backend_herdr_cli() {  # <session> <herdr-subcommand-and-args...>
 # Every operation routed through fm_backend_herdr_cli starts with the first
 # `herdr` on PATH, or the client already selected for that exact session. A
 # host can carry more than one herdr client (a self-updated copy in
-# ~/.local/bin next to a package-managed one), and the two PATH orders
-# Firstmate runs under (an interactive login shell, and the fixed remote-job
-# PATH that puts ~/.local/bin first - bin/fm-remote-job-lib.sh) can then resolve
-# DIFFERENT binaries. A client older than the running server is answered with
+# ~/.local/bin next to a package-managed one), and different launch
+# environments can resolve different binaries. A client older than the running server is answered with
 # error code protocol_mismatch on operational commands (verified: herdr 0.8.2,
 # protocol 20, against a 0.9.0 server, protocol 22), which the read classifiers
 # correctly refuse to interpret.
@@ -748,16 +718,13 @@ fm_backend_herdr_projection_journal_replace_endpoint() {  # <journal> <task-id> 
     "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL" "$FM_BACKEND_HERDR_JOURNAL_TASK_LABEL"
 }
 
-# fm_backend_herdr_projection_concise_task_label: strip redundant owner
-# prefixes from a task id used only in the presentation workspace label.
-# Removes firstmate/, 2ndmate-<id>/, and a presentation-level fm- owner
-# prefix when present. The ordinary task tab remains fm-<id> and is not
-# built by this helper.
+# fm_backend_herdr_projection_concise_task_label: strip redundant retained
+# owner prefixes from a task id used only in the presentation workspace label.
+# The ordinary task tab remains fm-<id> and is not built by this helper.
 fm_backend_herdr_projection_concise_task_label() {  # <task-id>
   local task=$1
   case "$task" in
     firstmate/*) task=${task#firstmate/} ;;
-    2ndmate-*/*) task=${task#*/} ;;
   esac
   case "$task" in
     fm-*) task=${task#fm-} ;;
@@ -776,8 +743,7 @@ fm_backend_herdr_projection_workspace_label() {  # <task-id> <projection-id>
 # fm_backend_herdr_presentation_session_lock_path: one machine-private lock
 # path per live named Herdr session/socket, shared across every Firstmate home
 # that uses that session.
-# The path is never under any one home's state/ and secondmates never write the
-# primary home. Returns non-zero when the named session's socket cannot be
+# The path is never under any one home's state/. Returns non-zero when the named session's socket cannot be
 # resolved unambiguously.
 fm_backend_herdr_presentation_lock_namespace() {
   printf '%s' '/tmp/firstmate-herdr-presentation'
@@ -1457,16 +1423,16 @@ fm_backend_herdr_pane_idle_shell_sample() {  # <session> <pane-id>
 # returned by THIS projected create immediately after its owning parent's
 # contiguous child block and before the next parent.
 #
-# <parent-label> is the owning FM_HOME label (firstmate or 2ndmate-<id>).
+# <parent-label> is the retained `firstmate` workspace label.
 # Optional <parent-workspace-id> is that parent's EXACT id, which the caller
 # already resolved from the launching agent's own herdr identity. When given it
 # anchors the owning parent by id, so two workspaces sharing the home label no
 # longer make the whole layout ambiguous; when omitted the parent is located by
 # label exactly as before. With a unique label the two select the same
 # workspace, so ordering behavior is unchanged in the ordinary case.
-# New-format └ ... · p:<token> children and, for compatibility only, already
-# adjacent old-format firstmate/... or 2ndmate-<id>/... projections may extend
-# the block read-only; they are never renamed or moved.
+# New-format └ ... · p:<token> children and already-adjacent old-format
+# firstmate/... projections may extend the block read-only; they are never
+# renamed or moved. Workspaces outside that retained owner block are foreign.
 #
 # This is presentation-only and always returns success.
 # Every unavailable, ambiguous, failed, or unverifiable ordering step prints a
@@ -1485,6 +1451,10 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
     echo "warning: herdr presentation ordering missing owning parent label; leaving worker in Herdr's current order" >&2
     return 0
   }
+  [ "$parent" = firstmate ] || {
+    echo "warning: herdr presentation ordering refuses unsupported owning parent '$parent'; leaving worker in Herdr's current order" >&2
+    return 0
+  }
   list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || {
     echo "warning: herdr presentation ordering could not list workspaces; leaving worker in Herdr's current order" >&2
     return 0
@@ -1497,13 +1467,13 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
       end;
     def is_top_level_parent:
       (.label | type) == "string"
-      and ((.label == "firstmate") or (.label | test("^2ndmate-[^/]+$")));
+      and (.label == "firstmate");
     def is_new_child:
       (.label | type) == "string"
       and (.label | test("^└ .+ · p:[A-Za-z0-9_-]{22}$"));
     def is_legacy_child:
       (.label | type) == "string"
-      and (.label | test("^(firstmate|2ndmate-[^/]+)/.+ · p:[A-Za-z0-9_-]{22}$"));
+      and (.label | test("^firstmate/.+ · p:[A-Za-z0-9_-]{22}$"));
     def is_legacy_child_for($owner):
       is_legacy_child and (.label | startswith($owner + "/"));
     def is_child_for($owner):
@@ -1713,8 +1683,8 @@ fm_backend_herdr_workspace_find() {  # <session>
 #
 # Herdr 0.7.5 injects HERDR_ENV=1, HERDR_PANE_ID, HERDR_SESSION,
 # HERDR_SOCKET_PATH, HERDR_TAB_ID, and HERDR_WORKSPACE_ID into every process it
-# manages a pane for (docs/verification/runtime-backends.md), and a firstmate
-# or secondmate agent's own tool calls inherit them. Older injection shapes are
+# manages a pane for (docs/verification/runtime-backends.md), and the
+# firstmate's own tool calls inherit them. Older injection shapes are
 # unverified and cannot establish launcher ancestry without both pane and
 # socket identity. Workspace LABELS are mutable and herdr enforces no
 # uniqueness on them, so a label search cannot tell one `firstmate` workspace
@@ -1938,17 +1908,9 @@ fm_backend_herdr_workspace_prune_seeded_default_tab() {  # <session> <workspace_
 # attach to). --no-focus is passed unconditionally anyway, for defense in
 # depth and because it is a no-op in the already-safe case.
 #
-# <launcher-relationship> (3rd arg, default "launcher-home") says whether the
-# container being ensured belongs to the SAME firstmate home as the process
-# calling this:
-#   launcher-home - a crewmate or scout for the caller's own home. When the
-#                   caller is itself running in a herdr pane, the worker MUST
-#                   land in that exact workspace
-#                   (fm_backend_herdr_launcher_identity), never in whichever
-#                   same-labeled workspace happens to sort first.
-#   other-home    - a --secondmate launch, which stands up a DIFFERENT home's
-#                   own per-home workspace by design. The launcher's workspace
-#                   is deliberately not inherited here.
+# When the caller is itself running in a herdr pane, the worker MUST land in
+# that exact workspace (fm_backend_herdr_launcher_identity), never in whichever
+# same-labeled workspace happens to sort first.
 # With no herdr ancestry at all there is no launcher workspace to inherit, so
 # the per-home label lookup below stays the resolver - but it must then resolve
 # to exactly ONE workspace. Two same-labeled home workspaces with no launcher
@@ -1957,22 +1919,20 @@ fm_backend_herdr_workspace_prune_seeded_default_tab() {  # <session> <workspace_
 #
 # Returns 0 on success, 3 for a refusal whose exact reason is already on
 # stderr, and 1 for a failed or unparseable herdr call.
-fm_backend_herdr_workspace_ensure() {  # <session> <cwd> [<launcher-relationship>]
-  local session=$1 cwd=$2 relationship=${3:-launcher-home} wsid out label matches count status
+fm_backend_herdr_workspace_ensure() {  # <session> <cwd>
+  local session=$1 cwd=$2 wsid out label matches count status
   FM_BACKEND_HERDR_WS_ID=""
   FM_BACKEND_HERDR_WS_SEEDED_TAB_ID=""
-  if [ "$relationship" = launcher-home ]; then
-    fm_backend_herdr_launcher_identity "$session" && status=0 || status=$?
-    case "$status" in
-      0)
-        FM_BACKEND_HERDR_WS_ID=$FM_BACKEND_HERDR_LAUNCHER_WORKSPACE_ID
-        printf '%s' "$FM_BACKEND_HERDR_WS_ID"
-        return 0
-        ;;
-      2) ;;
-      *) return 3 ;;
-    esac
-  fi
+  fm_backend_herdr_launcher_identity "$session" && status=0 || status=$?
+  case "$status" in
+    0)
+      FM_BACKEND_HERDR_WS_ID=$FM_BACKEND_HERDR_LAUNCHER_WORKSPACE_ID
+      printf '%s' "$FM_BACKEND_HERDR_WS_ID"
+      return 0
+      ;;
+    2) ;;
+    *) return 3 ;;
+  esac
   label=$(fm_backend_herdr_workspace_label)
   matches=$(fm_backend_herdr_workspace_find_all "$session")
   count=$(printf '%s' "$matches" | grep -c '[^[:space:]]' || true)
@@ -2009,14 +1969,13 @@ fm_backend_herdr_workspace_ensure() {  # <session> <cwd> [<launcher-relationship
 # CONTAINER=${RAW%%$'\t'*}; SEEDED_TAB_ID=${RAW#*$'\t'}. The seeded tab id
 # must be threaded through to fm_backend_herdr_create_task, which is the only
 # function allowed to prune it (fm_backend_herdr_workspace_prune_seeded_default_tab).
-# <launcher-relationship> is passed straight through to
-# fm_backend_herdr_workspace_ensure, which owns its meaning.
-fm_backend_herdr_container_ensure() {  # <cwd-for-a-fresh-workspace> [<launcher-relationship>]
-  local cwd=${1:-$PWD} relationship=${2:-launcher-home} session label status
+# The workspace owner resolves placement from the launcher's verified identity.
+fm_backend_herdr_container_ensure() {  # <cwd-for-a-fresh-workspace>
+  local cwd=${1:-$PWD} session label status
   fm_backend_herdr_version_check || return 1
   session=$(fm_backend_herdr_session)
   fm_backend_herdr_server_ensure "$session" || return 1
-  fm_backend_herdr_workspace_ensure "$session" "$cwd" "$relationship" >/dev/null && status=0 || status=$?
+  fm_backend_herdr_workspace_ensure "$session" "$cwd" >/dev/null && status=0 || status=$?
   # A 3 already reported the exact placement it refused to guess at; adding the
   # generic message here would bury it.
   [ "$status" -ne 3 ] || return 1
@@ -2639,7 +2598,7 @@ fm_backend_herdr_projection_live_binding_matches() {  # <session> <token> <works
         and (.label | test("^└ .+ · p:[A-Za-z0-9_-]{22}$"));
       def is_legacy_child_for($owner):
         (.label | type) == "string"
-        and (.label | test("^(firstmate|2ndmate-[^/]+)/.+ · p:[A-Za-z0-9_-]{22}$"))
+        and (.label | test("^firstmate/.+ · p:[A-Za-z0-9_-]{22}$"))
         and (.label | startswith($owner + "/"));
       (.result.workspaces // null) as $spaces
       | select(($spaces | type) == "array")
@@ -3657,13 +3616,10 @@ EOF
 
 # fm_backend_herdr_list_live: recovery/orphan discovery. Lists every tab whose
 # label looks like a firstmate task window (fm-<id>) in <session>'s, THIS
-# HOME'S OWN workspace (fm_backend_herdr_workspace_label - never another
-# home's), by LABEL - never by trusting a stored pane id, since ids are not
+# HOME'S OWN workspace (fm_backend_herdr_workspace_label), by LABEL - never by
+# trusting a stored pane id, since ids are not
 # guaranteed stable across every server lifecycle (see herdr-verification-p2.md
-# "ID stability"). A caller running as a given home (e.g. a secondmate
-# recovering its own in-flight work) naturally scopes to that home's own
-# workspace because FM_HOME already names it - no glue needed, unlike the
-# primary-spawns-a-secondmate path in fm-spawn.sh. Read-only: a session/
+# "ID stability"). Read-only: a session/
 # workspace that does not exist yet simply lists nothing. One
 # "<session>:<pane_id>\t<label>" line per live task tab.
 fm_backend_herdr_list_live() {  # <session>

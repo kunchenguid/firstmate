@@ -8,8 +8,7 @@
 # Generic reporters, temp roots, git fixtures, and fail/pass/fm_test_cleanup
 # come from tests/lib.sh, pulled in below. This file owns the shared fake
 # no-mistakes, gh, gh-axi, Herdr, ssh, and spawn-world helpers. Wake-queue mocks
-# stay in wake-helpers.sh; secondmate-lifecycle mocks stay in
-# secondmate-helpers.sh.
+# stay in wake-helpers.sh.
 #
 # FM_TEST_NO_MISTAKES_VERSION is the single default version for the shared fake
 # no-mistakes banner. Override a single case with FM_FAKE_NO_MISTAKES_VERSION
@@ -53,8 +52,8 @@ SH
 }
 
 # fm_test_fake_no_mistakes_init_doctor <fakebin>
-# Secondmate-lifecycle stub: init/doctor touch marker files; other verbs exit 2.
-# Does not answer --version (those suites never probe the floor).
+# Init/doctor stub: touch marker files; other verbs exit 2. Does not answer
+# --version (the suites using it never probe the floor).
 fm_test_fake_no_mistakes_init_doctor() {
   local fakebin=$1
   cat > "$fakebin/no-mistakes" <<'SH'

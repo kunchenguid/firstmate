@@ -191,7 +191,11 @@ wait_until "$P_KILL" idle || fail 'SIGKILL Pi never became idle on agent get'
 
 assert_live_idle "$P_LIVE" 'before-exit live-idle'
 
-lab pane run "$P_QUIT" '/quit' >/dev/null || fail 'could not send /quit'
+# Send the slash command through the interactive input surface. `pane run`
+# starts a shell command and does not submit text to an already-running agent.
+lab pane send-text "$P_QUIT" '/quit' >/dev/null || fail 'could not type /quit'
+sleep 0.5
+lab pane send-keys "$P_QUIT" Enter >/dev/null || fail 'could not submit /quit'
 
 KILL_PID=$(lab pane process-info --pane "$P_KILL" | jq -r '
   .result.process_info.foreground_processes[]?
@@ -202,7 +206,12 @@ KILL_PID=$(lab pane process-info --pane "$P_KILL" | jq -r '
   || fail 'SIGKILL pane had no pi pid in process-info'
 kill -KILL "$KILL_PID" || fail "kill -KILL $KILL_PID failed"
 
-wait_until "$P_QUIT" gone || fail '/quit pane never dropped off agent get'
+if ! wait_until "$P_QUIT" gone 20; then
+  # Pi completion may consume the first Enter; match the established live
+  # stale-registration test by allowing one bounded retry.
+  lab pane send-keys "$P_QUIT" Enter >/dev/null 2>&1 || true
+  wait_until "$P_QUIT" gone || fail '/quit pane never dropped off agent get'
+fi
 wait_until "$P_KILL" gone || fail 'SIGKILL pane never dropped off agent get'
 
 assert_exited_to_shell "$P_QUIT" '/quit leftover shell'

@@ -7,13 +7,7 @@
 # immediately delivers that row as observation handling, not a second outcome
 # path.
 #
-# The destination is the home's role, never the caller's choice:
-#   - a secondmate home reports upward on its parent channel, resolved and
-#     appended through bin/fm-parent-channel-lib.sh in the same
-#     "<state> [key=<slug>]: <note>" shape the charter contract defines;
-#   - a main home reports to the captain through the durable wake queue.
-# A poll observed in a secondmate home also receives a local durable wake after
-# the upward write, so the mate can handle its own poll observation.
+# The result is reported through this home's durable wake queue.
 # No new state file and no new transport are involved.
 #
 # Normal operation deduplicates the task's latest canonical PR identity through
@@ -29,8 +23,6 @@
 _FM_MERGE_OUTCOME_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$_FM_MERGE_OUTCOME_LIB_DIR/fm-pr-lib.sh"
-# shellcheck source=bin/fm-parent-channel-lib.sh
-. "$_FM_MERGE_OUTCOME_LIB_DIR/fm-parent-channel-lib.sh"
 
 # shellcheck disable=SC2034 # Public result consumed by sourcing callers.
 FM_MERGE_OUTCOME_ALREADY_RECORDED=false
@@ -41,7 +33,7 @@ FM_MERGE_OUTCOME_ALREADY_RECORDED=false
 # existing poll path also needs a local wake:
 #   self - this home performed the merge.
 #   poll - this home's merge poll detected the merge, so the canonical outcome
-#          also wakes this home after any upward hop needed by a secondmate.
+#          wakes this home.
 # Optional <authority> is yolo, away-grant, attended, or external. Yolo,
 # away-grant, and external are appended to the ledger line; attended remains
 # untagged. The merge entrypoint supplies its authority after forge acceptance,
@@ -49,14 +41,13 @@ FM_MERGE_OUTCOME_ALREADY_RECORDED=false
 # no matching record proves that this home authorized the merge.
 #
 # Returns 0 when the outcome is recorded (or already was), 2 on an invalid
-# request, 3 when this home's own role or parent binding cannot be read well
-# enough to say where the outcome belongs, and 1 on any other failure to
+# request, and 1 on any failure to
 # record. A caller that has already merged must report a non-zero return rather
 # than treat it as success: the merge landed and the record did not.
 fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin> <source-head> [authority]
   local home=$1 state=$2 id=$3 url=$4 origin=$5 head=${6-}
   local authority=${7-} suffix=
-  local self_rc=0 destination='' line lock status=0
+  local lock status=0
   local provider host path number
   # shellcheck disable=SC2034 # Sourced wake helpers consume these scoped globals.
   local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
@@ -83,14 +74,6 @@ fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin> <sourc
   fi
   [ -d "$state" ] && [ ! -L "$state" ] || return 1
 
-  if destination=$(fm_parent_channel_destination "$home" "$state"); then
-    line="done [key=merged-$id]: merged $id $FM_PR_URL$suffix"
-  else
-    self_rc=$?
-    [ "$self_rc" -eq 1 ] || return 3
-    destination=''
-  fi
-
   STATE=$state
   # shellcheck source=bin/fm-wake-lib.sh
   . "$_FM_MERGE_OUTCOME_LIB_DIR/fm-wake-lib.sh"
@@ -104,10 +87,7 @@ fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin> <sourc
     return 0
   fi
 
-  if [ -n "$destination" ]; then
-    fm_parent_channel_append_once "$destination" "$line" || status=1
-  fi
-  if [ "$status" -eq 0 ] && { [ "$origin" = poll ] || [ -z "$destination" ]; }; then
+  if [ "$status" -eq 0 ]; then
     fm_wake_append check "merged-$id-$FM_PR_URL" \
       "check: merge landed: $id $FM_PR_URL$suffix" || status=1
   fi

@@ -18,14 +18,7 @@
 #   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|remote-endpoint|none> · <detail>
 #
 # Logic, in order:
-#   1. Resolve worktree + backend target + kind from state/<id>.meta. A meta
-#      recording remote_host= is a remote secondmate: its worktree and endpoint
-#      live on that host, so the local worktree and pane reads are skipped and
-#      the remote host is asked for the endpoint's recovery-grade state
-#      (fm-on.sh + fm-remote-secondmate-control.sh state). alive falls through
-#      to the routed status log; dead/missing report the remote verdict; an
-#      unreachable or unreadable remote reports unknown-remote, never a false
-#      gone/dead.
+#   1. Resolve worktree, backend target, and kind from state/<id>.meta.
 #   2. Matching no-mistakes run for this crew's branch AND current code identity,
 #      active or terminal (from `axi status`, or the coarse `no-mistakes runs`
 #      fallback)? Branch name alone is not enough: a historical run on a reused
@@ -153,13 +146,12 @@ HARNESS=$(meta_value harness)
 if fm_control_harness_removed "$HARNESS"; then
   emit unknown none "historical harness $HARNESS is unsupported; record and work preserved; explicit migration required"
 fi
-REMOTE_HOST=$(meta_value remote_host)
 [ -n "$KIND" ] || KIND=ship
+[ "$KIND" != secondmate ] || emit unknown record "historical secondmate record (unsupported)"
 
 # A torn-down (or never-created) worktree has no current state to read. A
-# remote secondmate's recorded worktree is a path on ITS host, so the local
-# probe proves nothing for it - the remote arm below reads the true source.
-if [ -z "$REMOTE_HOST" ] && { [ -z "$WT" ] || [ ! -d "$WT" ]; }; then
+# missing local path is therefore an unknown state.
+if [ -z "$WT" ] || [ ! -d "$WT" ]; then
   emit unknown none "worktree gone (torn down?)"
 fi
 
@@ -192,45 +184,6 @@ map_log_state() {  # <line>
 
 LOG_LINE=$(log_last_line || true)
 LOG_VERB=$(status_line_verb "$LOG_LINE")
-
-# --- remote secondmate: the true source is the remote endpoint ---------------
-# A remote mate's recorded worktree and backend target live on its own host, so
-# the local worktree probe above and the local pane reads below would misreport
-# a healthy remote mate as gone or dead. Ask the remote host for the endpoint's
-# recovery-grade state over the same fm-on.sh transport fm-send uses, then read
-# current activity from the routed status log exactly as for a local
-# secondmate (an idle endpoint is healthy for a secondmate either way). An
-# unreachable host or unreadable endpoint is reported as unknown-remote -
-# explicitly NOT proof of death - so a transport blip never reads as a torn
-# down or dead mate; only the remote host's own dead/missing verdict may say
-# the endpoint is actually gone.
-if [ -n "$REMOTE_HOST" ]; then
-  if ! REMOTE_STATE=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-on.sh" "$ID" \
-    fm-remote-secondmate-control.sh state "$ID" < /dev/null 2>/dev/null); then
-    REMOTE_STATE=
-  fi
-  REMOTE_STATE=$(printf '%s\n' "$REMOTE_STATE" | tail -1)
-  case "$REMOTE_STATE" in
-    alive)
-      if [ -n "$LOG_VERB" ]; then
-        LOG_STATE=$(map_log_state "$LOG_LINE")
-        if [ "$LOG_STATE" != unknown ]; then
-          emit "$LOG_STATE" status-log "$(status_line_note "$LOG_LINE")${SEP}remote endpoint alive on $REMOTE_HOST"
-        fi
-      fi
-      emit unknown remote-endpoint "alive on $REMOTE_HOST (an idle secondmate is healthy)"
-      ;;
-    dead|missing)
-      emit unknown remote-endpoint "remote endpoint $REMOTE_STATE on $REMOTE_HOST"
-      ;;
-    '')
-      emit unknown remote-endpoint "unknown-remote: $REMOTE_HOST unreachable or endpoint unreadable (not proof of death)"
-      ;;
-    *)
-      emit unknown remote-endpoint "unknown-remote: endpoint state '$REMOTE_STATE' on $REMOTE_HOST (not proof of death)"
-      ;;
-  esac
-fi
 
 # pane_readable is consulted ONLY in the no-run fallback below. The run-step path
 # stays authoritative regardless of pane liveness - judge by the run-step, not the
@@ -568,8 +521,8 @@ HAVE_RUN=0
 # the TOON field parsing entirely for this crew.
 RUN_SOURCE=full
 COARSE_STATUS=""
-# Scouts and secondmates never drive a no-mistakes validation of their own
-# worktree, so skip the lookup for them and read state from pane/log directly.
+# Scouts never drive a no-mistakes validation of their own worktree, so skip
+# the lookup for them and read state from pane/log directly.
 if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/null 2>&1; then
   RUN_OUT=$(nm_run axi status)
   if [ -n "$RUN_OUT" ]; then
@@ -817,28 +770,24 @@ if ! pane_readable "$BACKEND_TARGET"; then
   esac
 fi
 
-# Secondmates idle on their own watcher (idle pane = healthy), so the busy
-# state is not meaningful for them; read their state from the status log only.
 # Only an exact busy verdict reports working here, and only an exact idle
 # verdict permits the status-log fallback below. Missing, malformed, stale, or
 # unverified semantic state remains unknown.
-if [ "$KIND" != secondmate ]; then
-  BUSY_VERDICT=$(crew_busy_verdict "$BACKEND_TARGET")
-  case "${BUSY_VERDICT%% *}" in
-    busy) emit working pane "harness busy (${BUSY_VERDICT#* })" ;;
-    idle) ;;
-    *) emit unknown pane "harness state unavailable ($BUSY_VERDICT)" ;;
-  esac
-fi
+BUSY_VERDICT=$(crew_busy_verdict "$BACKEND_TARGET")
+case "${BUSY_VERDICT%% *}" in
+  busy) emit working pane "harness busy (${BUSY_VERDICT#* })" ;;
+  idle) ;;
+  *) emit unknown pane "harness state unavailable ($BUSY_VERDICT)" ;;
+esac
 
 # Fall back to the status log's last line, but ONLY when its verb maps to a real
 # run-state. A decision-closing event - resolved: (fm-classify-lib.sh's
 # FM_CLASSIFY_RESOLVE_VERB), and any future decision-only sibling - is NOT a state:
 # it exists solely to CLOSE a keyed decision in the durable fold, so a trailing
 # resolved: must never become the current state or leak its resolution prose as the
-# detail. Skipping it lets a just-resolved idle crew (typically a secondmate, which
-# has no busy check above) fall through to the idle default instead of rendering
-# `unknown` with the resolution note as `doing`. map_log_state is the single owner of
+# detail. Skipping it lets a just-resolved idle crew fall through to the idle
+# default instead of rendering `unknown` with the resolution note as `doing`.
+# map_log_state is the single owner of
 # the verb->state mapping (including the configurable paused verb), so reusing its
 # `unknown` verdict as the "not a state" test needs no second verb list here.
 if [ -n "$LOG_VERB" ]; then

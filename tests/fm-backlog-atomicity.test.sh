@@ -18,7 +18,7 @@
 #               scripts and any drift a home was already carrying.
 #
 # The invariant is single-host: a home's backlog and its records live together,
-# so a persistent secondmate keeps its own books through its own copies of these
+# so each home keeps its own books through its own copies of these
 # scripts. A parent's view of a mate lagging is a freshness question and is
 # deliberately not asserted here.
 set -u
@@ -1871,27 +1871,6 @@ test_recovery_reports_an_owned_row_read_failure() {
   pass "session start reports owned backlog rows it cannot read"
 }
 
-test_orca_cleanup_recovery_never_transitions_the_backlog() {
-  local case_dir id meta out
-  id=atomic-orca-cleanup-recovery-b8
-  case_dir=$(make_home orca-cleanup-recovery)
-  add_item "$case_dir" "$id"
-  write_task_meta "$case_dir" "$id" ship local-only "cleanup_recovery=orca"
-  meta="$(home_of "$case_dir")/state/$id.meta"
-
-  out=$(run_bootstrap "$case_dir")
-  [ "$(row_state "$case_dir" "$id")" = queued ] \
-    || fail "session start treated cleanup recovery as a launched worker: $out"
-  assert_present "$meta" "session start removed the cleanup recovery record"
-
-  out=$(run_teardown "$case_dir" "$id") \
-    || fail "cleanup recovery teardown failed: $out"
-  [ "$(row_state "$case_dir" "$id")" = queued ] \
-    || fail "cleanup recovery teardown completed work that never launched"
-  assert_absent "$meta" "cleanup recovery teardown retained its task record"
-  pass "Orca cleanup recovery is excluded from backlog lifecycle transitions"
-}
-
 test_recovery_marks_an_owned_record_in_flight() {
   local case_dir id out
   id=atomic-heal-b8
@@ -2669,7 +2648,7 @@ test_bootstrap_stops_when_data_disappears_before_reconciliation() {
 }
 
 test_bootstrap_addressing_exemptions_remain_nonfatal() {
-  local manual_case no_backlog_case secondmate_case secondmate_id out
+  local manual_case no_backlog_case out
   manual_case=$(make_home bootstrap-manual-exempt)
   printf '%s\n' manual > "$(home_of "$manual_case")/config/backlog-backend"
   mv "$(home_of "$manual_case")/data" "$manual_case/manual-data"
@@ -2681,16 +2660,7 @@ test_bootstrap_addressing_exemptions_remain_nonfatal() {
   out=$(run_bootstrap "$no_backlog_case") \
     || fail "no-backlog bootstrap exemption became fatal: $out"
 
-  secondmate_id=atomic-bootstrap-secondmate-exempt-b11
-  secondmate_case=$(make_home bootstrap-secondmate-exempt)
-  write_task_meta "$secondmate_case" "$secondmate_id" secondmate '' \
-    "spawn_gen=spawn-secondmate-exempt"
-  mv "$(home_of "$secondmate_case")/data" "$secondmate_case/secondmate-data"
-  out=$(run_bootstrap "$secondmate_case") \
-    || fail "secondmate bootstrap exemption became fatal: $out"
-  assert_present "$(home_of "$secondmate_case")/state/$secondmate_id.meta" \
-    "secondmate bootstrap exemption removed the persistent agent record"
-  pass "bootstrap preserves secondmate, manual, and absent-backlog exemptions"
+  pass "bootstrap preserves manual and absent-backlog exemptions"
 }
 
 test_recovery_leaves_a_captain_held_item_alone() {
@@ -2708,7 +2678,7 @@ test_recovery_leaves_a_captain_held_item_alone() {
   pass "session start leaves a captain-held item where the captain put it"
 }
 
-# --- backend selection and secondmate scope ---------------------------------
+# --- backend selection -------------------------------------------------------
 
 test_no_backlog_teardown_refuses_a_symlinked_task_record_at_entry() {
   local case_dir home id target target_dir foreign_worktree out rc=0
@@ -3022,46 +2992,7 @@ test_manual_backend_home_dispatches_and_completes_without_touching_the_backlog()
   pass "a manual-backlog home dispatches and completes without a hard failure"
 }
 
-test_a_secondmate_home_keeps_its_own_books() {
-  local case_dir id out
-  id=atomic-mate-b13
-  case_dir=$(make_home mate-own-books "$id")
-  # The mate's home is a firstmate home in its own right; the invariant is
-  # single-host, so its own dispatch and completion keep its own two records
-  # paired with no parent involved.
-  printf '%s\n' mate-h1 > "$(home_of "$case_dir")/.fm-secondmate-home"
-  add_item "$case_dir" "$id"
 
-  out=$(run_ship_spawn "$case_dir" "$id") || fail "mate-home spawn failed: $out"
-  [ "$(row_state "$case_dir" "$id")" = in_flight ] \
-    || fail "a mate's own dispatch left its item at $(row_state "$case_dir" "$id")"
-
-  rm -f "$(home_of "$case_dir")/state/$id.meta"
-  write_task_meta "$case_dir" "$id" ship local-only "spawn_gen=spawn-mate-close"
-  out=$(run_teardown "$case_dir" "$id") || fail "mate-home teardown failed: $out"
-  [ "$(row_state "$case_dir" "$id")" = "done" ] \
-    || fail "a mate's own completion left its item at $(row_state "$case_dir" "$id")"
-  pass "a secondmate home keeps its own books paired through dispatch and completion"
-}
-
-test_a_persistent_secondmate_is_never_a_backlog_item() {
-  local case_dir id out mate
-  id=atomic-mate-b14
-  case_dir=$(make_home mate-not-an-item)
-  mate="$case_dir/mate-home"
-  mkdir -p "$mate/bin" "$mate/data"
-  printf '# Firstmate\n' > "$mate/AGENTS.md"
-  printf '%s\n' "$id" > "$mate/.fm-secondmate-home"
-  printf 'charter for %s\n' "$id" > "$mate/data/charter.md"
-
-  # No backlog item exists for the mate, and none should be required: agents are
-  # not work items. The dispatch must succeed anyway.
-  out=$(run_spawn "$case_dir" "$id" "$mate" --secondmate) \
-    || fail "secondmate spawn failed: $out"
-  assert_contains "$out" "spawned $id" "secondmate spawn did not report success"
-  assert_present "$(home_of "$case_dir")/state/$id.meta" "secondmate spawn published no record"
-  pass "dispatching a persistent secondmate needs no backlog item"
-}
 
 test_backend_resolution_preserves_config_errors
 test_backend_resolution_preserves_precedence_and_defaults
@@ -3118,7 +3049,6 @@ test_completion_refuses_a_close_target_symlinked_to_a_directory
 test_completion_fails_when_its_close_marker_cannot_be_removed
 test_recovery_retries_when_a_close_marker_cannot_be_removed
 test_recovery_reports_an_owned_row_read_failure
-test_orca_cleanup_recovery_never_transitions_the_backlog
 test_recovery_marks_an_owned_record_in_flight
 test_recovery_rejects_an_internal_worker_record_symlink
 test_recovery_ignores_a_symlinked_worker_record
@@ -3165,5 +3095,3 @@ test_dispatch_and_completion_are_structural
 test_refused_teardown_leaves_the_item_live
 test_environment_selected_adapter_is_not_forced_to_markdown
 test_manual_backend_home_dispatches_and_completes_without_touching_the_backlog
-test_a_secondmate_home_keeps_its_own_books
-test_a_persistent_secondmate_is_never_a_backlog_item

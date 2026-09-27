@@ -296,99 +296,6 @@ SH
 
 # Existing Herdr recovery fixture owns the session-start -> deferred bootstrap
 # -> spawn path, including missing, ambiguous, unreadable and shell endpoints.
-make_fake_herdr_secondmate_recovery() {
-  local fakebin=$1
-  # The recovery kill now requires the shared named-session lock and an exact
-  # focus snapshot. Keep a focused sibling tab so this test's husk close is
-  # provably non-workspace-emptying and never needs to signal a fake shell pid.
-  cat > "$fakebin/herdr" <<'SH'
-#!/usr/bin/env bash
-set -u
-log=${FM_FAKE_HERDR_LOG:?}
-state=${FM_FAKE_HERDR_STATE:?}
-mate_id=${FM_FAKE_SECOND_MATE_ID:?}
-killed="${state}.killed"
-spawned="${state}.spawned"
-case "$1 ${2:-}" in
-  'pane close'|'tab create') printf '%s\n' "$*" >> "$log" ;;
-esac
-case "${1:-} ${2:-}" in
-  "status --json")
-    printf '%s\n' '{"client":{"protocol":14,"version":"test"},"server":{"running":true}}'
-    ;;
-  "session list")
-    printf '{"sessions":[{"name":"default","running":true,"socket_path":"%s.sock"}]}\n' "$state"
-    ;;
-  "workspace list")
-    printf '{"result":{"workspaces":[{"workspace_id":"ws1","label":"2ndmate-%s","focused":true,"active_tab_id":"t-focus"}]}}\n' "$mate_id"
-    ;;
-  "tab list")
-    if [ -e "$spawned" ]; then
-      printf '{"result":{"tabs":[{"tab_id":"t-focus","workspace_id":"ws1","label":"captain","focused":true},{"tab_id":"t-new","workspace_id":"ws1","label":"fm-%s","focused":false}]}}\n' "$mate_id"
-    elif [ -e "$killed" ]; then
-      printf '%s\n' '{"result":{"tabs":[{"tab_id":"t-focus","workspace_id":"ws1","label":"captain","focused":true}]}}'
-    else
-      printf '{"result":{"tabs":[{"tab_id":"t-focus","workspace_id":"ws1","label":"captain","focused":true},{"tab_id":"t-old","workspace_id":"ws1","label":"fm-%s","focused":false}]}}\n' "$mate_id"
-    fi
-    ;;
-  "tab create")
-    : > "$spawned"
-    : > "$state"
-    printf '%s\n' '{"result":{"tab":{"tab_id":"t-new"},"root_pane":{"pane_id":"p-new"}}}'
-    ;;
-  "pane list")
-    if [ -e "$spawned" ]; then
-      printf '%s\n' '{"result":{"panes":[{"pane_id":"p-new","tab_id":"t-new"}]}}'
-    elif [ ! -e "$killed" ]; then
-      printf '%s\n' '{"result":{"panes":[{"pane_id":"p-old","tab_id":"t-old"}]}}'
-    else
-      printf '%s\n' '{"result":{"panes":[]}}'
-    fi
-    ;;
-  "pane get")
-    pane=${3:-}
-    if [ "$pane" = p-old ] && [ ! -e "$spawned" ]; then
-      case "${FM_FAKE_HERDR_MODE:-shell}" in
-        missing) echo '{"error":{"code":"pane_not_found"}}'; exit 1 ;;
-        unreadable) exit 1 ;;
-      esac
-    fi
-    if [ "$pane" = p-new ] && [ -e "$spawned" ]; then
-      printf '%s\n' '{"result":{"pane":{"pane_id":"p-new","tab_id":"t-new","workspace_id":"ws1"}}}'
-    elif [ "$pane" = p-old ] && [ ! -e "$killed" ]; then
-      printf '%s\n' '{"result":{"pane":{"pane_id":"p-old","tab_id":"t-old","workspace_id":"ws1"}}}'
-    else
-      printf '%s\n' '{"error":{"code":"pane_not_found"}}' >&2
-      exit 1
-    fi
-    ;;
-  "pane process-info")
-    jq -n --arg p "${4:-}" '{result:{type:"pane_process_info",process_info:{pane_id:$p,shell_pid:101,foreground_processes:[{pid:102,name:"pi",argv0:"pi"}]}}}'
-    ;;
-  "agent get")
-    if [ "${FM_FAKE_HERDR_MODE:-shell}" = ambiguous ] && [ ! -e "$spawned" ]; then
-      echo '{"result":{"agent":{"agent_status":"unknown"}}}'; exit
-    fi
-    if [ "${3:-}" = p-new ] && [ -e "$spawned" ]; then
-      printf '%s\n' '{"result":{"agent":{"agent_status":"idle"}}}'
-    else
-      printf '%s\n' '{"error":{"code":"agent_not_found"}}' >&2
-      exit 1
-    fi
-    ;;
-  "pane close")
-    [ "${3:-}" = p-old ] && : > "$killed"
-    ;;
-  "pane run"|"pane send-text"|"pane send-keys"|"tab close")
-    ;;
-  *)
-    exit 1
-    ;;
-esac
-exit 0
-SH
-  chmod +x "$fakebin/herdr"
-}
 
 # make_fake_herdr <fakebin> <live-pane>: `herdr pane get <pane>` succeeds only
 # for the given pane id - the exact primitive fm_backend_target_exists uses
@@ -447,63 +354,9 @@ run_named_harness_session_start() {  # <harness> <home> <root> <path> [fm-sessio
     "$SESSION_START" "$@"
 }
 
-prepare_session_start_secondmate() {
-  local SESSION_START_HERDR_SECOND_MATE_ID=$SESSION_START_SECOND_MATE_ID
-  prepare_session_start_herdr_secondmate "$1"
-}
 
-run_session_start_secondmate() {
-  local root=$1 home=$2 fakebin=$3 mate=$4 log=$5 state=$6 mode=$7
-  FM_BACKEND=herdr FM_FAKE_HERDR_MODE="$mode" FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" \
-    FM_FAKE_SECOND_MATE_ID="$SESSION_START_SECOND_MATE_ID" FM_FAKE_HARNESS_PID=$$ \
-    run_session_start "$home" "$root" "$fakebin:$BASE_PATH"
-}
 
-prepare_session_start_herdr_secondmate() {
-  local name=$1 rec root home fakebin w mate log state id=$SESSION_START_HERDR_SECOND_MATE_ID
-  rec=$(new_world "$name")
-  IFS='|' read -r root home fakebin <<EOF
-$rec
-EOF
-  w=${root%/root}
-  mate="$w/secondmate-$id"
-  log="$w/herdr.log"
-  state="$w/herdr.state"
-  mkdir -p "$mate/bin" "$mate/data" "$mate/state" "$mate/config" "$mate/projects"
-  printf '%s\n' "$id" > "$mate/.fm-secondmate-home"
-  printf '# Firstmate\n' > "$mate/AGENTS.md"
-  printf 'Second mate charter.\n' > "$mate/data/charter.md"
-  printf '%s\n' herdr > "$home/config/backend"
-  printf '%s\n' pi > "$home/config/secondmate-harness"
-  printf '%s\n' manual > "$home/config/backlog-backend"
-  touch "$home/state/.last-watcher-beat"
-  {
-    printf 'window=default:p-old\nendpoint_task_id=%s\nworktree=%s\nproject=%s\n' "$id" "$mate" "$mate"
-    printf 'kind=secondmate\n'
-    printf 'harness=pi\n'
-    printf 'home=%s\n' "$mate"
-    printf 'backend=herdr\n'
-    printf 'herdr_session=default\n'
-    printf 'herdr_workspace_id=ws1\n'
-    printf 'herdr_tab_id=t-old\n'
-    printf 'herdr_pane_id=p-old\n'
-  } > "$home/state/$id.meta"
-  ln -s "$ROOT/bin" "$root/bin"
-  make_fake_toolchain "$fakebin"
-  make_fake_ps_pi "$fakebin"
-  fm_fake_exit0 "$fakebin" pi
-  make_fake_herdr_secondmate_recovery "$fakebin"
-  : > "$log"
-  printf '%s|%s|%s|%s|%s|%s\n' "$root" "$home" "$fakebin" "$mate" "$log" "$state"
-}
 
-run_session_start_herdr_secondmate() {
-  local root=$1 home=$2 fakebin=$3 mate=$4 log=$5 state=$6
-  FM_BACKEND=herdr FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" \
-    FM_FAKE_SECOND_MATE_ID="$SESSION_START_HERDR_SECOND_MATE_ID" \
-    FM_FAKE_HARNESS_PID=$$ \
-    run_session_start "$home" "$root" "$fakebin:$BASE_PATH"
-}
 
 # wait_for_network_stage <home> <root> [seconds]
 # Block until the deferred network stage this home's session start launched has
@@ -583,31 +436,21 @@ EOF
 
   printf '%s\n' '- demo [no-mistakes] - a demo project (added 2026-07-01)' > "$home/data/projects.md"
   : > "$home/data/captain.md"
-  # secondmates.md, captain-shared.md, and learnings.md deliberately absent
+  # learnings.md deliberately absent
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
 
-  jq -e --arg home "$home" '
-    .schema == "fm-secondmate-home-summary.v1"
-    and .home == $home
-    and (.generated_epoch | type) == "number"
-  ' "$home/state/home-summary.json" >/dev/null \
-    || fail "a locked session start did not publish the home summary ledger"
   assert_contains "$out" "data/projects.md" "digest did not label the projects.md section"
   assert_contains "$out" "- demo [no-mistakes] - a demo project (added 2026-07-01)" "digest did not print projects.md content"
 
   assert_contains "$out" "data/captain.md" "digest did not label the captain.md section"
-  assert_contains "$out" "data/captain-shared.md (shared, main-authoritative, read-only in secondmate homes)" \
-    "digest did not label the shared captain section"
-
-  assert_contains "$out" "data/secondmates.md" "digest did not label the secondmates.md section"
   assert_contains "$out" "data/learnings.md" "digest did not label the learnings.md section"
 
-  # Exactly four context ABSENT markers (secondmates.md, captain-shared.md,
-  # learnings.md; backlog.md is covered by its own test) - and the
+  # Exactly two context ABSENT markers (learnings.md and backlog.md, which is
+  # covered by its own test) - and the
   # present-but-empty captain.md must NOT print ABSENT.
   absent_count=$(printf '%s\n' "$out" | grep -c '^ABSENT$')
-  [ "$absent_count" -eq 4 ] || fail "expected 4 ABSENT markers (secondmates.md, captain-shared.md, learnings.md, backlog.md), got $absent_count: $out"
+  [ "$absent_count" -eq 2 ] || fail "expected 2 ABSENT markers (learnings.md and backlog.md), got $absent_count: $out"
 
   cap_section=$(printf '%s\n' "$out" | awk '/^data\/captain\.md$/{flag=1;next}/^data\//{flag=0}flag')
   assert_contains "$cap_section" "(present, empty)" "empty-but-present captain.md was not distinguished from ABSENT"
@@ -652,14 +495,9 @@ EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_pi "$fakebin"
 
-  # A live secondmate meta with a window pointed at nothing real - if the
-  # bootstrap sweep's secondmate_sync ran (a MUTATING step), it would try to
-  # fast-forward this "home" and/or report a SECONDMATE_SYNC/NUDGE_SECONDMATES
-  # line. Absence of any such line is this test's proof that
-  # FM_BOOTSTRAP_DETECT_ONLY=1 actually suppressed the mutating sweep.
-  mkdir -p "$home/other-secondmate/state"
-  fm_write_secondmate_meta "$home/state/sm-x.meta" "$home/other-secondmate" "firstmate:fm-sm-x" alpha
-  append_wake "$home/state" signal sm-x "done: surfaced before refusal" || fail "seed wake failed"
+  append_wake "$home/state" signal task-x "done: surfaced before refusal" || fail "seed wake failed"
+  printf 'kind=ship\n' > "$home/state/task-x.meta"
+  printf 'kind=ship\n' > "$home/state/task-x.meta"
   git -C "$root" checkout -q -B fm/read-only-tangle
 
   sleep 300 &
@@ -690,12 +528,6 @@ EOF
   # tasks-axi, so bootstrap's own read-only tool-detection line fires
   # deterministically regardless of what is installed on the test host).
   assert_contains "$out" "MISSING: tasks-axi (install:" "detect-only bootstrap diagnostics did not run on the read-only path"
-
-  # The mutating secondmate sweep must NOT have run: no SECONDMATE_SYNC/
-  # NUDGE_SECONDMATES line, and the sowed secondmate meta's target dir is
-  # untouched (fm-ff-lib would have tried to fast-forward it otherwise).
-  assert_not_contains "$out" "SECONDMATE_SYNC" "mutating secondmate sweep ran during a lock refusal"
-  assert_not_contains "$out" "NUDGE_SECONDMATES" "mutating secondmate sweep ran during a lock refusal"
 
   # The rest of the digest (read-only-safe) still completed.
   assert_contains "$out" "FLEET STATE" "fleet-state digest section missing on the read-only path"
@@ -1064,143 +896,6 @@ EOF
   pass "orphan status logs are printed once with only their newest event"
 }
 
-# --- session-start secondmate recovery boundary -----------------------------
-
-test_session_start_relaunches_missing_pi_secondmate() {
-  local rec root home fakebin mate log spawned out first_calls second_calls
-  rec=$(prepare_session_start_secondmate secondmate-missing-pi)
-  IFS='|' read -r root home fakebin mate log spawned <<EOF
-$rec
-EOF
-
-  out=$(run_session_start_secondmate "$root" "$home" "$fakebin" "$mate" "$log" "$spawned" missing)
-
-  # The relaunch now runs off the blocking path, so the digest's own liveness
-  # read may legitimately still show the pre-relaunch endpoint. What must NOT
-  # happen is silence: the section names the relaunch as either done or not yet
-  # confirmed.
-  assert_contains "$out" "NETWORK CHECKS" "the digest lost its deferred network-check section"
-  assert_contains "$out" "dead-secondmate relaunch" \
-    "the digest never accounted for the dead-secondmate relaunch"
-
-  wait_for_network_stage "$home" "$root" \
-    || fail "the deferred network stage never published: $(network_stage_report "$home" "$root")"
-
-  assert_not_contains "$(network_stage_report "$home" "$root")" "SECONDMATE_LIVENESS:" \
-    "successful missing-window recovery should stay non-actionable"
-  assert_contains "$(cat "$log")" "tab create" "the deferred stage did not relaunch the missing Pi secondmate"
-  assert_not_contains "$(cat "$log")" "pane close" "the deferred stage tried to kill an already-absent window"
-  assert_grep 'harness=pi' "$home/state/$SESSION_START_SECOND_MATE_ID.meta" \
-    "the real respawn path did not preserve the Pi harness: $(cat "$home/state/$SESSION_START_SECOND_MATE_ID.meta")"
-
-  first_calls=$(grep -c 'tab create' "$log" || true)
-  rm -f "$home/state/.lock"
-  run_session_start_secondmate "$root" "$home" "$fakebin" "$mate" "$log" "$spawned" missing >/dev/null
-  wait_for_network_stage "$home" "$root" \
-    || fail "the second pass's deferred network stage never published"
-  second_calls=$(grep -c 'tab create' "$log" || true)
-  [ "$first_calls" -eq 1 ] && [ "$second_calls" -eq 1 ] \
-    || fail "a second session-start pass duplicated the relaunched Pi secondmate: $(cat "$log")"
-  pass "session start: an absent recorded Herdr pane relaunches its Pi secondmate exactly once, off the blocking path"
-}
-
-# The relaunch is the sharpest deferral: it mutates the very endpoint record the
-# digest printed moments earlier. Silence would leave that stale record looking
-# authoritative, so the deferred pass reports it whether or not verbose facts are
-# on, and the report says the digest's records are now behind.
-test_deferred_relaunch_is_always_reported() {
-  local rec root home fakebin mate log spawned report
-  rec=$(prepare_session_start_secondmate secondmate-relaunch-reported)
-  IFS='|' read -r root home fakebin mate log spawned <<EOF
-$rec
-EOF
-
-  run_session_start_secondmate "$root" "$home" "$fakebin" "$mate" "$log" "$spawned" missing >/dev/null
-  wait_for_network_stage "$home" "$root" || fail "the deferred network stage never published"
-
-  report=$(network_stage_report "$home" "$root")
-  assert_contains "$report" "secondmate $SESSION_START_SECOND_MATE_ID relaunched" \
-    "a relaunch performed after the digest was composed went unreported"
-  assert_contains "$report" "re-read any record" \
-    "the report did not tell the reader the digest's records are now behind"
-  pass "session start: a deferred relaunch is always reported, so the digest's stale endpoint record cannot stand"
-}
-
-test_session_start_preserves_ambiguous_pi_process() {
-  local rec root home fakebin mate log spawned out
-  rec=$(prepare_session_start_secondmate secondmate-ambiguous-pi)
-  IFS='|' read -r root home fakebin mate log spawned <<EOF
-$rec
-EOF
-
-  out=$(run_session_start_secondmate "$root" "$home" "$fakebin" "$mate" "$log" "$spawned" ambiguous)
-  wait_for_network_stage "$home" "$root" || fail "the deferred network stage never published"
-
-  assert_contains "$(network_stage_report "$home" "$root")" \
-    "SECONDMATE_LIVENESS: secondmate $SESSION_START_SECOND_MATE_ID: skipped: endpoint probe unreadable (backend=herdr)" \
-    "session start did not distinguish an existing Pi-shaped process from a missing window"
-  [ ! -s "$log" ] || fail "session start touched an ambiguous existing Pi process: $(cat "$log")"
-  assert_contains "$out" "endpoint: alive (backend=herdr window=default:p-old)" \
-    "the later fleet read should still see the ambiguous endpoint"
-  pass "session start: an existing ambiguous Pi process prevents duplicate recovery"
-}
-
-test_session_start_preserves_transiently_unreadable_herdr() {
-  local rec root home fakebin mate log spawned out
-  rec=$(prepare_session_start_secondmate secondmate-unreadable-pi)
-  IFS='|' read -r root home fakebin mate log spawned <<EOF
-$rec
-EOF
-
-  out=$(run_session_start_secondmate "$root" "$home" "$fakebin" "$mate" "$log" "$spawned" unreadable)
-  wait_for_network_stage "$home" "$root" || fail "the deferred network stage never published"
-
-  assert_contains "$(network_stage_report "$home" "$root")" \
-    "SECONDMATE_LIVENESS: secondmate $SESSION_START_SECOND_MATE_ID: skipped: endpoint probe unreadable (backend=herdr)" \
-    "session start did not distinguish transient unreadability from absence"
-  [ ! -s "$log" ] || fail "session start touched a transiently unreadable target: $(cat "$log")"
-  assert_contains "$out" "endpoint: dead (backend=herdr window=default:p-old)" \
-    "the later cheap presence read should preserve the visible offline symptom"
-  pass "session start: transient Herdr unreadability never licenses a relaunch"
-}
-
-test_session_start_preserves_proven_bare_shell_recovery() {
-  local rec root home fakebin mate log spawned out
-  rec=$(prepare_session_start_secondmate secondmate-bare-shell)
-  IFS='|' read -r root home fakebin mate log spawned <<EOF
-$rec
-EOF
-
-  run_session_start_secondmate "$root" "$home" "$fakebin" "$mate" "$log" "$spawned" shell >/dev/null
-  wait_for_network_stage "$home" "$root" || fail "the deferred network stage never published"
-
-  out=$(network_stage_report "$home" "$root")
-  assert_not_contains "$out" "SECONDMATE_LIVENESS:" "successful bare-shell recovery should stay non-actionable"
-  assert_contains "$(cat "$log")" "pane close p-old" \
-    "the proven bare-shell path did not remove its existing dead endpoint"
-  assert_contains "$(cat "$log")" "tab create" "the proven bare-shell path did not relaunch"
-  pass "session start: the proven bare-shell recovery path remains intact"
-}
-
-test_session_start_relaunches_herdr_husk_secondmate() {
-  local rec root home fakebin mate log state out
-  rec=$(prepare_session_start_herdr_secondmate secondmate-herdr-husk)
-  IFS='|' read -r root home fakebin mate log state <<EOF
-$rec
-EOF
-
-  run_session_start_herdr_secondmate "$root" "$home" "$fakebin" "$mate" "$log" "$state" >/dev/null
-  wait_for_network_stage "$home" "$root" || fail "the deferred network stage never published"
-
-  out=$(network_stage_report "$home" "$root")
-  assert_not_contains "$out" "SECONDMATE_LIVENESS:" "successful Herdr husk recovery should stay non-actionable"
-  assert_contains "$(cat "$log")" "pane close p-old" "session start did not close the confirmed Herdr husk"
-  assert_contains "$(cat "$log")" "tab create" "session start did not relaunch the Herdr secondmate"
-  assert_grep 'herdr_pane_id=p-new' "$home/state/$SESSION_START_HERDR_SECOND_MATE_ID.meta" \
-    "the real respawn path did not record the replacement Herdr pane"
-  pass "session start: a confirmed Herdr husk is closed and relaunched"
-}
-
 # Historical backend-less metadata is never reinterpreted as Herdr.
 test_endpoint_liveness_historical() {
   local rec root home fakebin out
@@ -1493,59 +1188,11 @@ SH
 # startup. The fake host hangs for 12s; the digest must be done long before that,
 # must say so rather than implying the checks passed, and the sweeps must still
 # run and land afterwards.
-test_unreachable_network_never_blocks_the_digest() {
-  local rec root home fakebin mate log spawned network_finished out started elapsed
-  rec=$(prepare_session_start_secondmate secondmate-slow-network)
-  IFS='|' read -r root home fakebin mate log spawned <<EOF
-$rec
-EOF
-  network_finished="${root%/root}/network-finished"
-  install_slow_gh "$fakebin" 12 "$network_finished"
-
-  started=$(date +%s)
-  out=$(run_session_start_secondmate "$root" "$home" "$fakebin" "$mate" "$log" "$spawned" missing)
-  elapsed=$(( $(date +%s) - started ))
-
-  [ ! -e "$network_finished" ] \
-    || fail "the digest waited for the 12s unreachable-host probe instead of returning from local state (${elapsed}s)"
-  assert_contains "$out" "SESSION START" "the digest did not complete"
-  assert_contains "$out" "IN PROGRESS - the deferred network checks have not finished yet." \
-    "the digest did not disclose that its network checks were still running"
-  assert_contains "$out" "NOT yet confirmed: GitHub authentication, dead-secondmate relaunch" \
-    "the digest did not name the checks it has not confirmed"
-  assert_not_contains "$out" "NEEDS_GH_AUTH" \
-    "the digest reported a GitHub-auth verdict it could not yet have"
-
-  # ... and the work itself still happens, off the blocking path.
-  wait_for_network_stage "$home" "$root" 60 \
-    || fail "the deferred stage never finished: $(network_stage_report "$home" "$root")"
-  assert_contains "$(network_stage_report "$home" "$root")" "NEEDS_GH_AUTH" \
-    "the deferred stage lost the GitHub-auth verdict it was deferring"
-  assert_contains "$(cat "$log")" "tab create" \
-    "the deferred stage lost the dead-secondmate relaunch"
-  pass "session start: an unreachable host delays a reported check, not the digest"
-}
 
 # A result the digest could not print must still reach the agent by itself. The
 # opposite half of the handshake - a printed result never ALSO queuing a wake -
 # is asserted deterministically in tests/fm-startup-network.test.sh, where the
 # claim can be set up directly instead of raced against digest composition.
-test_deferred_result_reaches_the_agent_when_the_digest_cannot_print_it() {
-  local rec root home fakebin mate log spawned queue
-  rec=$(prepare_session_start_secondmate secondmate-wake-once)
-  IFS='|' read -r root home fakebin mate log spawned <<EOF
-$rec
-EOF
-  install_slow_gh "$fakebin" 8
-  queue="$home/state/.wake-queue"
-
-  run_session_start_secondmate "$root" "$home" "$fakebin" "$mate" "$log" "$spawned" missing >/dev/null
-  wait_for_network_stage "$home" "$root" 60 || fail "the deferred stage never finished"
-  wait_for_network_wake "$home" 60 || fail "the deferred stage never settled wake delivery"
-  assert_grep 'check	startup-network' "$queue" \
-    "a result the digest could not print never reached the agent: $(cat "$queue" 2>/dev/null)"
-  pass "session start: a deferred result the digest outran still reaches the agent as a wake"
-}
 
 # A read-only session has no lock, so it neither owns the mutating sweeps nor has
 # any action a GitHub-auth verdict would gate. It must say that plainly instead of
@@ -2016,48 +1663,6 @@ SH
 
 # --- context re-emit (--reemit) ----------------------------------------------
 
-test_reemit_skips_startup_sweeps_but_keeps_the_wake_drain() {
-  local rec root home fakebin network_report reemit sequence generation
-  rec=$(new_world reemit)
-  IFS='|' read -r root home fakebin <<EOF
-$rec
-EOF
-  make_fake_toolchain "$fakebin"
-  make_fake_ps_pi "$fakebin"
-  mkdir -p "$home/other-secondmate/state"
-  fm_write_secondmate_meta "$home/state/sm-r.meta" "$home/other-secondmate" "firstmate:fm-sm-r" alpha
-  append_wake "$home/state" signal task-r "done: queued after startup" || fail "seed wake failed"
-
-  # A full startup reconciles the secondmate sweep and reports it.
-  FM_FAKE_HARNESS_PID=$$ run_session_start "$home" "$root" "$fakebin:$BASE_PATH" >/dev/null
-  wait_for_network_stage "$home" "$root" \
-    || fail "the full startup fixture's deferred network stage never published"
-  network_report=$(network_stage_report "$home" "$root")
-  assert_contains "$network_report" "SECONDMATE_LIVENESS" \
-    "the full startup fixture did not exercise a mutating sweep"
-
-  append_wake "$home/state" signal task-r "done: queued after the re-emit too" || fail "seed second wake failed"
-  reemit=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_FAKE_HARNESS_PID=$$ PATH="$fakebin:$BASE_PATH" \
-    env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
-    "$SESSION_START" --reemit)
-
-  assert_contains "$reemit" "SESSION START (CONTEXT RE-EMIT) - $home" "--reemit did not label itself"
-  assert_not_contains "$reemit" "SECONDMATE_LIVENESS" "--reemit repeated a mutating sweep startup already ran"
-  assert_contains "$reemit" "done: queued after the re-emit too" "--reemit did not drain the wake queue"
-  [ -s "$home/state/.wake-queue" ] || fail "--reemit removed the wake before its handling acknowledgement"
-  sequence=$(printf '%s\n' "$reemit" | sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' | tail -1)
-  generation=$(printf '%s\n' "$reemit" | sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' | tail -1)
-  [ -n "$sequence" ] && [ -n "$generation" ] \
-    || fail "--reemit omitted the generation-bound wake acknowledgement"
-  FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-wake-drain.sh" --ack-through "$sequence" \
-    --recovery-generation "$generation" || fail "--reemit wake acknowledgement failed"
-  [ ! -s "$home/state/.wake-queue" ] || fail "--reemit acknowledgement left queued wakes behind"
-  assert_contains "$reemit" "CONTEXT" "--reemit dropped the context digest"
-  assert_contains "$reemit" "FLEET STATE" "--reemit dropped the fleet-state digest"
-  assert_contains "$reemit" "NEXT STEP" "--reemit dropped the closing reminder"
-
-  pass "--reemit reprints the digest without repeating startup's mutating sweeps and still drains queued wakes"
-}
 
 test_agents_baseline_stays_at_true_start_and_reemits_on_every_drifted_pi_compact() {
   local rec root home fakebin startup compact_equal compact_first compact_second clear_out resume_out reset_out baseline baseline_after expected_hash refresh_line bootstrap_line
@@ -2527,17 +2132,9 @@ test_session_lock_concurrent_single_winner
 test_output_ordering_diagnostics_lead
 test_read_once_contract_is_stated_once_before_its_subject
 test_herdr_backend_diagnostics_follow_real_session_start
-test_session_start_relaunches_missing_pi_secondmate
-test_deferred_relaunch_is_always_reported
 test_inactive_reconcile_never_blocks_the_digest
-test_unreachable_network_never_blocks_the_digest
-test_deferred_result_reaches_the_agent_when_the_digest_cannot_print_it
 test_read_only_session_declares_skipped_network_checks
 test_tasks_axi_compatibility_is_probed_once
-test_session_start_preserves_ambiguous_pi_process
-test_session_start_preserves_transiently_unreadable_herdr
-test_session_start_preserves_proven_bare_shell_recovery
-test_session_start_relaunches_herdr_husk_secondmate
 test_latest_status_event_and_late_unread_note
 test_status_tail_line_cap
 test_orphan_status_logs_are_printed
@@ -2565,7 +2162,6 @@ test_runtime_bound_truncates_loudly_and_exits_zero
 test_portable_timeout_escalates_term_resistant_process
 test_runtime_bound_leaves_a_healthy_digest_untouched
 test_runtime_bound_leaves_harness_ancestry_headroom
-test_reemit_skips_startup_sweeps_but_keeps_the_wake_drain
 test_agents_baseline_stays_at_true_start_and_reemits_on_every_drifted_pi_compact
 test_read_only_pi_compact_refreshes_against_its_own_session_identity
 test_codex_unreachable_reset_sources_do_not_claim_instruction_refresh

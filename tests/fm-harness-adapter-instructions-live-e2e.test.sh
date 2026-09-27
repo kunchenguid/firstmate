@@ -38,8 +38,6 @@ cat > "$EXPECTED_JSON" <<'JSON'
     {"id":"resume.default","common":["references/common/control-and-recovery.md"],"harness":"references/harness/pi.md"},
     {"id":"recovery.default","common":["references/common/control-and-recovery.md"],"harness":"references/harness/cursor.md"},
     {"id":"recovery.replacement-profile","common":["references/common/control-and-recovery.md","references/common/dispatch.md","references/common/model-and-effort.md"],"harness":"references/harness/pi.md"},
-    {"id":"recovery.secondmate","common":["references/common/control-and-recovery.md","references/common/primary-hooks.md"],"harness":"references/harness/pi.md"},
-    {"id":"recovery.replacement-secondmate","common":["references/common/control-and-recovery.md","references/common/dispatch.md","references/common/model-and-effort.md","references/common/primary-hooks.md"],"harness":"references/harness/codex.md"},
     {"id":"primary.default","common":["references/common/primary-hooks.md"],"harness":"references/harness/pi.md"},
     {"id":"model-effort.default","common":["references/common/model-and-effort.md"],"harness":"references/harness/pi.md"},
     {"id":"model-effort.configured-profile","common":["references/common/model-and-effort.md","references/common/dispatch.md"],"harness":"references/harness/pi.md"},
@@ -63,8 +61,6 @@ JSON
     'resume.default pi' \
     'recovery.default cursor' \
     'recovery.replacement-profile pi' \
-    'recovery.secondmate pi' \
-    'recovery.replacement-secondmate codex' \
     'primary.default pi' \
     'model-effort.default pi' \
     'model-effort.configured-profile pi' \

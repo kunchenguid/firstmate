@@ -3,9 +3,7 @@
 #
 # WHY THIS EXISTS. Every external-network call a session start makes used to run
 # BEFORE the digest printed, on a hook that blocks session initialization: `gh
-# auth status`, the secondmate liveness and convergence sweeps (per-secondmate
-# remote probes, which bootstrap runs concurrently), pending remote
-# handoff delivery, and the fleet-sync fetch of every project clone. None of
+# auth status` and the fleet-sync fetch of every project clone. Neither of
 # those calls is individually bounded, so one unreachable host could consume the
 # whole FM_SESSION_START_TIMEOUT budget and truncate the digest outright, turning
 # a slow network into a startup that never printed the work queue at all.
@@ -23,8 +21,8 @@
 # WHEN they run, not WHETHER, and three properties make the later run safe:
 #   - The work is idempotent detection. A run whose report is lost (killed
 #     worker, truncated digest, crashed session) loses no finding: the next run
-#     re-derives the same inactive terminal child, dead secondmate, stuck clone,
-#     or undelivered handoff. There is no once-only signal to miss.
+#     re-derives the same inactive terminal child or stuck clone. There is no
+#     once-only signal to miss.
 #   - Results are durable and always surface. Network sweep output lands in
 #     state/.startup-network.report and reaches the agent either inline in the
 #     digest or, when it finishes too late for the digest to inline it, as a
@@ -92,11 +90,9 @@
 #                             wake.
 #   .startup-network.timings  per-step elapsed times for the last run, in
 #                             bin/fm-timing-lib.sh's tab-separated format: the
-#                             stage total, one record per network phase (gh auth,
-#                             secondmate liveness, secondmate convergence, handoff
-#                             delivery, fleet sync), one per secondmate for the
-#                             remote-touching steps (id and host), and one per
-#                             project clone. Published for a timed-out or failed
+#                             stage total, one record per network phase (GitHub
+#                             authentication and fleet sync), and one per project
+#                             clone. Published for a timed-out or failed
 #                             run too, where a partial record is the answer.
 #                             Diagnostic only: nothing reads it to make a
 #                             decision, and losing it never downgrades a run.
@@ -197,7 +193,7 @@ worker_alive() {
 phase_label() {  # <phases>
   case "$1" in
     probe) printf 'GitHub authentication' ;;
-    probe,sweeps) printf 'GitHub authentication, dead-secondmate relaunch, secondmate convergence, pending handoff delivery, project clone refresh with its drift reporting, and inactive terminal-outcome reconciliation' ;;
+    probe,sweeps) printf 'GitHub authentication, project clone refresh with its drift reporting, and inactive terminal-outcome reconciliation' ;;
     *) printf 'the deferred network checks' ;;
   esac
 }
@@ -509,7 +505,7 @@ EOF
   fm_timing_record stage network-checks "$stage_started" "$phases"
 
   if [ "$downgraded" -eq 1 ]; then
-    printf 'NETWORK_CHECKS: the fleet lock was no longer held by the session that requested these, so dead-secondmate relaunch, secondmate convergence, pending handoff delivery, and project clone refresh were skipped; they belong to whichever session holds the lock now\n' >> "$out"
+    printf 'NETWORK_CHECKS: the fleet lock was no longer held by the session that requested these, so project clone refresh was skipped; it belongs to whichever session holds the lock now\n' >> "$out"
   fi
   case "$rc" in
     0) publish "$generation" 'done' "$phases" "$sweep_locked" "$started" "$rc" "$out" "$timings" ;;

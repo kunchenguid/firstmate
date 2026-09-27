@@ -10,14 +10,14 @@
 # git identity and fixture builders, state/<id>.meta writers, and the common
 # string/exit-code/file assertions. Shared fake-toolchain and spawn-world
 # builders live in tests/fixtures.sh; wake-queue mocks in wake-helpers.sh;
-# secondmate-lifecycle mocks in secondmate-helpers.sh. Suite-specific fakes
+# lifecycle mocks in their owning suites. Suite-specific fakes
 # that encode a single test's terminal or lifecycle assumptions still belong
 # with the tests that own them.
 #
 # ROOT is exported as the firstmate repo root (this file lives in tests/), so a
 # sourcing test can use "$ROOT/bin/..." without recomputing it.
 
-# Idempotent guard: behavior-area helper files (secondmate-helpers.sh,
+# Idempotent guard: behavior-area helper files
 # wake-helpers.sh, fixtures.sh) source this library for ROOT/fail/pass, and the
 # test that includes them may also source it directly. Re-sourcing must not wipe
 # the registered-cleanup array or reset state.
@@ -523,27 +523,6 @@ fm_write_meta() {
   for kv in "$@"; do
     printf '%s\n' "$kv" >> "$file"
   done
-}
-
-# fm_write_secondmate_meta <file> <home> [window] [projects] [harness]: write the
-# standard kind=secondmate meta block used across the secondmate suites. Window
-# defaults to firstmate:fm-<id>, projects defaults to alpha, and harness defaults
-# to echo to match the common case.
-fm_write_secondmate_meta() {
-  local file=$1 home=$2 id window projects=${4:-alpha} harness=${5:-echo}
-  id=$(basename "$file" .meta)
-  window=${3:-firstmate:fm-$id}
-  fm_write_meta "$file" \
-    "window=$window" \
-    "endpoint_task_id=$id" \
-    "worktree=$home" \
-    "project=$home" \
-    "harness=$harness" \
-    "kind=secondmate" \
-    "mode=secondmate" \
-    "yolo=off" \
-    "home=$home" \
-    "projects=$projects"
 }
 
 # --- common assertions ------------------------------------------------------

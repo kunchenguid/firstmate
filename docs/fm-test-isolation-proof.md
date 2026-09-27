@@ -146,10 +146,8 @@ The family's clock is two long scripts that do not contend: `fm-pr-check-securit
 `bin/fm-test-isolation-proof.sh`'s own `--list-exclusions` keeps `fm-pr-check-security` and `fm-teardown` out of the mixed PORTABLE pool, where they would share a machine with unrelated lock and forge stress.
 Admitting them inside their own family is a different question and this proof answers it: the family's six scripts are safe with each other at four workers.
 
-### secondmate: admitted
 
 - Date: 2026-09-03
-- Command: `bin/fm-test-isolation-proof.sh --pool secondmate --jobs 4`
 - Result: two consecutive runs, 21 candidates, 0 failures.
 
 | Run | Summary |
@@ -157,8 +155,6 @@ Admitting them inside their own family is a different question and this proof an
 | 1 | `FM_ISOLATION_SUMMARY total=21 failed=0 concurrency=4 duration_ms=536586` |
 | 2 | `FM_ISOLATION_SUMMARY total=21 failed=0 concurrency=4 duration_ms=571247` |
 
-An earlier proof on 2026-09-03 refused this family on `tests/fm-backlog-handoff.test.sh`, failing two runs of three with `Task "pre-move-crash" not found in this backlog`.
-The cause was in the case's crash injection, not in shared secondmate state.
 Its fake `tasks-axi` killed the handoff and then slept a fixed second before delegating to the real binary, expecting to be torn down during that pause.
 Nothing tore it down: the fake outlives the process it kills, so on a host slow enough for the case's next assertions to take longer than a second, the orphan woke up and completed the very move the case requires left undone, which then made the recovery step fail.
 Direct observation of the source and destination backlogs during the injected crash showed exactly that, the item moving one second after the crash while the case was still asserting.
@@ -218,7 +214,6 @@ Curated `--family`, `--lane`, and `--all` selections remain serial unless the ca
 
 | family | scripts | `--jobs 1` | `--jobs 4` | speedup | recovered |
 |---|---:|---:|---:|---:|---:|
-| `secondmate` | 21 | 1233.1s | 453.4s | 2.72x | 779.7s |
 | `session-bootstrap` | 11 | 756.4s | 286.4s | 2.64x | 470.0s |
 | `standalone` | 28 | 724.6s | 261.1s | 2.78x | 463.5s |
 | total | 60 | 2714.1s | 1000.9s | 2.71x | 1713.2s (28.6 min) |

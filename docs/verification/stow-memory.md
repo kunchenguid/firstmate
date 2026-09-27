@@ -24,7 +24,6 @@ ok - Pi discovers and JIT-loads a repository-local git-excluded skill body
 
 ## 2026-09-24 periodic coordinator verification
 
-The default-off periodic coordinator was exercised behaviorally in a disposable `FM_HOME`, not against the primary or a registered secondmate home.
 The focused lifecycle suite observed lock, role, session-tree, compare-and-swap, bounded delivery, fixed-cutoff promotion, prepared/readback recovery, disable, budget, no-op, and corrupt-state outcomes through the public command and durable files.
 Strict no-emit checks passed against the supported Pi 0.84.4 baseline and installed Pi 0.87.1, while the real TUI guard loaded compatible `pi-openai-codex-compat` 0.0.16 in a named non-default Herdr lab and observed one stable custom follow-up.
 

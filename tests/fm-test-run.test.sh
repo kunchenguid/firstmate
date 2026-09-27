@@ -106,7 +106,7 @@ init_changed_fixture_repo() {
     fm-harness-adapter-instructions-live-e2e.test.sh \
     fm-harness-adapter-references.test.sh \
     fm-backend-herdr-smoke.test.sh \
-    fm-secondmate-safety.test.sh \
+    fm-control.test.sh \
     fm-session-start.test.sh \
     fm-afk-pi-herdr-return-e2e.test.sh \
     fm-backend.test.sh \
@@ -117,10 +117,8 @@ init_changed_fixture_repo() {
     fm-pi-windows-shell-invocation.test.sh \
     fm-afk-return.test.sh \
     fm-bearings-snapshot.test.sh \
-    fm-backend-cmux.test.sh \
-    fm-backend-zellij.test.sh \
     fm-control-herdr-smoke.test.sh \
-    fm-backend-orca.test.sh; do
+    fm-unclassified-serial.test.sh; do
     printf '#!/usr/bin/env bash\n# tests/lib.sh\n' >"$repo/tests/$script"
     chmod +x "$repo/tests/$script"
   done
@@ -138,12 +136,12 @@ init_changed_fixture_repo() {
   : >"$repo/tests/shared-probe-fixture.sh"
   : >"$repo/tests/unread-thing.sh"
   printf '# shared-probe-fixture.sh\n' >>"$repo/tests/fm-pr-merge.test.sh"
-  printf '# shared-probe-fixture.sh\n' >>"$repo/tests/fm-secondmate-safety.test.sh"
+  printf '# shared-probe-fixture.sh\n' >>"$repo/tests/fm-control.test.sh"
   # A nested fixture whose consuming suite names only the fixture directory,
   # the shape the tests/fixtures/<dir>/ arm is keyed for.
   mkdir -p "$repo/tests/fixtures/demo"
   : >"$repo/tests/fixtures/demo/demo-fixture.sh"
-  printf '# tests/fixtures/demo\n' >>"$repo/tests/fm-backend-orca.test.sh"
+  printf '# tests/fixtures/demo\n' >>"$repo/tests/fm-unclassified-serial.test.sh"
   # A shared helper with no curated family of its own, named by exactly ONE
   # script of the expensive real-Herdr family and consumed by one curated
   # watcher script. This is the shape that made a one-line helper change select
@@ -314,7 +312,7 @@ test_changed_dependency_selection_and_unmapped_failure() {
   printf '\n' >>"$repo/tests/lib.sh"
   listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
   assert_contains "$listed" "tests/fm-pr-merge.test.sh" "shared helper selects pr-forge dependents"
-  assert_contains "$listed" "tests/fm-secondmate-safety.test.sh" "shared helper selects secondmate dependents"
+  assert_contains "$listed" "tests/fm-control.test.sh" "shared helper selects control dependents"
   assert_contains "$listed" "tests/fm-bearings-snapshot.test.sh" "shared helper selects snapshot dependents"
   git -C "$repo" add tests/lib.sh
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm helper-change
@@ -322,7 +320,7 @@ test_changed_dependency_selection_and_unmapped_failure() {
   printf '\n' >>"$repo/tests/git-config-helpers.sh"
   listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
   assert_contains "$listed" "tests/fm-pr-merge.test.sh" "git-config helper selects lib.sh dependents"
-  assert_contains "$listed" "tests/fm-secondmate-safety.test.sh" "git-config helper selects secondmate dependents"
+  assert_contains "$listed" "tests/fm-control.test.sh" "git-config helper selects control dependents"
   assert_contains "$listed" "tests/fm-bearings-snapshot.test.sh" "git-config helper selects snapshot dependents"
   git -C "$repo" add tests/git-config-helpers.sh
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm git-config-helper-change
@@ -599,8 +597,8 @@ test_script_list_uses_bounded_automatic_concurrency() {
   init_changed_fixture_repo "$repo"
   rm -f "$repo/bin/fm-timeout-lib.sh"
   # fm-cd-pretool-check and fm-pr-merge are individually proven isolated;
-  # fm-backend-orca is not, so it must still land in the serial tail.
-  for script in fm-cd-pretool-check.test.sh fm-pr-merge.test.sh fm-backend-orca.test.sh; do
+  # fm-unclassified-serial is not, so it must still land in the serial tail.
+  for script in fm-cd-pretool-check.test.sh fm-pr-merge.test.sh fm-unclassified-serial.test.sh; do
     cat >"$repo/tests/$script" <<'SH'
 #!/usr/bin/env bash
 sleep 1
@@ -626,7 +624,7 @@ SH
   # An unproven script in the list is scheduled around, never refused and never
   # run beside another script.
   (cd "$repo" && bin/fm-test-run.sh tests/fm-cd-pretool-check.test.sh tests/fm-pr-merge.test.sh \
-      tests/fm-backend-orca.test.sh) >"$tmp/mixed.out" 2>"$tmp/mixed.err" \
+      tests/fm-unclassified-serial.test.sh) >"$tmp/mixed.out" 2>"$tmp/mixed.err" \
     || fail "mixed proven/unproven script list failed: $(cat "$tmp/mixed.err")"
   mixed_shape=$(grep -E '^FM_TEST_(BEGIN|END)' "$tmp/mixed.out" | awk '{print $1}' | paste -sd, -)
   [ "$mixed_shape" = FM_TEST_BEGIN,FM_TEST_BEGIN,FM_TEST_END,FM_TEST_END,FM_TEST_BEGIN,FM_TEST_END ] \
@@ -648,10 +646,10 @@ assert automatic["selection"].split(";")[-1] == f"jobs={expected}"
 assert serial["selection"].split(";")[-1] == "jobs=1"
 PYJSON
 
-  (cd "$repo" && bin/fm-test-run.sh tests/fm-backend-orca.test.sh) \
+  (cd "$repo" && bin/fm-test-run.sh tests/fm-unclassified-serial.test.sh) \
     >"$tmp/named.out" 2>"$tmp/named.err" \
     || fail "a named script unexpectedly required a timeout helper: $(cat "$tmp/named.err")"
-  grep -Eq '^FM_TEST_END .+ tests/fm-backend-orca\.test\.sh exit=0 ' "$tmp/named.out" \
+  grep -Eq '^FM_TEST_END .+ tests/fm-unclassified-serial\.test\.sh exit=0 ' "$tmp/named.out" \
     || fail "a named script did not run without an automatic bound: $(cat "$tmp/named.out")"
 
   rm -rf "$tmp"
@@ -1341,14 +1339,23 @@ test_changed_shared_fixture_selects_its_readers() {
   repo="$tmp/repo"
   init_changed_fixture_repo "$repo"
 
+  : > "$repo/tests/retired-probe-fixture.sh"
+  git -C "$repo" add tests/retired-probe-fixture.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm add-retired-fixture
+  rm "$repo/tests/retired-probe-fixture.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  [ -z "$listed" ] || fail "a retired unconsumed top-level fixture selected tests: $listed"
+  git -C "$repo" add -u tests/retired-probe-fixture.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm remove-retired-fixture
+
   printf '\n' >>"$repo/tests/shared-probe-fixture.sh"
   listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
   assert_contains "$listed" "tests/fm-pr-merge.test.sh" \
     "shared test fixture selects its pr-forge reader"
-  assert_contains "$listed" "tests/fm-secondmate-safety.test.sh" \
-    "shared test fixture selects its secondmate reader"
+  assert_contains "$listed" "tests/fm-control.test.sh" \
+    "shared test fixture selects its control reader"
   case "$listed" in
-    *fm-backend-orca.test.sh*)
+    *fm-unclassified-serial.test.sh*)
       fail "shared test fixture selection widened past its readers: $listed" ;;
   esac
   git -C "$repo" add tests/shared-probe-fixture.sh
@@ -1368,11 +1375,11 @@ test_changed_shared_fixture_selects_its_readers() {
   # directory-scan arm rather than the top-level fixture arm's basename scan.
   printf '\n' >>"$repo/tests/fixtures/demo/demo-fixture.sh"
   listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
-  assert_contains "$listed" "tests/fm-backend-orca.test.sh" \
+  assert_contains "$listed" "tests/fm-unclassified-serial.test.sh" \
     "a nested fixture selects the suite that reads its directory"
 
   rm -rf "$tmp"
-  pass "a changed shared test fixture selects its readers while an unread tests/ path still refuses"
+  pass "a changed shared test fixture selects its readers, a retired fixture is accepted, and an unread tests/ path still refuses"
 }
 
 # Workers are handed scripts in order, so the slowest script must start first or
@@ -1662,10 +1669,9 @@ test_herdr_ci_family_run_has_a_step_timeout() {
   # The required Herdr lane's hang tripwire is the family-run *step* bound, not
   # the 75-minute job cap. Parse the workflow as YAML so nested `with.name`
   # artifact keys cannot masquerade as the step contract.
-  command -v ruby >/dev/null 2>&1 \
-    || fail "ruby is required to parse .github/workflows/ci.yml as YAML"
   local json job_timeout step_timeout
-  json=$(ruby -ryaml -rjson -e '
+  if command -v ruby >/dev/null 2>&1; then
+    json=$(ruby -ryaml -rjson -e '
 doc = YAML.load_file(ARGV[0])
 job = doc.fetch("jobs").fetch("tests-herdr")
 step = job.fetch("steps").find { |s|
@@ -1678,7 +1684,35 @@ puts JSON.generate(
   "step_timeout" => step.fetch("timeout-minutes")
 )
 ' "$ROOT/.github/workflows/ci.yml") \
-    || fail "could not parse tests-herdr timeouts from ci.yml"
+      || fail "could not parse tests-herdr timeouts from ci.yml"
+  else
+    json=$(python3 - "$ROOT/.github/workflows/ci.yml" <<'PY'
+import json
+import sys
+
+try:
+    import yaml
+except ImportError as exc:
+    raise SystemExit("neither Ruby nor Python yaml is available") from exc
+
+with open(sys.argv[1], encoding="utf-8") as workflow:
+    doc = yaml.safe_load(workflow)
+job = doc["jobs"]["tests-herdr"]
+step = next(
+    item
+    for item in job["steps"]
+    if isinstance(item, dict)
+    and item.get("name") == "Run real-Herdr family (serial, required)"
+)
+if "timeout-minutes" not in step:
+    raise SystemExit("family-run step has no timeout-minutes")
+print(json.dumps({
+    "job_timeout": job["timeout-minutes"],
+    "step_timeout": step["timeout-minutes"],
+}))
+PY
+    ) || fail "could not parse tests-herdr timeouts from ci.yml"
+  fi
   job_timeout=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["job_timeout"])' <<<"$json") \
     || fail "could not read job timeout from parsed workflow"
   step_timeout=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["step_timeout"])' <<<"$json") \

@@ -6,7 +6,7 @@
 #
 # `read` prints the one validated effective budget from
 # config/startup-memory-budget.  `report` prints the stable local estimate for
-# data/captain.md, data/captain-shared.md, and data/learnings.md together.
+# data/captain.md and data/learnings.md together.
 # Bootstrap owns default materialization; this command never creates or repairs
 # configuration, so an absent, malformed, symlinked, hardlinked, or otherwise
 # unsafe value is a concrete error rather than an inferred default.
@@ -38,19 +38,14 @@ read_budget() {
 }
 
 report() {
-  local budget bytes tokens presence total=0 shared_tokens=0 role=primary
+  local budget bytes tokens presence total=0
   if ! budget=$(read_budget); then
     return 2
   fi
 
-  if [ -e "$FM_HOME/.fm-secondmate-home" ] || [ -L "$FM_HOME/.fm-secondmate-home" ]; then
-    role=secondmate
-  fi
-
   printf 'estimator=ceil(UTF-8 bytes / 3) conservative-local-estimate\n'
-  printf 'role=%s\n' "$role"
   printf 'effective_budget_tokens=%s\n' "$budget"
-  for file in captain.md captain-shared.md learnings.md; do
+  for file in captain.md learnings.md; do
     if ! fm_startup_memory_measure_file "$DATA/$file" >/dev/null; then
       print_error "$FM_STARTUP_MEMORY_BUDGET_ERROR"
       return 2
@@ -59,7 +54,6 @@ report() {
     tokens=$FM_STARTUP_MEMORY_MEASURE_TOKENS
     presence=$FM_STARTUP_MEMORY_MEASURE_PRESENCE
     total=$((total + tokens))
-    [ "$file" != captain-shared.md ] || shared_tokens=$tokens
     printf 'file=data/%s bytes=%s estimated_tokens=%s status=%s\n' \
       "$file" "$bytes" "$tokens" "$presence"
   done
@@ -68,10 +62,6 @@ report() {
     printf 'budget_status=within-budget\n'
   else
     printf 'budget_status=over-budget\n'
-  fi
-  if [ "$role" = secondmate ] \
-    && ! fm_startup_memory_decimal_le "$shared_tokens" "$budget"; then
-    printf 'exception=primary-owned-shared-file-alone-exceeds-budget\n'
   fi
 }
 

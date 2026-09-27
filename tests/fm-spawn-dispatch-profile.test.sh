@@ -66,13 +66,6 @@ enable_dispatch_profile() {
     > "$home/config/crew-dispatch.json"
 }
 
-make_seeded_secondmate_home() {
-  local home=$1 id=$2
-  mkdir -p "$home/bin" "$home/data"
-  printf '# Firstmate\n' > "$home/AGENTS.md"
-  printf '%s\n' "$id" > "$home/.fm-secondmate-home"
-  printf 'charter for %s\n' "$id" > "$home/data/charter.md"
-}
 
 run_spawn() {
   local home=$1 wt=$2 fakebin=$3 launchlog=$4
@@ -531,23 +524,6 @@ assert_attribution_policy() {  # <launch-command> <what>
   assert_contains "$launch" '"sessionUrl":false' "$what launch does not silence the session URL"
 }
 
-test_active_dispatch_profile_does_not_block_secondmate_launch() {
-  local rec id sm out status
-  id=profile-secondmate-z16
-  rec=$(make_spawn_case profile-secondmate codex "$id")
-  read_case_record "$rec"
-  enable_dispatch_profile "$HOME_DIR"
-  sm="$CASE_DIR/secondmate-home"
-  make_seeded_secondmate_home "$sm" "$id"
-
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
-  status=$?
-  expect_code 0 "$status" "secondmate spawn should be exempt from the dispatch-profile explicit harness requirement"
-  assert_contains "$out" "spawned $id harness=codex kind=secondmate" "secondmate launch did not use secondmate harness resolution"
-  assert_grep "kind=secondmate" "$HOME_DIR/state/$id.meta" "secondmate meta missing kind=secondmate"
-  assert_meta_profile "$HOME_DIR/state/$id.meta" codex default default
-  pass "active crew-dispatch profile does not block secondmate launches"
-}
 
 # Execute the actual emitted command in a synthetic pane environment: the
 # fake backend records delivery, while real shells exercise the env boundary.
@@ -651,126 +627,10 @@ test_launch_environment_inaccessible_config_refuses() {
   done
 }
 
-test_launch_environment_inherited_by_secondmate() {
-  local rec id sm out status result
-  id=env-secondmate
-  rec=$(make_spawn_case "$id" codex "$id")
-  read_case_record "$rec"
-  printf 'FM_TEST_ALLOWED\n' > "$HOME_DIR/config/launch-env-allowlist"
-  sm="$CASE_DIR/secondmate-home"
-  make_seeded_secondmate_home "$sm" "$id"
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
-  status=$?
-  expect_code 0 "$status" "secondmate with an allowlist should spawn: $out"
-  cmp -s "$HOME_DIR/config/launch-env-allowlist" "$sm/config/launch-env-allowlist" \
-    || fail "secondmate did not inherit the launch environment contract"
-  cat > "$FAKEBIN_DIR/codex" <<'SH'
-#!/bin/sh
-printf '%s\n' "${FM_TEST_AMBIENT_SENTINEL-unset}" "$FM_TEST_ALLOWED" "$FM_HOME" "${FM_STATE_OVERRIDE-unset}"
-SH
-  chmod +x "$FAKEBIN_DIR/codex"
-  result=$(env -i HOME="$HOME_DIR/user-home" PATH="$FAKEBIN_DIR:$PATH" \
-    FM_TEST_AMBIENT_SENTINEL=synthetic-unrelated FM_TEST_ALLOWED=synthetic-provider \
-    /bin/sh -c "$(cat "$LAUNCH_LOG")") || fail "secondmate's emitted command failed"
-  [ "$result" = "unset"$'\nsynthetic-provider\n'"$sm" ] \
-    || fail "secondmate's environment lost filtering or explicit home assignments: $result"
-  # Exercise the same inheritance owner used by local and remote transfers;
-  # removal must restore absence downstream as well as copying an opt-in.
-  (
-    # shellcheck source=/dev/null
-    . "$ROOT/bin/fm-config-inherit-lib.sh"
-    rm "$HOME_DIR/config/launch-env-allowlist"
-    propagate_secondmate_inheritance "$HOME_DIR" "$sm" >/dev/null
-  ) || fail "allowlist removal failed to converge"
-  [ ! -e "$sm/config/launch-env-allowlist" ] || fail "secondmate retained a removed allowlist"
-  pass "secondmate launch inherits the allowlist for subsequent worker launches"
-}
-
-run_launch_environment_inheritance() {
-  local route=$1 home=$2 dest=$3 fakebin=$4 generation=$5
-  if [ "$route" = local ]; then
-    (
-      # shellcheck source=/dev/null
-      . "$ROOT/bin/fm-config-inherit-lib.sh"
-      FM_INHERITABLE_CONFIG=launch-env-allowlist \
-        propagate_inheritable_config "$home/config" "$dest/config"
-    )
-  else
-    FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_CONFIG_OVERRIDE="$home/config" \
-      FM_DATA_OVERRIDE="$home/data" FM_INHERITABLE_CONFIG=launch-env-allowlist \
-      FM_SSH_BIN="$fakebin/inherit-ssh" \
-      "$ROOT/bin/fm-remote-inherit-push.sh" inherited-env "$generation"
-  fi
-}
-
-test_launch_environment_inheritance_preserves_on_source_errors() {
-  local route rec id dest out status
-  if [ "$(id -u)" = 0 ]; then
-    printf '# skip - inaccessible inheritance sources require a non-root user\n'
-    return
-  fi
-  for route in local remote; do
-    id="env-inherit-$route"
-    rec=$(make_spawn_case "$id" codex "$id")
-    read_case_record "$rec"
-    dest="$CASE_DIR/inherited-home"
-    mkdir -p "$dest/config"
-    printf 'FM_TEST_ALLOWED\n' > "$HOME_DIR/config/launch-env-allowlist"
-    printf -- '- inherited-env - Test route (host: inherit-host; root: %s; home: %s; scope: test; projects: ; added 2026-09-05)\n' \
-      "$ROOT" "$dest" > "$HOME_DIR/data/secondmates.md"
-    cat > "$FAKEBIN_DIR/inherit-ssh" <<'SH'
-#!/usr/bin/env bash
-set -eu
-while [ "$#" -gt 0 ]; do
-  case "$1" in -o) shift 2 ;; --) shift; break ;; *) exit 90 ;; esac
-done
-[ "$#" -eq 6 ] && [ "$1" = inherit-host ] && [ "$2" = fm-remote-entrypoint.sh ] && [ "$3" = 1 ] || exit 91
-remote_root=$(printf '%s' "$4" | base64 --decode)
-remote_home=$(printf '%s' "$5" | base64 --decode)
-args=()
-while IFS= read -r -d '' arg; do args+=("$arg"); done < <(printf '%s' "$6" | base64 --decode)
-[ "${args[0]}" = fm-remote-inherit.sh ] || exit 92
-FM_HOME="$remote_home" FM_STATE_OVERRIDE="$remote_home/state" \
-  exec "$remote_root/bin/${args[0]}" "${args[@]:1}"
-SH
-    chmod +x "$FAKEBIN_DIR/inherit-ssh"
-    out=$(run_launch_environment_inheritance "$route" "$HOME_DIR" "$dest" "$FAKEBIN_DIR" 1 2>&1)
-    status=$?
-    expect_code 0 "$status" "$route allowlist inheritance should succeed: $out"
-    [ "$(cat "$dest/config/launch-env-allowlist")" = FM_TEST_ALLOWED ] \
-      || fail "$route inheritance did not publish the allowlist"
-
-    chmod 600 "$HOME_DIR/config" || fail "could not remove source search permission"
-    out=$(run_launch_environment_inheritance "$route" "$HOME_DIR" "$dest" "$FAKEBIN_DIR" 2 2>&1)
-    status=$?
-    chmod 700 "$HOME_DIR/config" || fail "could not restore source search permission"
-    expect_code 1 "$status" "$route inheritance must refuse an inaccessible source: $out"
-    assert_contains "$out" launch-env-allowlist "$route inspection error must identify the allowlist"
-    [ "$(cat "$dest/config/launch-env-allowlist")" = FM_TEST_ALLOWED ] \
-      || fail "$route inheritance removed or changed the allowlist after an inspection error"
-
-    rm "$HOME_DIR/config/launch-env-allowlist"
-    ln -s missing-allowlist "$HOME_DIR/config/launch-env-allowlist"
-    out=$(run_launch_environment_inheritance "$route" "$HOME_DIR" "$dest" "$FAKEBIN_DIR" 3 2>&1)
-    status=$?
-    expect_code 1 "$status" "$route inheritance must refuse a dangling source link: $out"
-    [ "$(cat "$dest/config/launch-env-allowlist")" = FM_TEST_ALLOWED ] \
-      || fail "$route inheritance treated a dangling source link as absence"
-
-    rm "$HOME_DIR/config/launch-env-allowlist"
-    out=$(run_launch_environment_inheritance "$route" "$HOME_DIR" "$dest" "$FAKEBIN_DIR" 4 2>&1)
-    status=$?
-    expect_code 0 "$status" "$route inheritance should mirror proven absence: $out"
-    [ ! -e "$dest/config/launch-env-allowlist" ] || fail "$route inheritance retained a removed allowlist"
-    pass "$route inheritance preserves the allowlist on source errors and mirrors proven absence"
-  done
-}
 
 test_launch_environment_allowlist
 test_launch_environment_invalid_config_refuses
 test_launch_environment_inaccessible_config_refuses
-test_launch_environment_inherited_by_secondmate
-test_launch_environment_inheritance_preserves_on_source_errors
 
 test_worker_launch_delivers_role_scope() {
   local rec id out launch kind prompt envelope encoded brief_kind brief content first_line role_line task_line inbox
@@ -872,6 +732,5 @@ test_batch_preserves_native_ultra
 test_pi_threads_model_and_max_effort
 test_pi_tui_mode_probe_is_safe_for_old_and_new_pi
 test_batch_forwards_shared_profile_flags
-test_active_dispatch_profile_does_not_block_secondmate_launch
 
 echo "# all fm-spawn-dispatch-profile tests passed"

@@ -1,15 +1,10 @@
 # Local ShellCheck option A measurement
 
-The 2026-09-05 lint-cost audit measured the seven roots from the missed-reply incident at commit `f09de8a3d3a550b13b4d535346fbc7b9ac0d6c19`:
+The 2026-09-05 lint-cost audit measured the retained representative roots from the missed-reply incident at commit `f09de8a3d3a550b13b4d535346fbc7b9ac0d6c19`:
 
 ```text
 bin/fm-brief.sh
-bin/fm-parent-channel-lib.sh
-bin/fm-pending-reply-lib.sh
-bin/fm-secondmate-report.sh
 tests/fm-brief.test.sh
-tests/fm-classify-corr-token.test.sh
-tests/fm-pending-reply.test.sh
 ```
 
 ShellCheck was the repository-pinned 0.11.0 Darwin arm64 build.
@@ -33,12 +28,7 @@ set -eu
 [ "$(bin/fm-lint.sh --required-version)" = "$(shellcheck --version | awk '/^version:/ {print $2; exit}')" ]
 roots=(
   bin/fm-brief.sh
-  bin/fm-parent-channel-lib.sh
-  bin/fm-pending-reply-lib.sh
-  bin/fm-secondmate-report.sh
   tests/fm-brief.test.sh
-  tests/fm-classify-corr-token.test.sh
-  tests/fm-pending-reply.test.sh
 )
 rm -rf .lint-option-a-measurement
 mkdir .lint-option-a-measurement

@@ -1108,17 +1108,10 @@ fm_meta_lock_path() {
 # fm_task_set_lock_path: the per-home lock guarding WHICH tasks exist in a home,
 # as opposed to fm_meta_lock_path, which guards one task's record.
 #
-# A per-task lock cannot protect a task that does not exist yet. Forced
-# secondmate teardown enumerates a home's task set, locks what it found, and
-# then re-enumerates while removing; a fresh spawn publishing a record inside
-# that window is invisible to the first enumeration and visible to the second,
-# so it gets destructively processed while never lifecycle-locked (reproduced
-# with real agents: a record published 0.249s after teardown began was removed
-# and its worktree returned to the pool, with both commands reporting success).
-# Holding this lock from enumeration through cleanup makes the two operations
-# serialize: either the spawn publishes first and the teardown's preflight
-# covers it, or the teardown owns the set and the spawn refuses. Both directions
-# fail closed.
+# A per-task lock cannot protect a task that does not exist yet. Operations that
+# enumerate and mutate a home's task set must hold this lock so a concurrent
+# spawn cannot publish a record between enumeration and cleanup. The two
+# operations then serialize and both directions fail closed.
 fm_task_set_lock_path() {  # <state-dir>
   local state=$1
   [ -n "$state" ] || return 1
@@ -1126,57 +1119,12 @@ fm_task_set_lock_path() {  # <state-dir>
   printf '%s/.task-set.lock\n' "$state"
 }
 
-# The top-most firstmate home reachable from this one on THIS machine, used as
-# the single anchor every local home agrees on for machine-local shared state.
-#
-# A local parent binding is followed upward. A remote parent binding terminates
-# the walk at the current home, which is the correct answer rather than an
-# error: the parent lives on another machine, so its filesystem can neither hold
-# nor be observed by a lock taken here, and a remote-seeded home is itself the
-# top of the local tree that bin/fm-teardown.sh's collect_local_firstmate_states
-# enumerates (that walk already skips remote registry entries for the same
-# reason). Refusing a remote binding instead made every operation anchored here
-# fail closed inside a remote secondmate home and its local descendants.
-#
-# Everything else still fails closed: an unreadable or malformed binding, an
-# unreachable local parent, a cycle, and a chain deeper than the bound.
-fm_firstmate_root_home() {
-  local home=${1:-$FM_HOME} marker parent seen="|" depth=0
-  home=$(CDPATH='' cd -- "$home" 2>/dev/null && pwd -P) || return 1
-  while [ -e "$home/.fm-secondmate-parent" ] || [ -L "$home/.fm-secondmate-parent" ]; do
-    marker="$home/.fm-secondmate-parent"
-    if ! command -v fm_secondmate_parent_record_parse >/dev/null 2>&1; then
-      # shellcheck source=bin/fm-secondmate-parent-lib.sh
-      . "$FM_WAKE_LIB_DIR/fm-secondmate-parent-lib.sh"
-    fi
-    fm_secondmate_parent_record_parse "$marker" || return 1
-    case "$FM_SECONDMATE_PARENT_ROUTE" in
-      local) ;;
-      remote) break ;;
-      *) return 1 ;;
-    esac
-    parent=$(CDPATH='' cd -- "$FM_SECONDMATE_PARENT_HOME" 2>/dev/null && pwd -P) || return 1
-    case "$seen" in *"|$parent|"*) return 1 ;; esac
-    seen="$seen$home|"
-    home=$parent
-    depth=$((depth + 1))
-    [ "$depth" -le 64 ] || return 1
-  done
-  printf '%s\n' "$home"
-}
-
 # The one lock serializing Treehouse slot allocation and return for a project.
 #
-# It is anchored in the local root home's state directory so that every home on
-# this machine that can reach the same pool - the root, and each secondmate home
-# below it, including a remote-seeded home and its own local descendants -
-# derives the identical path. Its identity is the project's resolved origin, so
-# separate clones of one origin share a single lock; an origin-less local-only
-# project falls back to its own worktree top instead of failing to resolve.
+# It is anchored in this home and keyed by the project's resolved origin.
 fm_treehouse_project_lock_path() {  # <project-dir>
-  local project=$1 root origin identity hash top
+  local project=$1 origin identity hash top
   [ -d "$project" ] || return 1
-  root=$(fm_firstmate_root_home "$FM_HOME") || return 1
   origin=$(git -C "$project" remote get-url origin 2>/dev/null || true)
   if [ -n "$origin" ]; then
     case "$origin" in
@@ -1191,8 +1139,8 @@ fm_treehouse_project_lock_path() {  # <project-dir>
     identity=$top
   fi
   hash=$(printf '%s' "$identity" | git hash-object --stdin 2>/dev/null) || return 1
-  [ -d "$root/state" ] || return 1
-  printf '%s/.treehouse-project-%s.lock\n' "$root/state" "$hash"
+  [ -d "$FM_HOME/state" ] || return 1
+  printf '%s/.treehouse-project-%s.lock\n' "$FM_HOME/state" "$hash"
 }
 
 # A Treehouse slot has the managed pool's fixed <pool>/<slot>/<repo> layout.
@@ -1214,11 +1162,8 @@ fm_treehouse_pool_slot() {  # <project-dir> <worktree>
 
 # Slot-owner claim: which task a Treehouse pool slot currently belongs to.
 #
-# Treehouse can record ownership durably: `treehouse get --lease --lease-holder`
-# reserves a slot under a label until `treehouse return --if-lease-holder`
-# releases it, and Firstmate uses exactly that for secondmate homes
-# (bin/fm-home-seed.sh). Crewmate spawns do not take that path: they acquire
-# their slot through the interactive pane-driven `treehouse get`, whose state
+# Crewmate spawns acquire their slot through the interactive pane-driven
+# `treehouse get`, whose state
 # entry is a live process lease (owner_pid plus owner_started_at, and `treehouse
 # status` reports in-use from the processes actually running under the path).
 # That answers "is anything running here", never "which task owns this", and it
@@ -1379,88 +1324,6 @@ fm_wake_queued_keys_locked() {
   local kind=$1
   awk -F '\t' -v kind="$kind" 'NF >= 5 && $3 == kind && !seen[$4]++ { print $4 }' \
     "$FM_WAKE_QUEUE" 2>/dev/null || true
-}
-
-fm_wake_secondmate_progress_marker_write() { # <task> <observed-at> <oldest-row-key>
-  local task=$1 observed_at=$2 oldest_row_key=$3 marker tmp
-  case "$task" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
-  case "$observed_at" in ''|*[!0-9]*) return 1 ;; esac
-  case "$oldest_row_key" in ''|*[!0-9-]*) return 1 ;; esac
-  marker="$STATE/.secondmate-wake-progress-$task"
-  if [ -e "$marker" ] || [ -L "$marker" ]; then
-    [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
-  fi
-  tmp=$(mktemp "$STATE/.secondmate-wake-progress.XXXXXX") || return 1
-  if ! printf '%s\t%s\n' "$observed_at" "$oldest_row_key" > "$tmp" || ! chmod 0600 "$tmp" \
-    || ! _fm_atomic_replace "$tmp" "$marker"; then
-    rm -f -- "$tmp"
-    return 1
-  fi
-}
-
-fm_wake_secondmate_stall_marker_write() { # <task> <row-key>
-  local task=$1 row_key=$2 marker tmp
-  case "$task" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
-  case "$row_key" in ''|*[!0-9-]*) return 1 ;; esac
-  marker="$STATE/.secondmate-wake-stall-$task"
-  if [ -e "$marker" ] || [ -L "$marker" ]; then
-    [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
-  fi
-  tmp=$(mktemp "$STATE/.secondmate-wake-stall.XXXXXX") || return 1
-  if ! printf '%s\n' "$row_key" > "$tmp" || ! chmod 0600 "$tmp" \
-    || ! _fm_atomic_replace "$tmp" "$marker"; then
-    rm -f -- "$tmp"
-    return 1
-  fi
-}
-
-fm_wake_secondmate_stall_receipt_write() { # <task> <row-key>
-  local task=$1 row_key=$2 root task_dir receipt tmp
-  case "$task" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
-  case "$row_key" in ''|*[!0-9-]*) return 1 ;; esac
-  root="$STATE/.secondmate-wake-stall-receipts"
-  task_dir="$root/$task"
-  if [ -e "$root" ] || [ -L "$root" ]; then
-    [ -d "$root" ] && [ ! -L "$root" ] || return 1
-  else
-    mkdir "$root" || return 1
-    chmod 0700 "$root" || return 1
-  fi
-  if [ -e "$task_dir" ] || [ -L "$task_dir" ]; then
-    [ -d "$task_dir" ] && [ ! -L "$task_dir" ] || return 1
-  else
-    mkdir "$task_dir" || return 1
-    chmod 0700 "$task_dir" || return 1
-  fi
-  receipt="$task_dir/$row_key"
-  [ "$(cat "$receipt" 2>/dev/null || true)" != "$row_key" ] || return 0
-  tmp=$(mktemp "$task_dir/.receipt.XXXXXX") || return 1
-  if ! printf '%s\n' "$row_key" > "$tmp" || ! chmod 0600 "$tmp" \
-    || ! _fm_atomic_replace "$tmp" "$receipt"; then
-    rm -f -- "$tmp"
-    return 1
-  fi
-}
-
-fm_wake_commit_secondmate_stall_receipts_through() { # <cutoff> [<rows-file>]
-  local cutoff=$1 rows=${2:-} key seq rest epoch task row_key
-  while IFS= read -r key; do
-    seq=${key##*-}
-    rest=${key%-*}
-    epoch=${rest##*-}
-    task=${rest#secondmate-wake-loop-}
-    task=${task%-"$epoch"}
-    case "$seq" in ''|*[!0-9]*) return 1 ;; esac
-    case "$epoch" in ''|*[!0-9]*) return 1 ;; esac
-    case "$task" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
-    row_key="$epoch-$seq"
-    fm_wake_secondmate_stall_receipt_write "$task" "$row_key" || return 1
-  done < <(awk -F '\t' -v cutoff="$cutoff" -v rows="$rows" '
-    BEGIN { if (rows != "") while ((getline line < rows) > 0) owned[line]=1 }
-    NF >= 5 && $2 ~ /^[0-9]+$/ && $2 <= cutoff \
-      && (rows == "" || ($2 in owned)) && $3 == "check" \
-      && $4 ~ /^secondmate-wake-loop-[A-Za-z0-9._-]+-[0-9]+-[0-9]+$/ { print $4 }
-  ' "$FM_WAKE_QUEUE" 2>/dev/null)
 }
 
 fm_wake_restore_queue() {
@@ -1671,8 +1534,8 @@ fm_wake_status_mark_current() {  # <state> <status-file>
 
 # Guarded self-announced status append - the one dedup primitive for a status
 # line THIS home's own machinery writes as bookkeeping it has already presented
-# in the very turn or tick that writes it (an answerer-closes resolved line, a
-# pending-reply escalation close, a captain-held transfer). Such a close must
+# in the very turn or tick that writes it (an answerer-closes resolved line or a
+# captain-held transfer). Such a close must
 # not wake the session that wrote it, so this appends the line and then
 # advances the watcher's seen marker to cover exactly the appended bytes and
 # nothing else. The advance is provenance-gated and fails toward waking:

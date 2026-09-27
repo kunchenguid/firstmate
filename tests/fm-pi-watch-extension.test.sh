@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Tests for the tracked Pi primary watcher extension and Pi secondmate wiring.
+# Tests for the tracked Pi primary watcher extension.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -1139,9 +1139,9 @@ EOF
   pass "a captain-held signal trigger reaches main with routine rows present"
 }
 
-# An unread second-mate pending-reply escalation keeps a later stale reminder
-# under the same task's window alias on main until the decision row is read.
-test_pi_unread_pending_reply_forces_later_stale_alias_to_main() {
+# An unread decision escalation keeps a later stale reminder under the same
+# task's window alias on main until the decision row is read.
+test_pi_unread_decision_forces_later_stale_alias_to_main() {
   local repo home plugin log stop out status
   repo="$TMP_ROOT/pi-mixed-signal-root"
   home="$TMP_ROOT/pi-mixed-signal-home"
@@ -1151,7 +1151,7 @@ test_pi_unread_pending_reply_forces_later_stale_alias_to_main() {
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   printf 'project=%s/projects/approved\nwindow=fm-a\n' "$home" > "$home/state/task-a.meta"
-  printf 'blocked [key=pending-reply-0123456789abcdef]: pending-reply-missed: task=task-a pending-reply-id=0123456789abcdef request=finish report\n' \
+  printf 'blocked [key=review-signoff]: approval required before finishing report\n' \
     > "$home/state/task-a.status"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -1227,9 +1227,9 @@ process.exit(0);
 EOF
   )
   status=$?
-  expect_code 0 "$status" "an unread pending-reply escalation must keep a later stale alias on main: $out"
-  [ -z "$out" ] || fail "Pi unread pending-reply alias test printed output: $out"
-  pass "an unread pending-reply escalation keeps later stale aliases on main"
+  expect_code 0 "$status" "an unread decision escalation must keep a later stale alias on main: $out"
+  [ -z "$out" ] || fail "Pi unread decision alias test printed output: $out"
+  pass "an unread decision escalation keeps later stale aliases on main"
 }
 
 # The captain's accepted rule names ONE coalesced trigger batch, not only a
@@ -3252,7 +3252,7 @@ test_pi_heartbeat_is_not_ridden_into_main_by_a_co_present_check
 test_pi_main_only_check_classes_stay_on_main
 test_pi_routes_only_valid_ida_result_checks_to_branch
 test_pi_captain_held_signal_stays_on_main
-test_pi_unread_pending_reply_forces_later_stale_alias_to_main
+test_pi_unread_decision_forces_later_stale_alias_to_main
 test_pi_distinct_files_mixed_batch_routes_whole_batch_to_main
 test_pi_heartbeat_is_not_ridden_into_main_by_a_co_present_needs_decision
 test_pi_heartbeat_restoration_failure_stays_on_main

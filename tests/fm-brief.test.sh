@@ -278,7 +278,7 @@ test_ship_mode_is_explicit_not_registry() {
 }
 
 # yolo is firstmate's merge authority and never reaches the worker, and a scout
-# or charter carries no delivery contract. Each must refuse rather than accept and
+# carries no delivery contract. Each must refuse rather than accept and
 # discard the flag, which would look recorded but change nothing.
 test_delivery_flags_are_refused_where_they_do_not_apply() {
   local home out status label args expect
@@ -295,9 +295,8 @@ test_delivery_flags_are_refused_where_they_do_not_apply() {
 yolo on a ship brief|brief-refused-b1 some-proj --mode direct-PR --yolo on|--yolo is not a brief input
 yolo=value form on a ship brief|brief-refused-b2 some-proj --mode direct-PR --yolo=off|--yolo is not a brief input
 mode on a scout brief|brief-refused-b3 some-proj --scout --mode direct-PR|--mode applies only to ship briefs
-mode on a secondmate charter|brief-refused-b4 --secondmate --no-projects --mode no-mistakes|--mode applies only to ship briefs
 ROWS
-  pass "fm-brief.sh: --yolo and scout/secondmate --mode are refused, never silently dropped"
+  pass "fm-brief.sh: --yolo and scout --mode are refused, never silently dropped"
 }
 
 test_faster_paths_use_configured_authority_without_stacked_review() {
@@ -582,212 +581,18 @@ test_documented_global_replace_leaves_the_herdr_gate_intact() {
   pass "fm-brief.sh: the documented {TASK} and {FIRSTMATE_SPEC} fills cannot corrupt the Herdr safety gate"
 }
 
-test_secondmate_no_projects_charter() {
-  local home brief status
-  home="$TMP_ROOT/no-projects-home"
-  mkdir -p "$home/data"
 
-  # The deliberate --no-projects signal scaffolds a valid project-less charter for
-  # a domain whose subject is the firstmate repo itself (no clones needed).
-  FM_HOME="$home" FM_SECONDMATE_CHARTER='firstmate self-development' \
-    FM_SECONDMATE_SCOPE='firstmate repo work' \
-    "$ROOT/bin/fm-brief.sh" fdev --secondmate --no-projects >/dev/null 2>&1; status=$?
-  expect_code 0 "$status" "--no-projects secondmate brief should exit 0"
-  brief="$home/data/fdev/brief.md"
-  assert_present "$brief" "project-less charter was not scaffolded"
-  assert_grep "# Project clones" "$brief" "project-less charter dropped the Project clones heading"
-  assert_grep "None. This is a project-less domain" "$brief" \
-    "project-less charter did not render a sensible no-clones note"
-  assert_grep "its crews take pooled worktrees of that repo" "$brief" \
-    "project-less charter operating model lost the pooled-worktree note"
-  assert_no_grep "The projects above are local clones" "$brief" \
-    "project-less charter kept the with-projects operating-model line"
-  assert_grep '# The captain and the parent channel' "$brief" \
-    "secondmate charter lost the parent-channel section"
-  assert_grep 'Nobody reads this chat' "$brief" \
-    "secondmate charter no longer says the chat is unread"
-  assert_grep 'in this home it IS the captain' "$brief" \
-    "secondmate charter no longer names the parent channel as the captain"
-  assert_grep 'working [key=<work-slug>]' "$brief" \
-    "secondmate charter did not key material routed-work phases"
-  assert_grep 'resolved [key=<work-slug>]' "$brief" \
-    "secondmate charter did not close a quietly ended routed-work phase"
-  assert_grep 'use the same key on its later' "$brief" \
-    "secondmate charter did not supersede working phases with later states"
-  if grep -nE '^-[[:space:]]*$' "$brief" >/dev/null; then
-    fail "project-less charter left a stray empty project bullet"
-  fi
 
-  # Accidental omission (no projects, no signal) still fails loudly, writing nothing.
-  FM_HOME="$home" FM_SECONDMATE_CHARTER='x' "$ROOT/bin/fm-brief.sh" oops --secondmate >/dev/null 2>&1; status=$?
-  expect_code 1 "$status" "secondmate brief with no projects and no --no-projects must fail"
-  assert_absent "$home/data/oops/brief.md" "loud-failure secondmate brief still wrote a file"
 
-  # --no-projects is mutually exclusive with a project list.
-  FM_HOME="$home" FM_SECONDMATE_CHARTER='x' "$ROOT/bin/fm-brief.sh" oops2 --secondmate --no-projects alpha >/dev/null 2>&1; status=$?
-  expect_code 1 "$status" "--no-projects combined with a project list must fail"
-
-  # --no-projects applies only to secondmate charters, never a ship/scout brief.
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" oops3 somerepo --no-projects >/dev/null 2>&1; status=$?
-  expect_code 1 "$status" "--no-projects on a ship brief must fail"
-
-  pass "fm-brief.sh: --no-projects scaffolds a project-less charter and guards misuse"
-}
-
-test_secondmate_marked_request_reporting_contract() {
+test_herdr_lab_contract_applies_to_scouts() {
   local home brief
-  home="$TMP_ROOT/marked-request-reporting-home"
-  mkdir -p "$home/data"
-  FM_HOME="$home" FM_CLASSIFY_PAUSED_VERB=paused \
-    FM_SECONDMATE_CHARTER='Handle routed domain work.' \
-    "$ROOT/bin/fm-brief.sh" marked-request-reporting --secondmate --no-projects >/dev/null 2>&1
-  brief="$home/data/marked-request-reporting/brief.md"
-
-  assert_grep 'A marked request requires one correlated answer after the work' "$brief" \
-    "secondmate charter did not require the correlated answer after the work"
-  assert_grep 'does not require a separate receipt or start acknowledgement' "$brief" \
-    "secondmate charter did not reject a separate receipt/start acknowledgement"
-  assert_grep "Never append \`working:\` merely to acknowledge receipt or announce that a marked request has started." "$brief" \
-    "secondmate charter did not forbid a generic working acknowledgement"
-  assert_no_grep "Give every routed-work phase a stable key: open it with \`working" "$brief" \
-    "secondmate charter retained the unconditional working opener"
-  assert_grep 'When a routed-work phase has a supervisor-actionable material change worth reporting under the rule above' "$brief" \
-    "secondmate charter did not limit keyed phases to reportable material changes"
-  assert_grep "If its first reportable event is \`working [key=<work-slug>]: {material phase}\`" "$brief" \
-    "secondmate charter lost keyed working syntax for a reportable material phase"
-  assert_grep "use the same key on its later \`paused\`, \`done\`, \`failed\`, \`needs-decision\`, or \`blocked\` event" "$brief" \
-    "secondmate charter lost same-key closure for a reportable material phase"
-  assert_grep 'resolved [key=<work-slug>]' "$brief" \
-    "secondmate charter lost resolved closure for a keyed material phase"
-
-  assert_grep 'include that exact token in your parent status reply' "$brief" \
-    "secondmate charter lost correlated parent results"
-  assert_grep 'bin/fm-secondmate-report.sh <verb> <corr_id> <note>' "$brief" \
-    "secondmate charter lost the mechanical helper invocation"
-  assert_grep 'do not pass a status path' "$brief" \
-    "secondmate charter still tells the mate to pass a hand path to the helper"
-  assert_grep 'For a terse result, a status line is the whole answer.' "$brief" \
-    "secondmate charter lost terse result reporting"
-  assert_grep 'append a status line that points to that doc' "$brief" \
-    "secondmate charter lost detailed document pointers"
-  assert_grep 'Report only true captain-relevant outcomes or a declared external wait' "$brief" \
-    "secondmate charter lost declared external waits"
-  assert_grep 'a captain decision, a real blocker, a failure, work ready for review, or work you landed' "$brief" \
-    "secondmate charter lost decisions, blockers, failures, ready outcomes, or landed work"
-  # Under standing merge authority nothing is ever "ready for review", so the
-  # landed merge is the trigger a charter without this line silently omits.
-  assert_grep 'a merge you performed yourself under standing merge authority and one the captain merged on the forge' "$brief" \
-    "secondmate charter did not name a landed merge as a reporting trigger"
-  assert_grep 'States: working, needs-decision, blocked, paused, done, failed.' "$brief" \
-    "secondmate charter changed the preserved status vocabulary"
-  pass "fm-brief.sh: marked requests avoid generic acknowledgements and preserve material reporting"
-}
-
-test_secondmate_directory_paths_are_absolute_and_output_is_stable() {
-  local root home data_override state_override brief baseline err status
-  root="$TMP_ROOT/relative-directory-inputs"
-  mkdir -p "$root"
-  root=$(cd "$root" && pwd -P)
-  home="$root/home"
-  data_override="$root/data-override"
-  state_override="$root/state-override"
-  mkdir -p "$home/data" "$home/state" "$data_override" "$state_override" \
-    "$root/cdpath/home/data" "$root/cdpath/home/state" \
-    "$root/cdpath/data-override" "$root/cdpath/state-override"
-
-  brief="$home/data/relative-home/brief.md"
-  FM_HOME="$home" FM_SECONDMATE_CHARTER=x \
-    "$ROOT/bin/fm-brief.sh" relative-home --secondmate --no-projects >/dev/null 2>&1
-  baseline="$root/absolute-home-charter"
-  cp "$brief" "$baseline"
-  rm -f "$brief"
-  (
-    cd "$root" || exit 1
-    CDPATH="$root/cdpath" FM_HOME=home FM_SECONDMATE_CHARTER=x \
-      "$ROOT/bin/fm-brief.sh" relative-home --secondmate --no-projects >/dev/null 2>&1
-  )
-  cmp -s "$baseline" "$brief" \
-    || fail "relative FM_HOME changed charter bytes compared with the same absolute home"
-  assert_grep ">> '$home/state/relative-home.status'" "$brief" \
-    "relative FM_HOME did not render an absolute secondmate status path"
-
-  brief="$home/data/relative-state/brief.md"
-  FM_HOME="$home" FM_STATE_OVERRIDE="$state_override" FM_SECONDMATE_CHARTER=x \
-    "$ROOT/bin/fm-brief.sh" relative-state --secondmate --no-projects >/dev/null 2>&1
-  baseline="$root/absolute-state-charter"
-  cp "$brief" "$baseline"
-  rm -f "$brief"
-  (
-    cd "$root" || exit 1
-    CDPATH="$root/cdpath" FM_HOME="$home" FM_STATE_OVERRIDE=state-override FM_SECONDMATE_CHARTER=x \
-      "$ROOT/bin/fm-brief.sh" relative-state --secondmate --no-projects >/dev/null 2>&1
-  )
-  cmp -s "$baseline" "$brief" \
-    || fail "relative FM_STATE_OVERRIDE changed charter bytes compared with the same absolute state directory"
-  assert_grep ">> '$state_override/relative-state.status'" "$brief" \
-    "relative FM_STATE_OVERRIDE did not render an absolute secondmate status path"
-
-  brief="$data_override/relative-data/brief.md"
-  FM_HOME="$home" FM_DATA_OVERRIDE="$data_override" FM_SECONDMATE_CHARTER=x \
-    "$ROOT/bin/fm-brief.sh" relative-data --secondmate --no-projects >/dev/null 2>&1
-  baseline="$root/absolute-data-charter"
-  cp "$brief" "$baseline"
-  rm -f "$brief"
-  (
-    cd "$root" || exit 1
-    CDPATH="$root/cdpath" FM_HOME="$home" FM_DATA_OVERRIDE=data-override FM_SECONDMATE_CHARTER=x \
-      "$ROOT/bin/fm-brief.sh" relative-data --secondmate --no-projects >/dev/null 2>&1
-  )
-  cmp -s "$baseline" "$brief" \
-    || fail "relative FM_DATA_OVERRIDE changed charter bytes compared with the same absolute data directory"
-  assert_grep ">> '$home/state/relative-data.status'" "$brief" \
-    "relative FM_DATA_OVERRIDE changed the absolute default status path"
-
-  err="$root/unresolved.err"
-  (
-    cd "$root" || exit 1
-    FM_HOME=missing-home FM_SECONDMATE_CHARTER=x \
-      "$ROOT/bin/fm-brief.sh" unresolved-home --secondmate --no-projects >/dev/null 2>"$err"
-  ); status=$?
-  expect_code 1 "$status" "an unresolved relative FM_HOME must fail"
-  assert_grep "FM_HOME directory cannot be resolved: missing-home" "$err" \
-    "unresolved relative FM_HOME did not fail loudly"
-
-  (
-    cd "$root" || exit 1
-    FM_HOME="$home" FM_STATE_OVERRIDE=missing-state FM_SECONDMATE_CHARTER=x \
-      "$ROOT/bin/fm-brief.sh" unresolved-state --secondmate --no-projects >/dev/null 2>"$err"
-  ); status=$?
-  expect_code 1 "$status" "an unresolved relative FM_STATE_OVERRIDE must fail"
-  assert_grep "FM_STATE_OVERRIDE directory cannot be resolved: missing-state" "$err" \
-    "unresolved relative FM_STATE_OVERRIDE did not fail loudly"
-
-  (
-    cd "$root" || exit 1
-    FM_HOME="$home" FM_DATA_OVERRIDE=missing-data FM_SECONDMATE_CHARTER=x \
-      "$ROOT/bin/fm-brief.sh" unresolved-data --secondmate --no-projects >/dev/null 2>"$err"
-  ); status=$?
-  expect_code 1 "$status" "an unresolved relative FM_DATA_OVERRIDE must fail"
-  assert_grep "FM_DATA_OVERRIDE directory cannot be resolved: missing-data" "$err" \
-    "unresolved relative FM_DATA_OVERRIDE did not fail loudly"
-
-  pass "fm-brief.sh: relative directory inputs ignore CDPATH, render stable absolute charter paths, or fail loudly"
-}
-
-test_herdr_lab_contract_applies_to_scouts_but_not_secondmates() {
-  local home brief status=0
   home="$TMP_ROOT/herdr-kind-home"
   mkdir -p "$home/data"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" herdr-scout firstmate --scout --herdr-lab >/dev/null 2>&1
   brief="$home/data/herdr-scout/brief.md"
   assert_grep "# Herdr isolation - HARD SAFETY CONTRACT" "$brief" \
     "scout --herdr-lab brief missing the contract"
-
-  FM_HOME="$home" FM_SECONDMATE_CHARTER=ops "$ROOT/bin/fm-brief.sh" herdr-secondmate --secondmate firstmate --herdr-lab >/dev/null 2>&1 || status=$?
-  expect_code 1 "$status" "secondmate --herdr-lab must be rejected"
-  assert_absent "$home/data/herdr-secondmate/brief.md" \
-    "rejected secondmate --herdr-lab still wrote a brief"
-  pass "fm-brief.sh: Herdr lab contract covers scouts and rejects secondmate misuse"
+  pass "fm-brief.sh: Herdr lab contract covers scouts"
 }
 
 test_pause_verb_override_renders_all_brief_scaffolds() {
@@ -795,7 +600,7 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
   home="$TMP_ROOT/pause-verb-home"
   mkdir -p "$home/data"
 
-  for kind in ship scout secondmate; do
+  for kind in ship scout; do
     id="brief-pause-verb-$kind"
     case "$kind" in
       ship)
@@ -805,10 +610,6 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
       scout)
         FM_HOME="$home" FM_CLASSIFY_PAUSED_VERB=awaiting \
           "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1
-        ;;
-      secondmate)
-        FM_HOME="$home" FM_CLASSIFY_PAUSED_VERB=awaiting \
-          "$ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects >/dev/null 2>&1
         ;;
     esac
     brief="$home/data/$id/brief.md"
@@ -828,8 +629,8 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
   pass "fm-brief.sh: custom pause verb renders in every scaffold"
 }
 
-test_scout_and_secondmate_load_decision_hold_policy() {
-  local home scout charter
+test_scout_loads_captain_hold_policy() {
+  local home scout
   home="$TMP_ROOT/decision-policy-home"
   mkdir -p "$home/data"
   FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
@@ -839,11 +640,6 @@ test_scout_and_secondmate_load_decision_hold_policy() {
     "scout brief did not load the captain-call policy before done"
   assert_grep "pass its shared completion gate for the report and any visual review" "$scout" \
     "scout brief did not cross-reference visual-review completion"
-  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_SECONDMATE_CHARTER='sample reviews' \
-    "$ROOT/bin/fm-brief.sh" sample-mate --secondmate --no-projects >/dev/null 2>&1
-  charter="$home/data/sample-mate/brief.md"
-  assert_grep "load \`captain-hold-lifecycle\`" "$charter" \
-    "secondmate charter did not load the shared captain-call policy for detailed investigations"
   pass "fm-brief.sh: investigation and visual-review completions load the shared decision policy"
 }
 
@@ -882,8 +678,8 @@ ROWS
   pass "fm-brief.sh: scout Lavish hosting follows the bootstrap lavish-axi floor"
 }
 
-# Scout and secondmate paths still scaffold well-formed briefs.
-test_scout_and_secondmate_scaffold() {
+# Scout paths still scaffold well-formed briefs.
+test_scout_scaffold() {
   local brief
   FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" brief-scout-q6 alpha --scout >/dev/null 2>&1 \
     || fail "fm-brief.sh scout scaffold exited non-zero"
@@ -898,19 +694,7 @@ test_scout_and_secondmate_scaffold() {
     "scout brief treats report existence as goal acceptance"
   assert_grep "archive completed research automatically after the unresolved-decision gate" "$brief" \
     "scout brief lost automatic accepted-research archival"
-
-  FM_SECONDMATE_CHARTER='Supervise the alpha domain.' \
-    FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" brief-sm-q6 --secondmate alpha >/dev/null 2>&1 \
-    || fail "fm-brief.sh secondmate scaffold exited non-zero"
-  brief="$BRIEF_HOME/data/brief-sm-q6/brief.md"
-  assert_present "$brief" "secondmate charter was not scaffolded"
-  assert_grep "persistent second mate" "$brief" \
-    "secondmate charter must declare its role"
-  assert_no_grep "## Captain's intent" "$brief" \
-    "secondmate charter must not grow ship/scout Task subsections"
-  assert_no_grep "{FIRSTMATE_SPEC}" "$brief" \
-    "secondmate charter must not carry the Firstmate spec placeholder"
-  pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
+  pass "fm-brief: scout code path scaffolds a well-formed brief"
 }
 
 test_worker_role_scope() {
@@ -925,14 +709,7 @@ test_worker_role_scope() {
     brief="$home/data/$kind/brief.md"
     assert_no_grep '# Current worker role contract' "$brief" "$kind scaffolded a second owner of the role scope fm-spawn.sh delivers"
   done
-  FM_HOME="$home" FM_SECONDMATE_CHARTER='Supervise assigned work.' \
-    "$ROOT/bin/fm-brief.sh" supervisor --secondmate --no-projects >/dev/null || fail "secondmate scaffold failed"
-  brief="$home/data/supervisor/brief.md"
-  assert_no_grep '# Current worker role contract' "$brief" "secondmate received the worker exception"
-  assert_no_grep 'do not adopt the supervisor identity' "$brief" "secondmate received the worker exception"
-  assert_grep "The local \`AGENTS.md\` is your job description" "$brief" "secondmate lost its supervisor contract"
-  assert_grep 'That file is your parent channel' "$brief" "secondmate lost its parent channel"
-  pass "fm-brief: scaffolds leave the worker role scope to the launch boundary and keep the secondmate contract"
+  pass "fm-brief: scaffolds leave the worker role scope to the launch boundary"
 }
 
 test_worker_role_scope
@@ -951,11 +728,8 @@ test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout
 test_documented_global_replace_leaves_the_herdr_gate_intact
-test_herdr_lab_contract_applies_to_scouts_but_not_secondmates
-test_secondmate_no_projects_charter
-test_secondmate_marked_request_reporting_contract
-test_secondmate_directory_paths_are_absolute_and_output_is_stable
+test_herdr_lab_contract_applies_to_scouts
 test_pause_verb_override_renders_all_brief_scaffolds
-test_scout_and_secondmate_load_decision_hold_policy
-test_scout_and_secondmate_scaffold
+test_scout_loads_captain_hold_policy
+test_scout_scaffold
 test_scout_lavish_line_follows_presentation_floor

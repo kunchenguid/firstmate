@@ -13,9 +13,7 @@ The mid-turn pull guard can recognize an extension-owned watcher handoff; that d
 
 ## Guard predicates
 
-A normal primary checkout and a valid marked secondmate home are in scope.
 An unmarked linked worker worktree is exempt.
-The shared scope owner validates the secondmate marker against the home and requires Firstmate-shaped paths rather than trusting a marker's presence alone.
 `FM_HOME` selects private home state; `FM_STATE_OVERRIDE` can select an isolated state directory for tests.
 The session-start wrappers use the same scope owner, as described in [native startup](sessionstart-nudge.md).
 

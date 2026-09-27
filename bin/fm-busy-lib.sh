@@ -31,34 +31,20 @@
 # Firstmate launch and recovery writers use fm-spawn and fm-recovery.
 # Missing, malformed, mismatched or unsupported evidence stays unknown.
 #
-# Codex and TraeX managed non-secondmate workers use the task-bound pull reader in
+# Codex and TraeX managed workers use the task-bound pull reader in
 # fm-busy-transcript.py, which owns binding, verified versions and submission
 # fences. They arm an unknown record for generation ownership only; the reader
 # never trusts that seed as evidence of activity. tmux/Herdr process liveness
 # must be verified before reading; other backends remain unknown. Missing
 # bindings on legacy Codex tasks remain codex-unverified; legacy TraeX retains
 # the generic native busy-only fallback. New bindings outrank native state.
-# The reserved Codex push probes below remain closed: hooks miss API failure,
-# and observing a separate app-server thread does not observe a default TUI.
+# The reserved Codex hook probe below remains closed because hooks miss API failure.
 # docs/verification/supervision.md owns the current and historical evidence.
 #
 # Sourcing: set -u and set -e safe; no subshell-unfriendly globals.
 
 FM_BUSY_LIB_VERSION=v1
 FM_BUSY_TRANSCRIPT_READER="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-busy-transcript.py"
-
-# fm_busy_codex_appserver_observable: capability/version negotiation for the
-# Codex app-server turn lifecycle. Returns 0 only when a pane worker's turns
-# are observable through the app-server protocol on the installed binary.
-# codex-cli 0.145.0 verdict (live, 2026-07-28): NOT observable. The v2
-# protocol does define the needed turn lifecycle (turn/started plus a
-# turn/completed status of completed, interrupted, failed, or inProgress),
-# but an interactive TUI worker neither starts nor attaches to the
-# app-server daemon, and `codex app-server daemon start` refuses outside the
-# managed standalone install, so no client can observe a pane worker's turns.
-fm_busy_codex_appserver_observable() {
-  return 1
-}
 
 # fm_busy_codex_hooks_verified: the sanctioned intermediate - Codex's stable
 # hooks engine (UserPromptSubmit to open a turn, Stop and SessionEnd to close
@@ -77,7 +63,7 @@ fm_busy_codex_hooks_verified() {
 # fm_busy_codex_semantic_source: reserved push-source gate. The verified
 # transcript pull source does not use this record-writer trust table.
 fm_busy_codex_semantic_source() {
-  fm_busy_codex_appserver_observable || fm_busy_codex_hooks_verified
+  fm_busy_codex_hooks_verified
 }
 
 fm_busy_record_path() {  # <state-dir> <id>
@@ -116,7 +102,7 @@ fm_busy_sources_for_harness() {  # <harness>
   case "${1:-}" in
     codex*)
       fm_busy_codex_semantic_source || { printf ''; return 0; }
-      adapter='codex-hook codex-appserver'
+      adapter='codex-hook'
       ;;
     pi) adapter=pi-ext ;;
     *) printf ''; return 0 ;;

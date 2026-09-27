@@ -206,7 +206,7 @@ codex_cell() {
 
 test_matrix_codex_idle_starfield_furniture() {
   # Real idle codex-cli 0.154.0 (gpt-6-astra, fast mode) captured byte-for-byte
-  # through Herdr (`pane read --format ansi`) from the first codex second mate:
+  # through Herdr (`pane read --format ansi`) from a Codex CLI worker pane:
   # an animated braille "starfield" on the row above the bold `›`, on the `›`
   # row behind the SGR-2 dim `Ask Codex to do anything` placeholder, and on
   # the row below, then a bright model/path/title status footer. The cells are

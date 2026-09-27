@@ -51,18 +51,11 @@ How the reply lands depends on whether the work finishes during this turn:
 - **Work that spawns a real, longer-running job** (dispatching a crewmate, a scout investigation, a ship task) cannot report an outcome yet, so it follows **acknowledge first -> act -> follow up on completion**:
   1. **Acknowledge first.** Post an immediate, public-safe reply that you have the captain's order and are on it (the normal answer endpoint, via `bin/fm-x-reply.sh`). This is the legitimate, work-backed version of "aye, will do": it is paired with actually starting the work in the same turn, never a promise left empty.
   2. **Act.** Dispatch the work through the normal lifecycle right away.
-  3. **Bind the follow-up to wherever the work actually lives, before clearing the inbox.**
-     **The decision rule: work that stays in this home takes the lightweight link; work routed to a second mate takes a promised-final commitment bound to that second mate's home.**
-     There is no third option and no fallback between them - each mechanism can only reach the home it was built for, so choosing the wrong one orphans the public promise.
-     - **Local task (this home spawned it):** `bin/fm-x-link.sh <task-id> <request_id>` (records the request id, a timestamp, a follow-up counter, and reply platform/budget context).
-       Do this right after the task is spawned, and always **before** removing the inbox file (step 2f).
-       Linking before cleanup lets `bin/fm-x-link.sh` copy the context directly from the inbox, while the durable per-request context recorded by the poll preserves it independently for delayed and concurrent follow-ups.
-       The exact resolution and fail-safe posting contract is owned by `docs/configuration.md`.
-       If a recovery respawns the same relay request onto a successor task, relink with the paired `--carry-count <n> --carry-ts <epoch>` flags plus any prior `x_platform=` and `x_reply_max_chars=` as `--carry-platform <x|discord> --carry-max <n>` so the successor keeps the consumed follow-up count, original 7-day window, and reply split budget.
-     - **Second-mate-routed work (the request's project or domain belongs to a registered second mate, so the work is or will be routed there):** the link cannot be used at all.
-       It writes into this home's own `state/<task-id>.meta`, and a routed task's record lives in the second mate's home, so `bin/fm-x-link.sh` refuses and points you back here.
-       Register a **typed promised-final commitment bound to that home** up front instead - see "Promised final replies" below for the exact commands - and put its `bin/fm-public-followup.sh brief <obligation-id>` output into the routed worker's instructions so the terminal result comes back as typed data.
-       Do this in the same turn as the acknowledgement, before routing, so the promise is durable state from the moment it is made.
+  3. **Bind the follow-up before clearing the inbox.**
+     Run `bin/fm-x-link.sh <task-id> <request_id>` right after the task is spawned and always before removing the inbox file in step 2f.
+     Linking before cleanup lets the command copy the reply platform and budget from the inbox, while the durable per-request context preserves them for delayed and concurrent follow-ups.
+     The exact resolution and fail-safe posting contract is owned by `docs/configuration.md`.
+     If recovery respawns the same Relay request onto a successor task, relink with the paired `--carry-count <n> --carry-ts <epoch>` flags plus any prior `x_platform=` and `x_reply_max_chars=` as `--carry-platform <x|discord> --carry-max <n>` so the successor keeps the consumed follow-up count, original 7-day window, and reply split budget.
   4. **Follow up on genuine milestones, sparingly.** Firstmate gets up to **three** follow-ups per mention, within a 7-day window, chained in the same thread - spend them only on changes the captain would actually want to hear about (e.g. investigation done and a build started, work shipped or ready, or the task failing), never on routine internal churn.
      A task without a promised-final commitment posts its final outcome - shipped / reported / merged / failed - with `--final`, which clears the link regardless of how many follow-ups remain. A typed promised-final commitment uses the deterministic consumer instead.
      That posting happens on the task's milestone and completion wakes (see "Completion follow-up" below), not this turn.
@@ -89,7 +82,7 @@ The asker being your own captain (owner-only routing) does **not** relax this: a
 Never include, in any form:
 
 - Task ids, branch names, worktree paths, PR/issue numbers, or repo-internal identifiers.
-- Tooling/internal vocabulary: crewmate, scout, ship, secondmate, harness names, watcher, heartbeat, brief, teardown, no-mistakes, yolo, delivery modes.
+- Tooling/internal vocabulary: crewmate, scout, ship, harness names, watcher, heartbeat, brief, teardown, no-mistakes, yolo, delivery modes.
 - Captain-private material: the captain's name, product strategy, unreleased plans, revenue, internal URLs, file contents, or anything the captain has not made public.
 - Secrets of any kind: tokens, keys, credentials, the pairing token, hostnames.
 
@@ -179,7 +172,6 @@ Treat `state/x-inbox/` as the source of truth and process **every** file you fin
       **If the request spawned a real, longer-running task in THIS home** (you ran `bin/fm-spawn.sh` here), link that task to this mention so milestone and completion follow-ups can be posted: `bin/fm-x-link.sh <task-id> <request_id>`.
       **Link here, in step 2c, before the step 2f inbox cleanup** - `bin/fm-x-link.sh` can copy both the mention's reply platform and explicit budget from the still-present inbox payload without a relay lookup.
       If that local context is incomplete it uses the durable resolution contract in `docs/configuration.md` and warns loudly, while the follow-up path refuses to post unless both values can be resolved authoritatively.
-      **If intake routes the work to a second mate instead**, do not reach for the link: register the typed promised-final commitment bound to `secondmate:<id>` and brief the routed worker with its reporting command (step 3 of "acknowledge first, act, then follow up on completion", with the commands in "Promised final replies").
       Then step 2d's reply is an **acknowledgement** ("on it, captain"), and genuine milestone updates plus the final outcome come later as follow-ups (see "Completion follow-up" below), with the terminal one posted using `--final` when no typed promised-final commitment exists.
       If the work completed in this turn (a backlog item filed, a question answered), there is no task to link and step 2d reports the outcome directly.
    d. **Compose the reply.** For a **question**, answer `.text` from the fleet state gathered in step 1. For an **actionable request that completed now**, report the outcome of step 2c (what was done, or - for escalated work - that it has been flagged for the captain). For an **actionable request that spawned a linked task**, acknowledge that you have the order and are on it - milestone updates and the final outcome follow later as completion follow-ups, so do not promise a result you do not yet have. Either way keep it short, in firstmate's voice, and public-safe.
@@ -251,21 +243,15 @@ Never carry one in your head: the moment you promise a specific outcome in a pub
 This section is the sole owner of that procedure.
 `tasks-axi public-followup --help` owns the typed obligation, its states, and its file contracts; `bin/fm-public-followup.sh --help` owns firstmate's flags; do not restate either here.
 
-This is also the **only** mechanism that reaches work outside this home.
-The lightweight link of step 3 writes into this home's own task record, so it can never bind a second mate's task; `--work-home secondmate:<id>` here can.
-So treat second-mate-routed Relay work as a promised final by construction: the acknowledgement you just posted **is** the promise, and there is no other way to keep it.
-
-**When you promise a final (including every Relay request whose work is routed to a second mate):**
+**When you promise a final:**
 
 1. Create the typed obligation with `bin/fm-tasks-axi.sh public-followup add` and bind the work with its `bind-work`, keeping the public-safe summary and the opaque thread binding in the obligation and the full request context where the poll already put it.
    When the public ask plainly implies follow-on work ("look into X and fix it"), register the promised-final against the outcome and deliver any interim report as a separate `--purpose milestone` obligation on the same thread.
    An ask that genuinely terminates at a report stays `report-ready`; do not invent a ship commitment for work the captain has not authorized.
-2. Register it with `bin/fm-public-followup.sh register <obligation-id> --relation <relation-id> --work-home <main|secondmate:<id>> --work-id <task-id> --generation <n>`.
+2. Register it with `bin/fm-public-followup.sh register <obligation-id> --relation <relation-id> --work-home main --work-id <task-id> --generation <n>`.
    This is what makes the commitment reconcilable without you.
 3. Put `bin/fm-public-followup.sh brief <obligation-id>` output straight into the worker's brief.
    It prints the exact reporting command for that binding, including the obligation's actual required deliverable keys.
-   When the work is routed to a second mate rather than spawned here, the routed item's own note MUST carry that same `brief` output so it survives the routing and reaches whoever ends up doing the work.
-   A header-only routed item loses the emit command.
    Never ask a worker to find the thread or post the reply: only this home holds the relay consent and the thread binding.
 
 **When work reports back, or on a `public-followup ...` check wake, or when the session-start digest lists a public commitment or an open public loop:**
@@ -288,7 +274,7 @@ So treat second-mate-routed Relay work as a promised final by construction: the 
      Posting again would put a second reply in a public thread.
    - "the relay no longer accepts a follow-up" is a captain decision, not a retry.
 4. After a successful deliver (or when the digest lists an `open-loop` line), decide the disposition in that same turn:
-   - Follow-on work authorized from the same public thread: `bin/fm-public-followup.sh rechain <new-id> --from <delivered-id> --work-home <main|secondmate:<id>> --work-id <task-id> --expected <pr-merged|report-ready|local-main>`, then put the printed `brief` into that follow-on's instructions (and into the routed item's own note when the work is routed).
+   - Follow-on work authorized from the same public thread: `bin/fm-public-followup.sh rechain <new-id> --from <delivered-id> --work-home main --work-id <task-id> --expected <pr-merged|report-ready|local-main>`, then put the printed `brief` into that follow-on's instructions.
      If rechain reports an interrupted bind or source-retirement failure, resume the same destination with the same command; the retained source claim forbids choosing another destination.
    - The public loop is finished: `bin/fm-public-followup.sh retire <id> --reason "<why the loop is done>"`.
    Delivering a final is not closure.
@@ -301,7 +287,7 @@ Treat a public loop as closed only after `retire`.
 ## Notes
 
 - The direct author is always your own captain (owner-only routing), and in live mode you answer and act on eligible requests **autonomously**: enabling Relay is the captain's standing authorization, so never ask the captain before posting and never hold a worthwhile reply for a chat-side OK. For reply-worthy mentions, dry-run (`FMX_DRY_RUN`) is the only non-posting path; pure acknowledgments use the relay dismiss path instead.
-- An actionable mention is **acted on** through the normal lifecycle (intake, backlog, dispatch, investigate, ship), not merely replied to. Work that finishes now gets one outcome reply; work that spawns a real task gets an **acknowledgement now** plus up to three **completion follow-ups** over time, ending with a `--final` one when no typed promised-final commitment exists. Bind those follow-ups by where the work lives: a task in this home takes `bin/fm-x-link.sh`, and work routed to a second mate takes a promised-final commitment registered with `--work-home secondmate:<id>`, which is the only mechanism that reaches another home. A reply alone, with no work behind an actionable ask, is the bug to avoid.
+- An actionable mention is **acted on** through the normal lifecycle (intake, backlog, dispatch, investigate, ship), not merely replied to. Work that finishes now gets one outcome reply; work that spawns a real task gets an **acknowledgement now** plus up to three **completion follow-ups** over time, ending with a `--final` one when no typed promised-final commitment exists. Bind those follow-ups to the local task with `bin/fm-x-link.sh`. A reply alone, with no work behind an actionable ask, is the bug to avoid.
 - Destructive, irreversible, or security-sensitive asks are flagged to the captain through the trusted channel first and never run straight from a mention; the public reply says only that it has been flagged.
 - One answered mention = one reply (plus up to three completion follow-ups for a spawned task, spent only on genuine milestones); a skipped mention posts no reply but is **dismissed at the relay** (`bin/fm-x-dismiss.sh`) so the relay drops it rather than re-offering it (which would otherwise churn every poll and end in an "offline" auto-reply). A single wake may cover several pending mentions - drain them all.
 - Conversations: `in_reply_to` carries the parent post and optional `in_reply_to_chain` carries the surrounding transcript for continuity; a pure acknowledgment with nothing to answer is dismissed at the relay and skipped, not replied to. The relay already guards against self-replies and caps replies per conversation, so you only judge "is there something to answer here?".

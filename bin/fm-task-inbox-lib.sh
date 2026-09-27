@@ -6,9 +6,8 @@
 # allocation, the idempotent re-enqueue dedup, the handled/ acknowledgement,
 # the self-describing doorbell line, and the watcher's re-ring ladder policy.
 # bin/fm-send.sh writes and rings locally, bin/fm-task-handoff.sh writes and
-# rings one idempotent cross-task record locally, the host-local remote steer
-# leg (bin/fm-remote-secondmate-control.sh cmd_send) writes idempotently and
-# rings on the remote host, bin/fm-watch.sh polls and re-rings, and the brief
+# rings one idempotent cross-task record locally, bin/fm-watch.sh polls and
+# re-rings, and the brief
 # scaffold (bin/fm-brief.sh) tells the worker how to read and acknowledge;
 # none of them restates the format.
 #
@@ -38,8 +37,7 @@
 #   delivery=fire-and-forget   present only when the re-ring ladder must ignore it
 #   handoff=<id>               present only for an idempotent cross-task handoff
 #   --
-#   <exact message text; newlines are legal; a marked secondmate request keeps
-#    its from-firstmate marker and corr token verbatim in this body>
+#   <exact message text; newlines are legal>
 #
 # Sequence numbers are never reused within a task: allocation scans both the
 # inbox root and handled/, so a message is processed at most once per worker
@@ -241,14 +239,12 @@ fm_task_inbox_write() {  # <state-dir> <task-id> <text> [delivery-mode]
 # Durably enqueue one steer at most once: when a record with the exact same
 # body already exists - unhandled or already acknowledged in handled/ - no new
 # record is written and the existing record's path is printed instead.
-# This is the enqueue primitive for a transport that can fail with completion
-# unknown (the remote steer leg over ssh): the caller's safe recovery is to run
-# the same enqueue again, and this dedup is what makes the re-run land on the
-# same record instead of a duplicate the worker would act on twice. Two
-# distinct logical requests never collapse in practice because a marked
-# secondmate request embeds a per-request correlation token in its body. The
-# local plane keeps plain fm_task_inbox_write: its outcome is synchronous, so
-# a repeated identical local steer is a deliberate new instruction.
+# This is the enqueue primitive for transports that can fail with completion
+# unknown: the caller's safe recovery is to run the same enqueue again, and this
+# dedup makes the re-run land on the same record instead of a duplicate the
+# worker would act on twice. The local plane keeps plain fm_task_inbox_write:
+# its outcome is synchronous, so a repeated identical local steer is a
+# deliberate new instruction.
 fm_task_inbox_write_idempotent() {  # <state-dir> <task-id> <text> [delivery-mode]
   local state=$1 task=$2 text=$3 delivery_mode=${4:-} dir lock want have f rec='' status=0
   dir=$(fm_task_inbox_dir "$state" "$task")

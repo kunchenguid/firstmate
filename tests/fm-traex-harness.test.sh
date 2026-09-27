@@ -355,7 +355,7 @@ test_late_trust_preserves_launch() {
 }
 
 test_scope_refuses_before_endpoint() {
-  local rec out status sm
+  local rec out status
   rec=$(make_spawn_case scope)
   read_spawn_case "$rec"
   out=$(traex_env "$SPAWN" "$TASK_ID" "$PROJECT_DIR" --harness traex --backend herdr \
@@ -378,16 +378,7 @@ SH
   [ "$status" -ne 0 ] || fail "TraeX tmux spawn succeeded"
   [ ! -s "$CASE_DIR/tmux.log" ] || fail "unsupported backend created an endpoint"
 
-  sm="$CASE_DIR/secondmate"
-  mkdir -p "$sm/data" "$sm/bin"
-  printf '# Firstmate\n' > "$sm/AGENTS.md"
-  printf '%s\n' "$TASK_ID" > "$sm/.fm-secondmate-home"
-  printf 'charter\n' > "$sm/data/charter.md"
-  out=$(traex_env "$SPAWN" "$TASK_ID" "$sm" --harness traex --backend herdr --secondmate 2>&1)
-  status=$?
-  [ "$status" -ne 0 ] || fail "TraeX secondmate succeeded"
-  assert_contains "$out" 'crewmate/scout adapter only' "role refusal was unclear"
-  pass "traex refuses max effort, non-Herdr backends, and secondmate scope before endpoint creation"
+  pass "traex refuses max effort and non-Herdr backends before endpoint creation"
 }
 
 test_raw_traex_refuses_without_breaking_other_raw_launches() {

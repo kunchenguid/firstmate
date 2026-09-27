@@ -455,7 +455,7 @@ cmd_retire() {
     case "$REMOTE_STATE_PHASE" in terminal-success|terminal-failure|terminal-cancelled) ;; *) die "iDA task is not safely terminal: phase=$REMOTE_STATE_PHASE" ;; esac
     report=$(fm_remote_report_path "$id") || die "cannot resolve report path"
     fm_remote_report_safe "$id" && [ "$REMOTE_STATE_REPORT_PATH" = "$report" ] || die "iDA task has no safe report at data/$id/report.md"
-    FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-decision-hold.sh" verify "$id" >/dev/null || die "iDA task decision completion gate has not passed"
+    FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-captain-hold.sh" verify "$id" >/dev/null || die "iDA task decision completion gate has not passed"
     source=$(fm_remote_source_id ida "$id")
     "$SCRIPT_DIR/fm-procevent.sh" retire "$source" >/dev/null || die "cannot retire iDA process-event source"
     fm_backlog_remote_retire "$CONFIG" "$DATA" "$id" \

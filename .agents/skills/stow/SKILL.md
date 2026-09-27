@@ -42,13 +42,13 @@ The tier names say what the pass does with an entry:
 
 Marking rules:
 
-- Tier defaults are file-scoped: entries in `data/captain.md` and `data/captain-shared.md` default to `pinned` because preferences and authority boundaries do not age, and entries in `data/learnings.md` default to `aging` because operational facts must re-prove themselves.
+- Tier defaults are file-scoped: entries in `data/captain.md` default to `pinned` because preferences and authority boundaries do not age, and entries in `data/learnings.md` default to `aging` because operational facts must re-prove themselves.
 - An entry matching its file's `pinned` default carries no marker at all; every `aging` and `perishable` entry always carries its dated marker, whose letter names the tier, so a clock-carrying entry is never ambiguous with unmarked legacy material.
 - Marker and header-pointer bytes count toward the startup-memory budget: the pass's own bookkeeping is costed content, never free, which is why the spellings above are as short as they are.
 - Each memory file's header carries at most a one-line pointer naming this skill as the scheme owner, such as `<!-- memory tiers: see the stow skill -->`.
   This skill text is the single owner of tier semantics, marker spellings, and clocks, and no memory file header may restate them.
   The one exception is the `config/stow-pass-horizon` presence flag below, which turns a single extra horizon on for this home and changes nothing else on this page.
-- Inspect each editable file's header pointer on every pass and add or correct it; for a read-only `data/captain-shared.md`, leave the file byte-identical and route a missing or outdated pointer to the primary owner.
+- Inspect each editable file's header pointer on every pass and add or correct it.
   The required receipt action for that file is `routed`, not `unchanged`; name the ownership exception and do not declare the session reset-safe.
 - A pre-existing missing or hand-dropped marker is never grounds for destructive treatment: it means the file's default tier; an unmarked entry in a default-pinned file is simply pinned, while an unmarked entry in a file whose default tier carries a clock follows the migration rule below.
 
@@ -83,10 +83,9 @@ Every `/stow` invocation performs this complete pass, even when the session cont
    The helper's stable estimate is the documented conservative local approximation, not provider-exact accounting.
    If it rejects the setting or a memory file, do not infer a default or silently continue.
    Report that concrete exception and do not call the session reset-safe.
-2. Read every current memory file completely: `data/captain.md`, `data/captain-shared.md`, and `data/learnings.md`.
+2. Read every current memory file completely: `data/captain.md` and `data/learnings.md`.
    Treat an absent local file as absent, not as an invitation to manufacture content.
-   In a primary home, all three are curation inputs under their existing ownership rules.
-   In a secondmate home, `data/captain-shared.md` is a read-only primary-owned input: count it, never edit it, and curate only the editable local files.
+   All three are curation inputs under their existing ownership rules.
    Every mutation in the rest of this pass, including reinforcement, retiering, decay archival, legacy migration, consolidation, budget archival, and offload, applies only to an editable memory file.
    When a read-only shared entry appears to require one of those changes, leave it untouched, report the required change as an ownership exception, and route it to the primary owner.
 3. Build one whole-file retention plan before editing, ordered by likelihood of informing a future session.
@@ -117,8 +116,6 @@ Every `/stow` invocation performs this complete pass, even when the session cont
    The sole exception is relocation to a JIT owner after explicit, per-item captain approval under the offload flow below, and that entry remains in memory until its destination is live.
 8. Run `bin/fm-startup-memory-budget.sh report` again after the complete pass.
    Finish at or below the effective budget, or open a concrete captain decision before ending the pass.
-   A secondmate must explicitly report `primary-owned-shared-file-alone-exceeds-budget` when the inherited shared file alone exceeds its allowance, because local curation cannot resolve it.
-   Route that constraint to the primary owner and open one concrete captain decision at the primary owning level that names the shortfall, with exactly these options: raise the affected home's effective budget, or explicitly approve the primary owner trimming or offloading each named shared-file entry.
    When the convergence precondition skipped eviction, report the exempt pinned floor and the remaining shortfall as that concrete inability rather than archiving eligible knowledge that could not close the gap.
    Only after every safe non-pinned archival, consolidation, offload, and eligible eviction action is exhausted may a remaining excess be attributed to pinned safety, authority, or genuine captain-preference entries.
    In that last-resort case, create one captain-held decision that names the shortfall and each relevant pinned entry, with exactly these options: raise the effective budget, or explicitly approve offloading or trimming a named pinned entry.
@@ -184,7 +181,6 @@ Approved project-level destinations are not produced by stow: they ship normally
 - A project-level skill in the project's own repository, for situation-conditional knowledge within one project, through the same ship-task path.
 
 Forbidden destinations: any firstmate-repo-tracked skill per the hard rule; firstmate's own `AGENTS.md`, which is always-loaded for every fleet session; `docs/` alone, which is never agent-loaded on demand, though a skill body may point into docs for depth; and any committed surface for private content.
-A local skill exists only in this home, so offloading an entry out of `data/captain-shared.md` removes it from every inheriting home's always-injected memory: the proposal must say so, and the default for shared entries is keep.
 
 ### Flow: reduce, approve, migrate, remove
 
@@ -218,8 +214,7 @@ A local skill exists only in this home, so offloading an entry out of `data/capt
 3. **Write within the existing boundaries.**
    - Captain preferences and fleet-local operational facts belong in the destination selected by AGENTS.md after the required whole-file curation pass.
      Create `data/learnings.md` only for a genuinely new local learning with no stronger owner.
-   - In a primary home, curate shared captain preferences only under the existing primary-authoritative shared-preference contract.
-     In a secondmate home, route a newly discovered shared preference to the main firstmate through marked status or a document pointer instead of editing the inherited file.
+   - Curate shared captain preferences only under the existing ownership contract.
    - Project-intrinsic knowledge never goes directly into a project's `AGENTS.md`.
      Route it through a normal ship task so a crewmate records it with `bin/fm-ensure-agents-md.sh` and the project's delivery path.
    - Knowledge general to every Firstmate user belongs in this repo's shared tracked material through the normal branch, no-mistakes, PR, and captain-merge path.
@@ -249,7 +244,7 @@ Where the right correction is a judgment you cannot make, leave the record alone
 Legacy entries carry no markers; an unmarked entry is its file's default tier with unknown age, and unknown age is not guilt.
 The first pass after adoption performs a one-time revalidation sweep of editable memory files instead of blanket restamping, while a read-only shared file remains untouched and any required change is routed to its primary owner:
 
-- In `data/captain.md` and `data/captain-shared.md`, every unmarked entry is simply default-pinned and remains exempt from the aging clock, legacy grace cycle, and archive-by-age; consolidation still applies, and only genuine tier deviations receive markers.
+- In `data/captain.md`, every unmarked entry is simply default-pinned and remains exempt from the aging clock, legacy grace cycle, and archive-by-age; consolidation still applies, and only genuine tier deviations receive markers.
 - In `data/learnings.md`, stamp each entry the pass can confirm current with its compact dated marker for today, using a deviating tier letter or `<!--P-->` only where the entry genuinely deviates from the `aging` default.
 - On the first pass that cannot cite independent current-session evidence for an unmarked entry in `data/learnings.md`, add `<!--g-->` as its trailing marker and retain it through the rest of that pass; carrying no date, it persists that the entry has consumed exactly one grace cycle without pretending it was reinforced.
 - Only an entry that already carried `<!--g-->` when this invocation began is on the next-pass branch: replace that marker with the normal dated tier marker if independent current-session evidence confirms the entry; otherwise archive it with provenance `legacy-unvalidated`.
@@ -260,17 +255,16 @@ The first pass after adoption performs a one-time revalidation sweep of editable
 Report the outcome in plain captain-facing language with all of these facts:
 
 - effective startup-memory budget and total estimated tokens before and after;
-- one or more actions for each of `data/captain.md`, `data/captain-shared.md`, and `data/learnings.md`, using only `unchanged`, `added`, `rewritten`, `pruned`, `routed`, `archived`, or `proposed-offload`; adding or replacing a migration marker is `rewritten`, never a new action verb such as `migrated`;
+- one or more actions for each of `data/captain.md` and `data/learnings.md`, using only `unchanged`, `added`, `rewritten`, `pruned`, `routed`, `archived`, or `proposed-offload`; adding or replacing a migration marker is `rewritten`, never a new action verb such as `migrated`;
 - each durable finding filed outside memory and its authoritative owner;
 - each archived entry's reason, each autonomous offload's live destination and actual relief, and, when a pinned candidate was proposed, the `proposed-offload` section with every candidate's fields;
-- every unresolved exception, including a primary-owned shared-file constraint in a secondmate home, and every concrete captain decision opened for an over-budget result;
+- every unresolved exception and every concrete captain decision opened for an over-budget result;
 - each open record this pass filed or corrected, and each one it deliberately left alone with the judgment it is waiting on;
 - whether the session is safe to reset, only when all durable findings are captured, every open record this session held is filed or explicitly left with its reason, and the post-pass result is within budget with no exception or pending budget decision.
 
 State what reset-safe means in the same breath as the claim: nothing this session knew has been lost.
 It is never a claim that the home's durable records are correct, because this pass checks no record the session did not name.
 Do not hide an over-budget result behind a reset-safe claim.
-In a primary home the receipt is written after the cascade below, not instead of it.
 
 ## Coordinated periodic or recoverable invocation
 
@@ -281,43 +275,15 @@ Unknown session-message types remain candidate material for the ordinary relevan
 
 Build one fixed plan under `data/stow-runs/<run_id>/` before the first mutation.
 For every file or owned-record mutation, record a stable operation id, original digest, and target digest through `step --phase prepared`, perform the owner-governed write, read it back, and record `step --phase verified` only when the actual digest equals the planned target.
-On recovery, reuse the original operation ids, digests, archive markers, task operations, and secondmate correlations: target means record verified without rewriting, original means the planned operation may proceed, and any third value means defer or block without overwriting it.
-The run receipt is version 1, binds the exact run and generation, reports its final outcome, local-step readbacks, budget verdict, and every required cascade result; a skipped receipt also explicitly records false for uncovered material, due maintenance, external memory change, budget change, anomaly, and unfinished cascade.
+On recovery, reuse the original operation ids, digests, archive markers, and task operations: target means record verified without rewriting, original means the planned operation may proceed, and any third value means defer or block without overwriting it.
+The run receipt is version 1, binds the exact run and generation, and reports its final outcome, local-step readbacks, and budget verdict; a skipped receipt also explicitly records false for uncovered material, due maintenance, external memory change, budget change, and anomaly.
 The exact command arguments, exit codes, compare-and-swap revision, and JSON state mechanics belong to `bin/fm-stow-run.sh --help`, not this skill.
 
 Automatic full passes add conservative gates without changing manual semantics.
-Before an automatic pass, refuse and report any registered home with pass-horizon opt-in, an unmarked or grace-marked legacy learning, an unfinished run, an unavailable safe receiver, or an unreadable eligibility result; never silently remove that home from the cascade.
+Before an automatic pass, refuse and report pass-horizon opt-in, an unmarked or grace-marked legacy learning, an unfinished run, an unavailable safe receiver, or an unreadable eligibility result.
 A missing harness-safe receiver is `unsupported`, not permission to send a raw execution command.
 In particular, the cascade's ordinary `direct` transport remains valid for an independent manual pass but is `unsupported` for an automatic run until that child has a guarded lifecycle receiver; never execute an automatic child mutation as an untracked direct shell action.
-Manual independent invocation still performs the complete pass above, including its existing decay and cascade semantics.
-
-## Automatic cascade to secondmates
-
-In a primary home, every `/stow` cascades to every registered secondmate after this home's own required pass and knowledge sweep are complete.
-In a secondmate home, `/stow` curates that home only and never cascades further.
-The cascade changes nothing until `/stow` is invoked: it adds no notification, no digest section, and no background work.
-
-Run `bin/fm-stow-cascade.sh` once the primary's own pass is done.
-It enumerates each registered secondmate exactly once, reports that home's own budget accounting, and resolves how the sweep reaches it; its header owns the stanza fields, the bound, and the exit codes.
-Every home is judged against its own `config/startup-memory-budget` allowance, so never add homes together or treat one home's excess as another's.
-
-Act on each home by its reported `transport`:
-
-- `agent` - send the marked request with `bin/fm-send.sh fm-<id> "<request>"` so the live secondmate performs its own `/stow`, including the uncaptured knowledge that exists only in its session.
-  Ask it for the same completion receipt this skill defines, and read its reply from its status file or the document it points to, never from its chat.
-- `direct` - curate that local home's editable memory files yourself under the same retention plan, then re-run the cascade to confirm the after totals.
-  `data/captain-shared.md` stays a read-only counted input there, exactly as it is in any secondmate home.
-- `deferred` - a remote home with no live agent. Its memory is accounted read-only and cannot be curated from here, because there is no generic remote write path for a home's own memory files.
-  Report it as an unresolved exception and leave it to its next cascade.
-  Relaunching that secondmate is a separate decision owned by `secondmate-provisioning`, never something `/stow` does on its own.
-- `unavailable` - that home's own accounting did not complete. Report the concrete exception and continue; a slow or unreachable home never blocks this home's `/stow`.
-
-A newly discovered shared captain preference still routes to the primary's `data/captain-shared.md` under the existing primary-authoritative contract, whichever home found it.
-Offload proposals and the cold archive are per-home: file proposals only in the home whose pass produced them, and never cascade either to another home.
-
-Extend the completion receipt with one entry per secondmate alongside the primary's own, carrying that home's budget before and after, its per-file actions, its exceptions, and whether that home swept itself or was curated from here.
-Keep those entries in the same plain captain-facing language the rest of the receipt uses.
-The session is reset-safe only when every home is within its own budget with no unresolved exception.
+Manual independent invocation still performs the complete pass above, including its existing decay semantics.
 
 ## Scope exclusion: no skill storage by the pass
 
