@@ -20,8 +20,8 @@
 # banner to stderr expecting it to be read. Every path exits 0 and the only
 # channel is at most one {"followup_message": ...} object on stdout.
 # docs/turnend-guard.md:16 accepts one bounded follow-up as an equal alternative
-# to blocking, which is the same primitive OpenCode's session.idle and Pi's
-# agent_settled adapters use.
+# to blocking, which is the same primitive OpenCode's session.execution.*
+# turn-boundary events and Pi's agent_settled adapter use.
 #
 # Follow-up sources, in priority order, at most one per invocation:
 #   1. an actionable watcher wake from the park;
