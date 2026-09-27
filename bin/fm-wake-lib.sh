@@ -1343,7 +1343,7 @@ fm_firstmate_root_home() {
 # tests/fm-treehouse-pool-isolation-live-e2e.test.sh pins both halves against the
 # real provider.
 fm_treehouse_home_root() {  # <home>
-  local home=$1 abs base slug hash
+  local home=$1 abs base slug hash derived active_home root_home
   abs=$(CDPATH='' cd -- "$home" 2>/dev/null && pwd -P) || return 1
   base=${TREEHOUSE_ROOT:-${HOME:-}}
   case "$base" in
@@ -1369,7 +1369,18 @@ fm_treehouse_home_root() {  # <home>
   esac
   hash=$(printf '%s' "$abs" | git hash-object --stdin 2>/dev/null) || return 1
   [ -n "$hash" ] || return 1
-  printf '%s/.firstmate-worktrees/%s-%s\n' "$base" "$slug" "${hash:0:12}"
+  derived="$base/.firstmate-worktrees/$slug-${hash:0:12}"
+  if [ -n "${FM_HOME:-}" ]; then
+    active_home=$(CDPATH='' cd -- "$FM_HOME" 2>/dev/null && pwd -P) || return 1
+    root_home=$(fm_firstmate_root_home "$active_home") || return 1
+    case "$derived" in
+      "$active_home"|"$active_home"/*|"$root_home"|"$root_home"/*)
+        printf 'error: derived Treehouse root %s is inside the active Firstmate home or its root home; set TREEHOUSE_ROOT outside those homes\n' "$derived" >&2
+        return 1
+        ;;
+    esac
+  fi
+  printf '%s\n' "$derived"
 }
 
 # The one lock serializing Treehouse slot allocation and return for a project.

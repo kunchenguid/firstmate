@@ -91,6 +91,35 @@ test_root_falls_back_to_home_and_fails_closed() {
   pass "the worktree root falls back to Treehouse's own base and otherwise refuses"
 }
 
+test_root_rejects_bases_inside_active_or_root_home() {
+  local base root_home active_home err
+  base="$TMP_ROOT/reject"
+  root_home="$base/root-home"
+  active_home="$root_home/secondmate"
+  mkdir -p "$root_home/treehouse-base" "$active_home/treehouse-base"
+  printf '%s\n' \
+    'schema=fm-secondmate-parent.v1' \
+    'route=local' \
+    "parent_home=$root_home" > "$active_home/.fm-secondmate-parent"
+
+  err="$base/active.err"
+  if FM_HOME="$active_home" TREEHOUSE_ROOT="$active_home/treehouse-base" \
+    fm_treehouse_home_root "$active_home" >/dev/null 2>"$err"; then
+    fail "a derived root inside the active home was accepted"
+  fi
+  assert_contains "$(cat "$err")" "inside the active Firstmate home or its root home" \
+    "the active-home rejection did not explain the unsafe derived root"
+
+  err="$base/root.err"
+  if FM_HOME="$active_home" TREEHOUSE_ROOT="$root_home/treehouse-base" \
+    fm_treehouse_home_root "$active_home" >/dev/null 2>"$err"; then
+    fail "a derived root inside the root home was accepted"
+  fi
+  assert_contains "$(cat "$err")" "inside the active Firstmate home or its root home" \
+    "the root-home rejection did not explain the unsafe derived root"
+  pass "the derived worktree root stays outside the active and root Firstmate homes"
+}
+
 # Build a spawn fixture under <case>/ and echo "<home> <project> <pool> <fakebin>".
 make_spawn_case() {  # <name> <id>
   local name=$1 id=$2 case_dir home project pool fakebin
@@ -210,6 +239,7 @@ test_home_seed_return_resolves_from_the_path() {
 
 test_root_is_per_home_and_spelling_independent
 test_root_falls_back_to_home_and_fails_closed
+test_root_rejects_bases_inside_active_or_root_home
 test_spawn_allocates_from_its_own_home_root
 test_home_seed_leases_from_the_seeding_home_root
 test_home_seed_return_resolves_from_the_path
