@@ -1477,6 +1477,7 @@ test_spawn_secondmate_claude_grants_parent_inbox_dir() {
     mkdir -p "$w/home/config" "$w/home/state" "$w/home/data"
     printf 'claude\n' > "$w/home/config/secondmate-harness"
     printf '%s\n' "$mode" > "$w/home/config/claude-permission-mode"
+    fm_test_worker_accounts "$w/home"
     make_seeded_home "$sm" sm
 
     fakebin=$(make_launch_capturing_tmux "$w/tmux")
