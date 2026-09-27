@@ -219,6 +219,38 @@ test_matrix_claude_arrow_statusline_footer() {
   pass "matrix: claude's arrow statusline is footer furniture, not a composer holding text"
 }
 
+test_matrix_claude_wrapped_shell_glyph_row_is_composer_text() {
+  # Claude 2.x wraps long unsent input onto indented rows inside its rule pair.
+  # A wrapped row that happens to start with a shell glyph is still that
+  # composer's text: reading it as a dead shell turned an unsent away digest
+  # into `unknown`, which ends the submit retry after one Enter and blocks every
+  # later away-mode delivery.
+  local pair_top pair_bottom footer screen glyph out claude_idle
+  claude_idle=$(printf 'claude\tidle')
+  pair_top=$'transcript line\n────────────────────────'
+  pair_bottom=$'\n────────────────────────'
+  footer=$'\n  ⏵⏵ bypass permissions on (shift+tab to cycle)'
+  screen="$pair_top"$'\n❯'"$NBSP$pair_bottom$footer"
+  assert_screen "claude idle box stays empty" empty "$CAPS_STYLED" "$screen" '' "$claude_idle"
+  for glyph in '#' '$' '%' '>'; do
+    screen="$pair_top"$'\n❯ digest start wraps\n  '"$glyph"$' continues on the next row'"$pair_bottom$footer"
+    assert_screen "wrapped row starting with '$glyph' on herdr" pending \
+      "$CAPS_STYLED" "$screen" '' "$claude_idle"
+    assert_screen "wrapped row starting with '$glyph' on zellij" pending "$CAPS_STYLED_NOID" "$screen"
+    out=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$screen") \
+      || fail "the wrapped '$glyph' row must leave the composer content readable"
+    [ "$out" = "digest start wraps $glyph continues on the next row" ] \
+      || fail "the wrapped '$glyph' row must be extracted as composer text, got '$out'"
+  done
+  # The dead-shell safety this must keep: a shell prompt below the closing
+  # rule still refuses, with or without a wrapped glyph row above it.
+  screen="$pair_top"$'\n❯'"$NBSP$pair_bottom"$'\n$ '
+  assert_screen "shell prompt below the closing rule" unknown "$CAPS_STYLED" "$screen" '' "$claude_idle"
+  screen="$pair_top"$'\n❯ old draft\n  # wrapped'"$pair_bottom"$'\n$ ls -la'
+  assert_screen "dead shell below a wrapped draft" unknown "$CAPS_STYLED" "$screen" '' "$claude_idle"
+  pass "matrix: a wrapped claude row starting with a shell glyph is pending text, not a dead shell"
+}
+
 test_composer_footer_demotion_needs_a_proven_pair() {
   # The demotion is bounded in three directions, and each bound is a case
   # where a lower glyph row IS the live composer.
@@ -969,6 +1001,7 @@ test_idle_placeholder_case_mode_is_explicit
 test_real_text_is_pending
 test_matrix_claude_bare_nbsp_row
 test_matrix_claude_arrow_statusline_footer
+test_matrix_claude_wrapped_shell_glyph_row_is_composer_text
 test_composer_footer_demotion_needs_a_proven_pair
 test_composer_footer_zone_is_shape_independent
 test_composer_footer_zone_refuses_rather_than_allows

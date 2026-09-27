@@ -1485,7 +1485,15 @@ _fm_composer_select_cursorless() {
     FM_COMPOSER_SELECTED_KIND=
     return 1
   fi
-  if [ "$FM_COMPOSER_SCAN_SHELL_ROW" -gt "$generic" ]; then
+  # A lower shell-glyph row is a dead shell below the candidate, except inside
+  # the solid-rule pair that holds a bare composer (Claude 2.x): a wrapped
+  # input row there can start with `#`, `$`, `%` or `>` and is still that
+  # composer's text. A shell row below the closing rule keeps refusing.
+  if [ "$FM_COMPOSER_SCAN_SHELL_ROW" -gt "$generic" ] \
+     && ! { [ "$FM_COMPOSER_SELECTED_KIND" = bare ] \
+            && [ "$FM_COMPOSER_SCAN_PI_PAIR_FOUND" = 1 ] \
+            && [ "$FM_COMPOSER_SCAN_PI_OPEN" -lt "$generic" ] \
+            && [ "$FM_COMPOSER_SCAN_SHELL_ROW" -lt "$FM_COMPOSER_SCAN_PI_CLOSE" ]; }; then
     FM_COMPOSER_SELECTED_KIND=
     return 1
   fi

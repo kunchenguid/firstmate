@@ -914,6 +914,22 @@ fm_backend_composer_state() {  # <backend> <target> [expected-label] -> empty|pe
   esac
 }
 
+# fm_backend_composer_holds: whether the selected composer's content is exactly
+# <text>, ignoring line wrapping and U+2063 (Claude's composer read-back drops
+# that invisible mark). A caller that typed <text> itself uses this as proof
+# that pressing Enter submits only its own text.
+fm_backend_composer_holds() {  # <backend> <target> <text> [expected-label]
+  local cap held text=$3
+  fm_backend_source "$1" || return 1
+  cap=$(fm_backend_capture "$1" "$2" "$FM_COMPOSER_CAPTURE_LINES" "${4:-}" 2>/dev/null) || return 1
+  held=$(fm_composer_extract_selected_content styled=0 "$cap") || return 1
+  held=$(printf '%s' "$held" | tr -d '[:space:]')
+  held=${held//$'\xE2\x81\xA3'/}
+  text=$(printf '%s' "$text" | tr -d '[:space:]')
+  text=${text//$'\xE2\x81\xA3'/}
+  [ -n "$held" ] && [ "$held" = "$text" ]
+}
+
 # fm_backend_target_exists: cheap, READ-ONLY existence check - does the
 # recorded TARGET endpoint still exist on BACKEND? Never starts a server or
 # session: for herdr this deliberately queries the pane directly instead of
