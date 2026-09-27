@@ -626,11 +626,21 @@ test_refused_spawn_leaves_no_task_state() {
 }
 
 # Resolve the final prompt argument using the same shell argument splitting the
-# pane sees after the two leading export statements.
+# pane sees after the leading `prefix; ` segments (the TRACEPARENT scrub, the
+# compact-adviser floor, the AI-trailer hooks strip): peel them until the
+# `env -u ...` launch body, so the last argument is the doorbell no matter how
+# many prefixes ship.
 claude_launch_doorbell() {  # <launch command>
-  local command=${1#*; }
+  local command=$1
+  while :; do
+    case "$command" in
+    'env -u CURSOR_AGENT'*) break ;;
+    *'; '*) command=${command#*; } ;;
+    *) break ;;
+    esac
+  done
   (
-    eval "set -- ${command#*; }"
+    eval "set -- $command"
     printf '%s' "${!#}"
   )
 }

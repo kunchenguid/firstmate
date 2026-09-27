@@ -295,6 +295,8 @@ test_enabled_records_and_injects_identical_carrier_before_launch() {
   [ -n "$gl" ] && [ -n "$tl" ] && [ -n "$ll" ] || fail "launch log missing GOTMPDIR/TRACEPARENT/launch lines"
   [ "$tl" -gt "$gl" ] || fail "TRACEPARENT export must ride the GOTMPDIR pre-launch site (gotmp=$gl tp=$tl)"
   [ "$tl" -lt "$ll" ] || fail "TRACEPARENT export must be sent before the launch literal (tp=$tl launch=$ll)"
+  ! grep -q '^unset TRACEPARENT;' "$LAUNCH_LOG" \
+    || fail "enabled spawn must not scrub TRACEPARENT from the launch command"
   pass "enabled: one resolved carrier is recorded in meta and the identical TRACEPARENT is exported before launch"
 }
 
@@ -315,6 +317,44 @@ test_disabled_writes_and_injects_neither() {
   ! grep -q '^export TRACEPARENT=' "$LAUNCH_LOG" || fail "default-off spawn must not inject a TRACEPARENT export"
   grep -q '^export GOTMPDIR=' "$LAUNCH_LOG" || fail "the spawn should still run (GOTMPDIR is always injected)"
   pass "disabled: neither traceparent= in meta nor a TRACEPARENT export is produced"
+}
+
+# The off path must still defend the worker's trace boundary: a launching pane
+# or daemon can carry an ambient TRACEPARENT frozen at its own start, so with
+# the decision off the launch command scrubs it and no export is injected. The
+# replay through a real shell that itself holds the ambient value observes the
+# child environment directly: no TRACEPARENT reaches the worker even though the
+# launching pane carried one.
+test_disabled_scrubs_ambient_traceparent_from_launch() {
+  local rec out status meta ambient observed
+  rec=$(make_spawn_case tc-off-scrub)
+  read_case_record "$rec"
+  # No config/trace-context and no FM_TRACE_CONTEXT: default-off.
+
+  ambient='00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01'
+  out=$(TRACEPARENT="$ambient" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$CASE_ID" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "default-off spawn under an ambient TRACEPARENT should succeed"
+  assert_contains "$out" "spawned $CASE_ID" "default-off spawn under an ambient TRACEPARENT should report success"
+  meta="$HOME_DIR/state/$CASE_ID.meta"
+  ! grep -q '^traceparent=' "$meta" || fail "the off scrub must not record a carrier in meta"
+  ! grep -q '^export TRACEPARENT=' "$LAUNCH_LOG" || fail "the off scrub must not inject a TRACEPARENT export"
+  grep -q '^unset TRACEPARENT; .*claude' "$LAUNCH_LOG" \
+    || fail "the off decision must unset TRACEPARENT in the launch command"
+
+  # Execute the emitted pane commands through a real shell carrying the
+  # ambient value, and observe the child process environment.
+  cat > "$FAKEBIN_DIR/claude" <<'SH'
+#!/bin/sh
+printf 'TRACEPARENT=%s\n' "${TRACEPARENT-}"
+SH
+  chmod +x "$FAKEBIN_DIR/claude"
+  observed=$(env HOME="$HOME_DIR/user-home" PATH="$FAKEBIN_DIR:$PATH" \
+    TRACEPARENT="$ambient" bash "$LAUNCH_LOG") \
+    || fail "the emitted pane commands must still launch the harness probe"
+  [ "$observed" = "TRACEPARENT=" ] \
+    || fail "the child must receive no TRACEPARENT even though the launching environment carried one (got '$observed')"
+  pass "disabled: an inherited ambient TRACEPARENT is scrubbed from the launch, never forwarded to the worker"
 }
 
 test_failed_delivery_omits_metadata_and_still_launches() {
@@ -603,6 +643,7 @@ test_secondmate_carrier_and_snapshot_share_one_decision() {
 
 test_enabled_records_and_injects_identical_carrier_before_launch
 test_disabled_writes_and_injects_neither
+test_disabled_scrubs_ambient_traceparent_from_launch
 test_failed_delivery_omits_metadata_and_still_launches
 test_unsafe_delivery_refuses_to_append_launch
 test_failed_metadata_append_unsets_carrier_and_still_launches
