@@ -2419,8 +2419,11 @@ The evidence below was produced on 2026-09-05 against omp 18.1.11 (`~/.local/bin
 On 2026-09-05 with omp 18.1.11, `ps -o comm=` reported the bare `omp` process name, from both its `!` bash path and the model's bash tool.
 On 2026-09-27 with omp 18.3.1, the installed `~/.bun/bin/omp` was a `/usr/bin/env bun` script; its live process reported `comm=bun` and `args=bun ~/.bun/bin/omp` with the home path expanded.
 An OMP 18.3.1 resume retained the process PID but changed its command to `bun <home>/node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js --resume <session-id>`.
-The native name and both immediate Bun script arguments identify OMP in `bin/fm-harness.sh` and `bin/fm-session-lock-lib.sh` through one shared matcher; `ompd`, `comp`, lookalike scripts, and later arguments mentioning either entrypoint are not accepted.
+The native name and both immediate Bun script arguments identify OMP in `bin/fm-harness.sh`, `bin/fm-session-lock-lib.sh`, and process liveness through one shared matcher; `ompd`, `comp`, lookalike scripts, and later arguments mentioning either entrypoint are not accepted.
 `tests/fm-omp-harness.test.sh` checks that a live simulated Bun session owns its lock while a foreign caller cannot take it.
+`tests/fm-tmux-agent-liveness.test.sh` verifies Bun launch and resume attribution with real tmux processes; `FM_HARNESS_LIVENESS_DRIFT=1 tests/fm-harness-liveness-drift-live-e2e.test.sh` refreshes liveness and ancestry evidence against each installed harness, including OMP.
+On 2026-09-27, `FM_HARNESS_LIVENESS_DRIFT=1 bash tests/fm-harness-liveness-drift-live-e2e.test.sh` reported Claude Code 2.1.238, Codex CLI 0.156.1, and OMP 18.3.1 alive, each identified at comm strength; OMP's live pane reported `title='bun' foreground=[bun]` and ancestry `[comm omp]`.
+That run explicitly skipped opencode, pi, pi-signed, grok, kimi, cursor, and muse because they were not installed, and reported `checked 3 installed harness(es)`.
 The 18.1.11 inspection found no OMP-published identity marker; `FM_OMP_HARNESS=omp` remains Firstmate's launch marker rather than independent ownership proof.
 
 ### Composer

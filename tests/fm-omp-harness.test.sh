@@ -126,6 +126,10 @@ test_lock_identity_and_liveness_classification() {
   [ "$(fm_agent_process_classify_name /opt/omp/bin/omp)" = agent ] || fail "tmux liveness must classify an omp path as an agent"
   [ "$(fm_agent_process_classify_name ompd)" != agent ] || fail "tmux liveness must not classify ompd as an agent"
   [ "$(fm_agent_process_classify_name comp)" != agent ] || fail "tmux liveness must not classify comp as an agent"
+  [ "$(fm_agent_process_classify bun bun 'bun /Users/example/.bun/bin/omp')" = agent ] || fail "liveness must classify Bun executing OMP as an agent"
+  [ "$(fm_agent_process_classify bun bun 'bun /Users/example/node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js --resume id')" = agent ] || fail "liveness must classify Bun resuming OMP as an agent"
+  [ "$(fm_agent_process_classify bun bun 'bun -e /Users/example/.bun/bin/omp')" != agent ] || fail "liveness must reject a later OMP argument"
+  [ "$(fm_agent_process_classify bun bun 'bun /Users/example/.bun/bin/omp-other')" != agent ] || fail "liveness must reject an OMP lookalike"
   pass "session lock and tmux liveness: omp is anchored, decoys stay out"
 }
 

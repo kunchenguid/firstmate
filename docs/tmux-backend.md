@@ -62,7 +62,7 @@ The same scoping covers multi-process launchers without a special case, so the P
 Direct executable identities `pi`, `pi-signed`, and `Pi` remain accepted exactly, and similar or prefixed process names are not accepted through those exact Pi-family entries.
 Muse is likewise anchored to the exact `muse` launcher identity or the installed `muse-bin-<version>` prefix, so unrelated names such as `musescore` and `amuse` remain ambiguous.
 omp is anchored to the exact native `omp` identity, so `ompd` and `comp` remain ambiguous.
-Bun-script OMP reports `comm=bun`, which this liveness classifier does not identify and therefore reads as `ambiguous` until its process vocabulary accepts the OMP entrypoint.
+Bun-script OMP is attributed only when its foreground arguments show Bun directly executing the exact launch or resume entrypoint; eval commands and lookalike paths remain ambiguous.
 AGY and Devin are anchored to the exact `agy` and `devin` identities for the same reason, so unrelated names containing either fragment remain ambiguous.
 Cursor is identified from its exact `cursor-agent` identity or versioned install tree in the foreground process path or structured argv[0]; a bare `node` or unrelated `agent` remains ambiguous.
 
