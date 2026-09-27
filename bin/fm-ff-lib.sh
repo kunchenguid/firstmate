@@ -444,15 +444,15 @@ ff_target_jj() {
   fi
   base_rev=$(jj -R "$dir" log -r "$base" --no-graph -T 'commit_id' 2>/dev/null) || true
 
+  if [ -n "$(jj -R "$dir" log -r '@' --no-graph -T 'description' 2>/dev/null)" ]; then
+    echo "$label: skipped: described working copy commit"
+    return 0
+  fi
+
   # A jj working copy with any content change is a non-empty commit; unlanded
   # work is exactly that, so skip it rather than squash or discard it.
   if [ "$(jj -R "$dir" log -r '@' --no-graph -T 'empty' 2>/dev/null)" != true ]; then
     echo "$label: skipped: dirty working tree"
-    return 0
-  fi
-
-  if [ -n "$(jj -R "$dir" log -r '@' --no-graph -T 'description' 2>/dev/null)" ]; then
-    echo "$label: skipped: described working copy commit"
     return 0
   fi
 
@@ -462,7 +462,7 @@ ff_target_jj() {
     return 0
   fi
 
-  if [ -n "$(jj -R "$dir" log -r "parents(@) & ~::$base" --no-graph -T 'commit_id' 2>/dev/null)" ]; then
+  if [ -n "$(jj -R "$dir" log -r "::@ & ~::$base" --no-graph -T 'if(empty, "", "e") ++ if(description, "d", "")' 2>/dev/null)" ]; then
     echo "$label: skipped: working copy parked outside $base"
     return 0
   fi
