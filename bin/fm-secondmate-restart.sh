@@ -39,7 +39,10 @@
 # A mate whose persist answer did not arrive or whose runtime cannot prove a
 # restart gets the ordinary re-read nudge and is reported as a nudge, never as a
 # clean reload. Once a relaunch is attempted, any failed or ambiguous result is
-# reported as unknown rather than attributing it to either incarnation.
+# reported as unknown rather than attributing it to either incarnation. The one
+# exception retried first is a relaunch whose old agent never received its exit
+# command: that is a transport miss the control plane rolled back, so the whole
+# relaunch is attempted once more before it is reported.
 #
 # Placement changes the transport and nothing else. A local mate is restarted
 # with bin/fm-control.sh <id> relaunch, which republishes this home's own
@@ -62,6 +65,9 @@
 # Environment knobs:
 #   FM_SECONDMATE_PERSIST_WAIT  seconds to wait for one mate's persist answer (900)
 #   FM_SECONDMATE_PERSIST_POLL  seconds between checks of that answer (5)
+#   FM_SECONDMATE_RESTART_RETRY_PAUSE  seconds before the one second relaunch
+#                               attempt after the old agent's exit command was
+#                               refused unsent (5)
 #
 # Exit status: 0 every named mate restarted; 3 at least one was nudged or left
 # unreached and every mate was still accounted for; 1 the input itself is
@@ -72,7 +78,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
 usage() {
-  sed -n '2,65{s/^# \{0,1\}//;p;}' "$0"
+  sed -n '2,71{s/^# \{0,1\}//;p;}' "$0"
 }
 
 case "${1:-}" in
@@ -97,8 +103,10 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 PERSIST_WAIT=${FM_SECONDMATE_PERSIST_WAIT:-900}
 PERSIST_POLL=${FM_SECONDMATE_PERSIST_POLL:-5}
+RESTART_RETRY_PAUSE=${FM_SECONDMATE_RESTART_RETRY_PAUSE:-5}
 case "$PERSIST_WAIT" in ''|*[!0-9]*) echo "error: FM_SECONDMATE_PERSIST_WAIT must be a non-negative integer: $PERSIST_WAIT" >&2; exit 2 ;; esac
 case "$PERSIST_POLL" in ''|*[!0-9]*|0) echo "error: FM_SECONDMATE_PERSIST_POLL must be a positive integer: $PERSIST_POLL" >&2; exit 2 ;; esac
+case "$RESTART_RETRY_PAUSE" in ''|*[!0-9]*) echo "error: FM_SECONDMATE_RESTART_RETRY_PAUSE must be a non-negative integer: $RESTART_RETRY_PAUSE" >&2; exit 2 ;; esac
 
 IDS=()
 for arg in "$@"; do
@@ -162,9 +170,10 @@ report_unreached() {  # <id> <reason>
   printf 'unreached: %s: %s\n' "$1" "$2"
 }
 
-restart_mate() {  # <array-index>
-  local i=$1 id restart_out restart_rc restart_reason ran_on
-  id=${IDS[$i]}
+# One relaunch through the mate's placement transport. Sets restart_out and
+# restart_rc in the caller.
+relaunch_once() {  # <array-index>
+  local i=$1 id=${IDS[$1]}
   if [ "${PLACEMENT[i]}" = remote ]; then
     restart_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
       "$SCRIPT_DIR/fm-remote-secondmate-relaunch.sh" \
@@ -174,6 +183,21 @@ restart_mate() {  # <array-index>
     restart_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
       "$SCRIPT_DIR/fm-control.sh" "$id" relaunch 2>&1)
     restart_rc=$?
+  fi
+}
+
+restart_mate() {  # <array-index>
+  local i=$1 id restart_out restart_rc restart_reason ran_on retried=
+  id=${IDS[$i]}
+  relaunch_once "$i"
+  # A refused exit command is a transport miss, not a verdict on the mate:
+  # the control plane proved nothing was submitted, rolled its transaction
+  # back, and re-verifies everything on a second attempt.
+  if [ "$restart_rc" -ne 0 ] \
+     && printf '%s\n' "$restart_out" | grep -q 'the exit command could not be sent to task '; then
+    sleep "$RESTART_RETRY_PAUSE"
+    relaunch_once "$i"
+    retried=" after a second attempt"
   fi
   if [ "$restart_rc" -eq 0 ]; then
     ran_on=$(printf '%s\n' "$restart_out" | sed -n 's/^relaunched .* harness=\([^ ]*\).*/\1/p' | tail -1)
@@ -188,7 +212,7 @@ restart_mate() {  # <array-index>
 
   restart_reason=$(first_reported_line "$restart_out")
   [ -n "$restart_reason" ] || restart_reason="the restart failed without a reported reason"
-  report_unreached "$id" "the restart outcome is unknown: $restart_reason"
+  report_unreached "$id" "the restart outcome is unknown$retried: $restart_reason"
 }
 
 launch_restart() {  # <array-index>
