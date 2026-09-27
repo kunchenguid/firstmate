@@ -176,13 +176,13 @@ test_incoming_signal() { # comment|review|inline
   registered_checks "$home" >/dev/null
   jq -e '.records[0].pending | length == 1' "$home/data/delivery/contributions.json" >/dev/null \
     || fail "new maintainer $type must survive as a pending outward signal"
-  [ -s "$home/state/.wake-queue" ] || fail "new maintainer $type must enqueue an ordinary durable wake"
-  count=$(wc -l < "$home/state/.wake-queue")
-  wake_count=$(awk 'END { print NR }' "$home/state/.wake-queue")
+  [ -s "$home/state/wake/queue" ] || fail "new maintainer $type must enqueue an ordinary durable wake"
+  count=$(wc -l < "$home/state/wake/queue")
+  wake_count=$(awk 'END { print NR }' "$home/state/wake/queue")
   [ "$wake_count" = 1 ] || fail "new maintainer $type must enqueue exactly one ordinary durable wake"
   registered_checks "$home" >/dev/null
-  [ "$(wc -l < "$home/state/.wake-queue")" = "$count" ] || fail 're-poll duplicated an already enqueued event'
-  [ "$(awk 'END { print NR }' "$home/state/.wake-queue")" = "$wake_count" ] || fail 're-poll duplicated an already enqueued event'
+  [ "$(wc -l < "$home/state/wake/queue")" = "$count" ] || fail 're-poll duplicated an already enqueued event'
+  [ "$(awk 'END { print NR }' "$home/state/wake/queue")" = "$wake_count" ] || fail 're-poll duplicated an already enqueued event'
   out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" pending)
   printf '%s' "$out" | jq -e 'length == 1 and .[0].author == "maintainer"' >/dev/null \
     || fail 'supervisor cannot retrieve captured signal'
@@ -203,11 +203,11 @@ test_ready_issue_wake() {
     || ! jq -e 'any(.records[].pending[]; .type == "ready-for-pr")' "$home/data/filed/contributions.json" >/dev/null; then
     fail 'ready-for-pr on an explicitly filed issue must become a planning wake'
   fi
-  [ -s "$home/state/.wake-queue" ] || fail 'ready-for-pr signal never reached the durable wake path'
-  count=$(awk 'END { print NR }' "$home/state/.wake-queue")
+  [ -s "$home/state/wake/queue" ] || fail 'ready-for-pr signal never reached the durable wake path'
+  count=$(awk 'END { print NR }' "$home/state/wake/queue")
   [ "$count" = 1 ] || fail 'ready-for-pr signal must enqueue exactly one durable wake'
   registered_checks "$home" >/dev/null
-  [ "$(awk 'END { print NR }' "$home/state/.wake-queue")" = "$count" ] || fail 're-poll duplicated an already enqueued ready-for-pr wake'
+  [ "$(awk 'END { print NR }' "$home/state/wake/queue")" = "$count" ] || fail 're-poll duplicated an already enqueued ready-for-pr wake'
   pass 'ready-for-pr on a filed issue becomes a planning wake'
 }
 
@@ -424,7 +424,7 @@ test_shared_contribution_signal_wakes_once() {
     body:"Please clarify the contract",html_url:"https://github.com/o/r/pull/8#issuecomment-12",
     updated_at:"2026-09-16T08:01:00Z",submitted_at:"2026-09-16T08:01:00Z"}]' > "$home/forge/comments.json"
   registered_checks "$home" >/dev/null
-  wakes=$(awk -F '\t' 'NF >= 5 && $3 == "check" { count++ } END { print count + 0 }' "$home/state/.wake-queue")
+  wakes=$(awk -F '\t' 'NF >= 5 && $3 == "check" { count++ } END { print count + 0 }' "$home/state/wake/queue")
   [ "$wakes" = 1 ] || fail "one shared contribution signal created $wakes durable wakes"
   pending=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" pending) || fail 'shared contribution pending view failed'
   printf '%s' "$pending" | jq -e 'length == 2 and ([.[].task] | sort) == ["delivery","duplicate"]' >/dev/null \
@@ -456,10 +456,10 @@ test_watcher_keeps_diagnostics_separate_from_contribution_wakes() {
   with_home "$home" env FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 \
     "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 15 > "$out" 2> "$home/watcher-diagnostics.err" || rc=$?
   [ "$rc" -eq 0 ] || fail "watcher did not surface contribution diagnostics: $(cat "$home/watcher-diagnostics.err")"
-  diagnostic=$(awk -F '\t' -v key="$home/state/contributions.check.sh" '$3 == "check" && $4 == key { print $5 }' "$home/state/.wake-queue")
+  diagnostic=$(awk -F '\t' -v key="$home/state/contributions.check.sh" '$3 == "check" && $4 == key { print $5 }' "$home/state/wake/queue")
   [ "$diagnostic" = "check: $home/state/contributions.check.sh: contributions: 1 unreadable durable record(s)" ] \
     || fail "watcher wrapped a durable contribution wake into diagnostics: $diagnostic"
-  wakes=$(awk -F '\t' 'NF >= 5 && $3 == "check" { count++ } END { print count + 0 }' "$home/state/.wake-queue")
+  wakes=$(awk -F '\t' 'NF >= 5 && $3 == "check" { count++ } END { print count + 0 }' "$home/state/wake/queue")
   [ "$wakes" = 2 ] || fail "signal plus observer failure created $wakes durable wakes"
   pass 'watcher keeps observer diagnostics separate from contribution wakes'
 }
@@ -502,13 +502,13 @@ test_watcher_surfaces_new_contribution_once() {
   [ "$rc" -eq 0 ] || fail "watcher did not surface the new contribution signal: $(cat "$home/watcher.err")"
   grep -E '^check: contributions delivery [0-9a-f]{64}$' "$out" >/dev/null \
     || fail "watcher did not surface the durable contribution wake: $(cat "$out")"
-  rows=$(awk -F '\t' 'NF >= 5 && $3 == "check" { count++ } END { print count + 0 }' "$home/state/.wake-queue")
+  rows=$(awk -F '\t' 'NF >= 5 && $3 == "check" { count++ } END { print count + 0 }' "$home/state/wake/queue")
   [ "$rows" = 1 ] || fail "one contribution signal created $rows durable check wakes"
   rc=0
   with_home "$home" env FM_WATCH_HANDLING_SUCCESSOR=1 FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 \
     "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 2 > "$home/watcher-repeat.out" 2> "$home/watcher-repeat.err" || rc=$?
   [ "$rc" -eq 124 ] || fail "an already durable contribution signal re-rang the watcher: $(cat "$home/watcher-repeat.out")"
-  rows=$(awk -F '\t' 'NF >= 5 && $3 == "check" { count++ } END { print count + 0 }' "$home/state/.wake-queue")
+  rows=$(awk -F '\t' 'NF >= 5 && $3 == "check" { count++ } END { print count + 0 }' "$home/state/wake/queue")
   [ "$rows" = 1 ] || fail "repeat contribution observation created $rows durable check wakes"
   pass 'watcher surfaces one newly durable contribution signal without re-ringing it'
 }
@@ -597,7 +597,7 @@ test_budget_exhaustion_keeps_prior_record() { # exhaust|hang
     || fail "budget exhaustion ($mode) never started the observation"
   cmp -s "$home/prior.json" "$home/data/delivery/contributions.json" \
     || fail "budget exhaustion ($mode) rewrote the prior record: $(cat "$home/data/delivery/contributions.json")"
-  [ ! -s "$home/state/.wake-queue" ] || fail "budget exhaustion ($mode) enqueued a wake"
+  [ ! -s "$home/state/wake/queue" ] || fail "budget exhaustion ($mode) enqueued a wake"
   pass "budget exhausted mid-observation ($mode) keeps the prior record and stays silent"
 }
 
@@ -669,7 +669,7 @@ test_terminal_contribution_settles() {
     [ ! -s "$home/forge/calls" ] || fail "a $mode contribution was re-read: $(cat "$home/forge/calls")"
     cmp -s "$home/prior.json" "$home/data/delivery/contributions.json" \
       || fail "a $mode contribution record changed after it settled: $(cat "$home/data/delivery/contributions.json")"
-    [ ! -s "$home/state/.wake-queue" ] || fail "a $mode contribution enqueued a wake"
+    [ ! -s "$home/state/wake/queue" ] || fail "a $mode contribution enqueued a wake"
     NOW=$later bearings "$home" | jq -e '.contributions.checked == 1 and .contributions.counts.nobody == 1
       and .contributions.complete == true' >/dev/null \
       || fail "a settled $mode contribution expired into fleet work"
@@ -709,7 +709,7 @@ test_late_owner_inherits_terminal_observation() {
     and $late.checked_at == $terminal.checked_at and $late.observation == $terminal.observation' \
     "$home/data/duplicate/contributions.json" >/dev/null \
     || fail 'a late owner did not inherit the settled terminal observation'
-  [ ! -s "$home/state/.wake-queue" ] || fail 'a late owner terminal record enqueued a wake'
+  [ ! -s "$home/state/wake/queue" ] || fail 'a late owner terminal record enqueued a wake'
   pass 'a late owner inherits a terminal observation without a forge read or wake'
 }
 
@@ -785,7 +785,7 @@ test_slow_read_deadline_kill_is_budget_refusal() {
   [ -z "$out" ] || fail "a deadline-killed slow read printed an unavailable wake: $out"
   cmp -s "$home/prior.json" "$home/data/delivery/contributions.json" \
     || fail 'a deadline-killed slow read rewrote the prior record'
-  [ ! -s "$home/state/.wake-queue" ] || fail 'a deadline-killed slow read enqueued a wake'
+  [ ! -s "$home/state/wake/queue" ] || fail 'a deadline-killed slow read enqueued a wake'
   pass 'a read killed at the five-second bound is budget refusal and stays silent'
 }
 
@@ -821,7 +821,7 @@ test_unmeasured_url_does_not_starve_the_tail() {
       "$home/data/$task/contributions.json" >/dev/null \
       || fail "successive polls starved $task behind the slow head"
   done
-  [ ! -s "$home/state/.wake-queue" ] || fail 'routine slow reads enqueued a wake'
+  [ ! -s "$home/state/wake/queue" ] || fail 'routine slow reads enqueued a wake'
   home=$(new_home sustained-slow-refresh)
   forge_home "$home"
   wrap_forge "$home"
@@ -866,7 +866,7 @@ test_unmeasured_url_does_not_starve_the_tail() {
       done
     fi
   done
-  [ ! -s "$home/state/.wake-queue" ] || fail 'slow successful reads enqueued a wake'
+  [ ! -s "$home/state/wake/queue" ] || fail 'slow successful reads enqueued a wake'
   pass 'rotation preserves timed-out records and refreshes every slow PR on successive cycles'
 }
 
@@ -884,7 +884,7 @@ test_budget_is_cut_down_to_the_watcher_check_bound() {
   [ -z "$out" ] || fail "a check-bound-capped poll printed a wake: $out"
   cmp -s "$home/prior.json" "$home/data/delivery/contributions.json" \
     || fail 'a poll observed with the full budget despite a six-second check bound'
-  [ ! -s "$home/state/.wake-queue" ] || fail 'a check-bound-capped poll enqueued a wake'
+  [ ! -s "$home/state/wake/queue" ] || fail 'a check-bound-capped poll enqueued a wake'
   pass 'the effective budget is cut down to the watcher per-check bound with margin'
 }
 

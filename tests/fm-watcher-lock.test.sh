@@ -1492,7 +1492,7 @@ test_stale_watch_reclaim_publishes_before_clear() {
     . "$1"
     fm_recovery_marker_read "$2" || exit 1
     printf "%s\n" "$FM_RECOVERY_MARKER_TOKEN"
-  ' _ "$LIB" "$state/.watcher-down") \
+  ' _ "$LIB" "$state/wake/watcher-down") \
     || fail "stale watcher reclaim interruption left no durable recovery evidence"
   case "$token" in
     pending:downtime:*) ;;

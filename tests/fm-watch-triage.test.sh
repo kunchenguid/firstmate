@@ -874,7 +874,7 @@ test_provably_working_signal_absorbed() {
     reap "$pid"; fail "watcher exited for a working: signal whose crew is provably working (should absorb): $(cat "$out")"
   fi
   [ ! -s "$out" ] || fail "provably-working signal printed a wake reason: $(cat "$out")"
-  [ ! -s "$state/.wake-queue" ] || fail "provably-working signal enqueued a durable wake record"
+  [ ! -s "$state/wake/queue" ] || fail "provably-working signal enqueued a durable wake record"
   [ -s "$state/.seen-task_status" ] || fail "provably-working signal did not advance its .seen-* suppressor"
   [ -e "$state/.last-watcher-beat" ] || fail "watcher beacon was not touched while absorbing"
   reap "$pid"
@@ -894,7 +894,7 @@ test_turn_ended_provably_working_absorbed() {
     reap "$pid"; fail "watcher exited for a turn-end whose crew is provably working (should absorb): $(cat "$out")"
   fi
   [ ! -s "$out" ] || fail "provably-working turn-end printed a wake reason: $(cat "$out")"
-  [ ! -s "$state/.wake-queue" ] || fail "provably-working turn-end enqueued a durable wake record"
+  [ ! -s "$state/wake/queue" ] || fail "provably-working turn-end enqueued a durable wake record"
   reap "$pid"
   pass "a bare turn-end whose crew is provably working (busy pane) is absorbed"
 }
@@ -983,7 +983,7 @@ test_turn_ended_churning_pane_absorbed() {
   wait_for_absorbed "$state" "$pid" "absorbed benign signal:" \
     || { reap "$pid"; fail "a bare turn-end from a churning pane was not absorbed: $(cat "$out")"; }
   [ ! -s "$out" ] || fail "an absorbed churning-pane turn-end printed a wake reason: $(cat "$out")"
-  [ ! -s "$state/.wake-queue" ] || fail "an absorbed churning-pane turn-end enqueued a durable wake record"
+  [ ! -s "$state/wake/queue" ] || fail "an absorbed churning-pane turn-end enqueued a durable wake record"
   [ -s "$state/.churn-since-$key" ] \
     || { reap "$pid"; fail "an absorbed churning-pane turn-end did not open a bounded deferral window"; }
   reap "$pid"
@@ -1059,7 +1059,7 @@ test_turn_ended_churn_resets_wedge_state_before_stale_poll() {
     || { reap "$pid"; fail "a churning turn-end was not absorbed before the stale-path capture failed: $(cat "$out")"; }
   [ ! -e "$state/.wedge-escalations-$key" ] \
     || { reap "$pid"; fail "churn retained the prior quiet interval's wedge-escalation count"; }
-  [ ! -s "$state/.wake-queue" ] \
+  [ ! -s "$state/wake/queue" ] \
     || { reap "$pid"; fail "the absorbed churn fixture queued an unexpected wake"; }
   reap "$pid"
   unset FM_FAKE_CREW_STATE
@@ -1097,7 +1097,7 @@ test_turn_ended_churn_existing_marker_absorbed() {
   wait_for_absorbed "$state" "$pid" "absorbed benign signal:" \
     || { reap "$pid"; fail "a churning turn-end inside an open deferral window was not absorbed: $(cat "$out")"; }
   [ ! -s "$out" ] || fail "an absorbed marked-churn turn-end printed a wake reason: $(cat "$out")"
-  [ ! -s "$state/.wake-queue" ] || fail "an absorbed marked-churn turn-end enqueued a durable wake record"
+  [ ! -s "$state/wake/queue" ] || fail "an absorbed marked-churn turn-end enqueued a durable wake record"
   [ "$(cat "$state/.churn-since-$key" 2>/dev/null || true)" = "$marker_since" ] \
     || { reap "$pid"; fail "an already-marked churn re-opened or lost the existing deferral window"; }
   reap "$pid"
@@ -1311,7 +1311,7 @@ test_turn_ended_mixed_positive_evidence_batch_absorbed() {
   wait_for_absorbed "$state" "$pid" "absorbed benign signal:" \
     || { reap "$pid"; fail "a mixed authoritative-and-churn batch was not absorbed: $(cat "$out")"; }
   [ ! -s "$out" ] || fail "an absorbed mixed-evidence batch printed a wake reason: $(cat "$out")"
-  [ ! -s "$state/.wake-queue" ] || fail "an absorbed mixed-evidence batch enqueued a durable wake record"
+  [ ! -s "$state/wake/queue" ] || fail "an absorbed mixed-evidence batch enqueued a durable wake record"
   [ ! -e "$state/.churn-since-$first_key" ] \
     || fail "an authoritatively working task opened a pane-churn deadline"
   [ -s "$state/.churn-since-$second_key" ] \
@@ -1699,14 +1699,14 @@ test_secondmate_routine_progress_absorbed_then_note_surfaced() {
     reap "$pid"; fail "watcher surfaced a busy secondmate's routine working: progress: $(cat "$out")"
   fi
   [ ! -s "$out" ] || { reap "$pid"; fail "routine secondmate progress printed a wake reason: $(cat "$out")"; }
-  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "routine secondmate progress enqueued a durable wake"; }
+  [ ! -s "$state/wake/queue" ] || { reap "$pid"; fail "routine secondmate progress enqueued a durable wake"; }
   [ -s "$state/.seen-mate_status" ] || { reap "$pid"; fail "absorbed secondmate progress did not advance its .seen-* suppressor"; }
   # ...while a note: from the SAME still-busy mate surfaces on the next append.
   printf 'note: routed reply for the parent\n' >> "$state/mate.status"
   wait_for_exit "$pid" 100 || fail "watcher absorbed a busy secondmate's note after absorbing its routine progress"
   grep -F "signal: $state/mate.status" "$out" >/dev/null \
     || fail "watcher did not print the surfaced secondmate note"
-  grep -F "$state/mate.status" "$state/.wake-queue" >/dev/null \
+  grep -F "$state/mate.status" "$state/wake/queue" >/dev/null \
     || fail "surfaced secondmate note was not durably queued"
   pass "a busy secondmate's routine working: is absorbed while its later note: still surfaces"
 }
@@ -1726,7 +1726,7 @@ test_secondmate_buried_block_wakes_despite_busy_agent() {
     wait_for_exit "$pid" 100 || fail "busy secondmate's blocker did not wake after '$suffix'"
     grep -F "signal: $state/mate.status" "$out" >/dev/null \
       || fail "busy secondmate's blocker was not surfaced"
-    grep -F "$state/mate.status" "$state/.wake-queue" >/dev/null \
+    grep -F "$state/mate.status" "$state/wake/queue" >/dev/null \
       || fail "busy secondmate's blocker was not durably queued"
   done
   pass "a secondmate blocker wakes despite busy evidence and later unrelated appends"
@@ -1753,7 +1753,7 @@ test_self_announced_close_does_not_rewake_but_next_note_does() {
     reap "$pid"; fail "the home's own bookkeeping close re-woke its own watcher: $(cat "$out")"
   fi
   [ ! -s "$out" ] || { reap "$pid"; fail "self-announced close printed a wake reason: $(cat "$out")"; }
-  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "self-announced close enqueued a durable wake"; }
+  [ ! -s "$state/wake/queue" ] || { reap "$pid"; fail "self-announced close enqueued a durable wake"; }
   # A later, different note on the SAME task still wakes: dedup is keyed on the
   # exact announced bytes, never on task identity.
   printf 'needs-decision [key=k2]: a genuinely new decision\n' >> "$status_file"
@@ -1789,7 +1789,7 @@ test_self_announced_close_after_open_decisions_fold_does_not_rewake() {
     reap "$pid"; fail "a close after OPEN DECISIONS fold re-woke its own watcher: $(cat "$out")"
   fi
   [ ! -s "$out" ] || { reap "$pid"; fail "folded close printed a wake reason: $(cat "$out")"; }
-  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "folded close enqueued a durable wake"; }
+  [ ! -s "$state/wake/queue" ] || { reap "$pid"; fail "folded close enqueued a durable wake"; }
   printf 'blocked: worker still needs help\n' >> "$status_file"
   wait_for_exit "$pid" 100 || fail "a later worker line after a folded close was swallowed"
   grep -F "signal: $status_file" "$out" >/dev/null \
@@ -1857,7 +1857,7 @@ test_separate_self_announced_answers_after_fold_wake_once() {
     reap "$pid"; fail "the owned answers re-woke the watcher: $(cat "$out")"
   fi
   [ ! -s "$out" ] || { reap "$pid"; fail "the owned answers printed a wake reason: $(cat "$out")"; }
-  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "the owned answers enqueued another durable wake"; }
+  [ ! -s "$state/wake/queue" ] || { reap "$pid"; fail "the owned answers enqueued another durable wake"; }
   printf 'blocked: need staging credentials\n' >> "$status_file"
   wait_for_exit "$pid" 100 || fail "a later worker line after two owned answers was swallowed"
   grep -F "signal: $status_file" "$out" >/dev/null \
@@ -1964,8 +1964,8 @@ test_needs_decision_signal_payload_marked_for_branch_exclusion() {
   watch_bg "$state" "$fakebin" "$out"
   pid=$!
   wait_for_exit "$pid" 100 || fail "watcher did not exit for an actionable needs-decision signal"
-  grep -F "$(printf 'signal\ttask.status\tneeds-decision:')" "$state/.wake-queue" >/dev/null \
-    || fail "a needs-decision signal row was not payload-marked for branch exclusion: $(cat "$state/.wake-queue")"
+  grep -F "$(printf 'signal\ttask.status\tneeds-decision:')" "$state/wake/queue" >/dev/null \
+    || fail "a needs-decision signal row was not payload-marked for branch exclusion: $(cat "$state/wake/queue")"
   pass "a needs-decision signal row's queued payload is marked needs-decision: for branch exclusion"
 }
 
@@ -1984,8 +1984,8 @@ test_needs_decision_reconciliation_required_still_marked() {
   watch_bg "$state" "$fakebin" "$out"
   pid=$!
   wait_for_exit "$pid" 100 || fail "watcher did not exit for a rejected-reserved-key needs-decision"
-  grep -F "$(printf 'signal\ttask.status\tneeds-decision:')" "$state/.wake-queue" >/dev/null \
-    || fail "a reconciliation-required needs-decision row was not payload-marked for branch exclusion: $(cat "$state/.wake-queue")"
+  grep -F "$(printf 'signal\ttask.status\tneeds-decision:')" "$state/wake/queue" >/dev/null \
+    || fail "a reconciliation-required needs-decision row was not payload-marked for branch exclusion: $(cat "$state/wake/queue")"
   pass "a reconciliation-required needs-decision row's queued payload is still marked needs-decision:"
 }
 
@@ -2004,8 +2004,8 @@ test_captain_held_signal_payload_marked_for_branch_exclusion() {
   wait_for_exit "$pid" 100 || fail "watcher absorbed a captain-held signal while the crew was still working"
   grep -F "signal: $status_file" "$out" >/dev/null \
     || fail "a captain-held signal changed its wake reason: $(cat "$out")"
-  grep -F "$(printf 'signal\ttask.status\tneeds-decision:')" "$state/.wake-queue" >/dev/null \
-    || fail "a captain-held signal was not payload-marked for branch exclusion: $(cat "$state/.wake-queue")"
+  grep -F "$(printf 'signal\ttask.status\tneeds-decision:')" "$state/wake/queue" >/dev/null \
+    || fail "a captain-held signal was not payload-marked for branch exclusion: $(cat "$state/wake/queue")"
   pass "a captain-held signal stays actionable while the crew is still working"
 }
 
@@ -2020,8 +2020,8 @@ test_pending_reply_escalation_signal_payload_marked_for_branch_exclusion() {
   watch_bg "$state" "$fakebin" "$out"
   pid=$!
   wait_for_exit "$pid" 100 || fail "watcher did not exit for a pending-reply escalation"
-  grep -F "$(printf 'signal\ttask.status\tneeds-decision:')" "$state/.wake-queue" >/dev/null \
-    || fail "a pending-reply escalation was not payload-marked for branch exclusion: $(cat "$state/.wake-queue")"
+  grep -F "$(printf 'signal\ttask.status\tneeds-decision:')" "$state/wake/queue" >/dev/null \
+    || fail "a pending-reply escalation was not payload-marked for branch exclusion: $(cat "$state/wake/queue")"
   pass "a pending-reply second-mate escalation is marked for main-only routing"
 }
 
@@ -2034,9 +2034,9 @@ test_ordinary_blocked_signal_payload_remains_branch_eligible() {
   watch_bg "$state" "$fakebin" "$out"
   pid=$!
   wait_for_exit "$pid" 100 || fail "watcher did not exit for an ordinary blocked event"
-  grep -F "$(printf 'signal\ttask.status\tsignal:')" "$state/.wake-queue" >/dev/null \
-    || fail "an ordinary blocked event lost branch-eligible routing: $(cat "$state/.wake-queue")"
-  if grep -F "$(printf 'signal\ttask.status\tneeds-decision:')" "$state/.wake-queue" >/dev/null; then
+  grep -F "$(printf 'signal\ttask.status\tsignal:')" "$state/wake/queue" >/dev/null \
+    || fail "an ordinary blocked event lost branch-eligible routing: $(cat "$state/wake/queue")"
+  if grep -F "$(printf 'signal\ttask.status\tneeds-decision:')" "$state/wake/queue" >/dev/null; then
     fail "an ordinary blocked event was marked as a second-mate escalation"
   fi
   pass "an ordinary blocked event remains branch-eligible"
@@ -2053,10 +2053,10 @@ test_routine_signal_payload_not_marked_needs_decision() {
   watch_bg "$state" "$fakebin" "$out"
   pid=$!
   wait_for_exit "$pid" 100 || fail "watcher did not exit for an actionable done signal"
-  grep -F "$(printf 'signal\ttask.status\tneeds-decision:')" "$state/.wake-queue" >/dev/null \
-    && fail "a routine done signal was incorrectly payload-marked needs-decision: $(cat "$state/.wake-queue")"
-  grep -F "$(printf 'signal\ttask.status\tsignal:')" "$state/.wake-queue" >/dev/null \
-    || fail "a routine signal lost its ordinary payload: $(cat "$state/.wake-queue")"
+  grep -F "$(printf 'signal\ttask.status\tneeds-decision:')" "$state/wake/queue" >/dev/null \
+    && fail "a routine done signal was incorrectly payload-marked needs-decision: $(cat "$state/wake/queue")"
+  grep -F "$(printf 'signal\ttask.status\tsignal:')" "$state/wake/queue" >/dev/null \
+    || fail "a routine signal lost its ordinary payload: $(cat "$state/wake/queue")"
   pass "a routine event containing a needs-decision phrase keeps its ordinary payload, unmarked"
 }
 
@@ -2125,8 +2125,8 @@ SH
   wait_for_exit "$pid" 100 \
     || { reap "$pid"; fail "watcher did not surface a keyed decision appended to a long decision history"; }
   unset FM_STATUS_SPAN_READER FM_TEST_SPAN_READS
-  grep -F "$(printf 'signal\ttask.status\tneeds-decision:')" "$state/.wake-queue" >/dev/null \
-    || fail "the still-open keyed decision was not queued as a needs-decision: $(cat "$state/.wake-queue")"
+  grep -F "$(printf 'signal\ttask.status\tneeds-decision:')" "$state/wake/queue" >/dev/null \
+    || fail "the still-open keyed decision was not queued as a needs-decision: $(cat "$state/wake/queue")"
   [ -s "$reads" ] || fail "the classification made no read through the span reader, so the bound was not exercised"
   while IFS=$(printf '\t') read -r start length; do
     [ "$start" -ge "$prior" ] && [ "$length" -le "$appended" ] \
@@ -2173,7 +2173,7 @@ test_routine_appends_after_a_classified_event_stay_absorbed() {
   if ! wait_poll_cycle "$state" "$pid"; then
     reap "$pid"; fail "watcher re-surfaced a decision it had already classified: $(cat "$out")"
   fi
-  [ ! -s "$state/.wake-queue" ] || fail "a routine append after a classified decision enqueued a wake"
+  [ ! -s "$state/wake/queue" ] || fail "a routine append after a classified decision enqueued a wake"
   reap "$pid"
   unset FM_FAKE_CREW_STATE
   pass "a routine append after an already-classified event is absorbed (no re-wake)"
@@ -2323,7 +2323,7 @@ test_stale_terminal_status_overridden_by_active_run() {
     reap "$pid"; fail "watcher exited for a stale terminal-looking status the run-step overrides (should absorb): $(cat "$out")"
   fi
   [ ! -s "$out" ] || fail "the overridden stale terminal status printed a wake reason during absorb"
-  [ ! -s "$state/.wake-queue" ] || fail "the overridden stale terminal status enqueued a wake during absorb"
+  [ ! -s "$state/wake/queue" ] || fail "the overridden stale terminal status enqueued a wake during absorb"
   [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] || fail "stale suppressor not advanced on absorb"
   [ -s "$state/.stale-since-$key" ] || fail "stale-since escalation timer was not recorded on absorb"
   [ ! -e "$state/.hb-surfaced-validating" ] || fail "an absorbed wake must not mark the status line as surfaced"
@@ -2377,7 +2377,7 @@ test_nonterminal_stale_provably_working_absorbed_then_escalated() {
     reap "$pid"; fail "watcher exited for a fresh provably-working non-terminal stale (should absorb): $(cat "$out")"
   fi
   [ ! -s "$out" ] || fail "fresh provably-working stale printed a wake reason during absorb"
-  [ ! -s "$state/.wake-queue" ] || fail "fresh provably-working stale enqueued a wake during absorb"
+  [ ! -s "$state/wake/queue" ] || fail "fresh provably-working stale enqueued a wake during absorb"
   [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] || fail "stale suppressor not advanced on absorb"
   [ -s "$state/.stale-since-$key" ] || fail "stale-since escalation timer was not recorded on absorb"
   reap "$pid"
@@ -2477,7 +2477,7 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced() {
     reap "$pid"; fail "watcher exited for a fresh declared pause (should absorb): $(cat "$out")"
   fi
   [ ! -s "$out" ] || fail "fresh paused stale printed a wake reason during absorb"
-  [ ! -s "$state/.wake-queue" ] || fail "fresh paused stale enqueued a wake during absorb"
+  [ ! -s "$state/wake/queue" ] || fail "fresh paused stale enqueued a wake during absorb"
   [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] || fail "stale suppressor not advanced on paused absorb"
   [ -e "$state/.paused-$key" ] || fail "paused flag not recorded on absorb"
   [ ! -e "$state/.stale-since-$key" ] || fail "a paused absorb must not start the wedge timer"
@@ -2549,7 +2549,7 @@ test_own_work_wait_keeps_first_alert_then_long_cadence() {
       pid=$!
       wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "$wait_kind repeated an alert: $(cat "$dir/recheck.out")"; }
       [ ! -s "$dir/recheck.out" ] || { reap "$pid"; fail "$wait_kind printed a repeated alert"; }
-      [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "$wait_kind queued a repeated alert"; }
+      [ ! -s "$state/wake/queue" ] || { reap "$pid"; fail "$wait_kind queued a repeated alert"; }
       [ ! -e "$state/.wedge-escalations-$key" ] || { reap "$pid"; fail "$wait_kind counted a wedge"; }
       reap "$pid"
       ack_stopped_cycle "$state" || fail "could not acknowledge $wait_kind test stop"
@@ -2584,7 +2584,7 @@ test_own_work_wait_keeps_first_alert_then_long_cadence() {
   pid=$!
   wait_for_exit "$pid" 100 || { reap "$pid"; fail "undeclared idle worker no longer alarms"; }
   grep -Fx "stale: $window" "$out" >/dev/null || fail "undeclared idle worker did not surface"
-  grep -F "stale: $window" "$state/.wake-queue" >/dev/null || fail "undeclared idle worker's wake was not queued"
+  grep -F "stale: $window" "$state/wake/queue" >/dev/null || fail "undeclared idle worker's wake was not queued"
   pass "own-work waits keep one first alert, then bounded rechecks without wedges; undeclared idle still alarms"
 }
 
@@ -2629,18 +2629,18 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
     fi
     round=$((round + 1))
   done
-  # A watcher that queues nothing never creates .wake-queue, so these counts
+  # A watcher that queues nothing never creates wake/queue, so these counts
   # read a path that may legitimately be absent. awk aborts on a missing file
   # before END runs, which collapses the count to the empty string and turns the
   # next comparison into an "integer expression expected" error - reported as a
   # flood of an unprintable number of wakes instead of the real contract breach
   # the grep below names. No queue means no wakes, per the drain-count read at
   # the end of this file.
-  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue" 2>/dev/null || echo 0)
-  bare=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w && $5 == "stale: " w { n++ } END { print n + 0 }' "$state/.wake-queue" 2>/dev/null || echo 0)
+  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/wake/queue" 2>/dev/null || echo 0)
+  bare=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w && $5 == "stale: " w { n++ } END { print n + 0 }' "$state/wake/queue" 2>/dev/null || echo 0)
   [ "$wakes" -le 1 ] || fail "dead-agent declared pause flooded $wakes stale wakes across six unchanged polls"
   [ "$bare" -eq 0 ] || fail "dead-agent declared pause surfaced as $bare bare stopped-crew wakes"
-  grep -F "awaiting external" "$state/.wake-queue" >/dev/null \
+  grep -F "awaiting external" "$state/wake/queue" >/dev/null \
     || fail "dead-agent declared pause did not use the bounded paused recheck"
 
   dir=$(make_case exited-captain-held); state="$dir/state"; fakebin="$dir/fakebin"
@@ -2663,9 +2663,9 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 100 || fail "captain-held dead-agent pane did not re-surface on the bounded cadence"
-  grep -F "awaiting the captain" "$state/.wake-queue" >/dev/null \
-    || fail "captain-held dead-agent pane surfaced as a stopped crew instead of a captain-owned recheck: $(cat "$state/.wake-queue")"
-  grep -F "awaiting external" "$state/.wake-queue" >/dev/null \
+  grep -F "awaiting the captain" "$state/wake/queue" >/dev/null \
+    || fail "captain-held dead-agent pane surfaced as a stopped crew instead of a captain-owned recheck: $(cat "$state/wake/queue")"
+  grep -F "awaiting external" "$state/wake/queue" >/dev/null \
     && fail "captain-held dead-agent pane borrowed the pause verb's external-wait wording"
 
   dir=$(make_case alive-decision-gate); state="$dir/state"; fakebin="$dir/fakebin"
@@ -2707,8 +2707,8 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
   [ -e "$state/.paused-$key" ] || { reap "$pid"; fail "live external-decision gate lost its pause cadence marker"; }
   [ ! -e "$state/.stale-since-$key" ] || { reap "$pid"; fail "live external-decision gate retained the wedge timer"; }
   reap "$pid"
-  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue" 2>/dev/null || echo 0)
-  bare=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w && $5 == "stale: " w { n++ } END { print n + 0 }' "$state/.wake-queue" 2>/dev/null || echo 0)
+  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/wake/queue" 2>/dev/null || echo 0)
+  bare=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w && $5 == "stale: " w { n++ } END { print n + 0 }' "$state/wake/queue" 2>/dev/null || echo 0)
   [ "$wakes" -eq 0 ] || fail "acknowledged external-decision surface replayed $wakes wakes"
   [ "$bare" -eq 0 ] || fail "acknowledged external-decision bare stale remained queued"
   pass "exited declared-pause and captain-held panes use bounded pause cadence while a live decision gate still surfaces once"
@@ -2764,10 +2764,10 @@ test_absorbed_replacement_wait_does_not_inherit_the_old_throttle() {
     wait_for_exit "$pid" 100 \
       || { reap "$pid"; fail "[$name] replacement declared wait inherited the old throttle"; }
     wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' \
-      "$state/.wake-queue" 2>/dev/null || echo 0)
+      "$state/wake/queue" 2>/dev/null || echo 0)
     [ "$wakes" -eq 1 ] || fail "[$name] replacement declared wait produced $wakes wakes instead of one"
-    grep -F "$expected" "$state/.wake-queue" >/dev/null \
-      || fail "[$name] replacement declared wait used the wrong recheck reason: $(cat "$state/.wake-queue")"
+    grep -F "$expected" "$state/wake/queue" >/dev/null \
+      || fail "[$name] replacement declared wait used the wrong recheck reason: $(cat "$state/wake/queue")"
   done
   pass "absorbed paused and captain-held replacements each start their own re-surface cadence"
 }
@@ -2855,7 +2855,7 @@ test_live_declared_wait_churn_honors_the_resurface_throttle() {
       parked_watch_round "$state" "$fakebin" "$out" "$capture_file" "$window" absorb \
         || fail "[$name] watcher exited during churn round $round instead of supervising through it"
       wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' \
-        "$state/.wake-queue" 2>/dev/null || echo 0)
+        "$state/wake/queue" 2>/dev/null || echo 0)
       [ "$wakes" -eq 0 ] \
         || fail "[$name] pane churn re-alarmed a parked worker $wakes time(s) inside the re-surface window"
       [ -e "$throttle" ] || fail "[$name] pane churn cleared the re-surface throttle"
@@ -2876,18 +2876,18 @@ test_live_declared_wait_churn_honors_the_resurface_throttle() {
     parked_watch_round "$state" "$fakebin" "$out" "$capture_file" "$window" exit \
       || fail "[$name] a replacement declared wait inherited the previous wait's re-surface throttle"
     wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' \
-      "$state/.wake-queue" 2>/dev/null || echo 0)
+      "$state/wake/queue" 2>/dev/null || echo 0)
     bare=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w && $5 == "stale: " w { n++ } END { print n + 0 }' \
-      "$state/.wake-queue" 2>/dev/null || echo 0)
+      "$state/wake/queue" 2>/dev/null || echo 0)
     [ "$wakes" -eq 1 ] || fail "[$name] replacement declared wait produced $wakes first wakes instead of one"
-    [ "$bare" -eq 1 ] || fail "[$name] replacement declared wait changed the wake identity: $(cat "$state/.wake-queue")"
+    [ "$bare" -eq 1 ] || fail "[$name] replacement declared wait changed the wake identity: $(cat "$state/wake/queue")"
     ack_stopped_cycle "$state" || fail "[$name] could not acknowledge the replacement wait's first surface"
 
     printf 'replacement wait, elapsed 2s' > "$capture_file"
     parked_watch_round "$state" "$fakebin" "$out" "$capture_file" "$window" absorb \
       || fail "[$name] replacement wait re-alarmed inside its own re-surface window"
     wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' \
-      "$state/.wake-queue" 2>/dev/null || echo 0)
+      "$state/wake/queue" 2>/dev/null || echo 0)
     [ "$wakes" -eq 0 ] || fail "[$name] replacement wait re-alarmed $wakes time(s) inside its own re-surface window"
 
     # End of the window: the wait must re-surface exactly once, on the same plain
@@ -2897,11 +2897,11 @@ test_live_declared_wait_churn_honors_the_resurface_throttle() {
     parked_watch_round "$state" "$fakebin" "$out" "$capture_file" "$window" exit \
       || fail "[$name] a parked worker did not re-surface once its re-surface window elapsed"
     wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' \
-      "$state/.wake-queue" 2>/dev/null || echo 0)
+      "$state/wake/queue" 2>/dev/null || echo 0)
     bare=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w && $5 == "stale: " w { n++ } END { print n + 0 }' \
-      "$state/.wake-queue" 2>/dev/null || echo 0)
+      "$state/wake/queue" 2>/dev/null || echo 0)
     [ "$wakes" -eq 1 ] || fail "[$name] elapsed re-surface window produced $wakes wakes instead of one"
-    [ "$bare" -eq 1 ] || fail "[$name] elapsed re-surface changed the wake identity: $(cat "$state/.wake-queue")"
+    [ "$bare" -eq 1 ] || fail "[$name] elapsed re-surface changed the wake identity: $(cat "$state/wake/queue")"
   done
   pass "a parked live worker surfaces once, absorbs pane churn for the whole re-surface window, then re-surfaces when it elapses"
 }
@@ -2925,7 +2925,7 @@ test_live_paused_until_controls_recheck_time() {
   parked_watch_round "$state" "$fakebin" "$out" "$capture_file" "$window" absorb \
     || fail "pane churn bypassed a live worker's declared future time"
   wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' \
-    "$state/.wake-queue" 2>/dev/null || echo 0)
+    "$state/wake/queue" 2>/dev/null || echo 0)
   [ "$wakes" -eq 0 ] || fail "a live worker produced $wakes wakes before its declared time"
 
   past=$(iso_utc_at "$(( $(date +%s) - 120 ))")
@@ -2935,14 +2935,14 @@ test_live_paused_until_controls_recheck_time() {
   parked_watch_round "$state" "$fakebin" "$out" "$capture_file" "$window" exit \
     || fail "a live worker did not wake when its declared time passed"
   wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' \
-    "$state/.wake-queue" 2>/dev/null || echo 0)
+    "$state/wake/queue" 2>/dev/null || echo 0)
   [ "$wakes" -eq 1 ] || fail "a passed declared time produced $wakes wakes instead of one"
   ack_stopped_cycle "$state" || fail "could not acknowledge the due declared-time recheck"
   printf 'parked, elapsed 4s' > "$capture_file"
   parked_watch_round "$state" "$fakebin" "$out" "$capture_file" "$window" absorb \
     || fail "a due declared time bypassed the reset long cadence"
   wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' \
-    "$state/.wake-queue" 2>/dev/null || echo 0)
+    "$state/wake/queue" 2>/dev/null || echo 0)
   [ "$wakes" -eq 0 ] || fail "a due declared time rechecked again inside the long cadence"
   pass "a live paused worker stays absorbed until its declared time, then rechecks"
 }
@@ -3040,7 +3040,7 @@ arm_parked_gate() {  # <case-dir>
 
 wedge_stale_wakes() {  # <state> <window>
   awk -F '\t' -v w="$2" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' \
-    "$1/.wake-queue" 2>/dev/null || echo 0
+    "$1/wake/queue" 2>/dev/null || echo 0
 }
 
 # The wait age the deferral PUBLISHES to the captain, read back off the wake it
@@ -3066,7 +3066,7 @@ test_wedge_threshold_defers_to_a_declared_wait_under_a_working_verdict() {
     n=$((n + 1))
   done
   [ "$(wedge_stale_wakes "$state" "$window")" -eq 0 ] \
-    || fail "a declared wait queued a wedge wake under a working verdict: $(cat "$state/.wake-queue")"
+    || fail "a declared wait queued a wedge wake under a working verdict: $(cat "$state/wake/queue")"
   grep -F 'possible wedge' "$out" >/dev/null \
     && fail "a declared wait was reported as a possible wedge"
   [ ! -e "$state/.wedge-escalations-$key" ] \
@@ -3149,7 +3149,7 @@ test_wedge_threshold_keeps_a_wait_past_a_default_key_answer() {
     n=$((n + 1))
   done
   [ "$(wedge_stale_wakes "$state" "$window")" -eq 0 ] \
-    || fail "a default-key answer let a waiting lane queue a wedge wake: $(cat "$state/.wake-queue")"
+    || fail "a default-key answer let a waiting lane queue a wedge wake: $(cat "$state/wake/queue")"
   [ ! -e "$state/.wedge-escalations-$key" ] \
     || fail "a default-key answer let a waiting lane count $(cat "$state/.wedge-escalations-$key") wedge escalation(s)"
 
@@ -3204,7 +3204,7 @@ test_wedge_threshold_recheck_names_the_captain_for_a_held_lane() {
     n=$((n + 1))
   done
   [ "$(wedge_stale_wakes "$state" "$window")" -eq 0 ] \
-    || fail "a captain-held lane queued a wedge wake inside its recheck cadence: $(cat "$state/.wake-queue")"
+    || fail "a captain-held lane queued a wedge wake inside its recheck cadence: $(cat "$state/wake/queue")"
   [ ! -e "$state/.wedge-escalations-$key" ] \
     || fail "a captain-held lane counted $(cat "$state/.wedge-escalations-$key") wedge escalation(s)"
 
@@ -3229,7 +3229,7 @@ test_wedge_threshold_recheck_names_the_captain_for_a_held_lane() {
     n=$((n + 1))
   done
   [ "$(wedge_stale_wakes "$state" "$window")" -eq 0 ] \
-    || fail "a captain-held lane woke the away captain: $(cat "$state/.wake-queue")"
+    || fail "a captain-held lane woke the away captain: $(cat "$state/wake/queue")"
   [ ! -s "$out" ] \
     || fail "a captain-held lane printed a recheck while the away-posture record existed: $(cat "$out")"
   [ ! -e "$state/.waiting-resurfaced-$key" ] \
@@ -3340,7 +3340,7 @@ working: still parked at that gate'
     n=$((n + 1))
   done
   [ "$(wedge_stale_wakes "$state" "$window")" -eq "$queued" ] \
-    || fail "a gate awaiting a human queued a further wake inside its recheck cadence: $(cat "$state/.wake-queue")"
+    || fail "a gate awaiting a human queued a further wake inside its recheck cadence: $(cat "$state/wake/queue")"
   [ ! -e "$state/.wedge-escalations-$key" ] \
     || fail "a gate awaiting a human counted $(cat "$state/.wedge-escalations-$key") wedge escalation(s)"
 
@@ -3388,7 +3388,7 @@ working: still parked at that gate'
     n=$((n + 1))
   done
   [ "$(wedge_stale_wakes "$state" "$window")" -eq "$queued" ] \
-    || fail "an away-posture parked gate queued a further wake inside its recheck cadence: $(cat "$state/.wake-queue")"
+    || fail "an away-posture parked gate queued a further wake inside its recheck cadence: $(cat "$state/wake/queue")"
   [ ! -e "$state/.wedge-escalations-$key" ] \
     || fail "an away-posture parked gate counted $(cat "$state/.wedge-escalations-$key") wedge escalation(s)"
 
@@ -3607,10 +3607,10 @@ run_malformed_wait_record_round() {  # <name> <evidence-body>
 
 assert_malformed_record_kept_the_ladder() {  # <state> <what>
   local state=$1 what=$2
-  grep -F 'possible wedge, escalation 1' "$state/.wake-queue" >/dev/null \
-    || fail "$what did not keep the unchanged ladder: $(cat "$state/.wake-queue" 2>/dev/null)"
-  grep -F 'rechecked on a long cadence not a wedge' "$state/.wake-queue" >/dev/null \
-    && fail "$what was deferred on a record that is not what it claims: $(cat "$state/.wake-queue")"
+  grep -F 'possible wedge, escalation 1' "$state/wake/queue" >/dev/null \
+    || fail "$what did not keep the unchanged ladder: $(cat "$state/wake/queue" 2>/dev/null)"
+  grep -F 'rechecked on a long cadence not a wedge' "$state/wake/queue" >/dev/null \
+    && fail "$what was deferred on a record that is not what it claims: $(cat "$state/wake/queue")"
   [ "$(cat "$state/.wedge-escalations-test_fm-wedge" 2>/dev/null || echo 0)" -eq 1 ] \
     || fail "$what did not count its escalation"
 }
@@ -3701,7 +3701,7 @@ test_gone_endpoint_reports_once_instead_of_escalating_forever() {
       wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$failed" absorb \
         || fail "a $verdict endpoint re-alarmed on later threshold $round: $(cat "$out")"
       [ "$(wedge_stale_wakes "$state" "$window")" -eq 0 ] \
-        || fail "a $verdict endpoint queued a repeat wake on round $round: $(cat "$state/.wake-queue")"
+        || fail "a $verdict endpoint queued a repeat wake on round $round: $(cat "$state/wake/queue")"
       [ ! -e "$state/.wedge-escalations-$key" ] \
         || fail "a $verdict endpoint advanced the escalation count on round $round"
       round=$((round + 1))
@@ -3828,7 +3828,7 @@ test_second_death_after_a_same_window_relaunch_reports_in_full() {
   [ ! -e "$state/.wedge-escalations-$key" ] \
     || fail "the relaunch churn left a wedge escalation count behind"
   [ "$(wedge_stale_wakes "$state" "$window")" -eq 0 ] \
-    || fail "the relaunch churn queued a wake: $(cat "$state/.wake-queue")"
+    || fail "the relaunch churn queued a wake: $(cat "$state/wake/queue")"
 
   # The replacement dies too, without any intervening probe reading it alive:
   # the second death must still produce its own detailed report naming the
@@ -3851,7 +3851,7 @@ test_second_death_after_a_same_window_relaunch_reports_in_full() {
   wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$failed" absorb \
     || fail "an unchanged dead pane re-alarmed after the second report: $(cat "$out")"
   [ "$(wedge_stale_wakes "$state" "$window")" -eq 0 ] \
-    || fail "an unchanged dead pane queued a repeat wake: $(cat "$state/.wake-queue")"
+    || fail "an unchanged dead pane queued a repeat wake: $(cat "$state/wake/queue")"
   [ ! -e "$state/.wedge-escalations-$key" ] \
     || fail "an unchanged dead pane advanced the escalation count"
   unset FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS
@@ -3901,7 +3901,7 @@ test_identical_dead_display_of_a_successor_still_reports() {
   FM_TEST_STALE_ESCALATE=999 wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$failed" absorb \
     || fail "the successor's quiet round was never absorbed: $(cat "$out")"
   [ "$(wedge_stale_wakes "$state" "$window")" -eq 0 ] \
-    || fail "the successor's quiet round queued a wake: $(cat "$state/.wake-queue")"
+    || fail "the successor's quiet round queued a wake: $(cat "$state/wake/queue")"
 
   # The successor dies into the same byte-identical display. A pane-hash marker
   # absorbs this death silently; the incarnation half must report it in full.
@@ -3922,7 +3922,7 @@ test_identical_dead_display_of_a_successor_still_reports() {
   wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$failed" absorb \
     || fail "an unchanged dead pane re-alarmed under the same incarnation: $(cat "$out")"
   [ "$(wedge_stale_wakes "$state" "$window")" -eq 0 ] \
-    || fail "an unchanged dead pane queued a repeat wake: $(cat "$state/.wake-queue")"
+    || fail "an unchanged dead pane queued a repeat wake: $(cat "$state/wake/queue")"
   [ ! -e "$state/.wedge-escalations-$key" ] \
     || fail "an unchanged dead pane advanced the escalation count"
   unset FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS
@@ -4037,7 +4037,7 @@ hold_watch_churn() {  # <dir> <out> <capture> <label> <count>
 
 hold_stale_wakes() {  # <state>
   awk -F '\t' '$3 == "stale" && $4 == "test:fm-held-merge" { n++ } END { print n + 0 }' \
-    "$1/.wake-queue" 2>/dev/null || echo 0
+    "$1/wake/queue" 2>/dev/null || echo 0
 }
 
 # Both status lines a held task really carries: the delivery that routes through
@@ -4135,13 +4135,13 @@ test_failed_wake_append_does_not_arm_the_captain_hold_throttle() {
   # caller does, so the watcher cannot publish the wake it just decided to send.
   # Its exit code is read directly here because a refusing watcher exits NON-zero,
   # which is the correct outcome and not the "surfaced" one hold_watch_surface means.
-  rm -f "$state/.wake-queue"
-  mkdir -p "$state/.wake-queue"
+  rm -f "$state/wake/queue"
+  mkdir -p "$state/wake/queue"
   printf 'idle, elapsed 1s\n' > "$capture"
   hold_watch_launch "$dir" "$out" "$capture"
   wait_for_exit "$HOLD_WATCH_PID" 100
   rc=$?
-  rmdir "$state/.wake-queue"
+  rmdir "$state/wake/queue"
   [ "$rc" -ne 124 ] || fail "the watcher did not exit when its durable queue could not be written"
   [ "$rc" -ne 0 ] || fail "the watcher reported success despite an unwritable durable queue"
   [ -e "$state/.paused-resurfaced-$(hold_key)" ] \
@@ -4614,14 +4614,14 @@ test_term_stops_a_watcher_blocked_inside_a_poll() {
 
 # --- held downtime-marker lock must not wedge a TERM'd watcher -------------
 # fm-watch-triage-r1 flake (serial-1 CI): the EXIT cleanup publishes the
-# downtime marker under .watcher-down.lock through an unbounded acquire, so a
+# downtime marker under wake/watcher-down.lock through an unbounded acquire, so a
 # single TERM could strand the watcher inside its own trap for as long as a
 # live foreign holder kept that lock - the observed watcher only died when a
 # second TERM short-circuited the trap. The bounded cleanup acquire preserves
 # the single-TERM stop; on timeout the publish is skipped and the singleton
 # stays behind as ordinary dead-pid evidence for the next arm to clear.
 
-# Start a watcher, hold its .watcher-down.lock from a live foreign subshell,
+# Start a watcher, hold its wake/watcher-down.lock from a live foreign subshell,
 # and send exactly one TERM. Without <release-ticks> the lock stays held until
 # the watcher exits. With it, the watcher runs as a handling successor, whose
 # poll loop never takes the marker lock, and the holder arms FIFOs as its pid
@@ -4695,7 +4695,7 @@ term_watcher_with_held_marker_lock() {  # <dir> [release-ticks]
       done
     fi
     fm_lock_release "$lock"
-  ' _ "$ROOT/bin/fm-wake-lib.sh" "$state/.watcher-down.lock" "$dir/marker-lock-held" \
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$state/wake/watcher-down.lock" "$dir/marker-lock-held" \
     "$dir/release-marker-lock" "$dir/marker-lock-contended" \
     "$release_ticks" &
   holder=$!
@@ -4719,7 +4719,7 @@ term_watcher_with_held_marker_lock() {  # <dir> [release-ticks]
 test_term_stops_a_watcher_whose_cleanup_marker_lock_is_held() {
   local dir state
   dir=$(make_case term-held-marker-lock); state="$dir/state"
-  # A live foreign holder keeps .watcher-down.lock across the TERM, so the
+  # A live foreign holder keeps wake/watcher-down.lock across the TERM, so the
   # watcher's EXIT cleanup can only finish by out-waiting its bounded acquire
   # rather than spinning on the marker lock forever.
   term_watcher_with_held_marker_lock "$dir"
@@ -4729,7 +4729,7 @@ test_term_stops_a_watcher_whose_cleanup_marker_lock_is_held() {
     || fail "a watcher whose marker publish timed out lost its stale singleton evidence"
   FM_STATE_OVERRIDE="$state" bash -c '
     . "$1" && fm_recovery_transition "$2" clear-stale-lock "$3" downtime
-  ' _ "$ROOT/bin/fm-wake-lib.sh" "$state/.watcher-down" "$state/.watch.lock" \
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$state/wake/watcher-down" "$state/.watch.lock" \
     || fail "the retained singleton did not clear once the marker lock freed"
   [ ! -e "$state/.watch.lock" ] \
     || fail "the stale singleton survived its clear-stale-lock"
@@ -5380,7 +5380,7 @@ test_nonterminal_stale_repairs_missing_or_corrupt_timer() {
     wait "$pid" 2>/dev/null || true
     fail "watcher exited while repairing a missing stale-since timer: $(cat "$out")"
   fi
-  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "missing stale-since repair enqueued a wake"; }
+  [ ! -s "$state/wake/queue" ] || { reap "$pid"; fail "missing stale-since repair enqueued a wake"; }
   reap "$pid"
   ack_stopped_cycle "$state" || fail "could not acknowledge the intentional missing-timer repair stop"
 
@@ -5393,7 +5393,7 @@ test_nonterminal_stale_repairs_missing_or_corrupt_timer() {
   wait_numeric_file "$state/.stale-since-$key" 30 || { reap "$pid"; fail "matching stale suppressor with corrupt timer did not repair stale-since"; }
   since=$(cat "$state/.stale-since-$key" 2>/dev/null || true)
   [ "$since" != "corrupt" ] || { reap "$pid"; fail "corrupt stale-since value was left in place"; }
-  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "corrupt stale-since repair enqueued a wake"; }
+  [ ! -s "$state/wake/queue" ] || { reap "$pid"; fail "corrupt stale-since repair enqueued a wake"; }
   reap "$pid"
   pass "matching non-terminal stale suppressors repair missing or corrupt stale-since timers"
 }
@@ -5445,7 +5445,7 @@ test_wedge_escalation_deferred_while_worktree_is_written() {
     reap "$pid"; fail "watcher wedge-escalated a quiet pane whose worktree was being written: $(cat "$out")"
   fi
   [ ! -s "$out" ] || { reap "$pid"; fail "a written-worktree deferral printed a wake reason: $(cat "$out")"; }
-  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "a written-worktree deferral enqueued a wake"; }
+  [ ! -s "$state/wake/queue" ] || { reap "$pid"; fail "a written-worktree deferral enqueued a wake"; }
   [ -e "$state/.writing-since-$key" ] || { reap "$pid"; fail "the write-deferral chain marker was not recorded"; }
   [ ! -e "$state/.wedge-escalations-$key" ] || { reap "$pid"; fail "a deferral advanced the wedge escalation counter"; }
   [ "$(cat "$state/.stale-since-$key" 2>/dev/null || echo 0)" -gt "$back" ] \
@@ -5610,7 +5610,7 @@ test_timer_repair_drops_a_finished_write_deferral_chain() {
     || { reap "$pid"; fail "the corrupt idle-window timer was not repaired"; }
   [ ! -e "$state/.writing-since-$key" ] \
     || { reap "$pid"; fail "an idle-window timer repair kept a finished write-deferral chain"; }
-  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "the idle-window timer repair enqueued a wake"; }
+  [ ! -s "$state/wake/queue" ] || { reap "$pid"; fail "the idle-window timer repair enqueued a wake"; }
   reap "$pid"
   ack_stopped_cycle "$state" || fail "could not acknowledge the intentional timer-repair watcher stop"
 
@@ -5632,7 +5632,7 @@ test_timer_repair_drops_a_finished_write_deferral_chain() {
     fail "the first deferral of a new quiet window re-surfaced at once, so it inherited a finished chain: $(cat "$out")"
   fi
   [ ! -s "$out" ] || { reap "$pid"; fail "a fresh write deferral printed a wake reason: $(cat "$out")"; }
-  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "a fresh write deferral enqueued a wake"; }
+  [ ! -s "$state/wake/queue" ] || { reap "$pid"; fail "a fresh write deferral enqueued a wake"; }
   [ -e "$state/.writing-since-$key" ] || { reap "$pid"; fail "the new deferral recorded no chain marker"; }
   [ ! -e "$state/.writing-resurfaced-$key" ] \
     || { reap "$pid"; fail "a fresh write deferral spent its bounded re-surface on the first poll"; }
@@ -5740,7 +5740,7 @@ SH
     i=$((i + 1))
   done
   [ "$lines" -le 2000 ] || { reap "$pid"; fail "triage log was not capped when wc emitted a spaced byte count (lines=$lines)"; }
-  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "benign signal enqueued a wake while testing log capping"; }
+  [ ! -s "$state/wake/queue" ] || { reap "$pid"; fail "benign signal enqueued a wake while testing log capping"; }
   reap "$pid"
   pass "triage log capping handles wc byte counts with leading spaces"
 }
@@ -5772,7 +5772,7 @@ seed_captured_procevent_result() {  # <dir>
     /bin/sh -c 'printf "session:\n  file: /a.html\n  status: waiting\n"' >/dev/null || return 1
   pe_case "$dir" reconcile >/dev/null || return 1
   while [ "$i" -lt 100 ]; do
-    [ -s "$dir/state/.wake-queue" ] && break
+    [ -s "$dir/state/wake/queue" ] && break
     sleep 0.1
     i=$((i + 1))
   done
@@ -5790,7 +5790,7 @@ seed_captured_procevent_result() {  # <dir>
     i=$((i + 1))
   done
   pe_case "$dir" retire delivery-src >/dev/null || return 1
-  [ -s "$dir/state/.wake-queue" ]
+  [ -s "$dir/state/wake/queue" ]
 }
 
 # The watcher, scoped by FM_HOME rather than FM_STATE_OVERRIDE, so the
@@ -5808,7 +5808,7 @@ test_procevent_captured_result_surfaces_proactively() {
   dir=$(make_case procevent-delivery); state="$dir/state"
   out="$dir/watch.out"; drain_out="$dir/drain.out"
   seed_captured_procevent_result "$dir" || fail "the fixture captured no process-event result"
-  grep -F "procevent lavish delivery-src 1" "$state/.wake-queue" >/dev/null \
+  grep -F "procevent lavish delivery-src 1" "$state/wake/queue" >/dev/null \
     || fail "the captured result was never published to the durable queue"
 
   procevent_watch_bg "$dir" "$out"
@@ -5861,9 +5861,9 @@ test_procevent_unacknowledged_result_redrains_until_handled() {
     || fail "the replay drain omitted its post-handling acknowledgement boundary"
   FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" \
     || fail "completed process-event handling could not acknowledge the replay"
-  [ ! -s "$state/.wake-queue" ] || fail "acknowledged process-event replay remained durable"
+  [ ! -s "$state/wake/queue" ] || fail "acknowledged process-event replay remained durable"
 
-  before=$(awk 'END { print NR + 0 }' "$state/.wake-queue" 2>/dev/null || echo 0)
+  before=$(awk 'END { print NR + 0 }' "$state/wake/queue" 2>/dev/null || echo 0)
   : > "$out"
   procevent_watch_bg "$dir" "$out"
   pid=$!
@@ -5871,7 +5871,7 @@ test_procevent_unacknowledged_result_redrains_until_handled() {
     fail "a handled process-event result woke the watcher: $(cat "$out")"
   fi
   reap "$pid"
-  after=$(awk 'END { print NR + 0 }' "$state/.wake-queue" 2>/dev/null || echo 0)
+  after=$(awk 'END { print NR + 0 }' "$state/wake/queue" 2>/dev/null || echo 0)
   [ "$after" = "$before" ] || fail "a handled result was announced again ($before -> $after queued records)"
   pass "an unacknowledged process-event result re-drains until handling is acknowledged"
 }
@@ -6032,7 +6032,7 @@ test_procevent_surface_serializes_with_drain() {
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" &
   drain_pid=$!
   wait_live "$drain_pid" 10 || fail "a concurrent drain split the surfacing transition"
-  [ -s "$state/.wake-queue" ] || fail "the concurrent drain consumed the record before marker commit"
+  [ -s "$state/wake/queue" ] || fail "the concurrent drain consumed the record before marker commit"
   touch "$release"
   wait "$pid" || fail "the paused watcher did not finish surfacing"
   wait "$drain_pid" || fail "the concurrent drain failed after surfacing committed"
@@ -6057,7 +6057,7 @@ test_procevent_surface_crash_boundaries() {
   [ "$exit_status" -ne 124 ] || fail "the watcher survived a failed actionable output write"
   marker=$(find "$state" -maxdepth 1 -name '.seen-procevent-*' -type f | head -1)
   [ -z "$marker" ] || fail "failed output committed a suppression marker"
-  [ -s "$state/.wake-queue" ] || fail "failed output consumed the durable queue record"
+  [ -s "$state/wake/queue" ] || fail "failed output consumed the durable queue record"
   procevent_watch_bg "$dir" "$out"; pid=$!
   wait_for_exit "$pid" 100 || fail "the record was not replayable after output failure"
   grep -F "procevent:output-fail:1" "$out" >/dev/null || fail "output failure lost proactive replay"
@@ -6102,7 +6102,7 @@ test_procevent_surface_crash_boundaries() {
     || fail "post-marker replay omitted its post-handling acknowledgement boundary"
   FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" \
     || fail "post-marker replay acknowledgement failed"
-  [ ! -s "$state/.wake-queue" ] || fail "post-marker acknowledgement left the durable record queued"
+  [ ! -s "$state/wake/queue" ] || fail "post-marker acknowledgement left the durable record queued"
   pass "surfacing failures replay until post-handling acknowledgement"
 }
 
@@ -6118,7 +6118,7 @@ test_procevent_marker_failure_exits_and_replays() {
   [ "$output_count" = 1 ] || fail "marker failure printed the actionable reason $output_count times"
   marker=$(find "$state" -maxdepth 1 -name '.seen-procevent-*' -type f | head -1)
   [ -z "$marker" ] || fail "marker failure committed suppression"
-  [ ! -e "$state/.wake-queue.lock" ] && [ ! -L "$state/.wake-queue.lock" ] \
+  [ ! -e "$state/wake/queue.lock" ] && [ ! -L "$state/wake/queue.lock" ] \
     || fail "marker failure left the queue lock held"
   procevent_watch_bg "$dir" "$out.replay"
   pid=$!
@@ -6154,7 +6154,7 @@ test_heartbeat_no_change_absorbed() {
     i=$((i + 1))
   done
   [ ! -s "$out" ] || fail "no-change heartbeat printed a wake reason: $(cat "$out")"
-  [ ! -s "$state/.wake-queue" ] || fail "no-change heartbeat enqueued a durable wake record"
+  [ ! -s "$state/wake/queue" ] || fail "no-change heartbeat enqueued a durable wake record"
   [ "$(cat "$state/.heartbeat-streak" 2>/dev/null || echo 0)" -ge 1 ] || fail "heartbeat backoff streak did not advance while absorbing"
   [ "$(status_presentation_marker_offset "$state/.hb-surfaced-routine" "$state/routine.status")" = \
     "$(size_of "$state/routine.status")" ] \
@@ -6235,7 +6235,7 @@ test_beacon_stays_fresh_while_absorbing() {
   fi
   [ "$m2" -ge "$m1" ] || { reap "$pid"; fail "beacon mtime regressed while absorbing"; }
   [ "$(( now - m2 ))" -lt 10 ] || { reap "$pid"; fail "beacon went stale while absorbing (age $(( now - m2 ))s)"; }
-  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "absorbing benign signals enqueued a wake"; }
+  [ ! -s "$state/wake/queue" ] || { reap "$pid"; fail "absorbing benign signals enqueued a wake"; }
   reap "$pid"
   pass "the liveness beacon stays fresh while the watcher absorbs benign wakes (fm-guard never false-alarms)"
 }
@@ -6368,7 +6368,7 @@ test_captain_held_never_rechecked_while_away_record_exists() {
     reap "$pid"; fail "watcher rechecked a captain-held item while the away-posture record exists: $(cat "$out")"
   fi
   [ ! -s "$out" ] || fail "a captain-held recheck was printed while the away-posture record exists"
-  [ ! -s "$state/.wake-queue" ] || fail "a captain-held recheck was queued while the away-posture record exists"
+  [ ! -s "$state/wake/queue" ] || fail "a captain-held recheck was queued while the away-posture record exists"
   [ ! -e "$state/.paused-resurfaced-$key" ] || fail "the recheck throttle was armed for an item that must never be rechecked"
   grep -F 'never rechecked while the away-posture record exists' "$state/.watch-triage.log" >/dev/null \
     || fail "the silent absorb did not name the away-posture rule in the triage log"
@@ -6409,7 +6409,7 @@ test_live_captain_held_first_sight_silenced_by_away_record() {
   if ! wait_poll_cycle "$state" "$pid" || ! wait_poll_cycle "$state" "$pid" || ! wait_poll_cycle "$state" "$pid"; then
     reap "$pid"; fail "a live captain-held pane surfaced on first sight while the away-posture record exists: $(cat "$out")"
   fi
-  [ ! -s "$state/.wake-queue" ] || fail "a live captain-held pane was queued while the away-posture record exists"
+  [ ! -s "$state/wake/queue" ] || fail "a live captain-held pane was queued while the away-posture record exists"
   [ -e "$state/.stale-$key" ] || fail "the silenced first sight did not advance the stale suppressor"
   reap "$pid"
   unset FM_FAKE_CREW_STATE
@@ -6454,7 +6454,7 @@ test_afk_one_shot_never_hands_off_captain_held_under_away_record() {
   if ! wait_poll_cycle "$state" "$pid" || ! wait_poll_cycle "$state" "$pid" || ! wait_poll_cycle "$state" "$pid"; then
     reap "$pid"; fail "the daemon-owned one-shot handed off a captain-held pane while the away-posture record exists: $(cat "$out")"
   fi
-  [ ! -s "$state/.wake-queue" ] || fail "the daemon-owned one-shot queued a captain-held pane while the away-posture record exists"
+  [ ! -s "$state/wake/queue" ] || fail "the daemon-owned one-shot queued a captain-held pane while the away-posture record exists"
   [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$(hash_text 'idle awaiting the captain')" ] \
     || fail "the silenced one-shot did not advance the stale suppressor to the pane hash"
   reap "$pid"
@@ -6500,7 +6500,7 @@ test_paused_until_near_future_is_quiet_before_the_cadence() {
   if ! wait_poll_cycle "$state" "$UNTIL_PID" || ! wait_poll_cycle "$state" "$UNTIL_PID"; then
     reap "$UNTIL_PID"; fail "a declared wait with a near-future until time was rechecked before that time: $(cat "$dir/watch.out")"
   fi
-  [ ! -s "$state/.wake-queue" ] || fail "a declared wait with a near-future until time was queued for a recheck"
+  [ ! -s "$state/wake/queue" ] || fail "a declared wait with a near-future until time was queued for a recheck"
   grep -F 'declared time not reached' "$state/.watch-triage.log" >/dev/null \
     || fail "the absorb did not cite the declared time in the triage log"
   reap "$UNTIL_PID"

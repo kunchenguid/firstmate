@@ -165,8 +165,8 @@ acquire() {
   [ -d "$STATE" ] && [ ! -L "$STATE" ] || fail 'state directory unavailable'
   [ -d "$DATA" ] && [ ! -L "$DATA" ] || fail 'data directory unavailable'
   # Keep the wake library's source-time state initialization off read-only paths.
-  FM_WAKE_QUEUE="$STATE/.wake-queue"
-  FM_WAKE_QUEUE_LOCK="$STATE/.wake-queue.lock"
+  FM_WAKE_QUEUE="$STATE/wake/queue"
+  FM_WAKE_QUEUE_LOCK="$STATE/wake/queue.lock"
   # shellcheck source=bin/fm-wake-lib.sh
   . "$SCRIPT_DIR/fm-wake-lib.sh"
   fm_lock_acquire_wait "$STATE/.contributions.lock" || fail 'observation lock unavailable'

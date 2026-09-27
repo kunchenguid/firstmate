@@ -57,7 +57,7 @@ make_case() {
   local name=$1 dir fakebin
   dir="$TMP_ROOT/$name"
   fakebin="$dir/fakebin"
-  mkdir -p "$dir/state" "$fakebin"
+  mkdir -p "$dir/state/wake" "$fakebin"
   fm_test_track_watcher_state "$dir/state"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
@@ -164,7 +164,7 @@ make_supercase() {
   local name=$1 dir fakebin
   dir="$TMP_ROOT/$name"
   fakebin="$dir/fakebin"
-  mkdir -p "$dir/state" "$fakebin"
+  mkdir -p "$dir/state/wake" "$fakebin"
   fm_test_track_watcher_state "$dir/state"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
@@ -244,7 +244,7 @@ SH
 make_bordered_case() {
   local name=$1 dir fakebin
   dir="$TMP_ROOT/$name"; fakebin="$dir/fakebin"
-  mkdir -p "$dir/state" "$fakebin"
+  mkdir -p "$dir/state/wake" "$fakebin"
   fm_test_track_watcher_state "$dir/state"
   printf '╭─────╮\n│ >   │\n╰─────╯\n' > "$dir/composer"
   cat > "$fakebin/tmux" <<'SH'

@@ -444,7 +444,7 @@ install_autoarm_scripts() {
   cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 echo "$$" >> "$FM_HOME/state/arm-ran"
-printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/.watcher-down"
+printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/wake/watcher-down"
 touch "$FM_HOME/state/.last-watcher-beat"
 printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
 printf 'stale: fixture-win actionable\n'
@@ -457,7 +457,7 @@ SH
 # gates both pass and only identity decides the outcome.
 make_primary_home() {  # <dir>
   local dir=$1
-  mkdir -p "$dir/state"
+  mkdir -p "$dir/state/wake"
   git init -q "$dir"
   git -C "$dir" commit -q --allow-empty -m init
   : > "$dir/AGENTS.md"

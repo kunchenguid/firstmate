@@ -776,7 +776,7 @@ test_valid_recording_and_merge_derivation() {
   # A merge this home performed leaves its own durable outcome, so the poll's
   # confirmation is no longer the first the captain hears of it. Acknowledge that
   # record before the watcher cycle below, which is what still retires the poll.
-  assert_grep 'https://github.com/my-org/repo_name.with-dots/pull/37' "$dir/home/state/.wake-queue" \
+  assert_grep 'https://github.com/my-org/repo_name.with-dots/pull/37' "$dir/home/state/wake/queue" \
     "a merge this home performed left no durable outcome"
   ack_watcher_cycle "$dir/home/state" || fail "merge outcome acknowledgement failed"
   # With the merge already reported, the poll's own detection is a duplicate the
@@ -788,7 +788,7 @@ test_valid_recording_and_merge_derivation() {
   set -e
   [ "$rc" -eq 0 ] || fail "guarded merge poll retirement failed: $(cat "$dir/merged-watch.err")"
   assert_poll_absent "$dir/home/state" task-a
-  assert_no_grep "merged-task-a" "$dir/home/state/.wake-queue" \
+  assert_no_grep "merged-task-a" "$dir/home/state/wake/queue" \
     "the drained self-merge outcome was republished by its poll"
   grep -qxF 'pr=https://github.com/my-org/repo_name.with-dots/pull/37' "$dir/home/state/task-a.meta" \
     || fail "guarded merge retirement removed pr metadata"
@@ -2159,7 +2159,7 @@ test_merged_poll_retires_once() {
   case "$second" in check:*z-stop.check.sh:*stop-cycle) ;; *) fail "second cycle did not reach the control check: $second" ;; esac
   ! grep -F 'task-a.check.sh: merged' "$dir/watch-2.out" >/dev/null \
     || fail "retired merged poll executed a second time"
-  ! grep "$(printf '\tcheck\ttask-a.check.sh\t')" "$state/.wake-queue" >/dev/null 2>&1 \
+  ! grep "$(printf '\tcheck\ttask-a.check.sh\t')" "$state/wake/queue" >/dev/null 2>&1 \
     || fail "handled merged notification remained queued after acknowledgement"
   pass "validated merged polls notify once and retire before the next watcher cycle"
 }
@@ -2207,7 +2207,7 @@ test_merged_poll_reregistration_after_notification_is_absorbed() {
   esac
   ! grep -F 'task-a.check.sh: merged' "$dir/watch-2.out" >/dev/null \
     || fail "a repeat identical merged poll opened a main-blocking row: $(cat "$dir/watch-2.out")"
-  ! grep "$(printf '\tcheck\ttask-a.check.sh\t')" "$state/.wake-queue" >/dev/null 2>&1 \
+  ! grep "$(printf '\tcheck\ttask-a.check.sh\t')" "$state/wake/queue" >/dev/null 2>&1 \
     || fail "the absorbed duplicate merge notice was queued as a main-blocking row"
   assert_poll_absent "$state" task-a
   pass "a repeat identical merged poll for an already-notified task is absorbed, never queued as a main-blocking row"
@@ -2300,7 +2300,7 @@ test_self_merge_and_poll_publish_one_outcome() {
     || fail "merge-outcome-committed: watcher failed: $(cat "$dir/watch.err")"
   [ "$(sed -E 's/ \[at=[0-9]+\]//' "$replies" | grep -c -F "done [key=merged-task-a]: merged task-a $url")" -eq 1 ] \
     || fail "merge-outcome-committed: self and poll reports produced duplicate merge outcomes"
-  assert_no_grep "check: $state/task-a.check.sh: merged" "$state/.wake-queue" \
+  assert_no_grep "check: $state/task-a.check.sh: merged" "$state/wake/queue" \
     "merge-outcome-committed: absorbed poll published a second outcome"
   assert_poll_absent "$state" task-a
 
@@ -2327,13 +2327,13 @@ SH
   set -e
   [ "$rc" -eq 0 ] \
     || fail "merge-outcome-uncommitted: landed merge was reported as failed"
-  assert_grep "$url" "$state/.wake-queue" \
+  assert_grep "$url" "$state/wake/queue" \
     "merge-outcome-uncommitted: interrupted publication emitted no outcome"
   [ ! -e "$state/task-a.pr-poll-merge-notified" ] \
     || fail "merge-outcome-uncommitted: failed marker commit was treated as complete"
   ack_watcher_cycle "$state" \
     || fail "merge-outcome-uncommitted: could not drain the first outcome"
-  assert_no_grep "$url" "$state/.wake-queue" \
+  assert_no_grep "$url" "$state/wake/queue" \
     "merge-outcome-uncommitted: first outcome remained queued after its drain"
   rm -f "$dir/fakebin/mv" "$state/.last-check"
 
@@ -2348,7 +2348,7 @@ SH
     check:*task-a.check.sh:*merged) ;;
     *) fail "merge-outcome-uncommitted: poll retry did not re-emit the outcome" ;;
   esac
-  assert_grep "$url" "$state/.wake-queue" \
+  assert_grep "$url" "$state/wake/queue" \
     "merge-outcome-uncommitted: drained outcome was not durably re-emitted"
   fm_pr_poll_merge_already_notified "$state" task-a github github.com o/r 1 \
     || fail "merge-outcome-uncommitted: successful retry did not commit the marker"
@@ -2429,7 +2429,7 @@ test_different_merged_pr_for_same_task_is_not_absorbed() {
     *) fail "a different PR merge was absorbed: $(cat "$dir/watch-2.out")" ;;
   esac
   grep -F "$(printf '\tcheck\tmerged-task-a-https://github.com/o/r/pull/2\t')" \
-    "$state/.wake-queue" >/dev/null 2>&1 \
+    "$state/wake/queue" >/dev/null 2>&1 \
     || fail "the different PR merge did not create a main-blocking wake row"
   fm_pr_poll_merge_already_notified "$state" task-a github github.com o/r 2 \
     || fail "the marker was not advanced to the different PR identity"
@@ -2481,9 +2481,9 @@ test_persistent_secondmate_retirement_is_poll_only() {
   assert_poll_absent "$state" domain
   [ ! -e "$state/domain.pr-poll-merge-notified" ] \
     || fail "a secondmate's retired poll recorded a merge notification"
-  ! grep -F 'merged-domain-' "$state/.wake-queue" >/dev/null 2>&1 \
+  ! grep -F 'merged-domain-' "$state/wake/queue" >/dev/null 2>&1 \
     || fail "a secondmate's merged poll queued a landed-work wake"
-  ! grep -F 'domain.check.sh' "$state/.wake-queue" >/dev/null 2>&1 \
+  ! grep -F 'domain.check.sh' "$state/wake/queue" >/dev/null 2>&1 \
     || fail "a secondmate's merged poll queued a check wake"
   [ "$(shasum -a 256 "$state/domain.meta")" = "$meta_before" ] || fail "retirement changed secondmate metadata"
   [ "$(shasum -a 256 "$state/domain.status")" = "$status_before" ] || fail "retirement changed secondmate status"
@@ -2515,7 +2515,7 @@ test_retirement_crash_recovery() {
   [ "$rc" -eq 0 ] || fail "post-queue retry watcher failed: $(cat "$dir/watch.err")"
   assert_poll_absent "$state" task-a
   raw_count=$(grep -cF "$(printf '\tcheck\tmerged-task-a-https://github.com/o/r/pull/3\t')" \
-    "$state/.wake-queue" || true)
+    "$state/wake/queue" || true)
   [ "$raw_count" -eq 1 ] || fail "post-queue retry did not publish exactly one new terminal row"
   FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-wake-drain.sh" > "$dir/drain.out" 2>/dev/null
   drain_count=$(grep -cF "$(printf '\tcheck\tmerged-task-a-https://github.com/o/r/pull/3\t')" \
@@ -2614,7 +2614,7 @@ test_retirement_crash_recovery() {
   [ "$rc" -eq 0 ] || fail "template-update recovery watcher failed: $(cat "$dir/restart.err")"
   case "$(cat "$dir/restart.out")" in check:*z-stop.check.sh:*stop-cycle) ;; *) fail "template-update recovery did not reach the control check" ;; esac
   [ ! -s "$dir/gh.log" ] || fail "template-update migration rebuilt and queried the retired poll"
-  ! grep "$(printf '\tcheck\ttask-a.check.sh\t')" "$state/.wake-queue" >/dev/null 2>&1 \
+  ! grep "$(printf '\tcheck\ttask-a.check.sh\t')" "$state/wake/queue" >/dev/null 2>&1 \
     || fail "template-update recovery left the handled terminal wake queued"
   assert_poll_absent "$state" task-a
   pass "queue, receipt, and every fixed-path removal crash point recover without loss or repeated execution"
@@ -2766,9 +2766,9 @@ test_retirement_queue_failure_and_receipt_tampering() {
   write_poll_meta "$state" task-a https://github.com/o/r/pull/8
   seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/8
   # Fail sequence publication without making the queue itself look non-empty:
-  # a directory at .wake-queue would now (correctly) trigger re-arm recovery
+  # a directory at wake/queue would now (correctly) trigger re-arm recovery
   # before the poll runs, so it no longer exercises the terminal append path.
-  mkdir "$state/.wake-queue.seq"
+  mkdir "$state/wake/queue.seq"
   before=$(poll_artifact_snapshot "$state" task-a)
   set +e
   FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GH_STATE=MERGED \
@@ -2849,7 +2849,7 @@ archive_away_record() {  # <dir>
 # The durable queue is TSV (epoch, sequence, kind, key, payload).
 merged_ledger_row() {  # <state> <task-id>
   awk -F'\t' -v prefix="check: merge landed: $2 " \
-    'index($5, prefix) == 1 { print $5 }' "$1/.wake-queue"
+    'index($5, prefix) == 1 { print $5 }' "$1/wake/queue"
 }
 
 # Arming also registers the contributions observer, whose poll runs a full fleet
@@ -3118,7 +3118,7 @@ SH
   rm -f "$dir/fakebin/mv" "$state/.last-check"
   run_merged_poll_cycle "$dir"
   awk -F'\t' -v expected="check: merge landed: task-a $url_b" \
-    '$5 == expected { found=1 } END { exit !found }' "$state/.wake-queue" \
+    '$5 == expected { found=1 } END { exit !found }' "$state/wake/queue" \
     || fail "replacement: replacement merge lost its attended authority"
   pass "poll retirement preserves a replacement authority record"
 }

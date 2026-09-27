@@ -93,43 +93,43 @@ new_task_endpoint() {  # <home> <task-id>
   printf 'window=fmtest:fm-%s\nworktree=%s/worktree-%s\nproject=fmtest\n' "$2" "$1" "$2" \
     > "$1/state/$2.meta"
 }
-wake_payloads() { awk -F '\t' '{print $5}' "$1/state/.wake-queue" 2>/dev/null; }
+wake_payloads() { awk -F '\t' '{print $5}' "$1/state/wake/queue" 2>/dev/null; }
 
 # The wake queue is a durable tab-separated record firstmate consumes:
 # <epoch> <sequence> <kind> <key> <payload>. These read the rows reconcile
 # publishes for a source it stranded, keyed by that source and its claim
 # generation.
 stranded_wake_keys() {  # <home> <source-id>
-  [ -e "$1/state/.wake-queue" ] || return 0
+  [ -e "$1/state/wake/queue" ] || return 0
   awk -F '\t' -v id="$2" \
     '$3 == "check" && index($4, "procevent:" id ":stranded:") == 1 { print $4 }' \
-    "$1/state/.wake-queue"
+    "$1/state/wake/queue"
 }
 stranded_wake_count() {  # <home> <source-id>
   stranded_wake_keys "$1" "$2" | grep -c . || true
 }
 stranded_wake_payloads() {  # <home> <source-id>
-  [ -e "$1/state/.wake-queue" ] || return 0
+  [ -e "$1/state/wake/queue" ] || return 0
   awk -F '\t' -v id="$2" \
     '$3 == "check" && index($4, "procevent:" id ":stranded:") == 1 { print $5 }' \
-    "$1/state/.wake-queue"
+    "$1/state/wake/queue"
 }
 # The same rows for a launch reconcile could not confirm, keyed by that source
 # and the registration identity the launch ran under.
 launch_failed_wake_keys() {  # <home> <source-id>
-  [ -e "$1/state/.wake-queue" ] || return 0
+  [ -e "$1/state/wake/queue" ] || return 0
   awk -F '\t' -v id="$2" \
     '$3 == "check" && index($4, "procevent:" id ":launch-failed:") == 1 { print $4 }' \
-    "$1/state/.wake-queue"
+    "$1/state/wake/queue"
 }
 launch_failed_wake_count() {  # <home> <source-id>
   launch_failed_wake_keys "$1" "$2" | grep -c . || true
 }
 launch_failed_wake_payloads() {  # <home> <source-id>
-  [ -e "$1/state/.wake-queue" ] || return 0
+  [ -e "$1/state/wake/queue" ] || return 0
   awk -F '\t' -v id="$2" \
     '$3 == "check" && index($4, "procevent:" id ":launch-failed:") == 1 { print $5 }' \
-    "$1/state/.wake-queue"
+    "$1/state/wake/queue"
 }
 
 first_result() {  # <home> <source-id>: print the first captured result, if any
@@ -233,7 +233,9 @@ out=$(pe "$IDLE" list)
 assert_contains "$out" "no sources registered" "an unconfigured home reports no sources"
 out=$(pe "$IDLE" reconcile)
 assert_contains "$out" "published=0 started=0" "reconcile is a no-op with nothing registered"
-[ -z "$(ls -A "$IDLE/state" 2>/dev/null)" ] || fail "an unconfigured home generated state: $(ls -A "$IDLE/state")"
+# The wake library creates the empty wake-queue directory when sourced.
+[ -z "$(ls -A "$IDLE/state/wake" 2>/dev/null)" ] && [ "$(ls -A "$IDLE/state" 2>/dev/null)" = wake ] \
+  || fail "an unconfigured home generated state: $(ls -AR "$IDLE/state")"
 pass "no configured source means no generated state and no process"
 
 sup=$(PATH="${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" bash -c \
@@ -259,7 +261,7 @@ out=$(pe "$H1" start src-one)
 assert_contains "$out" "already owned" "a duplicate start loses instead of running a second child"
 
 : > "$TRIG"
-wait_for "$H1/state/.wake-queue" || fail "no event was published after the source completed"
+wait_for "$H1/state/wake/queue" || fail "no event was published after the source completed"
 payload=$(wake_payloads "$H1")
 assert_contains "$payload" "procevent lavish src-one 1" "completion publishes the committed result sequence"
 assert_not_contains "$payload" "payload one" "source output never reaches the event line"
@@ -289,7 +291,7 @@ pe "$HSYM" reconcile >/dev/null
 wait_for "$FM_PROCEVENT_CLAIM_ROOT/symlinked-src.claim" \
   || fail "a home reached through a symlinked ancestor never claimed its source"
 : > "$SYM_TRIGGER"
-wait_for "$HSYM/state/.wake-queue" \
+wait_for "$HSYM/state/wake/queue" \
   || fail "a home reached through a symlinked ancestor published no event"
 assert_contains "$(wake_payloads "$HSYM")" "procevent lavish symlinked-src 1" \
   "the symlinked-ancestor home publishes the committed result sequence"
@@ -380,12 +382,12 @@ out=$(pe "$H2" reconcile)
 assert_contains "$out" "published=1" "a durably captured but unhandled result is announced after restart"
 assert_contains "$(wake_payloads "$H2")" "procevent lavish src-cut 7" "durable adapter identity survives without a registration"
 assert_absent "$H2/state/procevent-inbox/src-cut.7.handled" "recovery alone never marks the recovered result handled"
-mv "$H2/state/.wake-queue" "$H2/state/.wake-queue.drained-1"
+mv "$H2/state/wake/queue" "$H2/state/wake/queue.drained-1"
 out=$(pe "$H2" reconcile)
 assert_contains "$out" "published=1" "an unhandled result is re-announced on every reconcile, not only the first"
 assert_contains "$(wake_payloads "$H2")" "procevent lavish src-cut 7" "the repeat wake preserves its deduplication identity"
 [ "$(count_results "$H2" src-cut)" = 1 ] || fail "repeat re-announcement created a second durable copy"
-mv "$H2/state/.wake-queue" "$H2/state/.wake-queue.drained-2"
+mv "$H2/state/wake/queue" "$H2/state/wake/queue.drained-2"
 
 ack_out=$(pe "$H2" handled src-cut 7)
 assert_contains "$ack_out" "handled: src-cut 7" "the owned handling interface newly authorizes the first acknowledgement"
@@ -416,13 +418,13 @@ wait_for "$RACE_PUBLISH_READY" || fail "publication race barrier did not acquire
 pe "$HRACE" reconcile > "$RACE_RECONCILE_OUT" &
 RACE_RECONCILE_PID=$!
 sleep 0.3
-assert_absent "$HRACE/state/.wake-queue" "publication bypassed the source serialization boundary"
+assert_absent "$HRACE/state/wake/queue" "publication bypassed the source serialization boundary"
 : > "$RACE_PUBLISH_RELEASE"
 wait "$RACE_HANDLE_PID" || fail "publication race barrier could not record handling"
 wait "$RACE_RECONCILE_PID" || fail "reconcile failed after the concurrent acknowledgement"
 assert_contains "$(cat "$RACE_RECONCILE_OUT")" "published=0" "reconcile rechecks handling at the serialized publication boundary"
 assert_present "$HRACE/state/procevent-inbox/racing-src.1.handled" "the concurrent acknowledgement remains durable"
-assert_absent "$HRACE/state/.wake-queue" "an acknowledged result was appended after handling completed"
+assert_absent "$HRACE/state/wake/queue" "an acknowledged result was appended after handling completed"
 pass "publication cannot race a handled acknowledgement"
 
 HPRIVATE="$TMP_ROOT/hprivate"; new_home "$HPRIVATE"
@@ -509,12 +511,12 @@ pe_adapter() {  # <home> <command>...: run the runner against the fixture adapte
 HPUBLISH="$TMP_ROOT/hpublish"; new_home "$HPUBLISH"
 fm_test_track_procevent_home "$HPUBLISH"
 pe_adapter "$HPUBLISH" register applying publish-src -- /bin/echo "apply after publish" >/dev/null
-mkdir "$HPUBLISH/state/.wake-queue"
+mkdir "$HPUBLISH/state/wake/queue"
 out=$(pe_adapter "$HPUBLISH" start publish-src 2>&1)
 assert_contains "$out" "not-autohandled: publish-src" "failed publication did not suppress automatic application"
 assert_absent "$HPUBLISH/state/applied" "a result was applied before its wake was durably published"
 assert_absent "$HPUBLISH/state/procevent-inbox/publish-src.1.handled" "a result was acknowledged before its wake was durably published"
-rmdir "$HPUBLISH/state/.wake-queue"
+rmdir "$HPUBLISH/state/wake/queue"
 # This source's child returns instantly, so leaving it registered would have the
 # recovery reconcile below start a detached poll that races every assertion after
 # it for the source claim, the next sequence, and this home's applied record.
@@ -546,7 +548,7 @@ assert_contains "$out" "autohandled: self-src" "the self-announcing adapter did 
 assert_not_contains "$out" "not-autohandled" "the applied capture was still reported as left for the handler"
 assert_grep 'self-src 1' "$HSELF/state/applied" "the self-announcing capture was not applied"
 assert_present "$HSELF/state/procevent-inbox/self-src.1.handled" "the self-announcing application was not acknowledged"
-if [ -e "$HSELF/state/.wake-queue" ] && grep -q 'procevent selfann self-src 1' "$HSELF/state/.wake-queue"; then
+if [ -e "$HSELF/state/wake/queue" ] && grep -q 'procevent selfann self-src 1' "$HSELF/state/wake/queue"; then
   fail "a fully autohandled self-announcing capture still published a duplicate check wake"
 fi
 # This self-announcing source's child returns instantly, so reconcile would
@@ -1330,7 +1332,7 @@ fm_test_track_procevent_home "$HANSWER"
 PATH="$ANSWER_BIN:$PATH" FM_HOME="$HANSWER" \
   "$ROOT/bin/fm-procevent-lavish.sh" arm "$ANSWER_ART" >/dev/null
 PATH="$ANSWER_BIN:$PATH" pe "$HANSWER" reconcile >/dev/null
-wait_for "$HANSWER/state/.wake-queue" \
+wait_for "$HANSWER/state/wake/queue" \
   || fail "a board close carrying the captain's real answer produced no wake"
 assert_contains "$(wake_payloads "$HANSWER")" "procevent lavish $answer_id 1" \
   "a real board answer still reaches the captain"
@@ -1425,7 +1427,7 @@ LAVISH_COUNT="$TMP_ROOT/retry-count"; LAVISH_SCRIPT="interrupt interrupt feedbac
 PATH="$LAVISH_SCRIPTED_BIN:$PATH" FM_HOME="$HRETRY" \
   "$ROOT/bin/fm-procevent-lavish.sh" arm "$RETRY_ART" >/dev/null
 PATH="$LAVISH_SCRIPTED_BIN:$PATH" pe "$HRETRY" reconcile >/dev/null
-wait_for "$HRETRY/state/.wake-queue" || fail "feedback after interrupted polls produced no wake"
+wait_for "$HRETRY/state/wake/queue" || fail "feedback after interrupted polls produced no wake"
 [ "$(cat "$LAVISH_COUNT")" = 3 ] \
   || fail "the interrupted listener was polled $(cat "$LAVISH_COUNT") times, not the two quiet retries plus the delivering poll"
 [ "$(count_results "$HRETRY" "$retry_id")" = 1 ] \
@@ -1544,7 +1546,7 @@ wait_capture "$HEXH" "$exh_id" 200 \
   || fail "the retry bound polled $(cat "$LAVISH_COUNT") times, not the first poll plus 12 bounded retries"
 [ "$(count_results "$HEXH" "$exh_id")" = 1 ] \
   || fail "exhaustion produced $(count_results "$HEXH" "$exh_id") captured results instead of one"
-wait_for "$HEXH/state/.wake-queue" \
+wait_for "$HEXH/state/wake/queue" \
   || fail "the interruption that survives the bound produced no wake"
 assert_contains "$(wake_payloads "$HEXH")" "procevent lavish $exh_id 1" \
   "the interruption that survives the bound is announced normally"
@@ -1565,7 +1567,7 @@ fm_test_track_procevent_home "$HOTHER"
 LAVISH_COUNT="$TMP_ROOT/other-count"; LAVISH_SCRIPT="other-server-error"
 PATH="$LAVISH_SCRIPTED_BIN:$PATH" FM_HOME="$HOTHER" \
   "$ROOT/bin/fm-procevent-lavish.sh" arm "$OTHER_ART" >/dev/null
-wait_for "$HOTHER/state/.wake-queue" \
+wait_for "$HOTHER/state/wake/queue" \
   || fail "an unrelated SERVER_ERROR is captured and announced immediately"
 [ "$(cat "$LAVISH_COUNT")" = 1 ] \
   || fail "an unrelated SERVER_ERROR was retried $(cat "$LAVISH_COUNT") times instead of surfacing at once"
@@ -1587,7 +1589,7 @@ fm_test_track_procevent_home "$HNEAR"
 LAVISH_COUNT="$TMP_ROOT/near-count"; LAVISH_SCRIPT="near-interrupt feedback"
 PATH="$LAVISH_SCRIPTED_BIN:$PATH" FM_HOME="$HNEAR" FM_LAVISH_POLL_RETRY_DELAY=1 \
   "$ROOT/bin/fm-procevent-lavish.sh" arm "$NEAR_ART" >/dev/null
-wait_for "$HNEAR/state/.wake-queue" \
+wait_for "$HNEAR/state/wake/queue" \
   || fail "a whitespace variant of the interruption is captured and announced immediately"
 [ "$(cat "$LAVISH_COUNT")" = 1 ] \
   || fail "a near-match interruption was retried instead of surfacing on its first poll"
@@ -1650,7 +1652,7 @@ stream_staged=("$STREAM_TMPDIR"/fm-lavish-poll.*)
 [ "$(wc -c < "${stream_staged[0]}" | tr -d ' ')" -le 100 ] \
   || fail "streaming poll exceeded its bounded classifier staging"
 : > "$LAVISH_STREAM_RELEASE"
-wait_for "$HSTREAM/state/.wake-queue" || fail "streaming poll produced no wake"
+wait_for "$HSTREAM/state/wake/queue" || fail "streaming poll produced no wake"
 stream_result=$(first_result "$HSTREAM" "$stream_id" || true)
 [ "$(wc -c < "$stream_result" | tr -d ' ')" -le 100 ] \
   || fail "streaming poll bypassed the runner output bound"
@@ -1672,7 +1674,7 @@ pe "$HW" start restart-cut-src > "$TMP_ROOT/restart-cut-start.log" 2>&1 &
 restart_cut_start_pid=$!
 sleep 0.5
 : > "$TRIGW"
-wait_for "$HW/state/.wake-queue" || fail "the restart-cut source published no event"
+wait_for "$HW/state/wake/queue" || fail "the restart-cut source published no event"
 assert_contains "$(wake_payloads "$HW")" "procevent lavish restart-cut-src 1" \
   "capture and publish reaches the wake queue before any handling"
 
@@ -1689,7 +1691,7 @@ pe "$HW" retire restart-cut-src >/dev/null \
 
 # Drain the wake without handling it: the end-user experience of a session
 # reading the wake queue at turn end without yet acting on this specific line.
-mv "$HW/state/.wake-queue" "$HW/state/.wake-queue.drained-unhandled"
+mv "$HW/state/wake/queue" "$HW/state/wake/queue.drained-unhandled"
 [ -z "$(wake_payloads "$HW")" ] || fail "the wake queue was not actually drained"
 
 # Simulate a replacement Firstmate session: reconcile runs cold, as it would on
@@ -1705,7 +1707,7 @@ ack_out=$(pe "$HW" handled restart-cut-src 1)
 assert_contains "$ack_out" "handled: restart-cut-src 1" \
   "the first acknowledgement newly authorizes the paired effect"
 
-mv "$HW/state/.wake-queue" "$HW/state/.wake-queue.post-handle"
+mv "$HW/state/wake/queue" "$HW/state/wake/queue.post-handle"
 out=$(pe "$HW" reconcile)
 assert_contains "$out" "published=0" \
   "a later reconcile does not resurface a result once it is durably handled"
@@ -1736,7 +1738,7 @@ expected=$(printf '%s\n' \
 pe "$HP" reconcile >/dev/null
 deduped=$(FM_HOME="$HP" bash -c '
   . "$1/bin/fm-wake-lib.sh"
-  fm_wake_print_deduped "$2/state/.wake-queue" | awk -F "\t" "{print \$5}"
+  fm_wake_print_deduped "$2/state/wake/queue" | awk -F "\t" "{print \$5}"
 ' _ "$ROOT" "$HP")
 expected=$(printf '%s\n' \
   'check: procevent lavish ordered-src 1' \
@@ -2670,7 +2672,7 @@ TRIG3="$TMP_ROOT/trigger-three"
 pe_register "$HD" lavish argv-src -- "$BLOCKER" "$TRIG3" "one arg with spaces" "second; rm -rf /tmp/nope" >/dev/null
 pe "$HD" reconcile >/dev/null
 : > "$TRIG3"
-wait_for "$HD/state/.wake-queue" || fail "argv source published no event"
+wait_for "$HD/state/wake/queue" || fail "argv source published no event"
 R=$(first_result "$HD" argv-src || true)
 assert_grep 'one arg with spaces' "$R" "an argument containing spaces survives as one argument"
 assert_grep 'second; rm -rf /tmp/nope' "$R" "a shell-looking argument is passed literally, never interpreted"

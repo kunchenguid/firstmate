@@ -42,7 +42,7 @@
 # Reliability model (see the /afk skill):
 #   - Nothing is lost in away mode: while state/.afk exists, the watcher reverts
 #     to daemon-owned one-shot behavior and enqueues every wake to
-#     state/.wake-queue BEFORE advancing its suppression markers, so a
+#     state/wake/queue BEFORE advancing its suppression markers, so a
 #     crash/restart/missed injection is recovered on the next fm-wake-drain.sh.
 #     After a watcher cycle, the daemon handles every durable row through that
 #     drain and acknowledges it only after routing completes.

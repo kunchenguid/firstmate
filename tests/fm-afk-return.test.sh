@@ -862,7 +862,7 @@ test_return_brief_health_leads_with_a_gap() {
   dir="$TMP_ROOT/brief-gap"
   install_runner "$dir"
   contract_in "$dir" enter >/dev/null 2>&1 || fail "could not write the away-posture record"
-  : > "$dir/home/state/.watcher-down"
+  : > "$dir/home/state/wake/watcher-down"
   # A beacon older than the grace, on either date flavor.
   touch "$dir/home/state/.last-watcher-beat"
   if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$(( $(date +%s) - 900 ))" '+%Y%m%d%H%M.%S')" "$dir/home/state/.last-watcher-beat"
@@ -886,7 +886,7 @@ test_return_brief_does_not_report_an_acked_watcher_down_marker_as_a_gap() {
   # An episode that was detected and fully handled during the away window
   # leaves the marker behind in an acked state (fm-wake-lib.sh
   # _fm_recovery_marker_ack); that is not an open gap.
-  printf 'acked:downtime:fixture-generation\n' > "$dir/home/state/.watcher-down"
+  printf 'acked:downtime:fixture-generation\n' > "$dir/home/state/wake/watcher-down"
   touch "$dir/home/state/.last-watcher-beat"
   : > "$dir/home/state/.fake-drain"
   out=$(run_return "$dir" begin) || fail "a clean fleet with only a handled marker should clear the gate: $out"

@@ -347,7 +347,7 @@ wait_for_file() {
 }
 
 wake_payloads() {
-  awk -F '\t' '{print $5}' "$1/state/.wake-queue" 2>/dev/null
+  awk -F '\t' '{print $5}' "$1/state/wake/queue" 2>/dev/null
 }
 
 first_result() {

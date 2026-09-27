@@ -20,8 +20,8 @@
 #           fleet work and must not become fleet work.
 #
 # Usage:
-#   fm-inbox.sh note [--request-id <id>] [--json] [--] <text>...
-#   fm-inbox.sh note [--request-id <id>] [--json] -   (body from stdin)
+#   fm-inbox.sh note [--request-id <id>] [--json] [--no-announce] [--] <text>...
+#   fm-inbox.sh note [--request-id <id>] [--json] [--no-announce] -   (body from stdin)
 #   fm-inbox.sh announce [--json] <id>
 #   fm-inbox.sh reply [--json] <id> <text>... | reply [--json] <id> -
 #   fm-inbox.sh receipts [--after <cursor>] [--all-pending] [--all-handled] [--all-replies]
@@ -62,6 +62,18 @@
 # Each reply is stamped with a durable per-home sequence, so the receipts cursor
 # is a strict total order and two replies recorded in the same second are both
 # readable. One reply per note: a second one is refused.
+# `note --no-announce` saves the note and appends no wake: it creates entries
+# only under state/inbox/, takes no lock and never loads the wake library, so a
+# sandboxed caller is granted just state/inbox/ writable. The watcher announces
+# such a note through `announce` (bin/fm-watch.sh inbox_announce_pending). A
+# sandboxed importer binds only state/inbox/ and never state/wake/, so every
+# lock, including the reply lock state/wake/replies.lock, stays out of its reach
+# (tests/fm-inbox.test.sh pins this). Because that caller can plant links in
+# state/inbox/, `reply`, `drain --ack` and the announcement marker write only
+# inside the real .replies/, handled/ and .announced/ directories, and refuse
+# such a directory that is a link or resolves anywhere else. `reply` writes its
+# counter and record in state/wake/ and only renames them in, and `drain --ack`
+# refuses the whole batch when any id is not a valid note id.
 # `ready` is the read-only primary-readiness projection (lock, wake-consumer
 # health, away posture, observation time). It never acquires the session lock
 # and never infers liveness from a lock file, a session, or a pane.
@@ -197,8 +209,6 @@ REQUESTS="$INBOX/.requests"
 ANNOUNCED_DIR="$INBOX/.announced"
 REPLIES="$INBOX/.replies"
 
-REPLY_SEQ_LOCK="$INBOX/.replies.lock"
-
 RECEIPTS_PENDING_BOUND=20
 RECEIPTS_HANDLED_BOUND=20
 RECEIPTS_REPLIES_BOUND=20
@@ -251,9 +261,38 @@ note_announced() {  # <id>
   [ -f "$ANNOUNCED_DIR/$1" ]
 }
 
+# A sandboxed note producer can write state/inbox, so it can plant a link where
+# the primary later writes. enter_inbox_dir changes into the real
+# state/inbox/<name> directory, creating it when absent, and refuses a <name>
+# that is a link or resolves anywhere else. Writes after it use paths relative
+# to that directory, which a later swap of <name> cannot redirect, and publish
+# with rename_no_follow, which replaces a planted link instead of following it
+# into a directory the way mv does. It sets INBOX_REAL to the physical inbox.
+enter_inbox_dir() {  # <name>
+  mkdir -p "$INBOX" 2>/dev/null || return 1
+  INBOX_REAL=$(cd -P "$INBOX" && pwd -P) || return 1
+  [ ! -L "$INBOX/$1" ] || return 1
+  mkdir -p "$INBOX/$1" 2>/dev/null || return 1
+  cd -P "$INBOX/$1" 2>/dev/null && [ "$(pwd -P)" = "$INBOX_REAL/$1" ]
+}
+
+rename_no_follow() {  # <from> <to>
+  perl -e 'rename($ARGV[0], $ARGV[1]) or exit 1' "$1" "$2"
+}
+
+# The marker is written only inside the real state/inbox/.announced directory
+# and only as a new file.
 mark_announced() {  # <id>
-  mkdir -p "$ANNOUNCED_DIR"
-  printf '%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$ANNOUNCED_DIR/$1"
+  local stamp
+  stamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  (
+    enter_inbox_dir .announced || exit 1
+    perl -MFcntl=:DEFAULT -e '
+      sysopen(my $marker, $ARGV[0], O_WRONLY | O_CREAT | O_EXCL, 0666) or exit 1;
+      print {$marker} "$ARGV[1]\n" or exit 1;
+      close($marker) or exit 1;
+    ' "./$1" "$stamp"
+  )
 }
 
 # true | false | unknown, for the note recorded at <path>.
@@ -354,7 +393,7 @@ announce_note() {  # <id> <summary>
     return 2
   fi
   if fm_wake_append_locked check "inbox:$id" "check: captain inbox note $id - $summary"; then
-    mark_announced "$id"
+    mark_announced "$id" || status=1
   else
     status=1
   fi
@@ -362,13 +401,19 @@ announce_note() {  # <id> <summary>
   return "$status"
 }
 
-finish_note_result() {  # <outcome> <id> <request-id> <json> <strict-exit> <summary>
-  local outcome=$1 id=$2 request_id=$3 json=$4 strict=$5 summary=$6
-  local announced=0 acknowledged=0 path="$INBOX/$id.note" rc=0
-  announce_note "$id" "$summary" || rc=$?
+finish_note_result() {  # <outcome> <id> <request-id> <json> <strict-exit> <summary> <announce>
+  local outcome=$1 id=$2 request_id=$3 json=$4 strict=$5 summary=$6 announce=$7
+  local announced=0 acknowledged=0 deferred=0 path="$INBOX/$id.note" rc=0
+  if [ "$announce" -eq 1 ]; then
+    announce_note "$id" "$summary" || rc=$?
+  elif ! note_announced "$id"; then
+    rc=4
+    [ -f "$INBOX/$id.note" ] || rc=2
+  fi
   case "$rc" in
     0) announced=1 ;;
     2) acknowledged=1 ;;
+    4) deferred=1 ;;
   esac
   [ -f "$INBOX/handled/$id.note" ] && path="$INBOX/handled/$id.note"
   if [ "$json" -eq 1 ]; then
@@ -384,9 +429,11 @@ finish_note_result() {  # <outcome> <id> <request-id> <json> <strict-exit> <summ
       printf '  firstmate will pick this up at its next check.\n'
     elif [ "$acknowledged" -eq 1 ]; then
       printf '  firstmate has already acknowledged this note.\n'
+    elif [ "$deferred" -eq 1 ]; then
+      printf "  firstmate's watcher will announce this note at its next poll.\n"
     fi
   fi
-  if [ "$announced" -eq 1 ] || [ "$acknowledged" -eq 1 ]; then
+  if [ "$announced" -eq 1 ] || [ "$acknowledged" -eq 1 ] || [ "$deferred" -eq 1 ]; then
     return 0
   fi
   if [ "$strict" -eq 1 ]; then
@@ -423,7 +470,7 @@ publish_from_reservation() {  # <request-id> <source> <body> <extra>
 }
 
 queue_note() {
-  local source=$1 body=$2 extra=${3:-} request_id=${4:-} json=${5:-0}
+  local source=$1 body=$2 extra=${3:-} request_id=${4:-} json=${5:-0} announce=${6:-1}
   local strict=0
   if [ -n "$request_id" ] || [ "$json" -eq 1 ]; then
     strict=1
@@ -439,7 +486,7 @@ queue_note() {
       id=$(publish_from_reservation "$request_id" "$source" "$body" "$extra") \
         || die "request id $request_id is reserved but unreadable; retry the same request id"
       summary=$(note_summary_from_body "$(read_note_body "$(note_path "$id")")")
-      finish_note_result replay "$id" "$request_id" "$json" "$strict" "$summary"
+      finish_note_result replay "$id" "$request_id" "$json" "$strict" "$summary" "$announce"
       return $?
     fi
     tmp=$(mktemp "$INBOX/.staging-XXXXXX")
@@ -451,12 +498,12 @@ queue_note() {
       id=$(publish_from_reservation "$request_id" "$source" "$body" "$extra") \
         || die "request id $request_id is reserved but unreadable; retry the same request id"
       summary=$(note_summary_from_body "$(read_note_body "$(note_path "$id")")")
-      finish_note_result replay "$id" "$request_id" "$json" "$strict" "$summary"
+      finish_note_result replay "$id" "$request_id" "$json" "$strict" "$summary" "$announce"
       return $?
     fi
     mv "$tmp" "$INBOX/$id.note"
     summary=$(note_summary_from_body "$body")
-    finish_note_result created "$id" "$request_id" "$json" "$strict" "$summary"
+    finish_note_result created "$id" "$request_id" "$json" "$strict" "$summary" "$announce"
     return $?
   fi
 
@@ -466,36 +513,37 @@ queue_note() {
   write_note_file "$tmp" "$id" "$source" "$body" "$extra" ""
   mv "$tmp" "$INBOX/$id.note"
   summary=$(note_summary_from_body "$body")
-  finish_note_result created "$id" "" "$json" "$strict" "$summary"
+  finish_note_result created "$id" "" "$json" "$strict" "$summary" "$announce"
 }
 
 cmd_note() {
-  local body json=0 request_id=""
+  local body json=0 request_id="" announce=1
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --json) json=1; shift ;;
+      --no-announce) announce=0; shift ;;
       --request-id)
-        [ "$#" -ge 2 ] || die "usage: fm-inbox.sh note [--request-id <id>] [--json] [--] <text>... (or: note -)"
+        [ "$#" -ge 2 ] || die "usage: fm-inbox.sh note [--request-id <id>] [--json] [--no-announce] [--] <text>... (or: note -)"
         request_id=$2
         valid_request_id "$request_id" \
           || die "invalid request id (use 1-128 characters: A-Za-z0-9._:-)"
         shift 2
         ;;
       --) shift; break ;;
-      -h|--help) die "usage: fm-inbox.sh note [--request-id <id>] [--json] [--] <text>... (or: note -)" ;;
+      -h|--help) die "usage: fm-inbox.sh note [--request-id <id>] [--json] [--no-announce] [--] <text>... (or: note -)" ;;
       *) break ;;
     esac
   done
   if [ "$#" -eq 0 ]; then
-    die "usage: fm-inbox.sh note [--request-id <id>] [--json] [--] <text>... (or: note -)"
+    die "usage: fm-inbox.sh note [--request-id <id>] [--json] [--no-announce] [--] <text>... (or: note -)"
   elif [ "$1" = "-" ]; then
-    [ "$#" -eq 1 ] || die "usage: fm-inbox.sh note [--request-id <id>] [--json] -"
+    [ "$#" -eq 1 ] || die "usage: fm-inbox.sh note [--request-id <id>] [--json] [--no-announce] -"
     body=$(cat; printf .)
     body=${body%.}
   else
     body="$*"
   fi
-  queue_note text "$body" "" "$request_id" "$json"
+  queue_note text "$body" "" "$request_id" "$json" "$announce"
 }
 
 cmd_announce() {
@@ -558,18 +606,22 @@ cmd_announce() {
   die "note $id is saved at $path but firstmate was NOT woken"
 }
 
-# Claim the next reply sequence. The caller holds REPLY_SEQ_LOCK across the
-# claim AND the record write, so a reply a reader can see implies every lower
-# sequence is already readable: the cursor stays a strict total order.
+# Claim the next reply sequence, run inside the real replies directory. The
+# caller holds the reply lock across the claim AND the record write, so a reply
+# a reader can see implies every lower sequence is already readable: the cursor
+# stays a strict total order.
 # The claim is above both the counter and every recorded reply, and the counter
 # is replaced by rename, so a torn or lost counter can never move it backwards.
+# Both the counter and the reply record are written in state/wake/, which the
+# sandboxed importer cannot reach, and only renamed into the replies directory,
+# so no path the importer can swap is ever opened for writing.
 next_reply_seq() {
-  local seq_file="$REPLIES/.seq" seq recorded tmp
+  local seq_file=.seq seq recorded tmp
   seq=$(cat "$seq_file" 2>/dev/null || printf '0')
   case "$seq" in
     ''|*[!0-9]*) seq=0 ;;
   esac
-  recorded=$(find "$REPLIES" -maxdepth 1 -type f ! -name '.*' -exec awk '
+  recorded=$(find . -maxdepth 1 -type f ! -name '.*' -exec awk '
     FNR == 1 { head = 1 }
     /^--$/ { head = 0 }
     head && /^seq=[0-9]+$/ { v = substr($0, 5) + 0; if (v > max) max = v }
@@ -579,8 +631,8 @@ next_reply_seq() {
   esac
   [ "$recorded" -le "$seq" ] || seq=$recorded
   seq=$((seq + 1))
-  tmp=$(mktemp "$REPLIES/.seq-XXXXXX") || return 1
-  if ! printf '%s\n' "$seq" >"$tmp" || ! mv "$tmp" "$seq_file"; then
+  tmp=$(mktemp "$FM_WAKE_DIR/.reply-seq.XXXXXX") || return 1
+  if ! printf '%s\n' "$seq" >"$tmp" || ! rename_no_follow "$tmp" "$seq_file"; then
     rm -f "$tmp"
     return 1
   fi
@@ -588,7 +640,7 @@ next_reply_seq() {
 }
 
 cmd_reply() {
-  local json=0 id body path staging seq
+  local json=0 id body path staging seq lock
   if [ "${1:-}" = "--json" ]; then
     json=1
     shift
@@ -608,18 +660,22 @@ cmd_reply() {
     body="$*"
   fi
   [ -n "${body//[[:space:]]/}" ] || die "refusing to record an empty reply"
-  mkdir -p "$REPLIES"
+  enter_inbox_dir .replies || die "refusing to reply: $REPLIES is a link or resolves outside $INBOX"
   load_wake_lib || die "the reply sequence needs $FM_ROOT/bin/fm-wake-lib.sh"
-  fm_lock_acquire_wait "$REPLY_SEQ_LOCK" || die "could not claim the reply sequence"
-  if [ -f "$REPLIES/$id" ]; then
-    fm_lock_release "$REPLY_SEQ_LOCK"
+  lock="$FM_WAKE_DIR/replies.lock"
+  fm_lock_acquire_wait "$lock" || die "could not claim the reply sequence"
+  if [ -e "./$id" ] || [ -L "./$id" ]; then
+    fm_lock_release "$lock"
     die "reply already recorded for $id"
   fi
   if ! seq=$(next_reply_seq); then
-    fm_lock_release "$REPLY_SEQ_LOCK"
+    fm_lock_release "$lock"
     die "could not claim the reply sequence"
   fi
-  staging=$(mktemp "$REPLIES/.staging-XXXXXX")
+  if ! staging=$(mktemp "$FM_WAKE_DIR/.reply-staging.XXXXXX"); then
+    fm_lock_release "$lock"
+    die "could not record the reply for $id"
+  fi
   {
     printf 'id=%s\n' "$id"
     printf 'at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -631,8 +687,8 @@ cmd_reply() {
       *) printf '\n' ;;
     esac
   } >"$staging"
-  mv "$staging" "$REPLIES/$id"
-  fm_lock_release "$REPLY_SEQ_LOCK"
+  rename_no_follow "$staging" "./$id" || { rm -f "$staging"; fm_lock_release "$lock"; die "could not record the reply for $id"; }
+  fm_lock_release "$lock"
   if [ "$json" -eq 1 ]; then
     need_python
     python3 - "$id" "$REPLIES/$id" <<'PY'
@@ -1117,11 +1173,14 @@ cmd_drain() {
   if [ "${1:-}" = "--ack" ]; then
     shift
     [ "$#" -gt 0 ] || die "usage: fm-inbox.sh drain --ack <id>..."
-    mkdir -p "$INBOX/handled"
     local id
     for id in "$@"; do
-      if [ -f "$INBOX/$id.note" ]; then
-        mv "$INBOX/$id.note" "$INBOX/handled/$id.note"
+      valid_note_id "$id" || die "invalid note id: $id"
+    done
+    enter_inbox_dir handled || die "refusing to ack: $INBOX/handled is a link or resolves outside $INBOX"
+    for id in "$@"; do
+      if [ -f "$INBOX_REAL/$id.note" ]; then
+        rename_no_follow "$INBOX_REAL/$id.note" "./$id.note" || die "could not ack $id"
         printf 'acked %s\n' "$id"
       else
         printf 'already-acked %s\n' "$id"

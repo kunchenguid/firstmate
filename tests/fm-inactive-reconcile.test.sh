@@ -123,7 +123,7 @@ run_report() { # <home> <child>
 }
 
 wake_count() { # <home> <key prefix>
-  grep -c "$2" "$1/state/.wake-queue" 2>/dev/null || true
+  grep -c "$2" "$1/state/wake/queue" 2>/dev/null || true
 }
 
 outcome_count() { # <home> <suffix>
@@ -188,7 +188,7 @@ test_branch_ack_retires_inactive_outcome_receipt() {
   # The same grant the branch dispatch publishes for this row in the away
   # posture (check rows become branch-eligible), with this test's own live
   # process as the recorded grant owner.
-  seq=$(awk -F '\t' '$4 ~ /^inactive-outcome:/ { print $2 }' "$MAIN/state/.wake-queue" | tail -1)
+  seq=$(awk -F '\t' '$4 ~ /^inactive-outcome:/ { print $2 }' "$MAIN/state/wake/queue" | tail -1)
   case "$seq" in ''|*[!0-9]*) fail "the queued inactive-outcome row had no sequence" ;; esac
   FM_HOME="$MAIN" FM_STATE_OVERRIDE="$MAIN/state" "$GRANT" activate "$$" branch-ack \
     || fail "branch owner activation failed"
@@ -712,7 +712,7 @@ test_invalid_secondmate_marker_blocks_routing() {
       || fail "$kind secondmate marker created a main-home pending receipt"
     [ "$(wake_count "$MATE" 'inactive-reconcile-diagnostic:invalid-secondmate-home')" = 1 ] \
       || fail "$kind secondmate marker diagnostic was not durably queued"
-    ! grep -Fq 'inactive-outcome:' "$MATE/state/.wake-queue" 2>/dev/null \
+    ! grep -Fq 'inactive-outcome:' "$MATE/state/wake/queue" 2>/dev/null \
       || fail "$kind secondmate marker routed a captain presentation wake"
     [ -f "$MATE/state/child.meta" ] && [ -f "$MATE/state/child.status" ] \
       || fail "$kind secondmate marker lost the terminal obligation"
@@ -880,7 +880,7 @@ test_watcher_hook_and_idle_secondmate_exemption() {
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$WORLD/idle.out" 2>&1 &
   pid=$!; sleep 2; kill -0 "$pid" 2>/dev/null || fail "idle secondmate watcher exited unexpectedly"; reap "$pid"
   grep -F 'stale:' "$WORLD/idle.out" >/dev/null && fail "idle secondmate was treated as a wedge"
-  [ ! -s "$MAIN/state/.wake-queue" ] || fail "idle secondmate emitted a false wake"
+  [ ! -s "$MAIN/state/wake/queue" ] || fail "idle secondmate emitted a false wake"
   pass "watcher hook wakes for terminal loss and preserves idle secondmate exemption"
 }
 
@@ -936,7 +936,7 @@ SH
 
   write_child "$MAIN" b 'done: green'
   FM_INACTIVE_RECONCILE_BUDGET_SECS=1 run_reconcile "$MAIN" --startup
-  grep -Fq 'child=b state=done' "$MAIN/state/.wake-queue" \
+  grep -Fq 'child=b state=done' "$MAIN/state/wake/queue" \
     || fail "next bounded scan did not resume with the following child"
   pass "stalled state reads are bounded without starving later children"
 }

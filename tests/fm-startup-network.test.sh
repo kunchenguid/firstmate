@@ -126,12 +126,12 @@ run_stage() {  # <home> <root> <args...>
 
 wait_for_startup_network_wake() {  # <home> [tenths]
   local home=$1 limit=${2:-50} waited=0
-  while ! grep -Fq $'check\tstartup-network' "$home/state/.wake-queue" 2>/dev/null \
+  while ! grep -Fq $'check\tstartup-network' "$home/state/wake/queue" 2>/dev/null \
     && [ "$waited" -lt "$limit" ]; do
     sleep 0.1
     waited=$((waited + 1))
   done
-  grep -Fq $'check\tstartup-network' "$home/state/.wake-queue" 2>/dev/null
+  grep -Fq $'check\tstartup-network' "$home/state/wake/queue" 2>/dev/null
 }
 
 # hold_publish_lock <home>: take the stage's publish lock from a separate live
@@ -226,8 +226,8 @@ EOF
   done
   ! kill -0 "$worker_pid" 2>/dev/null \
     || fail "the worker did not settle after harvest acknowledged its result"
-  [ ! -s "$home/state/.wake-queue" ] \
-    || fail "a result harvest acknowledged also queued a wake: $(cat "$home/state/.wake-queue")"
+  [ ! -s "$home/state/wake/queue" ] \
+    || fail "a result harvest acknowledged also queued a wake: $(cat "$home/state/wake/queue")"
 
   # Harvest releases that claim, so the NEXT publication has nobody to print it.
   # An actionable result (not a clean success) is used here so the assertion
@@ -236,15 +236,15 @@ EOF
   assert_absent "$home/state/.startup-network.claim" "harvest did not release its own claim"
   FM_FAKE_BOOTSTRAP_LOG="$log" FM_FAKE_BOOTSTRAP_OUT='MISSING: some-tool (install: brew install some-tool)' \
     run_stage "$home" "$root" run --locked 0
-  assert_grep 'check	startup-network' "$home/state/.wake-queue" \
+  assert_grep 'check	startup-network' "$home/state/wake/queue" \
     "an unclaimed actionable result never reached the wake queue"
 
-  : > "$home/state/.wake-queue"
+  : > "$home/state/wake/queue"
   FM_FAKE_BOOTSTRAP_LOG="$log" FM_FAKE_BOOTSTRAP_OUT='MISSING: some-tool (install: brew install some-tool)' \
     run_stage "$home" "$root" start --locked 0 --harvest-pid 999999999
   run_stage "$home" "$root" wait 30 >/dev/null || fail "the dead-claim worker never published"
   wait_for_startup_network_wake "$home" || fail "the dead-claim worker never settled delivery"
-  assert_grep 'check	startup-network' "$home/state/.wake-queue" \
+  assert_grep 'check	startup-network' "$home/state/wake/queue" \
     "a dead session's stale claim swallowed the result"
   assert_absent "$home/state/.startup-network.claim" "a dead claim was not reaped"
   pass "fm-startup-network: exactly one of the digest and the wake reports each actionable result"
@@ -269,7 +269,7 @@ EOF
   kill "$claimant" 2>/dev/null || true
   wait "$claimant" 2>/dev/null || true
   wait_for_startup_network_wake "$home" || fail "the crash-window worker never settled delivery"
-  assert_grep 'check	startup-network' "$home/state/.wake-queue" \
+  assert_grep 'check	startup-network' "$home/state/wake/queue" \
     "a claimant crash after publication silently lost the result"
   assert_absent "$home/state/.startup-network.delivered" \
     "an unharvested result was recorded as delivered"
@@ -302,7 +302,7 @@ EOF
   assert_absent "$home/state/.startup-network.delivered" \
     "harvest acknowledged a result whose report was not published"
   wait_for_startup_network_wake "$home" || fail "the report-publication failure suppressed the wake"
-  assert_grep 'check	startup-network' "$home/state/.wake-queue" \
+  assert_grep 'check	startup-network' "$home/state/wake/queue" \
     "the report-publication failure did not reach the wake queue"
 
   kill "$claimant" 2>/dev/null || true
@@ -332,8 +332,8 @@ EOF
   # Give the same settling window the crash-window test uses, then confirm no
   # wake ever lands - not a race that just hasn't finished yet.
   sleep 1
-  [ ! -s "$home/state/.wake-queue" ] \
-    || fail "a clean successful network-checks result queued a main-blocking wake: $(cat "$home/state/.wake-queue")"
+  [ ! -s "$home/state/wake/queue" ] \
+    || fail "a clean successful network-checks result queued a main-blocking wake: $(cat "$home/state/wake/queue")"
   report=$(run_stage "$home" "$root" report)
   assert_contains "$report" "(silent - no problems found)" \
     "a successful result was not durably readable through report: $report"
@@ -344,8 +344,8 @@ EOF
   FM_FAKE_BOOTSTRAP_LOG="$log" \
     FM_FAKE_BOOTSTRAP_OUT='BOOTSTRAP_INFO: fixture completed benign work' \
     run_stage "$home" "$root" run --locked 0
-  [ ! -s "$home/state/.wake-queue" ] \
-    || fail "a BOOTSTRAP_INFO-only success queued a main-blocking wake: $(cat "$home/state/.wake-queue")"
+  [ ! -s "$home/state/wake/queue" ] \
+    || fail "a BOOTSTRAP_INFO-only success queued a main-blocking wake: $(cat "$home/state/wake/queue")"
   report=$(run_stage "$home" "$root" report)
   assert_contains "$report" "BOOTSTRAP_INFO: fixture completed benign work" \
     "the completed no-action fact was not retained in the durable report"
@@ -373,7 +373,7 @@ EOF
 
   wait_for_startup_network_wake "$home" \
     || fail "an actionable successful (state=done) result never queued a wake"
-  assert_grep 'check	startup-network' "$home/state/.wake-queue" \
+  assert_grep 'check	startup-network' "$home/state/wake/queue" \
     "an actionable result did not reach the wake queue"
 
   pass "fm-startup-network: an actionable state=done report still queues a wake"
@@ -396,7 +396,7 @@ EOF
     fi
 
     FM_FAKE_BOOTSTRAP_LOG="$log" run_stage "$home" "$root" run --locked 1
-    assert_grep $'check\tinactive-reconcile-diagnostic:invalid-secondmate-home\t' "$home/state/.wake-queue" \
+    assert_grep $'check\tinactive-reconcile-diagnostic:invalid-secondmate-home\t' "$home/state/wake/queue" \
       "$kind marker finding was swallowed by the deferred startup stage"
     report=$(run_stage "$home" "$root" report)
     assert_contains "$report" "(silent - no problems found)" \
@@ -410,7 +410,7 @@ EOF
       || fail "$kind marker wake did not issue a durable acknowledgement"
     FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$DRAIN" \
       --ack-through "$seq" --recovery-generation "$generation" >/dev/null
-    assert_no_grep 'inactive-reconcile-diagnostic:invalid-secondmate-home' "$home/state/.wake-queue" \
+    assert_no_grep 'inactive-reconcile-diagnostic:invalid-secondmate-home' "$home/state/wake/queue" \
       "$kind marker wake could not be acknowledged"
   done
   pass "fm-startup-network: deferred invalid secondmate markers produce durable wakes"
@@ -465,7 +465,7 @@ EOF
   assert_contains "$report" "fm-startup-network.sh run --locked 1" \
     "the timeout line did not say how to rerun the stage"
   wait_for_startup_network_wake "$home" || fail "the timed-out worker never settled delivery"
-  assert_grep 'check	startup-network' "$home/state/.wake-queue" \
+  assert_grep 'check	startup-network' "$home/state/wake/queue" \
     "a timed-out stage did not surface to the agent"
   pass "fm-startup-network: an aggregate bound turns a wedged sweep into an actionable line"
 }
@@ -531,7 +531,7 @@ EOF
     || fail "the locked request never published"
   assert_grep 'network=only detect_only=0' "$log" \
     "the in-flight probe-only worker suppressed the locked sweeps"
-  assert_grep $'check\tinactive-reconcile-diagnostic:invalid-secondmate-home\t' "$home/state/.wake-queue" \
+  assert_grep $'check\tinactive-reconcile-diagnostic:invalid-secondmate-home\t' "$home/state/wake/queue" \
     "the in-flight probe-only worker suppressed the locked inactive scan"
   pass "fm-startup-network: locked requests supersede in-flight probe-only workers"
 }
@@ -824,14 +824,14 @@ EOF
     "the failed record did not name the process holding the lock: $report"
   assert_contains "$report" "fm-startup-network.sh run --locked 0" \
     "the failed record did not say how to rerun the stage"
-  assert_grep 'check	startup-network' "$home/state/.wake-queue" \
+  assert_grep 'check	startup-network' "$home/state/wake/queue" \
     "a worker that gave up on the lock did not surface to the agent"
   kill "$holder" 2>/dev/null || true
   await_pid_exit "$holder" 50 || fail "could not release the first lock holder"
 
   # After the sweeps: the worker registers and sweeps freely, then finds the
   # lock held when it comes to publish. What the sweeps produced must survive.
-  rm -f "$home/state/.wake-queue" "$log"
+  rm -f "$home/state/wake/queue" "$log"
   FM_FAKE_BOOTSTRAP_LOG="$log" FM_FAKE_BOOTSTRAP_SLEEP=2 FM_FAKE_BOOTSTRAP_OUT='PROBE_RAN' \
     FM_STARTUP_NETWORK_TIMEOUT=10 FM_SESSION_START_TIMEOUT=2 \
     run_stage "$home" "$root" start --locked 0 --harvest-pid 999999999
@@ -853,7 +853,7 @@ EOF
     "the sweep output was discarded when publication found the lock held: $report"
   assert_contains "$report" "still held by pid $holder" \
     "the unpublished result did not name the process holding the lock"
-  assert_grep 'check	startup-network' "$home/state/.wake-queue" \
+  assert_grep 'check	startup-network' "$home/state/wake/queue" \
     "a result that could not be published under the lock did not surface to the agent"
   kill "$holder" 2>/dev/null || true
   pass "fm-startup-network: a held publish lock ends the worker inside its budget with a failed-rerun record"

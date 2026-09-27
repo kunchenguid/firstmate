@@ -252,12 +252,12 @@ unit_stop_archives_the_record_last() {
 unit_clear_stale() {
   local st
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-clear.XXXXXX")
-  mkdir -p "$st/state"
+  mkdir -p "$st/state/wake"
   : > "$st/state/.subsuper-escalations"
   : > "$st/state/.subsuper-escalations.since"
   : > "$st/state/.subsuper-inject-wedged"
   : > "$st/state/.subsuper-unknown-acked"
-  : > "$st/state/.wake-queue"          # durable queue must be untouched
+  : > "$st/state/wake/queue"          # durable queue must be untouched
   # Source fm-afk-start.sh inside a child bash (it sets `set -eu` and would
   # otherwise leak that into this test shell) and call the clear helper.
   FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" \
@@ -270,7 +270,7 @@ unit_clear_stale() {
   else
     fail "clear-stale: stale artifacts survived"
   fi
-  if [ -e "$st/state/.wake-queue" ]; then
+  if [ -e "$st/state/wake/queue" ]; then
     pass "clear-stale: leaves the durable wake-queue intact (no pending work dropped)"
   else
     fail "clear-stale: removed the durable wake-queue"

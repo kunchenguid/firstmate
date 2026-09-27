@@ -317,7 +317,7 @@ test_second_missed_turn_escalates_once_and_stays_durable() {
     "blocked [key=pending-reply-$corr]"*pending-reply-missed:*pending-reply-id=$corr*) : ;;
     *) fail "parent status should carry one blocked missed-report line"$'\n'"$status_line" ;;
   esac
-  [ ! -s "$state/.wake-queue" ] || fail "direct escalation must not enqueue a duplicate check wake"
+  [ ! -s "$state/wake/queue" ] || fail "direct escalation must not enqueue a duplicate check wake"
   # Second escalate must be a no-op (phase no longer recovery_sent).
   if fm_pending_reply_maybe_escalate "$state" "$corr" 2>/dev/null; then
     # Function returns 1 when phase is not recovery_sent - good.

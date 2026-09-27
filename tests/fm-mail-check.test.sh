@@ -160,7 +160,7 @@ printf "42\\t2026-09-05T00:00:00Z\\talice@example.com\\tHello\\n"'
   assert_present "$home/state/.mail-check" "a successful poll records its outcome"
   assert_contains "$(cat "$home/state/.mail-check")" "fm-mail-check-v1" "the record carries its schema"
   assert_contains "$(cat "$home/state/.mail-check")" "reported=new mail: woke for 42" "the record carries the reported new-mail finding"
-  wakeq="$home/state/.wake-queue"
+  wakeq="$home/state/wake/queue"
   assert_contains "$(cat "$wakeq" 2>/dev/null)" "mail from alice@example.com" "the check-run poll still surfaces new mail as a durable wake"
   assert_contains "$(cat "$home/state/.mail-seen" 2>/dev/null)" "42" "the check-run poll still advances the inbox cursor"
   pass "fm-mail-check: a successful poll that surfaces new mail emits one wake line"
@@ -372,7 +372,7 @@ printf "77\\t2026-09-05T00:00:00Z\\tfrom@x\\tHello\\tretry\\n"'
   run_check "$home" "$out" "$CHECK"
   assert_contains "$(cat "$out")" "mail: could not clear retry for recovered 77 after publish" "the first status-4 poll reports the failure"
   assert_not_contains "$(cat "$out")" "woke for 77" "status 4 does not print woke-for"
-  wakeq="$home/state/.wake-queue"
+  wakeq="$home/state/wake/queue"
   assert_contains "$(cat "$wakeq" 2>/dev/null)" "check: mail 77" "status 4 leaves the recovery wake queued"
 
   out="$home/out2.txt"
@@ -398,7 +398,7 @@ test_repeated_status2_stays_queued_still_wakes() {
   done
   cat > "$tmpbin/fm-mail.sh" <<EOF
 #!/usr/bin/env bash
-printf '1\t1\tcheck\tmail:9\tcheck: mail 9 - stays queued\\n' >> "\$FM_HOME/state/.wake-queue"
+printf '1\t1\tcheck\tmail:9\tcheck: mail 9 - stays queued\\n' >> "\$FM_HOME/state/wake/queue"
 echo "fm-mail: wake for 9 could not be rolled back or durably recorded; the wake stays queued and the next poll heals it - a possible duplicate, never a lost mail" >&2
 exit 1
 EOF

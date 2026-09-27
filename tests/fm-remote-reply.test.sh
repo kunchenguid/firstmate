@@ -108,7 +108,7 @@ assert_grep 'done [corr=0123456789abcdef]' "$RESULT" "captured delta lost the co
 # fully autohandled capture publishes NO check wake - the mirrored status bytes
 # are the single announcement, observed here through the same signature-vs-seen
 # gate the watcher's signal scan and the drain's annotation check consume.
-if [ -e "$PARENT/state/.wake-queue" ] && grep -q "procevent remote-reply $SID 1" "$PARENT/state/.wake-queue"; then
+if [ -e "$PARENT/state/wake/queue" ] && grep -q "procevent remote-reply $SID 1" "$PARENT/state/wake/queue"; then
   fail "an autohandled remote-reply capture still published a duplicate check wake"
 fi
 FM_STATE_OVERRIDE="$PARENT/state" bash -c '
@@ -344,9 +344,9 @@ assert_absent "$PARENT/state/procevent-inbox/$SID.8.handled" \
   "a capture whose automatic application failed was acknowledged anyway"
 # The self-announcing declaration never silences a capture the adapter could
 # NOT fully apply: this one must still publish its check wake for the handler.
-assert_grep "procevent remote-reply $SID 8" "$PARENT/state/.wake-queue" \
+assert_grep "procevent remote-reply $SID 8" "$PARENT/state/wake/queue" \
   "a not-fully-applied capture lost its check-wake announcement"
-assert_no_grep 'retry local storage' "$PARENT/state/.wake-queue" \
+assert_no_grep 'retry local storage' "$PARENT/state/wake/queue" \
   "reply payload leaked into the event queue"
 retry_cursor_before=$(cat "$PARENT/state/remote-replies/ios.cursor")
 set +e
@@ -756,7 +756,7 @@ FM_STATE_OVERRIDE="$PARENT/state" bash -c '
   fm_wake_status_mark_current "$2/state" "$2/state/ios.status"
 ' _ "$ROOT" "$PARENT" || fail "could not prime the seen marker for the replay leg"
 cp "$PARENT/state/ios.status" "$TMP_ROOT/ios-status-before-replay"
-mv "$PARENT/state/.wake-queue" "$TMP_ROOT/wake-queue-before-replay" 2>/dev/null || true
+mv "$PARENT/state/wake/queue" "$TMP_ROOT/wake-queue-before-replay" 2>/dev/null || true
 rm -f "$PARENT/state/remote-replies/ios.cursor"
 GEN=$((GEN + 1))
 remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null 2>&1 \
@@ -768,7 +768,7 @@ assert_present "$PARENT/state/procevent-inbox/$SID.$GEN.handled" \
 # form it was first written under.
 cmp -s "$TMP_ROOT/ios-status-before-replay" "$PARENT/state/ios.status" \
   || fail "the whole-log recapture duplicated already-mirrored lines"
-if [ -e "$PARENT/state/.wake-queue" ] && grep -q "procevent remote-reply $SID $GEN" "$PARENT/state/.wake-queue"; then
+if [ -e "$PARENT/state/wake/queue" ] && grep -q "procevent remote-reply $SID $GEN" "$PARENT/state/wake/queue"; then
   fail "an already-mirrored recapture still published a check wake"
 fi
 FM_STATE_OVERRIDE="$PARENT/state" bash -c '

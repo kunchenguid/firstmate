@@ -652,12 +652,12 @@ wait_for_network_stage() {
 
 wait_for_network_wake() {
   local home=$1 limit=${2:-30} waited=0
-  while ! grep -Fq $'check\tstartup-network' "$home/state/.wake-queue" 2>/dev/null \
+  while ! grep -Fq $'check\tstartup-network' "$home/state/wake/queue" 2>/dev/null \
     && [ "$waited" -lt "$limit" ]; do
     sleep 1
     waited=$((waited + 1))
   done
-  grep -Fq $'check\tstartup-network' "$home/state/.wake-queue" 2>/dev/null
+  grep -Fq $'check\tstartup-network' "$home/state/wake/queue" 2>/dev/null
 }
 
 network_stage_report() {
@@ -850,7 +850,7 @@ EOF
   assert_contains "$out" "FLEET LOCK OWNERSHIP WAS NOT VERIFIED" "lock publication failure was misreported as a live holder"
   assert_contains "$out" "lacks verified fleet-lock ownership" "lock publication failure did not explain why queued wakes remain untouched"
   assert_not_contains "$out" "ANOTHER LIVE FIRSTMATE SESSION HOLDS THE FLEET LOCK" "lock publication failure falsely claimed a live lock holder"
-  [ -s "$home/state/.wake-queue" ] || fail "lock publication failure allowed the wake queue to mutate"
+  [ -s "$home/state/wake/queue" ] || fail "lock publication failure allowed the wake queue to mutate"
 
   pass "session start stays read-only when lock ownership cannot be published"
 }
@@ -1567,13 +1567,13 @@ SH
     || fail "the digest called the slow state reader on its blocking path"
   : > "$release_gate"
 
-  while ! grep -Fq $'\tcheck\tinactive-outcome:' "$home/state/.wake-queue" 2>/dev/null \
+  while ! grep -Fq $'\tcheck\tinactive-outcome:' "$home/state/wake/queue" 2>/dev/null \
     && [ "$waited" -lt 150 ]; do
     sleep 0.1
     waited=$((waited + 1))
   done
-  assert_grep 'check	inactive-outcome:' "$home/state/.wake-queue" \
-    "the deferred scan's terminal finding never reached the durable wake queue (calls=$(cat "$calls" 2>/dev/null), report=$(network_stage_report "$home" "$root" 2>/dev/null), queue=$(cat "$home/state/.wake-queue" 2>/dev/null))"
+  assert_grep 'check	inactive-outcome:' "$home/state/wake/queue" \
+    "the deferred scan's terminal finding never reached the durable wake queue (calls=$(cat "$calls" 2>/dev/null), report=$(network_stage_report "$home" "$root" 2>/dev/null), queue=$(cat "$home/state/wake/queue" 2>/dev/null))"
   [ "$(grep -c '^deferred$' "$calls" 2>/dev/null || true)" -eq 1 ] \
     || fail "the deferred scan did not make exactly one slow state read"
   pass "session start: inactive reconciliation runs after the digest and retains its durable wake"
@@ -1627,7 +1627,7 @@ test_deferred_result_reaches_the_agent_when_the_digest_cannot_print_it() {
 $rec
 EOF
   install_slow_gh "$fakebin" 8
-  queue="$home/state/.wake-queue"
+  queue="$home/state/wake/queue"
 
   run_session_start_secondmate "$root" "$home" "$fakebin" "$mate" "$log" "$spawned" missing >/dev/null
   wait_for_network_stage "$home" "$root" 60 || fail "the deferred stage never finished"
@@ -2132,14 +2132,14 @@ EOF
   assert_contains "$reemit" "SESSION START (CONTEXT RE-EMIT) - $home" "--reemit did not label itself"
   assert_not_contains "$reemit" "SECONDMATE_LIVENESS" "--reemit repeated a mutating sweep startup already ran"
   assert_contains "$reemit" "done: queued after the re-emit too" "--reemit did not drain the wake queue"
-  [ -s "$home/state/.wake-queue" ] || fail "--reemit removed the wake before its handling acknowledgement"
+  [ -s "$home/state/wake/queue" ] || fail "--reemit removed the wake before its handling acknowledgement"
   sequence=$(printf '%s\n' "$reemit" | sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' | tail -1)
   generation=$(printf '%s\n' "$reemit" | sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' | tail -1)
   [ -n "$sequence" ] && [ -n "$generation" ] \
     || fail "--reemit omitted the generation-bound wake acknowledgement"
   FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-wake-drain.sh" --ack-through "$sequence" \
     --recovery-generation "$generation" || fail "--reemit wake acknowledgement failed"
-  [ ! -s "$home/state/.wake-queue" ] || fail "--reemit acknowledgement left queued wakes behind"
+  [ ! -s "$home/state/wake/queue" ] || fail "--reemit acknowledgement left queued wakes behind"
   assert_contains "$reemit" "CONTEXT" "--reemit dropped the context digest"
   assert_contains "$reemit" "FLEET STATE" "--reemit dropped the fleet-state digest"
   assert_contains "$reemit" "NEXT STEP" "--reemit dropped the closing reminder"

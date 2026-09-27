@@ -1017,7 +1017,7 @@ assert_grep "done [corr=$CORR]: remote build passed" "$PARENT/state/ios.status" 
 phase=$(grep '^phase=' "$PARENT/state/pending-replies/$CORR" | cut -d= -f2-)
 [ "$phase" = resolved ] || fail "correlated remote reply did not resolve the parent expectation"
 pass "marked send and routed reply complete through the existing parent correlation owner"
-rm -f "$PARENT/state/.wake-queue"
+rm -f "$PARENT/state/wake/queue"
 
 printf '{"revision":2}\n' > "$PARENT/config/crew-dispatch.json"
 printf 'grok\n' > "$PARENT/config/crew-harness"
@@ -1154,7 +1154,7 @@ printf '%s' "$SNAPSHOT" | jq -e '.tasks[] | select(.id == "ios") | .paths.home.p
 printf '%s' "$SNAPSHOT" | jq -e '.secondmate_current.records | any(.id == "local" and .remote == false)' >/dev/null \
   || fail "fleet snapshot lost the existing local secondmate route"
 pass "fleet snapshot projects mixed local and remote structured state"
-rm -f "$PARENT/state/.wake-queue"
+rm -f "$PARENT/state/wake/queue"
 
 # The remote code root updates independently, then the persistent home imports
 # and fast-forwards to that host-local commit without touching project clones.
@@ -1269,8 +1269,8 @@ grep -F 'check: secondmate ios auto-relaunched after remote endpoint dead on its
   || fail "the dead remote secondmate was not auto-relaunched: $(cat "$TMP_ROOT/watch-liveness.out")"
 [ "$(grep -c 'check: secondmate ios auto-relaunched' "$TMP_ROOT/watch-liveness.out")" -eq 1 ] \
   || fail "the remote auto-relaunch did not produce exactly one captain-facing line"
-grep -F $'\tcheck\tsecondmate-relaunch-ios-' "$WATCH_STATE/.wake-queue" >/dev/null \
-  || fail "the durable auto-relaunch wake row was not queued: $(cat "$WATCH_STATE/.wake-queue" 2>/dev/null)"
+grep -F $'\tcheck\tsecondmate-relaunch-ios-' "$WATCH_STATE/wake/queue" >/dev/null \
+  || fail "the durable auto-relaunch wake row was not queued: $(cat "$WATCH_STATE/wake/queue" 2>/dev/null)"
 grep -F 'relaunched' "$WATCH_STATE/.secondmate-relaunch-ios" >/dev/null \
   || fail "the durable per-mate ledger did not record the relaunch"
 tabs_after=$(grep -c '^tab create' "$HERDR_LOG" || true)
@@ -1321,8 +1321,8 @@ sleep 3
   || fail "the stopped unreachable watcher kept probing the remote endpoint"
 [ -z "$(find "$WATCH_STATE_UNREACHABLE" -newer "$TMP_ROOT/watch-unreachable.stopped" -print)" ] \
   || fail "the stopped unreachable watcher kept writing its state"
-[ ! -s "$WATCH_STATE_UNREACHABLE/.wake-queue" ] \
-  || fail "an unreachable remote probe queued a wake: $(cat "$WATCH_STATE_UNREACHABLE/.wake-queue")"
+[ ! -s "$WATCH_STATE_UNREACHABLE/wake/queue" ] \
+  || fail "an unreachable remote probe queued a wake: $(cat "$WATCH_STATE_UNREACHABLE/wake/queue")"
 assert_absent "$WATCH_STATE_UNREACHABLE/.secondmate-relaunch-ios" \
   "an unreachable remote probe ledgered a relaunch attempt"
 assert_grep 'remote_host=remote-mac' "$WATCH_STATE_UNREACHABLE/ios.meta" \
@@ -1399,7 +1399,7 @@ printf '%s' "$UNAVAILABLE" | jq -e '.secondmate_current.records | any(.id == "io
   || fail "unreachable no-ledger remote home did not degrade to explicit unknown state"
 printf '%s' "$UNAVAILABLE" | jq -e '.tasks[] | select(.id == "ios") | .paths.home.present == null and .endpoint.agent_alive == "unknown"' >/dev/null \
   || fail "unreachable remote endpoint liveness was not left to supervision"
-rm -f "$PARENT/state/.wake-queue"
+rm -f "$PARENT/state/wake/queue"
 launches_after=$(grep -c '^tab create' "$HERDR_LOG" || true)
 [ "$launches_before" -eq "$launches_after" ] || fail "unreachable projection attempted a replacement launch"
 assert_present "$PARENT/state/ios.meta" "unreachable readiness removed the parent route metadata"

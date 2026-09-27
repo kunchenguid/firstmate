@@ -620,8 +620,8 @@ test_watcher_rerings_idle_pane_quietly() {
     || { kill "$pid" 2>/dev/null; fail "the watcher never re-rang the doorbell:"$'\n'"$(cat "$log")"; }
   kill -0 "$pid" 2>/dev/null \
     || fail "a healthy re-ring must not wake firstmate (watcher exited):"$'\n'"$(cat "$out")"
-  [ ! -s "$state/.wake-queue" ] \
-    || { kill "$pid" 2>/dev/null; fail "a healthy re-ring queued a wake:"$'\n'"$(cat "$state/.wake-queue")"; }
+  [ ! -s "$state/wake/queue" ] \
+    || { kill "$pid" 2>/dev/null; fail "a healthy re-ring queued a wake:"$'\n'"$(cat "$state/wake/queue")"; }
   # The acknowledgement silences the ladder: no further doorbells after the mv.
   mv "$rec" "$state/t1.inbox/handled/"
   sleep 2.5
@@ -646,7 +646,7 @@ test_watcher_waits_on_busy_pane() {
   sleep 4
   kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
   [ ! -s "$log" ] || fail "a busy pane should wait, not ring:"$'\n'"$(cat "$log")"
-  [ ! -s "$state/.wake-queue" ] || fail "a busy wait queued a wake:"$'\n'"$(cat "$state/.wake-queue")"
+  [ ! -s "$state/wake/queue" ] || fail "a busy wait queued a wake:"$'\n'"$(cat "$state/wake/queue")"
   pass "watcher: a busy pane just waits - the record is durable and no doorbell is typed"
 }
 
@@ -663,7 +663,7 @@ test_watcher_quiet_on_healthy_inbox() {
   kill -0 "$pid" 2>/dev/null || fail "the watcher exited on a healthy empty inbox:"$'\n'"$(cat "$out")"
   kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
   [ ! -s "$log" ] || fail "an empty inbox rang a doorbell:"$'\n'"$(cat "$log")"
-  [ ! -s "$state/.wake-queue" ] || fail "an empty inbox queued a wake:"$'\n'"$(cat "$state/.wake-queue")"
+  [ ! -s "$state/wake/queue" ] || fail "an empty inbox queued a wake:"$'\n'"$(cat "$state/wake/queue")"
   pass "watcher: a healthy or empty inbox stays completely silent"
 }
 
@@ -692,8 +692,8 @@ test_watcher_ack_silences_unwritable_ladder() {
   kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
   rings=$(grep -cF 'Firstmate instruction waiting' "$log" || true)
   [ "$rings" = 1 ] || fail "acknowledgement should silence retries, got $rings doorbells:"$'\n'"$(cat "$log")"
-  [ ! -s "$state/.wake-queue" ] \
-    || fail "an acknowledged record queued a bookkeeping wake:"$'\n'"$(cat "$state/.wake-queue")"
+  [ ! -s "$state/wake/queue" ] \
+    || fail "an acknowledged record queued a bookkeeping wake:"$'\n'"$(cat "$state/wake/queue")"
   pass "watcher: acknowledgement silences an unwritable ladder without a stale wake"
 }
 
@@ -712,11 +712,11 @@ test_watcher_surfaces_unwritable_ladder() {
     || { kill "$pid" 2>/dev/null; fail "the watcher silently retried with unwritable ladder bookkeeping"; }
   rings=$(grep -cF 'Firstmate instruction waiting' "$log" || true)
   [ "$rings" = 1 ] || fail "expected one doorbell before the bookkeeping wake, got $rings:"$'\n'"$(cat "$log")"
-  wakes=$(grep -cF 'steering-inbox ladder bookkeeping unwritable' "$state/.wake-queue" || true)
+  wakes=$(grep -cF 'steering-inbox ladder bookkeeping unwritable' "$state/wake/queue" || true)
   [ "$wakes" = 1 ] \
-    || fail "expected exactly one bookkeeping-unwritable stale wake, got $wakes:"$'\n'"$(cat "$state/.wake-queue" 2>/dev/null)"
-  grep -qF "$state/t1.inbox/.ring-state cannot be written" "$state/.wake-queue" \
-    || fail "the stale wake did not identify the unwritable ladder:"$'\n'"$(cat "$state/.wake-queue")"
+    || fail "expected exactly one bookkeeping-unwritable stale wake, got $wakes:"$'\n'"$(cat "$state/wake/queue" 2>/dev/null)"
+  grep -qF "$state/t1.inbox/.ring-state cannot be written" "$state/wake/queue" \
+    || fail "the stale wake did not identify the unwritable ladder:"$'\n'"$(cat "$state/wake/queue")"
   [ -f "$rec" ] || fail "the unhandled record disappeared during bookkeeping failure"
   grep -qF 'stale:' "$out" \
     || fail "the watcher should exit through the ordinary stale wake:"$'\n'"$(cat "$out")"
@@ -737,12 +737,12 @@ test_watcher_escalates_once_after_budget() {
     || { kill "$pid" 2>/dev/null; fail "the watcher never escalated a spent ring budget"; }
   rings=$(grep -cF 'Firstmate instruction waiting' "$log" || true)
   [ "$rings" = 1 ] || fail "expected exactly 1 doorbell before escalation, got $rings:"$'\n'"$(cat "$log")"
-  grep -qF 'unread firstmate instruction' "$state/.wake-queue" \
-    || fail "the escalation should queue a stale wake naming the unread instruction:"$'\n'"$(cat "$state/.wake-queue" 2>/dev/null)"
-  grep -qF "$rec" "$state/.wake-queue" \
-    || fail "the stale wake should name the record path:"$'\n'"$(cat "$state/.wake-queue")"
-  [ "$(grep -cF 'unread firstmate instruction' "$state/.wake-queue")" = 1 ] \
-    || fail "the escalation must fire exactly once:"$'\n'"$(cat "$state/.wake-queue")"
+  grep -qF 'unread firstmate instruction' "$state/wake/queue" \
+    || fail "the escalation should queue a stale wake naming the unread instruction:"$'\n'"$(cat "$state/wake/queue" 2>/dev/null)"
+  grep -qF "$rec" "$state/wake/queue" \
+    || fail "the stale wake should name the record path:"$'\n'"$(cat "$state/wake/queue")"
+  [ "$(grep -cF 'unread firstmate instruction' "$state/wake/queue")" = 1 ] \
+    || fail "the escalation must fire exactly once:"$'\n'"$(cat "$state/wake/queue")"
   grep -qF 'stale:' "$out" || fail "the watcher should exit through the ordinary stale wake:"$'\n'"$(cat "$out")"
   pass "watcher: a spent ring budget emits exactly one ordinary stale wake for recovery"
 }
@@ -760,11 +760,11 @@ test_watcher_dead_pane_escalates_once_without_ringing() {
   wait_watcher_gone "$pid" \
     || { kill "$pid" 2>/dev/null; fail "the watcher never surfaced a dead pane's unhandled instruction"; }
   [ ! -s "$log" ] || fail "a dead pane was typed into:"$'\n'"$(cat "$log")"
-  [ "$(grep -cF 'unread firstmate instruction' "$state/.wake-queue" 2>/dev/null || true)" = 1 ] \
-    || fail "a dead pane should surface exactly one stale wake:"$'\n'"$(cat "$state/.wake-queue" 2>/dev/null)"
-  grep -qF "agent has exited" "$state/.wake-queue" \
-    || fail "the stale wake should say the agent has exited:"$'\n'"$(cat "$state/.wake-queue")"
-  grep -qF "$rec" "$state/.wake-queue" || fail "the stale wake should name the record path"
+  [ "$(grep -cF 'unread firstmate instruction' "$state/wake/queue" 2>/dev/null || true)" = 1 ] \
+    || fail "a dead pane should surface exactly one stale wake:"$'\n'"$(cat "$state/wake/queue" 2>/dev/null)"
+  grep -qF "agent has exited" "$state/wake/queue" \
+    || fail "the stale wake should say the agent has exited:"$'\n'"$(cat "$state/wake/queue")"
+  grep -qF "$rec" "$state/wake/queue" || fail "the stale wake should name the record path"
   [ -f "$rec" ] || fail "the durable record must survive for recovery"
   [ "$(cat "$state/t1.inbox/.escalated")" = "${rec##*/}" ] \
     || fail "the escalation marker should suppress further surfacing of this record"
@@ -790,8 +790,8 @@ test_watcher_dead_pane_ignores_stale_busy_state() {
   wait_watcher_gone "$pid" \
     || { kill "$pid" 2>/dev/null; fail "stale busy state hid a dead pane's unhandled instruction"; }
   [ ! -s "$log" ] || fail "a busy-marked dead pane was typed into:"$'\n'"$(cat "$log")"
-  [ "$(grep -cF 'unread firstmate instruction' "$state/.wake-queue" 2>/dev/null || true)" = 1 ] \
-    || fail "a busy-marked dead pane should surface exactly once:"$'\n'"$(cat "$state/.wake-queue" 2>/dev/null)"
+  [ "$(grep -cF 'unread firstmate instruction' "$state/wake/queue" 2>/dev/null || true)" = 1 ] \
+    || fail "a busy-marked dead pane should surface exactly once:"$'\n'"$(cat "$state/wake/queue" 2>/dev/null)"
   [ -f "$rec" ] || fail "the durable record must survive stale busy-state recovery"
   [ "$(cat "$state/t1.inbox/.escalated")" = "${rec##*/}" ] \
     || fail "stale busy-state recovery should suppress repeated surfacing"

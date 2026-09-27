@@ -51,8 +51,8 @@ count_notes() {
 }
 
 count_wakes() {
-  if [ -f "$1/state/.wake-queue" ]; then
-    grep -c 'inbox:' "$1/state/.wake-queue" || true
+  if [ -f "$1/state/wake/queue" ]; then
+    grep -c 'inbox:' "$1/state/wake/queue" || true
   else
     printf '0\n'
   fi
@@ -544,3 +544,212 @@ run_inbox "$home" drain --ack "$did" >/dev/null || fail "drain --ack failed"
 assert_absent "$home/state/inbox/$did.note" "acked note leaves pending"
 assert_present "$home/state/inbox/handled/$did.note" "acked note is in handled"
 pass "drain --ack still moves the note to handled"
+
+# --- a sandboxed note touches only state/inbox --------------------------------
+# A sandboxed importer is granted just state/inbox writable and files with
+# `note --no-announce`. With the rest of state/ read-only, including state/wake,
+# the note must still be saved and leave every entry outside state/inbox
+# untouched: no wake, no lock, no temp file.
+
+outside_inbox_snapshot() {  # <state-dir>
+  python3 - "$1" <<'PY'
+import os, sys
+state = sys.argv[1]
+def show(path, times=True):
+    st = os.lstat(path)
+    rel = os.path.relpath(path, state)
+    print(rel, st.st_ino, st.st_mode, st.st_size if times else "-", st.st_mtime_ns if times else "-")
+show(state)
+for root, dirs, files in os.walk(state):
+    if root == state and "inbox" in dirs:
+        dirs.remove("inbox")
+        show(os.path.join(state, "inbox"), times=False)
+    dirs.sort()
+    for name in sorted(dirs + files):
+        show(os.path.join(root, name))
+PY
+}
+
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$ROOT/bin/fm-timeout-lib.sh"
+
+# Bounded, so a regression that spins on a lock it cannot create fails here
+# instead of hanging the suite.
+run_inbox_bounded() {
+  local home=$1
+  shift
+  fm_run_timed 30 env FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" "$INBOX_BIN" "$@"
+}
+
+home=$(make_home sandbox-inbox-only)
+run_inbox "$home" note "initialize the home" >/dev/null || fail "initializing note failed"
+wakes_before=$(count_wakes "$home")
+before=$(outside_inbox_snapshot "$home/state")
+chmod a-w "$home/state" "$home/state/wake"
+set +e
+sandbox_note_out=$(run_inbox_bounded "$home" note --no-announce "filed from the sandbox" 2>&1)
+sandbox_note_code=$?
+sandbox_json_out=$(run_inbox_bounded "$home" note --no-announce --request-id planner-1 --json "filed with a request id" 2>&1)
+sandbox_json_code=$?
+set -e
+chmod u+w "$home/state" "$home/state/wake"
+after=$(outside_inbox_snapshot "$home/state")
+expect_code 0 "$sandbox_note_code" "note --no-announce with only state/inbox writable: $sandbox_note_out"
+expect_code 0 "$sandbox_json_code" "note --no-announce --json with only state/inbox writable: $sandbox_json_out"
+sandbox_id=$(printf '%s\n' "$sandbox_note_out" | sed -n 's/^queued //p')
+sandbox_json_id=$(printf '%s' "$sandbox_json_out" | json_get id)
+assert_equals False "$(printf '%s' "$sandbox_json_out" | json_get announced)" "a --no-announce note reports announced false"
+assert_present "$home/state/inbox/$sandbox_id.note" "the sandboxed note is saved"
+assert_present "$home/state/inbox/$sandbox_json_id.note" "the sandboxed request-id note is saved"
+assert_absent "$home/state/inbox/.announced/$sandbox_id" "a --no-announce note is left for the watcher to announce"
+assert_equals "$wakes_before" "$(count_wakes "$home")" "a --no-announce note appends no wake"
+assert_equals "$before" "$after" "no entry outside state/inbox may be touched"
+pass "note --no-announce writes only under state/inbox"
+
+# An upgraded home whose legacy counter has not been folded yet: a note from a
+# process that cannot finish the fold (state/ read-only here) must still land
+# above the legacy counter, so an acknowledgement cutoff issued before the
+# upgrade cannot consume it unseen.
+home=$(make_home legacy-counter)
+run_inbox "$home" note "initialize the home" >/dev/null || fail "initializing note failed"
+printf '50\n' > "$home/state/.wake-queue.seq"
+chmod a-w "$home/state"
+set +e
+sandbox_note_out=$(run_inbox_bounded "$home" note "filed above the legacy counter" 2>&1)
+sandbox_note_code=$?
+set -e
+chmod u+w "$home/state"
+expect_code 0 "$sandbox_note_code" "note with an unfolded legacy counter: $sandbox_note_out"
+note_seq=$(awk -F '\t' '$5 ~ /filed above the legacy counter/ { print $2 }' "$home/state/wake/queue")
+[ -n "$note_seq" ] && [ "$note_seq" -gt 50 ] \
+  || fail "the note's wake seq '$note_seq' must be above the legacy counter 50"
+pass "a note's wake lands above a legacy counter the fold could not finish"
+
+# --- the primary never writes through a link planted in state/inbox ----------
+# A sandboxed note producer can write state/inbox, so it can replace .replies
+# or handled with a link and plant a note whose id has dots.
+# reply and drain --ack must then refuse and write nothing outside the inbox.
+
+plant_home() {  # <name>: a home with a planted dotted note and an outside dir
+  local home
+  home=$(make_home "$1")
+  mkdir -p "$home/state/inbox" "$home/state/wake" "$home/outside"
+  printf 'id=planted.one\nannounce_marker=1\n--\nplanted\n' > "$home/state/inbox/planted.one.note"
+  printf '%s\n' "$home"
+}
+
+outside_listing() {  # <home>: skips state/wake, where reply takes its lock
+  outside_inbox_snapshot "$home/state" | grep -v '^wake[ /]'
+  find "$1/outside" -print | sort
+}
+
+for target in state outside; do
+  home=$(plant_home "replies-link-$target")
+  ln -s "$home/$target" "$home/state/inbox/.replies"
+  before=$(outside_listing "$home")
+  set +e
+  out=$(run_inbox_bounded "$home" reply planted.one "answer" 2>&1)
+  code=$?
+  set -e
+  expect_code 1 "$code" "reply through a .replies link to $target must fail: $out"
+  assert_contains "$out" "refusing to reply" "reply names the planted .replies link"
+  assert_equals "$before" "$(outside_listing "$home")" "reply writes nothing through a .replies link to $target"
+
+  home=$(plant_home "handled-link-$target")
+  ln -s "$home/$target" "$home/state/inbox/handled"
+  before=$(outside_listing "$home")
+  set +e
+  out=$(run_inbox_bounded "$home" drain --ack planted.one 2>&1)
+  code=$?
+  set -e
+  expect_code 1 "$code" "drain --ack through a handled link to $target must fail: $out"
+  assert_contains "$out" "refusing to ack" "drain --ack names the planted handled link"
+  assert_present "$home/state/inbox/planted.one.note" "the note stays pending when the ack is refused"
+  assert_equals "$before" "$(outside_listing "$home")" "drain --ack writes nothing through a handled link to $target"
+done
+pass "reply and drain --ack refuse a .replies or handled link and write nothing outside the inbox"
+
+# Inside the real replies directory the counter and record are published by
+# rename, which replaces a planted link rather than following it.
+home=$(plant_home replies-seq-link)
+mkdir -p "$home/state/inbox/.replies"
+ln -s "$home/outside" "$home/state/inbox/.replies/.seq"
+before=$(outside_listing "$home")
+run_inbox_bounded "$home" reply planted.one "answer" >/dev/null || fail "reply with a planted .seq link failed"
+assert_equals "$before" "$(outside_listing "$home")" "a planted .seq link redirects no write"
+[ ! -L "$home/state/inbox/.replies/.seq" ] || fail "the planted .seq link must be replaced"
+assert_present "$home/state/inbox/.replies/planted.one" "the reply is recorded inside the real replies directory"
+pass "the reply counter replaces a planted link instead of writing through it"
+
+# The importer can swap any path in state/inbox at any moment, including a
+# temporary file between its creation and the write that fills it. This mktemp
+# shim plays that importer: it lets the real mktemp create the file and, for
+# the Nth file (not directory) created inside the inbox, replaces it with a link
+# to an outside canary. A reply that staged in the inbox would create its
+# counter (1st) and then its record (2nd) there.
+SHIM_BIN="$TMP_ROOT/mktemp-swap-bin"
+mkdir -p "$SHIM_BIN"
+REAL_MKTEMP=$(command -v mktemp)
+cat > "$SHIM_BIN/mktemp" <<SHIM
+#!/usr/bin/env bash
+set -euo pipefail
+path=\$("$REAL_MKTEMP" "\$@")
+case " \$* " in *" -d "*) printf '%s\n' "\$path"; exit 0 ;; esac
+real=\$(cd -P "\$(dirname "\$path")" && pwd -P)/\$(basename "\$path")
+printf '%s\n' "\$real" >> "\$SWAP_LOG"
+case "\$real" in
+  "\$SWAP_INBOX"/*)
+    n=\$(( \$(cat "\$SWAP_COUNT" 2>/dev/null || printf 0) + 1 ))
+    printf '%s\n' "\$n" > "\$SWAP_COUNT"
+    if [ "\$n" = "\$SWAP_NTH" ]; then rm -f "\$path"; ln -s "\$SWAP_CANARY" "\$path"; fi ;;
+esac
+printf '%s\n' "\$path"
+SHIM
+chmod +x "$SHIM_BIN/mktemp"
+
+for nth in 1 2; do
+  home=$(plant_home "reply-temp-swap-$nth")
+  printf 'canary\n' > "$home/outside/canary"
+  inbox_real=$(cd -P "$home/state/inbox" && pwd -P)
+  state_real=$(cd -P "$home/state" && pwd -P)
+  set +e
+  out=$(PATH="$SHIM_BIN:$PATH" SWAP_NTH=$nth SWAP_CANARY="$home/outside/canary" \
+    SWAP_INBOX="$inbox_real" SWAP_COUNT="$home/swap.count" SWAP_LOG="$home/swap.log" \
+    run_inbox_bounded "$home" reply planted.one "answer" 2>&1)
+  code=$?
+  set -e
+  [ "$(grep -c "^$state_real/" "$home/swap.log")" -ge 2 ] || fail "reply must create its counter and record files (swap site $nth)"
+  assert_equals "canary" "$(cat "$home/outside/canary")" "a swapped reply temp file ($nth) must not write the outside canary"
+  [ ! -L "$home/outside/canary" ] || fail "the canary must stay a regular file (swap site $nth)"
+  if grep -q "^$inbox_real/" "$home/swap.log"; then
+    fail "reply created a temporary file inside the importer-writable inbox: $(cat "$home/swap.log")"
+  fi
+  expect_code 0 "$code" "reply with the swap attempt at site $nth: $out"
+  assert_contains "$(cat "$home/state/inbox/.replies/planted.one")" "seq=1" "the reply is recorded with seq 1 (swap site $nth)"
+  assert_equals "1" "$(cat "$home/state/inbox/.replies/.seq")" "the counter is a regular file holding 1 (swap site $nth)"
+  printf 'id=planted.two\nannounce_marker=1\n--\nplanted\n' > "$home/state/inbox/planted.two.note"
+  run_inbox_bounded "$home" reply planted.two "second" >/dev/null || fail "second reply failed (swap site $nth)"
+  assert_contains "$(cat "$home/state/inbox/.replies/planted.two")" "seq=2" "the next reply keeps the sequence order (swap site $nth)"
+done
+pass "reply never opens an importer-writable temporary path, so a swapped link writes nothing outside"
+
+# drain --ack puts each id into a path, so every id is checked before anything
+# is created or moved; one bad id refuses the whole batch.
+for bad in '../outside/x' 'a/b' '..' ''; do
+  home=$(plant_home "ack-bad-id")
+  rm -rf "$home/state/inbox/handled"
+  set +e
+  out=$(run_inbox_bounded "$home" drain --ack planted.one "$bad" 2>&1)
+  code=$?
+  set -e
+  expect_code 1 "$code" "drain --ack with id '$bad' must fail: $out"
+  assert_contains "$out" "invalid note id" "drain --ack names the invalid id '$bad'"
+  assert_present "$home/state/inbox/planted.one.note" "a refused batch acks nothing (id '$bad')"
+  assert_absent "$home/state/inbox/handled" "a refused batch creates no directory (id '$bad')"
+  rm -rf "$home"
+done
+home=$(plant_home ack-good-id)
+run_inbox_bounded "$home" drain --ack planted.one >/dev/null || fail "drain --ack of a valid dotted id failed"
+assert_present "$home/state/inbox/handled/planted.one.note" "a valid id is still acked"
+pass "drain --ack refuses an invalid id before creating or moving anything"

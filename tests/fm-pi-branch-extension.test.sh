@@ -427,7 +427,7 @@ const { pathToFileURL } = await import("node:url");
 const home = process.env.FM_HOME;
 const realRoot = process.env.FM_ROOT_OVERRIDE;
 const approvedProject = `${home}/projects/approved`;
-mkdirSync(`${home}/state`, { recursive: true });
+mkdirSync(`${home}/state/wake`, { recursive: true });
 mkdirSync(`${home}/config`, { recursive: true });
 mkdirSync(approvedProject, { recursive: true });
 writeFileSync(`${home}/state/branch-driver.meta`, `project=${approvedProject}\nwindow=fm-branch-driver\n`);
@@ -626,7 +626,7 @@ function dispatch(message, projects, heartbeat, eligible) {
     const row = offer.heartbeat
       ? "1\t1\theartbeat\theartbeat\theartbeat\n"
       : `1\t1\tsignal\tbranch-driver.status\t${message}\n`;
-    writeFileSync(`${home}/state/.wake-queue`, row);
+    writeFileSync(`${home}/state/wake/queue`, row);
   }
   bus.emit("fm-branch-supervision:dispatch", offer);
   return offer;
@@ -655,7 +655,7 @@ test_branch_dispatch_two_stage_filter_and_prefix_contract() {
   local repo home out status
   repo="$TMP_ROOT/dispatch-root"
   home="$TMP_ROOT/dispatch-home"
-  mkdir -p "$home/state" "$home/config"
+  mkdir -p "$home/state/wake" "$home/config"
   install_pi_branch_extension_fixture "$repo"
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
@@ -937,7 +937,7 @@ test_requested_healthy_outcome_and_unsolicited_routine_outcome_delivery() {
   local repo home out status
   repo="$TMP_ROOT/requested-outcome-root"
   home="$TMP_ROOT/requested-outcome-home"
-  mkdir -p "$home/state" "$home/config"
+  mkdir -p "$home/state/wake" "$home/config"
   install_pi_branch_extension_fixture "$repo"
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
@@ -1133,7 +1133,7 @@ if (fleetOperations.length !== 10 || fleetOperations.some((operation) => operati
 if (fleetOperations.some((operation) => operation.actor !== "branch")) {
   throw new Error(`main took fleet-event ownership: ${JSON.stringify(fleetOperations)}`);
 }
-if (existsSync(`${home}/state/.wake-queue`) && readFileSync(`${home}/state/.wake-queue`, "utf8") !== "") {
+if (existsSync(`${home}/state/wake/queue`) && readFileSync(`${home}/state/wake/queue`, "utf8") !== "") {
   throw new Error("acknowledged fleet wake remained queued for another owner");
 }
 const rows = readFileSync(`${home}/state/branch-outcomes.jsonl`, "utf8").trim().split("\n").map((line) => JSON.parse(line));
@@ -1153,7 +1153,7 @@ test_captain_outcome_is_exactly_once_across_crash_reload_and_unrelated_response(
   local repo home out status
   repo="$TMP_ROOT/visible-outcome-recovery-root"
   home="$TMP_ROOT/visible-outcome-recovery-home"
-  mkdir -p "$home/state" "$home/config"
+  mkdir -p "$home/state/wake" "$home/config"
   install_pi_branch_extension_fixture "$repo"
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
@@ -1243,7 +1243,7 @@ test_captain_outcome_processing_turn_is_sequence_keyed_and_re_presented() {
   local repo home out status
   repo="$TMP_ROOT/processing-turn-root"
   home="$TMP_ROOT/processing-turn-home"
-  mkdir -p "$home/state" "$home/config"
+  mkdir -p "$home/state/wake" "$home/config"
   install_pi_branch_extension_fixture "$repo"
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
@@ -1444,7 +1444,7 @@ test_branch_cache_key_is_per_home_stable() {
   repo="$TMP_ROOT/cache-key-root"
   home_a="$TMP_ROOT/cache-key-home-a"
   home_b="$TMP_ROOT/cache-key-home-b"
-  mkdir -p "$home_a/state" "$home_a/config" "$home_b/state" "$home_b/config"
+  mkdir -p "$home_a/state/wake" "$home_a/config" "$home_b/state/wake" "$home_b/config"
   install_pi_branch_extension_fixture "$repo"
   probe() {
     PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$1" FM_ROOT_OVERRIDE="$ROOT" \
@@ -1477,7 +1477,7 @@ test_branch_default_on_heartbeat_afk_and_fallback() {
   repo="$TMP_ROOT/gating-root"
   broken="$TMP_ROOT/gating-broken-root"
   home="$TMP_ROOT/gating-home"
-  mkdir -p "$home/state" "$home/config" "$broken/bin"
+  mkdir -p "$home/state/wake" "$home/config" "$broken/bin"
   install_pi_branch_extension_fixture "$repo"
   cp "$ROOT/bin/fm-branch-outcome.sh" "$ROOT/bin/fm-classify-lib.sh" \
     "$ROOT/bin/fm-lease.sh" "$ROOT/bin/fm-lease-lib.sh" "$ROOT/bin/fm-timeout-lib.sh" \
@@ -1648,7 +1648,7 @@ test_away_record_parks_main_and_presents_after_archive() {
   local repo home out status
   repo="$TMP_ROOT/away-root"
   home="$TMP_ROOT/away-home"
-  mkdir -p "$home/state" "$home/config"
+  mkdir -p "$home/state/wake" "$home/config"
   install_pi_branch_extension_fixture "$repo"
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
@@ -1782,7 +1782,7 @@ if (JSON.stringify(unprocessedSeqs()) !== JSON.stringify([seq1])) throw new Erro
 // check and heartbeat rows are claimed, and a claimed check row lifts task
 // scoping so the branch may report fleet.
 writeFileSync(
-  `${home}/state/.wake-queue`,
+  `${home}/state/wake/queue`,
   "1\t1\tsignal\tbranch-driver.status\tsignal: away wake\n2\t2\tcheck\tmain-only\tcheck: task-d.check.sh: PR merged\n3\t3\theartbeat\theartbeat\theartbeat\n",
 );
 globalThis.__fmOnBranchPrompt = () => new Promise((resolve) => { finishPrompt = resolve; });
@@ -1865,7 +1865,7 @@ test_away_unchanged_held_outcome_reaches_the_captain_once_until_a_new_event() {
   local repo home out status old
   repo="$TMP_ROOT/away-held-once-root"
   home="$TMP_ROOT/away-held-once-home"
-  mkdir -p "$home/state" "$home/config" "$home/fakebin" "$home/projects/held"
+  mkdir -p "$home/state/wake" "$home/config" "$home/fakebin" "$home/projects/held"
   install_pi_branch_extension_fixture "$repo"
   git -C "$home/projects/held" init -q
   git -C "$home/projects/held" -c user.name=fmtest -c user.email=fmtest@example.invalid \
@@ -1895,7 +1895,7 @@ const run = (args, label, extra = {}) => {
   if (result.status !== 0) throw new Error(`${label} failed: ${result.stderr}`);
   return result.stdout || "";
 };
-const queued = () => (existsSync(`${state}/.wake-queue`) ? readFileSync(`${state}/.wake-queue`, "utf8") : "")
+const queued = () => (existsSync(`${state}/wake/queue`) ? readFileSync(`${state}/wake/queue`, "utf8") : "")
   .split("\n").filter(Boolean);
 const outcomes = () => outcomeScript(["list", "--recent", "100"]).split("\n").filter(Boolean).map((line) => JSON.parse(line));
 const captains = () => outcomes().filter((row) => row.verdict === "captain");
@@ -1991,7 +1991,7 @@ test_away_only_wake_rejects_when_record_is_archived_before_drain() {
   local repo home out status
   repo="$TMP_ROOT/away-only-recheck-root"
   home="$TMP_ROOT/away-only-recheck-home"
-  mkdir -p "$home/state" "$home/config"
+  mkdir -p "$home/state/wake" "$home/config"
   install_pi_branch_extension_fixture "$repo"
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
@@ -2012,7 +2012,7 @@ const contract = (args) => {
 
 await fire("session_start", {});
 contract(["enter"]);
-writeFileSync(`${home}/state/.wake-queue`, "1\t1\tcheck\tmain-only\tcheck: task-d.check.sh: PR merged\n");
+writeFileSync(`${home}/state/wake/queue`, "1\t1\tcheck\tmain-only\tcheck: task-d.check.sh: PR merged\n");
 contract(["archive"]);
 const offer = makeOffer("check: task-d.check.sh: PR merged", [], false, true, true);
 bus.emit("fm-branch-supervision:dispatch", offer);
@@ -2029,11 +2029,11 @@ if (mainUserMessages.length !== 0) {
 }
 
 contract(["enter"]);
-writeFileSync(`${home}/state/.wake-queue`, "1\t1\tsignal\tbranch-driver.status\tsignal: branch-driver.status\n");
+writeFileSync(`${home}/state/wake/queue`, "1\t1\tsignal\tbranch-driver.status\tsignal: branch-driver.status\n");
 const taskLocal = makeOffer("signal: branch-driver.status", [approvedProject], false, true);
 bus.emit("fm-branch-supervision:dispatch", taskLocal);
 if (!taskLocal.accepted) throw new Error("the attended-eligible away wake was refused at accept");
-writeFileSync(`${home}/state/.wake-queue`, "");
+writeFileSync(`${home}/state/wake/queue`, "");
 const quiet = await taskLocal.settlement.then(() => null, (error) => error);
 if (quiet instanceof Error) {
   throw new Error(`an attended-eligible wake threw after it was drained: ${quiet.message}`);
@@ -2056,7 +2056,7 @@ test_away_claimed_heartbeat_on_a_task_wake_lifts_task_scoping() {
   local repo home out status
   repo="$TMP_ROOT/away-heartbeat-scope-root"
   home="$TMP_ROOT/away-heartbeat-scope-home"
-  mkdir -p "$home/state" "$home/config"
+  mkdir -p "$home/state/wake" "$home/config"
   install_pi_branch_extension_fixture "$repo"
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
@@ -2078,7 +2078,7 @@ const contract = (args) => {
 await fire("session_start", {}, defaultSessionCtx);
 contract(["enter"]);
 writeFileSync(
-  `${home}/state/.wake-queue`,
+  `${home}/state/wake/queue`,
   "1\t1\tsignal\tbranch-driver.status\tsignal: branch-driver.status\n2\t2\theartbeat\theartbeat\theartbeat\n",
 );
 let finishPrompt;
@@ -2107,7 +2107,7 @@ test_branch_predrain_recheck_keeps_a_heartbeat_a_co_present_check_arrives_under(
   local repo home out status
   repo="$TMP_ROOT/predrain-recheck-root"
   home="$TMP_ROOT/predrain-recheck-home"
-  mkdir -p "$home/state" "$home/config"
+  mkdir -p "$home/state/wake" "$home/config"
   install_pi_branch_extension_fixture "$repo"
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
@@ -2123,7 +2123,7 @@ const offer = dispatch("heartbeat", [], true, true);
 if (!offer.accepted) throw new Error("eligible heartbeat offer was not accepted");
 // A main-only notice arrives between offer acceptance and the branch's own
 // drain. It must not carry the fleet review into the captain's chat.
-appendFileSync(`${home}/state/.wake-queue`, "2\t2\tcheck\tx-inbox\tcheck: pending x mention\n");
+appendFileSync(`${home}/state/wake/queue`, "2\t2\tcheck\tx-inbox\tcheck: pending x mention\n");
 for (let i = 0; i < 250 && !globalThis.__fmPromptStarted && mainUserMessages.length === 0; i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 10));
 }
@@ -2137,7 +2137,7 @@ const snapshot = readFileSync(`${home}/state/.branch-eligible-rows`, "utf8").tri
 if (!snapshot.includes("1")) throw new Error(`eligible-row snapshot omitted the heartbeat row: ${snapshot}`);
 if (snapshot.includes("2")) throw new Error(`eligible-row snapshot granted the main-owned row: ${snapshot}`);
 releasePrompt();
-const queue = readFileSync(`${home}/state/.wake-queue`, "utf8");
+const queue = readFileSync(`${home}/state/wake/queue`, "utf8");
 if (!queue.includes("\theartbeat\t") || !queue.includes("\tcheck\t")) {
   throw new Error(`the pre-drain recheck mutated the queued set: ${queue}`);
 }
@@ -2160,7 +2160,7 @@ test_branch_report_refuses_a_task_the_wake_did_not_name() {
   local repo home out status
   repo="$TMP_ROOT/ghost-report-root"
   home="$TMP_ROOT/ghost-report-home"
-  mkdir -p "$home/state" "$home/config"
+  mkdir -p "$home/state/wake" "$home/config"
   install_pi_branch_extension_fixture "$repo"
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
@@ -2221,7 +2221,7 @@ if (JSON.stringify(stored) !== JSON.stringify(["branch-driver", "other-task", "r
 // signal row by its status-log key, a stale row by the endpoint a task's
 // metadata records.
 const lib = await import(pathToFileURL(`${dirname(process.env.PLUGIN)}/lib/fm-branch-dispatch.ts`).href);
-writeFileSync(`${home}/state/.wake-queue`, [
+writeFileSync(`${home}/state/wake/queue`, [
   "1\t1\tsignal\tbranch-driver.status\tsignal: done",
   "2\t2\tstale\tdefault:wX:p1\tstale: default:wX:p1 (idle 378s)",
   "3\t3\tcheck\tmerge-poll\tcheck: merged",
@@ -2251,7 +2251,7 @@ test_branch_predrain_recheck_excludes_new_main_owned_row_without_deferring_eligi
   local repo home out status
   repo="$TMP_ROOT/predrain-partial-root"
   home="$TMP_ROOT/predrain-partial-home"
-  mkdir -p "$home/state" "$home/config"
+  mkdir -p "$home/state/wake" "$home/config"
   install_pi_branch_extension_fixture "$repo"
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
@@ -2268,7 +2268,7 @@ if (!offer.accepted) throw new Error("eligible task-local offer was not accepted
 // A main-only notice arrives while main is still finishing its own earlier
 // turn - unacked, still sitting in the queue - between offer acceptance and
 // the branch's own drain.
-appendFileSync(`${home}/state/.wake-queue`, "2\t2\tcheck\tx-inbox\tcheck: pending x mention\n");
+appendFileSync(`${home}/state/wake/queue`, "2\t2\tcheck\tx-inbox\tcheck: pending x mention\n");
 for (let i = 0; i < 250 && !globalThis.__fmPromptStarted && mainUserMessages.length === 0; i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 10));
 }
@@ -2281,7 +2281,7 @@ if (!globalThis.__fmPromptStarted) {
 const snapshot = readFileSync(`${home}/state/.branch-eligible-rows`, "utf8").trim().split("\n");
 if (!snapshot.includes("1")) throw new Error(`eligible-row snapshot omitted the task-local row: ${snapshot}`);
 if (snapshot.includes("2")) throw new Error(`eligible-row snapshot granted the main-owned row: ${snapshot}`);
-const queue = readFileSync(`${home}/state/.wake-queue`, "utf8");
+const queue = readFileSync(`${home}/state/wake/queue`, "utf8");
 if (!queue.includes("\tcheck\tx-inbox\t")) {
   throw new Error(`the main-owned row must remain queued for main, untouched: ${queue}`);
 }
@@ -2312,7 +2312,7 @@ test_branch_predrain_needs_decision_keeps_routine_row_branch_eligible() {
   local repo home out status
   repo="$TMP_ROOT/predrain-needs-decision-root"
   home="$TMP_ROOT/predrain-needs-decision-home"
-  mkdir -p "$home/state" "$home/config"
+  mkdir -p "$home/state/wake" "$home/config"
   install_pi_branch_extension_fixture "$repo"
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
@@ -2324,7 +2324,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 
 fire("session_start", {});
 writeFileSync(
-  `${home}/state/.wake-queue`,
+  `${home}/state/wake/queue`,
   "1\t1\tsignal\tbranch-driver.status\tsignal: routine progress\n" +
     "2\t2\tsignal\tdecision-task.status\tneeds-decision: decision-task.status\n",
 );
@@ -2372,7 +2372,7 @@ test_settled_branch_prompt_releases_unacknowledged_grant() {
   local repo home out status
   repo="$TMP_ROOT/settled-grant-root"
   home="$TMP_ROOT/settled-grant-home"
-  mkdir -p "$home/state" "$home/config"
+  mkdir -p "$home/state/wake" "$home/config"
   install_pi_branch_extension_fixture "$repo"
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
@@ -2423,7 +2423,7 @@ test_post_construction_provider_error_falls_back_latches_and_recovers_on_cooldow
   local repo home out status
   repo="$TMP_ROOT/provider-error-root"
   home="$TMP_ROOT/provider-error-home"
-  mkdir -p "$home/state" "$home/config"
+  mkdir -p "$home/state/wake" "$home/config"
   install_pi_branch_extension_fixture "$repo"
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
@@ -2611,7 +2611,7 @@ test_selection_change_does_not_corrupt_inflight_provider_state() {
   local repo home out status
   repo="$TMP_ROOT/provider-selection-race-root"
   home="$TMP_ROOT/provider-selection-race-home"
-  mkdir -p "$home/state" "$home/config"
+  mkdir -p "$home/state/wake" "$home/config"
   install_pi_branch_extension_fixture "$repo"
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
@@ -2692,7 +2692,7 @@ test_main_owned_grant_result_falls_back_to_main() {
   local repo home out status
   repo="$TMP_ROOT/main-owned-fallback-root"
   home="$TMP_ROOT/main-owned-fallback-home"
-  mkdir -p "$home/state" "$home/config"
+  mkdir -p "$home/state/wake" "$home/config"
   install_pi_branch_extension_fixture "$repo"
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
@@ -2730,7 +2730,7 @@ test_branch_predrain_recheck_noops_already_drained_wake() {
   local repo home out status
   repo="$TMP_ROOT/predrain-empty-root"
   home="$TMP_ROOT/predrain-empty-home"
-  mkdir -p "$home/state" "$home/config"
+  mkdir -p "$home/state/wake" "$home/config"
   install_pi_branch_extension_fixture "$repo"
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
@@ -2760,7 +2760,7 @@ for (let i = 0; i < 250 && !globalThis.__fmPromptStarted; i += 1) {
 }
 if (!globalThis.__fmPromptStarted) throw new Error("first branch prompt did not start");
 if (!dispatch("heartbeat", [], true, true).accepted) throw new Error("queued heartbeat was not accepted");
-writeFileSync(`${home}/state/.wake-queue`, "");
+writeFileSync(`${home}/state/wake/queue`, "");
 releaseFirst();
 for (let i = 0; i < 250 && (globalThis.__fmPrompts ?? []).length < 1; i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 10));
@@ -2784,7 +2784,7 @@ test_branch_mirror_filters_order_and_cursor() {
   local repo home out status
   repo="$TMP_ROOT/mirror-root"
   home="$TMP_ROOT/mirror-home"
-  mkdir -p "$home/state" "$home/config"
+  mkdir -p "$home/state/wake" "$home/config"
   install_pi_branch_extension_fixture "$repo"
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
@@ -2875,7 +2875,7 @@ test_branch_mirror_reanchors_for_the_new_session_branch_conversation() {
   local repo home out status
   repo="$TMP_ROOT/mirror-reanchor-root"
   home="$TMP_ROOT/mirror-reanchor-home"
-  mkdir -p "$home/state" "$home/config"
+  mkdir -p "$home/state/wake" "$home/config"
   install_pi_branch_extension_fixture "$repo"
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
@@ -2945,7 +2945,7 @@ test_branch_session_is_new_at_every_main_session_start() {
   local repo home out status first_pointer
   repo="$TMP_ROOT/fresh-session-root"
   home="$TMP_ROOT/fresh-session-home"
-  mkdir -p "$home/state" "$home/config"
+  mkdir -p "$home/state/wake" "$home/config"
   install_pi_branch_extension_fixture "$repo"
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
@@ -3042,7 +3042,7 @@ test_branch_model_pin_applies_and_absent_pin_keeps_the_default() {
   local repo home out status
   repo="$TMP_ROOT/modelpin-root"
   home="$TMP_ROOT/modelpin-home"
-  mkdir -p "$home/state" "$home/config"
+  mkdir -p "$home/state/wake" "$home/config"
   install_pi_branch_extension_fixture "$repo"
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
@@ -3139,7 +3139,7 @@ test_unpinned_branch_follows_main_model_changes_live() {
   local repo home out status
   repo="$TMP_ROOT/model-live-root"
   home="$TMP_ROOT/model-live-home"
-  mkdir -p "$home/state" "$home/config"
+  mkdir -p "$home/state/wake" "$home/config"
   install_pi_branch_extension_fixture "$repo"
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
@@ -3198,7 +3198,7 @@ test_supervision_model_command_persists_and_rebinds_the_live_branch() {
   local repo home out status
   repo="$TMP_ROOT/modelcmd-root"
   home="$TMP_ROOT/modelcmd-home"
-  mkdir -p "$home/state" "$home/config"
+  mkdir -p "$home/state/wake" "$home/config"
   install_pi_branch_extension_fixture "$repo"
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
@@ -3394,7 +3394,7 @@ test_branch_effort_pin_applies_and_absent_pin_follows_main() {
   local repo home out status
   repo="$TMP_ROOT/effortpin-root"
   home="$TMP_ROOT/effortpin-home"
-  mkdir -p "$home/state" "$home/config"
+  mkdir -p "$home/state/wake" "$home/config"
   install_pi_branch_extension_fixture "$repo"
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
@@ -3519,7 +3519,7 @@ test_unpinned_branch_follows_main_effort_changes_live() {
   local repo home out status
   repo="$TMP_ROOT/effort-live-root"
   home="$TMP_ROOT/effort-live-home"
-  mkdir -p "$home/state" "$home/config"
+  mkdir -p "$home/state/wake" "$home/config"
   install_pi_branch_extension_fixture "$repo"
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
@@ -3583,7 +3583,7 @@ test_supervision_model_picker_is_bounded_searchable_and_branch_only() {
   local repo home out status
   repo="$TMP_ROOT/pickerux-root"
   home="$TMP_ROOT/pickerux-home"
-  mkdir -p "$home/state" "$home/config"
+  mkdir -p "$home/state/wake" "$home/config"
   install_pi_branch_extension_fixture "$repo"
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
@@ -3712,7 +3712,7 @@ test_supervision_model_command_picks_effort_after_the_model() {
   local repo home out status
   repo="$TMP_ROOT/effortcmd-root"
   home="$TMP_ROOT/effortcmd-home"
-  mkdir -p "$home/state" "$home/config"
+  mkdir -p "$home/state/wake" "$home/config"
   install_pi_branch_extension_fixture "$repo"
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
@@ -3874,7 +3874,7 @@ test_unusable_model_pin_falls_back_to_main() {
   local repo home out status
   repo="$TMP_ROOT/modelbad-root"
   home="$TMP_ROOT/modelbad-home"
-  mkdir -p "$home/state" "$home/config"
+  mkdir -p "$home/state/wake" "$home/config"
   install_pi_branch_extension_fixture "$repo"
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
@@ -3945,7 +3945,7 @@ test_replacement_activation_cleans_leases_and_retries_failure() {
   home="$TMP_ROOT/activation-home"
   fakebin="$home/fakebin"
   real_bash=$(command -v bash)
-  mkdir -p "$home/state" "$home/config" "$fakebin"
+  mkdir -p "$home/state/wake" "$home/config" "$fakebin"
   install_pi_branch_extension_fixture "$repo"
   cat > "$fakebin/bash" <<'SH'
 #!/bin/sh
@@ -3987,7 +3987,7 @@ test_cold_start_activates_after_lock_acquisition() {
   local repo home out status
   repo="$TMP_ROOT/coldstart-root"
   home="$TMP_ROOT/coldstart-home"
-  mkdir -p "$home/state" "$home/config"
+  mkdir -p "$home/state/wake" "$home/config"
   install_pi_branch_extension_fixture "$repo"
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     FM_TEST_SKIP_LOCK=1 DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
@@ -4030,7 +4030,7 @@ test_queued_actions_recheck_lock_ownership() {
   local repo home out status
   repo="$TMP_ROOT/queued-ownership-root"
   home="$TMP_ROOT/queued-ownership-home"
-  mkdir -p "$home/state" "$home/config"
+  mkdir -p "$home/state/wake" "$home/config"
   install_pi_branch_extension_fixture "$repo"
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
@@ -4076,7 +4076,7 @@ test_stale_generation_boundaries_are_side_effect_free() {
   local repo home out status
   repo="$TMP_ROOT/stale-boundaries-root"
   home="$TMP_ROOT/stale-boundaries-home"
-  mkdir -p "$home/state" "$home/config"
+  mkdir -p "$home/state/wake" "$home/config"
   install_pi_branch_extension_fixture "$repo"
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
@@ -4152,7 +4152,7 @@ test_secondary_session_stays_inert() {
   local repo home out status foreign_pid
   repo="$TMP_ROOT/secondary-root"
   home="$TMP_ROOT/secondary-home"
-  mkdir -p "$home/state" "$home/config"
+  mkdir -p "$home/state/wake" "$home/config"
   install_pi_branch_extension_fixture "$repo"
   # The fleet lock is owned by ANOTHER live process that is NOT in the
   # driver's ancestry (a sibling sleeper), so the driver is a secondary
@@ -4187,7 +4187,7 @@ test_rebind_remirrors_undelivered_dialog_from_durable_cursor() {
   local repo home out status
   repo="$TMP_ROOT/rebind-root"
   home="$TMP_ROOT/rebind-home"
-  mkdir -p "$home/state" "$home/config"
+  mkdir -p "$home/state/wake" "$home/config"
   install_pi_branch_extension_fixture "$repo"
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
@@ -4237,7 +4237,7 @@ const replacement = await import(`${pathToFileURL(process.env.PLUGIN).href}?rebi
 replacement.default(replacementPi);
 for (const handler of replacementPiHandlers.get("session_start") ?? []) handler({}, ctx);
 for (const handler of replacementPiHandlers.get("turn_end") ?? []) handler({}, ctx);
-writeFileSync(`${home}/state/.wake-queue`, "1\t1\tsignal\tbranch-driver.status\tsignal: after rebind\n");
+writeFileSync(`${home}/state/wake/queue`, "1\t1\tsignal\tbranch-driver.status\tsignal: after rebind\n");
 const offer = {
   message: "signal: after rebind",
   projects: [`${home}/projects/approved`],
@@ -4279,7 +4279,7 @@ test_branch_dispatch_classifies_main_only_rows_and_writes_the_eligible_snapshot(
   local repo home out status
   repo="$TMP_ROOT/dispatch-classify-root"
   home="$TMP_ROOT/dispatch-classify-home"
-  mkdir -p "$repo/.pi/extensions/lib" "$home/state" "$home/projects/approved"
+  mkdir -p "$repo/.pi/extensions/lib" "$home/state/wake" "$home/projects/approved"
   cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$repo/.pi/extensions/lib/fm-branch-dispatch.ts"
   cp "$ROOT/.pi/extensions/lib/fm-native-contract.ts" "$repo/.pi/extensions/lib/fm-native-contract.ts"
   cp "$ROOT/.pi/extensions/lib/fm-async-exec.ts" "$repo/.pi/extensions/lib/fm-async-exec.ts"
@@ -4314,7 +4314,7 @@ const mainOnlyRows = [
   "1\t1\tcheck\tunauthenticated-state-checks\tcheck: rejected unauthenticated state checks",
 ];
 for (const row of mainOnlyRows) {
-  writeFileSync(`${state}/.wake-queue`, row);
+  writeFileSync(`${state}/wake/queue`, row);
   const scope = scopeForUnreadWake(state, false);
   if (scope.eligible || scope.eligibleSeqs.length !== 0) {
     throw new Error(`a main-only class was offered to the branch: ${row} -> ${JSON.stringify(scope)}`);
@@ -4328,7 +4328,7 @@ for (const row of mainOnlyRows) {
 // task's window alias remains individually claimable, while task-identity
 // precedence keeps its complete wake on main until the decision row is read.
 writeFileSync(
-  `${state}/.wake-queue`,
+  `${state}/wake/queue`,
   [
     "1\t1\tsignal\ttask-a.status\tneeds-decision: task-a.status",
     "1\t2\tstale\tfm-window\tstale: later routine reminder",
@@ -4354,7 +4354,7 @@ if (needsDecisionMixed.corrupted) {
 
 // A queue holding only a needs-decision row is ordinary main-only absence,
 // exactly like a queue holding only a check row.
-writeFileSync(`${state}/.wake-queue`, "1\t1\tsignal\ttask-a.status\tneeds-decision: task-a.status");
+writeFileSync(`${state}/wake/queue`, "1\t1\tsignal\ttask-a.status\tneeds-decision: task-a.status");
 const needsDecisionOnly = scopeForUnreadWake(state, false);
 if (needsDecisionOnly.eligible || needsDecisionOnly.eligibleSeqs.length !== 0 || needsDecisionOnly.corrupted) {
   throw new Error(`a needs-decision-only queue must be ordinary main-only absence: ${JSON.stringify(needsDecisionOnly)}`);
@@ -4364,7 +4364,7 @@ if (needsDecisionOnly.eligible || needsDecisionOnly.eligibleSeqs.length !== 0 ||
 // excluded while an unrelated routine row remains independently branch-owned.
 writeFileSync(`${state}/task-a.status`, "captain-held [key=route]: awaiting the captain\n \t \n");
 writeFileSync(
-  `${state}/.wake-queue`,
+  `${state}/wake/queue`,
   [
     "1\t1\tstale\tfm-window\tstale: fm-window (awaiting the captain)",
     "1\t2\tsignal\ttask-a.status\tsignal: routine follow-up",
@@ -4380,7 +4380,7 @@ if (captainHeldMixed.needsDecisionKeys.join(",") !== "fm-window") {
 
 writeFileSync(`${state}/task-a.status`, "captain-held [key=route]: awaiting a second captain reminder\n \n");
 writeFileSync(
-  `${state}/.wake-queue`,
+  `${state}/wake/queue`,
   [
     "1\t1\tstale\tfm-window\tstale: fm-window (first reminder)",
     "1\t2\tstale\tfm-window\tstale: fm-window (second reminder)",
@@ -4409,7 +4409,7 @@ if (countedStatusReads !== 2 || changedCaptainHeld.eligibleSeqs.join(",") !== "1
 }
 countedStatusPath = "";
 writeFileSync(
-  `${state}/.wake-queue`,
+  `${state}/wake/queue`,
   [
     "1\t1\tstale\tfm-window\tstale: fm-window (awaiting the captain)",
     "1\t2\tsignal\ttask-a.status\tsignal: routine follow-up",
@@ -4474,7 +4474,7 @@ unlinkSync(`${state}/task-a.status`);
 writeFileSync(`${state}/task-a.status`, "working: routine work\n");
 
 writeFileSync(
-  `${state}/.wake-queue`,
+  `${state}/wake/queue`,
   [
     "1\t1\tcheck\tx-inbox",
     "1\t2\tsignal\ttask-a.status\tsignal: task-a.status",
@@ -4488,7 +4488,7 @@ if (!truncated.corrupted || truncated.eligible || truncated.eligibleSeqs.length 
 // A mixed queue: the main-only row (seq 1) never vetoes the task-local rows
 // (seq 2, 3) - the reproduction from the task.
 writeFileSync(
-  `${state}/.wake-queue`,
+  `${state}/wake/queue`,
   [
     "1\t1\tcheck\tx-inbox\tcheck: pending x mention",
     "1\t2\tsignal\ttask-a.status\tsignal: task-a.status",
@@ -4529,7 +4529,7 @@ if ((await writeEligibleRowsSnapshot(state, ["2"], process.env.GRANT, "fixture")
 // from the claim rather than deferring a fleet review that has nothing to do
 // with it - the captain's reproduction.
 writeFileSync(
-  `${state}/.wake-queue`,
+  `${state}/wake/queue`,
   [
     "1\t1\tcheck\tx-inbox\tcheck: pending x mention",
     "1\t2\theartbeat\theartbeat\theartbeat",
@@ -4548,7 +4548,7 @@ if (heartbeatMixed.eligibleSeqs.slice().sort().join(",") !== "2,3") {
 // review takes every branch-ownable row or none of them, so a row this scan
 // cannot resolve still defers the whole review to main.
 writeFileSync(
-  `${state}/.wake-queue`,
+  `${state}/wake/queue`,
   [
     "1\t1\theartbeat\theartbeat\theartbeat",
     "1\t2\tsignal\tno-such-task.status\tsignal: no-such-task.status",
@@ -4559,7 +4559,7 @@ if (heartbeatUnresolvable.eligible || !heartbeatUnresolvable.corrupted) {
   throw new Error(`an unresolvable row must still defer a heartbeat review: ${JSON.stringify(heartbeatUnresolvable)}`);
 }
 writeFileSync(
-  `${state}/.wake-queue`,
+  `${state}/wake/queue`,
   [
     "1\t1\theartbeat\theartbeat\theartbeat",
     "1\t2\tinvented\tsomething\tinvented: not a kind fm_wake_append emits",
@@ -4572,7 +4572,7 @@ if (heartbeatUnknownKind.eligible || !heartbeatUnknownKind.corrupted) {
 
 // A queue holding nothing but main-only rows leaves a heartbeat with nothing
 // to hand over, so it is not offered rather than granted an empty claim.
-writeFileSync(`${state}/.wake-queue`, "1\t1\tcheck\tx-inbox\tcheck: pending x mention");
+writeFileSync(`${state}/wake/queue`, "1\t1\tcheck\tx-inbox\tcheck: pending x mention");
 const heartbeatNothingOwnable = scopeForUnreadWake(state, true);
 if (heartbeatNothingOwnable.eligible || heartbeatNothingOwnable.eligibleSeqs.length !== 0) {
   throw new Error(`a heartbeat was offered with no branch-ownable row: ${JSON.stringify(heartbeatNothingOwnable)}`);
@@ -4597,7 +4597,7 @@ test_branch_dispatch_routes_secondmate_signal_by_new_span() {
   local repo home out status
   repo="$TMP_ROOT/dispatch-span-root"
   home="$TMP_ROOT/dispatch-span-home"
-  mkdir -p "$repo/.pi/extensions/lib" "$home/state" "$home/projects/approved"
+  mkdir -p "$repo/.pi/extensions/lib" "$home/state/wake" "$home/projects/approved"
   cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$repo/.pi/extensions/lib/fm-branch-dispatch.ts"
   cp "$ROOT/.pi/extensions/lib/fm-native-contract.ts" "$repo/.pi/extensions/lib/fm-native-contract.ts"
   cp "$ROOT/.pi/extensions/lib/fm-async-exec.ts" "$repo/.pi/extensions/lib/fm-async-exec.ts"
@@ -4624,7 +4624,7 @@ function stage(task, presented, span) {
     'status_commit_presentation_snapshot "$2" "$(printf "%s\\t%s\\t%s" "$3" "$4" "$ident")"',
     "_", process.env.CLASSIFY_LIB, state, task, String(Buffer.byteLength(presented))]);
   appendFileSync(path, span);
-  writeFileSync(`${state}/.wake-queue`, signalRow(task));
+  writeFileSync(`${state}/wake/queue`, signalRow(task));
 }
 
 // Both routing paths: the Pi dispatcher and the attended supervision host.
@@ -4682,7 +4682,7 @@ for (const [order, queue, signalSeq, staleSeq] of [
   ["signal first", "1\t1\tsignal\tmate.status\tsignal: mate.status\n1\t2\tstale\tmate\tstale: mate", "1", "2"],
 ]) {
   stage("mate", hold, "done: sample-e PR merged\n");
-  writeFileSync(`${state}/.wake-queue`, queue);
+  writeFileSync(`${state}/wake/queue`, queue);
   for (const attendedHost of [false, true]) {
     const scope = scopeForUnreadWake(state, false, false, attendedHost);
     if (!scope.eligibleSeqs.includes(signalSeq) || scope.eligibleSeqs.includes(staleSeq)) {
@@ -4961,7 +4961,7 @@ test_delivery_keeps_the_event_loop_live_and_ordered() {
   local repo home out status
   repo="$TMP_ROOT/delivery-responsiveness-root"
   home="$TMP_ROOT/delivery-responsiveness-home"
-  mkdir -p "$home/state" "$home/config"
+  mkdir -p "$home/state/wake" "$home/config"
   install_pi_branch_extension_fixture "$repo"
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
@@ -5108,7 +5108,7 @@ test_session_replacement_during_delivery_neither_loses_nor_duplicates() {
   home="$TMP_ROOT/delivery-replacement-home"
   fakebin="$home/fakebin"
   real_ps=$(command -v ps)
-  mkdir -p "$home/state" "$home/config" "$fakebin"
+  mkdir -p "$home/state/wake" "$home/config" "$fakebin"
   install_pi_branch_extension_fixture "$repo"
   cat > "$fakebin/ps" <<'SH'
 #!/bin/sh
@@ -5221,7 +5221,7 @@ test_store_failure_during_delivery_neither_loses_nor_duplicates() {
   home="$TMP_ROOT/delivery-store-failure-home"
   fakebin="$home/fakebin"
   real_bash=$(command -v bash)
-  mkdir -p "$home/state" "$home/config" "$fakebin"
+  mkdir -p "$home/state/wake" "$home/config" "$fakebin"
   install_pi_branch_extension_fixture "$repo"
   # Fails exactly the store subcommand the arming file names, once, so the
   # delivery meets a real failing script rather than a stubbed return value.
@@ -5320,7 +5320,7 @@ test_mark_read_failure_keeps_routine_redelivery_and_captain_deduplication() {
   home="$TMP_ROOT/mark-read-failure-shape-home"
   fakebin="$home/fakebin"
   real_bash=$(command -v bash)
-  mkdir -p "$home/state" "$home/config" "$fakebin"
+  mkdir -p "$home/state/wake" "$home/config" "$fakebin"
   install_pi_branch_extension_fixture "$repo"
   cat > "$fakebin/bash" <<'SH'
 #!/bin/sh
@@ -5430,7 +5430,7 @@ test_extension_registered_provider_resolves_in_the_branch() {
   local repo home out status
   repo="$TMP_ROOT/extprov-root"
   home="$TMP_ROOT/extprov-home"
-  mkdir -p "$home/state" "$home/config"
+  mkdir -p "$home/state/wake" "$home/config"
   install_pi_branch_extension_fixture "$repo"
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'

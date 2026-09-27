@@ -2277,7 +2277,7 @@ SH
   assert_contains "$out" "answers-fed: $sid" \
     "the captured board answer never reached the keyed-answer intake: $out"
 
-  queue=$(cat "$home/state/.wake-queue" 2>/dev/null || true)
+  queue=$(cat "$home/state/wake/queue" 2>/dev/null || true)
   assert_contains "$queue" "check: procevent lavish $sid 1" \
     "the captured board answer produced no wake: $queue"
 

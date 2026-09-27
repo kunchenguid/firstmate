@@ -17,7 +17,7 @@ make_guard_case() {
   dir="$TMP_ROOT/$name"
   home="$dir/home"
   root="$dir/root"
-  mkdir -p "$home/state" "$home/config" "$root"
+  mkdir -p "$home/state/wake" "$home/config" "$root"
   fm_write_meta "$home/state/task.meta" "window=firstmate:fm-task" "kind=ship"
   printf '%s\n' "$dir"
 }
@@ -81,7 +81,7 @@ record_aged_rewake_epoch() {
   local home=$1 session_pid=$2 recovery=${3:-guard-test-generation}
   printf 'epoch=7 owner_pid=1 outcome=rewake updated_at=1 session_pid=%s recovery_generation=%s\n' \
     "$session_pid" "$recovery" > "$home/state/.claude-autoarm-epoch"
-  printf 'acked:handling:%s\n' "$recovery" > "$home/state/.watcher-down"
+  printf 'acked:handling:%s\n' "$recovery" > "$home/state/wake/watcher-down"
   touch -t 201901010000 "$home/state/.last-watcher-beat"
   touch -t 202001010000 "$home/state/.claude-autoarm-epoch"
 }
@@ -335,7 +335,7 @@ test_queued_wake_warning_stays_independent() {
   out1=$(run_guard_case "$dir")
   [ "$(count_text "$out1" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 1 ] \
     || fail "first stale call did not print the full banner before queued wake case: $out1"
-  printf 'signal: %s/state/task.status\n' "$home" > "$home/state/.wake-queue"
+  printf 'signal: %s/state/task.status\n' "$home" > "$home/state/wake/queue"
   out2=$(run_guard_case "$dir")
   assert_contains "$out2" "full banner already printed this episode" \
     "same-episode stale call should still print its concise reminder"
@@ -526,7 +526,7 @@ test_autoarm_long_turn_requires_every_healthy_signal() {
         record_session_lock_pid "$home" "$replacement_pid"
         ;;
       moved-recovery)
-        printf 'pending:handling:later-turn-generation\n' > "$home/state/.watcher-down"
+        printf 'pending:handling:later-turn-generation\n' > "$home/state/wake/watcher-down"
         ;;
       later-beacon)
         touch -t 202101010000 "$home/state/.last-watcher-beat"
@@ -823,7 +823,7 @@ test_extension_handoff_keeps_queued_wake_warning() {
   pid=$!
   record_pi_extension_session "$dir" "$pid" || fail "could not record the Pi extension session"
   touch "$home/state/.last-watcher-beat"
-  printf '%s\n' "1700000000	1	signal	task	signal: crewmate needs a decision" > "$home/state/.wake-queue"
+  printf '%s\n' "1700000000	1	signal	task	signal: crewmate needs a decision" > "$home/state/wake/queue"
   out=$(run_guard_case_extension "$dir")
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
@@ -851,7 +851,7 @@ test_branch_actor_is_not_told_to_drain_queued_wakes() {
   touch "$home/state/.last-watcher-beat"
   printf '%s\n' \
     "1700000000	7	stale	firstmate:fm-task	stale: firstmate:fm-task (idle 378s, possible wedge)" \
-    "1700000001	8	check	merge-poll	check: merge-poll: merged" > "$home/state/.wake-queue"
+    "1700000001	8	check	merge-poll	check: merge-poll: merged" > "$home/state/wake/queue"
   printf '7\n' > "$home/state/.branch-eligible-rows"
   out=$(run_guard_case_extension_as_branch "$dir")
   assert_not_contains "$out" "queued wakes pending" \

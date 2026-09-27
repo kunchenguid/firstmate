@@ -2059,7 +2059,7 @@ test_queued_gitlab_merge_leaves_the_poll_armed() {
     >"$case_dir/stdout" 2>"$case_dir/stderr" \
     || fail "queued-gitlab-merge: accepted merge command failed"
 
-  assert_absent "$case_dir/state/.wake-queue" \
+  assert_absent "$case_dir/state/wake/queue" \
     "queued-gitlab-merge: a queued merge was reported as landed"
   [ -f "$case_dir/state/task-x1.check.sh" ] \
     || fail "queued-gitlab-merge: the merge poll was not left armed"
@@ -2078,9 +2078,9 @@ test_main_home_merge_leaves_a_durable_wake() {
   FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$url" \
     >"$case_dir/stdout" 2>"$case_dir/stderr" || fail "main-merge-wake: merge failed"
 
-  assert_grep "$url" "$case_dir/state/.wake-queue" \
+  assert_grep "$url" "$case_dir/state/wake/queue" \
     "main-merge-wake: a merge this home performed left no durable record naming the PR"
-  [ "$(grep -c -F "$url" "$case_dir/state/.wake-queue")" -eq 1 ] \
+  [ "$(grep -c -F "$url" "$case_dir/state/wake/queue")" -eq 1 ] \
     || fail "main-merge-wake: one merge produced more than one durable record"
   assert_absent "$case_dir/state/parent-replies.status" \
     "main-merge-wake: a main home wrote a parent reply channel it does not have"
@@ -2100,7 +2100,7 @@ test_queued_github_merge_leaves_the_poll_armed() {
       >"$case_dir/stdout" 2>"$case_dir/stderr" \
     || fail "queued-github-merge: accepted merge command failed"
 
-  assert_absent "$case_dir/state/.wake-queue" \
+  assert_absent "$case_dir/state/wake/queue" \
     "queued-github-merge: a queued merge was reported as landed"
   [ -f "$case_dir/state/task-x1.check.sh" ] \
     || fail "queued-github-merge: the merge poll was not left armed"
@@ -2132,9 +2132,9 @@ test_distinct_merged_prs_keep_distinct_wakes() {
     >"$case_dir/stdout-2" 2>"$case_dir/stderr-2" \
     || fail "distinct-merge-wakes: second merge failed"
 
-  [ "$(grep -c -F "$first_url" "$case_dir/state/.wake-queue")" -eq 1 ] \
+  [ "$(grep -c -F "$first_url" "$case_dir/state/wake/queue")" -eq 1 ] \
     || fail "distinct-merge-wakes: first merge wake was missing or duplicated"
-  [ "$(grep -c -F "$second_url" "$case_dir/state/.wake-queue")" -eq 1 ] \
+  [ "$(grep -c -F "$second_url" "$case_dir/state/wake/queue")" -eq 1 ] \
     || fail "distinct-merge-wakes: second merge wake was missing or duplicated"
   FM_STATE_OVERRIDE="$case_dir/state" "$ROOT/bin/fm-wake-drain.sh" \
     >"$case_dir/drain.out" 2>"$case_dir/drain.err" \
@@ -2175,7 +2175,7 @@ SH
     "uncommitted-wake-retry: failed marker commit was not loud"
   [ -f "$case_dir/state/task-x1.check.sh" ] \
     || fail "uncommitted-wake-retry: failed commit disarmed the retry poll"
-  count=$(grep -c -F "$url" "$case_dir/state/.wake-queue")
+  count=$(grep -c -F "$url" "$case_dir/state/wake/queue")
   [ "$count" -ge 1 ] \
     || fail "uncommitted-wake-retry: failed marker commit lost the durable outcome"
   [ ! -e "$case_dir/state/task-x1.pr-poll-merge-notified" ] \
@@ -2185,7 +2185,7 @@ SH
     >"$case_dir/stdout-2" 2>"$case_dir/stderr-2" \
     || fail "uncommitted-wake-retry: retry failed"
   unset FM_TEST_MARKER_FAILURE FM_TEST_REAL_MV
-  count=$(grep -c -F "$url" "$case_dir/state/.wake-queue")
+  count=$(grep -c -F "$url" "$case_dir/state/wake/queue")
   [ "$count" -ge 1 ] \
     || fail "uncommitted-wake-retry: retry left the merge silent"
   [ -f "$case_dir/state/task-x1.pr-poll-merge-notified" ] \
@@ -2212,7 +2212,7 @@ test_secondmate_without_parent_binding_is_loud() {
   expect_code 0 "$rc" "unbound-secondmate: the merge itself landed and must not be reported as failed"
   assert_grep 'could not report it upward' "$case_dir/stderr" \
     "unbound-secondmate: a merge that could not be reported upward said nothing about it"
-  assert_absent "$case_dir/state/.wake-queue" \
+  assert_absent "$case_dir/state/wake/queue" \
     "unbound-secondmate: a secondmate home fell back to the main-home record"
   pass "a secondmate home that cannot report upward says so instead of merging in silence"
 }
@@ -2831,9 +2831,9 @@ test_away_record_permits_any_green_merge_under_away_authority() {
   FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$url" \
     > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "away-green: a green merge under the record should succeed: $(cat "$case_dir/stderr")"
   assert_logged_gh_merge "$case_dir" 83 example/repo --squash
-  assert_grep "merge landed: task-x1 $url away" "$case_dir/state/.wake-queue" \
+  assert_grep "merge landed: task-x1 $url away" "$case_dir/state/wake/queue" \
     "away-green: the durable outcome did not tag away"
-  assert_no_grep 'away-grant' "$case_dir/state/.wake-queue" \
+  assert_no_grep 'away-grant' "$case_dir/state/wake/queue" \
     "away-green: the retired away-grant tag reappeared"
   [ "$(sed -n 6p "$case_dir/state/task-x1.merge-authority" 2>/dev/null || true)" = away ] \
     || fail "away-green: the persisted merge authority is not away: $(cat "$case_dir/state/task-x1.merge-authority" 2>/dev/null || true)"
@@ -2847,7 +2847,7 @@ test_away_record_permits_any_green_merge_under_away_authority() {
   write_away_record "$case_dir"
   FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$url" \
     > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "away-yolo: yolo green merge should succeed"
-  assert_grep "merge landed: task-x1 $url away" "$case_dir/state/.wake-queue" \
+  assert_grep "merge landed: task-x1 $url away" "$case_dir/state/wake/queue" \
     "away-yolo: the durable outcome did not tag away"
 
   # --attended-override re-enables forge flags for an explicit instruction; it
@@ -2858,7 +2858,7 @@ test_away_record_permits_any_green_merge_under_away_authority() {
   write_away_record "$case_dir" --words 'merge it when green'
   FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$url" --attended-override \
     > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "away-attended-override: a green merge should succeed: $(cat "$case_dir/stderr")"
-  assert_grep "merge landed: task-x1 $url away" "$case_dir/state/.wake-queue" \
+  assert_grep "merge landed: task-x1 $url away" "$case_dir/state/wake/queue" \
     "away-attended-override: the durable outcome did not tag away"
 
   # Without the record the merge is attended and the ledger row stays untagged.
@@ -2867,9 +2867,9 @@ test_away_record_permits_any_green_merge_under_away_authority() {
   add_gh_mocks "$case_dir" "$head"
   FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$url" \
     > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "attended-untagged: an attended green merge should succeed"
-  case "$(grep -F "merge landed: task-x1 $url" "$case_dir/state/.wake-queue")" in
+  case "$(grep -F "merge landed: task-x1 $url" "$case_dir/state/wake/queue")" in
     *"$url") ;;
-    *) fail "attended-untagged: the attended outcome carried an authority tag: $(grep -F 'merge landed' "$case_dir/state/.wake-queue")" ;;
+    *) fail "attended-untagged: the attended outcome carried an authority tag: $(grep -F 'merge landed' "$case_dir/state/wake/queue")" ;;
   esac
   pass "while the away-posture record exists any green merge lands under away authority, yolo or not, and attended merges stay untagged"
 }
@@ -2910,7 +2910,7 @@ test_away_branch_actor_merges_green_under_the_record() {
   assert_grep 'main is parked' "$case_dir/stderr" \
     "away-branch-green: the relocation note was not printed"
   assert_logged_gh_merge "$case_dir" 93 example/repo --squash
-  assert_grep "merge landed: task-x1 $url away" "$case_dir/state/.wake-queue" \
+  assert_grep "merge landed: task-x1 $url away" "$case_dir/state/wake/queue" \
     "away-branch-green: the durable outcome did not tag away"
 
   # The green gate is absolute in this posture for the branch as for main: a
@@ -3157,7 +3157,7 @@ SH
   assert_equals 'merge task-x1 when green' "$(cat "$case_dir/away-words-at-merge" 2>/dev/null || true)" \
     "away-archive-at-merge: the record this merge read was not still standing at the forge call"
   assert_grep "merge landed: task-x1 https://github.com/example/repo/pull/71 away" \
-    "$case_dir/state/.wake-queue" \
+    "$case_dir/state/wake/queue" \
     "away-archive-at-merge: the landed merge was not recorded under the away authority it read"
   # The lock goes with the merge rather than leaking: the captain's return
   # archives the record on its first try once the merge is done.

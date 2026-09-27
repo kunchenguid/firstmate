@@ -129,7 +129,7 @@ test_branch_annotation_cannot_consume_the_main_resurfacing_backstop() {
   FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" \
     --ack-through "$sequence" --recovery-generation "$generation" \
     || fail "branch acknowledgement failed"
-  [ ! -s "$state/.wake-queue" ] || fail "branch acknowledgement did not consume its queue row"
+  [ ! -s "$state/wake/queue" ] || fail "branch acknowledgement did not consume its queue row"
 
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$main_out" \
     || fail "main drain failed after the branch lost its wake"
