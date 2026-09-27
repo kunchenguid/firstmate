@@ -94,13 +94,14 @@ test_the_bound_replaces_the_calling_shell() {
   dir="$TMP_ROOT/replace"
   mkdir -p "$dir"
   for path in "$PATH" "$PERL_ONLY"; do
-    rm -f "$dir/caller" "$dir/parent"
+    rm -f "$dir/parent"
+    # Backgrounded directly, the subshell's pid is the caller being replaced.
     (
       . "$ROOT/bin/fm-timeout-lib.sh"
-      printf '%s\n' "$BASHPID" > "$dir/caller"
       PATH=$path fm_exec_timed 5 1 bash -c 'echo "$PPID" > "$1"' _ "$dir/parent"
-    ) || fail "the bounded probe failed under PATH=$path"
-    caller=$(cat "$dir/caller")
+    ) &
+    caller=$!
+    wait "$caller" || fail "the bounded probe failed under PATH=$path"
     parent=$(cat "$dir/parent")
     [ "$caller" = "$parent" ] \
       || fail "the command's parent $parent is not the replaced caller $caller under PATH=$path"
@@ -199,7 +200,8 @@ test_an_owner_that_dies_during_startup_ends_the_command() {
   PATH=$PERL_ONLY bash -c '
     . "$1/bin/fm-timeout-lib.sh"
     (
-      echo "$BASHPID" > "$2/watchdog"
+      fm_exec_timed_self_pid || exit 1
+      echo "$fm_self_pid" > "$2/watchdog"
       while kill -0 "$$" 2>/dev/null; do sleep 0.05; done
       fm_exec_timed 60 1 bash -c "exec sleep 300"
     ) >/dev/null 2>&1 &
@@ -300,9 +302,70 @@ test_timed_out_names_exactly_the_bound_statuses() {
   pass "fm_timed_out accepts 124 and 137 and nothing else"
 }
 
+# Stock macOS bash 3.2 has no BASHPID, so the owner check must not read it bare
+# under set -u. Run the bound both in a subshell and as the shell's own last
+# command under every bash on the host, /bin/bash (3.2 on a stock Mac) included.
+test_the_owner_check_is_safe_without_bashpid() {
+  local sh out rc seen=0
+  for sh in /bin/bash /opt/homebrew/bin/bash "$(command -v bash)"; do
+    [ -x "$sh" ] || continue
+    seen=$((seen + 1))
+    rc=0
+    out=$(PATH=$PERL_ONLY "$sh" -c '
+      set -u
+      . "$1/bin/fm-timeout-lib.sh"
+      (fm_exec_timed 5 1 bash -c "echo sub; exit 3"); [ "$?" -eq 3 ] || exit 41
+      fm_exec_timed 5 1 bash -c "echo top; exit 4"
+    ' _ "$ROOT" 2>&1) || rc=$?
+    [ "$rc" -eq 4 ] || fail "$sh: fm_exec_timed died (rc=$rc): $out"
+    assert_contains "$out" "top" "$sh: the bounded command did not run at top level"
+    case "$out" in *unbound* | *"not found"*) fail "$sh: fm_exec_timed's owner check failed: $out" ;; esac
+  done
+  [ "$seen" -gt 0 ] || fail "no bash found to run the owner check"
+  pass "fm_exec_timed's owner check works without BASHPID"
+}
+
+# The owner check compares the owner against this process's own pid, which
+# Bash 3.2 cannot read from BASHPID. Resolve it at top level, in a subshell,
+# and in a function in each, under a PATH with no sh, and compare it with the
+# parent pid ps reports for a background child of the same process.
+test_the_self_pid_is_this_process_under_every_bash() {
+  local sh out rc seen=0
+  for sh in /bin/bash /opt/homebrew/bin/bash "$(command -v bash)"; do
+    [ -x "$sh" ] || continue
+    seen=$((seen + 1))
+    rc=0
+    out=$("$sh" -c '
+      set -u
+      . "$1/bin/fm-timeout-lib.sh"
+      check() {
+        local where=$1 fm_self_pid truth
+        PATH=$2 fm_exec_timed_self_pid || { echo "$where: unresolved"; return; }
+        sleep 5 &
+        truth=$(ps -o ppid= -p "$!")
+        { kill "$!" && wait "$!"; } 2>/dev/null
+        truth=${truth//[[:space:]]/}
+        [ "$fm_self_pid" = "$truth" ] || echo "$where: resolved $fm_self_pid, is $truth"
+      }
+      in_function() { check "$1" "$2"; }
+      check top "$2"
+      in_function top-function "$2"
+      (check subshell "$2")
+      (in_function subshell-function "$2")
+      (: ; (check nested-subshell "$2"))
+    ' _ "$ROOT" "$PERL_ONLY" 2>&1) || rc=$?
+    [ "$rc" -eq 0 ] || fail "$sh: resolving the pid failed (rc=$rc): $out"
+    [ -z "$out" ] || fail "$sh: the resolved pid is not this process: $out"
+  done
+  [ "$seen" -gt 0 ] || fail "no bash found to resolve the pid"
+  pass "fm_exec_timed_self_pid names this process under every bash, in and out of subshells"
+}
+
 test_passes_the_command_status_and_output_through
+test_the_self_pid_is_this_process_under_every_bash
 test_term_ends_a_cooperative_command_at_the_bound
 test_kill_ends_a_term_ignoring_command_after_the_grace
+test_the_owner_check_is_safe_without_bashpid
 test_the_bound_replaces_the_calling_shell
 test_a_descendant_holding_the_output_cannot_outlast_the_bound
 test_a_signal_to_the_bounding_process_reaches_the_command
