@@ -260,7 +260,8 @@ fm_backend_tmux_foreground_comms() {  # <target>
 
 # The foreground group's full command lines. Needed because a node-bundle
 # harness carries its identity in argv[1] rather than in its command name or
-# argv[0]; bin/fm-gemini-lib.sh owns what counts as evidence inside one.
+# argv[0]; bin/fm-gemini-lib.sh and bin/fm-copilot-lib.sh own what counts as
+# evidence inside one.
 fm_backend_tmux_foreground_args() {  # <target>
   local target=$1 tty pid pgid tpgid comm args
   tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 0
@@ -369,11 +370,15 @@ $argv0s
 EOF
 
   # Preserve argv boundaries where the platform exposes them. This is needed
-  # when the Gemini script path contains whitespace, which flattened ps output
-  # cannot represent unambiguously.
+  # when the Gemini or Copilot script path contains whitespace, which
+  # flattened ps output cannot represent unambiguously.
   while IFS= read -r pid; do
     [ -n "$pid" ] || continue
     if fm_gemini_pid_is_gemini "$pid"; then
+      printf 'alive'
+      return 0
+    fi
+    if fm_copilot_pid_is_copilot "$pid"; then
       printf 'alive'
       return 0
     fi
@@ -386,6 +391,10 @@ EOF
   while IFS= read -r name; do
     [ -n "$name" ] || continue
     if fm_gemini_args_are_gemini "$name"; then
+      printf 'alive'
+      return 0
+    fi
+    if fm_copilot_args_are_copilot "$name"; then
       printf 'alive'
       return 0
     fi

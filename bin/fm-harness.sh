@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|unknown
+# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|copilot|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate       print the harness the PRIMARY uses to launch
@@ -76,6 +76,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-cursor-lib.sh"
 # shellcheck source=bin/fm-gemini-lib.sh
 . "$SCRIPT_DIR/fm-gemini-lib.sh"
+# shellcheck source=bin/fm-copilot-lib.sh
+. "$SCRIPT_DIR/fm-copilot-lib.sh"
 
 # Print the harness named by a verified environment marker, or nothing when no
 # marker is present. Markers only report what the environment CLAIMS; detect_own
@@ -104,6 +106,20 @@ harness_marker() {
   # carrying the claude primary's value (claude-code_2-1-260_agent), so it is
   # an inherited launcher marker, not a Gemini identity.
   [ "${GEMINI_CLI:-}" = "1" ] && { echo gemini; return; }
+  # copilot (GitHub Copilot CLI) sets COPILOT_CLI=1 for its child/tool
+  # processes (verified, copilot 1.0.88: a tool process reported COPILOT_CLI=1
+  # with COPILOT_AGENT_SESSION_ID and COPILOT_CLI_BINARY_VERSION beside it).
+  # It does NOT scrub an inherited CLAUDECODE - a non-interactive probe with
+  # CLAUDECODE=1 exported printed the value back through the model's shell
+  # tool - so a copilot worker launched from a claude primary carries BOTH
+  # markers and this must be tested BEFORE the CLAUDECODE line, the same
+  # ordering hazard cursor, gemini, and rovo document above.
+  # bin/fm-spawn.sh additionally clears the foreign markers at the launch
+  # boundary. AGENT=1 is deliberately NOT used: it was present in a live
+  # copilot tool process, but it is also present in the launching
+  # environment, so like agy's it is inherited launcher state, not a
+  # copilot identity.
+  [ "${COPILOT_CLI:-}" = "1" ] && { echo copilot; return; }
   # rovo (Atlassian Rovo CLI) sets ATLASSIAN_AGENT_TYPE=rovo, ROVODEV_CLI=1, and
   # AGENT=rovodev_cli on its tool subprocesses (verified, rovo 202609.1.2). It does
   # NOT scrub an inherited CLAUDECODE, so a rovo worker launched from a claude
@@ -238,12 +254,23 @@ harness_process_verdict() {  # <pid>
     # inherited launcher value, not an agy identity), so like muse it is
     # detected by ancestry alone.
     agy) echo "comm agy"; return ;;
+    # copilot (GitHub Copilot CLI) ships as a node loader whose native child
+    # is literally named `copilot` (verified, copilot 1.0.88: the
+    # darwin-arm64 child's basename is copilot). Anchored, never *copilot*,
+    # so unrelated commands containing that fragment cannot be misread as
+    # this harness. The loader shim itself presents as comm=node and is
+    # reached through the interpreter-args rule below.
+    copilot) echo "comm copilot"; return ;;
     devin) echo "comm devin"; return ;;
     node*|python*)
       # Bare interpreter: match the harness name in its script path.
       args=$(ps -o args= -p "$pid" 2>/dev/null)
       if fm_gemini_args_are_gemini "$args"; then
         echo "args gemini"
+        return
+      fi
+      if fm_copilot_args_are_copilot "$args"; then
+        echo "args copilot"
         return
       fi
       case "$args" in
@@ -397,7 +424,7 @@ supervision_primary_pin() {
   local pin=${FM_SUPERVISION_PRIMARY_HARNESS:-}
   [ "${FM_SUPERVISION_ACTOR:-}" = branch ] && [ -n "$pin" ] || return 0
   case "$pin" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin)
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|copilot)
       printf '%s\n' "$pin"
       ;;
     *)

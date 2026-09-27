@@ -46,6 +46,7 @@
 #   fm-recovery      a documented recovery reset after relaunch
 # Classifier-only sources (never written into a record):
 #   endpoint-gone, herdr-native, grok-regex, rovo-regex, agy-regex, muse-session-log,
+#   copilot-session-log,
 #   cursor-transcript, missing, malformed, gen-mismatch, source-mismatch,
 #   kimi-unverified, codex-unverified, capture-failed, no-target, launch-prompt
 #
@@ -68,9 +69,9 @@
 #      bound is unchanged.
 #   4. no record at all: herdr's native busy verdict is trusted as busy
 #      (generation state is sufficient for busy, not for idle), then the
-#      muse session-log and cursor transcript pull sources, then the
-#      Grok/Rovo/AGY temporary regex fallbacks classify a grok, rovo, or agy
-#      task from its rendered tail, then unknown missing
+#      muse session-log, copilot session-events, and cursor transcript pull
+#      sources, then the Grok/Rovo/AGY temporary regex fallbacks classify a
+#      grok, rovo, or agy task from its rendered tail, then unknown missing
 #   5. malformed, stale, or untrusted records -> unknown, never a fallback
 #
 # fm_busy_launch_prompt_parked (the launch-prompt classifier-only source): a
@@ -114,6 +115,16 @@
 # no writer, no arm, and no gen, so nothing is seeded that could never be
 # cleared. See fm_busy_cursor_turn_state for the fold. Cursor's rendered
 # `ctrl+c to stop` footer is deliberately not a state source here.
+#
+# The copilot pull source works the same way and for the same reason: it folds
+# copilot's own durable per-session event log, which brackets each turn with
+# user.message / model.turn_started / assistant.turn_start opens and an
+# assistant.turn_end close. It has no writer, no arm, and no gen, because
+# copilot's hook surface has no per-task layer firstmate could arm without
+# mutating the operator's global hooks or the project's own .github/hooks/.
+# See fm_busy_copilot_turn_state for the fold. Copilot's rendered `Working`
+# and `Waiting for background shells` rows are deliberately not state sources
+# here.
 #
 # Codex negotiation (fm_busy_codex_appserver_observable,
 # fm_busy_codex_hooks_verified): the approved contract prefers Codex's
@@ -216,11 +227,12 @@ fm_busy_current_gen() {  # <state-dir> <id>
 # fm_busy_sources_for_harness: the semantic sources trusted to classify a
 # task recorded with <harness>. One line, space-separated, possibly empty.
 # The firstmate-owned sources are appended for every converted adapter.
-# Grok and muse deliberately trust nothing: neither has a semantic WRITER, so
-# neither is armed, and both read their live source on demand in the classifier
-# (grok's rendered tail, muse's session log) rather than through a stored
-# record. Listing a source here without a writer that can clear it would seed a
-# busy record nothing could ever settle.
+# Grok, muse, and copilot deliberately trust nothing: none has a semantic
+# WRITER, so none is armed, and each reads its live source on demand in the
+# classifier (grok's rendered tail, muse's session log, copilot's session
+# events) rather than through a stored record. Listing a source here without
+# a writer that can clear it would seed a busy record nothing could ever
+# settle.
 fm_busy_sources_for_harness() {  # <harness>
   local adapter=
   case "${1:-}" in
@@ -864,6 +876,185 @@ fm_busy_cursor_turn_state() {  # <transcript>
   '
 }
 
+# copilot session-events busy source
+#
+# copilot persists an append-only session event log per session at
+# <copilot-home>/session-state/<session-uuid>/events.jsonl, with the session's
+# working directory in the sibling workspace.yaml (`cwd:`). Every submitted
+# turn opens with user.message and brackets model work and the assistant
+# response with model.turn_started and assistant.turn_start; the turn closes
+# with assistant.turn_end. Verified live on copilot 1.0.88 across completed
+# turns, a Ctrl+C interrupt (which records abort user_initiated and closes
+# the turn), and the 30s foreground-tool auto-background (the
+# turn continues; the status row reads `Waiting for background shells`).
+# A session shutdown closes the turn too, so neither the interrupt path nor
+# an abnormal end can strand a busy verdict.
+#
+# The fold is last-boundary-wins over the open/close sets below: busy while
+# the newest boundary event is an opener, settled once it is a closer. Both
+# halves are trusted. An open boundary is positive proof a turn is in flight
+# (the log is appended live - tool.execution_start was observed mid-turn),
+# and a settled log is idle. Events outside both sets (model calls, tool
+# records, usage checkpoints, hook traffic) are skipped, so a model-call gap
+# between model.turn_ended and the following assistant.turn_start still reads
+# busy through the earlier opener rather than flickering idle. Resolution
+# failures - no sidecar, no matching session, an unreadable or boundary-free
+# log - remain unknown because those prove nothing about the turn either way.
+# See docs/verification/copilot.md for the evidence.
+#
+# Boundary extraction is anchored on the exact structural line prefix
+# `{"type":"`, because copilot also echoes arbitrary worker output inside
+# message content that could otherwise name a boundary. A reordered key
+# layout reads as boundary-free (unknown), never as a false verdict.
+# fm_busy_copilot_binding_path: the per-task sidecar fm-spawn writes so the
+# classifier binds a pane to its session events without re-deriving
+# copilot's home directory. It records copilot_home=<abs>,
+# workspace_root=<abs>, one binding_id=<token>, and one
+# prior_session=<uuid> for each session directory that predates this pane.
+fm_busy_copilot_binding_path() {  # <state-dir> <id>
+  printf '%s/%s.copilot-session' "$1" "$2"
+}
+
+# fm_busy_copilot_binding_field: read one field from the sidecar, or fail.
+fm_busy_copilot_binding_field() {  # <state-dir> <id> <key>
+  local path line key=$3
+  path=$(fm_busy_copilot_binding_path "$1" "$2")
+  [ -f "$path" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      "$key="*)
+        line=${line#"$key="}
+        [ -n "$line" ] || return 1
+        printf '%s' "$line"
+        return 0
+        ;;
+    esac
+  done < "$path"
+  return 1
+}
+
+# fm_busy_copilot_resolve_dir: print the physical path of <dir>, or fail.
+# Both the sidecar workspace and copilot's recorded cwd are resolved before
+# comparison because copilot records the resolved form (/private/tmp/...)
+# while the pane may start from the logical one (/tmp/...).
+fm_busy_copilot_resolve_dir() {  # <dir>
+  [ -d "${1:-}" ] || return 1
+  (cd "$1" 2>/dev/null && pwd -P) 2>/dev/null
+}
+
+# fm_busy_copilot_session_workspace: the cwd a session directory records in
+# its workspace.yaml, or failure.
+fm_busy_copilot_session_workspace() {  # <session-dir>
+  local file line
+  file=${1%/}/workspace.yaml
+  [ -f "$file" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      'cwd:'*)
+        line=${line#cwd:}
+        line=${line#"${line%%[![:space:]]*}"}
+        [ -n "$line" ] || return 1
+        printf '%s' "$line"
+        return 0
+        ;;
+    esac
+  done < "$file"
+  return 1
+}
+
+# fm_busy_copilot_matching_sessions: every session directory under
+# <copilot-home>/session-state whose recorded workspace is this task's
+# worktree, one directory per line. Exact resolved-path match only: a prefix
+# comparison would bind a nested worktree to its parent.
+fm_busy_copilot_matching_sessions() {  # <copilot-home> <workspace-root>
+  local home=$1 ws=$2 ws_real dir cwd cwd_real
+  [ -d "$home/session-state" ] || return 1
+  ws_real=$(fm_busy_copilot_resolve_dir "$ws") || ws_real=$ws
+  for dir in "$home"/session-state/*/; do
+    [ -d "$dir" ] || continue
+    cwd=$(fm_busy_copilot_session_workspace "$dir") || continue
+    if [ "$cwd" = "$ws" ] || [ "$cwd" = "$ws_real" ]; then
+      printf '%s\n' "${dir%/}"
+      continue
+    fi
+    cwd_real=$(fm_busy_copilot_resolve_dir "$cwd") || continue
+    [ "$cwd_real" = "$ws" ] || [ "$cwd_real" = "$ws_real" ] || continue
+    printf '%s\n' "${dir%/}"
+  done
+}
+
+fm_busy_copilot_binding_has_prior_session() {  # <state-dir> <id> <session-uuid>
+  local path line
+  path=$(fm_busy_copilot_binding_path "$1" "$2")
+  [ -f "$path" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ "$line" = "prior_session=$3" ] && return 0
+  done < "$path"
+  return 1
+}
+
+# fm_busy_copilot_session_dir: the one session directory this pane owns, or
+# failure. A session recorded as prior_session is excluded, so a relaunch
+# into a reused worktree folds its OWN events rather than the previous
+# pane's. Requiring a UNIQUE remaining session is what keeps the binding
+# honest: zero means no turn has been submitted yet and several means the
+# pane cannot be told apart, and neither proves anything about the current
+# turn.
+fm_busy_copilot_session_dir() {  # <state-dir> <id>
+  local home ws candidate selected='' uuid
+  home=$(fm_busy_copilot_binding_field "$1" "$2" copilot_home) || return 1
+  ws=$(fm_busy_copilot_binding_field "$1" "$2" workspace_root) || return 1
+  while IFS= read -r candidate; do
+    [ -n "$candidate" ] || continue
+    uuid=${candidate##*/}
+    fm_busy_copilot_binding_has_prior_session "$1" "$2" "$uuid" && continue
+    [ -f "$candidate/events.jsonl" ] || continue
+    [ -z "$selected" ] || return 1
+    selected=$candidate
+  done <<EOF
+$(fm_busy_copilot_matching_sessions "$home" "$ws")
+EOF
+  [ -n "$selected" ] || return 1
+  printf '%s' "$selected"
+}
+
+# fm_busy_copilot_boundary_events: the turn-boundary events of one session
+# log in file order, one `open` or `close` token per line. Anything outside
+# the two sets prints as `other` and is skipped by the fold.
+fm_busy_copilot_boundary_events() {  # <events-file>
+  [ -f "$1" ] || return 1
+  LC_ALL=C awk '
+    {
+      if (substr($0, 1, 9) != "{\"type\":\"") { print "other"; next }
+      rest = substr($0, 10)
+      q = index(rest, "\"")
+      if (q == 0) { print "other"; next }
+      type = substr(rest, 1, q - 1)
+      if (type == "user.message" || type == "model.turn_started" \
+        || type == "assistant.turn_start") print "open"
+      else if (type == "assistant.turn_end" || type == "abort" \
+        || type == "session.shutdown") print "close"
+      else print "other"
+    }
+  ' "$1"
+}
+
+# fm_busy_copilot_turn_state: fold one session log to busy|settled|none.
+#   busy     the newest boundary event opens a turn
+#   settled  the newest boundary event closes one
+#   none     the log holds no boundary event at all
+fm_busy_copilot_turn_state() {  # <events-file>
+  [ -f "$1" ] || return 1
+  fm_busy_copilot_boundary_events "$1" | LC_ALL=C awk '
+    $0 == "close" { open = 0; seen = 1; next }
+    $0 == "open" { open = 1; seen = 1; next }
+    END {
+      if (!seen) { print "none"; exit }
+      print (open ? "busy" : "settled")
+    }
+  '
+}
+
 # fm_busy_grok_tail_busy: the Grok-only temporary rendered-tail fallback.
 # Consumes the tail on stdin; 0 when Grok's verified busy signature matches.
 # FM_BUSY_REGEX still globally overrides the signature, mirroring the
@@ -1100,6 +1291,24 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
         busy) printf 'busy muse-session-log' ;;
         settled) printf 'idle muse-session-log' ;;
         *) printf 'unknown muse-session-log' ;;
+      esac
+      return 0
+      ;;
+    copilot*)
+      # Semantic, on demand: fold this task's bound session events. An open
+      # boundary is positive proof of a turn in flight and a settled log is
+      # a finished turn. Every other outcome - no sidecar, no matching
+      # session, an unreadable or boundary-free log - is unknown, never
+      # idle. The rendered `Working` and `Waiting for background shells`
+      # rows are deliberately NOT consulted here; see the source note above.
+      if ! log=$(fm_busy_copilot_session_dir "$state" "$id"); then
+        printf 'unknown copilot-session-log'
+        return 0
+      fi
+      case "$(fm_busy_copilot_turn_state "$log/events.jsonl" 2>/dev/null)" in
+        busy) printf 'busy copilot-session-log' ;;
+        settled) printf 'idle copilot-session-log' ;;
+        *) printf 'unknown copilot-session-log' ;;
       esac
       return 0
       ;;

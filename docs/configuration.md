@@ -726,6 +726,7 @@ gemini is likewise refused for secondmates because it has no primary supervision
 rovo is likewise verified for crewmate and scout launches ONLY, refused for a secondmate for the same reason - no turn-end hook and no primary supervision protocol; [`docs/verification/rovo.md`](verification/rovo.md) owns that evidence, including the OAuth token's silent background refresh from a stored refresh token and both tmux and herdr pane liveness (herdr placement is verified live, with a Herdr-side agent-detection gap left open for recovery classification).
 
 agy is likewise verified for crewmate and scout launches ONLY, refused for a secondmate for the same reason - no hook surface and no primary supervision protocol; [`docs/verification/agy.md`](verification/agy.md) owns that evidence, including the spawn-time worktree trust pre-registration through `bin/fm-agy-trust.sh` and Herdr's native agy pane recognition.
+copilot is likewise verified for crewmate and scout launches ONLY, refused for a secondmate for the same reason - no per-task hook layer and no primary supervision protocol; [`docs/verification/copilot.md`](verification/copilot.md) owns that evidence, including the `COPILOT_ALLOW_ALL=true` workspace trust on the launch command, the `--model auto` selection for allowance-constrained plans, the session-events busy fold, and the `Ctrl+C` interrupt.
 devin is verified for crewmate and scout launches only; a secondmate is refused because Devin has no verified primary supervision protocol.
 
 Its private worker config disables Claude Code imports (including the captain's hooks) and Devin commit attribution without editing user or project config; [`fm-devin-config.sh`](../bin/fm-devin-config.sh) owns these enforced settings and [Devin verification](verification/devin.md) owns the live evidence and observed model availability.
@@ -1043,6 +1044,18 @@ A profile `provider` optionally names the quota-axi provider family whose rows a
 Bootstrap validates resolver-only `approval`, `min_confidence`, `floor`, and present `provider` values only while typed resolution is active; without the key those inert fields and the pre-existing verified-harness baseline preserve bootstrap behavior.
 
 Typed resolution additively recognizes `gemini` because AGENTS.md section 4 verifies it for crewmate and scout dispatch.
+The opted-in resolver has authoritative single-provider mappings for `claude`, `codex`, `grok`, `kimi`, `cursor`, `agy`, and `muse`; every other verified harness must declare `provider` explicitly, including multi-provider `pi`, `pi-signed`, `omp`, and `opencode` and unmapped `gemini`, `rovo`, `devin`, and `copilot`.
+Its single-provider table is separate from the frozen legacy mapping used by `fm-quota-choose.sh`, so additions cannot alter no-key routing.
+The resolver returns an actionable configuration error before any request when such a profile omits it.
+A profile `floor` contains only `scope` and `min_percent`, always uses that profile's provider and matched account, and makes that one candidate ineligible below `min_percent` on the named scope.
+An absent or unknown named row also makes the candidate unrankable and is reported as an unverifiable floor, not as a known shortfall.
+`ultra` is native-only: the model-aware validation contract and launch mapping are owned by `bin/fm-harness.sh validate-native-effort` and `bin/fm-spawn.sh` respectively.
+Codex `max` is valid when the profile selects `gpt-5.6-luna`, whose installed catalog entry supports that reasoning level.
+An omitted model or effort means the selected harness uses its own default for that axis.
+Every profile array is an implicit quota-aware choice resolved through `quota-array-dispatch`.
+If no dispatch rule fits, firstmate resolves `default` through the same object-or-array path before falling back to `config/crew-harness`.
+Except for `ultra`, which refuses unsupported profiles under the native-effort contract above, an effort value the chosen harness does not accept is recorded as `effort=` in task meta for traceability but omitted from the launch flags.
+Bootstrap reports unsupported harness/model/effort combinations as a `CREW_DISPATCH` diagnostic when they are visible in the file.
 
 | Harness | Provider declaration on the opted-in resolver path |
 | --- | --- |
