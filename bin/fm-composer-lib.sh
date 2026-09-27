@@ -546,11 +546,12 @@ fm_composer_strip_braille() {
   '
 }
 
-# The bounded row window adapters should capture for a composer read. One
-# shared policy (previously three per-backend variables that had drifted to
-# 20/20/200): the composer is bottom-anchored, so a small tail window is
-# sufficient and keeps stale scrollback (startup banners, old transcript
-# boxes) from ever competing with the live composer.
+# The bounded row window for adapters that use tail-capture composer reads and
+# for the shared inbox confirmation read. One shared policy (previously three
+# per-backend variables that had drifted to 20/20/200) keeps stale scrollback
+# (startup banners, old transcript boxes) out of those candidate sets. tmux
+# and Herdr adapter composer reads use their visible viewports instead; Herdr
+# also uses this value as the minimum Ctrl+U clear budget after a refused proof.
 FM_COMPOSER_CAPTURE_LINES=${FM_COMPOSER_CAPTURE_LINES:-20}
 
 # Pi allows a multi-line composer between its horizontal separators. Bound the
