@@ -76,6 +76,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-cursor-lib.sh"
 # shellcheck source=bin/fm-gemini-lib.sh
 . "$SCRIPT_DIR/fm-gemini-lib.sh"
+# shellcheck source=bin/fm-omp-process-lib.sh
+. "$SCRIPT_DIR/fm-omp-process-lib.sh"
 
 # Print the harness named by a verified environment marker, or nothing when no
 # marker is present. Markers only report what the environment CLAIMS; detect_own
@@ -155,14 +157,14 @@ harness_marker() {
   return 0
 }
 
-# True when an exact `omp` process sits within eight parents of this one. The
-# same anchored match as the ancestry walk below, kept separate so the marker
-# precedence above can demand real process evidence before trusting FM_OMP_HARNESS.
+# True when a native omp or one of its two Bun script entrypoints sits within
+# eight parents. Use the same process matcher as session-lock ownership.
 ancestry_names_omp() {
-  local pid=$$ comm
+  local pid=$$ comm args
   for _ in 1 2 3 4 5 6 7 8; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
-    [ "$(basename -- "$comm")" = omp ] && return 0
+    args=$(ps -o args= -p "$pid" 2>/dev/null)
+    fm_omp_process_matches "$comm" "$args" && return 0
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
     [ -n "$pid" ] && [ "$pid" -gt 1 ] || return 1
   done
@@ -171,12 +173,10 @@ ancestry_names_omp() {
 
 # Print "<strength> <harness>" when one process identifies a harness, or nothing.
 # Strength records how the match was made:
-#   comm - the ancestor's own executable name identifies the harness. This is a
-#          structural fact about the running program, so it outranks a marker.
-#   args - a bare interpreter matched only because a harness name appears in the
-#          script path it was handed. This is the weakest inference in this file
-#          (any node process holding a harness-shaped path matches it), so it is
-#          used only when no marker is present.
+#   comm - the ancestor's executable name, or Bun directly executing an OMP
+#          entrypoint, identifies the harness and outranks a marker.
+#   args - a generic interpreter matched only because a harness name appears
+#          somewhere in its script path; a marker outranks this weak inference.
 harness_process_verdict() {  # <pid>
   local pid=$1 comm args argv0
   comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 0
@@ -220,15 +220,14 @@ harness_process_verdict() {  # <pid>
     # is why detect_own keeps a marker that agrees on the family.
     pi-signed) echo "comm pi"; return ;;
     pi) echo "comm pi"; return ;;
-    # omp is a Bun-compiled single binary whose process name is exactly `omp`
-    # (verified, omp 18.1.11: `ps -o comm=` reports omp from both its `!`
-    # bash path and the model's bash tool). Anchored, never *omp*, so ompd,
-    # comp, and similar unrelated commands are not misread as this harness.
-    # It sits above the node*|python* interpreter fallback deliberately: the
-    # optional claude-bridge extension runs a nested executable literally
-    # named `claude` with its own node child, and that fallback's *claude*
-    # args glob would otherwise claim it if that subtree were ever walked.
-    omp) echo "comm omp"; return ;;
+    # Native omp and Bun directly executing one of its two script entrypoints
+    # are exact process identities, not arbitrary command-line mentions.
+    # This precedes node*|python*: the optional claude-bridge extension runs
+    # a nested executable named claude with its own node child.
+    omp|bun)
+      args=$(ps -o args= -p "$pid" 2>/dev/null)
+      fm_omp_process_matches "$comm" "$args" && echo "comm omp"
+      return ;;
     # agy (Antigravity CLI) is a Go-compiled single binary whose process name
     # is exactly `agy` (verified, agy 1.2.0: `ps -o comm=` reports agy and
     # Herdr's process-info reports name agy with argv[0] agy). Anchored, never
