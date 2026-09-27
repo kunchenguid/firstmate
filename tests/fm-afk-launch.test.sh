@@ -1129,6 +1129,45 @@ unit_supervision_host_quiet_after_afk() {
   rm -rf "$st"
 }
 
+# A quiet start that fails after a quiet enter wrote its record, with no
+# daemon running, archives that record and leaves no flag, so the present
+# captain is not parked; an away start that fails keeps its record.
+unit_supervision_host_quiet_failed_start() {
+  local st out rc
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-quiet-failed.XXXXXX")
+  quiet_home "$st"
+  rm -f "$st/state/.host-mirror.jsonl"
+  quiet_in "$st" env FM_AFK_MODE=quiet "$LAUNCH" enter --words "stay quiet" >/dev/null \
+    || fail "a quiet entry without the dialog mirror must record quiet mode"
+  out=$(quiet_in "$st" env FM_SUPERVISOR_TARGET=unused FM_SUPERVISOR_BACKEND=unsupported "$LAUNCH" start); rc=$?
+  if [ "$rc" -eq 0 ] || [ -e "$st/state/.afk-contract" ] || [ -e "$st/state/.afk" ] \
+    || [ -z "$(ls "$st/state/afk-contracts" 2>/dev/null)" ]; then
+    fail "a failed quiet start must archive the quiet record and leave no flag (rc=$rc): $out"
+  fi
+  printf '%s\n' "$QUIET_MIRROR" > "$st/state/.host-mirror.jsonl"
+  out=$(quiet_in "$st" "$LAUNCH" quiet-check); rc=$?
+  quiet_expect 0 'Quiet mode needs nothing on this home' "once the mirror returns after a failed quiet start, the attended host must treat the captain as present"
+  quiet_in "$st" env FM_AFK_MODE=quiet "$LAUNCH" enter --words "stay quiet" >/dev/null; rc=$?
+  [ "$rc" -eq 3 ] && [ ! -e "$st/state/.afk-contract" ] || fail "a quiet enter after a failed quiet start must again write nothing (rc=$rc)"
+  rm -f "$st/state/.host-mirror.jsonl"
+  quiet_in "$st" env FM_AFK_MODE=quiet "$LAUNCH" enter --words "stay quiet" >/dev/null \
+    || fail "a second quiet entry without the dialog mirror must record quiet mode"
+  out=$(quiet_in "$st" env FM_SUPERVISOR_TARGET=unused "$LAUNCH" start-native); rc=$?
+  [ "$rc" -eq 0 ] && [ "$(head -n 1 "$st/state/.afk")" = quiet ] \
+    || fail "a successful quiet start must keep the quiet record and flag (rc=$rc): $out"
+  quiet_in "$st" "$LAUNCH" stop >/dev/null || true
+  pass "supervision host: a failed quiet start archives its quiet record so the present captain is not parked"
+
+  rm -f "$st/config/supervision-host"
+  quiet_in "$st" "$LAUNCH" enter --words "back after lunch" >/dev/null || fail "an away entry must record the away words"
+  cp "$st/state/.afk-contract" "$st/away-record"
+  out=$(quiet_in "$st" env FM_SUPERVISOR_TARGET=unused FM_SUPERVISOR_BACKEND=unsupported "$LAUNCH" start); rc=$?
+  [ "$rc" -ne 0 ] && cmp -s "$st/state/.afk-contract" "$st/away-record" && [ ! -e "$st/state/.afk" ] \
+    || fail "a failed away start must keep its away record (rc=$rc): $out"
+  pass "supervision host: a failed away start keeps its away record"
+  rm -rf "$st"
+}
+
 unit_native_entry_preserves_prepared_state() {
   local st
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-native-entry.XXXXXX")
@@ -1592,6 +1631,7 @@ unit_supervision_host_other_harnesses_run_no_away_daemon
 unit_supervision_host_quiet_statement
 unit_supervision_host_quiet_fallback
 unit_supervision_host_quiet_after_afk
+unit_supervision_host_quiet_failed_start
 unit_native_entry_preserves_prepared_state
 unit_close_failure_preserves_record
 unit_record_publication_atomic

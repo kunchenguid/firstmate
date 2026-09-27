@@ -41,7 +41,9 @@
 # through the daemon as it does without the host. A quiet `enter` records its
 # mode, so `start` and `start-native` launch the quiet daemon without
 # FM_AFK_MODE; a running quiet daemon is refreshed by a later `/quiet` and runs
-# until `/quiet off`.
+# until `/quiet off`. A quiet `start` or `start-native` that fails while no
+# daemon runs ends quiet mode as `stop` does, so no quiet record outlives its
+# daemon to park a present captain's main.
 # `stop` (the return, driven by bin/fm-afk-return.sh) shuts the daemon down,
 # clears state/.afk last, and archives the record under state/afk-contracts/.
 #
@@ -897,6 +899,18 @@ fm_afk_launch_stop() {
   return "$result"
 }
 
+# Roll back a failed quiet start (the header's QUIET MODE): with a quiet record
+# and no live daemon, archive the record as `stop` does. Returns <status>.
+fm_afk_launch_quiet_rollback() {  # <status>
+  local status=$1
+  if [ "$(fm_afk_launch_requested_mode)" = quiet ] && fm_afk_launch_record_quiet \
+    && ! daemon_lock_held_by_live_daemon; then
+    fm_afk_launch_log "the quiet daemon did not start; ending quiet mode so its record does not outlive it"
+    fm_afk_launch_stop
+  fi
+  return "$status"
+}
+
 fm_afk_launch_main() {
   local result
   # Traps first, lock second. Acquiring before the handlers exist leaves a
@@ -913,8 +927,8 @@ fm_afk_launch_main() {
     propose|confirm)
       fm_afk_launch_log "'$1' was retired with the wait-for-go gate: /afk is itself the go, so run 'enter' to write the record in the same turn"
       (exit 2) ;;
-    start) fm_afk_launch_start ;;
-    start-native) fm_afk_launch_start_native ;;
+    start) fm_afk_launch_start || fm_afk_launch_quiet_rollback $? ;;
+    start-native) fm_afk_launch_start_native || fm_afk_launch_quiet_rollback $? ;;
     stop) fm_afk_launch_stop ;;
     reconcile) fm_afk_launch_reconcile ;;
     quiet-check) fm_afk_launch_quiet_check ;;
