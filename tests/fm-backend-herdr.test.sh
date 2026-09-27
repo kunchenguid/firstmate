@@ -3594,6 +3594,116 @@ test_projection_reclaim_replaces_only_exact_husk_and_advances_binding() {
   pass "herdr presentation reclaim: exact agent-free husk survives duplicate parent labels while its sibling stays untouched"
 }
 
+test_projection_rebind_republishes_a_destroyed_projection() {
+  local dir state home home_real log resp fb journal token label out calls
+  local WS TAB1 TAB2 PANE2 ORDER
+  dir="$TMP_ROOT/projection-rebind"; state="$dir/state"; home="$dir/home"
+  mkdir -p "$dir/responses" "$state" "$home"
+  home_real=$(cd "$home" && pwd -P)
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  token=$(bash -c '
+    . "$0/bin/backends/herdr.sh"
+    token=$(fm_backend_herdr_projection_journal_create "$1" task-rb) || exit 1
+    label=$(fm_backend_herdr_projection_workspace_label task-rb "$token")
+    fm_backend_herdr_projection_journal_bind \
+      "$1/task-rb.herdr-presentation" task-rb "$2" fmtest \
+      wold wold:t1 wold:p1 w1 firstmate "$label" fm-task-rb || exit 1
+    printf "%s" "$token"
+  ' "$ROOT" "$state" "$home_real") || fail "could not create rebind journal fixture"
+  journal="$state/task-rb.herdr-presentation"
+  label="└ task-rb · p:$token"
+  # The old projected workspace is gone, so only the owning parent is listed.
+  # The canned sequence follows create_task's exact call order: a focus
+  # snapshot before every mutation, a focus restore after each one, then the
+  # shape check, the best-effort ordering read, and the live-binding verify.
+  WS='{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate","focused":true,"active_tab_id":"w1:t1"}]}}'
+  TAB1='{"result":{"tabs":[{"tab_id":"w1:t1","focused":true}]}}'
+  TAB2='{"result":{"tabs":[{"tab_id":"w2:t2","label":"fm-task-rb"}]}}'
+  PANE2='{"result":{"panes":[{"pane_id":"w2:p2","tab_id":"w2:t2"}]}}'
+  ORDER="{\"result\":{\"workspaces\":[{\"workspace_id\":\"w1\",\"label\":\"firstmate\",\"focused\":true,\"active_tab_id\":\"w1:t1\"},{\"workspace_id\":\"w2\",\"label\":\"$label\",\"focused\":false,\"active_tab_id\":\"w2:t2\"}]}}"
+  printf '%s\n' "$WS" > "$resp/1.out"
+  printf '%s\n' "$WS" > "$resp/2.out"
+  printf '%s\n' "$TAB1" > "$resp/3.out"
+  printf '%s\n' '{"result":{"workspace":{"workspace_id":"w2"},"tab":{"tab_id":"w2:seed"},"root_pane":{"pane_id":"w2:pseed"}}}' > "$resp/4.out"
+  printf '%s\n' "$WS" > "$resp/5.out"
+  printf '%s\n' "$TAB1" > "$resp/6.out"
+  printf '%s\n' "$WS" > "$resp/7.out"
+  printf '%s\n' "$TAB1" > "$resp/8.out"
+  printf '%s\n' '{"result":{"tab":{"tab_id":"w2:t2"},"root_pane":{"pane_id":"w2:p2"}}}' > "$resp/9.out"
+  printf '%s\n' "$WS" > "$resp/10.out"
+  printf '%s\n' "$TAB1" > "$resp/11.out"
+  printf '%s\n' "$WS" > "$resp/12.out"
+  printf '%s\n' "$TAB1" > "$resp/13.out"
+  printf '%s\n' "$TAB2" > "$resp/14.out"
+  printf '%s\n' "$WS" > "$resp/15.out"
+  printf '%s\n' "$TAB1" > "$resp/16.out"
+  printf '%s\n' "$TAB2" > "$resp/17.out"
+  printf '%s\n' "$PANE2" > "$resp/18.out"
+  printf '%s\n' "$ORDER" > "$resp/19.out"
+  printf '%s\n' "$ORDER" > "$resp/20.out"
+  printf '%s\n' "$TAB2" > "$resp/21.out"
+  printf '%s\n' "$PANE2" > "$resp/22.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HOME="$home" \
+    bash -c '
+      . "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_projection_rebind_task \
+        fmtest "$1" task-rb "$2" w1 firstmate /tmp/project fm-task-rb || exit 1
+      printf "%s %s" "$FM_BACKEND_HERDR_PROJECTION_TAB_ID" "$FM_BACKEND_HERDR_PROJECTION_PANE_ID"
+    ' "$ROOT" "$journal" "$home" 2>"$dir/rebind.err") \
+    || fail "destroyed-projection rebind failed: $(cat "$dir/rebind.err")"
+  [ "$out" = "w2:t2 w2:p2" ] || fail "rebind did not return the fresh projected endpoint: $out"
+  [ "$(sed -n 's/^version=//p' "$journal")" = 2 ] \
+    && [ "$(sed -n 's/^projection_id=//p' "$journal")" = "$token" ] \
+    && [ "$(sed -n 's/^workspace_id=//p' "$journal")" = w2 ] \
+    && [ "$(sed -n 's/^tab_id=//p' "$journal")" = w2:t2 ] \
+    && [ "$(sed -n 's/^pane_id=//p' "$journal")" = w2:p2 ] \
+    || fail "rebind did not replace the stale binding with the fresh projected endpoint"
+  calls=$(cat "$log")
+  assert_contains "$calls" $'workspace\x1fcreate' "a destroyed projection must be republished in a fresh workspace"
+  assert_not_contains "$calls" $'tab\x1fcreate\x1f--workspace\x1fw1' "rebind collapsed the task back into the home workspace as a flat tab"
+  pass "herdr presentation rebind: a destroyed projected endpoint is republished in a fresh one-task workspace"
+}
+
+test_projection_rebind_refuses_a_live_stale_token_match() {
+  local dir state home home_real log resp fb journal token label out rc calls
+  dir="$TMP_ROOT/projection-rebind-live"; state="$dir/state"; home="$dir/home"
+  mkdir -p "$dir/responses" "$state" "$home"
+  home_real=$(cd "$home" && pwd -P)
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  token=$(bash -c '
+    . "$0/bin/backends/herdr.sh"
+    token=$(fm_backend_herdr_projection_journal_create "$1" task-rl) || exit 1
+    label=$(fm_backend_herdr_projection_workspace_label task-rl "$token")
+    fm_backend_herdr_projection_journal_bind \
+      "$1/task-rl.herdr-presentation" task-rl "$2" fmtest \
+      wold wold:t1 wold:p1 w1 firstmate "$label" fm-task-rl || exit 1
+    printf "%s" "$token"
+  ' "$ROOT" "$state" "$home_real") || fail "could not create live-token rebind fixture"
+  journal="$state/task-rl.herdr-presentation"
+  label="└ task-rl · p:$token"
+  printf '%s\n' "{\"result\":{\"workspaces\":[{\"workspace_id\":\"wold\",\"label\":\"$label\"}]}}" > "$resp/1.out"
+  printf '%s\n' '{"result":{"panes":[{"pane_id":"wold:p1","tab_id":"wold:t1"}]}}' > "$resp/2.out"
+  printf '%s\n' '{"result":{"pane":{"pane_id":"wold:p1"}}}' > "$resp/3.out"
+  printf '%s\n' '{"result":{"agent":{"agent_status":"idle"}}}' > "$resp/4.out"
+  printf '%s\n' '{"result":{"type":"pane_process_info","process_info":{"pane_id":"wold:p1","shell_pid":4242,"foreground_process_group_id":4243,"foreground_processes":[{"pid":4243,"name":"node","argv0":"pi"}]}}}' > "$resp/5.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HOME="$home" \
+    bash -c '
+      . "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_projection_rebind_task \
+        fmtest "$1" task-rl "$2" w1 firstmate /tmp/project fm-task-rl
+    ' "$ROOT" "$journal" "$home" 2>&1)
+  rc=$?
+  [ "$rc" -eq 1 ] || fail "a live stale token match must refuse the rebind, got rc=$rc: $out"
+  calls=$(cat "$log")
+  assert_not_contains "$calls" $'workspace\x1fcreate' "a refused rebind created a workspace"
+  assert_not_contains "$calls" $'tab\x1fcreate' "a refused rebind created a tab"
+  [ "$(sed -n 's/^workspace_id=//p' "$journal")" = wold ] \
+    || fail "a refused rebind rewrote the stale journal binding"
+  pass "herdr presentation rebind: a live stale token match refuses rather than duplicating the agent"
+}
+
 test_projection_recovery_is_read_only_and_refuses_live_duplicate_risk() {
   local dir state log resp fb token journal out status calls
   dir="$TMP_ROOT/projection-recovery"; state="$dir/state"; mkdir -p "$dir/responses" "$state"
@@ -5869,6 +5979,8 @@ test_presentation_session_lock_path_rejects_malformed_socket
 test_projection_order_rejects_malformed_socket
 test_projection_reclaim_refusal_matrix_is_non_mutating
 test_projection_reclaim_replaces_only_exact_husk_and_advances_binding
+test_projection_rebind_republishes_a_destroyed_projection
+test_projection_rebind_refuses_a_live_stale_token_match
 test_projection_recovery_is_read_only_and_refuses_live_duplicate_risk
 test_workspace_find_matches_only_this_homes_own_label
 test_list_live_scoped_to_this_homes_workspace_only

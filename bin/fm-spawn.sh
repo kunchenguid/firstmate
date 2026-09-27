@@ -3458,11 +3458,12 @@ if [ "$RELAUNCH" -eq 1 ]; then
     # (fm_control_endpoint_absence_verdict owns that argument). tmux and every
     # secondmate were already refused, so there is no dispatch left to make.
     #
-    # This deliberately uses the FLAT container shape rather than Herdr's
-    # presentation projection: projection is a presentation-only layout that is
-    # never endpoint or ownership authority, and flat is already the documented
-    # fallback for every recovery it cannot bind exactly
-    # (docs/herdr-backend.md "Presentation spaces").
+    # The FLAT container shape below is the fallback, not the default: a task
+    # with an exact restart binding republishes its disposable one-task
+    # presentation workspace first (see below). Projection is a
+    # presentation-only layout that is never endpoint or ownership authority,
+    # and flat remains the documented fallback for every recovery it cannot
+    # bind exactly (docs/herdr-backend.md "Presentation spaces").
     #
     # KNOWN LIMITATION (bead fm-herdr-rebind-leak-20260913): the tab minted
     # below is registered with no abort cleanup, so a later refusal leaves that
@@ -3505,13 +3506,54 @@ if [ "$RELAUNCH" -eq 1 ]; then
     HERDR_SEEDED_DEFAULT_TAB_ID=${HERDR_CONTAINER_RAW#*$'\t'}
     HERDR_SES=${CONTAINER%%:*}
     HERDR_WORKSPACE_ID=${CONTAINER#*:}
-    HERDR_TASK_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "$W" "$WT" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
-    read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
+    # A projected task REPUBLISHES its disposable one-task workspace on reclaim,
+    # exactly as a fresh spawn publishes it: a reboot that destroys that
+    # workspace must not collapse the task back into the home workspace and drop
+    # its sidebar entry. Only an already-published version 2 binding is
+    # eligible, so a flat task and a task whose projection never bound keep the
+    # ordinary flat reclaim, and a live or ambiguous old projection still
+    # refuses. The rebind itself decides; any non-mutating refusal releases the
+    # lock and lets the flat path below run unchanged.
+    HERDR_PROJECTED=0
+    HERDR_REBIND_JOURNAL=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID")
+    if { [ -e "$HERDR_REBIND_JOURNAL" ] || [ -L "$HERDR_REBIND_JOURNAL" ]; } \
+       && HERDR_SESSION="$HERDR_SES" fm_backend_herdr_presentation_enabled "$CONFIG" "$STATE"; then
+      if spawn_herdr_presentation_order_lock_acquire "$HERDR_SES"; then
+        HERDR_REBIND_PARENT_LABEL=$(fm_backend_herdr_workspace_label)
+        set +e
+        fm_backend_herdr_projection_rebind_task \
+          "$HERDR_SES" "$HERDR_REBIND_JOURNAL" "$ID" "$FM_HOME" \
+          "$HERDR_WORKSPACE_ID" "$HERDR_REBIND_PARENT_LABEL" "$PROJ_ABS" "$W"
+        HERDR_REBIND_STATUS=$?
+        set -e
+        case "$HERDR_REBIND_STATUS" in
+        0)
+          HERDR_PROJECTED=1
+          HERDR_WORKSPACE_ID=$FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID
+          HERDR_SEEDED_DEFAULT_TAB_ID=$FM_BACKEND_HERDR_PROJECTION_SEEDED_TAB_ID
+          HERDR_TAB_ID=$FM_BACKEND_HERDR_PROJECTION_TAB_ID
+          HERDR_PANE_ID=$FM_BACKEND_HERDR_PROJECTION_PANE_ID
+          HERDR_PROJECTION_ABORT_CLEANUP=1
+          HERDR_PROJECTION_ABORT_SESSION=$HERDR_SES
+          HERDR_PROJECTION_ABORT_TASK_PANE=$HERDR_PANE_ID
+          HERDR_PROJECTION_ABORT_SEEDED_PANE=$FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID
+          ;;
+        2) spawn_herdr_presentation_order_lock_release ;;
+        *) exit 1 ;;
+        esac
+      else
+        echo "warning: herdr presentation focus lock unavailable; reclaiming into the ordinary flat layout" >&2
+      fi
+    fi
+    if [ "$HERDR_PROJECTED" -ne 1 ]; then
+      HERDR_TASK_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "$W" "$WT" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
+      read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
 $HERDR_TASK_IDS
 EOF
-    if [ -z "$HERDR_TAB_ID" ] || [ -z "$HERDR_PANE_ID" ]; then
-      echo "error: herdr did not return a tab/pane id for $W" >&2
-      exit 1
+      if [ -z "$HERDR_TAB_ID" ] || [ -z "$HERDR_PANE_ID" ]; then
+        echo "error: herdr did not return a tab/pane id for $W" >&2
+        exit 1
+      fi
     fi
     T="$HERDR_SES:$HERDR_PANE_ID"
     SES=$HERDR_SES

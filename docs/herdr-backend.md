@@ -157,7 +157,8 @@ Rename it manually before expecting new tasks or recovery to use it.
 
 Recovery and list-live still scan the first workspace matching the home label, because they address panes they already recorded rather than choosing where new work goes.
 The one recovery that does place new work is the control plane's reclaim of a destroyed endpoint.
-It mints a replacement tab through this section's ordinary placement rules while pinning the herdr session the task's record names ([`agent-control.md`](agent-control.md) "Reclaiming a task whose endpoint is gone").
+When the task still has an exact version 2 binding it republishes the task's one-task workspace and advances that binding; otherwise it mints a replacement flat tab through this section's ordinary placement rules.
+Either way it pins the herdr session the task's record names ([`agent-control.md`](agent-control.md) "Reclaiming a task whose endpoint is gone").
 
 Existing task operations use recorded endpoint ids and do not move a live task when labels change.
 The per-home workspace is reused while it has task tabs.
@@ -392,6 +393,8 @@ These cases fall back flat without mutating the old projection when duplicate-ag
 - Ambiguous identity or focus.
 
 A live or unknown recorded or token-matched endpoint refuses duplicate launch.
+
+A control-plane reclaim of an endpoint proven destroyed is the one recovery that replaces a gone projection with a fresh one: a version 2 binding republishes the task's one-task workspace and advances its journal, while every case above still falls back flat ([`agent-control.md`](agent-control.md) "Reclaiming a task whose endpoint is gone").
 
 ### Startup cleanup of restored projections
 

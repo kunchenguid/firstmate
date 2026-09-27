@@ -2949,7 +2949,7 @@ fm_backend_herdr_projection_recovery_allows_flat() {  # <session> <journal> <tas
     '.result.workspaces[]? | select((.label | type) == "string" and (.label | endswith($suffix))) | .workspace_id' 2>/dev/null)
   count=$(printf '%s\n' "$wsids" | awk 'NF { n += 1 } END { print n + 0 }')
   if [ "$count" -eq 0 ]; then
-    echo "warning: no exact herdr presentation token match for $id; leaving any stale space untouched and spawning flat" >&2
+    echo "warning: no exact herdr presentation token match for $id; leaving any stale space untouched" >&2
     return 0
   fi
   if [ "$count" -gt 1 ]; then
@@ -2982,7 +2982,92 @@ EOF
   done <<EOF
 $wsids
 EOF
-  echo "warning: quarantined herdr presentation for $id is dead or agent-free; exact bound reclaim may proceed, otherwise spawning flat" >&2
+  echo "warning: quarantined herdr presentation for $id is dead or agent-free" >&2
+  return 0
+}
+
+# fm_backend_herdr_projection_rebind_task: republish a fresh disposable
+# presentation workspace for one task whose previous projected endpoint was
+# destroyed, replacing its stale journal with a new exact version 2 binding.
+#
+# The caller holds the session presentation lock and has already proven the
+# recorded endpoint absent. Only an existing version 2 journal makes a task
+# eligible: a flat task, and a task with only an unbound attempt journal, keep
+# the ordinary flat reclaim. The stale token's matches are inspected read-only
+# for duplicate-agent risk before anything is created, exactly as the fresh
+# spawn path does, and a live or unknown match refuses rather than risking a
+# second agent in one worktree.
+#
+# Sets FM_BACKEND_HERDR_PROJECTION_TAB_ID and
+# FM_BACKEND_HERDR_PROJECTION_PANE_ID on success. Return 0 means an exact fresh
+# projection, 2 means a non-mutating refusal with flat fallback permitted, and
+# 1 means a live/unknown or post-mutation uncertainty that must refuse the
+# launch.
+#
+# New is created and verified before the old journal binding is replaced, and a
+# failed create, verification, or publication rolls back only the
+# response-derived replacement panes when focus-safe verification permits it.
+# The old binding is otherwise left exactly as it was found.
+fm_backend_herdr_projection_rebind_task() {  # <session> <journal> <task-id> <home> <parent-workspace> <parent-label> <cwd> <task-label>
+  local session=$1 journal=$2 id=$3 home=$4 parent_workspace=$5 parent_label=$6 cwd=$7 task_label=$8
+  local canonical_home token workspace_label
+  FM_BACKEND_HERDR_PROJECTION_TAB_ID=""
+  FM_BACKEND_HERDR_PROJECTION_PANE_ID=""
+  fm_backend_herdr_projection_journal_snapshot "$journal" "$id" || {
+    echo "warning: herdr presentation journal for $id has no exact restart binding; spawning flat" >&2
+    return 2
+  }
+  if [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" != 2 ]; then
+    echo "warning: herdr presentation journal for $id has no exact restart binding; spawning flat" >&2
+    return 2
+  fi
+  canonical_home=$(fm_backend_herdr_projection_home_identity "$home") || {
+    echo "warning: herdr presentation home for $id could not be resolved exactly; spawning flat" >&2
+    return 2
+  }
+  if [ "$FM_BACKEND_HERDR_JOURNAL_HOME" != "$canonical_home" ] \
+     || [ "$FM_BACKEND_HERDR_JOURNAL_SESSION" != "$session" ]; then
+    echo "warning: herdr presentation binding for $id does not match its exact home or session; spawning flat" >&2
+    return 2
+  fi
+  fm_backend_herdr_projection_recovery_allows_flat "$session" "$journal" "$id" || return 1
+  # The replacement keeps the journal's own token, so the one-task workspace
+  # label and its sidebar entry stay stable across the reclaim while the new
+  # workspace id is what changes. A stale token match would make
+  # live_binding_matches see two candidates and roll the replacement back, so
+  # this only ever succeeds against a genuinely absent old projection.
+  token=$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID
+  workspace_label=$(fm_backend_herdr_projection_workspace_label "$id" "$token")
+  if ! HERDR_SESSION="$session" FM_HOME="$home" fm_backend_herdr_projection_create_task \
+    "$cwd" "$workspace_label" "$task_label"; then
+    if [ "${FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE:-0}" = 1 ]; then
+      fm_backend_herdr_projection_cleanup_exact "$session" \
+        "$FM_BACKEND_HERDR_PROJECTION_PANE_ID" "$FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID" || true
+    fi
+    echo "warning: herdr presentation rebind for $id could not create a fresh projection; spawning flat" >&2
+    return 2
+  fi
+  fm_backend_herdr_projection_order_best_effort \
+    "$session" "$FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID" "$parent_label" "$parent_workspace"
+  if ! fm_backend_herdr_projection_live_binding_matches \
+    "$session" "$token" "$FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID" \
+    "$FM_BACKEND_HERDR_PROJECTION_TAB_ID" "$FM_BACKEND_HERDR_PROJECTION_PANE_ID" \
+    "$parent_workspace" "$parent_label" "$workspace_label" "$task_label"; then
+    fm_backend_herdr_projection_cleanup_exact "$session" \
+      "$FM_BACKEND_HERDR_PROJECTION_PANE_ID" "$FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID" || true
+    echo "warning: herdr presentation rebind for $id did not converge exactly; spawning flat" >&2
+    return 2
+  fi
+  if ! fm_backend_herdr_projection_journal_write_v2 \
+    "$journal" "$id" "$token" "$canonical_home" "$session" \
+    "$FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID" "$FM_BACKEND_HERDR_PROJECTION_TAB_ID" \
+    "$FM_BACKEND_HERDR_PROJECTION_PANE_ID" "$parent_workspace" "$parent_label" \
+    "$workspace_label" "$task_label"; then
+    fm_backend_herdr_projection_cleanup_exact "$session" \
+      "$FM_BACKEND_HERDR_PROJECTION_PANE_ID" "$FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID" || true
+    echo "warning: herdr presentation rebind for $id could not publish its replacement binding; spawning flat" >&2
+    return 2
+  fi
   return 0
 }
 
