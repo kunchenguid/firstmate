@@ -73,9 +73,9 @@
 #              A prefixed raw-command basename cannot reconstruct its launch
 #              command, so relaunch requires an explicit --harness for it.
 #              A replacement Claude or Pi profile must also pass this home's
-#              worker account pin (bin/fm-worker-account-lib.sh) here, so a pin
-#              that no longer resolves or is signed out refuses before the old
-#              agent stops.
+#              worker account pin (bin/fm-worker-account-lib.sh) here, so a
+#              missing account file or a pin that no longer resolves or is
+#              signed out refuses before the old agent stops.
 #              --note is required for a ship or scout, whose replacement
 #              inherits the local copy but none of the conversation; a
 #              secondmate reconciles its own home's records at startup, so its

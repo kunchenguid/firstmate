@@ -96,10 +96,11 @@ run_spawn() {
   local home=$1 wt=$2 fakebin=$3 launchlog=$4
   shift 4
   : > "$launchlog"
-  # CLAUDE_CONFIG_DIR is forwarded onto claude launches by fm-spawn, so pin it
-  # explicitly (empty by default) instead of leaking the invoking shell's value,
-  # which would make launch assertions depend on the developer's environment.
-  # A test opts in to the set case via FM_TEST_CLAUDE_CONFIG_DIR.
+  # fm-spawn exports or unsets CLAUDE_CONFIG_DIR from the validated account
+  # root, never from the invoking shell, so pin the ambient value explicitly
+  # (empty by default) to keep launch assertions independent of the
+  # developer's environment. A test opts in to a non-empty ambient value (which
+  # must not select the account) via FM_TEST_CLAUDE_CONFIG_DIR.
   CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
     FM_FAKE_LAUNCH_LOG="$launchlog" \
     FM_FAKE_CURSOR_MODELS="${FM_TEST_CURSOR_MODELS:-}" \
