@@ -806,10 +806,14 @@ The token is the file's whitespace-trimmed content.
 | `bypass` | `claude --dangerously-skip-permissions` |
 | `auto` | `--permission-mode auto` |
 
-An absent file defaults to bypass, so an unconfigured home launches byte-for-byte as before.
+An absent file defaults to bypass, so an unconfigured home launches with the bypass permission flag.
 Auto is Claude Code's classifier-reviewed permission mode, for a captain who refuses to run workers in bypass mode.
-Only the permission flag changes.
-The environment prefix, inline settings, model, effort flags, and every other part of the Claude launch stay unchanged.
+Only the permission flag changes between the two modes.
+The environment prefix, inline settings, model, effort flags, and the task-channel `--add-dir` grant below stay the same in both.
+
+Every Claude launch, in both modes, also passes `--add-dir` for exactly this task's Firstmate channel directories, resolved to real paths: a secondmate gets the parent home's `state/<id>.inbox` it reads its steers from; a ship or scout worker gets this home's `state/operational-inbox` (its launch record), `state/<id>.inbox` (its steers), `data/<id>` (its brief and report), and the code root's `.agents/skills`.
+The grant exists because Claude Code path-checks the Read/Glob/Grep file tools against cwd plus `--add-dir`, and since 2.1.257 the first outside read in `auto` mode parks the pane on a one-time interactive question, while a "Block" answer there writes `permissions.blockReadsOutsideWorkingDirectories` into user settings and then refuses the same reads under bypass too.
+It never covers the whole `state/` or anything wider.
 
 Any other value or an unreadable file refuses every spawn from that home, whichever harness it would launch.
 This happens before any endpoint, worktree, or task record exists.
@@ -820,7 +824,7 @@ The diagnostic names the accepted values; Firstmate never falls back to a permis
 `bin/fm-spawn.sh` reads the file on every spawn and relaunch, so a change takes effect at the next launch without a restart.
 The file is a captain-wide safety preference, so it is inherited into secondmate homes under the [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md) inherited-local-material contract; a secondmate's own Claude crewmates then launch on the same posture.
 
-The [Claude adapter reference](../.agents/skills/harness-adapters/references/harness/claude.md) records the verified shape of both launches and which once-per-machine dialog each one can meet.
+The [Claude adapter reference](../.agents/skills/harness-adapters/references/harness/claude.md) records the permission-mode observations and the distinct startup dialogs.
 
 ## Worker account pin (config/claude-account, config/pi-account)
 

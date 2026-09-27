@@ -101,7 +101,7 @@
 # unconfirmed submit (3): recognizable as "the other supervision actor holds
 # this task right now - retry after the lease clears".
 FM_LEASE_REFUSE_EXIT=6
-FM_LEASE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FM_LEASE_LIB_DIR="$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd "${d:-/}" && pwd)"
 FM_LEASE_GUARD_LOCK=
 
 fm_lease_lock_helpers() {

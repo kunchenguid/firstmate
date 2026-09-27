@@ -695,6 +695,17 @@ SH
   printf '%s\n' "$fakebin"
 }
 
+# The --add-dir grant a Claude secondmate launch carries between its
+# permission flag and --settings: only the PARENT home's state/<id>.inbox,
+# real-path resolved the way the spawn's claude_add_dirs_flag resolves it.
+# Prints a trailing space so callers can drop it straight into an expected
+# command.
+sm_claude_add_dir() {  # <world> <id>
+  local real
+  real=$(cd "$1/home/state" && pwd -P)
+  printf "%s " "--add-dir '$real/$2.inbox'"
+}
+
 # spawn_secondmate_capture <world> <id> <home> <launchlog> [extra fm-spawn.sh args...]
 # Same shape as spawn_secondmate but captures the launch command into <launchlog>
 # and does not discard stderr, so callers can assert on both.
@@ -801,7 +812,7 @@ test_spawn_secondmate_harness_model_token() {
   [ "$(meta_field "$meta" model)" = opus ] || fail "model-token: meta model not opus (got '$(meta_field "$meta" model)')"
   [ "$(meta_field "$meta" effort)" = default ] || fail "model-token: meta effort not default (got '$(meta_field "$meta" effort)')"
   launch=$(cat "$launchlog")
-  assert_contains "$launch" "claude --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\",\"attribution\":{\"commit\":\"\",\"pr\":\"\",\"sessionUrl\":false}}' --model 'opus'" \
+  assert_contains "$launch" "claude --dangerously-skip-permissions $(sm_claude_add_dir "$w" sm)--settings '{\"feedbackDrafts\":\"off\",\"attribution\":{\"commit\":\"\",\"pr\":\"\",\"sessionUrl\":false}}' --model 'opus'" \
     "model-token: launch did not carry --model opus"
   assert_not_contains "$launch" "--effort" "model-token: launch must not carry an --effort flag"
   pass "C3 spawn: config/secondmate-harness's model token threads --model into the launch and meta"
@@ -823,7 +834,7 @@ test_spawn_secondmate_harness_model_and_effort_tokens() {
   [ "$(meta_field "$meta" model)" = opus ] || fail "model-effort-tokens: meta model not opus"
   [ "$(meta_field "$meta" effort)" = high ] || fail "model-effort-tokens: meta effort not high (got '$(meta_field "$meta" effort)')"
   launch=$(cat "$launchlog")
-  assert_contains "$launch" "claude --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\",\"attribution\":{\"commit\":\"\",\"pr\":\"\",\"sessionUrl\":false}}' --model 'opus' --effort 'high'" \
+  assert_contains "$launch" "claude --dangerously-skip-permissions $(sm_claude_add_dir "$w" sm)--settings '{\"feedbackDrafts\":\"off\",\"attribution\":{\"commit\":\"\",\"pr\":\"\",\"sessionUrl\":false}}' --model 'opus' --effort 'high'" \
     "model-effort-tokens: launch did not carry both --model opus and --effort high"
   pass "C4 spawn: config/secondmate-harness's model+effort tokens thread into the launch and meta"
 }
@@ -1443,10 +1454,54 @@ test_spawn_secondmate_claude_permission_mode_auto() {
   meta="$w/home/state/sm.meta"
   [ "$(meta_field "$meta" harness)" = claude ] || fail "permmode: meta harness not claude"
   launch=$(cat "$launchlog")
-  assert_contains "$launch" "claude --permission-mode auto --settings '{\"feedbackDrafts\":\"off\",\"attribution\":{\"commit\":\"\",\"pr\":\"\",\"sessionUrl\":false}}' --model 'opus'" \
+  assert_contains "$launch" "claude --permission-mode auto $(sm_claude_add_dir "$w" sm)--settings '{\"feedbackDrafts\":\"off\",\"attribution\":{\"commit\":\"\",\"pr\":\"\",\"sessionUrl\":false}}' --model 'opus'" \
     "permmode: secondmate launch did not swap the permission flag while keeping --model"
   assert_not_contains "$launch" "--dangerously-skip-permissions" "permmode: secondmate launch must not request bypass mode"
   pass "C2b spawn: config/claude-permission-mode=auto reaches a Claude secondmate launch"
+}
+
+# A second mate's steering inbox lives in the PARENT home's
+# state/<id>.inbox - outside the mate's own working directory - so an
+# auto-mode Claude Code (2.1.257+) parks on its one-time "Allow reads outside
+# the working directories?" question the first time the mate file-tool reads
+# a steer, and a "Block" answer recorded anywhere on the machine would refuse
+# the same read even under bypass. Drive the real emitted launch through a
+# claude stub that models that working-directory gate, under both permission
+# modes: the parent inbox must resolve inside the pane cwd or an --add-dir.
+test_spawn_secondmate_claude_grants_parent_inbox_dir() {
+  local w sm launchlog launch reqs fakebin out status eval_out eval_rc
+  for mode in auto bypass; do
+    w="$TMP_ROOT/spawn-claude-adddir-$mode"
+    sm="$w/sm"
+    launchlog="$w/launch.log"
+    mkdir -p "$w/home/config" "$w/home/state" "$w/home/data"
+    printf 'claude\n' > "$w/home/config/secondmate-harness"
+    printf '%s\n' "$mode" > "$w/home/config/claude-permission-mode"
+    make_seeded_home "$sm" sm
+
+    fakebin=$(make_launch_capturing_tmux "$w/tmux")
+    fm_fake_claude_outside_read_gate "$fakebin"
+    : > "$launchlog"
+    out=$(
+      PATH="$fakebin:$BLIND_BIN:$BASE_PATH" TMUX='' CLAUDECODE=1 \
+        FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$w/home" HOME="$w/home/user-home" CLAUDE_CONFIG_DIR='' \
+        FM_STATE_OVERRIDE="$w/home/state" FM_DATA_OVERRIDE="$w/home/data" \
+        FM_PROJECTS_OVERRIDE="$w/home/projects" FM_CONFIG_OVERRIDE="$w/home/config" \
+        FM_SPAWN_NO_GUARD=1 FM_FAKE_LAUNCH_LOG="$launchlog" \
+        "$ROOT/bin/fm-spawn.sh" sm "$sm" --secondmate 2>&1
+    )
+    status=$?
+    expect_code 0 "$status" "claude secondmate spawn under $mode should succeed"$'\n'"$out"
+    launch=$(cat "$launchlog")
+
+    reqs="$w/channel-requirements.txt"
+    printf '%s\n' "$w/home/state/sm.inbox" > "$reqs"
+    eval_out=$(fm_eval_launch "$launch" "$sm" "$fakebin" "FM_FAKE_CLAUDE_REQUIREMENTS=$reqs" 2>&1)
+    eval_rc=$?
+    [ "$eval_rc" -eq 0 ] \
+      || fail "claude secondmate launch under $mode would hit the outside-read gate on its parent inbox"$'\n'"$eval_out"
+  done
+  pass "claude secondmate launches cover the parent-home steering inbox in auto and bypass modes"
 }
 
 # The file is a captain-wide safety preference, so it inherits like
@@ -2671,6 +2726,7 @@ test_bootstrap_sweep_defers_dispatch_on_stale_unignored_home
 test_bootstrap_sweep_materializes_and_inherits_memory_default
 test_backend_inheritance_present_and_absent
 test_spawn_secondmate_claude_permission_mode_auto
+test_spawn_secondmate_claude_grants_parent_inbox_dir
 test_claude_permission_mode_inheritance_present_and_absent
 test_presentation_inheritance_default_on_and_opt_out
 test_bootstrap_sweep_surfaces_config_propagation_failure

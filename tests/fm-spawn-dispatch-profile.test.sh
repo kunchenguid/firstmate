@@ -1064,6 +1064,8 @@ test_claude_launch_uses_declared_account_not_ambient_config_dir() {
     "claude launch must spend the home's declared account, not the ambient CLAUDE_CONFIG_DIR"
   assert_not_contains "$launch" "CLAUDE_CONFIG_DIR='$CASE_DIR/claude-work'" \
     "claude launch must not forward an ambient CLAUDE_CONFIG_DIR when a declaration exists"
+  assert_contains "$launch" "$(claude_worker_add_dirs "$HOME_DIR" "$id")" \
+    "claude launch did not grant this task's --add-dir directories"
   pass "claude spends the declared account instead of an ambient CLAUDE_CONFIG_DIR"
 }
 
@@ -1079,6 +1081,8 @@ test_claude_launch_always_prefixes_the_declared_account() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "CLAUDE_CONFIG_DIR='$HOME_DIR/accounts/claude'" \
     "claude launch must prefix the declared account even when the ambient CLAUDE_CONFIG_DIR is empty"
+  assert_contains "$launch" "$(claude_worker_add_dirs "$HOME_DIR" "$id")" \
+    "claude launch did not grant this task's --add-dir directories"
   pass "claude always prefixes the declared account onto the launch"
 }
 
@@ -1655,13 +1659,25 @@ claude_launch_brief_arg() {  # <launch>
   )
 }
 
+# The --add-dir segment every Claude worker launch now carries between the
+# permission flag and --settings, real-path resolved the way the spawn's
+# claude_add_dirs_flag resolves it. Prints a trailing space so callers can
+# drop it straight into an expected command.
+claude_worker_add_dirs() {  # <home> <id>
+  local state_real data_real root_real
+  state_real=$(cd "$1/state" && pwd -P)
+  data_real=$(cd "$1/data" && pwd -P)
+  root_real=$(cd "$ROOT" && pwd -P)
+  printf '%s ' "--add-dir '$state_real/operational-inbox' --add-dir '$state_real/$2.inbox' --add-dir '$data_real/$2' --add-dir '$root_real/.agents/skills'"
+}
+
 claude_expected_launch() {  # <launch> <home> <id> <permission-flag>
   local doorbell quoted
   doorbell=$(claude_launch_brief_arg "$1")
   [ "$(printf '%s' "$doorbell" | "$ROOT/bin/fm-operational-input.sh" doorbell-kind)" = launch-brief ] \
     || doorbell="not a launch-brief doorbell"
   quoted="'$(printf '%s' "$doorbell" | sed "s/'/'\\\\''/g")'"
-  printf '%s' "export COMPACT_ADVISER_DISABLE=1; $(ai_trailer_hooks_prefix "$2" "$3")$(claude_launch_prefix "$2")env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude $4 --settings '{\"feedbackDrafts\":\"off\",\"attribution\":{\"commit\":\"\",\"pr\":\"\",\"sessionUrl\":false}}' $CLAUDE_CONTROL_CHANNEL_FLAG $quoted"
+  printf '%s' "export COMPACT_ADVISER_DISABLE=1; $(ai_trailer_hooks_prefix "$2" "$3")$(claude_launch_prefix "$2")env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude $4 $(claude_worker_add_dirs "$2" "$3")--settings '{\"feedbackDrafts\":\"off\",\"attribution\":{\"commit\":\"\",\"pr\":\"\",\"sessionUrl\":false}}' $CLAUDE_CONTROL_CHANNEL_FLAG $quoted"
 }
 
 test_claude_permission_mode_bypass_matches_absent_launch() {
@@ -1710,9 +1726,48 @@ test_claude_permission_mode_auto_reaches_scout_launch() {
   status=$?
   expect_code 0 "$status" "claude scout spawn with claude-permission-mode=auto should succeed"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "claude --permission-mode auto --settings" "scout launch did not carry --permission-mode auto"
+  assert_contains "$launch" "claude --permission-mode auto " "scout launch did not carry --permission-mode auto"
   assert_not_contains "$launch" "--dangerously-skip-permissions" "scout launch must not request bypass mode"
   pass "config/claude-permission-mode=auto reaches scout launches too"
+}
+
+# A Claude worker's Firstmate channel files all live outside its worktree cwd
+# (launch record in state/operational-inbox, steers in state/<id>.inbox, brief
+# in data/<id>), and since Claude Code 2.1.257 the first file-tool read of
+# them under --permission-mode auto parks the pane on a one-time interactive
+# question; a "Block" answer on the machine then refuses the same reads even
+# under bypass. Drive the real emitted launch through a claude stub that
+# models that working-directory check: every channel path must resolve inside
+# the pane cwd or an --add-dir, under both permission modes, for ships and
+# scouts alike.
+test_claude_worker_launch_covers_task_channel_dirs() {
+  local mode kind rec id out status launch reqs eval_out eval_rc
+  for mode in bypass auto; do
+    for kind in ship scout; do
+      id="adddir-$mode-$kind"
+      rec=$(make_spawn_case "adddir-$mode-$kind" claude "$id")
+      read_case_record "$rec"
+      printf '%s\n' "$mode" > "$HOME_DIR/config/claude-permission-mode"
+      fm_fake_claude_outside_read_gate "$FAKEBIN_DIR"
+      reqs="$CASE_DIR/channel-requirements.txt"
+      printf '%s\n' "$HOME_DIR/state/$id.inbox" "$HOME_DIR/data/$id" "$ROOT/.agents/skills" > "$reqs"
+
+      if [ "$kind" = ship ]; then
+        out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+      else
+        out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout)
+      fi
+      status=$?
+      expect_code 0 "$status" "claude $kind spawn under $mode should succeed"$'\n'"$out"
+      launch=$(cat "$LAUNCH_LOG")
+
+      eval_out=$(fm_eval_launch "$launch" "$WT_DIR" "$FAKEBIN_DIR" "FM_FAKE_CLAUDE_REQUIREMENTS=$reqs" 2>&1)
+      eval_rc=$?
+      [ "$eval_rc" -eq 0 ] \
+        || fail "claude $kind launch under $mode would hit the outside-read gate"$'\n'"$eval_out"
+    done
+  done
+  pass "claude worker launches cover the task-channel directories in bypass and auto modes"
 }
 
 test_claude_permission_mode_invalid_refuses_before_endpoint_or_metadata() {
@@ -1798,6 +1853,7 @@ test_claude_long_launch_is_delivered_intact
 test_claude_permission_mode_bypass_matches_absent_launch
 test_claude_permission_mode_auto_swaps_only_the_permission_flag
 test_claude_permission_mode_auto_reaches_scout_launch
+test_claude_worker_launch_covers_task_channel_dirs
 test_claude_permission_mode_invalid_refuses_before_endpoint_or_metadata
 test_non_claude_harness_ignores_claude_permission_mode
 test_non_claude_harness_ignores_config_dir

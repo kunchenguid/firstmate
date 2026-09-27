@@ -482,6 +482,17 @@ jobs:
             exit 1
           }
 
+          # The fork-free hot-path helpers must stay byte-identical to the
+          # commands they replace under stock Bash 3.2, which lacks the
+          # printf %(...)T clock and falls back to date.
+          helpers_output=$(/bin/bash tests/fm-fork-free-helpers.test.sh)
+          printf '%s\n' "$helpers_output"
+          helpers_count=$(printf '%s\n' "$helpers_output" | grep -c '^ok - ')
+          [ "$helpers_count" -eq 6 ] || {
+            echo "::error::expected 6 fork-free helper bash 3.2 regressions, got $helpers_count"
+            exit 1
+          }
+
           backend_output=$(FM_TEST_ONLY=test_backend_source_requires_adapter_file \
             FM_TEST_BASH=/bin/bash \
             /bin/bash tests/fm-backend.test.sh)
