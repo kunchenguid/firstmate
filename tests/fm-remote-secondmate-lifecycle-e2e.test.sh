@@ -34,6 +34,11 @@ cleanup() {
   local worker_pid=''
   touch "$TMP_ROOT/provision.release" "$TMP_ROOT/seed.release" "$TMP_ROOT/handoff.release" \
     "$TMP_ROOT/inherit.release" "$TMP_ROOT/launch.release" "$TMP_ROOT/race-clone.release" 2>/dev/null || true
+  # A watcher leg cut short by a failed assertion is still polling the root.
+  if [ -n "${watch_pid:-}" ]; then
+    kill "$watch_pid" 2>/dev/null || true
+    wait "$watch_pid" 2>/dev/null || true
+  fi
   FM_HOME="$PARENT" FM_PROCEVENT_CLAIM_ROOT="$CLAIMS" \
     "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true
   if [ -f "$TMP_ROOT/remote-jobs/worker.pid" ]; then
@@ -1240,9 +1245,11 @@ jq --arg p "$ios_pane" \
   || fail "the agent-free remote pane did not classify dead"
 
 tabs_before=$(grep -c '^tab create' "$HERDR_LOG" || true)
+# exec keeps $! the watcher itself rather than the function's subshell, so a
+# kill reaches the process that probes and writes into the fixture root.
 FM_STATE_OVERRIDE="$WATCH_STATE" FM_SECONDMATE_LIVENESS_SECS=1 FM_POLL=1 \
   FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
-  remote_env "$ROOT/bin/fm-watch.sh" \
+  remote_env exec "$ROOT/bin/fm-watch.sh" \
   > "$TMP_ROOT/watch-liveness.out" 2> "$TMP_ROOT/watch-liveness.err" &
 watch_pid=$!
 watch_wait=0
@@ -1256,6 +1263,7 @@ if kill -0 "$watch_pid" 2>/dev/null; then
 fi
 wait "$watch_pid" \
   || fail "the liveness watcher leg exited non-zero: $(cat "$TMP_ROOT/watch-liveness.err")"
+watch_pid=''
 grep -F 'check: secondmate ios auto-relaunched after remote endpoint dead on its configured host (host=remote-mac)' \
   "$TMP_ROOT/watch-liveness.out" >/dev/null \
   || fail "the dead remote secondmate was not auto-relaunched: $(cat "$TMP_ROOT/watch-liveness.out")"
@@ -1293,7 +1301,7 @@ ssh_before=$(cat "$SSH_COUNT" 2>/dev/null || printf '0')
 FM_FAKE_SSH_MODE=unreachable FM_STATE_OVERRIDE="$WATCH_STATE_UNREACHABLE" \
   FM_SECONDMATE_LIVENESS_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
   FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
-  remote_env "$ROOT/bin/fm-watch.sh" \
+  remote_env exec "$ROOT/bin/fm-watch.sh" \
   > "$TMP_ROOT/watch-unreachable.out" 2> "$TMP_ROOT/watch-unreachable.err" &
 watch_pid=$!
 sleep 4
@@ -1301,8 +1309,18 @@ kill -0 "$watch_pid" 2>/dev/null \
   || fail "the watcher exited against an unreachable remote secondmate: $(cat "$TMP_ROOT/watch-unreachable.out" "$TMP_ROOT/watch-unreachable.err")"
 kill "$watch_pid" 2>/dev/null || true
 wait "$watch_pid" 2>/dev/null || true
+watch_pid=''
+sleep 1
 ssh_after=$(cat "$SSH_COUNT" 2>/dev/null || printf '0')
 [ "$ssh_after" -gt "$ssh_before" ] || fail "the unreachable remote endpoint was never probed"
+# A watcher that survives this stop keeps probing into the fixture root until
+# the EXIT trap races its removal, so prove nothing polls past a few cycles.
+touch "$TMP_ROOT/watch-unreachable.stopped"
+sleep 3
+[ "$(cat "$SSH_COUNT" 2>/dev/null || printf '0')" = "$ssh_after" ] \
+  || fail "the stopped unreachable watcher kept probing the remote endpoint"
+[ -z "$(find "$WATCH_STATE_UNREACHABLE" -newer "$TMP_ROOT/watch-unreachable.stopped" -print)" ] \
+  || fail "the stopped unreachable watcher kept writing its state"
 [ ! -s "$WATCH_STATE_UNREACHABLE/.wake-queue" ] \
   || fail "an unreachable remote probe queued a wake: $(cat "$WATCH_STATE_UNREACHABLE/.wake-queue")"
 assert_absent "$WATCH_STATE_UNREACHABLE/.secondmate-relaunch-ios" \

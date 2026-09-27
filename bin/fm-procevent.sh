@@ -690,6 +690,11 @@ next_result_sequence() {  # <source-id>
   printf '%s\n' "$seq"
 }
 
+register_extension_locks_release() {  # <source-id>
+  extension_lifecycle_lock_release
+  fm_procevent_source_lock_release "$1"
+}
+
 cmd_register_extension() {
   local adapter=${1-} id=${2-} option=${3-} config_ref=${4-} resolution schema extension_id
   local extension_version capability_version package_digest binding_digest extra registration_token
@@ -702,19 +707,27 @@ cmd_register_extension() {
   if [ ! -x "$EXTENSION_HOST" ] || [ -L "$EXTENSION_HOST" ]; then
     die "the tracked extension host is unavailable"
   fi
-  extension_lifecycle_lock_acquire || die "cannot lock the extension lifecycle"
+  # The source lock comes before the extension lifecycle lock, the order every
+  # other path holding both uses: publishing or concluding a captured extension
+  # result holds the source lock while the extension host takes the lifecycle
+  # lock. The reverse order here would let both wait on each other forever.
+  fm_procevent_source_lock_acquire "$id" || die "cannot lock the source"
+  if ! extension_lifecycle_lock_acquire; then
+    fm_procevent_source_lock_release "$id"
+    die "cannot lock the extension lifecycle"
+  fi
   if ! resolution=$("$EXTENSION_HOST" resolve-process-event "$adapter"); then
-    extension_lifecycle_lock_release
+    register_extension_locks_release "$id"
     die "extension adapter verification failed: $adapter"
   fi
   if [ "$(printf '%s\n' "$resolution" | wc -l | tr -d ' ')" != 1 ]; then
-    extension_lifecycle_lock_release
+    register_extension_locks_release "$id"
     die "extension adapter resolution was malformed: $adapter"
   fi
   IFS=$'\t' read -r schema extension_id extension_version capability_version \
     package_digest binding_digest extra <<< "$resolution"
   if [ "$schema" != fm-extension-process-event-resolution.v1 ] || [ -n "$extra" ]; then
-    extension_lifecycle_lock_release
+    register_extension_locks_release "$id"
     die "extension adapter resolution was malformed: $adapter"
   fi
   if ! fm_procevent_extension_id_valid "$extension_id" \
@@ -722,37 +735,29 @@ cmd_register_extension() {
     || [ "$capability_version" != 1 ] \
     || ! fm_procevent_digest_valid "$package_digest" \
     || ! fm_procevent_digest_valid "$binding_digest"; then
-    extension_lifecycle_lock_release
+    register_extension_locks_release "$id"
     die "extension adapter identity was malformed: $adapter"
   fi
   if ! registration_token=$(new_extension_registration_token); then
-    extension_lifecycle_lock_release
+    register_extension_locks_release "$id"
     die "cannot create an extension registration identity"
-  fi
-  if ! fm_procevent_source_lock_acquire "$id"; then
-    extension_lifecycle_lock_release
-    die "cannot lock the source"
   fi
   if [ "$(source_kind "$id" 2>/dev/null || true)" = task-owned ]; then
     owner_task=$(source_owner_task "$id")
-    fm_procevent_source_lock_release "$id"
-    extension_lifecycle_lock_release
+    register_extension_locks_release "$id"
     die "cannot replace task-owned source $id owned by task $owner_task; steer that task to re-arm its board"
   fi
   if ! extension_registration_replacement_safe_locked "$id"; then
-    fm_procevent_source_lock_release "$id"
-    extension_lifecycle_lock_release
+    register_extension_locks_release "$id"
     die "cannot replace extension registration while its prior runner remains active: $id"
   fi
   if ! fm_procevent_extension_registration_publish_locked "$STATE" "$adapter" "$id" \
       "$extension_id" "$extension_version" "$capability_version" "$package_digest" \
       "$binding_digest" "$config_ref" "$registration_token"; then
-    fm_procevent_source_lock_release "$id"
-    extension_lifecycle_lock_release
+    register_extension_locks_release "$id"
     die "cannot publish the extension registration"
   fi
-  fm_procevent_source_lock_release "$id"
-  extension_lifecycle_lock_release
+  register_extension_locks_release "$id"
   owner_lease_refresh
   printf 'registered: %s (%s from %s@%s)\n' "$id" "$adapter" "$extension_id" "$extension_version"
   printf 'owner-token: %s\n' "$registration_token"

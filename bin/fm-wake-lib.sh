@@ -654,11 +654,22 @@ _fm_atomic_replace() {
 }
 
 _fm_recovery_marker_write_locked() {
-  local marker=$1 kind=$2 generation=${3:-} status=${4:-pending} tmp
+  # Mint and write with sequential assignments only: two sibling $() on one
+  # command is a bash 5.2 parse-error landmine when a CHLD trap is set
+  # (regression: test_recovery_mint_and_delivery_log_avoid_sibling_subst in
+  # tests/fm-wake-queue.test.sh).
+  # Pid/date failures stay unchecked like the pre-fix sibling assignment so a
+  # grammar-valid token is still minted and the durable wake row still appends.
+  local marker=$1 kind=$2 generation=${3:-} status=${4:-pending} tmp pid epoch
   case "$kind" in handling|downtime) ;; *) return 1 ;; esac
   case "$status" in pending|announced) ;; *) return 1 ;; esac
   tmp=$(mktemp "${marker}.tmp.XXXXXX") || return 1
-  [ -n "$generation" ] || generation="$(fm_current_pid).$(date +%s).${tmp##*.}"
+  if [ -z "$generation" ]; then
+    # Prefer fm_current_pid's output-var form so the pid is not itself a $().
+    fm_current_pid pid
+    epoch=$(date +%s)
+    generation="${pid}.${epoch}.${tmp##*.}"
+  fi
   if ! printf '%s:%s:%s\n' "$status" "$kind" "$generation" > "$tmp" \
     || ! chmod 0600 "$tmp" \
     || ! _fm_atomic_replace "$tmp" "$marker"; then
@@ -673,10 +684,14 @@ _fm_recovery_marker_write_locked() {
 # new down stretch mints a new generation.
 # docs/watcher-continuity.md owns the recovery contract and sequence-safety rationale.
 _fm_recovery_marker_publish() {
-  local marker=$1 kind=${2:-downtime} lock saved_token generation='' status=pending
+  local marker=$1 kind=${2:-downtime} bound=${3:-} lock saved_token generation='' status=pending
   case "$kind" in handling|downtime) ;; *) return 1 ;; esac
   lock="${marker}.lock"
-  fm_lock_acquire_wait "$lock" || return 1
+  if [ -n "$bound" ]; then
+    fm_lock_acquire_wait_max "$lock" "$bound" || return 1
+  else
+    fm_lock_acquire_wait "$lock" || return 1
+  fi
   if [ -d "$marker" ] && [ ! -L "$marker" ]; then
     fm_lock_release "$lock"
     return 1
@@ -876,10 +891,10 @@ _fm_recovery_marker_reopen_announced() {
 }
 
 fm_recovery_transition() {
-  local marker=$1 action=$2 target=${3:-} value=${4:-}
+  local marker=$1 action=$2 target=${3:-} value=${4:-} bound=${5:-}
   case "$action" in
     publish)
-      _fm_recovery_marker_publish "$marker" "${target:-downtime}"
+      _fm_recovery_marker_publish "$marker" "${target:-downtime}" "$bound"
       ;;
     acknowledge)
       _fm_recovery_marker_ack "$marker" "$target"
@@ -892,13 +907,17 @@ fm_recovery_transition() {
       ;;
     release-lock)
       [ -n "$target" ] || return 1
-      _fm_recovery_marker_publish "$marker" "${value:-downtime}" || return 1
+      _fm_recovery_marker_publish "$marker" "${value:-downtime}" "$bound" || return 1
       fm_lock_release "$target"
       ;;
     release-lock-existing)
       [ -n "$target" ] || return 1
       local lock="${marker}.lock"
-      fm_lock_acquire_wait "$lock" || return 1
+      if [ -n "$bound" ]; then
+        fm_lock_acquire_wait_max "$lock" "$bound" || return 1
+      else
+        fm_lock_acquire_wait "$lock" || return 1
+      fi
       if ! fm_recovery_marker_read "$marker"; then
         fm_lock_release "$lock"
         return 1
@@ -908,7 +927,7 @@ fm_recovery_transition() {
       ;;
     clear-stale-lock)
       [ -n "$target" ] || return 1
-      _fm_recovery_marker_publish "$marker" "${value:-downtime}" || return 1
+      _fm_recovery_marker_publish "$marker" "${value:-downtime}" "$bound" || return 1
       fm_lock_remove_path "$target"
       ;;
     *) return 2 ;;
@@ -1094,6 +1113,19 @@ fm_lock_try_acquire() {
 fm_lock_acquire_wait() {
   local lockdir=$1
   while ! fm_lock_try_acquire "$lockdir"; do
+    sleep 0.1
+  done
+}
+
+# Bounded in-process variant of fm_lock_acquire_wait for the watcher's EXIT
+# cleanup: a live foreign holder must not let one TERM strand the watcher in
+# its trap, so the wait gives up after <seconds> and leaves the ordinary
+# stale-owner evidence for the next acquirer to reclaim.
+fm_lock_acquire_wait_max() {  # <lockdir> <max-seconds>
+  local lockdir=$1 seconds=$2 deadline
+  deadline=$((SECONDS + seconds))
+  while ! fm_lock_try_acquire "$lockdir"; do
+    [ "$SECONDS" -lt "$deadline" ] || return 1
     sleep 0.1
   done
 }

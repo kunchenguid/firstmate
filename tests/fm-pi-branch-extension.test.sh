@@ -4588,6 +4588,122 @@ EOF
   pass "scopeForUnreadWake excludes every main-only class without vetoing eligible task-local rows, and writes the eligible snapshot"
 }
 
+# A second mate's status log is one shared channel for many independently keyed
+# decisions, so its signal rows are judged by the span presented since the last
+# drain (bounded by bin/fm-classify-lib.sh's own presentation-cursor writer),
+# not by every decision still open anywhere in that log. Single-task crewmate
+# logs keep their previous rule on both the Pi and the attended-host path.
+test_branch_dispatch_routes_secondmate_signal_by_new_span() {
+  local repo home out status
+  repo="$TMP_ROOT/dispatch-span-root"
+  home="$TMP_ROOT/dispatch-span-home"
+  mkdir -p "$repo/.pi/extensions/lib" "$home/state" "$home/projects/approved"
+  cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$repo/.pi/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-native-contract.ts" "$repo/.pi/extensions/lib/fm-native-contract.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-async-exec.ts" "$repo/.pi/extensions/lib/fm-async-exec.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-branch-model-picker.ts" "$repo/.pi/extensions/lib/fm-branch-model-picker.ts"
+  printf 'project=%s/projects/approved\nwindow=mate-window\nkind=secondmate\n' "$home" > "$home/state/mate.meta"
+  printf 'project=%s/projects/approved\nwindow=crew-window\nkind=ship\n' "$home" > "$home/state/crew.meta"
+  LIB="$repo/.pi/extensions/lib/fm-branch-dispatch.ts" FM_HOME="$home" CLASSIFY_LIB="$ROOT/bin/fm-classify-lib.sh" \
+    node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+import { execFileSync } from "node:child_process";
+import { appendFileSync, rmSync, writeFileSync } from "node:fs";
+
+const { branchOfferForWake, scopeForUnreadWake } = await import(pathToFileURL(process.env.LIB).href);
+const state = `${process.env.FM_HOME}/state`;
+const signalRow = (task) => `1\t1\tsignal\t${task}.status\tsignal: ${task}.status`;
+
+// Write the already-presented history, commit the presentation cursor at its
+// end through the real writer, then append the unread span a new wake covers.
+function stage(task, presented, span) {
+  const path = `${state}/${task}.status`;
+  writeFileSync(path, presented);
+  execFileSync("bash", ["-c",
+    'set -e; . "$1"; ident=$(_fm_open_decisions_file_ident "$2/$3.status"); ' +
+    'status_commit_presentation_snapshot "$2" "$(printf "%s\\t%s\\t%s" "$3" "$4" "$ident")"',
+    "_", process.env.CLASSIFY_LIB, state, task, String(Buffer.byteLength(presented))]);
+  appendFileSync(path, span);
+  writeFileSync(`${state}/.wake-queue`, signalRow(task));
+}
+
+// Both routing paths: the Pi dispatcher and the attended supervision host.
+function verdicts() {
+  return [false, true].map((attendedHost) => scopeForUnreadWake(state, false, false, attendedHost).eligibleSeqs.includes("1"));
+}
+
+function expectRoute(label, presented, span, toBranch) {
+  stage("mate", presented, span);
+  const [pi, host] = verdicts();
+  if (pi !== toBranch || host !== toBranch) {
+    throw new Error(`${label}: expected ${toBranch ? "branch" : "main"}, got pi=${pi} host=${host}`);
+  }
+}
+
+const hold = "needs-decision [at=1790000000] [key=old-hold]: deferred captain call\n";
+expectRoute("unrelated open hold plus a routine merged line", hold,
+  "done [at=1790000100]: sample-a PR merged\n", true);
+expectRoute("unrelated open hold stamped with a readable time", "needs-decision [at=10:00] [key=old-hold]: waiting\n",
+  "done: sample-a PR merged\n", true);
+expectRoute("routine note that only mentions an open key in prose", hold,
+  "done: sample-a merged, unrelated to [key=old-hold]\n", true);
+expectRoute("mixed routine and decision span", hold,
+  "done: sample-b PR merged\nneeds-decision [key=new-call]: pick an option\n", false);
+expectRoute("same-key update to an open decision", hold,
+  "working [key=old-hold]: still gathering evidence\n", false);
+expectRoute("same-key update behind a readable time stamp", hold,
+  "working [at=10:30] [key=old-hold]: still gathering evidence\n", false);
+expectRoute("key-less blocked line", hold, "blocked: cannot reach the forge\n", false);
+expectRoute("resolution of an open decision", hold, "resolved [key=old-hold]: answered\n", false);
+expectRoute("key-less resolution beside an unrelated open hold", hold, "resolved: routine follow-up\n", true);
+expectRoute("key-less resolution of an open unkeyed decision", "needs-decision: pick an option\n",
+  "resolved: answered\n", false);
+expectRoute("keyed resolution of a never-open key", hold, "resolved [key=never-open]: nothing to close\n", true);
+expectRoute("resolution after a bare resolved word left the unkeyed decision open",
+  "needs-decision: choose\nresolved\n", "resolved: answered\n", false);
+expectRoute("captain-held declaration", "working: history\n", "captain-held [key=parked]: deferred to Monday\n", false);
+
+// The host decides the whole close through the offer rule, which must agree.
+stage("mate", hold, "done: sample-c PR merged\n");
+if (!branchOfferForWake(state, `signal: ${state}/mate.status`, false, true).eligible) {
+  throw new Error("the attended-host offer kept a routine second-mate close on main behind an unrelated hold");
+}
+
+// Without a readable cursor the whole log is the span, so routing falls back
+// toward main rather than guessing.
+stage("mate", hold, "done: sample-d PR merged\n");
+rmSync(`${state}/.status-presentation-cursor`);
+if (verdicts().some(Boolean)) throw new Error("a missing presentation cursor did not fall back to the whole log");
+
+// A stale row stays a whole-log liveness check, and a co-queued signal row for
+// the same second mate keeps its own verdict in either order.
+for (const [order, queue, signalSeq, staleSeq] of [
+  ["stale first", "1\t1\tstale\tmate\tstale: mate\n1\t2\tsignal\tmate.status\tsignal: mate.status", "2", "1"],
+  ["signal first", "1\t1\tsignal\tmate.status\tsignal: mate.status\n1\t2\tstale\tmate\tstale: mate", "1", "2"],
+]) {
+  stage("mate", hold, "done: sample-e PR merged\n");
+  writeFileSync(`${state}/.wake-queue`, queue);
+  for (const attendedHost of [false, true]) {
+    const scope = scopeForUnreadWake(state, false, false, attendedHost);
+    if (!scope.eligibleSeqs.includes(signalSeq) || scope.eligibleSeqs.includes(staleSeq)) {
+      throw new Error(`${order}: signal and stale rows for one second mate shared a verdict: ${JSON.stringify(scope)}`);
+    }
+  }
+}
+
+// Single-task crewmate logs are unchanged: Pi judges only the row payload, and
+// the attended host keeps its whole-log rule.
+stage("crew", hold, "done: routine follow-up\n");
+const [crewPi, crewHost] = verdicts();
+if (!crewPi || crewHost) throw new Error(`crewmate signal routing changed: pi=${crewPi} host=${crewHost}`);
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "second-mate signal rows must be routed by their new span: $out"
+  pass "second-mate signal rows route by their new span while crewmate and stale routing stay unchanged"
+}
+
 # The model picker's bounded scrolling and its search ranking are Pi's own
 # SelectList and fuzzyFilter, so the guarantee only holds while the installed
 # Pi still exports them and still bounds what it renders. Stubs cannot answer
@@ -5409,6 +5525,7 @@ test_requested_healthy_outcome_and_unsolicited_routine_outcome_delivery
 test_captain_outcome_is_exactly_once_across_crash_reload_and_unrelated_response
 test_captain_outcome_processing_turn_is_sequence_keyed_and_re_presented
 test_branch_dispatch_classifies_main_only_rows_and_writes_the_eligible_snapshot
+test_branch_dispatch_routes_secondmate_signal_by_new_span
 test_branch_cache_key_is_per_home_stable
 test_branch_default_on_heartbeat_afk_and_fallback
 test_away_record_parks_main_and_presents_after_archive

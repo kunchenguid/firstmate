@@ -1979,7 +1979,9 @@ case "${1:-} ${2:-}" in
     fi
     exit 0 ;;
   'agent get')
-    if [ -f "$D/herdr-agent-live" ]; then
+    if [ -f "$D/herdr-agent-registration" ]; then
+      cat "$D/herdr-agent-registration"
+    elif [ -f "$D/herdr-agent-live" ]; then
       # The agent came back with its server. Nothing here is reclaimable.
       printf '{"result":{"agent":{"agent_status":"idle"}}}\n'
     else
@@ -1988,9 +1990,15 @@ case "${1:-} ${2:-}" in
     fi
     exit 0 ;;
   'pane process-info')
-    # Only asked for once an agent IS registered, to prove it at process level.
-    printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":4242,"foreground_processes":[{"pid":4243,"name":"claude","argv":["claude"],"cmdline":"claude"}]}}}\n' \
-      "$(cat "$D/herdr-pane")"
+    # A retained registration with a shell-only pane models an exited agent
+    # whose Herdr status authority still belongs to its previous session.
+    if [ -f "$D/herdr-agent-registration" ]; then
+      printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":4242,"foreground_processes":[]}}}\n' \
+        "$(cat "$D/herdr-pane")"
+    else
+      printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":4242,"foreground_processes":[{"pid":4243,"name":"claude","argv":["claude"],"cmdline":"claude"}]}}}\n' \
+        "$(cat "$D/herdr-pane")"
+    fi
     exit 0 ;;
   'pane send-text')
     # Mirrors the tmux fake's `becomes`: delivering the launch brief is what
@@ -2004,7 +2012,9 @@ case "${1:-} ${2:-}" in
       ". '"*"'") staged=${payload#". '"}; staged=${staged%"'"}; [ ! -f "$staged" ] || payload=$(cat "$staged") ;;
     esac
     case "$payload" in
-      *'encode launch-brief'* | *'Firstmate operational input waiting: read'*) : > "$D/herdr-agent-live" ;;
+      *'encode launch-brief'* | *'Firstmate operational input waiting: read'*)
+        printf '%s\n' "$payload" > "$D/launched-command"
+        : > "$D/herdr-agent-live" ;;
     esac
     exit 0 ;;
   'workspace list')
@@ -2032,6 +2042,19 @@ esac
 exit 0
 SH
   chmod +x "$fb/herdr"
+  cat > "$fb/ps" <<'SH'
+#!/usr/bin/env bash
+if [ -f "$FM_FAKE_DIR/herdr-agent-registration" ]; then
+  case "$*" in
+    '-axo pid=,ppid=,comm=') printf '4242 1 bash\n' ;;
+    '-p 4242 -o args=') printf 'bash\n' ;;
+    *) exec /bin/ps "$@" ;;
+  esac
+else
+  exec /bin/ps "$@"
+fi
+SH
+  chmod +x "$fb/ps"
 }
 
 # add_herdr_ship_task <case-dir> <id> [session] [surviving-pane]: a ship task
@@ -2090,6 +2113,35 @@ herdr_case_or_skip() {  # <name> <id> [session] [surviving-pane]
   add_herdr_ship_task "$HERDR_CASE_DIR" "$2" "${3:-fmlab}" "${4:-%7}"
   make_herdr_stub "$HERDR_CASE_DIR"
   return 0
+}
+
+test_herdr_relaunch_resumes_only_the_registered_pi_session() {
+  local dir out rc=0 command registered
+  for registered in pi claude; do
+    herdr_case_or_skip "resume-$registered" "resume-$registered" || {
+      echo "skip - herdr relaunch needs jq (the herdr adapter parses JSON with it)"
+      return 0
+    }
+    dir=$HERDR_CASE_DIR
+    rm -f "$dir/fake/herdr-stopped"
+    sed -i 's/^harness=claude$/harness=pi/' "$dir/home/state/resume-$registered.meta"
+    # Keep the pane's status authority registered to an existing Pi session,
+    # while process-info proves that its previous agent has exited.
+    printf '{"result":{"agent":{"agent":"%s","agent_status":"idle","agent_session":{"kind":"path","value":"/tmp/pi-bound-session.jsonl"}}}}\n' \
+      "$registered" > "$dir/fake/herdr-agent-registration"
+    out=$(run_spawn "$dir" "resume-$registered" --relaunch --harness pi) || rc=$?
+    expect_code 0 "$rc" "Herdr Pi relaunch should complete ($registered registration)"$'\n'"$out"
+    command=$(cat "$dir/fake/launched-command")
+    if [ "$registered" = pi ]; then
+      assert_contains "$command" "--session '/tmp/pi-bound-session.jsonl'" \
+        "the replacement Pi must resume the session that owns Herdr status authority"
+    else
+      assert_not_contains "$command" "--session" \
+        "a Pi replacement must not resume a foreign adapter's conversation"
+    fi
+    rc=0
+  done
+  pass "fm-spawn --relaunch: resumes the bound Pi session only for a Pi registration"
 }
 
 test_herdr_reclaim_adopts_a_pane_that_outlived_its_server() {
@@ -2395,6 +2447,7 @@ test_tmux_refuses_a_window_missing_from_its_session
 test_tmux_refuses_a_session_that_cannot_be_found
 test_tmux_refuses_when_the_server_is_gone
 test_reclaim_refuses_an_unreadable_endpoint
+test_herdr_relaunch_resumes_only_the_registered_pi_session
 test_herdr_reclaim_adopts_a_pane_that_outlived_its_server
 test_herdr_exit_reports_already_stopped_when_the_pane_outlived_its_server
 test_herdr_rebind_stays_in_the_recorded_session
