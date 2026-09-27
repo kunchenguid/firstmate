@@ -37,8 +37,11 @@ def known($input; $saved):
 # field - a first observation, or one stored before review requests were
 # recorded - the current value is the baseline, never inferred movement.
 # The observation time keeps a repeated transition from reusing a token.
+# Settlement is not movement: a merged or closed observation has no separate
+# wake, so a head, draft, or reviewer signal there would be a follow-up after
+# no action remains.
 def movement($prev; $o; $url; $now):
-  if ($prev.head | sha) and ($o.head | sha) then
+  if ($prev.head | sha) and ($o.head | sha) and $o.state == "open" then
     (if $prev.head != $o.head then
        [{token:("head:" + $o.head + ":" + $now),type:"head",source:$url,head:$o.head,
          body:("head moved from " + $prev.head + " to " + $o.head)}] else [] end)
