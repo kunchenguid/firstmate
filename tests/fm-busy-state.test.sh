@@ -452,7 +452,7 @@ for harness, version in [('codex', '0.156.1'), ('traex', '0.207.1')]:
             'source':'cli','thread_source':'user','originator':harness+'-tui','cli_version':version}},
         {'type':'event_msg','payload':{'type':'task_started','turn_id':'turn-1','root_turn_id':'turn-1'}},
         {'type':'event_msg','payload':{'type':'item_completed','thread_id':'session-1','turn_id':'turn-1',
-            'item':{'type':'UserMessage','content':[{'type':'text','text':'brief\nFIRSTMATE_BUSY_GENERATION='+gen}]}}},
+            'item':{'type':'UserMessage','id':'initial-user','content':[{'type':'text','text':'brief\nFIRSTMATE_BUSY_GENERATION='+gen}]}}},
     ]
     complete = {'type':'event_msg','payload':{'type':'task_complete','turn_id':'turn-1','error':None}}
     def write(rows):
@@ -471,6 +471,116 @@ for harness, version in [('codex', '0.156.1'), ('traex', '0.207.1')]:
         actual = run('python3', reader, 'read', state, 'worker', harness, 'herdr', 'lab:w1:p1')
         assert actual == verdict+' '+harness+'-transcript', (harness,label,actual)
         print('ok - '+harness+' '+label)
+    def text_fence(text):
+        script = '''source "$1/bin/fm-backend.sh"
+fm_backend_source() { :; }
+fm_backend_herdr_send_text_submit() { printf empty; }
+fm_backend_send_text_submit herdr lab:w1:p1 "$2" 1 .01 .01
+'''
+        return subprocess.run(['bash', '-c', script, '_', str(root), text],
+            env=dict(os.environ, FM_HOME=str(home)), capture_output=True, text=True)
+    def user(text, turn='turn-1', thread='session-1'):
+        return {'type': 'event_msg', 'payload': {'type': 'item_completed',
+            'thread_id': thread, 'turn_id': turn,
+            'item': {'type': 'UserMessage', 'id': 'user-' + str(len(log.read_text().splitlines())), 'content': [{'type': 'text', 'text': text}]}}}
+    reset(); expect('busy', 'bind before in-turn steering')
+    assert text_fence('steer one').returncode == 0
+    assert text_fence('steer two').returncode == 0
+    append(user('steer one')); append(user('steer two'))
+    expect('busy', 'multiple consumed inputs keep the same working root turn')
+    append(complete); expect('idle', 'in-turn receipts settle without artificial root starts')
+    reset(); expect('busy', 'bind before unconsumed input')
+    assert text_fence('wanted').returncode == 0
+    append(user('unrelated')); expect('busy', 'working turn is not input-consumption proof')
+    append(complete); expect('unknown', 'unrelated user message cannot settle pending input')
+    reset(); append(complete); expect('idle', 'bind before root-turn text input')
+    assert text_fence('new root').returncode == 0
+    append({'type':'event_msg','payload':{'type':'task_started','turn_id':'turn-2','root_turn_id':'turn-2'}})
+    append(user('new root', 'turn-2')); expect('busy', 'matching root-turn input receipt')
+    append({'type':'event_msg','payload':{'type':'task_complete','turn_id':'turn-2','error':{'message':'simulated failure'}}})
+    expect('idle', 'consumed input can settle with API failure')
+    reset(); expect('busy', 'bind before identical inputs')
+    assert text_fence('same').returncode == 0
+    assert text_fence('same').returncode == 0
+    append(user('same')); expect('busy', 'one receipt cannot consume two identical sends')
+    append(complete); expect('unknown', 'second identical input remains unconsumed')
+    reset(); expect('busy', 'bind before partial read retry')
+    assert text_fence('late receipt').returncode == 0
+    row = json.dumps(dict(user('late receipt'), ordinal=3)) + '\n'
+    with log.open('a') as f: f.write(row[:20])
+    expect('unknown', 'partial consumption record remains uncertain')
+    with log.open('a') as f: f.write(row[20:])
+    expect('busy', 'complete matching record resolves transient read')
+    append(complete); expect('idle', 'retry preserves exact consumption attribution')
+    reset(); expect('busy', 'bind before failed pre-input read')
+    row = json.dumps({'type':'response_item','ordinal':3,'payload':{}}) + '\n'
+    with log.open('a') as f: f.write(row[:20])
+    refused = text_fence('never sent')
+    assert refused.returncode != 0 and 'partial-record' in refused.stderr, refused
+    with log.open('a') as f: f.write(row[20:])
+    append(complete); expect('idle', 'refused transport creates no phantom input')
+    assert text_fence('retry input').returncode == 0
+    append({'type':'event_msg','payload':{'type':'task_started','turn_id':'turn-2','root_turn_id':'turn-2'}})
+    append(user('retry input', 'turn-2'))
+    append({'type':'event_msg','payload':{'type':'turn_aborted','turn_id':'turn-2','reason':'interrupted'}})
+    expect('idle', 'retried exact input and real cancellation settle')
+    reset(); expect('busy', 'bind before wrong-thread receipt')
+    assert text_fence('steer').returncode == 0
+    append(user('steer', thread='other')); expect('unknown', 'wrong-thread consumption refused')
+    reset(); expect('busy', 'bind before wrong-turn receipt')
+    assert text_fence('steer').returncode == 0
+    append(user('steer', turn='other')); expect('unknown', 'wrong-turn consumption refused')
+    reset(); append(complete); expect('idle', 'bind before legacy uncertainty')
+    legacy = json.loads((state/'worker.busy-session').read_text()); legacy['unaccounted_input'] = True
+    (state/'worker.busy-session').write_text(json.dumps(legacy))
+    append({'type':'event_msg','payload':{'type':'task_started','turn_id':'turn-2','root_turn_id':'turn-2'}})
+    append(user('arbitrary', 'turn-2'))
+    append({'type':'event_msg','payload':{'type':'task_complete','turn_id':'turn-2'}})
+    expect('unknown', 'legacy unaccounted input never healed by readable unrelated records')
+    reset(); expect('busy', 'bind before compaction')
+    assert text_fence('after compaction').returncode == 0
+    append({'type':'compacted','payload':{'message':'summary'}})
+    append(user('after compaction')); append(complete)
+    expect('idle', 'append-only compaction preserves receipts and lifecycle')
+    reset(); expect('busy', 'bind before duplicate ordinal')
+    assert text_fence('duplicate').returncode == 0
+    append(user('duplicate'))
+    with log.open('a') as f: f.write(json.dumps(dict(user('duplicate'), ordinal=3))+'\n')
+    expect('unknown', 'replayed record ordinal cannot become another consumption')
+    reset(); append(complete); expect('idle', 'bind before malformed neighbor')
+    (state/'neighbor.busy-session').write_text('invalid')
+    (state/'neighbor.meta').write_text('backend=herdr\nwindow=lab:other:p2\nharness=codex\nharness=traex\n')
+    assert text_fence('neighbor unaffected').returncode == 0
+    append({'type':'event_msg','payload':{'type':'task_started','turn_id':'turn-2','root_turn_id':'turn-2'}})
+    append(user('neighbor unaffected', 'turn-2'))
+    append({'type':'event_msg','payload':{'type':'task_complete','turn_id':'turn-2'}})
+    expect('idle', 'unrelated damaged task cannot affect exact-target input receipts')
+    reset(); expect('busy', 'bind before malformed input accounting')
+    damaged = json.loads((state/'worker.busy-session').read_text())
+    damaged['pending_inputs'] = [{'after': 2, 'digest': 'not a hash'}]
+    (state/'worker.busy-session').write_text(json.dumps(damaged))
+    expect('unknown', 'malformed receipt accounting is never normalized')
+    assert json.loads((state/'worker.busy-session').read_text())['last_refusal'] == {'stage':'read','reason':'malformed-record'}
+    reset(); expect('busy', 'bind before diagnostic redaction')
+    with log.open('a') as f: f.write('do-not-log-this-secret\n')
+    refused = text_fence('do-not-log-input')
+    assert refused.returncode != 0 and 'malformed-record' in refused.stderr, refused
+    assert 'do-not-log' not in refused.stderr
+    assert json.loads((state/'worker.busy-session').read_text())['last_refusal'] == {'stage':'fence','reason':'malformed-record'}
+    if os.geteuid() != 0:
+        reset(); append(complete); expect('idle', 'bind before unreadable transient')
+        log.chmod(0)
+        try:
+            refused = text_fence('not delivered')
+            assert refused.returncode != 0 and 'transient-read' in refused.stderr, refused
+        finally:
+            log.chmod(0o600)
+        expect('idle', 'restored readability after refused send does not invent consumption')
+    reset(); expect('busy', 'bind before replayed typed user item')
+    assert text_fence('same').returncode == 0
+    assert text_fence('same').returncode == 0
+    replay = user('same'); append(replay); append(replay); append(complete)
+    expect('unknown', 'duplicate vendor user identity cannot account for two inputs')
     reset(); expect('busy','active turn')
     append({'type':'response_item','payload':{'type':'function_call_output','call_id':'tool-1','output':'exit code 7'}})
     expect('busy','tool failure does not end the turn')
@@ -487,6 +597,7 @@ fm_backend_send_text_submit herdr lab:w1:p1 next 1 .01 .01
     expect('unknown','submit-before-log and transport failure cannot reuse old idle')
     append({'type':'event_msg','payload':{'type':'task_started','turn_id':'turn-2','root_turn_id':'turn-2'}})
     expect('busy','next matching turn clears submission fence')
+    append(user('next', 'turn-2'))
     append({'type':'event_msg','payload':{'type':'task_complete','turn_id':'turn-2','error':{'message':'simulated 401'}}})
     expect('idle','API failure terminal settles turn')
     reset(); append({'type':'event_msg','payload':{'type':'turn_aborted','turn_id':'turn-1','reason':'interrupted'}})
@@ -524,7 +635,9 @@ fm_backend_send_text_submit herdr lab:w1:p1 next 1 .01 .01
     append({'type':'event_msg','payload':{'type':'task_complete','turn_id':'turn-2'}})
     expect('unknown','two pending submissions need two observed starts')
     reset();append(complete);expect('idle','bind before unreadable submission');log.unlink()
-    run('python3',reader,'fence-target',state,'herdr','lab:w1:p1');write(records+[complete])
+    denied=subprocess.run(['python3',str(reader),'fence-target',str(state),'herdr','lab:w1:p1'],capture_output=True,text=True)
+    assert denied.returncode != 0
+    write(records+[complete])
     expect('unknown','lost watermark cannot later resurrect old idle')
     reset()
     # The classifier's liveness input is backed by a real short-lived process.

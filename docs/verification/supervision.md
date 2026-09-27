@@ -143,6 +143,8 @@ Push-source passes polled `state/<id>.busy-state`; pull-source passes used the p
 | Codex | codex-cli 0.156.1 | Bound structured transcript | 2026-09-25 default interactive TUI: busy during a turn and foreground tool, idle after completion, API failure and interrupt, dead after process or endpoint exit. Local simulated provider; see the guard below. |
 | TraeX | 0.207.1 internal | Bound structured transcript | Same guard and lifecycle coverage; native Herdr unknown did not mask the transcript. |
 
+The 2026-09-27 Codex 0.157.1 and TraeX 0.207.1 in-turn steering refresh, including the before/after consumption evidence and current guard, is recorded in [runtime backend verification](runtime-backends.md#in-turn-transcript-input-consumption).
+
 The earlier Codex 0.145.0 probe on 2026-07-28 tried two push paths, both refused:
 
 ```sh

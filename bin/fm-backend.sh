@@ -390,7 +390,7 @@ fm_backend_capture() {  # <backend> <target> <lines> [expected-label]
 
 # Fence the two rollout readers before input reaches a worker. A failed send
 # leaves unknown until fresh lifecycle evidence; it never restores old idle.
-fm_backend_fence_transcript_input() {  # <backend> <target> [check-target]
+fm_backend_fence_transcript_input() {  # <backend> <target> [check-target|fence-text] [text]
   local candidate state=${FM_STATE_OVERRIDE:-$FM_HOME/state} managed=0
   [ -d "$state" ] || return 0
   for candidate in "$state/"*.busy-session; do
@@ -407,7 +407,11 @@ fm_backend_fence_transcript_input() {  # <backend> <target> [check-target]
     done
   fi
   [ "$managed" = 1 ] || return 0
-  python3 "$FM_BACKEND_LIB_DIR/fm-busy-transcript.py" "${3:-fence-target}" "$state" "$1" "$2"
+  if [ "${3:-}" = fence-text ]; then
+    printf '%s' "$4" | python3 "$FM_BACKEND_LIB_DIR/fm-busy-transcript.py" fence-text "$state" "$1" "$2"
+  else
+    python3 "$FM_BACKEND_LIB_DIR/fm-busy-transcript.py" "${3:-fence-target}" "$state" "$1" "$2"
+  fi
 }
 
 # fm_backend_send_key: one backend-supported named special key.
@@ -432,7 +436,7 @@ fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sl
   local backend=$1
   shift
   fm_backend_source "$backend" || return 1
-  fm_backend_fence_transcript_input "$backend" "$1" || return 1
+  fm_backend_fence_transcript_input "$backend" "$1" fence-text "$2" || return 1
   case "$backend" in
     herdr) fm_backend_herdr_send_text_submit "$@" ;;
     *) echo "error: no send-text implementation for backend '$backend'" >&2; return 1 ;;
