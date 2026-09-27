@@ -2755,6 +2755,61 @@ test_no_run_herdr_idle_agent_status_and_idle_record_stays_idle() {
   pass "an idle record with idle agent_status stays not-busy (no regression for a human-blocked agent)"
 }
 
+# A provider-limit crash can leave the pane's shell, a stale Pi lifecycle
+# record, and the last `working:` event together. The shell is readable, so
+# the old fallback accepted the stale record/log as current and the watcher had
+# no dead-agent evidence to surface. A live agent remains eligible for the
+# ordinary status-log fallback; only the shell-only endpoint is overridden.
+test_no_run_agent_free_pi_does_not_use_stale_state() {
+  reset_fakes
+  local d out gen
+  d=$(new_case agent-free-pi)
+  make_repo_on_branch "$d/wt" fm/feat-agent-free-pi
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-agent-free-pi.meta" \
+    "window=fm:fm-agent-free-pi" "worktree=$d/wt" "kind=ship" \
+    "backend=tmux" "harness=pi"
+  printf 'working: started before provider quota ended the harness\n' > \
+    "$d/state/feat-agent-free-pi.status"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-agent-free-pi)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-agent-free-pi idle --gen "$gen" \
+    --source pi-ext --event stop
+  cat > "$d/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  list-windows) printf 'fm-agent-free-pi\n' ;;
+  display-message)
+    format=
+    for arg in "$@"; do format=$arg; done
+    case "$format" in
+      '#{pane_id}') printf '%%1\n' ;;
+      '#{pane_current_command}') printf 'zsh\n' ;;
+      '#{pane_tty}') printf '\n' ;;
+      *) printf '%%1\n' ;;
+    esac
+    ;;
+  capture-pane) printf '403 You have reached your 5-hour usage limit\n> \n' ;;
+esac
+SH
+  chmod +x "$d/fakebin/tmux"
+  out=$(run_crew_state "$d" feat-agent-free-pi)
+  assert_contains "$out" "state: unknown" \
+    "an agent-free Pi pane must not remain working"
+  assert_contains "$out" "source: none" \
+    "agent-free evidence must bypass stale status-log fallback"
+  assert_contains "$out" "agent gone, pane shell remains" \
+    "the reconciliation detail must name the dead harness"
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-agent-free-pi busy --gen "$gen" \
+    --source pi-ext --event user-prompt-submit
+  out=$(run_crew_state "$d" feat-agent-free-pi)
+  assert_contains "$out" "state: unknown" \
+    "a stale Pi busy record must not survive the harness exit"
+  assert_contains "$out" "source: none" \
+    "dead-agent evidence must outrank stale pane busy state"
+  pass "agent-free Pi quota pane does not trust stale busy or status evidence"
+}
+
 # (g) no run + idle pane -> the status-log verb, as-is
 test_no_run_idle_pane_uses_log() {
   reset_fakes
@@ -5588,6 +5643,7 @@ test_no_run_herdr_alive_with_failed_read_stays_live
 test_no_run_herdr_husk_dead_still_reads_gone
 test_no_run_herdr_idle_agent_status_outranked_by_record
 test_no_run_herdr_idle_agent_status_and_idle_record_stays_idle
+test_no_run_agent_free_pi_does_not_use_stale_state
 test_no_run_idle_pane_uses_log
 test_no_run_idle_pane_uses_keyed_log
 test_no_run_idle_pane_paused
