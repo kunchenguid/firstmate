@@ -1033,6 +1033,29 @@ No reasoning-effort axis was found; `gemini --help` on 0.58.0 exposes no effort,
 
 ## Herdr
 
+### Secondmate restart after pane closure
+
+Verified 2026-09-26 on macOS with Herdr 0.9.1, protocol 22, and Pi 0.85.1.
+The token-free live guard uses a named lab session and a throwaway home, launches a real Pi process, and supplies the empty-work persist answer through a local input extension.
+It exercises `fm-secondmate-restart.sh`, Pi exit, Herdr pane closure, `fm-control.sh` replacement confirmation, and a real `fm-watch.sh` tick while the replacement holds its spawn guard.
+No authenticated model response, login flow, or real fleet restart is claimed by this guard.
+
+```sh
+bin/fm-test-run.sh tests/fm-secondmate-restart-herdr-e2e.test.sh
+```
+
+```text
+restarted: labmate (pi)
+summary: 1 of 1 restarted, 0 nudged, 0 unreached
+Pi version: 0.85.1
+ok - real Pi/Herdr restart replaces a closed pane; watcher defers without consuming a recovery attempt
+```
+
+The guard requires a new pane id, `exit_result=endpoint-gone`, an actual replacement agent registration, no automatic-recovery attempt, release of the restart lock, and the lab helper's unchanged-default-session tripwire at teardown.
+The portable counterparts are `tests/fm-control-relaunch.test.sh` for both an already-closed pane and closure during the public restart, and `tests/fm-secondmate-restart.test.sh` for the watcher/restart overlap.
+
+### Compatibility and core probes
+
 The compatibility floor is protocol 14.
 The whole real-Herdr lane's latest active verification uses both Herdr 0.7.4 protocol 16 and Herdr 0.8.0 protocol 19 on macOS aarch64, while focused Herdr 0.7.5 protocol 17, earlier protocol-16, protocol-14, and 0.7.3 evidence is retained where it defines current behavior or fallbacks.
 Protocol 17 keeps every protocol-16 feature gate satisfied; the event and workspace-move floors remain 16.
