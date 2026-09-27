@@ -858,6 +858,16 @@ assert_contains "$(cat "$TMP_ROOT/firstmate-other-home.err")" "another home reta
   "cross-home Lavish refusal did not identify durable ownership"
 assert_absent "$HFREPLY_OTHER/state/procevent/$freply_id.source" \
   "another home published a registration over firstmate's pending Lavish round"
+new_task_endpoint "$HFREPLY_OTHER" cross-home-worker
+if PATH="$FREPLY_BIN:$PATH" FM_HOME="$HFREPLY_OTHER" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$FREPLY_ART" --for cross-home-worker \
+  > "$TMP_ROOT/firstmate-other-task.out" 2> "$TMP_ROOT/firstmate-other-task.err"; then
+  fail "another home's worker armed firstmate's pending Lavish session"
+fi
+assert_contains "$(cat "$TMP_ROOT/firstmate-other-task.err")" "another home retains its ownership" \
+  "cross-home worker refusal did not identify durable ownership"
+assert_absent "$HFREPLY_OTHER/state/procevent/$freply_id.source" \
+  "another home's worker published over firstmate's pending Lavish round"
 if pe "$HFREPLY" register lavish "$freply_id" -- /bin/true \
   >"$TMP_ROOT/firstmate-replace.out" 2>"$TMP_ROOT/firstmate-replace.err"; then
   fail "generic registration replaced firstmate's round-aware Lavish source"
@@ -1212,8 +1222,10 @@ for _ in $(seq 1 100); do
   [ ! -e "$HFNOREPLY/state/procevent/$noreply_id.source" ] && break
   sleep 0.02
 done
-assert_absent "$HFNOREPLY/state/procevent/$noreply_id.source" \
-  "ended firstmate no-reply session stayed armed"
+assert_present "$HFNOREPLY/state/procevent/$noreply_id.source" \
+  "terminal capture discarded an earlier pending Lavish round's ownership"
+assert_present "$FM_PROCEVENT_CLAIM_ROOT/$noreply_id.claim" \
+  "terminal capture released machine-wide ownership of an earlier pending round"
 pass "firstmate no-reply re-arm acknowledges only the oldest capture"
 
 # --- end-user-aligned regression: an empty board close is not news ------------
