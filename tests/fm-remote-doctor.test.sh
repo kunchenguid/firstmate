@@ -219,9 +219,13 @@ SH
 # without ~/.local/bin, which is what a plain-SSH invocation actually inherits.
 doctor() {
   set +e
+  # Every case below pins the dedicated fm-remote session the assertions were
+  # written for; without this the doctor takes its shared-default session,
+  # where the launch-agent and herdr-server checks report skip by design.
   DOCTOR_OUT=$(
     HOME="$CASE_HOME" \
     FM_HOME="$CASE_PROJECT_HOME" \
+    FM_REMOTE_HERDR_SESSION=fm-remote \
     PATH="${CASE_PATH:-$CASE_HOME/.local/bin:$CASE_BIN:$BASE_PATH}" \
     FM_FAKE_STATE="$CASE_STATE" \
     FM_FAKE_LAUNCHCTL_LOG="$CASE_LAUNCHCTL_LOG" \

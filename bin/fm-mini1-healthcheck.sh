@@ -25,10 +25,11 @@ SCRIPT_DIR=${SCRIPT_SELF%/*}
 SCRIPT_DIR=$(CDPATH='' cd -- "$SCRIPT_DIR" && pwd -P)
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd -P)}"
 
-MODE=check
 case "${1:-}" in
   '') ;;
-  --fix) MODE=fix; shift ;;
+  # --fix is accepted for compatibility; this check reports actionable `action:`
+  # lines rather than mutating the machine, so the flag selects no behavior.
+  --fix) shift ;;
   *) { printf 'Usage: %s [--fix]\n' "$0" >&2; exit 2; }
 esac
 [ "$#" -eq 0 ] || { printf 'Usage: %s [--fix]\n' "$0" >&2; exit 2; }
