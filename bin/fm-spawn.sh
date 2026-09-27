@@ -3821,6 +3821,7 @@ spawn_enter_recorded_worktree() {
 spawn_assert_agent_worktree() {
   local expected seen i
   [ "$KIND" = secondmate ] && return 0
+  [ "$BACKEND" = orca ] && return 0
   expected=$(real_path_or_raw "$WT")
   for i in $(seq 1 20); do
     seen=$(spawn_current_path "$WT_TARGET" || true)
@@ -4127,7 +4128,9 @@ agy_spawn_fail() {  # <detail>
   rovo_endpoint_cleanup
 }
 
-if [ "$RELAUNCH" -eq 1 ]; then
+if [ "$RELAUNCH" -eq 1 ] && [ "$BACKEND" = orca ]; then
+  [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
+elif [ "$RELAUNCH" -eq 1 ]; then
   # No worktree is acquired: the recorded one is reused as-is. What must be
   # proven instead is that the adopted endpoint's shell is actually sitting in
   # that worktree, so the replacement agent starts where the work is rather
