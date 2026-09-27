@@ -484,6 +484,64 @@ TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_equals "$(cat "$BRIEF")" "$(jq -r .state.task.brief "$LOG/body")" "a brief with neither heading is sent whole"
 pass "only the brief's task sections and scout tag reach the model, with a whole-brief fallback"
 
+# --- one brief snapshot feeds both section extraction and the request --------
+# The first cp or awk that reads the brief rewrites it afterwards, so any second
+# read of the live brief sees different text than the first.
+REAL_CP=$(command -v cp)
+REAL_AWK=$(command -v awk)
+cat > "$FAKEBIN/mutating-reader" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$(basename "$0")" in
+  cp) real=$REAL_CP ;;
+  awk) real=$REAL_AWK ;;
+esac
+"$real" "$@"
+rc=$?
+if [ -n "${FAKE_MUTATE_BRIEF:-}" ] && [ ! -e "$FAKE_MUTATE_BRIEF.mutated" ]; then
+  for arg in "$@"; do
+    [ "$arg" = "$FAKE_MUTATE_BRIEF" ] || continue
+    : > "$FAKE_MUTATE_BRIEF.mutated"
+    printf '%s\n' '# Task' "## Captain's intent" 'Mutated intent.' '## Firstmate spec' 'Mutated spec.' > "$FAKE_MUTATE_BRIEF"
+    break
+  done
+fi
+exit "$rc"
+SH
+chmod +x "$FAKEBIN/mutating-reader"
+ln -s mutating-reader "$FAKEBIN/cp"
+ln -s mutating-reader "$FAKEBIN/awk"
+
+SNAPSHOT_BRIEF="$TMP_ROOT/snapshot-brief.md"
+cat > "$SNAPSHOT_BRIEF" <<'MD'
+# Task
+## Captain's intent
+Original intent.
+
+## Firstmate spec
+Original spec.
+
+# Definition of done
+This is a SCOUT task: the deliverable is a written report, not a PR.
+MD
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+REAL_CP=$REAL_CP REAL_AWK=$REAL_AWK FAKE_MUTATE_BRIEF=$SNAPSHOT_BRIEF TYPESAFE_API_KEY=$KEY run code out err "$SNAPSHOT_BRIEF"
+expect_code 0 "$code" "a brief rewritten mid-resolve still resolves"
+assert_contains "$(cat "$SNAPSHOT_BRIEF")" 'Mutated intent.' "the live brief was rewritten after its first read"
+assert_equals $'Brief kind: scout (report only)\n\n## Captain\'s intent\nOriginal intent.\n\n## Firstmate spec\nOriginal spec.' \
+  "$(jq -r .state.task.brief "$LOG/body")" "sections and scout tag all come from the first-read snapshot"
+
+WHOLE_SNAPSHOT_BRIEF="$TMP_ROOT/whole-snapshot-brief.md"
+printf '%s\n' '# Task' 'No recognized task subsections.' > "$WHOLE_SNAPSHOT_BRIEF"
+reset_log
+REAL_CP=$REAL_CP REAL_AWK=$REAL_AWK FAKE_MUTATE_BRIEF=$WHOLE_SNAPSHOT_BRIEF TYPESAFE_API_KEY=$KEY run code out err "$WHOLE_SNAPSHOT_BRIEF"
+expect_code 0 "$code" "a whole brief rewritten mid-resolve still resolves"
+assert_contains "$(cat "$WHOLE_SNAPSHOT_BRIEF")" 'Mutated intent.' "the live whole brief was rewritten after its first read"
+assert_equals $'# Task\nNo recognized task subsections.' "$(jq -r .state.task.brief "$LOG/body")" "the whole-brief fallback sends the same snapshot it found no sections in"
+rm -f "$FAKEBIN/cp" "$FAKEBIN/awk" "$FAKEBIN/mutating-reader"
+pass "section extraction and the resolver request read one brief snapshot"
+
 # --- escalate: captain approval ------------------------------------------------
 reset_log
 write_response "$RESPONSE" rule_3 0.95
