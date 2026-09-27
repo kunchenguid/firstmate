@@ -163,7 +163,7 @@ cmp -s "$TMP_ROOT/published-normalized.json" "$TMP_ROOT/fresh-normalized.json" \
 pass "watcher-carried status append publishes the real home summary"
 
 # A structured in-flight inventory above Linux MAX_ARG_STRLEN must remain
-# publishable through both fleet snapshot modes and the real home-summary writer.
+# publishable through every fleet snapshot mode and the real home-summary writer.
 mkdir -p "$LARGE_HOME/state" "$LARGE_HOME/data" "$LARGE_HOME/config" \
   "$LARGE_HOME/projects"
 printf '# Seeded Firstmate home\n' > "$LARGE_HOME/AGENTS.md"
@@ -189,6 +189,20 @@ jq -e '.schema == "fm-fleet-snapshot.v1"
   and (.main_inventory.orphan_in_flight | length) == 1200' \
   "$TMP_ROOT/large-snapshot.json" >/dev/null \
   || fail "large fleet snapshot did not preserve the orphan inventory"
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$LARGE_HOME" \
+  FM_SNAPSHOT_NOW="$NOW_ONE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_ONE" \
+  "$SNAPSHOT" --contribution-input > "$TMP_ROOT/large-contribution-input.json" \
+  2> "$TMP_ROOT/large-contribution-input.err" \
+  || fail "contribution-input mode failed for a large backlog: $(cat "$TMP_ROOT/large-contribution-input.err")"
+[ ! -s "$TMP_ROOT/large-contribution-input.err" ] \
+  || fail "contribution-input mode reported an error for a large backlog: $(cat "$TMP_ROOT/large-contribution-input.err")"
+jq -e --slurpfile snapshot "$TMP_ROOT/large-snapshot.json" '
+  (keys == ["backlog","tasks"])
+  and .tasks == []
+  and (.backlog.records | length) == 1200
+  and .backlog == $snapshot[0].backlog' \
+  "$TMP_ROOT/large-contribution-input.json" >/dev/null \
+  || fail "large contribution input did not carry the canonical backlog/tasks pair"
 PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$LARGE_HOME" \
   FM_SNAPSHOT_NOW="$NOW_ONE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_ONE" \
   "$SNAPSHOT" --secondmate-home-summary > "$TMP_ROOT/large-summary.json" \
