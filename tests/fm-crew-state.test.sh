@@ -96,7 +96,15 @@ case "${1:-}" in
       status)
         shift
         if [ "${1:-}" = --run ]; then
-          printf '%s\n' "${FM_FAKE_AXI_STATUS_RUN:-}"
+          run_id=${2:-}
+          run_output="${FM_FAKE_AXI_STATUS_RUN:-}"
+          if [ -n "$run_id" ]; then
+            run_var="FM_FAKE_AXI_STATUS_RUN_$run_id"
+            if [ -n "${!run_var+x}" ]; then
+              run_output=${!run_var}
+            fi
+          fi
+          printf '%s\n' "$run_output"
           exit "${FM_FAKE_AXI_STATUS_RUN_ERROR:-0}"
         else
           printf '%s\n' "${FM_FAKE_AXI_STATUS:-}"
@@ -352,10 +360,12 @@ reset_fakes() {
   FM_FAKE_GERRIT_READ_FAIL=0
   FM_FAKE_GERRIT_READ_LOG=
   unset FM_FAKE_PR_47_STATE FM_FAKE_PR_47_MERGED FM_FAKE_PR_48_STATE FM_FAKE_PR_48_MERGED
+  unset FM_FAKE_AXI_STATUS_RUN_01OLD FM_FAKE_AXI_STATUS_RUN_01NEW
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING FM_FAKE_TMUX_UNREADABLE
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_READ_FAIL FM_FAKE_HERDR_HUSK FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_HERDR_PROCESS FM_FAKE_HERDR_SHELL_PID FM_FAKE_CI_LOGS
   export FM_FAKE_DAEMON_DOWN FM_FAKE_DAEMON_TIMEOUT FM_FAKE_DAEMON_PROBE_LOG FM_FAKE_AXI_HOME
   export FM_FAKE_AXI_HOME_ERROR FM_FAKE_AXI_STATUS_RUN_ERROR FM_FAKE_AXI_STATUS_ERROR
+  export FM_FAKE_AXI_STATUS_RUN_01OLD FM_FAKE_AXI_STATUS_RUN_01NEW
   export FM_FAKE_PR_STATE FM_FAKE_PR_MERGED FM_FAKE_PR_READ_FAIL FM_FAKE_PR_READ_LOG FM_FAKE_PR_STATE_AXI
   export FM_FAKE_GLAB_STATE FM_FAKE_GLAB_READ_FAIL FM_FAKE_GLAB_READ_LOG
   export FM_FAKE_GERRIT_STATUS FM_FAKE_GERRIT_CHANGE FM_FAKE_GERRIT_URL_JSON
@@ -5323,6 +5333,40 @@ test_competing_live_runs_report_unknown_with_both_ids() {
   pass 'competing live runs report unknown with both run ids'
 }
 
+# The AXI overview can surface a historical row before the active current run
+# when an old run was updated by its stale PR being closed. The current branch
+# status identifies the active run, so crew-state must not trust the overview's
+# row order and report the stale PR state.
+test_current_active_run_beats_stale_overview_row() {
+  reset_fakes
+  local d old_head new_head out
+  d=$(new_case stale-overview-row)
+  make_repo_on_branch "$d/wt" fm/reused-branch
+  old_head=$(git -C "$d/wt" rev-parse HEAD)
+  new_head=$(make_rebased_head "$d/wt")
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/reused.meta" "window=fm:fm-reused" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: validating the current run\n' > "$d/state/reused.status"
+  FM_FAKE_AXI_HOME="count: 2 of 2 total
+runs[2]{id,branch,status,head,pr}:
+  \"01OLD\",fm/reused-branch,completed,$old_head,\"https://github.com/o/r/pull/1\"
+  \"01NEW\",fm/reused-branch,running,$new_head,\"\""
+  FM_FAKE_RUN_HEAD=$new_head
+  FM_FAKE_AXI_STATUS="$(run_running fm/reused-branch | sed 's/01RUN/01NEW/')
+branch_sync:
+  state: pipeline_owned"
+  FM_FAKE_AXI_STATUS_RUN_01OLD="$(FM_FAKE_RUN_HEAD=$old_head run_passed fm/reused-branch | sed 's/01RUN/01OLD/')"
+  FM_FAKE_AXI_STATUS_RUN_01NEW="$FM_FAKE_AXI_STATUS"
+  FM_FAKE_RUNS_LIST="  running fm/reused-branch ${new_head:0:7} 2026-09-28 12:00
+  completed fm/reused-branch ${old_head:0:7} 2026-09-28 11:00"
+  out=$(run_crew_state "$d" reused)
+  assert_contains "$out" 'state: working' 'the active current run remains authoritative'
+  assert_contains "$out" '01NEW' 'the active run identity is reported'
+  assert_not_contains "$out" 'PR closed' 'a stale closed PR is not reported for the active run'
+  unset FM_FAKE_AXI_STATUS_RUN_01OLD FM_FAKE_AXI_STATUS_RUN_01NEW
+  pass 'active current run beats a stale overview row'
+}
+
 test_newer_failed_run_is_not_hidden_by_older_live_run() {
   make_competing_runs_case newest-failed failed running
   local d=$TMP_ROOT/newest-failed out
@@ -5683,6 +5727,7 @@ test_coarse_live_row_keeps_the_original_supersede_note
 test_coarse_live_rebased_row_is_not_attributed
 test_terminal_rebased_run_is_not_attributed
 test_competing_live_runs_report_unknown_with_both_ids
+test_current_active_run_beats_stale_overview_row
 test_newer_failed_run_is_not_hidden_by_older_live_run
 test_unverifiable_run_selection_reports_unknown
 test_legacy_conflicting_run_records_report_unknown
