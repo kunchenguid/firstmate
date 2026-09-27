@@ -80,6 +80,9 @@ The same bytes in an argument, comment, assertion, documentation query, Python s
 Literal `sh`, `bash`, or `zsh` `-c` payloads and literal `eval` payloads are recursively classified.
 A literal nested payload that only runs a data-bearing command is allowed.
 A literal nested payload that executes a protected command is denied as `watcher-nested`, even when that inner protected call would be allowed at top level.
+A heredoc or literal here-string fed to a shell that reads its program from stdin is classified the same way.
+With `-s`, later operands set positional parameters rather than naming a script, so `bash -s sentinel <<< 'bin/fm-watch.sh'` is denied.
+An operand after `-s --` remains positional, while a protected watcher path in the first operand position is still denied.
 
 Dynamic payloads such as `bash -lc "$WATCHER_COMMAND"` cannot be proven statically and remain the post-arm guard's responsibility.
 If the submitted command first constructs a protected literal assignment and then feeds a dynamic value to a recognized shell or `eval` sink, the classifier denies conservatively as `watcher-nested`.

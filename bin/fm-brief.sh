@@ -14,7 +14,7 @@
 # charters still use a single `{TASK}` charter fill. Firstmate may adjust other
 # sections when the task genuinely deviates (e.g. working an existing external
 # PR instead of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--forge <none|gerrit> [--shape squash]] [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--branch-prefix <prefix>] [--forge <none|gerrit> [--shape squash]] [--herdr-lab]
 #        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
@@ -47,6 +47,18 @@
 #                the configured merge authority approves, firstmate merges to local main
 # no-mistakes-prod-only is a registry policy, not a task mode; resolve it to one of
 # the three concrete modes at intake before calling this script.
+# --branch-prefix <prefix> optionally overrides the ship branch's "fm/" prefix, so
+# the resolved branch is "<prefix><task-id>" instead of the default "fm/<task-id>".
+# Pass an empty prefix ("--branch-prefix ''") for a bare "<task-id>" branch, or a
+# conventional prefix such as "fix/" - useful for a third-party project that does
+# not use this tooling and should not see an "fm/"-branded branch or PR. Defaults
+# to "fm/" when omitted, so every existing installation's branch names are
+# unchanged. Like --mode, this script never reads data/projects.md for it: the
+# registry's optional "branch=<prefix>" annotation (bin/fm-project-mode.sh's
+# header owns that format and its --branch-prefix query) is the captain's
+# standing per-project preference, and firstmate resolves it per task at intake
+# and passes the explicit flag. Refused on --scout and --secondmate: a scout
+# makes no branch and a charter is not a delivery contract.
 # --forge names the project's forge, defaults to none, and is orthogonal to --mode
 # exactly as the registry's `forge=` token is. It is the captain's confirmed
 # registry binding, read from data/projects.md at intake and passed here; this
@@ -66,6 +78,10 @@
 # whose explicit --mode or registered forge disagrees, so an adjusted brief and the
 # recorded task metadata cannot drift apart.
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
+# Both crewmate scaffolds carry one shared rule against administering the
+# infrastructure every lane shares - the no-mistakes daemon and the worktree pool
+# their own slot came from - so ship and scout cannot drift apart. A secondmate
+# charter omits it: that home allocates and returns slots for its own crewmates.
 # --mode, --forge, and --shape are refused on scout and secondmate scaffolds: a
 # scout's deliverable is a report rather than a merge, and a charter is not a
 # delivery contract.
@@ -73,8 +89,9 @@
 # a spawn-time and firstmate-side input only (AGENTS.md section 7).
 # Every scaffold's status protocol distinguishes the configured
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
-# "blocked:": pause for a known external wait expected to clear on its own,
-# blocked when firstmate must act.
+# "blocked:": pause for a known wait expected to clear on its own, including
+# the worker's own background work, pipeline or long command; blocked when
+# firstmate must act. The first-sight alert remains; repeats use the long cadence.
 # Emission-time syntax and legacy unknown-time handling are owned by
 # bin/fm-classify-lib.sh; each scaffold renders the stamp as a literal <epoch>
 # placeholder the worker replaces with a numeric Unix time as it appends, so a
@@ -82,11 +99,12 @@
 # Every scaffold also carries the steering-inbox receive-and-ack section:
 # process state/<id>.inbox/*.msg in order and acknowledge each by moving it to
 # handled/ (record, doorbell, and ladder owned by bin/fm-task-inbox-lib.sh).
-# Ship tasks include a project-memory section so durable project-intrinsic
-# learnings can be committed to AGENTS.md through the project's delivery path;
-# it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
-# over copied detail) and defers self-governance recognition and insertion to
-# fm-ensure-agents-md.sh's contract.
+# Ship tasks include a project-memory section bounding crewmate edits to a
+# project's AGENTS.md/CLAUDE.md: only corrections of factually wrong
+# information, including wrong information the task itself introduced - never
+# additions of missing knowledge. A correction edits only the wrong text and
+# never runs fm-ensure-agents-md.sh, whose inserted sections and created
+# pointer file are themselves additions.
 # Scaffolds carry no role scope: fm-spawn.sh supplies fm_brief_worker_role from
 # fm-dod-lib.sh to every ship/scout launch brief, so this file never becomes a
 # second owner of a contract that must stay current across relaunches.
@@ -125,7 +143,16 @@ esac
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
-CREWMATE_PAUSE_WAIT_EXAMPLES='an upstream release, a rate-limit reset, a scheduled window, or your own validation round, which you declare once just before its blocking hold and then wait out inside that one command'
+IFS= read -r -d '' CREWMATE_PAUSE_INSTRUCTIONS <<EOF || true
+   Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - when deliberately waiting for work or an external condition expected to clear on its own, including your own validation round.
+   Before ending your turn with your own background shell or monitor still running, or before waiting on your own pipeline run or a long foreground command, append \`$PAUSED_VERB [at=<epoch>]: {job and completion condition}\` to the status file.
+   Name what you are waiting for and what will let you resume; do not repeat the declaration on every poll.
+   Do not declare active implementation or reasoning as a wait.
+   Firstmate may still raise one first-sight alert; the declared wait then uses the existing long recheck cadence instead of repeated possible-wedge alarms.
+   When you know when the wait clears, include \`until <YYYY-MM-DDTHH:MMZ>\` (UTC) for a recheck at that time.
+   Follow the resolution rule below when the wait clears, then resume the task.
+   Use \`blocked:\` when you are stuck and need help.
+EOF
 
 resolve_directory_input() {
   local name=$1 path=$2 resolved
@@ -158,6 +185,8 @@ HERDR_LAB=0
 NO_PROJECTS=0
 MODE=
 MODE_SET=0
+BRANCH_PREFIX=fm/
+BRANCH_PREFIX_SET=0
 FORGE=none
 FORGE_SET=0
 SHAPE=
@@ -171,6 +200,7 @@ for a in "$@"; do
     esac
     case "$want_value" in
       mode) MODE=$a; MODE_SET=1 ;;
+      branch-prefix) BRANCH_PREFIX=$a; BRANCH_PREFIX_SET=1 ;;
       forge) FORGE=$a; FORGE_SET=1 ;;
       shape) SHAPE=$a; SHAPE_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
@@ -185,6 +215,8 @@ for a in "$@"; do
     --no-projects) NO_PROJECTS=1 ;;
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
+    --branch-prefix) want_value="branch-prefix" ;;
+    --branch-prefix=*) BRANCH_PREFIX=${a#--branch-prefix=}; BRANCH_PREFIX_SET=1 ;;
     --forge) want_value=forge ;;
     --forge=*) FORGE=${a#--forge=}; FORGE_SET=1 ;;
     --shape) want_value=shape ;;
@@ -217,6 +249,16 @@ elif [ "$MODE_SET" -eq 1 ]; then
   exit 1
 fi
 
+# A ship branch's prefix is optional per-project cosmetics, not a delivery
+# decision, but it still only makes sense where a branch is actually created.
+if [ "$KIND" != ship ] && [ "$BRANCH_PREFIX_SET" -eq 1 ]; then
+  echo "error: --branch-prefix applies only to ship briefs; a scout makes no branch and a secondmate charter is not a delivery contract" >&2
+  exit 1
+fi
+case "$BRANCH_PREFIX" in
+  *' '*) echo "error: --branch-prefix must not contain a space (got '$BRANCH_PREFIX')" >&2; exit 1 ;;
+  -*) echo "error: --branch-prefix must not start with '-' (got '$BRANCH_PREFIX')" >&2; exit 1 ;;
+esac
 # The forge is validated against the same closed set the renderers enforce, so a
 # typo or an impossible mode/forge pair stops here rather than reaching a worker.
 if [ "$KIND" = ship ]; then
@@ -239,6 +281,12 @@ elif [ "$FORGE_SET" -eq 1 ] || [ "$SHAPE_SET" -eq 1 ]; then
   exit 1
 fi
 ID=${POS[0]}
+BRANCH="$BRANCH_PREFIX$ID"
+if ! git check-ref-format --branch "$BRANCH" >/dev/null 2>&1; then
+  echo "error: --branch-prefix and task id must form a valid git branch (got '$BRANCH')" >&2
+  exit 1
+fi
+printf -v BRANCH_Q '%q' "$BRANCH"
 
 if [ "$KIND" = secondmate ] && [ "$HERDR_LAB" -eq 1 ]; then
   echo "error: --herdr-lab applies only to crewmate ship or scout briefs" >&2
@@ -326,7 +374,7 @@ Bound that command by what your harness lets one command run: in Pi pass the bas
 Give any `--wait` a duration a little under that bound.
 When the bound passes with nothing changed, run the same blocking command again, with no status check in between.
 The one exception is `respond`: it sent its answer before it began waiting, so reattach with `no-mistakes axi run --wait` instead, and never send the same `respond` again, because it would answer whichever gate parks next without you reading it.
-A wait your shell can watch this way needs no `paused:` line, except your own validation round: append `paused:` once just before its first blocking command, then stay in the command, and never append it again as you reissue that command.
+A wait your shell can watch this way needs no `paused:` line, except your own pipeline run, a long foreground command, or your own validation round, which you declare once just before its blocking hold: append `paused:` once just before its first blocking command, then stay in the command, and never append it again as you reissue that command.
 EOF
 WAIT_SECTION=${WAIT_SECTION%$'\n'}
 
@@ -472,6 +520,36 @@ IFS= read -r -d '' TASK_SECTION <<'EOF' || true
 EOF
 TASK_SECTION=${TASK_SECTION%$'\n'}
 
+# One shared string keeps the ship and scout infrastructure rule identical.
+# Rule 2 governs file edits, so it does not prohibit pool administration.
+# The secondmate charter deliberately omits this rule because a secondmate
+# legitimately allocates and returns slots for crewmates in its own home.
+IFS= read -r -d '' SHARED_INFRA_RULE <<'EOF' || true
+7. Never administer infrastructure that every lane shares. Two things are shared:
+   - The `no-mistakes` daemon - one instance serving every lane/home, so stopping, restarting, or
+     updating it kills other lanes' in-flight pipeline runs; only firstmate manages the daemon.
+     Before you append `blocked:` about the pipeline, run `no-mistakes daemon status` and
+     `no-mistakes axi status`. If the daemon socket refuses connections or is missing, append
+     `blocked [at=<epoch>]: {the daemon error}` and stop even when the local run record still says running or
+     fixing, because that record can be stale after the daemon exits. A run record failed with a
+     daemon error is also a real block.
+     Only after ruling out socket refusal, if the run is still running or fixing, reattach and keep
+     going. A drive-call error, timeout, slow read, or generic unreachability is NOT a daemon error:
+     the daemon accepts `respond` immediately and runs the round in the background, so a killed or
+     timed-out call was only waiting for a read while the run kept working.
+   - The worktree pool your own worktree came from, and the repository every lane's worktree
+     shares. Never create, remove, return, prune, move, or reassign a worktree or pool slot, and
+     never write into a sibling slot's directory. Rule 2 does not cover this: removing a worktree
+     is administration rather than an edit outside your directory, and it lands on lanes that are
+     running right now. The act is the rule and commands are only examples of it - `treehouse`
+     get/return/remove/prune, the equivalent operations on any other worktree provider or runtime
+     backend, and `git worktree add|remove|move|prune`. A slot that looks unused is not evidence
+     that it is free, and returning your own worktree is firstmate's job at cleanup, not yours.
+   If you genuinely need a second checkout, another slot, or the daemon touched, append
+   `blocked [at=<epoch>]: {what you need}` and stop; firstmate arranges it.
+EOF
+SHARED_INFRA_RULE=${SHARED_INFRA_RULE%$'\n'}
+
 if [ "$KIND" = scout ]; then
 if "$SCRIPT_DIR/fm-bootstrap.sh" lavish-compatible >/dev/null 2>&1; then
   LAVISH_LINE='If your deliverable is a visual artifact the captain will review and iterate on, use the lavish-axi rule: arm your board with bin/fm-procevent-lavish.sh arm <artifact.html> --for <task-id>; never run lavish-axi poll yourself. Re-arm with the reply after each nonterminal round to acknowledge it, route the board feedback through your steering inbox, write needs-decision [key=board-review] with the live board URL when the captain owes a decision, and stop at session_ended or an empty End without re-arming - acknowledge that final round with bin/fm-procevent.sh handled <source-id> <sequence> to conclude and retire your board.'
@@ -505,29 +583,13 @@ The report is the only thing that survives, so anything worth keeping must be in
    Whenever you mention a PR anywhere - a status line, your terminal, a summary - write its full
    https:// URL exactly as the forge printed it, never a bare number such as "PR 108"; firstmate
    copies that URL from your line rather than assembling one.
-   Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - ONLY when you are deliberately idling on a
-   known external wait you expect to clear on its own ($CREWMATE_PAUSE_WAIT_EXAMPLES):
-   firstmate then leaves your idle pane alone and rechecks it on a long cadence instead of
-   treating it as a possible wedge. When you know when the wait clears, say so in the line with
-   \`until <YYYY-MM-DDTHH:MMZ>\` (UTC) and firstmate rechecks at that time instead.
-   Use \`blocked:\` when you are stuck and need help.
+$CREWMATE_PAUSE_INSTRUCTIONS
 5. If you hit the same obstacle twice, append \`blocked [at=<epoch>]: {why}\` and stop; firstmate will help.
 6. If a decision belongs to a human (product choices, destructive actions),
    append \`needs-decision [at=<epoch>]: {summary of options}\` and stop. Firstmate will reply with the decision.
    A decision or blocker you opened stays open until a \`resolved\` line carrying its exact key lands; a later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
    Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved [at=<epoch>]: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
-7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
-   every lane/home, so restarting it kills other lanes' in-flight pipeline runs; only firstmate
-   manages the daemon.
-   Before you append \`blocked:\` about the pipeline, run \`no-mistakes daemon status\` and
-   \`no-mistakes axi status\`. If the daemon socket refuses connections or is missing, append
-   \`blocked [at=<epoch>]: {the daemon error}\` and stop even when the local run record still says running or
-   fixing, because that record can be stale after the daemon exits. A run record failed with a
-   daemon error is also a real block.
-   Only after ruling out socket refusal, if the run is still running or fixing, reattach and keep
-   going. A drive-call error, timeout, slow read, or generic unreachability is NOT a daemon error:
-   the daemon accepts \`respond\` immediately and runs the round in the background, so a killed or
-   timed-out call was only waiting for a read while the run kept working.
+$SHARED_INFRA_RULE
 
 $WAIT_SECTION
 
@@ -564,8 +626,8 @@ case "$MODE" in
 2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
     ;;
 esac
-RULE1=$(fm_ship_rule_one "$MODE" "$ID" "$FORGE") || exit 1
-DOD=$(fm_dod_block "$MODE" "$ID" "$FORGE") || exit 1
+RULE1=$(fm_ship_rule_one "$MODE" "$ID" "$BRANCH" "$FORGE") || exit 1
+DOD=$(fm_dod_block "$MODE" "$ID" "$BRANCH" "$FORGE") || exit 1
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -581,7 +643,7 @@ You are in a disposable git worktree of $REPO, at a detached HEAD on a clean def
 The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse --git-common-dir\` can help inspect the repo, but they do not prove you are outside the primary checkout.
 If the top-level path is the primary checkout or not the worktree you were launched in, STOP - do not branch or commit here - append \`blocked [at=<epoch>]: launched in primary checkout, not an isolated worktree\` to the status file and stop.
 
-1. First action: create your branch: \`git checkout -b fm/$ID\`$SETUP2
+1. First action: create your branch: \`git checkout -b $BRANCH_Q --\`$SETUP2
 
 # Rules
 $RULE1
@@ -600,39 +662,22 @@ $RULE1
    copies that URL from your line rather than assembling one.
    A mid-task \`working:\` line (including setup complete) is nonterminal: do not end the
    turn after it; continue the same stage until a defined \`done:\` gate under Definition of done.
-   Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - ONLY when you are deliberately idling on a
-   known external wait you expect to clear on its own ($CREWMATE_PAUSE_WAIT_EXAMPLES):
-   firstmate then leaves your idle pane alone and rechecks it on a long
-   cadence instead of treating it as a possible wedge. Use \`blocked:\` when you are stuck and need help.
+$CREWMATE_PAUSE_INSTRUCTIONS
 5. If you hit the same obstacle twice, append \`blocked [at=<epoch>]: {why}\` and stop; firstmate will help.
 6. If a decision belongs above the implementation worker (product choices, destructive actions),
    append \`needs-decision [at=<epoch>]: {summary of options}\` and stop. Firstmate will reply with the decision.
 $ASK_USER_BLOCK
    A decision or blocker you opened stays open until a \`resolved\` line carrying its exact key lands; a later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
    Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved [at=<epoch>]: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
-7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
-   every lane/home, so restarting it kills other lanes' in-flight pipeline runs; only firstmate
-   manages the daemon.
-   Before you append \`blocked:\` about the pipeline, run \`no-mistakes daemon status\` and
-   \`no-mistakes axi status\`. If the daemon socket refuses connections or is missing, append
-   \`blocked [at=<epoch>]: {the daemon error}\` and stop even when the local run record still says running or
-   fixing, because that record can be stale after the daemon exits. A run record failed with a
-   daemon error is also a real block.
-   Only after ruling out socket refusal, if the run is still running or fixing, reattach and keep
-   going. A drive-call error, timeout, slow read, or generic unreachability is NOT a daemon error:
-   the daemon accepts \`respond\` immediately and runs the round in the background, so a killed or
-   timed-out call was only waiting for a read while the run kept working.
+$SHARED_INFRA_RULE
 
 $WAIT_SECTION
 
 $INBOX_SECTION
 
 # Project memory
-If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
-Record only project knowledge useful to almost every future session.
-For anything the codebase already shows, prefer a pointer to the authoritative file, command, or doc over copying the detail.
-If you touch a project \`AGENTS.md\`, follow \`$FM_ROOT/bin/fm-ensure-agents-md.sh\`'s self-governance contract in the same pass.
-Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
+A project's \`AGENTS.md\` or \`CLAUDE.md\` is loaded into every agent session in that project, so edit it only to correct information that is factually wrong - including information your own change made wrong - and never to add knowledge because it is missing.
+A correction edits only the wrong text: do not run \`$FM_ROOT/bin/fm-ensure-agents-md.sh\`, create either file, or add sections, headings, or pointers alongside it.
 
 $DOD
 EOF

@@ -6,6 +6,13 @@
 # receives. Both paths must hand the worker the same contract: a promoted
 # no-mistakes worker that never received the ask-user escalation rule or the
 # `--yes` ban is the exact delivery hole this single owner exists to close.
+# fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> [branch] [<forge>]
+# prints the block on stdout with no trailing blank line. The caller validates the
+# mode; an unknown mode is refused rather than silently rendered as the pipeline
+# contract.
+# The optional third argument is the task's full ship-branch name (a project's
+# registered prefix may replace the legacy `fm/` one); it defaults to `fm/<task-id>`
+# and is the immutable task branch rendered in every delivery contract.
 # Callers of the gate are bin/fm-crew-state.sh (current-state done),
 # bin/fm-pr-check.sh (PR registration), and bin/fm-inactive-reconcile.sh
 # (secondmate ledger-first publish of a child done). A ship `done:` is not
@@ -31,12 +38,11 @@
 # also hold the result of a passed run. These live reads are the one check at the ready
 # decision; a later rebase or patch set on the server does not revoke an armed
 # task's done. Teardown's landed-work test remains the complete discard gate.
-# fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> [<forge>] prints the
-# block on stdout with no trailing blank line. The caller validates the mode; an
-# unknown mode is refused rather than silently rendered as the pipeline contract.
 # The block opens with the fixed machine-readable "Delivery contract: mode=<mode>"
 # line that bin/fm-spawn.sh checks a ship brief against; a forge=gerrit block
-# appends " forge=gerrit shape=squash" to that line.
+# appends " forge=gerrit shape=squash" to that line. The "Ship branch: <branch>"
+# line under it is machine-readable the same way: bin/fm-spawn.sh refuses a ship
+# whose spawn-selected branch disagrees with it.
 # forge is none|gerrit and defaults to none; bin/fm-project-mode.sh's header owns
 # what the registry binding means, and this file owns what gerrit changes for a
 # WORKER (docs/gerrit-forge-integration.md is the design). A forge composes with
@@ -64,6 +70,8 @@
 # adding speaker labels or direct address: the heading supplies provenance and
 # is not part of --intent. A legacy mixed Task instead marks each captain line
 # with `[captain] `; the selector returns its words, not that metadata prefix.
+# That selector skips fenced blocks and indented examples like the heading
+# reader, so a quoted `Captain:` sample is never authorized intent.
 # Previously stored speaker labels remain readable for compatibility only.
 # Never scrub literal examples or other content the captain actually supplied.
 # The string passed must be self-sufficient - it plus the codebase reconstructs
@@ -94,6 +102,8 @@
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-classify-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-nm-run-lib.sh"
+# shellcheck source=bin/fm-brief-heading-lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-brief-heading-lib.sh"
 
 fm_brief_worker_role() {  # <state-dir> <task-id>
   local state=$1 task_id=$2
@@ -130,8 +140,9 @@ fm_forge_valid_for_mode() {  # <forge> <mode> <caller>
   return 0
 }
 
-fm_ship_rule_one() {  # <no-mistakes|direct-PR|local-only> <task-id> [<forge>]
-  local mode=$1 id=$2 forge=${3:-none}
+fm_ship_rule_one() {  # <no-mistakes|direct-PR|local-only> <task-id> [branch] [<forge>]
+  local mode=$1 id=$2 forge=${4:-none}
+  local branch=${3:-fm/$id}
   fm_forge_valid_for_mode "$forge" "$mode" fm_ship_rule_one || return 1
   if [ "$forge" = gerrit ]; then
     printf '%s\n' "1. Never push with git and never create a change except through the one \`gerrit-axi publish --squash\` your Definition of done names. Never run \`gerrit-axi submit\`, never vote or review a change by any path, including \`gerrit review\` or a label option on a push, and never abandon one: a human reviewer approves and submits it on the server."
@@ -139,10 +150,10 @@ fm_ship_rule_one() {  # <no-mistakes|direct-PR|local-only> <task-id> [<forge>]
   fi
   case "$mode" in
     direct-PR)
-      printf '%s\n' "1. Never push to the default branch (push only your \`fm/$id\` branch). Never merge a PR."
+      printf '%s\n' "1. Never push to the default branch (push only your \`$branch\` branch). Never merge a PR."
       ;;
     local-only)
-      printf '%s\n' "1. Never push to any remote and never open a PR. Work only on your \`fm/$id\` branch; firstmate handles the merge into local \`main\`."
+      printf '%s\n' "1. Never push to any remote and never open a PR. Work only on your \`$branch\` branch; firstmate handles the merge into local \`main\`."
       ;;
     no-mistakes)
       printf '%s\n' '1. Never push to the default branch. Never merge a PR.'
@@ -166,24 +177,15 @@ fm_brief_task_placeholders_present() {  # <file>
   return 1
 }
 
-# Parse an exact ATX heading outside fenced blocks. Body mode prints through
-# the next unfenced heading at the same or a higher level; present mode reports
-# whether the heading exists.
-fm_brief_heading_parse() {  # <file|-> <heading> <body|present>
-  local file=$1 heading=$2 mode=$3 input=$1
-  if [ "$file" = - ]; then
-    input=/dev/stdin
-  else
-    [ -f "$file" ] || { [ "$mode" = body ]; return; }
-  fi
-  awk -v heading="$heading" -v mode="$mode" '
-    BEGIN {
-      target_level = 0
-      while (substr(heading, target_level + 1, 1) == "#") target_level++
-    }
+# Print the words of every provenance-marked line in a legacy `# Task` body.
+# The marker is read the way bin/fm-brief-heading-lib.sh reads a heading: a
+# line inside a ``` or ~~~ fenced block, or indented four spaces or a tab as an
+# indented example, is never a marked line, so a fenced `Captain:` sample cannot
+# pass the provenance gate as the ship contract's intent (issue 3608).
+fm_brief_marked_captain_words() {  # <task-body>
+  printf '%s\n' "$1" | awk '
     {
-      line = $0
-      scan = line
+      scan = $0
       spaces = 0
       while (spaces < 3 && substr(scan, 1, 1) == " ") {
         scan = substr(scan, 2)
@@ -194,68 +196,21 @@ fm_brief_heading_parse() {  # <file|-> <heading> <body|present>
       if (marker == "`" || marker == "~") {
         while (substr(scan, marker_len + 1, 1) == marker) marker_len++
       }
-      is_fence = marker_len >= 3
-      was_fenced = fenced
-
-      if (is_fence) {
-        rest = substr(scan, marker_len + 1)
+      if (marker_len >= 3) {
         if (!fenced) {
           fenced = 1
           fence_marker = marker
           fence_len = marker_len
-        } else if (marker == fence_marker && marker_len >= fence_len && rest ~ /^[[:space:]]*$/) {
+        } else if (marker == fence_marker && marker_len >= fence_len && substr(scan, marker_len + 1) ~ /^[[:space:]]*$/) {
           fenced = 0
         }
-      }
-
-      if (!found && !was_fenced && line == heading) {
-        found = 1
-        if (mode == "present") next
-        grab = 1
         next
       }
-      if (mode == "present" || !grab) next
-      if (is_fence || was_fenced) {
-        print line
-        next
+      if (fenced || substr(scan, 1, 1) ~ /^[ \t]$/) next
+      if (match(scan, /^(\[captain\]|Captain('\''s (words|ask|intent))?:)[[:space:]]*/)) {
+        words = substr(scan, RLENGTH + 1)
+        if (words ~ /[^[:space:]]/) print words
       }
-
-      level = 0
-      while (substr(scan, level + 1, 1) == "#") level++
-      if (level > 0 && level <= target_level && substr(scan, level + 1, 1) ~ /^[[:space:]]?$/) exit
-      print line
-    }
-    END {
-      if (mode == "present" && !found) exit 1
-    }
-  ' "$input"
-}
-
-fm_brief_heading_body() {  # <file> <heading>
-  fm_brief_heading_parse "$1" "$2" body
-}
-
-fm_brief_heading_present() {  # <file> <heading>
-  fm_brief_heading_parse "$1" "$2" present >/dev/null
-}
-
-fm_brief_task_heading_body() {  # <file> <heading>
-  local task
-  task=$(fm_brief_heading_body "$1" "# Task")
-  printf '%s\n' "$task" | fm_brief_heading_parse - "$2" body
-}
-
-fm_brief_task_heading_present() {  # <file> <heading>
-  local task
-  task=$(fm_brief_heading_body "$1" "# Task")
-  printf '%s\n' "$task" | fm_brief_heading_parse - "$2" present >/dev/null
-}
-
-fm_brief_marked_captain_words() {  # <task-body>
-  printf '%s\n' "$1" | awk '
-    match($0, /^[[:space:]]*(\[captain\]|Captain('\''s (words|ask|intent))?:)[[:space:]]*/) {
-      words = substr($0, RLENGTH + 1)
-      if (words ~ /[^[:space:]]/) print words
     }
   '
 }
@@ -346,6 +301,7 @@ Do not hand-edit, commit, or fix findings yourself while a run is active - the p
 
 Drive the run with ONE foreground \`no-mistakes axi run\` and let it block.
 It bounds its own hold for you: \`--wait\` (default 8m) exists precisely so a harness with a ten-minute command cap gets a structured return instead of being killed mid-hold.
+Declare that wait using the brief's status-reporting rule before the foreground drive call.
 Never background a wait, and never arm a timer to stand in for one: a backgrounded call returns in milliseconds, so it does not wait at all, and every timer left behind fires later as a paid wake for nothing.
 ${pr_return_line}Whenever a drive call returns without a gate or an outcome - its own wait elapsed, or it was killed or timed out - that is not a failure: reattach at once by re-running \`no-mistakes axi run\` without flags, and issue the same foreground call again, one at a time, until a gate or outcome comes back${pr_reattach_clause} if it refuses because no run is active, read the finished outcome from \`no-mistakes axi status\`.
 A killed or timed-out call is never evidence the daemon died: the daemon accepts your response immediately and runs the round in the background, so the call was only ever waiting for a read while the run kept working.
@@ -382,14 +338,16 @@ There is no pull request, no \`gh-axi\` call, and no forge CI result to report: 
 EOF
 }
 
-fm_dod_block() {  # <mode> <task-id> [<forge>]
-  local mode=$1 id=$2 forge=${3:-none}
+fm_dod_block() {  # <mode> <task-id> [branch] [<forge>]
+  local mode=$1 id=$2 forge=${4:-none}
+  local branch=${3:-fm/$id}
   fm_forge_valid_for_mode "$forge" "$mode" fm_dod_block || return 1
   case "$mode:$forge" in
     direct-PR:gerrit)
       cat <<EOF
 # Definition of done
 Delivery contract: mode=direct-PR forge=gerrit shape=squash
+Ship branch: $branch
 This task ships **direct-PR** to a Gerrit review server: you publish the change yourself, without the no-mistakes pipeline.
 Gerrit has no pull requests, so there is nothing to open; publishing creates the change.
 The task is complete only when committed on your branch.
@@ -404,6 +362,7 @@ EOF
       cat <<EOF
 # Definition of done
 Delivery contract: mode=no-mistakes forge=gerrit shape=squash
+Ship branch: $branch
 This project's review server is Gerrit: it has no pull requests and no forge CI the pipeline can watch, so **no-mistakes runs here as a review pass that ends at a ready branch**, and you then publish that branch as one change.
 Pass \`--skip push,pr,ci\` on every \`no-mistakes axi run\` for this task, and skip nothing else: \`review\`, \`test\`, \`document\`, and \`lint\` are the whole point of the run.
 Those three are the only steps that reach a forge, and skipping them is a supported outcome, not a degraded one.
@@ -421,7 +380,7 @@ Your tree never goes dirty and nothing interrupts you, so a passed run whose fix
 You may not publish until you have closed that gap:
 1. After the run reaches its outcome, read \`branch_sync.next_action\` from \`no-mistakes axi status\`.
 2. When its code is \`recover_custody\`, run the exact command that status prints - \`no-mistakes axi sync --recover\` - and confirm \`branch_sync.state\` comes back \`custody_returned\` on a clean tree. The printed command is authoritative if it differs. The \`run_pipeline\` next action status reports after recovery is not an instruction to run again: the recovered head is the one the passed run validated, so publish it.
-3. Confirm with \`git log\` that \`fm/$id\` now carries every fix commit the run made, whether or not step 2 was needed.
+3. Confirm with \`git log\` that \`$branch\` now carries every fix commit the run made, whether or not step 2 was needed.
 An unrecovered fix round is an unfinished task, never housekeeping: publishing without it is how the UNFIXED code reaches review.
 Your ready report is refused while the run still holds your branch, while its outcome is missing or not passing, or while your HEAD's tree differs from the run's result.
 
@@ -435,10 +394,11 @@ EOF
       cat <<EOF
 # Definition of done
 Delivery contract: mode=direct-PR
+Ship branch: $branch
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
 When it is implemented and committed, push your branch and open a PR with \`gh-axi\` that is ready for review, not a draft.
-Before you report done, read the PR back from the forge and confirm it is not a draft (\`gh pr view <url> --json isDraft\` must print false); if it is a draft, mark it ready with \`gh-axi pr ready\`.
+Before you report done, read the PR back from the forge and confirm it is not a draft (\`gh-axi pr view <number>\` must print \`draft: no\`, where <number> is the PR number from your PR URL); if it is a draft, mark it ready with \`gh-axi pr ready <number>\`.
 A draft cannot be merged, so a done report on one leaves the merge unasked.
 Then append \`done [at=<epoch>]: PR {url}\` to the status file and stop.
 That \`done:\` is accepted only when this copy's HEAD - your latest commit - is pushed to your PR branch; the check tests that commit, not merely that a branch moved.
@@ -450,11 +410,12 @@ EOF
       cat <<EOF
 # Definition of done
 Delivery contract: mode=local-only
+Ship branch: $branch
 This task ships **local-only**: no remote, no PR, no pipeline.
-The task is complete only when committed on your branch \`fm/$id\`. Do NOT push, do NOT open a PR, do NOT merge.
+The task is complete only when committed on your branch \`$branch\`. Do NOT push, do NOT open a PR, do NOT merge.
 A \`done:\` is accepted when the named head is on this project's shared local branch, not only on a detached copy; the check tests that head, not merely that a branch moved.
 Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
-When it is implemented and committed, append \`done [at=<epoch>]: ready in branch fm/$id\` to the status file and stop.
+When it is implemented and committed, append \`done [at=<epoch>]: ready in branch $branch\` to the status file and stop.
 The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
 EOF
       ;;
@@ -462,6 +423,7 @@ EOF
       cat <<EOF
 # Definition of done
 Delivery contract: mode=no-mistakes
+Ship branch: $branch
 The task is complete only when committed on your branch.
 When you believe it is complete, append \`done [at=<epoch>]: {summary}\` to the status file and stop.
 Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
@@ -471,7 +433,7 @@ EOF
       fm_nm_driving_block "$forge"
       cat <<EOF
 
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), read the PR back from the forge and confirm it is not a draft (\`gh pr view <url> --json isDraft\` must print false); if it is a draft, mark it ready with \`gh-axi pr ready\`.
+After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), read the PR back from the forge and confirm it is not a draft (\`gh-axi pr view <number>\` must print \`draft: no\`, where <number> is the PR number from your PR URL); if it is a draft, mark it ready with \`gh-axi pr ready <number>\`.
 A draft cannot be merged, so a done report on one leaves the merge unasked.
 Then append \`done [at=<epoch>]: PR {url} checks green\` and stop. You are finished.
 That CI-ready \`done:\` is accepted only when this copy's HEAD - your latest commit - is one the /no-mistakes run pushed, so commit nothing after the run; the check tests that commit, not merely that a branch moved.

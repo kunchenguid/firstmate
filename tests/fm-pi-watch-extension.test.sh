@@ -3661,6 +3661,85 @@ EOF
   pass "OpenCode watcher plugin starts one successor before wake prompt delivery settles"
 }
 
+# An opted-in home spawns the supervision host in the arm's place; its
+# streamed status line drives readiness and the handling handoff, and a
+# handed-back wake is delivered with every host line and the away note.
+test_opencode_primary_watch_plugin_runs_the_supervision_host() {
+  local plugin repo home log stop out status
+  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  repo="$TMP_ROOT/opencode-host-root"
+  home="$TMP_ROOT/opencode-host-home"
+  log="$TMP_ROOT/opencode-host.log"
+  stop="$TMP_ROOT/opencode-host.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  git init -q "$repo"
+  : > "$repo/AGENTS.md"
+  : > "$home/state/task.meta"
+  : > "$home/state/.afk-contract"
+  : > "$home/config/supervision-host"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then
+  printf 'confirmed generation=%s watcher=%s\n' "$2" "$4" >> "${FM_ARM_LOG:?}"
+  exit 0
+fi
+printf 'plain-arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+exit 1
+SH
+  cat > "$repo/bin/fm-supervision-host.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'host=%s args=%s primary=%s predecessor=%s\n' "$$" "$*" "${FM_SUPERVISION_HOST_PRIMARY:-}" \
+  "${FM_WATCH_PREDECESSOR_ARM_PID:-none}" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^host=' "$FM_ARM_LOG")
+if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  sleep 0.3
+  printf 'signal: synthetic wake\nsupervision-host: the away session could not take this wake: fixture; this wake is yours\nsupervision-host: outcome 1 for demo [captain]: fixture\n'
+  exit 0
+fi
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh" "$repo/bin/fm-supervision-host.sh"
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" node 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+const prompts = [];
+const client = { session: { promptAsync: async (request) => { prompts.push(request.body.parts[0].text); } } };
+const hooks = await mod.FmPrimaryWatchArm({ client, directory: process.env.WORKTREE, worktree: process.env.WORKTREE });
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
+for (let i = 0; i < 400 && prompts.length < 1; i += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+const rows = existsSync(process.env.FM_ARM_LOG) ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n") : [];
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+if (rows.some((row) => row.startsWith("plain-arm="))) throw new Error(`an opted-in home ran the plain arm: ${rows.join(" | ")}`);
+const hosts = rows.filter((row) => row.startsWith("host="));
+if (hosts.length !== 2) throw new Error(`expected the host and one successor host, got: ${rows.join(" | ")}`);
+if (!hosts.every((row) => / args=park --restart primary=opencode /.test(row))) throw new Error(`the host must run as 'park --restart' with the opencode pin: ${hosts.join(" | ")}`);
+if (!/predecessor=[0-9]+$/.test(hosts[1])) throw new Error(`the successor host did not receive the closed host as its predecessor: ${hosts[1]}`);
+if (!rows.some((row) => row === "confirmed generation=fixture-generation watcher=" + hosts[1].replace(/^host=([0-9]+).*/, "$1"))) {
+  throw new Error(`the handling handoff was not confirmed against the successor host's cycle: ${rows.join(" | ")}`);
+}
+if (prompts.length !== 1) throw new Error(`expected one wake prompt, got ${prompts.length}`);
+for (const needle of [
+  "signal: synthetic wake",
+  "supervision-host: the away session could not take this wake: fixture; this wake is yours",
+  "supervision-host: outcome 1 for demo [captain]: fixture",
+  "not from the captain: it is not a return",
+]) {
+  if (!prompts[0].includes(needle)) throw new Error(`the wake prompt lacks '${needle}': ${prompts[0]}`);
+}
+EOF
+  )
+  status=$?
+  [ "$status" -eq 0 ] || fail "OpenCode watch plugin must run the supervision host on an opted-in home: $out"
+  [ -z "$out" ] || fail "OpenCode host test printed output: $out"
+  pass "OpenCode watcher plugin runs the supervision host on an opted-in home and relays every host line"
+}
+
 test_opencode_pre_ready_actionable_close_preserves_its_successor() {
   local plugin repo home log release retired stop out status
   plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
@@ -4355,6 +4434,7 @@ test_opencode_primary_watch_plugin_sources_effective_config
 test_opencode_primary_watch_plugin_requires_session_lock
 test_opencode_watch_arm_coordinator_respects_primary_scope
 test_opencode_primary_watch_plugin_rearms_after_wake
+test_opencode_primary_watch_plugin_runs_the_supervision_host
 test_opencode_pre_ready_actionable_close_preserves_its_successor
 test_opencode_hung_successor_falls_back_to_typed_wake
 test_opencode_unretired_successor_falls_back_without_retry

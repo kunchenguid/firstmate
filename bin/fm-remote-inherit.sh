@@ -6,8 +6,8 @@
 #   fm-remote-inherit.sh absent <allowlisted-relative-path> 0 <empty-sha256> <generation>
 #
 # Only the inherited-material allowlist is writable or removable. Writes are
-# atomic ordinary-file replacements. Divergent data/captain-shared.md bytes are
-# quarantined before replacement or removal and its converged copy is read-only.
+# atomic ordinary-file replacements. data/captain-shared.md is read-only and is
+# quarantined before removal or before replacing bytes not last published here.
 set -eu
 
 FM_HOME=${FM_HOME:?FM_HOME is required}
@@ -78,6 +78,9 @@ GENERATION_FILE="$PARENT_REAL/.fm-inherit-$BASE.generation"
 fm_lock_acquire_wait "$LOCK" || die "cannot lock inherited destination"
 TMP=
 GENERATION_TMP=
+# Digest this receiver last published to DEST, captured before commit_generation
+# overwrites the record. Empty when no put generation has been committed here.
+LAST_PUBLISHED_HASH=
 cleanup() {
   [ -z "$TMP" ] || rm -f -- "$TMP"
   [ -z "$GENERATION_TMP" ] || rm -f -- "$GENERATION_TMP"
@@ -102,6 +105,7 @@ commit_generation() {
     case "$existing_hash" in ''|*[!A-Fa-f0-9]*) die "inheritance generation record is malformed" ;; esac
     [ "${#existing_hash}" -eq 64 ] || die "inheritance generation record is malformed"
     case "$existing_command" in put|absent) ;; *) die "inheritance generation record is malformed" ;; esac
+    [ "$existing_command" != put ] || LAST_PUBLISHED_HASH=$(printf '%s' "$existing_hash" | tr 'A-F' 'a-f')
     if [ "$existing_generation" -gt "$GENERATION" ]; then
       die "inheritance write generation is superseded"
     fi
@@ -120,6 +124,15 @@ commit_generation() {
   chmod 600 "$GENERATION_TMP" || die "cannot secure inheritance generation"
   mv -f -- "$GENERATION_TMP" "$GENERATION_FILE" || die "cannot publish inheritance generation"
   GENERATION_TMP=
+}
+
+# True when the destination still holds the bytes this receiver last published,
+# so replacing it is ordinary convergence rather than destination drift.
+dest_matches_last_published() {
+  local actual
+  [ -n "$LAST_PUBLISHED_HASH" ] && [ -f "$DEST" ] || return 1
+  actual=$(sha256_file "$DEST") || return 1
+  [ "$actual" = "$LAST_PUBLISHED_HASH" ]
 }
 
 quarantine_shared() {
@@ -152,7 +165,7 @@ case "$COMMAND" in
       printf 'unchanged: %s\n' "$REL"
       exit 0
     fi
-    quarantine_shared replaced
+    dest_matches_last_published || quarantine_shared replaced
     chmod 600 "$TMP" || die "cannot secure inherited material"
     mv -f -- "$TMP" "$DEST" || die "cannot publish inherited material"
     TMP=

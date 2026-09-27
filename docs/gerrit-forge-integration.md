@@ -218,7 +218,7 @@ This is a property of Gerrit and no amount of tooling changes it.
 Every mechanism that reasons about a remote branch therefore has no counterpart here - the gone-upstream prune in `bin/fm-fleet-sync.sh`, the remote-reachability leg of `bin/fm-teardown.sh`'s landed-work test, and the `refs/pull/<n>/head` fetch in `bin/fm-review-diff.sh`.
 There is no separate namespace either, because there are no forks, so the change is the only remote artifact the work ever has.
 The teardown test and the review diff each already have a fallback that reasons about content or about the local branch, and on Gerrit the fallback is not a fallback, it is the only path.
-The prune has no fallback at all: a `refs/for/<branch>` push creates no upstream tracking ref, so nothing ever reads `[gone]`, the prune never fires, and `fm/<id>` branches accumulate locally after teardown.
+The prune has no fallback at all: a `refs/for/<branch>` push creates no upstream tracking ref, so nothing ever reads `[gone]`, the prune never fires, and ship branches accumulate locally after teardown.
 That raises the stakes on the content leg of the landed-work test specifically, since it becomes the sole proof that unlanded work is not about to be discarded.
 This is also a property of Gerrit.
 

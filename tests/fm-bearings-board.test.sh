@@ -352,10 +352,9 @@ test_build_injects_binds_then_arms() {
 }
 
 test_registration_cannot_consume_before_any_origin_binding() {
-  local home data runtime origin key hold board sid show
+  local home data origin key hold board sid show
   home=$(make_home order-proof)
   data="$home/payload.json"
-  runtime="$home/runtime"
   origin=order-proof-review
   key=captain-choice
   hold="$origin-decision-$key"
@@ -378,21 +377,6 @@ EOF
   jq --arg hold "$hold" '.captains_call[0].key = $hold' "$data" > "$data.tmp" \
     && mv "$data.tmp" "$data"
 
-  mkdir -p "$runtime"
-  cp -R "$ROOT/bin" "$runtime/bin"
-  cat > "$runtime/bin/fm-procevent-lavish.sh" <<'SH'
-#!/usr/bin/env bash
-set -eu
-if [ "${1:-}" = arm ]; then
-  artifact=${2:-}
-  "$REAL_LAVISH_ADAPTER" arm "$artifact" >/dev/null
-  sid=$("$REAL_LAVISH_ADAPTER" source-id "$artifact")
-  "$REAL_PROCEVENT" start "$sid" >/dev/null
-  exit 0
-fi
-exec "$REAL_LAVISH_ADAPTER" "$@"
-SH
-  chmod +x "$runtime/bin/fm-procevent-lavish.sh"
   cat > "$home/fakebin/lavish-axi" <<'SH'
 #!/usr/bin/env bash
 if [ -z "${1:-}" ]; then
@@ -421,18 +405,17 @@ EOF
 SH
   chmod +x "$home/fakebin/lavish-axi"
 
-  PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$runtime" FM_HOME="$home" \
-    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
-    FM_BEARINGS_BOARD_TEMPLATE="$ROOT/.agents/skills/bearings/assets/board-template.html" \
-    REAL_LAVISH_ADAPTER="$ROOT/bin/fm-procevent-lavish.sh" \
-    REAL_PROCEVENT="$ROOT/bin/fm-procevent.sh" ORDER_PROOF_HOLD="$hold" \
-    LAVISH_AXI_STATE_DIR="$home/lavish-state" \
-    "$runtime/bin/fm-bearings-board.sh" build "$data" >/dev/null \
+  ORDER_PROOF_HOLD="$hold" run_board "$home" build "$data" >/dev/null \
     || fail "the order-proof board build failed"
 
-  show=$(cd "$home" && tasks-axi show "$hold" --full) \
-    || fail "the order-proof captain hold disappeared"
+  # Arm starts the listener, which captures the answer and closes the hold on
+  # its own schedule after build returns.
+  for _ in $(seq 1 100); do
+    show=$(cd "$home" && tasks-axi show "$hold" --full) \
+      || fail "the order-proof captain hold disappeared"
+    case "$show" in *"state: done"*) break ;; esac
+    sleep 0.1
+  done
   assert_contains "$show" "state: done" \
     "registration consumed its answer before the any-origin binding existed"
   assert_contains "$show" "Resolution mode: answered" \

@@ -22,6 +22,6 @@ When this session owns supervision and away mode is not active:
    Otherwise, it allows the stop when a watcher is healthy or an open auto-arm generation claim owns recovery, while fresh failure epochs advance the bounded one-time attended fail-open progression described there.
 9. Waiting on the hook-owned cycle is silent: do not send idle progress while the watcher is parked.
 
-The watcher itself remains `bin/fm-watch.sh`, and `bin/fm-watch-arm.sh` remains the verified arm wrapper that the Stop hook foregrounds.
+The watcher itself remains `bin/fm-watch.sh`, and `bin/fm-watch-arm.sh` remains the verified arm wrapper that the Stop hook foregrounds unless this home opts into the [supervision host](../supervision-host.md).
 Re-arm attaches to an existing healthy cycle when one is already present and follows its verified successor chain.
 See [`watcher-continuity.md`](../watcher-continuity.md) for the arm-layer successor and clean-close failure contract and the Claude ownership model.

@@ -1853,6 +1853,140 @@ EOF
   pass "under the away-posture record the wake carries the verbatim read-back tail, claims every row, opens no processing turn, cancels a pending request, and presents the accumulated rows after archive"
 }
 
+# The 2026-09-25 away-window flood on the Pi report path: a held, green PR on a
+# finished task was re-escalated on every inactive-outcome cadence, because
+# the branch acknowledgement consumed the check row but left its
+# terminal-outcome receipt pending, so each later scan re-queued the same
+# fingerprint. Through the real reconcile scan, extension dispatch and grant,
+# fm_branch_report, and drain, that unchanged situation now reaches the
+# captain exactly once, and a new event on the same task - a red check -
+# still reaches the captain path afterwards.
+test_away_unchanged_held_outcome_reaches_the_captain_once_until_a_new_event() {
+  local repo home out status old
+  repo="$TMP_ROOT/away-held-once-root"
+  home="$TMP_ROOT/away-held-once-home"
+  mkdir -p "$home/state" "$home/config" "$home/fakebin" "$home/projects/held"
+  install_pi_branch_extension_fixture "$repo"
+  git -C "$home/projects/held" init -q
+  git -C "$home/projects/held" -c user.name=fmtest -c user.email=fmtest@example.invalid \
+    commit -q --allow-empty -m init
+  fm_write_meta "$home/state/held.meta" \
+    'window=fm-held' "worktree=$home/projects/held" "project=$home/projects/held" \
+    'harness=pi' 'kind=ship' 'mode=no-mistakes' 'yolo=off' 'spawn_gen=g1' \
+    'pr=https://example.test/o/r/pull/153'
+  printf 'done: PR https://example.test/o/r/pull/153 open, green, mergeable\n' > "$home/state/held.status"
+  old=$(( $(date +%s) - 600 ))
+  perl -e 'my $t = shift; utime $t, $t, @ARGV or exit 1' "$old" "$home/state/held.meta" "$home/state/held.status" \
+    || fail "fixture: could not age the held task's records"
+  printf '#!/usr/bin/env bash\nprintf "state: done · source: fake\\n"\n' > "$home/fakebin/fm-crew-state.sh"
+  chmod +x "$home/fakebin/fm-crew-state.sh"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, bus, makeOffer, outcomeScript, defaultSessionCtx, home, realRoot, approvedProject }; })()`);
+const { fire, bus, makeOffer, outcomeScript, defaultSessionCtx, home, realRoot, approvedProject } = globalThis.__t;
+import { spawnSync } from "node:child_process";
+import { existsSync, readFileSync, utimesSync } from "node:fs";
+
+const state = `${home}/state`;
+const env = { ...process.env, FM_HOME: home, FM_STATE_OVERRIDE: state, FM_CONFIG_OVERRIDE: `${home}/config` };
+const run = (args, label, extra = {}) => {
+  const result = spawnSync("bash", args, { encoding: "utf8", env: { ...env, ...extra } });
+  if (result.status !== 0) throw new Error(`${label} failed: ${result.stderr}`);
+  return result.stdout || "";
+};
+const queued = () => (existsSync(`${state}/.wake-queue`) ? readFileSync(`${state}/.wake-queue`, "utf8") : "")
+  .split("\n").filter(Boolean);
+const outcomes = () => outcomeScript(["list", "--recent", "100"]).split("\n").filter(Boolean).map((line) => JSON.parse(line));
+const captains = () => outcomes().filter((row) => row.verdict === "captain");
+const unprocessedSeqs = () => outcomeScript(["unprocessed"]).split("\n").filter(Boolean).map((line) => JSON.parse(line).seq);
+
+run([`${realRoot}/bin/fm-afk-contract.sh`, "enter", "--words", "watch the fleet; merge nothing"], "away record");
+await fire("session_start", {}, defaultSessionCtx);
+
+globalThis.__fmExecuteBranchBash = async (context) => {
+  const result = spawnSync("bash", ["-c", context.command], { encoding: "utf8", cwd: context.cwd, env: context.env });
+  return {
+    content: [{ type: "text", text: `${result.stdout}${result.stderr}` }],
+    details: { stdout: result.stdout, stderr: result.stderr, exitCode: result.status },
+    isError: result.status !== 0,
+  };
+};
+let commands = 0;
+async function runFleetCommand(session, args) {
+  const bash = session.options.customTools.find((tool) => tool.name === "bash");
+  const result = await bash.execute(`fleet-${commands++}`, { command: ["bin/fm-wake-drain.sh", ...args].join(" ") }, undefined, undefined, {});
+  if (result.isError) throw new Error(`fleet command failed: ${JSON.stringify(result)}`);
+  return result.details;
+}
+// The branch's model: every presented wake is escalated to the captain, as
+// the flood's held-PR report was, then acknowledged exactly as printed.
+globalThis.__fmOnBranchPrompt = async ({ session }) => {
+  const drained = await runFleetCommand(session, []);
+  const ack = drained.stderr.match(/--ack-through ([0-9]+) --recovery-generation ([A-Za-z0-9._-]+)/);
+  if (!ack) throw new Error(`drain did not return its acknowledgement command: ${drained.stderr}`);
+  const report = session.options.customTools.find((tool) => tool.name === "fm_branch_report");
+  const result = await report.execute(
+    `held-${commands}`,
+    { task: "held", verdict: "captain", summary: `escalated: ${drained.stdout.trim().slice(0, 400)}` },
+    undefined,
+    undefined,
+    {},
+  );
+  if (result.isError) throw new Error(`branch report failed: ${JSON.stringify(result)}`);
+  await runFleetCommand(session, ["--ack-through", ack[1], "--recovery-generation", ack[2]]);
+};
+async function wakeBranch(message) {
+  const offer = makeOffer(message, [approvedProject]);
+  bus.emit("fm-branch-supervision:dispatch", offer);
+  if (!offer.accepted) throw new Error(`the away wake "${message}" was refused`);
+  await offer.settlement;
+  if (queued().length !== 0) throw new Error(`the branch left rows queued: ${queued()}`);
+}
+// One watcher cadence: the scan marker is past due, the real scan runs, and
+// whatever it queued wakes the branch as the watcher's close would.
+async function cadence(n) {
+  const marker = `${state}/.inactive-outcome-reconcile`;
+  if (existsSync(marker)) {
+    const past = Math.floor(Date.now() / 1000) - 120;
+    utimesSync(marker, past, past);
+  }
+  run([`${realRoot}/bin/fm-inactive-reconcile.sh`, "scan"], `cadence ${n}`, {
+    FM_INACTIVE_RECONCILE_SECS: "60",
+    FM_INACTIVE_CREW_STATE_BIN: `${home}/fakebin/fm-crew-state.sh`,
+  });
+  if (queued().length > 0) await wakeBranch("check: inactive-outcome");
+}
+
+await cadence(1);
+if (captains().length !== 1 || !captains()[0].summary.includes("child=held")) {
+  throw new Error(`the first cadence did not escalate the held outcome once: ${JSON.stringify(outcomes())}`);
+}
+for (let n = 2; n <= 5; n += 1) {
+  await cadence(n);
+  if (captains().length !== 1) {
+    throw new Error(`cadence ${n} re-escalated the unchanged held outcome: ${JSON.stringify(captains())}`);
+  }
+}
+
+run(["-c", '. "$1"; fm_wake_append check "$2" "$3"', "_", `${realRoot}/bin/fm-wake-lib.sh`,
+  "pr-check:held", "check: held PR https://example.test/o/r/pull/153 check ci/test turned red"], "red check row");
+await wakeBranch("check: held PR https://example.test/o/r/pull/153 check ci/test turned red");
+const escalated = captains();
+if (escalated.length !== 2 || !escalated[1].summary.includes("turned red")) {
+  throw new Error(`the red check did not reach the captain path: ${JSON.stringify(outcomes())}`);
+}
+if (JSON.stringify(unprocessedSeqs()) !== JSON.stringify(escalated.map((row) => row.seq))) {
+  throw new Error(`the captain rows are not both awaiting the captain: ${unprocessedSeqs()}`);
+}
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "an unchanged held outcome must reach the captain once, and a new event must still reach it: $out"
+  pass "Pi branch: an unchanged held outcome reaches the captain once across cadences, and a later red check on the task still does"
+}
+
 test_away_only_wake_rejects_when_record_is_archived_before_drain() {
   local repo home out status
   repo="$TMP_ROOT/away-only-recheck-root"
@@ -4454,6 +4588,122 @@ EOF
   pass "scopeForUnreadWake excludes every main-only class without vetoing eligible task-local rows, and writes the eligible snapshot"
 }
 
+# A second mate's status log is one shared channel for many independently keyed
+# decisions, so its signal rows are judged by the span presented since the last
+# drain (bounded by bin/fm-classify-lib.sh's own presentation-cursor writer),
+# not by every decision still open anywhere in that log. Single-task crewmate
+# logs keep their previous rule on both the Pi and the attended-host path.
+test_branch_dispatch_routes_secondmate_signal_by_new_span() {
+  local repo home out status
+  repo="$TMP_ROOT/dispatch-span-root"
+  home="$TMP_ROOT/dispatch-span-home"
+  mkdir -p "$repo/.pi/extensions/lib" "$home/state" "$home/projects/approved"
+  cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$repo/.pi/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-native-contract.ts" "$repo/.pi/extensions/lib/fm-native-contract.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-async-exec.ts" "$repo/.pi/extensions/lib/fm-async-exec.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-branch-model-picker.ts" "$repo/.pi/extensions/lib/fm-branch-model-picker.ts"
+  printf 'project=%s/projects/approved\nwindow=mate-window\nkind=secondmate\n' "$home" > "$home/state/mate.meta"
+  printf 'project=%s/projects/approved\nwindow=crew-window\nkind=ship\n' "$home" > "$home/state/crew.meta"
+  LIB="$repo/.pi/extensions/lib/fm-branch-dispatch.ts" FM_HOME="$home" CLASSIFY_LIB="$ROOT/bin/fm-classify-lib.sh" \
+    node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+import { execFileSync } from "node:child_process";
+import { appendFileSync, rmSync, writeFileSync } from "node:fs";
+
+const { branchOfferForWake, scopeForUnreadWake } = await import(pathToFileURL(process.env.LIB).href);
+const state = `${process.env.FM_HOME}/state`;
+const signalRow = (task) => `1\t1\tsignal\t${task}.status\tsignal: ${task}.status`;
+
+// Write the already-presented history, commit the presentation cursor at its
+// end through the real writer, then append the unread span a new wake covers.
+function stage(task, presented, span) {
+  const path = `${state}/${task}.status`;
+  writeFileSync(path, presented);
+  execFileSync("bash", ["-c",
+    'set -e; . "$1"; ident=$(_fm_open_decisions_file_ident "$2/$3.status"); ' +
+    'status_commit_presentation_snapshot "$2" "$(printf "%s\\t%s\\t%s" "$3" "$4" "$ident")"',
+    "_", process.env.CLASSIFY_LIB, state, task, String(Buffer.byteLength(presented))]);
+  appendFileSync(path, span);
+  writeFileSync(`${state}/.wake-queue`, signalRow(task));
+}
+
+// Both routing paths: the Pi dispatcher and the attended supervision host.
+function verdicts() {
+  return [false, true].map((attendedHost) => scopeForUnreadWake(state, false, false, attendedHost).eligibleSeqs.includes("1"));
+}
+
+function expectRoute(label, presented, span, toBranch) {
+  stage("mate", presented, span);
+  const [pi, host] = verdicts();
+  if (pi !== toBranch || host !== toBranch) {
+    throw new Error(`${label}: expected ${toBranch ? "branch" : "main"}, got pi=${pi} host=${host}`);
+  }
+}
+
+const hold = "needs-decision [at=1790000000] [key=old-hold]: deferred captain call\n";
+expectRoute("unrelated open hold plus a routine merged line", hold,
+  "done [at=1790000100]: sample-a PR merged\n", true);
+expectRoute("unrelated open hold stamped with a readable time", "needs-decision [at=10:00] [key=old-hold]: waiting\n",
+  "done: sample-a PR merged\n", true);
+expectRoute("routine note that only mentions an open key in prose", hold,
+  "done: sample-a merged, unrelated to [key=old-hold]\n", true);
+expectRoute("mixed routine and decision span", hold,
+  "done: sample-b PR merged\nneeds-decision [key=new-call]: pick an option\n", false);
+expectRoute("same-key update to an open decision", hold,
+  "working [key=old-hold]: still gathering evidence\n", false);
+expectRoute("same-key update behind a readable time stamp", hold,
+  "working [at=10:30] [key=old-hold]: still gathering evidence\n", false);
+expectRoute("key-less blocked line", hold, "blocked: cannot reach the forge\n", false);
+expectRoute("resolution of an open decision", hold, "resolved [key=old-hold]: answered\n", false);
+expectRoute("key-less resolution beside an unrelated open hold", hold, "resolved: routine follow-up\n", true);
+expectRoute("key-less resolution of an open unkeyed decision", "needs-decision: pick an option\n",
+  "resolved: answered\n", false);
+expectRoute("keyed resolution of a never-open key", hold, "resolved [key=never-open]: nothing to close\n", true);
+expectRoute("resolution after a bare resolved word left the unkeyed decision open",
+  "needs-decision: choose\nresolved\n", "resolved: answered\n", false);
+expectRoute("captain-held declaration", "working: history\n", "captain-held [key=parked]: deferred to Monday\n", false);
+
+// The host decides the whole close through the offer rule, which must agree.
+stage("mate", hold, "done: sample-c PR merged\n");
+if (!branchOfferForWake(state, `signal: ${state}/mate.status`, false, true).eligible) {
+  throw new Error("the attended-host offer kept a routine second-mate close on main behind an unrelated hold");
+}
+
+// Without a readable cursor the whole log is the span, so routing falls back
+// toward main rather than guessing.
+stage("mate", hold, "done: sample-d PR merged\n");
+rmSync(`${state}/.status-presentation-cursor`);
+if (verdicts().some(Boolean)) throw new Error("a missing presentation cursor did not fall back to the whole log");
+
+// A stale row stays a whole-log liveness check, and a co-queued signal row for
+// the same second mate keeps its own verdict in either order.
+for (const [order, queue, signalSeq, staleSeq] of [
+  ["stale first", "1\t1\tstale\tmate\tstale: mate\n1\t2\tsignal\tmate.status\tsignal: mate.status", "2", "1"],
+  ["signal first", "1\t1\tsignal\tmate.status\tsignal: mate.status\n1\t2\tstale\tmate\tstale: mate", "1", "2"],
+]) {
+  stage("mate", hold, "done: sample-e PR merged\n");
+  writeFileSync(`${state}/.wake-queue`, queue);
+  for (const attendedHost of [false, true]) {
+    const scope = scopeForUnreadWake(state, false, false, attendedHost);
+    if (!scope.eligibleSeqs.includes(signalSeq) || scope.eligibleSeqs.includes(staleSeq)) {
+      throw new Error(`${order}: signal and stale rows for one second mate shared a verdict: ${JSON.stringify(scope)}`);
+    }
+  }
+}
+
+// Single-task crewmate logs are unchanged: Pi judges only the row payload, and
+// the attended host keeps its whole-log rule.
+stage("crew", hold, "done: routine follow-up\n");
+const [crewPi, crewHost] = verdicts();
+if (!crewPi || crewHost) throw new Error(`crewmate signal routing changed: pi=${crewPi} host=${crewHost}`);
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "second-mate signal rows must be routed by their new span: $out"
+  pass "second-mate signal rows route by their new span while crewmate and stale routing stay unchanged"
+}
+
 # The model picker's bounded scrolling and its search ranking are Pi's own
 # SelectList and fuzzyFilter, so the guarantee only holds while the installed
 # Pi still exports them and still bounds what it renders. Stubs cannot answer
@@ -5275,9 +5525,11 @@ test_requested_healthy_outcome_and_unsolicited_routine_outcome_delivery
 test_captain_outcome_is_exactly_once_across_crash_reload_and_unrelated_response
 test_captain_outcome_processing_turn_is_sequence_keyed_and_re_presented
 test_branch_dispatch_classifies_main_only_rows_and_writes_the_eligible_snapshot
+test_branch_dispatch_routes_secondmate_signal_by_new_span
 test_branch_cache_key_is_per_home_stable
 test_branch_default_on_heartbeat_afk_and_fallback
 test_away_record_parks_main_and_presents_after_archive
+test_away_unchanged_held_outcome_reaches_the_captain_once_until_a_new_event
 test_away_only_wake_rejects_when_record_is_archived_before_drain
 test_away_claimed_heartbeat_on_a_task_wake_lifts_task_scoping
 test_branch_predrain_recheck_keeps_a_heartbeat_a_co_present_check_arrives_under
