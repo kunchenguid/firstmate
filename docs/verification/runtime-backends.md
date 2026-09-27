@@ -508,6 +508,30 @@ The lab home was deleted and the test entry was removed from the store and verif
 That automated spawn case runs against a fake claude, so it asserts the store entry and the launch command and nothing more; the live arms above are what establish that the entry actually suppresses the dialog.
 The composer-classification record below observes the same gate from the other side, where an untrusted worktree left Claude, Grok, and Muse unverified because the guard reads a first-launch trust dialog as an unreadable composer.
 
+## Commit attribution guard
+
+Claude Code's `attribution` setting only empties the attribution text its own commit and PR instructions ask the model to append; Claude Code does not rewrite a command afterwards.
+A claude task worker launched with `"attribution":{"commit":"","pr":"","sessionUrl":false}` on Claude Code 2.1.282 still typed `Co-Authored-By: Claude <noreply@anthropic.com>` into its own `git commit -m` string.
+
+`bin/fm-git-strip-ai-trailers.sh` strips such a trailer from the commit object on every harness, so commit messages are covered.
+It reads a commit message, so it cannot reach a PR title or body: those are typed into `gh` or `gh-axi`.
+`bin/fm-attribution-pretool-check.sh` runs as a Bash PreToolUse hook in a claude task worktree's `.claude/settings.local.json` and denies the command instead, which covers both.
+
+It does not cover a harness with no PreToolUse hook, `git commit --no-verify` (which the strip still catches at commit-msg), or commits made by no-mistakes' own pipeline agents, which run in `~/.no-mistakes/worktrees` outside the task worktree.
+`tests/fm-attribution-pretool-check.test.sh` covers the matcher and a real spawn's registration; `tests/fm-attribution-guard-live-e2e.test.sh` drives real Claude Code.
+
+Verified 2026-09-25 on Claude Code 2.1.282 on macOS.
+
+```sh
+FM_ATTRIBUTION_LIVE_E2E=1 bash tests/fm-attribution-guard-live-e2e.test.sh
+```
+
+```
+ok - claude 2.1.282 (Claude Code): the worktree guard denies an attributed commit and allows a clean one
+```
+
+The test submits a prompt, so it is opt-in; rerun it after every Claude upgrade.
+
 ## Launch-prompt backstop signatures
 
 `bin/fm-busy-lib.sh`'s launch-prompt backstop (`fm_busy_launch_prompt_parked`) reclassifies a launch whose busy record is still pinned at the fm-spawn seed as `unknown launch-prompt`, rather than `busy fm-spawn`, when the captured pane matches that harness's own recognized trust, sign-in, or first-run dialog.
