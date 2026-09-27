@@ -70,6 +70,22 @@ FM_BACKEND_CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 FM_BACKEND_KNOWN="tmux herdr zellij orca cmux"
 FM_BACKEND_SPAWN="tmux herdr zellij orca cmux"
 
+# FM_BACKEND_PROMPT_COMMAND_SCRUB: the literal first line fm-spawn.sh sends
+# into a freshly created tmux or herdr pane, before any other pane-bootstrap
+# text (docs/tmux-backend.md, docs/herdr-backend.md "Inherited
+# PROMPT_COMMAND"). This fleet's own launcher commonly runs inside a tool
+# (Herdr) that exports a bash-preexec PROMPT_COMMAND into its own process
+# environment; the tmux server and the herdr daemon both inherit that exported
+# string, so a brand-new pane's shell starts with PROMPT_COMMAND set but
+# without the matching __bp_* function definitions - shell functions never
+# propagate through the environment. Every prompt display then errors
+# "__bp_precmd_invoke_cmd: command not found" and can wedge the multi-line
+# launch command sent moments later. Clearing it here never disturbs a healthy
+# operator profile's own bash-preexec install, which runs afterward from the
+# pane's own rc files and sets PROMPT_COMMAND again itself, correctly.
+# shellcheck disable=SC2034 # Output global, read by the sourcing caller (fm-spawn.sh).
+FM_BACKEND_PROMPT_COMMAND_SCRUB='unset PROMPT_COMMAND; trap - DEBUG'
+
 # fm_backend_list_contains: whitespace-delimited membership without relying on
 # shell word splitting. fm-backend.sh is normally sourced by bash scripts, but
 # zsh diagnostics can source it too, so backend-name matching must stay portable.
