@@ -4370,8 +4370,14 @@ if [ "$KIND" != secondmate ]; then
     j_stop=$(json_escape "touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event stop 2>/dev/null || true")
     j_stopfail=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event stop-failure 2>/dev/null || true")
     j_sessionend=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event session-end 2>/dev/null || true")
+    # A claude worker can still type an AI trailer or a generated-with footer
+    # into a gh pr create body, which no commit-msg hook sees. Guards share one
+    # Bash matcher: a second guard appends to pretool_hooks, because a second
+    # PreToolUse key in the same object would silently replace this one.
+    j_attribution=$(json_escape "$(shell_quote "$FM_ROOT/bin/fm-attribution-pretool-check.sh")")
+    pretool_hooks="{\"type\":\"command\",\"command\":\"$j_attribution\"}"
     cat >"$WT/.claude/settings.local.json" <<EOF
-{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$j_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$j_stop"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"$j_stopfail"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$j_sessionend"}]}]}}
+{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[$pretool_hooks]}],"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$j_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$j_stop"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"$j_stopfail"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$j_sessionend"}]}]}}
 EOF
     exclude_path '.claude/settings.local.json'
     ;;

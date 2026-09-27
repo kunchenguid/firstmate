@@ -966,11 +966,16 @@ This applies only to agents Firstmate launches; the captain's own primary Firstm
 
 [`fm-spawn.sh --help`](../bin/fm-spawn.sh) owns the delivery mechanics, with focused regression coverage in [`tests/fm-spawn-compact-adviser-disable.test.sh`](../tests/fm-spawn-compact-adviser-disable.test.sh) and [`tests/fm-spawn-compact-adviser-disable-remote.test.sh`](../tests/fm-spawn-compact-adviser-disable-remote.test.sh).
 
-Every claude launch's inline `--settings` JSON also carries `"attribution":{"commit":"","pr":"","sessionUrl":false}`, so a spawned worker never writes a Co-Authored-By trailer, Claude-Session link, or generated-with line into a commit or PR body regardless of which settings scopes end up loaded.
+Every claude launch's inline `--settings` JSON also carries `"attribution":{"commit":"","pr":"","sessionUrl":false}`, so Claude Code's own instructions never ask a spawned worker for a Co-Authored-By trailer, Claude-Session link, or generated-with line, regardless of which settings scopes end up loaded.
+The setting does not stop a model typing one anyway, which a real worker commit did.
 Every fleet launch, Claude included, also receives a pane-scoped `GIT_CONFIG` `core.hooksPath` pointing at `state/<id>.git-hooks`, so git's `commit-msg` hook strips known AI trailers at the commit object even when a runtime injects them after the typed message.
 `bin/fm-git-strip-ai-trailers.sh` owns the identities, the install, and chaining the hooks of whichever repository git is running in, including when `git -c core.hooksPath` supplies the pane's hook override, so a project hook such as husky still runs.
 If the wrapper cannot resolve that repository's hooks directory, the git operation fails rather than silently skipping a project hook such as a pre-push guard.
 That directory is read-only, so a hook manager run inside a fleet pane (lefthook's npm postinstall, `pre-commit install`) fails instead of displacing the strip; install a project's hooks from outside the pane, where the wrappers chain them.
+The strip reads a commit message, so it cannot see a PR title or body: those are typed into `gh` or `gh-axi` and never reach a git hook.
+A claude task worktree therefore also gets [`fm-attribution-pretool-check.sh`](../bin/fm-attribution-pretool-check.sh) as a Bash PreToolUse guard, which denies a commit or PR command carrying attribution before it runs, inline or in a message file it names, and allows reads such as `git log | grep Co-Authored-By` or `gh pr view`.
+The guard reads the command text, so it also denies an attributed `git commit --no-verify`, which skips every hook including the strip.
+Every ship and scout brief carries the matching rule, which is the only cover on a harness with no PreToolUse hook, including for `git commit --no-verify` there.
 Per-machine Cursor `cli-config.json` attribution-off is not this contract: it does not travel with Firstmate, defaults back to on when unset, and only feeds the CLI's request to the server, so it suppresses the trailer rather than preventing it.
 
 ## Crew dispatch profiles (config/crew-dispatch.json)

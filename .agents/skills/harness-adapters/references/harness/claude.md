@@ -13,6 +13,7 @@ Busy hooks verified 2026-07-28 on Claude Code 2.1.220.
 | Model | `--model <model>`; discover through the interactive `/model` picker, with alias or full-name shape documented by `claude --help`. |
 | Effort | `--effort <low\|medium\|high\|xhigh\|max>`, verified on 2.1.196. |
 | Permissions | `--dangerously-skip-permissions` by default, or `--permission-mode auto` when `config/claude-permission-mode` is `auto`; the `auto` shape verified on 2.1.269, and `../../../../../docs/configuration.md` "Claude permission mode" owns the file. |
+| Commit attribution | The launch's `attribution` settings only stop Claude Code asking for a trailer. `../../../bin/fm-git-strip-ai-trailers.sh` strips one that still reaches a commit; a task worktree also runs `../../../bin/fm-attribution-pretool-check.sh` as a Bash PreToolUse hook, which denies an attributed commit or PR command, PR text included. `../../../../../docs/verification/runtime-backends.md` "Commit attribution guard" records the live check. |
 
 ## Workspace trust
 
