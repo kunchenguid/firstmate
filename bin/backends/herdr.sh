@@ -1279,6 +1279,9 @@ fm_backend_herdr_pane_idle_shell_pid() {  # <session> <pane-id>
 # nested foreground shell with a different pid after an agent returns to an
 # ordinary prompt. A genuine verified agent sets the result to `agent`, while
 # every unknown, mismatched, or unreadable process sets it to `unsafe`.
+# Agent recognition is owned by fm_backend_herdr_identity_is_agent and keys on
+# argv0 as well as the process name, so a live pi worker reported as
+# {name:"node", argv0:"pi"} classifies as `agent` rather than `unsafe`.
 # <task-dir> is mandatory because a recognized shell in another directory is
 # not authority for this task's pane. Two consecutive valid samples must name
 # the same foreground shell pid before lifecycle authority may be cleared.
@@ -1308,6 +1311,37 @@ fm_backend_herdr_pane_shell_foreground_pid() {  # <session> <pane-id> <task-dir>
   done
 }
 
+# fm_backend_herdr_identity_is_agent: true (0) when a normalized foreground
+# process identity names one of firstmate's verified harnesses.
+#
+# The process NAME alone is not sufficient evidence. A JS-runtime harness such
+# as pi runs under the node executable, so herdr reports
+# {name:"node", argv0:"pi"} for a genuinely live pi agent - and for that same
+# process it omits argv and cmdline entirely (verified against real herdr
+# 0.9.0). Classifying on basename(name) alone therefore counted a live pi
+# worker as unsafe, so fm-control's exit and relaunch refused on every
+# herdr+pi task. argv0 is the name the process was actually invoked as, so it
+# carries the agent identity whenever the runtime host's name hides it; a
+# cmdline that begins with an agent (optionally path-qualified) remains
+# accepted as the weaker pre-existing evidence path.
+#
+# <base> is the normalized process name, <argv0> the normalized argv0, and
+# <cmdline> the raw cmdline (possibly empty). Any ONE of them naming a verified
+# harness is sufficient; anything else is not evidence of an agent, so an
+# unexpected or ambiguous process still falls through to unsafe.
+fm_backend_herdr_identity_is_agent() {  # <base> <argv0> <cmdline>
+  local base=$1 argv0=$2 cmdline=$3 token
+  for token in "$base" "$argv0"; do
+    case "$token" in
+      claude|codex|opencode|pi|grok|kimi|muse) return 0 ;;
+    esac
+  done
+  case "$cmdline" in
+    claude\ *|*/claude\ *|codex\ *|*/codex\ *|opencode\ *|*/opencode\ *|pi\ *|*/pi\ *|grok\ *|*/grok\ *|kimi\ *|*/kimi\ *|muse\ *|*/muse\ *) return 0 ;;
+  esac
+  return 1
+}
+
 fm_backend_herdr_pane_shell_foreground_sample() {  # <session> <pane-id> <task-dir>
   local session=$1 pane=$2 task_dir=$3 canonical_task_dir info foreground_pgid rows
   local pid name argv0 cmdline cwd base shell_count=0 agent_count=0 unsafe_count=0
@@ -1324,14 +1358,21 @@ fm_backend_herdr_pane_shell_foreground_sample() {  # <session> <pane-id> <task-d
     >/dev/null 2>&1 || return 1
   foreground_pgid=$(printf '%s' "$info" | jq -er \
     '.result.process_info.foreground_process_group_id | select(type == "number" and . > 1) | floor' 2>/dev/null) || return 1
+  # Field order is load-bearing: pid, name, argv0, and cwd must all be
+  # non-empty for the proof, while cmdline is legitimately empty for some
+  # processes (a real herdr 0.9.0 pi agent is reported as
+  # {name:"node", argv0:"pi"} with NO cmdline at all). Because bash's
+  # `read` collapses a run of IFS whitespace (tab included), an empty
+  # non-final field would shift cwd into cmdline's slot and silently fail the
+  # directory proof, so the possibly-empty cmdline is emitted LAST.
   rows=$(printf '%s' "$info" | jq -r --arg task_dir "$task_dir" '
     .result.process_info.foreground_processes
     | select(type == "array" and length > 0)[]
-    | [(.pid // ""), (.name // ""), (.argv0 // .argv[0] // ""), (.cmdline // ""), (.cwd // "")]
+    | [(.pid // ""), (.name // ""), (.argv0 // .argv[0] // ""), (.cwd // ""), (.cmdline // "")]
     | @tsv
   ' 2>/dev/null) || return 1
   [ -n "$rows" ] || return 1
-  while IFS=$'\t' read -r pid name argv0 cmdline cwd; do
+  while IFS=$'\t' read -r pid name argv0 cwd cmdline; do
     case "$pid:$name:$argv0" in *[!0-9A-Za-z._/-:]*|:*|*::) return 1 ;; esac
     # Herdr reports physical cwd paths, while metadata can preserve a
     # symlinked spelling such as macOS /var for /private/var.
@@ -1350,14 +1391,12 @@ fm_backend_herdr_pane_shell_foreground_sample() {  # <session> <pane-id> <task-d
           unsafe_count=$((unsafe_count + 1))
         fi
         ;;
-      claude|codex|opencode|pi|grok|kimi|muse)
-        agent_count=$((agent_count + 1))
-        ;;
       *)
-        case "$cmdline" in
-          claude\ *|*/claude\ *|codex\ *|*/codex\ *|opencode\ *|*/opencode\ *|pi\ *|*/pi\ *|grok\ *|*/grok\ *|kimi\ *|*/kimi\ *|muse\ *|*/muse\ *) agent_count=$((agent_count + 1)) ;;
-          *) unsafe_count=$((unsafe_count + 1)) ;;
-        esac
+        if fm_backend_herdr_identity_is_agent "$base" "$argv0" "$cmdline"; then
+          agent_count=$((agent_count + 1))
+        else
+          unsafe_count=$((unsafe_count + 1))
+        fi
         ;;
     esac
   done <<< "$rows"

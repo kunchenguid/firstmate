@@ -572,6 +572,29 @@ evidence: model=openai-codex/gpt-5.6-luna herdr=0.9.0 pane=<ephemeral> default-s
 
 The proof uses the named lab helper for every Herdr call and does not test the captain's default session.
 
+The pi foreground-process shape was reverified on 2026-09-27 with Herdr 0.9.0 and Pi 0.85.1, where a live pi worker reports `{name:"node", argv0:"pi"}` with no argv or cmdline at all:
+
+```sh
+tests/fm-control-herdr-pi-classify.test.sh
+```
+
+Observed output:
+
+```text
+ok - identity: name=node argv0=pi with empty cmdline identifies the pi agent
+ok - identity: a bare node process identifies no agent
+ok - identity: an unexpected process identifies no agent
+ok - real herdr: the name=node argv0=pi shape samples as agent
+ok - real herdr: a live pi-shaped process is protected from stale-registration repair
+ok - real herdr: a bare node process without a pi argv0 samples as unsafe
+ok - real herdr: exit refuses a genuinely unexpected process
+ok - real herdr: relaunch refuses a genuinely unexpected process
+ok - real herdr: refusals preserved the endpoint and the task's local copy
+```
+
+The same day the full exit and relaunch recovery plane was verified against a real pi worker in a named lab: `fm-control.sh exit` printed `stopped` with `harness=pi`, and `fm-control.sh relaunch` printed `relaunched` with `harness=pi from=pi` after its replacement worker came up alive.
+That command is the guard that refreshes the classification half of this record; run it after every Herdr upgrade rather than trusting the versions above.
+
 ### Away-mode transport
 
 The Pi/Herdr return and injection path was reverified on Herdr 0.7.3 and Pi 0.80.7:
