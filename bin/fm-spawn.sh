@@ -89,7 +89,7 @@
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
 #   config/backend, then runtime auto-detection from the runtime firstmate's
-#   environment: $TMUX, HERDR_ENV=1, or cmux runtime signals (via
+#   environment: $TMUX, HERDR_ENV=1, verified Cairn markers, or cmux runtime signals (via
 #   bin/fm-backend.sh's fm_backend_detect, with cmux fallback details in
 #   docs/cmux-backend.md),
 #   then tmux.
@@ -1645,6 +1645,12 @@ if [ "$RELAUNCH" -eq 0 ]; then
     echo "error: backend=cmux does not support --secondmate spawns yet" >&2
     exit 1
   fi
+  if [ "$BACKEND" = cairn ]; then
+    fm_backend_cairn_state_dir >/dev/null || {
+      echo "error: no Cairn instance state directory" >&2
+      exit 1
+    }
+  fi
   if [ "$BACKEND" = orca ]; then
     fm_backend_orca_runtime_check || exit 1
   fi
@@ -1696,7 +1702,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fm_backend_validate_spawn "$BACKEND" || exit 1
   fm_backend_source "$BACKEND" || exit 1
   # A relaunch must PROVE the previous agent is gone before it launches another
-  # one into the same endpoint, and only tmux and herdr have a recovery-grade
+  # one into the same endpoint, and only tmux, herdr, and Cairn have a recovery-grade
   # classifier that can (bin/fm-control-lib.sh owns that capability table).
   fm_control_backend_state_verified "$BACKEND" || {
     echo "error: backend '$BACKEND' has no recovery-grade agent-state classifier, so a relaunch cannot prove the previous agent exited; refusing rather than risking two agents in one endpoint" >&2
@@ -3720,6 +3726,21 @@ EOF
     fi
     T="$CMUX_WORKSPACE_ID:$CMUX_SURFACE_ID"
     ;;
+  cairn)
+    if [ "$KIND" = secondmate ]; then
+      CAIRN_LAUNCH_HOME=$PROJ_ABS
+    else
+      CAIRN_LAUNCH_HOME=$FM_HOME
+    fi
+    T=$(fm_backend_cairn_create_task "$W" "$PROJ_ABS" "$CAIRN_LAUNCH_HOME") || exit 1
+    fm_backend_cairn_parse_target "$T" || exit 1
+    CAIRN_INSTANCE_STATE_DIR=$CAIRN_TARGET_STATE
+    CAIRN_BOUND_HOME=$CAIRN_TARGET_HOME
+    CAIRN_ENDPOINT_WORKSPACE_ID=$CAIRN_TARGET_WORKSPACE
+    CAIRN_ENDPOINT_PANE_ID=$CAIRN_TARGET_PANE
+    CAIRN_INSTANCE_PID=$(jq -er '.pid' "$CAIRN_INSTANCE_STATE_DIR/control.json") \
+      || exit 1
+    ;;
   orca)
     set +e
     ORCA_WT_RAW=$(fm_backend_orca_worktree_create "$PROJ_ABS" "$W")
@@ -3765,6 +3786,7 @@ spawn_send_text_line() { # <target> <text>
   zellij) fm_backend_zellij_send_text_line "$1" "$2" "$W" ;;
   orca) fm_backend_orca_send_text_line "$1" "$2" ;;
   cmux) fm_backend_cmux_send_text_line "$1" "$2" "$W" ;;
+  cairn) fm_backend_cairn_send_text_line "$1" "$2" ;;
   esac
 }
 spawn_current_path() { # <target>
@@ -3773,6 +3795,7 @@ spawn_current_path() { # <target>
   herdr) fm_backend_herdr_current_path "$1" ;;
   zellij) fm_backend_zellij_current_path "$1" "$W" ;;
   cmux) fm_backend_cmux_current_path "$1" "$W" ;;
+  cairn) fm_backend_cairn_current_path "$1" ;;
   esac
 }
 spawn_send_literal() { # <target> <text>
@@ -3782,6 +3805,7 @@ spawn_send_literal() { # <target> <text>
   zellij) fm_backend_zellij_send_literal "$1" "$2" "$W" ;;
   orca) fm_backend_orca_send_literal "$1" "$2" ;;
   cmux) fm_backend_cmux_send_literal "$1" "$2" "$W" ;;
+  cairn) fm_backend_cairn_send_literal "$1" "$2" ;;
   esac
 }
 spawn_send_key() { # <target> <key>
@@ -3791,6 +3815,7 @@ spawn_send_key() { # <target> <key>
   zellij) fm_backend_zellij_send_key "$1" "$2" "$W" ;;
   orca) fm_backend_orca_send_key "$1" "$2" ;;
   cmux) fm_backend_cmux_send_key "$1" "$2" "$W" ;;
+  cairn) fm_backend_cairn_send_key "$1" "$2" ;;
   esac
 }
 
@@ -4753,7 +4778,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id cairn_instance_state_dir cairn_instance_pid cairn_home cairn_workspace_id cairn_pane_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -4801,6 +4826,21 @@ preserve_relaunch_meta() {
   if [ "$BACKEND" = cmux ]; then
     echo "cmux_workspace_id=$CMUX_WORKSPACE_ID"
     echo "cmux_surface_id=$CMUX_SURFACE_ID"
+  fi
+  if [ "$BACKEND" = cairn ]; then
+    if [ "$RELAUNCH" -eq 1 ]; then
+      fm_backend_cairn_parse_target "$T" || exit 1
+      CAIRN_INSTANCE_STATE_DIR=$CAIRN_TARGET_STATE
+      CAIRN_BOUND_HOME=$CAIRN_TARGET_HOME
+      CAIRN_ENDPOINT_WORKSPACE_ID=$CAIRN_TARGET_WORKSPACE
+      CAIRN_ENDPOINT_PANE_ID=$CAIRN_TARGET_PANE
+      CAIRN_INSTANCE_PID=$(fm_meta_get "$RELAUNCH_META" cairn_instance_pid)
+    fi
+    echo "cairn_instance_state_dir=$CAIRN_INSTANCE_STATE_DIR"
+    echo "cairn_instance_pid=$CAIRN_INSTANCE_PID"
+    echo "cairn_home=$CAIRN_BOUND_HOME"
+    echo "cairn_workspace_id=$CAIRN_ENDPOINT_WORKSPACE_ID"
+    echo "cairn_pane_id=$CAIRN_ENDPOINT_PANE_ID"
   fi
   if [ "$KIND" = secondmate ]; then
     echo "home=$PROJ_ABS"

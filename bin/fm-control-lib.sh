@@ -279,7 +279,7 @@ fm_control_relaunch_resume_flag() {  # <harness> <registered-agent>
 fm_control_backend_supports_key() {  # <backend> <key>
   local backend=${1-} key=${2-}
   case "$backend" in
-    tmux|herdr|zellij|cmux)
+    tmux|herdr|zellij|cmux|cairn)
       case "$key" in Escape|Enter|C-c|C-u) return 0 ;; esac
       ;;
     orca)
@@ -296,7 +296,7 @@ fm_control_backend_supports_key() {  # <backend> <key>
 # transition as success.
 fm_control_backend_state_verified() {  # <backend>
   case "${1-}" in
-    tmux|herdr) return 0 ;;
+    tmux|herdr|cairn) return 0 ;;
   esac
   return 1
 }
@@ -358,6 +358,15 @@ fm_control_endpoint_absence_verdict() {  # <backend> <target>
         alive) printf 'alive\t' ;;
         missing) printf 'gone\t' ;;
         *) printf 'unproven\tthe recorded herdr session'"'"'s server could not be started, or its pane could not be classified once it was running' ;;
+      esac
+      ;;
+    cairn)
+      # A responsive, bound Cairn instance can report the pane's absence,
+      # but recreating the workspace is not licensed by that observation.
+      case "$(fm_backend_cairn_agent_state "$target")" in
+        dead) printf 'dead\t' ;;
+        alive) printf 'alive\t' ;;
+        *) printf 'unproven\tthe exact Cairn endpoint cannot be safely re-created from a missing-pane read' ;;
       esac
       ;;
     *)
