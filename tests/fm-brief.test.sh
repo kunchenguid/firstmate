@@ -604,8 +604,8 @@ test_no_mistakes_dod_ci_gate_feedback() {
   assert_grep 'never append `done:` while a `pr-<n>-<comment-id>` decision you opened is still unanswered' "$brief" \
     "no-mistakes DOD must hold done while a review-feedback decision is open"
   # shellcheck disable=SC2016  # single quotes are deliberate: the backticked keyed paused/resolved lines must stay literal
-  assert_grep 'append `paused [at=<epoch>] [key=nm-<run>-ci-wait]: <what must happen>` once, keep polling, and when it clears append `resolved [at=<epoch>] [key=nm-<run>-ci-wait]: <how it cleared>` yourself' "$brief" \
-    "no-mistakes DOD must report a maintainer-only wait as a keyed wait the worker resolves itself"
+  assert_grep 'append `paused [at=<epoch>] [key=nm-<run>-ci-wait]: <what must happen>`, re-append that same keyed line after any later status event of your own while the wait is still open (a review-feedback `needs-decision` or its `resolved` line), keep polling, and when it clears append `resolved [at=<epoch>] [key=nm-<run>-ci-wait]: <how it cleared>` yourself' "$brief" \
+    "no-mistakes DOD must keep a maintainer-only wait the latest readable keyed pause until the worker resolves it"
   # shellcheck disable=SC2016  # single quotes are deliberate: the backticked blocked: token must stay literal
   assert_grep 'never report it as `blocked:` and never stop on it' "$brief" \
     "no-mistakes DOD must forbid blocked: for a maintainer-only wait"
