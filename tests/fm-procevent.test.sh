@@ -157,15 +157,15 @@ wait_for() {  # <file> [tries]
 }
 
 # Arm now starts the listener, so a later start would poll again. Wait for the
-# capture that listener is already producing, and for its runner to release the
-# claim: the result lands before the runner publishes and exits, and a retire or
-# re-arm in that gap meets a live claim the synchronous start never left behind.
+# capture that listener is already producing, and for its runner to stop: the
+# result lands before the runner publishes and exits, and a retire or re-arm in
+# that gap still meets a live runner.
 wait_capture() {  # <home> <source-id> [tries]
   local home=$1 id=$2 n=${3:-100}
   local _
   for _ in $(seq 1 "$n"); do
     if first_result "$home" "$id" >/dev/null 2>&1 \
-      && [ ! -e "$FM_PROCEVENT_CLAIM_ROOT/$id.claim" ]; then
+      && [ "$(pe "$home" list | awk -v source="$id" '$1 == source { print $3; exit }')" = none ]; then
       return 0
     fi
     sleep 0.1
@@ -839,6 +839,25 @@ assert_contains "$(wake_payloads "$HFREPLY")" "procevent lavish $freply_id 1" \
   "firstmate-owned Lavish feedback was not announced"
 assert_grep 'kind=lavish-owned' "$HFREPLY/state/procevent/$freply_id.source" \
   "firstmate-owned Lavish source did not retain its round-aware ownership"
+if pe "$HFREPLY" retire "$freply_id" \
+  > "$TMP_ROOT/firstmate-open-retire.out" 2> "$TMP_ROOT/firstmate-open-retire.err"; then
+  fail "retirement discarded firstmate's initial pending Lavish round"
+fi
+assert_present "$HFREPLY/state/procevent/$freply_id.source" \
+  "initial pending Lavish round lost its source ownership"
+assert_present "$FM_PROCEVENT_CLAIM_ROOT/$freply_id.claim" \
+  "pending Lavish round released its machine-wide ownership"
+HFREPLY_OTHER="$TMP_ROOT/hfreply-other"; new_home "$HFREPLY_OTHER"
+fm_test_track_procevent_home "$HFREPLY_OTHER"
+if PATH="$FREPLY_BIN:$PATH" FM_HOME="$HFREPLY_OTHER" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$FREPLY_ART" \
+  > "$TMP_ROOT/firstmate-other-home.out" 2> "$TMP_ROOT/firstmate-other-home.err"; then
+  fail "another home armed firstmate's pending Lavish session"
+fi
+assert_contains "$(cat "$TMP_ROOT/firstmate-other-home.err")" "another home retains its ownership" \
+  "cross-home Lavish refusal did not identify durable ownership"
+assert_absent "$HFREPLY_OTHER/state/procevent/$freply_id.source" \
+  "another home published a registration over firstmate's pending Lavish round"
 if pe "$HFREPLY" register lavish "$freply_id" -- /bin/true \
   >"$TMP_ROOT/firstmate-replace.out" 2>"$TMP_ROOT/firstmate-replace.err"; then
   fail "generic registration replaced firstmate's round-aware Lavish source"
@@ -917,6 +936,12 @@ assert_present "$HFREPLY/state/procevent-inbox/$freply_id.1.handled" \
   "posting firstmate's Lavish reply did not acknowledge its FIFO captured round"
 assert_absent "$HFREPLY/state/procevent-inbox/$freply_id.2.handled" \
   "one firstmate reply acknowledged more than one captured round"
+if pe "$HFREPLY" retire "$freply_id" \
+  > "$TMP_ROOT/firstmate-fifo-retire.out" 2> "$TMP_ROOT/firstmate-fifo-retire.err"; then
+  fail "retirement discarded a later pending Lavish round"
+fi
+assert_present "$HFREPLY/state/procevent/$freply_id.source" \
+  "later pending Lavish round lost its source ownership"
 assert_grep 'poll2 reply: Confirmed in session.' "$FREPLY_LOG" \
   "firstmate's response was not posted to the active Lavish session"
 PATH="$FREPLY_BIN:$PATH" pe "$HFREPLY" reconcile >/dev/null

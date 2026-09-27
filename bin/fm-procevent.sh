@@ -432,15 +432,22 @@ lavish_rearm_round_locked() {  # <source-id> [staged]
 # The registration record is a worker-owned board's ONLY ownership evidence, so
 # it cannot be retired while a captured round of it is still unacknowledged.
 # Every retirement path asks here, with the source lock already held.
-source_retirement_blocked_locked() {  # <source-id>
-  local id=$1 kind
+source_retirement_blocked_locked() {  # <source-id> [terminal]
+  local id=$1 mode=${2-} kind pending adapter round
   kind=$(source_kind "$id" 2>/dev/null || true)
   if [ "$kind" = task-owned ]; then
     [ -n "$(source_pending "$id" | head -1)" ]
     return
   fi
   if [ "$kind" = lavish-owned ]; then
-    local round
+    if [ "$mode" != terminal ]; then
+      while IFS= read -r pending; do
+        [ -n "$pending" ] || continue
+        adapter=$(fm_procevent_result_adapter "$pending" 2>/dev/null || true)
+        [ -n "$adapter" ] && adapter_result_is_terminal "$adapter" "$pending" && continue
+        return 0
+      done < <(source_pending "$id")
+    fi
     round=$(source_field "$id" reply_round 2>/dev/null || true)
     case "$round" in ''|*[!0-9]*) return 1 ;; esac
     ! fm_procevent_is_handled "$STATE" "$id" "$round" \
@@ -621,6 +628,12 @@ cmd_register_lavish_owner() {
   fi
   (umask 077; mkdir -p "$REG") || die "cannot prepare the process-event registry"
   fm_procevent_source_lock_acquire "$id" || die "cannot lock the source"
+  if [ "$firstmate_owner" -eq 1 ] \
+    && [ ! -e "$(source_file "$id")" ] && [ ! -L "$(source_file "$id")" ] \
+    && { [ -e "$(fm_procevent_claim_path "$id")" ] || [ -L "$(fm_procevent_claim_path "$id")" ]; }; then
+    fm_procevent_source_lock_release "$id"
+    die "cannot arm Lavish source $id while another home retains its ownership"
+  fi
   if [ -e "$(source_file "$id")" ] || [ -L "$(source_file "$id")" ]; then
     if [ "$firstmate_owner" -eq 1 ]; then
       current_kind=$(source_kind "$id" 2>/dev/null || true)
@@ -1239,10 +1252,13 @@ cmd_start() {
     if fm_procevent_claim_load_locked "$CLAIM_ID" 2>/dev/null \
       && [ "$FM_PROCEVENT_CLAIM_HOME" = "$CLAIM_HOME" ] \
       && [ "$FM_PROCEVENT_CLAIM_PID" = "$CLAIM_PID" ] \
-      && [ "$FM_PROCEVENT_CLAIM_TOKEN" = "$CLAIM_TOKEN" ] \
-      && [ "$FM_PROCEVENT_CLAIM_TERMINAL" = terminal ]; then
-      fm_procevent_source_lock_release "$CLAIM_ID" 2>/dev/null || true
-      return 0
+      && [ "$FM_PROCEVENT_CLAIM_TOKEN" = "$CLAIM_TOKEN" ]; then
+      if [ "$FM_PROCEVENT_CLAIM_TERMINAL" = terminal ] \
+        || { [ "$(source_kind "$CLAIM_ID" 2>/dev/null || true)" = lavish-owned ] \
+          && [ -n "$(source_pending "$CLAIM_ID" | head -1)" ]; }; then
+        fm_procevent_source_lock_release "$CLAIM_ID" 2>/dev/null || true
+        return 0
+      fi
     fi
     fm_procevent_claim_release_locked "$CLAIM_ID" "$CLAIM_HOME" "$CLAIM_PID" "$CLAIM_TOKEN" 2>/dev/null || true
     fm_procevent_source_lock_release "$CLAIM_ID" 2>/dev/null || true
@@ -1548,7 +1564,7 @@ retire_owned_terminal_source() {  # <source-id>
   local id=$1 status=0 registration current_identity
   registration=$(source_file "$id")
   fm_procevent_source_lock_acquire "$id" || return 1
-  if source_retirement_blocked_locked "$id"; then
+  if source_retirement_blocked_locked "$id" terminal; then
     fm_procevent_source_lock_release "$id"
     return 2
   fi
