@@ -18,7 +18,14 @@
 # bind a candidate to its row under either schema.
 
 FM_QUOTA_AXI_MIN=0.1.51
-FM_QUOTA_PROVIDER_ID_RE='^[a-z0-9]+(-[a-z0-9]+)*\z'
+# Keep jq's strict end-of-string anchor and Bash's end anchor on one body.
+FM_QUOTA_PROVIDER_ID_BODY_RE='(custom:)?[a-z0-9]+(-[a-z0-9]+)*'
+FM_QUOTA_PROVIDER_ID_RE="^${FM_QUOTA_PROVIDER_ID_BODY_RE}\\z"
+
+fm_quota_provider_id_valid() {
+  local LC_ALL=C
+  [[ $1 =~ ^${FM_QUOTA_PROVIDER_ID_BODY_RE}$ ]]
+}
 
 # The eligibility section of .agents/skills/quota-array-dispatch/SKILL.md
 # owns the account-matching contract these jq definitions implement.

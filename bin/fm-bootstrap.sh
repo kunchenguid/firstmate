@@ -1107,12 +1107,12 @@ crew_dispatch_validate() {
     elif [(.rules // [])[]? | profiles(.use?)[]? | select(type != "object")] | length > 0 then "each use profile must be an object"
     elif [(.rules // [])[]? | profiles(.use?)[]? | select((.harness? | type) != "string" or (.harness | length) == 0)] | length > 0 then "each use profile needs harness"
     elif malformed_optional_fields([(.rules // [])[]? | profiles(.use?)[]?]) then
-      if $typed then "use profile model and effort must be non-empty strings, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\\z when present"
+      if $typed then "use profile model and effort must be non-empty strings, and provider must match \($provider_re) when present"
       else "use profile model and effort must be non-empty strings when present"
       end
     elif $typed and malformed_profile_floors([(.rules // [])[]? | profiles(.use?)[]?]) then "use profile floor needs scope and min_percent 0..100"
     elif $typed and ([(.rules // [])[]? | select(has("approval") and .approval != "captain")] | length > 0) then "approval must be \"captain\" when present"
-    elif $typed and ([(.rules // [])[]? | select(has("floor") and floor_bad(.floor; true))] | length > 0) then "rule floor needs scope, min_percent 0..100, and provider matching ^[a-z0-9]+(-[a-z0-9]+)*\\z"
+    elif $typed and ([(.rules // [])[]? | select(has("floor") and floor_bad(.floor; true))] | length > 0) then "rule floor needs scope, min_percent 0..100, and provider matching \($provider_re)"
     elif $typed and ([(.rules // [])[]? | select(has("min_confidence") and ((.min_confidence | type) != "number" or .min_confidence < 0 or .min_confidence > 1))] | length > 0) then "min_confidence must be a number from 0 through 1 when present"
     elif [(.rules // [])[]? | select(has("select") and ((.select? | type) != "string" or (.select | length) == 0))] | length > 0 then "select must be a non-empty string"
     elif [(.rules // [])[]? | .select? // empty | select(. != "quota-balanced")] | length > 0 then
@@ -1122,7 +1122,7 @@ crew_dispatch_validate() {
     elif has("default") and ([profiles(.default)[]? | select(type != "object")] | length) > 0 then "each default profile must be an object"
     elif has("default") and ([profiles(.default)[]? | select((.harness? | type) != "string" or (.harness | length) == 0)] | length) > 0 then "each default profile needs harness"
     elif has("default") and malformed_optional_fields([profiles(.default)[]?]) then
-      if $typed then "default profile model and effort must be non-empty strings, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\\z when present"
+      if $typed then "default profile model and effort must be non-empty strings, and provider must match \($provider_re) when present"
       else "default profile model and effort must be non-empty strings when present"
       end
     elif $typed and has("default") and malformed_profile_floors([profiles(.default)[]?]) then "default profile floor needs scope and min_percent 0..100"

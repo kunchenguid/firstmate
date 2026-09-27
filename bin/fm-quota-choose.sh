@@ -122,7 +122,7 @@ if printf '%s\n' "$QUOTA_SNAPSHOT" | jq -e 'type == "object"' >/dev/null 2>&1; t
     *) die "unsupported quota-axi schema version: $schema" ;;
   esac
 else
-  QUOTA_JSON=$(printf '%s\n' "$QUOTA_SNAPSHOT" | jq -Rse '
+  QUOTA_JSON=$(printf '%s\n' "$QUOTA_SNAPSHOT" | jq -Rse --arg provider_re "$FM_QUOTA_PROVIDER_ID_RE" '
     def valid_preamble:
       ((length == 2) and
        (.[0] | test("^bin: (quota-axi|.*/quota-axi)$")) and
@@ -174,7 +174,7 @@ else
       all(.[];
         type == "object" and
         (.provider | type) == "string" and
-        (.provider | test("^[a-z0-9]+(-[a-z0-9]+)*$")) and
+        (.provider | test($provider_re)) and
         ((has("accountKey") | not) or
          ((.accountKey | type) == "string" and (.accountKey | length) > 0 and ((.accountKey | test("\\s")) | not))) and
         (.scope | type) == "string" and
