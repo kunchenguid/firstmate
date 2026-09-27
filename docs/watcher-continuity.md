@@ -512,6 +512,6 @@ The other harnesses rely on these mechanisms:
 - Claude depends on the Stop `asyncRewake` rewake.
 - Cursor depends on its awaited stop-hook park.
 - Grok retains native background-completion notifications.
-- Codex retains bounded foreground checkpoints.
+- Codex retains bounded foreground checkpoints during a turn and the Stop-started idle supervisor after it.
 
 [`verification/supervision.md`](verification/supervision.md#watcher-continuity) records the current cross-harness live evidence, the dated Stop-owned Claude auto-arm results, and exact opt-in commands.
