@@ -353,13 +353,21 @@ await new Promise((resolve) => setTimeout(resolve, 6));
 await emit("agent_settled");
 await new Promise((resolve) => setTimeout(resolve, 6));
 await emit("agent_settled");
-if (messages.some((item) => item.message.customType !== "fm-heartbeat-request" || item.message.display !== false)) throw new Error("automatic maintenance did not use silent heartbeat delivery");
-if (messages.length !== 3) throw new Error(`expected three bounded offers, got ${messages.length}`);
-const ids = new Set(messages.map((item) => item.message.details.run_id));
+const requests = messages.filter((item) => item.message.customType === "fm-heartbeat-request");
+if (requests.some((item) => item.message.display !== false)) throw new Error("automatic maintenance did not use silent heartbeat delivery");
+if (requests.length !== 3) throw new Error(`expected three bounded offers, got ${requests.length}`);
+const ids = new Set(requests.map((item) => item.message.details.run_id));
 if (ids.size !== 1) throw new Error("redelivery changed run_id");
 if (messages.some((item) => item.options.deliverAs !== "followUp" || item.options.triggerTurn !== true)) {
   throw new Error("delivery did not preserve follow-up semantics");
 }
+await new Promise((resolve) => setTimeout(resolve, 6));
+await emit("agent_settled");
+const escalations = messages.filter((item) => item.message.customType === "fm-heartbeat-escalation");
+if (escalations.length !== 1 || !escalations[0].message.display) throw new Error("exhausted heartbeat did not start one executable main handoff");
+await new Promise((resolve) => setTimeout(resolve, 6));
+await emit("agent_settled");
+if (messages.filter((item) => item.message.customType === "fm-heartbeat-escalation").length !== 1) throw new Error("exhausted heartbeat duplicated its reserved handoff");
 await commands.get("stow")("", ctx);
 await emit("session_before_compact", { type: "session_before_compact" });
 const status = JSON.parse((await import("node:fs")).readFileSync(`${process.env.FM_HOME}/state/stow/state.json`, "utf8"));
@@ -367,12 +375,13 @@ if (!status.active.reasons.includes("manual") || !status.active.reasons.includes
   throw new Error("manual and precompact reasons did not deduplicate into the active run");
 }
 await emit("session_shutdown", { type: "session_shutdown", reason: "quit" });
-console.log(JSON.stringify({ messages: messages.length, notices: notices.length, attempts: status.active.attempts }));
+console.log(JSON.stringify({ messages: requests.length, escalations: escalations.length, notices: notices.length, attempts: status.active.attempts }));
 EOF
   ) || fail "Pi coordinator lifecycle failed: $out"
   [ "$(printf '%s' "$out" | tail -1 | jq -r '.messages')" -eq 3 ] || fail "bounded redelivery evidence missing: $out"
   [ "$(printf '%s' "$out" | tail -1 | jq -r '.attempts')" -eq 3 ] || fail "durable attempt count missing: $out"
-  pass "Pi coordinator stays default-off, waits for tools, queues, and editor input, then redelivers one run at most three times"
+  [ "$(printf '%s' "$out" | tail -1 | jq -r '.escalations')" -eq 1 ] || fail "executable heartbeat handoff missing: $out"
+  pass "Pi coordinator bounds heartbeat delivery and hands exhaustion to one executable main turn"
 }
 
 test_heartbeat_requires_three_verified_duties() {

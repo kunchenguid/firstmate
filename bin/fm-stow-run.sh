@@ -10,6 +10,8 @@
 #     --expected-revision N
 #   FM_HOME=/path/to/home fm-stow-run.sh deliver --run-id UUID \
 #     --generation TOKEN --expected-revision N
+#   FM_HOME=/path/to/home fm-stow-run.sh delivery --run-id UUID \
+#     --generation TOKEN --operation-id ID --expected-revision N
 #   FM_HOME=/path/to/home fm-stow-run.sh step --run-id UUID --generation TOKEN \
 #     --operation-id ID --phase prepared|verified --plan-ref RELATIVE_PATH \
 #     --before-sha256 SHA256 --target-sha256 SHA256 [--actual-sha256 SHA256] \
@@ -112,6 +114,9 @@ state_filter='
         (.session_id | type == "string") and (.session_file | type == "string") and
         (.generation == null or (.generation | type == "string")) and
         (.offered_generation == null or (.offered_generation | type == "string")) and
+        (.escalation_id == null or (.escalation_id | type == "string" and test("^e\\.[A-Za-z0-9._:-]{1,255}$"))) and
+        (.escalation_generation == null or (.escalation_generation | type == "string")) and
+        (.escalation_delivered_at == null or (.escalation_delivered_at | type == "string")) and
         (.phase == "requested" or .phase == "running" or .phase == "partial" or .phase == "blocked") and
         (.attempts | type == "number" and . >= 0 and . <= 3 and floor == .) and
         (.cutoff_entry_id | type == "string") and (.branch_fingerprint | test("^[0-9a-f]{64}$")) and
@@ -293,7 +298,8 @@ case "$COMMAND" in
         .pending=null |
         .active={run_id:$run,reasons:[$r],session_id:$sid,session_file:$sf,generation:null,
           phase:"requested",cutoff_entry_id:$eid,branch_fingerprint:$fp,offered_generation:null,plan_ref:null,
-          receipt_ref:null,attempts:0,steps:[],defer_reason:null,started_at:$now,parent_run_id:null}
+          receipt_ref:null,attempts:0,escalation_id:null,escalation_generation:null,
+          escalation_delivered_at:null,steps:[],defer_reason:null,started_at:$now,parent_run_id:null}
       ')
     commit_state "$STATE"
     printf '%s\n' "$STATE" | jq -c '{version:1,outcome:"requested",run_id:.active.run_id,revision:.revision,phase:.active.phase}'
@@ -336,12 +342,51 @@ case "$COMMAND" in
     active_phase=$(printf '%s' "$STATE" | jq -r '.active.phase')
     case "$active_phase" in requested|partial) ;; *) die 3 invalid-phase "only requested or partial runs may be delivered" ;; esac
     attempts=$(printf '%s' "$STATE" | jq -r '.active.attempts')
-    [ "$attempts" -lt 3 ] || die 3 delivery-exhausted "the same run_id has already been offered three times"
+    if [ "$attempts" -ge 3 ]; then
+      heartbeat_run=$(printf '%s' "$STATE" | jq -r '[.active.reasons[]|select(.=="heartbeat")]|length>0')
+      [ "$heartbeat_run" = true ] || die 3 delivery-exhausted "the same run_id has already been offered three times"
+      escalation_id=$(printf 'e.%s' "$run_id")
+      if [ "$(printf '%s' "$STATE" | jq -r '.active.escalation_delivered_at // ""')" != "" ]; then
+        printf '%s\n' "$STATE" | jq -c '{version:1,outcome:"escalated",run_id:.active.run_id,revision:.revision,
+          attempts:.active.attempts,escalation_id:.active.escalation_id}'
+        exit 0
+      fi
+      if [ "$(printf '%s' "$STATE" | jq -r '.active.escalation_generation // ""')" != "$generation" ]; then
+        STATE=$(printf '%s' "$STATE" | jq -c --arg gen "$generation" --arg id "$escalation_id" --argjson rev "$next_revision" '
+          .revision=$rev | .active.offered_generation=$gen | .active.escalation_id=$id |
+          .active.escalation_generation=$gen
+        ')
+        commit_state "$STATE"
+      fi
+      printf '%s\n' "$STATE" | jq -c '{version:1,outcome:"escalate",run_id:.active.run_id,revision:.revision,
+        attempts:.active.attempts,escalation_id:.active.escalation_id}'
+      exit 0
+    fi
     STATE=$(printf '%s' "$STATE" | jq -c --arg gen "$generation" --argjson rev "$next_revision" '
       .revision=$rev | .active.offered_generation=$gen | .active.attempts=(.active.attempts+1)
     ')
     commit_state "$STATE"
     printf '%s\n' "$STATE" | jq -c '{version:1,outcome:"deliver",run_id:.active.run_id,revision:.revision,attempts:.active.attempts}'
+    ;;
+  delivery)
+    require_revision
+    if ! valid_id "$run_id" || ! valid_id "$generation" || ! valid_id "$operation_id"; then
+      die 2 invalid-identity "run_id, generation, and operation_id are required"
+    fi
+    [ "$(printf '%s' "$STATE" | jq -r '.active.run_id // ""')" = "$run_id" ] \
+      || die 3 stale-run "run_id does not own the active run"
+    [ "$(printf '%s' "$STATE" | jq -r '.active.escalation_id // ""')" = "$operation_id" ] \
+      || die 3 stale-delivery "operation_id does not own the escalation"
+    [ "$(printf '%s' "$STATE" | jq -r '.active.escalation_generation // ""')" = "$generation" ] \
+      || die 3 stale-generation "generation does not own the escalation"
+    if [ "$(printf '%s' "$STATE" | jq -r '.active.escalation_delivered_at // ""')" = "" ]; then
+      STATE=$(printf '%s' "$STATE" | jq -c --arg now "$now" --argjson rev "$next_revision" '
+        .revision=$rev | .active.escalation_delivered_at=$now
+      ')
+      commit_state "$STATE"
+    fi
+    printf '%s\n' "$STATE" | jq -c '{version:1,outcome:"delivered",run_id:.active.run_id,revision:.revision,
+      attempts:.active.attempts,escalation_id:.active.escalation_id}'
     ;;
   step)
     require_revision
@@ -481,7 +526,8 @@ case "$COMMAND" in
             {run_id:$next,reasons:.pending.reasons,session_id:.pending.target_session_id,
               session_file:.pending.target_session_file,generation:null,phase:"requested",
               cutoff_entry_id:.pending.target_entry_id,branch_fingerprint:.pending.branch_fingerprint,
-              offered_generation:null,plan_ref:null,receipt_ref:null,attempts:0,steps:[],
+              offered_generation:null,plan_ref:null,receipt_ref:null,attempts:0,escalation_id:null,
+              escalation_generation:null,escalation_delivered_at:null,steps:[],
               defer_reason:null,started_at:$now,parent_run_id:$completed}
             else null end) |
           .pending=null

@@ -34,6 +34,9 @@ type RunState = {
     generation: string | null;
     phase: "requested" | "running" | "partial" | "blocked";
     attempts: number;
+    escalation_id?: string | null;
+    escalation_generation?: string | null;
+    escalation_delivered_at?: string | null;
     cutoff_entry_id: string;
     branch_fingerprint: string;
   };
@@ -49,6 +52,7 @@ type CoordinatorGeneration = {
   due: boolean;
   dispatching: boolean;
   lastOfferAt: number;
+  submittedEscalations: Set<string>;
 };
 
 const extensionFile = fileURLToPath(import.meta.url);
@@ -232,6 +236,12 @@ function promptFor(run: RunState["active"], generation: CoordinatorGeneration): 
   ].join("\n");
 }
 
+function escalationRecorded(ctx: ExtensionContext, id: string): boolean {
+  return ctx.sessionManager.getBranch().some((entry) => entry.type === "custom_message" &&
+    entry.customType === "fm-heartbeat-escalation" &&
+    (entry.details as { escalation_id?: unknown })?.escalation_id === id);
+}
+
 function dispatch(pi: ExtensionAPI, ctx: ExtensionContext): void {
   const generation = activeGeneration;
   if (!generation?.live || generation.dispatching || !safeSettled(ctx)) return;
@@ -248,6 +258,29 @@ function dispatch(pi: ExtensionAPI, ctx: ExtensionContext): void {
       "deliver", "--run-id", active.run_id, "--generation", generation.token,
       "--expected-revision", String(state.revision),
     ]);
+    if (offered.outcome === "escalated") return;
+    if (offered.outcome === "escalate") {
+      const escalationId = String(offered.escalation_id || "");
+      if (!escalationId) throw new Error("heartbeat escalation reservation is missing");
+      if (escalationRecorded(ctx, escalationId)) {
+        callRun(["delivery", "--run-id", active.run_id, "--generation", generation.token,
+          "--operation-id", escalationId, "--expected-revision", String(offered.revision)]);
+        generation.submittedEscalations.add(escalationId);
+        return;
+      }
+      if (generation.submittedEscalations.has(escalationId)) return;
+      if (!safeSettled(ctx)) return;
+      pi.sendMessage({ customType: "fm-heartbeat-escalation", display: true,
+        content: encodeFirstmateOperationalInput("watcher",
+          `Heartbeat execution handoff is exhausted but unfinished.\n${promptFor(active, generation)}`),
+        details: { version: 1, run_id: active.run_id, generation: generation.token,
+          attempt: active.attempts, escalation_id: escalationId } },
+      { triggerTurn: true, deliverAs: "followUp" });
+      generation.submittedEscalations.add(escalationId);
+      generation.lastOfferAt = Date.now();
+      lastDispatchError = "";
+      return;
+    }
     pi.sendMessage({
       customType: active.reasons.includes("heartbeat") ? "fm-heartbeat-request" : "fm-stow-request",
       content: active.reasons.includes("heartbeat")
@@ -326,6 +359,7 @@ function activate(pi: ExtensionAPI, ctx: ExtensionContext): void {
   const generation: CoordinatorGeneration = {
     token: randomUUID(), sessionId: identity.id, sessionFile: identity.file,
     live: true, timer: null, due: false, dispatching: false, lastOfferAt: 0,
+    submittedEscalations: new Set(),
   };
   activeGeneration = generation;
   generation.timer = setInterval(() => {

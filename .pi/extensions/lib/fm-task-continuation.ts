@@ -234,16 +234,20 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
     }
   }
 
-  function escalationEntries(admission: Admission) {
-    return admission.escalations.map(({ id, task, reason }) => ({
+  function escalationEntry(admission: Admission) {
+    if (!admission.escalations.length) return;
+    const lines = admission.escalations.map(({ task, reason }) =>
+      `${task}: two automatic coordination requests produced no verified continuation: ${reason}.`);
+    return {
       type: "custom_message" as const, customType: ESCALATION, display: true,
-      content: `Continuation needs intervention: ${task}\n` +
-        `Two automatic coordination requests produced no verified continuation: ${reason}. ` +
-        "The task remains open. Automatic model retries for this evidence are exhausted; this is not completion or a task blocker. " +
-        "Main must assign an authorized executor and verify receipt/start, reconcile a real dependency, or provide acceptance evidence. " +
-        "If an effect may already have happened, read it back before any retry. A new instruction can resume coordination; unrelated input does not reset the budget.",
-      details: { admissions: [id], task, owner: "main", kind: "coordination-failure" },
-    }));
+      content: "Continuation needs executable main coordination:\n" + lines.join("\n") + "\n" +
+        "These tasks remain open. Automatic request budgets stay exhausted; this is not completion or a task blocker. " +
+        "Assign an authorized executor and verify receipt/start, reconcile a real dependency, or provide acceptance evidence. " +
+        "If an effect may already have happened, read it back before any retry. Unrelated input does not reset the budget.",
+      details: { admissions: admission.escalations.map(({ id }) => id),
+        task: admission.escalations.length === 1 ? admission.escalations[0].task : undefined,
+        tasks: admission.escalations.map(({ task }) => task), owner: "main", kind: "coordination-failure" },
+    };
   }
 
   async function check(ctx: ExtensionContext): Promise<Admission | undefined> {
@@ -272,9 +276,10 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
       // No await between the safety owner's complete judgment and submission.
       // If unsafe, canonical reserved admission survives the next tick/reload.
       if (admission && epoch === generation && admission.canNotify()) {
-        for (const entry of escalationEntries(admission)) {
-          submitted.add(entry.details.admissions[0]);
-          pi.sendMessage(entry, { triggerTurn: false });
+        const escalation = escalationEntry(admission);
+        if (escalation) {
+          pi.sendMessage(escalation, { triggerTurn: true, deliverAs: "followUp" });
+          for (const id of escalation.details.admissions) submitted.add(id);
         }
         if (!admission.admissions.length) return;
         for (const id of admission.admissions) submitted.add(id);
@@ -318,12 +323,12 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
     context = ctx;
     const admission = await check(ctx);
     if (admission && admission.canContinue()) {
-      const escalations = escalationEntries(admission);
-      for (const entry of escalations) submitted.add(entry.details.admissions[0]);
+      const escalation = escalationEntry(admission);
+      if (escalation) for (const id of escalation.details.admissions) submitted.add(id);
       for (const id of admission.admissions) submitted.add(id);
-      return { entries: [...escalations, ...(admission.admissions.length ? [{ type: "custom_message" as const, customType: MESSAGE,
+      return { entries: [...(escalation ? [escalation] : []), ...(admission.admissions.length ? [{ type: "custom_message" as const, customType: MESSAGE,
         content: admission.content, display: false, details: { admissions: admission.admissions } }] : [])],
-        continue: admission.admissions.length > 0 };
+        continue: admission.admissions.length > 0 || Boolean(escalation) };
     }
   });
 
