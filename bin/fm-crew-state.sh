@@ -990,7 +990,7 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
     # which needs no inventory read (the bare `axi` table may be capped).
     if [ "$(strip_quotes "$(nm_field current_branch)")" = "$CREW_BRANCH" ] \
       && [ "$(strip_quotes "$(nm_field runs_on_current_branch)")" = 0 ]; then
-      run_choice=status-absent
+      run_choice="status-absent"
     else
       overview_ok=1
       run_overview=$(fm_nm_run_checked "$WT" "$NM_TIMEOUT" axi) || overview_ok=0
