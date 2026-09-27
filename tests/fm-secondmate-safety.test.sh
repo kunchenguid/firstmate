@@ -550,6 +550,8 @@ test_secondmate_spawn_resolves_punctuated_registry_projects() {
   sub="$TMP_ROOT/punctuated-spawn-subhome"
   mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects"
   mkdir -p "$sub/data" "$sub/state" "$sub/config" "$sub/projects"
+  printf '%s\n' 'projects/' 'state/' 'data/' 'config/' '.no-mistakes/' > "$sub/.gitignore"
+  git -C "$sub" init -q -b main
   mark_firstmate_home "$sub"
   printf 'punctuated\n' > "$sub/.fm-secondmate-home"
   printf '# Charter\n\nHandled work.\n' > "$sub/data/charter.md"
@@ -1908,6 +1910,9 @@ home=$subhome
 projects=alpha
 EOF
   printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
+  fm_git_init_commit "$TMP_ROOT/plain-clone-teardown-child-wt"
+  "$ROOT/bin/fm-git-strip-ai-trailers.sh" install "$subhome/state/aborted-child.git-hooks" \
+    "$TMP_ROOT/plain-clone-teardown-child-wt" || fail "could not seed an aborted child's read-only strip dir"
   fakebin=$(make_fake_tmux "$TMP_ROOT/plain-clone-teardown-fake")
   log="$TMP_ROOT/plain-clone-teardown-fake/tmux.log"
 
@@ -1919,7 +1924,7 @@ EOF
   [ ! -d "$subhome" ] || fail "teardown did not remove the plain-clone secondmate home"
   [ ! -e "$home/state/domain.meta" ] || fail "teardown did not clear parent meta for plain-clone home"
   grep -F -- '- domain ' "$home/data/secondmates.md" >/dev/null && fail "teardown did not remove plain-clone registry route"
-  pass "secondmate teardown raw-removes plain-clone homes"
+  pass "secondmate teardown raw-removes plain-clone homes, including a leaked read-only strip dir"
 }
 
 test_secondmate_force_teardown_discards_child_work() {

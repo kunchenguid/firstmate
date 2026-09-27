@@ -220,6 +220,8 @@ test_secondmate_launch_relies_on_discovery() {
   printf '# Firstmate\n' > "$home/AGENTS.md"
   printf 'sm\n' > "$home/.fm-secondmate-home"
   printf 'charter\n' > "$home/data/charter.md"
+  printf '%s\n' 'projects/' 'state/' 'data/' 'config/' '.no-mistakes/' > "$home/.gitignore"
+  git -C "$home" init -q -b main
   fakebin=$(make_spawn_fakebin "$world/fake" claude)
   make_fake_omp "$fakebin"
   launchlog="$world/launch.log"
@@ -258,6 +260,8 @@ test_secondmate_config_pinned_model_is_validated() {
   printf '# Firstmate\n' > "$home/AGENTS.md"
   printf 'sm\n' > "$home/.fm-secondmate-home"
   printf 'charter\n' > "$home/data/charter.md"
+  printf '%s\n' 'projects/' 'state/' 'data/' 'config/' '.no-mistakes/' > "$home/.gitignore"
+  git -C "$home" init -q -b main
   printf 'omp openai-codex/gpt-nope\n' > "$world/home/config/secondmate-harness"
   fakebin=$(make_spawn_fakebin "$world/fake" claude)
   make_fake_omp "$fakebin"

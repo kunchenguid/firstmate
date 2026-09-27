@@ -222,6 +222,16 @@ Both use `max(300, FM_POLL + 60)`.
 The default never drops below the historical 300-second floor for the common short-poll case, but grows with the poll cadence once that cadence would otherwise outrun it.
 `fm_poll_derived_grace` in `bin/fm-wake-lib.sh` is the single owner of that formula.
 
+That refusal has a ceiling.
+Once the live holder's beacon is stale past `FM_WATCHER_STALL_BOUND` (default three times the grace), the re-arm takes these steps:
+
+1. It re-verifies the holder against the lock's recorded identity.
+2. It retires the holder with TERM.
+3. It starts in the holder's place.
+
+A watcher wedged mid-cycle can therefore no longer refuse every replacement indefinitely.
+`bin/fm-watch.sh`'s header owns the exact wording and the survives-TERM fallback.
+
 The auto-arm hook additionally exports its resolved `FM_GUARD_GRACE` when it forks `bin/fm-watch-arm.sh`.
 The arm wrapper and the watcher it may start then judge staleness with the exact same value the hook just judged it with, whether that value came from an operator override or the poll-derived default.
 
@@ -277,6 +287,13 @@ The registrations in detail:
   The same marker guard carries every tracked `.claude/settings.json` entry whose event Grok already covers through its own `.grok/hooks/` registration, which is both `Stop` entries, the `SessionStart` entry, and the two `PreToolUse` Bash entries.
   `bin/fm-subagent-pretool-check.sh` is the one deliberate unguarded exception because no Grok registration covers the subagent-spawn event, recorded in [`subagent-guard.md`](subagent-guard.md) "Known residual gap".
   `tests/fm-turnend-guard.test.sh` pins that inventory so neither the guarded set nor the exception can change silently.
+- pi-code, Pi's Claude-hook compatibility extension, also loads `<project>/.claude/settings.json` and has no `asyncRewake`, so it awaits every Stop hook it delivers.
+  `bin/fm-claude-stop-autoarm.sh` therefore stands down on a pi-code-delivered payload.
+  Otherwise its foreground arm would run synchronously and hold Pi's turn open for the declared multi-hour timeout, exactly the wedge Cursor and grok 1.0.0 would produce (issue #3343).
+  Pi's own native extensions own its supervision.
+  The discriminator is the payload's own `transcript_path`, not the environment and not the shared foreign-host predicate above.
+  pi-code stamps it with Pi's session file under `/.pi/`, a path component a Claude transcript never carries.
+  The stand-down fails toward running, matching the guards above, so no payload, no `jq`, or no `transcript_path` still arms, and every other Claude-shaped hook pi-code delivers keeps running.
 
 ### Claude and Codex blocking
 
@@ -488,7 +505,8 @@ The remaining microsecond takeover window can produce at most one harmless wake 
 Without those records an older park still running after the next `stop` could leak one process and one stale duplicate wake.
 
 Cursor's `beforeSubmitPrompt` step fires once on a real captain message and does not fire for hook-driven follow-ups, so invalidating the park baton there would close the pre-claim window exactly.
-That hook is deliberately left to a follow-up alongside the deferred `preCompact` surface and is not registered in this change.
+The step is now registered only for the [dialog mirror](supervision-host.md#the-dialog-mirror); it does not invalidate the park baton.
+Baton invalidation and the `preCompact` surface remain deferred.
 
 ### Adapter failures in the pull guard
 

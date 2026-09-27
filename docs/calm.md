@@ -24,6 +24,10 @@ Pi applies that rule independently to each text block, so a short working note c
 A working note is briefly visible while it streams before its settled row collapses.
 The narration is hidden only from the live transcript presentation, and remains in the message, model context, session storage, and `/export` artifacts.
 The operational inputs Calm classifies remain ordinary user-role messages, while Pi's transcript layout renders their complete rows at zero height.
+While a turn runs, Calm also keeps those Firstmate inputs out of Pi's queued-message listing, and the captain's own queued messages stay listed.
+Escape and the dequeue key return only the captain's queued messages to the editor; hidden Firstmate inputs stay queued in their original order and are never shown as raw text or dropped.
+When Escape, or navigating the session tree, stops a run with Firstmate inputs still queued, Calm starts one new turn to deliver them and shows the one-line notice `Firstmate supervision continues in a new turn.`
+Inputs held behind a running compaction stay there until Pi sends them after compaction, so they start and announce no turn of their own.
 The session-start nudge remains on its existing non-displayed custom-message path.
 
 Outside Pi's same-name built-in override collision described below, Calm changes presentation only.
@@ -39,8 +43,11 @@ These are supported-API boundaries rather than hidden-content failures.
 ## Pi compatibility
 
 Calm has no numeric Pi version minimum or maximum and never refuses Pi solely because its version is newer than a previously verified version.
-The collapsed-thinking and operational-user-row presentation adapters probe the exact Pi API seam they patch when Calm loads.
-If Pi removes one of those seams, Calm logs a diagnostic naming the unavailable adapter and skips only that adapter; `/calm`, the other adapter, and unrelated Pi extensions remain available.
+The collapsed-thinking, operational-user-row, and queued-operational-row presentation adapters probe the exact Pi API seam they patch when Calm loads.
+If Pi removes one of those seams, Calm logs a diagnostic naming the unavailable adapter and skips only that adapter; `/calm`, the other adapters, and unrelated Pi extensions remain available.
+Keeping hidden queued inputs across Escape also needs members of Pi's live session, which exist only once a session runs.
+Calm checks them for each session on its first queued-listing draw, before hiding anything.
+A session missing any of them keeps its queued rows and Escape exactly as stock and shows one warning, and `tests/fm-calm-pi-queue-retention-live-e2e.test.sh` fails naming the installed Pi version.
 
 Calm's built-in tool presentation (`bash`, `read`, `edit`, `write`, `grep`, `find`, `ls`) shares Pi's single, unmerged override slot per name with any other extension that overrides the same tool.
 While the persisted Calm preference is off, Calm registers none of those overrides and therefore contests no built-in tool name.
@@ -52,7 +59,7 @@ If the other extension wins, a session-start console diagnostic names the tool a
 
 [`calm-mode-feasibility.md`](calm-mode-feasibility.md) owns the version-scoped renderer taxonomy, built-in override constraints, and empirical evidence.
 [`configuration.md`](configuration.md#calm-preference-configcalm) owns the persisted preference file and resolution rules.
-`.pi/extensions/lib/fm-calm-visibility.ts` owns the visibility policy, `.claude/mods/firstmate-calm/lib/fm-calm-preservation.ts` owns the shared substantive mid-turn text rule that Pi imports through its tracked symlink, `.pi/extensions/lib/fm-calm-operational-user-layout.ts` owns the zero-height operational-user row adapter, and `.pi/extensions/lib/fm-calm-working-ship.ts` owns Pi's animated working presentation over the sprite geometry both harnesses share in `.claude/mods/firstmate-calm/lib/fm-calm-working-ship-sprite.ts`.
+`.pi/extensions/lib/fm-calm-visibility.ts` owns the visibility policy, `.claude/mods/firstmate-calm/lib/fm-calm-preservation.ts` owns the shared substantive mid-turn text rule that Pi imports through its tracked symlink, `.pi/extensions/lib/fm-calm-operational-user-layout.ts` owns the zero-height operational-user row adapter, `.pi/extensions/lib/fm-calm-pending-operational-layout.ts` owns the queued-row adapter and its session capability check, and `.pi/extensions/lib/fm-calm-working-ship.ts` owns Pi's animated working presentation over the sprite geometry both harnesses share in `.claude/mods/firstmate-calm/lib/fm-calm-working-ship-sprite.ts`.
 
 Regression entry points:
 
@@ -60,6 +67,7 @@ Regression entry points:
 tests/fm-calm-pi-extension.test.sh
 tests/fm-pi-branch-extension.test.sh
 tests/fm-pi-primary-types.test.sh
+tests/fm-calm-pi-queue-retention-live-e2e.test.sh
 FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh
 ```
 
@@ -76,14 +84,20 @@ While Calm is on, the stock working row (`Sauteing... (12s · 300 tokens)`) beco
 On Claude Code the boat is painted in Claude Code's own theme colors rather than Pi's standard ANSI codes: every water cell takes the spinner blue of the active theme family (`#93a5ff` on a dark theme, `#5769f7` on a light one) and the whole boat, both sail halves, mast, and hull, takes the Claude orange of the stock spinner (`#d77757`).
 The family follows the `theme` setting by its prefix, `dark` or `light`, is re-read when the theme changes, and uses the light set as the both-readable fallback for `auto`, custom, missing, or unreadable values; the Pi extension keeps its standard ANSI blue and yellow.
 Tool rows, tool result blocks, and folded tool groups draw at zero height, so a turn that used tools takes the same space as one that did not.
-A user row whose text the canonical operational-input parser recognizes, a Firstmate session-start, watcher, turn-end guard, away-supervisor, launch-brief, or branch-outcome envelope, a from-firstmate routed message, or one of the narrow pre-protocol shapes kept for old transcripts, draws at zero height; every other user row, including near misses such as a quoted or ASCII-only marker, stays visible.
+A user row whose text the canonical operational-input parser recognizes, a Firstmate session-start, watcher, turn-end guard, away-supervisor, launch-brief, or branch-outcome envelope, a from-firstmate routed message, or one of the narrow pre-protocol shapes kept for old transcripts, draws at zero height; other user rows, including near misses such as a quoted or ASCII-only marker, stay visible unless backed by an operational record as described below.
+Claude Code removes the U+2063 that starts those envelopes from every submitted prompt, so Firstmate delivers its away-mode escalations to a Claude Code primary as the record-backed doorbell `bin/fm-operational-input.sh` owns: a plain line naming a record under the home's `state/operational-inbox` that holds the envelope.
+Calm reads that record through the mod's file API and hides the doorbell row only when the record holds a current envelope, so a doorbell-shaped line naming no such record stays visible; a verbatim copy of a live doorbell line, pasted back while its record still exists, is treated as Firstmate's and hides.
+Record verdicts are cached until a drawing invalidation (including a `/calm` toggle), which rechecks pruned records on redraw.
 Assistant text follows the shared per-block preservation rule above, including when `claude --continue` restores the transcript.
 Toggling Calm redraws every hooked row already on screen, so rows drawn before the toggle hide or restore retroactively, and the preference is read before the first row draws.
 Nothing is rewritten: hidden rows remain in the message, model context, session storage, and exports, and the mod never touches tool execution, prompts, or the stored transcript.
 
-Bounds of the Claude Code support, each recorded with evidence in [`calm-mode-feasibility.md`](calm-mode-feasibility.md#2026-09-15-claude-code-21272-mods-feasibility-and-the-shipped-mod):
+Bounds of the Claude Code support, recorded with evidence in [`calm-mode-feasibility.md`](calm-mode-feasibility.md#2026-09-15-claude-code-21272-mods-feasibility-and-the-shipped-mod) and, for 2.1.280 and the record-backed doorbell, its [2026-09-25 record](calm-mode-feasibility.md#2026-09-25-claude-code-21280-verification-and-the-record-backed-operational-doorbell) and [2.1.282 reproduction](calm-mode-feasibility.md#2026-09-25-claude-code-21282-reproduction-on-the-installed-build):
 
-- The function-hooks surface is early access and default-off, and Claude Code states that its API may change between releases without notice; the mod is verified on Claude Code 2.1.272 and refuses nothing newer.
+- The function-hooks surface is early access and default-off, and Claude Code states that its API may change between releases without notice; the mod is verified on Claude Code 2.1.272, 2.1.280, and 2.1.282 and refuses nothing newer.
+- Firstmate's typed producers bound for a Claude Code pane - the away-mode daemon's escalations and a worker's launch brief - ride the record-backed doorbell, so they hide like any operational row; only an envelope that reaches Claude Code some other way as bare typed or launch-prompt text arrives without its U+2063 and stays visible.
+- Every record write prunes operational-inbox records once they reach about seven days of elapsed age (the boundary is approximate); age alone does not remove a record without a later write.
+  Once its record is gone, a doorbell is no longer recognized: it draws as a visible user row after Calm rechecks it (for example on `/calm` toggle or `claude --continue`) and `/ahoy` treats it as a captain boundary.
 - On the main-screen layout (not the fullscreen alternate screen), a toggle redraws the live screen by clearing and reprinting it, and the terminal's own scrollback keeps the earlier rendering above it; the fullscreen layout has no such stale copy.
 - The sailboat is painted through Claude Code's Raster element, whose colors are RGB quantized to 256-color escapes rather than the standard 16-color ANSI codes Pi's widget emits.
 - The detailed transcript view (`ctrl+o`) keeps its per-message timestamp and model headers where hidden assistant rows sat, because those headers are not a hookable drawing.
