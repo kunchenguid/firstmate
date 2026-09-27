@@ -818,6 +818,33 @@ test_inbound_records_a_failed_acknowledgment_durably_without_looping() {
   pass "a failed acknowledgment send is durably recorded as failed, reported plainly, and never silently dropped or retried"
 }
 
+test_inbound_reports_unconfigured_acknowledgment_as_failed_and_records_it() {
+  local home note out rc record f
+  home=$(make_home inbound-ack-unconfigured)
+  configure_hermes "$home"
+  run_inbox_note "$home" "[Telegram from Rajiv (chat 8629896233)] Please redeploy the staging environment."
+  note=$(latest_note "$home")
+  set +e
+  out=$(run_notify "$home" inbound "$note")
+  rc=$?
+  set -e
+  [ "$rc" -eq 3 ] \
+    || fail "an acknowledgment attempt on an unconfigured home was not reported with the distinct partial-success exit code (got $rc)"
+  assert_contains "$out" "acknowledgement:failed" \
+    "an acknowledgment attempt on an unconfigured home was not reported as failed on stdout"
+  assert_contains "$out" "command:Please redeploy the staging environment." \
+    "an unconfigured acknowledgment must not suppress the message's own classification"
+  [ -s "$home/hermes-send.log" ] && fail "a send was attempted with no configured Telegram target"
+  record=''
+  for f in "$home"/state/hermes-notify/routes/receipt--*.record; do
+    [ -e "$f" ] && record=$f
+    break
+  done
+  [ -n "$record" ] || fail "the unconfigured acknowledgment left no durable record under state/hermes-notify/routes"
+  assert_grep "status=skipped" "$record" "the unconfigured acknowledgment was not durably recorded as skipped"
+  pass "an acknowledgment attempt on a home with no configured Telegram target is reported as failed and durably recorded, never mislabeled as sent"
+}
+
 test_register_sends_and_records
 test_register_refuses_when_not_an_active_hold
 test_register_is_idempotent_within_same_lifecycle
@@ -848,3 +875,4 @@ test_inbound_explicit_ack_request_is_answered_even_at_home
 test_inbound_does_not_change_home_mode_behavior_for_ordinary_messages
 test_inbound_does_not_double_send_a_retried_capture
 test_inbound_records_a_failed_acknowledgment_durably_without_looping
+test_inbound_reports_unconfigured_acknowledgment_as_failed_and_records_it
