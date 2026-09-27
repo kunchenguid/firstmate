@@ -197,6 +197,7 @@ Bearings invocation examples:
 - `/bearings include PRs` keeps chat-only mode and opts into live PR enrichment.
 - `/bearings file` replaces today's `data/status-report-<YYYY-MM-DD>.md` from scratch and links it from the four-section chat digest.
 - `/bearings file include PRs` combines the dated report with live PR enrichment.
+- `/bearings lavish` adds a fleet board with Charted Next cards that show available task context; ready work has a dispatch checkbox, while gated work shows why it is waiting.
 
 Agent-only reference skills live under `.agents/skills/` and are loaded by firstmate at the trigger points named in [`AGENTS.md`](AGENTS.md).
 
