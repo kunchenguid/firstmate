@@ -37,6 +37,31 @@ ln -sf "$(command -v git)" "$TOOLS/git"
 ln -sf "$(command -v jq)" "$TOOLS/jq"
 BASE_PATH="$TOOLS:/usr/bin:/bin:/usr/sbin:/sbin"
 
+# Every command under test is a `#!/usr/bin/env bash` script, so the fixture PATH
+# must resolve a bash this suite controls rather than the runner's own /bin/bash
+# (which is 3.2 on macOS). REAL_BASH is the interpreter this suite started with;
+# each case's fake_bash shim advertises the version the readiness check should
+# see through the public --version interface and delegates everything else to it.
+REAL_BASH=${BASH:-$(command -v bash)}
+
+# fake_bash <version>: install the case's resolvable bash. Call it after
+# new_case to change the version a case presents.
+fake_bash() { # <version>
+  local version=$1 line
+  line="printf 'GNU bash, version $version(1)-release (fixture)\\n'"
+  {
+    printf '%s\n' '#!/bin/sh'
+    printf '%s\n' '# A controllable bash for the fixture PATH: see fake_bash in the suite.'
+    # shellcheck disable=SC2016 # Written to the shim verbatim, not expanded here.
+    printf '%s\n' 'if [ "${1:-}" = --version ]; then'
+    printf '%s\n' "$line"
+    printf '%s\n' '  exit 0'
+    printf '%s\n' 'fi'
+    printf 'exec %q "$@"\n' "$REAL_BASH"
+  } > "$CASE_BIN/bash"
+  chmod +x "$CASE_BIN/bash"
+}
+
 # Real socket-owner holders for the Darwin birth check: jq blocked on a fifo
 # this test keeps open, with exactly the marker environment each birth needs.
 JQ=$(command -v jq)
@@ -292,6 +317,7 @@ SH
 exit 0
 SH
   chmod +x "$CASE_BIN/sleep"
+  fake_bash 5.2.15
 }
 
 # doctor [args...] -> runs the real doctor against the current fixture,
@@ -406,6 +432,37 @@ assert_contains "$DOCTOR_OUT" 'check herdr=human:' "--fix stopped reporting the 
 assert_not_contains "$DOCTOR_OUT" 'fix herdr=applied' "--fix claimed to have installed herdr"
 assert_no_dangerous_calls "the doctor reached for auto-login, FileVault, or the keychain"
 pass "a missing herdr CLI is a human gap that --fix never claims to close"
+
+# --- an interpreter that cannot expand BASHPID is an operator gap ------------
+
+new_case Darwin with-herdr gui
+fake_bash 3.2.57
+doctor
+expect_code 1 "$DOCTOR_RC" "a runtime bash older than 4 was reported ready"
+assert_contains "$DOCTOR_OUT" "check bash=human: $CASE_BIN/bash is bash 3, which predates BASHPID" \
+  "an old runtime bash was not tagged as an operator gap"
+assert_contains "$DOCTOR_OUT" 'action: bash:' "the old runtime bash came with no operator action"
+assert_contains "$DOCTOR_OUT" 'brew install bash' "the old runtime bash action did not name the install step"
+assert_contains "$DOCTOR_OUT" 'error: this host is not ready for a remote second mate; unresolved: bash' \
+  "the readiness verdict did not name the unresolved interpreter"
+doctor --fix
+expect_code 1 "$DOCTOR_RC" "--fix reported a host whose bash predates BASHPID as ready"
+assert_contains "$DOCTOR_OUT" 'check bash=human:' "--fix stopped reporting the old runtime bash"
+assert_not_contains "$DOCTOR_OUT" 'fix bash=' "--fix claimed to have repaired the interpreter"
+assert_no_dangerous_calls "the interpreter gap took the doctor outside its repair contract"
+
+fake_bash ''
+doctor
+expect_code 1 "$DOCTOR_RC" "an interpreter that answers no version was reported ready"
+assert_contains "$DOCTOR_OUT" "check bash=human: $CASE_BIN/bash does not report a bash version" \
+  "an unversioned runtime bash was not left as an operator gap"
+
+fake_bash 5.2.15
+doctor --fix
+expect_code 0 "$DOCTOR_RC" "the modern-interpreter host could not be brought ready"
+assert_contains "$DOCTOR_OUT" "check bash=ok: $CASE_BIN/bash is bash 5" \
+  "the interpreter every bin script resolves was not reported"
+pass "the bash behind bin scripts is checked and an old one is an operator gap"
 
 # --- an absent launch agent is a fixable gap that --fix installs -------------
 
