@@ -40,8 +40,11 @@
 #              `missing` is put through the control plane's per-backend absence
 #              proof (fm_control_endpoint_absence_verdict) before anything is
 #              claimed about it, because `missing` also covers an endpoint that
-#              is merely unreachable from this seat. That proof exists only on
-#              HERDR, whose reads are scoped to the session the record names:
+#              is merely unreachable from this seat. That proof exists on
+#              HERDR, whose reads are scoped to the session the record names,
+#              and on ORCA for a confirmed full local terminal exit only
+#              (fm_control_orca_recovery_step names the operator's step for
+#              every other Orca reading):
 #              proven gone reports `endpoint-gone` rather than
 #              `already-stopped`, because the endpoint this verb normally
 #              preserves did not survive; a pane that turns out to be there and
@@ -56,14 +59,15 @@
 #              still exists - on the same or a newly chosen
 #              harness/model/effort - so switching harness is one ordinary use
 #              of this verb. When the recorded endpoint is instead proven gone -
-#              a Herdr pane or workspace destroyed in churn - the launch owner
-#              re-creates one in that worktree, in the herdr session the record
-#              names, and the task's record rebinds to it; that is how a task
-#              whose terminal was destroyed is reclaimed by the home that owns
-#              it, rather than being stranded with a parked approval nobody can
-#              answer. Reclaim is HERDR-ONLY for the reason `exit` gives above:
-#              a tmux `missing` cannot be proven absent from a task record, so
-#              it refuses.
+#              a Herdr pane or workspace destroyed in churn, or an Orca terminal
+#              the operator fully closed - the launch owner re-creates one in
+#              that worktree (in the herdr session the record names, or in the
+#              recorded Orca worktree), and the task's record rebinds to it;
+#              that is how a task whose terminal was destroyed is reclaimed by
+#              the home that owns it, rather than being stranded with a parked
+#              approval nobody can answer. Reclaim exists only where `exit`'s
+#              absence proof above does: a tmux `missing` cannot be proven
+#              absent from a task record, so it refuses.
 #              An explicit `default` model or effort clears that
 #              axis for the replacement. With no explicit axis, a secondmate
 #              re-resolves its durable config/secondmate-harness pin (harness

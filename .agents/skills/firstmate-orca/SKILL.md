@@ -73,6 +73,7 @@ For a messy Orca-backed task:
 4. Prefer firstmate helpers for peek, send, state, and teardown.
 5. Avoid raw deletion of Orca worktrees or manual branch cleanup.
 6. Stop and inspect if the recorded worktree path, Orca worktree id, or project checkout no longer matches expectations.
+7. To restart a stopped worker on another harness, use `bin/fm-control.sh <id> relaunch --harness <name> --note '<progress>'`; `docs/orca-backend.md` owns its prerequisites, the operator's terminal-close step, and which readings refuse.
 
 Teardown remains governed by the normal firstmate landing rules.
 Scout work can be torn down after the report exists and the `captain-hold-lifecycle` completion gate passes.
