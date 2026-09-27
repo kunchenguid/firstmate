@@ -537,7 +537,7 @@ A supervisor whose arm attached to a checkpoint's watcher re-armed its own watch
 Against an arm that reported only attached closes or signal exits, the supervisor kept running past five cycles, because an exit it did not cause is a handover rather than a failure, and it still stopped after three `watcher: FAILED - no live watcher` closes, queuing one `check: codex idle continuity stopped` line into the thread first.
 Three more allowing stops against that still-broken arm started no supervisor and queued no second check, and after one successful `bin/fm-watch-checkpoint.sh` the next allowing stop started a supervisor again, which queued the next episode's single check.
 An arm that turned on away mode and returned a `signal:` close left nothing in the thread and no `--stop` call, and the supervisor exited without arming again.
-In a home with `config/supervision-host`, the supervisor ran `fm-supervision-host.sh park` as the `codex` primary instead of the arm and queued its `supervision-host:` outcome line; a host that printed `supervision-host stood down:` ended the supervisor with no queued text and no `--stop`.
+An allowing stop in a home with `config/supervision-host` started no idle supervisor and no arm, because host-opted Codex homes are not covered yet ([#5899](https://github.com/kunchenguid/firstmate/issues/5899)).
 
 Pi 0.81.1 repeated the continuity and clean-exit lifecycle on 2026-07-23 after the Calm presentation changes.
 

@@ -241,45 +241,16 @@ wait_until 75 test ! -d "$SLOCK" || fail "away mode that started mid-cycle did n
 rm -f "$SSTATE/.afk"
 printf 'ok - a close that returns after away mode started is not queued and leaves the watcher alone\n'
 
-HOST_STUB="$STUB/host-calls"
-rm "$STUB/bin/fm-supervision-host.sh"
-cat > "$STUB/bin/fm-supervision-host.sh" <<EOF
-#!/bin/sh
-printf '%s %s\n' "\$FM_SUPERVISION_HOST_PRIMARY" "\$*" >> '$HOST_STUB'
-case "\$(cat '$STUB/mode')" in
-  host) [ "\$(wc -l < '$HOST_STUB')" -gt 1 ] && exec sleep 600
-    printf 'watcher: started pid=1 (beacon fresh)\nsupervision-host: outcome 1 for demo [done]: merged\nsupervision-host: cycle boundary - bound\n' ;;
-  standdown) printf 'supervision-host stood down: another session holds the fleet lock\n' ;;
-esac
-EOF
-chmod +x "$STUB/bin/fm-supervision-host.sh"
 mkdir -p "$STUB/config"
 : > "$STUB/config/supervision-host"
-host_calls() { [ "$(wc -l < "$HOST_STUB" 2>/dev/null | tr -d ' ')" -ge "$1" ]; }
-queued() { [ -s "$STUB/queue" ]; }
-printf 'host\n' > "$STUB/mode"
+printf 'broken\n' > "$STUB/mode"
 : > "$STUB/arms"
 : > "$STUB/queue"
-: > "$HOST_STUB"
 stub_stop
-wait_until 75 host_calls 2 || fail "the host-opted supervisor did not park through the supervision host"
-wait_until 25 queued || fail "the host's wake never reached the thread"
-[ "$(sed -n 1p "$HOST_STUB")" = "codex park" ] || fail "the host was not parked as the codex primary: $(cat "$HOST_STUB")"
-[ "$(arms)" -eq 0 ] || fail "a host-opted home armed the plain watcher $(arms) times"
-[ "$(cat "$STUB/queue")" = "supervision-host: outcome 1 for demo [done]: merged" ] \
-  || fail "the host close was queued as: $(cat "$STUB/queue")"
-FM_ROOT_OVERRIDE="$STUB" FM_HOME="$STUB" "$STUB/bin/fm-codex-idle-continuity.sh" --handover </dev/null \
-  || fail "handover of the host-parked supervisor failed"
-printf 'standdown\n' > "$STUB/mode"
-: > "$STUB/queue"
-: > "$STUB/stops"
-: > "$HOST_STUB"
-stub_stop
-wait_until 75 host_calls 1 || fail "the stand-down case never parked"
-wait_until 75 test ! -d "$SLOCK" || fail "a host that stood down did not end the supervisor"
-[ "$(wc -l < "$HOST_STUB" | tr -d ' ')" -eq 1 ] || fail "the supervisor parked again after the host stood down"
-[ ! -s "$STUB/queue" ] || fail "a stand-down reached the thread: $(cat "$STUB/queue")"
-[ ! -s "$STUB/stops" ] || fail "a stand-down stopped the watcher its new owner holds"
+sleep 2
+[ ! -d "$SLOCK" ] || fail "a host-opted home started an idle supervisor"
+[ "$(arms)" -eq 0 ] || fail "a host-opted home armed $(arms) times after the allowing stop"
+[ ! -s "$STUB/queue" ] || fail "a host-opted home queued text: $(cat "$STUB/queue")"
 kill "$owner" 2>/dev/null || true
 wait "$owner" 2>/dev/null || true
-printf 'ok - a host-opted home parks through the supervision host and stands down with it\n'
+printf 'ok - a home opted into the supervision host starts no idle supervisor\n'

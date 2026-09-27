@@ -16,3 +16,4 @@ Codex cannot reason while a foreground tool call is running.
 The bounded checkpoint returns control regularly so user messages and queued wakes can be handled without relying on background-task wake semantics.
 When that turn is allowed to end, `bin/fm-codex-idle-continuity.sh` keeps process-event reconciliation running and queues an actionable close back into the same thread.
 The next checkpoint stops that idle supervisor before it starts its own watcher, so each turn's checkpoint owns supervision until the turn ends again.
+Homes that opted into `config/supervision-host` are not covered by idle continuity yet ([#5899](https://github.com/kunchenguid/firstmate/issues/5899)); they keep only the in-turn checkpoint.

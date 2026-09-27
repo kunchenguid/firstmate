@@ -17,12 +17,13 @@
 # `codex queue`. FM_CODEX_IDLE_QUEUE, when set, receives that text on stdin
 # instead. FM_CODEX_IDLE_OWNER_PID overrides the Codex ancestor walk.
 #
-# A home that opted into config/supervision-host parks through
-# `fm-supervision-host.sh park` in place of the arm, as the in-turn
-# checkpoint does. A host that stood down ends the supervisor without
-# stopping the watcher. Away mode is checked again whenever an arm closes and
-# before the next one starts: an away-mode close is not queued and the
-# watcher is not stopped, because the away daemon owns triage from then on.
+# Away mode is checked again whenever an arm closes and before the next one
+# starts: an away-mode close is not queued and the watcher is not stopped,
+# because the away daemon owns triage from then on.
+#
+# A home that opted into config/supervision-host is not covered yet
+# (https://github.com/kunchenguid/firstmate/issues/5899): it never starts a
+# supervisor, and its in-turn checkpoint is unchanged.
 #
 # An idle home, away mode, a child worktree, or a stop that is still the
 # first one in the turn does not start a supervisor. A live supervisor is
@@ -114,6 +115,7 @@ ensure_supervisor() {  # <session-id>
   . "$SCRIPT_DIR/fm-supervision-lib.sh"
   fm_primary_scope_matches "$FM_ROOT" "$STATE" || return 0
   [ -e "$STATE/.afk" ] && return 0
+  [ -f "$CONFIG/supervision-host" ] && return 0
   [ -e "$FAILURE_NOTICE" ] && return 0
   fm_supervision_needed "$STATE" || return 0
   owner=$(codex_ancestor) || return 0
@@ -146,11 +148,11 @@ queue_text() {
 }
 
 actionable_text() {
-  awk '/^(signal:|stale:|check:|heartbeat(:|$)|supervision-host:)/ && !/^supervision-host: cycle boundary/'
+  awk '/^(signal:|stale:|check:|heartbeat(:|$))/'
 }
 
 handed_over() {
-  awk '/^(watcher: attached |supervision-host: cycle boundary)/ { found = 1 }
+  awk '/^watcher: attached / { found = 1 }
     /^watcher: FAILED - watcher cycle exited [0-9]+ / { if ($7 + 0 > 128) found = 1 }
     END { exit !found }'
 }
@@ -184,11 +186,7 @@ supervise() {
   while kill -0 "$owner" 2>/dev/null; do
     [ -e "$STATE/.afk" ] && leave_watcher
     fm_supervision_needed "$STATE" || break
-    if [ -f "$CONFIG/supervision-host" ]; then
-      FM_SUPERVISION_HOST_PRIMARY=codex "$SCRIPT_DIR/fm-supervision-host.sh" park >"$LOCK/arm.out" 2>&1 &
-    else
-      "$ARM" >"$LOCK/arm.out" 2>&1 &
-    fi
+    "$ARM" >"$LOCK/arm.out" 2>&1 &
     arm_pid=$!
     while kill -0 "$arm_pid" 2>/dev/null; do
       if ! kill -0 "$owner" 2>/dev/null; then
@@ -201,7 +199,6 @@ supervise() {
     wait "$arm_pid" || true
     arm_pid=
     [ -e "$STATE/.afk" ] && leave_watcher
-    grep -q '^supervision-host stood down:' "$LOCK/arm.out" && leave_watcher
     text=$(actionable_text < "$LOCK/arm.out" || true)
     if [ -n "$text" ]; then
       fails=0
