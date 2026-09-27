@@ -104,7 +104,7 @@ lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
 # only from the segment before its first quote, so quoted body text cannot turn
 # a write into a read.
 segment_writes() {  # <segment>
-  local seg=$1 tok method= get=1 next_is_method=0
+  local seg=$1 tok method='' get=1 next_is_method=0
   [[ $seg =~ $WRITER ]] && return 0
   [[ $seg =~ $GH_API ]] || return 1
   set -f
