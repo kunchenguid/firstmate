@@ -209,7 +209,7 @@ function request(kind: "heartbeat" | "manual" | "precompact", ctx: ExtensionCont
 }
 
 function promptFor(run: RunState["active"], generation: CoordinatorGeneration): string {
-  const action = run?.phase === "partial" ? "recover" : "begin";
+  const action = run?.phase === "partial" || run?.phase === "running" ? "recover" : "begin";
   const heartbeat = run?.reasons.includes("heartbeat");
   return [
     heartbeat ? "FIRSTMATE HEARTBEAT CHECKLIST" : "FIRSTMATE COORDINATED STOW REQUEST",
@@ -249,7 +249,8 @@ function dispatch(pi: ExtensionAPI, ctx: ExtensionContext): void {
   try {
     const state = callRun(["status"]);
     const active = state.active;
-    if (!active || (active.phase !== "requested" && active.phase !== "partial")) return;
+    if (!active || (active.phase !== "requested" && active.phase !== "partial" &&
+        !(active.phase === "running" && active.reasons.includes("heartbeat")))) return;
     if (active.session_id !== generation.sessionId || active.session_file !== generation.sessionFile) return;
     const cutoff = sessionIdentity(ctx, active.cutoff_entry_id);
     if (!cutoff || cutoff.fingerprint !== active.branch_fingerprint) return;
@@ -272,7 +273,7 @@ function dispatch(pi: ExtensionAPI, ctx: ExtensionContext): void {
       if (!safeSettled(ctx)) return;
       pi.sendMessage({ customType: "fm-heartbeat-escalation", display: true,
         content: encodeFirstmateOperationalInput("watcher",
-          `Heartbeat execution handoff is exhausted but unfinished.\n${promptFor(active, generation)}`),
+          `Initial heartbeat offers are exhausted; the same run remains unfinished.\n${promptFor(active, generation)}`),
         details: { version: 1, run_id: active.run_id, generation: generation.token,
           attempt: active.attempts, escalation_id: escalationId } },
       { triggerTurn: true, deliverAs: "followUp" });

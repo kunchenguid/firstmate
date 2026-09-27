@@ -48,6 +48,7 @@ cp /home/chengyuhang/.pi/agent/bin/fd "$PI_DIR/bin/fd"
 cp "$ROOT/.pi/extensions/fm-periodic-stow.ts" "$PROJECT/.pi/extensions/fm-periodic-stow.ts"
 cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$PROJECT/.pi/extensions/lib/fm-operational-input.ts"
 cp -R "$ROOT/bin/." "$PROJECT/bin/"
+cp "$ROOT/tests/continuation-host-action.py" "$PROJECT/continuation-host-action.py"
 # Isolate a controlled readback delay for the real before-settle UI race.
 # Every operation still delegates to the exact candidate public owner.
 mv "$PROJECT/bin/fm-task-state.sh" "$PROJECT/bin/fm-task-state-candidate.sh"
@@ -63,6 +64,24 @@ chmod +x "$PROJECT/bin/fm-task-state.sh"
 cp "$ROOT/.pi/extensions/lib/fm-task-continuation.ts" "$ROOT/.pi/extensions/lib/fm-async-exec.ts" \
   "$ROOT/.pi/extensions/lib/fm-native-contract.ts" "$PROJECT/.pi/extensions/lib/"
 chmod +x "$PROJECT/bin/fm-stow-run.sh"
+python3 - "$ROOT" "$PROJECT" "$HOME_DIR" <<'PYIDENTITY'
+import hashlib,json,subprocess,sys
+from pathlib import Path
+root,project,home=map(Path,sys.argv[1:])
+sha=lambda p:hashlib.sha256(p.read_bytes()).hexdigest()
+identity={'candidate':subprocess.check_output(['git','-C',str(root),'rev-parse','HEAD']).decode().strip(),'loaded_files':{}}
+for candidate in sorted(project.rglob('*')):
+    if not candidate.is_file():continue
+    relative=str(candidate.relative_to(project))
+    source=root/relative
+    if relative=='bin/fm-task-state.sh':continue  # Explicit fixture latency wrapper.
+    if relative=='bin/fm-task-state-candidate.sh':source=root/'bin/fm-task-state.sh'
+    if relative=='continuation-host-action.py':source=root/'tests/continuation-host-action.py'
+    assert candidate.read_bytes()==source.read_bytes(),relative
+    identity['loaded_files'][relative]=dict(source=str(source.relative_to(root)),sha256=sha(candidate))
+(home/'data/candidate-sources.json').write_text(json.dumps(identity,indent=2))
+PYIDENTITY
+
 printf '%s\n' '# Isolated periodic-stow live fixture' >"$PROJECT/AGENTS.md"
 printf '%s\n' '{"version":1,"enabled":true,"interval_seconds":3600,"min_interval_seconds":3600}' \
   >"$HOME_DIR/config/periodic-stow.json"
@@ -139,13 +158,32 @@ export default function captureExtension(pi: ExtensionAPI) {
     }],
     streamSimple(model, context) {
       const last = JSON.stringify(context.messages.at(-1)?.content || "");
-      const reason = last.includes("FIRSTMATE HEARTBEAT CHECKLIST") ? "heartbeat"
+      const reason = last.includes("The messages above") ? "compaction"
+        : last.includes("FIRSTMATE HEARTBEAT CHECKLIST") ? "heartbeat"
         : last.includes("Live task continuation obligations") ? "continuation"
+        : last.includes("Continuation needs executable main coordination:") ? "recovery"
         : last.includes("independent fixture B") ? "B" : "seed-or-compaction";
       log({ event: "provider_call", reason, last });
       const stream = createAssistantMessageEventStream();
       const output = assistant(model);
       queueMicrotask(() => {
+        if (reason !== "compaction" && context.messages.at(-1)?.role !== "toolResult" && last.includes("matrix-fair-8") &&
+            existsSync(`${home}/data/recovery-ready`) && !existsSync(`${home}/data/model-accepted`) &&
+            (last.includes("Persistent recovery:") || existsSync(`${home}/data/model-confirmed`))) {
+          output.stopReason = "toolUse";
+          output.content.push({ type: "toolCall", id: `recovery-${Date.now()}`, name: "bash",
+            arguments: { command: `python3 '${process.env.FM_ROOT_OVERRIDE}/continuation-host-action.py'`, timeout: 60 } });
+          log({ event: "model_tool_call", reason, last });
+          stream.push({ type: "done", reason: "toolUse", message: output }); stream.end(); return;
+        }
+        if (context.messages.at(-1)?.role !== "toolResult" && reason === "heartbeat" &&
+            JSON.parse(readFileSync(`${home}/state/stow/state.json`, "utf8")).active?.recovery_attempts >= 1) {
+          output.stopReason = "toolUse";
+          output.content.push({ type: "toolCall", id: `heartbeat-${Date.now()}`, name: "bash",
+            arguments: { command: `python3 '${process.env.FM_ROOT_OVERRIDE}/continuation-host-action.py' heartbeat`, timeout: 30 } });
+          log({ event: "model_tool_call", reason, last });
+          stream.push({ type: "done", reason: "toolUse", message: output }); stream.end(); return;
+        }
         const responseText = reason === "B" ? "fixture-B=42" : "periodic-stow lifecycle observed";
         const block = { type: "text" as const, text: responseText };
         output.content.push(block);
@@ -314,10 +352,15 @@ for event in rows:
         assert event.get('receipt') and event.get('receiver'),('bare release',event)
         assert event['receiver']['pid']==next(x['pid'] for x in rows if x['event']=='session_start')
 stow=json.loads((home/'state/stow/state.json').read_text())
-assert 1<=stow['active']['attempts']<=3
+assert stow['active']['attempts']==3
+assert stow['active']['phase']=='partial' and stow['active']['receipt_ref'], ('heartbeat did not execute recovery readback',stow)
 heartbeats=[r for r in rows if r['event']=='provider_call' and r.get('reason')=='heartbeat']
 assert heartbeats and heartbeats[0]['at']-first<=10000,('heartbeat starved',heartbeats)
-print('ok - 95s: two paced A requests, actual coordinator receipts, heartbeat <=10s, independent B responsive')
+recovery=[x for x in rows if x['event']=='provider_call' and x.get('reason')=='recovery' and 'live-prerequisite:' in x.get('last','')]
+assert 1 <= len(recovery) <= 2, ('unbounded recovery admission', recovery)
+assert all(y['at']-x['at'] >= 60000 for x,y in zip(recovery,recovery[1:])), recovery
+assert len(heartbeats) <= 5, ('heartbeat hot loop', heartbeats)
+print('ok - 95s: original attempts=2, honest total recovery/heartbeat counts bounded, heartbeat <=10s, B responsive')
 PYCHECK
 then
   fail "95-second no-progress acceptance failed"
@@ -424,7 +467,15 @@ while time.monotonic()<limit:
         assert len(r['coordination']['budgets'])==1
         assert next(iter(r['coordination']['budgets'].values()))['attempts']==2
         assert next(iter(r['coordination']['budgets'].values())).get('escalated_at_ms'), 'cold session lost escalation receipt'
-        print('ok - actual Pi cold session without leaf acquired coordinator after the first persisted boundary; A budget unchanged')
+        budget=next(iter(r['coordination']['budgets'].values()))
+        assert budget.get('recovery_attempts',0)>=2, ('no second persistent recovery',budget)
+        rows=[json.loads(x) for x in capture.read_text().splitlines()]
+        calls=[x for x in rows if x['event']=='provider_call' and x.get('reason')=='recovery' and 'live-prerequisite:' in x.get('last','')]
+        assert len(calls)>=3, ('later no-effect handling was abandoned',calls)
+        assert calls[1]['at']-calls[0]['at']>=60000 and calls[2]['at']-calls[1]['at']>=120000, calls
+        tool_calls=[x for x in rows if x['event']=='model_tool_call' and 'matrix-fair-8' in x.get('last','')]
+        assert tool_calls and 'Persistent recovery:' in tool_calls[0]['last'], 'controller replaced the product recovery trigger'
+        print('ok - cold session preserves original budget; repeated no-effect recovery remains paced; product-triggered main tool owns handoff and acceptance')
         break
     time.sleep(.2)
 else:

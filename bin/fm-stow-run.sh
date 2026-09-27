@@ -34,6 +34,9 @@
 # require heartbeat.{archival,continuation,knowledge}, each with status
 # complete|unchanged and an evidence_ref (home data/state) plus its sha256.
 # fm-heartbeat-receipt.py validates those evidence bindings, not goal semantics.
+# Exhausted heartbeat offers retain their original attempt budget and use
+# separately counted recovery deliveries with 60-second exponential backoff
+# capped at 15 minutes. Delivery never proves execution or completion.
 # Manual/precompact and legacy in-flight periodic runs keep their old contract.
 set -u
 umask 077
@@ -117,6 +120,8 @@ state_filter='
         (.escalation_id == null or (.escalation_id | type == "string" and test("^e\\.[A-Za-z0-9._:-]{1,255}$"))) and
         (.escalation_generation == null or (.escalation_generation | type == "string")) and
         (.escalation_delivered_at == null or (.escalation_delivered_at | type == "string")) and
+        ((.recovery_attempts // 0) | type == "number" and . >= 0 and . <= 9007199254740991 and floor == .) and
+        (.recovery_not_before == null or (.recovery_not_before | type == "number" and . >= 0 and floor == .)) and
         (.phase == "requested" or .phase == "running" or .phase == "partial" or .phase == "blocked") and
         (.attempts | type == "number" and . >= 0 and . <= 3 and floor == .) and
         (.cutoff_entry_id | type == "string") and (.branch_fingerprint | test("^[0-9a-f]{64}$")) and
@@ -340,18 +345,34 @@ case "$COMMAND" in
     [ "$(printf '%s' "$STATE" | jq -r '.active.run_id // ""')" = "$run_id" ] \
       || die 3 stale-run "run_id does not own the active run"
     active_phase=$(printf '%s' "$STATE" | jq -r '.active.phase')
-    case "$active_phase" in requested|partial) ;; *) die 3 invalid-phase "only requested or partial runs may be delivered" ;; esac
+    heartbeat_run=$(printf '%s' "$STATE" | jq -r '[.active.reasons[]|select(.=="heartbeat")]|length>0')
+    case "$active_phase" in
+      requested|partial) ;;
+      running) [ "$heartbeat_run" = true ] || die 3 invalid-phase "only heartbeat runs may recover at an idle boundary" ;;
+      *) die 3 invalid-phase "run cannot be delivered from $active_phase" ;;
+    esac
     attempts=$(printf '%s' "$STATE" | jq -r '.active.attempts')
     if [ "$attempts" -ge 3 ]; then
       heartbeat_run=$(printf '%s' "$STATE" | jq -r '[.active.reasons[]|select(.=="heartbeat")]|length>0')
       [ "$heartbeat_run" = true ] || die 3 delivery-exhausted "the same run_id has already been offered three times"
-      escalation_id=$(printf 'e.%s' "$run_id")
-      if [ "$(printf '%s' "$STATE" | jq -r '.active.escalation_delivered_at // ""')" != "" ]; then
-        printf '%s\n' "$STATE" | jq -c '{version:1,outcome:"escalated",run_id:.active.run_id,revision:.revision,
-          attempts:.active.attempts,escalation_id:.active.escalation_id}'
-        exit 0
+      escalation_id=$(printf '%s' "$STATE" | jq -r --arg run "$run_id" '.active.escalation_id // ("e."+$run)')
+      delivered_at=$(printf '%s' "$STATE" | jq -r '.active.escalation_delivered_at // ""')
+      if [ -n "$delivered_at" ]; then
+        # Legacy receipts derive the first deadline from their actual delivery.
+        due=$(printf '%s' "$STATE" | jq -r '.active.recovery_not_before // ((.active.escalation_delivered_at|fromdateiso8601)+60)')
+        if [ "$(date -u +%s)" -lt "$due" ]; then
+          printf '%s\n' "$STATE" | jq -c '{version:1,outcome:"escalated",run_id:.active.run_id,revision:.revision,
+            attempts:.active.attempts,escalation_id:.active.escalation_id}'
+          exit 0
+        fi
+        recovery_attempts=$(printf '%s' "$STATE" | jq -r '.active.recovery_attempts // 0')
+        [ "$recovery_attempts" -lt 9007199254740991 ] || die 4 recovery-exhausted "recovery counter exhausted"
+        recovery_attempts=$((recovery_attempts + 1))
+        escalation_id="e.$run_id.r.$recovery_attempts"
+        STATE=$(printf '%s' "$STATE" | jq -c --argjson count "$recovery_attempts" '
+          .active.recovery_attempts=$count | .active.escalation_delivered_at=null')
       fi
-      if [ "$(printf '%s' "$STATE" | jq -r '.active.escalation_generation // ""')" != "$generation" ]; then
+      if [ -n "$delivered_at" ] || [ "$(printf '%s' "$STATE" | jq -r '.active.escalation_generation // ""')" != "$generation" ]; then
         STATE=$(printf '%s' "$STATE" | jq -c --arg gen "$generation" --arg id "$escalation_id" --argjson rev "$next_revision" '
           .revision=$rev | .active.offered_generation=$gen | .active.escalation_id=$id |
           .active.escalation_generation=$gen
@@ -381,7 +402,9 @@ case "$COMMAND" in
       || die 3 stale-generation "generation does not own the escalation"
     if [ "$(printf '%s' "$STATE" | jq -r '.active.escalation_delivered_at // ""')" = "" ]; then
       STATE=$(printf '%s' "$STATE" | jq -c --arg now "$now" --argjson rev "$next_revision" '
-        .revision=$rev | .active.escalation_delivered_at=$now
+        .revision=$rev | .active.escalation_delivered_at=$now |
+        .active.recovery_not_before=(($now|fromdateiso8601) +
+          ([900, (60 * pow(2; ([.active.recovery_attempts // 0, 4]|min)))]|min))
       ')
       commit_state "$STATE"
     fi

@@ -418,6 +418,59 @@ test_heartbeat_requires_three_verified_duties() {
   pass "heartbeat retains failed duties and completes only with three unchanged bound readbacks"
 }
 
+test_heartbeat_persistent_recovery_keeps_budget_and_identity() {
+  local home session out run rev id next_id due base_path clockbin
+  home=$(new_home paced-recovery); session=$(seed_session "$home" session)
+  clockbin="$home/clockbin"; mkdir -p "$clockbin"
+  base_path=$PATH
+  # Advance only the fixture wall clock; no production timing override exists.
+  printf '2000000000\n' >"$home/clock"
+  cat >"$clockbin/date" <<'DATE'
+#!/usr/bin/env python3
+from datetime import datetime, timezone
+from pathlib import Path
+import sys
+value=int((Path(__file__).parent.parent/'clock').read_text())
+print(value if sys.argv[-1]=='+%s' else datetime.fromtimestamp(value,timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'))
+DATE
+  chmod +x "$clockbin/date"
+  PATH="$clockbin:$base_path"
+  out=$(request_run "$home" "$session" heartbeat) || fail "heartbeat request: $out"
+  run=$(printf '%s' "$out" | jq -r .run_id)
+  rev=$(printf '%s' "$out" | jq -r .revision)
+  for _ in 1 2 3 4; do
+    out=$(run_main "$home" deliver --run-id "$run" --generation gen-1 --expected-revision "$rev") || fail "offer: $out"
+    rev=$(printf '%s' "$out" | jq -r .revision)
+  done
+  id=$(printf '%s' "$out" | jq -r .escalation_id)
+  out=$(run_main "$home" delivery --run-id "$run" --generation gen-1 --operation-id "$id" --expected-revision "$rev") || fail "receipt: $out"
+  rev=$(printf '%s' "$out" | jq -r .revision)
+  for _ in 1 2 3; do
+    out=$(run_main "$home" deliver --run-id "$run" --generation gen-reloaded --expected-revision "$rev") || fail "cooldown: $out"
+    [ "$(printf '%s' "$out" | jq -r .outcome)" = escalated ] || fail "reload bypassed deadline"
+  done
+  printf '2000000060\n' >"$home/clock"
+  out=$(run_main "$home" deliver --run-id "$run" --generation gen-reloaded --expected-revision "$rev") || fail "recovery: $out"
+  rev=$(printf '%s' "$out" | jq -r .revision); next_id=$(printf '%s' "$out" | jq -r .escalation_id)
+  [ "$next_id" = "$id.r.1" ] || fail "first recovery identity: $out"
+  out=$(run_main "$home" deliver --run-id "$run" --generation gen-third --expected-revision "$rev") || fail "reservation rebind: $out"
+  rev=$(printf '%s' "$out" | jq -r .revision)
+  [ "$(printf '%s' "$out" | jq -r .escalation_id)" = "$next_id" ] || fail "generation replaced undelivered recovery"
+  out=$(run_main "$home" begin --run-id "$run" --session-id session-1 --generation gen-third --target-entry-id entry-1 \
+    --branch-fingerprint aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --expected-revision "$rev") || fail "begin recovery: $out"
+  rev=$(printf '%s' "$out" | jq -r .revision)
+  out=$(run_main "$home" delivery --run-id "$run" --generation gen-third --operation-id "$next_id" --expected-revision "$rev") || fail "recovery receipt: $out"
+  rev=$(printf '%s' "$out" | jq -r .revision)
+  due=$(FM_HOME="$home" "$RUN" status | jq -r .active.recovery_not_before)
+  [ "$due" = 2000000180 ] || fail "recovery backoff was not anchored to delivery: $due"
+  printf '%s\n' "$due" >"$home/clock"
+  out=$(run_main "$home" deliver --run-id "$run" --generation gen-third --expected-revision "$rev") || fail "second recovery: $out"
+  [ "$(printf '%s' "$out" | jq -r .escalation_id)" = "$id.r.2" ] || fail "unfinished heartbeat stopped recovering"
+  FM_HOME="$home" "$RUN" status | jq -e '.active.attempts==3 and .active.recovery_attempts==2 and .active.phase=="running" and .last_result==null' >/dev/null || fail "recovery fabricated progress or reset budget"
+  PATH=$base_path
+  pass "heartbeat persists paced recovery across generations without resetting attempts or fabricating progress"
+}
+
 test_status_is_read_only_and_default_idle
 test_request_delivery_begin_and_verified_finish
 test_cas_generation_and_role_refuse_stale_callers
@@ -428,3 +481,5 @@ test_receipts_and_corrupt_state_fail_closed
 test_pi_coordinator_waits_for_safe_settle_and_bounds_redelivery
 
 test_heartbeat_requires_three_verified_duties
+
+test_heartbeat_persistent_recovery_keeps_budget_and_identity

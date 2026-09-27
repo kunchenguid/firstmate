@@ -392,7 +392,8 @@ Setting `enabled` to false stops new automatic maintenance requests and withdraw
 Automatic passes now account for task archival, unfinished-task continuation, and knowledge curation in one heartbeat run, replacing periodic stow while leaving manual `/stow` and pre-compaction invocation intact.
 The existing coordinator timer also emits bounded live-task continuation checks while full maintenance is disabled; it creates no second timer or daemon.
 Busy tools, queued input, compaction, and editor input defer the maintenance offer; unchanged duties remain silent and repeated ticks share the same run id.
-After three offers without a verified finish, the coordinator preserves that run and sends one generation-bound visible follow-up that starts executable main-session handling; durable delivery readback prevents duplicate escalation while later ticks keep the unfinished run available.
+After three offers without a verified finish, the coordinator retains the run and starts main-session recovery with persistent pacing and delivery deduplication owned by `bin/fm-stow-run.sh`.
+A handling turn that performs no operation leaves the obligation pending for a later safe tick; original offer counts never reset, and delivery alone cannot complete a duty.
 The heartbeat receipt requires separately bound evidence for all three duties, as specified by `bin/fm-heartbeat-receipt.py`; an incomplete duty retains the run.
 `state/stow/state.json` is the single coordinator-state owner and `data/stow-runs/<run_id>/` holds non-injected plans and receipts; `bin/fm-stow-run.sh --help` owns their mutation interface, and the internal [`stow` skill](../.agents/skills/stow/SKILL.md) owns all knowledge, decay, budget, open-record, and cascade semantics.
 

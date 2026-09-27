@@ -11,8 +11,10 @@ import { encodeFirstmateOperationalInputWith } from "./fm-operational-input.ts";
 
 type Observation = { task_id: string; state: string; reason: string; key: string; revision?: number };
 type InputReceipt = { id: string; text: string; task?: string; answer?: string };
-type Admission = { content: string; admissions: string[]; escalations: { id: string; task: string; reason: string }[];
+type Admission = { content: string; admissions: string[]; escalations: { id: string; task: string; reason: string; recovery?: boolean }[];
   canNotify: () => boolean; canContinue: () => boolean };
+type InputPacing = { key: string; attempts: number; after: number; reserved?: string; escalatedAt?: number;
+  recoveryAttempts?: number; recoveryAfter?: number; recoveryReserved?: string };
 const INPUT_ENTRY = "fm-continuation-input";
 const PACING_ENTRY = "fm-continuation-input-pacing";
 const RECEIPT_ENTRY = "fm-continuation-receipt";
@@ -41,7 +43,7 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
   const inputs = new Map<string, InputReceipt>();
   // Unrouted input pacing is session-owned. Task admission and semantic truth
   // remain in the canonical lifecycle owner, independent of this runtime.
-  const pacing = new Map<string, { key: string; attempts: number; after: number; reserved?: string; escalatedAt?: number }>();
+  const pacing = new Map<string, InputPacing>();
   const submitted = new Set<string>();
   const delivered = new Map<string, number>();
   let generation = 0;
@@ -155,10 +157,12 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
       pid: process.pid, started_at_ms: started,
       recheck_at_ms: Date.now() + Math.max(30_000, owner.recheckMs * Math.max(1, Math.ceil(scanScope.length / BATCH))),
       scan_scope: scanScope, next_cursor: cursor,
-      recovery_trigger: "existing-heartbeat-clock: readback; changed evidence may admit coordination; effects use existing executor/handoff owners",
+      recovery_trigger: "existing-heartbeat-clock: readback and persistent paced recovery until verified continuation; effects use existing executor/handoff owners",
       observations: pending.map(({ task_id, key, revision }) => ({ task_id, key, revision })),
       delivered_admissions: Object.fromEntries(pending.flatMap((item) =>
-        [`n.${item.key}.1`, `n.${item.key}.2`, `e.${item.key}`].flatMap((id) => {
+        [`n.${item.key}.1`, `n.${item.key}.2`, `e.${item.key}`,
+          ...[...delivered.keys()].filter((id) => id.startsWith(`r.${item.key}.`))
+            .sort((a, b) => Number(b.split(".").at(-1)) - Number(a.split(".").at(-1))).slice(0, 1)].flatMap((id) => {
         return delivered.has(id) ? [[id, delivered.get(id)]] : [];
       }))),
     };
@@ -202,6 +206,22 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
             pace.escalatedAt ??= delivered.get(id);
             if (pace.escalatedAt === undefined && !submitted.has(id)) {
               escalations.push({ id, task: item.task_id, reason: "input has not been routed to a task or substantively answered" });
+            } else if (pace.escalatedAt !== undefined) {
+              pace.recoveryAttempts ??= 0;
+              pace.recoveryAfter ??= pace.escalatedAt + 60_000;
+              const at = pace.recoveryReserved ? delivered.get(pace.recoveryReserved) : undefined;
+              if (at !== undefined) {
+                pace.recoveryReserved = undefined;
+                pace.recoveryAfter = Math.max(pace.recoveryAfter, at + Math.min(900_000, 60_000 * 2 ** Math.min(pace.recoveryAttempts, 4)));
+              }
+              if (!pace.recoveryReserved && Date.now() >= pace.recoveryAfter) {
+                if (pace.recoveryAttempts >= Number.MAX_SAFE_INTEGER) throw new Error("input recovery counter exhausted");
+                pace.recoveryReserved = `r.${item.key}.${++pace.recoveryAttempts}`;
+              }
+              if (pace.recoveryReserved && !submitted.has(pace.recoveryReserved)) {
+                escalations.push({ id: pace.recoveryReserved, task: item.task_id,
+                  reason: "input remains unrouted after exhausted coordination", recovery: true });
+              }
             }
           }
           pacing.set(item.task_id, pace);
@@ -216,6 +236,9 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
           admission = coordinated.admission;
           if (coordinated.escalation && !submitted.has(coordinated.escalation) && !delivered.has(coordinated.escalation)) {
             escalations.push({ id: coordinated.escalation, task: item.task_id, reason: item.reason });
+          }
+          if (coordinated.recovery && !submitted.has(coordinated.recovery) && !delivered.has(coordinated.recovery)) {
+            escalations.push({ id: coordinated.recovery, task: item.task_id, reason: item.reason, recovery: true });
           }
         }
         if (admission && !submitted.has(admission) && !delivered.has(admission)) {
@@ -234,19 +257,21 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
     }
   }
 
-  function escalationEntry(admission: Admission) {
-    if (!admission.escalations.length) return;
-    const lines = admission.escalations.map(({ task, reason }) =>
+  function escalationEntry(admission: Admission, includeRecovery = true) {
+    const items = admission.escalations.filter((item) => includeRecovery || !item.recovery);
+    if (!items.length) return;
+    const lines = items.map(({ task, reason }) =>
       `${task}: two automatic coordination requests produced no verified continuation: ${reason}.`);
     return {
       type: "custom_message" as const, customType: ESCALATION, display: true,
       content: "Continuation needs executable main coordination:\n" + lines.join("\n") + "\n" +
-        "These tasks remain open. Automatic request budgets stay exhausted; this is not completion or a task blocker. " +
+        (items.some((item) => item.recovery) ? "Persistent recovery: prior coordination returned without a verified next action. Perform the authorized next tool/handoff action now; another observation-only response leaves responsibility pending.\n" : "") +
+        "These tasks remain open. Initial request budgets stay exhausted; later recovery is counted separately. This is not completion or a task blocker. " +
         "Assign an authorized executor and verify receipt/start, reconcile a real dependency, or provide acceptance evidence. " +
         "If an effect may already have happened, read it back before any retry. Unrelated input does not reset the budget.",
-      details: { admissions: admission.escalations.map(({ id }) => id),
-        task: admission.escalations.length === 1 ? admission.escalations[0].task : undefined,
-        tasks: admission.escalations.map(({ task }) => task), owner: "main", kind: "coordination-failure" },
+      details: { admissions: items.map(({ id }) => id),
+        task: items.length === 1 ? items[0].task : undefined,
+        tasks: items.map(({ task }) => task), owner: "main", kind: "coordination-failure" },
     };
   }
 
@@ -280,6 +305,7 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
         if (escalation) {
           pi.sendMessage(escalation, { triggerTurn: true, deliverAs: "followUp" });
           for (const id of escalation.details.admissions) submitted.add(id);
+          return; // One batch per tick; ordinary reservations remain durable.
         }
         if (!admission.admissions.length) return;
         for (const id of admission.admissions) submitted.add(id);
@@ -299,7 +325,7 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
     for (const entry of entries) {
       if (entry.type === "custom_message") readDelivery(entry);
       if (entry.type === "custom" && entry.customType === PACING_ENTRY) {
-        const pace = entry.data as { id: string; key: string; attempts: number; after: number; reserved?: string; escalatedAt?: number };
+        const pace = entry.data as InputPacing & { id: string };
         if (typeof pace?.id === "string") pacing.set(pace.id, pace);
       }
       if (entry.type !== "custom" || entry.customType !== INPUT_ENTRY) continue;
@@ -323,7 +349,7 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
     context = ctx;
     const admission = await check(ctx);
     if (admission && admission.canContinue()) {
-      const escalation = escalationEntry(admission);
+      const escalation = escalationEntry(admission, false);
       if (escalation) for (const id of escalation.details.admissions) submitted.add(id);
       for (const id of admission.admissions) submitted.add(id);
       return { entries: [...(escalation ? [escalation] : []), ...(admission.admissions.length ? [{ type: "custom_message" as const, customType: MESSAGE,

@@ -6112,6 +6112,31 @@ const input=listing.inputs.find(i=>i.text.includes('Separate request B'));
 const answer=await tool.execute('answer',{action:'answer',input:input.id,answer:'Configuration uses the documented per-home file.'});
 if(answer.isError) throw Error(JSON.stringify(answer));
 if(JSON.parse(readFileSync(path)).disposition!=='open') throw Error('retry budget exhaustion closed goal');
+// Unchanged evidence survives exhausted ordinary attempts. Only the existing
+// heartbeat may deliver a later recovery, and UI safety still takes priority.
+const recoveryDue=Object.values(JSON.parse(readFileSync(path)).coordination.budgets)[0].recovery_not_before_ms;
+let draft='draft';defaultSessionCtx.ui.getEditorText=()=>draft;
+await new Promise(resolve=>setTimeout(resolve,Math.max(0,recoveryDue-Date.now()+100)));
+if((await beforeSettle()).continued) throw Error('settle immediately executed paced recovery');
+const reservedRecovery=Object.values(JSON.parse(readFileSync(path)).coordination.budgets)[0];
+if(reservedRecovery.attempts!==2||reservedRecovery.recovery_attempts!==1||!reservedRecovery.recovery_reserved) throw Error('recovery reset original attempts or lost reservation');
+bus.emit('firstmate:heartbeat-tick');await new Promise(resolve=>setTimeout(resolve,500));
+if(sentToMain.some(x=>x.message.details?.admissions?.includes(reservedRecovery.recovery_reserved))) throw Error('recovery interrupted editor input');
+const originalSend=pi.sendMessage;
+pi.sendMessage=(message,options)=>{
+ originalSend(message,options);
+ const persisted={type:'custom_message',...message,id:`entry-${entries.length}`,timestamp:new Date().toISOString()};
+ entries.push(persisted);appendFileSync(file,JSON.stringify(persisted)+'\n');
+};
+draft='';bus.emit('firstmate:heartbeat-tick');
+for(let i=0;i<200&&!sentToMain.some(x=>x.message.details?.admissions?.includes(reservedRecovery.recovery_reserved));i++) await new Promise(r=>setTimeout(r,10));
+if(!sentToMain.some(x=>x.message.details?.admissions?.includes(reservedRecovery.recovery_reserved)&&x.options.triggerTurn)) throw Error('paced recovery did not start an executable turn');
+await beforeSettle();
+await fire('session_shutdown',{},defaultSessionCtx);await fire('session_start',{},defaultSessionCtx);
+await fire('session_compact',{},defaultSessionCtx);
+if((await beforeSettle()).continued) throw Error('reload/compaction replayed recovery');
+const recovered=Object.values(JSON.parse(readFileSync(path)).coordination.budgets)[0];
+if(recovered.attempts!==2||recovered.recovery_attempts!==1||recovered.recovery_reserved||recovered.recovery_not_before_ms<=Date.now()+110000) throw Error('recovery did not retain separate durable backoff');
 // A material observation changes the fingerprint and earns one fresh check.
 const r=JSON.parse(readFileSync(path));r.assessment.remaining_gap='Apply now-authorized prerequisite, then validate.';
 writeFileSync(`${home}/data/proposal.json`,JSON.stringify(r),{mode:0o600});
