@@ -27,13 +27,26 @@ unset _FM_SESSION_LOCK_LIB_DIR
 # Known harness command names; extend when a new adapter is verified. omp is
 # anchored exactly like pi: its process name is the bare word `omp` (verified,
 # omp 18.1.11), and a substring match would claim ompd or comp.
-FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$|^omp$'
+#
+# kiro-cli presents TWO distinct process comm names in one interactive session
+# (verified live, kiro-cli 2.22.1): the top `kiro-cli chat -a` frame is comm
+# `kiro-cli`, and the inner frames are comm `kiro-cli-chat` (the launcher and
+# the `acp` engine), with a `bun` interpreter frame interposed between the two
+# kiro-cli-chat frames (see the interpreter arm in fm_harness_process_matches).
+# Both are anchored: `^kiro-cli$` must NOT be a substring rule, because the
+# longer `kiro-cli-chat` basename is its own separate frame and a bare
+# `kiro-cli` substring would also match ordinary firstmate paths. The
+# alternation lists the longer name first for readability; anchoring makes
+# ordering irrelevant.
+FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$|^omp$|^kiro-cli-chat$|^kiro-cli$'
 
 # The same harnesses as exact executable names. Keep in sync with
 # FM_HARNESS_RE. Used only for the stricter path evidence below, where the
 # loose regex would also match ordinary firstmate paths such as
-# bin/fm-claude-stop-autoarm.sh.
-FM_HARNESS_NAMES=(claude codex opencode grok kimi pi-signed pi omp)
+# bin/fm-claude-stop-autoarm.sh. kiro-cli-chat precedes kiro-cli so a path
+# component check matches the more specific name first (a moot ordering for a
+# whole-component match, kept for clarity alongside FM_HARNESS_RE).
+FM_HARNESS_NAMES=(claude codex opencode grok kimi pi-signed pi omp kiro-cli-chat kiro-cli)
 
 # Print the exact harness name carried by executable path $1 - its own basename
 # or any directory component - or return 1.
@@ -56,7 +69,26 @@ fm_harness_path_name() {  # <path>
 }
 
 # True when the process described by command name $1 and full argument string $2
-# is a verified harness. Sets FM_HARNESS_IS_CLAUDE for the ancestry walk.
+# is a verified harness. Sets FM_HARNESS_IS_CLAUDE for the Claude-only
+# trusted-session-id logic below, and FM_HARNESS_EXTENDS_RUN for the ancestry
+# walk's contiguous-run extension.
+#
+# FM_HARNESS_EXTENDS_RUN is set for the harnesses whose per-session process is
+# NOT the innermost harness frame a subprocess descends from, so the walk must
+# report the WHOLE contiguous harness run rather than stopping at the first
+# match:
+#   - Claude runs hooks several levels below the session inside its own nested
+#     worker chain.
+#   - kiro-cli's interactive session is a four-frame run
+#     (kiro-cli -> kiro-cli-chat -> bun -> kiro-cli-chat) and BOTH its tool
+#     subprocesses AND its `stop` hook descend from the innermost `kiro-cli-chat
+#     acp` frame (verified live, kiro-cli 2.22.1), with a `bun` interpreter frame
+#     interposed in the middle. Stopping at the first match would anchor the lock
+#     on the transient inner `acp` engine pid; extending the run lets
+#     fm_session_lock_anchor_pid record the stable OUTERMOST `kiro-cli` frame and
+#     lets ownership match against any frame in the run, exactly as it does for
+#     Claude. The bun frame in the middle is matched by its `kiro-cli` install
+#     path component (step 2), so the run stays contiguous across it.
 #
 # Evidence, in order:
 #   1. the basename of the reported command name, against FM_HARNESS_RE.
@@ -64,28 +96,38 @@ fm_harness_path_name() {  # <path>
 #      needed because the two platforms report different things: macOS reports
 #      argv[0] in `ps -o comm=`, while procps on Linux reports the kernel exec
 #      name and ignores argv[0] entirely, so a version-named Claude Code binary
-#      is identified by its install path on macOS and by argv[0] on Linux.
+#      is identified by its install path on macOS and by argv[0] on Linux, and a
+#      kiro-cli `bun` frame is identified by its `kiro-cli` install-path
+#      component in the command path or argv[0].
 #   3. a bare interpreter (node, python) running a harness script path.
 #   4. Cursor's own structural identity, owned by bin/fm-cursor-lib.sh.
 FM_HARNESS_IS_CLAUDE=0
+FM_HARNESS_EXTENDS_RUN=0
 fm_harness_process_matches() {  # <comm> <args>
   local comm=$1 args=$2 base argv0 name
   FM_HARNESS_IS_CLAUDE=0
+  FM_HARNESS_EXTENDS_RUN=0
   base=$(basename -- "$comm")
   if printf '%s' "$base" | grep -qE "$FM_HARNESS_RE"; then
-    case "$base" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
+    case "$base" in
+      *claude*) FM_HARNESS_IS_CLAUDE=1; FM_HARNESS_EXTENDS_RUN=1 ;;
+      kiro-cli|kiro-cli-chat) FM_HARNESS_EXTENDS_RUN=1 ;;
+    esac
     return 0
   fi
   argv0=${args%% *}
   if name=$(fm_harness_path_name "$comm") || name=$(fm_harness_path_name "$argv0"); then
-    case "$name" in claude) FM_HARNESS_IS_CLAUDE=1 ;; esac
+    case "$name" in
+      claude) FM_HARNESS_IS_CLAUDE=1; FM_HARNESS_EXTENDS_RUN=1 ;;
+      kiro-cli|kiro-cli-chat) FM_HARNESS_EXTENDS_RUN=1 ;;
+    esac
     return 0
   fi
   # Bare interpreter (e.g. node): match the harness name in its script path.
   case "$comm" in
     *node*|*python*)
       if printf '%s' "$args" | grep -qE "$FM_HARNESS_RE"; then
-        case "$args" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
+        case "$args" in *claude*) FM_HARNESS_IS_CLAUDE=1; FM_HARNESS_EXTENDS_RUN=1 ;; esac
         return 0
       fi
       ;;
@@ -107,15 +149,22 @@ fm_harness_process_matches() {  # <comm> <args>
 # into an unrelated harness further up the real process tree - for example the
 # live session that launched a test as its own subprocess.
 #
-# For every harness except Claude the innermost match is the session, which is
+# For a single-frame harness the innermost match is the session, which is
 # where e.g. Pi's shared signed-wrapper ancestry actually holds the lock: a
 # "pi-signed" launcher can be the direct parent of the inner "pi" engine pid that
-# owns the lock, and the wrapper pid above it is not that owner. Claude Code
-# instead runs hooks several levels below the session inside its own nested
-# worker chain (hook shell -> claude bg-spare -> claude bg-pty-host -> claude ->
-# claude), with no non-harness process between them. Which pid in that run is the
-# session cannot be read off the ancestry at all, so the whole contiguous run is
-# reported and the callers below decide what they need from it.
+# owns the lock, and the wrapper pid above it is not that owner. Two harnesses
+# instead run their per-session process ABOVE the frame a subprocess descends
+# from, so the whole contiguous run is reported (FM_HARNESS_EXTENDS_RUN) and the
+# callers below decide what they need from it. Claude Code runs hooks several
+# levels below the session inside its own nested worker chain (hook shell ->
+# claude bg-spare -> claude bg-pty-host -> claude -> claude), with no non-harness
+# process between them, and which pid in that run is the session cannot be read
+# off the ancestry at all. kiro-cli's interactive session is a four-frame run
+# (kiro-cli -> kiro-cli-chat -> bun -> kiro-cli-chat) whose tool subprocesses and
+# `stop` hook both descend from the innermost `kiro-cli-chat acp` frame with the
+# `bun` interpreter interposed in the middle, so reporting the whole run lets the
+# anchor be the stable OUTERMOST `kiro-cli` frame instead of the transient inner
+# engine pid.
 fm_harness_ancestry_pids() {
   local pid=$$ comm args extending=0 printed=0
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
@@ -124,7 +173,7 @@ fm_harness_ancestry_pids() {
     if fm_harness_process_matches "$comm" "$args"; then
       printf '%s\n' "$pid"
       printed=1
-      [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || break
+      [ "$FM_HARNESS_EXTENDS_RUN" -eq 1 ] || break
       extending=1
     elif [ "$extending" -eq 1 ]; then
       break
@@ -143,8 +192,10 @@ fm_harness_ancestry_pids() {
 # Print the outermost pid of this session's contiguous harness run for callers
 # that need that ancestry identity. This is not necessarily the pid written to
 # the session lock: fm_session_lock_anchor_pid owns that choice and uses a
-# trusted Claude session's model-loop pid instead. Every non-Claude harness
-# reports a single pid, so this remains its innermost match unchanged.
+# trusted Claude session's model-loop pid instead. A single-frame harness
+# reports one pid, so this remains its innermost match unchanged; a run-extending
+# harness (Claude, kiro-cli) reports its whole contiguous run and this returns
+# its outermost frame.
 fm_harness_ancestry_pid() {
   local pids
   pids=$(fm_harness_ancestry_pids) || return 1

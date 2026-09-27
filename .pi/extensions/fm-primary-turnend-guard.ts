@@ -12,7 +12,10 @@ import {
 
 let guardFollowupActive = false;
 
-type LockOwnership = "owned" | "missing" | "other";
+type LockOwnership =
+  | { kind: "owned"; pid: string }
+  | { kind: "missing" }
+  | { kind: "other" };
 
 const extensionFile = fileURLToPath(import.meta.url);
 const extensionDir = dirname(extensionFile);
@@ -42,20 +45,25 @@ function lockOwnership(): LockOwnership {
   try {
     lockPid = readFileSync(`${state}/.lock`, "utf8").trim();
   } catch {
-    return "missing";
+    return { kind: "missing" };
   }
-  if (!/^[0-9]+$/.test(lockPid) || lockPid === "1") return "other";
+  if (!/^[0-9]+$/.test(lockPid) || lockPid === "1") return { kind: "other" };
   let pid = String(process.pid);
   for (let i = 0; i < 8; i += 1) {
-    if (pid === lockPid) return "owned";
+    if (pid === lockPid) return { kind: "owned", pid: lockPid };
     pid = parentPid(pid);
     if (!pid || pid === "1") break;
   }
-  return pidAlive(lockPid) ? "other" : "missing";
+  return pidAlive(lockPid) ? { kind: "other" } : { kind: "missing" };
 }
 
 function markLoaded(): void {
-  if (!existsSync(state) || lockOwnership() === "other") return;
+  if (!existsSync(state)) return;
+  const ownership = lockOwnership();
+  if (
+    ownership.kind === "other" ||
+    (ownership.kind === "owned" && ownership.pid !== String(process.pid))
+  ) return;
   writeFileSync(marker, `${extensionVersion}\n${process.pid}\n`);
 }
 

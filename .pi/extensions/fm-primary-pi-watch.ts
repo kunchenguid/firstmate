@@ -60,7 +60,10 @@ type ArmResult = {
   message: string;
 };
 
-type LockOwnership = "owned" | "missing" | "other";
+type LockOwnership =
+  | { kind: "owned"; pid: string }
+  | { kind: "missing" }
+  | { kind: "other" };
 
 type CloseClassification = {
   kind: "actionable" | "failure";
@@ -233,20 +236,24 @@ function lockOwnership(): LockOwnership {
   try {
     lockPid = readFileSync(`${state}/.lock`, "utf8").trim();
   } catch {
-    return "missing";
+    return { kind: "missing" };
   }
-  if (!/^[0-9]+$/.test(lockPid) || lockPid === "1") return "other";
+  if (!/^[0-9]+$/.test(lockPid) || lockPid === "1") return { kind: "other" };
   let pid = String(process.pid);
   for (let i = 0; i < 8; i += 1) {
-    if (pid === lockPid) return "owned";
+    if (pid === lockPid) return { kind: "owned", pid: lockPid };
     pid = parentPid(pid);
     if (!pid || pid === "1") break;
   }
-  return pidAlive(lockPid) ? "other" : "missing";
+  return pidAlive(lockPid) ? { kind: "other" } : { kind: "missing" };
 }
 
 function publishGenerationOwner(generation: SessionGeneration, phase: "active" | "handoff"): void {
-  if (lockOwnership() === "other") return;
+  const ownership = lockOwnership();
+  if (
+    ownership.kind === "other" ||
+    (ownership.kind === "owned" && ownership.pid !== String(process.pid))
+  ) return;
   mkdirSync(state, { recursive: true });
   const temporary = `${marker}.tmp-${process.pid}-${generation.id}`;
   writeFileSync(
@@ -937,7 +944,7 @@ export default function (pi: ExtensionAPI) {
   function scheduleRetry(owner: SessionGeneration, message: string, predecessorArmPid: string): void {
     if (!generationIsLive(owner) || owner.child || owner.retryTimer) return;
     const ownership = lockOwnership();
-    if (ownership !== "owned") {
+    if (ownership.kind !== "owned") {
       surfaceFailure(owner, `watcher: FAILED - Pi extension cannot restore continuity because this session no longer owns the lock\n${message}`);
       return;
     }
@@ -961,8 +968,8 @@ export default function (pi: ExtensionAPI) {
   function startArm(owner: SessionGeneration, predecessorArmPid = ""): ArmResult {
     if (!generationIsLive(owner)) return { ok: false, message: shuttingDownMessage };
     const ownership = lockOwnership();
-    if (ownership === "other") return { ok: false, message: "watcher: read-only - session lock is held by another firstmate session" };
-    if (ownership === "missing") {
+    if (ownership.kind === "other") return { ok: false, message: "watcher: read-only - session lock is held by another firstmate session" };
+    if (ownership.kind === "missing") {
       return {
         ok: false,
         message: "watcher: not armed - no live session holds the lock; run bin/fm-session-start.sh to reclaim it, then call fm_watch_arm_pi to re-arm",
@@ -1089,7 +1096,7 @@ export default function (pi: ExtensionAPI) {
 
   function activateOwnedWatch(owner: SessionGeneration): ArmResult {
     if (!generationIsLive(owner)) return { ok: false, message: shuttingDownMessage };
-    if (lockOwnership() !== "owned") return startArm(owner);
+    if (lockOwnership().kind !== "owned") return startArm(owner);
     replacementCoordinator.receiver = receiveReplacementActionable;
     let pending: PendingActionableClose[] = [];
     let loadFailure = "";
@@ -1128,7 +1135,7 @@ export default function (pi: ExtensionAPI) {
   pi.on?.("session_start", async () => {
     if (generation.stopping) generation = createGeneration();
     activateGeneration(generation);
-    if (lockOwnership() !== "owned") return;
+    if (lockOwnership().kind !== "owned") return;
     activateOwnedWatch(generation);
   });
   pi.on?.("session_shutdown", async (event) => {

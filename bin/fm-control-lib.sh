@@ -44,6 +44,11 @@
 # fm_control_relaunch_resume_flag below: a reference the endpoint's runtime
 # bound as its status authority is returned to a replacement with that adapter.
 
+_FM_CONTROL_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-kiro-lib.sh
+. "$_FM_CONTROL_LIB_DIR/fm-kiro-lib.sh"
+unset _FM_CONTROL_LIB_DIR
+
 # The complete control-plane verb allowlist, one per line.
 fm_control_verbs() {
   cat <<'EOF'
@@ -64,7 +69,7 @@ fm_control_verb_allowed() {  # <verb>
 # section 4's verified-adapter list; an unverified adapter is refused rather
 # than guessed at, exactly as a spawn on it would be.
 fm_control_harnesses() {
-  printf '%s\n' claude codex opencode pi pi-signed grok kimi cursor gemini muse rovo omp agy devin
+  printf '%s\n' claude codex opencode pi pi-signed grok kimi cursor gemini muse rovo omp agy devin kiro-cli
 }
 
 fm_control_harness_supported() {  # <harness>
@@ -82,7 +87,8 @@ fm_control_harness_supported() {  # <harness>
 # and friends. This is the one place that prefix rule is stated. `pi` and
 # `pi-signed` are exact because a `pi*` prefix would swallow the signed adapter,
 # `omp` is exact because an `omp*` prefix would claim unrelated commands, `agy`
-# is exact for the same reason on an even shorter name, and an
+# is exact for the same reason on an even shorter name, `kiro-cli` is exact
+# because it is the precise process name firstmate records and launches, and an
 # unrecognized value returns nonzero rather than being guessed into a family.
 fm_control_harness_family() {  # <recorded-harness>
   case "${1-}" in
@@ -91,6 +97,7 @@ fm_control_harness_family() {  # <recorded-harness>
     omp) printf 'omp' ;;
     agy) printf 'agy' ;;
     devin) printf 'devin' ;;
+    kiro-cli) printf 'kiro-cli' ;;
     claude*) printf 'claude' ;;
     codex*) printf 'codex' ;;
     opencode*) printf 'opencode' ;;
@@ -106,7 +113,10 @@ fm_control_harness_family() {  # <recorded-harness>
 
 # Which task kinds an adapter is verified to run. muse, gemini, rovo, agy, and devin
 # are crewmate/scout adapters only: none has a primary supervision protocol,
-# and bin/fm-spawn.sh refuses a --secondmate launch on any of them. The control
+# and bin/fm-spawn.sh refuses a --secondmate launch on any of them. kiro-cli is
+# NOT in that set: it carries a first-class `stop` agent hook and a verified
+# primary supervision protocol (docs/supervision-protocols/kiro-cli.md), so it
+# runs a secondmate like any other primary-capable adapter. The control
 # plane asks this BEFORE it stops anything, so an incompatible relaunch target is
 # refused while the current agent is still running rather than after it has
 # been stopped.
@@ -128,10 +138,13 @@ fm_control_harness_supports_kind() {  # <harness> <kind>
 # with an idle composer and no repollution (verified live, agy 1.2.0 through
 # Herdr). omp (Oh My Pi) shares Pi's single Escape, empty composer
 # afterwards, and /quit exit (verified omp 18.1.2 in a PTY, re-verified 18.1.11
-# through Herdr).
+# through Herdr). kiro-cli's new default TUI cancels the streaming turn on a
+# single Escape (its busy footer literally reads "Thinking... (esc to cancel)"),
+# leaving the session alive; a single Ctrl+C does NOT quit it (Ctrl+C x2 quits),
+# so Escape is the interrupt (scout report, kiro-cli 2.22.1).
 fm_control_interrupt_key() {  # <harness>
   case "${1-}" in
-    claude|codex|opencode|pi|pi-signed|omp|kimi|cursor|gemini|muse|rovo|agy|devin) printf 'Escape' ;;
+    claude|codex|opencode|pi|pi-signed|omp|kimi|cursor|gemini|muse|rovo|agy|devin|kiro-cli) printf 'Escape' ;;
     grok) printf 'C-c' ;;
     *) return 1 ;;
   esac
@@ -142,7 +155,7 @@ fm_control_interrupt_key() {  # <harness>
 fm_control_interrupt_repeat() {  # <harness>
   case "${1-}" in
     opencode|devin) printf '2' ;;
-    claude|codex|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy) printf '1' ;;
+    claude|codex|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|kiro-cli) printf '1' ;;
     *) return 1 ;;
   esac
 }
@@ -161,7 +174,7 @@ fm_control_interrupt_repeat() {  # <harness>
 fm_control_interrupt_arm_signal() {  # <harness>
   case "${1-}" in
     devin) printf '%s' 'esc again to interrupt' ;;
-    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy) ;;
+    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|kiro-cli) ;;
     *) return 1 ;;
   esac
 }
@@ -172,7 +185,7 @@ fm_control_interrupt_arm_signal() {  # <harness>
 fm_control_interrupt_press_gap() {  # <harness>
   case "${1-}" in
     devin) printf '0.5' ;;
-    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy) printf '0.2' ;;
+    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|kiro-cli) printf '0.2' ;;
     *) return 1 ;;
   esac
 }
@@ -185,7 +198,7 @@ fm_control_interrupt_press_gap() {  # <harness>
 fm_control_interrupt_hazard_signal() {  # <harness>
   case "${1-}" in
     devin) printf '%s' 'Revert to step:|↵ revert' ;;
-    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy) ;;
+    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|kiro-cli) ;;
     *) return 1 ;;
   esac
 }
@@ -206,7 +219,7 @@ fm_control_interrupt_hazard_signal() {  # <harness>
 fm_control_interrupt_clear_key() {  # <harness>
   case "${1-}" in
     muse) printf 'C-u' ;;
-    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|rovo|agy|devin) ;;
+    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|rovo|agy|devin|kiro-cli) ;;
     *) return 1 ;;
   esac
 }
@@ -221,7 +234,11 @@ fm_control_interrupt_ack_source() {  # <harness>
     # rovo's TUI prints "Agent cancelled" on Escape, but for parity with
     # claude/cursor this stays 'none': the ack is a rendered string, not a
     # recorded state source, and rovo has no busy wiring to confirm against.
-    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|rovo|agy|devin) printf 'none' ;;
+    # kiro-cli is the same: Escape cancels the turn but the only pane-side
+    # signal is the rendered busy footer (a delivery guard, not a recorded
+    # state source), and kiro-cli arms no semantic busy writer to confirm
+    # against, so its cancellation makes no claim either.
+    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|rovo|agy|devin|kiro-cli) printf 'none' ;;
     *) return 1 ;;
   esac
 }
@@ -230,7 +247,7 @@ fm_control_interrupt_ack_source() {  # <harness>
 fm_control_exit_command() {  # <harness>
   case "${1-}" in
     claude|opencode|grok|kimi|cursor|muse|rovo) printf '/exit' ;;
-    codex|pi|pi-signed|omp|gemini|agy|devin) printf '/quit' ;;
+    codex|pi|pi-signed|omp|gemini|agy|devin|kiro-cli) printf '/quit' ;;
     *) return 1 ;;
   esac
 }
@@ -388,6 +405,27 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id>
       printf '%s\n' "$wt/.fm-kimi-turnend"
       printf '%s\n' "$state/$id.kimi-turnend-token"
       ;;
+    kiro-cli)
+      # kiro-cli's turn-end is the TRACKED, firstmate-owned hook
+      # (bin/fm-kiro-turnend-hook.sh) registered in the per-task KIRO_HOME agent
+      # config that bin/fm-spawn.sh builds at state/<id>.kiro-home. The hook is
+      # gated by this per-task isolated-home pointer plus the state token below - the
+      # same guarded-pointer shape as grok and kimi, but with the registry
+      # (agents/fm-turn-end.d/<token>) living under the per-task KIRO_HOME rather
+      # than a shared global dir. Only the two rm-able files are listed here (the
+      # wiring-path caller uses `rm -f`); the state/<id>.kiro-home DIRECTORY is
+      # retired by bin/fm-teardown.sh's `rm -rf` and rebuilt fresh on every spawn,
+      # so a relaunch overwrites it rather than accumulating.
+      # Keep the legacy worktree pointer in the cleanup list for one-way
+      # migration, but new launches own the pointer inside KIRO_HOME.
+      printf '%s\n' "$wt/.fm-kiro-turnend"
+      printf '%s\n' "$state/$id.kiro-home/.fm-kiro-turnend"
+      printf '%s\n' "$state/$id.kiro-turnend-token"
+      fm_kiro_v3_agent_path "$wt" "$id"
+      printf '\n'
+      fm_kiro_v3_hook_path "$wt" "$id"
+      printf '\n'
+      ;;
     muse)
       # muse installs no hook: its busy source is its own session event log,
       # bound to the pane by these two firstmate-owned sidecars. A relaunch
@@ -408,15 +446,19 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id>
 }
 
 # The firstmate-owned global turn-end registry entry a harness mints per task.
-# grok and kimi are the two adapters whose turn-end hook is global and gated by
-# a private token file; every other adapter's wiring is fully covered by
-# fm_control_harness_wiring_paths. Prints the registry path or nothing.
+# grok and kimi are the adapters whose turn-end hook is global and gated by a
+# private token file; every other adapter's wiring is fully covered by
+# fm_control_harness_wiring_paths. kiro-cli is listed because its token lives
+# beside the task state like theirs, but its registry lives INSIDE the per-task
+# KIRO_HOME (see fm_control_harness_turnend_auth_path, empty for kiro-cli).
+# Prints the registry path or nothing.
 fm_control_harness_turnend_token_path() {  # <harness> <state-dir> <id>
   local harness=${1-} state=${2-} id=${3-}
   [ -n "$state" ] && [ -n "$id" ] || return 1
   case "$harness" in
     grok) printf '%s\n' "$state/$id.grok-turnend-token" ;;
     kimi) printf '%s\n' "$state/$id.kimi-turnend-token" ;;
+    kiro-cli) printf '%s\n' "$state/$id.kiro-turnend-token" ;;
   esac
 }
 
@@ -426,6 +468,12 @@ fm_control_harness_turnend_auth_path() {  # <harness> <token>
   case "$harness" in
     grok) printf '%s\n' "${GROK_HOME:-$HOME/.grok}/hooks/fm-turn-end.d/$token" ;;
     kimi) printf '%s\n' "$HOME/.kimi-code/fm-turn-end.d/$token" ;;
+    # kiro-cli's registry lives inside the per-task KIRO_HOME (state/<id>.kiro-home),
+    # not a shared global dir, so there is no external auth file to remove: the
+    # whole KIRO_HOME is retired by bin/fm-teardown.sh's `rm -rf` and rewritten
+    # fresh on relaunch. Emitting nothing is correct - the token path above is
+    # still listed so relaunch can read the token before overwrite.
+    kiro-cli) printf '%s' '' ;;
     *) return 0 ;;
   esac
 }

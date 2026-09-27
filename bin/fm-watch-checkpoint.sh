@@ -148,7 +148,7 @@ if [ -f "$CONFIG/supervision-host" ]; then
 fi
 
 set +e
-run_bounded "$SECONDS_ARG" "$SCRIPT_DIR/fm-watch.sh" >"$OUT" 2>"$ERR"
+run_bounded "$SECONDS_ARG" env FM_WATCH_FOREGROUND_CHECKPOINT=1 "$SCRIPT_DIR/fm-watch.sh" >"$OUT" 2>"$ERR"
 RC=$?
 set -e
 

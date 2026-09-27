@@ -295,6 +295,13 @@ The registrations in detail:
   pi-code stamps it with Pi's session file under `/.pi/`, a path component a Claude transcript never carries.
   The stand-down fails toward running, matching the guards above, so no payload, no `jq`, or no `transcript_path` still arms, and every other Claude-shaped hook pi-code delivers keeps running.
 
+- kiro-cli registers its lifecycle hooks (`SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`) running `bin/fm-kiro-turnend-hook.sh`: the tracked `.kiro/hooks/fm-firstmate.json` for a V3 primary, a task-specific `.kiro/hooks/fm-firstmate-<id>.json` that `bin/fm-spawn.sh` writes into the worker's own worktree for a V3 worker, and an embedded agent config inside the per-session `KIRO_HOME` for the explicit V2 fallback.
+  kiro-cli is the exception with NO turn-boundary channel at all: its `Stop` hook fires and is awaited synchronously (verified live, kiro-cli 2.22.1), but exit 2 is a no-op on `Stop` and neither the hook's stdout nor a `followup_message` is consumed as a continuation, so the hook cannot block the turn end and cannot force or deliver a follow-up.
+  The `Stop` hook is therefore a re-arm backstop: when a turn would end with supervision needed, this session owns the lock, away mode is off, and no watcher is healthy, it starts one `bin/fm-watch-arm.sh` cycle under `setsid` so the watcher survives the awaited hook (a bare `&` child would be reaped) and queues actionable events to the durable wake queue, then returns without blocking the boundary.
+  The wake reaches the model through a structural doorbell rather than the hook: the `SessionStart` hook publishes the primary pane as `state/.primary-endpoint`, the watcher rings one constant line into that pane after appending each actionable row, and the `UserPromptSubmit` hook attaches the drained queue as that turn's context (`bin/fm-primary-endpoint-lib.sh`).
+  When no endpoint can be published, kiro-cli falls back to model-driven supervision exactly like Codex and the unknown-harness fallback: [`supervision-protocols/kiro-cli.md`](supervision-protocols/kiro-cli.md) owns both paths and how the session-start digest selects between them.
+  Neither path satisfies the "block or force one bounded follow-up" invariant above at the hook boundary; the doorbell narrows the blind window to the ring's own refusals (a busy pane, away mode, a foreground checkpoint), each of which leaves the row durable for the next turn's `UserPromptSubmit` drain or the watcher poll loop's re-ring of the newest unrung row once the pane is idle.
+
 ### Claude and Codex blocking
 
 Claude and Codex can block a Stop directly with exit status 2 and stderr.
@@ -521,6 +528,7 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 - The blocking and bounded-follow-up mechanisms are limited to the primary integrations listed above.
 - OpenCode headless mode and untrusted Grok project hooks remain fail-open at the host boundary.
 - Cursor's `stop` step does not fire in headless `cursor-agent -p`, the same class of limit as OpenCode headless; firstmate primaries run interactive.
+- kiro-cli's `Stop` hook can neither block the turn end (exit 2 is a no-op on `Stop`) nor deliver a follow-up (no stdout or `followup_message` continuation), so it is a re-arm backstop only and cannot force a blind turn to continue; the watcher's doorbell into the published primary pane is what starts the wake-handling turn, with `bin/fm-watch-checkpoint.sh` as the fallback when no endpoint is published, and firstmate primaries run interactive because the interactive TUI needs a genuine PTY.
 - A Cursor primary must be launched with `--trust`, or its project hooks never load and the whole integration is inert.
 - Cursor's `preCompact` step is deliberately unregistered.
   Its response can return only `user_message` and it is absent from Cursor's `additional_context` step set, so a post-compaction re-emit needs its own design and is deferred to a follow-up ([`sessionstart-nudge.md`](sessionstart-nudge.md) owns that uncovered surface).

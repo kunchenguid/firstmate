@@ -377,7 +377,7 @@ fm_composer_strip_ghost() {
 # tmux agy endpoint reaches the submit core with no recorded harness, and its
 # bare `>` composer verdict is `unknown`, so the busy footer is the only
 # turn-started acknowledgement that path can read.
-FM_DELIVERY_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working(\.\.\.|…)|Ctrl\+c:cancel|ctrl\+c to stop|esc[[:space:]]+to[[:space:]]+cancel|esc twice to interrupt|^[[:space:]]*❭ Guide Devin while it works$'
+FM_DELIVERY_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working(\.\.\.|…)|Ctrl\+c:cancel|ctrl\+c to stop|esc[[:space:]]+to[[:space:]]+cancel|esc twice to interrupt|^[[:space:]]*❭ Guide Devin while it works$|Kiro is working'
 FM_DELIVERY_CLAUDE_BUSY_REGEX_DEFAULT='esc to interrupt|…[[:space:]]+\([0-9]+[smh]'
 # Devin 3000.11.1: the working composer and interrupt hint are independent
 # delivery signals. Neither is used as semantic worker-state evidence.
@@ -419,6 +419,14 @@ FM_DELIVERY_CURSOR_BUSY_REGEX_DEFAULT='ctrl\+c to stop'
 # acknowledgement. Delivery guard only; recorded worker state comes from the
 # agy-regex fold in bin/fm-busy-lib.sh.
 FM_DELIVERY_AGY_BUSY_REGEX_DEFAULT='esc[[:space:]]+to[[:space:]]+cancel'
+# kiro-cli renders two independent busy anchors while a turn streams (scout
+# report, kiro-cli 2.22.1): the composer footer `Thinking... (esc to cancel)`
+# and the status line `Kiro is working`. Both are matched so no single vendor
+# string is load-bearing, and both are ASCII that survive KIRO_ASCII_MODE. The
+# braille spinner beside them is locale-sensitive and deliberately not matched.
+# Delivery guard only; recorded worker state comes from the kiro-regex fold in
+# bin/fm-busy-lib.sh, and kiro-cli's authoritative turn-end is its stop hook.
+FM_DELIVERY_KIRO_BUSY_REGEX_DEFAULT='Thinking\.\.\.[[:space:]]*\(esc to cancel\)|Kiro is working'
 FM_DELIVERY_KIMI_BUSY_REGEX_DEFAULT='^[[:space:]]*(🌑|🌒|🌓|🌔|🌕|🌖|🌗|🌘)[[:space:]]+·[[:space:]]+'
 
 fm_busy_lines_match() {  # [harness]
@@ -436,6 +444,7 @@ fm_busy_lines_match() {  # [harness]
       omp) regex=$FM_DELIVERY_OMP_BUSY_REGEX_DEFAULT ;;
       grok) regex=$FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT ;;
       agy) regex=$FM_DELIVERY_AGY_BUSY_REGEX_DEFAULT ;;
+      kiro-cli) regex=$FM_DELIVERY_KIRO_BUSY_REGEX_DEFAULT ;;
       kimi) regex=$FM_DELIVERY_KIMI_BUSY_REGEX_DEFAULT ;;
       cursor) regex=$FM_DELIVERY_CURSOR_BUSY_REGEX_DEFAULT ;;
       '') regex=$FM_DELIVERY_BUSY_REGEX_DEFAULT ;;
@@ -462,14 +471,27 @@ FM_COMPOSER_SHELL_PROMPT_GLYPHS=$(printf '%s\n' '>' '$' '%' '#')
 # an EMPTY composer that a plain capture cannot tell from typed text. Grok's
 # bordered placeholder and opencode's left-bar hint (which uses either three
 # ASCII periods or U+2026 and continues with a rotating quoted suggestion,
-# hence the unanchored tail). cursor-agent renders
-# two, both anchored: `Plan, search, build anything` in a fresh session and
-# `Add a follow-up` once a turn has completed (verified live on cursor-agent
-# 2026.08.11-e8db854). Devin renders the anchored `Ask Devin to build features,
-# fix bugs, or work on your code` as dim text after its `❭` glyph (verified
-# live, devin 3000.11.1). FM_COMPOSER_IDLE_RE overrides for an unverified harness;
-# matching is case-insensitive.
+# hence the unanchored tail). cursor-agent renders two, both anchored:
+# `Plan, search, build anything` in a fresh session and `Add a follow-up` once
+# a turn has completed (verified live on cursor-agent 2026.08.11-e8db854).
+# Devin renders the anchored `Ask Devin to build features, fix bugs, or work on
+# your code` as dim text after its `❭` glyph (verified live, devin 3000.11.1).
+# FM_COMPOSER_IDLE_RE overrides for an unverified harness; matching is
+# case-insensitive.
 FM_COMPOSER_IDLE_RE_DEFAULT='^Type a message\.\.\.$|^Ask anything(\.\.\.|…)|^Plan, search, build anything$|^Add a follow-up$|^Ask Devin to build features, fix bugs, or work on your code$'
+
+# Kiro is deliberately separate from the fleet-wide set. kiro-cli 2.22.1 V2
+# and V3 render `ask a question or describe a task` in RGB ~158 after a bare
+# `›`, above the shared ghost-luminance ceiling of 128. Raising that ceiling
+# would erase muse's ~150 prompt glyph, while adding this text to the generic
+# idle set cannot distinguish another harness's real typed text. The exact,
+# case-sensitive Kiro placeholder is therefore empty only when the caller also
+# supplies harness=kiro-cli. V3 draws the second exact row below it as composer
+# furniture, and an agent launched before the V3 wiring draws only
+# `/copy to clipboard`; both shapes must stop the bare-wrap scan on cursorless
+# backends, while a row merely containing that phrase stays typed input.
+FM_COMPOSER_KIRO_IDLE_RE_DEFAULT='^ask a question or describe a task( ↵)?$'
+FM_COMPOSER_KIRO_FOOTER_RE_DEFAULT='^(/sessions to resume[[:space:]]+·[[:space:]]+)?/copy to clipboard$'
 
 # Opencode draws a mode/model footer line INSIDE its left-bar composer
 # ("Build · GPT-5.5 Fast OpenAI · high"). It is composer furniture, not typed
@@ -659,9 +681,9 @@ fm_composer_idle_matches() {
 # Content and plain_content are normalized and re-trimmed on entry, so the
 # verdict never depends on which whitespace alphabet the calling adapter
 # trimmed with.
-fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [plain_content] [placeholder-position] [styled]
+fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [plain_content] [placeholder-position] [styled] [harness]
   local bordered=$1 idle_re=${3:-} idle_case=${4:-sensitive} content plain_content glyph=''
-  local placeholder_position=${6:-0} styled=${7:-1} idle_collision=0
+  local placeholder_position=${6:-0} styled=${7:-1} harness=${8:-} idle_collision=0
   content=$2
   fm_composer_normalize_trim_var content
   plain_content=${5:-$2}
@@ -686,6 +708,12 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
   fi
   fm_composer_normalize_trim_var content
   [ -n "$content" ] || { printf 'empty'; return 0; }
+  if [ "$harness" = kiro-cli ] \
+     && fm_composer_idle_matches "$content" \
+       "${FM_COMPOSER_KIRO_IDLE_RE:-$FM_COMPOSER_KIRO_IDLE_RE_DEFAULT}" sensitive; then
+    printf 'empty'
+    return 0
+  fi
   fm_composer_idle_matches "$content" "$idle_re" "$idle_case" && idle_collision=1
   # Ghost stripping can leave a REMNANT of an idle placeholder rather than
   # emptying it, because a terminal draws the cell under its cursor in reverse
@@ -728,7 +756,7 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
 
 # --- The screen classifier ---------------------------------------------------
 #
-# fm_composer_classify_screen <caps> <screen> [cursor_row] [identity]
+# fm_composer_classify_screen <caps> <screen> [cursor_row] [identity] [harness]
 #   <caps>       newline-separated key=value capability facts (see header).
 #   <screen>     the captured screen: ANSI-preserving when styled=1, plain
 #                otherwise.
@@ -737,6 +765,8 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
 #   [identity]   "<agent>\t<status>" from the backend's native identity probe,
 #                or `probe-absent` when the probe found no live identity; only
 #                meaningful when caps carry identity=1.
+#   [harness]    verified harness family supplied by a caller that owns it;
+#                currently only exact `kiro-cli` changes a verdict.
 # Prints exactly one verdict: empty | pending | pending-unproven | unknown,
 # or the internal sentinel `need-identity` when caps declare identity=1, no
 # identity result was supplied, and the verdict depends on it. Adapters answer
@@ -1179,15 +1209,15 @@ _fm_composer_classify_rows() {  # <screen> <styled> <ambiguous> <first-row> <las
 # the styled=0 degradation: without styling, trailing text after the glyph may
 # be the harness's own idle suggestion (claude's rotating dim hint, codex's
 # `Use /skills ...`), so it must read `unknown` rather than a false `pending`.
-_fm_composer_classify_bare_row() {  # <screen> <styled> <row>
-  local screen=$1 styled=$2 row=$3 raw content plain state
+_fm_composer_classify_bare_row() {  # <screen> <styled> <row> [harness]
+  local screen=$1 styled=$2 row=$3 harness=${4:-} raw content plain state
   raw=$(_fm_composer_screen_row "$row" "$screen")
   content=$(_fm_composer_row_content "$raw" "$styled")
   plain=$(_fm_composer_row_content "$raw" 0)
   _fm_composer_bare_row_strip_furniture_var content
   _fm_composer_bare_row_strip_furniture_var plain
   state=$(fm_composer_classify_content 0 "$content" \
-    "${FM_COMPOSER_IDLE_RE:-$FM_COMPOSER_IDLE_RE_DEFAULT}" insensitive "$plain" 0 "$styled")
+    "${FM_COMPOSER_IDLE_RE:-$FM_COMPOSER_IDLE_RE_DEFAULT}" insensitive "$plain" 0 "$styled" "$harness")
   if [ "$styled" != 1 ] && [ "$state" = pending ]; then
     printf 'unknown'
     return 0
@@ -1207,6 +1237,14 @@ _fm_composer_row_is_omp_status() {  # <trimmed-row>
 # the separated pair; a `$` cost cell must not count as a dead-shell prompt.
 _fm_composer_row_is_pi_status() {  # <trimmed-row>
   fm_composer_idle_matches "$1" "$FM_COMPOSER_PI_STATUS_RE_DEFAULT" sensitive
+}
+
+# _fm_composer_row_is_kiro_footer: kiro's exact helper row below the bare
+# composer in either shape, scoped by the caller's harness before this
+# predicate is consulted.
+_fm_composer_row_is_kiro_footer() {  # <trimmed-row>
+  fm_composer_idle_matches "$1" \
+    "${FM_COMPOSER_KIRO_FOOTER_RE:-$FM_COMPOSER_KIRO_FOOTER_RE_DEFAULT}" sensitive
 }
 
 # _fm_composer_row_is_braille_furniture: 0 when the row is non-blank and its
@@ -1242,8 +1280,8 @@ _fm_composer_bare_row_strip_furniture_var() {  # <varname>
 # through <cursor-row> is non-blank and carries no structural edge - the
 # contiguity proof that those rows are the bare composer's wrapped input
 # rather than unrelated screen content.
-_fm_composer_wrap_region_ok() {  # <plain-screen> <glyph-row> <cursor-row>
-  local plain=$1 g=$2 cy=$3 row line trimmed glyph
+_fm_composer_wrap_region_ok() {  # <plain-screen> <glyph-row> <cursor-row> [harness]
+  local plain=$1 g=$2 cy=$3 harness=${4:-} row line trimmed glyph
   row=$((g + 1))
   while [ "$row" -le "$cy" ]; do
     line=$(_fm_composer_screen_row "$row" "$plain")
@@ -1252,6 +1290,7 @@ _fm_composer_wrap_region_ok() {  # <plain-screen> <glyph-row> <cursor-row>
     [ -n "$trimmed" ] || return 1
     if fm_composer_row_has_edge "$trimmed"; then return 1; fi
     if _fm_composer_row_is_omp_status "$trimmed"; then return 1; fi
+    if [ "$harness" = kiro-cli ] && _fm_composer_row_is_kiro_footer "$trimmed"; then return 1; fi
     if _fm_composer_row_is_braille_furniture "$trimmed"; then return 1; fi
     if fm_composer_leading_shell_glyph_var glyph "$trimmed"; then return 1; fi
     row=$((row + 1))
@@ -1428,8 +1467,8 @@ _fm_composer_locate_footer_zone() {  # <plain>
     && [ "$FM_COMPOSER_SCAN_BARE_ROW" -le "$FM_COMPOSER_FOOTER_LAST" ]
 }
 
-_fm_composer_select_cursorless() {
-  local plain=$1 generic=-1 next boundary raw trimmed glyph bare footer=0
+_fm_composer_select_cursorless() {  # <plain-screen> [harness]
+  local plain=$1 harness=${2:-} generic=-1 next boundary raw trimmed glyph bare footer=0
   FM_COMPOSER_SELECTED_KIND=
   FM_COMPOSER_SELECTED_FIRST=-1
   FM_COMPOSER_SELECTED_LAST=-1
@@ -1499,6 +1538,7 @@ _fm_composer_select_cursorless() {
       [ -n "$trimmed" ] || break
       fm_composer_row_has_edge "$trimmed" && break
       _fm_composer_row_is_omp_status "$trimmed" && break
+      if [ "$harness" = kiro-cli ] && _fm_composer_row_is_kiro_footer "$trimmed"; then break; fi
       _fm_composer_row_is_braille_furniture "$trimmed" && break
       FM_COMPOSER_SELECTED_LAST=$next
       next=$((next + 1))
@@ -1612,8 +1652,8 @@ EOF
   printf '%s\n' "$joined" | LC_ALL=C awk '{$1=$1; printf "%s", $0}'
 }
 
-fm_composer_classify_screen() {  # <caps> <screen> [cursor_row] [identity]
-  local caps=$1 screen=$2 cy=${3:-} identity=${4:-}
+fm_composer_classify_screen() {  # <caps> <screen> [cursor_row] [identity] [harness]
+  local caps=$1 screen=$2 cy=${3:-} identity=${4:-} harness=${5:-}
   local styled=0 cursor=0 has_identity=0 kv plain
   while IFS= read -r kv; do
     case "$kv" in
@@ -1651,9 +1691,9 @@ EOF
       if [ "$FM_COMPOSER_SCAN_PI_PAIR_FOUND" = 1 ] \
          && [ "$cy" -gt "$FM_COMPOSER_SCAN_PI_OPEN" ] \
          && [ "$cy" -lt "$FM_COMPOSER_SCAN_PI_CLOSE" ]; then
-        _fm_composer_classify_bare_pi_overlap "$screen" "$styled" "$has_identity" "$identity" "$cy"
+        _fm_composer_classify_bare_pi_overlap "$screen" "$styled" "$has_identity" "$identity" "$cy" "$harness"
       else
-        _fm_composer_classify_bare_row "$screen" "$styled" "$cy"
+        _fm_composer_classify_bare_row "$screen" "$styled" "$cy" "$harness"
       fi
       return 0
     fi
@@ -1665,7 +1705,7 @@ EOF
     # not apply and a swallowed Enter on a long message still reads pending
     # and earns its retry.
     if [ "$FM_COMPOSER_SCAN_BARE_ROW" -ge 0 ] && [ "$cy" -gt "$FM_COMPOSER_SCAN_BARE_ROW" ] \
-       && _fm_composer_wrap_region_ok "$plain" "$FM_COMPOSER_SCAN_BARE_ROW" "$cy"; then
+       && _fm_composer_wrap_region_ok "$plain" "$FM_COMPOSER_SCAN_BARE_ROW" "$cy" "$harness"; then
       _fm_composer_classify_bare_wrap "$screen" "$styled" "$FM_COMPOSER_SCAN_BARE_ROW" "$cy"
       return 0
     fi
@@ -1687,7 +1727,7 @@ EOF
   # No cursor: the bottom-most shape wins, with the pi-separator staleness
   # rules layered on (a live pi composer pair below the generic candidate
   # proves that candidate stale).
-  if ! _fm_composer_select_cursorless "$plain"; then
+  if ! _fm_composer_select_cursorless "$plain" "$harness"; then
     printf 'unknown'
     return 0
   fi
@@ -1707,9 +1747,9 @@ EOF
          && [ "$FM_COMPOSER_SELECTED_FIRST" -gt "$FM_COMPOSER_SCAN_PI_OPEN" ] \
          && [ "$FM_COMPOSER_SELECTED_FIRST" -lt "$FM_COMPOSER_SCAN_PI_CLOSE" ]; then
         _fm_composer_classify_bare_pi_overlap "$screen" "$styled" "$has_identity" "$identity" \
-          "$FM_COMPOSER_SELECTED_FIRST"
+          "$FM_COMPOSER_SELECTED_FIRST" "$harness"
       else
-        _fm_composer_classify_bare_row "$screen" "$styled" "$FM_COMPOSER_SELECTED_FIRST"
+        _fm_composer_classify_bare_row "$screen" "$styled" "$FM_COMPOSER_SELECTED_FIRST" "$harness"
       fi
       ;;
     leftbar)
@@ -1782,10 +1822,10 @@ _fm_composer_classify_pi_rows() {  # <screen> <styled>
   printf 'empty'
 }
 
-_fm_composer_classify_bare_pi_overlap() {  # <screen> <styled> <has-identity> <identity> <bare-row>
-  local screen=$1 styled=$2 has_identity=$3 identity=$4 row=$5 agent
+_fm_composer_classify_bare_pi_overlap() {  # <screen> <styled> <has-identity> <identity> <bare-row> [harness]
+  local screen=$1 styled=$2 has_identity=$3 identity=$4 row=$5 harness=${6:-} agent
   if [ "$has_identity" != 1 ]; then
-    _fm_composer_classify_bare_row "$screen" "$styled" "$row"
+    _fm_composer_classify_bare_row "$screen" "$styled" "$row" "$harness"
     return 0
   fi
   if [ -z "$identity" ]; then
@@ -1793,14 +1833,14 @@ _fm_composer_classify_bare_pi_overlap() {  # <screen> <styled> <has-identity> <i
     return 0
   fi
   if [ "$identity" = probe-absent ]; then
-    _fm_composer_classify_bare_row "$screen" "$styled" "$row"
+    _fm_composer_classify_bare_row "$screen" "$styled" "$row" "$harness"
     return 0
   fi
   agent=${identity%%$'\t'*}
   if [ "$agent" = pi ]; then
     _fm_composer_pi_verdict "$screen" "$styled" "$has_identity" "$identity"
   else
-    _fm_composer_classify_bare_row "$screen" "$styled" "$row"
+    _fm_composer_classify_bare_row "$screen" "$styled" "$row" "$harness"
   fi
 }
 

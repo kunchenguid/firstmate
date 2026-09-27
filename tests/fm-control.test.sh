@@ -288,6 +288,20 @@ test_exit_types_each_harness_verified_command() {
   pass "fm-control exit: every verified harness gets its own verified exit command"
 }
 
+test_kiro_bright_idle_placeholder_allows_safe_exit() {
+  local dir out rc esc
+  dir=$(new_case kiro-idle-exit)
+  add_task "$dir" t1 kiro-cli
+  alive_as "$dir" kiro-cli
+  esc=$(printf '\033')
+  printf 'transcript\n%s[38;2;158;158;158m› ask a question or describe a task ↵%s[0m\n'     "$esc" "$esc" > "$dir/fake/pane"
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "exit on an idle Kiro composer should succeed"$'\n'"$out"
+  [ "$(literals "$dir")" = /quit ]     || fail "Kiro exit should type exactly /quit, got: $(literals "$dir")"
+  assert_contains "$out" 'stopped t1 harness=kiro-cli'     "Kiro exit should prove the agent stopped"
+  pass "fm-control exit: Kiro's bright idle placeholder permits the verified /quit command"
+}
+
 test_interrupt_sends_each_harness_verified_key() {
   local dir out rc harness expected key repeat clear got want
   for harness in $VERIFIED_HARNESSES; do
@@ -1069,6 +1083,7 @@ EOF
 }
 
 test_exit_types_each_harness_verified_command
+test_kiro_bright_idle_placeholder_allows_safe_exit
 test_interrupt_sends_each_harness_verified_key
 test_devin_interrupt_invalidates_busy
 test_devin_idle_interrupt_sends_one_press

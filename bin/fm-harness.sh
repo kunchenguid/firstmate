@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|unknown
+# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|kiro-cli|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate       print the harness the PRIMARY uses to launch
@@ -128,6 +128,19 @@ harness_marker() {
     echo omp
     return
   fi
+  # kiro-cli (Kiro CLI) publishes a rich KIRO_* environment family
+  # (KIRO_SESSION_ID, KIRO_VERSION, KIRO_CLI_ACP_CLIENT_NAME) on its tool
+  # subprocesses, and like cursor/gemini/rovo it does NOT scrub an inherited
+  # CLAUDECODE (a kiro tool subprocess launched under a claude pane carries
+  # BOTH). None of those variables is promoted to an identity marker here:
+  # KIRO_SESSION_ID is inheritable environment state that SURVIVES into a
+  # detached descendant (verified live, kiro-cli 2.22.1: a `setsid` grandchild
+  # spawned from kiro's own tool process still carried KIRO_SESSION_ID), which is
+  # exactly the hazard that keeps GROK_SESSION_ID out of this function and would
+  # silently rename an unrelated later session. kiro-cli is therefore identified
+  # by its anchored comm ancestry alone, like codex/opencode/kimi/muse/agy.
+  # bin/fm-spawn.sh still clears the foreign primary markers at kiro's launch
+  # boundary as defense in depth.
   [ "${CLAUDECODE:-}" = "1" ] && { echo claude; return; }
   if [ "${PI_CODING_AGENT:-}" = "true" ]; then
     if [ "${FM_PI_HARNESS:-}" = pi-signed ]; then echo pi-signed; else echo pi; fi
@@ -239,6 +252,19 @@ harness_process_verdict() {  # <pid>
     # detected by ancestry alone.
     agy) echo "comm agy"; return ;;
     devin) echo "comm devin"; return ;;
+    # kiro-cli (Kiro CLI, an Amazon Q CLI fork) presents TWO comm names in one
+    # interactive session (verified live, kiro-cli 2.22.1): the top frame is
+    # comm `kiro-cli` and the inner launcher/engine frames are comm
+    # `kiro-cli-chat`, with a `bun` interpreter frame interposed between them
+    # (the bun arm below). Both are anchored exact, never *kiro-cli*, so an
+    # unrelated command carrying that substring cannot be misread, and
+    # kiro-cli-chat is listed first for clarity though an exact match makes the
+    # order moot. This is the /home/shiv/.local/bin/kiro-cli agent CLI, NEVER
+    # the /usr/bin/kiro Electron IDE (whose process name is `kiro`, not matched
+    # here). It sits above the interpreter fallback for the same reason omp
+    # does: its bundle path contains no foreign harness name to leak.
+    kiro-cli-chat) echo "comm kiro-cli"; return ;;
+    kiro-cli) echo "comm kiro-cli"; return ;;
     node*|python*)
       # Bare interpreter: match the harness name in its script path.
       args=$(ps -o args= -p "$pid" 2>/dev/null)
@@ -252,6 +278,22 @@ harness_process_verdict() {  # <pid>
         *opencode*) echo "args opencode"; return ;;
         *grok*) echo "args grok"; return ;;
         *" pi "*|*/pi) echo "args pi"; return ;;
+      esac ;;
+    bun|bun-*)
+      # kiro-cli's interactive TUI runs its bundle through a private Bun
+      # interpreter whose process name `ps -o comm=` reports as bare `bun`
+      # (verified live on Linux, kiro-cli 2.22.1: comm=bun, not the full
+      # install path). Only the argv carries identity:
+      #   /home/shiv/.local/share/kiro-cli/bun .../kiro-cli/tui.js chat -a
+      # Match ONLY a kiro-cli install-tree path component, never a generic args
+      # grep: a bare `bun` is also omp's and Pi's interpreter
+      # (~/.bun/bin/bun .../pi-coding-agent/dist/cli.js), and a substring rule
+      # would misread those as kiro-cli. `comm` strength because this frame IS
+      # kiro-cli's own bundle process, structurally, keeping the contiguous
+      # kiro-cli ancestry unbroken across the interposed bun frame.
+      args=$(ps -o args= -p "$pid" 2>/dev/null)
+      case " $args " in
+        *"/kiro-cli/"*) echo "comm kiro-cli"; return ;;
       esac ;;
   esac
 }

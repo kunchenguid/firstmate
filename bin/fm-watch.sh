@@ -555,7 +555,7 @@ inbox_steer_check() {  # <window> <task>
   case "$verb" in
     ring)
       ring_rc=0
-      fm_task_inbox_ring "$backend" "$w" "$rec" "$(window_label "$w")" || ring_rc=$?
+      fm_task_inbox_ring "$backend" "$w" "$rec" "$(window_label "$w")" "$(window_harness "$w")" || ring_rc=$?
       if [ "$ring_rc" -eq 3 ]; then
         inbox_steer_escalate_unavailable "$w" "$task" "$rec"
         return 0
@@ -2669,6 +2669,13 @@ while :; do
     echo "watcher: secondmate wake-loop observation failed" >&2
     exit 1
   }
+
+  # Kiro primary re-ring ladder: a doorbell refused while the pane was busy
+  # left its row durable; ring once more for the newest unrung row now that the
+  # composer may be idle. A no-op without a published endpoint or pending row.
+  if [ -f "$STATE/.primary-endpoint" ] && [ -s "$STATE/.wake-queue" ]; then
+    fm_primary_endpoint_ring_pending "$STATE" "$FM_ROOT" "$FM_HOME" || true
+  fi
 
   # Process-to-event liveness repair. This never discovers a result by polling:
   # each registered source has its own child blocking on that source, and this

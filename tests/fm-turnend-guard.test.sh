@@ -1059,6 +1059,56 @@ EOF
   pass ".opencode primary plugin: guard path is anchored to worktree, not directory"
 }
 
+test_pi_extension_descendant_does_not_replace_lock_owner_marker() {
+  local home state marker owner_pid out status
+  home="$TMP_ROOT/pi-marker-descendant-home"
+  state="$home/state"
+  marker="$state/.pi-turnend-extension-loaded"
+  owner_pid=$$
+  mkdir -p "$state"
+
+  run_extension() {
+    local mode=$1
+    FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_ROOT_OVERRIDE="$ROOT" \
+      FM_TEST_PI_EXTENSION_MODE="$mode" FM_TEST_PI_OWNER_PID="$owner_pid" \
+      NODE_NO_WARNINGS=1 /usr/bin/node --input-type=module 2>&1 <<'EOF'
+import { createHash } from "node:crypto";
+import { readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const extensionPath = `${process.env.FM_ROOT_OVERRIDE}/.pi/extensions/fm-primary-turnend-guard.ts`;
+const state = process.env.FM_STATE_OVERRIDE;
+const marker = `${state}/.pi-turnend-extension-loaded`;
+const lock = `${state}/.lock`;
+const version = `sha256:${createHash("sha256").update(readFileSync(extensionPath)).digest("hex")}`;
+if (process.env.FM_TEST_PI_EXTENSION_MODE === "owner") {
+  writeFileSync(lock, `${process.pid}\n`);
+} else if (process.env.FM_TEST_PI_EXTENSION_MODE === "descendant") {
+  const ownerPid = process.env.FM_TEST_PI_OWNER_PID;
+  writeFileSync(lock, `${ownerPid}\n`);
+  writeFileSync(marker, `${version}\n${ownerPid}\n`);
+}
+const extension = await import(pathToFileURL(extensionPath).href);
+extension.default({ on() {} });
+EOF
+  }
+
+  run_extension owner || fail "the Pi turn-end extension failed in the direct lock-owner process"
+  [ "$(sed -n '2p' "$marker")" = "$(cat "$state/.lock")" ] \
+    || fail "the direct lock owner did not record its own pid"
+
+  out=$(run_extension descendant); status=$?
+  expect_code 0 "$status" "a Pi extension process below the lock owner must load successfully"
+  [ -z "$out" ] || fail "descendant extension load printed output: $out"
+  [ "$(sed -n '2p' "$marker")" = "$owner_pid" ] \
+    || fail "descendant extension replaced the lock owner's turn-end marker with its own pid"
+
+  rm -f "$state/.lock" "$marker"
+  run_extension missing || fail "the Pi turn-end extension failed while the session lock was absent"
+  [ -s "$marker" ] || fail "the pre-lock extension load did not publish its marker"
+  pass ".pi primary extension: descendants preserve the lock owner's marker; owner and pre-lock loads still publish"
+}
+
 test_pi_extension_injects_once_per_logical_agent_run() {
   local repo home ext log out status
   repo="$TMP_ROOT/pi-logical-run-root"
@@ -2238,6 +2288,7 @@ test_tracked_claude_entries_inert_under_grok
 test_codex_hook_uses_process_pwd_when_payload_cwd_is_outside_root
 test_codex_hook_ignores_nested_git_root_guard
 test_opencode_plugin_anchors_guard_to_worktree
+test_pi_extension_descendant_does_not_replace_lock_owner_marker
 test_pi_extension_injects_once_per_logical_agent_run
 test_pi_extension_retries_after_followup_delivery_failure
 test_hook_claude_mode_reblocks_stop_hook_active_when_unhealthy

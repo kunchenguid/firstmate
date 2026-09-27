@@ -53,7 +53,8 @@ test_registered_check_uses_preserved_watcher_environment() {
   err="$home/err.txt"
   cat > "$home/state/env-check.check.sh" <<'SH'
 #!/usr/bin/env bash
-printf 'env check fired with FM_CHECK_INTERVAL=%s\n' "${FM_CHECK_INTERVAL:-missing}"
+printf 'env check fired with FM_CHECK_INTERVAL=%s FM_WATCH_FOREGROUND_CHECKPOINT=%s\n' \
+  "${FM_CHECK_INTERVAL:-missing}" "${FM_WATCH_FOREGROUND_CHECKPOINT:-missing}"
 SH
   chmod 0700 "$home/state/env-check.check.sh"
   FM_HOME="$home" "$ROOT/bin/fm-check-register.sh" env-check >/dev/null \
@@ -63,6 +64,8 @@ SH
   expect_code 0 "$status" "check checkpoint exit"
   assert_contains "$(cat "$out")" "check:" "check wake was not passed through"
   assert_contains "$(cat "$out")" "FM_CHECK_INTERVAL=1" "watcher environment was not preserved"
+  assert_contains "$(cat "$out")" "FM_WATCH_FOREGROUND_CHECKPOINT=1" \
+    "foreground checkpoint did not suppress the structural Kiro doorbell"
   pass "checkpoint preserves watcher environment for registered custom checks"
 }
 

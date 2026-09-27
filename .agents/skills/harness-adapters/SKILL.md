@@ -3,7 +3,7 @@ name: harness-adapters
 description: >-
   Agent-only reference for firstmate harness operations.
   Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter.
-  Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, gemini, muse, rovo, omp, agy, and devin.
+  Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, gemini, muse, rovo, omp, agy, devin, and kiro-cli.
 user-invocable: false
 metadata:
   internal: true
@@ -36,6 +36,7 @@ Deliver lifecycle actions only through `../../../bin/fm-control.sh <task-id> int
 Never type an interrupt key or exit command through `fm-send`, where routing-marked lifecycle text becomes chat.
 Trust handling is complete only when inspection proves the target started processing its instructions; delivery success alone is not proof.
 Muse, Gemini, AGY, and Devin are verified only for crewmate and scout work, never a secondmate or primary.
+kiro-cli is verified for all four kinds, following the primary wake protocol in `../../../../docs/supervision-protocols/kiro-cli.md`, which is model-driven (a foreground watcher checkpoint each cycle) because kiro-cli's `stop` hook cannot block the turn end or deliver a follow-up.
 
 ## Detection
 
@@ -96,7 +97,8 @@ A new tool remains undispatchable until the `verify` plan, its harness entry, ev
     "rovo": "references/harness/rovo.md",
     "omp": "references/harness/omp.md",
     "agy": "references/harness/agy.md",
-    "devin": "references/harness/devin.md"
+    "devin": "references/harness/devin.md",
+    "kiro-cli": "references/harness/kiro.md"
   }
 }
 ```

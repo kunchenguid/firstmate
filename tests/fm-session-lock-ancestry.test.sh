@@ -94,6 +94,89 @@ SH
   pass "session-lock: a version-named Claude Code session is identified from its install path and argv[0]"
 }
 
+# kiro-cli's interactive session is a FOUR-frame contiguous run with TWO comm
+# names and a `bun` interpreter interposed in the middle (verified live,
+# kiro-cli 2.22.1):
+#   kiro-cli chat -a                                   (comm kiro-cli, outermost)
+#     kiro-cli-chat chat -a                            (comm kiro-cli-chat)
+#       .../kiro-cli/bun .../kiro-cli/tui.js chat -a   (comm bun, interposed)
+#         kiro-cli-chat acp --trust-all-tools          (comm kiro-cli-chat, innermost)
+# Both tool subprocesses AND the `stop` hook descend from that innermost `acp`
+# frame, so the walk must climb the whole run without the bun frame breaking it,
+# report every frame (so ownership matches whichever frame recorded the lock),
+# and anchor on the stable OUTERMOST kiro-cli frame rather than the transient
+# inner engine pid. This pins that contiguous-run behavior.
+test_kiro_cli_run_is_contiguous_across_the_bun_frame() {
+  local dir fakebin got pids
+  dir="$TMP_ROOT/kiro-run"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+# The four-frame kiro run plus a non-harness parent (python3) that terminates
+# it, so the walk can never escape into whatever launched the suite. Any pid the
+# suite actually starts at (its own $$) reports as a bash child whose ppid leads
+# into the innermost acp frame 401.
+case "$pid" in
+  401) c=kiro-cli-chat; a='/home/shiv/.local/bin/kiro-cli-chat acp --trust-all-tools'; pp=402 ;;
+  402) c=bun; a='/home/shiv/.local/share/kiro-cli/bun /home/shiv/.local/share/kiro-cli/tui.js chat -a'; pp=403 ;;
+  403) c=kiro-cli-chat; a='/home/shiv/.local/bin/kiro-cli-chat chat -a'; pp=404 ;;
+  404) c=kiro-cli; a='kiro-cli chat -a'; pp=405 ;;
+  405) c=python3; a='python3 -'; pp=1 ;;
+  1) c=init; a=init; pp=0 ;;
+  *) c=bash; a='bash /repo/bin/fm-watch.sh'; pp=401 ;;
+esac
+case "$field" in
+  comm=) printf '%s\n' "$c" ;;
+  args=) printf '%s\n' "$a" ;;
+  ppid=) printf '%s\n' "$pp" ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+
+  # The whole contiguous run is reported, innermost first, and the bun frame in
+  # the middle does NOT break it.
+  pids=$(lib_eval "$fakebin" 'fm_harness_ancestry_pids') \
+    || fail "the kiro-cli run was not found in the ancestry at all"
+  printf '%s' "$pids" | tr '\n' ' ' | grep -q '401 402 403 404' \
+    || fail "the kiro-cli ancestry run was not contiguous across the bun frame, got: $(printf '%s' "$pids" | tr '\n' ' ')"
+  # The walk stops at the non-harness python3 parent: pid 405 is never reported.
+  printf '%s\n' "$pids" | grep -qx 405 \
+    && fail "the kiro-cli walk escaped past its non-harness parent into pid 405"
+
+  # The anchor is the stable OUTERMOST kiro-cli frame, not the inner engine pid.
+  got=$(lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+    || fail "the outermost kiro-cli frame was not resolved"
+  [ "$got" = 404 ] || fail "the kiro-cli anchor resolved '$got', expected the outermost frame pid 404"
+  got=$(lib_eval "$fakebin" 'fm_session_lock_anchor_pid') \
+    || fail "the kiro-cli anchor pid was not resolved"
+  [ "$got" = 404 ] || fail "fm_session_lock_anchor_pid resolved '$got', expected the outermost frame pid 404"
+
+  # Ownership is recognized when the lock was recorded against ANY frame in the
+  # run - the outermost anchor, or an inner frame such as the acp engine.
+  printf '404\n' > "$dir/state/.lock"
+  lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+    || fail "a kiro-cli session did not recognize its own lock recorded on the outermost frame"
+  printf '401\n' > "$dir/state/.lock"
+  lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+    || fail "a kiro-cli session did not recognize its own lock recorded on the inner acp frame"
+  # A pid OUTSIDE the run (the non-harness parent) is not this session's owner.
+  printf '405\n' > "$dir/state/.lock"
+  ! lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+    || fail "a kiro-cli session wrongly claimed a lock held by a pid outside its harness run"
+
+  pass "session-lock: a kiro-cli run is contiguous across the interposed bun frame and anchors on its outermost frame"
+}
+
 # A harness that is pid 1 of its own PID namespace - a container, or the
 # `codex sandbox` this shape was verified in - used to be invisible: the walk
 # stopped as soon as the NEXT pid was 1, so the one process that identifies the
@@ -1095,6 +1178,7 @@ test_verified_reclaim_keeps_new_sidecar() {
 }
 
 test_version_named_session_is_identified_on_both_platforms
+test_kiro_cli_run_is_contiguous_across_the_bun_frame
 test_harness_at_namespace_pid1_is_examined
 test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock

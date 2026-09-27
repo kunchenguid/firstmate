@@ -30,7 +30,7 @@ set -u
 # This suite states the markers it means to test in every case. Drop the ambient
 # ones so a verdict never depends on which harness launched the suite.
 unset CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT CURSOR_AGENT CURSOR_INVOKED_AS \
-  FM_SUPERVISION_ACTOR FM_SUPERVISION_PRIMARY_HARNESS
+  FM_SUPERVISION_ACTOR FM_SUPERVISION_PRIMARY_HARNESS KIRO_SESSION_ID
 
 HARNESS="$ROOT/bin/fm-harness.sh"
 RENDER="$ROOT/bin/fm-supervision-instructions.sh"
@@ -45,7 +45,7 @@ under_process() {  # <named-executable> [VAR=VAL ...]
   local bin=$1
   shift
   env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
-    -u CURSOR_AGENT -u CURSOR_INVOKED_AS "$@" \
+    -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u KIRO_SESSION_ID "$@" \
     "$bin" -c "r=\$(\"$HARNESS\"); printf '%s' \"\$r\""
 }
 
@@ -108,7 +108,7 @@ under_fake_ps() {  # <fakebin> <VAR=VAL ...> -- [harness args]
   done
   [ "${1:-}" = -- ] && shift
   env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
-    -u CURSOR_AGENT -u CURSOR_INVOKED_AS "${assignments[@]}" \
+    -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u KIRO_SESSION_ID "${assignments[@]}" \
     PATH="$fakebin:$BASE_PATH" "$HARNESS" "$@"
 }
 
@@ -116,7 +116,7 @@ with_blind_ancestry() {  # <fakebin> [VAR=VAL ...]
   local fakebin=$1
   shift
   env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
-    -u CURSOR_AGENT -u CURSOR_INVOKED_AS "$@" \
+    -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u KIRO_SESSION_ID "$@" \
     PATH="$fakebin:$BASE_PATH" "$HARNESS"
 }
 
@@ -185,6 +185,51 @@ test_genuine_marker_and_ancestry_agree() {
   [ "$got" = grok ] || fail "an unmarked grok hook process resolved '$got', expected grok"
 
   pass "a harness that publishes a marker inside its own process tree is unchanged"
+}
+
+# kiro-cli (Kiro CLI) is a fresh adapter with the same retained-CLAUDECODE
+# hazard cursor documents: a kiro tool subprocess carries both KIRO_SESSION_ID
+# and an inherited CLAUDECODE (verified live, kiro-cli 2.22.1). Its interactive
+# tree also uses TWO comm names - `kiro-cli` (top) and `kiro-cli-chat` (the
+# inner launcher/engine frames) - so a tool subprocess's nearest harness
+# ancestor is a `kiro-cli-chat` frame, which must resolve kiro-cli by comm.
+test_kiro_cli_ancestry_and_marker_outrank_a_retained_claudecode() {
+  local dir bin fakebin got
+  dir="$TMP_ROOT/kiro-cli"
+  # The nearest harness ancestor of a kiro tool subprocess is the inner
+  # `kiro-cli-chat` engine frame; comm ancestry alone must name kiro-cli.
+  bin=$(named_bin "$dir/kiro-tree" kiro-cli-chat)
+  got=$(under_process "$bin")
+  [ "$got" = kiro-cli ] \
+    || fail "a kiro-cli-chat ancestor alone resolved '$got', expected kiro-cli (the ancestry signal is not live)"
+
+  # kiro-cli does not scrub an inherited CLAUDECODE, so comm ancestry must win
+  # over the retained foreign marker exactly as it does for every markerless
+  # harness.
+  got=$(under_process "$bin" CLAUDECODE=1)
+  [ "$got" = kiro-cli ] \
+    || fail "a kiro-cli tree carrying a retained CLAUDECODE resolved '$got', expected kiro-cli"
+
+  # The top-of-tree comm name resolves kiro-cli too.
+  bin=$(named_bin "$dir/kiro-top" kiro-cli)
+  got=$(under_process "$bin")
+  [ "$got" = kiro-cli ] \
+    || fail "a kiro-cli top-frame ancestor resolved '$got', expected kiro-cli"
+
+  # KIRO_SESSION_ID is NOT an identity marker: it is inheritable environment
+  # state that survives into a detached descendant (verified live, kiro-cli
+  # 2.22.1), the same hazard that keeps GROK_SESSION_ID out of the marker list.
+  # With ancestry blinded it must therefore answer nothing, so a later unrelated
+  # session that inherited the variable is never renamed kiro-cli.
+  fakebin=$(blind_ancestry_bin "$dir/blind")
+  got=$(with_blind_ancestry "$fakebin" KIRO_SESSION_ID=abc-123)
+  [ "$got" != kiro-cli ] \
+    || fail "KIRO_SESSION_ID must never claim the kiro-cli identity with no ancestry, got '$got'"
+  got=$(with_blind_ancestry "$fakebin" KIRO_SESSION_ID=abc-123 CLAUDECODE=1)
+  [ "$got" = claude ] \
+    || fail "a retained CLAUDECODE with only a leaked KIRO_SESSION_ID must still resolve claude, got '$got'"
+
+  pass "kiro-cli comm ancestry names it and outranks a retained CLAUDECODE; KIRO_SESSION_ID never claims identity"
 }
 
 # Cursor is the case that motivated the pre-existing marker ordering: a cursor
@@ -260,12 +305,12 @@ r=\$("$HARNESS"); printf '%s' "\$r"
 SH
 
   got=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
-    -u CURSOR_AGENT -u CURSOR_INVOKED_AS "$node" "$script")
+    -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u KIRO_SESSION_ID "$node" "$script")
   [ "$got" = codex ] \
     || fail "an unmarked interpreter holding a codex-shaped script path resolved '$got', expected codex"
 
   got=$(env -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
-    -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 "$node" "$script")
+    -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u KIRO_SESSION_ID CLAUDECODE=1 "$node" "$script")
   [ "$got" = claude ] \
     || fail "a published CLAUDECODE lost to a codex-shaped script path, resolving '$got'"
   pass "an interpreter script-path match answers alone but never outranks a marker"
@@ -308,7 +353,7 @@ SH
   # launch.
   run_shim() {
     env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
-      -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+      -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u KIRO_SESSION_ID \
       FM_TEST_HARNESS="$HARNESS" FM_TEST_NATIVE="$native" FM_TEST_PROBE="$probe" \
       "$node" "$entry"
   }
@@ -323,7 +368,7 @@ SH
     || fail "the real Codex shim topology with a retained CLAUDECODE resolved '$got', expected codex"
 
   got=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
-    -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+    -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u KIRO_SESSION_ID \
     FM_TEST_HARNESS="$HARNESS" FM_TEST_NATIVE="$native" FM_TEST_PROBE="$probe" \
     "$node" "$entry" ancestry)
   [ "$got" = "comm codex" ] \
@@ -401,7 +446,7 @@ wait "$!"
 SH
 
   env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
-    -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+    -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u KIRO_SESSION_ID \
     FM_TEST_NATIVE="$native" FM_TEST_HOLD="$hold" FM_TEST_READY="$ready" \
     "$node" "$entry" &
   shim_pid=$!
@@ -491,7 +536,7 @@ wait
 SH
 
   env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
-    -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+    -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u KIRO_SESSION_ID \
     FM_TEST_DIR="$dir" FM_TEST_NODE="$node" FM_TEST_NATIVE="$native" \
     FM_TEST_WORKER="$worker" FM_TEST_HOLD="$hold" FM_TEST_BLOCK="$block" \
     FM_TEST_MCP="$mcp_script" FM_TEST_READY="$ready" FM_TEST_FIFO="$fifo" \
@@ -582,7 +627,7 @@ wait
 SH
 
   env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
-    -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+    -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u KIRO_SESSION_ID \
     FM_TEST_DIR="$dir" FM_TEST_NODE="$node" FM_TEST_NATIVE="$native" \
     FM_TEST_HOLD="$hold" FM_TEST_MCP="$mcp_script" FM_TEST_READY="$ready" \
     FM_TEST_FIFO="$fifo" \
@@ -674,7 +719,7 @@ wait
 SH
 
     env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
-      -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+      -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u KIRO_SESSION_ID \
       FM_TEST_ORDER="$order" FM_TEST_DIR="$dir" FM_TEST_NODE="$node" \
       FM_TEST_NATIVE="$native" FM_TEST_BLOCK="$block" FM_TEST_MCP="$mcp_script" \
       FM_TEST_READY="$ready" FM_TEST_FIFO="$fifo" "$node" "$entry" &
@@ -809,13 +854,13 @@ test_supervision_protocol_follows_corrected_verdict() {
   fakebin=$(blind_ancestry_bin "$dir/blind")
 
   got=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
-    -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 FM_HOME="$home" \
+    -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u KIRO_SESSION_ID CLAUDECODE=1 FM_HOME="$home" \
     PATH="$fakebin:$BASE_PATH" "$RENDER")
   assert_contains "$got" "primary harness: claude" \
     "with ancestry blinded, the retained marker must still render claude (the case is otherwise vacuous)"
 
   got=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
-    -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 FM_HOME="$home" \
+    -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u KIRO_SESSION_ID CLAUDECODE=1 FM_HOME="$home" \
     "$bin" -c "r=\$(\"$RENDER\"); printf '%s' \"\$r\"")
   assert_contains "$got" "primary harness: codex" \
     "a Codex primary carrying a retained CLAUDECODE did not render the Codex protocol"
@@ -828,6 +873,7 @@ test_supervision_protocol_follows_corrected_verdict() {
 
 test_markerless_ancestry_outranks_foreign_marker
 test_genuine_marker_and_ancestry_agree
+test_kiro_cli_ancestry_and_marker_outrank_a_retained_claudecode
 test_cursor_ordering_still_decides_when_ancestry_is_silent
 test_retained_cursor_marker_does_not_rename_a_nested_claude
 test_pi_signed_survives_agreeing_ancestry
