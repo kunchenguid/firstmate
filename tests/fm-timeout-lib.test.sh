@@ -52,6 +52,23 @@ test_passes_the_command_status_and_output_through() {
   pass "fm_exec_timed passes a command's status and output through unchanged"
 }
 
+# bash 3.2, the macOS /bin/bash, has no BASHPID. Unsetting it here drops its
+# special meaning the same way, so under set -u the bound must still run the
+# command and pass its status through rather than aborting the caller.
+test_runs_under_set_u_without_bashpid() {
+  local out rc=0
+  # shellcheck disable=SC2030,SC2031
+  out=$(
+    set -u
+    unset BASHPID
+    . "$ROOT/bin/fm-timeout-lib.sh"
+    PATH=$PERL_ONLY fm_exec_timed 5 1 bash -c 'echo ran; exit 7'
+  ) || rc=$?
+  [ "$rc" -eq 7 ] || fail "without BASHPID the bound did not pass the command's status through (rc=$rc)"
+  assert_contains "$out" "ran" "without BASHPID the bounded command never ran"
+  pass "fm_exec_timed runs under set -u when the shell has no BASHPID"
+}
+
 # A command that honors TERM ends at the bound, long before the grace would
 # have forced it, and is gone afterwards.
 test_term_ends_a_cooperative_command_at_the_bound() {
@@ -301,6 +318,7 @@ test_timed_out_names_exactly_the_bound_statuses() {
 }
 
 test_passes_the_command_status_and_output_through
+test_runs_under_set_u_without_bashpid
 test_term_ends_a_cooperative_command_at_the_bound
 test_kill_ends_a_term_ignoring_command_after_the_grace
 test_the_bound_replaces_the_calling_shell
