@@ -5939,9 +5939,9 @@ EOF
   pass "an extension-registered provider resolves in the isolated branch runtime"
 }
 
-test_continuation_defers_reserved_admission_at_ui_boundary() {
-  local repo home out rc
-  repo="$TMP_ROOT/continuation-ui-root"; home="$TMP_ROOT/continuation-ui-home"
+continuation_ui_boundary_case() {
+  local repo home out rc mode=$1
+  repo="$TMP_ROOT/continuation-ui-root-$mode"; home="$TMP_ROOT/continuation-ui-home-$mode"
   install_pi_branch_extension_fixture "$repo"
   mkdir -p "$home/state" "$home/data/task"
   printf 'Verify UI-safe continuation.\n' >"$home/data/task/brief.md"
@@ -5952,17 +5952,18 @@ exec "$REAL_ROOT/bin/fm-task-state.sh" "$@"
 SH
   cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/"
   set +e
-  out=$(PLUGIN="$repo/.pi/extensions/lib/fm-task-continuation.ts" REAL_ROOT="$ROOT" FM_ROOT_OVERRIDE="$repo" FM_HOME="$home" node --input-type=module 2>&1 <<'JS'
+  out=$(FM_TEST_CONTINUATION_DELIVERY="$mode" PLUGIN="$repo/.pi/extensions/lib/fm-task-continuation.ts" REAL_ROOT="$ROOT" FM_ROOT_OVERRIDE="$repo" FM_HOME="$home" node --input-type=module 2>&1 <<'JS'
 import {appendFileSync,existsSync,readFileSync,writeFileSync,mkdirSync,unlinkSync} from 'node:fs';
 const home=process.env.FM_HOME,handlers=new Map(),events=new Map(),sent=[],entries=[];
-let blocking=false;
+const mode=process.env.FM_TEST_CONTINUATION_DELIVERY;
+let blocking=false,idle=mode!=='settle';
 const file=home+'/session.jsonl';
 writeFileSync(home+'/state/.lock',process.pid+'\n');
 writeFileSync(file,JSON.stringify({type:'session',id:'ui-regression',version:3})+'\n');
-const ctx={isIdle:()=>true,hasPendingMessages:()=>false,hasUI:false,ui:{getEditorText:()=>''},sessionManager:{getSessionFile:()=>file,getSessionId:()=> 'ui-regression',getLeafId:()=>entries.at(-1)?.id,getBranch:()=>entries,getEntries:()=>entries}};
+const ctx={isIdle:()=>idle,hasPendingMessages:()=>false,hasUI:false,ui:{getEditorText:()=>''},sessionManager:{getSessionFile:()=>file,getSessionId:()=> 'ui-regression',getLeafId:()=>entries.at(-1)?.id,getBranch:()=>entries,getEntries:()=>entries}};
 function persist(row){row={...row,id:'e'+entries.length,parentId:entries.at(-1)?.id??null,timestamp:new Date().toISOString()};entries.push(row);appendFileSync(file,JSON.stringify(row)+'\n');}
 const pi={on:(name,fn)=>handlers.set(name,[...(handlers.get(name)||[]),fn]),events:{on:(name,fn)=>events.set(name,[...(events.get(name)||[]),fn]),emit:(name,arg)=>{for(const fn of events.get(name)||[])fn(arg)}},registerTool(){},registerCommand(){},sendMessage:(message,options)=>{sent.push({message,options,blocking});persist({type:'custom_message',...message});},appendEntry:(customType,data)=>persist({type:'custom',customType,data})};
-const fire=async(name)=>{for(const fn of handlers.get(name)||[])await fn({},ctx)};
+const fire=async(name)=>{const results=[];for(const fn of handlers.get(name)||[])results.push(await fn({},ctx));return results;};
 const wait=async(predicate)=>{const until=Date.now()+10000;while(!predicate()&&Date.now()<until)await new Promise(r=>setTimeout(r,10));if(!predicate())throw Error('timed out');};
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 const {installTaskContinuation}=await import(process.env.PLUGIN);
@@ -5975,10 +5976,13 @@ const record=()=>JSON.parse(readFileSync(home+'/data/task/lifecycle.json'));
 pi.events.emit('firstmate:heartbeat-tick',{});await sleep(100);
 if(existsSync(home+'/observing'))throw Error('cold session without leaf claimed a receiver');
 pi.appendEntry('seed',{});
-pi.events.emit('firstmate:heartbeat-tick',{});
+const settling=mode==='settle'?fire('agent_before_settle'):Promise.resolve([]);
+if(mode!=='settle')pi.events.emit('firstmate:heartbeat-tick',{});
 await wait(()=>existsSync(home+'/observing'));
 blocking=true;await fire('ui_prompt_start');
 await wait(()=>record().coordination);
+if((await settling).some(x=>x?.continue===true))throw Error('settle crossed blocking UI boundary');
+idle=true;
 await sleep(700);
 if(sent.length)throw Error('notification crossed blocking UI boundary');
 const budget=Object.values(record().coordination.budgets)[0];
@@ -6005,13 +6009,18 @@ if(sent.length!==1)throw Error('old asynchronous readback notified the replaceme
 pi.events.emit('firstmate:heartbeat-tick',{});await wait(()=>sent.length===2);
 if(!sent[1].message.content.includes('task2: pending'))throw Error('new generation lost pending task');
 await fire('session_shutdown');
-console.log('UI race deferred one durable admission; release delivered it once; reload preserved guard, receipt and budget');
+console.log(mode+': UI race deferred one durable admission; release delivered it once; reload preserved guard, receipt and budget');
 JS
   )
   rc=$?
   set -e
   expect_code 0 "$rc" "continuation UI boundary: $out"
   pass "$out"
+}
+
+test_continuation_defers_reserved_admission_at_ui_boundary() {
+  continuation_ui_boundary_case heartbeat
+  continuation_ui_boundary_case settle
 }
 
 test_continuation_survives_ack_compaction_and_unrelated_input() {
@@ -6079,15 +6088,24 @@ if(continuationMessages().length) throw Error('tick bypassed settlement admissio
 await new Promise(resolve=>setTimeout(resolve,30_100));
 const second=await beforeSettle();
 if(!second.continued) throw Error('second paced admission missing');
-if((await beforeSettle()).continued) throw Error('second admission repeated');
+const exhausted=await beforeSettle();
+if(exhausted.continued) throw Error('second admission repeated');
+if(!exhausted.content.includes('Continuation needs intervention: prerequisite')) throw Error('exhausted task was silently abandoned');
+const escalationEntries=()=>entries.filter(e=>e.customType==='fm-task-continuation-escalation');
+if(escalationEntries().length!==1 || !escalationEntries()[0].display) throw Error('missing visible native escalation');
+await beforeSettle();
+const escalated=JSON.parse(readFileSync(path));
+if(!Object.values(escalated.coordination.budgets)[0].escalated_at_ms || escalated.next_action!==null) throw Error('escalation readback missing or invented task action');
 await fire('session_shutdown',{},defaultSessionCtx);
 await fire('session_start',{},defaultSessionCtx);
 if((await beforeSettle()).continued) throw Error('reload reset task budget');
+if(escalationEntries().length!==1) throw Error('reload duplicated escalation');
 await fire('session_compact',{},defaultSessionCtx);
 await fire('before_agent_start',{prompt:'Separate request B: explain configuration.'},defaultSessionCtx);
 const next=await beforeSettle();
 if(!next.continued || !next.content.includes('Separate request B')) throw Error('independent input B was lost');
 if(next.content.includes('prerequisite: pending')) throw Error('independent input reset A budget');
+if(escalationEntries().length!==1) throw Error('compaction or independent input duplicated escalation');
 const tool=mainTools.find(t=>t.name==='fm_task_continuation');
 const listing=JSON.parse((await tool.execute('list',{action:'list'})).content[0].text);
 const input=listing.inputs.find(i=>i.text.includes('Separate request B'));

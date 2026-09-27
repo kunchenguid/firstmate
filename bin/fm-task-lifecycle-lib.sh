@@ -51,8 +51,8 @@ fm_task_lifecycle_execution_guard() { # <task>
   local id=$1 data="${FM_DATA_OVERRIDE:-${FM_HOME:?}/data}" record
   [ -e "$data/$id/lifecycle.json" ] || [ -L "$data/$id/lifecycle.json" ] || return 0
   record=$(fm_task_lifecycle read "$id") || return 1
-  printf '%s' "$record" | jq -e '.disposition == "open" and (.next_action.phase != "uncertain")' >/dev/null || {
-    printf 'REFUSED: task %s is terminal or has an uncertain effect; reconcile evidence before execution\n' "$id" >&2
+  printf '%s' "$record" | jq -e '.disposition == "open" and (.next_action.phase != "attempted") and (.next_action.phase != "uncertain")' >/dev/null || {
+    printf 'REFUSED: task %s is terminal or has an attempted/uncertain effect; reconcile evidence before execution\n' "$id" >&2
     return 1
   }
 }

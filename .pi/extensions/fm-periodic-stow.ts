@@ -181,13 +181,17 @@ function localAutomaticConflict(): string | null {
   return null;
 }
 
-function safeSettled(ctx: ExtensionContext): boolean {
-  if (!ctx.isIdle() || ctx.hasPendingMessages() || activeTools > 0 || blockingPrompt || compacting) return false;
+function safeBoundary(ctx: ExtensionContext): boolean {
+  if (ctx.hasPendingMessages() || activeTools > 0 || blockingPrompt || compacting) return false;
   try {
     return ctx.ui.getEditorText().trim() === "";
   } catch {
     return false;
   }
+}
+
+function safeSettled(ctx: ExtensionContext): boolean {
+  return ctx.isIdle() && safeBoundary(ctx);
 }
 
 function request(kind: "heartbeat" | "manual" | "precompact", ctx: ExtensionContext): RunState | null {
@@ -348,6 +352,9 @@ export default function periodicStow(pi: ExtensionAPI): void {
       recheckMs: tickMs * 2,
       current: () => activeGeneration === generation && generation.live,
       canNotify: () => safeSettled(offer.ctx),
+      // The current logical run is still active at before-settle. All other
+      // UI/input/tool/compaction protections apply at its final submission.
+      canContinue: () => safeBoundary(offer.ctx),
     });
   });
   pi.registerCommand("stow", {

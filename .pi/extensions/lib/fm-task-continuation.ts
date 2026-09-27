@@ -11,11 +11,13 @@ import { encodeFirstmateOperationalInputWith } from "./fm-operational-input.ts";
 
 type Observation = { task_id: string; state: string; reason: string; key: string; revision?: number };
 type InputReceipt = { id: string; text: string; task?: string; answer?: string };
-type Admission = { content: string; admissions: string[]; canNotify: () => boolean };
+type Admission = { content: string; admissions: string[]; escalations: { id: string; task: string; reason: string }[];
+  canNotify: () => boolean; canContinue: () => boolean };
 const INPUT_ENTRY = "fm-continuation-input";
 const PACING_ENTRY = "fm-continuation-input-pacing";
 const RECEIPT_ENTRY = "fm-continuation-receipt";
 const MESSAGE = "fm-task-continuation";
+const ESCALATION = "fm-task-continuation-escalation";
 const INTERVAL_MS = 30_000;
 const ATTEMPTS = 2;
 const BATCH = 8;
@@ -25,7 +27,7 @@ const atom = (s: string) => /^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(s);
 // Its receipt permits only logical-run release, not semantic task completion.
 export type ContinuationReceiver = {
   generation: string; sessionId: string; sessionFile: string; recheckMs: number;
-  current: () => boolean; canNotify: () => boolean;
+  current: () => boolean; canNotify: () => boolean; canContinue: () => boolean;
 };
 export type ContinuationReadbackOffer = {
   ctx: ExtensionContext; accept: (receiver: ContinuationReceiver) => void;
@@ -39,7 +41,7 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
   const inputs = new Map<string, InputReceipt>();
   // Unrouted input pacing is session-owned. Task admission and semantic truth
   // remain in the canonical lifecycle owner, independent of this runtime.
-  const pacing = new Map<string, { key: string; attempts: number; after: number; reserved?: string }>();
+  const pacing = new Map<string, { key: string; attempts: number; after: number; reserved?: string; escalatedAt?: number }>();
   const submitted = new Set<string>();
   const delivered = new Map<string, number>();
   let generation = 0;
@@ -126,7 +128,7 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
   }
 
   function readDelivery(entry: { customType?: string; details?: unknown; timestamp?: string | number }) {
-    if (entry.customType !== MESSAGE) return;
+    if (entry.customType !== MESSAGE && entry.customType !== ESCALATION) return;
     const ids = (entry.details as { admissions?: unknown })?.admissions;
     const at = typeof entry.timestamp === "number" ? entry.timestamp : Date.parse(entry.timestamp || "");
     if (!Array.isArray(ids) || !Number.isFinite(at)) return;
@@ -155,8 +157,8 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
       scan_scope: scanScope, next_cursor: cursor,
       recovery_trigger: "existing-heartbeat-clock: readback; changed evidence may admit coordination; effects use existing executor/handoff owners",
       observations: pending.map(({ task_id, key, revision }) => ({ task_id, key, revision })),
-      delivered_admissions: Object.fromEntries(pending.flatMap((item) => [1, 2].flatMap((attempt) => {
-        const id = `n.${item.key}.${attempt}`;
+      delivered_admissions: Object.fromEntries(pending.flatMap((item) =>
+        [`n.${item.key}.1`, `n.${item.key}.2`, `e.${item.key}`].flatMap((id) => {
         return delivered.has(id) ? [[id, delivered.get(id)]] : [];
       }))),
     };
@@ -176,6 +178,7 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
     writeFileSync(proofFile, JSON.stringify(proof), { mode: 0o600, flag: "wx" });
     const lines: string[] = [];
     const admissions: string[] = [];
+    const escalations: Admission["escalations"] = [];
     try {
       for (const item of pending) {
         if (!current()) throw new Error("readback receiver generation changed");
@@ -194,6 +197,13 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
             pace.after = Date.now() + INTERVAL_MS * 2 ** (pace.attempts - 1);
             pace.reserved = `input.${item.key}.${pace.attempts}`;
           }
+          if (!pace.reserved && pace.attempts === ATTEMPTS) {
+            const id = `e.${item.key}`;
+            pace.escalatedAt ??= delivered.get(id);
+            if (pace.escalatedAt === undefined && !submitted.has(id)) {
+              escalations.push({ id, task: item.task_id, reason: "input has not been routed to a task or substantively answered" });
+            }
+          }
           pacing.set(item.task_id, pace);
           pi.appendEntry(PACING_ENTRY, { id: item.task_id, ...pace });
           admission = pace.reserved;
@@ -204,6 +214,9 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
           if (retained?.coordination?.receipt?.entry_id !== entry.id ||
               retained.coordination.receiver.generation !== owner.generation) throw new Error("coordinator receipt readback changed");
           admission = coordinated.admission;
+          if (coordinated.escalation && !submitted.has(coordinated.escalation) && !delivered.has(coordinated.escalation)) {
+            escalations.push({ id: coordinated.escalation, task: item.task_id, reason: item.reason });
+          }
         }
         if (admission && !submitted.has(admission) && !delivered.has(admission)) {
           lines.push(`${item.task_id}: ${item.state}: ${item.reason}`);
@@ -212,11 +225,25 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
       }
     } finally { unlinkSync(proofFile); }
     if (!current()) throw new Error("readback receiver generation changed");
-    if (lines.length) {
-      const content = await encodeFirstmateOperationalInputWith(runCommandAsync, "branch-outcome", instruction(lines));
+    if (lines.length || escalations.length) {
+      const content = lines.length
+        ? await encodeFirstmateOperationalInputWith(runCommandAsync, "branch-outcome", instruction(lines)) : "";
       if (!current()) throw new Error("readback receiver generation changed");
-      return { content, admissions, canNotify: () => current() && owner.canNotify() };
+      return { content, admissions, escalations, canNotify: () => current() && owner.canNotify(),
+        canContinue: () => current() && owner.canContinue() };
     }
+  }
+
+  function escalationEntries(admission: Admission) {
+    return admission.escalations.map(({ id, task, reason }) => ({
+      type: "custom_message" as const, customType: ESCALATION, display: true,
+      content: `Continuation needs intervention: ${task}\n` +
+        `Two automatic coordination requests produced no verified continuation: ${reason}. ` +
+        "The task remains open. Automatic model retries for this evidence are exhausted; this is not completion or a task blocker. " +
+        "Main must assign an authorized executor and verify receipt/start, reconcile a real dependency, or provide acceptance evidence. " +
+        "If an effect may already have happened, read it back before any retry. A new instruction can resume coordination; unrelated input does not reset the budget.",
+      details: { admissions: [id], task, owner: "main", kind: "coordination-failure" },
+    }));
   }
 
   async function check(ctx: ExtensionContext): Promise<Admission | undefined> {
@@ -245,6 +272,11 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
       // No await between the safety owner's complete judgment and submission.
       // If unsafe, canonical reserved admission survives the next tick/reload.
       if (admission && epoch === generation && admission.canNotify()) {
+        for (const entry of escalationEntries(admission)) {
+          submitted.add(entry.details.admissions[0]);
+          pi.sendMessage(entry, { triggerTurn: false });
+        }
+        if (!admission.admissions.length) return;
         for (const id of admission.admissions) submitted.add(id);
         pi.sendMessage({ customType: MESSAGE, content: admission.content, display: false,
           details: { admissions: admission.admissions } }, { triggerTurn: true, deliverAs: "followUp" });
@@ -262,7 +294,7 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
     for (const entry of entries) {
       if (entry.type === "custom_message") readDelivery(entry);
       if (entry.type === "custom" && entry.customType === PACING_ENTRY) {
-        const pace = entry.data as { id: string; key: string; attempts: number; after: number; reserved?: string };
+        const pace = entry.data as { id: string; key: string; attempts: number; after: number; reserved?: string; escalatedAt?: number };
         if (typeof pace?.id === "string") pacing.set(pace.id, pace);
       }
       if (entry.type !== "custom" || entry.customType !== INPUT_ENTRY) continue;
@@ -285,10 +317,13 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
   pi.on("agent_before_settle", async (_event, ctx) => {
     context = ctx;
     const admission = await check(ctx);
-    if (admission) {
+    if (admission && admission.canContinue()) {
+      const escalations = escalationEntries(admission);
+      for (const entry of escalations) submitted.add(entry.details.admissions[0]);
       for (const id of admission.admissions) submitted.add(id);
-      return { entries: [{ type: "custom_message" as const, customType: MESSAGE,
-        content: admission.content, display: false, details: { admissions: admission.admissions } }], continue: true };
+      return { entries: [...escalations, ...(admission.admissions.length ? [{ type: "custom_message" as const, customType: MESSAGE,
+        content: admission.content, display: false, details: { admissions: admission.admissions } }] : [])],
+        continue: admission.admissions.length > 0 };
     }
   });
 

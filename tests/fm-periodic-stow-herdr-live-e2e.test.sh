@@ -48,6 +48,18 @@ cp /home/chengyuhang/.pi/agent/bin/fd "$PI_DIR/bin/fd"
 cp "$ROOT/.pi/extensions/fm-periodic-stow.ts" "$PROJECT/.pi/extensions/fm-periodic-stow.ts"
 cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$PROJECT/.pi/extensions/lib/fm-operational-input.ts"
 cp -R "$ROOT/bin/." "$PROJECT/bin/"
+# Isolate a controlled readback delay for the real before-settle UI race.
+# Every operation still delegates to the exact candidate public owner.
+mv "$PROJECT/bin/fm-task-state.sh" "$PROJECT/bin/fm-task-state-candidate.sh"
+cat >"$PROJECT/bin/fm-task-state.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = observe ] && [ "${2:-}" = ui-negative ] && [ -f "$FM_HOME/data/ui-delay" ]; then
+  touch "$FM_HOME/data/ui-observing"
+  sleep 1
+fi
+exec "$(dirname "$0")/fm-task-state-candidate.sh" "$@"
+SH
+chmod +x "$PROJECT/bin/fm-task-state.sh"
 cp "$ROOT/.pi/extensions/lib/fm-task-continuation.ts" "$ROOT/.pi/extensions/lib/fm-async-exec.ts" \
   "$ROOT/.pi/extensions/lib/fm-native-contract.ts" "$PROJECT/.pi/extensions/lib/"
 chmod +x "$PROJECT/bin/fm-stow-run.sh"
@@ -68,7 +80,7 @@ import {
   createAssistantMessageEventStream,
 } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { appendFileSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { installTaskContinuation } from "./project/.pi/extensions/lib/fm-task-continuation.ts";
 const home = process.env.FM_HOME!;
 const capture = process.env.FM_PERIODIC_STOW_CAPTURE!;
@@ -93,6 +105,22 @@ function assistant(model: { api: string; provider: string; id: string }): Assist
   };
 }
 export default function captureExtension(pi: ExtensionAPI) {
+  let uiBoundary = false;
+  pi.on("agent_before_settle", (_event, ctx) => {
+    if (!uiBoundary) return;
+    uiBoundary = false;
+    const until = Date.now() + 5000;
+    const open = () => {
+      if (!existsSync(`${home}/data/ui-observing`)) {
+        if (Date.now() < until) setTimeout(open, 10);
+        return;
+      }
+      log({ event: "fixture_ui_open", readback_started: true });
+      void ctx.ui.confirm("Continuation guard fixture", "Close this dialog to permit the reserved continuation.")
+        .then(() => log({ event: "fixture_ui_closed" }));
+    };
+    setTimeout(open, 0);
+  });
   const continuation = installTaskContinuation(pi, {
     root: process.env.FM_ROOT_OVERRIDE!, home, state: `${home}/state`, owns: () => true,
   });
@@ -135,6 +163,17 @@ export default function captureExtension(pi: ExtensionAPI) {
     description: "Exercise a supported session initialization without a leaf",
     async handler(_args, ctx) {
       await ctx.newSession({ setup: async (manager) => { manager.resetLeaf(); } });
+    },
+  });
+  pi.registerCommand("fixture-ui", {
+    description: "Open a real dialog during candidate before-settle readback",
+    async handler() {
+      mkdirSync(`${home}/data/ui-negative`, { recursive: true });
+      writeFileSync(`${home}/data/ui-negative/brief.md`, "Verify safe UI boundary and one reserved delivery.");
+      writeFileSync(`${home}/data/ui-delay`, "controlled public readback latency");
+      await continuation.preserve(["ui-negative"]);
+      uiBoundary = true;
+      pi.sendMessage({ customType: "fixture-ui-seed", content: "Begin the UI boundary fixture.", display: false }, { triggerTurn: true });
     },
   });
   pi.on("input", (event) => { if (event.text.includes("independent fixture B")) log({ event: "B_received" }); });
@@ -269,6 +308,7 @@ assert a[1]['at']>=first_budget['not_before_ms'],('unpaced request before canoni
 r=json.loads((home/'data/live-prerequisite/lifecycle.json').read_text())
 assert r['disposition']=='open' and r['next_action'] is None and r['assessment']['remaining_gap']
 assert len(r['coordination']['budgets'])==1 and next(iter(r['coordination']['budgets'].values()))['attempts']==2
+assert next(iter(r['coordination']['budgets'].values())).get('escalated_at_ms'), 'exhausted A has no durable visible escalation'
 for event in rows:
     if event['event']=='before_settle' and not event['continued']:
         assert event.get('receipt') and event.get('receiver'),('bare release',event)
@@ -313,6 +353,48 @@ RUN_ID=$(jq -r '.active.run_id' "$HOME_DIR/state/stow/state.json")
 jq -s -e 'any(.event == "session_start") and any(.event == "before_agent_start")' "$CAPTURE" >/dev/null \
   || fail "real Pi lifecycle evidence is incomplete"
 
+# Reproduce the second delivery path with an actual Pi dialog during the
+# candidate's asynchronous before-settle readback, before the larger matrix.
+"$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane send-text "$PANE" '/fixture-ui' >/dev/null
+"$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane send-keys "$PANE" Enter >/dev/null
+if ! python3 - "$CAPTURE" "$HOME_DIR" "$PROJECT" "$HERDR_LAB_HELPER" "$HERDR_LAB_SESSION" "$PANE" <<'PYUI'
+import json,sys,time,subprocess,os,hashlib
+from pathlib import Path
+capture,home,root=map(Path,sys.argv[1:4]);helper,session,pane=sys.argv[4:]
+def rows(): return [json.loads(x) for x in capture.read_text().splitlines()]
+def wait(test, seconds=10):
+    until=time.monotonic()+seconds
+    while time.monotonic()<until:
+        result=test()
+        if result:return result
+        time.sleep(.1)
+    raise AssertionError('real UI condition timed out')
+wait(lambda:any(r['event']=='fixture_ui_open' for r in rows()))
+time.sleep(1.5)
+record=home/'data/ui-negative/lifecycle.json'
+r=json.loads(record.read_text());budget=next(iter(r['coordination']['budgets'].values()))
+assert budget['attempts']==1 and budget.get('reserved'),('lost UI reservation',r)
+def offers():return [r for r in rows() if r['event']=='provider_call' and 'ui-negative: pending' in r.get('last','')]
+assert not offers(),'model started while native UI was blocking'
+(home/'data/ui-delay').unlink()
+p=subprocess.run([helper,'run',session,'pane','send-keys',pane,'escape'],capture_output=True,text=True);assert p.returncode==0,p.stderr
+wait(lambda:any(r['event']=='fixture_ui_closed' for r in rows()))
+wait(lambda:len(offers())==1)
+time.sleep(1)
+assert len(offers())==1,'UI release duplicated the reserved request'
+r=json.loads(record.read_text());assert next(iter(r['coordination']['budgets'].values()))['attempts']==1
+# The fixture has now verified its exact requested operation through public CAS.
+evidence=home/'data/ui-acceptance';evidence.write_text('Native dialog blocked before-settle continuation; release delivered its original reservation once.')
+r['disposition']='accepted';r['assessment'].update(remaining_gap='',outcome=evidence.read_text(),evidence=[dict(ref='data/ui-acceptance',sha256=hashlib.sha256(evidence.read_bytes()).hexdigest())])
+proposal=home/'data/ui-proposal.json';proposal.write_text(json.dumps(r));proposal.chmod(0o600)
+env=dict(os.environ,FM_HOME=str(home),FM_SUPERVISION_ACTOR='main')
+p=subprocess.run([str(root/'bin/fm-task-state.sh'),'reconcile','ui-negative','--expected-revision',str(r['revision']),'--record',str(proposal)],env=env,capture_output=True,text=True);assert p.returncode==0,p.stderr
+print('ok - real Pi UI dialog during before-settle readback deferred the same reservation and released it once')
+PYUI
+then
+  fail "real Pi before-settle UI race failed"
+fi
+
 python3 "$ROOT/tests/continuation-host-matrix.py" "$PROJECT" "$HOME_DIR" "$PI_DIR" "$CAPTURE" "$HERDR_LAB_HELPER" "$HERDR_LAB_SESSION" \
   || fail "real Pi additional continuation matrix failed"
 
@@ -341,6 +423,7 @@ while time.monotonic()<limit:
         assert r['disposition']=='open' and r['next_action'] is None
         assert len(r['coordination']['budgets'])==1
         assert next(iter(r['coordination']['budgets'].values()))['attempts']==2
+        assert next(iter(r['coordination']['budgets'].values())).get('escalated_at_ms'), 'cold session lost escalation receipt'
         print('ok - actual Pi cold session without leaf acquired coordinator after the first persisted boundary; A budget unchanged')
         break
     time.sleep(.2)

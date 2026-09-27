@@ -28,15 +28,19 @@ Enrollment is limited to current task briefs named by an input route, wake claim
 Main records semantic acceptance, an explicit stopped disposition, a named executor with observed receipt/start, or a genuine blocker with responsible owner and observable release evidence.
 A queued handoff, successful send, provider terminal state, reported plan, or PR result cannot independently establish acceptance.
 The existing durable handoff owner retains lease conflicts and deduplicates retries by the original id.
-Uncertain effects remain readback work; the continuation observer never executes a payload or grants new authority.
+Attempted and uncertain effects remain readback work; the continuation observer never executes a payload or grants new authority.
 The Pi extension preserves separate input receipts through compaction, checks pending obligations before logical-run settlement, and uses the existing heartbeat coordinator's tick for bounded rechecks.
 Unchanged genuine blockers, healthy observed execution, accepted goals, and explicitly stopped goals stay quiet.
 Changing dependency evidence or a missing executor makes the precise retained obligation actionable again without re-presenting its already acknowledged outcome.
 The extension limits unchanged automatic prompts to two with backoff, including settlement-triggered continuations.
 The canonical lifecycle record retains the budget across reload, compaction and unrelated input.
 Before releasing a logical Pi run, the existing heartbeat coordinator actually reads current obligations and persists a generation-bound receipt; the task remains pending, and that receipt proves coordination rather than execution or acceptance.
+After two delivered requests without a verified continuation, the main session durably displays a coordination-failure escalation without starting another model turn, including when full heartbeat maintenance is disabled.
+The canonical budget retains its native delivery receipt across reload and compaction so the same failure is not repeatedly presented.
+The task stays open: the escalation is neither an executor receipt nor a fabricated task blocker, and main must assign an authorized executor, reconcile a real dependency, or assess acceptance when it resumes.
 The same clock continues bounded readback while exhausted budgets suppress unchanged model requests, allowing heartbeat maintenance and independent input to run.
 An admission deferred by UI, tool, input or compaction activity stays reserved in the existing owner until the complete safety check permits delivery; a persisted native message confirms delivery without spending another attempt.
+Both timer delivery and the final before-settle submission recheck those protections after asynchronous readback; before-settle does not require the still-active logical run to become idle.
 This safeguard applies while Pi is alive; it introduces no process-exit recovery, external watchdog, cleanup engine, or parallel lifecycle truth store.
 `tests/fm-task-handoff.test.sh`, `tests/fm-pi-branch-extension.test.sh`, and `tests/fm-periodic-stow-herdr-live-e2e.test.sh` exercise these boundaries through public interfaces.
 

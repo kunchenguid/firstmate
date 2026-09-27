@@ -220,7 +220,7 @@ test_same_task_send_and_reminder_contract_stay_ordinary() {
 }
 
 test_continuation_assessment_and_observed_executor() {
-  ROOT="$ROOT" CASE_DIR="$TMP_ROOT/lifecycle" python3 - <<'PY'
+  ROOT="$ROOT" CASE_DIR="$TMP_ROOT/lifecycle" FM_FIXTURE_BACKEND="$(make_fake_backend "$TMP_ROOT/lifecycle")" python3 - <<'PY'
 import copy, hashlib, json, os, pathlib, shutil, subprocess
 root = pathlib.Path(os.environ['ROOT'])
 home = pathlib.Path(os.environ['CASE_DIR'])
@@ -274,8 +274,14 @@ a=dict(id='source.g1.a1',kind='steer',phase='prepared',expected_execution_genera
        recheck_at='2026-01-01T00:00:00Z',deadline='2099-01-01T00:00:00Z',payload_ref='data/readback',payload_sha256=sha(home/'data/readback'),receipt_ref=None,
        continuation=dict(type='executor',task_id='target',execution_generation='g1',inbox_id='000001',sha256='a'*64))
 r['next_action']=a;r['next_action_seq']=2;r=reconcile(r)
+def execution_guard():
+    return subprocess.run(['bash','-c','. "$1"; fm_task_lifecycle_execution_guard source',
+                           '_',str(bin/'fm-task-lifecycle-lib.sh')], env=env, capture_output=True, text=True)
+assert execution_guard().returncode == 0, 'prepared operation should remain executable'
 state('action','--action-id',a['id'],'--phase','attempted')
+assert execution_guard().returncode != 0, 'attempted effect must require readback before execution'
 r=receipt('uncertain'); oldkey=state('observe')['key']
+assert execution_guard().returncode != 0, 'uncertain effect must require readback before execution'
 bad=copy.deepcopy(r);bad['next_action']=None;reconcile(bad,ok=False)
 # Receipt has not arrived: a successful sender's claim cannot confirm execution.
 state('action','--action-id',a['id'],'--phase','confirmed','--receipt-ref','data/readback','--receipt-sha256',sha(home/'data/readback'),ok=False)
@@ -297,10 +303,8 @@ assert receipt('confirmed')['revision']==r['revision']
 (home/'state/provider-state').write_text('done')
 assert state('observe')['state']=='pending', 'provider done is not goal acceptance'
 # Bind the real durable handoff owner, including its exact inbox wire format.
-fake=home/'fakebin';fake.mkdir()
-(fake/'tmux').write_text('#!/bin/sh\ncase "$1" in capture-pane) printf "╭────╮\\n│    │\\n╰────╯\\n" ;; display-message) printf "1\\n" ;; esac\nexit 0\n')
-(fake/'tmux').chmod(0o755);env['PATH']=str(fake)+os.pathsep+env['PATH']
-with (home/'state/target.meta').open('a') as f: f.write('backend=tmux\nwindow=fm-target\nharness=pi\nendpoint_task_id=target\n')
+env['PATH']=os.environ['FM_FIXTURE_BACKEND']+os.pathsep+env['PATH']
+with (home/'state/target.meta').open('a') as f: f.write('backend=herdr\nwindow=fixture:w1:p-target\nharness=pi\nendpoint_task_id=target\n')
 call('fm-task-handoff.sh','send','source','target','--id','observed-handoff','Apply the next authorized operation exactly once.')
 a=dict(a,id='source.g1.a3',phase='prepared',attempts=0,continuation=dict(type='executor',task_id='target',execution_generation='g1',handoff_id='observed-handoff'))
 r['next_action']=a;r['next_action_seq']=4;r=reconcile(r)
@@ -367,5 +371,5 @@ test_local_runtime_backend_matrix_uses_one_durable_plane
 test_terminal_refusal_is_durable
 test_same_task_send_and_reminder_contract_stay_ordinary
 
-test_continuation_assessment_and_observed_executor
+test_continuation_assessment_and_observed_executor || fail "lifecycle behavior regression failed"
 printf 'All task-handoff tests passed.\n'

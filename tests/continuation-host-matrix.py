@@ -116,7 +116,15 @@ enroll('matrix-target')
 reconcile('matrix-target', accept)
 enroll('matrix-uncertain')
 action('matrix-uncertain', dict(type='executor', task_id='matrix-target', execution_generation='g1', inbox_id='000001', sha256='a'*64), 'steer')
-phase('matrix-uncertain', 'attempted'); phase('matrix-uncertain', 'uncertain')
+phase('matrix-uncertain', 'attempted')
+for pending_phase in ('attempted', 'uncertain'):
+    if pending_phase == 'uncertain':
+        phase('matrix-uncertain', pending_phase)
+    guard = subprocess.run(['bash', '-c', '. "$1"; fm_task_lifecycle_execution_guard matrix-uncertain',
+                            '_', str(root/'bin/fm-task-lifecycle-lib.sh')], env=env, capture_output=True, text=True)
+    assert guard.returncode != 0, (pending_phase, guard.stdout, guard.stderr)
+    assert (home/'data/effect-count').read_text() == '1'
+    log('effect-readback-guard', phase=pending_phase, refused=True, external_effects=1)
 retained = state('lifecycle', 'matrix-uncertain')['next_action']
 wait(lambda: any('read back before any retry' in x.get('last', '') for x in offered('matrix-uncertain')))
 assert state('lifecycle', 'matrix-uncertain')['next_action'] == retained
@@ -131,6 +139,27 @@ for index in range(9):
 wait(lambda: offered('matrix-fair-8'))
 assert all(state('observe', f'matrix-fair-{i}')['state'] == 'accepted' for i in range(8))
 log('batch-fairness-maintenance-off', tasks=9, tail_pending=True)
+# No executor or action is invented when the model ignores both requests.
+# The existing session visibly escalates that real coordination failure,
+# without spending another request or misclassifying the task as blocked.
+def escalation_record():
+    record = state('lifecycle', 'matrix-fair-8')
+    budgets = record.get('coordination', {}).get('budgets', {}).values()
+    return record if any(b.get('escalated_at_ms') for b in budgets) else None
+def visible_escalations():
+    entries = [json.loads(line) for file in (pi_dir/'sessions').rglob('*.jsonl') for line in file.read_text().splitlines()]
+    return [e for e in entries if e.get('customType') == 'fm-task-continuation-escalation'
+            and e.get('details', {}).get('task') == 'matrix-fair-8']
+visible = wait(visible_escalations, seconds=50)
+# Delivery is bounded above; canonical acknowledgement is the next bounded
+# round-robin readback, not the same operation as appending the native entry.
+exhausted = wait(escalation_record, seconds=30)
+assert exhausted['disposition'] == 'open' and exhausted['next_action'] is None
+assert len(offered('matrix-fair-8')) == 2
+visible = visible_escalations()
+assert len(visible) == 1 and visible[0]['display'] is True
+log('maintenance-off-exhaustion-escalated', task='matrix-fair-8', requests=2,
+    native_entry=visible[0]['id'], displayed=True, disposition='open', next_action=None)
 # Stopped work remains archived and cannot be relaunched by another tick.
 (home/'data/stop').write_text('Fixture authority stops this goal; retain existing work.\n')
 enroll('matrix-stopped')
@@ -201,34 +230,37 @@ herdr('pane', 'run', pane, 'zsh'); time.sleep(1)
 herdr('pane', 'run', pane, command)
 wait(lambda: (home/'data/executor-ready').exists())
 time.sleep(2)
-enroll('matrix-handoff-source')
+# Main resumes the exact exhausted/escalated task through the existing handoff owner.
+exhausted_key = exhausted['coordination']['observation_key']
 # A branch lease proves queueing cannot be mistaken for executor start.
 branch_env = dict(env, FM_SUPERVISION_ACTOR='branch', FM_LEASE_HOLDER_PID=(home/'state/.lock').read_text().strip())
 p = subprocess.run([str(root/'bin/fm-lease.sh'),'claim','matrix-executor','--actor','branch'],env=branch_env,text=True,capture_output=True)
 assert p.returncode == 0, p.stderr
-p = subprocess.run([str(root/'bin/fm-task-handoff.sh'),'send','matrix-handoff-source','matrix-executor','--id','matrix-handoff','Perform the exact fixture operation once, acknowledging this inbox record.'],env=env,text=True,capture_output=True)
+p = subprocess.run([str(root/'bin/fm-task-handoff.sh'),'send','matrix-fair-8','matrix-executor','--id','matrix-handoff','Perform the exact fixture operation once, acknowledging this inbox record.'],env=env,text=True,capture_output=True)
 assert p.returncode == 6 and 'not started' in p.stderr+p.stdout, (p.returncode,p.stdout,p.stderr)
 log('lease-refusal', exit_code=p.returncode, diagnostic=p.stdout+p.stderr, handoff=call('fm-task-handoff.sh','inspect','matrix-handoff'))
-action('matrix-handoff-source', dict(type='executor', task_id='matrix-executor', execution_generation='g1', handoff_id='matrix-handoff'), 'steer')
-assert state('observe','matrix-handoff-source')['state'] == 'pending'
+action('matrix-fair-8', dict(type='executor', task_id='matrix-executor', execution_generation='g1', handoff_id='matrix-handoff'), 'steer')
+assert state('observe','matrix-fair-8')['state'] == 'pending'
 p = subprocess.run([str(root/'bin/fm-lease.sh'),'release','matrix-executor','--actor','branch'],env=branch_env,text=True,capture_output=True)
 assert p.returncode == 0, p.stderr
 wait(lambda: (home/'data/executor-effects').exists(), 30)
-observed = wait(lambda: (r if (r := state('observe','matrix-handoff-source'))['state']=='running' else None))
+observed = wait(lambda: (r if (r := state('observe','matrix-fair-8'))['state']=='running' else None))
 provider = call('fm-task-state.sh','matrix-executor')
 assert 'harness busy (pi-ext)' in provider, provider
-phase('matrix-handoff-source','attempted'); phase('matrix-handoff-source','confirmed')
+phase('matrix-fair-8','attempted'); phase('matrix-fair-8','confirmed')
 call('fm-task-handoff.sh','retry','matrix-handoff')
 messages = list((home/'state/matrix-executor.inbox').rglob('*.msg'))
 assert len(messages)==1 and messages[0].parent.name=='handled'
 assert len((home/'data/executor-effects').read_text().splitlines())==1
-start=len(offered('matrix-handoff-source'));time.sleep(2)
-assert len(offered('matrix-handoff-source'))==start
+start=len(offered('matrix-fair-8'));time.sleep(2)
+assert len(offered('matrix-fair-8'))==start
 log('actual-executor-handoff', observed=observed, provider=provider, receipt=str(messages[0]), effects=1, lease_conflict_exit=6)
 (home/'data/executor-release').write_text('Fixture operation may finish.')
 wait(lambda: 'state: working' not in call('fm-task-state.sh','matrix-executor'))
-reconcile('matrix-handoff-source',accept)
-assert state('observe','matrix-handoff-source')['state']=='accepted'
-log('executor-acceptance', state='accepted')
+reconcile('matrix-fair-8',accept)
+assert state('observe','matrix-fair-8')['state']=='accepted'
+retained_budget = state('lifecycle','matrix-fair-8')['coordination']['budgets'][exhausted_key]
+assert retained_budget['attempts'] == 2 and retained_budget.get('escalated_at_ms')
+log('executor-acceptance', state='accepted', resumed_escalated_task='matrix-fair-8', original_budget_retained=True)
 herdr('pane','send-text',pane,'/quit');herdr('pane','send-keys',pane,'Enter')
 print('ok - real executor: lease refusal retained, handled once, actual Pi busy, confirmed readback, semantic acceptance')

@@ -14,6 +14,11 @@ Each budget may retain a reserved admission id while the native safety owner
 defers notification. Later readback of custom_message.details.admissions in
 the actual session branch acknowledges delivery and anchors the backoff to
 that message's timestamp. A deferred reservation consumes no extra attempt.
+After both requests are delivered without progress, coordinate requires a
+visible native main-session escalation instead of another model request.
+The same budget retains escalated_at_ms from delivery readback, independently
+of session lifetime. Escalation reports coordination failure; it neither holds
+the task for a fabricated dependency nor claims executor receipt or acceptance.
 Only main may mutate through the public entry; existing lease/meta locks own CAS.
 An open goal without a verified continuation remains due after presentation ack.
 Optional next_action.continuation has exactly one of these observation contracts:
@@ -208,6 +213,7 @@ class Task:
                 require(bool(re.fullmatch('[a-f0-9]{64}', key)) and isinstance(budget, dict), 'invalid readback fingerprint')
                 require(integer(budget.get('attempts')) and budget['attempts'] <= 2 and integer(budget.get('not_before_ms')), 'invalid readback pacing')
                 require(budget.get('reserved') is None or atom(budget['reserved']), 'invalid reserved admission')
+                require(budget.get('escalated_at_ms') is None or integer(budget['escalated_at_ms']), 'invalid escalation receipt')
             require(isinstance(coordination.get('receipt'), dict) and isinstance(coordination.get('receiver'), dict), 'missing native readback receipt')
         action = record.get('next_action')
         if action is not None:
@@ -342,12 +348,26 @@ class Task:
             budget['not_before_ms'] = current_ms + 30000 * 2 ** (budget['attempts'] - 1)
             budget['reserved'] = 'n.' + key + '.' + str(budget['attempts'])
         admitted = bool(budget.get('reserved'))
+        # Exhaustion is an automatic coordination failure, not an external
+        # blocker or acceptance. Require a durable visible escalation on main
+        # without admitting another model request. Its native delivery receipt
+        # survives reload/compaction in this same fingerprint budget.
+        escalation = None
+        if budget['attempts'] == 2 and not admitted:
+            escalation_id = 'e.' + key
+            escalated = receipt.get('delivered_admissions', {}).get(escalation_id)
+            if escalated is not None:
+                require(integer(escalated) and escalated <= current_ms, 'invalid escalation delivery readback')
+                budget['escalated_at_ms'] = escalated
+            if budget.get('escalated_at_ms') is None:
+                escalation = escalation_id
         record['coordination'] = {'budgets': budgets, 'observation_key': key,
                                   'receipt': proof, 'receiver': receipt}
         record['revision'] += 1
         self.write(record)
         return {'observation': observation, 'coordination': record['coordination'], 'admitted': admitted,
                 'admission': budget.get('reserved'),
+                'escalation': escalation,
                 'revision': record['revision']}
 
     def reconcile(self, args):
