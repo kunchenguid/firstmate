@@ -2233,17 +2233,31 @@ test_herdr_rebind_stays_in_the_recorded_session() {
 
 # A task that was projected before its endpoint was destroyed must come back as
 # its own one-task workspace, not as a tab swallowed by the home workspace.
-# The pre-fix rebind always used the flat container shape, which is what made a
-# reboot collapse every relaunched lane back into the primary's sidebar entry.
-test_herdr_reclaim_republishes_a_destroyed_projection() {
+# The pre-fix rebind never even tried the projected shape for a reclaim - it
+# went straight to the flat container, which is what made a reboot collapse
+# every relaunched lane back into the primary's sidebar entry. This case
+# proves the version-2 journal routes the reclaim into the projection attempt
+# instead of skipping straight to flat; the projection's own create/verify
+# sequence and its success postconditions are exercised precisely, with exact
+# response IDs at every step, by
+# tests/fm-backend-herdr.test.sh:test_projection_rebind_republishes_a_destroyed_projection.
+# This integration fake is stateless per command, so it cannot answer the
+# create_task shape-verification calls (tab list/pane list against the fresh
+# workspace) with the exact converged state a real success needs; it
+# deliberately leaves the fake's `workspace create` response without a
+# `root_pane`, so fm_backend_herdr_projection_create_task fails fast on
+# incomplete IDs and rebind_task takes its documented flat fallback. That
+# fallback is asserted here too, so this test would fail if the wiring
+# stopped attempting the projection at all.
+test_herdr_reclaim_attempts_to_republish_a_destroyed_projection() {
   local dir out rc log token label
   herdr_case_or_skip gone-herdr-projected rl78 fmlab '%none' || {
     echo "skip - herdr projected reclaim needs jq (the herdr adapter parses JSON with it)"
     return 0
   }
   dir=$HERDR_CASE_DIR
-  # A version 2 journal marks the task as projected, so the reclaim must
-  # republish a one-task workspace instead of taking the flat fallback.
+  # A version 2 journal marks the task as projected, so the reclaim must at
+  # least attempt to republish a one-task workspace before any flat fallback.
   token=$(bash -c '
     . "$0/bin/backends/herdr.sh"
     token=$(fm_backend_herdr_projection_journal_create "$1" rl78) || exit 1
@@ -2260,9 +2274,10 @@ test_herdr_reclaim_republishes_a_destroyed_projection() {
   mkdir -p "$dir/home/config"
   printf 'on\n' > "$dir/home/config/herdr-presentation-spaces"
   # The home workspace already exists, so container_ensure adopts it and the
-  # only workspace create in the log belongs to the projection. The workspace
-  # and tab reads keep create_task's focus snapshot exact; the projection then
-  # fails on this deliberately incomplete fake and the reclaim completes
+  # only workspace create in the log belongs to the projection attempt. The
+  # workspace and tab reads keep create_task's focus snapshot exact; the
+  # projection then fails on this deliberately incomplete fake (no
+  # `root_pane` in the workspace-create response) and the reclaim completes
   # through its documented flat fallback.
   printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"ws1","label":"firstmate","focused":true,"active_tab_id":"ws1:t1"}]}}' > "$dir/fake/herdr-workspaces"
   printf '%s\n' '{"result":{"tabs":[{"tab_id":"ws1:t1","focused":true}]}}' > "$dir/fake/herdr-tabs"
@@ -2271,12 +2286,16 @@ test_herdr_reclaim_republishes_a_destroyed_projection() {
   log=$(cat "$dir/fake/herdr-log")
   expect_code 0 "${rc:-0}" "a projected reclaim should complete"$'\n'"$out"$'\n'"$log"
   assert_contains "$log" "workspace create" \
-    "a projected reclaim must republish the one-task workspace, never a flat tab alone"
+    "a projected reclaim must at least attempt the one-task workspace, never skip straight to a flat tab"
   assert_contains "$log" "$label" \
-    "the republished workspace must carry the task's own presentation label"
+    "the attempted workspace must carry the task's own presentation label"
+  assert_contains "$log" "tab create --workspace ws1" \
+    "an incomplete projection response must fall back to the documented flat container, not abort or hang"
   [ "$(meta_field "$dir" rl78 herdr_session)" = fmlab ] \
     || fail "the projected reclaim left its recorded herdr session"
-  pass "reclaim: a destroyed projected endpoint republishes its one-task workspace"
+  [ "$(meta_field "$dir" rl78 herdr_workspace_id)" = ws1 ] \
+    || fail "a failed projection attempt must leave the reclaim in the flat home workspace, got $(meta_field "$dir" rl78 herdr_workspace_id)"
+  pass "reclaim: a destroyed projected endpoint's reclaim attempts to republish its one-task workspace, falling back to flat only when that attempt cannot converge"
 }
 
 test_herdr_reclaim_refuses_an_agent_that_came_back() {
@@ -2502,7 +2521,7 @@ test_herdr_relaunch_resumes_only_the_registered_pi_session
 test_herdr_reclaim_adopts_a_pane_that_outlived_its_server
 test_herdr_exit_reports_already_stopped_when_the_pane_outlived_its_server
 test_herdr_rebind_stays_in_the_recorded_session
-test_herdr_reclaim_republishes_a_destroyed_projection
+test_herdr_reclaim_attempts_to_republish_a_destroyed_projection
 test_herdr_reclaim_refuses_an_agent_that_came_back
 test_herdr_reclaim_keeps_the_task_whole
 test_herdr_reclaim_of_a_secondmate_names_its_own_owner
