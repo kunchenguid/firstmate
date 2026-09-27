@@ -1296,13 +1296,13 @@ EOF
   fi
 
   if [ "$capture_state" = no-result ] || { [ "$extension_owner" -eq 0 ] && [ "$rc" -ne 0 ] && [ ! -s "$out" ]; }; then
-    # No usable result. Leave the registration armed; the adapter decides
-    # whether a nonzero exit is terminal when it handles the next result.
+    # No usable result. Leave the registration armed; only a clean empty
+    # wait may continue under this owner. Failed reads await reconciliation.
     if [ "$extension_owner" -eq 0 ]; then
       rm -f -- "$out"
       STAGED_OUTPUT=
     fi
-    if adopt_relisten; then
+    if { [ "$capture_state" = no-result ] || [ "$rc" -eq 75 ]; } && adopt_relisten; then
       continue
     fi
     if [ "$extension_owner" -eq 0 ]; then
@@ -1359,6 +1359,7 @@ EOF
   [ "$extension_owner" -eq 1 ] || rm -f -- "$runner"
   if [ "$self_announcing" -eq 1 ]; then
     if adapter_autohandle "$adapter" "$id" "$durable"; then
+      handled_capture=1
       printf 'autohandled: %s\n' "$id"
     else
       printf 'not-autohandled: %s (left for the handler; still unacknowledged)\n' "$id" >&2
@@ -1375,6 +1376,7 @@ EOF
   elif [ "$extension_owner" -eq 0 ] \
     && [ "$published_capture" -eq 1 ] \
     && adapter_autohandle "$adapter" "$id" "$durable"; then
+    handled_capture=1
     printf 'autohandled: %s\n' "$id"
   else
     printf 'not-autohandled: %s (left for the handler; still unacknowledged)\n' "$id" >&2
@@ -1392,7 +1394,7 @@ EOF
     fm_procevent_claim_capture_reservation_remove_locked || true
     exec 6<&-
   fi
-  if adopt_relisten; then
+  if [ "$handled_capture" -eq 1 ] && adopt_relisten; then
     continue
   fi
   break

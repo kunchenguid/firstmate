@@ -52,6 +52,7 @@ done
 if [ -n "${FM_REMOTE_REPLY_POLL_LOG:-}" ]; then
   printf 'x\n' >> "$FM_REMOTE_REPLY_POLL_LOG"
 fi
+[ "${FM_REMOTE_REPLY_FAIL_READ:-}" != 1 ] || exit 255
 host=$1
 entry=$2
 shift 2
@@ -788,6 +789,43 @@ if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
 fi
 stop_reply_listener || fail "the continuity listener did not stop"
 pass "a remote reply listener stays owned across empty waits and a delta"
+
+# A failed transport is not an empty wait: do not launch a second read under
+# the same owner, even when the launch floor is short.
+: > "$TMP_ROOT/failed-polls"
+FM_REMOTE_REPLY_FAIL_READ=1 FM_REMOTE_REPLY_POLL_LOG="$TMP_ROOT/failed-polls" \
+  FM_PROCEVENT_LAUNCH_FLOOR_SECONDS=1 \
+  remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null 2>&1 &
+failed_reader=$!
+wait "$failed_reader" || fail "failed reader did not leave the runner"
+sleep 2
+[ "$(wc -l < "$TMP_ROOT/failed-polls" | tr -d ' ')" -eq 1 ] \
+  || fail "failed reader relaunched within the launch floor"
+pass "a failed remote read exits instead of relistening"
+
+# Make local ingestion persistently fail after the delta has been captured.
+# Its durable generation must remain the only copy until reconciliation.
+mv "$PARENT/state/ios.status" "$TMP_ROOT/ios-status-before-failure"
+mkdir "$PARENT/state/ios.status"
+printf 'working: cannot ingest yet\n' >> "$REMOTE/state/parent-replies.status"
+failed_gen=$((GEN + 1))
+FM_PROCEVENT_LAUNCH_FLOOR_SECONDS=1 FM_REMOTE_REPLY_WAIT_SECONDS=1 \
+  remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null 2>&1 &
+failed_ingest=$!
+wait "$failed_ingest" || fail "failed ingestion did not leave the runner"
+sleep 2
+[ -f "$PARENT/state/procevent-inbox/$SID.$failed_gen.result" ] \
+  || fail "failed ingestion lost its durable capture"
+[ ! -e "$PARENT/state/procevent-inbox/$SID.$((failed_gen + 1)).result" ] \
+  || fail "failed ingestion recaptured the same delta"
+rmdir "$PARENT/state/ios.status"
+mv "$TMP_ROOT/ios-status-before-failure" "$PARENT/state/ios.status"
+# The next sections assume the cursor has advanced; apply the one saved result.
+remote_env "$ADAPTER" handle ios "$failed_gen" \
+  "$PARENT/state/procevent-inbox/$SID.$failed_gen.result" >/dev/null \
+  || fail "saved capture could not be retried"
+GEN=$failed_gen
+pass "persistent ingestion failure leaves exactly one durable capture"
 
 rm -f -- "$PARENT/state/remote-replies/ios.caught-up"
 remote_env "$ADAPTER" source ios > "$TMP_ROOT/preempted-source.out" 2>&1 &
