@@ -2,7 +2,8 @@
 name: quiet
 description: >-
   Enter quiet supervision mode when the captain invokes /quiet or asks for quiet mode, quiet-while-present, or fewer routine wake turns while they stay in the session.
-  It sets the same durable away/quiet-mode flag as /afk, in `quiet` mode, so the sub-supervisor daemon self-handles routine wakes and escalates captain-relevant events exactly as away mode does, but ordinary captain chat does NOT exit it - only an explicit `/quiet off` does.
+  Where Pi's supervision branch or an attended supervision host already keeps routine wakes off the conversation, it enters nothing and says so.
+  Elsewhere it sets the same durable away/quiet-mode flag as /afk, in `quiet` mode, so the sub-supervisor daemon self-handles routine wakes and escalates captain-relevant events exactly as away mode does, but ordinary captain chat does NOT exit it - only an explicit `/quiet off` does.
 user-invocable: true
 metadata:
   internal: true
@@ -14,7 +15,7 @@ Quiet supervision mode (kunchenguid/firstmate#2356): the same token-saving
 daemon tradeoff as `/afk`, made explicit for a captain who is staying,
 watching the session, and does not want to exit the mode just by chatting.
 
-This skill is a thin wrapper.
+Where a daemon runs, this skill is a thin wrapper.
 Every mechanism below - the daemon, its injection, its busy/composer guards,
 its classification policy, its reliability properties - is owned once by the
 `afk` skill and is IDENTICAL in quiet mode; nothing here restates it.
@@ -23,14 +24,26 @@ exits it.
 
 ## What it does
 
+0. **First check whether quiet mode needs anything here.**
+   On Pi or pi-signed, enter nothing: the attended branch already keeps routine wakes out of this conversation (the `afk` skill's step 2); tell the captain so.
+   Everywhere else run `bin/fm-afk-launch.sh quiet-check`; its header's QUIET MODE owns what each result means.
+   - Exit 0: enter nothing - no record, no flag, no daemon, and `/quiet off` then needs nothing either.
+     Tell the captain in `AGENTS.md` section 9 language that supervision here already works that way: routine fleet events stay off this conversation, while decisions, failures, credentials, and review-ready work still reach them.
+     When its line says the supervision session is paused, say instead that routine updates reach them until it recovers, and when it next retries.
+   - Exit 2: an away record is live, so the captain has returned: run the `afk` skill's return and clear its catch-up gate, then run `quiet-check` again and follow its new result.
+   - Exit 1: go on to step 1; if it printed a line, first tell the captain plainly what keeps supervision from already being quiet here.
+
 1. **Enter the lifecycle through `bin/fm-afk-launch.sh`, exactly as `/afk`
    does, with `FM_AFK_MODE=quiet` set first.**
    Follow the `afk` skill's "What it does" steps 1-3 verbatim (terminal-
    backed vs harness-native entry, daemon-already-running refresh, never
    arming a separate `fm-watch.sh`) with one addition: export
-   `FM_AFK_MODE=quiet` in the shell that invokes `bin/fm-afk-launch.sh start`
-   (or `start-native`), so `state/.afk`'s first line reads `quiet` instead of
-   `away`.
+   `FM_AFK_MODE=quiet` in the shell that invokes `bin/fm-afk-launch.sh enter`
+   and `start` (or `start-native`), so the record notes quiet mode and
+   `state/.afk`'s first line reads `quiet` instead of `away`.
+   On a home with `config/supervision-host`, launch the daemon on the path
+   this harness uses without the host, although `/afk` launches none there;
+   `start` and `start-native` take quiet mode from the record `enter` wrote.
    Leaving `FM_AFK_MODE` unset on a bare refresh of an already-running quiet
    daemon is also correct and does nothing wrong: `fm_afk_flag_write`
    preserves the on-disk mode when no explicit mode is given, so a plain

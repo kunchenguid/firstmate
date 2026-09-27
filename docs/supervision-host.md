@@ -32,14 +32,14 @@ Today it runs beside a Claude, Cursor, OpenCode, omp, Grok, or Codex primary: aw
 - Away (the record exists), the host hands each close to the engine.
   Main stays parked unless the host hands the wake back.
 - `/afk` launches no away daemon on an opted-in home of those harnesses, because the host is the away session there.
-- `/quiet` still launches the daemon.
-  While its flag `state/.afk` exists, the host stands aside exactly as the plain arm does.
+- `/quiet` enters nothing where the attended host runs, and elsewhere launches the daemon; see [Quiet mode](#quiet-mode).
+  While the daemon's flag `state/.afk` exists, the host stands aside exactly as the plain arm does.
 - Pi keeps its in-process branch whether or not the file exists, and no Pi engine is built.
 - Kimi has no primary supervision protocol, so it has no arm owner to run the host.
 
 ### Not yet on the host
 
-`/quiet` on the host, attended supervision beside a Codex primary, and the daemon's retirement are later steps of the same design.
+Attended supervision beside a Codex primary and the daemon's retirement are later steps of the same design.
 Until they land, their current behavior stays as described in their own owners.
 
 ## Components and their owners
@@ -125,6 +125,13 @@ The engine turn runs beside a captain who is present, so its guarded actions tak
 Every close goes to the engine; captain outcomes remain in the store until the return drain presents them (see [Captain outcomes](#captain-outcomes)).
 Every turn that starts attended meets the attended rule again at its start, and the offer's scan is the scope the turn claims: a close accepted away whose turn starts attended, because the captain returned in between, or an attended close whose task turned main-only (a decision appeared) while the successor started, reaches main unchanged.
 A captain who leaves while an attended turn runs turns its captain outcomes into away outcomes: they wait for the return too.
+
+### Quiet mode
+
+`/quiet` asks for what the attended host already does: routine wakes stay off a present captain's main.
+So where the attended host runs, `/quiet` is a statement that enters nothing, because a quiet entry's record would park the present captain's main; while [the broken-session latch](#the-broken-session-latch) holds, it says the session is paused instead.
+Where the home opted in but the attended host lacks one of its parts, `/quiet` names the missing part and enters the quiet daemon, and while an away record is live the captain's return comes first.
+`bin/fm-afk-launch.sh` owns the readiness test and refusals in its `quiet-check` contract, and the [quiet skill](../.agents/skills/quiet/SKILL.md) owns the procedure.
 
 ## The dialog mirror
 
@@ -389,6 +396,7 @@ Each arm owner's own suite covers its host mode against a stub host.
 | `tests/fm-watch-checkpoint.test.sh` | The Codex checkpoint's host mode against a stub host. |
 | `tests/fm-supervision-instructions.test.sh` | The rendered protocol, including Grok's arm command. |
 | `tests/fm-host-mirror.test.sh` | The dialog mirror's writers through the tracked Claude and Cursor registrations, the opt-in gate, the feed, and the verified-writer list. |
+| `tests/fm-afk-launch.test.sh` | `/quiet` on an opted-in home: the statement, the paused statement, each named missing part, the quiet daemon fallback that carries its recorded mode, and the refusal under a live away record until the return. |
 | `tests/fm-afk-return.test.sh` | The return's drain-owned read-cursor advance through the away window on a host home, and none on Pi. |
 | `tests/fm-supervision-host-live-e2e.test.sh` | Runs a real engine turn; opt-in because it spends tokens. |
 | `tests/fm-host-mirror-live-e2e.test.sh` | Proves the Claude and Cursor mirror writers against the real harnesses; opt-in because it spends tokens. |
