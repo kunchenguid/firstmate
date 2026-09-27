@@ -827,10 +827,11 @@ test_local_only_merged_to_local_main_allows() {
 }
 
 test_no_mistakes_pushed_unmerged_refuses() {
-  local case_dir rc
+  local case_dir rc head
   case_dir=$(make_case nm-pushed-unmerged)
   write_meta "$case_dir" no-mistakes ship
   wt_commit_file "$case_dir" feature.txt hello "shippable work"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
   seed_backlog_in_flight "$case_dir"
   # Publishing the task branch is not landing it: there is no PR and the
   # default branch does not contain this change.
@@ -849,6 +850,7 @@ test_no_mistakes_pushed_unmerged_refuses() {
     || fail "nm-pushed-unmerged: teardown removed the task record"
   [ "$(backlog_row_state "$case_dir")" = in_flight ] \
     || fail "nm-pushed-unmerged: teardown closed the backlog item"
+  assert_refusal_retained_task_state "$case_dir" nm-pushed-unmerged "$head"
   pass "no-mistakes worktree with pushed but unmerged work is refused"
 }
 
