@@ -869,6 +869,15 @@ assert_absent "$HFREPLY/state/procevent-inbox/$freply_id.2.handled" \
   || fail "failed listener startup did not preserve exactly one staged reply"
 assert_grep 'kind=lavish-owned' "$HFREPLY/state/procevent/$freply_id.source" \
   "re-arm failure did not preserve the upgraded firstmate-owned registration"
+rm -f -- "$HFREPLY/state/procevent/.$freply_id.reply."*
+if pe "$HFREPLY" retire "$freply_id" \
+  > "$TMP_ROOT/firstmate-missing-stage-retire.out" 2> "$TMP_ROOT/firstmate-missing-stage-retire.err"; then
+  fail "retirement discarded an unhandled Lavish round after its reply stage disappeared"
+fi
+assert_present "$HFREPLY/state/procevent/$freply_id.source" \
+  "missing reply stage discarded firstmate's source ownership"
+assert_absent "$HFREPLY/state/procevent-inbox/$freply_id.1.handled" \
+  "missing reply stage acknowledged firstmate's pending capture"
 mv "$LAVISH_AXI_STATE_DIR/state.json" "$LAVISH_AXI_STATE_DIR/state.json.preflight"
 preflight_rc=0
 PATH="$FREPLY_BIN:$PATH" FM_HOME="$HFREPLY" FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS=1 \
@@ -993,6 +1002,48 @@ done
 assert_absent "$HFLEGACY/state/procevent/$legacy_id.source" \
   "ended live legacy handoff session stayed armed"
 pass "live legacy listener hands off to the reply generation"
+
+HFACKFAIL="$TMP_ROOT/hfackfail"; new_home "$HFACKFAIL"
+ACKFAIL_BIN=$(fm_fakebin "$TMP_ROOT/lavish-firstmate-ack-fail-stub")
+ACKFAIL_COUNT="$TMP_ROOT/lavish-firstmate-ack-fail-count"
+export ACKFAIL_COUNT
+cat > "$ACKFAIL_BIN/lavish-axi" <<'SH'
+#!/bin/sh
+n=$(cat "$ACKFAIL_COUNT" 2>/dev/null || echo 0)
+n=$((n + 1))
+printf '%s\n' "$n" > "$ACKFAIL_COUNT"
+if [ "$n" = 1 ]; then
+  printf 'session:\n  status: feedback\nprompts[1]{uid,prompt,selector,tag,text}:\n  "","","","message","ack failure"\n'
+else
+  while :; do sleep 1; done
+fi
+SH
+chmod +x "$ACKFAIL_BIN/lavish-axi"
+ACKFAIL_ART="$TMP_ROOT/firstmate-ack-fail.html"
+printf '<h1>ack failure</h1>\n' > "$ACKFAIL_ART"
+lavish_session "$ACKFAIL_ART"
+ackfail_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$ACKFAIL_ART")
+fm_test_track_procevent_home "$HFACKFAIL"
+PATH="$ACKFAIL_BIN:$PATH" FM_HOME="$HFACKFAIL" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$ACKFAIL_ART" >/dev/null
+wait_capture "$HFACKFAIL" "$ackfail_id" || fail "acknowledgement failure fixture did not capture feedback"
+ln -s "$TMP_ROOT/nonexistent-handled-target" \
+  "$HFACKFAIL/state/procevent-inbox/$ackfail_id.1.handled"
+printf 'reply whose acknowledgement fails\n' > "$TMP_ROOT/firstmate-ack-fail-reply.txt"
+ackfail_rc=0
+PATH="$ACKFAIL_BIN:$PATH" FM_HOME="$HFACKFAIL" FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS=1 \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$ACKFAIL_ART" \
+  --agent-reply-file "$TMP_ROOT/firstmate-ack-fail-reply.txt" \
+  > "$TMP_ROOT/firstmate-ack-fail.out" 2> "$TMP_ROOT/firstmate-ack-fail.err" \
+  || ackfail_rc=$?
+[ "$ackfail_rc" -ne 0 ] || fail "Lavish re-arm succeeded after its acknowledgement failed"
+assert_present "$HFACKFAIL/state/procevent/$ackfail_id.source" \
+  "acknowledgement failure discarded firstmate's source ownership"
+assert_present "$FM_PROCEVENT_CLAIM_ROOT/$ackfail_id.claim" \
+  "acknowledgement failure released ownership before proving its poll stopped"
+[ "$(pe "$HFACKFAIL" list | awk -v id="$ackfail_id" '$1 == id { print $3 }')" = none ] \
+  || fail "acknowledgement failure left a Lavish poll running without safe ownership"
+pass "acknowledgement failure stops the poll before preserving ownership"
 
 HFNOREPLY="$TMP_ROOT/hfnoreply"; new_home "$HFNOREPLY"
 NOREPLY_BIN=$(fm_fakebin "$TMP_ROOT/lavish-firstmate-no-reply-stub")

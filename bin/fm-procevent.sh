@@ -441,7 +441,8 @@ source_retirement_blocked_locked() {  # <source-id>
   fi
   if [ "$kind" = lavish-owned ]; then
     local round
-    round=$(lavish_rearm_round_locked "$id" 2>/dev/null) || return 1
+    round=$(source_field "$id" reply_round 2>/dev/null || true)
+    case "$round" in ''|*[!0-9]*) return 1 ;; esac
     ! fm_procevent_is_handled "$STATE" "$id" "$round" \
       || lavish_rearm_round_locked "$id" staged >/dev/null
     return
@@ -1395,12 +1396,12 @@ EOF
       if [ "$adapter_ready" = ready ] \
         && ! fm_procevent_is_handled "$STATE" "$id" "$reply_round" \
         && ! fm_procevent_mark_handled "$STATE" "$id" "$reply_round" >/dev/null 2>&1; then
-        kill "$launch_pid" 2>/dev/null || true
-        wait "$launch_pid" 2>/dev/null || true
         exec 5>&- 4<&-
         rm -f -- "$launch_ready"
         fm_procevent_source_lock_release "$id"
-        die "cannot acknowledge captured Lavish round: $id $reply_round"
+        trap - EXIT
+        kill -TERM -"$$" 2>/dev/null
+        exit 1
       fi
     fi
     exec 5>&-
