@@ -879,7 +879,8 @@ A remote secondmate is launched on its host from its own home's configuration, s
 ## Lavish server address (config/lavish-axi-host)
 
 The optional local, gitignored `config/lavish-axi-host` contains one non-empty address without whitespace for the per-machine Lavish server.
-`fm-spawn.sh` exports that address into every new worker and relaunch for opening boards, and the file is inherited into secondmate homes through the primary-authoritative configuration contract.
+`fm-spawn.sh` exports that home's address into every new worker and relaunch for opening boards.
+Each secondmate home keeps its own per-machine value; the primary does not copy or overwrite it.
 
 Once a board exists, the process-event adapter derives the polling address from that board's own saved Lavish session instead; its header owns the lookup contract.
 When the file is absent, worker launches do not add a board address and retain the existing ambient-environment behavior.

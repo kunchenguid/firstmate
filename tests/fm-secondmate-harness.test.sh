@@ -380,20 +380,26 @@ test_propagate_lib() {
   [ -d "$dest/crew-harness" ] || fail "failed absence mirror removed the wrong path"
   rm -rf "$dest/crew-harness"
 
-  # 5. secondmate-harness is never inherited; backend still is
+  # 5. secondmate-harness and the per-machine Lavish address are never inherited; backend still is
   printf 'grok\n' > "$src/secondmate-harness"
+  printf 'primary.example\n' > "$src/lavish-axi-host"
   printf '{"default":{"harness":"codex"}}\n' > "$src/crew-dispatch.json"
   printf 'codex\n' > "$src/crew-harness"
   printf 'manual\n' > "$src/backlog-backend"
   printf 'herdr\n' > "$src/backend"
   rm -rf "$d/home2"
   mkdir -p "$d/home2/config" "$d/home2/state"
+  printf 'secondmate.example\n' > "$d/home2/config/lavish-axi-host"
   propagate_inheritable_config "$src" "$d/home2/config"
   [ -e "$d/home2/config/secondmate-harness" ] && fail "secondmate-harness was inherited (must not be)"
+  [ "$(cat "$d/home2/config/lavish-axi-host")" = secondmate.example ] || fail "per-machine Lavish address was overwritten"
   [ "$(cat "$d/home2/config/crew-dispatch.json")" = '{"default":{"harness":"codex"}}' ] || fail "crew-dispatch.json not propagated alongside"
   [ "$(cat "$d/home2/config/crew-harness")" = codex ] || fail "crew-harness not propagated alongside"
   [ "$(cat "$d/home2/config/backlog-backend")" = manual ] || fail "backlog-backend not propagated alongside"
   [ "$(cat "$d/home2/config/backend")" = herdr ] || fail "backend not propagated alongside"
+  rm -f "$d/home2/config/lavish-axi-host"
+  propagate_inheritable_config "$src" "$d/home2/config"
+  [ ! -e "$d/home2/config/lavish-axi-host" ] || fail "primary Lavish address was copied into a home without its own value"
 
   # 6. nothing to propagate -> destination dir is never created (a true no-op)
   rm -rf "$d/src3" "$d/dest3"
@@ -1044,7 +1050,7 @@ new_world() {
     [ "$dispatch_ignore" = no ] || printf 'config/crew-dispatch.json\n'
     printf 'config/crew-harness\nconfig/secondmate-harness\nconfig/backlog-backend\n'
     printf 'config/backend\nconfig/herdr-presentation-spaces\nconfig/startup-memory-budget\n'
-    printf 'config/claude-permission-mode\n'
+    printf 'config/claude-permission-mode\nconfig/lavish-axi-host\n'
   } > "$w/main/.gitignore"
   printf 'v1\n' > "$w/main/AGENTS.md"
   printf 'r1\n' > "$w/main/README.md"
@@ -1302,6 +1308,8 @@ test_bootstrap_sweep_propagates_and_reconverges() {
   printf 'tmux\n' > "$w/home/config/backend"
   : > "$w/home/config/trace-context"
   printf 'grok\n' > "$w/home/config/secondmate-harness"
+  mkdir -p "$w/sm/config"
+  printf 'secondmate.example\n' > "$w/sm/config/lavish-axi-host"
   run_bootstrap "$w" >/dev/null
   [ "$(cat "$w/sm/config/crew-harness" 2>/dev/null)" = codex ] \
     || fail "sweep: crew-harness not pushed into the live home"
@@ -1315,12 +1323,15 @@ test_bootstrap_sweep_propagates_and_reconverges() {
     || fail "sweep: trace-context changed a legacy live home before relaunch"
   [ -e "$w/sm/config/secondmate-harness" ] \
     && fail "sweep: secondmate-harness was inherited (must not be)"
+  [ "$(cat "$w/sm/config/lavish-axi-host")" = secondmate.example ] \
+    || fail "sweep: secondmate's per-machine Lavish address was removed"
 
   # Re-converge: primary changes inherited config values; the home follows on the next sweep.
   printf '{"default":{"harness":"claude"}}\n' > "$w/home/config/crew-dispatch.json"
   printf 'claude\n' > "$w/home/config/crew-harness"
   printf 'tasks-axi\n' > "$w/home/config/backlog-backend"
   printf 'zellij\n' > "$w/home/config/backend"
+  printf 'primary.example\n' > "$w/home/config/lavish-axi-host"
   run_bootstrap "$w" >/dev/null
   [ "$(cat "$w/sm/config/crew-harness" 2>/dev/null)" = claude ] \
     || fail "sweep: home did not re-converge to the primary's new crew-harness"
@@ -1330,6 +1341,8 @@ test_bootstrap_sweep_propagates_and_reconverges() {
     || fail "sweep: home did not re-converge to the primary's new backlog-backend"
   [ "$(cat "$w/sm/config/backend" 2>/dev/null)" = zellij ] \
     || fail "sweep: home did not re-converge to the primary's new backend"
+  [ "$(cat "$w/sm/config/lavish-axi-host")" = secondmate.example ] \
+    || fail "sweep: primary Lavish address overwrote the secondmate's value"
 
   # Mirror absence: primary clears inherited config; the home's copies are removed.
   rm -f "$w/home/config/crew-dispatch.json" "$w/home/config/crew-harness" \
@@ -1343,6 +1356,8 @@ test_bootstrap_sweep_propagates_and_reconverges() {
     && fail "sweep: home backlog-backend not removed after the primary cleared it"
   [ -e "$w/sm/config/backend" ] \
     && fail "sweep: home backend not removed after the primary cleared it"
+  [ "$(cat "$w/sm/config/lavish-axi-host")" = secondmate.example ] \
+    || fail "sweep: secondmate's per-machine Lavish address changed"
   pass "B7 bootstrap sweep pushes, re-converges, and mirrors absence; never inherits secondmate-harness"
 }
 
