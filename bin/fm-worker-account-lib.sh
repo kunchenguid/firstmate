@@ -41,7 +41,7 @@
 # pin; a home with config/claude-account refuses such a command. A raw
 # command is recognised as Claude only when its first non-assignment word is
 # claude, so a raw launch through a wrapper such as env or npx is not treated
-# as a Claude launch, as on main.
+# as a Claude launch and gets no account check.
 #
 # The sign-in check asks the runner itself, with only HOME, PATH, TMPDIR,
 # USER, LOGNAME, and the selected root in its environment, so a credential

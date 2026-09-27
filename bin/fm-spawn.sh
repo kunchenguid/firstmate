@@ -327,8 +327,9 @@
 #   pinned Pi launch needs --model
 #   <provider>/<id> for a declared provider and also carries --provider, and a
 #   raw Pi command refuses. A raw launch through a wrapper such as env or npx
-#   is not recognised as Claude, as on main. The pin is recorded as account=
-#   (and Pi's account_provider=) in the task record and on the spawned line.
+#   is not recognised as Claude and gets no account check. The pin is
+#   recorded as account= (and Pi's account_provider=) in the task record and
+#   on the spawned line.
 #   A local secondmate reads this launching home's file; pins are never
 #   inherited.
 #   bin/fm-worker-account-lib.sh owns parsing, the check, and the shed list.
