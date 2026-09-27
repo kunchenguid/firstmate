@@ -1136,6 +1136,7 @@ These are single-run observations, not statistical p95 or a claim of general sav
 
 `tests/fm-short-operations.test.sh` uses a model fixture, real Git owners/effects, and a controlled Codebase forge to exercise merge-plus-sync, detached-checkout recovery, duplicate submission, cancellation, authority/identity drift, malformed output, partial success, and concurrent resource ownership.
 It also proves that a lost merge response is reconciled by owner readback and that an owner killed after a possible effect is not replayed after restart.
+The recovery cases release exact pre-intent and refused no-effect reservations only after the bound runner dies, while retaining reservations owned by a live runner, a possible effect, or another generation.
 `FM_SHORT_INSTALL_LIVE=1` adds an actual verified ShellCheck 0.11.0 install into a temporary directory, without a global install.
 `FM_SHORT_HERDR_E2E=1 bash tests/fm-short-operations-herdr.test.sh` adds real endpoint cleanup through a generated named lab and the guarded helper; the installed Herdr 0.8.0 run confirmed endpoint removal, refused dirty/unlanded/shared copies, and preserved the default-session tripwire.
 The cleanup guard covers both an already absent copy and a real existing clean landed Treehouse 2.1.1 worktree.

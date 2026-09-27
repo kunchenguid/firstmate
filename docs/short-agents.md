@@ -124,9 +124,9 @@ For operations, intent is persisted before calling the owner and a receipt requi
 Completed early steps remain visible if a later step fails.
 A verified merge whose command response was lost can still complete through the merge owner's readback.
 
-If an effect may have happened and no authoritative receipt exists, the resource stays reserved across restart.
+After the bound runner stops, reconciliation releases only exact reservations backed by a completed receipt or by proof that no effect began: no intent was recorded, or the matching intent has a refused receipt.
+If an effect may have happened and no authoritative completed receipt exists, the resource stays reserved across restart.
 Reconciliation does not reissue that effect or turn uncertainty into success; a concrete decision and evidence are required before further work on that resource.
-Completed reservations can be released after both recorded processes have stopped.
 A changed candidate, identity, or grant stops new writes.
 The CLI `reconcile` retries missing notifications and reconciles receipts without inventing recovery authority.
 [`bin/fm-short-operations.mjs`](../bin/fm-short-operations.mjs) owns the action schema and durable receipt mechanics.
