@@ -93,10 +93,11 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # shellcheck source=bin/fm-agent-process-lib.sh
 . "$FM_BACKEND_HERDR_ROOT/bin/fm-agent-process-lib.sh"
 
-# The single owner of the environment a long-lived herdr server is launched
-# with (bin/fm-herdr-launch-env-lib.sh). fm_backend_herdr_server_ensure below
-# and bin/fm-herdr-lab.sh's provision both launch through it, so the allowlist
-# exists once and cannot drift between them.
+# The single owner of the environment the two `env -i` herdr server launches
+# are given (bin/fm-herdr-launch-env-lib.sh). fm_backend_herdr_server_ensure
+# below and bin/fm-herdr-lab.sh's provision both launch through it, so the
+# allowlist exists once and cannot drift between them. That library also names
+# the one long-lived launch that is exempt, and why.
 # shellcheck source=bin/fm-herdr-launch-env-lib.sh
 . "$FM_BACKEND_HERDR_ROOT/bin/fm-herdr-launch-env-lib.sh"
 
@@ -1664,8 +1665,9 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
 # The server outlives its launcher and hands its OWN startup environment to
 # every pane it ever opens, so the launch below inherits nothing at all: it
 # runs through `/usr/bin/env -i` plus the explicit allowlist that
-# bin/fm-herdr-launch-env-lib.sh owns for BOTH of this repo's server launches.
-# That library documents why each name is kept or refused.
+# bin/fm-herdr-launch-env-lib.sh owns for both of this repo's `env -i` server
+# launches. That library documents why each name is kept or refused, and which
+# other long-lived launch is exempt.
 fm_backend_herdr_server_ensure() {  # <session>
   local session=$1 running i client_bin=herdr client_path
   running=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null | jq -r '.server.running // false' 2>/dev/null)

@@ -533,7 +533,8 @@ One home decides both `HOME` and the home entry in the baseline `PATH`: the laun
 It also forwards the temp directory, locale, terminal, display, session, and ssh-agent variables, plus the explicit session routing.
 `USER` and `LOGNAME` are not forwarded at all: they are re-derived from `id -un`, so the launcher cannot rename the account its server runs as.
 The per-pane identity Herdr injects into the launcher describes that launcher's own pane and is dropped.
-`fm_herdr_launch_env` in `bin/fm-herdr-launch-env-lib.sh` is the single owner of the exact allowlist, and the lab server launch in `bin/fm-herdr-lab.sh` uses that same helper, so the two launches cannot drift.
+`fm_herdr_launch_env` in `bin/fm-herdr-launch-env-lib.sh` is the single owner of the exact allowlist, and the lab server launch in `bin/fm-herdr-lab.sh` uses that same helper, so those two `env -i` launches cannot drift.
+The launch-agent server in `bin/fm-remote-herdr-guard.sh` is a third long-lived server and is deliberately exempt; that library records why.
 An already-running server is reused without restart or environment changes.
 
 ### Sending text and keys

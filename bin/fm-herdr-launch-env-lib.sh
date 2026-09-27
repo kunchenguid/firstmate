@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# bin/fm-herdr-launch-env-lib.sh - the SINGLE owner of the environment every
-# long-lived herdr server is launched with.
+# bin/fm-herdr-launch-env-lib.sh - the SINGLE owner of the environment the two
+# `env -i` herdr server launches are given.
 #
 # A herdr server outlives its launcher and hands its OWN startup environment to
-# every pane it ever opens, so both launches in this repo
+# every pane it ever opens, so both of those launches
 # (fm_backend_herdr_server_ensure and fm-herdr-lab.sh's provision) inherit
 # nothing at all: they run through `/usr/bin/env -i` plus the explicit
 # allowlist assembled here. A deny list cannot hold that boundary.
@@ -13,6 +13,14 @@
 # later pane's worker-state read answer about THAT task instead of the task it
 # was asked about (measured 2026-09-26). The allowlist lives here, once,
 # because a second copy in the lab script is exactly that rot again.
+#
+# A THIRD long-lived server launch exists and is deliberately exempt:
+# bin/fm-remote-herdr-guard.sh's `exec "$HERDR_BIN" server --session
+# "$SESSION"`. It is not routed through this helper because launchd starts it
+# from the Aqua login-shell environment rather than from a task shell, and that
+# gui/<uid> domain - not the environment this library would build - is what
+# grants its panes the audit session and login-keychain access. Scrubbing it to
+# this allowlist would take that away.
 #
 # SHELL always comes from the EFFECTIVE UID's own passwd entry, never from the
 # caller even when the caller has one. Herdr's default_shell is empty, which
