@@ -1069,21 +1069,17 @@ do_relaunch() {
 
 # --- guarded live reproject ------------------------------------------------
 #
-# The transaction's durable record is state/<id>.control-reproject, with the
-# prior metadata and presentation journal preserved beside it. A failure
+# The transaction's durable record is state/<id>.control-reproject. A failure
 # before the pane move keeps the prior durable record in place and drops the
 # receipt. A failure after the move retains the worker safe in its new child,
 # records the new endpoint in the receipt, and reports the concrete state; a
-# rerun discovers the moved pane and resumes the rebind instead of moving
-# again. Nothing here ever closes the worker's new child as rollback.
+# rerun verifies the pane and resumes the rebind or retries a proven unmoved
+# pane. Nothing here ever closes the worker's new child as rollback.
 reproject_receipt_write() {  # <phase>
   local tmp
   tmp="$REPROJECT_RECEIPT.tmp" || return 1
   {
     printf 'phase=%s\n' "$1"
-    printf 'tx=%s\n' "$REPROJECT_TX"
-    printf 'journal_bound=%s\n' "$REPROJECT_JOURNAL_BOUND"
-    printf 'meta_bound=%s\n' "$REPROJECT_META_BOUND"
     printf 'new_session=%s\n' "$REPROJECT_NEW_SESSION"
     printf 'new_workspace=%s\n' "$REPROJECT_NEW_WORKSPACE"
     printf 'new_tab=%s\n' "$REPROJECT_NEW_TAB"
@@ -1101,7 +1097,7 @@ reproject_rollback() {
       echo "error: reproject of $ID stopped with an unresolved move; the worker and receipt are retained for resume" >&2
       ;;
     *)
-      rm -f "$REPROJECT_RECEIPT" "$REPROJECT_RECEIPT.tmp" "$REPROJECT_META_PRIOR" "$REPROJECT_JOURNAL_PRIOR" 2>/dev/null || true
+      rm -f "$REPROJECT_RECEIPT" "$REPROJECT_RECEIPT.tmp" 2>/dev/null || true
       echo "error: reproject of $ID was refused before its pane moved; nothing changed" >&2
       ;;
   esac
@@ -1124,7 +1120,7 @@ reproject_publish_meta() {  # <session> <workspace> <tab> <pane>
   local session=$1 workspace=$2 tab=$3 pane=$4 tmp
   tmp="$STATE/.$ID.meta.reproject.${BASHPID:-$$}" || return 1
   awk -v window="$session:$pane" -v session="$session" -v workspace="$workspace" \
-    -v tab="$tab" -v pane="$pane" -v tx="$REPROJECT_TX" '
+    -v tab="$tab" -v pane="$pane" '
     /^window=/ { $0 = "window=" window; seen_window = 1 }
     /^herdr_session=/ { $0 = "herdr_session=" session; seen_session = 1 }
     /^herdr_workspace_id=/ { $0 = "herdr_workspace_id=" workspace; seen_workspace = 1 }
@@ -1138,7 +1134,6 @@ reproject_publish_meta() {  # <session> <workspace> <tab> <pane>
       if (!seen_workspace) print "herdr_workspace_id=" workspace
       if (!seen_tab) print "herdr_tab_id=" tab
       if (!seen_pane) print "herdr_pane_id=" pane
-      print "control_reproject_tx=" tx
     }
   ' "$META" >"$tmp" || { rm -f "$tmp" 2>/dev/null; return 1; }
   chmod 0600 "$tmp" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 1; }
@@ -1158,11 +1153,6 @@ do_reproject() {
   fm_backend_source herdr \
     || die "the herdr adapter could not be loaded for task $ID"
   REPROJECT_RECEIPT="$STATE/$ID.control-reproject"
-  REPROJECT_META_PRIOR="$REPROJECT_RECEIPT.meta-prior"
-  REPROJECT_JOURNAL_PRIOR="$REPROJECT_RECEIPT.journal-prior"
-  REPROJECT_TX="${BASHPID:-$$}.$(date -u +%Y%m%dT%H%M%SZ).$RANDOM"
-  REPROJECT_JOURNAL_BOUND=0
-  REPROJECT_META_BOUND=0
   REPROJECT_NEW_SESSION=""
   REPROJECT_NEW_WORKSPACE=""
   REPROJECT_NEW_TAB=""
@@ -1208,9 +1198,12 @@ do_reproject() {
   # Grade the endpoint Herdr currently resolves the recorded pane to. After a
   # previous move Herdr follows the old id to the relocated record, so grade
   # that record; the backend entry re-verifies the same follow before binding.
-  pre_info=$(fm_backend_herdr_cli "$session" pane get "${prior_pane:-$meta_pane}" 2>/dev/null) || pre_info=""
+  pre_info=$(fm_backend_herdr_cli "$session" pane get "$meta_pane" 2>/dev/null) || pre_info=""
+  if [ -z "$pre_info" ] && [ "$prior_phase" = moved ] && [ -n "$prior_pane" ]; then
+    pre_info=$(fm_backend_herdr_cli "$session" pane get "$prior_pane" 2>/dev/null) || pre_info=""
+  fi
   pre_followed=$(printf '%s' "$pre_info" | jq -r '.result.pane.pane_id // empty' 2>/dev/null)
-  if [ -z "$pre_followed" ] && [ "$prior_phase" = moved ] && [ -z "$prior_pane" ]; then
+  if [ -z "$pre_followed" ] && [ "$prior_phase" = moved ]; then
     pre_grade=alive
   else
     [ -n "$pre_followed" ] \
@@ -1222,10 +1215,6 @@ do_reproject() {
     *) die "task $ID's endpoint reads '$pre_grade'; 'reproject' requires a positively live endpoint" ;;
   esac
   if [ "$prior_phase" != moved ]; then
-    cp -p "$META" "$REPROJECT_META_PRIOR" \
-      || die "could not preserve task $ID's record before reprojecting"
-    cp -p "$journal" "$REPROJECT_JOURNAL_PRIOR" \
-      || die "could not preserve task $ID's presentation journal before reprojecting"
     REPROJECT_ACTIVE=1
     REPROJECT_PHASE=intent
     reproject_receipt_write intent \
@@ -1256,7 +1245,6 @@ do_reproject() {
   set -e
   case "$status" in
     0)
-      REPROJECT_JOURNAL_BOUND=1
       REPROJECT_NEW_SESSION=$FM_BACKEND_HERDR_PROJECTION_SESSION
       REPROJECT_NEW_WORKSPACE=$FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID
       REPROJECT_NEW_TAB=$FM_BACKEND_HERDR_PROJECTION_TAB_ID
@@ -1264,7 +1252,7 @@ do_reproject() {
       ;;
     1)
       if [ "$prior_phase" = moved ]; then
-        die "task $ID's previous move remains unresolved; its receipt and prior copies are retained"
+        die "task $ID's previous move remains unresolved; its receipt is retained"
       fi
       die "task $ID was not moved; see the refusal above"
       ;;
@@ -1289,9 +1277,6 @@ do_reproject() {
   new_target="$REPROJECT_NEW_SESSION:$REPROJECT_NEW_PANE"
   reproject_publish_meta "$REPROJECT_NEW_SESSION" "$REPROJECT_NEW_WORKSPACE" "$REPROJECT_NEW_TAB" "$REPROJECT_NEW_PANE" \
     || die "task $ID moved but its record could not rebind to $new_target; the worker is safe - rerun 'reproject' to resume"
-  REPROJECT_META_BOUND=1
-  reproject_receipt_write moved \
-    || die "task $ID's record rebound but its receipt could not be updated; verify the record before any further control action"
   if fm_backend_validate_task_endpoint "$META" "$ID" >/dev/null \
     && [ -n "$FM_BACKEND_VALIDATED_TARGET" ]; then
     validated=$FM_BACKEND_VALIDATED_TARGET
