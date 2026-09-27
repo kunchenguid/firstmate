@@ -2,7 +2,7 @@
 name: harness-adapters
 description: >-
   Agent-only reference for firstmate harness operations.
-  Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter.
+  Use before spawning or recovering a crewmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter.
   Contains verified facts for pi, codex, and traex.
 user-invocable: false
 metadata:
@@ -24,7 +24,7 @@ Operational paths keep the context named by their owner: `config/` and active-ho
 
 ## Non-negotiable safety
 
-Never dispatch a crewmate or secondmate on an unverified adapter.
+Never dispatch a crewmate on an unverified adapter.
 Unsupported configured harnesses refuse dispatch with an actionable diagnostic; explicitly select Pi, Codex, or TraeX before retrying.
 Historical records remain readable but automatic recovery and cleanup of removed harnesses are refused to preserve work.
 
@@ -35,14 +35,13 @@ For recovery and control, use the exact `harness=` in `state/<id>.meta`; never i
 Deliver lifecycle actions only through `../../../bin/fm-control.sh <task-id> interrupt|exit|relaunch`.
 Never type an interrupt key or exit command through `fm-send`, where routing-marked lifecycle text becomes chat.
 Trust handling is complete only when inspection proves the target started processing its instructions; delivery success alone is not proof.
-TraeX is verified only for crewmate and scout work on Herdr, never a secondmate, primary, remote coordinator, or away-mode supervisor.
+TraeX is verified only for crewmate and scout work on Herdr, never a primary, remote coordinator, or away-mode supervisor.
 
 ## Detection
 
 `../../../bin/fm-harness.sh` prints firstmate's own harness from verified environment markers and process ancestry, and owns how they combine.
 A marker names its harness, but a structural ancestor of a different harness outranks it, because a marker is ordinary environment state a child or a multiplexer can retain while ancestry is what proves who owns the process tree.
 `../../../bin/fm-harness.sh crew` resolves `config/crew-harness`, where absent or `default` means firstmate's own harness.
-`../../../bin/fm-harness.sh secondmate` resolves `config/secondmate-harness` -> `config/crew-harness` -> firstmate's own harness.
 `../../../bin/fm-spawn.sh` re-resolves on every spawn, and an explicit per-spawn argument wins for that spawn.
 A new adapter's verified marker and command name must land in `../../../bin/fm-harness.sh`.
 
@@ -67,9 +66,7 @@ A new tool remains undispatchable until the `verify` plan, its harness entry, ev
     "resume": {"default": ["references/common/control-and-recovery.md"]},
     "recovery": {
       "default": ["references/common/control-and-recovery.md"],
-      "replacement-profile": ["references/common/control-and-recovery.md", "references/common/dispatch.md", "references/common/model-and-effort.md"],
-      "secondmate": ["references/common/control-and-recovery.md", "references/common/primary-hooks.md"],
-      "replacement-secondmate": ["references/common/control-and-recovery.md", "references/common/dispatch.md", "references/common/model-and-effort.md", "references/common/primary-hooks.md"]
+      "replacement-profile": ["references/common/control-and-recovery.md", "references/common/dispatch.md", "references/common/model-and-effort.md"]
     },
     "primary": {"default": ["references/common/primary-hooks.md"]},
     "model-effort": {

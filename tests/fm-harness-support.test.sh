@@ -24,14 +24,10 @@ for harness in pi codex traex; do
 done
 pass 'selection preserves all three exact supported identities'
 for harness in $REMOVED; do
-  for config in crew-harness secondmate-harness; do
-    printf '%s\n' "$harness" > "$TMP_ROOT/home/config/$config"
-    verb=crew
-    [ "$config" = crew-harness ] || verb=secondmate
-    out=$(FM_HOME="$TMP_ROOT/home" "$HARNESS" "$verb" 2>&1); rc=$?
-    [ "$rc" -ne 0 ] || fail "unsupported $config=$harness silently accepted"
-    assert_contains "$out" 'unsupported harness' 'config refusal must be actionable'
-  done
+  printf '%s\n' "$harness" > "$TMP_ROOT/home/config/crew-harness"
+  out=$(FM_HOME="$TMP_ROOT/home" "$HARNESS" crew 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "unsupported crew-harness=$harness silently accepted"
+  assert_contains "$out" 'unsupported harness' 'config refusal must be actionable'
   out=$(FM_HOME="$TMP_ROOT/home" FM_SPAWN_NO_GUARD=1 "$ROOT/bin/fm-spawn.sh" rejected "$TMP_ROOT/project" --harness "$harness" --scout 2>&1); rc=$?
   [ "$rc" -ne 0 ] || fail "removed launch $harness accepted"
   assert_contains "$out" "unsupported harness" "launch refusal must identify the unsupported selection"
@@ -46,7 +42,7 @@ for command in "claude --model example" "bash -lc 'grok;'" 'env X=1 /opt/old/ope
 done
 pass 'ordinary shell wrapping cannot re-enable an excluded harness'
 
-rm -f "$TMP_ROOT/home/config/crew-harness" "$TMP_ROOT/home/config/secondmate-harness"
+rm -f "$TMP_ROOT/home/config/crew-harness"
 for harness in $REMOVED; do
   printf 'backend=herdr\nharness=%s\nkind=ship\nworktree=%s\nwindow=isolated:w1:p-history\nendpoint_task_id=history\n' "$harness" "$TMP_ROOT/project" > "$TMP_ROOT/home/state/history.meta"
   printf 'uncommitted historical work\n' > "$TMP_ROOT/project/work.txt"

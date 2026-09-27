@@ -40,7 +40,7 @@ It bounds the tree to 4,096 entries and 64 MiB, includes every directory, relati
 After validation, the host copies the complete package into `data/extensions/packages/<id>/<version>/<tree-digest>/` under the active home.
 Installed directories are mode `0555`, installed executable files are mode `0555`, and other installed files are mode `0444`.
 Every invocation revalidates canonical confinement, owner, modes, links, the complete tree digest, manifest digest, and entrypoint digest before executing anything.
-The enabled binding points only at that content-addressed home-local copy, so two local or remote homes install the same package identity at independent absolute paths.
+The enabled binding points only at that content-addressed home-local copy, so separate installations never share mutable package paths.
 
 ## Package manifest
 
@@ -219,15 +219,7 @@ The host runs in the Firstmate home that owns the source, never in a task worker
 The agent harnesses listed in [configuration.md](configuration.md#harness-support) therefore expose no package-loading surface for this capability.
 The result reaches every supported primary through the existing bounded `check` wake path, including the unknown-protocol fallback used where no specialized primary continuation exists.
 The Herdr session provider is not consulted because a process-event source has no task endpoint.
-Remote and local secondmate homes bind and install independently, and the primary never executes a missing remote-home package locally. `remote-bind` carries one canonical `firstmate.extension-package-transfer.v1` JSON envelope over the existing bounded `fm-on` stdin/stdout job. Its hashed manifest pins the extension id, version, complete package-tree digest, entry count, total bytes, and byte-sorted entries. Entries are limited to normalized relative directories at mode 0755 and single regular files at mode 0644 or 0755, each with an exact size and SHA-256 payload digest. The receiver accepts at most 128 entries, 256 KiB per file, 512 KiB of package bytes, and 900,000 serialized bytes; it rejects malformed or truncated JSON, duplicate keys or paths, collisions, absolute or traversing names, links and special files, noncanonical modes, hash or size mismatches, and duplicate transfer identities.
-
-The receiver creates the package in a private temporary directory below `data/extensions/staging`, validates ownership, permissions, the package manifest, executable, and complete reconstructed tree, then atomically publishes the transfer before the normal bind handshake and binding publication.
-A failed bind moves the exact transfer identity into `data/extensions/retired-staging` without enabling it.
-`retire-transfer` requires both transfer and binding digests, then revalidates the receipt, version directory, staged manifest identity, staged complete-tree digest, installed package, enabled binding, and binding source path as one identity.
-It refuses missing, ambiguous, drifted, mismatched, in-use, or unrelated state before moving the enabled binding into the staged identity and reversibly moving that exact unit into `data/extensions/retired-staging`.
-If the process stops between those two moves, a retry resumes only when the retained binding and staged receipt, version directory, package, transfer digest, and binding digest still form that one exact retirement identity; altered or coexisting partial state is refused.
-The transfer contains package bytes and declarative metadata only: it carries no environment, credentials, cookies, tokens, destinations, or caller-selected command text and creates no generic file-transfer surface.
-Bindings and credentials are deliberately absent from the inherited secondmate configuration allowlist.
+Bindings are local to the Firstmate home that owns the process-event source.
 
 ## Runnable example
 

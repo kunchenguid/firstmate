@@ -742,7 +742,7 @@ cmd_retire() {
     if ! fm_aime_report_safe "$id" || [ "$AIME_STATE_REPORT_PATH" != "$report" ]; then
       die "AIME task has no safe report at data/$id/report.md"
     fi
-    FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-decision-hold.sh" verify "$id" >/dev/null \
+    FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-captain-hold.sh" verify "$id" >/dev/null \
       || die "AIME task decision completion gate has not passed"
     source=$(fm_aime_source_id "$id") || die "invalid task id"
     "$SCRIPT_DIR/fm-procevent.sh" retire "$source" >/dev/null \

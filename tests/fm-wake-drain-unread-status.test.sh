@@ -123,39 +123,39 @@ test_signal_annotation_surfaces_every_unread_note_not_only_the_newest() {
   pass "a queued status signal annotates every unread note, not only the newest"
 }
 
-test_pending_reply_resolution_surfaces_once() {
+test_decision_resolution_surfaces_once() {
   local dir state out status
-  dir=$(make_case pending-reply-resolution)
+  dir=$(make_case decision-resolution)
   state="$dir/state"
   out="$dir/drain.out"
   status="$state/task5.status"
   prime_cursor "$state" "$status"
 
-  printf 'blocked [key=pending-reply-abcdef0123456789]: pending-reply-missed: task=task5 pending-reply-id=abcdef0123456789 request=ship it\n' >> "$status"
+  printf 'blocked [key=release-approval]: approval required before shipping\n' >> "$status"
   append_wake "$state" signal task5.status "signal: task5.status" \
-    || fail "queueing the pending-reply request signal failed"
+    || fail "queueing the decision request signal failed"
   FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null \
-    || fail "drain failed while acknowledging the pending-reply request"
+    || fail "drain failed while acknowledging the decision request"
   {
-    printf 'resolved [key=pending-reply-abcdef0123456789]: pending-reply-resolved: task=task5 pending-reply-id=abcdef0123456789 via=status\n'
+    printf 'resolved [key=release-approval]: approval recorded via status\n'
     printf 'note: re-read acknowledgement\n'
   } >> "$status"
 
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on a pending-reply resolution"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on a decision resolution"
 
-  grep -F 'pending-reply-resolved: task=task5 pending-reply-id=abcdef0123456789 via=status' "$out" >/dev/null \
-    || fail "the pending-reply resolution was buried under the later note: $(cat "$out")"
+  grep -F 'approval recorded via status' "$out" >/dev/null \
+    || fail "the decision resolution was buried under the later note: $(cat "$out")"
   grep -F 'task5 note: re-read acknowledgement' "$out" >/dev/null \
-    || fail "the trailing note was not surfaced with the pending-reply resolution: $(cat "$out")"
+    || fail "the trailing note was not surfaced with the decision resolution: $(cat "$out")"
   if grep -F 'OPEN DECISIONS' "$out" >/dev/null; then
-    fail "the pending-reply resolution did not close its open decision: $(cat "$out")"
+    fail "the decision resolution did not close its open decision: $(cat "$out")"
   fi
 
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "second drain after pending-reply presentation failed"
-  if grep -F 'pending-reply-resolved:' "$out" >/dev/null; then
-    fail "an already-presented pending-reply resolution was replayed: $(cat "$out")"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "second drain after decision presentation failed"
+  if grep -F 'approval recorded via status' "$out" >/dev/null; then
+    fail "an already-presented decision resolution was replayed: $(cat "$out")"
   fi
-  pass "a pending-reply resolution buried under a later note surfaces once and closes OPEN DECISIONS"
+  pass "a decision resolution buried under a later note surfaces once and closes OPEN DECISIONS"
 }
 
 test_unread_output_over_cap_remains_recoverable() {
@@ -378,7 +378,7 @@ test_incident_note_answer_buried_under_routine_note_surfaces_both
 test_already_presented_notes_are_not_replayed
 test_brand_new_note_after_presentation_is_surfaced
 test_signal_annotation_surfaces_every_unread_note_not_only_the_newest
-test_pending_reply_resolution_surfaces_once
+test_decision_resolution_surfaces_once
 test_unread_output_over_cap_remains_recoverable
 test_snapshot_does_not_ack_a_later_append
 test_retired_task_id_starts_new_status_unread

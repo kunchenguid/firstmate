@@ -195,34 +195,6 @@ test_terminal_refusal_is_durable() {
   pass "task-handoff: a terminal target refusal keeps the exact body and concrete blocker"
 }
 
-test_secondmate_routes_stay_with_pending_reply_owner() {
-  local dir home fakebin scope id out rc
-  for scope in local remote; do
-    dir="$TMP_ROOT/secondmate-$scope"
-    fakebin=$(make_fake_backend "$dir")
-    home=$(make_home "$dir" source mate)
-    {
-      printf 'window=fm-mate\n'
-      printf 'harness=pi\n'
-      printf 'kind=secondmate\n'
-      printf 'backend=herdr\n'
-      [ "$scope" != remote ] || printf 'remote_host=secondmate.example\n'
-      printf 'spawn_gen=test-mate\n'
-    } > "$home/state/mate.meta"
-    id="secondmate-$scope"
-    rc=0
-    out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$HANDOFF" send source mate --id "$id" \
-      "secondmate request stays on its established transport" 2>&1) || rc=$?
-    [ "$rc" -eq 7 ] || fail "$scope secondmate handoff exited $rc, not terminal refusal 7"
-    assert_contains "$out" "pending-reply contract" \
-      "$scope secondmate refusal did not name its existing lifecycle owner"
-    [ ! -d "$home/state/mate.inbox" ] \
-      || fail "$scope secondmate handoff bypassed fm-send into a local inbox"
-    [ ! -d "$home/state/pending-replies" ] \
-      || fail "$scope secondmate refusal partially created pending-reply state"
-  done
-  pass "task-handoff: local and remote secondmates remain on fm-send's pending-reply contract"
-}
 
 test_same_task_send_and_reminder_contract_stay_ordinary() {
   local dir home fakebin record handoff_record action
@@ -252,7 +224,6 @@ test_restart_sweep_recovers_pending_handoff
 test_sweep_without_handoffs_is_a_noop
 test_local_runtime_backend_matrix_uses_one_durable_plane
 test_terminal_refusal_is_durable
-test_secondmate_routes_stay_with_pending_reply_owner
 test_same_task_send_and_reminder_contract_stay_ordinary
 
 printf 'All task-handoff tests passed.\n'

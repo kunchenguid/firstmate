@@ -1,6 +1,6 @@
 # Primary startup and hooks
 
-Load this with the detected primary's tool reference before changing session startup, turn-end handling, pre-tool protection, watcher supervision, or secondmate integration.
+Load this with the detected primary's tool reference before changing session startup, turn-end handling, pre-tool protection, or watcher supervision.
 The tool reference establishes either that identity's empirical path or its unsupported boundary.
 
 ## Turn end

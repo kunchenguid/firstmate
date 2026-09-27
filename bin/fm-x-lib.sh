@@ -396,10 +396,10 @@ fmx_request_relay_context() {
 
 # --- durable per-request reply-context registry (state/x-context/<rid>.json) ---
 #
-# A single x_request per task collides across concurrent public requests routed
-# through one persistent secondmate: linking request B onto a task overwrites
-# request A's recorded platform/budget, so A's later follow-up loses its context.
-# And the inbox payload is drained right after the acknowledgement, so a delayed
+# A single x_request per task collides across concurrent public requests:
+# linking request B onto a task overwrites request A's recorded platform/budget,
+# so A's later follow-up loses its context. The inbox payload is drained right
+# after the acknowledgement, so a delayed
 # request-id follow-up has no local platform source at all. This registry is the
 # durable fix: one small JSON per request_id, keyed independently of any task
 # link, written at poll time from the authoritative relay payload. It survives
@@ -1010,8 +1010,8 @@ fmx_meta_link_clear() {
   fi
   lock=$(fm_meta_lock_path "$meta") || return 1
   if [ "$expected_set" -eq 1 ]; then
-    # A guarded clear runs unattended over the secondmate transport, so it must
-    # refuse rather than wedge. The parent's writability can flip between the
+    # A guarded clear must refuse rather than wedge. The directory's writability
+    # can flip between the
     # check above and lock creation, and the ordinary unbounded wait would then
     # retry forever instead of returning the reconciliation refusal this guard
     # exists to produce. A bounded acquire turns that race, and a live holder,

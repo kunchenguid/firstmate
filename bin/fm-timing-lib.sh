@@ -30,8 +30,8 @@
 # Appends are single short lines opened O_APPEND, so concurrent writers interleave
 # whole lines rather than corrupting each other.
 #
-# NO SECRETS, BY CONSTRUCTION. `detail` names an identity - a secondmate id, a
-# host, a clone directory name - and identities never contain whitespace, while
+# NO SECRETS, BY CONSTRUCTION. `detail` names an identity - a task id, a host,
+# or a clone directory name - and identities never contain whitespace, while
 # the things that must never reach this file (a command line, an environment
 # dump, a captured error) always do. So a detail carrying ANY whitespace is not a
 # truncated identity, it is free text that arrived from somewhere it should not

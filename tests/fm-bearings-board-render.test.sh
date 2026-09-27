@@ -193,7 +193,7 @@ test_an_underway_identifier_label_is_not_replaced_by_run_status() {
   home=$(make_home underway-identifier)
   out=$(render_board "$home" '[
     {"id":"mate/child-1","repo":null,"name":"mate/child-1",
-     "state":"working","kind":"secondmate","doing":"fixing the failing check"}
+     "state":"working","kind":"ship","doing":"fixing the failing check"}
   ]' '[]')
   printf '%s' "$out" | jq -e '
     (.underway | length) == 1

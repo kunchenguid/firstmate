@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Behavior tests for the worktree-tangle guards.
 #
-# Firstmate is a treehouse-pooled git repo of itself: linked worktrees and
-# secondmate homes all sit at a detached HEAD on the default branch, while the
+# Firstmate is a treehouse-pooled git repo of itself: linked worktrees can sit
+# at a detached HEAD on the default branch, while the
 # PRIMARY checkout (FM_ROOT) is a normal checkout on a real branch. The "tangle"
 # is a crewmate branching/committing in the primary instead of its own worktree,
 # stranding the primary on a feature branch. Two guards cover it:
@@ -53,7 +53,7 @@ test_lib_classification() {
   done <<'ROWS'
 on the default branch is healthy|default||
 on a feature branch is the tangle|feature|fm/readme-restructure-d3|fm/readme-restructure-d3
-detached HEAD on default is healthy (worktrees, secondmate homes)|detached||
+detached HEAD on default is healthy for worktrees|detached||
 ROWS
   # A non-git directory is not a tangle and must not error.
   out=$(fm_primary_tangle_branch "$TMP_ROOT" || true)

@@ -36,8 +36,8 @@
 #
 # Scope is deliberately local and textual. Recorded crewmate/scout task
 # selectors on every supported local runtime backend use the shared durable
-# inbox and backend doorbell. Remote and local secondmates retain fm-send's
-# from-firstmate marker and pending-reply contract and are refused here.
+# inbox and backend doorbell. Historical persistent-home and remote-home
+# records are refused here.
 # Harness-native parser invocations are also refused because they belong to
 # fm-send's typed plane, not a durable cross-task command.
 #
@@ -243,7 +243,7 @@ handoff_deliver_locked() {  # <id>
   kind=$(fm_meta_get "$meta" kind)
   remote=$(fm_meta_get "$meta" remote_host)
   if [ -n "$remote" ] || [ "$kind" = secondmate ]; then
-    handoff_reject_locked "$id" "target '$target' is a secondmate route; use fm-send.sh so its routing marker and pending-reply contract remain intact"
+    handoff_reject_locked "$id" "target '$target' is a historical persistent-home record; task handoff is no longer supported"
     return $?
   fi
   actor=$(fm_lease_actor) || {

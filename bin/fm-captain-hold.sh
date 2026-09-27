@@ -17,7 +17,7 @@
 # the legacy inputs noted below resolve them without a migration.
 # All backlog reads and mutations address the active home's configured data
 # directory the way bin/fm-backlog-transition-lib.sh does, which keeps main-home
-# and secondmate-home ownership aligned with the work that discovered the call.
+# and task ownership aligned with the work that discovered the call.
 #
 # Usage:
 #   fm-captain-hold.sh hold <task-id> --reason <reason> \
@@ -185,18 +185,9 @@
 # declined, answered, repaired) are recognized everywhere a record is read, so
 # nothing already closed needs rewriting.
 #
-# Parent channel: inside a secondmate home a task held for the captain, and its
-# answer, are captain-facing facts the moment they are recorded, so `hold`
-# publishes `needs-decision [key=captain-hold-<task>-<n>]` and `answer` (and
-# `answers`) the matching `resolved` line on the parent channel through
-# bin/fm-parent-channel-lib.sh, whether or not the mate model appends anything.
 # <n> is the count of resolution records the body already carries plus one, so
-# a released and re-held task opens and closes a distinct parent decision with
-# no new persisted state, and an exact retry republishes the same line, which
-# the channel deduplicates. A main home has no channel and publishes nothing.
-# The hold or answer is already durable in the backlog, so a channel that
-# cannot be written is reported as `actionable:` on stderr rather than undoing
-# the record; bin/fm-inactive-reconcile.sh's diagnostics name a broken binding.
+# a released and re-held task opens and closes a distinct decision with no new
+# persisted state.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -217,21 +208,7 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # shellcheck source=bin/fm-wake-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-wake-lib.sh"
-# shellcheck source=bin/fm-parent-channel-lib.sh
-# shellcheck disable=SC1091
-. "$SCRIPT_DIR/fm-parent-channel-lib.sh"
-
 PARENT_HOLD_PUBLISHED=0
-publish_parent_hold() {  # <task-id> <occurrence> <verb> <note>
-  local id=$1 occurrence=$2 verb=$3 note=$4 rc=0
-  PARENT_HOLD_PUBLISHED=0
-  fm_parent_channel_report "$FM_HOME" "$STATE" \
-    "$verb [key=captain-hold-$id-$occurrence]: captain hold $id: $(fm_parent_channel_clean_note "$note")" || rc=$?
-  case "$rc" in
-    0|1) PARENT_HOLD_PUBLISHED=1 ;;
-    *) printf 'actionable: task %s is held for the captain in this home but that did not reach the parent channel (rc=%s)\n' "$id" "$rc" >&2 ;;
-  esac
-}
 
 CAPTAIN_META_LOCK=
 CAPTAIN_META_LOCK_HELD=0
@@ -443,19 +420,15 @@ meta_value() {  # <meta> <key>
 }
 
 origin_open_decisions() {  # <origin-id>
-  local origin=$1 meta="$STATE/$1.meta" status_file="$STATE/$1.status" open kind last verb
+  local origin=$1 meta="$STATE/$1.meta" status_file="$STATE/$1.status" open last verb
   open=$(status_open_decisions "$status_file")
   [ -n "$open" ] || return 0
   [ -f "$meta" ] || { printf '%s' "$open"; return 0; }
-  kind=$(meta_value "$meta" kind)
-  [ -n "$kind" ] || kind=ship
-  if [ "$kind" != secondmate ]; then
-    last=$(last_status_line "$status_file")
-    verb=$(status_line_verb "$last")
-    case "$verb" in
-      done|failed) return 0 ;;
-    esac
-  fi
+  last=$(last_status_line "$status_file")
+  verb=$(status_line_verb "$last")
+  case "$verb" in
+    done|failed) return 0 ;;
+  esac
   printf '%s' "$open"
 }
 
@@ -911,7 +884,7 @@ command_hold() {
   occurrence=$(( $(resolution_record_count "$(show_field "$show" body)") + 1 ))
   [ -n "$(body_hold_set_timestamp "$(show_field_value "$show" body)")" ] \
     || fail "task $id lost its hold-set stamp while being held"
-  publish_parent_hold "$id" "$occurrence" needs-decision "$reason"
+  PARENT_HOLD_PUBLISHED=1
   printf '%s\n' "$id"
 }
 
@@ -1416,7 +1389,7 @@ reconcile_request_retire() {  # <task-id>
 publish_parent_resolution_then_retire() {  # <task-id> <occurrence> <note>
   local id=$1 occurrence=$2 note=$3 request
   request=$(reconcile_request_path "$id")
-  publish_parent_hold "$id" "$occurrence" resolved "$note"
+  PARENT_HOLD_PUBLISHED=1
   if [ -e "$request" ] && [ "$PARENT_HOLD_PUBLISHED" != 1 ]; then
     fail "could not publish the answered captain-held task $id to its parent"
   fi
@@ -1546,7 +1519,7 @@ reconcile_close() {
       || fail "task $id was not closed by reconciliation"
     occurrence=$(resolution_record_count "$body")
     remove_interrupted_answer_stamp "$id"
-    publish_parent_hold "$id" "$occurrence" resolved reconciled
+    PARENT_HOLD_PUBLISHED=1
     [ "$PARENT_HOLD_PUBLISHED" = 1 ] \
       || fail "could not publish the reconciled captain-held task $id to its parent"
     reconcile_request_retire "$id"
@@ -1569,7 +1542,7 @@ reconcile_close() {
   task_show_or_fail "$id" "task $id disappeared after closing"
   body_has_resolution_record "$(show_field "$show" body)" \
     || fail "captain-held task $id did not retain its durable resolution record"
-  publish_parent_hold "$id" "$occurrence" resolved reconciled
+  PARENT_HOLD_PUBLISHED=1
   [ "$PARENT_HOLD_PUBLISHED" = 1 ] \
     || fail "could not publish the reconciled captain-held task $id to its parent"
   reconcile_request_retire "$id"
@@ -1647,6 +1620,8 @@ command_complete() {
     fm_lock_acquire_wait "$CAPTAIN_META_LOCK"
     CAPTAIN_META_LOCK_HELD=1
     [ -f "$meta" ] || fail "task metadata disappeared while recording completion"
+    [ "$(meta_value "$meta" kind)" != secondmate ] \
+      || fail "origin $origin is a historical secondmate record; captain-call completion is no longer supported and the record was left untouched"
   fi
   require_tasks_axi
   origin_exists_here "$origin" || fail "origin $origin is not owned by the active home $FM_HOME"
@@ -1720,6 +1695,8 @@ command_verify() {
   validate_slug origin-id "$origin"
   meta="$STATE/$origin.meta"
   [ -f "$meta" ] || fail "origin metadata is absent: $meta"
+  [ "$(meta_value "$meta" kind)" != secondmate ] \
+    || fail "origin $origin is a historical secondmate record; captain-call verification is no longer supported and the record was left untouched"
   require_tasks_axi
   reviewed=$(meta_value "$meta" decisions_reviewed)
   [ "$reviewed" = 1 ] || fail "origin $origin has no completed captain-call inventory"

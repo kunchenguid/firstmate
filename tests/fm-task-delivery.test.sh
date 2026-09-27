@@ -98,9 +98,9 @@ ROWS
   pass "fm-spawn: a ship spawn requires a valid explicit mode and yolo before anything is created"
 }
 
-# A scout has no merge to govern and a secondmate's posture is fixed, so the flags
-# are refused rather than accepted and quietly ignored.
-test_scout_and_secondmate_refuse_delivery_flags() {
+# A scout has no merge to govern, so delivery flags are refused rather than
+# accepted and quietly ignored.
+test_scout_refuses_delivery_flags() {
   local rec home proj fakebin out status
   rec=$(make_home refused)
   IFS='|' read -r home proj fakebin <<EOF
@@ -117,12 +117,7 @@ EOF
   status=$?
   [ "$status" -ne 0 ] || fail "a scout spawn carrying --yolo should exit non-zero"
   assert_contains "$out" "--yolo applies only to ship spawns" "scout spawn did not refuse --yolo"
-
-  out=$(run_spawn "$home" "$fakebin" delivery-sm-a2 "$home" --secondmate --mode no-mistakes --yolo off)
-  status=$?
-  [ "$status" -ne 0 ] || fail "a secondmate spawn carrying delivery flags should exit non-zero"
-  assert_contains "$out" "applies only to ship spawns" "secondmate spawn did not refuse the delivery flags"
-  pass "fm-spawn: scout and secondmate spawns refuse ship delivery flags"
+  pass "fm-spawn: scout spawns refuse ship delivery flags"
 }
 
 # The brief is what the worker actually follows, so a spawn whose explicit mode
@@ -885,7 +880,7 @@ EOF
 test_authorized_intent_keeps_words_without_composed_address
 test_spawn_refreshes_legacy_worker_roles
 test_ship_spawn_requires_a_valid_delivery_contract
-test_scout_and_secondmate_refuse_delivery_flags
+test_scout_refuses_delivery_flags
 test_spawn_refuses_a_brief_mode_mismatch
 test_spawn_notices_a_rigor_downgrade_against_the_registry
 test_scout_records_no_delivery_posture

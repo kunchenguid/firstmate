@@ -7,7 +7,6 @@ This document records the deterministic mechanism, structured surfaces, compatib
 
 A decision is not a separate thing in this system: it is an ordinary backlog task held for the captain, and the task id is the identity every surface and channel uses.
 `bin/fm-captain-hold.sh` is the only lifecycle command layered on that primitive.
-The command addresses the active home's configured data directory, so the existing backlog remains the only durable work database and a secondmate-owned captain call stays in the secondmate home.
 It never reads report bodies, review artifacts, terminal output, or chat.
 
 The `hold` subcommand is the mandatory captain-hold creation path: it uses an existing task or creates one when nothing exists to hold, records its UTC hold-set timestamp as the leading line of the task body, then invokes the underlying tasks-axi hold operation and verifies both records.
@@ -114,7 +113,6 @@ Dropped cards are named on stderr as `dropped-landed-card:` lines so a rebuild s
 The landing procedure requires one immediate board rebuild to remove already-stale merged-PR and superseded-version cards without a committed migration or change-worktree state mutation.
 A subject whose state cannot be established is kept, because a wrongly shown card is safer than a wrongly hidden call.
 The validator's reservation scope must equal the adapter's reconcile-classification scope, which is all card types because the captured payload carries no card type.
-Owner-aware routing for remote-secondmate decision cards is tracked separately: that follow-up must query landedness and route reconciliation in the authoritative secondmate home while honoring the remote and local consistency principle.
 Until then, an absent main-home task passes through this hygiene check unchanged, and its Reconcile selection remains announced but cannot create a main-home request because the main intake refuses an absent task.
 For a main-home call, the reconcile option is the recovery path for whatever still slips through.
 
@@ -130,7 +128,6 @@ No captain hold can fall through them and none can match two, which is what keep
 Existing undated holds without a hold-set stamp fall back to the task's `since` date.
 That aging is a projection safety net only.
 The durable deferral remains re-holding with `--until`.
-Its secondmate-home summary classifies an actionable captain hold as `captain_decision` and preserves every captain hold in the bounded queued inventory of the owning home.
 
 `bin/fm-bearings-snapshot.sh` places each captain hold by its `hold_bucket` and inspects no prose of its own.
 A `live` hold is a default Captain's Call entry.
@@ -140,9 +137,7 @@ An actively worked held task may also appear in Underway, which reports running 
 
 Three accepted limits remain deliberate:
 
-- A remote or secondmate hold retains the producer home's age and aging decision from the summary's capture time and threshold rather than being recomputed by the parent.
 - A rare concurrent answer-close and re-hold race can leave the newly re-held task without its age basis.
-- Cross-home summaries remain bounded by `FM_SNAPSHOT_SECONDMATE_DECISIONS` and `FM_SNAPSHOT_SECONDMATE_QUEUED`; a remote deferred hold beyond those bounds is not exported, so it can be neither gated nor revealed.
 
 Re-holding through the wrapper with `--until` remains the durable fix rather than relying on the projection safety net.
 [`bin/fm-landed-lib.sh`](../bin/fm-landed-lib.sh) owns Recently Landed's shared selection and artifact-display compatibility rules.
@@ -185,7 +180,7 @@ Only when no row carries that marker line is the legacy id tried under the confi
 Because that acceptance rests on a name rather than on evidence, `complete` names the resolved row beside each prefix-attested legacy id in its completion line, so the guess is auditable after the fact.
 A markdown home keeps its legacy rows verbatim, so its resolution is unchanged.
 The shim recognizes an exact replay of a pre-collapse routed resolution by its historical answer digest and routed ids, then finishes any still-recorded dependency-edge cleanup without rewriting the old decision text.
-`bin/fm-decision-hold.sh` itself remains for one release as a thin command-mapping shim over `bin/fm-captain-hold.sh`, so in-flight work briefed before the collapse keeps working; its header owns the exact mapping.
+The compatibility logic remains inside `bin/fm-captain-hold.sh`; the retired command alias is no longer installed.
 
 ## Verification record
 

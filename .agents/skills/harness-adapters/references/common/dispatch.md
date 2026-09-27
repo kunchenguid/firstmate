@@ -4,15 +4,9 @@ Load this with the selected tool reference for dispatch, start, or adapter verif
 
 ## Resolution
 
-Use the router's detection and safety sections for static crew and secondmate harness resolution and all explicit overrides.
+Use the router's detection and safety sections for static crew harness resolution and all explicit overrides.
 `config/crew-dispatch.json` can override that static default for one crewmate or scout with concrete harness, model, and effort axes.
 For a profile array, load `quota-array-dispatch` for completion-aware candidate choice and any configured telemetry constraint after establishing harness and provider facts here.
-
-`../secondmate-provisioning/SKILL.md` owns inherited local material.
-Its harness consequence is that a secondmate's workers receive literal `config/crew-harness` and `config/crew-dispatch.json`, while the primary-only `config/secondmate-harness` is never inherited because secondmates do not spawn secondmates.
-A concrete crew value such as `codex` carries that runtime into the secondmate home.
-Unset or `default` carries no concrete value, so its workers use that home's own or detected harness rather than the primary's effective crew harness.
-The inherited dispatch file applies the same best-fit profiles there.
 
 ## Owners
 
@@ -26,7 +20,7 @@ Tool references record empirical knowledge for those executable owners.
 ## Adapter verification
 
 For an approved new adapter check, use the spawn owner's raw-launch escape hatch only for a trivial supervised task.
-Verify detection in `../../../bin/fm-harness.sh`, launch in `../../../bin/fm-spawn.sh`, busy state in `../../../bin/fm-busy-lib.sh`, shared composer behavior in `../../../bin/fm-composer-lib.sh`, lifecycle in `../../../bin/fm-control-lib.sh`, and Herdr liveness in `../../../bin/backends/herdr.sh` when secondmate use is supported.
+Verify detection in `../../../bin/fm-harness.sh`, launch in `../../../bin/fm-spawn.sh`, busy state in `../../../bin/fm-busy-lib.sh`, shared composer behavior in `../../../bin/fm-composer-lib.sh`, lifecycle in `../../../bin/fm-control-lib.sh`, and Herdr liveness in `../../../bin/backends/herdr.sh`.
 Also verify primary integration through `references/common/primary-hooks.md`, model discovery through `references/common/model-and-effort.md`, and one tool record.
 A value remains unreachable until its executable owner, portable regression, applicable credentialed live guard, and verification record land together.
 `../firstmate-coding-guidelines/SKILL.md` owns harness-dependent proof.

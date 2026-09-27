@@ -59,41 +59,6 @@ run_spawn() {
     "$id" "$PROJECT_DIR" "$@"
 }
 
-test_remote_seeded_home_spawns_from_treehouse_pool() {
-  local rec id out status lock
-  id='pool-remote-seeded-r13'
-  rec=$(make_case remote-seeded "$id")
-  read_case_record "$rec"
-  cat > "$HOME_DIR/.fm-secondmate-parent" <<'REC'
-schema=fm-secondmate-parent.v1
-route=remote
-parent_host=parent-machine
-REC
-
-  out=$(run_spawn "$id" --scout)
-  status=$?
-  expect_code 0 "$status" \
-    "a remote-seeded secondmate home should allocate and launch from its Treehouse pool"$'\n'"$out"
-  assert_contains "$out" "spawned $id" \
-    "the remote-seeded spawn did not report success"
-  assert_grep "worktree=$POOL_DIR" "$HOME_DIR/state/$id.meta" \
-    "the remote-seeded spawn did not publish its allocated pool worktree"
-  lock=$(FM_HOME="$HOME_DIR" bash -c '. "$1"; fm_treehouse_project_lock_path "$2"' _ \
-    "$ROOT/bin/fm-wake-lib.sh" "$PROJECT_DIR") \
-    || fail "the launched remote-seeded home could not resolve its Treehouse project lock"
-  case "$lock" in
-    "$HOME_DIR/state/"*) ;;
-    *) fail "the remote-seeded spawn anchored its lock outside its local root: $lock" ;;
-  esac
-  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
-    printf '# remote-seeded Treehouse spawn command\n'
-    printf '$ FM_HOME=%s bin/fm-spawn.sh %s %s --scout\n%s\nexit=%s\n' \
-      "$HOME_DIR" "$id" "$PROJECT_DIR" "$out" "$status"
-    printf 'published worktree=%s\nresolved project lock=%s\n' "$POOL_DIR" "$lock"
-  fi
-  pass "a remote-seeded secondmate home allocates and launches from its Treehouse pool"
-}
-
 test_linked_spawning_home_rejects_primary_before_refresh() {
   local rec id out status returned primary spawning before_reflog
   for returned in primary primary-alias spawning scout; do
@@ -101,7 +66,7 @@ test_linked_spawning_home_rejects_primary_before_refresh() {
     rec=$(make_case "linked-$returned" "$id")
     read_case_record "$rec"
     primary=$PROJECT_DIR
-    spawning="$CASE_DIR/secondmate"
+    spawning="$CASE_DIR/linked-home"
     git -C "$primary" worktree add --quiet --detach "$spawning" HEAD
     PROJECT_DIR=$spawning
     case "$returned" in
@@ -743,7 +708,6 @@ test_pool_slot_claim_follows_the_spawn_outcome() {
   pass "a Treehouse slot claim names the launched task, refuses when unclaimable, and is dropped by a locked abort"
 }
 
-test_remote_seeded_home_spawns_from_treehouse_pool
 test_pool_slot_claim_follows_the_spawn_outcome
 test_linked_spawning_home_rejects_primary_before_refresh
 test_stale_pool_base_refreshes_before_branching

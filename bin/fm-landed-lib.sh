@@ -4,11 +4,9 @@
 # program, then select backlog rows with `landed_record`.
 #
 # ONE OWNER for the landed selector. Recently Landed is assembled from two
-# separate jq programs - bin/fm-bearings-snapshot.sh projects this home's own
-# Done rows, and bin/fm-fleet-snapshot.sh projects each secondmate home's Done
-# rows into the roll-up that the same section merges in. Both answer the one
-# question "is this closed row a delivery the captain should see", so the rule
-# lives here and neither program restates it.
+# separate jq programs used by the bearings and fleet snapshots. Both answer
+# the one question "is this closed row a delivery the captain should see", so
+# the rule lives here and neither program restates it.
 #
 # A closed row is never actively held: tasks-axi clears the held flag when a
 # task closes, but a non-release answer keeps hold-kind and the hold reason.
@@ -33,7 +31,7 @@
 # hold-kind captain.
 # That preserves kindless rows closed before artifact-aware selection without
 # admitting answered captain calls or explicit reportless scouts.
-# Already-selected v1 secondmate landed rows may omit kind. For those rows,
+# Already-selected v1 landed rows may omit kind. For those rows,
 # landed_artifact preserves a report_path with a reported completion; this
 # display compatibility does not admit kindless reports from raw backlog rows.
 # tests/fm-bearings-snapshot.test.sh covers both fresh and cached v1 summaries.

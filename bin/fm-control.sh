@@ -9,11 +9,8 @@
 #                                         (--note <text> | --note-file <path>)
 #
 # Why this exists, and how it differs from fm-send.sh. bin/fm-send.sh is the
-# DATA plane: conversational text for the agent to read, always routing-marked
-# for a kind=secondmate target so the reply returns through the status path.
-# That marking is right for a message and wrong for a lifecycle command - a
-# marked "/quit" arrives as ordinary chat the agent reasons ABOUT instead of
-# executing. This script is the control plane: semantic process control with a
+# DATA plane for conversational text. This script is the control plane:
+# semantic process control with a
 # closed verb list, per-harness mechanics owned by an executable adapter
 # (bin/fm-control-lib.sh) rather than improvised in agent prose, and a verified
 # postcondition for every action. There is deliberately NO arbitrary-text and
@@ -35,17 +32,12 @@
 #              SAME endpoint and SAME worktree, on the same or a newly chosen
 #              harness/model/effort - so switching harness is one ordinary use
 #              of this verb. An explicit `default` model or effort clears that
-#              axis for the replacement. With no explicit axis, a secondmate
-#              re-resolves its durable config/secondmate-harness pin (harness
-#              plus its optional model and effort tokens) exactly as any other
-#              respawn does, while a ship or scout keeps the exact adapter
-#              already recorded for it.
+#              axis for the replacement. With no explicit axis, a ship or scout
+#              keeps the exact adapter already recorded for it.
 #              A prefixed raw-command basename cannot reconstruct its launch
 #              command, so relaunch requires an explicit --harness for it.
-#              --note is required for a ship or scout, whose replacement
-#              inherits the local copy but none of the conversation; a
-#              secondmate reconciles its own home's records at startup, so its
-#              standing charter is never rewritten.
+#              --note is required because the replacement inherits the local
+#              copy but none of the conversation.
 #              Records a durable checkpoint and that note, exits the old agent,
 #              then delegates the launch to its single owner,
 #              bin/fm-spawn.sh --relaunch. A failure before publication keeps
@@ -69,9 +61,6 @@
 # fm-<id> label, an explicit session:window endpoint, and a bare window name
 # are all refused - a lifecycle command delivered to the wrong endpoint is far
 # worse than a loud refusal.
-#
-# A remotely placed secondmate is refused by name: its agent runs on another
-# host, so no postcondition this plane verifies could be read for it here.
 #
 # Fail-closed boundaries:
 #   - An unverified harness, or a harness whose control mechanics are unknown,
@@ -286,17 +275,10 @@ if [ ! -f "$META" ]; then
   die "no task '$ID' in $STATE (fm-control resolves an exact task id only)"
 fi
 
-# A remotely placed secondmate records its endpoint on ANOTHER host, so every
-# postcondition this plane verifies - the agent-state classification, the busy
-# verdict, the endpoint's existence - would be read here for an endpoint that
-# does not live here. Endpoint validation already refuses such a record, since
-# `window=remote:<id>` can never match a local backend's required shape, so
-# nothing can be delivered to a wrong endpoint either way. What that refusal
-# cannot say is WHY, and "malformed metadata" is the wrong thing to tell an
-# operator about a correctly configured remote route. Name the placement
-# instead, using the same `remote_host` signal bin/fm-send.sh routes on.
-if [ -n "$(fm_meta_get "$META" remote_host)" ]; then
-  die "task $ID is a remotely placed secondmate on $(fm_meta_get "$META" remote_host); its agent runs outside this home, so no lifecycle action here could verify that it interrupted, stopped, or came back. Drive its lifecycle on that host, and reconcile it through the secondmate recovery path rather than this plane"
+# Historical secondmate records are preserved but cannot authorize lifecycle
+# operations after the feature's removal.
+if [ "$(fm_meta_get "$META" kind)" = secondmate ]; then
+  die "task $ID is a historical secondmate record; lifecycle control is no longer supported and the record was left untouched"
 fi
 
 fm_backend_validate_task_endpoint "$META" "$ID" || exit 1
@@ -605,39 +587,10 @@ resolve_relaunch_profile() {
      && [ "$PRIOR_RECORDED_HARNESS" != "$PRIOR_HARNESS" ]; then
     die "task $ID records harness '$PRIOR_RECORDED_HARNESS', whose original launch command cannot be reconstructed from its recorded basename; relaunching without --harness would substitute the canonical adapter '$PRIOR_HARNESS' for the command actually running. Pass an explicit --harness to choose the replacement runtime deliberately"
   fi
-  CONFIG_HARNESS=
-  CONFIG_MODEL=
-  CONFIG_EFFORT=
-  if [ "$KIND" = secondmate ]; then
-    # A secondmate's harness, model, and effort are a durable configured pin
-    # that every respawn re-resolves (the secondmate-provisioning contract), so
-    # a relaunch with no explicit harness picks up a newly configured one
-    # instead of freezing whatever this incarnation happens to run. Crewmates
-    # and scouts deliberately do NOT resolve config here: their harness comes
-    # from firstmate's own dispatch-profile judgment at intake, and silently
-    # re-resolving it would bypass that consultation.
-    if ! CONFIG_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" secondmate 2>/dev/null); then
-      [ "$HARNESS_SET" = 1 ] || die "config/secondmate-harness or config/crew-harness selects an unsupported harness; explicitly select pi or codex before relaunch"
-      CONFIG_HARNESS=
-    fi
-    CONFIG_MODEL=$("$SCRIPT_DIR/fm-harness.sh" secondmate-model 2>/dev/null || true)
-    CONFIG_EFFORT=$("$SCRIPT_DIR/fm-harness.sh" secondmate-effort 2>/dev/null || true)
-    case "$CONFIG_EFFORT" in
-      ''|low|medium|high|xhigh|max|ultra) ;;
-      *)
-        echo "warning: config/secondmate-harness effort token '$CONFIG_EFFORT' is not one of low, medium, high, xhigh, max, ultra; ignoring" >&2
-        CONFIG_EFFORT=
-        ;;
-    esac
-  fi
   if [ "$HARNESS_SET" = 1 ]; then
     fm_control_harness_supported "$NEW_HARNESS" \
       || die "'$NEW_HARNESS' is not a verified harness; fm-control refuses to relaunch onto an adapter with no verified control or launch mechanics"
     TARGET_HARNESS=$NEW_HARNESS
-  elif [ "$HARNESS_SET" = 0 ] && [ -n "$CONFIG_HARNESS" ]; then
-    fm_control_harness_supported "$CONFIG_HARNESS" \
-      || die "the configured secondmate harness '$CONFIG_HARNESS' is not verified; fm-control refuses to relaunch onto an adapter with no verified control or launch mechanics"
-    TARGET_HARNESS=$CONFIG_HARNESS
   else
     TARGET_HARNESS=$PRIOR_HARNESS
   fi
@@ -652,8 +605,6 @@ resolve_relaunch_profile() {
   # caller names them too.
   if [ "$MODEL_SET" = 1 ]; then
     TARGET_MODEL=$NEW_MODEL
-  elif [ "$HARNESS_SET" = 0 ] && [ -n "$CONFIG_HARNESS" ]; then
-    TARGET_MODEL=${CONFIG_MODEL:-default}
   elif [ "$TARGET_HARNESS" = "$PRIOR_HARNESS" ]; then
     TARGET_MODEL=$PRIOR_MODEL
   else
@@ -661,8 +612,6 @@ resolve_relaunch_profile() {
   fi
   if [ "$EFFORT_SET" = 1 ]; then
     TARGET_EFFORT=$NEW_EFFORT
-  elif [ "$HARNESS_SET" = 0 ] && [ -n "$CONFIG_HARNESS" ]; then
-    TARGET_EFFORT=${CONFIG_EFFORT:-default}
   elif [ "$TARGET_HARNESS" = "$PRIOR_HARNESS" ]; then
     TARGET_EFFORT=$PRIOR_EFFORT
   else
@@ -679,7 +628,7 @@ resolve_relaunch_profile() {
 # refuses outright when any of it cannot be established.
 CHECKPOINT_LINES=()
 safe_checkpoint() {
-  local wt_real wt_top wt_top_real head head_ref head_ref_status status_output dirty children marker child_meta
+  local wt_real wt_top wt_top_real head head_ref head_ref_status status_output dirty
   CHECKPOINT_LINES=()
   [ -n "$WT" ] || die "task $ID has no recorded worktree; refusing to relaunch without a recorded local copy to preserve"
   [ -d "$WT" ] || die "task $ID's recorded worktree $WT is missing; refusing to relaunch and lose track of its work"
@@ -711,65 +660,31 @@ safe_checkpoint() {
     dirty=no
   fi
   CHECKPOINT_LINES+=("worktree_head=$head" "worktree_dirty=$dirty")
-  if [ "$KIND" = secondmate ]; then
-    # A secondmate's own crewmates outlive its relaunch: they run in their own
-    # endpoints, and the relaunched secondmate reconciles them from its home's
-    # durable records at startup. The checkpoint proves those records are
-    # readable BEFORE the agent stops, so a relaunch can never strand child
-    # work behind an unreadable home.
-    marker=$(cat "$WT/.fm-secondmate-home" 2>/dev/null || true)
-    [ "$marker" = "$ID" ] \
-      || die "task $ID's home $WT is not marked as its own seeded secondmate home (marker: ${marker:-none}); refusing to relaunch"
-    [ -d "$WT/state" ] \
-      || die "secondmate $ID's home has no readable state directory, so its child work cannot be accounted for; refusing to relaunch"
-    find "$WT/state" -mindepth 1 -maxdepth 1 -print >/dev/null 2>&1 \
-      || die "secondmate $ID's child records cannot be traversed; refusing to relaunch"
-    children=0
-    for child_meta in "$WT/state"/*.meta; do
-      if [ ! -e "$child_meta" ] && [ ! -L "$child_meta" ]; then
-        continue
-      fi
-      if [ ! -f "$child_meta" ] || [ -L "$child_meta" ] \
-         || ! cat "$child_meta" >/dev/null 2>&1; then
-        die "secondmate $ID's child record $child_meta is not a readable regular file; refusing to relaunch"
-      fi
-      children=$((children + 1))
-    done
-    CHECKPOINT_LINES+=("children=$children")
-  fi
 }
 
-# record_note: put the required progress note somewhere durable, and - for a
-# ship or scout, whose only record of the interrupted reasoning is the
-# conversation about to be discarded - into the instructions the replacement
-# actually reads. A secondmate's charter is a durable standing document and is
-# never rewritten: a secondmate reconciles its own home's records at startup,
-# so the note stays parent-side audit evidence.
+# record_note: put the required progress note somewhere durable and into the
+# instructions the replacement actually reads.
 record_note() {
   local stamp
   [ -n "$NOTE" ] || return 0
   stamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   printf '%s\n' "$NOTE" > "$NOTE_FILE"
-  case "$KIND" in
-    ship|scout)
-      cp -p "$RELAUNCH_BRIEF" "$BRIEF_PRIOR" \
-        || die "could not preserve task $ID's instructions before recording the progress note"
-      {
-        echo
-        echo "## Progress note ($stamp)"
-        echo
-        echo "This task was relaunched. Continue from here; the local copy and every"
-        echo "uncommitted change are exactly as the previous worker left them."
-        echo
-        echo "First, check your instruction inbox: list $STATE/$ID.inbox/*.msg, act on"
-        echo "each message in numeric order, then mv each handled file into"
-        echo "$STATE/$ID.inbox/handled/. A steer sent before the relaunch survives there."
-        echo
-        printf '%s\n' "$NOTE"
-      } >> "$RELAUNCH_BRIEF" \
-        || die "could not append the progress note to task $ID's instructions"
-      ;;
-  esac
+  cp -p "$RELAUNCH_BRIEF" "$BRIEF_PRIOR" \
+    || die "could not preserve task $ID's instructions before recording the progress note"
+  {
+    echo
+    echo "## Progress note ($stamp)"
+    echo
+    echo "This task was relaunched. Continue from here; the local copy and every"
+    echo "uncommitted change are exactly as the previous worker left them."
+    echo
+    echo "First, check your instruction inbox: list $STATE/$ID.inbox/*.msg, act on"
+    echo "each message in numeric order, then mv each handled file into"
+    echo "$STATE/$ID.inbox/handled/. A steer sent before the relaunch survives there."
+    echo
+    printf '%s\n' "$NOTE"
+  } >> "$RELAUNCH_BRIEF" \
+    || die "could not append the progress note to task $ID's instructions"
 }
 
 do_relaunch() {
@@ -786,11 +701,6 @@ do_relaunch() {
         || die "task $ID has no instructions at $RELAUNCH_BRIEF; refusing to relaunch a worker with nothing to work from"
       [ "$NOTE_SET" = 1 ] && [ -n "$NOTE" ] \
         || die "relaunch of a $KIND task requires --note (or --note-file): the replacement worker inherits the local copy but none of the conversation, so it must be told what happened"
-      ;;
-    secondmate)
-      # The charter in the secondmate's own home is its instruction source and
-      # stays untouched.
-      RELAUNCH_BRIEF=
       ;;
     *)
       die "task $ID records kind '$KIND', which has no defined relaunch shape"

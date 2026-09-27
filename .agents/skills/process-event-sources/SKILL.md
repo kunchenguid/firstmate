@@ -52,10 +52,6 @@ This is generic across built-in adapters with an `answers` command, and the runn
 External process-event bindings intentionally expose no answer operation and cannot feed the captain-answer intake.
 `captain-hold-lifecycle` owns when a binding is required and what the keys must be.
 
-A configured remote secondmate reply source is armed and handled through `bin/fm-procevent-remote-reply.sh`.
-Its header owns exact commands, while the adapter owns cursor continuity, validated deduplicated status ingest, path-confined document fetch, acknowledgement, and re-arming after a good delta.
-A continuity break is escalated once and stays unarmed until an operator deliberately rebases it.
-
 For a recurring mid-task quota check, arm the quota adapter:
 
 ```sh
@@ -75,7 +71,7 @@ Eligibility is a firstmate judgment made BEFORE arming, because the scripts cann
 Never bind an action that is destructive, irreversible, or security-sensitive, an action needing captain approval or any gate decision, or an action whose right form depends on what the condition finds - those keep the existing check-fires-then-firstmate-decides flow, for which a plain custom check or another adapter stays correct.
 When in doubt, arm only the condition half as an ordinary check and keep the action as a wake-time decision.
 
-`bin/fm-procevent.sh --help`, `bin/fm-procevent-lavish.sh --help`, `bin/fm-procevent-when.sh --help`, `bin/fm-procevent-quota.sh --help`, `bin/fm-procevent-remote-reply.sh --help`, `bin/fm-procevent-aime.sh --help`, and `bin/fm-procevent-ida.sh --help` own the exact commands and flags.
+`bin/fm-procevent.sh --help`, `bin/fm-procevent-lavish.sh --help`, `bin/fm-procevent-when.sh --help`, `bin/fm-procevent-quota.sh --help`, `bin/fm-procevent-aime.sh --help`, and `bin/fm-procevent-ida.sh --help` own the exact commands and flags.
 
 An explicitly enabled external adapter registers through `bin/fm-procevent.sh register-extension`, never through a package-discovered script or package-supplied argv.
 [`docs/configuration.md`](../../../docs/configuration.md#trusted-external-process-event-adapters-configextensionsd) owns setup and [`docs/extension-bindings.md`](../../../docs/extension-bindings.md) owns the narrow trusted-code and untrusted-evidence boundary.
@@ -101,13 +97,6 @@ Two rules the commands cannot enforce for you:
 `procevent <adapter> <source-id> <sequence>`
 : The named durable result is waiting at `state/procevent-inbox/<source-id>.<sequence>.result`. Read that exact result; separate wakes identify later results independently.
 : **When the adapter owns applying the result, run the adapter, not the generic acknowledgement below.** The `<adapter>` field of the wake decides this.
-: For `remote-reply`, a captured delta is applied only by
-  ```sh
-  bin/fm-procevent-remote-reply.sh handle <secondmate-id> <sequence> <result-file>
-  ```
-  Here `<secondmate-id>` is the `<source-id>` with its `remote-reply-` prefix removed.
-  The runner normally applies the result on capture, but this call is the required idempotent confirmation when the wake remains unacknowledged.
-  Never acknowledge a `remote-reply` wake through the generic command, because only the adapter ingests the delta, acknowledges it, and re-arms its source.
 : For `aime`, a captured observation is applied only by
   ```sh
   bin/fm-procevent-aime.sh handle <task-id> <sequence> <result-file>

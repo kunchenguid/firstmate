@@ -6,7 +6,7 @@
 # Discord) asks for work. `tasks-axi public-followup` is the sole owner of that
 # typed obligation and its state machine; state/x-context/ is the sole owner of
 # the private full request context. This library owns Firstmate's activation
-# gate, private per-home transport paths, retained-loop state and locking
+# gate, private state paths, retained-loop state and locking
 # helpers, follow-up window classification, and deterministic terminal-event
 # identity.
 #
@@ -33,8 +33,8 @@
 # initialized by `fm-public-followup.sh register` and extended only by these
 # public-followup commands):
 #   registry/<obligation-id>   registration record: the bounded private binding
-#                              (obligation, relation, work ref and canonical
-#                              secondmate path, generation, platform, request id)
+#                              (obligation, relation, work ref, generation,
+#                              platform, request id)
 #                              plus the loop fields that survive delivery (state,
 #                              delivered_at, followup_expires_at,
 #                              request_context_b64). Presence means the public
@@ -44,14 +44,6 @@
 #                              tasks-axi truth.
 #   events/<event-id>.json     inbound typed terminal events awaiting
 #                              reconciliation, one file per event id.
-#   outbox/<event-id>.json     OUTBOUND typed terminal events a worker in THIS
-#                              home produced for an owning home on another
-#                              machine, which no local path can reach. Same file
-#                              shape as events/, staged here until that owning
-#                              home collects them over the route's transport
-#                              (bin/fm-public-followup-emit.sh --stage-in,
-#                              bin/fm-public-followup-collect.sh). A home whose
-#                              work is only ever local never has this directory.
 #   consumed/<event-id>        idempotency ledger: an accepted event id is never
 #                              replayed, so duplicate emits and restart replay
 #                              are no-ops.
@@ -111,7 +103,6 @@ fm_pf_relay_active() {
 fm_pf_root()       { printf '%s\n' "$1/$FM_PF_DIRNAME"; }
 fm_pf_registry_dir() { printf '%s\n' "$1/$FM_PF_DIRNAME/registry"; }
 fm_pf_events_dir()   { printf '%s\n' "$1/$FM_PF_DIRNAME/events"; }
-fm_pf_outbox_dir()   { printf '%s\n' "$1/$FM_PF_DIRNAME/outbox"; }
 fm_pf_consumed_dir() { printf '%s\n' "$1/$FM_PF_DIRNAME/consumed"; }
 fm_pf_rejected_dir() { printf '%s\n' "$1/$FM_PF_DIRNAME/rejected"; }
 fm_pf_retired_dir()  { printf '%s\n' "$1/$FM_PF_DIRNAME/retired"; }
@@ -163,16 +154,9 @@ fm_pf_slug_valid() {
   [ "${#v}" -le 128 ]
 }
 
-# fm_pf_home_id_valid <home_id>: tasks-axi accepts "main" or
-# "secondmate:<stable-id>" as a work_ref home. Validate the same shape here so a
-# malformed source home is refused before it reaches a filename or a CLI call.
+# fm_pf_home_id_valid <home_id>: public follow-up work belongs to the main home.
 fm_pf_home_id_valid() {
-  local v=$1
-  case "$v" in
-    main) return 0 ;;
-    secondmate:*) fm_pf_slug_valid "${v#secondmate:}" ;;
-    *) return 1 ;;
-  esac
+  [ "$1" = main ]
 }
 
 fm_pf_sha256() {

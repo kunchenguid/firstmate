@@ -124,7 +124,7 @@ run_decisions() {  # <home> <command args...>
   shift
   PATH="$home/fakebin:$PATH" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    "$ROOT/bin/fm-decision-hold.sh" "$@"
+    "$ROOT/bin/fm-captain-hold.sh" "$@"
 }
 
 # A realistic payload: a cross-origin full-identity decision key past the old
@@ -366,7 +366,7 @@ test_registration_cannot_consume_before_any_origin_binding() {
 ## Done
 EOF
   fm_write_meta "$home/state/$origin.meta" "project=$home/projects/sample" "kind=scout"
-  run_decisions "$home" hold "$origin" "$key" \
+  run_decisions "$home" hold "$hold" --origin "$origin" \
     --title "Choose the order proof" --reason "captain choice pending" --repo sample >/dev/null \
     || fail "could not create the order-proof captain hold"
 
@@ -683,7 +683,7 @@ EOF
   write_valid_payload "$data"
   jq '.captains_call = [{
         "key":"remote-mate-call","type":"decision","repo":"sample",
-        "title":"Remote secondmate decision",
+        "title":"Remote task decision",
         "options":[{"value":"yes","label":"Yes"}]
       }]
       | .landed = []' "$data" > "$data.tmp" && mv "$data.tmp" "$data"

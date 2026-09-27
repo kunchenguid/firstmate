@@ -17,16 +17,14 @@
 #                        open captain call (bin/fm-captain-hold.sh `open`), so
 #                        cleanup never retires the captain's own question
 #   bin/fm-bootstrap.sh  replays whatever a crash left behind, THIS HOME ONLY.
-# Remote retirement closes (or retains) the backlog before removing its terminal
+# Remote-agent retirement closes (or retains) the backlog before removing its terminal
 # provider record, through fm_backlog_remote_retire. Its caller holds both the
 # provider lock and the task meta lock after terminal/report/decision preflight.
 # A failed close preserves the complete execution record for retry; a crash after
 # close can retain a terminal record but never an in-flight row without evidence.
-# bin/fm-fleet-snapshot.sh's classifier and bin/fm-secondmate-reconcile.sh's
-# cross-home nudge stay defense in depth, not the primary mechanism.
 #
 # SCOPE. fm_backlog_transition_applies is the single gate. It excludes
-# secondmates (persistent agents are never backlog items, AGENTS.md section 10),
+# historical persistent-home records,
 # homes whose configured backlog backend is manual and markdown homes that keep
 # no backlog file. Those return-1 exemptions are never errors; an
 # unresolvable configured data directory, a backend resolution error, or
@@ -286,7 +284,7 @@ fm_backlog_transition_applies() {  # <config-dir> <data-dir> <kind>
   local config=$1 data authorized_data=$2 kind=$3 file root backend authorized_root
   FM_BACKLOG_TRANSITION_SKIP=
   if [ "$kind" = secondmate ]; then
-    FM_BACKLOG_TRANSITION_SKIP="secondmates are not backlog items"
+    FM_BACKLOG_TRANSITION_SKIP="historical persistent-home records are not backlog items"
     return 1
   fi
   if fm_backlog_backend_manual "$config"; then

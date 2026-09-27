@@ -7,8 +7,7 @@
 # bin/fm-cd-pretool-check.sh is the stable transport: it scopes the guard to the
 # real primary checkout, then drives both supported primary entry forms. This suite
 # proves the decision matrix, the harness-output shaping, the primary-checkout
-# scoping (including the deliberate secondmate-home difference from the turn-end
-# guard), the fail-open transport behavior, the prefilter fast path, the
+# scoping, the fail-open transport behavior, the prefilter fast path, the
 # end-to-end cwd-leak regression, and the per-harness wiring. No harness is
 # spawned; live per-harness evidence lives in docs/cd-guard.md.
 set -u
@@ -38,15 +37,6 @@ make_primary_fixture() {
   git -C "$dir" commit -q --allow-empty -m init
   : > "$dir/AGENTS.md"
   install_cd_scripts "$dir"
-  printf '%s\n' "$dir"
-}
-
-# Same shape as primary plus the .fm-secondmate-home marker: a secondmate's own
-# primary session, which the cd-guard DOES guard (unlike the turn-end guard).
-make_secondmate_fixture() {
-  local dir=$1
-  make_primary_fixture "$dir" >/dev/null
-  printf 'sm-cd-1\n' > "$dir/.fm-secondmate-home"
   printf '%s\n' "$dir"
 }
 
@@ -189,14 +179,6 @@ test_full_acceptance_matrix() {
 
 # --- primary-checkout scoping ----------------------------------------------
 
-test_fires_in_secondmate_home() {
-  local dir out rc
-  dir=$(make_secondmate_fixture "$TMP_ROOT/secondmate")
-  out=$("$dir/bin/fm-cd-pretool-check.sh" --command 'cd projects/foo' 2>&1); rc=$?
-  expect_code 2 "$rc" "cd-guard must fire in a secondmate's own primary session (unlike the turn-end guard)"
-  assert_contains "$out" '[persistent-cd]' "secondmate-home block must carry the reason code"
-  pass "cd-guard: fires in a secondmate home (its own primary session is a primary)"
-}
 
 test_inert_in_child_worktree() {
   local base dir out rc
@@ -369,7 +351,6 @@ test_scripts_are_shellcheck_clean() {
 }
 
 test_full_acceptance_matrix
-test_fires_in_secondmate_home
 test_inert_in_child_worktree
 test_inert_when_not_firstmate_repo
 test_inert_when_not_a_git_repo

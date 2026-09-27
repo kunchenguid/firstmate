@@ -14,8 +14,9 @@ set -u
 export FM_GATE_REFUSE_BYPASS=1
 
 HERDR_TEST_SAFETY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+HERDR_LAB_HELPER=${HERDR_LAB_HELPER:-$HERDR_TEST_SAFETY_DIR/bin/fm-herdr-lab.sh}
 # shellcheck source=/dev/null
-. "$HERDR_TEST_SAFETY_DIR/bin/fm-herdr-lab.sh"
+. "$HERDR_LAB_HELPER"
 
 # herdr_forget_inherited_pane: drop the Herdr PANE identity this test process
 # inherited from whatever terminal it was started in.
@@ -48,7 +49,7 @@ herdr_safe_stop_and_delete() { # <session>
 # Caller installs its teardown trap and provisions the exact session first.
 # The wrapper never grants lifecycle authority; those verbs remain helper-only.
 herdr_test_guard_cli() { # <lab-session> <wrapper-dir> [helper]
-  local session=$1 wrapper=$2 helper=${3:-$HERDR_TEST_SAFETY_DIR/bin/fm-herdr-lab.sh} real
+  local session=$1 wrapper=$2 helper=${3:-$HERDR_LAB_HELPER} real
   fm_herdr_lab_validate_name "$session" || return 1
   real=$(command -v herdr) || return 1
   mkdir -p "$wrapper" || return 1

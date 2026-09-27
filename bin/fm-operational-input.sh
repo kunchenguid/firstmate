@@ -10,9 +10,7 @@
 #
 # The landed U+2063 + "FIRSTMATE_OP: " prefix is permanent compatibility.
 # The version and kind header make current inputs structurally typed without
-# deriving provenance from body prose. The established from-firstmate routing
-# marker remains a current compatibility carrier because already-running
-# secondmates have its leading label in their charter context.
+# deriving provenance from body prose.
 #
 # CLI:
 #   fm-operational-input.sh encode <kind>  # body on stdin, encoded input stdout
@@ -34,12 +32,6 @@ FM_OPERATIONAL_KINDS='session-start watcher turn-end-guard away-supervisor launc
 # shellcheck disable=SC2034 # Public source-library variable used by callers.
 FM_INJECT_MARK=$FM_OPERATIONAL_MARK
 
-# The from-firstmate carrier stays byte-compatible with live secondmate charter
-# context while this owner supplies its construction and structural kind.
-FM_FROMFIRST_LABEL='[fm-from-firstmate]'
-FM_FROMFIRST_SEPARATOR=$FM_OPERATIONAL_MARK
-FM_FROMFIRST_MARK="${FM_FROMFIRST_LABEL}${FM_FROMFIRST_SEPARATOR}"
-
 fm_operational_kind_is_current() {  # <kind>
   case " $FM_OPERATIONAL_KINDS " in
     *" $1 "*) return 0 ;;
@@ -58,10 +50,6 @@ fm_operational_input_encode() {  # <generic-kind> <body> <result-var>
 fm_operational_input_construct() {  # <kind> <body> <result-var>
   local kind=${1-} body=${2-} result_var=${3-}
   [ -n "$result_var" ] && [ -n "$body" ] || return 2
-  if [ "$kind" = from-firstmate ]; then
-    fm_message_mark_from_firstmate "$body" "$result_var"
-    return
-  fi
   fm_operational_input_encode "$kind" "$body" "$result_var"
 }
 
@@ -87,12 +75,6 @@ fm_operational_input_kind() {  # <message> <result-var>
     printf -v "$result_var" '%s' "$current_kind"
     return 0
   fi
-  case "$message" in
-    "$FM_FROMFIRST_MARK"?*)
-      printf -v "$result_var" '%s' from-firstmate
-      return 0
-      ;;
-  esac
   return 1
 }
 
@@ -104,13 +86,6 @@ fm_operational_input_body() {  # <current-message> <result-var>
     printf -v "$result_var" '%s' "$parsed_body"
     return 0
   fi
-  case "$message" in
-    "$FM_FROMFIRST_MARK"?*)
-      parsed_body=${message#"$FM_FROMFIRST_MARK"}
-      printf -v "$result_var" '%s' "$parsed_body"
-      return 0
-      ;;
-  esac
   return 1
 }
 
@@ -170,22 +145,6 @@ fm_operational_input_classify() {  # <message> <result-var>
   return 1
 }
 
-fm_message_from_firstmate() {  # <message>
-  local kind
-  fm_operational_input_kind "${1-}" kind && [ "$kind" = from-firstmate ]
-}
-
-fm_message_mark_from_firstmate() {  # <message> <result-var>
-  local message=${1-} result_var=${2-} transformed
-  [ -n "$result_var" ] || return 2
-  if fm_message_from_firstmate "$message"; then
-    transformed=$message
-  else
-    transformed="${FM_FROMFIRST_MARK}${message}"
-  fi
-  printf -v "$result_var" '%s' "$transformed"
-}
-
 fm_operational_read_stdin() {  # <result-var>
   local result_var=${1-} value
   [ -n "$result_var" ] || return 2
@@ -203,10 +162,8 @@ Usage:
   bin/fm-operational-input.sh body           # current input on stdin
 
 Current construction kinds:
-  session-start watcher turn-end-guard away-supervisor from-firstmate launch-brief
+  session-start watcher turn-end-guard away-supervisor launch-brief
   branch-outcome
-
-The from-firstmate kind uses its established live-charter-compatible carrier.
 EOF
 }
 

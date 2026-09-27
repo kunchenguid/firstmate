@@ -4,7 +4,7 @@
 # When enabled, firstmate resolves one W3C `traceparent` carrier for a task,
 # injects it into the agent's pane shell as the TRACEPARENT environment variable
 # before launch (bin/fm-spawn.sh, alongside GOTMPDIR, so it reaches every spawn
-# backend and every harness for ship, scout, and secondmate spawns), and records
+# backend and every harness for ship and scout spawns), and records
 # the identical value as `traceparent=` in state/<id>.meta. Because the injected
 # carrier and the recorded carrier are the same string, an observer that reads
 # the metadata sees exactly the identity the child received - no collector,
@@ -53,16 +53,8 @@
 #   cannot reactivate a stale on decision. Every spawn reads only that frozen
 #   on/off value, so later config and environment edits take effect only after a
 #   new home session starts.
-#   At launch, the primary propagates config/trace-context into the secondmate
-#   home (FM_INHERITABLE_CONFIG in bin/fm-config-inherit-lib.sh) and passes its
-#   frozen on/off decision into the new process as a non-empty FM_TRACE_CONTEXT
-#   value in the launch prefix (bin/fm-spawn.sh). The Secondmate freezes that
-#   inherited decision when its own home session starts.
-#   A REMOTE secondmate route resolves here too, in the PARENT process that owns
-#   that task's meta: fm-spawn's spawn_remote_secondmate resolves the carrier,
-#   hands it to the configured host through fm-spawn's --traceparent, and records
-#   the carrier the remote endpoint reports back. Only the pane export moves
-#   hosts; identity, enablement, and the per-task boundary do not.
+#   Every new spawn reads the frozen home-session decision and receives the
+#   resolved carrier through its launch environment.
 #
 # Wire shape: version 00 only, "00-<32 hex trace>-<16 hex span>-<2 hex flags>",
 # with the trace id and span id never all-zero (W3C rejects both). New roots use

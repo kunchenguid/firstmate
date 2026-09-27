@@ -356,8 +356,8 @@ test_relaunch_from_linked_home_preserves_recorded_worktree() {
   local dir out rc head fetch_head
   dir=$(new_case linked-home rl42)
   add_ship_task "$dir" rl42 pi
-  git -C "$dir/proj" worktree add --quiet --detach "$dir/secondmate" HEAD
-  sed "s|^project=.*|project=$dir/secondmate|" "$dir/home/state/rl42.meta" > "$dir/linked.meta"
+  git -C "$dir/proj" worktree add --quiet --detach "$dir/linked-home" HEAD
+  sed "s|^project=.*|project=$dir/linked-home|" "$dir/home/state/rl42.meta" > "$dir/linked.meta"
   mv "$dir/linked.meta" "$dir/home/state/rl42.meta"
   printf 'committed task work\n' > "$dir/wt/task.txt"
   git -C "$dir/wt" add task.txt
@@ -383,7 +383,7 @@ test_relaunch_from_linked_home_preserves_recorded_worktree() {
   fi
   expect_code 0 "$rc" "a linked spawning home should relaunch its recorded copy"$'\n'"$out"
   [ "$(meta_field "$dir" rl42 worktree)" = "$dir/wt" ] || fail "relaunch replaced the recorded copy"
-  [ "$(meta_field "$dir" rl42 project)" = "$dir/secondmate" ] || fail "relaunch replaced the linked spawning home"
+  [ "$(meta_field "$dir" rl42 project)" = "$dir/linked-home" ] || fail "relaunch replaced the linked spawning home"
   [ "$(git -C "$dir/wt" rev-parse HEAD)" = "$head" ] || fail "relaunch reset committed task work"
   assert_grep 'unfinished task work' "$dir/wt/task.txt" "relaunch discarded unfinished task work"
   [ ! -e "$fetch_head" ] || fail "relaunch fetched instead of preserving the recorded copy"
@@ -672,181 +672,6 @@ test_wiring_removal_failure_refuses_before_replacement_arm() {
   [ "$(journal_field "$dir" rl29 rollback)" = prior-record-kept ] \
     || fail "unpublished rollback should retain the live durable record"
   pass "fm-control relaunch: wiring cleanup failure refuses replacement arming"
-}
-
-test_secondmate_relaunch_picks_up_the_configured_harness_pin() {
-  local dir home out rc
-  dir=$(new_case smpin sm3)
-  home="$dir/home"
-  mkdir -p "$home/config"
-  printf 'codex some-model high\n' > "$home/config/secondmate-harness"
-  mkdir -p "$home/data/sm3"
-  printf '# secondmate brief\n' > "$home/data/sm3/brief.md"
-  fm_git_worktree "$dir/proj" "$dir/smhome" sm-branch
-  mkdir -p "$dir/smhome/state" "$dir/smhome/data" "$dir/smhome/bin"
-  printf 'sm3\n' > "$dir/smhome/.fm-secondmate-home"
-  printf '# agents\n' > "$dir/smhome/AGENTS.md"
-  {
-    echo "window=fmses:w1:p-sm3"
-    echo backend=herdr
-    echo herdr_session=fmses
-    echo herdr_workspace_id=w1
-    echo "herdr_tab_id=w1:t-sm3"
-    echo "herdr_pane_id=w1:p-sm3"
-    echo "endpoint_task_id=sm3"
-    echo "worktree=$dir/smhome"
-    echo "project=$dir/smhome"
-    echo "harness=pi"
-    echo "kind=secondmate"
-    echo "mode=secondmate"
-    echo "yolo=off"
-    echo "model=default"
-    echo "effort=default"
-    echo "home=$dir/smhome"
-  } > "$home/state/sm3.meta"
-  printf '%s\n' "fm-sm3" > "$dir/fake/windows"
-  printf '%s' "$dir/smhome" > "$dir/fake/cwd"
-  printf 'codex' > "$dir/fake/becomes"
-  out=$(run_control "$dir" sm3 relaunch); rc=$?
-  expect_code 0 "$rc" "a configured secondmate harness should relaunch"$'\n'"$out"
-  [ "$(journal_field "$dir" sm3 to_harness)" = codex ] \
-    || fail "a secondmate relaunch should pick up the configured harness pin, got '$(journal_field "$dir" sm3 to_harness)'"
-  [ "$(journal_field "$dir" sm3 to_model)" = some-model ] \
-    || fail "the configured model token should come with the pin"
-  [ "$(journal_field "$dir" sm3 to_effort)" = high ] \
-    || fail "the configured effort token should come with the pin"
-  assert_not_contains "$out" "not a verified harness" "codex is a verified harness"
-  pass "fm-control relaunch: a secondmate relaunch re-resolves its durable configured harness pin"
-}
-
-test_secondmate_relaunch_ignores_invalid_configured_effort_before_stop() {
-  local dir home out rc
-  dir=$(new_case invalid-effort sm6)
-  home="$dir/home"
-  mkdir -p "$home/config" "$home/data/sm6"
-  printf 'codex some-model impossible\n' > "$home/config/secondmate-harness"
-  printf '# secondmate brief\n' > "$home/data/sm6/brief.md"
-  fm_git_worktree "$dir/proj" "$dir/smhome" sm-branch
-  mkdir -p "$dir/smhome/state" "$dir/smhome/data" "$dir/smhome/bin"
-  printf 'sm6\n' > "$dir/smhome/.fm-secondmate-home"
-  printf '# agents\n' > "$dir/smhome/AGENTS.md"
-  {
-    echo "window=fmses:w1:p-sm6"
-    echo backend=herdr
-    echo herdr_session=fmses
-    echo herdr_workspace_id=w1
-    echo "herdr_tab_id=w1:t-sm6"
-    echo "herdr_pane_id=w1:p-sm6"
-    echo "endpoint_task_id=sm6"
-    echo "worktree=$dir/smhome"
-    echo "project=$dir/smhome"
-    echo "harness=pi"
-    echo "kind=secondmate"
-    echo "mode=secondmate"
-    echo "yolo=off"
-    echo "model=default"
-    echo "effort=default"
-    echo "home=$dir/smhome"
-  } > "$home/state/sm6.meta"
-  printf '%s\n' "fm-sm6" > "$dir/fake/windows"
-  printf '%s' "$dir/smhome" > "$dir/fake/cwd"
-  printf 'codex' > "$dir/fake/becomes"
-  out=$(run_control "$dir" sm6 relaunch); rc=$?
-  expect_code 0 "$rc" "an invalid configured effort should be ignored before stop"$'\n'"$out"
-  assert_contains "$out" "effort token 'impossible'" \
-    "relaunch should surface the same warning as a normal secondmate spawn"
-  [ "$(journal_field "$dir" sm6 to_effort)" = default ] \
-    || fail "invalid configured effort should normalize to default"
-  pass "fm-control relaunch: invalid configured effort is ignored before stop"
-}
-
-# TraeX is a verified adapter, but only for crewmates and scouts: it has no
-# primary supervision protocol, so bin/fm-spawn.sh refuses it for a secondmate.
-# That refusal alone is not enough here, because the launch owner is reached
-# only AFTER the running agent has been stopped - a secondmate would be left
-# with no agent at all. The control plane asks the same capability question
-# before it touches anything, so the refusal lands while the agent is still up.
-test_secondmate_relaunch_onto_a_crewmate_only_adapter_refuses_before_stop() {
-  local dir home out rc
-  dir=$(new_case smkind sm7)
-  home="$dir/home"
-  mkdir -p "$home/config" "$home/data/sm7"
-  printf '# secondmate brief\n' > "$home/data/sm7/brief.md"
-  fm_git_worktree "$dir/proj" "$dir/smhome" sm-branch
-  mkdir -p "$dir/smhome/state" "$dir/smhome/data" "$dir/smhome/bin"
-  printf 'sm7\n' > "$dir/smhome/.fm-secondmate-home"
-  printf '# agents\n' > "$dir/smhome/AGENTS.md"
-  {
-    echo "window=fmses:w1:p-sm7"
-    echo backend=herdr
-    echo herdr_session=fmses
-    echo herdr_workspace_id=w1
-    echo "herdr_tab_id=w1:t-sm7"
-    echo "herdr_pane_id=w1:p-sm7"
-    echo "endpoint_task_id=sm7"
-    echo "worktree=$dir/smhome"
-    echo "project=$dir/smhome"
-    echo "harness=pi"
-    echo "kind=secondmate"
-    echo "mode=secondmate"
-    echo "yolo=off"
-    echo "model=default"
-    echo "effort=default"
-    echo "home=$dir/smhome"
-  } > "$home/state/sm7.meta"
-  printf '%s\n' "fm-sm7" > "$dir/fake/windows"
-  printf '%s' "$dir/smhome" > "$dir/fake/cwd"
-  out=$(run_control "$dir" sm7 relaunch --harness traex); rc=$?
-  expect_code 1 "$rc" "a crewmate-only adapter should refuse a secondmate relaunch"
-  assert_contains "$out" "not verified to run a secondmate task" \
-    "the refusal should name the kind the adapter cannot run"
-  [ "$(cat "$dir/fake/command")" = pi ] \
-    || fail "the refusal must land before the running agent is stopped"
-  [ "$(meta_field "$dir" sm7 harness)" = pi ] \
-    || fail "a refused relaunch must leave the durable record on the recorded harness"
-  pass "fm-control relaunch: an adapter unverified for this task kind refuses before the agent is stopped"
-}
-
-test_explicit_secondmate_harness_ignores_configured_profile_axes() {
-  local dir home out rc
-  dir=$(new_case smexplicit sm4)
-  home="$dir/home"
-  mkdir -p "$home/config"
-  printf 'pi opus high\n' > "$home/config/secondmate-harness"
-  mkdir -p "$home/data/sm4"
-  printf '# secondmate brief\n' > "$home/data/sm4/brief.md"
-  fm_git_worktree "$dir/proj" "$dir/smhome" sm-branch
-  mkdir -p "$dir/smhome/state" "$dir/smhome/data" "$dir/smhome/bin"
-  printf 'sm4\n' > "$dir/smhome/.fm-secondmate-home"
-  printf '# agents\n' > "$dir/smhome/AGENTS.md"
-  {
-    echo "window=fmses:w1:p-sm4"
-    echo backend=herdr
-    echo herdr_session=fmses
-    echo herdr_workspace_id=w1
-    echo "herdr_tab_id=w1:t-sm4"
-    echo "herdr_pane_id=w1:p-sm4"
-    echo "endpoint_task_id=sm4"
-    echo "worktree=$dir/smhome"
-    echo "project=$dir/smhome"
-    echo "harness=pi"
-    echo "kind=secondmate"
-    echo "mode=secondmate"
-    echo "yolo=off"
-    echo "model=opus"
-    echo "effort=high"
-    echo "home=$dir/smhome"
-  } > "$home/state/sm4.meta"
-  printf '%s\n' "fm-sm4" > "$dir/fake/windows"
-  printf '%s' "$dir/smhome" > "$dir/fake/cwd"
-  printf 'codex' > "$dir/fake/becomes"
-  out=$(run_control "$dir" sm4 relaunch --harness codex); rc=$?
-  expect_code 0 "$rc" "an explicit secondmate harness should relaunch"$'\n'"$out"
-  [ "$(meta_field "$dir" sm4 model)" = default ] \
-    || fail "an explicit secondmate harness must not inherit the configured model"
-  [ "$(meta_field "$dir" sm4 effort)" = default ] \
-    || fail "an explicit secondmate harness must not inherit the configured effort"
-  pass "fm-control relaunch: explicit secondmate harness resets unnamed profile axes"
 }
 
 test_ship_relaunch_ignores_the_crew_harness_config() {
@@ -1167,133 +992,7 @@ test_journal_records_the_checkpoint_it_proved() {
   pass "fm-control relaunch: the checkpoint records the exact unlanded work it preserved"
 }
 
-# --- secondmate child-work safety -------------------------------------------
-
-test_secondmate_relaunch_checkpoints_child_work_and_spares_the_charter() {
-  local dir home out rc
-  dir=$(new_case sm sm1)
-  home="$dir/home"
-  mkdir -p "$home/config"
-  printf 'pi\n' > "$home/config/secondmate-harness"
-  fm_git_worktree "$dir/proj" "$dir/smhome" sm-branch
-  mkdir -p "$dir/smhome/state" "$dir/smhome/data" "$dir/smhome/bin"
-  printf 'sm1\n' > "$dir/smhome/.fm-secondmate-home"
-  printf '# charter\n' > "$dir/smhome/data/charter.md"
-  printf '# agents\n' > "$dir/smhome/AGENTS.md"
-  printf 'window=x:fm-c1\n' > "$dir/smhome/state/c1.meta"
-  printf 'window=x:fm-c2\n' > "$dir/smhome/state/c2.meta"
-  {
-    echo "window=fmses:w1:p-sm1"
-    echo backend=herdr
-    echo herdr_session=fmses
-    echo herdr_workspace_id=w1
-    echo "herdr_tab_id=w1:t-sm1"
-    echo "herdr_pane_id=w1:p-sm1"
-    echo "endpoint_task_id=sm1"
-    echo "worktree=$dir/smhome"
-    echo "project=$dir/smhome"
-    echo "harness=pi"
-    echo "kind=secondmate"
-    echo "mode=secondmate"
-    echo "yolo=off"
-    echo "model=default"
-    echo "effort=default"
-    echo "home=$dir/smhome"
-    echo "projects="
-  } > "$home/state/sm1.meta"
-  printf '%s\n' "fm-sm1" > "$dir/fake/windows"
-  printf '%s' "$dir/smhome" > "$dir/fake/cwd"
-  # No --note: a secondmate reconciles its own home's records at startup, so
-  # the note is optional there.
-  out=$(run_control "$dir" sm1 relaunch); rc=$?
-  expect_code 0 "$rc" "a checkpointed secondmate should relaunch"$'\n'"$out"
-  [ "$(journal_field "$dir" sm1 children)" = 2 ] \
-    || fail "the checkpoint must account for the secondmate's child work, got '$(journal_field "$dir" sm1 children)'"
-  assert_not_contains "$out" "requires --note" "a secondmate relaunch must not demand a progress note"
-  [ "$(cat "$dir/smhome/data/charter.md")" = "# charter" ] \
-    || fail "a secondmate's standing charter must never be rewritten by a relaunch"
-  assert_present "$dir/smhome/state/c1.meta" "child records must survive the relaunch"
-  assert_present "$dir/smhome/state/c2.meta" "child records must survive the relaunch"
-  pass "fm-control relaunch: a secondmate's child work is accounted for and its charter is left alone"
-}
-
-test_secondmate_relaunch_refuses_an_unmarked_home() {
-  local dir home out rc
-  dir=$(new_case smbad sm2)
-  home="$dir/home"
-  mkdir -p "$home/config"
-  printf 'pi\n' > "$home/config/secondmate-harness"
-  fm_git_worktree "$dir/proj" "$dir/smhome" sm-branch
-  mkdir -p "$dir/smhome/state"
-  printf 'someone-else\n' > "$dir/smhome/.fm-secondmate-home"
-  {
-    echo "window=fmses:w1:p-sm2"
-    echo backend=herdr
-    echo herdr_session=fmses
-    echo herdr_workspace_id=w1
-    echo "herdr_tab_id=w1:t-sm2"
-    echo "herdr_pane_id=w1:p-sm2"
-    echo "endpoint_task_id=sm2"
-    echo "worktree=$dir/smhome"
-    echo "project=$dir/smhome"
-    echo "harness=pi"
-    echo "kind=secondmate"
-    echo "mode=secondmate"
-    echo "yolo=off"
-  } > "$home/state/sm2.meta"
-  printf '%s\n' "fm-sm2" > "$dir/fake/windows"
-  out=$(run_control "$dir" sm2 relaunch); rc=$?
-  expect_code 1 "$rc" "a home marked for another secondmate should refuse"
-  assert_contains "$out" "not marked as its own seeded secondmate home" \
-    "the refusal should name the identity mismatch"
-  [ "$(cat "$dir/fake/command")" = pi ] || fail "a refused relaunch must not stop the agent"
-  pass "fm-control relaunch: a secondmate home that is not this secondmate's is refused"
-}
-
-test_secondmate_checkpoint_refuses_unreadable_child_state() {
-  local dir home out rc
-  dir=$(new_case smchildren sm5)
-  home="$dir/home"
-  mkdir -p "$home/config"
-  printf 'pi\n' > "$home/config/secondmate-harness"
-  fm_git_worktree "$dir/proj" "$dir/smhome" sm-branch
-  mkdir -p "$dir/smhome/state/bad.meta"
-  printf 'sm5\n' > "$dir/smhome/.fm-secondmate-home"
-  {
-    echo "window=fmses:w1:p-sm5"
-    echo backend=herdr
-    echo herdr_session=fmses
-    echo herdr_workspace_id=w1
-    echo "herdr_tab_id=w1:t-sm5"
-    echo "herdr_pane_id=w1:p-sm5"
-    echo "endpoint_task_id=sm5"
-    echo "worktree=$dir/smhome"
-    echo "project=$dir/smhome"
-    echo "harness=pi"
-    echo "kind=secondmate"
-    echo "mode=secondmate"
-    echo "yolo=off"
-    echo "home=$dir/smhome"
-  } > "$home/state/sm5.meta"
-  printf '%s\n' "fm-sm5" > "$dir/fake/windows"
-  printf '%s' "$dir/smhome" > "$dir/fake/cwd"
-  out=$(run_control "$dir" sm5 relaunch); rc=$?
-  expect_code 1 "$rc" "a non-readable child record should refuse"
-  assert_contains "$out" "not a readable regular file" "the refusal should name the unreadable child record"
-  [ "$(cat "$dir/fake/command")" = pi ] || fail "child record failure must not stop the secondmate"
-  rmdir "$dir/smhome/state/bad.meta"
-  cat > "$dir/fakebin/find" <<'SH'
-#!/usr/bin/env bash
-exit 1
-SH
-  chmod +x "$dir/fakebin/find"
-  out=$(run_control "$dir" sm5 relaunch); rc=$?
-  expect_code 1 "$rc" "failed child-state traversal should refuse"
-  assert_contains "$out" "child records cannot be traversed" \
-    "the refusal should preserve a find traversal failure"
-  [ "$(cat "$dir/fake/command")" = pi ] || fail "child traversal failure must not stop the secondmate"
-  pass "fm-control relaunch: unreadable and untraversable child state fails checkpoint"
-}
+# --- lifecycle serialization -------------------------------------------------
 
 test_concurrent_relaunch_is_refused() {
   local dir out rc lock holder i
@@ -1570,10 +1269,6 @@ test_native_ultra_relaunch_preserves_profile_and_rejects_before_stop
 test_explicit_model_wins_over_the_recorded_one
 test_relaunch_onto_an_unverified_harness_is_refused
 test_wiring_removal_failure_refuses_before_replacement_arm
-test_secondmate_relaunch_picks_up_the_configured_harness_pin
-test_secondmate_relaunch_ignores_invalid_configured_effort_before_stop
-test_secondmate_relaunch_onto_a_crewmate_only_adapter_refuses_before_stop
-test_explicit_secondmate_harness_ignores_configured_profile_axes
 test_ship_relaunch_ignores_the_crew_harness_config
 test_spawn_relaunch_without_a_harness_reuses_the_recorded_one
 test_promoted_scout_relaunch_receives_the_current_delivery_contract
@@ -1588,9 +1283,6 @@ test_stop_transport_failure_reconciles_a_dead_agent
 test_complete_journal_failure_rolls_back_from_durable_phase
 test_prepublication_abort_retires_replacement_wiring_and_busy_state
 test_journal_records_the_checkpoint_it_proved
-test_secondmate_relaunch_checkpoints_child_work_and_spares_the_charter
-test_secondmate_relaunch_refuses_an_unmarked_home
-test_secondmate_checkpoint_refuses_unreadable_child_state
 test_concurrent_relaunch_is_refused
 test_direct_spawn_relaunch_participates_in_the_lifecycle_lock
 test_promotion_participates_in_the_lifecycle_lock_before_metadata_resolution

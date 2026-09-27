@@ -16,15 +16,10 @@
 #      watcher's re-ring ladder owns delivery from the record on.
 #   6. Carve-outs keep the typed plane: a leading "/" (any harness), a leading
 #      "$" to codex, an explicit backend target, and the --key path.
-#   7. A marked secondmate steer carries its marker + corr token in the record
-#      body, and the pending-reply expectation is marked delivered at enqueue.
-#   8. Pending-reply bookkeeping failure after enqueue never reports a
-#      retryable send failure that could duplicate the durable instruction.
-#   9. An unwritable inbox is a real local failure: nonzero exit, nothing
-#      typed, and a just-created pending-reply expectation is discarded.
-#  10. An empty or whitespace-only text steer is refused before anything is
-#      marked, recorded, or typed - on the marked secondmate path that means
-#      no marker-only record and no pending-reply expectation.
+#   7. An unwritable inbox is a real local failure: nonzero exit and nothing
+#      typed.
+#   8. An empty or whitespace-only text steer is refused before anything is
+#      recorded or typed.
 # Every case below that passes a literal `$...` message quotes it on purpose
 # (the point is sending an unexpanded `$` line), so SC2016 is disabled.
 # shellcheck disable=SC2016
@@ -32,9 +27,6 @@ set -u
 
 # shellcheck source=tests/fixtures.sh
 . "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
-# shellcheck source=/dev/null
-. "$ROOT/bin/fm-marker-lib.sh"
-
 SEND="$ROOT/bin/fm-send.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-send-inbox)
@@ -213,78 +205,6 @@ test_key_path_never_touches_inbox() {
   pass "fm-send planes: the --key lifecycle path never touches the inbox"
 }
 
-test_secondmate_marker_and_enqueue_delivery() {
-  local dir err body corr pr_rec delivered
-  dir=$(setup_case secondmate)
-  err="$dir/send.err"
-  fm_write_secondmate_meta "$dir/home/state/domain.meta" "$dir/home" "sess:w1:p-domain"
-  printf 'backend=herdr\n' >> "$dir/home/state/domain.meta"
-  run_send "$dir" "$err" -- fm-domain "please summarize fleet health" ||
-    fail "a secondmate steer should succeed"
-  body=$(record_body _ "$dir/home/state/domain.inbox/001.msg")
-  case "$body" in
-  "$FM_FROMFIRST_MARK"corr=*) : ;;
-  *) fail "the recorded body lost the from-firstmate marker/corr framing:"$'\n'"$body" ;;
-  esac
-  corr=$(printf '%s' "$body" | grep -oE 'corr=[a-f0-9]{16}' | head -1 | cut -d= -f2)
-  [ -n "$corr" ] || fail "no corr token in the recorded body"
-  pr_rec="$dir/home/state/pending-replies/$corr"
-  [ -f "$pr_rec" ] || fail "no pending-reply expectation was recorded at $pr_rec"
-  delivered=$(grep '^delivered_epoch=' "$pr_rec" | cut -d= -f2)
-  [ -n "$delivered" ] || fail "enqueue IS delivery: delivered_epoch should be set at enqueue time:"$'\n'"$(cat "$pr_rec")"
-  case "$(cat "$dir/send.log")" in
-  *"summarize fleet health"*) fail "the marked payload was typed" ;;
-  esac
-  pass "fm-send inbox: a secondmate steer records marker+corr in the body and is delivered at enqueue"
-}
-
-test_post_enqueue_bookkeeping_failure_is_not_retryable() {
-  local dir err rc rec body
-  dir=$(setup_case bookkeeping-failure)
-  err="$dir/send.err"
-  fm_write_secondmate_meta "$dir/home/state/domain.meta" "$dir/home" "sess:w1:p-domain"
-  printf 'backend=herdr\n' >> "$dir/home/state/domain.meta"
-  cat >"$dir/fakebin/mv" <<'SH'
-#!/usr/bin/env bash
-set -u
-source_arg=${@: -2:1}
-target_arg=${@: -1}
-if [ "${FM_FAIL_DELIVERY_CONFIRM:-0}" = 1 ] \
-  && grep -q '^confirmed=' "$source_arg" 2>/dev/null; then
-  # Simulate losing both the delivery commit and its prepared recovery marker.
-  rm -f "$target_arg"
-  exit 1
-fi
-exec /bin/mv "$@"
-SH
-  chmod +x "$dir/fakebin/mv"
-
-  run_send "$dir" "$err" FM_FAIL_DELIVERY_CONFIRM=1 -- domain "durable once"
-  rc=$?
-  # The durable record IS the delivery: even with the commit AND its recovery
-  # marker both lost, the steer was delivered, so fm-send must not signal a
-  # status that invites a resend (a nonzero would make automated callers
-  # enqueue the same instruction again under a new sequence). The degradation
-  # surfaces as its own distinct do-not-resend condition instead.
-  expect_code 0 "$rc" "a delivered steer must not report a resend-inviting failure over lost bookkeeping"
-  rec="$dir/home/state/domain.inbox/001.msg"
-  [ -f "$rec" ] || fail "bookkeeping failure test did not durably enqueue the steer"
-  [ "$(find "$dir/home/state/domain.inbox" -maxdepth 1 -name '*.msg' | wc -l | tr -d ' ')" = 1 ] ||
-    fail "the delivered steer was duplicated:"$'\n'"$(ls "$dir/home/state/domain.inbox")"
-  body=$(record_body _ "$rec")
-  case "$body" in
-  "$FM_FROMFIRST_MARK"corr=*) : ;;
-  *) fail "bookkeeping failure test lost the secondmate marker: $body" ;;
-  esac
-  assert_contains "$(cat "$err")" "reply-tracking-degraded" \
-    "lost bookkeeping should surface as its own distinct degraded condition"
-  assert_contains "$(cat "$err")" "do not resend" \
-    "the degraded condition should give explicit do-not-resend guidance"
-  assert_contains "$(cat "$err")" "durably recorded at" \
-    "the degraded condition should name the already-delivered record"
-  pass "fm-send inbox: lost reply bookkeeping never invites a resend, and the delivered steer is never duplicated"
-}
-
 test_meta_lock_contention_fails_bounded() {
   local dir err rc holder marker lock i
   dir=$(setup_case meta-lock)
@@ -322,37 +242,26 @@ test_unwritable_inbox_fails_loudly() {
   local dir err rc
   dir=$(setup_case unwritable)
   err="$dir/send.err"
-  fm_write_secondmate_meta "$dir/home/state/domain.meta" "$dir/home" "sess:w1:p-domain"
-  printf 'backend=herdr\n' >> "$dir/home/state/domain.meta"
-  : >"$dir/home/state/domain.inbox" # a FILE where the inbox dir must go
-  run_send "$dir" "$err" -- fm-domain "this cannot be recorded"
+  : >"$dir/home/state/t1.inbox" # a FILE where the inbox dir must go
+  run_send "$dir" "$err" -- t1 "this cannot be recorded"
   rc=$?
   [ "$rc" -ne 0 ] || fail "an unwritable inbox must fail the send"
   assert_contains "$(cat "$err")" "inbox record could not be written" \
     "the failure should name the unwritable inbox"
   [ ! -s "$dir/send.log" ] || fail "a failed enqueue still typed something:"$'\n'"$(cat "$dir/send.log")"
-  [ -z "$(find "$dir/home/state/pending-replies" -type f -not -name '.*' 2>/dev/null)" ] ||
-    fail "a failed enqueue should discard the just-created pending-reply expectation"
-  pass "fm-send inbox: an unwritable record is a loud local failure that leaves no false expectation"
+  pass "fm-send inbox: an unwritable ordinary-task record is a loud local failure"
 }
 
 test_empty_message_refused() {
   local dir err rc
-  # The lived defect: an empty marked secondmate steer used to deliver a
-  # marker+corr record with no body and mint a pending-reply expectation the
-  # parent could never see resolved.
-  dir=$(setup_case empty-marked)
+  dir=$(setup_case empty-omitted)
   err="$dir/send.err"
-  fm_write_secondmate_meta "$dir/home/state/domain.meta" "$dir/home" "sess:w1:p-domain"
-  printf 'backend=herdr\n' >> "$dir/home/state/domain.meta"
-  run_send "$dir" "$err" -- fm-domain
+  run_send "$dir" "$err" -- t1
   rc=$?
-  [ "$rc" -ne 0 ] || fail "an empty secondmate steer should refuse"
+  [ "$rc" -ne 0 ] || fail "an omitted ordinary-task message should refuse"
   assert_contains "$(cat "$err")" "nonempty message" \
     "the empty-message refusal should be explicit"
-  [ ! -d "$dir/home/state/domain.inbox" ] || fail "an empty steer still wrote an inbox record"
-  [ -z "$(find "$dir/home/state/pending-replies" -type f -not -name '.*' 2>/dev/null)" ] ||
-    fail "an empty steer still minted a pending-reply expectation"
+  [ ! -d "$dir/home/state/t1.inbox" ] || fail "an empty steer still wrote an inbox record"
   [ ! -s "$dir/send.log" ] || fail "an empty steer still typed something:"$'\n'"$(cat "$dir/send.log")"
 
   # An explicit empty-string argument is the same refusal.
@@ -390,8 +299,6 @@ test_failed_ring_is_still_sent
 test_harness_invocations_stay_typed
 test_explicit_target_stays_typed
 test_key_path_never_touches_inbox
-test_secondmate_marker_and_enqueue_delivery
-test_post_enqueue_bookkeeping_failure_is_not_retryable
 test_meta_lock_contention_fails_bounded
 test_unwritable_inbox_fails_loudly
 test_empty_message_refused

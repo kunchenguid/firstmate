@@ -106,14 +106,12 @@ assert_contains "$inbox_moved" 'moved-one' "status must read the overridden data
 pass "status honors the home data override"
 
 # Exercise the removed public entrypoint paths: an old invocation must fail
-# before any transport or historical MagiBook template can run.
+# before any transport can run.
 for retired in bin/fm-mail.sh bin/fm-mail-check.sh bin/fm-mail.py \
-  bin/fm-voice-client.py bin/fm-voice-relay.py \
-  .agents/skills/magibook-pyspark/templates/ensure_spark.py \
-  .agents/skills/magibook-pyspark/templates/parallel_queries.py; do
+  bin/fm-voice-client.py bin/fm-voice-relay.py; do
   case "$retired" in *.py) interpreter=python3 ;; *) interpreter=bash ;; esac
   if "$interpreter" "$ROOT/$retired" --help >"$TMP_ROOT/retired.out" 2>&1; then
     fail "retired entrypoint remained executable: $retired"
   fi
 done
-pass "historical mail, dedicated voice and MagiBook template invocations cannot execute"
+pass "historical mail and dedicated voice invocations cannot execute"

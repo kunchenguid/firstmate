@@ -5,7 +5,7 @@
 # workers commonly write the colon first (needs-decision: [key=x] note); that
 # stated key must be honored, never silently folded into the shared "default"
 # bucket where an answer can close the wrong record (issue #2109). Also covers
-# status_line_verb's bracket-tag stripping: a remote secondmate reply prepends
+# status_line_verb's bracket-tag stripping: a relayed status can prepend
 # a "[corr=...]" correlation tag before (or without) "[key=...]", and every
 # such tag before the colon must be stripped so the leading word is the bare
 # verb, regardless of order or count. These tests drive the REAL
@@ -155,8 +155,8 @@ test_malformed_stated_key_never_collapses_to_default() {
   pass "a malformed stated key is rejected in both positions, never folded as default"
 }
 
-# A remote secondmate reply routinely prepends a "[corr=<hex>]" correlation
-# tag ahead of "[key=...]" (issue: a remote reply's "needs-decision
+# A relayed status may prepend a "[corr=<hex>]" correlation tag ahead of
+# "[key=...]" (issue: a relayed "needs-decision
 # [corr=d448ea86afa4bf67] [key=x]: ..." folded to no open decision at all,
 # because the verb parser only stripped a leading "[key=...]" token and left
 # the corr tag glued onto the returned verb word). These cases drive the real

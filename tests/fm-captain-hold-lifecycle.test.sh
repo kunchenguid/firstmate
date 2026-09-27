@@ -5,11 +5,9 @@
 # compatibility for pre-collapse decision identities.
 set -u
 
-# shellcheck source=tests/lib.sh
+# shellcheck source=tests/fixtures.sh
 # shellcheck disable=SC1091
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
-# shellcheck source=tests/secondmate-helpers.sh
-. "$ROOT/tests/secondmate-helpers.sh"
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$ROOT/bin/fm-timeout-lib.sh"
 
@@ -183,14 +181,6 @@ SH
 
 # The retired command surface, kept for one release as a shim; in-flight
 # pre-collapse work still drives the lifecycle through these spellings.
-run_shim() {  # <home> <command args...>
-  local home=$1
-  shift
-  PATH="$home/fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" \
-    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-decision-hold.sh" "$@"
-}
-
 write_origin_meta() {  # <home> <id> [kind]
   local home=$1 id=$2 kind=${3:-scout}
   fm_test_write_herdr_meta "$home/state/$id.meta" \
@@ -1243,7 +1233,7 @@ EOF
 }
 
 test_terminal_single_owner_status_decision_does_not_block_empty_inventory() {
-  local home id open secondmate
+  local home id open historical_id
   home=$(make_home stale-terminal-decision)
   id=sample-terminal-review
   mkdir -p "$home/data/$id"
@@ -1262,234 +1252,17 @@ test_terminal_single_owner_status_decision_does_not_block_empty_inventory() {
   run_teardown "$home" "$id" >/dev/null 2> "$home/terminal-teardown.err" \
     || fail "terminal single-owner stale status decision blocked teardown: $(cat "$home/terminal-teardown.err")"
 
-  secondmate=sample-secondmate
-  write_origin_meta "$home" "$secondmate" secondmate
+  historical_id=sample-secondmate
+  write_origin_meta "$home" "$historical_id" secondmate
   printf 'needs-decision [key=route]: choose route A or route B\ndone: heartbeat complete\n' \
-    > "$home/state/$secondmate.status"
-  if run_captain "$home" complete "$secondmate" --none \
-    > "$home/secondmate-terminal.out" 2> "$home/secondmate-terminal.err"; then
-    fail "secondmate terminal status decision was incorrectly cleared"
+    > "$home/state/$historical_id.status"
+  if run_captain "$home" complete "$historical_id" --none \
+    > "$home/historical-terminal.out" 2> "$home/historical-terminal.err"; then
+    fail "historical secondmate terminal status decision was incorrectly cleared"
   fi
   pass "terminal single-owner stale status decisions do not block empty inventory"
 }
 
-test_secondmate_hold_stays_in_authoritative_home() {
-  local parent mate fakebin origin json
-  parent=$(make_home main-routing)
-  mate="$TMP_ROOT/sample-mate-home"
-  mkdir -p "$mate/data" "$mate/state" "$mate/config" "$mate/projects" "$mate/bin"
-  cp "$ROOT/.tasks.toml" "$mate/.tasks.toml"
-  printf '# Synthetic secondmate home\n' > "$mate/AGENTS.md"
-  printf 'sample-mate\n' > "$mate/.fm-secondmate-home"
-  # A seeded home always carries its parent binding; teardown delivers the
-  # scout's final line through it before removing the record.
-  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$parent" \
-    > "$mate/.fm-secondmate-parent"
-  cat > "$mate/data/backlog.md" <<'EOF'
-## In flight
-
-## Queued
-
-## Done
-EOF
-  fakebin=$(fm_fakebin "$mate")
-  fm_fake_exit0 "$fakebin" treehouse no-mistakes gh gh-axi
-  fm_test_fake_herdr_gone "$fakebin"
-  origin=sample-mate-review
-  mkdir -p "$mate/data/$origin"
-  tasks_in "$mate" add "$origin" "Investigate secondmate sample" --kind scout --repo sample --start >/dev/null
-  write_origin_meta "$mate" "$origin"
-  printf 'done: report and visual review complete\n' > "$mate/state/$origin.status"
-  printf '# Sample secondmate review\n\nOne captain choice remains.\n' > "$mate/data/$origin/report.md"
-  run_captain "$mate" hold sample-release-call --title "Choose the sample release" \
-    --reason "captain release choice pending" --repo sample --origin "$origin" >/dev/null \
-    || fail "secondmate-owned hold creation failed"
-  run_captain "$mate" complete "$origin" sample-release-call >/dev/null \
-    || fail "secondmate-owned completion failed"
-  # The parent registers the mate before its children are ever torn down;
-  # teardown resolves that registration to deliver the scout's final line.
-  printf -- '- sample-mate - synthetic scope (home: %s; scope: sample reviews; projects: sample; added 2026-07-14)\n' \
-    "$mate" > "$parent/data/secondmates.md"
-  fm_write_herdr_secondmate_meta "$parent/state/sample-mate.meta" "$mate" \
-    "firstmate:fm-sample-mate" sample
-  run_teardown "$mate" "$origin" >/dev/null 2> "$mate/teardown.err" \
-    || fail "secondmate investigation teardown failed: $(cat "$mate/teardown.err")"
-  tasks_in "$mate" "done" "$origin" --report "data/$origin/report.md" --keep 0 >/dev/null
-  grep -Eq "^done \\[key=child-outcome-$origin-done-[0-9a-f]{8}\\]: child $origin done: report and visual review complete mode=scout report=data/$origin/report.md$" \
-    "$parent/state/sample-mate.status" \
-    || fail "the scout's final line did not reach the parent at teardown"
-
-  json=$(run_bearings "$parent") || fail "parent Bearings could not read the secondmate captain call"
-  printf '%s' "$json" | jq -e '
-    .decisions_open | any(.owner == "sample-mate" and .verb == "captain-hold"
-      and (.id | endswith("sample-release-call")))
-  ' >/dev/null || fail "secondmate captain call did not surface with authoritative owner: $json"
-  assert_no_grep "sample-release-call" "$parent/data/backlog.md" "secondmate call leaked into the main backlog"
-  assert_grep "sample-release-call" "$mate/data/backlog.md" "secondmate call left its authoritative backlog"
-  pass "main-home and secondmate-home captain calls remain correctly routed"
-}
-
-# Inside a secondmate home a hold and its answer reach the parent channel from
-# the script itself, keyed per hold occurrence, so a re-held task opens and
-# closes a distinct parent decision and a retry never duplicates a line. A main
-# home publishes nothing anywhere.
-test_secondmate_home_publishes_holds_and_answers() {
-  local parent mate fakebin channel decision out
-  parent=$(make_home parent-channel)
-  mate="$TMP_ROOT/channel-mate-home"
-  mkdir -p "$mate/data" "$mate/state" "$mate/config" "$mate/projects"
-  cp "$ROOT/.tasks.toml" "$mate/.tasks.toml"
-  printf '# Synthetic secondmate home\n' > "$mate/AGENTS.md"
-  printf 'channel-mate\n' > "$mate/.fm-secondmate-home"
-  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$parent" \
-    > "$mate/.fm-secondmate-parent"
-  cat > "$mate/data/backlog.md" <<'EOF'
-## In flight
-
-## Queued
-
-## Done
-EOF
-  fakebin=$(fm_fakebin "$mate")
-  fm_fake_exit0 "$fakebin" treehouse no-mistakes gh gh-axi
-  fm_test_fake_herdr_gone "$fakebin"
-  channel="$parent/state/channel-mate.status"
-  decision="$mate/decision.txt"
-
-  tasks_in "$mate" add quoted-record-call "Choose quoted record handling" --kind ship --repo sample \
-    --body 'Documentation quote: Resolution recorded by fm-captain-hold.' >/dev/null \
-    || fail "could not create quoted-record captain call"
-  run_captain "$mate" hold quoted-record-call --reason "quoted record choice pending" \
-    --origin quoted-origin >/dev/null || fail "quoted-record hold failed"
-  assert_grep 'needs-decision [key=captain-hold-quoted-record-call-1]: captain hold quoted-record-call: quoted record choice pending' \
-    "$channel" "body prose was incorrectly counted as a resolution record"
-
-  run_captain "$mate" hold mate-call --title "Choose the mate release" \
-    --reason "release choice pending" --repo sample >/dev/null \
-    || fail "mate hold failed"
-  assert_grep 'needs-decision [key=captain-hold-mate-call-1]: captain hold mate-call: release choice pending' \
-    "$channel" "the mate's hold did not reach the parent channel"
-  run_captain "$mate" hold mate-call --reason "release choice pending" >/dev/null \
-    || fail "repeated mate hold failed"
-  [ "$(grep -c 'captain-hold-mate-call-1' "$channel")" = 1 ] \
-    || fail "a repeated hold duplicated the parent decision: $(cat "$channel")"
-
-  printf 'ship it later\n' > "$decision"
-  run_captain "$mate" answer mate-call --decision-file "$decision" --release >/dev/null \
-    || fail "mate release answer failed"
-  assert_grep 'resolved [key=captain-hold-mate-call-1]: captain hold mate-call: released' \
-    "$channel" "the released answer did not close the parent decision"
-
-  run_captain "$mate" hold mate-call --reason "second release choice" >/dev/null \
-    || fail "re-hold after release failed"
-  assert_grep 'needs-decision [key=captain-hold-mate-call-2]: captain hold mate-call: second release choice' \
-    "$channel" "a re-held task did not open a distinct parent decision"
-  printf 'ship it\n' > "$decision"
-  run_captain "$mate" answer mate-call --decision-file "$decision" >/dev/null \
-    || fail "mate close answer failed"
-  assert_grep 'resolved [key=captain-hold-mate-call-2]: captain hold mate-call: answered' \
-    "$channel" "the closing answer did not close the second parent decision"
-  run_captain "$mate" answer mate-call --decision-file "$decision" >/dev/null \
-    || fail "idempotent answer retry failed"
-  [ "$(grep -c 'captain-hold-mate-call-2' "$channel")" = 2 ] \
-    || fail "an answer retry duplicated a parent line: $(cat "$channel")"
-  [ "$(grep -c 'captain-hold-mate-call' "$channel")" = 4 ] \
-    || fail "unexpected parent channel contents: $(cat "$channel")"
-
-  run_captain "$mate" hold batch-call --title "Choose the batch release" \
-    --reason "batch choice pending" --repo sample >/dev/null \
-    || fail "batch hold failed"
-  mv "$channel" "$channel.saved"
-  mkdir "$channel"
-  out=$(printf 'batch-call\tship now\t\n' \
-    | run_captain "$mate" answers --source "batch retry fixture" 2>&1) \
-    || fail "batch answer did not preserve its durable close: $out"
-  printf '%s\n' "$out" | grep -Fq 'actionable:' \
-    || fail "failed batch parent delivery was not actionable: $out"
-  rmdir "$channel"
-  mv "$channel.saved" "$channel"
-  printf 'batch-call\tship now\t\n' \
-    | run_captain "$mate" answers --source "batch retry fixture" >/dev/null \
-    || fail "idempotent batch answer retry failed"
-  [ "$(grep -c 'resolved \[key=captain-hold-batch-call-1\]' "$channel")" = 1 ] \
-    || fail "batch retry did not restore exactly one parent resolution: $(cat "$channel")"
-
-  run_captain "$parent" hold main-call --title "Choose the main release" \
-    --reason "main choice pending" --repo sample >/dev/null || fail "main hold failed"
-  [ ! -e "$parent/state/parent-replies.status" ] || fail "a main home wrote a parent reply"
-  assert_no_grep 'captain-hold-main-call' "$channel" "a main home's hold leaked onto a mate channel"
-  pass "a secondmate home publishes each hold occurrence and its answer on the parent channel"
-}
-
-test_secondmate_reconcile_publishes_before_request_retirement() {
-  local parent mate channel evidence out show rc request
-  parent=$(make_home reconcile-parent-channel)
-  mate=$(make_home reconcile-channel-mate)
-  printf 'reconcile-channel-mate\n' > "$mate/.fm-secondmate-home"
-  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$parent" \
-    > "$mate/.fm-secondmate-parent"
-  channel="$parent/state/reconcile-channel-mate.status"
-  evidence="$mate/reconcile-evidence.txt"
-
-  tasks_in "$mate" add reconcile-channel-call "Verify the mate call" --kind ship --repo sample >/dev/null \
-    || fail "could not create the reconcile channel call"
-  run_captain "$mate" hold reconcile-channel-call --reason "verify current release state" >/dev/null \
-    || fail "could not hold the reconcile channel call"
-  request_reconciles "$mate" reconcile-board reconcile-channel-call \
-    || fail "could not request the channel reconciliation"
-  printf 'The release has already landed.\n' > "$evidence"
-  request="$mate/state/reconcile-requests/reconcile-channel-call.request"
-
-  chmod 0500 "$mate/state/reconcile-requests"
-  set +e
-  out=$(run_captain "$mate" reconcile close reconcile-channel-call \
-    --evidence-file "$evidence" 2>&1)
-  rc=$?
-  set -e
-  chmod 0700 "$mate/state/reconcile-requests"
-  [ "$rc" -ne 0 ] || fail "failed reconcile request retirement reported success"
-  assert_contains "$out" "reconcile-channel-call" \
-    "the reconcile retirement failure did not name its task: $out"
-  show=$(tasks_in "$mate" show reconcile-channel-call --full)
-  assert_contains "$show" "state: done" "request retirement failure reversed the reconciled close"
-  assert_contains "$show" "Resolution mode: reconciled" \
-    "request retirement failure lost the reconciled resolution mode"
-  [ -f "$request" ] || fail "the request retired despite its forced retirement failure"
-  [ "$(grep -c 'resolved \[key=captain-hold-reconcile-channel-call-1\]: captain hold reconcile-channel-call: reconciled' "$channel")" -eq 1 ] \
-    || fail "the parent resolution was not published before retirement failed: $(cat "$channel")"
-
-  run_captain "$mate" reconcile close reconcile-channel-call --evidence-file "$evidence" >/dev/null \
-    || fail "the closed reconciliation could not finish publication and retirement"
-  [ ! -e "$request" ] || fail "the retry did not retire the published reconcile request"
-  [ "$(grep -c 'resolved \[key=captain-hold-reconcile-channel-call-1\]: captain hold reconcile-channel-call: reconciled' "$channel")" -eq 1 ] \
-    || fail "the reconciliation retry duplicated or changed its parent resolution: $(cat "$channel")"
-  tasks_in "$mate" add answer-channel-call "Answer the mate call" --kind ship --repo sample >/dev/null \
-    || fail "could not create the normal-answer channel call"
-  run_captain "$mate" hold answer-channel-call --reason "captain answer needed" >/dev/null \
-    || fail "could not hold the normal-answer channel call"
-  request_reconciles "$mate" reconcile-board answer-channel-call \
-    || fail "could not create the normal-answer retry trigger"
-  printf 'Proceed with the release.\n' > "$mate/answer.txt"
-  request="$mate/state/reconcile-requests/answer-channel-call.request"
-  chmod 0500 "$mate/state/reconcile-requests"
-  set +e
-  out=$(run_captain "$mate" answer answer-channel-call --decision-file "$mate/answer.txt" 2>&1)
-  rc=$?
-  set -e
-  chmod 0700 "$mate/state/reconcile-requests"
-  [ "$rc" -ne 0 ] || fail "failed normal-answer request retirement reported success"
-  show=$(tasks_in "$mate" show answer-channel-call --full)
-  assert_contains "$show" "state: done" "request retirement failure reversed the captain answer"
-  [ -f "$request" ] || fail "the normal-answer retry trigger retired after its forced failure"
-  [ "$(grep -c 'resolved \[key=captain-hold-answer-channel-call-1\]: captain hold answer-channel-call: answered' "$channel")" -eq 1 ] \
-    || fail "the normal answer did not publish before retirement failed: $(cat "$channel")"
-  run_captain "$mate" answer answer-channel-call --decision-file "$mate/answer.txt" >/dev/null \
-    || fail "the normal-answer retry could not finish request retirement"
-  [ ! -e "$request" ] || fail "the normal-answer retry left its request pending"
-  [ "$(grep -c 'resolved \[key=captain-hold-answer-channel-call-1\]: captain hold answer-channel-call: answered' "$channel")" -eq 1 ] \
-    || fail "the normal-answer retry duplicated its parent resolution: $(cat "$channel")"
-  pass "secondmate resolutions publish before retiring durable retry triggers"
-}
 
 # The one keyed-answer intake, fed through the real process-event runner by a
 # fixture channel that knows nothing about captain holds: task-id keys close at
@@ -2057,11 +1830,11 @@ EOF
   pass "a channel source with no decision binding closes nothing"
 }
 
-# Everything a pre-collapse install already has keeps working: composed
-# identities through the shim, short decision keys in recorded metadata, a
-# concrete-origin binding, and the chat fallback for old rows.
+# Everything a pre-collapse install already recorded keeps working: composed
+# identities, short decision keys in metadata, a concrete-origin binding, and
+# the chat fallback for old rows. The removed pointer command is not exercised.
 test_legacy_identities_keep_working() {
-  local home id hold out show legacy_text legacy_digest old_hold
+  local home id hold out show legacy_text legacy_digest
   home=$(make_home legacy-compat)
   id=sample-legacy-review
   mkdir -p "$home/data/$id"
@@ -2070,17 +1843,16 @@ test_legacy_identities_keep_working() {
   printf 'done: report complete\n' > "$home/state/$id.status"
   printf '# Legacy review\n\nTwo captain choices remain.\n' > "$home/data/$id/report.md"
 
-  hold=$(run_shim "$home" id "$id" pick-one)
-  [ "$hold" = "$id-decision-pick-one" ] || fail "the shim identity was not deterministic: $hold"
-  out=$(run_shim "$home" hold "$id" pick-one \
+  hold="$id-decision-pick-one"
+  out=$(run_captain "$home" hold "$hold" --origin "$id" \
     --title "Pick one" --reason "captain choice pending" --repo sample) \
-    || fail "the shim hold path failed"
-  [ "$out" = "$hold" ] || fail "the shim hold did not print the composed identity: $out"
-  run_shim "$home" hold "$id" keep-two \
+    || fail "the canonical hold path could not preserve a legacy identity"
+  [ "$out" = "$hold" ] || fail "the canonical hold did not print the legacy-shaped identity: $out"
+  run_captain "$home" hold "$id-decision-keep-two" --origin "$id" \
     --title "Keep two" --reason "captain second choice pending" --repo sample >/dev/null \
-    || fail "the shim second hold failed"
+    || fail "the canonical path could not create the second legacy-shaped hold"
   show=$(tasks_in "$home" show "$hold" --full)
-  assert_contains "$show" "hold_kind: captain" "the shim-created row is not a plain captain-held task"
+  assert_contains "$show" "hold_kind: captain" "the legacy-shaped row is not a plain captain-held task"
 
   # A pre-collapse metadata attestation records SHORT keys; verify must resolve
   # them through the legacy composed identity.
@@ -2088,68 +1860,25 @@ test_legacy_identities_keep_working() {
   run_captain "$home" verify "$id" >/dev/null \
     || fail "legacy short-key metadata did not verify against composed identities"
 
-  # The shim's routed close records the routed work inside the captain decision
-  # and clears the recorded edge.
-  tasks_in "$home" add sample-legacy-work "Apply the legacy choice" \
-    --kind ship --repo sample --blocked-by "$hold" >/dev/null
-  tasks_in "$home" add sample-unrouted-work "Unrouted legacy work" \
-    --kind ship --repo sample >/dev/null
   printf 'Use route north.\n' > "$home/route.txt"
-  if run_shim "$home" resolve "$id" pick-one --decision-file "$home/route.txt" \
-    --routed-to sample-missing-work > "$home/missing-route.out" 2> "$home/missing-route.err"; then
-    fail "the shim resolve accepted a missing routed task"
-  fi
-  if run_shim "$home" resolve "$id" pick-one --decision-file "$home/route.txt" \
-    --routed-to sample-unrouted-work > "$home/unrouted.out" 2> "$home/unrouted.err"; then
-    fail "the shim resolve accepted work not blocked by the legacy decision"
-  fi
+  run_captain "$home" answer "$hold" --decision-file "$home/route.txt" >/dev/null \
+    || fail "the canonical answer path could not close a legacy-shaped row"
   show=$(tasks_in "$home" show "$hold" --full)
-  assert_contains "$show" "state: queued" "invalid shim routing closed the legacy decision"
-  assert_not_contains "$show" "Resolution recorded" "invalid shim routing recorded an answer"
-  run_shim "$home" resolve "$id" pick-one --decision-file "$home/route.txt" \
-    --routed-to sample-legacy-work >/dev/null \
-    || fail "the shim resolve path failed"
-  show=$(tasks_in "$home" show "$hold" --full)
-  assert_contains "$show" "state: done" "the shim resolve did not close the row"
-  assert_contains "$show" "Use route north." "the shim resolve lost the captain decision"
-  assert_contains "$show" "- sample-legacy-work" "the shim resolve lost the routed identities"
-  show=$(tasks_in "$home" show sample-legacy-work --full)
-  assert_contains "$show" "blocked: no" "the shim resolve did not release the routed work"
+  assert_contains "$show" "state: done" "the canonical answer did not close the legacy-shaped row"
+  assert_contains "$show" "Use route north." "the canonical answer lost the captain decision"
 
-  old_hold=$(run_shim "$home" hold "$id" old-route \
-    --title "Old routed choice" --reason "captain old route pending" --repo sample)
-  tasks_in "$home" add sample-old-routed-work "Apply the old routed choice" \
-    --kind ship --repo sample --blocked-by "$old_hold" >/dev/null
-  printf 'Use the historical route.\n' > "$home/old-route.txt"
-  legacy_text=$(cat "$home/old-route.txt")
-  if command -v shasum >/dev/null 2>&1; then
-    legacy_digest=$(printf '%s' "$legacy_text" | shasum -a 256 | awk '{print $1}')
-  else
-    legacy_digest=$(printf '%s' "$legacy_text" | sha256sum | awk '{print $1}')
-  fi
-  printf 'Resolution recorded by fm-decision-hold.\nDecision digest: %s\nRouted identities: sample-old-routed-work\nResolution mode: routed\n\nCaptain decision:\n%s\n\nRouted work:\n- sample-old-routed-work\n' \
-    "$legacy_digest" "$legacy_text" > "$home/old-route-body.txt"
-  tasks_in "$home" update "$old_hold" --body-file "$home/old-route-body.txt" --archive-body >/dev/null
-  run_shim "$home" resolve "$id" old-route --decision-file "$home/old-route.txt" \
-    --routed-to sample-old-routed-work >/dev/null \
-    || fail "the shim did not replay a matching pre-collapse routed record"
-  show=$(tasks_in "$home" show "$old_hold" --full)
-  assert_contains "$show" "state: done" "the replayed legacy resolve did not close its hold"
-  show=$(tasks_in "$home" show sample-old-routed-work --full)
-  assert_contains "$show" "blocked_by: none" "the replayed legacy resolve did not clear its recorded edge"
-
-  # The shim decline path maps onto the same recorded answer.
+  # A second legacy-shaped row closes through the same canonical answer path.
   printf 'Declined: keep the current shape.\n' > "$home/decline.txt"
-  run_shim "$home" decline "$id" keep-two --decision-file "$home/decline.txt" >/dev/null \
-    || fail "the shim decline path failed"
+  run_captain "$home" answer "$id-decision-keep-two" --decision-file "$home/decline.txt" >/dev/null \
+    || fail "the canonical answer path failed for the second legacy-shaped row"
   run_captain "$home" verify "$id" >/dev/null \
-    || fail "shim-closed rows did not satisfy the completion gate"
+    || fail "legacy-shaped closed rows did not satisfy the completion gate"
 
   # A concrete-origin binding (a pre-collapse record) makes short channel keys
   # resolve through the composed identity.
-  run_shim "$home" hold "$id" third-choice \
+  run_captain "$home" hold "$id-decision-third-choice" --origin "$id" \
     --title "Third choice" --reason "captain third choice pending" --repo sample >/dev/null
-  run_shim "$home" bind legacy-src "$id" >/dev/null || fail "the shim bind path failed"
+  run_captain "$home" bind legacy-src "$id" >/dev/null || fail "the canonical bind path failed"
   [ "$(run_captain "$home" binding legacy-src)" = "$id" ] \
     || fail "the concrete-origin binding was not preserved"
   printf 'third-choice\toption b\t\n' \
@@ -2159,7 +1888,7 @@ test_legacy_identities_keep_working() {
   show=$(tasks_in "$home" show "$id-decision-third-choice" --full)
   assert_contains "$show" "state: done" "the legacy-keyed answer did not close its row"
 
-  run_shim "$home" hold "$id" fourth-choice \
+  run_captain "$home" hold "$id-decision-fourth-choice" --origin "$id" \
     --title "Fourth choice" --reason "captain fourth choice pending" --repo sample >/dev/null
   legacy_text=$(printf 'Captain answered this decision through legacy replay.\nDecision key: fourth-choice\nAnswer: option c\n')
   if command -v shasum >/dev/null 2>&1; then
@@ -2181,7 +1910,7 @@ test_legacy_identities_keep_working() {
     || fail "a full legacy task-id replay without an origin was not idempotent"
   assert_contains "$out" "closed: $id-decision-fourth-choice" \
     "the origin-free legacy replay digest was treated as drift"
-  pass "legacy identities, metadata, bindings, and the shim keep working"
+  pass "legacy identities, metadata, bindings, and records keep working through canonical owners"
 }
 
 # A board answer must reach the keyed-answer intake through the RUNNER, not just
@@ -2253,7 +1982,7 @@ test_chat_channel_feeds_the_same_keyed_answer_intake() {
   write_origin_meta "$home" "$id" ship
   printf 'needs-decision [key=chat-choice]: pick option A or option B\n' > "$home/state/$id.status"
   printf '# Chat review\n\nTwo captain choices remain.\n' > "$home/data/$id/report.md"
-  run_shim "$home" hold "$id" chat-choice \
+  run_captain "$home" hold "$id-decision-chat-choice" --origin "$id" \
     --title "Choose the sample chat option" --reason "captain chat choice pending" --repo sample >/dev/null \
     || fail "could not register the legacy chat row"
   run_captain "$home" hold sample-chat-followup --title "Choose the chat follow-up" \
@@ -4021,9 +3750,6 @@ test_out_of_band_close_is_recordable
 test_visual_review_uses_shared_completion_owner
 test_none_inventory_and_resolved_prose_do_not_create_holds
 test_terminal_single_owner_status_decision_does_not_block_empty_inventory
-test_secondmate_hold_stays_in_authoritative_home
-test_secondmate_home_publishes_holds_and_answers
-test_secondmate_reconcile_publishes_before_request_retirement
 test_bound_channel_answers_close_at_answer_time
 test_reconcile_never_closes_through_the_keyed_answer_intake
 test_normal_answers_retire_pending_reconcile_requests

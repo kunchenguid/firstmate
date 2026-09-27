@@ -13,9 +13,9 @@
 # home (bin/fm-public-followup.sh deliver).
 #
 # Usage:
-#   fm-public-followup-emit.sh (--home <owning-home> | --stage-in <work-home>) \
+#   fm-public-followup-emit.sh --home <owning-home> \
 #     --obligation <obligation-id> --relation <relation-id> \
-#     --source-home <main|secondmate:<id>> --work-id <task-id> \
+#     --source-home main --work-id <task-id> \
 #     --generation <n> --outcome <outcome-type> \
 #     [--deliverable <key>=<value>]... \
 #     (--outcome-text <text> | --outcome-text-file <path> | --outcome-text -)
@@ -26,19 +26,10 @@
 #                          registration for --obligation; see
 #                          `fm-public-followup.sh register`. Use this whenever
 #                          the owning home is on THIS machine.
-#   --stage-in <path>      The home THIS worker runs in, when the owning home is
-#                          on another machine and no local path reaches it. The
-#                          typed event is staged in this home's public-followup
-#                          outbox with the identical identity, shape, and bounds,
-#                          and the owning home collects it over the route's own
-#                          transport (bin/fm-public-followup-collect.sh). Exactly
-#                          one of --home and --stage-in is required;
-#                          `fm-public-followup.sh brief` prints whichever the
-#                          bound work home actually needs.
 #   --obligation <id>      tasks-axi public-followup obligation id.
 #   --relation <id>        The relation_id this work fulfills or contributes to.
 #   --source-home <id>     This worker's stable home identity, exactly as bound:
-#                          "main" or "secondmate:<stable-id>".
+#                          "main".
 #   --work-id <id>         This worker's exact task id, exactly as bound.
 #   --generation <n>       The bound relation generation (integer >= 1).
 #   --outcome <type>       Typed outcome. tasks-axi owns the vocabulary and
@@ -65,12 +56,7 @@
 # atomic rename into place, single link, mode 0600 (never executable), inside a
 # 0700 directory. The owning home must already have registered the obligation, so
 # a home that never opted into the relay can never be given public-followup
-# artifacts by a child. --stage-in writes into the CALLER'S OWN home instead, so
-# that gate does not apply and does not run: the registration and the relay
-# consent both live on the other machine, and the collecting home re-validates
-# every field against its own registration and tasks-axi before accepting the
-# event. A staged event is never posted, never read as a public reply, and never
-# consumed by the staging home's own reconciliation.
+# artifacts by a child.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -79,9 +65,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
   cat >&2 <<'EOF'
-usage: fm-public-followup-emit.sh (--home <owning-home> | --stage-in <work-home>)
+usage: fm-public-followup-emit.sh --home <owning-home>
          --obligation <id> --relation <id>
-         --source-home <main|secondmate:<id>> --work-id <id> --generation <n>
+         --source-home main --work-id <id> --generation <n>
          --outcome <type> [--deliverable <key>=<value>]...
          (--outcome-text <text> | --outcome-text-file <path> | --outcome-text -)
 EOF
@@ -94,21 +80,12 @@ help() {
 
 die() { printf 'fm-public-followup-emit: %s\n' "$1" >&2; exit "${2:-2}"; }
 
-# set_home_target <owning|staging> <path>: record which home this event is being
-# written into, and which of the two destinations that means. The two modes
-# answer different questions - is the owning home reachable from here, or not -
-# so mixing them in one invocation is always a mistake and is refused rather
-# than silently resolved by argument order.
 set_home_target() {
-  if [ -n "$HOME_MODE" ] && [ "$HOME_MODE" != "$1" ]; then
-    die "--home and --stage-in are mutually exclusive; pass exactly one"
-  fi
-  HOME_MODE=$1
-  HOME_DIR=$2
+  [ -z "$HOME_DIR" ] || die "--home may be passed only once"
+  HOME_DIR=$1
 }
 
 HOME_DIR=
-HOME_MODE=
 OBLIGATION=
 RELATION=
 SOURCE_HOME=
@@ -127,8 +104,7 @@ esac
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --home)            shift; set_home_target owning "${1:-}" ;;
-    --stage-in)        shift; set_home_target staging "${1:-}" ;;
+    --home)            shift; set_home_target "${1:-}" ;;
     --obligation)      shift; OBLIGATION=${1:-} ;;
     --relation)        shift; RELATION=${1:-} ;;
     --source-home)     shift; SOURCE_HOME=${1:-} ;;
@@ -165,8 +141,7 @@ fm_pf_slug_valid "$OBLIGATION" || die "unsafe obligation id: $OBLIGATION"
 fm_pf_slug_valid "$RELATION"   || die "unsafe relation id: $RELATION"
 fm_pf_slug_valid "$WORK_ID"    || die "unsafe work id: $WORK_ID"
 fm_pf_slug_valid "$OUTCOME"    || die "unsafe outcome type: $OUTCOME"
-fm_pf_home_id_valid "$SOURCE_HOME" \
-  || die "source home must be 'main' or 'secondmate:<stable-id>', got '$SOURCE_HOME'"
+[ "$SOURCE_HOME" = main ] || die "source home must be 'main', got '$SOURCE_HOME'"
 case "$GENERATION" in
   ''|*[!0-9]*) die "generation must be a positive integer, got '$GENERATION'" ;;
 esac
@@ -189,38 +164,20 @@ done
 # Resolve the owning home to a real absolute directory before composing any path
 # under it, so a relative or symlinked argument cannot make the destination
 # ambiguous in a later message or write.
-HOME_FLAG=--home
-[ "$HOME_MODE" != staging ] || HOME_FLAG=--stage-in
 case "$HOME_DIR" in
   /*) ;;
   *)
     HOME_RESOLVED=$(CDPATH='' cd -- "$HOME_DIR" 2>/dev/null && pwd -P) \
-      || die "$HOME_FLAG is not a reachable directory: $HOME_DIR"
+      || die "--home is not a reachable directory: $HOME_DIR"
     HOME_DIR=$HOME_RESOLVED
     ;;
 esac
 [ -d "$HOME_DIR" ] && [ ! -L "$HOME_DIR" ] \
-  || die "$HOME_FLAG must name an existing directory, got '$HOME_DIR'"
-# A staged event is only ever found again by the collecting home reading this
-# home's state tree, so a path that is not a firstmate home would swallow the
-# result silently. Refuse it here instead.
-if [ "$HOME_MODE" = staging ]; then
-  case "$SOURCE_HOME" in
-    secondmate:*) STAGING_HOME_ID=${SOURCE_HOME#secondmate:} ;;
-    *) die "--stage-in must name the secondmate firstmate home identified by --source-home" ;;
-  esac
-  [ -d "$HOME_DIR/state" ] && [ ! -L "$HOME_DIR/state" ] \
-    && [ -f "$HOME_DIR/.fm-secondmate-home" ] && [ ! -L "$HOME_DIR/.fm-secondmate-home" ] \
-    || die "--stage-in must name the secondmate firstmate home identified by --source-home"
-  STAGING_HOME_MARKER=$(sed -n '1p' "$HOME_DIR/.fm-secondmate-home" 2>/dev/null) || STAGING_HOME_MARKER=
-  [ "$STAGING_HOME_MARKER" = "$STAGING_HOME_ID" ] \
-    || die "--stage-in must name the secondmate firstmate home identified by --source-home"
-fi
+  || die "--home must name an existing directory, got '$HOME_DIR'"
 
 STATE="$HOME_DIR/state"
-if [ "$HOME_MODE" = owning ]; then
-  fm_pf_relay_active "$HOME_DIR" || exit 0
-  command -v jq >/dev/null 2>&1 || die "jq is required to build a typed terminal event" 1
+fm_pf_relay_active "$HOME_DIR" || exit 0
+command -v jq >/dev/null 2>&1 || die "jq is required to build a typed terminal event" 1
 
   REGISTRY="$(fm_pf_registry_dir "$STATE")/$OBLIGATION"
   if [ ! -f "$REGISTRY" ] || [ -L "$REGISTRY" ]; then
@@ -240,12 +197,6 @@ if [ "$HOME_MODE" = owning ]; then
   reg_mismatch source-home "$(fm_pf_registry_get "$STATE" "$OBLIGATION" work_home)"  "$SOURCE_HOME"
   reg_mismatch work-id    "$(fm_pf_registry_get "$STATE" "$OBLIGATION" work_id)"     "$WORK_ID"
   reg_mismatch generation "$(fm_pf_registry_get "$STATE" "$OBLIGATION" generation)"  "$GENERATION"
-else
-  # Staging home: the registration and the relay consent live on the other
-  # machine, so neither gate can run here and neither is skipped as a shortcut.
-  # The collecting home applies both, plus tasks-axi, before it accepts anything.
-  command -v jq >/dev/null 2>&1 || die "jq is required to build a typed terminal event" 1
-fi
 
 case "$TEXT_MODE" in
   inline) OUTCOME_TEXT=$(printf '%s' "$TEXT_SOURCE" | fm_pf_clean_outcome_text) ;;
@@ -310,11 +261,7 @@ EVENT_BYTES=$(printf '%s\n' "$EVENT_JSON" | LC_ALL=C wc -c | tr -d ' ') \
 [ "$EVENT_BYTES" -le "$FM_PF_EVENT_BYTES_MAX" ] \
   || die "typed terminal event exceeds $FM_PF_EVENT_BYTES_MAX bytes" 2
 
-if [ "$HOME_MODE" = owning ]; then
-  DESTINATION=$(fm_pf_events_dir "$STATE")
-else
-  DESTINATION=$(fm_pf_outbox_dir "$STATE")
-fi
+DESTINATION=$(fm_pf_events_dir "$STATE")
 printf '%s\n' "$EVENT_JSON" \
   | fmx_private_artifact_publish_stdin_once "$DESTINATION" "$EVENT_ID.json" 600
 case $? in

@@ -38,9 +38,9 @@ Native resume availability and form belong solely to the selected tool reference
 Use native resume only when both that reference and the recovery procedure call for it.
 Deterministic relaunch instead trusts instructions on disk, not a private session.
 
-`../stuck-crewmate-recovery/SKILL.md` owns worker recovery and `../secondmate-provisioning/SKILL.md` owns secondmate recovery; both preserve recorded work.
+`../stuck-crewmate-recovery/SKILL.md` owns worker recovery and preserves recorded work.
 For a preserved unconfirmed launch or a missing original transcript generation beside a live local Herdr worker, use the read-only preflight and bounded in-place procedure owned by repository-root `bin/fm-busy-event.sh recover` before considering replacement.
-The router's recovery scenarios select the additional common references for replacement profiles and secondmates.
+The router's recovery scenarios select the additional common references for replacement profiles.
 
 Records naming removed harnesses are historical evidence, not authority to relaunch another tool.
 Control, relaunch, and teardown refuse them; preserve the record and worktree until an explicit migration is authorized.

@@ -27,8 +27,7 @@
     "docs/configuration.md",
     "docs/feishu-channel.md",
     "docs/wedge-alarm.md",
-    "docs/herdr-backend.md",
-    "docs/remote-secondmates.md"
+    "docs/herdr-backend.md"
   ],
   "requiredOwnerPointers": [
     {
@@ -80,10 +79,6 @@
       "target": "docs/verification/runtime-backends.md"
     },
     {
-      "source": "docs/codex-app-backend.md",
-      "target": "docs/verification/runtime-backends.md"
-    },
-    {
       "source": "docs/trace-context.md",
       "target": "docs/verification/trace-context.md"
     }
@@ -122,15 +117,7 @@
       "audience": "agent-runtime"
     },
     {
-      "path": ".agents/skills/decision-hold-lifecycle/SKILL.md",
-      "audience": "agent-runtime"
-    },
-    {
       "path": ".agents/skills/diagnostic-reasoning/SKILL.md",
-      "audience": "agent-runtime"
-    },
-    {
-      "path": ".agents/skills/firstmate-codexapp/SKILL.md",
       "audience": "agent-runtime"
     },
     {
@@ -178,10 +165,6 @@
       "audience": "agent-runtime"
     },
     {
-      "path": ".agents/skills/magibook-pyspark/SKILL.md",
-      "audience": "agent-runtime"
-    },
-    {
       "path": ".agents/skills/process-event-sources/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -195,10 +178,6 @@
     },
     {
       "path": ".agents/skills/quota-array-dispatch/SKILL.md",
-      "audience": "agent-runtime"
-    },
-    {
-      "path": ".agents/skills/secondmate-provisioning/SKILL.md",
       "audience": "agent-runtime"
     },
     {
@@ -260,10 +239,6 @@
     {
       "path": "docs/cd-guard.md",
       "audience": "maintainer-architecture"
-    },
-    {
-      "path": "docs/codex-app-backend.md",
-      "audience": "operator-current"
     },
     {
       "path": "docs/configuration.md",
@@ -334,14 +309,6 @@
       "audience": "maintainer-architecture"
     },
     {
-      "path": "docs/remote-secondmates.md",
-      "audience": "operator-current"
-    },
-    {
-      "path": "docs/secondmate-parent-channel.md",
-      "audience": "maintainer-architecture"
-    },
-    {
       "path": "docs/scripts.md",
       "audience": "operator-current"
     },
@@ -399,10 +366,6 @@
     },
     {
       "path": "docs/verification/runtime-backends.md",
-      "audience": "maintainer-verification"
-    },
-    {
-      "path": "docs/verification/secondmate-parent-channel.md",
       "audience": "maintainer-verification"
     },
     {

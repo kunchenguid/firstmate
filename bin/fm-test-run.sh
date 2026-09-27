@@ -313,26 +313,13 @@ family_for_basename() {
     fm-backend-herdr-agent-exit-shell-e2e.test.sh|\
     fm-periodic-stow-herdr-live-e2e.test.sh|\
     fm-herdr-attached-viewer-live-e2e.test.sh|fm-herdr-session-cleanup-e2e.test.sh|\
-    fm-backend-herdr-smoke.test.sh|fm-backend-herdr-workspace-per-home-e2e.test.sh|\
+    fm-backend-herdr-smoke.test.sh|\
     fm-control-herdr-smoke.test.sh|fm-agent-process-live-e2e.test.sh)
       printf '%s\n' real-herdr-gated
       ;;
-    fm-backlog-handoff.test.sh|fm-on.test.sh|fm-remote-backlog-handoff.test.sh|\
-    fm-remote-doctor.test.sh|fm-remote-herdr-guard.test.sh|fm-remote-job.test.sh|fm-remote-job-orphan-reap.test.sh|\
-    fm-remote-transport-lanes.test.sh|\
-    fm-remote-reply.test.sh|fm-remote-secondmate-lifecycle-e2e.test.sh|\
-    fm-remote-secondmate-trace-context.test.sh|\
-    fm-secondmate-harness.test.sh|fm-secondmate-lifecycle-e2e.test.sh|\
-    fm-secondmate-liveness.test.sh|fm-secondmate-reconcile.test.sh|\
-    fm-secondmate-restart.test.sh|\
-    fm-secondmate-safety.test.sh|fm-secondmate-sync.test.sh|\
-    fm-startup-memory-budget.test.sh|fm-stow-cascade.test.sh|\
-    fm-send-secondmate-marker.test.sh|fm-shared-captain-inheritance.test.sh)
-      printf '%s\n' secondmate
-      ;;
     fm-backlog-atomicity.test.sh|\
-    fm-bootstrap.test.sh|fm-bootstrap-network-parallel.test.sh|fm-fleet-sync.test.sh|fm-gate-refuse.test.sh|fm-gotmp.test.sh|\
-    fm-session-start.test.sh|fm-sessionstart-nudge.test.sh|fm-startup-network.test.sh|\
+    fm-bootstrap.test.sh|fm-fleet-sync.test.sh|fm-gate-refuse.test.sh|fm-gotmp.test.sh|\
+    fm-session-start.test.sh|fm-sessionstart-nudge.test.sh|fm-startup-memory-budget.test.sh|fm-startup-network.test.sh|\
     fm-tangle-guard.test.sh|fm-update.test.sh)
       printf '%s\n' session-bootstrap
       ;;
@@ -351,7 +338,7 @@ family_for_basename() {
     fm-calm-pi-herdr-live-e2e.test.sh|fm-pi-branch-responsiveness-live-e2e.test.sh|\
     fm-pi-primary-live-e2e.test.sh|fm-pi-codex-native.test.sh|\
     fm-sessionstart-hook-live-e2e.test.sh|fm-sessionstart-instruction-refresh-live-e2e.test.sh|\
-    fm-quota-array-dispatch-live-e2e.test.sh|fm-send-secondmate-marker-herdr-e2e.test.sh|\
+    fm-quota-array-dispatch-live-e2e.test.sh|\
     fm-send-inbox-doorbell-live-e2e.test.sh|fm-stow-local-skill-live-e2e.test.sh|\
     fm-readable-documents-live-e2e.test.sh)
       printf '%s\n' live-harness-optin
@@ -373,19 +360,17 @@ family_for_basename() {
       printf '%s\n' afk
       ;;
     fm-bearings-board-render.test.sh|fm-bearings-snapshot.test.sh|\
-    fm-fleet-snapshot-view.test.sh|fm-home-summary-refresh.test.sh)
+    fm-fleet-snapshot-view.test.sh)
       printf '%s\n' snapshot-bearings
       ;;
     fm-branch-supervision.test.sh|fm-busy-adapter-wiring.test.sh|\
-    fm-busy-state.test.sh|fm-classify-corr-token.test.sh|\
+    fm-busy-state.test.sh|\
     fm-extension-binding.test.sh|fm-gitignore-config.test.sh|\
-    fm-no-mistakes-required.test.sh|fm-peek-remote.test.sh|\
-    fm-pending-reply.test.sh|fm-pi-branch-extension.test.sh|\
+    fm-no-mistakes-required.test.sh|fm-pi-branch-extension.test.sh|\
     fm-procevent-quota.test.sh|fm-procevent-when.test.sh|fm-procevent.test.sh|\
     fm-live-gate.test.sh|\
-    fm-project-origin.test.sh|fm-public-followup.test.sh|fm-quota-choose.test.sh|\
-    fm-remote-entrypoint.test.sh|fm-remote-secondmate-parent-binding.test.sh|\
-    fm-send-remote-delivery.test.sh|fm-spawn-pool-base-freshen.test.sh|\
+    fm-public-followup.test.sh|fm-quota-choose.test.sh|\
+    fm-spawn-pool-base-freshen.test.sh|\
     fm-test-fixture-cleanup.test.sh|fm-test-fixtures.test.sh|\
     fm-inbox.test.sh|fm-wake-drain-open-decisions-cursor.test.sh|\
     fm-wake-drain-open-decisions.test.sh|fm-wake-drain-outcome-backstop.test.sh)
@@ -411,7 +396,6 @@ list_known_families() {
 pure-contract-unit
 watcher-wake-lock
 real-herdr-gated
-secondmate
 session-bootstrap
 live-harness-optin
 backend-dispatch
@@ -560,7 +544,6 @@ list_concurrent_safe_families() {
 watcher-wake-lock
 pure-contract-unit
 pr-forge
-secondmate
 session-bootstrap
 standalone
 EOF
@@ -577,7 +560,7 @@ family_is_concurrent_safe() {
 concurrent_safe_family_jobs_max() {
   case "$1" in
     watcher-wake-lock|pure-contract-unit|pr-forge) printf '4\n' ;;
-    secondmate|session-bootstrap|standalone) printf '4\n' ;;
+    session-bootstrap|standalone) printf '4\n' ;;
     *) printf '1\n' ;;
   esac
 }
@@ -604,8 +587,8 @@ is_proven_isolated_script() {
 }
 
 # The portable serial remainder: every tests/*.test.sh that is neither
-# proven-isolated nor real-herdr-gated. Watcher, lock, AFK, daemon, secondmate
-# lifecycle, bootstrap, the live-harness-optin family, and other unproven work
+# proven-isolated nor real-herdr-gated. Watcher, lock, AFK, daemon, bootstrap,
+# the live-harness-optin family, and other unproven work
 # stays here. Derived rather than enumerated so a newly added test
 # lands here by default instead of falling out of every lane.
 list_portable_serial() {
@@ -625,13 +608,14 @@ list_portable_serial() {
 }
 
 # Measured portable-serial script durations in milliseconds, from the CI timing
-# artifacts recorded in docs/fm-test-portable-shards.md. Each value is the
-# slowest of several green runs, so the balance holds on a slow runner rather
-# than only on the fastest one measured. These are balance hints only: the shard
+# artifacts recorded in docs/fm-test-portable-shards.md or a fresh green local
+# run when a retired test changes the lane denominator. Values refreshed from
+# multiple artifacts use the slowest green run. These are balance hints only: the shard
 # partition stays complete and disjoint whatever they say, so a stale hint costs
 # balance rather than coverage. That doc owns the refresh procedure.
 portable_serial_weight_hints() {
   cat <<'EOF'
+tests/fm-agent-process.test.sh 296
 tests/fm-afk-contract.test.sh 3000
 tests/fm-afk-inject-e2e.test.sh 35792
 tests/fm-afk-pi-herdr-return-e2e.test.sh 100
@@ -639,18 +623,16 @@ tests/fm-afk-return.test.sh 1837
 tests/fm-ask-user-authority.test.sh 128
 tests/fm-backend.test.sh 20061
 tests/fm-backlog-atomicity.test.sh 161989
-tests/fm-backlog-handoff.test.sh 52291
+tests/fm-backlog-read-bound.test.sh 24031
 tests/fm-bearings-board-render.test.sh 1528
 tests/fm-bearings-board.test.sh 4195
 tests/fm-bearings-snapshot.test.sh 116374
-tests/fm-bootstrap-network-parallel.test.sh 8214
 tests/fm-bootstrap.test.sh 25208
 tests/fm-branch-supervision.test.sh 5729
 tests/fm-busy-adapter-wiring.test.sh 49731
 tests/fm-busy-state.test.sh 2926
 tests/fm-calm-pi-extension.test.sh 256
 tests/fm-check-unregister.test.sh 481
-tests/fm-classify-corr-token.test.sh 38742
 tests/fm-classify-decision-key.test.sh 1167
 tests/fm-codex-continuity-live-e2e.test.sh 21
 tests/fm-composer-matrix-live-e2e.test.sh 23
@@ -669,74 +651,50 @@ tests/fm-guard-stale-banner.test.sh 32981
 tests/fm-harness-adapter-instructions-live-e2e.test.sh 20
 tests/fm-harness-adapter-references.test.sh 55
 tests/fm-harness-liveness-drift-live-e2e.test.sh 21
+tests/fm-harness-precedence.test.sh 599
 tests/fm-herdr-attached-viewer-live-e2e.test.sh 19000
 tests/fm-herdr-session-cleanup.test.sh 6704
 tests/fm-herdr-version-floor-live-e2e.test.sh 23
-tests/fm-home-summary-refresh.test.sh 34793
 tests/fm-inactive-reconcile.test.sh 74399
 tests/fm-lint-workflows.test.sh 855
 tests/fm-live-gate.test.sh 6000
 tests/fm-no-mistakes-required.test.sh 370
-tests/fm-on.test.sh 34087
 tests/fm-operational-input.test.sh 231
-tests/fm-peek-remote.test.sh 1018
-tests/fm-pending-reply.test.sh 86711
 tests/fm-pi-branch-extension.test.sh 22239
 tests/fm-pi-branch-live-e2e.test.sh 56
 tests/fm-pi-branch-responsiveness-live-e2e.test.sh 21
 tests/fm-pi-primary-live-e2e.test.sh 20
 tests/fm-pi-watch-extension.test.sh 42970
 tests/fm-pi-windows-shell-invocation.test.sh 5121
+tests/fm-periodic-stow.test.sh 21332
 tests/fm-pr-check-security.test.sh 172215
 tests/fm-procevent-quota.test.sh 1949
 tests/fm-procevent-when.test.sh 17392
 tests/fm-procevent.test.sh 69715
-tests/fm-project-origin.test.sh 137
 tests/fm-public-followup.test.sh 196745
 tests/fm-quota-array-dispatch-live-e2e.test.sh 21
 tests/fm-readable-documents-live-e2e.test.sh 8400
 tests/fm-stow-local-skill-live-e2e.test.sh 8400
 tests/fm-quota-choose.test.sh 1461
-tests/fm-remote-backlog-handoff.test.sh 41432
-tests/fm-remote-doctor.test.sh 5198
-tests/fm-remote-entrypoint.test.sh 132
-tests/fm-remote-herdr-guard.test.sh 1500
-tests/fm-remote-job-orphan-reap.test.sh 2972
-tests/fm-remote-job.test.sh 59603
-tests/fm-remote-reply.test.sh 101690
-tests/fm-remote-secondmate-lifecycle-e2e.test.sh 209631
-tests/fm-remote-secondmate-parent-binding.test.sh 29562
-tests/fm-remote-secondmate-trace-context.test.sh 67096
-tests/fm-remote-transport-lanes.test.sh 63976
-tests/fm-secondmate-harness.test.sh 151589
-tests/fm-secondmate-lifecycle-e2e.test.sh 8793
-tests/fm-secondmate-liveness.test.sh 18146
-tests/fm-secondmate-reconcile.test.sh 62726
-tests/fm-secondmate-restart.test.sh 119085
-tests/fm-secondmate-safety.test.sh 57689
-tests/fm-secondmate-sync.test.sh 17183
 tests/fm-send-inbox-doorbell-live-e2e.test.sh 22
 tests/fm-send-inbox.test.sh 38956
-tests/fm-send-remote-delivery.test.sh 27686
 tests/fm-send-resolve-key.test.sh 19619
-tests/fm-send-secondmate-marker-herdr-e2e.test.sh 51
-tests/fm-send-secondmate-marker.test.sh 6252
 tests/fm-session-lock-ancestry.test.sh 1414
 tests/fm-session-start.test.sh 156952
 tests/fm-sessionstart-hook-live-e2e.test.sh 20
 tests/fm-sessionstart-instruction-refresh-live-e2e.test.sh 22
 tests/fm-sessionstart-nudge.test.sh 66194
-tests/fm-shared-captain-inheritance.test.sh 6108
 tests/fm-spawn-dispatch-profile.test.sh 63996
 tests/fm-spawn-pool-base-freshen.test.sh 34920
 tests/fm-spawn-worktree-settle.test.sh 5687
 tests/fm-startup-memory-budget.test.sh 6964
 tests/fm-startup-network.test.sh 62274
-tests/fm-stow-cascade.test.sh 3101
+tests/fm-stat-shadowing.test.sh 47
 tests/fm-supervision-events.test.sh 719
 tests/fm-tangle-guard.test.sh 9662
 tests/fm-task-delivery.test.sh 5952
 tests/fm-task-inbox.test.sh 25369
+tests/fm-tasks-axi.test.sh 1690
 tests/fm-teardown-endpoint-safety.test.sh 4620
 tests/fm-teardown.test.sh 97603
 tests/fm-test-fixture-cleanup.test.sh 915
@@ -1335,7 +1293,6 @@ families_for_changed_path() {
       printf '%s\n' afk
       ;;
     bin/fm-startup-memory-budget.sh|bin/fm-startup-memory-budget-lib.sh)
-      printf '%s\n' secondmate
       printf '%s\n' session-bootstrap
       ;;
     bin/fm-remote-agent-lib.sh|bin/fm-remote-agent-aime.sh|bin/fm-remote-agent-ida.sh|\
@@ -1343,12 +1300,6 @@ families_for_changed_path() {
     bin/fm-task-dispatch.sh|bin/fm-task-state.sh|bin/fm-task-retire.sh)
       printf '%s\n' "__script__:fm-aime-cloud-worker.test.sh"
       printf '%s\n' "__script__:fm-remote-agent.test.sh"
-      ;;
-    bin/fm-secondmate*|bin/fm-remote*|bin/fm-on.sh|bin/fm-home-seed.sh|\
-    bin/fm-backlog-handoff.sh|bin/fm-backlog-receive.sh|bin/fm-procevent-remote-reply.sh|\
-    bin/fm-config-inherit-lib.sh|bin/fm-config-push.sh|bin/fm-shared*|\
-    bin/fm-stow-cascade.sh)
-      printf '%s\n' secondmate
       ;;
     bin/fm-stow-run.sh)
       printf '%s\n' "__script__:fm-periodic-stow.test.sh"
@@ -1442,7 +1393,6 @@ families_for_changed_path() {
       printf '%s\n' __script__:fm-extension-binding.test.sh
       printf '%s\n' __script__:fm-procevent.test.sh
       printf '%s\n' __script__:fm-procevent-when.test.sh
-      printf '%s\n' __script__:fm-remote-reply.test.sh
       ;;
     bin/fm-timeout-lib.sh)
       # The shared hard bound: session start's runtime bound, the fleet/bearings
@@ -1451,7 +1401,6 @@ families_for_changed_path() {
       printf '%s\n' session-bootstrap
       printf '%s\n' snapshot-bearings
       printf '%s\n' pure-contract-unit
-      printf '%s\n' secondmate
       printf '%s\n' watcher-wake-lock
       printf '%s\n' "__script__:fm-procevent-quota.test.sh"
       ;;
@@ -1497,8 +1446,7 @@ families_for_changed_path() {
       printf '%s\n' "__script__:fm-aime-cloud-worker.test.sh"
       printf '%s\n' "__script__:fm-remote-agent.test.sh"
       ;;
-    bin/fm-bearings-snapshot.sh|bin/fm-fleet-view.sh|\
-    bin/fm-home-summary-refresh.sh)
+    bin/fm-bearings-snapshot.sh|bin/fm-fleet-view.sh)
       printf '%s\n' snapshot-bearings
       ;;
     bin/fm-install-herdr.sh|bin/fm-install-treehouse.sh|bin/fm-herdr-ci-cleanup.sh)
@@ -1510,8 +1458,8 @@ families_for_changed_path() {
     bin/fm-lint.sh|bin/fm-lint-workflows.sh|bin/fm-install-shellcheck.sh|\
     bin/fm-install-actionlint.sh|\
     bin/fm-brief.sh|bin/fm-ensure-agents-md.sh|bin/fm-crew-state.sh|\
-    bin/fm-captain-hold.sh|bin/fm-decision-hold.sh|bin/fm-supervision*|bin/fm-transition-lib.sh|\
-    bin/fm-marker-lib.sh|bin/fm-operational-input.sh|bin/fm-tasks-axi-lib.sh|\
+    bin/fm-captain-hold.sh|bin/fm-supervision*|bin/fm-transition-lib.sh|\
+    bin/fm-operational-input.sh|bin/fm-tasks-axi-lib.sh|\
     bin/fm-primary-scope-lib.sh|bin/fm-project-mode.sh|bin/fm-promote.sh|\
     bin/fm-ff-lib.sh|bin/fm-gotmp*|bin/*pretool*)
       printf '%s\n' pure-contract-unit
@@ -1566,8 +1514,12 @@ families_for_changed_path() {
       # tests/*-fixture.sh would otherwise swallow a nested
       # tests/fixtures/<dir>/<name>-fixture.sh and scan for its basename
       # instead of the fixture directory its readers actually name.
-      families_for_test_reference "$(basename "$path")" \
-        || printf '%s\n' "__unmapped__:$path"
+      if [ -e "$path" ]; then
+        families_for_test_reference "$(basename "$path")" \
+          || printf '%s\n' "__unmapped__:$path"
+      else
+        families_for_test_reference "$(basename "$path")" || true
+      fi
       ;;
     bin/*)
       # A deleted script has no consuming suite left to select, the same rule

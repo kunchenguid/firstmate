@@ -18,15 +18,13 @@ set -u
 CI_WORKFLOW="$ROOT/.github/workflows/ci.yml"
 
 assert_present "$CI_WORKFLOW" ".github/workflows/ci.yml is missing"
-command -v ruby >/dev/null 2>&1 \
-  || fail "ruby is required to parse .github/workflows/ci.yml as YAML"
-
 # Resolve the workflow's concurrency contract under one simulated event and
 # print "<group><TAB><cancel-in-progress>". Only the two expression constructs
 # this workflow uses are resolved: an `a || b` fallback and an `==` comparison.
 resolve_concurrency() {
   local event=$1 pr_number=$2 run_id=$3
-  ruby -ryaml -e '
+  if command -v ruby >/dev/null 2>&1; then
+    ruby -ryaml -e '
 doc = YAML.load_file(ARGV[0])
 concurrency = doc.fetch("concurrency")
 context = {
@@ -60,12 +58,65 @@ end
 puts [interpolate.call(concurrency.fetch("group")),
       interpolate.call(concurrency.fetch("cancel-in-progress"))].join("\t")
 ' "$CI_WORKFLOW" "$event" "$pr_number" "$run_id"
+  else
+    python3 - "$CI_WORKFLOW" "$event" "$pr_number" "$run_id" <<'PY'
+import re
+import sys
+
+try:
+    import yaml
+except ImportError as exc:
+    raise SystemExit("neither Ruby nor Python yaml is available") from exc
+
+with open(sys.argv[1], encoding="utf-8") as workflow:
+    doc = yaml.safe_load(workflow)
+concurrency = doc["concurrency"]
+context = {
+    "github.workflow": doc["name"],
+    "github.event_name": sys.argv[2],
+    "github.event.pull_request.number": sys.argv[3],
+    "github.run_id": sys.argv[4],
+}
+
+def value(token):
+    token = token.strip()
+    if token.startswith("'") and token.endswith("'"):
+        return token[1:-1]
+    if token not in context:
+        raise SystemExit(f"unresolvable context reference: {token}")
+    return context[token]
+
+def evaluate(expression):
+    expression = expression.strip()
+    if "==" in expression:
+        left, right = expression.split("==", 1)
+        return "true" if value(left) == value(right) else "false"
+    return next((value(token) for token in expression.split("||") if value(token)), "")
+
+def interpolate(raw):
+    return re.sub(r"\$\{\{(.+?)\}\}", lambda match: evaluate(match.group(1)), str(raw))
+
+print("\t".join((interpolate(concurrency["group"]),
+                  interpolate(concurrency["cancel-in-progress"]))))
+PY
+  fi
 }
 
 job_timeout() {
-  ruby -ryaml -e '
+  if command -v ruby >/dev/null 2>&1; then
+    ruby -ryaml -e '
 puts YAML.load_file(ARGV[0]).fetch("jobs").fetch(ARGV[1]).fetch("timeout-minutes", "none")
 ' "$CI_WORKFLOW" "$1"
+  else
+    python3 - "$CI_WORKFLOW" "$1" <<'PY'
+import sys
+import yaml
+
+with open(sys.argv[1], encoding="utf-8") as workflow:
+    doc = yaml.safe_load(workflow)
+print(doc["jobs"][sys.argv[2]].get("timeout-minutes", "none"))
+PY
+  fi
 }
 
 group_of() { printf '%s\n' "$1" | cut -f1; }
@@ -104,13 +155,29 @@ test_main_pushes_are_never_cancelled() {
 
 test_every_job_has_a_finite_timeout() {
   local reported
-  reported=$(ruby -ryaml -e '
+  if command -v ruby >/dev/null 2>&1; then
+    reported=$(ruby -ryaml -e '
 YAML.load_file(ARGV[0]).fetch("jobs").each do |name, job|
   timeout = job["timeout-minutes"]
   next if timeout.is_a?(Integer) && timeout > 0
   puts "#{name}: #{timeout.inspect}"
 end
 ' "$CI_WORKFLOW") || fail "could not read job timeouts from ci.yml"
+  else
+    reported=$(python3 - "$CI_WORKFLOW" <<'PY'
+import json
+import sys
+import yaml
+
+with open(sys.argv[1], encoding="utf-8") as workflow:
+    doc = yaml.safe_load(workflow)
+for name, job in doc["jobs"].items():
+    timeout = job.get("timeout-minutes")
+    if not isinstance(timeout, int) or isinstance(timeout, bool) or timeout <= 0:
+        print(f"{name}: {json.dumps(timeout)}")
+PY
+    ) || fail "could not read job timeouts from ci.yml"
+  fi
   [ -z "$reported" ] || fail "these CI jobs have no finite hang tripwire:"$'\n'"$reported"
   pass "every ci.yml job carries a finite timeout"
 }

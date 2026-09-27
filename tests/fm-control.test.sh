@@ -14,17 +14,14 @@
 #   4. Verb allowlist: no arbitrary text, no raw keys, no resume.
 #   5. Lifecycle states: busy interrupts first, idle does not, already-stopped
 #      is idempotent success, and an agent that does not stop fails closed.
-#   6. Marker non-regression: a control command to a kind=secondmate task
-#      carries NO from-firstmate marker and opens no pending-reply expectation,
-#      while fm-send's marking of the same task is untouched.
+#   6. Historical-record non-regression: lifecycle control refuses records for
+#      removed persistent-home workers before reaching any endpoint.
 set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-control-lib.sh"
-# shellcheck source=/dev/null
-. "$ROOT/bin/fm-marker-lib.sh"
 
 CONTROL="$ROOT/bin/fm-control.sh"
 SEND="$ROOT/bin/fm-send.sh"
@@ -267,11 +264,7 @@ test_backend_key_capability_matrix() {
   pass "fm-control-lib: the backend key matrix matches each adapter's real send-key surface"
 }
 
-# A verified adapter is not automatically verified for every task kind, and the
-# check has to sit on the pre-stop side of a relaunch: TraeX has no primary
-# supervision protocol, so bin/fm-spawn.sh refuses it for a secondmate, and
-# discovering that only after the running agent was stopped would strand the
-# secondmate with no agent at all.
+# A verified adapter supports both retained task kinds.
 test_harness_kind_capability() {
   local harness
   for harness in $VERIFIED_HARNESSES; do
@@ -280,15 +273,9 @@ test_harness_kind_capability() {
     fm_control_harness_supports_kind "$harness" scout \
       || fail "$harness should be able to run a scout task"
   done
-  fm_control_harness_supports_kind traex secondmate \
-    && fail "TraeX has no primary supervision protocol and must not claim a secondmate"
-  for harness in codex pi; do
-    fm_control_harness_supports_kind "$harness" secondmate \
-      || fail "$harness should be able to run a secondmate"
-  done
   fm_control_harness_supports_kind someagent ship \
     && fail "an unverified harness must not claim any kind"
-  pass "fm-control-lib: adapter capability is per task kind, not per adapter alone"
+  pass "fm-control-lib: each verified adapter supports retained task kinds"
 }
 
 test_orca_refuses_an_escape_harness_interrupt() {
@@ -400,13 +387,9 @@ test_record_bound_to_another_task_is_refused() {
   pass "fm-control: a record whose endpoint identity names another task is refused"
 }
 
-# A remotely placed secondmate's agent runs on another host, so none of the
-# postconditions this plane verifies could be read for it here. Endpoint
-# validation would refuse the record anyway - `window=remote:<id>` can never
-# match a local backend's shape - but it would blame malformed metadata for a
-# correctly configured route, so the placement is named instead. Every verb
-# refuses, and none of them reaches a local endpoint.
-test_remote_secondmate_is_refused_by_placement() {
+# Historical secondmate records are preserved and refuse every lifecycle verb
+# without reaching an endpoint.
+test_historical_secondmate_is_refused() {
   local dir out rc verb
   for verb in interrupt exit relaunch; do
     dir=$(new_case "remote-$verb")
@@ -427,15 +410,13 @@ test_remote_secondmate_is_refused_by_placement() {
     else
       out=$(run_control "$dir" t1 "$verb"); rc=$?
     fi
-    expect_code 1 "$rc" "$verb on a remotely placed secondmate should refuse"
-    assert_contains "$out" "remotely placed secondmate on example.invalid" \
-      "the $verb refusal should name the remote placement, not blame the record"
-    assert_not_contains "$out" "malformed" \
-      "a correctly configured remote route must not be reported as malformed"
+    expect_code 1 "$rc" "$verb on a historical secondmate record should refuse"
+    assert_contains "$out" "historical secondmate record" \
+      "the $verb refusal should identify the retired record"
     [ -z "$(literals "$dir")" ] && [ -z "$(keys_sent "$dir")" ] \
-      || fail "$verb on a remote secondmate must reach no local endpoint"
+      || fail "$verb on a historical secondmate must reach no endpoint"
   done
-  pass "fm-control: a remotely placed secondmate is refused by placement, not by a metadata complaint"
+  pass "fm-control: historical secondmate records are preserved and safely refused"
 }
 
 hold_lifecycle_lock() {  # <lock-path>
@@ -667,56 +648,10 @@ test_agent_that_does_not_stop_fails_closed() {
 
 
 
-# --- 6. marker non-regression -----------------------------------------------
-
-test_secondmate_control_command_carries_no_marker() {
-  local dir out rc typed home
-  dir=$(new_case sm-marker)
-  home="$dir/home"
-  add_task "$dir" domain pi secondmate
-  # A secondmate's worktree IS its home; give it the marker its records need.
-  printf '%s\n' domain > "$dir/wt-domain/.fm-secondmate-home"
-  alive_as "$dir" pi
-  out=$(run_control "$dir" domain exit); rc=$?
-  expect_code 0 "$rc" "exiting a secondmate's agent should succeed"$'\n'"$out"
-  typed=$(literals "$dir")
-  [ "$typed" = "/quit" ] \
-    || fail "a secondmate control command must be the bare exit command, got: $typed"
-  case "$typed" in
-    *"$FM_FROMFIRST_MARK"*) fail "a control command must never carry the from-firstmate marker" ;;
-  esac
-  case "$typed" in
-    *corr=*) fail "a control command must never carry a pending-reply correlation id" ;;
-  esac
-  [ -z "$(find "$home/state/pending-replies" -type f 2>/dev/null | head -n 1)" ] \
-    || fail "a control command must not open a pending-reply expectation"
-  pass "fm-control: a lifecycle command to a secondmate is unmarked and opens no reply expectation"
-}
-
-test_fm_send_still_marks_the_same_secondmate_task() {
-  local dir log out rc
-  dir=$(new_case sm-send)
-  add_task "$dir" domain pi secondmate
-  log="$dir/fake/sendlog"
-  : > "$log"
-  out=$(env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
-    FM_SEND_SETTLE=0 FM_ROOT_OVERRIDE="$dir/home" \
-    "$SEND" domain "audit the build" 2>&1); rc=$?
-  expect_code 0 "$rc" "fm-send to a secondmate should still succeed"$'\n'"$out"
-  # The marked steer rides fm-send's durable inbox plane; only the doorbell is
-  # typed, so the marker is asserted on the recorded body.
-  case "$(bash -c '. "$1"; fm_task_inbox_body "$2"' _ "$ROOT/bin/fm-task-inbox-lib.sh" \
-    "$dir/home/state/domain.inbox/001.msg")" in
-    "$FM_FROMFIRST_MARK"*) : ;;
-    *) fail "fm-send must still mark a kind=secondmate target: $(literals "$dir")" ;;
-  esac
-  pass "fm-control's arrival leaves fm-send's from-firstmate marking untouched"
-}
-
 test_exit_types_each_harness_verified_command
 test_interrupt_sends_each_harness_verified_key
-test_unverified_harness_is_refused
 test_harness_family_resolution
+test_unverified_harness_is_refused
 test_backend_key_capability_matrix
 test_harness_kind_capability
 test_orca_refuses_an_escape_harness_interrupt
@@ -726,7 +661,7 @@ test_window_label_is_refused_with_the_exact_id
 test_explicit_endpoint_is_refused
 test_unknown_task_is_refused
 test_record_bound_to_another_task_is_refused
-test_remote_secondmate_is_refused_by_placement
+test_historical_secondmate_is_refused
 test_interrupt_and_exit_lock_before_task_state_resolution
 test_verb_allowlist_is_closed
 test_resume_is_refused_with_its_reason
@@ -740,5 +675,5 @@ test_idle_agent_is_not_interrupted
 test_interrupt_without_acknowledgement_preserves_busy_state
 test_exit_accepts_agent_stopped_by_busy_interrupt
 test_agent_that_does_not_stop_fails_closed
-test_secondmate_control_command_carries_no_marker
-test_fm_send_still_marks_the_same_secondmate_task
+
+printf '# fm-control.test.sh: all assertions passed\n'

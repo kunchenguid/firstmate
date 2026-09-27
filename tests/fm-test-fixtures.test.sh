@@ -32,6 +32,12 @@ test_git_config_isolation() (
   fm_fake_exit0 "$fakebin" herdr
   cat > "$fakebin/lab-helper" <<'SH'
 #!/usr/bin/env bash
+if [ "$#" -eq 0 ]; then
+  fm_herdr_lab_validate_name() { return 0; }
+  fm_herdr_lab_refuse_if_default() { return 0; }
+  fm_herdr_lab_teardown() { return 0; }
+  return 0 2>/dev/null || exit 0
+fi
 case "$1" in
   name) printf 'fm-lab-fixture-git-isolation\n'; exit ;;
   provision|teardown) exit ;;
@@ -113,7 +119,7 @@ SH
   # which layers that helper neutralizes is the helper's own property, settled
   # by the system-layer case below.
   arm_host_signing global
-  for helper in lib fixtures secondmate-helpers wake-helpers; do
+  for helper in lib fixtures wake-helpers; do
     assert_helper_isolates "$helper" global
   done
   bash -eus -- "$ROOT/tests/herdr-test-safety.sh" "$dir/global-herdr" <<'SH' || exit 1

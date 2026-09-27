@@ -4,11 +4,8 @@
 // Usage:
 //   fm-extension.mjs bind <package-root> --adapter <name> [--adapter <name> ...]
 //     --trust-same-user-code [--consent <fact> ...] [--timeout-ms <milliseconds>]
-//   fm-extension.sh remote-bind <secondmate-id> <package-root> [bind options]
 //   fm-extension.mjs retire-binding <extension-id>
 //     --if-binding-digest <sha256:digest>
-//   fm-extension.mjs retire-transfer <extension-id>
-//     --if-transfer-digest <sha256:digest> --if-binding-digest <sha256:digest>
 //   fm-extension.mjs list
 //   fm-extension.mjs inspect <extension-id>
 //   fm-extension.mjs verify [extension-id]
@@ -71,7 +68,6 @@ import {
   rmdir,
   rm,
   unlink,
-  writeFile,
 } from "node:fs/promises";
 import { createHash, randomBytes } from "node:crypto";
 import path from "node:path";
@@ -102,12 +98,6 @@ const MAX_RESULT_BYTES = 32768;
 const MAX_STDERR_BYTES = 8192;
 const MAX_TREE_ENTRIES = 4096;
 const MAX_TREE_BYTES = 64 * 1024 * 1024;
-const TRANSFER_SCHEMA = "firstmate.extension-package-transfer.v1";
-const TRANSFER_MANIFEST_SCHEMA = "firstmate.extension-package-transfer-manifest.v1";
-const MAX_TRANSFER_JSON_BYTES = 900000;
-const MAX_TRANSFER_ENTRIES = 128;
-const MAX_TRANSFER_FILE_BYTES = 256 * 1024;
-const MAX_TRANSFER_PACKAGE_BYTES = 512 * 1024;
 const MAX_BINDINGS = 128;
 const HANDSHAKE_TIMEOUT_MS = 5000;
 const DEFAULT_TIMEOUT_MS = 300000;
@@ -1802,15 +1792,10 @@ async function cmdBind(args) {
   await runLifecycleBinding("bind", args);
 }
 
-async function cmdBindFrom(args, stagedRoot) {
+async function cmdBindFrom(args) {
   const parsed = parseBindArguments(args);
   const home = await activeHome();
-  const sourceRoot = stagedRoot === null
-    ? await validateSourceRoot(home, parsed.packageRoot)
-    : await realpath(stagedRoot);
-  if (stagedRoot !== null && (path.resolve(parsed.packageRoot) !== stagedRoot || sourceRoot !== stagedRoot)) {
-    fail("path-unsafe", "received package root does not match its published staging path");
-  }
+  const sourceRoot = await validateSourceRoot(home, parsed.packageRoot);
   const sourceInfo = await validatePackage(sourceRoot, { installed: false });
   const selected = uniqueArray(parsed.adapters, "--adapter values", (entry, label) => boundedString(entry, 32, label, ADAPTER_RE));
   for (const adapter of selected) {
@@ -1895,126 +1880,6 @@ async function cmdBindFrom(args, stagedRoot) {
   }
 }
 
-function transferEntryPath(value, label) {
-  const relative = boundedString(value, 512, label);
-  if (path.posix.isAbsolute(relative) || relative.includes("\\")
-      || relative.split("/").some((part) => part === "" || part === "." || part === "..")) {
-    fail("path-unsafe", `${label} must be a normalized relative POSIX path`);
-  }
-  return relative;
-}
-
-function validateTransferEnvelope(value) {
-  exactKeys(value, ["schema", "manifest", "manifest_sha256", "payloads"], "package transfer envelope");
-  if (value.schema !== TRANSFER_SCHEMA) fail("schema-invalid", "unsupported package transfer envelope schema");
-  if (!DIGEST_RE.test(value.manifest_sha256)) fail("schema-invalid", "transfer manifest_sha256 is not a SHA-256 digest");
-  exactKeys(value.manifest, ["schema", "extension_id", "extension_version", "package_digest", "entry_count", "total_bytes", "entries"], "package transfer manifest");
-  const manifest = value.manifest;
-  if (manifest.schema !== TRANSFER_MANIFEST_SCHEMA) fail("schema-invalid", "unsupported package transfer manifest schema");
-  boundedString(manifest.extension_id, 128, "transfer extension_id", ID_RE);
-  boundedString(manifest.extension_version, 128, "transfer extension_version", SEMVER_RE);
-  if (!DIGEST_RE.test(manifest.package_digest)) fail("schema-invalid", "transfer package_digest is not a SHA-256 digest");
-  integerIn(manifest.entry_count, 1, MAX_TRANSFER_ENTRIES, "transfer entry_count");
-  integerIn(manifest.total_bytes, 1, MAX_TRANSFER_PACKAGE_BYTES, "transfer total_bytes");
-  if (!Array.isArray(manifest.entries) || manifest.entries.length !== manifest.entry_count) fail("schema-invalid", "transfer entry_count does not match entries");
-  if (!Array.isArray(value.payloads) || value.payloads.length !== manifest.entry_count) fail("schema-invalid", "transfer payload count does not match entries");
-  const seen = new Map();
-  let total = 0;
-  let previous = "";
-  for (let index = 0; index < manifest.entries.length; index += 1) {
-    const entry = manifest.entries[index];
-    exactKeys(entry, ["path", "type", "mode", "size", "sha256"], `transfer entry ${index}`);
-    const relative = transferEntryPath(entry.path, `transfer entry ${index} path`);
-    if (previous && Buffer.compare(Buffer.from(previous), Buffer.from(relative)) >= 0) fail("schema-invalid", "transfer entries must be uniquely byte-sorted");
-    previous = relative;
-    for (const ancestor of relative.split("/").slice(0, -1).map((_, partIndex, parts) => parts.slice(0, partIndex + 1).join("/"))) {
-      if (seen.get(ancestor) === "file") fail("path-unsafe", `transfer path collides with file ancestor: ${relative}`);
-    }
-    if (entry.type === "directory") {
-      if (entry.mode !== 0o755 || entry.size !== 0 || entry.sha256 !== null || value.payloads[index] !== null) {
-        fail("schema-invalid", `transfer directory entry is invalid: ${relative}`);
-      }
-    } else if (entry.type === "file") {
-      if (entry.mode !== 0o644 && entry.mode !== 0o755) fail("mode-unsafe", `transfer file mode is not allowed: ${relative}`);
-      integerIn(entry.size, 0, MAX_TRANSFER_FILE_BYTES, `transfer file size for ${relative}`);
-      if (!DIGEST_RE.test(entry.sha256)) fail("schema-invalid", `transfer file digest is invalid: ${relative}`);
-      if (typeof value.payloads[index] !== "string" || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value.payloads[index])) {
-        fail("schema-invalid", `transfer payload is not canonical base64: ${relative}`);
-      }
-      const bytes = Buffer.from(value.payloads[index], "base64");
-      if (bytes.length !== entry.size || digestBytes(bytes) !== entry.sha256) fail("integrity-mismatch", `transfer payload hash or size mismatch: ${relative}`);
-      total += bytes.length;
-      if (total > MAX_TRANSFER_PACKAGE_BYTES) fail("package-oversized", `transferred package exceeds ${MAX_TRANSFER_PACKAGE_BYTES} bytes`);
-    } else {
-      fail("package-invalid", `transfer entry type is not allowed: ${relative}`);
-    }
-    seen.set(relative, entry.type);
-  }
-  if (total !== manifest.total_bytes) fail("integrity-mismatch", "transfer total_bytes does not match payloads");
-  const manifestDigest = digestBytes(Buffer.from(canonicalJson(manifest), "utf8"));
-  if (manifestDigest !== value.manifest_sha256) fail("integrity-mismatch", "transfer manifest hash mismatch");
-  return { manifest, manifestDigest };
-}
-
-async function readStdinBounded(maxBytes) {
-  const chunks = [];
-  let total = 0;
-  for await (const chunk of process.stdin) {
-    total += chunk.length;
-    if (total > maxBytes) fail("package-oversized", `package transfer exceeds ${maxBytes} bytes`);
-    chunks.push(chunk);
-  }
-  return Buffer.concat(chunks, total);
-}
-
-async function cmdPackTransfer(args) {
-  if (args.length !== 1) fail("usage", "pack-transfer requires <package-root>");
-  const home = await activeHome();
-  const sourceRoot = await validateSourceRoot(home, args[0]);
-  const packageInfo = await validatePackage(sourceRoot, { installed: false });
-  if (packageInfo.tree.entryCount > MAX_TRANSFER_ENTRIES || packageInfo.tree.totalBytes > MAX_TRANSFER_PACKAGE_BYTES) {
-    fail("package-oversized", "package exceeds the remote transfer entry or byte limit");
-  }
-  const entries = [];
-  const payloads = [];
-  for (const entry of packageInfo.tree.entries) {
-    if (entry.type === "directory") {
-      entries.push({ path: entry.relative, type: "directory", mode: 0o755, size: 0, sha256: null });
-      payloads.push(null);
-    } else {
-      if (entry.size > MAX_TRANSFER_FILE_BYTES) fail("package-oversized", `package file exceeds ${MAX_TRANSFER_FILE_BYTES} bytes: ${entry.relative}`);
-      const bytes = await readFile(path.join(sourceRoot, entry.relative));
-      entries.push({ path: entry.relative, type: "file", mode: entry.executable ? 0o755 : 0o644, size: bytes.length, sha256: digestBytes(bytes) });
-      payloads.push(bytes.toString("base64"));
-    }
-  }
-  const manifest = {
-    schema: TRANSFER_MANIFEST_SCHEMA,
-    extension_id: packageInfo.manifest.id,
-    extension_version: packageInfo.manifest.version,
-    package_digest: packageInfo.tree.digest,
-    entry_count: entries.length,
-    total_bytes: packageInfo.tree.totalBytes,
-    entries,
-  };
-  const envelope = { schema: TRANSFER_SCHEMA, manifest, manifest_sha256: digestBytes(Buffer.from(canonicalJson(manifest))), payloads };
-  const output = Buffer.from(canonicalJson(envelope), "utf8");
-  if (output.length > MAX_TRANSFER_JSON_BYTES) fail("package-oversized", `serialized package transfer exceeds ${MAX_TRANSFER_JSON_BYTES} bytes`);
-  process.stdout.write(output);
-}
-
-async function transferRetiredDestination(home, manifest) {
-  const parent = await ensureHomePrivatePath(home, ["data", "extensions", "retired-staging", manifest.extension_id, manifest.extension_version]);
-  return path.join(parent, manifest.transfer_digest.slice("sha256:".length));
-}
-
-async function retirePublishedTransfer(home, published, receipt) {
-  const retired = await transferRetiredDestination(home, receipt);
-  if (await maybeLstat(retired)) fail("transfer-exists", "this transfer identity is already retired");
-  await rename(published, retired);
-  return retired;
-}
-
 async function assertLifecycleLockOwned() {
   if (!activeLifecycleLock) fail("lifecycle-lock-invalid", "retirement has no lifecycle lock ownership");
   const { lockPath, ownerPath, delegatedOwnerPid } = activeLifecycleLock;
@@ -2038,7 +1903,7 @@ async function assertLifecycleLockOwned() {
 
 async function claimInheritedLifecycleLock(home) {
   const mode = process.env.FM_EXTENSION_RETIREMENT_MODE;
-  if (mode !== "binding" && mode !== "transfer" && mode !== "bind" && mode !== "process-event") fail("lifecycle-lock-invalid", "extension lifecycle mode is invalid");
+  if (mode !== "binding" && mode !== "bind" && mode !== "process-event") fail("lifecycle-lock-invalid", "extension lifecycle mode is invalid");
   const stateRoot = effectiveStateRoot(home);
   const expectedLock = path.join(stateRoot, "procevent", ".extension-binding-lifecycle.lock");
   const lockPath = path.resolve(process.env.FM_EXTENSION_LIFECYCLE_LOCK || "");
@@ -2063,155 +1928,6 @@ async function releaseLifecycleLock() {
   activeLifecycleLock = null;
 }
 
-async function cmdReceiveTransferBind(args) {
-  await runLifecycleBinding("receive-transfer-bind", args);
-}
-
-async function cmdReceiveTransferBindLocked(args) {
-  const home = await activeHome();
-  const envelope = parseStrictJson(await readStdinBounded(MAX_TRANSFER_JSON_BYTES), "package transfer", MAX_TRANSFER_JSON_BYTES);
-  const { manifest, manifestDigest } = validateTransferEnvelope(envelope);
-  const versionRoot = await ensureHomePrivatePath(home, ["data", "extensions", "staging", manifest.extension_id, manifest.extension_version]);
-  const destination = path.join(versionRoot, manifestDigest.slice("sha256:".length));
-  const receipt = { schema: TRANSFER_MANIFEST_SCHEMA, extension_id: manifest.extension_id, extension_version: manifest.extension_version, package_digest: manifest.package_digest, transfer_digest: manifestDigest };
-  const retired = await transferRetiredDestination(home, receipt);
-  if (await maybeLstat(destination) || await maybeLstat(retired)) fail("transfer-exists", "this transfer identity was already received");
-  const lockPath = `${destination}.lock`;
-  const lock = await open(lockPath, "wx", 0o600).catch((error) => {
-    if (error?.code === "EEXIST") fail("transfer-exists", "this transfer identity is already being received");
-    throw error;
-  });
-  const temporary = path.join(versionRoot, `.receive-${process.pid}-${randomBytes(8).toString("hex")}`);
-  let published = false;
-  try {
-    await mkdir(path.join(temporary, "package"), { recursive: true, mode: 0o700 });
-    for (let index = 0; index < manifest.entries.length; index += 1) {
-      const entry = manifest.entries[index];
-      const target = path.join(temporary, "package", ...entry.path.split("/"));
-      if (entry.type === "directory") {
-        await mkdir(target, { mode: 0o755 });
-      } else {
-        await mkdir(path.dirname(target), { recursive: true, mode: 0o755 });
-        await writeFile(target, Buffer.from(envelope.payloads[index], "base64"), { flag: "wx", mode: entry.mode });
-        await chmod(target, entry.mode);
-      }
-    }
-    await chmod(path.join(temporary, "package"), 0o755);
-    const packageInfo = await validatePackage(path.join(temporary, "package"), { installed: false });
-    if (packageInfo.tree.entries.length !== manifest.entries.length) fail("package-invalid", "received package contains an entry absent from its transfer manifest");
-    for (let index = 0; index < manifest.entries.length; index += 1) {
-      const declared = manifest.entries[index];
-      const actual = packageInfo.tree.entries[index];
-      const actualMode = actual.type === "directory" || actual.executable ? 0o755 : 0o644;
-      if (actual.relative !== declared.path || actual.type !== declared.type || actualMode !== declared.mode
-          || (actual.type === "file" && (actual.size !== declared.size || actual.digest !== declared.sha256))) {
-        fail("package-invalid", "received package tree does not exactly match its transfer manifest");
-      }
-    }
-    if (packageInfo.manifest.id !== manifest.extension_id || packageInfo.manifest.version !== manifest.extension_version
-        || packageInfo.tree.digest !== manifest.package_digest) fail("integrity-mismatch", "received package identity does not match its transfer manifest");
-    await writeFile(path.join(temporary, "receipt.json"), prettyJson(receipt), { flag: "wx", mode: 0o600 });
-    await rename(temporary, destination);
-    published = true;
-    await cmdBindFrom([path.join(destination, "package"), ...args], path.join(destination, "package"));
-    process.stdout.write(`transfer-digest: ${manifestDigest}\n`);
-    process.stdout.write(`staged-package: ${path.join(destination, "package")}\n`);
-  } catch (error) {
-    if (published) await retirePublishedTransfer(home, destination, receipt).catch(() => {});
-    else await rm(temporary, { recursive: true, force: true }).catch(() => {});
-    throw error;
-  } finally {
-    await lock.close().catch(() => {});
-    await unlink(lockPath).catch(() => {});
-  }
-}
-
-async function cmdRetireTransferLocked(args) {
-  if (args.length !== 5 || args[1] !== "--if-transfer-digest" || args[3] !== "--if-binding-digest") {
-    fail("usage", "retire-transfer requires <extension-id> --if-transfer-digest <sha256:digest> --if-binding-digest <sha256:digest>");
-  }
-  const extensionId = boundedString(args[0], 128, "extension id", ID_RE);
-  const transferDigest = args[2];
-  const bindingDigest = args[4];
-  if (!DIGEST_RE.test(transferDigest)) fail("usage", "--if-transfer-digest must be sha256:<64 lowercase hex>");
-  if (!DIGEST_RE.test(bindingDigest)) fail("usage", "--if-binding-digest must be sha256:<64 lowercase hex>");
-  const home = await activeHome();
-  const idRoot = path.join(home, "data", "extensions", "staging", extensionId);
-  const versions = await readdir(idRoot).catch((error) => error?.code === "ENOENT" ? [] : Promise.reject(error));
-  const matches = [];
-  for (const version of versions) {
-    boundedString(version, 128, "staged extension version", SEMVER_RE);
-    const candidate = path.join(idRoot, version, transferDigest.slice("sha256:".length));
-    if (await maybeLstat(candidate)) matches.push(candidate);
-  }
-  if (matches.length !== 1) fail("transfer-missing", "no unique staged package matches that extension and transfer digest");
-  await assertOwnedSafeDirectory(matches[0], "staged transfer", true);
-  const receiptPath = path.join(matches[0], "receipt.json");
-  const receiptInfo = await maybeLstat(receiptPath);
-  if (!receiptInfo || !receiptInfo.isFile() || receiptInfo.isSymbolicLink() || receiptInfo.nlink !== 1) fail("link-unsafe", "transfer receipt is not one regular file");
-  if (receiptInfo.uid !== currentUid()) fail("owner-mismatch", "transfer receipt is not owned by the active user");
-  if (modeOf(receiptInfo) !== 0o600) fail("mode-unsafe", "transfer receipt must have mode 0600");
-  const receipt = parseStrictJson(await readFile(receiptPath), "transfer receipt");
-  exactKeys(receipt, ["schema", "extension_id", "extension_version", "package_digest", "transfer_digest"], "transfer receipt");
-  if (receipt.schema !== TRANSFER_MANIFEST_SCHEMA || receipt.extension_id !== extensionId || receipt.transfer_digest !== transferDigest
-      || !SEMVER_RE.test(receipt.extension_version) || !DIGEST_RE.test(receipt.package_digest)) fail("integrity-mismatch", "staged transfer receipt does not match retirement identity");
-  if (path.basename(path.dirname(matches[0])) !== receipt.extension_version) fail("integrity-mismatch", "staged transfer version directory does not match its receipt");
-  const stagedPackage = await validatePackage(path.join(matches[0], "package"), { installed: false });
-  if (stagedPackage.manifest.id !== receipt.extension_id || stagedPackage.manifest.version !== receipt.extension_version
-      || stagedPackage.tree.digest !== receipt.package_digest) fail("integrity-mismatch", "staged package identity does not match its transfer receipt");
-  const retired = await transferRetiredDestination(home, receipt);
-  if (await maybeLstat(retired)) fail("transfer-exists", "this transfer identity is already retired");
-  const retiredBinding = path.join(matches[0], "binding.json");
-  const partialInfo = await maybeLstat(retiredBinding);
-  const bindings = await loadBindings(home, { packages: true });
-  const record = bindings.find((candidate) => candidate.binding.extension_id === extensionId);
-  if (partialInfo) {
-    if (record) fail("retirement-partial", "enabled and partial binding state coexist for this transfer identity");
-    const partial = await loadBindingRecord(home, retiredBinding, "partial retired binding");
-    if (partial.bindingDigest !== bindingDigest
-        || partial.binding.extension_id !== receipt.extension_id
-        || partial.binding.extension_version !== receipt.extension_version
-        || partial.binding.package_digest !== receipt.package_digest
-        || partial.binding.source.path !== path.join(matches[0], "package")) {
-      fail("owner-mismatch", "partial binding does not match the exact transfer retirement identity");
-    }
-    await bindingRetirementPreflight(home, bindingDigest);
-    await assertLifecycleLockOwned();
-    await rename(matches[0], retired);
-    process.stdout.write(`retired-transfer: ${extensionId} ${transferDigest}\n`);
-    process.stdout.write(`retired-binding: ${extensionId} ${bindingDigest}\n`);
-    process.stdout.write(`retained-at: ${retired}\n`);
-    return;
-  }
-  if (!record) fail("binding-missing", `no enabled binding exists for extension: ${extensionId}`);
-  if (record.bindingDigest !== bindingDigest) fail("owner-mismatch", "current extension binding does not match the expected binding identity");
-  if (record.binding.extension_version !== receipt.extension_version
-      || record.binding.package_digest !== receipt.package_digest
-      || record.binding.source.path !== path.join(matches[0], "package")) {
-    fail("owner-mismatch", "current extension binding is not owned by this staged transfer identity");
-  }
-  await bindingRetirementPreflight(home, bindingDigest);
-  let bindingMoved = false;
-  try {
-    await assertLifecycleLockOwned();
-    await rename(record.bindingPath, retiredBinding);
-    bindingMoved = true;
-    const movedBytes = await readFile(retiredBinding);
-    if (digestBytes(movedBytes) !== bindingDigest || Buffer.compare(movedBytes, record.bytes) !== 0) {
-      fail("owner-mismatch", "binding changed during conditional retirement");
-    }
-    await assertLifecycleLockOwned();
-    await rename(matches[0], retired);
-    bindingMoved = false;
-  } catch (error) {
-    if (bindingMoved) await rename(retiredBinding, record.bindingPath).catch(() => {});
-    throw error;
-  }
-  process.stdout.write(`retired-transfer: ${extensionId} ${transferDigest}\n`);
-  process.stdout.write(`retired-binding: ${extensionId} ${bindingDigest}\n`);
-  process.stdout.write(`retained-at: ${retired}\n`);
-}
-
 async function cmdRetireBindingLocked(args) {
   if (args.length !== 3 || args[1] !== "--if-binding-digest") fail("usage", "retire-binding requires <extension-id> --if-binding-digest <sha256:digest>");
   const extensionId = boundedString(args[0], 128, "extension id", ID_RE);
@@ -2222,8 +1938,6 @@ async function cmdRetireBindingLocked(args) {
   const record = bindings.find((candidate) => candidate.binding.extension_id === extensionId);
   if (!record) fail("binding-missing", `no enabled binding exists for extension: ${extensionId}`);
   if (record.bindingDigest !== bindingDigest) fail("owner-mismatch", "current extension binding does not match the expected binding identity");
-  const stagingRoot = path.join(home, "data", "extensions", "staging");
-  if (isInside(stagingRoot, record.binding.source.path)) fail("retirement-incomplete", "a transferred binding must retire with its exact transfer identity");
   await bindingRetirementPreflight(home, bindingDigest);
   const parent = await ensureHomePrivatePath(home, ["data", "extensions", "retired-bindings", extensionId]);
   const destination = path.join(parent, `${bindingDigest.slice("sha256:".length)}.json`);
@@ -2331,9 +2045,8 @@ async function runLifecycleBinding(commandName, args) {
     cwd: CODE_ROOT,
     env,
     shell: false,
-    stdio: [commandName === "receive-transfer-bind" ? "pipe" : "ignore", "pipe", "pipe"],
+    stdio: ["ignore", "pipe", "pipe"],
   });
-  if (commandName === "receive-transfer-bind") process.stdin.pipe(child.stdin);
   const stdout = [];
   const stderr = [];
   let stdoutBytes = 0;
@@ -2361,10 +2074,6 @@ async function cmdRetireBinding(args) {
   await runLifecycleRetirement("binding", args);
 }
 
-async function cmdRetireTransfer(args) {
-  await runLifecycleRetirement("transfer", args);
-}
-
 async function runInheritedLifecycleRetirement(args) {
   const home = await activeHome();
   const mode = await claimInheritedLifecycleLock(home);
@@ -2374,11 +2083,9 @@ async function runInheritedLifecycleRetirement(args) {
       if (command !== "process-event") fail("lifecycle-lock-invalid", "extension lifecycle process-event command is invalid");
       await cmdProcessEventLocked(commandArgs);
     } else if (mode === "binding") await cmdRetireBindingLocked(args);
-    else if (mode === "transfer") await cmdRetireTransferLocked(args);
     else {
       const [command, ...commandArgs] = args;
-      if (command === "bind") await cmdBindFrom(commandArgs, null);
-      else if (command === "receive-transfer-bind") await cmdReceiveTransferBindLocked(commandArgs);
+      if (command === "bind") await cmdBindFrom(commandArgs);
       else fail("lifecycle-lock-invalid", "extension lifecycle binding command is invalid");
     }
   } finally {
@@ -2530,9 +2237,7 @@ function usage() {
 
 Usage:
   bin/fm-extension.mjs bind <package-root> --adapter <name> [--adapter <name> ...] --trust-same-user-code [--consent <fact> ...] [--timeout-ms <milliseconds>]
-  bin/fm-extension.sh remote-bind <secondmate-id> <package-root> --adapter <name> --trust-same-user-code [bind options]
   bin/fm-extension.mjs retire-binding <extension-id> --if-binding-digest <sha256:digest>
-  bin/fm-extension.mjs retire-transfer <extension-id> --if-transfer-digest <sha256:digest> --if-binding-digest <sha256:digest>
   bin/fm-extension.mjs list
   bin/fm-extension.mjs inspect <extension-id>
   bin/fm-extension.mjs verify [extension-id]
@@ -2550,10 +2255,7 @@ async function main() {
   const [command, ...args] = process.argv.slice(2);
   switch (command) {
     case "bind": await cmdBind(args); break;
-    case "pack-transfer": await cmdPackTransfer(args); break;
-    case "receive-transfer-bind": await cmdReceiveTransferBind(args); break;
     case "retire-binding": await cmdRetireBinding(args); break;
-    case "retire-transfer": await cmdRetireTransfer(args); break;
     case "list": await cmdList(args); break;
     case "inspect": await cmdInspect(args); break;
     case "verify": await cmdVerify(args); break;

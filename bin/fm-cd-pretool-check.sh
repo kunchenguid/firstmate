@@ -96,10 +96,8 @@ FM_ROOT=${FM_ROOT_OVERRIDE:-$(CDPATH='' cd -- "$SCRIPT_DIR/.." 2>/dev/null && pw
 # Scope to a plain, non-worktree firstmate checkout, where git-dir equals
 # git-common-dir. A crewmate/scout task worktree - the shape bin/fm-spawn.sh
 # always hands out - is a linked git worktree where the two differ. This guard
-# does not inspect .fm-secondmate-home, so it applies in a git-cloned secondmate
-# home but remains inert when the secondmate home is itself a treehouse-leased
-# linked worktree. docs/cd-guard.md owns this scope; docs/turnend-guard.md owns
-# the turn-end guard's separate marker-aware scope. Any failure to confirm the
+# remains inert in any linked worktree. docs/cd-guard.md owns this scope;
+# docs/turnend-guard.md owns the turn-end guard's matching scope. Any failure to confirm the
 # checkout is inert (exit 0), never a block, so a broken environment never
 # denies a shell command.
 [ -f "$FM_ROOT/AGENTS.md" ] || exit 0

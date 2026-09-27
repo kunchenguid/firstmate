@@ -241,7 +241,7 @@ test_status_span_survives_a_later_routine_append() {
 # Closure is the one thing that may retire an event inside a span, and only
 # through status_open_decisions' own open/closed rule.
 test_status_span_respects_decision_closure() {
-  local dir state event open
+  local dir state event
   dir=$(make_case classify-closure); state="$dir/state"
   printf 'needs-decision [key=api]: pick A or B\nresolved [key=api]: took A\n' > "$state/closed.status"
   status_span_has_actionable "$state/closed.status" 0 \
@@ -265,16 +265,7 @@ test_status_span_respects_decision_closure() {
     || fail "a still-open decision was retired by a newer closure under another key"
   [ "$event" = "needs-decision [key=api]: pick A or B" ] \
     || fail "the span reported '$event' instead of the decision still open"
-  printf 'needs-decision [key=pending-reply-x]: unrelated request\nworking: awaiting reconciliation\n' \
-    > "$state/rejected-reserved.status"
-  event=$(status_span_first_actionable "$state/rejected-reserved.status" 0) \
-    || fail "a rejected reserved-key request was silently dropped"
-  [ "$event" = "reconciliation-required: needs-decision [key=pending-reply-x]: unrelated request" ] \
-    || fail "a rejected reserved-key request was not labeled for reconciliation: $event"
-  open=$(status_open_decisions "$state/rejected-reserved.status")
-  [ -z "$open" ] \
-    || fail "span classification treated a rejected reserved-key request as an open decision: $open"
-  pass "span classification retires closed decisions and surfaces rejected transitions for reconciliation"
+  pass "span classification retires closed decisions and preserves live openings"
 }
 
 test_malformed_seen_signature_reads_the_whole_log() {
@@ -475,9 +466,9 @@ test_crew_absorb_class_classifier() {
 # its existing escalation schedule, and a supervisor-side git read (which touches
 # .git, never tracked files) must not be able to fake a positive.
 test_crew_worktree_written_since_classifier() {
-  local dir state anchor wt home statedir_wt
+  local dir state anchor wt statedir_wt
   dir=$(make_case classify-worktree-writes); state="$dir/state"
-  anchor="$state/anchor"; wt="$dir/wt"; home="$dir/mate-home"; statedir_wt="$dir/wt-with-state"
+  anchor="$state/anchor"; wt="$dir/wt"; statedir_wt="$dir/wt-with-state"
   mkdir -p "$wt/src" "$wt/.git/objects"
   printf 'old\n' > "$wt/src/existing.c"
   set_mtime "$(( $(date +%s) - 300 ))" "$wt/src/existing.c"
@@ -511,27 +502,13 @@ test_crew_worktree_written_since_classifier() {
   # An empty id is never evidence.
   ! crew_worktree_written_since "" "$state" "$anchor" || fail "an empty id reported write evidence"
 
-  # A secondmate records a provisioned firstmate home, not a code tree, and such a
-  # home supervises itself: its own watcher beacon, pane hashes, and heartbeats keep
-  # its state/ churning whether or not the mate produced anything.
-  mkdir -p "$home/state"
-  printf 'sm-classify-1\n' > "$home/.fm-secondmate-home"
-  printf 'beat\n' > "$home/state/.last-watcher-beat"
-  printf 'backend=herdr\nwindow=remote:sm\nkind=secondmate\nworktree=%s\n' "$home" > "$state/sm.meta"
-  ! crew_worktree_written_since sm "$state" "$anchor" \
-    || fail "a secondmate's own home supervision churn reported crew write evidence"
-  # The home marker alone is enough, even when the record does not say secondmate.
-  printf 'backend=herdr\nwindow=test:fm-sm2\nkind=ship\nworktree=%s\n' "$home" > "$state/sm2.meta"
-  ! crew_worktree_written_since sm2 "$state" "$anchor" \
-    || fail "a marked firstmate home reported crew write evidence"
-  # But an ordinary worktree that merely holds a directory named state is real
-  # work: only the home is excluded, never a source directory of that name.
+  # An ordinary worktree that holds a directory named state is still real work.
   mkdir -p "$statedir_wt/state"
   printf 'machine\n' > "$statedir_wt/state/machine.go"
   printf 'backend=herdr\nwindow=test:fm-d\nkind=ship\nworktree=%s\n' "$statedir_wt" > "$state/d.meta"
   crew_worktree_written_since d "$state" "$anchor" \
     || fail "a source directory named state was hidden from the write probe"
-  pass "crew_worktree_written_since: real writes are evidence; no worktree, no anchor, quiet trees, .git churn and a mate's own home are not"
+  pass "crew_worktree_written_since: real writes are evidence; no worktree, no anchor, quiet trees, and .git churn are not"
 }
 
 # FM_WORKTREE_WRITE_PRUNE is a skip list, so clearing it skips nothing and is the
@@ -661,32 +638,6 @@ test_signal_crew_provably_working_classifier() {
   unset FM_FAKE_CREW_STATE_a FM_FAKE_CREW_STATE_b
   pass "signal_crew_provably_working: benign only when every referenced crew is provably working"
 }
-
-test_secondmate_status_signal_never_absorbed_classifier() {
-  local dir fakebin state
-  dir=$(make_case secondmate-signal-classify); fakebin="$dir/fakebin"; state="$dir/state"
-  export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
-  # Even PROVABLY working, a secondmate's .status signal is its routed-reply
-  # channel and must surface; its bare turn-ended keeps the ordinary absorb.
-  export FM_FAKE_CREW_STATE_sm='state: working · source: run-step · running'
-  printf 'kind=secondmate\n' > "$state/sm.meta"
-  printf 'working: routed reply for the parent\n' > "$state/sm.status"
-  ! signal_crew_provably_working "$state/sm.status" \
-    || fail "a working secondmate's status signal was treated as absorbable"
-  signal_crew_provably_working "$state/sm.turn-ended" \
-    || fail "a working secondmate's bare turn-end lost its ordinary absorb"
-  # An ordinary crewmate with the same verdict stays absorbable: the rule is
-  # keyed on recorded kind, not on task naming or content guessing.
-  export FM_FAKE_CREW_STATE_crew='state: working · source: run-step · running'
-  printf 'kind=ship\n' > "$state/crew.meta"
-  printf 'working: progress\n' > "$state/crew.status"
-  signal_crew_provably_working "$state/crew.status" \
-    || fail "the secondmate rule leaked onto an ordinary crewmate status"
-  unset FM_FAKE_CREW_STATE_sm FM_FAKE_CREW_STATE_crew
-  pass "a secondmate's status signal is never absorbed as provably working; crewmates are unaffected"
-}
-
-# --- benign wakes are absorbed ONLY when the crew is provably working ---------
 
 test_provably_working_signal_absorbed() {
   local dir state fakebin out status_file pid
@@ -983,34 +934,6 @@ test_turn_ended_trailing_newline_prior_hash_surfaced() {
     || fail "a newline-terminated prior hash opened a deferral window"
   unset FM_FAKE_CREW_STATE
   pass "a bare turn-end backed by a newline-terminated prior hash surfaces"
-}
-
-test_secondmate_turn_ended_churning_pane_surfaced() {
-  local dir state fakebin out drain_out capture_file window key pid
-  dir=$(make_case secondmate-turn-ended-churning); state="$dir/state"; fakebin="$dir/fakebin"
-  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
-  window="test:fm-mate-churning"
-  : > "$state/mate.turn-ended"
-  printf 'backend=herdr\nwindow=%s\nkind=secondmate\nharness=pi\n' "$window" > "$state/mate.meta"
-  printf 'working on the next routed item' > "$capture_file"
-  key=$(printf '%s' "$window" | tr ':/.' '___')
-  printf '%s' "$(hash_text 'waiting for work')" > "$state/.hash-$key"
-  printf '0\n' > "$state/.count-$key"
-  export FM_FAKE_CREW_STATE='state: unknown · source: pane · harness state unavailable'
-  PATH="$fakebin:$PATH" FM_FAKE_HERDR_WINDOW="$window" FM_FAKE_HERDR_CAPTURE="$capture_file" \
-    FM_CONFIG_OVERRIDE="$(churn_config "$dir")" \
-    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=3 FM_SIGNAL_GRACE=1 \
-    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
-  pid=$!
-  wait_for_exit "$pid" 100 || fail "watcher did not surface a churning secondmate turn-end"
-  grep -F "signal: $state/mate.turn-ended" "$out" >/dev/null \
-    || fail "watcher did not print the surfaced churning secondmate turn-end"
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null \
-    || fail "drain after the churning secondmate turn-end failed"
-  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/mate.turn-ended" >/dev/null \
-    || fail "churning secondmate turn-end was not queued"
-  unset FM_FAKE_CREW_STATE
-  pass "a churning secondmate turn-end surfaces without a stale resurface path"
 }
 
 test_turn_ended_colliding_window_key_surfaced() {
@@ -1453,26 +1376,6 @@ test_working_note_not_working_surfaced() {
   pass "a no-verb working: note whose crew is idle with no running pipeline is surfaced"
 }
 
-test_secondmate_status_note_surfaced_despite_busy_agent() {
-  local dir state fakebin out drain_out pid
-  dir=$(make_case secondmate-note-surfaced); state="$dir/state"; fakebin="$dir/fakebin"
-  out="$dir/watch.out"; drain_out="$dir/drain.out"
-  printf 'kind=secondmate\n' > "$state/mate.meta"
-  printf 'working: routed reply landed in the parent stream\n' > "$state/mate.status"
-  # Busy evidence that would absorb an ordinary crewmate's no-verb note must
-  # not absorb a secondmate's: its status stream is the routed-reply channel.
-  export FM_FAKE_CREW_STATE='state: working · source: run-step · running'
-  FM_CONFIG_OVERRIDE="$(churn_config "$dir")" watch_bg "$state" "$fakebin" "$out"
-  pid=$!
-  wait_for_exit "$pid" 100 || fail "watcher absorbed a busy secondmate's routed status note"
-  grep -F "signal: $state/mate.status" "$out" >/dev/null \
-    || fail "watcher did not print the surfaced secondmate note"
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the surfaced note failed"
-  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/mate.status" >/dev/null \
-    || fail "surfaced secondmate note was not queued"
-  pass "a secondmate's status note surfaces even while its own agent is busy"
-}
-
 test_self_announced_close_does_not_rewake_but_next_note_does() {
   local dir state fakebin out status_file pid rc
   dir=$(make_case self-close-quiet); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
@@ -1542,26 +1445,6 @@ test_needs_decision_signal_payload_marked_for_branch_exclusion() {
   pass "a needs-decision signal row's queued payload is marked needs-decision: for branch exclusion"
 }
 
-# A needs-decision whose key transition was rejected by the reserved-key
-# vocabulary is reported as a "reconciliation-required: " wrapped event
-# (fm-classify-lib.sh's status_span_first_actionable_record), but it is still a
-# needs-decision signal that this path routes directly to main - the payload
-# marker must not be fooled by that wrapper.
-test_needs_decision_reconciliation_required_still_marked() {
-  local dir state fakebin out status_file pid
-  dir=$(make_case needs-decision-reconciliation); state="$dir/state"; fakebin="$dir/fakebin"
-  out="$dir/watch.out"
-  status_file="$state/task.status"
-  printf 'needs-decision [key=pending-reply-x]: unrelated request\nworking: awaiting reconciliation\n' \
-    > "$status_file"
-  watch_bg "$state" "$fakebin" "$out"
-  pid=$!
-  wait_for_exit "$pid" 100 || fail "watcher did not exit for a rejected-reserved-key needs-decision"
-  grep -F "$(printf 'signal\ttask.status\tneeds-decision:')" "$state/.wake-queue" >/dev/null \
-    || fail "a reconciliation-required needs-decision row was not payload-marked for branch exclusion: $(cat "$state/.wake-queue")"
-  pass "a reconciliation-required needs-decision row's queued payload is still marked needs-decision:"
-}
-
 # A captain-held declaration is itself actionable. Positive evidence that the
 # crew is still working must not absorb the signal before its main-only marker
 # can be delivered.
@@ -1582,22 +1465,6 @@ test_captain_held_signal_payload_marked_for_branch_exclusion() {
   pass "a captain-held signal stays actionable while the crew is still working"
 }
 
-test_pending_reply_escalation_signal_payload_marked_for_branch_exclusion() {
-  local dir state fakebin out status_file pid corr
-  dir=$(make_case pending-reply-escalation-payload); state="$dir/state"; fakebin="$dir/fakebin"
-  out="$dir/watch.out"
-  status_file="$state/task.status"
-  corr=0123456789abcdef
-  printf 'blocked [key=pending-reply-%s]: pending-reply-missed: task=task pending-reply-id=%s request=finish report\n' \
-    "$corr" "$corr" > "$status_file"
-  watch_bg "$state" "$fakebin" "$out"
-  pid=$!
-  wait_for_exit "$pid" 100 || fail "watcher did not exit for a pending-reply escalation"
-  grep -F "$(printf 'signal\ttask.status\tneeds-decision:')" "$state/.wake-queue" >/dev/null \
-    || fail "a pending-reply escalation was not payload-marked for branch exclusion: $(cat "$state/.wake-queue")"
-  pass "a pending-reply second-mate escalation is marked for main-only routing"
-}
-
 test_ordinary_blocked_signal_payload_remains_branch_eligible() {
   local dir state fakebin out status_file pid
   dir=$(make_case ordinary-blocked-payload); state="$dir/state"; fakebin="$dir/fakebin"
@@ -1610,7 +1477,7 @@ test_ordinary_blocked_signal_payload_remains_branch_eligible() {
   grep -F "$(printf 'signal\ttask.status\tsignal:')" "$state/.wake-queue" >/dev/null \
     || fail "an ordinary blocked event lost branch-eligible routing: $(cat "$state/.wake-queue")"
   if grep -F "$(printf 'signal\ttask.status\tneeds-decision:')" "$state/.wake-queue" >/dev/null; then
-    fail "an ordinary blocked event was marked as a second-mate escalation"
+    fail "an ordinary blocked event was marked as a needs-decision event"
   fi
   pass "an ordinary blocked event remains branch-eligible"
 }
@@ -2688,120 +2555,6 @@ test_reheld_captain_call_starts_its_own_resurface_window() {
 
 
 
-test_secondmate_paused_resurfaces_in_normal_mode() {
-  local dir state fakebin out capture_file statusf window key pane_hash sig pid back
-  dir=$(make_case secondmate-paused-resurface); state="$dir/state"; fakebin="$dir/fakebin"
-  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/secondmate-held.status"
-  window="test:fm-secondmate-held"
-  printf 'idle awaiting external\n' > "$capture_file"
-  printf 'backend=herdr\nwindow=%s\nkind=secondmate\n' "$window" > "$state/secondmate-held.meta"
-  printf 'paused: awaiting the upstream release\n' > "$statusf"
-  back=$(( $(date +%s) - 500 ))
-  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
-  else touch -m -d "@$back" "$statusf"; fi
-  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-secondmate-held_status"
-  key=$(printf '%s' "$window" | tr '.:/' '___')
-  pane_hash=$(hash_text "idle awaiting external")
-  printf '%s' "$pane_hash" > "$state/.hash-$key"
-  printf '1\n' > "$state/.count-$key"
-  export FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting the upstream release'
-  PATH="$fakebin:$PATH" FM_FAKE_HERDR_WINDOW="$window" FM_FAKE_HERDR_CAPTURE="$capture_file" \
-    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
-    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
-  pid=$!
-  wait_for_exit "$pid" 100 || fail "watcher did not re-surface a paused secondmate"
-  grep -F "stale: $window" "$out" >/dev/null || fail "paused secondmate did not emit a stale recheck"
-  grep -F "awaiting external" "$out" >/dev/null || fail "paused secondmate recheck omitted its external-wait reason"
-  grep -F "awaiting the captain" "$out" >/dev/null && fail "paused secondmate recheck named the captain instead of its external dependency"
-  grep -F "possible wedge" "$out" >/dev/null && fail "paused secondmate was mislabeled a wedge"
-  unset FM_FAKE_CREW_STATE
-  pass "a declared paused secondmate re-surfaces on the bounded normal-mode cadence"
-}
-
-# A captain hold is the other declared wait, but unlike paused: it has no
-# current-state mapping, so a held mate reports `unknown` rather than `paused`.
-# The bounded re-surface must still reach it, or a mate's hold rots invisibly:
-# nothing else re-reads a quiet mate's endpoint.
-test_secondmate_captain_held_resurfaces_in_normal_mode() {
-  local dir state fakebin out capture_file statusf window key pane_hash sig pid back
-  dir=$(make_case secondmate-held-resurface); state="$dir/state"; fakebin="$dir/fakebin"
-  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/secondmate-hold.status"
-  window="test:fm-secondmate-hold"
-  printf 'idle awaiting the captain\n' > "$capture_file"
-  printf 'backend=herdr\nwindow=%s\nkind=secondmate\n' "$window" > "$state/secondmate-hold.meta"
-  printf 'captain-held [key=route]: tracked by task-decision-route\n' > "$statusf"
-  back=$(( $(date +%s) - 500 ))
-  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
-  else touch -m -d "@$back" "$statusf"; fi
-  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-secondmate-hold_status"
-  key=$(printf '%s' "$window" | tr '.:/' '___')
-  pane_hash=$(hash_text "idle awaiting the captain")
-  printf '%s' "$pane_hash" > "$state/.hash-$key"
-  printf '1\n' > "$state/.count-$key"
-  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
-  PATH="$fakebin:$PATH" FM_FAKE_HERDR_WINDOW="$window" FM_FAKE_HERDR_CAPTURE="$capture_file" \
-    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
-    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
-  pid=$!
-  wait_for_exit "$pid" 100 || fail "watcher did not re-surface a captain-held secondmate"
-  grep -F "stale: $window" "$out" >/dev/null || fail "captain-held secondmate did not emit a stale recheck"
-  grep -F "awaiting the captain" "$out" >/dev/null || fail "captain-held secondmate recheck did not name the captain as the blocker: $(cat "$out")"
-  grep -F "awaiting external" "$out" >/dev/null && fail "captain-held secondmate recheck claimed an external wait"
-  grep -F "possible wedge" "$out" >/dev/null && fail "captain-held secondmate was mislabeled a wedge"
-  unset FM_FAKE_CREW_STATE
-  pass "a captain-held secondmate re-surfaces on the bounded normal-mode cadence"
-}
-
-test_secondmate_nonpaused_stale_remains_suppressed() {
-  local dir state fakebin out capture_file statusf window key pane_hash sig pid
-  dir=$(make_case secondmate-stale-suppressed); state="$dir/state"; fakebin="$dir/fakebin"
-  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/secondmate-working.status"
-  window="test:fm-secondmate-working"
-  printf 'idle while the parent supervises\n' > "$capture_file"
-  printf 'backend=herdr\nwindow=%s\nkind=secondmate\n' "$window" > "$state/secondmate-working.meta"
-  printf 'working: the parent supervises this secondmate\n' > "$statusf"
-  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-secondmate-working_status"
-  key=$(printf '%s' "$window" | tr '.:/' '___')
-  pane_hash=$(hash_text "idle while the parent supervises")
-  printf '%s' "$pane_hash" > "$state/.hash-$key"
-  printf '1\n' > "$state/.count-$key"
-  PATH="$fakebin:$PATH" FM_FAKE_HERDR_WINDOW="$window" FM_FAKE_HERDR_CAPTURE="$capture_file" \
-    FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
-  pid=$!
-  if ! wait_poll_cycle "$state" "$pid"; then
-    reap "$pid"; fail "watcher surfaced an ordinary secondmate stale pane: $(cat "$out")"
-  fi
-  [ ! -s "$out" ] || { reap "$pid"; fail "ordinary secondmate stale pane printed a wake reason: $(cat "$out")"; }
-  reap "$pid"
-  pass "a non-paused secondmate retains normal stale suppression"
-}
-
-test_secondmate_unpause_clears_pause_tracking() {
-  local dir state fakebin out statusf window key pid
-  dir=$(make_case secondmate-unpause-clears); state="$dir/state"; fakebin="$dir/fakebin"
-  out="$dir/watch.out"; statusf="$state/secondmate-resumed.status"; window="test:fm-secondmate-resumed"
-  printf 'backend=herdr\nwindow=%s\nkind=secondmate\n' "$window" > "$state/secondmate-resumed.meta"
-  printf 'working: upstream landed\n' > "$statusf"
-  printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-secondmate-resumed_status"
-  key=${window//:/_}
-  key=${key//\//_}
-  key=${key//./_}
-  : > "$state/.paused-$key"
-  : > "$state/.paused-rechecked-$key"
-  : > "$state/.paused-resurfaced-$key"
-  : > "$state/.stale-$key"
-  : > "$state/.stale-since-$key"
-  : > "$state/.wedge-escalations-$key"
-  watch_bg "$state" "$fakebin" "$out"
-  pid=$!
-  wait_poll_cycle "$state" "$pid" || fail "watcher exited while reconciling a resumed secondmate: $(cat "$out")"
-  [ ! -e "$state/.paused-$key" ] || { reap "$pid"; fail "resumed secondmate retained the pause marker"; }
-  [ ! -e "$state/.stale-$key" ] || { reap "$pid"; fail "resumed secondmate retained stale tracking"; }
-  [ ! -e "$state/.wedge-escalations-$key" ] || { reap "$pid"; fail "resumed secondmate retained wedge tracking"; }
-  reap "$pid"
-  pass "a resumed secondmate clears pause and stale tracking before stale exemption"
-}
-
 test_nonterminal_stale_pause_transitions_reclassify_unchanged_hash() {
   local dir state fakebin out capture_file window key pane_hash sig pid i
   dir=$(make_case nonterminal-stale-pause-transition); state="$dir/state"; fakebin="$dir/fakebin"
@@ -3788,62 +3541,6 @@ test_write_deferral_resurfaces_on_the_bounded_cadence() {
   pass "a write deferral re-surfaces once on the bounded pause cadence, so a churning worktree cannot stay invisible"
 }
 
-# The worktree recorded for a secondmate is a provisioned firstmate home, and that
-# home runs its OWN supervision inside itself: its watcher beacon, pane hashes and
-# heartbeats keep state/ churning whether or not the mate produced anything. Reading
-# that as crew progress would quietly relax the kind-agnostic busy-turn backstop from
-# the escalation cadence to the hourly recheck for work that produced nothing, so the
-# probe must report no evidence and the unchanged schedule must still fire.
-test_secondmate_home_supervision_churn_is_not_write_evidence() {
-  local dir state fakebin out drain_out capture_file window key sig pid home back
-  dir=$(make_case secondmate-home-churn); state="$dir/state"; fakebin="$dir/fakebin"
-  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
-  window="test:fm-mate"; home="$dir/mate-home"
-  mkdir -p "$home/state"
-  printf 'sm-mate\n' > "$home/.fm-secondmate-home"
-  printf 'Working... (12.3s)' > "$capture_file"
-  printf 'backend=herdr\nwindow=%s\nkind=ship\nharness=pi\nworktree=%s\n' "$window" "$home" > "$state/mate.meta"
-  record_pi_busy "$state" mate
-  # An ordinary crew recording a provisioned mate home is the route that actually
-  # reaches the probe: a kind=secondmate window of its own is triaged only under a
-  # declared pause, and a declared pause takes the bounded recheck cadence instead of
-  # the wedge timer. The home marker alone is what excludes the walk, so the exclusion
-  # is what this asserts. A busy pane is bounded by its completed-turn age; no turn
-  # ever completed here, so the spawn record itself is aged past the bound that routes
-  # it into the wedge timer.
-  printf 'working: implementing\n' > "$state/mate.status"
-  sig=$(seen_sig "$state/mate.status"); printf '%s' "$sig" > "$state/.seen-mate_status"
-  key=$(printf '%s' "$window" | tr ':/.' '___')
-  set_mtime "$(( $(date +%s) - 4000 ))" "$state/mate.meta"
-  back=$(( $(date +%s) - 500 ))
-  echo "$back" > "$state/.stale-since-$key"
-  set_mtime "$back" "$state/.stale-since-$key"
-  # The only thing written since the idle window opened is the mate home's own
-  # supervision bookkeeping.
-  printf 'beat\n' > "$home/state/.last-watcher-beat"
-
-  PATH="$fakebin:$PATH" FM_FAKE_HERDR_WINDOW="$window" FM_FAKE_HERDR_CAPTURE="$capture_file" \
-    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
-    FM_STALE_ESCALATE_SECS=240 FM_BUSY_TURN_MAX_SECS=1 FM_PAUSE_RESURFACE_SECS=999 \
-    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
-  pid=$!
-  wait_for_exit "$pid" 100 || fail "a mate home's own supervision churn deferred an escalation it must not defer"
-  grep -F "stale: $window" "$out" >/dev/null || fail "the mate-home escalation did not print a stale wake"
-  grep -F "possible wedge" "$out" >/dev/null || fail "the mate-home escalation did not flag a possible wedge"
-  [ ! -e "$state/.writing-since-$key" ] || fail "a mate's provisioned home was probed as if it were a code tree"
-  [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || true)" = 1 ] || fail "the mate escalation was not counted"
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the mate escalation failed"
-  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "the mate escalation was not queued"
-  pass "a secondmate's own home supervision churn is not crew write evidence, so a pane recording that home keeps the unchanged escalation schedule"
-}
-
-# A write deferral is a bounded chain, not a permanent one: its .writing-since
-# marker ages the whole chain so a churning worktree still re-surfaces once per
-# PAUSE_RESURFACE_SECS. That only holds while the chain belongs to the CURRENT quiet
-# stretch, so every path that restarts the idle-window timer must drop it too. The
-# reachable case is a pane that deferred on write evidence and later has its timer
-# repaired: a long-finished chain would make the first deferral of the new window
-# re-surface immediately instead of after a fresh window.
 test_timer_repair_drops_a_finished_write_deferral_chain() {
   local FM_CREW_STATE_BIN FM_FAKE_CREW_STATE
   local dir state fakebin out capture_file window key pane_hash sig pid wt back
@@ -4616,16 +4313,16 @@ archive_away_record() {  # <state>
 
 test_captain_held_never_rechecked_while_away_record_exists() {
   local dir state fakebin out capture_file statusf window key pane_hash sig pid back
-  dir=$(make_case away-record-held-secondmate); state="$dir/state"; fakebin="$dir/fakebin"
-  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/secondmate-hold.status"
-  window="test:fm-secondmate-hold"
+  dir=$(make_case away-record-held-worker); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/worker-hold.status"
+  window="test:fm-worker-hold"
   printf 'idle awaiting the captain\n' > "$capture_file"
-  printf 'backend=herdr\nwindow=%s\nkind=secondmate\n' "$window" > "$state/secondmate-hold.meta"
+  printf 'backend=herdr\nwindow=%s\nkind=ship\nharness=codex\n' "$window" > "$state/worker-hold.meta"
   printf 'captain-held [key=route]: tracked by task-decision-route\n' > "$statusf"
   back=$(( $(date +%s) - 500 ))
   if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
   else touch -m -d "@$back" "$statusf"; fi
-  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-secondmate-hold_status"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-worker-hold_status"
   key=$(printf '%s' "$window" | tr '.:/' '___')
   pane_hash=$(hash_text "idle awaiting the captain")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
@@ -4635,6 +4332,7 @@ test_captain_held_never_rechecked_while_away_record_exists() {
   # Phase A: the record exists, the hold is well past the cadence, and the
   # watcher still absorbs it across whole poll cycles: no wake, no throttle.
   PATH="$fakebin:$PATH" FM_FAKE_HERDR_WINDOW="$window" FM_FAKE_HERDR_CAPTURE="$capture_file" \
+    FM_FAKE_HERDR_CURRENT_COMMAND=zsh \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
@@ -4652,6 +4350,7 @@ test_captain_held_never_rechecked_while_away_record_exists() {
   archive_away_record "$state"
   : > "$out"
   PATH="$fakebin:$PATH" FM_FAKE_HERDR_WINDOW="$window" FM_FAKE_HERDR_CAPTURE="$capture_file" \
+    FM_FAKE_HERDR_CURRENT_COMMAND=zsh \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
@@ -4745,7 +4444,7 @@ paused_until_fixture() {  # <name> <until-epoch> <status-age-secs>
   window="test:fm-until"
   statusf="$state/until.status"
   printf 'idle, waiting for the reset\n' > "$dir/pane.txt"
-  printf 'backend=herdr\nwindow=%s\nkind=secondmate\n' "$window" > "$state/until.meta"
+  printf 'backend=herdr\nwindow=%s\nkind=ship\nharness=codex\n' "$window" > "$state/until.meta"
   printf 'paused: rate limit resets, until %s, then resuming\n' "$(iso_utc_at "$until")" > "$statusf"
   back=$(( $(date +%s) - age ))
   if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
@@ -4760,6 +4459,7 @@ paused_until_fixture() {  # <name> <until-epoch> <status-age-secs>
 until_watch() {  # <dir> <cadence> -> pid in UNTIL_PID
   local dir=$1
   PATH="$dir/fakebin:$PATH" FM_FAKE_HERDR_WINDOW=test:fm-until FM_FAKE_HERDR_CAPTURE="$dir/pane.txt" \
+    FM_FAKE_HERDR_CURRENT_COMMAND=zsh \
     FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available' \
     FM_STATE_OVERRIDE="$dir/state" FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
     FM_PAUSE_RESURFACE_SECS="$2" FM_POLL=1 FM_SIGNAL_GRACE=1 \
@@ -4832,7 +4532,6 @@ test_empty_write_prune_widens_the_probe
 test_empty_write_prune_from_the_environment_widens_the_probe
 test_worktree_write_probe_is_wall_clock_bounded
 test_signal_crew_provably_working_classifier
-test_secondmate_status_signal_never_absorbed_classifier
 test_provably_working_signal_absorbed
 test_turn_ended_provably_working_absorbed
 test_turn_ended_not_working_surfaced
@@ -4842,7 +4541,6 @@ test_turn_ended_churn_resets_wedge_state_before_stale_poll
 test_turn_ended_still_pane_surfaced
 test_turn_ended_malformed_prior_hash_surfaced
 test_turn_ended_trailing_newline_prior_hash_surfaced
-test_secondmate_turn_ended_churning_pane_surfaced
 test_turn_ended_colliding_window_key_surfaced
 test_turn_ended_duplicate_endpoint_records_surfaced
 test_turn_ended_mixed_positive_evidence_batch_absorbed
@@ -4856,13 +4554,10 @@ test_turn_ended_oversized_churn_bound_surfaced
 test_turn_ended_invalid_churn_deadline_surfaced
 test_turn_ended_surfaced_batch_opens_no_partial_deadline
 test_working_note_not_working_surfaced
-test_secondmate_status_note_surfaced_despite_busy_agent
 test_self_announced_close_does_not_rewake_but_next_note_does
 test_actionable_signal_surfaced
 test_needs_decision_signal_payload_marked_for_branch_exclusion
-test_needs_decision_reconciliation_required_still_marked
 test_captain_held_signal_payload_marked_for_branch_exclusion
-test_pending_reply_escalation_signal_payload_marked_for_branch_exclusion
 test_ordinary_blocked_signal_payload_remains_branch_eligible
 test_routine_signal_payload_not_marked_needs_decision
 test_actionable_signal_survives_a_later_routine_append
@@ -4895,17 +4590,12 @@ test_open_captain_call_bounds_stale_churn
 test_stale_churn_without_a_captain_call_still_alarms
 test_failed_wake_append_does_not_arm_the_captain_hold_throttle
 test_reheld_captain_call_starts_its_own_resurface_window
-test_secondmate_paused_resurfaces_in_normal_mode
-test_secondmate_captain_held_resurfaces_in_normal_mode
-test_secondmate_nonpaused_stale_remains_suppressed
-test_secondmate_unpause_clears_pause_tracking
 test_nonterminal_stale_pause_transitions_reclassify_unchanged_hash
 test_nonterminal_paused_rechecks_authoritative_state
 test_paused_authoritative_working_preserves_wedge_timer
 test_nonterminal_stale_repairs_missing_or_corrupt_timer
 test_wedge_escalation_deferred_while_worktree_is_written
 test_write_deferral_resurfaces_on_the_bounded_cadence
-test_secondmate_home_supervision_churn_is_not_write_evidence
 test_timer_repair_drops_a_finished_write_deferral_chain
 test_terminal_first_sight_drops_a_finished_write_deferral_chain
 test_triage_log_size_cap_accepts_spaced_wc_counts

@@ -4837,7 +4837,7 @@ delete process.env.FM_CLASSIFY_CAPTAIN_HELD_VERB;
 process.env.FM_CLASSIFY_RESERVED_KEY_PREFIXES = "secret-";
 writeFileSync(
   `${state}/task-a.status`,
-  "needs-decision [key=pending-reply-x]: choose destructive cleanup\nworking: routine follow-up\n",
+  "needs-decision [key=review-x]: choose destructive cleanup\nworking: routine follow-up\n",
 );
 const customReservedPrefixes = scopeForUnreadWake(state, false);
 if (!customReservedPrefixes.eligible || customReservedPrefixes.eligibleSeqs.join(",") !== "2" ||

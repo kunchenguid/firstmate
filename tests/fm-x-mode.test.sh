@@ -1655,9 +1655,8 @@ test_reply_followup_image_dry_run_marks_endpoint_and_compacts_image() {
 }
 
 # --- durable per-request context registry + follow-up platform fail-safe ------
-# Regression: a Discord milestone follow-up posted DIRECTLY by request_id (no task
-# link, because one persistent secondmate's single x_request slot was already
-# taken by a concurrent request) AFTER the inbox was drained silently defaulted to
+# Regression: a Discord milestone follow-up posted directly by request_id after
+# the inbox was drained silently defaulted to
 # the X 280-char budget and threaded a >280 Discord reply as "(1/2)". The fix: the
 # poll records a durable per-request reply-context registry, fm-x-reply resolves
 # platform/budget through registry -> inbox -> relay, and refuses to split an
@@ -2072,16 +2071,14 @@ TXT
   pass "a partial registry platform combines with the relay's authoritative budget"
 }
 
-# Regression case 4: concurrent requests through one secondmate keep their own
-# platform/budget - the per-request registry cannot be cross-overwritten the way a
-# single x_request per task was.
+# Concurrent requests keep their own platform and budget in the per-request
+# registry.
 test_regression_concurrent_requests_keep_own_platform() {
   local home fakebin out rc discord_reply x_reply
   home="$TMP_ROOT/reg-concurrent"; mkdir -p "$home"
   fakebin=$(make_fake_curl "$home")
   printf 'FMX_PAIRING_TOKEN=tok-cc\n' > "$home/.env"
-  # Two concurrent public requests arrive (one Discord, one X) - as if routed
-  # through ONE persistent secondmate whose single x_request slot would collide.
+  # Two concurrent public requests arrive, one from Discord and one from X.
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
     FAKE_POLL_CODE=200 FAKE_POLL_BODY="$(jq -cn '{request_id:"req-cd",platform:"discord",reply_max_chars:1900,text:"q"}')" \
     "$ROOT/bin/fm-x-poll.sh"); rc=$?
@@ -2101,7 +2098,7 @@ test_regression_concurrent_requests_keep_own_platform() {
 The Discord one is done, captain - patched, guarded, and up for review. This reply is deliberately over a single X tweet to prove the Discord follow-up recovers its own one-message budget while a concurrent X request is in flight.
 TXT
 )
-  x_reply="The X request is progressing on its own track, and this update deliberately runs well beyond the single-tweet budget on purpose, proving that the concurrent X follow-up still threads correctly at the X budget and did not inherit the larger Discord budget from the other in-flight request routed through the same secondmate."
+  x_reply="The X request is progressing on its own track, and this update deliberately runs well beyond the single-tweet budget on purpose, proving that the concurrent X follow-up still threads correctly at the X budget and did not inherit the larger Discord budget from the other in-flight request."
   [ "$(printf '%s' "$x_reply" | wc -m | tr -d '[:space:]')" -gt 280 ] \
     || fail "the concurrent X reply must exceed 280 chars to force a split"
   out=$(FM_HOME="$home" FMX_DRY_RUN=1 "$ROOT/bin/fm-x-reply.sh" req-cd --followup - <<<"$discord_reply" 2>/dev/null); rc=$?
@@ -2625,75 +2622,6 @@ test_link_rejects_unsafe_and_missing() {
   pass "fm-x-link rejects unsafe ids, missing meta, and missing arguments"
 }
 
-# A home with no secondmates at all learns nothing from the registry, so its
-# missing-task error must stay the plain one instead of routing every typo at a
-# mechanism that does not apply.
-test_link_missing_task_without_secondmates_stays_plain() {
-  local home err rc
-  home="$TMP_ROOT/link-no-secondmates"; mkdir -p "$home/state" "$home/data"
-  err="$TMP_ROOT/link-no-secondmates.err"
-  PATH="$BASE_PATH" FM_HOME="$home" "$ROOT/bin/fm-x-link.sh" no-such req-1 >/dev/null 2>"$err"; rc=$?
-  expect_code 1 "$rc" "plain missing-task exit"
-  assert_grep "no such task: state/no-such.meta" "$err" "the plain missing-task error must still be reported"
-  assert_no_grep "fm-public-followup.sh register" "$err" \
-    "a home with no second mates must not be pointed at the promised-final path"
-  pass "fm-x-link keeps the plain missing-task error when no second mate is registered"
-}
-
-# The link writes into THIS home's own state/<id>.meta, so it can never bind work
-# that lives in a secondmate home. Refusing with a bare "no such task" left the
-# public promise silently orphaned; the refusal must name the secondmate holding
-# the task and the promised-final path that can actually bind it.
-test_link_refuses_secondmate_routed_task_with_promised_final_pointer() {
-  local main sub err out rc
-  main="$TMP_ROOT/link-secondmate-main"; mkdir -p "$main/state" "$main/data"
-  sub="$TMP_ROOT/link-secondmate-sub"; mkdir -p "$sub/state"
-  printf 'sm-axi\n' > "$sub/.fm-secondmate-home"
-  printf 'window=w\nworktree=/wt\nkind=ship\n' > "$sub/state/routed-k1.meta"
-  printf '# Second mates\n\n- sm-axi - owns the axi domain (home: %s; scope: axi tooling; projects: axi; added 2026-01-01)\n' \
-    "$sub" > "$main/data/secondmates.md"
-  err="$TMP_ROOT/link-secondmate.err"
-  out=$(PATH="$BASE_PATH" FM_HOME="$main" "$ROOT/bin/fm-x-link.sh" routed-k1 req-routed 2>"$err"); rc=$?
-  expect_code 1 "$rc" "secondmate-routed link exit"
-  [ -z "$out" ] || fail "a refused link must print no success line (got: $out)"
-  assert_grep "sm-axi" "$err" "the refusal must name the second mate holding the task"
-  assert_grep "--work-home secondmate:sm-axi" "$err" \
-    "the refusal must name the exact promised-final binding for that second mate"
-  assert_grep "fm-public-followup.sh register" "$err" \
-    "the refusal must point at the promised-final registration command"
-  assert_absent "$main/state/routed-k1.meta" "a refused link must not create a local record"
-  assert_no_grep "x_request=" "$sub/state/routed-k1.meta" \
-    "a refused link must not write into the second mate's task record"
-  # The guardrail is scoped to the missing-record case: a task this home does own
-  # still links normally with second mates registered.
-  printf 'window=w\nworktree=/wt\nkind=ship\n' > "$main/state/local-k1.meta"
-  out=$(PATH="$BASE_PATH" FM_HOME="$main" FMX_NOW_OVERRIDE=1700000000 \
-    "$ROOT/bin/fm-x-link.sh" local-k1 req-local 2>/dev/null); rc=$?
-  expect_code 0 "$rc" "local link exit with second mates registered"
-  assert_grep "x_request=req-local" "$main/state/local-k1.meta" \
-    "a local task must still link while second mates are registered"
-  pass "fm-x-link refuses a second-mate-routed task and points at the promised-final path"
-}
-
-# A remote secondmate's home cannot be inspected from here, and neither can a
-# task the parent never recorded, so the refusal degrades to naming the routing
-# possibility and the mechanism rather than silently reporting a missing file.
-test_link_missing_task_with_secondmates_points_at_promised_final() {
-  local home err rc
-  home="$TMP_ROOT/link-remote-secondmate"; mkdir -p "$home/state" "$home/data"
-  printf '# Second mates\n\n- sm-far - owns the far domain (host: box; root: /srv/fm; home: /srv/fm/home; scope: far things; projects: far; added 2026-01-01)\n' \
-    > "$home/data/secondmates.md"
-  err="$TMP_ROOT/link-remote-secondmate.err"
-  PATH="$BASE_PATH" FM_HOME="$home" "$ROOT/bin/fm-x-link.sh" unknown-k1 req-unknown >/dev/null 2>"$err"; rc=$?
-  expect_code 1 "$rc" "unknown-task link exit with second mates registered"
-  assert_grep "no such task: state/unknown-k1.meta" "$err" "the concrete missing record must still be reported"
-  assert_grep "fm-public-followup.sh register" "$err" \
-    "an unlocatable task in a home with second mates must be pointed at the promised-final path"
-  assert_grep "--work-home secondmate:<id>" "$err" \
-    "an unlocatable task must leave the second mate id for the caller to fill in"
-  pass "fm-x-link points an unlocatable task at the promised-final path when second mates exist"
-}
-
 # --- fm-x-followup: detect, post up to 3 follow-ups, manage the link --------
 
 mk_linked_task() { # <home> <id> <request_id> <link-epoch> [starting-count]
@@ -3083,9 +3011,6 @@ test_link_carry_count_validation
 test_meta_rewrites_do_not_depend_on_tmpdir
 test_meta_helpers_refuse_a_symlinked_task_record
 test_link_rejects_unsafe_and_missing
-test_link_missing_task_without_secondmates_stays_plain
-test_link_refuses_secondmate_routed_task_with_promised_final_pointer
-test_link_missing_task_with_secondmates_points_at_promised_final
 test_followup_check_states
 test_followup_check_expired_prunes_link
 test_followup_check_cap_reached_prunes_link

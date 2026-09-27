@@ -395,8 +395,8 @@ EOF
   fi
 }
 
-# Print still-unread informational status lines (note: answers and pending-reply
-# resolutions) that the OPEN DECISIONS fold never carries. Uses the same
+# Print still-unread informational status lines (`note:` answers) that the OPEN
+# DECISIONS fold never carries. Uses the same
 # cursor-backed unread span as the annotation path, and runs on every drain -
 # including the empty-queue fast path - so a buried answer cannot be swallowed
 # when the fold later advances the cursor. Prints nothing when nothing is
@@ -432,8 +432,8 @@ EOF
 # fm-classify-lib.sh's status_open_decisions fold (via its cursor-backed
 # scan_open_decisions_incremental wrapper) rather than from the annotations
 # above, so a decision buried under later unrelated appends cannot be silently
-# missed. Informational `note:` lines and pending-reply resolutions are not
-# decisions; print_unread_status_section owns their one-shot surface. Runs on
+# missed. Informational `note:` lines are not decisions;
+# print_unread_status_section owns their one-shot surface. Runs on
 # every drain - including the empty-queue fast path - because the decision can
 # still be open even when nothing new is queued for
 # its task this turn. The incremental wrapper bounds this scan's cost to bytes
@@ -660,7 +660,7 @@ if [ -n "$ACK_THROUGH" ]; then
     claim_main_rows_locked || exit 1
   fi
   if [ "$ACTOR" = branch ]; then
-    # check-kind rows (inactive-outcome receipts, secondmate stall markers)
+# check-kind rows (such as inactive-outcome receipts)
     # are never in a branch's eligible snapshot - they are main-only by
     # construction (docs/pi-supervision-branch.md) - so a branch-actor ack
     # never removes one and these scans would find nothing relevant anyway.
@@ -700,10 +700,6 @@ if [ -n "$ACK_THROUGH" ]; then
       BEGIN { while ((getline line < seqs) > 0) owned[line]=1 }
       NF < 5 || $2 !~ /^[0-9]+$/ || $2 > cutoff || !($2 in owned) { print }
     ' "$FM_WAKE_QUEUE" > "$DRAIN_TMP" || exit 1
-    fm_wake_commit_secondmate_stall_receipts_through "$ACK_THROUGH" "$MAIN_ROWS_FILE" || {
-      echo "wake drain: secondmate stall receipt could not be recorded safely" >&2
-      exit 1
-    }
   fi
   ACK_REMOVED=$(( $(awk 'END { print NR }' "$FM_WAKE_QUEUE") - $(awk 'END { print NR }' "$DRAIN_TMP") ))
   if [ ! -s "$DRAIN_TMP" ]; then

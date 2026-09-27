@@ -11,7 +11,6 @@ export const FIRSTMATE_CURRENT_OPERATIONAL_KINDS = [
   "watcher",
   "turn-end-guard",
   "away-supervisor",
-  "from-firstmate",
   "launch-brief",
   "branch-outcome",
 ] as const;

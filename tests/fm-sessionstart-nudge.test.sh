@@ -88,7 +88,6 @@ test_gate_common_dir_is_silent() {
   git --git-dir="$bare" worktree add --quiet -b gate-test "$root" HEAD
   mkdir -p "$root/bin" "$root/state"
   : > "$root/AGENTS.md"
-  printf 'gate-test\n' > "$root/.fm-secondmate-home"
   expect_silent_zero "gate common-dir nudge" env FM_GATE_REFUSE_BYPASS=0 \
     FM_ROOT_OVERRIDE="$root" FM_HOME="$root" "$NUDGE"
   pass "fm-sessionstart-nudge: .no-mistakes gate common-dir is silent"
@@ -103,17 +102,6 @@ test_unmarked_linked_worktree_is_silent() {
   pass "fm-sessionstart-nudge: an unmarked linked task worktree is silent"
 }
 
-test_linked_secondmate_primary_nudges() {
-  local base="$TMP_ROOT/secondmate-base" root="$TMP_ROOT/secondmate-home" out status=0
-  fm_git_worktree "$base" "$root" fm/sessionstart-secondmate
-  mkdir -p "$root/bin" "$root/state"
-  : > "$root/AGENTS.md"
-  printf 'sessionstart-sm\n' > "$root/.fm-secondmate-home"
-  out=$(run_nudge "$root") || status=$?
-  expect_code 0 "$status" "linked secondmate nudge"
-  [ "$out" = "$NUDGE_LINE" ] || fail "linked secondmate printed unexpected output: $out"
-  pass "fm-sessionstart-nudge: a marked linked secondmate home is a primary"
-}
 
 test_missing_state_is_silent() {
   local root="$TMP_ROOT/missing-state"
@@ -1009,7 +997,6 @@ test_genuine_primary_nudges
 test_gate_env_is_silent
 test_gate_common_dir_is_silent
 test_unmarked_linked_worktree_is_silent
-test_linked_secondmate_primary_nudges
 test_missing_state_is_silent
 test_owned_lock_is_silent
 test_namespace_pid1_lock_holder_is_silent

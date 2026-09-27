@@ -15,7 +15,6 @@ metadata:
 Use this procedure before adding, creating, removing, or initializing a project.
 Cloning or registering a project is add intake and uses the same trigger.
 This skill is the single owner of Firstmate's project-management procedure.
-It does not replace `secondmate-provisioning`, which owns project clones inside persistent secondmate homes.
 
 ## Preconditions and registry
 
@@ -24,10 +23,6 @@ Use the registry format and parser contract owned by the header of `bin/fm-proje
 Keep each registry description useful for identifying the project, but keep delivery posture, captain-private state, and detailed project knowledge in their existing designated homes.
 Do not turn the registry into project documentation.
 
-Before adding, cloning, creating, or registering any project in the main home, inspect the authoritative `data/secondmates.md` routing table and judge every existing natural-language `scope:` against the proposed project or domain.
-Apply `AGENTS.md` section 7's authoritative secondmate routing rules; if an existing scope owns that domain, route the new-project operation or work there instead of creating or registering a duplicate main-home clone.
-Absence from the main `data/projects.md` registry is never evidence that no second mate owns the domain.
-If the owning second mate cannot accept the route, report that concrete blocker or obtain an explicit captain redirection rather than silently duplicating the project in the main home.
 
 Resolve the project name, destination, delivery posture, and autonomy posture before changing local or remote state.
 Keep a newly added clone and its registry entry consistent, and roll back only artifacts created by the incomplete operation when a later initialization step fails and that rollback is safe.
@@ -87,7 +82,7 @@ If doctor reports an environment, authentication, or daemon problem, resolve tha
 ## Remove
 
 Project removal is destructive.
-First obtain the captain's explicit removal decision, then inspect the current digest and authoritative repositories for in-flight or queued work, registered secondmate clones, linked worktrees, dirty files, unpushed commits, and any other unlanded work.
+First obtain the captain's explicit removal decision, then inspect the current digest and authoritative repositories for in-flight or queued work, linked worktrees, dirty files, unpushed commits, and any other unlanded work.
 If any dependency or unlanded work exists, stop and report it before changing anything.
 Never issue a raw removal command from Firstmate.
 Once that preflight confirms none of the above and the captain's approval is concrete, AGENTS.md hard rule 1's captain-approved project operation exception authorizes firstmate to remove the clone directly and update its registry entry to match.

@@ -48,21 +48,6 @@ test_current_generic_matrix() {
   pass "operational input: every current generic envelope retains its exact structured kind"
 }
 
-test_current_from_firstmate_carrier() {
-  local encoded parsed separator
-  separator=$(printf '\342\201\243')
-  fm_message_mark_from_firstmate "corr=0123456789abcdef inspect the report" encoded
-  [ "${encoded#"[fm-from-firstmate]$separator"}" != "$encoded" ] \
-    || fail "from-firstmate lost its live-charter-compatible leading carrier"
-  fm_operational_input_kind "$encoded" parsed \
-    || fail "from-firstmate current carrier did not parse"
-  [ "$parsed" = from-firstmate ] \
-    || fail "from-firstmate current carrier became $parsed"
-  [ "$(classify_cli "$encoded")" = from-firstmate ] \
-    || fail "cross-language classifier lost from-firstmate"
-  pass "operational input: the established from-firstmate carrier remains structurally typed and byte-compatible"
-}
-
 test_landed_untyped_prefix_is_explicitly_legacy() {
   local untyped parsed
   untyped="${FM_OPERATIONAL_PREFIX}body whose historical subtype is unknowable"
@@ -119,7 +104,6 @@ ${FM_LEGACY_SESSIONSTART} Please explain this sentence.
 FIRSTMATE WATCHER WAKE: can you explain this phrase?
 TURN WOULD END BLIND - can you make this warning friendlier?
 Supervisor escalate (1 event(s)): is this wording clear?
-[fm-from-firstmate] inspect this visible label
 EOF
   pass "operational input: quoted, ASCII-only, arbitrary-U+2063, altered-legacy, and label-only near misses stay genuine"
 }
@@ -136,7 +120,6 @@ test_invalid_current_encodings_are_rejected() {
 }
 
 test_current_generic_matrix
-test_current_from_firstmate_carrier
 test_landed_untyped_prefix_is_explicitly_legacy
 test_isolated_legacy_matrix
 test_genuine_near_misses_remain_unclassified

@@ -146,7 +146,6 @@ Push-source passes polled `state/<id>.busy-state`; pull-source passes used the p
 The earlier Codex 0.145.0 probe on 2026-07-28 tried two push paths, both refused:
 
 ```sh
-codex app-server daemon start
 codex exec --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust 'Reply with exactly PROBE2.'
 ```
 

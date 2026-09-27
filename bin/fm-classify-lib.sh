@@ -262,83 +262,12 @@ status_paused_until() {  # <status-line> -> epoch on stdout
 # number of "[name=value]" tags before the colon, in any order, so verb parsing
 # ends at the first tag rather than special-casing "[key=...]".
 #
-# Correlation tokens. That bracket rule already covers every BRACKETED tag,
-# including the "[corr=<16 hex>]" form bin/fm-secondmate-report.sh writes. It
-# does not cover the UNBRACKETED token that bin/fm-pending-reply-lib.sh writes
-# (fm_pending_reply_corr_token), which a secondmate answering a marked request
-# echoes on its parent status line ahead of the key tag (bin/fm-brief.sh), so a
-# real transition routinely arrives as
-#   needs-decision corr=<16 hex> [key=texte-du-mur]: <summary>
-#   resolved       corr=<16 hex> [key=texte-du-mur]: <how it was decided>
-# and a recovery turn can leave two such tokens on one line. All of those must
-# read as the bare verb, in BOTH directions: a verb parse that keeps the token
-# glued on matches no arm of _fm_decision_fold_line, so the opener never opens
-# and the closer never closes, and a captain decision goes silently missing.
-# Recognition starts only AFTER the retained leading verb: a token-first line
-# keeps that token, so its following word cannot impersonate a transition and
-# close a decision the captain is owed.
-#
-# The token grammar is OWNED by bin/fm-pending-reply-lib.sh
-# (fm_pending_reply_corr_token, FM_PENDING_REPLY_CORR_RE). That library sources
-# this one, so it cannot be sourced back here; the pattern below is a deliberate
-# second statement of the SHAPE alone, and tests/fm-classify-corr-token.test.sh
-# pins the two together through the real writers so they cannot drift.
-#
-# Recognition is deliberately narrow: EXACTLY the token that writer emits, whole
-# word, and nothing else. An arbitrary "<name>=<value>" token is NOT skipped.
-# Skipping unknown tokens would be the permissive road - it would let any
-# free-text word carrying an equals sign ("resolved x=1 [key=k]: ...") reduce to
-# a bare verb and impersonate a transition, which is the takeover the strict
-# parse and _fm_decision_key_transition_allowed exist to prevent. Recognising
-# only what a firstmate library actually writes costs one more line here each
-# time a real new token shape is introduced, and that is the intended trade: a
-# new shape is a deliberate, reviewed edit rather than a silent widening. A line
-# whose token is malformed, wrong-length, or merely mentioned in prose keeps its
-# extra words and therefore stays a non-transition, exactly as before.
-#
-# The 16 hex classes are written out literally rather than built from a
-# variable, the same way bin/fm-secondmate-report.sh validates the id it is
-# handed: a variable holding a glob is only re-read as a pattern under some
-# shells' expansion rules, and a safety parse must not turn on that.
-#
-# 0 if <word> is, in whole, an unbracketed correlation token this fleet's own
-# tooling writes. The bracketed form never reaches here: the tag rule above has
-# already ended the verb parse at its opening bracket.
-_fm_classify_is_corr_token() {  # <word>
-  case "$1" in
-    corr=[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f])
-      return 0
-      ;;
-  esac
-  return 1
-}
-
 status_line_verb() {  # <status-line> -> leading verb word
-  local v=${1%%:*} out='' word
+  local v=${1%%:*}
   v=${v%%\[*}
   v=${v#"${v%%[![:space:]]*}"}
   v=${v%"${v##*[![:space:]]}"}
-  # Fast path, and the whole no-regression guarantee: a prefix that cannot
-  # contain a correlation token is returned byte-for-byte as before, so every
-  # line without one keeps its exact historical verb, spacing included.
-  case "$v" in
-    *corr=*) ;;
-    *) printf '%s' "$v"; return 0 ;;
-  esac
-  # Retain the first word, then drop only recognised tokens from the remaining
-  # whole words. Anything unrecognised stays, so prose still matches no verb.
-  word=${v%%[[:space:]]*}
-  out=$word
-  v=${v#"$word"}
-  v=${v#"${v%%[![:space:]]*}"}
-  while [ -n "$v" ]; do
-    word=${v%%[[:space:]]*}
-    v=${v#"$word"}
-    v=${v#"${v%%[![:space:]]*}"}
-    _fm_classify_is_corr_token "$word" && continue
-    out="$out $word"
-  done
-  printf '%s' "$out"
+  printf '%s' "$v"
 }
 # 0 when a complete "[key=...]" token sits in the documented position before
 # the line's first colon (or anywhere on a line that has no colon at all).
@@ -422,50 +351,6 @@ EOF
 # whole-file fold (status_open_decisions) and the incremental cursor-backed fold
 # (status_open_decisions_incremental) below call this instead of re-deriving the
 # rule, so the two consumption strategies can never drift apart on semantics.
-# Reserved decision-key namespaces, and the rule that makes them mean something.
-#
-# A key like `pending-reply-<id>` names a decision that one library raises and is
-# the only thing that ever closes it. Every writer reaches this same stream: a
-# local mate appends straight into it, and a remote mate's lines are mirrored
-# into it verbatim. So without a rule here, any writer could claim a reserved
-# key with an unrelated note, take the key over in this fold, and permanently
-# block the owner's close - leaving a decision nothing will ever resolve - or
-# clear the owner's decision with a bare resolution.
-#
-# The rule is deliberately generic, so this fold needs no knowledge of any
-# particular owner: a reserved key may only be opened or closed by a line whose
-# note speaks that namespace's own vocabulary, which its owner states by
-# beginning the note with a `<namespace>...:` token. A line failing that is not a
-# decision transition at all here and is folded as ordinary status. This is a
-# consumer-side rule on purpose - it protects local and remote writers
-# identically, and it can never fail a whole delta or wedge a stream the way a
-# writer-side rejection would.
-FM_CLASSIFY_RESERVED_KEY_PREFIXES_DEFAULT='pending-reply-'
-
-# 0 when <key> is not reserved, or is reserved and <note> speaks its vocabulary.
-_fm_decision_key_transition_allowed() {  # <key> <note>
-  local key=$1 note=$2 prefix
-  for prefix in ${FM_CLASSIFY_RESERVED_KEY_PREFIXES:-$FM_CLASSIFY_RESERVED_KEY_PREFIXES_DEFAULT}; do
-    case "$key" in
-      "$prefix"*)
-        case "$note" in
-          "$prefix"*:*) return 0 ;;
-          *) return 1 ;;
-        esac
-        ;;
-    esac
-  done
-  return 0
-}
-
-_fm_is_pending_reply_escalation() {  # <key> <note>
-  case "$1" in pending-reply-*) ;; *) return 1 ;; esac
-  case "$2" in
-    pending-reply-missed:*|pending-reply-delivery-unknown:*|pending-reply-recovery-delivery-failed:*|pending-reply-recovery-delivery-unknown:*) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
 _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb>
   local open=$1 line=$2 resolve=$3 held=$4 verb key note
   # Blank-line guard. A `case` glob answers "does this line hold any non-space
@@ -479,8 +364,6 @@ _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb
   esac
   verb=$(status_line_verb "$line")
   key=$(_fm_decision_key "$line") || { printf '%s' "$open"; return 0; }
-  _fm_decision_key_transition_allowed "$key" "$(status_line_note "$line")" \
-    || { printf '%s' "$open"; return 0; }
   case "$verb" in
     needs-decision|blocked)
       note=$(status_line_note "$line")
@@ -1196,9 +1079,9 @@ status_retire_presentation_task() {  # <state> <task-id>
   heartbeat_marker=$(status_heartbeat_seen_marker_path "$state" "$task")
   daemon_marker=$(status_daemon_seen_marker_path "$state" "$task")
 
-  # A remote-home teardown can legitimately retire an endpoint ID that has no
-  # status log in that home. Do not contend with that home's unrelated status
-  # presenter in this no-op case. A concurrent presenter cannot add this task
+  # A teardown can legitimately retire an endpoint ID that has no status log.
+  # Do not contend with the unrelated status presenter in this no-op case.
+  # A concurrent presenter cannot add this task
   # without its status file, so a valid manifest with no matching row is a
   # durable proof that there is nothing to retire.
   if [ ! -e "$state/$task.status" ] && [ ! -L "$state/$task.status" ] \
@@ -1346,10 +1229,9 @@ EOF
 # --- unread status lines since the presentation cursor ----------------------
 #
 # The drain annotation historically printed only the newest status line, so a
-# substantive `note:` answer immediately followed by a routine `note:` (or a
-# pending-reply resolution buried under a later unrelated append) never reached
-# the supervisor. Those verbs also never enter the OPEN DECISIONS fold, so they
-# had no other surfacing path.
+# substantive `note:` answer immediately followed by a routine `note:` never
+# reached the supervisor. That verb also never enters the OPEN DECISIONS fold,
+# so it had no other surfacing path.
 # These helpers are the ONE owner of "what is still unread since the last drain
 # presentation": one fleet manifest records each status identity and last-
 # presented byte offset, and one atomic replacement commits only the contiguous
@@ -1360,9 +1242,9 @@ EOF
 # aborts presentation without advancing any offset. A trusted cursor at EOF
 # prints nothing, so already-presented bytes are not replayed as new. Teardown
 # retires a task's manifest row with its status file, so reusing a task ID starts
-# the replacement log unread at byte 0. Informational `note:` lines and
-# reserved-key pending-reply resolutions are the fleet-wide unread surface;
-# they are not open decisions and are not persisted in the folded open-set.
+# the replacement log unread at byte 0. Informational `note:` lines are the
+# fleet-wide unread surface; they are not open decisions and are not persisted
+# in the folded open-set.
 
 # Read the legacy per-task open-decisions cursor used to seed the presentation
 # offset before the fleet manifest exists. A fold-version mismatch, identity
@@ -1466,35 +1348,18 @@ status_new_lines_since_cursor() {  # <status-file> [<captured-end-offset>]
   return "$rc"
 }
 
-# 0 when a status line is an informational `note:` or a reserved-key
-# pending-reply resolution. Those lines never fold into OPEN DECISIONS, so the
-# drain's unread-status surface is their only guaranteed presentation.
+# 0 when a status line is an informational `note:`. These lines never fold into
+# OPEN DECISIONS, so the drain's unread-status surface is their only guaranteed
+# presentation.
 status_line_is_unread_surface() {  # <status-line>
-  local line=$1 verb key note resolve held prefix
+  local line=$1 verb
   [ -n "$line" ] || return 1
   verb=$(status_line_verb "$line")
-  [ "$verb" = note ] && return 0
-  resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
-  held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
-  case "$verb" in
-    "$resolve"|"$held") ;;
-    *) return 1 ;;
-  esac
-  key=$(_fm_decision_key "$line") || return 1
-  note=$(status_line_note "$line")
-  for prefix in ${FM_CLASSIFY_RESERVED_KEY_PREFIXES:-$FM_CLASSIFY_RESERVED_KEY_PREFIXES_DEFAULT}; do
-    case "$key" in
-      "$prefix"*)
-        _fm_decision_key_transition_allowed "$key" "$note"
-        return
-        ;;
-    esac
-  done
-  return 1
+  [ "$verb" = note ]
 }
 
 # Fleet-wide unread informational lines: one "<task>\t<status-line>" row per
-# still-unread `note:` or pending-reply resolution, in glob (task id) order.
+# still-unread `note:`, in glob (task id) order.
 # Prints nothing when none are unread. Directory scan rejects status symlinks
 # the same way scan_open_decisions does.
 scan_unread_surface_lines() {  # <state>
@@ -1608,7 +1473,7 @@ window_to_task() {
 # ` ; ` so callers report the complete captured span before committing it.
 # With optional <record-var>, it assigns that record instead of printing it; with
 # optional <needs-decision-var>, it also assigns 1 when the span newly surfaces a
-# needs-decision, captain-held declaration, or pending-reply escalation, otherwise
+# needs-decision or captain-held declaration, otherwise
 # 0. This side-band classification never changes the event text.
 # It returns 1 after a successful classification with no actionable event; an
 # existing log still produces its committable endpoint and identity, while an absent
@@ -1620,10 +1485,8 @@ window_to_task() {
 #
 # A keyed `needs-decision` or `blocked` transition accepted by the whole-file
 # fold is included only when that fold still names the exact opening as live.
-# A transition rejected by the reserved-key vocabulary is surfaced instead as a
-# reconciliation signal and never treated here as an open decision.
 # status_open_decisions remains the single owner of open/closed semantics,
-# including same-key reopening and reserved-key handling.
+# including same-key reopening.
 # Every other captain-relevant event is terminal and always actionable.
 _fm_decision_origin_drop() {  # <origins> <key>
   local origin
@@ -1717,13 +1580,6 @@ status_span_first_actionable_record() {  # <status-file> <start-offset> [record-
           rc=0
           continue
         }
-        _fm_decision_key_transition_allowed "$key" "$(status_line_note "$line")" || {
-          [ -n "$events" ] && events="${events} ; "
-          events="${events}reconciliation-required: ${line}"
-          [ "$verb" = needs-decision ] && _fm_span_needs_decision=1
-          rc=0
-          continue
-        }
         if [ "$folded" -eq 0 ]; then
           _fm_status_read_span "$f" 0 "$size" > "$full_file" 2>/dev/null \
             || { failed=1; break; }
@@ -1744,8 +1600,7 @@ EOF
         [ -n "$live_line" ] && [ "$((prefix_lines + line_number))" -eq "$live_line" ] || continue
         [ -n "$events" ] && events="${events} ; "
         events="${events}${line}"
-        if [ "$verb" = needs-decision ] || { [ "$verb" = blocked ] &&
-          _fm_is_pending_reply_escalation "$key" "$(status_line_note "$line")"; }; then
+        if [ "$verb" = needs-decision ]; then
           _fm_span_needs_decision=1
         fi
         rc=0
@@ -1878,15 +1733,6 @@ FM_WORKTREE_WRITE_TIMEOUT=${FM_WORKTREE_WRITE_TIMEOUT:-10}
 # evidence therefore always leaves the caller's existing escalation schedule
 # untouched, so a crew that writes nothing still escalates exactly as before.
 #
-# A kind=secondmate task records a provisioned firstmate home, not a code tree, and
-# such a home runs its OWN supervision inside it: its state/ directory churns a
-# watcher beacon, pane hashes, and heartbeats whether or not the mate is producing
-# anything, so a walk there would report liveness for a mate that has done nothing.
-# Those homes are excluded outright rather than by pruning "state", which would also
-# hide a legitimate source directory of that name in an ordinary worktree. The
-# exclusion is a negative outcome like any other, so an unproductive mate keeps
-# escalating on the caller's unchanged schedule.
-#
 # The anchor is the caller's own idle-window timer file, whose mtime already marks
 # when the quiet window opened, so `-newer` needs no clock arithmetic, no temp
 # file, and no portable mtime-setting. Not a pure status-file read (see the header):
@@ -1897,17 +1743,12 @@ FM_WORKTREE_WRITE_TIMEOUT=${FM_WORKTREE_WRITE_TIMEOUT:-10}
 # worktree's own filesystem rather than descending into a nested network or container
 # mount, so a write that lands only under such a mount is one more negative outcome.
 crew_worktree_written_since() {  # <id> <state> <anchor-file>
-  local id=$1 state=$2 anchor=$3 wt kind name hit bound
+  local id=$1 state=$2 anchor=$3 wt name hit bound
   local -a names=() prune=()
   [ -n "$id" ] || return 1
   [ -f "$anchor" ] || return 1
   wt=$(grep '^worktree=' "$state/$id.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
   [ -n "$wt" ] && [ -d "$wt" ] || return 1
-  kind=$(grep '^kind=' "$state/$id.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
-  [ "$kind" != secondmate ] || return 1
-  if [ -e "$wt/.fm-secondmate-home" ] || [ -L "$wt/.fm-secondmate-home" ]; then
-    return 1
-  fi
   read -r -a names <<< "$FM_WORKTREE_WRITE_PRUNE"
   for name in ${names[@]+"${names[@]}"}; do
     [ "${#prune[@]}" -eq 0 ] || prune+=( -o )
@@ -1931,31 +1772,16 @@ crew_worktree_written_since() {  # <id> <state> <anchor-file>
 # Files are mapped to task ids by stripping the .status / .turn-ended suffix;
 # a no-verb wake with nothing
 # provably working must surface, so an empty/unresolvable list returns 1.
-# A kind=secondmate task's .status signal is never absorbable here regardless of
-# busy evidence: that stream is the mate's routed-reply channel, so every append
-# is parent-directed content the supervisor must read (a routed reply, a newly
-# raised decision, a mirrored remote line), and a busy mate agent makes its note
-# more current, not less deliverable. Scoped to .status files - a mate's bare
-# turn-ended ping still uses the ordinary provably-working absorb.
 signal_crew_provably_working() {  # <file> ...
-  local f base dir task seen=""
+  local f base task seen=""
   for f in "$@"; do
     base=${f##*/}
-    dir=${f%/*}
-    [ "$dir" != "$f" ] || dir=.
     case "$base" in
       *.status)     task=${base%.status} ;;
       *.turn-ended) task=${base%.turn-ended} ;;
       *)            continue ;;
     esac
     [ -n "$task" ] || continue
-    case "$base" in
-      *.status)
-        if [ "$(grep '^kind=' "$dir/$task.meta" 2>/dev/null | tail -1 | cut -d= -f2-)" = secondmate ]; then
-          return 1
-        fi
-        ;;
-    esac
     case " $seen " in *" $task "*) continue ;; esac
     seen="$seen $task"
     crew_is_provably_working "$task" || return 1
