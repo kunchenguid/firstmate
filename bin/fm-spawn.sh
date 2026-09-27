@@ -1759,7 +1759,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
     missing) RELAUNCH_REBIND=1 ;;
     *)
       if [ "$BACKEND" = orca ]; then
-        echo "error: task $ID's Orca endpoint reads '$RELAUNCH_STATE'; a relaunch requires a fully stopped old terminal, so $(fm_control_orca_recovery_step)" >&2
+        echo "error: task $ID's Orca endpoint reads '$RELAUNCH_STATE'; a relaunch requires a fully stopped old terminal, and $(fm_control_orca_recovery_step "$RELAUNCH_STATE")" >&2
       else
         echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free endpoint (stop the agent first with bin/fm-control.sh $ID exit)" >&2
       fi

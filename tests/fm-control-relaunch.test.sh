@@ -2401,7 +2401,7 @@ exports.reply = (method, params) => {
   let result;
   switch(method) {
     case 'status.get': result = {graphStatus:'ready',appVersion:'1.4.212'}; break;
-    case 'terminal.show': result = {terminal}; break;
+    case 'terminal.show': if (mode === 'stale') throw Error('terminal_handle_stale'); result = {terminal}; break;
     case 'terminal.list': result = {terminals:live ? [terminal] : [], truncated:false,hostScope:{hostIds:['local']}}; break;
     case 'terminal.wait': result = {wait:{handle,condition:'exit',satisfied:true,status:'exited',exitCode:mode === 'ambiguous' ? -1 : 0,exitCause:{kind:'operator_close'}}}; break;
     case 'terminal.inspectProcess': result = {process:{foregroundProcess:read('orca-launched') || mode === 'live' ? 'codex' : 'zsh'}}; break;
@@ -2452,7 +2452,7 @@ JS
 
 test_orca_stopped_relaunch_preserves_work_and_refuses_uncertainty() {
   local dir mode verb out rc before brief
-  for mode in live ambiguous; do
+  for mode in live ambiguous stale; do
     dir=$(new_case "orca-$mode" orca-proof)
     add_ship_task "$dir" orca-proof
     make_orca_relaunch_stub "$dir"
@@ -2467,12 +2467,19 @@ test_orca_stopped_relaunch_preserves_work_and_refuses_uncertainty() {
         out=$(run_spawn "$dir" orca-proof --relaunch --harness codex) || rc=$?
       fi
       expect_code 1 "$rc" "Orca $mode must refuse $verb"$'\n'"$out"
-      if [ "$mode" = ambiguous ]; then
-        assert_contains "$out" ambiguous 'refusal must reach the uncertain-state guard'
-      elif [ "$verb" = spawn ]; then
-        assert_contains "$out" alive 'spawn must identify the live agent before refusing'
+      if [ "$mode" = stale ]; then
+        assert_contains "$out" unreadable 'refusal must reach the unreadable-state guard'
+        assert_contains "$out" 'cannot be recovered through relaunch' 'an unresolvable handle must be named as unrecoverable'
+        case "$out" in *"close the old Orca terminal"*) fail 'an unresolvable handle must not prescribe closing a terminal' ;; esac
       else
-        assert_contains "$out" 'live Orca agent' 'control must preserve the live-agent stop refusal'
+        if [ "$mode" = ambiguous ]; then
+          assert_contains "$out" ambiguous 'refusal must reach the uncertain-state guard'
+        elif [ "$verb" = spawn ]; then
+          assert_contains "$out" alive 'spawn must identify the live agent before refusing'
+        else
+          assert_contains "$out" 'live Orca agent' 'control must preserve the live-agent stop refusal'
+        fi
+        assert_contains "$out" 'close the old Orca terminal' 'refusal must name the operator terminal-close step'
       fi
       [ "$(cat "$dir/home/state/orca-proof.meta")" = "$before" ] || fail 'Orca refusal changed metadata'
       [ "$(cat "$dir/home/data/orca-proof/brief.md")" = "$brief" ] || fail 'Orca refusal changed instructions'

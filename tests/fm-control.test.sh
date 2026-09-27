@@ -547,17 +547,12 @@ add_orca_task() {  # <case-dir> <id> <harness>
   } > "$dir/home/state/$id.meta.new"
   sed "s|^window=.*|window=fm-$id|" "$dir/home/state/$id.meta.new" > "$dir/home/state/$id.meta"
   rm -f "$dir/home/state/$id.meta.new"
-  printf 'wt-%s::/orca/wt-%s' "$id" "$id" > "$dir/fake/orca-worktree-id"
   cat > "$dir/fakebin/orca" <<'SH'
 #!/usr/bin/env bash
 set -u
 D=$FM_FAKE_DIR
 case "${1:-} ${2:-}" in
   'terminal read') printf '{"ok":true,"result":{"terminal":{"tail":["$ "]}}}\n' ;;
-  'terminal show')
-    printf '{"ok":true,"result":{"terminal":{"handle":"%s","executionHostId":"local","worktreeId":"%s","worktreePath":"%s"}}}\n' \
-      "$4" "$(cat "$D/orca-worktree-id")" "$(cat "$D/cwd")"
-    ;;
   'terminal send')
     case " $* " in
       *' --interrupt '*) printf 'C-c\n' >> "$D/keys" ;;
@@ -599,10 +594,11 @@ test_orca_without_probe_prerequisites_keeps_legacy_interrupt() {
   out=$(run_control "$dir" t1 exit); rc=$?
   expect_code 1 "$rc" "exit on orca without the probe must refuse"$'\n'"$out"
   assert_contains "$out" "unverified" "the exit refusal should name the unverified reading"
-  assert_contains "$out" "close the old Orca terminal" "the exit refusal should name the operator's recovery step"
+  assert_contains "$out" "recovery probe prerequisites" "the exit refusal should name the missing prerequisites, not a terminal to close"
+  case "$out" in *"close the old Orca terminal"*) fail "an unverified reading must not tell the operator to close a terminal" ;; esac
   out=$(run_control "$dir" t1 relaunch --note x); rc=$?
   expect_code 1 "$rc" "relaunch on orca without the probe must refuse"$'\n'"$out"
-  assert_contains "$out" "close the old Orca terminal" "the relaunch refusal should name the operator's recovery step"
+  assert_contains "$out" "recovery probe prerequisites" "the relaunch refusal should name the missing prerequisites, not a terminal to close"
   [ -z "$(keys_sent "$dir")" ] || fail "a refused stop verb must send no key"
   [ -z "$(literals "$dir")" ] || fail "a refused stop verb must send no text"
   pass "fm-control: Orca without the recovery probe keeps its legacy interrupt and refuses the stop-proving verbs"

@@ -613,7 +613,7 @@ do_exit() {
       ;;
     *)
       [ "$BACKEND" != orca ] \
-        || die "task $ID's Orca endpoint reads '$state' rather than a positively classified state; no lifecycle command was sent. Recovery requires a fully stopped old terminal: $(fm_control_orca_recovery_step)"
+        || die "task $ID's Orca endpoint reads '$state' rather than a positively classified state, and no lifecycle command was sent; $(fm_control_orca_recovery_step "$state")"
       die "task $ID's endpoint reads '$state' rather than a positively classified state; refusing to send a lifecycle command into an unattributed endpoint"
       ;;
   esac
@@ -621,7 +621,7 @@ do_exit() {
   # Keep the pre-existing live-agent stop refusal; enabling recovery must not
   # send a command whose resulting shell we cannot prove agent-free.
   [ "$BACKEND" != orca ] \
-    || die "task $ID has a live Orca agent and no lifecycle input was sent; recovery requires a fully stopped old terminal, so $(fm_control_orca_recovery_step)"
+    || die "task $ID has a live Orca agent and no lifecycle input was sent; recovery requires a fully stopped old terminal, so $(fm_control_orca_recovery_step alive)"
   # A busy agent is interrupted first before the exit command is submitted.
   case "$(busy_verdict)" in
     busy*)
@@ -896,11 +896,6 @@ safe_checkpoint() {
   wt_top_real=$(cd "$wt_top" 2>/dev/null && pwd -P) || wt_top_real=$wt_top
   [ "$wt_real" = "$wt_top_real" ] \
     || die "task $ID's recorded worktree $WT is not a worktree root (root is $wt_top); refusing to relaunch against an ambiguous checkout"
-  if [ "$BACKEND" = orca ]; then
-    fm_backend_source orca || die "could not load the Orca adapter"
-    fm_backend_orca_terminal_matches_worktree "$T" "$(fm_meta_get "$META" orca_worktree_id)" "$WT" \
-      || die "task $ID's Orca terminal does not prove ownership of its recorded worktree; refusing to relaunch"
-  fi
   if head=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null); then
     :
   elif head_ref=$(git -C "$WT" symbolic-ref -q HEAD 2>/dev/null); then

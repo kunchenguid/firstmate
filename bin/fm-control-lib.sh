@@ -301,12 +301,18 @@ fm_control_backend_state_verified() {  # <backend>
   return 1
 }
 
-# The one operator action that turns a refused Orca endpoint into a
-# recoverable one. Orca's proof covers full terminal exits only, so a live
-# agent or the shell it leaves behind is refused until the operator closes the
-# old terminal itself; Firstmate never closes a live terminal on its own.
-fm_control_orca_recovery_step() {
-  printf 'close the old Orca terminal itself (not just the agent inside it) so Orca records a full terminal exit, then retry; Firstmate never closes a live terminal for you, and a handle Orca no longer resolves cannot be recovered through relaunch'
+# What a refused Orca reading means for the operator. Orca's proof covers full
+# terminal exits only, so a live agent or the shell it leaves behind is refused
+# until the operator closes the old terminal itself; Firstmate never closes a
+# live terminal on its own. A handle the runtime no longer resolves has no
+# recovery through relaunch, and an install without the probe's prerequisites
+# cannot prove anything at all.
+fm_control_orca_recovery_step() {  # <state>
+  case "${1-}" in
+    unverified) printf 'this Orca install lacks the recovery probe prerequisites (a local runtime at 1.4.212 or newer with its bundled runtime client), so no reading here can prove the old agent stopped' ;;
+    unreadable) printf 'the recorded terminal has no fresh, local, incarnation-bound reading; a handle Orca no longer resolves cannot be recovered through relaunch' ;;
+    *) printf 'close the old Orca terminal itself (not just the agent inside it) so Orca records a full terminal exit, then retry; Firstmate never closes a live terminal for you' ;;
+  esac
 }
 
 # fm_control_endpoint_absence_verdict: the ONE owner of the per-backend proof
@@ -379,7 +385,7 @@ fm_control_endpoint_absence_verdict() {  # <backend> <target>
       case "$(fm_backend_orca_agent_state "$target")" in
         missing) printf 'gone\t' ;;
         alive) printf 'alive\t' ;;
-        unverified) printf 'unproven\tthis Orca install lacks the recovery probe prerequisites (a local runtime at 1.4.212 or newer with its bundled runtime client)' ;;
+        unverified) printf 'unproven\t%s' "$(fm_control_orca_recovery_step unverified)" ;;
         *) printf 'unproven\tthe recorded Orca terminal incarnation has no fresh, local host-confirmed exit proof' ;;
       esac
       ;;
