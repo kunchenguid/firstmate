@@ -114,6 +114,10 @@
 #
 # --contribution-input prints only the canonical backlog/tasks ownership pair,
 # without worker observations or cross-home collection, for the home-local poll.
+# Both this mode and the full snapshot stage contribution JSON through temporary
+# files and jq --slurpfile so backlog/task payloads do not consume argv space.
+# Contribution serialization failure exits nonzero with a stderr diagnostic,
+# without emitting a snapshot; fm-contributions.sh owns reader input validation.
 # Compatibility: JSON is the primary machine-readable surface.
 # Human views must render this output instead of parsing state files again.
 set -u
@@ -1991,8 +1995,23 @@ contribution_tasks_json() {
 if [ "$OUTPUT_MODE" = contribution-input ]; then
   # Reuse the canonical backlog parser, without observing workers or other homes.
   contribution_tasks=$(contribution_tasks_json) || { echo "fm-fleet-snapshot: contribution task read failed" >&2; exit 1; }
-  jq -n --argjson backlog "$BACKLOG_JSON" --argjson tasks "$contribution_tasks" '{backlog:$backlog,tasks:$tasks}'
-  exit 0
+  JSON_TRANSPORT_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-fleet-snapshot.XXXXXX") \
+    || { echo "fm-fleet-snapshot: temporary contribution transport directory creation failed" >&2; exit 1; }
+  BACKLOG_JSON_FILE="$JSON_TRANSPORT_DIR/backlog.json"
+  CONTRIBUTION_TASKS_JSON_FILE="$JSON_TRANSPORT_DIR/contribution-tasks.json"
+  CONTRIBUTION_INPUT_JSON_FILE="$JSON_TRANSPORT_DIR/contribution-input.json"
+  printf '%s\n' "$BACKLOG_JSON" > "$BACKLOG_JSON_FILE" \
+    || { echo "fm-fleet-snapshot: temporary contribution backlog file write failed" >&2; exit 1; }
+  printf '%s\n' "$contribution_tasks" > "$CONTRIBUTION_TASKS_JSON_FILE" \
+    || { echo "fm-fleet-snapshot: temporary contribution task file write failed" >&2; exit 1; }
+  if ! jq -n --slurpfile backlog "$BACKLOG_JSON_FILE" --slurpfile tasks "$CONTRIBUTION_TASKS_JSON_FILE" \
+    '{backlog:$backlog[0],tasks:$tasks[0]}' > "$CONTRIBUTION_INPUT_JSON_FILE"; then
+    echo "fm-fleet-snapshot: contribution input serialization failed" >&2
+    exit 1
+  fi
+  cat "$CONTRIBUTION_INPUT_JSON_FILE" \
+    || { echo "fm-fleet-snapshot: contribution input read failed" >&2; exit 1; }
+  exit
 fi
 prefetch_task_current_states || { echo "fm-fleet-snapshot: task observation failed" >&2; exit 1; }
 TASKS_JSON=$(task_json_lines) || { echo "fm-fleet-snapshot: task snapshot failed" >&2; exit 1; }
@@ -2015,8 +2034,11 @@ CONTRIBUTION_TASKS_JSON=$(contribution_tasks_json) \
   || { echo "fm-fleet-snapshot: contribution task read failed" >&2; exit 1; }
 printf '%s\n' "$CONTRIBUTION_TASKS_JSON" > "$JSON_TRANSPORT_DIR/contribution-tasks.json" \
   || { echo "fm-fleet-snapshot: contribution task staging failed" >&2; exit 1; }
-jq -n --slurpfile backlog "$BACKLOG_JSON_FILE" --slurpfile tasks "$JSON_TRANSPORT_DIR/contribution-tasks.json" \
-  '{backlog:$backlog[0],tasks:$tasks[0]}' > "$JSON_TRANSPORT_DIR/contribution-input.json"
+if ! jq -n --slurpfile backlog "$BACKLOG_JSON_FILE" --slurpfile tasks "$JSON_TRANSPORT_DIR/contribution-tasks.json" \
+  '{backlog:$backlog[0],tasks:$tasks[0]}' > "$JSON_TRANSPORT_DIR/contribution-input.json"; then
+  echo "fm-fleet-snapshot: contribution input serialization failed" >&2
+  exit 1
+fi
 FM_CONTRIBUTIONS_NOW="$SNAPSHOT_NOW" "$SCRIPT_DIR/fm-contributions.sh" snapshot \
   "$JSON_TRANSPORT_DIR/contribution-input.json" > "$CONTRIBUTIONS_JSON_FILE" \
   || { echo "fm-fleet-snapshot: contribution coverage unavailable" >&2; exit 1; }
