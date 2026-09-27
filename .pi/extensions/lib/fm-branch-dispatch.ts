@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { runCommandAsync } from "./fm-async-exec.ts";
@@ -185,7 +186,10 @@ const UNSAFE_SCOPE: UnreadWakeScope = {
 // for a task with an open needs-decision or a current captain-held declaration,
 // gets the identical treatment: excluded from eligibleSeqs, never a scan veto,
 // and forced to main on its own triggering close (fm-primary-pi-watch.ts's
-// offerWakeToBranch). Heartbeat handling remains independent.
+// offerWakeToBranch). Heartbeat handling remains independent. A second mate's
+// signal row is decision-owned only by the span presented since the last drain
+// (spanIsDecisionOwned), because its status log is a shared channel in which
+// an unrelated open decision must not pin every routine update to main.
 //
 // That applies to a heartbeat review too, and it is the whole point: a
 // heartbeat used to be deferred to main merely because some unrelated check
@@ -217,16 +221,42 @@ function statusLineVerb(line: string): string {
   return words.filter((word, index) => index === 0 || !/^corr=[0-9a-f]{16}$/i.test(word)).join(" ");
 }
 
-function decisionKey(line: string): string | null {
+// bin/fm-classify-lib.sh's _fm_status_unstamped: drop every time-tag-shaped
+// run before the head ends, so a readable stamp like [at=10:30] cannot move the
+// head/note separator the key and note readers below look for.
+function statusLineUnstamped(line: string): string {
+  let rest = line;
+  let keep = "";
+  for (;;) {
+    const start = rest.indexOf("[at=");
+    const end = start < 0 ? -1 : rest.indexOf("]", start + 4);
+    if (end < 0) break;
+    const before = rest.slice(0, start);
+    if (before.includes(":")) break;
+    keep += before.endsWith(" ") ? before.slice(0, -1) : before;
+    rest = rest.slice(end + 1);
+  }
+  return keep + rest;
+}
+
+// The key a line states in one of the status parser's declared positions, if
+// any: before the head's colon, or at the head of its note.
+function declaredDecisionKey(rawLine: string): string | undefined {
+  const line = statusLineUnstamped(rawLine);
   const colon = line.indexOf(":");
   const beforeColon = colon < 0 ? line : line.slice(0, colon);
   const beforeMatch = beforeColon.match(/\[key=([^\]]*)\]/);
   const noteMatch = beforeMatch || colon < 0 ? null : line.slice(colon + 1).trimStart().match(/^\[key=([^\]]*)\]/);
-  const key = (beforeMatch ?? noteMatch)?.[1] ?? "default";
+  return (beforeMatch ?? noteMatch)?.[1];
+}
+
+function decisionKey(line: string): string | null {
+  const key = declaredDecisionKey(line) ?? "default";
   return /^[A-Za-z0-9._-]+$/.test(key) ? key : null;
 }
 
-function statusLineNote(line: string): string {
+function statusLineNote(rawLine: string): string {
+  const line = statusLineUnstamped(rawLine);
   const colon = line.indexOf(":");
   if (colon < 0) return line;
   const note = line.slice(colon + 1).trimStart();
@@ -254,12 +284,12 @@ function statusFileVersion(path: string): string | null {
   }
 }
 
-function hasOpenNeedsDecision(
+function openDecisions(
   lines: readonly string[],
   resolveVerb: string,
   heldVerb: string,
   reservedPrefixes: readonly string[],
-): boolean {
+): Map<string, "needs-decision" | "blocked"> {
   const open = new Map<string, "needs-decision" | "blocked">();
   for (const line of lines) {
     const verb = statusLineVerb(line);
@@ -272,7 +302,63 @@ function hasOpenNeedsDecision(
     if (verb === "needs-decision" || verb === "blocked") open.set(key, verb);
     else open.delete(key);
   }
-  return [...open.values()].includes("needs-decision");
+  return open;
+}
+
+function nonBlankLines(text: string): string[] {
+  return text.split(/\r?\n/).filter((line) => /\S/.test(line));
+}
+
+// bin/fm-classify-lib.sh's _fm_open_decisions_file_ident, which stamps each
+// row of state/.status-presentation-cursor. Any failure throws, and the caller
+// then reads the whole log.
+function statusFileIdentity(path: string): string {
+  const darwin = process.platform === "darwin";
+  const output = execFileSync(
+    darwin ? "/usr/bin/stat" : "stat",
+    darwin ? ["-f", "%d:%i|%B|%FB", path] : ["-c", "%d:%i|%W|%w", path],
+    { encoding: "utf8", env: { ...process.env, LC_ALL: "C" }, stdio: ["ignore", "pipe", "ignore"] },
+  ).trim();
+  const [ident, birthEpoch, birth] = output.split("|");
+  if (!ident || !birthEpoch) throw new Error("status identity unavailable");
+  return birthEpoch !== "0" && birth ? `strong:${ident}:${birth}` : `weak:${ident}`;
+}
+
+// The per-task presentation-cursor rows (task, identity, presented offset,
+// backstop), in the format bin/fm-classify-lib.sh writes. Null when the cursor
+// is absent or malformed, so every span read falls back to the whole log.
+function readPresentationCursor(state: string): Map<string, { ident: string; offset: number } | null> | null {
+  try {
+    const path = `${state}/.status-presentation-cursor`;
+    if (!lstatSync(path).isFile()) return null;
+    const rows = new Map<string, { ident: string; offset: number } | null>();
+    for (const row of readFileSync(path, "utf8").split("\n")) {
+      if (!row) continue;
+      const [task, ident, offset, backstop = "", ...extra] = row.split("\t");
+      if (!task || !ident || !/^[0-9]+$/.test(offset ?? "") || !/^[0-9]*$/.test(backstop) || extra.length > 0) return null;
+      rows.set(task, rows.has(task) ? null : { ident, offset: Number(offset) });
+    }
+    return rows;
+  } catch {
+    return null;
+  }
+}
+
+// A second-mate signal is decision-owned when a line presented since the last
+// drain is a decision transition, or declares the key of a decision still open
+// in the log. A key-less line counts only by its verb.
+function spanIsDecisionOwned(
+  open: ReadonlyMap<string, string>,
+  span: readonly string[],
+  resolveVerb: string,
+  heldVerb: string,
+): boolean {
+  return span.some((line) => {
+    const verb = statusLineVerb(line);
+    if (["needs-decision", "blocked", resolveVerb, heldVerb].includes(verb)) return true;
+    const key = declaredDecisionKey(line);
+    return key !== undefined && open.has(key);
+  });
 }
 
 export function scopeForUnreadWake(state: string, heartbeat: boolean, afk = false, attendedHost = false): UnreadWakeScope {
@@ -288,6 +374,7 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean, afk = fals
 
   const projects = new Set<string>();
   const metadata = new Map<string, string>();
+  const secondmates = new Set<string>();
   // The task id behind each key a signal or stale row may carry: the task id
   // itself, or the endpoint its metadata records.
   const taskByKey = new Map<string, string>();
@@ -298,6 +385,7 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean, afk = fals
       const fields = readFileSync(`${state}/${name}`, "utf8").split(/\r?\n/);
       const project = fields.find((line) => line.startsWith("project="))?.slice(8) ?? "";
       const window = fields.find((line) => line.startsWith("window="))?.slice(7) ?? "";
+      if (fields.includes("kind=secondmate")) secondmates.add(task);
       if (project) {
         metadata.set(task, project);
         taskByKey.set(task, task);
@@ -325,6 +413,7 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean, afk = fals
     .split(/\s+/)
     .filter(Boolean);
   const decisionConfig = `${resolveVerb}\0${heldVerb}\0${reservedPrefixes.join("\0")}`;
+  let presentationCursor: ReturnType<typeof readPresentationCursor> | undefined;
   for (const line of rows) {
     const fields = line.split("\t");
     if (fields.length < 5 || !/^[0-9]+$/.test(fields[1])) return UNSAFE_SCOPE;
@@ -375,11 +464,15 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean, afk = fals
       // ordinary main-only row.
       return UNSAFE_SCOPE;
     }
-    // An attended host can have accepted a routine signal before its task
-    // gained a main-owned decision. Pi retains its existing per-row scan.
-    if (task && (kind === "stale" || (attendedHost && kind === "signal"))) {
+    // A second mate's signal is judged by its new span on both paths. For a
+    // single-task log, an attended host can have accepted a routine signal
+    // before its task gained a main-owned decision, so it checks the whole
+    // log; Pi retains its existing per-row scan.
+    const spanRule = kind === "signal" && secondmates.has(task);
+    if (task && (kind === "stale" || (kind === "signal" && (attendedHost || spanRule)))) {
       const statusPath = `${state}/${task}.status`;
-      if (!staleDecisionOwnership.has(statusPath)) {
+      const ownershipKey = `${kind}\0${statusPath}`;
+      if (!staleDecisionOwnership.has(ownershipKey)) {
         let version: string | null;
         try {
           version = statusFileVersion(statusPath);
@@ -388,30 +481,47 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean, afk = fals
         }
         let decisionOwned = false;
         if (version) {
-          const cached = staleDecisionCache.get(statusPath);
-          if (cached?.version === version && cached.config === decisionConfig) {
+          let cursor: { ident: string; offset: number } | null | undefined;
+          if (spanRule) {
+            if (presentationCursor === undefined) presentationCursor = readPresentationCursor(state);
+            cursor = presentationCursor?.get(task);
+          }
+          const config = spanRule ? `${decisionConfig}\0${cursor?.ident ?? ""}\0${cursor?.offset ?? 0}` : decisionConfig;
+          const cached = staleDecisionCache.get(ownershipKey);
+          if (cached?.version === version && cached.config === config) {
             decisionOwned = cached.decisionOwned;
           } else {
-            let statusLines: string[];
+            let contents: Buffer;
+            let spanOffset = 0;
             try {
-              statusLines = readFileSync(statusPath, "utf8").split(/\r?\n/).filter((line) => /\S/.test(line));
+              contents = readFileSync(statusPath);
+              if (cursor && cursor.offset <= contents.length) {
+                try {
+                  if (cursor.ident === statusFileIdentity(statusPath)) spanOffset = cursor.offset;
+                } catch {
+                  // No identity to match: the span is the whole log.
+                }
+              }
               if (statusFileVersion(statusPath) !== version) return UNSAFE_SCOPE;
             } catch {
               return UNSAFE_SCOPE;
             }
-            decisionOwned = hasOpenNeedsDecision(statusLines, resolveVerb, heldVerb, reservedPrefixes) ||
-              statusLineVerb(statusLines.at(-1) ?? "") === heldVerb;
-            staleDecisionCache.set(statusPath, { version, config: decisionConfig, decisionOwned });
+            const statusLines = nonBlankLines(contents.toString("utf8"));
+            const open = openDecisions(statusLines, resolveVerb, heldVerb, reservedPrefixes);
+            decisionOwned = spanRule
+              ? spanIsDecisionOwned(open, nonBlankLines(contents.subarray(spanOffset).toString("utf8")), resolveVerb, heldVerb)
+              : [...open.values()].includes("needs-decision") || statusLineVerb(statusLines.at(-1) ?? "") === heldVerb;
+            staleDecisionCache.set(ownershipKey, { version, config, decisionOwned });
             if (staleDecisionCache.size > 512) {
               staleDecisionCache.delete(staleDecisionCache.keys().next().value!);
             }
           }
         } else {
-          staleDecisionCache.delete(statusPath);
+          staleDecisionCache.delete(ownershipKey);
         }
-        staleDecisionOwnership.set(statusPath, decisionOwned);
+        staleDecisionOwnership.set(ownershipKey, decisionOwned);
       }
-      if (staleDecisionOwnership.get(statusPath)) {
+      if (staleDecisionOwnership.get(ownershipKey)) {
         needsDecisionKeys.push(key);
         if (!afk) continue;
       }

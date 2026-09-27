@@ -115,6 +115,12 @@ A decision-owned event surfaced by `bin/fm-watch.sh`'s signal path gets the same
 
 `scopeForUnreadWake` excludes every marked row from what the branch may claim.
 
+A second mate's status log is one shared channel carrying many independently keyed decisions, so its signal row is judged by the lines presented since the last drain rather than by the whole log.
+The row is excluded when one of those lines is a decision, blocked, resolution, or captain-held line, or declares, in the status parser's key positions, the key of a decision still open in that log.
+An unrelated open decision alone leaves a routine span eligible.
+The status-presentation cursor bounds that span, and a missing or unmatched cursor falls back to the whole log.
+Single-task crewmate signals keep their existing rule on both paths.
+
 For a stale row, `scopeForUnreadWake` folds the mapped task's status log.
 It excludes the row when any `needs-decision` remains open or the current meaningful declaration is `captain-held`.
 An unreadable or symlinked status log fails the scope closed rather than influencing routing.
@@ -244,11 +250,11 @@ The guards are wired into these scripts:
 | Scripts | Guard behavior |
 | --- | --- |
 | `fm-send.sh`, `fm-control.sh`, and `fm-teardown.sh` | Overlap, lease-checked, with claim serialization retained through the mutation. |
-| `fm-pr-merge.sh`, `fm-merge-local.sh`, `fm-spawn.sh`, and `fm-send.sh --resolve-key` for a decision key | Main-owned while attended; branch refused. |
+| `fm-pr-merge.sh`, `fm-merge-local.sh`, `fm-spawn.sh`, `fm-send.sh --resolve-key` for a decision key, and `fm-teardown.sh` for a second mate | Main-owned while attended; branch refused. |
 
 A relaunch through `fm-control` stays branch-legal recovery in both postures.
 Under the away-posture record, the PR merge, a fresh spawn, and a decision answer relocate to the branch behind each script's own gate.
-Local-only landing never does ("Postures" below).
+Local-only landing and second-mate retirement never do ("Postures" below).
 
 ### Autonomy
 
@@ -633,10 +639,11 @@ At that moment the branch reports any refusal instead of concluding there is "no
 - Post-construction provider-error and no-report fallback, the consecutive-error latch, cooldown probe, exponential backoff, report-plus-settlement recovery, and report-before-error re-latch.
 - Cache key, and model and effort selection.
 - In `test_branch_dispatch_classifies_main_only_rows_and_writes_the_eligible_snapshot`: decision-owned signal and stale rows' exclusion from `eligibleSeqs`, their presence in `needsDecisionKeys`, task alias resolution, reserved-key configuration, status-log race and symlink refusal, non-vetoing behavior for unrelated eligible rows, and decision-only queues reading as ordinary main-only absence.
+- In `test_branch_dispatch_routes_secondmate_signal_by_new_span`: second-mate signal routing by new span on the Pi and attended-host paths, including an unrelated open hold, mixed, same-key, stamped-key, and key-less blocked spans, the whole-log fallback, and unchanged stale and crewmate routing.
 
 `tests/fm-branch-supervision.test.sh` covers:
 
-- Prompt stability, including the landed-work cleanup instruction.
+- Prompt stability, including the landed-work cleanup instruction and the second-mate relay, signal-span, and stale-liveness rules.
 - Store append-only behavior, the captain cursor barrier, and the processed marker's sequence bounds.
 - Leases, guards, and non-branch-home invariance.
 - The away relocation: only under a valid live record, never for local-only landing, queued-only branch dispatch rather than orphaned in-flight recovery, the spend cap for both actors and its lock-held recheck, and the attended guarded-action behavior restored by archive or an invalid record.
@@ -644,6 +651,8 @@ At that moment the branch reports any refusal instead of concluding there is "no
 `tests/fm-afk-return.test.sh` covers the ordered cleanup-due section, its durable merge-marker requirement, and exclusion of both a done task without durable merge evidence and a persistent secondmate carrying that evidence.
 
 `tests/fm-pr-merge.test.sh` covers the branch actor merging a green task under the record, being refused on a red check, an unreported required check, or `--allow-red`/`--allow-missing` under it, and being refused at the partition while attended.
+
+`tests/fm-secondmate-safety.test.sh` covers the branch actor being refused second-mate retirement with the mate's record, home, route, and endpoint left intact.
 
 `tests/fm-send-resolve-key.test.sh` covers the decision-answer partition:
 
