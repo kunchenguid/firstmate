@@ -1022,7 +1022,7 @@ This section is the single owner of the canonical schema and its per-field seman
 
 **Fields applied only by typed resolution**
 
-Rule `approval`, `min_confidence`, and `floor`, and profile `provider` and `floor` are optional declarations that only [typed dispatch resolution](#typed-dispatch-resolution-env-typesafe_api_key) applies in code; without that opt-in they are inert, and firstmate's own intake reads them as ordinary hints.
+Rule `approval`, `min_confidence`, and `floor`, and profile `provider` and `floor` are optional declarations that only [typed dispatch resolution](#typed-dispatch-resolution-env-typesafe_api_key-or-openrouter_api_key) applies in code; without that opt-in they are inert, and firstmate's own intake reads them as ordinary hints.
 The resolver supplies the fixed neutral Choice option `No listed rule applies to this task.` for work that matches no listed rule.
 
 - `approval` accepts only `"captain"` and means a task the rule matches is never dispatched from the tool's answer alone.
@@ -1083,10 +1083,11 @@ See [`docs/examples/crew-dispatch.json`](examples/crew-dispatch.json) for a star
 
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
 
-## Typed dispatch resolution (.env TYPESAFE_API_KEY)
+## Typed dispatch resolution (.env TYPESAFE_API_KEY or OPENROUTER_API_KEY)
 
-`bin/fm-dispatch-resolve.sh` resolves one concrete crewmate or scout profile from a written brief with typesafe.ai's System One model (Jev), so the rule match that firstmate otherwise reasons out in its own context becomes one short tool turn.
-It is off unless `TYPESAFE_API_KEY` is non-empty in the calling environment or the home's gitignored `.env` holds a `TYPESAFE_API_KEY=` line; the environment wins, matching the Relay and mail-plane contracts, and the Relay accessor in `bin/fm-env-lib.sh` reads the line.
+`bin/fm-dispatch-resolve.sh` resolves one concrete crewmate or scout profile from a written brief with the System One model (Jev), served by typesafe.ai directly or through OpenRouter with the same request and response shape, so the rule match that firstmate otherwise reasons out in its own context becomes one short tool turn.
+It is off unless `TYPESAFE_API_KEY` or `OPENROUTER_API_KEY` is non-empty in the calling environment or the home's gitignored `.env` holds a matching `=` line; per key the environment wins, matching the Relay and mail-plane contracts, and the Relay accessor in `bin/fm-env-lib.sh` reads the line.
+When both keys are present the typesafe.ai key wins, so an owner with only an OpenRouter key opts in with `OPENROUTER_API_KEY` alone and behavior is unchanged for every home that already holds `TYPESAFE_API_KEY`.
 
 Off means one `dispatch-resolve: off` line on stderr, nothing on stdout, exit 0, and no network call, so firstmate dispatches exactly as it does without the tool.
 This section is the single owner of the tool's operator contract; the script header owns its exact flags and output lines, and "Crew dispatch profiles" above owns the declared rule and profile fields it applies.
@@ -1190,9 +1191,10 @@ Firstmate passes its profile line unless it states a reason to override, such as
 
 **Key handling and fixed settings**
 
-- The resolver and bootstrap copy an environment-provided key into a non-exported private variable and unset `TYPESAFE_API_KEY` before launching child processes, so the secret is absent from child environments.
-- The resolver sends the key to `curl` only as a header read from a file descriptor, never on argv, and nothing prints, logs, or writes it.
-- The resolver fixes the endpoint at `https://api.typesafe.ai`, model at `jev-latest`, default confidence floor at 0.6, and request timeout at 5 seconds; `TYPESAFE_API_KEY` is its only resolver-specific environment setting.
+- The resolver and bootstrap copy an environment-provided key into a non-exported private variable and unset both `TYPESAFE_API_KEY` and `OPENROUTER_API_KEY` before launching child processes, so each secret is absent from child environments.
+- The resolver sends the selected key to `curl` only as a header read from a file descriptor, never on argv, and nothing prints, logs, or writes it.
+- The route is fixed by which key is present: `TYPESAFE_API_KEY` selects endpoint `https://api.typesafe.ai/v1/systemone` with model `jev-latest`, and `OPENROUTER_API_KEY` selects endpoint `https://openrouter.ai/api/alpha/decisions` with model `~typesafe/jev-latest`, OpenRouter's alias for the same Jev model; there are no endpoint or model settings to tune.
+- The resolver fixes the default confidence floor at 0.6 and the request timeout at 5 seconds; `TYPESAFE_API_KEY` and `OPENROUTER_API_KEY` are its only resolver-specific environment settings.
 
 The live rule-match evidence is recorded in [`verification/dispatch-resolve.md`](verification/dispatch-resolve.md).
 
@@ -2302,6 +2304,7 @@ FMX_ENV_FILE=           # optional alternate .env file for direct Relay client i
 FMX_DRY_RUN=            # truthy previews Relay replies and dismissals to state/x-outbox/ without posting or requiring a token
 FMX_X_REPLY_MAX_CHARS=280   # X reply per-message split budget; values below 50 clamp to 50
 TYPESAFE_API_KEY=       # typed dispatch resolution opt-in, from the environment or .env; absent means bin/fm-dispatch-resolve.sh is off (docs/configuration.md "Typed dispatch resolution")
+OPENROUTER_API_KEY=     # typed dispatch resolution opt-in through OpenRouter, read like TYPESAFE_API_KEY; used only when no typesafe.ai key exists
 FMX_DISCORD_REPLY_MAX_CHARS=1900   # Discord reply per-message split budget; values below 50 clamp to 50, values above 2000 reset to 1900
 FMX_X_THREAD_MAX=25     # maximum messages in one auto-split reply thread
 FMX_FOLLOWUP_MAX_AGE_SECS=604800   # local window for posting Relay completion follow-ups (7 days)

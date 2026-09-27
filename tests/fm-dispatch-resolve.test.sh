@@ -110,7 +110,8 @@ cat > "$FAKEBIN/curl" <<'SH'
 # Fake curl: records argv (minus the -o target), the stdin body, and the header
 # read from fd 3, then answers with FAKE_CURL_RESPONSE and FAKE_CURL_HTTP.
 set -u
-if [ -n "${TYPESAFE_API_KEY+x}" ] || [ -n "${TYPESAFE_API_KEY_PRIVATE+x}" ]; then
+if [ -n "${TYPESAFE_API_KEY+x}" ] || [ -n "${TYPESAFE_API_KEY_PRIVATE+x}" ] \
+  || [ -n "${OPENROUTER_API_KEY+x}" ] || [ -n "${OPENROUTER_API_KEY_PRIVATE+x}" ]; then
   printf 'curl:secret-present\n' >> "${CHILD_ENV_LOG:?}"
 else
   printf 'curl:clean\n' >> "${CHILD_ENV_LOG:?}"
@@ -138,7 +139,8 @@ chmod +x "$FAKEBIN/curl"
 cat > "$FAKEBIN/quota-axi" <<'SH'
 #!/usr/bin/env bash
 set -u
-if [ -n "${TYPESAFE_API_KEY+x}" ] || [ -n "${TYPESAFE_API_KEY_PRIVATE+x}" ]; then
+if [ -n "${TYPESAFE_API_KEY+x}" ] || [ -n "${TYPESAFE_API_KEY_PRIVATE+x}" ] \
+  || [ -n "${OPENROUTER_API_KEY+x}" ] || [ -n "${OPENROUTER_API_KEY_PRIVATE+x}" ]; then
   printf 'quota-axi:secret-present\n' >> "${CHILD_ENV_LOG:?}"
 else
   printf 'quota-axi:clean\n' >> "${CHILD_ENV_LOG:?}"
@@ -189,7 +191,7 @@ write_response "$RESPONSE" rule_4 0.9
 run code out err "$BRIEF" --project pager
 expect_code 0 "$code" "absent key exits 0"
 assert_equals '' "$out" "absent key prints nothing on stdout"
-assert_contains "$err" 'dispatch-resolve: off (TYPESAFE_API_KEY absent from the environment and' "absent key explains itself on stderr"
+assert_contains "$err" 'dispatch-resolve: off (TYPESAFE_API_KEY and OPENROUTER_API_KEY absent from the environment and' "absent key explains itself on stderr"
 assert_absent "$LOG/argv" "absent key never calls curl"
 assert_absent "$LOG/quota-axi.calls" "absent key never reads quota-axi"
 pass "absent key is off: one stderr line, exit 0, no network call"
@@ -212,6 +214,49 @@ reset_log
 TYPESAFE_API_KEY=$KEY FM_CONFIG_OVERRIDE="$OVERRIDE_CONFIG" run code out err "$BRIEF" --project pager
 assert_contains "$out" '  status: clear' "FM_CONFIG_OVERRIDE selects the canonical rules directory"
 pass "TYPESAFE_API_KEY= in .env activates the tool; environment and config overrides work"
+
+# --- OpenRouter route: its key alone selects it; typesafe.ai wins when both exist
+OR_KEY='openrouter-test-key-4e7b-never-on-argv'
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+OPENROUTER_API_KEY=$OR_KEY run code out err "$BRIEF" --project pager
+expect_code 0 "$code" "the OpenRouter key alone activates the tool"
+assert_contains "$out" '  status: clear' "the OpenRouter route resolves"
+argv=$(cat "$LOG/argv")
+assert_not_contains "$argv" "$OR_KEY" "the OpenRouter key never appears on curl argv"
+assert_contains "$argv" 'https://openrouter.ai/api/alpha/decisions' "the OpenRouter route uses the fixed openrouter endpoint"
+assert_not_contains "$argv" 'typesafe.ai' "the OpenRouter route does not touch typesafe.ai"
+assert_not_contains "$argv" '/v1/systemone' "the OpenRouter route never borrows the typesafe.ai path"
+assert_contains "$argv" $'--max-time\n5' "the OpenRouter request uses the fixed five-second timeout"
+assert_contains "$argv" '@/dev/fd/3' "the OpenRouter header is read from a file descriptor"
+assert_equals "Authorization: Bearer $OR_KEY" "$(cat "$LOG/header")" "curl receives the OpenRouter bearer header on fd 3"
+assert_equals $'curl:clean\nquota-axi:clean' "$(cat "$LOG/child-env")" "the OpenRouter key is absent from every child environment"
+assert_equals '~typesafe/jev-latest' "$(jq -r .model <<<"$(cat "$LOG/body")")" "the OpenRouter route sends the fixed alias model"
+assert_equals 'pager' "$(jq -r .state.task.project <<<"$(cat "$LOG/body")")" "the OpenRouter request shape is otherwise identical"
+
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+TYPESAFE_API_KEY=$KEY OPENROUTER_API_KEY=$OR_KEY run code out err "$BRIEF" --project pager
+assert_contains "$(cat "$LOG/argv")" 'https://api.typesafe.ai/v1/systemone' "the typesafe.ai route wins when both keys are present"
+assert_not_contains "$(cat "$LOG/argv")" 'openrouter.ai' "the OpenRouter endpoint is not used when the typesafe.ai key exists"
+assert_equals "Authorization: Bearer $KEY" "$(cat "$LOG/header")" "the typesafe.ai key is used when both keys are present"
+assert_not_contains "$(cat "$LOG/child-env")" 'secret-present' "neither key reaches a child environment when both are present"
+
+reset_log
+printf '%s\n' '# local secrets' "export OPENROUTER_API_KEY=\"$OR_KEY\"" > "$HOME_DIR/.env"
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project pager
+assert_contains "$(cat "$LOG/argv")" 'https://api.typesafe.ai/v1/systemone' "a typesafe.ai key in the environment beats an OpenRouter key in .env"
+assert_equals "Authorization: Bearer $KEY" "$(cat "$LOG/header")" "typesafe.ai wins across key sources"
+rm -f "$HOME_DIR/.env"
+
+reset_log
+printf '%s\n' '# local secrets' "OPENROUTER_API_KEY=\"$OR_KEY\"" > "$HOME_DIR/.env"
+run code out err "$BRIEF" --project pager
+expect_code 0 "$code" "an OpenRouter key in .env resolves"
+assert_contains "$out" '  status: clear' "an OpenRouter key in .env activates the tool"
+assert_equals "Authorization: Bearer $OR_KEY" "$(cat "$LOG/header")" "the .env OpenRouter key reaches curl on the fd header"
+rm -f "$HOME_DIR/.env"
+pass "OpenRouter route: its key alone selects the openrouter decisions endpoint and alias model; typesafe.ai wins when both keys exist"
 
 # --- clear: request shape, secret handling, argmax --------------------------
 reset_log

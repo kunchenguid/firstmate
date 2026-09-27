@@ -2,8 +2,8 @@
 
 Audience: maintainer verification.
 
-This record supports the opt-in `bin/fm-dispatch-resolve.sh` contract owned by [`../configuration.md`](../configuration.md) ("Typed dispatch resolution") and the declared rule and profile fields owned there under "Crew dispatch profiles".
-It records only facts that must be re-established when the typesafe.ai model, its API, or firstmate's dispatch rules change.
+This record supports the opt-in `bin/fm-dispatch-resolve.sh` contract owned by [`../configuration.md`](../configuration.md) ("Typed dispatch resolution"), for both the typesafe.ai route and the OpenRouter route, and the declared rule and profile fields owned there under "Crew dispatch profiles".
+It records only facts that must be re-established when the Jev model, either API, or firstmate's dispatch rules change.
 Task chronology, the captain's rules, and the briefs themselves stay in the private scout report.
 
 ## The API the tool depends on
@@ -14,6 +14,33 @@ Verified 2026-09-16 against `https://api.typesafe.ai`.
 Observed error shapes: 401 `authentication_error` for a bad key, 403 when the header is missing, 422 with a `detail[].loc` naming the offending field, 400 `api_usage_error` for an unknown model, 405 on GET.
 No rate-limit headers were present on any response; every response carried `x-typesafe-request-id`.
 Observed end-to-end latency from a Mac was 123 to 348 ms per request, with the server's own upstream time at 4 to 60 ms.
+
+## The OpenRouter route
+
+Verified 2026-09-27 against `https://openrouter.ai` with an OpenRouter key injected for the single command as `OPENROUTER_API_KEY`.
+`GET /api/v1/models` lists the Jev models under the `typesafe/` prefix.
+The route this branch ships is `POST /api/alpha/decisions` with model `~typesafe/jev-latest`, which resolved to `typesafe/jev-1.13-20260917` and answered with the same DecisionsRequest and DecisionsResponse shape as the typesafe.ai route: one `choice` answer with `choice`, `probabilities` (summing to 1), and `confidence`, and a `usage` object that additionally carries a USD `cost`.
+`https://openrouter.ai/api/v1/systemone` also answered the identical contract earlier the same day (five JSON calls), then began returning HTTP 200 with the website's HTML page - `content-type: text/html`, `x-matched-path: /[locale]/[maker-id]/[slug]`, `x-vercel-cache: STALE`, the page reading `v1/systemone` as a maker page - on every subsequent request across retried tool runs and bare curl alike, while `GET /api/v1/models` and `GET /api/v1/key` kept returning JSON.
+OpenRouter's own error surface names the replacement: a decisions model sent to `/api/v1/chat/completions` is refused with `~typesafe/jev-latest is a decisions model and cannot be used with the chat/completions endpoint. Use the /api/alpha/decisions endpoint instead.`
+A 200 HTML body fails the resolver's response validation and yields the normal structured `error` outcome with exit 0, so an endpoint serving the wrong surface never blocks dispatch.
+
+### Live rule match through OpenRouter
+
+Run 2026-09-27 with the OpenRouter key in the environment, model `~typesafe/jev-latest`, confidence floor 0.6, timeout 5 s, one real `quota-axi --json` snapshot per call, and the same five generic rules as the task-sections run above (all profiles on one codex provider so every candidate was rankable).
+Four briefs with one hand-labeled expected rule each, run through the shipped tool with `FM_HOME` pointed at an isolated home holding only the rules file.
+Exact command shape, key loaded inline for the run and never stored: `OPENROUTER_API_KEY="$(cat <key file>)" bin/fm-dispatch-resolve.sh <brief> --project pager`.
+
+| Measure | Result |
+| --- | --- |
+| Rule matched the hand label | 4 of 4 |
+| Outcomes: clear / ambiguous / escalate / error | 4 / 0 / 0 / 0 |
+| Confidence | 1.0 on all four |
+| Input tokens per brief | 550 to 570 |
+| Output tokens | 71 on all four |
+| API latency | 0 to 1,000 ms (sub-second on repeat calls) |
+| Usage cost per call | about US$0.000024 |
+
+The four briefs were the stated-root-cause bug fix, a routine feature build, a read-only investigation, and a trivial rename; each matched its own rule at probability 1 with every other option at 0, and each emitted a `profile:` line for that rule's candidate.
 
 ## Live rule match against real briefs
 
@@ -106,10 +133,11 @@ It proves the absent key (environment and `.env`) prints one stderr line, nothin
 It proves absent, default-only, and empty-rules files return `no rules to match` without a model or quota request, while a broken rules-file symlink exits 2 as unreadable.
 It proves the documented starter configuration resolves its Pi default through the declared Claude provider, a `.env` key turns the tool on, and the environment wins over it.
 It proves the key is absent from child environments, never appears on `curl` argv, and arrives only as the bearer header on the descriptor.
+It proves the OpenRouter key alone selects the OpenRouter route - fixed `https://openrouter.ai/api/alpha/decisions` endpoint and `~typesafe/jev-latest` model, identical request shape, same fd-3 header and child-environment hygiene - that the typesafe.ai key wins when both keys exist in either source, that the off line names both keys, and that an `OPENROUTER_API_KEY=` line in `.env` activates the tool.
 It proves the request uses the fixed endpoint and model, carries only the project, the brief's task sections read by the shared brief-heading parser with a scout line only for a scout brief and never a ship brief's delivery mode (or the whole brief when it has neither section), and rule Choice with one option per rule plus the fixed neutral none option, and never carries `why`, `use`, or quota.
 It proves a declared `min_confidence` is checked against the rule's own probability both as the pick and as a runner-up, a picked rule below it falls to the most probable runner-up that clears its floor, is `ambiguous` when none does or two tie, and that a file without declared floors keeps the global 0.6 floor on confidence unchanged.
 It proves the clear, fixed-floor ambiguous with candidate evidence, escalate (approval with candidate evidence, unverifiable rule floor, tie, nothing rankable), known rule-floor fall-through, known and unverifiable profile-floor evidence, explicit-provider and provider-ID enforcement, authoritative Agy and explicit-provider Gemini routing, partial providers, eligible unranked candidates and their clear-result note, concrete quota vetoes and profile-floor shortfalls taking precedence over uncertainty, account-wide quota veto, limiting-bound ranking, schema-6 account-row binding with schema-5 compatibility, missing-curl and quota-axi failures, HTTP 429 and 500, transport failure, malformed usage, zero-mass or malformed probabilities or confidence, malformed or duplicate profile, invalid selector, removed-option rejection, and out-of-range rule ID paths behave as the contract states, with configuration errors exiting 2 before any network call.
-`tests/fm-bootstrap.test.sh` proves bootstrap ignores resolver-only fields without the typed key, validates each malformed shape when the environment or home `.env` activates typed resolution, and prevents an environment-provided key from reaching child processes.
+`tests/fm-bootstrap.test.sh` proves bootstrap ignores resolver-only fields without either typed key, validates each malformed shape when either key activates typed resolution from the environment or the home `.env`, and prevents environment-provided keys of both routes from reaching child processes.
 
 ```console
 $ bash tests/fm-dispatch-resolve.test.sh | tail -1
