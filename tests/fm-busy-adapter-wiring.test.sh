@@ -157,26 +157,46 @@ test_pi_extension_stale_incarnation_rejected() {
 
 # drive_oc_plugin <plugin-path> <events-json-lines...>: load the generated
 # OpenCode plugin in a plain Node host and feed it one event per argument, in
-# order, through the same hooks.event entry OpenCode calls.
+# order, through the v2 { id, setup(ctx) } entry OpenCode 2.x calls. The
+# subscription loop drains asynchronously (each event awaits the real
+# fm-busy-event.sh writer), so the host waits once after pushing them all.
 drive_oc_plugin() {
   local plugin=$1
   shift
   PLUGIN_PATH="$plugin" node --input-type=module - "$@" 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
 const mod = await import(pathToFileURL(process.env.PLUGIN_PATH).href);
-const hooks = await mod.FmBusyState({});
+const queue = [];
+const waiters = [];
+const bus = {
+  [Symbol.asyncIterator]() {
+    return {
+      next() {
+        return new Promise((resolve) => {
+          if (queue.length) { resolve({ done: false, value: queue.shift() }); return; }
+          waiters.push((event) => resolve({ done: false, value: event }));
+        });
+      },
+    };
+  },
+};
+const cleanup = await mod.default.setup({ event: { subscribe: () => bus } });
 for (const arg of process.argv.slice(2)) {
-  await hooks.event({ event: JSON.parse(arg) });
+  const event = JSON.parse(arg);
+  if (waiters.length) waiters.shift()(event);
+  else queue.push(event);
 }
+await new Promise((resolve) => setTimeout(resolve, 700));
+if (typeof cleanup === "function") cleanup();
 EOF
 }
 
-oc_status() {  # <sessionID> <type>
-  printf '{"type":"session.status","properties":{"sessionID":"%s","status":{"type":"%s"}}}' "$1" "$2"
+oc_started() {  # <sessionID>
+  printf '{"type":"session.execution.started","data":{"sessionID":"%s"}}' "$1"
 }
 
-oc_idle() {  # <sessionID>
-  printf '{"type":"session.idle","properties":{"sessionID":"%s"}}' "$1"
+oc_ended() {  # <sessionID>
+  printf '{"type":"session.execution.succeeded","data":{"sessionID":"%s"}}' "$1"
 }
 
 test_opencode_plugin_semantic_lifecycle() {
@@ -188,43 +208,47 @@ test_opencode_plugin_semantic_lifecycle() {
   state="$HOME_DIR/state"
   plugin="$WT_DIR/.opencode/plugins/fm-busy-state.js"
   assert_present "$plugin" "opencode spawn did not write the busy-state plugin"
+  # OpenCode 2.x requires a default export shaped { id, setup|effect }; the
+  # legacy V1 named export fails to load, so the generated artifact must carry
+  # the v2 shape.
+  assert_contains "$(cat "$plugin")" "export default {" "the generated busy-state plugin is not a v2 default export"
 
   out=$(classify opencode "$id" "$state")
   [ "$out" = "busy fm-spawn" ] || fail "seed after spawn must be 'busy fm-spawn', got '$out'"
 
-  out=$(drive_oc_plugin "$plugin" "$(oc_status ses_main busy)") || fail "busy drive failed: $out"
+  out=$(drive_oc_plugin "$plugin" "$(oc_started ses_main)") || fail "started drive failed: $out"
   out=$(classify opencode "$id" "$state")
-  [ "$out" = "busy opencode-plugin" ] || fail "session busy must classify 'busy opencode-plugin', got '$out'"
+  [ "$out" = "busy opencode-plugin" ] || fail "session.execution.started must classify 'busy opencode-plugin', got '$out'"
 
   out=$(drive_oc_plugin "$plugin" \
-    "$(oc_status ses_main busy)" \
-    "$(oc_status ses_child busy)" \
-    "$(oc_status ses_child idle)") || fail "child-session drive failed: $out"
+    "$(oc_started ses_main)" \
+    "$(oc_started ses_child)" \
+    "$(oc_ended ses_child)") || fail "child-session drive failed: $out"
   out=$(classify opencode "$id" "$state")
-  [ "$out" = "busy opencode-plugin" ] || fail "a child session's idle must not clear the worker, got '$out'"
+  [ "$out" = "busy opencode-plugin" ] || fail "a child session's terminal event must not clear the worker, got '$out'"
 
   out=$(drive_oc_plugin "$plugin" \
-    "$(oc_status ses_main retry)" \
-    "$(oc_status ses_main idle)") || fail "retry/idle drive failed: $out"
+    "$(oc_started ses_main)" \
+    "$(oc_ended ses_main)") || fail "started/ended drive failed: $out"
   out=$(classify opencode "$id" "$state")
-  [ "$out" = "idle opencode-plugin" ] || fail "the latched session's idle must classify idle, got '$out'"
-
-  rm -f "$state/$id.turn-ended"
-  out=$(drive_oc_plugin "$plugin" \
-    "$(oc_status ses_main busy)" \
-    "$(oc_idle ses_main)") || fail "session.idle drive failed: $out"
-  [ -f "$state/$id.turn-ended" ] || fail "session.idle no longer touches the notification marker"
-  out=$(classify opencode "$id" "$state")
-  [ "$out" = "idle opencode-plugin" ] || fail "session.idle for the latched session must classify idle, got '$out'"
+  [ "$out" = "idle opencode-plugin" ] || fail "the latched session's terminal event must classify idle, got '$out'"
 
   rm -f "$state/$id.turn-ended"
   out=$(drive_oc_plugin "$plugin" \
-    "$(oc_status ses2 busy)" \
-    "$(oc_idle ses_other)") || fail "other-session idle drive failed: $out"
-  [ -f "$state/$id.turn-ended" ] || fail "the marker touch must stay a notification for every session.idle"
+    "$(oc_started ses_main)" \
+    "$(oc_ended ses_main)") || fail "terminal-marker drive failed: $out"
+  [ -f "$state/$id.turn-ended" ] || fail "a terminal session event no longer touches the notification marker"
   out=$(classify opencode "$id" "$state")
-  [ "$out" = "busy opencode-plugin" ] || fail "another session's idle must not clear the latched busy, got '$out'"
-  pass "opencode plugin classifies from session.status, scoped to the latched worker session"
+  [ "$out" = "idle opencode-plugin" ] || fail "the latched session's terminal event must classify idle, got '$out'"
+
+  rm -f "$state/$id.turn-ended"
+  out=$(drive_oc_plugin "$plugin" \
+    "$(oc_started ses2)" \
+    "$(oc_ended ses_other)") || fail "other-session terminal drive failed: $out"
+  [ -f "$state/$id.turn-ended" ] || fail "the marker touch must stay a notification for every terminal session event"
+  out=$(classify opencode "$id" "$state")
+  [ "$out" = "busy opencode-plugin" ] || fail "another session's terminal event must not clear the latched busy, got '$out'"
+  pass "opencode plugin classifies from the session.execution.* lifecycle, scoped to the latched worker session"
 }
 
 run_claude_hook() {  # <settings.json> <hook-event>
