@@ -10,8 +10,9 @@ import { registerFirstmateTool } from "./fm-native-contract.ts";
 import { encodeFirstmateOperationalInputWith } from "./fm-operational-input.ts";
 
 type Observation = { task_id: string; state: string; reason: string; key: string; revision?: number };
+type Reconciliation = { task_id: string; reason: string; key: string };
 type InputReceipt = { id: string; text: string; task?: string; answer?: string };
-type Admission = { content: string; admissions: string[]; escalations: { id: string; task: string; reason: string; recovery?: boolean }[];
+type Admission = { content: string; admissions: string[]; escalations: { id: string; task: string; reason: string; recovery?: boolean; reconciliation?: boolean }[];
   canNotify: () => boolean; canContinue: () => boolean };
 type InputPacing = { key: string; attempts: number; after: number; reserved?: string; escalatedAt?: number;
   recoveryAttempts?: number; recoveryAfter?: number; recoveryReserved?: string };
@@ -107,8 +108,10 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
       "bound release evidence, deadline and recovery trigger. Do not revive archived work or bypass authority.";
   }
 
-  async function collect(): Promise<Observation[]> {
+  async function collect(): Promise<{ observations: Observation[]; reconciliations: Reconciliation[] }> {
+    const epoch = generation;
     const observations: Observation[] = [];
+    const reconciliations: Reconciliation[] = [];
     const unrouted = [...inputs.values()].filter((value) => !value.task && !value.answer);
     for (let i = 0; i < Math.min(BATCH, unrouted.length); i++) {
       const value = unrouted[(inputCursor + i) % unrouted.length];
@@ -121,12 +124,18 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
     scanScope = ids;
     for (let i = 0; i < Math.min(BATCH, ids.length); i++) {
       const id = ids[(cursor + i) % ids.length];
-      if (lstatSync(join(data, id)).isSymbolicLink()) throw new Error("unsafe task directory");
-      // Unknown/corrupt records are never converted into a fictitious receiver.
-      observations.push(await command(["observe", id]));
+      try {
+        if (lstatSync(join(data, id)).isSymbolicLink()) throw new Error("unsafe task directory");
+        observations.push(await command(["observe", id]));
+      } catch (error) {
+        if (epoch !== generation || !owns()) throw error;
+        const reason = String(error instanceof Error ? error.message : error).slice(0, 1200);
+        const key = createHash("sha256").update(`${id}\0${reason}`).digest("hex");
+        reconciliations.push({ task_id: id, reason, key });
+      }
     }
     cursor = ids.length ? (cursor + BATCH) % ids.length : 0;
-    return observations;
+    return { observations, reconciliations };
   }
 
   function readDelivery(entry: { customType?: string; details?: unknown; timestamp?: string | number }) {
@@ -143,10 +152,10 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
     if (!current()) throw new Error("readback receiver generation changed");
     const started = Date.now();
     // The receiver has actually begun and executed readback before this receipt.
-    const observations = await collect();
+    const { observations, reconciliations } = await collect();
     if (!current()) throw new Error("readback receiver generation changed");
     const pending = observations.filter((item) => !["accepted", "archived", "running", "blocked"].includes(item.state));
-    if (!scanScope.length && !pending.length) return;
+    if (!scanScope.length && !pending.length && !reconciliations.length) return;
     // Boundary drafts are persisted without message_end. Read the actual
     // session branch before acknowledging their reserved admission.
     for (const entry of ctx.sessionManager.getBranch()) {
@@ -184,6 +193,13 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
     const admissions: string[] = [];
     const escalations: Admission["escalations"] = [];
     try {
+      for (const item of reconciliations) {
+        const id = `q.${item.key}`;
+        if (!submitted.has(id) && !delivered.has(id)) {
+          escalations.push({ id, task: item.task_id,
+            reason: `lifecycle observation refused; explicit reconciliation required: ${item.reason}`, reconciliation: true });
+        }
+      }
       for (const item of pending) {
         if (!current()) throw new Error("readback receiver generation changed");
         let admission: string | undefined;
@@ -261,17 +277,20 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
     const items = admission.escalations.filter((item) => includeRecovery || !item.recovery);
     if (!items.length) return;
     const lines = items.map(({ task, reason }) =>
-      `${task}: two automatic coordination requests produced no verified continuation: ${reason}.`);
+      `${task}: ${reason.startsWith("lifecycle observation refused;") ? reason : `two automatic coordination requests produced no verified continuation: ${reason}`}.`);
     return {
       type: "custom_message" as const, customType: ESCALATION, display: true,
       content: "Continuation needs executable main coordination:\n" + lines.join("\n") + "\n" +
         (items.some((item) => item.recovery) ? "Persistent recovery: prior coordination returned without a verified next action. Perform the authorized next tool/handoff action now; another observation-only response leaves responsibility pending.\n" : "") +
-        "These tasks remain open. Initial request budgets stay exhausted; later recovery is counted separately. This is not completion or a task blocker. " +
+        (items.some((item) => item.reconciliation) ? "Lifecycle refusals require explicit reconciliation; no receiver or execution state was inferred. " : "") +
+        (items.some((item) => !item.reconciliation) ? "Initial request budgets stay exhausted; later recovery is counted separately. " : "") +
+        "These tasks remain open. This is not completion or a task blocker. " +
         "Assign an authorized executor and verify receipt/start, reconcile a real dependency, or provide acceptance evidence. " +
         "If an effect may already have happened, read it back before any retry. Unrelated input does not reset the budget.",
       details: { admissions: items.map(({ id }) => id),
         task: items.length === 1 ? items[0].task : undefined,
-        tasks: items.map(({ task }) => task), owner: "main", kind: "coordination-failure" },
+        tasks: items.map(({ task }) => task), owner: "main",
+        kind: items.every((item) => item.reconciliation) ? "lifecycle-reconciliation" : "coordination-failure" },
     };
   }
 
@@ -303,14 +322,27 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
       if (admission && epoch === generation && admission.canNotify()) {
         const escalation = escalationEntry(admission);
         if (escalation) {
-          pi.sendMessage(escalation, { triggerTurn: true, deliverAs: "followUp" });
+          try { pi.sendMessage(escalation, { triggerTurn: true, deliverAs: "followUp" }); }
+          catch (error) {
+            for (const entry of ctx.sessionManager.getBranch()) {
+              if (entry.type === "custom_message") readDelivery(entry);
+            }
+            throw error;
+          }
           for (const id of escalation.details.admissions) submitted.add(id);
           return; // One batch per tick; ordinary reservations remain durable.
         }
         if (!admission.admissions.length) return;
+        try {
+          pi.sendMessage({ customType: MESSAGE, content: admission.content, display: false,
+            details: { admissions: admission.admissions } }, { triggerTurn: true, deliverAs: "followUp" });
+        } catch (error) {
+          for (const entry of ctx.sessionManager.getBranch()) {
+            if (entry.type === "custom_message") readDelivery(entry);
+          }
+          throw error;
+        }
         for (const id of admission.admissions) submitted.add(id);
-        pi.sendMessage({ customType: MESSAGE, content: admission.content, display: false,
-          details: { admissions: admission.admissions } }, { triggerTurn: true, deliverAs: "followUp" });
       }
     }).catch(() => { /* Pending evidence remains available at the next tick. */ });
   });

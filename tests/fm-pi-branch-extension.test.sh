@@ -6023,6 +6023,85 @@ test_continuation_defers_reserved_admission_at_ui_boundary() {
   continuation_ui_boundary_case settle
 }
 
+test_continuation_retries_definite_send_failure_and_isolates_stale_tasks() {
+  local repo home out rc
+  repo="$TMP_ROOT/continuation-failure-root"; home="$TMP_ROOT/continuation-failure-home"
+  install_pi_branch_extension_fixture "$repo"
+  mkdir -p "$home/state" "$home/data/healthy-one"
+  printf 'Keep the first healthy task progressing.\n' >"$home/data/healthy-one/brief.md"
+  cat >"$repo/bin/fm-task-state.sh" <<'SH'
+#!/usr/bin/env bash
+exec "$REAL_ROOT/bin/fm-task-state.sh" "$@"
+SH
+  cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/"
+  set +e
+  out=$(PLUGIN="$repo/.pi/extensions/lib/fm-task-continuation.ts" REAL_ROOT="$ROOT" FM_ROOT_OVERRIDE="$repo" FM_HOME="$home" node --input-type=module 2>&1 <<'JS'
+import {appendFileSync,mkdirSync,readFileSync,writeFileSync} from 'node:fs';
+const home=process.env.FM_HOME,handlers=new Map(),events=new Map(),entries=[],effects=[];
+const file=home+'/session.jsonl';
+let sendMode='fail-before';
+writeFileSync(home+'/state/.lock',process.pid+'\n');
+writeFileSync(file,JSON.stringify({type:'session',id:'failure-regression',version:3})+'\n');
+const ctx={isIdle:()=>true,hasPendingMessages:()=>false,hasUI:false,ui:{getEditorText:()=>''},sessionManager:{getSessionFile:()=>file,getSessionId:()=> 'failure-regression',getLeafId:()=>entries.at(-1)?.id,getBranch:()=>entries,getEntries:()=>entries}};
+function persist(row){row={...row,id:'e'+entries.length,parentId:entries.at(-1)?.id??null,timestamp:new Date().toISOString()};entries.push(row);appendFileSync(file,JSON.stringify(row)+'\n');return row;}
+const pi={on:(name,fn)=>handlers.set(name,[...(handlers.get(name)||[]),fn]),events:{on:(name,fn)=>events.set(name,[...(events.get(name)||[]),fn]),emit:(name,arg)=>{for(const fn of events.get(name)||[])fn(arg)}},registerTool(){},registerCommand(){},appendEntry:(customType,data)=>persist({type:'custom',customType,data}),sendMessage(message,options){
+  if(sendMode==='fail-before')throw Error('definite pre-delivery refusal');
+  effects.push({message,options});persist({type:'custom_message',...message});
+  if(sendMode==='persist-throw')throw Error('transport result uncertain after persistence');
+}};
+const fire=async(name)=>{for(const fn of handlers.get(name)||[])await fn({},ctx);};
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+const wait=async(predicate,label)=>{const until=Date.now()+10000;while(!predicate()&&Date.now()<until)await sleep(10);if(!predicate())throw Error('timed out: '+label);};
+const record=task=>JSON.parse(readFileSync(`${home}/data/${task}/lifecycle.json`));
+const {installTaskContinuation}=await import(process.env.PLUGIN);
+const periodic=(await import(process.env.REAL_ROOT+'/.pi/extensions/fm-periodic-stow.ts')).default;
+const continuation=installTaskContinuation(pi,{root:process.env.FM_ROOT_OVERRIDE,home,state:home+'/state',owns:()=>true});
+periodic(pi);
+await fire('session_start');pi.appendEntry('seed',{});
+await continuation.preserve(['healthy-one']);
+pi.events.emit('firstmate:heartbeat-tick',{});
+await wait(()=>record('healthy-one').coordination,'failed submission reservation');
+await sleep(100);
+if(effects.length)throw Error('definite pre-delivery failure produced an effect');
+sendMode='success';pi.events.emit('firstmate:heartbeat-tick',{});
+await wait(()=>effects.length===1,'successful retry');
+const firstAdmission=effects[0].message.details.admissions[0];
+pi.events.emit('firstmate:heartbeat-tick',{});await sleep(300);
+if(effects.length!==1||effects[0].message.details.admissions[0]!==firstAdmission)throw Error('successful retry was not delivered exactly once');
+
+for(const task of ['healthy-two','stale']){mkdirSync(`${home}/data/${task}`);writeFileSync(`${home}/data/${task}/brief.md`,task+' initial brief\n');}
+await continuation.preserve(['healthy-two','stale']);
+writeFileSync(`${home}/data/stale/brief.md`,'stale changed brief\n');
+continuation.capture('Already collected input must continue through this batch.','batch-input');
+const receiptCursor=()=>entries.filter(e=>e.customType==='fm-continuation-receipt').at(-1)?.data.next_cursor;
+const cursorBefore=receiptCursor();
+pi.events.emit('firstmate:heartbeat-tick',{});
+await wait(()=>effects.some(e=>e.message.details?.kind==='lifecycle-reconciliation'),'stale reconciliation');
+const reconciliation=effects.find(e=>e.message.details?.kind==='lifecycle-reconciliation');
+if(reconciliation.message.details.task!=='stale'||!reconciliation.message.content.includes('explicit reconciliation required'))throw Error('stale task did not surface a scoped reconciliation obligation');
+if(record('stale').coordination)throw Error('stale task invented a coordination receiver');
+const cursorAfterReconciliation=receiptCursor();
+if(cursorAfterReconciliation===cursorBefore)throw Error('stale observation did not advance the bounded cursor');
+
+sendMode='persist-throw';pi.events.emit('firstmate:heartbeat-tick',{});
+await wait(()=>effects.some(e=>e.message.customType==='fm-task-continuation'&&e.message.content.includes('healthy-two: pending')),'healthy batch after stale task');
+const batch=effects.find(e=>e.message.customType==='fm-task-continuation'&&e.message.content.includes('healthy-two: pending'));
+if(!batch.message.content.includes('Already collected input must continue through this batch.'))throw Error('stale task discarded already-collected input');
+if(!record('healthy-two').coordination)throw Error('stale task prevented healthy task coordination');
+const effectCount=effects.length;
+sendMode='success';pi.events.emit('firstmate:heartbeat-tick',{});await sleep(500);
+if(effects.length!==effectCount)throw Error('uncertain persisted delivery was replayed');
+if(receiptCursor()===cursorAfterReconciliation)throw Error('healthy follow-up did not keep the bounded cursor moving');
+await fire('session_shutdown');
+console.log('definite send failure retried once; uncertain delivery did not replay; stale task preserved healthy batch progress');
+JS
+  )
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "continuation delivery failure and stale batch: $out"
+  pass "$out"
+}
+
 test_continuation_survives_ack_compaction_and_unrelated_input() {
   local repo home out rc
   repo="$TMP_ROOT/continuation-root"; home="$TMP_ROOT/continuation-home"
@@ -6236,4 +6315,5 @@ test_store_failure_during_delivery_neither_loses_nor_duplicates
 test_mark_read_failure_keeps_routine_redelivery_and_captain_deduplication
 
 test_continuation_defers_reserved_admission_at_ui_boundary
+test_continuation_retries_definite_send_failure_and_isolates_stale_tasks
 test_continuation_survives_ack_compaction_and_unrelated_input
