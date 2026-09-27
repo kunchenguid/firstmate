@@ -8,6 +8,7 @@
 #   fm-procevent.sh register-task <adapter> <source-id> <task-id> -- <argv>...
 #   fm-procevent.sh register-extension <adapter> <source-id> --config-ref <reference>
 #   fm-procevent.sh start <source-id>
+#   fm-procevent.sh ensure-listening <source-id>
 #   fm-procevent.sh reconcile
 #   fm-procevent.sh classify <result-file>
 #   fm-procevent.sh handled <source-id> <sequence>
@@ -40,6 +41,15 @@
 #            bounded classification. Built-in results keep their existing
 #            script command; extension results must still match the exact bound
 #            package identity captured with them.
+# ensure-listening
+#            Confirm the current registration generation's listener is running.
+#            Starts one when nothing live is in the way, and returns only after
+#            that generation's live claim or its launch stamp says it started.
+#            The wait is the reconcile confirm window and ends early on evidence.
+#            No evidence within the window is a nonzero result. Exit 3 means a
+#            live listener from another registration generation still held the
+#            source when the window ended, so this generation cannot start until
+#            it is retired.
 # start      Claim the source, run its child to completion, durably capture the
 #            output, publish normalized wakes for pending results, then release
 #            the claim. It blocks for as long as the source blocks and is meant
@@ -680,6 +690,11 @@ next_result_sequence() {  # <source-id>
   printf '%s\n' "$seq"
 }
 
+register_extension_locks_release() {  # <source-id>
+  extension_lifecycle_lock_release
+  fm_procevent_source_lock_release "$1"
+}
+
 cmd_register_extension() {
   local adapter=${1-} id=${2-} option=${3-} config_ref=${4-} resolution schema extension_id
   local extension_version capability_version package_digest binding_digest extra registration_token
@@ -692,19 +707,27 @@ cmd_register_extension() {
   if [ ! -x "$EXTENSION_HOST" ] || [ -L "$EXTENSION_HOST" ]; then
     die "the tracked extension host is unavailable"
   fi
-  extension_lifecycle_lock_acquire || die "cannot lock the extension lifecycle"
+  # The source lock comes before the extension lifecycle lock, the order every
+  # other path holding both uses: publishing or concluding a captured extension
+  # result holds the source lock while the extension host takes the lifecycle
+  # lock. The reverse order here would let both wait on each other forever.
+  fm_procevent_source_lock_acquire "$id" || die "cannot lock the source"
+  if ! extension_lifecycle_lock_acquire; then
+    fm_procevent_source_lock_release "$id"
+    die "cannot lock the extension lifecycle"
+  fi
   if ! resolution=$("$EXTENSION_HOST" resolve-process-event "$adapter"); then
-    extension_lifecycle_lock_release
+    register_extension_locks_release "$id"
     die "extension adapter verification failed: $adapter"
   fi
   if [ "$(printf '%s\n' "$resolution" | wc -l | tr -d ' ')" != 1 ]; then
-    extension_lifecycle_lock_release
+    register_extension_locks_release "$id"
     die "extension adapter resolution was malformed: $adapter"
   fi
   IFS=$'\t' read -r schema extension_id extension_version capability_version \
     package_digest binding_digest extra <<< "$resolution"
   if [ "$schema" != fm-extension-process-event-resolution.v1 ] || [ -n "$extra" ]; then
-    extension_lifecycle_lock_release
+    register_extension_locks_release "$id"
     die "extension adapter resolution was malformed: $adapter"
   fi
   if ! fm_procevent_extension_id_valid "$extension_id" \
@@ -712,37 +735,29 @@ cmd_register_extension() {
     || [ "$capability_version" != 1 ] \
     || ! fm_procevent_digest_valid "$package_digest" \
     || ! fm_procevent_digest_valid "$binding_digest"; then
-    extension_lifecycle_lock_release
+    register_extension_locks_release "$id"
     die "extension adapter identity was malformed: $adapter"
   fi
   if ! registration_token=$(new_extension_registration_token); then
-    extension_lifecycle_lock_release
+    register_extension_locks_release "$id"
     die "cannot create an extension registration identity"
-  fi
-  if ! fm_procevent_source_lock_acquire "$id"; then
-    extension_lifecycle_lock_release
-    die "cannot lock the source"
   fi
   if [ "$(source_kind "$id" 2>/dev/null || true)" = task-owned ]; then
     owner_task=$(source_owner_task "$id")
-    fm_procevent_source_lock_release "$id"
-    extension_lifecycle_lock_release
+    register_extension_locks_release "$id"
     die "cannot replace task-owned source $id owned by task $owner_task; steer that task to re-arm its board"
   fi
   if ! extension_registration_replacement_safe_locked "$id"; then
-    fm_procevent_source_lock_release "$id"
-    extension_lifecycle_lock_release
+    register_extension_locks_release "$id"
     die "cannot replace extension registration while its prior runner remains active: $id"
   fi
   if ! fm_procevent_extension_registration_publish_locked "$STATE" "$adapter" "$id" \
       "$extension_id" "$extension_version" "$capability_version" "$package_digest" \
       "$binding_digest" "$config_ref" "$registration_token"; then
-    fm_procevent_source_lock_release "$id"
-    extension_lifecycle_lock_release
+    register_extension_locks_release "$id"
     die "cannot publish the extension registration"
   fi
-  fm_procevent_source_lock_release "$id"
-  extension_lifecycle_lock_release
+  register_extension_locks_release "$id"
   owner_lease_refresh
   printf 'registered: %s (%s from %s@%s)\n' "$id" "$adapter" "$extension_id" "$extension_version"
   printf 'owner-token: %s\n' "$registration_token"
@@ -1780,6 +1795,77 @@ confirm_launched_runners() {  # <source-id><TAB><registration-identity><TAB><lau
   [ "${#pending[@]}" -eq 0 ] || printf '%s\n' "${pending[@]}"
 }
 
+# 0 when this registration generation holds a live claim, 3 when another
+# generation does, 1 otherwise.
+generation_is_listening() {  # <source-id> <registration-identity>
+  local id=$1 identity=$2 state result=1
+  fm_procevent_source_lock_try_acquire "$id" || return 1
+  fm_procevent_claim_state_locked "$id"
+  state=$?
+  if [ "$state" -eq 0 ]; then
+    result=3
+    [ "$FM_PROCEVENT_CLAIM_REG_IDENTITY" != "$identity" ] || result=0
+  fi
+  fm_procevent_source_lock_release "$id"
+  return "$result"
+}
+
+# 0 when no live, uncertain, leaderless, terminal, or undisplaceable claim
+# blocks a launch, the same rule reconcile applies.
+generation_can_launch() {  # <source-id>
+  local id=$1 state result=1
+  fm_procevent_source_lock_try_acquire "$id" || return 1
+  fm_procevent_claim_state_locked "$id"
+  state=$?
+  if [ "$state" -eq 1 ] && ! fm_procevent_claim_undisplaceable_locked "$id"; then
+    result=0
+  fi
+  fm_procevent_source_lock_release "$id"
+  return "$result"
+}
+
+# Public readiness for one source. Same evidence reconcile uses after a launch:
+# a live claim bound to this registration generation, or that generation's
+# launch stamp advancing. Returns as soon as either appears. A fixed sleep is
+# not success.
+cmd_ensure_listening() {
+  local id=${1-} identity before mark stamp deadline window started_once=0 listening
+  [ "$#" -eq 1 ] || usage
+  fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
+  window=$(fm_procevent_launch_confirm_seconds) \
+    || die "FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS must be whole seconds from $FM_PROCEVENT_LAUNCH_CONFIRM_MIN_SECONDS to $FM_PROCEVENT_LAUNCH_CONFIRM_MAX_SECONDS"
+  [ -f "$(source_file "$id")" ] && [ ! -L "$(source_file "$id")" ] \
+    || die "source is not registered: $id"
+  identity=$(fm_pr_file_identity "$(source_file "$id")" 2>/dev/null) \
+    || die "cannot identify the registration: $id"
+  before=
+  if stamp=$(fm_procevent_launch_floor_stamp_path "$STATE" "$id" "$identity"); then
+    before=$(cat -- "$stamp" 2>/dev/null || true)
+  fi
+  deadline=$((SECONDS + 10#$window + 1))
+  while :; do
+    listening=0
+    generation_is_listening "$id" "$identity" || listening=$?
+    [ "$listening" -ne 0 ] || return 0
+    mark=
+    if stamp=$(fm_procevent_launch_floor_stamp_path "$STATE" "$id" "$identity"); then
+      mark=$(cat -- "$stamp" 2>/dev/null || true)
+    fi
+    if [ -n "$mark" ] && [ "$mark" != "$before" ]; then
+      return 0
+    fi
+    if [ "$started_once" -eq 0 ] && generation_can_launch "$id"; then
+      detach_runner "$id"
+      started_once=1
+    fi
+    [ "$SECONDS" -lt "$deadline" ] || break
+    sleep 0.05
+  done
+  [ "$listening" -ne 3 ] || return 3
+  printf 'error: listener is not running: %s\n' "$id" >&2
+  return 1
+}
+
 # Stop a runner and the child it is blocked on. A runner started by reconcile is
 # its own process group leader, so the group signal is what actually reaches the
 # blocking child - signalling only the runner would leave that child alive and
@@ -2339,6 +2425,7 @@ case "${1-}" in
   register-task)      shift; cmd_register_task "$@" ;;
   register-extension) shift; cmd_register_extension "$@" ;;
   start)              shift; cmd_start_public "$@" ;;
+  ensure-listening)   shift; cmd_ensure_listening "$@" ;;
   _start)             shift; cmd_start "$@" ;;
   _owner-watchdog)    shift; cmd_owner_watchdog "$@" ;;
   reconcile)          shift; cmd_reconcile "$@" ;;

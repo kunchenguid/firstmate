@@ -13,6 +13,13 @@
 # A normal firstmate session (real primary, real crew worktree) has NEITHER
 # signal and is completely unaffected.
 #
+# The one authorized exception is a disposable LAB home: bin/fm-lab-home.sh
+# stamps a marker file only on a fresh empty dir, and inside a gate context the
+# refusal lets a lifecycle call proceed only when FM_HOME is a marked lab home
+# used through its stock layout (any FM_*_OVERRIDE relocation stays refused).
+# The helper legs below cover the admit/refuse contract; teardown additionally
+# proves the admit end-to-end through a real entrypoint.
+#
 # Each entrypoint is exercised in three scenarios, isolating exactly ONE signal:
 #   - env-marker refuse : neutral cwd + NO_MISTAKES_GATE set      -> exit 3, no mutation
 #   - path-backstop refuse: gate-worktree cwd + marker UNSET      -> exit 3, no mutation
@@ -31,6 +38,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 
 GATE_LIB="$ROOT/bin/fm-gate-refuse-lib.sh"
+LABHOME="$ROOT/bin/fm-lab-home.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
 SEND="$ROOT/bin/fm-send.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
@@ -129,6 +137,82 @@ test_helper_normal_is_noop() {
   expect_code 0 "$rc" "helper: a normal session (neither signal) must not refuse"
   [ -z "$out" ] || fail "helper: normal session printed output: $out"
   pass "fm-gate-refuse-lib: no-op for a normal session (neither signal, set -eu clean)"
+}
+
+# --- disposable lab homes ----------------------------------------------------
+
+# run_guard_lib_home <cwd> <home> [ASSIGN...] -> combined output : like
+# run_guard_lib but with FM_HOME=<home>; extra ASSIGN args carry the gate
+# signal (NO_MISTAKES_GATE=1) or an override to exercise the stock-layout
+# requirement. All FM_*_OVERRIDE vars are unset first so the suite stays
+# hermetic inside a real gate.
+run_guard_lib_home() {
+  local cwd=$1 home=$2; shift 2
+  # shellcheck disable=SC2016 # $1/$2 expand in the child shell, not here.
+  env -u NO_MISTAKES_GATE -u FM_GATE_REFUSE_BYPASS \
+      -u FM_ROOT_OVERRIDE -u FM_STATE_OVERRIDE -u FM_DATA_OVERRIDE \
+      -u FM_PROJECTS_OVERRIDE -u FM_CONFIG_OVERRIDE \
+      FM_HOME="$home" "$@" \
+      bash -c 'cd "$1" || exit 111; set -eu; . "$2"; fm_refuse_if_gate_agent' \
+      _ "$cwd" "$GATE_LIB" 2>&1
+}
+
+test_helper_lab_home_admits() {
+  local lab plain out rc
+  lab=$("$LABHOME" create "$TMP/lab-home") || fail "lab-home create failed"
+  plain="$TMP/plain-home"; mkdir -p "$plain"
+
+  # gate + marked lab home -> permitted (env signal; the path backstop shares
+  # the same fm_is_gate_agent gate).
+  out=$(run_guard_lib_home "$NORMAL_CWD" "$lab" NO_MISTAKES_GATE=1); rc=$?
+  expect_code 0 "$rc" "helper: gate + marked lab home must be permitted"
+  assert_contains "$out" "lab home" "helper: lab permit should name the lab home"
+
+  # gate + unmarked home -> refused.
+  out=$(run_guard_lib_home "$NORMAL_CWD" "$plain" NO_MISTAKES_GATE=1); rc=$?
+  expect_code 3 "$rc" "helper: gate + unmarked home must still refuse"
+  assert_contains "$out" "$ENV_MSG" "helper: unmarked-home refusal message"
+
+  # gate + marked lab + an FM_*_OVERRIDE -> refused: the allowance requires
+  # the stock layout so an override cannot split state onto the real fleet.
+  out=$(run_guard_lib_home "$NORMAL_CWD" "$lab" NO_MISTAKES_GATE=1 FM_STATE_OVERRIDE="$lab/state"); rc=$?
+  expect_code 3 "$rc" "helper: lab home driven through FM_STATE_OVERRIDE must refuse"
+  assert_contains "$out" "$ENV_MSG" "helper: override refusal message"
+
+  # no gate signal + lab home -> still a normal no-op.
+  out=$(run_guard_lib_home "$NORMAL_CWD" "$lab"); rc=$?
+  expect_code 0 "$rc" "helper: lab home outside a gate must not refuse"
+  pass "fm-gate-refuse-lib: marked lab home permitted in a gate; unmarked home or an override stay refused"
+}
+
+test_lab_home_helper() {
+  local lab populated unlistable newline out rc
+  # create on an absent path mints the marker and the stock layout.
+  lab=$("$LABHOME" create "$TMP/lab-new"); rc=$?
+  expect_code 0 "$rc" "lab-home: create must succeed on a fresh path"
+  assert_present "$lab/.fm-lab-home" "lab-home: create must write the marker"
+  for d in state data config projects; do
+    [ -d "$lab/$d" ] || fail "lab-home: missing stock dir $d"
+  done
+  out=$("$LABHOME" create "$lab" 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "lab-home: create on an existing lab home must refuse"
+  # refuses a populated dir and leaves it unmarked.
+  populated="$TMP/populated"; mkdir -p "$populated/state"; echo x > "$populated/state/x.meta"
+  out=$("$LABHOME" create "$populated" 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "lab-home: create on a populated dir must refuse"
+  assert_absent "$populated/.fm-lab-home" "lab-home: refused create must not write the marker"
+  # refuses a populated dir it cannot list, rather than reading it as empty.
+  unlistable="$TMP/unlistable"; mkdir -p "$unlistable/state"; chmod 300 "$unlistable"
+  out=$("$LABHOME" create "$unlistable" 2>&1); rc=$?
+  chmod 700 "$unlistable"
+  [ "$rc" -ne 0 ] || fail "lab-home: create on an unlistable dir must refuse"
+  assert_absent "$unlistable/.fm-lab-home" "lab-home: unlistable create must not write the marker"
+  # refuses a dir whose only entry has a newline-only name.
+  newline="$TMP/newline-entry"; mkdir -p "$newline/"$'\n'
+  out=$("$LABHOME" create "$newline" 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "lab-home: create on a dir holding a newline-named entry must refuse"
+  assert_absent "$newline/.fm-lab-home" "lab-home: newline-entry create must not write the marker"
+  pass "fm-lab-home: create mints marked stock homes only on fresh empty dirs; anything else is refused"
 }
 
 # --- fm-spawn ---------------------------------------------------------------
@@ -321,6 +405,25 @@ run_teardown() {
       "$TEARDOWN" task-x1 ) 2>&1
 }
 
+# run_teardown_lab <cwd> <case_dir> [ASSIGN...] -> combined output
+# Lab-home counterpart of run_teardown: FM_HOME=<case_dir>, no FM_*_OVERRIDE.
+run_teardown_lab() {
+  local cwd=$1 case_dir=$2; shift 2
+  ( cd "$cwd" && env -u NO_MISTAKES_GATE -u FM_GATE_REFUSE_BYPASS \
+      "FM_HOME=$case_dir" \
+      "PATH=$case_dir/fakebin:$PATH" "$@" \
+      "$TEARDOWN" task-x1 ) 2>&1
+}
+
+# make_teardown_lab_case <name> -> echoes a marked lab case dir holding the same
+# landed task as make_teardown_case (the marker is stamped while the dir is
+# still empty, then the fixture populates it).
+make_teardown_lab_case() {
+  local name=$1
+  "$LABHOME" create "$TMP/$name" >/dev/null || return 1
+  make_teardown_case "$name"
+}
+
 test_teardown_refuses_and_admits() {
   local case_dir out rc
 
@@ -345,6 +448,21 @@ test_teardown_refuses_and_admits() {
   assert_not_contains "$out" "$ENV_MSG" "teardown: normal teardown must not print the gate refusal"
   assert_not_contains "$out" "$PATH_MSG" "teardown: normal teardown must not print the backstop refusal"
   assert_not_contains "$out" "REFUSED" "teardown: normal teardown of landed work must not refuse"
+
+  # lab-home admit: gate context + FM_HOME=marked lab home -> tears down.
+  case_dir=$(make_teardown_lab_case teardown-lab)
+  out=$(run_teardown_lab "$GATE_WT" "$case_dir"); rc=$?
+  expect_code 0 "$rc" "teardown: gate + marked lab home must tear down landed work"
+  assert_absent "$case_dir/state/task-x1.meta" "teardown: lab teardown should remove the task record"
+
+  # regression: a home reached through a symlinked spelling must not
+  # self-collide in the slot-ownership scan - the canonical root home and the
+  # textual state dir resolve to the same record by identity, not path bytes.
+  case_dir=$(make_teardown_case teardown-symlink)
+  ln -s "$case_dir" "$TMP/teardown-symlinked"
+  out=$(run_teardown_lab "$NORMAL_CWD" "$TMP/teardown-symlinked"); rc=$?
+  expect_code 0 "$rc" "teardown: a symlinked home spelling must not self-collide"
+  assert_absent "$case_dir/state/task-x1.meta" "teardown: symlinked-home teardown should remove the task"
   pass "fm-teardown: refuses on marker and gate-worktree backstop; a normal teardown is unaffected"
 }
 
@@ -352,6 +470,8 @@ test_helper_env_marker_refuses
 test_helper_empty_env_marker_refuses
 test_helper_path_backstop_refuses
 test_helper_normal_is_noop
+test_helper_lab_home_admits
+test_lab_home_helper
 test_spawn_refuses_and_admits
 test_send_refuses_and_admits
 test_teardown_refuses_and_admits

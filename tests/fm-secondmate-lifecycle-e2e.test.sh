@@ -303,6 +303,8 @@ phase_teardown() {
     "$HOME_DIR/state/pending-replies/$other_corr" \
     "$HOME_DIR/state/pending-replies/.delivery-confirmed-$other_corr"
   printf 'confirmed:%s\n' "$corr" > "$HOME_DIR/state/.backlog-handoff-design.wake-pending"
+  printf '%s\tattempt\n' "$(date +%s)" > "$HOME_DIR/state/.secondmate-relaunch-design"
+  printf '%s\tdead\n' "$(date +%s)" > "$HOME_DIR/state/.secondmate-relaunch-bound-design"
   : > "$LOG"
   teardown_out=$(PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_FAKE_TMUX_LOG="$LOG" FM_FAKE_TMUX_CAPTURE="$PANE" \
     "$ROOT/bin/fm-teardown.sh" design 2>&1) \
@@ -314,6 +316,12 @@ phase_teardown() {
   assert_absent "$HOME_DIR/state/.backlog-handoff-design.wake-pending" \
     "teardown left receiver wake state that could poison a replacement route"
   assert_absent "$rec" "teardown left the retired receiver wake correlation"
+  assert_absent "$HOME_DIR/state/.secondmate-relaunch-design" \
+    "teardown left the relaunch ledger a same-id replacement would inherit"
+  assert_absent "$HOME_DIR/state/.secondmate-relaunch-bound-design" \
+    "teardown left the relaunch park marker a same-id replacement would inherit"
+  assert_absent "$HOME_DIR/state/.secondmate-liveness-design.lock" \
+    "teardown left the liveness lock it took to retire relaunch state"
   assert_absent "$leftover_rec" "teardown left a resolved pending-reply for the retired secondmate"
   assert_no_grep '- design ' "$HOME_DIR/data/secondmates.md" "teardown did not remove the registry route"
   # The parent's source projects are untouched (no write through a parent home).

@@ -115,6 +115,13 @@ case "${1:-} ${2:-}" in
   "api graphql")
     printf '%s\n' 'state=MERGED' 'merged=true' 'queued=false' 'base=main'
     ;;
+  "api --paginate")
+    case " $* " in
+      *merge_queue*) ;;
+      *) printf '%s\n' '[]' ;;
+    esac
+    ;;
+  "api repos/"*) printf '%s\n' '{"name":"main","protected":false}' ;;
 esac
 SH
   cat > "$home/fakebin/gh-axi" <<'SH'

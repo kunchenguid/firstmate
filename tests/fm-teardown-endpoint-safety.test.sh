@@ -530,6 +530,23 @@ test_reused_pool_slot_refuses_before_touching_the_other_task() {
   [ ! -s "$dir/runtime.log" ] \
     || fail "teardown reached the runtime on a slot held by a secondmate home: $(cat "$dir/runtime.log")"
 
+  # A second task record that is a hardlink of this one is still a second
+  # claim on the slot, not this record reached through another spelling.
+  dir=$(make_case slot-reuse-hardlink)
+  mark_case_as_treehouse_pool "$dir"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  ln "$dir/home/state/$id.meta" "$dir/home/state/$other.meta"
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "teardown returned a pool slot a hardlinked second task record still holds"
+  assert_present "$dir/worktree/sentinel" "teardown reset a pool slot a hardlinked second task record still holds"
+  assert_contains "$(cat "$dir/stderr")" "$other" \
+    "hardlink refusal should name the other task record"
+
   pass "fm-teardown: a pool slot named by a second task record is never returned, killed, or reset"
 }
 
