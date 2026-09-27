@@ -316,14 +316,14 @@ worker_signal_process_or_group() { # process|group <signal> <pid>
 }
 
 worker_supervisor_identity_status() { # <job-dir> <pid>
-  local job=$1 pid=$2 recorded_start actual_start
+  local job=$1 pid=$2 recorded_start
   recorded_start=$(fm_remote_job_read_single_line "$job/.claim/supervisor_start" 256 2>/dev/null) || return 2
-  actual_start=$(fm_remote_job_process_start "$pid" 2>/dev/null) || {
-    worker_process_or_group_alive process "$pid" && return 2
-    return 1
-  }
-  [ "$recorded_start" = "$actual_start" ] && return 0
-  return 1
+  fm_remote_job_process_start_matches "$pid" "$recorded_start"
+  case "$?" in
+    0) return 0 ;;
+    2) worker_process_or_group_alive process "$pid" && return 2; return 1 ;;
+    *) return 1 ;;
+  esac
 }
 
 # A leaderless live group still belongs to the recorded execution: its PGID
@@ -332,16 +332,19 @@ worker_supervisor_identity_status() { # <job-dir> <pid>
 # recorded group stale; an unreadable live leader stays indeterminate so the
 # stop loop retries rather than signaling or declaring the group dead.
 worker_group_identity_status() { # <job-dir> <pid>
-  local job=$1 pid=$2 recorded_start actual_start file="$1/.claim/group_start"
+  local job=$1 pid=$2 recorded_start file="$1/.claim/group_start"
   [ -e "$file" ] || [ -L "$file" ] || return 3
   recorded_start=$(fm_remote_job_read_single_line "$file" 256 2>/dev/null) || return 2
-  actual_start=$(fm_remote_job_process_start "$pid" 2>/dev/null) || {
-    kill -0 "$pid" 2>/dev/null && return 2
-    worker_process_or_group_alive group "$pid" && return 0
-    return 1
-  }
-  [ "$recorded_start" = "$actual_start" ] && return 0
-  return 1
+  fm_remote_job_process_start_matches "$pid" "$recorded_start"
+  case "$?" in
+    0) return 0 ;;
+    2)
+      kill -0 "$pid" 2>/dev/null && return 2
+      worker_process_or_group_alive group "$pid" && return 0
+      return 1
+      ;;
+    *) return 1 ;;
+  esac
 }
 
 worker_recorded_execution_alive() { # <job-dir> process|group <pid>
@@ -429,10 +432,7 @@ worker_stop_recorded_execution() { # <job-dir>
 # stays running-with-a-dead-owner for the replacement worker's orphan recovery,
 # exactly as a crashed single-process worker's job did.
 worker_lane_identity_matches() { # <pid> <start>
-  local pid=$1 start=$2 actual_start
-  [ -n "$start" ] || return 1
-  actual_start=$(fm_remote_job_process_start "$pid" 2>/dev/null) || return 1
-  [ "$actual_start" = "$start" ]
+  fm_remote_job_process_start_matches "$1" "$2"
 }
 
 worker_stop_active_execution() {
@@ -548,7 +548,7 @@ worker_claim() { # <job-dir>
 }
 
 worker_claim_owner_alive() { # <job-dir>
-  local job=$1 claim="$1/.claim" owner pid recorded_start actual_start
+  local job=$1 claim="$1/.claim" owner pid recorded_start
   [ -d "$claim" ] && [ ! -L "$claim" ] || return 1
   owner="$claim/owner"
   fm_remote_job_regular_bounded "$owner" 64 || return 1
@@ -556,8 +556,7 @@ worker_claim_owner_alive() { # <job-dir>
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
   if [ -e "$claim/owner_start" ] || [ -L "$claim/owner_start" ]; then
     recorded_start=$(fm_remote_job_read_single_line "$claim/owner_start" 256 2>/dev/null) || return 1
-    actual_start=$(fm_remote_job_process_start "$pid" 2>/dev/null) || return 1
-    [ "$recorded_start" = "$actual_start" ]
+    fm_remote_job_process_start_matches "$pid" "$recorded_start"
     return
   fi
   kill -0 "$pid" 2>/dev/null

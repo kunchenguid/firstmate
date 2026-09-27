@@ -12,7 +12,10 @@
 # state; deadline and exit are added as execution advances, cancel is an
 # optional caller-cancellation marker, and .claim may hold owner, owner_start,
 # supervisor, supervisor_start, group, group_start, and armed records while
-# work executes.
+# work executes. The stage's .owner-start, the claim's *_start records, and the
+# worker lock's start record all hold the start identity
+# fm_remote_job_process_start owns: clock-independent where /proc exists, so a
+# wall-clock step never makes a live worker read as gone.
 # Stage writes state=queued last. seq is a queue-wide monotonic staging
 # sequence reserved atomically by its persistent .seq-claims directory; the
 # counter is only a forward-moving allocation hint. If the bounded hint walk
@@ -762,13 +765,12 @@ fm_remote_job_path_mtime() { # <path>
 }
 
 fm_remote_job_stage_owner_alive() { # <stage-dir>
-  local stage=$1 pid recorded_start actual_start
+  local stage=$1 pid recorded_start
   pid=$(fm_remote_job_read_single_line "$stage/.owner-pid" 64 2>/dev/null) || return 1
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
   [ "$pid" -gt 1 ] || return 1
   recorded_start=$(fm_remote_job_read_single_line "$stage/.owner-start" 256 2>/dev/null) || return 1
-  actual_start=$(fm_remote_job_process_start "$pid" 2>/dev/null) || return 1
-  [ "$recorded_start" = "$actual_start" ]
+  fm_remote_job_process_start_matches "$pid" "$recorded_start"
 }
 
 fm_remote_job_reap_stale() { # <account-home>
@@ -902,18 +904,84 @@ fm_remote_job_worker_ready_path() { printf '%s\n' "$FM_REMOTE_JOB_STATE/worker.r
 fm_remote_job_worker_identity_path() { printf '%s\n' "$FM_REMOTE_JOB_STATE/worker.identity"; }
 fm_remote_job_worker_lock_path() { printf '%s\n' "$FM_REMOTE_JOB_STATE/worker.lock"; }
 
-fm_remote_job_process_start() {
+# The system ps, resolved by absolute path because job children and launchd
+# run without a trusted PATH. FM_REMOTE_JOB_PS_BIN substitutes a stub for
+# isolated tests only.
+fm_remote_job_ps_bin() {
+  if [ -n "${FM_REMOTE_JOB_PS_BIN:-}" ]; then printf '%s\n' "$FM_REMOTE_JOB_PS_BIN"
+  elif [ -x /bin/ps ]; then printf '%s\n' /bin/ps
+  elif [ -x /usr/bin/ps ]; then printf '%s\n' /usr/bin/ps
+  else return 1; fi
+}
+
+# ps's rendering of when <pid> started. On Linux procps derives it from the
+# current wall clock minus the process's age, so a wall-clock step moves it for
+# a process that never restarted; it is the identity only where no /proc start
+# time exists (macOS, whose kernel records an absolute start time instead).
+fm_remote_job_process_lstart() { # <pid>
   local pid=$1 ps_bin value
-  if [ -x /bin/ps ]; then ps_bin=/bin/ps; elif [ -x /usr/bin/ps ]; then ps_bin=/usr/bin/ps; else return 1; fi
+  ps_bin=$(fm_remote_job_ps_bin) || return 1
   value=$("$ps_bin" -p "$pid" -o lstart= 2>/dev/null) || return 1
   [ -n "$value" ] || return 1
   case "$value" in *$'\n'*|*$'\r'*) return 1 ;; esac
   printf '%s\n' "$value"
 }
 
+# The clock-independent start identity of <pid> from a Linux-compatible /proc:
+# stat field 22 (start time in clock ticks since boot) qualified by the boot id,
+# so neither a wall-clock step nor PID reuse after a reboot can make a different
+# process read as the recorded one. FM_PROC_ROOT_OVERRIDE is a test seam.
+fm_remote_job_proc_start() { # <pid>
+  local pid=$1 proc_root stat_line starttime boot_id=
+  local -a stat_fields
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
+  [ -r "$proc_root/$pid/stat" ] || return 1
+  stat_line=$(cat "$proc_root/$pid/stat" 2>/dev/null) || return 1
+  # comm is parenthesised and may itself contain spaces or ')', so fields are
+  # counted after its final ')'; index 19 there is stat field 22.
+  case "$stat_line" in *')'*) ;; *) return 1 ;; esac
+  read -r -a stat_fields <<< "${stat_line##*)}"
+  [ "${#stat_fields[@]}" -ge 20 ] || return 1
+  starttime=${stat_fields[19]}
+  case "$starttime" in ''|*[!0-9]*) return 1 ;; esac
+  if [ -r "$proc_root/sys/kernel/random/boot_id" ]; then
+    IFS= read -r boot_id < "$proc_root/sys/kernel/random/boot_id" 2>/dev/null || boot_id=
+    case "$boot_id" in *[!0-9a-f-]*) return 1 ;; esac
+  fi
+  printf 'proc:%s:%s\n' "$boot_id" "$starttime"
+}
+
+# The start identity recorded beside a pid (lock owner, stage owner, claim
+# owner, supervisor, group leader, lane) so a later reader can tell the same
+# process from a reused pid. It prefers the /proc identity and falls back to
+# ps lstart only where /proc is absent.
+fm_remote_job_process_start() { # <pid>
+  fm_remote_job_proc_start "$1" 2>/dev/null || fm_remote_job_process_lstart "$1"
+}
+
+# Whether <pid> is still the process a recorded start identity names.
+# Returns 0 for the same process, 1 for a different process, 2 when no live
+# identity can be read (including a vanished pid), and 3 for an lstart record
+# written by a build predating the /proc identity that no longer equals ps's
+# current lstart. That last case is ambiguous on Linux, because a wall-clock step alone
+# moves lstart, so callers that hold independent evidence such as the recorded
+# command line may still accept it; every other caller treats it as a mismatch.
+fm_remote_job_process_start_matches() { # <pid> <recorded-start>
+  local pid=$1 recorded=$2 actual
+  [ -n "$recorded" ] || return 1
+  actual=$(fm_remote_job_process_start "$pid" 2>/dev/null) || return 2
+  [ "$actual" != "$recorded" ] || return 0
+  case "$recorded" in proc:*) return 1 ;; esac
+  case "$actual" in proc:*) ;; *) return 1 ;; esac
+  actual=$(fm_remote_job_process_lstart "$pid" 2>/dev/null) || return 2
+  [ "$actual" != "$recorded" ] || return 0
+  return 3
+}
+
 fm_remote_job_process_command() {
   local pid=$1 ps_bin value
-  if [ -x /bin/ps ]; then ps_bin=/bin/ps; elif [ -x /usr/bin/ps ]; then ps_bin=/usr/bin/ps; else return 1; fi
+  ps_bin=$(fm_remote_job_ps_bin) || return 1
   value=$("$ps_bin" -p "$pid" -o command= 2>/dev/null) || return 1
   [ -n "$value" ] || return 1
   case "$value" in *$'\n'*|*$'\r'*) return 1 ;; esac
@@ -922,7 +990,7 @@ fm_remote_job_process_command() {
 
 fm_remote_job_process_pgid() { # <pid>
   local pid=$1 ps_bin value
-  if [ -x /bin/ps ]; then ps_bin=/bin/ps; elif [ -x /usr/bin/ps ]; then ps_bin=/usr/bin/ps; else return 1; fi
+  ps_bin=$(fm_remote_job_ps_bin) || return 1
   value=$("$ps_bin" -p "$pid" -o pgid= 2>/dev/null) || return 1
   value=$(printf '%s' "$value" | tr -d '[:space:]')
   case "$value" in ''|*[!0-9]*) return 1 ;; esac
@@ -1003,7 +1071,7 @@ fm_remote_job_read_single_line() {
 }
 
 fm_remote_job_lock_owner_matches_process() {
-  local account_home=$1 lock pid recorded_start actual_start recorded_command actual_command
+  local account_home=$1 lock pid recorded_start start_status recorded_command actual_command
   fm_remote_job_prepare_state "$account_home" || return 1
   lock=$(fm_remote_job_worker_lock_path)
   [ -d "$lock" ] && [ ! -L "$lock" ] || return 1
@@ -1011,11 +1079,21 @@ fm_remote_job_lock_owner_matches_process() {
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
   [ "$pid" -gt 1 ] || return 1
   recorded_start=$(fm_remote_job_read_single_line "$lock/start" 256) || return 1
-  actual_start=$(fm_remote_job_process_start "$pid") || return 1
-  [ "$recorded_start" = "$actual_start" ] || return 1
   recorded_command=$(fm_remote_job_read_single_line "$lock/command" 8192) || return 1
   actual_command=$(fm_remote_job_process_command "$pid") || return 1
   [ "$recorded_command" = "$actual_command" ] || return 1
+  fm_remote_job_process_start_matches "$pid" "$recorded_start"
+  start_status=$?
+  case "$start_status" in
+    0) ;;
+    # A worker started by a pre-/proc build recorded its lstart, which a clock
+    # step has since moved. Its unchanged worker command line still proves it
+    # is that owner, so an upgrade can recognise and replace it instead of
+    # starting a rival beside it. A pid equal to this shell's own is a stale
+    # record reused after a reboot, never the owner.
+    3) [ "$pid" != "${BASHPID:-$$}" ] || return 1 ;;
+    *) return 1 ;;
+  esac
   FM_REMOTE_JOB_OWNER_PID=$pid
 }
 
