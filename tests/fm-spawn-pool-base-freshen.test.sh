@@ -238,6 +238,40 @@ make_originless_case() {  # <name> <id>
   printf '%s\n' "$case_dir|$home|$project|$pool|$fakebin|$initial|main"
 }
 
+test_graphify_out_is_linked_into_the_task_worktree() {
+  local rec id out status source_graph linked_graph
+  id='pool-graphify-link-r1'
+  rec=$(make_originless_case graphify-link "$id")
+  read_case_record "$rec"
+  mkdir -p "$PROJECT_DIR/graphify-out"
+  printf '%s\n' '{"nodes":[]}' > "$PROJECT_DIR/graphify-out/graph.json"
+
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  expect_code 0 "$status" "spawn should remain successful when graphify-out is available"$'\n'"$out"
+  [ -L "$POOL_DIR/graphify-out" ] || fail "spawn did not create a graphify-out symlink in the task worktree"
+  source_graph=$(cd "$PROJECT_DIR/graphify-out" && pwd -P)
+  linked_graph=$(readlink "$POOL_DIR/graphify-out")
+  [ "$linked_graph" = "$source_graph" ] || fail "graphify-out link was not absolute: $linked_graph"
+  [ -f "$POOL_DIR/graphify-out/graph.json" ] || fail "task worktree graphify-out link does not reach the source graph"
+  pass "spawn links the source clone's graphify-out into the isolated task worktree"
+}
+
+test_graphify_out_absence_does_not_block_spawn() {
+  local rec id out status
+  id='pool-graphify-absent-r1'
+  rec=$(make_originless_case graphify-absent "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  expect_code 0 "$status" "spawn should remain successful when the source graph is absent"$'\n'"$out"
+  [ ! -e "$POOL_DIR/graphify-out" ] && [ ! -L "$POOL_DIR/graphify-out" ] \
+    || fail "spawn created a graphify-out entry without a source graph"
+  assert_not_contains "$out" "graphify-out" "an absent source graph should not produce a graph warning"
+  pass "spawn skips graphify-out cleanly when the source clone has no graph"
+}
+
 test_originless_pool_launches_without_a_freshness_fetch() {
   local rec id out status before
   id='pool-originless-r6'
@@ -749,6 +783,8 @@ test_linked_spawning_home_rejects_primary_before_refresh
 test_stale_pool_base_refreshes_before_branching
 test_non_main_default_branch_refreshes_before_branching
 test_direct_pr_and_scout_refresh_before_launch
+test_graphify_out_is_linked_into_the_task_worktree
+test_graphify_out_absence_does_not_block_spawn
 test_dirty_pool_refuses_without_discarding_work
 test_unresolved_remote_default_refuses_pool
 test_unreachable_origin_refuses_stale_pool_base
