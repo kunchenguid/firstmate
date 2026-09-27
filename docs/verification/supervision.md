@@ -578,6 +578,22 @@ ok - unacknowledged recovery is announced at most once per generation and the su
 FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=59357
 ```
 
+The handling successor's generation-scoped recovery stand-down was verified on 2026-09-27 with real watcher processes and an isolated home.
+The regression proved a handling successor stayed silent for its inherited generation across two polls, and a captain inbox note appended after that episode was acknowledged minted a newer generation that the same successor cycle announced and closed within a few polls.
+
+```sh
+bin/fm-test-run.sh tests/fm-watch-recovery-loop.test.sh
+```
+
+Observed output:
+
+```text
+ok - a resurfacing handling successor stays alive and supervises instead of going blind
+ok - a handling successor announces a captain note's newer generation within a few polls
+ok - unacknowledged recovery is announced at most once per generation and the successor stays alive
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=64466
+```
+
 Deterministic entry points:
 
 ```sh
