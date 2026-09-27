@@ -6,8 +6,9 @@
 # newer branch outcome, OPEN DECISIONS, captain-call record divergence, and on
 # a supervision-host home the supervision session's new and unprocessed
 # outcomes (BRANCH OUTCOMES), then assert liveness.
-# Main wake acknowledgement retains an inbox check row while its note is pending;
-# bin/fm-inbox.sh drain --ack handles the note, after which the row can be consumed.
+# Acknowledgement keeps a pending inbox note's check row: main retains its claim,
+# branch releases its grant; bin/fm-inbox.sh drain --ack handles the note so the
+# next wake acknowledgement can consume the row.
 # Keep sequence-bound row consumption independent from generation-bound episode
 # retirement; docs/watcher-continuity.md owns the recovery contract.
 # FM_STATUS_PRESENTATION_LOCK_TIMEOUT sets the positive whole-second wait for

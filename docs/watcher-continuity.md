@@ -306,7 +306,7 @@ It leaves a row above the cutoff that arrived after presentation unowned, so an 
 
 Every settled branch prompt releases any residual grant.
 So an omitted or failed acknowledgement leaves the durable row available to a later main drain.
-A successful acknowledgement has already removed consumed rows, while pending inbox notes stay available.
+A successful acknowledgement has already removed consumed rows.
 
 An acknowledgement can remove none of the actor's rows while a presented row above the cutoff still waits.
 Such an acknowledgement is reported as having acknowledged nothing, together with the exact `--ack-through` and `--recovery-generation` command for that presented row.
