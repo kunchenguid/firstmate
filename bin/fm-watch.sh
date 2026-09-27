@@ -2418,8 +2418,16 @@ if ! fm_recovery_marker_arm_check "$WATCHER_DOWNTIME_MARKER"; then
   echo "watcher: recovery state could not be consumed safely; retaining stale lock evidence" >&2
   exit 1
 fi
+SUCCESSOR_INHERITED_GENERATION=
 if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ]; then
   WATCHER_RECOVERY_PENDING=0
+  # Inherit the episode this successor supervises over: rows already queued
+  # at startup ride the predecessor-delivered wake, so this cycle stays
+  # silent for that generation (the once-per-generation bound). The probe
+  # runs after fm_recovery_marker_arm_check above so a generation it minted
+  # at startup counts as inherited, not as an announcement duty.
+  fm_recovery_marker_probe "$WATCHER_DOWNTIME_MARKER" || true
+  SUCCESSOR_INHERITED_GENERATION=${FM_RECOVERY_MARKER_TOKEN##*:}
 elif [ "$FM_RECOVERY_MARKER_ACTION" = recover ]; then
   WATCHER_RECOVERY_PENDING=1
 fi
@@ -2577,10 +2585,16 @@ rerecord_device_shifted_pr_poll() {  # <id>
 
 resurface_after_downtime() {
   # Handling successors already have a predecessor-delivered wake on the way.
-  # Re-announcing from this cycle is what turned a lost handshake into an
-  # unbounded recovery loop; stay in the poll loop and supervise instead.
+  # Re-announcing the inherited episode from this cycle is what turned a lost
+  # handshake into an unbounded recovery loop, so the stand-down is scoped to
+  # the generation inherited at startup: a newer generation was minted by a
+  # wake append this cycle never delivered (a captain inbox note or any other
+  # foreign append), and it is announced exactly as a plain watcher announces
+  # it. The probe takes no marker lock, keeping the successor's poll loop
+  # lock-free on the marker; only a real announcement acquires locks.
   if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ]; then
-    return 0
+    fm_recovery_marker_probe "$WATCHER_DOWNTIME_MARKER" || true
+    [ "${FM_RECOVERY_MARKER_TOKEN##*:}" = "$SUCCESSOR_INHERITED_GENERATION" ] && return 0
   fi
   if [ "$WATCHER_RECOVERY_PENDING" -ne 1 ]; then
     if ! fm_recovery_marker_arm_check "$WATCHER_DOWNTIME_MARKER"; then
