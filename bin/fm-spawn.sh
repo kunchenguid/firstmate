@@ -565,8 +565,8 @@ case "$CLAUDE_PERMISSION_MODE" in
 auto) CLAUDE_PERM_FLAG='--permission-mode auto' ;;
 *) CLAUDE_PERM_FLAG='--dangerously-skip-permissions' ;;
 esac
-# config/lavish-axi-host is the primary-owned per-machine address for the
-# shared Lavish server. Read it once per launch and refuse malformed values so
+# config/lavish-axi-host is this home's own per-machine address for the
+# shared Lavish server; it is never inherited from the primary. Read it once per launch and refuse malformed values so
 # every worker reaches the same server instead of starting a second one.
 if ! LAVISH_AXI_HOST_CONFIG_PRESENT=$(fm_config_source_present "$CONFIG/lavish-axi-host"); then
   exit 1
