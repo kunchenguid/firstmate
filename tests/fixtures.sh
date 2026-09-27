@@ -292,14 +292,38 @@ EOF
 }
 
 # fm_test_make_spawn_fakebin <dir> [extra-exit0-tool...]
-# Creates <dir>/fakebin with the spawn tmux stub, a no-op treehouse, and any
+# Creates <dir>/fakebin with the spawn tmux stub, a mock treehouse, and any
 # extra exit-0 tools. Echoes the fakebin path.
 fm_test_make_spawn_fakebin() {
   local dir=$1 fakebin
   shift
   fakebin=$(fm_fakebin "$dir")
   fm_test_fake_tmux_spawn "$fakebin"
-  fm_fake_exit0 "$fakebin" treehouse "$@"
+
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+if [ "$1" = "status" ] && [ "$2" = "--json" ]; then
+  pool=$(dirname "$(dirname "$(pwd -P)")")
+  if [ -f "$pool/treehouse-state.json" ]; then
+    # Translate test fixture format {"worktrees": [...]} to real output format [...]
+    # by just outputting the array part, or parsing it.
+    if grep -q '"worktrees":' "$pool/treehouse-state.json"; then
+      jq '.worktrees' "$pool/treehouse-state.json"
+    else
+      cat "$pool/treehouse-state.json"
+    fi
+    exit 0
+  fi
+  echo "[]"
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
+
+  if [ $# -gt 0 ]; then
+    fm_fake_exit0 "$fakebin" "$@"
+  fi
   printf '%s\n' "$fakebin"
 }
 

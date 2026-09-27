@@ -4201,6 +4201,16 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # Written under the Treehouse project lock held from before slot allocation
   # through metadata publication, so no other spawn or return sees a half-claim.
   if fm_treehouse_pool_slot "$PROJ_ABS" "$WT"; then
+    WT_CANONICAL=$(fm_treehouse_canonical_path "$WT")
+    canon_status=$?
+    if [ "$canon_status" -eq 2 ]; then
+      echo "error: could not query Treehouse registry for $WT; refusing to launch to avoid teardown failure; inspect window $T" >&2
+      exit 1
+    elif [ "$canon_status" -ne 0 ]; then
+      echo "error: could not resolve Treehouse registry path for $WT; refusing to launch to avoid teardown failure; inspect window $T" >&2
+      exit 1
+    fi
+    WT="$WT_CANONICAL"
     if ! fm_treehouse_slot_owner_claim "$WT" "$ID" "$FM_HOME"; then
       echo "error: could not claim Treehouse pool slot $WT for task $ID; refusing to launch a worker whose slot cannot later be proved to be its own; inspect window $T" >&2
       exit 1

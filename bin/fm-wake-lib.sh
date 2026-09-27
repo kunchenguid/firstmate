@@ -1360,6 +1360,34 @@ fm_treehouse_pool_slot() {  # <project-dir> <worktree>
   [ "$project_common" = "$slot_common" ]
 }
 
+# Look up the canonical string path that treehouse uses in its own registry for
+# the given worktree, matching them safely by inode to avoid string collisions or
+# hardcoded symlink assumptions.
+fm_treehouse_canonical_path() {  # <worktree>
+  local worktree=$1 wt_inode p p_inode uname_s pool_json
+  uname_s=$(uname -s 2>/dev/null || echo unknown)
+  if [ "$uname_s" = Darwin ]; then
+    wt_inode=$(/usr/bin/stat -f '%d:%i' "$worktree" 2>/dev/null) || return 1
+  else
+    wt_inode=$(stat -c '%d:%i' "$worktree" 2>/dev/null) || return 1
+  fi
+  
+  pool_json=$(CDPATH='' cd -- "$worktree" 2>/dev/null && treehouse status --json 2>/dev/null) || return 2
+  
+  for p in $(printf '%s\n' "$pool_json" | jq -r '.[].path' 2>/dev/null); do
+    if [ "$uname_s" = Darwin ]; then
+      p_inode=$(/usr/bin/stat -f '%d:%i' "$p" 2>/dev/null) || continue
+    else
+      p_inode=$(stat -c '%d:%i' "$p" 2>/dev/null) || continue
+    fi
+    if [ "$wt_inode" = "$p_inode" ]; then
+      printf '%s\n' "$p"
+      return 0
+    fi
+  done
+  return 1
+}
+
 # Slot-owner claim: which task a Treehouse pool slot currently belongs to.
 #
 # Treehouse can record ownership durably: `treehouse get --lease --lease-holder`
