@@ -94,7 +94,9 @@
 # returned out from under a live worker (observed 2026-09-07). So teardown also
 # reads the slot's own owner claim, written by bin/fm-spawn.sh at the moment the
 # slot is taken and dropped here once it is genuinely returned; bin/fm-wake-lib.sh
-# owns the claim, its location, and its states. A claim naming another task is
+# owns the claim, its location, its states, and the durable Treehouse lease
+# bin/fm-spawn.sh takes on the same slot, which the return below releases with
+# the slot. A claim naming another task is
 # proof of reassignment: the slot is no longer this task's, so teardown warns,
 # names the claimant, and then finishes only this task's own cleanup - endpoint,
 # status, records, checks, backlog - while every step that would read or touch

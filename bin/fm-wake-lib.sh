@@ -1360,28 +1360,79 @@ fm_treehouse_pool_slot() {  # <project-dir> <worktree>
   [ "$project_common" = "$slot_common" ]
 }
 
-# Slot-owner claim: which task a Treehouse pool slot currently belongs to.
+# Durably reserve one pool slot for one task, in place.
 #
-# Treehouse can record ownership durably: `treehouse get --lease --lease-holder`
-# reserves a slot under a label until `treehouse return --if-lease-holder`
-# releases it, and Firstmate uses exactly that for secondmate homes
-# (bin/fm-home-seed.sh). Crewmate spawns do not take that path: they acquire
-# their slot through the interactive pane-driven `treehouse get`, whose state
-# entry is a live process lease (owner_pid plus owner_started_at, and `treehouse
-# status` reports in-use from the processes actually running under the path).
-# That answers "is anything running here", never "which task owns this", and it
-# is released by the very event that makes a task record stale - the worker
-# exiting - so a slot whose lease has lapsed reads identical whether it is still
-# this task's or has since been handed to another one. Firstmate therefore keeps
-# its own claim on top: one file naming the task that took the slot, written by
+# `treehouse lease` takes the slot name `treehouse status` prints and resolves
+# the pool from the repository it runs in, so it runs from the project clone the
+# pane acquired the slot from. It is state-only - it never resets, fetches,
+# cleans, or checks out the slot - so it is safe on the slot whose interactive
+# `get` subshell is still running, and Treehouse leaves the lease alone when
+# that subshell exits, because the slot is no longer the shell's own. The holder
+# label is the task id, so a reserved slot names the task that owns it.
+# Returns non-zero, with Treehouse's own complaint on stderr, when the slot
+# cannot be reserved.
+fm_treehouse_slot_lease() {  # <project-dir> <worktree> <task-id>
+  local project=$1 worktree=$2 id=$3 slot name out
+  [ -n "$id" ] || return 1
+  [ -d "$project" ] || return 1
+  slot=$(CDPATH='' cd -- "$worktree" 2>/dev/null && pwd -P) || return 1
+  # A managed pool slot is <pool>/<slot>/<repo>, the layout
+  # fm_treehouse_pool_slot proves before either call is made.
+  name=$(basename "$(dirname "$slot")")
+  [ -n "$name" ] && [ "$name" != . ] && [ "$name" != / ] || return 1
+  out=$( ( cd "$project" && treehouse lease "$name" --lease-holder "$id" ) 2>&1 ) || {
+    [ -z "$out" ] || printf '%s\n' "$out" >&2
+    return 1
+  }
+}
+
+# Release that reservation, returning the slot to the pool, for a spawn that
+# aborts before its task record exists and so can never be reached by
+# bin/fm-teardown.sh's release. Best-effort: the caller names the still-held
+# lease when Treehouse refuses.
+fm_treehouse_slot_lease_release() {  # <project-dir> <worktree>
+  local project=$1 worktree=$2 slot
+  [ -d "$project" ] && [ -d "$worktree" ] || return 1
+  slot=$(CDPATH='' cd -- "$worktree" 2>/dev/null && pwd -P) || return 1
+  ( cd "$project" && treehouse return --force "$slot" ) >/dev/null 2>&1
+}
+
+# Slot reservation: the durable Treehouse lease, and Firstmate's claim on top.
+#
+# A Treehouse pool slot is reserved durably by a lease: it lives in Treehouse's
+# own state, outlives every process inside the slot, is never handed out by a
+# later `get`, and is never removed by `prune`, until `treehouse return`
+# releases it. Secondmate homes acquire theirs with `treehouse get --lease`
+# (bin/fm-home-seed.sh); crewmate spawns acquire theirs through the interactive
+# pane-driven `treehouse get`, which records only a live process lease
+# (owner_pid plus owner_started_at, and `treehouse status` reports in-use from
+# the processes actually running under the path) and drops it the moment the
+# worker exits. After a reboot that made a slot with a recorded task in it read
+# as available, a fresh spawn was handed the parked task's slot and both records
+# then claimed it (observed 2026-09-27), so bin/fm-spawn.sh now gives every
+# crewmate slot the durable lease too - `treehouse lease` in place, which is
+# state-only and safe on a slot whose `get` subshell is still running - and
+# bin/fm-teardown.sh releases it through the same `treehouse return` that
+# returns the slot to the pool.
+#
+# The lease is the reservation; Firstmate's claim file is the record teardown
+# reads. One file naming the task and home that took the slot, written by
 # bin/fm-spawn.sh under the same project lock that allocates the slot and
-# released by bin/fm-teardown.sh when the slot goes back to the pool. Moving
-# crewmate spawns onto the durable lease is separate follow-up work.
+# released by bin/fm-teardown.sh when the slot goes back to the pool, it answers
+# "which task holds this" for every slot - including one taken before leases
+# existed, or one whose lease a hand repair released - and is what teardown's
+# ownership proof compares before it touches a slot. The claim lives at
+# <pool>/<slot>/.fm-slot-owner - a sibling of the repo checkout rather than a
+# file inside it - so claiming a slot can never dirty the copy teardown's
+# landed-work checks inspect, and a returned slot carries no untracked leftover
+# from it.
 #
-# The claim lives at <pool>/<slot>/.fm-slot-owner - a sibling of the repo
-# checkout rather than a file inside it - so claiming a slot can never dirty the
-# copy teardown's landed-work checks inspect, and a returned slot carries no
-# untracked leftover from it.
+# Both are written under the project lock and released when the slot goes back
+# to the pool; a spawn that aborts before publishing its task record releases
+# both, so a slot can never stay reserved for a task no record names.
+#
+# `treehouse lease` is gated by bin/fm-bootstrap.sh, which reports the provider
+# MISSING when the installed build cannot reserve a slot in place.
 fm_treehouse_slot_owner_marker() {  # <worktree>
   local worktree=$1 slot
   slot=$(CDPATH='' cd -- "$worktree" 2>/dev/null && pwd -P) || return 1

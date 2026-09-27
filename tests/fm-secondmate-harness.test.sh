@@ -1119,8 +1119,8 @@ SH
   chmod +x "$fakebin/gh"
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
-if [ "${1:-}" = get ] && [ "${2:-}" = --help ]; then
-  printf '%s\n' 'Usage: treehouse get [--lease]'
+if [ "${1:-}" = lease ] && [ "${2:-}" = --help ]; then
+  printf '%s\n' 'Usage: treehouse lease <name> [--lease-holder <holder>]'
 fi
 exit 0
 SH

@@ -53,8 +53,9 @@
 #          A TANGLE line means the firstmate primary checkout (FM_ROOT) is stranded
 #          on a feature branch instead of its default branch - a crewmate's work
 #          landed in the primary instead of its own worktree; restore it per the line.
-#          treehouse is also MISSING when its installed version lacks
-#          "treehouse get --lease" support.
+#          treehouse is also MISSING when its installed version cannot durably
+#          reserve an existing pool slot, which bin/fm-spawn.sh requires of every
+#          crewmate slot it allocates.
 #          no-mistakes is also MISSING when its installed version is older than
 #          1.46.0 (structured pipeline attestation floor; see CONTRIBUTING.md).
 #          The AXI-family floor policy is owned beside GH_AXI_MIN and
@@ -844,8 +845,17 @@ NO_MISTAKES_MIN=1.46.0
 GH_AXI_MIN=0.1.29
 LAVISH_AXI_MIN=0.1.77
 
-treehouse_supports_lease() {
-  treehouse get --help 2>&1 | grep -Eq '(^|[^[:alnum:]_-])--lease([^[:alnum:]_-]|$)'
+# Treehouse must be able to durably reserve an existing pool slot in place:
+# bin/fm-spawn.sh leases every crewmate slot it allocates, so a slot whose worker
+# exits is never handed to another task while a record still owns it. Probed as a
+# capability rather than a version floor, because the flag it needs is what the
+# installed build must actually accept; a build that does not answer `lease` at
+# all exits non-zero and is refused, and the holder flag proves the answer came
+# from that command rather than an error page.
+treehouse_supports_slot_lease() {
+  local help
+  help=$(treehouse lease --help 2>&1) || return 1
+  printf '%s\n' "$help" | grep -Eq '(^|[^[:alnum:]_-])--lease-holder([^[:alnum:]_-]|$)'
 }
 
 # Shared semantic-version floor for the tool gates below. A version string that
@@ -1389,11 +1399,12 @@ detect_local_tools() {
   for t in $COMMON_TOOLS; do
     command -v "$t" >/dev/null || missing_tool_diagnostic "$t"
   done
-  # The treehouse lease-support upgrade check is only relevant when the resolved
-  # backend actually requires treehouse (every backend except orca, which owns its
-  # own worktrees); an orca home must not be told to upgrade a provider it never uses.
+  # The treehouse slot-reservation upgrade check is only relevant when the
+  # resolved backend actually requires treehouse (every backend except orca,
+  # which owns its own worktrees); an orca home must not be told to upgrade a
+  # provider it never uses.
   if fm_backend_list_contains "$TOOLS" treehouse \
-    && command -v treehouse >/dev/null 2>&1 && ! treehouse_supports_lease; then
+    && command -v treehouse >/dev/null 2>&1 && ! treehouse_supports_slot_lease; then
     echo "MISSING: treehouse (install: $(install_cmd treehouse))"
   fi
   if command -v no-mistakes >/dev/null 2>&1 && ! tool_version_at_least no-mistakes "$NO_MISTAKES_MIN"; then
