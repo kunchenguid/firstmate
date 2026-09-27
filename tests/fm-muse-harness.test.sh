@@ -92,7 +92,7 @@ case "${1:-}" in
           ". '"*"'")
             staged=${arg#". '"}
             staged=${staged%"'"}
-            [ ! -f "$staged" ] || arg=$(cat "$staged")
+            [ ! -f "$staged" ] || { [ -n "${FM_FAKE_LAUNCH_NOT_RUN:-}" ] || : > "$staged.started"; arg=$(tail -n 1 "$staged"); }
             ;;
         esac
         printf '%s\n' "$arg" >> "$FM_FAKE_LAUNCH_LOG"

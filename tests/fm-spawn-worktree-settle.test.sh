@@ -36,6 +36,9 @@ make_settle_fakebin() {
   fakebin=$(fm_fakebin "$dir")
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
+# Stand in for a pane that really sources the staged launch file: a spawn waits
+# for the record its first line writes before it will report a worker.
+for a in "$@"; do s=$(printf '%s' "$a" | sed -n "s/^\\. '\\(.*\\)'$/\\1/p"); [ -n "$s" ] && [ -f "$s" ] && [ -z "${FM_FAKE_LAUNCH_NOT_RUN:-}" ] && : > "$s.started"; done || true
 set -u
 case "$*" in
   *"#{pane_current_path}"*)

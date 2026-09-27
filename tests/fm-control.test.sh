@@ -127,6 +127,15 @@ case "${1:-}" in
     payload=${1:-}
     if [ "$literal" = 1 ]; then
       printf '%s\n' "$payload" >> "$D/literal"
+      # Stand in for a pane that really sources the staged launch file. A spawn
+      # waits for the record its first line writes before it will report a
+      # worker, and the launch command itself is the file's last line, so read
+      # it back as the payload the checks below inspect.
+      staged=$(printf '%s' "$payload" | sed -n "s/^\\. '\\(.*\\)'$/\\1/p")
+      if [ -n "$staged" ] && [ -f "$staged" ]; then
+        [ -n "${FM_FAKE_LAUNCH_NOT_RUN:-}" ] || : > "$staged.started"
+        payload=$(tail -n 1 "$staged")
+      fi
       if [ -z "${FM_FAKE_NEVER_DIES:-}" ] \
          && { [ "$payload" = /exit ] || [ "$payload" = /quit ]; }; then
         printf 'zsh' > "$D/command"

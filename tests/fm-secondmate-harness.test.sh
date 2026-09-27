@@ -436,6 +436,9 @@ make_noop_tmux() {
   mkdir -p "$fakebin"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
+# Stand in for a pane that really sources the staged launch file: a spawn waits
+# for the record its first line writes before it will report a worker.
+for a in "$@"; do s=$(printf '%s' "$a" | sed -n "s/^\\. '\\(.*\\)'$/\\1/p"); [ -n "$s" ] && [ -f "$s" ] && [ -z "${FM_FAKE_LAUNCH_NOT_RUN:-}" ] && : > "$s.started"; done || true
 exit 0
 SH
   chmod +x "$fakebin/tmux"
@@ -669,7 +672,7 @@ case "${1:-}" in
       for a in "$@"; do
         if [ "$prev" = "-l" ]; then
           case "$a" in
-            ". '"*"'") staged=${a#". '"}; staged=${staged%"'"}; [ ! -f "$staged" ] || a=$(cat "$staged") ;;
+            ". '"*"'") staged=${a#". '"}; staged=${staged%"'"}; [ ! -f "$staged" ] || { [ -n "${FM_FAKE_LAUNCH_NOT_RUN:-}" ] || : > "$staged.started"; a=$(tail -n 1 "$staged"); } ;;
           esac
           printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG"
         fi
@@ -1088,6 +1091,9 @@ SH
   # FM_FAKE_TMUX_LOG / FM_FAKE_TMUX_FAIL_LITERAL for reread-nudge assertions.
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
+# Stand in for a pane that really sources the staged launch file: a spawn waits
+# for the record its first line writes before it will report a worker.
+for a in "$@"; do s=$(printf '%s' "$a" | sed -n "s/^\\. '\\(.*\\)'$/\\1/p"); [ -n "$s" ] && [ -f "$s" ] && [ -z "${FM_FAKE_LAUNCH_NOT_RUN:-}" ] && : > "$s.started"; done || true
 if [ -n "${FM_FAKE_TMUX_LOG:-}" ]; then
   printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
 fi
@@ -2208,6 +2214,9 @@ test_config_reread_serializes_concurrent_pushes() {
   log="$w/config-reread-serialized.tmux.log"
   cat > "$fakebin/tmux" <<SH
 #!/usr/bin/env bash
+# Stand in for a pane that really sources the staged launch file: a spawn waits
+# for the record its first line writes before it will report a worker.
+for a in "\$@"; do s=\$(printf '%s' "\$a" | sed -n "s/^\\\\. '\\\\(.*\\\\)'\$/\\\\1/p"); [ -n "\$s" ] && [ -f "\$s" ] && [ -z "\${FM_FAKE_LAUNCH_NOT_RUN:-}" ] && : > "\$s.started"; done || true
 case "\$*" in
   *send-keys*)
     if (set -o noclobber; : > "$marker") 2>/dev/null; then
@@ -2363,6 +2372,9 @@ test_config_reread_stops_after_failed_generation() {
   mv "$fakebin/tmux" "$fakebin/tmux.real"
   cat > "$fakebin/tmux" <<SH
 #!/usr/bin/env bash
+# Stand in for a pane that really sources the staged launch file: a spawn waits
+# for the record its first line writes before it will report a worker.
+for a in "\$@"; do s=\$(printf '%s' "\$a" | sed -n "s/^\\\\. '\\\\(.*\\\\)'\$/\\\\1/p"); [ -n "\$s" ] && [ -f "\$s" ] && [ -z "\${FM_FAKE_LAUNCH_NOT_RUN:-}" ] && : > "\$s.started"; done || true
 case "\$*" in
   *send-keys*'.0000-fail'*) exit 1 ;;
 esac
@@ -2539,6 +2551,9 @@ SH
   fakebin=$(make_fake_toolchain "$w")
   cat > "$fakebin/tmux" <<SH
 #!/usr/bin/env bash
+# Stand in for a pane that really sources the staged launch file: a spawn waits
+# for the record its first line writes before it will report a worker.
+for a in "\$@"; do s=\$(printf '%s' "\$a" | sed -n "s/^\\\\. '\\\\(.*\\\\)'\$/\\\\1/p"); [ -n "\$s" ] && [ -f "\$s" ] && [ -z "\${FM_FAKE_LAUNCH_NOT_RUN:-}" ] && : > "\$s.started"; done || true
 case "\$*" in
   *display-message*'#{pane_current_command}'*) printf '%s' zsh ;;
   *display-message*'#{pane_id}'*) printf '%s' '%1' ;;

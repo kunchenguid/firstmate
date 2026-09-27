@@ -46,6 +46,9 @@ make_stub() {  # <case-dir>
   mkdir -p "$fb"
   cat > "$fb/tmux" <<'SH'
 #!/usr/bin/env bash
+# Stand in for a pane that really sources the staged launch file: a spawn waits
+# for the record its first line writes before it will report a worker.
+for a in "$@"; do s=$(printf '%s' "$a" | sed -n "s/^\\. '\\(.*\\)'$/\\1/p"); [ -n "$s" ] && [ -f "$s" ] && [ -z "${FM_FAKE_LAUNCH_NOT_RUN:-}" ] && : > "$s.started"; done || true
 set -u
 D=$FM_FAKE_DIR
 case "${1:-}" in

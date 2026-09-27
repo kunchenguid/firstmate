@@ -39,7 +39,10 @@ case "${1:-}" in
           ". '"*"'")
             staged=${arg#". '"}
             staged=${staged%"'"}
-            [ ! -f "$staged" ] || printf 'staged-launch %s\n' "$(cat "$staged")" >> "$FM_FAKE_TMUX_LOG"
+            if [ -f "$staged" ]; then
+              [ -n "${FM_FAKE_LAUNCH_NOT_RUN:-}" ] || : > "$staged.started"
+              printf 'staged-launch %s\n' "$(tail -n 1 "$staged")" >> "$FM_FAKE_TMUX_LOG"
+            fi
             ;;
         esac
       fi

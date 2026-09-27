@@ -42,6 +42,19 @@ next=$(( $(cat "$COUNT_FILE" 2>/dev/null || echo 0) + 1 ))
   for a in "$@"; do printf '\x1f%s' "$a"; done
   printf '\n'
 } >> "$LOG"
+# A real pane sourcing the staged launch file runs every line of it, including
+# the first line recording that the file was sourced. A spawn waits for that
+# record before it will report a worker, so stand in for it here. A landed
+# launch then removes the staged file, so capture the command it ran - the
+# file's last line - at the moment it is sourced rather than reading it back
+# afterwards. FM_FAKE_LAUNCH_NOT_RUN asks for that dead pane on purpose.
+for a in "$@"; do
+  s=$(printf '%s' "$a" | sed -n "s/^\\. '\\(.*\\)'\$/\\1/p")
+  if [ -n "$s" ] && [ -f "$s" ]; then
+    tail -n 1 "$s" > "$LOG.staged"
+    [ -z "${FM_FAKE_LAUNCH_NOT_RUN:-}" ] && : > "$s.started"
+  fi
+done || true
 if [ "${1:-}" = status ] && [ "${FM_ORCA_STATUS_RESPONSE:-ready}" != sequence ]; then
   printf '{"ok":true,"result":{"runtime":{"reachable":true,"state":"ready"}}}\n'
   exit 0
@@ -561,9 +574,9 @@ test_spawn_writes_orca_metadata_and_launches_harness() {
   assert_contains "$(cat "$log")" $'orca\x1f''terminal'$'\x1f''send'$'\x1f''--terminal'$'\x1f''term-spawn'$'\x1f''--text'$'\x1f''export GOTMPDIR=/tmp/fm-orcaspawnz1/gotmp'$'\x1f''--enter'$'\x1f''--json' \
     "spawn did not export GOTMPDIR through the Orca terminal"
   staged=$(tr '\037' '\n' < "$log" | sed -n "s/^\. '\([^']*\)'$/\1/p" | tail -1)
-  [ -n "$staged" ] && [ -f "$staged" ] \
+  [ -n "$staged" ] && [ -f "$log.staged" ] \
     || fail "spawn did not send Orca a readable staged launch command"
-  launch=$(cat "$staged")
+  launch=$(cat "$log.staged")
   assert_contains "$launch" "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\",\"attribution\":{\"commit\":\"\",\"pr\":\"\",\"sessionUrl\":false}}'" \
     "the staged launch sent through Orca did not select the Claude harness"
   rm -rf "/tmp/fm-$id" "$(dirname "$staged")"

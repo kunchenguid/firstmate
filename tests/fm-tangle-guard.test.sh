@@ -227,6 +227,9 @@ make_spawn_record_fakebin() {
 #!/usr/bin/env bash
 set -u
 [ -n "${FM_TMUX_REC:-}" ] && printf 'tmux %s\n' "$*" >> "$FM_TMUX_REC"
+# Stand in for a pane that really sources the staged launch file: a spawn waits
+# for the record its first line writes before it will report a worker.
+for a in "$@"; do s=$(printf '%s' "$a" | sed -n "s/^\\. '\\(.*\\)'$/\\1/p"); [ -n "$s" ] && [ -f "$s" ] && [ -z "${FM_FAKE_LAUNCH_NOT_RUN:-}" ] && : > "$s.started"; done || true
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
 esac

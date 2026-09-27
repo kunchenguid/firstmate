@@ -50,6 +50,9 @@ trap 'FM_HOME="$PARENT" FM_PROCEVENT_CLAIM_ROOT="$CLAIMS" "$ROOT/bin/fm-proceven
 # non-second-mate tooling resolvable.
 cat > "$REMOTE_ROOT/bin/tmux" <<SH
 #!/usr/bin/env bash
+# Stand in for a pane that really sources the staged launch file: a spawn waits
+# for the record its first line writes before it will report a worker.
+for a in "\$@"; do s=\$(printf '%s' "\$a" | sed -n "s/^\\\\. '\\\\(.*\\\\)'\$/\\\\1/p"); [ -n "\$s" ] && [ -f "\$s" ] && [ -z "\${FM_FAKE_LAUNCH_NOT_RUN:-}" ] && : > "\$s.started"; done || true
 set -u
 log='$TMUX_LOG'
 state='$TMUX_STATE'
@@ -152,11 +155,11 @@ freeze_parent_session() {
 remote_injected_traceparent() {
   sed -n 's/.*export TRACEPARENT=\([0-9a-f-]*\).*/\1/p' "$HERDR_LOG" | tail -1
 }
+# A landed launch removes its staged file, so read the command the fixture
+# captured when the pane sourced it rather than reading the file back.
 remote_staged_launch() {
-  local staged
-  staged=$(sed -n "s/^pane send-text [^ ]* \\. '\([^']*\)' --session [^ ]*\$/\1/p" "$HERDR_LOG" | tail -1)
-  [ -n "$staged" ] && [ -f "$staged" ] || return 1
-  cat "$staged"
+  [ -s "$HERDR_LOG.staged" ] || return 1
+  cat "$HERDR_LOG.staged"
 }
 remote_launch_snapshot() {
   remote_staged_launch | grep -o 'FM_TRACE_CONTEXT=[a-z]*' | tail -1 | cut -d= -f2

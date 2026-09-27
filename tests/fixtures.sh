@@ -120,6 +120,27 @@ case "${1:-}" in
     ;;
   has-session|new-session|new-window|kill-window|set-window-option) exit 0 ;;
   send-keys)
+    # A real pane sourcing the staged launch file runs every line of it,
+    # including the first line recording that the file was sourced. A spawn
+    # waits for that record before it will report a worker, so stand in for it
+    # whether or not this suite logs launches: a fake that only reads the file
+    # models exactly the dead pane the record exists to catch.
+    # FM_FAKE_LAUNCH_NOT_RUN asks for that dead pane on purpose.
+    prev=
+    for a in "$@"; do
+      if [ "$prev" = "-l" ]; then
+        case "$a" in
+          ". '"*"'")
+            staged=${a#". '"}
+            staged=${staged%"'"}
+            if [ -f "$staged" ] && [ -z "${FM_FAKE_LAUNCH_NOT_RUN:-}" ]; then
+              : > "$staged.started"
+            fi
+            ;;
+        esac
+      fi
+      prev=$a
+    done
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       prev=
       for a in "$@"; do
@@ -133,7 +154,9 @@ case "${1:-}" in
               staged=${a#". '"}
               staged=${staged%"'"}
               if [ -f "$staged" ]; then
-                a=$(cat "$staged")
+                # Log the launch command itself, which is the staged file's
+                # last line, so suites keep asserting what the pane runs.
+                a=$(tail -n 1 "$staged")
               elif [ "${#a}" -gt 1024 ]; then
                 a=${a:0:1024}
               fi
