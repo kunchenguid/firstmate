@@ -799,6 +799,13 @@ tests/fm-composer-codex-idle-live-e2e.test.sh
 The verification machine runs its fleet on Herdr and has no tmux installed, so on 2026-09-15 that guard reported `skip: live: tmux absent` there, and the Herdr capture above is this entry's live evidence.
 The guard also notes whether the starfield and the placeholder were actually drawn during its read, because codex need not animate them under every model or mode; a refresh on a tmux host should record that note beside the verdict rather than assume the starfield was exercised.
 
+### 2026-09-28 opencode 2.0.18 status bar below the left-bar composer
+
+Real opencode 2.0.18 read through Herdr (captured live 2026-09-28) draws a status bar on the row directly below its left-bar composer's half-block floor row, ending in the fixed `ctrl+p commands` hint while idle and busy alike; `test_opencode_v2_status_bar_below_composer` in `tests/fm-composer-lib.test.sh` carries the exact idle, typed, and busy rows.
+Before the fix the cursorless "bottom-most shape wins" staleness probe read that bar as a live lower shape and rejected the pane as `unknown`, so `fm-send` refused to type an exit into a parked worker's pane.
+The classifier now treats that row as opencode's own furniture only when the selected shape is its left bar; a boxed composer above the same status text and a dead shell below the same idle composer still read `unknown`, and the regression pins both counterweights.
+The composer-matrix live guard (`FM_COMPOSER_MATRIX_LIVE=1 tests/fm-composer-matrix-live-e2e.test.sh`) does not yet pin this regression: its tmux arm reads the cursor-anchored shape, which this change does not affect, and its cursorless arm refuses only a `pending` verdict, while this bug surfaced as `unknown`, so an `empty` cursorless assertion for opencode 2.x is still owed.
+
 ## Steering-inbox doorbell
 
 The steering channel's one behavioral assumption - a real worker agent follows the constant self-describing doorbell line (list the inbox, read and act on its records in numeric order, then `mv` each into `handled/`) - was verified on 2026-08-23 against every installed verified harness, on tmux 3.6a, macOS arm64, on an isolated private socket, driving the REAL `bin/fm-send.sh` end to end (durable record plus doorbell, with one mid-wait re-ring playing the watcher's role).
