@@ -20,10 +20,11 @@
 # decision, so this file delegates to it rather than widening the name match.
 # shellcheck source=bin/fm-cursor-lib.sh
 . "$(dirname -- "${BASH_SOURCE[0]}")/fm-cursor-lib.sh"
+# shellcheck source=bin/fm-omp-process-lib.sh
+. "$(dirname -- "${BASH_SOURCE[0]}")/fm-omp-process-lib.sh"
 
-# Known harness command names; extend when a new adapter is verified. omp is
-# anchored exactly like pi: its process name is the bare word `omp` (verified,
-# omp 18.1.11), and a substring match would claim ompd or comp.
+# Native omp is anchored to its exact process name; the shared OMP matcher
+# also accepts Bun directly executing either exact script entrypoint.
 FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$|^omp$'
 
 # The same harnesses as exact executable names. Keep in sync with
@@ -62,7 +63,8 @@ fm_harness_path_name() {  # <path>
 #      argv[0] in `ps -o comm=`, while procps on Linux reports the kernel exec
 #      name and ignores argv[0] entirely, so a version-named Claude Code binary
 #      is identified by its install path on macOS and by argv[0] on Linux.
-#   3. a bare interpreter (node, python) running a harness script path.
+#   3. Bun directly executing an OMP entrypoint, then bare interpreters
+#      (node, python) running a harness script path.
 #   4. Cursor's own structural identity, owned by bin/fm-cursor-lib.sh.
 FM_HARNESS_IS_CLAUDE=0
 fm_harness_process_matches() {  # <comm> <args>
@@ -76,6 +78,9 @@ fm_harness_process_matches() {  # <comm> <args>
   argv0=${args%% *}
   if name=$(fm_harness_path_name "$comm") || name=$(fm_harness_path_name "$argv0"); then
     case "$name" in claude) FM_HARNESS_IS_CLAUDE=1 ;; esac
+    return 0
+  fi
+  if fm_omp_process_matches "$comm" "$args"; then
     return 0
   fi
   # Bare interpreter (e.g. node): match the harness name in its script path.

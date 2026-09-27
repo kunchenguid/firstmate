@@ -258,9 +258,9 @@ fm_backend_tmux_foreground_comms() {  # <target>
       done
 }
 
-# The foreground group's full command lines. Needed because a node-bundle
-# harness carries its identity in argv[1] rather than in its command name or
-# argv[0]; bin/fm-gemini-lib.sh owns what counts as evidence inside one.
+# The foreground group's full command lines. Needed because Bun-script and
+# node-bundle harness identities can sit in argv[1] rather than the command
+# name or argv[0]; the shared process classifier owns the evidence rules.
 fm_backend_tmux_foreground_args() {  # <target>
   local target=$1 tty pid pgid tpgid comm args
   tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 0
@@ -321,7 +321,7 @@ fm_backend_tmux_foreground_argv0s() {  # <target>
 # distinguish a truly idle pane from a rewritten process title.
 fm_backend_tmux_agent_state() {  # <target>
   local target=$1 comm session window windows inventory_status
-  local foreground argv0s name pid fg_seen=0 fg_shell=0 fg_other=0
+  local foreground argv0s name pid args argv0 fg_seen=0 fg_shell=0 fg_other=0
   case "$target" in
     *:*:*|'':*|*:'') printf 'unreadable'; return 0 ;;
     *:*) ;;
@@ -383,9 +383,11 @@ EOF
 
   # Fall back to flattened arguments on platforms without /proc. Positive
   # evidence only - a bare interpreter still reaches the negative verdicts.
-  while IFS= read -r name; do
-    [ -n "$name" ] || continue
-    if fm_gemini_args_are_gemini "$name"; then
+  while IFS= read -r args; do
+    [ -n "$args" ] || continue
+    args=${args#"${args%%[![:space:]]*}"}
+    argv0=${args%%[[:space:]]*}
+    if [ "$(fm_agent_process_classify "$argv0" "$argv0" "$args")" = agent ]; then
       printf 'alive'
       return 0
     fi

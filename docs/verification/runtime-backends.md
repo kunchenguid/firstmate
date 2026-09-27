@@ -2283,13 +2283,20 @@ Its native App Server peer and watcher-close process are deterministic fixtures;
 ## Oh My Pi (omp)
 
 omp runs crewmate, scout, secondmate, and primary work; [`supervision.md`](supervision.md#omp-oh-my-pi-native-delivery-2026-09-05) owns the primary evidence.
-The evidence below was produced on 2026-09-05 against omp 18.1.11 (`~/.local/bin/omp`, a Bun-compiled single binary) on macOS 26 arm64 through the Herdr backend with the `openai-codex/gpt-6-astra` model, building on the 2026-09-02 adapter investigation against 18.1.2.
+The adapter evidence began on 2026-09-05 against omp 18.1.11 (`~/.local/bin/omp`, a Bun-compiled single binary) on macOS 26 arm64 through Herdr with the `openai-codex/gpt-6-astra` model, building on the 2026-09-02 adapter investigation against 18.1.2.
+The Bun-script process identity addendum below was verified on 2026-09-27 with omp 18.3.1.
 
 ### Process identity and markers
 
-`ps -o comm=` reports the bare name `omp` for the agent process, from both its `!` bash path and the model's bash tool, so identity is the anchored name; `ompd` and `comp` never match.
-omp publishes no harness marker: `PI_CODING_AGENT` is absent from the binary, and the default profile sets neither `PI_CODING_AGENT_DIR` nor `OMP_PROFILE` in the process environment.
-`FM_OMP_HARNESS=omp` is Firstmate's own launch marker and wins over an inherited `CLAUDECODE` only under a real omp ancestor; `tests/fm-omp-harness.test.sh` pins both directions with real processes.
+On 2026-09-05 with omp 18.1.11, `ps -o comm=` reported the bare `omp` process name, from both its `!` bash path and the model's bash tool.
+On 2026-09-27 with omp 18.3.1, the installed `~/.bun/bin/omp` was a `/usr/bin/env bun` script; its live process reported `comm=bun` and `args=bun ~/.bun/bin/omp` with the home path expanded.
+An OMP 18.3.1 resume retained the process PID but changed its command to `bun <home>/node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js --resume <session-id>`.
+The native name and both immediate Bun script arguments identify OMP in `bin/fm-harness.sh`, `bin/fm-session-lock-lib.sh`, and process liveness through one shared matcher; `ompd`, `comp`, lookalike scripts, and later arguments mentioning either entrypoint are not accepted.
+`tests/fm-omp-harness.test.sh` checks that a live simulated Bun session owns its lock while a foreign caller cannot take it.
+`tests/fm-tmux-agent-liveness.test.sh` verifies Bun launch and resume attribution with real tmux processes; `FM_HARNESS_LIVENESS_DRIFT=1 tests/fm-harness-liveness-drift-live-e2e.test.sh` refreshes liveness and ancestry evidence against each installed harness, including OMP.
+On 2026-09-27, `FM_HARNESS_LIVENESS_DRIFT=1 bash tests/fm-harness-liveness-drift-live-e2e.test.sh` reported Claude Code 2.1.238, Codex CLI 0.156.1, and OMP 18.3.1 alive, each identified at comm strength; OMP's live pane reported `title='bun' foreground=[bun]` and ancestry `[comm omp]`.
+That run explicitly skipped opencode, pi, pi-signed, grok, kimi, cursor, and muse because they were not installed, and reported `checked 3 installed harness(es)`.
+The 18.1.11 inspection found no OMP-published identity marker; `FM_OMP_HARNESS=omp` remains Firstmate's launch marker rather than independent ownership proof.
 
 ### Composer
 
@@ -2326,4 +2333,4 @@ A throwaway scout was spawned through `bin/fm-spawn.sh --scout --harness omp --m
 5. `bin/fm-control.sh <id> interrupt` cancelled the running turn;
 6. `bin/fm-control.sh <id> exit` stopped the agent and `bin/fm-teardown.sh` returned the worktree and closed the item.
 
-`FM_OMP_LIVE_E2E=1 tests/fm-omp-primary-live-e2e.test.sh` refreshes the primary evidence; the worker path above is refreshed by repeating the scout dispatch after any omp upgrade.
+`FM_OMP_LIVE_E2E=1 FM_OMP_LIVE_MODEL=openai-codex/gpt-6-sol tests/fm-omp-primary-live-e2e.test.sh` refreshes primary evidence; the worker path above is refreshed by repeating the scout dispatch after an omp upgrade.

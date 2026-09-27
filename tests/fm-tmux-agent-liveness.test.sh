@@ -94,6 +94,8 @@ ln -s "$STANDIN_BIN" "$LAB/bin/notaharness"
 ln -s "$STANDIN_BIN" "$LAB/bin/omp"
 ln -s "$STANDIN_BIN" "$LAB/bin/ompd"
 ln -s "$STANDIN_BIN" "$LAB/bin/comp"
+ln -s "$STANDIN_BIN" "$LAB/bin/bun"
+mkdir -p "$LAB/.bun/bin" "$LAB/node_modules/@oh-my-pi/pi-coding-agent/dist"
 # muse's installed binary is muse-bin-<version>: the launcher execs it, so the
 # version is the LIVE process name and it changes on every auto-update. Unlike
 # Claude Code's version-named binary there is no `muse` path component to fall
@@ -236,6 +238,19 @@ for decoy in ompd comp; do
     || fail "'$decoy' merely contains 'omp' and must not classify as a live agent pane"
 done
 pass "tmux liveness: unrelated omp-containing command names stay ambiguous"
+
+# Bun OMP is identified by the exact script immediately after Bun's executable
+# in argv, including the different CLI path used by resume.
+new_window bun-launch "$LAB/bin/bun" "$LAB/.bun/bin/omp" 900
+wait_for_state "$SESSION:bun-launch" alive \
+  || fail "Bun executing the OMP launch script must classify alive"
+new_window bun-resume "$LAB/bin/bun" "$LAB/node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js" --resume fixture 900
+wait_for_state "$SESSION:bun-resume" alive \
+  || fail "Bun executing the OMP resume CLI must classify alive"
+new_window bun-decoy "$LAB/bin/bun" -e "$LAB/.bun/bin/omp" 900
+wait_for_state "$SESSION:bun-decoy" ambiguous \
+  || fail "a Bun command with a later OMP argument must stay ambiguous"
+pass "tmux liveness: exact Bun OMP launch and resume entrypoints classify alive"
 
 # --- a version name blinds one source ---------------------------------------
 # Giving a genuine harness-named executable the version-string argv[0] that

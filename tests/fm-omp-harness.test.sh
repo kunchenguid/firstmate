@@ -13,8 +13,9 @@
 # catches vendor drift against a real omp. Neither replaces the other.
 #
 # The load-bearing contracts:
-#   1. omp publishes no marker; the anchored process name `omp` is the ancestry
-#      evidence, and ompd/comp never identify.
+#   1. Native omp and Bun directly executing either exact OMP entrypoint are
+#      structural ancestry evidence; ompd, comp, and later-argument mentions
+#      never identify a session.
 #   2. FM_OMP_HARNESS=omp is a precedence override that needs a real omp
 #      ancestor: it beats an inherited CLAUDECODE under omp and is inert when it
 #      leaks into a worker whose ancestry holds no omp.
@@ -55,7 +56,7 @@ export NODE_NO_WARNINGS=1
 make_named_shells() {  # <dir> -> echoes <bindir>
   local dir=$1 name
   mkdir -p "$dir"
-  for name in omp ompd comp; do
+  for name in omp ompd comp bun; do
     ln -sf /bin/bash "$dir/$name"
   done
   printf '%s' "$dir"
@@ -64,29 +65,47 @@ make_named_shells() {  # <dir> -> echoes <bindir>
 # --- 1. Detection --------------------------------------------------------------
 
 test_detection_anchored_name_and_marker_precedence() {
-  local bin out
+  local bin out baseline
   bin=$(make_named_shells "$TMP_ROOT/named")
   # shellcheck disable=SC2016 # the quoted body expands inside the named shell
   out=$(env -u CLAUDECODE -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
     "$bin/omp" -c '"$1"; :' _ "$HARNESS")
   [ "$out" = omp ] || fail "a process named omp must detect as omp, got '$out'"
+  baseline=$(env -u CLAUDECODE -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS "$HARNESS")
   for decoy in ompd comp; do
     # shellcheck disable=SC2016 # the quoted body expands inside the named shell
     out=$(env -u CLAUDECODE -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
       "$bin/$decoy" -c '"$1"; :' _ "$HARNESS")
-    [ "$out" != omp ] || fail "'$decoy' merely contains omp and must not detect as omp"
+    [ "$out" = "$baseline" ] || fail "'$decoy' changed the surrounding harness identity to '$out' instead of '$baseline'"
   done
   # The marker beats an inherited CLAUDECODE only under a real omp ancestor.
   # shellcheck disable=SC2016 # the quoted body expands inside the named shell
   out=$(env -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 FM_OMP_HARNESS=omp \
     "$bin/omp" -c '"$1"; :' _ "$HARNESS")
   [ "$out" = omp ] || fail "FM_OMP_HARNESS under an omp ancestor must outrank an inherited CLAUDECODE, got '$out'"
-  # ...and is inert when it leaks into a worker with no omp ancestor.
+  # A leaked marker without a new OMP ancestor leaves the surrounding identity.
+  baseline=$(env -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 "$HARNESS")
   # shellcheck disable=SC2016 # the quoted body expands inside the named shell
   out=$(env -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 FM_OMP_HARNESS=omp \
     bash -c '"$1"; :' _ "$HARNESS")
-  [ "$out" = claude ] || fail "a leaked FM_OMP_HARNESS without an omp ancestor must not relabel a claude worker, got '$out'"
-  pass "fm-harness: omp detects by its anchored name; the marker is a precedence override that needs real omp ancestry"
+  [ "$out" = "$baseline" ] || fail "a leaked FM_OMP_HARNESS without a new omp ancestor changed '$baseline' to '$out'"
+  mkdir -p "$TMP_ROOT/.bun/bin" "$TMP_ROOT/node_modules/@oh-my-pi/pi-coding-agent/dist"
+  cat > "$TMP_ROOT/.bun/bin/omp" <<'SH'
+#!/usr/bin/env bash
+"$1"
+:
+SH
+  cp "$TMP_ROOT/.bun/bin/omp" "$TMP_ROOT/node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js"
+  for script in "$TMP_ROOT/.bun/bin/omp" "$TMP_ROOT/node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js"; do
+    out=$(env -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 \
+      "$bin/bun" "$script" "$HARNESS")
+    [ "$out" = omp ] || fail "Bun executing '$script' must outrank a retained Claude marker, got '$out'"
+  done
+  # shellcheck disable=SC2016 # the quoted body expands inside the named shell
+  out=$(env -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 \
+    "$bin/bun" -c '"$1"; :' _ "$HARNESS" "$TMP_ROOT/.bun/bin/omp")
+  [ "$out" = "$baseline" ] || fail "a later Bun argument naming omp changed '$baseline' to '$out'"
+  pass "fm-harness: native and Bun OMP entrypoints identify ancestry without accepting decoys"
 }
 
 test_lock_identity_and_liveness_classification() {
@@ -94,6 +113,12 @@ test_lock_identity_and_liveness_classification() {
   fm_harness_process_matches /usr/local/bin/omp 'omp --cwd /x' || fail "session-lock identity must accept an omp path"
   ! fm_harness_process_matches ompd '' || fail "session-lock identity must not accept ompd"
   ! fm_harness_process_matches comp '' || fail "session-lock identity must not accept comp"
+  fm_harness_process_matches bun 'bun /Users/example/.bun/bin/omp --cwd /x' || fail "session lock must accept Bun's OMP script"
+  fm_harness_process_matches /opt/homebrew/bin/bun '/opt/homebrew/bin/bun /Users/example/node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js --resume id' || fail "session lock must accept the resumed CLI"
+  ! fm_harness_process_matches bun 'bun /Users/example/.bun/bin/omp-other' || fail "session lock accepted a lookalike OMP script"
+  ! fm_harness_process_matches bun 'bun /Users/example/node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js-other' || fail "session lock accepted a lookalike CLI"
+  ! fm_harness_process_matches bun 'bun -e /Users/example/.bun/bin/omp' || fail "session lock accepted a later OMP argument"
+  ! fm_harness_process_matches bun 'bun -e /Users/example/node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js' || fail "session lock accepted a later CLI argument"
   # shellcheck source=bin/fm-backend.sh
   . "$ROOT/bin/fm-backend.sh"
   fm_backend_source tmux || fail "fm_backend_source tmux failed"
@@ -101,8 +126,49 @@ test_lock_identity_and_liveness_classification() {
   [ "$(fm_agent_process_classify_name /opt/omp/bin/omp)" = agent ] || fail "tmux liveness must classify an omp path as an agent"
   [ "$(fm_agent_process_classify_name ompd)" != agent ] || fail "tmux liveness must not classify ompd as an agent"
   [ "$(fm_agent_process_classify_name comp)" != agent ] || fail "tmux liveness must not classify comp as an agent"
+  [ "$(fm_agent_process_classify bun bun 'bun /Users/example/.bun/bin/omp')" = agent ] || fail "liveness must classify Bun executing OMP as an agent"
+  [ "$(fm_agent_process_classify bun bun 'bun /Users/example/node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js --resume id')" = agent ] || fail "liveness must classify Bun resuming OMP as an agent"
+  [ "$(fm_agent_process_classify bun bun 'bun -e /Users/example/.bun/bin/omp')" != agent ] || fail "liveness must reject a later OMP argument"
+  [ "$(fm_agent_process_classify bun bun 'bun /Users/example/.bun/bin/omp-other')" != agent ] || fail "liveness must reject an OMP lookalike"
   pass "session lock and tmux liveness: omp is anchored, decoys stay out"
 }
+
+# Exercise the public lock command with an owned Bun process and a second,
+# unrelated caller. The foreign caller must neither reclaim nor rewrite it.
+test_bun_session_lock_keeps_foreign_holder() (
+  local bin state holder out rc=0 i
+  bin=$(make_named_shells "$TMP_ROOT/lock-bun")
+  state="$TMP_ROOT/bun-session/state"
+  mkdir -p "$state" "$TMP_ROOT/bun-session/.bun/bin"
+  cat > "$TMP_ROOT/bun-session/.bun/bin/omp" <<'SH'
+#!/usr/bin/env bash
+"$1" > "$2" 2>&1
+"$1" >> "$2" 2>&1
+: > "$3"
+while [ ! -f "$4" ]; do sleep 0.05; done
+SH
+  trap 'touch "$TMP_ROOT/bun-session/release"; wait "$holder" 2>/dev/null || true' EXIT
+  FM_STATE_OVERRIDE="$state" "$bin/bun" "$TMP_ROOT/bun-session/.bun/bin/omp" \
+    "$ROOT/bin/fm-lock.sh" "$TMP_ROOT/bun-session/acquire.log" \
+    "$TMP_ROOT/bun-session/ready" "$TMP_ROOT/bun-session/release" &
+  holder=$!
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    [ -f "$TMP_ROOT/bun-session/ready" ] && break
+    sleep 0.05
+  done
+  [ -f "$TMP_ROOT/bun-session/ready" ] || fail "the Bun session never completed its lock attempt"
+  [ "$(cat "$state/.lock" 2>/dev/null)" = "$holder" ] || fail "the Bun session did not anchor its lock to its own pid"
+  [ "$(grep -c "^lock acquired: harness pid $holder$" "$TMP_ROOT/bun-session/acquire.log")" -eq 2 ] \
+    || fail "the Bun session did not verify ownership on its second lock attempt"
+  out=$(FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-lock.sh" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "an unrelated caller acquired the live Bun session's lock"
+  case "$out" in
+    *"another live firstmate session holds the lock (pid $holder)"*) ;;
+    *) fail "foreign live holder was not identified: $out" ;;
+  esac
+  [ "$(cat "$state/.lock")" = "$holder" ] || fail "the refused caller rewrote the live Bun lock"
+  pass "session lock: Bun verifies repeat ownership; a foreign caller cannot take its live lock"
+)
 
 # --- 2. Launch ---------------------------------------------------------------
 
@@ -561,7 +627,7 @@ const marker = readFileSync(`${process.env.FM_HOME}/state/.omp-watch-extension-l
 if (marker[1] !== String(process.pid)) throw new Error("loaded marker must record the session pid");
 const again = await tool.execute();
 if (!/^watcher: unchanged - omp extension already owns an arm child/.test(again.content[0].text)) throw new Error(`redundant arm was not an ownership no-op: ${again.content[0].text}`);
-await new Promise((r) => setTimeout(r, 2500));
+for (let i = 0; sent.length === 0 && i < 100; i++) await new Promise((r) => setTimeout(r, 100));
 if (sent.length !== 1) throw new Error(`expected one follow-up wake, saw ${sent.length}: ${JSON.stringify(sent)}`);
 if (!sent[0].m.startsWith("⁣FIRSTMATE_OP: v1 watcher: FIRSTMATE WATCHER WAKE: signal: omp-e2e done")) throw new Error(`unexpected wake text: ${sent[0].m}`);
 if (sent[0].o?.deliverAs !== "followUp") throw new Error("wake must be delivered as a follow-up");
@@ -795,6 +861,7 @@ EOF
 
 test_detection_anchored_name_and_marker_precedence
 test_lock_identity_and_liveness_classification
+test_bun_session_lock_keeps_foreign_holder
 test_spawn_launch_line_and_worker_wiring
 test_spawn_model_validation_scoped_to_listed_providers
 test_secondmate_launch_relies_on_discovery
