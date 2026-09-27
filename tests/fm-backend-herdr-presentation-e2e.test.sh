@@ -1294,6 +1294,67 @@ teardown_task "$CROSS_RESTART_ID" "$SECOND_HOME_A" > "$TMP_ROOT/cross-restart-te
 "$REAL_TREEHOUSE" return --force "$CROSS_NEW_WT" >/dev/null 2>&1 || true
 pass "real Herdr lab: secondmate restart binding and reclaim stay isolated to the exact child home and parent"
 
+# A model-switch relaunch after a positively missing projected pane recreates
+# the child under the same parent instead of flattening into it.
+RELAUNCH_ID=relaunch-child-r1
+mkdir -p "$HOME_DIR/data/$RELAUNCH_ID"
+write_ship_brief "$HOME_DIR" "$RELAUNCH_ID" 'Model-switch relaunch fixture.'
+spawn_task "$RELAUNCH_ID" "$HOME_DIR" "$RECOVERY_PROJECT_DIR" > "$TMP_ROOT/relaunch-first.out" 2> "$TMP_ROOT/relaunch-first.err" \
+  || fail "relaunch fixture spawn failed: $(cat "$TMP_ROOT/relaunch-first.err")"
+RELAUNCH_META="$HOME_DIR/state/$RELAUNCH_ID.meta"
+RELAUNCH_OLD_WT=$(remember_meta_worktree "$RELAUNCH_META")
+RELAUNCH_OLD_WSID=$(grep '^herdr_workspace_id=' "$RELAUNCH_META" | cut -d= -f2-)
+RELAUNCH_OLD_PANE=$(grep '^herdr_pane_id=' "$RELAUNCH_META" | cut -d= -f2-)
+RELAUNCH_OLD_LABEL=$(lab workspace get "$RELAUNCH_OLD_WSID" | jq -r '.result.workspace.label')
+RELAUNCH_TOKEN=$(grep '^projection_id=' "$HOME_DIR/state/$RELAUNCH_ID.herdr-presentation" | cut -d= -f2-)
+lab pane close "$RELAUNCH_OLD_PANE" >/dev/null \
+  || fail "could not stop the relaunch fixture pane"
+lab tab focus "$SECOND_TWO_TAB" >/dev/null || fail "could not restore the captured captain tab after stopping the relaunch fixture"
+assert_focus_is "$CAPTAIN_FOCUS" "relaunch fixture stop"
+lab pane get "$RELAUNCH_OLD_PANE" >/dev/null 2>&1 \
+  && fail "the stopped relaunch fixture pane is still readable"
+lab workspace get "$RELAUNCH_OLD_WSID" >/dev/null 2>&1 \
+  && fail "the stopped relaunch fixture workspace is still present"
+RELAUNCH_ORDER_BEFORE=$(lab workspace list | jq -r '.result.workspaces[].workspace_id')
+RELAUNCH_FOCUS=$(focus_snapshot)
+FM_GATE_REFUSE_BYPASS=1 FM_SPAWN_NO_GUARD=1 FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" \
+  "$ROOT/bin/fm-spawn.sh" "$RELAUNCH_ID" --relaunch --harness "sh -c 'while :; do sleep 60; done'" \
+  > "$TMP_ROOT/relaunch-resume.out" 2> "$TMP_ROOT/relaunch-resume.err" \
+  || fail "missing-child relaunch failed: $(cat "$TMP_ROOT/relaunch-resume.err")"
+RELAUNCH_NEW_WT=$(remember_meta_worktree "$RELAUNCH_META")
+RELAUNCH_NEW_WSID=$(grep '^herdr_workspace_id=' "$RELAUNCH_META" | cut -d= -f2-)
+RELAUNCH_NEW_PANE=$(grep '^herdr_pane_id=' "$RELAUNCH_META" | cut -d= -f2-)
+[ "$RELAUNCH_NEW_WT" = "$RELAUNCH_OLD_WT" ] \
+  || fail "missing-child relaunch did not reuse the recorded worktree"
+[ "$RELAUNCH_NEW_WSID" != "$RELAUNCH_OLD_WSID" ] && [ "$RELAUNCH_NEW_PANE" != "$RELAUNCH_OLD_PANE" ] \
+  || fail "missing-child relaunch did not mint a replacement endpoint"
+[ "$RELAUNCH_NEW_WSID" != "$FIRSTMATE_WSID" ] \
+  || fail "missing-child relaunch flattened the replacement into the parent workspace"
+[ "$(lab workspace get "$RELAUNCH_NEW_WSID" | jq -r '.result.workspace.label')" = "$RELAUNCH_OLD_LABEL" ] \
+  || fail "missing-child relaunch changed the child presentation label"
+[ "$(grep '^projection_id=' "$HOME_DIR/state/$RELAUNCH_ID.herdr-presentation" | cut -d= -f2-)" = "$RELAUNCH_TOKEN" ] \
+  && [ "$(grep '^workspace_id=' "$HOME_DIR/state/$RELAUNCH_ID.herdr-presentation" | cut -d= -f2-)" = "$RELAUNCH_NEW_WSID" ] \
+  || fail "missing-child relaunch did not advance the same-token journal to the new child"
+RELAUNCH_ORDER_AFTER=$(lab workspace list | jq -r '.result.workspaces[].workspace_id')
+[ "$(printf '%s\n' "$RELAUNCH_ORDER_AFTER" | grep -vxF "$RELAUNCH_NEW_WSID")" = "$RELAUNCH_ORDER_BEFORE" ] \
+  || fail "the relaunched child disturbed the pre-existing workspace order"
+lab workspace list | jq -e --arg parent "$FIRSTMATE_WSID" --arg child "$RELAUNCH_NEW_WSID" '
+  (.result.workspaces) as $spaces
+  | ([$spaces[].workspace_id] | index($parent)) as $p
+  | ([$spaces[].workspace_id] | index($child)) as $c
+  | $p != null and $c != null and $c > $p
+  | . and ([$spaces[range($p + 1; $c + 1)] | select(
+      (.label | test("^└ .+ · p:[A-Za-z0-9_-]{22}$")) or
+      (.label | test("^(firstmate|2ndmate-[^/]+)/.+ · p:[A-Za-z0-9_-]{22}$"))
+    )] | length == ($c - $p))
+' >/dev/null 2>&1 || fail "the relaunched child is not nested inside its parent block"
+assert_focus_is "$RELAUNCH_FOCUS" "missing-child relaunch"
+teardown_task "$RELAUNCH_ID" "$HOME_DIR" > "$TMP_ROOT/relaunch-teardown.out" 2> "$TMP_ROOT/relaunch-teardown.err" \
+  || fail "relaunched child teardown failed: $(cat "$TMP_ROOT/relaunch-teardown.err")"
+"$REAL_TREEHOUSE" return --force "$RELAUNCH_OLD_WT" >/dev/null 2>&1 || true
+"$REAL_TREEHOUSE" return --force "$RELAUNCH_NEW_WT" >/dev/null 2>&1 || true
+pass "real Herdr lab: a model-switch relaunch recreates the ordered child with the same token and captain focus"
+
 # Two homes recovering concurrently serialize on the named session lock and
 # each replace only their own exact husk.
 PRIMARY_WAVE_ID=resume-wave-primary

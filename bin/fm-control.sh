@@ -7,6 +7,7 @@
 #        fm-control.sh <task-id> relaunch [--harness <name>] [--model <name>]
 #                                         [--effort <level>]
 #                                         (--note <text> | --note-file <path>)
+#        fm-control.sh <task-id> reproject
 #
 # Why this exists, and how it differs from fm-send.sh. bin/fm-send.sh is the
 # DATA plane: conversational text for the agent to read, always routing-marked
@@ -86,6 +87,21 @@
 #              the prior durable record in place and reports the concrete
 #              state; it never leaves a half-transitioned task claiming to be
 #              running.
+#   reproject  Move a LIVE Herdr task tab out of its owning parent workspace
+#              into a new projected one-task child workspace under that same
+#              parent, then rebind the task's record and presentation journal
+#              to the new endpoint. The pane keeps its live process, agent
+#              registration, and cwd; only its workspace, tab, and pane ids
+#              change. HERDR-ONLY: no other backend has a verified
+#              move-existing-pane primitive. The agent is never stopped, the
+#              worktree is never touched, and no brief note is needed because
+#              no conversation is lost. A failure before the move keeps the
+#              prior durable record in place; a failure after the move retains
+#              the worker safe in its new child with a crash-recovery receipt
+#              (state/<id>.control-reproject) and reports the concrete state,
+#              and a rerun resumes the rebind instead of moving again. The new
+#              child is never closed as rollback: closing it would kill the
+#              live worker the verb exists to preserve.
 #
 # Teardown and discard are NOT verbs here and never will be. `exit` stops an
 # agent and preserves everything else; removing a worktree, killing an
@@ -115,7 +131,8 @@
 #   - `exit` and `relaunch` require a backend with a recovery-grade agent-state
 #     classifier (tmux, herdr), because without one the "the agent stopped"
 #     postcondition cannot be proven. zellij, orca, and cmux are refused rather
-#     than reported as successful blind.
+#     than reported as successful blind. `reproject` is herdr-only, because no
+#     other backend has a verified move-existing-pane primitive.
 #   - An ambiguous or unreadable endpoint state refuses; only a positively
 #     classified state acts.
 #   - A composer that visibly holds pending text refuses before an exit command
@@ -193,12 +210,18 @@ CONTROL_LOCK=
 CONTROL_LOCK_HELD=0
 RELAUNCH_ACTIVE=0
 RELAUNCH_PHASE=start
+REPROJECT_ACTIVE=0
+REPROJECT_PHASE=start
 
 control_cleanup() {
   local status=$?
   if [ "$RELAUNCH_ACTIVE" = 1 ] \
      && declare -F relaunch_rollback >/dev/null 2>&1; then
     relaunch_rollback || true
+  fi
+  if [ "$REPROJECT_ACTIVE" = 1 ] \
+     && declare -F reproject_rollback >/dev/null 2>&1; then
+    reproject_rollback || true
   fi
   if [ "$CONTROL_LOCK_HELD" = 1 ]; then
     CONTROL_LOCK_HELD=0
@@ -1044,6 +1067,223 @@ do_relaunch() {
   echo "relaunched $ID harness=$TARGET_HARNESS from=$PRIOR_RECORDED_HARNESS model=$TARGET_MODEL effort=$TARGET_EFFORT backend=$BACKEND endpoint=$T worktree=$WT"
 }
 
+# --- guarded live reproject ------------------------------------------------
+#
+# The transaction's durable record is state/<id>.control-reproject, with the
+# prior metadata and presentation journal preserved beside it. A failure
+# before the pane move keeps the prior durable record in place and drops the
+# receipt. A failure after the move retains the worker safe in its new child,
+# records the new endpoint in the receipt, and reports the concrete state; a
+# rerun discovers the moved pane and resumes the rebind instead of moving
+# again. Nothing here ever closes the worker's new child as rollback.
+reproject_receipt_write() {  # <phase>
+  local tmp
+  tmp="$REPROJECT_RECEIPT.tmp" || return 1
+  {
+    printf 'phase=%s\n' "$1"
+    printf 'tx=%s\n' "$REPROJECT_TX"
+    printf 'journal_bound=%s\n' "$REPROJECT_JOURNAL_BOUND"
+    printf 'meta_bound=%s\n' "$REPROJECT_META_BOUND"
+    printf 'new_session=%s\n' "$REPROJECT_NEW_SESSION"
+    printf 'new_workspace=%s\n' "$REPROJECT_NEW_WORKSPACE"
+    printf 'new_tab=%s\n' "$REPROJECT_NEW_TAB"
+    printf 'new_pane=%s\n' "$REPROJECT_NEW_PANE"
+  } >"$tmp" || return 1
+  mv -f "$tmp" "$REPROJECT_RECEIPT" || return 1
+}
+
+reproject_rollback() {
+  [ "$REPROJECT_ACTIVE" = 1 ] || return 0
+  [ "$REPROJECT_PHASE" != complete ] || return 0
+  REPROJECT_ACTIVE=0
+  case "$REPROJECT_PHASE" in
+    moved)
+      echo "error: reproject of $ID stopped after its pane moved; the worker is safe in its new child and the receipt records the new endpoint for resume" >&2
+      ;;
+    *)
+      rm -f "$REPROJECT_RECEIPT" "$REPROJECT_RECEIPT.tmp" "$REPROJECT_META_PRIOR" "$REPROJECT_JOURNAL_PRIOR" 2>/dev/null || true
+      echo "error: reproject of $ID was refused before its pane moved; nothing changed" >&2
+      ;;
+  esac
+  if [ "$REPROJECT_SESSION_LOCK_HELD" = 1 ]; then
+    REPROJECT_SESSION_LOCK_HELD=0
+    fm_lock_release "$REPROJECT_SESSION_LOCK" || true
+  fi
+  if [ "$REPROJECT_META_LOCK_HELD" = 1 ]; then
+    REPROJECT_META_LOCK_HELD=0
+    fm_lock_release "$REPROJECT_META_LOCK" || true
+  fi
+}
+
+# reproject_publish_meta: atomically rebind the task record to <session> <new-pane>
+# with its workspace, tab, and pane ids. Only endpoint identity lines change;
+# every other line survives byte-exact. There is no backlog row transition to
+# fuse here (the row is already In flight), so this is a same-filesystem
+# atomic rename rather than a backlog-library publication.
+reproject_publish_meta() {  # <session> <workspace> <tab> <pane>
+  local session=$1 workspace=$2 tab=$3 pane=$4 tmp
+  tmp="$STATE/.$ID.meta.reproject.${BASHPID:-$$}" || return 1
+  awk -v window="$session:$pane" -v session="$session" -v workspace="$workspace" \
+    -v tab="$tab" -v pane="$pane" -v tx="$REPROJECT_TX" '
+    /^window=/ { $0 = "window=" window; seen_window = 1 }
+    /^herdr_session=/ { $0 = "herdr_session=" session; seen_session = 1 }
+    /^herdr_workspace_id=/ { $0 = "herdr_workspace_id=" workspace; seen_workspace = 1 }
+    /^herdr_tab_id=/ { $0 = "herdr_tab_id=" tab; seen_tab = 1 }
+    /^herdr_pane_id=/ { $0 = "herdr_pane_id=" pane; seen_pane = 1 }
+    /^control_reproject_tx=/ { next }
+    { print }
+    END {
+      if (!seen_window) print "window=" window
+      if (!seen_session) print "herdr_session=" session
+      if (!seen_workspace) print "herdr_workspace_id=" workspace
+      if (!seen_tab) print "herdr_tab_id=" tab
+      if (!seen_pane) print "herdr_pane_id=" pane
+      print "control_reproject_tx=" tx
+    }
+  ' "$META" >"$tmp" || { rm -f "$tmp" 2>/dev/null; return 1; }
+  chmod 0600 "$tmp" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 1; }
+  mv -f "$tmp" "$META" || { rm -f "$tmp" 2>/dev/null; return 1; }
+}
+
+do_reproject() {
+  local pre_grade pre_info pre_followed meta_ws meta_tab meta_pane session parent_label task_label
+  local journal status new_target post_grade validated
+  local attempt
+  [ "$BACKEND" = herdr ] \
+    || die "task $ID runs on the $BACKEND backend, which has no verified move-existing-pane primitive; 'reproject' is herdr-only"
+  case "$KIND" in
+    ship|scout) ;;
+    *) die "task $ID records kind '$KIND', which has no projected child shape; 'reproject' covers ship and scout tasks only" ;;
+  esac
+  fm_backend_source herdr \
+    || die "the herdr adapter could not be loaded for task $ID"
+  REPROJECT_RECEIPT="$STATE/$ID.control-reproject"
+  REPROJECT_META_PRIOR="$REPROJECT_RECEIPT.meta-prior"
+  REPROJECT_JOURNAL_PRIOR="$REPROJECT_RECEIPT.journal-prior"
+  REPROJECT_TX="${BASHPID:-$$}.$(date -u +%Y%m%dT%H%M%SZ).$RANDOM"
+  REPROJECT_JOURNAL_BOUND=0
+  REPROJECT_META_BOUND=0
+  REPROJECT_NEW_SESSION=""
+  REPROJECT_NEW_WORKSPACE=""
+  REPROJECT_NEW_TAB=""
+  REPROJECT_NEW_PANE=""
+  REPROJECT_META_LOCK=""
+  REPROJECT_META_LOCK_HELD=0
+  REPROJECT_SESSION_LOCK=""
+  REPROJECT_SESSION_LOCK_HELD=0
+  session=$(fm_meta_get "$META" herdr_session)
+  meta_ws=$(fm_meta_get "$META" herdr_workspace_id)
+  meta_tab=$(fm_meta_get "$META" herdr_tab_id)
+  meta_pane=$(fm_meta_get "$META" herdr_pane_id)
+  [ -n "$session" ] && [ -n "$meta_ws" ] && [ -n "$meta_tab" ] && [ -n "$meta_pane" ] \
+    || die "task $ID has no complete herdr endpoint in its record; refusing to move an endpoint this home does not own"
+  parent_label=$(fm_backend_herdr_workspace_label) \
+    || die "task $ID's home has no exact workspace label; refusing a live move without its owning parent"
+  task_label="fm-$ID"
+  journal=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID")
+  [ -f "$journal" ] && [ ! -L "$journal" ] \
+    || die "task $ID has no presentation journal; 'reproject' rebinds an existing projection, it does not invent one"
+  # Grade the endpoint Herdr currently resolves the recorded pane to. After a
+  # previous move Herdr follows the old id to the relocated record, so grade
+  # that record; the backend entry re-verifies the same follow before binding.
+  pre_info=$(fm_backend_herdr_cli "$session" pane get "$meta_pane" 2>/dev/null) \
+    || die "task $ID's endpoint could not be read; 'reproject' requires a positively classified live or idle endpoint"
+  pre_followed=$(printf '%s' "$pre_info" | jq -r '.result.pane.pane_id // empty' 2>/dev/null)
+  [ -n "$pre_followed" ] \
+    || die "task $ID's endpoint reads unreadable; 'reproject' requires a positively classified live or idle endpoint"
+  pre_grade=$(fm_backend_agent_state "$BACKEND" "$session:$pre_followed")
+  case "$pre_grade" in
+    alive|dead) ;;
+    *) die "task $ID's endpoint reads '$pre_grade'; 'reproject' requires a positively classified live or idle endpoint" ;;
+  esac
+  cp -p "$META" "$REPROJECT_META_PRIOR" \
+    || die "could not preserve task $ID's record before reprojecting"
+  cp -p "$journal" "$REPROJECT_JOURNAL_PRIOR" \
+    || die "could not preserve task $ID's presentation journal before reprojecting"
+  REPROJECT_ACTIVE=1
+  REPROJECT_PHASE=intent
+  reproject_receipt_write intent \
+    || die "could not record task $ID's reproject receipt before moving"
+  REPROJECT_META_LOCK=$(fm_meta_lock_path "$META") \
+    || die "could not resolve task $ID's record lock; refusing a live move without it"
+  fm_lock_acquire_wait "$REPROJECT_META_LOCK"
+  REPROJECT_META_LOCK_HELD=1
+  REPROJECT_SESSION_LOCK=$(fm_backend_herdr_presentation_session_lock_path "$session") \
+    || die "task $ID's herdr session '$session' has no unambiguous socket; refusing a live move without its session lock"
+  attempt=0
+  while [ "$attempt" -lt 50 ]; do
+    if fm_lock_try_acquire "$REPROJECT_SESSION_LOCK"; then
+      REPROJECT_SESSION_LOCK_HELD=1
+      break
+    fi
+    sleep 0.1
+    attempt=$((attempt + 1))
+  done
+  [ "$REPROJECT_SESSION_LOCK_HELD" = 1 ] \
+    || die "task $ID's session presentation lock is contended; refusing to move a live worker under contention"
+  set +e
+  fm_backend_herdr_projection_reproject_live_tab "$session" "$journal" "$ID" "$FM_HOME" \
+    "$meta_ws" "$meta_tab" "$meta_pane" "$parent_label" "$task_label"
+  status=$?
+  set -e
+  case "$status" in
+    0)
+      REPROJECT_JOURNAL_BOUND=1
+      REPROJECT_NEW_SESSION=$FM_BACKEND_HERDR_PROJECTION_SESSION
+      REPROJECT_NEW_WORKSPACE=$FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID
+      REPROJECT_NEW_TAB=$FM_BACKEND_HERDR_PROJECTION_TAB_ID
+      REPROJECT_NEW_PANE=$FM_BACKEND_HERDR_PROJECTION_PANE_ID
+      ;;
+    1)
+      die "task $ID was not moved; see the refusal above"
+      ;;
+    *)
+      REPROJECT_PHASE=moved
+      if [ -n "$FM_BACKEND_HERDR_PROJECTION_PANE_ID" ]; then
+        REPROJECT_NEW_SESSION=$FM_BACKEND_HERDR_PROJECTION_SESSION
+        REPROJECT_NEW_WORKSPACE=$FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID
+        REPROJECT_NEW_TAB=$FM_BACKEND_HERDR_PROJECTION_TAB_ID
+        REPROJECT_NEW_PANE=$FM_BACKEND_HERDR_PROJECTION_PANE_ID
+      fi
+      reproject_receipt_write moved || true
+      die "task $ID's pane moved but the rebind did not complete; the worker is safe - rerun 'reproject' to resume"
+      ;;
+  esac
+  [ -n "$REPROJECT_NEW_SESSION" ] && [ -n "$REPROJECT_NEW_WORKSPACE" ] \
+    && [ -n "$REPROJECT_NEW_TAB" ] && [ -n "$REPROJECT_NEW_PANE" ] \
+    || die "task $ID's move returned no new endpoint; the worker is safe - rerun 'reproject' to resume"
+  REPROJECT_PHASE=moved
+  reproject_receipt_write moved \
+    || die "task $ID moved but its receipt could not record the new endpoint; the worker is safe - rerun 'reproject' to resume"
+  new_target="$REPROJECT_NEW_SESSION:$REPROJECT_NEW_PANE"
+  reproject_publish_meta "$REPROJECT_NEW_SESSION" "$REPROJECT_NEW_WORKSPACE" "$REPROJECT_NEW_TAB" "$REPROJECT_NEW_PANE" \
+    || die "task $ID moved but its record could not rebind to $new_target; the worker is safe - rerun 'reproject' to resume"
+  REPROJECT_META_BOUND=1
+  reproject_receipt_write moved \
+    || die "task $ID's record rebound but its receipt could not be updated; verify the record before any further control action"
+  if fm_backend_validate_task_endpoint "$META" "$ID" >/dev/null \
+    && [ -n "$FM_BACKEND_VALIDATED_TARGET" ]; then
+    validated=$FM_BACKEND_VALIDATED_TARGET
+  else
+    die "task $ID moved and its record rebound, but the republished record no longer passes endpoint validation; reconcile $META before any further control action"
+  fi
+  [ "$validated" = "$new_target" ] \
+    || die "task $ID's republished record points at $validated instead of $new_target; reconcile $META before any further control action"
+  post_grade=$(fm_backend_agent_state "$BACKEND" "$validated")
+  [ "$post_grade" = "$pre_grade" ] \
+    || die "task $ID moved to $validated but its endpoint reads '$post_grade' instead of '$pre_grade'; rerun 'reproject' to resume, or reconcile $META before any further control action"
+  T=$validated
+  REPROJECT_PHASE=complete
+  reproject_receipt_write complete \
+    || die "task $ID reprojected to $validated but its receipt could not close; the record is authoritative"
+  REPROJECT_SESSION_LOCK_HELD=0
+  fm_lock_release "$REPROJECT_SESSION_LOCK" || true
+  REPROJECT_META_LOCK_HELD=0
+  fm_lock_release "$REPROJECT_META_LOCK" || true
+  REPROJECT_ACTIVE=0
+  echo "reprojected $ID harness=$HARNESS backend=$BACKEND endpoint=$T workspace=$REPROJECT_NEW_WORKSPACE worktree=$WT"
+}
+
 # --- verbs ------------------------------------------------------------------
 
 case "$VERB" in
@@ -1069,5 +1309,8 @@ case "$VERB" in
     ;;
   relaunch)
     do_relaunch
+    ;;
+  reproject)
+    do_reproject
     ;;
 esac

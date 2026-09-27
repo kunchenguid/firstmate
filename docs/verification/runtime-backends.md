@@ -1306,6 +1306,25 @@ HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
 
 Observed guarantee: one exact home-local, journal-correlated, one-tab and one-pane childless idle shell was closed after restoration while the exact non-target focus and default fleet session remained unchanged, and a repeat run was a no-op.
 
+### Live reproject
+
+Measured on 2026-09-27 on Linux x86_64 against Herdr 0.9.1 (protocol 22) in isolated `fm-lab-` sessions (`bin/fm-herdr-lab.sh`), after a model switch left workers as flat tabs with stale version 2 journals.
+`herdr pane move <pane> --new-workspace --no-focus` relocates the pane with its live shell pid, its foreground child, its working directory, and its agent registration intact, auto-closes the emptied tab, and preserves focus.
+The response renames the endpoint: the old pane id becomes w2:p1-style while the terminal id is unchanged, `pane get` on the old id resolves to the relocated record, and `agent get` on the old id reports agent_not_found.
+`--label` and `--tab-label` set the new workspace and tab labels atomically, so the repair lands directly on the bound `└ <task> · p:<token>` and `fm-<id>` labels.
+`bin/fm-control.sh <id> reproject` drives that primitive end to end in the same lab shape: a flat tab with a stale binding moved to an ordered child, the record and journal rebound to the new endpoint, the shell pid unchanged, the old tab gone, focus unchanged, and a rerun without moving again.
+A staged post-move crash (stale journal plus flat record over the moved pane) resumed through pane-get-follow discovery to the same rebound state.
+Refresh the live half, which fails naming the installed version, with:
+
+```sh
+HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
+  bin/fm-test-run.sh tests/fm-control-herdr-smoke.test.sh
+HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
+  tests/fm-backend-herdr-presentation-e2e.test.sh
+```
+
+The portable halves are `tests/fm-control.test.sh` (reproject refusals) and `tests/fm-backend-herdr.test.sh` (missing-child recreation success plus live-pane refusal).
+
 ### Workspace-removal focus safety
 
 The focus-flash regression ran on 2026-08-05 against both Herdr 0.7.5 protocol 17 and Herdr 0.8.0 protocol 19 on macOS aarch64, with the 0.7.5 run using the pinned upstream release binary first on `PATH`:

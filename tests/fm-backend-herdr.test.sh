@@ -3634,6 +3634,108 @@ test_projection_recovery_is_read_only_and_refuses_live_duplicate_risk() {
   pass "herdr presentation recovery: duplicate-token inspection is read-only and live-agent risk refuses fallback"
 }
 
+test_projection_recreate_missing_child_advances_binding() {
+  local dir state home home_real journal token label out status calls
+  dir="$TMP_ROOT/projection-recreate-missing"; state="$dir/state"; home="$dir/home"
+  mkdir -p "$state" "$home"
+  home_real=$(cd "$home" && pwd -P)
+  token=$(bash -c '
+    . "$0/bin/backends/herdr.sh"
+    token=$(fm_backend_herdr_projection_journal_create "$1" recreate-r1) || exit 1
+    label=$(fm_backend_herdr_projection_workspace_label recreate-r1 "$token")
+    fm_backend_herdr_projection_journal_write_v2 \
+      "$1/recreate-r1.herdr-presentation" recreate-r1 "$token" "$2" fmtest \
+      w9 w9:t9 w9:p9 w1 firstmate "$label" fm-recreate-r1 || exit 1
+    printf "%s" "$token"
+  ' "$ROOT" "$state" "$home_real") || fail "could not create missing-child journal fixture"
+  journal="$state/recreate-r1.herdr-presentation"
+  label="└ recreate-r1 · p:$token"
+  mkdir -p "$dir/calls"; : > "$dir/calls/log"
+  out=$(ROOT="$ROOT" JOURNAL="$journal" HOME_DIR="$home" LABEL="$label" CALLS="$dir/calls/log" \
+    bash -c '
+      . "$ROOT/bin/backends/herdr.sh"
+      fm_backend_herdr_pane_presence_state() { [ "$2" = w9:p9 ] && printf dead || printf unknown; }
+      fm_backend_herdr_workspace_presence_state() { [ "$2" = w9 ] && printf dead || printf unknown; }
+      fm_backend_herdr_server_ensure() { return 0; }
+      fm_backend_herdr_cli() {
+        printf "%s\n" "$*" >> "$CALLS"
+        case "$*" in
+          *"workspace list"*)
+            printf "{\"result\":{\"workspaces\":[{\"workspace_id\":\"w1\",\"label\":\"firstmate\"},{\"workspace_id\":\"w7\",\"label\":\"captain-notes\"}]}}\n"
+            ;;
+          *) return 1 ;;
+        esac
+      }
+      fm_backend_herdr_launcher_identity() { return 2; }
+      fm_backend_herdr_projection_focus_snapshot() { printf "w1\tw1:t1"; }
+      fm_backend_herdr_projection_create_task() {
+        printf "%s %s %s\n" "$2" "$3" "$1" >> "$CALLS"
+        FM_BACKEND_HERDR_PROJECTION_SESSION=fmtest
+        FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID=w3
+        FM_BACKEND_HERDR_PROJECTION_TAB_ID=w3:t2
+        FM_BACKEND_HERDR_PROJECTION_PANE_ID=w3:p2
+        FM_BACKEND_HERDR_PROJECTION_SEEDED_TAB_ID=w3:t1
+        FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID=w3:p1
+        FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE=0
+        return 0
+      }
+      fm_backend_herdr_projection_order_best_effort() { return 0; }
+      fm_backend_herdr_projection_live_binding_matches() { return 0; }
+      fm_backend_herdr_projection_recreate_missing_task \
+        fmtest "$JOURNAL" recreate-r1 "$HOME_DIR" w9 w9:t9 w9:p9 firstmate fm-recreate-r1 /tmp/project || exit 1
+      printf "%s %s %s" "$FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID" "$FM_BACKEND_HERDR_PROJECTION_TAB_ID" "$FM_BACKEND_HERDR_PROJECTION_PANE_ID"
+    ') || fail "missing-child recreation failed"
+  [ "$out" = "w3 w3:t2 w3:p2" ] || fail "recreation did not return the replacement endpoint: $out"
+  [ "$(sed -n 's/^workspace_id=//p' "$journal")" = w3 ] \
+    && [ "$(sed -n 's/^tab_id=//p' "$journal")" = w3:t2 ] \
+    && [ "$(sed -n 's/^pane_id=//p' "$journal")" = w3:p2 ] \
+    && [ "$(sed -n 's/^projection_id=//p' "$journal")" = "$token" ] \
+    && [ "$(sed -n 's/^version=//p' "$journal")" = 2 ] \
+    || fail "recreation did not advance the journal to the replacement endpoint with the same token"
+  calls=$(cat "$dir/calls/log")
+  assert_contains "$calls" "$label" "recreation did not create under the bound workspace label"
+  assert_not_contains "$calls" $'pane\x1fclose' "recreation closed a pane while the old child was already gone"
+  assert_not_contains "$calls" $'workspace\x1fclose' "recreation introduced workspace-close authority"
+  pass "herdr presentation recreation: a positively gone child advances the same-token binding to its replacement"
+}
+
+test_projection_recreate_refuses_live_old_pane() {
+  local dir state home home_real journal token label out status calls
+  dir="$TMP_ROOT/projection-recreate-live"; state="$dir/state"; home="$dir/home"
+  mkdir -p "$state" "$home"
+  home_real=$(cd "$home" && pwd -P)
+  token=$(bash -c '
+    . "$0/bin/backends/herdr.sh"
+    token=$(fm_backend_herdr_projection_journal_create "$1" recreate-r2) || exit 1
+    label=$(fm_backend_herdr_projection_workspace_label recreate-r2 "$token")
+    fm_backend_herdr_projection_journal_write_v2 \
+      "$1/recreate-r2.herdr-presentation" recreate-r2 "$token" "$2" fmtest \
+      w9 w9:t9 w9:p9 w1 firstmate "$label" fm-recreate-r2 || exit 1
+    printf "%s" "$token"
+  ' "$ROOT" "$state" "$home_real") || fail "could not create live-pane refusal fixture"
+  journal="$state/recreate-r2.herdr-presentation"
+  label="└ recreate-r2 · p:$token"
+  mkdir -p "$dir/calls"; : > "$dir/calls/log"
+  out=$(ROOT="$ROOT" JOURNAL="$journal" HOME_DIR="$home" CALLS="$dir/calls/log" \
+    bash -c '
+      . "$ROOT/bin/backends/herdr.sh"
+      fm_backend_herdr_pane_presence_state() { printf present; }
+      fm_backend_herdr_cli() { printf "%s\n" "$*" >> "$CALLS"; return 1; }
+      fm_backend_herdr_projection_recreate_missing_task \
+        fmtest "$JOURNAL" recreate-r2 "$HOME_DIR" w9 w9:t9 w9:p9 firstmate fm-recreate-r2 /tmp/project 2>&1
+    ')
+  status=$?
+  [ "$status" -eq 1 ] || fail "a still-present old pane must refuse recreation, got status $status"
+  assert_contains "$out" "still present" "live-pane refusal did not explain the duplicate risk"
+  [ "$(sed -n 's/^workspace_id=//p' "$journal")" = w9 ] \
+    && [ "$(sed -n 's/^pane_id=//p' "$journal")" = w9:p9 ] \
+    || fail "live-pane refusal rewrote the journal"
+  calls=$(cat "$dir/calls/log")
+  assert_not_contains "$calls" $'workspace\x1fcreate' "live-pane refusal created a workspace"
+  assert_not_contains "$calls" $'pane\x1fclose' "live-pane refusal closed a pane"
+  pass "herdr presentation recreation: a still-present old pane refuses without mutation"
+}
+
 # --- workspace_find: scoped to THIS home's own label, not just any match ----
 
 test_workspace_find_matches_only_this_homes_own_label() {
@@ -5805,6 +5907,8 @@ test_projection_order_rejects_malformed_socket
 test_projection_reclaim_refusal_matrix_is_non_mutating
 test_projection_reclaim_replaces_only_exact_husk_and_advances_binding
 test_projection_recovery_is_read_only_and_refuses_live_duplicate_risk
+test_projection_recreate_missing_child_advances_binding
+test_projection_recreate_refuses_live_old_pane
 test_workspace_find_matches_only_this_homes_own_label
 test_list_live_scoped_to_this_homes_workspace_only
 test_parse_target

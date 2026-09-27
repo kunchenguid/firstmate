@@ -18,7 +18,9 @@
 #
 # Always runs on a private, named, throwaway lab session, never the default
 # one (tests/herdr-test-safety.sh; the 2026-07-02 incident). Skips cleanly
-# when herdr or jq is missing.
+# when herdr or jq is missing. The closing case also moves a live flat tab
+# with a stale journal into an ordered child through `reproject`, proving the
+# agent, its process, and focus survive the move.
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -323,5 +325,101 @@ case "$OUT" in
   *) fail "the exit failure should say the composer is not proven empty, got: $OUT" ;;
 esac
 pass "real herdr: an agent behind an unproven composer fails closed instead of typing an exit command into it"
+
+# --- live reproject: a flat tab with a stale journal moves to a child -------
+#
+# The model-switch incident left workers as flat tabs in the owning parent
+# with stale v2 journals pointing at destroyed workspaces. reproject moves the
+# live tab into a new child workspace under the same parent and rebinds the
+# record and the journal, keeping the agent, its process, and focus.
+REPROJ_PARENT_RAW=$(herdr workspace create --cwd "$WT" --label firstmate --no-focus --session "$SESSION") \
+  || fail "could not create the reproject parent workspace"
+REPROJ_PWS=$(printf '%s' "$REPROJ_PARENT_RAW" | jq -r '.result.workspace.workspace_id // empty')
+[ -n "$REPROJ_PWS" ] || fail "reproject parent creation returned no workspace id"
+# The earlier hsmoke home workspace may carry the same home label, which would
+# make the no-pane parent lookup ambiguous; give it a unique label first.
+herdr workspace rename "$WORKSPACE_ID" hsmoke-flat --session "$SESSION" >/dev/null 2>&1 \
+  || fail "could not rename the hsmoke workspace away from the home label"
+REPROJ_TAB_RAW=$(herdr tab create --workspace "$REPROJ_PWS" --cwd "$WT" --label fm-hreproj --no-focus --session "$SESSION") \
+  || fail "could not create the flat reproject tab"
+REPROJ_TAB=$(printf '%s' "$REPROJ_TAB_RAW" | jq -r '.result.tab.tab_id // empty')
+REPROJ_PANE=$(printf '%s' "$REPROJ_TAB_RAW" | jq -r '.result.root_pane.pane_id // empty')
+[ -n "$REPROJ_TAB" ] && [ -n "$REPROJ_PANE" ] || fail "flat reproject tab creation returned no ids"
+fm_backend_herdr_send_text_line "$SESSION:$REPROJ_PANE" "$AGENT_Q 900" \
+  || fail "could not start the agent-named process in the flat tab"
+OLD_PANE_ID=$PANE_ID
+PANE_ID=$REPROJ_PANE
+wait_process_state agent 50 \
+  || version_fail "the flat tab reads '$(fm_backend_herdr_pane_process_state "$SESSION" "$REPROJ_PANE")' rather than 'agent' before reproject"
+PANE_ID=$OLD_PANE_ID
+herdr pane report-agent "$REPROJ_PANE" --source fm-control-smoke --agent claude \
+  --state idle --session "$SESSION" >/dev/null 2>&1 \
+  || fail "could not register a live agent on the flat tab"
+REPROJ_SHELL=$(herdr pane process-info --pane "$REPROJ_PANE" --session "$SESSION" 2>/dev/null \
+  | jq -r '.result.process_info.shell_pid // empty')
+[ -n "$REPROJ_SHELL" ] || fail "could not read the flat tab shell pid before reproject"
+{
+  echo "window=$SESSION:$REPROJ_PANE"
+  echo "endpoint_task_id=hreproj"
+  echo "worktree=$WT"
+  echo "project=$PROJ"
+  echo "harness=claude"
+  echo "kind=ship"
+  echo "mode=no-mistakes"
+  echo "yolo=off"
+  echo "model=default"
+  echo "effort=default"
+  echo "backend=herdr"
+  echo "herdr_session=$SESSION"
+  echo "herdr_workspace_id=$REPROJ_PWS"
+  echo "herdr_tab_id=$REPROJ_TAB"
+  echo "herdr_pane_id=$REPROJ_PANE"
+} > "$HOME_DIR/state/hreproj.meta"
+REPROJ_TOKEN=$(fm_backend_herdr_projection_journal_create "$HOME_DIR/state" hreproj) \
+  || fail "could not publish the reproject attempt journal"
+REPROJ_LABEL=$(fm_backend_herdr_projection_workspace_label hreproj "$REPROJ_TOKEN")
+HOME_REAL=$(cd "$HOME_DIR" && pwd -P)
+fm_backend_herdr_projection_journal_write_v2 "$HOME_DIR/state/hreproj.herdr-presentation" \
+  hreproj "$REPROJ_TOKEN" "$HOME_REAL" "$SESSION" w9 w9:t9 w9:p9 \
+  "$REPROJ_PWS" firstmate "$REPROJ_LABEL" fm-hreproj \
+  || fail "could not stage the stale reproject binding"
+REPROJ_FOCUS_BEFORE=$(herdr workspace list --session "$SESSION" 2>/dev/null \
+  | jq -c '[.result.workspaces[] | select(.focused == true) | {id: .workspace_id, active: .active_tab_id}]')
+OUT=$(run_control hreproj reproject) || fail "live reproject of a flat tab should succeed: $OUT"
+case "$OUT" in
+  "reprojected hreproj harness=claude backend=herdr endpoint=$SESSION:"*" worktree=$WT") : ;;
+  *) fail "reproject should report the rebound endpoint, got: $OUT" ;;
+esac
+REPROJ_NEW_PANE=$(sed -n 's/^herdr_pane_id=//p' "$HOME_DIR/state/hreproj.meta" | tail -1)
+REPROJ_NEW_TAB=$(sed -n 's/^herdr_tab_id=//p' "$HOME_DIR/state/hreproj.meta" | tail -1)
+REPROJ_NEW_WS=$(sed -n 's/^herdr_workspace_id=//p' "$HOME_DIR/state/hreproj.meta" | tail -1)
+[ -n "$REPROJ_NEW_PANE" ] && [ "$REPROJ_NEW_PANE" != "$REPROJ_PANE" ] \
+  || fail "reproject did not rebind the record to a new pane id"
+[ -n "$REPROJ_NEW_TAB" ] && [ "$REPROJ_NEW_TAB" != "$REPROJ_TAB" ] \
+  || fail "reproject did not rebind the record to a new tab id"
+[ "$(sed -n 's/^tab_id=//p' "$HOME_DIR/state/hreproj.herdr-presentation" | tail -1)" = "$REPROJ_NEW_TAB" ] \
+  || fail "reproject did not advance the journal to the new tab"
+[ "$(sed -n 's/^workspace_id=//p' "$HOME_DIR/state/hreproj.herdr-presentation" | tail -1)" = "$REPROJ_NEW_WS" ] \
+  || fail "reproject did not advance the journal to the new child workspace"
+[ "$(herdr workspace list --session "$SESSION" 2>/dev/null | jq -r --arg ws "$REPROJ_NEW_WS" '.result.workspaces[] | select(.workspace_id == $ws) | .label')" = "$REPROJ_LABEL" ] \
+  || fail "the new child workspace does not carry the bound projection label"
+# Child order: the new child sits immediately after its owning parent block.
+herdr workspace list --session "$SESSION" 2>/dev/null | jq -e --arg parent "$REPROJ_PWS" --arg child "$REPROJ_NEW_WS" '
+  (.result.workspaces | map(.workspace_id)) as $ids
+  | ($ids | index($parent)) as $p
+  | ($ids | index($child)) as $c
+  | $p != null and $c == $p + 1
+' >/dev/null 2>&1 || fail "the reprojected child is not ordered immediately after its parent"
+[ "$(herdr workspace list --session "$SESSION" 2>/dev/null | jq -c '[.result.workspaces[] | select(.focused == true) | {id: .workspace_id, active: .active_tab_id}]')" = "$REPROJ_FOCUS_BEFORE" ] \
+  || fail "reproject moved the captain's focus"
+[ "$(herdr agent get "$REPROJ_NEW_PANE" --session "$SESSION" 2>/dev/null | jq -r '.result.agent.agent // empty')" = claude ] \
+  || fail "reproject lost the live agent registration"
+[ "$(herdr pane process-info --pane "$REPROJ_NEW_PANE" --session "$SESSION" 2>/dev/null | jq -r '.result.process_info.shell_pid // empty')" = "$REPROJ_SHELL" ] \
+  || fail "reproject did not preserve the live shell process"
+herdr tab get "$REPROJ_TAB" --session "$SESSION" >/dev/null 2>&1 \
+  && fail "reproject left the old flat tab behind"
+[ "$(herdr pane list --workspace "$REPROJ_NEW_WS" --session "$SESSION" 2>/dev/null | jq -r '.result.panes | length')" = 1 ] \
+  || fail "the new child does not hold exactly one task pane"
+pass "real herdr $HERDR_VERSION: reproject moves a live flat tab to an ordered child with its agent, process, and focus intact"
 
 fm_backend_herdr_kill "$SESSION:$PANE_ID" 2>/dev/null || true
