@@ -990,7 +990,7 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
     # which needs no inventory read (the bare `axi` table may be capped).
     if [ "$(strip_quotes "$(nm_field current_branch)")" = "$CREW_BRANCH" ] \
       && [ "$(strip_quotes "$(nm_field runs_on_current_branch)")" = 0 ]; then
-      run_choice=absent
+      run_choice=status-absent
     else
       overview_ok=1
       run_overview=$(fm_nm_run_checked "$WT" "$NM_TIMEOUT" axi) || overview_ok=0
@@ -1042,7 +1042,7 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
         SELECTED_RUN_ID=$selected_id
         ;;
     esac
-    if [ "$HAVE_RUN" = 0 ] && [ -z "$SELECTED_RUN_ID" ]; then
+    if [ "$run_choice" != status-absent ] && [ "$HAVE_RUN" = 0 ] && [ -z "$SELECTED_RUN_ID" ]; then
       run_branch=$(strip_quotes "$(nm_field branch)")
       # Head equality, the pipeline-owned parked-run exemption, or executing
       # regardless of head: a live run on this branch is current even after a

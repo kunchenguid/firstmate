@@ -2082,7 +2082,9 @@ test_cross_branch_attribution_via_runs_list() {
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-f.meta" "window=fm:fm-feat-f" "worktree=$d/wt" "kind=ship"
   # The repo-wide active/most-recent run belongs to a different crew's branch.
-  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)
+current_branch: fm/other-crew
+runs_on_current_branch: 0"
   # Real `no-mistakes runs` shape: plain text, newest-first, no run id, no
   # quoting - "<status> <branch> <short-sha> <date> [<pr-url>]".
   FM_FAKE_RUNS_LIST="$(cat <<EOF
@@ -2560,9 +2562,10 @@ test_no_run_busy_pane() {
 # pane/log sources instead of reporting an unreadable runs table.
 test_no_run_overview_zero_branch_falls_through() {
   reset_fakes
-  local d table status home out
+  local d table status home short out
   d=$(new_case explicit-no-run)
   make_repo_on_branch "$d/wt" fm/feat-no-run-overview
+  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-no-run-overview.meta" "window=fm:fm-feat-no-run-overview" \
     "worktree=$d/wt" "kind=ship" "harness=claude"
@@ -2600,6 +2603,7 @@ EOF
   )
   FM_FAKE_AXI_STATUS="$status"
   FM_FAKE_AXI_HOME="$home"
+  FM_FAKE_RUNS_LIST="  running    fm/feat-no-run-overview $short  2026-09-27 09:00"
   printf 'working: implementation continues\n' > "$d/state/feat-no-run-overview.status"
   FM_FAKE_BUSY=0
   arm_idle_record "$d/state" feat-no-run-overview
