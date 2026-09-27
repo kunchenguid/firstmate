@@ -73,6 +73,18 @@ unset TASKS_AXI_FILE TASKS_AXI_BACKEND
 # shellcheck disable=SC2034
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# Claude, Codex, and Pi openai-codex launches refuse without TeamClaude.
+# Prepend a deterministic stub so the suite does not need a running proxy.
+# FM_LIVE=1 keeps the real CLI first for opt-in live checks. A test that needs
+# a different teamclaude puts that directory ahead of this stub.
+if [ "${FM_LIVE:-0}" != 1 ]; then
+  PATH="$ROOT/tests/fixtures/teamclaude-stub:${PATH}"
+  export PATH
+  if [ -z "${FM_TEST_BASE_PATH:-}" ]; then
+    export FM_TEST_BASE_PATH="$ROOT/tests/fixtures/teamclaude-stub:/usr/bin:/bin:/usr/sbin:/sbin"
+  fi
+fi
+
 # --- reporters --------------------------------------------------------------
 
 fail() {

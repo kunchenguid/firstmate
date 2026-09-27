@@ -9,7 +9,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | --- | --- |
 | Firstmate's code, private files, or project location | [FM_HOME](#fm_home) and [operational home layout](#operational-home-layout-and-state) |
 | Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
-| Worker permissions, accounts, or environment | [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), and [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist) |
+| Worker permissions, accounts, or environment | [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist), and [TeamClaude worker routing](#teamclaude-worker-routing) |
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
@@ -980,6 +980,23 @@ If the wrapper cannot resolve that repository's hooks directory, the git operati
 When stripping is enabled, the hooks directory is read-only, so a hook manager run inside a fleet pane (lefthook's npm postinstall, `pre-commit install`) fails instead of displacing the strip; install a project's hooks from outside the pane, where the wrappers chain them.
 The flag is a home-wide attribution choice, so it is inherited into secondmate homes under the [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md) inherited-local-material contract and a secondmate's own workers keep AI trailers too.
 Per-machine Cursor `cli-config.json` attribution-off is not this contract: it does not travel with Firstmate, defaults back to on when unset, and only feeds the CLI's request to the server, so it suppresses the trailer rather than preventing it.
+
+## TeamClaude worker routing
+
+[`bin/fm-teamclaude.sh`](../bin/fm-teamclaude.sh) owns how Firstmate-launched workers reach TeamClaude.
+Claude launches use the MITM environment from `teamclaude env --mitm` and refuse to start when that proxy is not usable, with no direct-login fallback.
+Codex launches send the TeamClaude provider on the command itself and, when `codex` on PATH is an opencodex autostart shim, run the real Codex binary instead of that shim.
+opencodex is left running because OpenCode workers still use it, and OpenCode launches are not rewritten.
+Pi and pi-signed route through TeamClaude only for `openai-codex` models, by a per-task `models.json` base URL.
+OpenAI API-key models are not redirected, and a Pi launch that does not name an `openai-codex` model is unchanged.
+The rotation threshold stays TeamClaude's own `teamclaude threshold` command.
+Firstmate does not keep a second rotator.
+When that command reports a threshold other than a flat 95%, a routed launch still starts and names the remaining local step, `bin/fm-teamclaude.sh apply-threshold`, which runs `teamclaude threshold 95` on the machine that hosts the proxy.
+A task copy does not run that step.
+The Herdr primary is started by Herdr's own agent command, not by `fm-spawn`, so this routing does not change it.
+omp's worker overlay does not rewrite provider endpoints, so omp stays on the captain's own provider config.
+Every spawn backend sends the same launch command, so the routing covers tmux, Herdr, Zellij, Orca, and cmux workers alike.
+`quota-axi` still reads the local login, not TeamClaude's pool.
 
 ## Crew dispatch profiles (config/crew-dispatch.json)
 

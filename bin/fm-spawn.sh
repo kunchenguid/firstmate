@@ -328,6 +328,10 @@
 #   account_provider=) in the task record and on the spawned line. A local
 #   secondmate reads this launching home's file; pins are never inherited.
 #   bin/fm-worker-account-lib.sh owns parsing, the check, and the shed list.
+# TeamClaude routing for Claude, Codex, and Pi openai-codex models is owned by
+# bin/fm-teamclaude.sh. Claude and Codex launches refuse before an endpoint
+# exists when that proxy is not usable, and they do not fall back to a direct
+# login. Pi launches route only openai-codex models. OpenCode is unchanged.
 #   Launch templates live in launch_template() below; placeholders replaced before launch:
 #     __BRIEF__    absolute path to data/<task-id>/brief.md
 #     __CLAUDEPERMFLAG__ the claude permission flag selected by config/claude-permission-mode
@@ -626,6 +630,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 # shellcheck source=bin/fm-worker-account-lib.sh
 . "$SCRIPT_DIR/fm-worker-account-lib.sh"
+# shellcheck source=bin/fm-teamclaude.sh
+. "$SCRIPT_DIR/fm-teamclaude.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -2374,6 +2380,27 @@ WORKER_ACCOUNT_DECLARED=${WORKER_ACCOUNT%%$'\t'*}
 WORKER_ACCOUNT_ROOT=${WORKER_ACCOUNT#*$'\t'}
 WORKER_ACCOUNT_PROVIDER=${WORKER_ACCOUNT_ROOT#*$'\t'}
 WORKER_ACCOUNT_ROOT=${WORKER_ACCOUNT_ROOT%%$'\t'*}
+# TeamClaude routing refuses before any endpoint, worktree, or record exists.
+# bin/fm-teamclaude.sh owns the proxy check, the Codex shim bypass, and the
+# Pi openai-codex overlay. The fragments captured here are applied when the
+# launch command is assembled below.
+TEAMCLAUDE_CLAUDE_ENV=
+TEAMCLAUDE_CODEX_EXEC=
+TEAMCLAUDE_CODEX_CONFIG=
+TEAMCLAUDE_PI_PREFIX=
+case "$HARNESS" in
+claude)
+  TEAMCLAUDE_CLAUDE_ENV=$(fm_teamclaude_claude_env) || exit 1
+  ;;
+codex)
+  TEAMCLAUDE_CODEX_EXEC=$(fm_teamclaude_codex_exec) || exit 1
+  TEAMCLAUDE_CODEX_CONFIG=$(fm_teamclaude_codex_config) || exit 1
+  ;;
+pi | pi-signed)
+  _tc_agent=${WORKER_ACCOUNT_ROOT:-${PI_CODING_AGENT_DIR:-${HOME:-}/.pi/agent}}
+  TEAMCLAUDE_PI_PREFIX=$(fm_teamclaude_pi_prefix "$MODEL" "$WORKER_ACCOUNT_PROVIDER" "$_tc_agent" "$STATE/$ID.pi-agent") || exit 1
+  ;;
+esac
 if [ -n "$WORKER_ACCOUNT" ] && [ "$HARNESS" = claude ]; then
   if [ -n "$WORKER_ACCOUNT_ROOT" ]; then
     export CLAUDE_CONFIG_DIR=$WORKER_ACCOUNT_ROOT
@@ -5043,8 +5070,19 @@ case "$LAUNCH" in
   LAUNCH=${LAUNCH//__CLAUDEADDDIRS__/$CLAUDE_ADD_DIRS}
   ;;
 esac
+if [ "$HARNESS" = codex ]; then
+  LAUNCH=$(fm_teamclaude_splice_codex "$LAUNCH" "$TEAMCLAUDE_CODEX_EXEC" "$TEAMCLAUDE_CODEX_CONFIG")
+fi
 case "$HARNESS" in
-claude | codex | opencode | pi | pi-signed | grok | kimi | gemini | muse | rovo | agy | devin)
+claude)
+  LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI ${TEAMCLAUDE_CLAUDE_ENV}$LAUNCH"
+  ;;
+codex)
+  # Drop an ambient MITM proxy. Codex reaches TeamClaude through the HTTP
+  # base URL above, and a CA-based intercept is the wrong trust path for it.
+  LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI -u HTTPS_PROXY -u HTTP_PROXY -u https_proxy -u http_proxy -u ALL_PROXY -u all_proxy -u NODE_EXTRA_CA_CERTS $LAUNCH"
+  ;;
+opencode | pi | pi-signed | grok | kimi | gemini | muse | rovo | agy | devin)
   LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI $LAUNCH"
   ;;
 esac
@@ -5058,6 +5096,9 @@ esac
 # A home's worker account pin replaces that forwarding: the launch names the
 # pinned root (or unsets the variable for the ordinary Claude account) and
 # sheds the environment credentials Claude ranks above the root's login.
+if [ -n "$TEAMCLAUDE_PI_PREFIX" ]; then
+  LAUNCH="$TEAMCLAUDE_PI_PREFIX$LAUNCH"
+fi
 if [ -n "$WORKER_ACCOUNT" ]; then
   case "$HARNESS" in
   claude)
@@ -5068,7 +5109,11 @@ if [ -n "$WORKER_ACCOUNT" ]; then
     fi
     ;;
   pi | pi-signed)
-    LAUNCH="PI_CODING_AGENT_DIR=$(shell_quote "$WORKER_ACCOUNT_ROOT") $LAUNCH"
+    # An openai-codex overlay already points PI_CODING_AGENT_DIR at a
+    # directory that keeps this pin's login. Don't point Pi back at the pin.
+    if [ -z "$TEAMCLAUDE_PI_PREFIX" ]; then
+      LAUNCH="PI_CODING_AGENT_DIR=$(shell_quote "$WORKER_ACCOUNT_ROOT") $LAUNCH"
+    fi
     ;;
   esac
 elif [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then

@@ -1,0 +1,40 @@
+#!/bin/sh
+# Deterministic TeamClaude stand-in for the test suite.
+# Prints the MITM environment, reports a flat 95% threshold, and accepts status.
+# FM_TEST_TEAMCLAUDE_THRESHOLD replaces the reported threshold text.
+# FM_TEST_TEAMCLAUDE_STATUS_RC replaces the status exit code.
+dir=$(CDPATH= cd -- "$(dirname "$0")" && pwd) || exit 1
+cmd=${1:-}
+shift || true
+case "$cmd" in
+  env)
+    cat <<EOF
+export HTTPS_PROXY=http://127.0.0.1:3456
+export HTTP_PROXY=http://127.0.0.1:3456
+export https_proxy=http://127.0.0.1:3456
+export http_proxy=http://127.0.0.1:3456
+export NO_PROXY='localhost,127.0.0.1,::1'
+export no_proxy='localhost,127.0.0.1,::1'
+export NODE_EXTRA_CA_CERTS='$dir/ca.pem'
+unset ANTHROPIC_BASE_URL
+EOF
+    ;;
+  status)
+    exit "${FM_TEST_TEAMCLAUDE_STATUS_RC:-0}"
+    ;;
+  threshold)
+    if [ -n "${1:-}" ]; then
+      printf 'Switch threshold set to %s%%.\n' "$1"
+      exit 0
+    fi
+    if [ -n "${FM_TEST_TEAMCLAUDE_THRESHOLD:-}" ]; then
+      printf 'Switch threshold: %s\n' "$FM_TEST_TEAMCLAUDE_THRESHOLD"
+      exit 0
+    fi
+    printf 'Switch threshold: 95%%\n'
+    ;;
+  *)
+    printf 'teamclaude stub: unsupported command %s\n' "$cmd" >&2
+    exit 1
+    ;;
+esac
