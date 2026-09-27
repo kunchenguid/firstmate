@@ -630,7 +630,7 @@ fm_backend_source() {  # <name>
       siblings="fm-tmux-lib.sh fm-composer-lib.sh fm-cursor-lib.sh fm-session-lock-lib.sh fm-agent-process-lib.sh fm-gemini-lib.sh"
       ;;
     herdr)
-      siblings="fm-composer-lib.sh fm-transition-lib.sh fm-agent-process-lib.sh fm-session-lock-lib.sh fm-gemini-lib.sh"
+      siblings="fm-composer-lib.sh fm-transition-lib.sh fm-agent-process-lib.sh fm-session-lock-lib.sh fm-gemini-lib.sh fm-herdr-launch-env-lib.sh"
       ;;
     zellij)
       siblings="fm-backend-hometag-lib.sh fm-composer-lib.sh"

@@ -35,7 +35,13 @@
 # Stop signals only identity-matched recorded processes and retains its
 # ownership record until detach is confirmed or the session is stopped or
 # absent; teardown refuses when that stop cannot be confirmed.
+# The lab server is long-lived and hands its startup environment to every lab
+# pane, so provision launches it through the same shared allowlist the adapter
+# uses (bin/fm-herdr-launch-env-lib.sh) instead of the caller's environment.
 set -u
+
+# shellcheck source=bin/fm-herdr-launch-env-lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-herdr-launch-env-lib.sh"
 
 fm_herdr_lab_error() {
   echo "fm-herdr-lab: $*" >&2
@@ -408,7 +414,7 @@ fm_herdr_lab_cancel_provision() { # <pid>
 }
 
 fm_herdr_lab_provision() { # <session>
-  local name=$1 sessions tripwire running attempt server_pid max_attempts timeout_seconds
+  local name=$1 sessions tripwire running attempt server_pid max_attempts timeout_seconds client_path
   fm_herdr_lab_validate_name "$name" || return 1
   command -v herdr >/dev/null 2>&1 || { fm_herdr_lab_error "herdr is required"; return 1; }
   command -v jq >/dev/null 2>&1 || { fm_herdr_lab_error "jq is required"; return 1; }
@@ -434,7 +440,11 @@ fm_herdr_lab_provision() { # <session>
   else
     fm_herdr_lab_prepare "$name" || return 1
   fi
-  fm_herdr_lab_raw "$name" server >/dev/null 2>&1 &
+  # Resolved in the caller's own PATH, because the launch below runs with the
+  # shared baseline PATH rather than this shell's.
+  client_path=$(command -v herdr 2>/dev/null) || client_path=herdr
+  fm_herdr_launch_env "$name"
+  /usr/bin/env -i "${FM_HERDR_LAUNCH_ENV[@]}" "$client_path" server --session "$name" >/dev/null 2>&1 &
   server_pid=$!
   attempt=0
   max_attempts=300

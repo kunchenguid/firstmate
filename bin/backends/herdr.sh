@@ -93,6 +93,13 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # shellcheck source=bin/fm-agent-process-lib.sh
 . "$FM_BACKEND_HERDR_ROOT/bin/fm-agent-process-lib.sh"
 
+# The single owner of the environment a long-lived herdr server is launched
+# with (bin/fm-herdr-launch-env-lib.sh). fm_backend_herdr_server_ensure below
+# and bin/fm-herdr-lab.sh's provision both launch through it, so the allowlist
+# exists once and cannot drift between them.
+# shellcheck source=bin/fm-herdr-launch-env-lib.sh
+. "$FM_BACKEND_HERDR_ROOT/bin/fm-herdr-launch-env-lib.sh"
+
 FM_BACKEND_HERDR_MIN_PROTOCOL=14
 # events.subscribe (the native pane.agent_status_changed push stream) and its
 # subscription_event schema first shipped at protocol 16 (verified: herdr
@@ -394,7 +401,10 @@ fm_backend_herdr_cli() {  # <session> <herdr-subcommand-and-args...>
   # refusal can be recognized and retried once on a compatible client; see
   # "client selection" below. A failed command's stderr is replayed verbatim.
   # The long-lived `server` launch is exec'd straight through: buffering its
-  # stderr would hold this call open for the server's whole lifetime.
+  # stderr would hold this call open for the server's whole lifetime. No
+  # production path reaches this branch today - both server launches go through
+  # bin/fm-herdr-launch-env-lib.sh's `/usr/bin/env -i` assembly instead - so it
+  # is kept only so a future `server` subcommand cannot silently hang here.
   if [ "${1:-}" = server ]; then
     HERDR_SESSION="$session" "$client_bin" "$@" --session "$session"
     return $?
@@ -1653,126 +1663,31 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
 #
 # The server outlives its launcher and hands its OWN startup environment to
 # every pane it ever opens, so the launch below inherits nothing at all: it
-# runs through `env -i` plus the explicit allowlist assembled here. A deny list
-# cannot hold that boundary. FM_CREW_STATE_META_OVERRIDE,
-# FM_CREW_STATE_STATUS_OVERRIDE and FM_SNAPSHOT_CACHE_DIR entered the codebase
-# long after the old unset list and nobody extended it, so a server started
-# from one task's shell made every later pane's worker-state read answer about
-# THAT task instead of the task it was asked about (measured 2026-09-26).
-#
-# SHELL always comes from the EFFECTIVE UID's own passwd entry, never from the
-# caller even when the caller has one. Herdr's default_shell is empty, which
-# `herdr --default-config` documents as "$SHELL, then /bin/sh", so a
-# non-interactive launcher with no SHELL gave every pane a non-login /bin/sh
-# with no startup config. PATH is a stable source-defined baseline for the same
-# reason: a launcher's truncated PATH left /usr/bin/core_perl (shasum)
-# unreachable in every pane. Both values are launcher contamination, so neither
-# is ever preserved; the operator's real login shell rebuilds the rest of the
-# pane environment from its own startup files.
-#
-# HOME comes from that same passwd entry for the same reason, and the caller's
-# XDG_CONFIG_HOME is never forwarded: both relocate where herdr reads
-# config.toml and keeps its sessions, so honouring either would let a caller
-# redirect a server that outlives it. A caller running under some other HOME
-# therefore cannot move this server, and the poll below reports that refusal
-# rather than adopting the caller's location.
-#
-# Only enumerated names are forwarded, never a glob. The HERDR_* names herdr
-# injects per PANE (HERDR_ENV, HERDR_PANE_ID, HERDR_TAB_ID, HERDR_WORKSPACE_ID,
-# HERDR_SOCKET_PATH) are the LAUNCHER's own pane identity and are deliberately
-# dropped; only herdr's own explicit config selector survives, and
-# HERDR_SESSION is set here from <session>.
+# runs through `/usr/bin/env -i` plus the explicit allowlist that
+# bin/fm-herdr-launch-env-lib.sh owns for BOTH of this repo's server launches.
+# That library documents why each name is kept or refused.
 fm_backend_herdr_server_ensure() {  # <session>
-  local session=$1 running i
-  local uid login pw_line pw_shell pw_home raw
-  local launch_home launch_path client_bin=herdr client_path name
-  local -a launch_env=()
-  # Deliberately caller-relative, unlike the readiness poll below. This is the
-  # cheap fast path that every workspace, tab and pane call pays for, and every
-  # OTHER call in this adapter is caller-relative too, so answering it from the
-  # passwd root would not make a relocated caller coherent - it would only
-  # change which inconsistent answer it gets. A caller under another root
-  # therefore makes one redundant launch attempt, which herdr refuses on the
-  # already-bound socket before the poll confirms the server that is up.
+  local session=$1 running i client_bin=herdr client_path
   running=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null | jq -r '.server.running // false' 2>/dev/null)
   [ "$running" = "true" ] && return 0
 
   # Resolved here, in the caller's own PATH, because the launch runs with the
-  # baseline PATH below. Session-scoped client selection is
-  # fm_backend_herdr_cli's contract; this is the same choice for the one call
-  # that cannot go through it.
+  # baseline PATH the shared helper supplies. Session-scoped client selection
+  # is fm_backend_herdr_cli's contract; this is the same choice for the one
+  # call that cannot go through it.
   if [ "${FM_BACKEND_HERDR_CLIENT_SESSION:-}" = "$session" ]; then
     client_bin=$(fm_backend_herdr_bin)
   fi
   client_path=$(command -v "$client_bin" 2>/dev/null) || client_path=$client_bin
 
-  uid=$(id -u 2>/dev/null) || uid=""
-  login=$(id -un 2>/dev/null) || login=""
-  pw_shell=""
-  pw_home=""
-  if [ -n "$uid" ]; then
-    pw_line=""
-    if command -v getent >/dev/null 2>&1; then
-      pw_line=$(getent passwd "$uid" 2>/dev/null | head -1)
-    fi
-    [ -n "$pw_line" ] || pw_line=$(awk -F: -v want="$uid" '$3 == want { print; exit }' /etc/passwd 2>/dev/null)
-    if [ -n "$pw_line" ]; then
-      pw_home=$(printf '%s\n' "$pw_line" | cut -d: -f6)
-      pw_shell=$(printf '%s\n' "$pw_line" | cut -d: -f7)
-    elif [ -n "$login" ] && command -v dscl >/dev/null 2>&1; then
-      # darwin keeps only system accounts in /etc/passwd, so the real record
-      # lives in Directory Services. Bounded exactly like
-      # bin/fm-remote-doctor.sh's resolve_launch_agent_shell so a wedged
-      # directory service cannot hang a spawn.
-      if command -v perl >/dev/null 2>&1; then
-        raw=$(perl -e '$SIG{ALRM} = sub { exit 124 }; alarm 2; exec @ARGV' \
-          dscl . -read "/Users/$login" UserShell NFSHomeDirectory 2>/dev/null || true)
-      else
-        raw=$(dscl . -read "/Users/$login" UserShell NFSHomeDirectory 2>/dev/null || true)
-      fi
-      pw_shell=$(printf '%s\n' "$raw" | sed -n 's/^UserShell: //p' | head -1)
-      pw_home=$(printf '%s\n' "$raw" | sed -n 's/^NFSHomeDirectory: //p' | head -1)
-    fi
-  fi
-  if [ -z "$pw_shell" ] || [ ! -x "$pw_shell" ]; then
-    echo "warning: uid '${uid:-unknown}' has no usable passwd login shell; herdr panes fall back to /bin/sh" >&2
-    pw_shell=/bin/sh
-  fi
-
-  launch_home=${pw_home:-${HOME:-}}
-  [ -n "$launch_home" ] || launch_home=/
-  launch_path="$launch_home/.local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin"
-  launch_env=("HOME=$launch_home" "SHELL=$pw_shell" "PATH=$launch_path" "HERDR_SESSION=$session")
-  if [ -n "$login" ]; then
-    launch_env+=("USER=$login" "LOGNAME=$login")
-  fi
-  # Enumerated one name at a time on purpose: a HERDR_* or LC_* wildcard here
-  # would recreate exactly the rot that killed the old unset list.
-  for name in TERM COLORTERM LANG LC_ALL LC_CTYPE TZ \
-    DISPLAY WAYLAND_DISPLAY XAUTHORITY XDG_RUNTIME_DIR XDG_SESSION_TYPE \
-    SSH_AUTH_SOCK HERDR_CONFIG_PATH; do
-    if [ -n "${!name:-}" ]; then
-      launch_env+=("$name=${!name}")
-    fi
-  done
-
+  fm_herdr_launch_env "$session"
   # /usr/bin/env, not `env`: the truncated caller PATH this launch exists to
   # stop inheriting is also the PATH that would have to resolve it.
   (
-    /usr/bin/env -i "${launch_env[@]}" "$client_path" server --session "$session" >/dev/null 2>&1 &
+    /usr/bin/env -i "${FM_HERDR_LAUNCH_ENV[@]}" "$client_path" server --session "$session" >/dev/null 2>&1 &
   ) || return 1
-  # The readiness poll has to look where the launch put the server: herdr
-  # resolves its config and sessions under XDG_CONFIG_HOME, else HOME, so a
-  # caller carrying either of those would have this poll watch a root the
-  # server was deliberately kept out of and report a healthy server dead after
-  # 10s. Only those two names are corrected, inside the substitution's own
-  # subshell; the client needs nothing else from the launch environment. Every
-  # other call in this adapter stays caller-relative, so a caller running under
-  # some other root still cannot reach this server afterwards - that refusal is
-  # the point, and this poll simply stops misreporting it as a failed start.
   for i in $(seq 1 20); do
-    running=$(export HOME="$launch_home"; unset XDG_CONFIG_HOME
-      fm_backend_herdr_cli "$session" status --json 2>/dev/null | jq -r '.server.running // false' 2>/dev/null)
+    running=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null | jq -r '.server.running // false' 2>/dev/null)
     [ "$running" = "true" ] && return 0
     sleep 0.5
   done

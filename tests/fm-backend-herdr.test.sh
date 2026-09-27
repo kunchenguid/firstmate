@@ -1335,12 +1335,13 @@ test_server_ensure_keeps_task_scoped_state_out_of_the_server_and_its_panes() {
 }
 
 test_server_ensure_keeps_required_variables_and_leaves_a_running_server_alone() {
-  local dir log marker fb output name expected_home reported status
+  local dir log marker fb output name caller_home caller_config passwd_home reported status
   dir="$TMP_ROOT/server-required"; mkdir -p "$dir"; log="$dir/env"; marker="$dir/running"
+  caller_home="$dir/home"; caller_config="$dir/config"
+  mkdir -p "$caller_home" "$caller_config"
   fb=$(make_herdr_server_launch_fakebin "$dir" "$log" "$marker")
-  expected_home=$(herdr_test_passwd_home)
-  [ -n "$expected_home" ] || fail "uid $(id -u) has no passwd home directory on this host, so the config-root contract cannot be exercised"
-  reported=$( PATH="$fb:$PATH" HOME="$dir/home" XDG_CONFIG_HOME="$dir/wrong-config" HERDR_CONFIG_PATH="$dir/herdr.toml" \
+  reported=$( PATH="$fb:$PATH" HOME="$caller_home" XDG_CONFIG_HOME="$caller_config" \
+    HERDR_CONFIG_PATH="$dir/herdr.toml" TMPDIR="$dir/tmp" \
     LANG=en_US.UTF-8 TERM=xterm-256color COLORTERM=truecolor \
     DISPLAY=:0 WAYLAND_DISPLAY=wayland-1 XAUTHORITY="$dir/Xauthority" \
     XDG_RUNTIME_DIR="$dir/run" XDG_SESSION_TYPE=wayland SSH_AUTH_SOCK="$dir/ssh-agent" \
@@ -1348,18 +1349,20 @@ test_server_ensure_keeps_required_variables_and_leaves_a_running_server_alone() 
     HERDR_SOCKET_PATH="$dir/launcher.sock" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_server_ensure fmtest' "$ROOT" 2>&1 )
   status=$?
-  # The readiness poll has to watch the root the launch actually used: this
-  # server came up under the passwd root while the caller carries another one.
+  # The launch and every later call resolve ONE config root - the caller's - so
+  # the readiness poll watches the root the server actually came up under.
   expect_code 0 "$status" "server_ensure should report the server it just started as running"
-  assert_not_contains "$reported" "did not report running" "server_ensure started the server under the passwd root, then watched the caller's root and called a healthy server dead"
+  assert_not_contains "$reported" "did not report running" "server_ensure started the server under one config root and watched another, so it called a healthy server dead"
   output=$(cat "$log")
-  # HOME and XDG_CONFIG_HOME both relocate where herdr reads its config and
-  # keeps its sessions, so a caller must not be able to move either one for a
-  # server that outlives it.
-  assert_contains "$output" "HOME=$expected_home" "the server took its HOME from the caller instead of the effective uid's passwd entry, so a caller can still move its config and session root"
-  assert_not_contains "$output" "HOME=$dir/home" "the caller's HOME redirected the long-lived server"
-  assert_not_contains "$output" "XDG_CONFIG_HOME=" "the caller's XDG_CONFIG_HOME redirected the long-lived server's config and session root"
-  assert_contains "$output" "HERDR_CONFIG_PATH=$dir/herdr.toml" "the server lost herdr's own config selection"
+  # HOME and XDG_CONFIG_HOME are caller-environment settings, not task-scoped
+  # overrides, and they decide where herdr reads config.toml and keeps its
+  # sessions. Dropping them would split the adapter's config root in two.
+  assert_contains "$output" "HOME=$caller_home" "the server lost the caller's HOME, so the adapter's later calls read a different config root than the launch used"
+  assert_contains "$output" "XDG_CONFIG_HOME=$caller_config" "the server lost the caller's XDG_CONFIG_HOME, so its session root is not the one the caller reads"
+  # HERDR_CONFIG_PATH names config.toml directly, so a caller could otherwise
+  # impose a default_shell on a server that outlives it.
+  assert_not_contains "$output" "HERDR_CONFIG_PATH=" "the caller handed the long-lived server its own herdr config file, which can override the pane login shell for the server's whole life"
+  assert_contains "$output" "TMPDIR=$dir/tmp" "the server lost TMPDIR, so its panes fall back from the per-user temp directory to a shared one"
   assert_contains "$output" "HERDR_SESSION=fmtest" "server_ensure lost explicit Herdr session routing"
   assert_contains "$output" "LANG=en_US.UTF-8" "the server lost the operator's locale"
   assert_contains "$output" "TERM=xterm-256color" "the server lost TERM"
@@ -1376,15 +1379,28 @@ test_server_ensure_keeps_required_variables_and_leaves_a_running_server_alone() 
     assert_not_contains "$output" "$name=" "the server inherited the launcher's own pane identity through $name"
   done
 
-  # An already-running server is never replaced. This caller shares the running
-  # server's own config root, which is what the fast path at the top of the
-  # function reads.
+  # An already-running server is never replaced. Pinned to the exact root the
+  # launch above used, so this asserts the adapter's behavior instead of
+  # whatever HOME and XDG_CONFIG_HOME this host happens to export.
   rm -f "$log" "$log.args"
-  PATH="$fb:$PATH" \
+  PATH="$fb:$PATH" HOME="$caller_home" XDG_CONFIG_HOME="$caller_config" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_server_ensure fmtest' "$ROOT"
   expect_code 0 $? "server_ensure should report success for an already-running server"
   [ ! -e "$log" ] || fail "server_ensure started a second herdr server for a session that already had one running"
-  pass "fm_backend_herdr_server_ensure: forwards the required herdr, locale, display and agent variables, refuses a caller's relocated config root, drops the launcher's pane identity, and leaves a running server alone"
+
+  # A launcher with no HOME at all still gives the server somewhere to resolve
+  # its config: the effective uid's own passwd home, never nothing. Asked of
+  # the shared helper directly, because that is the interface both launches
+  # assemble their environment through.
+  passwd_home=$(herdr_test_passwd_home)
+  [ -n "$passwd_home" ] && [ -d "$passwd_home" ] || fail "uid $(id -u) has no usable passwd home directory on this host, so the no-HOME fallback cannot be exercised"
+  output=$(bash -c 'unset HOME XDG_CONFIG_HOME
+    . "$0/bin/fm-herdr-launch-env-lib.sh"
+    fm_herdr_launch_env fmtest
+    printf "%s\n" "${FM_HERDR_LAUNCH_ENV[@]}"' "$ROOT" 2>/dev/null)
+  assert_contains "$output" "HOME=$passwd_home" "a launcher with no HOME left the long-lived server with no home to resolve its config under"
+  assert_not_contains "$output" "XDG_CONFIG_HOME=" "the helper invented an XDG_CONFIG_HOME for a launcher that carries none"
+  pass "fm_backend_herdr_server_ensure: forwards the caller's config root and the required herdr, locale, display, temp and agent variables, refuses a caller-supplied herdr config file, drops the launcher's pane identity, and leaves a running server alone"
 }
 
 test_container_ensure_reuses_existing_workspace() {

@@ -10,16 +10,29 @@ FAKEBIN=$(fm_fakebin "$TMP_ROOT")
 FAKE_STATE="$TMP_ROOT/herdr-state"
 FAKE_LOG="$TMP_ROOT/herdr.log"
 TRIPWIRES="$TMP_ROOT/tripwires"
+# The long-lived `server` launch reaches the fake through `env -i`, so nothing
+# this file exports survives for that one call. Its paths and its one knob are
+# baked into the generated stub instead, and the server branch records the
+# environment it was actually handed.
+FAKE_CONTROL="$TMP_ROOT/herdr-control"
 REAL_SLEEP=$(command -v sleep)
-mkdir -p "$FAKE_STATE"
+mkdir -p "$FAKE_STATE" "$FAKE_CONTROL"
 printf '%s\n' '/home/test/.config/herdr/herdr.sock' > "$FAKE_STATE/default-socket"
 : > "$FAKE_LOG"
 
-cat > "$FAKEBIN/herdr" <<'SH'
-#!/usr/bin/env bash
-set -eu
-printf '%s\n' "$*" >> "$FM_FAKE_HERDR_LOG"
-state=$FM_FAKE_HERDR_STATE
+{
+  printf '#!/usr/bin/env bash\n'
+  printf 'set -eu\n'
+  # The parameter expansions below belong to the GENERATED script, so they stay
+  # literal here and are resolved when the stub runs.
+  # shellcheck disable=SC2016
+  printf 'LOG="${FM_FAKE_HERDR_LOG:-%s}"\n' "$FAKE_LOG"
+  # shellcheck disable=SC2016
+  printf 'state="${FM_FAKE_HERDR_STATE:-%s}"\n' "$FAKE_STATE"
+  printf 'CONTROL=%q\n' "$FAKE_CONTROL"
+  printf 'REAL_SLEEP=%q\n' "$REAL_SLEEP"
+  cat <<'SH'
+printf '%s\n' "$*" >> "$LOG"
 # Herdr reads --session only as an option, so it must end the arguments or
 # sit immediately before the first -- delimiter.
 last=
@@ -46,8 +59,12 @@ case "$1 ${2:-}" in
     fi
     ;;
   "server --session")
-    if [ "${FM_FAKE_HERDR_SERVER_DELAY:-0}" != 0 ]; then
-      "$FM_FAKE_HERDR_REAL_SLEEP" "$FM_FAKE_HERDR_SERVER_DELAY"
+    # compgen -e is every EXPORTED name, so the record is the server's real
+    # environment rather than a list this test already expected to find.
+    { for name in $(compgen -e); do printf '%s=%s\n' "$name" "${!name}"; done; } | sort > "$CONTROL/server-env"
+    delay=$(cat "$CONTROL/server-delay" 2>/dev/null || printf 0)
+    if [ "$delay" != 0 ]; then
+      "$REAL_SLEEP" "$delay"
     fi
     printf '%s\n' running > "$state/$session"
     ;;
@@ -78,6 +95,7 @@ case "$1 ${2:-}" in
     ;;
 esac
 SH
+} > "$FAKEBIN/herdr"
 chmod +x "$FAKEBIN/herdr"
 
 # shellcheck source=/dev/null
@@ -88,7 +106,6 @@ run_with_fake() {
     FM_FAKE_HERDR_STATE="$FAKE_STATE" \
     FM_FAKE_HERDR_LOG="$FAKE_LOG" \
     FM_FAKE_HERDR_REAL_SLEEP="$REAL_SLEEP" \
-    FM_FAKE_HERDR_SERVER_DELAY="${FM_FAKE_HERDR_SERVER_DELAY:-0}" \
     FM_FAKE_HERDR_FAST_POLL="${FM_FAKE_HERDR_FAST_POLL:-}" \
     FM_FAKE_HERDR_DELETE_FAIL="${FM_FAKE_HERDR_DELETE_FAIL:-}" \
     FM_FAKE_HERDR_TITLE_FAIL="${FM_FAKE_HERDR_TITLE_FAIL:-}" \
@@ -164,6 +181,56 @@ test_provision_run_and_guarded_teardown() {
   sed -n "$((delete_line - 1))p" "$FAKE_LOG" | grep -F "session list --json --session $name" >/dev/null \
     || fail "delete was not immediately preceded by a fresh refuse-default session list"
   pass "fm-herdr-lab: provisioning, scoped calls, guarded teardown, and fleet tripwire are deterministic"
+}
+
+# The lab server is as long-lived as the adapter's, and its panes inherit its
+# startup environment the same way, so it must come up through the same shared
+# launch environment (bin/fm-herdr-launch-env-lib.sh) rather than the caller's.
+# Asserted through what the launched server was actually handed, never by
+# reading the lab script's source.
+test_provision_launches_the_lab_server_with_the_shared_clean_environment() {
+  local name="fm-lab-launch-env-$$" recorded expected_shell leaked line
+  local -a pane_env=() shell_args=()
+  expected_shell=$(id -u >/dev/null 2>&1 && getent passwd "$(id -u)" 2>/dev/null | head -1 | cut -d: -f7)
+  [ -n "$expected_shell" ] || expected_shell=$(awk -F: -v want="$(id -u)" '$3 == want { print $7; exit }' /etc/passwd 2>/dev/null)
+  [ -n "$expected_shell" ] && [ -x "$expected_shell" ] \
+    || fail "uid $(id -u) has no usable passwd login shell on this host, so the lab pane-shell contract cannot be exercised"
+
+  rm -f "$FAKE_CONTROL/server-env"
+  # A launcher pinned to another task, carrying a misleading SHELL.
+  SHELL="$TMP_ROOT/not-a-shell" \
+    FM_CREW_STATE_META_OVERRIDE="$TMP_ROOT/task-b.meta" \
+    FM_CREW_STATE_STATUS_OVERRIDE="$TMP_ROOT/task-b.status" \
+    FM_SNAPSHOT_CACHE_DIR="$TMP_ROOT/snapshot-cache" \
+    FM_HOME="$TMP_ROOT/wrong-home" \
+    run_with_fake fm_herdr_lab_provision "$name" || fail "provision failed"
+  assert_present "$FAKE_CONTROL/server-env" "the lab server launch recorded no environment at all"
+  recorded=$(cat "$FAKE_CONTROL/server-env")
+  assert_contains "$recorded" "SHELL=$expected_shell" \
+    "the lab server took SHELL from its launcher, so every lab pane comes up as a non-login shell"
+  assert_contains "$recorded" "HERDR_SESSION=$name" "the lab server lost explicit Herdr session routing"
+  for leaked in FM_CREW_STATE_META_OVERRIDE FM_CREW_STATE_STATUS_OVERRIDE FM_SNAPSHOT_CACHE_DIR FM_HOME \
+    FM_FAKE_HERDR_STATE FM_HERDR_LAB_STATE_DIR; do
+    assert_not_contains "$recorded" "$leaked=" \
+      "the long-lived lab server inherited $leaked from the task shell that happened to start it"
+  done
+  case "$recorded" in
+    *"PATH=$FAKEBIN"*|*":$FAKEBIN:"*) fail "the lab server inherited the launcher's own PATH" ;;
+  esac
+
+  # A lab pane inherits exactly this environment, so run the recorded login
+  # shell under it and ask for a tool outside the system directories.
+  while IFS= read -r line; do pane_env+=("$line"); done < "$FAKE_CONTROL/server-env"
+  if "$expected_shell" -l -c 'exit 0' >/dev/null 2>&1; then
+    shell_args=(-l -c)
+  else
+    shell_args=(-c)
+  fi
+  [ -n "$(env -i "${pane_env[@]}" "$expected_shell" "${shell_args[@]}" 'command -v shasum' 2>/dev/null)" ] \
+    || fail "a pane of this lab server cannot run shasum; its PATH and login shell leave it unreachable"
+
+  run_with_fake fm_herdr_lab_teardown "$name" || fail "teardown after launch-environment provision failed"
+  pass "fm-herdr-lab: the lab server launches with the shared clean environment, so its panes get the passwd login shell and no task-scoped state"
 }
 
 test_run_scopes_session_before_double_dash() {
@@ -265,8 +332,12 @@ exec "$FM_FAKE_HERDR_REAL_SLEEP" "$@"
 SH
   chmod +x "$FAKEBIN/sleep"
   : > "$FAKE_LOG"
-  FM_FAKE_HERDR_FAST_POLL=1 FM_FAKE_HERDR_SERVER_DELAY=30 \
+  # The delay is a file, not an environment variable: the launch runs through
+  # `env -i`, so nothing exported here would reach the server branch.
+  printf '%s\n' 30 > "$FAKE_CONTROL/server-delay"
+  FM_FAKE_HERDR_FAST_POLL=1 \
     run_with_fake fm_herdr_lab_provision "$name" >/dev/null 2>&1 || status=$?
+  rm -f "$FAKE_CONTROL/server-delay"
   expect_code 1 "$status" "timed-out provision must fail"
   assert_present "$TRIPWIRES/$name.fleet-state.json" \
     "timed-out provision must retain its tripwire until teardown"
@@ -536,6 +607,7 @@ test_viewer_launcher_refuses_unsafe_arguments() {
 
 test_refuses_unsafe_names
 test_provision_run_and_guarded_teardown
+test_provision_launches_the_lab_server_with_the_shared_clean_environment
 test_run_scopes_session_before_double_dash
 test_missing_tripwire_blocks_destruction
 test_changed_default_trips_after_teardown

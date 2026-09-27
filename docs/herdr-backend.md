@@ -520,11 +520,14 @@ An environment variable alone is not reliable when another Herdr server is runni
 When the selected named server is not running, the adapter launches it through `env -i` with an explicit allowlist, so it inherits nothing else the launcher happened to carry.
 Herdr passes its server startup environment to every later pane, so a value retained here reaches panes long after the launching task is gone.
 A deny list cannot hold that boundary, because every variable added to Firstmate afterwards is inherited by default.
-The launch always takes `SHELL` and `HOME` from the effective uid's own passwd entry and supplies a stable baseline `PATH`, never the launcher's own values.
-A non-interactive launcher's missing `SHELL` and truncated `PATH` otherwise become every pane's shell and `PATH`, and a caller's `HOME` or `XDG_CONFIG_HOME` otherwise relocates where Herdr reads `config.toml` and keeps its sessions, so neither of those two is forwarded.
-It forwards the account name, locale, terminal, display, session, ssh-agent, and explicit Herdr config-selection variables, plus the explicit session routing.
+The launch always takes `SHELL` from the effective uid's own passwd entry and supplies a stable baseline `PATH`, never the launcher's own values.
+A non-interactive launcher's missing `SHELL` and truncated `PATH` otherwise become every pane's shell and `PATH`.
+`HOME` and `XDG_CONFIG_HOME` are forwarded, because they are caller-environment settings rather than task-scoped overrides and because Herdr resolves its config and sessions under them: refusing them would leave the adapter launching under one config root while every ordinary call reads another, and reporting a server its own caller can never reach.
+The passwd home is only the floor for a launcher that carries no `HOME` at all, and the baseline `PATH`.
+`HERDR_CONFIG_PATH` is the name that is refused: it selects `config.toml` directly, so forwarding it would let a caller impose a persistent `default_shell` on a server that outlives it, which is the outcome this boundary exists to prevent.
+It forwards the account name, temp directory, locale, terminal, display, session, and ssh-agent variables, plus the explicit session routing.
 The per-pane identity Herdr injects into the launcher describes that launcher's own pane and is dropped.
-`fm_backend_herdr_server_ensure` in `bin/backends/herdr.sh` is the single owner of the exact allowlist.
+`fm_herdr_launch_env` in `bin/fm-herdr-launch-env-lib.sh` is the single owner of the exact allowlist, and the lab server launch in `bin/fm-herdr-lab.sh` uses that same helper, so the two launches cannot drift.
 An already-running server is reused without restart or environment changes.
 
 ### Sending text and keys
