@@ -38,7 +38,10 @@
 # with config/pi-account refuses raw Pi launches. A raw Claude launch command
 # runs after the pinned root and shed credentials are applied, so its own
 # leading CLAUDE_CONFIG_DIR or shed-credential assignment would override the
-# pin; a home with config/claude-account refuses such a command.
+# pin; a home with config/claude-account refuses such a command. A raw
+# command is recognised as Claude only when its first non-assignment word is
+# claude, so a raw launch through a wrapper such as env or npx is not treated
+# as a Claude launch, as on main.
 #
 # The sign-in check asks the runner itself, with only HOME, PATH, TMPDIR,
 # USER, LOGNAME, and the selected root in its environment, so a credential

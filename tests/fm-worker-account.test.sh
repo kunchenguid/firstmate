@@ -362,7 +362,7 @@ test_raw_claude_without_an_account_file_refuses() {
   out=$(spawn_ship "$id" --harness "CLAUDE_CONFIG_DIR=$CASE/other ANTHROPIC_API_KEY=override-key claude --print raw"); rc=$?
   expect_code 1 "$rc" "a raw Claude command with no account file should refuse: $out"
   assert_refused_before_launch "$id" "$out" "config/claude-account is absent"
-  pass "a raw Claude command cannot bypass a missing account file"
+  pass "a raw Claude command written as VAR=value claude cannot bypass a missing account file"
 }
 
 test_local_secondmate_reads_the_launching_home_pin() {
