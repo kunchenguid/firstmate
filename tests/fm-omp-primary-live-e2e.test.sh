@@ -219,10 +219,23 @@ lock_comm=$(ps -o comm= -p "$lock_pid" 2>/dev/null)
 lock_args=$(ps -o args= -p "$lock_pid" 2>/dev/null)
 [ "$lock_pid" = "$OMP_PID" ] || [ "$lock_ppid" = "$OMP_PID" ] \
   || fail "the session lock names pid '$lock_pid', outside the launched omp process $OMP_PID"
+case "${lock_comm##*/}" in bun) ;; *) fail "the session lock owner '$lock_comm' is not the Bun-launched OMP process" ;; esac
 fm_omp_process_matches "$lock_comm" "$lock_args" \
   || fail "the session lock names '$lock_comm' with arguments '$lock_args', not an OMP entrypoint"
 [ -f "$PROJECT/state/.session-start-complete" ] || fail "session start did not record completion"
 pass "omp $OMP_VERSION: before_agent_start delivered the digest into model context and the lock names the OMP process"
+
+# An unrelated caller must refuse the live Bun-owned lock without publishing
+# anything over it. The test runner's harness ancestry is independent of the
+# background OMP RPC process, so this exercises the real foreign-holder path.
+cp "$PROJECT/state/.lock" "$LAB/omp-lock.before-foreign-acquire"
+if FM_HOME="$PROJECT" "$PROJECT/bin/fm-lock.sh" > "$LAB/foreign-acquire.log" 2>&1; then
+  fail "an unrelated caller acquired the live OMP session lock"
+fi
+grep -Fq "another live firstmate session holds the lock (pid $lock_pid" "$LAB/foreign-acquire.log" || fail "foreign acquisition failed for an unexpected reason: $(cat "$LAB/foreign-acquire.log")"
+cmp -s "$LAB/omp-lock.before-foreign-acquire" "$PROJECT/state/.lock" || fail "foreign acquisition changed the live OMP lock bytes"
+kill -0 "$OMP_PID" 2>/dev/null || fail "the OMP lock owner exited during the foreign acquisition check"
+pass "omp $OMP_VERSION: unrelated lock acquisition was refused and live lock bytes stayed unchanged"
 
 # --- 2. watcher arm, successor, and wake delivery ------------------------------
 : > "$PROJECT/state/omp-e2e.meta"
