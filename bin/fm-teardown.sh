@@ -50,12 +50,12 @@
 # to a forge. When local refs do not show the work, refresh_remote_refs updates
 # them from each remote. Unpushed work has landed only when its PR is merged and
 # the forge reports a PR head that contains the current local work, or its
-# content is already present in the up-to-date default branch. This recognizes the common squash-merge-then-delete-
-# branch flow, where the branch's own commits live nowhere on a remote yet the
-# change is fully in main. Local-only delivery retains its existing boundary where
-# publishing the branch to a remote is sufficient. A task whose meta records
+# content is already present in the up-to-date default branch. This recognizes
+# the common squash-merge-then-delete-branch flow, where the branch's own commits
+# live nowhere on a remote yet the change is fully in main. A task whose meta records
 # base_branch= (bin/fm-spawn.sh) runs that content check against origin's copy of
-# its base branch instead of the default branch.
+# its base branch instead of the default branch. Local-only delivery retains its
+# existing boundary where publishing the branch to a remote is sufficient.
 # Squash merges collapse the branch's commits, so per-commit patch ids against main
 # no longer match, and a pipeline rebase can leave the local worktree diverged from
 # the PR head. A diverged copy is not treated as landed: path-set coverage, git
