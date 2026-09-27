@@ -70,9 +70,11 @@
 #   rebind is a recovery, never a teardown. Only a crewmate or scout rebinds: a
 #   secondmate whose endpoint is gone is respawned by its own owner
 #   (`--secondmate`, driven by the session-start liveness sweep).
-#   The replacement still never starts outside the copy
-#   holding the work: a Herdr shell that has drifted out of the recorded
-#   worktree is told once to return, and only a shell that will not go refuses.
+#   Every fresh ship/scout launch and replacement explicitly enters the recorded
+#   worktree immediately before trust setup and brief delivery, and a post-launch
+#   cwd check refuses any endpoint that still reports another copy; a Herdr shell
+#   that has drifted out of the recorded worktree is told once to return, and
+#   only a shell that will not go refuses.
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
 #   --model <name> and --effort <low|medium|high|xhigh|max|ultra> are concrete profile
@@ -3852,6 +3854,38 @@ spawn_send_key() { # <target> <key>
   esac
 }
 
+# Enter the exact copy recorded for this task immediately before trust setup and
+# launch. Herdr restores a pane's shell cwd from its durable tab layout, so a
+# treehouse subshell's foreground cwd is not enough to keep a later pane restart
+# out of the primary checkout. The same explicit cd gives every backend one
+# launch boundary and makes a dropped or ignored cwd change a refusal.
+spawn_enter_recorded_worktree() {
+  [ "$KIND" = secondmate ] && return 0
+  spawn_send_text_line "$WT_TARGET" "cd -- $(shell_quote "$WT")" || {
+    echo "error: task $ID's endpoint could not be moved into its recorded worktree '$WT'; refusing to launch outside the copy holding its work" >&2
+    exit 1
+  }
+}
+
+# The pane cwd check above proves the shell handoff, but the foreground process
+# can still be launched by a backend-specific restore or wrapper. Re-read after
+# launch so the worker itself, not only its terminal, is proven to start in the
+# recorded copy before the task is reported as launched.
+spawn_assert_agent_worktree() {
+  local expected seen i
+  [ "$KIND" = secondmate ] && return 0
+  expected=$(real_path_or_raw "$WT")
+  for i in $(seq 1 20); do
+    seen=$(spawn_current_path "$WT_TARGET" || true)
+    if [ -n "$seen" ] && [ "$(real_path_or_raw "$seen")" = "$expected" ]; then
+      return 0
+    fi
+    [ "$i" -ge 20 ] || sleep 0.5
+  done
+  echo "error: task $ID's worker started in '${seen:-unknown}', not its recorded worktree '$WT'; refusing to continue outside the copy holding its work" >&2
+  exit 1
+}
+
 kimi_capture() {
   fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true
 }
@@ -4264,6 +4298,12 @@ fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
 fi
+
+# Re-assert the durable task copy after either treehouse acquisition or endpoint
+# adoption. This also updates Herdr's restored pane shell before any harness is
+# started, so a later host restart inherits the task worktree rather than the
+# tab's original project directory.
+spawn_enter_recorded_worktree
 
 # Pre-register Claude's workspace trust for the directory this launch starts in,
 # at the first point that directory is known and before any per-task state is
@@ -5337,6 +5377,8 @@ if [ "$HARNESS" = agy ]; then
     exit 1
   fi
 fi
+spawn_assert_agent_worktree
+
 if [ "$KIND" = secondmate ] && [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" != 1 ]; then
   if ! fm_config_reread_discard_pending "$PROJ_ABS" "$ID" "$FM_HOME"; then
     if fm_config_reread_quarantine_pending "$PROJ_ABS" "$ID" "$FM_HOME"; then
