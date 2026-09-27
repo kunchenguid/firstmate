@@ -257,6 +257,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/ui-task-brief/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/updatefirstmate/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -538,6 +542,10 @@
     },
     {
       "path": "skills/stow/SKILL.md",
+      "audience": "public-product"
+    },
+    {
+      "path": "skills/ui-delivery/SKILL.md",
       "audience": "public-product"
     },
     {
