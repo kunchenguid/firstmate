@@ -1811,6 +1811,69 @@ SH
   pass "wake append publishes atomic recovery evidence before durable rows"
 }
 
+# Recovery mint and wake-delivery logging must not use sibling $() on one
+# command (bash 5.2 CHLD-trap parse landmine). Mint failure semantics stay as
+# before: a pid/date miss still yields a grammar-valid token and a durable row.
+test_recovery_mint_and_delivery_log_avoid_sibling_subst() {
+  local dir state marker generation line
+  dir=$(make_case recovery-mint-sibling-subst)
+  state="$dir/state"
+
+  append_wake "$state" check task 'check: recovery mint' \
+    || fail "recovery mint wake append failed"
+  marker=$(cat "$state/.watcher-down")
+  case "$marker" in
+    pending:handling:*|pending:downtime:*) ;;
+    *) fail "recovery mint did not write a pending marker: $marker" ;;
+  esac
+  generation=${marker##*:}
+  case "$generation" in
+    ''|*[!A-Za-z0-9._-]*) fail "recovery mint produced an empty or invalid generation: [$generation]" ;;
+  esac
+  case "$generation" in
+    [0-9]*.[0-9]*.*) ;;
+    *) fail "recovery mint generation lost pid.epoch.suffix shape: $generation" ;;
+  esac
+
+  # Delivery log: sequential cleaners, then one printf (no sibling $() args).
+  FM_STATE_OVERRIDE="$state" bash -c '
+    # shellcheck disable=SC1090,SC1091
+    . "$1/bin/fm-push-transition-lib.sh"
+    FM_WATCH_DELIVERY_PID=4242
+    FM_WATCH_DELIVERY_IDENTITY="pane'$'\t''id"
+    watch_delivery_publish "signal: delivery log"
+  ' _ "$ROOT" || fail "watch_delivery_publish failed"
+  [ -s "$state/.watch-deliveries.log" ] \
+    || fail "watch_delivery_publish wrote no delivery log"
+  line=$(tail -n 1 "$state/.watch-deliveries.log")
+  case "$line" in
+    4242*$'\t'*signal:\ delivery\ log) ;;
+    *) fail "delivery log line lost pid/identity/reason shape: $line" ;;
+  esac
+
+  # Historical bash 5.2 repro used CHLD + sibling $(); when bash >= 5 is the
+  # runner, confirm the public mint still yields a nonempty generation with no
+  # trap parse error. Bash 5.2 is not installed on this host — skip otherwise.
+  if [ "${BASH_VERSINFO[0]}" -ge 5 ]; then
+    rm -f -- "$state/.watcher-down"
+    FM_STATE_OVERRIDE="$state" bash -c '
+      trap : CHLD
+      # shellcheck disable=SC1090,SC1091
+      . "$1/bin/fm-wake-lib.sh"
+      fm_recovery_marker_publish "$2/.watcher-down" downtime
+    ' _ "$ROOT" "$state" >"$dir/chld.out" 2>"$dir/chld.err" \
+      || fail "bash>=5 CHLD recovery publish failed: $(cat "$dir/chld.err")"
+    ! grep -F 'unexpected EOF while looking for matching' "$dir/chld.err" >/dev/null \
+      || fail "bash>=5 CHLD still hit sibling-\$() parse error: $(cat "$dir/chld.err")"
+    generation=$(cut -d: -f3- "$state/.watcher-down")
+    case "$generation" in
+      ''|*[!A-Za-z0-9._-]*) fail "bash>=5 CHLD mint left empty/invalid generation" ;;
+    esac
+  fi
+
+  pass "recovery mint and delivery log avoid sibling \$()"
+}
+
 test_legacy_generationless_wake_is_adopted() {
   local dir state row sequence generation
   dir=$(make_case legacy-generationless-wake)
@@ -3328,6 +3391,7 @@ test_actor_filter_precedes_same_key_deduplication
 test_main_reclaims_a_grant_whose_branch_owner_exited
 test_branch_actor_without_eligible_snapshot_refuses
 test_wake_publish_requires_atomic_recovery_evidence
+test_recovery_mint_and_delivery_log_avoid_sibling_subst
 test_legacy_generationless_wake_is_adopted
 test_stale_recovery_generation_cannot_touch_a_newer_episode
 test_stale_ack_that_consumes_nothing_names_the_current_wake

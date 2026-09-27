@@ -548,6 +548,64 @@ test_registered_agent_with_a_live_foreground_process_stays_alive() {
   pass "herdr stale registration: a registered agent with a live Pi foreground process still reads alive"
 }
 
+# --- the bound agent session reference (relaunch session continuity) --------
+#
+# Herdr applies only reports carrying the session identity it bound to a pane,
+# and that registration survives its agent process in the crew shape above. A
+# worker relaunched with a FRESH session therefore reports into a pane that
+# ignores it and reads idle while it works. bin/fm-spawn.sh hands the
+# replacement the reference this read returns: the exact identity the
+# endpoint's own runtime recorded, never a guess about which session looks
+# recent. It must return that record and nothing else - a reference handed to
+# `pi --session` is a launch input, so an unreadable, foreign-shaped, or
+# non-resumable value degrades to the ordinary fresh launch.
+pane_agent_session_ref_read() {  # <agent-get-body> [exit-status]
+  local dir resp log fb
+  dir=$(mktemp -d "$TMP_ROOT/session-ref.XXXXXX")
+  mkdir -p "$dir/responses"; resp="$dir/responses"; log="$dir/log"; : > "$log"
+  printf '%s\n' "$1" > "$resp/1.out"
+  [ -z "${2:-}" ] || printf '%s\n' "$2" > "$resp/1.exit"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_session_ref fmtest w1:p2' "$ROOT"
+}
+
+test_pane_agent_session_ref_reports_a_resumable_reference_with_its_agent() {
+  local out
+  out=$(pane_agent_session_ref_read \
+    '{"result":{"agent":{"agent":"pi","agent_status":"stale","agent_session":{"agent":"pi","kind":"path","source":"herdr:pi","value":"/home/u/.pi/agent/sessions/--wt--/2026-09-20T07-14-40-136Z_01a0bdaa.jsonl"}}}}')
+  [ "$out" = $'pi\t/home/u/.pi/agent/sessions/--wt--/2026-09-20T07-14-40-136Z_01a0bdaa.jsonl' ] \
+    || fail "an absolute path reference must be reported with its agent label, got '$out'"
+
+  out=$(pane_agent_session_ref_read \
+    '{"result":{"agent":{"agent":"pi","agent_session":{"agent":"pi","kind":"id","source":"herdr:pi","value":"01a0bdaa-c387-749d-966c-0dcd96a4b755"}}}}')
+  [ "$out" = $'pi\t01a0bdaa-c387-749d-966c-0dcd96a4b755' ] \
+    || fail "a bare session id must be reported as-is, got '$out'"
+  pass "herdr pane agent session: a resumable reference is reported with the agent label that reported it"
+}
+
+test_pane_agent_session_ref_degrades_to_nothing_when_not_resumable() {
+  local out body
+  for body in \
+    '{"error":{"code":"agent_not_found","message":"agent target w1:p2 not found"}}' \
+    '{"result":{"agent":{"agent":"pi","agent_status":"idle"}}}' \
+    '{"result":{"agent":{"agent":"pi","agent_session":{"agent":"pi","kind":"path","value":"relative/session.jsonl"}}}}' \
+    '{"result":{"agent":{"agent":"pi","agent_session":{"agent":"pi","kind":"id","value":"not a token"}}}}' \
+    '{"result":{"agent":{"agent":"pi","agent_session":{"agent":"pi","kind":"id","value":""}}}}' \
+    '{"result":{"agent":{"agent":"pi","agent_session":{"agent":"pi","kind":"opaque","value":"whatever"}}}}' \
+    'not json at all'; do
+    out=$(pane_agent_session_ref_read "$body") \
+      && fail "an unresumable registration must report nothing resumable, but the read succeeded for: $body"
+    [ -z "$out" ] \
+      || fail "an unresumable registration read must print nothing (got '$out') for: $body"
+  done
+  out=$(pane_agent_session_ref_read \
+    '{"result":{"agent":{"agent":"pi","agent_session":{"agent":"pi","kind":"path","value":"/abs/session.jsonl"}}}}' 1)
+  [ -z "$out" ] \
+    || fail "a failed agent read must print nothing, got '$out'"
+  pass "herdr pane agent session: anything unresumable degrades to a nonzero read with no output"
+}
+
 test_registered_agent_with_a_non_shell_foreground_process_stays_alive() {
   local out
   # A registered agent running a foreground tool in its own process group is
@@ -5633,6 +5691,8 @@ test_agent_state_bypasses_a_stale_client_shadowing_a_compatible_one
 test_recovery_grade_read_widens_only_at_its_own_boundary
 test_stale_registration_over_a_shell_only_pane_is_agent_free
 test_stale_registration_ignores_status_and_reads_the_process
+test_pane_agent_session_ref_reports_a_resumable_reference_with_its_agent
+test_pane_agent_session_ref_degrades_to_nothing_when_not_resumable
 test_registered_agent_with_a_live_foreground_process_stays_alive
 test_registered_agent_with_a_non_shell_foreground_process_stays_alive
 test_transient_prompt_helper_settles_into_stale_agent
