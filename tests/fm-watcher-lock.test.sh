@@ -172,6 +172,40 @@ test_live_stale_watch_lock_is_actionable() {
   pass "live watcher lock with stale heartbeat is actionable"
 }
 
+test_refused_watch_lock_recovery_is_not_reported_running() {
+  local dir state fakebin out err status dead real_mktemp
+  dir=$(make_case refused-watch-recovery)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  err="$dir/watch.err"
+  dead=$(dead_pid)
+  real_mktemp=$(command -v mktemp)
+  cat > "$fakebin/mktemp" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *.steal.recovery.reclaim.*) exit 1 ;;
+esac
+exec "$real_mktemp" "\$@"
+SH
+  chmod +x "$fakebin/mktemp"
+  mkdir "$state/.watch.lock" "$state/.watch.lock.steal" "$state/.watch.lock.steal.recovery"
+  printf '%s\n' "$dead" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dead" > "$state/.watch.lock.steal/pid"
+  printf '%s\n' "$dead" > "$state/.watch.lock.steal.recovery/pid"
+  touch "$state/.last-watcher-beat"
+  status=0
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2> "$err" || status=$?
+  [ "$status" -ne 0 ] || fail "watcher reported success after lock recovery was refused: $(cat "$out" "$err")"
+  if grep -F 'already running' "$out" "$err" >/dev/null; then
+    fail "refused lock recovery was reported as a running watcher: $(cat "$out" "$err")"
+  fi
+  grep -F 'not listening' "$err" >/dev/null || fail "watcher did not explain the refused recovery: $(cat "$err")"
+  [ "$(cat "$state/.watch.lock/pid")" = "$dead" ] || fail "refused recovery changed the primary lock evidence"
+  [ "$(cat "$state/.watch.lock.steal.recovery/pid")" = "$dead" ] || fail "refused recovery changed the recovery mutex"
+  pass "refused watch-lock recovery fails loudly instead of claiming a running watcher"
+}
+
 test_live_stalled_watch_lock_is_replaced_past_hard_bound() {
   # A live holder whose beacon is stale past the ordinary grace is refused, but
   # a beacon stale past the hard bound evicts that holder (identity-verified
@@ -1796,6 +1830,7 @@ test_msys_pid_identity_uses_proc
 test_stale_watch_lock_reclaimed
 test_stale_watch_reclaim_publishes_before_clear
 test_live_stale_watch_lock_is_actionable
+test_refused_watch_lock_recovery_is_not_reported_running
 test_live_stalled_watch_lock_is_replaced_past_hard_bound
 test_guard_warnings
 test_lock_single_winner_under_concurrency

@@ -2365,7 +2365,16 @@ evict_stalled_holder() {
 EVICTED_PID=
 EVICTED_BEAT_AGE=
 BEAT="$STATE/.last-watcher-beat"
-while ! fm_lock_try_acquire "$WATCH_LOCK"; do
+while true; do
+  if fm_lock_try_acquire "$WATCH_LOCK"; then
+    break
+  else
+    watch_lock_rc=$?
+  fi
+  if [ "$watch_lock_rc" -eq 2 ]; then
+    echo "watcher: lock recovery was refused and no live watcher holds the lock; not listening. Check that $STATE is writable, then re-arm." >&2
+    exit 1
+  fi
   if [ -n "${FM_LOCK_HELD_PID:-}" ]; then
     if [ -e "$BEAT" ]; then
       beat_age=$(fm_path_age "$BEAT")
