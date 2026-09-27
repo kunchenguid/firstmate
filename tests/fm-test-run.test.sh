@@ -120,6 +120,10 @@ init_changed_fixture_repo() {
     fm-backend-cmux.test.sh \
     fm-backend-zellij.test.sh \
     fm-control-herdr-smoke.test.sh \
+    fm-opencode-v2-plugins.test.sh \
+    fm-operational-input.test.sh \
+    fm-turnend-guard.test.sh \
+    fm-sessionstart-nudge.test.sh \
     fm-backend-orca.test.sh; do
     printf '#!/usr/bin/env bash\n# tests/lib.sh\n' >"$repo/tests/$script"
     chmod +x "$repo/tests/$script"
@@ -159,7 +163,8 @@ init_changed_fixture_repo() {
   mkdir -p \
     "$repo/.agents/skills/example" \
     "$repo/.agents/skills/harness-adapters/references/common" \
-    "$repo/.claude" "$repo/.pi/extensions" "$repo/docs" "$repo/src"
+    "$repo/.claude" "$repo/.pi/extensions" "$repo/docs" "$repo/src" \
+    "$repo/.opencode/plugins" "$repo/tests/assets"
   : >"$repo/.agents/skills/example/SKILL.md"
   : >"$repo/.agents/skills/harness-adapters/SKILL.md"
   : >"$repo/.agents/skills/harness-adapters/references/common/dispatch.md"
@@ -168,6 +173,11 @@ init_changed_fixture_repo() {
   : >"$repo/.pi/extensions/fm-primary-turnend-guard.ts"
   mkdir -p "$repo/.pi/extensions/lib"
   : >"$repo/.pi/extensions/lib/fm-operational-input.ts"
+  : >"$repo/.opencode/plugins/fm-primary-cd-check.js"
+  : >"$repo/.opencode/plugins/fm-primary-pretool-check.js"
+  : >"$repo/tests/assets/fm-opencode-v1-plugin-adapter.mjs"
+  printf '# tests/assets/fm-opencode-v1-plugin-adapter.mjs\n' \
+    >>"$repo/tests/fm-pi-watch-extension.test.sh"
   : >"$repo/docs/fm-test-isolation-proof.md"
   : >"$repo/CONTRIBUTING.md"
   : >"$repo/src/unmapped.ts"
@@ -1426,6 +1436,32 @@ test_changed_shared_fixture_selects_its_readers() {
   pass "a changed shared test fixture selects its readers while an unread tests/ path still refuses"
 }
 
+test_changed_opencode_plugin_and_asset_select_their_suites() {
+  local tmp repo listed
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-opencode.XXXXXX")
+  repo="$tmp/repo"
+  init_changed_fixture_repo "$repo"
+
+  # A ported plugin whose full path no test names must still map, or --changed
+  # refuses the whole selection with exit 2.
+  printf '\n' >>"$repo/.opencode/plugins/fm-primary-cd-check.js"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD) \
+    || { rm -rf "$tmp"; fail "a changed .opencode plugin left --changed with no mapping"; }
+  assert_contains "$listed" "tests/fm-opencode-v2-plugins.test.sh" \
+    "a changed seatbelt plugin does not select the ported-plugin suite"
+
+  # A changed test asset is mapped by the suite that reads it rather than the
+  # generic tests/* refusal.
+  printf '\n' >>"$repo/tests/assets/fm-opencode-v1-plugin-adapter.mjs"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD) \
+    || { rm -rf "$tmp"; fail "a changed test asset left --changed with no mapping"; }
+  assert_contains "$listed" "tests/fm-pi-watch-extension.test.sh" \
+    "a changed test asset does not select the suite that reads it"
+
+  rm -rf "$tmp"
+  pass "a changed .opencode plugin and tests asset select their suites instead of dying"
+}
+
 # Workers are handed scripts in order, so the slowest script must start first or
 # it runs alone at the tail and throws away most of the concurrency.
 test_concurrent_runs_are_ordered_longest_first() {
@@ -1860,6 +1896,7 @@ test_jobs_requires_proven_isolated
 test_jobs_admits_a_concurrent_safe_family
 test_unmapped_new_test_never_inherits_family_concurrency
 test_changed_shared_fixture_selects_its_readers
+test_changed_opencode_plugin_and_asset_select_their_suites
 test_concurrent_runs_are_ordered_longest_first
 test_per_script_timeout_bounds_a_hang
 test_changed_bound_gives_slow_watcher_suites_headroom
