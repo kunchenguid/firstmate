@@ -383,6 +383,37 @@ fm_backend_herdr_projection_journal_write_v2 "$HOME_DIR/state/hreproj.herdr-pres
   hreproj "$REPROJ_TOKEN" "$HOME_REAL" "$SESSION" w9 w9:t9 w9:p9 \
   "$REPROJ_PWS" firstmate "$REPROJ_LABEL" fm-hreproj \
   || fail "could not stage the stale reproject binding"
+REPROJ_OLD_RAW=$(herdr workspace create --cwd "$WT" --label "$REPROJ_LABEL" --no-focus --session "$SESSION") \
+  || fail "could not create the old reproject child"
+REPROJ_OLD_WS=$(printf '%s' "$REPROJ_OLD_RAW" | jq -r '.result.workspace.workspace_id // empty')
+REPROJ_OLD_TAB=$(printf '%s' "$REPROJ_OLD_RAW" | jq -r '.result.tab.tab_id // empty')
+REPROJ_OLD_PANE=$(printf '%s' "$REPROJ_OLD_RAW" | jq -r '.result.root_pane.pane_id // empty')
+[ -n "$REPROJ_OLD_WS" ] && [ -n "$REPROJ_OLD_TAB" ] && [ -n "$REPROJ_OLD_PANE" ] \
+  || fail "old reproject child creation returned no ids"
+fm_backend_herdr_projection_journal_write_v2 "$HOME_DIR/state/hreproj.herdr-presentation" \
+  hreproj "$REPROJ_TOKEN" "$HOME_REAL" "$SESSION" "$REPROJ_OLD_WS" "$REPROJ_OLD_TAB" "$REPROJ_OLD_PANE" \
+  "$REPROJ_PWS" firstmate "$REPROJ_LABEL" fm-hreproj \
+  || fail "could not bind the old reproject child"
+herdr workspace rename "$REPROJ_OLD_WS" renamed-old-hreproj --session "$SESSION" >/dev/null 2>&1 \
+  || fail "could not rename the old reproject child"
+if OUT=$(run_control hreproj reproject 2>&1); then
+  fail "reproject moved a live worker while its old child survived under a renamed label: $OUT"
+fi
+[ "$(herdr pane get "$REPROJ_PANE" --session "$SESSION" 2>/dev/null | jq -r '.result.pane.workspace_id // empty')" = "$REPROJ_PWS" ] \
+  || fail "the renamed old child refusal moved the flat live pane"
+[ "$(sed -n 's/^herdr_pane_id=//p' "$HOME_DIR/state/hreproj.meta" | tail -1)" = "$REPROJ_PANE" ] \
+  || fail "the renamed old child refusal rebound task metadata"
+[ "$(sed -n 's/^workspace_id=//p' "$HOME_DIR/state/hreproj.herdr-presentation" | tail -1)" = "$REPROJ_OLD_WS" ] \
+  || fail "the renamed old child refusal changed the journal"
+pass "real herdr: a renamed old child blocks a live move without rebinding the worker"
+herdr pane close "$REPROJ_OLD_PANE" --session "$SESSION" >/dev/null 2>&1 \
+  || fail "could not close the test's empty old child"
+[ "$(fm_backend_herdr_workspace_presence_state "$SESSION" "$REPROJ_OLD_WS")" = dead ] \
+  || fail "the test's empty old child survived pane close"
+fm_backend_herdr_projection_journal_write_v2 "$HOME_DIR/state/hreproj.herdr-presentation" \
+  hreproj "$REPROJ_TOKEN" "$HOME_REAL" "$SESSION" w9 w9:t9 w9:p9 \
+  "$REPROJ_PWS" firstmate "$REPROJ_LABEL" fm-hreproj \
+  || fail "could not restore the stale reproject binding"
 REPROJ_FOCUS_BEFORE=$(herdr workspace list --session "$SESSION" 2>/dev/null \
   | jq -c '[.result.workspaces[] | select(.focused == true) | {id: .workspace_id, active: .active_tab_id}]')
 OUT=$(run_control hreproj reproject) || fail "live reproject of a flat tab should succeed: $OUT"
@@ -423,5 +454,26 @@ herdr tab get "$REPROJ_TAB" --session "$SESSION" >/dev/null 2>&1 \
 [ ! -e "$HOME_DIR/state/hreproj.control-reproject" ] \
   || fail "a completed reproject retained an unresolved-move receipt"
 pass "real herdr $HERDR_VERSION: reproject moves a live flat tab to an ordered child with its agent, process, and focus intact"
+
+herdr workspace rename "$REPROJ_NEW_WS" renamed-receipt-hreproj --session "$SESSION" >/dev/null 2>&1 \
+  || fail "could not rename the receipt-named child"
+REPROJ_ORDER_ATTEMPT="$SCRATCH/reproject-order-attempt"
+if (
+  fm_backend_herdr_projection_order_best_effort() { : > "$REPROJ_ORDER_ATTEMPT"; }
+  fm_backend_herdr_projection_reproject_live_tab "$SESSION" "$HOME_DIR/state/hreproj.herdr-presentation" \
+    hreproj "$HOME_DIR" "$REPROJ_NEW_WS" "$REPROJ_NEW_TAB" "$REPROJ_NEW_PANE" \
+    firstmate fm-hreproj "$REPROJ_NEW_WS" "$REPROJ_NEW_TAB" "$REPROJ_NEW_PANE" 1
+); then
+  fail "reproject resumed a receipt whose child had been renamed"
+fi
+[ ! -e "$REPROJ_ORDER_ATTEMPT" ] \
+  || fail "reproject attempted to order a renamed receipt-named child"
+[ "$(sed -n 's/^workspace_id=//p' "$HOME_DIR/state/hreproj.herdr-presentation" | tail -1)" = "$REPROJ_NEW_WS" ] \
+  || fail "the renamed receipt refusal changed the journal"
+[ "$(sed -n 's/^herdr_pane_id=//p' "$HOME_DIR/state/hreproj.meta" | tail -1)" = "$REPROJ_NEW_PANE" ] \
+  || fail "the renamed receipt refusal changed task metadata"
+[ "$(herdr pane process-info --pane "$REPROJ_NEW_PANE" --session "$SESSION" 2>/dev/null | jq -r '.result.process_info.shell_pid // empty')" = "$REPROJ_SHELL" ] \
+  || fail "the renamed receipt refusal disturbed the live worker"
+pass "real herdr: a renamed receipt-named child is rejected before ordering"
 
 fm_backend_herdr_kill "$SESSION:$PANE_ID" 2>/dev/null || true

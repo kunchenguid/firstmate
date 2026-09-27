@@ -3183,7 +3183,9 @@ fm_backend_herdr_projection_recreate_missing_task() {  # <session> <journal> <ta
   new_tab=$FM_BACKEND_HERDR_PROJECTION_TAB_ID
   new_pane=$FM_BACKEND_HERDR_PROJECTION_PANE_ID
   new_seeded_pane=$FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID
-  fm_backend_herdr_projection_order_best_effort "$new_session" "$new_workspace" "$parent_label" "$parent_ws"
+  if fm_backend_herdr_projection_live_binding_matches "$new_session" "$token" "$new_workspace" "$new_tab" "$new_pane" "$parent_ws" "$parent_label" "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL" "$task_label" 1; then
+    fm_backend_herdr_projection_order_best_effort "$new_session" "$new_workspace" "$parent_label" "$parent_ws"
+  fi
   if ! fm_backend_herdr_projection_live_binding_matches "$new_session" "$token" "$new_workspace" "$new_tab" "$new_pane" "$parent_ws" "$parent_label" "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL" "$task_label"; then
     fm_backend_herdr_projection_cleanup_exact "$new_session" "$new_pane" "$new_seeded_pane" || true
     if ! fm_backend_herdr_projection_workspace_absent "$new_session" "$new_workspace" "$token" \
@@ -3291,6 +3293,7 @@ fm_backend_herdr_projection_reproject_live_tab() {  # <session> <journal> <task-
     && fm_backend_herdr_projection_live_binding_matches "$session" "$token" "$meta_workspace" "$meta_tab" "$meta_pane" "$parent_ws" "$parent_label" "$workspace_label" "$task_label" 1 \
     && [ "$(fm_backend_herdr_pane_agent_state "$session" "$meta_pane")" = live ]; then
     fm_backend_herdr_projection_order_best_effort "$session" "$meta_workspace" "$parent_label" "$parent_ws"
+    fm_backend_herdr_projection_live_binding_matches "$session" "$token" "$meta_workspace" "$meta_tab" "$meta_pane" "$parent_ws" "$parent_label" "$workspace_label" "$task_label" 1 || return 2
     if fm_backend_herdr_projection_live_binding_matches "$session" "$token" "$meta_workspace" "$meta_tab" "$meta_pane" "$parent_ws" "$parent_label" "$workspace_label" "$task_label"; then
       FM_BACKEND_HERDR_PROJECTION_ORDERED=1
     fi
@@ -3335,6 +3338,10 @@ fm_backend_herdr_projection_reproject_live_tab() {  # <session> <journal> <task-
   fi
   if [ "$meta_workspace" != "$parent_ws" ]; then
     echo "error: herdr task tab for $id is not inside its owning parent; refusing live move" >&2
+    return 1
+  fi
+  if [ "$(fm_backend_herdr_workspace_presence_state "$session" "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID")" != dead ]; then
+    echo "error: herdr presentation workspace for $id is present or unverified; refusing live move" >&2
     return 1
   fi
   # No live workspace may already carry this token; the stale v2 child is
@@ -3431,9 +3438,12 @@ fm_backend_herdr_projection_reproject_live_tab() {  # <session> <journal> <task-
     echo "error: herdr presentation move for $id lost its live agent registration; the worker process is retained in its new child, resume the rebind" >&2
     return 2
   fi
-  fm_backend_herdr_projection_order_best_effort "$session" "$new_workspace" "$parent_label" "$parent_ws"
   if ! fm_backend_herdr_projection_live_binding_matches "$session" "$token" "$new_workspace" "$new_tab" "$new_pane" "$parent_ws" "$parent_label" "$workspace_label" "$task_label" 1; then
     echo "error: herdr presentation move for $id did not converge to an exact child; the worker is retained, resume the rebind" >&2
+    return 2
+  fi
+  fm_backend_herdr_projection_order_best_effort "$session" "$new_workspace" "$parent_label" "$parent_ws"
+  if ! fm_backend_herdr_projection_live_binding_matches "$session" "$token" "$new_workspace" "$new_tab" "$new_pane" "$parent_ws" "$parent_label" "$workspace_label" "$task_label" 1; then
     return 2
   fi
   if fm_backend_herdr_projection_live_binding_matches "$session" "$token" "$new_workspace" "$new_tab" "$new_pane" "$parent_ws" "$parent_label" "$workspace_label" "$task_label"; then
@@ -3460,12 +3470,12 @@ fm_backend_herdr_projection_reproject_resume() {  # <session> <journal> <task-id
   local session=$1 journal=$2 id=$3 canonical_home=$4 token=$5
   local cur_workspace=$6 cur_tab=$7 cur_pane=$8 parent_ws=$9 parent_label=${10}
   local workspace_label=${11} task_label=${12} state ordered=0
-  fm_backend_herdr_projection_order_best_effort "$session" "$cur_workspace" "$parent_label" "$parent_ws"
-  if ! fm_backend_herdr_projection_live_binding_matches "$session" "$token" "$cur_workspace" "$cur_tab" "$cur_pane" "$parent_ws" "$parent_label" "$workspace_label" "$task_label" 1; then
+  if [ "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID" != "$cur_workspace" ] \
+    && [ "$(fm_backend_herdr_workspace_presence_state "$session" "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID")" != dead ]; then
     return 2
   fi
-  if fm_backend_herdr_projection_live_binding_matches "$session" "$token" "$cur_workspace" "$cur_tab" "$cur_pane" "$parent_ws" "$parent_label" "$workspace_label" "$task_label"; then
-    ordered=1
+  if ! fm_backend_herdr_projection_live_binding_matches "$session" "$token" "$cur_workspace" "$cur_tab" "$cur_pane" "$parent_ws" "$parent_label" "$workspace_label" "$task_label" 1; then
+    return 2
   fi
   state=$(fm_backend_herdr_pane_agent_state "$session" "$cur_pane")
   case "$state" in
@@ -3474,6 +3484,13 @@ fm_backend_herdr_projection_reproject_resume() {  # <session> <journal> <task-id
       return 2
       ;;
   esac
+  fm_backend_herdr_projection_order_best_effort "$session" "$cur_workspace" "$parent_label" "$parent_ws"
+  if ! fm_backend_herdr_projection_live_binding_matches "$session" "$token" "$cur_workspace" "$cur_tab" "$cur_pane" "$parent_ws" "$parent_label" "$workspace_label" "$task_label" 1; then
+    return 2
+  fi
+  if fm_backend_herdr_projection_live_binding_matches "$session" "$token" "$cur_workspace" "$cur_tab" "$cur_pane" "$parent_ws" "$parent_label" "$workspace_label" "$task_label"; then
+    ordered=1
+  fi
   if ! fm_backend_herdr_projection_journal_write_v2 "$journal" "$id" "$token" "$canonical_home" "$session" "$cur_workspace" "$cur_tab" "$cur_pane" "$parent_ws" "$parent_label" "$workspace_label" "$task_label"; then
     return 2
   fi
