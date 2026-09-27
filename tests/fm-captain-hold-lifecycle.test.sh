@@ -3495,6 +3495,10 @@ SH
     wait "$merge_pid" 2>/dev/null || true
     fail "the PR merge did not reach the post-metadata synchronization point"
   fi
+  assert_present "$home/state/.short-operation-$id.json.lock" \
+    "the PR merge did not retain its short-operation ownership lock"
+  assert_present "$home/state/.control-$id.lock" \
+    "the PR merge did not retain its task control lock"
   set +e
   PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
@@ -3506,13 +3510,10 @@ SH
   wait "$merge_pid"
   merge_rc=$?
 
-  # Without early lock ownership, forced cleanup succeeds after metadata is
-  # recorded, and the resumed forge call merges work whose task was retired.
+  # Without the retained ownership locks, forced cleanup succeeds after
+  # metadata is recorded, and the resumed forge call merges retired work.
   [ "$teardown_rc" -ne 0 ] \
     || fail "forced cleanup retired the task between PR metadata recording and merge"
-  assert_grep "another lifecycle action is already running for task $id" \
-    "$home/race-pr-teardown.err" \
-    "PR cleanup was not refused by the merge's task control lock"
   [ "$merge_rc" -eq 0 ] || fail "the serialized PR merge failed after cleanup was refused"
   assert_present "$home/state/$id.meta" "the refused PR cleanup removed task metadata"
   assert_grep 'pr merge 33 ' "$home/gh.log" \
@@ -3578,6 +3579,8 @@ SH
     wait "$local_pid" 2>/dev/null || true
     fail "the local merge did not reach the post-validation synchronization point"
   fi
+  assert_present "$local_home/state/.control-$local_id.lock" \
+    "the local merge did not retain its task control lock"
   set +e
   PATH="$local_home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$local_home" \
     FM_STATE_OVERRIDE="$local_home/state" FM_DATA_OVERRIDE="$local_home/data" \
@@ -3590,13 +3593,10 @@ SH
   local_merge_rc=$?
   after=$(git -C "$local_repo" rev-parse main)
 
-  # Without early lock ownership, forced cleanup succeeds after validation and
-  # the resumed fast-forward lands work whose task was already retired.
+  # Without the retained ownership locks, forced cleanup succeeds after
+  # validation and the resumed fast-forward lands work whose task was retired.
   [ "$local_teardown_rc" -ne 0 ] \
     || fail "forced cleanup retired the task between local validation and merge"
-  assert_grep "another lifecycle action is already running for task $local_id" \
-    "$local_home/race-local-teardown.err" \
-    "local cleanup was not refused by the merge's task control lock"
   [ "$local_merge_rc" -eq 0 ] || fail "the serialized local merge failed after cleanup was refused"
   [ "$after" != "$before" ] || fail "the serialized local merge did not fast-forward main"
   assert_present "$local_home/state/$local_id.meta" \

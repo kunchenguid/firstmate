@@ -7,7 +7,8 @@ Ordinary ship/scout dispatch is unchanged.
 
 ## Enable and submit
 
-This opt-in requires an installed Pi SDK, Node, an authenticated supported model, and the normal Pi supervision outcome extension.
+This opt-in requires an installed Pi SDK, Node, an authenticated supported model, the normal Pi supervision outcome extension, and the exact `pi-openai-codex-compat@0.0.16` user package.
+Install the required package with `pi install npm:pi-openai-codex-compat@0.0.16`, then verify that `pi list` reports that exact version before starting the primary session.
 Start the intended primary Pi session with `FM_SHORT_AGENT_ENABLED=1` and its explicit absolute `FM_HOME`.
 Load `.pi/extensions/fm-short-agent.ts` alongside the normal primary extensions.
 The tools require that session or an ancestor to own the home's session lock.
