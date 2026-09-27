@@ -22,10 +22,10 @@ Wake, watcher, away-mode, and Relay-specific state mechanics remain with their n
 `docs/sessionstart-nudge.md` owns the native session-open adapter tiers that run or nudge the digest command, and the source routing between them.
 `AGENTS.md` retains the run-once and read-once operator rules, lock-refusal safety, installation consent, and direct-report recovery boundaries because those facts apply at every session start.
 
-## Headless read-only short tasks
+## Headless short tasks
 
 `FM_SHORT_AGENT_ENABLED=1` enables the Pi-primary short-task tools; [the current-use guide](short-agents.md) owns setup, examples, limits, and recovery.
-`state/short-agents/` holds their runner-owned records, whose exact format is owned by `bin/fm-short-agent.mjs`.
+`state/short-agents/` holds their runner-owned records, whose lifecycle format is owned by `bin/fm-short-agent.mjs` and operation grants/receipts by `bin/fm-short-operations.mjs`.
 
 ## Feishu current-Pi channel
 

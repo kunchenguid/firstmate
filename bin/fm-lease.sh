@@ -54,11 +54,15 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 mkdir -p "$STATE"
 LEASE_COMMAND_LOCK="$STATE/.fm-lease-command.lock"
-fm_lock_acquire_wait "$LEASE_COMMAND_LOCK"
-LEASE_COMMAND_LOCK_HELD=1
+LEASE_COMMAND_LOCK_HELD=0
+LEASE_TASK_LOCK=
 RETRY_HANDOFF_TASKS=
 RETRY_ALL_HANDOFFS=0
 lease_command_lock_release() {
+  if [ -n "$LEASE_TASK_LOCK" ]; then
+    fm_lock_release "$LEASE_TASK_LOCK"
+    LEASE_TASK_LOCK=
+  fi
   [ "$LEASE_COMMAND_LOCK_HELD" -eq 1 ] || return 0
   LEASE_COMMAND_LOCK_HELD=0
   fm_lock_release "$LEASE_COMMAND_LOCK"
@@ -125,7 +129,20 @@ case "$CMD" in
 esac
 
 case "$CMD" in
+  claim|release)
+    LEASE_TASK_LOCK="$STATE/.fm-lease-task-$TASK.lock"
+    fm_lock_acquire_wait "$LEASE_TASK_LOCK"
+    ;;
+esac
+fm_lock_acquire_wait "$LEASE_COMMAND_LOCK"
+LEASE_COMMAND_LOCK_HELD=1
+
+case "$CMD" in
   claim)
+    if [ -e "$STATE/.short-operation-$TASK.json" ]; then
+      echo "error: claim refused - task '$TASK' has a pending short-operation receipt" >&2
+      exit "$FM_LEASE_REFUSE_EXIT"
+    fi
     # Loud accidental-override guard: a claim naming the OTHER actor than the
     # caller's own injected identity is a wiring mistake, never a role change.
     # Release and bulk release enforce the same caller authorization below.

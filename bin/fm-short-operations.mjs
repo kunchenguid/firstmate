@@ -1,0 +1,361 @@
+// Narrow operation grants for fm-short-agent.mjs. This module never evaluates
+// model-supplied commands. The immutable request owns the ordered grants; the
+// child can request the recorded finite chain once. Existing scripts own actions.
+// Operations require Linux /proc, a submitting primary lock ancestor, canonical
+// targets and an explicit expiry/provenance. Defaults and SDK lifecycle remain
+// in fm-short-agent.mjs. No restart/discard authority is inferred from cleanup.
+// state/short-agents/<id>/operation-N.{intent,effect,receipt,output}.json owns
+// attempt evidence. Intent precedes owner execution; effect records its exact
+// process identity before mutation; receipt follows authoritative readback.
+// Resource markers are atomic reservations; existing owner locks and leases
+// arbitrate effects with MAIN/BRANCH. A missing receipt after an effect remains
+// reserved across restart, never replayed. Reconcile releases verified completed
+// reservations and proven no-effect reservations after their processes stop.
+// Internal CLI verify/effect/receipt is called only by fm-short-owner-lib.sh;
+// it checks the immutable grant, kernel process ancestry and exact owner args.
+// This is a tool/owner boundary, not isolation against same-user arbitrary code.
+import * as fs from 'node:fs';
+import path from 'node:path';
+import {createHash} from 'node:crypto';
+import { execFile, execFileSync } from 'node:child_process';
+import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
+import { publish as atomicPublish } from './fm-short-agent.mjs';
+function publish(file,value) {
+  const created=atomicPublish(file,value);
+  if(created) {
+    const fd=fs.openSync(path.dirname(file),'r');
+    try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+  }
+  return created;
+}
+const exec = promisify(execFile);
+const read = file => JSON.parse(fs.readFileSync(file, 'utf8'));
+const exists = file => fs.existsSync(file);
+const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+const fail = message => { throw Error(message); };
+function fields(value, names) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(k => !names.includes(k))) fail('unsupported operation fields');
+}
+function str(value, label, limit=4096) {
+  if (typeof value !== 'string' || !value || value.includes('\0') || Buffer.byteLength(value)>limit) fail(`invalid operation ${label}`);
+  return value;
+}
+function canonical(value) {
+  str(value,'path');
+  if (!path.isAbsolute(value) || fs.realpathSync(value) !== value) fail('operation requires canonical absolute path');
+  return value;
+}
+export function processIdentity(pid) {
+  // Operation execution currently requires Linux's structural process identity.
+  // Read-only jobs retain their portable SDK path.
+  const stat=fs.readFileSync(`/proc/${pid}/stat`,'utf8');
+  const parts=stat.slice(stat.lastIndexOf(')')+2).split(' ');
+  if (parts[0]==='Z') fail('operation process is a zombie');
+  return {pid:Number(pid),parent:Number(parts[1]),start:parts[19],boot:fs.readFileSync('/proc/sys/kernel/random/boot_id','utf8').trim()};
+}
+export function primaryOwner(home) {
+  const holder=Number(fs.readFileSync(path.join(home,'state/.lock'),'utf8').trim());
+  if (!Number.isSafeInteger(holder) || holder<=1) fail('operation requires primary session lock');
+  for(let p=process.pid,n=0;p>1 && n<16;n++) {
+    const identity=processIdentity(p);
+    if(p===holder) return identity;
+    p=identity.parent;
+  }
+  fail('operation submission/control requires the owning primary process');
+}
+export function validateOperations(value) {
+  if (value === undefined) return undefined;
+  fields(value,['expiresAt','authority','steps']);
+  str(value.authority,'authority provenance',2048);
+  if(!Number.isSafeInteger(value.expiresAt) || value.expiresAt<=0) fail('invalid operation expiry');
+  if(!Array.isArray(value.steps) || value.steps.length<1 || value.steps.length>4) fail('operation needs one to four finite steps');
+  const steps=value.steps.map(s=>{
+    fields(s,['action','project','destination','task','url']);
+    switch(s.action) {
+      case 'sync': case 'recover-sync':
+        fields(s,['action','project']); str(s.project,'project');
+        return {action:s.action,project:s.project};
+      case 'install-shellcheck':
+        fields(s,['action','destination']); str(s.destination,'destination');
+        return {action:s.action,destination:s.destination};
+      case 'merge':
+        fields(s,['action','task','url']);
+        if(!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(s.task)) fail('invalid operation task');
+        str(s.url,'merge URL');
+        return {action:s.action,task:s.task,url:s.url};
+      case 'cleanup':
+        fields(s,['action','task']);
+        if(!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(s.task)) fail('invalid operation task');
+        return {action:s.action,task:s.task};
+      default: fail('unsupported operation action; no shell fallback');
+    }
+  });
+  return {expiresAt:value.expiresAt,authority:value.authority,steps};
+}
+function git(project,...args) {return execFileSync('git',['-C',project,...args],{encoding:'utf8',timeout:10000,stdio:['ignore','pipe','pipe']}).trim();}
+function metadata(home,task) {
+  const file=path.join(home,'state',task+'.meta');
+  if(fs.lstatSync(file).isSymbolicLink()) fail('symlink task metadata refused');
+  const text=fs.readFileSync(file,'utf8'), data={};
+  for(const line of text.split('\n')) {
+    const at=line.indexOf('='); if(at<1) continue;
+    const key=line.slice(0,at); if(Object.hasOwn(data,key)) fail('duplicate task metadata field');
+    data[key]=line.slice(at+1);
+  }
+  if(!data.spawn_gen) fail('operation requires an existing task generation; legacy identity refused');
+  return {sha256:createHash('sha256').update(JSON.stringify(Object.fromEntries(Object.entries(data).sort(([a],[b])=>a.localeCompare(b))))).digest('hex'),...Object.fromEntries(['pr','pr_head','spawn_gen','kind','worktree','project','backend','window','herdr_session','herdr_pane_id','herdr_workspace_id','herdr_tab_id','endpoint_task_id','harness','tmux_pane_id'].map(k=>[k,data[k]??'']))};
+}
+function binaryIdentity(destination) {
+  const file=path.join(destination,'shellcheck');
+  if(!exists(file)) {
+    // existsSync follows symlinks; lstat still refuses a dangling link.
+    try {fs.lstatSync(file);fail('install target is not a regular file');} catch(error) {if(error.code!=='ENOENT') throw error;}
+    return null;
+  }
+  const fd=fs.openSync(file,fs.constants.O_RDONLY|fs.constants.O_NOFOLLOW);
+  try {
+    const st=fs.fstatSync(fd);
+    if(!st.isFile()||st.nlink!==1||st.size>134217728) fail('install target must be a bounded single-link regular file');
+    return {dev:st.dev,ino:st.ino,sha256:createHash('sha256').update(fs.readFileSync(fd)).digest('hex')};
+  } finally {fs.closeSync(fd);}
+}
+export function bindOperations(home,operations) {
+  if(!operations) return undefined;
+  if(process.platform!=='linux') fail('operation process identity requires Linux /proc; read-only tasks remain supported');
+  primaryOwner(home);
+  if(operations.expiresAt<=Date.now()) fail('operation authority expired');
+  return operations.steps.map(step=>{
+    if(step.project) {
+      const project=canonical(step.project);
+      if(git(project,'rev-parse','--show-toplevel')!==project) fail('operation target must be a clone root');
+      return {project,origin:git(project,'remote','get-url','origin'),gitDir:fs.realpathSync(git(project,'rev-parse','--absolute-git-dir'))};
+    }
+    if(step.destination) {
+      const destination=canonical(step.destination);
+      if(!fs.statSync(destination).isDirectory()) fail('install destination must exist');
+      return {destination,previous:binaryIdentity(destination)};
+    }
+    if(step.action==='merge') {
+      if(!step.url.startsWith('https://code.byted.org/')) fail('short merge currently supports canonical Codebase requests only; this forge is unsupported');
+      const library=path.join(path.dirname(fileURLToPath(import.meta.url)),'fm-pr-lib.sh');
+      const canonicalUrl=execFileSync('bash',['-c','. "$1"; fm_pr_url_parse "$2" || exit 1; printf "%s" "$FM_PR_URL"','short-url',library,step.url],{encoding:'utf8',timeout:10000});
+      if(canonicalUrl!==step.url) fail('merge requires the canonical owner URL');
+    }
+    const identity=metadata(home,step.task);
+    if(step.action==='merge' && (identity.pr!==step.url || !/^[a-f0-9]{40,64}$/.test(identity.pr_head))) fail('merge requires the exact registered URL and candidate head before granting authority');
+    if(step.action==='cleanup' && exists(identity.worktree) && fs.realpathSync(identity.worktree)===fs.realpathSync(identity.project)) fail('cleanup cannot target the project clone');
+    if(step.action==='cleanup' && identity.backend!=='herdr') fail('short cleanup requires the Herdr owner with confirmed endpoint removal; this backend is unsupported');
+    if(identity.kind==='secondmate') fail('short operations do not retire secondmate homes');
+    return identity;
+  });
+}
+export function resource(home,step) {
+  if(step.project) {
+    const common=git(step.project,'rev-parse','--git-common-dir');
+    const directory=fs.realpathSync(path.resolve(step.project,common));
+    return {target:`project:${directory}`,file:path.join(directory,'fm-short-operation.json')};
+  }
+  if(step.destination) {
+    const directory=fs.realpathSync(step.destination);
+    return {target:`binary:${directory}/shellcheck`,file:path.join(directory,'.fm-short-shellcheck.json')};
+  }
+  const directory=path.join(fs.realpathSync(home),'state');
+  return {target:`task:${directory}:${step.task}`,file:path.join(directory,`.short-operation-${step.task}.json`)};
+}
+function resources(home,step) {
+  const keys=[resource(home,step)];
+  if(step.action==='merge') keys.push({target:`merge:${step.url}`,file:path.join(fs.realpathSync(home),'state',`.short-merge-${createHash('sha256').update(step.url).digest('hex')}.json`)});
+  return keys.sort((a,b)=>a.file.localeCompare(b.file));
+}
+export function operationCurrent(home,request,index,{terminal=false}={}) {
+  const dir=path.join(home,'state/short-agents',request.id);
+  if(!equal(read(path.join(dir,'request.json')),request)) fail('short task request/generation changed');
+  if(!terminal && exists(path.join(dir,'result.json'))) fail('short task is terminal');
+  if(exists(path.join(dir,'revoked.json'))) fail('operation authority revoked');
+  if(Date.now()>=request.input.operations.expiresAt) fail('operation authority expired');
+  if(Date.now()>=request.acceptedAt+request.input.budget.timeMs) fail('operation wall budget exhausted');
+  const step=request.input.operations.steps[index], binding=request.operationBindings[index];
+  if(!step || !binding) fail('operation outside grant');
+  if(step.project) {
+    canonical(step.project);
+    if(git(step.project,'status','--porcelain')) fail('dirty operation project refused');
+    if(step.action==='sync') {
+      const branch=git(step.project,'symbolic-ref','--short','HEAD');
+      const target=git(step.project,'symbolic-ref','--short','refs/remotes/origin/HEAD').replace(/^origin\//,'');
+      if(branch!==target) fail('sync does not authorize branch recovery');
+    }
+    if(git(step.project,'remote','get-url','origin')!==binding.origin || fs.realpathSync(git(step.project,'rev-parse','--absolute-git-dir'))!==binding.gitDir) fail('operation project identity changed');
+  } else if(step.destination) {canonical(step.destination);if(!equal(binaryIdentity(step.destination),binding.previous)) fail('install target identity changed');}
+  else if(!equal(metadata(home,step.task),binding)) fail('operation task/process/generation identity changed');
+  return step;
+}
+
+// Inspecting an operation is safe even after expiry/cancellation. Recovery never
+// executes a previous intent again; it retains uncertainty for a decision.
+export function operationReceipts(dir) {
+  const request=read(path.join(dir,'request.json'));
+  return fs.readdirSync(dir).filter(x=>/^operation-\d+\.receipt\.json$/.test(x)).sort().map(x=>{
+    const receipt=read(path.join(dir,x)), step=request.input.operations?.steps[receipt.index];
+    if(!step || x!==`operation-${receipt.index}.receipt.json` || receipt.id!==request.id || receipt.nonce!==request.nonce || !['completed','refused'].includes(receipt.state) || receipt.action!==commandFor(step).action) fail('malformed operation receipt');
+    if(receipt.state==='completed') {
+      const e=receipt.evidence;
+      if(!e || ((receipt.action==='sync'||receipt.action==='merge') && !/^[a-f0-9]{40,64}$/.test(e.head)) || (receipt.action==='install-shellcheck' && (!/^[a-f0-9]{64}$/.test(e.sha256)||typeof e.version!=='string')) || (receipt.action==='cleanup' && (e.taskRecordRemoved!==true || e.endpointConfirmedGone!==true || e.bookkeepingComplete!==true || e.copyDisposition!=='returned-or-already-absent'))) fail('malformed operation postcondition');
+    }
+    return receipt;
+  });
+}
+
+function sameLiveProcess(identity) {
+  try {const now=processIdentity(identity.pid);return ['pid','start','boot'].every(k=>now[k]===identity[k]);}
+  catch(error) {if(error.code==='ENOENT'||error.code==='ESRCH'||error.message.includes('zombie')) return false;throw error;}
+}
+export function reconcileOperationReceipts(home,request) {
+  if(!request.input.operations) return;
+  const dir=path.join(home,'state/short-agents',request.id);
+  operationReceipts(dir);
+  const startedFile=path.join(dir,'started.json');
+  if(!exists(startedFile) || sameLiveProcess(read(startedFile).identity)) return;
+  if(!request.input.operations.steps.some(step=>resources(home,step).some(({file})=>exists(file)&&read(file).id===request.id))) return;
+  const script=fileURLToPath(import.meta.url);
+  execFileSync('bash',['-c',
+    '. "$1"; fm_lock_acquire_wait_bounded "$2" 5 || exit; trap \'fm_lock_release "$2"\' EXIT; "$3" "$4" reconcile "$5"',
+    'short-reconcile',path.join(path.dirname(script),'fm-wake-lib.sh'),path.join(dir,'reconcile.lock'),process.execPath,script,home],
+  {input:JSON.stringify(request),encoding:'utf8',env:{...process.env,FM_HOME:home,FM_ROOT_OVERRIDE:path.dirname(path.dirname(script)),FM_STATE_OVERRIDE:path.join(home,'state')}});
+}
+function reconcileLocked(home,request) {
+  const dir=path.join(home,'state/short-agents',request.id),startedFile=path.join(dir,'started.json');
+  if(!equal(read(path.join(dir,'request.json')),request)) fail('short task request/generation changed');
+  const started=read(startedFile);
+  if(started.nonce!==request.nonce || started.pid!==started.identity?.pid) fail('short runner identity changed');
+  if(sameLiveProcess(started.identity)) return;
+  const receipts=operationReceipts(dir);
+  for(const [index,step] of request.input.operations.steps.entries()) {
+    const receipt=receipts.find(r=>r.index===index),intentFile=path.join(dir,`operation-${index}.intent.json`);
+    if(receipt?.state==='completed') {
+      if(sameLiveProcess(receipt.executor)) continue;
+    } else {
+      if(exists(path.join(dir,`operation-${index}.effect.json`))) continue;
+      if(exists(intentFile)) {
+        const intent=read(intentFile);
+        if(receipt?.state!=='refused' || intent.nonce!==request.nonce || intent.index!==index || !equal(intent.step,step)) continue;
+      }
+    }
+    for(const {file,target} of resources(home,step)) {
+      if(!exists(file)) continue;
+      const marker=read(file);
+      if(marker.id!==request.id || marker.nonce!==request.nonce || marker.index!==index || marker.home!==home || marker.target!==target) continue;
+      if(!equal(read(path.join(dir,'request.json')),request) || !equal(read(startedFile),started)) fail('short task recovery identity changed');
+      fs.unlinkSync(file);
+    }
+  }
+}
+
+// The guarded owner calls this immediately before effects. An actor string is
+// insufficient: the request, bound child process, intent and exact owner args
+// must all agree. No model tool can set these environment variables.
+export function verifyOwner(action,args,{receipt=false}={}) {
+  const home=fs.realpathSync(process.env.FM_HOME);
+  const id=process.env.FM_SHORT_TASK;
+  if(!/^short-[a-f0-9]{64}$/.test(id??'')) fail('missing short execution binding');
+  const dir=path.join(home,'state/short-agents',id),request=read(path.join(dir,'request.json'));
+  const index=Number(process.env.FM_SHORT_STEP);
+  const step=receipt ? request.input.operations.steps[index] : operationCurrent(home,request,index);
+  const started=read(path.join(dir,'started.json'));
+  if(started.nonce!==request.nonce || !started.identity || !['pid','start','boot'].every(k=>processIdentity(started.pid)[k]===started.identity[k])) fail('short runner identity changed');
+  let descendent=false;
+  for(let p=process.ppid,n=0;p>1 && n<16;n++) {
+    if(p===started.pid) {descendent=true;break;}
+    p=processIdentity(p).parent;
+  }
+  if(!descendent) fail('owner caller is not the bound short runner descendant');
+  const caller=fs.readFileSync(`/proc/${process.ppid}/cmdline`,'utf8').split('\0').filter(Boolean);
+  const expected=path.join(path.dirname(fileURLToPath(import.meta.url)),commandFor(step).script);
+  if(!caller.includes(expected)) fail('caller is not the granted action owner');
+  const invocation=commandFor(step);
+  if(action!==invocation.action || !equal(args,invocation.args)) fail('owner action/target outside grant');
+  const intent=read(path.join(dir,`operation-${index}.intent.json`));
+  if(intent.nonce!==request.nonce || intent.index!==index) fail('operation intent identity changed');
+  for(const r of resources(home,step)) {
+    const marker=read(r.file);
+    if(marker.id!==id || marker.nonce!==request.nonce || marker.index!==index || marker.home!==home) fail('operation resource ownership changed');
+  }
+  return {home,dir,request,index,step};
+}
+function commandFor(step) {
+  switch(step.action) {
+    case 'sync': case 'recover-sync':return {action:'sync',script:'fm-fleet-sync.sh',args:[step.project]};
+    case 'install-shellcheck':return {action:'install-shellcheck',script:'fm-install-shellcheck.sh',args:[step.destination]};
+    case 'merge':return {action:'merge',script:'fm-pr-merge.sh',args:[step.task,step.url]};
+    case 'cleanup':return {action:'cleanup',script:'fm-teardown.sh',args:[step.task]};
+    default:fail('unsupported operation');
+  }
+}
+export async function executeOperations(service,request,check) {
+  const dir=service.dir(request.id),results=[];
+  for(let index=0;index<request.input.operations.steps.length;index++) {
+    check();
+    const step=request.input.operations.steps[index];
+    if(!equal(read(path.join(dir,'request.json')),request)) fail('short task request/generation changed');
+    const receiptFile=path.join(dir,`operation-${index}.receipt.json`);
+    if(exists(receiptFile)) {const receipt=operationReceipts(dir).find(r=>r.index===index);results.push(receipt);if(receipt.state!=='completed') fail('prior operation did not complete');continue;}
+    operationCurrent(service.home,request,index);
+    const intentFile=path.join(dir,`operation-${index}.intent.json`);
+    if(exists(intentFile)) fail('uncertain prior operation; reconcile receipt before any new effect');
+    const held=[], invocation=commandFor(step);
+    const release=()=>{for(const file of held.splice(0)) if(exists(file)) {
+      const marker=read(file);
+      if(marker.id!==request.id || marker.nonce!==request.nonce || marker.index!==index || marker.home!==service.home) fail('operation resource ownership changed; preserving marker');
+      fs.unlinkSync(file);
+    }};
+    try {
+      for(const r of resources(service.home,step)) {
+        fs.mkdirSync(path.dirname(r.file),{recursive:true,mode:0o700});
+        if(!publish(r.file,{home:service.home,id:request.id,nonce:request.nonce,index,target:r.target})) fail('resource already has a short operation; no concurrent effect');
+        held.push(r.file);
+      }
+      operationCurrent(service.home,request,index);
+      if(!publish(intentFile,{nonce:request.nonce,index,step,at:Date.now()})) fail('operation intent already exists');
+      const env={...process.env,FM_HOME:service.home,FM_ROOT_OVERRIDE:service.root,FM_STATE_OVERRIDE:path.join(service.home,'state'),FM_CONFIG_OVERRIDE:path.join(service.home,'config'),FM_SUPERVISION_ACTOR:'short',FM_SHORT_TASK:request.id,FM_SHORT_STEP:String(index),FM_FLEET_PRUNE:'0'};
+      // Never inherit caller overrides that could redirect a guarded owner.
+      for(const key of ['FM_DATA_OVERRIDE','FM_PROJECTS_OVERRIDE','FM_LEASE_HOLDER_PID']) delete env[key];
+      let output;
+      try {output=await exec('bash',[path.join(service.root,'bin',invocation.script),...invocation.args],{env,cwd:dir,timeout:Math.max(1,request.acceptedAt+request.input.budget.timeMs-Date.now()),maxBuffer:131072});}
+      catch(error) {output={stdout:error.stdout??'',stderr:error.stderr??'',error:String(error.message).slice(0,512)};}
+      fs.writeFileSync(path.join(dir,`operation-${index}.output.json`),JSON.stringify(output)+'\n',{mode:0o600});
+      // Owners write verified postconditions, not a free-form success string.
+      if(!exists(receiptFile)) {
+        if(!exists(path.join(dir,`operation-${index}.effect.json`))) {
+          publish(receiptFile,{id:request.id,nonce:request.nonce,index,action:invocation.action,state:'refused',at:Date.now(),evidence:{reason:'owner refused before a guarded effect'}});
+          release();
+        }
+        fail('owner returned without a completed receipt; inspect output and effect intent');
+      }
+      const receipt=operationReceipts(dir).find(r=>r.index===index);results.push(receipt);
+      if(receipt.state!=='completed') fail('owner postcondition is incomplete');
+      release();
+    } catch(error) {
+      // A resource with no intent has not acted and can be released safely.
+      if(!exists(intentFile)) release();
+      throw error;
+    }
+  }
+  return results;
+}
+
+if(process.argv[1] && fs.realpathSync(process.argv[1])===fs.realpathSync(fileURLToPath(import.meta.url))) {
+  try {
+    const [command,action,...args]=process.argv.slice(2);
+    if(command==='reconcile') reconcileLocked(action,JSON.parse(fs.readFileSync(0,'utf8')));
+    else if(command==='verify') verifyOwner(action,args);
+    else if(command==='effect') {
+      const v=verifyOwner(action,args);
+      publish(path.join(v.dir,`operation-${v.index}.effect.json`),{id:v.request.id,nonce:v.request.nonce,index:v.index,owner:processIdentity(process.ppid),at:Date.now()});
+    }
+    else if(command==='receipt') {
+      const evidence=JSON.parse(args.pop());
+      const v=verifyOwner(action,args,{receipt:true});
+      publish(path.join(v.dir,`operation-${v.index}.receipt.json`),{id:v.request.id,nonce:v.request.nonce,index:v.index,action,state:'completed',at:Date.now(),executor:processIdentity(process.ppid),evidence});
+    } else fail('unsupported operation owner command');
+  } catch(error) {console.error(error.message);process.exitCode=1;}
+}

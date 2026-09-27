@@ -69,7 +69,9 @@ if [ "$PROVIDER" = codebase ]; then
   fi
 fi
 
-"$FM_ROOT/bin/fm-guard.sh" || true
+if [ "${FM_SUPERVISION_ACTOR:-}" != short ]; then
+  "$FM_ROOT/bin/fm-guard.sh" || true
+fi
 
 # pr_head is recorded only when the forge's CLI can supply it. Codebase requires
 # the official status response to supply an exact source head; gh exposes the

@@ -42,14 +42,14 @@ export default function (pi: ExtensionAPI) {
       if (!(await owner())) return;
       await (await get()).reconcile();
       if (!active) return;
-      lastError = ''; pi.events.emit('firstmate:outcomes-ready', {});
+      lastError = '';
     }
     catch (error) {
       const message = `Short-agent notification recovery failed: ${String(error).slice(0, 512)}`;
       if (active && message !== lastError) pi.sendMessage({ customType: 'fm-short-agent-error', content: message, display: true });
       lastError = message;
     }
-    finally { busy = false; }
+    finally { busy = false; if (active) pi.events.emit('firstmate:outcomes-ready', {}); }
   };
   pi.on('session_start', () => {
     active = true;
@@ -60,9 +60,16 @@ export default function (pi: ExtensionAPI) {
   });
   pi.on('session_shutdown', () => { active = false; if (timer) clearInterval(timer); timer = undefined; });
   pi.registerTool({
-    name: 'fm_short_submit', label: 'Submit read-only short task',
-    description: 'Explicitly offload a bounded read-only analysis to an independent headless Pi session. Returns durable ID immediately. Choose an authenticated provider/model from Pi discovery; files are canonical explicit text snapshots. Reuse key only for identical retries. No terminal/worktree or parent history.',
-    parameters: Type.Object({ key: Type.String(), goal: Type.String(), acceptance: Type.String(), provider: Type.String(), model: Type.String(),
+    name: 'fm_short_submit', label: 'Submit bounded short task',
+    description: 'Offload a bounded analysis or explicitly authorized finite operation chain to an independent headless Pi session. Returns durable ID immediately. Defaults to openai-codex/gpt-5.6-luna; explicit authenticated overrides are preserved. Operations require concrete existing authority, exact targets and expiry; files are canonical explicit text snapshots. Reuse key only for identical retries. No terminal/worktree or parent history.',
+    parameters: Type.Object({ key: Type.String(), goal: Type.String(), acceptance: Type.String(), provider: Type.Optional(Type.String()), model: Type.Optional(Type.String()),
+      operations: Type.Optional(Type.Object({ expiresAt: Type.Integer(), authority: Type.String(), steps: Type.Array(Type.Union([
+        Type.Object({ action: Type.Literal('sync'), project: Type.String() }),
+        Type.Object({ action: Type.Literal('recover-sync'), project: Type.String() }),
+        Type.Object({ action: Type.Literal('install-shellcheck'), destination: Type.String() }),
+        Type.Object({ action: Type.Literal('merge'), task: Type.String(), url: Type.String() }),
+        Type.Object({ action: Type.Literal('cleanup'), task: Type.String() }),
+      ]), { minItems: 1, maxItems: 4 }) })),
       materials: Type.Array(Type.String(), { maxItems: 4 }),
       budget: Type.Optional(Type.Object({ timeMs: Type.Optional(Type.Integer()), tools: Type.Optional(Type.Integer()), outputTokens: Type.Optional(Type.Integer()), requests: Type.Optional(Type.Integer()) })),
     }),

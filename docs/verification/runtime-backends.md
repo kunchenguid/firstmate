@@ -1109,11 +1109,40 @@ That run observed TraeX reporting native `agent_status=unknown` while its `traex
 The busy reader uses the existing structural process probe in that case; exact `traex` and `traecli` names are recognized, with real-process decoy coverage in `tests/fm-agent-process-live-e2e.test.sh`.
 Structural liveness permits the task-bound transcript read but does not itself infer busy or idle.
 
-## Pi headless read-only short tasks
+## Pi headless short tasks
 
-On 2026-09-26, Pi 0.87.1 and Node v22.22.2 passed the isolated SDK guard with a discovered, authenticated `openai-codex/gpt-6-luna` model.
-Refresh with `FM_SHORT_AGENT_LIVE_E2E=1 FM_SHORT_LIVE_PROVIDER=openai-codex FM_SHORT_LIVE_MODEL=gpt-6-luna bin/fm-test-run.sh tests/fm-short-agent-live-e2e.test.sh`, selecting an available pair when the installed catalog differs.
-Observed output included `"submitMs":6`, `"runnerStartedAfterReturnMs":29`, `"parentReplyMs":1438`, `"requests":2`, `"toolCalls":1`, and `ok - real Pi short task stays independent while the parent accepts another prompt`.
-The parent reply preceded child completion; the child read the fixture and excluded the parent-only sentinel.
-This checks SDK conversation responsiveness, not terminal repaint latency.
-The portable permission and lifecycle companion is `tests/fm-short-agent.test.sh`; [the operator guide](../short-agents.md) owns current use and limits.
+On 2026-09-26, Pi 0.87.1 and Node v22.22.2 passed the isolated SDK guard with authenticated `openai-codex/gpt-5.6-luna` for both read-only analysis and an authorized clone sync.
+Refresh with `FM_SHORT_AGENT_LIVE_E2E=1 FM_SHORT_LIVE_PROVIDER=openai-codex FM_SHORT_LIVE_MODEL=gpt-5.6-luna bin/fm-test-run.sh tests/fm-short-agent-live-e2e.test.sh`.
+Both submitted through the loaded candidate extension and returned before child completion; the parent answered another real-model prompt while each child was active.
+Both children excluded the parent-only sentinel.
+
+| Measurement | Read-only task | Sync operation |
+| --- | --- | --- |
+| Submission latency | 6 ms | 13 ms |
+| Parent reply after submission | 2007 ms | 1464 ms |
+| Parent reply before child completion | 4044 ms | 4201 ms |
+| Child model requests / tools | 2 / 1 read | 2 / 1 operation chain |
+| Child reported total tokens | 871 | 1062 |
+| Serialized terminal result | 509 bytes | 684 bytes |
+
+The test harness invoked two submit tools and one read-only status tool; terminal observation was fixture polling, not a parent model polling loop.
+MAIN executed zero operation commands: the sync receipt identifies the child-owned script process as executor.
+The operation's submit input and response were 599 and 388 bytes.
+Serialized SDK parent messages grew from 2 to 3475 to 4256 bytes across the two unrelated parent prompts and extension activity.
+The harness invokes submit directly through the loaded tool definition, so submit/result payloads are measured separately rather than inserted into that model history.
+Those bytes are not a billed-token estimate or a measurement of a full production conversation.
+The two parent requests used 880 reported tokens; all six real requests used 2813 tokens, including four child requests and two child tool calls.
+These are single-run observations, not statistical p95 or a claim of general savings; this guard measures SDK responsiveness, not terminal repaint latency.
+
+`tests/fm-short-operations.test.sh` uses a model fixture, real Git owners/effects, and a controlled Codebase forge to exercise merge-plus-sync, detached-checkout recovery, duplicate submission, cancellation, authority/identity drift, malformed output, partial success, and concurrent resource ownership.
+It also proves that a lost merge response is reconciled by owner readback and that an owner killed after a possible effect is not replayed after restart.
+The recovery cases release exact pre-intent and refused no-effect reservations only after the bound runner dies, while retaining reservations owned by a live runner, a possible effect, or another generation.
+`FM_SHORT_INSTALL_LIVE=1` adds an actual verified ShellCheck 0.11.0 install into a temporary directory, without a global install.
+`FM_SHORT_HERDR_E2E=1 bash tests/fm-short-operations-herdr.test.sh` adds real endpoint cleanup through a generated named lab and the guarded helper; the installed Herdr 0.8.0 run confirmed endpoint removal, refused dirty/unlanded/shared copies, and preserved the default-session tripwire.
+The cleanup guard covers both an already absent copy and a real existing clean landed Treehouse 2.1.1 worktree.
+The existing-copy case starts with a durable lease and a commit reachable from the disposable remote default branch, then observes the real owner return the slot from `leased` to `available`, clear its lease, and remove the exact endpoint and task record.
+It verifies the returned copy remains clean at the landed head, another slot retains its lease identity, head, untracked sentinel and task metadata, and every unrelated pane remains present.
+The saved `landed-cleanup-evidence.json` combines pre/post Treehouse and Herdr readbacks with the bound child-owner receipt; MAIN executes zero cleanup commands.
+The fixture chains use one model fixture invocation and one operation tool per chain; fixture responses are not real-provider token evidence.
+The optional install also repeats the tool call to prove receipt reuse without reinstalling.
+The portable read-only companion is `tests/fm-short-agent.test.sh`; [the operator guide](../short-agents.md) owns current use and limits.

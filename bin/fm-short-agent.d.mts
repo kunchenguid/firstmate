@@ -1,6 +1,12 @@
 export interface ShortRequest {
-  key: string; goal: string; acceptance: string; provider: string; model: string;
+  key: string; goal: string; acceptance: string; provider?: string; model?: string;
   materials: string[];
+  operations?: { expiresAt: number; authority: string; steps: (
+    { action: 'sync' | 'recover-sync'; project: string } |
+    { action: 'install-shellcheck'; destination: string } |
+    { action: 'merge'; task: string; url: string } |
+    { action: 'cleanup'; task: string }
+  )[] };
   budget?: { timeMs?: number; tools?: number; outputTokens?: number; requests?: number };
 }
 export interface ShortResult { id: string; state: string; evidence: string; summary?: string }

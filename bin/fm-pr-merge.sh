@@ -357,7 +357,12 @@ META="$STATE/$ID.meta"
 # wrong actor is refused for its role whatever that record says.
 # shellcheck source=bin/fm-lease-lib.sh
 . "$SCRIPT_DIR/fm-lease-lib.sh"
+# shellcheck source=bin/fm-short-owner-lib.sh
+. "$SCRIPT_DIR/fm-short-owner-lib.sh"
+trap 'fm_short_owner_release; fm_lease_guard_release' EXIT
+fm_short_owner_enter merge "$ID" "$URL" || exit 1
 fm_lease_forbid_branch "PR merge (fm-pr-merge)"
+fm_lease_guard "$ID" "PR merge (fm-pr-merge)"
 
 if [ ! -f "$META" ] || [ -L "$META" ]; then
   echo "error: task metadata is unavailable" >&2
@@ -372,6 +377,8 @@ MERGE_EXPECTED_SPAWN_GEN=$FM_BACKLOG_META_SPAWN_GEN
 MERGE_CONTROL_LOCK=
 MERGE_META_LOCK=
 merge_control_cleanup() {
+  fm_short_owner_release || true
+  fm_lease_guard_release || true
   [ -z "$MERGE_META_LOCK" ] || fm_lock_release "$MERGE_META_LOCK" || true
   fm_afk_contract_lock_release || true
   [ -z "$MERGE_CONTROL_LOCK" ] || fm_lock_release "$MERGE_CONTROL_LOCK" || true
@@ -1443,6 +1450,7 @@ case "$PROVIDER" in
     [ "$away_status" -eq 0 ] || exit "$away_status"
     refuse_github_queue_while_away || exit 2
     merge_status=0
+    fm_short_owner_effect || exit 1
     merge_output=$(gh pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
       --match-head-commit "$FM_PR_MERGE_HEAD" \
       "${merge_args[@]+"${merge_args[@]}"}" "$@" 2>&1) || merge_status=$?
@@ -1501,6 +1509,7 @@ case "$PROVIDER" in
     if [ "$FM_PR_AWAY_POSTURE" = true ]; then
       gitlab_merge_args=(--auto-merge=false)
     fi
+    fm_short_owner_effect || exit 1
     GITLAB_HOST="$FM_PR_HOST" glab mr merge "$PR_NUMBER" -R "$PROJECT_URL" \
       --sha "$FM_PR_MERGE_HEAD" --yes "$@" "${gitlab_merge_args[@]+"${gitlab_merge_args[@]}"}" || merge_status=$?
     if [ "$merge_status" -ne 0 ]; then
@@ -1546,6 +1555,7 @@ case "$PROVIDER" in
       require_current_away_authority || away_status=$?
       [ "$away_status" -eq 0 ] || exit "$away_status"
       merge_status=0
+      fm_short_owner_effect || exit 1
       merge_output=$(bytedcli --json codebase mr merge "$PR_NUMBER" -R "$PR_PATH" "$@" 2>&1) \
         || merge_status=$?
       if [ "$merge_status" -ne 0 ]; then
@@ -1553,6 +1563,9 @@ case "$PROVIDER" in
         fm_lock_release "$MERGE_CONTROL_LOCK" || true
         MERGE_CONTROL_LOCK=
         [ -z "$merge_output" ] || printf '%s\n' "$merge_output" >&2
+        if [ "${FM_SUPERVISION_ACTOR:-}" = short ] && codebase_confirm_merged; then
+          fm_short_owner_receipt "{\"head\":\"$FM_PR_MERGE_HEAD\",\"mergeCommit\":\"$FM_PR_CODEBASE_MERGE_COMMIT\"}" || exit 1
+        fi
         exit "$merge_status"
       fi
       persist_accepted_merge_authority || exit 1
@@ -1585,6 +1598,7 @@ esac
 # Reached only after the forge confirmed the merge landed: set -e exits on a
 # refused or failed merge above, and a queued forge merge exits without an
 # outcome while its existing poll remains armed.
+fm_short_owner_receipt "{\"head\":\"${FM_PR_MERGE_HEAD:-}\"}" || exit 1
 outcome_rc=0
 fm_merge_outcome_report "$FM_HOME" "$STATE" "$ID" "$URL" "$FM_PR_MERGE_OUTCOME_ORIGIN" \
   "${FM_PR_MERGE_HEAD:-}" "${FM_PR_MERGE_AUTHORITY:-}" || outcome_rc=$?
