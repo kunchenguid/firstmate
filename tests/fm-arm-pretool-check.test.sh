@@ -186,17 +186,28 @@ run_matrix_entry() {
 
   if [ "$expected" = allow ]; then
     [ "$rc" -eq 0 ] || fail "$id via $entry must allow, got exit $rc: $(cat "$err_file")"
-    [ ! -s "$out_file" ] || fail "$id via $entry allow must leave stdout empty: $(cat "$out_file")"
     [ ! -s "$err_file" ] || fail "$id via $entry allow must leave stderr empty: $(cat "$err_file")"
+    if [ "$entry" = claude ]; then
+      jq -e '. == {}' "$out_file" >/dev/null 2>&1 \
+        || fail "$id via claude allow must print {}: $(cat "$out_file")"
+    else
+      [ ! -s "$out_file" ] || fail "$id via $entry allow must leave stdout empty: $(cat "$out_file")"
+    fi
+    return
+  fi
+
+  if [ "$entry" = claude ]; then
+    [ "$rc" -eq 0 ] || fail "$id via claude must deny with exit 0, got exit $rc: $(cat "$err_file")"
+    [ ! -s "$err_file" ] || fail "$id via claude deny must leave stderr empty: $(cat "$err_file")"
+    jq -e '.hookSpecificOutput.permissionDecision == "deny" and (.hookSpecificOutput.permissionDecisionReason | test("\\[(watcher-(background|pipeline|redirection|bundled|nested|direct)|broad-watcher-kill|unclassifiable-protected-command)\\]")) and (.systemMessage | test("\\[(watcher-(background|pipeline|redirection|bundled|nested|direct)|broad-watcher-kill|unclassifiable-protected-command)\\]"))' "$out_file" >/dev/null 2>&1 \
+      || fail "$id via claude deny must carry a stable reason code on stdout: $(cat "$out_file")"
     return
   fi
 
   [ "$rc" -eq 2 ] || fail "$id via $entry must deny, got exit $rc"
   jq -e '.hookSpecificOutput.permissionDecision == "deny" and (.systemMessage | test("\\[(watcher-(background|pipeline|redirection|bundled|nested|direct)|broad-watcher-kill|unclassifiable-protected-command)\\]"))' "$err_file" >/dev/null 2>&1 \
     || fail "$id via $entry deny must carry a stable reason code on stderr: $(cat "$err_file")"
-  if [ "$entry" = claude ]; then
-    [ ! -s "$out_file" ] || fail "$id via claude deny must leave stdout empty: $(cat "$out_file")"
-  elif [ "$entry" = grok ]; then
+  if [ "$entry" = grok ]; then
     jq -e '.decision == "deny"' "$out_file" >/dev/null 2>&1 \
       || fail "$id via grok deny must carry decision=deny on stdout: $(cat "$out_file")"
   fi
@@ -411,7 +422,7 @@ test_failopen_missing_node() {
 
 # --- --claude output shaping ---------------------------------------------------
 
-test_claude_mode_stdout_empty_on_deny() {
+test_claude_mode_prints_decision_on_stdout() {
   local out err rc stderr_file
   # Keep stderr capture under TMPDIR so concurrent isolation-proof workers do
   # not share a fixed global /tmp path.
@@ -420,11 +431,11 @@ test_claude_mode_stdout_empty_on_deny() {
   rc=$?
   err=$(cat "$stderr_file" 2>/dev/null)
   rm -f "$stderr_file"
-  [ "$rc" -eq 2 ] || fail "--claude deny must still exit 2, got $rc"
-  [ -z "$out" ] || fail "--claude deny must leave stdout EMPTY (Claude Code only honors a stderr-only deny), got: $out"
-  printf '%s' "$err" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 \
-    || fail "--claude deny must put hookSpecificOutput.permissionDecision=deny on stderr: $err"
-  pass "--claude: stdout empty, stderr carries hookSpecificOutput deny JSON"
+  [ "$rc" -eq 0 ] || fail "--claude deny must exit 0, got $rc"
+  [ -z "$err" ] || fail "--claude deny must leave stderr empty, got: $err"
+  printf '%s' "$out" | jq -e '.hookSpecificOutput.permissionDecision == "deny" and (.hookSpecificOutput.permissionDecisionReason | type == "string" and length > 0) and (.systemMessage == .hookSpecificOutput.permissionDecisionReason)' >/dev/null 2>&1 \
+    || fail "--claude deny must put the decision document on stdout: $out"
+  pass "--claude deny prints one decision document on stdout and exits 0"
 }
 
 test_default_mode_stdout_has_grok_json_on_deny() {
@@ -437,13 +448,20 @@ test_default_mode_stdout_has_grok_json_on_deny() {
   pass "default mode: stdout carries Grok-shaped decision JSON on deny"
 }
 
-test_allow_is_silent_both_modes() {
-  local out1 out2
+test_allow_rendering_by_mode() {
+  local out1 out2 out3
   out1=$("$CHECK" --command 'exec bin/fm-watch-arm.sh' 2>&1)
   out2=$("$CHECK" --claude --command 'exec bin/fm-watch-arm.sh' 2>&1)
+  out3=$("$CHECK" --cursor --command 'exec bin/fm-watch-arm.sh' 2>&1)
   [ -z "$out1" ] || fail "default allow must be silent, got: $out1"
-  [ -z "$out2" ] || fail "--claude allow must be silent, got: $out2"
-  pass "allow is silent on both stdout and stderr in default and --claude mode"
+  printf '%s' "$out2" | jq -e '. == {}' >/dev/null 2>&1 \
+    || fail "--claude allow must print {}, got: $out2"
+  printf '%s' "$out3" | jq -e '.permission == "allow"' >/dev/null 2>&1 \
+    || fail "--cursor allow must print permission allow, got: $out3"
+  out3=$("$CHECK" --cursor --command 'bin/fm-watch-arm.sh &' 2>/dev/null)
+  printf '%s' "$out3" | jq -e '.permission == "deny" and (.user_message | type == "string" and length > 0) and .agent_message == .user_message' >/dev/null 2>&1 \
+    || fail "--cursor deny must carry user_message and agent_message, got: $out3"
+  pass "allow and deny rendering follows the selected mode"
 }
 
 # --- harness wiring: each adapter invokes the shared checker -----------------
@@ -477,7 +495,7 @@ test_failopen_empty_stdin
 test_failopen_garbage_stdin
 test_failopen_missing_jq
 test_failopen_missing_node
-test_claude_mode_stdout_empty_on_deny
+test_claude_mode_prints_decision_on_stdout
 test_default_mode_stdout_has_grok_json_on_deny
-test_allow_is_silent_both_modes
+test_allow_rendering_by_mode
 test_shellcheck_clean

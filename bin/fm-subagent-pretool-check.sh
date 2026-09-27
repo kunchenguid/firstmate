@@ -37,19 +37,20 @@
 # Stdin mode extracts .tool_name for Claude and Codex, or .toolName for Grok.
 # CLI mode is for adapters that already hold the tool name (OpenCode, Pi).
 #
-# Exit/output contract (identical shape to bin/fm-cd-pretool-check.sh):
-#   ALLOW - exit 0 and no output.
-#   DENY - exit 2, a Claude-shaped deny object on stderr, and a Grok-shaped
-#          deny object on stdout unless --claude was supplied.
-#   INERT - not a genuine primary home (a crewmate/scout task worktree or a
-#           non-firstmate repo): exit 0 with no output, exactly like ALLOW.
-#   ESCAPE - FM_ALLOW_SUBAGENT=1 in the environment allows deliberately.
-#   FAIL OPEN - malformed or empty stdin, or missing jq for stdin transport.
+# Exit/output contract (docs/arm-pretool-check.md owns the JSON documents):
+#   ALLOW, no flag - exit 0 and no output.
+#   ALLOW, --claude - exit 0 and {} on stdout.
+#   DENY, no flag - exit 2, the stderr deny object, and the Grok stdout object.
+#   DENY, --claude - exit 0 and Claude's decision document on stdout.
+#   INERT - not a genuine primary home: the allow rendering for the mode.
+#   ESCAPE - FM_ALLOW_SUBAGENT=1 uses the allow rendering.
+#   FAIL OPEN - the allow rendering for the selected mode.
 #
-# Claude requires stdout to remain empty on deny.
+# This checker has no --cursor mode.
 # Codex blocks on exit 2 and displays stderr.
 # Grok consumes the stdout decision object.
 # OpenCode and Pi consume exit 2 plus stderr.
+# Cursor blocks a permission hook whose stdout is not JSON.
 set -u
 
 # Lowercase substrings that mark a tool name as delegation-shaped: it creates
@@ -82,6 +83,13 @@ TOOL=""
 TOOL_SET=0
 CLAUDE_MODE=0
 
+# Resolve beside this file with builtins only. A missing-jq fail-open must
+# still reach fm_hook_allow when the hook PATH has no dirname.
+_fm_hook_dir=${BASH_SOURCE[0]%/*}
+[ "$_fm_hook_dir" != "${BASH_SOURCE[0]}" ] || _fm_hook_dir=.
+# shellcheck source=bin/fm-hook-host-lib.sh
+. "$_fm_hook_dir/fm-hook-host-lib.sh"
+
 usage() {
   cat <<'EOF'
 Usage: fm-subagent-pretool-check.sh [--tool <tool-name>] [--claude]
@@ -98,9 +106,11 @@ outside any local fixed list.
 Fires only in a genuine firstmate primary home; it is a silent no-op in a
 crewmate/scout task worktree or any non-firstmate repo, where a worker using
 delegation tools is legitimate.
-Exits 0 to allow and 2 to deny, naming the real crewmate dispatch path instead.
+Exits 0 to allow, and exits 2 to deny when no mode flag is set.
+With --claude, allow and deny both exit 0 and print one JSON document on
+stdout. docs/arm-pretool-check.md owns those documents.
 Set FM_ALLOW_SUBAGENT=1 in the session environment to allow deliberately.
-Malformed transport fails open.
+Malformed transport fails open through the same allow rendering.
 EOF
 }
 
@@ -135,12 +145,12 @@ done
 
 if [ "$TOOL_SET" -eq 0 ]; then
   PAYLOAD=$(cat 2>/dev/null || true)
-  [ -n "$PAYLOAD" ] || exit 0
-  command -v jq >/dev/null 2>&1 || exit 0
-  TOOL=$(printf '%s' "$PAYLOAD" | jq -r '(.tool_name // .toolName // empty)' 2>/dev/null) || exit 0
+  [ -n "$PAYLOAD" ] || fm_hook_allow
+  command -v jq >/dev/null 2>&1 || fm_hook_allow
+  TOOL=$(printf '%s' "$PAYLOAD" | jq -r '(.tool_name // .toolName // empty)' 2>/dev/null) || fm_hook_allow
 fi
 
-[ -n "$TOOL" ] || exit 0
+[ -n "$TOOL" ] || fm_hook_allow
 
 LC_ALL=C NORMALIZED=$(printf '%s' "$TOOL" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9')
 
@@ -149,11 +159,11 @@ LC_ALL=C NORMALIZED=$(printf '%s' "$TOOL" | tr '[:upper:]' '[:lower:]' | tr -cd 
 # here: an MCP server with a task or agent noun in a tool name is common and
 # blocking it would be a false positive with no bearing on fleet dispatch.
 case "$TOOL" in
-  mcp__*) exit 0 ;;
+  mcp__*) fm_hook_allow ;;
 esac
 
 for allowed in $OBSERVE_ONLY_TOOLS $PLAN_ONLY_TOOLS; do
-  [ "$NORMALIZED" != "$allowed" ] || exit 0
+  [ "$NORMALIZED" != "$allowed" ] || fm_hook_allow
 done
 
 MATCHED=""
@@ -162,16 +172,16 @@ for stem in $DELEGATION_STEMS; do
     *"$stem"*) MATCHED=$stem; break ;;
   esac
 done
-[ -n "$MATCHED" ] || exit 0
+[ -n "$MATCHED" ] || fm_hook_allow
 
 # The single deliberate escape hatch. It is an environment variable rather than
 # a flag or a state file so it must be set when the session is launched, which
 # makes a genuinely intended use possible and an accidental one impossible: no
 # in-session tool call can set it for the call that follows.
-[ "${FM_ALLOW_SUBAGENT:-}" != "1" ] || exit 0
+[ "${FM_ALLOW_SUBAGENT:-}" != "1" ] || fm_hook_allow
 
-SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P) || exit 0
-FM_ROOT=${FM_ROOT_OVERRIDE:-$(CDPATH='' cd -- "$SCRIPT_DIR/.." 2>/dev/null && pwd -P)} || exit 0
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P) || fm_hook_allow
+FM_ROOT=${FM_ROOT_OVERRIDE:-$(CDPATH='' cd -- "$SCRIPT_DIR/.." 2>/dev/null && pwd -P)} || fm_hook_allow
 FM_HOME=${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}
 STATE=${FM_STATE_OVERRIDE:-$FM_HOME/state}
 
@@ -184,7 +194,7 @@ STATE=${FM_STATE_OVERRIDE:-$FM_HOME/state}
 # inert (exit 0), never a block, so a broken environment never denies a call.
 # shellcheck source=bin/fm-primary-scope-lib.sh
 . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
-fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
+fm_primary_scope_matches "$FM_ROOT" "$STATE" || fm_hook_allow
 
 # Name the dedicated scout entry point only when this home carries it; degrade
 # to the two-step brief-then-spawn path when it does not, rather than naming a
@@ -202,6 +212,4 @@ json_escape() {
 }
 
 ESCAPED=$(json_escape "$REASON")
-printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny"},"systemMessage":"%s"}\n' "$ESCAPED" >&2
-[ "$CLAUDE_MODE" -eq 1 ] || printf '{"decision":"deny","reason":"%s"}\n' "$ESCAPED"
-exit 2
+fm_hook_deny "$ESCAPED"
