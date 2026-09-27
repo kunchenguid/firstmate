@@ -166,6 +166,9 @@ case "${1:-}" in
         *) shift ;;
       esac
     done
+    # Creating the window stands its session (and server) back up, as a real
+    # new-window after new-session does.
+    rm -f "$D/server-dead" "$D/session-missing"
     printf '%s\n' "$name" >> "$D/windows"
     printf '%s\n' "$name" >> "$D/created-windows"
     printf '@9\n'
@@ -236,7 +239,7 @@ run_control() {  # <case-dir> <args...>
   # without it this suite would write the developer's real ~/.claude.json.
   mkdir -p "$dir/user-home"
   env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SESSION -u HERDR_SOCKET_PATH \
-    -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID \
+    -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID -u TMUX \
     PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
     HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' \
     FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
@@ -258,7 +261,7 @@ run_spawn() {  # <case-dir> <args...>
   # without it this suite would write the developer's real ~/.claude.json.
   mkdir -p "$dir/user-home"
   env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SESSION -u HERDR_SOCKET_PATH \
-    -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID \
+    -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID -u TMUX \
     PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
     HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' \
     FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
@@ -1703,8 +1706,14 @@ test_spawn_relaunch_refuses_a_live_agent() {
   out=$(run_spawn "$dir" rl15 --relaunch --harness claude); rc=$?
   expect_code 1 "$rc" "relaunching into a live endpoint should refuse"
   assert_contains "$out" "positively agent-free endpoint" "the refusal should demand an agent-free endpoint"
-  assert_contains "$out" "fm-control.sh rl15 exit" "the refusal should point at the way to stop it"
-  pass "fm-spawn --relaunch: refuses to launch a second agent into a live endpoint"
+  assert_contains "$out" "fm-control.sh rl15 relaunch" \
+    "the refusal should name the one command that replaces a live agent"
+  [ ! -s "$dir/fake/literal" ] || fail "a refused relaunch must send nothing into the live endpoint"
+  # The named command must actually work for this state, rather than send the
+  # operator on to another refusal.
+  out=$(run_control "$dir" rl15 relaunch --note "replace the live agent"); rc=$?
+  expect_code 0 "$rc" "the command the refusal names should replace the live agent"$'\n'"$out"
+  pass "fm-spawn --relaunch: refuses a live endpoint and names the command that replaces its agent"
 }
 
 test_spawn_relaunch_refuses_a_symlinked_task_record_before_inspection() {
@@ -1832,13 +1841,12 @@ test_spawn_relaunch_refuses_a_pane_outside_the_worktree() {
 
 # --- 7. reclaiming a task whose endpoint is gone ----------------------------
 #
-# Before this, `missing` was a terminal state: fm-spawn --relaunch accepted only
-# `dead` and told the caller to stop the agent first, while fm-control exit
-# refused `missing` outright and told the caller to reconcile the task first -
-# and there is no reconcile verb. Each command named the other as its
-# prerequisite, so a task whose pane or workspace was destroyed could not be
-# reclaimed by anything, and any no-mistakes approval it was parked on had no
-# seat left to answer it.
+# A task whose endpoint was destroyed rather than stopped used to be terminal:
+# fm-spawn --relaunch accepted only `dead` and told the caller to stop the agent
+# first, while fm-control exit refused `missing` outright and told the caller to
+# reconcile the task first - and there is no reconcile verb. Each command named
+# the other as its prerequisite, so the task could not be reclaimed by anything,
+# and any no-mistakes approval it was parked on had no seat left to answer it.
 
 # strand_endpoint <case-dir> <id>: make a tmux endpoint read `missing` the way
 # a destroyed window does - a successful session inventory that omits the exact
@@ -1847,67 +1855,211 @@ strand_endpoint() {  # <case-dir> <id>
   : > "$1/fake/windows"
 }
 
-# Every tmux `missing` refuses on BOTH verbs, whatever produced it. tmux is the
-# one verified backend whose absence cannot be proven from a task record: the
-# record carries no socket identity for the endpoint, and any inventory
-# describes only the server this process happens to address. So a window that
-# is merely on a server this seat cannot reach is indistinguishable from one
-# that was destroyed, and neither verb will guess.
-assert_tmux_missing_refuses() {  # <case-dir> <id> <what-was-staged>
-  local dir=$1 id=$2 what=$3 out rc brief_before
-
-  out=$(run_spawn "$dir" "$id" --relaunch --harness claude); rc=$?
-  expect_code 1 "$rc" "relaunch must refuse a tmux endpoint whose absence cannot be proven ($what)"$'\n'"$out"
-  assert_absent "$dir/fake/created-windows" "a refused relaunch must not create a window ($what)"
-  assert_absent "$dir/fake/created-sessions" "a refused relaunch must not create a session ($what)"
-  [ ! -s "$dir/fake/literal" ] || fail "a refused relaunch must send nothing into any pane ($what)"
-
-  brief_before=$(cat "$dir/home/data/$id/brief.md")
-  out=$(run_control "$dir" "$id" exit); rc=$?
-  expect_code 1 "$rc" "exit must refuse a tmux endpoint whose absence cannot be proven ($what)"$'\n'"$out"
-  assert_not_contains "$out" "endpoint-gone" \
-    "exit must not report a stop it cannot see ($what)"
-  [ ! -s "$dir/fake/literal" ] || fail "a refused exit must send nothing into any pane ($what)"
-
-  out=$(run_control "$dir" "$id" relaunch --note "this note must never reach a live agent"); rc=$?
-  expect_code 1 "$rc" "the relaunch transaction must fail closed ($what)"$'\n'"$out"
-  [ "$(cat "$dir/home/data/$id/brief.md")" = "$brief_before" ] \
-    || fail "a refused relaunch edited instructions an agent that may still be running is reading ($what)"
-  assert_absent "$dir/fake/created-windows" "a refused transaction must not create a window ($what)"
-  assert_absent "$dir/fake/created-sessions" "a refused transaction must not create a session ($what)"
-  [ ! -s "$dir/fake/literal" ] || fail "a refused transaction must launch nothing ($what)"
+# A no-mistakes that only records being called, so a reclaim can prove it never
+# aborted, answered, or started the validation run the task is parked on; a
+# read-only status query is allowed.
+make_nm_recorder() {  # <case-dir>
+  cat > "$1/fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_FAKE_DIR/nm-calls"
+exit 0
+SH
+  chmod +x "$1/fakebin/no-mistakes"
 }
 
-test_tmux_refuses_a_window_missing_from_its_session() {
+# start_worktree_agent <case-dir>: a real process working in the task's
+# worktree whose argv[0] names a verified harness - what the tmux absence proof
+# reads, whichever terminal server holds it. Sets WORKTREE_AGENT_PID.
+start_worktree_agent() {  # <case-dir>
+  (cd "$1/wt" && exec -a claude /bin/sleep 60) &
+  WORKTREE_AGENT_PID=$!
+  # Let the exec land before anything reads the process table.
+  local _
+  for _ in $(seq 1 50); do
+    [ "$(tr '\0' '\n' < "/proc/$WORKTREE_AGENT_PID/cmdline" 2>/dev/null | head -n 1)" = claude ] && return 0
+    ps -o args= -p "$WORKTREE_AGENT_PID" 2>/dev/null | grep -q '^claude' && return 0
+    /bin/sleep 0.05
+  done
+}
+
+stop_worktree_agent() {
+  [ -z "${WORKTREE_AGENT_PID:-}" ] || kill "$WORKTREE_AGENT_PID" 2>/dev/null || true
+  wait "$WORKTREE_AGENT_PID" 2>/dev/null || true
+  WORKTREE_AGENT_PID=
+}
+
+# assert_tmux_reclaims <case-dir> <id> <what-was-staged>: a tmux endpoint that
+# is gone, with no agent left working in the worktree, is reclaimed through
+# the ordinary control plane - `exit` reports it gone, `relaunch` opens one
+# fresh window in the SAME worktree under the SAME task identity, and the
+# record follows the new window without anyone editing it. Everything else
+# about the task, including unlanded work and a parked validation run, is left
+# exactly where it was.
+assert_tmux_reclaims() {  # <case-dir> <id> <what-was-staged>
+  local dir=$1 id=$2 what=$3 out rc=0 head_before window
+  make_nm_recorder "$dir"
+  printf 'landed on the branch\n' > "$dir/wt/committed.txt"
+  git -C "$dir/wt" add committed.txt
+  git -C "$dir/wt" -c user.email=t@example.com -c user.name=t commit -qm "work in progress"
+  head_before=$(git -C "$dir/wt" rev-parse HEAD)
+  printf 'never committed\n' > "$dir/wt/dirty.txt"
+  printf 'working: parked at a validation gate\n' >> "$dir/home/state/$id.status"
+
+  out=$(run_control "$dir" "$id" exit) || rc=$?
+  expect_code 0 "$rc" "exit must report a proven-gone tmux endpoint rather than refuse it ($what)"$'\n'"$out"
+  assert_contains "$out" "endpoint-gone $id" "exit must say the endpoint did not survive ($what)"
+  [ ! -s "$dir/fake/literal" ] || fail "exit must send nothing when there is no endpoint ($what)"
+
+  out=$(run_control "$dir" "$id" relaunch --note "the window was destroyed; pick the work back up") || rc=$?
+  expect_code 0 "$rc" "relaunch must reclaim a proven-gone tmux endpoint ($what)"$'\n'"$out"
+  assert_contains "$(cat "$dir/fake/created-windows")" "fm-$id" \
+    "the reclaim must open one fresh window for the task ($what)"
+  [ "$(grep -c . "$dir/fake/created-windows")" = 1 ] \
+    || fail "the reclaim must open exactly one window ($what)"
+  window=$(meta_field "$dir" "$id" window)
+  case "$window" in
+    *":fm-$id") ;;
+    *) fail "the record must rebind to the new window, got '$window' ($what)" ;;
+  esac
+  [ "$(meta_field "$dir" "$id" endpoint_task_id)" = "$id" ] \
+    || fail "the reclaim must keep the task identity ($what)"
+  [ "$(meta_field "$dir" "$id" worktree)" = "$dir/wt" ] \
+    || fail "the reclaim must keep the recorded worktree ($what)"
+  assert_contains "$(cat "$dir/fake/literal")" "launch-brief" \
+    "the replacement agent must be launched into the new window ($what)"
+
+  [ "$(git -C "$dir/wt" rev-parse HEAD)" = "$head_before" ] \
+    || fail "the reclaim moved the worktree's HEAD ($what)"
+  assert_contains "$(cat "$dir/wt/dirty.txt")" "never committed" \
+    "the reclaim destroyed or rewrote an uncommitted change ($what)"
+  assert_contains "$(cat "$dir/home/state/$id.status")" "parked at a validation gate" \
+    "the reclaim truncated the status log ($what)"
+
+  # Reading the run is fine; acting on it is not.
+  if [ -f "$dir/fake/nm-calls" ] && grep -Eq '(^|[[:space:]])(run|respond|abort|sync|cancel|rerun)([[:space:]]|$)' "$dir/fake/nm-calls"; then
+    fail "the reclaim must never abort, answer, or start the task's validation run ($what): $(cat "$dir/fake/nm-calls")"
+  fi
+  assert_contains "$(cat "$dir/home/data/$id/brief.md")" "never start a second run or abort the one under way" \
+    "the replacement must be told to reattach to the parked validation run ($what)"
+  assert_contains "$(cat "$dir/home/data/$id/brief.md")" "the window was destroyed" \
+    "the replacement must inherit the progress note ($what)"
+  [ "$(journal_field "$dir" "$id" exit_result)" = endpoint-gone ] \
+    || fail "the transaction should record that the endpoint was already gone ($what)"
+}
+
+test_tmux_reclaims_a_window_missing_from_its_session() {
   local dir
   dir=$(new_case tmux-gone rl60)
   add_ship_task "$dir" rl60 claude
   strand_endpoint "$dir" rl60
-  assert_tmux_missing_refuses "$dir" rl60 "window absent from a readable session inventory"
-  pass "tmux: a window absent from its session refuses both verbs rather than being assumed gone"
+  assert_tmux_reclaims "$dir" rl60 "window absent from a readable session inventory"
+  pass "tmux: a destroyed window is reclaimed in the same worktree under the same task"
 }
 
-test_tmux_refuses_a_session_that_cannot_be_found() {
+test_tmux_reclaims_a_session_that_cannot_be_found() {
   local dir
   dir=$(new_case tmux-nosession rl61)
   add_ship_task "$dir" rl61 claude
-  # Real tmux's answer to a renamed session, and to a different
-  # TMUX_TMPDIR/socket: definitive about the SESSION, silent about whether the
-  # window and its agent survived elsewhere.
   : > "$dir/fake/session-missing"
-  assert_tmux_missing_refuses "$dir" rl61 "recorded session not found"
-  pass "tmux: an unfindable session refuses both verbs, so a live agent is never duplicated"
+  assert_tmux_reclaims "$dir" rl61 "recorded session not found"
+  pass "tmux: a destroyed session is reclaimed in the same worktree under the same task"
 }
 
-test_tmux_refuses_when_the_server_is_gone() {
+test_tmux_reclaims_when_the_server_is_gone() {
   local dir
   dir=$(new_case tmux-noserver rl62)
   add_ship_task "$dir" rl62 claude
-  # No server on the socket this process addresses. Another server may still be
-  # running the task's window, and the record cannot say which socket is its.
   : > "$dir/fake/server-dead"
-  assert_tmux_missing_refuses "$dir" rl62 "no tmux server on this socket"
-  pass "tmux: a dead server on this socket refuses both verbs rather than proving absence"
+  assert_tmux_reclaims "$dir" rl62 "no tmux server on this socket"
+  pass "tmux: a dead server's task is reclaimed in the same worktree under the same task"
+}
+
+test_spawn_relaunch_alone_reclaims_a_gone_tmux_endpoint() {
+  local dir out rc=0
+  dir=$(new_case tmux-spawn-gone rl64)
+  add_ship_task "$dir" rl64 claude
+  strand_endpoint "$dir" rl64
+  # The launch owner reaches the same verdict on its own, so the two commands
+  # can never disagree about one endpoint again.
+  out=$(run_spawn "$dir" rl64 --relaunch --harness claude) || rc=$?
+  expect_code 0 "$rc" "fm-spawn --relaunch must reclaim a proven-gone tmux endpoint"$'\n'"$out"
+  assert_contains "$(cat "$dir/fake/created-windows")" "fm-rl64" \
+    "the launch owner must open the task's fresh window"
+  [ "$(meta_field "$dir" rl64 worktree)" = "$dir/wt" ] \
+    || fail "the launch owner must keep the recorded worktree"
+  pass "fm-spawn --relaunch: a proven-gone tmux endpoint is reclaimed by the launch owner itself"
+}
+
+# An agent process still working in the worktree means the window may only be
+# on a tmux server this seat cannot address; neither verb may guess past it.
+test_tmux_refuses_a_gone_window_while_an_agent_works_in_the_worktree() {
+  local dir out rc brief_before
+  dir=$(new_case tmux-gone-agent rl65)
+  add_ship_task "$dir" rl65 claude
+  strand_endpoint "$dir" rl65
+  start_worktree_agent "$dir"
+
+  out=$(run_spawn "$dir" rl65 --relaunch --harness claude); rc=$?
+  expect_code 1 "$rc" "relaunch must refuse while an agent still works in the worktree"$'\n'"$out"
+  assert_contains "$out" "agent process $WORKTREE_AGENT_PID" \
+    "the refusal must name the agent process it found"
+  assert_contains "$out" "bin/fm-control.sh rl65 relaunch reclaims the task" \
+    "the refusal must name the command that reclaims the task once the agent is stopped"
+  brief_before=$(cat "$dir/home/data/rl65/brief.md")
+  out=$(run_control "$dir" rl65 exit); rc=$?
+  expect_code 1 "$rc" "exit must not claim a stop while an agent still works in the worktree"$'\n'"$out"
+  assert_not_contains "$out" "endpoint-gone" "exit must not report a stop it cannot see"
+  out=$(run_control "$dir" rl65 relaunch --note "this note must never reach a live agent"); rc=$?
+  expect_code 1 "$rc" "the relaunch transaction must refuse"$'\n'"$out"
+  [ "$(cat "$dir/home/data/rl65/brief.md")" = "$brief_before" ] \
+    || fail "a refused relaunch edited instructions a live agent may be reading"
+  assert_absent "$dir/fake/created-windows" "a refused reclaim must not create a window"
+  [ ! -s "$dir/fake/literal" ] || fail "a refused reclaim must launch nothing"
+  kill -0 "$WORKTREE_AGENT_PID" 2>/dev/null || fail "a refused reclaim must leave the working agent alone"
+  stop_worktree_agent
+  # Once that agent is gone, the command the refusal named does reclaim it.
+  out=$(run_control "$dir" rl65 relaunch --note "the agent has stopped; pick the work back up"); rc=$?
+  expect_code 0 "$rc" "the command the refusal named should reclaim the task once no agent works there"$'\n'"$out"
+  pass "tmux: a gone window is refused while an agent works in its worktree, then reclaimed by the command the refusal names"
+}
+
+# The tmux absence proof reads the kernel's per-process working directories, so
+# pin what it counts: only a verified harness, anywhere under the worktree, and
+# never a sibling directory that merely shares its prefix.
+test_worktree_agent_scan_counts_only_agents_inside_the_worktree() {
+  local base wt scan pid_plain pid_sub pid_sibling
+  base="$TMP_ROOT/scan-$RANDOM"
+  wt="$base/wt"
+  mkdir -p "$wt/sub" "$base/wt-sibling"
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-agent-process-lib.sh"
+
+  (cd "$wt" && exec /bin/sleep 60) &
+  pid_plain=$!
+  (cd "$base/wt-sibling" && exec -a claude /bin/sleep 60) &
+  pid_sibling=$!
+  /bin/sleep 0.3
+  scan=$(fm_agent_process_worktree_scan "$wt")
+  [ "$scan" = "none"$'\t' ] \
+    || fail "a non-agent process, or an agent in a sibling directory, must not count, got '$scan'"
+
+  (cd "$wt/sub" && exec -a claude /bin/sleep 60) &
+  pid_sub=$!
+  /bin/sleep 0.3
+  scan=$(fm_agent_process_worktree_scan "$wt")
+  case "$scan" in
+    "agent"$'\t'"$pid_sub "*) ;;
+    *) fail "an agent working in a subdirectory of the worktree must count, got '$scan'" ;;
+  esac
+
+  scan=$(fm_agent_process_worktree_scan "$base/never-created")
+  case "$scan" in
+    unreadable$'\t'*) ;;
+    *) fail "a worktree that cannot be resolved must read unreadable, got '$scan'" ;;
+  esac
+  kill "$pid_plain" "$pid_sub" "$pid_sibling" 2>/dev/null || true
+  wait "$pid_plain" "$pid_sub" "$pid_sibling" 2>/dev/null || true
+  pass "worktree agent scan: only a verified harness inside the worktree counts"
 }
 
 test_reclaim_refuses_an_unreadable_endpoint() {
@@ -1923,9 +2075,17 @@ test_reclaim_refuses_an_unreadable_endpoint() {
   expect_code 1 "$rc" "an unreadable endpoint must still refuse"
   assert_contains "$out" "positively agent-free endpoint" \
     "only a POSITIVELY proven agent-free endpoint may be relaunched into"
+  assert_not_contains "$out" "fm-control.sh rl63 exit" \
+    "the refusal must not send the operator to a verb that refuses this state too"
+  assert_contains "$out" "bin/fm-peek.sh rl63" \
+    "the refusal must name how to see why the endpoint cannot be read"
   assert_absent "$dir/fake/created-windows" \
     "a refused relaunch must not create an endpoint"
   [ ! -s "$dir/fake/literal" ] || fail "a refused relaunch must launch nothing"
+  out=$(run_control "$dir" rl63 exit); rc=$?
+  expect_code 1 "$rc" "exit must refuse an unreadable endpoint too"
+  assert_contains "$out" "bin/fm-peek.sh rl63" \
+    "exit's refusal must give the same next step as relaunch's"
   pass "reclaim: an unclassifiable endpoint is still refused, so two agents cannot share one"
 }
 
@@ -2297,6 +2457,8 @@ test_herdr_reclaim_keeps_the_task_whole() {
     "a reclaim truncated the status log"
   assert_contains "$(cat "$dir/home/data/rl75/brief.md")" "the pane was destroyed" \
     "the replacement must inherit the progress note"
+  assert_contains "$(cat "$dir/home/data/rl75/brief.md")" "never start a second run or abort the one under way" \
+    "the replacement must be told to reattach to the parked validation run"
   [ "$(journal_field "$dir" rl75 exit_result)" = endpoint-gone ] \
     || fail "the transaction should record that the endpoint was already gone"
   pass "reclaim: a herdr reclaim rebinds the endpoint and leaves the whole rest of the task alone"
@@ -2444,9 +2606,12 @@ test_spawn_relaunch_refuses_a_pending_authoritative_close
 test_spawn_relaunch_refuses_contradicting_flags
 test_spawn_relaunch_refuses_an_unrecorded_task
 test_spawn_relaunch_refuses_a_pane_outside_the_worktree
-test_tmux_refuses_a_window_missing_from_its_session
-test_tmux_refuses_a_session_that_cannot_be_found
-test_tmux_refuses_when_the_server_is_gone
+test_tmux_reclaims_a_window_missing_from_its_session
+test_tmux_reclaims_a_session_that_cannot_be_found
+test_tmux_reclaims_when_the_server_is_gone
+test_spawn_relaunch_alone_reclaims_a_gone_tmux_endpoint
+test_tmux_refuses_a_gone_window_while_an_agent_works_in_the_worktree
+test_worktree_agent_scan_counts_only_agents_inside_the_worktree
 test_reclaim_refuses_an_unreadable_endpoint
 test_herdr_relaunch_resumes_only_the_registered_pi_session
 test_herdr_reclaim_adopts_a_pane_that_outlived_its_server

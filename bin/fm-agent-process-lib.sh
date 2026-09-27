@@ -114,3 +114,105 @@ fm_agent_process_classify() {  # <name> <argv0> <args> [pid] -> agent|shell|othe
     printf 'other'
   fi
 }
+
+# fm_agent_process_worktree_scan: whether a verified harness process is still
+# working in <worktree> anywhere on this host, read from the kernel's own
+# per-process working directory rather than from any terminal endpoint. It
+# answers the one question a lost endpoint leaves open - would launching a
+# replacement join an agent that is still running on this task's local copy? -
+# without trusting a runtime backend that could not see the endpoint.
+#
+# Only processes owned by the current user are read: a worker is always
+# launched as that user, and another user's working directory is not readable
+# anyway. Each process is classified by fm_agent_process_classify, so this
+# answers from the same name vocabulary as every liveness probe.
+#
+# Prints "<verdict>\t<detail>", always exactly one TAB:
+#   none        - every readable process was read and none is an agent there
+#   agent       - "<pid> <name>" of an agent process working in <worktree>
+#   unreadable  - the reason the process table could not be read completely;
+#                 the caller must treat this as "an agent may be there"
+# Linux reads /proc; any other platform needs lsof and ps. A process that exits
+# mid-scan, and a zombie that holds no working directory, are skipped.
+fm_agent_process_worktree_scan() {  # <worktree>
+  local wt=${1-} wt_real dir pid cwd name argv0 args stat rest lsof_out line cmd
+  local -a pids=() names=()
+  if [ -z "$wt" ] || ! wt_real=$(cd "$wt" 2>/dev/null && pwd -P); then
+    printf 'unreadable\tthe worktree %s cannot be resolved' "'$wt'"
+    return 0
+  fi
+  if [ -r /proc/self/cmdline ] && [ -L /proc/self/cwd ]; then
+    for dir in /proc/[0-9]*; do
+      [ -O "$dir" ] || continue
+      pid=${dir#/proc/}
+      if cwd=$(readlink "$dir/cwd" 2>/dev/null); then
+        case "$cwd" in
+          "$wt_real"|"$wt_real"/*) ;;
+          *) continue ;;
+        esac
+      else
+        # A process that exited mid-scan, or a zombie, has no working
+        # directory left. A privileged or non-dumpable one (a per-session
+        # sshd, ssh-agent) hides its link from its own user; that is only a
+        # gap when the process is itself an agent, checked below.
+        [ -d "$dir" ] || continue
+        stat=$(cat "$dir/stat" 2>/dev/null) || continue
+        rest=${stat##*) }
+        case "${rest%% *}" in
+          Z|X) continue ;;
+        esac
+        cwd=
+      fi
+      name=$(cat "$dir/comm" 2>/dev/null) || continue
+      argv0=$(tr '\0' '\n' < "$dir/cmdline" 2>/dev/null | head -n 1) || argv0=
+      args=$(tr '\0' ' ' < "$dir/cmdline" 2>/dev/null) || args=
+      [ "$(fm_agent_process_classify "$name" "$argv0" "$args" "$pid")" = agent ] || continue
+      if [ -z "$cwd" ]; then
+        printf 'unreadable\tthe working directory of agent process %s (%s) could not be read' "$pid" "${name:-$argv0}"
+        return 0
+      fi
+      printf 'agent\t%s %s' "$pid" "${name:-$argv0}"
+      return 0
+    done
+    printf 'none\t'
+    return 0
+  fi
+  if ! command -v lsof >/dev/null 2>&1 || ! command -v ps >/dev/null 2>&1; then
+    printf 'unreadable\tthis platform has no /proc, and lsof or ps is not installed to read process working directories'
+    return 0
+  fi
+  # lsof exits 1 both for "no match" and for a partial failure, so an empty
+  # result is only trusted when lsof reported no error at all.
+  if ! lsof_out=$(lsof -a -u "$(id -u)" -d cwd -Fpcn 2>&1); then
+    case "$lsof_out" in
+      '') ;;
+      *) printf 'unreadable\tlsof could not list process working directories'; return 0 ;;
+    esac
+  fi
+  pid=
+  cmd=
+  while IFS= read -r line; do
+    case "$line" in
+      p*) pid=${line#p}; cmd= ;;
+      c*) cmd=${line#c} ;;
+      n*)
+        case "${line#n}" in
+          "$wt_real"|"$wt_real"/*) pids+=("$pid"); names+=("$cmd") ;;
+        esac
+        ;;
+      *) printf 'unreadable\tlsof printed an unexpected record'; return 0 ;;
+    esac
+  done <<EOF_LSOF
+$lsof_out
+EOF_LSOF
+  local i
+  for i in "${!pids[@]}"; do
+    args=$(ps -o args= -p "${pids[$i]}" 2>/dev/null) || continue
+    argv0=${args%% *}
+    if [ "$(fm_agent_process_classify "${names[$i]}" "$argv0" "$args" "${pids[$i]}")" = agent ]; then
+      printf 'agent\t%s %s' "${pids[$i]}" "${names[$i]:-$argv0}"
+      return 0
+    fi
+  done
+  printf 'none\t'
+}

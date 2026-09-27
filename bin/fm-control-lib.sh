@@ -15,7 +15,7 @@
 # This file owns three capability tables plus their pure artifact-path tables,
 # and ONE named exception to that purity - fm_control_endpoint_absence_verdict,
 # the single owner of the per-backend endpoint-absence proof, which does run
-# backend reads. Everything else has no side effects, runs no backend command,
+# backend reads and a process-table scan. Everything else has no side effects, runs no backend command,
 # and reads no state, so sourcing this file is still free and the tables can be
 # read by a test as a pure contract:
 #
@@ -302,8 +302,9 @@ fm_control_backend_state_verified() {  # <backend>
 }
 
 # fm_control_endpoint_absence_verdict: the ONE owner of the per-backend proof
-# that an endpoint reading `missing` is actually GONE rather than merely
-# unreachable from this seat. Call it only for a `missing` raw state.
+# that an endpoint reading `missing` holds no agent this home could duplicate,
+# so the task may be reclaimed rather than stranded. Call it only for a
+# `missing` raw state.
 #
 # Prints "<verdict>\t<reason>" - always exactly one TAB, so a caller splits
 # unambiguously with ${raw%%$'\t'*} and ${raw#*$'\t'}. The reason is empty
@@ -313,7 +314,7 @@ fm_control_backend_state_verified() {  # <backend>
 # assignment made here could never reach them.
 #
 # The verdicts:
-#   gone     - absence is PROVEN. There is no endpoint and therefore no agent.
+#   gone     - absence is PROVEN: no endpoint this seat can reach, and no agent.
 #   dead     - the endpoint is there after all and holds no agent.
 #   alive    - the endpoint is there and an agent is running in it.
 #   unproven - neither could be established; the caller must refuse.
@@ -323,31 +324,41 @@ fm_control_backend_state_verified() {  # <backend>
 # endpoint can still hold a live agent on the task's worktree, so every caller
 # that would act on absence - `exit` claiming the agent stopped, `relaunch`
 # re-creating the endpoint - must come through here rather than trusting the
-# raw verdict.
-#
-# Whether absence is provable AT ALL is a property of the backend, not of the
-# reading:
-#   herdr CAN prove it. Every read goes through fm_backend_herdr_cli, which
-#     passes `--session <session>`, so the recheck starts and reads the session
-#     the RECORD names, through that session's own socket. The answer is about
-#     the task's endpoint and nothing else.
-#   tmux CANNOT. `list-windows -a` describes only the server the CURRENT
-#     process addresses (its TMUX_TMPDIR/socket), and a task's record does not
-#     carry the endpoint's socket identity - so a different but running server
-#     would answer "not anywhere" about a window it was never able to see.
-#     There is no read available here that closes that gap, so tmux always
-#     returns `unproven` and both verbs refuse. tmux is left exactly as
-#     deadlocked as it was before this change - no worse - but deliberately.
+# raw verdict. How that is proven is a property of the backend:
+#   herdr proves the ENDPOINT absent. Every read goes through
+#     fm_backend_herdr_cli, which passes `--session <session>`, so the recheck
+#     starts and reads the session the RECORD names, through that session's
+#     own socket. The answer is about the task's endpoint and nothing else.
+#   tmux proves the AGENT absent. `list-windows` describes only the server the
+#     CURRENT process addresses, and a task record carries no socket identity,
+#     so no tmux read can tell a destroyed window from one on a server this
+#     seat cannot address. What a duplicate launch would actually collide with
+#     is an agent process working in the recorded worktree, and the kernel
+#     knows every process's working directory regardless of which terminal
+#     server holds it (fm_agent_process_worktree_scan). No agent process there
+#     is the proof; one found there, or a process table that cannot be read
+#     completely, refuses. A window that outlived its agent on a server this
+#     seat cannot address is left alone - it holds no agent, and the reclaim
+#     opens its replacement on the server this seat does address.
 #
 # Both control-plane callers share this one implementation so the proof cannot
 # drift into two answers for the same endpoint.
-fm_control_endpoint_absence_verdict() {  # <backend> <target>
-  local backend=${1-} target=${2-}
+fm_control_endpoint_absence_verdict() {  # <backend> <target> <worktree>
+  local backend=${1-} target=${2-} worktree=${3-} scan
   fm_backend_source "$backend" \
     || { printf 'unproven\tbackend %s could not be loaded to prove anything about that endpoint' "'$backend'"; return 0; }
   case "$backend" in
     tmux)
-      printf 'unproven\ttmux absence cannot be proven from a task record: the record does not carry the endpoint'"'"'s socket identity, and a server-wide window inventory only describes the tmux server this process addresses, so a window absent from it may still be alive on another'
+      scan=$(fm_agent_process_worktree_scan "$worktree")
+      case "${scan%%$'\t'*}" in
+        none) printf 'gone\t' ;;
+        agent)
+          printf 'unproven\tagent process %s is still working in the recorded worktree %s, so its window may be on a tmux server this seat cannot address; stop that process where it runs, or address its tmux server from this seat, then retry' "${scan#*$'\t'}" "$worktree"
+          ;;
+        *)
+          printf 'unproven\tno tmux read can prove that window absent, and the process scan that would prove no agent is still working in %s failed: %s' "$worktree" "${scan#*$'\t'}"
+          ;;
+      esac
       ;;
     herdr)
       # Start the RECORDED session's server (only the server - nothing is
@@ -362,6 +373,23 @@ fm_control_endpoint_absence_verdict() {  # <backend> <target>
       ;;
     *)
       printf 'unproven\tbackend %s has no recovery-grade classifier, so absence cannot be proven on it at all' "'$backend'"
+      ;;
+  esac
+}
+
+# fm_control_unclassified_next_step: the one sentence every lifecycle refusal
+# of an endpoint that is not positively classified ends with, so `exit`,
+# `relaunch`, and the launch owner never point an operator at each other for a
+# state none of them acts on. `alive`, `dead`, and a proven-gone `missing` are
+# all actionable through `bin/fm-control.sh <id> relaunch`; this covers the rest.
+fm_control_unclassified_next_step() {  # <task-id> <state>
+  local id=${1-} state=${2-}
+  case "$state" in
+    ambiguous)
+      printf 'no lifecycle command acts on it until it reads alive, dead, or gone: inspect it with bin/fm-peek.sh %s - a foreground process that is not a verified agent reads ambiguous - and once it is back at a shell or its agent, retry bin/fm-control.sh %s relaunch' "$id" "$id"
+      ;;
+    *)
+      printf 'no lifecycle command acts on it until it reads alive, dead, or gone: the read itself failed, so retry bin/fm-control.sh %s relaunch once bin/fm-peek.sh %s can read the endpoint again' "$id" "$id"
       ;;
   esac
 }

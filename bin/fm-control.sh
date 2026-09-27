@@ -40,30 +40,33 @@
 #              `missing` is put through the control plane's per-backend absence
 #              proof (fm_control_endpoint_absence_verdict) before anything is
 #              claimed about it, because `missing` also covers an endpoint that
-#              is merely unreachable from this seat. That proof exists only on
-#              HERDR, whose reads are scoped to the session the record names:
-#              proven gone reports `endpoint-gone` rather than
-#              `already-stopped`, because the endpoint this verb normally
-#              preserves did not survive; a pane that turns out to be there and
-#              idle is the ordinary `already-stopped`; one whose agent is back
-#              takes the ordinary interrupt-then-exit path. A tmux `missing`
-#              always REFUSES: a task record carries no socket identity for its
-#              endpoint, so this verb cannot tell a destroyed window from one on
-#              a tmux server it cannot address, and it will not claim a stop it
-#              cannot see.
+#              is merely unreachable from this seat: herdr re-reads the pane in
+#              the session the record names, and tmux proves no agent process
+#              is still working in the recorded worktree. Proven gone reports
+#              `endpoint-gone` rather than `already-stopped`, because the
+#              endpoint this verb normally preserves did not survive; a herdr
+#              pane that turns out to be there and idle is the ordinary
+#              `already-stopped`; one whose agent is back takes the ordinary
+#              interrupt-then-exit path. An absence that cannot be proven -
+#              an agent process still in the worktree, or a process table that
+#              cannot be read - REFUSES rather than claim a stop it cannot see.
 #   relaunch   Transactionally replace the running agent with a new one, in the
 #              SAME worktree - and the same endpoint whenever that endpoint
 #              still exists - on the same or a newly chosen
 #              harness/model/effort - so switching harness is one ordinary use
 #              of this verb. When the recorded endpoint is instead proven gone -
-#              a Herdr pane or workspace destroyed in churn - the launch owner
-#              re-creates one in that worktree, in the herdr session the record
-#              names, and the task's record rebinds to it; that is how a task
-#              whose terminal was destroyed is reclaimed by the home that owns
-#              it, rather than being stranded with a parked approval nobody can
-#              answer. Reclaim is HERDR-ONLY for the reason `exit` gives above:
-#              a tmux `missing` cannot be proven absent from a task record, so
-#              it refuses.
+#              a Herdr pane or workspace destroyed in churn, a tmux window or
+#              server that no longer exists - the launch owner re-creates one in
+#              that worktree (herdr: in the session the record names; tmux: on
+#              the server this seat addresses), and the task's record rebinds
+#              to it; that is how a task whose terminal was destroyed is
+#              reclaimed by the home that owns it, rather than being stranded
+#              with a parked approval nobody can answer. The absence proof is
+#              the one `exit` uses above, so a refusal there refuses here too.
+#              A reclaimed ship's progress note tells its replacement to
+#              reattach to any validation run already under way for its branch
+#              rather than start another; nothing here ever aborts, answers, or
+#              starts a validation run.
 #              An explicit `default` model or effort clears that
 #              axis for the replacement. With no explicit axis, a secondmate
 #              re-resolves its durable config/secondmate-harness pin (harness
@@ -571,7 +574,7 @@ do_exit() {
       # "destroyed" with "unreachable from this seat". Route it through the
       # control plane's one absence proof - the same one the relaunch gate uses
       # - and report what that proof actually established, never more.
-      absence=$(fm_control_endpoint_absence_verdict "$BACKEND" "$T")
+      absence=$(fm_control_endpoint_absence_verdict "$BACKEND" "$T" "$WT")
       case "${absence%%$'\t'*}" in
         gone)
           # Proven gone, so the agent that lived in it went with it: exit's
@@ -596,11 +599,11 @@ do_exit() {
           # alive path: interrupt if busy, then the harness's exit command.
           ;;
         *)
-          die "task $ID's endpoint $T reads 'missing', but ${absence#*$'\t'}; exit will not claim an agent stopped at an address it cannot trust, nor send lifecycle input to one"
+          die "task $ID's endpoint $T reads 'missing', but ${absence#*$'\t'}; exit will not claim an agent stopped at an address it cannot trust, nor send lifecycle input to one, and relaunch refuses for the same reason; once that changes, bin/fm-control.sh $ID relaunch reclaims the task"
           ;;
       esac
       ;;
-    *) die "task $ID's endpoint reads '$state' rather than a positively classified state; refusing to send a lifecycle command into an unattributed endpoint" ;;
+    *) die "task $ID's endpoint reads '$state' rather than a positively classified state; refusing to send a lifecycle command into an unattributed endpoint - $(fm_control_unclassified_next_step "$ID" "$state")" ;;
   esac
   # A busy agent is interrupted first before the exit command is submitted.
   case "$(busy_verdict)" in
@@ -738,7 +741,7 @@ relaunch_rollback() {
           ;;
         dead)
           journal_write "failed:$RELAUNCH_PHASE" "rollback=prior-record-kept-agent-dead" || true
-          echo "error: $ID's agent stopped but relaunch did not reach replacement launch; no agent is running, and its work plus progress note are preserved at $WT" >&2
+          echo "error: $ID's agent stopped but relaunch did not reach replacement launch; no agent is running, and its work plus progress note are preserved at $WT; rerun bin/fm-control.sh $ID relaunch to launch the replacement" >&2
           ;;
         *)
           # The old agent was NOT proven stopped, so no replacement is coming
@@ -767,10 +770,10 @@ relaunch_rollback() {
         # reconciles. Rewriting it back to the old harness would be a second,
         # worse inaccuracy.
         journal_write "failed:$RELAUNCH_PHASE" "rollback=none-new-record-kept" || true
-        echo "error: $ID was relaunched on $TARGET_HARNESS but no running agent could be confirmed; its work is preserved at $WT" >&2
+        echo "error: $ID was relaunched on $TARGET_HARNESS but no running agent could be confirmed; its work is preserved at $WT; inspect the endpoint with bin/fm-peek.sh $ID, then rerun bin/fm-control.sh $ID relaunch, which adopts it once it reads dead and replaces its agent once it reads alive" >&2
       else
         journal_write "failed:$RELAUNCH_PHASE" "rollback=prior-record-kept" || true
-        echo "error: $ID's agent was stopped but the replacement did not launch; no agent is running, and its work plus the recorded progress note are preserved at $WT" >&2
+        echo "error: $ID's agent was stopped but the replacement did not launch; no agent is running, and its work plus the recorded progress note are preserved at $WT; rerun bin/fm-control.sh $ID relaunch once the launch failure above is resolved" >&2
       fi
       ;;
   esac
@@ -951,6 +954,17 @@ record_note() {
         echo "First, check your instruction inbox: list $STATE/$ID.inbox/*.msg, act on"
         echo "each message in numeric order, then mv each handled file into"
         echo "$STATE/$ID.inbox/handled/. A steer sent before the relaunch survives there."
+        if [ "$KIND" = ship ] && [ "$(fm_meta_get "$META" mode)" = no-mistakes ]; then
+          # The validation run belongs to the branch, not to the agent that
+          # started it, so it outlives the relaunch; this plane never touches
+          # it, and the replacement must not duplicate or abandon it either.
+          echo
+          echo "A no-mistakes validation run for this branch may already be under way or"
+          echo "parked at a gate; it survived the relaunch. Before starting one, run"
+          echo "\`no-mistakes axi status\` in the local copy: if it shows a run for this"
+          echo "branch, reattach to it and answer its current gate as these instructions"
+          echo "say, and never start a second run or abort the one under way."
+        fi
         echo
         printf '%s\n' "$NOTE"
       } >> "$RELAUNCH_BRIEF" \
