@@ -1214,6 +1214,7 @@ The per-backend delta is required only for the backend resolved from `FM_BACKEND
 | `zellij` | `zellij`, `jq`, `treehouse` |
 | `orca` | `orca` |
 | `cmux` | `cmux`, `jq`, `treehouse` |
+| `cairn` | `jq`, `treehouse` |
 
 The JSON-emitting adapters (`herdr`, `zellij`, `cmux`, `cairn`) need `jq` because their spawn and liveness paths parse backend JSON.
 Every session-provider-only backend (`tmux`, `herdr`, `zellij`, `cmux`, `cairn`) uses `treehouse` for worktrees.
