@@ -207,6 +207,75 @@ assert_contains "$INVALID_COUNT_OUT" 'FM_SSH_ALIVE_COUNT_MAX must be a positive 
 [ "$(cat "$SSH_COUNT")" -eq "$SSH_CALLS_BEFORE_INVALID" ] || fail "invalid keepalive configuration launched ssh"
 pass "fm-on rejects invalid dead-peer settings before launching ssh"
 
+# Keepalives only run inside an established session, so connection setup needs
+# its own bound, and a background caller must never wait on a prompt.
+: > "$SSH_LOG"
+fm_on ios fm-probe-two.sh >/dev/null
+DEFAULT_ARGV=$(tail -n 1 "$SSH_LOG")
+assert_contains "$DEFAULT_ARGV" 'BatchMode=yes' "the ssh transport did not disable interactive prompts"
+assert_contains "$DEFAULT_ARGV" 'ConnectTimeout=15' "the ssh transport did not bound connection setup by default"
+: > "$SSH_LOG"
+FM_SSH_CONNECT_TIMEOUT=4 fm_on ios fm-probe-two.sh >/dev/null
+assert_contains "$(tail -n 1 "$SSH_LOG")" 'ConnectTimeout=4' "FM_SSH_CONNECT_TIMEOUT override was not honored"
+SSH_CALLS_BEFORE_INVALID=$(cat "$SSH_COUNT")
+for bad in 0 soon ''; do
+  set +e
+  INVALID_CONNECT_OUT=$(FM_SSH_CONNECT_TIMEOUT=$bad fm_on ios fm-probe-two.sh 2>&1)
+  INVALID_CONNECT_RC=$?
+  set -e
+  if [ -z "$bad" ]; then
+    [ "$INVALID_CONNECT_RC" -eq 0 ] || fail "an empty FM_SSH_CONNECT_TIMEOUT did not fall back to the default (exit $INVALID_CONNECT_RC)"
+    continue
+  fi
+  [ "$INVALID_CONNECT_RC" -eq 1 ] || fail "FM_SSH_CONNECT_TIMEOUT=$bad was accepted (got exit $INVALID_CONNECT_RC)"
+  assert_contains "$INVALID_CONNECT_OUT" 'FM_SSH_CONNECT_TIMEOUT must be a positive integer' "invalid connect timeout did not explain its constraint"
+done
+[ "$(cat "$SSH_COUNT")" -eq "$((SSH_CALLS_BEFORE_INVALID + 1))" ] || fail "invalid connect-timeout configuration launched ssh"
+pass "fm-on bounds connection setup, runs ssh in batch mode, and validates FM_SSH_CONNECT_TIMEOUT"
+
+# End to end with the real OpenSSH client: a peer that accepts the TCP
+# connection but never sends a banner used to hold fm-on forever, because
+# keepalives only start after login. The connect timeout must end it with 255.
+if command -v ssh >/dev/null 2>&1 && command -v perl >/dev/null 2>&1; then
+  SILENT_PORT_FILE="$TMP_ROOT/silent.port"
+  perl -MIO::Socket::INET -e '
+    my $s = IO::Socket::INET->new(LocalAddr => "127.0.0.1", LocalPort => 0, Listen => 5, ReuseAddr => 1) or die "listen: $!";
+    open(my $f, ">", $ARGV[0]) or die; print $f $s->sockport, "\n"; close $f;
+    alarm 60; my @held; while (my $c = $s->accept) { push @held, $c }
+  ' "$SILENT_PORT_FILE" &
+  SILENT_PID=$!
+  i=0
+  while [ ! -s "$SILENT_PORT_FILE" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+  [ -s "$SILENT_PORT_FILE" ] || fail "the silent test peer did not start"
+  cat > "$TMP_ROOT/silent-ssh.config" <<EOF
+Host remote-mac
+  HostName 127.0.0.1
+  Port $(cat "$SILENT_PORT_FILE")
+  StrictHostKeyChecking yes
+  UserKnownHostsFile /dev/null
+EOF
+  cat > "$FAKEBIN/silent-ssh" <<SH
+#!/usr/bin/env bash
+exec ssh -F "$TMP_ROOT/silent-ssh.config" "\$@"
+SH
+  chmod +x "$FAKEBIN/silent-ssh"
+  SILENT_START=$(date +%s)
+  set +e
+  FM_HOME="$LOCAL_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" FM_SSH_BIN="$FAKEBIN/silent-ssh" \
+    FM_SSH_CONNECT_TIMEOUT=2 perl -e 'alarm 30; exec @ARGV' "$ROOT/bin/fm-on.sh" ios fm-probe-two.sh \
+    > /dev/null 2> "$TMP_ROOT/silent.err"
+  SILENT_RC=$?
+  set -e
+  SILENT_ELAPSED=$(( $(date +%s) - SILENT_START ))
+  kill "$SILENT_PID" 2>/dev/null || true
+  wait "$SILENT_PID" 2>/dev/null || true
+  [ "$SILENT_RC" -eq 255 ] || fail "a silent peer did not end as an ssh transport failure (exit $SILENT_RC after ${SILENT_ELAPSED}s): $(cat "$TMP_ROOT/silent.err")"
+  [ "$SILENT_ELAPSED" -le 10 ] || fail "the connect timeout did not bound a silent peer (took ${SILENT_ELAPSED}s)"
+  pass "fm-on gives up on a peer that never sends a banner after the connect timeout (${SILENT_ELAPSED}s, exit 255)"
+else
+  echo "skip: real ssh or perl unavailable; silent-peer connect-timeout check not run"
+fi
+
 out=$(TOP_SECRET='must-not-cross' fm_on remote-mac fm-probe-two.sh)
 assert_contains "$out" "home=$REMOTE_HOME" "remote FM_HOME was not explicit"
 assert_contains "$out" "root=$REMOTE_ROOT" "remote root was not explicit"

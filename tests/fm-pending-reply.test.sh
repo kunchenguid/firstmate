@@ -29,6 +29,7 @@
 #  15. Remote parent-replies.status is not classified as wrong-home
 #  16. An escalated correlation stays retryable while undelivered, is never reset
 #      once delivered, and its delivery-unknown decision still closes on resolve
+#  17. A remote busy/idle observation that outlasts its bound reads as unknown
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -1603,6 +1604,67 @@ test_escalated_undelivered_correlation_stays_retryable() {
 # --- run --------------------------------------------------------------------
 
 test_normal_correlated_reply_resolves_once
+
+# A remote mate's busy/idle observation crosses SSH on every tick while a
+# marked request is open. A host that stops answering must not hold the
+# watcher's poll: the observation is hard-bounded and reads as unknown, which
+# never completes the turn or triggers a repost.
+test_remote_observation_is_bounded() {
+  local home state corr rec hook_log fb start elapsed
+  home=$(setup_parent remote-observe-bound)
+  state="$home/state"
+  hook_log="$TMP_ROOT/remote-observe-bound.log"
+  : > "$hook_log"
+  fb="$home/fakebin"
+  mkdir -p "$fb" "$home/data"
+  cat > "$fb/ssh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_FAKE_SSH_LOG"
+[ -z "${FM_FAKE_SSH_SLEEP:-}" ] || sleep "$FM_FAKE_SSH_SLEEP"
+printf 'idle\n'
+SH
+  chmod +x "$fb/ssh"
+  printf -- '- ios - iOS delivery (host: remote-mac; root: /remote/root; home: /remote/ios-home; scope: iOS work; projects: alpha; added 2026-08-02)\n' \
+    > "$home/data/secondmates.md"
+  export FM_PENDING_REPLY_NOW=7000
+  # Invoked indirectly through FM_PENDING_REPLY_SEND_HOOK.
+  # shellcheck disable=SC2329
+  observe_bound_hook() {
+    printf '%s\t%s\n' "$1" "$2" >> "$hook_log"
+  }
+  export -f observe_bound_hook
+  export FM_PENDING_REPLY_SEND_HOOK=observe_bound_hook
+
+  fm_write_meta "$state/ios.meta" \
+    "window=fm-remote:w1:p1" "harness=claude" "kind=secondmate" "mode=secondmate" \
+    "remote_host=remote-mac" "remote_root=/remote/root" "remote_backend=herdr"
+  corr=$(fm_pending_reply_create "$home" "$state" "ios" "is the build green")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  fm_pending_reply_observe_busy "$state" "$corr" busy
+  rec=$(fm_pending_reply_path "$state" "$corr")
+
+  start=$(date +%s)
+  FM_HOME="$home" FM_SSH_BIN="$fb/ssh" FM_FAKE_SSH_LOG="$home/ssh.log" FM_FAKE_SSH_SLEEP=30 \
+    FM_PENDING_REPLY_OBSERVE_TIMEOUT=1 fm_pending_reply_tick "$state" || fail "bounded tick should succeed"
+  elapsed=$(( $(date +%s) - start ))
+  [ "$elapsed" -le 10 ] || fail "a hung remote observation held the tick for ${elapsed}s"
+  grep -q 'fm-remote-entrypoint.sh' "$home/ssh.log" 2>/dev/null \
+    || fail "the tick never attempted the remote observation"
+  [ -z "$(fm_pending_reply_get "$rec" request_turn_completed_epoch)" ] \
+    || fail "a timed-out observation must read as unknown, not as a completed turn"
+  [ "$(phase_of "$state" "$corr")" = awaiting_report ] \
+    || fail "a timed-out observation must leave the expectation armed, got $(phase_of "$state" "$corr")"
+  [ ! -s "$hook_log" ] || fail "a timed-out observation must never trigger a repost"
+
+  # Control: the same answer inside the bound is read, so the case above is not vacuous.
+  FM_HOME="$home" FM_SSH_BIN="$fb/ssh" FM_FAKE_SSH_LOG="$home/ssh.log" \
+    FM_PENDING_REPLY_OBSERVE_TIMEOUT=10 fm_pending_reply_tick "$state" || fail "prompt tick should succeed"
+  [ -n "$(fm_pending_reply_get "$rec" request_turn_completed_epoch)" ] \
+    || fail "an idle observation inside the bound should complete the turn"
+  unset FM_PENDING_REPLY_SEND_HOOK
+  pass "a remote busy/idle observation past FM_PENDING_REPLY_OBSERVE_TIMEOUT reads as unknown (${elapsed}s)"
+}
+
 test_completed_turn_no_report_triggers_one_recovery
 test_recovery_attempt_is_never_reinjected
 test_recovery_reply_resolves_original
@@ -1641,5 +1703,6 @@ test_mechanical_helper_writes_parent_channel
 test_remote_parent_replies_is_not_wrong_home
 test_local_parent_replies_is_wrong_home_evidence
 test_escalated_undelivered_correlation_stays_retryable
+test_remote_observation_is_bounded
 
 printf 'ok - all pending-reply tests passed\n'

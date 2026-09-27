@@ -157,7 +157,9 @@
 # the hard bound FM_WATCHER_STALL_BOUND (default 3x that grace) is instead
 # evicted with TERM after its recorded identity is re-verified, and this arm
 # starts in its place, printing "watcher: replaced stalled pid <N> (...)". A
-# holder that survives TERM keeps the refusal and the nonzero exit.
+# holder that has not exited within the short wait after TERM is refused with
+# "watcher: sent TERM to stalled pid <N> ... but it has not exited yet" and the
+# nonzero exit; the next arm finds the lock free once it has.
 # Once per poll the watcher also checks that its home (when it existed at
 # start), its state directory, and its own bin directory still exist; when one
 # is gone it logs "watcher: exiting - <what> no longer exists: <path>" to stderr
@@ -2359,11 +2361,14 @@ fi
 # lock's own recorded identity (fm_watcher_lock_matches_pid: this home, this
 # script, and the starttime+cmdline proof the lock carries), so a recycled pid
 # is never touched; TERM only, never KILL, and never a name or pattern match.
-# Succeeds only once the holder has exited within the bounded wait.
+# Succeeds only once the holder has exited within the bounded wait; sets
+# EVICT_TERM_PID to the pid the TERM was delivered to, so that holder, still
+# finishing its current command, is refused with its own message.
 evict_stalled_holder() {
   local pid=$1 i=0
   fm_watcher_lock_matches_pid "$STATE" "$WATCH_PATH" "$pid" "$FM_HOME" || return 1
   kill -TERM "$pid" 2>/dev/null || return 1
+  EVICT_TERM_PID=$pid
   while [ "$i" -lt 50 ] && fm_pid_alive "$pid"; do
     sleep 0.1
     i=$((i + 1))
@@ -2373,6 +2378,7 @@ evict_stalled_holder() {
 
 EVICTED_PID=
 EVICTED_BEAT_AGE=
+EVICT_TERM_PID=
 BEAT="$STATE/.last-watcher-beat"
 while ! fm_lock_try_acquire "$WATCH_LOCK"; do
   if [ -n "${FM_LOCK_HELD_PID:-}" ]; then
@@ -2387,6 +2393,10 @@ while ! fm_lock_try_acquire "$WATCH_LOCK"; do
           EVICTED_PID=$FM_LOCK_HELD_PID
           EVICTED_BEAT_AGE=$beat_age
           continue
+        fi
+        if [ "$FM_LOCK_HELD_PID" = "$EVICT_TERM_PID" ]; then
+          echo "watcher: sent TERM to stalled pid $FM_LOCK_HELD_PID (beacon ${beat_age}s past hard bound ${WATCHER_STALL_BOUND}s) but it has not exited yet; it exits once its current command returns, so re-arm again shortly." >&2
+          exit 1
         fi
         echo "watcher: lock held by live pid $FM_LOCK_HELD_PID but heartbeat is stale for ${beat_age}s (>${WATCHER_STALE_GRACE}s); inspect or stop that watcher before re-arming." >&2
         exit 1

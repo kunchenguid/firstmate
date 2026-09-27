@@ -229,6 +229,116 @@ test_live_stalled_watch_lock_is_replaced_past_hard_bound() {
   pass "live watcher lock with a beacon past the hard bound is replaced, under it is still refused"
 }
 
+test_stalled_holder_inside_remote_probe_is_replaced() {
+  # A holder stalled inside a remote secondmate probe (the ssh call frozen by
+  # host sleep or a silent peer) must still be evictable: bash 3.2 defers a
+  # fatal TERM while a command substitution is being read, so a probe captured
+  # with $(...) kept the holder alive past the eviction wait and the re-arm was
+  # refused. The probe blocks in `wait` instead, where TERM lands at once.
+  local dir state fakebin out err holder holder_out pid i lock_pid stub_pid
+  dir=$(make_case stalled-in-remote-probe)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  err="$dir/watch.err"
+  holder_out="$dir/holder.out"
+  mkdir -p "$dir/data"
+  cat > "$state/rsm1.meta" <<EOF
+window=remote:rsm1
+kind=secondmate
+harness=claude
+remote_host=lab-host
+remote_backend=herdr
+remote_herdr_session=fm-remote
+remote_target=fm-remote:w1:p1
+home=/remote/rsm1-home
+EOF
+  printf -- '- rsm1 - Remote mate (host: lab-host; root: /remote/root; home: /remote/rsm1-home; scope: remote work; projects: alpha; added 2026-01-01)\n' \
+    > "$dir/data/secondmates.md"
+  cat > "$fakebin/ssh" <<SH
+#!/usr/bin/env bash
+sleep 60 &
+printf '%s\n' "\$!" > "$dir/ssh.pid"
+wait
+printf 'alive\n'
+SH
+  chmod +x "$fakebin/ssh"
+  # fm-on only routes tracked commands of a real checkout, so this holder runs
+  # against the repository root rather than the suite's inert tangle root.
+  PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_SSH_BIN="$fakebin/ssh" \
+    FM_SECONDMATE_LIVENESS_SECS=1 FM_SECONDMATE_PROBE_TIMEOUT=120 FM_GUARD_GRACE=1 FM_POLL=5 \
+    FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$holder_out" 2>&1 &
+  holder=$!
+  i=0
+  while [ ! -s "$dir/ssh.pid" ] && [ "$i" -lt 200 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -s "$dir/ssh.pid" ] || fail "the holder never reached its remote probe: $(cat "$holder_out")"
+  stub_pid=$(cat "$dir/ssh.pid")
+  is_live_non_zombie "$holder" || fail "the holder died before the stall: $(cat "$holder_out")"
+  touch -t 200001010000 "$state/.last-watcher-beat"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_SSH_BIN="$fakebin/ssh" \
+    FM_GUARD_GRACE=1 FM_WATCHER_STALL_BOUND=3 FM_SECONDMATE_LIVENESS_SECS=999999 FM_POLL=5 \
+    FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2> "$err" &
+  pid=$!
+  i=0
+  lock_pid=
+  while [ "$i" -lt 100 ]; do
+    lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+    [ "$lock_pid" = "$pid" ] && break
+    is_live_non_zombie "$pid" || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$lock_pid" = "$pid" ] \
+    || fail "a holder stalled in its remote probe was not replaced (holder=$lock_pid): $(cat "$out" "$err")"
+  is_live_non_zombie "$holder" && fail "the holder stalled in its remote probe survived the eviction"
+  i=0
+  while [ "$i" -lt 100 ]; do
+    grep -E "^watcher: replaced stalled pid $holder " "$out" >/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -E "^watcher: replaced stalled pid $holder " "$out" >/dev/null \
+    || fail "watcher did not report the replacement: $(cat "$out" "$err")"
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  kill "$stub_pid" 2>/dev/null || true
+  pass "a holder stalled inside a remote probe is evicted and replaced"
+}
+
+test_holder_still_finishing_after_term_gets_its_own_refusal() {
+  # A holder that has not exited within the eviction wait already has its TERM;
+  # the refusal must say so instead of asking the operator to inspect or stop it.
+  local dir state fakebin out err status holder identity
+  dir=$(make_case term-sent-refusal)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  err="$dir/watch.err"
+  bash -c 'trap "" TERM; exec sleep 300' &
+  holder=$!
+  sleep 0.2
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$holder") || fail "could not identify the fake holder"
+  mkdir -p "$state/.watch.lock"
+  printf '%s\n' "$holder" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+  touch -t 200001010000 "$state/.last-watcher-beat"
+  status=0
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 FM_WATCHER_STALL_BOUND=3 FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2> "$err" || status=$?
+  [ "$status" -ne 0 ] || fail "watcher started beside a holder that survived its TERM"
+  grep -E "^watcher: sent TERM to stalled pid $holder \(beacon [0-9]+s past hard bound 3s\) but it has not exited yet" "$err" >/dev/null \
+    || fail "the refusal after a delivered TERM did not say so: $(cat "$out" "$err")"
+  grep -F 'inspect or stop' "$err" >/dev/null && fail "the refusal after a delivered TERM still asked to inspect or stop the holder"
+  kill -KILL "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  pass "a holder still finishing after its TERM is refused with its own message"
+}
+
 test_guard_warnings() {
   # The guard's two operator-visible states, with resilient substrings instead of
   # four copy-coupled tests:
@@ -1539,6 +1649,8 @@ test_stale_watch_lock_reclaimed
 test_stale_watch_reclaim_publishes_before_clear
 test_live_stale_watch_lock_is_actionable
 test_live_stalled_watch_lock_is_replaced_past_hard_bound
+test_stalled_holder_inside_remote_probe_is_replaced
+test_holder_still_finishing_after_term_gets_its_own_refusal
 test_guard_warnings
 test_lock_single_winner_under_concurrency
 test_lock_steals_dead_pid_lock

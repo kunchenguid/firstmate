@@ -32,6 +32,13 @@
 # is doing, so a legitimately long-but-alive remote command is never falsely
 # killed. FM_SSH_ALIVE_INTERVAL and FM_SSH_ALIVE_COUNT_MAX override the
 # defaults; the worst-case detection window is roughly interval * count.
+# Keepalives only run inside an established session, so ConnectTimeout
+# (FM_SSH_CONNECT_TIMEOUT, default 15 seconds) bounds the TCP connect and the
+# banner exchange before it, where a peer that accepts the connection but never
+# answers would otherwise hold the caller indefinitely. BatchMode=yes makes any
+# prompt (a passphrase, password, or unknown host key) fail at once instead of
+# waiting for input no background caller can give. All three values must be
+# positive integers.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -106,15 +113,20 @@ ARGV_B64=$(printf '%s\0' "$COMMAND" "$@" | encode_base64)
 SSH_BIN=${FM_SSH_BIN:-ssh}
 ALIVE_INTERVAL=${FM_SSH_ALIVE_INTERVAL:-15}
 ALIVE_COUNT_MAX=${FM_SSH_ALIVE_COUNT_MAX:-3}
+CONNECT_TIMEOUT=${FM_SSH_CONNECT_TIMEOUT:-15}
 case "$ALIVE_INTERVAL" in ''|*[!0-9]*) die "FM_SSH_ALIVE_INTERVAL must be a positive integer: $ALIVE_INTERVAL" ;; esac
 case "$ALIVE_COUNT_MAX" in ''|*[!0-9]*) die "FM_SSH_ALIVE_COUNT_MAX must be a positive integer: $ALIVE_COUNT_MAX" ;; esac
+case "$CONNECT_TIMEOUT" in ''|*[!0-9]*) die "FM_SSH_CONNECT_TIMEOUT must be a positive integer: $CONNECT_TIMEOUT" ;; esac
 [ "$ALIVE_INTERVAL" -gt 0 ] || die "FM_SSH_ALIVE_INTERVAL must be a positive integer: $ALIVE_INTERVAL"
 [ "$ALIVE_COUNT_MAX" -gt 0 ] || die "FM_SSH_ALIVE_COUNT_MAX must be a positive integer: $ALIVE_COUNT_MAX"
+[ "$CONNECT_TIMEOUT" -gt 0 ] || die "FM_SSH_CONNECT_TIMEOUT must be a positive integer: $CONNECT_TIMEOUT"
 
 SSH_ARGS=(
   -o ForwardAgent=no
   -o ClearAllForwardings=yes
   -o 'SendEnv=-*'
+  -o BatchMode=yes
+  -o "ConnectTimeout=$CONNECT_TIMEOUT"
   -o "ServerAliveInterval=$ALIVE_INTERVAL"
   -o "ServerAliveCountMax=$ALIVE_COUNT_MAX"
   -- "$HOST" fm-remote-entrypoint.sh "$PROTOCOL" "$ROOT_B64" "$HOME_B64" "$ARGV_B64"
