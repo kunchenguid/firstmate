@@ -61,7 +61,8 @@ Scoping the second source to the foreground process group rather than to the pan
 The same scoping covers multi-process launchers without a special case, so the Pi Launcher path is attributed through its `pi-signed` wrapper and `pi` engine even though its title is the exact foreground command `pi-launcher`.
 Direct executable identities `pi`, `pi-signed`, and `Pi` remain accepted exactly, and similar or prefixed process names are not accepted through those exact Pi-family entries.
 Muse is likewise anchored to the exact `muse` launcher identity or the installed `muse-bin-<version>` prefix, so unrelated names such as `musescore` and `amuse` remain ambiguous.
-omp is anchored to the exact `omp` identity for the same reason, so `ompd` and `comp` remain ambiguous.
+omp is anchored to the exact native `omp` identity, so `ompd` and `comp` remain ambiguous.
+Bun-script OMP reports `comm=bun`, which this liveness classifier does not identify and therefore reads as `ambiguous` until its process vocabulary accepts the OMP entrypoint.
 AGY and Devin are anchored to the exact `agy` and `devin` identities for the same reason, so unrelated names containing either fragment remain ambiguous.
 Cursor is identified from its exact `cursor-agent` identity or versioned install tree in the foreground process path or structured argv[0]; a bare `node` or unrelated `agent` remains ambiguous.
 

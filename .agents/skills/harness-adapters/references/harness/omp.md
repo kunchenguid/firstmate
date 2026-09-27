@@ -31,7 +31,7 @@ omp cold start is roughly twenty seconds to the first agent turn, paid once per 
 
 `../../../bin/fm-harness.sh` tests `FM_OMP_HARNESS=omp` before `CLAUDECODE`, but trusts it only under a native `omp` or Bun directly executing `~/.bun/bin/omp` or `node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js`.
 The packaged CLI can replace the initial script path during resume without changing the process PID; a later argument merely naming either entrypoint is not identity.
-The omp template in `../../../bin/fm-spawn.sh` clears foreign markers at launch, and `../../../bin/fm-session-lock-lib.sh` shares the OMP process matcher for lock ownership; `../../../bin/backends/tmux.sh` classifies native `omp` as `agent` for liveness.
+The omp template in `../../../bin/fm-spawn.sh` clears foreign markers at launch, and `../../../bin/fm-session-lock-lib.sh` shares the OMP process matcher for lock ownership; `../../../docs/tmux-backend.md` owns the separate liveness classification.
 The optional claude-bridge extension runs a nested executable literally named `claude` as a sibling of tool execution, never an ancestor of it, so omp's own tool calls detect as omp; that subtree is never walked by a Firstmate script.
 
 ## Worker posture overlay
