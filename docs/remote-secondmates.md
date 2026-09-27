@@ -508,6 +508,10 @@ A process-event source takes these steps:
 - It mirrors content-bearing lines into the primary status channel.
 - It does not carry blank separators.
 
+The listener holds its claim across an empty wait and across a delta it re-arms, so a line appended during either is collected without waiting for the next supervision cycle.
+It stops when that registration is retired, the registered command changes, or the home's owner lease lapses.
+`bin/fm-procevent.sh` owns the generic relisten rule, and `bin/fm-procevent-remote-reply.sh` owns this adapter's answer.
+
 Only a structured `report=data/....md` pointer offers a document.
 A bare path inside prose is a mention.
 So writing about a document, including one the mate has not created yet, never asks this channel to fetch it.

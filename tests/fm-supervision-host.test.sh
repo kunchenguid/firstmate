@@ -752,6 +752,29 @@ test_attended_main_only_close_passes_straight_to_main() {
   pass "host: an attended decision close stays main's exactly as the plain arm delivers it"
 }
 
+# The live failure this guards: a main-only pass-through used to exit without
+# a watcher, so nothing restarted short-lived listeners until the session
+# armed again. The close still reaches main unchanged, and the successor
+# cycle stays up for the session's next arm to attach to.
+test_main_only_pass_through_leaves_the_successor_watcher_running() {
+  local home pid
+  home=$(make_home main-only-successor attended)
+  start_host "$home"
+  wait_until 150 watcher_live "$home" || fail "successor: the host never started a watcher cycle"
+  append_status "$home" 'which export format?' needs-decision
+  wait_until 250 host_exited "$home" || fail "successor: the decision close did not reach main: $(cat "$home/state/.supervision-host.log")"
+  expect_code 0 "$(cat "$home/host.rc")" "a main-only close must exit 0"
+  assert_re '^signal: .*demo.status' "$home/host.out" "the close must carry the watcher's reason line"
+  assert_no_re '^supervision-host' "$home/host.out" "a main-only close must reach main exactly as the arm printed it"
+  [ "$(engine_calls "$home")" -eq 0 ] || fail "successor: the engine ran for a decision close"
+  watcher_live "$home" || fail "successor: the pass-through left no live watcher: $(cat "$home/state/.supervision-host.log")"
+  pid=$(cat "$home/state/.watch.lock/pid")
+  sleep 2
+  kill -0 "$pid" 2>/dev/null || fail "successor: the watcher exited after the pass-through (pid $pid)"
+  [ "$(cat "$home/state/.watch.lock/pid" 2>/dev/null)" = "$pid" ] || fail "successor: the watcher lock moved after the pass-through"
+  pass "host: a main-only pass-through leaves the successor watcher running"
+}
+
 # The session-lock holder's process identity cannot be read (its proc entry
 # is truncated), so no main-session key exists: the close reaches main exactly
 # as the arm printed it, before any mirror feed or engine turn.
@@ -824,7 +847,7 @@ SH
   ' "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$home/state" "signal: $home/state/demo.status")
   [ "$pi_offer" = true ] || fail "the host-only transition veto changed Pi's existing offer rule"
   assert_re '	pass-through	attended	main-only	signal:' "$home/state/.supervision-host.log" "the ledger must record why the close went to main"
-  watcher_live "$home" && fail "the pass-through left the successor watcher running"
+  watcher_live "$home" || fail "the pass-through left no successor watcher"
   pass "host: an attended close whose task turns main-only before its turn still reaches main unchanged"
 }
 
@@ -860,7 +883,7 @@ SH
   assert_grep 'demo.status' "$home/state/.wake-queue" "the decision wake must stay queued for main"
   assert_re '	pass-through	attended	main-only	signal:' "$home/state/.supervision-host.log" "the ledger must record why the close went to main"
   assert_no_re '	no-op	' "$home/state/.supervision-host.log" "the close must not be treated as handled"
-  watcher_live "$home" && fail "the pass-through left the successor watcher running"
+  watcher_live "$home" || fail "the pass-through left no successor watcher"
   pass "host: a decision close accepted away whose turn starts attended still reaches main unchanged"
 }
 
@@ -962,12 +985,39 @@ SH
 # the watcher's downtime resurface, which main drains before the next park.
 # That close can end the park before its cycle is ever seen live, so this
 # waits for the exit itself.
+# The resurface pass-through leaves its successor running. Stop that watcher
+# and acknowledge the downtime its exit records, so the next park starts a
+# watcher it owns. Attaching instead would not observe the exit until the
+# beacon went stale, and this fixture's turn budget would already be gone.
+quiet_pass_through_successor() {  # <home>
+  local home=$1 pid i gen
+  pid=$(cat "$home/state/.watch.lock/pid" 2>/dev/null || true)
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    kill -TERM "$pid" 2>/dev/null || true
+    i=0
+    while [ "$i" -lt 50 ] && kill -0 "$pid" 2>/dev/null; do
+      sleep 0.1
+      i=$((i + 1))
+    done
+    kill -0 "$pid" 2>/dev/null && fail "fixture: the pass-through successor did not stop"
+  fi
+  gen=$(cat "$home/state/.watcher-down" 2>/dev/null || true)
+  gen=${gen##*:}
+  [ -n "$gen" ] || return 0
+  FM_HOME="$home" bash -c '
+    . "$1"
+    fm_recovery_marker_ack "$2" "$3"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$home/state/.watcher-down" "$gen" \
+    || fail "fixture: could not acknowledge the successor downtime"
+}
+
 park_after_stop() {  # <home>
   rm -f "$1/host.rc"
   : > "$1/park.go"
   wait_until 150 host_exited "$1" || fail "the watcher's downtime resurface did not reach main: $(cat "$1/host.out")"
   assert_re '^check: rearm-resurface' "$1/host.out" "fixture: the first close after the watcher stopped was not its resurface"
   main_drain_and_ack "$1"
+  quiet_pass_through_successor "$1"
   park_again "$1"
 }
 
@@ -2054,6 +2104,7 @@ test_attended_routine_wake_is_handled_on_the_engine_and_stays_off_main
 test_attended_captain_outcome_reaches_main_through_branch_outcomes
 test_captain_leaving_mid_turn_keeps_its_captain_outcome_for_the_return
 test_attended_main_only_close_passes_straight_to_main
+test_main_only_pass_through_leaves_the_successor_watcher_running
 test_attended_close_with_unidentified_main_session_passes_to_main
 test_close_accepted_away_that_turns_attended_passes_to_main
 test_attended_close_that_turns_main_only_before_its_turn_passes_to_main
