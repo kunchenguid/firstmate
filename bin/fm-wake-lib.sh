@@ -766,6 +766,19 @@ fm_recovery_marker_snapshot() {
   fm_lock_release "$lock"
 }
 
+# Lock-free marker read for poll-loop probes that only compare generations.
+# Safe without the marker lock because every marker write is an atomic
+# same-directory rename, so a concurrent reader observes either the old or the
+# new single-line token, never a partial one. A handling successor's poll loop
+# relies on this to stay off the marker lock entirely (tests/fm-watch-triage.test.sh
+# pins that no-lock property for its held-lock stop tests); a caller that
+# consumes or rewrites the episode must still hold the lock through
+# fm_recovery_marker_snapshot or _fm_recovery_marker_arm_check.
+fm_recovery_marker_probe() {
+  FM_RECOVERY_MARKER_TOKEN=
+  fm_recovery_marker_read "$1" || return 1
+}
+
 _fm_recovery_marker_ack() {
   local marker=$1 expected_generation=$2 lock tmp line
   [ -n "$expected_generation" ] || return 2

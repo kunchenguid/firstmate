@@ -222,5 +222,77 @@ test_handling_successor_does_not_go_blind() {
   pass "a resurfacing handling successor stays alive and supervises instead of going blind"
 }
 
+# T3: a captain note saved while a handling-successor cycle is live must close
+# that cycle through the recovery announcement within a few polls. The
+# successor's stand-down covers only the generation inherited at startup, so a
+# note whose append mints a newer generation (the inherited episode was already
+# acknowledged) is this cycle's to announce, while the inherited generation
+# itself must stay unannounced from this cycle.
+test_handling_successor_announces_a_new_inbox_note() {
+  local dir home state fakebin out note_out child marker now row
+  dir=$(make_case recovery-successor-note)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  mkdir -p "$home/data"
+  : > "$state/crew.meta"
+  # The live pre-note state: the episode the predecessor delivered was
+  # handled and acknowledged, and this successor inherited that generation.
+  printf 'acked:handling:seed.1.aaa\n' > "$state/.watcher-down"
+  chmod 600 "$state/.watcher-down"
+  out="$dir/watch.out"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=600 \
+    FM_WATCH_HANDLING_SUCCESSOR=1 "$WATCH" > "$out" 2>&1 &
+  child=$!
+  now=0
+  while [ "$now" -lt 40 ]; do
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$child" ] && break
+    sleep 0.1
+    now=$((now + 1))
+  done
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$child" ] \
+    || { kill -TERM "$child" 2>/dev/null || true; wait "$child" 2>/dev/null || true; fail "handling successor did not take the watcher lock"; }
+  # Two polls with the inherited generation still standing must stay silent.
+  sleep 2.5
+  if grep -q 'check: rearm-resurface' "$out" 2>/dev/null; then
+    kill -TERM "$child" 2>/dev/null || true; wait "$child" 2>/dev/null || true
+    fail "handling successor announced its inherited generation: $(cat "$out")"
+  fi
+  kill -0 "$child" 2>/dev/null \
+    || { fail "handling successor exited before any note was saved: $(cat "$out")"; }
+  note_out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-inbox.sh" note "successor must surface this note" 2>&1)
+  row=$(grep "$(printf '\tcheck\tinbox:')" "$state/.wake-queue" 2>/dev/null | tail -1 || true)
+  [ -n "$row" ] \
+    || { kill -TERM "$child" 2>/dev/null || true; wait "$child" 2>/dev/null || true; fail "the note appended no durable check row: $note_out"; }
+  now=0
+  while [ "$now" -lt 30 ]; do
+    kill -0 "$child" 2>/dev/null || break
+    sleep 0.5
+    now=$((now + 1))
+  done
+  if kill -0 "$child" 2>/dev/null; then
+    kill -TERM "$child" 2>/dev/null || true; wait "$child" 2>/dev/null || true
+    fail "the note did not close the handling-successor cycle within a few polls: $(cat "$out")"
+  fi
+  wait "$child" 2>/dev/null || true
+  grep -q '^check: rearm-resurface' "$out" \
+    || fail "the note closed the successor cycle without the recovery announcement: $(cat "$out")"
+  marker=$(cat "$state/.watcher-down" 2>/dev/null || true)
+  case "$marker" in
+    announced:downtime:*) ;;
+    *) fail "the announced episode did not become announced downtime: $marker" ;;
+  esac
+  [ "${marker##*:}" != "seed.1.aaa" ] \
+    || fail "the announcement reused the inherited generation: $marker"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf 'T3_NOTE=%s\n' "$note_out"
+    printf 'T3_MARKER=%s\n' "$marker"
+    printf 'T3_ROW=%s\n' "$row"
+  fi
+  pass "a handling successor announces a captain note's newer generation within a few polls"
+}
+
 test_handling_successor_does_not_go_blind
+test_handling_successor_announces_a_new_inbox_note
 test_unacknowledged_recovery_is_announced_once_per_generation
