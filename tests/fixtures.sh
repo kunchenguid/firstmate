@@ -303,6 +303,10 @@ fm_test_make_spawn_fakebin() {
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
 if [ "$1" = "status" ] && [ "$2" = "--json" ]; then
+  if [ "${FM_TEST_TREEHOUSE_STATUS_EXIT:-0}" -ne 0 ]; then
+    echo 'treehouse registry unavailable' >&2
+    exit "$FM_TEST_TREEHOUSE_STATUS_EXIT"
+  fi
   pool=$(dirname "$(dirname "$(pwd -P)")")
   if [ -f "$pool/treehouse-state.json" ]; then
     # Translate test fixture format {"worktrees": [...]} to real output format [...]
@@ -316,6 +320,18 @@ if [ "$1" = "status" ] && [ "$2" = "--json" ]; then
   fi
   echo "[]"
   exit 0
+fi
+if [ "$1" = "return" ] && [ "$2" = "--force" ]; then
+  [ "${FM_TEST_TREEHOUSE_STRICT_RETURN:-0}" -eq 1 ] || exit 0
+  pool=$(dirname "$(dirname "$(pwd -P)")")
+  if [ -f "$pool/treehouse-state.json" ] \
+    && jq -e --arg path "$3" '.worktrees[]? | select(.path == $path)' \
+      "$pool/treehouse-state.json" >/dev/null; then
+    printf 'returned %s\n' "$3"
+    exit 0
+  fi
+  echo "worktree $3 is not managed by treehouse" >&2
+  exit 1
 fi
 exit 0
 SH

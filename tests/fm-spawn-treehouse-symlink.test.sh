@@ -44,7 +44,7 @@ read_case_record() {
 }
 
 test_symlinked_pool_slot() {
-  local rec id out status pool_real pool_symlink slot_root slot_symlink
+  local rec id out status pool_real pool_symlink slot_root slot_symlink recorded_worktree
   id='symlink-pool-r1'
   rec=$(make_case symlink-pool "$id")
   read_case_record "$rec"
@@ -78,7 +78,15 @@ test_symlinked_pool_slot() {
   assert_grep "worktree=$slot_symlink" "$HOME_DIR/state/$id.meta" \
     "spawn did not record the canonical symlinked Treehouse path: $(cat "$HOME_DIR/state/$id.meta")"
 
-  pass "a spaced symlinked Treehouse slot records the canonical registry path"
+  recorded_worktree=$(sed -n 's/^worktree=//p' "$HOME_DIR/state/$id.meta")
+  out=$(cd "$POOL_DIR" && FM_TEST_TREEHOUSE_STRICT_RETURN=1 \
+    treehouse return --force "$recorded_worktree" 2>&1)
+  status=$?
+  expect_code 0 "$status" "treehouse did not accept the registry spelling persisted for teardown"$'\n'"$out"
+  assert_contains "$out" "returned $slot_symlink" \
+    "treehouse return did not receive the registry spelling persisted by spawn"
+
+  pass "a spaced symlinked Treehouse slot records a path that treehouse accepts for return"
 }
 
 test_unmanaged_pool_slot_refused() {
@@ -111,7 +119,33 @@ test_unmanaged_pool_slot_refused() {
   pass "an unmanaged Treehouse slot is refused at spawn time"
 }
 
+test_unavailable_registry_refused() {
+  local rec id out status pool_real slot_root
+  id='registry-unavailable-r1'
+  rec=$(make_case registry-unavailable "$id")
+  read_case_record "$rec"
+
+  pool_real="$CASE_DIR/real-pool"
+  slot_root="$pool_real/slots"
+  mkdir -p "$slot_root/1"
+  git -C "$PROJECT_DIR" worktree add "$slot_root/1/project"
+  printf '{"worktrees":[{"name":"1","path":"%s"}]}' "$slot_root/1/project" \
+    > "$slot_root/treehouse-state.json"
+  POOL_DIR="$slot_root/1/project"
+
+  out=$(FM_TEST_TREEHOUSE_STATUS_EXIT=9 run_spawn "$id" --scout)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn launched a worker while treehouse status was unavailable"
+  assert_contains "$out" "could not query Treehouse registry" \
+    "spawn did not distinguish a failed treehouse status query from a missing registry slot"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] \
+    || fail "spawn published task metadata after the Treehouse registry query failed"
+
+  pass "an unavailable Treehouse registry is refused before task state is published"
+}
+
 # Run the test
 test_symlinked_pool_slot
 test_unmanaged_pool_slot_refused
+test_unavailable_registry_refused
 echo "# all fm-spawn-treehouse-symlink tests passed"

@@ -157,6 +157,15 @@
 #   while it still holds the allocation lock drops its own claim; an abort after
 #   metadata publication has released that lock leaves the claim in place, and
 #   the next spawn's claim replaces it.
+#   Before publishing that record, a Treehouse-backed spawn replaces the
+#   filesystem-resolved worktree spelling with the matching path from Treehouse's
+#   registry, proved by device and inode rather than a symlink-specific rule.
+#   This keeps Treehouse's string-keyed return operation aligned with `worktree=`
+#   when a pool root is symlinked. A failed `treehouse status --json` and a slot
+#   missing from that registry refuse separately, so the operator can distinguish
+#   a registry query failure from an unmanaged slot. The refusal remains strict:
+#   recording an unresolved path would defer the fault to teardown, where it can
+#   leave an unmanaged process and lease dangling.
 #   The local root is whatever bin/fm-wake-lib.sh's
 #   fm_firstmate_root_home resolves, so a home seeded from another machine anchors
 #   that lock itself rather than failing to resolve one;
