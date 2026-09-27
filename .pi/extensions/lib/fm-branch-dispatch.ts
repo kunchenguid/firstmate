@@ -182,14 +182,12 @@ const UNSAFE_SCOPE: UnreadWakeScope = {
 // (fm-primary-pi-watch.ts forces every check-kind TRIGGER to main), so nothing
 // starves by being left behind.
 //
-// A signal row whose payload is "needs-decision:"-prefixed, or a stale row
-// for a task with an open needs-decision or a current captain-held declaration,
+// A signal row marked "needs-decision:" by the watcher, a second-mate signal
+// whose presented span owns a decision (spanIsDecisionOwned), or a stale row
+// for a task with an open needs-decision or a current captain-held declaration
 // gets the identical treatment: excluded from eligibleSeqs, never a scan veto,
 // and forced to main on its own triggering close (fm-primary-pi-watch.ts's
-// offerWakeToBranch). Heartbeat handling remains independent. A second mate's
-// signal row is decision-owned only by the span presented since the last drain
-// (spanIsDecisionOwned), because its status log is a shared channel in which
-// an unrelated open decision must not pin every routine update to main.
+// offerWakeToBranch). Heartbeat handling remains independent.
 //
 // That applies to a heartbeat review too, and it is the whole point: a
 // heartbeat used to be deferred to main merely because some unrelated check
@@ -346,10 +344,9 @@ function readPresentationCursor(state: string): Map<string, { ident: string; off
   }
 }
 
-// A second-mate signal is decision-owned when a line presented since the last
-// drain is a decision, blocked, or captain-held line, resolves a decision open
-// just before it, or declares the key of a decision still open in the log. A
-// key-less line counts only by its verb.
+// Walk the presented span in order: a resolution must close a decision that
+// was open immediately before that line, not one opened later in the span.
+// docs/pi-supervision-branch.md owns the routing contract.
 function spanIsDecisionOwned(
   open: ReadonlyMap<string, string>,
   presented: readonly string[],
