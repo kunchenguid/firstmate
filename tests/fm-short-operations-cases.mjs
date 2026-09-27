@@ -1,3 +1,4 @@
+import { pluginFixture } from './fm-short-plugin-fixture.mjs';
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import path from 'node:path';
@@ -5,7 +6,7 @@ import {execFile,execFileSync} from 'node:child_process';
 import {pathToFileURL} from 'node:url';
 const [root,tmp]=process.argv.slice(2);
 const {ShortAgents,validate}=await import(pathToFileURL(path.join(root,'bin/fm-short-agent.mjs')));
-const {resource,processIdentity}=await import(pathToFileURL(path.join(root,'bin/fm-short-operations.mjs')));
+const {resource,processIdentity,bindOperations}=await import(pathToFileURL(path.join(root,'bin/fm-short-operations.mjs')));
 const home=path.join(tmp,'home'),pkg=path.join(tmp,'sdk');
 fs.mkdirSync(path.join(home,'state'),{recursive:true});
 fs.writeFileSync(path.join(home,'state/.lock'),String(process.pid));
@@ -13,20 +14,24 @@ fs.mkdirSync(path.join(pkg,'dist/core'),{recursive:true});
 fs.writeFileSync(path.join(pkg,'package.json'),JSON.stringify({name:'@earendil-works/pi-coding-agent',main:'dist/index.js',type:'module'}));
 fs.writeFileSync(path.join(pkg,'dist/core/http-dispatcher.js'),'export function configureHttpDispatcher() {}');
 fs.writeFileSync(path.join(pkg,'dist/index.js'),`
+${pluginFixture(pkg)}
 export const createExtensionRuntime=()=>({});
-export const ModelRuntime={create:async()=>({getAvailable:async()=>[{provider:'openai-codex',id:'gpt-5.6-luna'}],streamSimple:async()=>{}})};
-export const SessionManager={inMemory:()=>({})};
+export const ModelRuntime={create:async()=>({provider:{},getProvider(){return this.provider;},getAvailable:async()=>[{provider:'openai-codex',id:'gpt-5.6-luna'}],streamSimple:async(_m,c,opts)=>{if(c.fail) await opts.fetch();}})};
+export const SessionManager={inMemory:()=>({getBranch:()=>[]})};
 export const SettingsManager={inMemory:x=>x};
 export async function createAgentSession(o) {
  const messages=[];
- return {session:{messages,systemPrompt:o.resourceLoader.getSystemPrompt(),getActiveToolNames:()=>o.tools,subscribe(){},dispose(){},getLastAssistantText:()=> 'complete',
+ return {session:{messages,systemPrompt:o.resourceLoader.getSystemPrompt(),getActiveToolNames:()=>o.tools,async bindExtensions(){o.modelRuntime.provider={};},subscribe(){},dispose(){},getLastAssistantText:()=> 'complete',
  async prompt(prompt) {
   const p=JSON.parse(prompt);
+  const transportFailure=()=>o.modelRuntime.streamSimple({}, {fail:true}, {fetch:async()=>{throw new TypeError('fetch failed',{cause:Object.assign(new Error('hidden'),{code:'ECONNRESET'})});}});
+  if(p.goal==='transport-before') await transportFailure();
   if(p.goal.startsWith('delay')) await new Promise(r=>setTimeout(r,500));
   await o.modelRuntime.streamSimple({}, {}, {});
   const tool=o.customTools.find(t=>t.name==='run_operations');
   if(!tool) throw Error('operations absent');
   const first=await tool.execute('op',p.goal==='inject'?{command:'touch BAD'}:{});
+  if(p.goal==='transport-after') await transportFailure();
   if(p.goal==='repeat' && JSON.stringify(await tool.execute('again',{}))!==JSON.stringify(first)) throw Error('receipt replay changed');
   messages.push({role:'assistant',stopReason:'stop'});
  }}};
@@ -63,6 +68,20 @@ const child=JSON.parse(fs.readFileSync(path.join(service.dir(a.id),'started.json
 const receipt=JSON.parse(fs.readFileSync(path.join(service.dir(a.id),'operation-0.receipt.json')));assert.notEqual(receipt.executor.pid,process.pid);assert.equal(receipt.evidence.head,expected);
 assert.equal(new ShortAgents(home,root).submit(request).id,a.id);
 const replay=await terminal(a.id);assert.equal(replay.finishedAt,done.finishedAt);
+for(const when of ['before','after']) {
+ const input=req('transport-'+when,undefined,'transport-'+when), accepted=service.submit(input);
+ const failed=await terminal(accepted.id);assert.equal(failed.state,'blocked');
+ assert.equal(failed.toolCalls,when==='before'?0:1);assert.equal(failed.requests,when==='before'?1:2);
+ const dir=service.dir(accepted.id), receiptFile=path.join(dir,'operation-0.receipt.json');
+ assert.equal(fs.existsSync(path.join(dir,'operation-0.intent.json')),when==='after');
+ if(when==='after') assert.equal(JSON.parse(fs.readFileSync(receiptFile)).state,'completed');
+ const events=fs.readFileSync(path.join(dir,'journal.jsonl'),'utf8').trim().split('\n').map(JSON.parse);
+ assert.deepEqual(events.filter(e=>e.type==='transport_error').map(e=>e.toolsStarted),[when==='before'?0:1]);
+ const receiptBefore=fs.existsSync(receiptFile)?fs.readFileSync(receiptFile,'utf8'):null;
+ assert.equal(service.submit(input).finishedAt,failed.finishedAt);
+ await service.reconcile();
+ assert.equal(fs.existsSync(receiptFile)?fs.readFileSync(receiptFile,'utf8'):null,receiptBefore,'transport failure never replays effects');
+}
 const inject=service.submit(req('inject',undefined,'inject'));assert.equal((await terminal(inject.id)).state,'blocked');
 assert.ok(!fs.existsSync(path.join(service.dir(inject.id),'operation-0.intent.json')));
 const cancelled=service.submit(req('cancel',undefined,'delay'));service.cancel(cancelled.id);await wait(700);assert.equal(service.status(cancelled.id).state,'cancelled');assert.ok(!fs.existsSync(path.join(service.dir(cancelled.id),'operation-0.intent.json')));
@@ -99,6 +118,24 @@ fs.mkdirSync(path.join(home,'data'),{recursive:true});fs.mkdirSync(path.join(hom
 fs.writeFileSync(path.join(home,'data/backlog.md'),'## In flight\n\n## Queued\n\n## Done\n');
 fs.writeFileSync(path.join(home,'config/backlog-backend'),'manual\n');
 const writeTask=(name)=>fs.writeFileSync(path.join(home,'state',name+'.meta'),`kind=ship\nmode=no-mistakes\nspawn_gen=g1\nwindow=unused-fixture\nworktree=${tmp}/absent\nproject=${project}\npr=https://code.byted.org/example/shortlab/merge_requests/7\npr_head=${'c'.repeat(40)}\n`);
+writeTask('audit-reader');
+const auditFile=path.join(home,'state/audit-reader.meta'),baseMeta=fs.readFileSync(auditFile,'utf8');
+const auditStep={action:'merge',task:'audit-reader',url:'https://code.byted.org/example/shortlab/merge_requests/7'};
+const bindAudit=()=>bindOperations(home,validate(req('audit-reader',[auditStep])).operations);
+const legacyAudit='decisions_reviewed=1\ndecision_keys=\ndecisions_reviewed=1\ndecision_keys=choice-a\ndecisions_reviewed=1\ndecision_keys=choice-a,choice-b\n';
+fs.writeFileSync(auditFile,baseMeta+legacyAudit);assert.equal(bindAudit().length,1,'legacy monotone audit pairs are compatible');
+for(const [field,value] of [['spawn_gen','g1'],['backend','herdr'],['window','unused-fixture'],['herdr_pane_id','w1:p1'],['endpoint_task_id','audit-reader'],['project',project],['worktree',tmp+'/absent'],['pr_head','c'.repeat(40)],['authority','same'],['__proto__','same']]) {
+ const single=baseMeta.includes(field+'=')?baseMeta:baseMeta+field+'='+value+'\n';
+ fs.writeFileSync(auditFile,single+legacyAudit+field+'='+value+'\n');assert.throws(bindAudit,/duplicate task metadata field/,field);
+}
+for(const invalid of [
+ 'decisions_reviewed=1\ndecisions_reviewed=1\n',
+ 'decisions_reviewed=1\ndecision_keys=a\ndecisions_reviewed=1\ndecision_keys=\n',
+ 'decisions_reviewed=0\ndecision_keys=\ndecisions_reviewed=1\ndecision_keys=a\n',
+ 'decisions_reviewed=1\ndecision_keys=\ndecision_keys=a\n',
+ 'decisions_reviewed=1\ndecision_keys=\ndecisions_reviewed=1\ndecision_keys=a,a\n',
+]) {fs.writeFileSync(auditFile,baseMeta+invalid);assert.throws(bindAudit,/duplicate task metadata field|ambiguous completion audit history/);}
+fs.writeFileSync(auditFile,baseMeta+legacyAudit);
 writeTask('merge-one');
 const mergeStep={action:'merge',task:'merge-one',url:'https://code.byted.org/example/shortlab/merge_requests/7'};
 writeTask('merge-leased');
@@ -141,6 +178,15 @@ writeTask('merge-changed');fs.writeFileSync(forge,JSON.stringify({merged:false,c
 const changed=service.submit(req('changed',[{...mergeStep,task:'merge-changed'}],'delay'));
 const changedMeta=path.join(home,'state/merge-changed.meta');fs.writeFileSync(changedMeta,fs.readFileSync(changedMeta,'utf8').replace('spawn_gen=g1','spawn_gen=g2'));
 assert.equal((await terminal(changed.id)).state,'blocked');assert.equal(JSON.parse(fs.readFileSync(forge)).calls,0);
+for(const change of ['inventory','history']) {
+ fs.writeFileSync(auditFile,baseMeta+legacyAudit);
+ const accepted=service.submit(req('audit-drift-'+change,[auditStep],'delay'));
+ fs.writeFileSync(auditFile,baseMeta+(change==='inventory'?legacyAudit+'decisions_reviewed=1\ndecision_keys=choice-a,choice-b,choice-c\n':legacyAudit.replace('decision_keys=\n','decision_keys=choice-a\n')));
+ // The history edit preserves the latest effective inventory and is still valid.
+ assert.equal(bindAudit().length,1);
+ const refused=await terminal(accepted.id);assert.equal(refused.state,'blocked');assert.equal(JSON.parse(fs.readFileSync(forge)).calls,0);
+ assert.ok(!fs.existsSync(path.join(service.dir(accepted.id),'operation-0.effect.json')),'audit drift refuses before effects');
+}
 const altered=service.submit(req('altered',undefined,'delay'));
 const alteredPath=path.join(service.dir(altered.id),'request.json');
 for(let n=0;n<100 && !fs.existsSync(path.join(service.dir(altered.id),'started.json'));n++)await wait(10);
@@ -299,6 +345,64 @@ if(process.env.FM_SHORT_CLEANUP_TARGET) {
   const copyEvidence={landedHead,beforeCopy,afterCopy,beforePool,afterPool,beforePanes,afterPanes,ownerReceipt,result:landedResult,mainExecutionCalls:0,unrelatedPreserved:true};
   fs.writeFileSync(path.join(tmp,'landed-cleanup-evidence.json'),JSON.stringify(copyEvidence,null,2));
   console.log(JSON.stringify({landedCleanupEvidence:path.join(tmp,'landed-cleanup-evidence.json'),returned,unrelatedPreserved:true,result:landedResult}));
+
+  // Real completion owner -> short intake -> guarded scout cleanup. Keep the
+  // captain choices pending throughout, including the source task's own hold.
+  const auditHome=path.join(tmp,'audit-home'),auditTask='audit-cleanup';
+  for(const sub of ['state','data','config',`data/${auditTask}`])fs.mkdirSync(path.join(auditHome,sub),{recursive:true});
+  fs.copyFileSync(path.join(root,'.tasks.toml'),path.join(auditHome,'.tasks.toml'));
+  fs.writeFileSync(path.join(auditHome,'data/backlog.md'),'## In flight\n\n## Queued\n\n## Done\n');
+  fs.writeFileSync(path.join(auditHome,'state/.lock'),String(process.pid));
+  const auditEnv={...process.env,FM_HOME:auditHome,FM_ROOT_OVERRIDE:root,FM_STATE_OVERRIDE:path.join(auditHome,'state'),FM_DATA_OVERRIDE:path.join(auditHome,'data'),FM_CONFIG_OVERRIDE:path.join(auditHome,'config')};
+  const tasks=(...args)=>execFileSync('tasks-axi',args,{cwd:auditHome,env:auditEnv,encoding:'utf8'});
+  const completion=(...args)=>execFileSync('bash',[path.join(root,'bin/fm-captain-hold.sh'),...args],{env:auditEnv,encoding:'utf8'});
+  const auditPane=herdr('tab','create','--workspace',target.workspace,'--cwd',path.join(tmp,'idle'),'--label','fm-audit-cleanup','--no-focus').result;
+  const auditMeta=path.join(auditHome,'state',auditTask+'.meta');
+  fs.writeFileSync(auditMeta,cleanMeta.replace('kind=ship','kind=scout').replaceAll('cleanup-one',auditTask).replaceAll(target.pane,auditPane.root_pane.pane_id).replaceAll(target.tab,auditPane.tab.tab_id));
+  fs.writeFileSync(path.join(auditHome,'data',auditTask,'report.md'),'# Synthetic completed scout\nA held implementation choice remains.\n');
+  tasks('add',auditTask,'Synthetic cleanup with pending choice','--kind','scout','--repo','sample','--start');
+  completion('complete',auditTask,'--none');
+  completion('hold',auditTask,'--reason','Synthetic implementation choice remains open');
+  completion('complete',auditTask,auditTask);
+  const firstReview=fs.readFileSync(auditMeta,'utf8');
+  assert.equal(firstReview.split('\n').filter(l=>l.startsWith('decisions_reviewed=')).length,1);
+  assert.equal(firstReview.split('\n').filter(l=>l.startsWith('decision_keys=')).length,1);
+  assert.ok(firstReview.includes('# previous completion: decision_keys=\n'),'empty reviewed inventory remains in the audit trail');
+  completion('complete',auditTask,auditTask);assert.equal(fs.readFileSync(auditMeta,'utf8'),firstReview,'repeated review is byte-idempotent');
+  const auditService=new ShortAgents(auditHome,root);
+  const cleanupInput=(key)=>({key,goal:'run',acceptance:'owner receipt',materials:[],operations:{authority:'synthetic named-lab scout only',expiresAt:Date.now()+120000,steps:[{action:'cleanup',task:auditTask}]},budget:{timeMs:120000,outputTokens:3072}});
+  // Emulate the historical writer's extra pair, then let the real completion
+  // owner canonicalize it without dropping the pending choice or audit bytes.
+  const oldPair=`decisions_reviewed=1\ndecision_keys=${auditTask}\n`;
+  fs.appendFileSync(auditMeta,oldPair);
+  assert.equal(bindOperations(auditHome,cleanupInput('legacy-bind').operations).length,1);
+  completion('complete',auditTask,auditTask);
+  const normalizedLegacy=fs.readFileSync(auditMeta,'utf8');
+  assert.equal(normalizedLegacy.split('\n').filter(l=>l.startsWith('decision_keys=')).length,1);
+  assert.equal(normalizedLegacy.split('\n').filter(l=>l===`# previous completion: decision_keys=${auditTask}`).length,2);
+  completion('open',auditTask);
+  const drift=auditService.submit(cleanupInput('audit-owner-drift'),false);
+  completion('hold','audit-second-choice','--title','Second synthetic choice','--reason','Unanswered synthetic choice','--origin',auditTask);
+  completion('complete',auditTask,auditTask,'audit-second-choice');
+  execFileSync(process.execPath,[path.join(root,'bin/fm-short-agent.mjs'),'_run',auditHome,drift.id],{env:auditEnv,timeout:30000});
+  assert.equal(auditService.status(drift.id).state,'blocked');assert.ok(fs.existsSync(auditMeta));
+  assert.ok(!fs.existsSync(path.join(auditService.dir(drift.id),'operation-0.effect.json')));
+  const currentReview=fs.readFileSync(auditMeta,'utf8');
+  assert.ok(currentReview.includes('# previous completion: decision_keys='+auditTask+'\n'));
+  completion('verify',auditTask);completion('open',auditTask);completion('open','audit-second-choice');
+  const approved=auditService.submit(cleanupInput('audit-owner-cleanup'));
+  let completed;
+  for(let n=0;n<6000;n++){completed=auditService.status(approved.id);if(completed.finishedAt)break;await wait(25);}
+  if(completed.state!=='completed')console.log(fs.readFileSync(path.join(auditService.dir(approved.id),'operation-0.output.json'),'utf8'));
+  assert.equal(completed.state,'completed',JSON.stringify(completed));assert.ok(!fs.existsSync(auditMeta));
+  assert.ok(!herdr('pane','list','--workspace',target.workspace).result.panes.some(p=>p.pane_id===auditPane.root_pane.pane_id));
+  completion('open',auditTask);completion('open','audit-second-choice');
+  assert.ok(fs.existsSync(path.join(auditHome,'data',auditTask,'report.md')));
+  const auditReceipt=JSON.parse(fs.readFileSync(path.join(auditService.dir(approved.id),'operation-0.receipt.json')));
+  assert.equal(auditReceipt.state,'completed');assert.notEqual(auditReceipt.executor.pid,process.pid);
+  await auditService.reconcile();
+  fs.writeFileSync(path.join(tmp,'audit-cleanup-evidence.json'),JSON.stringify({firstReview,normalizedLegacy,currentReview,driftResult:auditService.status(drift.id),cleanupResult:completed,receipt:auditReceipt,openChoices:[auditTask,'audit-second-choice'],reportPreserved:true,endpointRemoved:true},null,2));
+  console.log(JSON.stringify({auditCleanupEvidence:path.join(tmp,'audit-cleanup-evidence.json'),openChoicesPreserved:true}));
 }
 if(process.env.FM_SHORT_INSTALL_LIVE==='1') {
   const originalPath=process.env.PATH,hashPath=path.join(tmp,'shasum-only');fs.mkdirSync(hashPath);

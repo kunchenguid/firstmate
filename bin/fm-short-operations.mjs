@@ -97,14 +97,32 @@ function git(project,...args) {return execFileSync('git',['-C',project,...args],
 function metadata(home,task) {
   const file=path.join(home,'state',task+'.meta');
   if(fs.lstatSync(file).isSymbolicLink()) fail('symlink task metadata refused');
-  const text=fs.readFileSync(file,'utf8'), data={};
+  const text=fs.readFileSync(file,'utf8'), data=Object.create(null), audit=[];
   for(const line of text.split('\n')) {
+    if(line.startsWith('#')) continue;
     const at=line.indexOf('='); if(at<1) continue;
-    const key=line.slice(0,at); if(Object.hasOwn(data,key)) fail('duplicate task metadata field');
+    const key=line.slice(0,at);
+    if(key==='decisions_reviewed' || key==='decision_keys') audit.push([key,line.slice(at+1)]);
+    else if(Object.hasOwn(data,key)) fail('duplicate task metadata field');
     data[key]=line.slice(at+1);
   }
+  // Compatibility is limited to the completion owner's old append-only audit
+  // pairs: reviewed=1 followed by an inventory that never loses an earlier id.
+  // Every other repeated field remains ambiguous, including identical values.
+  if(audit.length>2) {
+    let previous=[];
+    if(audit.length%2) fail('ambiguous completion audit history');
+    for(let i=0;i<audit.length;i+=2) {
+      if(audit[i][0]!=='decisions_reviewed' || audit[i][1]!=='1' || audit[i+1][0]!=='decision_keys') fail('ambiguous completion audit history');
+      const keys=audit[i+1][1]?audit[i+1][1].split(','):[];
+      if(keys.some(k=>!(/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(k))) || new Set(keys).size!==keys.length || previous.some(k=>!keys.includes(k))) fail('ambiguous completion audit history');
+      previous=keys;
+    }
+  } else if(new Set(audit.map(([key])=>key)).size!==audit.length) fail('duplicate task metadata field');
   if(!data.spawn_gen) fail('operation requires an existing task generation; legacy identity refused');
-  return {sha256:createHash('sha256').update(JSON.stringify(Object.fromEntries(Object.entries(data).sort(([a],[b])=>a.localeCompare(b))))).digest('hex'),...Object.fromEntries(['pr','pr_head','spawn_gen','kind','worktree','project','backend','window','herdr_session','herdr_pane_id','herdr_workspace_id','herdr_tab_id','endpoint_task_id','harness','tmux_pane_id'].map(k=>[k,data[k]??'']))};
+  // Bind the entire record, including historical audit lines and comments, so
+  // even an edit that preserves the effective latest values refuses execution.
+  return {sha256:createHash('sha256').update(text).digest('hex'),...Object.fromEntries(['pr','pr_head','spawn_gen','kind','worktree','project','backend','window','herdr_session','herdr_pane_id','herdr_workspace_id','herdr_tab_id','endpoint_task_id','harness','tmux_pane_id'].map(k=>[k,data[k]??'']))};
 }
 function binaryIdentity(destination) {
   const file=path.join(destination,'shellcheck');

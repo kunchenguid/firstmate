@@ -4,10 +4,10 @@
 set -eu
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
-fm_live_gate opt-in FM_SHORT_HERDR_E2E herdr node jq treehouse
+fm_live_gate opt-in FM_SHORT_HERDR_E2E herdr node jq treehouse tasks-axi
 [ "$(uname -s)" = Linux ] || { echo "skip: operation identity requires Linux /proc"; exit 0; }
 HERDR_LAB_HELPER=${FM_SHORT_HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
-HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name short-operations)
+HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name "${FM_SHORT_HERDR_LAB_LABEL:-short-operations}")
 export FM_SHORT_TEST_BASE_PATH=$PATH
 cleanup_lab() {
   local rc=$?

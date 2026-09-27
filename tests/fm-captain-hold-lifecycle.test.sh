@@ -676,6 +676,8 @@ test_completion_gate_attests_and_transfers() {
   tasks_in "$home" add "$id" "Investigate sample systems" --kind scout --repo sample --start >/dev/null \
     || fail "could not create investigation backlog fixture"
   write_origin_meta "$home" "$id"
+  run_captain "$home" complete "$id" --none >/dev/null || fail "initial empty review failed"
+  before=$(shasum -a 256 "$home/state/$id.meta" | awk '{print $1}')
   cat > "$home/state/$id.status" <<'EOF'
 working: report drafted
 needs-decision [key=route]: choose route north or route south
@@ -691,8 +693,8 @@ EOF
   if run_captain "$home" complete "$id" --none > "$home/none.out" 2> "$home/none.err"; then
     fail "--none attested while captain calls were still open in the status stream"
   fi
-  assert_no_grep "decisions_reviewed=1" "$home/state/$id.meta" \
-    "failed completion recorded a false completion attestation"
+  after=$(shasum -a 256 "$home/state/$id.meta" | awk '{print $1}')
+  [ "$before" = "$after" ] || fail "failed completion changed the previous attestation"
   if run_captain "$home" complete "$id" sample-route-call > "$home/absent.out" 2> "$home/absent.err"; then
     fail "completion accepted an inventory entry that names no task"
   fi
@@ -725,6 +727,13 @@ EOF
     || fail "captain-held bookkeeping closes re-woke their own home"
   assert_grep "decisions_reviewed=1" "$home/state/$id.meta" "completion attestation missing"
   assert_grep "decision_keys=sample-route-call" "$home/state/$id.meta" "inventory was not recorded as task ids"
+  [ "$(grep -c '^decisions_reviewed=' "$home/state/$id.meta")" = 1 ] || fail "completion duplicated the reviewed flag"
+  [ "$(grep -c '^decision_keys=' "$home/state/$id.meta")" = 1 ] || fail "completion duplicated the current inventory"
+  assert_grep '# previous completion: decision_keys=' "$home/state/$id.meta" "completion discarded the earlier empty inventory"
+  before=$(shasum -a 256 "$home/state/$id.meta" | awk '{print $1}')
+  run_captain "$home" complete "$id" sample-route-call >/dev/null || fail "completion retry failed"
+  after=$(shasum -a 256 "$home/state/$id.meta" | awk '{print $1}')
+  [ "$before" = "$after" ] || fail "idempotent completion changed metadata"
   open=$(bash -c '. "$1"; status_open_decisions "$2"' _ \
     "$ROOT/bin/fm-classify-lib.sh" "$home/state/$id.status")
   [ -z "$open" ] || fail "captain-held transfer did not close the live status decisions: $open"
@@ -3157,6 +3166,9 @@ test_merge_entrypoints_refuse_a_reused_task_incarnation() {
   local local_home local_id local_old_repo local_old_wt local_new_repo local_new_wt
   local local_teardown_pid local_merge_pid local_teardown_ready local_teardown_release
   local local_merge_ready local_merge_release local_teardown_rc local_merge_rc before after
+  local lease_home lease_id lease_pr lease_repo lease_wt lease_lock lease_holder_pid
+  local lease_holder_ready lease_holder_release lease_merge_ready lease_merge_release
+  local lease_merge_pid lease_merge_rc
   local real_perl real_sleep
   real_perl=$(command -v perl)
   real_sleep=$(command -v sleep)
@@ -3248,6 +3260,79 @@ test_merge_entrypoints_refuse_a_reused_task_incarnation() {
     "the refused PR merge damaged the replacement task record"
   assert_absent "$home/state/.control-$id.lock" \
     "the reused-incarnation PR refusal left its task control lock held"
+
+  lease_home=$(make_home reused-pr-lease-incarnation)
+  configure_merged_github "$lease_home"
+  install_reused_task_barriers "$lease_home"
+  lease_id=sample-reused-pr-lease-incarnation
+  lease_pr=https://github.com/sample/sample/pull/43
+  lease_repo="$lease_home/projects/sample-reused-pr-lease"
+  lease_wt="$lease_home/projects/$lease_id"
+  fm_git_worktree "$lease_repo" "$lease_wt" "fm/$lease_id"
+  tasks_in "$lease_home" add "$lease_id" "Ship the lease-wait pull request" \
+    --kind ship --repo sample --start >/dev/null \
+    || fail "could not create the lease-wait PR task"
+  fm_test_write_herdr_meta "$lease_home/state/$lease_id.meta" \
+    "window=firstmate:fm-$lease_id" "endpoint_task_id=$lease_id" \
+    "worktree=$lease_wt" "project=$lease_repo" "harness=codex" "kind=ship" \
+    "mode=no-mistakes" "spawn_gen=original-$lease_id"
+  printf 'done: merge ready\n' > "$lease_home/state/$lease_id.status"
+  printf 'main\t999999\t0\n' > "$lease_home/state/.lease-$lease_id"
+
+  lease_lock="$lease_home/state/.fm-lease-task-$lease_id.lock"
+  lease_holder_ready="$lease_home/reuse-lease-holder-ready"
+  lease_holder_release="$lease_home/reuse-lease-holder-release"
+  (
+    STATE="$lease_home/state"
+    # shellcheck source=bin/fm-wake-lib.sh
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_lock_acquire_wait "$lease_lock"
+    : > "$lease_holder_ready"
+    while [ ! -e "$lease_holder_release" ]; do "$real_sleep" 0.01; done
+    fm_lock_release "$lease_lock"
+  ) &
+  lease_holder_pid=$!
+  if ! wait_for_test_file "$lease_holder_ready" "$lease_holder_pid"; then
+    : > "$lease_holder_release"
+    wait "$lease_holder_pid" 2>/dev/null || true
+    fail "the lease-wait fixture could not hold its task lease lock"
+  fi
+
+  lease_merge_ready="$lease_home/reuse-merge-ready"
+  lease_merge_release="$lease_home/reuse-merge-release"
+  FM_TEST_REUSE_MERGE=1 FM_TEST_REUSE_MERGE_ONCE="$lease_home/reuse-merge-once" \
+    FM_TEST_REUSE_MERGE_READY="$lease_merge_ready" \
+    FM_TEST_REUSE_MERGE_RELEASE="$lease_merge_release" \
+    FM_TEST_REAL_PERL="$real_perl" FM_TEST_REAL_SLEEP="$real_sleep" \
+    run_pr_merge "$lease_home" "$lease_id" "$lease_pr" \
+    > "$lease_home/reuse-merge.out" 2> "$lease_home/reuse-merge.err" &
+  lease_merge_pid=$!
+  if ! wait_for_test_file "$lease_merge_ready" "$lease_merge_pid"; then
+    : > "$lease_holder_release"
+    : > "$lease_merge_release"
+    wait "$lease_holder_pid" 2>/dev/null || true
+    wait "$lease_merge_pid" 2>/dev/null || true
+    fail "the PR merge did not wait behind the task lease lock"
+  fi
+
+  fm_test_write_herdr_meta "$lease_home/state/$lease_id.meta" \
+    "window=firstmate:fm-$lease_id" "endpoint_task_id=$lease_id" \
+    "worktree=$lease_wt" "project=$lease_repo" "harness=codex" "kind=ship" \
+    "mode=no-mistakes" "spawn_gen=replacement-$lease_id"
+  : > "$lease_holder_release"
+  wait "$lease_holder_pid" || fail "the task lease fixture did not release"
+  : > "$lease_merge_release"
+  set +e
+  wait "$lease_merge_pid"
+  lease_merge_rc=$?
+  set -e
+  [ "$lease_merge_rc" -ne 0 ] || fail "the PR merge accepted an incarnation replaced during its lease wait"
+  assert_no_grep 'pr merge 43 ' "$lease_home/gh.log" \
+    "the lease-wait PR merge reached the forge for a replacement task incarnation"
+  assert_grep "changed incarnation while waiting to merge" "$lease_home/reuse-merge.err" \
+    "the lease-wait PR merge did not identify the replacement task incarnation"
+  assert_grep "spawn_gen=replacement-$lease_id" "$lease_home/state/$lease_id.meta" \
+    "the refused lease-wait PR merge damaged the replacement task record"
 
   local_home=$(make_home reused-local-incarnation)
   install_reused_task_barriers "$local_home"
@@ -3350,7 +3435,7 @@ test_merge_entrypoints_refuse_a_reused_task_incarnation() {
     "the refused local merge damaged the replacement task record"
   assert_absent "$local_home/state/.control-$local_id.lock" \
     "the reused-incarnation local refusal left its task control lock held"
-  pass "merge entrypoints refuse a replacement incarnation after waiting for cleanup"
+  pass "merge entrypoints refuse a replacement incarnation after ownership waits"
 }
 
 test_merge_entrypoints_serialize_forced_teardown_before_task_reads() {
@@ -3410,6 +3495,10 @@ SH
     wait "$merge_pid" 2>/dev/null || true
     fail "the PR merge did not reach the post-metadata synchronization point"
   fi
+  assert_present "$home/state/.short-operation-$id.json.lock" \
+    "the PR merge did not retain its short-operation ownership lock"
+  assert_present "$home/state/.control-$id.lock" \
+    "the PR merge did not retain its task control lock"
   set +e
   PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
@@ -3421,13 +3510,10 @@ SH
   wait "$merge_pid"
   merge_rc=$?
 
-  # Without early lock ownership, forced cleanup succeeds after metadata is
-  # recorded, and the resumed forge call merges work whose task was retired.
+  # Without the retained ownership locks, forced cleanup succeeds after
+  # metadata is recorded, and the resumed forge call merges retired work.
   [ "$teardown_rc" -ne 0 ] \
     || fail "forced cleanup retired the task between PR metadata recording and merge"
-  assert_grep "another lifecycle action is already running for task $id" \
-    "$home/race-pr-teardown.err" \
-    "PR cleanup was not refused by the merge's task control lock"
   [ "$merge_rc" -eq 0 ] || fail "the serialized PR merge failed after cleanup was refused"
   assert_present "$home/state/$id.meta" "the refused PR cleanup removed task metadata"
   assert_grep 'pr merge 33 ' "$home/gh.log" \
@@ -3493,6 +3579,8 @@ SH
     wait "$local_pid" 2>/dev/null || true
     fail "the local merge did not reach the post-validation synchronization point"
   fi
+  assert_present "$local_home/state/.control-$local_id.lock" \
+    "the local merge did not retain its task control lock"
   set +e
   PATH="$local_home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$local_home" \
     FM_STATE_OVERRIDE="$local_home/state" FM_DATA_OVERRIDE="$local_home/data" \
@@ -3505,13 +3593,10 @@ SH
   local_merge_rc=$?
   after=$(git -C "$local_repo" rev-parse main)
 
-  # Without early lock ownership, forced cleanup succeeds after validation and
-  # the resumed fast-forward lands work whose task was already retired.
+  # Without the retained ownership locks, forced cleanup succeeds after
+  # validation and the resumed fast-forward lands work whose task was retired.
   [ "$local_teardown_rc" -ne 0 ] \
     || fail "forced cleanup retired the task between local validation and merge"
-  assert_grep "another lifecycle action is already running for task $local_id" \
-    "$local_home/race-local-teardown.err" \
-    "local cleanup was not refused by the merge's task control lock"
   [ "$local_merge_rc" -eq 0 ] || fail "the serialized local merge failed after cleanup was refused"
   [ "$after" != "$before" ] || fail "the serialized local merge did not fast-forward main"
   assert_present "$local_home/state/$local_id.meta" \

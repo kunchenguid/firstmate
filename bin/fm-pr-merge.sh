@@ -360,9 +360,12 @@ META="$STATE/$ID.meta"
 # shellcheck source=bin/fm-short-owner-lib.sh
 . "$SCRIPT_DIR/fm-short-owner-lib.sh"
 trap 'fm_short_owner_release; fm_lease_guard_release' EXIT
-fm_short_owner_enter merge "$ID" "$URL" || exit 1
-fm_lease_forbid_branch "PR merge (fm-pr-merge)"
-fm_lease_guard "$ID" "PR merge (fm-pr-merge)"
+# Enforce the supervisor role partition before reading the task. A short
+# executor needs its operation bound first, so its equivalent authority check
+# follows that binding below.
+if [ "${FM_SUPERVISION_ACTOR:-}" != short ]; then
+  fm_lease_forbid_branch "PR merge (fm-pr-merge)"
+fi
 
 if [ ! -f "$META" ] || [ -L "$META" ]; then
   echo "error: task metadata is unavailable" >&2
@@ -373,6 +376,15 @@ if ! fm_backlog_meta_spawn_gen_optional "$META" "$STATE"; then
   exit 1
 fi
 MERGE_EXPECTED_SPAWN_GEN=$FM_BACKLOG_META_SPAWN_GEN
+
+# Bind the caller's task incarnation before either ownership guard can wait.
+# The control-lock check below then refuses if cleanup replaced the task while
+# either guard or the control lock was blocked.
+fm_short_owner_enter merge "$ID" "$URL" || exit 1
+if [ "${FM_SUPERVISION_ACTOR:-}" = short ]; then
+  fm_lease_forbid_branch "PR merge (fm-pr-merge)"
+fi
+fm_lease_guard "$ID" "PR merge (fm-pr-merge)"
 
 MERGE_CONTROL_LOCK=
 MERGE_META_LOCK=
