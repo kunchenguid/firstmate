@@ -63,29 +63,47 @@ make_named_shells() {  # <dir> -> echoes <bindir>
   printf '%s' "$dir"
 }
 
+# Run a detection probe orphaned, so it reparents to pid 1 and the ancestry
+# walk sees only the chain this test built. A probe run as a plain subprocess
+# of this suite would instead climb into whatever live harness launched it -
+# firstmate's own omp primary, or any other ambient harness - and inherit its
+# verdict, so every detection verdict here must come from the probe's own
+# chain.
+detached_detect() {  # <cmd...>
+  local out="$TMP_ROOT/detect.$RANDOM.$RANDOM.$RANDOM" waited=0
+  ( ( "$@" > "$out" 2>/dev/null; : > "$out.done" ) & )
+  while [ ! -e "$out.done" ]; do
+    [ "$waited" -lt 100 ] || fail "detached detection probe timed out after 10s: $*"
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  cat "$out"
+  rm -f "$out" "$out.done"
+}
+
 # --- 1. Detection --------------------------------------------------------------
 
 test_detection_anchored_name_and_marker_precedence() {
   local bin out
   bin=$(make_named_shells "$TMP_ROOT/named")
   # shellcheck disable=SC2016 # the quoted body expands inside the named shell
-  out=$(env -u CLAUDECODE -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+  out=$(detached_detect env -u CLAUDECODE -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
     "$bin/omp" -c '"$1"; :' _ "$HARNESS")
   [ "$out" = omp ] || fail "a process named omp must detect as omp, got '$out'"
   for decoy in ompd comp; do
     # shellcheck disable=SC2016 # the quoted body expands inside the named shell
-    out=$(env -u CLAUDECODE -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+    out=$(detached_detect env -u CLAUDECODE -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
       "$bin/$decoy" -c '"$1"; :' _ "$HARNESS")
     [ "$out" != omp ] || fail "'$decoy' merely contains omp and must not detect as omp"
   done
   # The marker beats an inherited CLAUDECODE only under a real omp ancestor.
   # shellcheck disable=SC2016 # the quoted body expands inside the named shell
-  out=$(env -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 FM_OMP_HARNESS=omp \
+  out=$(detached_detect env -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 FM_OMP_HARNESS=omp \
     "$bin/omp" -c '"$1"; :' _ "$HARNESS")
   [ "$out" = omp ] || fail "FM_OMP_HARNESS under an omp ancestor must outrank an inherited CLAUDECODE, got '$out'"
   # ...and is inert when it leaks into a worker with no omp ancestor.
   # shellcheck disable=SC2016 # the quoted body expands inside the named shell
-  out=$(env -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 FM_OMP_HARNESS=omp \
+  out=$(detached_detect env -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 FM_OMP_HARNESS=omp \
     bash -c '"$1"; :' _ "$HARNESS")
   [ "$out" = claude ] || fail "a leaked FM_OMP_HARNESS without an omp ancestor must not relabel a claude worker, got '$out'"
   pass "fm-harness: omp detects by its anchored name; the marker is a precedence override that needs real omp ancestry"
@@ -118,36 +136,36 @@ SH
 SH
   chmod +x "$world/app/server.js"
 
-  out=$(env -u CLAUDECODE -u FM_OMP_HARNESS -u OMPCODE -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+  out=$(detached_detect env -u CLAUDECODE -u FM_OMP_HARNESS -u OMPCODE -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
     FM_T_HARNESS="$HARNESS" \
     "$bin/bun" "$script" --model anthropic/claude-sonnet-4)
   [ "$out" = omp ] || fail "bun running the omp script must detect as omp even with a claude-shaped --model token, got '$out'"
-  out=$(env -u CLAUDECODE -u FM_OMP_HARNESS -u OMPCODE -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+  out=$(detached_detect env -u CLAUDECODE -u FM_OMP_HARNESS -u OMPCODE -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
     FM_T_HARNESS="$HARNESS" FM_T_VERB=ancestry \
     "$bin/bun" "$script")
   [ "$out" = "args omp" ] || fail "the ancestry walk must attribute bun running the omp script at args strength, got '$out'"
-  out=$(env -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u OMPCODE \
+  out=$(detached_detect env -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u OMPCODE \
     CLAUDECODE=1 FM_OMP_HARNESS=omp FM_T_HARNESS="$HARNESS" \
     "$bin/bun" "$script" --model anthropic/claude-sonnet-4)
   [ "$out" = omp ] || fail "FM_OMP_HARNESS under a bun-omp ancestor must outrank an inherited CLAUDECODE, got '$out'"
-  out=$(env -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u FM_OMP_HARNESS \
+  out=$(detached_detect env -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u FM_OMP_HARNESS \
     CLAUDECODE=1 OMPCODE=1 FM_T_HARNESS="$HARNESS" \
     "$bin/bun" "$script")
   [ "$out" = omp ] || fail "OMPCODE must outrank an inherited CLAUDECODE under a bun-omp ancestor, got '$out'"
   # A decoy bun running an unrelated script never identifies as omp.
-  out=$(env -u CLAUDECODE -u FM_OMP_HARNESS -u OMPCODE -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+  out=$(detached_detect env -u CLAUDECODE -u FM_OMP_HARNESS -u OMPCODE -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
     FM_T_HARNESS="$HARNESS" \
     "$bin/bun" "$world/app/server.js")
   [ "$out" != omp ] || fail "bun running an unrelated script must never detect as omp"
   # OMPCODE alone names omp when the walk finds no harness (a marker is the
   # only evidence there is).
   # shellcheck disable=SC2016 # the quoted body expands inside the named shell
-  out=$(env -u CLAUDECODE -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+  out=$(detached_detect env -u CLAUDECODE -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
     OMPCODE=1 bash -c '"$1"; :' _ "$HARNESS")
   [ "$out" = omp ] || fail "OMPCODE alone must detect as omp, got '$out'"
   # ...but a real claude comm ancestor still overrules an inherited OMPCODE.
   # shellcheck disable=SC2016 # the quoted body expands inside the named shell
-  out=$(env -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+  out=$(detached_detect env -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
     OMPCODE=1 CLAUDECODE=1 "$bin/claude" -c '"$1"; :' _ "$HARNESS")
   [ "$out" = claude ] || fail "a real claude ancestor must overrule an inherited OMPCODE, got '$out'"
   pass "fm-harness: omp under bun detects by its script path, and OMPCODE is the 18.3+ marker"
