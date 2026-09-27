@@ -1145,6 +1145,8 @@ test_charted_main_context_and_links_surface() {
   This change connects the new board to the fleet.
 - [ ] queued-report - Queued research data/queued-report/report.md (repo: firstmate) (kind: scout)
   Research the unresolved rollout choice.
+- [ ] queued-https - Queued report https://reports.example.test/first https://reports.example.test/second (repo: firstmate) (kind: scout)
+  Review the first published report.
 
 ## Done
 EOF
@@ -1166,11 +1168,14 @@ EOF
     and (.bodies | any(.id == "queued-pr" and (.body | contains("connects the new board"))))
     and (.gates | any(.id == "queued-report" and .report_path == "data/queued-report/report.md"))
     and (.bodies | any(.id == "queued-report" and (.body | contains("unresolved rollout choice"))))
+    and (.gates | any(.id == "queued-https" and .pr_url == null
+      and .report_url == "https://reports.example.test/first"))
   ' >/dev/null || fail "visible main Charted Next gates lost bounded notes or recorded links: $json"
   mate_home=$(make_home charted-mate)
   write_fixture "$mate_home"
   mate=$(fixture_mate_home "$mate_home")
-  sed '/^## Done$/i\- [ ] mate-queued - Queued report https://github.com/acme/firstmate/pull/14 data/mate-queued/report.md (repo: firstmate) (kind: scout)' \
+  sed -e '/^## Done$/i\- [ ] mate-queued - Queued report https://github.com/acme/firstmate/pull/14 data/mate-queued/report.md (repo: firstmate) (kind: scout)' \
+    -e '/^## Done$/i\- [ ] mate-report - Published report https://reports.example.test/mate/first https://reports.example.test/mate/second (repo: firstmate) (kind: scout)' \
     "$mate/data/backlog.md" > "$mate/data/backlog.next"
   mv "$mate/data/backlog.next" "$mate/data/backlog.md"
   fakebin=$(make_fakebin "$mate_home")
@@ -1179,6 +1184,8 @@ EOF
     (.gates | any(.id == "mate-queued" and .owner == "mate"
       and .pr_url == "https://github.com/acme/firstmate/pull/14"
       and .report_path == "data/mate-queued/report.md"))
+    and (.gates | any(.id == "mate-report" and .owner == "mate" and .pr_url == null
+      and .report_url == "https://reports.example.test/mate/first"))
   ' >/dev/null || fail "secondmate Charted Next lost recorded pointers in its bounded summary: $json"
   pass "Charted Next carries main task notes and both homes' recorded pointers"
 }

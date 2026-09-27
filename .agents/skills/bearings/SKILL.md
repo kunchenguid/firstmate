@@ -114,7 +114,7 @@ Compose the payload from the same snapshot with the same ranking judgment as the
   Omit it or pass null for a row with no durable filed date - the main-inventory or return-catchup warning, an unavailable secondmate home, or a queued row filed before dates were recorded - and the board keeps those rows in payload order after every dated row.
 - For lavish mode, request `--fields bodies` on the same snapshot command and use a matching `bodies` task excerpt for the optional Charted Next `about` line when it explains why the task exists; omit it if the excerpt has no useful context or is unavailable (including a secondmate task).
   Use the structured gate's blocker, hold, and date facts to write its required `reason` in plain words; dispatchability comes from those facts, not an empty reason.
-  Fill optional `link` from the gate's recorded HTTPS PR URL or an HTTPS report URL in the snapshot.
+  Fill optional `link` from the gate's recorded HTTPS PR URL, or its first HTTPS report URL when no PR URL exists.
   When no HTTPS URL exists, pass the gate's local report pointer as `report_path` for plain, copyable text, never as a browser link.
   Never read a backlog file, report, or prose outside this snapshot to fill these fields.
 - Every Captain's Call item and every Underway, Recently Landed, and Charted Next row carries an explicit `repo` field. Fill it from the snapshot and task records wherever known; use null or an empty string only as the deliberate genuinely-no-repo marker, in which case the template may show the internal id. Ids otherwise stay in the payload only as the routing channel, and composed reasons name blockers in plain words.

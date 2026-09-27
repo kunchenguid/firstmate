@@ -269,8 +269,10 @@ a { color: inherit; text-decoration: none; }
 .bb-charted-card__details { min-width: 0; flex: 1 1 auto; }
 .bb-charted-card__summary { cursor: pointer; list-style: none; display: flex; align-items: center; gap: 10px; }
 .bb-charted-card__summary::-webkit-details-marker { display: none; }
+.bb-charted-card__summary--static { cursor: default; }
 .bb-charted-card__summary:focus-visible { outline: none; box-shadow: var(--focus-ring); border-radius: var(--radius-xs); }
 .bb-charted-card__summary::after { content: "+"; font-family: var(--font-mono); color: var(--text-muted); flex: none; }
+.bb-charted-card__summary--static::after { content: none; }
 .bb-charted-card__details[open] .bb-charted-card__summary::after { content: "−"; }
 .bb-charted-card__context { padding: 2px 14px 14px 42px; border-top: 1px solid var(--border-soft); }
 .bb-charted-card__context .bb-ctx { margin-top: 10px; }
@@ -716,30 +718,34 @@ __FM_BEARINGS_BOARD_DATA__
     } else {
       head.appendChild(el("span", "bb-pick-spacer"));
     }
-    var details = el("details", "bb-charted-card__details");
-    var summary = el("summary", "bb-charted-card__summary");
+    var hasContext = !!(t.about || !t.dispatchable || t.filed || t.link || t.report_path);
+    var details = el(hasContext ? "details" : "div", "bb-charted-card__details");
+    var summary = el(hasContext ? "summary" : "div", "bb-charted-card__summary" + (hasContext ? "" : " bb-charted-card__summary--static"));
     var main = el("div", "bb-row__main");
     main.appendChild(el("div", "bb-row__title", t.title));
     var waiting = t.reason || (isWarning(t) ? "Needs repair" : "Not ready to dispatch");
     var chSub = t.repo || t.id;
-    main.appendChild(el("div", "bb-row__sub", (!t.dispatchable || isWarning(t)) ? waiting + " · " + chSub : chSub));
+    main.appendChild(el("div", "bb-row__sub", (!t.dispatchable || isWarning(t))
+      ? waiting + " · " + chSub : (hasContext ? chSub : "Ready to start - no notes recorded · " + chSub)));
     summary.appendChild(main);
     if (isWarning(t)) summary.appendChild(badge("danger", "needs repair"));
     else if (!t.dispatchable) summary.appendChild(badge("warn", "waiting"));
     details.appendChild(summary);
-    var context = el("div", "bb-charted-card__context");
-    var ctx = el("div", "bb-ctx");
-    if (t.about) ctx.appendChild(ctxRow("about", t.about));
-    if (!t.dispatchable) ctx.appendChild(ctxRow("waiting on", waiting));
-    if (t.filed) ctx.appendChild(ctxRow("filed", t.filed));
-    if (!t.link && t.report_path) ctx.appendChild(ctxRow("report", t.report_path));
-    context.appendChild(ctx);
-    if (t.link) {
-      var link = el("a", "bb-decision__link", t.link);
-      link.href = t.link; link.target = "_blank"; link.rel = "noopener";
-      context.appendChild(link);
+    if (hasContext) {
+      var context = el("div", "bb-charted-card__context");
+      var ctx = el("div", "bb-ctx");
+      if (t.about) ctx.appendChild(ctxRow("about", t.about));
+      if (!t.dispatchable) ctx.appendChild(ctxRow("waiting on", waiting));
+      if (t.filed) ctx.appendChild(ctxRow("filed", t.filed));
+      if (!t.link && t.report_path) ctx.appendChild(ctxRow("report", t.report_path));
+      context.appendChild(ctx);
+      if (t.link) {
+        var link = el("a", "bb-decision__link", t.link);
+        link.href = t.link; link.target = "_blank"; link.rel = "noopener";
+        context.appendChild(link);
+      }
+      details.appendChild(context);
     }
-    details.appendChild(context);
     head.appendChild(details);
     row.appendChild(head);
     ch.appendChild(row);
