@@ -1367,9 +1367,10 @@ if (visibleFinals().at(-1) !== "Captain, task-d needs your call.") throw new Err
 if (JSON.stringify(unprocessedSeqs()) !== JSON.stringify([seq])) throw new Error("an unacknowledged answer advanced the processed marker");
 if (requests().length !== 2 || requests()[1].options.triggerTurn !== true) throw new Error("the first re-presentation must open its own turn");
 if (!requests()[1].message.content.includes(`[seq ${seq}, recorded 0m ago] task-d: ${decision}`)) throw new Error("the re-presentation changed the outcome");
-// The hidden retry answers with stale prose instead of acknowledging.
+// The hidden retry repeats this set's prior reply instead of acknowledging.
 // Exercise Pi's public message replacement and Markdown transformer surfaces:
-// retry replies must stay absent from both streaming and persisted finals.
+// buffer streaming until the complete reply can be compared, then keep every
+// differing reply, even one already visible outside this processing set.
 await runOf(async () => {
   if (render("Captain, task-d needs your call.") !== "" || render("prior reasoning", true, "assistant-thinking") !== "") {
     throw new Error("a processing retry reply leaked while streaming");
@@ -1377,12 +1378,16 @@ await runOf(async () => {
   if (render(priorResult, false) !== priorResult || render("A question", true, "user") !== "A question") {
     throw new Error("silencing a retry hid an earlier final or a user message");
   }
-  await finish("Captain, task-d needs your call.");
+  const repeated = await finish(" \nCaptain, task-d needs your call. \n");
+  if (repeated.content.length) throw new Error("the exact trimmed repeat retained visible content");
   await finish(priorResult);
-  await finish("");
+  await finish("Captain, task-d needs your call!");
+  const empty = await finish("");
+  const whitespace = await finish(" \n\t");
+  if (empty.content.length || whitespace.content.length) throw new Error("an empty retry retained visible content");
 });
-if (JSON.stringify(visibleFinals()) !== JSON.stringify([priorResult, "Captain, task-d needs your call."])) {
-  throw new Error(`hidden retries exposed additional finals: ${JSON.stringify(visibleFinals())}`);
+if (JSON.stringify(visibleFinals()) !== JSON.stringify([priorResult, "Captain, task-d needs your call.", priorResult, "Captain, task-d needs your call!"])) {
+  throw new Error(`retry comparison hid new prose or exposed a repeat: ${JSON.stringify(visibleFinals())}`);
 }
 if (JSON.stringify(unprocessedSeqs()) !== JSON.stringify([seq])) throw new Error("a repeated or empty answer advanced the processed marker");
 if (requests().length !== 3) throw new Error(`an unrelated answer did not re-present the outcome: ${requests().length} requests`);
@@ -1425,10 +1430,12 @@ await fire("agent_start", {});
 await fire("turn_start", {});
 await consumeRequest();
 await finish("stale after reload");
-if (visibleFinals().includes("stale after reload")) throw new Error("session replacement lost retry suppression");
-const withTool = await finish("stale prose alongside a tool", [thinking, call]);
-if (withTool.content.length !== 2 || withTool.content[0] !== thinking || withTool.content[1] !== call) {
-  throw new Error("suppression lost the acknowledgement tool call or its signed reasoning, or retained prose");
+if (visibleFinals().at(-1) !== "stale after reload") throw new Error("session replacement hid differing retry prose");
+const repeatedAfterReload = await finish("stale after reload");
+if (repeatedAfterReload.content.length) throw new Error("session replacement lost retry comparison");
+const withTool = await finish("stale after reload", [thinking, call]);
+if (withTool.content.length !== 3 || withTool.content[0].text !== "stale after reload" || withTool.content[1] !== thinking || withTool.content[2] !== call) {
+  throw new Error("retry comparison dropped prose, signed reasoning, or the acknowledgement call");
 }
 await fire("turn_start", {});
 if (render("still unacknowledged") !== "") throw new Error("a tool continuation released suppression before acknowledgement");
@@ -1560,6 +1567,35 @@ await finish("The batched user answer");
 if (visibleFinals().at(-1) !== "The batched user answer") throw new Error("processing suppression hid a user batched before the custom message");
 const latestSeq = unprocessedSeqs().at(-1);
 await processed.execute("ack-busy", { through: latestSeq }, undefined, undefined, {});
+await fire("agent_end", {});
+await fire("agent_settled", {});
+
+// A first reply can be empty or unrelated: a retry that finally handles the
+// outcome must stay visible. Reusing the same response across new sequence
+// sets must not make it a duplicate, and only the tool closes each outcome.
+for (const initial of ["", "Unrelated prior acknowledgment"]) {
+  await report2.execute("new-set", { task: "task-new", verdict: "captain", summary: "Another decision" }, undefined, undefined, {});
+  const newSeq = unprocessedSeqs().at(-1);
+  const startCount = visibleFinals().length;
+  await runOf(async () => {
+    const firstReply = await finish(initial);
+    if ((firstReply.content[0]?.text ?? "") !== initial) throw new Error("first presentation changed its output");
+  });
+  const newAnswer = "Handled the new outcome.";
+  await runOf(async () => {
+    await finish(newAnswer);
+    if (visibleFinals().at(-1) !== newAnswer) throw new Error("the first real handling on a retry was hidden");
+    const repeat = await finish(newAnswer);
+    if (repeat.content.length) throw new Error("a repeated retry final was retained");
+  });
+  if (visibleFinals().length !== startCount + (initial ? 2 : 1)) throw new Error("sequence comparison lost or duplicated a final");
+  if (!unprocessedSeqs().includes(newSeq) || requests().at(-1).options.deliverAs !== "nextTurn") {
+    throw new Error("an empty, unrelated, or differing reply closed the durable obligation");
+  }
+  await processed.execute("ack-new-set", { through: newSeq }, undefined, undefined, {});
+  if (unprocessedSeqs().length) throw new Error("acknowledgement did not close the new set");
+  await fire("agent_settled", {});
+}
 
 // A session that does not own the fleet lock cannot acknowledge anything.
 writeFileSync(`${home}/state/.lock`, "1\n");

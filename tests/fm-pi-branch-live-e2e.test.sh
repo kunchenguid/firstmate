@@ -993,14 +993,15 @@ fi
 pass "real Pi SDK $PI_VERSION queues a streaming-time watcher wake without before_agent_start, keeps the successor chain, and surfaces consumption of both follow-ups"
 
 # The first processing presentation keeps its visible response, while the
-# hidden retry stays silent through the real event runner, stock assistant
-# renderer, and session persistence, including after reopen.
-retryhome="$TMP_ROOT/retry-home"
-retrydir="$TMP_ROOT/retry-agent-dir"
+# hidden retry drops only empty or exact-repeat finals through the real event
+# runner, stock assistant renderer, and persistence, including after reopen.
+for retry_case in repeated differing empty first-empty; do
+retryhome="$TMP_ROOT/retry-home-$retry_case"
+retrydir="$TMP_ROOT/retry-agent-dir-$retry_case"
 mkdir -p "$retryhome/state" "$retryhome/config" "$retrydir"
 cp "$streamdir/models.json" "$retrydir/models.json"
 BRANCH_PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" \
-  FM_HOME="$retryhome" FM_ROOT_OVERRIDE="$ROOT" \
+  FM_HOME="$retryhome" FM_ROOT_OVERRIDE="$ROOT" RETRY_CASE="$retry_case" \
   PI_CODING_AGENT_DIR="$retrydir" PI_PACKAGE_DIR="$PI_PACKAGE_DIR" \
   node --input-type=module > "$TMP_ROOT/retry-output" 2>&1 <<'EOF'
 import { readFileSync, writeFileSync } from "node:fs";
@@ -1022,7 +1023,9 @@ const outcome = (...args) => {
 outcome("processed-init");
 const seq = Number(outcome("append", "--task", "example", "--verdict", "captain", "--summary", "A decision is needed"));
 const original = "The requested result is complete and verified.";
-const handled = "Captain, the example task needs your decision.";
+const handled = process.env.RETRY_CASE === "first-empty" ? "" : "The example task needs a decision.";
+const retryReply = process.env.RETRY_CASE === "repeated" ? handled : process.env.RETRY_CASE === "empty" ? "" : original;
+const expectedFinals = [original, ...(handled ? [handled] : []), ...(retryReply && retryReply !== handled ? [retryReply] : [])];
 let completions = 0;
 let settled = 0;
 const failures = [];
@@ -1034,7 +1037,7 @@ globalThis.fetch = async (input) => {
   const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
   if (!url.startsWith("https://fm-live-stream.invalid/")) throw new Error(`unexpected network request: ${url}`);
   completions += 1;
-  const text = completions === 1 ? original : completions === 2 ? handled : completions === 3 ? original : "The new user answer.";
+  const text = completions === 1 ? original : completions === 2 ? handled : completions === 3 ? retryReply : "The new user answer.";
   return new Response(chunk(text) + chunk(null, "stop") + "data: [DONE]\n\n", {
     headers: { "content-type": "text/event-stream" },
   });
@@ -1065,25 +1068,25 @@ const unsubscribe = session.subscribe((event) => {
   const component = new AssistantMessageComponent(undefined, false, undefined, undefined, 0, session.extensionRunner.getMarkdownTransformers());
   component.updateContent(event.message, true);
   const rendered = component.render(120).join("\n");
-  if (rendered.includes(original)) failures.push("retry prose leaked from the streaming renderer");
+  if (retryReply && rendered.includes(retryReply)) failures.push("retry prose leaked from the streaming renderer");
 });
 await session.prompt("Finish the requested work.");
 for (let i = 0; i < 600 && settled < 3; i += 1) await new Promise((done) => setTimeout(done, 50));
 if (settled !== 3 || completions !== 3) throw new Error(`retry chain did not settle: ${settled} settlements, ${completions} completions`);
-if (streamedRetries === 0 || failures.length) throw new Error(`streaming suppression failed: ${streamedRetries} updates, ${failures}`);
+if ((retryReply && streamedRetries === 0) || failures.length) throw new Error(`streaming suppression failed: ${streamedRetries} updates, ${failures}`);
 const assistantText = (messages) => messages.filter((message) => message.role === "assistant")
   .flatMap((message) => message.content.filter((part) => part.type === "text").map((part) => part.text));
-if (JSON.stringify(assistantText(session.messages)) !== JSON.stringify([original, handled])) throw new Error("agent state does not hold exactly the user and first-presentation finals");
+if (JSON.stringify(assistantText(session.messages)) !== JSON.stringify(expectedFinals)) throw new Error(`agent state lost new prose or retained an exact repeat: ${JSON.stringify(assistantText(session.messages))}`);
 const reopened = SessionManager.open(manager.getSessionFile(), `${home}/sessions`);
-if (JSON.stringify(assistantText(reopened.buildSessionContext().messages)) !== JSON.stringify([original, handled])) throw new Error("reopened session does not hold exactly the user and first-presentation finals");
+if (JSON.stringify(assistantText(reopened.buildSessionContext().messages)) !== JSON.stringify(expectedFinals)) throw new Error("reopened session lost new prose or retained an exact repeat");
 if (!outcome("unprocessed").includes(`"seq":${seq}`)) throw new Error("silent retries advanced the processed marker");
 await session.prompt("A new user question.");
 if (assistantText(session.messages).at(-1) !== "The new user answer.") throw new Error("a nextTurn retry hid the new user answer");
 const acknowledged = await session.getToolDefinition("fm_branch_processed").execute("ack", { through: seq }, undefined, undefined, {});
 if (acknowledged.isError || outcome("unprocessed")) throw new Error("the outcome could not be acknowledged after silent retries");
 const entries = readFileSync(manager.getSessionFile(), "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
-if (assistantText(entries.filter((entry) => entry.type === "message").map((entry) => entry.message)).length !== 3) {
-  throw new Error("persisted finals do not match the three handling outcomes");
+if (assistantText(entries.filter((entry) => entry.type === "message").map((entry) => entry.message)).length !== expectedFinals.length + 1) {
+  throw new Error("persisted finals do not match the retained handling outcomes");
 }
 unsubscribe();
 session.dispose();
@@ -1093,6 +1096,7 @@ EOF
 status=$?
 out=$(cat "$TMP_ROOT/retry-output")
 if [ "$status" -ne 0 ] || [ "$out" != "RETRY_OK" ]; then
-  fail "real-SDK processing retry visibility guard failed against pi-coding-agent $PI_VERSION: $out"
+  fail "real-SDK processing retry visibility guard ($retry_case) failed against pi-coding-agent $PI_VERSION: $out"
 fi
-pass "real Pi SDK $PI_VERSION keeps the first processing response, hides retry replies while streaming and after reopen, preserves user finals, and keeps outcomes retryable"
+done
+pass "real Pi SDK $PI_VERSION suppresses only empty or exact-repeat retry finals, retains first and differing replies after reopen, buffers retry streaming, and keeps outcomes retryable"
