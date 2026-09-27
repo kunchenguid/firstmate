@@ -1248,3 +1248,12 @@ case "$outcome_rc" in
     printf 'actionable: merged %s but could not record the outcome for supervision\n' "$URL" >&2
     ;;
 esac
+
+# The captain-facing landing outcome carries the cost overview: what this task
+# cost and what its project has cost so far. bin/fm-cost-lib.sh owns the
+# accounting and already recorded this merge through the outcome owner above, so
+# this only prints what was recorded. The merge has landed, so an unreadable cost
+# record is a diagnostic and never this entrypoint's result.
+fm_cost_landing_lines "$FM_HOME" "$ID" pr "$URL" || \
+  printf 'actionable: merged %s but could not read what it cost: bin/fm-cost.sh show %s\n' \
+    "$URL" "$ID" >&2

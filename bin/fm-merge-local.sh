@@ -25,6 +25,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-backlog-transition-lib.sh
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
+# shellcheck source=bin/fm-cost-lib.sh
+. "$SCRIPT_DIR/fm-cost-lib.sh"
 if [ "$#" -ne 1 ] || ! fm_pr_task_id_valid "$1"; then
   echo "error: invalid local merge request" >&2
   exit 2
@@ -133,3 +135,14 @@ MERGE_CONTROL_LOCK=
 [ "$merge_status" -eq 0 ] || exit "$merge_status"
 after=$(git -C "$PROJ" rev-parse --short "$DEFAULT")
 echo "merged $BRANCH into local $DEFAULT ($before -> $after) in $PROJ"
+
+# The captain-facing landing outcome carries the cost overview, through the same
+# owner the PR path uses (bin/fm-cost-lib.sh): the landed local head is this
+# landing's reference. Accounting is advisory - the merge above already landed,
+# so an unrecorded cost prints as an actionable diagnostic and never fails the
+# landing. The full landed head identifies the landing, so the ledger key stays
+# unambiguous even where an abbreviation would not.
+landed_head=$(git -C "$PROJ" rev-parse "$DEFAULT")
+fm_cost_landing_report "$FM_HOME" "$STATE" "$ID" local "$landed_head" || \
+  printf 'actionable: merged %s locally but did not record what it cost: repair with bin/fm-cost.sh record %s local %s\n' \
+    "$ID" "$ID" "$landed_head" >&2

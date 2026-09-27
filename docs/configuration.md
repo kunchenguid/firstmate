@@ -364,6 +364,40 @@ Any other value, or an unreadable file, refuses every spawn from that home, whic
 The file is a captain-wide safety preference, so it is inherited into secondmate homes under the [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md) inherited-local-material contract; a secondmate's own Claude crewmates then launch on the same posture.
 The [Claude adapter reference](../.agents/skills/harness-adapters/references/harness/claude.md) records the verified shape of both launches and which once-per-machine dialog each one can meet.
 
+## Delivery cost (config/model-prices.json, data/cost/ledger.jsonl)
+
+Every landing records what the work cost, so spend stays visible per project without a separate accounting step.
+`bin/fm-cost-lib.sh` is the single owner of that accounting, and its header owns the honesty contract, the usage sources, the attribution window, and the ledger key; `bin/fm-cost.sh --help` owns the operator commands.
+`bin/fm-pr-merge.sh` and `bin/fm-merge-local.sh` print the resulting overview as part of the landing outcome, and a merge this home's poll detected is recorded the same way, so `bin/fm-cost.sh show <task-id>` answers a merge nobody watched land.
+Accounting never gates a landing: the merge already happened, so a cost that could not be recorded prints an actionable diagnostic naming the `bin/fm-cost.sh record` repair instead.
+
+An amount is reported as `measured` when the worker runtime's own durable record states it, `estimated` when that record's token counts are priced with this home's own price table, and `unavailable` otherwise, always with the reason.
+Recorded token counts still print when no amount is available, so an unpriced home still sees the size of its spend.
+Nothing is ever substituted for a missing price, model, token count, or amount, and one unpriced model or token bucket makes that landing's amount unavailable rather than quietly too low.
+
+The optional local, gitignored `config/model-prices.json` is that price table, in USD per million tokens, and is inherited into secondmate homes through the primary-authoritative configuration contract:
+
+```json
+{
+  "version": 1,
+  "currency": "USD",
+  "per": "million_tokens",
+  "models": {
+    "claude-opus-5": {"input": 5, "output": 25, "cache_read": 0.5, "cache_write": 6.25},
+    "gpt-5.6-sol": {"input": 1.25, "output": 10, "cache_read": 0.125}
+  }
+}
+```
+
+Model keys are the identifiers the worker runtime itself records, not the shorthand a dispatch profile passes.
+A model absent from `models`, or a bucket absent from a model that used it, is an absent price, not a zero.
+With no file at all, every landing reports `unavailable` with its token counts, which is the correct answer for a home that has not told Firstmate what its tokens cost.
+
+Landings are recorded in the home's private, gitignored `data/cost/ledger.jsonl`, one JSON line per landing, keyed by task, landing kind, and landing reference so a retried report, a re-run entrypoint, or an interrupted cleanup finished at the next session start cannot count one landing twice.
+Nothing is written into a project.
+An entry records what was known when that landing happened, so configuring prices later does not retroactively price an earlier landing.
+`bin/fm-cost.sh projects` is the operator view of that ledger: one row per project, plus a fleet total that counts priced and unpriced landings separately.
+
 ## Worker launch environment (config/launch-env-allowlist)
 
 The optional local, gitignored `config/launch-env-allowlist` limits the ambient environment passed to newly launched workers, scouts, and secondmates, including relaunches.

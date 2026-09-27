@@ -23,6 +23,13 @@
 # is committed, so a failed commit stays eligible for at-least-once retry and
 # may rarely duplicate rather than leave a merge silent.
 #
+# Every confirmed merge this operation publishes is also accounted for through
+# bin/fm-cost-lib.sh, so a merge this home performed and a merge its poll
+# detected both reach the one cost owner. That accounting is advisory: the merge
+# has already landed, so a failure prints an actionable diagnostic and never
+# changes this operation's own result. Recording is idempotent on the ledger key,
+# so the already-notified path retries a previously failed record for free.
+#
 # Sourced by bin/fm-pr-merge.sh, bin/fm-watch.sh, and tests. No side effects on
 # source beyond its sourced libraries.
 
@@ -31,6 +38,8 @@ _FM_MERGE_OUTCOME_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$_FM_MERGE_OUTCOME_LIB_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-parent-channel-lib.sh
 . "$_FM_MERGE_OUTCOME_LIB_DIR/fm-parent-channel-lib.sh"
+# shellcheck source=bin/fm-cost-lib.sh
+. "$_FM_MERGE_OUTCOME_LIB_DIR/fm-cost-lib.sh"
 
 # shellcheck disable=SC2034 # Public result consumed by sourcing callers.
 FM_MERGE_OUTCOME_ALREADY_RECORDED=false
@@ -93,6 +102,7 @@ fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin> [autho
     # shellcheck disable=SC2034 # Public result consumed by sourcing callers.
     FM_MERGE_OUTCOME_ALREADY_RECORDED=true
     fm_lock_release "$lock"
+    _fm_merge_outcome_account "$home" "$state" "$id" "$FM_PR_URL"
     return 0
   fi
 
@@ -108,5 +118,16 @@ fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin> [autho
       "$provider" "$host" "$path" "$number" || status=1
   fi
   fm_lock_release "$lock"
+  _fm_merge_outcome_account "$home" "$state" "$id" "$FM_PR_URL"
   return "$status"
+}
+
+# Account for a confirmed merge exactly once. Always returns 0: the merge landed
+# before this ran, so unrecorded spend is a diagnostic to act on, never a reason
+# to report the merge as unreported.
+_fm_merge_outcome_account() {  # <home> <state> <task-id> <pr-url>
+  fm_cost_record "$1" "$2" "$3" pr "$4" && return 0
+  printf 'actionable: merged %s but did not record what it cost: repair with bin/fm-cost.sh record %s pr %s\n' \
+    "$4" "$3" "$4" >&2
+  return 0
 }
