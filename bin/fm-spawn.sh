@@ -331,7 +331,8 @@
 # TeamClaude routing for Claude, Codex, and Pi openai-codex models is owned by
 # bin/fm-teamclaude.sh. Claude and Codex launches refuse before an endpoint
 # exists when that proxy is not usable, and they do not fall back to a direct
-# login. Pi launches route only openai-codex models. OpenCode is unchanged.
+# login. Pi launches route only openai-codex models, through a provider
+# override in the per-task Pi extension. OpenCode is unchanged.
 #   Launch templates live in launch_template() below; placeholders replaced before launch:
 #     __BRIEF__    absolute path to data/<task-id>/brief.md
 #     __CLAUDEPERMFLAG__ the claude permission flag selected by config/claude-permission-mode
@@ -351,6 +352,7 @@
 #                  written by this script; outside the worktree to avoid pi's trust gate)
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
+#     __PITEAMCLAUDE__ `-e <state/<task-id>.pi-ext.ts> ` for an openai-codex pi secondmate, else empty
 #     __OMPBIN__   quoted concrete omp executable path resolved from PATH
 #     __OMPEXT__   absolute path to state/<task-id>.omp-ext.ts (omp busy-state and
 #                  turn-end extension, written by this script; outside the worktree so
@@ -2032,7 +2034,7 @@ launch_template() {
   pi | pi-signed)
     printf '%s' '__PIBIN____PITUIMODE____PIRESUME__'
     if [ "$kind" = secondmate ]; then
-      printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ __PITEAMCLAUDE__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     else
       printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PIEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     fi
@@ -2382,23 +2384,26 @@ WORKER_ACCOUNT_PROVIDER=${WORKER_ACCOUNT_ROOT#*$'\t'}
 WORKER_ACCOUNT_ROOT=${WORKER_ACCOUNT_ROOT%%$'\t'*}
 # TeamClaude routing refuses before any endpoint, worktree, or record exists.
 # bin/fm-teamclaude.sh owns the proxy check, the Codex shim bypass, and the
-# Pi openai-codex overlay. The fragments captured here are applied when the
-# launch command is assembled below.
+# Pi openai-codex base URL. The proxy check runs once in this shell so the
+# captures below reuse it. The fragments are applied when the launch command
+# is assembled below; the Pi base URL goes into the per-task Pi extension.
 TEAMCLAUDE_CLAUDE_ENV=
 TEAMCLAUDE_CODEX_EXEC=
 TEAMCLAUDE_CODEX_CONFIG=
-TEAMCLAUDE_PI_PREFIX=
+TEAMCLAUDE_PI_BASE_URL=
 case "$HARNESS" in
 claude)
+  fm_teamclaude_require_proxy || exit 1
   TEAMCLAUDE_CLAUDE_ENV=$(fm_teamclaude_claude_env) || exit 1
   ;;
 codex)
+  fm_teamclaude_require_proxy || exit 1
   TEAMCLAUDE_CODEX_EXEC=$(fm_teamclaude_codex_exec) || exit 1
   TEAMCLAUDE_CODEX_CONFIG=$(fm_teamclaude_codex_config) || exit 1
   ;;
 pi | pi-signed)
   _tc_agent=${WORKER_ACCOUNT_ROOT:-${PI_CODING_AGENT_DIR:-${HOME:-}/.pi/agent}}
-  TEAMCLAUDE_PI_PREFIX=$(fm_teamclaude_pi_prefix "$MODEL" "$WORKER_ACCOUNT_PROVIDER" "$_tc_agent" "$STATE/$ID.pi-agent") || exit 1
+  TEAMCLAUDE_PI_BASE_URL=$(fm_teamclaude_pi_base_url "$MODEL" "$WORKER_ACCOUNT_PROVIDER" "$_tc_agent") || exit 1
   ;;
 esac
 if [ -n "$WORKER_ACCOUNT" ] && [ "$HARNESS" = claude ]; then
@@ -4390,6 +4395,9 @@ if [ "$RELAUNCH" -eq 1 ]; then
   RELAUNCH_REPLACEMENT_STATE=$STATE_REAL
   RELAUNCH_REPLACEMENT_WT=$WT
 fi
+TEAMCLAUDE_PI_EXT=
+[ -z "$TEAMCLAUDE_PI_BASE_URL" ] \
+  || TEAMCLAUDE_PI_EXT=$'\n'"  pi.registerProvider(\"openai-codex\", { baseUrl: \"$(json_escape "$TEAMCLAUDE_PI_BASE_URL")\" });"
 if [ "$KIND" != secondmate ]; then
   # Arm the semantic busy-state contract (bin/fm-busy-lib.sh) for every
   # adapter with a verified semantic source. The launch brief sent below IS a
@@ -4575,7 +4583,7 @@ const busyEvent = (state: string, event: string) =>
       "--gen", "$BUSY_GEN", "--source", "pi-ext", "--event", event,
     ], () => resolve());
   });
-export default function (pi: any) {
+export default function (pi: any) {${TEAMCLAUDE_PI_EXT}
   pi.on("agent_start", () => busyEvent("busy", "agent-start"));
   pi.on("agent_settled", (_event: any, ctx: any) => {
     if (ctx && typeof ctx.isIdle === "function" && !ctx.isIdle()) return;
@@ -5031,6 +5039,14 @@ LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
 LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
 LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
+# A secondmate Pi launch loads its home's own extensions, so an openai-codex
+# secondmate gets the TeamClaude provider override from its own per-task file.
+PITEAMCLAUDE=
+if [ "$KIND" = secondmate ] && [ -n "$TEAMCLAUDE_PI_EXT" ]; then
+  printf '%s\n' "export default function (pi: any) {${TEAMCLAUDE_PI_EXT}" "}" >"$STATE/$ID.pi-ext.ts"
+  PITEAMCLAUDE="-e $sq_piext "
+fi
+LAUNCH=${LAUNCH//__PITEAMCLAUDE__/$PITEAMCLAUDE}
 LAUNCH=${LAUNCH//__OMPEXT__/$sq_ompext}
 LAUNCH=${LAUNCH//__OMPWORKERCFG__/$sq_ompcfg}
 LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
@@ -5096,9 +5112,6 @@ esac
 # A home's worker account pin replaces that forwarding: the launch names the
 # pinned root (or unsets the variable for the ordinary Claude account) and
 # sheds the environment credentials Claude ranks above the root's login.
-if [ -n "$TEAMCLAUDE_PI_PREFIX" ]; then
-  LAUNCH="$TEAMCLAUDE_PI_PREFIX$LAUNCH"
-fi
 if [ -n "$WORKER_ACCOUNT" ]; then
   case "$HARNESS" in
   claude)
@@ -5109,11 +5122,7 @@ if [ -n "$WORKER_ACCOUNT" ]; then
     fi
     ;;
   pi | pi-signed)
-    # An openai-codex overlay already points PI_CODING_AGENT_DIR at a
-    # directory that keeps this pin's login. Don't point Pi back at the pin.
-    if [ -z "$TEAMCLAUDE_PI_PREFIX" ]; then
-      LAUNCH="PI_CODING_AGENT_DIR=$(shell_quote "$WORKER_ACCOUNT_ROOT") $LAUNCH"
-    fi
+    LAUNCH="PI_CODING_AGENT_DIR=$(shell_quote "$WORKER_ACCOUNT_ROOT") $LAUNCH"
     ;;
   esac
 elif [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then

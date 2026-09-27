@@ -102,27 +102,29 @@ test_down_proxy_refuses_loudly() {
   pass "a down TeamClaude proxy refuses with the proxy diagnostic and no direct fallback"
 }
 
-test_threshold_below_95_warns_and_names_the_local_step() {
-  local out err status
-  out=$(FM_TEST_TEAMCLAUDE_THRESHOLD='80%' "$ROOT_BIN" claude-env 2>"$TMP_ROOT/threshold.err") && status=0 || status=$?
-  err=$(cat "$TMP_ROOT/threshold.err")
-  expect_code 0 "$status" "a non-95 threshold must not block the launch fragment"
-  assert_contains "$out" "HTTPS_PROXY=" "the launch fragment is still produced when the threshold differs"
-  assert_contains "$err" "not a flat 95%" "the warning must say the threshold is not 95%"
-  assert_contains "$err" "bin/fm-teamclaude.sh apply-threshold" \
-    "the warning must name the remaining local step"
-  assert_contains "$err" "teamclaude threshold 95" \
-    "the warning must name TeamClaude's own threshold command"
-  pass "a threshold other than 95% warns with the remaining local step and still routes"
+test_threshold_below_95_is_applied_before_the_launch() {
+  local out status file
+  file="$TMP_ROOT/threshold-applied"
+  printf '80%%\n' > "$file"
+  out=$(FM_TEST_TEAMCLAUDE_THRESHOLD_FILE="$file" "$ROOT_BIN" claude-env 2>"$TMP_ROOT/threshold.err") && status=0 || status=$?
+  expect_code 0 "$status" "a threshold TeamClaude accepts as 95% must let the launch start: $(cat "$TMP_ROOT/threshold.err")"
+  assert_equals "95%" "$(cat "$file")" "the launch must apply TeamClaude's 95% threshold"
+  assert_contains "$out" "HTTPS_PROXY=" "the launch fragment is produced once the threshold is 95%"
+  pass "a threshold other than 95% is set to 95% and verified before the launch"
 }
 
-test_apply_threshold_is_teamclaude_own_command() {
-  local out
-  out=$(PATH="$STUB:/usr/bin:/bin" "$ROOT_BIN" apply-threshold) \
-    || fail "apply-threshold failed"
-  assert_equals "Switch threshold set to 95%." "$out" \
-    "apply-threshold must run teamclaude threshold 95"
-  pass "apply-threshold delegates to teamclaude threshold 95"
+test_threshold_that_stays_off_95_refuses_loudly() {
+  local out status
+  out=$(FM_TEST_TEAMCLAUDE_THRESHOLD='80%' "$ROOT_BIN" claude-env 2>&1) && status=0 || status=$?
+  expect_code 1 "$status" "a threshold that does not become 95% must refuse"
+  assert_contains "$out" "still not a flat 95%" "the refusal must say the threshold could not be verified"
+  assert_not_contains "$out" "HTTPS_PROXY=" "a refused launch must not produce the proxy fragment"
+
+  out=$(FM_TEST_TEAMCLAUDE_THRESHOLD='80%' FM_TEST_TEAMCLAUDE_SET_RC=1 "$ROOT_BIN" claude-env 2>&1) && status=0 || status=$?
+  expect_code 1 "$status" "a threshold that cannot be applied must refuse"
+  assert_contains "$out" "teamclaude threshold 95\` failed" "the refusal must say applying the threshold failed"
+  assert_contains "$out" "cannot write the proxy config" "the refusal must keep TeamClaude's diagnostic"
+  pass "a threshold that cannot be applied or verified at 95% refuses the worker"
 }
 
 test_codex_shim_resolves_to_the_real_binary() {
@@ -160,27 +162,48 @@ test_codex_config_points_at_the_proxy_without_a_second_rotator() {
 }
 
 test_pi_routes_only_openai_codex() {
-  local dest out status
-  dest="$TMP_ROOT/pi-codex"
-  mkdir -p "$TMP_ROOT/pi-source"
-  printf '%s\n' '{"providers":{"openai":{"baseUrl":"https://api.openai.com/v1"}}}' \
-    > "$TMP_ROOT/pi-source/models.json"
-  out=$(PATH="/usr/bin:/bin" "$ROOT_BIN" pi-prefix --model openai/gpt-4o --provider '' \
-    --agent-dir "$TMP_ROOT/pi-source" --dest "$dest-skip" 2>"$TMP_ROOT/pi-skip.err") && status=0 || status=$?
+  local agent out status
+  agent="$TMP_ROOT/pi-source"
+  mkdir -p "$agent"
+  out=$(PATH="/usr/bin:/bin" "$ROOT_BIN" pi-base-url --model openai/gpt-4o --provider '' \
+    --agent-dir "$agent" 2>&1) && status=0 || status=$?
   expect_code 0 "$status" "an OpenAI API-key model must not require TeamClaude"
-  [ -z "$out" ] || fail "an OpenAI API-key model must not change the Pi launch"$'\n'"$out"
-  [ ! -e "$dest-skip" ] || fail "an OpenAI API-key model must not create a Pi overlay"
+  assert_equals "" "$out" "an OpenAI API-key model must not be routed"
 
-  out=$("$ROOT_BIN" pi-prefix --model openai-codex/gpt-5.5 --provider '' \
-    --agent-dir "$TMP_ROOT/pi-source" --dest "$dest") || fail "openai-codex pi-prefix failed"
-  assert_contains "$out" "PI_CODING_AGENT_DIR=" "openai-codex must point Pi at the overlay"
-  assert_contains "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["providers"]["openai-codex"]["baseUrl"])' "$dest/models.json")" \
-    "http://127.0.0.1:3456/backend-api" \
-    "the overlay must point openai-codex at TeamClaude's /backend-api path"
-  assert_contains "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["providers"]["openai"]["baseUrl"])' "$dest/models.json")" \
-    "https://api.openai.com/v1" \
-    "the overlay must leave the OpenAI API-key provider on its own base URL"
-  pass "Pi routes openai-codex through TeamClaude and leaves API-key OpenAI alone"
+  out=$("$ROOT_BIN" pi-base-url --model openai-codex/gpt-5.5 --provider '' --agent-dir "$agent") \
+    || fail "openai-codex pi-base-url failed"
+  assert_equals "http://127.0.0.1:3456/backend-api" "$out" \
+    "openai-codex must point at TeamClaude's /backend-api path"
+
+  printf '%s\n' '{"defaultProvider":"openai-codex"}' > "$agent/settings.json"
+  out=$("$ROOT_BIN" pi-base-url --model gpt-5.5 --provider '' --agent-dir "$agent") \
+    || fail "a bare model pi-base-url failed"
+  assert_equals "http://127.0.0.1:3456/backend-api" "$out" \
+    "a bare model under an openai-codex default provider must route"
+  out=$("$ROOT_BIN" pi-base-url --model '' --provider '' --agent-dir "$agent") \
+    || fail "a model-less pi-base-url failed"
+  assert_equals "http://127.0.0.1:3456/backend-api" "$out" \
+    "a launch without --model under an openai-codex default provider must route"
+
+  printf '%s\n' '{"defaultProvider":"anthropic"}' > "$agent/settings.json"
+  out=$(PATH="/usr/bin:/bin" "$ROOT_BIN" pi-base-url --model '' --provider '' --agent-dir "$agent" 2>&1) \
+    || fail "a model-less launch under another default provider must not refuse"
+  assert_equals "" "$out" "a launch under another default provider must not be routed"
+  pass "Pi routes openai-codex, including through the account default, and leaves API-key OpenAI alone"
+}
+
+# pi_ext_providers <ext>: load the generated Pi extension in a plain Node host
+# and print each provider it registers as name=baseUrl.
+pi_ext_providers() {
+  EXT_PATH="$1" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+const mod = await import(pathToFileURL(process.env.EXT_PATH).href);
+mod.default({
+  on: () => {},
+  events: { on: () => {} },
+  registerProvider: (name, config) => console.log(`${name}=${config.baseUrl}`),
+});
+EOF
 }
 
 test_spawn_claude_carries_the_proxy_and_clears_a_direct_base_url() {
@@ -264,7 +287,7 @@ SH
 }
 
 test_spawn_pi_openai_codex_routes_and_api_key_does_not() {
-  local rec out status launch base_url
+  local rec out status launch
   cat > "$TMP_ROOT/pi-bin" <<'SH'
 #!/bin/sh
 exit 0
@@ -278,28 +301,33 @@ SH
   out=$(run_spawn tc-pi-api-a1 "$PROJ_DIR" --mode no-mistakes --yolo off --model openai/gpt-4o)
   status=$?
   expect_code 0 "$status" "Pi with an API-key model must start even when TeamClaude is down: $out"
-  launch=$(cat "$LAUNCH_LOG")
-  assert_not_contains "$launch" "PI_CODING_AGENT_DIR=" \
-    "an API-key Pi model must not be pointed at a TeamClaude overlay"
-  assert_not_contains "$launch" ".pi-agent" \
-    "an API-key Pi model must not receive the overlay directory"
+  out=$(pi_ext_providers "$HOME_DIR/state/tc-pi-api-a1.pi-ext.ts") || fail "the Pi extension did not load: $out"
+  assert_equals "" "$out" "an API-key Pi model must not register a TeamClaude provider"
 
   rec=$(make_case pi-codex pi tc-pi-codex-a1)
   read_case "$rec"
   cp "$TMP_ROOT/pi-bin" "$FAKEBIN_DIR/pi"
-  mkdir -p "$HOME_DIR/user-home/.pi/agent"
-  printf '%s\n' '{"providers":{"openai":{"baseUrl":"https://api.openai.com/v1"}}}' \
-    > "$HOME_DIR/user-home/.pi/agent/models.json"
   out=$(run_spawn tc-pi-codex-a1 "$PROJ_DIR" --mode no-mistakes --yolo off --model openai-codex/gpt-5.5)
   status=$?
   expect_code 0 "$status" "Pi openai-codex spawn should succeed: $out"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "$HOME_DIR/state/tc-pi-codex-a1.pi-agent" \
-    "the Pi launch must use the per-task overlay"
-  base_url=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["providers"]["openai-codex"]["baseUrl"])' \
-    "$HOME_DIR/state/tc-pi-codex-a1.pi-agent/models.json")
-  assert_equals "http://127.0.0.1:3456/backend-api" "$base_url" \
-    "the spawned overlay must point openai-codex at TeamClaude"
+  assert_not_contains "$launch" "PI_CODING_AGENT_DIR=" \
+    "an openai-codex Pi launch must keep the account's own agent directory"
+  out=$(pi_ext_providers "$HOME_DIR/state/tc-pi-codex-a1.pi-ext.ts") || fail "the Pi extension did not load: $out"
+  assert_equals "openai-codex=http://127.0.0.1:3456/backend-api" "$out" \
+    "the per-task Pi extension must point openai-codex at TeamClaude"
+
+  rec=$(make_case pi-default pi tc-pi-default-a1)
+  read_case "$rec"
+  cp "$TMP_ROOT/pi-bin" "$FAKEBIN_DIR/pi"
+  mkdir -p "$HOME_DIR/user-home/.pi/agent"
+  printf '%s\n' '{"defaultProvider":"openai-codex"}' > "$HOME_DIR/user-home/.pi/agent/settings.json"
+  out=$(PI_CODING_AGENT_DIR='' run_spawn tc-pi-default-a1 "$PROJ_DIR" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "Pi spawn without --model should succeed: $out"
+  out=$(pi_ext_providers "$HOME_DIR/state/tc-pi-default-a1.pi-ext.ts") || fail "the Pi extension did not load: $out"
+  assert_equals "openai-codex=http://127.0.0.1:3456/backend-api" "$out" \
+    "a Pi launch that defaults to openai-codex must route through TeamClaude"
   pass "a Pi worker routes openai-codex through TeamClaude and does not route API-key OpenAI"
 }
 
@@ -320,8 +348,8 @@ test_spawn_opencode_is_unchanged() {
 test_claude_env_is_mitm_without_a_direct_fallback
 test_missing_cli_refuses_loudly
 test_down_proxy_refuses_loudly
-test_threshold_below_95_warns_and_names_the_local_step
-test_apply_threshold_is_teamclaude_own_command
+test_threshold_below_95_is_applied_before_the_launch
+test_threshold_that_stays_off_95_refuses_loudly
 test_codex_shim_resolves_to_the_real_binary
 test_codex_config_points_at_the_proxy_without_a_second_rotator
 test_pi_routes_only_openai_codex

@@ -1022,6 +1022,35 @@ test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
   pass "pi-signed is a distinct persistent secondmate runtime with shared Pi supervision semantics"
 }
 
+test_pi_openai_codex_secondmate_loads_the_teamclaude_provider() {
+  local rec id sm out status launch ext
+  id=profile-pi-codex-secondmate-t4c
+  rec=$(make_spawn_case profile-pi-codex-secondmate codex "$id")
+  read_case_record "$rec"
+  printf '%s\n' pi > "$HOME_DIR/config/secondmate-harness"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+  sm=$(cd "$sm" && pwd -P)
+  cp "$ROOT/AGENTS.md" "$sm/AGENTS.md"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate --model openai-codex/gpt-5.5)
+  status=$?
+  expect_code 0 "$status" "openai-codex pi secondmate spawn should succeed: $out"
+  ext="$HOME_DIR/state/$id.pi-ext.ts"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "-e '$sm/.pi/extensions/fm-primary-pi-watch.ts' -e '$ext' " \
+    "openai-codex pi secondmate did not load its TeamClaude provider extension"
+  out=$(EXT_PATH="$ext" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+const mod = await import(pathToFileURL(process.env.EXT_PATH).href);
+mod.default({ registerProvider: (name, config) => console.log(`${name}=${config.baseUrl}`) });
+EOF
+  ) || fail "the secondmate TeamClaude extension did not load: $out"
+  assert_equals "openai-codex=http://127.0.0.1:3456/backend-api" "$out" \
+    "the secondmate extension must point openai-codex at TeamClaude"
+  pass "an openai-codex Pi secondmate routes through TeamClaude with its home's own extensions"
+}
+
 test_batch_forwards_shared_profile_flags() {
   local rec id1 id2 out status
   id1=profile-batch-a-z9
@@ -1837,6 +1866,7 @@ test_pi_tui_mode_probe_is_safe_for_old_and_new_pi
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity
+test_pi_openai_codex_secondmate_loads_the_teamclaude_provider
 test_batch_forwards_shared_profile_flags
 test_claude_forwards_firstmate_config_dir_when_set
 test_lavish_server_address_is_exported_to_worker_launch

@@ -19,18 +19,20 @@
 # `<codex>.opencodex-real` instead of the shim. opencodex is not stopped and
 # OpenCode launches are not rewritten.
 #
-# Pi and pi-signed launches route only when the model or the provider is
-# openai-codex. The per-task agent directory's models.json sets that
-# provider's baseUrl to the proxy's /backend-api path, which Pi normalizes
-# onto /codex/responses. OpenAI API-key models are not redirected. A launch
-# that does not name openai-codex is unchanged and does not require the proxy.
+# Pi and pi-signed launches route only when the provider Pi would use is
+# openai-codex: the pinned --provider, else the --model <provider>/ prefix,
+# else defaultProvider in the account's settings.json. The per-task Pi
+# extension fm-spawn writes registers that provider's baseUrl as the proxy's
+# /backend-api path, which Pi normalizes onto /codex/responses.
+# PI_CODING_AGENT_DIR stays the account's own directory. OpenAI API-key
+# models are not redirected. A launch that does not resolve to openai-codex
+# is unchanged and does not require the proxy.
 #
-# Rotation stays TeamClaude's. This script does not pick accounts. When
-# `teamclaude threshold` does not report a flat 95%, the routed launch still
-# proceeds and warns that the remaining local step is
-# `bin/fm-teamclaude.sh apply-threshold`. That subcommand runs
-# `teamclaude threshold 95` (TeamClaude writes its config and notifies the
-# running proxy). A task copy must not run it.
+# Rotation stays TeamClaude's. This script does not pick accounts. Every
+# routed launch requires `teamclaude threshold` to report a flat 95%. When it
+# does not, the launch runs `teamclaude threshold 95` (TeamClaude writes its
+# config and notifies the running proxy), reads the threshold again, and
+# refuses the worker when it still is not a flat 95%.
 #
 # omp is not this contract: its worker overlay does not rewrite provider
 # endpoints. The Herdr primary is started by Herdr's own agent command, not
@@ -38,8 +40,8 @@
 # sends the same launch command, so the routing covers tmux, herdr, zellij,
 # orca, and cmux workers alike.
 #
-# Usage: fm-teamclaude.sh <claude-env|codex-exec|codex-config|pi-prefix|apply-threshold|help>
-#        fm-teamclaude.sh pi-prefix --model <model> --provider <provider> --agent-dir <dir> --dest <dir>
+# Usage: fm-teamclaude.sh <claude-env|codex-exec|codex-config|pi-base-url|help>
+#        fm-teamclaude.sh pi-base-url --model <model> --provider <provider> --agent-dir <dir>
 fm_teamclaude_shell_quote() {
   printf "'"
   printf '%s' "$1" | sed "s/'/'\\\\''/g"
@@ -122,23 +124,34 @@ EOF
     return 1
   fi
   rm -f "$errfile"
-  fm_teamclaude_warn_threshold || return 1
+  fm_teamclaude_enforce_threshold || return 1
   _FM_TC_READY=1
 }
 
-fm_teamclaude_warn_threshold() {
-  local report first extra
+fm_teamclaude_threshold_is_95() {
+  local report extra
   if ! report=$(teamclaude threshold 2>&1); then
-    fm_teamclaude_die "could not read TeamClaude's rotation threshold. Refusing to guess a second rotator."
+    fm_teamclaude_die "could not read TeamClaude's rotation threshold. Refusing to start this worker. There is no direct fallback." || true
+    printf '%s\n' "$report" | sed 's/^/error: /' >&2
+    return 2
+  fi
+  _FM_TC_THRESHOLD=${report%%$'\n'*}
+  extra=$(printf '%s\n' "$report" | awk 'NR > 1 && $0 ~ /^  / { found = 1 } END { if (found) print "yes" }')
+  [ "$_FM_TC_THRESHOLD" = "Switch threshold: 95%" ] && [ -z "$extra" ]
+}
+
+fm_teamclaude_enforce_threshold() {
+  local out rc
+  fm_teamclaude_threshold_is_95 && return 0 || rc=$?
+  [ "$rc" = 1 ] || return 1
+  if ! out=$(teamclaude threshold 95 2>&1); then
+    fm_teamclaude_die "TeamClaude's rotation threshold is not a flat 95% (${_FM_TC_THRESHOLD}) and \`teamclaude threshold 95\` failed. Refusing to start this worker. There is no direct fallback." || true
+    printf '%s\n' "$out" | sed 's/^/error: /' >&2
     return 1
   fi
-  first=${report%%$'\n'*}
-  extra=$(printf '%s\n' "$report" | awk 'NR > 1 && $0 ~ /^  / { found = 1 } END { if (found) print "yes" }')
-  if [ "$first" = "Switch threshold: 95%" ] && [ -z "$extra" ]; then
-    return 0
-  fi
-  printf '%s\n' "warning: TeamClaude rotation threshold is not a flat 95% (${first})." >&2
-  printf '%s\n' "warning: remaining local step: run bin/fm-teamclaude.sh apply-threshold from the firstmate code root on the machine that hosts the proxy. That runs \`teamclaude threshold 95\`, which is TeamClaude's own threshold command: it writes the proxy config and notifies the running proxy. Firstmate does not rotate accounts itself." >&2
+  fm_teamclaude_threshold_is_95 && return 0 || rc=$?
+  [ "$rc" = 1 ] || return 1
+  fm_teamclaude_die "TeamClaude's rotation threshold is still not a flat 95% after \`teamclaude threshold 95\` (${_FM_TC_THRESHOLD}). Refusing to start this worker. There is no direct fallback."
 }
 
 fm_teamclaude_claude_env() {
@@ -252,69 +265,28 @@ fm_teamclaude_splice_codex() {
   esac
 }
 
-fm_teamclaude_pi_routes() {
-  local model=$1 provider=$2
-  case "$model" in
-    openai-codex | openai-codex/*) return 0 ;;
-  esac
-  case "$provider" in
-    openai-codex) return 0 ;;
-  esac
-  return 1
+fm_teamclaude_pi_provider() {
+  local model=$1 provider=$2 settings=$3/settings.json
+  if [ -z "$provider" ]; then
+    case "$model" in
+      */*) provider=${model%%/*} ;;
+      *)
+        if [ -f "$settings" ] && ! provider=$(jq -r '.defaultProvider // empty' "$settings" 2>/dev/null); then
+          fm_teamclaude_die "could not read defaultProvider from ${settings}, so Firstmate cannot tell whether this Pi worker uses openai-codex. Refusing to start this worker. There is no direct fallback."
+          return 1
+        fi
+        ;;
+    esac
+  fi
+  printf '%s\n' "$provider"
 }
 
-fm_teamclaude_pi_prefix() {
-  local model=$1 provider=$2 agent_dir=$3 dest=$4 origin base name src
-  fm_teamclaude_pi_routes "$model" "$provider" || return 0
+fm_teamclaude_pi_base_url() {
+  local provider
+  provider=$(fm_teamclaude_pi_provider "$1" "$2" "$3") || return 1
+  [ "$provider" = openai-codex ] || return 0
   fm_teamclaude_require_proxy || return 1
-  command -v python3 >/dev/null 2>&1 || {
-    fm_teamclaude_die "python3 is required to point a Pi openai-codex model at TeamClaude. Refusing to start this worker. There is no direct fallback."
-    return 1
-  }
-  origin=${_FM_TC_HTTPS_PROXY%/}
-  base="${origin}/backend-api"
-  mkdir -p "$dest" || return 1
-  chmod 700 "$dest" || return 1
-  python3 - "$agent_dir/models.json" "$dest/models.json" "$base" <<'PY' || return 1
-import json, os, sys
-src, dest, base = sys.argv[1:]
-data = {"providers": {}}
-if os.path.isfile(src):
-    with open(src) as handle:
-        loaded = json.load(handle)
-    if isinstance(loaded, dict):
-        data = loaded
-providers = data.get("providers")
-if not isinstance(providers, dict):
-    providers = {}
-    data["providers"] = providers
-entry = providers.get("openai-codex")
-if not isinstance(entry, dict):
-    entry = {}
-entry["baseUrl"] = base
-providers["openai-codex"] = entry
-with open(dest, "w") as handle:
-    json.dump(data, handle, indent=2)
-    handle.write("\n")
-os.chmod(dest, 0o600)
-PY
-  for name in auth.json settings.json models-store.json bin themes tools prompts; do
-    src=$agent_dir/$name
-    if [ -e "$src" ] || [ -L "$src" ]; then
-      if [ ! -e "$dest/$name" ] && [ ! -L "$dest/$name" ]; then
-        ln -s "$src" "$dest/$name" || return 1
-      fi
-    fi
-  done
-  printf '%s ' "PI_CODING_AGENT_DIR=$(fm_teamclaude_shell_quote "$dest")"
-}
-
-fm_teamclaude_apply_threshold() {
-  command -v teamclaude >/dev/null 2>&1 || {
-    fm_teamclaude_die "teamclaude is not on PATH"
-    return 1
-  }
-  exec teamclaude threshold 95
+  printf '%s\n' "${_FM_TC_HTTPS_PROXY%/}/backend-api"
 }
 
 fm_teamclaude_usage() {
@@ -322,21 +294,16 @@ fm_teamclaude_usage() {
 }
 
 fm_teamclaude_pi_args() {
-  local model='' provider='' agent_dir='' dest=''
+  local model='' provider='' agent_dir=''
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --model) model=${2:-}; shift 2 ;;
       --provider) provider=${2:-}; shift 2 ;;
       --agent-dir) agent_dir=${2:-}; shift 2 ;;
-      --dest) dest=${2:-}; shift 2 ;;
-      *) fm_teamclaude_die "unknown pi-prefix argument: $1"; return 1 ;;
+      *) fm_teamclaude_die "unknown pi-base-url argument: $1"; return 1 ;;
     esac
   done
-  [ -n "$dest" ] || {
-    fm_teamclaude_die "pi-prefix requires --dest"
-    return 1
-  }
-  fm_teamclaude_pi_prefix "$model" "$provider" "$agent_dir" "$dest"
+  fm_teamclaude_pi_base_url "$model" "$provider" "$agent_dir"
 }
 
 if [ "${BASH_SOURCE[0]}" != "$0" ]; then
@@ -349,8 +316,7 @@ case "${1:-}" in
   claude-env) fm_teamclaude_claude_env ;;
   codex-exec) fm_teamclaude_codex_exec ;;
   codex-config) fm_teamclaude_codex_config ;;
-  pi-prefix) shift; fm_teamclaude_pi_args "$@" ;;
-  apply-threshold) fm_teamclaude_apply_threshold ;;
+  pi-base-url) shift; fm_teamclaude_pi_args "$@" ;;
   help | --help | -h) fm_teamclaude_usage ;;
-  *) fm_teamclaude_die "usage: fm-teamclaude.sh <claude-env|codex-exec|codex-config|pi-prefix|apply-threshold|help>"; exit 1 ;;
+  *) fm_teamclaude_die "usage: fm-teamclaude.sh <claude-env|codex-exec|codex-config|pi-base-url|help>"; exit 1 ;;
 esac

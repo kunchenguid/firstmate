@@ -987,12 +987,12 @@ Per-machine Cursor `cli-config.json` attribution-off is not this contract: it do
 Claude launches use the MITM environment from `teamclaude env --mitm` and refuse to start when that proxy is not usable, with no direct-login fallback.
 Codex launches send the TeamClaude provider on the command itself and, when `codex` on PATH is an opencodex autostart shim, run the real Codex binary instead of that shim.
 opencodex is left running because OpenCode workers still use it, and OpenCode launches are not rewritten.
-Pi and pi-signed route through TeamClaude only for `openai-codex` models, by a per-task `models.json` base URL.
-OpenAI API-key models are not redirected, and a Pi launch that does not name an `openai-codex` model is unchanged.
+Pi and pi-signed route through TeamClaude only when the provider Pi would use is `openai-codex`: the pinned `--provider`, else the `--model` provider prefix, else `defaultProvider` in the account's `settings.json`.
+The per-task Pi extension registers that provider's base URL as the proxy, and `PI_CODING_AGENT_DIR` stays the account's own directory.
+OpenAI API-key models are not redirected, and a Pi launch that does not resolve to `openai-codex` is unchanged.
 The rotation threshold stays TeamClaude's own `teamclaude threshold` command.
 Firstmate does not keep a second rotator.
-When that command reports a threshold other than a flat 95%, a routed launch still starts and names the remaining local step, `bin/fm-teamclaude.sh apply-threshold`, which runs `teamclaude threshold 95` on the machine that hosts the proxy.
-A task copy does not run that step.
+Before a routed launch starts, Firstmate requires a flat 95%: it runs `teamclaude threshold 95` when the threshold differs, reads it again, and refuses the worker when it still is not a flat 95%.
 The Herdr primary is started by Herdr's own agent command, not by `fm-spawn`, so this routing does not change it.
 omp's worker overlay does not rewrite provider endpoints, so omp stays on the captain's own provider config.
 Every spawn backend sends the same launch command, so the routing covers tmux, Herdr, Zellij, Orca, and cmux workers alike.
