@@ -38,6 +38,7 @@ MAX_REPLY_CHARS = 8000
 OWNER_EMAIL = Path(__file__).resolve().with_name("fm-afk-owner-email").read_text(encoding="ascii").strip()
 
 
+
 TOKEN_RE = re.compile(r"^FM-AFK-[A-Za-z0-9_-]{16}$")
 
 

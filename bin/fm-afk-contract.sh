@@ -533,6 +533,7 @@ fm_afk_contract_cmd_enter() {
   local record legacy now now_epoch session_entered session_entered_epoch staged archived archived_tmp standing=''
   local harness destination owner_email require_owner_destination
 
+
   record=$(fm_afk_contract_path)
   legacy=$(fm_afk_contract_legacy_proposal_path)
   FM_AFK_CONTRACT_ENTRY_MODE=away
@@ -563,6 +564,7 @@ fm_afk_contract_cmd_enter() {
     )
     if [ "$destination" != "$owner_email" ]; then
       fm_afk_contract_log "FM_AFK_EMAIL_TO must be exactly $owner_email for Pi away mode; refusing entry"
+
 
       return 1
     fi

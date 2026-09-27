@@ -31,6 +31,7 @@ from pathlib import Path
 
 
 
+
 USER = os.environ['FM_MAIL_USER']
 PW = os.environ['FM_MAIL_PASS']
 IMH = os.environ['FM_IMAP_HOST']
@@ -143,6 +144,7 @@ def away_posture_operation():
 
 
 
+
 class AfkBodyFetchError(Exception):
     pass
 
@@ -209,7 +211,7 @@ def afk_email_context():
     recipient = configured.stdout.strip()
     if configured.returncode != 0 or not recipient:
         return None, True, False
-    if recipient.casefold() != AFK_OWNER_EMAIL:
+    if recipient.casefold() != OWNER_EMAIL.casefold():
         return None, True, True
     return recipient, True, False
 
@@ -426,6 +428,7 @@ def cmd_read():
                 mi = email.message_from_bytes(header_bytes)
                 trusted_sender = (
                     from_is_configured(dec(mi.get('From')), OWNER_EMAIL)
+
 
 
                     and gmail_authentication_pass(mi)
