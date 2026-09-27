@@ -238,6 +238,33 @@ test_an_underway_identifier_label_is_not_replaced_by_run_status() {
   pass "an underway identifier label is not replaced by run status"
 }
 
+test_charted_cards_show_context_and_preserve_dispatch_rules() {
+  local home out
+  home=$(make_home charted-context)
+  out=$(render "$home" '[
+    {"id":"ready","repo":"sample","title":"Ready work","reason":"","dispatchable":true,
+     "about":"Add the customer view","filed":"2026-08-01","link":"https://github.com/example/sample/pull/7"},
+    {"id":"held","repo":"sample","title":"Held work","reason":"blocked on prep","dispatchable":false,
+     "about":"Depends on the migration","waiting_on":"Migration must land first","filed":"2026-07-20"},
+    {"id":"legacy","repo":"sample","title":"Legacy wait","reason":"until Friday","dispatchable":false},
+    {"id":"warning","repo":"sample","title":"Inventory warning","reason":"","dispatchable":false,"kind":"warning"}
+  ]')
+  printf '%s' "$out" | jq -e '
+    (.charted | length) == 4 and all(.charted[]; .expandable)
+      and (.charted[0] | .pickable and .context.about == "Add the customer view"
+        and .context.filed == "2026-08-01"
+        and .link == "https://github.com/example/sample/pull/7")
+      and (.charted[1] | (.pickable | not) and (.sub | contains("Migration must land first"))
+        and .context["waiting on"] == "Migration must land first"
+        and .context.about == "Depends on the migration")
+      and (.charted[2] | (.pickable | not) and .context["waiting on"] == "until Friday")
+      and (.charted[3] | (.pickable | not) and .context["waiting on"] == "Needs repair"
+        and [.badges[].text] == ["needs repair"])
+  ' >/dev/null || fail "charted cards lost context, legacy fallback or dispatch behavior: $out"
+  [ "$(charted_next_count "$out")" = 3 ] || fail "charted cards changed the queued tally: $out"
+  pass "charted cards expand into context and keep dispatch eligibility and warning counts"
+}
+
 test_charted_next_reads_newest_filed_first() {
   local home out
   home=$(make_home charted-order)
@@ -268,6 +295,7 @@ test_charted_rows_without_a_filed_date_follow_the_dated_rows_in_payload_order() 
 
 test_an_underway_row_leads_with_the_task_name_and_keeps_its_run_status
 test_an_underway_identifier_label_is_not_replaced_by_run_status
+test_charted_cards_show_context_and_preserve_dispatch_rules
 test_charted_next_reads_newest_filed_first
 test_charted_rows_without_a_filed_date_follow_the_dated_rows_in_payload_order
 test_a_warning_row_reads_as_a_repair_not_as_queued_work

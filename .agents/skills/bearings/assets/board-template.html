@@ -258,7 +258,24 @@ a { color: inherit; text-decoration: none; }
 }
 .bb-empty { padding: 18px; font-size: var(--fs-sm); color: var(--text-muted); }
 
-/* ---- Charted Next dispatch picker ---- */
+/* ---- Charted Next cards and dispatch picker ---- */
+.bb-charted-card {
+  margin: 10px 12px; border: 1.5px solid var(--border-default);
+  border-radius: var(--radius-md); background: var(--surface-card);
+  box-shadow: var(--shadow-sm); overflow: hidden; display: block; padding: 0;
+}
+.bb-charted-card:first-child { margin-top: 12px; border-top: 1.5px solid var(--border-default); }
+.bb-charted-card__head { display: flex; align-items: center; gap: 12px; padding: 12px 14px; }
+.bb-charted-card__details { min-width: 0; flex: 1 1 auto; }
+.bb-charted-card__summary { cursor: pointer; list-style: none; display: flex; align-items: center; gap: 10px; }
+.bb-charted-card__summary::-webkit-details-marker { display: none; }
+.bb-charted-card__summary:focus-visible { outline: none; box-shadow: var(--focus-ring); border-radius: var(--radius-xs); }
+.bb-charted-card__summary::after { content: "+"; font-family: var(--font-mono); color: var(--text-muted); flex: none; }
+.bb-charted-card__details[open] .bb-charted-card__summary::after { content: "−"; }
+.bb-charted-card__context { padding: 2px 14px 14px 42px; border-top: 1px solid var(--border-soft); }
+.bb-charted-card__context .bb-ctx { margin-top: 10px; }
+.bb-charted-card__context .bb-ctx__row { grid-template-columns: 88px minmax(0,1fr); }
+.bb-charted-card__context .bb-decision__link { margin-top: 10px; }
 /* margin:0 kills the UA default checkbox margin so picker rows and spacer rows
    share one text left edge */
 .bb-pick { accent-color: var(--rust-500); width: 16px; height: 16px; flex: none; cursor: pointer; margin: 0; }
@@ -679,7 +696,8 @@ __FM_BEARINGS_BOARD_DATA__
     ch.appendChild(el("div", "bb-empty", "Nothing is queued."));
   }
   chartedOrder(data.charted).forEach(function (t) {
-    var row = el("div", "bb-row");
+    var row = el("div", "bb-row bb-charted-card");
+    var head = el("div", "bb-charted-card__head");
     if (t.dispatchable && !isWarning(t)) {
       anyPickable = true;
       var pick = document.createElement("input");
@@ -693,18 +711,37 @@ __FM_BEARINGS_BOARD_DATA__
         }
         refreshBar();
       });
-      row.appendChild(pick);
+      head.appendChild(pick);
     } else {
-      row.appendChild(el("span", "bb-pick-spacer"));
+      head.appendChild(el("span", "bb-pick-spacer"));
     }
+    var details = el("details", "bb-charted-card__details");
+    var summary = el("summary", "bb-charted-card__summary");
     var main = el("div", "bb-row__main");
     main.appendChild(el("div", "bb-row__title", t.title));
-    /* second line keeps the title uncrowded in the half-width column */
+    /* The collapsed line explains an unavailable checkbox as well as naming
+       the repo. Legacy payloads keep their required reason as the fallback. */
+    var waiting = t.waiting_on || t.reason || (isWarning(t) ? "Needs repair" : "Not ready to dispatch");
     var chSub = t.repo || t.id;
-    main.appendChild(el("div", "bb-row__sub", t.reason ? t.reason + " · " + chSub : chSub));
-    row.appendChild(main);
-    if (isWarning(t)) row.appendChild(badge("danger", "needs repair"));
-    else if (t.reason) row.appendChild(badge("warn", "waiting"));
+    main.appendChild(el("div", "bb-row__sub", (!t.dispatchable || isWarning(t)) ? waiting + " · " + chSub : chSub));
+    summary.appendChild(main);
+    if (isWarning(t)) summary.appendChild(badge("danger", "needs repair"));
+    else if (!t.dispatchable || t.reason || t.waiting_on) summary.appendChild(badge("warn", "waiting"));
+    details.appendChild(summary);
+    var context = el("div", "bb-charted-card__context");
+    var ctx = el("div", "bb-ctx");
+    if (t.about) ctx.appendChild(ctxRow("about", t.about));
+    if (t.waiting_on || t.reason || !t.dispatchable) ctx.appendChild(ctxRow("waiting on", waiting));
+    if (t.filed) ctx.appendChild(ctxRow("filed", t.filed));
+    context.appendChild(ctx);
+    if (t.link) {
+      var link = el("a", "bb-decision__link", t.link);
+      link.href = t.link; link.target = "_blank"; link.rel = "noopener";
+      context.appendChild(link);
+    }
+    details.appendChild(context);
+    head.appendChild(details);
+    row.appendChild(head);
     ch.appendChild(row);
   });
   var chartedShown = chartedQueued(data.charted).length;

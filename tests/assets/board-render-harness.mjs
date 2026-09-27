@@ -5,7 +5,7 @@
 // Usage: node board-render-harness.mjs <built-board.html>
 // Prints one JSON document:
 //   { stats:[{n,label}], underway:[{title,sub,badges}],
-//     charted:[{title,sub,badges,pickable}], empty, more, error }
+//     charted:[{title,sub,badges,pickable,expandable,context,link}], empty, more, error }
 import { readFileSync } from "node:fs";
 
 const html = readFileSync(process.argv[2], "utf8");
@@ -84,8 +84,9 @@ globalThis.TextEncoder = TextEncoder;
 const script = html.slice(html.indexOf("<script>") + "<script>".length, html.lastIndexOf("</script>"));
 new Function(script)();
 
+const descendants = (node) => node.children.flatMap((c) => [c, ...descendants(c)]);
 const badgesOf = (row) =>
-  row.children
+  descendants(row)
     .filter((c) => c.className.includes("fm-badge"))
     .map((c) => ({ tone: c.className.replace(/.*fm-badge--/, "").trim(), text: c.textContent }));
 
@@ -99,12 +100,18 @@ const rowsOf = (container) =>
   container.children
     .filter((r) => r.className.split(/\s+/).includes("bb-row"))
     .map((row) => {
-      const main = row.children.find((c) => c.className.includes("bb-row__main"));
+      const nodes = descendants(row);
+      const main = nodes.find((c) => c.className.includes("bb-row__main"));
+      const context = nodes.filter((c) => c.className.includes("bb-ctx__row"));
+      const link = nodes.find((c) => c.tagName === "a" && c.className.includes("bb-decision__link"));
       return {
         title: main?.children.find((c) => c.className.includes("bb-row__title"))?.textContent ?? "",
         sub: main?.children.find((c) => c.className.includes("bb-row__sub"))?.textContent ?? "",
         badges: badgesOf(row),
-        pickable: row.children.some((c) => c.className.includes("bb-pick") && !c.className.includes("spacer")),
+        pickable: nodes.some((c) => c.className.split(/\s+/).includes("bb-pick")),
+        expandable: nodes.some((c) => c.tagName === "details" && c.children.some((d) => d.tagName === "summary")),
+        context: Object.fromEntries(context.map((c) => [c.children[0].textContent, c.children[1].textContent])),
+        link: link?.href ?? "",
       };
     });
 

@@ -492,6 +492,37 @@ test_build_refuses_a_template_without_exactly_one_slot() {
   pass "build refuses a template without exactly one data slot"
 }
 
+test_charted_context_is_optional_and_validated() {
+  local home data field value rc out
+  home=$(make_home chartedcontext)
+  data="$home/payload.json"
+  write_valid_payload "$data"
+  run_board "$home" build "$data" >/dev/null || fail "a legacy charted row was refused"
+  jq '.charted[0] += {about:"Explain why",waiting_on:"Wait for approval",link:"https://github.com/example/sample/pull/2"}' \
+    "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  run_board "$home" build "$data" >/dev/null || fail "valid charted context was refused"
+  extract_payload "$home/.lavish/bearings-board.html" | jq -e '
+    .charted[0] | .about == "Explain why" and .waiting_on == "Wait for approval"
+      and .link == "https://github.com/example/sample/pull/2"
+  ' >/dev/null || fail "the built board lost charted context"
+  for field in about waiting_on link; do
+    write_valid_payload "$data"
+    case "$field" in
+      link) value='"javascript:alert(1)"' ;;
+      *) value='42' ;;
+    esac
+    jq --arg field "$field" --argjson value "$value" '.charted[0][$field] = $value' \
+      "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+    set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+    [ "$rc" -ne 0 ] || fail "invalid charted $field was accepted"
+  done
+  write_valid_payload "$data"
+  jq '.charted[0].link = "http://example.com/unsafe"' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+  [ "$rc" -ne 0 ] || fail "a non-HTTPS charted link was accepted"
+  pass "charted context is backward compatible and rejects invalid fields and unsafe links"
+}
+
 test_charted_kind_is_optional_and_accepts_both_values() {
   local home data
   home=$(make_home chartedkind)
@@ -771,6 +802,7 @@ test_build_refuses_a_nondecision_reconcile_value() {
 
 test_path_is_stable_and_home_scoped
 test_build_refuses_malformed_payloads_before_touching_the_board
+test_charted_context_is_optional_and_validated
 test_charted_kind_is_optional_and_accepts_both_values
 test_build_injects_binds_then_arms
 test_registration_cannot_consume_before_any_origin_binding
