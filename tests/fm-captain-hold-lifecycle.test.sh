@@ -3166,6 +3166,9 @@ test_merge_entrypoints_refuse_a_reused_task_incarnation() {
   local local_home local_id local_old_repo local_old_wt local_new_repo local_new_wt
   local local_teardown_pid local_merge_pid local_teardown_ready local_teardown_release
   local local_merge_ready local_merge_release local_teardown_rc local_merge_rc before after
+  local lease_home lease_id lease_pr lease_repo lease_wt lease_lock lease_holder_pid
+  local lease_holder_ready lease_holder_release lease_merge_ready lease_merge_release
+  local lease_merge_pid lease_merge_rc
   local real_perl real_sleep
   real_perl=$(command -v perl)
   real_sleep=$(command -v sleep)
@@ -3257,6 +3260,79 @@ test_merge_entrypoints_refuse_a_reused_task_incarnation() {
     "the refused PR merge damaged the replacement task record"
   assert_absent "$home/state/.control-$id.lock" \
     "the reused-incarnation PR refusal left its task control lock held"
+
+  lease_home=$(make_home reused-pr-lease-incarnation)
+  configure_merged_github "$lease_home"
+  install_reused_task_barriers "$lease_home"
+  lease_id=sample-reused-pr-lease-incarnation
+  lease_pr=https://github.com/sample/sample/pull/43
+  lease_repo="$lease_home/projects/sample-reused-pr-lease"
+  lease_wt="$lease_home/projects/$lease_id"
+  fm_git_worktree "$lease_repo" "$lease_wt" "fm/$lease_id"
+  tasks_in "$lease_home" add "$lease_id" "Ship the lease-wait pull request" \
+    --kind ship --repo sample --start >/dev/null \
+    || fail "could not create the lease-wait PR task"
+  fm_test_write_herdr_meta "$lease_home/state/$lease_id.meta" \
+    "window=firstmate:fm-$lease_id" "endpoint_task_id=$lease_id" \
+    "worktree=$lease_wt" "project=$lease_repo" "harness=codex" "kind=ship" \
+    "mode=no-mistakes" "spawn_gen=original-$lease_id"
+  printf 'done: merge ready\n' > "$lease_home/state/$lease_id.status"
+  printf 'main\t999999\t0\n' > "$lease_home/state/.lease-$lease_id"
+
+  lease_lock="$lease_home/state/.fm-lease-task-$lease_id.lock"
+  lease_holder_ready="$lease_home/reuse-lease-holder-ready"
+  lease_holder_release="$lease_home/reuse-lease-holder-release"
+  (
+    STATE="$lease_home/state"
+    # shellcheck source=bin/fm-wake-lib.sh
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_lock_acquire_wait "$lease_lock"
+    : > "$lease_holder_ready"
+    while [ ! -e "$lease_holder_release" ]; do "$real_sleep" 0.01; done
+    fm_lock_release "$lease_lock"
+  ) &
+  lease_holder_pid=$!
+  if ! wait_for_test_file "$lease_holder_ready" "$lease_holder_pid"; then
+    : > "$lease_holder_release"
+    wait "$lease_holder_pid" 2>/dev/null || true
+    fail "the lease-wait fixture could not hold its task lease lock"
+  fi
+
+  lease_merge_ready="$lease_home/reuse-merge-ready"
+  lease_merge_release="$lease_home/reuse-merge-release"
+  FM_TEST_REUSE_MERGE=1 FM_TEST_REUSE_MERGE_ONCE="$lease_home/reuse-merge-once" \
+    FM_TEST_REUSE_MERGE_READY="$lease_merge_ready" \
+    FM_TEST_REUSE_MERGE_RELEASE="$lease_merge_release" \
+    FM_TEST_REAL_PERL="$real_perl" FM_TEST_REAL_SLEEP="$real_sleep" \
+    run_pr_merge "$lease_home" "$lease_id" "$lease_pr" \
+    > "$lease_home/reuse-merge.out" 2> "$lease_home/reuse-merge.err" &
+  lease_merge_pid=$!
+  if ! wait_for_test_file "$lease_merge_ready" "$lease_merge_pid"; then
+    : > "$lease_holder_release"
+    : > "$lease_merge_release"
+    wait "$lease_holder_pid" 2>/dev/null || true
+    wait "$lease_merge_pid" 2>/dev/null || true
+    fail "the PR merge did not wait behind the task lease lock"
+  fi
+
+  fm_test_write_herdr_meta "$lease_home/state/$lease_id.meta" \
+    "window=firstmate:fm-$lease_id" "endpoint_task_id=$lease_id" \
+    "worktree=$lease_wt" "project=$lease_repo" "harness=codex" "kind=ship" \
+    "mode=no-mistakes" "spawn_gen=replacement-$lease_id"
+  : > "$lease_holder_release"
+  wait "$lease_holder_pid" || fail "the task lease fixture did not release"
+  : > "$lease_merge_release"
+  set +e
+  wait "$lease_merge_pid"
+  lease_merge_rc=$?
+  set -e
+  [ "$lease_merge_rc" -ne 0 ] || fail "the PR merge accepted an incarnation replaced during its lease wait"
+  assert_no_grep 'pr merge 43 ' "$lease_home/gh.log" \
+    "the lease-wait PR merge reached the forge for a replacement task incarnation"
+  assert_grep "changed incarnation while waiting to merge" "$lease_home/reuse-merge.err" \
+    "the lease-wait PR merge did not identify the replacement task incarnation"
+  assert_grep "spawn_gen=replacement-$lease_id" "$lease_home/state/$lease_id.meta" \
+    "the refused lease-wait PR merge damaged the replacement task record"
 
   local_home=$(make_home reused-local-incarnation)
   install_reused_task_barriers "$local_home"
@@ -3359,7 +3435,7 @@ test_merge_entrypoints_refuse_a_reused_task_incarnation() {
     "the refused local merge damaged the replacement task record"
   assert_absent "$local_home/state/.control-$local_id.lock" \
     "the reused-incarnation local refusal left its task control lock held"
-  pass "merge entrypoints refuse a replacement incarnation after waiting for cleanup"
+  pass "merge entrypoints refuse a replacement incarnation after ownership waits"
 }
 
 test_merge_entrypoints_serialize_forced_teardown_before_task_reads() {
