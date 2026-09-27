@@ -17,7 +17,7 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | `fm-fleet-snapshot.sh`   | Print structured fleet snapshot JSON and refresh only its parent-side remote-ledger cache (schema `fm-fleet-snapshot.v1`) |
 | `fm-home-summary-refresh.sh` | Atomically publish this home's structured summary ledger                         |
 | `fm-fleet-ledger.sh`     | Append the opt-in fleet activity ledger's records ([contract](fleet-ledger.md))      |
-| `fm-fleet-view.sh`       | Render the fleet snapshot as a human Markdown view                                   |
+| `fm-fleet-view.sh`       | Render the fleet snapshot as a human Markdown view, or the kind-labeled cleanup candidates |
 | `fm-bearings-snapshot.sh` | Project the bounded remote-ledger fleet snapshot to compact TOON; `--include-prs` adds live GitHub enrichment |
 | `fm-bearings-board.sh`   | Build and arm the stable interactive `/bearings lavish` fleet board                  |
 | `fm-secondmate-reconcile.sh` | Queue Bearings reconcile requests for later supervision delivery and ask each mismatched home through its durable inbox with a per-home cooldown |
@@ -60,7 +60,7 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | `fm-remote-home-seed.sh` | Register and provision a whole secondmate home on an SSH-reachable host              |
 | `fm-remote-readiness-lib.sh` | Shared remote second-mate readiness gate: check and, when needed, repair then re-check through `fm-remote-doctor.sh` |
 | [`fm-project-origin-lib.sh`](../bin/fm-project-origin-lib.sh) | Accepted origin-form owner shared by both remote provisioning boundaries |
-| `fm-spawn.sh`            | Spawn crewmates, scouts, `id=repo` batches, and secondmates on the resolved harness and runtime backend |
+| `fm-spawn.sh`            | Spawn crewmates, scouts, `id=repo` batches, and secondmates on the resolved harness and runtime backend; a full treehouse pool becomes a recorded capacity hold, not a wait |
 | `fm-git-strip-ai-trailers.sh` | Strip known AI commit trailers at commit-msg time and install that hook for a fleet launch |
 | `fm-backend.sh`          | Runtime-backend selection, meta helpers, selector resolution, and operation dispatch |
 | `fm-backend-hometag-lib.sh` | Shared per-installation home-tag derivation for zellij tab and cmux workspace titles |
@@ -109,6 +109,7 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | `fm-config-inherit-lib.sh` | Shared primary-to-secondmate inherited local-material propagation and config-reread delivery |
 | `fm-tasks-axi.sh`        | Run `tasks-axi` against this home's backlog from any working directory               |
 | `fm-tasks-axi-lib.sh`    | Shared backlog-backend selector and `tasks-axi` compatibility probe                  |
+| `fm-capacity-lib.sh`     | Single owner of the treehouse pool capacity hold: reason contract, pool identity, hold, and oldest-for-pool release |
 | `fm-backlog-transition-lib.sh` | Pair task-record changes with their backlog transitions and replay interrupted closes |
 | `fm-quota-axi-lib.sh`    | Shared `quota-axi` compatibility floor and quota snapshot schema validation           |
 | `fm-quota-choose.sh`     | Choose the first candidate with known positive quota from an ordered harness:model list |
@@ -117,6 +118,8 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | `fm-wake-grant.sh`       | Serialize Pi supervision-branch wake-row claim activation, publication, release, and deactivation |
 | `fm-wake-lib.sh`         | Shared durable wake queue, recovery generations, portable locks, and watcher identity/health helpers |
 | `fm-classify-lib.sh`     | Shared wake classification, durable keyed-decision folds and scans, unread status selection, home-owned status-append ranges, and bounded latest-event snapshots |
+| `fm-jev-decisions.sh`    | Triage open decisions and blockers across tasks using Jev System One                 |
+| `fm-jev-decisions.py`    | Jev System One decision classification engine behind `fm-jev-decisions.sh`           |
 | `fm-send.sh`             | Steer a task via a durable inbox record plus doorbell, or send a supported key or typed harness invocation through the recorded backend |
 | `fm-branch-prompt.sh`    | Emit the shared supervision branch's byte-stable system prompt ([pi-supervision-branch.md](pi-supervision-branch.md), [supervision-host.md](supervision-host.md)) |
 | `fm-branch-outcome.sh`   | Own the supervision branch's append-only outcome store, cursors, bounded status-coverage indexes, and session-start replay |
@@ -132,6 +135,7 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | `fm-check-unregister.sh` | Retire a custom watcher check and its trust binding by validated task id            |
 | `fm-check-lib.sh`        | Validate custom-check registrations and prepare private execution snapshots          |
 | `fm-tool-update-check.sh` | Report watched tooling with an update available, and updates installed but left inert by PATH order |
+| `fm-stale-sweep.sh`      | Reclaim stale in_progress Beads claims whose endpoint is dead, as a dry-run/apply sweep and an armable watcher check |
 | `fm-pr-lib.sh`           | Own canonical task and PR validation plus private atomic PR-poll publication, merge-notification identity, and retirement |
 | `fm-pr-poll.sh`          | Provide the byte-static watcher program for validated pull-request, merge-request, and Gerrit-change poll sidecars |
 | `fm-contributions.sh`    | Observe owned publications, retain exact-head judgments, measure required actors, and wake on maintainer signals |
@@ -143,7 +147,7 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | `fm-merge-authority-lib.sh` | Resolve merge authority at the gate, persist it against the accepted canonical PR, and identity-check its later poll consumption |
 | `fm-parent-channel-lib.sh` | Resolve a secondmate home's parent channel and append a captain-facing outcome line to it at most once |
 | `fm-promote.sh`          | Promote a scout task in place to a protected ship task with an explicit delivery mode, write the ship instructions carrying that mode's definition of done, and supersede the task's brief so a later relaunch cannot revive stale scout delivery text |
-| `fm-teardown.sh`         | Fail-closed teardown: return landed ship worktrees, require completed scout deliverables, retire secondmate homes |
+| `fm-teardown.sh`         | Fail-closed teardown of one target: return landed ship worktrees, require completed scout deliverables, retire a secondmate home only under authority naming it, release the oldest pool capacity hold |
 | `fm-harness.sh`          | Detect the running harness, resolve crew or secondmate harness, model, and effort, and validate the native-only `ultra` effort |
 | `fm-lock.sh`             | Per-home firstmate session lock                                                      |
 | `fm-x-lib.sh`            | Shared Relay config, relay, and reply-threading helpers                              |

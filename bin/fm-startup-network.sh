@@ -33,7 +33,7 @@
 #     itself actionable (state is not "done", or bootstrap emitted something
 #     other than its explicit BOOTSTRAP_INFO no-action record;
 #     report_requires_wake owns that transport test). A late-finishing clean run is not captain-facing progress
-#     (AGENTS.md section 8) and never becomes a wake row; it is still durable
+#     (the supervision-protocol skill) and never becomes a wake row; it is still durable
 #     in the report file for `... report` to read on demand. Only a durable
 #     acknowledgement written after harvest prints the finished result
 #     suppresses the wake, so a claimant that exits first cannot lose the

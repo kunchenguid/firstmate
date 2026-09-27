@@ -1,10 +1,7 @@
 ---
 name: stuck-crewmate-recovery
 description: >-
-  Agent-only playbook for stuck or missing ordinary Firstmate direct reports.
-  Use when the session-start digest reports an ordinary direct report's endpoint dead or its metadata has no window, or after a stale wake, looping pane, repeated confusion, an answered-by-brief question, an unresponsive crewmate, or a failed steer.
-  Also use on the inverse case: a live crewmate reporting the no-mistakes pipeline dead, unreachable, or timed out.
-  Reconciles recorded work before escalating from targeted inspection through safe relaunch or failure.
+  Load when an ordinary direct report's endpoint is dead or its metadata has no window, after a stale wake, looping pane, repeated confusion, an answered-by-brief question, an unresponsive crewmate, or a failed steer, and when a live worker reports the no-mistakes pipeline dead, unreachable, or timed out.
 user-invocable: false
 metadata:
   internal: true
@@ -13,7 +10,9 @@ metadata:
 # stuck-crewmate-recovery
 
 Use this playbook when the session-start digest reports an ordinary direct report's endpoint dead or its metadata has no window, or when a direct report is stale, looping, repeatedly confused, asking a question its brief already answers, unresponsive, or when a steer failed to land.
-A stale or dead-endpoint report for a worker whose pull request has already landed is not a recovery case: the work is finished, so close the task through ordinary teardown (`AGENTS.md` section 7 for firstmate, the landed-work rule in `bin/fm-branch-prompt.sh` for the supervision branch) instead of this playbook, never with `--force`.
+A stale or dead-endpoint report for a worker whose pull request has already landed is not a recovery case: the work is finished, so close the task through ordinary teardown (`task-lifecycle` for firstmate, the landed-work rule in `bin/fm-branch-prompt.sh` for the supervision branch) instead of this playbook, never with `--force`.
+On stale-escalation, Jev triage is default-on unless `config/jev-wake-triage` is off; `bin/fm-jev-wake-triage.sh` owns the request, telemetry, and calibration, and `docs/configuration.md` "Jev stale-escalation triage" owns the operator contract.
+Treat a `pipeline_wait` class as a suppressed paging event, not a missed wedge.
 
 Follow the crew-hosted Lavish board contract in [`docs/configuration.md`](../../../docs/configuration.md#crew-hosted-lavish-review-boards) when recovering a worker that hosts a board.
 
@@ -79,4 +78,4 @@ Escalate in order:
    Genuine wedging means looping, unresponsive, repeating the same obstacle, or truly dead.
    A low context reading is not wedging; modern harnesses auto-compact and keep going.
    The worktree and commits persist, so relaunch is cheap.
-5. If a second relaunch fails too, write `failed` to the backlog and tell the captain the plain failure, preserved work, and consequence using `AGENTS.md` section 9; do not mention metadata, harness, window, or worktree unless the path itself is needed for action.
+5. If a second relaunch fails too, write `failed` to the backlog and tell the captain the plain failure, preserved work, and consequence using `captain-etiquette`; do not mention metadata, harness, window, or worktree unless the path itself is needed for action.

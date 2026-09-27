@@ -363,6 +363,11 @@ test_pi_startup_classifies_cli_continuations() {
   }
   fixture="$TMP_ROOT/pi-continuation-source"
   mkdir -p "$fixture/.pi/extensions/lib" "$fixture/bin" "$fixture/state"
+  # Scoped module type so node stops its package.json upward walk here: a stray
+  # /tmp/package.json without "type" would otherwise emit
+  # MODULE_TYPELESS_PACKAGE_JSON warnings for every fixture script and pollute
+  # the classification output this test asserts is silent.
+  printf '{"type":"module"}\n' > "$fixture/package.json"
   cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$fixture/.pi/extensions/"
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" \
     "$ROOT/.pi/extensions/lib/fm-sessionstart-supervisor.mjs" "$fixture/.pi/extensions/lib/"
@@ -461,6 +466,10 @@ test_pi_sessionstart_generation_prerequisite() {
   }
   fixture="$TMP_ROOT/pi-sessionstart-generation"
   mkdir -p "$fixture/.pi/extensions/lib" "$fixture/bin" "$fixture/state"
+  # Scoped module type so node stops its package.json upward walk here (a stray
+  # /tmp/package.json without "type" would otherwise emit
+  # MODULE_TYPELESS_PACKAGE_JSON warnings for every fixture script).
+  printf '{"type":"module"}\n' > "$fixture/package.json"
   cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$fixture/.pi/extensions/"
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" \
     "$ROOT/.pi/extensions/lib/fm-sessionstart-supervisor.mjs" "$fixture/.pi/extensions/lib/"
@@ -787,6 +796,10 @@ test_pi_reload_releases_sessionstart_exit_listener() {
   }
   fixture="$TMP_ROOT/pi-reload-exit-listener"
   mkdir -p "$fixture/.pi/extensions/lib" "$fixture/bin" "$fixture/state"
+  # Scoped module type so node stops its package.json upward walk here (a stray
+  # /tmp/package.json without "type" would otherwise emit
+  # MODULE_TYPELESS_PACKAGE_JSON warnings for every fixture script).
+  printf '{"type":"module"}\n' > "$fixture/package.json"
   cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$fixture/.pi/extensions/"
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" \
     "$ROOT/.pi/extensions/lib/fm-sessionstart-supervisor.mjs" "$fixture/.pi/extensions/lib/"
@@ -918,6 +931,10 @@ test_pi_large_sessionstart_digest_is_delivered_loudly() {
   }
   fixture="$TMP_ROOT/pi-large-digest"
   mkdir -p "$fixture/.pi/extensions/lib" "$fixture/bin" "$fixture/state" "$fixture/data" "$fixture/config"
+  # Scoped module type so node stops its package.json upward walk here (a stray
+  # /tmp/package.json without "type" would otherwise emit
+  # MODULE_TYPELESS_PACKAGE_JSON warnings for every fixture script).
+  printf '{"type":"module"}\n' > "$fixture/package.json"
   git init -q -b main "$fixture"
   git -C "$fixture" commit -q --allow-empty -m init
   : > "$fixture/AGENTS.md"

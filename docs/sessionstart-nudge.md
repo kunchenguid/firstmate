@@ -1,7 +1,7 @@
 # Native session-start adapters
 
 This doc is for operators who need to know which harnesses run `bin/fm-session-start.sh` when a session opens, which only nudge the agent to run it, and how clear, compaction, and resume are handled.
-AGENTS.md section 3 is the authoritative behavioral contract for session start.
+`AGENTS.md` section 3 owns the lock-refused read-only boundary and the `session-start` load trigger; [`.agents/skills/session-start/SKILL.md`](../.agents/skills/session-start/SKILL.md) owns the session-start runbook.
 This file owns how the tracked native session-open adapters deliver it, and the compatibility limits that force two tiers rather than one.
 
 One term recurs throughout:

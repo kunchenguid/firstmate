@@ -151,3 +151,33 @@ if [ "$REVIEW_DECISION" = CHANGES_REQUESTED ]; then
       }
     }' | LC_ALL=C sort
 fi
+
+# Pattern 12: Jev Root-Cause PR Triage
+if [ "${FM_DISABLE_JEV_TRIAGE:-0}" != 1 ] && [ -x "$SCRIPT_DIR/fm-jev-pr-triage.sh" ] &&
+  [ "${REQUIRED#REQUIRED CHECK:}" != "$REQUIRED" ]; then
+  printf '\n--- Jev Root-Cause Triage ---\n'
+  "$SCRIPT_DIR/fm-jev-pr-triage.sh" --pr "$NUMBER" --repo "$PATH_PART" 2>/dev/null || true
+fi
+
+# Pattern 13: Jev Flake vs Regression Disambiguator
+if [ "${FM_DISABLE_JEV_TRIAGE:-0}" != 1 ] && [ -x "$SCRIPT_DIR/fm-jev-flake-detector.sh" ] &&
+  [ "${REQUIRED#REQUIRED CHECK:}" != "$REQUIRED" ]; then
+  printf '\n--- Jev Flake vs Regression Analysis ---\n'
+  "$SCRIPT_DIR/fm-jev-flake-detector.sh" --pr "$NUMBER" --repo "$PATH_PART" 2>/dev/null || true
+fi
+
+# Pattern 16: Jev Memory & Instruction Token Budget Enforcer
+if [ "${FM_DISABLE_JEV_TRIAGE:-0}" != 1 ] && [ -x "$SCRIPT_DIR/fm-jev-token-budget.sh" ] &&
+  [ "${REQUIRED#REQUIRED CHECK:}" != "$REQUIRED" ]; then
+  if [ -f "./AGENTS.md" ] || [ -f "./CLAUDE.md" ]; then
+    printf '\n--- Jev Instruction Token Budget ---\n'
+    "$SCRIPT_DIR/fm-jev-token-budget.sh" --repo-path . 2>/dev/null || true
+  fi
+fi
+
+# Pattern 17: Jev Continuous Test Flake Quarantine & Auto-Bisect
+if [ "${FM_DISABLE_JEV_TRIAGE:-0}" != 1 ] && [ -x "$SCRIPT_DIR/fm-jev-quarantine.sh" ] &&
+  [ "${REQUIRED#REQUIRED CHECK:}" != "$REQUIRED" ]; then
+  printf '\n--- Jev Test Flake Quarantine Analysis ---\n'
+  "$SCRIPT_DIR/fm-jev-quarantine.sh" --pr "$NUMBER" --repo "$PATH_PART" 2>/dev/null || true
+fi

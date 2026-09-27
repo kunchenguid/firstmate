@@ -14,7 +14,7 @@
 # for this project", never "how does this task ship". A task's delivery mode,
 # yolo, and ship-branch prefix are resolved by firstmate at intake and passed
 # explicitly to bin/fm-brief.sh, bin/fm-spawn.sh, and bin/fm-promote.sh (AGENTS.md
-# section 7; bin/fm-brief.sh's own header owns the --branch-prefix flag it accepts).
+# section 7 and the task-lifecycle skill; bin/fm-brief.sh's own header owns the --branch-prefix flag it accepts).
 # The consumers are bin/fm-fleet-sync.sh (skip local-only clones),
 # bin/fm-home-seed.sh and bin/fm-remote-home-seed.sh (refuse local-only seeding,
 # run no-mistakes init), bin/fm-spawn.sh's advisory registry-deviation notice,
@@ -46,7 +46,7 @@
 #                          no-mistakes, so sync, seeding, and init treat such a
 #                          project as the remote-backed pipeline project it is.
 # yolo (orthogonal) = merge authority only: when on, firstmate merges green,
-#   in-scope work itself (AGENTS.md section 7).
+#   in-scope work itself (the task-lifecycle skill).
 # branch=<prefix> (orthogonal) = overrides the "fm/" ship-branch prefix so a
 #   project's branch and PR do not read as firstmate-authored, e.g. for a
 #   third-party repo that does not use this tooling. Query it with

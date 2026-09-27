@@ -307,7 +307,7 @@ phase_teardown() {
   printf '%s\tdead\n' "$(date +%s)" > "$HOME_DIR/state/.secondmate-relaunch-bound-design"
   : > "$LOG"
   teardown_out=$(PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_FAKE_TMUX_LOG="$LOG" FM_FAKE_TMUX_CAPTURE="$PANE" \
-    "$ROOT/bin/fm-teardown.sh" design 2>&1) \
+    "$ROOT/bin/fm-teardown.sh" design --retire-secondmate design 2>&1) \
     || fail "teardown failed for the empty secondmate home: $teardown_out"
   printf '%s\n' "$teardown_out" | grep -F 'Backlog:' >/dev/null \
     && fail "secondmate teardown emitted a main-backlog completion reminder"

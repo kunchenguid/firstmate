@@ -139,8 +139,8 @@
 #     reporting surfaces (bin/fm-bearings-snapshot.sh, /ahoy), and at startup it
 #     is pure weight - 10 done rows cost 3.3KB in an observed main-home digest.
 #   - Every in-flight, held, and blocked row is listed IN FULL, with its
-#     hold_kind/hold_reason and blocked_by. Those are the rows AGENTS.md
-#     sections 7 and 10 make actionable at startup, so they are never bounded
+#     hold_kind/hold_reason and blocked_by. Those are the rows the task-lifecycle
+#     skill and AGENTS.md section 10 make actionable at startup, so they are never bounded
 #     away.
 #   - Only the plain queued (dispatchable-now) listing is bounded, by
 #     FM_SESSION_START_QUEUED_LIMIT, default 20. Anything it omits is disclosed
@@ -168,7 +168,7 @@
 # STATUS TAILS: FM_SESSION_START_STATUS_TAIL bounds how many lines each task's
 # tail prints, and bin/fm-line-cap-lib.sh bounds how long each of those lines
 # may be. Both bounds are safe because the section prints every task's full
-# status log path, and AGENTS.md section 8 treats a status line as a wake EVENT
+# status log path, and AGENTS.md section 2 treats a status line as a wake EVENT
 # rather than current state - bin/fm-crew-state.sh owns current state.
 #
 # RUNTIME BOUND: the digest is now executed through a native session-open
@@ -400,7 +400,7 @@ subsection() { printf '\n%s\n%s\n' "$1" "$SUBRULE"; }
 # subsection, or an explicit ABSENT marker. Absence is semantically
 # meaningful for every one of these files (captain.md absent = firstmate
 # repo built-in defaults, projects.md absent = rebuild from clones, etc. -
-# AGENTS.md section 3) and must never be confused with an empty-but-present
+# see the session-start skill) and must never be confused with an empty-but-present
 # file, so the two cases print differently.
 print_file_or_absent() {
   local path=$1 label=$2
@@ -756,7 +756,7 @@ fi
 # separate 900-second cadence remains unchanged.
 # Presented records are this turn's first work queue and remain durable until
 # post-handling acknowledgement. The drain's separate OPEN DECISIONS section
-# remains actionable even when that queue is empty (AGENTS.md sections 3 and 8).
+# remains actionable even when that queue is empty (the supervision-protocol skill).
 # The drain also runs fm-guard.sh internally on the locked path, so the
 # tangle/watcher-liveness alarms land right here too, ahead of the bulk digest
 # below. The read-only path never touches the queue because it lacks mutation

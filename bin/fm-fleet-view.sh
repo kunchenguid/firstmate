@@ -4,22 +4,34 @@
 # This command intentionally does not parse fleet state itself.
 # It shells out to fm-fleet-snapshot.sh --json and renders that stable
 # structured contract for humans.
+#
+# --cleanup-candidates renders the same snapshot as a kind-labeled cleanup
+# report: one row per live task, its kind, whether that kind is disposable or a
+# persistent home, and the exact teardown command that kind takes. It exists so
+# a cleanup target list is chosen from recorded kinds instead of inferred from a
+# worktree path - a path suffix cannot tell a crewmate worktree of the firstmate
+# project from a secondmate home, and an idle queue is a healthy secondmate's
+# normal state rather than evidence it is finished.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
   cat <<'EOF'
-usage: fm-fleet-view.sh [--json]
+usage: fm-fleet-view.sh [--json | --cleanup-candidates]
 
 Render a human fleet view from fm-fleet-snapshot.sh.
 Use --json to print the underlying snapshot.
+Use --cleanup-candidates to list every live task with its kind and the teardown
+command that kind takes; it is how cleanup targets are chosen.
 EOF
 }
 
+MODE=view
 case "${1:-}" in
   -h|--help) usage; exit 0 ;;
   --json) "$SCRIPT_DIR/fm-fleet-snapshot.sh" --json; exit $? ;;
+  --cleanup-candidates) MODE=cleanup-candidates ;;
   "") ;;
   *) usage >&2; exit 2 ;;
 esac
@@ -27,6 +39,30 @@ esac
 command -v jq >/dev/null 2>&1 || { echo "fm-fleet-view: jq not found" >&2; exit 1; }
 
 SNAPSHOT=$("$SCRIPT_DIR/fm-fleet-snapshot.sh" --json) || exit $?
+
+if [ "$MODE" = cleanup-candidates ]; then
+  printf '%s\n' "$SNAPSHOT" | jq -r '
+    def persistence($t): if $t.kind == "secondmate" then "persistent" else "disposable" end;
+    def command_for($t):
+      if $t.kind == "secondmate" then "bin/fm-teardown.sh \($t.id) --retire-secondmate \($t.id)"
+      else "bin/fm-teardown.sh \($t.id)" end;
+    "# Cleanup Candidates",
+    "",
+    "Home: \(.fm_home)",
+    "",
+    (if (.tasks | length) == 0 then
+      "No live task metadata found."
+     else
+      "| ID | Kind | Persistence | Teardown command |",
+      "| --- | --- | --- | --- |",
+      (.tasks[] | "| \(.id) | \(.kind) | \(persistence(.)) | \(command_for(.)) |")
+     end),
+    "",
+    "A persistent home is retired only by a decision naming that exact home; an idle queue is healthy, not finished.",
+    "Teardown takes one target per invocation."
+  '
+  exit $?
+fi
 
 printf '%s\n' "$SNAPSHOT" | jq -r '
   def dash($v): if $v == null or $v == "" then "-" else $v end;

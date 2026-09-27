@@ -1,8 +1,7 @@
 ---
 name: afk
 description: >-
-  Enter the away posture when the captain invokes /afk, says they are going afk, `state/.afk-contract` or `state/.afk` exists, an incoming message starts with `FM_INJECT_MARK`, or any `state/.subsuper-*` marker is involved.
-  It writes the durable away-posture record with the captain's away words verbatim as the whole mandate in the same turn as /afk, before any other work and without waiting for a further go, reads the words back in plain sentences after entry, announces hold-for-return only at entry, keeps the one supervision session running in the away posture (on Pi the supervision branch acts on the words by its own judgment and takes every safe actionable wake with main parked, as the supervision host does on a non-Pi home that opted into it; the daemon still delivers batched digests elsewhere for now), and on the first unmarked message renders the return brief from durable records before ordinary work resumes.
+  Load when the captain invokes /afk, says they are going afk, `state/.afk-contract` or `state/.afk` exists, an incoming message starts with `FM_INJECT_MARK`, or any `state/.subsuper-*` marker is involved.
 user-invocable: true
 metadata:
   internal: true
@@ -45,7 +44,7 @@ Hold-for-return is the default and the only reach profile this release records: 
    The daemon is **presence-gated**: it injects escalations only while `state/.afk` exists, and stays quiet otherwise.
 3. **Announce, then read back after entry.**
    Relay the announcement in spirit: hold-for-return only, no phone channel, your instructions are recorded and the away session will carry them out where it can, anything it is unsure of, or that needs you, waits for your return, and destructive, irreversible, and security-sensitive actions are never pre-authorizable whatever the words say.
-   Then give your own plain-sentence restatement of the words in `AGENTS.md` section 9 language - what you read them as asking for, sentence by sentence, never a numbered field list - beside the expected return, the spend cap, and the one-sentence reach announcement.
+   Then give your own plain-sentence restatement of the words as `captain-etiquette` requires - what you read them as asking for, sentence by sentence, never a numbered field list - beside the expected return, the spend cap, and the one-sentence reach announcement.
    Say plainly which sentence, if any, you could not act on while away (a red merge, a discard, anything on the never-set, local-only landing); it waits for their return.
    This read-back is informational: the record already stands, so never ask for a go or wait for a reply; a captain who wants a different reading sends `/afk` again with new words.
 4. **Do not separately arm `fm-watch.sh` where the daemon runs.** The daemon manages the watcher as its child; the singleton lock no-ops a stray arm harmlessly.
@@ -70,7 +69,7 @@ No `/back` is needed. The first genuine message is the return signal:
 - A message that is none of the internal forms below, and **not** starting with `/afk` -> the captain is back.
   Run `bin/fm-afk-return.sh` before acting on the message that brought the captain back.
   That script owns the correct-ordered daemon shutdown where a daemon ran, the archive of the posture record, durable wake presentation and post-handling acknowledgement, escalation and wedge evidence, the return brief, and the return-catch-up gate.
-  Relay every section of the return brief in its emitted order and in section 9 language; `bin/fm-afk-return.sh` owns that order.
+  Relay every section of the return brief in its emitted order, in `captain-etiquette`'s plain language; `bin/fm-afk-return.sh` owns that order.
   The gate keeps every open `blocked:` event until that blocker's own resolution is proven: remediate each immediately through the normal lifecycle, or explicitly reclassify it with a durable reason and close its decision key with `resolved [key=...]`, then run `bin/fm-afk-return.sh check`.
   Captain-verdict outcomes are listed under "waiting on you", but do not exempt open blockers: per-blocker provenance is deferred with no owner, and the gate fails safe by keeping every open blocker.
   Once the record is archived, resume full per-wake responsiveness through the emitted primary-harness supervision protocol while blocker handling proceeds, so the gate never creates a blind wait.
@@ -91,7 +90,7 @@ When the captain wants this same token-saving supervision while staying present 
 
 afk changes how the captain is informed and what happens at a captain-owned decision point, **not who approves what**.
 "Away" never means "approves more" or "approves less."
-A PR ready for merge keeps the merge authority from `AGENTS.md` section 7, and a needs-decision finding keeps the `ask-user-authority` policy; anything requiring the captain still waits for the captain's explicit word.
+A PR ready for merge keeps the merge authority from `task-lifecycle`, and a needs-decision finding keeps the `ask-user-authority` policy; anything requiring the captain still waits for the captain's explicit word.
 While the away-posture record exists, any pull request green at its live head may merge under away authority; which one the captain's words meant is the away session's reading, and a merge the words do not call for holds for the return.
 Away authority never releases a captain hold, and it expires when the away record is archived.
 `--allow-red` and `--allow-missing` remain attended-only and are refused while the record exists.

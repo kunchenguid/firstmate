@@ -30,7 +30,7 @@ Only `answer` with the captain's words or an evidence-backed `reconcile close` m
 Never close anything the captain owns without recording what he actually said: `bin/fm-captain-hold.sh answer` writes his exact words into the task and closes a question-shaped call, while `--release` frees a captain-gated work item to proceed.
 A merge approval uses that existing release path because approval permits the merge to proceed; cleanup closes the work only after it lands and records what shipped.
 Closing a held row at merge approval instead records completion before landing, so the backlog claims completion before the work actually ships.
-When the answer changes what a task must build, follow `AGENTS.md` section 7's mid-task ask rule to preserve the captain's words in the brief and steer the worker.
+When the answer changes what a task must build, follow [`task-lifecycle`](../task-lifecycle/SKILL.md)'s No-mistakes validation contract to preserve the captain's words in the brief and steer the worker.
 When the captain says "later", that is an answer too: re-hold with `bin/fm-captain-hold.sh hold <id> --reason "<reason>" --until <date>` so the item leaves the live Captain's Call and resurfaces on its date, instead of leaving a live-looking card or fabricating a closure.
 "A keyed answer resolves its matching captain-held task" is one capability with one owner, `bin/fm-captain-hold.sh answers`, and every channel that carries a captain answer feeds it the same task id and answer; a channel never maps keys to tasks, records a decision, or resolves anything itself.
 Chat already feeds it through `bin/fm-send.sh --resolve-key`, and a captured-answer source feeds it once bound with `bin/fm-captain-hold.sh bind <source-id>`; bind before arming the source, and key each structured question by the held task's id.
@@ -60,7 +60,7 @@ The absence of a routed work item is not a divergence and the guard never requir
 2. Inventory only genuine unresolved choices that require the captain, and find the task each one gates.
 3. Hold that task - or create one captain-held task for the review's open questions - with a concise reason carrying the question and options.
 4. Run `complete` with the full captain-held inventory for that review pass.
-5. Relay the choices to the captain as decisions from Bearings' Captain's Call section under `AGENTS.md` section 9; do not use the word hold in captain chat.
+5. Relay the choices to the captain as decisions from Bearings' Captain's Call section under `captain-etiquette`; do not use the word hold in captain chat.
 6. Close each call only through `answer` (or a channel that feeds `answers`), close a board-requested moot call through evidence-backed `reconcile close`, record a still-active reconciliation through `reconcile note`, use `--until` when the captain defers it, or confirm a channel already closed it.
 7. Confirm Bearings reflects the outcome: answered or reconciled-moot calls leave Captain's Call, released work resumes, active reconciliations remain held, and deferred calls sit in Charted Next with their date.
 

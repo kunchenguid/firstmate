@@ -1,11 +1,8 @@
 ---
 name: bearings
 description: >-
-  Generate a "pick up where I left off" fleet digest from firstmate's live fleet state.
-  Use when the captain invokes /bearings or asks for a bearings report, morning brief, status report, catch-up, "where did I leave off", or "what's in the works".
-  Plain /bearings is chat-only by default, /bearings file explicitly writes the dated data/status-report-<YYYY-MM-DD>.md artifact, and /bearings lavish additionally builds and arms the interactive fleet board; live PR enrichment remains opt-in and composes with the other modes.
-  Also use on a contributions check wake or when filing work linked to an upstream issue.
-  Also load this skill's board-wake handling when a procevent lavish wake's source id matches the canonical source id of the stable bearings board path.
+  Load when the captain invokes /bearings or asks for a bearings report, morning brief, status report, catch-up, or "where did I leave off".
+  Also load on a contributions check wake, when filing work linked to an upstream issue, or when a procevent lavish wake's source id matches the stable bearings board path.
 user-invocable: true
 metadata:
   internal: true
@@ -173,7 +170,7 @@ Rules that keep the contract unambiguous:
 - Do not suppress separately projected decisions, landed records, or gates from a `partial-structured` home merely because that secondmate's own row is `unknown` or its `invalidity` reports an inventory mismatch.
 - Include the required direct address to the captain inside one item or empty-state sentence.
 - Every PR appears as the full `https://...` URL; a shorthand `#number` is fine only as a back-reference after the full URL has already appeared in the same digest.
-- The chat follows `AGENTS.md` section 9 and carries one scannable line per item.
+- The chat follows `captain-etiquette` and carries one scannable line per item.
 - Detailed decisions, plans, full gate reasons, and evidence stay out of chat; file mode puts them in the report, while lavish mode puts only its payload-backed interactive detail on the board.
 - In file mode, include the report path or link inside the four-section digest without adding another heading.
 - In lavish mode, include the board URL inside the four-section digest the same way.

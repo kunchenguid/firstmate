@@ -721,7 +721,7 @@ test_kimi_readiness_gate_precedes_pointer() {
   rec=$(make_spawn_case not-ready "$id")
   read_spawn_record "$rec"
   rc=0
-  out=$(FM_FAKE_KIMI_READY=no run_spawn \
+  out=$(FM_TEST_LIB_SOURCED='' FM_FAKE_KIMI_READY=no run_spawn \
     "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
   [ "$rc" -ne 0 ] || fail "kimi spawn without a ready signal should fail"
   assert_contains "$out" "kimi did not show a verified ready signal" \

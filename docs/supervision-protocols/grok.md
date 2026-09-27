@@ -24,7 +24,7 @@ Grok injects a synthetic user message with `synthetic_reason: task_completed` wh
 When you see a background-task-completed system reminder for the arm:
 1. Run `bin/fm-wake-drain.sh` first.
 2. Optionally fetch arm output with `get_command_or_subagent_output(<task_id>)` for the reason line.
-3. Handle `signal`, `stale`, `check`, or `heartbeat` using the harness-neutral contract in `AGENTS.md`.
+3. Handle `signal`, `stale`, `check`, or `heartbeat` using the harness-neutral contract in the `supervision-protocol` skill that `AGENTS.md` section 8 loads.
 4. Ordinary wake: re-arm the next cycle with the same background `__FM_GROK_ARM__` call if the home still needs supervision, as `bin/fm-supervision-lib.sh` defines it.
 5. Do not invent a wake from an attach-status line alone.
    Drain the queue and act only on real wake records, the drain's `OPEN DECISIONS` and `UNREAD STATUS` entries, or a real watcher reason line.

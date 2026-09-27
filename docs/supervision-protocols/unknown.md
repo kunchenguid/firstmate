@@ -1,7 +1,7 @@
 Mode: Unknown harness fallback.
 
 This primary harness does not have a verified watcher wake adapter.
-Follow the generic supervision contract in `AGENTS.md`.
+Follow the generic supervision contract in the `supervision-protocol` skill that `AGENTS.md` section 8 loads.
 First cycle: drain queued wakes, then choose a supervision wait that the harness can actually wake from.
 Ordinary wake: drain, handle all emitted wakes, reconcile open decisions and unread status lines, and run the exact `--ack-through` command printed as `WAKE_ACK_REQUIRED`, then repeat that verified wait while supervision is still required.
 Before that acknowledgement, interruption leaves the work durable for idempotent re-handling.

@@ -34,7 +34,7 @@
 # is checked against the wrong quota row. This is an accepted limitation of the
 # optional helper. Authoritative multi-provider routing - including provider
 # discovery from the harness catalog and quota matching by that explicit
-# provider - is owned by AGENTS.md section 4 and the quota-array-dispatch skill,
+# provider - is owned by the quota-array-dispatch skill,
 # not by this helper. Use this helper only when the brief already fixed the
 # candidate order and every candidate's provider is the harness's primary family.
 #

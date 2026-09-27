@@ -25,9 +25,11 @@ Claude's verified delegation guard is in `references/harness/claude.md`.
 `../../../docs/subagent-guard.md` owns its full contract, local hardening, escape hatch, and per-harness applicability review.
 Never generalize Claude tool names or permissions without live evidence.
 
+The Jev dynamic delegation guard (`../../../bin/fm-jev-guard.sh`) is wired on every harness that carries the watcher-arm seatbelt; its header owns classification, per-harness transport, primary-checkout-only scope, and fail-open behavior, and `AGENTS.md` section 6 names the `require_delegation` boundary it enforces.
+
 ## Session start
 
-`../../../AGENTS.md` section 3 and the `session-start-recovery` skill remain the behavioral owners.
+[`session-start`](../../../session-start/SKILL.md) owns the session-start runbook; `AGENTS.md` section 3 retains the lock-refused read-only boundary.
 `../../../docs/sessionstart-nudge.md` owns native tier assignment, transport, source routing, runtime bound, and fail-open behavior.
 Read it before changing session-open behavior.
 `../../../docs/verification/supervision.md` under "Native session-start delivery" owns active dated evidence.

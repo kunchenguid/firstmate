@@ -380,7 +380,7 @@ An authorization addressed to main (for example "you may merge when green") does
 
 ## Two-stage noise filter
 
-Stage one is unchanged: the bash watcher absorbs everything provably fine at zero token cost.
+Stage one still absorbs everything provably fine at zero token cost; only a provably-working stale pane that would otherwise escalate consults the Jev classifier first, a model call that suppresses `pipeline_wait` and `healthy_idle` and leaves `true_wedge` to fire ([`configuration.md`](configuration.md) "Jev stale-escalation triage" owns that gate).
 Stage two is the branch's verdict on each handled event, reported through its `fm_branch_report` tool:
 
 | Verdict | Delivery |

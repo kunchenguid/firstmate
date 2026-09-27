@@ -226,7 +226,7 @@ Codex is therefore not applicable today, and this table row is the tripwire: if 
 
 The integration surface of each was inspected and each is structurally wireable for the shipped guard.
 
-- Grok's tracked hooks (`.grok/hooks/fm-primary-pretool-check.json`, `.grok/hooks/fm-primary-cd-check.json`) use a `PreToolUse` matcher, currently `Bash`, and pipe stdin to a checker.
+- Grok's tracked hooks (`.grok/hooks/fm-primary-pretool-check.json`, `.grok/hooks/fm-primary-cd-check.json`, `.grok/hooks/fm-primary-jev-guard.json`) use a `PreToolUse` matcher, currently `Bash`, and pipe stdin to a checker.
   The checker already reads Grok's `.toolName` field, so only the matcher token is missing.
   Grok does expose a delegation surface: `docs/supervision-protocols/grok.md` documents `get_command_or_subagent_output(<task_id>)`, which implies a corresponding dispatch tool.
 - OpenCode's tracked plugins gate on `input?.tool !== "bash"` inside `tool.execute.before`, and block by throwing.

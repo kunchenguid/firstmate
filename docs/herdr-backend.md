@@ -97,6 +97,7 @@ Removing or upgrading the shadowing client is the durable fix.
 ## Watching and task containers
 
 The ordinary topology puts one task tab per endpoint in the exact workspace of the Firstmate or secondmate that launches it.
+A new worker's task tab is labeled `<short title> (<id>)`, derived from its backlog row title or, without one, its task brief; historical `fm-<id>` task tabs remain valid and discoverable, and existing task operations never rename them.
 When the launcher has no Herdr workspace to inherit, the adapter maintains one durable home-labeled workspace instead.
 
 | Home | Workspace label |
@@ -266,7 +267,7 @@ It falls back to a unique home-label lookup only for a Firstmate outside Herdr.
 Projected children are never collapsed back into that parent.
 The parent is the placement and ordering reference the projection is bound under.
 
-The normal `fm-<id>` task tab is created in the exact new workspace returned by Herdr.
+The normal task tab is created in the exact new workspace returned by Herdr.
 Only the exact seeded default tab returned by the same workspace-create response can be pruned.
 Before and after create, prune, order, abort cleanup, and normal cleanup, Firstmate verifies exact workspace, tab, pane, and active-focus ids.
 An ambiguous response grants no mutation or cleanup authority.
@@ -503,11 +504,13 @@ herdr_session=<session>
 herdr_workspace_id=<workspace-id>
 herdr_tab_id=<tab-id>
 herdr_pane_id=<pane-id>
+herdr_task_label=<short title> (<id>)
 ```
 
 A Herdr pane id contains a colon, so the adapter splits `window=` on the first colon only.
 The recorded pane is the operational fast path.
 Workspace and tab ids support verification and cleanup but are not inferred from mutable labels during normal operation.
+The recorded `herdr_task_label` survives a relaunch unchanged, because a relaunch adopts the recorded tab without renaming it.
 
 ## Current transport behavior
 

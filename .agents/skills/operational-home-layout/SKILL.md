@@ -13,7 +13,7 @@ AGENTS.md            this file (CLAUDE.md is a real @AGENTS.md pointer to it)
 CONTRIBUTING.md      contributor workflow and repo conventions
 README.md            public overview and development notes
 .github/workflows/   shared CI and PR enforcement, committed
-.tasks.toml          tracked tasks-axi markdown backend config for the default backlog backend (section 10)
+.tasks.toml.example  tracked tasks-axi markdown backend config template, copied into a home that has none as that home's gitignored .tasks.toml (docs/configuration.md "Backlog backend")
 .agents/skills/      firstmate-loaded internal skills, committed; each carries metadata.internal=true for installers
 .claude/skills       symlink to .agents/skills for claude compatibility
 .claude/mods/        Claude Code mods (function-hooks plugins), committed; Calm's module may load through CLAUDE_CODE_ENABLE_FUNCTION_HOOKS or tengu_plugin_hooks_modules, but activates only when CLAUDE_CODE_ENABLE_FUNCTION_HOOKS is exactly "1" and is otherwise a complete no-op (docs/calm.md)

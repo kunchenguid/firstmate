@@ -79,6 +79,9 @@ remove_dead_stale_lock() { # <lock-path>
 }
 
 run_move() { # <keys...>
+  # The receipt move is a state change in the receiving home's backlog, so it
+  # carries that home's audit identity.
+  fm_tasks_axi_export_actor
   tasks-axi mv "$@" --file "$DELIVERED" --to "$DEST"
 }
 

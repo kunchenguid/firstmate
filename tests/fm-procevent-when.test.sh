@@ -26,7 +26,12 @@ when() { FM_HOME="$1" "$ROOT/bin/fm-procevent-when.sh" "${@:2}"; }
 # Every home this suite arms is registered with tests/lib.sh, which sweeps it
 # from every cleanup path so a runner still blocked on a condition that never
 # fires cannot survive the run.
-new_home() { mkdir -p "$1/state"; fm_test_track_procevent_home "$1"; }
+# The process-event state-root contract requires a private directory, so the
+# fixture must not inherit an ambient group-writable umask.
+new_home() {
+  (umask 077; mkdir -p "$1/state")
+  fm_test_track_procevent_home "$1"
+}
 
 wake_payloads() { awk -F '\t' '{print $5}' "$1/state/.wake-queue" 2>/dev/null; }
 

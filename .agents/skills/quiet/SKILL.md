@@ -37,7 +37,7 @@ exits it.
    `/afk`-shaped refresh call never resets quiet back to away underneath the
    captain.
 
-2. **Acknowledge** in `AGENTS.md` section 9 language: "Captain, quiet mode is
+2. **Acknowledge** in `captain-etiquette`'s language: "Captain, quiet mode is
    active; I will batch routine updates and surface only decisions, failures,
    credentials, or review-ready work - ordinary chat will not exit this, say
    `/quiet off` when you want normal per-wake responses back."
@@ -65,7 +65,7 @@ point of this mode (AGENTS.md section 8's away-mode stub, quiet branch).
 
 Identical to `/afk`: quiet mode changes how aggressively firstmate surfaces
 things, never who approves what.
-A PR ready for merge keeps the merge authority from `AGENTS.md` section 7, and
+A PR ready for merge keeps the merge authority from `task-lifecycle`, and
 a needs-decision finding keeps the `ask-user-authority` policy.
 
 ## Must not hide a decision or a failure
