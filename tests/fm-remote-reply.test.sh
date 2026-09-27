@@ -781,6 +781,11 @@ done
 [ "$(reply_owner)" = live ] || fail "the reply listener dropped its claim after a delta"
 [ "$(sed -n '2p' "$CLAIMS/$SID.claim")" = "$HELD_PID" ] \
   || fail "the post-delta poll was a new listener"
+if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+  printf 'Continuous listener: owner=%s pid=%s polls=%s; mirrored status: ' \
+    "$(reply_owner)" "$HELD_PID" "$polls"
+  grep -F 'held across an empty wait' "$PARENT/state/ios.status" | tail -1
+fi
 stop_reply_listener || fail "the continuity listener did not stop"
 pass "a remote reply listener stays owned across empty waits and a delta"
 
