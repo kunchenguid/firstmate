@@ -946,7 +946,11 @@ if [ -n "$ACK_THROUGH" ]; then
     consume_actor_rows_locked "$MAIN_ROWS_FILE" "$ACK_THROUGH" || exit 1
     if [ -s "$RETAINED_NOTE_ROWS" ]; then
       DRAIN_TMP=$(mktemp "$STATE/.main-retained-rows.tmp.XXXXXX") || exit 1
-      cat "$MAIN_ROWS_FILE" "$RETAINED_NOTE_ROWS" | LC_ALL=C sort -nu > "$DRAIN_TMP" || exit 1
+      if [ -e "$MAIN_ROWS_FILE" ]; then
+        cat "$MAIN_ROWS_FILE" > "$DRAIN_TMP" || exit 1
+      fi
+      cat "$RETAINED_NOTE_ROWS" >> "$DRAIN_TMP" || exit 1
+      LC_ALL=C sort -nu "$DRAIN_TMP" -o "$DRAIN_TMP" || exit 1
       write_rows_file_locked "$MAIN_ROWS_FILE" "$DRAIN_TMP" || exit 1
       DRAIN_TMP=
     fi

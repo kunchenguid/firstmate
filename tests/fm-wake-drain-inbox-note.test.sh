@@ -86,6 +86,21 @@ test_note_among_status_wakes_is_presented_and_survives_ack() {
   pass "pending inbox note repeats until handled among 40 status wakes"
 }
 
+test_only_pending_note_ack_is_quiet() {
+  local dir note_out
+  dir=$(make_case only-note)
+  note_out=$(run_inbox "$dir" note "keep this note") || fail "note queue failed"
+  NOTE_ID=$(printf '%s\n' "$note_out" | awk '/^queued /{ print $2; exit }')
+  FM_STATE_OVERRIDE="$dir/state" "$DRAIN" > "$dir/drain.out" 2> "$dir/drain.err" || fail "note drain failed"
+  ACK_CMD=$(grep -o 'bin/fm-wake-drain.sh --ack-through [0-9]* --recovery-generation [^ ]*' "$dir/drain.err" | head -1)
+  [ -n "$ACK_CMD" ] || fail "note drain printed no acknowledgement command"
+  run_ack "$dir"
+  [ ! -s "$dir/ack.err" ] || fail "retained-only acknowledgement emitted an error: $(cat "$dir/ack.err")"
+  FM_STATE_OVERRIDE="$dir/state" "$DRAIN" > "$dir/again.out" 2> "$dir/again.err" || fail "retained note drain failed"
+  grep -F "check: captain inbox note $NOTE_ID" "$dir/again.out" >/dev/null || fail "retained note was not presented again"
+  pass "acknowledging only a pending note stays quiet and retains its claim"
+}
+
 test_handled_note_is_not_renamed_at_ack() {
   local dir
   dir=$(make_case handled-note)
@@ -141,5 +156,6 @@ test_branch_ack_releases_pending_note_for_next_grant() {
 
 test_branch_ack_releases_pending_note_for_next_grant
 test_note_among_status_wakes_is_presented_and_survives_ack
+test_only_pending_note_ack_is_quiet
 test_handled_note_is_not_renamed_at_ack
 test_note_above_cutoff_is_not_named
