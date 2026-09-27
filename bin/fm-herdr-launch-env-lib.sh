@@ -29,8 +29,10 @@
 # with no startup config. PATH is a stable source-defined baseline for the same
 # reason: a launcher's truncated PATH left /usr/bin/core_perl (shasum)
 # unreachable in every pane. Both values are launcher contamination, so neither
-# is ever preserved; the operator's real login shell rebuilds the rest of the
-# pane environment from its own startup files.
+# is ever preserved. The baseline PATH must be self-sufficient rather than a
+# floor a profile later tops up: herdr 0.9.1 starts a pane's shell interactive
+# but NOT login, so only the shell's per-interactive-shell file runs and
+# /etc/profile.d never does.
 #
 # HOME, XDG_CONFIG_HOME and HERDR_CONFIG_PATH ARE preserved, because they are
 # caller-environment settings rather than task-scoped overrides, and because on
@@ -133,7 +135,16 @@ fm_herdr_launch_env() {  # <session>
     launch_home=/
     echo "warning: uid '${uid:-unknown}' has neither a caller HOME nor a usable passwd home directory; the herdr server's HOME and baseline PATH fall back to '/'" >&2
   fi
-  launch_path="$launch_home/.local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin"
+  # The perl script directories come LAST, after every standard system
+  # directory, and they are here because herdr 0.9.1 starts a pane's shell
+  # interactive but NOT login (measured 2026-09-27: argv0 /usr/bin/bash, no
+  # -l, `shopt -q login_shell` false), so /etc/profile.d/perlbin.sh never
+  # runs and nothing else re-adds them. Neither the frozen config file nor
+  # herdr's shell start mode can be changed, so this baseline has to carry
+  # them or no pane can resolve shasum - the 127 exits measured 2026-09-26.
+  # Directories that do not exist are inert on PATH, so hosts without them
+  # are unaffected.
+  launch_path="$launch_home/.local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin:/usr/bin/site_perl:/usr/bin/vendor_perl:/usr/bin/core_perl"
 
   FM_HERDR_LAUNCH_ENV=(
     "HOME=$launch_home"

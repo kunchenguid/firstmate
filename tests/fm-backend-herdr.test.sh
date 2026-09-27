@@ -1266,16 +1266,21 @@ test_server_ensure_gives_panes_the_passwd_login_shell_and_a_usable_path() {
     *"$fb"*) fail "the server inherited the launcher's PATH ('$recorded_path' still carries the launcher-only directory '$fb')" ;;
   esac
 
-  # A pane inherits exactly this environment, so run the recorded login shell
-  # under it and ask it for a tool that lives outside the system directories.
+  # A pane inherits exactly this environment, so run the recorded shell under
+  # it the way herdr 0.9.1 actually starts a pane's shell - INTERACTIVE and NOT
+  # login (measured: argv0 /usr/bin/bash, no -l, `shopt -q login_shell` false)
+  # - and ask it for a tool that lives outside the system directories. Probing
+  # with -l instead would let a login profile supply the PATH entry, which no
+  # real pane ever gets, so the assertion could not fail for the reason it
+  # claims to test.
   while IFS= read -r line; do pane_env+=("$line"); done < "$log"
-  if "$recorded_shell" -l -c 'exit 0' >/dev/null 2>&1; then
-    shell_args=(-l -c)
+  if "$recorded_shell" -i -c 'exit 0' >/dev/null 2>&1 </dev/null; then
+    shell_args=(-i -c)
   else
     shell_args=(-c)
   fi
-  out=$(env -i "${pane_env[@]}" "$recorded_shell" "${shell_args[@]}" 'command -v shasum' 2>/dev/null)
-  [ -n "$out" ] || fail "a pane of this server cannot run shasum; its PATH ('$recorded_path') and login shell leave it unreachable"
+  out=$(env -i "${pane_env[@]}" "$recorded_shell" "${shell_args[@]}" 'command -v shasum' 2>/dev/null </dev/null)
+  [ -n "$out" ] || fail "a pane of this server cannot run shasum; the launched PATH ('$recorded_path') leaves it unreachable in a pane's non-login shell"
 
   # The same guarantee with no SHELL at all, which is how the server was
   # actually started tonight.

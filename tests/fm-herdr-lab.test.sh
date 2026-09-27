@@ -217,16 +217,18 @@ test_provision_launches_the_lab_server_with_the_shared_clean_environment() {
     *"PATH=$FAKEBIN"*|*":$FAKEBIN:"*) fail "the lab server inherited the launcher's own PATH" ;;
   esac
 
-  # A lab pane inherits exactly this environment, so run the recorded login
-  # shell under it and ask for a tool outside the system directories.
+  # A lab pane inherits exactly this environment, so run the recorded shell
+  # under it the way herdr 0.9.1 starts a pane's shell - interactive and NOT
+  # login, so no /etc/profile.d tops the PATH up - and ask for a tool outside
+  # the system directories.
   while IFS= read -r line; do pane_env+=("$line"); done < "$FAKE_CONTROL/server-env"
-  if "$expected_shell" -l -c 'exit 0' >/dev/null 2>&1; then
-    shell_args=(-l -c)
+  if "$expected_shell" -i -c 'exit 0' >/dev/null 2>&1 </dev/null; then
+    shell_args=(-i -c)
   else
     shell_args=(-c)
   fi
-  [ -n "$(env -i "${pane_env[@]}" "$expected_shell" "${shell_args[@]}" 'command -v shasum' 2>/dev/null)" ] \
-    || fail "a pane of this lab server cannot run shasum; its PATH and login shell leave it unreachable"
+  [ -n "$(env -i "${pane_env[@]}" "$expected_shell" "${shell_args[@]}" 'command -v shasum' 2>/dev/null </dev/null)" ] \
+    || fail "a pane of this lab server cannot run shasum; the launched PATH leaves it unreachable in a pane's non-login shell"
 
   run_with_fake fm_herdr_lab_teardown "$name" || fail "teardown after launch-environment provision failed"
   pass "fm-herdr-lab: the lab server launches with the shared clean environment, so its panes get the passwd login shell and no task-scoped state"
