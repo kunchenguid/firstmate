@@ -188,13 +188,13 @@ SH
   printf '%s\n' "$case_dir"
 }
 
-# Write a meta file for the task. Args: case_dir mode kind
+# Write a meta file for the task. Args: case_dir mode kind [worktree]
 write_meta() {
-  local case_dir=$1 mode=$2 kind=$3
+  local case_dir=$1 mode=$2 kind=$3 worktree=${4:-$1/wt}
   fm_write_meta "$case_dir/state/task-x1.meta" \
     "window=firstmate:fm-task-x1" \
     "endpoint_task_id=task-x1" \
-    "worktree=$case_dir/wt" \
+    "worktree=$worktree" \
     "project=$case_dir/project" \
     "kind=$kind" \
     "mode=$mode" \
@@ -1145,13 +1145,20 @@ test_content_fallback_refreshes_stale_origin_ref() {
 # Local teardown hooks (docs/teardown-hooks.md) run after a successful
 # teardown, in name order, with the task id; a failing or overrunning hook only
 # warns, and a non-executable file never runs.
-add_teardown_hooks() {  # <case-dir>
-  local case_dir=$1 hooks="$1/config/teardown-hooks"
+add_recording_teardown_hook() {  # <case-dir>
+  local hooks="$1/config/teardown-hooks"
   mkdir -p "$hooks"
   cat > "$hooks/10-record" <<'SH'
 #!/usr/bin/env bash
-printf '10 %s %s %s\n' "$1" "$FM_TEARDOWN_TASK_ID" "$FM_TEARDOWN_KIND" >> "$(dirname "$0")/../../hook-log"
+printf '10 %s %s %s [%s] [%s]\n' "$1" "$FM_TEARDOWN_TASK_ID" "$FM_TEARDOWN_KIND" \
+  "$FM_TEARDOWN_PROJECT" "$FM_TEARDOWN_WORKTREE" >> "$(dirname "$0")/../../hook-log"
 SH
+  chmod +x "$hooks/10-record"
+}
+
+add_teardown_hooks() {  # <case-dir>
+  local case_dir=$1 hooks="$1/config/teardown-hooks"
+  add_recording_teardown_hook "$case_dir"
   cat > "$hooks/20-fails" <<'SH'
 #!/usr/bin/env bash
 printf '20 ran\n' >> "$(dirname "$0")/../../hook-log"
@@ -1171,7 +1178,43 @@ SH
 #!/usr/bin/env bash
 printf '50 ran\n' >> "$(dirname "$0")/../../hook-log"
 SH
-  chmod +x "$hooks/10-record" "$hooks/20-fails" "$hooks/30-hangs" "$hooks/40-record"
+  chmod +x "$hooks/20-fails" "$hooks/30-hangs" "$hooks/40-record"
+}
+
+# Turn the case's task worktree into a Treehouse pool slot, so teardown treats
+# it as returnable pool capacity, and claim that slot for another task.
+# Args: case_dir other-task-id
+make_pool_slot_reassigned() {
+  local case_dir=$1 other=$2
+  mkdir -p "$case_dir/pool/1"
+  git -C "$case_dir/project" worktree move "$case_dir/wt" "$case_dir/pool/1/project"
+  printf '{"worktrees":[{"name":"1","path":"%s"}]}\n' \
+    "$case_dir/pool/1/project" > "$case_dir/pool/treehouse-state.json"
+  printf 'task=%s\nhome=%s\n' "$other" "$case_dir/other-home" > "$case_dir/pool/1/.fm-slot-owner"
+}
+
+# Record task-x1 as a secondmate on another host, with the registry route
+# fm-on.sh resolves, and stand a fake ssh in for the far machine that grants
+# every retirement and logs the command it was asked to run.
+add_remote_secondmate() {  # <case-dir>
+  local case_dir=$1 remote_home="$1/remote-home"
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "kind=secondmate" "home=$remote_home" "remote_host=remote-mac" "remote_root=/remote/firstmate"
+  printf -- '- task-x1 - remote lane (host: remote-mac; root: /remote/firstmate; home: %s; scope: relay work; projects: alpha; added 2026-08-02)\n' \
+    "$remote_home" > "$case_dir/data/secondmates.md"
+  cat > "$case_dir/fakebin/fake-ssh" <<'SH'
+#!/usr/bin/env bash
+while [ "$#" -gt 0 ]; do
+  case "$1" in -o) shift 2 ;; --) shift; break ;; *) exit 90 ;; esac
+done
+host=$1
+shift 2
+perl -MMIME::Base64=decode_base64 -e '
+  print join(" ", split(/\0/, decode_base64($ARGV[1]))), "\n";
+' "$host" "$4" | sed "s/^/$host /" >> "$(dirname "$0")/../ssh-log"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/fake-ssh"
 }
 
 test_teardown_runs_local_hooks_after_success() {
@@ -1188,7 +1231,7 @@ test_teardown_runs_local_hooks_after_success() {
   set -e
 
   expect_code 0 "$rc" "hooks-run: a failing or overrunning hook must not fail a teardown that succeeded"
-  [ "$(cat "$case_dir/hook-log")" = "$(printf '%s\n' '10 task-x1 task-x1 ship' '20 ran' '30 started' '40 task-x1')" ] \
+  [ "$(cat "$case_dir/hook-log")" = "$(printf '%s\n' "10 task-x1 task-x1 ship [$case_dir/project] [$case_dir/wt]" '20 ran' '30 started' '40 task-x1')" ] \
     || fail "hooks-run: hooks did not run in name order with the task id, or the stopped hook finished: $(cat "$case_dir/hook-log")"
   grep -q 'teardown hook 20-fails for task-x1 exited 3' "$case_dir/stderr" \
     || fail "hooks-run: a failing hook was not reported: $(cat "$case_dir/stderr")"
@@ -1214,6 +1257,57 @@ test_refused_teardown_runs_no_hooks() {
   expect_code 1 "$rc" "hooks-refused: teardown should refuse a dirty worktree"
   assert_absent "$case_dir/hook-log" "hooks-refused: a refused teardown ran a hook"
   pass "a refused teardown runs no local hook"
+}
+
+# A pool slot another task claimed after this record was written is that task's
+# live worktree: teardown leaves it alone, and hooks must not be handed it.
+test_reassigned_slot_hooks_get_no_worktree() {
+  local case_dir rc
+  case_dir=$(make_case hooks-reassigned-slot)
+  make_pool_slot_reassigned "$case_dir" other-task
+  write_meta "$case_dir" no-mistakes ship "$case_dir/pool/1/project"
+  add_recording_teardown_hook "$case_dir"
+
+  set +e
+  FM_HOME="$case_dir" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "hooks-reassigned-slot: teardown of a task whose slot was reassigned should succeed: $(cat "$case_dir/stderr")"
+  grep -q "pool slot $case_dir/pool/1/project left to task other-task" "$case_dir/stdout" \
+    || fail "hooks-reassigned-slot: teardown did not take the reassigned-slot path: $(cat "$case_dir/stdout")"
+  assert_present "$case_dir/pool/1/project/.git" "hooks-reassigned-slot: the reassigned slot's checkout was removed"
+  [ "$(cat "$case_dir/hook-log")" = "10 task-x1 task-x1 ship [$case_dir/project] []" ] \
+    || fail "hooks-reassigned-slot: the hook was handed the reassigned slot as this task's worktree: $(cat "$case_dir/hook-log")"
+  assert_absent "$case_dir/state/task-x1.meta" "hooks-reassigned-slot: the task record survived the teardown"
+  pass "a teardown whose pool slot was reassigned runs hooks with no worktree"
+}
+
+# Retiring a remote secondmate succeeds on the local records alone, so it is a
+# successful teardown like any other and runs this home's hooks with the
+# secondmate kind and no local worktree.
+test_remote_secondmate_teardown_runs_local_hooks() {
+  local case_dir rc
+  case_dir=$(make_case hooks-remote-secondmate)
+  add_remote_secondmate "$case_dir"
+  add_recording_teardown_hook "$case_dir"
+
+  set +e
+  FM_SSH_BIN="$case_dir/fakebin/fake-ssh" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "hooks-remote-secondmate: remote retirement should succeed: $(cat "$case_dir/stderr")"
+  grep -q "teardown task-x1 complete (remote remote-mac:$case_dir/remote-home)" "$case_dir/stdout" \
+    || fail "hooks-remote-secondmate: teardown did not take the remote-secondmate path: $(cat "$case_dir/stdout")"
+  grep -q 'remote-mac fm-remote-secondmate-control.sh retire task-x1' "$case_dir/ssh-log" \
+    || fail "hooks-remote-secondmate: the far host was not asked to retire the secondmate: $(cat "$case_dir/ssh-log" 2>/dev/null)"
+  [ "$(cat "$case_dir/hook-log")" = "10 task-x1 task-x1 secondmate [] []" ] \
+    || fail "hooks-remote-secondmate: hooks did not run once with the secondmate kind and no local paths: $(cat "$case_dir/hook-log" 2>/dev/null)"
+  assert_absent "$case_dir/state/task-x1.meta" "hooks-remote-secondmate: the task record survived the teardown"
+  ! grep -q '^- task-x1 ' "$case_dir/data/secondmates.md" \
+    || fail "hooks-remote-secondmate: the remote route survived the teardown"
+  pass "a remote secondmate retirement runs local hooks with the secondmate kind and no worktree"
 }
 
 test_dirty_worktree_refuses() {
@@ -4176,6 +4270,8 @@ test_content_fallback_refreshes_stale_origin_ref
 test_dirty_worktree_refuses
 test_teardown_runs_local_hooks_after_success
 test_refused_teardown_runs_no_hooks
+test_reassigned_slot_hooks_get_no_worktree
+test_remote_secondmate_teardown_runs_local_hooks
 test_gh_error_and_content_absent_refuses
 test_legacy_record_without_the_flag_refuses
 test_windowless_legacy_record_with_gone_worktree_tears_down

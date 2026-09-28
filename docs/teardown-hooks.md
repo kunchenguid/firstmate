@@ -24,6 +24,10 @@ Each hook receives the task id as its only argument, stdin from `/dev/null`, and
 | `FM_TEARDOWN_PROJECT`   | The task's project directory, empty when it has none           |
 | `FM_TEARDOWN_WORKTREE`  | The task's worktree or home path, empty when it has none       |
 
+Two teardowns pass an empty `FM_TEARDOWN_WORKTREE` on purpose.
+A task whose Treehouse pool slot was reassigned to another task no longer owns that path, so teardown leaves the slot alone and tells hooks the task has no worktree.
+A remote second mate's home lives on another host, so its retirement runs this home's hooks with an empty worktree and an empty project.
+
 ## Limits
 
 Each hook runs under its own time bound, `FM_TEARDOWN_HOOK_TIMEOUT` seconds (default `120`), and is stopped with its whole process group when the bound passes.

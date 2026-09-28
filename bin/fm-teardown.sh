@@ -1079,8 +1079,30 @@ remote_secondmate_teardown_locked() {
   return "$rc"
 }
 
+# Local teardown hooks (docs/teardown-hooks.md): every executable in this
+# home's gitignored config/teardown-hooks/ runs once the task is fully gone,
+# with the task id, each under its own bound. A hook can only warn; the
+# teardown above has already succeeded. An absent directory costs one test.
+run_teardown_hooks() {  # <kind> <project> <worktree>
+  local kind=$1 project=$2 worktree=$3 dir=$CONFIG/teardown-hooks hook rc bound=${FM_TEARDOWN_HOOK_TIMEOUT:-120}
+  [ -d "$dir" ] || return 0
+  case "$bound" in ''|*[!0-9]*|0) bound=120 ;; esac
+  for hook in "$dir"/*; do
+    [ -f "$hook" ] && [ -x "$hook" ] || continue
+    rc=0
+    FM_TEARDOWN_TASK_ID=$ID FM_TEARDOWN_KIND=$kind FM_TEARDOWN_PROJECT=$project \
+      FM_TEARDOWN_WORKTREE=$worktree fm_run_timed "$bound" "$hook" "$ID" </dev/null || rc=$?
+    if fm_timed_out "$rc"; then
+      echo "warning: teardown hook $(basename "$hook") for $ID was stopped after ${bound}s" >&2
+    elif [ "$rc" -ne 0 ]; then
+      echo "warning: teardown hook $(basename "$hook") for $ID exited $rc" >&2
+    fi
+  done
+}
+
 if remote_secondmate_teardown_locked; then
   "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
+  run_teardown_hooks secondmate '' ''
   exit 0
 else
   remote_teardown_rc=$?
@@ -3804,25 +3826,7 @@ elif teardown_owns_worktree; then
 else
   echo "teardown $ID complete (window ${T:-none}; pool slot $WT left to task $TEARDOWN_SLOT_REASSIGNED_TO${TEARDOWN_SLOT_REASSIGNED_HOME:+ (home $TEARDOWN_SLOT_REASSIGNED_HOME)}, which it was reassigned to)"
 fi
-# Local teardown hooks (docs/teardown-hooks.md): every executable in this
-# home's gitignored config/teardown-hooks/ runs once the task is fully gone,
-# with the task id, each under its own bound. A hook can only warn; the
-# teardown above has already succeeded. An absent directory costs one test.
-run_teardown_hooks() {
-  local dir=$CONFIG/teardown-hooks hook rc bound=${FM_TEARDOWN_HOOK_TIMEOUT:-120}
-  [ -d "$dir" ] || return 0
-  case "$bound" in ''|*[!0-9]*|0) bound=120 ;; esac
-  for hook in "$dir"/*; do
-    [ -f "$hook" ] && [ -x "$hook" ] || continue
-    rc=0
-    FM_TEARDOWN_TASK_ID=$ID FM_TEARDOWN_KIND=$KIND FM_TEARDOWN_PROJECT=${PROJ:-} \
-      FM_TEARDOWN_WORKTREE=${WT:-} fm_run_timed "$bound" "$hook" "$ID" </dev/null || rc=$?
-    if fm_timed_out "$rc"; then
-      echo "warning: teardown hook $(basename "$hook") for $ID was stopped after ${bound}s" >&2
-    elif [ "$rc" -ne 0 ]; then
-      echo "warning: teardown hook $(basename "$hook") for $ID exited $rc" >&2
-    fi
-  done
-}
-run_teardown_hooks
+TEARDOWN_HOOK_WORKTREE=${WT:-}
+teardown_owns_worktree || TEARDOWN_HOOK_WORKTREE=
+run_teardown_hooks "$KIND" "${PROJ:-}" "$TEARDOWN_HOOK_WORKTREE"
 backlog_refresh_reminder
