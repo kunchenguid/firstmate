@@ -105,8 +105,7 @@ const cells = (row) => row.map((run) => run.text).join("");
 const RIGS = [core.CALM_WORKING_SHIP_SAIL_LEFT, core.CALM_WORKING_SHIP_SAIL_RIGHT];
 const rigOf = (text) => text.replace(/[╲╱]/, "│");
 const BARS = core.CALM_WORKING_SHIP_WAVE_BARS.join("");
-const TOP_BARS = (core.CALM_WORKING_SHIP_TOP_BARS ?? ["▔", "▀"]).join("");
-const ALLOWED = BARS + " " + TOP_BARS;
+const ALLOWED = BARS + " ▔▀";
 check(pi.CALM_WORKING_SHIP_TICK_MS === core.CALM_WORKING_SHIP_TICK_MS, "Pi re-exports a different tick");
 check(core.CALM_WORKING_SHIP_TICK_MS <= 17, "the frame clock is slower than about sixty frames a second");
 let frames = 0;
@@ -224,7 +223,7 @@ check(highest <= amplitude * 1.05 && lowest >= -amplitude * 1.05, "the surface l
   const sprite = core.createCalmWorkingShipSprite();
   const surfaces = new Set();
   for (let step = 0; step < 240; step += 1) {
-    const surface = sprite.frame(200)[2].map((run) => run.text).join("");
+    const surface = sprite.frame(200).at(-2).map((run) => run.text).join("");
     surfaces.add(surface);
     const sample = surface.slice(12);
     for (let period = 1; period <= 40; period += 1) check(sample.slice(0, -period) !== sample.slice(period), \`the sea collapsed into a \${period}-cell cycle\`);
@@ -280,6 +279,52 @@ check(highest <= amplitude * 1.05 && lowest >= -amplitude * 1.05, "the surface l
   check(rockings > 90 * 0.8, \`the boat rocked only \${rockings} times in ninety seconds\`);
   check(hullTops.size >= 6, \`the hull was drawn at only \${hullTops.size} heights: it does not visibly rise and fall\`);
 }
+// The boat is rigid: it only rises, falls, and tilts. Decoding every drawn cell back
+// into its eight sub-rows, the boat's outline and colors at one drawn tilt and heading
+// are identical in every frame, shifted only by how high it rides, wherever the scene's
+// top or bottom edge does not cut it off.
+{
+  const BARS = core.CALM_WORKING_SHIP_WAVE_BARS.join("");
+  const TOP = { "▔": 1, "▀": 4 };
+  for (const family of ["dark", "light"]) {
+    const { hull, sails } = core.calmWorkingShipBoatColors(family);
+    const boat = new Set([hull, ...sails]);
+    const sprite = core.createCalmWorkingShipSprite();
+    const outlines = new Map();
+    let compared = 0;
+    for (let step = 0; step < 60 * 120; step += 1) {
+      const frame = sprite.frame(80, family);
+      const points = [];
+      frame.forEach((row, index) => {
+        let column = 0;
+        for (const run of row) for (const glyph of Array.from(run.text)) {
+          const bar = BARS.indexOf(glyph);
+          for (let level = 0; level < 8; level += 1) {
+            const color = bar >= 0 ? (level <= bar ? run.fg : run.bg)
+              : glyph in TOP ? (level >= 8 - TOP[glyph] ? run.fg : run.bg)
+              : run.bg;
+            if (boat.has(color)) points.push([column - sprite.position(), (frame.length - 1 - index) * 8 + level, color]);
+          }
+          column += 1;
+        }
+      });
+      const lowest = Math.min(...points.map((point) => point[1]));
+      const highest = Math.max(...points.map((point) => point[1]));
+      if (lowest > 0 && highest < frame.length * 8 - 1) {
+        const outline = points.map(([column, level, color]) => column + "," + (level - lowest) + "," + color).sort().join(";");
+        const key = sprite.tilt().toFixed(3) + "|" + sprite.bow();
+        const first = outlines.get(key);
+        if (first === undefined) outlines.set(key, outline);
+        else {
+          check(first === outline, \`the \${family} boat changed shape at tilt \${key} on step \${step}\`);
+          compared += 1;
+        }
+      }
+      sprite.tick();
+    }
+    check(outlines.size >= 8 && compared > 5000, \`the rigid-boat check compared too little: \${outlines.size} tilts, \${compared} frames\`);
+  }
+}
 // The boat floats where the water is: its heave follows the mean water height under it.
 {
   const sprite = core.createCalmWorkingShipSprite();
@@ -314,7 +359,7 @@ console.log("physics-ok");
 JS
   out=$(run_node "$TMP_ROOT/physics.mjs" 2>&1) || fail "sea physics: $out"
   assert_contains "$out" "physics-ok" "the sea physics check did not complete"
-  pass "the shared sea follows deep-water dispersion with consistent slopes and non-repeating travel, and the boat cruises calmly, turns smoothly at both edges, heaves with the water under it, pitches both ways, keeps rocking between waves, and is drawn visibly rising and falling"
+  pass "the shared sea follows deep-water dispersion with consistent slopes and non-repeating travel, and the boat cruises calmly, turns smoothly at both edges, heaves with the water under it, pitches both ways, keeps rocking between waves, is drawn visibly rising and falling, and keeps one rigid outline at every height for each drawn tilt"
 }
 
 test_raster_packing() {

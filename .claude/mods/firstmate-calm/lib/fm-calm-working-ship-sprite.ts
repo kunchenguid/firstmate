@@ -28,14 +28,17 @@
 // boat and its moment pitches it; both are lightly damped, so the boat rises and falls
 // with the water under it, tilts to the local slope, and keeps bobbing and rocking a
 // little after each wave passes. The boat cruises, surges with the waves' orbital
-// velocity, surfs down their faces, brakes into each edge, and turns about through a
-// foreshortened, side-on view before sailing back.
+// velocity, surfs down their faces, brakes into each edge, and comes about there.
 //
-// Rendering: the scene is sampled at eight sub-rows per cell and four sub-columns per
-// column, and each cell shows its best two-color split through the bottom-aligned block
-// glyphs, so the waterline, the rising and falling hull, and its tilted deck and sails
-// all move in eighth-cell steps rather than whole rows. The sky stays the terminal's
-// own background.
+// Rigid boat: the hull and sails keep one shape. The boat is drawn once, at a set of
+// tilts and facing each way, and each frame shows the drawing at the tilt nearest its
+// pitch, on whole columns and lifted in eighth-row steps, so it only rises, falls, and
+// tilts and is never re-sampled into a different outline.
+//
+// Rendering: the scene is sampled at eight sub-rows per cell, and each cell shows its
+// best two-color split through the bottom-aligned block glyphs, so the waterline and
+// the rising and falling boat move in eighth-cell steps rather than whole rows. The
+// sky stays the terminal's own background.
 //
 // Cadence: one fixed-step scheduler at CALM_WORKING_SHIP_TICK_MS drives everything.
 // Ticks, not wall-clock timestamps, drive every state change, so tests can seek time
@@ -64,15 +67,11 @@ const LEVELS = CALM_WORKING_SHIP_WAVE_BARS.length;
 const TOP_EIGHTH = "▔";
 const TOP_HALF = "▀";
 
-/** Rows in the full scene: two of sky for the rig, the surface row, and the water body. */
-export const CALM_WORKING_SHIP_ROWS = 4;
+/** Rows in the full scene: three of sky for the rig, the surface row, and the water body. */
+export const CALM_WORKING_SHIP_ROWS = 5;
 /** Hull length in columns: the narrowest width that draws the full scene. */
 export const CALM_WORKING_SHIP_HULL_LENGTH = 8;
 const HALF = CALM_WORKING_SHIP_HULL_LENGTH / 2;
-/** How much of the chop against the hull side the hull smooths away. */
-const HULL_CALMING = 0.7;
-/** Sub-columns sampled per column when shading the boat's outline. */
-const SUBSAMPLES = 4;
 
 // ---------------------------------------------------------------------------------
 // Time.
@@ -103,12 +102,12 @@ export const CALM_WORKING_SHIP_WAVE_TRAINS: readonly {
   readonly direction: 1 | -1;
   readonly phase: number;
 }[] = [
-  { wavelength: 44.0, amplitude: 0.3, direction: 1, phase: 0.3 },
-  { wavelength: 28.9, amplitude: 0.19, direction: 1, phase: 2.1 },
-  { wavelength: 19.3, amplitude: 0.12, direction: 1, phase: 4.4 },
-  { wavelength: 12.1, amplitude: 0.068, direction: 1, phase: 1.2 },
-  { wavelength: 7.7, amplitude: 0.04, direction: -1, phase: 5.0 },
-  { wavelength: 4.9, amplitude: 0.024, direction: 1, phase: 3.3 },
+  { wavelength: 44.0, amplitude: 0.26, direction: 1, phase: 0.3 },
+  { wavelength: 28.9, amplitude: 0.16, direction: 1, phase: 2.1 },
+  { wavelength: 19.3, amplitude: 0.1, direction: 1, phase: 4.4 },
+  { wavelength: 12.1, amplitude: 0.058, direction: 1, phase: 1.2 },
+  { wavelength: 7.7, amplitude: 0.034, direction: -1, phase: 5.0 },
+  { wavelength: 4.9, amplitude: 0.02, direction: 1, phase: 3.3 },
 ];
 
 type Train = {
@@ -172,24 +171,20 @@ export function calmWorkingShipSea(column: number, seconds: number): CalmSeaSamp
 // The boat's shape, in its own frame: `u` along the hull in columns with the bow at
 // +HALF, `v` up in physical units from the design waterline, both before pitch.
 
-/** Freeboard amidships and draft of the canoe body, in physical units. */
-const FREEBOARD = 0.26 * ASPECT;
-const DRAFT = 0.27 * ASPECT;
-/** A short fin keel under the middle of the hull, below the canoe body. */
-const FIN_DEPTH = 0.2 * ASPECT;
-const FIN_HALF = 0.22;
+/** Freeboard amidships and draft of the hull, in physical units. */
+const FREEBOARD = 0.4 * ASPECT;
+const DRAFT = 0.6 * ASPECT;
 
 /** Top of the hull: a sheer line rising toward both ends, highest at the bow. */
 function deckAt(t: number): number {
   return FREEBOARD * (1 + 0.32 * t * t + 0.14 * t);
 }
 
-/** Bottom of the hull: a rounded canoe body whose ends rake up out of the water. */
+/** Bottom of the hull: a rounded body whose ends rake up out of the water. */
 function keelAt(t: number): number {
   const body = -DRAFT * Math.pow(Math.max(0, 1 - t * t), 0.6);
   const rake = t > 0 ? 1.15 * FREEBOARD * t ** 6 : 0.55 * FREEBOARD * t ** 8;
-  const fin = Math.abs(t) < FIN_HALF ? -FIN_DEPTH * Math.sqrt(1 - (t / FIN_HALF) ** 2) : 0;
-  return body + rake + fin;
+  return body + rake;
 }
 
 /** The underwater lift a section contributes grows with its beam, fullest amidships. */
@@ -197,33 +192,31 @@ function beamAt(t: number): number {
   return 1 - 0.55 * t * t;
 }
 
-type Triangle = readonly [number, number, number, number, number, number];
-
 /** Mast position along the hull, and its height above the deck, in physical units. */
 const MAST_U = 0.1 * HALF;
-const MAST_HEIGHT = 2.05 * ASPECT;
-const MAST_FOOT = deckAt(MAST_U / HALF);
-/** Mainsail: tack at the mast foot, head at the masthead, clew at the boom end. */
-const MAINSAIL: Triangle = [
-  MAST_U - 0.08, MAST_FOOT + 0.14,
-  MAST_U - 0.04, MAST_FOOT + MAST_HEIGHT,
-  MAST_U - 2.6, MAST_FOOT + 0.3,
-];
-/** Jib: head below the masthead, tack at the stem, clew overlapping the mainsail. */
-const JIB: Triangle = [
-  MAST_U + 0.3, MAST_FOOT + 0.72 * MAST_HEIGHT,
-  HALF - 0.4, deckAt(0.9) + 0.06,
-  MAST_U - 0.2, MAST_FOOT + 0.3,
-];
+const MAST_HEIGHT = 2.75 * ASPECT;
+/** The mainsail's foot, from the mast aft to the boom end, in columns. */
+const BOOM = 2.5;
+/** The jib's head as a fraction of the mast height, and its tack forward of the mast. */
+const JIB_HEAD = 0.72;
+const JIB_TACK = MAST_U + 2.2;
+/** Where each sail's leech meets its foot: a full cell above the deck (see drawBoat). */
+const CLEW = ASPECT;
 
-function insideTriangle(tri: Triangle, u: number, v: number): boolean {
-  const [ax, ay, bx, by, cx, cy] = tri;
-  const d1 = (u - bx) * (ay - by) - (ax - bx) * (v - by);
-  const d2 = (u - cx) * (by - cy) - (bx - cx) * (v - cy);
-  const d3 = (u - ax) * (cy - ay) - (cx - ax) * (v - ay);
-  const negative = d1 < 0 || d2 < 0 || d3 < 0;
-  const positive = d1 > 0 || d2 > 0 || d3 > 0;
-  return !(negative && positive);
+/**
+ * Whether the rig covers `u` along the hull and `v` up: the mainsail aft of the mast
+ * and the jib forward of it, one sail color, both rising straight from the deck line,
+ * each leech sloping down from its head to a clew a full cell above the deck.
+ */
+function rigAt(u: number, v: number): number {
+  const above = v - deckAt(u / HALF);
+  if (above < 0) return SKY;
+  if (u <= MAST_U && u >= MAST_U - BOOM) {
+    if (above <= CLEW + ((MAST_HEIGHT - CLEW) * (u - (MAST_U - BOOM))) / BOOM) return MAIN_INDEX;
+  } else if (u > MAST_U && u <= JIB_TACK) {
+    if (above <= CLEW + ((JIB_HEAD * MAST_HEIGHT - CLEW) * (JIB_TACK - u)) / (JIB_TACK - MAST_U)) return MAIN_INDEX;
+  }
+  return SKY;
 }
 
 // ---------------------------------------------------------------------------------
@@ -249,8 +242,13 @@ const PITCH_LIMIT = 0.45;
 const STRIPS = 12;
 /** Turning rate when the boat comes about, in radians per second. */
 const TURN_RATE = Math.PI / 1.7;
-/** The hull's apparent length side-on while it is turned end-on, as a fraction. */
-const END_ON = 0.32;
+/**
+ * The tilts the boat is drawn at: the rigid boat is drawn once at each multiple of
+ * TILT_STEP radians up to TILT_STEPS either way, and every frame shows the one nearest
+ * its pitch, so at one tilt its outline is the same in every frame.
+ */
+const TILT_STEP = 0.06;
+const TILT_STEPS = 6;
 /**
  * Wind gusts on the rig: a smooth random pitching moment, in radians of equivalent
  * slope, and how many gusts arrive a second. They set the hull rocking on its own
@@ -311,10 +309,13 @@ const PALETTES: Readonly<Record<CalmWorkingShipFamily, ShipPalette>> = {
   },
 };
 
-/** The boat's resolved colors in `family`, as `0xRRGGBB`, for callers locating it. */
+/**
+ * The boat's resolved colors in `family`, as `0xRRGGBB`, for callers locating it: the
+ * hull, and the sails (the working boat's one sail color, then the narrow rig's jib).
+ */
 export function calmWorkingShipBoatColors(family: CalmWorkingShipFamily): { hull: number; sails: readonly number[] } {
-  const palette = PALETTES[family];
-  return { hull: packRgb(palette.hull), sails: [packRgb(palette.sailLit), packRgb(palette.sailShade)] };
+  const colors = COLOR_TABLES[family];
+  return { hull: colors[HULL_INDEX]!, sails: [colors[MAIN_INDEX]!, colors[JIB_INDEX]!] };
 }
 
 // Every color is an index into a small per-family table: runs of equal color merge,
@@ -333,9 +334,7 @@ const BAND = 0.33;
 const SKY = -1;
 const SURFACE_BASE = 0;
 const BODY_BASE = SURFACE_BASE + TONE_STEPS * FOAM_STEPS * GLINT_STEPS;
-/** The keel seen through the water: one shade for the skin, then one per depth band. */
-const KEEL_BASE = BODY_BASE + BANDS;
-const HULL_INDEX = KEEL_BASE + BANDS + 1;
+const HULL_INDEX = BODY_BASE + BANDS;
 const MAIN_INDEX = HULL_INDEX + 1;
 const JIB_INDEX = MAIN_INDEX + 1;
 const PALETTE_SIZE = JIB_INDEX + 1;
@@ -381,13 +380,9 @@ function buildColorTable(palette: ShipPalette): Uint32Array {
       }
     }
   }
-  // Light fades with depth, so each band is a darker echo of the lit water above it,
-  // and the keel shows through most clearly just under the surface.
-  table[KEEL_BASE] = packRgb(mix(waterTone(palette.water, 0.42), palette.hull, 0.42));
+  // Light fades with depth, so each band is a darker echo of the lit water above it.
   for (let band = 0; band < BANDS; band += 1) {
-    const body = waterTone(palette.water, 0.38 * 0.62 ** band);
-    table[BODY_BASE + band] = packRgb(body);
-    table[KEEL_BASE + 1 + band] = packRgb(mix(body, palette.hull, 0.3 * 0.6 ** band));
+    table[BODY_BASE + band] = packRgb(waterTone(palette.water, 0.38 * 0.62 ** band));
   }
   table[HULL_INDEX] = packRgb(palette.hull);
   table[MAIN_INDEX] = packRgb(palette.sailLit);
@@ -500,6 +495,10 @@ export type CalmWorkingShipSprite = {
   velocity(): number;
   /** Current pitch in radians, positive with the right end up. */
   pitch(): number;
+  /** The tilt the boat is drawn at, in radians: the drawn tilt nearest its pitch. */
+  tilt(): number;
+  /** Which way the drawn bow points: 1 right, -1 left, flipping as the boat comes about. */
+  bow(): number;
   /** Current heave in rows: the hull's rise above its resting waterline. */
   heave(): number;
   /** Elapsed sea time in milliseconds, exposed for deterministic freeze assertions. */
@@ -532,10 +531,9 @@ type BoatState = {
   splash: number;
 };
 
-/** The hull's apparent side-on scale and which way its bow points on screen. */
-function aspectOf(heading: number): { scale: number; bow: number } {
-  const c = Math.cos(heading);
-  return { scale: Math.max(Math.abs(c), END_ON), bow: c >= 0 ? 1 : -1 };
+/** Which way the bow points on screen: right until the boat has turned past end-on. */
+function bowOf(heading: number): number {
+  return Math.cos(heading) >= 0 ? 1 : -1;
 }
 
 type Forcing = {
@@ -549,7 +547,7 @@ type Forcing = {
 
 /** Buoyancy over the hull's sections for the boat state `state` at `seconds`. */
 function hullForcing(state: BoatState, seconds: number): Forcing {
-  const { scale, bow } = aspectOf(state.heading);
+  const bow = bowOf(state.heading);
   const center = state.x + HALF;
   const tilt = Math.tan(state.pitch);
   let lift = 0;
@@ -561,7 +559,7 @@ function hullForcing(state: BoatState, seconds: number): Forcing {
   let bowImmersion = 0;
   for (let strip = 0; strip < STRIPS; strip += 1) {
     const t = -1 + (2 * strip + 1) / STRIPS;
-    const offset = t * HALF * scale * bow;
+    const offset = t * HALF * bow;
     const keel = keelAt(t);
     const depth = deckAt(t) - keel;
     const water = calmWorkingShipSea(center + offset, seconds).height * ASPECT;
@@ -635,6 +633,8 @@ function toRuns(cells: readonly Cell[]): CalmWorkingShipRun[] {
 }
 
 // Reused per-cell scratch for the two-color split: the cell's runs of equal sub-rows.
+/** Stands in for all water and sky while a cell holding part of the boat is split. */
+const BACKGROUND = -2;
 const runValues = new Int32Array(LEVELS);
 const runLengths = new Int32Array(LEVELS);
 
@@ -670,9 +670,14 @@ function bestValue(from: number, to: number): { value: number; cost: number } {
  * colors: a lower part up to one boundary and an upper part above it.
  */
 function cellOf(sub: Int32Array, offset: number, colors: Uint32Array): Cell {
+  // A cell holding part of the boat is split on the boat alone, with water and sky as
+  // one background, so the boat is drawn the same whatever the water behind it does.
+  let boat = false;
+  for (let level = 0; level < LEVELS; level += 1) if (classOf(sub[offset + level]!) >= 2) boat = true;
   let runs = 0;
   for (let level = 0; level < LEVELS; level += 1) {
-    const value = sub[offset + level]!;
+    const actual = sub[offset + level]!;
+    const value = boat && classOf(actual) < 2 ? BACKGROUND : actual;
     if (runs > 0 && runValues[runs - 1] === value) runLengths[runs - 1]! += 1;
     else {
       runValues[runs] = value;
@@ -699,24 +704,18 @@ function cellOf(sub: Int32Array, offset: number, colors: Uint32Array): Cell {
       }
     }
   }
+  if (lower === BACKGROUND) lower = backgroundOf(sub, offset, 0, split);
+  if (upper === BACKGROUND) upper = backgroundOf(sub, offset, split, LEVELS);
   if (lower === upper || split >= LEVELS) return solid(lower, colors);
   if (split <= 0) return solid(upper, colors);
   const category = categoryOf(lower, upper);
   if (lower === SKY) {
-    // Draw the sail edge at its true sampled height using the eighth-cell
-    // lower-block set: a lower block of height `split` with sky as foreground
-    // (transparent) and sail as background leaves `LEVELS - split` of sail at
-    // the top, so the edge steps in eighths rather than snapping to 1/8, 1/2
-    // or full.
-    if (split >= 1 && split < LEVELS) {
-      return {
-        glyph: CALM_WORKING_SHIP_WAVE_BARS[split - 1]!,
-        color: category,
-        fg: null,
-        bg: colors[upper]!,
-      };
-    }
-    if (split >= LEVELS) return solid(upper, colors);
+    // Only top-aligned glyphs can leave the sky below, since a block drawn in the
+    // terminal's default foreground would paint text color rather than sky. The boat
+    // never needs this: water fills in under its hull and its sails rise from the deck.
+    const cover = LEVELS - split;
+    if (cover <= 2) return { glyph: TOP_EIGHTH, color: category, fg: colors[upper]!, bg: null };
+    if (cover <= 6) return { glyph: TOP_HALF, color: category, fg: colors[upper]!, bg: null };
     return solid(upper, colors);
   }
   return {
@@ -727,6 +726,23 @@ function cellOf(sub: Int32Array, offset: number, colors: Uint32Array): Cell {
   };
 }
 
+/** The most common water or sky value among sub-rows [from, to) of a cell, or sky. */
+function backgroundOf(sub: Int32Array, offset: number, from: number, to: number): number {
+  let value = SKY;
+  let most = 0;
+  for (let level = from; level < to; level += 1) {
+    const candidate = sub[offset + level]!;
+    if (classOf(candidate) >= 2) continue;
+    let count = 0;
+    for (let other = from; other < to; other += 1) if (sub[offset + other] === candidate) count += 1;
+    if (count > most) {
+      most = count;
+      value = candidate;
+    }
+  }
+  return value;
+}
+
 function solid(value: number, colors: Uint32Array): Cell {
   if (value === SKY) return PLAIN;
   return { glyph: "█", color: categoryOf(value, value), fg: colors[value]!, bg: null };
@@ -735,6 +751,107 @@ function solid(value: number, colors: Uint32Array): Cell {
 function categoryOf(lower: number, upper: number): CalmWorkingShipColor {
   const top = Math.max(classOf(lower), classOf(upper));
   return top === 3 ? "sail" : top === 2 ? "hull" : top === 1 ? "water" : "plain";
+}
+
+/**
+ * The rigid boat drawn once at one tilt and heading: its palette index (or SKY) at
+ * every column and sub-row of a box around it. Columns count from the hull's left end
+ * starting at `left`; sub-rows count up from the design waterline starting at `bottom`.
+ * `lowest` holds each column's lowest boat sub-row, or -1 when the column is empty.
+ */
+type BoatImage = {
+  left: number;
+  columns: number;
+  bottom: number;
+  rows: number;
+  pixels: Int32Array;
+  lowest: Int32Array;
+};
+
+/** Sub-columns sampled per column when drawing the boat's outline. */
+const SUBSAMPLES = 4;
+
+/**
+ * Draw the rigid boat at one tilt and heading. Each column is made one hull run with
+ * at most one sail run straight above it, and each run at least a full cell tall, so
+ * no cell the boat touches ever holds more than two of its colors and the background.
+ * A cell can show only two colors, so that is what keeps the drawn outline identical
+ * at every eighth-row height the boat rides at, instead of thin parts being redrawn
+ * differently as they cross cell boundaries.
+ */
+function drawBoat(bow: number, tilt: number): BoatImage {
+  const cos = Math.cos(tilt);
+  const sin = Math.sin(tilt);
+  const lean = Math.abs(sin);
+  const reach = Math.ceil((MAST_HEIGHT + 2 * FREEBOARD) * lean) + 1;
+  const left = -reach;
+  const columns = CALM_WORKING_SHIP_HULL_LENGTH + 2 * reach;
+  const rise = Math.ceil(((HALF * lean) / ASPECT) * LEVELS);
+  const bottom = -Math.max(LEVELS, Math.ceil((DRAFT / ASPECT) * LEVELS)) - rise - 1;
+  const top = Math.ceil(((2 * FREEBOARD + MAST_HEIGHT) / ASPECT) * LEVELS) + rise + LEVELS;
+  const rows = top - bottom;
+  const pixels = new Int32Array(columns * rows).fill(SKY);
+  const lowest = new Int32Array(columns).fill(-1);
+  const votes = new Int32Array(SUBSAMPLES);
+  for (let column = 0; column < columns; column += 1) {
+    let hullLow = -1;
+    let hullHigh = -1;
+    let sailLow = -1;
+    let sailHigh = -1;
+    for (let row = 0; row < rows; row += 1) {
+      const dy = ((bottom + row + 0.5) / LEVELS) * ASPECT;
+      for (let sample = 0; sample < SUBSAMPLES; sample += 1) {
+        const dx = left + column + (sample + 0.5) / SUBSAMPLES - HALF;
+        const along = (dx * cos + dy * sin) * bow;
+        const up = -dx * sin + dy * cos;
+        let part = SKY;
+        if (along >= -HALF && along <= HALF) {
+          const t = along / HALF;
+          part = up <= deckAt(t) && up >= keelAt(t) ? HULL_INDEX : rigAt(along, up);
+        }
+        votes[sample] = part;
+      }
+      const part = majority(votes);
+      if (part === HULL_INDEX) {
+        if (hullLow < 0) hullLow = row;
+        hullHigh = row;
+      } else if (part === MAIN_INDEX) {
+        if (sailLow < 0) sailLow = row;
+        sailHigh = row;
+      }
+    }
+    // The hull reaches at least a cell below its deck, and the sail rises from the deck
+    // to at least a cell above it, or is left out where only a sliver of it shows.
+    if (hullHigh >= 0) {
+      hullLow = Math.min(hullLow, hullHigh - LEVELS + 1);
+      for (let row = hullLow; row <= hullHigh; row += 1) pixels[column * rows + row] = HULL_INDEX;
+      if (sailHigh > hullHigh) sailLow = hullHigh + 1;
+    }
+    if (sailHigh >= 0 && sailLow >= 0) {
+      const height = sailHigh - sailLow + 1;
+      if (height >= 3) {
+        sailHigh = Math.max(sailHigh, sailLow + LEVELS - 1);
+        for (let row = sailLow; row <= sailHigh; row += 1) pixels[column * rows + row] = MAIN_INDEX;
+      }
+    }
+    for (let row = 0; row < rows; row += 1) {
+      if (pixels[column * rows + row] !== SKY) {
+        lowest[column] = row;
+        break;
+      }
+    }
+  }
+  return { left, columns, bottom, rows, pixels, lowest };
+}
+
+/** The boat at every drawn tilt, heading right then heading left. */
+const BOAT_IMAGES: readonly (readonly BoatImage[])[] = [1, -1].map((bow) =>
+  Array.from({ length: 2 * TILT_STEPS + 1 }, (_, index) => drawBoat(bow, (index - TILT_STEPS) * TILT_STEP)),
+);
+
+/** The drawn tilt nearest `pitch`, as an index into a heading's images. */
+function tiltIndex(pitch: number): number {
+  return Math.max(-TILT_STEPS, Math.min(TILT_STEPS, Math.round(pitch / TILT_STEP))) + TILT_STEPS;
 }
 
 export function createCalmWorkingShipSprite(): CalmWorkingShipSprite {
@@ -777,7 +894,7 @@ export function createCalmWorkingShipSprite(): CalmWorkingShipSprite {
       };
     }
     if (width >= SAIL_WIDTH) {
-      const rig = Array.from(aspectOf(state.heading).bow > 0 ? CALM_WORKING_SHIP_SAIL_RIGHT : CALM_WORKING_SHIP_SAIL_LEFT);
+      const rig = Array.from(bowOf(state.heading) > 0 ? CALM_WORKING_SHIP_SAIL_RIGHT : CALM_WORKING_SHIP_SAIL_LEFT);
       const at = column();
       cells.splice(
         at,
@@ -795,31 +912,15 @@ export function createCalmWorkingShipSprite(): CalmWorkingShipSprite {
     const seconds = state.ticks * DT;
     if (width < CALM_WORKING_SHIP_HULL_LENGTH) return paintNarrow(width, colors, seconds);
 
-    const { scale, bow } = aspectOf(state.heading);
-    const center = state.x + HALF;
-    const waterline = MEAN_LEVEL + state.z / ASPECT;
-    const cos = Math.cos(state.pitch);
-    const sin = Math.sin(state.pitch);
-    const reach = HALF * scale + (MAST_HEIGHT + FREEBOARD) * Math.abs(sin) + 1;
+    // The rigid boat at its drawn tilt, on whole columns, lifted in eighth-row steps.
+    const bow = bowOf(state.heading);
+    const image = BOAT_IMAGES[bow > 0 ? 0 : 1]![tiltIndex(state.pitch)]!;
+    const at = column();
+    const base = Math.round((MEAN_LEVEL + state.z / ASPECT) * LEVELS) + image.bottom;
+    const center = at + HALF;
     const speed = clamp01(Math.abs(state.v) / CALM_WORKING_SHIP_CRUISE);
-    const stern = center - HALF * scale * bow;
-    const stem = center + HALF * scale * bow;
-
-    // What the boat shows at a point in rows above the scene bottom: nothing, the hull,
-    // the mainsail, or the jib, which overlaps the mainsail and is drawn over it.
-    const boatAt = (px: number, py: number): number => {
-      const dx = px - center;
-      const dy = (py - waterline) * ASPECT;
-      const along = ((dx * cos + dy * sin) / scale) * bow;
-      if (along < -HALF || along > HALF) return SKY;
-      const up = -dx * sin + dy * cos;
-      const t = along / HALF;
-      if (up <= deckAt(t) && up >= keelAt(t)) return HULL_INDEX;
-      if (up < MAST_FOOT) return SKY;
-      if (insideTriangle(JIB, along, up)) return JIB_INDEX;
-      if (insideTriangle(MAINSAIL, along, up)) return MAIN_INDEX;
-      return SKY;
-    };
+    const stern = center - HALF * bow;
+    const stem = center + HALF * bow;
 
     // The surface at every column center, through per-train phase recurrences so a
     // frame costs a handful of multiplies per column rather than fresh trigonometry.
@@ -843,7 +944,6 @@ export function createCalmWorkingShipSprite(): CalmWorkingShipSprite {
 
     const subRows = CALM_WORKING_SHIP_ROWS * LEVELS;
     const sub = new Int32Array(subRows);
-    const votes = new Int32Array(SUBSAMPLES);
     const grid: Cell[][] = Array.from({ length: CALM_WORKING_SHIP_ROWS }, () => new Array<Cell>(width));
     for (let x = 0; x < width; x += 1) {
       const middle = x + 0.5;
@@ -853,32 +953,22 @@ export function createCalmWorkingShipSprite(): CalmWorkingShipSprite {
       let foam = 0;
       if (behind > 0) foam = 0.75 * speed * Math.exp(-behind / 2.4) * (0.6 + 0.4 * hash01(x, Math.floor(seconds * 5)));
       else if (ahead > -0.5 && ahead < 1.2) foam = 0.3 * speed + state.splash;
-      // Against the hull side the boat pushes the chop aside, so the water there follows
-      // the hull's own waterline with only part of the ripple showing.
-      let surface = MEAN_LEVEL + heights[x]!;
-      const along = (middle - center) / (HALF * scale);
-      if (along > -1 && along < 1) {
-        const hullLine = waterline + ((middle - center) * Math.tan(state.pitch)) / ASPECT;
-        surface += (hullLine - surface) * HULL_CALMING * (1 - along ** 4);
-      }
       const skin = surfaceIndex(heights[x]!, slopes[x]!, x, seconds, foam);
-      const nearBoat = middle > center - reach && middle < center + reach;
+      const imageColumn = x - at - image.left;
+      const inImage = imageColumn >= 0 && imageColumn < image.columns && image.lowest[imageColumn]! >= 0;
+      // The boat floats in the water, so the water reaches up to its hull wherever the
+      // hull rides above the surface, and the boat is drawn in front of the water.
+      let surface = MEAN_LEVEL + heights[x]!;
+      if (inImage) surface = Math.max(surface, (base + image.lowest[imageColumn]!) / LEVELS);
       for (let level = 0; level < subRows; level += 1) {
-        const py = (level + 0.5) / LEVELS;
-        const depth = surface - py;
-        if (!nearBoat) {
-          sub[level] = depth < 0 ? SKY : depth < SKIN ? skin : BODY_BASE + Math.min(BANDS - 1, Math.floor((depth - SKIN) / BAND));
+        const row = level - base;
+        const part = inImage && row >= 0 && row < image.rows ? image.pixels[imageColumn * image.rows + row]! : SKY;
+        if (part !== SKY) {
+          sub[level] = part;
           continue;
         }
-        // Near the boat, vote over sub-columns so its outline moves smoothly.
-        for (let sample = 0; sample < SUBSAMPLES; sample += 1) {
-          const px = x + (sample + 0.5) / SUBSAMPLES;
-          const part = boatAt(px, py);
-          if (depth < 0) votes[sample] = part;
-          else if (part === HULL_INDEX) votes[sample] = depth < SKIN ? KEEL_BASE : KEEL_BASE + 1 + Math.min(BANDS - 1, Math.floor((depth - SKIN) / BAND));
-          else votes[sample] = depth < SKIN ? skin : BODY_BASE + Math.min(BANDS - 1, Math.floor((depth - SKIN) / BAND));
-        }
-        sub[level] = majority(votes);
+        const depth = surface - (level + 0.5) / LEVELS;
+        sub[level] = depth < 0 ? SKY : depth < SKIN ? skin : BODY_BASE + Math.min(BANDS - 1, Math.floor((depth - SKIN) / BAND));
       }
       for (let row = 0; row < CALM_WORKING_SHIP_ROWS; row += 1) {
         grid[CALM_WORKING_SHIP_ROWS - 1 - row]![x] = cellOf(sub, row * LEVELS, colors);
@@ -892,6 +982,8 @@ export function createCalmWorkingShipSprite(): CalmWorkingShipSprite {
     direction: () => state.direction,
     velocity: () => state.v,
     pitch: () => state.pitch,
+    tilt: () => (tiltIndex(state.pitch) - TILT_STEPS) * TILT_STEP,
+    bow: () => bowOf(state.heading),
     heave: () => state.z / ASPECT,
     seaTime: () => state.ticks * CALM_WORKING_SHIP_TICK_MS,
 

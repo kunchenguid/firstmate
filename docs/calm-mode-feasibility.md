@@ -160,13 +160,16 @@ Pi emits `agent_settled` from a `finally` block once a run will not continue aut
 Repeated `agent_start` events inside one run are idempotent, and Pi disposes the previous component before installing a replacement under the same key and when it clears extension widgets, so the frame timer cannot duplicate or outlive the widget.
 Pi's above-editor widget container reserves one spacer row whether or not a widget is present, so removing the boat leaves no residual blank row.
 
-The sprite is four rows when the usable width admits the complete eight-column hull: two rows of sky for the rig, the row the sea surface moves through, and the water body beneath.
-Every cell is drawn from a sampled picture of the scene rather than from fixed glyphs: each column is sampled at eight sub-rows, and near the boat also at four sub-columns whose majority decides each sub-row, and each cell then shows its best two-color split through the bottom-aligned block glyphs `▁▂▃▄▅▆▇█`, with `▔` and `▀` where sky lies under the boat.
-The split weighs losing any part of the boat above losing water or sky, so a hull or sail that fills only a sliver of a cell still shows, and the waterline, the rising and falling hull, and its tilted deck and sails all move in eighth-cell steps rather than whole rows.
+The sprite is five rows when the usable width admits the complete eight-column hull: three rows of sky for the rig, the row the sea surface moves through, and the water body beneath.
+Every cell is drawn from a picture of the scene sampled at eight sub-rows per cell, and each cell shows its best two-color split through the bottom-aligned block glyphs `▁▂▃▄▅▆▇█`, with `▔` and `▀` kept for sky under a colored part.
 The sky stays the terminal's own background.
-The hull is a canoe body with a sheer line rising toward both ends, highest at the bow, ends raked up out of the water, and a short fin keel; the rig is a mainsail aft of the mast and a smaller jib forward of it, shaded differently so the two read apart.
-Below the surface the keel shows through the water, strongest just under it, and against the hull side the drawn water follows the hull's own waterline with only part of the chop, because the hull pushes that water aside.
-Direction reverses the moment the boat lands on an endpoint; the boat then eases through zero speed and turns about at a steady rate, foreshortening to about a third of its length while end-on to the view, so its bow and rig change sides without snapping.
+
+The boat is a rigid sprite.
+It is drawn once, when the module loads, at thirteen tilts 0.06 radians apart up to 0.36 either way, facing each way, sampled at four sub-columns per column so its outline is smooth; every frame shows the drawing at the tilt nearest the boat's pitch, placed on whole columns and lifted in whole eighth-row steps, and nothing about it is re-sampled per frame.
+A cell can show only two colors, so the drawing is built so that no cell the boat touches ever needs more: each column of it is one hull run with at most one sail run straight above it, the hull at least a cell tall, the sail rising from the deck and at least a cell tall where it shows, one hull color and one sail color.
+A cell holding part of the boat is split on the boat alone, with water and sky counted as one background whose color is chosen afterwards, and water fills in under the hull wherever it rides above the surface, so the drawn outline and colors are identical at every height the boat rides at and whatever the water behind it does.
+The hull is a slab with a sheer line rising toward both ends, highest at the bow; the mainsail and jib rise straight from the deck, each leech sloping from its head down to a clew a cell above the deck, the mainsail tallest at the mast.
+Direction reverses the moment the boat lands on an endpoint; the boat eases through zero speed and its heading turns at a steady rate, and the boat is drawn facing the other way once that turn passes end-on.
 The sea rows fill the complete supplied width, the track is recomputed and clamped from that width on every frame so a resize cannot wrap or strand the boat offscreen, and widths too narrow for the hull fall back to a deterministic single row with a `◢│◺` or `◿│◣` rig in the water.
 
 The surface is a sum of six second-order Stokes wave trains with mutually incommensurate wavelengths from about five to forty-four columns, one of them running against the swell as cross-sea chop.
@@ -880,12 +883,13 @@ $ cd .claude/mods/firstmate-calm && CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude p
 
 The Pi interactive regression in `tests/fm-calm-pi-extension.test.sh` passed against Pi 0.87.1 in a real tmux terminal: the ship replaced the stock working row, moved, reflowed on resize, reversed on a 12-column track, froze and resumed across two working periods, and cleared on abort.
 
-## 2026-09-28 The boat rides the sea on Claude Code 2.1.283 and Pi 0.87.1
+## 2026-09-28 The rigid boat rides the sea on Claude Code 2.1.283 and Pi 0.87.1
 
-The working ship became a four-row scene sampled at eighth-cell height, and the boat stopped being held in place by a view that followed its heave: it now floats by strip theory, rising and falling up to about half a row either side of rest, pitching up to about a third of a radian to the local slope with about 0.13 radians root-mean-square, and rocking between waves.
-Over ninety simulated seconds the hull's drawn middle stayed within one and a half columns of its track position, including through the end-on turn, and a sweep of every frame up to the Raster's 512-column limit used at most 56 color pairs.
-Computing one frame took about 0.15ms at 80 columns and 0.5ms at 512 columns on the maintainer machine.
-Because the boat is now drawn only in shaded blocks, the live suites locate it by color in a `capture-pane -e` capture through `tests/calm-boat-helpers.sh`, which reads 24-bit and 256-color escapes alike.
+The boat stopped being held in place by a view that followed its heave: it floats by strip theory, rising and falling up to about half a row either side of rest and pitching up to about 0.3 radians to the local slope, with about 0.1 radians root-mean-square, rocking between waves.
+It is drawn as a rigid sprite, and decoding every frame's cells back into sub-rows over two simulated minutes at 80 columns showed one outline per drawn tilt and heading at every height clear of the scene edges, where the previous per-frame re-sampled boat changed outline in 3583 of 3585 comparable frames.
+Over ninety simulated seconds the hull's drawn middle stayed within one and a half columns of its track position, and a sweep of every frame up to the Raster's 512-column limit used at most 50 color pairs.
+Computing one frame took about 0.06ms at 80 columns and 0.44ms at 512 columns on the maintainer machine.
+Because the boat is drawn only in shaded blocks, the live suites locate it by color in a `capture-pane -e` capture through `tests/calm-boat-helpers.sh`, which reads 24-bit and 256-color escapes alike.
 
 ```text
 $ FM_CLAUDE_CALM_LIVE_E2E=1 bash tests/fm-calm-claude-mod-live-e2e.test.sh
@@ -894,7 +898,7 @@ ok - Claude Code 2.1.283 (Claude Code) with the flag on: the mod auto-loads from
 ok - Claude Code 2.1.283 (Claude Code) resumes the transcript with Calm's hidden rows still hidden and the preference intact
 
 $ cd .claude/mods/firstmate-calm && CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude plugin test .
- 44 pass
+ 45 pass
  0 fail
 ```
 

@@ -2992,8 +2992,7 @@ const ESC = "\u001b";
 const RESET = `${ESC}[39;49m`;
 const RIG = /[◢◿]│[◺◣]/;
 const WAVE_BARS = "▁▂▃▄▅▆▇█";
-const TOP_BARS = "▔\u{1FB82}\u{1FB83}▀\u{1FB84}\u{1FB85}\u{1FB86}█";
-const SCENE_GLYPHS = new RegExp(`^[ ${WAVE_BARS}${TOP_BARS}]*$`, "u");
+const SCENE_GLYPHS = new RegExp(`^[ ${WAVE_BARS}▔▀]*$`);
 const TRUECOLOR = { family: "dark", mode: "truecolor" };
 const PALETTE_256 = { family: "light", mode: "256color" };
 const strip = (text) => text.replace(new RegExp(`${ESC}\\[[0-9;]*m`, "g"), "");
@@ -3149,20 +3148,24 @@ for (const width of [40, 16, 9, 8, 6, 4, 3]) {
   }
 }
 
-// --- The boat comes about: its hull foreshortens end-on and the rig mirrors -----------
+// --- The boat comes about: it keeps its length and the narrow rig mirrors ----------
 {
   const animation = createCalmWorkingShipAnimation();
   const lengths = new Set();
+  const bows = new Set();
   const rigs = new Set();
   for (let step = 0; step < COLUMN_TICKS * 40; step += 1) {
     const boat = boatOf(animation.render(14));
     lengths.add(boat.right - boat.left + 1);
+    bows.add(animation.bow());
     rigs.add((strip(animation.render(6)[0]).match(RIG) ?? ["none"])[0]);
     animation.tick();
   }
-  check(Math.min(...lengths) <= 4 && Math.max(...lengths) >= CALM_WORKING_SHIP_HULL_LENGTH - 1, `the hull never turned end-on: lengths ${[...lengths].sort().join(",")}`);
+  check(bows.has(1) && bows.has(-1), "the boat never came about");
+  check(Math.min(...lengths) >= CALM_WORKING_SHIP_HULL_LENGTH - 1 && Math.max(...lengths) <= CALM_WORKING_SHIP_HULL_LENGTH + 2, `the hull changed length: ${[...lengths].sort().join(",")}`);
   check(rigs.has("◢│◺") && rigs.has("◿│◣"), `the narrow rig never mirrored: ${[...rigs].join(",")}`);
 }
+
 // --- Shrink and grow resize clamping ----------------------------------------------
 {
   const animation = createCalmWorkingShipAnimation();
@@ -3587,7 +3590,7 @@ JS
   status=$?
   [ "$status" -eq 0 ] || fail "Pi Calm working-ship checks failed: $out"
   [ -z "$out" ] || fail "Pi Calm working-ship test printed output: $out"
-  pass "Pi Calm working ship paints the shared shaded sea with the boat riding it at many heights at about sixty frames a second in the Pi theme family and color depth with closing resets, keeps ANSI-stripped width exact, keeps the hull on its column, reverses at both edges and every width, turns end-on as it comes about, clamps visible and hidden resizes, falls back deterministically when narrow, freezes and resumes across settle/start without hidden-time jumps or duplicate timers, resets only on a fresh session, and leaves Calm-off visibility untouched"
+  pass "Pi Calm working ship paints the shared shaded sea with the boat riding it at many heights at about sixty frames a second in the Pi theme family and color depth with closing resets, keeps ANSI-stripped width exact, keeps the hull on its column, reverses at both edges and every width, keeps its length as it comes about, clamps visible and hidden resizes, falls back deterministically when narrow, freezes and resumes across settle/start without hidden-time jumps or duplicate timers, resets only on a fresh session, and leaves Calm-off visibility untouched"
 }
 
 # The rendered-DOM assertions below depend on a real browser, so the render step
@@ -4251,8 +4254,8 @@ JS
   tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$boat_frame_one"
   read -r boat_column_one boat_hull_end boat_top boat_bottom boat_width boat_sails <<<"$boat_scan"
   [ "$boat_sails" -gt 0 ] || fail "the working ship lost its sails"
-  [ "$((boat_bottom - boat_top + 1))" -le 4 ] \
-    || fail "the working ship spread over lines $boat_top-$boat_bottom instead of its four-row scene"
+  [ "$((boat_bottom - boat_top + 1))" -le 5 ] \
+    || fail "the working ship spread over lines $boat_top-$boat_bottom instead of its five-row scene"
   assert_not_contains "$(cat "$boat_frame_one")" "Working" "Calm left Pi's stock working row visible while the ship was shown"
   assert_not_contains "$(cat "$boat_frame_one")" "calm transcript" "the real provider wait showed a persistent Calm status row"
   assert_not_contains "$(cat "$boat_frame_one")" "FIRSTMATE WATCHER WAKE: signal: /tmp/probe.status" "the real provider wait restored a hidden operational row"
@@ -4324,8 +4327,8 @@ JS
   read -r boat_column_one boat_hull_end boat_top boat_bottom boat_width boat_sails <<<"$boat_scan"
   [ "$boat_width" -eq 100 ] \
     || fail "after resizing to 100 columns the water row was $boat_width cells instead of exactly 100"
-  # The four-row scene reflowed rather than wrapping onto more lines.
-  [ "$((boat_bottom - boat_top + 1))" -le 4 ] \
+  # The five-row scene reflowed rather than wrapping onto more lines.
+  [ "$((boat_bottom - boat_top + 1))" -le 5 ] \
     || fail "the working ship wrapped over lines $boat_top-$boat_bottom after the resize"
   tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$boat_frame_one"
   while IFS= read -r boat_line; do

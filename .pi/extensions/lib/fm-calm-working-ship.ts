@@ -170,6 +170,8 @@ export function createCalmWorkingShipAnimation(): CalmWorkingShipAnimation {
     direction: sprite.direction,
     velocity: sprite.velocity,
     pitch: sprite.pitch,
+    tilt: sprite.tilt,
+    bow: sprite.bow,
     heave: sprite.heave,
     seaTime: sprite.seaTime,
     restoreLastRendered: sprite.restoreLastRendered,

@@ -30,7 +30,7 @@ Streaming text and the genuine reply that ends a response remain visible.
 
 ### Working boat
 
-While Calm is active and an agent run is under way, Calm hides Pi's built-in `Working...` row and shows a small four-row animated sailboat riding a simulated sea in its place.
+While Calm is active and an agent run is under way, Calm hides Pi's built-in `Working...` row and shows a small five-row animated sailboat riding a simulated sea in its place.
 No separate Calm status row is added.
 While Calm is off, Pi's stock working row is left exactly as Pi renders it.
 
@@ -38,7 +38,8 @@ The boat and sea look like this:
 
 - The sea is physically modelled: several wave trains with deep-water dispersion, so long swells outrun short chop, sharpened crests, and a surface that never repeats, drawn at eighth-cell height across the full usable width above water that darkens with depth.
 - Every column is lit from its surface: crests glow where light passes through thin water, the sun-facing flanks brighten, sun glitter twinkles on lit crests, and whitecaps, the boat's wake, and spray where its bow slams into a wave show as foam.
-- The boat floats on buoyancy: it rises and falls with the water under it, tilts bow-up and bow-down to the local slope, and keeps bobbing and rocking a little after each wave and gust, all drawn in eighth-cell steps so the hull and sails move smoothly rather than jumping whole rows.
+- The boat is rigid: its hull and sails keep one fixed shape, and it only rises and falls with the water under it and tilts bow-up and bow-down to the local slope, bobbing and rocking a little after each wave and gust.
+- It rises and falls in eighth-cell steps, and its outline is the same at every height it rides at, so it never stretches or changes shape as it moves.
 - On Pi the colors follow the active theme: a theme named `light...` gets the light shading family and every other theme the dark one, painted as 24-bit color when Pi's theme runs in truecolor and as the nearest 256-color entries otherwise.
 - Very narrow terminals fall back to a smaller deterministic sprite.
 
@@ -47,7 +48,7 @@ The boat and sea look like this:
 The boat cruises at about one column a second.
 It surges with the swell and surfs down wave faces.
 It eases into each edge.
-It comes about by turning end-on to the view and back, so its jib and mainsail change sides.
+It comes about as its speed passes through zero at each edge, and is then drawn facing the other way.
 The animation runs at about sixty frames a second on a fixed physics step.
 Each frame costs well under a millisecond to compute.
 Every resize reflows the sprite without wrapping.
@@ -206,7 +207,7 @@ Toggling Calm redraws every hooked row already on screen, so rows drawn before t
 
 ### Working sailboat on Claude Code
 
-While Calm is on, the stock working row (`Sauteing... (12s · 300 tokens)`) becomes the same four-row sailboat and sea Pi draws, from the same shared simulation and shading.
+While Calm is on, the stock working row (`Sauteing... (12s · 300 tokens)`) becomes the same five-row sailboat and sea Pi draws, from the same shared simulation and shading.
 The sailboat fills the row inside the transcript margin.
 It repaints at about sixty frames a second.
 It reflows on resize, and appears and disappears exactly where the stock row would.
@@ -249,7 +250,7 @@ The mod never touches tool execution, prompts, or the stored transcript.
 ### Claude Code support bounds
 
 The bounds of the Claude Code support below are recorded with evidence in [`calm-mode-feasibility.md`](calm-mode-feasibility.md#2026-09-15-claude-code-21272-mods-feasibility-and-the-shipped-mod).
-Evidence for 2.1.280 and the record-backed doorbell is also in its [2026-09-25 record](calm-mode-feasibility.md#2026-09-25-claude-code-21280-verification-and-the-record-backed-operational-doorbell) and [2.1.282 reproduction](calm-mode-feasibility.md#2026-09-25-claude-code-21282-reproduction-on-the-installed-build), and for the physically modelled sea and the riding boat in its [2026-09-26 record](calm-mode-feasibility.md#2026-09-26-physically-modelled-sea-on-claude-code-21283-and-pi-0871) and [2026-09-28 record](calm-mode-feasibility.md#2026-09-28-the-boat-rides-the-sea-on-claude-code-21283-and-pi-0871).
+Evidence for 2.1.280 and the record-backed doorbell is also in its [2026-09-25 record](calm-mode-feasibility.md#2026-09-25-claude-code-21280-verification-and-the-record-backed-operational-doorbell) and [2.1.282 reproduction](calm-mode-feasibility.md#2026-09-25-claude-code-21282-reproduction-on-the-installed-build), and for the physically modelled sea and the rigid riding boat in its [2026-09-26 record](calm-mode-feasibility.md#2026-09-26-physically-modelled-sea-on-claude-code-21283-and-pi-0871) and [2026-09-28 record](calm-mode-feasibility.md#2026-09-28-the-rigid-boat-rides-the-sea-on-claude-code-21283-and-pi-0871).
 
 - The function-hooks surface is early access and default-off.
   Claude Code states that its API may change between releases without notice.

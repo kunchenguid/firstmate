@@ -5,6 +5,7 @@
 import { describe, expect, test } from "claude-code/testing";
 import {
   CALM_WORKING_SHIP_HULL_LENGTH,
+  CALM_WORKING_SHIP_ROWS as ROWS,
   calmWorkingShipBoatColors,
   createCalmWorkingShipSprite,
 } from "../lib/fm-calm-working-ship-sprite.ts";
@@ -44,14 +45,14 @@ function hullMiddle(decoded: Decoded, family: "dark" | "light"): number {
 }
 
 describe("the working ship", () => {
-  test("replaces the spinner with a four-row raster sized to the row inside the transcript margin", async ($, on) => {
+  test("replaces the spinner with a five-row raster sized to the row inside the transcript margin", async ($, on) => {
     world(on, { preference: "on\n" });
     const raster = rasterOf(await $.ui.render(spinner("agent-main", { columns: 40, rows: 24 })));
     expect(raster).toBeDefined();
     expect(raster!.key).toBe("firstmate-calm-working-ship");
     expect(raster!.columns).toBe(38);
-    expect(raster!.rows).toBe(4);
-    const decoded = decodeCells(raster!.cells, 38, 4);
+    expect(raster!.rows).toBe(ROWS);
+    const decoded = decodeCells(raster!.cells, 38, ROWS);
     const { glyphs, foregrounds, backgrounds } = decoded;
     for (const row of glyphs) expect(row).toHaveLength(38);
     // The boat starts at the left edge heading right: its hull spans the first hull
@@ -62,14 +63,14 @@ describe("the working ship", () => {
     const sailCells = cellsWith(decoded, (color) => sails.includes(color));
     expect(sailCells.length).toBeGreaterThan(3);
     for (const [row, column] of sailCells) {
-      expect(row).toBeLessThan(3);
+      expect(row).toBeLessThan(ROWS - 1);
       expect(column).toBeLessThan(CALM_WORKING_SHIP_HULL_LENGTH);
     }
     for (const [, column] of cellsWith(decoded, (color) => color === hull)) expect(column).toBeLessThan(CALM_WORKING_SHIP_HULL_LENGTH + 1);
     // The sea is lit per cell and fills the width: the water body has no gaps and many
     // distinct shades, none of them the default.
-    expect(foregrounds[3]!.every((color) => color !== DEFAULT)).toBe(true);
-    expect(new Set([...foregrounds[2]!, ...foregrounds[3]!, ...backgrounds[3]!]).size).toBeGreaterThan(6);
+    expect(foregrounds[ROWS - 1]!.every((color) => color !== DEFAULT)).toBe(true);
+    expect(new Set([...foregrounds[ROWS - 2]!, ...foregrounds[ROWS - 1]!, ...backgrounds[ROWS - 1]!]).size).toBeGreaterThan(6);
     for (const row of glyphs) expect(row).toMatch(/^[ ▁▂▃▄▅▆▇█▔▀]+$/);
     // Sky stays the terminal's own colors.
     expect(glyphs[0]!.slice(12)).toBe(" ".repeat(26));
@@ -81,15 +82,15 @@ describe("the working ship", () => {
     const { clock, journal } = world(on, { preference: "on\n" });
     await $.session.start({ cwd: "/work", surface: "terminal", isInteractive: true });
     const raster = rasterOf(await $.ui.render(spinner("agent-main", { columns: 40, rows: 24 })))!;
-    const first = decodeCells(raster.cells, 38, 4);
+    const first = decodeCells(raster.cells, 38, ROWS);
     await clock.advance(TICK * 10);
     expect(journal.blits).toHaveLength(10);
-    expect(journal.blits[0]).toMatchObject({ requestId: "agent-main", key: "firstmate-calm-working-ship", columns: 38, rows: 4 });
-    const later = decodeCells(journal.blits.at(-1)!.cells, 38, 4);
+    expect(journal.blits[0]).toMatchObject({ requestId: "agent-main", key: "firstmate-calm-working-ship", columns: 38, rows: ROWS });
+    const later = decodeCells(journal.blits.at(-1)!.cells, 38, ROWS);
     expect(hullMiddle(later, "dark")).toBeLessThanOrEqual(CALM_WORKING_SHIP_HULL_LENGTH / 2 + 1.5);
     expect(later.foregrounds.slice(2)).not.toEqual(first.foregrounds.slice(2));
     await clock.advance(COLUMN_MS * 3);
-    const moved = hullMiddle(decodeCells(journal.blits.at(-1)!.cells, 38, 4), "dark") - CALM_WORKING_SHIP_HULL_LENGTH / 2;
+    const moved = hullMiddle(decodeCells(journal.blits.at(-1)!.cells, 38, ROWS), "dark") - CALM_WORKING_SHIP_HULL_LENGTH / 2;
     expect(moved).toBeGreaterThanOrEqual(1.5);
     expect(moved).toBeLessThanOrEqual(5.5);
   });
@@ -144,13 +145,13 @@ describe("the working ship", () => {
     await $.session.start({ cwd: "/work", surface: "terminal", isInteractive: true });
     await $.ui.render(spinner("agent-main", { columns: 80, rows: 24 }));
     await clock.advance(COLUMN_MS * 8);
-    expect(hullMiddle(decodeCells(journal.blits.at(-1)!.cells, 78, 4), "dark")).toBeGreaterThan(9);
+    expect(hullMiddle(decodeCells(journal.blits.at(-1)!.cells, 78, ROWS), "dark")).toBeGreaterThan(9);
     const shrunk = rasterOf(await $.ui.render(spinner("agent-main", { columns: 12, rows: 24 })))!;
     expect(shrunk.columns).toBe(10);
     // The track clamps to the new right edge: the hull's far end sits at the last column.
-    expect(hullMiddle(decodeCells(shrunk.cells, 10, 4), "dark")).toBeGreaterThanOrEqual(10 - CALM_WORKING_SHIP_HULL_LENGTH / 2 - 1.5);
+    expect(hullMiddle(decodeCells(shrunk.cells, 10, ROWS), "dark")).toBeGreaterThanOrEqual(10 - CALM_WORKING_SHIP_HULL_LENGTH / 2 - 1.5);
     await clock.advance(TICK);
-    expect(journal.blits.at(-1)).toMatchObject({ columns: 10, rows: 4 });
+    expect(journal.blits.at(-1)).toMatchObject({ columns: 10, rows: ROWS });
   });
 
   test("leaves a non-terminal surface to the engine", async ($, on) => {
@@ -185,7 +186,7 @@ describe("the working ship", () => {
     expect(journal.blits).toHaveLength(2);
     await clock.advance(TICK);
     expect(journal.blits).toHaveLength(3);
-    expect(journal.blits[2]).toMatchObject({ requestId: "agent-main", columns: 10, rows: 4 });
+    expect(journal.blits[2]).toMatchObject({ requestId: "agent-main", columns: 10, rows: ROWS });
   });
 
   // Each theme value needs its own world, so the family rule gets one test per value.
@@ -214,7 +215,7 @@ describe("the working ship", () => {
     await clock.advance(TICK);
     const hullOf = (family: "dark" | "light") => calmWorkingShipBoatColors(family).hull;
     const shows = (hull: number) =>
-      cellsWith(decodeCells(journal.blits.at(-1)!.cells, 38, 4), (color) => color === hull).length > 0;
+      cellsWith(decodeCells(journal.blits.at(-1)!.cells, 38, ROWS), (color) => color === hull).length > 0;
     expect(shows(hullOf("dark"))).toBe(true);
     const redrawsBefore = journal.invalidations.length;
     const changed = await $.config.set(themeChange("light", "dark"));
