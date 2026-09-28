@@ -142,7 +142,7 @@ After the bound runner stops, reconciliation releases only exact reservations ba
 If an effect may have happened and no authoritative completed receipt exists, the resource stays reserved across restart.
 For the narrow case where a Codebase merge owner died after recording its effect, MAIN can run `FM_HOME=/absolute/home node bin/fm-short-agent.mjs settle-merge <short-id> <step-index>:<independently-observed-merge-commit>`.
 The command requires the original immutable grant and bindings, the preserved unsuccessful result and effect history, exact matching reservations, and proof that both the runner and merge executor are dead.
-It then performs only the official Codebase detail read, requires the exact repository, MR URL, registered source head, merged status, and exact independently supplied merge commit, publishes a distinct readback-settlement receipt, and releases only that step's matching reservations.
+It then performs only the official read-only Codebase status and detail reads, requires the exact repository, MR URL, registered source head, merged status, and exact independently supplied merge commit, publishes a distinct readback-settlement receipt, and releases only that step's matching reservations.
 It never issues a merge, runs later steps, changes the original terminal result, or reports the failed or timed-out model execution as successful.
 Repeated settlement converges on the same receipt and missing or ambiguous evidence leaves the reservations intact.
 Other uncertain effects remain unsupported and reserved; a concrete decision and evidence are required before further work on those resources.
