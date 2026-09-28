@@ -554,6 +554,10 @@ export function dispositionForWakeTrigger(message: string, scope: UnreadWakeScop
 }
 
 export const BRANCH_ROUTING_TRACE_FILE = ".supervision-routing.jsonl";
+// Observational events only: subscribers cannot acquire or settle an offer.
+export const BRANCH_ACTIVITY_EVENT = "firstmate:branch-activity";
+export const BRANCH_HEALTH_EVENT = "firstmate:branch-health";
+export const BRANCH_HEALTH_REQUEST = "firstmate:branch-health-request";
 let traceWriteId = 0;
 
 export type BranchRoutingTrace = {
@@ -570,7 +574,9 @@ export type BranchRoutingTrace = {
 };
 
 /** Best-effort, bounded, privacy-safe diagnostics; never an ownership input. */
-export function appendBranchRoutingTrace(state: string, event: BranchRoutingTrace): void {
+export function appendBranchRoutingTrace(state: string, event: BranchRoutingTrace,
+  events?: { emit(channel: string, data: unknown): void }): void {
+  try { events?.emit(BRANCH_ACTIVITY_EVENT, { ...event, time: new Date().toISOString() }); } catch {}
   try {
     mkdirSync(state, { recursive: true });
     const path = `${state}/${BRANCH_ROUTING_TRACE_FILE}`;

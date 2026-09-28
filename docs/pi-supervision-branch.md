@@ -20,6 +20,34 @@ The supervision branch itself is Pi-only by construction:
   A home on any harness that already has an outcome store still receives the shared drain compatibility recovery described in [Lost-wake outcome backstop](#lost-wake-outcome-backstop).
 - It does not change which harness is primary and never moves a home to Pi.
 
+## Activity in the Pi terminal
+
+The primary TUI shows a compact `Branch` widget above the editor.
+Run `/supervision-status` to toggle its detail lines and request a fresh read-only health observation.
+This does not start or reset a branch, claim a wake, or acknowledge an outcome.
+
+| State | Meaning |
+| --- | --- |
+| `disabled` | A fresh branch observation says away mode, reset, or shutdown currently disables handling. |
+| `idle` | The current process owns the lock and reports no pending work or latched fault; this is not proof of completed work. |
+| `processing` | A live admission is pending; the item summary distinguishes accepted-before-prompt from model/tool execution. |
+| `degraded` | The latest handling attempt failed or unexpectedly fell back to MAIN. |
+| `error` | The branch reports a construction, reconciliation, or provider health fault. |
+| `unknown` | Ownership or current evidence is missing, stale, inconsistent, or exceeds the bounded display capacity. |
+
+Details show the current wake kind and bounded item/batch count, latest completed branch result time, latest MAIN fallback, and latest error category.
+Only a branch settlement after a durable report counts as a completed result; acceptance, a loaded extension, mirrored conversation, a short-task outcome, and a quiet empty-queue return never count.
+A MAIN-only check or decision is an expected fallback and does not imply branch failure.
+The `ownership-lost` fallback category historically groups fleet-lock loss and wake rows already claimed by MAIN; the branch's `grant: main-owned` observation distinguishes the latter without altering its safety guard.
+
+The presentation owner is `.pi/extensions/fm-branch-status.ts`, with its bounded read model in `lib/fm-branch-activity.ts`.
+It consumes branch/watcher observational events, reads at most the last 256 KiB and 200 routing records once on session start, and retains no message bodies or tool arguments.
+Historical records can establish the last result or failure, but never current processing.
+Refreshes coalesce over 100 ms, stream liveness pulses are limited to once per second, and a single two-minute expiry marks silent evidence unknown without polling or rescanning files.
+Shutdown and reload dispose subscriptions and timers; noninteractive modes allocate no display observer.
+Other primary harnesses and terminal backends gain no behavior or authority changes.
+The portable checks are `tests/fm-pi-branch-status.test.sh`; `tests/fm-pi-branch-status-live.test.sh` refreshes real-Pi rendered evidence under the [harness verification policy](verification/runtime-backends.md).
+
 ## Live task continuation
 
 Presentation acknowledgement does not establish task acceptance.
