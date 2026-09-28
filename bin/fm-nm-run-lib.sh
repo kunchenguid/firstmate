@@ -124,6 +124,24 @@ fm_nm_run_status_class() {  # <status_word>
   esac
 }
 
+# 0 when the status identity with $3 was created after the overview-selected
+# run with $2, using the creation-ordered `no-mistakes runs` ledger. Heads must
+# differ and both rows must be uniquely identifiable; otherwise the ledger
+# cannot prove which same-head historical run is newer.
+fm_nm_run_is_newer_than_selected() {  # <branch> <selected-head> <reported-head> <runs-list>
+  local branch=$1 selected_head=$2 reported_head=$3 runs=$4 selected_stamp reported_stamp
+  [ -n "$selected_head" ] && [ -n "$reported_head" ] \
+    && [ "$selected_head" != "$reported_head" ] || return 1
+  selected_stamp=$(printf '%s\n' "$runs" | awk -v branch="$branch" -v head="${selected_head:0:7}" \
+    '$2 == branch && index($3, head) == 1 { print $4 " " $5 }')
+  reported_stamp=$(printf '%s\n' "$runs" | awk -v branch="$branch" -v head="${reported_head:0:7}" \
+    '$2 == branch && index($3, head) == 1 { print $4 " " $5 }')
+  case "$selected_stamp" in *$'\n'*) return 1 ;; esac
+  case "$reported_stamp" in *$'\n'*) return 1 ;; esac
+  [ -n "$selected_stamp" ] && [ -n "$reported_stamp" ] \
+    && [[ "$reported_stamp" > "$selected_stamp" ]]
+}
+
 # Select from a complete `no-mistakes axi` overview with the existing awk
 # toolchain. A capped overview requires an optional Python 3 sqlite3 reader
 # for a read-only same-branch query of NM_HOME/state.sqlite (default:

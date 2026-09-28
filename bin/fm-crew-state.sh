@@ -952,23 +952,36 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
         ;;
       selected\|*)
         IFS='|' read -r _ selected_id selected_status candidate_ids <<< "$run_choice"
-        # `axi status` identifies the CLI's current run, while the overview
-        # can expose an older same-branch row first when its inventory order
-        # is stale.  Prefer that current identity only when it is a listed
-        # candidate and is still live; a newer failed inventory row remains
-        # authoritative over an older live status.
+        # A bare `axi status` identity can be an older live sibling while the
+        # overview's newest row is terminal.  It may replace a terminal row
+        # only when the creation-ordered runs ledger proves that the reported
+        # live run is newer and is one of the same-branch candidates.
         reported_id=$(strip_quotes "$(nm_field id)")
         reported_branch=$(strip_quotes "$(nm_field branch)")
+        selected_detail=
         if [ -n "$reported_id" ] && [ "$reported_branch" = "$CREW_BRANCH" ] \
           && [ "$reported_id" != "$selected_id" ] \
           && { [ "$selected_status" = completed ] || [ "$selected_status" = cancelled ]; } \
           && fm_nm_run_is_active "$RUN_OUT"; then
           case ",$candidate_ids," in
-            *,"$reported_id",*|*,\ "$reported_id",*) selected_id=$reported_id; selected_status=running ;;
+            *,"$reported_id",*|*,\ "$reported_id",*)
+              selected_detail=$(fm_nm_run_checked "$WT" "$NM_TIMEOUT" axi status --run "$selected_id") || true
+              selected_head=$(strip_quotes "$(fm_nm_field "$selected_detail" head)")
+              reported_head=$(strip_quotes "$(fm_nm_field "$RUN_OUT" head)")
+              if fm_nm_run_is_newer_than_selected "$CREW_BRANCH" "$selected_head" "$reported_head" "$(nm_runs_list)"; then
+                selected_id=$reported_id
+                selected_status=running
+                selected_detail=
+              fi
+              ;;
           esac
         fi
-        RUN_OUT=$(fm_nm_run_checked "$WT" "$NM_TIMEOUT" axi status --run "$selected_id") \
-          || emit unknown run-step "selected run unreadable; run ids: $candidate_ids"
+        if [ -n "$selected_detail" ]; then
+          RUN_OUT=$selected_detail
+        else
+          RUN_OUT=$(fm_nm_run_checked "$WT" "$NM_TIMEOUT" axi status --run "$selected_id") \
+            || emit unknown run-step "selected run unreadable; run ids: $candidate_ids"
+        fi
         if [ "$(strip_quotes "$(nm_field id)")" != "$selected_id" ] \
           || [ "$(strip_quotes "$(nm_field branch)")" != "$CREW_BRANCH" ]; then
           emit unknown run-step "selected run unavailable or mismatched; run ids: $candidate_ids"
