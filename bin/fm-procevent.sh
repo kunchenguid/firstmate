@@ -1492,8 +1492,7 @@ EOF
       exec 3>&-
       IFS= read -r adapter_ready < "$adapter_ready_pipe" || adapter_ready=
       rm -f -- "$adapter_ready_pipe"
-      if [ "$reply_uncertain" -eq 1 ] && [ "$adapter_ready" != ready ] \
-        && [ -f "$reply_stage" ] && [ ! -L "$reply_stage" ]; then
+      if [ "$reply_uncertain" -eq 1 ] && [ "$adapter_ready" = rejected ]; then
         rm -f -- "$(fm_procevent_accepted_marker "$STATE" "$id" "$reply_round")"
         reply_uncertain=0
       fi

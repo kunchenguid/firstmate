@@ -980,7 +980,7 @@ superseded_registration=$(pe "$HFREPLY" register-lavish "$freply_id" -- \
 superseded_identity=$(printf '%s\n' "$superseded_registration" \
   | sed -n 's/^registration-identity: //p' | head -1)
 printf 'Second FIFO response.\n' > "$TMP_ROOT/firstmate-reply-2.txt"
-PATH="$FREPLY_BIN:$PATH" FM_HOME="$HFREPLY" \
+PATH="$FREPLY_BIN:$PATH" FM_HOME="$HFREPLY" FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS=5 \
   "$ROOT/bin/fm-procevent-lavish.sh" arm "$FREPLY_ART" \
   --agent-reply-file "$TMP_ROOT/firstmate-reply-2.txt" \
   > "$TMP_ROOT/firstmate-reply-2-arm.out" &
@@ -1131,7 +1131,7 @@ HFLEGACY_OTHER="$TMP_ROOT/hflegacy-other"; new_home "$HFLEGACY_OTHER"
 fm_test_track_procevent_home "$HFLEGACY_OTHER"
 pe "$HFLEGACY_OTHER" register lavish "$legacy_id" -- /bin/sleep 30 >/dev/null
 printf 'Answered after handoff.\n' > "$TMP_ROOT/firstmate-live-legacy-reply.txt"
-PATH="$LEGACY_BIN:$PATH" FM_HOME="$HFLEGACY" \
+PATH="$LEGACY_BIN:$PATH" FM_HOME="$HFLEGACY" FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS=5 \
   "$ROOT/bin/fm-procevent-lavish.sh" arm "$LEGACY_ART" \
   --agent-reply-file "$TMP_ROOT/firstmate-live-legacy-reply.txt" \
   > "$TMP_ROOT/firstmate-live-legacy-arm.out" &
@@ -1232,6 +1232,60 @@ fi
 [ "$(cat "$STOREFAIL_COUNT")" = 2 ] \
   || fail "pre-header disconnect submitted the reply more than once"
 pass "pre-header disconnect preserves reply uncertainty"
+
+HFSTAGERETAIN="$TMP_ROOT/hfstageretain"; new_home "$HFSTAGERETAIN"
+STAGERETAIN_BIN=$(fm_fakebin "$TMP_ROOT/lavish-firstmate-stage-retain-stub")
+STAGERETAIN_COUNT="$TMP_ROOT/lavish-firstmate-stage-retain-count"
+export STAGERETAIN_COUNT
+cat > "$STAGERETAIN_BIN/lavish-axi" <<'SH'
+#!/bin/sh
+[ "$#" -gt 0 ] || exit 0
+n=$(cat "$STAGERETAIN_COUNT" 2>/dev/null || echo 0)
+n=$((n + 1))
+printf '%s\n' "$n" > "$STAGERETAIN_COUNT"
+shift 2
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --agent-reply-file) cat >/dev/null; shift 2 ;;
+    --owner) shift 2 ;;
+    *) shift ;;
+  esac
+done
+if [ "$n" = 1 ]; then
+  printf 'session:\n  status: feedback\nprompts[1]{uid,prompt,selector,tag,text}:\n  "","","","message","retain stage"\n'
+else
+  kill -KILL "$PPID"
+  sleep 0.1
+fi
+SH
+chmod +x "$STAGERETAIN_BIN/lavish-axi"
+STAGERETAIN_ART="$TMP_ROOT/firstmate-stage-retain.html"
+printf '<h1>retain stage</h1>\n' > "$STAGERETAIN_ART"
+lavish_session "$STAGERETAIN_ART"
+stageretain_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$STAGERETAIN_ART")
+fm_test_track_procevent_home "$HFSTAGERETAIN"
+PATH="$STAGERETAIN_BIN:$PATH" FM_HOME="$HFSTAGERETAIN" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$STAGERETAIN_ART" >/dev/null
+wait_capture "$HFSTAGERETAIN" "$stageretain_id" || fail "retained stage fixture did not capture feedback"
+printf 'Possibly persisted.\n' > "$TMP_ROOT/firstmate-stage-retain-reply.txt"
+if PATH="$STAGERETAIN_BIN:$PATH" FM_HOME="$HFSTAGERETAIN" FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS=1 \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$STAGERETAIN_ART" \
+  --agent-reply-file "$TMP_ROOT/firstmate-stage-retain-reply.txt" >/dev/null 2>&1; then
+  fail "crashed reply submission reported acceptance"
+fi
+assert_present "$HFSTAGERETAIN/state/procevent-inbox/$stageretain_id.1.accepted" \
+  "retained stage erased post-submission acceptance uncertainty"
+[ "$(find "$HFSTAGERETAIN/state/procevent" -maxdepth 1 -type f -name ".$stageretain_id.reply.*" | wc -l | tr -d ' ')" = 1 ] \
+  || fail "crashed reply submission did not retain its staged file"
+printf 'Duplicate attempt.\n' > "$TMP_ROOT/firstmate-stage-retain-retry.txt"
+if PATH="$STAGERETAIN_BIN:$PATH" FM_HOME="$HFSTAGERETAIN" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$STAGERETAIN_ART" \
+  --agent-reply-file "$TMP_ROOT/firstmate-stage-retain-retry.txt" >/dev/null 2>&1; then
+  fail "retained stage allowed an ambiguous reply retry"
+fi
+[ "$(cat "$STAGERETAIN_COUNT")" = 2 ] \
+  || fail "retained stage submitted the reply more than once"
+pass "retained reply stage preserves post-submission uncertainty"
 
 HFINTERRUPT="$TMP_ROOT/hfinterrupt"; new_home "$HFINTERRUPT"
 INTERRUPT_BIN=$(fm_fakebin "$TMP_ROOT/lavish-firstmate-interrupt-stub")

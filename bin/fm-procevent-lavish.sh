@@ -377,7 +377,7 @@ poll_iteration_floor_wait() {
 cmd_poll() {
   local artifact=${1-} delay attempt=0 active_attempt=0 response status_file cleanup_command rc filter_rc iteration_started
   local pipeline_status pipeline_pid reply_file='' ready_fd=${FM_PROCEVENT_ADAPTER_READY_FD-}
-  local poll_owner=${FM_PROCEVENT_ADAPTER_OWNER-} reply_pending=0 reply_acceptance_path=0
+  local poll_owner=${FM_PROCEVENT_ADAPTER_OWNER-} reply_pending=0 reply_acceptance_path=0 submission_started=0
   local acceptance_dir='' acceptance_signal='' node_options=''
   [ -n "$artifact" ] || usage
   if [ "$#" -eq 3 ] && [ "${2-}" = --agent-reply-file ]; then
@@ -416,8 +416,13 @@ JS
     node_options="${NODE_OPTIONS:+$NODE_OPTIONS }--require=$acceptance_dir/accept.cjs"
   fi
   printf -v cleanup_command 'rm -f -- %q %q; rm -rf -- %q' "$response" "$status_file" "$acceptance_dir"
-  # shellcheck disable=SC2064 # $cleanup_command must expand now, while the staged path is still set.
-  trap "$cleanup_command" EXIT
+  adapter_exit() {
+    if [ -n "$ready_fd" ] && [ "$submission_started" -eq 0 ]; then
+      printf 'rejected\n' >&3 2>/dev/null || true
+    fi
+    eval "$cleanup_command"
+  }
+  trap adapter_exit EXIT
   # Retirement stops this listener by signalling its process group, and bash runs
   # no EXIT trap for an uncaught signal, so each one cleans up the staged
   # response and then re-raises itself with the default disposition, leaving the
@@ -430,6 +435,7 @@ JS
   while :; do
     reply_pending=0
     reply_acceptance_path=0
+    submission_started=0
     iteration_started=$(poll_iteration_started) || die "cannot start the poll rate governor"
     [ -f "$artifact" ] && [ ! -L "$artifact" ] && [ -r "$artifact" ] \
       || die "artifact is no longer a readable file: $artifact"
@@ -451,6 +457,7 @@ JS
       : > "$status_file" || die "cannot stage the poll status"
       exec 6> "$status_file" || die "cannot retain the poll status"
       rm -f -- "$acceptance_signal"
+      submission_started=1
       if [ "$reply_pending" -eq 1 ]; then
         reply_acceptance_path=1
         { HERDR_ENV=1 LAVISH_AXI_HERDR_CHIME=1 FM_LAVISH_ACCEPTED_SIGNAL="$acceptance_signal" \
@@ -523,6 +530,11 @@ JS
           sleep 0.05
           continue
         fi
+        if [ -n "$ready_fd" ]; then
+          printf 'rejected\n' >&3 || die "cannot reject the adapter readiness boundary"
+          exec 3>&-
+          ready_fd=
+        fi
         cat -- "$response"
         break
         ;;
@@ -545,6 +557,8 @@ JS
       *) die "cannot classify the poll response" ;;
     esac
   done
+  trap - EXIT
+  eval "$cleanup_command"
   return "$rc"
 }
 
