@@ -109,7 +109,7 @@ test_the_bound_replaces_the_calling_shell() {
     rm -f "$dir/caller" "$dir/parent"
     (
       . "$ROOT/bin/fm-timeout-lib.sh"
-      printf '%s\n' "$BASHPID" > "$dir/caller"
+      printf '%s\n' "${BASHPID:-$(exec /bin/sh -c 'printf "%s\n" "$PPID"')}" > "$dir/caller"
       PATH=$path fm_exec_timed 5 1 bash -c 'echo "$PPID" > "$1"' _ "$dir/parent"
     ) || fail "the bounded probe failed under PATH=$path"
     caller=$(cat "$dir/caller")
@@ -211,10 +211,10 @@ test_an_owner_that_dies_during_startup_ends_the_command() {
   PATH=$PERL_ONLY bash -c '
     . "$1/bin/fm-timeout-lib.sh"
     (
-      echo "$BASHPID" > "$2/watchdog"
       while kill -0 "$$" 2>/dev/null; do sleep 0.05; done
       fm_exec_timed 60 1 bash -c "exec sleep 300"
     ) >/dev/null 2>&1 &
+    echo $! > "$2/watchdog"
     exit 0
   ' _ "$ROOT" "$dir"
   wait_for_file "$dir/watchdog"
@@ -300,6 +300,102 @@ test_gnu_timeout_kills_a_term_ignoring_command_after_the_grace() {
   pass "fm_exec_timed's GNU timeout fallback kills a TERM-ignoring command once the grace has passed"
 }
 
+# Stock macOS Bash 3.2 has no BASHPID, and callers run under set -u, so a bare
+# $BASHPID aborts the helper before the command starts. Drive the real helper
+# under that shell with the variable removed so a 4+ host still covers it.
+test_exec_timed_completes_under_set_u_without_bashpid() {
+  local rc=0 out
+  out=$( /bin/bash -c '
+    set -u
+    unset BASHPID
+    . "$1/bin/fm-timeout-lib.sh"
+    PATH=$2 fm_exec_timed 5 1 bash -c "exit 0"
+  ' _ "$ROOT" "$PERL_ONLY" 2>&1 ) || rc=$?
+  [ "$rc" -eq 0 ] || fail "fm_exec_timed aborted under set -u without BASHPID (rc=$rc: $out)"
+  pass "fm_exec_timed completes under set -u when BASHPID is unset"
+}
+
+# A subshell that names its own pid as owner would otherwise watch the
+# watchdog it execs into. Fall-through must select $PPID (the grandparent)
+# so that process dying ends the command while the watchdog's parent lives.
+test_a_caller_that_names_itself_falls_through_to_its_parent() {
+  local dir started pid
+  dir="$TMP_ROOT/named-self"
+  mkdir -p "$dir"
+  cat > "$dir/middle.sh" <<'SH'
+set -u
+unset BASHPID
+trap '' HUP
+. "$1/bin/fm-timeout-lib.sh"
+(
+  current=${BASHPID:-$(exec /bin/sh -c 'printf "%s\n" "$PPID"')}
+  FM_EXEC_TIMED_OWNER_PID=$current
+  PATH=$2 fm_exec_timed 60 1 bash -c 'echo $$ > "$1"; exec sleep 300' _ "$3/pid"
+) &
+echo $! > "$3/watchdog"
+exec sleep 60
+SH
+  started=$SECONDS
+  bash -c '
+    set -u
+    bash "$1/middle.sh" "$2" "$3" "$1" &
+    echo $! > "$1/middle"
+    i=0
+    while [ ! -s "$1/pid" ]; do
+      i=$((i + 1))
+      [ "$i" -lt 500 ] || exit 1
+      kill -0 "$(cat "$1/middle" 2>/dev/null)" 2>/dev/null || exit 1
+      sleep 0.02
+    done
+    exit 0
+  ' _ "$dir" "$ROOT" "$PERL_ONLY" || fail "the named-self fixture did not start the bounded command"
+  pid=$(cat "$dir/pid")
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$((SECONDS - started))" -ge 15 ]; then
+      kill -KILL "$pid" 2>/dev/null || true
+      kill -KILL "$(cat "$dir/middle" 2>/dev/null)" 2>/dev/null || true
+      kill -KILL "$(cat "$dir/watchdog" 2>/dev/null)" 2>/dev/null || true
+      fail "a caller that named itself as owner left the command running"
+    fi
+    sleep 0.02
+  done
+  kill -KILL "$(cat "$dir/middle" 2>/dev/null)" 2>/dev/null || true
+  kill -KILL "$(cat "$dir/watchdog" 2>/dev/null)" 2>/dev/null || true
+  pass "fm_exec_timed falls through to the parent when the caller names itself as owner"
+}
+
+# Default owner in a subshell is the calling script ($$), not the subshell.
+# With BASHPID unset, $$ would look like the current process unless the helper
+# resolves this frame some other way; the script dying before the watchdog
+# starts must still end the command.
+test_a_subshell_caller_is_distinguished_from_that_subshell() {
+  local dir watchdog started
+  dir="$TMP_ROOT/subshell-owner"
+  mkdir -p "$dir"
+  PATH=$PERL_ONLY bash -c '
+    set -u
+    unset BASHPID
+    . "$1/bin/fm-timeout-lib.sh"
+    (
+      while kill -0 "$$" 2>/dev/null; do sleep 0.05; done
+      fm_exec_timed 60 1 bash -c "exec sleep 300"
+    ) >/dev/null 2>&1 &
+    echo $! > "$2/watchdog"
+    exit 0
+  ' _ "$ROOT" "$dir"
+  wait_for_file "$dir/watchdog"
+  watchdog=$(cat "$dir/watchdog")
+  started=$SECONDS
+  while kill -0 "$watchdog" 2>/dev/null; do
+    if [ "$((SECONDS - started))" -ge 15 ]; then
+      kill -KILL "$watchdog" 2>/dev/null || true
+      fail "a subshell caller was not distinguished from that subshell: the watchdog ran on toward its bound"
+    fi
+    sleep 0.02
+  done
+  pass "fm_exec_timed distinguishes a subshell caller from that subshell when BASHPID is unset"
+}
+
 test_timed_out_names_exactly_the_bound_statuses() {
   local status verdict
   for status in 124 137 0 1 125 127 143 ''; do
@@ -337,6 +433,9 @@ test_a_descendant_holding_the_output_cannot_outlast_the_bound
 test_a_signal_to_the_bounding_process_reaches_the_command
 test_a_named_owner_that_is_gone_ends_the_command
 test_an_owner_that_dies_during_startup_ends_the_command
+test_exec_timed_completes_under_set_u_without_bashpid
+test_a_caller_that_names_itself_falls_through_to_its_parent
+test_a_subshell_caller_is_distinguished_from_that_subshell
 test_perl_is_preferred_over_timeout
 test_refuses_rather_than_running_unbounded
 test_rejects_malformed_bounds_before_running_anything
