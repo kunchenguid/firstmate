@@ -165,11 +165,13 @@ EOF
 
   task_in "$home" add parked-residual 'Parked residual' --kind scout --queue >/dev/null
   task_in "$home" hold parked-residual --reason 'synthetic archival disposition' --kind parked >/dev/null
-  write_task_meta "$home" parked-residual p-missing-parked
+  write_task_meta "$home" parked-residual p-active-stale-parked
+  printf 'blocked [key=stale]: historical parked wait\n' > "$home/state/parked-residual.status"
 
   task_in "$home" add done-pruned 'Done pruned' --kind scout --start >/dev/null
   task_in "$home" 'done' done-pruned --report data/done-pruned/report.md --no-prune >/dev/null
-  write_task_meta "$home" done-pruned p-missing-done
+  write_task_meta "$home" done-pruned p-active-stale-done
+  printf 'needs-decision [key=stale]: historical completed decision\n' > "$home/state/done-pruned.status"
   task_in "$home" add prune-trigger 'Prune trigger' --kind scout --start >/dev/null
   task_in "$home" 'done' prune-trigger --report data/prune-trigger/report.md --keep 1 >/dev/null
 
@@ -187,9 +189,11 @@ EOF
   fleet=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-fleet-snapshot.sh" --json)
   printf '%s\n' "$fleet" | jq -e '
     (.tasks[] | select(.id == "done-pruned")
-      | .backlog == null and .record_disposition == "archive_done" and .retained_record == true)
+      | .backlog == null and .record_disposition == "archive_done"
+        and .current_state.state == "working" and .retained_record == false)
     and (.tasks[] | select(.id == "parked-residual")
-      | .backlog.state == "queued" and .record_disposition == "parked" and .retained_record == false)
+      | .backlog.state == "queued" and .record_disposition == "parked"
+        and .current_state.state == "working" and .retained_record == false)
     and (.tasks[] | select(.id == "healthy-active")
       | .backlog.state == "in_flight" and .record_disposition == "active"
         and .current_state.state == "working" and .retained_record == false)
@@ -211,7 +215,8 @@ EOF
       and ([.in_flight[].id] | index("done-pruned") == null)
       and ([.in_flight[].id] | index("ambiguous-duplicate") == null)
       and ([.in_flight[].id] | index("orphan-unknown") == null)
-      and ([.retained_records[].id] | index("done-pruned") != null)
+      and ([.retained_records[].id] | index("done-pruned") == null)
+      and ([.gates[] | select(.id == "done-pruned" and .reason == "task record integrity")] | length == 1)
       and ([.gates[].id] | index("parked-residual") != null)
       and ([.gates[] | select(.id == "ambiguous-duplicate" and .reason == "task record integrity")] | length >= 1)
       and ([.gates[] | select(.id == "orphan-unknown" and .reason == "task record integrity")] | length == 1)

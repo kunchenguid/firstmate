@@ -331,7 +331,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   | ([ .tasks[]
        | select(.kind != "secondmate")
        | select(.retained_record != true)
-       | select(.backlog.state == "in_flight" or .current_state.state == "working"
+       | select((.record_disposition == "active"
+                   and (.backlog.state == "in_flight" or .current_state.state == "working"))
            or (.record_disposition == "unknown" and (.hints.open_decisions | length) > 0))
        | select(.backlog.current_role != "program")
        | select(.backlog.current_role != "held" or .current_state.state == "working")
