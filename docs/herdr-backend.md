@@ -410,7 +410,7 @@ A candidate must meet all of these conditions:
 - A version 2 journal additionally must bind this exact physical home, named session, workspace, and tab, and it must bind the pane when one remains.
 - The task's ordinary metadata must be absent.
 - The candidate must have exactly one tab and exactly one pane, or exactly one empty tab and zero panes left by a completed pane close.
-- An empty-tab candidate must still have the exact workspace and tab binding from a version 2 journal when one is present.
+- An empty-tab candidate requires the exact workspace and tab binding from a version 2 journal, and it must not be the focused tab. An unbound version 1 journal never authorizes closing an empty tab, so that tab is preserved.
 
 Firstmate then cleans up the candidate in this order:
 
