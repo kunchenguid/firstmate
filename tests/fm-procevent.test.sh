@@ -1416,7 +1416,7 @@ printf 'poll%s reply: %s\n' "$n" "$reply" >> "$LINGER_LOG"
 if [ "$n" = 1 ]; then
   printf 'session:\n  status: feedback\nprompts[1]{uid,prompt,selector,tag,text}:\n  "","","","message","linger"\n'
 elif [ "$n" = 2 ]; then
-  printf 'error: Lavish Editor already has an active poll listener\ncode: LISTENER_ACTIVE\n'
+  printf 'error: Lavish Editor already has an active poll listener (current listener: prior-owner; active for 37ms)\ncode: LISTENER_ACTIVE\n'
   exit 1
 else
   [ -z "$owner" ] || node -e 'require("node:child_process").spawn("herdr", [], {stdio:"ignore"})'

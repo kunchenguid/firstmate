@@ -292,15 +292,14 @@ poll_response_filter() {  # <response-file>
     use warnings;
     my ($stage) = @ARGV;
     my $expected = "error: Lavish Editor poll response was interrupted\ncode: SERVER_ERROR\n";
-    my $active = "error: Lavish Editor already has an active poll listener\ncode: LISTENER_ACTIVE\n";
+    my $active = "error: Lavish Editor already has an active poll listener";
     my $replaced = "error: Lavish Editor poll listener was replaced by a takeover\ncode: LISTENER_REPLACED\n";
-    my $limit = length($expected) > length($active) ? length($expected) : length($active);
-    $limit = length($replaced) if length($replaced) > $limit;
+    my $limit = 4096;
     open my $staged, ">", $stage or exit 2;
     binmode STDIN;
     binmode STDOUT;
     binmode $staged;
-    my ($candidate, $streaming) = ("", 0);
+    my ($candidate, $streaming, $control) = ("", 0, 0);
     sub write_all {
       my ($handle, $bytes) = @_;
       my $offset = 0;
@@ -318,11 +317,20 @@ poll_response_filter() {  # <response-file>
         write_all(*STDOUT, $chunk);
         next;
       }
+      next if $control;
       my $room = $limit + 1 - length($candidate);
       my $take = length($chunk) < $room ? length($chunk) : $room;
       my $prefix = substr($chunk, 0, $take);
       $candidate .= $prefix;
       write_all($staged, $prefix);
+      if ($candidate =~ /^\Q$active\E[^\n]*\ncode: LISTENER_ACTIVE\n/) {
+        $control = 11;
+        next;
+      }
+      if (index($candidate, $replaced) == 0 && length($candidate) >= length($replaced)) {
+        $control = 12;
+        next;
+      }
       my $expected_prefix = length($candidate) <= length($expected)
         && substr($expected, 0, length($candidate)) eq $candidate;
       my $active_prefix = length($candidate) <= length($active)
@@ -334,11 +342,14 @@ poll_response_filter() {  # <response-file>
         write_all(*STDOUT, $candidate);
         write_all(*STDOUT, substr($chunk, $take));
         $streaming = 1;
+      } elsif (length($candidate) > $limit) {
+        write_all(*STDOUT, $candidate);
+        write_all(*STDOUT, substr($chunk, $take));
+        $streaming = 1;
       }
     }
-    exit 10 if !$streaming && $candidate eq $expected;
-    exit 11 if !$streaming && index($candidate, $active) == 0;
-    exit 12 if !$streaming && index($candidate, $replaced) == 0;
+    exit 10 if !$streaming && !$control && $candidate eq $expected;
+    exit $control if $control;
     write_all(*STDOUT, $candidate) unless $streaming;
   ' "$1"
 }
