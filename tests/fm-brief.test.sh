@@ -351,6 +351,60 @@ test_pr_based_dod_requires_non_draft() {
   pass "fm-brief.sh: PR-based done requires a non-draft PR; a deliberate draft declares a wait"
 }
 
+# The done gate must stay correct whether or not the pipeline and gh-axi can
+# actually drive a project's forge, without a --forge flag or any caller having
+# to know: the worker reads what actually happened - the pipeline's own outcome
+# in no-mistakes mode, gh-axi's own success or failure in direct-PR mode - and
+# acts accordingly. (2026-09-27 fleet incident: five workers stuck on a brief
+# that only described the outcome where the pipeline and gh-axi both work, and
+# a --forge flag defaulting to "works" would have reintroduced the same bug for
+# every project whose dispatcher forgot to pass it.) No forge value appears
+# anywhere in this test: the rendered text is unconditional on every mode.
+test_dod_describes_both_pipeline_outcomes() {
+  local home id brief
+  home="$TMP_ROOT/both-outcomes-home"
+  mkdir -p "$home/data"
+
+  id="brief-both-outcomes-nm"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "no-mistakes: brief was not scaffolded"
+  assert_grep "If it drove the pull request and CI itself, wait for its CI-green return" "$brief" \
+    "no-mistakes DOD must describe the pipeline-drove-it-itself outcome"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+  assert_grep '`passed-with-skips`' "$brief" \
+    "no-mistakes DOD must name passed-with-skips as the signal the pipeline could not drive pr/ci"
+  assert_grep "that is this project's normal PASS here, not a coverage gap" "$brief" \
+    "no-mistakes DOD must say the skip outcome is a PASS, not a gap"
+  assert_grep "Open the pull request yourself instead" "$brief" \
+    "no-mistakes DOD must hand the worker the pull request when the pipeline could not open it"
+  assert_grep "then watch its checks yourself until they are green" "$brief" \
+    "no-mistakes DOD must hand the worker CI-watching when the pipeline could not"
+  assert_no_grep "Forgejo" "$brief" \
+    "no-mistakes DOD must never hardcode a specific forge name"
+  assert_no_grep "--forge" "$brief" \
+    "no-mistakes DOD must not ask the worker to know or pass a forge value"
+
+  id="brief-both-outcomes-dp"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode direct-PR >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "direct-PR: brief was not scaffolded"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+  assert_grep 'push your branch and open a PR with `gh-axi` that is ready for review, not a draft' "$brief" \
+    "direct-PR DOD must still try gh-axi first"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+  assert_grep "if \`gh-axi\` cannot open the pull request because this project's forge is not GitHub" "$brief" \
+    "direct-PR DOD must describe the gh-axi-cannot-work-here outcome"
+  assert_grep "open it yourself instead through that forge" "$brief" \
+    "direct-PR DOD must hand the worker the pull request when gh-axi cannot open it"
+  assert_no_grep "Forgejo" "$brief" \
+    "direct-PR DOD must never hardcode a specific forge name"
+  assert_no_grep "--forge" "$brief" \
+    "direct-PR DOD must not ask the worker to know or pass a forge value"
+
+  pass "fm-brief.sh: the done gate describes both pipeline/tool outcomes unconditionally, correct on any forge"
+}
+
 # Pin the specific line the bug lived on: the no-mistakes DOD's no-mistakes
 # reference must render as plain prose with no dangling apostrophe artifact.
 test_no_mistakes_dod_wording() {
@@ -1336,6 +1390,7 @@ test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_no_mistakes_dod_green_detection
 test_pr_based_dod_requires_non_draft
+test_dod_describes_both_pipeline_outcomes
 test_ask_user_escalation_format
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete

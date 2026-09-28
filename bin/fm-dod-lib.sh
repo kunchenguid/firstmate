@@ -63,6 +63,17 @@
 # report, read back from the forge; a lane that deliberately holds a draft
 # declares a paused wait instead. bin/fm-pr-check.sh refuses to arm merge
 # monitoring on a draft through the same reading bin/fm-pr-merge.sh uses.
+# Neither PR-based block asks the caller which forge=none host it is on: gh-axi
+# only ever works against GitHub and no-mistakes' pr/ci steps only ever run where
+# it has a working provider, both true or false per project rather than per forge
+# brand, so the worker is told to try the normal path and read what actually
+# happened instead - gh-axi's own failure to open a PR, or a no-mistakes outcome
+# naming pr/ci as skipped (passed-with-skips, the normal PASS there, not a
+# coverage gap) - and to open the pull request and watch its checks itself when
+# that is what it observes. This stays correct on a forge no one has bound yet
+# and never depends on a caller remembering to say which one a project is on
+# (2026-09-27 fleet incident: a captain-confirmed forge=none default that reads
+# as "this forge works" is the exact bug this paragraph exists to prevent).
 # This file is the one owner of the no-mistakes `--intent` contract: only the
 # brief's `## Captain's intent` subsection plus later captain words, never
 # `## Firstmate spec` and never the worker's own tradeoffs.
@@ -397,8 +408,8 @@ Delivery contract: mode=direct-PR
 Ship branch: $branch
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
-When it is implemented and committed, push your branch and open a PR with \`gh-axi\` that is ready for review, not a draft.
-Before you report done, read the PR back from the forge and confirm it is not a draft (\`gh-axi pr view <number>\` must print \`draft: no\`, where <number> is the PR number from your PR URL); if it is a draft, mark it ready with \`gh-axi pr ready <number>\`.
+When it is implemented and committed, push your branch and open a PR with \`gh-axi\` that is ready for review, not a draft; if \`gh-axi\` cannot open the pull request because this project's forge is not GitHub, open it yourself instead through that forge - its web UI, or its own CLI if this worktree has one configured - also not as a draft.
+When gh-axi opened it, before you report done, read the PR back from the forge and confirm it is not a draft (\`gh-axi pr view <number>\` must print \`draft: no\`, where <number> is the PR number from your PR URL); if it is a draft, mark it ready with \`gh-axi pr ready <number>\`. When you opened it yourself, confirm the same on the forge's own page before reporting done, and mark it ready there if it is a draft.
 A draft cannot be merged, so a done report on one leaves the merge unasked.
 Then append \`done [at=<epoch>]: PR {url}\` to the status file and stop.
 That \`done:\` is accepted only when this copy's HEAD - your latest commit - is pushed to your PR branch; the check tests that commit, not merely that a branch moved.
@@ -433,10 +444,12 @@ EOF
       fm_nm_driving_block "$forge"
       cat <<EOF
 
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), read the PR back from the forge and confirm it is not a draft (\`gh-axi pr view <number>\` must print \`draft: no\`, where <number> is the PR number from your PR URL); if it is a draft, mark it ready with \`gh-axi pr ready <number>\`.
+/no-mistakes reaches its outcome one of two ways, and its own report tells you which:
+- If it drove the pull request and CI itself, wait for its CI-green return (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), then read the PR back from the forge and confirm it is not a draft (\`gh-axi pr view <number>\` must print \`draft: no\`, where <number> is the PR number from your PR URL); if it is a draft, mark it ready with \`gh-axi pr ready <number>\`.
+- If its outcome instead names the pr and ci steps as skipped (a \`passed-with-skips\` outcome), that is this project's normal PASS here, not a coverage gap: no-mistakes could not drive those two steps on this forge. Open the pull request yourself instead, not as a draft - with \`gh-axi\` if this project is on GitHub, otherwise through this project's own forge (its web UI, or its own CLI if this worktree has one configured) - then watch its checks yourself until they are green.
 A draft cannot be merged, so a done report on one leaves the merge unasked.
 Then append \`done [at=<epoch>]: PR {url} checks green\` and stop. You are finished.
-That CI-ready \`done:\` is accepted only when this copy's HEAD - your latest commit - is one the /no-mistakes run pushed, so commit nothing after the run; the check tests that commit, not merely that a branch moved.
+That CI-ready \`done:\` is accepted only when this copy's HEAD - your latest commit - is one the /no-mistakes run pushed, or one you pushed yourself when you opened the pull request; the check tests that commit, not merely that a branch moved.
 If you deliberately keep the PR a draft, append \`paused [at=<epoch>]: {why the draft is held}\` instead of done.
 EOF
       ;;
