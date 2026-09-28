@@ -2115,9 +2115,9 @@ The pool names, capacities, and models are the operator's own choice; nothing is
 
 - The primary home and every local secondmate whose parent binding leads to it share the primary's pools and one lock, so simultaneous launches cannot both take the last seat.
 - The count includes every pooled agent recorded in the primary and in each local secondmate registered in `data/secondmates.md`, so agents launched before the file existed are counted.
-- A remote secondmate shares the same capacity through the existing primary-to-remote transport: the primary's watcher delivers the current pool declaration to each remote about every 30 seconds while holding the fleet lock, and a remote launch files a seat request in its own home and waits for that answer.
+- A remote secondmate shares the same capacity through the existing primary-to-remote transport: while a declaration exists or needs clearing, the primary's watcher delivers the current pool declaration to each remote about every 30 seconds while holding the fleet lock, and a pooled remote launch files a seat request in its own home and waits for that answer.
 - The primary grants no pooled seat while any registered remote has not confirmed the current declaration or its holder snapshot is absent. It counts each remote's seats from that remote's last answer, so an unreachable remote keeps its seats counted rather than freeing them.
-- Every remote launch waits for the next primary serve to confirm its model against the current declaration, including models the last delivered policy called unpooled. A request from an old declaration or old pool is refused. Before the first delivery, a remote launch is refused.
+- Once a nonempty policy is delivered, remote launches wait for the next primary serve to confirm the current declaration, including models the last policy called unpooled; a request from an old declaration or old pool is refused. Before first delivery, an inherited declaration can identify a pooled launch that must refuse until delivery. A home with no declaration, or a delivered empty declaration, launches as before.
 - A remote request the primary does not answer within 90 seconds is withdrawn and refused, and removing this file clears every remote on the next delivery.
 
 **Refusals**
@@ -2131,7 +2131,7 @@ The pool names, capacities, and models are the operator's own choice; nothing is
 
 **Delivery**
 
-The primary delivers its current declaration directly to remote secondmates, including an empty declaration when no pools are configured. Remote homes do not use an inherited copy as authority.
+The primary delivers its current declaration directly to remote secondmates, including an empty declaration after a pool is removed. An inherited copy identifies pools that must refuse before first delivery; it never grants a seat or acts as reservation authority. With no declaration, reservation does not require `jq` or remote confirmation.
 
 ## Toolchain
 

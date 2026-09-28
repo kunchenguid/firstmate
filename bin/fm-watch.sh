@@ -3978,7 +3978,8 @@ while :; do
   # owns the contract). Mechanical and silent: only the fleet root serves,
   # at most every 30 seconds, and each remote call is bounded inside
   # the script.
-  if [ "$(age_of "$STATE/.fleet-seats-served")" -ge 30 ]; then
+  if { [ -e "$CONFIG/fleet-seats" ] || [ -d "$STATE/fleet-seats" ]; } \
+    && [ "$(age_of "$STATE/.fleet-seats-served")" -ge 30 ]; then
     touch "$STATE/.fleet-seats-served" 2>/dev/null || true
     if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
       "$SCRIPT_DIR/fm-fleet-seats.sh" serve-remotes >/dev/null 2>&1; then

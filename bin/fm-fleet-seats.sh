@@ -61,10 +61,12 @@
 #     requests in arrival order while its holders stay within the allowance,
 #     denies the rest, and prints "policy <digest>" plus one
 #     "holder <pool> <id>" line per seat, which become the root's snapshot.
-#   - reserve requires a delivered policy, files a request for every model,
-#     and waits (bounded) for the root's next serve to confirm that exact
-#     policy and model. Pooled requests also require a seat grant. A timeout
-#     withdraws the request and refuses unless confirmation landed first.
+#   - reserve is unchanged when no declaration is known to this home. A
+#     declared pool requires delivery before launch. After a nonempty policy
+#     is delivered, reserve files a request and waits (bounded) for the root's
+#     next serve to confirm that exact policy and model. Pooled requests also
+#     require a seat grant. A timeout withdraws the request and refuses unless
+#     confirmation landed first.
 #
 # EXPLICIT MODELS. While any pool is configured, a ship, scout, or secondmate
 # on a multi-provider harness (pi, pi-signed, omp, opencode) refuses without an
@@ -438,6 +440,29 @@ case "$CMD" in
   *) usage ;;
 esac
 
+if ! resolve_authority; then
+  case "$CMD" in serve-remotes) exit 0 ;; esac
+  unavailable "this home's fleet root cannot be resolved from its secondmate parent binding"
+fi
+
+if [ "$CMD" = reserve ]; then
+  if [ "$ROOT_REMOTE" -eq 0 ]; then
+    [ -e "$ROOT_CONFIG/fleet-seats" ] || [ -L "$ROOT_CONFIG/fleet-seats" ] || exit 0
+  else
+    DELIVERED=$STATE/fleet-seats/policy.json
+    if [ ! -e "$DELIVERED" ] && [ ! -L "$DELIVERED" ]; then
+      [ -e "$CONFIG/fleet-seats" ] || [ -L "$CONFIG/fleet-seats" ] || exit 0
+    elif [ -f "$DELIVERED" ] && [ ! -L "$DELIVERED" ] \
+      && cmp -s "$DELIVERED" <(printf '{"pools":[]}\n'); then
+      exit 0
+    fi
+  fi
+elif [ "$CMD" = serve-remotes ] && [ "$ROOT_SELF" -eq 1 ] \
+  && [ ! -e "$ROOT_CONFIG/fleet-seats" ] && [ ! -L "$ROOT_CONFIG/fleet-seats" ] \
+  && [ ! -d "$ROOT_STATE/fleet-seats" ]; then
+  exit 0
+fi
+
 command -v jq >/dev/null 2>&1 || unavailable "jq is not installed"
 TMPD=$(mktemp -d "${TMPDIR:-/tmp}/fm-fleet-seats.XXXXXX") || unavailable "cannot create a scratch directory"
 LOCK_HELD=
@@ -447,11 +472,6 @@ cleanup() {
   rm -rf "$TMPD"
 }
 trap cleanup EXIT
-
-if ! resolve_authority; then
-  case "$CMD" in serve-remotes) exit 0 ;; esac
-  unavailable "this home's fleet root cannot be resolved from its secondmate parent binding"
-fi
 
 # --- remote home -------------------------------------------------------------
 
@@ -549,7 +569,12 @@ if [ "$ROOT_REMOTE" -eq 1 ]; then
     exit 0
   fi
 
-  [ -e "$DELIVERED" ] || unavailable "the fleet root has not delivered a seat policy to this home"
+  if [ ! -e "$DELIVERED" ] && [ ! -L "$DELIVERED" ]; then
+    validate_pools "$CONFIG/fleet-seats" || unavailable "$CONFIG/fleet-seats is malformed"
+    require_explicit_model "$CONFIG/fleet-seats"
+    [ -n "$(pool_for_model "$CONFIG/fleet-seats" "$MODEL")" ] || exit 0
+    unavailable "the fleet root has not delivered a seat policy to this home"
+  fi
   POOLS=$DELIVERED
   validate_pools "$POOLS" || unavailable "$POOLS is malformed"
   require_explicit_model "$POOLS"
