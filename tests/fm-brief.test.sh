@@ -598,8 +598,11 @@ test_no_mistakes_dod_ci_gate_feedback() {
   # shellcheck disable=SC2016  # single quotes are deliberate: the backticked status line must stay literal
   assert_grep 'escalate it inline in a keyed status line - append `needs-decision [at=<epoch>] [key=pr-<n>-<comment-id>]' "$brief" \
     "no-mistakes DOD must escalate gateless review feedback inline as a keyed decision"
-  assert_grep "for this decision only in place of rule 6's stop, keep polling about once a minute and wait for firstmate's reply instead of stopping, processing and acknowledging your Firstmate instruction inbox on each poll as that section describes, since the reply arrives there; on dismiss, reply on the PR; on fix, feed it to the next parked gate as above" "$brief" \
+  assert_grep "for this decision only in place of rule 6's stop, keep polling about once a minute and wait for firstmate's reply instead of stopping, processing and acknowledging your Firstmate instruction inbox on each poll as that section describes, since the reply arrives there; on dismiss, reply on the PR; on fix, feed it to the next parked gate or CI-ready decision point as above when one comes" "$brief" \
     "no-mistakes DOD must keep polling behind a review-feedback decision, acknowledge the inbox each poll, and route both answers"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticked run flags must stay literal
+  assert_grep 'when the run reaches CI green or its final outcome first, commit it as post-pipeline follow-up work on top of this same branch so every pipeline fix commit remains present, then drive a new `no-mistakes` run with the same `--intent` to its outcome before `done:`' "$brief" \
+    "no-mistakes DOD must route a fix answer that arrives after the run's own outcome"
   # shellcheck disable=SC2016  # single quotes are deliberate: the backticked done token must stay literal
   assert_grep 'never append `done:` while a `pr-<n>-<comment-id>` decision you opened is still unanswered' "$brief" \
     "no-mistakes DOD must hold done while a review-feedback decision is open"
@@ -610,6 +613,24 @@ test_no_mistakes_dod_ci_gate_feedback() {
   assert_grep 'never report it as `blocked:` and never stop on it' "$brief" \
     "no-mistakes DOD must forbid blocked: for a maintainer-only wait"
   pass "fm-brief.sh: no-mistakes DOD reads and routes review feedback at the CI gate"
+}
+
+# The maintainer-only CI wait must be declared with the same pause verb the rest
+# of the brief and the status classifier use, so an FM_CLASSIFY_PAUSED_VERB
+# override still reads as a declared wait rather than an unknown verb.
+test_no_mistakes_dod_ci_wait_uses_configured_pause_verb() {
+  local home id brief
+  home="$TMP_ROOT/ci-wait-verb-home"
+  mkdir -p "$home/data"
+  id="brief-ci-wait-v1"
+  FM_HOME="$home" FM_CLASSIFY_PAUSED_VERB=holding \
+    "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "brief was not scaffolded"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticked keyed wait line must stay literal
+  assert_grep 'append `holding [at=<epoch>] [key=nm-<run>-ci-wait]: <what must happen>`' "$brief" \
+    "no-mistakes DOD must declare the maintainer-only CI wait with the configured pause verb"
+  pass "fm-brief.sh: no-mistakes DOD declares the maintainer-only CI wait with the configured pause verb"
 }
 
 test_ask_user_escalation_format() {
@@ -1658,6 +1679,7 @@ test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_no_mistakes_dod_green_detection
 test_no_mistakes_dod_ci_gate_feedback
+test_no_mistakes_dod_ci_wait_uses_configured_pause_verb
 test_pr_based_dod_requires_non_draft
 test_ask_user_escalation_format
 test_ship_project_memory_wording
