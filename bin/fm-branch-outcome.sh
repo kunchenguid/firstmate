@@ -128,10 +128,10 @@
 #     Run it only when the session holds the lock (fm-session-start.sh owns the
 #     call site).
 #   fm-branch-outcome.sh seed-tail
-#     Under the lock, write the display tail copy from the validated store
-#     when the store has rows and the copy is absent; otherwise change
-#     nothing. fm-session-start.sh runs it at every locked session start, on
-#     every harness and away posture, before the drain.
+#     Under the lock, when the store has rows and the display tail copy is
+#     absent, validate the store and write the copy from it; otherwise read
+#     and change nothing. fm-session-start.sh runs it at every locked session
+#     start, on every harness and away posture, before the drain.
 set -eu
 
 SCRIPT_DIR="$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd "${d:-/}" && pwd)"
@@ -772,12 +772,16 @@ case "$CMD" in
   seed-tail)
     [ "$#" -eq 0 ] || usage
     fm_lock_acquire_wait "$LOCK"
+    if [ -e "$OUTCOME_TAIL" ] || [ ! -s "$STORE" ]; then
+      fm_lock_release "$LOCK"
+      exit 0
+    fi
     if ! last_seq >/dev/null; then
       fm_lock_release "$LOCK"
       echo "error: refusing to seed the display tail copy because the outcome store is malformed or non-sequential" >&2
       exit 1
     fi
-    if [ -s "$STORE" ] && [ ! -e "$OUTCOME_TAIL" ] && ! write_outcome_tail; then
+    if ! write_outcome_tail; then
       fm_lock_release "$LOCK"
       echo "error: the display tail copy could not be seeded from the outcome store" >&2
       exit 1

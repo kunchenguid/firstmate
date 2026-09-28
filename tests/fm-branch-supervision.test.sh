@@ -211,8 +211,11 @@ test_outcome_seed_tail_creates_only_an_absent_display_tail() {
   FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" seed-tail || fail "seed-tail failed with a display tail"
   [ "$(cat "$tail")" = kept ] || fail "seed-tail rewrote an existing display tail"
 
-  rm -f "$tail"
   printf 'not json\n' >> "$store"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" seed-tail \
+    || fail "seed-tail parsed the store although a display tail already existed"
+  [ "$(cat "$tail")" = kept ] || fail "seed-tail rewrote an existing display tail beside a malformed store"
+  rm -f "$tail"
   if FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" seed-tail 2>/dev/null; then
     fail "seed-tail accepted a malformed store"
   fi
