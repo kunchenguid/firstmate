@@ -441,6 +441,101 @@ test_routine_working_and_covered_done_stay_silent_on_the_empty_queue() {
   pass "routine working and branch-covered done lines print nothing on an empty-queue drain"
 }
 
+
+# Real Git repositories model a persistent detached home while main advances.
+# Only fixture paths reach the public drain; no live home or endpoint is used.
+test_secondmate_checkout_drift_is_visible_without_mutation() {
+  local dir primary home parent state before out mode target initial saved_status
+  dir=$(make_case checkout-drift)
+  primary="$dir/primary" home="$dir/sm" parent="$dir/parent" state="$dir/state"
+  mkdir -p "$parent" "$primary/bin"
+  fm_git_identity fmtest fmtest@example.com
+  git init -q -b main "$primary"
+  printf 'v1\n' > "$primary/AGENTS.md"
+  printf 'tool\n' > "$primary/bin/tool"
+  printf '.fm-secondmate-home\n' > "$primary/.gitignore"
+  git -C "$primary" add .
+  git -C "$primary" commit -qm initial
+  git clone -q "$primary" "$home"
+  git -C "$home" checkout -q --detach
+  printf 'sm\n' > "$home/.fm-secondmate-home"
+  printf 'kind=secondmate\nhome=%s\n' "$home" > "$state/sm.meta"
+  before=$(git -C "$home" rev-parse HEAD)
+  initial=$before
+  out=$(PATH="$dir/fakebin:$PATH" FM_BACKEND=tmux FM_HOME="$parent" FM_ROOT_OVERRIDE="$primary" FM_STATE_OVERRIDE="$state" "$DRAIN" 2>/dev/null)
+  assert_not_contains "$out" 'SECONDMATE CHECKOUT DRIFT' 'a current home has no drift warning'
+
+  printf 'v2\n' > "$primary/AGENTS.md"
+  git -C "$primary" commit -qam advance
+  git -C "$home" fetch -q origin
+  target=$(git -C "$primary" rev-parse HEAD)
+  for mode in clean dirty unique; do
+    case "$mode" in
+      dirty) printf 'uncommitted\n' > "$home/local-work" ;;
+      unique)
+        git -C "$home" add local-work
+        git -C "$home" commit -qm unique-work
+        before=$(git -C "$home" rev-parse HEAD)
+        ;;
+    esac
+    saved_status=$(git -C "$home" status --porcelain)
+    out=$(PATH="$dir/fakebin:$PATH" FM_BACKEND=tmux FM_HOME="$parent" FM_ROOT_OVERRIDE="$primary" FM_STATE_OVERRIDE="$state" "$DRAIN" 2>/dev/null)
+    assert_contains "$out" 'SECONDMATE CHECKOUT DRIFT' "$mode detached home drift is visible in routine drain"
+    assert_contains "$out" 'sm: 1 behind' "$mode home reports its missing main commit"
+    [ "$(git -C "$home" rev-parse HEAD)" = "$before" ] || fail "$mode home HEAD moved"
+    [ "$(git -C "$home" status --porcelain)" = "$saved_status" ] || fail "$mode working tree or index changed"
+    [ "$(git -C "$primary" rev-parse HEAD)" = "$target" ] || fail 'primary HEAD moved'
+    git -C "$home" symbolic-ref -q HEAD >/dev/null && fail 'detached home became attached'
+    if [ "$mode" != clean ]; then
+      [ "$(cat "$home/local-work")" = uncommitted ] || fail "$mode local work changed"
+    fi
+    if [ "$mode" = unique ]; then
+      assert_contains "$out" '1 unique' 'divergence is identified without discarding unique commits'
+    fi
+  done
+
+  # The primary can lag its own known origin tip too. Keep its local main at
+  # the initial commit while the home retains the fetched origin/main ref.
+  git -C "$primary" checkout -q --detach
+  git -C "$primary" update-ref refs/heads/main "$initial"
+  out=$(PATH="$dir/fakebin:$PATH" FM_BACKEND=tmux FM_HOME="$parent" FM_ROOT_OVERRIDE="$primary" FM_STATE_OVERRIDE="$state" "$DRAIN" 2>/dev/null)
+  assert_contains "$out" 'cached origin/main (not fetched)' 'cached origin drift remains visible when primary main is stale'
+  assert_not_contains "$out" 'relative to primary local main' 'a home ahead of local main is not reported behind it'
+
+  # A queued ordinary wake must not hide the same current observation.
+  append_wake "$state" check fixture 'check: fixture'
+  out=$(PATH="$dir/fakebin:$PATH" FM_BACKEND=tmux FM_HOME="$parent" FM_ROOT_OVERRIDE="$primary" FM_STATE_OVERRIDE="$state" "$DRAIN" 2>/dev/null)
+  assert_contains "$out" 'check: fixture' 'queued wake is preserved'
+  assert_contains "$out" 'SECONDMATE CHECKOUT DRIFT' 'queued drain also exposes drift'
+
+  # Moving the fixture to the target ourselves clears the warning. The unique
+  # commit remains referenced, so no fixture work is discarded either.
+  git -C "$home" branch saved-unique HEAD
+  git -C "$home" checkout -q --detach "$target"
+  out=$(PATH="$dir/fakebin:$PATH" FM_BACKEND=tmux FM_HOME="$parent" FM_ROOT_OVERRIDE="$primary" FM_STATE_OVERRIDE="$state" "$DRAIN" 2>/dev/null)
+  assert_not_contains "$out" 'SECONDMATE CHECKOUT DRIFT' 'warning clears when home catches up'
+  [ "$(git -C "$home" rev-parse saved-unique)" = "$before" ] || fail 'unique commit lost'
+
+  # Only validated local secondmates participate, never ship workers, remote
+  # routes, or a directory whose seed marker identifies another home.
+  git -C "$home" checkout -q --detach "$initial"
+  for mode in worker remote invalid; do
+    case "$mode" in
+      worker) printf 'kind=ship\nhome=%s\n' "$home" > "$state/sm.meta" ;;
+      remote) printf 'kind=secondmate\nhome=%s\nremote_host=fixture.invalid\n' "$home" > "$state/sm.meta" ;;
+      invalid)
+        printf 'kind=secondmate\nhome=%s\n' "$home" > "$state/sm.meta"
+        printf 'another-home\n' > "$home/.fm-secondmate-home"
+        ;;
+    esac
+    out=$(PATH="$dir/fakebin:$PATH" FM_BACKEND=tmux FM_HOME="$parent" FM_ROOT_OVERRIDE="$primary" FM_STATE_OVERRIDE="$state" "$DRAIN" 2>/dev/null)
+    assert_not_contains "$out" 'SECONDMATE CHECKOUT DRIFT' "$mode route is excluded"
+  done
+  pass 'routine drain exposes detached-home drift and preserves clean, dirty, and unique work'
+}
+
+test_secondmate_checkout_drift_is_visible_without_mutation
+
 test_incident_note_answer_buried_under_routine_note_surfaces_both
 test_already_presented_notes_are_not_replayed
 test_brand_new_note_after_presentation_is_surfaced

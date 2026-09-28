@@ -74,6 +74,24 @@ primary_head_commit() {
   git -C "$root" rev-parse --verify --quiet "refs/heads/$default^{commit}" 2>/dev/null || return 1
 }
 
+# Read-only comparison for routine supervision. BASE is a pinned commit from a
+# locally available default-branch ref, not evidence of the live forge tip.
+# Do not fetch or inspect/reset the worktree here: even dirty and unique work
+# must remain untouched. A missing object is uncertainty, never "current".
+secondmate_checkout_drift() { # <home> <id> <base-commit> <base-label>
+  local home=$1 id=$2 base=$3 label=$4 head counts unique behind
+  head=$(git -C "$home" rev-parse --verify HEAD 2>/dev/null) || return 0
+  [ "$head" != "$base" ] || return 0
+  if ! counts=$(git -C "$home" rev-list --left-right --count "$head...$base" -- 2>/dev/null); then
+    printf '%s: cannot compare checkout with %s (%s); commit unavailable locally\n' "$id" "$label" "$base"
+    return 0
+  fi
+  read -r unique behind <<< "$counts"
+  [ "$behind" -gt 0 ] || return 0
+  printf '%s: %s behind, %s unique relative to %s (%s); home=%s\n' \
+    "$id" "$behind" "$unique" "$label" "$base" "$home"
+}
+
 resolve_path() {
   # Resolve to a canonical absolute path, falling back to the literal input
   # when the directory does not exist (so callers can still dedup/skip on it).
