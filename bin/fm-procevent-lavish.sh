@@ -375,7 +375,7 @@ poll_owner_is_listening() {
 cmd_poll() {
   local artifact=${1-} delay attempt=0 response status_file cleanup_command rc filter_rc iteration_started
   local pipeline_status pipeline_pid reply_file='' ready_fd=${FM_PROCEVENT_ADAPTER_READY_FD-}
-  local poll_owner=${FM_PROCEVENT_ADAPTER_OWNER-} reply_text='' reply_pending=0
+  local poll_owner=${FM_PROCEVENT_ADAPTER_OWNER-} reply_pending=0
   [ -n "$artifact" ] || usage
   if [ "$#" -eq 3 ] && [ "${2-}" = --agent-reply-file ]; then
     reply_file=$3
@@ -415,8 +415,7 @@ cmd_poll() {
     # Robust delivery waits on lavish-axi's own exclusive listener; do not add a
     # receipt, retry, or idempotency marker here.
     if [ -f "$reply_file" ] && [ ! -L "$reply_file" ]; then
-      reply_text=$(cat -- "$reply_file") \
-        || die "cannot read agent reply file: $reply_file"
+      exec 7< "$reply_file" || die "cannot read agent reply file: $reply_file"
       rm -f -- "$reply_file" || die "cannot consume agent reply file: $reply_file"
       reply_pending=1
     fi
@@ -426,8 +425,9 @@ cmd_poll() {
       : > "$status_file" || die "cannot stage the poll status"
       exec 6> "$status_file" || die "cannot retain the poll status"
       if [ "$reply_pending" -eq 1 ]; then
-        { lavish-axi poll "$artifact" --owner "$poll_owner" --agent-reply "$reply_text"; printf '%s\n' "$?" >&6; } \
+        { lavish-axi poll "$artifact" --owner "$poll_owner" --agent-reply-file - <&7; printf '%s\n' "$?" >&6; } \
           | poll_response_filter "$response" &
+        exec 7<&-
       else
         { lavish-axi poll "$artifact" --owner "$poll_owner"; printf '%s\n' "$?" >&6; } \
           | poll_response_filter "$response" &
@@ -453,11 +453,13 @@ cmd_poll() {
       fi
     else
       if [ "$reply_pending" -eq 1 ]; then
-        lavish-axi poll "$artifact" --agent-reply "$reply_text" | poll_response_filter "$response"
+        lavish-axi poll "$artifact" --agent-reply-file - <&7 | poll_response_filter "$response"
+        pipeline_status=("${PIPESTATUS[@]}")
+        exec 7<&-
       else
         lavish-axi poll "$artifact" | poll_response_filter "$response"
+        pipeline_status=("${PIPESTATUS[@]}")
       fi
-      pipeline_status=("${PIPESTATUS[@]}")
       rc=${pipeline_status[0]}
       filter_rc=${pipeline_status[1]}
     fi

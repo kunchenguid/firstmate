@@ -755,11 +755,12 @@ HFREPLY="$TMP_ROOT/hfreply"; new_home "$HFREPLY"
 FREPLY_BIN=$(fm_fakebin "$TMP_ROOT/lavish-firstmate-reply-stub")
 FREPLY_COUNT="$TMP_ROOT/lavish-firstmate-reply-count"
 FREPLY_LOG="$TMP_ROOT/lavish-firstmate-replies"
+FREPLY_ARGS="$TMP_ROOT/lavish-firstmate-args"
 FREPLY_TRIGGER1="$TMP_ROOT/lavish-firstmate-trigger1"
 FREPLY_TRIGGER2="$TMP_ROOT/lavish-firstmate-trigger2"
 FREPLY_TRIGGER3="$TMP_ROOT/lavish-firstmate-trigger3"
 FREPLY_OWNERS="$TMP_ROOT/lavish-firstmate-reply-owners"
-export FREPLY_COUNT FREPLY_LOG FREPLY_TRIGGER1 FREPLY_TRIGGER2 FREPLY_TRIGGER3 FREPLY_OWNERS
+export FREPLY_COUNT FREPLY_LOG FREPLY_ARGS FREPLY_TRIGGER1 FREPLY_TRIGGER2 FREPLY_TRIGGER3 FREPLY_OWNERS
 cat > "$FREPLY_BIN/lavish-axi" <<'SH'
 #!/usr/bin/env bash
 if [ "$#" -eq 0 ]; then
@@ -770,6 +771,7 @@ if [ "$#" -eq 0 ]; then
   exit
 fi
 artifact=$2
+printf '%s\n' "$*" >> "$FREPLY_ARGS"
 n=$(cat "$FREPLY_COUNT" 2>/dev/null || echo 0)
 n=$((n + 1))
 printf '%s\n' "$n" > "$FREPLY_COUNT"
@@ -778,6 +780,7 @@ shift 2
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --agent-reply) reply=$2; shift 2 ;;
+    --agent-reply-file) [ "$2" = - ] || exit 2; reply=$(cat); shift 2 ;;
     --owner) owner=$2; shift 2 ;;
     *) shift ;;
   esac
@@ -868,6 +871,14 @@ assert_contains "$(cat "$TMP_ROOT/firstmate-other-task.err")" "another home reta
   "cross-home worker refusal did not identify durable ownership"
 assert_absent "$HFREPLY_OTHER/state/procevent/$freply_id.source" \
   "another home's worker published over firstmate's pending Lavish round"
+pe "$HFREPLY_OTHER" register lavish "$freply_id" -- \
+  "$ROOT/bin/fm-procevent-lavish.sh" poll "$FREPLY_ART" >/dev/null
+PATH="$FREPLY_BIN:$PATH" pe "$HFREPLY_OTHER" reconcile >/dev/null 2>&1 || true
+sleep 0.2
+[ "$(cat "$FREPLY_COUNT")" = 1 ] \
+  || fail "a cross-home legacy registration reclaimed firstmate's pending Lavish source"
+assert_present "$FM_PROCEVENT_CLAIM_ROOT/$freply_id.claim" \
+  "legacy reconciliation discarded firstmate's machine-wide ownership"
 if pe "$HFREPLY" register lavish "$freply_id" -- /bin/true \
   >"$TMP_ROOT/firstmate-replace.out" 2>"$TMP_ROOT/firstmate-replace.err"; then
   fail "generic registration replaced firstmate's round-aware Lavish source"
@@ -954,6 +965,8 @@ assert_present "$HFREPLY/state/procevent/$freply_id.source" \
   "later pending Lavish round lost its source ownership"
 assert_grep 'poll2 reply: Confirmed in session.' "$FREPLY_LOG" \
   "firstmate's response was not posted to the active Lavish session"
+assert_not_contains "$(cat "$FREPLY_ARGS")" 'Confirmed in session.' \
+  "firstmate's Lavish reply was exposed in process arguments"
 PATH="$FREPLY_BIN:$PATH" pe "$HFREPLY" reconcile >/dev/null
 [ "$(cat "$FREPLY_COUNT")" = 2 ] \
   || fail "recovery duplicated firstmate's same-session Lavish reply"
@@ -1009,6 +1022,7 @@ shift 2
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --agent-reply) reply=$2; shift 2 ;;
+    --agent-reply-file) [ "$2" = - ] || exit 2; reply=$(cat); shift 2 ;;
     --owner) owner=$2; shift 2 ;;
     *) shift ;;
   esac
@@ -1092,6 +1106,7 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --owner) owner=$2; shift 2 ;;
     --agent-reply) shift 2 ;;
+    --agent-reply-file) [ "$2" = - ] || exit 2; cat >/dev/null; shift 2 ;;
     *) shift ;;
   esac
 done
@@ -1162,6 +1177,7 @@ shift 2
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --agent-reply) reply=$2; shift 2 ;;
+    --agent-reply-file) [ "$2" = - ] || exit 2; reply=$(cat); shift 2 ;;
     --owner) owner=$2; shift 2 ;;
     *) shift ;;
   esac
@@ -1295,18 +1311,19 @@ n=$(cat "$MULTI_ROOT/count" 2>/dev/null || echo 0)
 n=$((n + 1))
 printf '%s\n' "$n" > "$MULTI_ROOT/count"
 printf '%s:%s\n' "${LAVISH_AXI_HOST-unset}" "${LAVISH_AXI_PORT-unset}" >> "$MULTI_ROOT/routes"
-for arg in "$@"; do
-  case "$arg" in
-    --agent-reply) ;;
-    --*)
-      printf 'error: unknown option %s\ncode: VALIDATION_ERROR\n' "$arg" >&2
+reply=
+shift 2
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --agent-reply) reply=$2; shift 2 ;;
+    --agent-reply-file) [ "$2" = - ] || exit 2; reply=$(cat); shift 2 ;;
+    *)
+      printf 'error: unknown option %s\ncode: VALIDATION_ERROR\n' "$1" >&2
       exit 2
       ;;
   esac
 done
-if [ "${1-}" = poll ] && [ "${3-}" = --agent-reply ]; then
-  printf 'poll%s reply: %s\n' "$n" "$4" >> "$MULTI_ROOT/replies"
-fi
+[ -z "$reply" ] || printf 'poll%s reply: %s\n' "$n" "$reply" >> "$MULTI_ROOT/replies"
 while [ ! -e "$MULTI_ROOT/trigger$n" ]; do sleep 0.02; done
 case "$n" in
   1|2)
@@ -1717,7 +1734,14 @@ ROLL_BIN=$(fm_fakebin "$TMP_ROOT/lavish-rollback-stub")
 cat > "$ROLL_BIN/lavish-axi" <<'SH'
 #!/usr/bin/env bash
 set -eu
-[ "${3-}" != --agent-reply ] || printf '%s\n' "$4" >> "$ROLL_ROOT/replies"
+shift 2
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --agent-reply) printf '%s\n' "$2" >> "$ROLL_ROOT/replies"; shift 2 ;;
+    --agent-reply-file) [ "$2" = - ] || exit 2; cat >> "$ROLL_ROOT/replies"; shift 2 ;;
+    *) shift ;;
+  esac
+done
 printf 'session:\n  status: feedback\nprompts[1]{uid,prompt,selector,tag,text}:\n  "","another round","","message",""\n'
 SH
 chmod +x "$ROLL_BIN/lavish-axi"
@@ -1774,7 +1798,14 @@ REARM_BIN=$(fm_fakebin "$TMP_ROOT/lavish-rearm-stub")
 cat > "$REARM_BIN/lavish-axi" <<'SH'
 #!/usr/bin/env bash
 set -eu
-[ "${3-}" != --agent-reply ] || printf '%s\n' "$4" >> "$REARM_ROOT/replies"
+shift 2
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --agent-reply) printf '%s\n' "$2" >> "$REARM_ROOT/replies"; shift 2 ;;
+    --agent-reply-file) [ "$2" = - ] || exit 2; cat >> "$REARM_ROOT/replies"; shift 2 ;;
+    *) shift ;;
+  esac
+done
 while [ ! -e "$REARM_ROOT/release" ]; do sleep 0.02; done
 printf 'session:\n  status: feedback\nprompts[1]{uid,prompt,selector,tag,text}:\n  "","one more round","","message",""\n'
 SH
@@ -1873,17 +1904,20 @@ cat > "$LAVISH_SCRIPTED_BIN/lavish-axi" <<'SH'
 n=$(cat "$LAVISH_COUNT" 2>/dev/null || echo 0)
 n=$((n + 1))
 printf '%s\n' "$n" > "$LAVISH_COUNT"
-for arg in "$@"; do
-  case "$arg" in
-    --agent-reply) ;;
-    --*)
-      printf 'error: unknown option %s\ncode: VALIDATION_ERROR\n' "$arg" >&2
+reply=
+shift 2
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --agent-reply) reply=$2; shift 2 ;;
+    --agent-reply-file) [ "$2" = - ] || exit 2; reply=$(cat); shift 2 ;;
+    *)
+      printf 'error: unknown option %s\ncode: VALIDATION_ERROR\n' "$1" >&2
       exit 2
       ;;
   esac
 done
-if [ -n "${LAVISH_REPLY_LOG-}" ] && [ "${1-}" = poll ] && [ "${3-}" = --agent-reply ]; then
-  printf '%s\n' "$4" >> "$LAVISH_REPLY_LOG"
+if [ -n "${LAVISH_REPLY_LOG-}" ] && [ -n "$reply" ]; then
+  printf '%s\n' "$reply" >> "$LAVISH_REPLY_LOG"
 fi
 read -r -a plan <<< "$LAVISH_SCRIPT"
 i=$((n - 1))
@@ -5053,7 +5087,14 @@ export DRAIN
 cat > "$DRAIN/bin/lavish-axi" <<'SH'
 #!/usr/bin/env bash
 set -eu
-[ "${3-}" != --agent-reply ] || printf '%s\n' "$4" >> "$DRAIN/replies"
+shift 2
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --agent-reply) printf '%s\n' "$2" >> "$DRAIN/replies"; shift 2 ;;
+    --agent-reply-file) [ "$2" = - ] || exit 2; cat >> "$DRAIN/replies"; shift 2 ;;
+    *) shift ;;
+  esac
+done
 printf 'poll\n' >> "$DRAIN/polls"
 if [ "$(wc -l < "$DRAIN/polls")" -ge 2 ]; then
   while [ ! -e "$DRAIN/release2" ]; do sleep 0.02; done

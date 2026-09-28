@@ -769,7 +769,7 @@ fm_procevent_claim_state_locked() {
 # fm_procevent_claim_acquire_locked <source-id> <home> <pid> <registration> <state-root>
 # 0 acquired, 1 error, 2 held by a live owner (possibly another home).
 fm_procevent_claim_acquire_locked() {
-  local id=$1 home=$2 pid=$3 registration=$4 state=$5 root claim tmp identity token status claim_state old_home old_token old_reg_dir reg_dir reg_identity stage state_root state_device state_inode state_owner state_mode kind
+  local id=$1 home=$2 pid=$3 registration=$4 state=$5 root claim tmp identity token status claim_state old_home old_token old_reg_dir reg_dir reg_identity stage state_root state_device state_inode state_owner state_mode
   fm_procevent_source_id_valid "$id" || return 1
   [ -f "$registration" ] && [ ! -L "$registration" ] || return 1
   reg_dir=${registration%/*}
@@ -785,9 +785,7 @@ fm_procevent_claim_acquire_locked() {
     case "$claim_state" in
       0|2|3|4) status=2 ;;
       1)
-        kind=$(sed -n 's/^kind=//p' "$registration" | head -1)
-        if { [ "$kind" = lavish-owned ] || [ "$kind" = task-owned ]; } \
-          && ! fm_procevent_claim_owned_by_state "$state" "$home"; then
+        if ! fm_procevent_claim_owned_by_state "$state" "$home"; then
           status=2
         elif [ -f "$claim" ] && [ ! -L "$claim" ]; then
           old_home=$FM_PROCEVENT_CLAIM_HOME
