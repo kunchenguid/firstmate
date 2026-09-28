@@ -12,6 +12,18 @@
 # only reach profile this release records: there is no phone channel, and the
 # entry announcement says so every time.
 #
+# AWAY OR QUIET. The same record also backs daemon-backed quiet mode, which a
+# quiet entry marks with `mode: quiet`: the captain is present there, so a quiet
+# record holds nothing for a return. fm_afk_contract_mode (the `mode`
+# subcommand) is the one reading of which posture a record is, and
+# fm_afk_contract_away_present is true only for an away record; any record
+# without a valid quiet mode reads as away, so a damaged mode keeps the holds.
+# A quiet record's announcement and read-back say it holds nothing and name no
+# reach, return, or spend cap; an away record's are unchanged. Only a quiet
+# entry over no record or over a quiet record writes one: an away entry over a
+# quiet record, a refresh included, rewrites it as away, and a quiet entry never
+# turns a standing away record quiet (the captain's return comes first).
+#
 # ENTRY IS THE GO. `/afk` itself is the captain's go: `enter` writes the record
 # in the same turn, before any other work, and never waits for a further human
 # response, because the captain who typed /afk may not look at the screen again.
@@ -79,7 +91,10 @@
 #     replaced. `propose` and `confirm` were retired with the wait-for-go gate.
 #   fm-afk-contract.sh readback
 #     The record's content for the captain and for the away session: the words
-#     verbatim plus the entry time, expected return, spend cap, and reach line.
+#     verbatim plus the entry time, expected return, spend cap, and reach line
+#     (for a quiet record, the entry time and that nothing is held).
+#   fm-afk-contract.sh mode [--path <record>]
+#     Print `away` or `quiet` (AWAY OR QUIET above); exit 1 with no record.
 #   fm-afk-contract.sh field <name> [--path <record>]
 #   fm-afk-contract.sh words [--path <record>]
 #   fm-afk-contract.sh validate [--path <record>]  exit 0 when the record is readable and complete
@@ -104,7 +119,8 @@
 # primitive itself.
 #
 # Sourceable: with the BASH_SOURCE guard, other scripts get the path, presence,
-# and lock helpers (fm_afk_contract_path, fm_afk_contract_present,
+# posture, and lock helpers (fm_afk_contract_path, fm_afk_contract_present,
+# fm_afk_contract_mode, fm_afk_contract_away_present,
 # fm_afk_contract_archive_dir,
 # fm_afk_contract_lock_hold, fm_afk_contract_lock_release) without running main.
 set -u
@@ -122,6 +138,7 @@ FM_AFK_CONTRACT_VERSION=2
 FM_AFK_CONTRACT_READABLE_VERSIONS="1 2"
 FM_AFK_CONTRACT_REACH_ANNOUNCED='No phone channel is configured; anything that needs you waits for your return.'
 FM_AFK_CONTRACT_SPEND_DEFAULT=4
+FM_AFK_CONTRACT_QUIET_HOLDS_NOTHING='you are present, so nothing waits for your return: every action you ask for, a local landing or a merge included, proceeds now under ordinary attended authority, and quiet mode changes only which updates reach this conversation.'
 # Generous against the longest legitimate holder, a merge waiting on the forge,
 # so the bound only ever trips on something genuinely wedged.
 _FM_AFK_CONTRACT_LOCK_TIMEOUT=120
@@ -143,6 +160,29 @@ fm_afk_contract_archive_dir() {  # [state-dir]
 
 fm_afk_contract_present() {  # [state-dir]
   [ -f "$(fm_afk_contract_path "${1:-$FM_AFK_CONTRACT_STATE}")" ]
+}
+
+# The posture a record at <path> is (the header's AWAY OR QUIET): quiet only
+# for an exact `mode: quiet`, away otherwise.
+fm_afk_contract_record_mode() {  # <path>
+  if [ "$(fm_afk_contract_read_field "$1" mode)" = quiet ]; then
+    printf 'quiet\n'
+  else
+    printf 'away\n'
+  fi
+}
+
+# Print away or quiet for this home's record; 1 with no record.
+fm_afk_contract_mode() {  # [state-dir]
+  local path
+  path=$(fm_afk_contract_path "${1:-$FM_AFK_CONTRACT_STATE}")
+  [ -f "$path" ] || return 1
+  fm_afk_contract_record_mode "$path"
+}
+
+# True only while an away record exists; a quiet record is a present captain.
+fm_afk_contract_away_present() {  # [state-dir]
+  [ "$(fm_afk_contract_mode "$@")" = away ]
 }
 
 fm_afk_contract_lock_path() {  # [state-dir]
@@ -222,7 +262,7 @@ fm_afk_contract_render_record() {  # <entered-iso> <entered-epoch> <confirmed-is
   printf 'spend_max_concurrent_workers: %s\n' "${SPEND:-$FM_AFK_CONTRACT_SPEND_DEFAULT}"
   printf 'confirmed: %s\n' "$confirmed"
   printf 'confirmed_epoch: %s\n' "$confirmed_epoch"
-  [ "${FM_AFK_MODE:-}" != quiet ] || printf 'mode: quiet\n'
+  [ "${FM_AFK_CONTRACT_ENTRY_MODE:-away}" != quiet ] || printf 'mode: quiet\n'
   if [ -n "$WORDS" ]; then
     local words_body=$WORDS words_indicator='|-'
     case "$words_body" in
@@ -340,15 +380,23 @@ fm_afk_contract_validate() {  # <path>
 # rules live in bin/fm-branch-prompt.sh, so this render stays a faithful mirror
 # of the record for the captain at entry and for the away session on every wake.
 # It never asks for a go: the record already stands when it is printed.
-fm_afk_contract_render_readback() {  # <path> <title>
-  local path=$1 title=$2 words expected spend
-  expected=$(fm_afk_contract_read_field "$path" expected_return)
-  spend=$(fm_afk_contract_read_field "$path" spend_max_concurrent_workers)
-  printf '%s\n' "$title"
-  printf '  entered: %s\n' "$(fm_afk_contract_read_field "$path" entered)"
-  printf '  expected return: %s\n' "$( [ "$expected" = - ] && printf 'not given' || printf '%s' "$expected")"
-  printf '  spend cap: %s concurrent workers\n' "$spend"
-  printf '  reach: hold-for-return only. %s\n' "$(fm_afk_contract_read_field "$path" reach_announced)"
+# A quiet record reads back as quiet mode: no return, reach, or spend cap
+# applies while the captain is present.
+fm_afk_contract_render_readback() {  # <path>
+  local path=$1 words expected spend
+  if [ "$(fm_afk_contract_record_mode "$path")" = quiet ]; then
+    printf 'Quiet mode (recorded):\n'
+    printf '  entered: %s\n' "$(fm_afk_contract_read_field "$path" entered)"
+    printf '  holds: none - %s\n' "$FM_AFK_CONTRACT_QUIET_HOLDS_NOTHING"
+  else
+    expected=$(fm_afk_contract_read_field "$path" expected_return)
+    spend=$(fm_afk_contract_read_field "$path" spend_max_concurrent_workers)
+    printf 'Away posture (recorded):\n'
+    printf '  entered: %s\n' "$(fm_afk_contract_read_field "$path" entered)"
+    printf '  expected return: %s\n' "$( [ "$expected" = - ] && printf 'not given' || printf '%s' "$expected")"
+    printf '  spend cap: %s concurrent workers\n' "$spend"
+    printf '  reach: hold-for-return only. %s\n' "$(fm_afk_contract_read_field "$path" reach_announced)"
+  fi
   words=$(fm_afk_contract_read_words "$path"; rc=$?; printf x; exit "$rc") || return 1
   words=${words%x}
   if [ -n "$words" ]; then
@@ -362,6 +410,11 @@ fm_afk_contract_render_readback() {  # <path> <title>
 
 fm_afk_contract_render_announcement() {  # <path>
   local path=$1 expected words mandate_text
+  if [ "$(fm_afk_contract_record_mode "$path")" = quiet ]; then
+    printf 'Quiet mode recorded at %s: %s Only an explicit /quiet off ends it.\n' \
+      "$(fm_afk_contract_read_field "$path" confirmed)" "$FM_AFK_CONTRACT_QUIET_HOLDS_NOTHING"
+    return 0
+  fi
   expected=$(fm_afk_contract_read_field "$path" expected_return)
   words=$(fm_afk_contract_read_words "$path"; rc=$?; printf x; exit "$rc") || return 1
   words=${words%x}
@@ -443,28 +496,40 @@ fm_afk_contract_archive_target() {  # <record> [superseded-stamp]
 
 # /afk is the go: write the record in this same call, with no proposal and no
 # later confirmation step. Inputs were parsed before the lock (WORDS,
-# EXPECTED_RETURN, SPEND, FM_AFK_CONTRACT_SCALARS_GIVEN).
+# EXPECTED_RETURN, SPEND, FM_AFK_CONTRACT_SCALARS_GIVEN). The written mode
+# follows the header's AWAY OR QUIET rules.
 fm_afk_contract_cmd_enter() {
-  local record legacy now now_epoch session_entered session_entered_epoch staged archived archived_tmp
+  local record legacy now now_epoch session_entered session_entered_epoch staged archived archived_tmp standing=''
   record=$(fm_afk_contract_path)
   legacy=$(fm_afk_contract_legacy_proposal_path)
-  if [ -f "$record" ] && [ -z "$WORDS" ]; then
+  FM_AFK_CONTRACT_ENTRY_MODE=away
+  [ "${FM_AFK_MODE:-}" != quiet ] || FM_AFK_CONTRACT_ENTRY_MODE=quiet
+  if [ -f "$record" ]; then
     fm_afk_contract_validate "$record" || return 1
-    fm_afk_contract_log "away posture already recorded at $(fm_afk_contract_read_field "$record" entered); a refresh leaves it untouched"
+    standing=$(fm_afk_contract_record_mode "$record")
+    [ "$standing" = quiet ] || FM_AFK_CONTRACT_ENTRY_MODE=away
+  fi
+  if [ -f "$record" ] && [ -z "$WORDS" ] && [ "$standing" = "$FM_AFK_CONTRACT_ENTRY_MODE" ]; then
+    if [ "$standing" = quiet ]; then
+      fm_afk_contract_log "quiet mode already recorded at $(fm_afk_contract_read_field "$record" entered); a refresh leaves it untouched"
+    else
+      fm_afk_contract_log "away posture already recorded at $(fm_afk_contract_read_field "$record" entered); a refresh leaves it untouched"
+    fi
     if [ "$FM_AFK_CONTRACT_SCALARS_GIVEN" -eq 1 ]; then
       fm_afk_contract_log "the expected return and spend cap given with this refresh were not applied; enter new words to replace the mandate"
     fi
     rm -f "$legacy"
     fm_afk_contract_render_announcement "$record" || return 1
-    fm_afk_contract_render_readback "$record" 'Away posture (recorded):'
+    fm_afk_contract_render_readback "$record"
     return
   fi
   now=$(fm_afk_contract_now_iso)
   now_epoch=$(date +%s)
   session_entered=$now
   session_entered_epoch=$now_epoch
-  if [ -f "$record" ]; then
-    fm_afk_contract_validate "$record" || return 1
+  # A replacement carries the session entry forward; quiet mode becoming the
+  # away posture starts the away session now.
+  if [ -f "$record" ] && [ "$standing" = "$FM_AFK_CONTRACT_ENTRY_MODE" ]; then
     session_entered=$(fm_afk_contract_read_field "$record" entered)
     session_entered_epoch=$(fm_afk_contract_read_field "$record" entered_epoch)
   fi
@@ -489,11 +554,15 @@ fm_afk_contract_cmd_enter() {
     return 1
   }
   if [ -n "${archived:-}" ]; then
-    fm_afk_contract_log "replaced the earlier away posture; its record is archived at $archived"
+    if [ "$standing" = "$FM_AFK_CONTRACT_ENTRY_MODE" ]; then
+      fm_afk_contract_log "replaced the earlier $( [ "$standing" = quiet ] && printf 'quiet mode' || printf 'away posture'); its record is archived at $archived"
+    else
+      fm_afk_contract_log "quiet mode became the away posture; the quiet record is archived at $archived"
+    fi
   fi
   rm -f "$legacy"
   fm_afk_contract_render_announcement "$record" || return 1
-  fm_afk_contract_render_readback "$record" 'Away posture (recorded):'
+  fm_afk_contract_render_readback "$record"
 }
 
 fm_afk_contract_cmd_archive() {
@@ -552,7 +621,7 @@ fm_afk_contract_main() {
       [ "$#" -eq 0 ] || { fm_afk_contract_select_path "$@" >/dev/null; fm_afk_contract_usage >&2; return 2; }
       path=$(fm_afk_contract_path)
       [ -f "$path" ] || { fm_afk_contract_log "no record at $path"; return 1; }
-      fm_afk_contract_render_readback "$path" 'Away posture (recorded):' || return 1 ;;
+      fm_afk_contract_render_readback "$path" || return 1 ;;
     field)
       [ "$#" -ge 1 ] || { fm_afk_contract_usage >&2; return 2; }
       local name=$1; shift
@@ -561,6 +630,10 @@ fm_afk_contract_main() {
     words)
       path=$(fm_afk_contract_select_path "$@") || { fm_afk_contract_usage >&2; return 2; }
       fm_afk_contract_read_words "$path" ;;
+    mode)
+      path=$(fm_afk_contract_select_path "$@") || { fm_afk_contract_usage >&2; return 2; }
+      [ -f "$path" ] || { fm_afk_contract_log "no record at $path"; return 1; }
+      fm_afk_contract_record_mode "$path" ;;
     validate)
       path=$(fm_afk_contract_select_path "$@") || { fm_afk_contract_usage >&2; return 2; }
       fm_afk_contract_validate "$path" ;;

@@ -2785,6 +2785,28 @@ test_allow_red_is_refused_while_away() {
   pass "fm-pr-merge rechecks away presence before an attended red merge"
 }
 
+# A quiet-mode record is a present captain, not an away posture: the attended
+# red-check waiver still works and the merge is recorded as attended.
+test_quiet_record_keeps_merges_attended() {
+  local case_dir head url
+  head=adadadadadadadadadadadadadadadadadadadad
+  url=https://github.com/example/repo/pull/84
+  case_dir=$(make_case quiet-allow-red)
+  mkdir -p "$case_dir/wt" "$case_dir/home"
+  add_gh_mocks "$case_dir" "$head"
+  write_github_red_json "$case_dir" "$head" lint
+  FM_AFK_MODE=quiet write_away_record "$case_dir"
+  FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$url" --allow-red lint \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "quiet-allow-red: the attended waiver was refused under quiet mode: $(cat "$case_dir/stderr")"
+  assert_no_grep 'attended-only' "$case_dir/stderr" \
+    "quiet-allow-red: quiet mode was treated as away"
+  assert_logged_gh_merge "$case_dir" 84 example/repo --squash
+  [ "$(sed -n 6p "$case_dir/state/task-x1.merge-authority" 2>/dev/null || true)" = attended ] \
+    || fail "quiet-allow-red: the persisted merge authority is not attended: $(cat "$case_dir/state/task-x1.merge-authority" 2>/dev/null || true)"
+  pass "fm-pr-merge keeps a quiet-mode home's merges attended, the named red-check waiver included"
+}
+
 test_allow_red_requires_one_separate_name() {
   local case_dir rc head
   head=afafafafafafafafafafafafafafafafafafafaf
@@ -3696,6 +3718,7 @@ test_supersession_never_crosses_check_names
 test_undated_runs_never_supersede
 test_allow_red_still_waives_only_the_current_failure
 test_allow_red_is_refused_while_away
+test_quiet_record_keeps_merges_attended
 test_allow_red_requires_one_separate_name
 test_away_record_permits_any_green_merge_under_away_authority
 test_away_branch_actor_merges_green_under_the_record

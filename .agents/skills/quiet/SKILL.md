@@ -76,10 +76,12 @@ point of this mode (AGENTS.md section 8's away-mode stub, quiet branch).
 
 ## Orthogonal to approval authority
 
-Identical to `/afk`: quiet mode changes how aggressively firstmate surfaces
-things, never who approves what.
-A PR ready for merge keeps the merge authority from `AGENTS.md` section 7, and
-a needs-decision finding keeps the `ask-user-authority` policy.
+Quiet mode changes how aggressively firstmate surfaces things, never who approves what.
+A PR ready for merge keeps the merge authority from `AGENTS.md` section 7, and a needs-decision finding keeps the `ask-user-authority` policy.
+
+The captain is present, so quiet mode holds nothing for a return.
+The record a quiet entry writes carries quiet mode (`bin/fm-afk-contract.sh mode`), and its entry, read-back, and session-start lines say so.
+Every action the captain asks for or standing authority covers - landing local-only work, a merge, a dispatch - proceeds now exactly as it would without quiet mode; the `afk` skill's away holds never apply to a quiet record.
 
 ## Must not hide a decision or a failure
 

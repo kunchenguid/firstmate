@@ -976,6 +976,38 @@ quiet_in() {  # <home> <command...>
     FM_STATE_OVERRIDE="$home/state" "$@" 2>&1
 }
 
+# Daemon-backed quiet mode (no supervision host) writes the record through the
+# same entry, and the captain is present: the entry the main session reads must
+# not say hold-for-return, the live finding where a present captain's requested
+# local landing was held until /quiet off. A later /afk makes the record away.
+unit_daemon_quiet_entry_holds_nothing_for_a_return() {
+  local st out rc
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-quiet-entry.XXXXXX")
+  mkdir -p "$st/state"
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_MODE=quiet "$LAUNCH" enter 2>&1)
+  rc=$?
+  if [ "$rc" -eq 0 ] \
+    && [ "$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$CONTRACT" mode)" = quiet ] \
+    && printf '%s' "$out" | grep -F 'Quiet mode recorded at ' >/dev/null \
+    && printf '%s' "$out" | grep -F 'nothing waits for your return' >/dev/null \
+    && ! printf '%s' "$out" | grep -F 'hold-for-return' >/dev/null \
+    && ! printf '%s' "$out" | grep -F 'Away posture' >/dev/null; then
+    pass "quiet entry: the daemon-backed quiet record announces a present captain with nothing held for a return"
+  else
+    fail "quiet entry: the quiet record read as away or hold-for-return (rc=$rc): $out"
+  fi
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" enter 2>&1)
+  rc=$?
+  if [ "$rc" -eq 0 ] \
+    && [ "$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$CONTRACT" mode)" = away ] \
+    && printf '%s' "$out" | grep -F 'hold-for-return only' >/dev/null; then
+    pass "quiet entry: a later /afk entry turns the quiet record into the away posture, which holds for the return"
+  else
+    fail "quiet entry: /afk over quiet mode did not record away (rc=$rc): $out"
+  fi
+  rm -rf "$st"
+}
+
 # /quiet where the attended supervision host runs is a statement: quiet-check
 # says quiet mode needs nothing, or that the session is paused while its
 # broken-session latch holds, and a quiet enter writes nothing. Without the
@@ -1628,6 +1660,7 @@ unit_tmux_absence_distinguishes_probe_failure
 unit_native_lifecycle
 unit_supervision_host_claude_home_runs_no_away_daemon
 unit_supervision_host_other_harnesses_run_no_away_daemon
+unit_daemon_quiet_entry_holds_nothing_for_a_return
 unit_supervision_host_quiet_statement
 unit_supervision_host_quiet_fallback
 unit_supervision_host_quiet_after_afk

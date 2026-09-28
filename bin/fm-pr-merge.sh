@@ -95,7 +95,9 @@
 # serializes the captain-hold check through the forge command. A still-held or
 # unreadable row refuses before that command, so a captain approval must be
 # recorded as an `answer --release` before this entrypoint is invoked. While
-# state/.afk-contract exists any green merge may proceed under away authority:
+# an away record exists (a quiet-mode record is a present captain, so its
+# merges stay attended: bin/fm-afk-contract.sh mode) any green merge may
+# proceed under away authority:
 # the record's presence is the whole mechanical fact, and which merge the
 # captain's away words meant is the supervision session's reading
 # (bin/fm-branch-prompt.sh "Postures"). An unreadable record refuses rather
@@ -1100,7 +1102,7 @@ hold_away_record_for_merge() {
 
 require_current_away_authority() {
   FM_PR_AWAY_POSTURE=false
-  if fm_afk_contract_present "$STATE"; then
+  if fm_afk_contract_away_present "$STATE"; then
     FM_PR_AWAY_POSTURE=true
     if [ "$PROVIDER" = github ] && [ "$FM_PR_GITHUB_AUTO_REQUESTED" = true ]; then
       echo "error: --auto is attended-only; while the away-posture record exists only a synchronous merge may run under its authority lock" >&2

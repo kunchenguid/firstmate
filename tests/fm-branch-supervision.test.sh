@@ -1317,6 +1317,26 @@ WRAPPER
   pass "relocated branch spawn admits only already-queued dispatchable work, including on a manual-backend home"
 }
 
+# A quiet-mode record is a present captain: its spend cap never queues the
+# captain's own dispatch for a return, while an away record's cap still binds.
+test_quiet_record_never_caps_a_present_captains_spawn() {
+  local home root out
+  home="$TMP_ROOT/quiet-spend-home"
+  root="$TMP_ROOT/quiet-spend-root"
+  mkdir -p "$home/state" "$root/bin"
+  git init -q -b main "$root"
+  git -C "$root" commit -q --allow-empty -m init
+  FM_AFK_MODE=quiet FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" enter --spend 1 >/dev/null || fail "quiet entry failed"
+  fm_write_meta "$home/state/task-a.meta" "window=fm-task-a" "kind=ship"
+  fm_write_meta "$home/state/task-b.meta" "window=fm-task-b" "kind=ship"
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" "$ROOT/bin/fm-spawn.sh" task-new --mode no-mistakes --yolo off 2>&1)
+  assert_not_contains "$out" "caps concurrent workers" "a quiet record capped a present captain's spawn"
+  FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" enter --spend 1 >/dev/null 2>&1 || fail "away entry over quiet failed"
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" "$ROOT/bin/fm-spawn.sh" task-new --mode no-mistakes --yolo off 2>&1)
+  assert_contains "$out" "caps concurrent workers at 1 and 2 ordinary task(s) are live" "the away record's cap no longer binds"
+  pass "a quiet-mode record never caps a present captain's spawn, while the away record's cap still binds"
+}
+
 test_away_spend_cap_is_rechecked_under_the_task_set_lock() {
   local home root out i
   home="$TMP_ROOT/away-cap-lock-home"
@@ -1401,3 +1421,4 @@ test_branch_cannot_force_teardown_or_directly_relaunch
 test_away_record_relocates_main_owned_actions_to_the_branch
 test_away_branch_spawn_requires_queued_dispatchable_work
 test_away_spend_cap_is_rechecked_under_the_task_set_lock
+test_quiet_record_never_caps_a_present_captains_spawn
