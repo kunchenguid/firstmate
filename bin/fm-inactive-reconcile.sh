@@ -83,8 +83,25 @@
 # main-home acknowledgement. The atomic epoch/cursor marker's mtime gates scans,
 # and its cursor records the last child visited within the aggregate budget.
 #
-# The scan reads only durable local state and fm-crew-state.sh; it never invokes
-# gh, gh-axi, curl, fm-pr-check.sh, fm-pr-poll.sh, or a state *.check.sh.
+# The scan reads only durable local state and fm-crew-state.sh, with one
+# narrow bounded exception: a direct ship child whose crew-state verdict is
+# specifically unknown is not thereby proven still unfinished (working,
+# paused, parked, and every other non-terminal verdict are left exactly as
+# before - only unknown gets the extra look).
+# fm-crew-state.sh's own header (step 5) documents that it deliberately
+# reports unknown, never an optimistic done, whenever no no-mistakes run is
+# attributed to a crew and its endpoint cannot be read - exactly how a
+# genuinely landed task whose run record aged out of the ledger, or whose
+# pane simply closed after finishing, is reported back here. For such a
+# child, with its worktree still present, one call to bin/fm-landing-lib.sh's
+# work_is_landed() - the same proven check bin/fm-teardown.sh's worktree
+# safety gate uses: a merged PR, or content already in the default branch -
+# supplies the missing proof before the child is left merely inactive. This
+# is the only case in which the scan may invoke gh, gh-axi, or a network git
+# fetch, it is bounded by the same per-child timeout as the crew-state read
+# above, and a timeout or inconclusive read yields no verdict, same as an
+# ordinary unknown. It never invokes fm-pr-check.sh, fm-pr-poll.sh, or a
+# state *.check.sh.
 set -u
 export LC_ALL=C
 
@@ -106,6 +123,8 @@ CREW_STATE_BIN="${FM_INACTIVE_CREW_STATE_BIN:-$SCRIPT_DIR/fm-crew-state.sh}"
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
+# shellcheck source=bin/fm-landing-lib.sh
+. "$SCRIPT_DIR/fm-landing-lib.sh"
 
 FM_INACTIVE_RECONCILE_SECS=${FM_INACTIVE_RECONCILE_SECS:-900}
 case "$FM_INACTIVE_RECONCILE_SECS" in
@@ -495,6 +514,28 @@ report_child() { # <id>
   report_child_ledger_locked "$id" "$meta"
 }
 
+# A crew-state verdict of specifically unknown for an inactive ship child is
+# not itself proof the work is unfinished (see this file's header): ask
+# bin/fm-landing-lib.sh's work_is_landed() the same question
+# bin/fm-teardown.sh's worktree safety gate would ask before ever discarding
+# this worktree. Only a kind=ship child (a scout has no landing concept, and
+# a secondmate is already excluded by the caller) whose worktree still exists
+# and whose branch can be read is eligible. Re-enters this script as
+# `_check-landed` under the same per-child timeout bound as the crew-state
+# read, so a slow or unreachable forge cannot wedge the scan; the existing
+# process-group backstop remains the last resort for a call that runs past
+# it. Returns 0 only on a proven landed verdict.
+landed_ship_verdict() { # <meta> <kind> <timeout>
+  local meta=$1 kind=$2 timeout=$3 wt branch
+  [ "$kind" != scout ] || return 1
+  wt=$(meta_field "$meta" worktree)
+  [ -n "$wt" ] && [ -d "$wt" ] || return 1
+  branch=$(git -C "$wt" rev-parse --abbrev-ref HEAD 2>/dev/null) || return 1
+  [ -n "$branch" ] && [ "$branch" != HEAD ] || return 1
+  fm_run_timed "$timeout" "$0" _check-landed "$wt" "$(meta_field "$meta" project)" "$branch" \
+    >/dev/null 2>&1
+}
+
 reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeout>
   local id=$1 meta=$2 self=${3:-} timeout=$4 status turn last age state_line state pr incarnation fingerprint outcome_key payload kind state_rc=0
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
@@ -522,6 +563,10 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
   case "$state_line" in
     'state: done '*) state='done' ;;
     'state: failed '*) state='failed' ;;
+    'state: unknown '*)
+      landed_ship_verdict "$meta" "$kind" "$timeout" || return 0
+      state='done'
+      ;;
     *) return 0 ;;
   esac
   pr=$(pr_for_task "$meta")
@@ -679,6 +724,17 @@ case "$mode" in
     fm_lock_acquire_wait "$SCAN_LOCK" || exit 1
     trap 'fm_lock_release "$SCAN_LOCK"' EXIT
     scan "$2"
+    ;;
+  _check-landed)
+    # Reentrant, bounded worker for landed_ship_verdict: <worktree> <project>
+    # <branch>. No lock of its own - the caller already holds the child's meta
+    # lock and bounds this call with fm_run_timed. Prints nothing; exit 0 only
+    # on a proven landed verdict from bin/fm-landing-lib.sh's work_is_landed().
+    [ "$#" -eq 4 ] || exit 2
+    WT=$2
+    PROJ=$3
+    PR_URL=
+    work_is_landed "$4"
     ;;
   report)
     if [ "$#" -ne 2 ] || ! valid_id "$2"; then
