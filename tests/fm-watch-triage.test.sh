@@ -2559,6 +2559,51 @@ test_declared_pause_first_alert_then_bounded_for_every_liveness_verdict() {
   pass "declared waits alert once, then recheck on the bounded cadence for alive, unknown, and dead agents"
 }
 
+# A crew that declared a wait, alerted, and passed its re-surface window can
+# resume provable work without a new status line. On a new pane hash the working
+# verdict outranks the standing declaration: pause bookkeeping clears and no
+# paused recheck wakes the supervisor.
+test_resurfaced_declared_pause_resuming_work_on_new_hash_clears_pause() {
+  local dir state fakebin out capture_file window key statusf sig pid
+  dir=$(make_case resurfaced-pause-resumes-work); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/held.status"
+  window="test:fm-held"; key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf 'idle, holding for upstream' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/held.meta"
+  printf 'paused: holding for the upstream tool release\n' > "$statusf"
+  set_mtime "$(( $(date +%s) - 500 ))" "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-held_status"
+  printf '%s' "$(hash_text "idle, holding for upstream")" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok \
+    FM_FAKE_CREW_STATE='state: paused · source: status-log · holding for the upstream tool release' \
+    watch_bg "$state" "$fakebin" "$out" env FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=240
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "declared wait did not alert on first sight"; }
+  grep -Fx "stale: $window" "$out" >/dev/null || fail "first-sight alert changed: $(cat "$out")"
+  [ -e "$state/.paused-resurfaced-$key" ] || fail "first alert did not start the bounded cadence"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the first-sight alert"
+
+  set_mtime "$(( $(date +%s) - 500 ))" "$state/.paused-resurfaced-$key"
+  set_mtime "$(( $(date +%s) - 500 ))" "$state/.paused-rechecked-$key"
+  printf 'running no-mistakes validation\n' > "$capture_file"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok \
+    FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)' \
+    watch_bg "$state" "$fakebin" "$out" env FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=240
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "resumed work was re-surfaced as a paused recheck: $(cat "$out")"; }
+  reap "$pid"
+  [ ! -s "$out" ] || fail "resumed work printed a wake: $(cat "$out")"
+  grep -F 'awaiting external' "$state/.wake-queue" >/dev/null 2>&1 && fail "resumed work queued a paused recheck"
+  [ ! -e "$state/.paused-$key" ] || fail "resumed work kept the paused flag"
+  [ ! -e "$state/.paused-resurfaced-$key" ] || fail "resumed work kept the re-surface throttle"
+  pass "a resurfaced declared wait whose crew resumes provable work on a new hash clears pause tracking without a recheck"
+}
+
 # Own background work is a declared wait using the same existing paused verb.
 # This intentionally keeps the first-sight alert, then uses the long cadence.
 # The backend/current-state fixtures are not live-harness evidence.
@@ -6675,6 +6720,7 @@ test_afk_busy_declared_pause_ticking_pane_hands_off_once
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_alerted_then_rechecked
 test_declared_pause_first_alert_then_bounded_for_every_liveness_verdict
+test_resurfaced_declared_pause_resuming_work_on_new_hash_clears_pause
 test_exited_declared_pause_is_bounded_and_live_gate_uses_pause_cadence
 test_own_work_wait_keeps_first_alert_then_long_cadence
 test_absorbed_replacement_wait_does_not_inherit_the_old_throttle

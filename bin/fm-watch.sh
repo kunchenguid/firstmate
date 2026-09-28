@@ -3118,6 +3118,7 @@ EOF
       if ! afk_present && status_is_paused_or_captain_held "$(status_declared_wait_line "$STATE/$task.status")" && [ "$busy_now" -ne 0 ]; then
         case "$(pause_state_class "$w" "$task")" in
           paused) handle_paused_stale "$w" "$task" "$h" ;;
+          working) clear_pause_tracking "$key" ;;
           *)
             if [ -e "$STATE/.paused-resurfaced-$key" ]; then
               handle_paused_stale "$w" "$task" "$h"
