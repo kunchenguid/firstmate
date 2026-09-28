@@ -21,3 +21,4 @@ config/
 .claude/upstreams/*/node_modules/
 .claude/upstreams/winnow/sidecar/.venv/
 .stow-notes.md
+.omo/
