@@ -962,6 +962,8 @@ test_ship_and_scout_forbid_ending_a_turn_on_an_announced_step() {
       FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes >/dev/null 2>&1
     fi
     brief="$home/data/$id/brief.md"
+    assert_grep "take it in the same turn with your tools" "$brief" \
+      "$kind brief did not require taking the announced next step with tools in the same turn"
     assert_grep "on the announcement, or report \`paused:\`/\`blocked:\` with the reason." "$brief" \
       "$kind brief did not forbid ending a turn on an announced next step"
     if [ "$kind" = ship ]; then

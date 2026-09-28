@@ -308,7 +308,7 @@ test_promote_refuses_a_symlinked_task_record() {
 # prints against a capturing fm-send.sh, and asserts on the message the worker would
 # actually receive - for every supported mode.
 test_promotion_delivers_the_real_definition_of_done() {
-  local home meta out sendroot payload mode id brief_dod delivered_dod
+  local home meta out sendroot payload mode id brief_dod delivered_dod instructions
   home="$TMP_ROOT/promote-dod/home"
   sendroot="$TMP_ROOT/promote-dod/sendroot"
   mkdir -p "$home/state" "$sendroot/bin"
@@ -355,6 +355,17 @@ STUB
       "$mode: promoted worker did not receive the Captain's intent subsection"
     assert_grep "## Firstmate spec" "$payload" \
       "$mode: promoted worker did not receive the Firstmate spec subsection"
+
+    # Both the delivered promotion message and persisted relaunch brief are
+    # generated worker interfaces; neither may lose the actionable ship rule.
+    for instructions in "$payload" "$home/data/$id/brief.md"; do
+      assert_grep "Never end a turn on an announced next step: take it in the same turn with your tools instead of stopping on the announcement, or report \`paused:\`/\`blocked:\` with the reason." "$instructions" \
+        "$mode: $instructions omitted the same-turn action rule"
+      assert_grep "Drive your own validation and delivery path: beyond the handoff your Definition of done names, wait for no approval you did not request through \`needs-decision\`." "$instructions" \
+        "$mode: $instructions omitted handoff-qualified ship authority"
+      assert_no_grep "Your own validation and delivery path needs no such approval" "$instructions" \
+        "$mode: $instructions retained approval wording that conflicts with the handoff"
+    done
 
     # Compare the public outputs of both real generation paths. The promoted
     # payload ends at its Definition of done, as does an ordinary generated
