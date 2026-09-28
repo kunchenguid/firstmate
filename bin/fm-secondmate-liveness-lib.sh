@@ -56,8 +56,9 @@
 # remote probe, fm_pending_reply_tick's `observe` call in
 # bin/fm-pending-reply-lib.sh. The bound is fm_exec_timed's, not
 # fm_run_timed's, because its watchdog also reaps the probe when the prober is
-# stopped mid-probe, even by a TERM to its whole process group. bin/fm-on.sh stays unbounded for routed
-# commands by design; only this probe, which supervision waits on, is bounded.
+# stopped mid-probe, even by a TERM to its whole process group. bin/fm-on.sh
+# stays unbounded for routed commands by design; only this probe, which
+# supervision waits on, is bounded.
 #
 # Concurrency: fm_secondmate_liveness_lock serializes probe+kill+relaunch per
 # task across the bootstrap sweep and the watcher tick, so a concurrent
