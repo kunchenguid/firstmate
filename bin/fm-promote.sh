@@ -178,12 +178,17 @@ PROMOTE_PROJECT_LOCK_HELD=0
 TMP=
 META=
 SCOUT_BRIEF=
+INSTRUCTIONS=
 BRIEF_ORIGINAL=
 BRIEF_REPLACEMENT=
+INSTRUCTIONS_PUBLISHED=0
 promote_cleanup() {
   local status=$?
   [ -z "$TMP" ] || rm -f -- "$TMP" 2>/dev/null || true
   [ -z "$BRIEF_REPLACEMENT" ] || rm -f -- "$BRIEF_REPLACEMENT" 2>/dev/null || true
+  if [ "$status" -ne 0 ] && [ "$INSTRUCTIONS_PUBLISHED" = 1 ] && [ -n "$INSTRUCTIONS" ]; then
+    rm -f -- "$INSTRUCTIONS" 2>/dev/null || true
+  fi
   if [ -n "$BRIEF_ORIGINAL" ] && [ -e "$BRIEF_ORIGINAL" ]; then
     mv -f -- "$BRIEF_ORIGINAL" "$SCOUT_BRIEF" 2>/dev/null || true
   fi
@@ -256,29 +261,27 @@ if [ -n "$BASE_BRANCH" ] && [ "$MODE" != local-only ]; then
     echo "error: cannot verify remote base '$BASE_BRANCH' without the scout's project checkout; refusing promotion" >&2
     exit 1
   }
-  if git -C "$PROMOTE_PROJECT" remote get-url origin >/dev/null 2>&1; then
-    PROMOTE_REMOTE_BASE_REFS=$(git -C "$PROMOTE_PROJECT" ls-remote --heads origin "refs/heads/$BASE_BRANCH" 2>/dev/null) || {
-      echo "error: could not check remote base '$BASE_BRANCH' on origin; refusing promotion" >&2
-      exit 1
-    }
-    [ -n "$PROMOTE_REMOTE_BASE_REFS" ] || {
-      echo "error: remote base '$BASE_BRANCH' does not exist on origin; refusing promotion" >&2
-      exit 1
-    }
-    [ -n "$PROMOTE_WORKTREE" ] && [ -d "$PROMOTE_WORKTREE" ] || {
-      echo "error: cannot verify remote base '$BASE_BRANCH' without the scout's recorded worktree; refusing promotion" >&2
-      exit 1
-    }
-    git -C "$PROMOTE_WORKTREE" rev-parse --verify --quiet "refs/remotes/origin/$BASE_BRANCH^{commit}" >/dev/null || {
-      echo "error: remote base '$BASE_BRANCH' is not available in the scout worktree; refusing promotion" >&2
-      exit 1
-    }
-    PROMOTE_BASE_REMOTE=1
-  elif [ -n "$PROMOTE_PROJECT" ] && [ -d "$PROMOTE_PROJECT" ] &&
-    ! git -C "$PROMOTE_PROJECT" rev-parse --verify --quiet "refs/heads/$BASE_BRANCH^{commit}" >/dev/null; then
-    echo "error: base '$BASE_BRANCH' does not exist locally in $PROMOTE_PROJECT; refusing promotion" >&2
+  git -C "$PROMOTE_PROJECT" remote get-url origin >/dev/null 2>&1 || {
+    echo "error: cannot verify remote base '$BASE_BRANCH' without origin; refusing promotion" >&2
     exit 1
-  fi
+  }
+  PROMOTE_REMOTE_BASE_REFS=$(git -C "$PROMOTE_PROJECT" ls-remote --heads origin "refs/heads/$BASE_BRANCH" 2>/dev/null) || {
+    echo "error: could not check remote base '$BASE_BRANCH' on origin; refusing promotion" >&2
+    exit 1
+  }
+  [ -n "$PROMOTE_REMOTE_BASE_REFS" ] || {
+    echo "error: remote base '$BASE_BRANCH' does not exist on origin; refusing promotion" >&2
+    exit 1
+  }
+  [ -n "$PROMOTE_WORKTREE" ] && [ -d "$PROMOTE_WORKTREE" ] || {
+    echo "error: cannot verify remote base '$BASE_BRANCH' without the scout's recorded worktree; refusing promotion" >&2
+    exit 1
+  }
+  git -C "$PROMOTE_WORKTREE" rev-parse --verify --quiet "refs/remotes/origin/$BASE_BRANCH^{commit}" >/dev/null || {
+    echo "error: remote base '$BASE_BRANCH' is not available in the scout worktree; refusing promotion" >&2
+    exit 1
+  }
+  PROMOTE_BASE_REMOTE=1
 fi
 if [ "$MODE" = local-only ] && [ -n "$BASE_BRANCH" ]; then
   [ -n "$PROMOTE_PROJECT" ] && [ -d "$PROMOTE_PROJECT" ] || {
@@ -453,6 +456,7 @@ EOF
 } > "$TMP" || { echo "error: could not render ship instructions for mode=$MODE" >&2; exit 1; }
 mv "$TMP" "$INSTRUCTIONS"
 TMP=
+INSTRUCTIONS_PUBLISHED=1
 [ -f "$INSTRUCTIONS" ] && [ -r "$INSTRUCTIONS" ] || { echo "error: ship instructions were not published as a readable file: $INSTRUCTIONS" >&2; exit 1; }
 
 # The current worker receives the instructions through fm-send, but a replacement
@@ -493,12 +497,10 @@ grep -v -e '^kind=' -e '^mode=' -e '^yolo=' -e '^branch=' -e '^base_branch=' "$M
 } >> "$TMP"
 if [ "$PROMOTE_BASE_REMOTE" = 1 ]; then
   [ -n "$PROMOTE_WORKTREE" ] && [ -d "$PROMOTE_WORKTREE" ] || {
-    rm -f -- "$INSTRUCTIONS" 2>/dev/null || true
     echo "error: cannot verify remote base '$BASE_BRANCH' without the scout's recorded worktree; refusing promotion" >&2
     exit 1
   }
   git -C "$PROMOTE_WORKTREE" rev-parse --verify --quiet "refs/remotes/origin/$BASE_BRANCH^{commit}" >/dev/null || {
-    rm -f -- "$INSTRUCTIONS" 2>/dev/null || true
     echo "error: remote base '$BASE_BRANCH' is no longer available in the scout worktree; refusing promotion" >&2
     exit 1
   }
