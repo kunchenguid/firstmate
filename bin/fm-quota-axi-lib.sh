@@ -151,7 +151,7 @@ fm_quota_single_provider_table() {
 fm_quota_single_provider_for_harness() {
   local harness provider found=''
   while read -r harness provider; do
-    [ -z "$found" ] && [ "$harness" = "$1" ] && found=$provider
+    [ -z "$found" ] && [ "$harness" = "$1" ] && found=$provider || :
   done < <(fm_quota_single_provider_table)
   [ -n "$found" ] || return 1
   printf '%s\n' "$found"
