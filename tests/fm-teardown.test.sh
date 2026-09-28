@@ -746,7 +746,14 @@ test_teardown_closes_the_backlog_item_itself() {
   printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
   seed_backlog_in_flight "$case_dir"
 
+  mkdir -p "$case_dir/data/task-x1"
+  printf 'Check the requested outcome independently of cleanup.\n' > "$case_dir/data/task-x1/brief.md"
+  FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" FM_STATE_OVERRIDE="$case_dir/state" \
+    "$ROOT/bin/fm-task-state.sh" enroll task-x1 >/dev/null || fail "cleanup lifecycle enrollment failed"
+
   out=$(run_teardown "$case_dir") || fail "teardown failed with a real backlog"
+  jq -e '.disposition == "open" and .owner_receipts.cleanup[-1].facts.bookkeepingComplete == true' \
+    "$case_dir/data/task-x1/lifecycle.json" >/dev/null || fail "cleanup receipt missing or auto-accepted the goal"
   [ "$(backlog_row_state "$case_dir")" = "done" ] \
     || fail "teardown returned success while its backlog item was still open: $(backlog_row_state "$case_dir")"
   assert_grep 'https://github.com/example/repo/pull/7' "$case_dir/data/backlog.md" \

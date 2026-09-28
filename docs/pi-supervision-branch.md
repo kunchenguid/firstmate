@@ -24,6 +24,10 @@ The supervision branch itself is Pi-only by construction:
 
 Presentation acknowledgement does not establish task acceptance.
 The main session retains an enrolled task's goal assessment in the canonical `data/<task>/lifecycle.json` owner, exposed by `bin/fm-task-state.sh`; `bin/fm-task-lifecycle.py --help` owns its schema and compare-and-swap transitions.
+MAIN uses the native tool's `inspect` and `assess` actions to bind evidence and submit a semantic judgment; the lifecycle owner derives mechanical fields and returns a concise current result.
+For an authenticated follow-up, `route` with `update_brief:true` appends the exact input through that same owner, so the following steer does not require a hand-authored reconciliation document.
+The existing watcher offers due eligible rows before native lifecycle and shell tool operations; decisions, uncertain results and other MAIN-only rows remain durably actionable in the original queue.
+The full lifecycle read and legacy reconciliation interface remain available for recovery and explicit delegation changes.
 Enrollment is limited to current task briefs named by an input route, wake claim, or processed outcome, with no historical fleet migration.
 Main records semantic acceptance, an explicit stopped disposition, a named executor with observed receipt/start, or a genuine blocker with responsible owner and observable release evidence.
 A queued handoff, successful send, provider terminal state, reported plan, or PR result cannot independently establish acceptance.

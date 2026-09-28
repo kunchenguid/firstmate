@@ -46,7 +46,7 @@ fi
 # shellcheck source=bin/fm-task-inbox-lib.sh
 . "$SCRIPT_DIR/fm-task-inbox-lib.sh"
 
-FM_GUARD_CONTINUE_LINE='This is a supervision warning only; the requested message WILL still be sent.' "$SCRIPT_DIR/fm-guard.sh" || true
+FM_GUARD_CONTINUE_LINE='This is a supervision warning only; delivery is reported by the send operation below.' "$SCRIPT_DIR/fm-guard.sh" || true
 
 fm_send_id_from_meta() { # <meta-file>
   local base
@@ -216,7 +216,8 @@ if [ -n "$TARGET_META" ]; then
   LEASE_GUARD_TASK=$(fm_send_id_from_meta "$TARGET_META")
   if [ -n "$LEASE_GUARD_TASK" ]; then
     fm_lease_guard "$LEASE_GUARD_TASK" "steer (fm-send)"
-    trap 'fm_lease_guard_release' EXIT
+    send_exit_status=0
+    trap 'send_exit_status=$?; fm_lease_guard_release; exit "$send_exit_status"' EXIT
     # shellcheck source=bin/fm-task-lifecycle-lib.sh
     . "$SCRIPT_DIR/fm-task-lifecycle-lib.sh"
     if [ -z "$ACTION_ID" ]; then

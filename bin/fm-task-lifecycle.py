@@ -3,6 +3,30 @@
 
 Not a worker, queue or semantic acceptance engine.
 Public entry: fm-task-state.sh lifecycle|enroll|reconcile|action|observe|coordinate TASK.
+MAIN normally uses inspect/assess, not a reconstructed lifecycle document:
+  inspect ID --evidence data/checks --evidence data/authority
+  assess ID --basis TOKEN --judgment '{"disposition":"open","outcome":"...",
+    "remaining_gap":"...","authority_ref":"data/authority","evidence":["data/checks"]}'
+inspect returns an opaque basis binding the record, current brief, execution and
+every specified file. Include authority, action payload and blocker release paths
+in that inspection. assess takes semantic fields only; stale bytes or revisions
+refuse. next_action optionally supplies kind, payload_ref, recheck_at, deadline,
+attempt_limit (default 1), and blocker {owner,dependency,release_ref}; null clears
+only a resolved action. The owner derives identity, hashes, timestamps and counters.
+intent_changed is explicit MAIN reconciliation for unexplained brief/execution
+changes with new authority; revoke_delegation revokes a v2 grant separately first.
+The native fm_task_continuation route action with update_brief:true appends exact
+authenticated input words to the intent subsection and synchronizes this record.
+Its internal update-brief takes --session-file, --entry-id and --input, verifying
+the original capture and explicit route under the native home owner and task lock.
+The bounded intent_updates field retains before/after hashes and a prepared
+transaction until atomic brief replacement and record commit converge. Retry
+the same route after interruption; a different unexplained byte sequence refuses.
+refresh records a verified executor receipt/start without semantic acceptance.
+Merge and cleanup owners alone call owner-receipt inside their guarded effects;
+owner_receipts holds exact generation-bound observed facts, never permissions.
+inspect/assess/update-brief/refresh return the current judgment/action and receipt
+summary; lifecycle retains the complete coordination and recovery history.
 coordinate --expected-revision N --record private.json records a native
 fm-periodic-stow readback receipt and admits at most two model requests per
 observation fingerprint, with 30/60-second backoff. Its independent coordination
@@ -78,6 +102,7 @@ Attempted/uncertain actions cannot be replaced or reset by reconciliation.
 No operation executes a payload, launches a worker or contacts a provider.
 """
 import argparse
+import copy
 import datetime
 import hashlib
 import json
@@ -233,6 +258,22 @@ class Task:
             require(bool(re.fullmatch('[a-f0-9]{64}', str(item.get('sha256')))), 'invalid evidence digest')
         if record['disposition'] == 'accepted':
             require(not assessment['remaining_gap'], 'accepted task still has a gap')
+        updates = record.get('intent_updates', {})
+        require(isinstance(updates, dict) and len(updates) <= 128, 'invalid intent receipt history')
+        for key, update in updates.items():
+            require(re.fullmatch('[a-f0-9]{64}', key) and isinstance(update, dict) and
+                    update.get('phase') in ('prepared', 'confirmed') and isinstance(update.get('proof'), dict), 'invalid intent transaction')
+            require(all(re.fullmatch('[a-f0-9]{64}', str(update.get(k))) for k in ('before', 'after')), 'invalid intent byte binding')
+            if update['phase'] == 'prepared':
+                require(text(update.get('content'), MAX_BYTES) and digest(update['content'].encode()) == update['after'], 'invalid prepared intent bytes')
+        receipts = record.get('owner_receipts', {})
+        require(isinstance(receipts, dict) and set(receipts) <= {'merge', 'cleanup'}, 'invalid owner receipts')
+        for history in receipts.values():
+            require(isinstance(history, list) and 1 <= len(history) <= 128, 'invalid effect receipt history')
+            for proof in history:
+                require(isinstance(proof, dict) and atom(proof.get('execution_generation')) and
+                        isinstance(proof.get('facts'), dict) and proof.get('sha256') == digest(json.dumps(proof['facts'], sort_keys=True).encode()),
+                        'invalid effect fact binding')
         coordination = record.get('coordination')
         if coordination is not None:
             require(isinstance(coordination, dict) and isinstance(coordination.get('budgets'), dict), 'invalid readback coordination')
@@ -364,7 +405,7 @@ class Task:
             if entry.get('type') == 'custom' and entry.get('customType') == 'fm-continuation-input':
                 value = entry.get('data', {})
                 inputs[value['id']] = value
-        require(not any(not v.get('task') and not v.get('answer') for v in inputs.values()), 'unclassified original input receipt prevents new effects')
+        require(not any(v.get('pending') or not v.get('task') and not v.get('answer') for v in inputs.values()), 'unclassified original input receipt prevents new effects')
 
     def branch_patch(self, args):
         record = self.read()
@@ -517,7 +558,11 @@ class Task:
     def read(self, current=True):
         if not self.path.exists() and not self.path.is_symlink():
             return None
-        return self.validate(load(self.path), current)
+        record = self.validate(load(self.path), current)
+        if current:
+            require(not any(u['phase'] == 'prepared' for u in record.get('intent_updates', {}).values()),
+                    'intent update pending; retry the same authenticated route before further effects')
+        return record
 
     def write(self, record):
         record['assessment']['evidence_key'] = digest(json.dumps([
@@ -644,16 +689,295 @@ class Task:
                 'recovery': recovery,
                 'revision': record['revision']}
 
-    def reconcile(self, args):
+    def inspect(self, refs=()):
+        """Opaque compare-and-swap basis includes bytes, not just a revision.
+
+        Callers inspect the evidence they will judge, then return this token.
+        Reading does not enroll, fix stale identity, or consume any receipt.
+        """
+        record = self.read(current=False)
+        evidence = [{'ref': ref, 'sha256': digest(self.reference(ref))} for ref in sorted(set(refs))]
+        brief_sha, generation = digest(regular(self.directory / 'brief.md')), self.generation()
+        snapshot = [record, brief_sha, generation, evidence]
+        return {**self.summary(record), 'basis': digest(json.dumps(snapshot, sort_keys=True).encode()),
+                'evidence': evidence, 'brief_changed': bool(record and record['brief_sha256'] != brief_sha),
+                'current_execution_generation': generation,
+                'pending_intent_updates': [u['proof'].get('input') for u in (record or {}).get('intent_updates', {}).values()
+                                           if u['phase'] == 'prepared']}
+
+    def summary(self, record):
+        if record is None:
+            return {'task_id': self.id, 'enrolled': False}
+        result = {key: record.get(key) for key in ('schema', 'task_id', 'revision', 'goal_revision', 'execution_generation',
+                'disposition', 'assessment', 'next_action', 'decision_ref', 'cleanup_ref', 'delegation', 'precheck')}
+        result['owner_receipts'] = {kind: history[-1] for kind, history in record.get('owner_receipts', {}).items()}
+        return result
+
+    def assess(self, args):
+        require(os.environ.get('FM_SUPERVISION_ACTOR', 'main') == 'main', 'assessment belongs to MAIN')
+        judgment = json.loads(args.judgment, object_pairs_hook=unique_object)
+        require(isinstance(judgment, dict) and set(judgment) <= {
+            'disposition', 'outcome', 'remaining_gap', 'authority_ref', 'evidence', 'next_action',
+            'intent_changed', 'revoke_delegation'}, 'unsupported semantic input')
+        require(all(type(judgment[key]) is bool for key in ('intent_changed', 'revoke_delegation') if key in judgment),
+                'semantic intent/delegation choices must be booleans')
+        refs = judgment.get('evidence')
+        require(isinstance(refs, list) and refs and all(text(ref, 4096) for ref in refs), 'evidence references required')
+        authority = judgment.get('authority_ref')
+        require(text(authority, 4096), 'explicit judgment authority required')
+        bound = list(refs) + [authority]
+        action = judgment.get('next_action')
+        if action:
+            require(isinstance(action, dict) and set(action) <= {
+                'kind', 'payload_ref', 'recheck_at', 'deadline', 'attempt_limit', 'blocker'}, 'unsupported next action input')
+            bound.append(action['payload_ref'])
+            if action.get('blocker'):
+                bound.append(action['blocker']['release_ref'])
+        require(args.basis == self.inspect(bound)['basis'], 'assessment basis changed; inspect current judgment/evidence again')
+        prior = self.read(current=False)
+        require(prior is not None, 'enroll the task before assessment')
+        candidate = copy.deepcopy(prior)
+        changed = prior['brief_sha256'] != digest(regular(self.directory / 'brief.md'))
+        generation = self.generation() or prior['execution_generation']
+        identity_changed = generation != prior['execution_generation']
+        require(not changed and not identity_changed or judgment.get('intent_changed') is True,
+                'changed brief/execution requires explicit intent_changed judgment')
+        require(not judgment.get('intent_changed') or changed or identity_changed or prior['disposition'] != 'open',
+                'unchanged intent cannot reset goal or effect budgets')
+        if judgment.get('intent_changed'):
+            require(authority != prior['assessment']['authority_ref'], 'changed intent requires new explicit authority')
+            candidate['goal_revision'] += 1
+            candidate['brief_sha256'] = digest(regular(self.directory / 'brief.md'))
+            candidate['execution_generation'] = generation
+        if judgment.get('revoke_delegation'):
+            grant = candidate.get('delegation')
+            require(grant is not None, 'no delegation to revoke')
+            if not grant['revoked']:
+                grant['revoked'] = True
+                grant['revision'] += 1
+                candidate['precheck'] = None
+        candidate['disposition'] = judgment['disposition']
+        candidate['assessment'] = {'outcome': judgment['outcome'], 'remaining_gap': judgment['remaining_gap'],
+            'authority_ref': authority, 'assessed_at': now(),
+            'evidence_key': prior['assessment'].get('evidence_key'),
+            'evidence': [{'ref': ref, 'sha256': digest(self.reference(ref))} for ref in refs]}
+        if 'next_action' in judgment:
+            if action is None:
+                candidate['next_action'] = None
+            else:
+                candidate['next_action'] = {
+                    'id': f'{self.id}.g{candidate["goal_revision"]}.a{prior["next_action_seq"]}',
+                    'kind': action['kind'], 'phase': 'prepared', 'attempts': 0,
+                    'attempt_limit': action.get('attempt_limit', 1),
+                    'expected_execution_generation': generation,
+                    'payload_ref': action['payload_ref'], 'payload_sha256': digest(self.reference(action['payload_ref'])),
+                    'recheck_at': action['recheck_at'], 'deadline': action['deadline'], 'receipt_ref': None}
+                if action.get('blocker'):
+                    blocker = action['blocker']
+                    require(set(blocker) == {'owner', 'dependency', 'release_ref'}, 'unsupported blocker input')
+                    candidate['next_action']['continuation'] = dict(blocker, type='blocker',
+                        release_sha256=digest(self.reference(blocker['release_ref'])), recovery_trigger='evidence-change')
+                candidate['next_action_seq'] += 1
+        # Recheck immediately before the existing invariant/CAS owner commits.
+        require(args.basis == self.inspect(bound)['basis'], 'assessment evidence changed during readback')
+        args.expected_revision = prior['revision']
+        return self.summary(self.reconcile(args, candidate))
+
+    def native_input(self, args):
+        """Only an original, explicitly routed native input can append intent.
+
+        The session is the authority store. The lifecycle retains a transaction
+        receipt, never a second copy of the conversation or an authority grant.
+        """
+        require(os.environ.get('FM_SUPERVISION_ACTOR', 'main') == 'main', 'intent updates belong to MAIN')
+        pid = regular(self.state / '.lock').decode().strip()
+        require(pid.isdigit() and int(pid) > 1, 'missing native owner')
+        parent = os.getpid()
+        for _ in range(32):
+            if str(parent) == pid:
+                break
+            result = subprocess.run(['ps', '-o', 'ppid=', '-p', str(parent)], capture_output=True, text=True, check=False)
+            require(result.returncode == 0 and result.stdout.strip().isdigit(), 'cannot verify native input owner')
+            parent = int(result.stdout.strip())
+            require(parent > 1, 'input caller is outside owning session')
+        require(str(parent) == pid, 'input owner ancestry exceeded')
+        path = Path(args.session_file)
+        st = path.lstat()
+        require(path.is_absolute() and stat.S_ISREG(st.st_mode) and st.st_nlink == 1 and
+                st.st_uid == os.getuid() and st.st_size <= 16777216, 'unsafe native input session')
+        entries = [json.loads(line, object_pairs_hook=unique_object) for line in path.read_text().splitlines() if line.strip()]
+        require(entries and entries[0].get('type') == 'session', 'missing session identity')
+        by_id = {e['id']: e for e in entries[1:] if 'id' in e}
+        chain, seen = [], set()
+        route = by_id.get(args.entry_id)
+        require(route is not None, 'unread native route receipt')
+        entry = entries[-1] if len(entries) > 1 else None
+        while entry is not None:
+            require(entry['id'] not in seen, 'invalid session ancestry')
+            seen.add(entry['id']); chain.append(entry)
+            if entry.get('parentId') is None:
+                break
+            entry = by_id.get(entry['parentId'])
+            require(entry is not None, 'incomplete session ancestry')
+        require(args.entry_id in seen, 'route receipt is outside the current session branch')
+        require(route.get('customType') == 'fm-continuation-input' and route.get('data', {}).get('task') == self.id and
+                route.get('data', {}).get('update_brief') is True and route.get('data', {}).get('id') == args.input,
+                'not an explicit intent route receipt')
+        values = [e.get('data', {}) for e in reversed(chain) if e.get('type') == 'custom' and
+                  e.get('customType') == 'fm-continuation-input' and e.get('data', {}).get('id') == args.input]
+        require(len(values) >= 2 and text(values[0].get('text')) and not values[0].get('task') and
+                not values[0].get('answer'), 'missing original authenticated input')
+        value = values[-1]
+        require(value.get('task') == self.id and value.get('update_brief') is True and
+                value.get('text') == values[0]['text'] and not value.get('answer'), 'input not explicitly routed as intent update')
+        require(all(v.get('text') == value['text'] and v.get('task', self.id) == self.id and not v.get('answer') for v in values),
+                'input authority was rerouted or answered')
+        return value, {'session_file': str(path), 'entry_id': args.entry_id, 'input': args.input,
+                       'sha256': digest(json.dumps(by_id[args.entry_id], sort_keys=True).encode())}
+
+    def update_brief(self, args):
+        value, proof = self.native_input(args)
+        record = self.read(current=False)
+        require(record is not None and record['disposition'] == 'open', 'intent update requires an enrolled open goal')
+        require((self.generation() or 'unassigned-g1') == record['execution_generation'], 'stale execution generation')
+        updates = record.get('intent_updates', {})
+        key = digest((proof['session_file'] + '\0' + args.input).encode())
+        prior = updates.get(key)
+        brief = self.directory / 'brief.md'
+        raw = regular(brief)
+        if prior and prior.get('phase') == 'confirmed':
+            require(prior['proof'] == proof, 'input receipt identity changed')
+            self.validate(record)
+            return self.summary(record)
+        if prior:
+            require(prior['proof'] == proof and prior['phase'] == 'prepared', 'intent transaction collision')
+            require(digest(raw) in (prior['before'], prior['after']), 'uncertain brief update; exact readback required')
+        else:
+            self.validate(record)
+            grant = record.get('delegation')
+            require(not grant or grant['revoked'], 'revoke delegation before changing intent')
+            action = record.get('next_action')
+            require(not action or action['phase'] in ('confirmed', 'refused'), 'outstanding action requires readback before intent update')
+            require(len(updates) < 128, 'intent receipt history full; explicit reconciliation required')
+            # The scope is exact append-only user words in the owned subsection.
+            body = raw.decode()
+            heading = "## Captain's intent\n"
+            require(body.count(heading) == 1, 'brief needs one canonical Captain intent subsection')
+            start = body.index(heading) + len(heading)
+            end = re.search(r'^#{1,2} ', body[start:], flags=re.M)
+            position = start + end.start() if end else len(body)
+            body = body[:position].rstrip('\n') + '\n\n' + value['text'] + '\n\n' + body[position:]
+            # Newer briefs carry an additional pipeline-only intent subsection.
+            pipeline = '## Captain intent authorized for --intent\n'
+            if pipeline in body:
+                require(body.count(pipeline) == 1, 'ambiguous pipeline intent subsection')
+                body = body.rstrip('\n') + '\n\n' + value['text'] + '\n'
+            after = body.encode()
+            require(len(after) <= MAX_BYTES, 'updated brief too large')
+            prior = {'phase': 'prepared', 'proof': proof, 'before': digest(raw), 'after': digest(after),
+                     'content': body}
+            updates[key] = prior
+            record['intent_updates'] = updates
+            record['revision'] += 1
+            self.write(record)
+        if digest(raw) == prior['before']:
+            # Recheck before replacement. Cooperating writers share the meta lock.
+            require(digest(regular(brief)) == prior['before'], 'brief changed during intent append')
+            fd, name = tempfile.mkstemp(prefix='.brief.', dir=self.directory)
+            try:
+                with os.fdopen(fd, 'wb') as stream:
+                    stream.write(prior['content'].encode()); stream.flush(); os.fsync(stream.fileno())
+                os.replace(name, brief)
+            finally:
+                if os.path.exists(name):
+                    os.unlink(name)
+        require(digest(regular(brief)) == prior['after'], 'brief replacement uncertain; retry the same input receipt')
+        record['brief_sha256'] = prior['after']
+        record['goal_revision'] += 1
+        record['revision'] += 1
+        record['precheck'] = None
+        # Retain the previous gap AND this obligation until MAIN assesses it.
+        record['assessment']['remaining_gap'] += '\nUnassessed routed input: ' + args.input
+        record['assessment']['evidence'].append({'ref': str(brief), 'sha256': prior['after']})
+        record['assessment']['evidence'] = [e for e in record['assessment']['evidence']
+            if e['ref'] != str(brief) or e['sha256'] == prior['after']]
+        prior['phase'] = 'confirmed'
+        del prior['content']
+        self.write(record)
+        return self.summary(record)
+
+    def refresh(self, args):
+        record = self.read()
+        if record is None:
+            return self.summary(record)
+        action = record.get('next_action')
+        if action and action['phase'] in ('attempted', 'uncertain'):
+            if not action.get('continuation') and action['kind'] == 'steer':
+                self.readback(args)
+                record = self.read()
+                action = record['next_action']
+            continuation = action.get('continuation', {})
+            if continuation.get('type') == 'executor' and self.observe_executor(continuation)[0] == 'running':
+                # This observed effect confirms execution receipt, never the goal.
+                target = continuation['task_id']
+                if 'inbox_id' in continuation:
+                    receipt = self.state / (target + '.inbox') / 'handled' / (continuation['inbox_id'] + '.msg')
+                    raw = self.reference(str(receipt), continuation['sha256'])
+                elif 'handoff_id' in continuation:
+                    receipt = self.state / 'task-handoffs' / 'records' / (continuation['handoff_id'] + '.msg')
+                    raw = self.reference(str(receipt))
+                    require(digest(raw.partition(b'--\n')[2]) == action['payload_sha256'], 'handoff receipt payload changed')
+                else:
+                    receipt = self.data / target / 'brief.md'
+                    raw = self.reference(str(receipt), continuation['brief_sha256'])
+                action['receipt_ref'], action['receipt_sha256'] = str(receipt), digest(raw)
+                action['phase'] = 'confirmed'
+                record['revision'] += 1
+                self.write(record)
+        return self.summary(record)
+
+    def owner_receipt(self, args):
+        require(args.kind in ('merge', 'cleanup'), 'unknown effect receipt owner')
+        record = self.read()
+        if record is None:
+            return {'task_id': self.id, 'enrolled': False}
+        require(args.execution_generation == record['execution_generation'], 'stale owner receipt execution')
+        facts = json.loads(args.facts, object_pairs_hook=unique_object)
+        require(isinstance(facts, dict), 'invalid owner facts')
+        if args.kind == 'merge':
+            require(set(facts) == {'url', 'head'} and text(facts['url']) and isinstance(facts['head'], str), 'invalid merge receipt')
+        else:
+            require(facts == {'taskRecordRemoved': True, 'endpointConfirmedGone': True,
+                             'copyDisposition': 'returned-or-already-absent', 'bookkeepingComplete': True}, 'incomplete cleanup receipt')
+            require(not (self.state / (self.id + '.meta')).exists(), 'cleanup task record still exists')
+        proof = {'execution_generation': args.execution_generation, 'facts': facts,
+                 'sha256': digest(json.dumps(facts, sort_keys=True).encode())}
+        receipts = record.setdefault('owner_receipts', {})
+        history = receipts.setdefault(args.kind, [])
+        same = [p for p in history if p['execution_generation'] == args.execution_generation and
+                p['facts'].get('url') == facts.get('url')]
+        require(not same or same == [proof], 'owner receipt collision; reconcile exact effect')
+        if not same:
+            require(len(history) < 128, 'owner receipt history full; retain effect for explicit readback')
+            history.append(proof)
+            record['revision'] += 1
+            self.write(record)
+        return self.summary(record)
+
+    def reconcile(self, args, candidate=None):
         prior = self.read(current=False)
         require(args.expected_revision == (prior['revision'] if prior else 0), 'revision conflict')
-        candidate = load(Path(args.record))
+        require(not any(u['phase'] == 'prepared' for u in (prior or {}).get('intent_updates', {}).values()),
+                'intent update pending; retry the same authenticated route')
+        candidate = load(Path(args.record)) if candidate is None else candidate
         candidate['revision'] = args.expected_revision + 1
         if prior and 'coordination' in prior:
             require(candidate.get('coordination', prior['coordination']) == prior['coordination'], 'coordination belongs to the native readback owner')
             candidate['coordination'] = prior['coordination']
         else:
             require('coordination' not in candidate, 'coordination requires an actual native readback receipt')
+        require(candidate.get('owner_receipts') == (prior or {}).get('owner_receipts'), 'effect facts belong to their receipt owners')
+        require(candidate.get('intent_updates') == (prior or {}).get('intent_updates'), 'intent receipts belong to the brief update owner')
         self.validate(candidate)
         grant = candidate.get('delegation')
         if grant:
@@ -741,7 +1065,8 @@ class Task:
             require(action['attempts'] < action['attempt_limit'] and stamp(action['deadline']) >= stamp(now()), 'action budget expired')
             action['attempts'] += 1
         else:
-            require(args.receipt_ref and args.receipt_sha256, 'phase change requires a bound owner receipt')
+            require(args.receipt_ref, 'phase change requires a bound owner receipt')
+            args.receipt_sha256 = args.receipt_sha256 or digest(self.reference(args.receipt_ref))
             self.reference(args.receipt_ref, args.receipt_sha256)
             action['receipt_ref'] = args.receipt_ref
             action['receipt_sha256'] = args.receipt_sha256
@@ -889,7 +1214,7 @@ class Task:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('operation', choices=('read', 'init', 'reconcile', 'action', 'observe', 'coordinate', 'branch-patch', 'effect', 'bind-inbox', 'handoff-binding', 'handoff-effect', 'readback'))
+    parser.add_argument('operation', choices=('read', 'inspect', 'assess', 'update-brief', 'refresh', 'owner-receipt', 'init', 'reconcile', 'action', 'observe', 'coordinate', 'branch-patch', 'effect', 'bind-inbox', 'handoff-binding', 'handoff-effect', 'readback'))
     parser.add_argument('task')
     parser.add_argument('--expected-revision', type=int)
     parser.add_argument('--record')
@@ -899,10 +1224,29 @@ def main():
     parser.add_argument('--phase', choices=tuple(PHASES))
     parser.add_argument('--receipt-ref')
     parser.add_argument('--receipt-sha256')
+    parser.add_argument('--basis')
+    parser.add_argument('--evidence', action='append', default=[])
+    parser.add_argument('--judgment')
+    parser.add_argument('--session-file')
+    parser.add_argument('--entry-id')
+    parser.add_argument('--input')
+    parser.add_argument('--kind', choices=('merge', 'cleanup'))
+    parser.add_argument('--execution-generation')
+    parser.add_argument('--facts')
     args = parser.parse_args()
     try:
         task = Task(args.task)
-        if args.operation == 'init':
+        if args.operation == 'inspect':
+            result = task.inspect(args.evidence)
+        elif args.operation == 'assess':
+            result = task.assess(args)
+        elif args.operation == 'update-brief':
+            result = task.update_brief(args)
+        elif args.operation == 'refresh':
+            result = task.refresh(args)
+        elif args.operation == 'owner-receipt':
+            result = task.owner_receipt(args)
+        elif args.operation == 'init':
             result = task.init()
         elif args.operation == 'reconcile':
             require(integer(args.expected_revision) and args.record, 'reconcile needs revision and record')

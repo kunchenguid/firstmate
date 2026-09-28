@@ -520,5 +520,8 @@ test_terminal_refusal_is_durable
 test_same_task_send_and_reminder_contract_stay_ordinary
 
 test_continuation_assessment_and_observed_executor || fail "lifecycle behavior regression failed"
+# shellcheck disable=SC2097,SC2098 # Export the existing root to the Python fixture.
+ROOT="$ROOT" CASE_DIR="$TMP_ROOT/semantic" FM_FIXTURE_BACKEND="$(make_fake_backend "$TMP_ROOT/semantic")" \
+  python3 "$ROOT/tests/lifecycle-semantic.py" || fail "semantic lifecycle regression failed"
 test_delegated_lifecycle_effect_boundaries || fail "delegated lifecycle regression failed"
 printf 'All task-handoff tests passed.\n'

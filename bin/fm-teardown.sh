@@ -309,6 +309,7 @@ fm_lease_guard "$ID" "teardown (fm-teardown)"
 # shellcheck source=bin/fm-task-lifecycle-lib.sh
 . "$SCRIPT_DIR/fm-task-lifecycle-lib.sh"
 fm_task_lifecycle_forbid_delegated_control "$ID" || { fm_lease_guard_release; exit 6; }
+fm_task_lifecycle_receipt_preflight "$ID" || { fm_lease_guard_release; exit 6; }
 
 META="$STATE/$ID.meta"
 TREEHOUSE_PROJECT_LOCK=
@@ -1951,6 +1952,11 @@ else
     exit 1
   fi
 fi
+fm_task_lifecycle_owner_receipt "$ID" "$TEARDOWN_META_SPAWN_GEN" cleanup \
+  '{"taskRecordRemoved":true,"endpointConfirmedGone":true,"copyDisposition":"returned-or-already-absent","bookkeepingComplete":true}' locked || {
+  echo 'actionable: cleanup completed but lifecycle receipt recording failed; read back before retrying effects' >&2
+  exit 1
+}
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
 if [ "${FM_SUPERVISION_ACTOR:-}" != short ] && [ "$KIND" != scout ] && [ "$MODE" != local-only ]; then
