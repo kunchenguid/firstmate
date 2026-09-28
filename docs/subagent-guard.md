@@ -346,7 +346,7 @@ Result: the Workflow tool call was NOT blocked by a hook. It launched and ran to
 ### Empty-stdout requirement
 
 A Claude deny is honored only when the hook's stdout is empty.
-`tests/fm-subagent-pretool-check.test.sh` asserts stdout is empty on every `--claude` deny and that default mode still emits the Grok object on stdout.
+`tests/fm-subagent-pretool-check.test.sh` asserts stdout is empty on genuine Claude denials and that default non-Cursor mode still emits the Grok object on stdout.
 The live consequence is confirmed by the shipped-guard result above: Claude honored the deny and reported the reason text.
 
 ## Automated validation
@@ -369,7 +369,7 @@ This entry is the deliberate exception and stays unguarded: Grok is "inspected b
 The coverage it leaves is partial rather than correct - the tracked entry passes `--claude`, which suppresses exactly the stdout decision object Grok consumes - so treat this as incidental reach, not as Grok being wired.
 Wiring Grok properly still requires the matcher-token verification described above, and that is what closes this exception.
 The same exception also covers Cursor, which loads the tracked Claude settings: `.cursor/hooks.json` registers no subagent-spawn matcher, so this entry stays active there.
-Cursor payloads receive Cursor permission documents for both allow and deny; genuine Claude and Grok events keep their existing response paths.
+See [Output contract](#output-contract) for this checker's host selection and responses.
 Cursor's subagent tool name has not been verified, and registering an unverified matcher would be a guess rather than coverage, so closing it needs the same verification step.
 
 This change does not close the deeper harness-agnostic defect.
