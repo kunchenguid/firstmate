@@ -170,6 +170,12 @@ gone=$("$DECISION_SH" --all --state-dir "$GONE" --resolve-cmds)
 [ "$gone" = "# No actionable resolve commands generated." ] || fail "torn-down task must not get a resolve cmd: $gone"
 assert_contains "$("$DECISION_SH" --all --state-dir "$GONE")" "task metadata gone" "torn-down task is flagged for manual close"
 
+# 7c. An fm-<id> selector resolves through <id>.meta, as fm-send does.
+LEGACY="$TDIR/legacy state"; mkdir -p "$LEGACY"
+printf 'blocked [key=old-dep]: superseded dependency\n' > "$LEGACY/fm-delta.status"
+: > "$LEGACY/delta.meta"
+assert_contains "$("$DECISION_SH" --all --state-dir "$LEGACY" --resolve-cmds)" "fm-delta" "fm-<id> selector keeps its resolve cmd via <id>.meta"
+
 # 8. A key configured only in the home's .env is used.
 ENVHOME="$TDIR/envhome"; mkdir -p "$ENVHOME"
 printf 'TYPESAFE_API_KEY="env-file-key"\n' > "$ENVHOME/.env"

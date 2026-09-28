@@ -411,9 +411,11 @@ def main() -> None:
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [executor.submit(classify_decision, item, api_key, never_send, send_prefix) for item in items]
             classified_items = [f.result() for f in futures]
-        # fm-send resolves its target through state/<task>.meta; a torn-down task has none.
+        # fm-send resolves its target through state/<task>.meta (or <id>.meta for an
+        # fm-<id> selector); a torn-down task has neither.
         for item in classified_items:
-            if item.resolve_cmd and not (send_state / f"{item.task}.meta").is_file():
+            metas = [item.task] + ([item.task[3:]] if item.task.startswith("fm-") else [])
+            if item.resolve_cmd and not any((send_state / f"{m}.meta").is_file() for m in metas):
                 item.resolve_cmd = ""
                 item.suggested_action += " (task metadata gone; close it by hand)"
 
