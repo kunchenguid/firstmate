@@ -336,22 +336,39 @@ NPX
 }
 
 test_raw_claude_command_receives_the_pin() {
-  local out rc id=acct-raw n=0 cmd
+  local out rc id=acct-raw
   new_case raw-claude claude
+  signed_in_claude_root "$CASE/work"
+  printf '%s\n' "$CASE/work" > "$HOME_DIR/config/claude-account"
+  out=$(spawn_ship "$id" --harness "claude --print raw"); rc=$?
+  expect_code 0 "$rc" "a raw claude spawn under a signed-in pin should succeed: $out"
+  assert_contains "$out" "account=$CASE/work" "a raw claude spawn should report the pin"
+  run_pane
+  assert_grep "CLAUDE_CONFIG_DIR=$CASE/work" "$CASE/claude-worker" "a raw claude worker should run under the pinned root"
+  assert_grep "ANTHROPIC_API_KEY=unset" "$CASE/claude-worker" "a raw claude worker must not keep an ambient API key"
+  pass "a direct raw Claude launch command receives the home's pin"
+}
+
+test_raw_command_reaching_claude_or_pi_through_another_program_refuses() {
+  local out rc id=acct-raw-wrapped n=0 cmd
+  new_case raw-wrapped claude
   fake_npx
   signed_in_claude_root "$CASE/work"
   printf '%s\n' "$CASE/work" > "$HOME_DIR/config/claude-account"
-  for cmd in "claude --print raw" "env claude --print raw" "npx @anthropic-ai/claude-code --print raw"; do
+  for cmd in "env -u CLAUDE_CONFIG_DIR claude --print raw" "env claude --print raw" \
+    "npx @anthropic-ai/claude-code --print raw" "codex claude" "env pi --print raw"; do
     n=$((n + 1))
-    rm -f "$CASE/claude-worker"
     out=$(spawn_ship "$id-$n" --harness "$cmd"); rc=$?
-    expect_code 0 "$rc" "a raw '$cmd' spawn under a signed-in pin should succeed: $out"
-    assert_contains "$out" "account=$CASE/work" "a raw '$cmd' spawn should report the pin"
-    run_pane
-    assert_grep "CLAUDE_CONFIG_DIR=$CASE/work" "$CASE/claude-worker" "a raw '$cmd' worker should run under the pinned root"
-    assert_grep "ANTHROPIC_API_KEY=unset" "$CASE/claude-worker" "a raw '$cmd' worker must not keep an ambient API key"
+    expect_code 1 "$rc" "a raw '$cmd' must refuse: $out"
+    assert_refused_before_launch "$id-$n" "$out" "launch claude or pi directly"
   done
-  pass "a raw Claude launch command, direct or through env or npx, receives the home's pin"
+  assert_absent "$CASE/claude-worker" "a refused wrapped launch must never start Claude"
+  assert_absent "$CASE/claude-checks" "a refused wrapped launch must not reach the sign-in check"
+  rm -f "$HOME_DIR/config/pi-account"
+  out=$(spawn_ship "$id-pi" --harness "pi --print raw"); rc=$?
+  expect_code 1 "$rc" "a direct raw pi command with no Pi account file must refuse: $out"
+  assert_refused_before_launch "$id-pi" "$out" "config/pi-account is absent"
+  pass "a raw command reaching Claude or Pi through another program refuses; a direct one takes the account check"
 }
 
 test_raw_claude_account_override_refuses_under_a_pin() {
@@ -366,29 +383,21 @@ test_raw_claude_account_override_refuses_under_a_pin() {
     assert_refused_before_launch "$id-${var%%=*}" "$out" "the raw launch command sets ${var%%=*}"
     assert_contains "$out" "remove ${var%%=*} from the raw command, or ask the captain to change config/claude-account" \
       "the refusal should say how to proceed"
-    out=$(spawn_ship "$id-env-${var%%=*}" --harness "env $var claude --print raw"); rc=$?
-    expect_code 1 "$rc" "a raw env Claude command setting ${var%%=*} must refuse under a pin"
-    assert_refused_before_launch "$id-env-${var%%=*}" "$out" "the raw launch command sets ${var%%=*}"
   done
   assert_absent "$CASE/claude-worker" "a refused raw override must never start Claude"
   pass "a pinned home refuses a raw Claude command that overrides the account"
 }
 
 test_raw_claude_without_an_account_file_refuses() {
-  local out rc id=acct-raw-unpinned n=0 cmd
+  local out rc id=acct-raw-unpinned
   new_case raw-unpinned claude
-  fake_npx
   rm -f "$HOME_DIR/config/claude-account"
   mkdir -p "$CASE/other"
-  for cmd in "CLAUDE_CONFIG_DIR=$CASE/other ANTHROPIC_API_KEY=override-key claude --print raw" \
-    "env claude --print raw" "npx @anthropic-ai/claude-code --print raw"; do
-    n=$((n + 1))
-    out=$(spawn_ship "$id-$n" --harness "$cmd"); rc=$?
-    expect_code 1 "$rc" "a raw '$cmd' with no account file should refuse: $out"
-    assert_refused_before_launch "$id-$n" "$out" "config/claude-account is absent"
-  done
+  out=$(spawn_ship "$id" --harness "CLAUDE_CONFIG_DIR=$CASE/other ANTHROPIC_API_KEY=override-key claude --print raw"); rc=$?
+  expect_code 1 "$rc" "a raw claude command with no account file should refuse: $out"
+  assert_refused_before_launch "$id" "$out" "config/claude-account is absent"
   assert_absent "$CASE/claude-worker" "a refused raw launch must never start Claude"
-  pass "a raw Claude command, direct or through env or npx, cannot bypass a missing account file"
+  pass "a raw Claude command written as VAR=value claude cannot bypass a missing account file"
 }
 
 test_local_secondmate_reads_the_launching_home_pin() {
@@ -427,6 +436,7 @@ test_pi_pin_refusals
 test_pi_extension_provider_and_old_pi_fall_back_to_the_model_listing
 test_a_pin_governs_only_its_own_runner
 test_raw_claude_command_receives_the_pin
+test_raw_command_reaching_claude_or_pi_through_another_program_refuses
 test_raw_claude_account_override_refuses_under_a_pin
 test_raw_claude_without_an_account_file_refuses
 test_local_secondmate_reads_the_launching_home_pin

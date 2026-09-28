@@ -326,9 +326,10 @@
 #   through those credentials is refused until the file names an account. A
 #   pinned Pi launch needs --model
 #   <provider>/<id> for a declared provider and also carries --provider, and a
-#   raw Pi command refuses. A raw command is Claude or Pi when any word is
-#   claude or pi or names @anthropic-ai/claude-code, so a launch through a
-#   wrapper such as env or npx takes the same pin. The pin is
+#   raw Pi command refuses. A raw command is Claude or Pi when its first
+#   word after any leading assignments is claude or pi; a raw command that
+#   starts another program but mentions claude, pi, or
+#   @anthropic-ai/claude-code (env claude, npx) refuses. The pin is
 #   recorded as account= (and Pi's account_provider=) in the task record and
 #   on the spawned line.
 #   A local secondmate reads this launching home's file; pins are never
@@ -2216,15 +2217,20 @@ case "$ARG3" in
       ;;
     esac
   done
-  # A wrapped Claude or Pi launch (env claude, npx @anthropic-ai/claude-code)
-  # is still that runner, so it takes the same account pin as a direct one.
-  for word in $LAUNCH; do
-    case "$word" in
-    *@anthropic-ai/claude-code | *@anthropic-ai/claude-code@*) HARNESS=claude ;;
-    *) case "$(basename -- "$word")" in claude | pi) HARNESS=$(basename -- "$word") ;; *) continue ;; esac ;;
-    esac
-    break
-  done
+  # Only a direct claude or pi launch can carry the account pin. A raw command
+  # that reaches Claude or Pi through another program (env claude, npx
+  # @anthropic-ai/claude-code) could discard the pin, so it refuses.
+  case "$HARNESS" in claude | pi) ;; *)
+    for word in $LAUNCH; do
+      case "$word" in
+      *@anthropic-ai/claude-code | *@anthropic-ai/claude-code@*) ;;
+      *) case "$(basename -- "$word")" in claude | pi) ;; *) continue ;; esac ;;
+      esac
+      echo "error: the raw launch command starts with '$HARNESS' but mentions '$word'; launch claude or pi directly so the account in config/claude-account or config/pi-account applies" >&2
+      exit 1
+    done
+    ;;
+  esac
   ;;
 '')
   # No explicit harness: resolve from config. A secondmate AGENT launches on the

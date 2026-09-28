@@ -863,8 +863,9 @@ A raw Claude launch command refuses if its leading assignments set `CLAUDE_CONFI
 The assignment would override the pin.
 The refusal names the variable.
 Remove that assignment from the raw command, or ask the captain to change `config/claude-account`.
-A raw command counts as a Claude launch only when its first word after any leading assignments is `claude`.
-A raw launch through a wrapper, such as `env claude` or `npx @anthropic-ai/claude-code`, is not recognised as Claude and gets no account check.
+A raw command counts as a Claude or Pi launch only when its first word after any leading assignments is `claude` or `pi`.
+A raw command that starts another program but mentions `claude`, `pi`, or `@anthropic-ai/claude-code`, such as `env claude`, `npx @anthropic-ai/claude-code`, or `codex claude`, refuses, because the other program could discard the pinned account.
+Launch `claude` or `pi` directly instead.
 
 Before any worker endpoint, local copy, or task record exists, and before a relaunch stops the running worker, Firstmate asks the runner itself whether the pinned account is signed in: `claude auth status` for Claude, and `pi auth check --provider <provider> --json --no-refresh` for Pi, falling back to `pi --list-models <provider>` for a provider an extension registers.
 The check runs with only `HOME`, `PATH`, `TMPDIR`, `USER`, `LOGNAME`, and the pinned root in its environment, so a credential variable in firstmate's own environment cannot answer for an empty root.

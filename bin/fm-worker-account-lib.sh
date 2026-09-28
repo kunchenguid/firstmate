@@ -38,10 +38,10 @@
 # with config/pi-account refuses raw Pi launches. A raw Claude launch command
 # runs after the pinned root and shed credentials are applied, so its own
 # leading CLAUDE_CONFIG_DIR or shed-credential assignment would override the
-# pin; a home with config/claude-account refuses such a command, wherever the
-# assignment appears in it. bin/fm-spawn.sh treats a raw command as Claude or
-# Pi when any word is claude or pi or names @anthropic-ai/claude-code, so a
-# launch through a wrapper such as env or npx takes the same pin.
+# pin; a home with config/claude-account refuses such a command. bin/fm-spawn.sh
+# treats a raw command as Claude or Pi only when its first word after those
+# assignments is claude or pi, and refuses a raw command that reaches Claude or
+# Pi through another program such as env or npx.
 #
 # The sign-in check asks the runner itself, with only HOME, PATH, TMPDIR,
 # USER, LOGNAME, and the selected root in its environment, so a credential
@@ -267,6 +267,7 @@ fm_worker_account_select() {
           ;;
         esac
         ;;
+      *) break ;;
       esac
     done
   else
