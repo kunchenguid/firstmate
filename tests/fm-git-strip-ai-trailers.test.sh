@@ -291,6 +291,39 @@ test_git_c_override_still_strips_and_chains_commit_hooks() {
   pass "a git -c hooksPath override still strips the trailer and chains the project's hooks"
 }
 
+test_wrapper_copy_inside_repository_hookspath_completes() {
+  local repo hooks copyland body bound
+  repo="$TMP_ROOT/self-copy"
+  make_repo "$repo"
+  hooks="$TMP_ROOT/hooks-self-copy"
+  "$STRIP" install "$hooks" "$repo" || fail "install should succeed"
+  # Beads preserves the pane's hooks into .beads/hooks on init and then points
+  # core.hooksPath there, so the repository's own hooks directory ends up
+  # holding a copy of this wrapper. That copy's chain lookup names its own
+  # directory, which used to exec the copy again forever while git waited for
+  # a hook exit that never came. No pane override here: bd scrubs the fleet
+  # environment before running git, so the lookup resolves the repository's
+  # own config only.
+  copyland="$repo/.beads-hooks"
+  mkdir -p "$copyland"
+  cp "$hooks/prepare-commit-msg" "$copyland/prepare-commit-msg"
+  cp "$hooks/commit-msg" "$copyland/commit-msg"
+  chmod 700 "$copyland/prepare-commit-msg" "$copyland/commit-msg"
+  git -C "$repo" config core.hooksPath "$copyland"
+  printf 'note\n' >>"$repo/README.md"
+  git -C "$repo" add README.md
+  if command -v timeout >/dev/null 2>&1; then bound="timeout 60";
+  elif command -v gtimeout >/dev/null 2>&1; then bound="gtimeout 60";
+  else fail "neither timeout nor gtimeout is installed to bound the recursion check"; fi
+  # shellcheck disable=SC2086 # bound is a chosen command name plus its seconds
+  $bound git -C "$repo" commit -q --trailer 'Co-authored-by: Cursor <cursoragent@cursor.com>' -m 'fix: self-contained wrapper' ||
+    fail "commit through a wrapper copy inside the repository hooks hung or failed"
+  body=$(git -C "$repo" log -1 --format=%B)
+  assert_not_contains "$body" "cursoragent@cursor.com" "Cursor trailer survived a commit through the copied wrapper"
+  assert_contains "$body" "fix: self-contained wrapper" "subject was rewritten"
+  pass "a wrapper copy inside the repository hooks completes instead of re-entering itself"
+}
+
 test_strip_msgfile_alone_does_not_rewrite_author_fields() {
   local msg
   msg="$TMP_ROOT/msg.txt"
@@ -313,6 +346,7 @@ test_project_hook_generated_after_install_still_runs
 test_pane_hookspath_does_not_reroute_another_repository
 test_repository_pre_push_runs_on_every_override_channel
 test_git_c_override_still_strips_and_chains_commit_hooks
+test_wrapper_copy_inside_repository_hookspath_completes
 test_strip_msgfile_alone_does_not_rewrite_author_fields
 
 echo "# all fm-git-strip-ai-trailers tests passed"

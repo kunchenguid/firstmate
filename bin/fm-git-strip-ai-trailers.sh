@@ -20,7 +20,10 @@
 #       inherits it) carries the override there, and a lookup that honored it
 #       would find this directory again and never run the repository's own
 #       hook - a skipped pre-push guard. A lookup that fails exits nonzero
-#       rather than skipping the repository's hook. Does not touch the
+#       rather than skipping the repository's hook. A lookup that finds a copy
+#       of the wrapper itself exits zero instead of exec-ing that copy, since
+#       beads preserves the pane's hooks into .beads/hooks on init and that
+#       exec would re-enter the wrapper forever. Does not touch the
 #       project's git config; the caller prefixes the pane with
 #       GIT_CONFIG_COUNT / GIT_CONFIG_KEY_0 / GIT_CONFIG_VALUE_0.
 #
@@ -153,7 +156,10 @@ write_executable() {
 # is the other environment channel that can carry this directory as
 # core.hooksPath; only the repository's config files name its own hooks. Skip
 # when the lookup still names this launch's own hooks dir, meaning those files
-# point here, so the wrapper cannot recurse into itself.
+# point here, so the wrapper cannot recurse into itself. Refuse as well when
+# the lookup names a directory holding a copy of this very file, so the
+# wrapper cannot exec itself: beads preserves the pane's hooks into
+# .beads/hooks on init and then points core.hooksPath there.
 runtime_chain_body() {
   local ours=$1
   cat <<EOF
@@ -165,6 +171,19 @@ orig=\$(unset GIT_CONFIG_PARAMETERS; git rev-parse --path-format=absolute --git-
   exit 1
 }
 if [ "\$orig" = "\$ours" ]; then
+  exit 0
+fi
+# A copy of this wrapper can live inside the repository's own hooks directory:
+# beads preserves the pane's hooks into .beads/hooks on init and then points
+# core.hooksPath there, so the lookup above names the directory holding this
+# very file. Then \$orig/\$name IS this file, and exec would re-enter this
+# wrapper forever while git waits for a hook exit that never comes (seen
+# 2026-09-28: every bd init in a fleet pane hung this way, orphaning one git
+# commit per attempt). Refuse that exec; commit-msg already stripped above,
+# and every other name has nothing left to do here. -ef follows symlinks, and
+# a relative \$0 still resolves against this process's cwd, so the comparison
+# holds however git invoked the hook.
+if [ "\$orig/\$name" -ef "\$0" ] 2>/dev/null; then
   exit 0
 fi
 if [ -x "\$orig/\$name" ]; then
