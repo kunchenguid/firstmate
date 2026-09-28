@@ -2075,10 +2075,15 @@ test_first_cycle_status_streams_and_owner_options_reach_it() {
   # Main handles that close, so the next cycle has no episode to resurface.
   FM_HOME="$home" "$ROOT/bin/fm-wake-drain.sh" >/dev/null 2> "$home/drain.err" || fail "stream: main's drain failed"
   ack_drain_err "$home/state" "$home/drain.err" >/dev/null 2>&1 || fail "stream: main's acknowledgement failed: $(cat "$home/drain.err")"
+  # Pass-through can leave a successor watcher running. Retire that cycle so
+  # the orphan-arm fixture below owns the watcher we later ask --restart to replace.
+  FM_HOME="$home" "$ROOT/bin/fm-watch-arm.sh" --stop >/dev/null || fail "stream: could not stop the prior cycle"
 
   # A watcher a dead arm left behind, holding this home's watcher lock.
   FM_HOME="$home" PATH="$home/fakebin:$PATH" perl -e 'setpgrp(0, 0); exec @ARGV' "$ROOT/bin/fm-watch-arm.sh" \
     > "$home/stale-arm.out" 2>&1 &
+  wait_until 150 grep -qs '^watcher: started pid=' "$home/stale-arm.out" \
+    || fail "stream: the fixture arm never started its watcher: $(cat "$home/stale-arm.out")"
   wait_until 150 watcher_live "$home" || fail "stream: the fixture watcher never started"
   kill -KILL "$!" 2>/dev/null || true
   wait "$!" 2>/dev/null || true
