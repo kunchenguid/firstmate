@@ -796,6 +796,7 @@ handle_wake() {  # <reason-lines>
   fi
   if [ "$status" = empty ] || [ -z "$rows" ]; then
     log_line "no-op	nothing for the branch to claim	$first"
+    "$SCRIPT_DIR/fm-wake-grant.sh" withhold >/dev/null 2>&1 || true
     return 0
   fi
   if [ "$GRANT_ACTIVE" -eq 0 ]; then

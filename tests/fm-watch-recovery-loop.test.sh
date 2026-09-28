@@ -356,8 +356,8 @@ test_branch_grant_leaves_withheld_note_to_the_successor() {
   child=$!
   wait_for_exit "$child" 50 \
     || fail "a handling successor kept blocking on a note the branch grant withheld: $(cat "$out")"
-  grep -F "check: undelivered queued wake: $note" "$out" >/dev/null \
-    || fail "the successor did not surface the withheld note: $(cat "$out")"
+  grep -Fx "check: undelivered queued wake: $note" "$out" >/dev/null \
+    || fail "the successor did not surface exactly the withheld note, leaving the granted row to the branch: $(cat "$out")"
 
   foreign_watch_bg "$dir" "$out" 1
   child=$!
@@ -370,8 +370,44 @@ test_branch_grant_leaves_withheld_note_to_the_successor() {
   pass "a note a branch grant withholds still reaches main once through the handling successor"
 }
 
+# T6: a branch that takes a close but finds nothing left to claim presents no
+# row at all, so a note that close handed over must still reach main once.
+test_branch_noop_leaves_handed_note_to_the_successor() {
+  local dir state out child note
+  dir=$(make_case branch-noop-note)
+  dir=$(cd "$dir" && pwd -P)
+  state="$dir/state"
+  out="$dir/watch.out"
+  mkdir -p "$dir/data" "$dir/config"
+
+  note=$(foreign_note "$dir" "note before a branch no-op") || fail "the inbox note was not queued"
+  foreign_watch_bg "$dir" "$out" 0
+  child=$!
+  wait_for_exit "$child" 100 || fail "the predecessor did not close on the queued note: $(cat "$out")"
+  grep -q '^check:' "$out" || fail "the predecessor closed without a wake: $(cat "$out")"
+
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-wake-grant.sh" withhold \
+    || fail "the branch no-op could not return the handed rows"
+
+  foreign_watch_bg "$dir" "$out" 1
+  child=$!
+  wait_for_exit "$child" 50 \
+    || fail "a handling successor kept blocking on a note no actor was presented: $(cat "$out")"
+  grep -Fx "check: undelivered queued wake: $note" "$out" >/dev/null \
+    || fail "the successor did not surface the note the branch no-op left: $(cat "$out")"
+
+  foreign_watch_bg "$dir" "$out" 1
+  child=$!
+  stays_blocking "$state" "$child" \
+    || fail "a later successor surfaced the same note again: $(cat "$out")"
+  kill -TERM "$child" 2>/dev/null || true
+  wait "$child" 2>/dev/null || true
+  pass "a note a branch no-op close handed over still reaches main once through the handling successor"
+}
+
 test_handling_successor_does_not_go_blind
 test_unacknowledged_recovery_is_announced_once_per_generation
 test_handling_successor_surfaces_a_foreign_append_once
 test_afk_successor_leaves_foreign_appends_to_the_daemon
 test_branch_grant_leaves_withheld_note_to_the_successor
+test_branch_noop_leaves_handed_note_to_the_successor

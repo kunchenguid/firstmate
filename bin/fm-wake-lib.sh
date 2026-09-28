@@ -2070,11 +2070,11 @@ fm_wake_seq_read() {
 # records the queue's sequence counter just before it prints, because the drain
 # that follows presents every row queued up to then; bin/fm-watch.sh
 # (queue_handover_surface) surfaces a queued row above it once. A supervision
-# branch that takes the close presents only its granted rows, so publishing
-# that grant (bin/fm-wake-grant.sh) lowers the record below every other queued
-# row main has not claimed. A missing, malformed, or reset-counter value reads
-# as 0, which errs toward surfacing a still-queued row once more rather than
-# holding it.
+# branch that takes the close presents only its granted rows, so when it takes
+# one (bin/fm-wake-grant.sh publish or withhold) the record drops below every
+# other queued row main has not claimed (watch_queue_handed_withhold_locked).
+# A missing, malformed, or reset-counter value reads as 0, which errs toward
+# surfacing a still-queued row once more rather than holding it.
 watch_queue_handed_read() {  # <output-variable>
   local _handed=0 _last
   IFS= read -r _handed 2>/dev/null < "$STATE/.watch-queue-handed" || true
@@ -2094,12 +2094,43 @@ watch_queue_handed_write() {  # <sequence>
   fi
 }
 
+# watch_queue_handed_withhold_locked
+# Under an already-held FM_WAKE_QUEUE_LOCK, lower the handover record below the
+# lowest queued row neither the branch grant nor main's claim covers: the close
+# a supervision branch takes never presents it to main.
+watch_queue_handed_withhold_locked() {
+  local low handed grant=
+  ! fm_wake_branch_grant_live "$STATE/.branch-eligible-rows" "$STATE/.branch-eligible-owner" \
+    || grant="$STATE/.branch-eligible-rows"
+  low=$(awk -F '\t' -v branch="$grant" -v main="$STATE/.main-eligible-rows" '
+    BEGIN {
+      if (branch != "") while ((getline line < branch) > 0) held[line]=1
+      while ((getline line < main) > 0) held[line]=1
+    }
+    NF >= 5 && $2 ~ /^[0-9]+$/ && !($2 in held) && (low == "" || $2 + 0 < low) { low = $2 + 0 }
+    END { if (low != "") print low }
+  ' "$FM_WAKE_QUEUE" 2>/dev/null) || return 0
+  [ -n "$low" ] || return 0
+  watch_queue_handed_read handed
+  [ "$handed" -lt "$low" ] || watch_queue_handed_write "$((low - 1))"
+}
+
 # fm_wake_keys_after_locked <sequence>
 # Print the distinct keys of queued rows whose sequence is above <sequence>,
-# oldest first, under an already-held FM_WAKE_QUEUE_LOCK.
+# oldest first, under an already-held FM_WAKE_QUEUE_LOCK. Rows a live branch
+# grant holds or main's last drain already claimed have reached an actor, so
+# they are left out.
 fm_wake_keys_after_locked() {
-  awk -F '\t' -v after="$1" 'NF >= 5 && $2 ~ /^[0-9]+$/ && $2 + 0 > after + 0 && !seen[$4]++ { print $4 }' \
-    "$FM_WAKE_QUEUE" 2>/dev/null || true
+  local grant=
+  ! fm_wake_branch_grant_live "$STATE/.branch-eligible-rows" "$STATE/.branch-eligible-owner" \
+    || grant="$STATE/.branch-eligible-rows"
+  awk -F '\t' -v after="$1" -v branch="$grant" -v main="$STATE/.main-eligible-rows" '
+    BEGIN {
+      if (branch != "") while ((getline line < branch) > 0) held[line]=1
+      while ((getline line < main) > 0) held[line]=1
+    }
+    NF >= 5 && $2 ~ /^[0-9]+$/ && $2 + 0 > after + 0 && !($2 in held) && !seen[$4]++ { print $4 }
+  ' "$FM_WAKE_QUEUE" 2>/dev/null || true
 }
 
 fm_wake_secondmate_progress_marker_write() { # <task> <observed-at> <oldest-row-key>

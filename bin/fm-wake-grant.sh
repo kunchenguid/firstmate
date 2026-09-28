@@ -65,36 +65,35 @@ case "${1:-}" in
       rows_valid "$BRANCH_ROWS" && cmp -s "$TMP" "$BRANCH_ROWS" || exit 1
       replace=0
     fi
-    # On success, print the lowest queued sequence neither this grant nor
-    # main's claim covers: the branch taking this close never presents it.
-    withheld=$(awk -F '\t' -v requested="$TMP" -v main="$MAIN_ROWS" '
+    awk -F '\t' -v requested="$TMP" -v main="$MAIN_ROWS" '
       BEGIN {
         while ((getline line < requested) > 0) wanted[line]=1
         while ((getline line < main) > 0) owned[line]=1
       }
-      NF >= 5 && $2 ~ /^[0-9]+$/ && $2 in wanted { present[$2]=1; next }
-      NF >= 5 && $2 ~ /^[0-9]+$/ && !($2 in owned) && (low == "" || $2 + 0 < low) { low = $2 + 0 }
+      NF >= 5 && $2 ~ /^[0-9]+$/ && $2 in wanted { present[$2]=1 }
       END {
         for (seq in wanted) if (seq in owned) exit 3
         for (seq in wanted) if (!(seq in present)) exit 1
-        if (low != "") print low
       }
-    ' "$FM_WAKE_QUEUE")
+    ' "$FM_WAKE_QUEUE"
     rc=$?
     [ "$rc" -eq 0 ] || exit "$rc"
     if [ "$replace" -eq 1 ]; then
       _fm_atomic_replace "$TMP" "$BRANCH_ROWS" || exit 1
       TMP=
+      # The close this grant answers recorded every row queued before it as
+      # handed over; the running watcher surfaces a row the branch withholds to
+      # main once. An identical re-publish is the same grant and lowers nothing.
+      watch_queue_handed_withhold_locked || true
     fi
-    # The close this grant answers recorded every row queued before it as
-    # handed over (watch_queue_handed_read). Lower that record below a row the
-    # branch withholds, so the running watcher surfaces it to main once; an
-    # identical re-publish is the same grant and lowers nothing again.
-    if [ "$replace" -eq 1 ] && [ -n "$withheld" ]; then
-      handed=0
-      watch_queue_handed_read handed
-      [ "$handed" -lt "$withheld" ] || watch_queue_handed_write "$((withheld - 1))" || true
-    fi
+    ;;
+  withhold)
+    # A branch took a close and claimed nothing from it: that close handed
+    # main no row, so the running watcher surfaces the unclaimed ones once.
+    [ "$#" -eq 1 ] || exit 2
+    fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+    LOCK_HELD=true
+    watch_queue_handed_withhold_locked || true
     ;;
   release)
     generation=${2:-}
@@ -114,7 +113,7 @@ case "${1:-}" in
     rm -f -- "$BRANCH_ROWS" "$BRANCH_OWNER" || exit 1
     ;;
   *)
-    echo "usage: fm-wake-grant.sh activate PID GENERATION | publish GENERATION SEQUENCE... | release GENERATION | deactivate PID GENERATION" >&2
+    echo "usage: fm-wake-grant.sh activate PID GENERATION | publish GENERATION SEQUENCE... | withhold | release GENERATION | deactivate PID GENERATION" >&2
     exit 2
     ;;
 esac
