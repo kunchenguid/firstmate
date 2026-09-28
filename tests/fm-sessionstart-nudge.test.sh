@@ -228,6 +228,22 @@ run_hook() {  # <root> [args...]
     FM_GATE_REFUSE_BYPASS=0 FM_ROOT_OVERRIDE="$root" FM_HOME="$root" PATH="$RUN_PATH" "$RUN" "$@"
 }
 
+# run_under_pi_fixture <test-function>: run one Pi run-tier case beneath its own
+# long-lived `pi`-named fixture harness, the way the whole suite runs beneath a
+# `codex` one. A Pi primary's hooks descend from a Pi process, and the ancestry
+# walk that names the harness and the session lock is deep enough to reach the
+# suite's codex fixture, so a Pi case without its own Pi ancestor would be
+# detected as the codex session that holds the lock.
+run_under_pi_fixture() {  # <test-function>
+  local fixture status=0
+  fixture=$(mktemp -d "${TMPDIR:-/tmp}/fm-sessionstart-pi.XXXXXX") || fail "could not create the Pi fixture"
+  ln -s /bin/bash "$fixture/pi" || fail "could not create the Pi fixture"
+  # shellcheck disable=SC2016 # Expand in the fixture shell, not this parent.
+  FM_SESSIONSTART_TEST_ONLY=$1 "$fixture/pi" -c '"$@"; rc=$?; :; exit "$rc"' _ "$0" || status=$?
+  rm -rf "$fixture"
+  [ "$status" -eq 0 ] || exit "$status"
+}
+
 run_hook_pi() {  # <root> [args...]
   local root=$1
   shift
@@ -1048,6 +1064,11 @@ test_run_reports_a_failed_session_start_as_digest_text() {
   pass "run wrapper: a session start that cannot take the lock still opens the session and says so"
 }
 
+if [ -n "${FM_SESSIONSTART_TEST_ONLY:-}" ]; then
+  "$FM_SESSIONSTART_TEST_ONLY"
+  exit
+fi
+
 test_genuine_primary_nudges
 test_gate_env_is_silent
 test_gate_common_dir_is_silent
@@ -1059,8 +1080,8 @@ test_namespace_pid1_lock_holder_is_silent
 test_opencode_plugin_delivers_exact_nudge_once
 test_run_startup_runs_the_full_digest
 test_run_clear_and_compact_reemit
-test_run_rebuild_forwards_source_to_drifted_instruction_refresh
-test_run_compact_without_completion_refreshes_before_finishing_startup
+run_under_pi_fixture test_run_rebuild_forwards_source_to_drifted_instruction_refresh
+run_under_pi_fixture test_run_compact_without_completion_refreshes_before_finishing_startup
 test_run_clear_without_completion_finishes_startup
 test_run_clear_rejects_previous_owner_completion
 test_run_resume_delegates_to_the_nudge

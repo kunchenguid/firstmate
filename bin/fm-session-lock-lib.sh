@@ -27,26 +27,64 @@ unset _FM_SESSION_LOCK_LIB_DIR
 # Known harness command names; extend when a new adapter is verified. omp is
 # anchored exactly like pi: its process name is the bare word `omp` (verified,
 # omp 18.1.11), and a substring match would claim ompd or comp.
-#
-# kiro-cli presents TWO distinct process comm names in one interactive session
-# (verified live, kiro-cli 2.22.1): the top `kiro-cli chat -a` frame is comm
-# `kiro-cli`, and the inner frames are comm `kiro-cli-chat` (the launcher and
-# the `acp` engine), with a `bun` interpreter frame interposed between the two
-# kiro-cli-chat frames (see the interpreter arm in fm_harness_process_matches).
-# Both are anchored: `^kiro-cli$` must NOT be a substring rule, because the
-# longer `kiro-cli-chat` basename is its own separate frame and a bare
-# `kiro-cli` substring would also match ordinary firstmate paths. The
-# alternation lists the longer name first for readability; anchoring makes
-# ordering irrelevant.
-FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$|^omp$|^kiro-cli-chat$|^kiro-cli$'
+# kiro-cli's frames are decided by fm_kiro_cli_process_matches below, the single
+# owner of that identity, before this pattern is consulted.
+FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$|^omp$'
 
-# The same harnesses as exact executable names. Keep in sync with
-# FM_HARNESS_RE. Used only for the stricter path evidence below, where the
-# loose regex would also match ordinary firstmate paths such as
-# bin/fm-claude-stop-autoarm.sh. kiro-cli-chat precedes kiro-cli so a path
-# component check matches the more specific name first (a moot ordering for a
-# whole-component match, kept for clarity alongside FM_HARNESS_RE).
+# The same harnesses as exact executable names, plus kiro-cli's two names.
+# Keep in sync with FM_HARNESS_RE. Used only for the stricter path evidence
+# below, where the loose regex would also match ordinary firstmate paths such as
+# bin/fm-claude-stop-autoarm.sh, and by bin/fm-agent-process-lib.sh's pane
+# liveness classifier. kiro-cli-chat precedes kiro-cli so a path component check
+# matches the more specific name first (a moot ordering for a whole-component
+# match, kept for clarity).
 FM_HARNESS_NAMES=(claude codex opencode grok kimi pi-signed pi omp kiro-cli-chat kiro-cli)
+
+# --- shared ancestry walk ----------------------------------------------------
+# ONE owner of how far and how every parent-chain walk in the fleet climbs:
+# this file's session-lock walk and bin/fm-harness.sh's harness detection both
+# step with fm_ancestry_parent_pid under FM_ANCESTRY_MAX_HOPS, so the question
+# "which harness owns this process tree" can never get two answers from two
+# depths. The bound is generous because a harness can run its hooks deep below
+# the session: a kiro-cli Stop hook reaches bin/fm-harness.sh through a hook
+# shell, this adapter, bin/fm-sessionstart-run.sh, bin/fm-session-start.sh, and
+# a command substitution before the four-frame kiro-cli run even begins.
+FM_ANCESTRY_MAX_HOPS=16
+
+# Print the parent of pid $1 for an ancestry walk, or return 1 once the walk has
+# examined the top of the chain. Inside a PID namespace the harness itself is
+# pid 1, so pid 1 is still handed back for examination; a host's real pid 1
+# (init, systemd, launchd) matches no harness name, and its parent 0 - or a
+# process reported as its own parent - ends the walk.
+fm_ancestry_parent_pid() {  # <pid>
+  local parent
+  parent=$(ps -o ppid= -p "$1" 2>/dev/null | tr -d ' ')
+  case "$parent" in '' | *[!0-9]*) return 1 ;; esac
+  [ "$parent" -ge 1 ] && [ "$parent" != "$1" ] || return 1
+  printf '%s\n' "$parent"
+}
+
+# True when the process described by command name $1 and full argument string
+# $2 is one of kiro-cli's own frames. The single owner of kiro-cli's process
+# identity, consumed by fm_harness_process_matches below and by
+# bin/fm-harness.sh's detection. kiro-cli publishes no identity marker (see
+# bin/fm-harness.sh), so these frames are its only identity:
+#   - comm `kiro-cli` (the top `kiro-cli chat -a` frame) and `kiro-cli-chat`
+#     (the launcher and `acp` engine frames), both anchored exact so an
+#     unrelated command carrying that substring is never claimed; this is the
+#     kiro-cli agent CLI, never the `kiro` Electron IDE.
+#   - the private Bun interpreter frame interposed between them, whose comm is
+#     a bare `bun` (verified live on Linux, kiro-cli 2.22.1) and whose argv
+#     alone carries a kiro-cli install-tree component. A bare `bun` is also
+#     omp's and Pi's interpreter, so nothing but that component matches.
+fm_kiro_cli_process_matches() {  # <comm> <args>
+  case "${1##*/}" in
+    kiro-cli|kiro-cli-chat) return 0 ;;
+    bun|bun-*)
+      case " $2 " in *"/kiro-cli/"*) return 0 ;; esac ;;
+  esac
+  return 1
+}
 
 # Print the exact harness name carried by executable path $1 - its own basename
 # or any directory component - or return 1.
@@ -87,18 +125,17 @@ fm_harness_path_name() {  # <path>
 #     on the transient inner `acp` engine pid; extending the run lets
 #     fm_session_lock_anchor_pid record the stable OUTERMOST `kiro-cli` frame and
 #     lets ownership match against any frame in the run, exactly as it does for
-#     Claude. The bun frame in the middle is matched by its `kiro-cli` install
-#     path component (step 2), so the run stays contiguous across it.
+#     Claude. The bun frame in the middle is matched by
+#     fm_kiro_cli_process_matches (step 0), so the run stays contiguous across it.
 #
 # Evidence, in order:
+#   0. kiro-cli's own frames, owned by fm_kiro_cli_process_matches above.
 #   1. the basename of the reported command name, against FM_HARNESS_RE.
 #   2. an exact harness component in that command path or in argv[0]. Both are
 #      needed because the two platforms report different things: macOS reports
 #      argv[0] in `ps -o comm=`, while procps on Linux reports the kernel exec
 #      name and ignores argv[0] entirely, so a version-named Claude Code binary
-#      is identified by its install path on macOS and by argv[0] on Linux, and a
-#      kiro-cli `bun` frame is identified by its `kiro-cli` install-path
-#      component in the command path or argv[0].
+#      is identified by its install path on macOS and by argv[0] on Linux.
 #   3. a bare interpreter (node, python) running a harness script path.
 #   4. Cursor's own structural identity, owned by bin/fm-cursor-lib.sh.
 FM_HARNESS_IS_CLAUDE=0
@@ -108,10 +145,13 @@ fm_harness_process_matches() {  # <comm> <args>
   FM_HARNESS_IS_CLAUDE=0
   FM_HARNESS_EXTENDS_RUN=0
   base=$(basename -- "$comm")
+  if fm_kiro_cli_process_matches "$comm" "$args"; then
+    FM_HARNESS_EXTENDS_RUN=1
+    return 0
+  fi
   if printf '%s' "$base" | grep -qE "$FM_HARNESS_RE"; then
     case "$base" in
       *claude*) FM_HARNESS_IS_CLAUDE=1; FM_HARNESS_EXTENDS_RUN=1 ;;
-      kiro-cli|kiro-cli-chat) FM_HARNESS_EXTENDS_RUN=1 ;;
     esac
     return 0
   fi
@@ -140,7 +180,7 @@ fm_harness_process_matches() {  # <comm> <args>
   return 1
 }
 
-# Walk the current process ancestry (up to 16 hops) and print this session's
+# Walk the current process ancestry (FM_ANCESTRY_MAX_HOPS frames) and print this session's
 # contiguous verified-harness ancestry, innermost pid first.
 #
 # The walk climbs freely until the first harness match, because the caller is
@@ -166,8 +206,8 @@ fm_harness_process_matches() {  # <comm> <args>
 # anchor be the stable OUTERMOST `kiro-cli` frame instead of the transient inner
 # engine pid.
 fm_harness_ancestry_pids() {
-  local pid=$$ comm args extending=0 printed=0
-  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
+  local pid=$$ comm args extending=0 printed=0 hop
+  for ((hop = 0; hop < FM_ANCESTRY_MAX_HOPS; hop++)); do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
     args=$(ps -o args= -p "$pid" 2>/dev/null)
     if fm_harness_process_matches "$comm" "$args"; then
@@ -178,13 +218,7 @@ fm_harness_ancestry_pids() {
     elif [ "$extending" -eq 1 ]; then
       break
     fi
-    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
-    # Examine the top of the chain before stopping. Inside a PID namespace the
-    # harness itself is pid 1, so stopping as soon as the next pid is 1 hides the
-    # very process this walk exists to find. A host's real pid 1 (init, systemd,
-    # launchd) is not harness-shaped, so fm_harness_process_matches rejects it.
-    case "$pid" in '' | *[!0-9]*) break ;; esac
-    [ "$pid" -ge 1 ] || break
+    pid=$(fm_ancestry_parent_pid "$pid") || break
   done
   [ "$printed" -eq 1 ]
 }

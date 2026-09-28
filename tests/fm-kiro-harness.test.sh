@@ -166,6 +166,36 @@ test_kiro_is_in_the_session_lock_vocabulary() {
   pass "fm-session-lock-lib: kiro-cli names are in the lock vocabulary, kiroshi is not"
 }
 
+test_kiro_detection_and_lock_agree_at_shallow_and_deep_vantages() {
+  # A tool call runs a frame or two below kiro-cli, while a Kiro hook reaches
+  # bin/fm-harness.sh through the hook shell, this adapter, the session-start
+  # runner, the digest, and command substitutions - more than eight frames
+  # down. Detection and the session lock must name the same kiro-cli session
+  # from both, so a real process chain (a copied bash named kiro-cli, then
+  # genuine nested shells) is walked by the shipped scripts with no ps fake.
+  local dir fakebin probe depth out kiro_pid
+  dir="$TMP_ROOT/anc-depth"
+  fakebin=$(fm_fakebin "$dir")
+  cp "$(command -v bash)" "$fakebin/kiro-cli"
+  probe="$dir/probe.sh"
+  cat > "$probe" <<'SH'
+#!/usr/bin/env bash
+printf 'detect=%s\n' "$("$FM_TEST_ROOT/bin/fm-harness.sh")"
+. "$FM_TEST_ROOT/bin/fm-session-lock-lib.sh"
+printf 'anchor=%s\n' "$(fm_session_lock_anchor_pid)"
+SH
+  for depth in 0 10; do
+    out=$(FM_TEST_ROOT="$ROOT" "$fakebin/kiro-cli" -c \
+      "printf 'kiro=%s\n' \"\$\$\"; $(fm_nested_bash_command "$depth" "bash '$probe'"); true")
+    kiro_pid=$(printf '%s\n' "$out" | sed -n 's/^kiro=//p')
+    assert_contains "$out" "detect=kiro-cli" \
+      "detection $depth shells below kiro-cli must name kiro-cli, got: $out"
+    assert_contains "$out" "anchor=$kiro_pid" \
+      "the session lock $depth shells below kiro-cli must anchor on its pid, got: $out"
+  done
+  pass "fm-harness.sh and the session lock agree on kiro-cli from a tool call and from a deep hook"
+}
+
 # --- control ----------------------------------------------------------------
 
 test_kiro_control_mechanics_are_the_verified_ones() {
@@ -1343,6 +1373,7 @@ test_kiro_ancestry_detects_the_native_and_inner_command_names
 test_kiro_ancestry_rejects_unrelated_mentions
 test_kiro_env_family_does_not_claim_identity_and_ancestry_outranks_claudecode
 test_kiro_is_in_the_session_lock_vocabulary
+test_kiro_detection_and_lock_agree_at_shallow_and_deep_vantages
 test_kiro_control_mechanics_are_the_verified_ones
 test_kiro_control_wiring_and_token_paths
 test_kiro_idle_placeholder_is_exact_and_harness_scoped

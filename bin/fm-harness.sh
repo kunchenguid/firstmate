@@ -76,6 +76,11 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-cursor-lib.sh"
 # shellcheck source=bin/fm-gemini-lib.sh
 . "$SCRIPT_DIR/fm-gemini-lib.sh"
+# The session lock's library owns the shared ancestry walk (FM_ANCESTRY_MAX_HOPS,
+# fm_ancestry_parent_pid) and kiro-cli's process identity, so detection here and
+# the lock's ownership walk climb the same chain the same distance.
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
 
 # Print the harness named by a verified environment marker, or nothing when no
 # marker is present. Markers only report what the environment CLAIMS; detect_own
@@ -168,16 +173,16 @@ harness_marker() {
   return 0
 }
 
-# True when an exact `omp` process sits within eight parents of this one. The
-# same anchored match as the ancestry walk below, kept separate so the marker
-# precedence above can demand real process evidence before trusting FM_OMP_HARNESS.
+# True when an exact `omp` process sits in this process's ancestry, walked the
+# shared distance. The same anchored match as the ancestry walk below, kept
+# separate so the marker precedence above can demand real process evidence
+# before trusting FM_OMP_HARNESS.
 ancestry_names_omp() {
-  local pid=$$ comm
-  for _ in 1 2 3 4 5 6 7 8; do
+  local pid=$$ comm hop
+  for ((hop = 0; hop < FM_ANCESTRY_MAX_HOPS; hop++)); do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
     [ "$(basename -- "$comm")" = omp ] && return 0
-    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
-    [ -n "$pid" ] && [ "$pid" -gt 1 ] || return 1
+    pid=$(fm_ancestry_parent_pid "$pid") || return 1
   done
   return 1
 }
@@ -252,19 +257,19 @@ harness_process_verdict() {  # <pid>
     # detected by ancestry alone.
     agy) echo "comm agy"; return ;;
     devin) echo "comm devin"; return ;;
-    # kiro-cli (Kiro CLI, an Amazon Q CLI fork) presents TWO comm names in one
-    # interactive session (verified live, kiro-cli 2.22.1): the top frame is
-    # comm `kiro-cli` and the inner launcher/engine frames are comm
-    # `kiro-cli-chat`, with a `bun` interpreter frame interposed between them
-    # (the bun arm below). Both are anchored exact, never *kiro-cli*, so an
-    # unrelated command carrying that substring cannot be misread, and
-    # kiro-cli-chat is listed first for clarity though an exact match makes the
-    # order moot. This is the /home/shiv/.local/bin/kiro-cli agent CLI, NEVER
-    # the /usr/bin/kiro Electron IDE (whose process name is `kiro`, not matched
-    # here). It sits above the interpreter fallback for the same reason omp
-    # does: its bundle path contains no foreign harness name to leak.
-    kiro-cli-chat) echo "comm kiro-cli"; return ;;
-    kiro-cli) echo "comm kiro-cli"; return ;;
+    # kiro-cli's frames (its two anchored comm names and its private bun
+    # interpreter) are decided by fm_kiro_cli_process_matches in
+    # bin/fm-session-lock-lib.sh, the one owner the lock walk shares. All are
+    # `comm` strength: each frame IS kiro-cli's own program, structurally,
+    # which keeps the contiguous kiro-cli ancestry unbroken across the bun
+    # frame. They sit above the interpreter fallback for the same reason omp
+    # does, and a bun that is not kiro-cli's (omp's, Pi's) matches nothing.
+    kiro-cli|kiro-cli-chat|bun|bun-*)
+      args=$(ps -o args= -p "$pid" 2>/dev/null)
+      if fm_kiro_cli_process_matches "$comm" "$args"; then
+        echo "comm kiro-cli"
+      fi
+      return ;;
     node*|python*)
       # Bare interpreter: match the harness name in its script path.
       args=$(ps -o args= -p "$pid" 2>/dev/null)
@@ -279,43 +284,22 @@ harness_process_verdict() {  # <pid>
         *grok*) echo "args grok"; return ;;
         *" pi "*|*/pi) echo "args pi"; return ;;
       esac ;;
-    bun|bun-*)
-      # kiro-cli's interactive TUI runs its bundle through a private Bun
-      # interpreter whose process name `ps -o comm=` reports as bare `bun`
-      # (verified live on Linux, kiro-cli 2.22.1: comm=bun, not the full
-      # install path). Only the argv carries identity:
-      #   /home/shiv/.local/share/kiro-cli/bun .../kiro-cli/tui.js chat -a
-      # Match ONLY a kiro-cli install-tree path component, never a generic args
-      # grep: a bare `bun` is also omp's and Pi's interpreter
-      # (~/.bun/bin/bun .../pi-coding-agent/dist/cli.js), and a substring rule
-      # would misread those as kiro-cli. `comm` strength because this frame IS
-      # kiro-cli's own bundle process, structurally, keeping the contiguous
-      # kiro-cli ancestry unbroken across the interposed bun frame.
-      args=$(ps -o args= -p "$pid" 2>/dev/null)
-      case " $args " in
-        *"/kiro-cli/"*) echo "comm kiro-cli"; return ;;
-      esac ;;
   esac
 }
 
 # Print the verdict for the NEAREST harness process in the parent chain, or
 # nothing when the walk finds none. The nearest match wins, so a worker nested
 # inside another harness resolves to its own harness.
+# The walk is the shared one (bin/fm-session-lock-lib.sh): it climbs
+# FM_ANCESTRY_MAX_HOPS frames and stops only once it has EXAMINED the top of the
+# chain, because inside a PID namespace the harness itself is pid 1 - a
+# container, or the `codex sandbox` this boundary was proven in.
 harness_ancestry() {  # [<pid>]
-  local pid=${1:-$$} verdict
-  for _ in 1 2 3 4 5 6 7 8; do
+  local pid=${1:-$$} verdict hop
+  for ((hop = 0; hop < FM_ANCESTRY_MAX_HOPS; hop++)); do
     verdict=$(harness_process_verdict "$pid")
     [ -z "$verdict" ] || { echo "$verdict"; return; }
-    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
-    # Stop only once the walk has EXAMINED the top of the chain. Inside a PID
-    # namespace the harness itself is pid 1 - a container, or the `codex sandbox`
-    # this boundary was proven in - so breaking as soon as the next pid is 1
-    # skips the one process that identifies the session and hands the verdict
-    # straight back to a retained marker. A host's real pid 1 (init, systemd,
-    # launchd) matches no harness name above, so examining it costs one ps call
-    # and can introduce no false positive.
-    case "$pid" in '' | *[!0-9]*) break ;; esac
-    [ "$pid" -ge 1 ] || break
+    pid=$(fm_ancestry_parent_pid "$pid") || break
   done
   return 0
 }
@@ -323,8 +307,8 @@ harness_ancestry() {  # [<pid>]
 # Print the pids on the UPWARD path between the deepest descendant of <root> and
 # <root> itself, deepest first. Optional <eligible-leaf-pid> values restrict which
 # descendants may be chosen as that deepest one; with none given every descendant
-# is eligible. Bounded to the same eight levels harness_ancestry climbs, so a deep
-# or pathological tree cannot make this walk unbounded.
+# is eligible. Bounded to the same FM_ANCESTRY_MAX_HOPS levels harness_ancestry
+# climbs, so a deep or pathological tree cannot make this walk unbounded.
 process_descent_path() {  # <root> [<eligible-leaf-pid>...]
   local root=${1:-$$} eligible any hit pairs frontier next pid child parent verdict
   local parents='' depth=0 best best_depth=0 best_strength='' hops=0
@@ -336,7 +320,7 @@ process_descent_path() {  # <root> [<eligible-leaf-pid>...]
   pairs=$(ps -eo pid=,ppid= 2>/dev/null) || { printf '%s\n' "$root"; return 0; }
   best=$root
   frontier=$root
-  while [ -n "$frontier" ] && [ "$depth" -lt 8 ]; do
+  while [ -n "$frontier" ] && [ "$depth" -lt "$FM_ANCESTRY_MAX_HOPS" ]; do
     next=
     for pid in $frontier; do
       while read -r child parent; do
@@ -378,7 +362,7 @@ EOF
   done
 
   pid=$best
-  while [ -n "$pid" ] && [ "$hops" -le 8 ]; do
+  while [ -n "$pid" ] && [ "$hops" -le "$FM_ANCESTRY_MAX_HOPS" ]; do
     printf '%s\n' "$pid"
     [ "$pid" != "$root" ] || break
     parent=
@@ -439,7 +423,7 @@ supervision_primary_pin() {
   local pin=${FM_SUPERVISION_PRIMARY_HARNESS:-}
   [ "${FM_SUPERVISION_ACTOR:-}" = branch ] && [ -n "$pin" ] || return 0
   case "$pin" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin)
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|kiro-cli)
       printf '%s\n' "$pin"
       ;;
     *)

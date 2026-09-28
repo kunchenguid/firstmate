@@ -414,6 +414,20 @@ SH
   done
 }
 
+# fm_nested_bash_command <depth> <command>
+# Print a command string that runs <command> <depth> real `bash -c` frames below
+# the shell that evaluates it. Each frame ends with `; true` so bash cannot exec
+# its last simple command in place, which keeps every frame in the process
+# ancestry. Use it to build genuinely deep parent chains, such as a harness hook
+# that reaches a script through several wrapper shells, without faking `ps`.
+fm_nested_bash_command() {  # <depth> <command>
+  local depth=$1 cmd=$2 i
+  for ((i = 0; i < depth; i++)); do
+    cmd="bash -c $(printf '%q' "$cmd; true")"
+  done
+  printf '%s\n' "$cmd"
+}
+
 # fm_fake_crash_injector <fakebin>
 # Drops an `fm-crash-inject <pid>` shim that a PATH fake calls to simulate a
 # hard crash of the process under test. It SIGKILLs <pid> and then returns only

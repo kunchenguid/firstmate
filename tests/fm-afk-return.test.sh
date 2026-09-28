@@ -482,7 +482,7 @@ test_return_brief_points_at_the_drain_on_a_host_home_only() {
   for harness in claude pi; do
     dir="$TMP_ROOT/window-pointer-$harness"
     install_runner "$dir"
-    for f in fm-supervision-engine-lib.sh fm-harness.sh fm-cursor-lib.sh fm-gemini-lib.sh; do
+    for f in fm-supervision-engine-lib.sh fm-harness.sh fm-session-lock-lib.sh fm-cursor-lib.sh fm-gemini-lib.sh; do
       cp "$ROOT/bin/$f" "$dir/bin/"
     done
     : > "$dir/home/config/supervision-host"
@@ -519,7 +519,7 @@ test_return_brief_all_silent_window_does_not_point_at_drain() {
   local dir fakebin out f
   dir="$TMP_ROOT/window-pointer-silent"
   install_runner "$dir"
-  for f in fm-supervision-engine-lib.sh fm-harness.sh fm-cursor-lib.sh fm-gemini-lib.sh; do
+  for f in fm-supervision-engine-lib.sh fm-harness.sh fm-session-lock-lib.sh fm-cursor-lib.sh fm-gemini-lib.sh; do
     cp "$ROOT/bin/$f" "$dir/bin/"
   done
   : > "$dir/home/config/supervision-host"
