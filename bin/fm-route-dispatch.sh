@@ -11,7 +11,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
-FM_HOME="${FM_HOME:-$FM_ROOT}"
+export FM_HOME="${FM_HOME:-$FM_ROOT}"
 
 TASK=""
 BRIEF=""
@@ -40,7 +40,8 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-if [ -n "$BRIEF" ] && [ -f "$BRIEF" ]; then
+if [ -n "$BRIEF" ]; then
+  [ -f "$BRIEF" ] || { echo "error: brief file not found: $BRIEF" >&2; exit 2; }
   TASK_INPUT=$(cat "$BRIEF")
 elif [ -n "$TASK" ]; then
   TASK_INPUT="$TASK"
@@ -50,17 +51,21 @@ else
 fi
 
 # Run Jev domain classifier
-ROUTER_JSON=$(python3 "$SCRIPT_DIR/fm-route-domain.py" --json --task "$TASK_INPUT")
-
-if [ "$AS_JSON" -eq 1 ]; then
-  printf '%s\n' "$ROUTER_JSON"
-  exit 0
-fi
+ROUTER_JSON=$(python3 "$SCRIPT_DIR/fm-route-domain.py" --json --task="$TASK_INPUT")
 
 ACTION=$(echo "$ROUTER_JSON" | jq -r '.action')
 ROUTE=$(echo "$ROUTER_JSON" | jq -r '.route')
 CONF=$(echo "$ROUTER_JSON" | jq -r '.confidence // 0')
 NOUL=$(echo "$ROUTER_JSON" | jq -r '.needs_new_noul // 0')
+CLEAN_TASK=$(printf '%s' "$TASK_INPUT" | tr '\n' ' ' | head -c 300)
+
+if [ "$AS_JSON" -eq 1 ]; then
+  if [ "$EXECUTE" -eq 1 ] && [ "$ACTION" = dispatch ]; then
+    "$SCRIPT_DIR/fm-send.sh" "$ROUTE" "[fm-from-firstmate] $CLEAN_TASK" >&2
+  fi
+  printf '%s\n' "$ROUTER_JSON"
+  exit 0
+fi
 
 printf '=== Jev Front-Door Router ===\n'
 printf 'Action:     %s\n' "$ACTION"
@@ -81,11 +86,10 @@ case "$ACTION" in
     printf '  3. Dispatch task to new secondmate inbox.\n'
     ;;
   dispatch)
-    CLEAN_TASK=$(printf '%s' "$TASK_INPUT" | tr '\n' ' ' | head -c 300)
-    SEND_CMD="FM_HOME=$FM_HOME \"$SCRIPT_DIR/fm-send.sh\" \"$ROUTE\" \"[fm-from-firstmate] $CLEAN_TASK\""
+    SEND_CMD=$(printf 'FM_HOME=%q %q %q %q' "$(cd "$FM_HOME" && pwd)" "$SCRIPT_DIR/fm-send.sh" "$ROUTE" "[fm-from-firstmate] $CLEAN_TASK")
     if [ "$EXECUTE" -eq 1 ]; then
       printf 'Executing dispatch to second mate: %s ...\n' "$ROUTE"
-      FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-send.sh" "$ROUTE" "[fm-from-firstmate] $CLEAN_TASK"
+      "$SCRIPT_DIR/fm-send.sh" "$ROUTE" "[fm-from-firstmate] $CLEAN_TASK"
       printf 'Dispatched successfully to %s.\n' "$ROUTE"
     else
       printf 'Recommended dispatch command:\n  %s\n' "$SEND_CMD"
