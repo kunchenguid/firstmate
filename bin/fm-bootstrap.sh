@@ -1448,20 +1448,37 @@ detect_local_config() {
   detect_home_summary_publication
 }
 
-# Shadow-backlog check. When this home's data directory is not the code root's,
+# Shadow-backlog check. When this home's data directory is not its code root's,
 # a code-root data/backlog.md or data/done-archive.md that is not this home's
 # own file is a queue a cwd-relative tasks-axi write has already forked; a link
 # into the home does not survive such a write (docs/configuration.md "Backlog
 # backend" owns why). Detect-only: neither copy is a safe winner, so nothing is
 # merged here.
+#
+# The code root is the one this home's own sessions run from, not the checkout
+# this script happens to live in. A home that carries its own tracked
+# .tasks.toml is a Firstmate checkout and so is its own code root; the invoking
+# checkout's data/ is then another home's live backlog, never a fork of this
+# one. Only a home with no .tasks.toml borrows the invoking code root.
+#
+# The remedy never names or moves a file outside this home: a code-root copy
+# beyond it can be another home's live record, so the reader copies this home's
+# rows in and leaves that file alone.
 detect_code_root_backlog_fork() {
-  local name root_copy
-  [ "$FM_ROOT/data" -ef "$DATA" ] && return 0
+  local name code_root root_copy remedy
+  code_root=$FM_ROOT
+  [ -f "$FM_HOME/.tasks.toml" ] && code_root=$FM_HOME
+  [ "$code_root/data" -ef "$DATA" ] && return 0
   for name in backlog.md done-archive.md; do
-    root_copy="$FM_ROOT/data/$name"
+    root_copy="$code_root/data/$name"
     [ -e "$root_copy" ] || [ -L "$root_copy" ] || continue
     [ "$root_copy" -ef "$DATA/$name" ] && continue
-    echo "BACKLOG_RECONCILE: code-root $root_copy is not this home's $DATA/$name; tasks-axi wrote the code root instead of this home, so rows in it may be missing here - merge it into this home's copy and move it aside"
+    if [ "$code_root" -ef "$FM_HOME" ]; then
+      remedy="merge it into this home's copy and move it aside"
+    else
+      remedy="copy only this home's rows into $DATA/$name and leave the code-root file in place, because it can be another home's live record"
+    fi
+    echo "BACKLOG_RECONCILE: code-root $root_copy is not this home's $DATA/$name; a tasks-axi write may have landed there instead of this home, so rows may be missing here - $remedy"
   done
 }
 

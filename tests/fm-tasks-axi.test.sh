@@ -100,6 +100,60 @@ test_guard_reports_foreign_link_and_archive() {
   pass "bootstrap reports a code-root backlog linked elsewhere and a forked archive"
 }
 
+# The reported cross-home false positive: another checkout's bootstrap run
+# with FM_HOME naming a secondmate home that is itself a Firstmate checkout.
+# The invoking checkout's data/ is its own home's live backlog, not a fork of
+# the secondmate's, so nothing may be reported against it - least of all a
+# remedy that moves it aside.
+test_guard_silent_for_cross_home_checkout() {
+  local dir out
+  dir="$TMP_ROOT/cross-home"
+  mkdir -p "$dir/main/data" "$dir/mate/data" "$dir/mate/state" "$dir/mate/config"
+  ln -s "$ROOT/bin" "$dir/main/bin"
+  cp "$ROOT/.tasks.toml" "$dir/main/.tasks.toml"
+  cp "$ROOT/.tasks.toml" "$dir/mate/.tasks.toml"
+  printf '## In flight\n\n## Queued\n\n- [ ] main-1: the main home'"'"'s own row\n\n## Done\n' \
+    > "$dir/main/data/backlog.md"
+  printf '## Done\n' > "$dir/main/data/done-archive.md"
+  empty_backlog "$dir/mate/data/backlog.md"
+  printf '## Done\n' > "$dir/mate/data/done-archive.md"
+  out=$(PATH="$BASE_PATH" FM_HOME="$dir/mate" FM_BOOTSTRAP_DETECT_ONLY=1 \
+    FM_BOOTSTRAP_NETWORK=skip "$dir/main/bin/fm-bootstrap.sh" 2>&1 | grep '^BACKLOG_RECONCILE' || true)
+  assert_not_contains "$out" "$dir/main/data" \
+    "a cross-home bootstrap reported the invoking checkout's own data files"
+  assert_equals "" "$out" "a cross-home bootstrap of a checkout home must stay silent"
+  pass "another checkout's bootstrap stays silent for a home that is its own checkout"
+}
+
+# The remedy may only ever act inside the home being bootstrapped. A code root
+# beyond the home can be another home's live record, so its line must not name
+# that file in the remedy or move it; a code-root copy inside the home (a
+# checkout home whose data directory is relocated) is this home's to move.
+test_guard_remedy_stays_inside_home() {
+  local dir out remedy
+  dir=$(make_split guard-remedy)
+  rm "$dir/code/data/backlog.md"
+  empty_backlog "$dir/code/data/backlog.md"
+  out=$(bootstrap_backlog_lines "$dir/code" "$dir/home")
+  assert_contains "$out" "is not this home's $dir/home/data/backlog.md" \
+    "a regular code-root backlog outside the home was not reported"
+  remedy=${out##* - }
+  assert_contains "$remedy" "$dir/home/data/backlog.md" "the remedy did not name this home's copy"
+  assert_not_contains "$remedy" "$dir/code" "the remedy named a path outside this home"
+  assert_not_contains "$remedy" "move it aside" "the remedy moved a file outside this home"
+
+  mkdir -p "$dir/relocated"
+  cp "$ROOT/.tasks.toml" "$dir/home/.tasks.toml"
+  empty_backlog "$dir/relocated/backlog.md"
+  out=$(PATH="$BASE_PATH" FM_HOME="$dir/home" FM_DATA_OVERRIDE="$dir/relocated" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_NETWORK=skip "$BOOTSTRAP" 2>&1 \
+    | grep '^BACKLOG_RECONCILE: code-root' || true)
+  assert_contains "$out" "code-root $dir/home/data/backlog.md is not this home's $dir/relocated/backlog.md" \
+    "a checkout home's own code-root copy beside its relocated data was not reported"
+  assert_contains "$out" "move it aside" "a code-root copy inside this home lost its move-aside remedy"
+  pass "the code-root remedy moves only a file inside the home being bootstrapped"
+}
+
 test_guard_silent_for_single_home() {
   local dir out
   dir="$TMP_ROOT/single-guard"
@@ -242,6 +296,8 @@ test_wrapper_single_home() {
 test_guard_reports_regular_code_root_backlog
 test_guard_reports_foreign_link_and_archive
 test_guard_silent_for_single_home
+test_guard_silent_for_cross_home_checkout
+test_guard_remedy_stays_inside_home
 if [ "$HAVE_TASKS_AXI" = 1 ]; then
   test_bare_tasks_axi_fork_is_detected
   test_wrapper_writes_through_to_home
