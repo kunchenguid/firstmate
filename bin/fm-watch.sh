@@ -2070,17 +2070,17 @@ procevent_surface_queued() {
 # While the away-mode daemon owns triage this stays off, so its one-shot
 # contract is unchanged.
 queue_handover_surface() {
-  local last handed keys key reason
+  local last handed floor keys key reason
   afk_present && return 0
   fm_wake_seq_read last
-  watch_queue_handed_read handed
+  watch_queue_handed_read handed floor
   [ "$last" -gt "$handed" ] || return 0
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
   fm_wake_seq_read last
   keys=$(fm_wake_keys_after_locked "$handed")
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   if [ -z "$keys" ]; then
-    watch_queue_handed_write "$last" || true
+    watch_queue_handed_write "$last" "$floor" || true
     return 0
   fi
   reason="check: undelivered queued wake:"

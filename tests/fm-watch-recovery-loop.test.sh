@@ -371,9 +371,11 @@ test_branch_grant_leaves_withheld_note_to_the_successor() {
 }
 
 # T6: a branch that takes a close but finds nothing left to claim presents no
-# row at all, so a note that close handed over must still reach main once.
+# row at all, so a note that close handed over must still reach main once. A
+# later close the branch also takes with nothing to claim must not hand the
+# already-announced note to main again.
 test_branch_noop_leaves_handed_note_to_the_successor() {
-  local dir state out child note
+  local dir state out child note later
   dir=$(make_case branch-noop-note)
   dir=$(cd "$dir" && pwd -P)
   state="$dir/state"
@@ -400,9 +402,27 @@ test_branch_noop_leaves_handed_note_to_the_successor() {
   child=$!
   stays_blocking "$state" "$child" \
     || fail "a later successor surfaced the same note again: $(cat "$out")"
+  later=$(foreign_note "$dir" "note before a second branch no-op") || fail "the later inbox note was not queued"
+  wait_for_exit "$child" 50 || fail "a handling successor kept blocking after a later note: $(cat "$out")"
+  grep -Fx "check: undelivered queued wake: $later" "$out" >/dev/null \
+    || fail "the successor did not surface exactly the later note: $(cat "$out")"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-wake-grant.sh" withhold \
+    || fail "the second branch no-op could not return the handed rows"
+
+  foreign_watch_bg "$dir" "$out" 1
+  child=$!
+  wait_for_exit "$child" 50 \
+    || fail "a handling successor kept blocking on the note the second no-op left: $(cat "$out")"
+  grep -Fx "check: undelivered queued wake: $later" "$out" >/dev/null \
+    || fail "a second branch no-op handed an already-announced note to main again: $(cat "$out")"
+
+  foreign_watch_bg "$dir" "$out" 1
+  child=$!
+  stays_blocking "$state" "$child" \
+    || fail "a successor after repeated no-op closes surfaced a note again: $(cat "$out")"
   kill -TERM "$child" 2>/dev/null || true
   wait "$child" 2>/dev/null || true
-  pass "a note a branch no-op close handed over still reaches main once through the handling successor"
+  pass "a note a branch no-op close handed over reaches main once, and later no-op closes never repeat it"
 }
 
 test_handling_successor_does_not_go_blind
