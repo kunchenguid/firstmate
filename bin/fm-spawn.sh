@@ -1283,7 +1283,7 @@ parse_orca_worktree_result() {
 }
 
 spawn_abort_cleanup() {
-  local status=$? spawn_adopt_unwind_rc
+  local status=$? spawn_adopt_unwind_rc spawn_adopt_restore_rc
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] &&
     [ "$SPAWN_META_PUBLISH_STARTED" = 1 ] &&
     [ -n "$SPAWN_META_TMP" ] &&
@@ -1413,9 +1413,12 @@ spawn_abort_cleanup() {
       spawn_adopt_unwind_rc=0
       clear_relaunch_harness_wiring "${HARNESS:-}" "$WT" "${STATE_REAL:-$STATE}" "$ID" ||
         spawn_adopt_unwind_rc=1
+      spawn_adopt_restore_rc=0
       fm_control_restore_adopted_wiring "$WT" "$SPAWN_ADOPT_WIRING_STORE" "${HARNESS:-}" ||
-        spawn_adopt_unwind_rc=1
-      if [ "$spawn_adopt_unwind_rc" != 0 ]; then
+        spawn_adopt_restore_rc=$?
+      if [ "$spawn_adopt_unwind_rc" = 0 ] && [ "$spawn_adopt_restore_rc" = 3 ]; then
+        echo "warning: adopted worktree $WT was restored to the wiring its creator handed over after task $ID's spawn aborted, but the preserve store at $SPAWN_ADOPT_WIRING_STORE could not be removed; every later adoption of that copy refuses until it is" >&2
+      elif [ "$spawn_adopt_unwind_rc" != 0 ] || [ "$spawn_adopt_restore_rc" != 0 ]; then
         echo "warning: could not fully restore adopted worktree $WT's own harness wiring after task $ID's spawn aborted; inspect that copy and $SPAWN_ADOPT_WIRING_STORE before it is handed back" >&2
       fi
       SPAWN_ADOPT_WIRING_STORE=

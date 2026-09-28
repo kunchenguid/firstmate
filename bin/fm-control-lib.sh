@@ -483,7 +483,9 @@ EOF
 # restore every file <store> preserved, and remove only the paths the recorded
 # harness arms where the copy carried none - a relaunch retires the prior
 # harness's wiring, so those are the only ones firstmate can have written. A
-# restored path that became a symlink is replaced, never written through. A
+# restored path that became a symlink is replaced, never written through, and
+# one that became a directory or any other non-regular file is left alone and
+# counted as a failed path rather than copied into. A
 # missing store means nothing was ever preserved here, so nothing is this
 # caller's to remove. Returns 1 when some path could not be put back (the store
 # is kept), and 3 when every path was but the store itself could not be removed.
@@ -497,8 +499,12 @@ fm_control_restore_adopted_wiring() {  # <worktree> <store> <recorded-harness>
     [ -n "$path" ] || continue
     rel=${path#"$wt"/}
     if [ -f "$store/$rel" ] && [ ! -L "$store/$rel" ]; then
-      { [ ! -L "$path" ] || rm -f "$path"; } &&
-        mkdir -p "$(dirname "$path")" && cp -p "$store/$rel" "$path" || rc=1
+      if [ -e "$path" ] && [ ! -L "$path" ] && [ ! -f "$path" ]; then
+        rc=1
+      elif ! { { [ ! -L "$path" ] || rm -f "$path"; } &&
+        mkdir -p "$(dirname "$path")" && cp -p "$store/$rel" "$path"; }; then
+        rc=1
+      fi
     elif printf '%s\n' "$armed" | grep -qxF -- "$path"; then
       rm -f "$path" || rc=1
     fi

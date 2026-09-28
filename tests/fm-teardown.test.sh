@@ -1369,6 +1369,40 @@ test_adopted_worktree_teardown_replaces_symlinked_wiring() {
   pass "an adopted teardown replaces a symlinked wiring path rather than writing through it"
 }
 
+# cp copies INTO a directory rather than failing, so a wiring path that became a
+# directory must be refused, not written into: nesting the creator's only copy
+# of their original one level down and then deleting the store would report a
+# clean handback for a copy left wrong.
+test_adopted_worktree_teardown_refuses_directory_wiring_path() {
+  local case_dir rc store settings
+  case_dir=$(make_case adopted-directory-wiring)
+  write_adopted_meta "$case_dir" claude
+  store=$(git -C "$case_dir/wt" rev-parse --absolute-git-dir)/fm-adopted-wiring
+  mkdir -p "$store/.claude" "$case_dir/wt/.claude"
+  printf '{"creator":true}\n' > "$store/.claude/settings.local.json"
+  settings="$case_dir/wt/.claude/settings.local.json"
+  mkdir -p "$settings"
+  printf 'agent\n' > "$settings/kept.json"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "adopted-directory-wiring: teardown should still complete"$'\n'"$(cat "$case_dir/stderr")"
+  assert_contains "$(cat "$case_dir/stderr")" "adopted worktree $case_dir/wt was only partly restored" \
+    "adopted-directory-wiring: teardown reported a clean handback over a wiring path it could not restore"
+  [ ! -e "$settings/settings.local.json" ] \
+    || fail "adopted-directory-wiring: the restore nested the creator's original inside the directory"
+  [ "$(cat "$settings/kept.json")" = agent ] \
+    || fail "adopted-directory-wiring: the restore modified a path it could not prove was firstmate's"
+  [ "$(cat "$store/.claude/settings.local.json")" = '{"creator":true}' ] \
+    || fail "adopted-directory-wiring: teardown deleted the original it could not put back"
+  assert_not_contains "$(cat "$case_dir/stdout")" "left in place for its creator" \
+    "adopted-directory-wiring: teardown still reported the copy as cleanly handed back"
+  pass "an adopted teardown refuses a wiring path that became a directory instead of copying into it"
+}
+
 # The store left behind makes every later adoption of the copy refuse, so a
 # failure to remove it after a full restore is not a clean handback.
 test_adopted_worktree_teardown_reports_unremovable_store() {
@@ -4572,6 +4606,7 @@ test_adopted_worktree_teardown_warns_when_store_is_missing
 test_adopted_worktree_teardown_reports_unresolvable_claim
 test_adopted_worktree_teardown_keeps_unarmed_creator_wiring
 test_adopted_worktree_teardown_replaces_symlinked_wiring
+test_adopted_worktree_teardown_refuses_directory_wiring_path
 test_adopted_worktree_teardown_reports_unremovable_store
 test_content_fallback_refreshes_stale_origin_ref
 test_dirty_worktree_refuses
