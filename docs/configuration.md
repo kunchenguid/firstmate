@@ -487,6 +487,7 @@ Backend guides and other documents refer here instead of restating the resolutio
 
 `fm-teardown.sh <id>` takes a task id directly and validates the complete metadata-only endpoint identity before any runtime dispatch or cleanup mutation.
 Missing, empty, duplicate, malformed, backend-inconsistent, or task-mismatched endpoint records are preserved and refused.
+A missing `worktree=` refuses too, unless an operator deliberately replaced it with the explicit scout-only `no_worktree=1` marker, which lets `fm-control.sh` stop the agent and `fm-teardown.sh` clean up the task without touching any local copy; `fm_backend_meta_no_worktree` in [`bin/fm-backend.sh`](../bin/fm-backend.sh) owns that marker's shape and limits.
 
 Legacy tmux metadata remains cleanup-compatible when its exact window name is `fm-<id>`; opaque non-tmux endpoints require their recorded `endpoint_task_id=` binding.
 

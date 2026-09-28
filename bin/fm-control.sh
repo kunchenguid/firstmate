@@ -102,7 +102,10 @@
 # validation (bin/fm-backend.sh's fm_backend_validate_task_endpoint). A legacy
 # fm-<id> label, an explicit session:window endpoint, and a bare window name
 # are all refused - a lifecycle command delivered to the wrong endpoint is far
-# worse than a loud refusal.
+# worse than a loud refusal. A scout record carrying that validation's explicit
+# no-worktree marker (fm_backend_meta_no_worktree) passes it, so `interrupt` and
+# `exit` act on its recorded endpoint, while `relaunch` still refuses for want
+# of a recorded worktree to launch into.
 #
 # A remotely placed secondmate is refused by name: its agent runs on another
 # host, so no postcondition this plane verifies could be read for it here.
@@ -1065,7 +1068,7 @@ case "$VERB" in
     ;;
   exit)
     result=$(do_exit)
-    echo "$result $ID harness=$HARNESS backend=$BACKEND endpoint=$T worktree=$WT"
+    echo "$result $ID harness=$HARNESS backend=$BACKEND endpoint=$T worktree=${WT:-none}"
     ;;
   relaunch)
     do_relaunch

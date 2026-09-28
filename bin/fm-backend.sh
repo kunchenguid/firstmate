@@ -368,6 +368,9 @@ fm_backend_target_of_meta() {  # <meta-file>
 # and worktree. New non-tmux records carry endpoint_task_id because their
 # opaque runtime ids do not encode the task label. Legacy tmux records remain
 # valid only when their window name itself is exactly fm-<task-id>.
+# A missing, empty, or duplicated worktree= refuses: an absent record never
+# silently means "no worktree". The one exception is the explicit no-worktree
+# marker that fm_backend_meta_no_worktree below owns.
 # On success, sets FM_BACKEND_VALIDATED_BACKEND and
 # FM_BACKEND_VALIDATED_TARGET. On failure, prints one refusal and returns 1.
 fm_backend_meta_exact_value() {  # <meta-file> <key>
@@ -404,6 +407,47 @@ fm_backend_orca_worktree_id_valid() {  # <value>
   esac
 }
 
+# fm_backend_meta_no_worktree: whether <meta-file> deliberately records that
+# its task holds no worktree. This is the single owner of that marker.
+# An operator opts a record in by replacing its worktree= line with exactly one
+# `no_worktree=1` line, which is only ever done by hand after proving the task
+# has no local copy of its own - for example a finished scout whose former pool
+# slot another task now owns, where keeping the stale worktree= line would let
+# cleanup reach into that other task's slot.
+# The marker is honored only on a record with exactly one `kind=scout` line and
+# no worktree= line at all: a scout's local copy is declared scratch and its
+# report under data/<id>/ is the work product, so no unlanded work can hide
+# behind the marker. A ship's landed-work proof needs its worktree, so a ship
+# record can never use the marker; a ship whose pool slot was reassigned keeps
+# its worktree= line and bin/fm-teardown.sh's slot-owner claim check handles it.
+# An Orca record can never use it either: Orca names its per-task worktree
+# through orca_worktree_id, which cleanup removes, and that worktree is never a
+# shared slot another task could come to own.
+# Returns 0 for a valid opted-in record, 1 when the record carries no
+# no_worktree= line, and 2 after printing one refusal when it carries the
+# marker in any other shape. Endpoint identity is validated exactly as strictly
+# either way; the marker replaces only the worktree identity.
+fm_backend_meta_no_worktree() {  # <meta-file> <task-id>
+  local meta=$1 id=$2 marker_count worktree_count kind
+  marker_count=$(grep -c '^no_worktree=' "$meta" 2>/dev/null || true)
+  [ "$marker_count" != 0 ] || return 1
+  worktree_count=$(grep -c '^worktree=' "$meta" 2>/dev/null || true)
+  if [ "$marker_count" != 1 ] || [ "$(fm_meta_get "$meta" no_worktree)" != 1 ] \
+     || [ "$worktree_count" != 0 ]; then
+    echo "REFUSED: task $id has a malformed or ambiguous no-worktree marker (it needs exactly one no_worktree=1 line and no worktree= line); preserving task state." >&2
+    return 2
+  fi
+  kind=$(fm_backend_meta_exact_value "$meta" kind) || kind=
+  if [ "$kind" != scout ]; then
+    echo "REFUSED: task $id records no_worktree=1 but is not exactly kind=scout; only a scout, whose local copy is scratch, may record that it holds no worktree; preserving task state." >&2
+    return 2
+  fi
+  if grep -q '^backend=orca$' "$meta" 2>/dev/null || grep -q '^orca_worktree_id=' "$meta" 2>/dev/null; then
+    echo "REFUSED: task $id records no_worktree=1 on an Orca record, whose worktree is named by orca_worktree_id; preserving task state." >&2
+    return 2
+  fi
+}
+
 fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
   local meta=$1 id=$2 backend_count backend window worktree project binding_count binding
   local session pane recorded_session workspace tab terminal worktree_id surface
@@ -421,10 +465,15 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
     echo "REFUSED: task $id has a missing, empty, or ambiguous window endpoint; preserving task state." >&2
     return 1
   }
-  worktree=$(fm_backend_meta_exact_value "$meta" worktree) || {
-    echo "REFUSED: task $id has a missing, empty, or ambiguous worktree identity; preserving task state." >&2
-    return 1
-  }
+  if fm_backend_meta_no_worktree "$meta" "$id"; then
+    worktree=
+  else
+    [ "$?" -eq 1 ] || return 1
+    worktree=$(fm_backend_meta_exact_value "$meta" worktree) || {
+      echo "REFUSED: task $id has a missing, empty, or ambiguous worktree identity; preserving task state." >&2
+      return 1
+    }
+  fi
   project=$(fm_backend_meta_exact_value "$meta" project) || {
     echo "REFUSED: task $id has a missing, empty, or ambiguous project identity; preserving task state." >&2
     return 1
