@@ -2113,8 +2113,9 @@ List every provider spelling that reaches the same endpoint in one pool, because
 
 - The primary home and every local secondmate whose parent binding leads to it share the primary's pools, capacity, and one lock.
 - The count includes every pooled task record in the primary and in each local secondmate registered in `data/secondmates.md`, so workers launched before the file existed are counted.
-- A remote secondmate cannot reach the primary's accounting, so its spawn refuses any model its inherited copy of this file pools.
-  Route pooled work to the primary or a local home, or use another route there.
+- A remote secondmate shares the same capacity through the existing primary-to-remote transport: its spawn files a seat request in its own home and waits, and the primary's watcher answers every remote's requests about every 30 seconds while holding the fleet lock.
+- The primary counts each remote's seats from that remote's last answer, so a remote the primary cannot currently reach keeps its seats counted rather than freeing them.
+- A remote request the primary does not answer within 90 seconds is withdrawn and refused, so a remote home never launches a pooled worker the primary has not counted.
 
 **Refusals**
 
@@ -2128,7 +2129,7 @@ Run `bin/fm-fleet-seats.sh status` from any local home to see each pool's capaci
 
 **Inheritance**
 
-Secondmate homes inherit this file from the primary so a remote home knows which models to refuse; a local home counts against the primary's own copy.
+Secondmate homes inherit this file from the primary so a remote home knows which models need a seat; capacity always comes from the primary's own copy.
 
 ## Toolchain
 
@@ -3371,6 +3372,10 @@ FMX_FOLLOWUP_MAX_COUNT=3   # local cap on Relay completion follow-ups per linked
 FM_PF_RETRY_BACKOFF_SECS=900   # seconds before the next attempt after a retryable promised-public-reply delivery error
 FM_LOCK_STALE_AFTER=2   # grace seconds for missing or nonnumeric lock-owner PIDs (minimum 2s); dead numeric PIDs, and live ones whose start time (or, for the watch lock, process identity) no longer matches the holder's recorded value, have no age grace
 FM_FLEET_SEATS_LOCK_WAIT=30   # seconds a seat reservation waits for the fleet seat lock before refusing (docs/configuration.md "Fleet seat pools")
+FM_FLEET_SEATS_REMOTE_WAIT=90   # seconds a remote home's seat request waits for the primary's answer before refusing
+FM_FLEET_SEATS_SERVE_INTERVAL=30   # seconds between the primary watcher's remote seat-serving passes
+FM_FLEET_SEATS_SERVE_TIMEOUT=20   # bound on one remote seat-serving call
+FM_FLEET_SEATS_SERVE_BACKOFF=120   # seconds a remote that failed to answer is skipped before the next attempt
 FM_GUARD_GRACE=300      # beacon freshness threshold for guard verdicts, arm health checks, and the primary turn-end guard; see docs/turnend-guard.md for model-aware exceptions
 FM_CLAUDE_AUTOARM_ATTEMPTS=2   # bounded Stop-owned arm attempts per Claude auto-arm cycle; accepted values are 1, 2, or 3
 FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=800   # milliseconds the --claude turn-end guard waits for watcher health, an open Stop auto-arm generation claim, or a fresh epoch before deciding recovery ownership or failure progression
