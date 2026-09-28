@@ -714,6 +714,7 @@ function validateOutboundLedger(ledger) {
   requireSafeInteger(ledger.attempts, "outbound attempts");
   requireSafeInteger(ledger.retry_at_ms, "outbound retry time");
   requireSafeInteger(ledger.binding_generation, "outbound ledger generation", { min: 1 });
+  if (ledger.text_hash !== undefined) requireString(ledger.text_hash, "outbound ledger text hash", RECORD_HASH);
   if (ledger.attempt_id !== undefined) requireString(ledger.attempt_id, "outbound attempt id", /^attempt_[a-f0-9]{24}$/);
   if (ledger.last_attempt_ms !== undefined) requireSafeInteger(ledger.last_attempt_ms, "outbound last attempt");
   if (ledger.idempotency_started_ms !== undefined && ledger.idempotency_started_ms !== null) requireSafeInteger(ledger.idempotency_started_ms, "outbound idempotency start");
@@ -1358,9 +1359,10 @@ function readInboundByDeliveryRef(paths, deliveryRef) {
   requireString(deliveryRef, "inbound delivery ref", DELIVERY_REF);
   const map = readJson(join(paths.inboundDeliveryMap, `${sha(deliveryRef)}.json`), { optional: true });
   if (!map) return undefined;
-  const event = readJson(join(paths.inbox, map.filename));
+  const event = readJson(join(paths.inbox, map.filename), { optional: true });
   const ledger = readJson(join(paths.inboundLedger, map.filename));
-  if (event.delivery_ref !== deliveryRef || ledger.delivery_ref !== deliveryRef || event.message_id !== map.message_id || ledger.message_id !== map.message_id) throw new Error("Feishu inbound delivery lookup mismatch");
+  if (ledger.delivery_ref !== deliveryRef || ledger.message_id !== map.message_id || (event && (event.delivery_ref !== deliveryRef || event.message_id !== map.message_id))) throw new Error("Feishu inbound delivery lookup mismatch");
+  if (!event && ledger.state !== "delivered") throw new Error("unfinished Feishu inbound delivery lost its message record");
   return { name: map.filename, event, ledger };
 }
 
@@ -1615,7 +1617,7 @@ export function publishFeishuInbound(home, raw, options = {}) {
     return { status: "quarantined", reason: "malformed-event" };
   }
   const filename = inboundFilename(messageId);
-  if (existsSync(join(paths.inbox, filename)) || inboundEventIdExists(paths, raw.event_id)) {
+  if (existsSync(join(paths.inbox, filename)) || existsSync(join(paths.inboundLedger, filename)) || inboundEventIdExists(paths, raw.event_id)) {
     return withLock(paths, "inbound-state", () => {
       repairInboundPublicationsLocked(paths);
       return { status: "duplicate", messageIdHash: sha(messageId) };
@@ -1671,7 +1673,7 @@ export function publishFeishuInbound(home, raw, options = {}) {
       quarantine(paths, "authorization-changed", messageId, { ...audit, message_id_hash: sha(messageId) });
       return { status: "quarantined", reason: "authorization-changed", messageIdHash: sha(messageId) };
     }
-    if (existsSync(join(paths.inbox, filename)) || inboundEventIdExists(paths, raw.event_id)) {
+    if (existsSync(join(paths.inbox, filename)) || existsSync(join(paths.inboundLedger, filename)) || inboundEventIdExists(paths, raw.event_id)) {
       return { status: "duplicate", messageIdHash: sha(messageId) };
     }
     const pressure = inboundResourcePressure(paths, options);
@@ -1979,82 +1981,78 @@ function inboundEventHasBody(event) {
 
 function cleanupProcessedInboundBodiesLocked(paths, nowMs) {
   repairInboundLedgersLocked(paths);
-  const bodyRefsBefore = [];
+  let filesBefore = 0;
+  let filesAfter = 0;
   const removedDeliveryRefs = [];
-  let pendingBodies = 0;
   for (const name of safeJsonNames(paths.inboundLedger)) {
     const ledger = validateInboundLedger(readJson(join(paths.inboundLedger, name)));
     const eventPath = join(paths.inbox, name);
-    const event = validateInboundEvent(readJson(eventPath));
-    if (!inboundEventHasBody(event)) continue;
-    bodyRefsBefore.push(event.delivery_ref);
+    const rawEvent = readJson(eventPath, { optional: true });
+    if (!rawEvent) continue;
+    const event = validateInboundEvent(rawEvent);
+    filesBefore += 1;
     if (ledger.state !== "delivered") {
-      pendingBodies += 1;
+      filesAfter += 1;
       continue;
     }
-    const { text: _text, content: _content, ...identity } = event;
-    atomicJson(eventPath, {
-      ...identity,
-      schema: PROCESSED_INBOUND_SCHEMA,
-      body_removed_at: new Date(nowMs).toISOString(),
-    });
+    unlinkSync(eventPath);
+    fsyncDirectory(paths.inbox);
     removedDeliveryRefs.push(event.delivery_ref);
   }
   const media = cleanupFeishuMediaLocked(paths, nowMs, 0);
   return {
-    bodiesBefore: bodyRefsBefore.length,
-    bodiesAfter: pendingBodies,
-    removedBodies: removedDeliveryRefs.length,
-    retainedPendingBodies: pendingBodies,
+    filesBefore,
+    filesAfter,
+    removedFiles: removedDeliveryRefs.length,
+    retainedUnprocessedFiles: filesAfter,
     removedDeliveryRefs,
     removedMediaRecords: media.removedRecords,
     removedMediaBytes: media.removedBytes,
   };
 }
 
-function cleanupProcessedOutboundBodiesLocked(paths, nowMs) {
+function cleanupProcessedOutboundBodiesLocked(paths) {
   const bindingRaw = readJson(paths.activeBinding, { optional: true });
   const binding = bindingRaw ? validateBindingRecord(bindingRaw) : undefined;
   repairOutboundStateLocked(paths, binding);
-  let bodiesBefore = 0;
-  let bodiesAfter = 0;
-  let removedBodies = 0;
+  let filesBefore = 0;
+  let filesAfter = 0;
+  let removedFiles = 0;
   for (const name of safeJsonNames(paths.outbox)) {
     const outboxPath = join(paths.outbox, name);
     const outbox = validateAnyOutbound(readJson(outboxPath));
-    if (outbox.schema === PROCESSED_OUTBOUND_SCHEMA) continue;
-    bodiesBefore += 1;
-    const ledger = validateOutboundLedger(readJson(join(paths.outboundLedger, name)));
+    filesBefore += 1;
+    const ledgerPath = join(paths.outboundLedger, name);
+    const ledger = validateOutboundLedger(readJson(ledgerPath));
     if (ledger.state !== "posted") {
-      bodiesAfter += 1;
+      filesAfter += 1;
       continue;
     }
     const receipt = validateOutboundReceipt(readJson(join(paths.outboundReceipts, name)));
-    if (receipt.event_id !== outbox.event_id || receipt.chat_id !== outbox.destination_chat_id || receipt.message_ids.length !== outbox.chunks.length || receipt.idempotency_keys.some((key, index) => key !== outbox.chunks[index].idempotency_key)) {
+    const chunkCount = outbox.schema === PROCESSED_OUTBOUND_SCHEMA ? outbox.chunk_count : outbox.chunks.length;
+    const destinationChatId = outbox.destination_chat_id;
+    const idempotencyMismatch = receipt.idempotency_keys.length !== chunkCount || receipt.idempotency_keys.some((key, index) => key !== stableId("fm", `${outbox.event_id}\0${index}`, 44));
+    if (receipt.event_id !== outbox.event_id || receipt.chat_id !== destinationChatId || receipt.message_ids.length !== chunkCount || idempotencyMismatch) {
       throw new Error("posted Feishu outbound body lacks complete authoritative receipt evidence");
     }
-    const { text: _text, chunks, rendered_text_hash: _renderedTextHash, ...identity } = outbox;
-    atomicJson(outboxPath, {
-      ...identity,
-      schema: PROCESSED_OUTBOUND_SCHEMA,
-      chunk_count: chunks.length,
-      body_removed_at: new Date(nowMs).toISOString(),
-    });
-    removedBodies += 1;
+    atomicJson(ledgerPath, { ...ledger, text_hash: outbox.text_hash });
+    unlinkSync(outboxPath);
+    fsyncDirectory(paths.outbox);
+    removedFiles += 1;
   }
-  return { bodiesBefore, bodiesAfter, removedBodies };
+  return { filesBefore, filesAfter, removedFiles };
 }
 
 export function cleanupProcessedFeishuBodies(home, options = {}) {
   const paths = ensurePrivateLayout(home);
   const nowMs = Number.isSafeInteger(options.nowMs) ? options.nowMs : Date.now();
   const inbound = withLock(paths, "inbound-state", () => cleanupProcessedInboundBodiesLocked(paths, nowMs));
-  const outbound = withLock(paths, "outbound-state", () => cleanupProcessedOutboundBodiesLocked(paths, nowMs));
+  const outbound = withLock(paths, "outbound-state", () => cleanupProcessedOutboundBodiesLocked(paths));
   return {
-    bodiesBefore: inbound.bodiesBefore + outbound.bodiesBefore,
-    bodiesAfter: inbound.bodiesAfter + outbound.bodiesAfter,
-    removedBodies: inbound.removedBodies + outbound.removedBodies,
-    retainedUnprocessedBodies: inbound.bodiesAfter + outbound.bodiesAfter,
+    filesBefore: inbound.filesBefore + outbound.filesBefore,
+    filesAfter: inbound.filesAfter + outbound.filesAfter,
+    removedFiles: inbound.removedFiles + outbound.removedFiles,
+    retainedUnprocessedFiles: inbound.filesAfter + outbound.filesAfter,
     inbound,
     outbound,
     removedDeliveryRefs: inbound.removedDeliveryRefs,
@@ -2077,7 +2075,6 @@ function repairInboundLedgersLocked(paths) {
   for (const name of safeJsonNames(paths.inbox)) {
     const ledgerPath = join(paths.inboundLedger, name);
     const event = validateInboundEvent(readJson(join(paths.inbox, name)));
-    validDeliveryMaps.add(`${sha(event.delivery_ref)}.json`);
     writeInboundDeliveryMap(paths, event);
     for (const eventId of event.event_ids) recordInboundEventId(paths, eventId, event.message_id, event.delivery_ref);
     if (existsSync(ledgerPath)) continue;
@@ -2100,9 +2097,11 @@ function repairInboundLedgersLocked(paths) {
   let pending = 0;
   const indexed = new Set(safeJsonNames(paths.inboundPending));
   for (const name of safeJsonNames(paths.inboundLedger)) {
-    const ledger = requireSchema(readJson(join(paths.inboundLedger, name)), INBOUND_LEDGER_SCHEMA, "inbound ledger");
-    const event = validateInboundEvent(readJson(join(paths.inbox, name)));
-    assertInboundPair(paths, name, event, ledger);
+    const ledger = validateInboundLedger(readJson(join(paths.inboundLedger, name)));
+    validDeliveryMaps.add(`${sha(ledger.delivery_ref)}.json`);
+    const event = readJson(join(paths.inbox, name), { optional: true });
+    if (event) assertInboundPair(paths, name, validateInboundEvent(event), ledger);
+    else if (ledger.state !== "delivered") throw new Error("unfinished Feishu inbound ledger lost its message record");
     if (new Set(["pending", "offered"]).has(ledger.state)) {
       writeInboundPendingIndex(paths, name, ledger);
       indexed.delete(name);
@@ -2225,7 +2224,7 @@ export function findInboundByDeliveryRef(home, deliveryRef) {
   return withLock(paths, "inbound-state", () => {
     repairInboundPublicationsLocked(paths);
     const found = readInboundByDeliveryRef(paths, deliveryRef);
-    return found ? deliveryEventForLedger(found.event, found.ledger) : undefined;
+    return found?.event ? deliveryEventForLedger(found.event, found.ledger) : undefined;
   });
 }
 
@@ -2251,9 +2250,12 @@ export function findInboundDeliveryEvidence(home, deliveryRef) {
     const found = readInboundByDeliveryRef(paths, deliveryRef);
     if (!found) return undefined;
     return {
-      event: deliveryEventForLedger(found.event, found.ledger),
+      event: found.event ? deliveryEventForLedger(found.event, found.ledger) : {
+        delivery_ref: found.ledger.delivery_ref,
+        binding_generation: found.ledger.binding_generation,
+      },
       contentDigest: typeof found.ledger.content_digest === "string" ? found.ledger.content_digest : undefined,
-      bodyAvailable: inboundEventHasBody(found.event),
+      bodyAvailable: Boolean(found.event && inboundEventHasBody(found.event)),
     };
   });
 }
@@ -2903,13 +2905,31 @@ function reconcileOutboundReceiptLocked(paths, name, outbox, ledger) {
   return { ledger, receipt, repaired };
 }
 
+function assertProcessedOutboundEvidence(name, ledger, receipt) {
+  validateOutboundLedger(ledger);
+  validateOutboundReceipt(receipt);
+  requireString(ledger.text_hash, "processed outbound ledger text hash", RECORD_HASH);
+  if (name !== `${sha(ledger.event_id)}.json` || ledger.state !== "posted" || receipt.event_id !== ledger.event_id || receipt.message_ids.length !== ledger.next_chunk || receipt.idempotency_keys.length !== ledger.next_chunk || receipt.idempotency_keys.some((key, index) => key !== stableId("fm", `${ledger.event_id}\0${index}`, 44))) {
+    throw new Error("processed Feishu outbound ledger lacks complete authoritative receipt evidence");
+  }
+}
+
 function repairOutboundStateLocked(paths, binding) {
   assertConfigurationIdentity(paths, undefined, binding);
   let repaired = 0;
   const outboxNames = safeJsonNames(paths.outbox);
   const outboxSet = new Set(outboxNames);
-  for (const name of safeJsonNames(paths.outboundLedger)) if (!outboxSet.has(name)) throw new Error("orphan Feishu outbound ledger");
-  for (const name of safeJsonNames(paths.outboundReceipts)) if (!outboxSet.has(name)) throw new Error("orphan Feishu outbound receipt");
+  const ledgerNames = safeJsonNames(paths.outboundLedger);
+  const ledgerSet = new Set(ledgerNames);
+  for (const name of safeJsonNames(paths.outboundReceipts)) if (!ledgerSet.has(name)) throw new Error("orphan Feishu outbound receipt");
+  for (const name of ledgerNames) {
+    if (outboxSet.has(name)) continue;
+    const ledger = readJson(join(paths.outboundLedger, name));
+    const receipt = readJson(join(paths.outboundReceipts, name), { optional: true });
+    if (!receipt) throw new Error("orphan Feishu outbound ledger");
+    assertProcessedOutboundEvidence(name, ledger, receipt);
+    if (removeOutboundPendingIndex(paths, name)) repaired += 1;
+  }
   for (const name of outboxNames) {
     const outbox = readJson(join(paths.outbox, name));
     const ledgerPath = join(paths.outboundLedger, name);
@@ -2973,6 +2993,14 @@ export function persistAssistantOutboundIntent(home, input) {
     if (existingOutbox) {
       validateAnyOutbound(existingOutbox);
       if (existingOutbox.assistant_entry_id !== assistantEntryId || existingOutbox.session_order !== sessionOrder || existingOutbox.session_entry_timestamp !== sessionEntryTimestamp || existingOutbox.text_hash !== `sha256:${sha(text)}`) throw new Error("persisted Assistant entry conflicts with its existing Feishu outbound record");
+      return { status: "duplicate", eventId };
+    }
+    const existingLedger = readJson(join(paths.outboundLedger, `${sha(eventId)}.json`), { optional: true });
+    if (existingLedger) {
+      const receipt = readJson(join(paths.outboundReceipts, `${sha(eventId)}.json`), { optional: true });
+      if (!receipt) throw new Error("processed Feishu outbound identity lacks its durable receipt");
+      assertProcessedOutboundEvidence(`${sha(eventId)}.json`, existingLedger, receipt);
+      if (existingLedger.text_hash !== `sha256:${sha(text)}`) throw new Error("persisted Assistant entry conflicts with its processed Feishu outbound identity");
       return { status: "duplicate", eventId };
     }
     const secretPattern = assistantSecretPattern(text);
@@ -3129,6 +3157,14 @@ export function registerAssistantOutbound(home, input) {
       ledger = reconcileOutboundReceiptLocked(paths, filename, outbox, ledger).ledger;
       if (["pending", "retryable", "sending"].includes(ledger.state)) writeOutboundPendingIndex(paths, filename, outbox);
       else removeOutboundPendingIndex(paths, filename);
+      return { status: "duplicate", eventId };
+    }
+    const processedLedger = readJson(join(paths.outboundLedger, filename), { optional: true });
+    if (processedLedger) {
+      const receipt = readJson(join(paths.outboundReceipts, filename), { optional: true });
+      if (!receipt) throw new Error("processed Feishu outbound identity lacks its durable receipt");
+      assertProcessedOutboundEvidence(filename, processedLedger, receipt);
+      if (processedLedger.text_hash !== `sha256:${sha(text)}`) throw new Error("persisted Assistant entry conflicts with its processed Feishu outbound identity");
       return { status: "duplicate", eventId };
     }
     let transferringIntent = false;

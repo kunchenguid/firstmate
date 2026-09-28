@@ -45,11 +45,13 @@ The processed-body lifecycle was verified on 2026-09-28 with Node `22.22.2` and 
 
 ```console
 $ bash tests/fm-feishu-processed-cleanup.test.sh
-ok - five-second Feishu cleanup removes only receipt-proven bodies and preserves all unfinished work
+evidence - message JSON files before=7 after=5; legacy processed files before=7 after=5
+ok - five-second Feishu cleanup unlinks only receipt-proven message files and preserves all unfinished work
 ```
 
-The clock-controlled public-lifecycle fixture proves the pass does not run before five seconds, then removes one delivered inbound body and one fully receipted outbound body while retaining five pending, offered, delivery-uncertain, partially posted, or unsent bodies.
-It also proves empty and repeated passes are harmless, runtime shutdown disposes the timer, restart readback does not rehydrate compacted inbound content, compacted identities still deduplicate inbound replay and outbound registration, and superseded inbound, sending, and retryable records remain intact.
+The clock-controlled public-lifecycle fixture proves the pass does not run before five seconds, then reduces the inbound and outbound message-file count from seven to five by unlinking one delivered inbound JSON file and one fully receipted outbound JSON file while retaining five pending, offered, delivery-uncertain, partially posted, or unsent files.
+A second clock-controlled cycle starts from the same seven-file count with earlier-version processed empty-body fixtures and again reaches five by unlinking those two legacy message files.
+It also proves empty and repeated passes are harmless, runtime shutdown disposes the timer, restart readback does not rehydrate deleted inbound content, retained ledger and receipt identities still deduplicate inbound replay and outbound registration, and superseded inbound, sending, and retryable records remain intact.
 
 ```console
 $ bash tests/fm-feishu-channel.test.sh

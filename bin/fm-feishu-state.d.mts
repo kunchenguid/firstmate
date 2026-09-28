@@ -194,20 +194,20 @@ export function failFeishuMediaDownload(home: string, claim: InboundMediaClaim, 
 export function loadFeishuIngressContent(home: string, event: InboundEvent): Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }> | undefined;
 export function cleanupFeishuMedia(home: string, options?: { nowMs?: number; retentionMs?: number }): { removedRecords: number; removedBytes: number };
 export interface ProcessedBodyCleanupResult {
-  bodiesBefore: number;
-  bodiesAfter: number;
-  removedBodies: number;
-  retainedUnprocessedBodies: number;
+  filesBefore: number;
+  filesAfter: number;
+  removedFiles: number;
+  retainedUnprocessedFiles: number;
   inbound: {
-    bodiesBefore: number;
-    bodiesAfter: number;
-    removedBodies: number;
-    retainedPendingBodies: number;
+    filesBefore: number;
+    filesAfter: number;
+    removedFiles: number;
+    retainedUnprocessedFiles: number;
     removedDeliveryRefs: string[];
     removedMediaRecords: number;
     removedMediaBytes: number;
   };
-  outbound: { bodiesBefore: number; bodiesAfter: number; removedBodies: number };
+  outbound: { filesBefore: number; filesAfter: number; removedFiles: number };
   removedDeliveryRefs: string[];
 }
 export function cleanupProcessedFeishuBodies(home: string, options?: { nowMs?: number }): ProcessedBodyCleanupResult;
@@ -233,7 +233,7 @@ export function reconcileFeishuIngress(home: string, markers: Array<{
 }, resetUnobservedOffers?: boolean): number;
 export function findInboundByDeliveryRef(home: string, deliveryRef: string): InboundEvent | undefined;
 export function recordInboundContentDigest(home: string, deliveryRef: string, contentDigest: string): boolean;
-export function findInboundDeliveryEvidence(home: string, deliveryRef: string): { event: InboundEvent; contentDigest: string | undefined; bodyAvailable: boolean } | undefined;
+export function findInboundDeliveryEvidence(home: string, deliveryRef: string): { event: InboundEvent | Pick<InboundEvent, "delivery_ref" | "binding_generation">; contentDigest: string | undefined; bodyAvailable: boolean } | undefined;
 export function claimLiveSession(home: string, binding: BindingRecord, session: {
   sessionId: string;
   sessionFile: string;
