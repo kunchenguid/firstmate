@@ -623,11 +623,12 @@ cmd_register_lavish_owner() {
     [ "$arg" = --agent-reply-file ] && reply_requested=1
   done
   if [ "$firstmate_owner" -eq 1 ]; then
-    { [ "${#argv[@]}" -eq 3 ] || [ "${#argv[@]}" -eq 5 ]; } \
+    if ! { { [ "${#argv[@]}" -eq 3 ] || [ "${#argv[@]}" -eq 5 ]; } \
       && [ "${argv[0]}" = "$SCRIPT_DIR/fm-procevent-lavish.sh" ] \
       && [ "${argv[1]}" = poll ] \
-      && { [ "${#argv[@]}" -eq 3 ] || [ "${argv[3]}" = --agent-reply-file ]; } \
-      || die "register-lavish requires the built-in Lavish poll command"
+      && { [ "${#argv[@]}" -eq 3 ] || [ "${argv[3]}" = --agent-reply-file ]; }; }; then
+      die "register-lavish requires the built-in Lavish poll command"
+    fi
     expected_id=$("$SCRIPT_DIR/fm-procevent-lavish.sh" source-id "${argv[2]}" 2>/dev/null) \
       || die "cannot verify the Lavish artifact for source $id"
     [ "$expected_id" = "$id" ] || die "Lavish artifact does not match source id: $id"

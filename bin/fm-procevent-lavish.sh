@@ -427,9 +427,9 @@ cmd_poll() {
     kill -"$caught" "$$"
   }
   trap adapter_exit EXIT
-  for signal in INT TERM HUP; do
-    trap "adapter_signal_exit $signal" "$signal"
-  done
+  trap 'adapter_signal_exit INT' INT
+  trap 'adapter_signal_exit TERM' TERM
+  trap 'adapter_signal_exit HUP' HUP
   [ -n "$artifact" ] || usage
   if [ "$#" -eq 3 ] && [ "${2-}" = --agent-reply-file ]; then
     reply_file=$3
