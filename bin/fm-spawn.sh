@@ -1252,6 +1252,7 @@ spawn_abort_cleanup() {
     [ ! -e "$SPAWN_META_TMP" ] &&
     [ ! -L "$SPAWN_META_TMP" ]; then
     RELAUNCH_REPLACEMENT_PENDING=0
+    TMUX_REBIND_ABORT_TARGET=
   fi
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ]; then
     RELAUNCH_REPLACEMENT_PENDING=0
