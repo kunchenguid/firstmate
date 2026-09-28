@@ -313,9 +313,9 @@ export const register: Register = (on) => {
       site = { columns, rows: packed.rows, sprite };
       sites.set(e.requestId, site);
     } else {
-      site.columns = columns;
       packed = packCalmShipRasterCells(site.sprite.frame(columns, family), columns);
-      site.rows = packed.rows;
+      site = { columns, rows: packed.rows, sprite: site.sprite };
+      sites.set(e.requestId, site);
     }
     startTicker($);
     const { Box, Raster } = $.ui.resolve(e);

@@ -161,6 +161,33 @@ describe("the working ship", () => {
     expect(journal.blits).toHaveLength(0);
   });
 
+  test("keeps the boat sailing when a resize redraws the site while a blit is in flight", async ($, on) => {
+    const { clock, journal, holdNextBlit } = world(on, { preference: "on\n" });
+    await $.session.start({ cwd: "/work", surface: "terminal", isInteractive: true });
+    await $.ui.render(spinner("agent-main", { columns: 40, rows: 24 }));
+    await clock.advance(TICK);
+    expect(journal.blits).toHaveLength(1);
+    expect(journal.blits[0]!.columns).toBe(38);
+    const held = holdNextBlit();
+    const pendingTick = clock.advance(TICK);
+    // Wait until the ticker's repaint has entered the held blit and stays in flight.
+    for (let wait = 0; wait < 50 && journal.blits.length < 2; wait++) await new Promise((r) => setTimeout(r, 0));
+    expect(journal.blits).toHaveLength(2);
+    expect(journal.blits[1]!.columns).toBe(38);
+    const resized = rasterOf(await $.ui.render(spinner("agent-main", { columns: 12, rows: 24 }))!)!;
+    expect(resized.columns).toBe(10);
+    // The old blit was for the previous width; the surface now denies it because the
+    // resize redrew the same requestId with a new Raster.
+    held.release("resize denied: old raster no longer mounted");
+    await pendingTick;
+    // The denied old Raster must not have deleted the live resized site, so the frame
+    // clock keeps ticking at the new width.
+    expect(journal.blits).toHaveLength(2);
+    await clock.advance(TICK);
+    expect(journal.blits).toHaveLength(3);
+    expect(journal.blits[2]).toMatchObject({ requestId: "agent-main", columns: 10, rows: 4 });
+  });
+
   // Each theme value needs its own world, so the family rule gets one test per value.
   for (const [theme, family] of [
     ["dark", "dark"],

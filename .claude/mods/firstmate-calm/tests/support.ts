@@ -37,6 +37,8 @@ export type World = {
   denyBlits: (reason: string | undefined) => void;
   /** Set to reject every `$.fs.write` from now on. */
   failWrites: (reason: string | undefined) => void;
+  /** Hold the next `$.ui.blit` in flight until `release` is called. */
+  holdNextBlit: () => { release: (deny?: string) => void };
 };
 
 export type WorldOptions = {
@@ -81,6 +83,8 @@ export function world(on: On, options: WorldOptions = {}): World {
   let theme: unknown = "theme" in options ? options.theme : "dark";
   let blitDenial: string | undefined;
   let writeFailure: string | undefined;
+  let nextBlitDeferred: Promise<{ deny?: string }> | undefined;
+  let nextBlitResolve: ((value: { deny?: string }) => void) | undefined;
 
   on("fs.read", async (_$, e) => {
     journal.fsReads.push(e.path);
@@ -105,7 +109,15 @@ export function world(on: On, options: WorldOptions = {}): World {
   });
   on("ui.blit", async (_$, e) => {
     journal.blits.push({ requestId: e.requestId, key: e.key, columns: e.columns, rows: e.rows, cells: e.cells });
-    return { value: blitDenial === undefined ? {} : { deny: blitDenial } };
+    if (nextBlitDeferred !== undefined) {
+      const deferred = nextBlitDeferred;
+      nextBlitDeferred = undefined;
+      const outcome = await deferred;
+      nextBlitResolve = undefined;
+      if (outcome.deny !== undefined) return { value: { deny: outcome.deny } } as never;
+      return { value: {} } as never;
+    }
+    return { value: blitDenial === undefined ? {} : { deny: blitDenial } } as never;
   });
   on("session.messages", async () => {
     journal.sessionMessageReads += 1;
@@ -147,6 +159,20 @@ export function world(on: On, options: WorldOptions = {}): World {
     },
     failWrites: (reason) => {
       writeFailure = reason;
+    },
+    holdNextBlit: () => {
+      let resolve!: (value: { deny?: string }) => void;
+      const deferred = new Promise<{ deny?: string }>((r) => {
+        resolve = r;
+      });
+      nextBlitDeferred = deferred;
+      nextBlitResolve = resolve;
+      return {
+        release: (deny?: string) => {
+          const resolver = nextBlitResolve;
+          if (resolver !== undefined) resolver({ deny });
+        },
+      };
     },
   };
 }
