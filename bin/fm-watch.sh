@@ -2565,17 +2565,21 @@ retire_merged_pr_poll() {  # <id>
 # A green pull request that cannot merge raises no merge poll output, so an
 # armed yolo merge can sit refused (behind its base, conflicting, protection)
 # with nobody told. bin/fm-pr-green-blocked.sh reads the forge; this owns the
-# episode: state/<id>.pr-green-blocked records "<url> <first-seen-epoch>
-# <alerted>" from the first blocked reading, one wake fires once the episode
-# is PR_GREEN_BLOCKED_SECS old, and a clear reading (merged, closed, a red or
-# pending check, or mergeable again) ends it, so a later block is a new
-# episode. An unknown reading changes nothing. The wake row is queued before
-# the episode is marked alerted, preferring a rare duplicate over silence.
+# episode: state/<id>.pr-green-blocked records "<url> <head-sha>
+# <first-seen-epoch> <alerted>" from the first blocked reading, one wake fires
+# once the episode is PR_GREEN_BLOCKED_SECS old, and a clear reading (merged,
+# closed, a red or pending check, or mergeable again) ends it, so a later
+# block is a new episode. An episode is keyed by URL and head: a re-pushed
+# head that is blocked again before any clear reading (a rebase whose CI went
+# green between two sweeps while the base advanced) starts a fresh episode
+# with its own timer rather than hiding inside the alerted one. An unknown
+# reading changes nothing. The wake row is queued before the episode is
+# marked alerted, preferring a rare duplicate over silence.
 # Runs under the caller's PR poll control lock; wakes (and exits) only when due.
-pr_green_blocked_record() {  # <file> <url> <first-epoch> <alerted>
+pr_green_blocked_record() {  # <file> <url> <head> <first-epoch> <alerted>
   local tmp
   tmp=$(mktemp "$STATE/.pr-green-blocked.XXXXXX") || return 1
-  if printf '%s %s %s\n' "$2" "$3" "$4" > "$tmp" && mv -f -- "$tmp" "$1"; then
+  if printf '%s %s %s %s\n' "$2" "$3" "$4" "$5" > "$tmp" && mv -f -- "$tmp" "$1"; then
     return 0
   fi
   rm -f "$tmp"
@@ -2583,8 +2587,8 @@ pr_green_blocked_record() {  # <file> <url> <first-epoch> <alerted>
 }
 
 pr_green_blocked_tick() {  # <id> <check-path> <url>
-  local id=$1 c=$2 url=$3 file probe verdict detail now age reason
-  local rec_url='' first='' alerted=''
+  local id=$1 c=$2 url=$3 file probe verdict head detail now age reason
+  local rec_url='' rec_head='' first='' alerted=''
   file="$STATE/$id.pr-green-blocked"
   probe="$SCRIPT_DIR/fm-pr-green-blocked.sh"
   [ -f "$probe" ] || return 0
@@ -2592,25 +2596,29 @@ pr_green_blocked_tick() {  # <id> <check-path> <url>
   verdict=${FM_CHECK_RESULT%%$'\n'*}
   case "$verdict" in
     clear) rm -f "$file"; return 0 ;;
-    'blocked '*) detail=${verdict#blocked } ;;
+    'blocked '*' '*)
+      detail=${verdict#blocked }
+      head=${detail%% *}
+      detail=${detail#* }
+      ;;
     *) return 0 ;;
   esac
   now=$(date +%s)
   if [ -f "$file" ] && [ ! -L "$file" ]; then
-    read -r rec_url first alerted < "$file" || true
+    read -r rec_url rec_head first alerted < "$file" || true
   fi
   case "$first" in ''|*[!0-9]*) rec_url='' ;; esac
-  if [ "$rec_url" != "$url" ]; then
+  if [ "$rec_url" != "$url" ] || [ "$rec_head" != "$head" ]; then
     first=$now
     alerted=0
-    pr_green_blocked_record "$file" "$url" "$first" 0 || return 0
+    pr_green_blocked_record "$file" "$url" "$head" "$first" 0 || return 0
   fi
   [ "$alerted" = 1 ] && return 0
   age=$((now - first))
   [ "$age" -ge "$PR_GREEN_BLOCKED_SECS" ] || return 0
   reason="check: $c: green-unmergeable $url for $((age / 60))m: $detail"
   fm_wake_append check "$c" "$reason" || exit 1
-  pr_green_blocked_record "$file" "$url" "$first" 1 || exit 1
+  pr_green_blocked_record "$file" "$url" "$head" "$first" 1 || exit 1
   pr_poll_control_release || exit 1
   touch "$STATE/.last-check"
   wake "$reason"

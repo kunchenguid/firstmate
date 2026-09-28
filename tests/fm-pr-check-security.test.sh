@@ -2172,13 +2172,17 @@ test_merged_poll_retires_once() {
 # invisible to the merged-only poll, so an armed merge can sit refused with
 # nobody told. The watcher raises one wake naming the PR and the reason once
 # the episode passes FM_PR_GREEN_BLOCKED_SECS, never repeats it for the same
-# episode, and treats a later block after a clear reading as a new episode.
-green_blocked_cycle() {  # <dir> <out> <mergeStateStatus> <conclusion> <threshold-secs>
+# episode, and treats a later block after a clear reading as a new episode. An
+# episode is keyed by the PR head too: a re-pushed head that is blocked again
+# with no clear reading in between (CI went green and the base advanced
+# between two sweeps) starts a fresh episode with its own timer.
+green_blocked_cycle() {  # <dir> <out> <mergeStateStatus> <conclusion> <threshold-secs> [head-sha]
   local dir=$1 out=$2 merge_state=$3 conclusion=$4 threshold=$5 rc
+  local head=${6:-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}
   rm -f "$dir/home/state/.last-check"
   set +e
   FM_PR_GREEN_BLOCKED_SECS="$threshold" FM_TEST_GH_STATE=OPEN FM_TEST_GH_LOG="$dir/gh.log" \
-    FM_TEST_GH_ROLLUP_JSON="{\"state\":\"OPEN\",\"isDraft\":false,\"mergeable\":\"MERGEABLE\",\"mergeStateStatus\":\"$merge_state\",\"statusCheckRollup\":[{\"__typename\":\"CheckRun\",\"name\":\"ci\",\"status\":\"COMPLETED\",\"conclusion\":\"$conclusion\"}]}" \
+    FM_TEST_GH_ROLLUP_JSON="{\"state\":\"OPEN\",\"isDraft\":false,\"mergeable\":\"MERGEABLE\",\"mergeStateStatus\":\"$merge_state\",\"headRefOid\":\"$head\",\"statusCheckRollup\":[{\"__typename\":\"CheckRun\",\"name\":\"ci\",\"status\":\"COMPLETED\",\"conclusion\":\"$conclusion\"}]}" \
     run_watcher_bounded "$dir/home" "$dir/fakebin" > "$out" 2> "$out.err"
   rc=$?
   set -e
@@ -2210,16 +2214,28 @@ test_green_unmergeable_pr_alerts_once_per_episode() {
   green_blocked_cycle "$dir" "$dir/w4.out" BEHIND SUCCESS 0
   case "$(cat "$dir/w4.out")" in check:*z-stop.check.sh:*stop-cycle) ;; *) fail "one stuck episode alerted twice: $(cat "$dir/w4.out")" ;; esac
 
-  green_blocked_cycle "$dir" "$dir/w5.out" BEHIND FAILURE 0
-  case "$(cat "$dir/w5.out")" in check:*z-stop.check.sh:*stop-cycle) ;; *) fail "a red PR raised a green-unmergeable alert: $(cat "$dir/w5.out")" ;; esac
+  green_blocked_cycle "$dir" "$dir/w5.out" BEHIND SUCCESS 1800 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  case "$(cat "$dir/w5.out")" in check:*z-stop.check.sh:*stop-cycle) ;; *) fail "a re-pushed head inherited the previous head's episode age: $(cat "$dir/w5.out")" ;; esac
 
-  green_blocked_cycle "$dir" "$dir/w6.out" BLOCKED SUCCESS 0
+  green_blocked_cycle "$dir" "$dir/w6.out" BEHIND SUCCESS 0 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
   case "$(cat "$dir/w6.out")" in
+    *"task-a.check.sh: green-unmergeable $url for "*"m: branch is behind the base branch") ;;
+    *) fail "a re-pushed head blocked again with no clear reading in between did not alert: $(cat "$dir/w6.out")" ;;
+  esac
+
+  green_blocked_cycle "$dir" "$dir/w7.out" BEHIND SUCCESS 0 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  case "$(cat "$dir/w7.out")" in check:*z-stop.check.sh:*stop-cycle) ;; *) fail "the re-pushed head's episode alerted twice: $(cat "$dir/w7.out")" ;; esac
+
+  green_blocked_cycle "$dir" "$dir/w8.out" BEHIND FAILURE 0 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  case "$(cat "$dir/w8.out")" in check:*z-stop.check.sh:*stop-cycle) ;; *) fail "a red PR raised a green-unmergeable alert: $(cat "$dir/w8.out")" ;; esac
+
+  green_blocked_cycle "$dir" "$dir/w9.out" BLOCKED SUCCESS 0 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  case "$(cat "$dir/w9.out")" in
     *"task-a.check.sh: green-unmergeable $url for "*"m: base-branch protection refuses the merge"*) ;;
-    *) fail "a new stuck episode after a clear reading did not alert: $(cat "$dir/w6.out")" ;;
+    *) fail "a new stuck episode after a clear reading did not alert: $(cat "$dir/w9.out")" ;;
   esac
   ! grep -F ' pr merge' "$dir/gh.log" >/dev/null || fail "the green-unmergeable alert attempted a merge"
-  pass "a green but unmergeable PR raises one wake per stuck episode after the threshold"
+  pass "a green but unmergeable PR raises one wake per stuck episode, keyed by URL and head, after the threshold"
 }
 
 # A poll's own retirement state is scoped to ONE registration, so it cannot by
