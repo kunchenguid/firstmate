@@ -582,6 +582,14 @@ fm_eval_launch() {
 
 # --- planted processes -------------------------------------------------------
 
+# fm_proc_scan_available: whether this host can run the tmux absence proof at
+# all. fm_agent_process_worktree_scan reads /proc and refuses everywhere else,
+# so a case that needs a positive `none` or `agent` verdict has nothing to pin
+# on a host without it.
+fm_proc_scan_available() {
+  [ -r /proc/self/cmdline ] && [ -L /proc/self/cwd ]
+}
+
 # fm_wait_for_agent_argv0 <pid>: block until <pid> reports a verified harness
 # name as its argv[0], which is the identity the process-table absence proof
 # reads (bin/fm-agent-process-lib.sh). A process planted as

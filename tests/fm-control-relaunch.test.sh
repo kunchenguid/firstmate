@@ -1942,6 +1942,7 @@ assert_tmux_reclaims() {  # <case-dir> <id> <what-was-staged>
 
 test_tmux_reclaims_a_window_missing_from_its_session() {
   local dir
+  fm_proc_scan_available || { echo "skip - the tmux absence proof reads /proc"; return 0; }
   dir=$(new_case tmux-gone rl60)
   add_ship_task "$dir" rl60 claude
   strand_endpoint "$dir" rl60
@@ -1951,6 +1952,7 @@ test_tmux_reclaims_a_window_missing_from_its_session() {
 
 test_tmux_reclaims_a_session_that_cannot_be_found() {
   local dir
+  fm_proc_scan_available || { echo "skip - the tmux absence proof reads /proc"; return 0; }
   dir=$(new_case tmux-nosession rl61)
   add_ship_task "$dir" rl61 claude
   : > "$dir/fake/session-missing"
@@ -1960,6 +1962,7 @@ test_tmux_reclaims_a_session_that_cannot_be_found() {
 
 test_tmux_reclaims_when_the_server_is_gone() {
   local dir
+  fm_proc_scan_available || { echo "skip - the tmux absence proof reads /proc"; return 0; }
   dir=$(new_case tmux-noserver rl62)
   add_ship_task "$dir" rl62 claude
   : > "$dir/fake/server-dead"
@@ -1969,6 +1972,7 @@ test_tmux_reclaims_when_the_server_is_gone() {
 
 test_spawn_relaunch_alone_reclaims_a_gone_tmux_endpoint() {
   local dir out rc=0
+  fm_proc_scan_available || { echo "skip - the tmux absence proof reads /proc"; return 0; }
   dir=$(new_case tmux-spawn-gone rl64)
   add_ship_task "$dir" rl64 claude
   strand_endpoint "$dir" rl64
@@ -1987,6 +1991,7 @@ test_spawn_relaunch_alone_reclaims_a_gone_tmux_endpoint() {
 # on a tmux server this seat cannot address; neither verb may guess past it.
 test_tmux_refuses_a_gone_window_while_an_agent_works_in_the_worktree() {
   local dir out rc brief_before
+  fm_proc_scan_available || { echo "skip - the tmux absence proof reads /proc"; return 0; }
   dir=$(new_case tmux-gone-agent rl65)
   add_ship_task "$dir" rl65 claude
   strand_endpoint "$dir" rl65
@@ -2021,6 +2026,7 @@ test_tmux_refuses_a_gone_window_while_an_agent_works_in_the_worktree() {
 # never a sibling directory that merely shares its prefix.
 test_worktree_agent_scan_counts_only_agents_inside_the_worktree() {
   local base wt scan pid_plain pid_sub pid_sibling
+  fm_proc_scan_available || { echo "skip - the worktree scan reads /proc"; return 0; }
   base="$TMP_ROOT/scan-$RANDOM"
   wt="$base/wt"
   mkdir -p "$wt/sub" "$base/wt-sibling"

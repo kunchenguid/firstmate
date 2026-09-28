@@ -780,6 +780,7 @@ test_already_stopped_exit_is_idempotent() {
 
 test_missing_tmux_endpoint_reports_gone_only_when_no_agent_works_there() {
   local dir out rc agent
+  fm_proc_scan_available || { echo "skip - the tmux absence proof reads /proc"; return 0; }
   dir=$(new_case gone)
   add_task "$dir" t1 claude
   : > "$dir/fake/windows"

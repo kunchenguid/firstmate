@@ -132,103 +132,55 @@ fm_agent_process_classify() {  # <name> <argv0> <args> [pid] -> agent|shell|othe
 #   agent       - "<pid> <name>" of an agent process working in <worktree>
 #   unreadable  - the reason the process table could not be read; the caller
 #                 must treat this as "an agent may be there"
-# Linux reads /proc; any other platform needs lsof and ps. A process that exits
-# mid-scan, and a zombie that holds no working directory, are skipped.
+# The only reader is /proc, whose per-process `cwd` link is the kernel's own
+# answer for one exact process. A host without /proc answers `unreadable`, so
+# no tmux endpoint is proven absent there: every other way to ask - lsof's
+# file-set records, a ps listing - reports a path it may have failed to
+# resolve without saying so for the one process that matters, and reading that
+# silence as "no agent" is what launches a duplicate onto a live worktree.
+# A process that exits mid-scan, and a zombie that holds no working directory,
+# are skipped.
 fm_agent_process_worktree_scan() {  # <worktree>
-  local wt=${1-} wt_real dir pid cwd name argv0 args stat rest line cmd
-  local lsof_out lsof_err lsof_diag lsof_status=0
-  local -a pids=() names=()
+  local wt=${1-} wt_real dir pid cwd name argv0 args stat rest
   if [ -z "$wt" ] || ! wt_real=$(cd "$wt" 2>/dev/null && pwd -P); then
     printf 'unreadable\tthe worktree %s cannot be resolved' "'$wt'"
     return 0
   fi
-  if [ -r /proc/self/cmdline ] && [ -L /proc/self/cwd ]; then
-    for dir in /proc/[0-9]*; do
-      [ -O "$dir" ] || continue
-      pid=${dir#/proc/}
-      if cwd=$(readlink "$dir/cwd" 2>/dev/null); then
-        case "$cwd" in
-          "$wt_real"|"$wt_real"/*) ;;
-          *) continue ;;
-        esac
-      else
-        # A process that exited mid-scan, or a zombie, has no working
-        # directory left. A privileged or non-dumpable one (a per-session
-        # sshd, ssh-agent) hides its link from its own user; that is only a
-        # gap when the process is itself an agent, checked below.
-        [ -d "$dir" ] || continue
-        stat=$(cat "$dir/stat" 2>/dev/null) || continue
-        rest=${stat##*) }
-        case "${rest%% *}" in
-          Z|X) continue ;;
-        esac
-        cwd=
-      fi
-      name=$(cat "$dir/comm" 2>/dev/null) || continue
-      argv0=$(tr '\0' '\n' < "$dir/cmdline" 2>/dev/null | head -n 1) || argv0=
-      args=$(tr '\0' ' ' < "$dir/cmdline" 2>/dev/null) || args=
-      [ "$(fm_agent_process_classify "$name" "$argv0" "$args" "$pid")" = agent ] || continue
-      if [ -z "$cwd" ]; then
-        printf 'unreadable\tthe working directory of agent process %s (%s) could not be read' "$pid" "${name:-$argv0}"
-        return 0
-      fi
-      printf 'agent\t%s %s' "$pid" "${name:-$argv0}"
+  if [ ! -r /proc/self/cmdline ] || [ ! -L /proc/self/cwd ]; then
+    printf 'unreadable\tthis host has no /proc, so nothing here can prove no agent is working in the recorded worktree; drive the task from a seat that addresses its recorded tmux server, where its window classifies directly and no absence proof is needed'
+    return 0
+  fi
+  for dir in /proc/[0-9]*; do
+    [ -O "$dir" ] || continue
+    pid=${dir#/proc/}
+    if cwd=$(readlink "$dir/cwd" 2>/dev/null); then
+      case "$cwd" in
+        "$wt_real"|"$wt_real"/*) ;;
+        *) continue ;;
+      esac
+    else
+      # A process that exited mid-scan, or a zombie, has no working
+      # directory left. A privileged or non-dumpable one (a per-session
+      # sshd, ssh-agent) hides its link from its own user; that is only a
+      # gap when the process is itself an agent, checked below.
+      [ -d "$dir" ] || continue
+      stat=$(cat "$dir/stat" 2>/dev/null) || continue
+      rest=${stat##*) }
+      case "${rest%% *}" in
+        Z|X) continue ;;
+      esac
+      cwd=
+    fi
+    name=$(cat "$dir/comm" 2>/dev/null) || continue
+    argv0=$(tr '\0' '\n' < "$dir/cmdline" 2>/dev/null | head -n 1) || argv0=
+    args=$(tr '\0' ' ' < "$dir/cmdline" 2>/dev/null) || args=
+    [ "$(fm_agent_process_classify "$name" "$argv0" "$args" "$pid")" = agent ] || continue
+    if [ -z "$cwd" ]; then
+      printf 'unreadable\tthe working directory of agent process %s (%s) could not be read' "$pid" "${name:-$argv0}"
       return 0
-    done
-    printf 'none\t'
+    fi
+    printf 'agent\t%s %s' "$pid" "${name:-$argv0}"
     return 0
-  fi
-  if ! command -v lsof >/dev/null 2>&1 || ! command -v ps >/dev/null 2>&1; then
-    printf 'unreadable\tthis platform has no /proc, and lsof or ps is not installed to read process working directories'
-    return 0
-  fi
-  # Only a FAILED lsof refuses: a non-zero exit that also carries diagnostics.
-  # lsof exits 1 for "no match" as well, and it warns on stderr about file
-  # systems it cannot stat while still exiting 0 and reporting every process it
-  # did read - macOS does that for its system volumes on every run - so reading
-  # a warning as an incomplete table would refuse every reclaim on such a host.
-  # Its diagnostics stay out of the parsed stream for the same reason: a
-  # warning line read as a record would be a malformed one. `+c 0` asks for the
-  # untruncated command name, so a long harness name still classifies by name.
-  lsof_err=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-agent-scan.XXXXXX") || {
-    printf 'unreadable\tno scratch file could be created to read lsof diagnostics'
-    return 0
-  }
-  lsof_out=$(lsof +c 0 -a -u "$(id -u)" -d cwd -Fpcn 2>"$lsof_err") || lsof_status=$?
-  lsof_diag=$(head -n 1 -- "$lsof_err" 2>/dev/null) || lsof_diag=
-  rm -f -- "$lsof_err"
-  if [ "$lsof_status" -ne 0 ] && [ -n "$lsof_diag" ]; then
-    printf 'unreadable\tlsof could not list process working directories: %s' "$lsof_diag"
-    return 0
-  fi
-  pid=
-  cmd=
-  while IFS= read -r line; do
-    case "$line" in
-      p*) pid=${line#p}; cmd= ;;
-      c*) cmd=${line#c} ;;
-      n*)
-        case "${line#n}" in
-          "$wt_real"|"$wt_real"/*) pids+=("$pid"); names+=("$cmd") ;;
-        esac
-        ;;
-      fcwd|'') ;;
-      *) printf 'unreadable\tlsof printed an unexpected record'; return 0 ;;
-    esac
-  done <<EOF_LSOF
-$lsof_out
-EOF_LSOF
-  local i
-  if [ "${#pids[@]}" -gt 0 ]; then
-    for i in "${!pids[@]}"; do
-      args=$(LC_ALL=C ps -o args= -p "${pids[$i]}" 2>/dev/null) || continue
-      args=${args#"${args%%[![:space:]]*}"}
-      argv0=${args%%[[:space:]]*}
-      if [ "$(fm_agent_process_classify "${names[$i]}" "$argv0" "$args" "${pids[$i]}")" = agent ]; then
-        printf 'agent\t%s %s' "${pids[$i]}" "${names[$i]:-$argv0}"
-        return 0
-      fi
-    done
-  fi
+  done
   printf 'none\t'
 }
