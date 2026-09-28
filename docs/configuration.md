@@ -9,7 +9,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | --- | --- |
 | Firstmate's code, private files, or project location | [FM_HOME](#fm_home) and [operational home layout](#operational-home-layout-and-state) |
 | Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
-| Worker permissions, accounts, or environment | [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), and [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist) |
+| Worker permissions, accounts, or environment | [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [Claude worker agent](#claude-worker-agent-configcrew-claude-agent), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), and [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist) |
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
@@ -825,6 +825,34 @@ The diagnostic names the accepted values; Firstmate never falls back to a permis
 The file is a captain-wide safety preference, so it is inherited into secondmate homes under the [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md) inherited-local-material contract; a secondmate's own Claude crewmates then launch on the same posture.
 
 The [Claude adapter reference](../.agents/skills/harness-adapters/references/harness/claude.md) records the permission-mode observations and the distinct startup dialogs.
+
+## Claude worker agent (config/crew-claude-agent)
+
+The optional local, gitignored `config/crew-claude-agent` names one Claude agent profile, such as `crewmate`, for Firstmate's Claude ship and scout workers.
+With the file present, every Claude ship and scout launch, relaunches included, carries `--agent <name>`.
+Claude Code then runs the worker session as that agent: its system prompt, tool list, and other frontmatter apply, and it overrides any `agent` key in the captain's Claude settings, so a main-thread profile selected there does not also load into workers.
+An absent file keeps the Claude launch unchanged, with no `--agent` flag.
+Nothing else in the launch changes: the permission flag, inline settings, task-channel grant, task-worker trust statement, model, and effort stay as they are.
+
+A home file rather than a dispatch-profile field owns this setting because it names a Claude-only launch flag, while dispatch profiles choose a harness, model, and effort that apply across harnesses; one per-home file keeps every Claude worker on the same profile whichever dispatch rule chose Claude.
+
+### Accepted values and refusals
+
+The file holds one agent name on one line; surrounding spaces or tabs and a final newline are ignored.
+A name is letters, digits, `-`, or `_`, starting with a letter or digit, optionally namespaced as `plugin:agent`, and at most 128 characters.
+Any other content, including an empty file, a second line, whitespace inside the name, or a shell metacharacter, refuses every spawn from that home, whichever harness it would launch.
+An unreadable file refuses the same way.
+This happens before any endpoint, worktree, or task record exists; remove the file to launch without an agent.
+
+Firstmate checks only the name's shape, not that the agent exists.
+Claude Code itself refuses an unknown agent at launch and exits, so a misspelled or missing profile shows up as a worker that did not start rather than as a worker running without the profile.
+
+### Secondmates and inheritance
+
+A secondmate launch never carries `--agent`, because a secondmate runs the Firstmate supervisor contract rather than a worker profile.
+The file is inherited into secondmate homes under the [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md) inherited-local-material contract, so a secondmate's own Claude ship and scout workers carry the same profile.
+`bin/fm-spawn.sh` reads the file on every spawn and relaunch, so a change takes effect at the next launch without a restart.
+The agent must exist on every machine that launches those workers, including a remote secondmate's host.
 
 ## Worker account pin (config/claude-account, config/pi-account)
 
