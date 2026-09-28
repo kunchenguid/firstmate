@@ -3,15 +3,20 @@
 #
 # Kiro CLI V3 resolves custom agents and expanded hooks from the current
 # project's .kiro/ tree.
-# KIRO_HOME still owns Firstmate's settings, sessions, data, and logs, but KAS
-# 0.66.4 (kiro-cli 2.22.1) can also discover the operator's global ~/.kiro
-# configuration even when KIRO_HOME is set.
+# KIRO_HOME still owns Firstmate's settings, data, and logs, but KAS 0.66.4
+# (kiro-cli 2.22.1) can also discover the operator's global ~/.kiro
+# configuration even when KIRO_HOME is set, and it persists V3 conversations
+# under the login HOME's ~/.kiro/sessions, so a plain `kiro-cli --resume-id`
+# reopens a Firstmate session without any of its launcher environment.
 # Firstmate therefore uses both boundaries together:
 #   - an isolated KIRO_HOME with chat.enableKnowledge=false;
 #   - a task-specific project agent with the knowledge tool excluded, Powers
 #     disabled, and capability `all` explicitly allowed for unattended work;
-#   - a task-specific project Stop hook that reaches the tracked Kiro hook
-#     adapter through FM_KIRO_HOOK.
+#   - task-specific project lifecycle hooks whose command names the tracked
+#     adapter by the absolute path of this library's own bin directory and
+#     passes the task's absolute KIRO_HOME, so a hook reaches its task from any
+#     folder and without launcher environment (a session resumed with plain
+#     kiro-cli carries neither).
 #
 # V2 remains an explicit compatibility fallback only.
 # Its legacy embedded-hook agent receives a distinct name, so the V3 project
@@ -121,6 +126,36 @@ fm_kiro_publish_project_copy() {  # <destination> <source>
   [ -f "$dest" ] && [ ! -L "$dest" ]
 }
 
+# The tracked lifecycle-hook adapter, resolved once from this library's own
+# directory. Every generated hook command names it by this absolute path.
+FM_KIRO_TURNEND_HOOK="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-kiro-turnend-hook.sh"
+
+fm_kiro_shell_quote() {  # <value>
+  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
+# Print <value> as a JSON string body. Control characters refuse rather than
+# producing a hook document Kiro would reject or misread.
+fm_kiro_json_string() {  # <value>
+  case "$1" in *[[:cntrl:]]*) return 1 ;; esac
+  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+# Print the hook command for one task's generated V3 hook file or V2 agent.
+# The per-task KIRO_HOME is the only binding a resumed session needs: it holds
+# the turn-end pointer, the registry, and the session record from which
+# bin/fm-kiro-turnend-hook.sh recovers the busy generation.
+fm_kiro_task_hook_command() {  # <kiro-home>
+  case "$1" in /*) ;; *) return 1 ;; esac
+  printf '%s --kiro-home %s' "$(fm_kiro_shell_quote "$FM_KIRO_TURNEND_HOOK")" "$(fm_kiro_shell_quote "${1%/}")"
+}
+
+# Print the hook command for the explicit V2 primary agent, which lives in the
+# per-home isolated KIRO_HOME rather than in the tracked project hooks.
+fm_kiro_primary_hook_command() {
+  printf 'FM_KIRO_PRIMARY_HOOK=1 %s' "$(fm_kiro_shell_quote "$FM_KIRO_TURNEND_HOOK")"
+}
+
 fm_kiro_write_settings() {  # <kiro-home>
   local home=$1
   fm_kiro_prepare_home "$home" || return 1
@@ -133,9 +168,10 @@ fm_kiro_write_settings() {  # <kiro-home>
 EOF
 }
 
-fm_kiro_write_v2_agent() {  # <kiro-home> <agent-name>
-  local home=$1 agent=$2
+fm_kiro_write_v2_agent() {  # <kiro-home> <agent-name> <hook-command>
+  local home=$1 agent=$2 command
   fm_kiro_slug_valid "$agent" || return 1
+  command=$(fm_kiro_json_string "$3") || return 1
   fm_kiro_prepare_home "$home" || return 1
   fm_kiro_publish_owned "$home/agents/$agent.json" <<EOF
 {
@@ -145,16 +181,16 @@ fm_kiro_write_v2_agent() {  # <kiro-home> <agent-name>
   "allowedTools": ["*"],
   "hooks": {
     "userPromptSubmit": [
-      { "command": "\"\${FM_KIRO_HOOK:-bin/fm-kiro-turnend-hook.sh}\"" }
+      { "command": "$command" }
     ],
     "preToolUse": [
-      { "command": "\"\${FM_KIRO_HOOK:-bin/fm-kiro-turnend-hook.sh}\"" }
+      { "command": "$command" }
     ],
     "postToolUse": [
-      { "command": "\"\${FM_KIRO_HOOK:-bin/fm-kiro-turnend-hook.sh}\"" }
+      { "command": "$command" }
     ],
     "stop": [
-      { "command": "\"\${FM_KIRO_HOOK:-bin/fm-kiro-turnend-hook.sh}\"" }
+      { "command": "$command" }
     ]
   }
 }
@@ -172,10 +208,12 @@ EOF
 FM_KIRO_V3_TOOLS_JSON='["execute_bash", "fs_read", "fs_write", "code", "grep", "glob", "web_fetch", "web_search", "introspect", "session", "report", "tool_search"]'
 
 fm_kiro_install_v3_project_config() {  # <workspace> <task-id> <kiro-home>
-  local workspace=$1 id=$2 home=$3 agent agent_path hook_path agent_home hook_home
+  local workspace=$1 id=$2 home=$3 agent agent_path hook_path agent_home hook_home command
   [ -d "$workspace" ] && [ ! -L "$workspace" ] || return 1
   [ -d "$home" ] && [ ! -L "$home" ] || return 1
   fm_kiro_slug_valid "$id" || return 1
+  command=$(fm_kiro_task_hook_command "$home") || return 1
+  command=$(fm_kiro_json_string "$command") || return 1
   fm_kiro_safe_dir "$workspace/.kiro" || return 1
   fm_kiro_safe_dir "$workspace/.kiro/agents" || return 1
   fm_kiro_safe_dir "$workspace/.kiro/hooks" || return 1
@@ -205,7 +243,7 @@ fm_kiro_install_v3_project_config() {  # <workspace> <task-id> <kiro-home>
   }
 }
 EOF
-  fm_kiro_publish_owned "$hook_home" <<'EOF' || return 1
+  fm_kiro_publish_owned "$hook_home" <<EOF || return 1
 {
   "version": "v1",
   "hooks": [
@@ -214,7 +252,7 @@ EOF
       "trigger": "UserPromptSubmit",
       "action": {
         "type": "command",
-        "command": "\"${FM_KIRO_HOOK:-bin/fm-kiro-turnend-hook.sh}\""
+        "command": "$command"
       }
     },
     {
@@ -222,7 +260,7 @@ EOF
       "trigger": "PreToolUse",
       "action": {
         "type": "command",
-        "command": "\"${FM_KIRO_HOOK:-bin/fm-kiro-turnend-hook.sh}\""
+        "command": "$command"
       }
     },
     {
@@ -230,7 +268,7 @@ EOF
       "trigger": "PostToolUse",
       "action": {
         "type": "command",
-        "command": "\"${FM_KIRO_HOOK:-bin/fm-kiro-turnend-hook.sh}\""
+        "command": "$command"
       }
     },
     {
@@ -238,7 +276,7 @@ EOF
       "trigger": "Stop",
       "action": {
         "type": "command",
-        "command": "\"${FM_KIRO_HOOK:-bin/fm-kiro-turnend-hook.sh}\""
+        "command": "$command"
       }
     }
   ]
@@ -254,6 +292,55 @@ fm_kiro_remove_v3_project_config() {  # <workspace> <task-id>
   hook_path=$(fm_kiro_v3_hook_path "$workspace" "$id") || return 1
   rm -f -- "$agent_path" "$hook_path" || return 1
   rmdir "$workspace/.kiro/agents" "$workspace/.kiro/hooks" "$workspace/.kiro" 2>/dev/null || true
+}
+
+# Build the firstmate-owned isolated KIRO_HOME for ONE task and print the
+# turn-end token it registered:
+#   settings/cli.json          - chat.disableTrustAllConfirmation=true (suppress
+#                                the --trust-all-tools startup dialog, VERIFIED
+#                                LIVE to otherwise render with its default on
+#                                "No, exit" and block the launch) and
+#                                chat.allowAnimations=false (freeze the spinner
+#                                to one static frame for a stable screen-scrape
+#                                baseline);
+#   agents/<v2-agent>.json     - the explicit V2 fallback's embedded-hook agent,
+#                                only when a V2 agent name is given;
+#   agents/fm-turn-end.d/<tok> - this task's registry entry naming
+#                                state/<id>.turn-ended;
+#   .fm-kiro-turnend           - the pointer carrying <tok>. The shared hook
+#                                touches the registered file only when both
+#                                agree, so a stray kiro-cli session under this
+#                                KIRO_HOME that is not this task changes nothing
+#                                (the grok/kimi guard shape).
+# The directory is rewritten fresh on every spawn, which also drops the session
+# record bin/fm-kiro-turnend-hook.sh keeps there, and bin/fm-teardown.sh retires
+# it with `rm -rf`, so no separate registry cleanup is needed
+# (bin/fm-control-lib.sh's auth path is empty for kiro-cli).
+fm_kiro_build_task_home() {  # <kiro-home> <v2-agent-name-or-empty> <turn-end-path>
+  local home=$1 v2_agent=$2 turnend=$3 auth_dir auth_file old_umask hook_command token
+  [ -x "$FM_KIRO_TURNEND_HOOK" ] || {
+    echo "error: kiro-cli turn-end hook missing or not executable at $FM_KIRO_TURNEND_HOOK" >&2
+    return 1
+  }
+  hook_command=$(fm_kiro_task_hook_command "$home") || return 1
+  rm -rf "$home" || return 1
+  fm_kiro_write_settings "$home" || return 1
+  if [ -n "$v2_agent" ]; then
+    fm_kiro_write_v2_agent "$home" "$v2_agent" "$hook_command" || return 1
+  fi
+  auth_dir="$home/agents/fm-turn-end.d"
+  mkdir -p "$auth_dir" || return 1
+  old_umask=$(umask)
+  umask 077
+  auth_file=$(mktemp "$auth_dir/fm.XXXXXXXXXXXX") || {
+    umask "$old_umask"
+    return 1
+  }
+  umask "$old_umask"
+  printf '%s\n' "$turnend" > "$auth_file" || return 1
+  token=${auth_file##*/}
+  printf 'token=%s\n' "$token" > "$home/.fm-kiro-turnend" || return 1
+  printf '%s\n' "$token"
 }
 
 fm_kiro_primary_home() {  # <state-dir>

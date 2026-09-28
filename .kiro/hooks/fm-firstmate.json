@@ -6,7 +6,7 @@
       "trigger": "SessionStart",
       "action": {
         "type": "command",
-        "command": "FM_KIRO_PRIMARY_HOOK=1 \"${FM_KIRO_HOOK:-bin/fm-kiro-turnend-hook.sh}\""
+        "command": "p=$(cat); r=${p#*'\"cwd\":\"'}; r=${r%%'\"'*}; case $r in /*) ;; *) exit 0 ;; esac; case $r in *'\\'*) exit 0 ;; esac; [ -x \"$r/bin/fm-kiro-turnend-hook.sh\" ] || exit 0; printf '%s' \"$p\" | FM_KIRO_PRIMARY_HOOK=1 \"$r/bin/fm-kiro-turnend-hook.sh\""
       }
     },
     {
@@ -14,7 +14,7 @@
       "trigger": "UserPromptSubmit",
       "action": {
         "type": "command",
-        "command": "FM_KIRO_PRIMARY_HOOK=1 \"${FM_KIRO_HOOK:-bin/fm-kiro-turnend-hook.sh}\""
+        "command": "p=$(cat); r=${p#*'\"cwd\":\"'}; r=${r%%'\"'*}; case $r in /*) ;; *) exit 0 ;; esac; case $r in *'\\'*) exit 0 ;; esac; [ -x \"$r/bin/fm-kiro-turnend-hook.sh\" ] || exit 0; printf '%s' \"$p\" | FM_KIRO_PRIMARY_HOOK=1 \"$r/bin/fm-kiro-turnend-hook.sh\""
       }
     },
     {
@@ -22,7 +22,7 @@
       "trigger": "PreToolUse",
       "action": {
         "type": "command",
-        "command": "FM_KIRO_PRIMARY_HOOK=1 \"${FM_KIRO_HOOK:-bin/fm-kiro-turnend-hook.sh}\""
+        "command": "p=$(cat); r=${p#*'\"cwd\":\"'}; r=${r%%'\"'*}; case $r in /*) ;; *) exit 0 ;; esac; case $r in *'\\'*) exit 0 ;; esac; [ -x \"$r/bin/fm-kiro-turnend-hook.sh\" ] || exit 0; printf '%s' \"$p\" | FM_KIRO_PRIMARY_HOOK=1 \"$r/bin/fm-kiro-turnend-hook.sh\""
       }
     },
     {
@@ -30,7 +30,7 @@
       "trigger": "PostToolUse",
       "action": {
         "type": "command",
-        "command": "FM_KIRO_PRIMARY_HOOK=1 \"${FM_KIRO_HOOK:-bin/fm-kiro-turnend-hook.sh}\""
+        "command": "p=$(cat); r=${p#*'\"cwd\":\"'}; r=${r%%'\"'*}; case $r in /*) ;; *) exit 0 ;; esac; case $r in *'\\'*) exit 0 ;; esac; [ -x \"$r/bin/fm-kiro-turnend-hook.sh\" ] || exit 0; printf '%s' \"$p\" | FM_KIRO_PRIMARY_HOOK=1 \"$r/bin/fm-kiro-turnend-hook.sh\""
       }
     },
     {
@@ -38,7 +38,7 @@
       "trigger": "Stop",
       "action": {
         "type": "command",
-        "command": "FM_KIRO_PRIMARY_HOOK=1 \"${FM_KIRO_HOOK:-bin/fm-kiro-turnend-hook.sh}\""
+        "command": "p=$(cat); r=${p#*'\"cwd\":\"'}; r=${r%%'\"'*}; case $r in /*) ;; *) exit 0 ;; esac; case $r in *'\\'*) exit 0 ;; esac; [ -x \"$r/bin/fm-kiro-turnend-hook.sh\" ] || exit 0; printf '%s' \"$p\" | FM_KIRO_PRIMARY_HOOK=1 \"$r/bin/fm-kiro-turnend-hook.sh\""
       }
     }
   ]

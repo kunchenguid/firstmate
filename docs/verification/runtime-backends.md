@@ -15,6 +15,23 @@ The coordination received routed work, wrote its own backlog and brief, dispatch
 The scout produced `data/canary-inventory-r4/report.md` with 109 lines and 11,594 bytes, and the project clone remained unchanged.
 The live guard family that refreshes the Kiro lifecycle evidence is `FM_KIRO_LIVE_E2E=1 bash tests/fm-kiro-signals-live-e2e.test.sh`; the coordination result above is the recorded real-harness observation for this adapter.
 
+Resumed sessions keep their lifecycle hooks.
+The run used kiro-cli 2.22.1 on 2026-09-28 with Kiro's default model routing, driving the interactive TUI through a pseudo-terminal because `--no-interactive` runs no workspace hooks:
+
+```sh
+FM_KIRO_RESUME_LIVE_E2E=1 bash tests/fm-kiro-resume-live-e2e.test.sh
+```
+
+Observed output:
+
+```text
+ok - live worker: a launched incarnation's hooks bind to its task and record its Kiro session
+ok - live worker: the conversation resumed without launcher environment reaches its task
+ok - live worker: after a relaunch the older conversation cannot write busy state
+ok - live primary: a resumed primary retakes its dead owner's lock on the first prompt (kiro-cli 2.22.1)
+ok - Kiro resume continuity passed on kiro-cli 2.22.1
+```
+
 ## Harness detection precedence
 
 Firstmate's own harness comes from two kinds of evidence, and `bin/fm-harness.sh` owns how they combine: an environment marker names its harness, and the nearest harness process in the parent chain proves who owns the process tree.

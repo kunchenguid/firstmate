@@ -9,6 +9,10 @@
 # .kiro/agents/firstmate-kiro.json plus .kiro/hooks/fm-firstmate.json.
 # V2 is an explicit compatibility fallback; it uses a distinct legacy agent
 # generated inside the isolated home and retains --trust-all-tools.
+# Both hook registrations carry their own primary marker and reach
+# bin/fm-kiro-turnend-hook.sh without this launcher's environment, so a session
+# resumed with plain kiro-cli keeps its lifecycle hooks
+# (bin/fm-kiro-turnend-hook.sh header).
 # Both engines launch trusted (`-a` for V3, `--trust-all-tools` for V2): the
 # agent file declares its tool list, but a V3 agent still stops on `fs_write`'s
 # Replace in File with a human approval prompt, so the trust flag belongs to
@@ -83,7 +87,7 @@ AGENT=firstmate-kiro
 TRUST_ARGS=(-a)
 if [ "$ENGINE" = v2 ]; then
   AGENT=firstmate-kiro-v2
-  fm_kiro_write_v2_agent "$KIRO_HOME_DIR" "$AGENT" || {
+  fm_kiro_write_v2_agent "$KIRO_HOME_DIR" "$AGENT" "$(fm_kiro_primary_hook_command)" || {
     echo "error: could not prepare the Kiro V2 compatibility agent in $KIRO_HOME_DIR" >&2
     exit 1
   }
@@ -97,8 +101,6 @@ else
 fi
 
 export FM_HOME
-export FM_KIRO_PRIMARY_HOOK=1
-export FM_KIRO_HOOK="$SCRIPT_DIR/fm-kiro-turnend-hook.sh"
 export KIRO_HOME="$KIRO_HOME_DIR"
 export KIRO_DATA_DIR="$KIRO_HOME_DIR/data"
 export KIRO_CHAT_LOG_FILE="$KIRO_HOME_DIR/chat.log"

@@ -364,10 +364,11 @@ A later in-process `clear` re-emits only when this lock owner completed a full s
 ### Kiro CLI V3
 
 Kiro CLI V3 is a run-tier harness.
-`.kiro/hooks/fm-firstmate.json` registers project-scoped `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, and `Stop` hooks that invoke `bin/fm-kiro-turnend-hook.sh` with `FM_KIRO_PRIMARY_HOOK=1`.
+`.kiro/hooks/fm-firstmate.json` registers project-scoped `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, and `Stop` hooks that invoke `bin/fm-kiro-turnend-hook.sh` with `FM_KIRO_PRIMARY_HOOK=1`, resolved from the hook payload's `cwd` rather than from the hook's folder or the launcher's environment.
 Its `SessionStart` branch runs `bin/fm-sessionstart-run.sh --source startup`, so native stdout context injection delivers the digest, and `bin/fm-kiro-primary.sh` is the launcher that selects the tracked agent.
+Kiro fires `SessionStart` only for a conversation's first prompt, so a conversation resumed with `kiro-cli --resume-id` runs that same branch from its first `UserPromptSubmit` when the lock is free or its recorded pid is not a live harness.
 The same hook publishes the primary pane as `state/.primary-endpoint`, the structural doorbell the watcher rings after each actionable row; [`supervision-protocols/kiro-cli.md`](supervision-protocols/kiro-cli.md) owns that contract and its model-driven fallback.
-Delivery was verified live on kiro-cli 2.22.1 by `tests/fm-kiro-primary-live-e2e.test.sh`.
+Delivery was verified live on kiro-cli 2.22.1 by `tests/fm-kiro-primary-live-e2e.test.sh`, and the resumed-conversation path by `tests/fm-kiro-resume-live-e2e.test.sh`.
 The hook is inert outside primary scope, so a worker worktree inheriting the tracked file gains nothing from it, and the explicit V2 fallback has no `SessionStart` delivery.
 
 ### Cursor compaction
