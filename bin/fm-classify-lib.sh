@@ -99,8 +99,8 @@ FM_CLASSIFY_CAPTAIN_RE_DEFAULT='done:|needs-decision:|blocked:|failed:|PR ready|
 # they do not identify a separate classification or liveness source.
 # bin/fm-brief.sh owns worker-facing declaration and resolution instructions.
 # Unlike `blocked:` (stuck, firstmate must help), an idle `paused:` pane is EXPECTED, so
-# the stale path alerts once, bounds later rechecks, and does not escalate a possible
-# wedge; agent liveness does not suppress that first-sight stale alert. It is
+# the stale path bounds repeats instead of escalating a possible wedge; a live
+# idle worker can still surface a first-sight stale alert. It is
 # deliberately NOT in the captain-relevant set above: a pause is a "stop
 # wedge-nagging this idle pane" signal, not work to keep surfacing. This constant
 # is the ONE definition of the verb; both the watcher and the daemon read it here
@@ -348,8 +348,8 @@ status_is_captain_held() {  # <status-line>
 # Both declarations can intentionally leave a crew's endpoint idle, so both
 # supervisors give them one cadence: the away-mode daemon defers the wedge and
 # ages a pause marker instead, and the watcher applies its bounded pause cadence
-# once pause_state_class has admitted the wait, which it does for every
-# agent-liveness verdict unless the crew is provably working.
+# once pause_state_class has admitted the wait (fm-watch.sh owns which liveness
+# evidence each kind of crew must supply for that).
 status_is_paused_or_captain_held() {  # <status-line>
   local line=$1
   status_is_paused "$line" || status_is_captain_held "$line"
