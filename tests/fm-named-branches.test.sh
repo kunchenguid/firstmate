@@ -127,6 +127,7 @@ test_spawn_checks_the_named_base_and_crew_branch_before_launch() {
   proj="$TMP_ROOT/spawn/proj"
   fakebin="$TMP_ROOT/spawn/bin"
   mkdir -p "$home/data" "$home/state" "$home/config" "$proj" "$fakebin"
+  printf 'claude\n' > "$home/config/crew-harness"
   printf '#!/bin/sh\nexit 1\n' > "$fakebin/tmux"
   chmod +x "$fakebin/tmux"
   git init -q -b main "$proj"
