@@ -336,8 +336,8 @@ fm_control_backend_state_verified() {  # <backend>
 #     is an agent process working in the recorded worktree, and the kernel
 #     knows every process's working directory regardless of which terminal
 #     server holds it (fm_agent_process_worktree_scan). No agent process there
-#     is the proof; one found there, or a process table that cannot be read
-#     completely, refuses. A window that outlived its agent on a server this
+#     is the proof; one found there, or a process table that cannot be read,
+#     refuses. A window that outlived its agent on a server this
 #     seat cannot address is left alone - it holds no agent, and the reclaim
 #     opens its replacement on the server this seat does address.
 #
@@ -381,15 +381,18 @@ fm_control_endpoint_absence_verdict() {  # <backend> <target> <worktree>
 # of an endpoint that is not positively classified ends with, so `exit`,
 # `relaunch`, and the launch owner never point an operator at each other for a
 # state none of them acts on. `alive`, `dead`, and a proven-gone `missing` are
-# all actionable through `bin/fm-control.sh <id> relaunch`; this covers the rest.
-fm_control_unclassified_next_step() {  # <task-id> <state>
-  local id=${1-} state=${2-}
+# all actionable, and <verb> is the one the caller was actually asked to
+# perform: a refused `exit` names `exit`, because sending a stop request off to
+# the verb that REPLACES the agent is the same cross-pointing this sentence
+# exists to end.
+fm_control_unclassified_next_step() {  # <task-id> <state> <verb>
+  local id=${1-} state=${2-} verb=${3-}
   case "$state" in
     ambiguous)
-      printf 'no lifecycle command acts on it until it reads alive, dead, or gone: inspect it with bin/fm-peek.sh %s - a foreground process that is not a verified agent reads ambiguous - and once it is back at a shell or its agent, retry bin/fm-control.sh %s relaunch' "$id" "$id"
+      printf 'no lifecycle command acts on it until it reads alive, dead, or gone: inspect it with bin/fm-peek.sh %s - a foreground process that is not a verified agent reads ambiguous - and once it is back at a shell or its agent, retry bin/fm-control.sh %s %s' "$id" "$id" "$verb"
       ;;
     *)
-      printf 'no lifecycle command acts on it until it reads alive, dead, or gone: the read itself failed, so retry bin/fm-control.sh %s relaunch once bin/fm-peek.sh %s can read the endpoint again' "$id" "$id"
+      printf 'no lifecycle command acts on it until it reads alive, dead, or gone: the read itself failed, so retry bin/fm-control.sh %s %s once bin/fm-peek.sh %s can read the endpoint again' "$id" "$verb" "$id"
       ;;
   esac
 }

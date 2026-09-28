@@ -827,8 +827,18 @@ test_ambiguous_endpoint_refuses() {
   out=$(run_control "$dir" t1 exit); rc=$?
   expect_code 1 "$rc" "an unattributed endpoint should refuse"
   assert_contains "$out" "positively classified" "the refusal should name the missing attribution"
+  assert_contains "$out" "retry bin/fm-control.sh t1 exit" \
+    "the refusal must name the verb the operator invoked"
+  assert_not_contains "$out" "bin/fm-control.sh t1 relaunch" \
+    "an exit refusal must not send the operator to the verb that launches a replacement"
   [ -z "$(literals "$dir")" ] || fail "an unattributed endpoint must receive no bytes"
-  pass "fm-control exit: an endpoint whose process cannot be attributed refuses"
+
+  out=$(run_control "$dir" t1 relaunch --note "the pane holds something unattributable"); rc=$?
+  expect_code 1 "$rc" "the same unattributed endpoint must refuse a relaunch too"
+  assert_contains "$out" "retry bin/fm-control.sh t1 relaunch" \
+    "a relaunch refusal must still name relaunch"
+  [ -z "$(literals "$dir")" ] || fail "an unattributed endpoint must receive no bytes"
+  pass "fm-control: an endpoint whose process cannot be attributed refuses and names the invoked verb"
 }
 
 test_busy_agent_is_interrupted_before_the_exit_command() {

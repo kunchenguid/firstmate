@@ -598,11 +598,11 @@ do_exit() {
           # alive path: interrupt if busy, then the harness's exit command.
           ;;
         *)
-          die "task $ID's endpoint $T reads 'missing', but ${absence#*$'\t'}; exit will not claim an agent stopped at an address it cannot trust, nor send lifecycle input to one, and relaunch refuses for the same reason; once that changes, bin/fm-control.sh $ID relaunch reclaims the task"
+          die "task $ID's endpoint $T reads 'missing', but ${absence#*$'\t'}; exit will not claim an agent stopped at an address it cannot trust, nor send lifecycle input to one, and relaunch refuses for the same reason; once that changes, retry bin/fm-control.sh $ID $VERB"
           ;;
       esac
       ;;
-    *) die "task $ID's endpoint reads '$state' rather than a positively classified state; refusing to send a lifecycle command into an unattributed endpoint - $(fm_control_unclassified_next_step "$ID" "$state")" ;;
+    *) die "task $ID's endpoint reads '$state' rather than a positively classified state; refusing to send a lifecycle command into an unattributed endpoint - $(fm_control_unclassified_next_step "$ID" "$state" "$VERB")" ;;
   esac
   # A busy agent is interrupted first before the exit command is submitted.
   case "$(busy_verdict)" in

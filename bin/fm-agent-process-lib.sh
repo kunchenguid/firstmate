@@ -130,8 +130,8 @@ fm_agent_process_classify() {  # <name> <argv0> <args> [pid] -> agent|shell|othe
 # Prints "<verdict>\t<detail>", always exactly one TAB:
 #   none        - every readable process was read and none is an agent there
 #   agent       - "<pid> <name>" of an agent process working in <worktree>
-#   unreadable  - the reason the process table could not be read completely;
-#                 the caller must treat this as "an agent may be there"
+#   unreadable  - the reason the process table could not be read; the caller
+#                 must treat this as "an agent may be there"
 # Linux reads /proc; any other platform needs lsof and ps. A process that exits
 # mid-scan, and a zombie that holds no working directory, are skipped.
 fm_agent_process_worktree_scan() {  # <worktree>
@@ -182,13 +182,14 @@ fm_agent_process_worktree_scan() {  # <worktree>
     printf 'unreadable\tthis platform has no /proc, and lsof or ps is not installed to read process working directories'
     return 0
   fi
-  # lsof exits 1 both for "no match" and for a partial failure, so an empty
-  # result is only trusted when lsof reported no error at all. Its diagnostics
-  # are kept out of the parsed stream: a host that warns about an unrelated
-  # file system - macOS does, for its system volumes - would otherwise have
-  # every warning line read as a malformed record, and no endpoint on it could
-  # ever be proven agent-free. `+c 0` asks for the untruncated command name, so
-  # a long harness name still classifies by name.
+  # Only a FAILED lsof refuses: a non-zero exit that also carries diagnostics.
+  # lsof exits 1 for "no match" as well, and it warns on stderr about file
+  # systems it cannot stat while still exiting 0 and reporting every process it
+  # did read - macOS does that for its system volumes on every run - so reading
+  # a warning as an incomplete table would refuse every reclaim on such a host.
+  # Its diagnostics stay out of the parsed stream for the same reason: a
+  # warning line read as a record would be a malformed one. `+c 0` asks for the
+  # untruncated command name, so a long harness name still classifies by name.
   lsof_err=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-agent-scan.XXXXXX") || {
     printf 'unreadable\tno scratch file could be created to read lsof diagnostics'
     return 0

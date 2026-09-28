@@ -1775,7 +1775,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
       exit 1
       ;;
     *)
-      echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free endpoint, and $(fm_control_unclassified_next_step "$ID" "$RELAUNCH_STATE")" >&2
+      echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free endpoint, and $(fm_control_unclassified_next_step "$ID" "$RELAUNCH_STATE" relaunch)" >&2
       exit 1
       ;;
   esac
