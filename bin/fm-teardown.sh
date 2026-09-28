@@ -291,11 +291,12 @@
 #     root still exists, so the account's healthy LaunchAgent worker and every
 #     live remote secondmate worker are out of scope. Best effort: a sweep
 #     failure never blocks this teardown.
-# After Fix 1 and Fix 2, a ship task whose local copy this teardown owns has
-# its no-mistakes pipeline spend recorded by bin/fm-pipeline-spend.sh, which
-# owns the attribution and the ledger. It runs before the task branch it
-# attributes runs by is deleted and before state/<id>.meta is removed, and is
-# best effort: a failure warns and never blocks cleanup.
+# After Fix 1 and Fix 2, when config/pipeline-spend opts this home in, a ship
+# task whose local copy this teardown owns has its no-mistakes pipeline spend
+# recorded by bin/fm-pipeline-spend.sh, which owns the attribution and the
+# ledger. It runs before the task branch it attributes runs by is deleted and
+# before state/<id>.meta is removed, and is best effort: a failure warns and
+# never blocks cleanup.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
