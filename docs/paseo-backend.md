@@ -71,7 +71,8 @@ Paseo 0.8.0's send-keys token set is Enter, Tab, Escape, Space, BSpace, C-c, C-d
 Any other key name is typed as literal text, so the adapter sends Ctrl-U as the raw `0x15` byte through `-l` and refuses every other unlisted key.
 
 `terminal capture <id> -S --json` returns plain-text lines with ANSI stripped.
-There is no per-call line bound, so the adapter fetches the scrollback whole and trims the tail locally.
+The adapter fetches the scrollback whole and trims the tail locally; Paseo caps scrollback at 1024 lines (verified on Paseo 0.9.2), so that read stays bounded however long a task runs.
+`--start -<n>` is not used because it counts the blank screen rows below the prompt as part of the tail.
 Because capture strips styling, the capability descriptor declares `styled=0`, and the shared classifier in `bin/fm-composer-lib.sh` degrades a glyph row carrying trailing text to `unknown` rather than misreading an idle suggestion as unsent input.
 
 A terminal's `cwd` field in `terminal ls` is creation-time-frozen and never follows the foreground subshell opened by `treehouse get`.

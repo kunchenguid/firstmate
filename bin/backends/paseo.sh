@@ -53,8 +53,10 @@
 #      is delivered as its raw 0x15 byte through -l instead.
 #   2. `terminal capture <id> -S --json` returns
 #      {terminalId, lines[], totalLines} as PLAIN text (ANSI stripped unless
-#      --ansi). There is no per-call line bound; the adapter fetches the
-#      scrollback and trims the tail locally (cmux's fetch-generous pattern).
+#      --ansi). The adapter fetches the scrollback and trims the tail
+#      locally: Paseo caps scrollback at 1024 lines (verified on 0.9.2), so
+#      the read stays bounded, and `--start -<n>` would count the blank rows
+#      below the prompt as the tail.
 #   3. A terminal's `cwd` field in `terminal ls` is CREATION-TIME-FROZEN
 #      (zellij/cmux shape): it never follows a foreground subshell such as
 #      `treehouse get`, so current_path uses the same active pwd-marker probe
@@ -472,10 +474,9 @@ fm_backend_paseo_send_text_line() { # <target> <text> [expected-label]
   return 2
 }
 
-# fm_backend_paseo_capture: bounded plain-text terminal capture. `capture -S`
-# has no per-call line bound (finding #2), so the scrollback is fetched
-# whole and trimmed to the caller's tail locally (cmux's
-# fetch-generous-trim-locally pattern).
+# fm_backend_paseo_capture: bounded plain-text terminal capture. The whole
+# scrollback is fetched and trimmed to the caller's tail locally (finding #2);
+# Paseo's 1024-line scrollback cap keeps that read bounded.
 fm_backend_paseo_capture() { # <target> <lines> [expected-label]
   fm_backend_paseo_target_ready "$1" "${3:-}" || return 1
   local lines=${2:-200} raw out
