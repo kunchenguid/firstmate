@@ -140,9 +140,14 @@ A verified merge whose command response was lost can still complete through the 
 
 After the bound runner stops, reconciliation releases only exact reservations backed by a completed receipt or by proof that no effect began: no intent was recorded, or the matching intent has a refused receipt.
 If an effect may have happened and no authoritative completed receipt exists, the resource stays reserved across restart.
-Reconciliation does not reissue that effect or turn uncertainty into success; a concrete decision and evidence are required before further work on that resource.
+For the narrow case where a Codebase merge owner died after recording its effect, MAIN can run `FM_HOME=/absolute/home node bin/fm-short-agent.mjs settle-merge <short-id> <step-index>:<independently-observed-merge-commit>`.
+The command requires the original immutable grant and bindings, the preserved unsuccessful result and effect history, exact matching reservations, and proof that both the runner and merge executor are dead.
+It then performs only the official read-only Codebase status and detail reads, requires the exact repository, MR URL, registered source head, merged status, and exact independently supplied merge commit, publishes a distinct readback-settlement receipt, and releases only that step's matching reservations.
+It never issues a merge, runs later steps, changes the original terminal result, or reports the failed or timed-out model execution as successful.
+Repeated settlement converges on the same receipt and missing or ambiguous evidence leaves the reservations intact.
+Other uncertain effects remain unsupported and reserved; a concrete decision and evidence are required before further work on those resources.
 A changed candidate, identity, or grant stops new writes.
-The CLI `reconcile` retries missing notifications and reconciles receipts without inventing recovery authority.
+The CLI `reconcile` retries missing notifications and reconciles ordinary receipts without inventing recovery authority.
 [`bin/fm-short-operations.mjs`](../bin/fm-short-operations.mjs) owns the action schema and durable receipt mechanics.
 
 ## Verify the installed path
