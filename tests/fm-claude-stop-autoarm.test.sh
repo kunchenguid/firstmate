@@ -1549,7 +1549,7 @@ test_host_crash_is_retried_then_reported() {
 # must print help or refuse before anything is armed, since the host or arm it
 # starts would be owned by that short-lived process.
 test_arguments_never_arm() {
-  local dir arg rc out before after status
+  local dir arg rc out before after before_contents after_contents status
   dir=$(make_primary_dir "$TMP_ROOT/help-mode")
   mkdir -p "$dir/config"
   : > "$dir/config/supervision-host"
@@ -1559,12 +1559,14 @@ test_arguments_never_arm() {
   # The fake session writes state/.lock itself; everything else must be untouched.
   for arg in --help -h --bogus; do
     before=$(find "$dir/state" -mindepth 1 ! -name .lock | sort)
+    before_contents=$(find "$dir/state" -type f ! -name .lock -exec cksum {} + | sort)
     rc=0
     out=$(FM_HOME="$dir" "$FAKE_CLAUDE" -c '
         printf "%s\n" "$$" > "$FM_HOME/state/.lock"
         "$FM_HOME/bin/fm-claude-stop-autoarm.sh" "$1" </dev/null 2>"$FM_HOME/help-stderr"
       ' _ "$arg") || rc=$?
     after=$(find "$dir/state" -mindepth 1 ! -name .lock | sort)
+    after_contents=$(find "$dir/state" -type f ! -name .lock -exec cksum {} + | sort)
     case "$arg" in
       --bogus)
         expect_code 2 "$rc" "an unknown argument must be refused"
@@ -1578,6 +1580,7 @@ test_arguments_never_arm() {
     [ ! -e "$dir/state/host-ran" ] || fail "$arg started the supervision host"
     [ ! -e "$dir/state/arm-ran" ] || fail "$arg ran the arm"
     [ "$before" = "$after" ] || fail "$arg changed state: before=[$before] after=[$after]"
+    [ "$before_contents" = "$after_contents" ] || fail "$arg changed state file contents: before=[$before_contents] after=[$after_contents]"
   done
   out=$(run_autoarm "$dir" 2>/dev/null); status=$?
   expect_code 2 "$status" "the ordinary Stop path must still rewake from the host"
