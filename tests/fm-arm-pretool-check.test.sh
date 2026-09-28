@@ -3,7 +3,7 @@
 # Behavior tests for the watcher-arm PreToolUse seatbelt (docs/arm-pretool-check.md).
 #
 # bin/fm-arm-command-policy.mjs is the single owner of command classification.
-# This suite drives the stable shell transport through all five harness entry
+# This suite drives the stable shell transport through all six harness entry
 # forms and asserts the per-harness wiring contract without spawning a harness.
 # Empirical harness evidence lives in docs/arm-pretool-check.md.
 set -u
@@ -170,6 +170,11 @@ run_matrix_entry() {
       printf '%s' "$payload" | "$CHECK" --claude >"$out_file" 2>"$err_file"
       rc=$?
       ;;
+    cursor)
+      payload=$(jq -cn --arg command "$cmd" '{tool_name:"Shell",tool_input:{command:$command},cursor_version:"fixture"}')
+      printf '%s' "$payload" | "$CHECK" --cursor >"$out_file" 2>"$err_file"
+      rc=$?
+      ;;
     grok)
       payload=$(jq -cn --arg command "$cmd" '{toolName:"run_terminal_command",toolInput:{command:$command}}')
       printf '%s' "$payload" | "$CHECK" >"$out_file" 2>"$err_file"
@@ -183,6 +188,18 @@ run_matrix_entry() {
       fail "unknown matrix entry form: $entry"
       ;;
   esac
+
+  if [ "$entry" = cursor ]; then
+    [ "$rc" -eq 0 ] || fail "$id via Cursor must exit 0, got $rc"
+    [ ! -s "$err_file" ] || fail "$id via Cursor must leave stderr empty: $(cat "$err_file")"
+    if [ "$expected" = allow ]; then
+      [ "$(cat "$out_file")" = '{"permission":"allow"}' ] || fail "$id via Cursor must emit the allow document"
+    else
+      jq -es 'length == 1 and (.[0] | .permission == "deny" and (.user_message | test("\\[(watcher-(background|pipeline|redirection|bundled|nested|direct)|broad-watcher-kill|unclassifiable-protected-command)\\]")))' "$out_file" >/dev/null \
+        || fail "$id via Cursor must retain its denial reason: $(cat "$out_file")"
+    fi
+    return
+  fi
 
   if [ "$expected" = allow ]; then
     [ "$rc" -eq 0 ] || fail "$id via $entry must allow, got exit $rc: $(cat "$err_file")"
@@ -205,10 +222,10 @@ run_matrix_entry() {
 test_full_acceptance_matrix() {
   local i entry
   for ((i = 0; i < ${#MATRIX_IDS[@]}; i++)); do
-    for entry in codex claude grok opencode pi; do
+    for entry in codex claude grok opencode pi cursor; do
       run_matrix_entry "${MATRIX_IDS[$i]}" "${MATRIX_EXPECTED[$i]}" "$entry" "${MATRIX_COMMANDS[$i]}"
     done
-    pass "matrix ${MATRIX_IDS[$i]}: ${MATRIX_EXPECTED[$i]} through all five entry forms"
+    pass "matrix ${MATRIX_IDS[$i]}: ${MATRIX_EXPECTED[$i]} through all six entry forms"
   done
 }
 
