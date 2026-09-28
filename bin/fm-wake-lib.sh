@@ -1389,8 +1389,8 @@ fm_firstmate_root_home() {
 # because their workers run on another machine.
 #
 # Sets FM_LOCAL_FIRSTMATE_STATES to that list, <first-state> first and without
-# duplicates. Returns 1 with FM_LOCAL_FIRSTMATE_ERROR naming what could not be
-# proved - an unresolvable root, an unsafe or malformed registry, or an
+# duplicates however each directory is spelled. Returns 1 with
+# FM_LOCAL_FIRSTMATE_ERROR naming what could not be proved - an unresolvable root, an unsafe or malformed registry, or an
 # unavailable registered local home - so a caller refuses rather than treating
 # an unreadable home as one with no tasks.
 # shellcheck disable=SC2034 # FM_LOCAL_FIRSTMATE_ERROR is read by callers.
@@ -1413,7 +1413,9 @@ fm_local_firstmate_state_dirs() {  # <first-state>
     i=$((i + 1))
     known=0
     for existing in "${FM_LOCAL_FIRSTMATE_STATES[@]}"; do
-      [ "$existing" != "$home/state" ] || known=1
+      if [ "$existing" = "$home/state" ] || [ "$existing" -ef "$home/state" ]; then
+        known=1
+      fi
     done
     [ "$known" = 1 ] || FM_LOCAL_FIRSTMATE_STATES+=("$home/state")
     reg="$home/data/secondmates.md"

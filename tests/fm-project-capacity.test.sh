@@ -240,6 +240,22 @@ test_exhausted_capacity_defers_without_leaving_anything_behind() {
   pass "a spawn beyond capacity is deferred before any record, brief, endpoint, worktree, or backlog move exists"
 }
 
+# A home reached through a symlink is still one home: its workers hold one
+# place each, not one per spelling of its state directory.
+test_symlinked_home_counts_each_worker_once() {
+  local case_dir home out rc=0
+  case_dir=$(make_case symlinked-home task-c)
+  home="$case_dir/home"
+  ln -s "$home" "$case_dir/home-link"
+  declare_capacity "$home" "project 2"
+  write_live "$home" live-a "$case_dir/project"
+  out=$(run_spawn "$case_dir" "$case_dir/home-link" "$(new_worktree "$case_dir" task-c)" \
+    task-c "$case_dir/project" --mode no-mistakes --yolo off) || rc=$?
+  expect_code 0 "$rc" "a spawn through a symlinked home counted its own worker twice: $out"
+  assert_contains "$out" "spawned task-c" "a spawn through a symlinked home did not launch"
+  pass "a home reached through a symlink counts each of its workers once"
+}
+
 # A place frees when a worker records its ready PR and when a task is cleaned
 # up; each release admits exactly one more worker.
 test_release_frees_a_place() {
@@ -484,6 +500,7 @@ SH
 test_undeclared_capacity_keeps_dispatch_uncapped
 test_available_capacity_admits_the_worker
 test_exhausted_capacity_defers_without_leaving_anything_behind
+test_symlinked_home_counts_each_worker_once
 test_release_frees_a_place
 test_occupancy_counts_only_this_projects_workers
 test_capacity_is_shared_by_every_local_home
