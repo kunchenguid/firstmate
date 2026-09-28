@@ -395,7 +395,7 @@ fm_control_endpoint_absence_verdict() {  # <backend> <target> <worktree>
 # perform: a refused `exit` names `exit`, because sending a stop request off to
 # the verb that REPLACES the agent is the same cross-pointing this sentence
 # exists to end.
-fm_control_unclassified_next_step() {  # <task-id> <state> <verb>
+fm_control_unclassified_next_step() {  # <task-id> <state> <verb-with-its-flags>
   local id=${1-} state=${2-} verb=${3-}
   case "$state" in
     ambiguous)

@@ -1706,11 +1706,12 @@ test_spawn_relaunch_refuses_a_live_agent() {
   out=$(run_spawn "$dir" rl15 --relaunch --harness claude); rc=$?
   expect_code 1 "$rc" "relaunching into a live endpoint should refuse"
   assert_contains "$out" "positively agent-free endpoint" "the refusal should demand an agent-free endpoint"
-  assert_contains "$out" "fm-control.sh rl15 relaunch" \
-    "the refusal should name the one command that replaces a live agent"
+  assert_contains "$out" 'fm-control.sh rl15 relaunch --note "<why>"' \
+    "the refusal should name the one command that replaces a live agent, spelled as it can be run"
   [ ! -s "$dir/fake/literal" ] || fail "a refused relaunch must send nothing into the live endpoint"
   # The named command must actually work for this state, rather than send the
-  # operator on to another refusal.
+  # operator on to another refusal: a ship relaunch refuses without --note, so
+  # the printed command has to carry it.
   out=$(run_control "$dir" rl15 relaunch --note "replace the live agent"); rc=$?
   expect_code 0 "$rc" "the command the refusal names should replace the live agent"$'\n'"$out"
   pass "fm-spawn --relaunch: refuses a live endpoint and names the command that replaces its agent"
@@ -2003,7 +2004,7 @@ test_tmux_refuses_a_gone_window_while_an_agent_works_in_the_worktree() {
     "the refusal must name the agent process it found"
   assert_contains "$out" "stop that process where it runs" \
     "the refusal must name what would have to change before the task can be reclaimed"
-  assert_contains "$out" "bin/fm-control.sh rl65 relaunch can reclaim the task" \
+  assert_contains "$out" 'bin/fm-control.sh rl65 relaunch --note "<why>" can reclaim the task' \
     "the refusal must name the command that reclaims the task once the agent is stopped"
   brief_before=$(cat "$dir/home/data/rl65/brief.md")
   out=$(run_control "$dir" rl65 exit); rc=$?

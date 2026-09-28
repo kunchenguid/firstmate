@@ -1762,7 +1762,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
       dead) RELAUNCH_STATE=dead ;;
       alive) RELAUNCH_STATE=alive ;;
       *)
-        echo "error: task $ID's recorded endpoint $RELAUNCH_TARGET reads 'missing', but ${RELAUNCH_ABSENCE#*$'\t'}. An endpoint that cannot be proven absent may still hold a live agent on this task's worktree; refusing rather than launching a second agent into it (bin/fm-control.sh $ID exit and relaunch refuse it for the same reason; that reason is what would have to change before bin/fm-control.sh $ID relaunch can reclaim the task)" >&2
+        echo "error: task $ID's recorded endpoint $RELAUNCH_TARGET reads 'missing', but ${RELAUNCH_ABSENCE#*$'\t'}. An endpoint that cannot be proven absent may still hold a live agent on this task's worktree; refusing rather than launching a second agent into it (bin/fm-control.sh $ID exit and relaunch refuse it for the same reason; that reason is what would have to change before bin/fm-control.sh $ID relaunch --note \"<why>\" can reclaim the task)" >&2
         exit 1
         ;;
     esac
@@ -1771,11 +1771,11 @@ if [ "$RELAUNCH" -eq 1 ]; then
     dead) ;;
     missing) RELAUNCH_REBIND=1 ;;
     alive)
-      echo "error: task $ID's endpoint reads 'alive': an agent still runs there, and a relaunch requires a positively agent-free endpoint, so replace it with bin/fm-control.sh $ID relaunch, which stops that agent before launching this one" >&2
+      echo "error: task $ID's endpoint reads 'alive': an agent still runs there, and a relaunch requires a positively agent-free endpoint, so replace it with bin/fm-control.sh $ID relaunch --note \"<why>\", which stops that agent before launching this one" >&2
       exit 1
       ;;
     *)
-      echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free endpoint, and $(fm_control_unclassified_next_step "$ID" "$RELAUNCH_STATE" relaunch)" >&2
+      echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free endpoint, and $(fm_control_unclassified_next_step "$ID" "$RELAUNCH_STATE" 'relaunch --note "<why>"')" >&2
       exit 1
       ;;
   esac

@@ -177,7 +177,8 @@ The worktree and the task's records are unaffected either way.
 - `exit`'s composer-empty check, above, is itself a fail-closed boundary that `relaunch` inherits by stopping the old agent through `exit`.
 - `fm-spawn --relaunch` independently refuses unless the endpoint is positively agent-free - either a `dead` endpoint that survives, or an endpoint proven gone by the absence proof above - so a replacement can never join a live agent.
   An `alive`, `ambiguous`, or `unreadable` verdict all refuse, and so does any endpoint whose absence is not provable; absence is claimed only from positive evidence of it.
-  Every such refusal names a command that acts on the state it read: an `alive` endpoint points at `bin/fm-control.sh <id> relaunch`, which stops that agent first, and an `ambiguous` or `unreadable` one points at `bin/fm-peek.sh <id>` and a retry, because no lifecycle verb acts on it until it reads positively.
+  Every such refusal names a command that acts on the state it read, spelled as the operator can run it: an `alive` endpoint points at `bin/fm-control.sh <id> relaunch --note "<why>"`, which stops that agent first, and an `ambiguous` or `unreadable` one points at `bin/fm-peek.sh <id>` and the same retry, because no lifecycle verb acts on it until it reads positively.
+  The `--note` placeholder is part of every printed `relaunch`, because a ship or scout relaunch refuses without one.
   It also requires the shell to be in the recorded worktree: every backend but Orca (which owns its own task worktree with no current-path probe) gets one explicit `cd` to the recorded path, then a pre-launch path read that refuses before any harness starts unless it confirms the endpoint is sitting in the recorded copy.
 
 ## Capability matrix

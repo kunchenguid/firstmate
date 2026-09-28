@@ -234,6 +234,9 @@ if ! fm_control_verb_allowed "$VERB"; then
   exit 2
 fi
 
+VERB_RETRY=$VERB
+[ "$VERB" != relaunch ] || VERB_RETRY='relaunch --note "<why>"'
+
 NEW_HARNESS=
 NEW_MODEL=
 NEW_EFFORT=
@@ -601,11 +604,11 @@ do_exit() {
           # alive path: interrupt if busy, then the harness's exit command.
           ;;
         *)
-          die "task $ID's endpoint $T reads 'missing', but ${absence#*$'\t'}; exit will not claim an agent stopped at an address it cannot trust, nor send lifecycle input to one, and relaunch refuses for the same reason. That reason is what would have to change before bin/fm-control.sh $ID $VERB can act"
+          die "task $ID's endpoint $T reads 'missing', but ${absence#*$'\t'}; exit will not claim an agent stopped at an address it cannot trust, nor send lifecycle input to one, and relaunch refuses for the same reason. That reason is what would have to change before bin/fm-control.sh $ID $VERB_RETRY can act"
           ;;
       esac
       ;;
-    *) die "task $ID's endpoint reads '$state' rather than a positively classified state; refusing to send a lifecycle command into an unattributed endpoint - $(fm_control_unclassified_next_step "$ID" "$state" "$VERB")" ;;
+    *) die "task $ID's endpoint reads '$state' rather than a positively classified state; refusing to send a lifecycle command into an unattributed endpoint - $(fm_control_unclassified_next_step "$ID" "$state" "$VERB_RETRY")" ;;
   esac
   # A busy agent is interrupted first before the exit command is submitted.
   case "$(busy_verdict)" in
@@ -743,7 +746,7 @@ relaunch_rollback() {
           ;;
         dead)
           journal_write "failed:$RELAUNCH_PHASE" "rollback=prior-record-kept-agent-dead" || true
-          echo "error: $ID's agent stopped but relaunch did not reach replacement launch; no agent is running, and its work plus progress note are preserved at $WT; rerun bin/fm-control.sh $ID relaunch to launch the replacement" >&2
+          echo "error: $ID's agent stopped but relaunch did not reach replacement launch; no agent is running, and its work plus progress note are preserved at $WT; rerun bin/fm-control.sh $ID relaunch --note \"<why>\" to launch the replacement" >&2
           ;;
         *)
           # The old agent was NOT proven stopped, so no replacement is coming
@@ -772,10 +775,10 @@ relaunch_rollback() {
         # reconciles. Rewriting it back to the old harness would be a second,
         # worse inaccuracy.
         journal_write "failed:$RELAUNCH_PHASE" "rollback=none-new-record-kept" || true
-        echo "error: $ID was relaunched on $TARGET_HARNESS but no running agent could be confirmed; its work is preserved at $WT; inspect the endpoint with bin/fm-peek.sh $ID, then rerun bin/fm-control.sh $ID relaunch, which adopts it once it reads dead and replaces its agent once it reads alive" >&2
+        echo "error: $ID was relaunched on $TARGET_HARNESS but no running agent could be confirmed; its work is preserved at $WT; inspect the endpoint with bin/fm-peek.sh $ID, then rerun bin/fm-control.sh $ID relaunch --note \"<why>\", which adopts it once it reads dead and replaces its agent once it reads alive" >&2
       else
         journal_write "failed:$RELAUNCH_PHASE" "rollback=prior-record-kept" || true
-        echo "error: $ID's agent was stopped but the replacement did not launch; no agent is running, and its work plus the recorded progress note are preserved at $WT; rerun bin/fm-control.sh $ID relaunch once the launch failure above is resolved" >&2
+        echo "error: $ID's agent was stopped but the replacement did not launch; no agent is running, and its work plus the recorded progress note are preserved at $WT; rerun bin/fm-control.sh $ID relaunch --note \"<why>\" once the launch failure above is resolved" >&2
       fi
       ;;
   esac

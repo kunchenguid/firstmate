@@ -837,8 +837,8 @@ test_ambiguous_endpoint_refuses() {
 
   out=$(run_control "$dir" t1 relaunch --note "the pane holds something unattributable"); rc=$?
   expect_code 1 "$rc" "the same unattributed endpoint must refuse a relaunch too"
-  assert_contains "$out" "retry bin/fm-control.sh t1 relaunch" \
-    "a relaunch refusal must still name relaunch"
+  assert_contains "$out" 'retry bin/fm-control.sh t1 relaunch --note "<why>"' \
+    "a relaunch refusal must still name relaunch, with the note it requires"
   [ -z "$(literals "$dir")" ] || fail "an unattributed endpoint must receive no bytes"
   pass "fm-control: an endpoint whose process cannot be attributed refuses and names the invoked verb"
 }
