@@ -133,7 +133,21 @@
 # destination, normal-case deduplication, and at-least-once recovery.
 # A landed merge whose outcome cannot be written is reported loudly rather than
 # misreported as a failed merge.
+# When GitHub reports mergeable=UNKNOWN, this entrypoint retries the complete
+# live pre-merge verification up to FM_PR_MERGE_UNKNOWN_RETRIES times, waiting
+# FM_PR_MERGE_UNKNOWN_BACKOFF_SECS whole seconds between attempts. These
+# environment overrides are intended for tests and operators diagnosing forge
+# recalculation delays; an exhausted retry remains pending with exit code 3.
 set -eu
+
+UNKNOWN_RETRY_LIMIT=${FM_PR_MERGE_UNKNOWN_RETRIES:-3}
+UNKNOWN_RETRY_BACKOFF_SECS=${FM_PR_MERGE_UNKNOWN_BACKOFF_SECS:-5}
+case "$UNKNOWN_RETRY_LIMIT" in
+  ''|*[!0-9]*) echo "error: FM_PR_MERGE_UNKNOWN_RETRIES must be a non-negative whole number" >&2; exit 2 ;;
+esac
+case "$UNKNOWN_RETRY_BACKOFF_SECS" in
+  ''|*[!0-9]*) echo "error: FM_PR_MERGE_UNKNOWN_BACKOFF_SECS must be a non-negative whole number" >&2; exit 2 ;;
+esac
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
@@ -831,6 +845,15 @@ EOF
   fi
 
   if [ -n "$refusals" ]; then
+    if [ "$mergeable" = UNKNOWN ]; then
+      local non_unknown_refusals
+      non_unknown_refusals=$(printf '%s' "$refusals" | sed '/^  - mergeable is "UNKNOWN", not MERGEABLE$/d')
+      if [ -z "$non_unknown_refusals" ]; then
+        FM_PR_MERGE_HEAD=$live_head
+        FM_PR_GITHUB_BASE=$base
+        return 10
+      fi
+    fi
     printf 'error: refusing to merge %s\n' "$URL" >&2
     printf '%s' "$refusals" >&2
     [ -z "$uncovered" ] || printf 'error: these checks are not green: %s\n' "$uncovered" >&2
@@ -841,6 +864,42 @@ EOF
     "$URL" "$live_head" >&2
   FM_PR_MERGE_HEAD=$live_head
   FM_PR_GITHUB_BASE=$base
+}
+
+github_verify_mergeable_with_retry() {
+  local attempt=0 verify_status=0 expected_head=''
+  while :; do
+    require_current_away_authority || return $?
+    verify_status=0
+    github_verify_mergeable || verify_status=$?
+    if [ "$verify_status" -eq 10 ]; then
+      refuse_github_queue_while_away || return $?
+    fi
+    if [ "$verify_status" -eq 0 ]; then
+      if [ -n "$expected_head" ] && [ "$FM_PR_MERGE_HEAD" != "$expected_head" ]; then
+        printf 'error: refusing to merge %s because its head commit changed while GitHub mergeability was pending (was %s, now %s)\n' \
+          "$URL" "$expected_head" "$FM_PR_MERGE_HEAD" >&2
+        return 1
+      fi
+      return 0
+    fi
+    [ "$verify_status" -eq 10 ] || return "$verify_status"
+
+    if [ -z "$expected_head" ]; then
+      expected_head=$FM_PR_MERGE_HEAD
+    elif [ "$FM_PR_MERGE_HEAD" != "$expected_head" ]; then
+      printf 'error: refusing to merge %s because its head commit changed while GitHub mergeability was pending (was %s, now %s)\n' \
+        "$URL" "$expected_head" "$FM_PR_MERGE_HEAD" >&2
+      return 1
+    fi
+    if [ "$attempt" -ge "$UNKNOWN_RETRY_LIMIT" ]; then
+      printf 'actionable: GitHub mergeability for %s is still pending after %s retries; no merge was attempted\n' \
+        "$URL" "$UNKNOWN_RETRY_LIMIT" >&2
+      return 3
+    fi
+    attempt=$((attempt + 1))
+    sleep "$UNKNOWN_RETRY_BACKOFF_SECS"
+  done
 }
 
 # Read one live GitHub pull request view after gh returns. The selected
@@ -1322,7 +1381,7 @@ case "$PROVIDER" in
       merge_args=(--squash)
     fi
     FM_PR_GITHUB_CALLER_METHOD=$(caller_merge_method "$@")
-    github_verify_mergeable || exit 1
+    github_verify_mergeable_with_retry || exit $?
     # The away record is locked first, so this last presence and authority read
     # and the forge command below share one live-owner critical section.
     hold_away_record_for_merge || exit 1

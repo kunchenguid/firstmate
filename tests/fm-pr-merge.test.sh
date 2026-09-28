@@ -174,7 +174,14 @@ case "${1:-} ${2:-}" in
   "pr view")
     case " $* " in
       *statusCheckRollup*)
-        cat "$FM_TEST_GH_VIEW_JSON"
+        if [ -n "${FM_TEST_GH_VIEW_SEQUENCE:-}" ] && [ -f "$FM_TEST_GH_VIEW_SEQUENCE" ]; then
+          sequence_line=$(cat "${FM_TEST_GH_VIEW_SEQUENCE_POS:-/dev/null}" 2>/dev/null || printf '0')
+          sequence_line=$((sequence_line + 1))
+          printf '%s\n' "$sequence_line" > "$FM_TEST_GH_VIEW_SEQUENCE_POS"
+          sed -n "${sequence_line}p" "$FM_TEST_GH_VIEW_SEQUENCE"
+        else
+          cat "$FM_TEST_GH_VIEW_JSON"
+        fi
         if [ -f "${FM_TEST_AWAY_RECORD_AFTER_VIEW:-}" ]; then
           if [ -s "${FM_TEST_AWAY_RECORD_AFTER_VIEW}" ]; then
             cp "$FM_TEST_AWAY_RECORD_AFTER_VIEW" "$FM_STATE_OVERRIDE/.afk-contract"
@@ -448,6 +455,8 @@ run_pr_merge() {
   FM_TEST_GH_OUTCOME="$case_dir/github-outcome" \
   FM_TEST_GH_RULES="$case_dir/github-rules" \
   FM_TEST_GH_VIEW_JSON="$case_dir/github-view.json" \
+  FM_TEST_GH_VIEW_SEQUENCE="${FM_TEST_GH_VIEW_SEQUENCE:-}" \
+  FM_TEST_GH_VIEW_SEQUENCE_POS="$case_dir/github-view-sequence-pos" \
   FM_TEST_GH_HEAD="$case_dir/github-head" \
   FM_TEST_GH_RUNS="$case_dir/github-runs.json" \
   FM_TEST_GH_MERGE_RC_FILE="$case_dir/github-merge-rc" \
@@ -467,6 +476,8 @@ run_pr_merge() {
   FM_TEST_AWAY_MUTATE_RC="$case_dir/away-mutate-rc" \
   FM_TEST_AWAY_WORDS_AT_MERGE="$case_dir/away-words-at-merge" \
   FM_TEST_REAL_MV="$REAL_MV" \
+  FM_PR_MERGE_UNKNOWN_RETRIES="${FM_TEST_UNKNOWN_RETRIES:-}" \
+  FM_PR_MERGE_UNKNOWN_BACKOFF_SECS="${FM_TEST_UNKNOWN_BACKOFF_SECS:-}" \
   FM_TEST_GLAB_LOG="$case_dir/glab.log" \
   FM_TEST_GLAB_JSON="$case_dir/mr.json" \
   HOME="${FM_TEST_USER_HOME:-$case_dir/user-home}" \
@@ -2471,6 +2482,121 @@ test_github_red_checks_refuse_and_allow_red_waives_named() {
   pass "fm-pr-merge refuses red GitHub checks and waives only a named --allow-red check"
 }
 
+write_github_unknown_json() {
+  local case_dir=$1 head=$2
+  printf '%s\n' "$head" > "$case_dir/github-head"
+  cat <<JSON
+{"state":"OPEN","isDraft":false,"mergeable":"UNKNOWN","mergeStateStatus":"CLEAN","headRefOid":"$head","baseRefName":"main","statusCheckRollup":[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS"}]}
+JSON
+}
+
+test_github_unknown_then_mergeable_retries_full_verification() {
+  local case_dir rc head
+  head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  case_dir=$(make_case github-unknown-then-mergeable)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  {
+    write_github_unknown_json "$case_dir" "$head"
+    write_github_live_json "$case_dir" "$head"
+    cat "$case_dir/github-view.json"
+  } > "$case_dir/github-view-sequence"
+
+  set +e
+  FM_TEST_GH_VIEW_SEQUENCE="$case_dir/github-view-sequence" \
+  FM_TEST_UNKNOWN_RETRIES=1 FM_TEST_UNKNOWN_BACKOFF_SECS=0 \
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/81 \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "github-unknown-then-mergeable: UNKNOWN should retry and merge"
+  [ "$(cat "$case_dir/github-view-sequence-pos")" -eq 2 ] \
+    || fail "github-unknown-then-mergeable: full verification did not rerun"
+  assert_logged_gh_merge "$case_dir" 81 example/repo --squash
+  pass "fm-pr-merge retries transient GitHub UNKNOWN and merges after MERGEABLE"
+}
+
+test_github_unknown_exhausted_reports_pending() {
+  local case_dir rc head
+  head=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  case_dir=$(make_case github-unknown-exhausted)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  {
+    write_github_unknown_json "$case_dir" "$head"
+    write_github_unknown_json "$case_dir" "$head"
+    write_github_unknown_json "$case_dir" "$head"
+  } > "$case_dir/github-view-sequence"
+
+  set +e
+  FM_TEST_GH_VIEW_SEQUENCE="$case_dir/github-view-sequence" \
+  FM_TEST_UNKNOWN_RETRIES=2 FM_TEST_UNKNOWN_BACKOFF_SECS=0 \
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/82 \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 3 "$rc" "github-unknown-exhausted: exhausted UNKNOWN should be pending"
+  assert_grep 'still pending' "$case_dir/stderr" \
+    "github-unknown-exhausted: pending outcome was not reported"
+  assert_no_grep 'not MERGEABLE' "$case_dir/stderr" \
+    "github-unknown-exhausted: UNKNOWN was reported as unmergeable"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "github-unknown-exhausted: gh pr merge ran while pending"
+  pass "fm-pr-merge reports GitHub UNKNOWN as pending after its retry bound"
+}
+
+test_github_unknown_conflict_refuses_without_retry() {
+  local case_dir rc head
+  head=cccccccccccccccccccccccccccccccccccccccc
+  case_dir=$(make_case github-unknown-conflict)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  jq -c '.mergeable = "CONFLICTING" | .mergeStateStatus = "DIRTY"' \
+    "$case_dir/github-view.json" > "$case_dir/github-view-sequence"
+
+  set +e
+  FM_TEST_GH_VIEW_SEQUENCE="$case_dir/github-view-sequence" \
+  FM_TEST_UNKNOWN_RETRIES=2 FM_TEST_UNKNOWN_BACKOFF_SECS=0 \
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/83 \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "github-unknown-conflict: CONFLICTING should refuse immediately"
+  [ "$(cat "$case_dir/github-view-sequence-pos")" -eq 1 ] \
+    || fail "github-unknown-conflict: CONFLICTING was retried"
+  assert_grep 'mergeable is "CONFLICTING"' "$case_dir/stderr" \
+    "github-unknown-conflict: conflict refusal was not reported"
+  pass "fm-pr-merge still refuses CONFLICTING without retry"
+}
+
+test_github_unknown_head_change_refuses() {
+  local case_dir rc first second
+  first=dddddddddddddddddddddddddddddddddddddddd
+  second=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+  case_dir=$(make_case github-unknown-head-change)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$first"
+  {
+    write_github_unknown_json "$case_dir" "$first"
+    write_github_live_json "$case_dir" "$second"
+    cat "$case_dir/github-view.json"
+  } > "$case_dir/github-view-sequence"
+
+  set +e
+  FM_TEST_GH_VIEW_SEQUENCE="$case_dir/github-view-sequence" \
+  FM_TEST_UNKNOWN_RETRIES=1 FM_TEST_UNKNOWN_BACKOFF_SECS=0 \
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/84 \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "github-unknown-head-change: changed head should refuse"
+  assert_grep 'head commit changed while GitHub mergeability was pending' "$case_dir/stderr" \
+    "github-unknown-head-change: head change refusal was not reported"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "github-unknown-head-change: gh pr merge ran after head changed"
+  pass "fm-pr-merge refuses a head change during UNKNOWN retry"
+}
+
 # A draft cannot be merged, and neither can a pull request whose draft state the
 # forge did not report as a boolean; both refuse before any merge call.
 test_github_draft_or_unreadable_draft_state_refuses() {
@@ -3685,6 +3811,10 @@ test_untraversable_user_backend_config_directory_refuses_the_merge
 test_absent_user_backend_config_directory_and_backlog_still_merge
 test_backend_override_bypasses_unreadable_user_config
 test_github_red_checks_refuse_and_allow_red_waives_named
+test_github_unknown_then_mergeable_retries_full_verification
+test_github_unknown_exhausted_reports_pending
+test_github_unknown_conflict_refuses_without_retry
+test_github_unknown_head_change_refuses
 test_github_draft_or_unreadable_draft_state_refuses
 test_superseded_failed_check_run_no_longer_refuses
 test_check_runs_never_supersede_status_contexts
