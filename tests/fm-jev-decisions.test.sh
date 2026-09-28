@@ -120,7 +120,14 @@ if FM_HOME="$TDIR/nohome" "$DECISION_SH" --all --state-dir "$STATE" >/dev/null 2
   fail "missing fm-classify-lib.sh must exit non-zero"
 fi
 
-# 7. No selector and non-TTY stdin prints usage instead of scanning.
+# 7. A mistyped --input path is an error, and malformed lines are reported.
+if "$DECISION_SH" --input "$TDIR/no-such.tsv" >/dev/null 2>&1; then
+  fail "missing --input file must exit non-zero"
+fi
+warn=$(printf 'k\tneeds-decision\tnote\n' | "$DECISION_SH" --input - 2>&1 >/dev/null)
+assert_contains "$warn" "skipped 1 malformed line" "3-column stdin without --task warns about skipped lines"
+
+# 8. No selector and non-TTY stdin prints usage instead of scanning.
 if printf '' | "$DECISION_SH" >/dev/null 2>&1; then
   fail "no selector must exit non-zero"
 fi

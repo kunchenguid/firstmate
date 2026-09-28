@@ -93,6 +93,7 @@ def get_api_key(fm_root: Path) -> str | None:
 def parse_decision_lines(content: str, task: str | None) -> list[DecisionItem]:
     """Parse key<TAB>verb<TAB>note lines, prefixed by a task column when task is None."""
     items = []
+    skipped = 0
     for line in content.splitlines():
         if not line.strip():
             continue
@@ -100,10 +101,16 @@ def parse_decision_lines(content: str, task: str | None) -> list[DecisionItem]:
             parts = line.split("\t", 3)
             if len(parts) == 4:
                 items.append(DecisionItem(task=parts[0], key=parts[1], verb=parts[2], note=parts[3]))
+                continue
         else:
             parts = line.split("\t", 2)
             if len(parts) == 3:
                 items.append(DecisionItem(task=task, key=parts[0], verb=parts[1], note=parts[2]))
+                continue
+        skipped += 1
+    if skipped:
+        expected = "task<TAB>key<TAB>verb<TAB>note" if task is None else "key<TAB>verb<TAB>note"
+        print(f"warning: skipped {skipped} malformed line(s); expected {expected}", file=sys.stderr)
     return items
 
 
@@ -287,7 +294,10 @@ def main() -> None:
             content = sys.stdin.read()
         else:
             p = Path(args.input)
-            content = p.read_text(encoding="utf-8", errors="replace") if p.exists() else ""
+            if not p.exists():
+                print(f"error: input file {p} does not exist", file=sys.stderr)
+                sys.exit(1)
+            content = p.read_text(encoding="utf-8", errors="replace")
         items = parse_decision_lines(content, args.task)
     # 3. Specific status file
     elif args.status_file:
