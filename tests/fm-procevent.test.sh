@@ -793,6 +793,7 @@ if [ -n "$owner" ]; then
   mkdir -p "$FREPLY_OWNERS"
   printf '%s\n' "$artifact" > "$FREPLY_OWNERS/$owner"
   trap 'rm -f -- "$FREPLY_OWNERS/$owner"' EXIT
+  herdr notification show ready
 fi
 trigger_var=FREPLY_TRIGGER$n
 trigger=${!trigger_var}
@@ -1057,6 +1058,7 @@ if [ -n "$owner" ]; then
   mkdir -p "$LEGACY_OWNERS"
   printf '%s\n' "$artifact" > "$LEGACY_OWNERS/$owner"
   trap 'rm -f -- "$LEGACY_OWNERS/$owner"' EXIT
+  herdr notification show ready
 fi
 case "$n" in
   1) trigger=$LEGACY_TRIGGER1 ;;
@@ -1124,6 +1126,22 @@ assert_absent "$HFLEGACY/state/procevent-inbox/$legacy_id.1.accepted" \
   "blank Lavish reply stranded its round as ambiguously accepted"
 assert_present "$FM_PROCEVENT_CLAIM_ROOT/$legacy_id.claim" \
   "blank Lavish reply dropped machine-wide ownership"
+rm -f -- "$FM_PROCEVENT_CLAIM_ROOT/$legacy_id.claim"
+HFLEGACY_OTHER="$TMP_ROOT/hflegacy-other"; new_home "$HFLEGACY_OTHER"
+fm_test_track_procevent_home "$HFLEGACY_OTHER"
+pe "$HFLEGACY_OTHER" register lavish "$legacy_id" -- /bin/sleep 30 >/dev/null
+printf 'Reserved legacy response.\n' > "$TMP_ROOT/firstmate-legacy-reservation-reply.txt"
+if ! legacy_reservation=$(pe "$HFLEGACY" register-lavish "$legacy_id" -- \
+  "$ROOT/bin/fm-procevent-lavish.sh" poll "$LEGACY_ART" \
+  --agent-reply-file "$TMP_ROOT/firstmate-legacy-reservation-reply.txt"); then
+  fail "legacy migration could not publish while reserving ownership"
+fi
+assert_present "$FM_PROCEVENT_CLAIM_ROOT/$legacy_id.claim" \
+  "legacy migration did not reserve machine-wide ownership"
+PATH="$LEGACY_BIN:$PATH" pe "$HFLEGACY_OTHER" start "$legacy_id" \
+  > "$TMP_ROOT/firstmate-legacy-other-start.out"
+assert_contains "$(cat "$TMP_ROOT/firstmate-legacy-other-start.out")" "already owned: $legacy_id" \
+  "another home acquired the session during legacy migration"
 printf 'Answered after handoff.\n' > "$TMP_ROOT/firstmate-live-legacy-reply.txt"
 PATH="$LEGACY_BIN:$PATH" FM_HOME="$HFLEGACY" \
   "$ROOT/bin/fm-procevent-lavish.sh" arm "$LEGACY_ART" \
@@ -1144,6 +1162,118 @@ done
 assert_absent "$HFLEGACY/state/procevent/$legacy_id.source" \
   "ended live legacy handoff session stayed armed"
 pass "live legacy listener hands off to the reply generation"
+
+HFSTOREFAIL="$TMP_ROOT/hfstorefail"; new_home "$HFSTOREFAIL"
+STOREFAIL_BIN=$(fm_fakebin "$TMP_ROOT/lavish-firstmate-store-fail-stub")
+STOREFAIL_COUNT="$TMP_ROOT/lavish-firstmate-store-fail-count"
+STOREFAIL_REPLY="$TMP_ROOT/lavish-firstmate-store-fail-reply"
+STOREFAIL_OWNERS="$TMP_ROOT/lavish-firstmate-store-fail-owners"
+export STOREFAIL_COUNT STOREFAIL_REPLY STOREFAIL_OWNERS
+cat > "$STOREFAIL_BIN/lavish-axi" <<'SH'
+#!/bin/sh
+if [ "$#" -eq 0 ]; then
+  for owner_file in "$STOREFAIL_OWNERS"/*; do
+    [ -f "$owner_file" ] || continue
+    printf '  store-fail,open,"",0,%s\n' "${owner_file##*/}"
+  done
+  exit
+fi
+n=$(cat "$STOREFAIL_COUNT" 2>/dev/null || echo 0)
+n=$((n + 1))
+printf '%s\n' "$n" > "$STOREFAIL_COUNT"
+owner=
+shift 2
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --agent-reply-file) cat > "$STOREFAIL_REPLY"; shift 2 ;;
+    --owner) owner=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+if [ "$n" = 1 ]; then
+  printf 'session:\n  status: feedback\nprompts[1]{uid,prompt,selector,tag,text}:\n  "","","","message","store failure"\n'
+else
+  mkdir -p "$STOREFAIL_OWNERS"
+  printf '%s\n' store-fail > "$STOREFAIL_OWNERS/$owner"
+  trap 'rm -f -- "$STOREFAIL_OWNERS/$owner"' EXIT
+  sleep 0.2
+  printf 'error: failed to persist agent reply\ncode: SERVER_ERROR\n'
+  exit 1
+fi
+SH
+chmod +x "$STOREFAIL_BIN/lavish-axi"
+STOREFAIL_ART="$TMP_ROOT/firstmate-store-fail.html"
+printf '<h1>store failure</h1>\n' > "$STOREFAIL_ART"
+lavish_session "$STOREFAIL_ART"
+storefail_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$STOREFAIL_ART")
+fm_test_track_procevent_home "$HFSTOREFAIL"
+PATH="$STOREFAIL_BIN:$PATH" FM_HOME="$HFSTOREFAIL" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$STOREFAIL_ART" >/dev/null
+wait_capture "$HFSTOREFAIL" "$storefail_id" || fail "storage failure fixture did not capture feedback"
+printf 'Must be durably accepted.\n' > "$TMP_ROOT/firstmate-store-fail-input.txt"
+if PATH="$STOREFAIL_BIN:$PATH" FM_HOME="$HFSTOREFAIL" FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS=1 \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$STOREFAIL_ART" \
+  --agent-reply-file "$TMP_ROOT/firstmate-store-fail-input.txt" \
+  > "$TMP_ROOT/firstmate-store-fail.out" 2> "$TMP_ROOT/firstmate-store-fail.err"; then
+  fail "Lavish storage failure was reported as accepted"
+fi
+assert_absent "$HFSTOREFAIL/state/procevent-inbox/$storefail_id.1.handled" \
+  "owner visibility acknowledged a reply that Lavish failed to store"
+assert_absent "$HFSTOREFAIL/state/procevent-inbox/$storefail_id.1.accepted" \
+  "proven storage failure remained ambiguously accepted"
+[ "$(find "$HFSTOREFAIL/state/procevent" -maxdepth 1 -type f -name ".$storefail_id.reply.*" | wc -l | tr -d ' ')" = 1 ] \
+  || fail "storage failure did not retain the staged reply for recovery"
+pass "Lavish storage failure never acknowledges a reply"
+
+HFLINGER="$TMP_ROOT/hflinger"; new_home "$HFLINGER"
+LINGER_BIN=$(fm_fakebin "$TMP_ROOT/lavish-firstmate-linger-stub")
+LINGER_COUNT="$TMP_ROOT/lavish-firstmate-linger-count"
+LINGER_LOG="$TMP_ROOT/lavish-firstmate-linger-log"
+export LINGER_COUNT LINGER_LOG
+cat > "$LINGER_BIN/lavish-axi" <<'SH'
+#!/bin/sh
+[ "$#" -gt 0 ] || exit 0
+n=$(cat "$LINGER_COUNT" 2>/dev/null || echo 0)
+n=$((n + 1))
+printf '%s\n' "$n" > "$LINGER_COUNT"
+reply= owner=
+shift 2
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --agent-reply-file) reply=$(cat); shift 2 ;;
+    --owner) owner=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+printf 'poll%s reply: %s\n' "$n" "$reply" >> "$LINGER_LOG"
+if [ "$n" = 1 ]; then
+  printf 'session:\n  status: feedback\nprompts[1]{uid,prompt,selector,tag,text}:\n  "","","","message","linger"\n'
+elif [ "$n" = 2 ]; then
+  printf 'error: Lavish Editor already has an active poll listener\ncode: LISTENER_ACTIVE\n'
+  exit 1
+else
+  [ -z "$owner" ] || herdr notification show ready
+  while :; do sleep 1; done
+fi
+SH
+chmod +x "$LINGER_BIN/lavish-axi"
+LINGER_ART="$TMP_ROOT/firstmate-linger.html"
+printf '<h1>linger</h1>\n' > "$LINGER_ART"
+lavish_session "$LINGER_ART"
+linger_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$LINGER_ART")
+fm_test_track_procevent_home "$HFLINGER"
+PATH="$LINGER_BIN:$PATH" FM_HOME="$HFLINGER" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$LINGER_ART" >/dev/null
+wait_capture "$HFLINGER" "$linger_id" || fail "lingering listener fixture did not capture feedback"
+printf 'Retry after release.\n' > "$TMP_ROOT/firstmate-linger-reply.txt"
+PATH="$LINGER_BIN:$PATH" FM_HOME="$HFLINGER" FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS=2 \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$LINGER_ART" \
+  --agent-reply-file "$TMP_ROOT/firstmate-linger-reply.txt" >/dev/null
+assert_present "$HFLINGER/state/procevent-inbox/$linger_id.1.handled" \
+  "bounded listener release recovery did not acknowledge the accepted reply"
+[ "$(grep -c 'reply: Retry after release.' "$LINGER_LOG")" = 2 ] \
+  || fail "listener release recovery did not retain the exact staged reply"
+pass "lingering Lavish listener recovers without takeover"
 
 HFACKFAIL="$TMP_ROOT/hfackfail"; new_home "$HFACKFAIL"
 ACKFAIL_BIN=$(fm_fakebin "$TMP_ROOT/lavish-firstmate-ack-fail-stub")
@@ -1178,6 +1308,7 @@ fi
 n=$(cat "$ACKFAIL_COUNT" 2>/dev/null || echo 0)
 n=$((n + 1))
 printf '%s\n' "$n" > "$ACKFAIL_COUNT"
+[ -z "$owner" ] || herdr notification show ready
 if [ "$n" = 1 ]; then
   printf 'session:\n  status: feedback\nprompts[1]{uid,prompt,selector,tag,text}:\n  "","","","message","ack failure"\n'
 else
@@ -1257,6 +1388,7 @@ if [ -n "$owner" ]; then
   mkdir -p "$NOREPLY_OWNERS"
   printf '%s\n' "$artifact" > "$NOREPLY_OWNERS/$owner"
   trap 'rm -f -- "$NOREPLY_OWNERS/$owner"' EXIT
+  herdr notification show ready
 fi
 printf 'poll%s reply: %s\n' "$n" "$reply" >> "$NOREPLY_LOG"
 trigger_var=NOREPLY_TRIGGER$n

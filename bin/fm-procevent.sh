@@ -603,7 +603,7 @@ cmd_register_lavish_owner() {
   local adapter=${1-} id=${2-} task=${3-} sep=${4-} result pending pending_adapter
   local reply_source='' reply_dest='' stale arg i adopting=0 pending_owner prior_record='' current_kind
   local pending_rounds=0 firstmate_owner=0 reply_requested=0 first_pending='' reply_round='' expected_id
-  local claim_state stop_state registration_identity owner pid token identity handoff=0
+  local claim_state stop_state registration_identity owner pid token identity handoff=0 reservation=0
   local -a argv=()
   shift 4 2>/dev/null || usage
   [ "$adapter" = lavish ] || die "round-aware registration is reserved for the Lavish adapter"
@@ -815,6 +815,21 @@ cmd_register_lavish_owner() {
         die "cannot safely hand off the firstmate-owned Lavish listener: $id"
         ;;
     esac
+    if [ "$current_kind" != lavish-owned ] && [ "$handoff" -eq 0 ]; then
+      fm_procevent_claim_acquire_locked "$id" "$FM_HOME" "$$" "$(source_file "$id")" "$STATE"
+      claim_state=$?
+      if [ "$claim_state" -ne 0 ]; then
+        [ -z "$prior_record" ] || rm -f -- "$prior_record"
+        [ -z "$reply_dest" ] || rm -f -- "$reply_dest"
+        fm_procevent_source_lock_release "$id"
+        die "cannot reserve ownership for the legacy Lavish handoff: $id"
+      fi
+      owner=$FM_HOME
+      pid=$$
+      token=$FM_PROCEVENT_CLAIM_TOKEN
+      handoff=1
+      reservation=1
+    fi
   fi
   if [ "$firstmate_owner" -eq 1 ]; then
     fm_procevent_lavish_registration_publish_locked "$STATE" "$adapter" "$id" "$reply_round" "${argv[@]}"
@@ -823,6 +838,9 @@ cmd_register_lavish_owner() {
   fi || {
     [ -z "$prior_record" ] || rm -f -- "$prior_record"
     [ -z "$reply_dest" ] || rm -f -- "$reply_dest"
+    if [ "$reservation" -eq 1 ]; then
+      fm_procevent_claim_release_locked "$id" "$owner" "$pid" "$token" >/dev/null 2>&1 || true
+    fi
     fm_procevent_source_lock_release "$id"
     die "cannot publish Lavish registration"
   }

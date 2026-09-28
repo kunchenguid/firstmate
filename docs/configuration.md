@@ -1820,8 +1820,8 @@ Firstmate arms its opened artifact once with `bin/fm-procevent-lavish.sh arm <ar
 That arm records a round-aware firstmate-owned source, so reconciliation never starts another listener while captured feedback remains unacknowledged.
 
 After handling a nonterminal capture, firstmate writes the exact response it will send in main chat to a private, nonblank file and re-arms the same artifact with `--agent-reply-file <path>`.
-The re-arm copies that response into generation-private staging, publishes the next registration while retaining machine-wide ownership, and confirms only that exact registration generation.
-Before exposing the staged reply to Lavish, the runner durably records acceptance uncertainty. The listener validates its setup and saved session route, consumes the stage through `lavish-axi poll --agent-reply-file -`, and the runner records the captured round handled only after Lavish reports that listener accepted.
+The re-arm copies that response into generation-private staging, publishes the next registration while retaining or reserving machine-wide ownership, and confirms only that exact registration generation.
+Before exposing the staged reply to Lavish, the runner durably records acceptance uncertainty. The listener validates its setup and saved session route, retains the stage while any prior server-side listener finishes releasing, and submits it through `lavish-axi poll --agent-reply-file -` without takeover. The runner records the captured round handled only after Lavish's poll response directly confirms that reply persistence completed; listener-owner visibility is not acceptance.
 
 A failure before the stage is consumed proves non-acceptance, clears the uncertainty marker, preserves the capture and ownership, and remains retryable. Once the stage may have been accepted, a failed handled acknowledgement leaves the uncertainty marker and registration in place and refuses another reply for that round, preventing an ambiguous retry from posting twice.
 Re-arm without a reply file acknowledges a round that needs no same-session response.

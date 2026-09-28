@@ -292,6 +292,8 @@ poll_response_filter() {  # <response-file>
     use warnings;
     my ($stage) = @ARGV;
     my $expected = "error: Lavish Editor poll response was interrupted\ncode: SERVER_ERROR\n";
+    my $active = "error: Lavish Editor already has an active poll listener\ncode: LISTENER_ACTIVE\n";
+    my $limit = length($expected) > length($active) ? length($expected) : length($active);
     open my $staged, ">", $stage or exit 2;
     binmode STDIN;
     binmode STDOUT;
@@ -314,20 +316,23 @@ poll_response_filter() {  # <response-file>
         write_all(*STDOUT, $chunk);
         next;
       }
-      my $room = length($expected) + 1 - length($candidate);
+      my $room = $limit + 1 - length($candidate);
       my $take = length($chunk) < $room ? length($chunk) : $room;
       my $prefix = substr($chunk, 0, $take);
       $candidate .= $prefix;
       write_all($staged, $prefix);
-      my $matches_prefix = length($candidate) <= length($expected)
+      my $expected_prefix = length($candidate) <= length($expected)
         && substr($expected, 0, length($candidate)) eq $candidate;
-      if (!$matches_prefix) {
+      my $active_prefix = length($candidate) <= length($active)
+        && substr($active, 0, length($candidate)) eq $candidate;
+      if (!$expected_prefix && !$active_prefix && index($candidate, $active) != 0) {
         write_all(*STDOUT, $candidate);
         write_all(*STDOUT, substr($chunk, $take));
         $streaming = 1;
       }
     }
     exit 10 if !$streaming && $candidate eq $expected;
+    exit 11 if !$streaming && index($candidate, $active) == 0;
     write_all(*STDOUT, $candidate) unless $streaming;
   ' "$1"
 }
@@ -363,21 +368,10 @@ poll_iteration_floor_wait() {
   ' "$1" "$2"
 }
 
-poll_owner_is_listening() {
-  lavish-axi 2>/dev/null | awk -v owner="$1" '
-    BEGIN { suffix = "," owner }
-    length($0) >= length(suffix) && substr($0, length($0) - length(suffix) + 1) == suffix {
-      found = 1
-      exit
-    }
-    END { exit !found }
-  '
-}
-
 cmd_poll() {
-  local artifact=${1-} delay attempt=0 response status_file cleanup_command rc filter_rc iteration_started
+  local artifact=${1-} delay attempt=0 active_attempt=0 response status_file cleanup_command rc filter_rc iteration_started
   local pipeline_status pipeline_pid reply_file='' ready_fd=${FM_PROCEVENT_ADAPTER_READY_FD-}
-  local poll_owner=${FM_PROCEVENT_ADAPTER_OWNER-} reply_pending=0
+  local poll_owner=${FM_PROCEVENT_ADAPTER_OWNER-} reply_pending=0 acceptance_dir='' acceptance_signal=''
   [ -n "$artifact" ] || usage
   if [ "$#" -eq 3 ] && [ "${2-}" = --agent-reply-file ]; then
     reply_file=$3
@@ -391,7 +385,17 @@ cmd_poll() {
     rm -f -- "$response"
     die "cannot stage the poll status"
   }
-  printf -v cleanup_command 'rm -f -- %q %q' "$response" "$status_file"
+  if [ -n "$ready_fd" ]; then
+    acceptance_dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-lavish-accept.XXXXXX") \
+      || die "cannot prepare the Lavish acceptance boundary"
+    acceptance_signal="$acceptance_dir/accepted"
+    cat > "$acceptance_dir/herdr" <<'SH'
+#!/bin/sh
+: > "$FM_LAVISH_ACCEPTED_SIGNAL"
+SH
+    chmod 0700 "$acceptance_dir/herdr" || die "cannot prepare the Lavish acceptance boundary"
+  fi
+  printf -v cleanup_command 'rm -f -- %q %q; rm -rf -- %q' "$response" "$status_file" "$acceptance_dir"
   # shellcheck disable=SC2064 # $cleanup_command must expand now, while the staged path is still set.
   trap "$cleanup_command" EXIT
   # Retirement stops this listener by signalling its process group, and bash runs
@@ -414,7 +418,9 @@ cmd_poll() {
     # that starts with no staged file simply polls without one.
     if [ -f "$reply_file" ] && [ ! -L "$reply_file" ]; then
       exec 7< "$reply_file" || die "cannot read agent reply file: $reply_file"
-      rm -f -- "$reply_file" || die "cannot consume agent reply file: $reply_file"
+      if [ -z "$ready_fd" ]; then
+        rm -f -- "$reply_file" || die "cannot consume agent reply file: $reply_file"
+      fi
       reply_pending=1
     fi
     if [ -n "$ready_fd" ]; then
@@ -422,17 +428,23 @@ cmd_poll() {
       case "$poll_owner" in ''|*[!A-Za-z0-9._-]*) die "invalid process-event adapter owner" ;; esac
       : > "$status_file" || die "cannot stage the poll status"
       exec 6> "$status_file" || die "cannot retain the poll status"
+      rm -f -- "$acceptance_signal"
       if [ "$reply_pending" -eq 1 ]; then
-        { lavish-axi poll "$artifact" --owner "$poll_owner" --agent-reply-file - <&7; printf '%s\n' "$?" >&6; } \
+        { HERDR_ENV=1 LAVISH_AXI_HERDR_CHIME=1 FM_LAVISH_ACCEPTED_SIGNAL="$acceptance_signal" \
+            PATH="$acceptance_dir:$PATH" lavish-axi poll "$artifact" --owner "$poll_owner" \
+            --agent-reply-file - <&7; printf '%s\n' "$?" >&6; } \
           | poll_response_filter "$response" &
         exec 7<&-
       else
-        { lavish-axi poll "$artifact" --owner "$poll_owner"; printf '%s\n' "$?" >&6; } \
-          | poll_response_filter "$response" &
+        { HERDR_ENV=1 LAVISH_AXI_HERDR_CHIME=1 FM_LAVISH_ACCEPTED_SIGNAL="$acceptance_signal" \
+            PATH="$acceptance_dir:$PATH" lavish-axi poll "$artifact" --owner "$poll_owner"; \
+            printf '%s\n' "$?" >&6; } | poll_response_filter "$response" &
       fi
       pipeline_pid=$!
       while kill -0 "$pipeline_pid" 2>/dev/null; do
-        if poll_owner_is_listening "$poll_owner"; then
+        if [ -f "$acceptance_signal" ]; then
+          [ "$reply_pending" -eq 0 ] || rm -f -- "$reply_file" \
+            || die "cannot consume accepted agent reply file: $reply_file"
           printf 'ready\n' >&3 || die "cannot confirm adapter readiness"
           exec 3>&-
           ready_fd=
@@ -445,6 +457,8 @@ cmd_poll() {
       exec 6>&-
       IFS= read -r rc < "$status_file" || die "cannot read the poll status"
       if [ -n "$ready_fd" ] && [ "$rc" -eq 0 ]; then
+        [ "$reply_pending" -eq 0 ] || rm -f -- "$reply_file" \
+          || die "cannot consume accepted agent reply file: $reply_file"
         printf 'ready\n' >&3 || die "cannot confirm adapter readiness"
         exec 3>&-
         ready_fd=
@@ -464,6 +478,15 @@ cmd_poll() {
     reply_pending=0
     case "$filter_rc" in
       0) break ;;
+      11)
+        if [ -n "$ready_fd" ] && [ "$active_attempt" -lt 100 ]; then
+          active_attempt=$((active_attempt + 1))
+          sleep 0.05
+          continue
+        fi
+        cat -- "$response"
+        break
+        ;;
       10)
         if [ "$attempt" -lt "$POLL_RETRY_LIMIT" ]; then
           attempt=$((attempt + 1))

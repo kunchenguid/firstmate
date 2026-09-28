@@ -35,7 +35,7 @@ bin/fm-procevent-lavish.sh arm <artifact.html>
 ```
 
 After handling each nonterminal round, write the exact captain-facing response to a private, nonblank file and re-arm the same artifact with `--agent-reply-file <path>` before sending that response in main chat.
-That re-arm stages one same-session reply, records acceptance uncertainty before exposing it, and records the round handled only after Lavish accepts the exact registration generation; if no response belongs in the session, re-arm without a reply file.
+That re-arm stages one same-session reply, records acceptance uncertainty before exposing it, waits for a prior server listener to release without takeover, and records the round handled only after Lavish directly confirms reply persistence for the exact registration generation; owner visibility alone is not acceptance. If no response belongs in the session, re-arm without a reply file.
 Do not separately acknowledge a nonterminal firstmate-owned Lavish round with the generic `handled` command.
 A pre-exposure failure preserves the capture and ownership for retry. An ambiguous post-exposure acknowledgement failure keeps its uncertainty marker and refuses another reply for that round so recovery cannot post it twice.
 
