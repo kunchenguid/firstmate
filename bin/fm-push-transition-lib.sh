@@ -88,33 +88,6 @@ triage_log() {
   fi
 }
 
-# The wake-queue sequence this home's watchers have already handed to
-# firstmate. Every actionable exit records the queue's sequence counter just
-# before it prints, because the drain that follows presents every row queued up
-# to then; bin/fm-watch.sh (queue_handover_surface) surfaces a queued row above
-# it once. A missing, malformed, or reset-counter value reads as 0, which errs
-# toward surfacing a still-queued row once more rather than holding it.
-WATCH_QUEUE_HANDED="$STATE/.watch-queue-handed"
-
-watch_queue_handed_read() {  # <output-variable>
-  local _handed=0 _last
-  IFS= read -r _handed < "$WATCH_QUEUE_HANDED" 2>/dev/null || true
-  case "$_handed" in ''|*[!0-9]*) _handed=0 ;; esac
-  _handed=$((10#$_handed))
-  fm_wake_seq_read _last
-  [ "$_handed" -le "$_last" ] || _handed=0
-  printf -v "$1" '%s' "$_handed"
-}
-
-watch_queue_handed_write() {  # <sequence>
-  local tmp
-  tmp=$(mktemp "$STATE/.watch-queue-handed.XXXXXX") || return 1
-  if ! printf '%s\n' "$1" > "$tmp" || ! mv -f -- "$tmp" "$WATCH_QUEUE_HANDED"; then
-    rm -f -- "$tmp"
-    return 1
-  fi
-}
-
 # Exit after reporting one actionable wake. Tests override this callback.
 wake() {
   local output_status=0 handed

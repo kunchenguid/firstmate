@@ -2060,9 +2060,38 @@ fm_wake_queued_keys_locked() {
 # recorded. Uses only the read builtin, so a per-poll caller forks nothing.
 fm_wake_seq_read() {
   local _fm_seq=0
-  IFS= read -r _fm_seq < "$STATE/.wake-queue.seq" 2>/dev/null || true
+  IFS= read -r _fm_seq 2>/dev/null < "$STATE/.wake-queue.seq" || true
   case "$_fm_seq" in ''|*[!0-9]*) _fm_seq=0 ;; esac
   printf -v "$1" '%s' "$((10#$_fm_seq))"
+}
+
+# The wake-queue sequence this home's watchers have already handed to
+# firstmate. Every actionable exit (wake(), bin/fm-push-transition-lib.sh)
+# records the queue's sequence counter just before it prints, because the drain
+# that follows presents every row queued up to then; bin/fm-watch.sh
+# (queue_handover_surface) surfaces a queued row above it once. A supervision
+# branch that takes the close presents only its granted rows, so publishing
+# that grant (bin/fm-wake-grant.sh) lowers the record below every other queued
+# row main has not claimed. A missing, malformed, or reset-counter value reads
+# as 0, which errs toward surfacing a still-queued row once more rather than
+# holding it.
+watch_queue_handed_read() {  # <output-variable>
+  local _handed=0 _last
+  IFS= read -r _handed 2>/dev/null < "$STATE/.watch-queue-handed" || true
+  case "$_handed" in ''|*[!0-9]*) _handed=0 ;; esac
+  _handed=$((10#$_handed))
+  fm_wake_seq_read _last
+  [ "$_handed" -le "$_last" ] || _handed=0
+  printf -v "$1" '%s' "$_handed"
+}
+
+watch_queue_handed_write() {  # <sequence>
+  local tmp
+  tmp=$(mktemp "$STATE/.watch-queue-handed.XXXXXX") || return 1
+  if ! printf '%s\n' "$1" > "$tmp" || ! mv -f -- "$tmp" "$STATE/.watch-queue-handed"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
 }
 
 # fm_wake_keys_after_locked <sequence>

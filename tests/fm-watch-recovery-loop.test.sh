@@ -324,7 +324,54 @@ test_afk_successor_leaves_foreign_appends_to_the_daemon() {
   pass "the away-mode watcher leaves a foreign queue append to the daemon"
 }
 
+# T5: a close hands over every row queued before it, but a supervision branch
+# that takes the close presents only its granted rows. A captain inbox note
+# queued just before a signal close the branch took must still reach main
+# through the handling successor, exactly once.
+test_branch_grant_leaves_withheld_note_to_the_successor() {
+  local dir state out child note signal_seq
+  dir=$(make_case branch-withheld-note)
+  dir=$(cd "$dir" && pwd -P)
+  state="$dir/state"
+  out="$dir/watch.out"
+  mkdir -p "$dir/data" "$dir/config"
+
+  note=$(foreign_note "$dir" "note before a branch close") || fail "the inbox note was not queued"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '. "$1/bin/fm-wake-lib.sh" && fm_wake_append signal task-a.status "done: task-a"' _ "$ROOT" \
+    || fail "the signal row was not queued"
+  signal_seq=$(awk -F '\t' 'END { print $2 }' "$state/.wake-queue")
+  foreign_watch_bg "$dir" "$out" 0
+  child=$!
+  wait_for_exit "$child" 100 || fail "the predecessor did not close on the queued rows: $(cat "$out")"
+  grep -q '^check:' "$out" || fail "the predecessor closed without a wake: $(cat "$out")"
+
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-wake-grant.sh" activate "$$" withheld-note \
+    || fail "branch owner activation failed"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-wake-grant.sh" publish withheld-note "$signal_seq" \
+    || fail "branch grant publication failed"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-wake-grant.sh" publish withheld-note "$signal_seq" \
+    || fail "identical branch grant re-publication failed"
+
+  foreign_watch_bg "$dir" "$out" 1
+  child=$!
+  wait_for_exit "$child" 50 \
+    || fail "a handling successor kept blocking on a note the branch grant withheld: $(cat "$out")"
+  grep -F "check: undelivered queued wake: $note" "$out" >/dev/null \
+    || fail "the successor did not surface the withheld note: $(cat "$out")"
+
+  foreign_watch_bg "$dir" "$out" 1
+  child=$!
+  stays_blocking "$state" "$child" \
+    || fail "a later successor surfaced the withheld note again: $(cat "$out")"
+  kill -TERM "$child" 2>/dev/null || true
+  wait "$child" 2>/dev/null || true
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-wake-grant.sh" deactivate "$$" withheld-note \
+    || fail "branch owner deactivation failed"
+  pass "a note a branch grant withholds still reaches main once through the handling successor"
+}
+
 test_handling_successor_does_not_go_blind
 test_unacknowledged_recovery_is_announced_once_per_generation
 test_handling_successor_surfaces_a_foreign_append_once
 test_afk_successor_leaves_foreign_appends_to_the_daemon
+test_branch_grant_leaves_withheld_note_to_the_successor
