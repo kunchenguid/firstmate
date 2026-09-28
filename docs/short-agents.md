@@ -95,7 +95,10 @@ Full logs stay there rather than entering MAIN's context.
 Short-task state directories are retained for inspection; there is no automatic cleanup.
 
 Results enter the existing durable supervision outcome store.
-MAIN receives, verifies, and acknowledges through `fm_branch_outcomes` / `fm_branch_processed`; it does not poll normal operation progress or execute the chain's commands.
+For a successful task, MAIN's processing request includes the complete returned result and any verified operation receipts directly, while retaining the result directory as durable evidence.
+The supervision extension accepts that direct body only when it exactly matches the bound successful ShortTask files; otherwise MAIN recovers it through `fm_branch_outcomes` before acknowledging with `fm_branch_processed`.
+Failed, cancelled, interrupted, and uncertain tasks retain their actual terminal state and use the ordinary durable outcome recovery path.
+MAIN does not poll normal operation progress or execute the chain's commands.
 Delivery is deduplicated, including a crash between storing the outcome and its notification receipt.
 A notification error is surfaced without replacing the terminal result.
 

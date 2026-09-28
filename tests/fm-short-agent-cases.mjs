@@ -141,10 +141,17 @@ assert.equal(rows.filter(x=>x.task===accepted.id).length,1);
 fs.unlinkSync(path.join(service.dir(accepted.id),'notified.json'));await fresh.notify(accepted.id);
 rows=fs.readFileSync(path.join(home,'state/branch-outcomes.jsonl'),'utf8').trim().split('\n').map(JSON.parse);
 const row=rows.find(x=>x.task===accepted.id);assert.equal(rows.filter(x=>x.task===accepted.id).length,1);
+assert.match(row.summary,/Result:\nanswer 42 m1/);
+assert.match(row.summary,/Durable result: .*\/result\.json$/);
+assert.ok(!row.summary.includes('Full result:'),'successful notification must not require a result lookup');
+await fresh.notify(cancelled.id);
+const cancelledRow=fs.readFileSync(path.join(home,'state/branch-outcomes.jsonl'),'utf8').trim().split('\n').map(JSON.parse).find(x=>x.task===cancelled.id);
+assert.match(cancelledRow.summary,/cancelled\. Full result:/);
+assert.ok(!cancelledRow.summary.includes(': completed.'),'cancellation must not be relabeled successful');
 const outcome=args=>execFileSync('bash',[path.join(root,'bin/fm-branch-outcome.sh'),...args],{env:{...process.env,FM_HOME:home,FM_STATE_OVERRIDE:path.join(home,'state')},encoding:'utf8'});
 outcome(['mark-read','--through',String(row.seq)]);outcome(['mark-processed','--through',String(row.seq)]);
 assert.ok(!outcome(['unprocessed']).includes(accepted.id));
 // CLI result/status preserve the full public result across a new process.
 const cli=JSON.parse(execFileSync(process.execPath,[path.join(root,'bin/fm-short-agent.mjs'),'result',large.id],{env:{...process.env,FM_HOME:home},encoding:'utf8'}));
 assert.equal(cli.state,'completed');assert.equal(cli.summary.length,4096);
-console.log(JSON.stringify({submitMs:accepted.submitMs,eventLoopTicks:ticks,resultBytes:Buffer.byteLength(JSON.stringify(cli)),noTerminalOrWorktree:true}));
+console.log(JSON.stringify({submitMs:accepted.submitMs,eventLoopTicks:ticks,resultBytes:Buffer.byteLength(JSON.stringify(cli)),before:`${accepted.id}: completed. Full result: ${service.dir(accepted.id)}/result.json`,after:row.summary,noTerminalOrWorktree:true}));

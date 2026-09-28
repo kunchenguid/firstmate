@@ -24,6 +24,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { validateOperations, bindOperations, executeOperations, processIdentity, operationReceipts, primaryOwner, reconcileOperationReceipts, settleMergeReceipt } from './fm-short-operations.mjs';
 import { shortPluginLoader, shortPlugin, shortPluginEnvironment } from './fm-short-plugin.mjs';
+import { successfulNotification } from './fm-short-notification.mjs';
 const exec = promisify(execFile);
 const script = fileURLToPath(import.meta.url);
 const sha = value => createHash('sha256').update(value).digest('hex');
@@ -210,8 +211,12 @@ export class ShortAgents {
     if (!result.finishedAt) return;
     const marker = path.join(this.dir(id), 'notified.json');
     if (optional(marker)) return;
+    const summary = result.state === 'completed'
+      ? successfulNotification(this.home, id)
+      : `${id}: ${result.state}. Full result: ${result.evidence}/result.json`;
+    if (!summary) throw Error('completed short-task result could not be bound to its durable evidence');
     const { stdout } = await exec('bash', [path.join(this.root, 'bin/fm-branch-outcome.sh'), 'append', '--once-task',
-      '--task', id, '--verdict', 'captain', '--summary', `${id}: ${result.state}. Full result: ${result.evidence}/result.json`],
+      '--task', id, '--verdict', 'captain', '--summary', summary],
     { env: { ...process.env, FM_HOME: this.home, FM_STATE_OVERRIDE: path.join(this.home, 'state'), FM_ROOT_OVERRIDE: this.root }, timeout: 10000, maxBuffer: 16384 });
     publish(marker, { seq: Number(stdout.trim()) });
   }

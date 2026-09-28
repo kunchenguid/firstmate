@@ -122,6 +122,7 @@ import {
   classifyFirstmateOperationalText,
   encodeFirstmateOperationalInputWith,
 } from "./lib/fm-operational-input.ts";
+import { successfulNotification } from "../../bin/fm-short-notification.mjs";
 
 const extensionFile = fileURLToPath(import.meta.url);
 const extensionDir = dirname(extensionFile);
@@ -183,7 +184,7 @@ const RECONCILE_RETRY_MAX_MS = Math.max(RECONCILE_RETRY_BASE_MS, Number(process.
 const PROCESSING_INSTRUCTION =
   "This is a supervision processing request delivered automatically by the supervision branch. " +
   "It was not typed by the captain. " +
-  "The outcome identities below refer to exact, durable anchor entries already shown to the captain in this transcript. Before acting, call fm_branch_outcomes with exactly the listed sequences to load their trusted content; this is required even when an anchor appears visible, because recovery or compaction may have omitted it from model context. Each fleet event is already handled, so do not re-drain, re-run, or acknowledge the wake. " +
+  "The outcome identities below refer to exact, durable anchor entries already shown to the captain in this transcript. Each fleet event is already handled, so do not re-drain, re-run, or acknowledge the wake. " +
   "Process each identified outcome now as firstmate: give the captain a visible response where one is due, answer or escalate a decision, act on a blocker or failure, or record that no further action is needed. " +
   "When every outcome below is processed, call fm_branch_processed with through={N} exactly once. " +
   "Until that call the outcomes stay open and are presented again; an answer that does not make that call never counts as processing.";
@@ -1164,13 +1165,25 @@ export default function (pi: ExtensionAPI) {
   // beats an outcome that is never processed.
   async function processingRequestInput(rows: OutcomeRow[]): Promise<string> {
     const through = rows[rows.length - 1].seq;
-    // The visible custom entries are the exact, durable content source already
-    // in main's transcript. Re-present only their stable identities here: the
-    // request still names every open outcome and the acknowledgement range,
-    // without loading the same potentially large summary into model context a
-    // second time on every retry.
-    const listed = rows.map((row) => `[seq ${row.seq}] task=${row.task}`).join("\n");
-    const body = `${PROCESSING_INSTRUCTION.replace("{N}", String(through))}\n\n${listed}`;
+    const direct = new Map<number, string>();
+    for (const row of rows) {
+      const result = successfulNotification(fmHome, row.task);
+      if (result === row.summary) {
+        direct.set(row.seq, result);
+        loadedOutcomeSequences.add(row.seq);
+      }
+    }
+    const lookup = rows.filter((row) => !direct.has(row.seq));
+    const lookupInstruction = lookup.length
+      ? `Before acting on sequences ${lookup.map((row) => row.seq).join(",")}, call fm_branch_outcomes with exactly those sequences to load their trusted content; this remains required even when an anchor appears visible, because recovery or compaction may have omitted it from model context. `
+      : "The successful ShortTask results below were verified against their bound durable result and operation receipts and are already loaded; do not call fm_branch_outcomes for them. ";
+    const listed = rows.map((row) => {
+      const result = direct.get(row.seq);
+      return result === undefined
+        ? `[seq ${row.seq}] task=${row.task}`
+        : `[seq ${row.seq}] task=${row.task}\nAuthenticated ShortTask result:\n${result}`;
+    }).join("\n\n");
+    const body = `${PROCESSING_INSTRUCTION.replace("{N}", String(through))}\n${lookupInstruction}\n${listed}`;
     try {
       return await encodeFirstmateOperationalInputWith(runCommandAsync, "branch-outcome", body);
     } catch {

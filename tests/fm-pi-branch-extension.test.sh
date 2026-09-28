@@ -63,6 +63,7 @@ install_pi_branch_extension_fixture() {
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
   cp "$ROOT/.pi/extensions/lib/fm-feishu-native-channel.ts" "$repo/.pi/extensions/lib/fm-feishu-native-channel.ts"
   mkdir -p "$repo/bin"
+  cp "$ROOT/bin/fm-short-notification.mjs" "$repo/bin/fm-short-notification.mjs"
   cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/fm-operational-input.sh"
   cp "$ROOT/bin/fm-feishu-state.mjs" "$repo/bin/fm-feishu-state.mjs"
   chmod +x "$repo/bin/fm-operational-input.sh"
@@ -1088,7 +1089,7 @@ EOF
   body=$(./bin/fm-operational-input.sh body < "$home/state/delivered-processing-request") \
     || fail "the processing request envelope carries no readable body"
   case "$body" in
-    *"delivered automatically by the supervision branch."*"It was not typed by the captain."*"call fm_branch_outcomes with exactly the listed sequences"*"[seq 3] task=task-9"*) ;;
+    *"delivered automatically by the supervision branch."*"It was not typed by the captain."*"call fm_branch_outcomes with exactly those sequences"*"[seq 3] task=task-9"*) ;;
     *) fail "the processing request body lost its self-description or outcome identity: $body" ;;
   esac
   case "$body" in
@@ -5237,6 +5238,7 @@ test_outcomes_tool_uses_stock_execution_and_export_consumers() {
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$fixture/.pi/extensions/lib/fm-operational-input.ts"
   cp "$ROOT/.pi/extensions/lib/fm-feishu-native-channel.ts" "$fixture/.pi/extensions/lib/fm-feishu-native-channel.ts"
   mkdir -p "$fixture/bin"
+  cp "$ROOT/bin/fm-short-notification.mjs" "$fixture/bin/fm-short-notification.mjs"
   cp "$ROOT/bin/fm-feishu-state.mjs" "$fixture/bin/fm-feishu-state.mjs"
   ln -s "$package_dir" "$fixture/node_modules/@earendil-works/pi-coding-agent"
   ln -s "$package_dir/node_modules/@earendil-works/pi-tui" "$fixture/node_modules/@earendil-works/pi-tui"
@@ -6464,12 +6466,98 @@ JS
   pass "$out"
 }
 
+test_short_task_success_reaches_main_with_authenticated_body() {
+  local repo home out status
+  repo="$TMP_ROOT/short-result-root"
+  home="$TMP_ROOT/short-result-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  set +e
+  out=$(PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { pi, fire, settle, sentToMain, mainEntries, mainTools, defaultSessionCtx, home, bus, realRoot }; })()`);
+const { fire, settle, sentToMain, mainEntries, mainTools, defaultSessionCtx, home, bus, realRoot } = globalThis.__t;
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+const { ShortAgents } = await import(pathToFileURL(join(realRoot, "bin/fm-short-agent.mjs")).href);
+
+writeFileSync(`${home}/state/.lock`, `${process.ppid}\n`);
+await fire("session_start", {}, defaultSessionCtx);
+const service = new ShortAgents(home, realRoot);
+const seed = (character, summary, operations, receipt, state = "completed") => {
+  const id = `short-${character.repeat(64)}`;
+  const dir = service.dir(id);
+  mkdirSync(dir, { recursive: true });
+  const nonce = `nonce-${character}`;
+  const input = { key: `key-${character}`, goal: "fixture", acceptance: "fixture", provider: "fixture", model: "fixture", materials: [], ...(operations ? { operations } : {}) };
+  writeFileSync(join(dir, "request.json"), `${JSON.stringify({ version: 2, id, input, materials: [], acceptedAt: Date.now(), nonce, sdk: "/unused" })}\n`);
+  writeFileSync(join(dir, "result.json"), `${JSON.stringify({ id, state, summary, finishedAt: Date.now(), evidence: dir })}\n`);
+  if (receipt) writeFileSync(join(dir, "operation-0.receipt.json"), `${JSON.stringify({ id, nonce, index: 0, action: "sync", state: "completed", at: Date.now(), executor: { pid: 1 }, evidence: { head: "a".repeat(40) } })}\n`);
+  return { id, dir };
+};
+const requests = () => sentToMain.filter((sent) => sent.message.customType === "fm-branch-process");
+const acknowledge = mainTools.find((tool) => tool.name === "fm_branch_processed");
+const outcomes = mainTools.find((tool) => tool.name === "fm_branch_outcomes");
+
+const analysis = seed("a", "Measured 42 from m1; no caveats.");
+await service.notify(analysis.id);
+bus.emit("firstmate:outcomes-ready", {});
+await settle(() => requests().length === 1, "direct read-only ShortTask result");
+let request = requests().at(-1);
+if (!request.message.content.includes("Authenticated ShortTask result:") || !request.message.content.includes("Measured 42 from m1; no caveats.")) throw new Error(`MAIN did not receive the read-only result body: ${request.message.content}`);
+if (!request.message.content.includes("do not call fm_branch_outcomes")) throw new Error("direct ShortTask result still demanded a lookup");
+let visible = mainEntries.filter((entry) => entry.customType === "fm-branch-visible-outcome" && entry.data.task === analysis.id);
+if (visible.length !== 1 || !visible[0].data.summary.includes("Measured 42 from m1; no caveats.")) throw new Error("read-only result was not visibly delivered exactly once");
+let ack = await acknowledge.execute("ack-analysis", { through: visible[0].data.seq }, undefined, undefined, {});
+if (ack.isError) throw new Error(`direct read-only result was not preloaded for acknowledgement: ${JSON.stringify(ack)}`);
+
+const operations = { authority: "fixture", expiresAt: Date.now() + 60000, steps: [{ action: "sync", project: "/fixture" }] };
+const operation = seed("b", "Sync completed with the owner-confirmed postcondition. Caveat: cleanup was not granted.", operations, true);
+await service.notify(operation.id);
+bus.emit("firstmate:outcomes-ready", {});
+await settle(() => requests().length === 2, "direct operation ShortTask result");
+request = requests().at(-1);
+if (!request.message.content.includes("Sync completed with the owner-confirmed postcondition. Caveat: cleanup was not granted.")) throw new Error("MAIN did not receive the complete operation result body and caveat");
+if (!request.message.content.includes('Verified operation receipts:') || !request.message.content.includes(`\"head\":\"${"a".repeat(40)}\"`)) throw new Error(`MAIN did not receive the exact operation receipt: ${request.message.content}`);
+visible = mainEntries.filter((entry) => entry.customType === "fm-branch-visible-outcome" && entry.data.task === operation.id);
+if (visible.length !== 1) throw new Error("operation result visible delivery duplicated");
+ack = await acknowledge.execute("ack-operation", { through: visible[0].data.seq }, undefined, undefined, {});
+if (ack.isError) throw new Error(`direct operation result was not preloaded for acknowledgement: ${JSON.stringify(ack)}`);
+
+const cancelled = seed("c", "authority revoked; active effects may be partial or uncertain", undefined, false, "cancelled");
+await service.notify(cancelled.id);
+bus.emit("firstmate:outcomes-ready", {});
+await settle(() => requests().length === 3, "cancelled ShortTask recovery result");
+request = requests().at(-1);
+if (request.message.content.includes("Authenticated ShortTask result:")) throw new Error("a cancelled ShortTask was relabeled as direct success");
+if (!request.message.content.includes("call fm_branch_outcomes with exactly those sequences")) throw new Error("an unavailable success body lost the durable recovery path");
+visible = mainEntries.filter((entry) => entry.customType === "fm-branch-visible-outcome" && entry.data.task === cancelled.id);
+const recovered = await outcomes.execute("recover-cancelled", { sequences: String(visible[0].data.seq) }, undefined, undefined, {});
+if (recovered.isError || !recovered.content[0].text.includes("cancelled. Full result:")) throw new Error("durable recovery did not preserve the cancelled terminal state");
+ack = await acknowledge.execute("ack-cancelled", { through: visible[0].data.seq }, undefined, undefined, {});
+if (ack.isError) throw new Error(`recovered cancelled result could not be acknowledged: ${JSON.stringify(ack)}`);
+
+bus.emit("firstmate:outcomes-ready", {});
+await new Promise((resolve) => setTimeout(resolve, 100));
+if (requests().length !== 3 || mainEntries.filter((entry) => entry.customType === "fm-branch-visible-outcome").length !== 3) throw new Error("reconciliation duplicated an acknowledged ShortTask notification");
+console.log("read-only and operation ShortTask results reached MAIN directly; cancelled recovery and durable exact-once delivery stayed intact");
+EOF
+  )
+  status=$?
+  set -e
+  expect_code 0 "$status" "authenticated ShortTask public notification boundary: $out"
+  pass "$out"
+}
+
 test_outcomes_tool_uses_stock_execution_and_export_consumers
 test_real_pi_picker_primitives_stay_bounded_and_searchable
 test_branch_dispatch_two_stage_filter_and_prefix_contract
 test_requested_healthy_outcome_and_unsolicited_routine_outcome_delivery
 test_captain_outcome_is_exactly_once_across_crash_reload_and_unrelated_response
 test_captain_outcome_processing_turn_is_sequence_keyed_and_re_presented
+test_short_task_success_reaches_main_with_authenticated_body
 test_branch_dispatch_classifies_main_only_rows_and_writes_the_eligible_snapshot
 test_branch_dispatch_routes_only_identity_bound_ida_results
 test_branch_cache_key_is_per_home_stable
