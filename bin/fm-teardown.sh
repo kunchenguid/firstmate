@@ -83,19 +83,19 @@
 # name a slot a DIFFERENT live task now holds. Cleanup kills every process under
 # that path and hard-resets it before returning it, so releasing a slot that is
 # not genuinely this task's destroys another worker's live work. Before the first
-# cleanup step, teardown first reads the slot's owner claim. A claim naming
+# cleanup step, teardown reads the slot's owner claim. A claim naming
 # another task proves reassignment and skips every slot step. Otherwise teardown
 # verifies record exclusivity: no OTHER task record in this home or any locally
 # registered Firstmate home may name the same live path in its worktree= or
-# home=. One live path with two task records is the reuse collision itself,
-# whichever record is stale.
+# home=. For a slot with this task's claim or no claim, two records naming one
+# live path remain a refusal, whichever record is stale.
 # That scan alone cannot prove THIS record is the current owner, because the task
 # that took the slot next may leave no record it can reach - its own worker may
 # have exited and its record been cleaned up, or it may live in a home this
 # machine does not register - which is how a released-then-reassigned slot was
-# returned out from under a live worker (observed 2026-09-07). So teardown also
-# reads the slot's own owner claim, written by bin/fm-spawn.sh at the moment the
-# slot is taken and dropped here once it is genuinely returned; bin/fm-wake-lib.sh
+# returned out from under a live worker (observed 2026-09-07). Bin/fm-spawn.sh
+# writes the slot's owner claim when the slot is taken, and teardown drops it
+# once the slot is genuinely returned; bin/fm-wake-lib.sh
 # owns the claim, its location, and its states. A claim naming another task is
 # proof of reassignment: the slot is no longer this task's, so teardown warns,
 # names the claimant, and then finishes only this task's own cleanup - endpoint,
@@ -2382,9 +2382,9 @@ require_exclusive_task_worktree_slot() {
 # For a claim naming this task, or an absent claim, the record scan proves that
 # no OTHER task record names this slot. That scan cannot prove this record still
 # owns it, because the task that took the slot next may leave no record this
-# scan can reach: its own worker may have
-# exited and its record been cleaned up, or it may belong to a home this machine
-# does not register. The claim closes that gap from the other side - it names the
+# scan can reach: its own worker may have exited and its record been cleaned up,
+# or it may belong to a home this machine does not register. The claim closes
+# that gap from the other side - it names the
 # task that actually took the slot, and it is written under the same project lock
 # that allocates it - so a claim naming another task is proof the slot was
 # reassigned after this record was written.
