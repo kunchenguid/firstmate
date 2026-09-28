@@ -1442,6 +1442,54 @@ assert_present "$HFLINGER/state/procevent-inbox/$linger_id.1.handled" \
   || fail "listener release recovery did not retain the exact staged reply"
 pass "lingering Lavish listener recovers without takeover"
 
+HFSIGNAL="$TMP_ROOT/hfsignal"; new_home "$HFSIGNAL"
+SIGNAL_BIN=$(fm_fakebin "$TMP_ROOT/lavish-firstmate-signal-stub")
+SIGNAL_COUNT="$TMP_ROOT/lavish-firstmate-signal-count"
+export SIGNAL_COUNT
+cat > "$SIGNAL_BIN/lavish-axi" <<'SH'
+#!/bin/sh
+[ "$#" -gt 0 ] || exit 0
+n=$(cat "$SIGNAL_COUNT" 2>/dev/null || echo 0)
+n=$((n + 1))
+printf '%s\n' "$n" > "$SIGNAL_COUNT"
+shift 2
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --agent-reply-file) cat >/dev/null; shift 2 ;;
+    --owner) shift 2 ;;
+    *) shift ;;
+  esac
+done
+if [ "$n" = 1 ]; then
+  printf 'session:\n  status: feedback\nprompts[1]{uid,prompt,selector,tag,text}:\n  "","","","message","signal"\n'
+else
+  adapter=$(ps -o ppid= -p "$PPID" | tr -d ' ')
+  (sleep 0.02; kill -TERM "$adapter") >/dev/null 2>&1 &
+  printf 'error: Lavish Editor already has an active poll listener (current listener: prior-owner; active for 12ms)\ncode: LISTENER_ACTIVE\n'
+  exit 1
+fi
+SH
+chmod +x "$SIGNAL_BIN/lavish-axi"
+SIGNAL_ART="$TMP_ROOT/firstmate-signal.html"
+printf '<h1>signal</h1>\n' > "$SIGNAL_ART"
+lavish_session "$SIGNAL_ART"
+signal_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$SIGNAL_ART")
+fm_test_track_procevent_home "$HFSIGNAL"
+PATH="$SIGNAL_BIN:$PATH" FM_HOME="$HFSIGNAL" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$SIGNAL_ART" >/dev/null
+wait_capture "$HFSIGNAL" "$signal_id" || fail "signal fixture did not capture feedback"
+printf 'Retryable after conflict.\n' > "$TMP_ROOT/firstmate-signal-reply.txt"
+if PATH="$SIGNAL_BIN:$PATH" FM_HOME="$HFSIGNAL" FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS=1 \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$SIGNAL_ART" \
+  --agent-reply-file "$TMP_ROOT/firstmate-signal-reply.txt" >/dev/null 2>&1; then
+  fail "signalled listener conflict reported readiness"
+fi
+assert_absent "$HFSIGNAL/state/procevent-inbox/$signal_id.1.accepted" \
+  "signal after listener conflict stranded reply uncertainty"
+[ "$(find "$HFSIGNAL/state/procevent" -maxdepth 1 -type f -name ".$signal_id.reply.*" | wc -l | tr -d ' ')" = 1 ] \
+  || fail "signal after listener conflict discarded the staged reply"
+pass "listener-conflict signal keeps the reply retryable"
+
 HFLARGE="$TMP_ROOT/hflarge"; new_home "$HFLARGE"
 LARGE_BIN=$(fm_fakebin "$TMP_ROOT/lavish-firstmate-large-stub")
 LARGE_COUNT="$TMP_ROOT/lavish-firstmate-large-count"

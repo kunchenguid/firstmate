@@ -427,11 +427,21 @@ JS
     node_options="${NODE_OPTIONS:+$NODE_OPTIONS }--require=$acceptance_dir/accept.cjs"
   fi
   printf -v cleanup_command 'rm -f -- %q %q; rm -rf -- %q' "$response" "$status_file" "$acceptance_dir"
-  adapter_exit() {
+  reject_unsubmitted() {
     if [ -n "$ready_fd" ] && [ "$submission_started" -eq 0 ]; then
       printf 'rejected\n' >&3 2>/dev/null || true
     fi
+  }
+  adapter_exit() {
+    reject_unsubmitted
     eval "$cleanup_command"
+  }
+  adapter_signal_exit() {
+    local caught=$1
+    reject_unsubmitted
+    eval "$cleanup_command"
+    trap - "$caught"
+    kill -"$caught" "$$"
   }
   trap adapter_exit EXIT
   # Retirement stops this listener by signalling its process group, and bash runs
@@ -440,8 +450,7 @@ JS
   # process dying exactly as the runner expects.
   local signal
   for signal in INT TERM HUP; do
-    # shellcheck disable=SC2064 # Same reason: expand now, while both are set.
-    trap "$cleanup_command; trap - $signal; kill -$signal $$" "$signal"
+    trap "adapter_signal_exit $signal" "$signal"
   done
   while :; do
     reply_pending=0
@@ -536,6 +545,7 @@ JS
     case "$filter_rc" in
       0) break ;;
       11)
+        submission_started=0
         if [ -n "$ready_fd" ] && [ "$active_attempt" -lt 100 ]; then
           active_attempt=$((active_attempt + 1))
           sleep 0.05
