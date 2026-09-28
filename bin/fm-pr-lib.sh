@@ -230,11 +230,67 @@ fm_pr_head_valid() {
   [[ "$head" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]]
 }
 
+fm_pr_codebase_read_identity() {
+  local json fields line
+  local total=0 named=0
+  local repo_path='' mr_id='' number='' url=''
+  local source_branch='' target_branch='' source_head=''
+
+  [ "${FM_PR_PROVIDER:-}" = codebase ] && fm_pr_head_valid "${FM_PR_MERGE_HEAD:-}" || return 2
+  if ! json=$(bytedcli --json codebase mr status "$FM_PR_NUMBER" -R "$FM_PR_PATH" --page-size 100 2>/dev/null) \
+    || [ -z "$json" ]; then
+    printf 'actionable: the Codebase identity for %s could not be confirmed; no landed outcome is recorded\n' \
+      "$FM_PR_URL" >&2
+    return 2
+  fi
+  if ! fields=$(printf '%s' "$json" | jq -r '
+      if type == "object" and .status == "success" and (.data | type) == "object"
+      then . else error("invalid status payload") end
+      | "repo_path=" + ((.data.repository.path // "") | tostring),
+        "mr_id=" + ((.data.merge_request.id // "") | tostring),
+        "number=" + ((.data.merge_request.number // "") | tostring),
+        "url=" + ((.data.merge_request.url // "") | tostring),
+        "source_branch=" + ((.data.merge_request.source_branch // "") | tostring),
+        "target_branch=" + ((.data.merge_request.target_branch // "") | tostring),
+        "source_head=" + ((.data.merge_request.source_commit_id // "") | tostring)
+      ' 2>/dev/null); then
+    printf 'actionable: the Codebase identity for %s could not be confirmed; no landed outcome is recorded\n' \
+      "$FM_PR_URL" >&2
+    return 2
+  fi
+  while IFS= read -r line; do
+    total=$((total + 1))
+    case "$line" in
+      repo_path=*) repo_path=${line#repo_path=} ;;
+      mr_id=*) mr_id=${line#mr_id=} ;;
+      number=*) number=${line#number=} ;;
+      url=*) url=${line#url=} ;;
+      source_branch=*) source_branch=${line#source_branch=} ;;
+      target_branch=*) target_branch=${line#target_branch=} ;;
+      source_head=*) source_head=${line#source_head=} ;;
+      *) continue ;;
+    esac
+    named=$((named + 1))
+  done <<FIELDS
+$fields
+FIELDS
+  if [ "$named" -ne 7 ] || [ "$total" -ne 7 ] \
+    || [ "$repo_path" != "$FM_PR_PATH" ] || [ "$number" != "$FM_PR_NUMBER" ] \
+    || [ "$url" != "$FM_PR_URL" ] || [ -z "$mr_id" ] \
+    || [ -z "$source_branch" ] || [ -z "$target_branch" ] \
+    || ! fm_pr_head_valid "$source_head" || [ "$source_head" != "$FM_PR_MERGE_HEAD" ]; then
+    printf 'actionable: the Codebase merge request or source identity for %s changed during readback; no landed outcome is recorded\n' \
+      "$FM_PR_URL" >&2
+    return 2
+  fi
+  FM_PR_CODEBASE_MR_ID=$mr_id
+  FM_PR_CODEBASE_SOURCE_BRANCH=$source_branch
+  FM_PR_CODEBASE_TARGET_BRANCH=$target_branch
+}
+
 # Read an exact already-merged Codebase candidate through the official detail
-# API. Callers first parse the canonical URL with fm_pr_url_parse and set
-# FM_PR_MERGE_HEAD. The ordinary merge owner additionally sets the preflight
-# MR and branch identities; a receipt-loss recovery has only the immutable URL
-# and registered source head, so those three comparisons are optional there.
+# API. Callers first parse the canonical URL, set FM_PR_MERGE_HEAD, and obtain
+# the expected MR and branch identities through an official read-only view.
 # On success FM_PR_CODEBASE_MERGE_COMMIT contains the independently observed
 # merge commit. This helper is read-only and returns 2 for every unproved view.
 fm_pr_codebase_confirm_merged() {
@@ -243,7 +299,10 @@ fm_pr_codebase_confirm_merged() {
   local repo_path='' mr_id='' number='' state='' url=''
   local source_branch='' target_branch='' source_head='' merge_commit=''
 
-  [ "${FM_PR_PROVIDER:-}" = codebase ] && fm_pr_head_valid "${FM_PR_MERGE_HEAD:-}" || return 2
+  [ "${FM_PR_PROVIDER:-}" = codebase ] && fm_pr_head_valid "${FM_PR_MERGE_HEAD:-}" \
+    && [ -n "${FM_PR_CODEBASE_MR_ID:-}" ] \
+    && [ -n "${FM_PR_CODEBASE_SOURCE_BRANCH:-}" ] \
+    && [ -n "${FM_PR_CODEBASE_TARGET_BRANCH:-}" ] || return 2
   if ! json=$(bytedcli --json codebase mr get "$FM_PR_NUMBER" -R "$FM_PR_PATH" 2>/dev/null) \
     || [ -z "$json" ]; then
     printf 'actionable: the Codebase landed state for %s could not be confirmed; the merge poll remains armed\n' \
@@ -291,10 +350,9 @@ FIELDS
     return 2
   fi
   if [ "$repo_path" != "$FM_PR_PATH" ] || [ "$number" != "$FM_PR_NUMBER" ] \
-    || [ "$url" != "$FM_PR_URL" ] \
-    || { [ -n "${FM_PR_CODEBASE_MR_ID:-}" ] && [ "$mr_id" != "$FM_PR_CODEBASE_MR_ID" ]; } \
-    || { [ -n "${FM_PR_CODEBASE_SOURCE_BRANCH:-}" ] && [ "$source_branch" != "$FM_PR_CODEBASE_SOURCE_BRANCH" ]; } \
-    || { [ -n "${FM_PR_CODEBASE_TARGET_BRANCH:-}" ] && [ "$target_branch" != "$FM_PR_CODEBASE_TARGET_BRANCH" ]; }; then
+    || [ "$url" != "$FM_PR_URL" ] || [ "$mr_id" != "$FM_PR_CODEBASE_MR_ID" ] \
+    || [ "$source_branch" != "$FM_PR_CODEBASE_SOURCE_BRANCH" ] \
+    || [ "$target_branch" != "$FM_PR_CODEBASE_TARGET_BRANCH" ]; then
     printf 'actionable: the Codebase repository, merge request, or branch identity for %s changed during readback; no landed outcome is recorded and the merge poll remains armed\n' \
       "$FM_PR_URL" >&2
     return 2

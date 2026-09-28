@@ -244,7 +244,7 @@ function codebaseMergeReadback(root,url,head) {
   let output;
   try {
     output=execFileSync('bash',['-c',
-      '. "$1"; fm_pr_url_parse "$2" && [ "$FM_PR_PROVIDER" = codebase ] || exit 2; FM_PR_MERGE_HEAD=$3; command -v bytedcli >/dev/null && command -v jq >/dev/null || exit 2; fm_pr_codebase_confirm_merged || exit $?; printf "%s\\t%s\\n" "$FM_PR_MERGE_HEAD" "$FM_PR_CODEBASE_MERGE_COMMIT"',
+      '. "$1"; fm_pr_url_parse "$2" && [ "$FM_PR_PROVIDER" = codebase ] || exit 2; FM_PR_MERGE_HEAD=$3; command -v bytedcli >/dev/null && command -v jq >/dev/null || exit 2; fm_pr_codebase_read_identity && fm_pr_codebase_confirm_merged || exit $?; printf "%s\\t%s\\n" "$FM_PR_MERGE_HEAD" "$FM_PR_CODEBASE_MERGE_COMMIT"',
       'short-merge-readback',library,url,head],{encoding:'utf8',timeout:30000,stdio:['ignore','pipe','pipe']}).trim();
   } catch(error) {
     const detail=String(error.stderr??'').trim();
