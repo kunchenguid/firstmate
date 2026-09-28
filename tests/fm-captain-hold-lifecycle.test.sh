@@ -121,7 +121,7 @@ case "${1:-} ${2:-}" in
       *) printf '%s\n' '[]' ;;
     esac
     ;;
-  "api --silent")
+  "api repos/"*"/contents/scripts/full-suite.sh?ref="*)
     # The base branch carries no full-suite script: GitHub's 404.
     echo 'gh: Not Found (HTTP 404)' >&2
     exit 1

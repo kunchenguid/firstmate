@@ -92,10 +92,13 @@
 # base, and refuses unless it exits 0, reporting that alongside every other
 # failing condition. The script owns what counts as a pass. The same verified
 # head is what --match-head-commit binds, so a pass recorded on any other commit
-# cannot admit the merge. This only looks for a pass already recorded and never
-# runs the suite. A task with no recorded clone, or a clone with no executable
-# copy of the script, refuses, and neither waiver nor --attended-override skips
-# the requirement. GitLab merges do not read it.
+# cannot admit the merge. The clone's copy must also hash to the blob that same
+# live read returns for the base branch, so a copy older or newer than the base
+# branch's current script refuses instead of checking with code the base does
+# not hold. This only looks for a pass already recorded and never runs the
+# suite. A task with no recorded clone, or a clone with no executable copy of
+# the script, refuses, and neither waiver nor --attended-override skips the
+# requirement. GitLab merges do not read it.
 # This is a merge-path backstop, not enforcement. A merge made outside this
 # script, including one made by hand on GitHub, bypasses it completely, and a
 # base branch that advances between the check and the merge is not re-checked.
@@ -737,28 +740,34 @@ FM_PR_FULL_SUITE_SCRIPT=scripts/full-suite.sh
 FM_PR_FULL_SUITE_REFUSALS=
 FM_PR_FULL_SUITE_VERIFIED=
 github_verify_full_suite() {
-  local head=$1 base=$2 ref err_file err_text project script output line rc=0
+  local head=$1 base=$2 ref err_file err_text base_blob clone_blob project script output line rc=0
   local required="base branch $base carries $FM_PR_FULL_SUITE_SCRIPT, so the full suite must have passed at head $head"
+  local unreadable="  - whether base branch $base carries $FM_PR_FULL_SUITE_SCRIPT could not be read, so a required full-suite pass cannot be ruled out
+"
   FM_PR_FULL_SUITE_REFUSALS=
   FM_PR_FULL_SUITE_VERIFIED=
   ref=$(github_urlencode_path_segment "$base")
   if ! err_file=$(mktemp "${TMPDIR:-/tmp}/fm-pr-merge-full-suite.XXXXXX"); then
-    FM_PR_FULL_SUITE_REFUSALS="  - whether base branch $base carries $FM_PR_FULL_SUITE_SCRIPT could not be read, so a required full-suite pass cannot be ruled out
-"
+    FM_PR_FULL_SUITE_REFUSALS=$unreadable
     return 0
   fi
-  if ! gh api --silent "repos/$PR_OWNER/$PR_REPO/contents/$FM_PR_FULL_SUITE_SCRIPT?ref=$ref" \
-    >/dev/null 2>"$err_file"; then
+  if ! base_blob=$(gh api "repos/$PR_OWNER/$PR_REPO/contents/$FM_PR_FULL_SUITE_SCRIPT?ref=$ref" \
+    --jq '.sha' 2>"$err_file"); then
     err_text=$(cat "$err_file" 2>/dev/null || true)
     rm -f "$err_file"
     case "$err_text" in
       *"(HTTP 404)"*) return 0 ;;
     esac
-    FM_PR_FULL_SUITE_REFUSALS="  - whether base branch $base carries $FM_PR_FULL_SUITE_SCRIPT could not be read, so a required full-suite pass cannot be ruled out
-"
+    FM_PR_FULL_SUITE_REFUSALS=$unreadable
     return 0
   fi
   rm -f "$err_file"
+  # The blob id is what binds the clone's copy to the base branch's live one,
+  # so an answer that is not an object id is a failed read.
+  if ! fm_pr_head_valid "$base_blob"; then
+    FM_PR_FULL_SUITE_REFUSALS=$unreadable
+    return 0
+  fi
 
   project=$(grep '^project=' "$META" | tail -1 | cut -d= -f2- || true)
   if [ -z "$project" ]; then
@@ -769,6 +778,14 @@ github_verify_full_suite() {
   script="$project/$FM_PR_FULL_SUITE_SCRIPT"
   if [ ! -f "$script" ] || [ ! -x "$script" ]; then
     FM_PR_FULL_SUITE_REFUSALS="  - $required, but the project clone $project has no executable copy of it to check with; bring that clone's checkout up to date
+"
+    return 0
+  fi
+  # git hash-object applies the clone's own attributes, so a checkout's line
+  # endings hash to the committed blob when the content is the same.
+  clone_blob=$(git -C "$project" hash-object -- "$FM_PR_FULL_SUITE_SCRIPT" 2>/dev/null || true)
+  if [ "$clone_blob" != "$base_blob" ]; then
+    FM_PR_FULL_SUITE_REFUSALS="  - $required, but the project clone's copy $script is not the base branch's current version (blob ${clone_blob:-unreadable}, not $base_blob), so its check cannot vouch for the merge; bring that clone's checkout up to date
 "
     return 0
   fi
