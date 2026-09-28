@@ -88,6 +88,7 @@ $ file /tmp/shot/out.png
 ```
 
 Measured on a machine with none of `mmdc`, `wkhtmltoimage`, `rsvg-convert`, `convert`, `magick`, or a Chromium CLI installed; the existing Google Chrome app supplied the rasterisation.
+The same command rendered a realistic 800x330 diagram containing an embedded SVG and Chinese labels into a 26.9 KB PNG, so neither size nor CJK text needed a dependency.
 
 ## Confirmed: the WeChat image surface and its limits
 
@@ -96,7 +97,8 @@ Calling it in this session returned `微信桥接未启动，请先在 TUI 执�
 
 ## Not proven
 
-- End-to-end delivery of a rendered diagram to a captain's WeChat conversation: blocked by the bridge being stopped above, so only the renderer and the tool contract are proven, not the round trip.
+- End-to-end delivery of a rendered diagram to a captain's WeChat conversation. Attempted twice from this task, including with a real rendered PNG sitting in the project directory, and both attempts returned `微信桥接未启动，请先在 TUI 执行 /wechat start`.
+  The renderer and the tool contract are proven; the round trip is not, and it needs a session whose bridge is started.
 - Any harness besides pi: claude, codex, opencode, grok, kimi, cursor, omp, and the rest of firstmate's verified adapters were not exercised for this skill.
 - Whether `chrome-devtools-axi` or `lavish-axi` is reachable in a given session; neither was available in the session that produced this record.
 - Rendering quality at realistic diagram sizes, and whether an attached HTML file previews usefully on a phone.
