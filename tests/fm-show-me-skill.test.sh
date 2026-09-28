@@ -186,11 +186,14 @@ live_guard() {
   pass "pi loads show-me by name, keeps the adaptation separable, and stays silent when uninvited"
 }
 
-fm_live_gate opt-in FM_SHOW_ME_LIVE pi
-live_guard
-
 test_vendored_body_stays_verbatim_and_manual_only
 test_vendored_body_matches_the_upstream_bytes_this_home_retrieved
 test_delivery_surface_rules_are_enforceable
 test_view_type_bindings_stay_one_judgement_each
 test_adaptation_records_what_it_refused_to_claim
+
+# fm_live_gate ends the script with exit 0 whenever it skips, so nothing placed
+# after it runs on a host that does not opt in. The portable checks above must
+# therefore finish first, and this call stays last.
+fm_live_gate opt-in FM_SHOW_ME_LIVE pi
+live_guard
