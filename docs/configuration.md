@@ -986,10 +986,9 @@ Per-machine Cursor `cli-config.json` attribution-off is not this contract: it do
 [`bin/fm-teamclaude.sh`](../bin/fm-teamclaude.sh) owns how Firstmate-launched workers reach TeamClaude.
 Claude launches use the MITM environment from `teamclaude env --mitm` and refuse to start when that proxy is not usable, with no direct-login fallback.
 Codex launches send the TeamClaude provider on the command itself and, when `codex` on PATH is an opencodex autostart shim, run the real Codex binary instead of that shim.
+A Codex worker keeps the captain's proxy and CA variables, and its launch adds `127.0.0.1` and `localhost` to `NO_PROXY`/`no_proxy` so only the loopback TeamClaude request skips that proxy.
 opencodex is left running because OpenCode workers still use it, and OpenCode launches are not rewritten.
-Pi and pi-signed route through TeamClaude only when the provider Pi would use is `openai-codex`: the pinned `--provider`, else the `--model` provider prefix, else `defaultProvider` in the account's `settings.json`.
-The per-task Pi extension registers that provider's base URL as the proxy, and `PI_CODING_AGENT_DIR` stays the account's own directory.
-OpenAI API-key models are not redirected, and a Pi launch that does not resolve to `openai-codex` is unchanged.
+Pi and pi-signed workers do not go through TeamClaude for now; bead `ag-awb` tracks adding them back.
 The rotation threshold stays TeamClaude's own `teamclaude threshold` command.
 Firstmate does not keep a second rotator.
 Before a routed launch starts, Firstmate requires a flat 95%: it runs `teamclaude threshold 95` when the threshold differs, reads it again, and refuses the worker when it still is not a flat 95%.

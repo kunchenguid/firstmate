@@ -73,7 +73,7 @@ unset TASKS_AXI_FILE TASKS_AXI_BACKEND
 # shellcheck disable=SC2034
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-# Claude, Codex, and Pi openai-codex launches refuse without TeamClaude.
+# Claude and Codex launches refuse without TeamClaude.
 # Prepend a deterministic stub so the suite does not need a running proxy.
 # FM_LIVE=1 keeps the real CLI first for opt-in live checks. A test that needs
 # a different teamclaude puts that directory ahead of this stub.

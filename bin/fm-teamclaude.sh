@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Route Firstmate-launched Claude, Codex, and Pi openai-codex workers through
-# TeamClaude. This script is the single owner of that launch contract.
+# Route Firstmate-launched Claude and Codex workers through TeamClaude. This
+# script is the single owner of that launch contract.
 # fm-spawn.sh calls the functions below; the subcommands are the same contract
 # for operators and tests.
 #
@@ -12,21 +12,16 @@
 # a missing CA file refuses the launch. There is no direct-login fallback.
 #
 # Codex launches pass the TeamClaude provider with -c (model_provider and
-# model_providers.teamclaude base_url/wire_api/name) and clear proxy variables
-# on that process so the HTTP base URL is the only route. When the first
-# `codex` on PATH is an opencodex autostart shim (the marker
-# "opencodex codex autostart shim"), the launch executes the sibling
+# model_providers.teamclaude base_url/wire_api/name). fm-spawn keeps the
+# ambient proxy and CA variables on that process and adds 127.0.0.1 and
+# localhost to NO_PROXY/no_proxy, so only the loopback base URL skips a
+# proxy. When the first `codex` on PATH is an opencodex autostart shim (the
+# marker "opencodex codex autostart shim"), the launch executes the sibling
 # `<codex>.opencodex-real` instead of the shim. opencodex is not stopped and
 # OpenCode launches are not rewritten.
 #
-# Pi and pi-signed launches route only when the provider Pi would use is
-# openai-codex: the pinned --provider, else the --model <provider>/ prefix,
-# else defaultProvider in the account's settings.json. The per-task Pi
-# extension fm-spawn writes registers that provider's baseUrl as the proxy's
-# /backend-api path, which Pi normalizes onto /codex/responses.
-# PI_CODING_AGENT_DIR stays the account's own directory. OpenAI API-key
-# models are not redirected. A launch that does not resolve to openai-codex
-# is unchanged and does not require the proxy.
+# Pi and pi-signed launches do not go through TeamClaude for now (bead
+# ag-awb).
 #
 # Rotation stays TeamClaude's. This script does not pick accounts. Every
 # routed launch requires `teamclaude threshold` to report a flat 95%. When it
@@ -40,8 +35,7 @@
 # sends the same launch command, so the routing covers tmux, herdr, zellij,
 # orca, and cmux workers alike.
 #
-# Usage: fm-teamclaude.sh <claude-env|codex-exec|codex-config|pi-base-url|help>
-#        fm-teamclaude.sh pi-base-url --model <model> --provider <provider> --agent-dir <dir>
+# Usage: fm-teamclaude.sh <claude-env|codex-exec|codex-config|help>
 fm_teamclaude_shell_quote() {
   printf "'"
   printf '%s' "$1" | sed "s/'/'\\\\''/g"
@@ -265,45 +259,8 @@ fm_teamclaude_splice_codex() {
   esac
 }
 
-fm_teamclaude_pi_provider() {
-  local model=$1 provider=$2 settings=$3/settings.json
-  if [ -z "$provider" ]; then
-    case "$model" in
-      */*) provider=${model%%/*} ;;
-      *)
-        if [ -f "$settings" ] && ! provider=$(jq -r '.defaultProvider // empty' "$settings" 2>/dev/null); then
-          fm_teamclaude_die "could not read defaultProvider from ${settings}, so Firstmate cannot tell whether this Pi worker uses openai-codex. Refusing to start this worker. There is no direct fallback."
-          return 1
-        fi
-        ;;
-    esac
-  fi
-  printf '%s\n' "$provider"
-}
-
-fm_teamclaude_pi_base_url() {
-  local provider
-  provider=$(fm_teamclaude_pi_provider "$1" "$2" "$3") || return 1
-  [ "$provider" = openai-codex ] || return 0
-  fm_teamclaude_require_proxy || return 1
-  printf '%s\n' "${_FM_TC_HTTPS_PROXY%/}/backend-api"
-}
-
 fm_teamclaude_usage() {
   sed -n '2,${/^#/!q;p;}' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
-}
-
-fm_teamclaude_pi_args() {
-  local model='' provider='' agent_dir=''
-  while [ "$#" -gt 0 ]; do
-    case "$1" in
-      --model) model=${2:-}; shift 2 ;;
-      --provider) provider=${2:-}; shift 2 ;;
-      --agent-dir) agent_dir=${2:-}; shift 2 ;;
-      *) fm_teamclaude_die "unknown pi-base-url argument: $1"; return 1 ;;
-    esac
-  done
-  fm_teamclaude_pi_base_url "$model" "$provider" "$agent_dir"
 }
 
 if [ "${BASH_SOURCE[0]}" != "$0" ]; then
@@ -316,7 +273,6 @@ case "${1:-}" in
   claude-env) fm_teamclaude_claude_env ;;
   codex-exec) fm_teamclaude_codex_exec ;;
   codex-config) fm_teamclaude_codex_config ;;
-  pi-base-url) shift; fm_teamclaude_pi_args "$@" ;;
   help | --help | -h) fm_teamclaude_usage ;;
-  *) fm_teamclaude_die "usage: fm-teamclaude.sh <claude-env|codex-exec|codex-config|pi-base-url|help>"; exit 1 ;;
+  *) fm_teamclaude_die "usage: fm-teamclaude.sh <claude-env|codex-exec|codex-config|help>"; exit 1 ;;
 esac

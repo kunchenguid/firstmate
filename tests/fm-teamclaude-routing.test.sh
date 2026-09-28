@@ -161,51 +161,6 @@ test_codex_config_points_at_the_proxy_without_a_second_rotator() {
   pass "codex-config is the TeamClaude HTTP provider and not a second proxy"
 }
 
-test_pi_routes_only_openai_codex() {
-  local agent out status
-  agent="$TMP_ROOT/pi-source"
-  mkdir -p "$agent"
-  out=$(PATH="/usr/bin:/bin" "$ROOT_BIN" pi-base-url --model openai/gpt-4o --provider '' \
-    --agent-dir "$agent" 2>&1) && status=0 || status=$?
-  expect_code 0 "$status" "an OpenAI API-key model must not require TeamClaude"
-  assert_equals "" "$out" "an OpenAI API-key model must not be routed"
-
-  out=$("$ROOT_BIN" pi-base-url --model openai-codex/gpt-5.5 --provider '' --agent-dir "$agent") \
-    || fail "openai-codex pi-base-url failed"
-  assert_equals "http://127.0.0.1:3456/backend-api" "$out" \
-    "openai-codex must point at TeamClaude's /backend-api path"
-
-  printf '%s\n' '{"defaultProvider":"openai-codex"}' > "$agent/settings.json"
-  out=$("$ROOT_BIN" pi-base-url --model gpt-5.5 --provider '' --agent-dir "$agent") \
-    || fail "a bare model pi-base-url failed"
-  assert_equals "http://127.0.0.1:3456/backend-api" "$out" \
-    "a bare model under an openai-codex default provider must route"
-  out=$("$ROOT_BIN" pi-base-url --model '' --provider '' --agent-dir "$agent") \
-    || fail "a model-less pi-base-url failed"
-  assert_equals "http://127.0.0.1:3456/backend-api" "$out" \
-    "a launch without --model under an openai-codex default provider must route"
-
-  printf '%s\n' '{"defaultProvider":"anthropic"}' > "$agent/settings.json"
-  out=$(PATH="/usr/bin:/bin" "$ROOT_BIN" pi-base-url --model '' --provider '' --agent-dir "$agent" 2>&1) \
-    || fail "a model-less launch under another default provider must not refuse"
-  assert_equals "" "$out" "a launch under another default provider must not be routed"
-  pass "Pi routes openai-codex, including through the account default, and leaves API-key OpenAI alone"
-}
-
-# pi_ext_providers <ext>: load the generated Pi extension in a plain Node host
-# and print each provider it registers as name=baseUrl.
-pi_ext_providers() {
-  EXT_PATH="$1" node --input-type=module 2>&1 <<'EOF'
-import { pathToFileURL } from "node:url";
-const mod = await import(pathToFileURL(process.env.EXT_PATH).href);
-mod.default({
-  on: () => {},
-  events: { on: () => {} },
-  registerProvider: (name, config) => console.log(`${name}=${config.baseUrl}`),
-});
-EOF
-}
-
 test_spawn_claude_carries_the_proxy_and_clears_a_direct_base_url() {
   local rec out status launch seen
   rec=$(make_case claude-up claude tc-claude-a1)
@@ -249,7 +204,7 @@ test_spawn_down_proxy_refuses_before_a_worker_exists() {
   pass "a down proxy stops the Claude launch before a worker exists"
 }
 
-test_spawn_codex_bypasses_the_shim_and_clears_the_proxy() {
+test_spawn_codex_bypasses_the_shim_and_skips_the_proxy_only_for_loopback() {
   local rec out status launch seen
   rec=$(make_case codex-shim codex tc-codex-a1)
   read_case "$rec"
@@ -262,6 +217,10 @@ SH
 #!/bin/sh
 printf 'bin=%s\n' "$0"
 printf 'proxy=%s\n' "${HTTPS_PROXY-unset}"
+printf 'all=%s\n' "${ALL_PROXY-unset}"
+printf 'ca=%s\n' "${NODE_EXTRA_CA_CERTS-unset}"
+printf 'NO_PROXY=%s\n' "${NO_PROXY-unset}"
+printf 'no_proxy=%s\n' "${no_proxy-unset}"
 SH
   chmod +x "$FAKEBIN_DIR/codex" "$FAKEBIN_DIR/codex.opencodex-real"
   out=$(run_spawn tc-codex-a1 "$PROJ_DIR" --mode no-mistakes --yolo off)
@@ -272,63 +231,41 @@ SH
     "the codex launch must execute the real binary"
   assert_contains "$launch" 'model_provider="teamclaude"' \
     "the codex launch must select the TeamClaude provider"
-  assert_contains "$launch" "-u HTTPS_PROXY" \
-    "the codex launch must clear an ambient MITM proxy"
   seen=$(env -i HOME="$TMP_ROOT/pane" PATH="$FAKEBIN_DIR:$STUB:/usr/bin:/bin" \
-    HTTPS_PROXY='http://127.0.0.1:9' /bin/sh -c "$launch") \
+    HTTPS_PROXY='http://corp.example:8080' ALL_PROXY='http://corp.example:8080' \
+    NODE_EXTRA_CA_CERTS='/etc/corp-ca.pem' NO_PROXY='corp.internal' /bin/sh -c "$launch") \
     || fail "the emitted codex launch failed to run"
   assert_contains "$seen" "bin=$FAKEBIN_DIR/codex.opencodex-real" \
     "the launched process must be the real binary, not the shim"
-  assert_contains "$seen" "proxy=unset" \
-    "the codex process must not inherit HTTPS_PROXY"
+  assert_contains "$seen" "proxy=http://corp.example:8080" \
+    "the codex worker must keep the captain's HTTPS_PROXY for its other tools"
+  assert_contains "$seen" "all=http://corp.example:8080" \
+    "the codex worker must keep the captain's ALL_PROXY"
+  assert_contains "$seen" "ca=/etc/corp-ca.pem" \
+    "the codex worker must keep the captain's CA"
+  assert_contains "$seen" "NO_PROXY=corp.internal,127.0.0.1,localhost" \
+    "the codex launch must add loopback to the captain's NO_PROXY"
+  assert_contains "$seen" "no_proxy=127.0.0.1,localhost" \
+    "the codex launch must bypass a proxy for loopback when no_proxy was unset"
   printf '%s\n' "$seen" | grep -qx shim \
     && fail "the shim must not have been the process that ran"
-  pass "a Codex worker reaches TeamClaude without the opencodex shim or a MITM proxy"
+  pass "a Codex worker reaches TeamClaude on loopback without the shim and keeps the captain's proxy"
 }
 
-test_spawn_pi_openai_codex_routes_and_api_key_does_not() {
+test_spawn_pi_does_not_use_teamclaude() {
   local rec out status launch
-  cat > "$TMP_ROOT/pi-bin" <<'SH'
-#!/bin/sh
-exit 0
-SH
-  chmod +x "$TMP_ROOT/pi-bin"
-
-  rec=$(make_case pi-api pi tc-pi-api-a1)
+  rec=$(make_case pi-keep pi tc-pi-keep-a1)
   read_case "$rec"
-  cp "$TMP_ROOT/pi-bin" "$FAKEBIN_DIR/pi"
+  printf '#!/bin/sh\nexit 0\n' > "$FAKEBIN_DIR/pi"
+  chmod +x "$FAKEBIN_DIR/pi"
   install_down_teamclaude "$FAKEBIN_DIR"
-  out=$(run_spawn tc-pi-api-a1 "$PROJ_DIR" --mode no-mistakes --yolo off --model openai/gpt-4o)
+  out=$(run_spawn tc-pi-keep-a1 "$PROJ_DIR" --mode no-mistakes --yolo off --model openai-codex/gpt-5.5)
   status=$?
-  expect_code 0 "$status" "Pi with an API-key model must start even when TeamClaude is down: $out"
-  out=$(pi_ext_providers "$HOME_DIR/state/tc-pi-api-a1.pi-ext.ts") || fail "the Pi extension did not load: $out"
-  assert_equals "" "$out" "an API-key Pi model must not register a TeamClaude provider"
-
-  rec=$(make_case pi-codex pi tc-pi-codex-a1)
-  read_case "$rec"
-  cp "$TMP_ROOT/pi-bin" "$FAKEBIN_DIR/pi"
-  out=$(run_spawn tc-pi-codex-a1 "$PROJ_DIR" --mode no-mistakes --yolo off --model openai-codex/gpt-5.5)
-  status=$?
-  expect_code 0 "$status" "Pi openai-codex spawn should succeed: $out"
+  expect_code 0 "$status" "a Pi worker must start without TeamClaude: $out"
   launch=$(cat "$LAUNCH_LOG")
-  assert_not_contains "$launch" "PI_CODING_AGENT_DIR=" \
-    "an openai-codex Pi launch must keep the account's own agent directory"
-  out=$(pi_ext_providers "$HOME_DIR/state/tc-pi-codex-a1.pi-ext.ts") || fail "the Pi extension did not load: $out"
-  assert_equals "openai-codex=http://127.0.0.1:3456/backend-api" "$out" \
-    "the per-task Pi extension must point openai-codex at TeamClaude"
-
-  rec=$(make_case pi-default pi tc-pi-default-a1)
-  read_case "$rec"
-  cp "$TMP_ROOT/pi-bin" "$FAKEBIN_DIR/pi"
-  mkdir -p "$HOME_DIR/user-home/.pi/agent"
-  printf '%s\n' '{"defaultProvider":"openai-codex"}' > "$HOME_DIR/user-home/.pi/agent/settings.json"
-  out=$(PI_CODING_AGENT_DIR='' run_spawn tc-pi-default-a1 "$PROJ_DIR" --mode no-mistakes --yolo off)
-  status=$?
-  expect_code 0 "$status" "Pi spawn without --model should succeed: $out"
-  out=$(pi_ext_providers "$HOME_DIR/state/tc-pi-default-a1.pi-ext.ts") || fail "the Pi extension did not load: $out"
-  assert_equals "openai-codex=http://127.0.0.1:3456/backend-api" "$out" \
-    "a Pi launch that defaults to openai-codex must route through TeamClaude"
-  pass "a Pi worker routes openai-codex through TeamClaude and does not route API-key OpenAI"
+  assert_not_contains "$launch" "HTTPS_PROXY" "a Pi launch must not be moved onto TeamClaude"
+  assert_not_contains "$launch" "127.0.0.1:9" "a Pi launch must not name the TeamClaude proxy"
+  pass "a Pi worker, even on openai-codex, does not go through TeamClaude for now"
 }
 
 test_spawn_opencode_is_unchanged() {
@@ -352,9 +289,8 @@ test_threshold_below_95_is_applied_before_the_launch
 test_threshold_that_stays_off_95_refuses_loudly
 test_codex_shim_resolves_to_the_real_binary
 test_codex_config_points_at_the_proxy_without_a_second_rotator
-test_pi_routes_only_openai_codex
 test_spawn_claude_carries_the_proxy_and_clears_a_direct_base_url
 test_spawn_down_proxy_refuses_before_a_worker_exists
-test_spawn_codex_bypasses_the_shim_and_clears_the_proxy
-test_spawn_pi_openai_codex_routes_and_api_key_does_not
+test_spawn_codex_bypasses_the_shim_and_skips_the_proxy_only_for_loopback
+test_spawn_pi_does_not_use_teamclaude
 test_spawn_opencode_is_unchanged
