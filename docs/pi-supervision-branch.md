@@ -29,12 +29,13 @@ For an authenticated follow-up, `route` with `update_brief:true` appends the exa
 The existing watcher offers due eligible rows before native lifecycle and shell tool operations; decisions, uncertain results and other MAIN-only rows remain durably actionable in the original queue.
 The full lifecycle read and legacy reconciliation interface remain available for recovery and explicit delegation changes.
 Enrollment is limited to current task briefs named by an input route, wake claim, or processed outcome, with no historical fleet migration.
-Main records semantic acceptance, an explicit stopped disposition, a named executor with observed receipt/start, or a genuine blocker with responsible owner and observable release evidence.
+MAIN supplies the evidence-backed disposition, outcome, remaining gap and next action, including a genuine blocker with responsible owner and observable release evidence.
+The lifecycle owner derives identifiers, hashes, timestamps, counters and verified executor receipts, while the existing merge and cleanup owners append generation-bound result receipts without changing semantic acceptance.
 A queued handoff, successful send, provider terminal state, reported plan, or PR result cannot independently establish acceptance.
 The existing durable handoff owner retains lease conflicts and deduplicates retries by the original id.
 Attempted and uncertain effects remain readback work; the continuation observer never executes a payload or grants new authority.
 The Pi extension preserves separate input receipts through compaction, checks pending obligations before logical-run settlement, and uses the existing heartbeat coordinator's tick for bounded rechecks.
-Unchanged genuine blockers, healthy observed execution, accepted goals, and explicitly stopped goals stay quiet.
+Unchanged genuine blockers, healthy observed execution, accepted goals, and explicitly archived goals stay quiet.
 Changing dependency evidence or a missing executor makes the precise retained obligation actionable again without re-presenting its already acknowledged outcome.
 The extension limits unchanged automatic prompts to two with backoff, including settlement-triggered continuations.
 The canonical lifecycle record retains the budget across reload, compaction and unrelated input.
@@ -48,7 +49,8 @@ Between due recovery turns, the same clock continues bounded readback without bl
 A MAIN admission deferred by UI, tool, input or compaction activity stays reserved in the existing owner until the complete safety check permits delivery; a persisted native message confirms delivery without spending another attempt.
 Both timer delivery and the final before-settle submission recheck those protections after asynchronous readback; before-settle does not require the still-active logical run to become idle.
 This safeguard applies while Pi is alive; it introduces no process-exit recovery, external watchdog, cleanup engine, or parallel lifecycle truth store.
-`tests/fm-task-handoff.test.sh`, `tests/fm-pi-branch-extension.test.sh`, and `tests/fm-periodic-stow-herdr-live-e2e.test.sh` exercise these boundaries through public interfaces.
+`tests/lifecycle-semantic.py` and `tests/lifecycle-native.mjs` exercise semantic assessment, authenticated intent updates, automatic owner receipts, operation ordering and refusal boundaries through public interfaces.
+`tests/fm-task-handoff.test.sh`, `tests/fm-pi-branch-extension.test.sh`, and `tests/fm-periodic-stow-herdr-live-e2e.test.sh` cover the existing handoff, continuation and live-runtime boundaries.
 
 ## Components and their owners
 
