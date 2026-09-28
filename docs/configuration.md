@@ -829,7 +829,7 @@ The [Claude adapter reference](../.agents/skills/harness-adapters/references/har
 ## Claude worker agent (config/crew-claude-agent)
 
 The optional local, gitignored `config/crew-claude-agent` names one Claude agent profile, such as `crewmate`, for Firstmate's Claude ship and scout workers.
-With the file present, every Claude ship and scout launch, relaunches included, carries `--agent <name>`.
+With the file present, every Claude ship and scout template launch, relaunches included, carries `--agent <name>`.
 Claude Code then runs the worker session as that agent: its system prompt, tool list, and other frontmatter apply, and it overrides any `agent` key in the captain's Claude settings, so a main-thread profile selected there does not also load into workers.
 An absent file keeps the Claude launch unchanged, with no `--agent` flag.
 Nothing else in the launch changes: the permission flag, inline settings, task-channel grant, task-worker trust statement, model, and effort stay as they are.
@@ -840,8 +840,9 @@ A home file rather than a dispatch-profile field owns this setting because it na
 
 The file holds one agent name on one line; surrounding spaces or tabs and a final newline are ignored.
 A name is letters, digits, `-`, or `_`, starting with a letter or digit, optionally namespaced as `plugin:agent`, and at most 128 characters.
-Any other content, including an empty file, a second line, whitespace inside the name, or a shell metacharacter, refuses every spawn from that home, whichever harness it would launch.
+Any other content, including an empty file, a second line, whitespace inside the name, or a shell metacharacter, refuses Claude ship and scout template launches from that home.
 An unreadable file refuses the same way.
+Other harnesses, raw launch commands, and secondmate launches do not validate this setting.
 This happens before any endpoint, worktree, or task record exists; remove the file to launch without an agent.
 
 Firstmate checks only the name's shape, not that the agent exists.
@@ -851,7 +852,7 @@ Claude Code itself refuses an unknown agent at launch and exits, so a misspelled
 
 A secondmate launch never carries `--agent`, because a secondmate runs the Firstmate supervisor contract rather than a worker profile.
 The file is inherited into secondmate homes under the [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md) inherited-local-material contract, so a secondmate's own Claude ship and scout workers carry the same profile.
-`bin/fm-spawn.sh` reads the file on every spawn and relaunch, so a change takes effect at the next launch without a restart.
+`bin/fm-spawn.sh` reads the file on every Claude ship and scout template spawn and relaunch, so a change takes effect at the next worker launch without a restart.
 The agent must exist on every machine that launches those workers, including a remote secondmate's host.
 
 ## Worker account pin (config/claude-account, config/pi-account)

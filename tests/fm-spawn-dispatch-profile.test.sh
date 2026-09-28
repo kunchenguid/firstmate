@@ -1884,19 +1884,58 @@ test_claude_agent_invalid_refuses_before_endpoint_or_metadata() {
 }
 
 test_non_claude_harness_ignores_claude_agent() {
-  local rec id out status launch
-  id=crewagent-codex-z33
-  rec=$(make_spawn_case crewagent-codex codex "$id")
-  read_case_record "$rec"
-  printf 'crewmate\n' > "$HOME_DIR/config/crew-claude-agent"
+  local rec id out status launch value n=0
+  for value in crewmate 'crew mate'; do
+    n=$((n + 1))
+    id="crewagent-codex-$n"
+    rec=$(make_spawn_case "$id" codex "$id")
+    read_case_record "$rec"
+    printf '%s\n' "$value" > "$HOME_DIR/config/crew-claude-agent"
 
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness codex)
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness codex)
+    status=$?
+    expect_code 0 "$status" "codex spawn under crew-claude-agent should succeed"$'\n'"$out"
+    launch=$(cat "$LAUNCH_LOG")
+    assert_contains "$launch" "codex " "codex launch did not run codex"
+    assert_not_contains "$launch" "--agent" "the claude agent flag must not leak into a codex launch"
+  done
+  pass "codex ignores valid and malformed config/crew-claude-agent"
+}
+
+test_raw_claude_launch_ignores_invalid_claude_agent() {
+  local rec id out status launch
+  id=crewagent-raw-claude
+  rec=$(make_spawn_case "$id" claude "$id")
+  read_case_record "$rec"
+  printf 'crew mate\n' > "$HOME_DIR/config/crew-claude-agent"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" 'claude --model sonnet')
   status=$?
-  expect_code 0 "$status" "codex spawn under crew-claude-agent should succeed"$'\n'"$out"
+  expect_code 0 "$status" "raw claude command must ignore worker template config"$'\n'"$out"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex " "codex launch did not run codex"
-  assert_not_contains "$launch" "--agent" "the claude agent flag must not leak into a codex launch"
-  pass "config/crew-claude-agent changes claude launches only"
+  assert_contains "$launch" "claude --model sonnet" "raw claude command was not delivered"
+  assert_not_contains "$launch" "--agent" "worker template config leaked into raw command"
+  pass "raw claude command ignores malformed worker template config"
+}
+
+test_claude_secondmate_ignores_invalid_claude_agent() {
+  local rec id sm out status launch
+  id=crewagent-invalid-secondmate
+  rec=$(make_spawn_case "$id" claude "$id")
+  read_case_record "$rec"
+  printf 'crew mate\n' > "$HOME_DIR/config/crew-claude-agent"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "claude secondmate must ignore malformed worker agent config"$'\n'"$out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "claude " "secondmate launch did not run claude"
+  assert_not_contains "$launch" "--agent" "a secondmate must not select the worker agent"
+  [ "$(cat "$sm/config/crew-claude-agent")" = 'crew mate' ] \
+    || fail "secondmate did not inherit the worker agent config unchanged"
+  pass "claude secondmate ignores malformed worker agent config and inherits it for its crew"
 }
 
 test_claude_agent_skips_secondmate_launch_but_reaches_its_crew() {
@@ -1985,6 +2024,8 @@ test_claude_agent_adds_only_the_agent_flag_to_ship_launch
 test_claude_agent_reaches_scout_launch_with_plugin_name
 test_claude_agent_invalid_refuses_before_endpoint_or_metadata
 test_non_claude_harness_ignores_claude_agent
+test_raw_claude_launch_ignores_invalid_claude_agent
+test_claude_secondmate_ignores_invalid_claude_agent
 test_claude_agent_skips_secondmate_launch_but_reaches_its_crew
 test_non_claude_harness_ignores_config_dir
 test_claude_task_launch_carries_control_channel_authority

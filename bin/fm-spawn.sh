@@ -319,14 +319,15 @@
 #   Opt-in. Absent keeps today's claude launch byte-for-byte. A present file
 #   holds one Claude agent name (letters, digits, '-', '_', optionally
 #   plugin:agent, at most 128 characters; surrounding blanks and one final
-#   newline are ignored), and every claude SHIP and SCOUT launch, relaunches
-#   included, then carries `--agent <name>`, which selects that agent profile
+#   newline are ignored), and every claude SHIP and SCOUT template launch,
+#   relaunches included, then carries `--agent <name>`, which selects that agent profile
 #   for the worker session and overrides any `agent` key in the captain's
 #   Claude settings. A secondmate launch never carries it, because a secondmate
 #   runs the supervisor contract rather than a worker profile. Any other
-#   content, or an unreadable file, refuses every spawn before any endpoint,
-#   worktree, or record exists. The file is read on every spawn and relaunch
-#   and is inherited into secondmate homes (bin/fm-config-inherit-lib.sh), so a
+#   content, or an unreadable file, refuses only Claude worker template
+#   launches before any endpoint, worktree, or record exists. The file is read
+#   on every such spawn and relaunch and is inherited into secondmate homes
+#   (bin/fm-config-inherit-lib.sh), so a
 #   secondmate's own claude crewmates carry the same profile.
 # Worker account pin (config/claude-account, config/pi-account):
 #   Opt-in. With no file, a Claude or Pi launch is unchanged: Claude still
@@ -581,26 +582,6 @@ case "$CLAUDE_PERMISSION_MODE" in
 auto) CLAUDE_PERM_FLAG='--permission-mode auto' ;;
 *) CLAUDE_PERM_FLAG='--dangerously-skip-permissions' ;;
 esac
-# config/crew-claude-agent (header above): resolved once per spawn or relaunch,
-# before any mutation, so a malformed name refuses instead of launching a
-# worker on a profile the captain did not choose.
-if ! CLAUDE_AGENT_PRESENT=$(fm_config_source_present "$CONFIG/crew-claude-agent"); then
-  exit 1
-fi
-CLAUDE_AGENT=
-if [ "$CLAUDE_AGENT_PRESENT" = 1 ]; then
-  if [ ! -f "$CONFIG/crew-claude-agent" ] || [ ! -r "$CONFIG/crew-claude-agent" ]; then
-    echo "error: config/crew-claude-agent must be a readable regular file holding one Claude agent name" >&2
-    exit 1
-  fi
-  CLAUDE_AGENT=$(cat "$CONFIG/crew-claude-agent") || exit 1
-  CLAUDE_AGENT=${CLAUDE_AGENT#"${CLAUDE_AGENT%%[![:blank:]]*}"}
-  CLAUDE_AGENT=${CLAUDE_AGENT%"${CLAUDE_AGENT##*[![:blank:]]}"}
-  if [ "${#CLAUDE_AGENT}" -gt 128 ] || ! [[ "$CLAUDE_AGENT" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*(:[A-Za-z0-9][A-Za-z0-9_-]*)?$ ]]; then
-    echo "error: config/crew-claude-agent holds '$(printf '%s' "$CLAUDE_AGENT" | tr -c '[:print:]' '?')'; expected one Claude agent name of letters, digits, '-' or '_', optionally namespaced as plugin:agent (at most 128 characters); remove the file to launch without --agent" >&2
-    exit 1
-  fi
-fi
 # config/lavish-axi-host is the primary-owned per-machine address for the
 # shared Lavish server. Read it once per launch and refuse malformed values so
 # every worker reaches the same server instead of starting a second one.
@@ -2282,6 +2263,26 @@ case "$ARG3" in
   }
   ;;
 esac
+
+CLAUDE_AGENT=
+if [ "$HARNESS" = claude ] && [ "$KIND" != secondmate ] && [ "$RAW_LAUNCH" -eq 0 ]; then
+  if ! CLAUDE_AGENT_PRESENT=$(fm_config_source_present "$CONFIG/crew-claude-agent"); then
+    exit 1
+  fi
+  if [ "$CLAUDE_AGENT_PRESENT" = 1 ]; then
+    if [ ! -f "$CONFIG/crew-claude-agent" ] || [ ! -r "$CONFIG/crew-claude-agent" ]; then
+      echo "error: config/crew-claude-agent must be a readable regular file holding one Claude agent name" >&2
+      exit 1
+    fi
+    CLAUDE_AGENT=$(cat "$CONFIG/crew-claude-agent") || exit 1
+    CLAUDE_AGENT=${CLAUDE_AGENT#"${CLAUDE_AGENT%%[![:blank:]]*}"}
+    CLAUDE_AGENT=${CLAUDE_AGENT%"${CLAUDE_AGENT##*[![:blank:]]}"}
+    if [ "${#CLAUDE_AGENT}" -gt 128 ] || ! [[ "$CLAUDE_AGENT" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*(:[A-Za-z0-9][A-Za-z0-9_-]*)?$ ]]; then
+      echo "error: config/crew-claude-agent holds '$(printf '%s' "$CLAUDE_AGENT" | tr -c '[:print:]' '?')'; expected one Claude agent name of letters, digits, '-' or '_', optionally namespaced as plugin:agent (at most 128 characters); remove the file to launch without --agent" >&2
+      exit 1
+    fi
+  fi
+fi
 
 # muse, gemini, agy, and devin are verified as CREWMATE/SCOUT adapters only. A secondmate is
 # a firstmate instance, so it needs a primary supervision protocol.
