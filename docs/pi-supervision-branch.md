@@ -581,8 +581,8 @@ A leftover `state/.afk` flag declines nothing.
 ### Authority relocation
 
 `fm_lease_forbid_branch` passes the branch actor only for the actions whose guarded script opts in.
-It does so only while `bin/fm-afk-contract.sh validate` succeeds on a complete, readable, live record.
-An archived, incomplete, or invalid record restores the attended refusal byte for byte.
+It does so only while `bin/fm-afk-contract.sh validate` succeeds on a complete, readable, live away record (`mode` is not quiet).
+An archived, incomplete, invalid, or quiet record restores the attended refusal byte for byte.
 
 The captain's away words are the whole mandate:
 
