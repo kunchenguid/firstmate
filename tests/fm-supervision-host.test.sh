@@ -168,7 +168,7 @@ suite_cleanup() {
 }
 trap suite_cleanup EXIT
 
-make_home() {  # <name> <attended|away> [config line]
+make_home() {  # <name> <attended|away|quiet> [config line]
   local home="$TMP_ROOT/$1"
   mkdir -p "$home/state" "$home/config" "$home/fakebin"
   # An unreachable backend: the watcher reads no endpoint as dead, so the only
@@ -181,11 +181,18 @@ make_home() {  # <name> <attended|away> [config line]
   printf 'project=demo\nwindow=fm-demo\nharness=claude\n' > "$home/state/demo.meta"
   echo handle > "$home/stub-mode"
   # The captain has spoken in this session, so an attended wake has a mirror.
-  [ "$2" != attended ] \
+  [ "$2" = away ] \
     || printf '{"hook_event_name":"UserPromptSubmit","prompt_id":"p0","prompt":"watch the fleet for me"}' > "$home/mirror-seed.0"
   if [ "$2" = away ]; then
     FM_HOME="$home" "$CONTRACT" enter --words 'watch the fleet; merge nothing' >/dev/null 2>&1 \
       || fail "fixture: could not record the away posture"
+  fi
+  # Quiet mode's record with no daemon flag: a quiet entry whose daemon never
+  # started or stopped, left beside a present captain.
+  if [ "$2" = quiet ]; then
+    FM_HOME="$home" FM_AFK_MODE=quiet "$CONTRACT" enter --words 'keep routine wakes off my main' >/dev/null 2>&1 \
+      || fail "fixture: could not record quiet mode"
+    [ "$(FM_HOME="$home" "$CONTRACT" mode)" = quiet ] || fail "fixture: the record is not quiet mode's"
   fi
   printf '%s\n' "$home" >> "$HOMES_FILE"
   printf '%s\n' "$home"
@@ -904,6 +911,40 @@ test_captain_leaving_mid_turn_keeps_its_captain_outcome_for_the_return() {
   pass "host: a captain outcome recorded after the captain left waits for the return, then reaches main's drain"
 }
 
+# A quiet record left without its daemon (no state/.afk) is a present captain,
+# not an away one: the host runs attended beside it, so a captain outcome wakes
+# main and reaches its drain instead of waiting for a return that never comes,
+# and a decision close reaches main as the plain arm delivers it.
+test_quiet_record_without_its_daemon_is_a_present_captain() {
+  local home drained
+  home=$(make_home quiet-captain quiet)
+  echo captain > "$home/stub-mode"
+  start_host "$home"
+  wait_until 150 watcher_live "$home" || fail "quiet: the host never started a watcher cycle"
+  append_status "$home" 'ready for review'
+  wait_until 250 host_exited "$home" || fail "quiet: the captain outcome did not wake the present captain's main: $(cat "$home/state/.supervision-host.log")"
+  assert_re '	handled	turn=[^	]*	posture=attended	' "$home/state/.supervision-host.log" "a quiet record must leave the host's turn attended"
+  assert_no_re '^POSTURE: AWAY' "$home/engine-call.1" "a turn beside a quiet record must carry no away tail"
+  assert_re 'MAIN DIALOG MIRROR' "$home/engine-call.1" "a turn beside a quiet record must carry the captain's dialog"
+  assert_grep 'MAIN processes it from its next drain' "$home/engine-report.log" "a captain report beside a quiet record must say main processes it"
+  assert_re '^supervision-host: branch-outcome: .*\(store rows 1\); run bin/fm-wake-drain.sh' "$home/host.out" \
+    "the exit must name the captain outcome's store row for the present captain"
+  drained=$(FM_HOME="$home" "$FAKE_CLAUDE" -c '"$0" 2>&1' "$ROOT/bin/fm-wake-drain.sh")
+  assert_contains "$drained" "BRANCH OUTCOMES (captain outcomes the supervision session recorded for you" "main's drain must present the captain outcome beside a quiet record"
+  assert_contains "$drained" " ago] demo: stub escalated: " "the section must carry the outcome"
+  [ -f "$home/state/.afk-contract" ] || fail "the host must leave quiet mode's record in place"
+
+  home=$(make_home quiet-main-only quiet)
+  start_host "$home"
+  wait_until 150 watcher_live "$home" || fail "quiet main-only: the host never started a watcher cycle"
+  append_status "$home" 'which export format?' needs-decision
+  wait_until 250 host_exited "$home" || fail "quiet main-only: the decision close did not reach main: $(cat "$home/state/.supervision-host.log")"
+  assert_re '^signal: .*demo.status' "$home/host.out" "the decision close must reach main as the arm printed it"
+  [ "$(engine_calls "$home")" -eq 0 ] || fail "quiet main-only: the engine took a decision close from a present captain"
+  assert_re '	pass-through	attended	main-only	signal:' "$home/state/.supervision-host.log" "the ledger must record the attended main-only pass-through"
+  pass "host: a quiet record without its daemon is a present captain, so outcomes and decisions reach main"
+}
+
 test_attended_main_only_close_passes_straight_to_main() {
   local home
   home=$(make_home attended-main-only attended)
@@ -1099,6 +1140,31 @@ test_claude_stop_hook_delivers_a_main_only_pass_through() {
   assert_re '^signal: .*demo.status' "$home/hook.err" "the rewake must carry the close"
   watcher_live "$home" || fail "hook main-only: the pass-through left no successor watcher"
   pass "host+hook: an attended main-only pass-through rewakes main and keeps its successor watcher"
+}
+
+# The live repro (2026-09-28): a quiet record live with no daemon flag parked a
+# present Claude captain, whose worker's captain outcomes waited for a return.
+# Through the real Stop hook the outcome now rewakes main, with no away note.
+test_claude_stop_hook_rewakes_a_present_captain_beside_a_quiet_record() {
+  local home drained
+  home=$(make_primary_home hook-quiet-record)
+  # This case runs an engine turn from the primary root, whose prompt reads the skills.
+  ln -s "$ROOT/.agents" "$home/.agents"
+  FM_HOME="$home" FM_AFK_MODE=quiet "$CONTRACT" enter --words 'keep routine wakes off my main' >/dev/null 2>&1 \
+    || fail "fixture: could not record quiet mode"
+  echo captain > "$home/stub-mode"
+  start_hook_session "$home"
+  turn_end "$home"
+  wait_until 150 watcher_live "$home" || fail "hook quiet: the Stop hook never started a watcher cycle: $(cat "$home/hook.err" 2>/dev/null)"
+  append_status "$home" 'ready for review'
+  wait_until 250 hook_exited "$home" || fail "hook quiet: the Stop hook never closed: $(cat "$home/state/.supervision-host.log")"
+  assert_re '	handled	turn=[^	]*	posture=attended	' "$home/state/.supervision-host.log" "a quiet record must leave the host's turn attended"
+  assert_rewoke_main "$home" "hook quiet"
+  assert_re '^supervision-host: branch-outcome: ' "$home/hook.err" "the rewake must carry the captain outcome"
+  assert_no_grep 'not a return' "$home/hook.err" "a present captain's rewake must not call itself away-posture supervision"
+  drained=$(main_drain "$home")
+  assert_contains "$drained" " ago] demo: stub escalated: " "main's drain must present the captain outcome beside a quiet record"
+  pass "host+hook: a captain outcome beside a quiet record rewakes the present captain with no away note"
 }
 
 test_claude_stop_hook_delivers_a_close_that_turns_main_only_at_its_turn() {
@@ -2438,12 +2504,14 @@ test_branch_outcomes_keep_a_drain_presented_outcome_across_an_index_repair
 test_attended_routine_wake_is_handled_on_the_engine_and_stays_off_main
 test_attended_captain_outcome_reaches_main_through_branch_outcomes
 test_captain_leaving_mid_turn_keeps_its_captain_outcome_for_the_return
+test_quiet_record_without_its_daemon_is_a_present_captain
 test_attended_main_only_close_passes_straight_to_main
 test_main_only_pass_through_leaves_the_successor_watcher_running
 test_attended_close_with_unidentified_main_session_passes_to_main
 test_close_accepted_away_that_turns_attended_passes_to_main
 test_attended_close_that_turns_main_only_before_its_turn_passes_to_main
 test_claude_stop_hook_delivers_a_main_only_pass_through
+test_claude_stop_hook_rewakes_a_present_captain_beside_a_quiet_record
 test_claude_stop_hook_delivers_a_close_that_turns_main_only_at_its_turn
 test_claude_stop_hook_notifies_when_at_turn_downtime_write_fails
 test_successor_close_during_main_turn_is_delivered_at_the_next_turn_end

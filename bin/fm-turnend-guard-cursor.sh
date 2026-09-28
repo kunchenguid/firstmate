@@ -396,7 +396,8 @@ fi
 if [ "$ACTIONABLE" -eq 1 ]; then
   if [ "$HOST_MODE" -eq 1 ]; then
     WAKE=$(awk '/^supervision-host:/ { print; next } /^(signal:|stale:|check:|heartbeat)/ && shown++ < 8' "$ARM_OUT" 2>/dev/null)
-    if [ -e "$STATE/.afk-contract" ]; then
+    if [ -e "$STATE/.afk-contract" ] \
+      && [ "$(FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-afk-contract.sh" mode 2>/dev/null)" != quiet ]; then
       WAKE="$WAKE
 This wake comes from automatic supervision under the away-posture record, not from the captain: it is not a return, so handle it under the away posture."
     fi

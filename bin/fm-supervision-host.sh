@@ -35,8 +35,10 @@
 #
 # THE LOOP. It owns watcher cycles through bin/fm-watch-arm.sh. The posture is
 # the away-posture record state/.afk-contract, read at every close and again
-# when a turn starts. On each actionable close:
-#   - attended (no record): the close reaches main exactly as the arm printed
+# when a turn starts: only an away record is away, and no record or quiet
+# mode's record (fm_afk_contract_away_present, bin/fm-afk-contract.sh AWAY OR
+# QUIET) is a present captain. On each actionable close:
+#   - attended (no away record): the close reaches main exactly as the arm printed
 #     it, as without the host, unless the supervision session may take it: the
 #     home names a usable engine, its turns have every tool they need, this
 #     primary has a verified dialog mirror (bin/fm-host-mirror.sh verified;
@@ -52,7 +54,7 @@
 #     marker still reads downtime and the re-arm owner delivers the close to
 #     main. The watcher singleton lock makes the session's next arm attach to
 #     that cycle instead of starting a second one;
-#   - away (the record exists): every close goes to the engine.
+#   - away (an away record exists): every close goes to the engine.
 # Every turn that starts attended meets that rule again at its start, so a
 # close accepted away whose turn starts attended (the captain returned in
 # between) or an attended close whose task turned main-only while the
@@ -171,6 +173,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 # shellcheck source=bin/fm-supervision-engine-lib.sh
 . "$SCRIPT_DIR/fm-supervision-engine-lib.sh"
+# shellcheck source=bin/fm-afk-contract.sh
+. "$SCRIPT_DIR/fm-afk-contract.sh"
 
 FIRST_ARM_RESTART=0
 case "${1:-}" in
@@ -550,7 +554,7 @@ returned_during_turn() {
   RETURNED_ROWS=
   RETURNED_SEQS=
   RETURNED_LOOKUP_FAILED=0
-  [ -n "$LAST_TURN" ] && [ "$TURN_POSTURE" = away ] && [ ! -f "$STATE/.afk-contract" ] || return 1
+  [ -n "$LAST_TURN" ] && [ "$TURN_POSTURE" = away ] && ! fm_afk_contract_away_present "$STATE" || return 1
   if ! TURN_RECEIPT_SEQS=$(awk -F '\t' -v turn="$LAST_TURN" \
     '$1 == turn { printf "%s%s", sep, $2; sep = "," }' "$RECEIPTS" 2>/dev/null); then
     RETURNED_LOOKUP_FAILED=1
@@ -772,7 +776,7 @@ handle_wake() {  # <reason-lines>
   ENGINE_ERROR=0
   HEALTH_NOTE=
   TURN_POSTURE=attended
-  [ ! -f "$STATE/.afk-contract" ] || TURN_POSTURE=away
+  ! fm_afk_contract_away_present "$STATE" || TURN_POSTURE=away
   first=$(printf '%s\n' "$reason" | head -n 1)
   if [ "$TURN_POSTURE" = attended ]; then
     attended_acceptor "$first" || return 2
@@ -1013,7 +1017,7 @@ while :; do
   fi
   # Attended: the close reaches main exactly as the plain arm delivers it,
   # unless the supervision session may take it (attended_acceptor).
-  if [ ! -f "$STATE/.afk-contract" ]; then
+  if ! fm_afk_contract_away_present "$STATE"; then
     if ! attended_acceptor "$(printf '%s\n' "$REASON" | head -n 1)"; then
       log_line "pass-through	attended	$ATTENDED_WHY	$(printf '%s\n' "$REASON" | head -n 1)"
       if [ "$ATTENDED_WHY" = main-only ]; then
@@ -1095,7 +1099,7 @@ while :; do
   # Attended captain outcomes are main's to process; away they wait for the
   # return, including when the captain left while this turn ran. The close
   # itself was handled, so only the host's lines reach main.
-  if [ -n "$LAST_TURN" ] && [ ! -f "$STATE/.afk-contract" ]; then
+  if [ -n "$LAST_TURN" ] && ! fm_afk_contract_away_present "$STATE"; then
     CAPTAIN_SEQS=$(turn_captain_seqs "$LAST_TURN")
     if [ -n "$CAPTAIN_SEQS" ]; then
       ARM_TEXT=

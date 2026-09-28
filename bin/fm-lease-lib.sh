@@ -67,9 +67,9 @@
 #     merging a PR, landing local-only work, spawning workers, answering a
 #     decision, retiring a secondmate - refuse the branch actor outright,
 #     lease or no lease, while the home is attended. While a confirmed,
-#     readable, live away-posture
-#     record exists (bin/fm-afk-contract.sh validate; docs/pi-supervision-
-#     branch.md "Postures"), main is parked and its STANDING authority
+#     readable, live away record exists (bin/fm-afk-contract.sh validate and
+#     mode, never quiet mode's record, whose captain is present; docs/pi-
+#     supervision-branch.md "Postures"), main is parked and its STANDING authority
 #     relocates to the branch for exactly the actions whose guarded script
 #     opts in with --away-relocated: a PR merge, a fresh spawn of queued work,
 #     and a decision answer. Each guarded script keeps its own mechanical gate;
@@ -237,13 +237,14 @@ fm_lease_guard_release() {
 }
 
 # fm_lease_away_relocated: 0 iff main's standing authority is relocated to the
-# branch actor right now - a confirmed, readable, live away-posture record
-# exists in $STATE, as bin/fm-afk-contract.sh's own validate subcommand judges
+# branch actor right now - a confirmed, readable, live away record exists in
+# $STATE, as bin/fm-afk-contract.sh's own validate and mode subcommands judge
 # it (the header's role-partition paragraph). Read fresh on every call, never
 # cached, because the record can be archived between two guarded actions.
 fm_lease_away_relocated() {
   [ -f "$STATE/.afk-contract" ] || return 1
-  FM_STATE_OVERRIDE="$STATE" "$FM_LEASE_LIB_DIR/fm-afk-contract.sh" validate >/dev/null 2>&1
+  FM_STATE_OVERRIDE="$STATE" "$FM_LEASE_LIB_DIR/fm-afk-contract.sh" validate >/dev/null 2>&1 || return 1
+  [ "$(FM_STATE_OVERRIDE="$STATE" "$FM_LEASE_LIB_DIR/fm-afk-contract.sh" mode 2>/dev/null)" != quiet ]
 }
 
 # fm_lease_forbid_branch <action-label> [--away-relocated]: refuse (exit

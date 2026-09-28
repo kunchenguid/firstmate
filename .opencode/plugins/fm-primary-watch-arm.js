@@ -145,8 +145,19 @@ async function sessionOwnsLock(paths) {
   return false;
 }
 
+// An away record, never quiet mode's (bin/fm-afk-contract.sh mode owns that
+// reading): a record whose mode cannot be read as quiet reads as away.
+function awayRecordPresent(paths) {
+  if (!existsSync(`${paths.state}/.afk-contract`)) return false;
+  const result = spawnSync("bash", [`${paths.root}/bin/fm-afk-contract.sh`, "mode"], {
+    encoding: "utf8",
+    env: { ...process.env, FM_STATE_OVERRIDE: paths.state },
+  });
+  return String(result.stdout || "").trim() !== "quiet";
+}
+
 // The host-mode wake message: every "supervision-host:" line in order, wake
-// lines capped at eight, and the away note while the posture record exists.
+// lines capped at eight, and the away note while an away record exists.
 function hostWakeMessage(paths, combined) {
   let shown = 0;
   const lines = combined.split(/\r?\n/).filter((line) => {
@@ -158,7 +169,7 @@ function hostWakeMessage(paths, combined) {
     return false;
   });
   if (lines.length === 0) return "";
-  if (existsSync(`${paths.state}/.afk-contract`)) {
+  if (awayRecordPresent(paths)) {
     lines.push("This wake comes from automatic supervision under the away-posture record, not from the captain: it is not a return, so handle it under the away posture.");
   }
   return lines.join("\n");

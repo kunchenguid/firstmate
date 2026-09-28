@@ -581,13 +581,22 @@ EOF
 # An opted-in home spawns the supervision host in the arm's place; its streamed
 # status line drives readiness and the handling handoff, and a handed-back
 # wake is delivered with every host line and the away note.
-test_watch_extension_runs_the_supervision_host() {
-  local repo home log out status
-  repo="$TMP_ROOT/watch-host/repo"; home="$TMP_ROOT/watch-host/home"; log="$TMP_ROOT/watch-host/arm.log"
+test_watch_extension_runs_the_supervision_host() {  # [away|quiet]
+  local kind=${1:-away} repo home log out status f
+  repo="$TMP_ROOT/watch-host-$kind/repo"; home="$TMP_ROOT/watch-host-$kind/home"; log="$TMP_ROOT/watch-host-$kind/arm.log"
   install_omp_extension_fixture "$repo"
   mkdir -p "$home/state" "$home/config"
   : > "$home/config/supervision-host"
-  : > "$home/state/.afk-contract"
+  if [ "$kind" = quiet ]; then
+    # Quiet mode's record is a present captain (bin/fm-afk-contract.sh AWAY OR
+    # QUIET): the extension asks the record owner, so the same handback carries
+    # no away note.
+    for f in fm-afk-contract.sh fm-classify-lib.sh fm-timeout-lib.sh; do cp "$ROOT/bin/$f" "$repo/bin/$f"; done
+    FM_HOME="$home" FM_AFK_MODE=quiet "$ROOT/bin/fm-afk-contract.sh" enter --words 'keep routine wakes off my main' >/dev/null 2>&1 \
+      || fail "fixture: could not record quiet mode"
+  else
+    : > "$home/state/.afk-contract"
+  fi
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = --handling-delivered ]; then
@@ -612,7 +621,7 @@ sleep 30
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh" "$repo/bin/fm-supervision-host.sh"
   out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_WATCH_REARM_RETRY_LIMIT=1 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 \
-    EXT="$repo/.omp/extensions/fm-primary-omp-watch.ts" node --input-type=module 2>&1 <<'EOF'
+    RECORD_KIND="$kind" EXT="$repo/.omp/extensions/fm-primary-omp-watch.ts" node --input-type=module 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
 import { writeFileSync, readFileSync } from "node:fs";
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
@@ -641,9 +650,12 @@ for (const needle of [
   "signal: omp-host done",
   "supervision-host: the away session could not take this wake: fixture; this wake is yours",
   "supervision-host: outcome 1 for demo [captain]: fixture",
-  "not from the captain: it is not a return",
 ]) {
   if (!sent[0].m.includes(needle)) throw new Error(`the follow-up lacks '${needle}': ${sent[0].m}`);
+}
+const awayNote = sent[0].m.includes("not from the captain: it is not a return");
+if (process.env.RECORD_KIND === "quiet" ? awayNote : !awayNote) {
+  throw new Error(`the away note must appear exactly under an away record (${process.env.RECORD_KIND}): ${sent[0].m}`);
 }
 await handlers.get("before_agent_start")({ type: "before_agent_start", prompt: sent[0].m }, {});
 await handlers.get("session_shutdown")({}, {});
@@ -651,9 +663,9 @@ process.exit(0);
 EOF
 )
   status=$?
-  expect_code 0 "$status" "omp watch extension host mode: $out"
+  expect_code 0 "$status" "omp watch extension host mode ($kind record): $out"
   [ -z "$out" ] || fail "omp watch extension host test printed output: $out"
-  pass ".omp watch extension: an opted-in home runs the supervision host and relays every host line"
+  pass ".omp watch extension: an opted-in home runs the supervision host and relays every host line ($kind record)"
 }
 
 # A host cycle boundary can close with only a "supervision-host:" line; left
@@ -805,5 +817,6 @@ test_ownership_proof_is_omp_keyed
 test_turnend_guard_extension_compels_one_continuation
 test_watch_extension_arms_and_delivers
 test_watch_extension_runs_the_supervision_host
+test_watch_extension_runs_the_supervision_host quiet
 test_watch_extension_replays_a_host_only_boundary_across_replacement
 test_watch_extension_delivers_a_split_host_close_whole

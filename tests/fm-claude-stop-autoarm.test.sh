@@ -35,7 +35,10 @@ install_autoarm_scripts() {
   cp "$ROOT/bin/fm-cursor-lib.sh" "$dir/bin/fm-cursor-lib.sh"
   cp "$ROOT/bin/fm-hook-host-lib.sh" "$dir/bin/fm-hook-host-lib.sh"
   cp "$ROOT/bin/fm-lock.sh" "$dir/bin/fm-lock.sh"
-  chmod +x "$dir/bin/fm-claude-stop-autoarm.sh" "$dir/bin/fm-lock.sh"
+  cp "$ROOT/bin/fm-afk-contract.sh" "$dir/bin/fm-afk-contract.sh"
+  cp "$ROOT/bin/fm-classify-lib.sh" "$dir/bin/fm-classify-lib.sh"
+  cp "$ROOT/bin/fm-timeout-lib.sh" "$dir/bin/fm-timeout-lib.sh"
+  chmod +x "$dir/bin/fm-claude-stop-autoarm.sh" "$dir/bin/fm-lock.sh" "$dir/bin/fm-afk-contract.sh"
 }
 
 make_primary_dir() {
@@ -1475,6 +1478,24 @@ test_host_handback_under_away_record_is_not_a_return() {
   pass "auto-arm: a wake the host hands back under the away record says it is automatic supervision, not a return"
 }
 
+# Quiet mode's record is a present captain (bin/fm-afk-contract.sh AWAY OR
+# QUIET), so a wake the host hands back beside it carries no away note.
+test_host_handback_beside_a_quiet_record_carries_no_away_note() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/host-handback-quiet")
+  mkdir -p "$dir/config"
+  : > "$dir/config/supervision-host"
+  : > "$dir/state/task.meta"
+  FM_HOME="$dir" FM_AFK_MODE=quiet "$ROOT/bin/fm-afk-contract.sh" enter --words 'keep routine wakes off my main' >/dev/null 2>&1 \
+    || fail "fixture: could not record quiet mode"
+  write_host_fixture "$dir" handed-back
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a wake the host hands back must rewake main"
+  assert_contains "$out" "signal: fixture.status" "the handed-back wake must carry its reason line"
+  assert_not_contains "$out" "not a return" "a present captain's rewake must not call itself away-posture supervision"
+  pass "auto-arm: a wake the host hands back beside a quiet record carries no away note"
+}
+
 test_plain_arm_banner_keeps_its_wake_line_cap() {
   local dir out expected
   dir=$(make_primary_dir "$TMP_ROOT/plain-banner")
@@ -1642,6 +1663,7 @@ test_long_poll_grace_reaches_arm_wrapper
 test_host_absent_flag_keeps_the_arm
 test_host_boundary_rewakes_with_the_host_line
 test_host_handback_under_away_record_is_not_a_return
+test_host_handback_beside_a_quiet_record_carries_no_away_note
 test_plain_arm_banner_keeps_its_wake_line_cap
 test_host_handback_carries_every_host_line
 test_host_stand_down_is_silent
