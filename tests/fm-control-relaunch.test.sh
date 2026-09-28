@@ -390,6 +390,30 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
   pass "fm-control relaunch: a same-harness relaunch replaces the agent in the same endpoint and worktree"
 }
 
+test_claude_relaunch_rereads_the_worker_agent_profile() {
+  local dir out rc launch
+  dir=$(new_case worker-agent rl-agent)
+  add_ship_task "$dir" rl-agent claude
+  mkdir -p "$dir/home/config"
+  printf 'crewmate\n' > "$dir/home/config/crew-claude-agent"
+
+  out=$(run_control "$dir" rl-agent relaunch --note "use the initial worker profile"); rc=$?
+  expect_code 0 "$rc" "the initial Claude worker relaunch should succeed"$'\n'"$out"
+  assert_contains "$(cat "$dir/fake/literal")" "--agent 'crewmate' " \
+    "the initial launch must carry the configured worker profile"
+
+  printf 'my-plugin:worker_2\n' > "$dir/home/config/crew-claude-agent"
+  : > "$dir/fake/literal"
+  out=$(run_control "$dir" rl-agent relaunch --note "use the updated worker profile"); rc=$?
+  expect_code 0 "$rc" "Claude worker relaunch after a profile change should succeed"$'\n'"$out"
+  launch=$(cat "$dir/fake/literal")
+  assert_contains "$launch" "--agent 'my-plugin:worker_2' " \
+    "the relaunch must carry the updated worker profile"
+  assert_not_contains "$launch" "--agent 'crewmate' " \
+    "the relaunch must not retain the previous worker profile"
+  pass "fm-control relaunch: Claude workers reread config/crew-claude-agent"
+}
+
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text() {
   local dir out rc
   dir=$(new_case pending-exit rl43)
@@ -2387,6 +2411,7 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
 }
 
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
+test_claude_relaunch_rereads_the_worker_agent_profile
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
 test_relaunch_from_linked_home_preserves_recorded_worktree
