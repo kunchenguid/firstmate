@@ -34,11 +34,7 @@
 # Primary config/supervision-host-off is the fleet's supervision-host opt-out,
 # so a primary that opts out opts every secondmate home out too, while each
 # home's config/supervision-host engine line stays its own.
-# Primary config/fleet-seats declares the fleet-wide seat pools, so a remote home
-# knows which models must wait for a seat granted by the primary
-# (bin/fm-fleet-seats.sh).
-# It also pushes
-# the one primary-authoritative shared captain-preference file,
+# It also pushes the one primary-authoritative shared captain-preference file,
 # data/captain-shared.md, into each secondmate home's data/ as a read-only copy.
 # Shared-captain convergence records the SHA-256 of the last successfully
 # published destination generation beside that copy. A destination whose bytes
