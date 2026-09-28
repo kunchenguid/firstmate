@@ -268,7 +268,8 @@ start_primary() {  # <lab>
   wait_until 300 watcher_live "$lab" || fail "$(basename "$lab"): the host never started a watcher"$'\n'"$(diagnose "$lab")"
   wait_until "$TURN_POLLS" turn_idle "$lab" "$started" || fail "$(basename "$lab"): the setup turn never ended"$'\n'"$(diagnose "$lab")"
   wait_until 300 listener_live "$lab" || fail "$(basename "$lab"): the stand-in remote listener is not owned"$'\n'"$(diagnose "$lab")"
-  grep -q 'fm-claude-stop-autoarm.sh' "$lab/fm/.claude/settings.json" \
+  jq -e '[.hooks.Stop[]?.hooks[]? | select(.type == "command" and .asyncRewake == true and (.command | endswith("/bin/fm-claude-stop-autoarm.sh")))] | length == 1' \
+    "$lab/fm/.claude/settings.json" >/dev/null \
     || fail "$(basename "$lab"): the lab lacks the tracked Stop hook registration"
   evidence "$(basename "$lab") step 1: primary idle (claude pid $(cat "$lab/fm/state/.lock"), $CLAUDE_VERSION, model $MODEL); tracked Stop hook registered; config/supervision-host present; host pid $(awk -F '\t' '$1 == "host" { print $2; exit }' "$lab/fm/state/.supervision-host") parked on watcher $(watcher_pid "$lab"); listener runner $(listener_pid "$lab"); captain prompts so far: $(captain_prompts "$lab")"
   evidence "$(basename "$lab") transcript: $(transcript "$lab")"
