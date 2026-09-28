@@ -443,8 +443,9 @@ EOF
 # than failing, so a <store> that appeared while this call was saving is caught
 # after the move by the nested copy it leaves behind, not by mv's exit status.
 FM_CONTROL_ADOPTED_WIRING_UNSAFE=
+# shellcheck disable=SC2034 # FM_CONTROL_ADOPTED_WIRING_UNSAFE is read by callers (fm-spawn.sh) after this returns.
 fm_control_preserve_adopted_wiring() {  # <worktree> <store>
-  local wt=${1-} store=${2-} tmp path rel
+  local wt=${1-} store=${2-} tmp path rel nested
   [ -n "$wt" ] && [ -n "$store" ] || return 1
   FM_CONTROL_ADOPTED_WIRING_UNSAFE=
   if [ -e "$store" ] || [ -L "$store" ]; then
@@ -462,17 +463,18 @@ fm_control_preserve_adopted_wiring() {  # <worktree> <store>
       return 1
     fi
     rel=${path#"$wt"/}
-    mkdir -p "$tmp/$(dirname "$rel")" && cp -p "$path" "$tmp/$rel" || {
+    if ! { mkdir -p "$tmp/$(dirname "$rel")" && cp -p "$path" "$tmp/$rel"; }; then
       FM_CONTROL_ADOPTED_WIRING_UNSAFE=$path
       rm -rf "$tmp"
       return 1
-    }
+    fi
   done <<EOF
 $(fm_control_worktree_wiring_paths "$wt")
 EOF
   mv -f "$tmp" "$store" 2>/dev/null || { rm -rf "$tmp"; return 1; }
-  if [ -e "$store/${tmp##*/}" ]; then
-    rm -rf "$store/${tmp##*/}"
+  nested=${tmp##*/}
+  if [ -n "$nested" ] && [ -e "$store/$nested" ]; then
+    rm -rf "${store:?}/${nested:?}"
     return 2
   fi
 }
