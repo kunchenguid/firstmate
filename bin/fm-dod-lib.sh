@@ -249,6 +249,36 @@ fm_brief_task_content_valid() {  # <file>
   [ -n "$(printf '%s' "$task" | tr -d '[:space:]')" ]
 }
 
+# When a present subsection parses empty because an unfenced same-level heading
+# ended it before any body text, print one clause naming that heading. A sibling
+# contract heading or a following level-1 heading is how a blank subsection
+# ordinarily ends, and then this prints nothing. The ending rule itself stays in
+# bin/fm-brief-heading-lib.sh.
+fm_brief_task_heading_cutoff_clause() {  # <file>
+  local file=$1 heading body term level subject
+  local -a subjects=()
+  [ -f "$file" ] && [ -r "$file" ] || return 1
+  for heading in "## Captain's intent" "## Firstmate spec"; do
+    fm_brief_task_heading_present "$file" "$heading" || continue
+    body=$(fm_brief_task_heading_body "$file" "$heading")
+    [ -z "$(printf '%s' "$body" | tr -d '[:space:]')" ] || continue
+    term=$(fm_brief_task_heading_terminator "$file" "$heading") || continue
+    case "$term" in
+      "## Captain's intent"|"## Firstmate spec") continue ;;
+    esac
+    level=$(fm_brief_heading_line_level "$term")
+    [ "$level" -eq 2 ] || continue
+    subjects+=("$heading (ended at \`$term\`)")
+  done
+  [ "${#subjects[@]}" -gt 0 ] || return 1
+  if [ "${#subjects[@]}" -eq 1 ]; then
+    subject=${subjects[0]}
+  else
+    subject="${subjects[0]} and ${subjects[1]}"
+  fi
+  printf '%s parsed empty because a subsection body ends at the next unfenced heading of the same or higher level; put the body text before any such heading, and use ### or deeper for a heading that should stay inside the subsection\n' "$subject"
+}
+
 # Print the first `## Captain's intent` body line that opens with an operator
 # address spelling; fail when there is none. The body is never rewritten.
 fm_brief_intent_address_line() {  # <file>

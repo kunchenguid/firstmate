@@ -718,6 +718,8 @@ EOF
   [ "$status" -ne 0 ] || fail "spawn of empty Task subsections should exit non-zero"
   assert_contains "$out" "must contain nonempty ## Captain's intent and ## Firstmate spec" \
     "empty Task subsections were not rejected semantically"
+  assert_not_contains "$out" "parsed empty because" \
+    "a blank subsection ended by the next contract heading was blamed on a nested heading"
   assert_absent "$home/state/$id.meta" "empty-subsection spawn wrote task metadata"
 
   id=promote-unfilled-e1
@@ -873,6 +875,177 @@ EOF
   assert_not_contains "$spec_body" "This is a SCOUT task" \
     "legacy promotion copied the scout Setup section into Firstmate spec"
   pass "fm-spawn/fm-promote: leftover Task placeholders are refused until both subsections are filled"
+}
+
+# A subsection that opens with another same-level heading parses as empty while
+# the heading is still present. The refusal has to name that ending rule so the
+# brief can be fixed; a deeper heading, a fenced example, and a later same-level
+# heading after real body text stay on the ordinary content check.
+test_spawn_names_same_level_heading_that_empties_a_subsection() {
+  local rec home proj fakebin id out status
+  rec=$(make_home heading-cutoff)
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+
+  id=delivery-spec-same-level
+  mkdir -p "$home/data/$id"
+  cat > "$home/data/$id/brief.md" <<'EOF'
+# Task
+## Captain's intent
+Fix the pager off-by-one.
+
+## Firstmate spec
+## Scope
+Keep the fix inside the pager.
+
+# Definition of done
+Delivery contract: mode=direct-PR
+EOF
+  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode direct-PR --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn of a spec opened by a same-level heading should exit non-zero"
+  assert_contains "$out" "must contain nonempty ## Captain's intent and ## Firstmate spec" \
+    "same-level heading refusal dropped the nonempty requirement"
+  assert_contains "$out" "## Firstmate spec (ended at \`## Scope\`) parsed empty because a subsection body ends at the next unfenced heading of the same or higher level" \
+    "same-level heading refusal did not name the heading that ended the spec"
+  assert_contains "$out" "use ### or deeper for a heading that should stay inside the subsection" \
+    "same-level heading refusal did not say what heading level stays inside the subsection"
+  assert_not_contains "$out" "Captain's intent (ended at" \
+    "a filled Captain's intent was described as ended by a heading"
+  assert_absent "$home/state/$id.meta" "same-level heading refusal wrote task metadata"
+  assert_absent "$home/data/$id/launch-brief.md" "same-level heading refusal published a launch brief"
+
+  id=delivery-both-same-level
+  mkdir -p "$home/data/$id"
+  cat > "$home/data/$id/brief.md" <<'EOF'
+# Task
+## Captain's intent
+## Reported ask
+Fix the pager off-by-one.
+
+## Firstmate spec
+## Scope
+Keep the fix inside the pager.
+
+# Definition of done
+Delivery contract: mode=direct-PR
+EOF
+  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode direct-PR --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn of two subsections opened by same-level headings should exit non-zero"
+  assert_contains "$out" "## Captain's intent (ended at \`## Reported ask\`) and ## Firstmate spec (ended at \`## Scope\`) parsed empty because" \
+    "a brief with two cut-off subsections did not name both ending headings in one refusal"
+  assert_absent "$home/state/$id.meta" "two-heading refusal wrote task metadata"
+
+  id=delivery-indented-same-level
+  mkdir -p "$home/data/$id"
+  cat > "$home/data/$id/brief.md" <<'EOF'
+# Task
+## Captain's intent
+Fix the pager off-by-one.
+
+## Firstmate spec
+ ## Scope
+Keep the fix inside the pager.
+
+# Definition of done
+Delivery contract: mode=direct-PR
+EOF
+  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode direct-PR --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn of a spec opened by an indented same-level heading should exit non-zero"
+  assert_contains "$out" "ended at \` ## Scope\`" \
+    "an indented same-level heading was not named as the line that ended the spec"
+  assert_absent "$home/state/$id.meta" "indented same-level heading refusal wrote task metadata"
+
+  id=delivery-level-one-end
+  mkdir -p "$home/data/$id"
+  cat > "$home/data/$id/brief.md" <<'EOF'
+# Task
+## Captain's intent
+Fix the pager off-by-one.
+
+## Firstmate spec
+# Scope
+Keep the fix inside the pager.
+
+# Definition of done
+Delivery contract: mode=direct-PR
+EOF
+  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode direct-PR --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn of a spec ended by a level-1 heading should exit non-zero"
+  assert_contains "$out" "must contain nonempty ## Captain's intent and ## Firstmate spec" \
+    "a level-1 ending stopped using the ordinary nonempty refusal"
+  assert_not_contains "$out" "parsed empty because" \
+    "a level-1 section break was explained as a nested same-level heading"
+
+  id=delivery-deeper-heading
+  mkdir -p "$home/data/$id"
+  cat > "$home/data/$id/brief.md" <<'EOF'
+# Task
+## Captain's intent
+Fix the pager off-by-one.
+
+## Firstmate spec
+### Scope
+Keep the fix inside the pager.
+
+# Definition of done
+Delivery contract: mode=direct-PR
+EOF
+  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode direct-PR --yolo off)
+  assert_not_contains "$out" "must contain nonempty" \
+    "a ### heading inside Firstmate spec was treated as ending the subsection"
+  assert_not_contains "$out" "parsed empty because" \
+    "a ### heading inside Firstmate spec produced the heading-cutoff refusal"
+
+  id=delivery-fenced-same-level
+  mkdir -p "$home/data/$id"
+  cat > "$home/data/$id/brief.md" <<'EOF'
+# Task
+## Captain's intent
+Fix the pager off-by-one.
+
+## Firstmate spec
+```markdown
+## Scope
+An example heading, not the subsection boundary.
+```
+Keep the fix inside the pager.
+
+# Definition of done
+Delivery contract: mode=direct-PR
+EOF
+  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode direct-PR --yolo off)
+  assert_not_contains "$out" "must contain nonempty" \
+    "a fenced same-level heading made a filled spec fail content validation"
+  assert_not_contains "$out" "parsed empty because" \
+    "a fenced same-level heading produced the heading-cutoff refusal"
+
+  id=delivery-later-same-level
+  mkdir -p "$home/data/$id"
+  cat > "$home/data/$id/brief.md" <<'EOF'
+# Task
+## Captain's intent
+Fix the pager off-by-one.
+
+## Firstmate spec
+Keep the fix inside the pager.
+## Scope
+Further notes the body parser stops before.
+
+# Definition of done
+Delivery contract: mode=direct-PR
+EOF
+  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode direct-PR --yolo off)
+  assert_not_contains "$out" "must contain nonempty" \
+    "body text before a later same-level heading failed content validation"
+  assert_not_contains "$out" "parsed empty because" \
+    "body text before a later same-level heading produced the heading-cutoff refusal"
+
+  pass "fm-spawn: a same-level heading that empties a subsection is named in the refusal"
 }
 
 # Exercise the serialized input a worker is told to pass to no-mistakes, not
@@ -1636,5 +1809,6 @@ test_spawn_notices_a_ship_branch_against_the_registry_prefix
 test_spawn_refuses_a_registry_forge_it_cannot_read
 test_promotion_carries_the_forge_binding
 test_spawn_and_promote_require_filled_task_subsections
+test_spawn_names_same_level_heading_that_empties_a_subsection
 test_project_mode_resolves_branch_prefix
 echo "# all fm-task-delivery tests passed"
