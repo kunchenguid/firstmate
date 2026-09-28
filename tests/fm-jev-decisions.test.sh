@@ -105,31 +105,32 @@ urgent=$("$DECISION_SH" --input "$TSV" --min-noul 0.35 --json)
 
 # 4. Resolve commands are shell-safe for hostile task and key values.
 EVIL="$TDIR/evil.tsv"
-printf '%s\t%s\t%s\t%s\n' "t;touch $TDIR/pwned-task" "old-\$(touch $TDIR/pwned-key)" blocked "superseded" > "$EVIL"
-cmds=$("$DECISION_SH" --input "$EVIL" --resolve-cmds)
+EVIL_TASK='t;touch pwned-task'
+# shellcheck disable=SC2016
+EVIL_KEY='old-$(touch pwned-key)'
+EVIL_STATE="$TDIR/evil-state"; mkdir -p "$EVIL_STATE"
+: > "$EVIL_STATE/$EVIL_TASK.meta"
+printf '%s\t%s\t%s\t%s\n' "$EVIL_TASK" "$EVIL_KEY" blocked "superseded" > "$EVIL"
+cmds=$(FM_STATE_OVERRIDE="$EVIL_STATE" "$DECISION_SH" --input "$EVIL" --resolve-cmds)
 assert_contains "$cmds" "bin/fm-send.sh" "resolve cmd emitted for stale key"
 FAKE="$TDIR/fakeroot"; mkdir -p "$FAKE/bin"
 printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$@" > %q\n' "$TDIR/argv" > "$FAKE/bin/fm-send.sh"; chmod +x "$FAKE/bin/fm-send.sh"
 (cd "$FAKE" && bash -c "$cmds")
-[ ! -e "$TDIR/pwned-task" ] && [ ! -e "$TDIR/pwned-key" ] || fail "resolve cmds executed injected shell"
-[ "$(sed -n 1p "$TDIR/argv")" = "t;touch $TDIR/pwned-task" ] || fail "resolve cmd must pass the task verbatim"
-[ "$(sed -n 3p "$TDIR/argv")" = "old-\$(touch $TDIR/pwned-key)" ] || fail "resolve cmd must pass the key verbatim"
+[ ! -e "$FAKE/pwned-task" ] && [ ! -e "$FAKE/pwned-key" ] || fail "resolve cmds executed injected shell"
+[ "$(sed -n 1p "$TDIR/argv")" = "$EVIL_TASK" ] || fail "resolve cmd must pass the task verbatim"
+[ "$(sed -n 3p "$TDIR/argv")" = "$EVIL_KEY" ] || fail "resolve cmd must pass the key verbatim"
 
-# 5. Config-reread closure wording applies only to CONFIG_REREAD pending replies.
+# 5. Pending replies may still be owed: stale ones get no auto-resolve command.
 WORDING="$TDIR/wording.tsv"
 printf '%s\t%s\t%s\t%s\n' \
   w pending-reply-cfg blocked "pending-reply-missed: task=w request=CONFIG_REREAD" \
   w pending-reply-other blocked "pending-reply-missed: task=w request=STATUS_PING" \
   > "$WORDING"
-wording=$("$DECISION_SH" --input "$WORDING" --json)
-note_of() { printf '%s' "$wording" | python3 -c 'import json,shlex,sys; print({i["key"]: shlex.split(i["resolve_cmd"])[-1] for i in json.load(sys.stdin)}[sys.argv[1]])' "$1"; }
-[ "$(note_of pending-reply-cfg)" = "auto-resolved: expired legacy config reread from previous phase" ] ||
-  fail "CONFIG_REREAD pending reply must get the config-reread closure note"
-[ "$(note_of pending-reply-other)" = "auto-resolved: superseded historical decision" ] ||
-  fail "non-CONFIG_REREAD pending reply must get the generic closure note"
-case "$(printf '%s' "$wording" | python3 -c 'import json,sys; i=[i for i in json.load(sys.stdin) if i["key"]=="pending-reply-other"][0]; print(i["resolve_cmd"], i["suggested_action"])')" in
-  *"config reread"*) fail "generic closure path must not mention config reread" ;;
-esac
+: > "$EVIL_STATE/w.meta"
+wording=$(FM_STATE_OVERRIDE="$EVIL_STATE" "$DECISION_SH" --input "$WORDING" --json)
+[ "$(printf '%s' "$wording" | python3 -c 'import json,sys; print(",".join(sorted(i["category"] + ":" + i["resolve_cmd"] for i in json.load(sys.stdin))))')" = "stale_historical:,stale_historical:" ] ||
+  fail "stale pending replies must not get an auto-resolve command: $wording"
+assert_contains "$wording" "no longer owed" "pending reply suggestion asks to confirm the reply is not owed"
 
 # 6. Status-file extraction: tab-bearing notes keep key/verb intact, --all is read-only.
 STATE="$TDIR/state it's"; mkdir -p "$STATE"
@@ -144,6 +145,7 @@ assert_contains "$all" '"key": "active-pick"' "--all scans the state dir"
 # 7. Resolve commands pin the home and state the decisions were read from.
 OTHER="$TDIR/other state"; mkdir -p "$OTHER"
 printf 'blocked [key=old-dep]: superseded dependency\n' > "$OTHER/beta.status"
+: > "$OTHER/beta.meta"
 # shellcheck disable=SC2016
 printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$FM_HOME" "$FM_STATE_OVERRIDE" "$@" > %q\n' "$TDIR/argv" > "$FAKE/bin/fm-send.sh"
 check_pinned() {
@@ -158,6 +160,13 @@ check_pinned() {
 }
 check_pinned status-file --status-file "$OTHER/beta.status"
 check_pinned state-dir --all --state-dir "$OTHER"
+
+# 7b. A torn-down task (no metadata) gets no resolve command fm-send could not target.
+GONE="$TDIR/gone state"; mkdir -p "$GONE"
+printf 'blocked [key=old-dep]: superseded dependency\n' > "$GONE/gamma.status"
+gone=$("$DECISION_SH" --all --state-dir "$GONE" --resolve-cmds)
+[ "$gone" = "# No actionable resolve commands generated." ] || fail "torn-down task must not get a resolve cmd: $gone"
+assert_contains "$("$DECISION_SH" --all --state-dir "$GONE")" "task metadata gone" "torn-down task is flagged for manual close"
 
 # 8. A key configured only in the home's .env is used.
 ENVHOME="$TDIR/envhome"; mkdir -p "$ENVHOME"

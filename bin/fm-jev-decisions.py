@@ -87,6 +87,8 @@ def get_api_key(fm_root: Path) -> str | None:
 
     # 3. Try vault injection wrapper if available
     run_py = fm_root / "bin" / "jev-typesafe-run.py"
+    if not run_py.exists():
+        run_py = Path("/opt/ra/firstmate/bin/jev-typesafe-run.py")
 
     if run_py.exists():
         try:
@@ -246,12 +248,9 @@ def classify_decision(
 
         # Assign recommendations
         if item.category == "stale_historical":
-            if item.key.startswith("pending-reply-") and "request=CONFIG_REREAD" in item.note:
-                item.suggested_action = "Auto-resolve expired legacy pending-reply config reread"
-                item.resolve_cmd = send_prefix + shlex.join(
-                    ["bin/fm-send.sh", item.task, "--resolve-key", item.key,
-                     "auto-resolved: expired legacy config reread from previous phase"]
-                )
+            if item.key.startswith("pending-reply-"):
+                # A pending reply may still be owed; closing it is a judgment, not a stale sweep.
+                item.suggested_action = "Confirm the pending reply is no longer owed before closing it"
             else:
                 item.suggested_action = "Archive or resolve superseded historical decision"
                 item.resolve_cmd = send_prefix + shlex.join(
@@ -413,6 +412,11 @@ def main() -> None:
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [executor.submit(classify_decision, item, api_key, never_send, send_prefix) for item in items]
             classified_items = [f.result() for f in futures]
+        # fm-send resolves its target through state/<task>.meta; a torn-down task has none.
+        for item in classified_items:
+            if item.resolve_cmd and not (send_state / f"{item.task}.meta").is_file():
+                item.resolve_cmd = ""
+                item.suggested_action += " (task metadata gone; close it by hand)"
 
     # Filters
     filtered_items = classified_items
