@@ -3,7 +3,8 @@
 // Each test mocks the world beneath the plugin noun by noun: the environment that
 // names the Firstmate home, an in-memory file system for the per-home preference, the
 // engine's own draw for every component the mod passes through, and a journal of every
-// call the mod makes on `$` (blits, toasts, redraws, the command it registers).
+// call the mod makes on `$` (blits, toasts, redraws, transcript lines, the command it
+// registers).
 import type { On, SessionMessage } from "claude-code";
 import { mock, type MockClock } from "claude-code/testing";
 
@@ -27,6 +28,8 @@ export type Journal = {
   sessionMessageReads: number;
   /** Number of `/config` listings that reached the mocked menu. */
   configLists: number;
+  /** Every `$.ui.log` line, in order. */
+  logs: string[];
 };
 
 export type World = {
@@ -77,6 +80,7 @@ export function world(on: On, options: WorldOptions = {}): World {
     fsReads: [],
     sessionMessageReads: 0,
     configLists: 0,
+    logs: [],
   };
   let theme: unknown = "theme" in options ? options.theme : "dark";
   let blitDenial: string | undefined;
@@ -85,6 +89,18 @@ export function world(on: On, options: WorldOptions = {}): World {
   on("fs.read", async (_$, e) => {
     journal.fsReads.push(e.path);
     return files.has(e.path) ? { value: files.get(e.path)! } : { deny: `ENOENT: ${e.path}` };
+  });
+  // A file's time is its content's hash, so every changed content restamps it.
+  on("fs.stat", async (_$, e) => {
+    const text = files.get(e.path);
+    if (text === undefined) return { deny: `ENOENT: ${e.path}` };
+    let mtimeMs = 0;
+    for (const char of text) mtimeMs = (mtimeMs * 31 + char.codePointAt(0)!) % 2147483647;
+    return { value: { kind: "file" as const, size: text.length, mtimeMs } };
+  });
+  on("ui.log", async (_$, e) => {
+    journal.logs.push(e.text);
+    return { value: undefined };
   });
   on("fs.write", async (_$, e) => {
     if (writeFailure !== undefined) return { deny: writeFailure };

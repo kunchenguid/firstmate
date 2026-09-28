@@ -57,6 +57,13 @@
 #     Main-actor drain calls processed-init under the outcome lock when that
 #     ready marker is absent or invalid, on every harness; only a genuine store
 #     fault keeps the lost-wake backstop skipped.
+#   - Tail copy: $STATE/.branch-outcomes-tail.jsonl holds the newest
+#     OUTCOME_TAIL_ROWS store lines verbatim, replaced atomically after each
+#     append. It is a read-only display source for readers that cannot read the
+#     unbounded store (the Claude Code Calm mod's supervision notes, whose file
+#     read rejects over 4 MiB); it is never authoritative, and a failed refresh
+#     leaves the stored outcome and its delivery untouched. It first appears
+#     with the next append.
 #   - Every mutation runs under $STATE/.branch-outcomes.lock so the branch
 #     extension and a concurrent session-start replay cannot interleave.
 #   - The store is written BEFORE the outcome is delivered to main
@@ -132,6 +139,8 @@ MAX_SAFE_SEQ=9007199254740991
 OUTCOME_INDEX_VERSION=fm-branch-outcome-index-v1
 OUTCOME_INDEX_MAX_BYTES=512
 OUTCOME_INDEX_READY="$STATE/.branch-outcome-index-ready"
+OUTCOME_TAIL="$STATE/.branch-outcomes-tail.jsonl"
+OUTCOME_TAIL_ROWS=200
 # The "recordedAgo" field present and unprocessed add to captain rows (see the
 # usage above).
 # Callers pass --argjson now "$(date +%s)".
@@ -331,6 +340,15 @@ EOF
   publish_outcome_index_ready "$(last_seq)"
 }
 
+write_outcome_tail() {
+  local tmp
+  tmp=$(mktemp "$STATE/.branch-outcomes-tail.XXXXXX") || return 1
+  if ! { tail -n "$OUTCOME_TAIL_ROWS" "$STORE" > "$tmp" && mv -f -- "$tmp" "$OUTCOME_TAIL"; }; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
+
 print_unread() {
   local cursor last
   cursor=$(read_cursor)
@@ -500,6 +518,7 @@ case "$CMD" in
       "$SEQ" "$(date +%s)" "$(json_escape "$TASK")" "$(json_escape "$WAKE")" \
       "$VERDICT" "$(json_escape "$SUMMARY")" "$SILENT" "$CAPTURED_STATUS_ENDPOINT" \
       "$(json_escape "$CAPTURED_STATUS_IDENT")" >> "$STORE"
+    write_outcome_tail || echo "warning: outcome $SEQ was stored but its display tail copy could not be refreshed" >&2
     # A task with neither a live meta nor a status log is retired: the branch
     # reports the teardown it just performed, and writing the index here would
     # recreate the footprint teardown removed. The outcome itself is still

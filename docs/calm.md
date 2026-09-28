@@ -191,7 +191,7 @@ Without that exact value, the mod is a complete no-op, even if Claude Code's rol
 
 - There is no `/calm` command.
 - The mod reads neither the preference nor the transcript.
-- The mod runs no timer.
+- The mod runs no timer and writes no supervision note.
 - Every drawing stays exactly as Claude Code draws it, whatever `config/calm` says.
 
 ### Toggling Calm on Claude Code
@@ -220,6 +220,24 @@ On Claude Code the boat is painted in Claude Code's own theme colors rather than
 The theme family follows the `theme` setting by its prefix, `dark` or `light`, and is re-read when the theme changes.
 It uses the light set as the both-readable fallback for `auto`, custom, missing, or unreadable values.
 The Pi extension keeps its standard ANSI blue and yellow.
+
+### Supervision notes on Claude Code
+
+With the flag on, the mod shows the supervision notes Pi shows, whether Calm is on or off, because on Pi they are supervision UI rather than Calm UI.
+Each note is one dim line appended to the transcript, drawn like a system notice and never sent to the model:
+
+| Line | When |
+| --- | --- |
+| `⛵ <task>: <summary>` | The supervision session recorded a routine outcome that is not silent. |
+| `⚓ [seq N] <task>: <summary>` | It recorded a captain outcome; main still receives and processes it as [`supervision-host.md`](supervision-host.md#captain-outcomes) describes. |
+| `⛵ Supervision session paused after repeated engine errors; main will handle wakes while it cools down.` | The host's broken-session latch trips. |
+| `⛵ Supervision session recovered after a successful cooldown probe.` | That latch clears. |
+
+Silent routine outcomes show nothing.
+The mod checks the outcome store's display tail copy and the host's latch file every 3 seconds, so a note can land a few seconds after its outcome.
+At each session start, including `claude --continue`, it first replays every captain outcome main has not acknowledged and every unread routine note, the newest 20 with a count of any older ones.
+The mod only reads these files: the drain remains the only presenter that marks outcomes read or processed.
+Only a home that runs the supervision host has outcomes to show.
 
 ### What Calm hides on Claude Code
 
@@ -273,6 +291,9 @@ Evidence for 2.1.280 and the record-backed doorbell is also in its [2026-09-25 r
 - The sailboat is painted through Claude Code's Raster element, whose colors are RGB quantized to 256-color escapes rather than the standard 16-color ANSI codes Pi's widget emits.
 - The detailed transcript view (`ctrl+o`) keeps its per-message timestamp and model headers where hidden assistant rows sat, because those headers are not a hookable drawing.
 - Collapsed thinking never appears in Claude Code's default view.
+- Supervision notes are transcript lines rather than messages: session storage, `/export`, and `claude --continue` keep none of them, and the session-start replay covers only outcomes still unread or unprocessed.
+  Each note is plain dim text, so its glyph cannot take its own color as on Pi.
+- A captain outcome still wakes main through a `Stop hook feedback` row, which fires no hookable drawing, so its anchor line appears beside that row rather than replacing it.
   The mod has no thinking drawing to hide in other views.
 
 ### Claude Code regression entry points

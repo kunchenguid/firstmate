@@ -1,0 +1,122 @@
+// firstmate-calm under `claude plugin test`: the supervision notes, one dim transcript
+// line per outcome the store's tail copy gains and per latch change, replayed at session
+// start, shown whether Calm is on or off, and never marking anything read.
+import { describe, expect, test } from "claude-code/testing";
+import { HOME, world } from "./support.ts";
+
+const sessionStart = { cwd: "/work", surface: "terminal" as const, isInteractive: true };
+const STATE = `${HOME}/state`;
+const TAIL = `${STATE}/.branch-outcomes-tail.jsonl`;
+const CURSOR = `${STATE}/.branch-outcomes-cursor`;
+const PROCESSED = `${STATE}/.branch-outcomes-processed`;
+const HEALTH = `${STATE}/.supervision-host-health`;
+const POLL = 3000;
+
+type Row = { seq: number; task: string; verdict: "routine" | "captain"; summary: string; silent?: boolean; epoch?: number };
+
+function tail(rows: readonly Row[]): string {
+  return rows
+    .map((row) =>
+      JSON.stringify({
+        seq: row.seq,
+        epoch: row.epoch ?? 100,
+        task: row.task,
+        wake: "",
+        verdict: row.verdict,
+        summary: row.summary,
+        silent: row.silent ?? false,
+        statusEndpoint: 0,
+        statusIdent: "-",
+      }),
+    )
+    .map((line) => `${line}\n`)
+    .join("");
+}
+
+function health(key: string, cooldown: number): string {
+  return `key=${key}\nerrors=${cooldown > 0 ? 2 : 0}\ncooldown=${cooldown}\nretry_after=0\n`;
+}
+
+const history: Row[] = [
+  { seq: 1, task: "fm-old", verdict: "captain", summary: "PR merged earlier" },
+  { seq: 2, task: "fm-a", verdict: "routine", summary: "read already" },
+  { seq: 3, task: "fm-b", verdict: "captain", summary: "decision waiting" },
+  { seq: 4, task: "fm-c", verdict: "routine", summary: "worker healthy" },
+  { seq: 5, task: "fm-d", verdict: "routine", summary: "no change", silent: true },
+];
+
+describe("supervision notes", () => {
+  test("session start replays unprocessed captain rows and unread visible routine rows with Calm off", async ($, on) => {
+    const { files, journal } = world(on);
+    files.set(TAIL, tail(history));
+    files.set(CURSOR, "3\n");
+    files.set(PROCESSED, "1\n");
+    await $.session.start(sessionStart);
+    expect(journal.logs).toEqual(["⚓ [seq 3] fm-b: decision waiting", "⛵ fm-c: worker healthy"]);
+    // Only reads: the markers the drain owns are exactly as they were.
+    expect(files.get(CURSOR)).toBe("3\n");
+    expect(files.get(PROCESSED)).toBe("1\n");
+  });
+
+  test("each new row becomes one line on the next slow tick, a silent row none, and none twice", async ($, on) => {
+    const { clock, files, journal } = world(on, { preference: "on\n" });
+    files.set(TAIL, tail(history));
+    files.set(CURSOR, "5\n");
+    files.set(PROCESSED, "3\n");
+    await $.session.start(sessionStart);
+    expect(journal.logs).toEqual([]);
+    files.set(
+      TAIL,
+      tail([
+        ...history,
+        { seq: 6, task: "fm-e", verdict: "routine", summary: "reconciled\nthe backlog" },
+        { seq: 7, task: "fm-f", verdict: "routine", summary: "nothing new", silent: true },
+        { seq: 8, task: "fm-g", verdict: "captain", summary: "PR https://example.test/pr/1 checks green" },
+      ]),
+    );
+    await clock.advance(POLL - 1);
+    expect(journal.logs).toEqual([]);
+    await clock.advance(1);
+    expect(journal.logs).toEqual(["⛵ fm-e: reconciled the backlog", "⚓ [seq 8] fm-g: PR https://example.test/pr/1 checks green"]);
+    await clock.advance(POLL * 3);
+    expect(journal.logs).toHaveLength(2);
+  });
+
+  test("a tail copy that first appears after session start shows only rows recorded since then", async ($, on) => {
+    const { clock, files, journal } = world(on);
+    await clock.set(1_000_000);
+    await $.session.start(sessionStart);
+    files.set(TAIL, tail([...history, { seq: 6, task: "fm-new", verdict: "captain", summary: "fresh", epoch: 1_000 }]));
+    await clock.advance(POLL);
+    expect(journal.logs).toEqual(["⚓ [seq 6] fm-new: fresh"]);
+  });
+
+  test("a latch trip and its recovery each write Pi's health note, and a new session key alone writes none", async ($, on) => {
+    const { clock, files, journal } = world(on);
+    files.set(HEALTH, health("s1", 0));
+    await $.session.start(sessionStart);
+    files.set(HEALTH, health("s1", 300));
+    await clock.advance(POLL);
+    expect(journal.logs).toEqual([
+      "⛵ Supervision session paused after repeated engine errors; main will handle wakes while it cools down.",
+    ]);
+    files.set(HEALTH, health("s1", 0));
+    await clock.advance(POLL);
+    expect(journal.logs[1]).toBe("⛵ Supervision session recovered after a successful cooldown probe.");
+    files.set(HEALTH, health("s2", 0));
+    await clock.advance(POLL);
+    expect(journal.logs).toHaveLength(2);
+  });
+
+  test("a hot reload or resume replays the rows still due and follows from the tail again", async ($, on) => {
+    const { clock, files, journal } = world(on);
+    files.set(TAIL, tail(history));
+    files.set(CURSOR, "5\n");
+    files.set(PROCESSED, "2\n");
+    await $.session.start(sessionStart);
+    await $.session.start(sessionStart);
+    expect(journal.logs).toEqual(["⚓ [seq 3] fm-b: decision waiting", "⚓ [seq 3] fm-b: decision waiting"]);
+    await clock.advance(POLL);
+    expect(journal.logs).toHaveLength(2);
+  });
+});

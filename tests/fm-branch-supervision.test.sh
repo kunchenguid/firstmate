@@ -139,6 +139,30 @@ PY
   pass "outcome store is append-only and refuses sequence reuse after a torn tail"
 }
 
+test_outcome_append_keeps_a_bounded_display_tail() {
+  local home store tail cursor
+  home="$TMP_ROOT/tail-home"
+  mkdir -p "$home/state"
+  store="$home/state/branch-outcomes.jsonl"
+  tail="$home/state/.branch-outcomes-tail.jsonl"
+  jq -nc 'range(1; 206) | {seq: ., epoch: 100, task: "task-\(.)", wake: "", verdict: "routine", summary: "row \(.)", silent: false}' \
+    > "$store"
+  printf '205\n' > "$home/state/.branch-outcomes-cursor"
+  cursor=$(cat "$home/state/.branch-outcomes-cursor")
+  [ ! -e "$tail" ] || fail "a display tail existed before any append"
+
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-206 --verdict captain --summary $'PR "ready"\nwith a second line' >/dev/null \
+    || fail "append failed on a store with history"
+  [ "$(wc -l < "$tail" | tr -d ' ')" = 200 ] || fail "the display tail is not bounded to the newest 200 rows"
+  [ "$(cat "$tail")" = "$(tail -n 200 "$store")" ] || fail "the display tail is not the store's newest rows verbatim"
+  [ "$(head -n 1 "$tail" | jq -r .seq)" = 7 ] || fail "the display tail does not start at the 200th newest row"
+  [ "$(tail -n 1 "$tail" | jq -r .summary)" = $'PR "ready"\nwith a second line' ] \
+    || fail "the display tail lost the new row's exact summary"
+  [ "$(cat "$home/state/.branch-outcomes-cursor")" = "$cursor" ] || fail "refreshing the display tail moved the read cursor"
+  pass "outcome append refreshes a bounded, verbatim display tail of the newest rows without moving the cursor"
+}
+
 test_outcome_startup_replay_preserves_silence() {
   local home replay out status store
   home="$TMP_ROOT/store-silent-home"
@@ -1374,6 +1398,7 @@ WRAPPER
 
 test_branch_prompt_is_byte_stable_and_above_cache_floor
 test_outcome_store_is_append_only_with_cursor_reads
+test_outcome_append_keeps_a_bounded_display_tail
 test_outcome_startup_replay_preserves_silence
 test_outcome_startup_replay_stops_at_captain_barrier
 test_outcome_cursor_corruption_fails_closed

@@ -27,6 +27,13 @@
 // The boat is painted in Claude Code's own theme colors: the family is read from the
 // `theme` setting at load and re-read when a `config.set` changes it.
 //
+// Supervision notes, whether Calm is on or off, as Pi shows them regardless of Calm: a
+// slow timer follows the outcome store's display tail copy and the supervision host's
+// latch, and `$.ui.log` appends one dim line per new outcome or latch change, never
+// sent to the model. `session.start` replays the unread and unprocessed outcomes. The
+// mod only reads: the drain remains the one presenter that marks outcomes read.
+// ../lib/fm-branch-notes.ts owns every line and which rows are due.
+//
 // Loading is lazy and cached within a session: a resumed transcript or a hot reload can
 // draw restored rows before `session.start`, so every hook awaits that session's load of
 // the per-home preference and restored working notes rather than trusting a stale "off".
@@ -55,6 +62,16 @@ import {
   userTextOperationalRecord,
   workingNoteKey,
 } from "../lib/fm-calm-presentation.ts";
+import {
+  firstmateStateDirectory,
+  hostHealthNote,
+  newOutcomeNotes,
+  parseHostHealth,
+  parseOutcomeMarker,
+  parseOutcomeTail,
+  replayOutcomeNotes,
+  type HostHealth,
+} from "../lib/fm-branch-notes.ts";
 
 /** The slash command the mod serves, the same name as Pi's `/calm`. */
 const CALM_COMMAND = "calm";
@@ -76,6 +93,21 @@ let palette: CalmShipRasterPalette = CALM_SHIP_RASTER_PALETTES.light;
 // Every Spinner site currently drawing the boat, by its requestId, with the mounted
 // Raster size a blit must repeat exactly.
 const sites = new Map<string, { columns: number; rows: number }>();
+/** How often the supervision notes check the store's tail copy and the host's latch. */
+const BRANCH_NOTES_POLL_MS = 3000;
+// What the notes have shown in this session; each `session.start` replaces it.
+type NotesState = {
+  tailPath: string;
+  healthPath: string;
+  tailStamp: string | undefined;
+  healthStamp: string | undefined;
+  lastSeen: number | undefined;
+  sinceEpoch: number;
+  health: HostHealth | undefined;
+};
+let notes: NotesState | undefined;
+let notesTimer: { cancel(): void } | undefined;
+let notesPolling = false;
 
 function isActivated($: EngineInterface): Promise<boolean> {
   if (activation === undefined) {
@@ -186,6 +218,84 @@ function doorbellIsOperational($: EngineInterface, text: string): Promise<boolea
   return verdict;
 }
 
+/** A file's text with the size and time it was read at, or undefined when it is missing or unchanged. */
+async function readIfChanged(
+  $: EngineInterface,
+  path: string,
+  stamp: string | undefined,
+): Promise<{ stamp: string; text: string } | undefined> {
+  let current: string;
+  try {
+    const stat = await $.fs.stat(path);
+    current = `${stat.size}:${stat.mtimeMs}`;
+  } catch {
+    return undefined;
+  }
+  if (current === stamp) return undefined;
+  const text = await readText($, path);
+  return text === undefined ? undefined : { stamp: current, text };
+}
+
+/** Replay the due outcomes, then follow the store from its current tail. */
+async function startNotes($: EngineInterface): Promise<void> {
+  const state = firstmateStateDirectory(
+    {
+      FM_HOME: await $.env.get("FM_HOME"),
+      FM_ROOT_OVERRIDE: await $.env.get("FM_ROOT_OVERRIDE"),
+      FM_STATE_OVERRIDE: await $.env.get("FM_STATE_OVERRIDE"),
+    },
+    $.plugin.root,
+  );
+  const tailPath = `${state}/.branch-outcomes-tail.jsonl`;
+  const healthPath = `${state}/.supervision-host-health`;
+  const tail = await readIfChanged($, tailPath, undefined);
+  const rows = parseOutcomeTail(tail?.text);
+  const cursor = parseOutcomeMarker(await readText($, `${state}/.branch-outcomes-cursor`));
+  const processed = parseOutcomeMarker(await readText($, `${state}/.branch-outcomes-processed`));
+  for (const line of replayOutcomeNotes(rows, cursor, processed)) $.ui.log(line);
+  const health = await readIfChanged($, healthPath, undefined);
+  notes = {
+    tailPath,
+    healthPath,
+    tailStamp: tail?.stamp,
+    healthStamp: health?.stamp,
+    lastSeen: rows[rows.length - 1]?.seq,
+    sinceEpoch: Math.floor((await $.clock.now()) / 1000),
+    health: parseHostHealth(health?.text),
+  };
+  if (notesTimer === undefined) {
+    notesTimer = $.clock.every(BRANCH_NOTES_POLL_MS, () => {
+      void pollNotes($);
+    });
+  }
+}
+
+/** One slow tick: a line per outcome appended since the last, and a latch change's note. */
+async function pollNotes($: EngineInterface): Promise<void> {
+  const current = notes;
+  if (current === undefined || notesPolling) return;
+  notesPolling = true;
+  try {
+    const tail = await readIfChanged($, current.tailPath, current.tailStamp);
+    if (tail !== undefined) {
+      current.tailStamp = tail.stamp;
+      const fresh = newOutcomeNotes(parseOutcomeTail(tail.text), current.lastSeen, current.sinceEpoch);
+      current.lastSeen = fresh.lastSeen;
+      for (const line of fresh.lines) $.ui.log(line);
+    }
+    const health = await readIfChanged($, current.healthPath, current.healthStamp);
+    if (health !== undefined) {
+      current.healthStamp = health.stamp;
+      const next = parseHostHealth(health.text);
+      const note = hostHealthNote(current.health, next);
+      if (next !== undefined) current.health = next;
+      if (note !== undefined) $.ui.log(note);
+    }
+  } finally {
+    notesPolling = false;
+  }
+}
+
 /** A zero-height drawing: the row contributes nothing to the transcript's layout. */
 function hiddenRow($: EngineInterface, e: RenderInput): RenderElement {
   const { Box } = $.ui.resolve(e);
@@ -196,6 +306,8 @@ export const register: Register = (on) => {
   on("session.start", async ($, e, next) => {
     if (!(await isActivated($))) return next(e);
     await resetSession($);
+    // Notes that cannot start leave Calm and the transcript exactly as they were.
+    await startNotes($).catch(() => undefined);
     await $.command.register({
       name: CALM_COMMAND,
       description: "Toggle Firstmate's Calm transcript presentation and working ship.",
