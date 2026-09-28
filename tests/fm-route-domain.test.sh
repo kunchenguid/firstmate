@@ -51,6 +51,9 @@ RAW = {
     "null-confidence": {"answers": {"route": {"choice": "portal-ops", "confidence": None}}},
     "null-noul": {"answers": {"route": {"choice": "portal-ops"}, "needs_new_secondmate": {"noul": None}}},
     "no-choice": {"answers": {"route": {"confidence": 0.9}}},
+    "weak-signal": {"answers": {"route": {"choice": "seller-outreach", "confidence": 0.34}, "needs_new_secondmate": {"noul": 0.2}}},
+    "floor-signal": {"answers": {"route": {"choice": "seller-outreach", "confidence": 0.7}, "needs_new_secondmate": {"noul": 0.2}}},
+    "weak-newdomain": {"answers": {"route": {"choice": "new_domain", "confidence": 0.5}, "needs_new_secondmate": {"noul": 0.2}}},
 }
 class H(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
@@ -209,7 +212,13 @@ printf 'zorbex\n' > "$CFG/dispatch-never-send"
 before=$(requests)
 out=$(FM_CONFIG_OVERRIDE="$CFG" "$ROUTER" --registry "$REG_ID" --task "seller leads")
 assert_contains "$out" "action=unavailable" "withheld secondmate id fails closed"
+assert_contains "$out" "zorbex-ops" "withheld secondmate id is named in the reason"
 [ "$(requests)" -eq "$before" ] || fail "nothing may be sent when a secondmate id is withheld"
+
+# Common words matching only the built-in routes do not disable the router.
+printf 'new\ndirect\ndomain\n' > "$CFG/dispatch-never-send"
+out=$(FM_CONFIG_OVERRIDE="$CFG" "$ROUTER" --task "seller leads")
+assert_contains "$out" "action=dispatch" "built-in route names are not checked against the never-send list"
 
 rm "$CFG/dispatch-never-send"; mkdir "$CFG/dispatch-never-send"
 before=$(requests)
@@ -225,7 +234,24 @@ done
 out=$("$DISPATCH" --task "null-answers reply") || fail "dispatcher must survive a malformed response"
 assert_contains "$out" "Router unavailable" "dispatcher falls back on a malformed response"
 
-# 10. Dispatcher branches.
+# 10. Route confidence shares the noul floor: below it never dispatches.
+out=$("$ROUTER" --task "weak-signal seller leads")
+assert_contains "$out" "action=handle_direct" "confidence below the floor falls back to handle_direct"
+assert_contains "$out" "route=captain_direct" "confidence below the floor routes to the captain"
+assert_not_contains "$out" "dispatch_cmd=" "confidence below the floor has no dispatch command"
+out=$("$ROUTER" --task "floor-signal seller leads")
+assert_contains "$out" "action=dispatch" "confidence exactly at the floor dispatches"
+assert_contains "$out" "route=seller-outreach" "confidence at the floor keeps the route"
+out=$("$ROUTER" --task "Seller outreach campaign")
+assert_contains "$out" "action=dispatch" "confidence above the floor dispatches"
+out=$("$ROUTER" --task "weak-newdomain request")
+assert_contains "$out" "action=handle_direct" "a weak new_domain choice does not charter a secondmate"
+rm -f "$TDIR/argv"
+out=$("$DISPATCH" --task "weak-signal seller leads" --execute)
+assert_contains "$out" "Status: Direct communication" "dispatcher handles a weak signal directly"
+[ ! -e "$TDIR/argv" ] || fail "a weak signal must never be dispatched"
+
+# 11. Dispatcher branches.
 out=$("$DISPATCH" --task "Good morning")
 assert_contains "$out" "Status: Direct communication" "dispatcher handle_direct branch"
 out=$("$DISPATCH" --task "Drone firmware")
@@ -254,6 +280,22 @@ rm -f "$TDIR/argv"
 json=$("$DISPATCH" --task "seller leads" --json --execute 2>/dev/null)
 [ "$(printf '%s' "$json" | field action)" = dispatch ] || fail "--json --execute must emit json: $json"
 [ -e "$TDIR/argv" ] || fail "--json --execute must still dispatch"
+[ "$(printf '%s' "$json" | field dispatched)" = True ] || fail "--json --execute must report the send: $json"
+
+# A failed send in --json --execute still emits JSON reporting the failure.
+cp "$FAKE/bin/fm-send.sh" "$TDIR/fm-send.ok"
+printf '#!/usr/bin/env bash\nexit 3\n' > "$FAKE/bin/fm-send.sh"
+code=0; json=$("$DISPATCH" --task "seller leads" --json --execute 2>/dev/null) || code=$?
+cp "$TDIR/fm-send.ok" "$FAKE/bin/fm-send.sh"
+[ "$code" -eq 3 ] || fail "a failed send must exit with its status, got $code"
+[ "$(printf '%s' "$json" | field dispatched)" = False ] || fail "a failed send must be reported in json: $json"
+[ "$(printf '%s' "$json" | field send_exit_code)" = 3 ] || fail "send exit code must be reported: $json"
+
+# A brief larger than one argv string can hold still routes.
+HUGE="$TDIR/huge.md"
+{ printf 'seller leads\n'; head -c 200000 /dev/zero | tr '\0' 'x'; printf '\n'; } > "$HUGE"
+out=$("$DISPATCH" --brief "$HUGE") || fail "a brief over 128 KiB must not abort the dispatcher"
+assert_contains "$out" "Route:      seller-outreach" "a brief over 128 KiB is classified"
 
 # A long brief reaches the second mate whole, under the contract preamble.
 BRIEF="$TDIR/brief.md"

@@ -51,7 +51,7 @@ else
 fi
 
 # Run Jev domain classifier
-ROUTER_JSON=$(python3 "$SCRIPT_DIR/fm-route-domain.py" --json --task="$TASK_INPUT")
+ROUTER_JSON=$(printf '%s' "$TASK_INPUT" | python3 "$SCRIPT_DIR/fm-route-domain.py" --json)
 
 ACTION=$(echo "$ROUTER_JSON" | jq -r '.action')
 ROUTE=$(echo "$ROUTER_JSON" | jq -r '.route')
@@ -61,7 +61,10 @@ MESSAGE=$(echo "$ROUTER_JSON" | jq -r '.dispatch_message // empty')
 
 if [ "$AS_JSON" -eq 1 ]; then
   if [ "$EXECUTE" -eq 1 ] && [ "$ACTION" = dispatch ]; then
-    "$SCRIPT_DIR/fm-send.sh" "$ROUTE" "$MESSAGE" >&2
+    SEND_RC=0
+    "$SCRIPT_DIR/fm-send.sh" "$ROUTE" "$MESSAGE" >&2 || SEND_RC=$?
+    printf '%s\n' "$ROUTER_JSON" | jq --argjson rc "$SEND_RC" '. + {dispatched: ($rc == 0), send_exit_code: $rc}'
+    exit "$SEND_RC"
   fi
   printf '%s\n' "$ROUTER_JSON"
   exit 0

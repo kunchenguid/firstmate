@@ -19,6 +19,8 @@ from pathlib import Path
 TS_BASE = os.environ.get("FM_JEV_TS_BASE", "https://api.typesafe.ai")
 TS_MODEL = os.environ.get("FM_JEV_TS_MODEL", "jev-latest")
 TS_TIMEOUT = float(os.environ.get("FM_JEV_TS_TIMEOUT", "5.0"))
+SIGNAL_FLOOR = 0.7
+BUILTIN_ROUTES = ("new_domain", "captain_direct")
 
 # Mirrors secondmate_registry_parse_line in bin/fm-secondmate-registry-lib.sh.
 _SUFFIX = (
@@ -239,12 +241,12 @@ def main() -> None:
             as_json=args.json,
         )
 
-    withheld_ids = [k for k in criteria if withhold(k, never_send) != k]
+    withheld_ids = [k for k in criteria if k not in BUILTIN_ROUTES and withhold(k, never_send) != k]
     if withheld_ids:
         emit_result(
             "unavailable",
             "captain_direct",
-            reason="a secondmate id matches the never-send list; nothing sent",
+            reason=f"secondmate id {', '.join(withheld_ids)} matches the never-send list; nothing sent",
             task_text=task_text,
             as_json=args.json,
         )
@@ -316,11 +318,18 @@ def main() -> None:
             as_json=args.json,
         )
 
+    reason = None
     if choice == "captain_direct":
         action = "handle_direct"
-    elif choice == "new_domain" or noul_val >= 0.7:
+    elif noul_val >= SIGNAL_FLOOR:
         action = "create_secondmate"
         choice = "new_domain"
+    elif confidence < SIGNAL_FLOOR:
+        action = "handle_direct"
+        reason = f"route confidence {confidence:.3f} below {SIGNAL_FLOOR} for {choice}"
+        choice = "captain_direct"
+    elif choice == "new_domain":
+        action = "create_secondmate"
     else:
         action = "dispatch"
 
@@ -330,6 +339,7 @@ def main() -> None:
         confidence=confidence,
         noul=noul_val,
         probabilities=probs,
+        reason=reason,
         task_text=task_text,
         fm_root=fm_root,
         as_json=args.json,
