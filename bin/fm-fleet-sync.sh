@@ -15,11 +15,12 @@
 # and fetch failures. A project whose registry entry bin/fm-project-mode.sh
 # refuses is skipped too, naming that command so its refusal is readable, rather
 # than synced under a guessed posture.
-# A candidate under projects/ must be the root of its own work tree: git discovery
-# walks up, so a plain nested directory would otherwise resolve to the enclosing
-# repository (the firstmate checkout) and be synced under that directory's label.
-# Anything else is reported as "skipped: not a clone root" naming the repository
-# that would have been touched.
+# A candidate must be the root of its own work tree: git discovery walks up,
+# so a plain nested directory would otherwise resolve to the enclosing repo.
+# A non-root is reported as "skipped: not a clone root" naming that repo.
+# Before any fetch, its registry identity must resolve from on-disk entries in
+# this home's projects dir; unknown or ambiguous identities are skipped rather
+# than assigned a delivery posture from the caller's path spelling.
 # Pruning never deletes the checked-out branch or a branch that still has a
 # worktree, so it cannot discard unlanded work; set FM_FLEET_PRUNE=0 to disable it.
 # When the fetch fails on an orphaned .git/packed-refs.lock (left by a ref rewrite
@@ -34,6 +35,10 @@
 # falling back to an explicit path. Example: from anywhere,
 # `fm-fleet-sync.sh dotfiles-private` syncs just that one clone, same as
 # passing its full projects/dotfiles-private path.
+# On case-insensitive filesystems, alternate letter case for the clone or its
+# projects/ ancestor resolves to the on-disk project entry for mode lookup.
+# Explicitly named symlinks keep their own registry identity where unambiguous;
+# symlinks to clones outside projects/ remain supported when uniquely identified.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -75,11 +80,45 @@ fi
 [ $# -le 1 ] || { usage; exit 1; }
 
 project_label() {
-  case "$PROJ" in
-    "$PROJECTS"/*) basename "$PROJ" ;;
-    projects/*) basename "$PROJ" ;;
-    *) printf '%s\n' "$PROJ" ;;
-  esac
+  local entry matched='' physical='' named='' exact='' matches=0 physical_matches=0 name=''
+  if [ "$(dirname "$PROJ")" -ef "$PROJECTS" ]; then
+    name=$(basename "$PROJ")
+    shopt -s nocasematch
+  fi
+  for entry in "$PROJECTS"/* "$PROJECTS"/.[!.]* "$PROJECTS"/..?*; do
+    [ -d "$entry" ] && [ "$entry" -ef "$PROJ" ] || continue
+    matches=$((matches + 1))
+    matched=$entry
+    if [ -n "$name" ]; then
+      if [ "${entry##*/}" = "$name" ]; then
+        exact=$entry
+        named=$entry
+      elif [ -z "$exact" ] && [[ "${entry##*/}" == "$name" ]]; then
+        named=$entry
+      fi
+    fi
+    if [ ! -L "$entry" ]; then
+      physical_matches=$((physical_matches + 1))
+      physical=$entry
+    fi
+  done
+  if [ "$physical_matches" -eq 1 ]; then
+    if [ "$matches" -gt 1 ]; then
+      if [ -n "$exact" ] && [ -L "$exact" ] \
+          && [[ "${exact##*/}" == "${physical##*/}" ]]; then
+        basename "$exact"
+        return 0
+      fi
+      [ -n "$named" ] && [ ! -L "$named" ] || return 1
+    fi
+    basename "$physical"
+    return 0
+  fi
+  if [ "$matches" -eq 1 ]; then
+    basename "$matched"
+    return 0
+  fi
+  return 1
 }
 
 # resolve_project_arg <arg>: accept a path (used as-is when it already exists)
@@ -301,7 +340,10 @@ report_stuck() {
 
 sync_project() {
   PROJ=$1
-  label=$(project_label)
+  label=$PROJ
+  case "$PROJ" in
+    "$PROJECTS"/*|projects/*) label=$(basename "$PROJ") ;;
+  esac
 
   if [ ! -d "$PROJ" ]; then
     echo "$label: skipped: not a directory"
@@ -319,11 +361,16 @@ sync_project() {
     echo "$label: skipped: not a git repo"
     return 0
   fi
-  # Both sides are physical paths (git resolves --show-toplevel through symlinks),
-  # so a symlinked clone dir still compares equal to its own root.
-  proj_abs=$(cd "$PROJ" && pwd -P) || proj_abs=""
-  if [ "$proj_top" != "$proj_abs" ]; then
+  # Compare the actual directories rather than path spellings: pwd -P keeps a
+  # caller's letter case on case-insensitive macOS even when git reports the
+  # clone's on-disk spelling. -ef also preserves the symlinked-clone allowance;
+  # an enclosing repository has a different directory identity and is refused.
+  if [ ! "$proj_top" -ef "$PROJ" ]; then
     echo "$label: skipped: not a clone root (git would act on $proj_top)"
+    return 0
+  fi
+  if ! label=$(project_label); then
+    echo "$PROJ: skipped: unknown or ambiguous project identity"
     return 0
   fi
   if ! mode_line=$("$FM_ROOT/bin/fm-project-mode.sh" "$label" 2>/dev/null); then

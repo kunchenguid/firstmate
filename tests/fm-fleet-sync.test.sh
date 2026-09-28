@@ -678,6 +678,231 @@ test_non_clone_dir_named_directly_never_syncs_the_enclosing_repo() {
   pass "the single-project form also refuses a directory that is not its own clone root"
 }
 
+# On a case-insensitive filesystem a case-only spelling is the same clone root,
+# not an enclosing repo discovered by git. This is the post-merge single-clone
+# refresh path teardown calls with the recorded project path.
+test_case_variant_clone_root_still_syncs() {
+  local home clone variant out before
+  home=$(new_home)
+  clone=$(build_pair "$home" CaseSpelling)
+  variant="${clone/CaseSpelling/casespelling}"
+  if [ ! "$variant" -ef "$clone" ]; then
+    pass "a mixed-case clone-root path (case-sensitive filesystem; skipped)"
+    return 0
+  fi
+  [ "$variant" != "$clone" ] || fail "the variant must have a different spelling"
+  [ ! -L "$variant" ] || fail "the variant must not rely on a symlink"
+  before=$(head_sha "$clone")
+  advance_origin "$home" CaseSpelling C1
+
+  out=$(run_sync "$home" "$variant")
+
+  assert_contains "$out" "CaseSpelling: synced" \
+    "a case-only spelling of a real clone root must still fast-forward: $out"
+  [ "$(head_sha "$clone")" != "$before" ] || fail "the clone did not advance"
+  [ "$(head_sha "$clone")" = "$(git -C "$clone" rev-parse origin/main)" ] \
+    || fail "the clone was not fast-forwarded to origin/main"
+  pass "a case-only clone-root spelling still fast-forwards"
+}
+
+test_case_variant_local_only_clone_never_fetches() {
+  local home clone variant ancestor out before remote_before
+  home="$TMP_ROOT/local-only-case-alias"
+  mkdir -p "$home/projects"
+  clone=$(build_pair "$home" CaseSpelling)
+  ln -s "$clone" "$home/projects/Alias"
+  variant="${clone/CaseSpelling/casespelling}"
+  ancestor="$home/PROJECTS/CaseSpelling"
+  if [ ! "$variant" -ef "$clone" ] || [ ! "$ancestor" -ef "$clone" ]; then
+    pass "case-alias local-only refusal (case-sensitive filesystem; skipped)"
+    return 0
+  fi
+  mkdir -p "$home/data"
+  printf -- '- CaseSpelling [local-only] - test project (added 2026-06-27)\n' > "$home/data/projects.md"
+  before=$(head_sha "$clone")
+  remote_before=$(git -C "$clone" rev-parse origin/main)
+  advance_origin "$home" CaseSpelling C1
+
+  out=$(run_sync "$home" "$variant")
+  assert_contains "$out" "CaseSpelling: skipped: local-only project" \
+    "a case-only clone name must retain its registered posture: $out"
+  [ "$(head_sha "$clone")" = "$before" ] || fail "clone-name alias fast-forwarded a local-only clone"
+  [ "$(git -C "$clone" rev-parse origin/main)" = "$remote_before" ] \
+    || fail "clone-name alias fetched a local-only clone"
+
+  out=$(run_sync "$home" "$ancestor")
+  assert_contains "$out" "CaseSpelling: skipped: local-only project" \
+    "a case-only ancestor path must retain its registered posture: $out"
+  [ "$(head_sha "$clone")" = "$before" ] || fail "ancestor alias fast-forwarded a local-only clone"
+  [ "$(git -C "$clone" rev-parse origin/main)" = "$remote_before" ] \
+    || fail "ancestor alias fetched a local-only clone"
+  pass "case-only clone and ancestor aliases cannot fetch local-only projects"
+}
+
+test_hidden_local_only_clone_aliases_never_fetch() {
+  local home clone variant ancestor out before remote_before
+  home="$TMP_ROOT/hidden-local-only-case-alias"
+  mkdir -p "$home/projects" "$home/data"
+  clone=$(build_pair "$home" .CaseSpelling)
+  ln -s "$clone" "$home/projects/Alias"
+  printf -- '- .CaseSpelling [local-only] - test project (added 2026-06-27)\n' > "$home/data/projects.md"
+  variant="${clone/.CaseSpelling/.casespelling}"
+  ancestor="$home/PROJECTS/.CaseSpelling"
+  before=$(head_sha "$clone")
+  remote_before=$(git -C "$clone" rev-parse origin/main)
+  advance_origin "$home" .CaseSpelling C1
+
+  out=$(run_sync "$home" "$home/projects/Alias")
+  assert_contains "$out" "skipped: unknown or ambiguous project identity" \
+    "a symlink to a hidden local-only clone must not use a guessed posture: $out"
+  [ "$(head_sha "$clone")" = "$before" ] || fail "hidden clone advanced through its symlink"
+  [ "$(git -C "$clone" rev-parse origin/main)" = "$remote_before" ] \
+    || fail "hidden clone fetched through its symlink"
+
+  if [ ! "$variant" -ef "$clone" ] || [ ! "$ancestor" -ef "$clone" ]; then
+    pass "hidden local-only clone symlink refused (case aliases skipped on case-sensitive filesystem)"
+    return 0
+  fi
+  out=$(run_sync "$home" "$variant")
+  assert_contains "$out" ".CaseSpelling: skipped: local-only project" \
+    "a hidden clone-name case alias must retain its registered posture: $out"
+  [ "$(head_sha "$clone")" = "$before" ] || fail "hidden clone-name alias fast-forwarded"
+  [ "$(git -C "$clone" rev-parse origin/main)" = "$remote_before" ] \
+    || fail "hidden clone-name alias fetched"
+
+  out=$(run_sync "$home" "$ancestor")
+  assert_contains "$out" ".CaseSpelling: skipped: local-only project" \
+    "a hidden clone's ancestor case alias must retain its registered posture: $out"
+  [ "$(head_sha "$clone")" = "$before" ] || fail "hidden ancestor alias fast-forwarded"
+  [ "$(git -C "$clone" rev-parse origin/main)" = "$remote_before" ] \
+    || fail "hidden ancestor alias fetched"
+  pass "hidden local-only clone and case aliases cannot fetch"
+}
+
+test_registered_local_only_symlink_retains_own_posture() {
+  local home clone alias variant ancestor external out before remote_before
+  home="$TMP_ROOT/registered-local-only-symlink"
+  mkdir -p "$home/projects" "$home/data"
+  clone=$(build_pair "$home" ordinary-clone)
+  alias="$home/projects/LocalAlias"
+  ln -s "$clone" "$alias"
+  printf -- '- LocalAlias [local-only] - test project (added 2026-06-27)\n' > "$home/data/projects.md"
+  before=$(head_sha "$clone")
+  remote_before=$(git -C "$clone" rev-parse origin/main)
+  advance_origin "$home" ordinary-clone C1
+
+  out=$(run_sync "$home" "$alias")
+  assert_contains "$out" "skipped: unknown or ambiguous project identity" \
+    "a separately registered local-only symlink must not use the physical clone's posture: $out"
+  [ "$(head_sha "$clone")" = "$before" ] || fail "local-only symlink fast-forwarded its target"
+  [ "$(git -C "$clone" rev-parse origin/main)" = "$remote_before" ] \
+    || fail "local-only symlink fetched its target"
+
+  external="$home/outside-alias"
+  ln -s "$alias" "$external"
+  out=$(run_sync "$home" "$external")
+  assert_contains "$out" "skipped: unknown or ambiguous project identity" \
+    "an external alias to a separately registered local-only symlink must be refused: $out"
+  [ "$(head_sha "$clone")" = "$before" ] || fail "external alias fast-forwarded"
+  [ "$(git -C "$clone" rev-parse origin/main)" = "$remote_before" ] \
+    || fail "external alias fetched"
+
+  variant="$home/projects/localalias"
+  ancestor="$home/PROJECTS/LocalAlias"
+  if [ ! "$variant" -ef "$clone" ] || [ ! "$ancestor" -ef "$clone" ]; then
+    pass "registered local-only symlink refused (case aliases skipped on case-sensitive filesystem)"
+    return 0
+  fi
+  out=$(run_sync "$home" "$variant")
+  assert_contains "$out" "skipped: unknown or ambiguous project identity" \
+    "a symlink clone-name case alias must not use the physical clone's posture: $out"
+  [ "$(head_sha "$clone")" = "$before" ] || fail "symlink clone-name alias fast-forwarded"
+  [ "$(git -C "$clone" rev-parse origin/main)" = "$remote_before" ] \
+    || fail "symlink clone-name alias fetched"
+
+  out=$(run_sync "$home" "$ancestor")
+  assert_contains "$out" "skipped: unknown or ambiguous project identity" \
+    "a symlink ancestor case alias must not use the physical clone's posture: $out"
+  [ "$(head_sha "$clone")" = "$before" ] || fail "symlink ancestor alias fast-forwarded"
+  [ "$(git -C "$clone" rev-parse origin/main)" = "$remote_before" ] \
+    || fail "symlink ancestor alias fetched"
+  pass "registered local-only symlink and case aliases cannot fetch"
+}
+
+test_case_sensitive_case_only_symlink_keeps_its_posture() {
+  local home clone alias out before remote_before
+  home="$TMP_ROOT/case-sensitive-symlink-identity"
+  mkdir -p "$home/projects" "$home/data"
+  clone=$(build_pair "$home" clone)
+  alias="$home/projects/Clone"
+  if [ -e "$alias" ]; then
+    pass "case-only symlink identity (case-insensitive filesystem; skipped)"
+    return 0
+  fi
+  ln -s "$clone" "$alias"
+  printf -- '- Clone [local-only] - test project (added 2026-06-27)\n' > "$home/data/projects.md"
+  before=$(head_sha "$clone")
+  remote_before=$(git -C "$clone" rev-parse origin/main)
+  advance_origin "$home" clone C1
+
+  out=$(run_sync "$home" "$alias")
+  assert_contains "$out" "Clone: skipped: local-only project" \
+    "the exact symlink name must select its own registered posture: $out"
+  [ "$(head_sha "$clone")" = "$before" ] || fail "case-only symlink fast-forwarded its target"
+  [ "$(git -C "$clone" rev-parse origin/main)" = "$remote_before" ] \
+    || fail "case-only symlink fetched its target"
+
+  out=$(run_sync "$home" "$clone")
+  assert_contains "$out" "clone: synced" \
+    "the exact physical clone name must select its own posture: $out"
+  [ "$(head_sha "$clone")" != "$before" ] || fail "physical clone did not fast-forward"
+  [ "$(head_sha "$clone")" = "$(git -C "$clone" rev-parse origin/main)" ] \
+    || fail "physical clone did not reach origin/main"
+  pass "case-only symlink and physical clone keep separate postures"
+}
+
+test_unknown_clone_identity_never_fetches() {
+  local home clone out before remote_before
+  home="$TMP_ROOT/unknown-clone-identity"
+  mkdir -p "$home/projects"
+  clone=$(build_pair "$home" unregistered)
+  mv "$clone" "$home/outside-projects"
+  clone="$home/outside-projects"
+  before=$(head_sha "$clone")
+  remote_before=$(git -C "$clone" rev-parse origin/main)
+  advance_origin "$home" unregistered C1
+
+  out=$(run_sync "$home" "$clone")
+  assert_contains "$out" "skipped: unknown or ambiguous project identity" \
+    "a clone with no on-disk project entry must be refused: $out"
+  [ "$(head_sha "$clone")" = "$before" ] || fail "unknown clone identity fast-forwarded"
+  [ "$(git -C "$clone" rev-parse origin/main)" = "$remote_before" ] \
+    || fail "unknown clone identity fetched"
+  pass "unknown clone identity cannot fetch"
+}
+
+test_ambiguous_symlink_aliases_never_fetch() {
+  local home clone out before remote_before
+  home="$TMP_ROOT/ambiguous-symlink-aliases"
+  mkdir -p "$home/projects"
+  clone=$(build_pair "$home" only-clone)
+  mv "$clone" "$home/real-clone"
+  clone="$home/real-clone"
+  ln -s "$clone" "$home/projects/AliasOne"
+  ln -s "$clone" "$home/projects/AliasTwo"
+  before=$(head_sha "$clone")
+  remote_before=$(git -C "$clone" rev-parse origin/main)
+  advance_origin "$home" only-clone C1
+
+  out=$(run_sync "$home" "$home/projects/AliasOne")
+  assert_contains "$out" "skipped: unknown or ambiguous project identity" \
+    "multiple aliases of one external clone must be refused: $out"
+  [ "$(head_sha "$clone")" = "$before" ] || fail "ambiguous aliases fast-forwarded the clone"
+  [ "$(git -C "$clone" rev-parse origin/main)" = "$remote_before" ] \
+    || fail "ambiguous aliases fetched the clone"
+  pass "multiple symlink aliases without a physical project entry are refused"
+}
+
 test_symlinked_clone_still_syncs() {
   local home clone out
   home=$(new_home)
@@ -740,4 +965,11 @@ test_transient_packed_refs_lock_self_clears
 test_non_signature_fetch_failure_is_not_retried
 test_non_clone_dir_never_syncs_the_enclosing_repo
 test_non_clone_dir_named_directly_never_syncs_the_enclosing_repo
+test_case_variant_clone_root_still_syncs
+test_case_variant_local_only_clone_never_fetches
+test_hidden_local_only_clone_aliases_never_fetch
+test_registered_local_only_symlink_retains_own_posture
+test_case_sensitive_case_only_symlink_keeps_its_posture
+test_unknown_clone_identity_never_fetches
+test_ambiguous_symlink_aliases_never_fetch
 test_symlinked_clone_still_syncs
