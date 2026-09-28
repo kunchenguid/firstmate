@@ -1198,7 +1198,40 @@ test_adopted_worktree_teardown_warns_when_restore_fails() {
   expect_code 0 "$rc" "adopted-restore-fails: teardown should still complete"$'\n'"$(cat "$case_dir/stderr")"
   assert_contains "$(cat "$case_dir/stderr")" "could not restore adopted worktree $case_dir/wt" \
     "adopted-restore-fails: teardown reported success without warning that the restore failed"
+  assert_not_contains "$(cat "$case_dir/stdout")" "left in place for its creator" \
+    "adopted-restore-fails: teardown still reported the copy as cleanly handed back"
+  [ -d "$store" ] || fail "adopted-restore-fails: teardown deleted the originals it failed to put back"
   pass "an adopted teardown whose restore fails says so instead of reporting a clean handback"
+}
+
+# The preserve store is the only record of which wiring files firstmate wrote,
+# so for an adopted record a store that is gone is an anomaly, not "nothing to
+# restore": teardown must say so and must not touch the copy on a guess.
+test_adopted_worktree_teardown_warns_when_store_is_missing() {
+  local case_dir rc settings
+  case_dir=$(make_case adopted-store-missing)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' "worktree_source=adopted" >> "$case_dir/state/task-x1.meta"
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  mkdir -p "$case_dir/wt/.claude"
+  settings="$case_dir/wt/.claude/settings.local.json"
+  printf '{"firstmate":true}\n' > "$settings"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "adopted-store-missing: teardown should still complete"$'\n'"$(cat "$case_dir/stderr")"
+  assert_contains "$(cat "$case_dir/stderr")" "could not restore adopted worktree $case_dir/wt" \
+    "adopted-store-missing: teardown said nothing about the vanished preserve store"
+  assert_not_contains "$(cat "$case_dir/stdout")" "left in place for its creator" \
+    "adopted-store-missing: teardown reported a clean handback it could not prove"
+  [ -f "$settings" ] \
+    || fail "adopted-store-missing: teardown removed a file it could not prove firstmate created"
+  pass "an adopted teardown whose preserve store is gone reports the anomaly and touches nothing"
 }
 
 # The claim is the cross-home mutual exclusion on an adopted copy, so a teardown
@@ -4396,6 +4429,7 @@ test_content_in_default_fallback_allows
 test_adopted_worktree_teardown_skips_pool_return
 test_adopted_worktree_teardown_leaves_another_homes_claim
 test_adopted_worktree_teardown_warns_when_restore_fails
+test_adopted_worktree_teardown_warns_when_store_is_missing
 test_content_fallback_refreshes_stale_origin_ref
 test_dirty_worktree_refuses
 test_gh_error_and_content_absent_refuses

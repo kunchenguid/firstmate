@@ -154,6 +154,9 @@
 # spawn in the copy's per-worktree git dir), removes only the wiring files
 # firstmate itself wrote, and releases only this task's own owner claim - a
 # claim another home or another task holds on the same copy is never touched.
+# That store is the only proof of which files firstmate wrote, so a store that
+# is gone or cannot be applied removes nothing at all: teardown warns naming the
+# copy and the store and reports the handback as incomplete rather than clean.
 # The copy itself is left to its creator; the landed-work
 # gates, process reaping, and record cleanup run exactly as for a pooled copy.
 # Orca tasks use the same safety checks, then close the recorded terminal and
@@ -1116,6 +1119,7 @@ fi
 # validator rather than probing or closing an ambient current window.
 WT=$(fm_meta_get "$META" worktree)
 WORKTREE_SOURCE=$(fm_meta_get "$META" worktree_source)
+TEARDOWN_ADOPTED_RESTORE_FAILED=0
 PROJ=$(fm_meta_get "$META" project)
 T_ORCA=
 if [ "$TEARDOWN_WINDOWLESS" = 1 ]; then
@@ -3271,9 +3275,9 @@ cleanup_firstmate_home_children() {
       # its branch, or another home's claim on it.
       if [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
         child_wiring_store=$(fm_adopted_worktree_wiring_store "$child_wt" 2>/dev/null) || child_wiring_store=
-        if [ -z "$child_wiring_store" ] ||
+        if [ -z "$child_wiring_store" ] || [ ! -d "$child_wiring_store" ] ||
           ! fm_control_restore_adopted_wiring "$child_wt" "$child_wiring_store"; then
-          echo "warning: could not restore adopted worktree $child_wt to the wiring its creator handed over (store ${child_wiring_store:-unresolved}); task $child_id's hook files may still be live in that copy" >&2
+          echo "warning: could not restore adopted worktree $child_wt to the wiring its creator handed over: the originals that spawn preserved at ${child_wiring_store:-an unresolvable store path} are missing or could not be put back, so task $child_id's hook files may still be live in that copy and nothing was removed from it" >&2
         fi
         fm_adopted_worktree_owner_release "$child_wt" "$child_id" "$sub_state"
       fi
@@ -3616,9 +3620,10 @@ elif [ "$WORKTREE_SOURCE" = adopted ] && [ "$KIND" != secondmate ]; then
   # is released - a claim another home holds on the same copy is left alone.
   if [ -d "$WT" ]; then
     ADOPT_WIRING_STORE=$(fm_adopted_worktree_wiring_store "$WT" 2>/dev/null) || ADOPT_WIRING_STORE=
-    if [ -z "$ADOPT_WIRING_STORE" ] ||
+    if [ -z "$ADOPT_WIRING_STORE" ] || [ ! -d "$ADOPT_WIRING_STORE" ] ||
       ! fm_control_restore_adopted_wiring "$WT" "$ADOPT_WIRING_STORE"; then
-      echo "warning: could not restore adopted worktree $WT to the wiring its creator handed over (store ${ADOPT_WIRING_STORE:-unresolved}); task $ID's hook files may still be live in that copy" >&2
+      TEARDOWN_ADOPTED_RESTORE_FAILED=1
+      echo "warning: could not restore adopted worktree $WT to the wiring its creator handed over: the originals this spawn preserved at ${ADOPT_WIRING_STORE:-an unresolvable store path} are missing or could not be put back, so task $ID's hook files may still be live in that copy and nothing was removed from it" >&2
     fi
     fm_adopted_worktree_owner_release "$WT" "$ID" "$STATE"
   fi
@@ -3878,7 +3883,11 @@ fi
 if [ "$TEARDOWN_LEGACY_ACCEPTED" = 1 ]; then
   echo "teardown $ID complete (window ${T:-none}, worktree $WT, legacy record accepted without spawn_gen: endpoint $TEARDOWN_LEGACY_ENDPOINT, incarnation $TEARDOWN_META_SPAWN_GEN)"
 elif [ "$WORKTREE_SOURCE" = adopted ] && [ "$KIND" != secondmate ]; then
-  echo "teardown $ID complete (window ${T:-none}; adopted worktree $WT left in place for its creator)"
+  if [ "$TEARDOWN_ADOPTED_RESTORE_FAILED" = 1 ]; then
+    echo "teardown $ID complete (window ${T:-none}; adopted worktree $WT was NOT restored to the wiring its creator handed over - see the warning above; the copy and its branch are untouched)"
+  else
+    echo "teardown $ID complete (window ${T:-none}; adopted worktree $WT left in place for its creator)"
+  fi
 elif teardown_owns_worktree; then
   echo "teardown $ID complete (window ${T:-none}, worktree $WT)"
 else

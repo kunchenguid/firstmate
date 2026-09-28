@@ -1409,7 +1409,7 @@ spawn_abort_cleanup() {
         echo "warning: leaving task $ID's claim on adopted worktree $WT in place; the Treehouse project lock is no longer held, so the next spawn's claim replaces it" >&2
       fi
     fi
-    if [ -n "$SPAWN_ADOPT_WIRING_STORE" ]; then
+    if [ -n "$SPAWN_ADOPT_WIRING_STORE" ] && [ -d "$SPAWN_ADOPT_WIRING_STORE" ]; then
       if ! clear_relaunch_harness_wiring "${HARNESS:-}" "$WT" "${STATE_REAL:-$STATE}" "$ID" ||
         ! fm_control_restore_adopted_wiring "$WT" "$SPAWN_ADOPT_WIRING_STORE"; then
         echo "warning: could not restore adopted worktree $WT's own harness wiring after task $ID's spawn aborted" >&2
@@ -3383,21 +3383,27 @@ spawn_worktree_has_origin_config() { # <worktree>
   return 1
 }
 
-freshen_spawn_worktree_base() { # <worktree>
-  local worktree=$1 default target expected actual status label=pooled
-  [ "$SPAWN_WORKTREE_ADOPTED" = 0 ] || label=adopted
+# The one clean-copy rule for any task worktree, so the adopted pre-flight and
+# the base refresh cannot drift into two verdicts or two wordings for one state.
+spawn_worktree_clean_or_refuse() { # <worktree> <label>
+  local worktree=$1 label=$2 status
   status=$(git -C "$worktree" -c core.quotePath=false status --porcelain) || {
-    echo "error: could not inspect $label worktree '$worktree' before refreshing its base" >&2
+    echo "error: could not inspect $label worktree '$worktree'" >&2
     return 1
   }
-  if [ -n "$status" ]; then
-    if describe_stale_submodule_pins "$worktree" "$status"; then
-      echo "error: $label worktree '$worktree' has a stale submodule checkout, not uncommitted work; refusing to launch and leaving it untouched" >&2
-    else
-      echo "error: $label worktree '$worktree' is not clean; refusing to discard uncommitted work while refreshing its base" >&2
-    fi
-    return 1
+  [ -n "$status" ] || return 0
+  if describe_stale_submodule_pins "$worktree" "$status"; then
+    echo "error: $label worktree '$worktree' has a stale submodule checkout, not uncommitted work; refusing to launch and leaving it untouched" >&2
+  else
+    echo "error: $label worktree '$worktree' is not clean: it has uncommitted changes; refusing to discard uncommitted work and leaving the copy untouched" >&2
   fi
+  return 1
+}
+
+freshen_spawn_worktree_base() { # <worktree>
+  local worktree=$1 default target expected actual label=pooled
+  [ "$SPAWN_WORKTREE_ADOPTED" = 0 ] || label=adopted
+  spawn_worktree_clean_or_refuse "$worktree" "$label" || return 1
   if ! spawn_worktree_has_origin_config "$worktree"; then
     return 0
   fi
@@ -3471,18 +3477,7 @@ spawn_adopt_worktree() {
     echo "error: adopted worktree '$WT' is already recorded for task $(basename "$meta" .meta); refusing to launch a second worker into its copy" >&2
     exit 1
   done
-  status=$(git -C "$WT" -c core.quotePath=false status --porcelain) || {
-    echo "error: could not inspect adopted worktree '$WT'" >&2
-    exit 1
-  }
-  if [ -n "$status" ]; then
-    if describe_stale_submodule_pins "$WT" "$status"; then
-      echo "error: adopted worktree '$WT' has a stale submodule checkout, not uncommitted work; refusing to launch and leaving it untouched" >&2
-    else
-      echo "error: adopted worktree '$WT' has uncommitted changes; a first dispatch cannot tell whose work they are, so it refuses rather than reset them away" >&2
-    fi
-    exit 1
-  fi
+  spawn_worktree_clean_or_refuse "$WT" adopted || exit 1
   spawn_adopt_claim_worktree
   spawn_adopt_preserve_wiring
   SPAWN_WORKTREE_ADOPTED=1
