@@ -738,7 +738,10 @@ PROMPT_ITEMS_PL='
     if ($shape eq "table") {
       my @fields = split /,/, $hdr;
       for my $line (@block) {
-        last if @parsed + @malformed >= $want;
+        if (@parsed + @malformed >= $want) {
+          push @malformed, [ $line ];
+          next;
+        }
         my $row = $line;
         $row =~ s/^\s+//;
         my @vals;
@@ -774,7 +777,10 @@ PROMPT_ITEMS_PL='
       push @{ $groups[-1] }, $line;
     }
     for my $group (@groups) {
-      last if @parsed + @malformed >= $want;
+      if (@parsed + @malformed >= $want) {
+        push @malformed, $group;
+        next;
+      }
       local @PL = @$group;
       local @PU;
       my $i = 0;

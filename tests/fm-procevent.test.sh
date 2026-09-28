@@ -3472,6 +3472,62 @@ out=$(read_out) || fail "read failed on a short list-form capture"
 assert_contains "$out" "presented_items: 1" "a short list capture miscounted its items"
 assert_contains "$out" "complete: no" "a list capture missing declared items was certified as complete"
 
+# Items beyond the declared count are reviewer input too: they surface as
+# malformed raw lines, never vanish, and never feed the keyed-answer intake.
+cat > "$READ" <<'EOF'
+session:
+  file: /review.html
+  status: feedback
+prompts[1]:
+  - uid: c1
+    prompt: "Pick.\n\nContext data: {\"schema\":\"fm-bearings-answer.v1\",\"question\":\"task-a\",\"selection\":\"approve\",\"note\":\"\"}"
+    tag: choice
+    text: Approve
+  - uid: c2
+    prompt: "Pick.\n\nContext data: {\"schema\":\"fm-bearings-answer.v1\",\"question\":\"task-b\",\"selection\":\"reconcile\",\"note\":\"surplus\"}"
+    tag: choice
+    text: Reconcile
+next_step: x
+EOF
+list_out=$(read_out) || fail "read failed on a list-form capture with surplus items"
+list_answers=$("$ROOT/bin/fm-procevent-lavish.sh" answers "$READ") \
+  || fail "answers failed on a list-form capture with surplus items"
+list_reconciles=$("$ROOT/bin/fm-procevent-lavish.sh" reconciles "$READ") \
+  || fail "reconciles failed on a list-form capture with surplus items"
+cat > "$READ" <<'EOF'
+session:
+  file: /review.html
+  status: feedback
+prompts[1]{uid,prompt,tag,text}:
+  c1,"Pick.\n\nContext data: {\"schema\":\"fm-bearings-answer.v1\",\"question\":\"task-a\",\"selection\":\"approve\",\"note\":\"\"}",choice,Approve
+  c2,"Pick.\n\nContext data: {\"schema\":\"fm-bearings-answer.v1\",\"question\":\"task-b\",\"selection\":\"reconcile\",\"note\":\"surplus\"}",choice,Reconcile
+next_step: x
+EOF
+table_out=$(read_out) || fail "read failed on a tabular capture with surplus rows"
+table_answers=$("$ROOT/bin/fm-procevent-lavish.sh" answers "$READ") \
+  || fail "answers failed on a tabular capture with surplus rows"
+table_reconciles=$("$ROOT/bin/fm-procevent-lavish.sh" reconciles "$READ") \
+  || fail "reconciles failed on a tabular capture with surplus rows"
+assert_contains "$list_out" $'MALFORMED ITEM 1 of 1 (raw capture lines)\n|   - uid: c2\n|     prompt: "Pick.' \
+  "a surplus list item's raw lines were not shown"
+assert_contains "$table_out" $'MALFORMED ITEM 1 of 1 (raw capture lines)\n|   c2,"Pick.' \
+  "a surplus tabular row's raw line was not shown"
+for shape in list table; do
+  if [ "$shape" = list ]; then
+    out=$list_out answers=$list_answers reconciles=$list_reconciles
+  else
+    out=$table_out answers=$table_answers reconciles=$table_reconciles
+  fi
+  assert_contains "$out" "declared_items: 1" "the $shape surplus capture lost its declared count"
+  assert_contains "$out" "presented_items: 1" "the $shape surplus capture miscounted its items"
+  assert_contains "$out" "malformed_items: 1" "the $shape surplus item was not reported as malformed"
+  assert_contains "$out" "complete: no" "a $shape capture with surplus items was certified as complete"
+  [ "$answers" = $'task-a\tapprove\tApprove' ] \
+    || fail "answers read a $shape surplus item as a keyed answer: $answers"
+  [ -z "$reconciles" ] \
+    || fail "reconciles read a $shape surplus item as a reconcile selection: $reconciles"
+done
+
 cat > "$READ" <<'EOF'
 session:
   file: /review.html
