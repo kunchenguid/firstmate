@@ -1716,21 +1716,36 @@ The fake-Orca suite covers readiness, registration, create response parsing, met
 
 ## Paseo
 
-Paseo 0.9.1 was live and reachable on 2026-09-23/24 through the existing daemon.
-A disposable labeled probe used `env -u PASEO_AGENT_ID`, `--background`, and the OpenCode provider.
-The adapter returned all three required identities: agent, workspace, and worktree path.
-The bounded live probe did not cover the full provider, status, control, workspace-archival, or environment-transport matrix; the portable suites below are the current evidence for those paths.
+Paseo live validation ran on 2026-09-28 with CLI 0.9.2 connected to daemon 0.9.1.
+The check used the task-authorized throwaway `paseo-live-test` checkout and registered that one source path as a Paseo project.
+Two Codex tasks launched through the adapter under that project each returned agent, workspace, and worktree identities.
+The workspace listing reported `project=paseo-live-test` and `isolation=worktree` for both, while workspace IDs, worktree paths, and Git branch names were pairwise distinct.
+Both created agents and workspaces were archived through Paseo, the active workspace listing for the throwaway project was empty afterward, and the checkout remained on `main` with a clean status.
+An existing-workspace response can print `Using workspace <id>` without a `workspaceId` JSON field; the spawn integration suite pins that response and proves relaunch publishes the replacement agent while retaining the validated workspace and worktree identities.
+The focused regression commands and repository checks ran through Codex 0.157.1 with model `gpt-6-luna`.
 
 ```sh
 paseo --version
 paseo daemon status
-tests/fm-backend-paseo.test.sh
-tests/fm-busy-state.test.sh
-tests/fm-control.test.sh
+paseo project ls --json
+paseo workspace ls --json
+bash tests/fm-backend-paseo.test.sh
+bash tests/fm-spawn-paseo-env.test.sh
+bin/fm-lint.sh
+bin/fm-doc-audience-check.sh
 ```
 
-Observed version and status were `0.9.1` and `connectedDaemon: reachable`.
-The portable suites cover provider refusal, native busy status, unverified liveness, unsupported key refusal, and the Paseo control route with a stubbed CLI.
+For each live task, the adapter used the following CLI shape with a distinct task slug, branch, workspace, and label:
+
+```sh
+paseo workspace create --isolation worktree --path "$PROJECT_PATH" --project "$PROJECT_ID" --mode branch-off --new-branch "$TASK_SLUG" --base "$BASE_REF" --worktree-slug "$TASK_SLUG" --json
+env -u PASEO_AGENT_ID -u PASEO_WORKSPACE_ID paseo run --background --workspace "$WORKSPACE_ID" --provider codex --model gpt-6-luna --label "fm-task=$TASK_ID" --label "fm-home=liveprobe" --title "fm-liveprobe-$TASK_ID" --json "$PROMPT"
+```
+
+The live assertions printed `PASS task A workspace is worktree-isolated in project paseo-live-test`, `PASS task B workspace is worktree-isolated in project paseo-live-test`, and `PASS two distinct workspaces, worktree paths, and branches`.
+Observed CLI version and daemon status were `0.9.2`, `daemonVersion: 0.9.1`, and `connectedDaemon: reachable`.
+The adapter suite covers project-path matching, project and workspace refusal, isolated branch/worktree creation, provider refusal, native busy status, unverified liveness, unsupported-key refusal, and agent-before-workspace archival.
+The spawn suite covers launch environment forwarding, identity publication from a `Using workspace` response without `workspaceId`, relaunch identity retention, terminal proof, and safe abort cleanup.
 
 ## cmux
 

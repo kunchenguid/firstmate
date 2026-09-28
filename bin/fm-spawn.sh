@@ -2985,7 +2985,7 @@ if [ "$BACKEND" = paseo ]; then
       ;;
     opencode*) PASEO_ENV_ARGS+=("OPENCODE_CONFIG_CONTENT={\"permission\":{\"*\":\"allow\"}}") ;;
   esac
-  PASEO_RESULT=$(fm_backend_paseo_create_task "$ID" "$PROJ_ABS" "$BRIEF_REAL" "$HARNESS" "${MODEL:-}" "${EFFORT:-}" "$PASEO_HOME_TAG" "$PASEO_WORKSPACE_ID" "${PASEO_ENV_ARGS[@]}") || exit 1
+  PASEO_RESULT=$(fm_backend_paseo_create_task "$ID" "$PROJ_ABS" "$BRIEF_REAL" "$HARNESS" "${MODEL:-}" "${EFFORT:-}" "$PASEO_HOME_TAG" "$PASEO_WORKSPACE_ID" "${RELAUNCH_WT:-}" "${PASEO_ENV_ARGS[@]}") || exit 1
   IFS=$'\t' read -r PASEO_AGENT_ID PASEO_WORKSPACE_ID WT <<EOF
 $PASEO_RESULT
 EOF
@@ -4011,7 +4011,11 @@ agy_spawn_fail() {  # <detail>
   rovo_endpoint_cleanup
 }
 
-if [ "$RELAUNCH" -eq 1 ]; then
+if [ "$RELAUNCH" -eq 1 ] && [ "$BACKEND" = paseo ]; then
+  # Paseo has no terminal pane whose cwd can be polled; the adapter validated
+  # the recorded workspace and worktree before relaunching its agent.
+  validate_spawn_worktree "Paseo relaunch" "$T"
+elif [ "$RELAUNCH" -eq 1 ]; then
   # No worktree is acquired: the recorded one is reused as-is. What must be
   # proven instead is that the adopted endpoint's shell is actually sitting in
   # that worktree, so the replacement agent starts where the work is rather
