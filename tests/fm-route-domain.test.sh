@@ -53,6 +53,8 @@ RAW = {
     "no-choice": {"answers": {"route": {"confidence": 0.9}}},
     "weak-signal": {"answers": {"route": {"choice": "seller-outreach", "confidence": 0.34}, "needs_new_secondmate": {"noul": 0.2}}},
     "floor-signal": {"answers": {"route": {"choice": "seller-outreach", "confidence": 0.7}, "needs_new_secondmate": {"noul": 0.2}}},
+    "nan-confidence": {"answers": {"route": {"choice": "seller-outreach", "confidence": float("nan")}, "needs_new_secondmate": {"noul": 0.2}}},
+    "nan-noul": {"answers": {"route": {"choice": "seller-outreach", "confidence": 0.9}, "needs_new_secondmate": {"noul": float("nan")}}},
     "weak-newdomain": {"answers": {"route": {"choice": "new_domain", "confidence": 0.5}, "needs_new_secondmate": {"noul": 0.2}}},
 }
 class H(http.server.BaseHTTPRequestHandler):
@@ -250,6 +252,15 @@ rm -f "$TDIR/argv"
 out=$("$DISPATCH" --task "weak-signal seller leads" --execute)
 assert_contains "$out" "Status: Direct communication" "dispatcher handles a weak signal directly"
 [ ! -e "$TDIR/argv" ] || fail "a weak signal must never be dispatched"
+for word in nan-confidence nan-noul; do
+  out=$("$ROUTER" --task "$word seller leads")
+  assert_contains "$out" "action=handle_direct" "$word falls back to handle_direct"
+  assert_not_contains "$out" "dispatch_cmd=" "$word has no dispatch command"
+  rm -f "$TDIR/argv"
+  json=$("$DISPATCH" --task "$word seller leads" --json --execute)
+  [ "$(printf '%s' "$json" | field action)" = handle_direct ] || fail "$word json must be handle_direct: $json"
+  [ ! -e "$TDIR/argv" ] || fail "$word must never be dispatched"
+done
 
 # 11. Dispatcher branches.
 out=$("$DISPATCH" --task "Good morning")
@@ -296,6 +307,14 @@ HUGE="$TDIR/huge.md"
 { printf 'seller leads\n'; head -c 200000 /dev/zero | tr '\0' 'x'; printf '\n'; } > "$HUGE"
 out=$("$DISPATCH" --brief "$HUGE") || fail "a brief over 128 KiB must not abort the dispatcher"
 assert_contains "$out" "Route:      seller-outreach" "a brief over 128 KiB is classified"
+rm -f "$TDIR/argv"
+code=0; err=$("$DISPATCH" --brief "$HUGE" --execute 2>&1 >/dev/null) || code=$?
+[ "$code" -eq 2 ] || fail "an oversized --execute message must be refused with exit 2, got $code"
+assert_contains "$err" "single-argument limit" "an oversized --execute message is refused loudly"
+[ ! -e "$TDIR/argv" ] || fail "an oversized message must not reach fm-send.sh"
+code=0; json=$("$DISPATCH" --brief "$HUGE" --json --execute 2>/dev/null) || code=$?
+[ "$code" -eq 2 ] || fail "an oversized --json --execute message must exit 2, got $code"
+[ "$(printf '%s' "$json" | field dispatched)" = False ] || fail "an oversized message must be reported undispatched"
 
 # A long brief reaches the second mate whole, under the contract preamble.
 BRIEF="$TDIR/brief.md"

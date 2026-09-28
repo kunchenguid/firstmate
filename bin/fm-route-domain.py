@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import shlex
@@ -319,12 +320,17 @@ def main() -> None:
         )
 
     reason = None
-    if choice == "captain_direct":
+    if not (math.isfinite(confidence) and math.isfinite(noul_val)):
+        action = "handle_direct"
+        reason = f"Jev returned a non-finite signal for {choice}"
+        choice = "captain_direct"
+        confidence = noul_val = None
+    elif choice == "captain_direct":
         action = "handle_direct"
     elif noul_val >= SIGNAL_FLOOR:
         action = "create_secondmate"
         choice = "new_domain"
-    elif confidence < SIGNAL_FLOOR:
+    elif not confidence >= SIGNAL_FLOOR:
         action = "handle_direct"
         reason = f"route confidence {confidence:.3f} below {SIGNAL_FLOOR} for {choice}"
         choice = "captain_direct"

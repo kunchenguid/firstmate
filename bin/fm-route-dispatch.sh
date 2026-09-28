@@ -13,6 +13,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 export FM_HOME="${FM_HOME:-$FM_ROOT}"
 
+MAX_MESSAGE_BYTES=131071
 TASK=""
 BRIEF=""
 EXECUTE=0
@@ -58,11 +59,22 @@ ROUTE=$(echo "$ROUTER_JSON" | jq -r '.route')
 CONF=$(echo "$ROUTER_JSON" | jq -r '.confidence // 0')
 NOUL=$(echo "$ROUTER_JSON" | jq -r '.needs_new_noul // 0')
 MESSAGE=$(echo "$ROUTER_JSON" | jq -r '.dispatch_message // empty')
+MESSAGE_BYTES=$(printf '%s' "$MESSAGE" | wc -c | tr -d ' ')
+
+message_fits() {
+  [ "$MESSAGE_BYTES" -le "$MAX_MESSAGE_BYTES" ] && return 0
+  echo "error: dispatch message is $MESSAGE_BYTES bytes, over the $MAX_MESSAGE_BYTES-byte single-argument limit of fm-send.sh; not sent" >&2
+  return 1
+}
 
 if [ "$AS_JSON" -eq 1 ]; then
   if [ "$EXECUTE" -eq 1 ] && [ "$ACTION" = dispatch ]; then
     SEND_RC=0
-    "$SCRIPT_DIR/fm-send.sh" "$ROUTE" "$MESSAGE" >&2 || SEND_RC=$?
+    if message_fits; then
+      "$SCRIPT_DIR/fm-send.sh" "$ROUTE" "$MESSAGE" >&2 || SEND_RC=$?
+    else
+      SEND_RC=2
+    fi
     printf '%s\n' "$ROUTER_JSON" | jq --argjson rc "$SEND_RC" '. + {dispatched: ($rc == 0), send_exit_code: $rc}'
     exit "$SEND_RC"
   fi
@@ -91,6 +103,7 @@ case "$ACTION" in
   dispatch)
     SEND_CMD=$(printf 'FM_HOME=%q %q %q %q' "$(cd "$FM_HOME" && pwd)" "$SCRIPT_DIR/fm-send.sh" "$ROUTE" "$MESSAGE")
     if [ "$EXECUTE" -eq 1 ]; then
+      message_fits || exit 2
       printf 'Executing dispatch to second mate: %s ...\n' "$ROUTE"
       "$SCRIPT_DIR/fm-send.sh" "$ROUTE" "$MESSAGE"
       printf 'Dispatched successfully to %s.\n' "$ROUTE"
