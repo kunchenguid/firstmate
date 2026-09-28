@@ -87,8 +87,6 @@ def get_api_key(fm_root: Path) -> str | None:
 
     # 3. Try vault injection wrapper if available
     run_py = fm_root / "bin" / "jev-typesafe-run.py"
-    if not run_py.exists():
-        run_py = Path("/opt/ra/firstmate/bin/jev-typesafe-run.py")
 
     if run_py.exists():
         try:
