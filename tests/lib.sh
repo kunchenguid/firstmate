@@ -168,6 +168,15 @@ fm_test_reap_procevent_homes() {
 # never reaches another home's watcher. A tracked state directory a test already
 # deleted has no lock and is skipped; that watcher exits on its own home-gone
 # check within one poll.
+#
+# --stop's own home-scoped match compares the watcher-path a lock recorded
+# against the arm script's OWN invocation path (unresolved, so a symlinked
+# bin/ stays distinct from the real one). A fixture armed through its own
+# home's bin/ (symlinked to $ROOT/bin, per setup_repo_root) records that
+# fixture path, so stopping it must run that same home's bin/fm-watch-arm.sh,
+# not $ROOT/bin/fm-watch-arm.sh, or the path comparison never matches and the
+# watcher is left running. Fall back to $ROOT/bin for trackers with no such
+# home-scoped script.
 
 FM_TEST_WATCHER_REGISTRY=$(mktemp "${TMPDIR:-/tmp}/.fm-test-watcher.$$.XXXXXX") || return 1
 
@@ -177,7 +186,7 @@ fm_test_track_watcher_state() {  # <state-dir>
 }
 
 fm_test_reap_watchers() {
-  local state lock_home seen=$'\n'
+  local state lock_home seen=$'\n' arm_bin
   [ -f "$FM_TEST_WATCHER_REGISTRY" ] || return 0
   while IFS= read -r state; do
     [ -n "$state" ] || continue
@@ -191,8 +200,10 @@ fm_test_reap_watchers() {
     [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" != "$$" ] || continue
     lock_home=$(cat "$state/.watch.lock/fm-home" 2>/dev/null || true)
     [ -n "$lock_home" ] || continue
+    arm_bin="$lock_home/bin/fm-watch-arm.sh"
+    [ -x "$arm_bin" ] || arm_bin="$ROOT/bin/fm-watch-arm.sh"
     FM_HOME="$lock_home" FM_STATE_OVERRIDE="$state" \
-      "$ROOT/bin/fm-watch-arm.sh" --stop >/dev/null 2>&1 || true
+      "$arm_bin" --stop >/dev/null 2>&1 || true
   done < "$FM_TEST_WATCHER_REGISTRY"
   rm -f "$FM_TEST_WATCHER_REGISTRY"
 }
