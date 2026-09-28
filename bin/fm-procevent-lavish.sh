@@ -1,18 +1,20 @@
 #!/usr/bin/env bash
-# Lavish adapter for the generic process-to-event runner.
+# Read-only compatibility adapter for results captured by retired Lavish sources.
 #
 # Usage:
-#   fm-procevent-lavish.sh arm <artifact.html>
+#   fm-procevent-lavish.sh retire-registered
 #   fm-procevent-lavish.sh classify <result-file>
 #   fm-procevent-lavish.sh terminal <result-file>
 #   fm-procevent-lavish.sh silent <result-file>
 #   fm-procevent-lavish.sh answers <result-file>
 #   fm-procevent-lavish.sh reconciles <result-file>
 #   fm-procevent-lavish.sh read <result-file>
-#   fm-procevent-lavish.sh source-id <artifact.html>
-#   fm-procevent-lavish.sh retire <artifact.html>
-#   fm-procevent-lavish.sh poll <artifact.html>
 #
+# retire-registered
+#            Retire every legacy built-in Lavish registration in this home by
+#            exact registration identity. Captured result files remain intact,
+#            pending results remain announced, and their decision binding is
+#            retained until the final captured generation is acknowledged.
 # classify   Print the lifecycle state a handler should act on: feedback, ended,
 #            waiting, missing, or unknown.
 # read       Print a structured presentation of one already-captured result so a
@@ -30,10 +32,6 @@
 #            Captain-supplied body lines are visibly prefixed so they cannot
 #            forge structural labels. Empty message and annotation sections
 #            are reported explicitly.
-# poll       The registered listener command `arm` publishes, not a command to
-#            run in a conversational turn. It runs the published blocking poll
-#            and prints its response verbatim, absorbing only the one exact
-#            transient interruption described below.
 # terminal   Exit 0 when the captured result means this Lavish source will never
 #            produce another result, so the runner may retire it; any other exit
 #            keeps it armed. This is the generic adapter contract bin/fm-procevent.sh
@@ -61,10 +59,9 @@
 # positively proves nothing was said. Silence is only ever an absence this
 # adapter can see in the result, never an absence it assumes.
 #
-# This adapter is deliberately thin. It owns only what is specific to Lavish:
-# canonical source identity, the argv for the currently published poll command,
-# and how to read a completed result. Ownership, durable capture, publication,
-# and restart recovery all belong to bin/fm-procevent.sh.
+# This compatibility adapter cannot arm or poll a source and has no dependency
+# on lavish-axi. It exists only so homes upgraded with old registrations or
+# captures converge safely without losing already captured feedback.
 #
 # `answers` is this adapter's half of the generic keyed-answer contract in
 # bin/fm-procevent.sh. It reports what the captain actually chose, as
@@ -80,41 +77,12 @@
 # `read` is the presentation command summarized above; keyed intake remains
 # the separate `answers` contract described here.
 #
-# It wraps ONLY the currently published interface, verified against 0.1.45:
-#   Usage: lavish-axi poll <html-file> [--agent-reply "..."]
-# and that command "long-polls indefinitely" server-side. The adapter therefore
-# runs the plain blocking form with no timeout flag, so results arrive as real
-# server-side events. It adds no periodic discovery, no timer fallback, and no
-# dependency on any unreleased capability.
-#
-# BOUNDED QUIET RETRY, owned here and nowhere else. A live listener can be cut
-# short by the server with exactly this two-line response while the session's
-# marks remain available:
-#
-#   error: Lavish Editor poll response was interrupted
-#   code: SERVER_ERROR
-#
-# That is an internal retry, not news, so registering the raw poll made the
-# generic runner capture it and wake the whole fleet. `poll` therefore re-runs
-# the published poll up to POLL_RETRY_LIMIT times for that exact response, with
-# attempt starts at least POLL_RETRY_DELAY_DEFAULT seconds apart. The match is exact and
-# deliberately narrow: real feedback, ended and missing sessions, any other
-# SERVER_ERROR, and the same interruption still standing after the bound is
-# spent are all printed straight through and captured normally. The retry is a
-# Lavish fact, so the generic runner in bin/fm-procevent.sh stays
-# adapter-agnostic and learns nothing about it.
-#
-# LOSS LIMITATION, stated plainly. The published poll destructively clears
-# feedback before returning it. A result lost after that clearing and before the
-# runner reads the process output is unrecoverable, and no Firstmate wrapper can
-# close that source-side handoff window. Never describe this path as
-# at-least-once, no-loss, or lossless. The only durability this proves is the
-# runner's own: output that reached the runner is stored before it is announced.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
@@ -124,183 +92,35 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 . "$SCRIPT_DIR/fm-procevent-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,111p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,/^set -u$/p' "${BASH_SOURCE[0]}" | sed '$d; s/^# \{0,1\}//'; exit 2; }
 
-# Canonical identity is physical, not the path string: Lavish itself keys a
-# session on the realpath of the artifact, so two names for one file are one
-# source and must never become two owners.
-cmd_source_id() {
-  local artifact=${1-} real
-  [ -n "$artifact" ] || usage
-  case "$artifact" in *$'\n'*) die "artifact paths cannot contain newlines" ;; esac
-  real=$(perl -MCwd=realpath -e '$p = realpath($ARGV[0]); defined($p) or exit 1; print "$p\n"' "$artifact" 2>/dev/null) \
-    || die "cannot resolve the artifact path: $artifact"
-  [ -f "$real" ] || die "artifact does not exist: $artifact"
-  if command -v shasum >/dev/null 2>&1; then
-    printf 'lavish-%s\n' "$(printf '%s' "$real" | shasum -a 256 | awk '{print substr($1,1,16)}')"
-  else
-    printf 'lavish-%s\n' "$(printf '%s' "$real" | sha256sum | awk '{print substr($1,1,16)}')"
-  fi
-}
-
-cmd_arm() {
-  local artifact=${1-} id real
-  [ -n "$artifact" ] || usage
-  [ "$#" -eq 1 ] || usage
-  command -v lavish-axi >/dev/null 2>&1 || die "lavish-axi is not installed"
-  poll_retry_delay >/dev/null
-  id=$(cmd_source_id "$artifact") || exit 1
-  real=$(perl -MCwd=realpath -e '$p = realpath($ARGV[0]); defined($p) or exit 1; print "$p\n"' "$artifact" 2>/dev/null) \
-    || die "cannot resolve the artifact path: $artifact"
-  # This adapter's own listener command, which runs the plain blocking form with
-  # no --timeout-ms so completion is a server event, and absorbs only the exact
-  # transient interruption. Registering raw poll output is what let that
-  # interruption reach the runner as a captured result.
-  "$SCRIPT_DIR/fm-procevent.sh" register lavish "$id" \
-    -- "$SCRIPT_DIR/fm-procevent-lavish.sh" poll "$real" || exit 1
-  printf 'armed: %s\n' "$id"
-  printf 'artifact: %s\n' "$real"
-}
-
-cmd_retire() {
-  local artifact=${1-} id
-  [ -n "$artifact" ] || usage
-  id=$(cmd_source_id "$artifact") || exit 1
-  "$SCRIPT_DIR/fm-procevent.sh" retire "$id"
-}
-
-# The bounded quiet retry described in the header. The bound is a constant
-# because it is a property of the transient response, not an operator choice;
-# only the delay takes an override, so a test can exercise the real bound
-# without waiting it out.
-POLL_RETRY_LIMIT=12
-POLL_RETRY_DELAY_DEFAULT=5
-POLL_RETRY_DELAY_MIN=1
-POLL_RETRY_DELAY_MAX=60
-
-# Exit 0 only for the exact two-line interruption, and nothing else. The whole
-# response must be those two lines with those exact bytes: whitespace variants,
-# a longer response that merely opens with them, and any other SERVER_ERROR are
-# genuine errors this adapter must never swallow.
-poll_response_filter() {  # <response-file>
-  perl -e '
-    use strict;
-    use warnings;
-    my ($stage) = @ARGV;
-    my $expected = "error: Lavish Editor poll response was interrupted\ncode: SERVER_ERROR\n";
-    open my $staged, ">", $stage or exit 2;
-    binmode STDIN;
-    binmode STDOUT;
-    binmode $staged;
-    my ($candidate, $streaming) = ("", 0);
-    sub write_all {
-      my ($handle, $bytes) = @_;
-      my $offset = 0;
-      while ($offset < length $bytes) {
-        my $written = syswrite $handle, $bytes, length($bytes) - $offset, $offset;
-        exit 2 unless defined $written;
-        $offset += $written;
-      }
-    }
-    while (1) {
-      my $count = sysread STDIN, my $chunk, 65536;
-      exit 2 unless defined $count;
-      last if $count == 0;
-      if ($streaming) {
-        write_all(*STDOUT, $chunk);
-        next;
-      }
-      my $room = length($expected) + 1 - length($candidate);
-      my $take = length($chunk) < $room ? length($chunk) : $room;
-      my $prefix = substr($chunk, 0, $take);
-      $candidate .= $prefix;
-      write_all($staged, $prefix);
-      my $matches_prefix = length($candidate) <= length($expected)
-        && substr($expected, 0, length($candidate)) eq $candidate;
-      if (!$matches_prefix) {
-        write_all(*STDOUT, $candidate);
-        write_all(*STDOUT, substr($chunk, $take));
-        $streaming = 1;
-      }
-    }
-    exit 10 if !$streaming && $candidate eq $expected;
-    write_all(*STDOUT, $candidate) unless $streaming;
-  ' "$1"
-}
-
-# Minimum seconds between retry attempt starts. FM_LAVISH_POLL_RETRY_DELAY is a
-# bounded test override; a malformed or out-of-range value is refused rather than quietly
-# rounded, because silently changing a retry cadence is how a bound stops
-# meaning anything.
-poll_retry_delay() {
-  local delay=${FM_LAVISH_POLL_RETRY_DELAY-}
-  if [ -z "$delay" ]; then
-    printf '%s\n' "$POLL_RETRY_DELAY_DEFAULT"
-    return 0
-  fi
-  case "$delay" in
-    *[!0-9]*) die "FM_LAVISH_POLL_RETRY_DELAY must be whole seconds from $POLL_RETRY_DELAY_MIN to $POLL_RETRY_DELAY_MAX: $delay" ;;
-  esac
-  [ "$delay" -ge "$POLL_RETRY_DELAY_MIN" ] && [ "$delay" -le "$POLL_RETRY_DELAY_MAX" ] \
-    || die "FM_LAVISH_POLL_RETRY_DELAY must be whole seconds from $POLL_RETRY_DELAY_MIN to $POLL_RETRY_DELAY_MAX: $delay"
-  printf '%s\n' "$delay"
-}
-
-poll_iteration_started() {
-  perl -MTime::HiRes=clock_gettime,CLOCK_MONOTONIC -e \
-    'printf "%.6f\\n", clock_gettime(CLOCK_MONOTONIC)'
-}
-
-poll_iteration_floor_wait() {
-  perl -MTime::HiRes=clock_gettime,sleep,CLOCK_MONOTONIC -e '
-    my ($started, $floor) = @ARGV;
-    my $remaining = $floor - (clock_gettime(CLOCK_MONOTONIC) - $started);
-    sleep($remaining) if $remaining > 0;
-  ' "$1" "$2"
-}
-
-cmd_poll() {
-  local artifact=${1-} delay attempt=0 response cleanup_command rc filter_rc iteration_started
-  local pipeline_status
-  [ -n "$artifact" ] || usage
-  [ "$#" -eq 1 ] || usage
-  command -v lavish-axi >/dev/null 2>&1 || die "lavish-axi is not installed"
-  delay=$(poll_retry_delay) || exit 1
-  response=$(mktemp "${TMPDIR:-/tmp}/fm-lavish-poll.XXXXXX") || die "cannot stage the poll response"
-  printf -v cleanup_command 'rm -f -- %q' "$response"
-  # shellcheck disable=SC2064 # $cleanup_command must expand now, while the staged path is still set.
-  trap "$cleanup_command" EXIT
-  # Retirement stops this listener by signalling its process group, and bash runs
-  # no EXIT trap for an uncaught signal, so each one cleans up the staged
-  # response and then re-raises itself with the default disposition, leaving the
-  # process dying exactly as the runner expects.
-  local signal
-  for signal in INT TERM HUP; do
-    # shellcheck disable=SC2064 # Same reason: expand now, while both are set.
-    trap "$cleanup_command; trap - $signal; kill -$signal $$" "$signal"
+cmd_retire_registered() {
+  local registry rec id argc line_no=0 retired=0
+  local -a argv=()
+  [ "$#" -eq 0 ] || usage
+  registry=$(fm_procevent_registry_dir "$STATE")
+  [ -d "$registry" ] && [ ! -L "$registry" ] || return 0
+  for rec in "$registry"/*.source; do
+    [ -e "$rec" ] || continue
+    [ -f "$rec" ] && [ ! -L "$rec" ] || continue
+    [ "$(sed -n '1p' "$rec")" = adapter=lavish ] || continue
+    id=${rec##*/}
+    id=${id%.source}
+    fm_procevent_source_id_valid "$id" || continue
+    argc=$(sed -n 's/^argc=//p' "$rec" | head -1)
+    case "$argc" in ''|*[!0-9]*) continue ;; esac
+    argv=()
+    line_no=0
+    while IFS= read -r line; do
+      line_no=$((line_no + 1))
+      [ "$line_no" -le "$argc" ] && argv+=("$line")
+    done < <(sed -n '/^argv:$/,$p' "$rec" | tail -n +2)
+    [ "${#argv[@]}" -eq "$argc" ] || continue
+    "$SCRIPT_DIR/fm-procevent.sh" retire "$id" --if-matches lavish -- "${argv[@]}" >/dev/null \
+      || die "cannot safely retire legacy Lavish source: $id"
+    retired=$((retired + 1))
   done
-  while :; do
-    iteration_started=$(poll_iteration_started) || die "cannot start the poll rate governor"
-    lavish-axi poll "$artifact" | poll_response_filter "$response"
-    pipeline_status=("${PIPESTATUS[@]}")
-    rc=${pipeline_status[0]}
-    filter_rc=${pipeline_status[1]}
-    case "$filter_rc" in
-      0) break ;;
-      10)
-        if [ "$attempt" -lt "$POLL_RETRY_LIMIT" ]; then
-          attempt=$((attempt + 1))
-          poll_iteration_floor_wait "$iteration_started" "$delay" \
-            || die "cannot enforce the poll rate governor"
-        else
-          cat -- "$response"
-          break
-        fi
-        ;;
-      *) die "cannot classify the poll response" ;;
-    esac
-  done
-  return "$rc"
+  [ "$retired" -eq 0 ] || printf 'BOOTSTRAP_INFO: retired legacy Lavish sources: %s\n' "$retired"
 }
 
 # Read one field of the response's leading `session:` block. Those fields are
@@ -676,10 +496,7 @@ cmd_read() {
 }
 
 case "${1-}" in
-  arm)       shift; cmd_arm "$@" ;;
-  retire)    shift; cmd_retire "$@" ;;
-  poll)      shift; cmd_poll "$@" ;;
-  source-id) shift; cmd_source_id "$@" ;;
+  retire-registered) shift; cmd_retire_registered "$@" ;;
   classify)  shift; cmd_classify "$@" ;;
   terminal)  shift; cmd_terminal "$@" ;;
   silent)    shift; cmd_silent "$@" ;;

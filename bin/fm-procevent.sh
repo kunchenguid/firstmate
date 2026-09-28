@@ -634,6 +634,16 @@ publish_pending() {  # [result-file-to-skip]
   printf '%s\n' "$published"
 }
 
+source_has_pending_results() {  # <source-id>
+  local id=$1 result
+  while IFS= read -r result; do
+    [ -n "$result" ] || continue
+    [ "$(fm_procevent_result_source_id "$result" 2>/dev/null || true)" = "$id" ] \
+      && return 0
+  done < <(fm_procevent_pending "$STATE")
+  return 1
+}
+
 # Start one command as the leader of a fresh process group, either waiting for
 # it (the public `start` boundary) or detaching from it (reconcile's restart and
 # the runner's own owner guard). The guard deliberately gets its OWN group
@@ -1636,14 +1646,20 @@ cmd_classify() {
 }
 
 cmd_handled() {
-  local id=${1-} seq=${2-} status
+  local id=${1-} seq=${2-} status unbind=0
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
   case "$seq" in ''|*[!0-9]*) die "sequence must be a nonnegative integer: $seq" ;; esac
   owner_lease_refresh
   fm_procevent_source_lock_acquire "$id" || die "cannot lock source: $id"
   fm_procevent_mark_handled "$STATE" "$id" "$seq"
   status=$?
+  if [ ! -e "$(source_file "$id")" ] && ! source_has_pending_results "$id"; then
+    unbind=1
+  fi
   fm_procevent_source_lock_release "$id"
+  if [ "$unbind" -eq 1 ]; then
+    "$SCRIPT_DIR/fm-captain-hold.sh" unbind "$id" >/dev/null 2>&1 || true
+  fi
   case "$status" in
     0) printf 'handled: %s %s\n' "$id" "$seq" ;;
     1) printf 'already-handled: %s %s\n' "$id" "$seq" ;;
@@ -1753,11 +1769,18 @@ cmd_retire() {
   rm -f -- "$(runner_file "$id")"
   rm -f -- "$(stranded_file "$id")"
   rm -f -- "$(launch_failed_file "$id")"
+  if source_has_pending_results "$id"; then
+    owner_state=1
+  else
+    owner_state=0
+  fi
   fm_procevent_source_lock_release "$id"
-  # A retired source produces no further answer, so drop any decision binding it
-  # carried. Generic and idempotent: the binding owner is asked to forget this
-  # source id, and an unbound source is unaffected.
-  "$SCRIPT_DIR/fm-captain-hold.sh" unbind "$id" >/dev/null 2>&1 || true
+  # A retired source produces no further answer, but a pre-retirement capture
+  # may still need its binding to route a preserved captain answer. Keep that
+  # binding until `handled` acknowledges the final pending generation.
+  if [ "$owner_state" -eq 0 ]; then
+    "$SCRIPT_DIR/fm-captain-hold.sh" unbind "$id" >/dev/null 2>&1 || true
+  fi
   printf 'retired: %s\n' "$id"
 }
 

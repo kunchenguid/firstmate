@@ -4,88 +4,12 @@ Audience: maintainer verification.
 
 This record holds reusable version-scoped evidence for the runner's active guarantees.
 `docs/configuration.md` owns the operating contract, each script's header and `--help` own its mechanics, and `.agents/skills/process-event-sources/SKILL.md` owns the handling procedure.
-
-Verified on 2026-07-31 on macOS (Darwin 25.5.0) with `lavish-axi` 0.1.45 installed.
-Generic keyed-answer feed verified on 2026-08-16 on the same platform, against the same published poll response shape.
-Cross-origin keyed-answer feed verified on 2026-08-19 through the real runner and Lavish adapter interface.
+Retired-provider compatibility was verified on 2026-09-28 on Linux through disposable fixture homes.
+The fixture PATH contains no `lavish-axi`: bootstrap stays silent on a fresh home, retires an exact legacy registration, preserves a captured result and its binding, re-announces that result through the generic queue, and removes the obsolete binding only after the final captured generation is handled.
 Trusted external `process-event-adapter/1` binding conformance and the runnable `file-signal` example were verified on 2026-08-27 on macOS (Darwin 25.5.0) with Node v25.9.0.
 
-## The published Lavish poll interface the adapter wraps
-
-Verified at implementation time without upgrading the installed build:
-
-```sh
-$ lavish-axi --version
-0.1.45
-$ lavish-axi poll --help | head -1
-Usage: lavish-axi poll <html-file> [--agent-reply "..."]
-```
-
-The same help states that the command "long-polls indefinitely".
-The adapter therefore registers the plain blocking form with no timeout flag, so a completion is a real server-side event rather than a timer expiry.
-
-This build exposes no capabilities command and no multiplexed or subscription endpoint:
-
-```sh
-$ lavish-axi capabilities --json
-error: Lavish Editor expects an HTML file
-code: VALIDATION_ERROR   # exit 2
-```
-
-Exit 2 with `VALIDATION_ERROR` is positive proof the subcommand does not exist, because the word is parsed as a filename.
-Note that `lavish-axi <anything> --help` exits 0 for any argument, including a nonsense subcommand, so a `--help` exit code can never be used as a capability probe.
-
-The adapter depends on none of this: it uses only the published poll shape above.
-
-## Why an ended Lavish review is terminal
-
-Re-verified on 2026-08-01 against the same installed build.
-The published poll help states the lifecycle directly:
-
-```text
-$ lavish-axi poll --help | tr '.' '\n' | grep -F 'Send & End'
- `Send & End` ends the session
-$ lavish-axi poll --help | tr '.' '\n' | grep -F 'polling stops'
- After that response, polling stops, and the agent must not reopen the session uninvited
-```
-
-The sentence between those two, in the same help text, is "Its final feedback is still delivered once."
-
-So the last useful response of an ended review is a `feedback` response, and every poll after it returns an empty ended session immediately.
-That is why the adapter's terminal verdict covers a `feedback` response carrying `session_ended`, not only `status: ended` and a missing session: without it, one human `Send & End` leaves the source armed and each later cycle captures another empty ended result.
-`session_ended` is a session-level field emitted beside `status` in the response's leading `session:` block, which is why the adapter reads it there and ignores identical text appearing in prompt payloads.
-
-## Why an empty board close is silent
-
-The same published lifecycle above is the whole basis for the `silent` verdict, so no new source knowledge was needed.
-`Send & End` delivers the captain's final feedback once as a `feedback` response carrying `session_ended`, and every poll after it returns an empty ended session.
-A board the captain closes without saying anything therefore produces exactly one `ended` response carrying no queued content block, and announcing it put a wake in front of the handler whose entire content was that nothing happened.
-
-The verdict is confined to that one shape and fails closed everywhere else.
-A `Send & End` close carrying the captain's own answer classifies `feedback`, never `ended`, so it is announced unchanged; so is any `ended` result that still carries a `prompts` or `feedback` block, which this lifecycle is not expected to produce but which must never be dropped on that expectation.
-A `waiting` session, a `missing` one, an `unknown` or unreadable result, and every error stay announced, because none of them positively proves nothing was said.
-The content check anchors on column zero for the same reason the terminal check reads the leading `session:` block: content headers are top-level and their rows are indented, so captain-supplied payload text can neither forge a content block nor hide behind a fake empty one.
-Any recognized block counts as present even when its declared count is zero, and a malformed top-level `prompts` or `feedback` header is indeterminate and therefore announced.
-
-## The loss limitation this runner cannot close
-
-The published poll clears feedback destructively before returning it.
-Measured at the protocol layer by consuming and discarding the response:
-
-```text
-consuming read http=200
-listing after: ...,open,"...",0
-state.json: status= open pending= 0 prompts= []  chat entries= []
-```
-
-Nothing remains on the source side to re-read, and there is no acknowledgement, cursor, or replay surface to reserve against.
-A result lost after that clearing and before the runner reads the child's output is therefore unrecoverable.
-
-**Consequence for wording:** the runner may describe only its own durability boundary.
-Never at-least-once, no-loss, or lossless.
-
-## What the runner does prove
-
+The retired `bin/fm-procevent-lavish.sh` entrypoint has no arm or poll command and invokes no provider binary.
+Its remaining parser commands exist only to make already captured result files readable and to preserve any keyed answer they contain.
 Exercised by `tests/fm-procevent.test.sh` against a fake blocking source whose completion is a process event, not a timer; for the supervision-delivery and headline rows below, by `tests/fm-watch-triage.test.sh` driving a real `bin/fm-watch.sh` over a real capture and over queued strand and launch-failure keys, with `tests/fm-watch-arm.test.sh` covering the arm-time refusal:
 
 | Guarantee | How it is proven |
@@ -97,20 +21,18 @@ Exercised by `tests/fm-procevent.test.sh` against a fake blocking source whose c
 | adapter-owned terminal verdict | two fixture adapters - one that ends on any result, one with no terminal knowledge - decide the outcome alone: the first has its registration and claim retired automatically after one capture and is never restarted, the second stays armed |
 | generic built-in keyed-answer feed | `tests/fm-captain-hold-lifecycle.test.sh` drives a bound built-in source through the real runner with a fixture adapter that only prints keyed lines, proving any bound built-in channel reaches the one keyed-answer intake: named captain-held tasks close at capture time, a card-declared release mode frees held work, keys naming no captain-held task skip, freeform prose forges nothing, matching answer-and-mode replays are idempotent while mode mismatches refuse, an unbound source closes nothing, and capture remains independent of the handler wake. |
 | structured reconcile feed | The same suite drives the optional `reconciles` adapter seam through the real runner and proves only a bound captured source can create a request; the ordinary keyed-answer and chat paths refuse the reserved value without closing or creating a request, versioned selection stays separate from its note, rollout-compatible ordinary legacy answers still pass, and legacy reconcile-shaped values feed neither intake. |
-| adapter-owned silence verdict | an armed Lavish source driven against a stand-in poll that returns an empty ended session captures its result, records it durably handled, appends no wake, and stays silent through a later `reconcile` that would otherwise republish it, while still retiring its ended source; the same real path with a `Send & End` response carrying the captain's choice still publishes its `check` wake and is left unacknowledged for the handler |
-| silence fails closed | the adapter's published `silent` command suppresses only an `ended` session with no queued content block, and announces a real answer, freeform prose, any recognized content block regardless of its declared count, a malformed top-level content header, a `waiting` or `missing` session, a server error, an unreadable result, and indented payload text imitating an empty content block; the `when` adapter, which implements no `silent` command, announces every result |
+| retired-adapter compatibility | bootstrap has no Lavish prerequisite and retires exact legacy Lavish registrations; captured result and adapter records remain readable and re-announced, pending answer bindings survive retirement, and acknowledging the final pending generation removes the obsolete binding |
+| compatibility parser fails closed | the retired adapter's `silent` command suppresses only an already captured `ended` result with no queued content block, while real answers, freeform prose, malformed content, errors, and unreadable results remain visible |
 | terminal retirement preserves the result | the retired source's captured output, its announced event, its handled acknowledgement, and later explicit `retire` all still behave normally |
 | registration-generation retirement | an old terminal runner preserves a concurrently replaced registration and releases ownership so the replacement runs independently; injected registration-removal failure retains a terminal claim, performs no second poll, and completes idempotently once removal recovers; a live owner retiring its own terminal source mid-capture tolerates only its transient reservation-removal failure and still removes the registration under exact ownership |
-| one `Send & End`, one result | an armed Lavish source driven against a stand-in for the published poll, which delivers the final `session_ended` feedback once and empty ended sessions afterward, polls exactly once, captures exactly one result, publishes one distinct event, and retires itself |
 | bounded re-announcement until handled | a durably captured result with no handled acknowledgement is re-announced by `reconcile` with the same source and sequence on every call - not only the first restart after a crash - and a presented-but-unacknowledged wake resurfaces identically after a simulated replacement session |
 | handled acknowledgement | `fm-procevent.sh handled <source-id> <sequence>` atomically and idempotently records handling at mode `0600`, fails without leaving a marker when private-mode enforcement fails, reports the first call distinctly from every repeat, stops further re-announcement once recorded, and never authorizes a paired effect twice across repeat calls |
 | publication-and-acknowledgement serialization | a concurrent `reconcile` cannot append a wake after `handled` wins the shared per-source boundary, so an acknowledged result is not re-announced by a publication race |
 | acknowledgement precondition | `handled` is refused, with no marker created, unless matching captured result and adapter records already exist, so a premature or mistyped acknowledgement cannot suppress a future result |
 | immutable adapter identity | a captured result retains its adapter after its mutable registration is removed |
-| trusted classification boundary | Lavish lifecycle classification reads the leading response envelope, so prompt payload text that resembles a missing-session error cannot override a valid session status |
+| trusted classification boundary | the retired compatibility parser reads the leading response envelope, so payload text that resembles a missing-session error cannot override a valid captured session status |
 | result identity and ordering | each wake names the committed sequence to read, and pending sequences 1, 2, and 10 publish in numeric order |
 | one owner per canonical source | a second home's `start` for the same source id reports `already owned` and publishes nothing |
-| canonical physical identity | a final-component symlink and its target produce the same Lavish source id |
 | isolated public start boundary | direct `start` establishes a new runner-led process group before claiming the source, so retirement cannot signal an unrelated process inherited from the caller's group |
 | guarded runner startup | the source command does not launch when the detached owner guard rejects an invalid lease configuration, proving the runner waits for positive guard readiness and fails closed when initialization fails |
 | attached owner continuity | a foreground `start` with a one-second lease remains alive beyond that lease while its caller stays attached, then captures normally when the blocking source completes |
@@ -155,14 +77,13 @@ Exercised by `tests/fm-procevent.test.sh` against a fake blocking source whose c
 | owner-matched replacement safety | two registrations for the same external source receive distinct owner tokens; unconditional external retirement and the first token cannot retire the replacement, the replacement token can, bounded home sweep derives and uses that exact token, and legacy built-in registrations retain unconditional behavior plus exact `--if-matches` retirement |
 | independent homes | two homes bind the same package id/version to different content-addressed absolute paths and independently capture results and extension state, with no cross-home fallback or result path |
 
-Run the focused external-binding evidence and the live Bearings session guard with:
+Run the focused external-binding and process-event evidence with:
 
 ```sh
 node --version
 bin/fm-test-run.sh tests/fm-extension-binding.test.sh
 FM_EXTENSION_BINDING_SEGMENT=lifecycle-invocation-cleanup bin/fm-test-run.sh tests/fm-extension-binding.test.sh
 bin/fm-test-run.sh tests/fm-procevent.test.sh
-FM_BEARINGS_LAVISH_LIVE=1 bin/fm-test-run.sh tests/fm-bearings-board-lavish-live-e2e.test.sh
 bin/fm-doc-audience-check.sh
 ```
 

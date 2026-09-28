@@ -638,44 +638,22 @@ test_scout_loads_captain_hold_policy() {
   scout="$home/data/sample-investigation/brief.md"
   assert_grep "$ROOT/.agents/skills/captain-hold-lifecycle/SKILL.md" "$scout" \
     "scout brief did not load the captain-call policy before done"
-  assert_grep "pass its shared completion gate for the report and any visual review" "$scout" \
-    "scout brief did not cross-reference visual-review completion"
-  pass "fm-brief.sh: investigation and visual-review completions load the shared decision policy"
+  assert_grep "pass its shared completion gate for the report" "$scout" \
+    "scout brief did not cross-reference report completion"
+  pass "fm-brief.sh: investigation completion loads the shared decision policy"
 }
 
-# A scout brief offers the Lavish review loop only when bootstrap confirms the
-# supported lavish-axi floor at scaffold time; a missing or older build gets a
-# text-report instruction instead, so a scout never drives a below-floor Lavish.
-test_scout_lavish_line_follows_presentation_floor() {
-  local base label version expect case_dir fakebin brief n=0
-  local hosting='you may host the Lavish review loop yourself'
-  local text_only='deliver your findings as a text report without Lavish'
-  base=$(fm_test_base_path_sans "${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" lavish-axi)
-  while IFS='^' read -r label version expect; do
-    [ -n "$label" ] || continue
-    n=$((n + 1))
-    case_dir="$TMP_ROOT/scout-lavish-$n"
-    mkdir -p "$case_dir/home/data"
-    fakebin=$(fm_fakebin "$case_dir")
-    [ "$version" = absent ] || fm_fake_version_tool "$fakebin" lavish-axi FM_FAKE_LAVISH_AXI_VERSION "$version"
-    PATH="$fakebin:$base" FM_HOME="$case_dir/home" \
-      "$ROOT/bin/fm-brief.sh" scout-lavish alpha --scout >/dev/null \
-      || fail "$label: scout scaffold failed"
-    brief="$case_dir/home/data/scout-lavish/brief.md"
-    if [ "$expect" = hosting ]; then
-      assert_grep "$hosting" "$brief" "$label: scout brief did not offer the Lavish review loop"
-      assert_no_grep "$text_only" "$brief" "$label: scout brief withheld Lavish from a compatible build"
-    else
-      assert_grep "$text_only" "$brief" "$label: scout brief did not ask for a text report"
-      assert_no_grep "$hosting" "$brief" "$label: scout brief offered a below-floor Lavish"
-    fi
-  done <<'ROWS'
-lavish-axi at the floor^0.1.46^hosting
-lavish-axi above the floor^0.2.0^hosting
-lavish-axi just below the floor^0.1.45^text
-absent lavish-axi^absent^text
-ROWS
-  pass "fm-brief.sh: scout Lavish hosting follows the bootstrap lavish-axi floor"
+test_scout_uses_report_and_chat_without_visual_dependency() {
+  local home brief
+  home="$TMP_ROOT/scout-report-chat"
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" scout-report-chat alpha --scout >/dev/null \
+    || fail "scout scaffold failed without a visual dependency"
+  brief="$home/data/scout-report-chat/brief.md"
+  assert_grep "Deliver findings through the durable report and ordinary chat" "$brief" \
+    "scout brief did not select the supported report and chat surfaces"
+  assert_no_grep "Lavish" "$brief" "scout brief retained the retired visual dependency"
+  pass "fm-brief.sh: scouts use durable reports and ordinary chat"
 }
 
 # Scout paths still scaffold well-formed briefs.
@@ -732,4 +710,4 @@ test_herdr_lab_contract_applies_to_scouts
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_loads_captain_hold_policy
 test_scout_scaffold
-test_scout_lavish_line_follows_presentation_floor
+test_scout_uses_report_and_chat_without_visual_dependency
