@@ -101,8 +101,8 @@
 # and state/.claude-autoarm-failure-alarmed bounds the attended fail-open and
 # suppresses any later automatic continuation in that unresolved episode.
 #
-# This hook never blocks the Stop decision itself and never prints to stdout:
-# exit 0 is always silent, and exit 2 carries the rewake banner on stderr.
+# In hook mode it never blocks the Stop decision itself or prints to stdout:
+# exit 0 is silent, and exit 2 carries the rewake banner on stderr.
 # On any uncertainty such as unresolvable ancestry, malformed lock state, or
 # lock contention, it exits 0 and leaves continuity to the synchronous guard and
 # the model.
