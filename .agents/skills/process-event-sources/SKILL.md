@@ -34,10 +34,10 @@ For a Lavish review artifact firstmate owns, arm once:
 bin/fm-procevent-lavish.sh arm <artifact.html>
 ```
 
-After handling each nonterminal round, write the exact captain-facing response to a private file and re-arm the same artifact with `--agent-reply-file <path>` before sending that response in main chat.
-That re-arm stages one same-session reply and records the round handled atomically; if no response belongs in the session, re-arm without a reply file.
+After handling each nonterminal round, write the exact captain-facing response to a private, nonblank file and re-arm the same artifact with `--agent-reply-file <path>` before sending that response in main chat.
+That re-arm stages one same-session reply, records acceptance uncertainty before exposing it, and records the round handled only after Lavish accepts the exact registration generation; if no response belongs in the session, re-arm without a reply file.
 Do not separately acknowledge a nonterminal firstmate-owned Lavish round with the generic `handled` command.
-A failed re-arm preserves the captured round and prior registration for retry, while recovery never starts another listener across an open Lavish round.
+A pre-exposure failure preserves the capture and ownership for retry. An ambiguous post-exposure acknowledgement failure keeps its uncertainty marker and refuses another reply for that round so recovery cannot post it twice.
 
 A worker-owned board uses `bin/fm-procevent-lavish.sh arm <artifact.html> --for <task-id>` and re-arms with its reply after each nonterminal round; the existing handled marker is the acknowledgement.
 Arm it once, then re-arm only when a round is actually waiting: arming again with nothing to acknowledge is refused, because it would discard the reply your listener is still holding.

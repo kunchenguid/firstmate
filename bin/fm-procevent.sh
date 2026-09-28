@@ -731,6 +731,11 @@ cmd_register_lavish_owner() {
         fm_procevent_source_lock_release "$id"
         die "agent reply file does not exist: $reply_source"
       }
+      grep -q '[^[:space:]]' "$reply_source" 2>/dev/null || {
+        [ -z "$reply_dest" ] || rm -f -- "$reply_dest"
+        fm_procevent_source_lock_release "$id"
+        die "agent reply file is blank: $reply_source"
+      }
       reply_dest=$(umask 077; mktemp "$REG/.$id.reply.XXXXXX") || {
         fm_procevent_source_lock_release "$id"
         die "cannot stage agent reply"

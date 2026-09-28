@@ -35,11 +35,10 @@
 #            run in a conversational turn. It runs the published blocking poll
 #            and prints its response verbatim, absorbing only the one exact
 #            transient interruption described below. A reply-carrying arm consumes
-#            its staged reply file once - reading and removing it before the
-#            poll - and hands the contents to the published `--agent-reply`
-#            argument; later retries poll without that reply. That post is best
-#            effort: a crash while consuming drops that one round's reply
-#            instead of posting it twice. See the note at the consume site.
+#            its staged reply file once and streams it through the published
+#            `--agent-reply-file -` interface; later retries poll without that
+#            reply. Firstmate-owned rounds record durable acceptance uncertainty
+#            before this boundary so an ambiguous failure cannot post twice.
 # terminal   Exit 0 when the captured result means this Lavish source will never
 #            produce another result, so the runner may retire it; any other exit
 #            keeps it armed. This is the generic adapter contract bin/fm-procevent.sh
@@ -409,14 +408,10 @@ cmd_poll() {
     [ -f "$artifact" ] && [ ! -L "$artifact" ] && [ -r "$artifact" ] \
       || die "artifact is no longer a readable file: $artifact"
     apply_session_host "$artifact"
-    # Posting a round's reply is BEST EFFORT and deliberately carries no delivery
-    # machinery. The staged file is the only record that a reply is owed, so it is
-    # consumed HERE - after every non-posting step that could abort this poll has
-    # already succeeded - leaving one narrow window: a crash between consuming the
-    # file and the call below drops this one round's reply rather than posting it
-    # twice. A listener that starts with no staged file simply polls without one.
-    # Robust delivery waits on lavish-axi's own exclusive listener; do not add a
-    # receipt, retry, or idempotency marker here.
+    # The staged file is consumed only after every non-posting setup step succeeds.
+    # Firstmate-owned rounds already carry the runner's durable acceptance-uncertainty
+    # marker at this boundary; worker-owned posting remains best effort. A listener
+    # that starts with no staged file simply polls without one.
     if [ -f "$reply_file" ] && [ ! -L "$reply_file" ]; then
       exec 7< "$reply_file" || die "cannot read agent reply file: $reply_file"
       rm -f -- "$reply_file" || die "cannot consume agent reply file: $reply_file"

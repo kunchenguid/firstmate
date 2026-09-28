@@ -1113,6 +1113,17 @@ if PATH="$LEGACY_BIN:$PATH" FM_HOME="$HFLEGACY" \
 fi
 assert_present "$FM_PROCEVENT_CLAIM_ROOT/$legacy_id.claim" \
   "failed live legacy handoff dropped machine-wide ownership"
+printf '  \n\t\n' > "$TMP_ROOT/firstmate-legacy-blank-reply.txt"
+if PATH="$LEGACY_BIN:$PATH" FM_HOME="$HFLEGACY" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$LEGACY_ART" \
+  --agent-reply-file "$TMP_ROOT/firstmate-legacy-blank-reply.txt" \
+  > "$TMP_ROOT/firstmate-legacy-blank.out" 2> "$TMP_ROOT/firstmate-legacy-blank.err"; then
+  fail "live legacy handoff accepted a blank reply"
+fi
+assert_absent "$HFLEGACY/state/procevent-inbox/$legacy_id.1.accepted" \
+  "blank Lavish reply stranded its round as ambiguously accepted"
+assert_present "$FM_PROCEVENT_CLAIM_ROOT/$legacy_id.claim" \
+  "blank Lavish reply dropped machine-wide ownership"
 printf 'Answered after handoff.\n' > "$TMP_ROOT/firstmate-live-legacy-reply.txt"
 PATH="$LEGACY_BIN:$PATH" FM_HOME="$HFLEGACY" \
   "$ROOT/bin/fm-procevent-lavish.sh" arm "$LEGACY_ART" \

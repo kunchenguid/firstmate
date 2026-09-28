@@ -1819,14 +1819,13 @@ An already-armed Lavish source keeps its registered listener command until it is
 Firstmate arms its opened artifact once with `bin/fm-procevent-lavish.sh arm <artifact.html>`.
 That arm records a round-aware firstmate-owned source, so reconciliation never starts another listener while captured feedback remains unacknowledged.
 
-After handling a nonterminal capture, firstmate writes the exact response it will send in main chat to a private file and re-arms the same artifact with `--agent-reply-file <path>`.
-The re-arm copies that response into generation-private staging, publishes the next registration, and records the captured round handled under one source lock before starting the listener.
-A failed publish or acknowledgement restores the prior registration, retains the capture, and removes the new staged file, so retry cannot silently skip the round.
-Re-arm without a reply file acknowledges a round that needs no same-session response.
-A reply file is refused when no captured round is waiting, which prevents an unrelated response from entering the session.
+After handling a nonterminal capture, firstmate writes the exact response it will send in main chat to a private, nonblank file and re-arms the same artifact with `--agent-reply-file <path>`.
+The re-arm copies that response into generation-private staging, publishes the next registration while retaining machine-wide ownership, and confirms only that exact registration generation.
+Before exposing the staged reply to Lavish, the runner durably records acceptance uncertainty. The listener validates its setup and saved session route, consumes the stage through `lavish-axi poll --agent-reply-file -`, and the runner records the captured round handled only after Lavish reports that listener accepted.
 
-The listener validates its setup and saved session route before consuming the staged file, then passes its contents once to `lavish-axi poll --agent-reply`.
-Posting stays best effort: a crash after consuming the file but before making that call drops one reply rather than risking duplicate delivery.
+A failure before the stage is consumed proves non-acceptance, clears the uncertainty marker, preserves the capture and ownership, and remains retryable. Once the stage may have been accepted, a failed handled acknowledgement leaves the uncertainty marker and registration in place and refuses another reply for that round, preventing an ambiguous retry from posting twice.
+Re-arm without a reply file acknowledges a round that needs no same-session response.
+A blank reply file or a reply file with no captured round waiting is refused before publication.
 A terminal firstmate-owned capture follows normal terminal retirement and uses the generic handled acknowledgement because no next listener should start.
 
 ### Crew-hosted Lavish review boards
@@ -1852,7 +1851,7 @@ Re-arm is that acknowledgement and nothing else: the board is armed once while n
 
 Re-arm never acquires, releases, or hands off the source claim.
 It may carry `--agent-reply-file <path>`.
-The file's contents are copied into that generation's private staging file and passed once to the published `--agent-reply` argument.
+The file's contents are copied into that generation's private staging file and passed once through `--agent-reply-file -`, keeping the response out of process arguments.
 
 A failed re-arm leaves the prior registration and its referenced reply unchanged, including when its required acknowledgement cannot be recorded.
 Reply posting is best effort by design.
