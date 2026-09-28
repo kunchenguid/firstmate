@@ -144,21 +144,26 @@ REFUSAL_MARKERS='insufficient_quota|exceeded_token_limit|"code": *"429"|status_c
 # probe_pi <cwd> <prompt>: run one non-interactive pi turn against a project copy.
 # The prompt must literally begin with the /skill: token: expansion keys on the
 # message's leading text, so prose that merely mentions the command does not load it.
+# probe_pi <cwd> <prompt> <destination>: one non-interactive pi turn in <cwd>, whose
+# whole stream lands in <destination> for read-back. Two shapes matter and both were
+# learned by getting them wrong: do not pass --no-context-files, which suppresses the
+# very /skill: expansion under test, and write to a file rather than capturing stdout,
+# because a command substitution around a backgrounded writer produced an empty read.
 probe_pi() {
-  local cwd=$1 prompt=$2
-  shift 2
-  (cd "$cwd" && env -u PI_SESSION_FILE pi "$@" --no-context-files --offline --mode text \
-    --print "$prompt" 2>&1)
+  local cwd=$1 prompt=$2 dest=$3
+  (cd "$cwd" && env -u PI_SESSION_FILE pi --approve --mode json --print "$prompt" > "$dest" 2>&1)
 }
 
-# verdict_of <output> <label>: echo YES/NO for a labelled line, or refuse.
+# verdict_of <file> <label>: echo YES/NO for a labelled assistant line, or refuse.
 verdict_of() {
-  local out=$1 label=$2 value
+  local file=$1 label=$2 out value
+  [ -s "$file" ] || { printf 'EMPTY\n'; return; }
+  out=$(cat "$file")
   if printf '%s' "$out" | grep -Eq "$REFUSAL_MARKERS"; then
     printf 'REFUSED\n'
     return
   fi
-  value=$(printf '%s' "$out" | grep -o "${label}=[A-Za-z]*" | head -1 | cut -d= -f2 | tr '[:lower:]' '[:upper:]')
+  value=$(printf '%s' "$out" | grep -o "${label}=[A-Za-z]*" | tail -1 | cut -d= -f2 | tr '[:lower:]' '[:upper:]')
   case "$value" in
     YES|NO) printf '%s\n' "$value" ;;
     *) printf 'OFFSHAPE\n' ;;
@@ -178,53 +183,84 @@ require_verdict() {
   local label=$1 value=$2
   case "$value" in
     REFUSED) fail "provider refused the $label probe (quota); set FM_SHOW_ME_LIVE=1 again once quota is available" ;;
+    EMPTY) fail "$label probe produced no output to read back; the probe wrote nothing, which is not a loader result" ;;
     OFFSHAPE) fail "$label probe answered off-shape; the answer shape or the skill changed" ;;
   esac
 }
 
-# One model read carries three independent signals, so a refusal shows up as all
-# three unusable rather than quietly passing whichever line it happened to parse.
+# injected_from_stream <file> [needle]: read back the delivered user message through
+# tests/pi-stream-user-text.cjs, which knows why only a message event counts and why a
+# serialized content array must be joined before matching. With a needle it prints
+# FOUND or MISSING; without one it prints the text.
+injected_from_stream() {
+  local file=$1 needle=${2-}
+  [ -s "$file" ] || { printf 'NOTFOUND\n'; return; }
+  if [ -n "$needle" ]; then
+    node "$ROOT/tests/pi-stream-user-text.cjs" "$file" "$needle" 2>/dev/null || printf 'READER_ERROR\n'
+  else
+    node "$ROOT/tests/pi-stream-user-text.cjs" "$file" 2>/dev/null || printf 'READER_ERROR\n'
+  fi
+}
+
+# assert_skill_block <stream> <expect FOUND|MISSING> <message>: did the loader inject
+# the show-me body? The quoted attribute form means prose about the command cannot
+# produce this signal by itself.
+assert_skill_block() {
+  local file=$1 expect=$2 msg=$3
+  assert_equals "$expect" "$(injected_from_stream "$file" '<skill name="show-me"')" "$msg"
+}
+
+# Deterministic shape: read back the first user message from the harness's own json
+# stream instead of asking a model to self-report. Asking proved worthless twice -
+# the same YES/NO prompt answered YES for a token that exists nowhere on the machine,
+# while the character-count variant of it tracked real context correctly.
 live_guard() {
-  local project marker seen sibling listed negative bare
+  local project bare marker stream
   project=$(make_project_copy live)
-  # The injected marker lives only inside the skill body. It is never typed into
-  # the prompt, so the answer is a claim about what arrived, and any reply naming
-  # it wrongly falsifies the assertion instead of confirming itself.
-  marker=$(grep -o 'SHOWME-INJECTED-MARKER' "$project/.agents/skills/show-me/SKILL.md" | head -1)
-  [ -n "$marker" ] || fail "the internal skill body no longer carries the injection marker the live guard needs"
-  assert_no_grep "$marker" "$project/.agents/skills/show-me/FIRSTMATE.md" \
-    "the marker leaked into the sibling adaptation, so SIBLING can no longer separate the two files"
-
-  local out
-  out=$(probe_pi "$project" \
-    "/skill:show-me Report exactly three lines and nothing else: SEEN=<YES if the token $marker appears in this message, otherwise NO>, SIBLING=<YES if the token $marker appears in a file other than SKILL.md in this message, otherwise NO>, LISTED=<YES if a skill named show-me appears in your system-prompt skill list, otherwise NO>" \
-    --skill "$project/.agents/skills/show-me")
-  seen=$(verdict_of "$out" SEEN)
-  sibling=$(verdict_of "$out" SIBLING)
-  listed=$(verdict_of "$out" LISTED)
-  require_verdict "forced-load" "$seen"
-  require_verdict "sibling-leak" "$sibling"
-  require_verdict "prompt-listing" "$listed"
-
-  assert_equals "YES" "$seen" "pi did not load the show-me body from a discovered project skill"
-  assert_equals "NO" "$listed" \
-    "manual-only show-me appeared in the system-prompt skill list without being invoked, so it taxes every session"
-  # Shipping the adaptation beside the vendored file means a forced load cannot drag
-  # it along; that separation is what keeps the vendor copy verifiable.
-  assert_equals "NO" "$sibling" \
-    "a forced skill load dragged the sibling adaptation along, contradicting the documented layout"
-
-  # Negative control: same prompt, no registration anywhere near it. If this ever
-  # answers YES, the positive verdict above proved nothing about registration.
   bare="$TMP_ROOT/bare"
   mkdir -p "$bare"
   git -C "$bare" init -q -b main
-  negative=$(probe_pi "$bare" \
-    "Report exactly one line and nothing else: SEEN=<YES if the token $marker appears in this message, otherwise NO>")
-  require_verdict "unregistered control" "$(verdict_of "$negative" SEEN)"
-  assert_equals "NO" "$(verdict_of "$negative" SEEN)" \
-    "show-me loaded without any registration, so the loader probes measure nothing"
-  pass "pi loads show-me by name, keeps the adaptation separable, and stays silent when uninvited"
+
+  marker=$(grep -o 'Body anchor SHOWME-BODY-TOKEN' "$project/.agents/skills/show-me/SKILL.md" | head -1)
+  [ -n "$marker" ] || fail "the internal skill body no longer carries the visible body anchor the live guard needs"
+  assert_no_grep "$marker" "$project/.agents/skills/show-me/FIRSTMATE.md" \
+    "the anchor leaked into the sibling adaptation, so the two files are no longer separable"
+
+  # Ruling 1a's acceptance core: does an internal .agents/skills copy load by discovery?
+  stream="$TMP_ROOT/discover.json"
+  probe_pi "$project" "/skill:show-me Reply with exactly one line and nothing else: DISCOVERED=<YES if the token $marker appears in this message, otherwise NO>" "$stream"
+  # The marker lives only in the body's visible prose and is never typed into the
+  # prompt, so FOUND for it means the discovered file was really injected. The quoted
+  # attribute form is checked too because a missing name would make that injection luck.
+  assert_equals "FOUND" "$(injected_from_stream "$stream" "$marker")" \
+    "pi did not load the internal show-me skill from a project .agents/skills directory, so ruling 1a's loaded surface is unverified - report the raw output rather than relocating the file"
+  assert_skill_block "$stream" FOUND \
+    "the body arrived without an injected skill block naming show-me, so the load is unattributable"
+
+  # Negative control: the same command where no such directory exists must not expand.
+  # Without this, a positive above could be the harness echoing the question.
+  stream="$TMP_ROOT/bare.json"
+  probe_pi "$bare" "/skill:show-me Reply with exactly one line and nothing else: DISCOVERED=<YES if the token $marker appears in this message, otherwise NO>" "$stream"
+  assert_skill_block "$stream" MISSING \
+    "show-me expanded in a project holding no skill directory, so the discovery probe measured nothing"
+
+  # Manual-only gate: the flag keeps the skill out of the prompt listing, so an
+  # ordinary session pays nothing for it even though the file is discovered.
+  stream="$TMP_ROOT/listing.json"
+  probe_pi "$project" "Reply with exactly one line and nothing else: LISTED=<YES if a skill named show-me appears in your available skills listing, otherwise NO>" "$stream"
+  case "$(injected_from_stream "$stream" '<name>show-me</name>')" in FOUND) fail "manual-only show-me appeared in the prompt listing without being invoked, so it taxes every session" ;;
+    MISSING) pass "manual-only show-me stayed out of the system-prompt skill listing" ;;
+    *) fail "the prompt-listing probe could not read its own stream" ;;
+  esac
+
+  # The public vendored body ships alone; loading the internal directory must not drag
+  # the working note into the same injection, which is what keeps the vendor copy auditable.
+  stream="$TMP_ROOT/sibling.json"
+  probe_pi "$project" "/skill:show-me Reply with exactly one line and nothing else: SIBLING=<YES if the phrase Honest fallback shape appears in this message, otherwise NO>" "$stream"
+  case "$(injected_from_stream "$stream" 'Separation anchor SHOWME-NOTE-ONLY')" in FOUND) fail "a forced skill load dragged the sibling working note along, contradicting the documented layout" ;;
+    MISSING) pass "a forced load injected only the skill body, not the sibling working note" ;;
+    *) fail "the sibling probe could not read its own stream" ;;
+  esac
 }
 
 test_vendored_body_stays_verbatim_and_manual_only

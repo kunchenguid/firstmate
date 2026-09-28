@@ -48,6 +48,8 @@ Do not install npm or pip packages to make rendering prettier; if the cheap path
 
 ### Honest fallback shape (rank 2)
 
+Separation anchor SHOWME-NOTE-ONLY: this line appears only in this working note, never in the skill body, so a probe can tell the two files apart.
+
 When rank 1 fails - no bridge running, no display path - say so, then send the structure as text: the node list, the edge list, and the open questions, in short lines.
 Say plainly that the picture itself did not reach the captain, so he knows he is reading the reduced form rather than the intended view.
 

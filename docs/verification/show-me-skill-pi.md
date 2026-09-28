@@ -95,24 +95,32 @@ The same command rendered a realistic 800x330 diagram containing an embedded SVG
 `send_image_to_wechat` comes from the installed `pi-wechat-assistant` extension (`src/index.ts`), takes one parameter `imagePath`, documents png/jpg/gif/webp, and restricts sends to the session's project directory.
 Calling it in this session returned `微信桥接未启动，请先在 TUI 执行 /wechat start`: the bridge was not running, which is the concrete case the rank-2 fallback in [FIRSTMATE.md](../../.agents/skills/show-me/FIRSTMATE.md) exists for.
 
-## Confirmed: an internal `.agents/skills/show-me/` copy was NOT observed loading (2026-09-28, later round)
+## Confirmed: the internal `.agents/skills/show-me/` copy loads by discovery, and a forced load produced a view (2026-09-28)
 
-Ruling 1a moves the adaptation to `.agents/skills/show-me/SKILL.md` and requires a real invocation record before calling that "installed". No such record exists yet. Probes run the same evening, in a throwaway git project holding only that directory:
+Ruling 1a required a real invocation record before calling this installed. That record now exists, obtained only after three earlier instruments were shown to be broken.
 
-| Probe | Command shape | Result |
-|---|---|---|
-| Non-interactive, no saved trust decision | `pi -p "<list skills starting with 'show'>"` | `NONE` |
-| Same, trust forced for one run | `pi --approve -p "<same>"` | `NONE` |
-| Loader called directly | `loadSkills({ cwd, agentDir, includeDefaults: true, skillPaths: [] })` from the harness's own `dist/core/skills.js` | `{ total: 0 }` |
-| Control from a path already in `trust.json` | `pi -p "<does show-me appear in your skill list?>"` | enumerated 28 internal skills by name; `show-me` absent because the file had just been created |
+Measurement that counts (`tests/fm-show-me-skill.test.sh`, run with `FM_SHOW_ME_LIVE=1`):
 
-Reading that goes with the numbers:
-- `pi --help` documents `-ns/--no-skills` as disabling discovery, which is **not** evidence of how discovery works when enabled, so it explains nothing above.
-- pi's settings documentation says non-interactive modes show no trust prompt and fall through `defaultProjectTrust`, where `ask` and `never` ignore project resources - so probe 1's `NONE` has an ordinary explanation.
-- The loader function itself never walks ancestors for `.agents/skills/`; the ancestor walk happens in the resource/package layer above it (`package-manager.js` adds `.agents/skills` dirs per project), so probe 3 tested the wrong layer and cannot falsify discovery either.
-- The control shows internal `.agents/skills/*/SKILL.md` files do get enumerated in practice from a trusted firstmate path, so the mechanism is real; `show-me` was missing there only because it did not exist when that session started.
+| Assertion | Result |
+|---|---|
+| A fixture git project holding only `.agents/skills/show-me/`, asked to force-load the skill | the delivered user message begins `<skill name="show-me" location=".../.agents/skills/show-me/SKILL.md">` - **FOUND** |
+| The same command in a project holding no skills directory | the raw text passes through unexpanded - **MISSING** |
+| The body's own visible anchor, never typed into any prompt | present in the injected message, so the arrival came from the discovered file |
+| An ordinary prompt in the fixture project | no `<name>show-me</name>` in the listing, so manual-only still costs nothing per session |
+| The working note's separate anchor | absent from the injection, so a forced load brings the body alone |
 
-Conclusion: **discoverability of the internal show-me surface is unverified**, not disproved. It needs a session started after the file landed, or `/skill:show-me` in a live pane. Do not write it as installed until then.
+Real invocation producing the deliverable: in that fixture project, `/skill:show-me` plus one collection-defect ask returned a sequence-shaped view of seven nodes and seven edges, two defect points named, missing edges drawn explicitly, and every unverified node labelled `to confirm`.
+The reply opened by stating it was the reduced text form and that no image had been delivered, which is the rank-2 honesty rule behaving as written rather than being quoted.
+
+How the answer is read, and why the earlier probes lied: `tests/pi-stream-user-text.cjs` parses the harness's own json stream and takes the first **message event** whose role is user.
+Three dead ends are recorded here because each produced a confident wrong answer:
+
+- Asking a model whether a token appears in its own message confirmed a token that exists nowhere on the machine. Model self-report is not an instrument; the character-count variant of the same question did behave correctly, so the failure is specific to self-description.
+- A marker inside an HTML comment could never be seen: comments are stripped from injected bodies, and the prompt echoing the question supplied the token anyway. Anchors must sit in visible prose, one unique string per file.
+- Reading the stream's first record found the pre-flight `prompt` echo instead of the delivered message, and serializing a content array left inner quotes escaped so a plain needle missed. Both made a genuine load read as MISSING.
+
+Trust precondition, stated because it bounds the result: pi collects project `.agents/skills/` directories only while the project is trusted (`package-manager.js`, `collectAncestorAgentsSkillDirs` gated on `isProjectTrusted()`), and these runs passed `--approve`, whose help documents it as trusting project-local files for one run.
+A firstmate home already carries a saved decision for its own path, and the control run in this repository enumerated its internal skills without any flag. What remains unproven is the interactive pane itself: no live TUI session was opened to watch `/skill:show-me` resolve there.
 
 ## Not proven
 

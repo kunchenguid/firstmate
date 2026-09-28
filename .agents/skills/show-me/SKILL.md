@@ -12,7 +12,7 @@ disable-model-invocation: true
 
 # show-me (firstmate internal adaptation)
 
-<!-- SHOWME-INJECTED-MARKER: this exact token appears only in this file, so a probe can tell whether the skill body was injected. -->
+Body anchor SHOWME-BODY-TOKEN: this visible line exists only inside this file, never in the working note beside it, so a probe can tell which of the two arrived.
 
 This is firstmate's own text; it is not part of the upstream skill body.
 Read [skills/show-me/UPSTREAM.md](../../../skills/show-me/UPSTREAM.md) for provenance and license.
@@ -96,31 +96,37 @@ Extra standing instructions are not free; upstream's own estimate is a noticeabl
 
 Measured facts about the installed harness (see [docs/verification/show-me-skill-pi.md](../../../docs/verification/show-me-skill-pi.md) for the probe records):
 
-- **Route 1, an internal `.agents/skills/` directory - documentation-only, not yet measured.**
+- **Route 1, an internal `.agents/skills/` directory - measured; see section 5 for what was compared.**
   pi's own skills documentation lists `.agents/skills/` in the working directory and its ancestors, recursing into directories that contain `SKILL.md`, as a project skill location loaded only after the project is trusted.
-  The adaptation lives here because that is the documented loaded surface. It has **not** been observed to load in a real firstmate session; see section 5 for the measurement that failed and what it does and does not prove.
+  The adaptation lives here because that is the documented loaded surface. It has been observed loading in a scripted project and in a control run from this repository; the interactive pane is still unmeasured, and section 5 states exactly which evidence supports which claim.
 - A packaged `skills/` directory is a separate documented route: pi's packages documentation states that when no `pi` manifest is present, `skills/` recursively yields `SKILL.md` folders and top-level `.md` files as skills.
   So calling a repository-root `skills/` directory undiscoverable would be wrong: it is not a *project-trust* location, but it is a package resource location.
-- The three routes this repo names are, each with its own status: an internal `.agents/skills/` directory (documentation-only), a `settings.json` `skills` array pointing at a skill directory (documentation-only), and an explicit `--skill <path>` (**measured**: a non-interactive run pointed at this repo's public directory started and completed cleanly).
+- The three routes this repo names are, each with its own status: an internal `.agents/skills/` directory (**measured**: forced load injected the discovered body against an unexpanded empty-project control), a `settings.json` `skills` array pointing at a skill directory (documentation-only), and an explicit `--skill <path>` (**measured**: a non-interactive run pointed at this repo's public directory started and completed cleanly).
   Do not describe an unlabelled combination as supported.
 - Invocation keys on the **leading token** of the message: `/skill:show-me` must come first, and prose that merely names it loads nothing.
 - Registration and discovery are different claims: a copy can be installed and still not resolve until something registers it.
 - A forced load injects only `SKILL.md`; sibling files arrive only if read explicitly.
   This file is self-contained on purpose, and links out to the public body rather than depending on a sibling being read.
 
-## 5. Discoverability measurement that has not passed
+## 5. Discoverability: measured, with the false readings kept visible
 
-Ruling 1a requires a real invocation record before this counts as installed. That record does not exist yet, so the honest status is **not verified**.
+Ruling 1a required a real invocation record before calling this installed. It now has one.
 
-What was run, in a throwaway git project holding only this directory under `.agents/skills/`:
+Measured, in a throwaway git project holding only this directory, reading back the harness's own message stream rather than asking a model about its context:
 
-- `pi -p` with no trust decision saved for the folder: `NONE` - and pi's settings documentation explains why, because non-interactive modes show no trust prompt and without a saved decision fall through `defaultProjectTrust`, where `ask` and `never` ignore project resources.
-- The same question with `--approve`: still `NONE`.
-- A direct call to the harness loader (`loadSkills`) with the defaults it uses at startup returned zero skills for that folder, and its path argument was required, not optional - so the ancestor walk that places `.agents/skills/` on the loaded list happens elsewhere, above this function.
+- Forcing `/skill:show-me` delivered a block starting `<skill name="show-me" location=".../.agents/skills/show-me/SKILL.md">`, and carried this file's visible body anchor, so the text came from the discovered file.
+- The identical command in a project with no skills directory passed through unexpanded. Without that negative control the positive proves nothing.
+- An ordinary prompt showed no `show-me` entry in the skill listing, so manual-only still taxes sessions nothing.
+- One forced invocation produced a real minimal view: nodes, edges, missing edges drawn explicitly, and unverified nodes labelled `to confirm`, opening by admitting it was the reduced text form with no image delivered.
+- Loading the body did not drag this directory's working note along; each file carries its own anchor precisely so that stays checkable.
 
-What these results do **not** establish: they do not prove an internal `.agents/skills/show-me/` copy cannot be discovered. Every probe above ran non-interactively against a synthetic project, while interactive startup is what the documented trust flow governs. One control did work: from this repository, whose path is listed in the trust store, a plain `pi -p` run enumerated the internal skills by name - `afk`, `bearings`, `harness-adapters` and the rest - so discovery of *some* `.agents/skills/` content is observable in practice; `show-me` was absent there only because this file had just been created and that session started before it existed.
+Three instruments failed before those results, and their failures are the reason the claims above are phrased narrowly:
 
-Until a session lists `show-me` in its own skill inventory, or `/skill:show-me` loads this body in a live pane, treat section 4's route 1 as documentation-only and say so rather than describing the skill as installed.
+- A model asked whether a token appears in its own message said YES to a token existing nowhere. Self-description is not a probe.
+- A marker inside an HTML comment was invisible to injection and echoed by the question, so it could only ever answer YES.
+- Reading the first record of the stream picked up the input echo instead of the delivered message, and serialized content arrays escape their quotes; a real load read as missing until both were fixed.
+
+Bounded by trust: project `.agents/skills/` directories are collected only for a trusted project, and the runs above passed a one-run trust flag. This repository's path already has a saved decision, and a plain run there listed its internal skills. What is still unproven is the interactive pane: no live TUI session watched the command resolve.
 
 Unverified; do not advertise until actually run:
 
