@@ -9,15 +9,21 @@
 # distinct real files or wrong symlinks.
 # Owns the canonical "## Maintaining this file" self-governance wording for
 # project AGENTS.md files, injecting it idempotently into created skeletons,
-# promoted CLAUDE.md files, and existing AGENTS.md files lacking both the exact
-# heading and the project-owned mark below (exact first line, LF or CRLF):
+# promoted CLAUDE.md files, and existing AGENTS.md files lacking all three of:
+# the exact heading, the project-owned mark below (exact first line, LF or CRLF):
 # <!-- firstmate:maintained-by-project -->
-# Projects may place this mark at the start of the file and retain equivalent
-# maintenance guidance under their own heading. It declares guidance is present, not
-# permission to remove governance. No prose equivalence is inferred.
+# and a heading of any level carrying the explicit id {#maintaining-this-file}
+# anywhere in the file, for example "## Principes voor dit bestand {#maintaining-this-file}".
+# Projects may place the first-line mark and retain equivalent maintenance
+# guidance under their own heading, or carry that same equivalence on a single
+# translated heading via the id instead. Both declare guidance is present, not
+# permission to remove governance; no prose equivalence is ever inferred from
+# heading text or body wording, in any language.
 # Owns the canonical CLAUDE.md pointer content (the exact two-line @AGENTS.md
 # form). A real-file pointer cannot follow a write into AGENTS.md, which is why
-# the installer never creates a CLAUDE.md symlink.
+# the installer never creates a CLAUDE.md symlink. A one-line "@AGENTS.md"
+# pointer (LF or CRLF) is also accepted as canonical and left untouched; the
+# installer still writes the two-line form for a file it creates itself.
 # Refuses a case-variant real memory file such as a lowercase agents.md, so the
 # pointer's @AGENTS.md import resolves to a real AGENTS.md on a case-sensitive
 # filesystem (issue #389). The real-file pointer also eliminates the old
@@ -33,10 +39,15 @@ usage() {
   cat >&2 <<'EOF'
 
 To retain equivalent project-owned maintenance guidance without adding the
-canonical section, use this exact first line of AGENTS.md (LF or CRLF):
-<!-- firstmate:maintained-by-project -->
-The mark declares retained guidance, not permission to remove governance.
-Without the first-line mark or exact canonical heading, the helper adds the section.
+canonical section, either:
+  - use this exact first line of AGENTS.md (LF or CRLF):
+    <!-- firstmate:maintained-by-project -->
+  - or give your own heading, in any language, the explicit id
+    {#maintaining-this-file}, for example:
+    ## Principes voor dit bestand {#maintaining-this-file}
+Either mark declares retained guidance, not permission to remove governance.
+Without the first-line mark, the exact canonical heading, or a heading
+carrying that id, the helper adds the section.
 EOF
 }
 
@@ -74,15 +85,29 @@ write_maintenance_section_with_eol() {
   done < <(write_maintenance_section)
 }
 
-# Idempotently append the canonical self-governance section to AGENTS.md when
-# neither its heading nor the first-line project-owned mark is present. Sets
-# MAINT_INJECTED=1 when it appends and 0 otherwise, for caller change reporting.
+# True when a heading of any level in AGENTS.md carries the explicit id
+# {#maintaining-this-file}, wherever in the file it appears. This is a fixed
+# ASCII token attached to the project's own heading rather than a translation
+# of the canonical English wording, so it identifies an equivalent
+# self-governance section under any heading text, in any language, without
+# language detection or a word list: a language this repo does not support
+# today still carries the same literal id unchanged.
+has_maintenance_section_id() {
+  grep -E '^#{1,6}[[:space:]]' "$AGENTS" | grep -Fq '{#maintaining-this-file}'
+}
+
+# Idempotently append the canonical self-governance section to AGENTS.md
+# unless one of three equivalent-guidance signals is already present: the
+# exact heading, the first-line project-owned mark, or a heading carrying the
+# {#maintaining-this-file} id. Sets MAINT_INJECTED=1 when it appends and 0
+# otherwise, for caller change reporting.
 MAINT_INJECTED=0
 ensure_maintenance_section() {
   MAINT_INJECTED=0
   if grep -Fqx -e '## Maintaining this file' -e $'## Maintaining this file\r' "$AGENTS" ||
     head -n 1 "$AGENTS" | grep -Fqx -e '<!-- firstmate:maintained-by-project -->' \
-      -e $'<!-- firstmate:maintained-by-project -->\r'; then
+      -e $'<!-- firstmate:maintained-by-project -->\r' ||
+    has_maintenance_section_id; then
     return 0
   fi
   local eol=$'\n' sep=''
@@ -123,9 +148,15 @@ claude_pointer_content() {
 EOF
 }
 
+# Canonical also accepts a one-line "@AGENTS.md" pointer (LF or CRLF): a
+# project may have trimmed the explanatory comment line, and refusing that
+# shorter valid form only relocates the refusal this helper exists to avoid.
 is_canonical_claude_pointer() {
   [ -f "$CLAUDE" ] && [ ! -L "$CLAUDE" ] || return 1
-  claude_pointer_content | cmp -s - "$CLAUDE"
+  claude_pointer_content | cmp -s - "$CLAUDE" && return 0
+  printf '@AGENTS.md\n' | cmp -s - "$CLAUDE" && return 0
+  printf '@AGENTS.md\r\n' | cmp -s - "$CLAUDE" && return 0
+  return 1
 }
 
 # Write the canonical pointer as a regular file. Unlink a symlink first so the
