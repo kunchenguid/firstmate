@@ -19,7 +19,7 @@ fs.writeFileSync(path.join(pkg, 'dist/index.js'), `
 ${pluginFixture(pkg)}
 export const createExtensionRuntime = () => ({});
 export const ModelRuntime = { create: async () => ({provider:{},getProvider(){return this.provider;},getAvailable: async () => [{provider:'fixture',id:'fixture'}],streamSimple:async (_m,_c,opts)=> {
- if(!opts.maxTokens) throw Error('missing provider token cap');
+ if(Object.hasOwn(opts,'maxTokens')) throw Error('application output cap still present');
  if(_c.transport) await opts.fetch('https://unused.invalid');
  if(_c.replay) {await opts.fetch();await opts.fetch();}
 }}) };
@@ -28,10 +28,10 @@ export const SettingsManager = {inMemory: x => ({...x,getCacheWarmingMode:()=>x.
 export async function createAgentSession(o) {
  if(o.tools.join() !== 'read_material' || o.resourceLoader.getAgentsFiles().agentsFiles.length || o.resourceLoader.getExtensions().extensions.length!==1) throw Error('isolation violated');
  if(o.settingsManager.getCacheWarmingMode() !== 'off') throw Error('cache warming enabled');
- const messages=[], subscribers=[];
+ const messages=[], subscribers=[];let answer='answer 42 m1';
  return {session:{ messages, systemPrompt:o.resourceLoader.getSystemPrompt(), getActiveToolNames:()=>o.tools,async bindExtensions(options){if(process.env.FM_FIXTURE_BIND_ERROR)options.onError({event:'session_start',error:'fixture'});o.modelRuntime.provider={};},
 
- subscribe: cb=>subscribers.push(cb),dispose(){},getLastAssistantText:()=> 'answer 42 m1',
+ subscribe: cb=>subscribers.push(cb),dispose(){},getLastAssistantText:()=>answer,
  async prompt(prompt){
   const goal=JSON.parse(prompt).goal;
   if(goal==='crash') process.exit(19);
@@ -49,6 +49,7 @@ export async function createAgentSession(o) {
   await o.modelRuntime.streamSimple({}, {}, {});
   if(goal==='modelbudget') await o.modelRuntime.streamSimple({}, {}, {});
   if(goal==='toolbudget') {for(let i=0;i<4;i++) await o.customTools[0].execute('a',{material:'m1'});}
+  if(goal.startsWith('large-output')) answer='x'.repeat(4096);
   const result=await o.customTools[0].execute('a',{material:'m1'});
   if(!result.content[0].text.includes('42')) throw Error('fixture missing');
   const message={role:'assistant',stopReason:'stop',content:[{type:'text',text:'42'}]};messages.push(message);
@@ -57,8 +58,9 @@ export async function createAgentSession(o) {
 }
 `);
 const fixture = path.join(tmp, 'evidence.txt'); fs.writeFileSync(fixture, 'value = 42\n');
+const largeFixture = path.join(tmp, 'large-evidence.txt'); fs.writeFileSync(largeFixture, 'value = 42\n' + 'x'.repeat(40000));
 const service = new ShortAgents(home, root);
-const request = (key, goal='delayed', budget={}) => ({key,goal,acceptance:'return value with evidence',provider:'fixture',model:'fixture',materials:[fixture],budget:{timeMs:30000,...budget}});
+const request = (key, goal='delayed', budget) => ({key,goal,acceptance:'return value with evidence',provider:'fixture',model:'fixture',materials:[fixture],...(budget ? {budget} : {})});
 const accepted = service.submit(request('one'));
 assert.equal(accepted.state, 'accepted'); assert.ok(accepted.submitMs < 1000);
 assert.equal(service.submit(request('one')).id, accepted.id);
@@ -89,10 +91,11 @@ assert.ok(!fs.existsSync(path.join(home,'projects')));
 assert.equal(fs.readdirSync(path.join(home,'state')).filter(x=>x.endsWith('.meta')).length,0);
 const fresh=new ShortAgents(home,root);assert.equal(fresh.status(accepted.id).state,'completed');
 assert.equal(fresh.cancel(accepted.id).state,'completed');
-const r={ input:request('reader','read',{tools:20}), materials:[{id:'m1',...snapshot(fixture)}] };
+const r={ input:request('reader','read'), materials:[{id:'m1',...snapshot(fixture)}] };
 const read=reader(r);
 assert.equal((await read('a',{material:'m1',offset:8,bytes:2})).content[0].text,'42');
-for(const args of [{material:fixture},{material:'../../etc/passwd'},{material:'m1',write:'bad'},{material:'m1',bytes:999999},{material:'m1',offset:-1}]) await assert.rejects(()=>read('a',args));
+for(let n=0;n<40;n++)assert.equal((await read('unlimited',{material:'m1',offset:0,bytes:100000})).content[0].text,'value = 42\n');
+for(const args of [{material:fixture},{material:'../../etc/passwd'},{material:'m1',write:'bad'},{material:'m1',offset:-1}]) await assert.rejects(()=>read('a',args));
 assert.equal(fs.readFileSync(fixture,'utf8'),'value = 42\n');
 fs.writeFileSync(fixture,'changed on disk');
 assert.equal((await read('snapshot',{material:'m1'})).content[0].text,'value = 42\n');
@@ -102,10 +105,26 @@ const link=path.join(tmp,'linked');fs.symlinkSync(fixture,link);assert.throws(()
 const hard=path.join(tmp,'hard');fs.linkSync(fixture,hard);assert.throws(()=>snapshot(hard), /single-link/);fs.unlinkSync(hard);
 assert.throws(()=>snapshot(tmp+'/sub/../evidence.txt'), /denied/);
 const secret=path.join(tmp,'innocent.txt');fs.writeFileSync(secret,'-----BEGIN PRIVATE KEY-----');assert.throws(()=>snapshot(secret), /credential/);
-for(const [goal,state,budget] of [['wait','cancelled',{}],['wait','timeout',{timeMs:1000}],['toolbudget','budget',{tools:1}],['modelbudget','budget',{outputTokens:64}],['oversize','budget',{outputTokens:64}]]) {
- const a=service.submit(request(goal+state,goal,budget));if(state==='cancelled')service.cancel(a.id);
- await until(a.id,state);service.finish(a.id,'completed','late success');assert.equal(service.status(a.id).state,state);
+const cancelled=service.submit(request('wait-cancelled','wait'));service.cancel(cancelled.id);
+await until(cancelled.id,'cancelled');service.finish(cancelled.id,'completed','late success');assert.equal(service.status(cancelled.id).state,'cancelled');
+for(const goal of ['delayed','toolbudget','modelbudget','oversize']) {
+ const began=Date.now(),a=service.submit(request('removed-'+goal,goal,{timeMs:1,tools:1,outputTokens:1,requests:1}));
+ const result=await until(a.id,'completed');
+ assert.ok(!Object.hasOwn(JSON.parse(fs.readFileSync(path.join(service.dir(a.id),'request.json'))).input,'budget'));
+ if(goal==='delayed')assert.ok(result.finishedAt-began>=800,'legacy wall budget does not stop execution');
 }
+const large=service.submit({key:'k'.repeat(200),goal:'large-output'+('g'.repeat(9000)),acceptance:'a'.repeat(5000),provider:'fixture',model:'fixture',materials:Array(5).fill(largeFixture)});
+const largeResult=await until(large.id,'completed');assert.equal(largeResult.summary.length,4096);assert.ok(JSON.parse(fs.readFileSync(path.join(service.dir(large.id),'request.json'))).materials[0].content.length>40000);
+const legacy=service.submit(request('legacy-readable'),false),legacyFile=path.join(service.dir(legacy.id),'request.json');
+const legacyRecord=JSON.parse(fs.readFileSync(legacyFile));legacyRecord.version=1;legacyRecord.input.budget={timeMs:1,tools:1,outputTokens:1,requests:1};fs.writeFileSync(legacyFile,JSON.stringify(legacyRecord));
+assert.equal(service.status(legacy.id).state,'accepted','legacy wall budget is ignored');
+assert.equal(service.submit(request('legacy-readable')).id,legacy.id,'legacy budget does not change duplicate identity');
+assert.ok(!fs.existsSync(path.join(service.dir(legacy.id),'started.json')),'legacy duplicate is never replayed');
+fs.writeFileSync(path.join(service.dir(legacy.id),'heartbeat'),'old');fs.utimesSync(path.join(service.dir(legacy.id),'heartbeat'),new Date(0),new Date(0));
+assert.equal(service.status(legacy.id).state,'interrupted');
+const legacyTerminal=service.submit(request('legacy-terminal'),false),legacyTerminalFile=path.join(service.dir(legacyTerminal.id),'request.json');
+const legacyTerminalRecord=JSON.parse(fs.readFileSync(legacyTerminalFile));legacyTerminalRecord.version=1;legacyTerminalRecord.input.budget={timeMs:1000,tools:1,outputTokens:64,requests:1};fs.writeFileSync(legacyTerminalFile,JSON.stringify(legacyTerminalRecord));
+service.finish(legacyTerminal.id,'budget','historical budget result');assert.equal(service.status(legacyTerminal.id).state,'budget');
 const crash=service.submit(request('crash','crash'));await wait(500);
 // Age only the specific crashed lease; do not rely on broad process scans.
 const crashDir=service.dir(crash.id);fs.writeFileSync(path.join(crashDir,'heartbeat'),'old');fs.utimesSync(path.join(crashDir,'heartbeat'),new Date(0),new Date(0));
@@ -125,7 +144,7 @@ const row=rows.find(x=>x.task===accepted.id);assert.equal(rows.filter(x=>x.task=
 const outcome=args=>execFileSync('bash',[path.join(root,'bin/fm-branch-outcome.sh'),...args],{env:{...process.env,FM_HOME:home,FM_STATE_OVERRIDE:path.join(home,'state')},encoding:'utf8'});
 outcome(['mark-read','--through',String(row.seq)]);outcome(['mark-processed','--through',String(row.seq)]);
 assert.ok(!outcome(['unprocessed']).includes(accepted.id));
-// CLI result/status preserve the bounded public contract across a new process.
-const cli=JSON.parse(execFileSync(process.execPath,[path.join(root,'bin/fm-short-agent.mjs'),'result',accepted.id],{env:{...process.env,FM_HOME:home},encoding:'utf8'}));
-assert.equal(cli.state,'completed');assert.ok(Buffer.byteLength(JSON.stringify(cli))<4096);
+// CLI result/status preserve the full public result across a new process.
+const cli=JSON.parse(execFileSync(process.execPath,[path.join(root,'bin/fm-short-agent.mjs'),'result',large.id],{env:{...process.env,FM_HOME:home},encoding:'utf8'}));
+assert.equal(cli.state,'completed');assert.equal(cli.summary.length,4096);
 console.log(JSON.stringify({submitMs:accepted.submitMs,eventLoopTicks:ticks,resultBytes:Buffer.byteLength(JSON.stringify(cli)),noTerminalOrWorktree:true}));

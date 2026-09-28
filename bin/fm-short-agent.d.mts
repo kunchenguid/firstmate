@@ -7,7 +7,6 @@ export interface ShortRequest {
     { action: 'merge'; task: string; url: string } |
     { action: 'cleanup'; task: string }
   )[] };
-  budget?: { timeMs?: number; tools?: number; outputTokens?: number; requests?: number };
 }
 export interface ShortResult { id: string; state: string; evidence: string; summary?: string }
 export class ShortAgents {

@@ -1,7 +1,7 @@
-# Run a bounded short task while continuing the conversation
+# Run a short task while continuing the conversation
 
 A Pi primary can submit a small analysis or an explicitly authorized operation chain, receive an ID immediately, and continue the conversation while an independent Pi process works.
-Both use `fm_short_submit`, the same bounded lifecycle, and the normal supervision outcome channel.
+Both use `fm_short_submit`, the same independent lifecycle, and the normal supervision outcome channel.
 Each submission has its own context; unrelated tasks do not share a conversation.
 Ordinary ship/scout dispatch is unchanged.
 
@@ -20,20 +20,21 @@ Use `node bin/fm-short-agent.mjs models` to discover pairs through the installed
 The runner initializes Pi's HTTP dispatcher, respecting existing proxy variables without copying credentials or importing provider extensions.
 `FM_PI_PACKAGE_DIR` can select the installed Pi package when `pi` is not on PATH.
 
-Call `fm_short_submit` with a stable retry key, goal, acceptance condition, and up to four absolute canonical paths to harmless text files:
+Call `fm_short_submit` with a stable retry key, goal, acceptance condition, and absolute canonical paths to harmless text files:
 
 ```json
 {
   "key": "count-check-1",
   "goal": "Read m1 and report the measured count.",
   "acceptance": "Quote the count and cite m1.",
-  "materials": ["/absolute/path/to/count-report.txt"],
-  "budget": {"timeMs": 120000, "tools": 8, "outputTokens": 2048, "requests": 4}
+  "materials": ["/absolute/path/to/count-report.txt"]
 }
 ```
 
 Submission captures the selected files and returns `id`, `state`, `submitMs`, and an evidence directory before model initialization.
 An identical retry returns the same task and original snapshots; changed arguments with the same key are rejected.
+For compatibility, the CLI accepts the former `budget` object and ignores its four legacy fields when comparing or storing a new request.
+The Pi tool no longer exposes that object.
 The CLI equivalent is `FM_HOME=/absolute/home node bin/fm-short-agent.mjs submit request.json`.
 Operation submission and cancellation enforce primary ownership in the service as well as the Pi tool.
 
@@ -84,7 +85,7 @@ No actor string alone grants execution.
 ## Read the result or cancel
 
 `fm_short_task` accepts `status`, `result`, or `cancel` with the returned `id`.
-Terminal records contain a bounded summary and evidence directory; operation status also lists each recorded step's completion or refusal.
+Terminal records contain the complete summary and evidence directory; operation status also lists each recorded step's completion or refusal.
 The directory contains the independent starting context, model/tool journal, and per-step intent, owner output, and postcondition receipts.
 It also records the initialized Pi version, extension list, active tools, empty starting history, and effective cache-warming mode in `runtime.json`.
 Successful model execution also writes `plugin-result.json` with the exact package version, handler error count, active tools and native provider response count; these counts contain no response bodies.
@@ -101,11 +102,11 @@ A notification error is surfaced without replacing the terminal result.
 Cancellation revokes operation authority and publishes one terminal result.
 A call already in progress may have changed its target; cancellation does not undo an effect or provider billing.
 The owner may still record its postcondition, but no new step may start.
-The first terminal result wins, so a late provider response cannot replace cancellation or budget exhaustion.
+The first terminal result wins, so a late provider response cannot replace cancellation or interruption.
 
 ## Access limits and uncertain effects
 
-Every child gets `read_material`, which accepts only a material ID and a bounded byte slice of the captured snapshot.
+Every child gets `read_material`, which accepts only a material ID and a selected byte slice of the captured snapshot.
 Only an explicitly granted operation task also gets the argument-free `run_operations` tool.
 Neither tool accepts shell commands, new paths, expanded grants, or arbitrary recovery choices.
 The child receives no parent messages, context files, skills, prompt templates, or arbitrary extensions.
@@ -116,24 +117,22 @@ All plugin shell, filesystem and network tool registrations and management comma
 Plugin config and installation identity use the child directory, while the already initialized model runtime retains its original authentication source.
 No global settings, installed package or parent session is changed.
 
-Capture rejects directories, large files, symlink paths, hardlinks, common credential locations, and recognizable credential content.
+Capture rejects directories, symlink paths, hardlinks, common credential locations, and recognizable credential content.
 Select sanitized evidence: detecting every secret in ordinary prose is outside this boundary.
 The trusted Pi runtime retains provider authentication and network access.
 These are enforced model-tool and action-owner boundaries, not an operating-system sandbox against arbitrary code running as the same user.
 
-Wall time, tool calls, provider requests, and reserved output tokens are bounded.
-Each request reserves up to 1024 output tokens without refunding unused allowance.
-A conservative streamed-byte guard also stops transports that ignore an upstream output limit; input is byte-bounded separately.
-The output allowance is not a total billed-token cap, and abort cannot guarantee exact billing.
+Firstmate applies no short-task wall-clock limit, tool-call limit, provider-request limit, captured-input size limit, output-token reservation, or streamed-output size limit.
+The selected provider and model still enforce their own context, request, and output limits; a provider length stop is recorded as `blocked` with that distinction rather than reported as a Firstmate budget failure.
+Cancellation of an already active provider request can take a short time and cannot guarantee exact billing.
 Automatic compaction and cache warming are disabled, including the plugin threshold override.
-SSE uses zero transport retries, and each model stream may issue only one HTTP request, so plugin-internal retries or continuations cannot silently bypass the request reservation.
-An output-limit response ends the child before the plugin can trigger a continuation turn.
-[`bin/fm-short-agent.mjs`](../bin/fm-short-agent.mjs) and its `--help` own exact request limits.
+SSE uses zero transport retries, and each model stream may issue only one HTTP request, so plugin-internal retries cannot replay an uncertain request.
+[`bin/fm-short-agent.mjs`](../bin/fm-short-agent.mjs) and its `--help` own the request schema and compatibility behavior.
 
 Reloading MAIN leaves children running and reconciles results when the extension starts again.
-An expired wall deadline produces `timeout`.
 A stale heartbeat produces `completed` only when every operation has a verified completed receipt; otherwise it produces `interrupted`.
 Neither path replays work.
+Historical v1 requests retain their legacy budget object for immutable evidence, but status and recovery ignore it; an unstarted stale request becomes `interrupted`, and an existing terminal `timeout` or `budget` result remains readable without execution.
 For operations, intent is persisted before calling the owner and a receipt requires authoritative postcondition readback.
 Completed early steps remain visible if a later step fails.
 A verified merge whose command response was lost can still complete through the merge owner's readback.
@@ -152,7 +151,7 @@ The CLI `reconcile` retries missing notifications and reconciles ordinary receip
 
 ## Verify the installed path
 
-Run `bin/fm-test-run.sh tests/fm-short-agent.test.sh tests/fm-short-operations.test.sh tests/fm-pi-primary-types.test.sh` for lifecycle, permission, isolated Git/forge effects, replay, and SDK checks.
+Run `bin/fm-test-run.sh tests/fm-short-agent.test.sh tests/fm-short-operations.test.sh tests/fm-pi-primary-types.test.sh` for uncapped input, output, duration and call behavior plus lifecycle, permission, isolated Git/forge effects, replay, and SDK checks.
 The operation suite doubles the model and forge; it does not perform an external merge.
 Set `FM_SHORT_INSTALL_LIVE=1` for its optional verified ShellCheck install into a temporary directory.
 Run `FM_SHORT_HERDR_E2E=1 bash tests/fm-short-operations-herdr.test.sh` for cleanup through a generated named Herdr lab and its default-session safety tripwire.

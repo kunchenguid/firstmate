@@ -24,7 +24,7 @@ Wake, watcher, away-mode, and Relay-specific state mechanics remain with their n
 
 ## Headless short tasks
 
-`FM_SHORT_AGENT_ENABLED=1` enables the Pi-primary short-task tools; [the current-use guide](short-agents.md) owns setup, examples, limits, and recovery.
+`FM_SHORT_AGENT_ENABLED=1` enables the Pi-primary short-task tools; [the current-use guide](short-agents.md) owns setup, examples, provider-limit distinctions, and recovery.
 `state/short-agents/` holds their runner-owned records, whose lifecycle format is owned by `bin/fm-short-agent.mjs` and operation grants/receipts by `bin/fm-short-operations.mjs`.
 
 ## Feishu current-Pi channel
