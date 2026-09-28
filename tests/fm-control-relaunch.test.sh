@@ -1873,13 +1873,8 @@ SH
 start_worktree_agent() {  # <case-dir>
   (cd "$1/wt" && exec -a claude /bin/sleep 60) &
   WORKTREE_AGENT_PID=$!
-  # Let the exec land before anything reads the process table.
-  local _
-  for _ in $(seq 1 50); do
-    [ "$(tr '\0' '\n' < "/proc/$WORKTREE_AGENT_PID/cmdline" 2>/dev/null | head -n 1)" = claude ] && return 0
-    ps -o args= -p "$WORKTREE_AGENT_PID" 2>/dev/null | grep -q '^claude' && return 0
-    /bin/sleep 0.05
-  done
+  fm_wait_for_agent_argv0 "$WORKTREE_AGENT_PID" \
+    || fail "the planted worktree agent never reported a harness argv[0]"
 }
 
 stop_worktree_agent() {
@@ -2036,14 +2031,16 @@ test_worktree_agent_scan_counts_only_agents_inside_the_worktree() {
   pid_plain=$!
   (cd "$base/wt-sibling" && exec -a claude /bin/sleep 60) &
   pid_sibling=$!
-  /bin/sleep 0.3
+  fm_wait_for_agent_argv0 "$pid_sibling" \
+    || fail "the sibling-directory agent never reported a harness argv[0], so excluding it would prove nothing"
   scan=$(fm_agent_process_worktree_scan "$wt")
   [ "$scan" = "none"$'\t' ] \
     || fail "a non-agent process, or an agent in a sibling directory, must not count, got '$scan'"
 
   (cd "$wt/sub" && exec -a claude /bin/sleep 60) &
   pid_sub=$!
-  /bin/sleep 0.3
+  fm_wait_for_agent_argv0 "$pid_sub" \
+    || fail "the subdirectory agent never reported a harness argv[0], so counting it would prove nothing"
   scan=$(fm_agent_process_worktree_scan "$wt")
   case "$scan" in
     "agent"$'\t'"$pid_sub "*) ;;

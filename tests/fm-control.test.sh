@@ -791,7 +791,8 @@ test_missing_tmux_endpoint_reports_gone_only_when_no_agent_works_there() {
   # task whose endpoint is gone").
   (cd "$dir/wt-t1" && exec -a claude /bin/sleep 60) &
   agent=$!
-  /bin/sleep 0.3
+  fm_wait_for_agent_argv0 "$agent" \
+    || fail "the planted agent never reported a harness argv[0], so the refusal below would prove nothing"
   out=$(run_control "$dir" t1 exit); rc=$?
   kill "$agent" 2>/dev/null || true
   wait "$agent" 2>/dev/null || true
