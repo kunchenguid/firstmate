@@ -90,14 +90,19 @@ triage_log() {
 
 # Exit after reporting one actionable wake. Tests override this callback.
 wake() {
-  local output_status=0 handed floor
+  local output_status=0 handed
   case "$1" in
     heartbeat*) echo $(( $(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0) + 1 )) > "$STATE/.heartbeat-streak" ;;
     *) echo 0 > "$STATE/.heartbeat-streak" ;;
   esac
-  watch_queue_handed_read floor
-  fm_wake_seq_read handed
-  watch_queue_handed_write "$handed" "$floor" || true
+  # Only a check close hands every queued row to main (watch_queue_handed_read
+  # in bin/fm-wake-lib.sh owns the rule).
+  case "$1" in
+    check:*)
+      fm_wake_seq_read handed
+      watch_queue_handed_write "$handed" || true
+      ;;
+  esac
   trap '' HUP INT TERM
   [ -z "$FM_WAKE_POST_OUTPUT_ACTION" ] || trap '' PIPE
   if echo "$1"; then

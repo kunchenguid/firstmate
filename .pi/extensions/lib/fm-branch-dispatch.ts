@@ -682,12 +682,6 @@ export async function writeEligibleRowsSnapshot(
   return "error";
 }
 
-// A branch took a close and claimed nothing from it, so that close handed main
-// no row: let the running watcher surface the unclaimed rows to main once.
-export async function withholdHandedRows(state: string, grantScript: string): Promise<boolean> {
-  return (await runGrantScript(state, grantScript, ["withhold"])) === 0;
-}
-
 export async function releaseEligibleRowsSnapshot(
   state: string,
   grantScript: string,

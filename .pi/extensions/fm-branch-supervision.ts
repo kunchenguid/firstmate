@@ -117,7 +117,6 @@ import {
   FM_BRANCH_DISPATCH_EVENT,
   releaseEligibleRowsSnapshot,
   scopeForUnreadWake,
-  withholdHandedRows,
   writeEligibleRowsSnapshot,
   type BranchDispatchOffer,
 } from "./lib/fm-branch-dispatch.ts";
@@ -1521,7 +1520,6 @@ ${context.command}
           if (acceptedAwayOnly) {
             throw new Error("accepted away-only wake is no longer branch-eligible");
           }
-          await withholdHandedRows(state, wakeGrantScript);
           return;
         }
         if (scope.corrupted) {

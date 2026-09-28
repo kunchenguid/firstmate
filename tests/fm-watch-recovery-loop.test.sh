@@ -324,112 +324,93 @@ test_afk_successor_leaves_foreign_appends_to_the_daemon() {
   pass "the away-mode watcher leaves a foreign queue append to the daemon"
 }
 
-# T5: a close hands over every row queued before it, but a supervision branch
-# that takes the close presents only its granted rows. A captain inbox note
-# queued just before a signal close the branch took must still reach main
-# through the handling successor, exactly once.
-test_branch_grant_leaves_withheld_note_to_the_successor() {
-  local dir state out child note signal_seq
-  dir=$(make_case branch-withheld-note)
-  dir=$(cd "$dir" && pwd -P)
-  state="$dir/state"
-  out="$dir/watch.out"
-  mkdir -p "$dir/data" "$dir/config"
-
-  note=$(foreign_note "$dir" "note before a branch close") || fail "the inbox note was not queued"
-  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '. "$1/bin/fm-wake-lib.sh" && fm_wake_append signal task-a.status "done: task-a"' _ "$ROOT" \
-    || fail "the signal row was not queued"
-  signal_seq=$(awk -F '\t' 'END { print $2 }' "$state/.wake-queue")
-  foreign_watch_bg "$dir" "$out" 0
-  child=$!
-  wait_for_exit "$child" 100 || fail "the predecessor did not close on the queued rows: $(cat "$out")"
-  grep -q '^check:' "$out" || fail "the predecessor closed without a wake: $(cat "$out")"
-
-  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-wake-grant.sh" activate "$$" withheld-note \
-    || fail "branch owner activation failed"
-  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-wake-grant.sh" publish withheld-note "$signal_seq" \
-    || fail "branch grant publication failed"
-  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-wake-grant.sh" publish withheld-note "$signal_seq" \
-    || fail "identical branch grant re-publication failed"
-
-  foreign_watch_bg "$dir" "$out" 1
-  child=$!
-  wait_for_exit "$child" 50 \
-    || fail "a handling successor kept blocking on a note the branch grant withheld: $(cat "$out")"
-  grep -Fx "check: undelivered queued wake: $note" "$out" >/dev/null \
-    || fail "the successor did not surface exactly the withheld note, leaving the granted row to the branch: $(cat "$out")"
-
-  foreign_watch_bg "$dir" "$out" 1
-  child=$!
-  stays_blocking "$state" "$child" \
-    || fail "a later successor surfaced the withheld note again: $(cat "$out")"
-  kill -TERM "$child" 2>/dev/null || true
-  wait "$child" 2>/dev/null || true
-  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-wake-grant.sh" deactivate "$$" withheld-note \
-    || fail "branch owner deactivation failed"
-  pass "a note a branch grant withholds still reaches main once through the handling successor"
+# A fake fm-crew-state.sh that queues one real captain inbox note the first
+# time the watcher asks whether a crew is working, then reports no evidence,
+# so the note lands after this cycle's queue check and before its signal close.
+note_during_triage_crew_state() {  # <dir>
+  local dir=$1
+  cat > "$dir/fakebin/fm-crew-state.sh" <<SH
+#!/usr/bin/env bash
+if [ ! -e "$dir/note-queued" ]; then
+  : > "$dir/note-queued"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_DATA_OVERRIDE="$dir/data" \\
+    FM_CONFIG_OVERRIDE="$dir/config" "$ROOT/bin/fm-inbox.sh" note "note during a signal close" >/dev/null
+fi
+printf '%s\n' 'state: unknown · source: none · fake default'
+SH
+  chmod +x "$dir/fakebin/fm-crew-state.sh"
 }
 
-# T6: a branch that takes a close but finds nothing left to claim presents no
-# row at all, so a note that close handed over must still reach main once. A
-# later close the branch also takes with nothing to claim must not hand the
-# already-announced note to main again.
-test_branch_noop_leaves_handed_note_to_the_successor() {
-  local dir state out child note later
-  dir=$(make_case branch-noop-note)
+# T5: a signal, stale, or heartbeat close may be taken by a supervision branch
+# that presents only its granted rows, so it must not hand over a captain inbox
+# note that was queued just before it. The next handling successor surfaces
+# exactly that note - never the watcher's own signal row - and only once.
+test_signal_close_leaves_a_raced_note_to_the_successor() {
+  local dir state out child note handed note_seq
+  dir=$(make_case signal-close-raced-note)
   dir=$(cd "$dir" && pwd -P)
   state="$dir/state"
   out="$dir/watch.out"
   mkdir -p "$dir/data" "$dir/config"
+  note_during_triage_crew_state "$dir"
+  printf 'working: step 1\n' > "$state/crew.status"
+  : > "$state/crew.meta"
 
-  note=$(foreign_note "$dir" "note before a branch no-op") || fail "the inbox note was not queued"
-  foreign_watch_bg "$dir" "$out" 0
+  foreign_watch_bg "$dir" "$out" 1 FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh"
   child=$!
-  wait_for_exit "$child" 100 || fail "the predecessor did not close on the queued note: $(cat "$out")"
-  grep -q '^check:' "$out" || fail "the predecessor closed without a wake: $(cat "$out")"
-
-  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-wake-grant.sh" withhold \
-    || fail "the branch no-op could not return the handed rows"
+  wait_for_exit "$child" 100 || fail "the successor did not close on the crew signal: $(cat "$out")"
+  [ -e "$dir/note-queued" ] || fail "the fixture never queued its note during triage: $(cat "$out")"
+  grep -q '^signal:' "$out" || fail "the raced close was not a signal close: $(cat "$out")"
+  note=$(awk -F '\t' '$3 == "check" && $4 ~ /^inbox:/ { print $4 }' "$state/.wake-queue")
+  note_seq=$(awk -F '\t' '$3 == "check" && $4 ~ /^inbox:/ { print $2 }' "$state/.wake-queue")
+  [ -n "$note" ] || fail "the raced note is not queued: $(cat "$state/.wake-queue")"
+  handed=$(cat "$state/.watch-queue-handed" 2>/dev/null || echo 0)
+  [ "${handed:-0}" -lt "$note_seq" ] \
+    || fail "the signal close recorded the raced note (seq $note_seq) as handed over (record $handed)"
 
   foreign_watch_bg "$dir" "$out" 1
   child=$!
   wait_for_exit "$child" 50 \
-    || fail "a handling successor kept blocking on a note no actor was presented: $(cat "$out")"
+    || fail "a handling successor kept blocking on a note a signal close did not hand over: $(cat "$out")"
   grep -Fx "check: undelivered queued wake: $note" "$out" >/dev/null \
-    || fail "the successor did not surface the note the branch no-op left: $(cat "$out")"
+    || fail "the successor did not surface exactly the raced note without the signal row: $(cat "$out")"
 
   foreign_watch_bg "$dir" "$out" 1
   child=$!
   stays_blocking "$state" "$child" \
-    || fail "a later successor surfaced the same note again: $(cat "$out")"
-  later=$(foreign_note "$dir" "note before a second branch no-op") || fail "the later inbox note was not queued"
-  wait_for_exit "$child" 50 || fail "a handling successor kept blocking after a later note: $(cat "$out")"
-  grep -Fx "check: undelivered queued wake: $later" "$out" >/dev/null \
-    || fail "the successor did not surface exactly the later note: $(cat "$out")"
-  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-wake-grant.sh" withhold \
-    || fail "the second branch no-op could not return the handed rows"
-
-  foreign_watch_bg "$dir" "$out" 1
-  child=$!
-  wait_for_exit "$child" 50 \
-    || fail "a handling successor kept blocking on the note the second no-op left: $(cat "$out")"
-  grep -Fx "check: undelivered queued wake: $later" "$out" >/dev/null \
-    || fail "a second branch no-op did not surface only the later note: $(cat "$out")"
-  grep -F "$note" "$out" >/dev/null \
-    && fail "a second branch no-op handed an already-announced note to main again: $(cat "$out")"
-
-  foreign_watch_bg "$dir" "$out" 1
-  child=$!
-  stays_blocking "$state" "$child" \
-    || fail "a successor after repeated no-op closes surfaced a note again: $(cat "$out")"
+    || fail "a later successor surfaced the raced note again: $(cat "$out")"
   kill -TERM "$child" 2>/dev/null || true
   wait "$child" 2>/dev/null || true
-  pass "a note a branch no-op close handed over reaches main once, and later no-op closes never repeat it"
+  pass "a note queued just before a signal close reaches main once through the next successor, without the signal row"
+}
+
+# T6: a note main's drain has already claimed is being handled, so a successor
+# that starts before main acknowledges it must not wake main for it again.
+test_main_claimed_note_is_not_surfaced_again() {
+  local dir state out child
+  dir=$(make_case main-claimed-note)
+  dir=$(cd "$dir" && pwd -P)
+  state="$dir/state"
+  out="$dir/watch.out"
+  mkdir -p "$dir/data" "$dir/config"
+  foreign_note "$dir" "note main is handling" >/dev/null || fail "the inbox note was not queued"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-wake-drain.sh" >/dev/null 2>&1 \
+    || fail "main's drain could not present the note"
+
+  foreign_watch_bg "$dir" "$out" 1
+  child=$!
+  stays_blocking "$state" "$child" \
+    || fail "a successor surfaced a note main's drain had already claimed: $(cat "$out")"
+  kill -TERM "$child" 2>/dev/null || true
+  wait "$child" 2>/dev/null || true
+  grep -q "$(printf '\tcheck\tinbox:')" "$state/.wake-queue" \
+    || fail "the claimed note left the durable queue before acknowledgement"
+  pass "a note main's drain already claimed is not surfaced again before acknowledgement"
 }
 
 test_handling_successor_does_not_go_blind
 test_unacknowledged_recovery_is_announced_once_per_generation
 test_handling_successor_surfaces_a_foreign_append_once
 test_afk_successor_leaves_foreign_appends_to_the_daemon
-test_branch_grant_leaves_withheld_note_to_the_successor
-test_branch_noop_leaves_handed_note_to_the_successor
+test_signal_close_leaves_a_raced_note_to_the_successor
+test_main_claimed_note_is_not_surfaced_again

@@ -81,19 +81,7 @@ case "${1:-}" in
     if [ "$replace" -eq 1 ]; then
       _fm_atomic_replace "$TMP" "$BRANCH_ROWS" || exit 1
       TMP=
-      # The close this grant answers recorded every row queued before it as
-      # handed over; the running watcher surfaces a row the branch withholds to
-      # main once. An identical re-publish is the same grant and lowers nothing.
-      watch_queue_handed_withhold_locked || true
     fi
-    ;;
-  withhold)
-    # A branch took a close and claimed nothing from it: that close handed
-    # main no row, so the running watcher surfaces the unclaimed ones once.
-    [ "$#" -eq 1 ] || exit 2
-    fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
-    LOCK_HELD=true
-    watch_queue_handed_withhold_locked || true
     ;;
   release)
     generation=${2:-}
@@ -113,7 +101,7 @@ case "${1:-}" in
     rm -f -- "$BRANCH_ROWS" "$BRANCH_OWNER" || exit 1
     ;;
   *)
-    echo "usage: fm-wake-grant.sh activate PID GENERATION | publish GENERATION SEQUENCE... | withhold | release GENERATION | deactivate PID GENERATION" >&2
+    echo "usage: fm-wake-grant.sh activate PID GENERATION | publish GENERATION SEQUENCE... | release GENERATION | deactivate PID GENERATION" >&2
     exit 2
     ;;
 esac

@@ -107,11 +107,11 @@
 #                          joined with `;` when more than one surfaces in a cycle
 #   check: undelivered queued wake: <keys>
 #                          another writer (a captain inbox note, a mail or
-#                          contributions check) appended rows to this home's
-#                          own queue after the last actionable close handed
-#                          the queue over; reported once per row sequence and
-#                          never while the away-mode daemon owns triage
-#                          (queue_handover_surface)
+#                          contributions check) appended check rows to this
+#                          home's own queue that no check close has handed
+#                          over and no actor holds; reported once per row
+#                          sequence and never while the away-mode daemon owns
+#                          triage (queue_handover_surface)
 #   check: rejected unauthenticated state checks: <paths>
 #                          unsafe state checks were refused without execution
 #   check: rejected unauthenticated PR poll retirement receipts: <paths>
@@ -2057,30 +2057,33 @@ procevent_surface_queued() {
   wake "$reason"
 }
 
-# Deliver a row another writer appended to this home's own durable queue while
-# this watcher was blocking - a captain inbox note, a mail or contributions
-# check. Such a row otherwise waits for an unrelated event: a handling successor
-# never re-announces recovery (resurface_after_downtime), so nothing in its
-# cycle looks at the queue. Every actionable exit records the queue sequence it
-# handed over (wake(), bin/fm-push-transition-lib.sh), so a queued row above
-# that sequence has not reached firstmate yet; surface it once, and the record
-# the wake itself writes keeps every later cycle from surfacing it again while
-# it stays queued. Rows above the record that a drain already consumed only
-# advance it. With no append since the last record this costs two builtin reads.
-# While the away-mode daemon owns triage this stays off, so its one-shot
-# contract is unchanged.
+# Deliver a check row another writer appended to this home's own durable queue
+# - a captain inbox note, a mail or contributions check - that has not reached
+# an actor. Such a row otherwise waits for an unrelated event: a handling
+# successor never re-announces recovery (resurface_after_downtime), so nothing
+# in its cycle looks at the queue. Every writer outside the watcher appends
+# only check rows, while signal, stale, and heartbeat rows are this watcher's
+# own and reach their actor through their own close. A check close records the
+# queue sequence it handed over (watch_queue_handed_read in
+# bin/fm-wake-lib.sh), so a queued check row above that record that no live
+# branch grant holds and main's last drain did not claim is surfaced once; the
+# wake that surfaces it advances the record, so a later cycle never surfaces it
+# again. With none, the record advances to the counter read under the lock.
+# With no append since the last record this costs two builtin reads. While the
+# away-mode daemon owns triage this stays off, so its one-shot contract is
+# unchanged.
 queue_handover_surface() {
-  local last handed floor keys key reason
+  local last handed keys key reason
   afk_present && return 0
   fm_wake_seq_read last
-  watch_queue_handed_read handed floor
+  watch_queue_handed_read handed
   [ "$last" -gt "$handed" ] || return 0
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
   fm_wake_seq_read last
-  keys=$(fm_wake_keys_after_locked "$handed")
+  keys=$(fm_wake_keys_after_locked check "$handed")
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   if [ -z "$keys" ]; then
-    watch_queue_handed_write "$last" "$floor" || true
+    watch_queue_handed_write "$last" || true
     return 0
   fi
   reason="check: undelivered queued wake:"
