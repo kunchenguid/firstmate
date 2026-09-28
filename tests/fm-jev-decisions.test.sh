@@ -24,9 +24,17 @@ ANSWERS = {
     "active": ("actionable_now", 0.9),
     "bogus": ("not_a_category", 0.9),
 }
+KEYS = {"Bearer test-dummy-key", "Bearer env-file-key"}
 class H(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
-        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        raw = self.rfile.read(int(self.headers["Content-Length"]))
+        with open(sys.argv[2], "ab") as log:
+            log.write(raw + b"\n")
+        if self.headers.get("Authorization") not in KEYS:
+            self.send_response(401)
+            self.end_headers()
+            return
+        body = json.loads(raw)
         key = body["state"]["key"]
         answers = {}
         for prefix, (choice, noul) in ANSWERS.items():
@@ -45,7 +53,7 @@ srv = http.server.HTTPServer(("127.0.0.1", 0), H)
 open(sys.argv[1], "w").write(str(srv.server_port))
 srv.serve_forever()
 PY
-python3 "$TDIR/stub.py" "$TDIR/port" &
+python3 "$TDIR/stub.py" "$TDIR/port" "$TDIR/requests.log" &
 STUB_PID=$!
 trap 'kill "$STUB_PID" 2>/dev/null || true; fm_test_cleanup' EXIT
 for _ in $(seq 50); do [ -s "$TDIR/port" ] && break; sleep 0.1; done
@@ -54,6 +62,8 @@ for _ in $(seq 50); do [ -s "$TDIR/port" ] && break; sleep 0.1; done
 FM_JEV_TS_BASE="http://127.0.0.1:$(cat "$TDIR/port")"
 export FM_JEV_TS_BASE
 export TYPESAFE_API_KEY=test-dummy-key
+FM_CONFIG_OVERRIDE="$TDIR/no-config"
+export FM_CONFIG_OVERRIDE
 
 # 1. Empty input exits cleanly without calling Jev.
 out=$("$DECISION_SH" --input /dev/null)
@@ -131,19 +141,60 @@ all=$("$DECISION_SH" --all --state-dir "$STATE" --json </dev/null)
 assert_contains "$all" '"key": "active-pick"' "--all scans the state dir"
 [ -z "$(find "$STATE" -name '*cursor*')" ] || fail "--all must not write open-decision cursors"
 
-# 7. A missing classify lib is an error, not an empty triage.
+# 7. Resolve commands pin the home and state the decisions were read from.
+OTHER="$TDIR/other state"; mkdir -p "$OTHER"
+printf 'blocked [key=old-dep]: superseded dependency\n' > "$OTHER/beta.status"
+# shellcheck disable=SC2016
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$FM_HOME" "$FM_STATE_OVERRIDE" "$@" > %q\n' "$TDIR/argv" > "$FAKE/bin/fm-send.sh"
+check_pinned() {
+  local label=$1 cmds
+  shift
+  rm -f "$TDIR/argv"
+  cmds=$("$DECISION_SH" "$@" --resolve-cmds)
+  (cd "$FAKE" && env -u FM_STATE_OVERRIDE FM_HOME=/wrong/home bash -c "$cmds")
+  [ "$(sed -n 1p "$TDIR/argv")" = "$ROOT" ] || fail "resolve cmd must pin FM_HOME ($label)"
+  [ "$(sed -n 2p "$TDIR/argv")" = "$OTHER" ] || fail "resolve cmd must pin the selected state dir ($label)"
+  [ "$(sed -n 3p "$TDIR/argv")" = beta ] || fail "resolve cmd must target the selected task ($label)"
+}
+check_pinned status-file --status-file "$OTHER/beta.status"
+check_pinned state-dir --all --state-dir "$OTHER"
+
+# 8. A key configured only in the home's .env is used.
+ENVHOME="$TDIR/envhome"; mkdir -p "$ENVHOME"
+printf 'TYPESAFE_API_KEY="env-file-key"\n' > "$ENVHOME/.env"
+envkey=$(env -u TYPESAFE_API_KEY FM_HOME="$ENVHOME" "$DECISION_SH" --input "$TSV" --category actionable_now --json)
+assert_contains "$envkey" '"key": "active-fix"' ".env TYPESAFE_API_KEY classifies decisions"
+
+# 9. Never-send values are withheld from every Jev request.
+mkdir -p "$TDIR/ns-config"
+printf '# client names\n  Example   Client  \n' > "$TDIR/ns-config/dispatch-never-send"
+printf '%s\t%s\t%s\t%s\n' ns active-ns needs-decision "decide for EXAMPLE    client Ltd now" > "$TDIR/ns.tsv"
+: > "$TDIR/requests.log"
+ns=$(FM_CONFIG_OVERRIDE="$TDIR/ns-config" "$DECISION_SH" --input "$TDIR/ns.tsv" --json)
+assert_contains "$ns" '"category": "actionable_now"' "withheld note is still classified"
+if grep -qi "example client" "$TDIR/requests.log"; then
+  fail "never-send value reached the Jev request"
+fi
+assert_contains "$(cat "$TDIR/requests.log")" "[withheld]" "never-send value is replaced in the request"
+mkdir -p "$TDIR/bad-config/dispatch-never-send"
+: > "$TDIR/requests.log"
+bad=$(FM_CONFIG_OVERRIDE="$TDIR/bad-config" "$DECISION_SH" --input "$TDIR/ns.tsv" --json 2>/dev/null)
+assert_contains "$bad" '"category": "unavailable"' "unreadable never-send list sends nothing"
+[ ! -s "$TDIR/requests.log" ] || fail "unreadable never-send list must not reach Jev"
+
+# 10. A missing classify lib is an error, not an empty triage.
 if FM_HOME="$TDIR/nohome" "$DECISION_SH" --all --state-dir "$STATE" >/dev/null 2>&1; then
   fail "missing fm-classify-lib.sh must exit non-zero"
 fi
 
-# 8. A mistyped --input path is an error, and malformed lines are reported.
+# 11. A mistyped --input path is an error, and malformed lines are reported.
 if "$DECISION_SH" --input "$TDIR/no-such.tsv" >/dev/null 2>&1; then
   fail "missing --input file must exit non-zero"
 fi
 warn=$(printf 'k\tneeds-decision\tnote\n' | "$DECISION_SH" --input - 2>&1 >/dev/null)
 assert_contains "$warn" "skipped 1 malformed line" "3-column stdin without --task warns about skipped lines"
 
-# 9. No selector and non-TTY stdin prints usage instead of scanning.
+# 12. No selector and non-TTY stdin prints usage instead of scanning.
 if printf '' | "$DECISION_SH" >/dev/null 2>&1; then
   fail "no selector must exit non-zero"
 fi

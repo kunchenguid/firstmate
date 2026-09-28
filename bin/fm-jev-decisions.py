@@ -14,6 +14,7 @@ import concurrent.futures
 import dataclasses
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -66,7 +67,24 @@ def get_api_key(fm_root: Path) -> str | None:
     if key:
         return key
 
-    # 2. Try vault injection wrapper if available
+    # 2. The home's .env, read with the same accessor as fm-dispatch-resolve.sh
+    env_lib = Path(__file__).resolve().parent / "fm-env-lib.sh"
+    try:
+        res = subprocess.run(
+            ["bash", "-c", 'source "$1" && fmx_env_get TYPESAFE_API_KEY "$2"', "_",
+             str(env_lib), str(fm_root / ".env")],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        key = res.stdout.strip() if res.returncode == 0 else ""
+        if key:
+            return key
+    except Exception:
+        pass
+
+    # 3. Try vault injection wrapper if available
     run_py = fm_root / "bin" / "jev-typesafe-run.py"
 
     if run_py.exists():
@@ -87,6 +105,35 @@ def get_api_key(fm_root: Path) -> str | None:
             pass
 
     return None
+
+
+class NeverSendUnreadable(Exception):
+    pass
+
+
+def load_never_send(config_dir: Path) -> list[str]:
+    path = config_dir / "dispatch-never-send"
+    if not path.exists() and not path.is_symlink():
+        return []
+    if not path.is_file() or not os.access(path, os.R_OK):
+        raise NeverSendUnreadable(f"{path} is not a readable regular file")
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError as exc:
+        raise NeverSendUnreadable(f"could not read {path}: {exc}") from exc
+    values = []
+    for line in lines:
+        value = " ".join(line.split())
+        if value and not value.startswith("#"):
+            values.append(value)
+    return values
+
+
+def withhold(text: str, never_send: list[str]) -> str:
+    text = " ".join(text.split())
+    for value in never_send:
+        text = re.sub(re.escape(value), "[withheld]", text, flags=re.IGNORECASE)
+    return text
 
 
 def parse_decision_lines(content: str, task: str | None) -> list[DecisionItem]:
@@ -129,20 +176,21 @@ def extract_decisions_from_bash(func: str, classify_lib: Path, target: Path, tas
     return parse_decision_lines(proc.stdout, task)
 
 
-def classify_decision(item: DecisionItem, api_key: str | None) -> DecisionItem:
+def classify_decision(
+    item: DecisionItem, api_key: str | None, never_send: list[str], send_prefix: str
+) -> DecisionItem:
     if not api_key:
         item.category = "unavailable"
         item.error = "TYPESAFE_API_KEY unavailable"
         return item
 
-    clean_note = " ".join(item.note.split())[:600]
     payload = {
         "model": TS_MODEL,
         "state": {
-            "task": item.task,
-            "key": item.key,
-            "verb": item.verb,
-            "note": clean_note,
+            "task": withhold(item.task, never_send),
+            "key": withhold(item.key, never_send),
+            "verb": withhold(item.verb, never_send),
+            "note": withhold(item.note, never_send)[:600],
         },
         "questions": {
             "category": {
@@ -189,13 +237,13 @@ def classify_decision(item: DecisionItem, api_key: str | None) -> DecisionItem:
         if item.category == "stale_historical":
             if item.key.startswith("pending-reply-") and "request=CONFIG_REREAD" in item.note:
                 item.suggested_action = "Auto-resolve expired legacy pending-reply config reread"
-                item.resolve_cmd = shlex.join(
+                item.resolve_cmd = send_prefix + shlex.join(
                     ["bin/fm-send.sh", item.task, "--resolve-key", item.key,
                      "auto-resolved: expired legacy config reread from previous phase"]
                 )
             else:
                 item.suggested_action = "Archive or resolve superseded historical decision"
-                item.resolve_cmd = shlex.join(
+                item.resolve_cmd = send_prefix + shlex.join(
                     ["bin/fm-send.sh", item.task, "--resolve-key", item.key,
                      "auto-resolved: superseded historical decision"]
                 )
@@ -274,6 +322,8 @@ def main() -> None:
     fm_root = Path(os.environ.get("FM_HOME", "/opt/ra/firstmate"))
     state_dir = args.state_dir or Path(os.environ.get("FM_STATE_OVERRIDE") or fm_root / "state")
     classify_lib = fm_root / "bin" / "fm-classify-lib.sh"
+    config_dir = Path(os.environ.get("FM_CONFIG_OVERRIDE") or fm_root / "config")
+    send_state = args.status_file.parent if args.status_file else state_dir
 
     items: list[DecisionItem] = []
 
@@ -330,12 +380,28 @@ def main() -> None:
         items = items[: args.limit]
 
     api_key = get_api_key(fm_root)
+    withheld_reason = None
+    try:
+        never_send = load_never_send(config_dir)
+    except NeverSendUnreadable as exc:
+        withheld_reason = f"{exc}; nothing sent"
+        never_send = []
+    send_prefix = (
+        f"FM_HOME={shlex.quote(str(fm_root.resolve()))} "
+        f"FM_STATE_OVERRIDE={shlex.quote(str(send_state.resolve()))} "
+    )
 
     # Concurrently classify items
-    max_workers = min(args.max_workers, len(items)) if len(items) > 0 else 1
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = [executor.submit(classify_decision, item, api_key) for item in items]
-        classified_items = [f.result() for f in futures]
+    if withheld_reason:
+        print(f"warning: {withheld_reason}", file=sys.stderr)
+        for item in items:
+            item.error = withheld_reason
+        classified_items = items
+    else:
+        max_workers = min(args.max_workers, len(items))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(classify_decision, item, api_key, never_send, send_prefix) for item in items]
+            classified_items = [f.result() for f in futures]
 
     # Filters
     filtered_items = classified_items
