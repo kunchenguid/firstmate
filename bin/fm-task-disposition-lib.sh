@@ -8,7 +8,7 @@
 # metadata is an explicit parked disposition, not current execution.
 #
 # Output from fm_task_disposition_snapshot is sorted TSV:
-#   <task-id>\t<active|done|archive_done|parked|ambiguous>
+#   <task-id>\t<active|queued|done|archive_done|parked|ambiguous>
 #
 # Unsupported backends and inaccessible archives never infer completion: the
 # function returns an empty/smaller set so readers preserve unknown work rather
@@ -77,6 +77,7 @@ fm_task_disposition_snapshot() {  # <data-dir>
       current_count[id]++
       if (section == "done") current_value[id]="done"
       else if (section == "queued" && $0 ~ /[(,][[:space:]]*hold-kind:[[:space:]]*parked([[:space:]]*[,)]|[[:space:]]*$)/) current_value[id]="parked"
+      else if (section == "queued") current_value[id]="queued"
       else current_value[id]="active"
       next
     }
