@@ -225,6 +225,7 @@ So a plain restart with no re-arm loop and no session would otherwise reopen the
 Past `FM_RECOVERY_REOPEN_LIMIT` (default 3) consecutive reopens of one episode with no intervening explicit acknowledgement, the next reopen settles the episode to acked directly instead of minting another generation, so the watcher can finally start and stay up.
 The settle records that generation in `state/.watcher-down.reopen-settled`.
 A watcher start does not re-announce that bound-settled episode just because the queue is non-empty, so its queued rows cannot make the watcher exit; they stay durable and the next session's drain presents them.
+When a watcher's lock later ends (a `--restart` retiring it, or a stale lock cleared), that close keeps the bound-settled episode instead of publishing a fresh downtime generation, so the next restart stays up too.
 A genuinely acknowledged episode with queued rows still re-announces and resurfaces them on the next arm.
 A real acknowledgement, or a watcher start that mints a fresh episode from a missing or invalid marker, clears the counter, so this bound never shortens the once-per-genuine-generation resurface a live, attentive session relies on.
 

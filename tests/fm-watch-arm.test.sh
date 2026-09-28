@@ -1325,7 +1325,7 @@ test_reaper_stops_a_tracked_watcher() {
 # With queued rows still unacknowledged, settling must not re-announce them on
 # a watcher start either: the rows stay durable for the next session's drain.
 check_stuck_unacked_recovery_settles() {  # <case-name> <queued:0|1>
-  local dir home state fakebin queued=$2 i
+  local dir home state fakebin queued=$2 i settled_pid settled_token
   local FM_RECOVERY_REOPEN_LIMIT=2
   export FM_RECOVERY_REOPEN_LIMIT
   dir=$(make_case "$1")
@@ -1366,8 +1366,20 @@ check_stuck_unacked_recovery_settles() {  # <case-name> <queued:0|1>
   esac
   [ ! -e "$state/.watcher-down.reopen-count" ] \
     || fail "$1: reopen counter was not cleared once the episode settled"
-  kill "$ARM_PID" 2>/dev/null || true
-  wait "$ARM_PID" 2>/dev/null || true
+  settled_pid=$ARM_PID
+  settled_token=$(cat "$state/.watcher-down" 2>/dev/null || true)
+
+  # Restarting the healthy settled watcher retires it; that close must keep the
+  # settled episode rather than reopen it into another resurface-and-exit cycle.
+  start_rearm_arm "$home" "$state" "$fakebin" "$dir/restart-after-settle-arm.out"
+  is_live_non_zombie "$ARM_PID" \
+    || fail "$1: restarting a bound-settled watcher did not keep supervision up: $(cat "$dir/restart-after-settle-arm.out")"
+  ! grep -F 'check: rearm-resurface' "$dir/restart-after-settle-arm.out" >/dev/null \
+    || fail "$1: restarting a bound-settled watcher resurfaced the settled episode: $(cat "$dir/restart-after-settle-arm.out")"
+  [ "$(cat "$state/.watcher-down" 2>/dev/null || true)" = "$settled_token" ] \
+    || fail "$1: restarting a bound-settled watcher changed its settled marker: $(cat "$state/.watcher-down" 2>/dev/null)"
+  kill "$ARM_PID" "$settled_pid" 2>/dev/null || true
+  wait "$ARM_PID" "$settled_pid" 2>/dev/null || true
 
   if [ "$queued" = 1 ]; then
     grep "$(printf '\tcheck\tstuck-queued\t')" "$state/.wake-queue" >/dev/null \

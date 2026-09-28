@@ -709,12 +709,14 @@ _fm_recovery_marker_write_locked() {
 }
 
 # Apply the downtime republication states owned by docs/watcher-continuity.md
-# while preserving an outstanding generation-bound acknowledgement.
+# while preserving an outstanding generation-bound acknowledgement. A watcher
+# lock ending (source close) keeps an episode the reopen bound settled, so the
+# next restart does not reopen that same unwatched stretch all over again.
 _fm_recovery_marker_publish() {
   local marker=$1 kind=${2:-downtime} bound=${3:-} source=${4:-watcher}
   local lock saved_token generation='' status=pending previous_append_token=''
   case "$kind" in handling|downtime) ;; *) return 1 ;; esac
-  case "$source" in watcher|append) ;; *) return 1 ;; esac
+  case "$source" in watcher|close|append) ;; *) return 1 ;; esac
   if [ "$source" = append ]; then
     FM_WAKE_APPEND_RECOVERY_PREVIOUS_TOKEN=
     FM_WAKE_APPEND_RECOVERY_PUBLISHED_TOKEN=
@@ -748,9 +750,16 @@ _fm_recovery_marker_publish() {
           status=pending
           ;;
         announced:downtime:*)
-          if [ "$source" = watcher ]; then
+          if [ "$source" != append ]; then
             generation=${FM_RECOVERY_MARKER_TOKEN##*:}
             status=announced
+          fi
+          ;;
+        acked:downtime:*)
+          if [ "$source" = close ] \
+            && [ "$(cat "${marker}.reopen-settled" 2>/dev/null || true)" = "${FM_RECOVERY_MARKER_TOKEN##*:}" ]; then
+            generation=${FM_RECOVERY_MARKER_TOKEN##*:}
+            status=acked
           fi
           ;;
       esac
@@ -1052,7 +1061,7 @@ fm_recovery_transition() {
       ;;
     release-lock)
       [ -n "$target" ] || return 1
-      _fm_recovery_marker_publish "$marker" "${value:-downtime}" "$bound" || return 1
+      _fm_recovery_marker_publish "$marker" "${value:-downtime}" "$bound" close || return 1
       fm_lock_release "$target"
       ;;
     release-lock-existing)
@@ -1072,7 +1081,7 @@ fm_recovery_transition() {
       ;;
     clear-stale-lock)
       [ -n "$target" ] || return 1
-      _fm_recovery_marker_publish "$marker" "${value:-downtime}" "$bound" || return 1
+      _fm_recovery_marker_publish "$marker" "${value:-downtime}" "$bound" close || return 1
       fm_lock_remove_path "$target"
       ;;
     *) return 2 ;;
@@ -1233,7 +1242,7 @@ fm_lock_try_acquire() {
   fi
 
   if [ "$lockdir" = "$STATE/.watch.lock" ] \
-    && ! _fm_recovery_marker_publish "$STATE/.watcher-down" downtime; then
+    && ! _fm_recovery_marker_publish "$STATE/.watcher-down" downtime "" close; then
     fm_lock_release "$steal"
     FM_LOCK_HELD_PID=$cur
     FM_LOCK_OWNER_DIR=
