@@ -113,7 +113,8 @@ An unreachable endpoint can still hold the live agent a rebind would duplicate, 
   An agent found there refuses and names its process id, and so does any process whose working directory could not be read.
   `/proc` is the only reader, because it answers for one exact process and says so when it cannot: a host without it refuses every tmux absence proof, so reclaiming a tmux task is unavailable there.
   The refusal says that plainly and names the only route left - a seat that still addresses the recorded tmux server, where the window classifies directly and no absence proof is needed - and says that once that server is gone there is no such seat and no route.
-  The replacement window opens on the tmux server and session this seat addresses, which is where an ordinary spawn from here would place it.
+  The replacement window opens on the tmux server and session this seat addresses, which is where an ordinary spawn from here would place it - even when the recorded session was read successfully and merely no longer holds the window.
+  So a tmux reclaim can move the task into the reclaiming seat's session, unlike the Herdr rebind below, which pins the session the record names.
   A window already carrying the task's `fm-<id>` name in that session refuses the create rather than being closed and replaced, unlike a Herdr husk: `fm-<id>` carries no home identity and every seat outside tmux resolves to the one session `firstmate`, so closing it could destroy another home's deliberately preserved endpoint. The refusal names how to read that window, and says plainly that no control-plane command closes one this home's records do not name.
   A window that outlived its agent is left alone whether it sits on a server this seat cannot address or under a session name the record no longer matches on this seat's own server: it holds no agent, and it is not the task's endpoint any more.
 
@@ -126,7 +127,7 @@ What a reclaim is not:
 
 - It is **not a teardown**. The worktree is reused exactly as the previous agent left it; nothing unlanded is ever discarded, and the ordinary `--note` requirement still applies.
 - It does **not** touch validation. A no-mistakes run belongs to the branch rather than to the agent that started it, so an active or parked run survives the reclaim untouched; nothing in the reclaim aborts, answers, or starts one.
-- It does **not** change the task's identity. The task id, its armed poll and registration, and its status log are untouched; only the endpoint binding in the record moves.
+- It does **not** change the task's identity. The task id, its armed poll and registration, and its status log are untouched; only the endpoint binding in the record moves - and on tmux that binding includes the session, because the replacement lands in the session this seat addresses rather than the recorded one.
   Its instructions are the one exception, and only in the way an ordinary relaunch already changes them: a ship or scout reclaim appends the required `--note` under a `## Progress note (<timestamp>)` heading in `data/<id>/brief.md`, so re-read that brief rather than assuming it is byte-identical - a reclaim that failed and was retried leaves one block per attempt.
   A secondmate's standing charter is never rewritten.
 - It is **not** a peer seat's operation. `fm-control` resolves an exact task id against **this** home's `state/`, so only the home that owns the task can reclaim it.

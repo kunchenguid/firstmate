@@ -58,8 +58,9 @@
 #              a Herdr pane or workspace destroyed in churn, a tmux window or
 #              server that no longer exists - the launch owner re-creates one in
 #              that worktree (herdr: in the session the record names; tmux: on
-#              the server this seat addresses), and the task's record rebinds
-#              to it; that is how a task whose terminal was destroyed is
+#              the server and in the session THIS seat addresses, which need not
+#              be the recorded one), and the task's record rebinds to it; that
+#              is how a task whose terminal was destroyed is
 #              reclaimed by the home that owns it, rather than being stranded
 #              with a parked approval nobody can answer. The absence proof is
 #              the one `exit` uses above, so a refusal there refuses here too.

@@ -3546,8 +3546,14 @@ if [ "$RELAUNCH" -eq 1 ]; then
     # poll and status log are untouched.
     #
     # The window goes on the tmux server and session THIS seat addresses, the
-    # same placement an ordinary spawn from here uses: the recorded server may
-    # no longer exist, and a record carries no socket identity to name another.
+    # same placement an ordinary spawn from here uses. Only one of the states
+    # that reach here forces that: the recorded session, or its whole server,
+    # was absent, and a record carries no socket identity to name another. It
+    # is not forced when the recorded session was read successfully and merely
+    # no longer holds the window; the placement is the same there, so a reclaim
+    # run from outside that session moves the task into this seat's session.
+    # Pinning the recorded session is the herdr rebind's invariant, not this
+    # one.
     # The absence proof already established that no agent works in the
     # worktree, so a window that outlived its agent on some other server holds
     # nothing this could duplicate. create_task refuses a same-named window
