@@ -123,6 +123,14 @@ _FM_PENDING_REPLY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/n
 # here would re-expand the same transitive graph.
 . "$_FM_PENDING_REPLY_LIB_DIR/fm-classify-lib.sh"
 
+# The remote observation below is a probe the watcher cycle waits on, so it
+# carries the same wall-clock bound as bin/fm-secondmate-liveness-lib.sh's
+# probe, which owns this setting: a host that accepts the connection and then
+# hangs inside the remote command answers SSH keepalives forever, and an
+# abandoned observation reads as `unknown` like any unreadable one.
+FM_SECONDMATE_PROBE_TIMEOUT=${FM_SECONDMATE_PROBE_TIMEOUT:-}
+case "$FM_SECONDMATE_PROBE_TIMEOUT" in ''|0*|*[!0-9]*) FM_SECONDMATE_PROBE_TIMEOUT=30 ;; esac
+
 FM_PENDING_REPLY_SCHEMA='fm-pending-reply.v1'
 FM_PENDING_REPLY_CORR_RE='corr=[A-Fa-f0-9]{16}'
 FM_PENDING_REPLY_GRACE_DEFAULT=120
@@ -1544,8 +1552,9 @@ fm_pending_reply_tick() {  # <state-dir>
         done
         if [ "$found" = 0 ]; then
           if [ -n "$remote_host" ]; then
-            observation=$("$_FM_PENDING_REPLY_LIB_DIR/fm-on.sh" "$task_id" \
-              fm-remote-secondmate-control.sh observe "$task_id" < /dev/null 2>/dev/null || printf 'unknown')
+            observation=$(fm_exec_timed "$FM_SECONDMATE_PROBE_TIMEOUT" 1 \
+              "$_FM_PENDING_REPLY_LIB_DIR/fm-on.sh" "$task_id" \
+              fm-remote-secondmate-control.sh observe "$task_id" < /dev/null 2>/dev/null)
             case "$observation" in busy|idle|fallback-idle|unknown) ;; *) observation=unknown ;; esac
           else
             observation=$(fm_pending_reply_backend_observation "$backend" "$target" "$label" "$harness")

@@ -435,7 +435,7 @@ So recovery passes the same readiness gate rather than a weaker one.
 
 The watcher's liveness tick applies the identical rule during ordinary supervision through the shared `bin/fm-secondmate-liveness-lib.sh`:
 
-- The remote endpoint is probed read-only once per cadence, within a wall-clock bound that also covers a host that accepts the connection and then hangs.
+- The remote endpoint is probed read-only once per cadence, within a wall-clock bound that also covers a host that accepts the connection and then hangs. The same bound covers every remote call on the probe path, including the session-start sweep's readiness runs and route revalidation.
 - Only a positive `dead` or `missing` reply relaunches through that command.
 - An unreachable transport, a probe abandoned at its bound, or an inconclusive state is left untouched rather than replaced locally.
 

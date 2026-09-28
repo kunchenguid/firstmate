@@ -702,6 +702,79 @@ test_remote_poll_probe_unreachable_preserves_route() {
   pass "poll probe: unreachable or inconclusive remote reads preserve the route"
 }
 
+# make_remote_hang_world <name>: the same one-remote-route world, with a fake
+# ssh that answers every verb except the one named in FM_FAKE_HANG_ON, which it
+# accepts and then never returns from, holding a child that stands in for a
+# ProxyCommand hop. Both pids are recorded so the test can prove an abandoned
+# call left nothing behind. bin/fm-on.sh passes the remote argv base64-encoded
+# and NUL-delimited as its last ssh argument, so the verb has to be decoded.
+make_remote_hang_world() {
+  local name=$1 w
+  w=$(make_remote_probe_world "$name")
+  cat > "$w/fakebin/ssh" <<'SH'
+#!/usr/bin/env bash
+set -u
+argv=$(perl -MMIME::Base64=decode_base64 -e '$d = decode_base64($ARGV[0]); $d =~ tr/\0/ /; print $d' "${*: -1}")
+printf '%s\n' "$argv" >> "${FM_FAKE_SSH_LOG:?}"
+case " $argv " in
+  *" ${FM_FAKE_HANG_ON:?} "*)
+    sleep 60 &
+    printf '%s %s\n' "$$" "$!" >> "${FM_FAKE_SSH_PIDS:?}"
+    wait
+    exit 0
+    ;;
+esac
+case " $argv " in
+  *" state "*) printf 'alive\n' ;;
+  *" route "*) printf 'backend=herdr\n' ;;
+esac
+exit 0
+SH
+  chmod +x "$w/fakebin/ssh"
+  printf '%s\n' "$w"
+}
+
+# The full-mode probe is the session-start sweep's, and bin/fm-session-start.sh
+# waits on it, so every remote call it makes carries the same wall-clock bound
+# as the watcher's `state` call: a host that accepts the connection and then
+# hangs answers SSH keepalives forever and only the bound returns the sweep.
+test_remote_full_probe_bounds_every_remote_call() {
+  local w hang out started elapsed leaked ssh_pid child_pid p
+
+  for hang in fm-remote-doctor.sh route; do
+    w=$(make_remote_hang_world "probe-hung-${hang%.sh}")
+    : > "$w/ssh.pids"
+    started=$(date +%s)
+    out=$(probe_remote "$w" full FM_FAKE_HANG_ON="$hang" FM_FAKE_SSH_PIDS="$w/ssh.pids" \
+      FM_SECONDMATE_PROBE_TIMEOUT=2)
+    elapsed=$(( $(date +%s) - started ))
+    case "$hang" in
+      fm-remote-doctor.sh)
+        [ "$out" = 'skipped|unknown|0|||remote host unavailable or endpoint state unknown; route preserved on lab-host' ] \
+          || fail "a hung readiness run must read as unknown with the route preserved, never unready, got: $out"
+        ;;
+      route)
+        [ "$out" = 'skipped|alive|0|||remote route probe exceeded its 2s bound; endpoint route unknown; route preserved on lab-host' ] \
+          || fail "a hung route call must read as unknown with the route preserved, never backend drift, got: $out"
+        ;;
+    esac
+    [ -s "$w/ssh.pids" ] || fail "the probe never reached its hung $hang call: $(cat "$w/ssh.log")"
+    [ "$elapsed" -lt 20 ] || fail "the hung $hang call was not abandoned near its 2s bound (${elapsed}s)"
+
+    sleep 2
+    leaked=
+    while read -r ssh_pid child_pid; do
+      for p in "$ssh_pid" "$child_pid"; do
+        ! kill -0 "$p" 2>/dev/null || leaked="$leaked $p"
+      done
+    done < "$w/ssh.pids"
+    # shellcheck disable=SC2086 # Deliberate word splitting over the pid list.
+    [ -z "$leaked" ] || kill -KILL $leaked 2>/dev/null || true
+    [ -z "$leaked" ] || fail "an abandoned $hang call left ssh processes running:$leaked"
+  done
+  pass "full probe: readiness and route calls are bounded, read as unknown, and are reaped"
+}
+
 test_tmux_agent_state_classifies
 test_tmux_agent_state_rejects_malformed_targets_before_probe
 test_herdr_agent_state_preserves_husk_classifier
@@ -721,5 +794,6 @@ test_sweep_skips_mate_whose_liveness_lock_is_held
 test_sweep_refuses_relaunch_on_ledger_errors
 test_remote_poll_probe_maps_states
 test_remote_poll_probe_unreachable_preserves_route
+test_remote_full_probe_bounds_every_remote_call
 
 echo "# all fm-secondmate-liveness tests passed"
