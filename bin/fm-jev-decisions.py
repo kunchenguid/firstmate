@@ -13,6 +13,7 @@ import concurrent.futures
 import dataclasses
 import json
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -89,33 +90,37 @@ def get_api_key(fm_root: Path) -> str | None:
     return None
 
 
-def extract_decisions_from_bash(cmd: str) -> list[DecisionItem]:
+def parse_decision_lines(content: str, task: str | None) -> list[DecisionItem]:
+    """Parse key<TAB>verb<TAB>note lines, prefixed by a task column when task is None."""
+    items = []
+    for line in content.splitlines():
+        if not line.strip():
+            continue
+        if task is None:
+            parts = line.split("\t", 3)
+            if len(parts) == 4:
+                items.append(DecisionItem(task=parts[0], key=parts[1], verb=parts[2], note=parts[3]))
+        else:
+            parts = line.split("\t", 2)
+            if len(parts) == 3:
+                items.append(DecisionItem(task=task, key=parts[0], verb=parts[1], note=parts[2]))
+    return items
+
+
+def extract_decisions_from_bash(func: str, classify_lib: Path, target: Path, task: str | None) -> list[DecisionItem]:
     try:
         proc = subprocess.run(
-            ["bash", "-c", cmd],
+            ["bash", "-c", f'source "$1" && {func} "$2"', "_", str(classify_lib), str(target)],
             capture_output=True,
             text=True,
             timeout=30,
             check=False,
         )
-        if proc.returncode != 0:
-            print(f"warning: bash extraction failed: {proc.stderr.strip()}", file=sys.stderr)
-            return []
-        items = []
-        for line in proc.stdout.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            parts = line.split("\t")
-            if len(parts) >= 4:
-                items.append(DecisionItem(task=parts[0], key=parts[1], verb=parts[2], note="\t".join(parts[3:])))
-            elif len(parts) == 3:
-                # key, verb, note without task prefix
-                items.append(DecisionItem(task="unknown", key=parts[0], verb=parts[1], note=parts[2]))
-        return items
     except Exception as exc:
-        print(f"warning: error running bash extraction: {exc}", file=sys.stderr)
-        return []
+        sys.exit(f"error: running {func}: {exc}")
+    if proc.returncode != 0:
+        sys.exit(f"error: {func} failed via {classify_lib}: {proc.stderr.strip()}")
+    return parse_decision_lines(proc.stdout, task)
 
 
 def classify_decision(item: DecisionItem, api_key: str | None) -> DecisionItem:
@@ -161,8 +166,13 @@ def classify_decision(item: DecisionItem, api_key: str | None) -> DecisionItem:
             data = json.loads(resp.read().decode("utf-8"))
         answers = data.get("answers", {})
 
-        cat_ans = answers.get("category", {})
-        item.category = cat_ans.get("choice", "actionable_now")
+        cat_ans = answers.get("category") or {}
+        choice = cat_ans.get("choice")
+        if choice not in DECISION_CRITERIA:
+            item.category = "unavailable"
+            item.error = f"Jev returned no valid category choice: {choice!r}"
+            return item
+        item.category = choice
         item.confidence = float(cat_ans.get("confidence", 0.0))
         item.probabilities = cat_ans.get("probabilities", {})
 
@@ -173,15 +183,15 @@ def classify_decision(item: DecisionItem, api_key: str | None) -> DecisionItem:
         if item.category == "stale_historical":
             if item.key.startswith("pending-reply-"):
                 item.suggested_action = "Auto-resolve expired legacy pending-reply config reread"
-                item.resolve_cmd = (
-                    f"bin/fm-send.sh {item.task} --resolve-key {item.key} "
-                    f"'auto-resolved: expired legacy config reread from previous phase'"
+                item.resolve_cmd = shlex.join(
+                    ["bin/fm-send.sh", item.task, "--resolve-key", item.key,
+                     "auto-resolved: expired legacy config reread from previous phase"]
                 )
             else:
                 item.suggested_action = "Archive or resolve superseded historical decision"
-                item.resolve_cmd = (
-                    f"bin/fm-send.sh {item.task} --resolve-key {item.key} "
-                    f"'auto-resolved: superseded historical decision'"
+                item.resolve_cmd = shlex.join(
+                    ["bin/fm-send.sh", item.task, "--resolve-key", item.key,
+                     "auto-resolved: superseded historical decision"]
                 )
         elif item.category == "external_block":
             item.suggested_action = "Investigate external host, route, or credentials dependency"
@@ -192,6 +202,8 @@ def classify_decision(item: DecisionItem, api_key: str | None) -> DecisionItem:
 
     except Exception as exc:
         item.category = "unavailable"
+        item.suggested_action = ""
+        item.resolve_cmd = ""
         item.error = str(exc)
 
     return item
@@ -254,7 +266,7 @@ def main() -> None:
     args = parser.parse_args()
 
     fm_root = Path(os.environ.get("FM_HOME", "/opt/ra/firstmate"))
-    state_dir = args.state_dir or (fm_root / "state")
+    state_dir = args.state_dir or Path(os.environ.get("FM_STATE_OVERRIDE") or fm_root / "state")
     classify_lib = fm_root / "bin" / "fm-classify-lib.sh"
 
     items: list[DecisionItem] = []
@@ -276,55 +288,24 @@ def main() -> None:
         else:
             p = Path(args.input)
             content = p.read_text(encoding="utf-8", errors="replace") if p.exists() else ""
-        for line in content.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            parts = line.split("\t")
-            if len(parts) >= 4:
-                items.append(DecisionItem(task=parts[0], key=parts[1], verb=parts[2], note="\t".join(parts[3:])))
-            elif len(parts) == 3:
-                items.append(DecisionItem(task=args.task or "unknown", key=parts[0], verb=parts[1], note=parts[2]))
+        items = parse_decision_lines(content, args.task)
     # 3. Specific status file
     elif args.status_file:
         sf = args.status_file
         if not sf.exists():
             print(f"error: status file {sf} does not exist", file=sys.stderr)
             sys.exit(1)
-        task_name = args.task or sf.stem
-        cmd = f"source '{classify_lib}' && status_open_decisions '{sf}'"
-        raw_items = extract_decisions_from_bash(cmd)
-        for it in raw_items:
-            it.task = task_name
-            items.append(it)
+        items = extract_decisions_from_bash("status_open_decisions", classify_lib, sf, args.task or sf.stem)
     # 4. Specific task name
     elif args.task:
         sf = state_dir / f"{args.task}.status"
         if not sf.exists():
             print(f"error: status file {sf} does not exist", file=sys.stderr)
             sys.exit(1)
-        cmd = f"source '{classify_lib}' && status_open_decisions '{sf}'"
-        raw_items = extract_decisions_from_bash(cmd)
-        for it in raw_items:
-            it.task = args.task
-            items.append(it)
+        items = extract_decisions_from_bash("status_open_decisions", classify_lib, sf, args.task)
     # 5. All status files across state
-    elif args.all or not sys.stdin.isatty():
-        if not sys.stdin.isatty():
-            content = sys.stdin.read().strip()
-            if content:
-                for line in content.splitlines():
-                    line = line.strip()
-                    if not line:
-                        continue
-                    parts = line.split("\t")
-                    if len(parts) >= 4:
-                        items.append(DecisionItem(task=parts[0], key=parts[1], verb=parts[2], note="\t".join(parts[3:])))
-                    elif len(parts) == 3:
-                        items.append(DecisionItem(task="unknown", key=parts[0], verb=parts[1], note=parts[2]))
-        if not items:
-            cmd = f"source '{classify_lib}' && scan_open_decisions_incremental '{state_dir}'"
-            items = extract_decisions_from_bash(cmd)
+    elif args.all:
+        items = extract_decisions_from_bash("scan_open_decisions", classify_lib, state_dir, None)
     else:
         parser.print_help()
         sys.exit(2)
