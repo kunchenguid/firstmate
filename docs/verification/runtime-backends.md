@@ -1610,6 +1610,7 @@ The following facts were measured on 2026-09-24 against Herdr 0.9.1 (client and 
   A returned slot that still holds a live process reads `in-use` in `status`, and the next `get --lease` hands out a different slot, so a foreign shell parked in a pool slot never receives a task lease.
   A lease also outlives a lab server `stop` and `provision`, so the slot stays `leased ... (held by fm-<task-id>)` while that task's pane is dead: a same-id resume re-enters exactly the slot its surviving record names and takes no second lease, while the same probe against the interactive shape saw the resumed task's `treehouse get` hand out the slot of a still-recorded sibling task whose pane the restart had ended, so cleanup refused both tasks as sharing one recorded worktree.
   An attempt that ends without a record naming the slot it leased returns that slot itself: with a record naming a copy that is gone, the respawn leases a fresh slot and its abort returns it, leaving `status` with no slot held by that task.
+  A leased slot whose checkout is removed from disk, by `git worktree remove` or by deleting the directory, loses its lease on Treehouse's next `get --lease` or `status`, which drops the entry from its persistent state so that slot's capacity returns to the pool, while `return` on that missing path fails with `failed to detach worktree HEAD: chdir ...: no such file or directory` and releases nothing (re-measured on 2026-09-28 against Treehouse v2.0.1 in a scratch pool).
 
 Refresh the record with:
 
