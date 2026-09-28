@@ -83,6 +83,20 @@ reserve() {  # <home> <id> <model> [harness]: reserve for the most recent holder
   seats "$1" reserve "$2" --harness "${4:-pi}" --model "$3" --holder-pid "$LAST_HOLDER"
 }
 
+reserve_without_jq() {
+  local home=$1
+  shift
+  env -u FM_STATE_OVERRIDE -u FM_CONFIG_OVERRIDE -u FM_DATA_OVERRIDE -u FM_ROOT_OVERRIDE \
+    FM_HOME="$home" SEATS="$SEATS" bash -c '
+    command() {
+      if [ "${1:-}" = -v ] && [ "${2:-}" = jq ]; then return 1; fi
+      builtin command "$@"
+    }
+    export -f command
+    exec "$SEATS" "$@"
+  ' _ "$@"
+}
+
 # used_seats <home>: the pool's current holder count, measured by a probe
 # reservation whose holder is then stopped so its seat reclaims itself.
 used_seats() {
@@ -108,6 +122,13 @@ test_no_pool_configured_is_off() {
   expect_code 0 "$status" "reserve with no pool"
   assert_equals "" "$out" "reserve with no pool should print nothing"
   out=$(reserve "$home" t2 default 2>&1) || fail "a harness default was refused with no pool: $out"
+  out=$(reserve_without_jq "$home" reserve t3 --harness pi --model pool-model-a --holder-pid "$LAST_HOLDER" 2>&1)
+  expect_code 0 "$?" "an undeclared primary without jq"
+  assert_equals "" "$out" "an undeclared primary without jq printed a reservation"
+  pools "$home" 1
+  out=$(reserve_without_jq "$home" reserve t4 --harness pi --model pool-model-a --holder-pid "$LAST_HOLDER" 2>&1)
+  expect_code 5 "$?" "a declared pool without jq"
+  assert_contains "$out" "jq is not installed" "the missing-jq fixture did not disable jq"
   pass "without config/fleet-seats a reservation is a silent no-op"
 }
 
@@ -482,12 +503,15 @@ test_unreachable_remote_is_never_free() {
 }
 
 test_delivered_policy_governs_the_remote_home() {
-  local out dir="$TMP_ROOT/remote-deliver-out"
+  local out
   make_remote_fleet remote-deliver 2
-  mkdir -p "$dir"
   new_holder
   out=$(reserve "$R_REMOTE" before pool-model-a 2>&1)
-  expect_code 5 "$?" "an unserved remote pooled launch"
+  expect_code 0 "$?" "an undeclared remote before first delivery"
+  assert_equals "" "$out" "an undeclared remote printed a reservation"
+  cp "$R_ROOT/config/fleet-seats" "$R_REMOTE/config/fleet-seats"
+  out=$(reserve "$R_REMOTE" declared-before pool-model-a 2>&1)
+  expect_code 5 "$?" "a declared remote pooled launch before delivery"
   # Once served, the delivered policy applies even though no inherited copy
   # ever arrived: a pooled request waits for a grant, and a default model on
   # a multi-provider harness refuses.
@@ -503,12 +527,11 @@ test_delivered_policy_governs_the_remote_home() {
   expect_code 5 "$?" "a stale inherited copy let a pooled model through"
   rm -f "$R_ROOT/config/fleet-seats"
   serve_remotes >/dev/null 2>&1 || fail "clearing serve failed"
-  remote_reserve_bg cleared pool-model-a "$dir/cleared"
-  serve_remotes >/dev/null 2>&1 || fail "unpooled confirmation serve failed"
-  wait "$BG_PID"
-  expect_code 0 "$(cat "$dir/cleared.rc")" "a cleared remote model after root confirmation"
-  assert_equals "" "$(cat "$dir/cleared.out")" "a cleared remote should reserve nothing"
-  pass "remote launches require a delivered policy and current root confirmation"
+  new_holder
+  out=$(reserve "$R_REMOTE" cleared pool-model-a 2>&1)
+  expect_code 0 "$?" "a cleared remote model"
+  assert_equals "" "$out" "a cleared remote should reserve nothing"
+  pass "declared remote launches require current confirmation and clearing restores opt-out"
 }
 
 test_stale_remote_requests_refuse_before_launch() {
@@ -544,17 +567,21 @@ test_stale_remote_requests_refuse_before_launch() {
 }
 
 test_remote_without_pools_confirms_unpooled_models() {
-  local dir="$TMP_ROOT/remote-off-out"
+  local out
   make_remote_fleet remote-off 3
-  mkdir -p "$dir"
+  rm -f "$R_ROOT/config/fleet-seats"
+  new_holder
+  out=$(reserve_without_jq "$R_REMOTE" reserve unpooled --harness pi --model unrelated-model --holder-pid "$LAST_HOLDER" 2>&1)
+  expect_code 0 "$?" "an undeclared remote without jq or delivery"
+  assert_equals "" "$out" "an undeclared remote printed a seat grant"
+  pools "$R_ROOT" 3
+  serve_remotes >/dev/null 2>&1 || fail "active policy delivery failed"
   rm -f "$R_ROOT/config/fleet-seats"
   serve_remotes >/dev/null 2>&1 || fail "empty policy delivery failed"
-  remote_reserve_bg unpooled unrelated-model "$dir/unpooled"
-  serve_remotes >/dev/null 2>&1 || fail "empty policy confirmation failed"
-  wait "$BG_PID"
-  expect_code 0 "$(cat "$dir/unpooled.rc")" "an unpooled model with no pool configured"
-  assert_equals "" "$(cat "$dir/unpooled.out")" "unpooled confirmation printed a seat grant"
-  pass "a remote without configured pools confirms unpooled models through the root"
+  out=$(reserve_without_jq "$R_REMOTE" reserve cleared --harness pi --model pool-model-a --holder-pid "$LAST_HOLDER" 2>&1)
+  expect_code 0 "$?" "a cleared remote without jq"
+  assert_equals "" "$out" "a cleared remote printed a seat grant"
+  pass "undeclared and cleared remote policies leave launches unchanged"
 }
 
 test_remote_and_local_contention_never_overbooks() {
