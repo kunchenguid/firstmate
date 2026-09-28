@@ -68,8 +68,6 @@ def get_api_key(fm_root: Path) -> str | None:
 
     # 2. Try vault injection wrapper if available
     run_py = fm_root / "bin" / "jev-typesafe-run.py"
-    if not run_py.exists():
-        run_py = Path("/opt/ra/firstmate/bin/jev-typesafe-run.py")
 
     if run_py.exists():
         try:
@@ -189,7 +187,7 @@ def classify_decision(item: DecisionItem, api_key: str | None) -> DecisionItem:
 
         # Assign recommendations
         if item.category == "stale_historical":
-            if item.key.startswith("pending-reply-"):
+            if item.key.startswith("pending-reply-") and "request=CONFIG_REREAD" in item.note:
                 item.suggested_action = "Auto-resolve expired legacy pending-reply config reread"
                 item.resolve_cmd = shlex.join(
                     ["bin/fm-send.sh", item.task, "--resolve-key", item.key,

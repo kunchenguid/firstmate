@@ -105,7 +105,23 @@ printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$@" > %q\n' "$TDIR/argv" > "$FAKE/
 [ "$(sed -n 1p "$TDIR/argv")" = "t;touch $TDIR/pwned-task" ] || fail "resolve cmd must pass the task verbatim"
 [ "$(sed -n 3p "$TDIR/argv")" = "old-\$(touch $TDIR/pwned-key)" ] || fail "resolve cmd must pass the key verbatim"
 
-# 5. Status-file extraction: tab-bearing notes keep key/verb intact, --all is read-only.
+# 5. Config-reread closure wording applies only to CONFIG_REREAD pending replies.
+WORDING="$TDIR/wording.tsv"
+printf '%s\t%s\t%s\t%s\n' \
+  w pending-reply-cfg blocked "pending-reply-missed: task=w request=CONFIG_REREAD" \
+  w pending-reply-other blocked "pending-reply-missed: task=w request=STATUS_PING" \
+  > "$WORDING"
+wording=$("$DECISION_SH" --input "$WORDING" --json)
+note_of() { printf '%s' "$wording" | python3 -c 'import json,shlex,sys; print({i["key"]: shlex.split(i["resolve_cmd"])[-1] for i in json.load(sys.stdin)}[sys.argv[1]])' "$1"; }
+[ "$(note_of pending-reply-cfg)" = "auto-resolved: expired legacy config reread from previous phase" ] ||
+  fail "CONFIG_REREAD pending reply must get the config-reread closure note"
+[ "$(note_of pending-reply-other)" = "auto-resolved: superseded historical decision" ] ||
+  fail "non-CONFIG_REREAD pending reply must get the generic closure note"
+case "$(printf '%s' "$wording" | python3 -c 'import json,sys; i=[i for i in json.load(sys.stdin) if i["key"]=="pending-reply-other"][0]; print(i["resolve_cmd"], i["suggested_action"])')" in
+  *"config reread"*) fail "generic closure path must not mention config reread" ;;
+esac
+
+# 6. Status-file extraction: tab-bearing notes keep key/verb intact, --all is read-only.
 STATE="$TDIR/state it's"; mkdir -p "$STATE"
 printf 'needs-decision [key=active-pick]: choose\tA or B\n' > "$STATE/alpha.status"
 one=$(FM_STATE_OVERRIDE="$STATE" "$DECISION_SH" --task alpha --json)
@@ -115,19 +131,19 @@ all=$("$DECISION_SH" --all --state-dir "$STATE" --json </dev/null)
 assert_contains "$all" '"key": "active-pick"' "--all scans the state dir"
 [ -z "$(find "$STATE" -name '*cursor*')" ] || fail "--all must not write open-decision cursors"
 
-# 6. A missing classify lib is an error, not an empty triage.
+# 7. A missing classify lib is an error, not an empty triage.
 if FM_HOME="$TDIR/nohome" "$DECISION_SH" --all --state-dir "$STATE" >/dev/null 2>&1; then
   fail "missing fm-classify-lib.sh must exit non-zero"
 fi
 
-# 7. A mistyped --input path is an error, and malformed lines are reported.
+# 8. A mistyped --input path is an error, and malformed lines are reported.
 if "$DECISION_SH" --input "$TDIR/no-such.tsv" >/dev/null 2>&1; then
   fail "missing --input file must exit non-zero"
 fi
 warn=$(printf 'k\tneeds-decision\tnote\n' | "$DECISION_SH" --input - 2>&1 >/dev/null)
 assert_contains "$warn" "skipped 1 malformed line" "3-column stdin without --task warns about skipped lines"
 
-# 8. No selector and non-TTY stdin prints usage instead of scanning.
+# 9. No selector and non-TTY stdin prints usage instead of scanning.
 if printf '' | "$DECISION_SH" >/dev/null 2>&1; then
   fail "no selector must exit non-zero"
 fi
