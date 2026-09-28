@@ -102,6 +102,17 @@ test_down_proxy_refuses_loudly() {
   pass "a down TeamClaude proxy refuses with the proxy diagnostic and no direct fallback"
 }
 
+test_threshold_at_95_starts_without_reapplying() {
+  local out status file
+  file="$TMP_ROOT/threshold-already"
+  printf '95%%\n' > "$file"
+  out=$(FM_TEST_TEAMCLAUDE_THRESHOLD_FILE="$file" FM_TEST_TEAMCLAUDE_SET_RC=1 \
+    "$ROOT_BIN" claude-env 2>"$TMP_ROOT/threshold-already.err") && status=0 || status=$?
+  expect_code 0 "$status" "a 95% threshold must start without touching TeamClaude's config: $(cat "$TMP_ROOT/threshold-already.err")"
+  assert_contains "$out" "HTTPS_PROXY=" "the launch fragment is produced at 95%"
+  pass "a threshold already at 95% starts the worker without reapplying it"
+}
+
 test_threshold_below_95_is_applied_before_the_launch() {
   local out status file
   file="$TMP_ROOT/threshold-applied"
@@ -310,6 +321,7 @@ test_spawn_opencode_is_unchanged() {
 test_claude_env_is_mitm_without_a_direct_fallback
 test_missing_cli_refuses_loudly
 test_down_proxy_refuses_loudly
+test_threshold_at_95_starts_without_reapplying
 test_threshold_below_95_is_applied_before_the_launch
 test_threshold_read_ignores_stderr_noise
 test_claude_env_carries_the_hold_timeout
