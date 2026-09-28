@@ -186,7 +186,7 @@ So a finished, hung, or identity-mismatched claim cannot suppress that recovery 
 The recovery-episode contract below owns once-per-generation announcement.
 A handling successor does not re-announce.
 It enters its poll loop immediately and keeps scanning signals, stale panes, and checks.
-It also surfaces, once, any check row another writer appended to the home's own queue that has not reached an actor, such as a captain inbox note.
+It also surfaces, once, any check row another writer appended to the home's own queue that has not reached an actor, such as a captain inbox note, unless the away-mode daemon owns triage.
 Only a `check:` close records the queue sequence it handed over in `state/.watch-queue-handed`, because a check trigger always reaches main while the captain is attended and main's drain presents every row it can claim; a signal, stale, or heartbeat close may be taken by a supervision branch that presents only its granted rows, so it leaves the record alone.
 The successor surfaces a check row above the record unless a live branch grant holds it or main's last drain already claimed it, and the record only moves forward, so each row is surfaced at most once ([`bin/fm-wake-lib.sh`](../bin/fm-wake-lib.sh) `watch_queue_handed_read` owns the rule).
 
