@@ -173,14 +173,16 @@ spawn_ship() {  # <case-dir> <id> [pane-path]
   run_spawn "$case_dir" "$case_dir/home" "$pane" "$id" "$case_dir/project" --mode no-mistakes --yolo off
 }
 
-# Everything a deferred spawn must not have created for <id>.
-assert_nothing_created() {  # <case-dir> <home> <id> <calls-before>
-  local case_dir=$1 home=$2 id=$3 before=$4 after
+# Everything a deferred spawn must not have created for <id>; <worktrees-before>
+# is worktree_list taken before the spawn.
+assert_nothing_created() {  # <case-dir> <home> <id> <calls-before> <worktrees-before>
+  local case_dir=$1 home=$2 id=$3 before=$4 worktrees=$5 after
   assert_absent "$home/state/$id.meta" "a deferred spawn published a task record for $id"
   assert_absent "$home/data/$id/launch-brief.md" "a deferred spawn rendered a launch brief for $id"
   after=$(call_count "$case_dir")
   [ "$after" -eq "$before" ] ||
     fail "a deferred spawn touched the terminal or worktree pool for $id: $(tail -n +"$((before + 1))" "$case_dir/calls.log")"
+  assert_equals "$worktrees" "$(worktree_list "$case_dir")" "a deferred spawn left a git worktree for $id"
   if [ "$HAVE_TASKS_AXI" = 1 ]; then
     [ "$(row_state "$home" "$id")" = queued ] ||
       fail "a deferred spawn moved $id's backlog item: $(row_state "$home" "$id")"
@@ -188,6 +190,8 @@ assert_nothing_created() {  # <case-dir> <home> <id> <calls-before>
 }
 
 call_count() { wc -l < "$1/calls.log" | tr -d ' '; }
+
+worktree_list() { git -C "$1/project" worktree list --porcelain; }
 
 # --- cases ------------------------------------------------------------------
 
@@ -223,21 +227,41 @@ test_available_capacity_admits_the_worker() {
 }
 
 test_exhausted_capacity_defers_without_leaving_anything_behind() {
-  local case_dir home out rc=0 before
+  local case_dir home out rc=0 before worktrees
   case_dir=$(make_case exhausted task-c)
   home="$case_dir/home"
   declare_capacity "$home" "project 2"
   write_live "$home" live-a "$case_dir/project"
   write_live "$home" live-b "$case_dir/project"
   before=$(call_count "$case_dir")
+  worktrees=$(worktree_list "$case_dir")
   out=$(spawn_ship "$case_dir" task-c "$case_dir/unused") || rc=$?
   expect_code "$DEFER_EXIT" "$rc" "a spawn beyond capacity was not deferred: $out"
   assert_contains "$out" "deferred: project project admits 2 worker(s) at once on this machine ($home/config/project-capacity) and 2 already hold a place (live-a, live-b)" \
     "the deferral did not name the capacity and its holders"
   assert_contains "$out" "task task-c was not launched and its backlog item stays queued" \
     "the deferral did not say the task stays queued"
-  assert_nothing_created "$case_dir" "$home" task-c "$before"
+  assert_nothing_created "$case_dir" "$home" task-c "$before" "$worktrees"
   pass "a spawn beyond capacity is deferred before any record, brief, endpoint, worktree, or backlog move exists"
+}
+
+# The capacity is the last field, so a project whose clone directory name holds
+# spaces can be declared; only a line whose first non-blank character is # is a
+# comment.
+test_spaced_project_name_is_declared() {
+  local case_dir home spaced out rc=0
+  case_dir=$(make_case spaced task-c)
+  home="$case_dir/home"
+  spaced="$case_dir/my  heavy project"
+  git clone -q "$(git -C "$case_dir/project" remote get-url origin)" "$spaced"
+  declare_capacity "$home" "   # my  heavy project 9" "my  heavy project 1" "project 5"
+  write_live "$home" live-a "$spaced"
+  out=$(run_spawn "$case_dir" "$home" "$case_dir/unused" task-c "$spaced" --mode no-mistakes --yolo off) || rc=$?
+  expect_code "$DEFER_EXIT" "$rc" "a project whose name holds spaces was not capped by its declaration: $out"
+  assert_contains "$out" "deferred: project my  heavy project admits 1 worker(s) at once" \
+    "the deferral did not use the spaced project's declared capacity"
+  assert_absent "$home/state/task-c.meta" "the deferred spaced-name spawn published a record"
+  pass "a project name with spaces is declared by taking the capacity from the last field"
 }
 
 # A home reached through a symlink is still one home: its workers hold one
@@ -349,6 +373,47 @@ test_capacity_is_shared_by_every_local_home() {
   pass "every local home shares one declared capacity per project origin, and remote homes do not count"
 }
 
+# A local home's state directory or task record that cannot be read could hide a
+# holder, so admission refuses instead of counting without it.
+test_unreadable_holders_refuse_admission() {
+  local case_dir root mate out rc=0
+  if [ "$(id -u)" = 0 ]; then
+    printf 'ok - skipped the unreadable-holder case (root reads files regardless of mode)\n'
+    return 0
+  fi
+  case_dir=$(make_case unreadable-holders task-c)
+  root="$case_dir/home"
+  mate="$case_dir/mate"
+  make_home "$mate"
+  printf '%s\n' schema=fm-secondmate-parent.v1 route=local "parent_home=$root" > "$mate/.fm-secondmate-parent"
+  printf -- '- mate - a local mate (home: %s; scope: project work; projects: project; added 2026-09-01)\n' "$mate" \
+    > "$root/data/secondmates.md"
+  declare_capacity "$root" "project 2"
+
+  write_live "$root" live-a "$case_dir/project"
+  chmod 000 "$root/state/live-a.meta"
+  out=$(spawn_ship "$case_dir" task-c "$case_dir/unused") || rc=$?
+  chmod 600 "$root/state/live-a.meta"
+  expect_code 1 "$rc" "an unreadable task record did not refuse admission: $out"
+  assert_contains "$out" "task record $root/state/live-a.meta cannot be read" \
+    "the refusal did not name the unreadable task record"
+  assert_absent "$root/state/task-c.meta" "a spawn published past an unreadable task record"
+
+  chmod 000 "$mate/state"
+  rc=0
+  out=$(spawn_ship "$case_dir" task-c "$case_dir/unused") || rc=$?
+  chmod 755 "$mate/state"
+  expect_code 1 "$rc" "an unreadable local state directory did not refuse admission: $out"
+  assert_contains "$out" "local Firstmate state directory $mate/state cannot be read" \
+    "the refusal did not name the unreadable state directory"
+  assert_absent "$root/state/task-c.meta" "a spawn published past an unreadable state directory"
+
+  rc=0
+  out=$(spawn_ship "$case_dir" task-c) || rc=$?
+  expect_code 0 "$rc" "a readable machine did not admit the worker: $out"
+  pass "an unreadable state directory or task record refuses admission rather than undercounting"
+}
+
 # Two spawns racing for the last place: the one holding the project lock
 # publishes, the other cannot publish while it waits and is deferred afterwards.
 test_concurrent_spawns_cannot_both_take_the_last_place() {
@@ -397,18 +462,19 @@ test_failed_spawn_after_admission_holds_no_place() {
 }
 
 test_unreadable_declaration_refuses_every_spawn() {
-  local case_dir home out rc label body before
+  local case_dir home out rc label body before worktrees
   case_dir=$(make_case unreadable task-c)
   home="$case_dir/home"
   while IFS='|' read -r label body; do
     [ -n "$label" ] || continue
     printf '%b' "$body" > "$home/config/project-capacity"
     before=$(call_count "$case_dir")
+    worktrees=$(worktree_list "$case_dir")
     rc=0
     out=$(spawn_ship "$case_dir" task-c "$case_dir/unused") || rc=$?
     expect_code 1 "$rc" "$label: an unreadable declaration did not refuse: $out"
     assert_contains "$out" "the project capacity declaration is unreadable" "$label: the refusal did not name the declaration"
-    assert_nothing_created "$case_dir" "$home" task-c "$before"
+    assert_nothing_created "$case_dir" "$home" task-c "$before" "$worktrees"
   done <<'ROWS'
 missing capacity|project\n
 zero capacity|project 0\n
@@ -439,11 +505,12 @@ test_batch_reports_a_deferred_pair() {
 }
 
 # Orca owns its own worktrees and never takes the Treehouse allocation lock, so
-# a declared capacity is what makes an Orca spawn take the shared project lock:
-# it refuses while another holder has it, and defers at capacity before asking
-# Orca for anything but its runtime status.
+# a declared capacity is what makes an Orca spawn take the shared project lock,
+# even from an uncapped clone of a capped origin whose worker would still hold a
+# place: it refuses while another holder has it, and defers at capacity before
+# asking Orca for anything but its runtime status.
 test_orca_spawn_is_admitted_under_the_shared_project_lock() {
-  local case_dir home out rc=0 holder i
+  local case_dir home out out2 rc=0 rc2 holder i
   command -v node >/dev/null 2>&1 || {
     printf 'ok - skipped the Orca capacity case (node, which the Orca status check needs, is not installed)\n'
     return 0
@@ -460,6 +527,7 @@ printf 'orca %s\n' "$*" >> "$FM_FAKE_CALL_LOG"
 exit 1
 SH
   chmod +x "$case_dir/fakebin/orca"
+  git clone -q "$(git -C "$case_dir/project" remote get-url origin)" "$case_dir/project-2"
   declare_capacity "$home" "project 1"
 
   # shellcheck disable=SC2016 # expanded by the holder's own shell
@@ -480,11 +548,18 @@ SH
   done
   out=$(run_spawn "$case_dir" "$home" "$case_dir/unused" task-o "$case_dir/project" \
     --backend orca --mode no-mistakes --yolo off) || rc=$?
+  rc2=0
+  out2=$(run_spawn "$case_dir" "$home" "$case_dir/unused" task-o "$case_dir/project-2" \
+    --backend orca --mode no-mistakes --yolo off) || rc2=$?
   : > "$case_dir/holder.release"
   wait "$holder" || true
   expect_code 1 "$rc" "an Orca spawn ignored a held project lock: $out"
   assert_contains "$out" "another spawn or cleanup holds the shared project lock for $case_dir/project; refusing to race its capacity admission" \
     "the Orca spawn did not refuse on the shared project lock"
+  expect_code 1 "$rc2" "an Orca spawn from an uncapped same-origin clone ignored the held project lock: $out2"
+  assert_contains "$out2" "another spawn or cleanup holds the shared project lock for $case_dir/project-2" \
+    "the uncapped same-origin clone's Orca spawn did not refuse on the shared project lock"
+  assert_absent "$home/state/task-o.meta" "the uncapped clone's Orca spawn published a record while the lock was held"
   assert_no_grep "orca " "$case_dir/calls.log" "the Orca spawn asked Orca for more than its runtime status"
 
   write_live "$home" live-a "$case_dir/project"
@@ -494,16 +569,18 @@ SH
   expect_code "$DEFER_EXIT" "$rc" "an Orca spawn beyond capacity was not deferred: $out"
   assert_absent "$home/state/task-o.meta" "the deferred Orca spawn published a record"
   assert_no_grep "orca " "$case_dir/calls.log" "the deferred Orca spawn created an Orca worktree"
-  pass "an Orca spawn takes the shared project lock for a declared capacity and defers before creating anything"
+  pass "an Orca spawn takes the shared project lock whenever a same-origin clone is capped and defers before creating anything"
 }
 
 test_undeclared_capacity_keeps_dispatch_uncapped
 test_available_capacity_admits_the_worker
 test_exhausted_capacity_defers_without_leaving_anything_behind
+test_spaced_project_name_is_declared
 test_symlinked_home_counts_each_worker_once
 test_release_frees_a_place
 test_occupancy_counts_only_this_projects_workers
 test_capacity_is_shared_by_every_local_home
+test_unreadable_holders_refuse_admission
 test_concurrent_spawns_cannot_both_take_the_last_place
 test_failed_spawn_after_admission_holds_no_place
 test_unreadable_declaration_refuses_every_spawn

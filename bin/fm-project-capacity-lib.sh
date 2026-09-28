@@ -23,7 +23,9 @@
 #   <project-name> <capacity>
 # <project-name> is the project's registered name, which is the basename of its
 # clone directory, and <capacity> is a positive integer of at most six digits.
-# Blank lines and lines whose first non-blank character is # are ignored. Any
+# The capacity is the last whitespace-separated field, so the name before it may
+# contain spaces. Blank lines and lines whose first non-blank character is # are
+# ignored, so a project whose name starts with # cannot be declared. Any
 # other shape, a project named twice, or an unreadable file makes the whole
 # declaration unreadable, and bin/fm-spawn.sh then refuses every fresh ship or
 # scout spawn from this machine's homes rather than guessing which limit was
@@ -55,8 +57,11 @@
 # Race safety: bin/fm-spawn.sh evaluates admission while holding the shared
 # project lock and keeps holding it until the new task record is published, so
 # two concurrent spawns for one project can never both publish from the same
-# count. Freeing a place needs no lock, because removing a record or adding pr=
-# only ever lowers the count.
+# count. A spawn on an uncapped project can still publish a holder for a capped
+# same-origin clone, so every backend takes that lock whenever the declaration
+# caps any project; Orca, which otherwise never takes it, is included. Freeing a
+# place needs no lock, because removing a record or adding pr= only ever lowers
+# the count.
 #
 # Requires bin/fm-wake-lib.sh (root home, local homes, project lock path) and
 # bin/fm-backend.sh (fm_meta_get) to be sourced first. No side effects on source.
@@ -82,13 +87,15 @@ fm_project_capacity_config_dir() {  # <spawning-home> <spawning-config-dir>
 }
 
 # Read the declared capacity for one project.
-# Sets FM_PROJECT_CAPACITY_FILE to the declaration path and FM_PROJECT_CAPACITY
-# to the project's capacity, or to empty when the project declares none.
+# Sets FM_PROJECT_CAPACITY_FILE to the declaration path, FM_PROJECT_CAPACITY
+# to the project's capacity, or to empty when the project declares none, and
+# FM_PROJECT_CAPACITY_ANY to 1 when the declaration caps any project at all.
 # Returns 1 with FM_PROJECT_CAPACITY_ERROR when the declaration is unreadable.
 fm_project_capacity_lookup() {  # <config-dir> <project-name>
-  local name=$2 line lineno=0 pname pcap extra seen='|'
+  local name=$2 line lineno=0 pname pcap seen='|'
   FM_PROJECT_CAPACITY_FILE="$1/project-capacity"
   FM_PROJECT_CAPACITY=
+  FM_PROJECT_CAPACITY_ANY=
   FM_PROJECT_CAPACITY_ERROR=
   if [ ! -e "$FM_PROJECT_CAPACITY_FILE" ] && [ ! -L "$FM_PROJECT_CAPACITY_FILE" ]; then
     return 0
@@ -100,12 +107,14 @@ fm_project_capacity_lookup() {  # <config-dir> <project-name>
   while IFS= read -r line || [ -n "$line" ]; do
     lineno=$((lineno + 1))
     line=${line%$'\r'}
-    pname='' pcap='' extra=''
-    read -r pname pcap extra <<EOF
-$line
-EOF
-    case "$pname" in '' | '#'*) continue ;; esac
-    if [ -z "$pcap" ] || [ -n "$extra" ]; then
+    line=${line#"${line%%[![:space:]]*}"}
+    line=${line%"${line##*[![:space:]]}"}
+    case "$line" in '' | '#'*) continue ;; esac
+    # The capacity is the last field, so the name before it may hold spaces.
+    pcap=${line##*[[:space:]]}
+    pname=${line%"$pcap"}
+    pname=${pname%"${pname##*[![:space:]]}"}
+    if [ -z "$pname" ]; then
       FM_PROJECT_CAPACITY_ERROR="$FM_PROJECT_CAPACITY_FILE line $lineno is not '<project-name> <capacity>'"
       FM_PROJECT_CAPACITY=
       return 1
@@ -132,6 +141,7 @@ EOF
     seen="$seen$pname|"
     [ "$pname" != "$name" ] || FM_PROJECT_CAPACITY=$pcap
   done < "$FM_PROJECT_CAPACITY_FILE"
+  [ "$seen" = '|' ] || FM_PROJECT_CAPACITY_ANY=1
   return 0
 }
 
@@ -143,7 +153,9 @@ EOF
 # Sets FM_PROJECT_CAPACITY_OCCUPANTS to the count and
 # FM_PROJECT_CAPACITY_OCCUPANT_IDS to a comma-separated list of the holders,
 # each outside <first-state> qualified with its home. Returns 1 with
-# FM_PROJECT_CAPACITY_ERROR when the local homes cannot be enumerated.
+# FM_PROJECT_CAPACITY_ERROR when the local homes cannot be enumerated, or when
+# a state directory or task record in them cannot be read, since skipping it
+# could undercount the holders.
 fm_project_capacity_occupants() {  # <project-lock> <project-dir> <first-state>
   local want=$1 own=$2 first=$3 state meta kind project lock id label i
   local -a cache_dirs cache_locks
@@ -157,8 +169,16 @@ fm_project_capacity_occupants() {  # <project-lock> <project-dir> <first-state>
   cache_dirs=("$own")
   cache_locks=("$want")
   for state in "${FM_LOCAL_FIRSTMATE_STATES[@]}"; do
+    if [ -e "$state" ] && { [ ! -d "$state" ] || [ ! -r "$state" ] || [ ! -x "$state" ]; }; then
+      FM_PROJECT_CAPACITY_ERROR="local Firstmate state directory $state cannot be read"
+      return 1
+    fi
     for meta in "$state"/*.meta; do
       [ -f "$meta" ] && [ ! -L "$meta" ] || continue
+      [ -r "$meta" ] || {
+        FM_PROJECT_CAPACITY_ERROR="task record $meta cannot be read"
+        return 1
+      }
       kind=$(fm_meta_get "$meta" kind)
       [ "$kind" != secondmate ] || continue
       [ -z "$(fm_meta_get "$meta" pr)" ] || continue
