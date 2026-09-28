@@ -8,6 +8,7 @@ set -u
 TMP_ROOT=$(fm_test_tmproot fm-calm-pi-extension)
 EXT="$ROOT/.pi/extensions/fm-calm.ts"
 ASSISTANT_LAYOUT="$ROOT/.pi/extensions/lib/fm-calm-assistant-layout.ts"
+TOOL_LAYOUT="$ROOT/.pi/extensions/lib/fm-calm-tool-layout.ts"
 PRESERVATION="$ROOT/.pi/extensions/lib/fm-calm-preservation.ts"
 OPERATIONAL_USER_LAYOUT="$ROOT/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
 PENDING_OPERATIONAL_LAYOUT="$ROOT/.pi/extensions/lib/fm-calm-pending-operational-layout.ts"
@@ -189,6 +190,7 @@ test_home_resolution() {
     "$fixture/launch-cwd"
   cp "$EXT" "$fixture/project/.pi/extensions/fm-calm.ts"
   cp "$ASSISTANT_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
+  cp "$TOOL_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-tool-layout.ts"
   cp "$PRESERVATION" "$fixture/project/.pi/extensions/lib/fm-calm-preservation.ts"
   cp "$OPERATIONAL_USER_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
   cp "$PENDING_OPERATIONAL_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-pending-operational-layout.ts"
@@ -314,6 +316,7 @@ test_pi_compat_degraded_adapter() {
     "$fixture/project/node_modules/@earendil-works"
   cp "$EXT" "$fixture/project/.pi/extensions/fm-calm.ts"
   cp "$ASSISTANT_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
+  cp "$TOOL_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-tool-layout.ts"
   cp "$PRESERVATION" "$fixture/project/.pi/extensions/lib/fm-calm-preservation.ts"
   cp "$OPERATIONAL_USER_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
   cp "$PENDING_OPERATIONAL_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-pending-operational-layout.ts"
@@ -416,6 +419,7 @@ test_pi_compat_missing_adapter_exports() {
     "$fixture/project/.pi/extensions/lib" \
     "$fixture/project/node_modules/@earendil-works/pi-coding-agent"
   cp "$ASSISTANT_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
+  cp "$TOOL_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-tool-layout.ts"
   cp "$PRESERVATION" "$fixture/project/.pi/extensions/lib/fm-calm-preservation.ts"
   cp "$OPERATIONAL_USER_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
   cp "$PENDING_OPERATIONAL_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-pending-operational-layout.ts"
@@ -775,25 +779,17 @@ JS
   pass "Calm hides queued Firstmate rows only on a session that can keep them, keeps hidden ones out of the editor on Escape, delivers them once in order, and leaves unsupported sessions and Calm off stock"
 }
 
-test_builtin_gate_load_time() {
-  local fixture out output_file status
-  if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
-    echo "skip: node or npm not found for Pi calm gate test"
-    return 0
-  fi
-  if [ ! -f "$PI_PACKAGE_DIR/package.json" ]; then
-    echo "skip: installed @earendil-works/pi-coding-agent package not found"
-    return 0
-  fi
-
-  fixture="$TMP_ROOT/gate-load-time"
+# Prepares $fixture/project as a Pi project that loads the tracked Calm extension against the
+# installed Pi package, for the tool-row fixtures below.
+prepare_calm_tool_row_fixture() {
+  local fixture=$1
   mkdir -p \
     "$fixture/project/.pi/extensions/lib" \
     "$fixture/project/node_modules/@earendil-works" \
-    "$fixture/home-off/config" \
-    "$fixture/home-on/config"
+    "$fixture/home/config"
   cp "$EXT" "$fixture/project/.pi/extensions/fm-calm.ts"
   cp "$ASSISTANT_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
+  cp "$TOOL_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-tool-layout.ts"
   cp "$PRESERVATION" "$fixture/project/.pi/extensions/lib/fm-calm-preservation.ts"
   cp "$OPERATIONAL_USER_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
   cp "$PENDING_OPERATIONAL_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-pending-operational-layout.ts"
@@ -805,6 +801,23 @@ test_builtin_gate_load_time() {
   ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/project/node_modules/@earendil-works/pi-tui"
   ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$fixture/project/node_modules/typebox"
   printf '%s\n' '{"type":"module"}' >"$fixture/project/package.json"
+}
+
+test_calm_registers_no_tools() {
+  local fixture out output_file status
+  if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+    echo "skip: node or npm not found for Pi calm tool registration test"
+    return 0
+  fi
+  if [ ! -f "$PI_PACKAGE_DIR/package.json" ]; then
+    echo "skip: installed @earendil-works/pi-coding-agent package not found"
+    return 0
+  fi
+
+  fixture="$TMP_ROOT/no-tool-registration"
+  prepare_calm_tool_row_fixture "$fixture"
+  mkdir -p "$fixture/home-off/config" "$fixture/home-on/config"
+  printf '%s\n' off >"$fixture/home-off/config/calm"
   printf '%s\n' on >"$fixture/home-on/config/calm"
 
   output_file="$fixture/node-output"
@@ -812,63 +825,60 @@ test_builtin_gate_load_time() {
     EXT="$fixture/project/.pi/extensions/fm-calm.ts" \
     HOME_OFF="$fixture/home-off" \
     HOME_ON="$fixture/home-on" \
+    PI_PACKAGE_DIR="$PI_PACKAGE_DIR" \
     node --input-type=module) >"$output_file" 2>&1 <<'JS'
 import { pathToFileURL } from "node:url";
 
+const packageRoot = process.env.PI_PACKAGE_DIR;
+const { ToolExecutionComponent } = await import(
+  pathToFileURL(`${packageRoot}/dist/modes/interactive/components/tool-execution.js`).href
+);
+
+// Pi keeps one unmerged definition per tool name and refuses to start when two extensions
+// register the same name, so Calm must never register a tool - whether it is on or off at
+// load, and whether or not another extension owns a built-in.
 function fakePi() {
-  const tools = [];
-  const handlers = new Map();
+  const registered = [];
   const pi = {
     events: { emit() {}, on() {} },
-    on(event, handler) {
-      handlers.set(event, handler);
-    },
+    on() {},
     registerCommand() {},
     registerEntryRenderer() {},
     registerTool(tool) {
-      tools.push(tool);
+      registered.push(tool.name);
     },
     getAllTools() {
-      return tools.map((tool) => ({ name: tool.name, sourceInfo: { source: "extension", path: "self" } }));
+      return [];
     },
   };
-  return { pi, tools, handlers };
+  return { pi, registered };
 }
 
-// Calm-off (config/calm absent for this home): load-time registration must be
-// entirely skipped, so a non-Calm user contests nothing.
-process.env.FM_HOME = process.env.HOME_OFF;
-const offRun = fakePi();
-const extensionOff = await import(`${pathToFileURL(process.env.EXT).href}?gate-off=${Date.now()}`);
-extensionOff.default(offRun.pi);
-if (offRun.tools.length !== 0) {
-  throw new Error(`Calm registered ${offRun.tools.length} built-ins while config/calm was absent: ${offRun.tools.map((t) => t.name).join(",")}`);
+const stockRender = ToolExecutionComponent.prototype.render;
+for (const [label, home] of [["off", process.env.HOME_OFF], ["on", process.env.HOME_ON]]) {
+  process.env.FM_HOME = home;
+  const run = fakePi();
+  const extension = await import(`${pathToFileURL(process.env.EXT).href}?no-registration-${label}=${Date.now()}`);
+  extension.default(run.pi);
+  if (run.registered.length !== 0) {
+    throw new Error(`Calm registered ${JSON.stringify(run.registered)} at load with config/calm=${label}`);
+  }
 }
-
-// Calm-on (config/calm="on" for this home): registration must happen synchronously,
-// during this same factory call, exactly the timing /reload's pre-session_start
-// transcript render depends on - not deferred to session_start or later.
-process.env.FM_HOME = process.env.HOME_ON;
-const onRun = fakePi();
-const extensionOn = await import(`${pathToFileURL(process.env.EXT).href}?gate-on=${Date.now()}`);
-extensionOn.default(onRun.pi);
-const names = onRun.tools.map((t) => t.name).sort();
-const expected = ["bash", "edit", "find", "grep", "ls", "read", "write"];
-if (JSON.stringify(names) !== JSON.stringify(expected)) {
-  throw new Error(`Calm registered ${JSON.stringify(names)} synchronously at load with config/calm=on, expected ${JSON.stringify(expected)}`);
+if (ToolExecutionComponent.prototype.render === stockRender) {
+  throw new Error("Calm did not install its tool-row presentation adapter");
 }
 JS
   status=$?
   out=$(cat "$output_file")
-  [ "$status" -eq 0 ] || fail "Pi calm gate-at-load-time path failed: $out"
-  [ -z "$out" ] || fail "Pi calm gate-at-load-time test printed output: $out"
-  pass "Calm registers none of its 7 built-in tool wrappers at load while config/calm is off, and all 7 synchronously at load while config/calm is on"
+  [ "$status" -eq 0 ] || fail "Pi calm no-tool-registration path failed: $out"
+  [ -z "$out" ] || fail "Pi calm no-tool-registration test printed output: $out"
+  pass "Calm registers no tool at load whether config/calm is on or off, and installs its tool-row adapter instead"
 }
 
-test_calm_activation_collision_and_regression_bound() {
+test_calm_tool_rows_beside_foreign_owner() {
   local fixture out output_file status
   if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
-    echo "skip: node or npm not found for Pi calm activation test"
+    echo "skip: node or npm not found for Pi calm foreign tool owner test"
     return 0
   fi
   if [ ! -f "$PI_PACKAGE_DIR/package.json" ]; then
@@ -876,52 +886,30 @@ test_calm_activation_collision_and_regression_bound() {
     return 0
   fi
 
-  fixture="$TMP_ROOT/activation-collision"
-  mkdir -p \
-    "$fixture/project/.pi/extensions/lib" \
-    "$fixture/project/node_modules/@earendil-works" \
-    "$fixture/home/config"
-  cp "$EXT" "$fixture/project/.pi/extensions/fm-calm.ts"
-  cp "$ASSISTANT_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
-  cp "$PRESERVATION" "$fixture/project/.pi/extensions/lib/fm-calm-preservation.ts"
-  cp "$OPERATIONAL_USER_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
-  cp "$PENDING_OPERATIONAL_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-pending-operational-layout.ts"
-  cp "$VISIBILITY" "$fixture/project/.pi/extensions/lib/fm-calm-visibility.ts"
-  cp "$WORKING_SHIP" "$fixture/project/.pi/extensions/lib/fm-calm-working-ship.ts"
-  cp "$WORKING_SHIP_SPRITE" "$fixture/project/.pi/extensions/lib/fm-calm-working-ship-sprite.ts"
-  cp "$PI_OPERATIONAL_INPUT" "$fixture/project/.pi/extensions/lib/fm-operational-input.ts"
-  ln -s "$PI_PACKAGE_DIR" "$fixture/project/node_modules/@earendil-works/pi-coding-agent"
-  ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/project/node_modules/@earendil-works/pi-tui"
-  ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$fixture/project/node_modules/typebox"
-  printf '%s\n' '{"type":"module"}' >"$fixture/project/package.json"
-  printf '%s\n' 'export default function () {}' >"$fixture/project/foreign-bash-extension.ts"
+  fixture="$TMP_ROOT/foreign-tool-owner"
+  prepare_calm_tool_row_fixture "$fixture"
 
   output_file="$fixture/node-output"
   (cd "$fixture/project" && \
     EXT="$fixture/project/.pi/extensions/fm-calm.ts" \
-    FOREIGN_EXT="$fixture/project/foreign-bash-extension.ts" \
     FM_HOME="$fixture/home" \
     PI_PACKAGE_DIR="$PI_PACKAGE_DIR" \
     node --input-type=module) >"$output_file" 2>&1 <<'JS'
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 
 const packageRoot = process.env.PI_PACKAGE_DIR;
-const { ToolExecutionComponent } = await import(
-  pathToFileURL(`${packageRoot}/dist/modes/interactive/components/tool-execution.js`).href
-);
-const { initTheme } = await import(pathToFileURL(`${packageRoot}/dist/modes/interactive/theme/theme.js`).href);
-const { setCapabilities } = await import(
-  pathToFileURL(`${packageRoot}/node_modules/@earendil-works/pi-tui/dist/index.js`).href
-);
+const [{ ToolExecutionComponent }, { initTheme }, { Text, setCapabilities }, { createReadToolDefinition }] = await Promise.all([
+  import(pathToFileURL(`${packageRoot}/dist/modes/interactive/components/tool-execution.js`).href),
+  import(pathToFileURL(`${packageRoot}/dist/modes/interactive/theme/theme.js`).href),
+  import(pathToFileURL(`${packageRoot}/node_modules/@earendil-works/pi-tui/dist/index.js`).href),
+  import(pathToFileURL(`${packageRoot}/dist/core/tools/index.js`).href),
+]);
 initTheme("dark");
 setCapabilities({ images: null, trueColor: true, hyperlinks: false });
 
-// Reproduces the collision: a different, earlier-loaded extension already owns
-// "bash" by the time Calm's first activation runs, exactly as Pi's real
-// ExtensionRunner resolves same-name pi.registerTool() calls (first-registered-
-// extension-per-name wins, verified in the installed Pi package's
-// ExtensionRunner.getAllRegisteredTools).
-const foreignPath = fileURLToPath(pathToFileURL(process.env.FOREIGN_EXT).href);
+// Another extension owns "bash" (a sandbox or approval gate) and, like a stock Pi override,
+// defines no render slots of its own. Pi hands rows for it to the same row component as any
+// other tool, so Calm must hide that row without touching the extension that owns it.
 const FOREIGN_MARKER = "FOREIGN_BASH_EXECUTED";
 const foreignBash = {
   name: "bash",
@@ -933,154 +921,142 @@ const foreignBash = {
   },
 };
 
-const registry = new Map([["bash", { tool: foreignBash, ownerPath: foreignPath }]]);
+const registered = [];
 const notifications = [];
 const diagnostics = [];
 const originalConsoleError = console.error;
 console.error = (...args) => diagnostics.push(args.join(" "));
-
-const handlers = new Map();
 let calmCommand;
-const extPath = fileURLToPath(pathToFileURL(process.env.EXT).href);
 const pi = {
   events: { emit() {}, on() {} },
-  on(event, handler) {
-    handlers.set(event, handler);
-  },
+  on() {},
   registerCommand(name, command) {
     if (name === "calm") calmCommand = command;
   },
   registerEntryRenderer() {},
-  // Mirrors Pi's own arbitration: first registrant for a name keeps it, silently.
   registerTool(tool) {
-    if (!registry.has(tool.name)) {
-      registry.set(tool.name, { tool, ownerPath: extPath });
-    }
+    registered.push(tool.name);
   },
   getAllTools() {
-    return Array.from(registry.entries()).map(([name, { ownerPath }]) => ({
-      name,
-      sourceInfo: { source: "extension", path: ownerPath },
-    }));
+    return [{ name: "bash", sourceInfo: { source: "auto", path: "/foreign/sandbox/index.ts" } }];
+  },
+};
+const extension = await import(`${pathToFileURL(process.env.EXT).href}?foreign-owner=${Date.now()}`);
+extension.default(pi);
+console.error = originalConsoleError;
+if (!calmCommand) throw new Error("Calm did not register its command");
+
+const renderUi = { requestRender() {} };
+const rowFor = (name, definition, args, result, options = { showImages: false }) => {
+  const row = new ToolExecutionComponent(name, `${name}-row`, args, options, definition, renderUi, process.cwd());
+  row.markExecutionStarted();
+  row.setArgsComplete();
+  row.updateResult(result);
+  return row;
+};
+const textResult = (text) => ({ content: [{ type: "text", text }], details: {}, isError: false });
+const bashRow = rowFor("bash", foreignBash, { command: "echo hi" }, textResult("BASH_ROW_OUTPUT"));
+const readRow = rowFor("read", createReadToolDefinition(process.cwd()), { path: "sample.txt" }, textResult("READ_ROW_OUTPUT"));
+const customRow = rowFor(
+  "third_party_tool",
+  {
+    name: "third_party_tool",
+    label: "Third party tool",
+    description: "Custom-tool boundary probe",
+    parameters: { type: "object", properties: {} },
+    renderShell: "self",
+    async execute() {
+      return textResult("CUSTOM_RESULT");
+    },
+    renderCall: () => new Text("CUSTOM_CALL", 0, 0),
+    renderResult: () => new Text("CUSTOM_RESULT", 0, 0),
+  },
+  {},
+  textResult("CUSTOM_RESULT"),
+);
+setCapabilities({ images: "iterm2", trueColor: true, hyperlinks: true });
+const imageRow = rowFor(
+  "read",
+  createReadToolDefinition(process.cwd()),
+  { path: "pixel.png" },
+  {
+    content: [{
+      type: "image",
+      data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+      mimeType: "image/png",
+    }],
+    details: {},
+    isError: false,
+  },
+  { showImages: true },
+);
+const ui = {
+  getEditorText: () => "",
+  getToolsExpanded: () => false,
+  onTerminalInput: () => () => {},
+  setHiddenThinkingLabel() {},
+  setStatus() {},
+  setToolsExpanded() {},
+  setWorkingVisible() {},
+  notify(message, type) {
+    notifications.push({ message, type });
   },
 };
 
-let threw = false;
-try {
-  const extension = await import(`${pathToFileURL(process.env.EXT).href}?activation=${Date.now()}`);
-  extension.default(pi);
-} catch {
-  threw = true;
-}
-if (threw) throw new Error("Calm's own factory threw while config/calm was absent and another extension already owned bash");
-if (registry.size !== 1) {
-  throw new Error(`Calm registered built-ins at load time despite config/calm being absent: ${JSON.stringify(Array.from(registry.keys()))}`);
-}
-if (!calmCommand || !handlers.has("session_start")) {
-  throw new Error("Calm did not finish registering its command and session handler");
-}
-
-// A row constructed before Calm's first-ever activation this session: this is the
-// captain-accepted, documented bound on the gate-at-load fix (see fm-calm.ts's file
-// header and docs/calm.md) - Pi gives no way to re-point an already-constructed
-// ToolExecutionComponent at a definition registered later, so this row can never
-// retroactively collapse. Lock that in explicitly rather than let it regress further.
-const renderUi = { requestRender() {} };
-const preToggleReadArgs = { path: "sample.txt" };
-const preToggleRead = new ToolExecutionComponent(
-  "read",
-  "pre-toggle-read",
-  preToggleReadArgs,
-  { showImages: false },
-  registry.get("read")?.tool,
-  renderUi,
-  process.cwd(),
-);
-preToggleRead.markExecutionStarted();
-preToggleRead.setArgsComplete();
-preToggleRead.updateResult({ content: [{ type: "text", text: "PRE_TOGGLE_READ_OUTPUT" }], details: {}, isError: false });
-const preToggleRenderedBefore = preToggleRead.render(100);
-if (preToggleRenderedBefore.length === 0) {
+const visibleBefore = {
+  bash: bashRow.render(100),
+  read: readRow.render(100),
+  image: imageRow.render(100),
+};
+if (!visibleBefore.bash.join("\n").includes("BASH_ROW_OUTPUT") || visibleBefore.read.length === 0) {
   throw new Error("a tool row rendered as hidden before Calm was ever activated");
 }
+if (!visibleBefore.image.join("\n").includes("\x1b]1337;File=")) {
+  throw new Error("image-capable Pi fixture did not render the built-in read image");
+}
 
-const ctx = {
-  ui: {
-    getEditorText: () => "",
-    getToolsExpanded: () => false,
-    onTerminalInput: () => () => {},
-    setHiddenThinkingLabel() {},
-    setStatus() {},
-    setToolsExpanded() {},
-    setWorkingVisible() {},
-    notify(message, type) {
-      notifications.push({ message, type });
-    },
-  },
-};
+// First activation in a session that started Calm-off, beside a foreign bash owner.
 console.error = (...args) => diagnostics.push(args.join(" "));
-await calmCommand.handler("", ctx);
+await calmCommand.handler("", { ui });
 console.error = originalConsoleError;
 
-const bashEntry = registry.get("bash");
-if (bashEntry.tool !== foreignBash) {
-  throw new Error("Calm replaced the foreign extension's bash registration instead of leaving it alone");
+if (registered.length !== 0) {
+  throw new Error(`Calm registered ${JSON.stringify(registered)} instead of only hiding rows`);
 }
-const bashResult = await bashEntry.tool.execute();
-if (bashResult.content[0]?.text !== FOREIGN_MARKER) {
-  throw new Error("the foreign extension's bash tool no longer executes its own real behavior");
+if (notifications.length !== 0 || diagnostics.length !== 0) {
+  throw new Error(`Calm warned about a foreign built-in owner: ${JSON.stringify({ notifications, diagnostics })}`);
 }
-for (const name of ["read", "edit", "write", "grep", "find", "ls"]) {
-  const entry = registry.get(name);
-  if (!entry || entry.ownerPath !== extPath) {
-    throw new Error(`Calm failed to claim the uncontested built-in "${name}" on first activation`);
-  }
+if (bashRow.render(100).length !== 0) {
+  throw new Error("Calm left the bash row of a foreign bash owner visible");
 }
-
-// Part C: a single, prominent, user-facing warning naming the contested tool, not
-// merely a console diagnostic.
-if (notifications.length !== 1) {
-  throw new Error(`expected exactly one contested-tool notification, saw ${JSON.stringify(notifications)}`);
+if (readRow.render(100).length !== 0) {
+  throw new Error("a read row drawn before Calm's first activation did not collapse");
 }
-if (notifications[0].type !== "warning") {
-  throw new Error(`contested-tool notification was not type "warning": ${JSON.stringify(notifications[0])}`);
+if (customRow.render(100).length === 0) {
+  throw new Error("Calm hid a third-party tool row outside its built-in tool boundary");
 }
-if (!notifications[0].message.includes("bash") || !notifications[0].message.toLowerCase().includes("calm")) {
-  throw new Error(`contested-tool notification did not name the tool clearly: ${JSON.stringify(notifications[0])}`);
+if (JSON.stringify(imageRow.render(100)) !== JSON.stringify(visibleBefore.image)) {
+  throw new Error("Calm changed a built-in read row that carries an image instead of leaving that row stock");
 }
-const sawBashDiagnostic = diagnostics.some((line) => line.includes("bash"));
-if (!sawBashDiagnostic) {
-  throw new Error(`expected a console diagnostic naming the skipped built-in too; saw: ${JSON.stringify(diagnostics)}`);
+const foreignResult = await foreignBash.execute();
+if (foreignResult.content[0]?.text !== FOREIGN_MARKER) {
+  throw new Error("the foreign extension's bash tool no longer executes its own behavior");
 }
 
-// The documented bound itself: still non-empty after Calm is now active, because it
-// was constructed before Calm ever claimed anything.
-if (preToggleRead.render(100).length === 0) {
-  throw new Error("a pre-activation tool row retroactively hid after Calm turned on; the documented bound regressed");
+// Turning Calm off restores every row exactly.
+await calmCommand.handler("", { ui });
+if (JSON.stringify(bashRow.render(100)) !== JSON.stringify(visibleBefore.bash)) {
+  throw new Error("turning Calm off did not restore the foreign bash row");
 }
-
-// A row for the same tool constructed after activation behaves normally: it does hide.
-const postToggleRead = new ToolExecutionComponent(
-  "read",
-  "post-toggle-read",
-  preToggleReadArgs,
-  { showImages: false },
-  registry.get("read")?.tool,
-  renderUi,
-  process.cwd(),
-);
-postToggleRead.markExecutionStarted();
-postToggleRead.setArgsComplete();
-postToggleRead.updateResult({ content: [{ type: "text", text: "POST_TOGGLE_READ_OUTPUT" }], details: {}, isError: false });
-if (postToggleRead.render(100).length !== 0) {
-  throw new Error("a tool row constructed after Calm's activation did not hide");
+if (JSON.stringify(readRow.render(100)) !== JSON.stringify(visibleBefore.read)) {
+  throw new Error("turning Calm off did not restore the read row");
 }
 JS
   status=$?
   out=$(cat "$output_file")
-  [ "$status" -eq 0 ] || fail "Pi calm activation/collision/regression-bound path failed: $out"
-  [ -z "$out" ] || fail "Pi calm activation/collision/regression-bound test printed output: $out"
-  pass "Calm's first same-session /calm activation claims every uncontested built-in, leaves a foreign bash tool fully intact and callable, warns prominently and logs the contested name, and only rows constructed before that activation - the documented bound - fail to retroactively collapse"
+  [ "$status" -eq 0 ] || fail "Pi calm foreign tool owner path failed: $out"
+  [ -z "$out" ] || fail "Pi calm foreign tool owner test printed output: $out"
+  pass "Calm hides built-in tool rows, including one whose tool another extension owns, on the first /calm with no warning and no registration, leaves third-party and image rows stock, and restores every row when turned off"
 }
 
 test_rendering_and_session_lifecycle() {
@@ -1100,6 +1076,7 @@ test_rendering_and_session_lifecycle() {
   mkdir -p "$fixture/home" "$fixture/lib" "$fixture/node_modules/@earendil-works"
   cp "$EXT" "$fixture/fm-calm.ts"
   cp "$ASSISTANT_LAYOUT" "$fixture/lib/fm-calm-assistant-layout.ts"
+  cp "$TOOL_LAYOUT" "$fixture/lib/fm-calm-tool-layout.ts"
   cp "$PRESERVATION" "$fixture/lib/fm-calm-preservation.ts"
   cp "$OPERATIONAL_USER_LAYOUT" "$fixture/lib/fm-calm-operational-user-layout.ts"
   cp "$PENDING_OPERATIONAL_LAYOUT" "$fixture/lib/fm-calm-pending-operational-layout.ts"
@@ -1125,13 +1102,7 @@ SH
   output_file="$fixture/node-output"
   (cd "$fixture" && EXT="$fixture/fm-calm.ts" WATCH_EXT="$fixture/fm-primary-pi-watch.ts" FM_HOME="$fixture/home" FM_OPERATIONAL_INPUT_SCRIPT="$fixture/operational-input-probe.sh" FM_OPERATIONAL_INPUT_OWNER="$OPERATIONAL_INPUT" FM_OPERATIONAL_INPUT_CALLS="$fixture/operational-input-calls" PI_PACKAGE_DIR="$PI_PACKAGE_DIR" node --input-type=module) >"$output_file" 2>&1 <<'JS'
 import { readFileSync, writeFileSync } from "node:fs";
-import { fileURLToPath, pathToFileURL } from "node:url";
-
-// fm-calm.ts derives its own identity the same way (fileURLToPath(import.meta.url)),
-// which normalizes away irregularities like a symlinked TMPDIR (macOS /tmp, /var);
-// comparing against the raw env var would spuriously read this fixture's own
-// registration as foreign.
-const extPath = fileURLToPath(pathToFileURL(process.env.EXT).href);
+import { pathToFileURL } from "node:url";
 
 const packageRoot = process.env.PI_PACKAGE_DIR;
 const [{ AssistantMessageComponent }, { CustomEntryComponent }, { ToolExecutionComponent }, { UserMessageComponent }, { InteractiveMode }, { initTheme, theme }, { Text, getKeybindings, setCapabilities }, { createToolHtmlRenderer }, { createReadToolDefinition, createBashToolDefinition, createEditToolDefinition, createWriteToolDefinition, createGrepToolDefinition, createFindToolDefinition, createLsToolDefinition }] = await Promise.all([
@@ -1194,47 +1165,17 @@ const pi = {
     if (existingIndex === -1) tools.push(tool);
     else tools[existingIndex] = tool;
   },
-  getAllTools() {
-    // Only Calm itself has registered anything in this fixture, so every entry
-    // reports Calm's own extension path; the dedicated collision fixture below is
-    // what exercises a foreign extension already owning a name.
-    return tools.map((tool) => ({
-      name: tool.name,
-      sourceInfo: { source: "extension", path: extPath },
-    }));
-  },
 };
+// Pi's own row layout, captured before Calm installs its tool-row adapter, is the calm-off
+// equivalence baseline: the adapter wraps this exact method on the shared class.
+const stockRender = ToolExecutionComponent.prototype.render;
 const extension = await import(`${pathToFileURL(process.env.EXT).href}?test=${Date.now()}`);
 extension.default(pi);
 const visibility = await import(`${pathToFileURL(`${process.cwd()}/lib/fm-calm-visibility.ts`).href}?policy=${Date.now()}`);
 const operationalInput = await import(`${pathToFileURL(`${process.cwd()}/lib/fm-operational-input.ts`).href}?input=${Date.now()}`);
 
-// Registration is gated on config/calm at load (see fm-calm.ts's file header); this
-// fixture has no config/calm file, so nothing is registered yet. Every render-
-// equivalence assertion below needs the wrapped definitions the way a user who kept
-// Calm on across a previous session would already have them, so force that here via
-// the same /calm command path a real activation uses, then round-trip back off so the
-// rest of this fixture's own off/on toggle sequence still observes its usual starting
-// state. This does not touch the calm-off/toggle-on assertions further down: those
-// exercise activateBuiltInsIfNeeded's own contested-name skip and warning through the
-// dedicated fixture below, not this one.
-const earlyActivationUi = {
-  getEditorText: () => "",
-  getToolsExpanded: () => false,
-  onTerminalInput: () => () => {},
-  setHiddenThinkingLabel() {},
-  setStatus() {},
-  setToolsExpanded() {},
-  setWorkingVisible() {},
-  notify() {},
-};
-await calmCommand.handler("", { ui: earlyActivationUi });
-await calmCommand.handler("", { ui: earlyActivationUi });
-
-const names = tools.map((tool) => tool.name);
-const expectedNames = ["read", "bash", "edit", "write", "grep", "find", "ls"];
-if (JSON.stringify(names) !== JSON.stringify(expectedNames)) {
-  throw new Error(`unexpected wrapped built-ins: ${names.join(",")}`);
+if (tools.length !== 0) {
+  throw new Error(`Calm registered tools instead of only hiding their rows: ${tools.map((tool) => tool.name).join(",")}`);
 }
 if (!calmCommand || !handlers.has("session_start")) {
   throw new Error("calm command or session lifecycle handler was not registered");
@@ -1333,22 +1274,21 @@ const cases = [
 const renderUi = { requestRender() {} };
 const rows = [];
 for (const [name, args, result] of cases) {
-  const wrapped = tools.find((tool) => tool.name === name);
   const baseline = new ToolExecutionComponent(name, `baseline-${name}`, args, { showImages: false }, stockDefinitions[name](process.cwd()), renderUi, process.cwd());
-  const actual = new ToolExecutionComponent(name, `wrapped-${name}`, args, { showImages: false }, wrapped, renderUi, process.cwd());
+  const actual = new ToolExecutionComponent(name, `calm-${name}`, args, { showImages: false }, stockDefinitions[name](process.cwd()), renderUi, process.cwd());
   for (const row of [baseline, actual]) {
     row.markExecutionStarted();
     row.setArgsComplete();
     row.updateResult(result);
   }
-  const collapsedExpected = baseline.render(100);
+  const collapsedExpected = stockRender.call(baseline, 100);
   const collapsedActual = actual.render(100);
   if (JSON.stringify(collapsedActual) !== JSON.stringify(collapsedExpected)) {
     throw new Error(`${name} collapsed rendering changed while calm mode was off`);
   }
   baseline.setExpanded(true);
   actual.setExpanded(true);
-  const expandedExpected = baseline.render(100);
+  const expandedExpected = stockRender.call(baseline, 100);
   const expandedActual = actual.render(100);
   if (JSON.stringify(expandedActual) !== JSON.stringify(expandedExpected)) {
     throw new Error(`${name} expanded rendering changed while calm mode was off`);
@@ -1439,7 +1379,7 @@ const imageRow = new ToolExecutionComponent(
   "read-image-row",
   { path: "pixel.png" },
   { showImages: true },
-  tools.find((tool) => tool.name === "read"),
+  stockDefinitions.read(process.cwd()),
   renderUi,
   process.cwd(),
 );
@@ -1650,7 +1590,7 @@ async function assertStockHtmlRendering(command, submitData) {
   editorText = command;
   terminalInputHandler(submitData);
   const htmlRenderer = createToolHtmlRenderer({
-    getToolDefinition: (name) => tools.find((tool) => tool.name === name),
+    getToolDefinition: (name) => tools.find((tool) => tool.name === name) ?? stockDefinitions[name]?.(process.cwd()),
     theme,
     cwd: process.cwd(),
   });
@@ -1685,7 +1625,7 @@ const unmatchedRenderer = createToolHtmlRenderer({
   theme,
   cwd: process.cwd(),
 });
-if (unmatchedRenderer.renderCall("unmatched-submit", "grep", { pattern: "alpha", path: "." })) {
+if (unmatchedRenderer.renderCall("unmatched-submit", "fm_watch_arm_pi", watchArgs)) {
   throw new Error("ordinary non-submit input activated HTML export rendering");
 }
 editorText = "";
@@ -1696,12 +1636,8 @@ for (const { name, actual } of rows) {
     throw new Error(`${name} left residual tool rows while calm mode was on: ${JSON.stringify(rendered)}`);
   }
 }
-const calmImageOutput = imageRow.render(100).join("\n");
-if (!calmImageOutput.includes("\x1b]1337;File=")) {
-  throw new Error("calm mode hid the disclosed built-in read image boundary");
-}
-if (calmImageOutput.includes("pixel.png")) {
-  throw new Error("calm mode left the built-in read call shell beside the disclosed image output");
+if (JSON.stringify(imageRow.render(100)) !== JSON.stringify(imageVisibleBefore)) {
+  throw new Error("calm mode changed a built-in read row that carries an image instead of leaving that row stock");
 }
 if (!customRow.render(100).join("\n").includes("CUSTOM_CALL")) {
   throw new Error("calm mode incorrectly claimed or applied generic custom-tool coverage");
@@ -1743,7 +1679,7 @@ if (!legacyOperationalComponent.render(100).join("\n").includes("legacy presenta
   throw new Error("turning Calm off did not restore the supported legacy operational row");
 }
 for (const { name, baseline, actual } of rows) {
-  if (JSON.stringify(actual.render(100)) !== JSON.stringify(baseline.render(100))) {
+  if (JSON.stringify(actual.render(100)) !== JSON.stringify(stockRender.call(baseline, 100))) {
     throw new Error(`${name} did not restore the expanded standard renderer`);
   }
 }
@@ -1785,16 +1721,6 @@ for (const reason of ["startup", "new", "resume", "fork", "reload"]) {
 }
 await calmCommand.handler("", commandContext);
 
-const readWrapper = tools.find((tool) => tool.name === "read");
-const originalRead = createReadToolDefinition(process.cwd());
-const executeContext = { cwd: process.cwd() };
-const [originalResult, wrappedResult] = await Promise.all([
-  originalRead.execute("original-read", { path: "sample.txt" }, undefined, undefined, executeContext),
-  readWrapper.execute("wrapped-read", { path: "sample.txt" }, undefined, undefined, executeContext),
-]);
-if (JSON.stringify(wrappedResult) !== JSON.stringify(originalResult)) {
-  throw new Error("calm wrapper changed built-in read execution or result data");
-}
 JS
   status=$?
   out=$(cat "$output_file")
@@ -1820,6 +1746,7 @@ test_calm_mid_turn_working_notes() {
   mkdir -p "$fixture/home" "$fixture/lib" "$fixture/node_modules/@earendil-works"
   cp "$EXT" "$fixture/fm-calm.ts"
   cp "$ASSISTANT_LAYOUT" "$fixture/lib/fm-calm-assistant-layout.ts"
+  cp "$TOOL_LAYOUT" "$fixture/lib/fm-calm-tool-layout.ts"
   cp "$PRESERVATION" "$fixture/lib/fm-calm-preservation.ts"
   cp "$OPERATIONAL_USER_LAYOUT" "$fixture/lib/fm-calm-operational-user-layout.ts"
   cp "$PENDING_OPERATIONAL_LAYOUT" "$fixture/lib/fm-calm-pending-operational-layout.ts"
@@ -2077,9 +2004,9 @@ for (const persisted of ["on\n", "max\n", "max"]) {
   ui.setHiddenThinkingLabel(undefined);
   requireVisible("midTurn", "MIDTURN_WORKING_NOTE", "scrambled live state");
   calm = await loadCalmExtension();
-  if (calm.registeredTools.length !== 7) {
+  if (calm.registeredTools.length !== 0) {
     throw new Error(
-      `a session restored from ${JSON.stringify(persisted)} claimed ${calm.registeredTools.length} built-in tools instead of 7`,
+      `a session restored from ${JSON.stringify(persisted)} claimed ${calm.registeredTools.length} tools instead of none`,
     );
   }
   for (const reason of ["startup", "resume", "new", "fork", "reload"]) {
@@ -2127,6 +2054,7 @@ test_operational_followup_turn_e2e() {
   fm_git_init_commit "$project"
   cp "$EXT" "$project/.pi/extensions/fm-calm.ts"
   cp "$ASSISTANT_LAYOUT" "$project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
+  cp "$TOOL_LAYOUT" "$project/.pi/extensions/lib/fm-calm-tool-layout.ts"
   cp "$PRESERVATION" "$project/.pi/extensions/lib/fm-calm-preservation.ts"
   cp "$OPERATIONAL_USER_LAYOUT" "$project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
   cp "$PENDING_OPERATIONAL_LAYOUT" "$project/.pi/extensions/lib/fm-calm-pending-operational-layout.ts"
@@ -2496,6 +2424,7 @@ test_queued_operational_escape_e2e() {
   fm_git_init_commit "$project"
   cp "$EXT" "$project/.pi/extensions/fm-calm.ts"
   cp "$ASSISTANT_LAYOUT" "$project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
+  cp "$TOOL_LAYOUT" "$project/.pi/extensions/lib/fm-calm-tool-layout.ts"
   cp "$PRESERVATION" "$project/.pi/extensions/lib/fm-calm-preservation.ts"
   cp "$OPERATIONAL_USER_LAYOUT" "$project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
   cp "$PENDING_OPERATIONAL_LAYOUT" "$project/.pi/extensions/lib/fm-calm-pending-operational-layout.ts"
@@ -2700,6 +2629,7 @@ test_hidden_block_geometry_e2e() {
   fm_git_init_commit "$project"
   cp "$EXT" "$project/.pi/extensions/fm-calm.ts"
   cp "$ASSISTANT_LAYOUT" "$project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
+  cp "$TOOL_LAYOUT" "$project/.pi/extensions/lib/fm-calm-tool-layout.ts"
   cp "$PRESERVATION" "$project/.pi/extensions/lib/fm-calm-preservation.ts"
   cp "$OPERATIONAL_USER_LAYOUT" "$project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
   cp "$PENDING_OPERATIONAL_LAYOUT" "$project/.pi/extensions/lib/fm-calm-pending-operational-layout.ts"
@@ -2937,6 +2867,7 @@ test_working_ship_geometry_and_lifecycle() {
   mkdir -p "$fixture/home" "$fixture/lib" "$fixture/node_modules/@earendil-works"
   cp "$EXT" "$fixture/fm-calm.ts"
   cp "$ASSISTANT_LAYOUT" "$fixture/lib/fm-calm-assistant-layout.ts"
+  cp "$TOOL_LAYOUT" "$fixture/lib/fm-calm-tool-layout.ts"
   cp "$PRESERVATION" "$fixture/lib/fm-calm-preservation.ts"
   cp "$OPERATIONAL_USER_LAYOUT" "$fixture/lib/fm-calm-operational-user-layout.ts"
   cp "$PENDING_OPERATIONAL_LAYOUT" "$fixture/lib/fm-calm-pending-operational-layout.ts"
@@ -3969,6 +3900,7 @@ test_interactive_terminal_e2e() {
   : > "$project/AGENTS.md"
   cp "$EXT" "$project/.pi/extensions/fm-calm.ts"
   cp "$ASSISTANT_LAYOUT" "$project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
+  cp "$TOOL_LAYOUT" "$project/.pi/extensions/lib/fm-calm-tool-layout.ts"
   cp "$PRESERVATION" "$project/.pi/extensions/lib/fm-calm-preservation.ts"
   cp "$OPERATIONAL_USER_LAYOUT" "$project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
   cp "$PENDING_OPERATIONAL_LAYOUT" "$project/.pi/extensions/lib/fm-calm-pending-operational-layout.ts"
@@ -4199,18 +4131,12 @@ JSON
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
   active_screen_wait=0
   while [ "$active_screen_wait" -lt 120 ]; do
-    # Include scrollback: the built-in tool rows this documented bound keeps visible
-    # (see below) lengthen the transcript enough to push earlier genuine content, such
-    # as the original user prompt, above the plain viewport.
+    # Include scrollback so the retained genuine content is found wherever it scrolled.
     tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S -600 >"$hidden_snapshot"
-    # Wait for the redraw this block actually asserts: the collapsed-thinking adapter
-    # (unconditional, unaffected by the built-in tool gate below) hides, and the
-    # retained genuine rows are back on screen. Built-in tool rows from before this
-    # first-ever activation are a separate, documented exception (see fm-calm.ts's
-    # file header and docs/calm.md): Pi gives no way to re-point an already-rendered
-    # tool row at a definition registered later, so CALM_E2E_OUTPUT and friends stay
-    # on screen through this whole redraw rather than disappearing with it.
+    # Wait for the redraw this block actually asserts: the collapsed-thinking and
+    # built-in tool row adapters hide, and the retained genuine rows are back on screen.
     if ! grep -Fq "Thinking..." "$hidden_snapshot" &&
+      ! grep -Fq "CALM_E2E_OUTPUT" "$hidden_snapshot" &&
       ! grep -Fq "/calm" "$hidden_snapshot" &&
       ! grep -Fq "I will run one command." "$hidden_snapshot" &&
       grep -Fq "FIRSTMATE WATCHER WAKE: can you explain this phrase?" "$hidden_snapshot" &&
@@ -4221,19 +4147,13 @@ JSON
     active_screen_wait=$((active_screen_wait + 1))
   done
   # This session's built-in tool rows (bash/grep/find) were all rendered during the
-  # initial session restore, before Calm's first-ever activation in this session had
-  # claimed any built-in name; they keep their stock presentation for the rest of the
-  # session. This is the captain-accepted, documented bound on the collision fix (see
-  # fm-calm.ts's file header and docs/calm.md): the alternative was letting Calm
-  # silently disable a differently loaded extension's own bash/read/etc override. A
-  # fresh built-in tool call made after this same activation does hide correctly;
-  # that path is covered by this file's own test_calm_activation_collision_and
-  # _regression_bound against real Pi rendering components, not repeated here.
-  assert_contains "$(cat "$hidden_snapshot")" "CALM_E2E_OUTPUT" "a pre-activation built-in tool row unexpectedly hid; the documented bound regressed"
+  # initial session restore, before Calm's first activation; the tool-row adapter hides
+  # them retroactively because it acts on the row, not on a tool registered later.
+  assert_not_contains "$(cat "$hidden_snapshot")" "CALM_E2E_OUTPUT" "/calm left a bash row drawn before the toggle in the transcript"
   assert_not_contains "$(cat "$hidden_snapshot")" "calm transcript" "/calm added a persistent Calm status row"
   [ "$(cat "$home/config/calm")" = on ] || fail "/calm did not persist its active choice"
-  assert_contains "$(cat "$hidden_snapshot")" "CALM_EXPORT_GREP" "a pre-activation grep row unexpectedly hid; the documented bound regressed"
-  assert_contains "$(cat "$hidden_snapshot")" "CALM_EXPORT_FIND" "a pre-activation find row unexpectedly hid; the documented bound regressed"
+  assert_not_contains "$(cat "$hidden_snapshot")" "CALM_EXPORT_GREP" "/calm left a grep row drawn before the toggle in the transcript"
+  assert_not_contains "$(cat "$hidden_snapshot")" "CALM_EXPORT_FIND" "/calm left a find row drawn before the toggle in the transcript"
   assert_not_contains "$(cat "$hidden_snapshot")" "Thinking..." "/calm left collapsed thinking labels in the transcript"
   assert_not_contains "$(cat "$hidden_snapshot")" "fm_watch_arm_pi" "/calm left the Firstmate watcher tool call shell in the transcript"
   assert_not_contains "$(cat "$hidden_snapshot")" "watcher: started Pi extension arm child" "/calm left the Firstmate watcher tool result in the transcript"
@@ -4459,9 +4379,6 @@ JS
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
   active_screen_wait=0
-  # CALM_E2E_OUTPUT is not a useful redraw signal here: it is the pre-activation
-  # bash row covered by the documented bound above, so it never leaves the screen
-  # again this session regardless of this toggle.
   while [ "$active_screen_wait" -lt 120 ]; do
     tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$working_snapshot"
     if ! grep -Fq "/calm" "$working_snapshot" &&
@@ -4823,8 +4740,8 @@ test_pi_compat_no_upper_bound
 test_pi_compat_degraded_adapter
 test_pi_compat_missing_adapter_exports
 test_queued_operational_rows
-test_builtin_gate_load_time
-test_calm_activation_collision_and_regression_bound
+test_calm_registers_no_tools
+test_calm_tool_rows_beside_foreign_owner
 test_rendering_and_session_lifecycle
 test_calm_mid_turn_working_notes
 test_operational_followup_turn_e2e

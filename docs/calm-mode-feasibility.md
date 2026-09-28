@@ -19,17 +19,19 @@ The exported classes used by the adapters (`AssistantMessageComponent` and `Inte
 `tests/fm-calm-pi-extension.test.sh` records the installed Pi version as evidence without gating on it and covers both newer synthetic versions and an unavailable adapter seam.
 This host tracks Pi latest, so the version the evidence is pinned to moves; the [2026-09-07 record](#2026-09-07-pi-0851-renderer-and-export-dom-verification) owns the currently pinned version and the renderer comparison behind it.
 
-### Built-in tool override constraints
+### Built-in tool ownership constraints
 
-[`calm.md`](calm.md#pi-compatibility) owns the current user-facing collision behavior and limitation.
-Inspection of Pi 0.80.10 and 0.82.0 established that extensions override a built-in tool by registering the same name, the first registered extension wins the complete `ToolDefinition` without merging, and Pi exposes no unregister operation.
-Pi loads project-local extensions before global or CLI-configured extensions, so Firstmate's tracked Calm extension previously won those collisions even when its persisted preference was off.
-The losing definition's execution and render functions are both discarded, so unconditionally registering Calm's wrappers would replace another extension's same-named tool rather than changing presentation alone.
-
-Pi's `getAllTools()` exposes tool metadata and source identity but not the executable or rendering functions needed to wrap another extension's full definition.
-It is also usable for reliable collision detection only after extension binding, which makes it suitable for the first same-session `/calm` activation but not for synchronous extension loading.
-Deferring registration to `session_start` is not an equivalent path: Pi constructs restored tool rows from an earlier tool-registry snapshot during reload, new-session, fork, and session switching, so those rows retain the definition captured before `session_start`.
-`tests/fm-calm-pi-extension.test.sh` covers the resulting split contract: no load-time claims while Calm is off, synchronous claims while it is already on, collision-checked first activation with a warning, preservation of a contested tool's execution, and the non-retroactive bound for rows rendered before first activation.
+[`calm.md`](calm.md#built-in-tool-ownership) owns the current user-facing behavior.
+An extension overrides a built-in tool by registering the same name, the first extension in Pi's load order wins the complete `ToolDefinition` without merging, and Pi exposes no unregister operation.
+Pi loads project-local extensions before global ones, so Calm's tracked extension always outranks a user's global override of the same name.
+The losing definition's execution and render functions are both discarded, so registering Calm's own wrappers would replace another extension's same-named tool rather than changing presentation alone.
+Pi's `getAllTools()` exposes tool metadata and source identity but not the executable or rendering functions needed to wrap another extension's definition.
+Pi 0.82.0 and later also record any load-time same-name registration by two extensions as a startup error, and Pi 0.84.1 and 0.87.1 exit with `Failed to load extension ".../<other>.ts": Tool "bash" conflicts with .../fm-calm.ts` before the session opens.
+A registration made after load, such as from a command handler, is not conflict-checked, which is why an ownership-based design warned on the first toggle and refused to start on the next launch.
+Calm therefore registers no tool.
+Every tool row, live or restored, is one `ToolExecutionComponent` whose `render(width)` returns its lines, so the built-in tool row adapter hides the seven built-in rows there whichever extension owns the tool.
+Pi's HTML export renders tools from their definitions and never reaches that method.
+`tests/fm-calm-pi-extension.test.sh` covers the row hiding beside a foreign `bash` owner with real Pi components, and `tests/fm-calm-pi-foreign-tool-owner-live-e2e.test.sh` proves the behavior in a real Pi session.
 
 ## Pi 0.81.1 end-to-end reproduction
 
@@ -205,7 +207,7 @@ Every tool registered or supplied by Firstmate under `.pi/extensions` has this d
 
 | Tool | Registration surface | Calm disposition |
 | --- | --- | --- |
-| `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls` | Calm wrappers for Pi's seven main-session built-ins | Their call and text-result shells hide while Calm is active; ordinary and stock export rendering delegate to Pi's original renderers. |
+| `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls` | Pi's seven main-session built-ins, or another extension's override of one | Calm registers none of them; the built-in tool row adapter hides their rows while Calm is active, and Pi's own or the owning extension's renderers and execution are untouched. |
 | `fm_watch_arm_pi` | Main-session custom tool in `fm-primary-pi-watch.ts` | Its complete self-rendered shell hides while Calm is active and returns unchanged when Calm is off or stock export rendering is active. |
 | `fm_branch_outcomes` | Main-session custom tool in `fm-branch-supervision.ts` | Its complete self-rendered shell hides while Calm is active; when visible, the self-renderer reconstructs Pi's ordinary boxed fallback shell and probes Pi's rendered stock fallback to preserve that installed surface's collapsed or all-line output policy plus expanded state, while stock export rendering deliberately falls through to Pi's structured fallback. |
 | `fm_branch_processed` | Main-session custom tool in `fm-branch-supervision.ts` | Its complete self-rendered shell hides while Calm is active, exactly like `fm_branch_outcomes`; when visible, the self-renderer reconstructs Pi's ordinary boxed fallback shell around the one-line acknowledgement result, while stock export rendering deliberately falls through to Pi's structured fallback. |
@@ -226,9 +228,9 @@ The test fixture enumerates every class below through the centralized policy, an
 | `genuine-agent-response` | Assistant text in `AssistantMessageComponent` | Visible. |
 | `assistant-working-note` | Assistant text in an `AssistantMessageComponent` message the model did not end its response with, identified by its own `stopReason` of `toolUse`, or of `length` with tool calls present | Each settled text block follows the cross-harness preservation contract in [`calm.md`](calm.md); hidden blocks are removed from the shallow presentation copy before layout, a `toolUse` message carrying only short narration occupies zero rows (verified on Pi 0.84.1), and a still-streaming `pending` message is never filtered. |
 | `assistant-thinking` | Thinking content in `AssistantMessageComponent` | Collapsed reasoning is removed from the shallow presentation copy before layout and occupies zero rows; explicit expansion renders the original reasoning. |
-| `assistant-tool-call` | `ToolExecutionComponent` | Seven built-ins, `fm_watch_arm_pi`, and `fm_branch_outcomes` hidden; other arbitrary custom tools remain an unsupported boundary. |
+| `assistant-tool-call` | `ToolExecutionComponent` | Seven built-ins (whichever extension owns them), `fm_watch_arm_pi`, and `fm_branch_outcomes` hidden; other arbitrary custom tools remain an unsupported boundary. |
 | `tool-result` | `ToolExecutionComponent` | Text results for the controlled tools hidden; other arbitrary custom results remain an unsupported boundary. |
-| `tool-image` | Image children appended outside tool renderer slots | Unsupported boundary; remains visible. |
+| `tool-image` | Image children appended outside tool renderer slots | Unsupported boundary; a built-in tool row that carries an image remains fully visible. |
 | `user-bash` | `BashExecutionComponent` for `!` and `!!` | Unsupported boundary; remains visible. |
 | `skill-invocation` | `SkillInvocationMessageComponent` plus parsed user text | Unsupported boundary; remains visible. |
 | `custom-message` | `CustomMessageComponent` when `display` is true | The session-start nudge and legacy Calm context messages use `display: false`; arbitrary extension messages remain an unsupported boundary. |
@@ -299,7 +301,7 @@ The same real-Pi reproduction then delivered the notification exactly once in a 
 
 ## Regression coverage
 
-`tests/fm-calm-pi-extension.test.sh` compares wrapped and stock renderers and verifies all seven built-ins plus `fm_watch_arm_pi`; `tests/fm-pi-branch-extension.test.sh` verifies `fm_branch_outcomes` Calm toggling, capability-probed all-line versus collapsed stock output, exact expanded output, and export rendering.
+`tests/fm-calm-pi-extension.test.sh` compares Calm-off rows against Pi's stock layout and verifies all seven built-ins plus `fm_watch_arm_pi`, including a `bash` row whose tool another extension owns; `tests/fm-pi-branch-extension.test.sh` verifies `fm_branch_outcomes` Calm toggling, capability-probed all-line versus collapsed stock output, exact expanded output, and export rendering.
 Together they exercise redraw of already-rendered tool, thinking, current operational-user, and legacy synthetic rows, and cover every policy class.
 It covers persisted preference restoration across every session-start reason and a real restart, proves the working-ship presentation and Calm-off stock `Working...` row through a delayed deterministic provider, asserts no Calm status row, verifies operational messages remain exact ordinary user-role session entries and complete exports, and drives genuine 100 by 44, 160 by 36, and 180 by 44 terminal fixtures.
 A native deterministic `/skill:ahoy` turn produces thinking, tool-call, and tool-result blocks, asserts that the collapsed skill-to-final gap equals the two-row visible-only baseline, expands and re-collapses original thinking, restores Calm-off rendering, verifies persisted hidden history, and repeats the geometry assertion after restart with `terminal.clearOnShrink` explicitly off.
@@ -307,6 +309,7 @@ The operational provider path covers Calm loaded on, loaded off, default prefere
 It asserts one persisted and rendered captain answer, exact user-role operational envelopes in order, no replacement custom messages, one processing result, zero operational transcript rows, and the two-row neighboring-assistant geometry for live, adjacent, and restart paths.
 Quoted current markers, ASCII-only labels, ordinary text before a marker, unrelated U+2063 placement, and image-bearing input remain visible in component and native transcript checks.
 Queued-row coverage drives Pi's real listing and restore methods over a stand-in session for each capability-check branch, including a hidden row kept when the classifier cannot answer again and a refused continuation that re-queues instead of dropping, and repeats Escape in a real Pi TUI with Calm on, with a captain message queued beside the notification, and with Calm off.
+`tests/fm-calm-pi-foreign-tool-owner-live-e2e.test.sh` is the default-on, token-free guard that starts a real Pi with Calm on beside a global extension that owns `bash`, hides that row on the first `/calm` with no warning, and checks the other extension keeps owning the tool.
 `tests/fm-calm-pi-queue-retention-live-e2e.test.sh` is the default-on, token-free guard that probes a running Pi session for every member the check requires and fails naming the installed Pi version.
 `tests/fm-pi-primary-live-e2e.test.sh` also proves the working ship replaces the built-in `Working...` row while Calm is active on the credentialed provider path, and that it clears when the run settles, before continuing its ordinary watcher lifecycle.
 `tests/fm-pi-primary-types.test.sh` performs strict no-emit TypeScript checking against whichever Pi declarations are installed, without pinning a version of its own.
@@ -322,6 +325,7 @@ tests/fm-pi-branch-extension.test.sh
 FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh
 tests/fm-pi-primary-types.test.sh
 tests/fm-calm-pi-queue-retention-live-e2e.test.sh
+tests/fm-calm-pi-foreign-tool-owner-live-e2e.test.sh
 tests/fm-calm-claude-mod.test.sh
 tests/fm-calm-claude-mod-plugin.test.sh
 FM_CLAUDE_CALM_LIVE_E2E=1 tests/fm-calm-claude-mod-live-e2e.test.sh
@@ -670,6 +674,26 @@ not ok - Pi 0.87.1 lacks the queue-retention capability Calm needs to hide queue
 ```
 
 With the queued-row adapter left uninstalled, the real-Pi Escape case failed on the listed notification, `Pi Calm listed a queued Firstmate notification`.
+
+## 2026-09-28 Pi 0.87.1 foreign built-in tool owner verification
+
+Calm previously claimed the seven built-in tool names by registering same-name tools.
+With the global `sandbox` extension, which registers `bash` even when its sandbox is disabled, that produced `Warning: Firstmate Calm: the "bash" built-in tool is already provided by another extension` on the first `/calm` and left `bash` rows visible, and it made Pi refuse to start while Calm was already on.
+The row adapter in `.pi/extensions/lib/fm-calm-tool-layout.ts` replaced that registration.
+
+```sh
+$ pi --version
+0.87.1
+$ tests/fm-calm-pi-foreign-tool-owner-live-e2e.test.sh
+ok - Pi 0.87.1 starts with Calm already on beside a foreign extension that owns bash
+ok - Calm on hides the bash row of a foreign bash owner and the read row
+ok - Calm registers no built-in tool: the foreign extension keeps bash and Pi keeps read
+ok - The first /calm collapses rows already on screen and shows no ownership warning
+ok - Turning Calm off restores the bash and read rows
+```
+
+Against the previous implementation the same guard fails at its first step with Pi's own `Failed to load extension ".../foreign-bash.ts": Tool "bash" conflicts with .../fm-calm.ts` and exit status 1.
+The seams the adapter needs, the exported `ToolExecutionComponent` with its `toolName` and `imageComponents` members and `render(width)`, are present in the 0.81.1, 0.84.1, 0.85.1, and 0.87.1 packages inspected.
 
 ## 2026-09-15 Claude Code 2.1.272 mods feasibility and the shipped mod
 

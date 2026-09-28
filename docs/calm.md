@@ -65,7 +65,7 @@ Calm hides these rows:
 
 - Collapsed thinking labels.
 - The mid-turn assistant working-note blocks governed by the [shared preservation rule](#shared-preservation-rule-for-assistant-text) above.
-- The shells for the Pi built-in tool names Calm owns.
+- The rows for Pi's seven built-in tools (`read`, `bash`, `edit`, `write`, `grep`, `find`, and `ls`), whichever extension owns the tool.
 - The `fm_watch_arm_pi` and `fm_branch_outcomes` tool shells.
 - Canonically classified Firstmate operational user rows.
 
@@ -92,8 +92,8 @@ Inputs held behind a running compaction stay there until Pi sends them after com
 
 ### What stays unchanged on Pi
 
-Outside Pi's same-name built-in override collision described in [Pi compatibility](#pi-compatibility) below, Calm changes presentation only.
-Calm's built-in wrappers preserve Pi's execution behavior.
+Calm changes presentation only.
+It registers no tool and never touches how a tool executes.
 Input delivery, ordering, model context, session storage, diagnostics, and `/export` and `/share` operation remain unchanged.
 Every hidden Firstmate input remains available to the model and in serialized session data and exported artifacts.
 Legacy operational custom messages remain in session data and Pi's sidebar tree, although the main HTML transcript may omit them.
@@ -105,7 +105,7 @@ Pi's supported presentation API does not expose a global transcript filter.
 These rows remain visible:
 
 - Expanded reasoning and its reserved spacing.
-- Built-in tool images.
+- Built-in tool rows that carry an image.
 - User-bash rows.
 - Skill and summary rows.
 - Generic status notices.
@@ -120,7 +120,7 @@ These are supported-API boundaries rather than hidden-content failures.
 Calm has no numeric Pi version minimum or maximum.
 It never refuses Pi solely because its version is newer than a previously verified version.
 
-When Calm loads, the collapsed-thinking, operational-user-row, and queued-operational-row presentation adapters probe the exact Pi API seam they patch.
+When Calm loads, the collapsed-thinking, built-in-tool-row, operational-user-row, and queued-operational-row presentation adapters probe the exact Pi API seam they patch.
 If Pi removes one of those seams, Calm logs a diagnostic naming the unavailable adapter and skips only that adapter.
 `/calm`, the other adapters, and unrelated Pi extensions remain available.
 
@@ -131,25 +131,14 @@ Calm checks them for each session on its first queued-listing draw, before hidin
 A session missing any of them keeps its queued rows and Escape exactly as stock, and shows one warning.
 In that case `tests/fm-calm-pi-queue-retention-live-e2e.test.sh` fails naming the installed Pi version.
 
-### Built-in tool override collisions
+### Built-in tool ownership
 
-Calm's built-in tool presentation (`bash`, `read`, `edit`, `write`, `grep`, `find`, `ls`) shares Pi's single, unmerged override slot per name with any other extension that overrides the same tool.
-How Calm handles that shared slot depends on whether Calm was already on when the session started or reloaded.
-
-**Session started with Calm off**
-
-- While the persisted Calm preference is off, Calm registers none of those overrides and therefore contests no built-in tool name.
-- The first time Calm turns on in a session that started off, it claims every built-in name no other extension already owns.
-- It leaves every contested tool intact and callable, and displays a prominent warning naming the tools it skipped.
-- Tool-call rows already on screen before that first toggle do not retroactively collapse.
-- Later rows for the names Calm claimed use Calm presentation.
-
-**Session started or reloaded with Calm already on**
-
-- Calm must instead register all seven overrides synchronously so Pi can render restored rows with them.
-- Pi provides no ownership check early enough for that load-time path, and the first registrant wins the complete tool definition.
-- If the other extension wins, a session-start console diagnostic names the tool and winning extension.
-- If Calm wins, Pi does not expose the losing registration, so the other extension's override is unavailable and cannot be named.
+Pi keeps one unmerged definition per tool name and refuses to start when two extensions register the same name.
+Calm therefore never registers a tool and hides the built-in tool rows at the point Pi draws every tool row.
+Another extension that owns `bash`, `read`, or any other built-in, such as a sandbox or an approval gate, keeps executing and rendering the tool exactly as it did without Calm.
+Calm shows no ownership warning, and Calm on at session start needs no check for such an extension.
+Rows already on screen when Calm turns on collapse at once, and they return when Calm turns off.
+A row that carries an image stays fully visible, because Calm cannot present the image on its own.
 
 ### Owning docs and files
 
@@ -157,6 +146,7 @@ How Calm handles that shared slot depends on whether Calm was already on when th
 - [`configuration.md`](configuration.md#calm-preference-configcalm) owns the persisted preference file and resolution rules.
 - `.pi/extensions/lib/fm-calm-visibility.ts` owns the visibility policy.
 - `.claude/mods/firstmate-calm/lib/fm-calm-preservation.ts` owns the shared substantive mid-turn text rule, which Pi imports through its tracked symlink.
+- `.pi/extensions/lib/fm-calm-tool-layout.ts` owns the built-in tool row adapter.
 - `.pi/extensions/lib/fm-calm-operational-user-layout.ts` owns the zero-height operational-user row adapter.
 - `.pi/extensions/lib/fm-calm-pending-operational-layout.ts` owns the queued-row adapter and its session capability check.
 - `.pi/extensions/lib/fm-calm-working-ship.ts` owns Pi's animated working presentation over the sprite geometry both harnesses share in `.claude/mods/firstmate-calm/lib/fm-calm-working-ship-sprite.ts`.
@@ -168,6 +158,7 @@ tests/fm-calm-pi-extension.test.sh
 tests/fm-pi-branch-extension.test.sh
 tests/fm-pi-primary-types.test.sh
 tests/fm-calm-pi-queue-retention-live-e2e.test.sh
+tests/fm-calm-pi-foreign-tool-owner-live-e2e.test.sh
 FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh
 ```
 
