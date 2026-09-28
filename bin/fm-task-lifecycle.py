@@ -20,7 +20,8 @@ Recovery attempts are counted separately in the same budget, with persistent
 60-second exponential backoff capped at 15 minutes, never resetting attempts.
 Delivery is not execution or progress. Recovery reports coordination failure; it neither holds
 the task for a fabricated dependency nor claims executor receipt or acceptance.
-Only main may mutate through the public entry; existing lease/meta locks own CAS.
+Main owns semantic assessment; explicitly delegated v2 branch patches can change
+only precheck and bounded next_action. Existing lease/meta locks own CAS.
 An open goal without a verified continuation remains due after presentation ack.
 Optional next_action.continuation has exactly one of these observation contracts:
   executor: {type, task_id, execution_generation, handoff_id} OR
@@ -44,6 +45,30 @@ Absent => legacy; invalid/changed brief/execution generation => unknown.
 Semantic disposition is independent of provider/process state and cleanup.
 Usage via fm-task-state.sh:
   lifecycle ID
+  branch-patch ID --expected-revision N --record private.json
+  readback ID
+v2 is an explicit reconcile upgrade preserving v1 fields and coordination.
+MAIN issues delegation {revision,issuer:"main",authority_ref,authority_sha256,
+allowed,edges,expires_at,revoked}; each change advances its revision once and
+clears precheck. Revoke before changing goal/brief/execution. No downgrade.
+Allowed actions: inspect, precheck, steer-same-intent, observe-receipt, handoff.
+Each edge binds target, goal_revision, execution_generation, authority_ref/hash
+and scope (maximum 16). Parent lifecycle binds the source identity.
+Branch patch accepts only delegation_revision, precheck and next_action.
+Precheck {delegation_revision,basis_key,conclusion,checks,summary} records only
+needs-evidence/candidate/conflict/blocked; checks (maximum 64) each have criterion,
+result (present/missing/conflict/not-applicable), evidence [{ref,sha256}].
+Present/not-applicable need evidence; candidate cannot contain missing/conflict.
+Use observe.basis_key, not the routing key; repeat identical patches are no-ops.
+Only MAIN reconcile may accept, against the exact current candidate/evidence.
+Branch generation is the existing wake owner, not a new task scheduler.
+Effect-time readback of original MAIN input receipts (bounded at 16 MiB) fails
+closed on unknown data or unclassified input. No store mirrors that authority.
+Actual send/handoff owners use private effect/bind-inbox/handoff-effect calls
+inside lease/meta critical sections; callers must not pre-mark attempted.
+readback can recover the stable action inbox receipt without re-enqueueing it.
+The first version delegates no interrupt/exit/relaunch. Escalate exact recovery
+requests to MAIN through the existing control owner and its transaction receipt.
   reconcile ID --expected-revision N --record private.json
   action ID --action-id ID --phase attempted|uncertain|confirmed|refused
             [--receipt-ref data/... --receipt-sha256 HASH]
@@ -66,6 +91,8 @@ import subprocess
 import time
 
 SCHEMA = 'fm-task-lifecycle.v1'
+DELEGATED_SCHEMA = 'fm-task-lifecycle.v2'
+PERMISSIONS = {'inspect', 'precheck', 'steer-same-intent', 'observe-receipt', 'handoff'}
 MAX_BYTES = 262144
 MAX_INT = 9007199254740991
 KINDS = {'steer', 'relaunch', 'spawn', 'readback', 'wait', 'decision'}
@@ -187,7 +214,7 @@ class Task:
 
     def validate(self, record, current=True):
         require(isinstance(record, dict), 'record must be an object')
-        require(record.get('schema') == SCHEMA and record.get('task_id') == self.id, 'record identity/schema mismatch')
+        require(record.get('schema') in (SCHEMA, DELEGATED_SCHEMA) and record.get('task_id') == self.id, 'record identity/schema mismatch')
         require(integer(record.get('revision'), 1) and integer(record.get('goal_revision'), 1), 'invalid revision')
         require(record.get('disposition') in ('open', 'accepted', 'archived'), 'invalid disposition')
         require(atom(record.get('execution_generation')), 'missing bound execution generation')
@@ -218,6 +245,7 @@ class Task:
                 require(integer(budget.get('recovery_attempts', 0)) and integer(budget.get('recovery_not_before_ms', 0)), 'invalid recovery pacing')
                 require(budget.get('recovery_reserved') is None or atom(budget['recovery_reserved']), 'invalid recovery reservation')
             require(isinstance(coordination.get('receipt'), dict) and isinstance(coordination.get('receiver'), dict), 'missing native readback receipt')
+        self.validate_delegation(record)
         action = record.get('next_action')
         if action is not None:
             require(isinstance(action, dict) and atom(action.get('id')), 'invalid action identity')
@@ -257,6 +285,234 @@ class Task:
             generation = self.generation()
             require(generation is None or generation == record['execution_generation'], 'stale execution generation')
         return record
+
+    def validate_delegation(self, record):
+        grant, precheck = record.get('delegation'), record.get('precheck')
+        if record['schema'] == SCHEMA:
+            require(grant is None and precheck is None, 'delegation requires explicit v2 upgrade')
+            return
+        if grant is not None:
+            require(isinstance(grant, dict) and set(grant) == {
+                'revision', 'issuer', 'authority_ref', 'authority_sha256', 'allowed',
+                'edges', 'expires_at', 'revoked'}, 'invalid delegation fields')
+            require(integer(grant['revision'], 1) and grant['issuer'] == 'main' and type(grant['revoked']) is bool, 'invalid delegation issuer/revision')
+            require(text(grant['authority_ref'], 4096) and re.fullmatch('[a-f0-9]{64}', str(grant['authority_sha256'])), 'invalid delegation authority')
+            allowed = grant['allowed']
+            require(isinstance(allowed, list) and all(isinstance(x, str) and x in PERMISSIONS for x in allowed) and len(set(allowed)) == len(allowed), 'invalid delegation permissions')
+            stamp(grant['expires_at'])
+            require(isinstance(grant['edges'], list) and len(grant['edges']) <= 16, 'invalid dependency edges')
+            for edge in grant['edges']:
+                require(isinstance(edge, dict) and set(edge) == {'target', 'goal_revision', 'execution_generation', 'authority_ref', 'authority_sha256', 'scope'}, 'invalid dependency edge')
+                require(atom(edge['target']) and edge['target'] != self.id and integer(edge['goal_revision'], 1) and atom(edge['execution_generation']), 'invalid dependency identity')
+                require(text(edge['scope']) and text(edge['authority_ref'], 4096) and re.fullmatch('[a-f0-9]{64}', str(edge['authority_sha256'])), 'invalid dependency authority')
+        if precheck is not None:
+            require(isinstance(precheck, dict) and set(precheck) == {'delegation_revision', 'basis_key', 'conclusion', 'checks', 'summary'}, 'invalid precheck fields')
+            require(grant and precheck['delegation_revision'] == grant['revision'], 'stale precheck delegation')
+            require(re.fullmatch('[a-f0-9]{64}', str(precheck['basis_key'])) and text(precheck['summary']), 'invalid precheck basis')
+            require(precheck['conclusion'] in ('needs-evidence', 'candidate', 'conflict', 'blocked'), 'invalid provisional conclusion')
+            require(isinstance(precheck['checks'], list) and 1 <= len(precheck['checks']) <= 64, 'invalid precheck checks')
+            for check in precheck['checks']:
+                require(isinstance(check, dict) and set(check) == {'criterion', 'result', 'evidence'}, 'invalid criterion fields')
+                require(text(check['criterion']) and check['result'] in ('present', 'missing', 'conflict', 'not-applicable'), 'invalid criterion')
+                require(isinstance(check['evidence'], list) and len(check['evidence']) <= 64, 'invalid criterion evidence')
+                if check['result'] in ('present', 'not-applicable'):
+                    require(check['evidence'], 'present/not-applicable requires bound evidence')
+                for item in check['evidence']:
+                    require(isinstance(item, dict) and set(item) == {'ref', 'sha256'} and text(item['ref'], 4096) and re.fullmatch('[a-f0-9]{64}', str(item['sha256'])), 'invalid precheck evidence')
+            if precheck['conclusion'] == 'candidate':
+                require(all(c['result'] in ('present', 'not-applicable') for c in precheck['checks']), 'candidate still has missing/conflicting evidence')
+
+    def delegated(self, record, permission, revision=None, effect=False):
+        grant = record.get('delegation')
+        require(record['schema'] == DELEGATED_SCHEMA and record['disposition'] == 'open' and grant, 'task is not delegated')
+        require(self.generation() == record['execution_generation'], 'delegated task has no current exact executor identity')
+        require(not grant['revoked'] and stamp(grant['expires_at']) > stamp(now()), 'delegation revoked or expired')
+        require(revision is None or revision == grant['revision'], 'delegation revision conflict')
+        require(permission in grant['allowed'], 'action outside delegation')
+        self.reference(grant['authority_ref'], grant['authority_sha256'])
+        if os.environ.get('FM_SUPERVISION_ACTOR', 'main') == 'branch':
+            pid = os.environ.get('FM_LEASE_HOLDER_PID', '')
+            require(pid.isdigit() and int(pid) > 1 and regular(self.state / '.lock').decode().strip() == pid, 'branch no longer owns the home generation')
+            os.kill(int(pid), 0)
+            scope = json.loads(os.environ.get('FM_BRANCH_TASK_SCOPE', '[]'))
+            require(isinstance(scope, list) and (self.id in scope or scope == ['*']), 'task outside the current branch offer')
+            binding = json.loads(os.environ.get('FM_BRANCH_TASK_BINDINGS', '{}')).get(self.id)
+            require(binding == {'goal_revision': record['goal_revision'], 'brief_sha256': record['brief_sha256'],
+                                'execution_generation': record['execution_generation'], 'delegation_revision': grant['revision']},
+                    'task intent/delegation changed since branch admission')
+        if effect and os.environ.get('FM_SUPERVISION_ACTOR', 'main') == 'branch':
+            require(os.environ.get('FM_BRANCH_INPUT_BARRIER') != '1', 'unclassified user input prevents new effects')
+            self.input_barrier(os.environ.get('FM_BRANCH_MAIN_SESSION_FILE', ''))
+        return grant
+
+    def input_barrier(self, session_file):
+        # Read original input receipts again at effect time. An environment
+        # snapshot alone misses input arriving during a long bash command.
+        path = Path(session_file)
+        require(path.is_absolute(), 'branch effects require the original MAIN input receipt session')
+        st = path.lstat()
+        require(stat.S_ISREG(st.st_mode) and st.st_nlink == 1 and st.st_uid == os.getuid() and st.st_size <= 16777216, 'MAIN input receipt session is unsafe or exceeds bounded readback')
+        entries = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+        by_id = {e['id']: e for e in entries if 'id' in e}
+        chain, seen = [], set()
+        entry = entries[-1] if entries else {}
+        while entry.get('id') and entry.get('id') not in seen:
+            seen.add(entry['id']); chain.append(entry)
+            entry = by_id.get(entry.get('parentId'), {})
+        inputs = {}
+        for entry in reversed(chain):
+            if entry.get('type') == 'custom' and entry.get('customType') == 'fm-continuation-input':
+                value = entry.get('data', {})
+                inputs[value['id']] = value
+        require(not any(not v.get('task') and not v.get('answer') for v in inputs.values()), 'unclassified original input receipt prevents new effects')
+
+    def branch_patch(self, args):
+        record = self.read()
+        require(record and args.expected_revision == record['revision'], 'revision conflict')
+        patch = load(Path(args.record))
+        require(isinstance(patch, dict) and set(patch) <= {'delegation_revision', 'precheck', 'next_action'} and 'delegation_revision' in patch, 'branch patch cannot change semantic ownership')
+        self.delegated(record, 'precheck', patch['delegation_revision'])
+        original = json.dumps(record, sort_keys=True)
+        if 'precheck' in patch:
+            check = patch['precheck']
+            require(check and check.get('basis_key') == self.observe()['basis_key'], 'precheck observation changed')
+            require(check.get('delegation_revision') == patch['delegation_revision'], 'precheck delegation changed')
+            for criterion in check.get('checks', []):
+                for evidence in criterion.get('evidence', []):
+                    self.reference(evidence['ref'], evidence['sha256'])
+            record['precheck'] = check
+        if 'next_action' in patch:
+            action = patch['next_action']
+            old = record.get('next_action')
+            require(not old or old['phase'] in ('confirmed', 'refused'), 'outstanding action requires readback')
+            require(action and action['kind'] in ('steer', 'wait', 'readback', 'decision'), 'branch cannot launch or change execution')
+            self.delegated(record, 'steer-same-intent' if action['kind'] == 'steer' else 'observe-receipt', patch['delegation_revision'], effect=action['kind'] == 'steer')
+            require(action['id'] == f'{self.id}.g{record["goal_revision"]}.a{record["next_action_seq"]}' and action['phase'] == 'prepared' and action['attempts'] == 0, 'new action must be monotonic and prepared')
+            require(not old or old['phase'] != 'refused' or (old['kind'], old['payload_sha256']) != (action['kind'], action['payload_sha256']), 'refused effect budget cannot reset')
+            self.reference(action['payload_ref'], action['payload_sha256'])
+            continuation = action.get('continuation', {})
+            if continuation.get('type') == 'blocker':
+                self.reference(continuation['release_ref'], continuation['release_sha256'])
+            if action['kind'] == 'steer':
+                require(not action.get('continuation'), 'steer receipt belongs to the actual delivery owner')
+            record['next_action'] = action
+            record['next_action_seq'] += 1
+            record['precheck'] = None
+        if json.dumps(record, sort_keys=True) != original:
+            record['revision'] += 1
+            self.write(record)
+        return record
+
+    def handoff_binding(self, args):
+        record = self.read()
+        if not record or record['schema'] != DELEGATED_SCHEMA:
+            require(not args.action_id, 'bound handoff requires v2 source')
+            return None
+        grant = self.delegated(record, 'handoff', effect=True)
+        target = Task(args.target).read()
+        require(target and target['disposition'] == 'open', 'dependency target is not an enrolled open task')
+        edge = next((e for e in grant['edges'] if e['target'] == args.target and e['goal_revision'] == target['goal_revision'] and e['execution_generation'] == target['execution_generation']), None)
+        require(edge, 'dependency edge is not authorized for this target generation')
+        self.reference(edge['authority_ref'], edge['authority_sha256'])
+        action = record.get('next_action')
+        require(action and action['id'] == args.action_id and action['kind'] == 'steer' and action['phase'] == 'prepared', 'handoff requires exact prepared action')
+        keys = ('task_id', 'goal_revision', 'brief_sha256', 'execution_generation')
+        return {'source': {k: record[k] for k in keys}, 'target': {k: target[k] for k in keys},
+                'delegation_revision': grant['revision'], 'action_id': action['id'], 'payload_sha256': action['payload_sha256'],
+                'input_session': os.environ.get('FM_BRANCH_MAIN_SESSION_FILE') if os.environ.get('FM_SUPERVISION_ACTOR') == 'branch' else None}
+
+    def handoff_effect(self, args):
+        raw = regular(Path(args.record))
+        header, sep, body = raw.partition(b'--\n')
+        fields = dict(line.decode().split('=', 1) for line in header.splitlines() if b'=' in line)
+        binding = json.loads(fields.get('lifecycle', 'null'))
+        require(binding and fields.get('from') == self.id and fields.get('target') == args.target, 'missing exact handoff binding')
+        record = self.read()
+        target = Task(args.target).read()
+        for name, actual in (('source', record), ('target', target)):
+            require(actual and actual['disposition'] == 'open' and all(actual.get(k) == v for k, v in binding[name].items()), 'handoff task identity changed')
+        self.delegated(record, 'handoff', binding['delegation_revision'], effect=True)
+        if binding.get('input_session'):
+            self.input_barrier(binding['input_session'])
+        require(digest(body) == binding['payload_sha256'], 'handoff body changed')
+        action = record.get('next_action')
+        require(action and action['id'] == binding['action_id'] and action['payload_sha256'] == binding['payload_sha256'], 'handoff action changed')
+        # Preserve exact executor identity before the irreversible inbox enqueue.
+        # After a crash observe can discover its receipt without a second send.
+        continuation = {'type': 'executor', 'task_id': args.target, 'execution_generation': target['execution_generation'], 'handoff_id': fields['id']}
+        if action['phase'] in ('attempted', 'uncertain', 'confirmed') and action.get('continuation') == continuation:
+            matches = []
+            inbox = self.state / (args.target + '.inbox')
+            for folder in (inbox, inbox / 'handled'):
+                for path in folder.glob('*.msg'):
+                    message = regular(path)
+                    headers, separator, received_body = message.partition(b'--\n')
+                    if ('handoff=' + fields['id']).encode() in headers.splitlines():
+                        require(separator and received_body == body, 'handoff receipt body collision')
+                        matches.append(str(path))
+            require(len(matches) == 1, 'effect receipt absent or conflicting; readback required, no replay')
+            return {'readback': matches[0]}
+        require(action['phase'] == 'prepared', 'handoff effect may have happened; readback required')
+        require(action['attempts'] < action['attempt_limit'] and stamp(action['deadline']) >= stamp(now()), 'handoff budget expired')
+        action['continuation'] = continuation
+        action['phase'] = 'attempted'
+        action['attempts'] += 1
+        record['revision'] += 1
+        self.write(record)
+        return record
+
+    def readback(self, args):
+        record = self.read()
+        require(record, 'no lifecycle to read back')
+        self.delegated(record, 'observe-receipt')
+        action = record.get('next_action')
+        require(action and action['phase'] in ('attempted', 'uncertain'), 'no uncertain action to read back')
+        if not action.get('continuation') and action['kind'] == 'steer':
+            inbox = self.state / (self.id + '.inbox')
+            matches = []
+            for directory in (inbox, inbox / 'handled'):
+                for path in directory.glob('*.msg'):
+                    header = regular(path).partition(b'--\n')[0]
+                    if ('handoff=action.' + action['id']).encode() in header.splitlines():
+                        matches.append(path)
+            require(len(matches) == 1, 'effect receipt absent or conflicting; no replay authorized')
+            args.action_id, args.receipt_ref = action['id'], str(matches[0])
+            return self.bind_inbox(args)
+        return self.observe()
+
+    def bind_inbox(self, args):
+        record = self.read()
+        action = record and record.get('next_action')
+        require(action and action['id'] == args.action_id and action['phase'] in ('attempted', 'uncertain'), 'inbox action binding mismatch')
+        raw = self.reference(args.receipt_ref)
+        header, sep, body = raw.partition(b'--\n')
+        require(sep and digest(body) == action['payload_sha256'] and ('handoff=action.' + action['id']).encode() in header.splitlines(), 'not the exact action inbox receipt')
+        path = Path(args.receipt_ref)
+        require(path.parent in (self.state / (self.id + '.inbox'), self.state / (self.id + '.inbox') / 'handled') and re.fullmatch(r'[0-9]+\.msg', path.name), 'inbox belongs to another task')
+        action['continuation'] = {'type': 'executor', 'task_id': self.id, 'execution_generation': record['execution_generation'], 'inbox_id': path.stem, 'sha256': digest(raw)}
+        action['receipt_ref'] = args.receipt_ref
+        action['receipt_sha256'] = digest(raw)
+        record['revision'] += 1
+        self.write(record)
+        return record
+
+    def effect(self, args):
+        """Called only inside the actual inbox owner's lease/meta critical section.
+
+        attempted is persisted before enqueue. A repeated call is readback only;
+        even a crash before enqueue never licenses an automatic resend.
+        """
+        record = self.read()
+        require(record and record['disposition'] == 'open', 'effect requires an open goal')
+        action = record.get('next_action')
+        require(action and action['id'] == args.action_id and action['kind'] == 'steer', 'effect action identity mismatch')
+        require(action['phase'] == 'prepared', 'effect may have happened; readback required')
+        require(action['payload_sha256'] == args.payload_sha256, 'effect body differs from prepared action')
+        self.reference(action['payload_ref'], action['payload_sha256'])
+        if os.environ.get('FM_SUPERVISION_ACTOR', 'main') == 'branch':
+            self.delegated(record, 'steer-same-intent', effect=True)
+        args.phase = 'attempted'
+        return self.action(args)
 
     def read(self, current=True):
         if not self.path.exists() and not self.path.is_symlink():
@@ -399,6 +655,30 @@ class Task:
         else:
             require('coordination' not in candidate, 'coordination requires an actual native readback receipt')
         self.validate(candidate)
+        grant = candidate.get('delegation')
+        if grant:
+            self.reference(grant['authority_ref'], grant['authority_sha256'])
+            for edge in grant['edges']:
+                self.reference(edge['authority_ref'], edge['authority_sha256'])
+        if prior:
+            old_grant = prior.get('delegation')
+            if old_grant and not old_grant['revoked']:
+                require(all(candidate.get(k) == prior.get(k) for k in ('goal_revision', 'brief_sha256', 'execution_generation')), 'revoke delegation before changing intent')
+                if grant != old_grant:
+                    require(grant and grant['revoked'] and all(
+                        grant.get(k) == old_grant.get(k) for k in old_grant if k not in ('revision', 'revoked')),
+                        'revoke the existing delegation before issuing a replacement')
+            if grant != old_grant:
+                require(grant and grant['revision'] == (old_grant['revision'] + 1 if old_grant else 1), 'delegation revision must advance once')
+                require(candidate.get('precheck') is None, 'new delegation invalidates precheck')
+            if prior['schema'] == DELEGATED_SCHEMA:
+                require(candidate['schema'] == DELEGATED_SCHEMA, 'v2 receipts cannot be downgraded')
+            if candidate['disposition'] == 'accepted' and candidate.get('precheck'):
+                require(candidate['precheck'] == prior.get('precheck'), 'accept only the exact loaded candidate')
+                require(candidate['precheck']['basis_key'] == self.observe()['basis_key'], 'candidate observation is stale')
+                for check in candidate['precheck']['checks']:
+                    for item in check['evidence']:
+                        self.reference(item['ref'], item['sha256'])
         candidate_authority = self.authority_identity(candidate['assessment']['authority_ref'])
         for item in candidate['assessment']['evidence']:
             self.reference(item['ref'], item['sha256'])
@@ -447,6 +727,9 @@ class Task:
     def action(self, args):
         record = self.read()
         require(record is not None, 'no goal assessment')
+        if os.environ.get('FM_SUPERVISION_ACTOR', 'main') == 'branch':
+            self.delegated(record, 'observe-receipt')
+            require(args.operation == 'effect' or args.phase == 'confirmed', 'branch phase requires owner evidence')
         action = record.get('next_action')
         require(action and action['id'] == args.action_id, 'action identity conflict')
         if action['phase'] == args.phase:
@@ -462,6 +745,8 @@ class Task:
             self.reference(args.receipt_ref, args.receipt_sha256)
             action['receipt_ref'] = args.receipt_ref
             action['receipt_sha256'] = args.receipt_sha256
+        if os.environ.get('FM_SUPERVISION_ACTOR', 'main') == 'branch' and args.phase == 'confirmed':
+            require(action.get('continuation', {}).get('type') == 'executor', 'branch confirmation requires actual executor receipt')
         if args.phase == 'confirmed' and action.get('continuation', {}).get('type') == 'executor':
             require(self.observe_executor(action['continuation'])[0] == 'running', 'executor has not acknowledged its exact instruction')
         action['phase'] = args.phase
@@ -562,7 +847,21 @@ class Task:
         key = digest(json.dumps([self.id, record['goal_revision'], record['execution_generation'],
                                  state, reason, observation, record['assessment']['remaining_gap'],
                                  action], sort_keys=True).encode())
-        return {'task_id': self.id, 'state': state, 'reason': reason, 'key': key, 'revision': record['revision']}
+        basis_key = key
+        precheck = record.get('precheck')
+        candidate = bool(precheck and precheck['basis_key'] == basis_key and precheck['conclusion'] in ('candidate', 'conflict', 'blocked'))
+        if candidate and disposition == 'open':
+            state, reason = 'pending', 'preliminary ' + precheck['conclusion'] + ': ' + precheck['summary']
+            key = digest(json.dumps([basis_key, precheck], sort_keys=True).encode())
+        delegated = False
+        try:
+            self.delegated(record, 'inspect')
+            delegated = not candidate
+        except Refusal:
+            pass
+        return {'task_id': self.id, 'state': state, 'reason': reason, 'key': key, 'basis_key': basis_key,
+                'delegated': delegated, 'revision': record['revision']}
+
 
     def init(self):
         prior = self.read()
@@ -590,11 +889,13 @@ class Task:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('operation', choices=('read', 'init', 'reconcile', 'action', 'observe', 'coordinate'))
+    parser.add_argument('operation', choices=('read', 'init', 'reconcile', 'action', 'observe', 'coordinate', 'branch-patch', 'effect', 'bind-inbox', 'handoff-binding', 'handoff-effect', 'readback'))
     parser.add_argument('task')
     parser.add_argument('--expected-revision', type=int)
     parser.add_argument('--record')
     parser.add_argument('--action-id')
+    parser.add_argument('--target')
+    parser.add_argument('--payload-sha256')
     parser.add_argument('--phase', choices=tuple(PHASES))
     parser.add_argument('--receipt-ref')
     parser.add_argument('--receipt-sha256')
@@ -609,6 +910,18 @@ def main():
         elif args.operation == 'coordinate':
             require(integer(args.expected_revision) and args.record, 'coordinate needs revision and receipt record')
             result = task.coordinate(args)
+        elif args.operation == 'branch-patch':
+            result = task.branch_patch(args)
+        elif args.operation == 'readback':
+            result = task.readback(args)
+        elif args.operation == 'handoff-binding':
+            result = task.handoff_binding(args)
+        elif args.operation == 'handoff-effect':
+            result = task.handoff_effect(args)
+        elif args.operation == 'bind-inbox':
+            result = task.bind_inbox(args)
+        elif args.operation == 'effect':
+            result = task.effect(args)
         elif args.operation == 'action':
             result = task.action(args)
         elif args.operation == 'observe':

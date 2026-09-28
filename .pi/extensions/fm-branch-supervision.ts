@@ -92,7 +92,7 @@ import {
 import { Box, Container, fuzzyFilter, Input, SelectList, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { registerFirstmateTool } from "./lib/fm-native-contract.ts";
-import { installTaskContinuation } from "./lib/fm-task-continuation.ts";
+import { installTaskContinuation, type TaskContinuationOffer } from "./lib/fm-task-continuation.ts";
 import { runCommandAsync } from "./lib/fm-async-exec.ts";
 import { classifyFeishuMessage } from "./lib/fm-feishu-native-channel.ts";
 import {
@@ -693,6 +693,13 @@ export default function (pi: ExtensionAPI) {
   // dispatch order, one at a time (the branch runs drain -> handle -> ack
   // serially by design).
   let branchChain: Promise<void> = Promise.resolve();
+  let continuationToolsRemaining: number | null = null;
+  let recordContinuationReceipt: (() => void) | null = null;
+  let branchTaskBindings: Record<string, { goal_revision: number; brief_sha256: string; execution_generation: string; delegation_revision: number }> = {};
+  function taskBinding(record: any) {
+    return { goal_revision: record.goal_revision, brief_sha256: record.brief_sha256,
+      execution_generation: record.execution_generation, delegation_revision: record.delegation?.revision };
+  }
   // Accepted wake turns that have not settled yet. A newly offered iDA result
   // must fall back to main while the branch is busy unless the current live
   // row grant already owns that exact result row; accepting an unclaimed
@@ -1351,6 +1358,16 @@ export default function (pi: ExtensionAPI) {
               isError: true,
             };
           }
+          const binding = branchTaskBindings[task];
+          if (binding) {
+            const current = await runCommandAsync("bash", [join(fmRoot, "bin/fm-task-state.sh"), "lifecycle", task], { env: scriptEnv });
+            const record = current.status === 0 ? JSON.parse(current.stdout) : null;
+            const expiresAt = Date.parse(record?.delegation?.expires_at || "");
+            if (!record || JSON.stringify(taskBinding(record)) !== JSON.stringify(binding) || record.delegation?.revoked ||
+                !Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+              return { content: [{ type: "text", text: "report refused: newer task intent invalidated this branch result" }], details: undefined, isError: true };
+            }
+          }
           const appended = await runOutcomeScript(appendArgs);
           if (!appended.ok) {
             return {
@@ -1465,6 +1482,12 @@ export default function (pi: ExtensionAPI) {
         {
           name: "fm-branch-cache-key",
           factory: (branchPi: ExtensionAPI) => {
+            branchPi.on("tool_call", () => {
+              recordContinuationReceipt?.();
+              if (continuationToolsRemaining !== null && continuationToolsRemaining-- <= 0) {
+                return { block: true, reason: "Continuation tool budget exhausted; report retained responsibility." };
+              }
+            });
             branchPi.on("before_provider_request", (event) => {
               const payload = event.payload;
               // Only providers whose request already carries Pi's default
@@ -1510,7 +1533,7 @@ export default function (pi: ExtensionAPI) {
           // accidental in-shell reassignment fails loudly instead of silently
           // impersonating main. Confused-agent-grade by design; the threat
           // model lives in bin/fm-lease-lib.sh.
-          command: `readonly FM_SUPERVISION_ACTOR FM_LEASE_HOLDER_PID
+          command: `readonly FM_SUPERVISION_ACTOR FM_LEASE_HOLDER_PID FM_BRANCH_INPUT_BARRIER FM_BRANCH_MAIN_SESSION_FILE FM_BRANCH_GENERATION FM_BRANCH_TASK_SCOPE FM_BRANCH_TASK_BINDINGS
 (
 ${context.command}
 )`,
@@ -1518,6 +1541,11 @@ ${context.command}
             ...context.env,
             ...scriptEnv,
             FM_SUPERVISION_ACTOR: "branch",
+            FM_BRANCH_GENERATION: String(branchGeneration),
+            FM_BRANCH_TASK_BINDINGS: JSON.stringify(branchTaskBindings),
+            FM_BRANCH_TASK_SCOPE: JSON.stringify(wakeTaskScope ? [...wakeTaskScope.tasks] : ["*"]),
+            FM_BRANCH_MAIN_SESSION_FILE: continuation.sessionFile() || "",
+            FM_BRANCH_INPUT_BARRIER: continuation.inputBarrier() ? "1" : "0",
             FM_LEASE_HOLDER_PID: leaseHolderPid,
           },
         };
@@ -1731,6 +1759,14 @@ ${context.command}
         const admittedTasks = new Set(admittedSeqs.map((seq) => scope.taskBySeq[seq]).filter(Boolean));
         // Retain exact task obligations before granting branch acknowledgement.
         await continuation.preserve([...admittedTasks]);
+        branchTaskBindings = {};
+        for (const task of admittedTasks) {
+          const file = join(process.env.FM_DATA_OVERRIDE || join(fmHome, "data"), task, "lifecycle.json");
+          if (existsSync(file)) {
+            const record = JSON.parse(readFileSync(file, "utf8"));
+            if (record.schema === "fm-task-lifecycle.v2") branchTaskBindings[task] = taskBinding(record);
+          }
+        }
         const grant = await writeEligibleRowsSnapshot(
           state,
           admittedSeqs,
@@ -1751,6 +1787,7 @@ ${context.command}
           );
         } finally {
           wakeTaskScope = null;
+          branchTaskBindings = {};
         }
         const providerError = settledPromptProviderError(sessionManager, entryOffset);
         if (providerError) {
@@ -1782,6 +1819,87 @@ ${context.command}
       });
     branchChain = delivery.catch(() => {});
     return delivery;
+  }
+
+  // Continuations have canonical lifecycle reservations, never wake queue rows.
+  // Reuse branchChain so these and ordinary wake prompts cannot overlap.
+  function offerTaskContinuation(offer: TaskContinuationOffer): boolean {
+    if (shuttingDown || resetInProgress || afkActive() || branchBroken || !generationOwnsLockSync(generation)) return false;
+    const acceptedGeneration = generation;
+    const selection = branchSelectionRevision;
+    const delivery = branchChain.then(async () => {
+      if (acceptedGeneration !== generation || selection !== branchSelectionRevision ||
+          !(await actingAsOwner(acceptedGeneration))) throw new Error("continuation receiver replaced");
+      const read = await runCommandAsync("bash", [join(fmRoot, "bin/fm-task-state.sh"), "lifecycle", offer.task], { env: scriptEnv });
+      if (read.status !== 0) throw new Error(read.stderr || "continuation lifecycle read refused");
+      const record = JSON.parse(read.stdout);
+      if (["goal_revision", "brief_sha256", "execution_generation"].some((key) => record[key] !== offer.record[key]) ||
+          record.delegation?.revision !== offer.record.delegation?.revision || record.delegation?.revoked ||
+          Date.parse(record.delegation?.expires_at || "") <= Date.now() || record.disposition !== "open") {
+        throw new Error("delegation identity changed before branch receipt");
+      }
+      const branchForTask = await ensureBranch(acceptedGeneration);
+      const { session, sessionManager } = branchForTask;
+      await flushMirror(session, acceptedGeneration);
+      if (!(await actingAsOwner(acceptedGeneration))) throw new Error("continuation receiver lost ownership");
+      const entryId = sessionManager.appendCustomEntry("fm-task-continuation-admission", {
+        task: offer.task, admission: offer.admission, observation: offer.observation,
+        goal_revision: record.goal_revision, delegation_revision: record.delegation.revision,
+        execution_generation: record.execution_generation, generation: acceptedGeneration,
+      });
+      const sessionFile = sessionManager.getSessionFile();
+      if (!sessionFile || !sessionManager.getEntries().some((entry) => entry.id === entryId)) throw new Error("branch admission was not retained");
+      let receipted = false;
+      recordContinuationReceipt = () => {
+        if (receipted) return;
+        // Cold Pi sessions flush only after the first assistant response.
+        // In-memory append is not a durable delivery receipt.
+        if (!existsSync(sessionFile)) return;
+        const entry = readFileSync(sessionFile, "utf8").split("\n").filter(Boolean)
+          .map((line) => JSON.parse(line)).find((entry) => entry.id === entryId);
+        if (entry?.customType !== "fm-task-continuation-admission" || entry.data?.admission !== offer.admission) {
+          throw new Error("branch admission persistence conflict");
+        }
+        offer.delivered({ sessionFile, entryId, generation: acceptedGeneration });
+        receipted = true;
+      };
+      recordContinuationReceipt();
+      const before = durableReportRevision;
+      const entryOffset = sessionManager.getEntries().length;
+      wakeTaskScope = { rows: [], tasks: new Set([offer.task]), token: offer.admission };
+      branchTaskBindings = { [offer.task]: taskBinding(record) };
+      continuationToolsRemaining = 8;
+      const timeout = setTimeout(() => { void session.abort(); }, 120_000);
+      try {
+        await session.prompt(`FIRSTMATE TASK CONTINUATION: ${offer.task}\n` +
+          `Admission ${offer.admission}. This is not a queue wake: do not drain/ack queue rows.\n` +
+          `Read the current lifecycle, durable brief, exact inbox/current state and bounded evidence. ` +
+          `Only the MAIN-issued delegation permits routine actions. Use branch-patch CAS for precheck or a prepared next_action, ` +
+          `fm-send --action-id for its exact body, and existing stable handoff identities for explicit dependency edges. ` +
+          `Read back attempted/uncertain effects; never replay. New input blocks new effects until MAIN routes it. ` +
+          `Do not enroll, spawn, change authority, accept, archive, merge or add a reviewer. ` +
+          `Stop after at most eight tool calls; retain remaining responsibility. ` +
+          `Finish with fm_branch_report: routine for healthy progress, captain only for a candidate, real decision, exhausted blocker or failure.\n` +
+          JSON.stringify({ task: offer.task, goal_revision: record.goal_revision, brief_sha256: record.brief_sha256,
+            execution_generation: record.execution_generation, delegation: record.delegation,
+            observation: offer.observation }));
+        recordContinuationReceipt();
+        if (!receipted) throw new Error("branch admission has no durable receipt");
+      } finally { clearTimeout(timeout); continuationToolsRemaining = null; recordContinuationReceipt = null; branchTaskBindings = {}; wakeTaskScope = null; }
+      const error = settledPromptProviderError(sessionManager, entryOffset);
+      if (error || durableReportRevision <= before) throw new Error(error || "continuation settled without a durable outcome");
+      recordDurableBranchReport(branchForTask.generation, branchForTask.selectionRevision);
+    });
+    branchChain = delivery.catch(async (error) => {
+      // Canonical reservation/budget remains due. Publish the failure through
+      // the existing outcome owner, not a second event queue.
+      if (acceptedGeneration === generation && await actingAsOwner(acceptedGeneration)) {
+        await runOutcomeScript(["append", "--task", offer.task, "--verdict", "captain", "--summary",
+          `Delegated continuation failed; obligation retained: ${String(error).slice(0, 1200)}`]);
+        await enqueueDelivery(() => reconcileWithHealth(acceptedGeneration));
+      }
+    }).catch(() => { /* Native reservation retains responsibility if failure reporting also fails. */ }).finally(offer.settled);
+    return true;
   }
 
   // A model or effort change applies to the next branch turn without waiting
@@ -2787,5 +2905,6 @@ ${context.command}
   // accepted between a helper callback and the main generation transition.
   const continuation = installTaskContinuation(pi, {
     root: fmRoot, home: fmHome, state, owns: () => generationOwnsLockSync(generation),
+    offer: offerTaskContinuation,
   });
 }

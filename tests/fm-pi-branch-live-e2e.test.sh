@@ -42,7 +42,7 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-fm_live_gate opt-in FM_PI_BRANCH_LIVE_E2E npm jq node
+fm_live_gate opt-in FM_PI_BRANCH_LIVE_E2E npm jq node pi python3
 export NODE_NO_WARNINGS=1
 
 PI_PACKAGE_DIR=${FM_PI_PACKAGE_DIR:-"$(npm root -g)/@earendil-works/pi-coding-agent"}
@@ -1561,3 +1561,13 @@ if [ "$status" -ne 0 ] || ! printf '%s\n' "$out" | grep -qx 'FEISHU_MIRROR_OK'; 
   fail "real Pi $PI_VERSION trusted Feishu mirror guard failed: $out"
 fi
 pass "real Pi SDK $PI_VERSION mirrors only provenance-verified Feishu text before idle/streaming branch turns, once and in order across persistence and cold creation"
+
+# The actual Pi host and extension runtime also exercise delegated continuation
+# while an independent MAIN question arrives before the branch settles.
+FM_REAL_ROOT="$ROOT" FM_DELEGATION_HOST_DIR="$TMP_ROOT/delegation-host" \
+  python3 "$ROOT/tests/delegation-host.py" > "$TMP_ROOT/delegation-host-output" 2>&1 || {
+    cat "$TMP_ROOT/delegation-host-output"
+    fail "real Pi delegated continuation host failed"
+  }
+cat "$TMP_ROOT/delegation-host-output"
+pass "real Pi delegated continuation preserves open goals and handles MAIN input concurrently"

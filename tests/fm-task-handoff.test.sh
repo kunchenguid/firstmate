@@ -364,6 +364,154 @@ print('ok - lifecycle: acknowledgement retains debt, CAS rejects false closure/r
 PY
 }
 
+test_delegated_lifecycle_effect_boundaries() {
+  ROOT="$ROOT" CASE_DIR="$TMP_ROOT/delegated" FM_FIXTURE_BACKEND="$(make_fake_backend "$TMP_ROOT/delegated")" python3 - <<'PY'
+import copy, hashlib, json, os, pathlib, shutil, subprocess
+root=pathlib.Path(os.environ['ROOT']);home=pathlib.Path(os.environ['CASE_DIR'])
+(home/'state').mkdir(parents=True);(home/'data').mkdir()
+(home/'state/.lock').write_text(str(os.getpid())+'\n')
+bin=home/'bin';shutil.copytree(root/'bin',bin)
+(bin/'fm-crew-state.sh').write_text('#!/bin/sh\necho "state: working · source: controlled-provider"\n');(bin/'fm-crew-state.sh').chmod(0o755)
+session=home/'main.jsonl';session.write_text('{"type":"session","id":"s"}\n')
+env=dict(os.environ,FM_HOME=str(home),FM_SUPERVISION_ACTOR='main',PI_CODING_AGENT='true',FM_LEASE_HOLDER_PID=str(os.getpid()),FM_BRANCH_MAIN_SESSION_FILE=str(session),FM_BRANCH_GENERATION='1',FM_BRANCH_TASK_SCOPE='["source"]',PATH=os.environ['FM_FIXTURE_BACKEND']+':'+os.environ['PATH'])
+def call(script,*args,ok=True,actor='main',extra=None):
+    current=home/'data/source/lifecycle.json'
+    bindings={}
+    if current.exists():
+        r=json.loads(current.read_text())
+        if r.get('delegation'):bindings={'source':dict(goal_revision=r['goal_revision'],brief_sha256=r['brief_sha256'],execution_generation=r['execution_generation'],delegation_revision=r['delegation']['revision'])}
+    p=subprocess.run([str(bin/script),*args],env=dict(env,FM_SUPERVISION_ACTOR=actor,FM_BRANCH_TASK_BINDINGS=json.dumps(bindings)) | (extra or {}),text=True,capture_output=True,timeout=20)
+    assert (p.returncode==0)==ok,(script,args,p.returncode,p.stdout,p.stderr)
+    return json.loads(p.stdout) if ok and p.stdout.strip().startswith(('{','[')) else p.stdout+p.stderr
+
+def state(op,task='source',*args,**kw):return call('fm-task-state.sh',op,task,*args,**kw)
+def sha(p):return hashlib.sha256(p.read_bytes()).hexdigest()
+def save(name,value):
+    p=home/'data'/name;p.write_text(json.dumps(value));p.chmod(0o600);return str(p)
+def reconcile(r,ok=True):return state('reconcile',r['task_id'],'--expected-revision',str(r['revision']),'--record',save('proposal',r),ok=ok)
+def patch(value,ok=True):
+    r=state('lifecycle');return state('branch-patch','source','--expected-revision',str(r['revision']),'--record',save('patch',dict(delegation_revision=r['delegation']['revision'],**value)),actor='branch',ok=ok)
+def new_action(r,body='Fill the existing acceptance evidence.'):
+    payload=home/'data'/('payload'+str(r['next_action_seq']));payload.write_text(body)
+    return dict(id=f"source.g{r['goal_revision']}.a{r['next_action_seq']}",kind='steer',phase='prepared',expected_execution_generation=r['execution_generation'],attempts=0,attempt_limit=1,recheck_at='2026-01-01T00:00:00Z',deadline='2099-01-01T00:00:00Z',payload_ref=str(payload),payload_sha256=sha(payload),receipt_ref=None)
+for task in ('source','target','legacy'):
+    d=home/'data'/task;d.mkdir();(d/'brief.md').write_text('Implement existing goal and supply exact verification evidence.\n')
+    (home/'state'/f'{task}.meta').write_text(f'window=fixture:w1:p-{task}\nbackend=herdr\nharness=pi\nkind=ship\nexecutor=local-agent\nspawn_gen=g1\n')
+    state('enroll',task)
+call('fm-wake-grant.sh','activate',str(os.getpid()),'1')
+r=state('lifecycle');r['schema']='fm-task-lifecycle.v2';r['precheck']=None
+r['delegation']=dict(revision=1,issuer='main',authority_ref='data/source/brief.md',authority_sha256=sha(home/'data/source/brief.md'),allowed=['inspect','precheck','steer-same-intent','observe-receipt','handoff'],edges=[dict(target='target',goal_revision=1,execution_generation='g1',authority_ref='data/source/brief.md',authority_sha256=sha(home/'data/source/brief.md'),scope='Existing prerequisite evidence only')],expires_at='2099-01-01T00:00:00Z',revoked=False)
+r=reconcile(r)
+# Branch cannot mutate semantic truth or grant itself authority.
+patch({'disposition':'accepted'},ok=False)
+for owner,args in [('fm-control.sh',('source','relaunch')),('fm-teardown.sh',('source',)),('fm-task-retire.sh',('source',))]:
+    call(owner,*args,actor='branch',ok=False)
+assert (home/'state/source.meta').exists()
+state('reconcile','source','--expected-revision',str(r['revision']),'--record',save('proposal',r),actor='branch',ok=False)
+state('enroll','unknown',actor='branch',ok=False)
+check=dict(delegation_revision=1,basis_key=state('observe')['basis_key'],conclusion='needs-evidence',checks=[dict(criterion='brief acceptance',result='missing',evidence=[])],summary='Existing evidence is missing')
+r=patch({'precheck':check});revision=r['revision'];assert patch({'precheck':check})['revision']==revision
+# Exact same-intent steer: denied body, intake barrier and stale generation have zero effects.
+a=new_action(r);r=patch({'next_action':a})
+call('fm-send.sh','source','--action-id',a['id'],'Different body',actor='branch',ok=False)
+call('fm-send.sh','source','--action-id',a['id'],'Fill the existing acceptance evidence.',actor='branch',extra={'FM_BRANCH_TASK_BINDINGS':'{}'},ok=False)
+call('fm-send.sh','source','--action-id',a['id'],'Fill the existing acceptance evidence.',actor='branch',extra={'FM_BRANCH_GENERATION':'old'},ok=False)
+call('fm-send.sh','source','--action-id',a['id'],'Fill the existing acceptance evidence.',actor='branch',extra={'FM_BRANCH_TASK_SCOPE':'["other"]'},ok=False)
+# Expiry is checked at the effect boundary, independently of model judgment.
+expired=copy.deepcopy(r);expired['delegation']['expires_at']='2020-01-01T00:00:00Z';expired['delegation']['revision']+=1;expired['precheck']=None;reconcile(expired,ok=False)
+revoked=copy.deepcopy(r);revoked['delegation']['revision']+=1;revoked['delegation']['revoked']=True;revoked['precheck']=None;r=reconcile(revoked)
+expired=copy.deepcopy(r);expired['delegation']['expires_at']='2020-01-01T00:00:00Z';expired['delegation']['revision']+=1;expired['delegation']['revoked']=False;r=reconcile(expired)
+call('fm-send.sh','source','--action-id',a['id'],'Fill the existing acceptance evidence.',actor='branch',ok=False)
+revoked=copy.deepcopy(r);revoked['delegation']['revision']+=1;revoked['delegation']['revoked']=True;r=reconcile(revoked)
+r['delegation']['expires_at']='2099-01-01T00:00:00Z';r['delegation']['revision']+=1;r['delegation']['revoked']=False;r=reconcile(r)
+
+call('fm-send.sh','source','--action-id',a['id'],'Fill the existing acceptance evidence.',actor='branch',extra={'FM_BRANCH_INPUT_BARRIER':'1'},ok=False)
+session.write_text('{"type":"session","id":"s"}\n'+json.dumps(dict(type='custom',id='i1',parentId=None,customType='fm-continuation-input',data=dict(id='new',text='Change scope')))+'\n')
+call('fm-send.sh','source','--action-id',a['id'],'Fill the existing acceptance evidence.',actor='branch',ok=False)
+assert not (home/'state/source.inbox').exists()
+with session.open('a') as f:f.write(json.dumps(dict(type='custom',id='i2',parentId='i1',customType='fm-continuation-input',data=dict(id='new',text='Change scope',answer='Classified informational input')))+'\n')
+# Inject a process boundary failure after the real enqueue, before receipt binding.
+owner=bin/'fm-task-lifecycle.py';candidate=owner.read_text()
+owner.write_text(candidate.replace("        elif args.operation == 'bind-inbox':", "        elif args.operation == 'bind-inbox':\n            raise Refusal('fixture crash after enqueue')"))
+call('fm-send.sh','source','--action-id',a['id'],'Fill the existing acceptance evidence.',actor='branch',ok=False)
+owner.write_text(candidate)
+assert not state('lifecycle')['next_action'].get('continuation')
+state('readback','source',actor='branch')
+assert len(list((home/'state/source.inbox').glob('*.msg')))==1
+r=state('lifecycle');assert r['next_action']['phase']=='attempted'
+call('fm-send.sh','source','--action-id',a['id'],'Fill the existing acceptance evidence.',actor='branch',ok=False)
+msg=next((home/'state/source.inbox').glob('*.msg'));handled=msg.parent/'handled'/msg.name
+# Durable enqueue is not executor acknowledgement.
+state('action','source','--action-id',a['id'],'--phase','confirmed','--receipt-ref',str(msg),'--receipt-sha256',sha(msg),actor='branch',ok=False)
+msg.rename(handled)
+state('action','source','--action-id',a['id'],'--phase','confirmed','--receipt-ref',str(handled),'--receipt-sha256',sha(handled),actor='branch')
+# Exact provisional candidate remains open and its evidence cannot be silently replaced.
+r=state('lifecycle');basis=state('observe')['basis_key'];evidence=dict(ref=str(handled),sha256=sha(handled))
+check.update(delegation_revision=r['delegation']['revision'],basis_key=basis,conclusion='candidate',checks=[dict(criterion='brief acceptance',result='present',evidence=[evidence])],summary='Ready for MAIN semantic assessment')
+r=patch({'precheck':check});assert r['disposition']=='open' and state('observe')['delegated']==False
+actual=handled.read_bytes();handled.write_bytes(actual+b'changed')
+bad=copy.deepcopy(r);bad['disposition']='accepted';bad['assessment']['remaining_gap']='';reconcile(bad,ok=False)
+handled.write_bytes(actual)
+
+bad=copy.deepcopy(r);bad['goal_revision']+=1;reconcile(bad,ok=False)
+# Revoke preserves receipts/budgets and invalidates the old candidate.
+r['delegation']['revision']+=1;r['delegation']['revoked']=True;r['precheck']=None;r=reconcile(r)
+patch({'precheck':dict(check,delegation_revision=r['delegation']['revision']-1)},ok=False)
+# Explicit renewal and target generation binding for cross-task handoff.
+r['delegation']['revision']+=1;r['delegation']['revoked']=False;r=reconcile(r)
+a=new_action(r,'Deliver authorized prerequisite evidence.');r=patch({'next_action':a})
+call('fm-lease.sh','claim','target','--actor','main')
+call('fm-task-handoff.sh','send','source','target','--id','dependency-one','--action-id',a['id'],'Deliver authorized prerequisite evidence.',actor='branch',ok=False)
+assert not (home/'state/target.inbox').exists()
+# A queued old branch instruction cannot bypass the input barrier when MAIN's
+# lease release automatically retries its original durable handoff.
+with session.open('a') as f:f.write(json.dumps(dict(type='custom',id='i3',parentId='i2',customType='fm-continuation-input',data=dict(id='newer',text='Classify this new intent')))+'\n')
+call('fm-lease.sh','release','target','--actor','main')
+assert not (home/'state/target.inbox').exists()
+with session.open('a') as f:f.write(json.dumps(dict(type='custom',id='i4',parentId='i3',customType='fm-continuation-input',data=dict(id='newer',text='Classify this new intent',answer='Independent informational input')))+'\n')
+call('fm-task-handoff.sh','retry','dependency-one',actor='branch')
+(home/'state/task-handoffs/status/dependency-one.state').unlink()
+call('fm-task-handoff.sh','retry','dependency-one',actor='branch')
+assert len(list((home/'state/target.inbox').glob('*.msg')))==1
+assert state('lifecycle')['next_action']['continuation']['handoff_id']=='dependency-one'
+# A newer execution cannot be reached by an old task-bound request.
+(home/'state/target.meta').write_text((home/'state/target.meta').read_text().replace('spawn_gen=g1','spawn_gen=g2'))
+call('fm-task-handoff.sh','send','source','target','--id','dependency-wrong-generation','--action-id',a['id'],'Deliver authorized prerequisite evidence.',actor='branch',ok=False)
+assert len(list((home/'state/target.inbox').glob('*.msg')))==1
+# v1 remains unenrolled in delegation and ordinary typed/inbox behavior stays independent.
+assert state('lifecycle','legacy')['schema']=='fm-task-lifecycle.v1'
+call('fm-send.sh','legacy','Ordinary v1 steer',actor='branch')
+# Two opposite dependency edges use the actual public handoff owners concurrently.
+# One uncertain effect fences its target until readback; neither retains locks
+# while waiting for the other task, and both immutable bodies survive.
+pair={}
+for name,other in (('cycle-a','cycle-b'),('cycle-b','cycle-a')):
+    d=home/'data'/name;d.mkdir();(d/'brief.md').write_text('Exchange the already authorized prerequisite evidence.')
+    (home/'state'/f'{name}.meta').write_text(f'window=fixture:w1:p-{name}\nbackend=herdr\nharness=pi\nkind=ship\nexecutor=local-agent\nspawn_gen=g1\n')
+    rr=state('enroll',name);rr['schema']='fm-task-lifecycle.v2';rr['precheck']=None
+    rr['delegation']=dict(revision=1,issuer='main',authority_ref=f'data/{name}/brief.md',authority_sha256=sha(d/'brief.md'),allowed=['inspect','precheck','steer-same-intent','observe-receipt','handoff'],edges=[dict(target=other,goal_revision=1,execution_generation='g1',authority_ref=f'data/{name}/brief.md',authority_sha256=sha(d/'brief.md'),scope='Existing prerequisite exchange')],expires_at='2099-01-01T00:00:00Z',revoked=False)
+    payload=d/'payload';payload.write_text('Exact existing evidence from '+name)
+    rr['next_action']=dict(id=name+'.g1.a1',kind='steer',phase='prepared',expected_execution_generation='g1',attempts=0,attempt_limit=1,recheck_at='2026-01-01T00:00:00Z',deadline='2099-01-01T00:00:00Z',payload_ref=str(payload),payload_sha256=sha(payload),receipt_ref=None)
+    rr['next_action_seq']=2;pair[name]=reconcile(rr)
+bindings={name:dict(goal_revision=rr['goal_revision'],brief_sha256=rr['brief_sha256'],execution_generation='g1',delegation_revision=1) for name,rr in pair.items()}
+cycle_env=dict(env,FM_SUPERVISION_ACTOR='branch',FM_BRANCH_TASK_SCOPE=json.dumps(list(pair)),FM_BRANCH_TASK_BINDINGS=json.dumps(bindings))
+children=[]
+for name,other in (('cycle-a','cycle-b'),('cycle-b','cycle-a')):
+    children.append(subprocess.Popen([str(bin/'fm-task-handoff.sh'),'send',name,other,'--id',name+'-edge','--action-id',name+'.g1.a1','Exact existing evidence from '+name],env=cycle_env,text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE))
+for child in children:
+    stdout,stderr=child.communicate(timeout=20);assert child.returncode in (0,6),(stdout,stderr)
+assert sum(c.returncode==0 for c in children)==1
+for name in pair:assert (home/'state/task-handoffs/records'/f'{name}-edge.msg').exists()
+first='cycle-a' if children[0].returncode==0 else 'cycle-b';other='cycle-b' if first=='cycle-a' else 'cycle-a'
+msg=next((home/'state'/f'{other}.inbox').glob('*.msg'));handled=msg.parent/'handled'/msg.name;msg.rename(handled)
+state('action',first,'--action-id',first+'.g1.a1','--phase','confirmed','--receipt-ref',str(handled),'--receipt-sha256',sha(handled))
+call('fm-task-handoff.sh','retry',other+'-edge',actor='branch',extra={'FM_BRANCH_TASK_SCOPE':json.dumps(list(pair)),'FM_BRANCH_TASK_BINDINGS':json.dumps(bindings)})
+for name in pair:call('fm-task-handoff.sh','retry',name+'-edge',actor='branch',extra={'FM_BRANCH_TASK_SCOPE':json.dumps(list(pair)),'FM_BRANCH_TASK_BINDINGS':json.dumps(bindings)})
+assert sum(len(list((home/'state'/f'{name}.inbox').rglob('*.msg'))) for name in pair)==2
+print('ok - delegated lifecycle: semantic ownership, CAS/no-op, intake/body fences, once-only effects, receipt/start, candidate/revoke, dependency identity and cyclic contention')
+PY
+}
+
 test_conflict_preserves_then_delivers_exactly_once
 test_restart_sweep_recovers_pending_handoff
 test_sweep_without_handoffs_is_a_noop
@@ -372,4 +520,5 @@ test_terminal_refusal_is_durable
 test_same_task_send_and_reminder_contract_stay_ordinary
 
 test_continuation_assessment_and_observed_executor || fail "lifecycle behavior regression failed"
+test_delegated_lifecycle_effect_boundaries || fail "delegated lifecycle regression failed"
 printf 'All task-handoff tests passed.\n'
