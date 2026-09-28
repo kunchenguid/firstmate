@@ -1275,7 +1275,9 @@ spawn_abort_cleanup() {
     # A tmux reclaim's fresh window, refused before the record named it. It
     # holds only the shell it was created with, so closing it loses nothing and
     # keeps a retry from tripping over a same-named window.
-    fm_backend_kill tmux "$TMUX_REBIND_ABORT_TARGET" 2>/dev/null || true
+    if ! fm_backend_kill tmux "$TMUX_REBIND_ABORT_TARGET" 2>/dev/null; then
+      echo "warning: could not confirm the replacement window $TMUX_REBIND_ABORT_TARGET was closed after aborted relaunch of $ID" >&2
+    fi
     TMUX_REBIND_ABORT_TARGET=
   fi
   if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] &&
