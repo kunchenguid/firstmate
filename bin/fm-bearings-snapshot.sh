@@ -331,6 +331,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   | ([ .tasks[]
        | select(.kind != "secondmate")
        | select(.retained_record != true)
+       | select(.backlog.state == "in_flight" or .current_state.state == "working"
+           or (.record_disposition == "unknown" and (.hints.open_decisions | length) > 0))
        | select(.backlog.current_role != "program")
        | select(.backlog.current_role != "held" or .current_state.state == "working")
        | {id, kind,
@@ -364,6 +366,21 @@ MODEL=$(printf '%s' "$SNAP" | jq \
          owner:"(main)",
          filed:null}]
      else [] end) as $return_catchup_gate
+  | ([ .tasks[]
+       | select(.kind != "secondmate")
+       | select(((.record_disposition == "unknown" or .record_disposition == "ambiguous")
+                   and (.hints.open_decisions | length) == 0)
+           or ((.record_disposition == "done" or .record_disposition == "archive_done")
+               and .current_state.state == "working"))
+       | {id,
+          title:(if .record_disposition == "ambiguous"
+                 then "execution record matches duplicate current task rows"
+                 elif .record_disposition == "unknown" and .backlog == null
+                 then "execution record has no current or archived task row"
+                 elif .record_disposition == "unknown"
+                 then "task row disposition could not be classified"
+                 else "closed task still has current working evidence" end),
+          blocked_by:"-", reason:"task record integrity", owner:"(main)", filed:null} ]) as $task_record_gates
   | ((if (.main_inventory.valid == false) then
         [{id:"(main-inventory)",
           title:((.main_inventory.reason // "main inventory invalid") | trunc(60)),
@@ -372,6 +389,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
           owner:"(main)",
           filed:null}]
       else [] end)
+     + $task_record_gates
      + [ .backlog.records[]
          | . as $record
          | select(.structured and
@@ -404,7 +422,9 @@ MODEL=$(printf '%s' "$SNAP" | jq \
       in_flight: (if $all_in_flight == 1 then $in_flight_all else $in_flight_all[:$in_flight_n] end),
       retained_records: ([.tasks[] | select(.retained_record == true)
         | {id,state:.current_state.state,open_decisions:.hints.open_decisions,
-           reason:"backlog closed; execution record retained, cleanup unverified"}]
+           reason:(if .record_disposition == "archive_done"
+                   then "backlog completion archived; execution record retained, cleanup unverified"
+                   else "backlog closed; execution record retained, cleanup unverified" end)}]
         | if $all_in_flight == 1 then . else .[:$in_flight_n] end),
       decisions_open: (if $all_decisions == 1 then $decisions_all else $decisions_all[:$decisions_n] end),
       landed: ($done | map({id, what:(.title | trunc(70)),

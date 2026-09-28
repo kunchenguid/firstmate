@@ -26,10 +26,23 @@ make_fakebin() {
 #!/usr/bin/env bash
 case "$1 ${2:-}" in
   'status --json') echo '{"server":{"running":true}}' ;;
-  'pane get') jq -n --arg p "$3" '{result:{pane:{pane_id:$p}}}' ;;
-  'agent get') echo '{"result":{"agent":{"agent_status":"working"}}}' ;;
-  'pane process-info') jq -n --arg p "${4:-}" '{result:{type:"pane_process_info",process_info:{pane_id:$p,shell_pid:101,foreground_processes:[{pid:102,name:"pi",argv0:"pi"}]}}}' ;;
-  'pane read') printf 'working\n> \n' ;;
+  'pane get')
+    case "$3" in
+      *missing*) echo '{"error":{"code":"pane_not_found"}}'; exit 1 ;;
+      *) jq -n --arg p "$3" '{result:{pane:{pane_id:$p}}}' ;;
+    esac ;;
+  'agent get')
+    case "$3" in
+      *missing*) echo '{"error":{"code":"agent_not_found"}}'; exit 1 ;;
+      *) echo '{"result":{"agent":{"agent_status":"working"}}}' ;;
+    esac ;;
+  'pane process-info')
+    case "${4:-}" in
+      *missing*) exit 1 ;;
+      *) jq -n --arg p "${4:-}" '{result:{type:"pane_process_info",process_info:{pane_id:$p,shell_pid:101,foreground_processes:[{pid:102,name:"pi",argv0:"pi"}]}}}' ;;
+    esac ;;
+  'pane read')
+    case "$3" in *missing*) exit 1 ;; *) printf 'working\n> \n' ;; esac ;;
   *) echo '{}' ;;
 esac
 SH
@@ -116,6 +129,136 @@ test_removed_secondmate_flag_is_rejected() {
   pass "bearings rejects the removed secondmate expansion flag"
 }
 
+task_in() {  # <home> <tasks-axi arguments...>
+  local home=$1
+  shift
+  FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" "$@"
+}
+
+write_task_meta() {  # <home> <id> <pane>
+  local home=$1 id=$2 pane=$3
+  fm_test_write_herdr_meta "$home/state/$id.meta" \
+    "window=fixture:w1:$pane" "endpoint_task_id=$id" \
+    "backend=herdr" "herdr_session=fixture" "herdr_workspace_id=w1" \
+    "herdr_tab_id=w1:t1" "herdr_pane_id=$pane" \
+    "worktree=$home/projects/ship" "project=alpha" "harness=pi" \
+    "kind=scout" "mode=no-mistakes" "spawn_gen=g-$id"
+}
+
+test_archived_and_parked_execution_records_are_not_underway() {
+  local home fakebin fleet bearings
+  command -v tasks-axi >/dev/null 2>&1 || {
+    pass "skipped archived projection regression: tasks-axi not installed"
+    return
+  }
+  home=$(make_home archive-projection)
+  fakebin=$(make_fakebin "$home")
+  mkdir -p "$home/records"
+  cat > "$home/.tasks.toml" <<'EOF'
+backend = "markdown"
+
+[markdown]
+path = "data/backlog.md"
+archive = "records/completed.md"
+done_keep = 1
+EOF
+
+  task_in "$home" add parked-residual 'Parked residual' --kind scout --queue >/dev/null
+  task_in "$home" hold parked-residual --reason 'synthetic archival disposition' --kind parked >/dev/null
+  write_task_meta "$home" parked-residual p-missing-parked
+
+  task_in "$home" add done-pruned 'Done pruned' --kind scout --start >/dev/null
+  task_in "$home" 'done' done-pruned --report data/done-pruned/report.md --no-prune >/dev/null
+  write_task_meta "$home" done-pruned p-missing-done
+  task_in "$home" add prune-trigger 'Prune trigger' --kind scout --start >/dev/null
+  task_in "$home" 'done' prune-trigger --report data/prune-trigger/report.md --keep 1 >/dev/null
+
+  task_in "$home" add healthy-active 'Healthy active' --kind scout --start >/dev/null
+  write_task_meta "$home" healthy-active p-active
+  task_in "$home" add ambiguous-duplicate 'Ambiguous duplicate' --kind scout --queue >/dev/null
+  sed -i '/ambiguous-duplicate/p' "$home/data/backlog.md"
+  write_task_meta "$home" ambiguous-duplicate p-missing-ambiguous
+  task_in "$home" add reused-active 'Old completed incarnation' --kind scout --start >/dev/null
+  task_in "$home" 'done' reused-active --report data/reused-active/report.md --keep 0 >/dev/null
+  task_in "$home" add reused-active 'Current active incarnation' --kind scout --start >/dev/null
+  write_task_meta "$home" reused-active p-active-reused
+  write_task_meta "$home" orphan-unknown p-missing-orphan
+
+  fleet=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  printf '%s\n' "$fleet" | jq -e '
+    (.tasks[] | select(.id == "done-pruned")
+      | .backlog == null and .record_disposition == "archive_done" and .retained_record == true)
+    and (.tasks[] | select(.id == "parked-residual")
+      | .backlog.state == "queued" and .record_disposition == "parked" and .retained_record == false)
+    and (.tasks[] | select(.id == "healthy-active")
+      | .backlog.state == "in_flight" and .record_disposition == "active"
+        and .current_state.state == "working" and .retained_record == false)
+    and (.tasks[] | select(.id == "ambiguous-duplicate")
+      | .backlog.state == "queued" and .record_disposition == "ambiguous"
+        and .retained_record == false)
+    and (.tasks[] | select(.id == "reused-active")
+      | .backlog.state == "in_flight" and .record_disposition == "active"
+        and .current_state.state == "working" and .retained_record == false)
+    and (.tasks[] | select(.id == "orphan-unknown")
+      | .backlog == null and .record_disposition == "unknown" and .retained_record == false)
+  ' >/dev/null || fail "fleet lost an authoritative archived, parked, active, or unknown disposition: $fleet"
+
+  bearings=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$BEARINGS" --json --all-in-flight --all-queued --all-unhealthy)
+  printf '%s\n' "$bearings" | jq -e '
+    ([.in_flight[].id] | index("healthy-active") != null)
+      and ([.in_flight[].id] | index("reused-active") != null)
+      and ([.in_flight[].id] | index("parked-residual") == null)
+      and ([.in_flight[].id] | index("done-pruned") == null)
+      and ([.in_flight[].id] | index("ambiguous-duplicate") == null)
+      and ([.in_flight[].id] | index("orphan-unknown") == null)
+      and ([.retained_records[].id] | index("done-pruned") != null)
+      and ([.gates[].id] | index("parked-residual") != null)
+      and ([.gates[] | select(.id == "ambiguous-duplicate" and .reason == "task record integrity")] | length >= 1)
+      and ([.gates[] | select(.id == "orphan-unknown" and .reason == "task record integrity")] | length == 1)
+      and ([.unhealthy_endpoints[].id] | index("orphan-unknown") != null)
+  ' >/dev/null || fail "bearings confused work identity, process identity, or an unknown orphan: $bearings"
+  pass "archived and parked residual execution records stay out of Underway while active and unknown evidence remain visible"
+}
+
+test_unsupported_backend_never_infers_terminal_disposition() {
+  local home fakebin fleet bearings
+  command -v tasks-axi >/dev/null 2>&1 || {
+    pass "skipped unsupported-backend projection regression: tasks-axi not installed"
+    return
+  }
+  home=$(make_home unsupported-backend)
+  fakebin=$(make_fakebin "$home")
+  cat > "$home/.tasks.toml" <<'EOF'
+backend = "markdown"
+
+[markdown]
+path = "data/backlog.md"
+archive = "data/completed.md"
+done_keep = 10
+EOF
+  task_in "$home" add backend-unknown 'Backend unknown' --kind scout --start >/dev/null
+  task_in "$home" 'done' backend-unknown --report data/backend-unknown/report.md --no-prune >/dev/null
+  write_task_meta "$home" backend-unknown p-missing-backend
+  printf 'backend = "github"\n' > "$home/.tasks.toml"
+
+  fleet=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  printf '%s\n' "$fleet" | jq -e '
+    .tasks[] | select(.id == "backend-unknown")
+      | .backlog.state == "done" and .record_disposition == "unknown"
+        and .retained_record == false
+  ' >/dev/null || fail "an unsupported backend was treated as terminal evidence: $fleet"
+
+  bearings=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$BEARINGS" --json --all-queued --all-unhealthy)
+  printf '%s\n' "$bearings" | jq -e '
+    ([.in_flight[].id] | index("backend-unknown") == null)
+      and ([.retained_records[].id] | index("backend-unknown") == null)
+      and ([.gates[] | select(.id == "backend-unknown" and .reason == "task record integrity")] | length == 1)
+  ' >/dev/null || fail "an unsupported backend disappeared instead of remaining an integrity gate: $bearings"
+  pass "unsupported task backends preserve terminal-looking execution records as unknown integrity evidence"
+}
+
 test_empty_projection
 test_main_home_projection_is_local_and_complete
 test_removed_secondmate_flag_is_rejected
+test_archived_and_parked_execution_records_are_not_underway
+test_unsupported_backend_never_infers_terminal_disposition

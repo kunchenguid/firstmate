@@ -23,6 +23,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 # shellcheck source=bin/fm-lease-lib.sh
 . "$SCRIPT_DIR/fm-lease-lib.sh"
+# shellcheck source=bin/fm-task-disposition-lib.sh
+. "$SCRIPT_DIR/fm-task-disposition-lib.sh"
 
 DRAIN_TMP=
 DRAIN_VIEW_TMP=
@@ -39,6 +41,8 @@ PRESENTED_MAX=0
 ACK_FINGERPRINTS=
 ACK_NOTICE_FINGERPRINTS=
 PRESENTATION_LOCK_TIMEOUT=${FM_STATUS_PRESENTATION_LOCK_TIMEOUT:-10}
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+STATUS_TASK_DISPOSITIONS=
 case "$PRESENTATION_LOCK_TIMEOUT" in ''|*[!0-9]*|0) PRESENTATION_LOCK_TIMEOUT=10 ;; esac
 
 # --- per-actor consume (docs/watcher-continuity.md "Per-actor acknowledgement") --
@@ -428,7 +432,8 @@ EOF
 }
 
 # Print the consolidated OPEN DECISIONS section: every still-open
-# needs-decision/blocked, fleet-wide, folded from the durable status logs by
+# needs-decision/blocked on current or unclassified work, fleet-wide, folded
+# from the durable status logs by
 # fm-classify-lib.sh's status_open_decisions fold (via its cursor-backed
 # scan_open_decisions_incremental wrapper) rather than from the annotations
 # above, so a decision buried under later unrelated appends cannot be silently
@@ -440,10 +445,12 @@ EOF
 # appended to each task's status log since the LAST drain, not that log's whole
 # lifetime, while still never dropping an old buried decision (see
 # fm-classify-lib.sh's "incremental (cursor-backed) open-decisions fold").
-# Bounded and silent: prints nothing when no decision is open, which is the
-# common case.
+# A structured Done/archive or explicit parked disposition retires only the
+# presentation of historical blockers; it does not rewrite the fold, consume a
+# raw wake, or suppress unread notes and uncovered outcomes. Bounded and silent:
+# prints nothing when no current decision is open, which is the common case.
 print_open_decisions_section() {
-  local snapshot=${1:-} open task key verb note line item_bytes=220 global_bytes=4000
+  local snapshot=${1:-} open task key verb note line disposition item_bytes=220 global_bytes=4000
   local output='' used=0 shown=0 omitted=0 bytes
 
   if [ -n "$snapshot" ]; then
@@ -455,6 +462,12 @@ print_open_decisions_section() {
 
   while IFS=$(printf '\t') read -r task key verb note; do
     [ -n "$task" ] || continue
+    disposition=$(fm_task_disposition_for "$STATUS_TASK_DISPOSITIONS" "$task" 2>/dev/null || true)
+    # The fold remains intact on disk. Only its presentation is retired while a
+    # structured record says this work is Done, archived Done, or deliberately
+    # parked. A current/unknown/captain-held task has no such exemption, so its
+    # independent decision continues to surface.
+    case "$disposition" in done|archive_done|parked) continue ;; esac
     line="$task"
     [ "$key" = default ] || line="$line [key=$key]"
     line="$line $verb: $note"
@@ -553,6 +566,7 @@ print_status_sections() {
   local snapshot=${1:-} fully_presented=${2:-} acknowledged prepared
   if [ -z "$snapshot" ]; then snapshot=$(status_presentation_snapshot "$STATE") || return 1; fi
   [ -n "$snapshot" ] || return 0
+  STATUS_TASK_DISPOSITIONS=$(fm_task_disposition_snapshot "$DATA" 2>/dev/null || true)
   acknowledged=$(status_acknowledge_presented_snapshot "$STATE" "$snapshot" "$fully_presented") || return 1
   prepared=$(mktemp "$STATE/.status-presentation.prepared.XXXXXX") || return 1
   if ! {
