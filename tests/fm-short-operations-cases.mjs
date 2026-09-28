@@ -495,6 +495,10 @@ const outcomes=()=>fs.readFileSync(path.join(home,'state/branch-outcomes.jsonl')
 assert.equal(outcomes().filter(r=>r.task===a.id).length,1);
 fs.unlinkSync(path.join(service.dir(a.id),'notified.json'));await new ShortAgents(home,root).notify(a.id);
 const row=outcomes().find(r=>r.task===a.id);assert.equal(outcomes().filter(r=>r.task===a.id).length,1);
+assert.match(row.summary,/Result:\ncomplete/);
+assert.match(row.summary,/Verified operation receipts:/);
+assert.ok(row.summary.includes(JSON.stringify(receipt)),'successful operation notification must include the verified receipt');
+assert.ok(!row.summary.includes('Full result:'),'successful operation notification must not require a result lookup');
 for(const command of ['mark-read','mark-processed'])execFileSync('bash',[path.join(root,'bin/fm-branch-outcome.sh'),command,'--through',String(row.seq)],{env:{...process.env,FM_HOME:home,FM_STATE_OVERRIDE:path.join(home,'state')}});
 for(const id of submittedIds) {
   const file=path.join(service.dir(id),'started.json');

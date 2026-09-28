@@ -30,6 +30,7 @@ mkdir -p "$TMP_ROOT/.pi/extensions/lib" "$TMP_ROOT/bin" "$TMP_ROOT/node_modules/
 cp "$ROOT/.pi/extensions/fm-branch-supervision.ts" "$TMP_ROOT/.pi/extensions/fm-branch-supervision.ts"
 cp "$ROOT/.pi/extensions/fm-short-agent.ts" "$TMP_ROOT/.pi/extensions/fm-short-agent.ts"
 cp "$ROOT/bin/fm-short-agent.mjs" "$ROOT/bin/fm-short-agent.d.mts" "$TMP_ROOT/bin/"
+cp "$ROOT/bin/fm-short-notification.mjs" "$ROOT/bin/fm-short-notification.d.mts" "$TMP_ROOT/bin/"
 cp "$ROOT/.pi/extensions/fm-calm.ts" "$TMP_ROOT/.pi/extensions/fm-calm.ts"
 cp "$ROOT/.pi/extensions/fm-primary-feishu-bridge.ts" "$TMP_ROOT/.pi/extensions/fm-primary-feishu-bridge.ts"
 cp "$ROOT/.pi/extensions/fm-primary-pi-watch.ts" "$TMP_ROOT/.pi/extensions/fm-primary-pi-watch.ts"
