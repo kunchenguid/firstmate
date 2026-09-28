@@ -1130,23 +1130,23 @@ rm -f -- "$FM_PROCEVENT_CLAIM_ROOT/$legacy_id.claim"
 HFLEGACY_OTHER="$TMP_ROOT/hflegacy-other"; new_home "$HFLEGACY_OTHER"
 fm_test_track_procevent_home "$HFLEGACY_OTHER"
 pe "$HFLEGACY_OTHER" register lavish "$legacy_id" -- /bin/sleep 30 >/dev/null
-printf 'Reserved legacy response.\n' > "$TMP_ROOT/firstmate-legacy-reservation-reply.txt"
-if ! legacy_reservation=$(pe "$HFLEGACY" register-lavish "$legacy_id" -- \
-  "$ROOT/bin/fm-procevent-lavish.sh" poll "$LEGACY_ART" \
-  --agent-reply-file "$TMP_ROOT/firstmate-legacy-reservation-reply.txt"); then
-  fail "legacy migration could not publish while reserving ownership"
-fi
+printf 'Answered after handoff.\n' > "$TMP_ROOT/firstmate-live-legacy-reply.txt"
+PATH="$LEGACY_BIN:$PATH" FM_HOME="$HFLEGACY" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$LEGACY_ART" \
+  --agent-reply-file "$TMP_ROOT/firstmate-live-legacy-reply.txt" \
+  > "$TMP_ROOT/firstmate-live-legacy-arm.out" &
+legacy_arm_pid=$!
+for _ in $(seq 1 100); do
+  [ -f "$FM_PROCEVENT_CLAIM_ROOT/$legacy_id.claim" ] && break
+  sleep 0.01
+done
 assert_present "$FM_PROCEVENT_CLAIM_ROOT/$legacy_id.claim" \
   "legacy migration did not reserve machine-wide ownership"
 PATH="$LEGACY_BIN:$PATH" pe "$HFLEGACY_OTHER" start "$legacy_id" \
   > "$TMP_ROOT/firstmate-legacy-other-start.out"
 assert_contains "$(cat "$TMP_ROOT/firstmate-legacy-other-start.out")" "already owned: $legacy_id" \
   "another home acquired the session during legacy migration"
-printf 'Answered after handoff.\n' > "$TMP_ROOT/firstmate-live-legacy-reply.txt"
-PATH="$LEGACY_BIN:$PATH" FM_HOME="$HFLEGACY" \
-  "$ROOT/bin/fm-procevent-lavish.sh" arm "$LEGACY_ART" \
-  --agent-reply-file "$TMP_ROOT/firstmate-live-legacy-reply.txt" \
-  > "$TMP_ROOT/firstmate-live-legacy-arm.out"
+wait "$legacy_arm_pid"
 assert_contains "$(cat "$TMP_ROOT/firstmate-live-legacy-arm.out")" "armed: $legacy_id" \
   "live legacy handoff did not confirm the reply-carrying listener"
 assert_not_contains "$(cat "$TMP_ROOT/firstmate-live-legacy-arm.out")" "still-listening" \
@@ -1224,6 +1224,56 @@ assert_absent "$HFSTOREFAIL/state/procevent-inbox/$storefail_id.1.accepted" \
 [ "$(find "$HFSTOREFAIL/state/procevent" -maxdepth 1 -type f -name ".$storefail_id.reply.*" | wc -l | tr -d ' ')" = 1 ] \
   || fail "storage failure did not retain the staged reply for recovery"
 pass "Lavish storage failure never acknowledges a reply"
+
+HFINTERRUPT="$TMP_ROOT/hfinterrupt"; new_home "$HFINTERRUPT"
+INTERRUPT_BIN=$(fm_fakebin "$TMP_ROOT/lavish-firstmate-interrupt-stub")
+INTERRUPT_COUNT="$TMP_ROOT/lavish-firstmate-interrupt-count"
+export INTERRUPT_COUNT
+cat > "$INTERRUPT_BIN/lavish-axi" <<'SH'
+#!/bin/sh
+[ "$#" -gt 0 ] || exit 0
+n=$(cat "$INTERRUPT_COUNT" 2>/dev/null || echo 0)
+n=$((n + 1))
+printf '%s\n' "$n" > "$INTERRUPT_COUNT"
+shift 2
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --agent-reply-file) cat >/dev/null; shift 2 ;;
+    --owner) shift 2 ;;
+    *) shift ;;
+  esac
+done
+if [ "$n" = 1 ]; then
+  printf 'session:\n  status: feedback\nprompts[1]{uid,prompt,selector,tag,text}:\n  "","","","message","interrupt"\n'
+else
+  printf 'error: Lavish Editor poll response was interrupted\ncode: SERVER_ERROR\n'
+  exit 1
+fi
+SH
+chmod +x "$INTERRUPT_BIN/lavish-axi"
+INTERRUPT_ART="$TMP_ROOT/firstmate-interrupt.html"
+printf '<h1>interrupt</h1>\n' > "$INTERRUPT_ART"
+lavish_session "$INTERRUPT_ART"
+interrupt_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$INTERRUPT_ART")
+fm_test_track_procevent_home "$HFINTERRUPT"
+PATH="$INTERRUPT_BIN:$PATH" FM_HOME="$HFINTERRUPT" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$INTERRUPT_ART" >/dev/null
+wait_capture "$HFINTERRUPT" "$interrupt_id" || fail "interrupted reply fixture did not capture feedback"
+printf 'Post at most once.\n' > "$TMP_ROOT/firstmate-interrupt-reply.txt"
+if PATH="$INTERRUPT_BIN:$PATH" FM_HOME="$HFINTERRUPT" FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS=1 \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$INTERRUPT_ART" \
+  --agent-reply-file "$TMP_ROOT/firstmate-interrupt-reply.txt" >/dev/null 2>&1; then
+  fail "interrupted reply request reported durable acceptance"
+fi
+[ "$(cat "$INTERRUPT_COUNT")" = 2 ] \
+  || fail "interrupted reply request was submitted more than once"
+assert_present "$HFINTERRUPT/state/procevent-inbox/$interrupt_id.1.accepted" \
+  "interrupted reply request did not preserve acceptance uncertainty"
+assert_absent "$HFINTERRUPT/state/procevent-inbox/$interrupt_id.1.handled" \
+  "interrupted reply request acknowledged an unconfirmed response"
+[ "$(find "$HFINTERRUPT/state/procevent" -maxdepth 1 -type f -name ".$interrupt_id.reply.*" | wc -l | tr -d ' ')" = 0 ] \
+  || fail "interrupted reply request retained a stage that could post twice"
+pass "interrupted Lavish reply cannot be retried"
 
 HFLINGER="$TMP_ROOT/hflinger"; new_home "$HFLINGER"
 LINGER_BIN=$(fm_fakebin "$TMP_ROOT/lavish-firstmate-linger-stub")

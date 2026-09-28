@@ -371,7 +371,7 @@ poll_iteration_floor_wait() {
 cmd_poll() {
   local artifact=${1-} delay attempt=0 active_attempt=0 response status_file cleanup_command rc filter_rc iteration_started
   local pipeline_status pipeline_pid reply_file='' ready_fd=${FM_PROCEVENT_ADAPTER_READY_FD-}
-  local poll_owner=${FM_PROCEVENT_ADAPTER_OWNER-} reply_pending=0 acceptance_dir='' acceptance_signal=''
+  local poll_owner=${FM_PROCEVENT_ADAPTER_OWNER-} reply_pending=0 acceptance_dir='' acceptance_signal='' node_options=''
   [ -n "$artifact" ] || usage
   if [ "$#" -eq 3 ] && [ "${2-}" = --agent-reply-file ]; then
     reply_file=$3
@@ -391,9 +391,27 @@ cmd_poll() {
     acceptance_signal="$acceptance_dir/accepted"
     cat > "$acceptance_dir/herdr" <<'SH'
 #!/bin/sh
-: > "$FM_LAVISH_ACCEPTED_SIGNAL"
+printf '%s\n' "$FM_PROCEVENT_ADAPTER_OWNER" > "$FM_LAVISH_ACCEPTED_SIGNAL"
 SH
+    cat > "$acceptance_dir/accept.cjs" <<'JS'
+const fs = require('node:fs');
+const childProcess = require('node:child_process');
+const { syncBuiltinESMExports } = require('node:module');
+const spawn = childProcess.spawn;
+childProcess.spawn = function(command, args, options) {
+  if (command === 'herdr' && process.env.FM_LAVISH_ACCEPTED_SIGNAL) {
+    const fd = fs.openSync(process.env.FM_LAVISH_ACCEPTED_SIGNAL, 'wx', 0o600);
+    fs.writeSync(fd, `${process.env.FM_PROCEVENT_ADAPTER_OWNER}\n`);
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);
+    return spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
+  }
+  return spawn(command, args, options);
+};
+syncBuiltinESMExports();
+JS
     chmod 0700 "$acceptance_dir/herdr" || die "cannot prepare the Lavish acceptance boundary"
+    node_options="${NODE_OPTIONS:+$NODE_OPTIONS }--require=$acceptance_dir/accept.cjs"
   fi
   printf -v cleanup_command 'rm -f -- %q %q; rm -rf -- %q' "$response" "$status_file" "$acceptance_dir"
   # shellcheck disable=SC2064 # $cleanup_command must expand now, while the staged path is still set.
@@ -408,6 +426,7 @@ SH
     trap "$cleanup_command; trap - $signal; kill -$signal $$" "$signal"
   done
   while :; do
+    reply_pending=0
     iteration_started=$(poll_iteration_started) || die "cannot start the poll rate governor"
     [ -f "$artifact" ] && [ ! -L "$artifact" ] && [ -r "$artifact" ] \
       || die "artifact is no longer a readable file: $artifact"
@@ -431,18 +450,21 @@ SH
       rm -f -- "$acceptance_signal"
       if [ "$reply_pending" -eq 1 ]; then
         { HERDR_ENV=1 LAVISH_AXI_HERDR_CHIME=1 FM_LAVISH_ACCEPTED_SIGNAL="$acceptance_signal" \
+            FM_PROCEVENT_ADAPTER_OWNER="$poll_owner" NODE_OPTIONS="$node_options" \
             PATH="$acceptance_dir:$PATH" lavish-axi poll "$artifact" --owner "$poll_owner" \
             --agent-reply-file - <&7; printf '%s\n' "$?" >&6; } \
           | poll_response_filter "$response" &
         exec 7<&-
       else
         { HERDR_ENV=1 LAVISH_AXI_HERDR_CHIME=1 FM_LAVISH_ACCEPTED_SIGNAL="$acceptance_signal" \
+            FM_PROCEVENT_ADAPTER_OWNER="$poll_owner" NODE_OPTIONS="$node_options" \
             PATH="$acceptance_dir:$PATH" lavish-axi poll "$artifact" --owner "$poll_owner"; \
             printf '%s\n' "$?" >&6; } | poll_response_filter "$response" &
       fi
       pipeline_pid=$!
       while kill -0 "$pipeline_pid" 2>/dev/null; do
-        if [ -f "$acceptance_signal" ]; then
+        if [ -f "$acceptance_signal" ] \
+          && [ "$(cat "$acceptance_signal" 2>/dev/null || true)" = "$poll_owner" ]; then
           [ "$reply_pending" -eq 0 ] || rm -f -- "$reply_file" \
             || die "cannot consume accepted agent reply file: $reply_file"
           printf 'ready\n' >&3 || die "cannot confirm adapter readiness"
@@ -475,7 +497,6 @@ SH
       rc=${pipeline_status[0]}
       filter_rc=${pipeline_status[1]}
     fi
-    reply_pending=0
     case "$filter_rc" in
       0) break ;;
       11)
@@ -488,7 +509,10 @@ SH
         break
         ;;
       10)
-        if [ "$attempt" -lt "$POLL_RETRY_LIMIT" ]; then
+        if [ "$reply_pending" -eq 1 ] && [ -n "$ready_fd" ]; then
+          rm -f -- "$reply_file" || die "cannot preserve ambiguous reply acceptance"
+          break
+        elif [ "$attempt" -lt "$POLL_RETRY_LIMIT" ]; then
           attempt=$((attempt + 1))
           poll_iteration_floor_wait "$iteration_started" "$delay" \
             || die "cannot enforce the poll rate governor"

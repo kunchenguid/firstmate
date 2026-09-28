@@ -882,6 +882,30 @@ fm_procevent_claim_acquire_locked() {
   return "$status"
 }
 
+fm_procevent_claim_make_transferable_locked() {  # <source-id> <home> <pid> <token> <registration>
+  local id=$1 home=$2 pid=$3 token=$4 registration=$5 claim root tmp reg_identity
+  claim=$(fm_procevent_claim_path "$id")
+  fm_procevent_claim_load_locked "$id" \
+    && [ "$FM_PROCEVENT_CLAIM_HOME" = "$home" ] \
+    && [ "$FM_PROCEVENT_CLAIM_PID" = "$pid" ] \
+    && [ "$FM_PROCEVENT_CLAIM_TOKEN" = "$token" ] || return 1
+  reg_identity=$(fm_pr_file_identity "$registration" 2>/dev/null) || return 1
+  root=$(fm_procevent_claim_root)
+  tmp=$(umask 077; mktemp "$root/.claim.XXXXXX") || return 1
+  if printf '%s\n%s\n%s\n%s\n%s\n%s\nactive\n%s\n%s\n%s\n%s\n%s\n' \
+    "$FM_PROCEVENT_CLAIM_HOME" 2147483647 "$FM_PROCEVENT_CLAIM_TOKEN" \
+    "transfer:$FM_PROCEVENT_CLAIM_TOKEN" "$FM_PROCEVENT_CLAIM_REG_DIR" "$reg_identity" \
+    "$FM_PROCEVENT_CLAIM_STATE_ROOT" "$FM_PROCEVENT_CLAIM_STATE_DEVICE" \
+    "$FM_PROCEVENT_CLAIM_STATE_INODE" "$FM_PROCEVENT_CLAIM_STATE_OWNER" \
+    "$FM_PROCEVENT_CLAIM_STATE_MODE" > "$tmp" \
+    && chmod 0600 "$tmp" \
+    && mv -f -- "$tmp" "$claim"; then
+    return 0
+  fi
+  rm -f -- "$tmp"
+  return 1
+}
+
 fm_procevent_claim_mark_terminal_locked() {
   local id=$1 home=$2 pid=$3 token=$4 claim root tmp
   claim=$(fm_procevent_claim_path "$id")

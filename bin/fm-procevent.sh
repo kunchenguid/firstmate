@@ -844,6 +844,14 @@ cmd_register_lavish_owner() {
     fm_procevent_source_lock_release "$id"
     die "cannot publish Lavish registration"
   }
+  if [ "$reservation" -eq 1 ] \
+    && ! fm_procevent_claim_make_transferable_locked "$id" "$owner" "$pid" "$token" "$(source_file "$id")"; then
+    [ -z "$prior_record" ] || mv -f -- "$prior_record" "$(source_file "$id")"
+    [ -z "$reply_dest" ] || rm -f -- "$reply_dest"
+    fm_procevent_claim_release_locked "$id" "$owner" "$pid" "$token" >/dev/null 2>&1 || true
+    fm_procevent_source_lock_release "$id"
+    die "cannot transfer the legacy Lavish ownership reservation: $id"
+  fi
   if [ "$handoff" -eq 1 ]; then
     rm -f -- "$(staging_file "$id" "$token")" "$(runner_file "$id")"
   fi
