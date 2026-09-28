@@ -409,6 +409,19 @@ source_owner_task() { source_field "$1" owner_task; }
 source_pending() {  # <source-id>
   fm_procevent_pending "$STATE" | awk -v id="$1" 'index($0, "/" id ".") { print }'
 }
+source_is_builtin_lavish_locked() {  # <source-id>
+  local id=$1 kind expected_id
+  kind=$(source_kind "$id" 2>/dev/null || true)
+  [ "$kind" = lavish-owned ] && return 0
+  [ -z "$kind" ] || return 1
+  [ "$(read_adapter "$id" 2>/dev/null || true)" = lavish ] || return 1
+  read_argv "$id" || return 1
+  [ "${#ARGV[@]}" -eq 3 ] \
+    && [ "${ARGV[0]}" = "$SCRIPT_DIR/fm-procevent-lavish.sh" ] \
+    && [ "${ARGV[1]}" = poll ] || return 1
+  expected_id=$("$SCRIPT_DIR/fm-procevent-lavish.sh" source-id "${ARGV[2]}" 2>/dev/null) || return 1
+  [ "$expected_id" = "$id" ]
+}
 lavish_rearm_round_locked() {  # <source-id> [staged]
   local id=$1 mode=${2-} round reply
   [ "$(source_kind "$id" 2>/dev/null || true)" = lavish-owned ] || return 1
@@ -439,7 +452,7 @@ source_retirement_blocked_locked() {  # <source-id>
     [ -n "$(source_pending "$id" | head -1)" ]
     return
   fi
-  if [ "$kind" = lavish-owned ]; then
+  if [ "$kind" = lavish-owned ] || { [ -z "$kind" ] && source_is_builtin_lavish_locked "$id"; }; then
     while IFS= read -r pending; do
       [ -n "$pending" ] || continue
       adapter=$(fm_procevent_result_adapter "$pending" 2>/dev/null || true)
@@ -1256,7 +1269,8 @@ cmd_start() {
       && [ "$FM_PROCEVENT_CLAIM_PID" = "$CLAIM_PID" ] \
       && [ "$FM_PROCEVENT_CLAIM_TOKEN" = "$CLAIM_TOKEN" ]; then
       if [ "$FM_PROCEVENT_CLAIM_TERMINAL" = terminal ] \
-        || { case "$(source_kind "$CLAIM_ID" 2>/dev/null || true)" in lavish-owned|task-owned) true ;; *) false ;; esac \
+        || { { [ "$(source_kind "$CLAIM_ID" 2>/dev/null || true)" = task-owned ] \
+            || source_is_builtin_lavish_locked "$CLAIM_ID"; } \
           && [ -n "$(source_pending "$CLAIM_ID" | head -1)" ]; }; then
         fm_procevent_source_lock_release "$CLAIM_ID" 2>/dev/null || true
         return 0

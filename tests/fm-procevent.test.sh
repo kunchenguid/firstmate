@@ -1057,13 +1057,21 @@ fm_test_track_procevent_home "$HFLEGACY"
 PATH="$LEGACY_BIN:$PATH" FM_HOME="$HFLEGACY" \
   "$ROOT/bin/fm-procevent-lavish.sh" arm "$LEGACY_ART" >/dev/null
 wait_for_lines "$LEGACY_LOG" 1 || fail "live legacy fixture did not start"
-touch "$LEGACY_TRIGGER1"
-wait_capture "$HFLEGACY" "$legacy_id" || fail "live legacy fixture did not capture feedback"
 grep -v '^kind=' "$HFLEGACY/state/procevent/$legacy_id.source" \
   > "$HFLEGACY/state/procevent/$legacy_id.source.legacy"
 mv "$HFLEGACY/state/procevent/$legacy_id.source.legacy" \
   "$HFLEGACY/state/procevent/$legacy_id.source"
 chmod 0600 "$HFLEGACY/state/procevent/$legacy_id.source"
+touch "$LEGACY_TRIGGER1"
+wait_capture "$HFLEGACY" "$legacy_id" || fail "live legacy fixture did not capture feedback"
+assert_present "$FM_PROCEVENT_CLAIM_ROOT/$legacy_id.claim" \
+  "legacy Lavish capture released its machine-wide ownership"
+if pe "$HFLEGACY" retire "$legacy_id" \
+  > "$TMP_ROOT/firstmate-legacy-retire.out" 2> "$TMP_ROOT/firstmate-legacy-retire.err"; then
+  fail "retirement orphaned a pending legacy Lavish capture"
+fi
+assert_present "$HFLEGACY/state/procevent/$legacy_id.source" \
+  "pending legacy Lavish capture lost its registration ownership"
 PATH="$LEGACY_BIN:$PATH" pe "$HFLEGACY" reconcile >/dev/null
 wait_for_lines "$LEGACY_LOG" 2 || fail "legacy recovery listener did not start"
 printf 'Answered after handoff.\n' > "$TMP_ROOT/firstmate-live-legacy-reply.txt"
