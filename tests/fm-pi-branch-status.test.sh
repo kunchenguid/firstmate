@@ -27,10 +27,12 @@ m.observe(row('prompt','started'));
 assert.match(m.view(now).lines[1],/model\/tools/);
 m.observe(row('settlement','reported-and-released'));
 assert.match(m.view(now).lines[2],/durable branch result/);
-m.observe(row('classify','check-main-only','b','watcher'));
-m.observe(row('declined','ineligible-trigger','b','watcher'));
-assert.equal(m.view(now).state,'idle');
-assert.match(m.view(now).lines[3],/MAIN: check-main-only/);
+for (const reason of ['check-main-only', 'main-owned-trigger']) {
+  m.observe(row('classify',reason,'b','watcher'));
+  m.observe(row('declined','ineligible-trigger','b','watcher'));
+  assert.equal(m.view(now).state,'idle');
+  assert.ok(m.view(now).lines[3].includes('MAIN: '+reason));
+}
 m.observe(row('admission','accepted'));
 m.observe(row('fallback','ownership-lost','a','watcher'));
 assert.equal(m.view(now).state,'degraded');

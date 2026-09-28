@@ -74,8 +74,9 @@ try:
     command('/quit'); p.wait(timeout=10)
     rows=[json.loads(l) for l in (lab/'state/probe.jsonl').read_text().splitlines()]
     conflict=[x for x in rows if x.get('token')=='conflict'][-1]
+    assert any(x.get('event')=='mixed-claim' and x['eligible']==['1'] for x in rows), rows
     assert conflict['calls']==2 and 'claimed by main' in conflict['error'],conflict
-    print('REAL_TUI_OK providerCalls=2 conflictBeforePrompt=true reload=true')
+    print('REAL_TUI_OK mixedMainClaimExcluded=true providerCalls=2 conflictBeforePrompt=true reload=true')
 finally:
     (lab/'render.ansi').write_bytes(raw)
     dest=os.environ.get('FM_STATUS_EVIDENCE')

@@ -15,6 +15,7 @@ export default function lab(pi: ExtensionAPI) {
     const url = String(input instanceof Request ? input.url : input);
     if (!url.startsWith('https://branch-status.invalid/')) throw Error('unexpected network request');
     calls++;
+    if(readFileSync(`${state}/.branch-eligible-rows`,'utf8') !== '1\n' || readFileSync(`${state}/.main-eligible-rows`,'utf8') !== '0\n') throw Error('mixed grant does not preserve exact MAIN rows');
     if (calls === 1 && !released) await new Promise<void>(resolve => { delay = resolve; });
     const body = JSON.parse(String(init?.body));
     const reported = body.messages.some((m: any) => m.role === 'tool');
@@ -42,7 +43,14 @@ export default function lab(pi: ExtensionAPI) {
   pi.registerCommand('lab-stage', {description:'isolated test input',handler:async(args,ctx)=>{
     if(args==='before') { ctx.ui.notify('LAB_BASELINE_READY', 'info'); }
     else if(args==='process') {
-      writeFileSync(`${state}/.wake-queue`,'1\t1\tsignal\tprobe.status\tsynthetic\n');
+      // Corrected counterfactual: keep an old MAIN row in the same queue,
+      // claim only the unrelated new row, and complete real SDK model work.
+      writeFileSync(`${state}/old.meta`,'project=synthetic\nwindow=fm-old\n');
+      writeFileSync(`${state}/.wake-queue`,'1\t0\tsignal\told.status\told\n1\t1\tsignal\tprobe.status\tsynthetic\n');
+      writeFileSync(`${state}/.main-eligible-rows`,'0\n');
+      const scope = scopeForUnreadWake(state,false);
+      if(scope.eligibleSeqs.join(',') !== '1' || dispositionForWakeTrigger('signal: old.status',scope).reason !== 'main-owned-trigger') throw Error('mixed MAIN claim classification failed');
+      log({event:'mixed-claim',eligible:scope.eligibleSeqs,main:'0'});
       dispatch('successful');
     } else if(args==='finish') { released = true; delay?.(); }
     else if(args==='main') {
@@ -52,8 +60,9 @@ export default function lab(pi: ExtensionAPI) {
       appendBranchRoutingTrace(state,{token:'expected-main',actor:'watcher',stage:'classify',reason:disposition.reason},pi.events);
       appendBranchRoutingTrace(state,{token:'expected-main',actor:'watcher',stage:'declined',reason:'ineligible-trigger'},pi.events);
     } else if(args==='conflict') {
-      writeFileSync(`${state}/.main-eligible-rows`,'1\n');
       dispatch('conflict');
+      // MAIN wins after admission but before the asynchronous pre-prompt read.
+      writeFileSync(`${state}/.main-eligible-rows`,'0\n1\n');
     } else if(args==='disabled') { writeFileSync(`${state}/.afk`,'away\n'); health(); }
     else if(args==='unknown') { if(existsSync(`${state}/.afk`)) unlinkSync(`${state}/.afk`); unlinkSync(`${state}/.lock`); health(); }
     else if(args==='stale') {

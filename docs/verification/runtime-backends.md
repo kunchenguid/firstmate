@@ -1207,7 +1207,7 @@ The portable read-only companion is `tests/fm-short-agent.test.sh`; [the operato
 
 ## Pi branch activity display
 
-Verified on 2026-09-28 with Pi 0.87.1 and Node v22.22.2 on Linux using an isolated real Pi CLI pseudo-terminal and SDK branch.
+Verified on 2026-09-29 (Asia/Shanghai) with Pi 0.87.1 and Node v22.22.2 on Linux using an isolated real Pi CLI pseudo-terminal and SDK branch.
 This display is independent of terminal backend lifecycle; the guard does not call Herdr or operate fleet endpoints.
 Other primary harnesses do not load Pi extensions, so this observational UI adds no Codex or TraeX runtime behavior.
 
@@ -1229,11 +1229,12 @@ VISIBLE Branch unknown
 VISIBLE Branch error
 VISIBLE Branch unknown
 VISIBLE Branch
-REAL_TUI_OK providerCalls=2 conflictBeforePrompt=true reload=true
+REAL_TUI_OK mixedMainClaimExcluded=true providerCalls=2 conflictBeforePrompt=true reload=true
 ```
 
-The successful branch uses the real `fm_branch_report` tool and durable outcome owner with a synthetic local provider transport.
-The conflict case adds a MAIN claim in the isolated home, uses the real classifier and grant guard, and verifies that the accepted offer falls back without another provider request.
+The successful branch keeps an old MAIN-claimed row in the same queue while the unrelated new row alone receives a grant and completes the real `fm_branch_report` tool and durable outcome owner with a synthetic local provider transport.
+The conflict case adds a MAIN claim after admission in the isolated home, uses the real pre-prompt classifier, and verifies that the accepted offer falls back without another provider request.
+The portable branch-extension suite separately exercises the final locked grant after a claim race and exact branch acknowledgement that leaves the old MAIN row untouched.
 The MAIN-only check uses the real trigger classifier; its routing observation is emitted by the fixture rather than a live fleet watcher.
 The error and aged-evidence cases inject explicitly synthetic health observations into the supported event bus to test real terminal rendering, not a production provider outage or a two-minute wall-clock wait.
 The portable test independently verifies that admission, mirror-independent observations, report-before-settlement and watcher no-op settlement never become successful completion, that 1000 notifications coalesce into one paint, and that shutdown/reload removes subscriptions and timers without changing unrelated queue/lock files or sending model messages.

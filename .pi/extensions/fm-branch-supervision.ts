@@ -1769,6 +1769,10 @@ ${context.command}
         // became unresolved while this asynchronous turn waited. Return that
         // still-durable row to the watcher; only a genuinely empty queue means
         // another actor already consumed it.
+        if (admittedSeqs.some((seq) => scope.mainOwnedRows.some((row) => row.seq === seq))) {
+          trace("recheck", "main-owned", admittedSeqs);
+          throw new Error("the wake rows are already claimed by main");
+        }
         if (admissionSeqs.length > 0 && admittedSeqs.some((seq) => !scope.eligibleSeqs.includes(seq))) {
           trace("recheck", "admitted-row-retired", admittedSeqs);
           throw new Error("wake scope changed before branch grant: admitted row retired");

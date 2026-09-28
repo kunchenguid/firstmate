@@ -2602,12 +2602,17 @@ test_main_owned_grant_result_falls_back_to_main() {
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 const prelude = process.env.DRIVER_PRELUDE;
-await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, fire, home, mainUserMessages }; })()`);
-const { dispatch, fire, home, mainUserMessages } = globalThis.__t;
+await eval(`(async () => { ${prelude}; globalThis.__t = { bus, fire, home, mainUserMessages }; })()`);
+const { bus, fire, home, mainUserMessages } = globalThis.__t;
 import { writeFileSync } from "node:fs";
-
+import { dirname } from "node:path";
+import { pathToFileURL } from "node:url";
+const lib = await import(pathToFileURL(`${dirname(process.env.PLUGIN)}/lib/fm-branch-dispatch.ts`).href);
 await fire("session_start", {});
-const offer = dispatch("signal: interrupted main claim");
+writeFileSync(`${home}/state/.wake-queue`, "1\t1\tsignal\tbranch-driver.status\trace\n");
+const scope = lib.scopeForUnreadWake(`${home}/state`, false);
+const offer = lib.createBranchDispatchOffer("signal: branch-driver.status", [], false, lib.dispositionForWakeTrigger("signal: branch-driver.status", scope).eligible, [], "claim-race", scope.eligibleSeqs, scope.eligibleTasks, scope.taskBySeq);
+bus.emit("fm-branch-supervision:dispatch", offer);
 if (!offer.accepted) throw new Error("eligible wake was not accepted before the ownership recheck");
 writeFileSync(`${home}/state/.main-eligible-rows`, "1\n");
 const failure = await offer.settlement.then(
@@ -4672,7 +4677,7 @@ fs.readFileSync = function(path, ...args) {
 };
 syncBuiltinESMExports();
 
-const { activateEligibleRowsOwner, scopeForUnreadWake, writeEligibleRowsSnapshot, releaseEligibleRowsSnapshot, BRANCH_ELIGIBLE_ROWS_FILE } =
+const { activateEligibleRowsOwner, scopeForUnreadWake, dispositionForWakeTrigger, writeEligibleRowsSnapshot, releaseEligibleRowsSnapshot, BRANCH_ELIGIBLE_ROWS_FILE } =
   await import(pathToFileURL(process.env.LIB).href);
 const state = `${process.env.FM_HOME}/state`;
 const project = `${process.env.FM_HOME}/projects/approved`;
@@ -4895,6 +4900,81 @@ writeFileSync(`${state}/.main-eligible-rows`, "2\n");
 if ((await writeEligibleRowsSnapshot(state, ["2"], process.env.GRANT, "fixture")) !== "main-owned") {
   throw new Error("a row already claimed by main was not reported as main-owned");
 }
+unlinkSync(`${state}/.main-eligible-rows`);
+
+// A MAIN claim is row-local: old claimed rows cannot poison an unrelated
+// new task's grant. The same task/endpoint trigger remains conservatively MAIN.
+const { strict: assert } = await import("node:assert");
+const { spawnSync } = await import("node:child_process");
+writeFileSync(`${state}/task-b.meta`, `project=${project}\nwindow=fm-b\n`);
+const mixedClaims = "1\t1\tsignal\ttask-a.status\told\n1\t2\tsignal\ttask-b.status\tnew\n";
+writeFileSync(`${state}/.wake-queue`, mixedClaims);
+writeFileSync(`${state}/.main-eligible-rows`, "1\n");
+const claimed = scopeForUnreadWake(state, false);
+assert.deepEqual(claimed.eligibleSeqs, ["2"]);
+assert.deepEqual(claimed.eligibleTasks, ["task-b"]);
+assert.deepEqual(claimed.taskBySeq, {"2":"task-b"});
+assert.equal(dispositionForWakeTrigger("signal: task-b.status", claimed).eligible, true);
+for (const trigger of ["signal: task-a.status", "stale: fm-window", "signal: task-b.status task-a.status"]) {
+  assert.equal(dispositionForWakeTrigger(trigger, claimed).reason, "main-owned-trigger");
+}
+writeFileSync(`${state}/.wake-queue`, mixedClaims + "1\t3\theartbeat\theartbeat\theartbeat\n1\t4\tcheck\tcheck-key\tcheck: exact-check\n");
+writeFileSync(`${state}/.main-eligible-rows`, "1\n3\n4\n");
+const claimedKinds = scopeForUnreadWake(state, true);
+assert.deepEqual(claimedKinds.eligibleSeqs, ["2"]);
+assert.equal(dispositionForWakeTrigger("heartbeat", claimedKinds).reason, "main-owned-trigger");
+assert.equal(dispositionForWakeTrigger("check: exact-check", claimedKinds).reason, "main-owned-trigger");
+writeFileSync(`${state}/.wake-queue`, mixedClaims);
+// Absent is the supported empty record. Present empty, duplicate, malformed,
+// symlink and directory records never grant speculative ownership.
+for (const raw of ["", "1\n1\n", "1\n\n", "1\r\n", "bad\n"]) {
+  writeFileSync(`${state}/.main-eligible-rows`, raw);
+  assert.equal(scopeForUnreadWake(state, false).corrupted, true, JSON.stringify(raw));
+}
+unlinkSync(`${state}/.main-eligible-rows`);
+assert.deepEqual(scopeForUnreadWake(state, false).eligibleSeqs, ["1", "2"]);
+symlinkSync(`${state}/missing-claim`, `${state}/.main-eligible-rows`);
+assert.equal(scopeForUnreadWake(state, false).corrupted, true);
+unlinkSync(`${state}/.main-eligible-rows`);
+fs.mkdirSync(`${state}/.main-eligible-rows`);
+assert.equal(scopeForUnreadWake(state, false).corrupted, true);
+fs.rmdirSync(`${state}/.main-eligible-rows`);
+// A concurrent replacement during the read is uncertain, never a partial set.
+writeFileSync(`${state}/.main-eligible-rows`, "1\n");
+fs.readFileSync = function(path, ...args) {
+  const value = originalReadFileSync.call(this, path, ...args);
+  if (String(path) === `${state}/.main-eligible-rows`) {
+    writeFileSync(`${state}/replacement-claim`, "1\n2\n");
+    fs.renameSync(`${state}/replacement-claim`, `${state}/.main-eligible-rows`);
+  }
+  return value;
+};
+syncBuiltinESMExports();
+assert.equal(scopeForUnreadWake(state, false).corrupted, true);
+fs.readFileSync = originalReadFileSync; syncBuiltinESMExports();
+// Claim 2 after the scan: final locked publication still refuses the entire
+// previously eligible set. No partial grant and no queue mutation.
+assert.equal(await writeEligibleRowsSnapshot(state, claimed.eligibleSeqs, process.env.GRANT, "fixture"), "main-owned");
+assert.equal(fs.existsSync(`${state}/${BRANCH_ELIGIBLE_ROWS_FILE}`), false);
+assert.equal(readFileSync(`${state}/.wake-queue`, "utf8"), mixedClaims);
+writeFileSync(`${state}/.main-eligible-rows`, "1\n");
+assert.equal(await writeEligibleRowsSnapshot(state, claimed.eligibleSeqs, process.env.GRANT, "fixture"), "published");
+assert.equal(readFileSync(`${state}/${BRANCH_ELIGIBLE_ROWS_FILE}`, "utf8"), "2\n");
+const env = {...process.env, FM_STATE_OVERRIDE:state, FM_SUPERVISION_ACTOR:"branch"};
+const drainScript = process.env.GRANT.replace(/fm-wake-grant.sh$/, "fm-wake-drain.sh");
+const drain = spawnSync("bash", [drainScript], {env, encoding:"utf8"});
+assert.equal(drain.status, 0, drain.stderr);
+assert.ok(drain.stdout.includes("\t2\tsignal\ttask-b.status\t"));
+assert.ok(!drain.stdout.includes("\t1\tsignal\ttask-a.status\t"));
+const ack = drain.stderr.match(/--ack-through (\d+) --recovery-generation ([A-Za-z0-9._-]+)/);
+assert.ok(ack, drain.stderr);
+assert.equal(ack[1], "2");
+const consumed = spawnSync("bash", [drainScript, "--ack-through", ack[1], "--recovery-generation", ack[2]], {env, encoding:"utf8"});
+assert.equal(consumed.status, 0, consumed.stderr);
+assert.equal(readFileSync(`${state}/.wake-queue`, "utf8"), mixedClaims.split("\n")[0]+"\n");
+assert.equal(readFileSync(`${state}/.main-eligible-rows`, "utf8"), "1\n");
+assert.equal(await releaseEligibleRowsSnapshot(state, process.env.GRANT, "fixture"), true);
+unlinkSync(`${state}/.main-eligible-rows`);
 
 // A heartbeat is not vetoed or ridden into main by a co-present check row.
 // The check row is permanently main-owned in every mode, so it is excluded

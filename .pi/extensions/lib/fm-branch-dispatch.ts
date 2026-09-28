@@ -75,6 +75,8 @@ export interface UnreadWakeScope {
    */
   eligibleIdaResults: Array<{ trigger: string; row: string; task: string }>;
   taskByWakeKey: Record<string, string>;
+  /** Exact queued rows already claimed by MAIN; never branch candidates. */
+  mainOwnedRows: Array<{ seq: string; kind: string; key: string; payload: string }>;
 }
 
 const EMPTY_SCOPE: UnreadWakeScope = {
@@ -89,6 +91,7 @@ const EMPTY_SCOPE: UnreadWakeScope = {
   unresolvedRows: [],
   eligibleIdaResults: [],
   taskByWakeKey: {},
+  mainOwnedRows: [],
 };
 const UNSAFE_SCOPE: UnreadWakeScope = {
   status: "unsafe",
@@ -102,6 +105,7 @@ const UNSAFE_SCOPE: UnreadWakeScope = {
   unresolvedRows: [],
   eligibleIdaResults: [],
   taskByWakeKey: {},
+  mainOwnedRows: [],
 };
 
 // scopeForUnreadWake is the single owner of branch-eligibility classification
@@ -348,6 +352,32 @@ function hasOpenNeedsDecision(
   return [...open.values()].includes("needs-decision");
 }
 
+// Same record grammar as fm_wake_grant_rows_valid: a present claim is a
+// nonempty set of distinct decimal rows. Absence means no MAIN claim; malformed
+// or changing evidence fails closed. The locked publish remains the authority
+// for claims that race this observational read.
+function mainClaimRows(state: string): Set<string> {
+  const path = `${state}/.main-eligible-rows`;
+  let stat;
+  try { stat = lstatSync(path); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return new Set();
+    throw error;
+  }
+  if (!stat.isFile()) throw new Error("invalid MAIN claim file");
+  const text = readFileSync(path, "utf8");
+  const after = lstatSync(path);
+  if (!after.isFile() || stat.dev !== after.dev || stat.ino !== after.ino ||
+    stat.size !== after.size || stat.mtimeMs !== after.mtimeMs || stat.ctimeMs !== after.ctimeMs) {
+    throw new Error("MAIN claim changed during read");
+  }
+  const rows = (text.endsWith("\n") ? text.slice(0, -1) : text).split("\n");
+  if (rows.some((row) => !/^[0-9]+$/.test(row)) || new Set(rows).size !== rows.length) {
+    throw new Error("invalid MAIN claim rows");
+  }
+  return new Set(rows);
+}
+
 export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWakeScope {
   let queue = "";
   try {
@@ -355,6 +385,9 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
   } catch {
     return UNSAFE_SCOPE;
   }
+
+  let mainClaims: Set<string>;
+  try { mainClaims = mainClaimRows(state); } catch { return UNSAFE_SCOPE; }
 
   const rows = queue.split(/\r?\n/).filter((line) => line.length > 0);
   if (rows.length === 0) return EMPTY_SCOPE;
@@ -386,6 +419,7 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
     return UNSAFE_SCOPE;
   }
 
+  const mainOwnedRows: UnreadWakeScope["mainOwnedRows"] = [];
   const eligibleSeqs: string[] = [];
   const eligibleTasks = new Set<string>();
   const taskBySeq = new Map<string, string>();
@@ -405,6 +439,12 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
     const seq = fields[1];
     const kind = fields[2];
     const key = fields[3];
+    // Validate even excluded rows: a claim cannot hide queue corruption.
+    if (!["heartbeat", "check", "signal", "stale"].includes(kind)) return UNSAFE_SCOPE;
+    if (mainClaims.has(seq)) {
+      mainOwnedRows.push({ seq, kind, key, payload: fields.slice(4).join("\t") });
+      continue;
+    }
     if (kind === "heartbeat") {
       if (heartbeat) eligibleSeqs.push(seq);
       continue;
@@ -512,12 +552,13 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
     unresolvedRows,
     eligibleIdaResults,
     taskByWakeKey: Object.fromEntries(taskByKey),
+    mainOwnedRows,
   };
 }
 
 export type WakeTriggerDisposition = {
   eligible: boolean;
-  reason: "eligible" | "no-eligible-rows" | "check-main-only" | "decision-owned" | "unresolved-task" | "corrupt-queue";
+  reason: "eligible" | "no-eligible-rows" | "check-main-only" | "decision-owned" | "unresolved-task" | "corrupt-queue" | "main-owned-trigger";
 };
 
 function triggerKeys(message: string): string[] {
@@ -536,6 +577,15 @@ function taskIdentity(scope: UnreadWakeScope, key: string): string {
 export function dispositionForWakeTrigger(message: string, scope: UnreadWakeScope): WakeTriggerDisposition {
   if (scope.corrupted) return { eligible: false, reason: "corrupt-queue" };
   const keys = triggerKeys(message);
+  // Watcher messages do not carry seqs. If a signal/stale task alias can refer
+  // to a MAIN claim, conservatively keep that whole trigger on MAIN; unrelated
+  // new tasks remain eligible. Check payloads retain their exact identity.
+  if (scope.mainOwnedRows.some((row) =>
+    (["signal", "stale"].includes(row.kind) && keys.some((key) => taskIdentity(scope, key) === taskIdentity(scope, row.key))) ||
+    (row.kind === "check" && message === row.payload) ||
+    (row.kind === "heartbeat" && /^heartbeat($|:)/.test(message)))) {
+    return { eligible: false, reason: "main-owned-trigger" };
+  }
   const unresolved = new Set(scope.unresolvedRows.map((row) => row.key));
   if (keys.some((key) => unresolved.has(key) || unresolved.has(key.replace(/^fm-/, "")))) {
     return { eligible: false, reason: "unresolved-task" };
