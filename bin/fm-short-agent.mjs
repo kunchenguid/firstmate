@@ -23,7 +23,7 @@ import { spawn, execFile } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { validateOperations, bindOperations, executeOperations, processIdentity, operationReceipts, primaryOwner, reconcileOperationReceipts, settleMergeReceipt } from './fm-short-operations.mjs';
-import { shortPluginLoader, shortPlugin, shortPluginEnvironment } from './fm-short-plugin.mjs';
+import { shortPluginLoader, shortPluginEnvironment } from './fm-short-plugin.mjs';
 import { successfulNotification } from './fm-short-notification.mjs';
 const exec = promisify(execFile);
 const script = fileURLToPath(import.meta.url);
@@ -303,7 +303,8 @@ async function run(home, id) {
     stage = 'session-initialization';
     const settingsManager = sdk.SettingsManager.inMemory({ compaction: { enabled: false }, cacheWarming: 'off', transport: 'sse', retry: { enabled: false, provider: { maxRetries: 0 } } });
     stage = 'plugin-initialization';
-    const resourceLoader = await shortPluginLoader(sdk, dir, settingsManager, systemPrompt);
+    const loadedPlugin = await shortPluginLoader(sdk, dir, settingsManager, systemPrompt);
+    const resourceLoader = loadedPlugin.loader;
     const nativeProvider = runtime.getProvider('openai-codex');
     const sessionManager = sdk.SessionManager.inMemory(dir);
     ({ session } = await sdk.createAgentSession({ cwd: dir, agentDir: dir, modelRuntime: runtime, model, thinkingLevel: 'off',
@@ -317,7 +318,7 @@ async function run(home, id) {
     publish(path.join(dir, 'runtime.json'), { node: process.version,
       pi: optional(path.join(path.dirname(request.sdk), '../package.json'))?.version ?? 'unknown',
       provider: model.provider, model: model.id, extensions: extensions.extensions.map(e => e.path),
-      plugin: shortPlugin, pluginSettings: shortPluginEnvironment, compaction: false, providerRegistered: true, handlers: [...extensions.extensions[0].handlers.keys()],
+      plugin: loadedPlugin.plugin, pluginSettings: shortPluginEnvironment, compaction: false, providerRegistered: true, handlers: [...extensions.extensions[0].handlers.keys()],
       extensionErrors: extensions.errors.length + extensionErrors.length, parentMessages: session.messages.length, tools: session.getActiveToolNames(),
       cacheWarming: settingsManager.getCacheWarmingMode?.() ?? 'unknown', transport: 'sse', providerRetries: 0,
     });
@@ -359,7 +360,7 @@ async function run(home, id) {
     const last = [...session.messages].reverse().find(m => m.role === 'assistant');
     if (!last || ['error', 'aborted'].includes(last.stopReason)) throw Error('Pi provider failed or aborted; inspect journal');
     if (extensionErrors.length) throw Error('short-agent plugin handler failed');
-    publish(path.join(dir, 'plugin-result.json'), { ...shortPlugin, extensionErrors: extensionErrors.length,
+    publish(path.join(dir, 'plugin-result.json'), { ...loadedPlugin.plugin, extensionErrors: extensionErrors.length,
       nativeResponses: sessionManager.getBranch().filter(e => e.type === 'custom' && e.customType === 'openai-codex-compat-native-response').length,
       tools: session.getActiveToolNames() });
     const answer = session.getLastAssistantText() || 'No answer produced';

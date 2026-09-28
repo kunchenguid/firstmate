@@ -18,6 +18,7 @@ const runtime=await sdk.ModelRuntime.create();
 const available=await runtime.getAvailable();
 const model=available.find(m=>m.provider===process.env.FM_SHORT_LIVE_PROVIDER && m.id===process.env.FM_SHORT_LIVE_MODEL);
 assert.ok(model,'select explicit provider/model from `node bin/fm-short-agent.mjs models` with FM_SHORT_LIVE_PROVIDER and FM_SHORT_LIVE_MODEL');
+const installedPlugin=JSON.parse(fs.readFileSync(path.join(sdk.getAgentDir(),'npm/node_modules/pi-openai-codex-compat/package.json')));
 const settings=sdk.SettingsManager.inMemory({compaction:{enabled:false},retry:{enabled:false,provider:{maxRetries:0}},transport:'sse',cacheWarming:'off'});
 assert.equal(settings.getCacheWarmingMode(),'off','installed Pi actually disables cache warming');
 const loader=new sdk.DefaultResourceLoader({cwd:home,agentDir:home,settingsManager:settings,
@@ -59,9 +60,9 @@ try {
   assert.ok(started.at>=returnedAt,'child started after submit returned');
   assert.ok(!context.includes(sentinel));assert.ok(!journal.includes(sentinel));assert.equal(contextRecord.parentMessages,0);
   assert.deepEqual(contextRecord.tools,['read_material']);assert.match(journal,/"type":"read"/);
-  const pluginResult=JSON.parse(fs.readFileSync(path.join(dir,'plugin-result.json')));assert.ok(pluginResult.nativeResponses >= 2);assert.equal(pluginResult.extensionErrors,0);assert.deepEqual(pluginResult.tools,['read_material']);
+  const pluginResult=JSON.parse(fs.readFileSync(path.join(dir,'plugin-result.json')));assert.deepEqual({name:pluginResult.name,version:pluginResult.version},{name:installedPlugin.name,version:installedPlugin.version});assert.ok(pluginResult.nativeResponses >= 2);assert.equal(pluginResult.extensionErrors,0);assert.deepEqual(pluginResult.tools,['read_material']);
   const runtimeRecord=JSON.parse(fs.readFileSync(path.join(dir,'runtime.json')));
-  assert.equal(runtimeRecord.cacheWarming,'off');assert.equal(runtimeRecord.extensions.length,1);assert.deepEqual(runtimeRecord.plugin,{name:'pi-openai-codex-compat',version:'0.0.16'});assert.equal(runtimeRecord.providerRegistered,true);assert.equal(runtimeRecord.extensionErrors,0);
+  assert.equal(runtimeRecord.cacheWarming,'off');assert.equal(runtimeRecord.extensions.length,1);assert.deepEqual(runtimeRecord.plugin,{name:installedPlugin.name,version:installedPlugin.version});assert.equal(runtimeRecord.providerRegistered,true);assert.equal(runtimeRecord.extensionErrors,0);
   assert.ok(!fs.existsSync(path.join(home,'projects')));
   const evidence={pi:JSON.parse(fs.readFileSync(path.join(path.dirname(sdkEntry()),'../package.json'))).version,node:process.version,model:{provider:model.provider,id:model.id},home,
     submitMs:returnedAt-began,runnerStartedAfterReturnMs:started.at-returnedAt,parentReplyMs:parentReplyAt-returnedAt,stateAtPrompt,
@@ -118,7 +119,7 @@ try {
   const opDir=service.dir(opAccepted.id),opContext=JSON.parse(fs.readFileSync(path.join(opDir,'context.json')));
   assert.deepEqual(opContext.tools,['read_material','run_operations']);
   assert.equal(opContext.parentMessages,0);assert.ok(!JSON.stringify(opContext).includes(sentinel));
-  const opPlugin=JSON.parse(fs.readFileSync(path.join(opDir,'plugin-result.json')));assert.ok(opPlugin.nativeResponses >= 2);assert.equal(opPlugin.extensionErrors,0);assert.deepEqual(opPlugin.tools,['read_material','run_operations']);
+  const opPlugin=JSON.parse(fs.readFileSync(path.join(opDir,'plugin-result.json')));assert.deepEqual({name:opPlugin.name,version:opPlugin.version},{name:installedPlugin.name,version:installedPlugin.version});assert.ok(opPlugin.nativeResponses >= 2);assert.equal(opPlugin.extensionErrors,0);assert.deepEqual(opPlugin.tools,['read_material','run_operations']);
   const opReceipt=JSON.parse(fs.readFileSync(path.join(opDir,'operation-0.receipt.json')));
   assert.notEqual(opReceipt.executor.pid,process.pid);
   assert.equal(git('-C',project,'rev-parse','HEAD'),expectedHead,'real operation advances the isolated clone');

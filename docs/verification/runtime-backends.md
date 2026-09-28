@@ -1165,11 +1165,11 @@ ok - short operation grants, real sync/recovery effects, receipts and refusals
 FM_TEST_SUMMARY total=3 failed=0 skipped_gate=0
 ```
 
-On 2026-09-27, Pi 0.87.1 and Node v22.22.2 passed the isolated SDK guard with authenticated `openai-codex/gpt-5.6-luna` for both read-only analysis and an authorized fast-forward of a disposable local clone.
+On 2026-09-29, Pi 0.87.1, Node v22.22.2, and installed `pi-openai-codex-compat` 0.0.17 passed the isolated SDK guard with authenticated `openai-codex/gpt-5.6-luna` for both read-only analysis and an authorized fast-forward of a disposable local clone.
 Refresh with `FM_SHORT_AGENT_LIVE_E2E=1 FM_SHORT_LIVE_PROVIDER=openai-codex FM_SHORT_LIVE_MODEL=gpt-5.6-luna bin/fm-test-run.sh tests/fm-short-agent-live-e2e.test.sh`.
 Both submitted through the loaded candidate extension and returned before child completion; the parent answered another real-model prompt while each child was active.
 Both children excluded the parent-only sentinel.
-The installed SDK read back `cacheWarming: "off"` and disabled compaction; each child loaded only `pi-openai-codex-compat@0.0.16`, with zero extension errors and zero starting parent messages.
+The installed SDK read back `cacheWarming: "off"` and disabled compaction; each child loaded only `pi-openai-codex-compat@0.0.17`, with zero extension errors and zero starting parent messages.
 Both children persisted the plugin's native response markers, proving execution by its registered provider rather than package presence alone.
 Each successful child used two model requests and one tool call, while MAIN executed zero operation commands.
 The sync receipt identifies the child-owned script executor, and readback verified the changed clone head and file contents.
@@ -1183,7 +1183,8 @@ The transport journal retained `codes: ["ECONNREFUSED"]`, while the original pro
 Restoring the normal environment allowed the real fast-forward above without changing provider, model, or extension isolation.
 This demonstrates the diagnostic boundary and refusal behavior; it does not identify the cause of an earlier failure whose underlying transport evidence was not retained.
 The portable suites also cover nested/cyclic transport causes, secret exclusion, failure after a completed operation, refusal of provider-internal HTTP replay, and no operation replay after duplicate submission or reconciliation.
-Plugin admission tests reject missing or mismatched packages, failed loading, extra discovered extensions and unexpected tool registrations.
+The zero-request initialization guard loaded the installed 0.0.17 package through the candidate loader, observed provider replacement and the required `session_start` handler, and retained no registered or active plugin tools, no parent messages, no extension errors, and no initialization network calls.
+Portable public-behavior tests admit current and future package-version strings without treating them as vendor-compatibility proof, while rejecting wrong package identity or entrypoint, missing required Pi or plugin capabilities, failed loading, extra discovered extensions, and unexpected tool registrations.
 Short sessions initialize the plugin compaction handlers but disable automatic compaction; provider or model context and output limits still apply and are not Firstmate controls.
 This guard does not perform a primary `/compact`.
 

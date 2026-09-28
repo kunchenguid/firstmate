@@ -7,8 +7,10 @@ Ordinary ship/scout dispatch is unchanged.
 
 ## Enable and submit
 
-This opt-in requires an installed Pi SDK, Node, an authenticated supported model, the normal Pi supervision outcome extension, and the exact `pi-openai-codex-compat@0.0.16` user package.
-Install the required package with `pi install npm:pi-openai-codex-compat@0.0.16`, then verify that `pi list` reports that exact version before starting the primary session.
+This opt-in requires an installed Pi SDK, Node, an authenticated supported model, the normal Pi supervision outcome extension, and the `pi-openai-codex-compat` user package.
+Install the required package with `pi install npm:pi-openai-codex-compat`, then verify that `pi list` reports that package identity before starting the primary session.
+ShortTask records the installed package version as evidence but does not use a version string, allowlist, or range as an admission boundary.
+Instead, initialization validates the canonical package identity and declared in-package entrypoint, loads only that entrypoint, requires the Pi resource APIs and plugin startup capabilities it uses, and verifies provider registration and the isolated active-tool surface before prompting.
 Start the intended primary Pi session with `FM_SHORT_AGENT_ENABLED=1` and its explicit absolute `FM_HOME`.
 Load `.pi/extensions/fm-short-agent.ts` alongside the normal primary extensions.
 The tools require that session or an ancestor to own the home's session lock.
@@ -113,8 +115,8 @@ Every child gets `read_material`, which accepts only a material ID and a selecte
 Only an explicitly granted operation task also gets the argument-free `run_operations` tool.
 Neither tool accepts shell commands, new paths, expanded grants, or arbitrary recovery choices.
 The child receives no parent messages, context files, skills, prompt templates, or arbitrary extensions.
-The sole extension exception is the explicitly loaded `pi-openai-codex-compat@0.0.16` package under the original Pi agent directory's `npm/node_modules`.
-The child verifies its exact identity, version and entrypoint and fails closed on missing, mismatched or failed initialization; it never installs packages.
+The sole extension exception is the explicitly loaded `pi-openai-codex-compat` package under the original Pi agent directory's `npm/node_modules`.
+The child verifies the exact package identity and entrypoint, records the installed version, and fails closed on missing, mismatched, capability-deficient, or failed initialization; it never installs packages.
 [`bin/fm-short-plugin.mjs`](../bin/fm-short-plugin.mjs) owns this supported SDK loader path, its resource override, and the fixed child-only plugin settings.
 All plugin shell, filesystem and network tool registrations and management commands are removed before session construction; unexpected tool registrations refuse initialization.
 Plugin config and installation identity use the child directory, while the already initialized model runtime retains its original authentication source.

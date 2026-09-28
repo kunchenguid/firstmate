@@ -22,7 +22,8 @@ const fetch = globalThis.fetch;
 let networkCalls = 0, session;
 globalThis.fetch = async () => { networkCalls++; throw Error('unexpected network during isolated initialization'); };
 try {
-  const loader = await shortPluginLoader(sdk, dir, settingsManager, 'Only this task.');
+  const loadedPlugin = await shortPluginLoader(sdk, dir, settingsManager, 'Only this task.');
+  const loader = loadedPlugin.loader;
   assert.equal(loader.getExtensions().errors.length, 0);
   assert.equal(loader.getExtensions().extensions.length, 1);
   assert.equal(loader.getExtensions().extensions[0].tools.size, 0);
@@ -47,7 +48,7 @@ try {
   assert.equal(networkCalls, 0);
   assert.equal(settingsManager.getCompactionSettings().enabled, false);
   assert.equal(settingsManager.getCacheWarmingMode(), 'off');
-  fs.writeFileSync(path.join(tmp, 'plugin-sdk-evidence.json'), JSON.stringify({ plugin: 'pi-openai-codex-compat@0.0.16',
+  fs.writeFileSync(path.join(tmp, 'plugin-sdk-evidence.json'), JSON.stringify({ plugin: loadedPlugin.plugin,
     extensions: loader.getExtensions().extensions.length, registeredExtensionTools: 0, activeTools: [],
     messages: 0, initializationNetworkCalls: networkCalls, errors, payload: { text: payload.text, reasoning: payload.reasoning, tools: payload.tools },
     compaction: 'disabled', cacheWarming: 'off', unselectedExtensionsExcluded: true }));

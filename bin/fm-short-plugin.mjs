@@ -3,7 +3,7 @@
 // its provider, request, transcript and compaction handlers remain initialized.
 import fs from 'node:fs';
 import path from 'node:path';
-export const shortPlugin = { name: 'pi-openai-codex-compat', version: '0.0.16' };
+export const shortPlugin = { name: 'pi-openai-codex-compat', entrypoint: './extensions/index.ts' };
 export const shortPluginEnvironment = {
   FAST_MODE: 'false', RESPONSES_LITE: 'false', APPLY_PATCH: 'false',
   APPLY_PATCH_DEBUG: 'false', APPLY_PATCH_DIAGNOSTICS: 'false', TOOL_BACKGROUND: 'subtle',
@@ -13,15 +13,20 @@ export const shortPluginEnvironment = {
 };
 const pluginTools = new Set(['exec_command', 'write_stdin', 'shell_command', 'apply_patch', 'image_gen.imagegen', 'web.run']);
 export async function shortPluginLoader(sdk, dir, settingsManager, systemPrompt) {
+  if (typeof sdk?.getAgentDir !== 'function' || typeof sdk?.DefaultResourceLoader !== 'function') {
+    throw Error('short-agent required Pi resource APIs unavailable');
+  }
   const packageDir = path.join(sdk.getAgentDir(), 'npm/node_modules', shortPlugin.name);
   let manifest;
   try { manifest = JSON.parse(fs.readFileSync(path.join(packageDir, 'package.json'), 'utf8')); }
-  catch { throw Error(`short-agent requires installed ${shortPlugin.name}@${shortPlugin.version}`); }
-  if (manifest.name !== shortPlugin.name || manifest.version !== shortPlugin.version ||
-      JSON.stringify(manifest.pi?.extensions) !== JSON.stringify(['./extensions/index.ts'])) {
-    throw Error('short-agent plugin identity/version/entrypoint mismatch');
+  catch { throw Error(`short-agent requires installed ${shortPlugin.name}`); }
+  if (manifest.name !== shortPlugin.name ||
+      JSON.stringify(manifest.pi?.extensions) !== JSON.stringify([shortPlugin.entrypoint])) {
+    throw Error('short-agent plugin identity/entrypoint mismatch');
   }
-  const entry = fs.realpathSync(path.join(packageDir, 'extensions/index.ts'));
+  const plugin = { name: shortPlugin.name,
+    version: typeof manifest.version === 'string' && manifest.version.trim() ? manifest.version : 'unknown' };
+  const entry = fs.realpathSync(path.join(packageDir, shortPlugin.entrypoint));
   if (!entry.startsWith(fs.realpathSync(packageDir) + path.sep)) throw Error('short-agent plugin entry escapes package');
   // Runtime authentication has already been initialized from its original store.
   // Plugin config and installation identity now belong only to this child.
@@ -36,6 +41,11 @@ export async function shortPluginLoader(sdk, dir, settingsManager, systemPrompt)
         throw Error('short-agent plugin load failed or unexpected extension discovered');
       }
       const extension = result.extensions[0];
+      if (!(extension.tools instanceof Map) || !(extension.commands instanceof Map) ||
+          !(extension.shortcuts instanceof Map) || !(extension.handlers instanceof Map) ||
+          !extension.handlers.has('session_start')) {
+        throw Error('short-agent plugin required runtime capabilities unavailable');
+      }
       for (const name of extension.tools.keys()) if (!pluginTools.has(name)) throw Error('short-agent plugin registered an unexpected tool');
       // Removing registrations, not just hiding active names, prevents later
       // plugin activation from granting filesystem, shell or network tools.
@@ -46,5 +56,5 @@ export async function shortPluginLoader(sdk, dir, settingsManager, systemPrompt)
     },
   });
   await loader.reload();
-  return loader;
+  return { loader, plugin };
 }
