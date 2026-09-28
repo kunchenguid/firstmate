@@ -127,7 +127,7 @@ fi
 # Each flagged reread is claimed under the same lock its convergence holds and
 # is flagged again only when it is deferred again or that lock is busy.
 retry_deferred_rereads() {
-  local id home meta flag remote_host lock marker rc failed=0
+  local id home meta flag remote_host lock marker placement message rc failed=0
   while IFS='|' read -r id home _window meta; do
     flag=$(fm_secondmate_reread_deferred_path "$STATE" "$id") || continue
     [ -f "$flag" ] || continue
@@ -146,15 +146,17 @@ retry_deferred_rereads() {
     fi
     rc=0
     if [ -n "$remote_host" ]; then
-      marker=$(fm_secondmate_nudge_marker_path "$STATE" "$id")
-      if [ "$(fm_meta_get "$marker" remote)" = 1 ]; then
-        FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" \
-          "$SCRIPT_DIR/fm-send.sh" "fm-$id" --automatic "$FM_REMOTE_SECOND_MATE_NUDGE_MESSAGE" >/dev/null 2>&1 || rc=$?
-        [ "$rc" -ne 0 ] || rm -f -- "$marker"
-      fi
+      placement=1 message=$FM_REMOTE_SECOND_MATE_NUDGE_MESSAGE
     else
+      placement=0 message=$FM_SECOND_MATE_NUDGE_MESSAGE
       FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" \
         fm_config_reread_retry_pending "$id" "$VALIDATED_HOME" || rc=$?
+    fi
+    marker=$(fm_secondmate_nudge_marker_path "$STATE" "$id")
+    if [ "$rc" -eq 0 ] && [ -f "$marker" ] && [ "$(fm_meta_get "$marker" remote)" = "$placement" ]; then
+      FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" \
+        "$SCRIPT_DIR/fm-send.sh" "fm-$id" --automatic "$message" >/dev/null 2>&1 || rc=$?
+      [ "$rc" -ne 0 ] || rm -f -- "$marker"
     fi
     case "$rc" in
       0) ;;

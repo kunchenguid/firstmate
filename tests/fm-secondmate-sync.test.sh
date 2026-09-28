@@ -571,6 +571,47 @@ test_bootstrap_nudge_defers_while_the_mate_waits_on_a_decision() {
   pass "T8g bootstrap defers the re-read nudge while the mate waits on its decision"
 }
 
+# Contract: a deferred local instruction nudge is flagged for the watcher, whose
+# --retry-deferred poll leaves it alone while the decision is open and delivers
+# it once the decision closes, without waiting for the next session start.
+test_deferred_local_nudge_is_retried_after_the_decision_closes() {
+  local w c1 fakebin marker flag out status
+  w=$(new_world nudge-deferred-retry)
+  c1=$(head_of "$w/main")
+  add_sm_worktree "$w" sm-instr "$c1"
+  bump_primary "$w" instr
+  fakebin=$(make_fake_toolchain "$w")
+  printf 'needs-decision [key=pick]: alpha or beta?\n' > "$w/home/state/sm-instr.status"
+
+  PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 FM_FAKE_TMUX_LOG="$w/tmux.log" \
+    "$ROOT/bin/fm-bootstrap.sh" >/dev/null 2>&1
+  marker="$w/home/state/.secondmate-nudge-pending/sm-instr.pending"
+  flag="$w/home/state/.secondmate-reread-deferred/sm-instr"
+  assert_present "$marker" "precondition: the deferred nudge should keep its retry marker"
+  assert_present "$flag" "a deferred local nudge was not flagged for the watcher's retry"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 FM_FAKE_TMUX_LOG="$w/tmux.log" \
+    "$ROOT/bin/fm-config-push.sh" --retry-deferred 2>&1); status=$?
+  expect_code 0 "$status" "a retry still waiting on the decision is not a failure: $out"
+  [ -z "$(find "$w/home/state/sm-instr.inbox" -name '*.msg' 2>/dev/null)" ] \
+    || fail "the retry woke a mate still waiting on its decision"
+  assert_present "$marker" "a retry still waiting on the decision must keep the marker"
+  assert_present "$flag" "a retry still waiting on the decision must stay flagged"
+
+  printf 'resolved [key=pick]: answered: alpha\n' >> "$w/home/state/sm-instr.status"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 FM_FAKE_TMUX_LOG="$w/tmux.log" \
+    "$ROOT/bin/fm-config-push.sh" --retry-deferred 2>&1); status=$?
+  expect_code 0 "$status" "the deferred nudge should be delivered once the decision closes: $out"
+  grep -rqF "please re-read your AGENTS.md" "$w/home/state/sm-instr.inbox" 2>/dev/null \
+    || fail "the deferred instruction nudge was not delivered after the decision closed"
+  assert_absent "$marker" "a delivered nudge should clear its retry marker"
+  assert_absent "$flag" "a delivered nudge stayed flagged, so the watcher would keep retrying it"
+  pass "T8i the watcher retry delivers a deferred local nudge once the decision closes"
+}
+
 # Contract: the deferral is classified by fm-send's EXIT STATUS, never by the
 # shape of its output. fm-send runs the supervision guard, which prints a
 # worktree-tangle banner whenever the primary checkout sits on a feature branch
@@ -1421,6 +1462,7 @@ test_bootstrap_nudge_send_uses_state_override
 test_bootstrap_nudge_retry_rejects_malformed_marker_id
 test_bootstrap_nudge_failure_records_retry_marker
 test_bootstrap_nudge_defers_while_the_mate_waits_on_a_decision
+test_deferred_local_nudge_is_retried_after_the_decision_closes
 test_bootstrap_nudge_defers_when_the_send_prints_a_banner_first
 test_bootstrap_nudge_retry_is_idempotent
 test_bootstrap_nudge_retry_refuses_changed_home

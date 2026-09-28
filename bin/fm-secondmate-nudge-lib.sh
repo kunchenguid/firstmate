@@ -16,7 +16,7 @@ fm_secondmate_nudge_marker_path() { # <state-dir> <id>
 
 # A reread send deferred because the mate waited on its own open decision or
 # blocker (fm-send --automatic exit 4) is flagged here, whether it was a local
-# config-reread generation or a remote route's marker above. The watcher
+# config-reread generation or a local or remote marker above. The watcher
 # delivers a flagged reread once that decision closes
 # (fm-config-push.sh --retry-deferred) instead of leaving it for the next config
 # push or session start. A failed send is never flagged; it keeps that retry.

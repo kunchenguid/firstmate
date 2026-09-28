@@ -409,14 +409,15 @@ secondmate_sync() {
   }
 
   # fm-send exits 4 with a "deferred:" line while the mate waits on its own open
-  # decision; the retained marker retries the nudge at a later session start,
-  # and a remote route's deferral is also flagged so the watcher sends it once
-  # that decision closes (fm_secondmate_reread_mark_deferred).
+  # decision; the retained marker keeps the nudge, and the deferral is flagged
+  # for a local home and a remote route alike so the watcher sends it once that
+  # decision closes (fm_secondmate_reread_mark_deferred).
   # The exit status is what classifies the result, not the shape of the output:
   # anything the send prints ahead of that line must not read as a failure.
   secondmate_nudge_unsent() {  # <id> <fm-send-output> <fm-send-status>
     local detail
     if [ "${3:-1}" -eq 4 ]; then
+      fm_secondmate_reread_mark_deferred "$STATE" "$1" || true
       detail=$(printf '%s\n' "$2" | grep -m1 '^deferred:') || detail=$(first_line "$2")
       echo "NUDGE_SECONDMATES: secondmate $1: $detail"
     else
@@ -660,7 +661,6 @@ secondmate_sync() {
         rm -f "$remote_marker"
         [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" != 1 ] || echo "BOOTSTRAP_INFO: nudged remote fm-$id after convergence"
       else
-        [ "$send_rc" -ne 4 ] || fm_secondmate_reread_mark_deferred "$STATE" "$id" || true
         secondmate_nudge_unsent "$id" "$out" "$send_rc"
       fi
     elif [ "$converged" -eq 1 ]; then
