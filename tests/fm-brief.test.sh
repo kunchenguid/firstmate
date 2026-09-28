@@ -944,6 +944,39 @@ test_ship_and_scout_teach_validation_round_pause() {
   pass "fm-brief.sh: ship and scout scaffolds teach validation-round pauses"
 }
 
+# Issue #5545: an interactive harness ends the turn when the model emits prose,
+# so a worker that announces a next step and stops sits frozen until firstmate
+# steers it by hand. Both scaffolds must forbid ending a turn on an announced
+# next step, and must say the worker's own driving of its report or pipeline
+# needs no supervisor approval it did not request through needs-decision.
+test_ship_and_scout_forbid_ending_a_turn_on_an_announced_step() {
+  local home kind id brief
+  home="$TMP_ROOT/anti-stall-home"
+  mkdir -p "$home/data"
+
+  for kind in ship scout; do
+    id="brief-anti-stall-$kind"
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes >/dev/null 2>&1
+    fi
+    brief="$home/data/$id/brief.md"
+    assert_grep "on the announcement, or report \`paused:\`/\`blocked:\` with the reason." "$brief" \
+      "$kind brief did not forbid ending a turn on an announced next step"
+    if [ "$kind" = ship ]; then
+      assert_grep "Your own validation and delivery path needs no such approval" "$brief" \
+        "ship brief did not grant standing authority to drive its own validation and delivery path"
+    else
+      assert_grep "Your own investigation and report-writing needs no such approval" "$brief" \
+        "scout brief did not grant standing authority to drive its own report, or wrongly copied the ship pipeline wording"
+      assert_no_grep "validation and delivery path" "$brief" \
+        "scout brief copied the ship-specific validation/delivery wording instead of its own report contract"
+    fi
+  done
+  pass "fm-brief.sh: ship and scout scaffolds forbid stalling on an announced next step"
+}
+
 test_scout_and_secondmate_load_decision_hold_policy() {
   local home scout charter
   home="$TMP_ROOT/decision-policy-home"
@@ -1348,6 +1381,7 @@ test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_ship_and_scout_teach_validation_round_pause
+test_ship_and_scout_forbid_ending_a_turn_on_an_announced_step
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
 test_scout_lavish_line_follows_presentation_floor
