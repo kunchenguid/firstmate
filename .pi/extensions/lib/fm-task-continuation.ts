@@ -11,6 +11,7 @@ import { encodeFirstmateOperationalInputWith } from "./fm-operational-input.ts";
 
 type Observation = { task_id: string; state: string; reason: string; key: string; revision?: number };
 type Reconciliation = { task_id: string; reason: string; key: string };
+type OwnershipDeferral = { task_id: string; reason: string; key: string };
 type InputReceipt = { id: string; text: string; task?: string; answer?: string };
 type Admission = { content: string; admissions: string[]; escalations: { id: string; task: string; reason: string; recovery?: boolean; reconciliation?: boolean }[];
   canNotify: () => boolean; canContinue: () => boolean };
@@ -25,6 +26,16 @@ const INTERVAL_MS = 30_000;
 const ATTEMPTS = 2;
 const BATCH = 8;
 const atom = (s: string) => /^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(s);
+
+function temporaryOwnershipRefusal(error: unknown, task: string): string | undefined {
+  const reason = String(error instanceof Error ? error.message : error).trim();
+  const prefix = reason.startsWith("error: ") ? reason.slice(7) : reason;
+  const action = `goal reconciliation refused - task '${task}'`;
+  if (prefix === `${action} has a pending short-operation receipt` ||
+      prefix === `${action} acquired a pending short-operation receipt while waiting` ||
+      ["main", "branch", "short"].some((actor) => prefix ===
+        `${action} is leased to the ${actor} supervision actor (state/.lease-${task}); retry after that actor releases it`)) return prefix;
+}
 
 // The existing heartbeat owner accepts and starts a bounded public readback.
 // Its receipt permits only logical-run release, not semantic task completion.
@@ -108,10 +119,29 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
       "bound release evidence, deadline and recovery trigger. Do not revive archived work or bypass authority.";
   }
 
-  async function collect(): Promise<{ observations: Observation[]; reconciliations: Reconciliation[] }> {
+  function deferOwnership(item: OwnershipDeferral) {
+    const id = `ownership:${item.task_id}`;
+    let pace = pacing.get(id);
+    if (!pace || pace.key !== item.key) pace = { key: item.key, attempts: 0, after: 0 };
+    pace.attempts = Math.min(Number.MAX_SAFE_INTEGER, pace.attempts + 1);
+    pace.after = Date.now() + Math.min(900_000, INTERVAL_MS * 2 ** Math.min(pace.attempts - 1, 5));
+    pacing.set(id, pace);
+    pi.appendEntry(PACING_ENTRY, { id, ...pace });
+  }
+
+  function clearOwnershipDeferral(task: string) {
+    const id = `ownership:${task}`;
+    if (!pacing.get(id)?.key) return;
+    pacing.delete(id);
+    pi.appendEntry(PACING_ENTRY, { id, key: "", attempts: 0, after: 0 });
+  }
+
+  async function collect(): Promise<{ observations: Observation[]; reconciliations: Reconciliation[];
+    deferrals: OwnershipDeferral[] }> {
     const epoch = generation;
     const observations: Observation[] = [];
     const reconciliations: Reconciliation[] = [];
+    const deferrals: OwnershipDeferral[] = [];
     const unrouted = [...inputs.values()].filter((value) => !value.task && !value.answer);
     for (let i = 0; i < Math.min(BATCH, unrouted.length); i++) {
       const value = unrouted[(inputCursor + i) % unrouted.length];
@@ -124,6 +154,8 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
     scanScope = ids;
     for (let i = 0; i < Math.min(BATCH, ids.length); i++) {
       const id = ids[(cursor + i) % ids.length];
+      const ownership = pacing.get(`ownership:${id}`);
+      if (ownership?.key && Date.now() < ownership.after) continue;
       try {
         if (lstatSync(join(data, id)).isSymbolicLink()) throw new Error("unsafe task directory");
         observations.push(await command(["observe", id]));
@@ -131,11 +163,13 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
         if (epoch !== generation || !owns()) throw error;
         const reason = String(error instanceof Error ? error.message : error).slice(0, 1200);
         const key = createHash("sha256").update(`${id}\0${reason}`).digest("hex");
-        reconciliations.push({ task_id: id, reason, key });
+        const temporary = temporaryOwnershipRefusal(error, id);
+        if (temporary) deferrals.push({ task_id: id, reason: temporary, key });
+        else reconciliations.push({ task_id: id, reason, key });
       }
     }
     cursor = ids.length ? (cursor + BATCH) % ids.length : 0;
-    return { observations, reconciliations };
+    return { observations, reconciliations, deferrals };
   }
 
   function readDelivery(entry: { customType?: string; details?: unknown; timestamp?: string | number }) {
@@ -152,10 +186,10 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
     if (!current()) throw new Error("readback receiver generation changed");
     const started = Date.now();
     // The receiver has actually begun and executed readback before this receipt.
-    const { observations, reconciliations } = await collect();
+    const { observations, reconciliations, deferrals } = await collect();
     if (!current()) throw new Error("readback receiver generation changed");
     const pending = observations.filter((item) => !["accepted", "archived", "running", "blocked"].includes(item.state));
-    if (!scanScope.length && !pending.length && !reconciliations.length) return;
+    if (!scanScope.length && !pending.length && !reconciliations.length && !deferrals.length) return;
     // Boundary drafts are persisted without message_end. Read the actual
     // session branch before acknowledging their reserved admission.
     for (const entry of ctx.sessionManager.getBranch()) {
@@ -193,6 +227,7 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
     const admissions: string[] = [];
     const escalations: Admission["escalations"] = [];
     try {
+      for (const item of deferrals) deferOwnership(item);
       for (const item of reconciliations) {
         const paceId = `reconcile:${item.task_id}`;
         let pace = pacing.get(paceId);
@@ -267,7 +302,17 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
           pi.appendEntry(PACING_ENTRY, { id: item.task_id, ...pace });
           admission = pace.reserved;
         } else {
-          const coordinated = await command(["coordinate", item.task_id, "--expected-revision", String(item.revision), "--record", proofFile]);
+          let coordinated: { admission?: string; escalation?: string; recovery?: string };
+          try {
+            coordinated = await command(["coordinate", item.task_id, "--expected-revision", String(item.revision), "--record", proofFile]);
+            clearOwnershipDeferral(item.task_id);
+          } catch (error) {
+            const reason = temporaryOwnershipRefusal(error, item.task_id);
+            if (!reason) throw error;
+            deferOwnership({ task_id: item.task_id, reason,
+              key: createHash("sha256").update(`${item.task_id}\0${reason}`).digest("hex") });
+            continue;
+          }
           // Read the canonical receiver back before releasing this logical run.
           const retained = await command(["lifecycle", item.task_id]);
           if (retained?.coordination?.receipt?.entry_id !== entry.id ||
