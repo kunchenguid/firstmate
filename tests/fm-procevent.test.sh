@@ -161,12 +161,14 @@ wait_for() {  # <file> [tries]
 # result lands before the runner publishes and exits, and a retire or re-arm in
 # that gap still meets a live runner.
 wait_capture() {  # <home> <source-id> [tries]
-  local home=$1 id=$2 n=${3:-100}
+  local home=$1 id=$2 n=${3:-100} claim pid
   local _
+  claim="$FM_PROCEVENT_CLAIM_ROOT/$id.claim"
   for _ in $(seq 1 "$n"); do
-    if first_result "$home" "$id" >/dev/null 2>&1 \
-      && [ "$(pe "$home" list | awk -v source="$id" '$1 == source { print $3; exit }')" = none ]; then
-      return 0
+    if first_result "$home" "$id" >/dev/null 2>&1; then
+      [ -e "$claim" ] || return 0
+      pid=$(sed -n '2p' "$claim" 2>/dev/null || true)
+      case "$pid" in ''|*[!0-9]*) ;; *) kill -0 "$pid" 2>/dev/null || return 0 ;; esac
     fi
     sleep 0.1
   done
@@ -1560,8 +1562,10 @@ wait_capture "$HADOPT" "$adopt_id" \
   || fail "the firstmate fixture capture never landed"
 [ ! -f "$HADOPT/state/procevent-inbox/$adopt_id.1.handled" ] \
   || fail "the firstmate fixture capture was already acknowledged"
-PATH="$ADOPT_BIN:$PATH" FM_HOME="$HADOPT" \
-  "$ROOT/bin/fm-procevent-lavish.sh" retire "$ADOPT_ART" >/dev/null
+if PATH="$ADOPT_BIN:$PATH" FM_HOME="$HADOPT" \
+  "$ROOT/bin/fm-procevent-lavish.sh" retire "$ADOPT_ART" >/dev/null 2>&1; then
+  fail "retirement orphaned firstmate's unacknowledged capture"
+fi
 if PATH="$ADOPT_BIN:$PATH" FM_HOME="$HADOPT" \
   "$ROOT/bin/fm-procevent-lavish.sh" arm "$ADOPT_ART" --for worker-5 \
   >/dev/null 2>"$TMP_ROOT/adopt-arm.err"; then
@@ -1571,9 +1575,11 @@ assert_contains "$(cat "$TMP_ROOT/adopt-arm.err")" "firstmate" \
   "the refusal did not name the owner the orphaned capture belongs to"
 [ ! -f "$HADOPT/state/procevent-inbox/$adopt_id.1.handled" ] \
   || fail "a refused arm still acknowledged another owner's capture"
-[ ! -e "$HADOPT/state/procevent/$adopt_id.source" ] \
-  || fail "a refused arm still published its task-owned registration"
-pass "an orphaned capture is not acknowledged by a worker it never reached"
+assert_present "$HADOPT/state/procevent/$adopt_id.source" \
+  "a refused arm discarded firstmate's pending Lavish ownership"
+assert_grep 'kind=lavish-owned' "$HADOPT/state/procevent/$adopt_id.source" \
+  "a refused arm replaced firstmate's pending Lavish ownership"
+pass "an unacknowledged capture is not adopted by another owner"
 
 # --- end-user-aligned regression: a board is armed for a reachable owner ------
 # Captured feedback goes straight to the owning task's steering inbox, so a task

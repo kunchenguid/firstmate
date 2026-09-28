@@ -628,8 +628,9 @@ cmd_register_lavish_owner() {
   fm_procevent_source_lock_acquire "$id" || die "cannot lock the source"
   if [ ! -e "$(source_file "$id")" ] && [ ! -L "$(source_file "$id")" ] \
     && { [ -e "$(fm_procevent_claim_path "$id")" ] || [ -L "$(fm_procevent_claim_path "$id")" ]; } \
-    && { ! fm_procevent_claim_load_locked "$id" 2>/dev/null \
-      || ! fm_procevent_claim_owned_by_state "$STATE" "$FM_HOME"; }; then
+    && fm_procevent_claim_load_locked "$id" 2>/dev/null \
+    && ! fm_procevent_claim_owned_by_state "$STATE" "$FM_HOME" \
+    && fm_procevent_claim_protects_pending_lavish_locked "$id"; then
     fm_procevent_source_lock_release "$id"
     die "cannot arm Lavish source $id while another home retains its ownership"
   fi
@@ -726,7 +727,8 @@ cmd_register_lavish_owner() {
         ;;
       1)
         if [ -e "$(fm_procevent_claim_path "$id")" ]; then
-          if ! fm_procevent_claim_owned_by_state "$STATE" "$FM_HOME" \
+          if { ! fm_procevent_claim_owned_by_state "$STATE" "$FM_HOME" \
+              && fm_procevent_claim_protects_pending_lavish_locked "$id"; } \
             || fm_procevent_claim_undisplaceable_locked "$id"; then
             fm_procevent_source_lock_release "$id"
             die "cannot safely hand off the firstmate-owned Lavish listener: $id"

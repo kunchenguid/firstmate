@@ -665,6 +665,21 @@ fm_procevent_claim_recorded_state_root_valid() {
     && [ "$state_mode" = "$FM_PROCEVENT_CLAIM_STATE_MODE" ]
 }
 
+fm_procevent_claim_protects_pending_lavish_locked() {  # <source-id>
+  local id=$1 state registration adapter identity inbox
+  state=${FM_PROCEVENT_CLAIM_STATE_ROOT:-}
+  registration="$FM_PROCEVENT_CLAIM_REG_DIR/$id.source"
+  [ -n "$state" ] && fm_procevent_claim_recorded_state_root_valid || return 1
+  [ -f "$registration" ] && [ ! -L "$registration" ] || return 1
+  identity=$(fm_pr_file_identity "$registration" 2>/dev/null) || return 1
+  [ "$identity" = "$FM_PROCEVENT_CLAIM_REG_IDENTITY" ] || return 1
+  adapter=$(sed -n 's/^adapter=//p' "$registration" | head -1)
+  [ "$adapter" = lavish ] || return 1
+  inbox=$(fm_procevent_inbox_dir "$state")
+  fm_procevent_pending "$state" \
+    | awk -v prefix="$inbox/$id." 'index($0, prefix) == 1 { found=1; exit } END { exit !found }'
+}
+
 fm_procevent_claim_capture_reservation_remove_locked() {
   [ -n "${FM_PROCEVENT_CLAIM_STATE_ROOT:-}" ] || return 0
   fm_procevent_claim_recorded_state_root_valid || return 1
@@ -785,7 +800,8 @@ fm_procevent_claim_acquire_locked() {
     case "$claim_state" in
       0|2|3|4) status=2 ;;
       1)
-        if ! fm_procevent_claim_owned_by_state "$state" "$home"; then
+        if ! fm_procevent_claim_owned_by_state "$state" "$home" \
+          && fm_procevent_claim_protects_pending_lavish_locked "$id"; then
           status=2
         elif [ -f "$claim" ] && [ ! -L "$claim" ]; then
           old_home=$FM_PROCEVENT_CLAIM_HOME
