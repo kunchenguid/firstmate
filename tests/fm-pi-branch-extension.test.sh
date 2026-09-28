@@ -6210,9 +6210,12 @@ if(calls().filter(call=>call.endsWith(' a-reserved')).length!==reservedCallCount
 // an invented completion.
 pi.appendEntry('fm-continuation-input-pacing',{id:'ownership:a-reserved',key:pace.data.key,attempts:pace.data.attempts,after:0});
 await fire('session_shutdown');await fire('session_start');
+const retryStarted=Date.now();
 const stillOwned=await fire('agent_before_settle');persistDrafts(stillOwned);
 if(stillOwned.some(result=>result?.continue&&JSON.stringify(result).includes('a-reserved')))throw Error('live short owner produced a continuation admission');
 if(record('a-reserved').coordination)throw Error('live short owner was accepted without a receipt');
+const retriedPace=entries.filter(entry=>entry.customType==='fm-continuation-input-pacing'&&entry.data.id==='ownership:a-reserved').at(-1);
+if(retriedPace.data.attempts!==2||retriedPace.data.after<=pace.data.after||retriedPace.data.after<retryStarted+59000)throw Error(`repeated ownership did not increase durable backoff: ${JSON.stringify(retriedPace.data)}`);
 
 // Once the fixture's reservation is released, the same public boundary may
 // coordinate the unfinished task exactly once. No operation effect is ever
@@ -6221,9 +6224,11 @@ rmSync(home+'/state/.short-operation-a-reserved.json');
 const latest=entries.filter(entry=>entry.customType==='fm-continuation-input-pacing'&&entry.data.id==='ownership:a-reserved').at(-1);
 pi.appendEntry('fm-continuation-input-pacing',{id:'ownership:a-reserved',key:latest.data.key,attempts:latest.data.attempts,after:0});
 await fire('session_shutdown');await fire('session_start');
+const releasedCoordinateCount=calls().filter(call=>call==='coordinate a-reserved').length;
 const released=await fire('agent_before_settle');persistDrafts(released);
 if(!released.some(result=>result?.continue&&JSON.stringify(result).includes('a-reserved: pending')))throw Error('released reservation did not resume its unfinished task');
 if(!record('a-reserved').coordination)throw Error('released task lacks the canonical coordination receipt');
+if(calls().filter(call=>call==='coordinate a-reserved').length!==releasedCoordinateCount+1)throw Error('released task did not coordinate exactly once');
 if(calls().some(call=>/^(merge|cleanup) /.test(call)))throw Error('continuation replayed an operation effect');
 console.log('public agent_before_settle keeps pending short ownership durable and paced; unrelated work continues; release resumes once without replay');
 process.exit(0);

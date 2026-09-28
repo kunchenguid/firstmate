@@ -159,7 +159,6 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
       try {
         if (lstatSync(join(data, id)).isSymbolicLink()) throw new Error("unsafe task directory");
         observations.push(await command(["observe", id]));
-        clearOwnershipDeferral(id);
       } catch (error) {
         if (epoch !== generation || !owns()) throw error;
         const reason = String(error instanceof Error ? error.message : error).slice(0, 1200);
