@@ -254,11 +254,14 @@ fm_backend_paseo_scoped_name() { # <fm-task-label>
 # fm_backend_paseo_terminal_id_for_name: the live terminal id whose NAME
 # equals <name>, or empty. Paseo enforces no name uniqueness itself
 # (finding #4's sibling on the terminal layer), so this adopts the first
-# match, mirroring cmux's duplicate-check posture.
+# match, mirroring cmux's duplicate-check posture. Fails when the inventory
+# cannot be read, so a caller about to create a terminal never mistakes an
+# unreadable list for "no match".
 fm_backend_paseo_terminal_id_for_name() { # <name>
-  local name=$1
-  fm_backend_paseo_cli terminal ls --all --json 2>/dev/null |
-    jq -r --arg want "$name" '.[]? | select(.name == $want) | .id' 2>/dev/null | head -1
+  local name=$1 list
+  list=$(fm_backend_paseo_cli terminal ls --all --json 2>/dev/null) || return 1
+  printf '%s' "$list" | jq -e 'type == "array"' >/dev/null 2>&1 || return 1
+  printf '%s' "$list" | jq -r --arg want "$name" '.[] | select(.name == $want) | .id' | head -1
 }
 
 # fm_backend_paseo_workspace_label: the shared per-project workspace's title,
@@ -288,7 +291,14 @@ fm_backend_paseo_workspace_ensure() { # <cwd>
   logical=$(cd "$cwd" 2>/dev/null && pwd) || logical=$cwd
   real=$(cd "$cwd" 2>/dev/null && pwd -P) || real=$cwd
   label=$(fm_backend_paseo_workspace_label)
-  list=$(fm_backend_paseo_cli workspace ls --json 2>/dev/null) || list='[]'
+  # An unreadable inventory refuses rather than reading as "none": Paseo
+  # allows duplicate workspaces, so creating on a failed lookup would split
+  # the project across two.
+  list=$(fm_backend_paseo_cli workspace ls --json 2>/dev/null) &&
+    printf '%s' "$list" | jq -e 'type == "array"' >/dev/null 2>&1 || {
+    echo "error: could not read the paseo workspace inventory; refusing to create a workspace for '$cwd'" >&2
+    return 1
+  }
   wsid=""
   if [ -n "${PASEO_WORKSPACE_ID:-}" ]; then
     wsid=$(printf '%s' "$list" |
@@ -322,7 +332,10 @@ fm_backend_paseo_workspace_ensure() { # <cwd>
 fm_backend_paseo_create_task() { # <label> <cwd>
   local label=$1 cwd=$2 name dup out wsid tid
   name=$(fm_backend_paseo_scoped_name "$label")
-  dup=$(fm_backend_paseo_terminal_id_for_name "$name")
+  dup=$(fm_backend_paseo_terminal_id_for_name "$name") || {
+    echo "error: could not read the paseo terminal inventory; refusing to create '$name'" >&2
+    return 1
+  }
   if [ -n "$dup" ]; then
     echo "error: paseo terminal '$name' already exists" >&2
     return 1

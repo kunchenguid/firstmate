@@ -338,6 +338,36 @@ test_create_task_creates_and_parses_ids() {
   pass "fm_backend_paseo_create_task: creates the shared workspace once plus a terminal tab and parses terminal_id/workspace_id"
 }
 
+test_create_task_refuses_unreadable_inventory() {
+  local dir fb status case_name
+  for case_name in workspace-ls-fails workspace-ls-garbage terminal-ls-fails; do
+    dir="$TMP_ROOT/create-task-$case_name"
+    mkdir -p "$dir/responses"
+    case "$case_name" in
+    workspace-ls-fails)
+      printf '[]' >"$dir/responses/1.out"
+      printf '1' >"$dir/responses/2.exit"
+      ;;
+    workspace-ls-garbage)
+      printf '[]' >"$dir/responses/1.out"
+      printf 'daemon restarting' >"$dir/responses/2.out"
+      ;;
+    terminal-ls-fails)
+      printf '1' >"$dir/responses/1.exit"
+      ;;
+    esac
+    fb=$(make_paseo_fakebin "$dir")
+    PATH="$fb:$PATH" FM_PASEO_LOG="$dir/log" FM_PASEO_RESPONSES="$dir/responses" \
+      bash -c '. "$0/bin/backends/paseo.sh"; fm_backend_paseo_create_task fm-newtask /tmp/proj' "$ROOT" >/dev/null 2>&1
+    status=$?
+    [ "$status" -ne 0 ] || fail "create_task must refuse when the inventory is unreadable ($case_name)"
+    case "$(cat "$dir/log")" in
+    *$'\x1f''create'*) fail "create_task must not create anything when the inventory is unreadable ($case_name)" ;;
+    esac
+  done
+  pass "fm_backend_paseo_create_task: refuses, creating nothing, when the terminal or workspace inventory cannot be read"
+}
+
 test_create_task_adopts_existing_shared_workspace() {
   local dir fb out name
   dir="$TMP_ROOT/create-task-adopt"
@@ -549,6 +579,7 @@ test_capture_trims_locally() {
     "capture did not verify readiness before the actual read"
   pass "fm_backend_paseo_capture: fetches the whole scrollback and trims to N lines locally"
 }
+
 
 test_capture_fails_when_target_not_ready() {
   local dir fb status
@@ -892,6 +923,7 @@ test_daemon_state_down_on_unreachable
 test_ensure_running_returns_immediately_when_already_ok
 test_create_task_refuses_duplicate_name
 test_create_task_creates_and_parses_ids
+test_create_task_refuses_unreadable_inventory
 test_create_task_adopts_existing_shared_workspace
 test_create_task_adopts_own_paseo_workspace_first
 test_create_task_ignores_own_workspace_for_another_project
