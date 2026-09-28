@@ -3,6 +3,7 @@
 
 Usage:
   fm-jev-decisions.py [--task <task>] [--status-file <path>] [--all]
+                      [--input <tsv-path> | --input -]
                       [--json] [--resolve-cmds] [--category <cat>]
                       [--min-noul <float>] [--max-workers <int>] [--limit <int>]
 """
