@@ -1435,6 +1435,31 @@ test_adopted_worktree_teardown_leaves_processes_in_the_copy_alone() {
   pass "an adopted teardown names the processes still running in the copy and leaves them alone"
 }
 
+# A run parked in an adopted copy matches this task on branch and head, but
+# nothing proves this task started it - the creator's own session shares that
+# checkout - so teardown must leave it for its owner instead of aborting it.
+test_adopted_worktree_teardown_leaves_a_parked_run_alone() {
+  local case_dir rc head
+  case_dir=$(make_case adopted-parked-run)
+  write_adopted_meta "$case_dir" claude
+  mkdir -p "$(git -C "$case_dir/wt" rev-parse --absolute-git-dir)/fm-adopted-wiring"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+
+  rc=0
+  FM_FAKE_AXI_STATUS="$(parked_axi_status_toon fm/task-x1 "$head")" \
+  FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "adopted-parked-run: teardown should succeed"$'\n'"$(cat "$case_dir/stderr")"
+  assert_absent "$case_dir/nm-abort.log" \
+    "adopted-parked-run: teardown aborted a no-mistakes run in a copy it hands back: $(cat "$case_dir/nm-abort.log" 2>/dev/null)"
+  assert_not_contains "$(cat "$case_dir/stderr")" "parked at a gate; aborting" \
+    "adopted-parked-run: teardown reported concluding a run in its creator's copy"
+  assert_contains "$(cat "$case_dir/stdout")" "adopted worktree $case_dir/wt left in place" \
+    "adopted-parked-run: teardown did not hand the copy back"
+  pass "an adopted teardown leaves a parked no-mistakes run in the copy for its owner"
+}
+
 # The store left behind makes every later adoption of the copy refuse, so a
 # failure to remove it after a full restore is not a clean handback.
 test_adopted_worktree_teardown_reports_unremovable_store() {
@@ -4640,6 +4665,7 @@ test_adopted_worktree_teardown_keeps_unarmed_creator_wiring
 test_adopted_worktree_teardown_replaces_symlinked_wiring
 test_adopted_worktree_teardown_refuses_directory_wiring_path
 test_adopted_worktree_teardown_leaves_processes_in_the_copy_alone
+test_adopted_worktree_teardown_leaves_a_parked_run_alone
 test_adopted_worktree_teardown_reports_unremovable_store
 test_content_fallback_refreshes_stale_origin_ref
 test_dirty_worktree_refuses

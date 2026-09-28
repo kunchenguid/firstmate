@@ -162,11 +162,14 @@
 # every later adoption of the copy refuse; teardown warns for each case in its
 # own terms, naming the copy and the store, and reports the handback as
 # incomplete rather than clean.
-# The copy itself is left to its creator, and so is anything running inside it:
-# teardown never reaps a process under an adopted copy, because sessions
-# sharing that checkout legitimately work there; a process still holding the
-# copy is named and left alone. This task's own tasktmp is still reaped, and
-# the landed-work gates and record cleanup run exactly as for a pooled copy.
+# The copy itself is left to its creator, and so is everything live inside it:
+# sessions sharing that checkout legitimately work there, and a run or a
+# process in the copy cannot be attributed to this task by branch and head
+# alone, so teardown reaps no process under an adopted copy and concludes or
+# aborts no no-mistakes run in it - a process still holding the copy is named
+# and left running, and a parked run is left for whoever started it. This
+# task's own tasktmp is still reaped, and the landed-work gates and this
+# task's own record cleanup run exactly as for a pooled copy.
 # Orca tasks use the same safety checks, then close the recorded terminal and
 # remove the recorded worktree through `orca worktree rm`; teardown never guesses
 # an Orca target from ambient CLI state.
@@ -3629,11 +3632,11 @@ fi
 # dedicated process-event and firstmate-home removal machinery further below,
 # not by task-worktree cleanup.
 if [ "$KIND" != secondmate ] && teardown_owns_worktree; then
-  conclude_task_no_mistakes_run "$WT"
   if [ "$WORKTREE_SOURCE" = adopted ]; then
     report_adopted_worktree_processes "$WT"
     reap_task_worktree_processes tasktmp "$TASK_TMP"
   else
+    conclude_task_no_mistakes_run "$WT"
     reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
   fi
 elif [ "$KIND" != secondmate ]; then
