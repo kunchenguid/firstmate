@@ -341,9 +341,11 @@ pollute_color_env() {
 
 # A `tmux` shim bound to <socket>, so bin/backends/tmux.sh's bare `tmux ...`
 # calls reach that private server rather than this file's or the host's.
+# Each caller registers its socket in EXTRA_SOCKETS itself, because this
+# function is used in command substitution and an assignment here would die
+# with that subshell, leaving the server it births alive after cleanup.
 make_socket_shim() {  # <socket> -> prints the shim dir
   local sock=$1 dir="$EXTRA_DIR/shim-$1"
-  EXTRA_SOCKETS="$EXTRA_SOCKETS $sock"
   mkdir -p "$dir"
   cat > "$dir/tmux" <<SH
 #!/usr/bin/env bash
@@ -368,6 +370,7 @@ birthed_window_env() {  # <socket> -> prints that window's environment
 }
 
 CONTROL_SOCKET="fm-backend-smoke-control-$$"
+EXTRA_SOCKETS="$EXTRA_SOCKETS ${CONTROL_SOCKET}"
 control_shim=$(make_socket_shim "$CONTROL_SOCKET")
 (
   pollute_color_env
@@ -383,6 +386,7 @@ esac
 pass "real tmux: an unscrubbed server birth really does hand NO_COLOR to every later window"
 
 FIXED_SOCKET="fm-backend-smoke-fixed-$$"
+EXTRA_SOCKETS="$EXTRA_SOCKETS ${FIXED_SOCKET}"
 fixed_shim=$(make_socket_shim "$FIXED_SOCKET")
 ensured=$(
   pollute_color_env
@@ -414,4 +418,10 @@ reused=$(
 pass "real tmux: a second container_ensure reuses the existing session instead of birthing another server"
 
 cleanup_all
+for sock in "$CONTROL_SOCKET" "$FIXED_SOCKET"; do
+  if "$REAL_TMUX" -L "$sock" list-sessions >/dev/null 2>&1; then
+    fail "cleanup left the tmux server on socket $sock running"
+  fi
+done
+pass "real tmux: cleanup kills every private server this test births"
 trap - EXIT
