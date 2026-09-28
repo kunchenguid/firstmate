@@ -193,7 +193,7 @@ fm_agent_process_worktree_scan() {  # <worktree>
     printf 'unreadable\tno scratch file could be created to read lsof diagnostics'
     return 0
   }
-  lsof_out=$(lsof -w +c 0 -a -u "$(id -u)" -d cwd -Fpcn 2>"$lsof_err") || lsof_status=$?
+  lsof_out=$(lsof +c 0 -a -u "$(id -u)" -d cwd -Fpcn 2>"$lsof_err") || lsof_status=$?
   lsof_diag=$(head -n 1 -- "$lsof_err" 2>/dev/null) || lsof_diag=
   rm -f -- "$lsof_err"
   if [ "$lsof_status" -ne 0 ] && [ -n "$lsof_diag" ]; then
@@ -211,6 +211,7 @@ fm_agent_process_worktree_scan() {  # <worktree>
           "$wt_real"|"$wt_real"/*) pids+=("$pid"); names+=("$cmd") ;;
         esac
         ;;
+      fcwd|'') ;;
       *) printf 'unreadable\tlsof printed an unexpected record'; return 0 ;;
     esac
   done <<EOF_LSOF

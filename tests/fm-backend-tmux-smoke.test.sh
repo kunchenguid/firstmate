@@ -61,17 +61,48 @@ TARGET="$SESSION:$WINDOW"
 
 tmux new-session -d -s "$SESSION" -x 200 -y 50 \
   || fail "real tmux: new-session failed"
-fm_backend_tmux_create_task "$SESSION" "$WINDOW" "$HOME" \
+FIRST_WID=$(fm_backend_tmux_create_task "$SESSION" "$WINDOW" "$HOME") \
   || fail "fm_backend_tmux_create_task failed to create the task window"
 tmux list-windows -t "$SESSION" -F '#{window_name}' | grep -qx "$WINDOW" \
   || fail "created window is not visible in the real session"
 
-# A second create for the SAME window name must refuse (mirrors fm-spawn.sh's
-# duplicate-window guard).
+# A second create for the SAME window name replaces the first when that window
+# is provably agent-free: it holds a bare shell, so the reclaim path must not
+# dead-end on it. Exactly one window keeps the name, and it is the new one.
+SECOND_WID=$(fm_backend_tmux_create_task "$SESSION" "$WINDOW" "$HOME") \
+  || fail "fm_backend_tmux_create_task should replace an agent-free window of the same name"
+[ -n "$SECOND_WID" ] && [ "$SECOND_WID" != "$FIRST_WID" ] \
+  || fail "the replacement must be a new window, got '$SECOND_WID' for '$FIRST_WID'"
+[ "$(tmux list-windows -t "$SESSION" -F '#{window_name}' | grep -cx "$WINDOW")" = 1 ] \
+  || fail "exactly one window may carry the task name after a replacement"
+tmux list-windows -t "$SESSION" -F '#{window_id}' | grep -qx "$FIRST_WID" \
+  && fail "the replaced agent-free window must be closed"
+pass "real tmux: fm_backend_tmux_create_task replaces an agent-free window of the same name"
+
+# The same name with an AGENT running in it must refuse instead: a false
+# agent-free reading here is what would put two agents on one worktree. A copy
+# of `sleep` under a harness name gives the foreground process group the
+# process name the liveness probe classifies as an agent.
+AGENT_BIN="$SHIM_DIR/claude"
+cp "$(command -v sleep)" "$AGENT_BIN" || fail "could not stage a harness-named process"
+tmux send-keys -t "$SESSION:$WINDOW" -l "$AGENT_BIN 300"
+tmux send-keys -t "$SESSION:$WINDOW" Enter
+AGENT_SEEN=false
+for _ in $(seq 1 100); do
+  if [ "$(fm_backend_tmux_agent_state "$SESSION:$WINDOW")" = alive ]; then
+    AGENT_SEEN=true
+    break
+  fi
+  sleep 0.1
+done
+[ "$AGENT_SEEN" = true ] || fail "the probe never saw the planted agent, so the refusal below proves nothing"
 if fm_backend_tmux_create_task "$SESSION" "$WINDOW" "$HOME" 2>/dev/null; then
-  fail "fm_backend_tmux_create_task should refuse an existing window name"
+  fail "fm_backend_tmux_create_task must refuse a same-named window that holds an agent"
 fi
-pass "real tmux: fm_backend_tmux_create_task creates a window and refuses a duplicate"
+[ "$(tmux list-windows -t "$SESSION" -F '#{window_name}' | grep -cx "$WINDOW")" = 1 ] \
+  || fail "a refused create must not leave a second window behind"
+tmux send-keys -t "$SESSION:$WINDOW" C-c
+pass "real tmux: fm_backend_tmux_create_task refuses a same-named window holding an agent"
 
 # --- send text + Enter -------------------------------------------------------
 

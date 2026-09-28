@@ -43,11 +43,11 @@
 #              is merely unreachable from this seat: herdr re-reads the pane in
 #              the session the record names, and tmux proves no agent process
 #              is still working in the recorded worktree. Proven gone reports
-#              `endpoint-gone` rather than `already-stopped`, because the
-#              endpoint this verb normally preserves did not survive; a herdr
-#              pane that turns out to be there and idle is the ordinary
-#              `already-stopped`; one whose agent is back takes the ordinary
-#              interrupt-then-exit path. An absence that cannot be proven -
+#              `endpoint-gone` rather than `already-stopped`, because no
+#              endpoint this seat can reach survived for this verb to
+#              preserve; a herdr pane that turns out to be there and idle is
+#              the ordinary `already-stopped`; one whose agent is back takes
+#              the ordinary interrupt-then-exit path. An absence that cannot be proven -
 #              an agent process still in the worktree, or a process table that
 #              cannot be read - REFUSES rather than claim a stop it cannot see.
 #   relaunch   Transactionally replace the running agent with a new one, in the
@@ -63,10 +63,9 @@
 #              reclaimed by the home that owns it, rather than being stranded
 #              with a parked approval nobody can answer. The absence proof is
 #              the one `exit` uses above, so a refusal there refuses here too.
-#              A reclaimed ship's progress note tells its replacement to
-#              reattach to any validation run already under way for its branch
-#              rather than start another; nothing here ever aborts, answers, or
-#              starts a validation run.
+#              A validation run already under way for the branch survives the
+#              reclaim untouched; nothing here ever aborts, answers, or starts
+#              a validation run.
 #              An explicit `default` model or effort clears that
 #              axis for the replacement. With no explicit axis, a secondmate
 #              re-resolves its durable config/secondmate-harness pin (harness
@@ -579,10 +578,10 @@ do_exit() {
         gone)
           # Proven gone, so the agent that lived in it went with it: exit's
           # postcondition already holds and there is nothing to send. Its own
-          # outcome rather than `already-stopped`, because the endpoint this
-          # verb normally preserves did not survive. The worktree and every
-          # uncommitted change are untouched, and `relaunch` re-creates the
-          # endpoint from here.
+          # outcome rather than `already-stopped`, because no endpoint this
+          # seat can reach survived for this verb to preserve. The worktree
+          # and every uncommitted change are untouched, and `relaunch`
+          # re-creates the endpoint from here.
           printf 'endpoint-gone'
           return 0
           ;;
