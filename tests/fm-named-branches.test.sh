@@ -354,6 +354,18 @@ test_promote_rejects_base_changes_and_branch_collisions() {
     --mode local-only --yolo off --branch-name feature/offline >/dev/null \
     || fail "local-only promotion required an unreachable origin"
   assert_grep 'kind=ship' "$home/state/$id.meta" "offline local-only promotion did not publish ship metadata"
+
+  git -C "$project" remote remove origin
+  id=named-promote-publishing-local-base
+  printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\nproject=%s\nbase_branch=office\n' "$id" "$project" > "$home/state/$id.meta"
+  FM_HOME="$home" "$BRIEF" "$id" proj --scout --base-branch office >/dev/null
+  fill_brief "$home/data/$id/brief.md"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" \
+    --mode direct-PR --yolo off --branch-name feature/publishing-local-base 2>&1); status=$?
+  expect_code 1 "$status" "a publishing promotion accepted a local-only base"
+  assert_contains "$out" "without origin" "a publishing promotion did not require a remote base"
+  assert_grep 'kind=scout' "$home/state/$id.meta" "a local-only publishing base refusal published ship metadata"
+  assert_absent "$home/data/$id/ship-instructions.md" "a local-only publishing base refusal published ship instructions"
   pass "fm-promote: changed bases and occupied crew branches are refused"
 }
 
