@@ -293,7 +293,9 @@ poll_response_filter() {  # <response-file>
     my ($stage) = @ARGV;
     my $expected = "error: Lavish Editor poll response was interrupted\ncode: SERVER_ERROR\n";
     my $active = "error: Lavish Editor already has an active poll listener\ncode: LISTENER_ACTIVE\n";
+    my $replaced = "error: Lavish Editor poll listener was replaced by a takeover\ncode: LISTENER_REPLACED\n";
     my $limit = length($expected) > length($active) ? length($expected) : length($active);
+    $limit = length($replaced) if length($replaced) > $limit;
     open my $staged, ">", $stage or exit 2;
     binmode STDIN;
     binmode STDOUT;
@@ -325,7 +327,10 @@ poll_response_filter() {  # <response-file>
         && substr($expected, 0, length($candidate)) eq $candidate;
       my $active_prefix = length($candidate) <= length($active)
         && substr($active, 0, length($candidate)) eq $candidate;
-      if (!$expected_prefix && !$active_prefix && index($candidate, $active) != 0) {
+      my $replaced_prefix = length($candidate) <= length($replaced)
+        && substr($replaced, 0, length($candidate)) eq $candidate;
+      if (!$expected_prefix && !$active_prefix && !$replaced_prefix
+        && index($candidate, $active) != 0 && index($candidate, $replaced) != 0) {
         write_all(*STDOUT, $candidate);
         write_all(*STDOUT, substr($chunk, $take));
         $streaming = 1;
@@ -333,6 +338,7 @@ poll_response_filter() {  # <response-file>
     }
     exit 10 if !$streaming && $candidate eq $expected;
     exit 11 if !$streaming && index($candidate, $active) == 0;
+    exit 12 if !$streaming && index($candidate, $replaced) == 0;
     write_all(*STDOUT, $candidate) unless $streaming;
   ' "$1"
 }
@@ -473,6 +479,16 @@ JS
       filter_rc=$?
       exec 6>&-
       IFS= read -r rc < "$status_file" || die "cannot read the poll status"
+      if [ -n "$ready_fd" ] \
+        && { { [ -f "$acceptance_signal" ] \
+          && [ "$(cat "$acceptance_signal" 2>/dev/null || true)" = "$poll_owner" ]; } \
+          || { [ "$reply_pending" -eq 1 ] && [ "$filter_rc" -eq 12 ]; }; }; then
+        [ "$reply_pending" -eq 0 ] || rm -f -- "$reply_file" \
+          || die "cannot consume accepted agent reply file: $reply_file"
+        printf 'ready\n' >&3 || die "cannot confirm adapter readiness"
+        exec 3>&-
+        ready_fd=
+      fi
       if [ "$reply_pending" -eq 1 ] && [ -n "$ready_fd" ] \
         && [ "$filter_rc" -ne 11 ] && [ "$rc" -ne 0 ]; then
         rm -f -- "$reply_file" || die "cannot preserve ambiguous reply acceptance"
@@ -507,6 +523,7 @@ JS
         cat -- "$response"
         break
         ;;
+      12) break ;;
       10)
         if [ "$reply_pending" -eq 1 ] && [ -n "$ready_fd" ]; then
           break

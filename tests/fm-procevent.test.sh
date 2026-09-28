@@ -1283,6 +1283,55 @@ assert_absent "$HFINTERRUPT/state/procevent-inbox/$interrupt_id.1.handled" \
   || fail "interrupted reply request retained a stage that could post twice"
 pass "interrupted Lavish reply cannot be retried"
 
+HFREPLACED="$TMP_ROOT/hfreplaced"; new_home "$HFREPLACED"
+REPLACED_BIN=$(fm_fakebin "$TMP_ROOT/lavish-firstmate-replaced-stub")
+REPLACED_COUNT="$TMP_ROOT/lavish-firstmate-replaced-count"
+export REPLACED_COUNT
+cat > "$REPLACED_BIN/lavish-axi" <<'SH'
+#!/bin/sh
+[ "$#" -gt 0 ] || exit 0
+n=$(cat "$REPLACED_COUNT" 2>/dev/null || echo 0)
+n=$((n + 1))
+printf '%s\n' "$n" > "$REPLACED_COUNT"
+shift 2
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --agent-reply-file) cat >/dev/null; shift 2 ;;
+    --owner) shift 2 ;;
+    *) shift ;;
+  esac
+done
+if [ "$n" = 1 ]; then
+  printf 'session:\n  status: feedback\nprompts[1]{uid,prompt,selector,tag,text}:\n  "","","","message","replace after persistence"\n'
+else
+  printf 'error: Lavish Editor poll listener was replaced by a takeover\ncode: LISTENER_REPLACED\n'
+  exit 1
+fi
+SH
+chmod +x "$REPLACED_BIN/lavish-axi"
+REPLACED_ART="$TMP_ROOT/firstmate-replaced.html"
+printf '<h1>replaced</h1>\n' > "$REPLACED_ART"
+lavish_session "$REPLACED_ART"
+replaced_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$REPLACED_ART")
+fm_test_track_procevent_home "$HFREPLACED"
+PATH="$REPLACED_BIN:$PATH" FM_HOME="$HFREPLACED" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$REPLACED_ART" >/dev/null
+wait_capture "$HFREPLACED" "$replaced_id" || fail "replaced listener fixture did not capture feedback"
+printf 'Persisted before takeover.\n' > "$TMP_ROOT/firstmate-replaced-reply.txt"
+PATH="$REPLACED_BIN:$PATH" FM_HOME="$HFREPLACED" FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS=1 \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$REPLACED_ART" \
+  --agent-reply-file "$TMP_ROOT/firstmate-replaced-reply.txt" \
+  > "$TMP_ROOT/firstmate-replaced.out"
+assert_contains "$(cat "$TMP_ROOT/firstmate-replaced.out")" "armed: $replaced_id" \
+  "persisted reply was not accepted after listener replacement"
+assert_present "$HFREPLACED/state/procevent-inbox/$replaced_id.1.handled" \
+  "listener replacement stranded the persisted reply round"
+assert_absent "$HFREPLACED/state/procevent-inbox/$replaced_id.1.accepted" \
+  "listener replacement retained stale acceptance uncertainty"
+[ "$(count_results "$HFREPLACED" "$replaced_id")" = 1 ] \
+  || fail "listener replacement entered a control response into the feedback FIFO"
+pass "listener replacement acknowledges its persisted reply"
+
 HFLINGER="$TMP_ROOT/hflinger"; new_home "$HFLINGER"
 LINGER_BIN=$(fm_fakebin "$TMP_ROOT/lavish-firstmate-linger-stub")
 LINGER_COUNT="$TMP_ROOT/lavish-firstmate-linger-count"
