@@ -595,11 +595,8 @@ test_no_mistakes_dod_ci_gate_feedback() {
   # shellcheck disable=SC2016  # single quotes are deliberate: the backticked status line must stay literal
   assert_grep 'escalate it inline in a keyed status line - append `needs-decision [at=<epoch>] [key=pr-<n>-<comment-id>]' "$brief" \
     "no-mistakes DOD must escalate gateless review feedback inline as a keyed decision"
-  assert_grep "for this decision only in place of rule 6's stop, keep polling about once a minute and wait for firstmate's reply instead of stopping; on dismiss, reply on the PR" "$brief" \
-    "no-mistakes DOD must name that a review-feedback decision replaces rule 6's stop and keeps polling"
-  # shellcheck disable=SC2016  # single quotes are deliberate: the backticked respond command must stay literal
-  assert_grep 'A firstmate fix answer goes to the next parked gate, through `no-mistakes axi respond --action fix` adding the finding' "$brief" \
-    "no-mistakes DOD must route a fix answer to the next parked gate"
+  assert_grep "for this decision only in place of rule 6's stop, keep polling about once a minute and wait for firstmate's reply instead of stopping, processing and acknowledging your Firstmate instruction inbox on each poll as that section describes, since the reply arrives there; on dismiss, reply on the PR; on fix, feed it to the next parked gate as above" "$brief" \
+    "no-mistakes DOD must keep polling behind a review-feedback decision, acknowledge the inbox each poll, and route both answers"
   # shellcheck disable=SC2016  # single quotes are deliberate: the backticked done token must stay literal
   assert_grep 'never append `done:` while a `pr-<n>-<comment-id>` decision you opened is still unanswered' "$brief" \
     "no-mistakes DOD must hold done while a review-feedback decision is open"
