@@ -15,7 +15,7 @@ Changing persisted context to remove hidden content, filtering provider context,
 [`calm.md`](calm.md#pi-compatibility) owns the current Pi compatibility contract.
 Pi 0.81.1 was installed when Calm was first built, and Pi 0.82.0 was the later reverification target.
 The inspected Pi CHANGELOG shows no relevant presentation API introduced at either version, so those versions remain verification evidence rather than compatibility bounds.
-The exported classes used by the adapters (`AssistantMessageComponent` and `InteractiveMode`) are undocumented internals with no stated version guarantee.
+The exported classes used by the adapters (`AssistantMessageComponent`, `ToolExecutionComponent`, and `InteractiveMode`) are undocumented internals with no stated version guarantee.
 `tests/fm-calm-pi-extension.test.sh` records the installed Pi version as evidence without gating on it and covers both newer synthetic versions and an unavailable adapter seam.
 This host tracks Pi latest, so the version the evidence is pinned to moves; the [2026-09-07 record](#2026-09-07-pi-0851-renderer-and-export-dom-verification) owns the currently pinned version and the renderer comparison behind it.
 
