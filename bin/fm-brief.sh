@@ -535,6 +535,19 @@ IFS= read -r -d '' SHARED_INFRA_RULE <<'EOF' || true
 EOF
 SHARED_INFRA_RULE=${SHARED_INFRA_RULE%$'\n'}
 
+# One shared string keeps the ship and scout notable-item bead rule identical.
+# The federated bead stores are the durable record the in-flight view reads,
+# so notable sub-items born inside the work get beads too - filed at creation,
+# closed with a receipt on landing. The secondmate charter deliberately omits
+# this rule: a secondmate routes durable knowledge through its own backlog.
+IFS= read -r -d '' NOTABLE_BEADS_RULE <<'EOF' || true
+# Notable-item beads
+Every notable item this task produces is a bead in the federated store: file it at creation time in the appropriate store (`task`, `review`, `robots`, `projects`, `workflows`), and close it with a receipt when it lands.
+One line files it: `bin/fm-note.sh <store> "<title>"`.
+What the in-flight view (`bin/fm-inflight.sh`) cannot source from a bead does not exist to the captain - chat memory is not a record.
+EOF
+NOTABLE_BEADS_RULE=${NOTABLE_BEADS_RULE%$'\n'}
+
 if [ "$KIND" = scout ]; then
 if "$SCRIPT_DIR/fm-bootstrap.sh" lavish-compatible >/dev/null 2>&1; then
   LAVISH_LINE='If your deliverable is a visual artifact the captain will review and iterate on, use the lavish-axi rule: arm your board with bin/fm-procevent-lavish.sh arm <artifact.html> --for <task-id>; never run lavish-axi poll yourself. Re-arm with the reply after each nonterminal round to acknowledge it, route the board feedback through your steering inbox, write needs-decision [key=board-review] with the live board URL when the captain owes a decision, and stop at session_ended or an empty End without re-arming - acknowledge that final round with bin/fm-procevent.sh handled <source-id> <sequence> to conclude and retire your board.'
@@ -575,6 +588,8 @@ $CREWMATE_PAUSE_INSTRUCTIONS
    A decision or blocker you opened stays open until a \`resolved\` line carrying its exact key lands; a later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
    Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved [at=<epoch>]: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
 $SHARED_INFRA_RULE
+
+$NOTABLE_BEADS_RULE
 
 $INBOX_SECTION
 
@@ -653,6 +668,8 @@ $ASK_USER_BLOCK
    A decision or blocker you opened stays open until a \`resolved\` line carrying its exact key lands; a later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
    Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved [at=<epoch>]: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
 $SHARED_INFRA_RULE
+
+$NOTABLE_BEADS_RULE
 
 $INBOX_SECTION
 
