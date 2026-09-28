@@ -133,6 +133,40 @@ test_adoption_from_another_firstmate_home_is_refused() {
   pass "an adopted copy another firstmate home holds is refused, however it is spelled or named"
 }
 
+# Unwinding an aborted adoption has two steps, and the state-side clear failing
+# must not cancel the copy-side handback: the creator's copy is the part firstmate
+# does not own, so it is put back even when firstmate's own cleanup stumbles.
+test_aborted_adoption_restores_the_copy_even_when_the_clear_fails() {
+  local id out status settings original store excl
+  id='adopt-abort-clear-fails-b2'
+  make_case abort-clear-fails "$id"
+  printf 'claude\n' > "$HOME_DIR/config/crew-harness"
+  mkdir -p "$CLAIM_DIR/.claude"
+  settings="$CLAIM_DIR/.claude/settings.local.json"
+  printf '{"permissions":{"allow":["Bash(make:*)"]}}\n' > "$settings"
+  original=$(cat "$settings")
+  # A read-only .claude lets the launch overwrite the existing file but makes the
+  # unwind's rm of it fail, which is what returns non-zero from the state-side clear.
+  chmod a-w "$CLAIM_DIR/.claude"
+  excl=$(git -C "$CLAIM_DIR" rev-parse --path-format=absolute --git-path info/exclude)
+  mkdir -p "$(dirname "$excl")"
+  : > "$excl"
+  chmod a-w "$excl" "$(dirname "$excl")"
+
+  out=$(run_spawn "$CLAIM_DIR" "$id" --mode no-mistakes --yolo off --adopt-worktree "$CLAIM_DIR")
+  status=$?
+  chmod u+w "$(dirname "$excl")" "$excl" "$CLAIM_DIR/.claude"
+
+  [ "$status" -ne 0 ] || fail "the spawn survived a failed launch step"$'\n'"$out"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "the aborted adoption published task metadata"
+  [ "$(cat "$settings")" = "$original" ] \
+    || fail "the aborted adoption left firstmate's wiring in the creator's copy after its own clear failed"$'\n'"$(cat "$settings")"
+  store=$(git -C "$CLAIM_DIR" rev-parse --absolute-git-dir)/fm-adopted-wiring
+  [ ! -e "$store" ] \
+    || fail "the aborted adoption left its preserve store behind, which refuses every later dispatch onto that copy"
+  pass "an aborted adoption hands the copy back even when its own state-side clear fails"
+}
+
 # The creator's own gitignored wiring file is invisible to the clean-copy check,
 # so adoption has to save it before arming and put it back afterwards. This is
 # the byte-for-byte contract on the file the creator handed over.
@@ -431,6 +465,7 @@ test_adopted_worktree_is_recorded_and_entered_without_a_pool_allocation
 test_adopted_primary_checkout_is_refused_by_the_isolation_proof
 test_adoption_from_another_firstmate_home_is_refused
 test_aborted_adoption_leaves_no_firstmate_wiring_in_the_copy
+test_aborted_adoption_restores_the_copy_even_when_the_clear_fails
 test_adoption_preserves_the_copys_own_wiring_file
 test_refused_adoption_leaves_the_copys_own_wiring_file
 test_redispatch_refuses_rather_than_replacing_preserved_originals

@@ -1186,6 +1186,9 @@ test_adopted_worktree_teardown_warns_when_restore_fails() {
   printf '{"creator":true}\n' > "$store/.claude/settings.local.json"
   settings="$case_dir/wt/.claude/settings.local.json"
   printf '{"firstmate":true}\n' > "$settings"
+  # A second armed path outside the unwritable dir: its removal succeeds while
+  # the settings restore fails, which is the mixed state the warning must describe.
+  printf 'token=abc\n' > "$case_dir/wt/.fm-grok-turnend"
   chmod a-w "$settings"
   chmod a-w "$case_dir/wt/.claude"
 
@@ -1196,12 +1199,18 @@ test_adopted_worktree_teardown_warns_when_restore_fails() {
   chmod u+w "$case_dir/wt/.claude" "$settings"
 
   expect_code 0 "$rc" "adopted-restore-fails: teardown should still complete"$'\n'"$(cat "$case_dir/stderr")"
-  assert_contains "$(cat "$case_dir/stderr")" "could not restore adopted worktree $case_dir/wt" \
+  assert_contains "$(cat "$case_dir/stderr")" "adopted worktree $case_dir/wt was only partly restored" \
     "adopted-restore-fails: teardown reported success without warning that the restore failed"
+  assert_not_contains "$(cat "$case_dir/stderr")" "nothing was removed from it" \
+    "adopted-restore-fails: the warning claimed nothing was removed after a partial restore"
+  assert_absent "$case_dir/wt/.fm-grok-turnend" \
+    "adopted-restore-fails: this test no longer produces the partial state it describes"
+  assert_contains "$(cat "$case_dir/stderr")" "retained at $store" \
+    "adopted-restore-fails: the warning did not say where the unrestored originals are kept"
   assert_not_contains "$(cat "$case_dir/stdout")" "left in place for its creator" \
     "adopted-restore-fails: teardown still reported the copy as cleanly handed back"
   [ -d "$store" ] || fail "adopted-restore-fails: teardown deleted the originals it failed to put back"
-  pass "an adopted teardown whose restore fails says so instead of reporting a clean handback"
+  pass "an adopted teardown whose restore only partly applies describes the mixed state it left"
 }
 
 # The preserve store is the only record of which wiring files firstmate wrote,
@@ -1227,6 +1236,8 @@ test_adopted_worktree_teardown_warns_when_store_is_missing() {
   expect_code 0 "$rc" "adopted-store-missing: teardown should still complete"$'\n'"$(cat "$case_dir/stderr")"
   assert_contains "$(cat "$case_dir/stderr")" "could not restore adopted worktree $case_dir/wt" \
     "adopted-store-missing: teardown said nothing about the vanished preserve store"
+  assert_contains "$(cat "$case_dir/stderr")" "nothing was removed from it" \
+    "adopted-store-missing: the warning did not say the copy was left untouched"
   assert_not_contains "$(cat "$case_dir/stdout")" "left in place for its creator" \
     "adopted-store-missing: teardown reported a clean handback it could not prove"
   [ -f "$settings" ] \

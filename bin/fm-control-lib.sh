@@ -439,7 +439,9 @@ EOF
 # whole set is saved, so its presence is what licenses a later restore - and an
 # existing <store> means an earlier adoption's originals are still waiting to be
 # restored, so this returns 2 rather than replacing them with wiring firstmate
-# itself armed over them.
+# itself armed over them. mv moves a directory INTO an existing target rather
+# than failing, so a <store> that appeared while this call was saving is caught
+# after the move by the nested copy it leaves behind, not by mv's exit status.
 FM_CONTROL_ADOPTED_WIRING_UNSAFE=
 fm_control_preserve_adopted_wiring() {  # <worktree> <store>
   local wt=${1-} store=${2-} tmp path rel
@@ -469,6 +471,10 @@ fm_control_preserve_adopted_wiring() {  # <worktree> <store>
 $(fm_control_worktree_wiring_paths "$wt")
 EOF
   mv -f "$tmp" "$store" 2>/dev/null || { rm -rf "$tmp"; return 1; }
+  if [ -e "$store/${tmp##*/}" ]; then
+    rm -rf "$store/${tmp##*/}"
+    return 2
+  fi
 }
 
 # Put an adopted copy's worktree wiring back the way it was handed over:

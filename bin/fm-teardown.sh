@@ -154,9 +154,11 @@
 # spawn in the copy's per-worktree git dir), removes only the wiring files
 # firstmate itself wrote, and releases only this task's own owner claim - a
 # claim another home or another task holds on the same copy is never touched.
-# That store is the only proof of which files firstmate wrote, so a store that
-# is gone or cannot be applied removes nothing at all: teardown warns naming the
-# copy and the store and reports the handback as incomplete rather than clean.
+# That store is the only proof of which files firstmate wrote, so a store that is
+# gone removes nothing at all, while a store that cannot be fully applied is
+# retained and leaves the copy possibly part restored; teardown warns for each
+# case in its own terms, naming the copy and the store, and reports the handback
+# as incomplete rather than clean.
 # The copy itself is left to its creator; the landed-work
 # gates, process reaping, and record cleanup run exactly as for a pooled copy.
 # Orca tasks use the same safety checks, then close the recorded terminal and
@@ -3275,9 +3277,10 @@ cleanup_firstmate_home_children() {
       # its branch, or another home's claim on it.
       if [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
         child_wiring_store=$(fm_adopted_worktree_wiring_store "$child_wt" 2>/dev/null) || child_wiring_store=
-        if [ -z "$child_wiring_store" ] || [ ! -d "$child_wiring_store" ] ||
-          ! fm_control_restore_adopted_wiring "$child_wt" "$child_wiring_store"; then
-          echo "warning: could not restore adopted worktree $child_wt to the wiring its creator handed over: the originals that spawn preserved at ${child_wiring_store:-an unresolvable store path} are missing or could not be put back, so task $child_id's hook files may still be live in that copy and nothing was removed from it" >&2
+        if [ -z "$child_wiring_store" ] || [ ! -d "$child_wiring_store" ]; then
+          echo "warning: could not restore adopted worktree $child_wt to the wiring its creator handed over: the originals spawn preserved at ${child_wiring_store:-an unresolvable store path} are gone, so nothing in that copy can be proved to be firstmate's; nothing was removed from it and task $child_id's hook files may still be live there" >&2
+        elif ! fm_control_restore_adopted_wiring "$child_wt" "$child_wiring_store"; then
+          echo "warning: adopted worktree $child_wt was only partly restored to the wiring its creator handed over: some paths were put back or removed and others could not be, so that copy may now hold a mix of task $child_id's wiring and its creator's own files. The preserved originals are retained at $child_wiring_store; inspect both before that copy is used again" >&2
         fi
         fm_adopted_worktree_owner_release "$child_wt" "$child_id" "$sub_state"
       fi
@@ -3620,10 +3623,12 @@ elif [ "$WORKTREE_SOURCE" = adopted ] && [ "$KIND" != secondmate ]; then
   # is released - a claim another home holds on the same copy is left alone.
   if [ -d "$WT" ]; then
     ADOPT_WIRING_STORE=$(fm_adopted_worktree_wiring_store "$WT" 2>/dev/null) || ADOPT_WIRING_STORE=
-    if [ -z "$ADOPT_WIRING_STORE" ] || [ ! -d "$ADOPT_WIRING_STORE" ] ||
-      ! fm_control_restore_adopted_wiring "$WT" "$ADOPT_WIRING_STORE"; then
+    if [ -z "$ADOPT_WIRING_STORE" ] || [ ! -d "$ADOPT_WIRING_STORE" ]; then
       TEARDOWN_ADOPTED_RESTORE_FAILED=1
-      echo "warning: could not restore adopted worktree $WT to the wiring its creator handed over: the originals this spawn preserved at ${ADOPT_WIRING_STORE:-an unresolvable store path} are missing or could not be put back, so task $ID's hook files may still be live in that copy and nothing was removed from it" >&2
+      echo "warning: could not restore adopted worktree $WT to the wiring its creator handed over: the originals spawn preserved at ${ADOPT_WIRING_STORE:-an unresolvable store path} are gone, so nothing in that copy can be proved to be firstmate's; nothing was removed from it and task $ID's hook files may still be live there" >&2
+    elif ! fm_control_restore_adopted_wiring "$WT" "$ADOPT_WIRING_STORE"; then
+      TEARDOWN_ADOPTED_RESTORE_FAILED=1
+      echo "warning: adopted worktree $WT was only partly restored to the wiring its creator handed over: some paths were put back or removed and others could not be, so that copy may now hold a mix of task $ID's wiring and its creator's own files. The preserved originals are retained at $ADOPT_WIRING_STORE; inspect both before that copy is used again" >&2
     fi
     fm_adopted_worktree_owner_release "$WT" "$ID" "$STATE"
   fi
