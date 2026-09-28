@@ -6,7 +6,10 @@
 #   bin/fm-doc-audience-check.sh --root <repo> [--inventory <path>]
 #
 # The inventory owns classification and setup routing.
-# This check validates structure only and does not keyword-lint prose.
+# This check validates that structure, local links, and docs/scripts.md toolbelt
+# rows. It does not keyword-lint prose.
+# When docs/scripts.md is tracked, every tracked file under bin/ needs exactly
+# one table row, and every row must name a tracked bin/ file.
 set -eu
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -26,6 +29,9 @@ from urllib.parse import unquote, urlsplit
 
 MARKDOWN_LINK_RE = re.compile(r"!?\[[^\]]*\]\(([^)]+)\)")
 HTML_LINK_RE = re.compile(r"\b(?:href|src)=[\"']([^\"']+)[\"']", re.IGNORECASE)
+TOOLBELT_ROW_RE = re.compile(
+    r"^\|\s*(?:\[`([^`]+)`\]\([^)]+\)|`([^`]+)`)\s*\|"
+)
 REQUIRED_TRACKED_PATTERNS = ["*.md", "*.mdx", "*.rst", "*.txt", "docs/examples/*"]
 
 
@@ -243,7 +249,40 @@ def validate(root: Path, inventory_path: Path) -> tuple[int, int]:
                 if fragment not in anchors:
                     fail(f"unresolved local anchor in {path}: {raw}")
 
+    validate_toolbelt(root)
     return len(tracked), checked_links
+
+
+def validate_toolbelt(root: Path) -> None:
+    if "docs/scripts.md" not in set(git_tracked(root, ["docs/scripts.md"])):
+        return
+    tracked = {
+        path.removeprefix("bin/")
+        for path in git_tracked(root, ["bin"])
+        if path.startswith("bin/")
+    }
+    try:
+        text = (root / "docs/scripts.md").read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        fail(f"cannot read docs/scripts.md: {exc}")
+    rows: list[str] = []
+    for line in text.splitlines():
+        match = TOOLBELT_ROW_RE.match(line)
+        if match:
+            rows.append(match.group(1) or match.group(2))
+    duplicates = sorted(name for name, count in Counter(rows).items() if count != 1)
+    if duplicates:
+        fail("bin toolbelt rows repeated: " + ", ".join(duplicates))
+    documented = set(rows)
+    missing = sorted(tracked - documented)
+    extra = sorted(documented - tracked)
+    if missing or extra:
+        details: list[str] = []
+        if missing:
+            details.append("missing rows: " + ", ".join(missing))
+        if extra:
+            details.append("rows without a tracked bin file: " + ", ".join(extra))
+        fail("bin toolbelt coverage: " + "; ".join(details))
 
 
 def main() -> int:
