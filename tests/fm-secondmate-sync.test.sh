@@ -652,6 +652,61 @@ test_deferred_flag_survives_a_skipped_invalid_home() {
   pass "T8j a deferred flag survives a skipped invalid home and is retried once it validates"
 }
 
+# Contract: bootstrap records a deferred local nudge - its retry marker, send,
+# and deferral flag - under the per-home inheritance lock the watcher's
+# --retry-deferred pass holds, so that pass cannot clear a flag bootstrap has
+# just written. While another holder owns the lock, bootstrap writes neither.
+test_bootstrap_deferral_waits_for_the_retry_lock() {
+  local w c1 fakebin marker flag lock boot_pid waited
+  w=$(new_world nudge-deferred-lock)
+  c1=$(head_of "$w/main")
+  add_sm_worktree "$w" sm-instr "$c1"
+  bump_primary "$w" instr
+  fakebin=$(make_fake_toolchain "$w")
+  printf 'needs-decision [key=pick]: alpha or beta?\n' > "$w/home/state/sm-instr.status"
+  marker="$w/home/state/.secondmate-nudge-pending/sm-instr.pending"
+  flag="$w/home/state/.secondmate-reread-deferred/sm-instr"
+  mkdir -p "$w/sm-instr/state"
+  lock="$(cd "$w/sm-instr" && pwd -P)/state/.fm-inherited-config.lock"
+
+  # Stand in for a watcher retry mid-pass: hold the lock until told to release.
+  # shellcheck disable=SC2016 # Expanded by the holder process from its argv.
+  FM_HOME="$w/home" bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    fm_lock_acquire_wait "$2" || exit 1
+    : > "$3/lock-held"
+    n=0
+    while [ ! -e "$3/lock-release" ] && [ "$n" -lt 1200 ]; do sleep 0.05; n=$((n + 1)); done
+    fm_lock_release "$2"
+  ' holder "$ROOT" "$lock" "$w" &
+  waited=0
+  while [ ! -e "$w/lock-held" ]; do
+    [ "$waited" -lt 200 ] || fail "precondition: the retry lock was never taken"
+    sleep 0.05; waited=$((waited + 1))
+  done
+
+  PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 FM_FAKE_TMUX_LOG="$w/tmux.log" \
+    "$ROOT/bin/fm-bootstrap.sh" >/dev/null 2>&1 &
+  boot_pid=$!
+  # Give an unlocked bootstrap every chance to finish its deferral.
+  waited=0
+  while kill -0 "$boot_pid" 2>/dev/null && [ "$waited" -lt 100 ]; do
+    sleep 0.05; waited=$((waited + 1))
+  done
+  kill -0 "$boot_pid" 2>/dev/null \
+    || fail "bootstrap finished its nudge while the watcher retry held the per-home lock"
+  assert_absent "$marker" "bootstrap wrote the retry marker while the retry held the lock"
+  assert_absent "$flag" "bootstrap wrote the deferral flag while the retry held the lock"
+
+  : > "$w/lock-release"
+  wait "$boot_pid" 2>/dev/null || true
+  wait
+  assert_present "$marker" "the deferred nudge should keep its retry marker once the lock frees"
+  assert_present "$flag" "the deferred nudge should be flagged once the lock frees"
+  pass "T8k bootstrap records a deferred nudge only under the watcher retry's lock"
+}
+
 # Contract: the deferral is classified by fm-send's EXIT STATUS, never by the
 # shape of its output. fm-send runs the supervision guard, which prints a
 # worktree-tangle banner whenever the primary checkout sits on a feature branch
@@ -1504,6 +1559,7 @@ test_bootstrap_nudge_failure_records_retry_marker
 test_bootstrap_nudge_defers_while_the_mate_waits_on_a_decision
 test_deferred_local_nudge_is_retried_after_the_decision_closes
 test_deferred_flag_survives_a_skipped_invalid_home
+test_bootstrap_deferral_waits_for_the_retry_lock
 test_bootstrap_nudge_defers_when_the_send_prints_a_banner_first
 test_bootstrap_nudge_retry_is_idempotent
 test_bootstrap_nudge_retry_refuses_changed_home
