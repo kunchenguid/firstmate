@@ -4135,13 +4135,23 @@ rovo_endpoint_cleanup() {
 # with the preselected safe default if it renders anyway, then require
 # positive proof that the brief is being processed - the same verdict the
 # supervisor reads (Herdr's native working state or the pinned `esc to cancel`
-# status row through fm_busy_classify) - before the spawn reports success.
+# status row through fm_busy_classify), or a status line the worker itself
+# appended after launch - before the spawn reports success.
+# The worker's own append is the second proof because the first two are one
+# source with a verified blind spot: agy suppresses both statusline hints under
+# a full-screen overlay panel, and Herdr's bundled agy rules read that same
+# pane, so a turn streaming behind a first-run panel reads busy nowhere
+# (docs/verification/agy.md, 2026-09-28 record).
 # The gate is strict about ordering because on Herdr the native working
-# verdict is known to coexist with an unanswered dialog: a busy verdict counts
+# verdict is known to coexist with an unanswered dialog: either proof counts
 # only when the path was pre-registered or the dialog has been seen and
 # answered; on an unregistered path it keeps polling for the dialog instead.
+# The append is held to that order too, because a worker reached through an
+# untrusted pane can append to an absolute status path from agy's own scratch
+# directory: it proves processing, never where the turn runs.
 AGY_TRUST_DIALOG='Do you trust the contents of this project?'
 AGY_TRUST_ANSWERED=0
+AGY_STATUS_BASELINE=0
 
 agy_capture() {
   fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true
@@ -4158,6 +4168,17 @@ agy_pane_is_working() {  # <plain-pane-capture>
   return 1
 }
 
+agy_status_appends() {  # count of status lines recorded for this task
+  local n
+  n=$(wc -l <"$STATE/$ID.status" 2>/dev/null) || n=
+  n=${n//[^0-9]/}
+  printf '%s' "${n:-0}"
+}
+
+agy_worker_reported() {  # the worker appended its own status line after launch
+  [ "$(agy_status_appends)" -gt "$AGY_STATUS_BASELINE" ]
+}
+
 agy_wait_for_working() {
   local pane i=0 max=${FM_AGY_READY_POLLS:-60} interval=${FM_AGY_POLL_INTERVAL:-0.5}
   while [ "$i" -lt "$max" ]; do
@@ -4169,6 +4190,7 @@ agy_wait_for_working() {
       fi
     elif [ "$AGY_TRUST_PREREGISTERED" -eq 1 ] || [ "$AGY_TRUST_ANSWERED" -eq 1 ]; then
       agy_pane_is_working "$pane" && return 0
+      agy_worker_reported && return 0
     fi
     i=$((i + 1))
     [ "$i" -ge "$max" ] || sleep "$interval"
@@ -4349,6 +4371,7 @@ claude*)
   ;;
 agy)
   if [ "$KIND" != secondmate ]; then
+    AGY_STATUS_BASELINE=$(agy_status_appends)
     if "$FM_ROOT/bin/fm-agy-trust.sh" "$WT" "$PROJ_ABS" >/dev/null; then
       AGY_TRUST_PREREGISTERED=1
     else
