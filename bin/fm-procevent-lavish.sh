@@ -389,10 +389,6 @@ cmd_poll() {
     acceptance_dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-lavish-accept.XXXXXX") \
       || die "cannot prepare the Lavish acceptance boundary"
     acceptance_signal="$acceptance_dir/accepted"
-    cat > "$acceptance_dir/herdr" <<'SH'
-#!/bin/sh
-printf '%s\n' "$FM_PROCEVENT_ADAPTER_OWNER" > "$FM_LAVISH_ACCEPTED_SIGNAL"
-SH
     cat > "$acceptance_dir/accept.cjs" <<'JS'
 const fs = require('node:fs');
 const childProcess = require('node:child_process');
@@ -410,7 +406,6 @@ childProcess.spawn = function(command, args, options) {
 };
 syncBuiltinESMExports();
 JS
-    chmod 0700 "$acceptance_dir/herdr" || die "cannot prepare the Lavish acceptance boundary"
     node_options="${NODE_OPTIONS:+$NODE_OPTIONS }--require=$acceptance_dir/accept.cjs"
   fi
   printf -v cleanup_command 'rm -f -- %q %q; rm -rf -- %q' "$response" "$status_file" "$acceptance_dir"
@@ -451,15 +446,15 @@ JS
       if [ "$reply_pending" -eq 1 ]; then
         { HERDR_ENV=1 LAVISH_AXI_HERDR_CHIME=1 FM_LAVISH_ACCEPTED_SIGNAL="$acceptance_signal" \
             FM_PROCEVENT_ADAPTER_OWNER="$poll_owner" NODE_OPTIONS="$node_options" \
-            PATH="$acceptance_dir:$PATH" lavish-axi poll "$artifact" --owner "$poll_owner" \
+            lavish-axi poll "$artifact" --owner "$poll_owner" \
             --agent-reply-file - <&7; printf '%s\n' "$?" >&6; } \
           | poll_response_filter "$response" &
         exec 7<&-
       else
         { HERDR_ENV=1 LAVISH_AXI_HERDR_CHIME=1 FM_LAVISH_ACCEPTED_SIGNAL="$acceptance_signal" \
             FM_PROCEVENT_ADAPTER_OWNER="$poll_owner" NODE_OPTIONS="$node_options" \
-            PATH="$acceptance_dir:$PATH" lavish-axi poll "$artifact" --owner "$poll_owner"; \
-            printf '%s\n' "$?" >&6; } | poll_response_filter "$response" &
+            lavish-axi poll "$artifact" --owner "$poll_owner"; printf '%s\n' "$?" >&6; } \
+          | poll_response_filter "$response" &
       fi
       pipeline_pid=$!
       while kill -0 "$pipeline_pid" 2>/dev/null; do

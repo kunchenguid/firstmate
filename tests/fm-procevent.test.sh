@@ -793,7 +793,7 @@ if [ -n "$owner" ]; then
   mkdir -p "$FREPLY_OWNERS"
   printf '%s\n' "$artifact" > "$FREPLY_OWNERS/$owner"
   trap 'rm -f -- "$FREPLY_OWNERS/$owner"' EXIT
-  herdr notification show ready
+  node -e 'require("node:child_process").spawn("herdr", [], {stdio:"ignore"})'
 fi
 trigger_var=FREPLY_TRIGGER$n
 trigger=${!trigger_var}
@@ -1058,7 +1058,7 @@ if [ -n "$owner" ]; then
   mkdir -p "$LEGACY_OWNERS"
   printf '%s\n' "$artifact" > "$LEGACY_OWNERS/$owner"
   trap 'rm -f -- "$LEGACY_OWNERS/$owner"' EXIT
-  herdr notification show ready
+  node -e 'require("node:child_process").spawn("herdr", [], {stdio:"ignore"})'
 fi
 case "$n" in
   1) trigger=$LEGACY_TRIGGER1 ;;
@@ -1310,7 +1310,7 @@ elif [ "$n" = 2 ]; then
   printf 'error: Lavish Editor already has an active poll listener\ncode: LISTENER_ACTIVE\n'
   exit 1
 else
-  [ -z "$owner" ] || herdr notification show ready
+  [ -z "$owner" ] || node -e 'require("node:child_process").spawn("herdr", [], {stdio:"ignore"})'
   while :; do sleep 1; done
 fi
 SH
@@ -1366,7 +1366,7 @@ fi
 n=$(cat "$ACKFAIL_COUNT" 2>/dev/null || echo 0)
 n=$((n + 1))
 printf '%s\n' "$n" > "$ACKFAIL_COUNT"
-[ -z "$owner" ] || herdr notification show ready
+[ -z "$owner" ] || node -e 'require("node:child_process").spawn("herdr", [], {stdio:"ignore"})'
 if [ "$n" = 1 ]; then
   printf 'session:\n  status: feedback\nprompts[1]{uid,prompt,selector,tag,text}:\n  "","","","message","ack failure"\n'
 else
@@ -1446,7 +1446,7 @@ if [ -n "$owner" ]; then
   mkdir -p "$NOREPLY_OWNERS"
   printf '%s\n' "$artifact" > "$NOREPLY_OWNERS/$owner"
   trap 'rm -f -- "$NOREPLY_OWNERS/$owner"' EXIT
-  herdr notification show ready
+  node -e 'require("node:child_process").spawn("herdr", [], {stdio:"ignore"})'
 fi
 printf 'poll%s reply: %s\n' "$n" "$reply" >> "$NOREPLY_LOG"
 trigger_var=NOREPLY_TRIGGER$n
