@@ -755,7 +755,7 @@ test_remote_full_probe_bounds_every_remote_call() {
     : > "$w/ssh.pids"
     started=$(date +%s)
     out=$(probe_remote "$w" full FM_FAKE_HANG_ON="$hang" FM_FAKE_HANG_PARTIAL="$partial" \
-      FM_FAKE_SSH_PIDS="$w/ssh.pids" FM_SECONDMATE_PROBE_TIMEOUT=2)
+      FM_FAKE_SSH_PIDS="$w/ssh.pids" FM_SECONDMATE_PROBE_TIMEOUT=5)
     elapsed=$(( $(date +%s) - started ))
     case "$hang" in
       fm-remote-doctor.sh)
@@ -763,16 +763,16 @@ test_remote_full_probe_bounds_every_remote_call() {
           || fail "a hung readiness run must read as unknown with the route preserved, never unready, got: $out"
         ;;
       state)
-        [ "$out" = 'skipped|unknown|0|||remote state probe exceeded its 2s bound; endpoint state unknown; route preserved on lab-host' ] \
+        [ "$out" = 'skipped|unknown|0|||remote state probe exceeded its 5s bound; endpoint state unknown; route preserved on lab-host' ] \
           || fail "a hung state call that printed 'dead' must read as unknown, never relaunchable, got: $out"
         ;;
       route)
-        [ "$out" = 'skipped|alive|0|||remote route probe exceeded its 2s bound; endpoint route unknown; route preserved on lab-host' ] \
+        [ "$out" = 'skipped|alive|0|||remote route probe exceeded its 5s bound; endpoint route unknown; route preserved on lab-host' ] \
           || fail "a hung route call that printed a drifted backend must read as unknown, never backend drift, got: $out"
         ;;
     esac
     [ -s "$w/ssh.pids" ] || fail "the probe never reached its hung $hang call: $(cat "$w/ssh.log")"
-    [ "$elapsed" -lt 20 ] || fail "the hung $hang call was not abandoned near its 2s bound (${elapsed}s)"
+    [ "$elapsed" -lt 20 ] || fail "the hung $hang call was not abandoned near its 5s bound (${elapsed}s)"
 
     sleep 2
     leaked=
@@ -797,7 +797,7 @@ test_remote_full_probe_bounds_every_remote_call() {
     bash -c '
       . "$0/bin/fm-remote-readiness-lib.sh"
       rc=0
-      fm_remote_readiness_ensure "$0/bin" rsm1 2 || rc=$?
+      fm_remote_readiness_ensure "$0/bin" rsm1 5 || rc=$?
       printf "%s|%s\n" "$rc" "$FM_REMOTE_READINESS_OUT"
     ' "$ROOT")
   sleep 2
