@@ -244,6 +244,16 @@ watcher_live() {  # <home>
   [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
 }
 host_exited() { [ -s "$1/host.rc" ]; }
+# The recovery marker's episode kind (downtime or handling), read through its
+# owner's parser; the Claude re-arm owner delivers a close only on downtime.
+marker_kind() {  # <home>
+  FM_HOME="$1" bash -c '
+    . "$1"
+    fm_recovery_marker_read "$2" || exit 1
+    kind=${FM_RECOVERY_MARKER_TOKEN#*:}
+    printf "%s\n" "${kind%%:*}"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$1/state/.watcher-down"
+}
 engine_calls() { find "$1" -maxdepth 1 -name 'engine-call.*' 2>/dev/null | wc -l | tr -d ' '; }
 handled_count() { local n; n=$(grep -c '	handled	' "$1/state/.supervision-host.log" 2>/dev/null); printf '%s\n' "${n:-0}"; }
 handled_at_least() { [ "$(handled_count "$1")" -ge "$2" ]; }
@@ -926,11 +936,13 @@ test_main_only_pass_through_leaves_the_successor_watcher_running() {
   assert_no_re '^supervision-host' "$home/host.out" "a main-only close must reach main exactly as the arm printed it"
   [ "$(engine_calls "$home")" -eq 0 ] || fail "successor: the engine ran for a decision close"
   watcher_live "$home" || fail "successor: the pass-through left no live watcher: $(cat "$home/state/.supervision-host.log")"
+  [ "$(marker_kind "$home")" = downtime ] \
+    || fail "successor: the pass-through claimed the close was being handled, so main's re-arm owner would not deliver it: $(cat "$home/state/.watcher-down")"
   pid=$(cat "$home/state/.watch.lock/pid")
   sleep 2
   kill -0 "$pid" 2>/dev/null || fail "successor: the watcher exited after the pass-through (pid $pid)"
   [ "$(cat "$home/state/.watch.lock/pid" 2>/dev/null)" = "$pid" ] || fail "successor: the watcher lock moved after the pass-through"
-  pass "host: a main-only pass-through leaves the successor watcher running"
+  pass "host: a main-only pass-through leaves the successor watcher running and the close undelivered for main"
 }
 
 # The session-lock holder's process identity cannot be read (its proc entry
@@ -967,14 +979,13 @@ test_attended_close_with_unidentified_main_session_passes_to_main() {
 # decision is recorded) while the successor starts: the turn meets the offer
 # rule again, so the close reaches main exactly as the arm printed it and no
 # engine turn runs on the stale offer.
-test_attended_close_that_turns_main_only_before_its_turn_passes_to_main() {
-  local home real_node
-  home=$(make_home attended-turns-main-only attended)
+# Change the task immediately before the second offer computation, rather
+# than racing the successor startup. The first offer accepts the close; the
+# turn-boundary offer must see the new main-owned decision.
+turn_main_only_at_second_offer() {  # <home>
+  local real_node
   real_node=$(command -v node)
-  # Change the task immediately before the second offer computation, rather
-  # than racing the successor startup. The first offer accepts the close; the
-  # turn-boundary offer must see the new main-owned decision.
-  cat > "$home/fakebin/node" <<SH
+  cat > "$1/fakebin/node" <<SH
 #!/usr/bin/env bash
 case "\$*" in
   *fm-branch-dispatch.mjs\ offer*)
@@ -987,7 +998,13 @@ case "\$*" in
 esac
 exec "$real_node" "\$@"
 SH
-  chmod +x "$home/fakebin/node"
+  chmod +x "$1/fakebin/node"
+}
+
+test_attended_close_that_turns_main_only_before_its_turn_passes_to_main() {
+  local home
+  home=$(make_home attended-turns-main-only attended)
+  turn_main_only_at_second_offer "$home"
   start_host "$home"
   wait_until 150 watcher_live "$home" || fail "turns-main-only: the host never started a watcher cycle"
   append_status "$home" 'step one'
@@ -1007,6 +1024,155 @@ SH
   assert_re '	pass-through	attended	main-only	signal:' "$home/state/.supervision-host.log" "the ledger must record why the close went to main"
   watcher_live "$home" || fail "the pass-through left no successor watcher"
   pass "host: an attended close whose task turns main-only before its turn still reaches main unchanged"
+}
+
+# --- the Claude re-arm owner around the host ----------------------------------
+
+# A fixture home that is also a genuine primary checkout whose bin is this
+# repo's, so the real Claude Stop hook (bin/fm-claude-stop-autoarm.sh) runs the
+# real host in it.
+make_primary_home() {  # <name>
+  local home
+  home=$(make_home "$1" attended)
+  git init -q "$home"
+  : > "$home/AGENTS.md"
+  ln -s "$ROOT/bin" "$home/bin"
+  printf '%s\n' "$home"
+}
+
+# One Claude main session under the fake harness. Each turn_end fires the real
+# Stop hook as the tracked asyncRewake registration does, and records its exit
+# status and stderr (the rewake banner Claude delivers on exit 2).
+start_hook_session() {  # <home>
+  local home=$1
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_CREW_STATE_BIN="$home/fakebin/fm-crew-state.sh" \
+    PATH="$home/fakebin:$PATH" "$FAKE_CLAUDE" -c '
+      printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+      printf "%s\n" "$$" >> "$FM_HOME/claude-pids"
+      for seed in "$FM_HOME"/mirror-seed.*; do
+        [ -f "$seed" ] || continue
+        "$FM_HOME/bin/fm-host-mirror.sh" hook claude < "$seed"
+      done
+      while [ ! -e "$FM_HOME/session.stop" ]; do
+        if [ -e "$FM_HOME/stop.go" ]; then
+          rm -f "$FM_HOME/stop.go"
+          printf "{\"session_id\":\"sess-host-hook\",\"stop_hook_active\":false}\n" \
+            | "$FM_HOME/bin/fm-claude-stop-autoarm.sh" > "$FM_HOME/hook.out" 2> "$FM_HOME/hook.err"
+          printf "%s\n" "$?" > "$FM_HOME/hook.rc"
+        fi
+        sleep 0.1
+      done
+    ' 2>> "$home/claude.err" &
+}
+turn_end() { rm -f "$1/hook.rc"; : > "$1/stop.go"; }
+hook_exited() { [ -s "$1/hook.rc" ]; }
+
+# Main's rewoken turn drains; the caller runs the printed acknowledgement
+# (MAIN_ACK) when that turn's handling is done.
+main_drain() {  # <home>; prints the drain and sets MAIN_ACK
+  local out
+  out=$(FM_HOME="$1" "$FAKE_CLAUDE" -c '"$0" 2>&1' "$ROOT/bin/fm-wake-drain.sh")
+  MAIN_ACK=$(printf '%s\n' "$out" | sed -n 's/^WAKE_ACK_REQUIRED: after handling completes run bin\/fm-wake-drain.sh //p' | tail -1)
+  printf '%s\n' "$out"
+}
+
+assert_rewoke_main() {  # <home> <label>
+  expect_code 2 "$(cat "$1/hook.rc")" "$2: the Stop hook must rewake main: $(cat "$1/hook.err"; cat "$1/state/.watcher-down" 2>/dev/null)"
+  assert_grep 'firstmate watcher wake - one supervision event needs a handling turn now.' "$1/hook.err" "$2: the rewake banner is missing"
+  assert_re '^epoch=[0-9]+ owner_pid=[0-9]+ outcome=rewake ' "$1/state/.claude-autoarm-epoch" "$2: the auto-arm ledger must record the rewake"
+}
+
+# The live failure (2026-09-27): a main-only pass-through confirmed a handling
+# handoff before the close reached main's re-arm owner, so the Stop hook's
+# rewake commit refused and it exited 0 in silence. An idle primary was never
+# woken, and the detached successor's own later close reached no reader.
+test_claude_stop_hook_delivers_a_main_only_pass_through() {
+  local home
+  home=$(make_primary_home hook-main-only)
+  start_hook_session "$home"
+  turn_end "$home"
+  wait_until 150 watcher_live "$home" || fail "hook main-only: the Stop hook never started a watcher cycle: $(cat "$home/hook.err" 2>/dev/null)"
+  append_status "$home" 'which export format?' needs-decision
+  wait_until 250 hook_exited "$home" || fail "hook main-only: the Stop hook never closed: $(cat "$home/state/.supervision-host.log")"
+  assert_re '	pass-through	attended	main-only	signal:' "$home/state/.supervision-host.log" "fixture: the close was not a main-only pass-through"
+  assert_rewoke_main "$home" "hook main-only"
+  assert_re '^signal: .*demo.status' "$home/hook.err" "the rewake must carry the close"
+  watcher_live "$home" || fail "hook main-only: the pass-through left no successor watcher"
+  pass "host+hook: an attended main-only pass-through rewakes main and keeps its successor watcher"
+}
+
+test_claude_stop_hook_delivers_a_close_that_turns_main_only_at_its_turn() {
+  local home
+  home=$(make_primary_home hook-turns-main-only)
+  turn_main_only_at_second_offer "$home"
+  start_hook_session "$home"
+  turn_end "$home"
+  wait_until 150 watcher_live "$home" || fail "hook turns-main-only: the Stop hook never started a watcher cycle: $(cat "$home/hook.err" 2>/dev/null)"
+  append_status "$home" 'step one'
+  wait_until 250 hook_exited "$home" || fail "hook turns-main-only: the Stop hook never closed: $(cat "$home/state/.supervision-host.log")"
+  [ "$(cat "$home/offer-count" 2>/dev/null)" -ge 2 ] || fail "fixture: the close was not accepted before it turned main-only"
+  [ "$(engine_calls "$home")" -eq 0 ] || fail "hook turns-main-only: the engine ran on a stale offer"
+  assert_rewoke_main "$home" "hook turns-main-only"
+  watcher_live "$home" || fail "hook turns-main-only: the pass-through left no successor watcher"
+  pass "host+hook: a close that turns main-only at its turn rewakes main and keeps its successor watcher"
+}
+
+# If the at-turn hand-back cannot publish downtime, the healthy successor
+# cannot turn that undelivered close into a silent Stop-hook success.
+test_claude_stop_hook_notifies_when_at_turn_downtime_write_fails() {
+  local home real_mktemp
+  home=$(make_primary_home hook-turns-main-only-write-fails)
+  turn_main_only_at_second_offer "$home"
+  real_mktemp=$(command -v mktemp)
+  cat > "$home/fakebin/mktemp" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *'/state/.watcher-down.tmp.'*)
+    [ "\$(cat "\$FM_HOME/offer-count" 2>/dev/null)" != 2 ] || exit 1 ;;
+esac
+exec "$real_mktemp" "\$@"
+SH
+  chmod +x "$home/fakebin/mktemp"
+  start_hook_session "$home"
+  turn_end "$home"
+  wait_until 150 watcher_live "$home" || fail "hook write failure: no watcher started"
+  append_status "$home" 'step one'
+  wait_until 250 hook_exited "$home" || fail "hook write failure: the Stop hook did not finish"
+  [ "$(cat "$home/offer-count" 2>/dev/null)" -ge 2 ] || fail "fixture: the close did not turn main-only at its turn"
+  assert_re 'pass-through[[:space:]]+downtime-unrestored' "$home/state/.supervision-host.log" "fixture: downtime publication did not fail"
+  assert_re '^(pending|announced):handling:' "$home/state/.watcher-down" "fixture: the marker unexpectedly became downtime"
+  expect_code 2 "$(cat "$home/hook.rc")" "the Stop hook must notify main instead of dropping the close"
+  assert_grep 'firstmate watcher auto-arm FAILED' "$home/hook.err" "main must receive the failure notification"
+  assert_re 'outcome=failed ' "$home/state/.claude-autoarm-epoch" "the failure must be committed"
+  pass "host+hook: failed at-turn downtime write notifies main despite a healthy successor"
+}
+
+# The successor a pass-through leaves closes while main's rewoken turn is still
+# running, so no arm is attached to read it: the next turn end must still
+# deliver that close instead of stranding it in the queue.
+test_successor_close_during_main_turn_is_delivered_at_the_next_turn_end() {
+  local home successor drained
+  home=$(make_primary_home hook-successor-close)
+  start_hook_session "$home"
+  turn_end "$home"
+  wait_until 150 watcher_live "$home" || fail "successor close: the Stop hook never started a watcher cycle: $(cat "$home/hook.err" 2>/dev/null)"
+  append_status "$home" 'which export format?' needs-decision
+  wait_until 250 hook_exited "$home" || fail "successor close: the first close never reached the Stop hook: $(cat "$home/state/.supervision-host.log")"
+  assert_rewoke_main "$home" "successor close (first)"
+  successor=$(cat "$home/state/.watch.lock/pid")
+  main_drain "$home" >/dev/null
+  append_status "$home" 'which region?' needs-decision
+  wait_until 250 bash -c '! kill -0 "$1" 2>/dev/null' _ "$successor" || fail "fixture: the successor did not close on the later decision"
+  # shellcheck disable=SC2086 # the printed acknowledgement arguments
+  [ -z "$MAIN_ACK" ] || FM_HOME="$home" "$FAKE_CLAUDE" -c '"$0" "$@" >/dev/null 2>&1' "$ROOT/bin/fm-wake-drain.sh" $MAIN_ACK \
+    || fail "successor close: main's acknowledgement failed: $MAIN_ACK"
+  turn_end "$home"
+  wait_until 250 hook_exited "$home" || fail "successor close: the next turn end never closed: $(cat "$home/state/.supervision-host.log")"
+  assert_rewoke_main "$home" "successor close (next turn end)"
+  drained=$(main_drain "$home")
+  assert_contains "$drained" 'which region?' "the successor's close must reach main's drain"
+  watcher_live "$home" || fail "successor close: the next turn end left no watcher"
+  pass "host+hook: a successor close that lands during main's turn is delivered at the next turn end"
 }
 
 # The captain returns after the loop accepted a decision close away but before
@@ -2272,6 +2438,10 @@ test_main_only_pass_through_leaves_the_successor_watcher_running
 test_attended_close_with_unidentified_main_session_passes_to_main
 test_close_accepted_away_that_turns_attended_passes_to_main
 test_attended_close_that_turns_main_only_before_its_turn_passes_to_main
+test_claude_stop_hook_delivers_a_main_only_pass_through
+test_claude_stop_hook_delivers_a_close_that_turns_main_only_at_its_turn
+test_claude_stop_hook_notifies_when_at_turn_downtime_write_fails
+test_successor_close_during_main_turn_is_delivered_at_the_next_turn_end
 test_primary_without_a_verified_mirror_runs_away_only
 test_attended_wake_carries_the_dialog_mirror
 test_dialog_bearing_files_are_owner_only
