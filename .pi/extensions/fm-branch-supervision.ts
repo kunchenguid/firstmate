@@ -83,7 +83,6 @@ import {
   SessionManager,
   SettingsManager,
   ToolExecutionComponent,
-  VERSION as PI_VERSION,
   type AgentSession,
   type ExtensionAPI,
   type ExtensionCommandContext,
@@ -144,10 +143,6 @@ const modelPinFile = join(config, "supervision-branch-model");
 const effortPinFile = join(config, "supervision-branch-effort");
 const CODEX_COMPAT_PACKAGE = "pi-openai-codex-compat";
 const CODEX_COMPAT_SOURCE = `npm:${CODEX_COMPAT_PACKAGE}`;
-const SUPPORTED_CODEX_COMPAT_PAIR = {
-  pi: "0.87.1",
-  compat: "0.0.16",
-} as const;
 
 // Same tool set in the same order on every request (part of the cached
 // prefix). "bash" resolves to the customTools override below, which injects
@@ -291,16 +286,6 @@ async function resolveCodexCompatResources(
   ) {
     throw new Error(`${CODEX_COMPAT_PACKAGE} has malformed package metadata`);
   }
-  if (
-    PI_VERSION !== SUPPORTED_CODEX_COMPAT_PAIR.pi ||
-    packageManifest.version !== SUPPORTED_CODEX_COMPAT_PAIR.compat
-  ) {
-    throw new Error(
-      `${CODEX_COMPAT_PACKAGE} version ${String(packageManifest.version)} with Pi ${PI_VERSION} is unsupported; ` +
-      `the verified pair is ${SUPPORTED_CODEX_COMPAT_PAIR.compat} with Pi ${SUPPORTED_CODEX_COMPAT_PAIR.pi}`,
-    );
-  }
-
   const packageRoot = resolve(installedPath);
   const expectedExtensionPath = resolve(packageRoot, extensionEntries[0]);
   const extensionRelative = relative(packageRoot, expectedExtensionPath);

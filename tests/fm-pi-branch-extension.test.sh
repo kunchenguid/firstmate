@@ -3029,7 +3029,7 @@ test_codex_branch_initializes_only_the_compat_package_before_prompting() {
     install_pi_branch_extension_fixture "$repo"
     PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
       COMPAT_MODE="$mode" DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
-globalThis.__fmPiVersion = "0.87.1";
+globalThis.__fmPiVersion = "9.9.9";
 const prelude = process.env.DRIVER_PRELUDE;
 await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, makeCtx, registryModels, home }; })()`);
 const { fire, dispatch, settle, makeCtx, registryModels, home } = globalThis.__t;
@@ -3039,6 +3039,8 @@ const mode = process.env.COMPAT_MODE;
 const path = `${process.env.FM_TEST_AGENT_DIR}/npm/node_modules/pi-openai-codex-compat/package.json`;
 const manifest = JSON.parse(readFileSync(path, "utf8"));
 if (manifest.version !== "0.0.16") throw new Error(`fixture has the wrong compatibility version: ${manifest.version}`);
+manifest.version = "8.8.8";
+writeFileSync(path, JSON.stringify(manifest));
 const globalSettings = {
   transport: "sse", websocketConnectTimeoutMs: 7000, httpIdleTimeoutMs: 23000,
   httpProxy: "http://127.0.0.1:9", defaultModel: "another-model", defaultThinkingLevel: "high",
@@ -3130,7 +3132,7 @@ EOF
   status=$?
   out=$(cat "$TMP_ROOT/node-output")
     expect_code 0 "$status" "Codex branch compatibility initialization must precede every prompt: $out"
-  pass "Codex branch lazily initializes only the verified Pi 0.87.1 and compatibility 0.0.16 pair without widening tools"
+  pass "Codex branch initializes with non-pinned Pi and compatibility versions without widening tools"
 }
 
 test_non_codex_branch_does_not_depend_on_the_compat_package() {
@@ -3170,7 +3172,7 @@ EOF
 
 test_codex_compat_package_failures_return_the_wake_to_main() {
   local mode repo home out status
-  for mode in settings absent malformed identity no-entry multiple-entries outside-entry missing-version old-pi future-pi old-plugin future-plugin resolve wrong-source wrong-scope wrong-origin wrong-path load startup unexpected-tools unrestorable-bash; do
+  for mode in settings absent malformed identity no-entry multiple-entries outside-entry resolve wrong-source wrong-scope wrong-origin wrong-path load startup unexpected-tools unrestorable-bash; do
     repo="$TMP_ROOT/codex-failure-$mode-root"
     home="$TMP_ROOT/codex-failure-$mode-home"
     mkdir -p "$home/state" "$home/config"
@@ -3178,8 +3180,6 @@ test_codex_compat_package_failures_return_the_wake_to_main() {
     PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
       DRIVER_PRELUDE="$DRIVER_PRELUDE" FAILURE_MODE="$mode" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 const mode = process.env.FAILURE_MODE;
-if (mode === "old-pi") globalThis.__fmPiVersion = "0.85.1";
-if (mode === "future-pi") globalThis.__fmPiVersion = "0.87.2";
 const prelude = process.env.DRIVER_PRELUDE;
 await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatchThroughWatcher, settle, makeCtx, registryModels, mainUserMessages, home }; })()`);
 const { fire, dispatchThroughWatcher, settle, makeCtx, registryModels, mainUserMessages, home } = globalThis.__t;
@@ -3188,16 +3188,6 @@ const manifest = `${process.env.FM_TEST_AGENT_DIR}/npm/node_modules/pi-openai-co
 if (mode === "absent") globalThis.__fmCompatAbsent = true;
 if (mode === "settings") writeFileSync(`${process.env.FM_TEST_AGENT_DIR}/settings.json`, "{not-json\n");
 if (mode === "malformed") writeFileSync(manifest, "{not-json\n");
-if (mode === "missing-version") {
-  const value = JSON.parse(readFileSync(manifest, "utf8"));
-  delete value.version;
-  writeFileSync(manifest, JSON.stringify(value));
-}
-if (mode === "old-plugin" || mode === "future-plugin") {
-  const value = JSON.parse(readFileSync(manifest, "utf8"));
-  value.version = mode === "old-plugin" ? "0.0.10-alpha.7" : "0.0.17";
-  writeFileSync(manifest, JSON.stringify(value));
-}
 const metadata = {
   name: mode === "identity" ? "another-package" : "pi-openai-codex-compat",
   version: "local-build",
@@ -3231,10 +3221,6 @@ await settle(() => mainUserMessages.length === 1, `${mode} fallback`);
 if (!mainUserMessages[0].content.includes("Supervision branch unavailable, falling back to main:")) {
   throw new Error(`${mode}: fallback omitted the safe-return reason: ${mainUserMessages[0].content}`);
 }
-if (["missing-version", "old-pi", "future-pi", "old-plugin", "future-plugin"].includes(mode) &&
-    !mainUserMessages[0].content.includes("the verified pair is 0.0.16 with Pi 0.87.1")) {
-  throw new Error(`${mode}: version refusal omitted the exact supported pair: ${mainUserMessages[0].content}`);
-}
 if ((globalThis.__fmPromptStarts ?? 0) !== 0) {
   throw new Error(`${mode}: a Codex branch prompted without a fully initialized compatibility package`);
 }
@@ -3247,7 +3233,7 @@ EOF
     out=$(cat "$TMP_ROOT/node-output")
     expect_code 0 "$status" "Codex compatibility $mode failure must fail closed: $out"
   done
-  pass "unsupported versions plus package identity, provenance, containment, startup, and unexpected-tool failures return Codex wakes to main before prompting"
+  pass "package identity, provenance, containment, startup, and unexpected-tool failures return Codex wakes to main before prompting"
 }
 
 test_supervision_reset_aborts_rotates_and_reanchors_without_touching_main_or_feishu() {

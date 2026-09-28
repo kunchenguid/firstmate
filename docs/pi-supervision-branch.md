@@ -71,12 +71,12 @@ This safeguard applies while Pi is alive; it introduces no process-exit recovery
   Unreadable or malformed global settings fail the build and return the wake to main instead of silently using defaults.
   Pi's CLI owns process-wide proxy environment and HTTP dispatcher initialization; the branch retains that process setup and does not reconfigure it.
   Before an `openai-codex` branch can prompt, it resolves the installed user package `npm:pi-openai-codex-compat` through Pi's package manager, validates package identity and the readable manifest, loads exactly its declared in-package extension entry from the installed user-package provenance, and binds the extension so its `session_start` provider override and native compaction hooks are active.
-  The branch currently admits only the empirically verified Pi 0.87.1 and `pi-openai-codex-compat` 0.0.16 pair; a missing, older, newer, or otherwise unknown version returns the wake to main before any branch prompt.
+  The branch does not gate initialization on Pi or `pi-openai-codex-compat` version strings.
   Every other resource-discovery class remains disabled, and the post-start active-tool check must still equal `read`, guarded `bash`, and `fm_branch_report` in that order.
   If compatibility startup removes only `bash`, leaving exactly `read` and `fm_branch_report`, the branch restores the registered guarded override and verifies the full active-tool set again.
-  The exact release check bounds the supported provider protocol, while the runtime state check independently prevents a package with the expected manifest version from widening the branch tools.
+  The runtime state check independently prevents a compatibility package from widening the branch tools.
   The plugin's native runtime dependencies must load on the host; an incompatible tree-sitter prebuild needs a local source build using the package's supported build tooling before activation.
-  [Runtime verification](verification/runtime-backends.md#2026-09-24-pi-0871-and-codex-compatibility-0016) records the checked pair and refresh commands.
+  [Runtime verification](verification/runtime-backends.md) records the current installed-runtime checks and refresh commands.
   A missing, malformed, unresolved, unloadable, or startup-failing compatibility package makes that Codex branch fail closed before prompting and returns its accepted wake to main; non-Codex branches do not resolve or depend on the package.
   The branch conversation never spans main sessions: after every main session start - a cold start, `/new`, `/resume`, `/fork`, or a reload - the next eligible wake creates a NEW branch conversation, and a conversation recorded by an earlier session is never reopened as the live one.
   Installing or upgrading the package alone does not create `state/.branch-session`; ownership and durable-outcome reconciliation must succeed before the first eligible notification starts it.
