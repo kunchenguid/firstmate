@@ -3370,6 +3370,98 @@ SH
   pass "watch liveness: an unreachable remote secondmate is probed, preserved, and never failed over"
 }
 
+# A host that accepts the connection and then hangs inside the remote command
+# answers keepalives forever, so only a wall-clock bound on the probe itself can
+# return the cycle. The fake ssh never exits on its own and holds a child that
+# stands in for a ProxyCommand hop; both pids are recorded so the test can
+# prove an abandoned probe leaves nothing behind.
+test_secondmate_liveness_tick_abandons_hung_remote_probe() {
+  local dir state pid ssh_pid child_pid p i abandoned alive beat_age leaked
+  dir=$(make_secondmate_liveness_case liveness-remote-hung)
+  state="$dir/state"
+  rm -f "$state/sm1.meta"
+  cat > "$state/rsm1.meta" <<EOF
+window=remote:rsm1
+kind=secondmate
+harness=claude
+remote_host=lab-host
+remote_backend=herdr
+remote_herdr_session=fm-remote
+remote_target=fm-remote:w1:p1
+home=/remote/rsm1-home
+EOF
+  cat > "$dir/data/secondmates.md" <<EOF
+- rsm1 - Remote mate (host: lab-host; root: /remote/root; home: /remote/rsm1-home; scope: remote work; projects: alpha; added 2026-01-01)
+EOF
+  cp "$state/rsm1.meta" "$dir/rsm1.meta.before"
+  cat > "$dir/fakebin/ssh" <<'SH'
+#!/usr/bin/env bash
+sleep 60 &
+printf '%s %s\n' "$$" "$!" >> "${FM_FAKE_SSH_PIDS:?}"
+printf '%s\n' "$*" >> "${FM_FAKE_SSH_LOG:?}"
+wait
+SH
+  chmod +x "$dir/fakebin/ssh"
+  : > "$dir/ssh.log"
+  : > "$dir/ssh.pids"
+
+  # Its own process group lets the stop below signal the whole group, the way
+  # bin/fm-watch-checkpoint.sh's outer bound stops a watcher.
+  set -m
+  run_liveness_leg "$dir" hung FM_SSH_BIN="$dir/fakebin/ssh" FM_FAKE_SSH_LOG="$dir/ssh.log" \
+    FM_FAKE_SSH_PIDS="$dir/ssh.pids" FM_SECONDMATE_PROBE_TIMEOUT=2; pid=$LIVENESS_PID
+  set +m
+  # Two abandoned probes prove the watcher came back from the first hang and
+  # kept cycling, rather than merely logging once before wedging.
+  abandoned=0
+  for i in $(seq 1 200); do
+    abandoned=$(grep -c 'secondmate rsm1 liveness: remote state probe exceeded its 2s bound; endpoint state unknown; route preserved on lab-host' \
+      "$state/.watch-triage.log" 2>/dev/null || true)
+    [ "${abandoned:-0}" -lt 2 ] || break
+    sleep 0.1
+  done
+  alive=0
+  ! is_live_non_zombie "$pid" || alive=1
+  beat_age=$(( $(date +%s) - $(stall_watch_beat_epoch "$state/.last-watcher-beat") ))
+
+  # Stop the watcher group while a fresh probe is in flight. Every probe,
+  # including that one, is reaped by its own bound: no ssh or ssh child
+  # outlives it. Survivors are killed after the check so a failing run leaves
+  # nothing behind either.
+  i=$(wc -l < "$dir/ssh.pids")
+  for _ in $(seq 1 50); do
+    [ "$(wc -l < "$dir/ssh.pids")" -le "$i" ] || break
+    sleep 0.1
+  done
+  kill -TERM -- "-$pid" 2>/dev/null || true
+  wait_for_exit "$pid" 50 >/dev/null || true
+  sleep 4
+  leaked=
+  while read -r ssh_pid child_pid; do
+    for p in "$ssh_pid" "$child_pid"; do
+      ! kill -0 "$p" 2>/dev/null || leaked="$leaked $p"
+    done
+  done < "$dir/ssh.pids"
+  # shellcheck disable=SC2086 # Deliberate word splitting over the pid list.
+  [ -z "$leaked" ] || kill -KILL $leaked 2>/dev/null || true
+
+  [ "${abandoned:-0}" -ge 2 ] \
+    || fail "a hung remote probe was not abandoned as unknown within its bound: $(cat "$state/.watch-triage.log" "$dir/watch-hung.err" 2>/dev/null)"
+  [ "$alive" -eq 1 ] \
+    || fail "the watcher exited against a hung remote secondmate: $(cat "$dir/watch-hung.out" "$dir/watch-hung.err")"
+  [ "$beat_age" -le 4 ] \
+    || fail "the watcher stopped beating behind a hung remote probe (beacon ${beat_age}s old)"
+  [ -z "$leaked" ] || fail "an abandoned remote probe left ssh processes running:$leaked"
+  cmp -s "$dir/rsm1.meta.before" "$state/rsm1.meta" \
+    || fail "an abandoned remote probe changed the route metadata"
+  assert_grep '- rsm1 ' "$dir/data/secondmates.md" "an abandoned probe changed the registry route"
+  [ ! -s "$state/.wake-queue" ] || fail "an abandoned remote probe queued a wake: $(cat "$state/.wake-queue")"
+  [ ! -e "$state/.secondmate-relaunch-rsm1" ] \
+    || fail "an abandoned remote probe ledgered a relaunch attempt"
+  [ ! -s "$dir/tmux.log" ] || fail "an abandoned remote probe touched a local endpoint"
+  pass "watch liveness: a hung remote probe is abandoned as unknown, reaped, and the watcher keeps beating"
+}
+
 test_self_held_lock_reclaims_instead_of_deadlocking
 test_subshell_lock_ownership_without_bashpid
 test_bounded_lock_handoff_after_contention
@@ -3436,3 +3528,4 @@ test_secondmate_liveness_tick_error_keeps_scanning_and_wakes
 test_secondmate_liveness_tick_unqueued_outcome_is_an_error_not_a_wake
 test_secondmate_liveness_tick_skips_mate_whose_lock_is_held
 test_secondmate_liveness_tick_preserves_unreachable_remote
+test_secondmate_liveness_tick_abandons_hung_remote_probe
