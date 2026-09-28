@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Behavior tests for the backlog<->record pairing invariant:
-# `state/<id>.meta` exists <=> this home's backlog row for that id is In flight.
+# Legacy task records pair with In flight rows; accepted/archived goals may
+# retain resource metadata and cleanup receipts after their row is closed.
 #
 # bin/fm-backlog-transition-lib.sh states the contract; the three scripts that
 # own a task's physical record enforce it. These tests drive those real scripts
@@ -569,6 +570,61 @@ write_task_meta() {  # <case-dir> <id> <kind> <mode> [extra-line...]
     "$@"
 }
 
+# Synthetic launch binding plus an externally closed pane for enrolled backlog
+# cases. Endpoint identity/mutation is covered by the dedicated safety and live
+# lab suites; this fixture keeps backlog replay on its real production path.
+fixture_closed_endpoint() {  # <case-dir> <id>
+  local case_dir=$1 id=$2 home meta session pane ws tab gen socket instance journal label
+  home=$(home_of "$case_dir"); meta="$home/state/$id.meta"
+  session=$(sed -n 's/^herdr_session=//p' "$meta")
+  pane=$(sed -n 's/^herdr_pane_id=//p' "$meta")
+  ws=$(sed -n 's/^herdr_workspace_id=//p' "$meta")
+  tab=$(sed -n 's/^herdr_tab_id=//p' "$meta")
+  gen=$(sed -n 's/^spawn_gen=//p' "$meta")
+  socket="$case_dir/fixture.sock"
+  instance=$(python3 - "$socket" <<'PYFIX'
+import hashlib,os,socket,sys
+p=sys.argv[1]
+sock=socket.socket(socket.AF_UNIX); sock.bind(p); sock.close()
+s=os.lstat(p)
+print(hashlib.sha256(repr((s.st_dev,s.st_ino,s.st_mtime_ns,s.st_ctime_ns)).encode()).hexdigest())
+PYFIX
+  ) || fail 'cannot create private fixture socket identity'
+  journal="$home/state/$id.herdr-presentation"
+  label=$(FM_HOME="$home" bash -c '. "$1/bin/backends/herdr.sh"; fm_backend_herdr_projection_workspace_label "$2" abcdefghijklmnopqrstuv' _ "$ROOT" "$id")
+  cat > "$journal" <<EOF
+version=3
+task_id=$id
+projection_id=abcdefghijklmnopqrstuv
+home=$(cd "$home" && pwd -P)
+session=$session
+workspace_id=$ws
+tab_id=$tab
+pane_id=$pane
+parent_workspace_id=anchor
+parent_label=anchor
+workspace_label=$label
+task_label=fm-$id
+spawn_gen=$gen
+terminal_id=fixture-terminal
+session_instance=$instance
+shell_pid=12345
+shell_start=synthetic exited shell
+EOF
+  chmod 600 "$journal"
+  cat > "$case_dir/fakebin/herdr" <<EOF
+#!/usr/bin/env bash
+case "\$1 \${2:-}" in
+  'session list') printf '%s\n' '{"sessions":[{"name":"$session","running":true,"socket_path":"$socket"}]}' ;;
+  'status --json') printf '%s\n' '{"server":{"running":true,"session":"$session","socket":"$socket"}}' ;;
+  'pane get') printf '%s\n' '{"error":{"code":"pane_not_found"}}' ;;
+  'workspace list') printf '%s\n' '{"result":{"workspaces":[]}}' ;;
+  *) exit 1 ;;
+esac
+EOF
+  chmod +x "$case_dir/fakebin/herdr"
+}
+
 run_spawn() {  # <case-dir> <args...>
   local case_dir=$1
   shift
@@ -1069,6 +1125,7 @@ test_immediate_child_absolute_data_dispatches_and_completes() {
   chmod 600 "$assessment"
   FM_HOME="$(home_of "$case_dir")" FM_DATA_OVERRIDE="$data" "$ROOT/bin/fm-task-state.sh" \
     reconcile "$id" --expected-revision 1 --record "$assessment" >/dev/null || fail 'fixture acceptance failed'
+  fixture_closed_endpoint "$case_dir" "$id"
   out=$(FM_DATA_OVERRIDE="$data" run_teardown "$case_dir" "$id") \
     || fail "immediate-child-data teardown failed: $out"
   [ "$(tasks-axi show "$id" --file "$backlog" 2>/dev/null | sed -n 's/^  state: *//p' | head -1)" = "done" ] \
@@ -1103,6 +1160,7 @@ test_bare_relative_data_dispatches_and_completes() {
   chmod 600 "$assessment"
   FM_HOME="$(home_of "$case_dir")" FM_DATA_OVERRIDE="$data" "$ROOT/bin/fm-task-state.sh" \
     reconcile "$id" --expected-revision 1 --record "$assessment" >/dev/null || fail 'fixture acceptance failed'
+  fixture_closed_endpoint "$case_dir" "$id"
   out=$(cd "$case_dir" && FM_DATA_OVERRIDE=records run_teardown "$case_dir" "$id") \
     || fail "bare-relative-data teardown failed: $out"
   [ "$(tasks-axi show "$id" --file "$backlog" 2>/dev/null | sed -n 's/^  state: *//p' | head -1)" = "done" ] \
@@ -1780,14 +1838,17 @@ test_interrupted_destructive_cleanup_leaves_a_recoverable_close() {
   marker="$home/state/$id.backlog-close"
   interrupt_teardown_during_treehouse_return "$case_dir"
 
+  fixture_closed_endpoint "$case_dir" "$id"
   out=$(run_teardown "$case_dir" "$id") || rc=$?
   [ "$rc" -ne 0 ] || fail "interrupted destructive cleanup reported success"
   assert_present "$marker" \
     "destructive cleanup began before recording its authoritative close"
   assert_present "$home/state/$id.meta" \
     "interrupted destructive cleanup lost the task incarnation"
-  [ "$(row_state "$case_dir" "$id")" = in_flight ] \
-    || fail "interrupted cleanup changed the backlog before recovery"
+  [ "$(row_state "$case_dir" "$id")" = "done" ] \
+    || fail "accepted goal was reopened by interrupted directory cleanup"
+  jq -e '.phases.pane_close.state=="confirmed" and .phases.directory_return.state=="retained"' \
+    "$home/state/$id.cleanup.json" >/dev/null || fail 'interrupted directory cleanup lost its independent receipt'
 
   out=$(run_bootstrap "$case_dir")
   [ "$(row_state "$case_dir" "$id")" = "done" ] \
@@ -2821,6 +2882,7 @@ EOF
   assert_present "$(home_of "$case_dir")/state/$id.meta" \
     "no-backlog spawn did not publish its task record"
   fm_test_archive_goal "$(home_of "$case_dir")" "$id"
+  fixture_closed_endpoint "$case_dir" "$id"
   out=$(run_teardown "$case_dir" "$id") || fail "no-backlog teardown failed: $out"
   assert_absent "$(home_of "$case_dir")/state/$id.meta" \
     "no-backlog teardown retained its task record"
@@ -2946,6 +3008,7 @@ test_dispatch_and_completion_are_structural() {
   meta="$home/state/$id.meta"
   printf 'pr=%s\n' "$pr" >> "$meta"
   fm_test_archive_goal "$home" "$id"
+  fixture_closed_endpoint "$case_dir" "$id"
   out=$(run_teardown "$case_dir" "$id") \
     || fail "structural teardown failed: $out"
   [ "$(row_state "$case_dir" "$id")" = "done" ] \
@@ -2955,7 +3018,7 @@ test_dispatch_and_completion_are_structural() {
   pass "dispatch and completion transition structurally with evidence"
 }
 
-test_refused_teardown_leaves_the_item_live() {
+test_refused_directory_cleanup_keeps_the_goal_closed() {
   local case_dir home id out rc=0
   id=fm-structural-refusal-b15
   case_dir=$(make_home structural-refusal "$id")
@@ -2969,14 +3032,20 @@ test_refused_teardown_leaves_the_item_live() {
   git -C "$case_dir/wt" -c user.name=fmtest -c user.email=fmtest@example.invalid \
     commit -q -m "unlanded fixture work"
   fm_test_archive_goal "$home" "$id"
+  fixture_closed_endpoint "$case_dir" "$id"
   out=$(run_teardown "$case_dir" "$id") || rc=$?
 
   [ "$rc" -ne 0 ] || fail "teardown accepted unlanded work"
-  [ "$(row_state "$case_dir" "$id")" = in_flight ] \
-    || fail "refused teardown changed the live backlog state"
+  [ "$(row_state "$case_dir" "$id")" = "done" ] \
+    || fail "refused directory cleanup reopened an explicitly archived goal"
+  jq -e '.disposition=="archived"' "$home/data/$id/lifecycle.json" >/dev/null \
+    || fail 'refused directory cleanup changed explicit archive'
+  jq -e '.phases.pane_close.state=="confirmed" and .phases.directory_return.state=="retained"' \
+    "$home/state/$id.cleanup.json" >/dev/null || fail 'unlanded directory cleanup obligation was lost'
+  assert_present "$case_dir/wt/unlanded.txt" 'refused cleanup discarded unlanded content'
   assert_present "$home/state/$id.meta" \
     "refused teardown removed the live task record"
-  pass "refused teardown leaves the backlog item in flight"
+  pass "refused directory cleanup retains unlanded work and cleanup receipts without reopening the archived goal"
 }
 
 test_environment_selected_adapter_is_not_forced_to_markdown() {
@@ -3009,6 +3078,7 @@ test_manual_backend_home_dispatches_and_completes_without_touching_the_backlog()
   assert_contains "$out" "spawned $id" "manual-backend spawn did not report success"
 
   FM_DATA_OVERRIDE="$data" fm_test_archive_goal "$(home_of "$case_dir")" "$id"
+  fixture_closed_endpoint "$case_dir" "$id"
   out=$(FM_DATA_OVERRIDE="$data" run_teardown "$case_dir" "$id") \
     || fail "manual-backend teardown failed: $out"
   assert_contains "$out" "Update $data_resolved/backlog.md" \
@@ -3019,6 +3089,18 @@ test_manual_backend_home_dispatches_and_completes_without_touching_the_backlog()
 }
 
 
+
+
+if [ "${FM_BACKLOG_ENROLLED_ONLY:-0}" = 1 ]; then
+  test_immediate_child_absolute_data_dispatches_and_completes
+  test_bare_relative_data_dispatches_and_completes
+  test_interrupted_destructive_cleanup_leaves_a_recoverable_close
+  test_home_without_a_backlog_dispatches_and_completes
+  test_dispatch_and_completion_are_structural
+  test_refused_directory_cleanup_keeps_the_goal_closed
+  test_manual_backend_home_dispatches_and_completes_without_touching_the_backlog
+  exit 0
+fi
 
 test_backend_resolution_preserves_config_errors
 test_backend_resolution_preserves_precedence_and_defaults
@@ -3118,6 +3200,6 @@ test_spawn_refuses_an_unsafe_tasks_config_before_exempting_a_missing_backlog
 test_spawn_refuses_a_data_directory_symlinked_outside_the_home
 test_configured_adapter_refuses_a_data_directory_outside_the_home
 test_dispatch_and_completion_are_structural
-test_refused_teardown_leaves_the_item_live
+test_refused_directory_cleanup_keeps_the_goal_closed
 test_environment_selected_adapter_is_not_forced_to_markdown
 test_manual_backend_home_dispatches_and_completes_without_touching_the_backlog

@@ -1386,8 +1386,6 @@ def main():
             result = task.action(args)
         elif args.operation == 'observe':
             result = task.observe()
-        elif args.operation == 'action':
-            result = task.action(args)
         elif args.operation == 'authorize':
             result = task.authorize(args)
         elif args.operation == 'link-cleanup':
