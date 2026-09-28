@@ -151,6 +151,10 @@ case "${1:-} ${2:-}" in
   "pr view")
     case " $* " in
       *statusCheckRollup*)
+        if [ -n "${FM_TEST_GH_ROLLUP_JSON:-}" ]; then
+          printf '%s\n' "$FM_TEST_GH_ROLLUP_JSON"
+          exit 0
+        fi
         printf '%s\n' "{\"state\":\"OPEN\",\"isDraft\":false,\"mergeable\":\"MERGEABLE\",\"mergeStateStatus\":\"CLEAN\",\"headRefOid\":\"${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}\",\"baseRefName\":\"main\",\"statusCheckRollup\":[{\"__typename\":\"CheckRun\",\"name\":\"ci\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\"}]}"
         exit 0
         ;;
@@ -2164,6 +2168,60 @@ test_merged_poll_retires_once() {
   pass "validated merged polls notify once and retire before the next watcher cycle"
 }
 
+# A green pull request that GitHub refuses to merge (here: behind its base) is
+# invisible to the merged-only poll, so an armed merge can sit refused with
+# nobody told. The watcher raises one wake naming the PR and the reason once
+# the episode passes FM_PR_GREEN_BLOCKED_SECS, never repeats it for the same
+# episode, and treats a later block after a clear reading as a new episode.
+green_blocked_cycle() {  # <dir> <out> <mergeStateStatus> <conclusion> <threshold-secs>
+  local dir=$1 out=$2 merge_state=$3 conclusion=$4 threshold=$5 rc
+  rm -f "$dir/home/state/.last-check"
+  set +e
+  FM_PR_GREEN_BLOCKED_SECS="$threshold" FM_TEST_GH_STATE=OPEN FM_TEST_GH_LOG="$dir/gh.log" \
+    FM_TEST_GH_ROLLUP_JSON="{\"state\":\"OPEN\",\"isDraft\":false,\"mergeable\":\"MERGEABLE\",\"mergeStateStatus\":\"$merge_state\",\"statusCheckRollup\":[{\"__typename\":\"CheckRun\",\"name\":\"ci\",\"status\":\"COMPLETED\",\"conclusion\":\"$conclusion\"}]}" \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$out" 2> "$out.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "green-blocked watcher cycle failed: $(cat "$out.err")"
+  ack_watcher_cycle "$dir/home/state" || fail "green-blocked cycle acknowledgement failed"
+}
+
+test_green_unmergeable_pr_alerts_once_per_episode() {
+  local dir state url=https://github.com/o/r/pull/1
+  dir=$(make_case green-unmergeable)
+  state="$dir/home/state"
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
+  write_poll_meta "$state" task-a "$url"
+  seed_canonical_poll "$dir" task-a "$url"
+  add_stop_custom_check "$dir"
+
+  green_blocked_cycle "$dir" "$dir/w1.out" CLEAN SUCCESS 0
+  case "$(cat "$dir/w1.out")" in check:*z-stop.check.sh:*stop-cycle) ;; *) fail "a mergeable green PR raised an alert: $(cat "$dir/w1.out")" ;; esac
+
+  green_blocked_cycle "$dir" "$dir/w2.out" BEHIND SUCCESS 1800
+  case "$(cat "$dir/w2.out")" in check:*z-stop.check.sh:*stop-cycle) ;; *) fail "a green PR blocked for under the threshold raised an alert: $(cat "$dir/w2.out")" ;; esac
+
+  green_blocked_cycle "$dir" "$dir/w3.out" BEHIND SUCCESS 0
+  case "$(cat "$dir/w3.out")" in
+    *"task-a.check.sh: green-unmergeable $url for "*"m: branch is behind the base branch") ;;
+    *) fail "a green PR blocked past the threshold did not raise an alert naming it and the reason: $(cat "$dir/w3.out")" ;;
+  esac
+
+  green_blocked_cycle "$dir" "$dir/w4.out" BEHIND SUCCESS 0
+  case "$(cat "$dir/w4.out")" in check:*z-stop.check.sh:*stop-cycle) ;; *) fail "one stuck episode alerted twice: $(cat "$dir/w4.out")" ;; esac
+
+  green_blocked_cycle "$dir" "$dir/w5.out" BEHIND FAILURE 0
+  case "$(cat "$dir/w5.out")" in check:*z-stop.check.sh:*stop-cycle) ;; *) fail "a red PR raised a green-unmergeable alert: $(cat "$dir/w5.out")" ;; esac
+
+  green_blocked_cycle "$dir" "$dir/w6.out" BLOCKED SUCCESS 0
+  case "$(cat "$dir/w6.out")" in
+    *"task-a.check.sh: green-unmergeable $url for "*"m: base-branch protection refuses the merge"*) ;;
+    *) fail "a new stuck episode after a clear reading did not alert: $(cat "$dir/w6.out")" ;;
+  esac
+  ! grep -F ' pr merge' "$dir/gh.log" >/dev/null || fail "the green-unmergeable alert attempted a merge"
+  pass "a green but unmergeable PR raises one wake per stuck episode after the threshold"
+}
+
 # A poll's own retirement state is scoped to ONE registration, so it cannot by
 # itself catch a poll re-registered for a task whose merge was already
 # surfaced (e.g. bin/fm-pr-check.sh re-armed after the fact). The per-task
@@ -3446,6 +3504,7 @@ test_gerrit_arming_records_no_patch_set_revision
 test_gerrit_ready_gate_reads_the_published_tree
 test_gerrit_nm_ready_gate_requires_recovered_custody
 test_merged_poll_retires_once
+test_green_unmergeable_pr_alerts_once_per_episode
 test_merged_poll_reregistration_after_notification_is_absorbed
 test_merged_poll_retries_a_failed_upward_report
 test_self_merge_and_poll_publish_one_outcome

@@ -362,7 +362,10 @@ The configured `tasks-axi` backend is the durable queue; the tracked default is 
 It tracks work items only, never agents; persistent secondmates never appear as backlog items.
 Work routed to a secondmate is recorded in that secondmate home's own backlog, not the main backlog.
 A decision is simply a task held for the captain: create the task with `bin/fm-tasks-axi.sh add` when needed, then always hold it through `bin/fm-captain-hold.sh hold <id> --reason "<reason>"`, with `--until <date>` when the captain defers it.
-When a main-side thread such as a pending captain decision or relay reminder is worth durable tracking, file it as its own work item and hold it through that wrapper.
+Every captain request for an outcome becomes a work item before or while you act on it, even one you finish directly in chat; only a pure question whose answer is the whole deliverable stays chat-only.
+Open that item's body with a `verify: <observation>` line naming what proves it done, such as "no keychain popups on screen", and close it - by `done` or by the teardown that closes it - only after making that observation.
+When the captain reported seeing a problem, the observation is that problem absent on the surface where he saw it; a cause fixed, a doc written, or a handoff sent does not close it.
+A handoff note, instruction, or "watch for it" follow-up you write is its own work item with an owner: a worker, or held for the captain through `bin/fm-captain-hold.sh hold`, the same wrapper that holds any pending captain decision or relay reminder worth durable tracking.
 Captain calls discovered by investigations or visual reviews follow `captain-hold-lifecycle`, which owns their completion gate and recorded-answer rules.
 When the automatic transition gate applies, dispatch and completion move the item themselves - `bin/fm-spawn.sh` and `bin/fm-teardown.sh` own those transitions and refuse rather than report success without them - so what remains yours is filing the item before dispatch, recording decisions, and keeping notes current; `docs/configuration.md` owns gate applicability and the manual-backend exception.
 Re-evaluate queued work after every teardown and heartbeat, dispatching items only when dependencies and time gates have cleared.

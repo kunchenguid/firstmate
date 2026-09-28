@@ -13,11 +13,12 @@
 # A GitHub merge is refused unless every pre-merge condition holds, each read
 # live at merge time rather than taken from recorded metadata: the pull request
 # is open, not a draft, mergeable, free of conflicts, every unwaived check
-# is green at the exact current head commit, where github_checks_not_green below
-# owns what makes a check green and judges each one by its current run, and
-# every unwaived check the forge requires for the base branch has reported at
-# that head. A required check that never reported is absent from the checks
-# list rather than red, so github_read_required_contexts below reads the
+# is green at the exact current head commit, where bin/fm-pr-lib.sh's
+# fm_pr_github_checks_not_green owns what makes a check green and judges each
+# one by its current run, and every unwaived check the forge requires for the
+# base branch has reported at that head. A required check that never reported
+# is absent from the checks list rather than red, so
+# github_read_required_contexts below reads the
 # required set from classic branch protection and active rulesets. Check-run
 # requirements retain their producer app binding: a same-named check run from another app cannot
 # satisfy them, and a duplicate name-only entry cannot weaken that binding.
@@ -542,84 +543,6 @@ FIELDS
   FM_PR_GITLAB_ASYNC_CONFIGURED=$async_configured
 }
 
-# Every GitHub check that is not green in the given live pull-request JSON, one
-# name per line. An entry is green when it is a status context whose state is
-# SUCCESS, or a check run that completed with SUCCESS, NEUTRAL, or SKIPPED (so
-# a pending check is not green either). Exits nonzero when the rollup cannot be
-# read, so a malformed answer is a failed read and never an empty red set.
-#
-# The rollup can hold several runs of one check name at the same head, because
-# GitHub cancels a pull request's in-flight run when the base branch advances
-# and re-triggers it; the cancelled run stays in the rollup beside the passing
-# re-run. A check is therefore judged by its current run rather than by any run
-# that a later one superseded, which is what makes this agree with GitHub's own
-# CLEAN mergeStateStatus instead of refusing a pull request GitHub considers
-# mergeable.
-#
-# Supersession applies only among check runs with the same reported name. A
-# name is dropped from the red set only when every non-green run is COMPLETED,
-# has a whole-second UTC startedAt, and started strictly before a green run.
-# Status contexts are never grouped or superseded, and every non-green one is
-# reported independently. A still-running, queued, undated, or tied check run
-# stays red. A name whose runs are all green needs no timestamp, while a name
-# with no green run stays red.
-#
-# The reported name is also what --allow-red matches. An unnamed check run is
-# grouped alone and can neither supersede nor be superseded, because unrelated
-# unnamed checks must not be treated as one.
-github_checks_not_green() {
-  local json=$1
-  printf '%s' "$json" | jq -r '
-    def settled_at:
-      if type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
-      then . else null end;
-    if (.statusCheckRollup | type) != "array" then error("no check rollup") else . end
-    | [ .statusCheckRollup
-        | to_entries[]
-        | .key as $i
-        | .value
-        | if .__typename == "CheckRun" then
-            {
-              kind: "check_run",
-              name: (.name // ""),
-              completed: (.status == "COMPLETED"),
-              ok: (.status == "COMPLETED" and (.conclusion == "SUCCESS" or .conclusion == "NEUTRAL" or .conclusion == "SKIPPED")),
-              at: (.startedAt | settled_at)
-            }
-            | . + {group: (if .name == "" then ["", $i] else [.name, -1] end)}
-          else
-            {kind: "status_context", name: (.context // ""), ok: (.state == "SUCCESS")}
-          end
-      ]
-    | . as $entries
-    | (
-        ($entries[]
-          | select(.kind == "status_context" and (.ok | not))
-          | .name
-        ),
-        ($entries
-          | [.[] | select(.kind == "check_run")]
-          | group_by(.group)[]
-          | {
-              name: .[0].name,
-              reds: [.[] | select(.ok | not)],
-              newest_green: ([.[] | select(.ok) | .at | select(. != null)] | max)
-            }
-          | select(
-              (.reds | length) > 0
-              and (
-                .newest_green == null
-                or any(.reds[]; (.completed | not) or .at == null)
-                or ([.reds[] | .at] | max) >= .newest_green
-              )
-            )
-          | .name
-        )
-      )
-    | if . == "" then "(unnamed check)" else . end
-  ' 2>/dev/null || return 1
-}
-
 FM_PR_GITHUB_REQUIRED=
 FM_PR_GITHUB_REQUIRED_ERROR=
 github_read_required_contexts() {
@@ -753,7 +676,7 @@ FIELDS
     echo "error: could not read the GitHub pull request head commit before merging" >&2
     return 1
   fi
-  if ! red=$(github_checks_not_green "$json"); then
+  if ! red=$(fm_pr_github_checks_not_green "$json"); then
     echo "error: could not read the GitHub pull request state before merging" >&2
     return 1
   fi
