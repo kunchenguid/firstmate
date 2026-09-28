@@ -119,7 +119,7 @@ pane() { tmux -L "$SOCKET" capture-pane -p -t "$SESSION" 2>/dev/null; }
 start_pi() {
   local preference=$1
   tmux -L "$SOCKET" kill-server 2>/dev/null || true
-  rm -rf "$TMP_ROOT/home"
+  rm -rf "${TMP_ROOT:?}/home"
   mkdir -p "$TMP_ROOT/home/config"
   printf '%s\n' "$preference" >"$TMP_ROOT/home/config/calm"
   rm -f "$OWNERS_OUT"
