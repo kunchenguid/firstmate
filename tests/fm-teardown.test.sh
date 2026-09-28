@@ -1127,7 +1127,7 @@ SH
 # never a Treehouse lease: teardown must not return it to a pool, reset it, or
 # delete its claim branch, while the landed-work gate and record cleanup still run.
 test_adopted_worktree_teardown_skips_pool_return() {
-  local case_dir rc
+  local case_dir rc claim
   case_dir=$(make_case adopted-worktree)
   write_meta "$case_dir" no-mistakes ship
   printf '%s\n' "worktree_source=adopted" >> "$case_dir/state/task-x1.meta"
@@ -1136,6 +1136,8 @@ test_adopted_worktree_teardown_skips_pool_return() {
   git -C "$case_dir/project" fetch -q origin
   mkdir -p "$case_dir/wt/.claude"
   printf '{}\n' > "$case_dir/wt/.claude/settings.local.json"
+  claim=$(git -C "$case_dir/wt" rev-parse --absolute-git-dir)/fm-adopted-owner
+  printf 'task=task-x1\nhome=%s\n' "$case_dir" > "$claim"
   cat > "$case_dir/fakebin/treehouse" <<SH
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$case_dir/treehouse.log"
@@ -1160,7 +1162,35 @@ SH
     "adopted-worktree: teardown left firstmate's hook wiring in the adopted copy"
   assert_contains "$(cat "$case_dir/stdout")" "adopted worktree $case_dir/wt left in place" \
     "adopted-worktree: teardown did not say the adopted copy was left to its creator"
+  assert_absent "$claim" \
+    "adopted-worktree: teardown left this task's own owner claim on the adopted copy"
   pass "an adopted worktree is left to its creator, never returned to a Treehouse pool"
+}
+
+# The claim is the cross-home mutual exclusion on an adopted copy, so a teardown
+# whose record is stale must never strip the claim that protects the home that
+# actually holds the copy now.
+test_adopted_worktree_teardown_leaves_another_homes_claim() {
+  local case_dir rc claim
+  case_dir=$(make_case adopted-foreign-claim)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' "worktree_source=adopted" >> "$case_dir/state/task-x1.meta"
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  claim=$(git -C "$case_dir/wt" rev-parse --absolute-git-dir)/fm-adopted-owner
+  printf 'task=other-task\nhome=%s\n' "$case_dir/other-home" > "$claim"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "adopted-foreign-claim: teardown should succeed for landed work"$'\n'"$(cat "$case_dir/stderr")"
+  [ -f "$claim" ] || fail "adopted-foreign-claim: teardown removed another home's claim on the adopted copy"
+  assert_grep 'task=other-task' "$claim" \
+    "adopted-foreign-claim: teardown rewrote another home's claim on the adopted copy"
+  pass "an adopted teardown releases only its own owner claim"
 }
 
 test_content_fallback_refreshes_stale_origin_ref() {
@@ -4330,6 +4360,7 @@ test_pr_check_does_not_refresh_stale_pr_head
 test_pr_check_records_remote_head_when_local_lags
 test_content_in_default_fallback_allows
 test_adopted_worktree_teardown_skips_pool_return
+test_adopted_worktree_teardown_leaves_another_homes_claim
 test_content_fallback_refreshes_stale_origin_ref
 test_dirty_worktree_refuses
 test_gh_error_and_content_absent_refuses

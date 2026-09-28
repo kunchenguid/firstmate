@@ -47,10 +47,15 @@
 #   for a pooled slot. Before any endpoint exists it also refuses a path that does
 #   not exist, is not a worktree of the spawning project's repository, is itself a
 #   Treehouse pool slot (pool slots are allocated here, never adopted, so teardown
-#   keeps returning them), is already recorded by another task in this home, or
-#   has uncommitted changes. The ordinary base refresh below then refuses a copy
-#   carrying commits the origin default branch lacks rather than resetting them
-#   away. The task record carries worktree_source=adopted, which relaunch
+#   keeps returning them), is already recorded by another task in this home or
+#   claimed by a live task in any firstmate home, or has uncommitted changes.
+#   The adoption writes that cross-home claim itself, in the same task=/home=
+#   format a pool slot carries but inside the copy's own per-worktree git dir,
+#   so sibling ticket copies never share one claim and claiming never dirties
+#   the copy; an aborted spawn drops only its own claim and the wiring it armed,
+#   and teardown releases only its own. The ordinary base refresh below then
+#   refuses a copy carrying commits the origin default branch lacks rather than
+#   resetting them away. The task record carries worktree_source=adopted, which relaunch
 #   preserves and bin/fm-teardown.sh reads to leave the copy and its branch to
 #   their creator instead of returning them to a pool. The flag is refused with
 #   --relaunch, --secondmate, batch pairs, and the orca backend, which creates
@@ -1231,6 +1236,8 @@ SPAWN_TREEHOUSE_PROJECT_LOCK=
 SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
 SPAWN_SLOT_CLAIMED=0
 SPAWN_WORKTREE_ADOPTED=0
+SPAWN_ADOPT_CLAIMED=0
+SPAWN_ADOPT_CLAIM_MARKER=
 RELAUNCH_REPLACEMENT_PENDING=0
 RELAUNCH_REPLACEMENT_BUSY_GEN=
 RELAUNCH_REPLACEMENT_HARNESS=
@@ -1381,6 +1388,24 @@ spawn_abort_cleanup() {
       fm_treehouse_slot_owner_release "$WT" "$ID" || true
     else
       echo "warning: leaving task $ID's slot claim on $WT in place; the Treehouse project lock is no longer held, so the next spawn's claim replaces it" >&2
+    fi
+  fi
+  # An adopted copy is its creator's, so nothing returns and resets it the way a
+  # pool slot self-heals: a spawn that aborts before its record is published has
+  # to take back both its own claim and the wiring it armed inside that copy,
+  # or the creator's next session inherits a hook naming a task that never was.
+  if [ "$SPAWN_WORKTREE_ADOPTED" = 1 ] && [ -n "${WT:-}" ] &&
+    [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
+    if [ "$SPAWN_ADOPT_CLAIMED" = 1 ]; then
+      SPAWN_ADOPT_CLAIMED=0
+      if [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" = 1 ]; then
+        fm_treehouse_slot_owner_release "$WT" "$ID" "$SPAWN_ADOPT_CLAIM_MARKER" || true
+      else
+        echo "warning: leaving task $ID's claim on adopted worktree $WT in place; the Treehouse project lock is no longer held, so the next spawn's claim replaces it" >&2
+      fi
+    fi
+    if ! clear_relaunch_harness_wiring "${HARNESS:-}" "$WT" "${STATE_REAL:-$STATE}" "$ID"; then
+      echo "warning: could not remove task $ID's wiring from adopted worktree $WT" >&2
     fi
   fi
   if [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" = 1 ]; then
@@ -3437,15 +3462,60 @@ spawn_adopt_worktree() {
     echo "error: adopted worktree '$WT' is already recorded for task $(basename "$meta" .meta); refusing to launch a second worker into its copy" >&2
     exit 1
   done
-  status=$(git -C "$WT" status --porcelain) || {
+  status=$(git -C "$WT" -c core.quotePath=false status --porcelain) || {
     echo "error: could not inspect adopted worktree '$WT'" >&2
     exit 1
   }
   if [ -n "$status" ]; then
-    echo "error: adopted worktree '$WT' has uncommitted changes; a first dispatch cannot tell whose work they are, so it refuses rather than reset them away" >&2
+    if describe_stale_submodule_pins "$WT" "$status"; then
+      echo "error: adopted worktree '$WT' has a stale submodule checkout, not uncommitted work; refusing to launch and leaving it untouched" >&2
+    else
+      echo "error: adopted worktree '$WT' has uncommitted changes; a first dispatch cannot tell whose work they are, so it refuses rather than reset them away" >&2
+    fi
     exit 1
   fi
+  spawn_adopt_claim_worktree
   SPAWN_WORKTREE_ADOPTED=1
+}
+
+# The cross-home owner claim for an adopted copy. A pooled slot carries one
+# (fm_treehouse_slot_owner_claim, task id plus $FM_HOME); the record scan above
+# reads only this home's state dir, so without the same claim a sibling
+# firstmate home would launch a second worker into one ticket copy. Written
+# under the Treehouse project lock this spawn holds through metadata
+# publication, in the copy's own per-worktree git dir so sibling ticket copies
+# never share one claim and the copy teardown inspects is never dirtied.
+spawn_adopt_claim_worktree() {
+  local owner_state
+  SPAWN_ADOPT_CLAIM_MARKER=$(fm_adopted_worktree_owner_marker "$WT") || {
+    echo "error: could not resolve the owner claim location for adopted worktree '$WT'" >&2
+    exit 1
+  }
+  fm_treehouse_slot_owner_state "$WT" "$ID" "$SPAWN_ADOPT_CLAIM_MARKER"
+  case "$FM_TREEHOUSE_SLOT_OWNER" in
+    other)
+      # A claim whose named task no longer has a record in its named home is
+      # spent, so it may be replaced; anything else is a live owner.
+      if [ "$FM_TREEHOUSE_SLOT_OWNER_HOME" = "$FM_HOME" ]; then
+        owner_state=$STATE
+      else
+        owner_state="$FM_TREEHOUSE_SLOT_OWNER_HOME/state"
+      fi
+      if [ -z "$FM_TREEHOUSE_SLOT_OWNER_HOME" ] || [ -e "$owner_state/$FM_TREEHOUSE_SLOT_OWNER_ID.meta" ]; then
+        echo "error: adopted worktree '$WT' is already claimed by task $FM_TREEHOUSE_SLOT_OWNER_ID (firstmate home ${FM_TREEHOUSE_SLOT_OWNER_HOME:-unknown}); refusing to launch a second worker into its copy" >&2
+        exit 1
+      fi
+      ;;
+    unsafe)
+      echo "error: adopted worktree '$WT' carries an owner claim that cannot be read, so it cannot be proved unclaimed; inspect or repair $SPAWN_ADOPT_CLAIM_MARKER (task= and home= lines)" >&2
+      exit 1
+      ;;
+  esac
+  if ! fm_treehouse_slot_owner_claim "$WT" "$ID" "$FM_HOME" "$SPAWN_ADOPT_CLAIM_MARKER"; then
+    echo "error: could not claim adopted worktree '$WT' for task $ID; refusing to launch a worker whose copy cannot later be proved to be its own" >&2
+    exit 1
+  fi
+  SPAWN_ADOPT_CLAIMED=1
 }
 [ "$ADOPT_SET" -eq 0 ] || spawn_adopt_worktree
 

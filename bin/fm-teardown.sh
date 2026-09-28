@@ -150,7 +150,9 @@
 # --adopt-worktree) is not a pool slot either: it is its creator's copy, so
 # teardown never returns it to a pool, resets it, deletes its branch, or removes
 # it, even when a forced secondmate teardown discards child work. It removes only
-# firstmate's own hook wiring and leaves the copy to its creator; the landed-work
+# firstmate's own hook wiring and this task's own owner claim (written by spawn
+# in the copy's per-worktree git dir; another home's claim is never touched) and
+# leaves the copy to its creator; the landed-work
 # gates, process reaping, and record cleanup run exactly as for a pooled copy.
 # Orca tasks use the same safety checks, then close the recorded terminal and
 # remove the recorded worktree through `orca worktree rm`; teardown never guesses
@@ -3202,7 +3204,7 @@ endpoint_close_refusal() {  # <subject> <backend> <target> <honors-force>
 }
 
 cleanup_firstmate_home_children() {
-  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc child_busy_gen child_owner_rc
+  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc child_busy_gen child_owner_rc child_adopt_marker
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -3262,11 +3264,14 @@ cleanup_firstmate_home_children() {
       fm_backend_remove_worktree "$child_backend" "$child_orca_worktree_id" || return 1
     elif [ "$(meta_value "$child_meta" worktree_source)" = adopted ]; then
       # An adopted copy is its creator's, never a pool slot: even a forced
-      # discard only removes firstmate's wiring, never the copy or its branch.
+      # discard only removes firstmate's wiring and this child's own claim,
+      # never the copy, its branch, or another task's claim.
       if [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
         rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
           "$child_wt/.opencode/plugins/fm-busy-state.js" \
           "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
+        child_adopt_marker=$(fm_adopted_worktree_owner_marker "$child_wt" 2>/dev/null) &&
+          fm_treehouse_slot_owner_release "$child_wt" "$child_id" "$child_adopt_marker" || true
       fi
     elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
       # The same ownership determination as the parent's own slot: a child
@@ -3602,11 +3607,14 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
 elif [ "$KIND" != secondmate ] && ! teardown_owns_worktree; then
   :
 elif [ "$WORKTREE_SOURCE" = adopted ] && [ "$KIND" != secondmate ]; then
-  # Adopted, not leased (see script header): only firstmate's own wiring leaves.
+  # Adopted, not leased (see script header): only firstmate's own wiring and
+  # this task's own owner claim leave; the release never removes another home's.
   if [ -d "$WT" ]; then
     rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
       "$WT/.opencode/plugins/fm-busy-state.js" \
       "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
+    ADOPT_CLAIM_MARKER=$(fm_adopted_worktree_owner_marker "$WT" 2>/dev/null) &&
+      fm_treehouse_slot_owner_release "$WT" "$ID" "$ADOPT_CLAIM_MARKER" || true
   fi
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)

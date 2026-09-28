@@ -67,6 +67,123 @@ run_spawn() {
     "$id" "$PROJECT_DIR" "$@"
 }
 
+# The collision this feature exists to prevent crosses firstmate homes: a
+# secondmate home has its own state dir, so the record scan in the spawning home
+# cannot see a worker another home already launched into the same ticket copy.
+# The owner claim written on adoption is what closes that, so it is driven here
+# from a genuinely separate $FM_HOME.
+second_home() { # <home-dir> <id>
+  local home=$1 id=$2
+  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
+  printf 'codex\n' > "$home/config/crew-harness"
+  fm_test_spawn_brief "$home" "$id"
+  touch "$home/state/.last-watcher-beat"
+}
+
+test_adoption_from_another_firstmate_home_is_refused() {
+  local id other_id other_home out status link
+  id='adopt-claim-first-a5'
+  other_id='adopt-claim-second-a5'
+  make_case cross-home "$id"
+  other_home="$CASE_DIR/home-two"
+  second_home "$other_home" "$other_id"
+
+  out=$(run_spawn "$CLAIM_DIR" "$id" --mode no-mistakes --yolo off --adopt-worktree "$CLAIM_DIR")
+  status=$?
+  expect_code 0 "$status" "the first adoption should launch"$'\n'"$out"
+
+  out=$(FM_FAKE_PANE_LOG="$PANE_LOG" fm_test_run_spawn "$other_home" "$CLAIM_DIR" "$FAKEBIN_DIR" \
+    "$other_id" "$PROJECT_DIR" --mode no-mistakes --yolo off --adopt-worktree "$CLAIM_DIR")
+  status=$?
+  [ "$status" -ne 0 ] || fail "a second firstmate home adopted a copy another home already holds"$'\n'"$out"
+  assert_contains "$out" "already claimed by task $id" \
+    "the cross-home refusal did not name the task holding the copy"
+  assert_contains "$out" "$HOME_DIR" \
+    "the cross-home refusal did not name the firstmate home holding the copy"
+  [ ! -e "$other_home/state/$other_id.meta" ] || fail "the refused cross-home adoption published task metadata"
+
+  # A different spelling of the same copy resolves to the same worktree, so the
+  # claim must refuse it exactly as it refuses the literal path.
+  link="$CASE_DIR/claim-link"
+  ln -s "$CLAIM_DIR" "$link"
+  out=$(FM_FAKE_PANE_LOG="$PANE_LOG" fm_test_run_spawn "$other_home" "$link" "$FAKEBIN_DIR" \
+    "$other_id" "$PROJECT_DIR" --mode no-mistakes --yolo off --adopt-worktree "$link")
+  status=$?
+  [ "$status" -ne 0 ] || fail "a symlinked spelling slipped past the owner claim"$'\n'"$out"
+  assert_contains "$out" "already claimed by task $id" \
+    "the symlinked spelling was not refused by the owner claim"
+  [ ! -e "$other_home/state/$other_id.meta" ] || fail "the refused symlinked adoption published task metadata"
+  pass "an adopted copy another firstmate home holds is refused, however it is spelled"
+}
+
+# An adopted copy is its creator's, so nothing resets it the way a returned pool
+# slot self-heals: a spawn that dies after arming wiring must take that wiring
+# and its claim back out of the copy it was handed.
+test_aborted_adoption_leaves_no_firstmate_wiring_in_the_copy() {
+  local id out status claim excl
+  id='adopt-abort-wiring-a6'
+  make_case abort-wiring "$id"
+  printf 'claude\n' > "$HOME_DIR/config/crew-harness"
+  # A read-only per-worktree info/exclude fails the launch one step after the
+  # claude hook wiring is armed into the copy and long before any task record.
+  excl=$(git -C "$CLAIM_DIR" rev-parse --path-format=absolute --git-path info/exclude)
+  mkdir -p "$(dirname "$excl")"
+  : > "$excl"
+  chmod a-w "$excl" "$(dirname "$excl")"
+
+  out=$(run_spawn "$CLAIM_DIR" "$id" --mode no-mistakes --yolo off --adopt-worktree "$CLAIM_DIR")
+  status=$?
+  chmod u+w "$(dirname "$excl")" "$excl"
+  [ "$status" -ne 0 ] || fail "the spawn survived a failed launch step"$'\n'"$out"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "the aborted adoption published task metadata"
+  [ ! -e "$CLAIM_DIR/.claude/settings.local.json" ] \
+    || fail "the aborted adoption left firstmate's hook wiring in its creator's copy"
+  claim=$(git -C "$CLAIM_DIR" rev-parse --absolute-git-dir)/fm-adopted-owner
+  [ ! -e "$claim" ] || fail "the aborted adoption left its owner claim on its creator's copy"
+  pass "an adoption that aborts before publishing its record leaves the copy as it was handed over"
+}
+
+# A copy whose only deviation is a submodule left on the pin an older base
+# recorded carries no user work at all. Reporting it as uncommitted changes
+# sends the captain hunting for work that does not exist, so the adopted check
+# has to diagnose it the way the pooled base refresh already does.
+test_stale_submodule_pin_is_not_reported_as_uncommitted_work() {
+  local id out status sub subpin1 subpin2
+  id='adopt-stale-submodule-a7'
+  make_case stale-submodule "$id"
+  sub="$CASE_DIR/sub-origin"
+
+  git init --quiet -b main "$sub"
+  printf 'pin one\n' > "$sub/lib.txt"
+  git -C "$sub" add lib.txt
+  git -C "$sub" -c user.name=t -c user.email=t@t commit -qm sub-one
+  subpin1=$(git -C "$sub" rev-parse HEAD)
+  printf 'pin two\n' > "$sub/lib.txt"
+  git -C "$sub" -c user.name=t -c user.email=t@t commit -qam sub-two
+  subpin2=$(git -C "$sub" rev-parse HEAD)
+
+  git -C "$PROJECT_DIR" -c protocol.file.allow=always -c user.name=t -c user.email=t@t \
+    submodule --quiet add "file://$sub" ui
+  git -C "$PROJECT_DIR" -c user.name=t -c user.email=t@t commit -qm add-submodule
+  git -C "$CLAIM_DIR" checkout --quiet -B issue-7 main
+  git -C "$CLAIM_DIR" -c protocol.file.allow=always submodule --quiet update --init
+  git -C "$CLAIM_DIR/ui" checkout --quiet "$subpin1"
+
+  out=$(run_spawn "$CLAIM_DIR" "$id" --mode no-mistakes --yolo off --adopt-worktree "$CLAIM_DIR")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn adopted a copy carrying a stale submodule pin"$'\n'"$out"
+  assert_contains "$out" "stale submodule checkout" \
+    "the stale submodule pin was not named as the cause"
+  assert_contains "$out" "submodule 'ui'" "the refusal did not name the submodule"
+  assert_contains "$out" "$subpin2" "the refusal did not report the pin this base records"
+  assert_not_contains "$out" "has uncommitted changes" \
+    "a stale submodule pin was misreported as the creator's uncommitted work"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "the stale-submodule refusal published task metadata"
+  [ "$(git -C "$CLAIM_DIR/ui" rev-parse HEAD)" = "$subpin1" ] \
+    || fail "the refusal converged the submodule instead of leaving the copy untouched"
+  pass "an adopted copy whose only deviation is a stale submodule pin is diagnosed as one"
+}
+
 test_adopted_worktree_is_recorded_and_entered_without_a_pool_allocation() {
   local id out status
   id='adopt-claimed-copy-a1'
@@ -202,6 +319,9 @@ test_adopt_worktree_is_refused_outside_a_first_ship_or_scout_dispatch() {
 
 test_adopted_worktree_is_recorded_and_entered_without_a_pool_allocation
 test_adopted_primary_checkout_is_refused_by_the_isolation_proof
+test_adoption_from_another_firstmate_home_is_refused
+test_aborted_adoption_leaves_no_firstmate_wiring_in_the_copy
+test_stale_submodule_pin_is_not_reported_as_uncommitted_work
 test_unusable_adopted_paths_are_refused_with_their_condition
 test_adopt_worktree_is_refused_outside_a_first_ship_or_scout_dispatch
 
