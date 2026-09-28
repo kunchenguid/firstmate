@@ -442,50 +442,6 @@ test_empty_message_refused() {
   pass "fm-send: an empty or whitespace-only text steer refuses before marking, recording, or typing"
 }
 
-# Contract: a worker waiting on its own decision is woken only by firstmate's
-# deliberate answer, never by an automatic sender.
-test_automatic_send_waits_for_an_open_decision() {
-  local dir err rc status
-  dir=$(setup_case automatic); err="$dir/send.err"
-  status="$dir/home/state/t1.status"
-  printf 'needs-decision [key=pick]: ship alpha or beta?\n' > "$status"
-  run_send "$dir" "$err" -- t1 --automatic "re-read your instructions"; rc=$?
-  expect_code 4 "$rc" "an automatic send to a worker waiting on its decision must defer"
-  assert_contains "$(cat "$err")" "deferred: t1 is waiting on its open decision or blocker (pick)" \
-    "the deferral should name the open decision"
-  [ -z "$(find "$dir/home/state/t1.inbox" -name '*.msg' 2>/dev/null)" ] \
-    || fail "a deferred automatic send left an inbox record"
-  [ ! -s "$dir/send.log" ] || fail "a deferred automatic send typed into the pane:"$'\n'"$(cat "$dir/send.log")"
-
-  run_send "$dir" "$err" -- t1 --resolve-key pick "use alpha"; rc=$?
-  expect_code 0 "$rc" "the deliberate answer must still be delivered"
-  [ -f "$dir/home/state/t1.inbox/001.msg" ] || fail "the deliberate answer was not recorded"
-  assert_contains "$(cat "$dir/send.log")" "Firstmate instruction waiting" \
-    "the deliberate answer must ring the waiting worker"
-
-  # A parent-owned escalation about the worker is not a wait of the worker's own.
-  printf 'blocked [key=pending-reply-0123456789abcdef]: pending-reply-missed: no report\n' >> "$status"
-  run_send "$dir" "$err" -- t1 --automatic "re-read your instructions"; rc=$?
-  expect_code 0 "$rc" "an automatic send resumes once the worker's own decision is closed"
-  [ -f "$dir/home/state/t1.inbox/002.msg" ] || fail "the resumed automatic send was not recorded"
-
-  # A captain hold a secondmate relays for its child is not a wait of its own.
-  printf 'needs-decision [key=captain-hold-t42-1]: captain hold t42: ship alpha or beta?\n' >> "$status"
-  run_send "$dir" "$err" -- t1 --automatic "re-read your instructions"; rc=$?
-  expect_code 0 "$rc" "a relayed captain hold must not defer an automatic send"
-  [ -f "$dir/home/state/t1.inbox/003.msg" ] || fail "the automatic send beside a captain hold was not recorded"
-
-  # The parent's own blocker about a broken remote reply mirror is not a wait of the worker's.
-  printf 'blocked [key=remote-reply-continuity-t1]: remote reply continuity broke for t1 (gap)\n' >> "$status"
-  run_send "$dir" "$err" -- t1 --automatic "re-read your instructions"; rc=$?
-  expect_code 0 "$rc" "a parent-raised continuity blocker must not defer an automatic send"
-  [ -f "$dir/home/state/t1.inbox/004.msg" ] || fail "the automatic send beside a continuity blocker was not recorded"
-
-  run_send "$dir" "$err" -- sess:fm-t1 --automatic "re-read your instructions"; rc=$?
-  expect_code 1 "$rc" "--automatic needs a recorded task, not an explicit backend target"
-  pass "fm-send inbox: an automatic send defers while the worker's own decision is open, and the answer still wakes it"
-}
-
 test_text_steer_rides_inbox
 test_multiline_steer_is_legal
 test_resend_enqueues_new_sequence
@@ -500,4 +456,3 @@ test_post_enqueue_bookkeeping_failure_is_not_retryable
 test_meta_lock_contention_fails_bounded
 test_unwritable_inbox_fails_loudly
 test_empty_message_refused
-test_automatic_send_waits_for_an_open_decision

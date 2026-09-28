@@ -76,7 +76,6 @@ This touches only the firstmate repo and its own worktrees, never anything under
    - `nudged: <id>: <reason>` - the restart was not safe, so the mate got the older re-read message instead and is still running the conversation and launch-time settings it started with.
      Never report one of these as a clean reload.
    - `unreached: <id>: <reason>` - no safe running outcome could be confirmed, including an ambiguous relaunch result.
-     When its reason says the send was deferred, the mate is waiting on its own open decision: do not resend, because the watcher delivers the retained re-read once that decision closes, unless the reason adds that its retry could not be recorded.
 
 4. **Send the re-read message to the rest.**
    For every target on the `nudge-secondmates:` line (do nothing when it says `none`), send the one-line re-read steer:

@@ -223,10 +223,6 @@ WATCH_HOME_EXISTED=0
 # (inbox_steer_check below).
 # shellcheck source=bin/fm-task-inbox-lib.sh
 . "$SCRIPT_DIR/fm-task-inbox-lib.sh"
-# Deferred secondmate rereads are flagged by bin/fm-secondmate-nudge-lib.sh and
-# delivered through fm-config-push.sh (config_reread_retry_due below).
-# shellcheck source=bin/fm-secondmate-nudge-lib.sh
-. "$SCRIPT_DIR/fm-secondmate-nudge-lib.sh"
 # The away-posture record (state/.afk-contract) is the posture in both the
 # attended and the afk session; bin/fm-afk-contract.sh owns its schema and this
 # watcher reads only its presence (afk_record_present below).
@@ -2504,37 +2500,6 @@ reconcile_requests_detached() {
   RECONCILE_REQUEST_PID=$!
 }
 
-# A secondmate reread deferred while the mate waited on its own open decision
-# or blocker is flagged (fm_secondmate_reread_mark_deferred). It becomes due
-# here once that decision closes, so it is delivered within a poll instead of
-# at the next config push or session start.
-CONFIG_REREAD_RETRY_PID=
-config_reread_retry_due() {
-  local flag id
-  for flag in "$(fm_secondmate_reread_deferred_dir "$STATE")"/*; do
-    [ -f "$flag" ] || continue
-    id=${flag##*/}
-    [ "$(fm_meta_get "$STATE/$id.meta" kind)" = secondmate ] || continue
-    [ -n "$(status_own_open_decisions "$STATE/$id.status")" ] || return 0
-  done
-  return 1
-}
-
-config_reread_retry_detached() {
-  if [ -n "$CONFIG_REREAD_RETRY_PID" ]; then
-    if kill -0 "$CONFIG_REREAD_RETRY_PID" 2>/dev/null; then
-      return 0
-    fi
-    if ! wait "$CONFIG_REREAD_RETRY_PID" 2>/dev/null; then
-      triage_log "secondmate config reread retry failed; the next config push or session start retries it"
-    fi
-    CONFIG_REREAD_RETRY_PID=
-  fi
-  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
-    "$SCRIPT_DIR/fm-config-push.sh" --retry-deferred </dev/null >/dev/null 2>&1 &
-  CONFIG_REREAD_RETRY_PID=$!
-}
-
 PR_POLL_CONTROL_LOCK=
 PR_POLL_PUBLISH_LOCK=
 
@@ -2698,9 +2663,6 @@ while :; do
   # a skipped or failed request remains durable for another poll.
   if reconcile_requests_pending; then
     reconcile_requests_detached
-  fi
-  if config_reread_retry_due; then
-    config_reread_retry_detached
   fi
 
   # Parent-owned secondmate pending-reply reconciliation: resolve correlated

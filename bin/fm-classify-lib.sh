@@ -922,8 +922,9 @@ EOF
 # own blocker about a broken remote reply mirror
 # (bin/fm-procevent-remote-reply.sh), and a `captain-hold-` key relays a child
 # decision a secondmate escalated to the captain (bin/fm-captain-hold.sh) while
-# it keeps working, so the task is not waiting on any of them. Automatic senders
-# consult this set and leave a task alone while it is non-empty.
+# it keeps working, so the task is not waiting on any of them. Pending-reply
+# recovery and a fire-and-forget retry ring consult this set and leave a task
+# alone while it is non-empty.
 status_own_open_decisions() {  # <status-file>
   local line prefix
   status_open_decisions "$1" | while IFS= read -r line || [ -n "$line" ]; do

@@ -408,58 +408,23 @@ secondmate_sync() {
     fm_secondmate_nudge_write "$STATE" "$id" "$home" "$commit" "$instr" "$message" "$remote"
   }
 
-  # fm-send exits 4 with a "deferred:" line while the mate waits on its own open
-  # decision; the retained marker keeps the nudge, and the deferral is flagged
-  # for a local home and a remote route alike so the watcher sends it once that
-  # decision closes (fm_secondmate_reread_mark_deferred).
-  # The exit status is what classifies the result, not the shape of the output:
-  # anything the send prints ahead of that line must not read as a failure.
-  secondmate_nudge_unsent() {  # <id> <fm-send-output> <fm-send-status>
-    local detail
-    if [ "${3:-1}" -eq 4 ]; then
-      fm_secondmate_reread_mark_deferred "$STATE" "$1" || true
-      detail=$(printf '%s\n' "$2" | grep -m1 '^deferred:') || detail=$(first_line "$2")
-      echo "NUDGE_SECONDMATES: secondmate $1: $detail"
-    else
-      echo "NUDGE_SECONDMATES: secondmate $1: send failed: $(first_line "$2")"
-    fi
-  }
-
-  # A local nudge's marker, send, and deferral flag are held under the per-home
-  # inheritance lock the watcher's deferred retry holds
-  # (fm-config-push.sh --retry-deferred), so that retry cannot clear a flag
-  # this send has just set.
-  secondmate_local_nudge_lock() {  # <validated-home>
-    SECONDMATE_NUDGE_LOCK=""
-    mkdir -p "$1/state" || return 1
-    SECONDMATE_NUDGE_LOCK=$(fm_config_inherit_lock_path "$1") || return 1
-    fm_lock_acquire_wait "$SECONDMATE_NUDGE_LOCK"
-  }
-
   secondmate_send_nudge() {
-    local id=$1 home=$2 commit=$3 instr=$4 selector marker out send_rc
+    local id=$1 home=$2 commit=$3 instr=$4 selector marker out
     selector="fm-$id"
     marker=$(secondmate_nudge_marker_path "$id") || {
       echo "NUDGE_SECONDMATES: secondmate $id: send failed: unsafe id"
       return 0
     }
-    secondmate_local_nudge_lock "$home" || {
-      echo "NUDGE_SECONDMATES: secondmate $id: send failed: could not acquire per-home lock"
-      return 0
-    }
     if ! secondmate_write_nudge_marker "$id" "$home" "$commit" "$instr"; then
       echo "NUDGE_SECONDMATES: secondmate $id: send failed: cannot record retry marker"
-      fm_lock_release "$SECONDMATE_NUDGE_LOCK" || true
       return 0
     fi
-    out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-send.sh" "$selector" --automatic "$SECOND_MATE_NUDGE_MESSAGE" 2>&1) && send_rc=0 || send_rc=$?
-    if [ "$send_rc" -eq 0 ]; then
+    if out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-send.sh" "$selector" "$SECOND_MATE_NUDGE_MESSAGE" 2>&1); then
       rm -f "$marker"
       echo "BOOTSTRAP_INFO: nudged $selector with '$SECOND_MATE_NUDGE_MESSAGE'"
     else
-      secondmate_nudge_unsent "$id" "$out" "$send_rc"
+      echo "NUDGE_SECONDMATES: secondmate $id: send failed: $(first_line "$out")"
     fi
-    fm_lock_release "$SECONDMATE_NUDGE_LOCK" || true
   }
 
   fm_ff_after_instruction_update() {
@@ -468,7 +433,7 @@ secondmate_sync() {
   }
 
   secondmate_retry_pending_nudges() {
-    local marker id selector home commit message remote expected_marker meta meta_home home_real head out send_rc
+    local marker id selector home commit message remote expected_marker meta meta_home home_real head out
     [ -d "$SECOND_MATE_NUDGE_PENDING_DIR" ] || return 0
     for marker in "$SECOND_MATE_NUDGE_PENDING_DIR"/*.pending; do
       [ -f "$marker" ] || continue
@@ -527,21 +492,12 @@ secondmate_sync() {
         echo "NUDGE_SECONDMATES: secondmate $id: send failed: retry target is not at recorded instruction commit"
         continue
       }
-      secondmate_local_nudge_lock "$home_real" || {
-        echo "NUDGE_SECONDMATES: secondmate $id: send failed: could not acquire per-home lock"
-        continue
-      }
-      # The watcher's deferred retry may have delivered this nudge meanwhile.
-      if [ -f "$marker" ]; then
-        out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-send.sh" "$selector" --automatic "$SECOND_MATE_NUDGE_MESSAGE" 2>&1) && send_rc=0 || send_rc=$?
-        if [ "$send_rc" -eq 0 ]; then
-          rm -f "$marker"
-          echo "BOOTSTRAP_INFO: nudged $selector with '$SECOND_MATE_NUDGE_MESSAGE'"
-        else
-          secondmate_nudge_unsent "$id" "$out" "$send_rc"
-        fi
+      if out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-send.sh" "$selector" "$SECOND_MATE_NUDGE_MESSAGE" 2>&1); then
+        rm -f "$marker"
+        echo "BOOTSTRAP_INFO: nudged $selector with '$SECOND_MATE_NUDGE_MESSAGE'"
+      else
+        echo "NUDGE_SECONDMATES: secondmate $id: send failed: $(first_line "$out")"
       fi
-      fm_lock_release "$SECONDMATE_NUDGE_LOCK" || true
     done
   }
 
@@ -566,7 +522,7 @@ secondmate_sync() {
   # running home, send its literal-content reread instruction pointer so the
   # live agent does not keep applying stale defaults. Spawn/respawn already
   # re-reads at launch and needs no redundant nudge unless files changed after launch.
-  local id home home_real home_lock propagated_homes report reread_out reread_rc reread_skip_pending
+  local id home home_real home_lock propagated_homes report reread_out reread_skip_pending
   propagated_homes=""
   SECONDMATE_RESPAWNED_IDS=${SECONDMATE_RESPAWNED_IDS:-}
   while IFS='|' read -r id home _window _meta; do
@@ -616,16 +572,17 @@ secondmate_sync() {
     else
       echo "SECONDMATE_SYNC: secondmate $id: skipped: inheritance failed"
     fi
-    reread_rc=0
-    reread_out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" \
+    if ! reread_out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" \
       FM_STATE_OVERRIDE="$STATE" \
       FM_CONFIG_REREAD_SKIP_PENDING="$reread_skip_pending" \
-      fm_config_send_reread_nudge "$id" "$home_real" "$report" 2>&1) || reread_rc=$?
-    [ "$reread_rc" -ne 4 ] || fm_secondmate_reread_mark_deferred "$STATE" "$id" || true
-    if [ -n "$reread_out" ]; then
+      fm_config_send_reread_nudge "$id" "$home_real" "$report" 2>&1); then
+      if [ -n "$reread_out" ]; then
+        printf '%s\n' "$reread_out"
+      else
+        echo "CONFIG_REREAD: secondmate $id: send failed: unknown error"
+      fi
+    elif [ -n "$reread_out" ]; then
       printf '%s\n' "$reread_out"
-    elif [ "$reread_rc" -ne 0 ]; then
-      echo "CONFIG_REREAD: secondmate $id: send failed: unknown error"
     fi
     rm -f "$report"
     fm_lock_release "$home_lock" || true
@@ -679,14 +636,12 @@ secondmate_sync() {
     fi
     [ "$remote_pending" -eq 0 ] || nudge_needed=1
     if [ "$converged" -eq 1 ] && [ "$nudge_needed" -eq 1 ]; then
-      local send_rc=0
-      out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" \
-        "$SCRIPT_DIR/fm-send.sh" "fm-$id" --automatic "$REMOTE_SECOND_MATE_NUDGE_MESSAGE" 2>&1) && send_rc=0 || send_rc=$?
-      if [ "$send_rc" -eq 0 ]; then
+      if out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" \
+        "$SCRIPT_DIR/fm-send.sh" "fm-$id" "$REMOTE_SECOND_MATE_NUDGE_MESSAGE" 2>&1); then
         rm -f "$remote_marker"
         [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" != 1 ] || echo "BOOTSTRAP_INFO: nudged remote fm-$id after convergence"
       else
-        secondmate_nudge_unsent "$id" "$out" "$send_rc"
+        echo "NUDGE_SECONDMATES: secondmate $id: send failed: $(first_line "$out")"
       fi
     elif [ "$converged" -eq 1 ]; then
       rm -f "$remote_marker"

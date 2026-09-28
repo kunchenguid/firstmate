@@ -142,66 +142,19 @@ first_reported_line() {  # <text>
   printf '%s\n' "$1" | sed -n '/./{s/^error: //;s/[[:space:]]\{1,\}/ /g;p;q;}'
 }
 
-# A re-read steer that fm-send defers (exit 4) while the mate waits on its own
-# open decision is kept as the same retry marker and deferral flag that startup
-# and config-push record, so the watcher sends it once that decision closes
-# (fm-config-push.sh --retry-deferred). They are written under the lock that
-# retry holds: the remote inheritance transaction lock for a remote route, the
-# home's inheritance lock for a local one.
-record_deferred_nudge() {  # <id>
-  local id=$1 meta home lock commit rc
-  # Only this path needs home validation and the inheritance lock. Loading those
-  # libraries at startup would run their setup on every restart, including ones
-  # that never defer.
-  # shellcheck source=bin/fm-ff-lib.sh
-  . "$SCRIPT_DIR/fm-ff-lib.sh"
-  # shellcheck source=bin/fm-wake-lib.sh
-  . "$SCRIPT_DIR/fm-wake-lib.sh"
-  # shellcheck source=bin/fm-config-inherit-lib.sh
-  . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
-  meta="$STATE/$id.meta"
-  home=$(fm_meta_get "$meta" home)
-  [ -n "$home" ] || return 1
-  if [ -n "$(fm_meta_get "$meta" remote_host)" ]; then
-    lock=$(fm_remote_inherit_transaction_lock_path "$STATE" "$id") || return 1
-    fm_lock_acquire_wait "$lock" || return 1
-    fm_secondmate_nudge_write "$STATE" "$id" "$home" "" remote \
-      "$FM_REMOTE_SECOND_MATE_NUDGE_MESSAGE" 1 \
-      && fm_secondmate_reread_mark_deferred "$STATE" "$id"
-  else
-    validate_secondmate_home "$id" "$home" || return 1
-    home=$VALIDATED_HOME
-    commit=$(git -C "$home" rev-parse HEAD 2>/dev/null) || return 1
-    mkdir -p "$home/state" || return 1
-    lock=$(fm_config_inherit_lock_path "$home") || return 1
-    fm_lock_acquire_wait "$lock" || return 1
-    fm_secondmate_nudge_write "$STATE" "$id" "$home" "$commit" "" \
-      "$FM_SECOND_MATE_NUDGE_MESSAGE" 0 \
-      && fm_secondmate_reread_mark_deferred "$STATE" "$id"
-  fi
-  rc=$?
-  fm_lock_release "$lock" || true
-  return "$rc"
-}
-
 # Send the ordinary re-read steer to a mate this pass will not restart, and say
 # plainly which it was. A nudge is a partial reload and is never reported as more.
 fall_back_to_nudge() {  # <id> <reason>
-  local id=$1 reason=$2 out rc=0 detail
-  out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
-    "$SCRIPT_DIR/fm-send.sh" "$id" --automatic "$FM_SECOND_MATE_NUDGE_MESSAGE" 2>&1) || rc=$?
-  if [ "$rc" -eq 0 ]; then
+  local id=$1 reason=$2 out
+  if out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    "$SCRIPT_DIR/fm-send.sh" "$id" "$FM_SECOND_MATE_NUDGE_MESSAGE" 2>&1); then
     nudged_count=$((nudged_count + 1))
     printf 'nudged: %s: %s\n' "$id" "$reason"
-    return
+  else
+    unreached_count=$((unreached_count + 1))
+    printf 'unreached: %s: %s; the re-read message could not be delivered either: %s\n' \
+      "$id" "$reason" "$(first_reported_line "$out")"
   fi
-  detail=$(first_reported_line "$out")
-  if [ "$rc" -eq 4 ] && ! record_deferred_nudge "$id"; then
-    detail="$detail; its retry could not be recorded"
-  fi
-  unreached_count=$((unreached_count + 1))
-  printf 'unreached: %s: %s; the re-read message could not be delivered either: %s\n' \
-    "$id" "$reason" "$detail"
 }
 
 report_unreached() {  # <id> <reason>
@@ -344,7 +297,7 @@ while [ "$i" -lt "${#IDS[@]}" ]; do
   fi
   if ! send_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
     FM_PENDING_REPLY_EXISTING_CORR="$corr" \
-    "$SCRIPT_DIR/fm-send.sh" "$id" --automatic "$FM_SECONDMATE_PERSIST_REQUEST" 2>&1); then
+    "$SCRIPT_DIR/fm-send.sh" "$id" "$FM_SECONDMATE_PERSIST_REQUEST" 2>&1); then
     fm_pending_reply_discard_undelivered "$STATE" "$corr" >/dev/null 2>&1 || true
     REASON[i]="the request to write down its open work could not be delivered: $(first_reported_line "$send_out")"
     i=$((i + 1))
