@@ -1552,9 +1552,13 @@ fm_pending_reply_tick() {  # <state-dir>
         done
         if [ "$found" = 0 ]; then
           if [ -n "$remote_host" ]; then
-            observation=$(fm_exec_timed "$FM_SECONDMATE_PROBE_TIMEOUT" 1 \
+            # A failed or abandoned call's output is discarded unread: a
+            # partial answer cut off by the bound is never turn evidence.
+            if ! observation=$(fm_exec_timed "$FM_SECONDMATE_PROBE_TIMEOUT" 1 \
               "$_FM_PENDING_REPLY_LIB_DIR/fm-on.sh" "$task_id" \
-              fm-remote-secondmate-control.sh observe "$task_id" < /dev/null 2>/dev/null)
+              fm-remote-secondmate-control.sh observe "$task_id" < /dev/null 2>/dev/null); then
+              observation=unknown
+            fi
             case "$observation" in busy|idle|fallback-idle|unknown) ;; *) observation=unknown ;; esac
           else
             observation=$(fm_pending_reply_backend_observation "$backend" "$target" "$label" "$harness")

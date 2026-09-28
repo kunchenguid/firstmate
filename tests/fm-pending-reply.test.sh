@@ -1231,9 +1231,12 @@ test_remote_repost_waits_for_the_reply_channel() {
 # keepalives forever, and an unbounded observation would stop the watcher
 # beating while it holds the home lock. The fake ssh never returns on its own
 # and holds a child standing in for a ProxyCommand hop; both pids are recorded
-# so the test can prove the abandoned observation left nothing behind.
+# so the test can prove the abandoned observation left nothing behind. Before
+# hanging it prints a partial observation - `busy`, then `idle` - that would
+# record turn evidence if it were read, so the test fails if an abandoned
+# call's truncated output is ever accepted instead of reading as unknown.
 test_remote_observation_is_bounded_and_reaped() {
-  local home state corr fb started elapsed leaked ssh_pid child_pid p
+  local home state corr rec fb partial started elapsed leaked ssh_pid child_pid p
   home=$(setup_parent remote-observe-hung)
   state="$home/state"
   fb="$home/fakebin"
@@ -1241,6 +1244,7 @@ test_remote_observation_is_bounded_and_reaped() {
   cat > "$fb/ssh" <<'SH'
 #!/usr/bin/env bash
 set -u
+[ -z "${FM_FAKE_PARTIAL:-}" ] || printf '%s\n' "$FM_FAKE_PARTIAL"
 sleep 60 &
 printf '%s %s\n' "$$" "$!" >> "${FM_FAKE_SSH_PIDS:?}"
 wait
@@ -1257,17 +1261,24 @@ EOF
   corr=$(fm_pending_reply_create "$home" "$state" "ios" "status of the iOS build")
   fm_pending_reply_mark_delivered "$state" "$corr"
 
-  started=$(date +%s)
-  (
-    export FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_SSH_BIN="$fb/ssh" \
-      FM_FAKE_SSH_PIDS="$home/ssh.pids" FM_SECONDMATE_PROBE_TIMEOUT=2
-    fm_pending_reply_tick "$state"
-  ) || fail "the watcher tick must return from a hung remote observation"
-  elapsed=$(( $(date +%s) - started ))
-  [ -s "$home/ssh.pids" ] || fail "the tick never reached its remote observation"
-  [ "$elapsed" -lt 20 ] || fail "a hung remote observation was not abandoned near its 2s bound (${elapsed}s)"
-  [ "$(phase_of "$state" "$corr")" != resolved ] \
-    || fail "an abandoned observation must never resolve the expectation"
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  for partial in busy idle; do
+    started=$(date +%s)
+    (
+      export FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_SSH_BIN="$fb/ssh" \
+        FM_FAKE_SSH_PIDS="$home/ssh.pids" FM_FAKE_PARTIAL="$partial" FM_SECONDMATE_PROBE_TIMEOUT=2
+      fm_pending_reply_tick "$state"
+    ) || fail "the watcher tick must return from a hung remote observation"
+    elapsed=$(( $(date +%s) - started ))
+    [ -s "$home/ssh.pids" ] || fail "the tick never reached its remote observation"
+    [ "$elapsed" -lt 20 ] || fail "a hung remote observation was not abandoned near its 2s bound (${elapsed}s)"
+    [ "$(phase_of "$state" "$corr")" != resolved ] \
+      || fail "an abandoned observation must never resolve the expectation"
+    [ "$(fm_pending_reply_get "$rec" turn_seen_busy)" = 0 ] \
+      || fail "a partial '$partial' from an abandoned observation was recorded as busy evidence"
+    [ -z "$(fm_pending_reply_get "$rec" request_turn_completed_epoch)" ] \
+      || fail "a partial '$partial' from an abandoned observation completed the request turn"
+  done
 
   sleep 2
   leaked=

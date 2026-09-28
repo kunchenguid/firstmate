@@ -50,27 +50,36 @@ fm_remote_readiness_run() { # <bin-dir> <secondmate-id> <bound-seconds|''> [doct
   fi
 }
 
+# One run whose output becomes FM_REMOTE_READINESS_OUT. A bounded run abandoned
+# at its bound returns 255 and its partial output is discarded unread, so a
+# truncated doctor report can never stand in for a verdict.
+fm_remote_readiness_step() { # <bin-dir> <secondmate-id> <bound-seconds|''> [doctor-args...]
+  local out rc
+  out=$(fm_remote_readiness_run "$@")
+  rc=$?
+  if [ -n "$3" ] && fm_timed_out "$rc"; then
+    FM_REMOTE_READINESS_OUT=
+    return 255
+  fi
+  FM_REMOTE_READINESS_OUT=$out
+  return "$rc"
+}
+
 fm_remote_readiness_ensure() { # <bin-dir> <secondmate-id> [bound-seconds]
-  local bin_dir=$1 id=$2 bound=${3:-} out rc
+  local bin_dir=$1 id=$2 bound=${3:-} rc
   case "$bound" in ''|0*|*[!0-9]*) bound= ;; esac
 
-  out=$(fm_remote_readiness_run "$bin_dir" "$id" "$bound")
-  rc=$?
-  FM_REMOTE_READINESS_OUT=$out
-  [ -z "$bound" ] || ! fm_timed_out "$rc" || return 255
+  rc=0
+  fm_remote_readiness_step "$bin_dir" "$id" "$bound" || rc=$?
   [ "$rc" -ne 0 ] || return 0
   [ "$rc" -ne 255 ] || return 255
 
-  out=$(fm_remote_readiness_run "$bin_dir" "$id" "$bound" --fix)
-  rc=$?
-  FM_REMOTE_READINESS_OUT=$out
-  [ -z "$bound" ] || ! fm_timed_out "$rc" || return 255
+  rc=0
+  fm_remote_readiness_step "$bin_dir" "$id" "$bound" --fix || rc=$?
   [ "$rc" -ne 255 ] || return 255
 
-  out=$(fm_remote_readiness_run "$bin_dir" "$id" "$bound")
-  rc=$?
-  FM_REMOTE_READINESS_OUT=$out
-  [ -z "$bound" ] || ! fm_timed_out "$rc" || return 255
+  rc=0
+  fm_remote_readiness_step "$bin_dir" "$id" "$bound" || rc=$?
   [ "$rc" -ne 255 ] || return 255
   [ "$rc" -eq 0 ] || return 1
   return 0

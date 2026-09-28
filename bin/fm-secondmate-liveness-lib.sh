@@ -50,9 +50,10 @@
 # and then hangs inside the remote command answers SSH keepalives forever, so
 # an unbounded call would stop the watcher beating while it holds its lock, or
 # hang session start. At the bound the call's whole process group (ssh and any
-# ProxyCommand child) is killed and the verdict is `skipped` with the route
-# preserved, exactly like an unreachable host: an abandoned call is never
-# evidence of death or of drift. The same bound covers the watcher's other
+# ProxyCommand child) is killed, whatever it printed before the bound is
+# discarded unread, and the verdict is `skipped` with the route preserved,
+# exactly like an unreachable host: an abandoned call is never evidence of
+# death, drift, liveness, or readiness. The same bound covers the watcher's other
 # remote probe, fm_pending_reply_tick's `observe` call in
 # bin/fm-pending-reply-lib.sh. The bound is fm_exec_timed's, not
 # fm_run_timed's, because its watchdog also reaps the probe when the prober is

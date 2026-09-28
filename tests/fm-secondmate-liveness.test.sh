@@ -704,8 +704,8 @@ test_remote_poll_probe_unreachable_preserves_route() {
 
 # make_remote_hang_world <name>: the same one-remote-route world, with a fake
 # ssh that answers every verb except the one named in FM_FAKE_HANG_ON, which it
-# accepts and then never returns from, holding a child that stands in for a
-# ProxyCommand hop. Both pids are recorded so the test can prove an abandoned
+# accepts, answers with the partial output in FM_FAKE_HANG_PARTIAL, and then
+# never returns from, holding a child that stands in for a ProxyCommand hop. Both pids are recorded so the test can prove an abandoned
 # call left nothing behind. bin/fm-on.sh passes the remote argv base64-encoded
 # and NUL-delimited as its last ssh argument, so the verb has to be decoded.
 make_remote_hang_world() {
@@ -718,6 +718,7 @@ argv=$(perl -MMIME::Base64=decode_base64 -e '$d = decode_base64($ARGV[0]); $d =~
 printf '%s\n' "$argv" >> "${FM_FAKE_SSH_LOG:?}"
 case " $argv " in
   *" ${FM_FAKE_HANG_ON:?} "*)
+    [ -z "${FM_FAKE_HANG_PARTIAL:-}" ] || printf '%s\n' "$FM_FAKE_HANG_PARTIAL"
     sleep 60 &
     printf '%s %s\n' "$$" "$!" >> "${FM_FAKE_SSH_PIDS:?}"
     wait
@@ -738,24 +739,36 @@ SH
 # waits on it, so every remote call it makes carries the same wall-clock bound
 # as the watcher's `state` call: a host that accepts the connection and then
 # hangs answers SSH keepalives forever and only the bound returns the sweep.
+# Each hung call first prints a partial answer that would be decisive if it
+# were read - a `dead` state, a drifted backend, a readiness line - so the test
+# fails if an abandoned call's truncated output is ever accepted.
 test_remote_full_probe_bounds_every_remote_call() {
-  local w hang out started elapsed leaked ssh_pid child_pid p
+  local w hang partial out started elapsed leaked ssh_pid child_pid p
 
-  for hang in fm-remote-doctor.sh route; do
+  for hang in fm-remote-doctor.sh state route; do
+    case "$hang" in
+      fm-remote-doctor.sh) partial='check worker=ok' ;;
+      state) partial=dead ;;
+      route) partial=backend=tmux ;;
+    esac
     w=$(make_remote_hang_world "probe-hung-${hang%.sh}")
     : > "$w/ssh.pids"
     started=$(date +%s)
-    out=$(probe_remote "$w" full FM_FAKE_HANG_ON="$hang" FM_FAKE_SSH_PIDS="$w/ssh.pids" \
-      FM_SECONDMATE_PROBE_TIMEOUT=2)
+    out=$(probe_remote "$w" full FM_FAKE_HANG_ON="$hang" FM_FAKE_HANG_PARTIAL="$partial" \
+      FM_FAKE_SSH_PIDS="$w/ssh.pids" FM_SECONDMATE_PROBE_TIMEOUT=2)
     elapsed=$(( $(date +%s) - started ))
     case "$hang" in
       fm-remote-doctor.sh)
         [ "$out" = 'skipped|unknown|0|||remote host unavailable or endpoint state unknown; route preserved on lab-host' ] \
           || fail "a hung readiness run must read as unknown with the route preserved, never unready, got: $out"
         ;;
+      state)
+        [ "$out" = 'skipped|unknown|0|||remote state probe exceeded its 2s bound; endpoint state unknown; route preserved on lab-host' ] \
+          || fail "a hung state call that printed 'dead' must read as unknown, never relaunchable, got: $out"
+        ;;
       route)
         [ "$out" = 'skipped|alive|0|||remote route probe exceeded its 2s bound; endpoint route unknown; route preserved on lab-host' ] \
-          || fail "a hung route call must read as unknown with the route preserved, never backend drift, got: $out"
+          || fail "a hung route call that printed a drifted backend must read as unknown, never backend drift, got: $out"
         ;;
     esac
     [ -s "$w/ssh.pids" ] || fail "the probe never reached its hung $hang call: $(cat "$w/ssh.log")"
@@ -772,7 +785,28 @@ test_remote_full_probe_bounds_every_remote_call() {
     [ -z "$leaked" ] || kill -KILL $leaked 2>/dev/null || true
     [ -z "$leaked" ] || fail "an abandoned $hang call left ssh processes running:$leaked"
   done
-  pass "full probe: readiness and route calls are bounded, read as unknown, and are reaped"
+
+  # A bounded readiness run abandoned at its bound leaves no partial doctor
+  # output behind for any caller to read as a verdict.
+  w=$(make_remote_hang_world probe-hung-readiness-out)
+  : > "$w/ssh.pids"
+  # shellcheck disable=SC2016 # positional params expand in the child shell.
+  out=$(env FM_HOME="$w/home" FM_DATA_OVERRIDE="$w/home/data" FM_SSH_BIN="$w/fakebin/ssh" \
+    FM_FAKE_SSH_LOG="$w/ssh.log" FM_FAKE_SSH_PIDS="$w/ssh.pids" \
+    FM_FAKE_HANG_ON=fm-remote-doctor.sh FM_FAKE_HANG_PARTIAL='check worker=ok' \
+    bash -c '
+      . "$0/bin/fm-remote-readiness-lib.sh"
+      rc=0
+      fm_remote_readiness_ensure "$0/bin" rsm1 2 || rc=$?
+      printf "%s|%s\n" "$rc" "$FM_REMOTE_READINESS_OUT"
+    ' "$ROOT")
+  sleep 2
+  while read -r ssh_pid child_pid; do
+    kill -KILL "$ssh_pid" "$child_pid" 2>/dev/null || true
+  done < "$w/ssh.pids"
+  [ "$out" = '255|' ] \
+    || fail "an abandoned readiness run must return 255 and discard its partial output, got: $out"
+  pass "full probe: readiness, state, and route calls are bounded, discard partial output, read as unknown, and are reaped"
 }
 
 test_tmux_agent_state_classifies
