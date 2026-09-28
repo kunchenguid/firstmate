@@ -3373,16 +3373,16 @@ test_oversized_check_run_history_keeps_producer_identity() {
     mv "$case_dir/updated.json" "$case_dir/github-branch.json"
     app=15368
     [ "$variant" != wrong-app ] || app=42
-    jq -n --arg head "$head" --argjson app "$app" --arg summary "$(printf '%04096d' 0)" '
-      {check_runs: [range(0; 44) as $i | {
-        name: (if $i == 0 then "ci" else "history-\($i)" end),
+    jq -n --arg head "$head" --argjson app "$app" '
+      {check_runs: [range(0; 1500) as $i | {
+        name: (if $i == 0 then "ci" else "history-\($i)-" + ("x" * 64) end),
         app: {id: (if $i == 0 then $app else 42 end)},
-        head_sha: $head,
-        output: {summary: $summary}
+        head_sha: $head
       }]}' > "$case_dir/github-runs.json"
-    bytes=$(wc -c < "$case_dir/github-runs.json")
+    bytes=$(jq -c '[.check_runs[] | {name, app: {id: .app.id}, head_sha}]' \
+      "$case_dir/github-runs.json" | wc -c)
     [ "$bytes" -gt 131072 ] \
-      || fail "oversized-producer-$variant: fixture is only $bytes bytes"
+      || fail "oversized-producer-$variant: producer data is only $bytes bytes"
 
     run_required_case "$case_dir" 110 --attended-override -- --admin
     if [ "$variant" = correct ]; then

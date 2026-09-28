@@ -691,7 +691,10 @@ github_read_required_contexts() {
 
 github_required_checks_missing() {
   local json=$1 required=$2 producers=$3
-  printf '%s' "$json" | jq -r --argjson required "$required" --argjson producers "$producers" '
+  printf '%s\n%s\n' "$json" "$producers" | jq -sr --argjson required "$required" '
+    if length == 2 then . else error("invalid check inputs") end
+    | .[0] as $view | .[1] as $producers | $view
+    |
     if (.statusCheckRollup | type) != "array" then error("no check rollup") else . end
     | .statusCheckRollup as $reported
     | $required
