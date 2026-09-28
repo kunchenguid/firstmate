@@ -5,8 +5,9 @@
 # for operators and tests.
 #
 # Claude launches take the MITM environment from `teamclaude env --mitm`
-# (HTTPS_PROXY, HTTP_PROXY, the lowercase twins, NO_PROXY, and
-# NODE_EXTRA_CA_CERTS), unset ANTHROPIC_BASE_URL, and never set
+# (HTTPS_PROXY, HTTP_PROXY, the lowercase twins, NO_PROXY,
+# NODE_EXTRA_CA_CERTS, and API_TIMEOUT_MS when TeamClaude holds requests),
+# unset ANTHROPIC_BASE_URL, and never set
 # ANTHROPIC_API_KEY. They do not use `teamclaude run` and they do not pass
 # --auto-fallback. A missing teamclaude CLI, a `teamclaude status` failure, or
 # a missing CA file refuses the launch. There is no direct-login fallback.
@@ -79,6 +80,7 @@ fm_teamclaude_require_proxy() {
   _FM_TC_NO_PROXY=
   _FM_TC_no_proxy=
   _FM_TC_CA=
+  _FM_TC_API_TIMEOUT_MS=
   while IFS= read -r line; do
     case "$line" in
       export\ *)
@@ -94,6 +96,7 @@ fm_teamclaude_require_proxy() {
           NO_PROXY) _FM_TC_NO_PROXY=$value ;;
           no_proxy) _FM_TC_no_proxy=$value ;;
           NODE_EXTRA_CA_CERTS) _FM_TC_CA=$value ;;
+          API_TIMEOUT_MS) _FM_TC_API_TIMEOUT_MS=$value ;;
           ANTHROPIC_API_KEY | ANTHROPIC_BASE_URL) ;;
         esac
         ;;
@@ -123,12 +126,15 @@ EOF
 }
 
 fm_teamclaude_threshold_is_95() {
-  local report extra
-  if ! report=$(teamclaude threshold 2>&1); then
+  local report extra errfile
+  errfile=$(mktemp "${TMPDIR:-/tmp}/fm-teamclaude.XXXXXX") || return 2
+  if ! report=$(teamclaude threshold 2>"$errfile"); then
     fm_teamclaude_die "could not read TeamClaude's rotation threshold. Refusing to start this worker. There is no direct fallback." || true
-    printf '%s\n' "$report" | sed 's/^/error: /' >&2
+    sed 's/^/error: /' "$errfile" >&2
+    rm -f "$errfile"
     return 2
   fi
+  rm -f "$errfile"
   _FM_TC_THRESHOLD=${report%%$'\n'*}
   extra=$(printf '%s\n' "$report" | awk 'NR > 1 && $0 ~ /^  / { found = 1 } END { if (found) print "yes" }')
   [ "$_FM_TC_THRESHOLD" = "Switch threshold: 95%" ] && [ -z "$extra" ]
@@ -158,6 +164,7 @@ fm_teamclaude_claude_env() {
   [ -z "$_FM_TC_NO_PROXY" ] || printf '%s ' "NO_PROXY=$(fm_teamclaude_shell_quote "$_FM_TC_NO_PROXY")"
   [ -z "$_FM_TC_no_proxy" ] || printf '%s ' "no_proxy=$(fm_teamclaude_shell_quote "$_FM_TC_no_proxy")"
   printf '%s ' "NODE_EXTRA_CA_CERTS=$(fm_teamclaude_shell_quote "$_FM_TC_CA")"
+  [ -z "$_FM_TC_API_TIMEOUT_MS" ] || printf '%s ' "API_TIMEOUT_MS=$(fm_teamclaude_shell_quote "$_FM_TC_API_TIMEOUT_MS")"
 }
 
 fm_teamclaude_is_shim() {

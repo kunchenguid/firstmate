@@ -591,7 +591,7 @@ EOF
 # invoking environment resolves node from, the fm-kimi-harness shape.
 NODE_BIN=$(command -v node) || fail "test needs node"
 NODE_BIN_DIR=$(dirname "$NODE_BIN")
-BASE_PATH=${FM_TEST_BASE_PATH:-$NODE_BIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin}
+BASE_PATH=$(fm_test_base_path_with "$NODE_BIN_DIR")
 
 run_agy_spawn() {
   local case_dir=$1 home=$2 proj=$3 wt=$4 fakebin=$5 id=$6

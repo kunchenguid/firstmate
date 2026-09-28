@@ -113,6 +113,31 @@ test_threshold_below_95_is_applied_before_the_launch() {
   pass "a threshold other than 95% is set to 95% and verified before the launch"
 }
 
+test_threshold_read_ignores_stderr_noise() {
+  local out status file
+  file="$TMP_ROOT/threshold-noisy"
+  printf '95%%\n' > "$file"
+  out=$(FM_TEST_TEAMCLAUDE_THRESHOLD_FILE="$file" FM_TEST_TEAMCLAUDE_SET_RC=1 \
+    FM_TEST_TEAMCLAUDE_STDERR='(node:1) DeprecationWarning: noisy runtime' \
+    "$ROOT_BIN" claude-env 2>"$TMP_ROOT/threshold-noisy.err") && status=0 || status=$?
+  expect_code 0 "$status" "a 95% threshold with stderr noise must start: $(cat "$TMP_ROOT/threshold-noisy.err")"
+  assert_contains "$out" "HTTPS_PROXY=" "the launch fragment is produced at a real 95%"
+  pass "a runtime warning on stderr does not hide a real 95% threshold"
+}
+
+test_claude_env_carries_the_hold_timeout() {
+  local out seen
+  out=$(FM_TEST_TEAMCLAUDE_HOLD_MS=180000 "$ROOT_BIN" claude-env) || fail "claude-env failed with a hold timeout"
+  seen=$(eval "env $out /bin/sh -c 'printf %s \"\${API_TIMEOUT_MS-unset}\"'") \
+    || fail "the claude-env fragment did not run"
+  assert_equals "180000" "$seen" "a Claude worker must get TeamClaude's API_TIMEOUT_MS"
+  out=$("$ROOT_BIN" claude-env) || fail "claude-env failed without a hold timeout"
+  seen=$(eval "env -u API_TIMEOUT_MS $out /bin/sh -c 'printf %s \"\${API_TIMEOUT_MS-unset}\"'") \
+    || fail "the claude-env fragment did not run"
+  assert_equals "unset" "$seen" "without a hold, claude-env must not set API_TIMEOUT_MS"
+  pass "claude-env passes TeamClaude's hold timeout to the Claude worker"
+}
+
 test_threshold_that_stays_off_95_refuses_loudly() {
   local out status
   out=$(FM_TEST_TEAMCLAUDE_THRESHOLD='80%' "$ROOT_BIN" claude-env 2>&1) && status=0 || status=$?
@@ -286,6 +311,8 @@ test_claude_env_is_mitm_without_a_direct_fallback
 test_missing_cli_refuses_loudly
 test_down_proxy_refuses_loudly
 test_threshold_below_95_is_applied_before_the_launch
+test_threshold_read_ignores_stderr_noise
+test_claude_env_carries_the_hold_timeout
 test_threshold_that_stays_off_95_refuses_loudly
 test_codex_shim_resolves_to_the_real_binary
 test_codex_config_points_at_the_proxy_without_a_second_rotator

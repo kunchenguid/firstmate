@@ -5,9 +5,12 @@
 # changes. FM_TEST_TEAMCLAUDE_THRESHOLD_FILE holds a threshold that
 # `threshold <n>` rewrites. FM_TEST_TEAMCLAUDE_SET_RC fails `threshold <n>`.
 # FM_TEST_TEAMCLAUDE_STATUS_RC replaces the status exit code.
+# FM_TEST_TEAMCLAUDE_HOLD_MS adds the API_TIMEOUT_MS line a hold config emits.
+# FM_TEST_TEAMCLAUDE_STDERR is written to stderr by every command.
 dir=$(CDPATH='' cd -- "$(dirname "$0")" && pwd) || exit 1
 cmd=${1:-}
 shift || true
+[ -z "${FM_TEST_TEAMCLAUDE_STDERR:-}" ] || printf '%s\n' "$FM_TEST_TEAMCLAUDE_STDERR" >&2
 case "$cmd" in
   env)
     cat <<EOF
@@ -20,6 +23,8 @@ export no_proxy='localhost,127.0.0.1,::1'
 export NODE_EXTRA_CA_CERTS='$dir/ca.pem'
 unset ANTHROPIC_BASE_URL
 EOF
+    [ -z "${FM_TEST_TEAMCLAUDE_HOLD_MS:-}" ] \
+      || printf 'export API_TIMEOUT_MS=%s\n' "$FM_TEST_TEAMCLAUDE_HOLD_MS"
     ;;
   status)
     exit "${FM_TEST_TEAMCLAUDE_STATUS_RC:-0}"

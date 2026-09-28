@@ -77,13 +77,28 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # Prepend a deterministic stub so the suite does not need a running proxy.
 # FM_LIVE=1 keeps the real CLI first for opt-in live checks. A test that needs
 # a different teamclaude puts that directory ahead of this stub.
+# A suite whose default base PATH carries an interpreter builds it with
+# fm_test_base_path_with so the stub stays ahead of that interpreter's
+# directory, which may hold the real teamclaude.
+FM_TEST_TEAMCLAUDE_STUB_DIR="$ROOT/tests/fixtures/teamclaude-stub"
 if [ "${FM_LIVE:-0}" != 1 ]; then
-  PATH="$ROOT/tests/fixtures/teamclaude-stub:${PATH}"
+  PATH="$FM_TEST_TEAMCLAUDE_STUB_DIR:${PATH}"
   export PATH
   if [ -z "${FM_TEST_BASE_PATH:-}" ]; then
-    export FM_TEST_BASE_PATH="$ROOT/tests/fixtures/teamclaude-stub:/usr/bin:/bin:/usr/sbin:/sbin"
+    export FM_TEST_BASE_PATH="$FM_TEST_TEAMCLAUDE_STUB_DIR:/usr/bin:/bin:/usr/sbin:/sbin"
   fi
 fi
+
+# fm_test_base_path_with <dir>: the default base PATH with <dir> right after
+# the TeamClaude stub, so a suite keeps the interpreter it needs. A caller's
+# own FM_TEST_BASE_PATH is used as given.
+fm_test_base_path_with() {
+  case "${FM_TEST_BASE_PATH:-}" in
+    "$FM_TEST_TEAMCLAUDE_STUB_DIR":*) printf '%s\n' "$FM_TEST_TEAMCLAUDE_STUB_DIR:$1:${FM_TEST_BASE_PATH#"$FM_TEST_TEAMCLAUDE_STUB_DIR":}" ;;
+    '') printf '%s\n' "$1:/usr/bin:/bin:/usr/sbin:/sbin" ;;
+    *) printf '%s\n' "$FM_TEST_BASE_PATH" ;;
+  esac
+}
 
 # --- reporters --------------------------------------------------------------
 

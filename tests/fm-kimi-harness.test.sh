@@ -21,7 +21,7 @@ KIMI_RUNTIME_LAUNCH_DIR=
 PYTHON_BIN=$(command -v python3) || fail "test needs python3"
 PYTHON_BIN_DIR=$(dirname "$PYTHON_BIN")
 JQ_BIN=$(command -v jq) || fail "test needs jq"
-BASE_PATH=${FM_TEST_BASE_PATH:-$PYTHON_BIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin}
+BASE_PATH=$(fm_test_base_path_with "$PYTHON_BIN_DIR")
 
 ai_trailer_hooks_prefix() {  # <home> <id>
   local state
