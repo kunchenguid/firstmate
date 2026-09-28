@@ -111,12 +111,14 @@ EVIL_KEY='old-$(touch pwned-key)'
 EVIL_STATE="$TDIR/evil-state"; mkdir -p "$EVIL_STATE"
 : > "$EVIL_STATE/$EVIL_TASK.meta"
 printf '%s\t%s\t%s\t%s\n' "$EVIL_TASK" "$EVIL_KEY" blocked "superseded" > "$EVIL"
-cmds=$(FM_STATE_OVERRIDE="$EVIL_STATE" "$DECISION_SH" --input "$EVIL" --resolve-cmds)
-assert_contains "$cmds" "bin/fm-send.sh" "resolve cmd emitted for stale key"
 FAKE="$TDIR/fakeroot"; mkdir -p "$FAKE/bin"
+cp -R "$ROOT/bin/." "$FAKE/bin/"
 printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$@" > %q\n' "$TDIR/argv" > "$FAKE/bin/fm-send.sh"; chmod +x "$FAKE/bin/fm-send.sh"
-(cd "$FAKE" && bash -c "$cmds")
-[ ! -e "$FAKE/pwned-task" ] && [ ! -e "$FAKE/pwned-key" ] || fail "resolve cmds executed injected shell"
+RUNDIR="$TDIR/elsewhere"; mkdir -p "$RUNDIR"
+cmds=$(FM_HOME="$FAKE" FM_STATE_OVERRIDE="$EVIL_STATE" "$DECISION_SH" --input "$EVIL" --resolve-cmds)
+assert_contains "$cmds" "$FAKE/bin/fm-send.sh" "resolve cmd names the home's own fm-send.sh by absolute path"
+(cd "$RUNDIR" && bash -c "$cmds")
+[ ! -e "$RUNDIR/pwned-task" ] && [ ! -e "$RUNDIR/pwned-key" ] || fail "resolve cmds executed injected shell"
 [ "$(sed -n 1p "$TDIR/argv")" = "$EVIL_TASK" ] || fail "resolve cmd must pass the task verbatim"
 [ "$(sed -n 3p "$TDIR/argv")" = "$EVIL_KEY" ] || fail "resolve cmd must pass the key verbatim"
 
@@ -152,9 +154,9 @@ check_pinned() {
   local label=$1 cmds
   shift
   rm -f "$TDIR/argv"
-  cmds=$("$DECISION_SH" "$@" --resolve-cmds)
-  (cd "$FAKE" && env -u FM_STATE_OVERRIDE FM_HOME=/wrong/home bash -c "$cmds")
-  [ "$(sed -n 1p "$TDIR/argv")" = "$ROOT" ] || fail "resolve cmd must pin FM_HOME ($label)"
+  cmds=$(FM_HOME="$FAKE" "$DECISION_SH" "$@" --resolve-cmds)
+  (cd "$RUNDIR" && env -u FM_STATE_OVERRIDE FM_HOME=/wrong/home bash -c "$cmds")
+  [ "$(sed -n 1p "$TDIR/argv")" = "$FAKE" ] || fail "resolve cmd must pin FM_HOME ($label)"
   [ "$(sed -n 2p "$TDIR/argv")" = "$OTHER" ] || fail "resolve cmd must pin the selected state dir ($label)"
   [ "$(sed -n 3p "$TDIR/argv")" = beta ] || fail "resolve cmd must target the selected task ($label)"
 }

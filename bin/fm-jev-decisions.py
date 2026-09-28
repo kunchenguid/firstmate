@@ -252,7 +252,7 @@ def classify_decision(
             else:
                 item.suggested_action = "Archive or resolve superseded historical decision"
                 item.resolve_cmd = send_prefix + shlex.join(
-                    ["bin/fm-send.sh", item.task, "--resolve-key", item.key,
+                    [item.task, "--resolve-key", item.key,
                      "auto-resolved: superseded historical decision"]
                 )
         elif item.category == "external_block":
@@ -397,6 +397,7 @@ def main() -> None:
     send_prefix = (
         f"FM_HOME={shlex.quote(str(fm_root.resolve()))} "
         f"FM_STATE_OVERRIDE={shlex.quote(str(send_state.resolve()))} "
+        f"{shlex.quote(str(fm_root.resolve() / 'bin' / 'fm-send.sh'))} "
     )
 
     # Concurrently classify items
