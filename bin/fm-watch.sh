@@ -1602,8 +1602,8 @@ handle_paused_stale() {  # <window> <task> <hash> [absorb-first-sight]
     detail="paused, awaiting external"
     reason="paused ${age}s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds"
   fi
-  [ -n "$absorb_first" ] || [ "$(window_kind "$win")" != secondmate ] || absorb_first=secondmate
-  if [ -z "$absorb_first" ] || [ -e "$STATE/.paused-resurfaced-$key" ] || [ "$age" -ge "$min_age" ]; then
+  if [ -e "$STATE/.paused-resurfaced-$key" ] || [ "$age" -ge "$min_age" ] \
+    || { [ -z "$absorb_first" ] && [ "$(window_kind "$win")" != secondmate ]; }; then
     resurface_absorbed "$win" "$STATE/.paused-resurfaced-$key" "$age" "stale: $win ($reason)" "$declaration" "$min_age"
   fi
   triage_log "absorbed stale ($detail, age ${age}s): $win"
