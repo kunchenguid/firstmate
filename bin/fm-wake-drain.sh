@@ -927,7 +927,11 @@ if [ -n "$ACK_THROUGH" ]; then
         ;;
     esac
   else
-    fm_recovery_marker_snapshot "$RECOVERY_MARKER" "$ACK_GENERATION" || exit 1
+    # Only an ack that consumed rows retires the reopen bound's settle
+    # distinction; a retried stale ack that consumed nothing must not.
+    SNAPSHOT_ACK_GENERATION=
+    [ "$ACK_REMOVED" -gt 0 ] && SNAPSHOT_ACK_GENERATION=$ACK_GENERATION
+    fm_recovery_marker_snapshot "$RECOVERY_MARKER" "$SNAPSHOT_ACK_GENERATION" || exit 1
     RECOVERY_MARKER_TOKEN=$FM_RECOVERY_MARKER_TOKEN
     if [ "${RECOVERY_MARKER_TOKEN##*:}" != "$ACK_GENERATION" ]; then
       RECOVERY_ACK_MOVED=true

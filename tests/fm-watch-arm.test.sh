@@ -1452,6 +1452,65 @@ test_late_genuine_ack_after_bound_settle_still_resurfaces_queued_row() {
   pass "watch-arm: a genuine ack after a bound settle still resurfaces a newer queued row on re-arm"
 }
 
+# A retried stale ack for a bound-settled generation consumes no row, so it is
+# not a genuine acknowledgement: the settle distinction must survive and the
+# next arm must keep the watcher up instead of re-announcing the newer row.
+test_stale_zero_row_ack_keeps_bound_settle() {
+  local dir home state fakebin
+  dir=$(make_case stale-ack-after-settle)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  mkdir -p "$home/data"
+  printf 'acked:downtime:settledgen1\n' > "$state/.watcher-down"
+  chmod 0600 "$state/.watcher-down"
+  printf 'settledgen1\n' > "$state/.watcher-down.reopen-settled"
+  printf '%s\t2\tcheck\tstale-ack-two\tcheck: stale ack row two\n' "$(date +%s)" > "$state/.wake-queue"
+  printf '2\n' > "$state/.wake-queue.seq"
+
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through 1 --recovery-generation settledgen1 \
+    > "$dir/ack.out" 2>&1 \
+    || fail "stale zero-row ack after a bound settle failed: $(cat "$dir/ack.out")"
+  [ "$(cat "$state/.watcher-down.reopen-settled" 2>/dev/null || true)" = settledgen1 ] \
+    || fail "a stale zero-row ack cleared the bound-settle distinction"
+
+  start_rearm_arm "$home" "$state" "$fakebin" "$dir/arm.out"
+  is_live_non_zombie "$ARM_PID" \
+    || fail "a stale zero-row ack after a bound settle made the next watcher exit: $(cat "$dir/arm.out")"
+  ! grep -F 'check: rearm-resurface' "$dir/arm.out" >/dev/null \
+    || fail "a stale zero-row ack after a bound settle re-announced the settled episode: $(cat "$dir/arm.out")"
+  kill "$ARM_PID" 2>/dev/null || true
+  wait "$ARM_PID" 2>/dev/null || true
+  pass "watch-arm: a stale zero-row ack keeps a bound-settled episode settled and the watcher up"
+}
+
+# A non-numeric FM_RECOVERY_REOPEN_LIMIT falls back to the default bound, so a
+# configuration typo cannot make a stuck episode reopen on every restart.
+test_invalid_reopen_limit_falls_back_to_default() {
+  local dir home state fakebin
+  local FM_RECOVERY_REOPEN_LIMIT=three
+  export FM_RECOVERY_REOPEN_LIMIT
+  dir=$(make_case invalid-reopen-limit)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  mkdir -p "$home/data"
+  printf 'announced:downtime:seedgen1\n' > "$state/.watcher-down"
+  chmod 0600 "$state/.watcher-down"
+  printf '3\n' > "$state/.watcher-down.reopen-count"
+  printf '%s\t1\tcheck\tinvalid-limit\tcheck: invalid limit row\n' "$(date +%s)" > "$state/.wake-queue"
+  printf '1\n' > "$state/.wake-queue.seq"
+
+  start_rearm_arm "$home" "$state" "$fakebin" "$dir/arm.out"
+  is_live_non_zombie "$ARM_PID" \
+    || fail "a non-numeric reopen limit defeated the bound; the watcher exited: $(cat "$dir/arm.out")"
+  [ "$(cat "$state/.watcher-down" 2>/dev/null || true)" = 'acked:downtime:seedgen1' ] \
+    || fail "a non-numeric reopen limit did not settle past the default bound: $(cat "$state/.watcher-down" 2>/dev/null)"
+  kill "$ARM_PID" 2>/dev/null || true
+  wait "$ARM_PID" 2>/dev/null || true
+  pass "watch-arm: a non-numeric FM_RECOVERY_REOPEN_LIMIT falls back to the default bound"
+}
+
 # With an empty queue an announced-but-unacknowledged episode is never
 # reopened: every plain restart leaves that generation announced, starts no
 # resurface, and keeps the watcher up without spending the reopen bound.
@@ -1501,6 +1560,8 @@ test_stuck_unacked_recovery_settles_after_bounded_reopen
 test_stuck_unacked_recovery_with_queued_rows_stays_up_after_settling
 test_genuinely_acked_recovery_with_queued_row_still_resurfaces
 test_late_genuine_ack_after_bound_settle_still_resurfaces_queued_row
+test_stale_zero_row_ack_keeps_bound_settle
+test_invalid_reopen_limit_falls_back_to_default
 test_attached_arm_still_fails_on_a_wake_it_did_not_deliver
 test_attached_arm_follows_a_slow_live_holder
 test_attached_arm_hands_a_stalled_holder_to_its_replacement
