@@ -1222,6 +1222,32 @@ test_out_of_band_close_is_recordable() {
 }
 
 # A post-teardown visual review completes against the surviving report and
+# A completion attestation on a task whose merge poll is already armed must
+# keep the pr= identity block last, or the watcher refuses that poll.
+test_complete_keeps_an_armed_pr_poll_valid() {
+  local home id
+  home=$(make_home armed-pr-complete)
+  id=sample-armed-pr
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Sample armed delivery" --kind ship --repo sample --start >/dev/null
+  write_origin_meta "$home" "$id" ship
+  printf 'pr=https://github.com/example/repo/pull/7\n' >> "$home/state/$id.meta"
+  printf 'done: PR https://github.com/example/repo/pull/7 checks green\n' > "$home/state/$id.status"
+  bash -c '
+    . "$1"
+    fm_pr_poll_prepare "$2" "$3" github https://github.com/example/repo/pull/7 \
+      github.com example/repo 7 "$4" && fm_pr_poll_publish_prepared
+  ' _ "$ROOT/bin/fm-pr-lib.sh" "$home/state" "$id" "$ROOT/bin/fm-pr-poll.sh" \
+    || fail "could not arm the PR poll fixture"
+  run_captain "$home" complete "$id" --none >/dev/null \
+    || fail "completion attestation failed on a task with an armed PR poll"
+  assert_grep "decisions_reviewed=1" "$home/state/$id.meta" "completion attestation missing"
+  bash -c '. "$1"; fm_pr_poll_artifacts_valid "$2" "$3" "$4"' _ \
+    "$ROOT/bin/fm-pr-lib.sh" "$home/state" "$id" "$ROOT/bin/fm-pr-poll.sh" \
+    || fail "completion attestation broke the armed PR poll:"$'\n'"$(cat "$home/state/$id.meta")"
+  pass "captain-hold: completion attestation keeps an armed PR poll valid"
+}
+
 # durable tasks, with no volatile task metadata and no second decision database.
 test_visual_review_uses_shared_completion_owner() {
   local home id json
@@ -4045,6 +4071,7 @@ test_interrupted_answer_preserves_hold_age
 test_deferral_leaves_captains_call_until_due
 test_out_of_band_close_is_recordable
 test_visual_review_uses_shared_completion_owner
+test_complete_keeps_an_armed_pr_poll_valid
 test_none_inventory_and_resolved_prose_do_not_create_holds
 test_terminal_single_owner_status_decision_does_not_block_empty_inventory
 test_secondmate_hold_stays_in_authoritative_home
