@@ -1545,7 +1545,8 @@ busy_turn_over_age() {  # <task>
 }
 
 # Absorb a stale pane under a declared external-wait pause (paused:) or a
-# captain-held transfer, alarm its first sight once, and re-surface it once every
+# captain-held transfer, alarm its first sight once (a secondmate's status signal
+# is its first surface, so its first sight is absorbed), and re-surface it once every
 # PAUSE_RESURFACE_SECS for a recheck so it cannot rot invisibly. Called on any
 # stale poll once pause_state_class permits the bounded cadence, so it must be
 # cheap: it NEVER re-reads crew state. The re-surface age is anchored on the
@@ -1601,6 +1602,7 @@ handle_paused_stale() {  # <window> <task> <hash> [absorb-first-sight]
     detail="paused, awaiting external"
     reason="paused ${age}s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds"
   fi
+  [ -n "$absorb_first" ] || [ "$(window_kind "$win")" != secondmate ] || absorb_first=secondmate
   if [ -z "$absorb_first" ] || [ -e "$STATE/.paused-resurfaced-$key" ] || [ "$age" -ge "$min_age" ]; then
     resurface_absorbed "$win" "$STATE/.paused-resurfaced-$key" "$age" "stale: $win ($reason)" "$declaration" "$min_age"
   fi
@@ -2982,7 +2984,7 @@ EOF
         # firstmate. Detection itself is unchanged from above.
         if [ "$kind" = secondmate ]; then
           case "$(pause_state_class "$w" "$task")" in
-            paused) handle_paused_stale "$w" "$task" "$h" absorb-first-sight ;;
+            paused) handle_paused_stale "$w" "$task" "$h" ;;
             *)      clear_pause_tracking "$key" ;;
           esac
         elif afk_present; then

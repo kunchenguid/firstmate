@@ -4252,12 +4252,13 @@ test_secondmate_captain_held_resurfaces_in_normal_mode() {
 # first stale sight of a fresh paused: or captain-held declaration stays quiet;
 # the same declaration still re-surfaces once the cadence elapses.
 test_secondmate_declared_wait_first_sight_is_absorbed() {
-  local spec name status_line crew_state expected dir state fakebin out capture_file statusf window key sig pid
+  local spec name status_line crew_state expected dir state fakebin out capture_file statusf window key sig pid path seeded
+  for path in stable new-hash; do
   for spec in \
     'paused|paused: awaiting the upstream release|state: paused · source: status-log · awaiting the upstream release|awaiting external' \
     'captain-held|captain-held [key=route]: tracked by task-decision-route|state: unknown · source: none · no current-state source available|awaiting the captain'
   do
-    name=${spec%%|*}; spec=${spec#*|}
+    name="${spec%%|*}-$path"; spec=${spec#*|}
     status_line=${spec%%|*}; spec=${spec#*|}
     crew_state=${spec%%|*}; expected=${spec#*|}
     dir=$(make_case "secondmate-first-sight-$name"); state="$dir/state"; fakebin="$dir/fakebin"
@@ -4268,7 +4269,9 @@ test_secondmate_declared_wait_first_sight_is_absorbed() {
     printf '%s\n' "$status_line" > "$statusf"
     sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-mate_status"
     key=$(printf '%s' "$window" | tr '.:/' '___')
-    printf '%s' "$(hash_text 'idle secondmate on a declared wait')" > "$state/.hash-$key"
+    seeded='idle secondmate on a declared wait'
+    [ "$path" = stable ] || seeded='secondmate output before its declared wait'
+    printf '%s' "$(hash_text "$seeded")" > "$state/.hash-$key"
     printf '1\n' > "$state/.count-$key"
 
     FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" FM_FAKE_CREW_STATE="$crew_state" \
@@ -4291,7 +4294,8 @@ test_secondmate_declared_wait_first_sight_is_absorbed() {
     grep -F "stale: $window" "$out" >/dev/null || fail "[$name] secondmate cadence recheck was not a stale wake"
     grep -F "$expected" "$out" >/dev/null || fail "[$name] secondmate cadence recheck lost its reason: $(cat "$out")"
   done
-  pass "a secondmate's fresh declared wait absorbs its first stale sight, then re-surfaces on the cadence"
+  done
+  pass "a secondmate's fresh declared wait absorbs its first stale sight on stable and new-hash paths, then re-surfaces on the cadence"
 }
 
 test_secondmate_nonpaused_stale_remains_suppressed() {
