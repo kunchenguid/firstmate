@@ -379,6 +379,43 @@ test_home_directory_is_refused_even_when_it_is_a_worktree() {
   pass "fm-claude-trust.sh: refuses a home directory the git checks would accept"
 }
 
+# The primary checkout is written to the store too, so a project that IS the
+# home directory, or contains it, must be refused exactly like such a worktree:
+# Claude Code's trust check walks ancestors, and one entry there trusts every
+# folder beneath it. The worktree itself lives outside HOME in every case here,
+# so only the project-root guard can refuse.
+test_project_root_at_or_above_home_is_refused() {
+  local rec out home
+  rec=$(make_case project-home)
+  read_case "$rec"
+  out=$(run_trust "$CONFIG" "$WT" "$PROJ" "$PROJ")
+  expect_code 1 $? "a project root that is the home directory must be refused: $out"
+  assert_contains "$out" "home directory" "the refusal did not name the home directory"
+  assert_not_trusted "$CONFIG/.claude.json" "$PROJ" "the home directory was trusted as a project root"
+  assert_not_trusted "$CONFIG/.claude.json" "$WT" "a worktree was trusted despite the refused project root"
+
+  home="$PROJ/users/me"
+  mkdir -p "$home"
+  out=$(run_trust "$CONFIG" "$WT" "$PROJ" "$home")
+  expect_code 1 $? "a project root that contains the home directory must be refused: $out"
+  assert_contains "$out" "contains the home directory" "the refusal did not name the contained home directory"
+  assert_not_trusted "$CONFIG/.claude.json" "$PROJ" "an ancestor of the home directory was trusted"
+  assert_not_trusted "$CONFIG/.claude.json" "$WT" "a worktree was trusted despite the refused project root"
+
+  out=$(CLAUDE_CONFIG_DIR="$PROJ/claude-config" HOME="$CASE_DIR/elsewhere-home" "$TRUST" "$WT" "$PROJ" 2>&1)
+  expect_code 1 $? "a project root that contains the Claude config directory must be refused: $out"
+  assert_contains "$out" "contains the Claude config directory" "the refusal did not name the contained config directory"
+  [ ! -e "$PROJ/claude-config/.claude.json" ] \
+    || fail "a store was written for a project root that contains the config directory"
+
+  # Control: the same project outside HOME registers as designed, so the
+  # refusals above came from the home guard rather than an unrelated failure.
+  out=$(run_trust "$CONFIG" "$WT" "$PROJ" "$CASE_DIR/elsewhere-home")
+  expect_code 0 $? "the same project must register once HOME is outside it: $out"
+  assert_trusted "$CONFIG/.claude.json" "$PROJ" "the project root outside HOME was not trusted"
+  pass "fm-claude-trust.sh: refuses a project root that is or contains the home or config directory"
+}
+
 # fm-spawn forwards CLAUDE_CONFIG_DIR onto the worker verbatim and the worker's
 # pane starts in the task worktree, so a relative value names one store here and
 # another there; registering into the first and reporting success would leave the
@@ -848,6 +885,7 @@ test_primary_checkout_is_refused
 test_cdpath_cannot_defeat_the_primary_checkout_refusal
 test_git_env_overrides_cannot_defeat_the_primary_checkout_refusal
 test_home_directory_is_refused_even_when_it_is_a_worktree
+test_project_root_at_or_above_home_is_refused
 test_config_directory_is_refused
 test_relative_config_dir_is_refused
 test_non_git_directory_is_refused
