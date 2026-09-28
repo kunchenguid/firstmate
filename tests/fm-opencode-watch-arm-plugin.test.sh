@@ -26,23 +26,7 @@ CHECK_REGISTER="$ROOT/bin/fm-check-register.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-opencode-watch-arm)
 
-# Set by each test before driving the plugin, read by cleanup on the way out.
-STATE_A=
-STATE_B=
-
-kill_watcher_tree() {  # <state>
-  local state=$1 watch_pid arm_pid
-  [ -n "${state:-}" ] || return 0
-  watch_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
-  [ -n "$watch_pid" ] || return 0
-  arm_pid=$(ps -p "$watch_pid" -o ppid= 2>/dev/null | tr -d ' ' || true)
-  kill -TERM "$watch_pid" 2>/dev/null || true
-  [ -z "$arm_pid" ] || kill -TERM "$arm_pid" 2>/dev/null || true
-}
-
 cleanup() {
-  kill_watcher_tree "$STATE_A"
-  kill_watcher_tree "$STATE_B"
   fm_test_cleanup
 }
 trap cleanup EXIT
@@ -116,7 +100,7 @@ test_arms_for_registered_check_with_no_in_flight_work() {
   root="$TMP_ROOT/check-only/root"
   state="$TMP_ROOT/check-only/state"
   config="$TMP_ROOT/check-only/config"
-  STATE_A=$state
+  fm_test_track_watcher_state "$state"
   mkdir -p "$state" "$config"
   setup_repo_root "$root"
   register_fixture_check "$state"
@@ -139,7 +123,7 @@ test_does_not_arm_with_nothing_registered() {
   root="$TMP_ROOT/nothing/root"
   state="$TMP_ROOT/nothing/state"
   config="$TMP_ROOT/nothing/config"
-  STATE_B=$state
+  fm_test_track_watcher_state "$state"
   mkdir -p "$state" "$config"
   setup_repo_root "$root"
 
