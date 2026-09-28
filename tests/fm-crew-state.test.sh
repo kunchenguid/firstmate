@@ -5336,7 +5336,8 @@ test_competing_live_runs_report_unknown_with_both_ids() {
 # The AXI overview can surface a historical row before the active current run
 # when an old run was updated by its stale PR being closed. The current branch
 # status identifies the active run, so crew-state must not trust the overview's
-# row order and report the stale PR state.
+# row order and report the stale PR state, even when both ledger rows share a
+# minute-level timestamp.
 test_current_active_run_beats_stale_overview_row() {
   reset_fakes
   local d old_head new_head out
@@ -5358,7 +5359,7 @@ branch_sync:
   FM_FAKE_AXI_STATUS_RUN_01OLD="$(FM_FAKE_RUN_HEAD=$old_head run_passed fm/reused-branch | sed 's/01RUN/01OLD/')"
   FM_FAKE_AXI_STATUS_RUN_01NEW="$FM_FAKE_AXI_STATUS"
   FM_FAKE_RUNS_LIST="  running fm/reused-branch ${new_head:0:7} 2026-09-28 12:00
-  completed fm/reused-branch ${old_head:0:7} 2026-09-28 11:00"
+  completed fm/reused-branch ${old_head:0:7} 2026-09-28 12:00"
   out=$(run_crew_state "$d" reused)
   assert_contains "$out" 'state: working' 'the active current run remains authoritative'
   assert_contains "$out" '01NEW' 'the active run identity is reported'
@@ -5388,8 +5389,8 @@ runs[2]{id,branch,status,head,pr}:
   FM_FAKE_AXI_STATUS="$(run_running fm/reused-branch | sed 's/01RUN/01OLD/')"
   FM_FAKE_AXI_STATUS_RUN_01OLD="$FM_FAKE_AXI_STATUS"
   FM_FAKE_AXI_STATUS_RUN_01NEW="$(FM_FAKE_RUN_HEAD=$new_head run_passed fm/reused-branch | sed 's/01RUN/01NEW/')"
-  FM_FAKE_RUNS_LIST="  running fm/reused-branch ${old_head:0:7} 2026-09-28 11:00
-  completed fm/reused-branch ${new_head:0:7} 2026-09-28 12:00"
+  FM_FAKE_RUNS_LIST="  completed fm/reused-branch ${new_head:0:7} 2026-09-28 12:00
+  running fm/reused-branch ${old_head:0:7} 2026-09-28 11:00"
   out=$(run_crew_state "$d" reused)
   assert_contains "$out" 'state: done' 'the newer completed run remains authoritative'
   assert_contains "$out" '01NEW' 'the newer run identity is reported'

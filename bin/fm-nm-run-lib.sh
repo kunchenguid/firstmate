@@ -124,22 +124,25 @@ fm_nm_run_status_class() {  # <status_word>
   esac
 }
 
-# 0 when the status identity with $3 was created after the overview-selected
-# run with $2, using the creation-ordered `no-mistakes runs` ledger. Heads must
-# differ and both rows must be uniquely identifiable; otherwise the ledger
-# cannot prove which same-head historical run is newer.
+# 0 when the status identity with $3 appears before the overview-selected run
+# with $2 in the creation-ordered, newest-first `no-mistakes runs` ledger.
+# The ledger's row order is the tie-break when timestamps share a minute. Heads
+# must differ and each abbreviated head must occur once; otherwise the ledger
+# cannot prove which historical run is newer.
 fm_nm_run_is_newer_than_selected() {  # <branch> <selected-head> <reported-head> <runs-list>
-  local branch=$1 selected_head=$2 reported_head=$3 runs=$4 selected_stamp reported_stamp
+  local branch=$1 selected_head=$2 reported_head=$3 runs=$4 first_match
   [ -n "$selected_head" ] && [ -n "$reported_head" ] \
-    && [ "$selected_head" != "$reported_head" ] || return 1
-  selected_stamp=$(printf '%s\n' "$runs" | awk -v branch="$branch" -v head="${selected_head:0:7}" \
-    '$2 == branch && index($3, head) == 1 { print $4 " " $5 }')
-  reported_stamp=$(printf '%s\n' "$runs" | awk -v branch="$branch" -v head="${reported_head:0:7}" \
-    '$2 == branch && index($3, head) == 1 { print $4 " " $5 }')
-  case "$selected_stamp" in *$'\n'*) return 1 ;; esac
-  case "$reported_stamp" in *$'\n'*) return 1 ;; esac
-  [ -n "$selected_stamp" ] && [ -n "$reported_stamp" ] \
-    && [[ "$reported_stamp" > "$selected_stamp" ]]
+    && [ "${selected_head:0:7}" != "${reported_head:0:7}" ] || return 1
+  first_match=$(printf '%s\n' "$runs" | awk -v branch="$branch" \
+    -v selected="${selected_head:0:7}" -v reported="${reported_head:0:7}" '
+    $2 == branch {
+      if (index($3, selected) == 1) { selected_count++; if (first == "") first = "selected" }
+      else if (index($3, reported) == 1) { reported_count++; if (first == "") first = "reported" }
+    }
+    END {
+      if (selected_count == 1 && reported_count == 1) print first
+    }')
+  [ "$first_match" = reported ]
 }
 
 # Select from a complete `no-mistakes axi` overview with the existing awk
