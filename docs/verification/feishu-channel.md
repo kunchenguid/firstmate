@@ -41,6 +41,16 @@ A post-PR real-image check remains an explicit captain action using the already 
 
 ## Focused behavioral result
 
+The processed-body lifecycle was verified on 2026-09-28 with Node `22.22.2` and Pi `0.87.1`.
+
+```console
+$ bash tests/fm-feishu-processed-cleanup.test.sh
+ok - five-second Feishu cleanup removes only receipt-proven bodies and preserves all unfinished work
+```
+
+The clock-controlled public-lifecycle fixture proves the pass does not run before five seconds, then removes one delivered inbound body and one fully receipted outbound body while retaining five pending, offered, delivery-uncertain, partially posted, or unsent bodies.
+It also proves empty and repeated passes are harmless, runtime shutdown disposes the timer, restart readback does not rehydrate compacted inbound content, compacted identities still deduplicate inbound replay and outbound registration, and superseded inbound, sending, and retryable records remain intact.
+
 ```console
 $ bash tests/fm-feishu-channel.test.sh
 ok - native Pi steering, lock-contention recovery, state safety, and all-origin Assistant mirroring
@@ -92,7 +102,7 @@ A sentinel executable on `PATH` proves the transport does not invoke the former 
 
 ```console
 $ bash tests/fm-pi-primary-types.test.sh
-ok - tracked Pi extensions pass strict no-emit typecheck against Pi 0.84.4
+ok - tracked Pi extensions pass strict no-emit typecheck against Pi 0.87.1
 ```
 
 The check compiles the bridge, native-queue channel, watcher integration, turn-end integration, and shared state declarations with strict TypeScript settings against the installed Pi declarations.

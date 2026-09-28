@@ -18,6 +18,7 @@ import type {
 import {
   FeishuStateLockContentionError,
   claimLiveSession,
+  cleanupProcessedFeishuBodies,
   completeAssistantOutboundIntent,
   findInboundByDeliveryRef,
   findInboundDeliveryEvidence,
@@ -86,6 +87,7 @@ interface ActiveRuntime {
   pumping: boolean;
   lockRetryAttempt: number;
   nextPumpAt: number;
+  nextProcessedCleanupAt: number;
   lockContentionNotified: boolean;
   configFileIdentity: string;
   recoveryAttempt: number;
@@ -125,6 +127,9 @@ const PROCESS_RECOVERY_TEST_MODE = process.env.FM_FEISHU_PROCESS_RECOVERY_TEST_M
 const PUMP_INTERVAL_MS = PROCESS_RECOVERY_TEST_MODE ? positiveInteger(process.env.FM_FEISHU_PUMP_MS, 250) : 250;
 const PROCESS_RECOVERY_BASE_MS = PROCESS_RECOVERY_TEST_MODE ? positiveInteger(process.env.FM_FEISHU_PROCESS_RECOVERY_BASE_MS, 1000) : 1000;
 const PROCESS_RECOVERY_MAX_MS = PROCESS_RECOVERY_TEST_MODE ? positiveInteger(process.env.FM_FEISHU_PROCESS_RECOVERY_MAX_MS, 60000) : 60000;
+const PROCESSED_BODY_CLEANUP_INTERVAL_MS = PROCESS_RECOVERY_TEST_MODE
+  ? positiveInteger(process.env.FM_FEISHU_PROCESSED_CLEANUP_MS, 5000)
+  : 5000;
 export interface FeishuNativeChannelControls {
   hardBind(ctx: ExtensionCommandContext): Promise<"already-current" | "hard-bound">;
 }
@@ -220,11 +225,21 @@ function ingressContentDigest(content: unknown): string | undefined {
 }
 
 const verifiedClassifications = new Map<string, { marker: FeishuMarker; contentDigest: string }>();
+const processedDeliveryRefs = new Set<string>();
 const VERIFIED_CLASSIFICATION_LIMIT = 128;
+
+function rememberProcessedDeliveryRef(deliveryRef: string): void {
+  if (processedDeliveryRefs.size >= VERIFIED_CLASSIFICATION_LIMIT) {
+    const oldest = processedDeliveryRefs.values().next().value;
+    if (oldest !== undefined) processedDeliveryRefs.delete(oldest);
+  }
+  processedDeliveryRefs.add(deliveryRef);
+}
 
 export function classifyFeishuMessage(message: unknown): FeishuMarker | undefined {
   const marker = parseFeishuMessage(message);
   if (!marker) return undefined;
+  if (processedDeliveryRefs.has(marker.deliveryRef)) return undefined;
   const contentDigest = ingressContentDigest((message as { content?: unknown }).content);
   if (!contentDigest) return undefined;
   const memoKey = `${marker.deliveryRef}:${marker.bindingGeneration}`;
@@ -232,6 +247,11 @@ export function classifyFeishuMessage(message: unknown): FeishuMarker | undefine
   if (verified && verified.contentDigest === contentDigest) return verified.marker;
   const evidence = findInboundDeliveryEvidence(fmHome, marker.deliveryRef);
   if (!evidence || evidence.event.delivery_ref !== marker.deliveryRef || evidence.event.binding_generation !== marker.bindingGeneration) return undefined;
+  if (!evidence.bodyAvailable) {
+    rememberProcessedDeliveryRef(marker.deliveryRef);
+    verifiedClassifications.delete(memoKey);
+    return undefined;
+  }
   if (evidence.contentDigest !== contentDigest) return undefined;
   if (verifiedClassifications.size >= VERIFIED_CLASSIFICATION_LIMIT) {
     const oldest = verifiedClassifications.keys().next().value;
@@ -239,6 +259,19 @@ export function classifyFeishuMessage(message: unknown): FeishuMarker | undefine
   }
   verifiedClassifications.set(memoKey, { marker, contentDigest });
   return marker;
+}
+
+function processedFeishuMessage(message: unknown): boolean {
+  const marker = parseFeishuMessage(message) ?? (
+    (message as { role?: unknown })?.role === "user" ? parseFeishuMarker(messageText(message)) : undefined
+  );
+  if (!marker) return false;
+  if (processedDeliveryRefs.has(marker.deliveryRef)) return true;
+  const evidence = findInboundDeliveryEvidence(fmHome, marker.deliveryRef);
+  if (!evidence || evidence.event.binding_generation !== marker.bindingGeneration || evidence.bodyAvailable) return false;
+  rememberProcessedDeliveryRef(marker.deliveryRef);
+  verifiedClassifications.delete(`${marker.deliveryRef}:${marker.bindingGeneration}`);
+  return true;
 }
 
 function ingressPreamble(marker: FeishuMarker): string {
@@ -694,6 +727,17 @@ function clearLockRetry(runtime: ActiveRuntime): void {
   runtime.lockContentionNotified = false;
 }
 
+function cleanupProcessedBodiesOnSchedule(runtime: ActiveRuntime): void {
+  const now = Date.now();
+  if (now < runtime.nextProcessedCleanupAt) return;
+  const result = cleanupProcessedFeishuBodies(fmHome, { nowMs: now });
+  for (const deliveryRef of result.removedDeliveryRefs) {
+    rememberProcessedDeliveryRef(deliveryRef);
+    verifiedClassifications.delete(`${deliveryRef}:${runtime.binding.generation}`);
+  }
+  runtime.nextProcessedCleanupAt = now + PROCESSED_BODY_CLEANUP_INTERVAL_MS;
+}
+
 async function pump(runtime: ActiveRuntime): Promise<void> {
   if (runtime.pumping) return;
   runtime.pumping = true;
@@ -703,6 +747,7 @@ async function pump(runtime: ActiveRuntime): Promise<void> {
       return;
     }
     updateStatus(runtime);
+    cleanupProcessedBodiesOnSchedule(runtime);
     captureAssistantHistory(runtime);
     flushAssistantOutbound(runtime);
     observeProcessRecovery(runtime);
@@ -789,6 +834,7 @@ function activate(pi: ExtensionAPI, ctx: ExtensionContext, token: string): Activ
     pumping: false,
     lockRetryAttempt: 0,
     nextPumpAt: 0,
+    nextProcessedCleanupAt: Date.now() + PROCESSED_BODY_CLEANUP_INTERVAL_MS,
     lockContentionNotified: false,
     configFileIdentity: transportOwner.configFileIdentity,
     recoveryAttempt: 0,
@@ -971,7 +1017,8 @@ export function registerFeishuNativeChannel(pi: ExtensionAPI): FeishuNativeChann
   });
   pi.on("message_start", (event) => onUserStart(event, token));
   pi.on("context", (event) => ({
-    messages: event.messages.map((message) => {
+    messages: event.messages.flatMap((message) => {
+      if (processedFeishuMessage(message)) return [];
       if (message.role !== "custom") return message;
       const content = modelFeishuContent(message);
       return content ? { ...message, content } : message;
