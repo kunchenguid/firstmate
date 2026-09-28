@@ -1442,6 +1442,65 @@ assert_present "$HFLINGER/state/procevent-inbox/$linger_id.1.handled" \
   || fail "listener release recovery did not retain the exact staged reply"
 pass "lingering Lavish listener recovers without takeover"
 
+HFLARGE="$TMP_ROOT/hflarge"; new_home "$HFLARGE"
+LARGE_BIN=$(fm_fakebin "$TMP_ROOT/lavish-firstmate-large-stub")
+LARGE_COUNT="$TMP_ROOT/lavish-firstmate-large-count"
+export LARGE_COUNT
+cat > "$LARGE_BIN/lavish-axi" <<'SH'
+#!/bin/sh
+[ "$#" -gt 0 ] || exit 0
+n=$(cat "$LARGE_COUNT" 2>/dev/null || echo 0)
+n=$((n + 1))
+printf '%s\n' "$n" > "$LARGE_COUNT"
+shift 2
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --agent-reply-file) cat >/dev/null; shift 2 ;;
+    --owner) shift 2 ;;
+    *) shift ;;
+  esac
+done
+if [ "$n" = 1 ]; then
+  printf 'session:\n  status: feedback\nprompts[1]{uid,prompt,selector,tag,text}:\n  "","","","message","first"\n'
+else
+  perl -e 'print "session:\n  status: feedback\nprompts[1]{uid,prompt,selector,tag,text}:\n  \"\",\"\",\"\",\"message\",\"", "x" x 262144, "\"\n"'
+fi
+SH
+chmod +x "$LARGE_BIN/lavish-axi"
+LARGE_ART="$TMP_ROOT/firstmate-large.html"
+printf '<h1>large</h1>\n' > "$LARGE_ART"
+lavish_session "$LARGE_ART"
+large_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$LARGE_ART")
+fm_test_track_procevent_home "$HFLARGE"
+PATH="$LARGE_BIN:$PATH" FM_HOME="$HFLARGE" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$LARGE_ART" >/dev/null
+wait_capture "$HFLARGE" "$large_id" || fail "large immediate feedback fixture did not capture its first round"
+printf 'Reply before queued feedback.\n' > "$TMP_ROOT/firstmate-large-reply.txt"
+PATH="$LARGE_BIN:$PATH" FM_HOME="$HFLARGE" FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS=5 \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$LARGE_ART" \
+  --agent-reply-file "$TMP_ROOT/firstmate-large-reply.txt" \
+  > "$TMP_ROOT/firstmate-large.out" &
+large_arm_pid=$!
+for _ in $(seq 1 500); do
+  kill -0 "$large_arm_pid" 2>/dev/null || break
+  sleep 0.01
+done
+if kill -0 "$large_arm_pid" 2>/dev/null; then
+  kill "$large_arm_pid" 2>/dev/null || true
+  wait "$large_arm_pid" 2>/dev/null || true
+  fail "reply re-arm deadlocked on large immediate feedback"
+fi
+wait "$large_arm_pid" || fail "reply re-arm failed on large immediate feedback"
+assert_present "$HFLARGE/state/procevent-inbox/$large_id.1.handled" \
+  "large immediate feedback did not acknowledge the replied-to round"
+for _ in $(seq 1 100); do
+  [ "$(count_results "$HFLARGE" "$large_id")" = 2 ] && break
+  sleep 0.02
+done
+[ "$(count_results "$HFLARGE" "$large_id")" = 2 ] \
+  || fail "large immediate feedback was not durably captured"
+pass "reply readiness drains large immediate feedback concurrently"
+
 HFACKFAIL="$TMP_ROOT/hfackfail"; new_home "$HFACKFAIL"
 ACKFAIL_BIN=$(fm_fakebin "$TMP_ROOT/lavish-firstmate-ack-fail-stub")
 ACKFAIL_COUNT="$TMP_ROOT/lavish-firstmate-ack-fail-count"

@@ -1192,7 +1192,7 @@ cmd_start_public() {
 }
 
 cmd_start() {
-  local id=${1-} adapter out rc claimed bound_rc published_capture=0 handled_capture=0 self_announcing=0 task_owner='' task_pending kind reply_round='' pending_round launch_floor
+  local id=${1-} adapter out rc claimed bound_rc drain_pid published_capture=0 handled_capture=0 self_announcing=0 task_owner='' task_pending kind reply_round='' pending_round launch_floor
   local extension_owner=0 extension_load_state extension_sequence='' extension_request_id=''
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
   require_runner_group
@@ -1485,6 +1485,32 @@ EOF
       "${ARGV[@]}" >&5 5>&- 4<&- 2>/dev/null &
     fi
     launch_pid=$!
+    perl -e '
+      use strict;
+      use warnings;
+      my $limit = shift;
+      my ($written, $truncated) = (0, 0);
+      while (1) {
+        my $count = sysread(STDIN, my $buffer, 65536);
+        exit 2 unless defined $count;
+        last if $count == 0;
+        my $take = $written < $limit ? $limit - $written : 0;
+        $take = $count if $take > $count;
+        if ($take > 0) {
+          my $offset = 0;
+          while ($offset < $take) {
+            my $count_written = syswrite(STDOUT, $buffer, $take - $offset, $offset);
+            exit 2 unless defined $count_written;
+            $offset += $count_written;
+          }
+          $written += $take;
+        }
+        $truncated = 1 if $take < $count;
+      }
+      exit($truncated ? 3 : 0);
+    ' "$MAX_OUTPUT_BYTES" 5>&- <&4 > "$out" &
+    drain_pid=$!
+    exec 4<&-
     if [ -n "$reply_round" ]; then
       while [ ! -s "$adapter_ready_pipe" ] && kill -0 "$launch_pid" 2>/dev/null; do
         sleep 0.01
@@ -1513,32 +1539,8 @@ EOF
     rm -f -- "$launch_ready"
     fm_procevent_source_lock_release "$id" \
       || die "cannot release the source launch boundary: $id"
-    perl -e '
-      use strict;
-      use warnings;
-      my $limit = shift;
-      my ($written, $truncated) = (0, 0);
-      while (1) {
-        my $count = sysread(STDIN, my $buffer, 65536);
-        exit 2 unless defined $count;
-        last if $count == 0;
-        my $take = $written < $limit ? $limit - $written : 0;
-        $take = $count if $take > $count;
-        if ($take > 0) {
-          my $offset = 0;
-          while ($offset < $take) {
-            my $count_written = syswrite(STDOUT, $buffer, $take - $offset, $offset);
-            exit 2 unless defined $count_written;
-            $offset += $count_written;
-          }
-          $written += $take;
-        }
-        $truncated = 1 if $take < $count;
-      }
-      exit($truncated ? 3 : 0);
-    ' "$MAX_OUTPUT_BYTES" <&4 > "$out"
+    wait "$drain_pid"
     bound_rc=$?
-    exec 4<&-
     wait "$launch_pid"
     rc=$?
     case "$bound_rc" in
