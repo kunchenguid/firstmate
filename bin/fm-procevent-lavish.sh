@@ -286,11 +286,11 @@ POLL_RETRY_DELAY_MAX=60
 # response must be those two lines with those exact bytes: whitespace variants,
 # a longer response that merely opens with them, and any other SERVER_ERROR are
 # genuine errors this adapter must never swallow.
-poll_response_filter() {  # <response-file>
+poll_response_filter() {  # <response-file> [rejection-file] [owner]
   perl -e '
     use strict;
     use warnings;
-    my ($stage) = @ARGV;
+    my ($stage, $rejection, $owner) = @ARGV;
     my $expected = "error: Lavish Editor poll response was interrupted\ncode: SERVER_ERROR\n";
     my $active = "error: Lavish Editor already has an active poll listener";
     my $replaced = "error: Lavish Editor poll listener was replaced by a takeover\ncode: LISTENER_REPLACED\n";
@@ -324,6 +324,11 @@ poll_response_filter() {  # <response-file>
       $candidate .= $prefix;
       write_all($staged, $prefix);
       if ($candidate =~ /^\Q$active\E[^\n]*\ncode: LISTENER_ACTIVE\n/) {
+        if (length($rejection)) {
+          open my $rejected, ">", $rejection or exit 2;
+          print {$rejected} "$owner\n" or exit 2;
+          close $rejected or exit 2;
+        }
         $control = 11;
         next;
       }
@@ -389,9 +394,12 @@ cmd_poll() {
   local artifact=${1-} delay attempt=0 active_attempt=0 response='' status_file='' rc filter_rc iteration_started
   local pipeline_status pipeline_pid reply_file='' ready_fd=${FM_PROCEVENT_ADAPTER_READY_FD-}
   local poll_owner=${FM_PROCEVENT_ADAPTER_OWNER-} reply_pending=0 reply_acceptance_path=0 submission_started=0
-  local acceptance_dir='' acceptance_signal='' node_options='' signal
+  local acceptance_dir='' acceptance_signal='' rejection_signal='' node_options='' signal
   reject_unsubmitted() {
-    if [ -n "$ready_fd" ] && [ "$submission_started" -eq 0 ]; then
+    if [ -n "$ready_fd" ] \
+      && { [ "$submission_started" -eq 0 ] \
+        || { [ -f "$rejection_signal" ] \
+          && [ "$(cat "$rejection_signal" 2>/dev/null || true)" = "$poll_owner" ]; }; }; then
       printf 'rejected\n' >&3 2>/dev/null || true
     fi
   }
@@ -432,6 +440,7 @@ cmd_poll() {
     acceptance_dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-lavish-accept.XXXXXX") \
       || die "cannot prepare the Lavish acceptance boundary"
     acceptance_signal="$acceptance_dir/accepted"
+    rejection_signal="$acceptance_dir/rejected"
     cat > "$acceptance_dir/accept.cjs" <<'JS'
 const fs = require('node:fs');
 const childProcess = require('node:child_process');
@@ -475,21 +484,22 @@ JS
       case "$poll_owner" in ''|*[!A-Za-z0-9._-]*) die "invalid process-event adapter owner" ;; esac
       : > "$status_file" || die "cannot stage the poll status"
       exec 6> "$status_file" || die "cannot retain the poll status"
-      rm -f -- "$acceptance_signal"
+      rm -f -- "$acceptance_signal" "$rejection_signal"
       submission_started=1
       if [ "$reply_pending" -eq 1 ]; then
         reply_acceptance_path=1
         { HERDR_ENV=1 LAVISH_AXI_HERDR_CHIME=1 FM_LAVISH_ACCEPTED_SIGNAL="$acceptance_signal" \
-            FM_PROCEVENT_ADAPTER_OWNER="$poll_owner" NODE_OPTIONS="$node_options" \
-            lavish-axi poll "$artifact" --owner "$poll_owner" \
+            FM_LAVISH_REJECTED_SIGNAL="$rejection_signal" FM_PROCEVENT_ADAPTER_OWNER="$poll_owner" \
+            NODE_OPTIONS="$node_options" lavish-axi poll "$artifact" --owner "$poll_owner" \
             --agent-reply-file - <&7; printf '%s\n' "$?" >&6; } \
-          | poll_response_filter "$response" &
+          | poll_response_filter "$response" "$rejection_signal" "$poll_owner" &
         exec 7<&-
       else
         { HERDR_ENV=1 LAVISH_AXI_HERDR_CHIME=1 FM_LAVISH_ACCEPTED_SIGNAL="$acceptance_signal" \
-            FM_PROCEVENT_ADAPTER_OWNER="$poll_owner" NODE_OPTIONS="$node_options" \
-            lavish-axi poll "$artifact" --owner "$poll_owner"; printf '%s\n' "$?" >&6; } \
-          | poll_response_filter "$response" &
+            FM_LAVISH_REJECTED_SIGNAL="$rejection_signal" FM_PROCEVENT_ADAPTER_OWNER="$poll_owner" \
+            NODE_OPTIONS="$node_options" lavish-axi poll "$artifact" --owner "$poll_owner"; \
+            printf '%s\n' "$?" >&6; } \
+          | poll_response_filter "$response" "$rejection_signal" "$poll_owner" &
       fi
       pipeline_pid=$!
       while kill -0 "$pipeline_pid" 2>/dev/null; do
@@ -531,11 +541,12 @@ JS
       fi
     else
       if [ "$reply_pending" -eq 1 ]; then
-        lavish-axi poll "$artifact" --agent-reply-file - <&7 | poll_response_filter "$response"
+        lavish-axi poll "$artifact" --agent-reply-file - <&7 \
+          | poll_response_filter "$response" "$rejection_signal" "$poll_owner"
         pipeline_status=("${PIPESTATUS[@]}")
         exec 7<&-
       else
-        lavish-axi poll "$artifact" | poll_response_filter "$response"
+        lavish-axi poll "$artifact" | poll_response_filter "$response" "$rejection_signal" "$poll_owner"
         pipeline_status=("${PIPESTATUS[@]}")
       fi
       rc=${pipeline_status[0]}

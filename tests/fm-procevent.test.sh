@@ -1477,7 +1477,10 @@ if [ "$n" = 1 ]; then
   printf 'session:\n  status: feedback\nprompts[1]{uid,prompt,selector,tag,text}:\n  "","","","message","signal"\n'
 else
   adapter=$(ps -o ppid= -p "$PPID" | tr -d ' ')
-  (sleep 0.02; kill -TERM "$adapter") >/dev/null 2>&1 &
+  (for _ in $(seq 1 100); do
+    if [ -s "$FM_LAVISH_REJECTED_SIGNAL" ]; then kill -TERM "$adapter"; exit; fi
+    sleep 0.001
+  done) >/dev/null 2>&1 &
   printf 'error: Lavish Editor already has an active poll listener (current listener: prior-owner; active for 12ms)\ncode: LISTENER_ACTIVE\n'
   exit 1
 fi
