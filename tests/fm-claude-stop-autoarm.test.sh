@@ -1544,6 +1544,47 @@ test_host_crash_is_retried_then_reported() {
   pass "auto-arm: a host that died without a close is retried, then reported as a failure"
 }
 
+# A model running the hook by hand mid-turn (for example to read its help) is a
+# tool process under the lock-owning session with no Stop payload. Any argument
+# must print help or refuse before anything is armed, since the host or arm it
+# starts would be owned by that short-lived process.
+test_arguments_never_arm() {
+  local dir arg rc out before after status
+  dir=$(make_primary_dir "$TMP_ROOT/help-mode")
+  mkdir -p "$dir/config"
+  : > "$dir/config/supervision-host"
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  write_host_fixture "$dir" boundary
+  # The fake session writes state/.lock itself; everything else must be untouched.
+  for arg in --help -h --bogus; do
+    before=$(find "$dir/state" -mindepth 1 ! -name .lock | sort)
+    rc=0
+    out=$(FM_HOME="$dir" "$FAKE_CLAUDE" -c '
+        printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+        "$FM_HOME/bin/fm-claude-stop-autoarm.sh" "$1" </dev/null 2>"$FM_HOME/help-stderr"
+      ' _ "$arg") || rc=$?
+    after=$(find "$dir/state" -mindepth 1 ! -name .lock | sort)
+    case "$arg" in
+      --bogus)
+        expect_code 2 "$rc" "an unknown argument must be refused"
+        assert_contains "$(cat "$dir/help-stderr")" "unknown argument: --bogus" "the refusal must name the argument"
+        ;;
+      *)
+        expect_code 0 "$rc" "$arg must exit 0"
+        assert_contains "$out" "Usage: fm-claude-stop-autoarm.sh" "$arg must print usage to stdout"
+        ;;
+    esac
+    [ ! -e "$dir/state/host-ran" ] || fail "$arg started the supervision host"
+    [ ! -e "$dir/state/arm-ran" ] || fail "$arg ran the arm"
+    [ "$before" = "$after" ] || fail "$arg changed state: before=[$before] after=[$after]"
+  done
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "the ordinary Stop path must still rewake from the host"
+  assert_present "$dir/state/host-ran" "the ordinary Stop path did not run the host in the same home"
+  pass "auto-arm: --help, -h, and an unknown argument arm nothing; the Stop path still arms"
+}
+
 test_fm_lock_status_still_works_with_shared_lib() {
   local out
   out=$(FM_HOME="$TMP_ROOT/lock-status-home" bash "$ROOT/bin/fm-lock.sh" status 2>&1)
@@ -1602,5 +1643,6 @@ test_plain_arm_banner_keeps_its_wake_line_cap
 test_host_handback_carries_every_host_line
 test_host_stand_down_is_silent
 test_host_crash_is_retried_then_reported
+test_arguments_never_arm
 test_fm_lock_status_still_works_with_shared_lib
 test_stands_down_only_on_pi_code_transcript_path
