@@ -100,8 +100,8 @@ So every guarded script treats it exactly as it treats the Pi branch.
 
 ## Postures
 
-The posture is the away-posture record, read at every close and again when a turn starts, exactly as the Pi branch reads it.
-Only an away record is away: no record, or the record daemon-backed quiet mode writes, is a present captain (`bin/fm-afk-contract.sh` "AWAY OR QUIET"), so the host runs attended beside a quiet record whose daemon is not running.
+The host reads the record's mode at every close and again when a turn starts (`bin/fm-afk-contract.sh` "AWAY OR QUIET").
+Only an away record is away: no record, or the record daemon-backed quiet mode writes, is a present captain, so the host runs attended beside a quiet record whose daemon is not running.
 
 ### Attended
 

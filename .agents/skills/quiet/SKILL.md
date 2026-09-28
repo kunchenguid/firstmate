@@ -16,10 +16,8 @@ daemon tradeoff as `/afk`, made explicit for a captain who is staying,
 watching the session, and does not want to exit the mode just by chatting.
 
 Where a daemon runs, this skill is a thin wrapper.
-Every mechanism below - the daemon, its injection, its busy/composer guards,
-its classification policy, its reliability properties - is owned once by the
-`afk` skill and is IDENTICAL in quiet mode; nothing here restates it.
-Quiet mode uses the daemon without making the present captain's requested actions wait for a return.
+The `afk` skill owns the daemon's injection, busy/composer guards, and reliability properties; quiet mode uses that machinery while the captain remains present.
+For captain-held rechecks under quiet, see [architecture](../../../docs/architecture.md).
 
 ## What it does
 

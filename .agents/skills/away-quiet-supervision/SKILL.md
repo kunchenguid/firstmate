@@ -8,7 +8,8 @@ metadata:
 
 # Away and quiet supervision safety
 
-The `/afk` and `/quiet` skills each own their daemon procedure, which is otherwise identical; these safety facts apply to both:
+The `/afk` and `/quiet` skills own their respective entry procedures and share the daemon machinery; [architecture](../../../docs/architecture.md) owns the captain-held recheck difference between their postures.
+These safety facts apply to both:
 
 - Every current daemon injection uses the `away-supervisor` kind from `bin/fm-operational-input.sh` after `FM_OPERATIONAL_PREFIX` (U+2063 INVISIBLE SEPARATOR followed by `FIRSTMATE_OP: `), except that a Claude Code primary, which strips U+2063, receives that owner's record-backed doorbell and it counts as marked only when `bin/fm-operational-input.sh open <path>` verifies its record; the `/afk` skill owns legacy bare-marker compatibility.
 - `state/.afk-contract` is the away posture, written in the same turn as `/afk` before any other work, because `/afk` is itself the go: no read-back gates entry or waits for a go; entry announces hold-for-return only, and the away session acts on those words by its own judgment through the guarded scripts under standing authority, holding for the return on doubt.
