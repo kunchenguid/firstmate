@@ -965,8 +965,10 @@ test_ship_and_scout_forbid_ending_a_turn_on_an_announced_step() {
     assert_grep "on the announcement, or report \`paused:\`/\`blocked:\` with the reason." "$brief" \
       "$kind brief did not forbid ending a turn on an announced next step"
     if [ "$kind" = ship ]; then
-      assert_grep "Your own validation and delivery path needs no such approval" "$brief" \
-        "ship brief did not grant standing authority to drive its own validation and delivery path"
+      assert_grep "Drive your own validation and delivery path: beyond the handoff your Definition of done names, wait for no approval you did not request through \`needs-decision\`." "$brief" \
+        "ship brief did not preserve the defined handoff when granting standing authority"
+      assert_no_grep "Your own validation and delivery path needs no such approval" "$brief" \
+        "ship brief retained approval wording that conflicts with the defined handoff"
     else
       assert_grep "Your own investigation and report-writing needs no such approval" "$brief" \
         "scout brief did not grant standing authority to drive its own report, or wrongly copied the ship pipeline wording"
