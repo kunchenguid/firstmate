@@ -1250,6 +1250,36 @@ test_adopted_worktree_teardown_warns_when_store_is_missing() {
   pass "an adopted teardown whose preserve store is gone reports the anomaly and touches nothing"
 }
 
+# An adopted copy whose git dir can no longer be resolved (the creator moved it,
+# or pruned the project's worktree admin entry) has no readable claim, so a
+# forced teardown must report that anomaly and hand nothing back - not abort on
+# owner state the claim check never determined.
+test_adopted_worktree_teardown_reports_unresolvable_claim() {
+  local case_dir rc settings
+  case_dir=$(make_case adopted-dangling-gitdir)
+  write_adopted_meta "$case_dir" claude
+  mkdir -p "$case_dir/wt/.claude"
+  settings="$case_dir/wt/.claude/settings.local.json"
+  printf '{"firstmate":true}\n' > "$settings"
+  printf 'gitdir: %s\n' "$case_dir/gone/worktrees/wt" > "$case_dir/wt/.git"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "adopted-dangling-gitdir: forced teardown should still complete"$'\n'"$(cat "$case_dir/stderr")"
+  assert_not_contains "$(cat "$case_dir/stderr")" "unbound variable" \
+    "adopted-dangling-gitdir: teardown aborted on unset owner state instead of reporting the anomaly"
+  assert_contains "$(cat "$case_dir/stderr")" "adopted worktree $case_dir/wt is no longer task task-x1's" \
+    "adopted-dangling-gitdir: teardown did not report that the copy could not be proved this task's"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "adopted-dangling-gitdir: teardown left the task record behind"
+  [ -f "$settings" ] \
+    || fail "adopted-dangling-gitdir: teardown removed wiring from a copy it could not prove was this task's"
+  pass "an adopted teardown whose claim location is unresolvable reports it instead of aborting"
+}
+
 # The claim is the cross-home mutual exclusion on an adopted copy, so a teardown
 # whose record is stale must never strip the claim that protects the home that
 # actually holds the copy now.
@@ -4539,6 +4569,7 @@ test_adopted_worktree_teardown_skips_pool_return
 test_adopted_worktree_teardown_leaves_another_homes_claim
 test_adopted_worktree_teardown_warns_when_restore_fails
 test_adopted_worktree_teardown_warns_when_store_is_missing
+test_adopted_worktree_teardown_reports_unresolvable_claim
 test_adopted_worktree_teardown_keeps_unarmed_creator_wiring
 test_adopted_worktree_teardown_replaces_symlinked_wiring
 test_adopted_worktree_teardown_reports_unremovable_store

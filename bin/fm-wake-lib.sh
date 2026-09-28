@@ -1490,6 +1490,9 @@ fm_adopted_worktree_wiring_store() {  # <worktree>
 # matching on it would let one home overwrite or release the other's live claim.
 fm_adopted_worktree_owner_is_mine() {  # <worktree> <task-id> <state-dir> [marker]
   local worktree=$1 id=$2 state=$3 marker=${4:-} owner_state record_state
+  FM_TREEHOUSE_SLOT_OWNER=unsafe
+  FM_TREEHOUSE_SLOT_OWNER_ID=
+  FM_TREEHOUSE_SLOT_OWNER_HOME=
   [ -n "$marker" ] || marker=$(fm_adopted_worktree_owner_marker "$worktree") || return 1
   fm_treehouse_slot_owner_state "$worktree" "$id" "$marker"
   [ "$FM_TREEHOUSE_SLOT_OWNER" = mine ] || return 1
