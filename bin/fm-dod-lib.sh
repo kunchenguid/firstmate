@@ -5,7 +5,7 @@
 # receives. Both paths must hand the worker the same contract: a promoted
 # no-mistakes worker that never received the ask-user escalation rule or the
 # `--yes` ban is the exact delivery hole this single owner exists to close.
-# fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> prints the block on
+# fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> <task-data-dir> prints the block on
 # stdout with no trailing blank line. The caller validates the mode; an unknown
 # mode is refused rather than silently rendered as the pipeline contract.
 # The block opens with the fixed machine-readable "Delivery contract: mode=<mode>"
@@ -224,8 +224,8 @@ fm_brief_intent_address_line() {  # <file>
   '
 }
 
-fm_dod_block() {  # <mode> <task-id>
-  local mode=$1 id=$2
+fm_dod_block() {  # <mode> <task-id> <task-data-dir>
+  local mode=$1 id=$2 task_data_dir=$3
   case "$mode" in
     direct-PR)
       cat <<EOF
@@ -256,6 +256,7 @@ The implementation phase reaches its first delivery checkpoint only when the bri
 When that is true, append \`done: {summary}\` to the status file and stop.
 Firstmate will then instruct you on the next delivery phase.
 Before starting or resuming no-mistakes, handling one of its gates, or reporting a pipeline failure, read \`$FM_ROOT/.agents/skills/crewmate-no-mistakes/SKILL.md\` completely and follow it.
+Task data directory: \`$task_data_dir\`.
 That skill owns the conditional intent, ask-user, daemon-recovery, BITS/PPE boundary, and CI-ready completion procedure.
 Never merge the PR; Firstmate owns semantic acceptance and the configured merge decision.
 EOF

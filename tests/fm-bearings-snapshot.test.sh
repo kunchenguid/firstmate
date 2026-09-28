@@ -34,6 +34,7 @@ case "$1 ${2:-}" in
   'agent get')
     case "$3" in
       *missing*) echo '{"error":{"code":"agent_not_found"}}'; exit 1 ;;
+      *idle*) echo '{"result":{"agent":{"agent_status":"idle"}}}' ;;
       *) echo '{"result":{"agent":{"agent_status":"working"}}}' ;;
     esac ;;
   'pane process-info')
@@ -265,7 +266,7 @@ EOF
 }
 
 test_mixed_history_stays_compact_and_long_decision_has_targeted_read() {
-  local home fakebin default expanded targeted targeted_toon missing rc
+  local home fakebin default expanded targeted targeted_toon missing rc gen
   command -v tasks-axi >/dev/null 2>&1 || {
     pass "skipped targeted task projection regression: tasks-axi not installed"
     return
@@ -295,17 +296,32 @@ EOF
   cat > "$home/records/completed.md" <<'EOF'
 ## Archived 2026-09
 - [x] archive-old - Historical completed task (repo: alpha) (kind: scout) (reported 2026-09-01)
+- [x] archive-quiet - Historical completed task without open work (repo: alpha) (kind: scout) (reported 2026-09-02)
 EOF
   printf '# exact evidence\n' > "$home/data/actionable-choice/report.md"
-  write_task_meta "$home" actionable-choice p-active-choice
+  write_task_meta "$home" actionable-choice p-idle-choice
   printf 'yolo=off\n' >> "$home/state/actionable-choice.meta"
   printf 'kind=secondmate\nproject=alpha\n' > "$home/state/archive-old.meta"
+  printf 'kind=secondmate\nproject=alpha\n' > "$home/state/archive-quiet.meta"
+  printf '%s\n' \
+    'needs-decision [key=retained-choice]: choose whether to retain the archived evidence' \
+    'working: later unrelated archival bookkeeping' > "$home/state/archive-old.status"
+  printf '%s\n' \
+    'needs-decision [key=active-choice]: choose the current recovery input' \
+    'working: later unrelated evidence indexing' > "$home/state/actionable-choice.status"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$home/state" actionable-choice)
+  "$ROOT/bin/fm-busy-event.sh" apply "$home/state" actionable-choice idle --gen "$gen" \
+    --source pi-ext --event stop
 
   default=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_BEARINGS_NOW=2026-09-29T12:00:00Z "$BEARINGS" --json) \
     || fail "default mixed-history projection failed"
   printf '%s\n' "$default" | jq -e '
-    .retained_record_count == 1
-      and .retained_records == []
+    .retained_record_count == 2
+      and (.retained_records | any(.id == "archive-old"
+        and (.open_decisions | any(.key == "retained-choice" and .verb == "needs-decision"))))
+      and ([.retained_records[].id] | index("archive-quiet") == null)
+      and ([.in_flight[].id] | index("archive-old") == null)
+      and ([.decisions_open[].id] | index("archive-old") == null)
       and (.decisions_open | any(.id == "actionable-choice"
         and .retrieve == "--task actionable-choice"
         and (.summary | endswith("…"))))
@@ -315,7 +331,9 @@ EOF
   expanded=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_BEARINGS_NOW=2026-09-29T12:00:00Z "$BEARINGS" --json --all-retained) \
     || fail "retained-record drill-down failed"
   printf '%s\n' "$expanded" | jq -e '
-    .retained_record_count == 1 and (.retained_records | any(.id == "archive-old"))
+    .retained_record_count == 2
+      and (.retained_records | any(.id == "archive-old"))
+      and (.retained_records | any(.id == "archive-quiet"))
   ' >/dev/null || fail "archived evidence was not discoverable through its exact drill-down: $expanded"
 
   targeted=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_BEARINGS_NOW=2026-09-29T12:00:00Z "$BEARINGS" --json --task actionable-choice) \
@@ -326,6 +344,9 @@ EOF
       and .delivery_mode == "no-mistakes" and .merge_posture == "off"
       and (.remaining_request | contains("option A: restore the authenticated read-only GUI session"))
       and (.remaining_request | contains("option B: provide the complete timestamped campaign-level export"))
+      and (.open_decisions | any(.key == "active-choice" and .verb == "needs-decision"
+        and .summary == "choose the current recovery input"))
+      and (.current_detail | contains("later unrelated evidence indexing"))
       and (.backlog_body | any(.line | contains("all twenty-two named groups")))
       and (.report_path | endswith("data/actionable-choice/report.md"))
       and .omitted[0].surface == "other fleet tasks and history"
@@ -353,9 +374,30 @@ EOF
   pass "mixed history stays compact while exact actionable task context remains retrievable"
 }
 
+test_targeted_task_requires_a_value() {
+  local home out rc
+  home=$(make_home malformed-target)
+  for arg in --task --task= --task=-other; do
+    set +e
+    out=$(FM_HOME="$home" "$BEARINGS" "$arg" 2>&1)
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "$arg silently fell back to a broad bearings snapshot"
+    assert_contains "$out" "--task requires" "$arg did not report its missing task id"
+  done
+  set +e
+  out=$(FM_HOME="$home" "$BEARINGS" --task --json 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "--task consumed another option and ran a broad bearings snapshot"
+  assert_contains "$out" "--task requires a non-option task id" "--task accepted an option as its task id"
+  pass "bearings rejects malformed targeted reads before broad fallback"
+}
+
 test_empty_projection
 test_main_home_projection_is_local_and_complete
 test_removed_secondmate_flag_is_rejected
 test_archived_and_parked_execution_records_are_not_underway
 test_unsupported_backend_never_infers_terminal_disposition
 test_mixed_history_stays_compact_and_long_decision_has_targeted_read
+test_targeted_task_requires_a_value

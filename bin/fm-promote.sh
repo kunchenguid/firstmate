@@ -192,9 +192,10 @@ The mode-specific Definition of done below is the current delivery contract.
 EOF
   fm_ship_rule_one "$MODE" "$ID"
   printf '\n'
-  fm_dod_block "$MODE" "$ID"
+  fm_dod_block "$MODE" "$ID" "$TASK_DATA_DIR"
 }
 mkdir -p "$DATA/$ID"
+TASK_DATA_DIR=$(CDPATH='' cd -- "$DATA/$ID" && pwd -P) || { echo "error: task data directory cannot be resolved: $DATA/$ID" >&2; exit 1; }
 [ ! -d "$INSTRUCTIONS" ] || { echo "error: ship instructions path is a directory: $INSTRUCTIONS" >&2; exit 1; }
 TMP="$DATA/$ID/.ship-instructions.md.${BASHPID:-$$}"
 {

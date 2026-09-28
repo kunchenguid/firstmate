@@ -228,8 +228,29 @@ EOF
   pass "targeted fleet snapshot narrows both output and process observations to one task"
 }
 
+test_targeted_snapshot_requires_a_value() {
+  local home out rc
+  home=$(make_home malformed-target)
+  for arg in --task --task= --task=-other; do
+    set +e
+    out=$(FM_HOME="$home" "$SNAPSHOT" "$arg" 2>&1)
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "$arg silently fell back to a broad fleet snapshot"
+    assert_contains "$out" "--task requires" "$arg did not report its missing task id"
+  done
+  set +e
+  out=$(FM_HOME="$home" "$SNAPSHOT" --task --json 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "--task consumed another option and ran a broad fleet snapshot"
+  assert_contains "$out" "--task requires a non-option task id" "--task accepted an option as its task id"
+  pass "fleet snapshot rejects malformed targeted reads before broad fallback"
+}
+
 test_empty_snapshot_and_view
 test_main_home_inventory_and_historical_refusal
 test_view_uses_authoritative_task_disposition
 test_removed_home_summary_mode_is_rejected
 test_targeted_snapshot_observes_only_one_task
+test_targeted_snapshot_requires_a_value

@@ -38,7 +38,7 @@ Only a refused or missing daemon socket, or a run record failed with a daemon er
 ## Ask-user findings
 
 Ask-user findings belong to Firstmate, never the implementation worker.
-At one ask-user gate, write only the findings verbatim and unparaphrased - id, severity, file, line, description, and authority - to the current task's `data/<task-id>/nm-<run>-findings.txt`.
+At one ask-user gate, use the exact absolute `Task data directory` published in the generated delivery contract and write only the findings verbatim and unparaphrased - id, severity, file, line, description, and authority - to `<task-data-directory>/nm-<run>-findings.txt`.
 Then append exactly one status event in this shape:
 
 `needs-decision [key=nm-<run>-<step>]: ask-user findings=<id1>,<id2>,... file=<absolute-snapshot-path>`

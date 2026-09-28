@@ -172,8 +172,19 @@ TARGET_TASK_ID=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --json) ;;
-    --task) shift; TARGET_TASK_ID=${1:-} ;;
-    --task=*) TARGET_TASK_ID=${1#--task=} ;;
+    --task)
+      [ $# -gt 1 ] || { echo "fm-fleet-snapshot: --task requires a task id" >&2; usage >&2; exit 2; }
+      case "$2" in ''|-*) echo "fm-fleet-snapshot: --task requires a non-option task id" >&2; usage >&2; exit 2 ;; esac
+      shift
+      TARGET_TASK_ID=$1
+      ;;
+    --task=*)
+      TARGET_TASK_ID=${1#--task=}
+      case "$TARGET_TASK_ID" in
+        '') echo "fm-fleet-snapshot: --task requires a task id" >&2; usage >&2; exit 2 ;;
+        -*) echo "fm-fleet-snapshot: --task requires a non-option task id" >&2; usage >&2; exit 2 ;;
+      esac
+      ;;
     -h|--help) usage; exit 0 ;;
     *) usage >&2; exit 2 ;;
   esac

@@ -56,7 +56,8 @@ usage: fm-bearings-snapshot.sh [--json] [--include-prs] [--fields <list>]
                                [--all-pr-repos]
 
 Compact bearings projection over fm-fleet-snapshot.sh. TOON by default.
-Closed non-working records are counted by default; --all-retained reveals their bounded detail.
+Closed non-working records are counted by default; rows with folded open decisions remain visible.
+--all-retained reveals bounded purely historical detail.
 --include-prs additionally performs live GitHub discovery and checks.
 
 Default fields: schema, home, generated, prs, in_flight{id,kind,state,repo,name,doing},
@@ -107,8 +108,19 @@ while [ $# -gt 0 ]; do
     --all-pr-repos) ALL_PR_REPOS=1 ;;
     --fields) shift; FIELDS=${1:-} ;;
     --fields=*) FIELDS=${1#--fields=} ;;
-    --task) shift; TASK_ID=${1:-} ;;
-    --task=*) TASK_ID=${1#--task=} ;;
+    --task)
+      [ $# -gt 1 ] || { echo "fm-bearings-snapshot: --task requires a task id" >&2; usage >&2; exit 2; }
+      case "$2" in ''|-*) echo "fm-bearings-snapshot: --task requires a non-option task id" >&2; usage >&2; exit 2 ;; esac
+      shift
+      TASK_ID=$1
+      ;;
+    --task=*)
+      TASK_ID=${1#--task=}
+      case "$TASK_ID" in
+        '') echo "fm-bearings-snapshot: --task requires a task id" >&2; usage >&2; exit 2 ;;
+        -*) echo "fm-bearings-snapshot: --task requires a non-option task id" >&2; usage >&2; exit 2 ;;
+      esac
+      ;;
     -h|--help) usage; exit 0 ;;
     *) usage >&2; exit 2 ;;
   esac
@@ -216,6 +228,7 @@ if [ -n "$TASK_ID" ]; then
         remaining_request:($record.hold_reason // null),
         blocked_by:(($record.unresolved_blocker_ids // []) | join(",")),
         hold_kind:($record.hold_kind // null), hold_until:($record.hold_until // null),
+        open_decisions:($task.hints.open_decisions // []),
         current_detail:($task.current_state.detail // null),
         backlog_path:.backlog.path, backlog_row:($record.raw // null),
         backlog_body:(($record.body_lines // []) | map({line:.})),
@@ -499,6 +512,12 @@ MODEL=$(printf '%s' "$SNAP" | jq \
        | select(($all_reports == 1) or (($rel_ids | index($r.id)) != null))
        | {id, path} ]) as $reports_all
   | ([ .tasks[] | select(.kind != "secondmate" and .pr.url != null and .pr.source == "meta") | {id, url:.pr.url} ]) as $recorded_prs_all
+  | ([.tasks[] | select(.retained_record == true)
+       | {id,state:.current_state.state,open_decisions:.hints.open_decisions,
+          reason:(if .record_disposition == "archive_done"
+                  then "backlog completion archived; execution record retained, cleanup unverified"
+                  else "backlog closed; execution record retained, cleanup unverified" end)}]) as $retained_all
+  | ($retained_all | map(select((.open_decisions | length) > 0))) as $retained_open
   | def filed_epoch:
       (.filed // null) as $filed
       | if ($filed | type) != "string" then null
@@ -516,13 +535,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
       generated: $now,
       prs: $prs,
       in_flight: (if $all_in_flight == 1 then $in_flight_all else $in_flight_all[:$in_flight_n] end),
-      retained_record_count: ([.tasks[] | select(.retained_record == true)] | length),
-      retained_records: ([.tasks[] | select(.retained_record == true)
-        | {id,state:.current_state.state,open_decisions:.hints.open_decisions,
-           reason:(if .record_disposition == "archive_done"
-                   then "backlog completion archived; execution record retained, cleanup unverified"
-                   else "backlog closed; execution record retained, cleanup unverified" end)}]
-        | if $all_retained == 1 then .[:$in_flight_n] else [] end),
+      retained_record_count: ($retained_all | length),
+      retained_records: (if $all_retained == 1 then $retained_all[:$in_flight_n] else $retained_open end),
       decisions_open: (if $all_decisions == 1 then $decisions_all else $decisions_all[:$decisions_n] end),
       landed: ($done | map({id, what:(.title | trunc(70)),
                             artifact:(landed_artifact // "-"),owner:.home_id})),
@@ -552,8 +566,9 @@ MODEL=$(printf '%s' "$SNAP" | jq \
         ((($snap.main_inventory.unstructured_current_count // 0)) as $n
          | if $n > 0 then {surface:("main unstructured current backlog row(s): \($n)"), reveal:"inspect main data/backlog.md In flight and Queued free-form rows"} else empty end),
         (if $all_in_flight == 0 and ($in_flight_all | length) > $in_flight_n then {surface:("in_flight showing \($in_flight_n) of \($in_flight_all | length)"), reveal:"--all-in-flight"} else empty end),
-        (([$snap.tasks[] | select(.retained_record == true)] | length) as $n
-         | if $all_retained == 0 and $n > 0 then {surface:("retained records omitted: \($n)"), reveal:"--all-retained"}
+        (($retained_all | length) as $n
+         | (($retained_all | length) - ($retained_open | length)) as $historical_n
+         | if $all_retained == 0 and $historical_n > 0 then {surface:("retained records omitted: \($historical_n)"), reveal:"--all-retained"}
            elif $all_retained == 1 and $n > $in_flight_n then {surface:("retained records showing \($in_flight_n) of \($n)"), reveal:"raise FM_BEARINGS_IN_FLIGHT"}
            else empty end),
         (if $all_decisions == 0 and ($decisions_all | length) > $decisions_n then {surface:("decisions_open showing \($decisions_n) of \($decisions_all | length)"), reveal:"--all-decisions"} else empty end),

@@ -367,6 +367,8 @@ STUB
   payload="$TMP_ROOT/promote-dod/payload-promote-dod-no-mistakes"
   assert_grep "crewmate-no-mistakes/SKILL.md\` completely" "$payload" \
     "promoted no-mistakes worker did not receive the conditional-procedure trigger"
+  assert_contains "$(cat "$payload")" "Task data directory: \`$home/data/promote-dod-no-mistakes\`." \
+    "promoted no-mistakes worker did not receive its exact absolute task data directory"
   assert_no_grep "nm-<run>-findings.txt" "$payload" \
     "promoted no-mistakes payload duplicated the conditional ask-user wire format"
 
