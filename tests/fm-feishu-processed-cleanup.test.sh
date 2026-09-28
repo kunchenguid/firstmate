@@ -44,7 +44,7 @@ SID="$SID" \
 node --input-type=module <<'JS'
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   bindSession,
@@ -219,7 +219,7 @@ function createOutbound(text, maxChunkBytes = 1024) {
   assert.equal(result.status, "registered");
   return result;
 }
-createOutbound("successfully posted outbound body");
+const posted = createOutbound("successfully posted outbound body");
 let claim = claimNextOutbound(home, { nowMs: clock });
 assert(claim, "posted fixture was not claimable");
 assert.equal(receiptOutbound(home, claim, { messageId: "om_postedReceipt1", chatId: "oc_chat1234" }), true);
@@ -236,24 +236,25 @@ assert.equal(receiptOutbound(home, claim, { messageId: "om_partialReceipt1", cha
 
 createOutbound("plain pending outbound body");
 
-const bodyCount = () => readdirSync(paths.inbox).filter((name) => {
-  const value = JSON.parse(readFileSync(join(paths.inbox, name), "utf8"));
-  return Object.hasOwn(value, "text") || Object.hasOwn(value, "content");
-}).length + readdirSync(paths.outbox).filter((name) => {
-  const value = JSON.parse(readFileSync(join(paths.outbox, name), "utf8"));
-  return Object.hasOwn(value, "text") || Object.hasOwn(value, "chunks");
-}).length;
-assert.equal(bodyCount(), 7, "before-count fixture did not contain every inbound and outbound body");
+const messageFileCount = () => readdirSync(paths.inbox).length + readdirSync(paths.outbox).length;
+const deliveredInboundName = readdirSync(paths.inbox).find((name) => JSON.parse(readFileSync(join(paths.inbox, name), "utf8")).delivery_ref === delivered.deliveryRef);
+const deliveredInboundPath = join(paths.inbox, deliveredInboundName);
+const deliveredInboundRecord = JSON.parse(readFileSync(deliveredInboundPath, "utf8"));
+const postedTextHash = `sha256:${createHash("sha256").update("successfully posted outbound body").digest("hex")}`;
+const postedOutboundName = readdirSync(paths.outbox).find((name) => JSON.parse(readFileSync(join(paths.outbox, name), "utf8")).text_hash === postedTextHash);
+const postedOutboundPath = join(paths.outbox, postedOutboundName);
+const postedOutboundRecord = JSON.parse(readFileSync(postedOutboundPath, "utf8"));
+assert.equal(messageFileCount(), 7, "before-count fixture did not contain every inbound and outbound message file");
 clock += 4999;
 await new Promise((resolve) => setTimeout(resolve, 30));
-assert.equal(bodyCount(), 7, "processed body cleanup ran before the five-second boundary");
+assert.equal(messageFileCount(), 7, "processed message cleanup ran before the five-second boundary");
 clock += 1;
-await waitFor(() => bodyCount() === 5, "five-second processed-body cleanup");
-assert.equal(bodyCount(), 5, "after-count did not remove exactly the two safely processed bodies");
+await waitFor(() => messageFileCount() === 5, "five-second processed-message cleanup");
+assert.equal(messageFileCount(), 5, "after-count did not remove exactly the two safely processed message files");
+assert(!existsSync(deliveredInboundPath), "delivered inbound JSON file survived cleanup");
+assert(!existsSync(postedOutboundPath), "posted outbound JSON file survived cleanup");
 
-const compactedInbound = findInboundByDeliveryRef(home, delivered.deliveryRef);
-assert.equal(compactedInbound.schema, "fm-feishu-inbound-processed.v1");
-assert(!Object.hasOwn(compactedInbound, "content") && !Object.hasOwn(compactedInbound, "text"), "processed inbound body survived cleanup");
+assert.equal(findInboundByDeliveryRef(home, delivered.deliveryRef), undefined, "deleted inbound message remained readable as a tombstone");
 assert.equal(findInboundByDeliveryRef(home, pending.deliveryRef).content[0].text, "pending inbound body", "pending inbound body was removed");
 assert.equal(findInboundByDeliveryRef(home, offered.deliveryRef).content[0].text, "offered inbound body", "offered inbound body was removed");
 const contextResult = await emit(pi, "context", { messages: [deliveredMessage] }, ctx);
@@ -265,17 +266,41 @@ const legacyContextResult = await emit(pi, "context", { messages: [{
 assert.deepEqual(legacyContextResult[0].messages, [], "compacted legacy inbound history was rehydrated into provider context");
 
 const outboxes = readdirSync(paths.outbox).map((name) => JSON.parse(readFileSync(join(paths.outbox, name), "utf8")));
-const compactedOutbound = outboxes.find((record) => record.text_hash === `sha256:${createHash("sha256").update("successfully posted outbound body").digest("hex")}`);
-assert.equal(compactedOutbound.schema, "fm-feishu-assistant-outbound-processed.v1");
-assert(!Object.hasOwn(compactedOutbound, "text") && !Object.hasOwn(compactedOutbound, "chunks"), "successfully posted outbound body survived cleanup");
+assert(!outboxes.some((record) => record.text_hash === postedTextHash), "posted outbound message remained readable as a tombstone");
 for (const text of ["unknown outbound body", "partial send body with several words", "plain pending outbound body"]) {
   assert(outboxes.some((record) => record.text === text), `unprocessed outbound body was removed: ${text}`);
 }
 
+const { text: _legacyInboundText, content: _legacyInboundContent, ...legacyInboundIdentity } = deliveredInboundRecord;
+writeFileSync(deliveredInboundPath, `${JSON.stringify({
+  ...legacyInboundIdentity,
+  schema: "fm-feishu-inbound-processed.v1",
+  body_removed_at: new Date(clock).toISOString(),
+}, null, 2)}\n`, { mode: 0o600 });
+const { text: _legacyOutboundText, chunks: legacyOutboundChunks, rendered_text_hash: _legacyRenderedHash, ...legacyOutboundIdentity } = postedOutboundRecord;
+writeFileSync(postedOutboundPath, `${JSON.stringify({
+  ...legacyOutboundIdentity,
+  schema: "fm-feishu-assistant-outbound-processed.v1",
+  chunk_count: legacyOutboundChunks.length,
+  body_removed_at: new Date(clock).toISOString(),
+}, null, 2)}\n`, { mode: 0o600 });
+const postedLedgerPath = join(paths.outboundLedger, postedOutboundName);
+const { text_hash: _newProcessedIdentity, ...legacyPostedLedger } = JSON.parse(readFileSync(postedLedgerPath, "utf8"));
+writeFileSync(postedLedgerPath, `${JSON.stringify(legacyPostedLedger, null, 2)}\n`, { mode: 0o600 });
+assert.equal(messageFileCount(), 7, "legacy processed empty-body fixtures were not restored as message files");
+clock += 4999;
+await new Promise((resolve) => setTimeout(resolve, 30));
+assert.equal(messageFileCount(), 7, "legacy processed message cleanup ran before its five-second boundary");
+clock += 1;
+await waitFor(() => messageFileCount() === 5, "five-second legacy processed-message cleanup");
+assert(!existsSync(deliveredInboundPath), "legacy processed inbound JSON file survived cleanup");
+assert(!existsSync(postedOutboundPath), "legacy processed outbound JSON file survived cleanup");
+assert.equal(JSON.parse(readFileSync(postedLedgerPath, "utf8")).text_hash, postedTextHash, "legacy processed outbound cleanup did not retain the minimal no-replay hash");
+
 const repeated = cleanupProcessedFeishuBodies(home, { nowMs: clock });
-assert.equal(repeated.removedBodies, 0, "repeated cleanup was not idempotent");
-assert.equal(repeated.bodiesBefore, 5, "cleanup before-count did not report retained unprocessed bodies");
-assert.equal(repeated.bodiesAfter, 5, "cleanup after-count changed retained unprocessed bodies");
+assert.equal(repeated.removedFiles, 0, "repeated cleanup was not idempotent");
+assert.equal(repeated.filesBefore, 5, "cleanup before-count did not report retained unprocessed message files");
+assert.equal(repeated.filesAfter, 5, "cleanup after-count changed retained unprocessed message files");
 assert.equal(registerAssistantOutbound(home, {
   text: "successfully posted outbound body",
   assistantEntryId: "0000000a",
@@ -284,13 +309,15 @@ assert.equal(registerAssistantOutbound(home, {
   sessionId,
   bindingGeneration: binding.generation,
 }).status, "duplicate", "compacted outbound identity allowed an old effect to be registered again");
+assert(!existsSync(join(paths.outboundPending, postedOutboundName)), "processed outbound registration recreated a send candidate");
+assert.equal(posted.eventId, JSON.parse(readFileSync(postedLedgerPath, "utf8")).event_id, "processed outbound ledger changed stable effect identity");
 assert.equal(publishFeishuInbound(home, inbound("delivered", "processed inbound body")).status, "duplicate", "compacted inbound identity allowed re-delivery");
+assert.equal(publishFeishuInbound(home, { ...inbound("delivered", "processed inbound body"), event_id: "evt_delivered_redelivery" }).status, "duplicate", "same-message redelivery with a new event id resurrected inbound history");
 
-const removedAt = compactedInbound.body_removed_at;
 await emit(pi, "session_shutdown", { reason: "reload" }, ctx);
 clock += 10000;
 await new Promise((resolve) => setTimeout(resolve, 30));
-assert.equal(findInboundByDeliveryRef(home, delivered.deliveryRef).body_removed_at, removedAt, "disposed runtime rewrote processed history after shutdown");
+assert(!existsSync(deliveredInboundPath), "disposed runtime resurrected deleted inbound history after shutdown");
 const resumedPi = fakePi();
 registerFeishuNativeChannel(resumedPi);
 await emit(resumedPi, "session_start", { reason: "resume" }, ctx);
@@ -309,8 +336,8 @@ function stateOnlyHome(name) {
 }
 const emptyFixture = stateOnlyHome("empty");
 const emptyResult = cleanupProcessedFeishuBodies(emptyFixture.target, { nowMs: clock });
-assert.equal(emptyResult.bodiesBefore, 0, "idle empty cleanup reported a body");
-assert.equal(emptyResult.removedBodies, 0, "idle empty cleanup removed a record");
+assert.equal(emptyResult.filesBefore, 0, "idle empty cleanup reported a message file");
+assert.equal(emptyResult.removedFiles, 0, "idle empty cleanup removed a record");
 const supersededFixture = stateOnlyHome("superseded");
 const superseded = publishFeishuInbound(supersededFixture.target, inbound("superseded", "superseded inbound body"));
 convergeConfiguredSession(supersededFixture.target, {
@@ -326,7 +353,7 @@ convergeConfiguredSession(supersededFixture.target, {
   outboundAfterEntryId: null,
 });
 const supersededResult = cleanupProcessedFeishuBodies(supersededFixture.target, { nowMs: clock });
-assert.equal(supersededResult.removedBodies, 0, "superseded inbound body crossed the processed boundary");
+assert.equal(supersededResult.removedFiles, 0, "superseded inbound body crossed the processed boundary");
 const retainedSuperseded = findInboundByDeliveryRef(supersededFixture.target, superseded.deliveryRef);
 assert.equal(retainedSuperseded.content[0].text, "superseded inbound body", "superseded inbound body was removed");
 assert(!Object.hasOwn(retainedSuperseded, "body_removed_at"), "superseded inbound gained a cleanup marker");
@@ -339,10 +366,11 @@ for (const state of ["sending", "retryable"]) {
   const active = claimNextOutbound(fixture.target, { nowMs: clock });
   if (state === "retryable") failOutboundAttempt(fixture.target, active, "retry later", { retryAfterMs: 1000, nowMs: clock });
   const result = cleanupProcessedFeishuBodies(fixture.target, { nowMs: clock });
-  assert.equal(result.removedBodies, 0, `${state} outbound body crossed the processed boundary`);
+  assert.equal(result.removedFiles, 0, `${state} outbound body crossed the processed boundary`);
   const record = JSON.parse(readFileSync(join(pathsForHome(fixture.target).outbox, readdirSync(pathsForHome(fixture.target).outbox)[0]), "utf8"));
   assert.equal(record.text, `${state} outbound body`, `${state} outbound body was removed`);
 }
 
-console.log("ok - five-second Feishu cleanup removes only receipt-proven bodies and preserves all unfinished work");
+console.log("evidence - message JSON files before=7 after=5; legacy processed files before=7 after=5");
+console.log("ok - five-second Feishu cleanup unlinks only receipt-proven message files and preserves all unfinished work");
 JS
