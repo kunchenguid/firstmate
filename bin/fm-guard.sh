@@ -146,22 +146,22 @@ fm_guard_clear_stale_banner() {
 }
 
 # Repair a session lock that has gone missing out from under a still-live
-# harness. This guard only ever runs non-read-only (READ_ONLY=0) when an
-# earlier ownership check in THIS call chain already succeeded (fm-guard.sh's
-# own callers gate that), so a harness is plainly still active in this
-# process's own ancestry right now. If state/.lock has since vanished - the
-# literal "no session lock present" gap a live watcher-arm plugin's
-# sessionOwnsLock check reads as ownerless - bin/fm-lock.sh is the one place
-# that may write it, and its acquire path already does exactly the right
-# thing when the file is simply absent: resolve this session's own trusted
-# anchor pid and write it fresh. Only the missing case is touched; a lock
-# file that already exists, whether held by this session or a genuine foreign
-# live owner, is never read, written, or otherwise disturbed here, so
-# fm-lock.sh's tested foreign-live-owner refusal keeps failing exactly as
-# fast as before. Best-effort and silent: a repair failure (no verifiable
-# harness in the ancestry, an unwritable state dir) leaves the gap exactly as
-# it was and is not this guard's alarm to raise.
-if [ "$READ_ONLY" -eq 0 ] && [ ! -e "$STATE/.lock" ] && [ ! -L "$STATE/.lock" ]; then
+# main-session harness. Callers do not verify ownership before invoking this
+# guard, so the repair is limited to the main actor: a supervision-branch
+# actor runs in its own harness and must never record itself as the home's
+# session owner. If state/.lock has vanished - the literal "no session lock
+# present" gap a live watcher-arm plugin's sessionOwnsLock check reads as
+# ownerless - bin/fm-lock.sh is the one place that may write it, and its
+# acquire path resolves this session's own trusted anchor pid and writes it
+# fresh. Only the missing case is touched; a lock file that already exists,
+# whether held by this session or a genuine foreign live owner, is never
+# read, written, or otherwise disturbed here, so fm-lock.sh's
+# foreign-live-owner refusal keeps failing exactly as fast as before.
+# Best-effort and silent: a repair failure (no verifiable harness in the
+# ancestry, an unwritable state dir) leaves the gap exactly as it was and is
+# not this guard's alarm to raise.
+if [ "$READ_ONLY" -eq 0 ] && [ "$GUARD_ACTOR" = main ] \
+  && [ ! -e "$STATE/.lock" ] && [ ! -L "$STATE/.lock" ]; then
   "$SCRIPT_DIR/fm-lock.sh" >/dev/null 2>&1 || true
 fi
 

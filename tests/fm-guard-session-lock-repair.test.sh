@@ -110,6 +110,26 @@ test_guard_never_touches_an_existing_foreign_lock() {
   pass "fm-guard: an existing lock (foreign live owner) is left completely alone, so its refusal keeps failing exactly as fast as before"
 }
 
+test_guard_branch_actor_never_repairs_missing_session_lock() {
+  local dir home root fakebin
+  dir="$TMP_ROOT/branch-actor"
+  home="$dir/home"
+  root="$dir/root"
+  mkdir -p "$home/state" "$home/config" "$root"
+  fakebin=$(make_harness_ps_fakebin "$dir")
+
+  PATH="$fakebin:$PATH" \
+    FM_ROOT_OVERRIDE="$root" \
+    FM_HOME="$home" \
+    FM_GUARD_GRACE=999 \
+    FM_SUPERVISION_ACTOR=branch \
+    "$ROOT/bin/fm-guard.sh" >/dev/null 2>&1
+
+  [ ! -e "$home/state/.lock" ] || fail "a supervision-branch guard call must never write itself into state/.lock"
+  pass "fm-guard: a supervision-branch call leaves a missing state/.lock alone"
+}
+
 test_guard_repairs_missing_session_lock
 test_guard_read_only_never_repairs_missing_session_lock
+test_guard_branch_actor_never_repairs_missing_session_lock
 test_guard_never_touches_an_existing_foreign_lock
