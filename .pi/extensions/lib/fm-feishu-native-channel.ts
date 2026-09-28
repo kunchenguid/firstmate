@@ -3,7 +3,7 @@
 // Native TUI and Firstmate operational input never pass through this module.
 // Accepted Feishu events are offered to Pi's own steering queue after
 // exact binding, generation, transport, and live-session checks.
-import { spawn, spawnSync } from "node:child_process";
+import { execFile, spawn, spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { lstatSync, realpathSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -382,8 +382,17 @@ function sameIdentity(left: SessionIdentity | undefined, right: SessionIdentity)
     left.headerCwd === right.headerCwd;
 }
 
-function runtimeIsCurrent(runtime: ActiveRuntime): boolean {
-  if (!runtime.active || activeRuntime !== runtime || firstmateSessionLockOwnership() !== "owned") return false;
+function currentSessionLockOwnedAsync(): Promise<boolean> {
+  return new Promise((resolve) => {
+    execFile(lockStatusScript, [], {
+      encoding: "utf8", timeout: 3000, maxBuffer: 1024,
+      env: { ...process.env, FM_HOME: fmHome, FM_ROOT_OVERRIDE: fmRoot },
+    }, (error, stdout) => resolve(!error && stdout.trim() === "owned"));
+  });
+}
+
+function runtimeIsCurrent(runtime: ActiveRuntime, lockChecked = false): boolean {
+  if (!runtime.active || activeRuntime !== runtime || (!lockChecked && firstmateSessionLockOwnership() !== "owned")) return false;
   const pairing = readPairing(fmHome);
   const binding = readActiveBinding(fmHome);
   if (!pairing || pairing.disabled_at !== null || !binding || pairing.home_id !== binding.home_id) return false;
@@ -502,6 +511,7 @@ function reconcileConfiguredLifecycle(
 }
 
 function stopRuntime(runtime: ActiveRuntime): void {
+  if (!runtime.active) return;
   runtime.active = false;
   if (runtime.timer) clearInterval(runtime.timer);
   runtime.timer = null;
@@ -543,8 +553,8 @@ function recoveryHealth(runtime: ActiveRuntime): Record<string, unknown> | undef
   return health;
 }
 
-function recoveredTransportIsHealthy(runtime: ActiveRuntime, expected?: TransportOwnerFence | null): boolean {
-  if (!runtimeIsCurrent(runtime)) return false;
+function recoveredTransportIsHealthy(runtime: ActiveRuntime, expected?: TransportOwnerFence | null, lockChecked = false): boolean {
+  if (!runtimeIsCurrent(runtime, lockChecked)) return false;
   const owner = transportOwnerFence(readTransportOwner(fmHome));
   if (!owner || owner.configFileIdentity !== runtime.configFileIdentity || (expected && !sameTransportOwner(owner, expected))) return false;
   const health = recoveryHealth(runtime);
@@ -601,7 +611,7 @@ function beginProcessRecovery(runtime: ActiveRuntime): void {
 
 function observeProcessRecovery(runtime: ActiveRuntime): void {
   if (transportAllowsDispatch(runtime)) {
-    if (recoveredTransportIsHealthy(runtime, runtime.recoveryOwner)) resetProcessRecovery(runtime);
+    if (recoveredTransportIsHealthy(runtime, runtime.recoveryOwner, true)) resetProcessRecovery(runtime);
     return;
   }
   if (runtime.recoveryTerminalReason || runtime.recoveryTask) return;
@@ -742,7 +752,10 @@ async function pump(runtime: ActiveRuntime): Promise<void> {
   if (runtime.pumping) return;
   runtime.pumping = true;
   try {
-    if (!runtimeIsCurrent(runtime)) {
+    const lockOwned = await currentSessionLockOwnedAsync();
+    // Shutdown or replacement can finish while the ownership subprocess runs.
+    if (!runtime.active || activeRuntime !== runtime) return;
+    if (!lockOwned || !runtimeIsCurrent(runtime, true)) {
       stopRuntime(runtime);
       return;
     }
@@ -784,6 +797,7 @@ function schedulePump(runtime: ActiveRuntime): void {
   setImmediate(() => {
     if (!runtime.active || Date.now() < runtime.nextPumpAt) return;
     void pump(runtime).catch((error) => {
+      if (!runtime.active || activeRuntime !== runtime) return;
       if (error instanceof FeishuStateLockContentionError && runtime.active && activeRuntime === runtime) {
         const delay = Math.min(LOCK_RETRY_BASE_MS * (2 ** Math.min(runtime.lockRetryAttempt, 4)), LOCK_RETRY_MAX_MS);
         runtime.lockRetryAttempt = Math.min(runtime.lockRetryAttempt + 1, 5);
@@ -1021,6 +1035,7 @@ export function registerFeishuNativeChannel(pi: ExtensionAPI): FeishuNativeChann
       if (processedFeishuMessage(message)) return [];
       if (message.role !== "custom") return message;
       const content = modelFeishuContent(message);
+      if (message.customType === FEISHU_INBOUND_CUSTOM_TYPE && !content) return [];
       return content ? { ...message, content } : message;
     }),
   }));

@@ -51,7 +51,16 @@ ok - five-second Feishu cleanup unlinks only receipt-proven message files and pr
 
 The clock-controlled public-lifecycle fixture proves the pass does not run before five seconds, then reduces the inbound and outbound message-file count from seven to five by unlinking one delivered inbound JSON file and one fully receipted outbound JSON file while retaining five pending, offered, delivery-uncertain, partially posted, or unsent files.
 A second clock-controlled cycle starts from the same seven-file count with earlier-version processed empty-body fixtures and again reaches five by unlinking those two legacy message files.
-It also proves empty and repeated passes are harmless, runtime shutdown disposes the timer, restart readback does not rehydrate deleted inbound content, retained ledger and receipt identities still deduplicate inbound replay and outbound registration, and superseded inbound, sending, and retryable records remain intact.
+The same pass removes the delivered inbound ledger and delivery map plus the posted outbound ledger, including legacy residue whose payload was already deleted.
+It also proves empty and repeated passes are harmless, runtime shutdown disposes the timer, restart readback does not rehydrate deleted inbound content, retained dedup and receipt identities still reject inbound replay and outbound registration, and superseded inbound, sending, and retryable records remain intact.
+The fixture interrupts every cleanup publication/unlink boundary, interrupts inbound publication and acknowledgement, and recovers through public owner APIs without replay.
+Separate processes exercise concurrent publication, acknowledgement, and cleanup with pending work preserved.
+
+The public ingress fixture holds pending work fixed while varying processed inbox/ledger/map histories through 0, 40, 1500, and 3000 records.
+Across all four sizes, five idle polls enumerate 10 directories with zero entries and perform 10 file reads and 10 JSON parses; one pending/offer/ack/idle cycle enumerates 8 directories with 2 entries and performs 11 reads and 11 parses.
+After cleanup, five idle polls plus another cleanup enumerate 15 directories with zero entries and perform 11 reads and 11 parses, independent of retained processed identity count.
+The test prints wall time and process CPU measurements alongside these deterministic operation counts, but does not enforce timing thresholds on shared hosts.
+This evidence uses disposable homes and public state APIs plus a simulated Pi lifecycle; it neither measures live activation CPU nor establishes the cost of Pi's separate session-array traversal.
 
 ```console
 $ bash tests/fm-feishu-channel.test.sh
