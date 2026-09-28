@@ -314,6 +314,17 @@ test_disabled_record_does_not_read_or_create_spend_data() {
   pass 'an absent opt-in flag bypasses task, pipeline, and ledger reads and writes'
 }
 
+# With neither NM_HOME nor HOME set, the state database still resolves under
+# the account's home directory, as the CLI's own lookup does, never /.no-mistakes.
+test_state_db_without_nm_home_or_home_uses_the_account_home() {
+  local want got
+  want=$(python3 -c 'import os, pwd; print(pwd.getpwuid(os.getuid()).pw_dir)')/.no-mistakes/state.sqlite
+  # shellcheck disable=SC2016 # $1 expands in the child shell
+  got=$(env -u NM_HOME -u HOME bash -c '. "$1/bin/fm-nm-run-lib.sh"; fm_nm_state_db /wt' _ "$ROOT")
+  assert_equals "$want" "$got" 'an unset HOME falls back to the account home directory'
+  pass 'the state database resolves under the account home when NM_HOME and HOME are unset'
+}
+
 test_refusals() {
   local d rc
   d=$(make_case refusals)
@@ -340,4 +351,5 @@ test_absent_spend_is_zero_or_unavailable_never_invented
 test_older_state_without_delta_columns_counts_only_provable_rounds
 test_record_appends_once_per_task_incarnation
 test_disabled_record_does_not_read_or_create_spend_data
+test_state_db_without_nm_home_or_home_uses_the_account_home
 test_refusals

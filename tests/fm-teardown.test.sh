@@ -3145,6 +3145,25 @@ test_teardown_skips_pipeline_spend_when_disabled() {
   pass 'teardown skips all pipeline-spend recording when the home has not opted in'
 }
 
+# An owned ship task whose local copy is already gone still leaves a durable
+# account: the recorder writes an unavailable-source line before the record goes.
+test_teardown_records_unavailable_spend_for_a_gone_worktree() {
+  local case_dir rc=0 ledger
+  case_dir=$(make_case pipeline-spend-gone)
+  write_windowless_legacy_meta "$case_dir" no-mistakes ship "$case_dir/missing-wt"
+  : > "$case_dir/config/pipeline-spend"
+  seed_backlog_in_flight "$case_dir"
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "pipeline-spend-gone: teardown should succeed"
+  ledger=$case_dir/data/pipeline-spend.jsonl
+  assert_present "$ledger" "pipeline-spend-gone: teardown left no pipeline spend record"
+  jq -e '.task == "task-x1" and .source == "unavailable" and .total == null
+    and (.reason | contains("is gone"))' "$ledger" >/dev/null \
+    || fail "pipeline-spend-gone: the recorded spend is wrong: $(cat "$ledger")"
+  assert_absent "$case_dir/state/task-x1.meta" "pipeline-spend-gone: teardown kept the task record"
+  pass "teardown records unavailable pipeline spend for an owned ship task whose copy is gone"
+}
+
 test_parked_own_run_is_aborted_before_teardown() {
   local case_dir rc head
   case_dir=$(make_case parked-run-abort)
@@ -4389,6 +4408,7 @@ test_empty_retry_wait_uses_default_without_aborting
 test_fractional_legacy_retry_wait_refuses_without_arithmetic_error
 test_teardown_records_the_task_pipeline_spend
 test_teardown_skips_pipeline_spend_when_disabled
+test_teardown_records_unavailable_spend_for_a_gone_worktree
 test_parked_own_run_is_aborted_before_teardown
 test_parked_own_run_concludes_on_passed_with_override_after_abort
 test_parked_own_run_concludes_on_passed_with_skips_after_abort
