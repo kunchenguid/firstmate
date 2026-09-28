@@ -9,8 +9,10 @@
 # direct address) and `{FIRSTMATE_SPEC}`
 # under `## Firstmate spec` (build instructions, including the intended outcome,
 # observable acceptance evidence, allowed scope and exclusions, and hard-block
-# stop condition, which are never the captain's intent). bin/fm-dod-lib.sh owns the no-mistakes `--intent` contract those
-# subsections feed; bin/fm-spawn.sh refuses leftover placeholders and a
+# stop condition, which are never the captain's intent). bin/fm-dod-lib.sh owns
+# intent extraction and the generated validation trigger. The triggered
+# crewmate-no-mistakes skill owns the worker-side contract those subsections feed;
+# bin/fm-spawn.sh refuses leftover placeholders and a
 # `## Captain's intent` line opening with a Captain label or address. Firstmate may adjust other
 # sections when the task genuinely deviates (e.g. working an existing external
 # PR instead of shipping a new one).

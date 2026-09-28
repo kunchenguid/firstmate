@@ -2,9 +2,9 @@
 # Single owner of a ship task's mode-specific "Definition of done" block.
 # Sourced by bin/fm-brief.sh, which renders it into a generated ship brief, and by
 # bin/fm-promote.sh, which renders it into the ship instructions a promoted scout
-# receives. Both paths must hand the worker the same contract: a promoted
-# no-mistakes worker that never received the ask-user escalation rule or the
-# `--yes` ban is the exact delivery hole this single owner exists to close.
+# receives. Both paths must hand the worker the same contract, including the
+# precise skill trigger that keeps a promoted no-mistakes worker from missing
+# the ask-user escalation rule or the `--yes` ban.
 # fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> <task-data-dir> prints the block on
 # stdout with no trailing blank line. The caller validates the mode; an unknown
 # mode is refused rather than silently rendered as the pipeline contract.
@@ -17,8 +17,8 @@
 # bin/fm-brief.sh scaffolds those two `# Task` subsections; bin/fm-spawn.sh and
 # bin/fm-promote.sh refuse leftover `{TASK}` / `{FIRSTMATE_SPEC}` placeholders
 # and a `## Captain's intent` line opening with a Captain label or address
-# through the helpers below. Other mentions of `--intent` point here rather than
-# restating the rule.
+# through the helpers below. Mentions of the full worker-side `--intent`
+# procedure point to the skill rather than restating its rule here.
 # Every heredoc here stays outside a command substitution: `VAR=$(cat <<EOF ...)`
 # breaks parsing of the whole file on Bash 3.2 (tests/fm-brief.test.sh).
 # fm_brief_worker_role owns the ship/scout role scope. bin/fm-spawn.sh is its one

@@ -252,7 +252,7 @@ The task worker that starts a no-mistakes run drives the pipeline and owns every
 Firstmate never invokes `no-mistakes axi respond` for a crew-owned run.
 When the captain adds or changes an ask mid-task, use the native continuation tool's authenticated brief-update route where available, then relay those words to the worker; `bin/fm-task-lifecycle.py --help` owns that operation and explicit reconciliation for other edits.
 The brief's `## Captain's intent` contains only the captain's words without added speaker labels or direct address; Firstmate build constraints stay in `## Firstmate spec` or the steer.
-`bin/fm-dod-lib.sh` owns the worker-side `--intent` contract.
+After the implementation checkpoint, `crewmate-no-mistakes` owns the worker-side `--intent` contract and gate procedure.
 Once validation starts, prefer routing new requirements to follow-up work rather than expanding the current task, unless a new requirement completely invalidates the work being validated; however, the smallest downstream changes needed to keep already accepted product or engineering behavior correct, add behavioral tests where an executable contract exists, or keep documentation accurate remain within the current task even when they touch files not named at intake, and corrections required to satisfy already accepted intent are not new requirements.
 
 Only a current, explicit captain instruction that completely invalidates the work being validated keeps the task with the same worker instead of routing it to follow-up work or handing it to a replacement.
@@ -427,7 +427,7 @@ Preserve durable structured identifiers, dependencies, and completion artifact l
 
 ## 11. Crewmate briefs
 
-`bin/fm-brief.sh` and its help own scaffold syntax, generated variants, status protocol, delivery-mode definitions of done, and exact safety mechanics.
+`bin/fm-brief.sh` and its help own scaffold syntax and generated variants; the generated text points to each conditional contract's owner.
 Use its scaffold as the contract, then fill `## Captain's intent` (`{TASK}`) with the captain's own ask and any boundary the captain stated, plus the context needed to read it, including the substance of any report, decision, or PR the ask refers to; never widen the ask there into a general goal or an enumerated coverage list, because the reviewer treats that subsection as acceptance criteria.
 Fill `## Firstmate spec` (`{FIRSTMATE_SPEC}`) with only the build instructions that ask requires, explicitly stating the intended outcome, observable acceptance evidence or checks, allowed scope and exclusions, and the concrete condition for stopping as hard-blocked.
 Name what stays out of scope when the ask is narrow; a generalization, consistency sweep, or extra hardening the captain did not ask for is follow-up work to note, not scope to add.
