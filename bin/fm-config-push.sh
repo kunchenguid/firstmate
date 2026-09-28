@@ -124,15 +124,15 @@ if [ ! -s "$records" ]; then
   exit 0
 fi
 
-# Each flagged reread is claimed under the same lock its convergence holds and
-# is flagged again only when it is deferred again or that lock is busy.
+# Each flagged reread is retried under the same lock its convergence holds, and
+# its flag is cleared only once that reread is delivered, so a skipped home, a
+# busy lock, or a deferred send leaves it flagged for the next poll.
 retry_deferred_rereads() {
   local id home meta flag remote_host lock marker placement message rc failed=0
   while IFS='|' read -r id home _window meta; do
     flag=$(fm_secondmate_reread_deferred_path "$STATE" "$id") || continue
     [ -f "$flag" ] || continue
     [ -z "$(status_own_open_decisions "$STATE/$id.status")" ] || continue
-    rm -f -- "$flag"
     remote_host=$(fm_meta_get "$meta" remote_host)
     if [ -n "$remote_host" ]; then
       lock=$(fm_remote_inherit_transaction_lock_path "$STATE" "$id") || continue
@@ -140,10 +140,7 @@ retry_deferred_rereads() {
       validate_secondmate_home "$id" "$home" || continue
       lock=$(fm_config_inherit_lock_path "$VALIDATED_HOME") || continue
     fi
-    if ! fm_lock_try_acquire "$lock"; then
-      fm_secondmate_reread_mark_deferred "$STATE" "$id" || failed=1
-      continue
-    fi
+    fm_lock_try_acquire "$lock" || continue
     rc=0
     if [ -n "$remote_host" ]; then
       placement=1 message=$FM_REMOTE_SECOND_MATE_NUDGE_MESSAGE
@@ -159,8 +156,8 @@ retry_deferred_rereads() {
       [ "$rc" -ne 0 ] || rm -f -- "$marker"
     fi
     case "$rc" in
-      0) ;;
-      4) fm_secondmate_reread_mark_deferred "$STATE" "$id" || failed=1 ;;
+      0) rm -f -- "$flag" ;;
+      4) ;;
       *) failed=1 ;;
     esac
     fm_lock_release "$lock" || true

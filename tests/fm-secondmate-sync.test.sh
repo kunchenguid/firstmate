@@ -612,6 +612,46 @@ test_deferred_local_nudge_is_retried_after_the_decision_closes() {
   pass "T8i the watcher retry delivers a deferred local nudge once the decision closes"
 }
 
+# Contract: a flagged reread keeps its flag until it is delivered. A retry that
+# skips the mate because its home does not validate leaves the flag in place, so
+# the watcher still delivers it once the home validates again.
+test_deferred_flag_survives_a_skipped_invalid_home() {
+  local w c1 fakebin marker flag out status
+  w=$(new_world nudge-deferred-invalid-home)
+  c1=$(head_of "$w/main")
+  add_sm_worktree "$w" sm-instr "$c1"
+  bump_primary "$w" instr
+  fakebin=$(make_fake_toolchain "$w")
+  printf 'needs-decision [key=pick]: alpha or beta?\n' > "$w/home/state/sm-instr.status"
+
+  PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 FM_FAKE_TMUX_LOG="$w/tmux.log" \
+    "$ROOT/bin/fm-bootstrap.sh" >/dev/null 2>&1
+  marker="$w/home/state/.secondmate-nudge-pending/sm-instr.pending"
+  flag="$w/home/state/.secondmate-reread-deferred/sm-instr"
+  assert_present "$flag" "precondition: the deferred nudge should be flagged for the watcher"
+
+  printf 'resolved [key=pick]: answered: alpha\n' >> "$w/home/state/sm-instr.status"
+  mv "$w/sm-instr/.fm-secondmate-home" "$w/sm-instr.marker"
+  PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 FM_FAKE_TMUX_LOG="$w/tmux.log" \
+    "$ROOT/bin/fm-config-push.sh" --retry-deferred >/dev/null 2>&1
+  [ -z "$(find "$w/home/state/sm-instr.inbox" -name '*.msg' 2>/dev/null)" ] \
+    || fail "precondition: a mate whose home does not validate was sent the nudge"
+  assert_present "$flag" "a retry that skipped an invalid home dropped the deferred flag"
+
+  mv "$w/sm-instr.marker" "$w/sm-instr/.fm-secondmate-home"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 FM_FAKE_TMUX_LOG="$w/tmux.log" \
+    "$ROOT/bin/fm-config-push.sh" --retry-deferred 2>&1); status=$?
+  expect_code 0 "$status" "the flagged nudge should be delivered once the home validates: $out"
+  grep -rqF "please re-read your AGENTS.md" "$w/home/state/sm-instr.inbox" 2>/dev/null \
+    || fail "the flagged nudge was not delivered once the home validated again"
+  assert_absent "$marker" "a delivered nudge should clear its retry marker"
+  assert_absent "$flag" "a delivered nudge stayed flagged"
+  pass "T8j a deferred flag survives a skipped invalid home and is retried once it validates"
+}
+
 # Contract: the deferral is classified by fm-send's EXIT STATUS, never by the
 # shape of its output. fm-send runs the supervision guard, which prints a
 # worktree-tangle banner whenever the primary checkout sits on a feature branch
@@ -1463,6 +1503,7 @@ test_bootstrap_nudge_retry_rejects_malformed_marker_id
 test_bootstrap_nudge_failure_records_retry_marker
 test_bootstrap_nudge_defers_while_the_mate_waits_on_a_decision
 test_deferred_local_nudge_is_retried_after_the_decision_closes
+test_deferred_flag_survives_a_skipped_invalid_home
 test_bootstrap_nudge_defers_when_the_send_prints_a_banner_first
 test_bootstrap_nudge_retry_is_idempotent
 test_bootstrap_nudge_retry_refuses_changed_home

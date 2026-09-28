@@ -383,6 +383,35 @@ test_unprovable_runtime_falls_back() {
   pass "T3 a runtime that cannot prove a restart falls back to the re-read message"
 }
 
+# --- T3b: a mate waiting on its own decision is not woken -------------------
+# Both sends this pass makes are automatic: the persist request and the re-read
+# fallback defer while the mate waits on its own open decision, so the mate
+# spends no turn and nothing reaches its pane or inbox.
+test_mate_waiting_on_its_decision_is_not_woken() {
+  local dir out rc
+  dir=$(new_case waiting-decision)
+  add_local_mate "$dir" sm1
+  arm_answer "$dir" sm1
+  printf 'needs-decision [key=pick]: alpha or beta?\n' > "$dir/home/state/sm1.status"
+  # A live watcher keeps its down banner out of the refusal each send reports.
+  touch "$dir/home/state/.last-watcher-beat"
+
+  out=$(run_restart "$dir" sm1); rc=$?
+
+  expect_code 3 "$rc" "a deferred mate must not be reported as reloaded"$'\n'"$out"
+  assert_contains "$out" "unreached: sm1:" "a mate that received nothing must be reported unreached"
+  assert_contains "$out" "the request to write down its open work could not be delivered: deferred: sm1 is waiting on its open decision" \
+    "the persist request must defer while the mate waits on its decision"
+  assert_contains "$out" "the re-read message could not be delivered either: deferred: sm1 is waiting on its open decision" \
+    "the re-read fallback must defer while the mate waits on its decision"
+  assert_not_contains "$out" "restarted: sm1" "a waiting mate must not be restarted"
+  [ ! -s "$dir/fake/rings" ] || fail "a mate waiting on its decision was rung"
+  [ -z "$(find "$dir/home/state/sm1.inbox" -name '*.msg' 2>/dev/null)" ] \
+    || fail "a mate waiting on its decision was handed a message"
+  assert_no_grep '^/exit$' "$dir/fake/literal" "a waiting mate must not be stopped"
+  pass "T3b a mate waiting on its own decision is neither asked to persist nor nudged"
+}
+
 # --- T4: a mate with no durable record in this home --------------------------
 test_unknown_mate_is_accounted_for() {
   local dir out rc
@@ -852,6 +881,7 @@ test_persist_precedes_restart
 test_arrived_answer_precedes_deadline_check
 test_answer_between_resolution_and_timeout_wins
 test_unprovable_runtime_falls_back
+test_mate_waiting_on_its_decision_is_not_woken
 test_unknown_mate_is_accounted_for
 test_refused_restart_falls_back_without_claiming_a_reload
 test_local_restart_uses_the_home_pin_and_reports_what_ran
