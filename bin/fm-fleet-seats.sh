@@ -1,93 +1,109 @@
 #!/usr/bin/env bash
-# fm-fleet-seats.sh - fleet-wide active-worker seat pools for shared model routes.
+# fm-fleet-seats.sh - opt-in fleet-wide active-agent seat pools for shared model endpoints.
 #
 # docs/configuration.md "Fleet seat pools" owns the operator contract: the
 # config/fleet-seats schema, what a seat is, which homes share one pool, and
 # what the refusals mean. This header owns the mechanics.
 #
-# A seat is one live ship or scout task record whose model belongs to a pool.
-# It is an active agent slot, not an inference request: a worker holds its seat
-# from reservation until its task record leaves its home (cleanup) or is
-# republished on a model outside the pool (a relaunch onto another route),
-# whether or not it is generating at that moment.
+# A seat is an active agent slot on a pooled model, never an inference
+# request. The holders of a pool are, keyed by canonical state directory plus
+# id:
+#   - every ship or scout whose task record names a pooled model, from
+#     reservation until cleanup removes the record or a relaunch republishes it
+#     on a model outside the pool;
+#   - every secondmate supervisor whose task record in the root names a pooled
+#     model, unless its semantic busy record (bin/fm-busy-lib.sh) proves it
+#     idle - busy, unknown, missing, stale, untrusted, or remote busy state all
+#     count, because indeterminate is never idle;
+#   - the primary supervisor, keyed "<root-state>\t.primary", when the root's
+#     config/fleet-seats declares "primary_model" in a pool and the root's
+#     session lock is not provably free or stale (bin/fm-session-lock-lib.sh).
+#     No primary busy record exists, so a live primary is indeterminate and
+#     counts. A running primary is never refused or preempted.
 #
 # THE AUTHORITY. Every home resolves the one fleet root with
 # fm_firstmate_root_home (bin/fm-wake-lib.sh): the primary is its own root, and
 # a local secondmate walks its .fm-secondmate-parent binding to the primary.
-# The root's config/fleet-seats declares the pools and every grant is decided
+# The root's config/fleet-seats declares the pools, and every grant is decided
 # under the root's lock (<root>/state/.fleet-seats.lock), so no two homes can
 # both take the last seat.
 #
-# COUNTING. Under the root lock, the holders of a pool are the union, keyed by
-# canonical state directory plus task id, of:
-#   - every live seat record in <root>/state/fleet-seats/<pool>/*.seat. A record
-#     is live while its task record exists as a pooled ship or scout, or while
-#     its reserving process (recorded pid plus pid identity) still runs, which
-#     covers a spawn that has reserved but not yet published its record. A
-#     record that is neither is stale and removed; a live task record is never
-#     reclaimed, so recovery never preempts a running worker.
-#   - every pooled ship or scout task record in the root home and in each local
-#     secondmate registered in the root's data/secondmates.md, so workers
+# COUNTING AT THE ROOT. Under the root lock, a pool's holders are the union of:
+#   - live seat records in <root>/state/fleet-seats/<pool>/*.seat. A record is
+#     live while its task record is pooled and active (as above), or while its
+#     reserving process (recorded pid plus pid identity) still runs, which
+#     covers a spawn that reserved before publishing its record. A record that
+#     is neither is stale and removed; a live task record is never reclaimed,
+#     so recovery never preempts running work.
+#   - pooled active task records in the root home and in every local
+#     secondmate registered in the root's data/secondmates.md, so agents
 #     launched before a pool existed count without any reservation.
-#   - for each remote secondmate still registered there, the holder snapshot
-#     that home returned from its last successful serve, cached in
-#     <root>/state/fleet-seats/<pool>/remote-<id>.holders and keyed
-#     "remote:<id>". A failed or unreachable serve keeps the previous snapshot,
-#     so an unreachable remote's seats stay counted rather than becoming free.
-# A task record that exists but cannot be read counts as held. A registered
-# local home that exists but whose state cannot be listed refuses the
-# reservation; a registered home directory that does not exist has no workers.
+#   - the primary supervisor, as above.
+#   - for each registered remote secondmate, the holders that home returned
+#     from its last successful serve, cached in
+#     <root>/state/fleet-seats/remote-<id>.holders ("remote:<id>" keys), with
+#     the policy digest it confirmed in remote-<id>.policy. A failed serve
+#     keeps the previous snapshot, so an unreachable remote's seats stay
+#     counted.
+# The root refuses (exit 5) instead of counting when any registered remote has
+# not confirmed the current policy digest, a registry line under the remote or
+# local structured-suffix format cannot be parsed, a registered local home
+# that exists cannot be listed, or a task record cannot be read.
 #
 # REMOTE HOMES. A home whose walk ends at a remote parent binding cannot reach
-# the root, so it holds its seats locally and the root grants them:
-#   - reserve writes a request in <home>/state/fleet-seats/<pool>/requests/ and
-#     waits up to FM_FLEET_SEATS_REMOTE_WAIT seconds (default 90) for a grant
-#     (a seat record there carrying the request nonce) or a denial. A timeout
-#     withdraws the request under the home's lock and refuses with exit 5,
-#     unless the grant landed first, in which case the seat is kept.
-#   - the root's serve-remotes, run from the root's watcher, calls serve on
-#     each registered remote through bin/fm-on.sh while holding the root lock,
-#     passing the allowance (capacity minus every other holder). Under the
-#     remote home's own lock, serve prunes its dead seats, grants waiting
+# the root, so the root delivers the policy and grants seats to it:
+#   - the root's serve-remotes (run from the root's watcher) calls serve on
+#     each registered remote through bin/fm-on.sh while holding the root lock.
+#     It sends the root's pool declaration on stdin (an empty "pools" list
+#     when the root has none) plus the policy digest and each pool's
+#     allowance (capacity minus every other holder, or 0 while another remote
+#     is unconfirmed).
+#   - under the remote's own lock, serve stores the delivered policy in
+#     <home>/state/fleet-seats/policy.json, prunes dead seats, grants waiting
 #     requests in arrival order while its holders stay within the allowance,
-#     denies the rest, and prints its holders, which become the root's
-#     snapshot. Seat records and pooled task records there are counted exactly
-#     as in the root.
-#   - the pool declaration a remote home uses is its inherited
-#     config/fleet-seats; the root decides capacity.
+#     denies the rest, and prints "policy <digest>" plus one
+#     "holder <pool> <id>" line per seat, which become the root's snapshot.
+#   - reserve decides pool membership from the delivered policy when one
+#     exists, else from the inherited config/fleet-seats, writes a request in
+#     <home>/state/fleet-seats/<pool>/requests/, and waits (bounded) for a
+#     grant carrying its nonce or a denial. A timeout withdraws the request
+#     under the home's lock and refuses with exit 5, unless the grant landed
+#     first.
+#
+# EXPLICIT MODELS. While any pool is configured, a ship, scout, or secondmate
+# on a multi-provider harness (pi, pi-signed, omp, opencode) refuses without an
+# explicit --model, because that harness's own default could be a pooled model
+# nothing counted.
 #
 # Usage:
-#   fm-fleet-seats.sh reserve <task> --model <model> --holder-pid <pid>
-#       Reserve a seat for this home's <task> when <model> belongs to a pool.
-#       Prints nothing and exits 0 when no pool names the model (or no pool
-#       is configured); prints "fleet-seats: reserved ..." on success. A task
-#       that already holds a seat (a relaunch on the same route) keeps it even
-#       when the pool is full. <holder-pid> is the long-lived reserving process
+#   fm-fleet-seats.sh reserve <id> --harness <harness> --model <model|default> --holder-pid <pid>
+#       Reserve a seat for this home's <id> when <model> belongs to a pool.
+#       Prints nothing and exits 0 when no pool names the model (or no pool is
+#       configured); prints "fleet-seats: reserved ..." on success. An id that
+#       already holds a seat (a relaunch on the same route) keeps it even when
+#       the pool is full. <holder-pid> is the long-lived reserving process
 #       (bin/fm-spawn.sh passes its own pid) and must be alive.
-#   fm-fleet-seats.sh status
-#       In a home that reaches the root, print each pool as
-#       "pool <name> capacity=<n> used=<n> free=<n>" followed by one
-#       "  holder <state-dir|remote:id> <task>" line per seat. Read-only.
 #   fm-fleet-seats.sh serve-remotes
-#       Root only (a no-op anywhere else or with no pool): serve every
-#       registered remote secondmate for every pool and print one
-#       "served <id> pool=<p> allowance=<n> holders=<n>" or
-#       "unreachable <id> pool=<p>" line each. A remote that failed is skipped
-#       for FM_FLEET_SEATS_SERVE_BACKOFF seconds (default 120); each call is
-#       bounded by FM_FLEET_SEATS_SERVE_TIMEOUT seconds (default 20).
-#   fm-fleet-seats.sh serve <pool> --allowance <n> --capacity <n>
-#       Remote home only; the root runs it through bin/fm-on.sh. Prints one
-#       "holder <task>" line per seat this home holds after serving.
+#       Root only (a no-op anywhere else): serve every registered remote
+#       secondmate and print one "served <id> ..." or "unreachable <id>" line
+#       each. A remote that failed is skipped for a fixed backoff.
+#   fm-fleet-seats.sh serve --digest <digest> [--allowance <pool>=<n>]...
+#       Remote home only; the root runs it through bin/fm-on.sh with the pool
+#       declaration on stdin.
+#
+# Fixed bounds: 30s lock wait, 90s remote request wait, 20s per remote serve
+# call, 120s backoff after a failed serve. FM_FLEET_SEATS_TEST_REMOTE_WAIT and
+# FM_FLEET_SEATS_TEST_BACKOFF shorten the last two for the regression suite
+# only; they are not operator settings.
 #
 # Environment: FM_HOME, FM_STATE_OVERRIDE, FM_CONFIG_OVERRIDE, and
 # FM_DATA_OVERRIDE resolve the calling home as the other bin/ scripts do; they
 # also select the root's own directories when the caller is the root.
-# FM_FLEET_SEATS_LOCK_WAIT bounds each lock wait in seconds (default 30).
 #
-# Exit status: 0 reserved, not pooled, served, or status printed; 2 usage
-# error; 4 the pool is full; 5 the accounting authority is unreachable,
-# unreadable, or misconfigured. Exit 4 and 5 both mean no seat: choose another
-# route.
+# Exit status: 0 reserved, not pooled, or served; 2 usage error; 4 the pool is
+# full; 5 the accounting authority is unreachable, unconfirmed, unreadable, or
+# misconfigured, or an explicit model is required. Exit 4 and 5 both mean no
+# seat: choose another route.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -104,13 +120,20 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-busy-lib.sh
+. "$SCRIPT_DIR/fm-busy-lib.sh"
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
 
 EXIT_FULL=4
 EXIT_UNAVAILABLE=5
-LOCK_WAIT=${FM_FLEET_SEATS_LOCK_WAIT:-30}
+LOCK_WAIT=30
+REMOTE_WAIT=${FM_FLEET_SEATS_TEST_REMOTE_WAIT:-90}
+SERVE_TIMEOUT=20
+SERVE_BACKOFF=${FM_FLEET_SEATS_TEST_BACKOFF:-120}
 
 usage() {
-  echo "usage: fm-fleet-seats.sh reserve <task> --model <model> --holder-pid <pid> | status | serve-remotes | serve <pool> --allowance <n> --capacity <n>" >&2
+  echo "usage: fm-fleet-seats.sh reserve <id> --harness <harness> --model <model|default> --holder-pid <pid> | serve-remotes | serve --digest <digest> [--allowance <pool>=<n>]..." >&2
   exit 2
 }
 
@@ -121,13 +144,15 @@ unavailable() {
 
 canon_dir() { CDPATH='' cd -- "$1" 2>/dev/null && pwd -P; }
 is_count() { case "$1" in ''|*[!0-9]*) return 1 ;; esac; }
+id_ok() { case "$1" in ''|.*|*[!A-Za-z0-9._-]*) return 1 ;; esac; }
 
 # validate_pools <file>: a readable, well-formed pool declaration, or fail.
+# An empty "pools" list is valid and means no pool.
 validate_pools() {
   local file=$1
   [ -f "$file" ] && [ ! -L "$file" ] && [ -r "$file" ] || return 1
   jq -e '
-    (.pools | type == "array" and length > 0)
+    (.pools | type == "array")
     and all(.pools[];
       (.name | type == "string" and test("^[A-Za-z0-9._-]+$"))
       and (.capacity | type == "number" and . >= 0 and . == floor)
@@ -135,8 +160,11 @@ validate_pools() {
            and all(.[]; type == "string" and length > 0)))
     and ([.pools[].name] | length == (unique | length))
     and ([.pools[].models[]] | length == (unique | length))
+    and ((has("primary_model") | not) or (.primary_model | type == "string" and length > 0))
   ' "$file" >/dev/null 2>&1
 }
+
+pool_count() { jq -r '.pools | length' "$1"; }
 
 # pool_for_model <file> <model>: print "<name>\t<capacity>" for the pool naming it.
 pool_for_model() {
@@ -147,6 +175,8 @@ pool_for_model() {
 pool_models() {
   jq -r --arg p "$2" '.pools[] | select(.name == $p) | .models[]' "$1"
 }
+
+policy_digest() { jq -cS . "$1" | cksum | tr -s ' ' '-' | cut -d- -f1-2; }
 
 # Resolve the authority for the calling home. Sets ROOT_REMOTE=1 when the walk
 # ends at a remote parent binding, else ROOT_STATE / ROOT_CONFIG / ROOT_DATA,
@@ -171,9 +201,24 @@ resolve_authority() {
   fi
 }
 
+# supervisor_idle <meta> <state-dir> <id>: a secondmate supervisor is provably
+# idle - a valid, gen-matching busy record from a source trusted for its
+# harness says idle. Anything else is indeterminate and counts.
+supervisor_idle() {
+  local meta=$1 state=$2 id=$3 harness rec r_state r_source
+  [ -z "$(sed -n 's/^remote_host=//p' "$meta" | tail -1)" ] || return 1
+  harness=$(sed -n 's/^harness=//p' "$meta" | tail -1)
+  rec=$(fm_busy_record_read "$state" "$id") || return 1
+  r_state=${rec%% *}
+  r_source=${rec#* }
+  r_source=${r_source%% *}
+  [ "$r_state" = idle ] && fm_busy_source_trusted "$harness" "$r_source"
+}
+
 # meta_state <meta> <models-file>: "pooled", "other", "absent", or "unreadable".
+# A pooled secondmate supervisor that is provably idle reads "other".
 meta_state() {
-  local meta=$1 models=$2 kind model
+  local meta=$1 models=$2 kind model dir id
   if [ ! -e "$meta" ] && [ ! -L "$meta" ]; then
     echo absent
     return
@@ -181,12 +226,20 @@ meta_state() {
   [ -f "$meta" ] && [ -r "$meta" ] || { echo unreadable; return; }
   kind=$(sed -n 's/^kind=//p' "$meta" | tail -1)
   model=$(sed -n 's/^model=//p' "$meta" | tail -1)
-  case "$kind" in secondmate) echo other; return ;; esac
-  if [ -n "$model" ] && grep -Fxq -- "$model" "$models"; then
-    echo pooled
-  else
+  if [ -z "$model" ] || ! grep -Fxq -- "$model" "$models"; then
     echo other
+    return
   fi
+  if [ "$kind" = secondmate ]; then
+    dir=${meta%/*}
+    id=${meta##*/}
+    id=${id%.meta}
+    if supervisor_idle "$meta" "$dir" "$id"; then
+      echo other
+      return
+    fi
+  fi
+  echo pooled
 }
 
 # holder_alive <pid> <identity>: the reserving process is still the same process.
@@ -198,11 +251,11 @@ holder_alive() {
   [ "$now" = "$identity" ]
 }
 
-record_field() { sed -n "s/^$2=//p" "$1" | head -1; }
+record_field() { sed -n "s/^$2=//p" "$1" 2>/dev/null | head -1; }
 
 seat_name() { printf '%s\t%s' "$1" "$2" | cksum | tr -s ' ' '-' | cut -d- -f1-2; }
 
-# write_record <path> <state> <task> <model> <pid> [nonce]: publish atomically.
+# write_record <path> <state> <id> <model> <pid> [nonce]: publish atomically.
 write_record() {
   local path=$1 identity
   identity=$(fm_pid_identity "$5" 2>/dev/null || true)
@@ -217,7 +270,7 @@ write_record() {
   } > "$path.tmp.$$" && mv -f "$path.tmp.$$" "$path"
 }
 
-# seat_records <dir> <models-file> <remove-stale 0|1>: "<state>\t<task>" per live record.
+# seat_records <dir> <models-file> <remove-stale 0|1>: "<state>\t<id>" per live record.
 seat_records() {
   local dir=$1 models=$2 remove_stale=$3 f st task verdict
   [ -d "$dir" ] || return 0
@@ -243,7 +296,7 @@ seat_records() {
   done
 }
 
-# pooled_records <state-dir> <models-file>: "<state>\t<task>" per pooled task record.
+# pooled_records <state-dir> <models-file>: "<state>\t<id>" per pooled active record.
 pooled_records() {
   local home_state=$1 models=$2 meta id verdict
   [ -r "$home_state" ] && [ -x "$home_state" ] || return 1
@@ -251,14 +304,23 @@ pooled_records() {
     [ -e "$meta" ] || continue
     id=${meta##*/}
     id=${id%.meta}
-    case "$id" in ''|.*|*[!A-Za-z0-9._-]*) continue ;; esac
+    id_ok "$id" || continue
     verdict=$(meta_state "$meta" "$models")
     case "$verdict" in pooled|unreadable) printf '%s\t%s\n' "$home_state" "$id" ;; esac
   done
 }
 
+# primary_counts <state-dir>: the primary's session lock is not provably free
+# or stale.
+primary_counts() {
+  fm_session_lock_inspect "$1"
+  case "$FM_LOCK_INSPECT_STATE" in free|stale) return 1 ;; esac
+  return 0
+}
+
 # registry_homes: fill $TMPD/local-homes (canonical state dirs) and
-# $TMPD/remote-ids from the root registry.
+# $TMPD/remote-ids from the root registry. A record line that parses under
+# neither form fails, because its home's agents would go uncounted.
 registry_homes() {
   local reg=$ROOT_DATA/secondmates.md line home
   : > "$TMPD/local-homes"
@@ -268,7 +330,10 @@ registry_homes() {
   [ -f "$reg" ] && [ -r "$reg" ] || return 1
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in '- '*) ;; *) continue ;; esac
-    secondmate_registry_parse_line "$line" || continue
+    if ! secondmate_registry_parse_line "$line"; then
+      REGISTRY_ERROR="unparseable secondmate registry line: $line"
+      return 1
+    fi
     if [ "$SECONDMATE_REGISTRY_REMOTE" -eq 1 ]; then
       printf '%s\n' "$SECONDMATE_REGISTRY_ID" >> "$TMPD/remote-ids"
       continue
@@ -280,29 +345,36 @@ registry_homes() {
 }
 
 # root_holders <pool> <models-file> <remove-stale 0|1> [excluded-remote-id]:
-# every holder the root counts, one "<key>\t<task>" per line, sorted unique.
+# every holder the root counts, one "<key>\t<id>" per line, sorted unique.
+# Returns 3 (with UNCONFIRMED set) when another registered remote has not
+# confirmed the current policy.
 root_holders() {
-  local pool=$1 models=$2 remove_stale=$3 exclude=${4:-} dir home_state f id
-  dir="$ROOT_STATE/fleet-seats/$pool"
+  local pool=$1 models=$2 remove_stale=$3 exclude=${4:-} dir home_state id primary
+  dir="$ROOT_STATE/fleet-seats"
+  UNCONFIRMED=
   registry_homes || return 1
   {
-    seat_records "$dir" "$models" "$remove_stale"
+    seat_records "$dir/$pool" "$models" "$remove_stale"
     while IFS= read -r home_state; do
       pooled_records "$home_state" "$models" || return 1
     done < "$TMPD/local-homes"
-    for f in "$dir"/remote-*.holders; do
-      [ -f "$f" ] || continue
-      id=${f##*/remote-}
-      id=${id%.holders}
+    primary=$(jq -r '.primary_model // empty' "$POOLS")
+    if [ -n "$primary" ] && grep -Fxq -- "$primary" "$models" && primary_counts "$ROOT_STATE"; then
+      printf '%s\t.primary\n' "$(canon_dir "$ROOT_STATE")"
+    fi
+    while IFS= read -r id; do
       [ "$id" != "$exclude" ] || continue
-      if grep -Fxq -- "$id" "$TMPD/remote-ids"; then
-        cat "$f"
-      elif [ "$remove_stale" -eq 1 ]; then
-        rm -f "$f"
+      if [ "$(cat "$dir/remote-$id.policy" 2>/dev/null)" != "$DIGEST" ]; then
+        UNCONFIRMED="$UNCONFIRMED $id"
+        continue
       fi
-    done
+      awk -F '\t' -v p="$pool" '$1 == p && NF == 2 { print $2 }' "$dir/remote-$id.holders" 2>/dev/null | while IFS= read -r task; do
+        printf 'remote:%s\t%s\n' "$id" "$task"
+      done
+    done < "$TMPD/remote-ids"
   } > "$TMPD/holders.raw" || return 1
   sort -u "$TMPD/holders.raw"
+  [ -z "$UNCONFIRMED" ] || return 3
 }
 
 # remote_holders <pool> <models-file> <remove-stale 0|1>: a remote home's own seats.
@@ -328,44 +400,60 @@ unlock() {
 }
 
 print_full() {  # <pool> <used> <cap> <holders-file|->
-  echo "fleet-seats: pool $1 is full ($2 of $3 seats held); task $TASK gets no seat for model $MODEL - choose an overflow route or wait for a holder to finish" >&2
+  echo "fleet-seats: pool $1 is full ($2 of $3 seats held); $TASK gets no seat for model $MODEL - choose an overflow route or wait for a holder to finish" >&2
   [ "$4" = - ] && return 0
   while IFS=$'\t' read -r st task; do
     echo "  holder $st $task" >&2
   done < "$4"
 }
 
+# require_explicit_model <pools-file>: refuse a harness default while pools exist.
+require_explicit_model() {
+  [ "$(pool_count "$1")" -gt 0 ] || return 0
+  case "$MODEL" in ''|default) ;; *) return 0 ;; esac
+  case "$HARNESS" in
+    pi|pi-signed|omp|opencode)
+      unavailable "harness $HARNESS launches its own default model, which may be pooled; pass an explicit --model while fleet seat pools are configured"
+      ;;
+  esac
+}
+
 CMD=${1:-}
 shift 2>/dev/null || true
-TASK='' MODEL='' HOLDER='' SERVE_POOL='' ALLOWANCE='' CAPACITY=''
+TASK='' MODEL='' HOLDER='' HARNESS='' DIGEST_ARG=''
+ALLOWANCES=''
 case "$CMD" in
   reserve)
     TASK=${1:-}
     shift 2>/dev/null || true
-    case "$TASK" in ''|.*|*[!A-Za-z0-9._-]*) usage ;; esac
+    id_ok "$TASK" || usage
     while [ "$#" -gt 0 ]; do
       case "$1" in
         --model) MODEL=${2:-}; shift 2 || usage ;;
+        --harness) HARNESS=${2:-}; shift 2 || usage ;;
         --holder-pid) HOLDER=${2:-}; shift 2 || usage ;;
         *) usage ;;
       esac
     done
     [ -n "$HOLDER" ] || usage
     ;;
-  status|serve-remotes) [ "$#" -eq 0 ] || usage ;;
+  serve-remotes) [ "$#" -eq 0 ] || usage ;;
   serve)
-    SERVE_POOL=${1:-}
-    shift 2>/dev/null || true
-    case "$SERVE_POOL" in ''|*[!A-Za-z0-9._-]*) usage ;; esac
     while [ "$#" -gt 0 ]; do
       case "$1" in
-        --allowance) ALLOWANCE=${2:-}; shift 2 || usage ;;
-        --capacity) CAPACITY=${2:-}; shift 2 || usage ;;
+        --digest) DIGEST_ARG=${2:-}; shift 2 || usage ;;
+        --allowance)
+          case "${2:-}" in
+            *=*) { is_count "${2#*=}" && id_ok "${2%%=*}"; } || usage ;;
+            *) usage ;;
+          esac
+          ALLOWANCES="$ALLOWANCES ${2}"
+          shift 2
+          ;;
         *) usage ;;
       esac
     done
-    is_count "$ALLOWANCE" || usage
-    is_count "$CAPACITY" || usage
+    case "$DIGEST_ARG" in ''|*[!0-9-]*) usage ;; esac
     ;;
   *) usage ;;
 esac
@@ -373,6 +461,7 @@ esac
 command -v jq >/dev/null 2>&1 || unavailable "jq is not installed"
 TMPD=$(mktemp -d "${TMPDIR:-/tmp}/fm-fleet-seats.XXXXXX") || unavailable "cannot create a scratch directory"
 LOCK_HELD=
+REGISTRY_ERROR=
 cleanup() {
   unlock
   rm -rf "$TMPD"
@@ -386,6 +475,7 @@ if ! resolve_authority; then
   if [ "$CMD" = reserve ]; then
     [ -e "$CONFIG/fleet-seats" ] || exit 0
     validate_pools "$CONFIG/fleet-seats" || unavailable "config/fleet-seats is malformed in $CONFIG"
+    require_explicit_model "$CONFIG/fleet-seats"
     [ -n "$(pool_for_model "$CONFIG/fleet-seats" "$MODEL")" ] || exit 0
   fi
   unavailable "this home's fleet root cannot be resolved from its secondmate parent binding"
@@ -394,63 +484,79 @@ fi
 # --- remote home -------------------------------------------------------------
 
 if [ "$ROOT_REMOTE" -eq 1 ]; then
-  POOLS=$CONFIG/fleet-seats
-  case "$CMD" in
-    status) unavailable "this home's fleet root is on another host; run status there" ;;
-    serve-remotes) exit 0 ;;
-  esac
-  if [ ! -e "$POOLS" ] && [ ! -L "$POOLS" ]; then
-    [ "$CMD" = serve ] && unavailable "this home has no config/fleet-seats for pool $SERVE_POOL"
-    exit 0
-  fi
-  validate_pools "$POOLS" || unavailable "config/fleet-seats is malformed in $CONFIG"
+  [ "$CMD" != serve-remotes ] || exit 0
   OWN_STATE=$(canon_dir "$STATE") || unavailable "this home's state directory $STATE is missing"
+  DELIVERED=$STATE/fleet-seats/policy.json
   LOCK=$STATE/.fleet-seats.lock
 
   if [ "$CMD" = serve ]; then
-    pool_models "$POOLS" "$SERVE_POOL" > "$TMPD/models"
-    [ -s "$TMPD/models" ] || unavailable "this home's config/fleet-seats has no pool $SERVE_POOL"
-    SEATDIR=$STATE/fleet-seats/$SERVE_POOL
-    mkdir -p "$SEATDIR/requests" || unavailable "cannot create $SEATDIR"
+    mkdir -p "$STATE/fleet-seats" || unavailable "cannot create $STATE/fleet-seats"
+    cat > "$TMPD/delivered" || unavailable "cannot read the delivered policy"
+    validate_pools "$TMPD/delivered" || unavailable "the delivered policy is malformed"
+    [ "$(policy_digest "$TMPD/delivered")" = "$DIGEST_ARG" ] || unavailable "the delivered policy does not match digest $DIGEST_ARG"
     lock_or_refuse "$LOCK"
-    remote_holders "$SERVE_POOL" "$TMPD/models" 1 > "$TMPD/holders" || unavailable "this home's task records cannot be read"
-    # Arrival order: oldest request first.
-    for f in "$SEATDIR/requests"/*.req; do
-      [ -f "$f" ] || continue
-      printf '%s\t%s\n' "$(record_field "$f" at)" "$f"
-    done | sort -n > "$TMPD/requests"
-    while IFS=$'\t' read -r _ f; do
-      name=${f##*/}
-      name=${name%.req}
-      st=$(record_field "$f" state)
-      task=$(record_field "$f" task)
-      pid=$(record_field "$f" pid)
-      if [ -z "$st" ] || [ -z "$task" ] || ! holder_alive "$pid" "$(record_field "$f" pid_identity)"; then
-        rm -f "$f"
-        continue
-      fi
-      key=$(printf '%s\t%s' "$st" "$task")
-      used=$(wc -l < "$TMPD/holders" | tr -d ' ')
-      if grep -Fxq -- "$key" "$TMPD/holders" || [ "$used" -lt "$ALLOWANCE" ]; then
-        if ! { cp "$f" "$SEATDIR/$name.seat.tmp.$$" && mv -f "$SEATDIR/$name.seat.tmp.$$" "$SEATDIR/$name.seat"; }; then
+    { cp "$TMPD/delivered" "$DELIVERED.tmp.$$" && mv -f "$DELIVERED.tmp.$$" "$DELIVERED"; } || unavailable "cannot store the delivered policy"
+    echo "policy $DIGEST_ARG"
+    jq -r '.pools[].name' "$DELIVERED" > "$TMPD/pools"
+    while IFS= read -r pool; do
+      allowance=0
+      for a in $ALLOWANCES; do
+        [ "${a%%=*}" != "$pool" ] || allowance=${a#*=}
+      done
+      capacity=$(jq -r --arg p "$pool" '.pools[] | select(.name == $p) | .capacity' "$DELIVERED")
+      pool_models "$DELIVERED" "$pool" > "$TMPD/models"
+      SEATDIR=$STATE/fleet-seats/$pool
+      mkdir -p "$SEATDIR/requests" || unavailable "cannot create $SEATDIR"
+      remote_holders "$pool" "$TMPD/models" 1 > "$TMPD/holders" || unavailable "this home's task records cannot be read"
+      # Arrival order: oldest request first.
+      for f in "$SEATDIR/requests"/*.req; do
+        [ -f "$f" ] || continue
+        printf '%s\t%s\n' "$(record_field "$f" at)" "$f"
+      done | sort -n > "$TMPD/requests"
+      while IFS=$'\t' read -r _ f; do
+        name=${f##*/}
+        name=${name%.req}
+        st=$(record_field "$f" state)
+        task=$(record_field "$f" task)
+        pid=$(record_field "$f" pid)
+        if [ -z "$st" ] || [ -z "$task" ] || ! holder_alive "$pid" "$(record_field "$f" pid_identity)"; then
+          rm -f "$f"
           continue
         fi
-        grep -Fxq -- "$key" "$TMPD/holders" || printf '%s\n' "$key" >> "$TMPD/holders"
-      else
-        {
-          echo "nonce=$(record_field "$f" nonce)"
-          echo "used=$((used + CAPACITY - ALLOWANCE))"
-          echo "capacity=$CAPACITY"
-        } > "$SEATDIR/$name.denied.tmp.$$" && mv -f "$SEATDIR/$name.denied.tmp.$$" "$SEATDIR/$name.denied"
-      fi
-      rm -f "$f"
-    done < "$TMPD/requests"
-    while IFS=$'\t' read -r _ task; do
-      echo "holder $task"
-    done < "$TMPD/holders"
+        key=$(printf '%s\t%s' "$st" "$task")
+        used=$(wc -l < "$TMPD/holders" | tr -d ' ')
+        if grep -Fxq -- "$key" "$TMPD/holders" || [ "$used" -lt "$allowance" ]; then
+          if ! { cp "$f" "$SEATDIR/$name.seat.tmp.$$" && mv -f "$SEATDIR/$name.seat.tmp.$$" "$SEATDIR/$name.seat"; }; then
+            continue
+          fi
+          grep -Fxq -- "$key" "$TMPD/holders" || printf '%s\n' "$key" >> "$TMPD/holders"
+        else
+          {
+            echo "nonce=$(record_field "$f" nonce)"
+            echo "used=$((used + capacity - allowance))"
+            echo "capacity=$capacity"
+          } > "$SEATDIR/$name.denied.tmp.$$" && mv -f "$SEATDIR/$name.denied.tmp.$$" "$SEATDIR/$name.denied"
+        fi
+        rm -f "$f"
+      done < "$TMPD/requests"
+      while IFS=$'\t' read -r _ task; do
+        echo "holder $pool $task"
+      done < "$TMPD/holders"
+    done < "$TMPD/pools"
     exit 0
   fi
 
+  # reserve: the delivered policy is the root's latest word; the inherited copy
+  # covers a home the root has not served yet.
+  if [ -e "$DELIVERED" ]; then
+    POOLS=$DELIVERED
+  elif [ -e "$CONFIG/fleet-seats" ] || [ -L "$CONFIG/fleet-seats" ]; then
+    POOLS=$CONFIG/fleet-seats
+  else
+    exit 0
+  fi
+  validate_pools "$POOLS" || unavailable "$POOLS is malformed"
+  require_explicit_model "$POOLS"
   POOL_LINE=$(pool_for_model "$POOLS" "$MODEL")
   [ -n "$POOL_LINE" ] || exit 0
   POOL=${POOL_LINE%%$'\t'*}
@@ -469,9 +575,9 @@ if [ "$ROOT_REMOTE" -eq 1 ]; then
   if grep -Fxq -- "$KEY" "$TMPD/holders"; then
     # Already counted by the root through this home's snapshot: a relaunch
     # on the same route keeps its seat.
-    write_record "$SEAT" "$OWN_STATE" "$TASK" "$MODEL" "$HOLDER" "$(record_field "$SEAT" nonce 2>/dev/null || true)" \
+    write_record "$SEAT" "$OWN_STATE" "$TASK" "$MODEL" "$HOLDER" "$(record_field "$SEAT" nonce)" \
       || unavailable "cannot write $SEAT"
-    echo "fleet-seats: reserved pool=$POOL task=$TASK (already held)"
+    echo "fleet-seats: reserved pool=$POOL id=$TASK (already held)"
     exit 0
   fi
   NONCE="$(date +%s).$$.$RANDOM"
@@ -479,11 +585,10 @@ if [ "$ROOT_REMOTE" -eq 1 ]; then
   write_record "$REQ" "$OWN_STATE" "$TASK" "$MODEL" "$HOLDER" "$NONCE" || unavailable "cannot write $REQ"
   unlock
 
-  WAIT=${FM_FLEET_SEATS_REMOTE_WAIT:-90}
-  deadline=$((SECONDS + WAIT))
+  deadline=$((SECONDS + REMOTE_WAIT))
   while [ "$SECONDS" -lt "$deadline" ]; do
     if [ -f "$SEAT" ] && [ "$(record_field "$SEAT" nonce)" = "$NONCE" ]; then
-      echo "fleet-seats: reserved pool=$POOL task=$TASK (granted by the fleet root)"
+      echo "fleet-seats: reserved pool=$POOL id=$TASK (granted by the fleet root)"
       exit 0
     fi
     if [ -f "$DENIED" ] && [ "$(record_field "$DENIED" nonce)" = "$NONCE" ]; then
@@ -495,98 +600,103 @@ if [ "$ROOT_REMOTE" -eq 1 ]; then
   done
   lock_or_refuse "$LOCK"
   if [ -f "$SEAT" ] && [ "$(record_field "$SEAT" nonce)" = "$NONCE" ]; then
-    echo "fleet-seats: reserved pool=$POOL task=$TASK (granted by the fleet root)"
+    echo "fleet-seats: reserved pool=$POOL id=$TASK (granted by the fleet root)"
     exit 0
   fi
   rm -f "$REQ"
-  unavailable "the fleet root on another host did not answer seat request for task $TASK within ${WAIT}s"
+  unavailable "the fleet root on another host did not answer the seat request for $TASK within ${REMOTE_WAIT}s"
 fi
 
 # --- root and local homes ----------------------------------------------------
 
 [ "$CMD" != serve ] || unavailable "serve runs only in a home whose fleet root is on another host"
 POOLS=$ROOT_CONFIG/fleet-seats
-if [ ! -e "$POOLS" ] && [ ! -L "$POOLS" ]; then
-  [ "$CMD" = status ] && echo "fleet-seats: no pools configured"
-  exit 0
-fi
-validate_pools "$POOLS" || unavailable "$POOLS is malformed (see docs/configuration.md \"Fleet seat pools\")"
-jq -r '.pools[] | "\(.name)\t\(.capacity)"' "$POOLS" > "$TMPD/pools"
+SEATROOT=$ROOT_STATE/fleet-seats
 LOCK=$ROOT_STATE/.fleet-seats.lock
-
-if [ "$CMD" = status ]; then
-  while IFS=$'\t' read -r name cap; do
-    pool_models "$POOLS" "$name" > "$TMPD/models"
-    root_holders "$name" "$TMPD/models" 0 > "$TMPD/holders" || unavailable "a fleet home's task records cannot be read"
-    used=$(wc -l < "$TMPD/holders" | tr -d ' ')
-    free=$((cap - used))
-    [ "$free" -ge 0 ] || free=0
-    echo "pool $name capacity=$cap used=$used free=$free"
-    while IFS=$'\t' read -r st task; do
-      echo "  holder $st $task"
-    done < "$TMPD/holders"
-  done < "$TMPD/pools"
-  exit 0
-fi
 
 if [ "$CMD" = serve-remotes ]; then
   [ "$ROOT_SELF" -eq 1 ] || exit 0
-  registry_homes || unavailable "the secondmate registry cannot be read"
+  if [ -e "$POOLS" ] || [ -L "$POOLS" ]; then
+    validate_pools "$POOLS" || unavailable "$POOLS is malformed (see docs/configuration.md \"Fleet seat pools\")"
+    cp "$POOLS" "$TMPD/policy"
+  else
+    # No pool: tell every remote so a previously delivered policy clears.
+    [ -d "$SEATROOT" ] || exit 0
+    printf '{"pools":[]}\n' > "$TMPD/policy"
+  fi
+  POOLS=$TMPD/policy
+  DIGEST=$(policy_digest "$POOLS")
+  registry_homes || unavailable "${REGISTRY_ERROR:-the secondmate registry cannot be read}"
   [ -s "$TMPD/remote-ids" ] || exit 0
-  TIMEOUT=${FM_FLEET_SEATS_SERVE_TIMEOUT:-20}
-  BACKOFF=${FM_FLEET_SEATS_SERVE_BACKOFF:-120}
+  mkdir -p "$SEATROOT" || unavailable "cannot create $SEATROOT"
   cp "$TMPD/remote-ids" "$TMPD/serve-ids"
-  while IFS=$'\t' read -r name cap; do
-    pool_models "$POOLS" "$name" > "$TMPD/models"
-    dir=$ROOT_STATE/fleet-seats/$name
-    mkdir -p "$dir" || unavailable "cannot create $dir"
-    while IFS= read -r id; do
-      failed=$ROOT_STATE/.fleet-seats-serve-failed-$id
-      if [ -e "$failed" ] && [ "$(fm_path_age "$failed")" -lt "$BACKOFF" ]; then
-        echo "unreachable $id pool=$name (backing off)"
-        continue
-      fi
-      lock_or_refuse "$LOCK"
-      root_holders "$name" "$TMPD/models" 1 "$id" > "$TMPD/holders" || unavailable "a fleet home's task records cannot be read"
-      others=$(wc -l < "$TMPD/holders" | tr -d ' ')
-      allowance=$((cap - others))
-      [ "$allowance" -ge 0 ] || allowance=0
-      if fm_run_timed "$TIMEOUT" "$SCRIPT_DIR/fm-on.sh" "$id" fm-fleet-seats.sh serve "$name" \
-          --allowance "$allowance" --capacity "$cap" > "$TMPD/served" 2>"$TMPD/served.err" </dev/null; then
-        while IFS= read -r line; do
-          case "$line" in
-            'holder '*) task=${line#holder } ;;
-            *) continue ;;
-          esac
-          case "$task" in ''|.*|*[!A-Za-z0-9._-]*) continue ;; esac
-          printf 'remote:%s\t%s\n' "$id" "$task"
-        done < "$TMPD/served" > "$dir/remote-$id.holders.tmp.$$" || unavailable "cannot record the snapshot for $id"
-        mv -f "$dir/remote-$id.holders.tmp.$$" "$dir/remote-$id.holders" || unavailable "cannot record the snapshot for $id"
-        rm -f "$failed"
-        echo "served $id pool=$name allowance=$allowance holders=$(wc -l < "$dir/remote-$id.holders" | tr -d ' ')"
+  jq -r '.pools[] | "\(.name)\t\(.capacity)"' "$POOLS" > "$TMPD/pools"
+  while IFS= read -r id; do
+    failed=$ROOT_STATE/.fleet-seats-serve-failed-$id
+    if [ -e "$failed" ] && [ "$(fm_path_age "$failed")" -lt "$SERVE_BACKOFF" ]; then
+      echo "unreachable $id (backing off)"
+      continue
+    fi
+    lock_or_refuse "$LOCK"
+    set --
+    while IFS=$'\t' read -r name cap; do
+      pool_models "$POOLS" "$name" > "$TMPD/models"
+      if root_holders "$name" "$TMPD/models" 1 "$id" > "$TMPD/holders"; then
+        others=$(wc -l < "$TMPD/holders" | tr -d ' ')
+        allowance=$((cap - others))
+        [ "$allowance" -ge 0 ] || allowance=0
       else
-        : > "$failed"
-        echo "unreachable $id pool=$name"
+        [ "$?" -eq 3 ] || unavailable "${REGISTRY_ERROR:-a fleet task record cannot be read}"
+        allowance=0
       fi
-      unlock
-    done < "$TMPD/serve-ids"
-  done < "$TMPD/pools"
+      set -- "$@" --allowance "$name=$allowance"
+    done < "$TMPD/pools"
+    if fm_run_timed "$SERVE_TIMEOUT" "$SCRIPT_DIR/fm-on.sh" --stdin "$id" fm-fleet-seats.sh serve \
+        --digest "$DIGEST" "$@" < "$POOLS" > "$TMPD/served" 2>"$TMPD/served.err" \
+      && [ "$(sed -n 's/^policy //p' "$TMPD/served" | head -1)" = "$DIGEST" ]; then
+      awk '$1 == "holder" && NF == 3 && $2 ~ /^[A-Za-z0-9._-]+$/ && $3 ~ /^[A-Za-z0-9._-]+$/ { printf "%s\t%s\n", $2, $3 }' "$TMPD/served" \
+        > "$SEATROOT/remote-$id.holders.tmp.$$" || unavailable "cannot record the snapshot for $id"
+      mv -f "$SEATROOT/remote-$id.holders.tmp.$$" "$SEATROOT/remote-$id.holders" || unavailable "cannot record the snapshot for $id"
+      { printf '%s\n' "$DIGEST" > "$SEATROOT/remote-$id.policy.tmp.$$" \
+        && mv -f "$SEATROOT/remote-$id.policy.tmp.$$" "$SEATROOT/remote-$id.policy"; } \
+        || unavailable "cannot record the policy confirmation for $id"
+      rm -f "$failed"
+      echo "served $id policy=$DIGEST holders=$(wc -l < "$SEATROOT/remote-$id.holders" | tr -d ' ')"
+    else
+      : > "$failed"
+      echo "unreachable $id"
+    fi
+    unlock
+  done < "$TMPD/serve-ids"
   exit 0
 fi
 
+# reserve at the root or a local home
+if [ ! -e "$POOLS" ] && [ ! -L "$POOLS" ]; then
+  exit 0
+fi
+validate_pools "$POOLS" || unavailable "$POOLS is malformed (see docs/configuration.md \"Fleet seat pools\")"
+require_explicit_model "$POOLS"
 POOL_LINE=$(pool_for_model "$POOLS" "$MODEL")
 [ -n "$POOL_LINE" ] || exit 0
 POOL=${POOL_LINE%%$'\t'*}
 CAP=${POOL_LINE#*$'\t'}
+DIGEST=$(policy_digest "$POOLS")
 fm_pid_alive "$HOLDER" || unavailable "holder pid $HOLDER is not a running process"
 CALLER_STATE=$(canon_dir "$STATE") || unavailable "this home's state directory $STATE is missing"
 pool_models "$POOLS" "$POOL" > "$TMPD/models"
 
 [ -d "$ROOT_STATE" ] || unavailable "the fleet root state directory $ROOT_STATE is missing"
-mkdir -p "$ROOT_STATE/fleet-seats/$POOL" 2>/dev/null || unavailable "cannot create $ROOT_STATE/fleet-seats/$POOL"
+mkdir -p "$SEATROOT/$POOL" 2>/dev/null || unavailable "cannot create $SEATROOT/$POOL"
 lock_or_refuse "$LOCK"
 
-root_holders "$POOL" "$TMPD/models" 1 > "$TMPD/holders" || unavailable "a fleet home's task records cannot be read"
+if root_holders "$POOL" "$TMPD/models" 1 > "$TMPD/holders"; then
+  :
+elif [ "$?" -eq 3 ]; then
+  unavailable "remote secondmate(s)$UNCONFIRMED have not confirmed the current seat policy, so their agents cannot be counted yet"
+else
+  unavailable "${REGISTRY_ERROR:-a fleet task record cannot be read}"
+fi
 USED=$(wc -l < "$TMPD/holders" | tr -d ' ')
 KEY=$(printf '%s\t%s' "$CALLER_STATE" "$TASK")
 if ! grep -Fxq -- "$KEY" "$TMPD/holders" && [ "$USED" -ge "$CAP" ]; then
@@ -594,10 +704,10 @@ if ! grep -Fxq -- "$KEY" "$TMPD/holders" && [ "$USED" -ge "$CAP" ]; then
   exit "$EXIT_FULL"
 fi
 
-SEAT=$ROOT_STATE/fleet-seats/$POOL/$(seat_name "$CALLER_STATE" "$TASK").seat
+SEAT=$SEATROOT/$POOL/$(seat_name "$CALLER_STATE" "$TASK").seat
 write_record "$SEAT" "$CALLER_STATE" "$TASK" "$MODEL" "$HOLDER" || unavailable "cannot write $SEAT"
 if grep -Fxq -- "$KEY" "$TMPD/holders"; then
-  echo "fleet-seats: reserved pool=$POOL task=$TASK (already held) used=$USED capacity=$CAP"
+  echo "fleet-seats: reserved pool=$POOL id=$TASK (already held) used=$USED capacity=$CAP"
 else
-  echo "fleet-seats: reserved pool=$POOL task=$TASK used=$((USED + 1)) capacity=$CAP"
+  echo "fleet-seats: reserved pool=$POOL id=$TASK used=$((USED + 1)) capacity=$CAP"
 fi
