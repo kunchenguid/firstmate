@@ -3268,7 +3268,7 @@ EOF
 # fm_backend_herdr_projection_journal_workspaces: print the ids of every
 # workspace whose label carries the journal's token, one per line, or fail
 # when the journal or the workspace list cannot be read. Read-only input to
-# the two teardown correlations below; no verdict here authorizes a mutation.
+# the teardown correlation below; no verdict here authorizes a mutation.
 fm_backend_herdr_projection_journal_workspaces() {  # <session> <journal> <task-id>
   local session=$1 journal=$2 id=$3 token list
   token=$(fm_backend_herdr_projection_journal_token "$journal" "$id") || return 1
@@ -3287,22 +3287,6 @@ fm_backend_herdr_projection_endpoint_matches_journal() {  # <session> <workspace
   local matches
   matches=$(fm_backend_herdr_projection_journal_workspaces "$1" "$3" "$4") || return 1
   [ "$matches" = "$2" ]
-}
-
-# fm_backend_herdr_projection_journal_already_gone: the journal's exact
-# recorded pane reads structured pane_not_found AND no workspace carries its
-# token - the state Herdr's pane-death removal leaves once the task pane's
-# shell has ended. A Herdr task's root shell sits inside its leased slot
-# (docs/herdr-backend.md "Watching and task containers"), so teardown's
-# worktree return ends that shell before the explicit close runs and this is
-# the ordinary post-return state. Read-only: a present or unknown pane, an
-# unreadable list, or any surviving token-bearing workspace refuses, so the
-# journal stays quarantined rather than being retired over a live endpoint.
-fm_backend_herdr_projection_journal_already_gone() {  # <session> <pane-id> <journal> <task-id>
-  local matches
-  matches=$(fm_backend_herdr_projection_journal_workspaces "$1" "$3" "$4") || return 1
-  [ -z "$matches" ] || return 1
-  [ "$(fm_backend_herdr_pane_presence_state "$1" "$2")" = dead ]
 }
 
 # fm_backend_herdr_projection_token_workspace_gone: true only when the named

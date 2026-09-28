@@ -3147,35 +3147,28 @@ test_herdr_projection_teardown_retains_journal_when_close_unconfirmed() {
   pass "herdr projection teardown retains every record when post-close presence is unknown"
 }
 
-test_herdr_projection_teardown_retires_journal_when_pane_already_gone() {
+test_herdr_projection_teardown_keeps_journal_when_pane_already_gone() {
   local case_dir log closed restored
   case_dir=$(make_case herdr-projection-already-gone)
   write_meta "$case_dir" local-only ship
   configure_herdr_projection_teardown_case "$case_dir"
   log="$case_dir/herdr.log"; closed="$case_dir/closed"; restored="$case_dir/restored"; : > "$log"
-  # A Herdr task pane's root shell sits inside its leased slot, so the
-  # worktree return that precedes the close ends that shell and Herdr removes
-  # the exact pane and its emptied workspace before teardown reaches the
-  # close: the pane already reads not-found and no workspace carries the token.
+  # The exact pane and its token-bearing workspace were already gone before
+  # teardown started, so no confirmed close can correlate the journal.
   : > "$closed"
 
   FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_RESTORED="$restored" \
     run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
     || fail "herdr-projection-already-gone: teardown failed: $(cat "$case_dir/stderr")"
-  [ ! -e "$case_dir/state/task-x1.herdr-presentation" ] \
-    || fail "herdr-projection-already-gone: a pane already confirmed gone left its presentation journal quarantined"
+  [ -e "$case_dir/state/task-x1.herdr-presentation" ] \
+    || fail "herdr-projection-already-gone: a journal no confirmed close correlated was retired"
   [ ! -e "$case_dir/state/task-x1.meta" ] \
     || fail "herdr-projection-already-gone: teardown retained the metadata of a confirmed-gone endpoint"
-  assert_not_contains "$(cat "$log")" "pane close" \
-    "herdr-projection-already-gone: teardown issued a close for a pane it had already confirmed gone"
+  assert_grep "remains quarantined" "$case_dir/stderr" \
+    "herdr-projection-already-gone: teardown did not explain why the journal was retained"
   assert_not_contains "$(cat "$log")" "workspace close" \
     "herdr-projection-already-gone: teardown must never call workspace close"
-  assert_not_contains "$(cat "$log")" "tab focus" \
-    "herdr-projection-already-gone: teardown moved focus with nothing to close"
-  if grep -F "quarantined" "$case_dir/stderr" >/dev/null 2>&1; then
-    fail "herdr-projection-already-gone: teardown warned about a quarantined journal it had every reason to retire"
-  fi
-  pass "herdr projection teardown retires its journal without any close once the exact pane is gone and no workspace carries its token"
+  pass "herdr projection teardown keeps a journal quarantined when the exact pane was already gone before teardown"
 }
 
 test_herdr_projection_teardown_keeps_journal_when_token_workspace_is_gone_but_pane_lives() {
@@ -3195,7 +3188,7 @@ test_herdr_projection_teardown_keeps_journal_when_token_workspace_is_gone_but_pa
   [ -e "$closed" ] \
     || fail "herdr-projection-token-gone-pane-live: teardown did not close the still-present pane"
   [ -e "$case_dir/state/task-x1.herdr-presentation" ] \
-    || fail "herdr-projection-token-gone-pane-live: a journal whose pane was still live was retired as already gone"
+    || fail "herdr-projection-token-gone-pane-live: a journal whose pane was still live was retired"
   assert_grep "remains quarantined" "$case_dir/stderr" \
     "herdr-projection-token-gone-pane-live: teardown did not explain why the journal was retained"
   assert_not_contains "$(cat "$log")" "workspace close" \
@@ -4140,6 +4133,36 @@ EOF
   pass "teardown refuses before reap or removal when a task-owned run remains parked"
 }
 
+test_herdr_parked_own_run_refuses_before_closing_the_task_pane() {
+  local case_dir rc head log closed restored
+  case_dir=$(make_case herdr-parked-run-abort-unconfirmed)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  configure_herdr_projection_teardown_case "$case_dir"
+  log="$case_dir/herdr.log"; closed="$case_dir/closed"; restored="$case_dir/restored"; : > "$log"
+
+  rc=0
+  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_RESTORED="$restored" \
+  FM_FAKE_AXI_STATUS="$(parked_axi_status_toon fm/task-x1 "$head")" \
+  FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
+  FM_FAKE_NM_ABORT_NOOP=1 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 1 "$rc" "herdr-parked-run-abort-unconfirmed: teardown should refuse"
+  assert_grep "REFUSED: no-mistakes run for task-x1 is still parked after axi abort" "$case_dir/stderr" \
+    "herdr-parked-run-abort-unconfirmed: teardown did not explain the parked-run refusal"
+  [ ! -e "$closed" ] \
+    || fail "herdr-parked-run-abort-unconfirmed: the worker pane was closed before the parked-run refusal"
+  assert_not_contains "$(cat "$log")" "pane close" \
+    "herdr-parked-run-abort-unconfirmed: teardown issued a pane close before the parked-run refusal"
+  assert_present "$case_dir/state/task-x1.herdr-presentation" \
+    "herdr-parked-run-abort-unconfirmed: teardown retired the presentation journal before the parked-run refusal"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "herdr-parked-run-abort-unconfirmed: teardown removed task metadata after refusing"
+  pass "herdr teardown refuses a still-parked own run before closing the worker pane"
+}
+
 test_another_branchs_parked_run_is_never_touched() {
   local case_dir rc
   case_dir=$(make_case parked-run-not-ours)
@@ -4774,7 +4797,7 @@ test_forced_teardown_retains_nested_secondmate_home_when_grandchild_close_unconf
 test_herdr_projection_teardown_retires_journal_only_after_confirmed_close
 test_herdr_projection_teardown_refuses_viewed_task_tab_before_touching_the_worktree
 test_herdr_projection_teardown_retains_journal_when_close_unconfirmed
-test_herdr_projection_teardown_retires_journal_when_pane_already_gone
+test_herdr_projection_teardown_keeps_journal_when_pane_already_gone
 test_herdr_projection_teardown_keeps_journal_when_token_workspace_is_gone_but_pane_lives
 test_herdr_projection_teardown_surfaces_restore_failure_without_blocking_cleanup
 test_teardown_retires_task_watcher_markers_and_orphan_journal
@@ -4843,6 +4866,7 @@ test_parked_run_behind_diverged_newer_row_is_never_aborted
 test_parked_advanced_run_ambiguous_rows_are_never_aborted
 test_ledger_proven_continuation_never_aborts_active_run
 test_parked_own_run_refuses_when_abort_is_unconfirmed
+test_herdr_parked_own_run_refuses_before_closing_the_task_pane
 test_mismatched_run_after_abort_refuses_unconfirmed
 test_empty_status_after_abort_refuses_unconfirmed
 test_not_found_status_after_abort_confirms_completion

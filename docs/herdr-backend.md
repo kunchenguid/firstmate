@@ -325,9 +325,9 @@ Packing an existing parent into its home block with `workspace.move_block`, drop
 
 Normal task metadata remains the sole endpoint authority after creation.
 Cleanup closes only the exact recorded task pane and never calls `workspace close`.
-Because a task pane's root shell sits inside its leased slot, cleanup closes that pane before it reaps the task's processes and returns the worktree, since either step would end the root shell and let Herdr remove the pane through its pane-death path with no close left to refuse.
+Because a task pane's root shell sits inside its leased slot, cleanup closes that pane after it concludes the task's parked no-mistakes run and before it reaps the task's processes and returns the worktree, since either step would end the root shell and let Herdr remove the pane through its pane-death path with no close left to refuse.
 A close that cannot be confirmed stops the cleanup there, leaving the pane, the isolated copy, its pool slot, and every record untouched for a rerun, so the active-tab refusal below still protects a workspace the captain is viewing.
-Cleanup retires the presentation journal once that close is confirmed, or, when the recorded pane already read structured not-found before cleanup acted and no workspace carries the journal's token, without any mutation at all.
+Cleanup retires the presentation journal once that close is confirmed.
 
 Herdr 0.7.5's explicit close moves focus to a neighbor whenever it empties a non-focused workspace.
 Its pane-death removal preserves the focused workspace whenever the dying workspace sits behind it or the focused workspace is last.
