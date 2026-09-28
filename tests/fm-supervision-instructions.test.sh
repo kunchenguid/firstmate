@@ -54,7 +54,8 @@ test_supervision_host_protocol_on_every_arm_owner() {
     assert_not_contains "$plain" "__FM_" "$harness: a placeholder leaked into the rendered block"
     : > "$config/supervision-host"
     hosted=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness "$harness")
-    assert_contains "$hosted" "- Supervision host: on;" "$harness: an opted-in home did not render the host state line"
+    assert_contains "$hosted" "- Supervision host: on; it takes away-posture wakes and, where the dialog mirror is verified, eligible attended wakes itself, and hands the rest to you (protocol at the end of this block)." \
+      "$harness: an opted-in home did not render the host state line naming both postures it takes"
     body=$(printf '%s\n' "$hosted" | sed -n '/^Supervision host: on for this home/,$p')
     [ -n "$body" ] || fail "$harness: the host protocol is missing"
     printf '%s\n' "$body" | grep -E '^\{[a-z,]+\} ' >/dev/null && fail "$harness: a harness tag leaked into the rendered protocol: $body"
@@ -166,6 +167,8 @@ test_cross_harness_ordinary_continuation_and_repair_matrix() {
   local ordinary out
 
   out=$("$RENDER" --harness pi)
+  assert_contains "$out" "task-level routine outcome that says the worker is still busy" "Pi instructions omitted task-level silent no-change behavior"
+  assert_contains "$out" "captain outcomes are never silent" "Pi instructions allowed silent captain outcomes"
   ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
   assert_contains "$ordinary" "Pi extension already owns watcher continuity" "pi ordinary-wake line does not leave continuity to the extension"
   assert_not_contains "$ordinary" "fm_watch_arm_pi" "pi ordinary-wake line incorrectly calls the recovery tool"

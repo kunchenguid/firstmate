@@ -153,6 +153,20 @@ PAYLOAD=$(cat 2>/dev/null || true)
 # its turn boundary, so stand down on a Cursor-delivered payload.
 fm_hook_payload_is_foreign_host "$PAYLOAD" && exit 0
 
+# pi-code (Pi's Claude-hook compatibility extension) also loads the tracked
+# Claude settings and has no asyncRewake, so it awaits every Stop hook and this
+# arm would run SYNCHRONOUSLY inside Pi's turn end, holding that turn open for
+# the declared multi-hour timeout - the same wedge as Cursor above (issue
+# #3343). Pi's own native extensions own Pi supervision, so stand down on a
+# pi-code-delivered payload. The signal is again the PAYLOAD, not the
+# environment: pi-code stamps every hook payload's transcript_path with Pi's
+# own session file under .pi/, which a Claude transcript path never contains.
+# Fail direction matches the guard above: no payload, no jq, or no
+# transcript_path means the hook RUNS.
+if [ -n "$PAYLOAD" ] && command -v jq >/dev/null 2>&1; then
+  printf '%s' "$PAYLOAD" | jq -e '(.transcript_path // "") | type == "string" and contains("/.pi/")' >/dev/null 2>&1 && exit 0
+fi
+
 # --- scope: genuine primary checkout only -----------------------------------
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 
@@ -397,7 +411,6 @@ while [ "$attempt" -lt "$AUTOARM_ATTEMPTS" ]; do
     grep -Eq "$ACTIONABLE_RE" "$OUT" 2>/dev/null && ACTIONABLE=1
   fi
   [ "$ACTIONABLE" -eq 1 ] && break
-
   if [ "$HOST_MODE" -eq 1 ]; then
     # The host stood down because this session or generation no longer owns
     # supervision: whoever does owns continuity now.
@@ -415,6 +428,9 @@ while [ "$attempt" -lt "$AUTOARM_ATTEMPTS" ]; do
       OUT=
       continue
     fi
+    # A failed hand-back cannot be dismissed just because its successor
+    # watcher is healthy: the close is still undelivered.
+    [ "$HOST_RC" -eq 0 ] || break
   fi
 
   # A non-actionable close is benign when another verified watcher already owns

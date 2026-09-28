@@ -3,7 +3,9 @@
 # host's branch session, and how one engine turn runs (one owner of both).
 #
 # Sourced, never executed. docs/supervision-host.md owns the host design and
-# bin/fm-supervision-host.sh the loop; this file owns two contracts.
+# bin/fm-supervision-host.sh the loop; this file owns two contracts, plus the
+# main-session key (fm_supervision_host_main_key) and the attended readiness
+# check (fm_supervision_host_attended_ready) the host's parts share.
 #
 # THE HOME OPT-IN (config/supervision-host). docs/configuration.md
 # "Supervision host" owns the file's schema and its no-engine outcome; this
@@ -101,6 +103,90 @@ EOF
   FM_SUPERVISION_ENGINE=$engine
   FM_SUPERVISION_ENGINE_MODEL=$model
   return 0
+}
+
+# fm_supervision_host_attended_ready <config-dir> <primary-harness>
+# 0 when the attended host's configured engine, executable, node, jq, turn
+# bound (perl, timeout, or gtimeout), and primary's mirror writer are ready;
+# otherwise 1, with FM_SUPERVISION_HOST_UNREADY naming why. The host's
+# attended acceptor runs it on every attended close; the mirror's contents are
+# checked later, by the feed that renders the wake.
+fm_supervision_host_attended_ready() {
+  FM_SUPERVISION_HOST_UNREADY=
+  if ! fm_supervision_host_config "$1" "$2" || [ -z "$FM_SUPERVISION_ENGINE" ]; then
+    FM_SUPERVISION_HOST_UNREADY="no supervision engine"
+  elif ! fm_supervision_engine_bin "$FM_SUPERVISION_ENGINE" >/dev/null 2>&1; then
+    FM_SUPERVISION_HOST_UNREADY="the $FM_SUPERVISION_ENGINE engine executable is missing"
+  elif ! command -v node >/dev/null 2>&1; then
+    FM_SUPERVISION_HOST_UNREADY="node is missing"
+  elif ! command -v jq >/dev/null 2>&1; then
+    FM_SUPERVISION_HOST_UNREADY="jq is missing"
+  elif ! command -v perl >/dev/null 2>&1 && ! command -v timeout >/dev/null 2>&1 \
+    && ! command -v gtimeout >/dev/null 2>&1; then
+    FM_SUPERVISION_HOST_UNREADY="none of perl, timeout, or gtimeout can bound the engine turn"
+  elif ! "$(dirname "${BASH_SOURCE[0]}")/fm-host-mirror.sh" verified "$2"; then
+    FM_SUPERVISION_HOST_UNREADY="no verified dialog mirror for $2"
+  fi
+  [ -z "$FM_SUPERVISION_HOST_UNREADY" ]
+}
+
+# fm_supervision_host_outcomes_drained <config-dir>: 0 when main processes the
+# supervision session's outcomes through the drain's BRANCH OUTCOMES section
+# (bin/fm-wake-drain.sh): the home opted in and its primary is not Pi, whose
+# branch extension owns that path. The drain and the return
+# (bin/fm-afk-return.sh) share this check.
+fm_supervision_host_outcomes_drained() {
+  fm_supervision_host_enabled "$1" || return 1
+  case "$("$(dirname "${BASH_SOURCE[0]}")/fm-harness.sh" 2>/dev/null)" in pi|pi-signed) return 1 ;; esac
+}
+
+# fm_supervision_host_main_key <state-dir>: print the key of the current main
+# session, which changes at every main session start: the session-lock holder,
+# a checksum of its process identity (bin/fm-wake-lib.sh fm_pid_identity), and
+# a checksum of its session sidecar, so a later session given a recycled lock
+# pid never shares it. The host keys its engine conversation and broken-session
+# latch to it; the dialog mirror (bin/fm-host-mirror.sh) keys each entry and
+# feed to it. When the holder's identity cannot be read, it prints nothing and
+# fails, so an attended wake reaches main, a mirror writer records nothing,
+# and no conversation, latch, or dialog kept under an earlier key is reused.
+# Needs bin/fm-wake-lib.sh sourced first.
+fm_supervision_host_main_key() {
+  local pid identity
+  pid=$(sed -n '1p' "$1/.lock" 2>/dev/null)
+  identity=$(fm_pid_identity "$pid" 2>/dev/null) && [ -n "$identity" ] || return 1
+  printf '%s:%s:%s\n' "$pid" "$(printf '%s\n' "$identity" | cksum | awk '{ print $1 }')" \
+    "$(sed -n '1p' "$1/.lock-session" 2>/dev/null | cksum | awk '{ print $1 }')"
+}
+
+# fm_supervision_host_health_key <state-dir>: the key the host's
+# broken-session latch (bin/fm-supervision-host.sh, state/.supervision-host-health)
+# is kept under: the current main session, engine, and model; fails with no
+# main-session key. Needs fm_supervision_host_config first.
+fm_supervision_host_health_key() {
+  local key
+  key=$(fm_supervision_host_main_key "$1") || return 1
+  printf '%s|%s|%s\n' "$key" "$FM_SUPERVISION_ENGINE" "$FM_SUPERVISION_ENGINE_MODEL"
+}
+
+# fm_supervision_host_paused_until <state-dir>: while that latch holds, from
+# the trip until a probe succeeds, print the epoch from which the next wake
+# probes the engine (every wake before it reaches main) and succeed; otherwise
+# fail. Needs fm_supervision_host_config first.
+fm_supervision_host_paused_until() {
+  local file="$1/.supervision-host-health" key cooldown retry
+  key=$(fm_supervision_host_health_key "$1") || return 1
+  [ "$(sed -n 's/^key=//p' "$file" 2>/dev/null | head -n 1)" = "$key" ] || return 1
+  cooldown=$(sed -n 's/^cooldown=//p' "$file" 2>/dev/null | head -n 1)
+  retry=$(sed -n 's/^retry_after=//p' "$file" 2>/dev/null | head -n 1)
+  case "$cooldown" in ''|*[!0-9]*) return 1 ;; esac
+  case "$retry" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$cooldown" -gt 0 ] || return 1
+  printf '%s\n' "$retry"
+}
+
+# fm_supervision_host_clock <epoch>: the local time of day it names.
+fm_supervision_host_clock() {
+  date -r "$1" '+%H:%M' 2>/dev/null || date -d "@$1" '+%H:%M' 2>/dev/null || printf 'the end of its cooldown'
 }
 
 # fm_supervision_engine_bin <engine>: print the executable, or fail with a

@@ -716,6 +716,111 @@ test_markerless_legacy_queue_is_recovered_on_arm() {
   pass "watch-arm: markerless legacy queues are adopted and recovered"
 }
 
+test_idle_lavish_source_stays_quiet_until_result() {
+  local dir home state fakebin source trigger first_out idle_out i
+  dir=$(make_case idle-lavish-source)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  source="$dir/lavish-source.sh"
+  trigger="$dir/result-ready"
+  first_out="$dir/first-arm.out"
+  idle_out="$dir/idle-arm.out"
+  mkdir -p "$home/data"
+  cat > "$source" <<'SH'
+#!/usr/bin/env bash
+set -u
+trigger=$1
+i=0
+while [ ! -e "$trigger" ] && [ "$i" -lt 400 ]; do
+  sleep 0.05
+  i=$((i + 1))
+done
+[ -e "$trigger" ] || exit 1
+cat <<'RESULT'
+session:
+  status: feedback
+  session_ended: true
+prompts[1]{tag,prompt}:
+  feedback,"real review result"
+RESULT
+SH
+  chmod +x "$source"
+
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    "$ROOT/bin/fm-procevent.sh" register lavish idle-lavish -- "$source" "$trigger" \
+    >/dev/null || fail "could not register the Lavish fixture source"
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS=1 \
+    "$ROOT/bin/fm-procevent.sh" reconcile >/dev/null \
+    || fail "could not start the Lavish fixture source"
+  printf 'pending:downtime:idle-lavish.1.fixture\n' > "$state/.watcher-down"
+
+  FM_ROOT_OVERRIDE="$ROOT" start_rearm_arm "$home" "$state" "$fakebin" "$first_out"
+  wait_for_exit "$ARM_PID" 80 || fail "the first recovery arm did not surface"
+  grep -F 'check: rearm-resurface' "$first_out" >/dev/null \
+    || fail "the pending recovery generation did not get its first announcement"
+  [ ! -s "$state/.wake-queue" ] \
+    || fail "the idle Lavish source produced a wake before any result"
+
+  FM_ROOT_OVERRIDE="$ROOT" start_rearm_arm "$home" "$state" "$fakebin" "$idle_out"
+  i=0
+  while [ "$i" -lt 30 ] && is_live_non_zombie "$ARM_PID"; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if ! is_live_non_zombie "$ARM_PID"; then
+    : > "$trigger"
+    wait "$ARM_PID" 2>/dev/null || true
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+      "$ROOT/bin/fm-procevent.sh" retire idle-lavish >/dev/null 2>&1 || true
+    fail "an idle live Lavish source re-fired recovery with an empty queue: $(cat "$idle_out")"
+  fi
+  ! grep -F 'check: rearm-resurface' "$idle_out" >/dev/null \
+    || fail "the idle live Lavish source emitted a repeated recovery wake"
+
+  : > "$trigger"
+  wait_for_exit "$ARM_PID" 120 \
+    || fail "the live Lavish result did not wake the supervising arm"
+  grep -F 'check: process-event result captured: procevent:idle-lavish:1' "$idle_out" >/dev/null \
+    || fail "the live Lavish result did not surface promptly: $(cat "$idle_out")"
+  grep "$(printf '\tcheck\tprocevent:idle-lavish:1\t')" "$state/.wake-queue" >/dev/null \
+    || fail "the live Lavish result was not durable before its wake"
+  pass "watch-arm: an idle Lavish source stays quiet and its real result wakes promptly"
+}
+
+test_append_wakes_live_announced_watcher() {
+  local dir home state fakebin first_out idle_out
+  dir=$(make_case append-after-empty-recovery)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  first_out="$dir/first-arm.out"
+  idle_out="$dir/idle-arm.out"
+  mkdir -p "$home/data"
+  printf 'pending:downtime:append-after-empty.fixture\n' > "$state/.watcher-down"
+
+  start_rearm_arm "$home" "$state" "$fakebin" "$first_out"
+  wait_for_exit "$ARM_PID" 80 || fail "the initial empty recovery did not surface"
+  grep -F 'check: rearm-resurface' "$first_out" >/dev/null \
+    || fail "the initial empty recovery was not announced"
+  [ ! -s "$state/.wake-queue" ] \
+    || fail "the empty recovery unexpectedly queued durable work"
+
+  start_rearm_arm "$home" "$state" "$fakebin" "$idle_out"
+  is_live_non_zombie "$ARM_PID" \
+    || fail "the announced empty recovery did not leave a live watcher"
+  append_wake "$state" check inbox:fixture 'check: captain inbox note fixture' \
+    || fail "the generic producer could not append its wake"
+  wait_for_exit "$ARM_PID" 80 \
+    || fail "the live watcher stranded work appended after an empty recovery"
+  grep -F 'check: rearm-resurface' "$idle_out" >/dev/null \
+    || fail "the appended wake did not reopen recovery: $(cat "$idle_out")"
+  grep "$(printf '\tcheck\tinbox:fixture\t')" "$state/.wake-queue" >/dev/null \
+    || fail "the appended wake was not durable when recovery surfaced"
+  pass "watch-arm: appending work reopens an announced empty recovery"
+}
+
 # Exercise the handling-window recovery invariant owned by
 # docs/watcher-continuity.md through real watcher processes.
 test_handling_window_close_keeps_the_acknowledgement_valid() {
@@ -950,9 +1055,152 @@ test_arm_refuses_an_unusable_launch_confirm_window() {
   pass "watch-arm: an unusable launch confirm window refuses to arm by name"
 }
 
+# A watcher armed from a disposable no-mistakes validation checkout outlives the
+# validation step and keeps writing the real home's state from a path about to be
+# deleted (upstream #321). The arm must refuse before touching any state. The
+# fixture reaches this checkout's real arm through a symlink whose logical path
+# sits under .no-mistakes/worktrees/, with the test harness's own bypass cleared
+# for this one launch.
+test_arm_refuses_a_disposable_validation_checkout() {
+  local dir home state fakebin armout status link
+  dir=$(make_case disposable-checkout-refusal)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  link="$dir/.no-mistakes/worktrees/run-1/firstmate"
+  mkdir -p "$home/data" "$(dirname "$link")"
+  ln -s "$ROOT" "$link"
+
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_GATE_REFUSE_BYPASS='' \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_ARM_CONFIRM_TIMEOUT=5 "$link/bin/fm-watch-arm.sh" > "$armout" 2>&1 &
+  ARM_PID=$!
+  wait_for_exit "$ARM_PID" 200
+  status=$?
+  [ "$status" -ne 124 ] || fail "arm from a disposable checkout never stopped: $(cat "$armout")"
+  [ "$status" -ne 0 ] || fail "arm from a disposable checkout reported success: $(cat "$armout")"
+  grep -q '^watcher: FAILED' "$armout" \
+    || fail "arm did not report the typed failure line: $(cat "$armout")"
+  grep -qF 'disposable validation checkout' "$armout" \
+    || fail "the refusal did not name the disposable checkout: $(cat "$armout")"
+  ! grep -q '^watcher: started' "$armout" \
+    || fail "arm reported a started watcher despite the refusal: $(cat "$armout")"
+  [ ! -e "$state/.last-watcher-beat" ] \
+    || fail "a refused watcher still published a liveness beacon"
+  [ ! -e "$state/.watch.lock" ] \
+    || fail "a refused watcher still took the singleton lock"
+  pass "watch-arm: a disposable validation checkout refuses to arm"
+}
+
+# Start a real watcher through the real arm for a temporary home and set
+# WATCH_PID from the arm's started line. Both stdout and stderr land in <arm-out>
+# so the watcher's own exit reason, which it logs to stderr, is readable there.
+WATCH_PID=
+start_owned_watcher() {  # <home> <state> <fakebin> <arm-out>
+  local home=$1 state=$2 fakebin=$3 armout=$4 i
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_ARM_CONFIRM_TIMEOUT=2 "$WATCH_ARM" > "$armout" 2>&1 &
+  ARM_PID=$!
+  i=0
+  while [ "$i" -lt 100 ]; do
+    grep -q '^watcher: started pid=' "$armout" 2>/dev/null && break
+    is_live_non_zombie "$ARM_PID" || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  WATCH_PID=$(sed -n 's/^watcher: started pid=\([0-9][0-9]*\).*/\1/p' "$armout" | head -1)
+  [ -n "$WATCH_PID" ] || fail "arm did not start a watcher: $(cat "$armout")"
+}
+
+# The watcher is the arm's child, not this shell's, so wait on liveness only.
+wait_for_pid_gone() {  # <pid> <polls>
+  local pid=$1 limit=$2 i=0
+  while [ "$i" -lt "$limit" ]; do
+    is_live_non_zombie "$pid" || return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
+# A running watcher whose state directory is deleted (a torn-down temporary
+# home) must exit after noticing the deletion with a logged reason, not run on
+# as an orphan (upstream #4760). Allow for a slow CI runner finishing the cycle
+# already in progress before its next FM_POLL=1 tick. A busy poll may spend
+# longer than ten seconds in subprocesses on a contended CI runner.
+test_watcher_exits_when_its_state_directory_is_removed() {
+  local dir home state fakebin armout
+  dir=$(make_case state-dir-removed)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  mkdir -p "$home/data"
+  start_owned_watcher "$home" "$state" "$fakebin" "$armout"
+
+  rm -rf "$state"
+  wait_for_pid_gone "$WATCH_PID" 400 \
+    || { kill -TERM "$WATCH_PID" 2>/dev/null; fail "watcher pid $WATCH_PID outlived its deleted state directory"; }
+  wait_for_exit "$ARM_PID" 100 >/dev/null 2>&1 || true
+  grep -qF 'watcher: exiting - state directory' "$armout" \
+    || fail "watcher did not log the state-gone exit reason: $(cat "$armout")"
+  ! grep -q '^signal:\|^check:\|^stale:\|^heartbeat' "$armout" \
+    || fail "a state-gone exit was reported as an actionable wake: $(cat "$armout")"
+  pass "watch-arm: a watcher exits when its state directory is removed"
+}
+
+# The same for a deleted home whose state directory still exists elsewhere: the
+# lock is released through the ordinary cleanup so nothing stale is left behind.
+test_watcher_exits_when_its_home_is_removed() {
+  local dir home state fakebin armout
+  dir=$(make_case home-removed)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  mkdir -p "$home/data"
+  start_owned_watcher "$home" "$state" "$fakebin" "$armout"
+
+  rm -rf "$home"
+  wait_for_pid_gone "$WATCH_PID" 400 \
+    || { kill -TERM "$WATCH_PID" 2>/dev/null; fail "watcher pid $WATCH_PID outlived its deleted home"; }
+  wait_for_exit "$ARM_PID" 100 >/dev/null 2>&1 || true
+  grep -qF 'watcher: exiting - home no longer exists' "$armout" \
+    || fail "watcher did not log the home-gone exit reason: $(cat "$armout")"
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" != "$WATCH_PID" ] \
+    || fail "the exited watcher left its lock in place"
+  pass "watch-arm: a watcher exits when its home is removed"
+}
+
+# tests/lib.sh's exit-time reaper must stop a watcher a suite armed for a
+# temporary home, through the home-scoped stop, so no test leaves one behind.
+# The reaper is driven with a private registry so this suite's own registry
+# keeps covering the other cases.
+test_reaper_stops_a_tracked_watcher() {
+  local dir state fakebin out
+  dir=$(make_case reaper)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  start_seed_watcher "$state" "$fakebin" "$out"
+  printf '%s\n' "$state" > "$dir/registry"
+  ( FM_TEST_WATCHER_REGISTRY="$dir/registry"; fm_test_reap_watchers )
+  wait_for_exit "$SEED_PID" 100 >/dev/null 2>&1 || true
+  ! is_live_non_zombie "$SEED_PID" \
+    || { kill -TERM "$SEED_PID" 2>/dev/null; fail "reaper left the tracked watcher pid $SEED_PID running"; }
+  [ ! -e "$dir/registry" ] || fail "reaper did not consume its registry"
+  pass "watch-arm: the test reaper stops a watcher armed for a tracked temporary home"
+}
+
 test_attached_arm_reports_the_delivered_wake
 test_attached_arm_reports_the_delivered_wake_after_drain
 test_arm_refuses_an_unusable_launch_confirm_window
+test_arm_refuses_a_disposable_validation_checkout
+test_watcher_exits_when_its_state_directory_is_removed
+test_watcher_exits_when_its_home_is_removed
+test_reaper_stops_a_tracked_watcher
 test_attached_arm_still_fails_on_a_wake_it_did_not_deliver
 test_rearm_resurfaces_durable_queue_and_remote_open_decision
 test_slow_rearm_recovery_is_still_surfaced
@@ -963,6 +1211,8 @@ test_malformed_marker_is_quarantined_once
 test_recovery_consumption_serializes_queue_publication
 test_restart_preserves_recovery_across_reused_pid_lock
 test_markerless_legacy_queue_is_recovered_on_arm
+test_idle_lavish_source_stays_quiet_until_result
+test_append_wakes_live_announced_watcher
 test_handling_window_close_keeps_the_acknowledgement_valid
 test_moved_generation_acknowledgement_is_self_healing
 test_downtime_marker_does_not_follow_symlink
