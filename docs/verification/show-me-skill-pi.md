@@ -1,7 +1,7 @@
 # Verification: `show-me` skill availability on pi
 
 Active empirical facts for the vendored [`skills/show-me/`](../../skills/show-me/) public skill.
-[FIRSTMATE.md](../../skills/show-me/FIRSTMATE.md) owns how to deliver a visual and which view answers which judgement; this record owns what was measured on a real harness, the exact commands, and what is still unproven.
+[FIRSTMATE.md](../../.agents/skills/show-me/FIRSTMATE.md) owns how to deliver a visual and which view answers which judgement; this record owns what was measured on a real harness, the exact commands, and what is still unproven.
 
 ## Subject
 
@@ -93,7 +93,26 @@ The same command rendered a realistic 800x330 diagram containing an embedded SVG
 ## Confirmed: the WeChat image surface and its limits
 
 `send_image_to_wechat` comes from the installed `pi-wechat-assistant` extension (`src/index.ts`), takes one parameter `imagePath`, documents png/jpg/gif/webp, and restricts sends to the session's project directory.
-Calling it in this session returned `微信桥接未启动，请先在 TUI 执行 /wechat start`: the bridge was not running, which is the concrete case the rank-3 fallback in [FIRSTMATE.md](../../skills/show-me/FIRSTMATE.md) exists for.
+Calling it in this session returned `微信桥接未启动，请先在 TUI 执行 /wechat start`: the bridge was not running, which is the concrete case the rank-2 fallback in [FIRSTMATE.md](../../.agents/skills/show-me/FIRSTMATE.md) exists for.
+
+## Confirmed: an internal `.agents/skills/show-me/` copy was NOT observed loading (2026-09-28, later round)
+
+Ruling 1a moves the adaptation to `.agents/skills/show-me/SKILL.md` and requires a real invocation record before calling that "installed". No such record exists yet. Probes run the same evening, in a throwaway git project holding only that directory:
+
+| Probe | Command shape | Result |
+|---|---|---|
+| Non-interactive, no saved trust decision | `pi -p "<list skills starting with 'show'>"` | `NONE` |
+| Same, trust forced for one run | `pi --approve -p "<same>"` | `NONE` |
+| Loader called directly | `loadSkills({ cwd, agentDir, includeDefaults: true, skillPaths: [] })` from the harness's own `dist/core/skills.js` | `{ total: 0 }` |
+| Control from a path already in `trust.json` | `pi -p "<does show-me appear in your skill list?>"` | enumerated 28 internal skills by name; `show-me` absent because the file had just been created |
+
+Reading that goes with the numbers:
+- `pi --help` documents `-ns/--no-skills` as disabling discovery, which is **not** evidence of how discovery works when enabled, so it explains nothing above.
+- pi's settings documentation says non-interactive modes show no trust prompt and fall through `defaultProjectTrust`, where `ask` and `never` ignore project resources - so probe 1's `NONE` has an ordinary explanation.
+- The loader function itself never walks ancestors for `.agents/skills/`; the ancestor walk happens in the resource/package layer above it (`package-manager.js` adds `.agents/skills` dirs per project), so probe 3 tested the wrong layer and cannot falsify discovery either.
+- The control shows internal `.agents/skills/*/SKILL.md` files do get enumerated in practice from a trusted firstmate path, so the mechanism is real; `show-me` was missing there only because it did not exist when that session started.
+
+Conclusion: **discoverability of the internal show-me surface is unverified**, not disproved. It needs a session started after the file landed, or `/skill:show-me` in a live pane. Do not write it as installed until then.
 
 ## Not proven
 
@@ -106,7 +125,8 @@ Calling it in this session returned `微信桥接未启动，请先在 TUI 执�
 ## Reproducing these probes
 
 The portable regression is [`tests/fm-show-me-skill.test.sh`](../../tests/fm-show-me-skill.test.sh); run it with `bash tests/fm-show-me-skill.test.sh`.
-It checks the vendor copy, its license bytes, and every delivery rule without spending a model token, finishes in about a tenth of a second, and skips the loader question when pi is absent.
+It hashes the shipped public body against the pinned upstream fingerprint on every host, compares the real upstream bytes only when this home still holds the private retrieval copy under `data/` (gitignored, so CI compares the fingerprint alone), and asserts the delivery rules in the adaptation text. None of it spends a model token; it finishes in about a tenth of a second.
+It does not ask the loader question at all unless opted in: `fm_live_gate opt-in` exits successfully at the opt-in check, before it looks for pi, so a default run skips the guard whether or not pi is installed.
 The loader observations above come from the same file's live guard, which submits prompts and therefore sits behind `FM_SHOW_ME_LIVE=1` per `tests/lib.sh`'s `fm_live_gate`.
 Run it after a pi upgrade with `FM_SHOW_ME_LIVE=1 bash tests/fm-show-me-skill.test.sh`.
 That guard must stay last in the file: a skipped `fm_live_gate` exits the script successfully, so anything appended after it would stop running without ever failing.

@@ -212,7 +212,8 @@ Firstmate's skills live in two separate places with different audiences:
     It intentionally shares no code with the firstmate-internal `.agents/skills/stow` it is named after, so the two can evolve independently.
   - `skills/show-me`, a vendored HumanLayer skill whose provenance and license are recorded in [`UPSTREAM.md`](skills/show-me/UPSTREAM.md).
     It answers a question with the smallest diagram that makes the point instead of a wall of prose, and ships manual-only (`disable-model-invocation: true`) so it costs context only when you invoke it.
-    Its [`FIRSTMATE.md`](skills/show-me/FIRSTMATE.md) swaps the upstream "open it in a browser" delivery for surfaces a captain actually receives.
+    Firstmate's own adaptation layer proposes replacing that upstream "open it in a browser" delivery with surfaces a captain actually receives, and records which parts were measured; see [`.agents/skills/show-me/FIRSTMATE.md`](.agents/skills/show-me/FIRSTMATE.md) and its [verification record](docs/verification/show-me-skill-pi.md).
+    Discoverability of that adaptation layer and delivery into a live conversation are **not yet proven**, so this README states no outcome beyond what that record shows.
 
 ## Documentation
 

@@ -285,8 +285,12 @@
       "audience": "public-product"
     },
     {
-      "path": "skills/show-me/FIRSTMATE.md",
-      "audience": "public-product"
+      "path": ".agents/skills/show-me/FIRSTMATE.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/show-me/SKILL.md",
+      "audience": "agent-runtime"
     },
     {
       "path": "skills/show-me/SKILL.md",

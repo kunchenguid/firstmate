@@ -20,7 +20,7 @@ This directory vendors a third-party skill; firstmate did not author its content
 - [SKILL.md](SKILL.md) is the upstream file byte-for-byte: same frontmatter, same diagram menu, same judgement note.
   Nothing upstream was rewritten, reordered, deleted, or reworded, and no firstmate sentence was inserted into it.
 - [upstream-LICENSE.txt](upstream-LICENSE.txt) is the upstream license byte-for-byte.
-- [FIRSTMATE.md](FIRSTMATE.md) is firstmate-authored delivery adaptation.
+- [FIRSTMATE.md](../../.agents/skills/show-me/FIRSTMATE.md) is firstmate-authored delivery adaptation.
   It lives beside the vendored file rather than inside it, so the vendored body stays a single-freestanding-upstream-copy and the local additions stay separable and deletable.
 - This repository makes no originality claim over the upstream body.
 
@@ -29,7 +29,7 @@ This directory vendors a third-party skill; firstmate did not author its content
 Pi's `/skill:name` command reads exactly one file: the skill's own `SKILL.md`, with its frontmatter stripped.
 That was confirmed by reading the installed pi 0.84.2 package source, not inferred from a changelog.
 Appending firstmate prose to the vendored body would have broken the byte-for-byte guarantee while still being loaded, so both properties could not be kept by appending.
-Keeping it as a sibling keeps the vendored copy verifiable, at the cost documented in [FIRSTMATE.md](FIRSTMATE.md): a forced skill load does not automatically deliver the sibling, so the pointer has to be explicit.
+Keeping it as a sibling keeps the vendored copy verifiable, at the cost documented in [FIRSTMATE.md](../../.agents/skills/show-me/FIRSTMATE.md): a forced skill load does not automatically deliver the sibling, so the pointer has to be explicit.
 
 ## Local material held for audit
 
