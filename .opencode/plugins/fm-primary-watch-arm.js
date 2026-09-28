@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.js";
 
@@ -116,14 +116,19 @@ async function isPrimaryRoot(root, home) {
   return gitDir.stdout.trim() === commonDir.stdout.trim();
 }
 
-function shouldArm(paths) {
+// Delegates to fm_supervision_needed in bin/fm-supervision-lib.sh, the one
+// owner of "does this home need a watcher" (in-flight *.meta, a registered
+// process-event source, a registered custom check, or X-mode relay polling).
+// This used to reimplement a partial copy here (only *.meta and x-mode.env),
+// which drifted the moment a task with no in-flight work still carried a
+// registered custom check (e.g. the GitHub contributions poll): the turn-end
+// guard correctly demanded a watcher while this predicate said none was
+// needed, so the plugin never armed one and every idle re-triggered the guard.
+async function shouldArm(paths) {
   if (existsSync(`${paths.state}/.afk`)) return false;
-  if (existsSync(`${paths.config}/x-mode.env`)) return true;
-  try {
-    return readdirSync(paths.state).some((name) => name.endsWith(".meta"));
-  } catch {
-    return false;
-  }
+  const script = 'state=$1; root=$2; . "$root/bin/fm-supervision-lib.sh"; fm_supervision_needed "$state"';
+  const result = await runProcess("bash", ["-c", script, "shouldArm", paths.state, paths.root]);
+  return result.code === 0;
 }
 
 async function sessionOwnsLock(paths) {
@@ -494,7 +499,7 @@ async function beginArm(paths, sessionID, client, predecessorArmPid) {
   if (!(await sessionOwnsLock(paths))) return { status: "read-only", armChild: null };
   if (child) return { status: "existing", armChild: child };
   if (retryTimer) return { status: "retrying", armChild: null };
-  if (!shouldArm(paths)) return { status: "not-needed", armChild: null };
+  if (!(await shouldArm(paths))) return { status: "not-needed", armChild: null };
   return { status: "spawned", armChild: spawnArm(paths, sessionID, client, predecessorArmPid) };
 }
 
