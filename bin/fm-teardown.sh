@@ -137,8 +137,8 @@
 # gate, removes the volatile state and record, and lands the backlog transition,
 # while every step that would read or touch a worktree or Treehouse slot is
 # skipped: no no-mistakes run conclusion, no process kill under a worktree (only
-# the per-task tasktmp root is reaped), no branch or hook removal, no Treehouse
-# return, and no slot claim change.
+# the per-task tasktmp root is reaped), no branch or hook removal in a worktree,
+# no Treehouse return, and no slot claim change.
 # The recorded endpoint's exact task identity and the record's spawn incarnation
 # are validated separately
 # before cleanup. Its current working directory is only incidental process
