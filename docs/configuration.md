@@ -984,7 +984,8 @@ Per-machine Cursor `cli-config.json` attribution-off is not this contract: it do
 ## TeamClaude worker routing
 
 [`bin/fm-teamclaude.sh`](../bin/fm-teamclaude.sh) owns how Firstmate-launched workers reach TeamClaude.
-Claude launches use the MITM environment from `teamclaude env --mitm` and refuse to start when that proxy is not usable, with no direct-login fallback.
+Claude and Codex launches refuse to start when that proxy is not usable, with no direct-login fallback.
+Claude launches use the MITM environment from `teamclaude env --mitm`.
 Codex launches send the TeamClaude provider on the command itself and, when `codex` on PATH is an opencodex autostart shim, run the real Codex binary instead of that shim.
 A Codex worker keeps the captain's proxy and CA variables, and its launch adds `127.0.0.1` and `localhost` to `NO_PROXY`/`no_proxy` so only the loopback TeamClaude request skips that proxy.
 opencodex is left running because OpenCode workers still use it, and OpenCode launches are not rewritten.
