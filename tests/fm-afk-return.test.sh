@@ -1121,6 +1121,32 @@ $now${tab}latch${tab}errors=3${tab}cooldown=600s"
   pass "the return brief's failures section names an engine latch inside the away window with its time, error count, and cooldown state"
 }
 
+test_return_brief_keeps_recovered_trip_when_next_append_is_lost() {
+  local dir out now first recovered tab section first_iso recovered_iso
+  dir="$TMP_ROOT/brief-lost-second-trip"
+  tab=$(printf '\t')
+  install_runner "$dir"
+  now=$(date +%s)
+  printf '%s\n' "$((now - 120))" > "$dir/home/state/.afk"
+  first=$((now - 60))
+  recovered=$((now - 30))
+  seed_host_latch "$dir" 2 300 "$((now + 300))" "$first${tab}latch${tab}errors=2${tab}cooldown=300s
+$recovered${tab}recovered${tab}after a successful probe"
+  touch "$dir/home/state/.last-watcher-beat"
+  : > "$dir/home/state/.fake-drain"
+  out=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" FM_CONFIG_OVERRIDE="$dir/home/config" \
+    "$dir/bin/fm-afk-return.sh" begin 2>&1) || fail "a lost second trip append should not hold the gate: $out"
+  section=$(printf '%s\n' "$out" | sed -n '/^Tried and failed, or could not be fixed:$/,/^Landed, cleanup due:$/p')
+  first_iso=$(date -u -r "$first" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d "@$first" +%Y-%m-%dT%H:%M:%SZ)
+  recovered_iso=$(date -u -r "$recovered" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d "@$recovered" +%Y-%m-%dT%H:%M:%SZ)
+  assert_contains "$section" "  - the supervision session latched at $first_iso after 2 consecutive engine errors and paused away supervision (last cooldown 300s); it recovered at $recovered_iso after a successful probe" \
+    "the recorded trip was not kept as recovered"
+  assert_contains "$section" '  - the supervision session latched after engine errors and paused away supervision (trip time unavailable); still paused at return' \
+    "the current pause was not reported separately without a trip time"
+  [ "$(printf '%s\n' "$section" | grep -c 'still paused at return')" -eq 1 ] || fail "the earlier trip was incorrectly marked paused: $section"
+  pass "a lost second trip append does not attach the current pause to a recovered episode"
+}
+
 test_return_brief_keeps_trip_row_count_after_probe() {
   local dir out now tab
   dir="$TMP_ROOT/brief-trip-count"
@@ -1326,6 +1352,7 @@ test_return_brief_health_leads_with_a_gap
 test_return_brief_does_not_report_an_acked_watcher_down_marker_as_a_gap
 test_return_brief_reports_only_an_open_downtime_episode_as_a_gap
 test_return_brief_reports_an_engine_latch_in_the_window
+test_return_brief_keeps_recovered_trip_when_next_append_is_lost
 test_return_brief_keeps_trip_row_count_after_probe
 test_return_brief_ignores_previous_main_session
 test_return_brief_keeps_in_window_history_across_main_restart

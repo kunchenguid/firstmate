@@ -367,7 +367,7 @@ $note" "$evidence"
 # An engine error is a failed turn that exited nonzero or lacked a clean
 # engine result, the latch's own definition.
 engine_snapshot() {  # <evidence-file> <since-epoch>
-  local evidence=$1 since=$2 summary errors trip last latch_errors cooldown recovered retry paused="" state line session_start lock_start sidecar_start count_clause episodes episode_count episode
+  local evidence=$1 since=$2 summary errors trip last latch_errors cooldown recovered retry paused="" state line session_start lock_start sidecar_start count_clause episodes episode_count episode lost_trip=""
   case "$since" in ''|*[!0-9]*) since=0 ;; esac
   # shellcheck source=bin/fm-supervision-engine-lib.sh
   . "$SCRIPT_DIR/fm-supervision-engine-lib.sh" || return 0
@@ -422,11 +422,22 @@ EOF
     while IFS='|' read -r trip latch_errors cooldown; do
       episode=$((episode + 1))
       line="the supervision session latched at $(epoch_to_iso "$trip") after $latch_errors consecutive engine errors and paused away supervision (${count_clause}last cooldown $cooldown)"
-      if [ "$episode" -eq "$episode_count" ]; then line="$line; $state"; fi
+      if [ "$episode" -eq "$episode_count" ]; then
+        if [ -n "$paused" ] && [ -n "$recovered" ] && [ "$recovered" -ge "$trip" ]; then
+          line="$line; it recovered at $(epoch_to_iso "$recovered") after a successful probe"
+          lost_trip=1
+        else
+          line="$line; $state"
+        fi
+      fi
       append_evidence engine "$line" "$evidence"
     done <<EOF
 $episodes
 EOF
+    if [ -n "$lost_trip" ]; then
+      line="the supervision session latched after engine errors and paused away supervision (trip time unavailable${count_clause:+, ${count_clause%, }}); $state"
+      append_evidence engine "$line" "$evidence"
+    fi
     return 0
   elif [ -n "$paused" ] && [ -n "$trip" ] && [ -z "$recovered" ]; then
     line="the supervision session was already latched after engine errors when the window began; $state"
