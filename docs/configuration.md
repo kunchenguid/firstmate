@@ -9,6 +9,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | --- | --- |
 | Firstmate's code, private files, or project location | [FM_HOME](#fm_home) and [operational home layout](#operational-home-layout-and-state) |
 | Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
+| Worker routing and fleet-wide route limits | [Crew dispatch profiles](#crew-dispatch-profiles-configcrew-dispatchjson) and [fleet seat pools](#fleet-seat-pools-configfleet-seats) |
 | Worker permissions, accounts, or environment | [Codex approval review](#codex-automatic-approval-review), [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [Codex permission mode](#codex-permission-mode-configcodex-permission-mode), [persistent managed-policy failover](#persistent-managed-policy-failover), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist), and its [Orca environment source](#orca-environment-source-configlaunch-env-tmux-session) |
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), [external memory tiers](#external-memory-tiers-memory-layering-section), [record export](#record-export-configrecord-export-root), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), [warm-cache compaction](#warm-cache-compaction-configwarm-compact), and [Calm preference](#calm-preference-configcalm) |
@@ -2077,6 +2078,58 @@ FM_DISPATCH_BASE_URL=http://127.0.0.1:8080
 
 The live rule-match evidence is recorded in [`verification/dispatch-resolve.md`](verification/dispatch-resolve.md).
 
+## Fleet seat pools (config/fleet-seats)
+
+`config/fleet-seats` is an optional local, gitignored JSON file in the primary home that caps how many task workers may run at once on a shared model route across the whole fleet, rather than per home.
+Without it, no spawn is capped.
+[`bin/fm-fleet-seats.sh`](../bin/fm-fleet-seats.sh) owns the accounting mechanics and exit codes; this section owns the operator contract.
+
+```json
+{
+  "pools": [
+    { "name": "john-qwen", "capacity": 6, "models": ["john-lan/qwen3.8-flash-next", "john-remote/qwen3.8-flash-next"] }
+  ]
+}
+```
+
+| Field | Requirement |
+| --- | --- |
+| `name` | Required, unique, letters, digits, `.`, `_`, or `-`. |
+| `capacity` | Required whole number of seats, `0` or more. |
+| `models` | Required non-empty list of exact `--model` strings; one model belongs to at most one pool. |
+
+List every provider spelling that reaches the same endpoint in one pool, because a pool matches the exact model string a spawn passes.
+
+**What a seat is**
+
+- A seat is one active agent slot: a ship or scout whose task record names a pooled model.
+- A seat is not an inference request, so the endpoint's own request concurrency is a separate limit this file does not measure.
+- A worker holds its seat from spawn until cleanup removes its task record, including while it waits for review or merge.
+- A relaunch onto a model outside the pool frees the seat, and a relaunch on the same route keeps it even when the pool is full.
+- A persistent secondmate agent is a home, not a task worker, so it never holds a seat.
+- A spawn without an explicit `--model` records the harness default and is not matched to a pool, so pooled routes must pass the model explicitly.
+
+**Which homes share a pool**
+
+- The primary home and every local secondmate whose parent binding leads to it share the primary's pools, capacity, and one lock.
+- The count includes every pooled task record in the primary and in each local secondmate registered in `data/secondmates.md`, so workers launched before the file existed are counted.
+- A remote secondmate cannot reach the primary's accounting, so its spawn refuses any model its inherited copy of this file pools.
+  Route pooled work to the primary or a local home, or use another route there.
+
+**Refusals**
+
+- `fm-spawn.sh` reserves the seat before any endpoint, worktree, or record exists, so a refusal costs nothing to unwind.
+- A full pool refuses with the current holders listed.
+- An unreachable, unreadable, locked, or malformed authority also refuses, because an uncounted seat is never treated as free.
+- Neither refusal changes the route: firstmate picks the overflow route from `config/crew-dispatch.json` at its own model and effort, or holds the task.
+- A reservation left by a spawn that died before publishing its record is reclaimed at the next reservation; a live task record is never reclaimed.
+
+Run `bin/fm-fleet-seats.sh status` from any local home to see each pool's capacity, used and free seats, and holders before choosing a pooled route at intake.
+
+**Inheritance**
+
+Secondmate homes inherit this file from the primary so a remote home knows which models to refuse; a local home counts against the primary's own copy.
+
 ## Toolchain
 
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with its exact install or upgrade command, or with manual instructions.
@@ -3317,6 +3370,7 @@ FMX_FOLLOWUP_MAX_AGE_SECS=604800   # local window for posting Relay completion f
 FMX_FOLLOWUP_MAX_COUNT=3   # local cap on Relay completion follow-ups per linked mention
 FM_PF_RETRY_BACKOFF_SECS=900   # seconds before the next attempt after a retryable promised-public-reply delivery error
 FM_LOCK_STALE_AFTER=2   # grace seconds for missing or nonnumeric lock-owner PIDs (minimum 2s); dead numeric PIDs, and live ones whose start time (or, for the watch lock, process identity) no longer matches the holder's recorded value, have no age grace
+FM_FLEET_SEATS_LOCK_WAIT=30   # seconds a seat reservation waits for the fleet seat lock before refusing (docs/configuration.md "Fleet seat pools")
 FM_GUARD_GRACE=300      # beacon freshness threshold for guard verdicts, arm health checks, and the primary turn-end guard; see docs/turnend-guard.md for model-aware exceptions
 FM_CLAUDE_AUTOARM_ATTEMPTS=2   # bounded Stop-owned arm attempts per Claude auto-arm cycle; accepted values are 1, 2, or 3
 FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=800   # milliseconds the --claude turn-end guard waits for watcher health, an open Stop auto-arm generation claim, or a fresh epoch before deciding recovery ownership or failure progression

@@ -3314,6 +3314,20 @@ if [ -n "$WORKER_ACCOUNT" ] && [ "$HARNESS" = claude ]; then
   fi
 fi
 
+# Fleet seat pool (bin/fm-fleet-seats.sh owns the contract): a ship or scout on
+# a pooled model reserves its fleet-wide seat before any endpoint, worktree, or
+# record exists, so a full pool or an unreachable authority refuses at no
+# unwind cost. This process is the reservation's holder until the published
+# task record takes over, and a relaunch on the same route keeps its seat. A
+# secondmate is a persistent home, not a task worker, and holds no seat.
+if [ "$KIND" != secondmate ]; then
+  FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG FM_DATA_OVERRIDE=$DATA \
+    "$SCRIPT_DIR/fm-fleet-seats.sh" reserve "$ID" --model "${MODEL:-default}" --holder-pid "$$" || {
+    echo "error: spawn refused - task $ID has no fleet seat for model ${MODEL:-default} (see the fleet-seats line above)" >&2
+    exit 1
+  }
+fi
+
 secondmate_registry_value() {
   secondmate_registry_field "$DATA/secondmates.md" "$1" "$2"
 }
