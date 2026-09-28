@@ -7,7 +7,7 @@
 # data/<task-id>/brief.md for future relaunches, and prints the fm-send.sh command
 # that delivers it to the current worker. Those instructions carry the
 # scratch-state inventory, the clean
-# default-branch base, the fm/<task-id> branch, and - rendered from
+# default-branch base, the immutable ship branch, and - rendered from
 # bin/fm-dod-lib.sh, the single owner an ordinary ship brief also uses - the
 # mode-specific Definition of done, so a promoted worker receives exactly the same
 # delivery contract as a briefed one, including the no-mistakes mode's ask-user
@@ -17,14 +17,25 @@
 # is not relabeled as the ship spec. Promotion refuses leftover `{TASK}` /
 # `{FIRSTMATE_SPEC}` placeholders and a `## Captain's intent` line opening with
 # a Captain label or address (bin/fm-dod-lib.sh). A pre-subsection scout
-# brief contributes only Task lines explicitly marked as captain words to intent.
+# brief contributes only Task lines explicitly marked as captain words to intent,
+# read outside fenced blocks and indented examples so a quoted `Captain:` sample
+# never passes the provenance gate as the ask (bin/fm-dod-lib.sh).
 # A scout records no delivery posture, so promotion is where this task's delivery
-# contract is decided: --mode and --yolo are REQUIRED and written into the meta
-# alongside the kind= flip. Firstmate resolves both at promotion time, having just
+# contract is decided: --mode, --yolo, and the ship branch resolved from
+# --branch-prefix are written into the meta alongside the kind= flip. Firstmate resolves all three at promotion time, having just
 # read the scout's report (AGENTS.md section 7); data/projects.md holds the
-# captain's standing posture as context, and this script never looks it up.
+# captain's standing posture as context, and this script never looks that posture
+# up. The registry IS read for one thing only: the project's forge binding, which
+# is a project fact rather than a per-task decision, so promotion takes it from
+# there instead of asking firstmate to remember it.
 # no-mistakes-prod-only is a registry policy rather than a task mode and is refused.
-# Usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off>
+# There is no --forge flag here: the binding comes from the registry, and for a
+# task record naming no project it is none. bin/fm-brief.sh takes --forge instead
+# because that script has no registry access at all, and bin/fm-spawn.sh checks
+# its value against the registry; bin/fm-project-mode.sh's header owns the
+# binding and bin/fm-dod-lib.sh owns what it changes for the worker, including
+# the refusal of a forge on local-only.
+# Usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>]
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -52,8 +63,10 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 
 MODE=
 YOLO=
+BRANCH_PREFIX=fm/
 MODE_SET=0
 YOLO_SET=0
+FORGE=none
 POS=()
 want_value=
 for a in "$@"; do
@@ -64,6 +77,7 @@ for a in "$@"; do
     case "$want_value" in
       mode) MODE=$a; MODE_SET=1 ;;
       yolo) YOLO=$a; YOLO_SET=1 ;;
+      branch-prefix) BRANCH_PREFIX=$a ;;
     esac
     want_value=
     continue
@@ -73,6 +87,8 @@ for a in "$@"; do
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
     --yolo) want_value=yolo ;;
     --yolo=*) YOLO=${a#--yolo=}; YOLO_SET=1 ;;
+    --branch-prefix) want_value="branch-prefix" ;;
+    --branch-prefix=*) BRANCH_PREFIX=${a#--branch-prefix=} ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -97,9 +113,31 @@ case "$YOLO" in
   on|off) ;;
   *) echo "error: --yolo must be on or off (got '$YOLO')" >&2; exit 1 ;;
 esac
+# A posture this forge cannot carry is refused once the registry binding has been
+# read. Merge authority on a Gerrit forge is refused rather than quietly dropped,
+# on the captain's decision of 2026-09-15 (bin/fm-project-mode.sh's header carries
+# it). The call right below the definition is kept deliberately as a guard on the
+# mode and yolo posture; it cannot refuse on the forge, which stays none until the
+# registry supplies it after the lock, so the post-registry call is the one that
+# fires.
+refuse_impossible_forge_posture() {
+  fm_forge_valid_for_mode "$FORGE" "$MODE" fm-promote.sh || return 1
+  if [ "$FORGE" = gerrit ] && [ "$YOLO" = on ]; then
+    echo "error: --yolo on is refused for forge=gerrit: a Code-Review+2 is a positive attributed claim that a named human approved and firstmate must not manufacture one (captain's decision 2026-09-15); promote with --yolo off and take any landing on a current explicit captain instruction naming that concrete change" >&2
+    return 1
+  fi
+  return 0
+}
+refuse_impossible_forge_posture || exit 1
 
 ID=${POS[0]}
 fm_task_id_creation_valid "$ID" || { echo "error: invalid task id" >&2; exit 2; }
+BRANCH="$BRANCH_PREFIX$ID"
+if ! git check-ref-format --branch "$BRANCH" >/dev/null 2>&1; then
+  echo "error: --branch-prefix and task id must form a valid git branch (got '$BRANCH')" >&2
+  exit 1
+fi
+printf -v BRANCH_Q '%q' "$BRANCH"
 CONTROL_LOCK="$STATE/.control-$ID.lock"
 CONTROL_LOCK_HELD=0
 META_LOCK=
@@ -144,6 +182,23 @@ if ! fm_backlog_record_present "$META" "task record" "$STATE"; then
 fi
 grep -qx 'kind=scout' "$META" || { echo "error: task $ID is not a scout task (kind=scout not in meta)" >&2; exit 1; }
 
+# Unlike the mode and yolo above, the forge is not a per-task decision: it is the
+# captain's project binding, so promotion takes it from the registry rather than
+# from a flag firstmate must remember.
+PROMOTE_PROJECT=$(sed -n 's/^project=//p' "$META" | head -n 1)
+if [ -n "$PROMOTE_PROJECT" ]; then
+  PROMOTE_PROJECT_NAME=$(basename "$PROMOTE_PROJECT")
+  if ! PROMOTE_STANDING_FORGE=$("$FM_ROOT/bin/fm-project-mode.sh" --forge "$PROMOTE_PROJECT_NAME"); then
+    echo "error: $ID cannot promote: the registry entry for $PROMOTE_PROJECT_NAME does not resolve to a delivery posture (see the refusal above); correct data/projects.md and promote again" >&2
+    exit 1
+  fi
+  FORGE=${PROMOTE_STANDING_FORGE:-none}
+  refuse_impossible_forge_posture || exit 1
+fi
+# An unbound project keeps the exact wording it always had.
+PROMOTE_FORGE_WORDS=
+[ "$FORGE" = none ] || PROMOTE_FORGE_WORDS=" forge=$FORGE"
+
 SCOUT_BRIEF="$DATA/$ID/brief.md"
 if fm_brief_task_placeholders_present "$SCOUT_BRIEF"; then
   echo "error: $SCOUT_BRIEF still contains {TASK} or {FIRSTMATE_SPEC}; preserve the original ask in ## Captain's intent and fill the scout-time ## Firstmate spec; promotion generates a separate ship-time spec" >&2
@@ -179,10 +234,10 @@ if [ "$MODE" = no-mistakes ]; then
   PROMOTION_ASK_USER_BLOCK=$(fm_ask_user_escalation_block "$DATA" "$ID")
 fi
 IFS= read -r -d '' PROMOTION_SHIP_SPEC <<EOF || true
-If these promotion steps were already completed before a relaunch, preserve the existing \`fm/$ID\` branch and continue from its current state; do not repeat them destructively.
+If these promotion steps were already completed before a relaunch, preserve the existing \`$BRANCH_Q\` branch and continue from its current state; do not repeat them destructively.
 1. **Verify isolation before anything else.** Run \`pwd -P\` and \`git rev-parse --show-toplevel\`; both must resolve to the disposable task worktree you were launched in, such as a treehouse pool path or an Orca-managed worktree, not the primary checkout firstmate operates from. If either does not resolve to the worktree you were launched in, stop and escalate to firstmate.
 2. Inventory this worktree's scratch state with \`git status\` and \`git log\` before changing anything.
-3. Return to a clean default-branch base, then create your branch: \`git checkout -b fm/$ID\`.
+3. Return to a clean default-branch base, then create your branch: \`git checkout -b $BRANCH_Q --\`.
 4. Carry over only the intended fix changes. Leave scratch commits, debug edits, and experiment files behind.
 5. If you reproduced a bug, turn that reproduction into a regression test.
 6. Treat the scout-time Firstmate spec and any unmarked legacy \`# Task\` text as investigation context, not captain intent or current ship-time instructions.
@@ -191,7 +246,7 @@ EOF
 promote_delivery_contract() {
   cat <<EOF
 # Current delivery mode contract
-This task is now kind=ship with mode=$MODE.
+This task is now kind=ship with mode=$MODE$PROMOTE_FORGE_WORDS.
 This section supersedes every earlier brief instruction about delivery mode.
 These current ship instructions supersede the scout delivery rules and report-based Definition of done.
 Any earlier "Never push" or scout-only delivery language in this file is superseded.
@@ -199,13 +254,13 @@ The mode-specific Definition of done below is the current delivery contract.
 
 # Current ship safety rule
 EOF
-  fm_ship_rule_one "$MODE" "$ID"
+  fm_ship_rule_one "$MODE" "$ID" "$BRANCH" "$FORGE"
   if [ -n "$PROMOTION_ASK_USER_BLOCK" ]; then
     printf '\nThe no-mistakes ask-user escalation below supersedes the scout rule 6 escalation shape.\n'
     printf '%s\n' "$PROMOTION_ASK_USER_BLOCK"
   fi
   printf '\n'
-  fm_dod_block "$MODE" "$ID"
+  fm_dod_block "$MODE" "$ID" "$BRANCH" "$FORGE"
 }
 mkdir -p "$DATA/$ID"
 [ ! -d "$INSTRUCTIONS" ] || { echo "error: ship instructions path is a directory: $INSTRUCTIONS" >&2; exit 1; }
@@ -258,11 +313,12 @@ fi
 BRIEF_REPLACEMENT=
 
 TMP="$STATE/.$ID.meta.promote.${BASHPID:-$$}"
-grep -v -e '^kind=' -e '^mode=' -e '^yolo=' "$META" > "$TMP"
+grep -v -e '^kind=' -e '^mode=' -e '^yolo=' -e '^branch=' "$META" > "$TMP"
 {
   echo "kind=ship"
   echo "mode=$MODE"
   echo "yolo=$YOLO"
+  echo "branch=$BRANCH"
 } >> "$TMP"
 if ! fm_backlog_atomic_transition publish "$TMP" "$META" "task record" "$STATE"; then
   rm -f -- "$TMP"
@@ -278,8 +334,8 @@ META_LOCK_HELD=0
 
 HOME_Q=$(printf '%q' "$FM_HOME")
 INSTRUCTIONS_Q=$(printf '%q' "$INSTRUCTIONS")
-echo "promoted $ID to ship mode=$MODE yolo=$YOLO (teardown protection restored)"
-echo "wrote ship instructions for mode=$MODE: $INSTRUCTIONS"
+echo "promoted $ID to ship mode=$MODE yolo=$YOLO$PROMOTE_FORGE_WORDS (teardown protection restored)"
+echo "wrote ship instructions for mode=$MODE$PROMOTE_FORGE_WORDS: $INSTRUCTIONS"
 echo "next: FM_HOME=$HOME_Q bin/fm-send.sh fm-$ID \"\$(cat $INSTRUCTIONS_Q)\""
 
 promote_print_rechain_hint() {

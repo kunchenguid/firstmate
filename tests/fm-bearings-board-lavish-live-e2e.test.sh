@@ -35,6 +35,7 @@ note() { printf '# %s\n' "$1"; }
 
 LAB=''
 cleanup() {
+  fm_test_reap_procevent_homes
   [ -z "$LAB" ] || {
     [ ! -f "$LAB/.lavish/bearings-board.html" ] \
       || lavish-axi end "$LAB/.lavish/bearings-board.html" >/dev/null 2>&1 || true
@@ -50,6 +51,7 @@ note "lavish-axi ${VERSION:-version-unknown}"
 LAB=$(mktemp -d "${TMPDIR:-/tmp}/fm-bearings-lavish-live.XXXXXX") || fail "cannot create the guard lab"
 LAB=$(cd -P -- "$LAB" && pwd -P)
 mkdir -p "$LAB/state" "$LAB/data"
+fm_test_track_procevent_home "$LAB" "$LAB/procevent-claims"
 
 cat > "$LAB/payload.json" <<'JSON'
 {

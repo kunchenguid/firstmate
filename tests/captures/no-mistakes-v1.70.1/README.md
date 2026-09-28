@@ -28,6 +28,7 @@ No branch in that repository had two recorded live runs at capture time.
 Only the copy's repository `working_path` was relocated to the permitted worktree; no pipeline was initialized or controlled.
 The copy omitted step data and had no daemon, so the unrelated active-run detail from that output is intentionally excluded.
 The retained section demonstrates the actual ten-row cap, row order, quoting, and field layout.
+The excluded header also carried the overview's top-level `repo:` line, the resolved `working_path` that the capped-inventory reader uses as repository identity, so this section's lack of that line says nothing about the real output.
 Original stdout, source projections, and SHA-256 digests were retained in the test-phase evidence directory under `real-anchors/`.
 
 ## Replay transformations and limits

@@ -42,7 +42,7 @@
 # Both layers are bounded by process lifetime, so a tasks-axi install or upgrade
 # is picked up by the next process rather than being cached to disk.
 
-FM_TASKS_AXI_MIN=0.2.4
+FM_TASKS_AXI_MIN=0.2.6
 
 FM_TASKS_AXI_COMPATIBLE_MEMO=${FM_TASKS_AXI_COMPATIBLE:-}
 unset FM_TASKS_AXI_COMPATIBLE

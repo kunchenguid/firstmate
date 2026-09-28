@@ -121,3 +121,19 @@ export function classifyFirstmateCurrentOperationalText(
 ): string | undefined {
   return runOperationalInputCommand("kind", content);
 }
+
+// The only legacy operational shape Calm presentation hides on top of the current
+// typed kinds. The broader `classify` legacy set stays out: its bare forms are text a
+// captain can type, so hiding them would hide real input.
+const LEGACY_CALM_OPERATIONAL_PREFIX = "\u2063Supervisor escalate (";
+
+// Single owner of "may Calm presentation hide this exact input?", shared by the
+// transcript-row and queued-row adapters so the two can never disagree about a message.
+// Text without the U+2063 marker answers here without spawning the classifier.
+export function isFirstmateOperationalPresentationText(text: string): boolean {
+  if (!text.includes("\u2063")) return false;
+  return (
+    classifyFirstmateCurrentOperationalText(text) !== undefined ||
+    text.startsWith(LEGACY_CALM_OPERATIONAL_PREFIX)
+  );
+}

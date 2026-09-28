@@ -4,8 +4,10 @@
 // Pi emits session_shutdown for ordinary same-process replacements (/new, /resume,
 // /fork, reload) as well as terminal quit. This extension binds one generation per
 // session activation. Only the active live generation may start, stop, rearm, or
-// clear the arm child. An owning replacement session_start (or fresh factory bind)
-// arms its new generation without a model turn. A replacement handoff carries
+// clear the arm child. Replacement shutdown publishes a generation-bound handoff
+// phase but retains its established child until the next owning session_start (or
+// fresh factory bind) publishes a distinct active generation and commits the
+// tracked replacement arm without a model turn. A replacement handoff carries
 // actionable closes that were still pending delivery; its durable state lives at
 // state/extensions/pi-primary-watch/session-replacement-actionable.json.
 // Terminal quit leaves the final generation stopped so late callbacks cannot rearm.
@@ -42,9 +44,9 @@ import { Type } from "typebox";
 import { registerFirstmateTool } from "./lib/fm-native-contract.ts";
 import {
   afkPostureRecordPresent,
+  branchOfferForWake,
   createBranchDispatchOffer,
   FM_BRANCH_DISPATCH_EVENT,
-  scopeForUnreadWake,
 } from "./lib/fm-branch-dispatch.ts";
 import {
   type CalmPresentationState,
@@ -162,7 +164,6 @@ const armRetireTimeoutMs = positiveInteger("FM_WATCH_ARM_RETIRE_TIMEOUT_MS", 100
 const repairOnlyHint = "call fm_watch_arm_pi again only after a later notification says the cycle is missing, failed, or unhealthy";
 const shuttingDownMessage = "watcher: not armed - Pi session is shutting down";
 
-let nextGenerationId = 0;
 let nextHandoffId = 0;
 let activeGeneration: SessionGeneration | null = null;
 let replacementHandoff: PendingActionableClose[] | null = null;
@@ -175,6 +176,7 @@ type ReplacementCoordinator = {
   receiver: ReplacementActionableReceiver | null;
   pending: PendingActionableClose[];
   nextTokenId: number;
+  nextGenerationId: number;
   deliveries: Map<string, ActionableDeliveryClaim>;
 };
 type ReplacementCoordinatorGlobal = typeof globalThis & {
@@ -189,6 +191,7 @@ function replacementCoordinatorFor(handoff: string): ReplacementCoordinator {
     receiver: null,
     pending: [],
     nextTokenId: 0,
+    nextGenerationId: 0,
     deliveries: new Map(),
   };
   replacementCoordinators.set(handoff, created);
@@ -197,6 +200,7 @@ function replacementCoordinatorFor(handoff: string): ReplacementCoordinator {
 const replacementCoordinator = replacementCoordinatorFor(actionableHandoff);
 const armReadiness = new WeakMap<ChildProcess, Promise<boolean>>();
 const armClose = new WeakMap<ChildProcess, Promise<void>>();
+const retiringGenerations = new Set<SessionGeneration>();
 // Children the extension itself asked to exit; their close is not a failure
 // of the successor and never earns a deferred retry.
 const armRetired = new WeakSet<ChildProcess>();
@@ -241,10 +245,39 @@ function lockOwnership(): LockOwnership {
   return pidAlive(lockPid) ? "other" : "missing";
 }
 
-function markLoaded(): void {
+function publishGenerationOwner(generation: SessionGeneration, phase: "active" | "handoff"): void {
   if (lockOwnership() === "other") return;
   mkdirSync(state, { recursive: true });
-  writeFileSync(marker, `${extensionVersion}\n${process.pid}\n`);
+  const temporary = `${marker}.tmp-${process.pid}-${generation.id}`;
+  writeFileSync(
+    temporary,
+    `${extensionVersion}\n${process.pid}\ngeneration=${generation.id} phase=${phase}\n`,
+    { mode: 0o600 },
+  );
+  renameSync(temporary, marker);
+}
+
+function retireGenerationOwner(generation: SessionGeneration, replacement: boolean): void {
+  let lines: string[];
+  try {
+    lines = readFileSync(marker, "utf8").trimEnd().split(/\r?\n/);
+  } catch {
+    return;
+  }
+  if (
+    lines[0] !== extensionVersion ||
+    lines[1] !== String(process.pid) ||
+    lines[2] !== `generation=${generation.id} phase=active`
+  ) return;
+  if (replacement) {
+    publishGenerationOwner(generation, "handoff");
+    return;
+  }
+  try {
+    unlinkSync(marker);
+  } catch (error) {
+    if (nodeErrorCode(error) !== "ENOENT") throw error;
+  }
 }
 
 function actionableLine(output: string): string {
@@ -421,7 +454,7 @@ function classifyClose(stdout: string, stderr: string, code: number | null, sign
 
 function createGeneration(): SessionGeneration {
   return {
-    id: ++nextGenerationId,
+    id: ++replacementCoordinator.nextGenerationId,
     stopping: false,
     replacement: false,
     child: null,
@@ -445,15 +478,21 @@ function generationIsLive(generation: SessionGeneration): boolean {
   return activeGeneration === generation && !generation.stopping;
 }
 
-function stopGeneration(generation: SessionGeneration): ChildProcess | null {
+function relinquishGeneration(generation: SessionGeneration): void {
   generation.stopping = true;
   if (generation.retryTimer) clearTimeout(generation.retryTimer);
   if (generation.cleanupTimer) clearTimeout(generation.cleanupTimer);
   generation.retryTimer = null;
   generation.cleanupTimer = null;
+  if (generation.child) retiringGenerations.add(generation);
+}
+
+function stopGeneration(generation: SessionGeneration): ChildProcess | null {
+  relinquishGeneration(generation);
   const child = generation.child;
   if (child) child.kill("SIGTERM");
   generation.child = null;
+  retiringGenerations.delete(generation);
   return child;
 }
 
@@ -472,12 +511,25 @@ async function waitForGenerationChildClose(armChild: ChildProcess | null): Promi
 
 async function stopSessionGeneration(generation: SessionGeneration, replacement: boolean): Promise<void> {
   generation.replacement = replacement;
-  let persistedTokens = "";
+  retireGenerationOwner(generation, replacement);
+  if (!replacement) {
+    const child = stopGeneration(generation);
+    await waitForGenerationChildClose(child);
+    return;
+  }
+
+  // A same-process replacement has not proved its successor yet. Keep this
+  // generation's established arm child alive while transferring delivery and
+  // retry responsibility. The replacement's --restart arm retires it only
+  // after the new generation has committed its own tracked child.
+  relinquishGeneration(generation);
+  const observed = generation.child ? armPendingActionable.get(generation.child) : undefined;
+  if (observed && !generation.pendingActionables.some((item) => item.token === observed.token)) {
+    generation.pendingActionables.push(observed);
+  }
+  if (generation.pendingActionables.length === 0) return;
   try {
-    if (replacement && generation.pendingActionables.length > 0) {
-      persistReplacementHandoff(generation.pendingActionables);
-      persistedTokens = generation.pendingActionables.map((pending) => pending.token).join("\n");
-    }
+    persistReplacementHandoff(generation.pendingActionables);
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     for (const pending of generation.pendingActionables) {
@@ -487,18 +539,11 @@ async function stopSessionGeneration(generation: SessionGeneration, replacement:
         message: `${pending.message}\n\nwatcher: FAILED - Pi extension could not persist a replacement-session actionable wake\n${detail}`,
       });
     }
-    throw error;
-  } finally {
-    const child = stopGeneration(generation);
-    await waitForGenerationChildClose(child);
-  }
-  const currentTokens = generation.pendingActionables.map((pending) => pending.token).join("\n");
-  if (replacement && currentTokens && currentTokens !== persistedTokens) {
-    persistReplacementHandoff(generation.pendingActionables);
   }
 }
 
 const cleanupOnProcessExit = () => {
+  for (const generation of retiringGenerations) stopGeneration(generation);
   if (activeGeneration) stopGeneration(activeGeneration);
 };
 process.once("exit", cleanupOnProcessExit);
@@ -606,46 +651,9 @@ export default function (pi: ExtensionAPI) {
   }
 
   function offerWakeToBranch(message: string): Promise<void> | null {
-    const heartbeat = /^heartbeat($|:)/.test(message);
-    // A check-kind close (merge-confirmation polls, Relay mentions,
-    // credential/auth failures, and every other legitimately main-only
-    // class - docs/pi-supervision-branch.md) is never routed to the branch
-    // even when other currently-unread rows are individually eligible: this
-    // watcher cycle's own triggering event stays on main, exactly as before
-    // scopeForUnreadWake stopped letting a co-present check row veto the
-    // whole scan. That relaxation is what lets an UNRELATED eligible
-    // signal/stale row still reach the branch on this cycle; it must never
-    // also let a check-kind trigger itself slip past main's delivery.
-    const isCheckTrigger = /^check:/.test(message);
-    // The away posture collapses the partition below: every actionable row is
-    // branch-eligible and the trigger class no longer forces anything to main
-    // (lib/fm-branch-dispatch.ts owns the per-row rule).
-    const afk = afkPostureRecordPresent(state);
-    const scope = scopeForUnreadWake(state, heartbeat, afk);
-    // A signal close containing a needs-decision status file, or a stale close
-    // for a captain-held task, gets the identical main-only treatment as a
-    // check-kind trigger. The cross-reference deliberately includes every
-    // unread decision row: until that row is read, a later signal or stale
-    // trigger for the same task stays on main. Other tasks and heartbeat
-    // handling remain independent.
-    const triggerKeys = /^signal:/.test(message)
-      ? message
-        .slice("signal:".length)
-        .split(/\s+/)
-        .filter(Boolean)
-        .map((path) => path.split("/").pop() ?? path)
-      : /^stale:/.test(message)
-        ? [message.slice("stale:".length).trim().split(/\s+/, 1)[0]].filter(Boolean)
-        : [];
-    const taskIdentity = (key: string): string =>
-      scope.taskByWakeKey[key] ?? scope.taskByWakeKey[key.replace(/^fm-/, "")] ?? key;
-    const needsDecisionTasks = new Set(scope.needsDecisionKeys.map(taskIdentity));
-    const isNeedsDecisionTrigger = triggerKeys.some((key) => needsDecisionTasks.has(taskIdentity(key)));
-    const attendedEligible = !isCheckTrigger && !isNeedsDecisionTrigger && (
-      afk ? scopeForUnreadWake(state, heartbeat, false).eligible : scope.eligible
-    );
-    const eligible = afk ? scope.eligible : attendedEligible;
-    const awayOnly = Boolean(eligible && !attendedEligible);
+    // lib/fm-branch-dispatch.ts owns the offer rule for one close, shared with
+    // the supervision host off Pi (bin/fm-branch-dispatch.mjs offer).
+    const { scope, heartbeat, eligible, awayOnly } = branchOfferForWake(state, message, afkPostureRecordPresent(state));
     const offer = createBranchDispatchOffer(message, scope.projects, heartbeat, eligible, awayOnly);
     pi.events?.emit?.(FM_BRANCH_DISPATCH_EVENT, offer);
     return offer.accepted ? offer.settlement : null;
@@ -960,7 +968,7 @@ export default function (pi: ExtensionAPI) {
         message: "watcher: not armed - no live session holds the lock; run bin/fm-session-start.sh to reclaim it, then call fm_watch_arm_pi to re-arm",
       };
     }
-    markLoaded();
+    publishGenerationOwner(owner, "active");
     if (owner.child) {
       return {
         ok: true,
@@ -1020,11 +1028,11 @@ export default function (pi: ExtensionAPI) {
       if (reason && !armPendingActionable.has(armChild)) {
         const pending = createPendingActionable(reason, String(armChild.pid ?? ""));
         armPendingActionable.set(armChild, pending);
-        enqueuePendingActionable(owner, pending);
       }
     };
     const releaseChild = (): void => {
       if (owner.child === armChild) owner.child = null;
+      if (!owner.child) retiringGenerations.delete(owner);
     };
     armChild.stdout.on("data", (chunk: Buffer) => {
       stdout += chunk.toString();
@@ -1120,7 +1128,6 @@ export default function (pi: ExtensionAPI) {
   pi.on?.("session_start", async () => {
     if (generation.stopping) generation = createGeneration();
     activateGeneration(generation);
-    markLoaded();
     if (lockOwnership() !== "owned") return;
     activateOwnedWatch(generation);
   });
@@ -1182,5 +1189,9 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  markLoaded();
+  // Pi loads project extensions before the first model turn can run the locked
+  // session-start command. Publish this generation while the lock is absent so
+  // that command can distinguish a loaded extension from a missing one; a
+  // foreign live lock still suppresses publication.
+  publishGenerationOwner(generation, "active");
 }

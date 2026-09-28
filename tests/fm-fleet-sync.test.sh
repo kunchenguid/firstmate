@@ -410,6 +410,27 @@ test_local_only_skipped() {
   pass "local-only clone is skipped (benign), not flagged STUCK"
 }
 
+# A registry entry the parser refuses resolves to no posture at all, so sync must
+# skip the clone rather than fall back to the default posture: reading a refusal
+# as "no-mistakes" is how a local-only clone would be fetched and fast-forwarded.
+test_unresolvable_registry_posture_skipped() {
+  local home clone out before
+  home=$(new_home)
+  clone=$(build_pair "$home" omicron)
+  advance_origin "$home" omicron C1
+  before=$(head_sha "$clone")
+  mkdir -p "$home/data"
+  printf -- '- omicron [local-only forge=githb] - test project (added 2026-06-27)\n' > "$home/data/projects.md"
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "omicron: skipped: registry entry does not resolve to a delivery posture" \
+    "a refused registry entry was not reported as a skip"
+  assert_not_contains "$out" "STUCK" "a refused registry entry was escalated to STUCK"
+  [ "$(head_sha "$clone")" = "$before" ] || fail "a clone whose registry entry was refused was still fast-forwarded"
+  pass "a clone whose registry entry the parser refuses is skipped, never synced on the default posture"
+}
+
 test_single_project_by_bare_name_resolves() {
   local home out
   home=$(new_home)
@@ -704,6 +725,7 @@ test_on_default_clean_behind_fast_forwards
 test_already_current_unchanged
 test_no_origin_skipped
 test_local_only_skipped
+test_unresolvable_registry_posture_skipped
 test_single_project_by_bare_name_resolves
 test_single_project_by_bare_name_ignores_cwd_shadow
 test_single_project_by_projects_relative_name_resolves

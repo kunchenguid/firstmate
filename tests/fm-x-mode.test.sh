@@ -734,6 +734,95 @@ test_reply_whitespace_text_rejected() {
   pass "fm-x-reply rejects whitespace-only reply text"
 }
 
+# A mistyped flag must never become the posted text: `fm-x-reply.sh <id>
+# --followup --final <text>` once posted the literal string "--final" publicly.
+# Every refused form below must exit non-zero with a usage error and leave the
+# dry-run outbox untouched; reply text starting with '-' stays possible only
+# through --text-file or stdin.
+test_reply_rejects_flag_like_arguments() {
+  local home out rc err
+  home="$TMP_ROOT/reply-arg-guard"; mkdir -p "$home"
+  err="$home/err.txt"
+
+  # The incident invocation: --final belongs to fm-x-followup.sh, not here.
+  out=$(PATH="$BASE_PATH" FM_HOME="$home" FMX_DRY_RUN=1 \
+    FMX_REPLY_PLATFORM=x FMX_REPLY_MAX_CHARS=280 \
+    "$ROOT/bin/fm-x-reply.sh" req-guard --followup --final "the real completion text" 2>"$err"); rc=$?
+  expect_code 2 "$rc" "reply --final-as-flag exit"
+  assert_grep "unknown option '--final'" "$err" "reply must name the unknown option it refused"
+  [ -z "$out" ] || fail "a refused reply must not echo the request_id (got: $out)"
+
+  out=$(PATH="$BASE_PATH" FM_HOME="$home" FMX_DRY_RUN=1 \
+    "$ROOT/bin/fm-x-reply.sh" req-guard --bogus "hi" 2>"$err"); rc=$?
+  expect_code 2 "$rc" "reply unknown flag exit"
+  assert_grep "unknown option '--bogus'" "$err" "reply must name the unknown flag it refused"
+
+  out=$(PATH="$BASE_PATH" FM_HOME="$home" FMX_DRY_RUN=1 \
+    "$ROOT/bin/fm-x-reply.sh" --bogus "hi" 2>"$err"); rc=$?
+  expect_code 2 "$rc" "reply dash-leading request_id exit"
+  assert_grep "unknown option '--bogus'" "$err" "reply must refuse a dash-leading request_id"
+
+  out=$(PATH="$BASE_PATH" FM_HOME="$home" FMX_DRY_RUN=1 \
+    "$ROOT/bin/fm-x-reply.sh" req-guard "one" "two" 2>"$err"); rc=$?
+  expect_code 2 "$rc" "reply surplus positional exit"
+  assert_grep "unexpected extra arguments" "$err" "reply must refuse extra positional arguments"
+
+  out=$(PATH="$BASE_PATH" FM_HOME="$home" FMX_DRY_RUN=1 \
+    "$ROOT/bin/fm-x-reply.sh" req-guard --text-file /dev/null extra 2>"$err"); rc=$?
+  expect_code 2 "$rc" "reply --text-file with extra positional exit"
+
+  out=$(PATH="$BASE_PATH" FM_HOME="$home" FMX_DRY_RUN=1 \
+    "$ROOT/bin/fm-x-reply.sh" req-guard - extra </dev/null 2>"$err"); rc=$?
+  expect_code 2 "$rc" "reply stdin marker with extra positional exit"
+
+  out=$(PATH="$BASE_PATH" FM_HOME="$home" FMX_DRY_RUN=1 \
+    "$ROOT/bin/fm-x-reply.sh" req-guard "-leading dash text" 2>"$err"); rc=$?
+  expect_code 2 "$rc" "reply dash-leading positional text exit"
+  assert_grep "unknown option '-leading dash text'" "$err" \
+    "reply must refuse dash-leading positional text"
+
+  out=$(PATH="$BASE_PATH" FM_HOME="$home" FMX_DRY_RUN=1 \
+    "$ROOT/bin/fm-x-reply.sh" req-guard --image --followup "text" 2>"$err"); rc=$?
+  expect_code 2 "$rc" "reply flag-swallowing --image value exit"
+  assert_grep "missing --image path" "$err" "reply must refuse a dash-leading --image value"
+
+  # A dash-leading --text-file operand is refused whether or not a file by that
+  # name exists, so an option can never be read as the reply text's source.
+  local cwd="$home/cwd" operand
+  mkdir -p "$cwd"
+  for operand in --final --text-file -; do
+    rm -f -- "$cwd/--final" "$cwd/--text-file"
+    out=$(cd "$cwd" && PATH="$BASE_PATH" FM_HOME="$home" FMX_DRY_RUN=1 \
+      "$ROOT/bin/fm-x-reply.sh" req-guard --text-file "$operand" </dev/null 2>"$err"); rc=$?
+    expect_code 2 "$rc" "reply --text-file $operand exit (no such file)"
+    assert_grep "missing --text-file path" "$err" "reply must refuse --text-file $operand with no such file"
+    printf 'file named like an option\n' > "$cwd/--final"
+    printf 'file named like an option\n' > "$cwd/--text-file"
+    out=$(cd "$cwd" && PATH="$BASE_PATH" FM_HOME="$home" FMX_DRY_RUN=1 \
+      "$ROOT/bin/fm-x-reply.sh" req-guard --text-file "$operand" </dev/null 2>"$err"); rc=$?
+    expect_code 2 "$rc" "reply --text-file $operand exit (file present)"
+    assert_grep "missing --text-file path" "$err" "reply must refuse --text-file $operand even when that file exists"
+    [ -z "$out" ] || fail "a refused reply must not echo the request_id (got: $out)"
+  done
+
+  assert_absent "$home/state/x-outbox" "refused invocations must never write a dry-run outbox"
+
+  # Text that legitimately starts with '-' still goes through --text-file or
+  # stdin, and only there.
+  printf -- '-leading dash text\n' > "$home/reply.txt"
+  out=$(PATH="$BASE_PATH" FM_HOME="$home" FMX_DRY_RUN=1 \
+    "$ROOT/bin/fm-x-reply.sh" req-dash-file --text-file "$home/reply.txt" 2>"$err"); rc=$?
+  expect_code 0 "$rc" "reply dash text via --text-file exit"
+  [ "$(jq -r .text "$home/state/x-outbox/req-dash-file.json")" = "-leading dash text" ] \
+    || fail "--text-file must accept text that starts with '-'"
+  out=$(PATH="$BASE_PATH" FM_HOME="$home" FMX_DRY_RUN=1 \
+    "$ROOT/bin/fm-x-reply.sh" req-dash-stdin - <<<"-stdin dash text" 2>"$err"); rc=$?
+  expect_code 0 "$rc" "reply dash text via stdin exit"
+  [ "$(jq -r .text "$home/state/x-outbox/req-dash-stdin.json")" = "-stdin dash text" ] \
+    || fail "stdin must accept text that starts with '-'"
+  pass "fm-x-reply refuses unknown options and surplus positionals before recording anything"
+}
+
 test_bootstrap_activates_on_env_token() {
   local home out sum1 sum2 n
   home="$TMP_ROOT/boot-on"; mkdir -p "$home"
@@ -784,7 +873,7 @@ test_bootstrap_reports_missing_x_dependency() {
   home="$TMP_ROOT/boot-missing-x"; mkdir -p "$home"
   fakebin=$(fm_fakebin "$home")
   fm_fake_exit0 "$fakebin" tmux node no-mistakes chrome-devtools-axi curl
-  fm_fake_version_tool "$fakebin" lavish-axi FM_FAKE_LAVISH_AXI_VERSION 0.1.46
+  fm_fake_version_tool "$fakebin" lavish-axi FM_FAKE_LAVISH_AXI_VERSION 0.1.77
   cat > "$fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = --version ]; then
@@ -2283,6 +2372,21 @@ test_dismiss_usage_error() {
   pass "fm-x-dismiss rejects missing or extra arguments with a usage error"
 }
 
+# A dash-leading request_id (e.g. a mistyped `--help`) must be refused as a
+# usage error, not dismissed at the relay under that literal name.
+test_dismiss_rejects_dash_leading_request_id() {
+  local home out rc err
+  home="$TMP_ROOT/dismiss-arg-guard"; mkdir -p "$home"
+  err="$home/err.txt"
+  out=$(PATH="$BASE_PATH" FM_HOME="$home" FMX_DRY_RUN=1 \
+    "$ROOT/bin/fm-x-dismiss.sh" --bogus 2>"$err"); rc=$?
+  expect_code 2 "$rc" "dismiss dash-leading request_id exit"
+  assert_grep "unknown option '--bogus'" "$err" "dismiss must name the unknown option it refused"
+  [ -z "$out" ] || fail "a refused dismiss must not echo the request_id (got: $out)"
+  assert_absent "$home/state/x-outbox" "a refused dismiss must never write a dry-run outbox"
+  pass "fm-x-dismiss refuses a dash-leading request_id before recording anything"
+}
+
 # --- fm-x-link: task <-> X-request association in meta -----------------------
 
 test_link_records_request_and_timestamp() {
@@ -3001,6 +3105,76 @@ test_followup_usage_errors() {
   pass "fm-x-followup rejects malformed invocations"
 }
 
+# An unknown dash-leading argument (including a --help after the task id), a
+# dash-leading task id, or more than one text source must be a usage error
+# before the link is even read, so a refused call never posts or clears a link.
+test_followup_rejects_flag_like_arguments() {
+  local home fakebin log out rc err meta now id
+  home="$TMP_ROOT/fu-arg-guard"; mkdir -p "$home/state"
+  err="$home/err.txt"
+  printf 'kind=ship\n' > "$home/state/plain.meta"
+
+  out=$(PATH="$BASE_PATH" FM_HOME="$home" FMX_DRY_RUN=1 \
+    "$ROOT/bin/fm-x-followup.sh" plain --bogus - <<<"hi" 2>"$err"); rc=$?
+  expect_code 2 "$rc" "followup unknown option exit"
+  assert_grep "unknown option '--bogus'" "$err" "followup must name the unknown option it refused"
+  [ -z "$out" ] || fail "a refused follow-up must not echo a request_id (got: $out)"
+
+  out=$(PATH="$BASE_PATH" FM_HOME="$home" FMX_DRY_RUN=1 \
+    "$ROOT/bin/fm-x-followup.sh" --bogus - <<<"hi" 2>"$err"); rc=$?
+  expect_code 2 "$rc" "followup dash-leading task id exit"
+
+  PATH="$BASE_PATH" FM_HOME="$home" "$ROOT/bin/fm-x-followup.sh" --check --bogus >/dev/null 2>"$err"; rc=$?
+  expect_code 2 "$rc" "followup --check dash-leading id exit"
+  PATH="$BASE_PATH" FM_HOME="$home" "$ROOT/bin/fm-x-followup.sh" --clear -x >/dev/null 2>"$err"; rc=$?
+  expect_code 2 "$rc" "followup --clear dash-leading id exit"
+  PATH="$BASE_PATH" FM_HOME="$home" "$ROOT/bin/fm-x-followup.sh" --clear plain extra >/dev/null 2>"$err"; rc=$?
+  expect_code 2 "$rc" "followup --clear extra argument exit"
+  PATH="$BASE_PATH" FM_HOME="$home" "$ROOT/bin/fm-x-followup.sh" --clear plain --expect-request -x >/dev/null 2>"$err"; rc=$?
+  expect_code 2 "$rc" "followup --expect-request dash-leading value exit"
+
+  PATH="$BASE_PATH" FM_HOME="$home" "$ROOT/bin/fm-x-followup.sh" plain --text-file --final >/dev/null 2>"$err"; rc=$?
+  expect_code 2 "$rc" "followup flag-swallowing --text-file value exit"
+  assert_grep "missing --text-file path" "$err" "followup must refuse a dash-leading --text-file value"
+  PATH="$BASE_PATH" FM_HOME="$home" "$ROOT/bin/fm-x-followup.sh" plain --image --final - <<<"hi" >/dev/null 2>"$err"; rc=$?
+  expect_code 2 "$rc" "followup flag-swallowing --image value exit"
+  assert_grep "missing --image path" "$err" "followup must refuse a dash-leading --image value"
+
+  PATH="$BASE_PATH" FM_HOME="$home" "$ROOT/bin/fm-x-followup.sh" plain --help >/dev/null 2>"$err"; rc=$?
+  expect_code 2 "$rc" "followup --help after task id exit"
+  assert_grep "unknown option '--help'" "$err" "followup must refuse --help after the task id"
+
+  # Surplus text sources are refused before the link is read: an unlinked task
+  # must not report a no-op success, and a live or expired link must survive.
+  out=$(PATH="$BASE_PATH" FM_HOME="$home" FMX_DRY_RUN=1 \
+    "$ROOT/bin/fm-x-followup.sh" plain one two 2>"$err"); rc=$?
+  expect_code 2 "$rc" "followup surplus positionals on an unlinked task exit"
+  assert_grep "unexpected extra arguments" "$err" "followup must refuse extra positionals when unlinked"
+  PATH="$BASE_PATH" FM_HOME="$home" FMX_DRY_RUN=1 \
+    "$ROOT/bin/fm-x-followup.sh" plain --text-file /dev/null - <<<"hi" >/dev/null 2>"$err"; rc=$?
+  expect_code 2 "$rc" "followup two text sources exit"
+  assert_grep "unexpected extra arguments" "$err" "followup must refuse two text sources"
+
+  fakebin=$(make_fake_curl "$home")
+  log="$home/curl.log"
+  for id in task-g task-e; do
+    mk_linked_task "$home" "$id" "req-$id" 1700000000
+    meta="$home/state/$id.meta"
+    if [ "$id" = task-g ]; then now=1700003600; else now=$((1700000000 + 8*86400)); fi
+    out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_DRY_RUN=1 FMX_NOW_OVERRIDE=$now \
+      FAKE_CURL_LOG="$log" \
+      "$ROOT/bin/fm-x-followup.sh" "$id" one two 2>"$err"); rc=$?
+    expect_code 2 "$rc" "followup surplus positionals on $id exit"
+    assert_grep "unexpected extra arguments" "$err" "followup must refuse extra positionals on $id"
+    [ -z "$out" ] || fail "a refused follow-up must not echo a request_id (got: $out)"
+    assert_grep "x_request=req-$id" "$meta" "a refused follow-up must keep the $id link"
+    assert_grep "x_followups=0" "$meta" "a refused follow-up must not change the $id counter"
+  done
+  assert_absent "$log" "a refused follow-up must never reach the relay"
+  assert_absent "$home/state/x-outbox" "a refused follow-up must never write a dry-run outbox"
+  pass "fm-x-followup refuses unknown options and surplus positionals without touching the link"
+}
+
 test_poll_no_token_is_hard_noop
 test_poll_empty_env_token_overrides_env_file
 test_poll_204_is_silent
@@ -3023,6 +3197,7 @@ test_reply_auth_header_tempfile_cleans_up_on_interrupted_post
 test_reply_usage_error
 test_reply_help_mentions_image
 test_reply_whitespace_text_rejected
+test_reply_rejects_flag_like_arguments
 test_reply_dry_run_records_not_posts
 test_reply_dry_run_needs_no_token
 test_reply_dry_run_from_env_file
@@ -3073,6 +3248,7 @@ test_dismiss_non_2xx_fails
 test_dismiss_transport_failure_fails
 test_dismiss_unsafe_request_id_rejected
 test_dismiss_usage_error
+test_dismiss_rejects_dash_leading_request_id
 test_link_records_request_and_timestamp
 test_link_records_discord_platform_for_followups
 test_link_resolves_platform_by_request_id_after_inbox_cleanup
@@ -3101,6 +3277,7 @@ test_followup_post_not_linked_is_noop
 test_followup_post_dry_run_increments_counter_keeps_link
 test_followup_post_dry_run_final_clears_link
 test_followup_usage_errors
+test_followup_rejects_flag_like_arguments
 test_bootstrap_activates_on_env_token
 test_bootstrap_relative_home_writes_absolute_poll_shim
 test_bootstrap_reports_missing_x_dependency

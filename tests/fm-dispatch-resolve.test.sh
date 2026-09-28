@@ -250,8 +250,9 @@ assert_equals $'curl:clean\nquota-axi:clean' "$(cat "$LOG/child-env")" "the API 
 body=$(cat "$LOG/body")
 assert_equals 'jev-latest' "$(jq -r .model <<<"$body")" "default model is jev-latest"
 assert_equals 'pager' "$(jq -r .state.task.project <<<"$body")" "project rides in the state"
-assert_contains "$(jq -r .state.task.brief <<<"$body")" 'off-by-one in the pager' "the whole brief rides in the state"
+assert_contains "$(jq -r .state.task.brief <<<"$body")" 'off-by-one in the pager' "a brief without task headings rides whole in the state"
 assert_equals '["difficulty","domain","escalation","intent","model_class","risk","rule"]' "$(jq -c '.questions | keys' <<<"$body")" "rule and router classification Choices are asked"
+
 assert_equals '["default","rule_1","rule_2","rule_3","rule_4"]' "$(jq -c '.questions.rule.criteria | keys' <<<"$body")" "one option per rule plus default"
 assert_equals 'No listed rule applies to this task.' "$(jq -r '.questions.rule.criteria.default' <<<"$body")" "the fixed generic none criterion is the default option"
 assert_equals 'A simple bug fix with a stated root cause.' "$(jq -r '.questions.rule.criteria.rule_4' <<<"$body")" "rule when text is the option verbatim"
@@ -261,6 +262,100 @@ assert_not_contains "$body" 'cursor-grok' "use profiles never leave the machine"
 assert_equals '["no","yes"]' "$(jq -c '.questions.escalation.criteria | keys' <<<"$body")" "the one gating classifier axis is bounded to yes and no"
 assert_contains "$out" '  classification: intent=bugfix(0.91) domain=project_code(0.88) difficulty=medium(0.87) risk=low(0.86) model_class=standard(0.9) escalation=no(0.93)' "typed classifier evidence is emitted beside the rule match"
 pass "clear: one rule Choice request, router classifier evidence, key on the fd header only, spendPriority argmax over every candidate"
+
+# --- never-send list: a match or a bad list withholds the request -------------
+NEVER_SEND="$HOME_DIR/config/dispatch-never-send"
+PRIVATE_BRIEF="$TMP_ROOT/private-brief.md"
+cat > "$PRIVATE_BRIEF" <<'MD'
+# Task
+## Captain's intent
+Fix the pager for the Acme-Ledger account 4417-2290.
+
+## Firstmate spec
+- Keep the change small.
+MD
+expect_withheld() {  # <label> <stderr fragment> [<value that must not print>...]
+  local label=$1 fragment=$2
+  shift 2
+  expect_code 0 "$code" "$label exits 0"
+  assert_equals '' "$out" "$label prints nothing on stdout, so firstmate uses its existing intake"
+  assert_contains "$err" "dispatch-resolve: off ($fragment" "$label names why on stderr"
+  assert_contains "$err" 'nothing sent)' "$label says nothing was sent"
+  assert_equals '1' "$(grep -c . <<<"$err")" "$label prints one diagnostic line"
+  assert_absent "$LOG/argv" "$label never calls curl"
+  assert_absent "$LOG/quota-axi.calls" "$label never reads quota"
+  local value
+  for value in "$@"; do
+    assert_not_contains "$err" "$value" "$label never prints the listed value"
+  done
+}
+
+printf '%s\n' '# private values' '' '   ' 'Unlisted-Value' > "$NEVER_SEND"
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+TYPESAFE_API_KEY=$KEY run code out err "$PRIVATE_BRIEF" --project pager
+assert_contains "$out" '  status: clear' "a list with no match leaves resolution unchanged"
+assert_contains "$(jq -r .state.task.brief "$LOG/body")" 'Acme-Ledger' "a list with no match sends the task text"
+
+printf '%s\n' '# private values' '' '  acme-ledger  ' > "$NEVER_SEND"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$PRIVATE_BRIEF" --project pager
+expect_withheld "a case-insensitive literal match" "brief text matches $NEVER_SEND line 3" 'acme-ledger' 'Acme-Ledger'
+
+WRAPPED_BRIEF="$TMP_ROOT/wrapped-brief.md"
+printf '# Task\n## Captain'"'"'s intent\nFix the pager for Example Client\nLtd before\tthe\xc2\xa0release.\n' > "$WRAPPED_BRIEF"
+printf '%s\n' 'example  client ltd' > "$NEVER_SEND"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$WRAPPED_BRIEF" --project pager
+expect_withheld "a literal the brief wraps across lines" "brief text matches $NEVER_SEND line 1" 'example' 'Example'
+
+printf '%s\n' 'before the release' > "$NEVER_SEND"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$WRAPPED_BRIEF" --project pager
+expect_withheld "a literal the brief spaces with a tab and a no-break space" "brief text matches $NEVER_SEND line 1" 'release'
+
+printf '%s\n' 'orion-private' > "$NEVER_SEND"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project orion-private
+expect_withheld "a project-name match" "brief text matches $NEVER_SEND line 1" 'orion-private'
+
+printf '%s\n' 'stated root cause' > "$NEVER_SEND"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project pager
+expect_withheld "a rule-criterion match" "brief text matches $NEVER_SEND line 1" 'stated root cause'
+
+SECOND_HOME="$TMP_ROOT/secondmate-home"
+mkdir -p "$SECOND_HOME/config"
+printf '%s\n' 'acme-ledger' > "$NEVER_SEND"
+# A child shell keeps the lib's own globals (such as out) out of this script
+# shellcheck disable=SC2016 # Expanded by the child shell
+bash -c '. "$1" && propagate_inheritable_config "$2" "$3"' _ \
+  "$ROOT/bin/fm-config-inherit-lib.sh" "$HOME_DIR/config" "$SECOND_HOME/config" \
+  || fail "inheritance into the secondmate home failed"
+PRIMARY_HOME=$HOME_DIR
+HOME_DIR=$SECOND_HOME
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$PRIVATE_BRIEF" --project pager
+expect_withheld "an inherited list in a secondmate home" "brief text matches $SECOND_HOME/config/dispatch-never-send line 1" 'acme-ledger' 'Acme-Ledger'
+HOME_DIR=$PRIMARY_HOME
+
+rm -f "$NEVER_SEND"
+mkdir "$NEVER_SEND"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$PRIVATE_BRIEF" --project pager
+expect_withheld "a directory at the list path" "$NEVER_SEND is not a readable regular file"
+rmdir "$NEVER_SEND"
+ln -s "$TMP_ROOT/missing-never-send" "$NEVER_SEND"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$PRIVATE_BRIEF" --project pager
+expect_withheld "a broken symlink at the list path" "$NEVER_SEND is not a readable regular file"
+rm -f "$NEVER_SEND"
+
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$PRIVATE_BRIEF" --project pager
+assert_contains "$out" '  status: clear' "no list resolves exactly as before"
+assert_contains "$(jq -r .state.task.brief "$LOG/body")" 'Acme-Ledger' "no list sends the task text as before"
+pass "never-send list withholds the request on a match or a bad list, and never prints the value"
 
 # --- rules are snapshotted and line output is injection-safe -------------------
 MUTATED_RULES="$TMP_ROOT/mutated-rules.json"
@@ -418,6 +513,151 @@ TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" '  status: error' "a missing classifier axis is an error outcome"
 assert_contains "$out" '  reason: response is not a typed dispatch classifier answer' "every declared classifier axis must be present and typed"
 pass "classifier evidence never vetoes local routing, and only a confident escalation answer stops dispatch"
+
+# --- per-rule confidence floor ------------------------------------------------
+write_floor_response() {  # <path> <choice> <confidence> <rule_1> <rule_2> <rule_3> <rule_4> <default>
+  cat > "$1" <<JSON
+{ "model": "jev-1.13.0",
+  "answers": {
+    "rule": { "type": "choice", "choice": "$2", "confidence": $3,
+      "probabilities": { "rule_1": $4, "rule_2": $5, "rule_3": $6, "rule_4": $7, "default": $8 } },
+$(classifier_answers)
+  },
+  "usage": { "input_tokens": 812, "output_tokens": 386 } }
+JSON
+}
+FLOOR_RULES="$TMP_ROOT/floor-rules.json"
+jq '.rules[1].min_confidence = 0.9 | .rules[3].min_confidence = 0.1' "$BASE_RULES" > "$FLOOR_RULES"
+cp "$FLOOR_RULES" "$RULES"
+reset_log
+write_floor_response "$RESPONSE" rule_2 0.76 0.02 0.76 0.02 0.18 0.02
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: clear' "a top rule below its own floor falls to a runner-up that clears its floor"
+assert_contains "$out" '  rule: rule_2 (The task generates images.)   confidence: 0.76' "the model's own pick stays visible"
+assert_contains "$out" '  fallback: rule_4 (A simple bug fix with a stated root cause.) probability 0.18 clears its floor 0.1; rule_2 probability 0.76 is below its floor 0.9' "the fallback names both floors"
+assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "the runner-up rule's profiles are resolved"
+assert_not_contains "$(cat "$LOG/body")" 'min_confidence' "the model never sees confidence floors"
+
+reset_log
+write_floor_response "$RESPONSE" rule_2 0.76 0.02 0.76 0.02 0.08 0.12
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: ambiguous' "no runner-up clearing its own floor is ambiguous"
+assert_contains "$out" '  reason: rule_2 probability 0.76 below its floor 0.9; no other option clears its own floor' "the undeclared default keeps the global floor as a runner-up"
+assert_not_contains "$out" '  fallback:' "no fallback is reported when none is taken"
+assert_not_contains "$out" '  profile:' "ambiguous per-rule floor emits no profile"
+
+jq '.rules[0].min_confidence = 0.1' "$FLOOR_RULES" > "$RULES"
+reset_log
+write_floor_response "$RESPONSE" rule_2 0.76 0.12 0.76 0.0 0.12 0.0
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: ambiguous' "equally probable runner-ups never break by option order"
+assert_contains "$out" '  reason: rule_2 probability 0.76 below its floor 0.9; runner-up tie' "a runner-up tie is named"
+
+cp "$FLOOR_RULES" "$RULES"
+reset_log
+write_floor_response "$RESPONSE" rule_4 0.45 0.01 0.01 0.01 0.45 0.52
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "a declared floor below the global floor lets the picked rule resolve"
+
+# A declared floor needs the same support from a rule as the pick or as a runner-up
+jq '.rules[3].min_confidence = 0.3' "$FLOOR_RULES" > "$RULES"
+reset_log
+write_floor_response "$RESPONSE" rule_4 0.25 0.25 0.05 0.05 0.35 0.30
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: clear' "a picked rule clears its declared floor on its own probability, not the answer confidence"
+assert_not_contains "$out" '  fallback:' "a picked rule that clears its own floor takes no fallback"
+assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "the picked rule resolves at probability 0.35 over floor 0.3"
+
+reset_log
+write_floor_response "$RESPONSE" rule_2 0.95 0.05 0.55 0.05 0.30 0.05
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: clear' "a high answer confidence does not lift a picked rule over its own floor"
+assert_contains "$out" '  fallback: rule_4 (A simple bug fix with a stated root cause.) probability 0.30 clears its floor 0.3; rule_2 probability 0.55 is below its floor 0.9' "the runner-up clears the same floor it would need as the pick"
+
+reset_log
+write_floor_response "$RESPONSE" rule_2 0.55 0.05 0.55 0.05 0.25 0.10
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: ambiguous' "a runner-up below its own floor is not taken"
+assert_contains "$out" '  reason: rule_2 probability 0.55 below its floor 0.9; no other option clears its own floor' "the missed runner-up floor is named"
+cp "$BASE_RULES" "$RULES"
+
+reset_log
+write_floor_response "$RESPONSE" rule_2 0.55 0.01 0.55 0.01 0.42 0.01
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: ambiguous' "without declared floors a low pick stays ambiguous"
+assert_contains "$out" '  reason: confidence 0.55 below floor 0.6' "without declared floors the global floor reason is unchanged"
+assert_not_contains "$out" '  fallback:' "without declared floors no runner-up is taken"
+pass "per-rule confidence floors fall to the most probable runner-up that clears its own floor"
+
+# --- the model sees only the task-specific brief sections ----------------------
+SCAFFOLD_BRIEF="$TMP_ROOT/scaffold-brief.md"
+cat > "$SCAFFOLD_BRIEF" <<'MD'
+# Task
+## Captain's intent
+Add a flag to the pager.
+
+## Firstmate spec
+Touch pager.sh only.
+```sh
+# Not a heading inside a fence
+## Setup
+```
+### Out of scope
+Anything else.
+
+# Setup
+BOILERPLATE-SETUP never push to the default branch.
+
+## Captain intent authorized for --intent
+BOILERPLATE-DUPLICATE
+MD
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+TYPESAFE_API_KEY=$KEY run code out err "$SCAFFOLD_BRIEF"
+sent=$(jq -r .state.task.brief "$LOG/body")
+assert_contains "$sent" $'## Captain\'s intent\nAdd a flag to the pager.' "the captain's intent section is sent"
+assert_contains "$sent" $'## Firstmate spec\nTouch pager.sh only.' "the Firstmate spec section is sent"
+assert_contains "$sent" $'# Not a heading inside a fence\n## Setup\n```\n### Out of scope\nAnything else.' "fenced lines and subheadings stay inside the section"
+assert_not_contains "$sent" 'BOILERPLATE' "scaffold boilerplate after the task sections is not sent"
+assert_not_contains "$sent" '# Task' "the enclosing Task heading is not sent"
+assert_not_contains "$sent" 'Brief kind:' "a brief without a scout contract line gets no kind line"
+
+SPEC_ONLY_BRIEF="$TMP_ROOT/spec-only-brief.md"
+printf '%s\n' '# Task' '## Firstmate spec' 'Spec text.' '## Rules' 'RULES-TEXT' > "$SPEC_ONLY_BRIEF"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$SPEC_ONLY_BRIEF"
+assert_equals $'## Firstmate spec\nSpec text.' "$(jq -r .state.task.brief "$LOG/body")" "one recognized section is enough"
+
+printf '%s\n' '# Task' '## Firstmate spec   ' 'Spec text.' '## Rules' 'RULES-TEXT' > "$SPEC_ONLY_BRIEF"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$SPEC_ONLY_BRIEF"
+assert_equals "$(cat "$SPEC_ONLY_BRIEF")" "$(jq -r .state.task.brief "$LOG/body")" "a heading with trailing blanks is not a section, matching spawn validation"
+
+printf '%s\n' 'Preamble.' '## Firstmate spec' 'Spec text.' > "$SPEC_ONLY_BRIEF"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$SPEC_ONLY_BRIEF"
+assert_equals "$(cat "$SPEC_ONLY_BRIEF")" "$(jq -r .state.task.brief "$LOG/body")" "a section outside the Task heading is not a task section"
+
+KIND_BRIEF="$TMP_ROOT/kind-brief.md"
+{ cat "$SCAFFOLD_BRIEF"; printf '%s\n' '# Definition of done' 'Delivery contract: mode=no-mistakes' 'Delivery contract: mode=direct-PR'; } > "$KIND_BRIEF"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$KIND_BRIEF"
+sent=$(jq -r .state.task.brief "$LOG/body")
+assert_contains "$sent" $'## Captain\'s intent\nAdd a flag to the pager.' "a ship brief still sends its task sections"
+assert_not_contains "$sent" 'Brief kind:' "a ship brief gets no kind line"
+assert_not_contains "$sent" 'mode=' "a ship brief's delivery mode is not sent"
+
+{ cat "$SCAFFOLD_BRIEF"; printf '%s\n' 'This is a SCOUT task: the deliverable is a written report, not a PR.'; } > "$KIND_BRIEF"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$KIND_BRIEF"
+sent=$(jq -r .state.task.brief "$LOG/body")
+assert_contains "$sent" $'Brief kind: scout (report only)\n\n## Captain\'s intent' "a scout brief's contract line names its kind"
+assert_not_contains "$sent" 'This is a SCOUT task' "the scout contract line itself is not sent"
+
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_equals "$(cat "$BRIEF")" "$(jq -r .state.task.brief "$LOG/body")" "a brief with neither heading is sent whole"
+pass "only the brief's task sections and scout tag reach the model, with a whole-brief fallback"
 
 # --- escalate: captain approval ------------------------------------------------
 reset_log
@@ -802,6 +1042,8 @@ assert_contains "$err" 'not JSON' "non-JSON rules is named"
 for bad in \
   '{"rules":[{"when":"x","use":{"harness":"claude"},"approval":"firstmate"}]}|approval must be "captain" when present' \
   '{"rules":[{"when":"x","use":{"harness":"claude"},"select":"mystery"}]}|unknown select: mystery' \
+  '{"rules":[{"when":"x","use":{"harness":"claude"},"min_confidence":"high"}]}|min_confidence must be a number from 0 through 1 when present' \
+  '{"rules":[{"when":"x","use":{"harness":"claude"},"min_confidence":1.5}]}|min_confidence must be a number from 0 through 1 when present' \
   '{"rules":[{"when":"x","use":{"harness":"claude"},"floor":{"scope":"model:fable","min_percent":20}}]}|rule floor needs scope, min_percent 0..100, and provider matching ^[a-z0-9]+(-[a-z0-9]+)*\z' \
   '{"rules":[{"when":"x","use":{"harness":"claude"},"floor":{"scope":"model:fable","min_percent":20,"provider":"CLAUDE"}}]}|rule floor needs scope, min_percent 0..100, and provider matching ^[a-z0-9]+(-[a-z0-9]+)*\z' \
   '{"rules":[{"when":"x","use":{"harness":"claude","provider":""}}]}|each use profile needs harness; model, effort, and floor must be well formed, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\z when present' \

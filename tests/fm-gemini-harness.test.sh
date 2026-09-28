@@ -128,9 +128,10 @@ test_gemini_node_bundle_is_not_ancestry_detectable() {
   # documents ancestry as covering gemini or "fixes" it by matching MainThread.
   comm=$(node -e 'const{execSync}=require("child_process");process.stdout.write(execSync("ps -o comm= -p "+process.pid).toString().trim())' 2>/dev/null)
   [ -n "$comm" ] || return 0
-  if [ "$comm" = node ]; then
-    # A platform whose node DOES report `node` reaches the interpreter arm, and
-    # there the gemini script path must win.
+  case "$(basename -- "$comm")" in node*)
+    # A platform whose comm basename matches production's `node*` interpreter
+    # arm, including a versioned name, reaches that arm, and there the gemini
+    # script path must win.
     cat > "$dir/gemini" <<'JS'
 const { spawnSync } = require('child_process');
 const env = { ...process.env };
@@ -141,12 +142,13 @@ process.stdout.write(r.stdout || '');
 JS
     out=$(FM_HARNESS_BIN="$HARNESS" node "$dir/gemini" 2>/dev/null | tr -d '\n')
     [ "$out" = gemini ] \
-      || fail "where node reports comm=node, a gemini script path must detect gemini, got '$out'"
-    pass "fm-harness.sh: this platform's node reports comm=node and ancestry reaches gemini"
+      || fail "where node reports comm=$comm, a gemini script path must detect gemini, got '$out'"
+    pass "fm-harness.sh: this platform's node reports comm=$comm and ancestry reaches gemini"
     return 0
-  fi
-  # The measured case: comm is not `node`, so ancestry cannot see the bundle and
-  # the marker is the only detection path.
+    ;;
+  esac
+  # The measured case: comm does not reach the interpreter arm, so ancestry
+  # cannot see the bundle and the marker is the only detection path.
   cat > "$dir/gemini" <<'JS'
 const { spawnSync } = require('child_process');
 const env = { ...process.env };

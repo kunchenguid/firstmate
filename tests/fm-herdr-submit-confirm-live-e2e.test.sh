@@ -5,8 +5,11 @@
 # a busy-queued Enter can keep proven pending text visible. A stub cannot prove
 # either signal. This guard launches real Claude Code in an isolated Herdr lab
 # and requires fm_backend_herdr_send_text_submit to report empty for a landed
-# idle steer. It fails naming the harness and version rather than degrading
-# quietly.
+# idle steer. It then requires the same submit path to prove and submit a
+# typed /exit slash command behind the command popup Claude renders below the
+# composer (the fm-control exit breakage on 2.1.283) and verifies the agent
+# actually exited. It fails naming the harness and version rather than
+# degrading quietly.
 #
 # Run explicitly with FM_HERDR_SUBMIT_CONFIRM_LIVE=1 after a Herdr or Claude
 # upgrade, and before trusting a refreshed docs/verification/runtime-backends.md
@@ -84,14 +87,35 @@ lab pane run "$PANE" "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEN
   || fail "could not launch Claude Code ($VERSION) in the isolated Herdr pane"
 
 idle=0
+trusted=0
 i=0
-while [ "$i" -lt 45 ]; do
-  st=$(lab agent get "$PANE" 2>/dev/null | jq -r '.result.agent.agent_status // empty')
-  case "$st" in idle|done|blocked) idle=1; break ;; esac
+while [ "$i" -lt 60 ]; do
+  screen=$(lab pane read "$PANE" --source visible 2>/dev/null || true)
+  case "$screen" in
+    *'bypass permissions on'*)
+      # The composer footer means Claude is past any folder-trust prompt. Herdr
+      # can report the agent idle while that prompt is still up, so the wait
+      # keys off the rendered composer rather than the native status alone.
+      st=$(lab agent get "$PANE" 2>/dev/null | jq -r '.result.agent.agent_status // empty')
+      case "$st" in idle|done) idle=1; break ;; esac
+      ;;
+    *'Yes, I trust this folder'*)
+      # A fresh checkout path stops on Claude's folder-trust prompt, which the
+      # pre-send proof would read as a non-empty composer. Accept it once and
+      # keep waiting for a real idle composer; the accepted dialog stays in the
+      # viewport. The prompt preselects "No, exit", so move to "Yes" before
+      # confirming; a bare Enter quits Claude.
+      if [ "$trusted" = 0 ]; then
+        trusted=1
+        lab pane send-keys "$PANE" down enter >/dev/null \
+          || fail "could not accept Claude's folder-trust prompt"
+      fi
+      ;;
+  esac
   i=$((i + 1))
   sleep 1
 done
-[ "$idle" = 1 ] || fail "Claude Code ($VERSION) on $HERDR_VER never registered an idle agent in the lab pane"
+[ "$idle" = 1 ] || fail "Claude Code ($VERSION) on $HERDR_VER never rendered an idle composer in the lab pane"
 
 TOKEN="FMHERDRPONG$$_$RANDOM"
 verdict=$(fm_backend_herdr_send_text_submit "$TARGET" "Reply with exactly $TOKEN and nothing else." 3 0.4 0.4) \
@@ -118,5 +142,68 @@ done
 [ "$landed" = 1 ] \
   || fail "Claude Code ($VERSION) on $HERDR_VER: submit reported '$verdict' but the expected reply never rendered"
 pass "live Herdr submit confirm: Claude Code ($VERSION) on $HERDR_VER reports empty and renders the requested reply in isolated session $SESSION"
+
+# Away-mode digests start with U+2063, which Claude's composer read-back drops.
+# The pre-Enter proof must still accept the rest of the payload.
+# shellcheck source=bin/fm-operational-input.sh
+. "$ROOT/bin/fm-operational-input.sh"
+i=0
+while [ "$i" -lt 45 ]; do
+  st=$(lab agent get "$PANE" 2>/dev/null | jq -r '.result.agent.agent_status // empty')
+  case "$st" in idle|done) break ;; esac
+  i=$((i + 1))
+  sleep 1
+done
+OP_TOKEN="FMHERDROPPONG$$_$RANDOM"
+op_text=
+fm_operational_input_encode away-supervisor "Reply with exactly $OP_TOKEN and nothing else." op_text \
+  || fail "could not encode an away-supervisor payload"
+verdict=$(fm_backend_herdr_send_text_submit "$TARGET" "$op_text" 3 0.4 0.4) \
+  || fail "send_text_submit failed to run an operational payload against Claude Code ($VERSION) on $HERDR_VER"
+[ "$verdict" = empty ] \
+  || fail "Claude Code ($VERSION) on $HERDR_VER: a landed U+2063 operational payload must confirm empty, got '$verdict'"
+landed=0
+i=0
+while [ "$i" -lt 45 ]; do
+  screen=$(lab pane read "$PANE" --source recent --lines 200 2>/dev/null || true)
+  occurrences=$(printf '%s\n' "$screen" | grep -F -c "$OP_TOKEN" || true)
+  if [ "$occurrences" -ge 2 ]; then
+    landed=1
+    break
+  fi
+  i=$((i + 1))
+  sleep 1
+done
+[ "$landed" = 1 ] \
+  || fail "Claude Code ($VERSION) on $HERDR_VER: operational submit reported '$verdict' but the expected reply never rendered"
+pass "live Herdr submit confirm: Claude Code ($VERSION) on $HERDR_VER submits a U+2063 away-supervisor payload whose read-back drops the mark"
+
+# The fm-control exit regression: a typed slash command (/exit) makes Claude
+# Code 2.1.283 render its command popup between the composer and the pane
+# bottom, which pushed the composer above the old bounded proof read - the
+# typed command was judged unsent, cleared, and never submitted. The viewport
+# capture must prove the typed /exit and submit it; Claude must actually
+# exit. This scenario runs last because it ends the lab's Claude process.
+i=0
+while [ "$i" -lt 45 ]; do
+  st=$(lab agent get "$PANE" 2>/dev/null | jq -r '.result.agent.agent_status // empty')
+  case "$st" in idle|done) break ;; esac
+  i=$((i + 1))
+  sleep 1
+done
+verdict=$(fm_backend_herdr_send_text_submit "$TARGET" '/exit' 3 0.4 1.2) \
+  || fail "send_text_submit failed to run the /exit submission against Claude Code ($VERSION) on $HERDR_VER"
+[ "$verdict" != send-failed ] \
+  || fail "Claude Code ($VERSION) on $HERDR_VER: a typed /exit behind its command popup was judged unsent and cleared instead of submitted"
+exited=0
+i=0
+while [ "$i" -lt 30 ]; do
+  if ! lab agent get "$PANE" >/dev/null 2>&1; then exited=1; break; fi
+  i=$((i + 1))
+  sleep 1
+done
+[ "$exited" = 1 ] \
+  || fail "Claude Code ($VERSION) on $HERDR_VER: the /exit submission reported '$verdict' but the agent never exited"
+pass "live Herdr submit confirm: Claude Code ($VERSION) on $HERDR_VER proves and submits a typed /exit behind its command popup"
 
 [ "$CHECKED" -gt 0 ] || fail "FM_HERDR_SUBMIT_CONFIRM_LIVE=1 checked no harness"

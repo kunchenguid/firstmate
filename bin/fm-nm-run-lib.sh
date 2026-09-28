@@ -2,8 +2,9 @@
 # Shared no-mistakes axi run attribution primitives.
 #
 # ONE owner for the no-mistakes run-attribution primitives used by
-# fm-crew-state.sh (read-only current-state reporting) and fm-teardown.sh
-# (pre-teardown run abort, see its "Fix 1" header comment). Crew-state binds
+# fm-crew-state.sh (read-only current-state reporting), fm-teardown.sh
+# (pre-teardown run abort, see its "Fix 1" header comment), and fm-dod-lib.sh
+# (the custody check a Gerrit no-mistakes ready report must pass). Crew-state binds
 # an EXECUTING run (pending, running, fixing or ci) on the task's branch
 # regardless of head (fm_nm_run_is_executing); every other run still needs
 # strict branch-and-head identity. Both callers then recognize a provable
@@ -127,13 +128,16 @@ fm_nm_run_status_class() {  # <status_word>
 # toolchain. A capped overview requires an optional Python 3 sqlite3 reader
 # for a read-only same-branch query of NM_HOME/state.sqlite (default:
 # ~/.no-mistakes/state.sqlite; relative NM_HOME resolves from the worktree).
-# The real CLI overview never carries a `repo: ` identity line (observed
-# 2026-09-20: a truncated overview with zero rows for this task's branch has
-# only `count:`/`runs[...]:`), so repo identity is looked up by the task
-# worktree path itself, which is exactly what `no-mistakes` records as a
-# repo's `working_path`; the recorded spelling is matched exactly, so a task
-# worktree that is not absolute, or whose spelling differs from the recorded
-# one, reads as unreadable rather than guessed among candidates.
+# Repo identity is the overview's own top-level `repo:` line, which every axi
+# release emits: it is the `working_path` the CLI itself resolved for the
+# queried worktree. That is NOT the task worktree path in general - a linked
+# git worktree resolves to its main clone's registered path (observed
+# 2026-09-22 on v1.79.0: every task copy of a firstmate home reports
+# `repo: <home clone>`, and looking the repo up by the task worktree path
+# matched no row, so every capped read reported the inventory unreadable).
+# The recorded spelling is matched exactly, so an overview without exactly one
+# absolute `repo:` line, or with one the inventory does not record, reads as
+# unreadable rather than guessed among candidates.
 # The reader subprocess is bounded by $4 seconds (default 10), so a contended
 # database can never outlast the caller's per-read budget.
 # If that reader or inventory is unavailable, report unknown with available
@@ -231,7 +235,7 @@ fm_nm_select_run() {  # <branch> <axi-overview> <worktree> [timeout_secs]
     incomplete\|*) available_ids=${selection#*|} ;;
     *) printf '%s\n' "$selection"; return ;;
   esac
-  if ! inventory=$(fm_nm_bounded "$3" "$timeout_secs" python3 - "$1" "$3" "$available_ids" 2>/dev/null <<'PY'
+  if ! inventory=$(fm_nm_bounded "$3" "$timeout_secs" python3 - "$1" "$2" "$3" "$available_ids" 2>/dev/null <<'PY'
 import json
 import os
 import re
@@ -240,17 +244,21 @@ import sys
 from contextlib import closing
 from pathlib import Path
 
-branch, worktree, available_ids = sys.argv[1:]
+branch, overview, worktree, available_ids = sys.argv[1:]
 ids = available_ids.split(", ") if available_ids else []
 try:
-    if not os.path.isabs(worktree):
+    repos = [line[6:].strip() for line in overview.splitlines() if line.startswith("repo: ")]
+    if len(repos) != 1:
+        raise ValueError
+    repo_path = json.loads(repos[0]) if repos[0].startswith('"') else repos[0]
+    if not isinstance(repo_path, str) or not os.path.isabs(repo_path):
         raise ValueError
     root = Path(os.environ.get("NM_HOME") or Path.home() / ".no-mistakes")
     if not root.is_absolute():
         root = Path(worktree) / root
     with closing(sqlite3.connect((root / "state.sqlite").as_uri() + "?mode=ro", uri=True, timeout=30)) as db:
         db.execute("BEGIN")
-        repo = db.execute("SELECT id FROM repos WHERE working_path = ?", (worktree,)).fetchall()
+        repo = db.execute("SELECT id FROM repos WHERE working_path = ?", (repo_path,)).fetchall()
         if len(repo) != 1:
             raise ValueError
         rows = db.execute(
@@ -299,6 +307,31 @@ fm_nm_branch_sync_state() {  # <toon-output>
   s=$(printf '%s\n' "$1" \
     | sed -n '/^[[:space:]]*branch_sync:[[:space:]]*$/,/^[^[:space:]][^:]*:/s/^[[:space:]]\{1,\}state:[[:space:]]*\(.*\)/\1/p' \
     | head -1)
+  fm_nm_strip_quotes "$s"
+}
+
+# One scalar from a nested block of the top-level `branch_sync:` block in
+# captured `axi status` TOON $1: `<sub>.<key>` such as `next_action.code` or
+# `pipeline.current_head`. Empty when either block or the key is absent.
+# Indentation bounds each block, so a same-named key in a sibling sub-block
+# (every sub-block of branch_sync carries its own `head`-like keys) is never
+# read in its place.
+fm_nm_branch_sync_nested() {  # <toon-output> <sub-block> <key>
+  local s
+  s=$(printf '%s\n' "$1" | awk -v sub_block="$2" -v key="$3" '
+    function indent(line) { match(line, /[^ ]/); return RSTART - 1 }
+    /^[^[:space:]]/ { in_sync = ($0 ~ /^branch_sync:[[:space:]]*$/); in_sub = 0; next }
+    !in_sync { next }
+    {
+      ind = indent($0)
+      if (in_sub && ind <= sub_ind) in_sub = 0
+      if (!in_sub && $0 ~ ("^[[:space:]]+" sub_block ":[[:space:]]*$")) { in_sub = 1; sub_ind = ind; next }
+      if (in_sub && ind > sub_ind && $0 ~ ("^[[:space:]]+" key ":")) {
+        sub(("^[[:space:]]+" key ":[[:space:]]*"), "")
+        print
+        exit
+      }
+    }')
   fm_nm_strip_quotes "$s"
 }
 
@@ -362,7 +395,7 @@ fm_nm_run_is_parked() {  # <toon-output>
 # daemon-down probe for exactly that reason.
 # All four accepted words reach here on BOTH surfaces. The overview table
 # fm_nm_select_run validates carries a narrower column
-# (pending|running|completed|failed|cancelled, :196), but that column is not
+# (pending|running|completed|failed|cancelled, its unknown_status check), but that column is not
 # what this predicate reads: the selected-run route re-reads the run by id and
 # passes that DETAIL object, whose own vocabulary check admits `fixing` and `ci`
 # as live, and the legacy bare-status route passes the same detail shape.

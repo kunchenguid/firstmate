@@ -3,10 +3,11 @@
 # (bin/fm-claude-stop-autoarm.sh + bin/fm-turnend-guard.sh --claude).
 # Proves, against the real installed Claude Code and the real tracked hook
 # registration: a fresh session with in-flight work, no watcher, and a stale
-# session lock can run fm-session-start.sh first; session start reclaims the
-# dead owner; at least two tokenless auto-arm and rewake cycles then complete
-# with zero model-issued arm commands; and the cooperative guard consumes no
-# forced continuation while the hook's launch is healthy.
+# session lock receives the full session-start digest through the tracked
+# SessionStart hook; session start reclaims the dead owner; at least two
+# tokenless auto-arm and rewake cycles then complete with zero model-issued arm
+# commands; and the cooperative guard consumes no forced continuation while the
+# hook's launch is healthy.
 # The project and FM_HOME are isolated; Claude keeps using its existing managed
 # authentication. No live fleet home, worktree, or session is touched.
 # shellcheck disable=SC2016 # the model, not this test shell, reads the prompt text
@@ -42,7 +43,7 @@ mkdir -p "$LAB"
 git clone -q "$ROOT" "$PROJECT"
 cp -R "$ROOT/bin/." "$PROJECT/bin/"
 cp "$ROOT/.claude/settings.json" "$PROJECT/.claude/settings.json"
-# The lab keeps the real tracked .claude/settings.json SessionStart nudge,
+# The lab keeps the real tracked .claude/settings.json SessionStart run hook,
 # Stop guard, and asyncRewake auto-arm registration.
 # The only local hook records model-issued Bash calls without acquiring the
 # session lock or otherwise changing lifecycle behavior.
@@ -87,6 +88,8 @@ if [ "$N" -ge 3 ]; then
   printf 'watcher: attached pid=%s (beacon 2s)\n' "$$"
   exit 0
 fi
+printf 'pending:downtime:fixture-generation-%s\n' "$N" > "$FM_HOME/state/.watcher-down"
+touch "$FM_HOME/state/.last-watcher-beat"
 printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
 printf 'stale: fixture-rapid-%s\n' "$N"
 exit 0
@@ -105,7 +108,7 @@ printf 'stale: fixture-rapid drained\n'
 SH
 chmod +x "$PROJECT/bin/fm-watch-arm.sh" "$PROJECT/bin/fm-wake-drain.sh"
 
-PROMPT='Run exactly `bin/fm-session-start.sh` with Bash as your first tool call. After reading its complete digest, reply with exactly CYCLE0 and stop. Whenever a Stop hook feedback message wakes you, run exactly `bin/fm-wake-drain.sh` once with Bash, then reply with exactly ACK and stop. Never run bin/fm-watch-arm.sh or any other arm command, and never use any other tool.'
+PROMPT='After reading the complete session-start digest, reply with exactly CYCLE0 and stop. Whenever a Stop hook feedback message wakes you, run exactly `bin/fm-wake-drain.sh` once with Bash, then reply with exactly ACK and stop. Never run bin/fm-watch-arm.sh or any other arm command, and never use any other tool.'
 
 (
   cd "$PROJECT" || exit 1
@@ -118,12 +121,32 @@ ARM_RUNS=$(wc -l < "$HOME_DIR/state/arm-ran" 2>/dev/null | tr -d ' ')
 [ "$ARM_RUNS" = 2 ] || fail "expected exactly 2 hook-owned arm cycles, got $ARM_RUNS: $(cat "$HOME_DIR/state/arm-ran" 2>/dev/null)"
 DRAIN_RUNS=$(wc -l < "$HOME_DIR/state/drain-ran" 2>/dev/null | tr -d ' ')
 [ "$DRAIN_RUNS" = 3 ] || fail "expected one session-start drain plus two model wake drains, got $DRAIN_RUNS drains"
-REWAKES=$(grep -c 'Stop hook feedback' "$TRANSCRIPT" 2>/dev/null || true)
+REWAKES=$(jq -r '
+  select(.type == "user")
+  | .message.content[]?
+  | select(.type == "text")
+  | .text
+' "$TRANSCRIPT" 2>/dev/null | awk '/^Stop hook feedback:/{count++} END{print count+0}')
 [ "$REWAKES" -ge 2 ] || fail "expected at least 2 exit-2 rewake deliveries, got $REWAKES"
 grep -q 'stale: fixture-rapid-1' "$TRANSCRIPT" || fail "first rapid rewake reason missing from the transcript"
 grep -q 'stale: fixture-rapid-2' "$TRANSCRIPT" || fail "second rapid rewake reason missing from the transcript"
-[ "$(sed -n '1p' "$HOME_DIR/state/tool-calls.log" 2>/dev/null)" = 'bin/fm-session-start.sh' ] \
-  || fail "fresh Claude session did not run session start first: $(cat "$HOME_DIR/state/tool-calls.log" 2>/dev/null)"
+[ -s "$HOME_DIR/state/tool-calls.log" ] \
+  || fail "Claude emitted no logged Bash tool calls"
+! grep -q 'fm-session-start.sh' "$HOME_DIR/state/tool-calls.log" \
+  || fail "model issued a redundant session-start command: $(cat "$HOME_DIR/state/tool-calls.log")"
+DIGEST_EVENTS=$(jq -c --arg heading "SESSION START - $HOME_DIR" '
+  select(.type == "system" and .subtype == "hook_response" and .hook_event == "SessionStart")
+  | select(.stdout | contains($heading))
+' "$TRANSCRIPT" 2>/dev/null)
+[ "$(printf '%s' "$DIGEST_EVENTS" | jq -s 'length')" = 1 ] \
+  || fail "expected exactly one SessionStart hook_response carrying the session-start digest"
+DIGEST=$(printf '%s' "$DIGEST_EVENTS" | jq -r '.stdout')
+printf '%s' "$DIGEST" | grep -q '^lock acquired: harness pid [0-9][0-9]*$' \
+  || fail "SessionStart hook digest lacks the stale-lock reclaim"
+! printf '%s' "$DIGEST" | grep -q '^●  STARTUP TRUNCATED - ' \
+  || fail "SessionStart hook digest was truncated"
+printf '%s' "$DIGEST" | grep -q '^The digest above is complete for this session start\.' \
+  || fail "SessionStart hook digest lacks its completion marker"
 [ "$(cat "$HOME_DIR/state/.lock" 2>/dev/null)" != 9999999 ] \
   || fail "session start did not reclaim the stale dead-owner lock"
 if [ -f "$HOME_DIR/state/tool-calls.log" ]; then

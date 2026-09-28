@@ -50,12 +50,24 @@ test_branch_prompt_is_byte_stable_and_above_cache_floor() {
     *) fail "branch prompt lost the inlined recovery playbook" ;;
   esac
   case "$out_a" in
-    *"Report verdict captain for the finished result of work the captain requested, even when that result is healthy."*"A start or still-working update on requested work that brings no new artifact, finding, or decision is verdict routine."*"Keep an unsolicited routine outcome as verdict routine"*"Keep an unchanged fleet review silent"*) ;;
+    *"Report verdict captain for the finished result of work the captain requested, even when that result is healthy."*"A start or still-working update on requested work that brings no new artifact, finding, or decision is verdict routine."*"Set silent true for a task-level routine outcome only when it says the worker is still busy, nothing new has happened since the last outcome, and no action was taken."*"Any routine outcome reporting an action, state change, or new result stays rendered; captain outcomes are never silent."*"Keep an unsolicited routine outcome as verdict routine"*"Keep an unchanged fleet review silent"*) ;;
     *) fail "branch prompt lost the requested-result, progress-routine, or routine-silence rules" ;;
   esac
   case "$out_a" in
     *"# PR identity: copy or abstain"*"copied verbatim from the task's \`done [at=<epoch>]: PR <url>\` status line or its \`pr=\` metadata field"*"Never assemble an owner, repository, host, or number"*"report the identifier you do have"*) ;;
     *) fail "branch prompt lost the copy-or-abstain PR identity rule" ;;
+  esac
+  # The 2026-09-22 away window: every landed exemption worker was left sitting
+  # because the prompt granted landed-task cleanup without ever naming the
+  # moment or the command, so the stale wake ended in the recovery playbook's
+  # "nothing to recover".
+  case "$out_a" in
+    *"A worker whose pull request has landed is finished, not stuck"*"\`check: merge landed:\` wake names exactly that moment"*"\`bin/fm-teardown.sh <task>\` with no flags"*"never forced, worked around, or repaired by hand"*) ;;
+    *) fail "branch prompt lost the landed-work cleanup rule" ;;
+  esac
+  case "$out_a" in
+    *"A second mate's status log is a relay channel for its child work"*"retiring a second mate is MAIN's alone"*"Report a second mate's signal wake from the status lines that wake newly presents"*"A second mate's stale wake is a liveness event: report it even when it presents no new status lines."*) ;;
+    *) fail "branch prompt lost the second-mate relay, signal-span, or stale-liveness rule" ;;
   esac
   pass "branch prompt is byte-stable across homes, cwd, timezone, and time, above the cache floor"
 }
@@ -137,40 +149,44 @@ test_outcome_startup_replay_preserves_silence() {
     --task task-a --verdict captain --summary 'blocked' --silent true 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "append accepted a silent captain outcome"
-  assert_contains "$out" "silent outcomes must be routine fleet outcomes" "silent captain refusal lost its diagnostic"
-  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
-    --task task-a --verdict routine --summary 'healthy' --silent true 2>&1)
-  status=$?
-  [ "$status" -ne 0 ] || fail "append accepted a silent task-scoped outcome"
-  assert_contains "$out" "silent outcomes must be routine fleet outcomes" "silent task refusal lost its diagnostic"
-  [ ! -e "$store" ] || fail "refused silent outcomes changed the durable store"
+  assert_contains "$out" "silent outcomes must have the routine verdict" "silent captain refusal lost its diagnostic"
+  [ ! -e "$store" ] || fail "refused silent captain outcome changed the durable store"
 
+  printf 'working: still building\n' > "$home/state/task-a.status"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-a --verdict routine --summary 'worker still busy, nothing new, no action taken' --silent true >/dev/null \
+    || fail "silent task-scoped routine append failed"
+  [ -s "$home/state/.task-a.branch-outcome-index" ] \
+    || fail "silent task outcome was omitted from the status-outcome backstop index"
+  assert_contains "$(cat "$home/state/.task-a.branch-outcome-index")" \
+    "$(printf 'fm-branch-outcome-index-v1\t1\t')" "status-outcome backstop index lost the silent task outcome"
   FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
     --task fleet --verdict routine --summary 'fleet reviewed, nothing changed' --silent true >/dev/null \
-    || fail "silent outcome append failed"
+    || fail "silent heartbeat append failed"
   FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
     --task task-1 --verdict routine --summary 'worker recovered automatically' >/dev/null \
     || fail "visible outcome append failed"
 
   replay=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" startup-replay) || fail "mixed startup replay failed"
-  assert_not_contains "$replay" "fleet reviewed, nothing changed" "startup replay printed a silent outcome"
+  assert_not_contains "$replay" "fleet reviewed, nothing changed" "startup replay printed a silent heartbeat outcome"
+  assert_not_contains "$replay" "worker still busy, nothing new, no action taken" "startup replay printed a silent task outcome"
   assert_contains "$replay" "worker recovered automatically" "startup replay lost a visible routine outcome"
   [ -z "$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unread)" ] \
     || fail "startup replay did not mark the silent and visible rows read"
 
-  printf '%s\n' '{"seq":3,"epoch":1,"task":"task-legacy","wake":"","verdict":"routine","summary":"legacy visible outcome"}' \
+  printf '%s\n' '{"seq":4,"epoch":1,"task":"task-legacy","wake":"","verdict":"routine","summary":"legacy visible outcome"}' \
     >> "$home/state/branch-outcomes.jsonl"
   replay=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" startup-replay) || fail "legacy startup replay failed"
   assert_contains "$replay" "legacy visible outcome" "startup replay hid a legacy row with no silent field"
   [ -z "$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unread)" ] \
     || fail "startup replay did not mark the legacy row read"
 
-  printf '%s\n' '{"seq":4,"epoch":1,"task":"task-bad","wake":"","verdict":"captain","summary":"poisoned","silent":true}' >> "$store"
+  printf '%s\n' '{"seq":5,"epoch":1,"task":"task-bad","wake":"","verdict":"captain","summary":"poisoned","silent":true}' >> "$store"
   out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unread 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "unread accepted a stored silent captain outcome"
   assert_contains "$out" "malformed or non-sequential" "stored silent captain refusal lost its diagnostic"
-  pass "only routine fleet outcomes can be silent"
+  pass "routine task and fleet no-change outcomes stay stored and silent captain outcomes are refused"
 }
 
 test_outcome_startup_replay_stops_at_captain_barrier() {
@@ -305,6 +321,31 @@ test_outcome_sequence_conflicts_fail_closed() {
   pass "middle sequence conflicts fail closed for every store read and append"
 }
 
+test_outcome_lookup_returns_exact_sequences_and_refuses_missing_rows() {
+  local home out status selected
+  home="$TMP_ROOT/store-exact-lookup-home"
+  mkdir -p "$home/state"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-1 --verdict routine --summary first >/dev/null || fail "lookup fixture append 1 failed"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-2 --verdict routine --summary second --silent true >/dev/null || fail "lookup fixture append 2 failed"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-3 --verdict captain --summary third >/dev/null || fail "lookup fixture append 3 failed"
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" lookup --seqs 3,1) \
+    || fail "lookup refused existing sequences 3 and 1"
+  selected=$(printf '%s\n' "$out" | jq -sr '[.[].seq] | join(",")')
+  [ "$selected" = "3,1" ] || fail "lookup changed requested sequence order: $selected"
+  assert_contains "$out" '"task":"task-1"' "lookup omitted the first requested row"
+  assert_contains "$out" '"task":"task-3"' "lookup omitted the second requested row"
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" lookup --seqs 1,4 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "lookup accepted a missing sequence"
+  assert_contains "$out" "requested outcome sequences are missing" "missing-row lookup lost its diagnostic"
+  pass "outcome lookup returns exact sequence rows and distinguishes missing receipts"
+}
+
 test_outcome_non_jsonl_layout_fails_closed() {
   local home store snapshot out status
   home="$TMP_ROOT/store-physical-layout-home"
@@ -346,6 +387,62 @@ test_outcome_non_jsonl_layout_fails_closed() {
   assert_contains "$out" "malformed or non-sequential" "unterminated-store refusal lost its diagnostic"
   [ "$(cat "$store")" = "$snapshot" ] || fail "failed append changed the unterminated store"
   pass "outcome stores require terminated single-line JSON records"
+}
+
+# A supervision-host drain presents off Pi: every unread row and every
+# unprocessed captain row, moving nothing, so the drain marks them read only
+# once it has shown them; a routine row is presented once and a captain row
+# until it is acknowledged.
+test_outcome_present_reads_without_advancing() {
+  local home out
+  home="$TMP_ROOT/store-present-home"
+  mkdir -p "$home/state"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-1 --verdict routine --summary 'routine first' >/dev/null || fail "routine append failed"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-2 --verdict captain --summary 'captain second' >/dev/null || fail "captain append failed"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" present) || fail "present failed"
+  [ "$(printf '%s\n' "$out" | jq -r '"\(.seq):\(.unread)"' | tr '\n' ' ')" = "1:true 2:true " ] \
+    || fail "present did not print both unread rows: $out"
+  assert_absent "$home/state/.branch-outcomes-cursor" "present must not move the read cursor"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-read --through 2 || fail "the presented rows could not be marked read"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" present) || fail "second present failed"
+  [ "$(printf '%s\n' "$out" | jq -r '"\(.seq):\(.unread)"' | tr '\n' ' ')" = "2:false " ] \
+    || fail "a second present must repeat only the unprocessed captain row: $out"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-processed --through 2 || fail "the presented captain row could not be acknowledged"
+  [ -z "$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" present)" ] || fail "an acknowledged store still presented rows"
+  pass "outcome store: present shows each routine row once and each captain row until it is acknowledged"
+}
+
+# Both presenters name how long ago each captain row was recorded, in the one
+# wording the store owns: minutes under an hour, hours under two days, then
+# days, with a clock that moved backwards reading as just recorded. It is
+# computed at read time and never written into the store, and routine rows
+# carry no age.
+test_outcome_rows_carry_their_recorded_age() {
+  local home store now snapshot out
+  home="$TMP_ROOT/store-age-home"
+  mkdir -p "$home/state"
+  store="$home/state/branch-outcomes.jsonl"
+  now=$(date +%s)
+  local epoch seq=0
+  for epoch in $((now + 600)) $((now - 125)) $((now - 90 * 60)) $((now - 47 * 3600)) $((now - 49 * 3600)) $((now - 6 * 86400 - 60)); do
+    seq=$((seq + 1))
+    printf '{"seq":%s,"epoch":%s,"task":"task-%s","wake":"","verdict":"captain","summary":"row %s","silent":false}\n' \
+      "$seq" "$epoch" "$seq" "$seq" >> "$store"
+  done
+  printf '{"seq":7,"epoch":%s,"task":"task-7","wake":"","verdict":"routine","summary":"row 7","silent":false}\n' \
+    "$((now - 86400))" >> "$store"
+  snapshot=$(cat "$store")
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" present) || fail "present failed"
+  [ "$(printf '%s\n' "$out" | jq -r '.recordedAgo // "none"' | tr '\n' ' ')" = "0m 2m 1h 47h 2d 6d none " ] \
+    || fail "present did not name each captain row's recorded age, and only theirs: $out"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-read --through 7 || fail "mark-read failed"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unprocessed) || fail "unprocessed failed"
+  [ "$(printf '%s\n' "$out" | jq -r '"\(.seq):\(.recordedAgo)"' | tr '\n' ' ')" = "1:0m 2:2m 3:1h 4:47h 5:2d 6:6d " ] \
+    || fail "unprocessed did not name each row's recorded age: $out"
+  [ "$(cat "$store")" = "$snapshot" ] || fail "reading the age changed the store"
+  pass "outcome store: present and unprocessed name each captain row's recorded age without writing it"
 }
 
 test_outcome_processed_marker_is_sequence_bound() {
@@ -428,9 +525,9 @@ test_outcome_processed_marker_is_sequence_bound() {
   [ "$(cat "$marker")" = 999999999999999999999999999999999 ] \
     || fail "out-of-range marker refusal changed the marker"
 
-  # Migration: a home with delivered history and no marker starts processed
-  # at its read cursor, so that history is not re-presented; an absent marker
-  # otherwise reads as zero, the safe direction.
+  # A home with delivered history and no marker cannot tell a read row from
+  # an acknowledged one, so processed-init never adopts the read cursor: the
+  # absent marker keeps reading as zero, the safe direction.
   home="$TMP_ROOT/store-processed-migration-home"
   mkdir -p "$home/state"
   FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
@@ -439,10 +536,10 @@ test_outcome_processed_marker_is_sequence_bound() {
   assert_contains "$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unprocessed)" '"seq":1' \
     "an absent marker hid a delivered captain row instead of reading as zero"
   FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" processed-init || fail "migration processed-init failed"
-  [ "$(cat "$home/state/.branch-outcomes-processed")" = 1 ] || fail "processed-init did not start at the read cursor"
-  [ -z "$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unprocessed)" ] \
-    || fail "migrated history was re-presented for processing"
-  pass "the processed marker is sequence-bound, never ahead of the read cursor, never backwards, and migrates delivered history once"
+  [ ! -e "$home/state/.branch-outcomes-processed" ] || fail "processed-init created the marker from the read cursor"
+  assert_contains "$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unprocessed)" '"seq":1' \
+    "processed-init adopted a delivered but unacknowledged captain row as processed"
+  pass "the processed marker is sequence-bound, never ahead of the read cursor, never backwards, and never adopts delivered history"
 }
 
 # --- lease contract -----------------------------------------------------------
@@ -589,8 +686,19 @@ test_home_without_branch_is_untouched() {
   [ -z "$(find "$home/state" -name '.lease-*' -o -name 'branch-outcomes*' -o -name '.branch-*' 2>/dev/null)" ] \
     || fail "guard layer created branch state in a home that never ran the branch"
 
-  # A stale Pi marker and recycled-but-live lease pid cannot activate leases in
-  # a no-lock Claude home; the guard removes the leftover and passes silently.
+  # An unmarked caller with no lease file for the task takes no lock at all, so
+  # the guard leaves a home that never ran a branch byte-for-byte unchanged.
+  # The positional parameter belongs to the nested shell.
+  # shellcheck disable=SC2016
+  out=$(env -u PI_CODING_AGENT -u FM_SUPERVISION_ACTOR STATE="$home/state" bash -c '
+    . "$1"
+    fm_lease_guard task-none "probe"
+    if [ -e "$STATE/.fm-lease-command.lock" ]; then echo lock-taken; else echo no-lock; fi
+  ' _ "$ROOT/bin/fm-lease-lib.sh" 2>&1)
+  [ "$out" = no-lock ] || fail "an unmarked guard with no lease file engaged the lease-command lock: $out"
+
+  # A stale Pi marker and a leftover lease cannot bind a no-lock Claude home;
+  # the guard removes the leftover and passes silently.
   printf 'harness=claude\n' > "$home/state/fake.meta"
   printf '%s\n' "$PPID" > "$home/state/.pi-branch-extension-loaded"
   printf 'branch\t%s\t123\n' "$PPID" > "$home/state/.lease-task-reused"
@@ -598,14 +706,191 @@ test_home_without_branch_is_untouched() {
   [ "$out" = "silent-pass" ] || fail "guard helpers honored a leftover Pi lease in a no-lock Claude home: $out"
   [ ! -e "$home/state/.lease-task-reused" ] || fail "guard kept a leftover Pi lease without a session lock"
 
-  printf '%s\n' "$PPID" > "$home/state/.lock"
+  # A leftover lease whose pid is alive but is not the current lock holder - a
+  # session that exited while its pid lives on - is stale for a Claude main.
+  printf '%s\n' "$$" > "$home/state/.lock"
   printf 'branch\t%s\t123\n' "$PPID" > "$home/state/.lease-task-reused"
   # The positional parameter belongs to the nested shell.
   # shellcheck disable=SC2016
   out=$(env -u PI_CODING_AGENT -u FM_SUPERVISION_ACTOR CLAUDECODE=1 STATE="$home/state" bash -c '. "$1"; fm_lease_guard task-reused "probe"; echo silent-pass' _ "$ROOT/bin/fm-lease-lib.sh" 2>&1)
-  [ "$out" = "silent-pass" ] || fail "guard helpers honored a reused-pid Pi lease in a Claude context: $out"
-  [ ! -e "$home/state/.lease-task-reused" ] || fail "Claude context kept a Pi lease whose old pid matched its current lock"
-  pass "a non-Pi home ignores stale Pi leases even when the recycled pid owns its lock"
+  [ "$out" = "silent-pass" ] || fail "guard helpers honored a lease whose pid no longer holds the lock: $out"
+  [ ! -e "$home/state/.lease-task-reused" ] || fail "Claude context kept a lease whose pid is not the current lock holder"
+  pass "a home without a live branch lease takes no lock and clears leftover leases in any calling context"
+}
+
+# --- the partition across two processes, off Pi -------------------------------
+
+# A branch that runs as its own process beside an unmarked main (no Pi marker,
+# no actor variable - how every non-Pi primary's own shell looks) must bind that
+# main exactly as it binds a Pi main: liveness is the lease record alone.
+test_unmarked_main_honors_a_live_branch_lease() {
+  local home fakebin out status lease_before
+  home="$TMP_ROOT/unmarked-main-home"
+  fakebin="$TMP_ROOT/unmarked-main-bin"
+  mkdir -p "$home/state" "$fakebin"
+  printf '%s\n' "$$" > "$home/state/.lock"
+  fm_write_meta "$home/state/task-held.meta" "window=fm-task-held" "backend=tmux" "harness=claude"
+  # A delivery that got past the guard would reach tmux; record it instead.
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s"\nexit 1\n' "$home/tmux-calls" > "$fakebin/tmux"
+  chmod +x "$fakebin/tmux"
+
+  env -u PI_CODING_AGENT FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_LEASE_HOLDER_PID=$$ \
+    "$ROOT/bin/fm-lease.sh" claim task-held --actor branch || fail "the branch process could not claim its lease"
+  lease_before=$(cat "$home/state/.lease-task-held")
+
+  out=$(env -u PI_CODING_AGENT -u FM_SUPERVISION_ACTOR CLAUDECODE=1 FM_HOME="$home" \
+    "$ROOT/bin/fm-lease.sh" check task-held) || fail "an unmarked main could not see the branch lease"
+  case "$out" in
+    "branch $$ "*" live") ;;
+    *) fail "an unmarked main read the live branch lease as: $out" ;;
+  esac
+
+  out=$(env -u PI_CODING_AGENT -u FM_SUPERVISION_ACTOR CLAUDECODE=1 FM_HOME="$home" FM_LEASE_HOLDER_PID=$$ \
+    "$ROOT/bin/fm-lease.sh" claim task-held 2>&1)
+  status=$?
+  [ "$status" -eq 6 ] || fail "an unmarked main claim over the live branch lease exited $status, not 6: $out"
+  env -u PI_CODING_AGENT -u FM_SUPERVISION_ACTOR CLAUDECODE=1 FM_HOME="$home" \
+    "$ROOT/bin/fm-lease.sh" sweep || fail "sweep from an unmarked main failed"
+  [ "$(cat "$home/state/.lease-task-held")" = "$lease_before" ] \
+    || fail "an unmarked main overwrote or swept the live branch lease"
+
+  out=$(env -u PI_CODING_AGENT -u FM_SUPERVISION_ACTOR CLAUDECODE=1 FM_HOME="$home" PATH="$fakebin:$PATH" \
+    "$ROOT/bin/fm-send.sh" fm-task-held "steer while leased" 2>&1)
+  status=$?
+  [ "$status" -eq 6 ] || fail "an unmarked main steer through the live branch lease exited $status, not 6: $out"
+  assert_contains "$out" "steer (fm-send) refused" "the fm-send refusal lost its action label"
+  [ ! -e "$home/tmux-calls" ] || fail "the refused steer still reached the endpoint: $(cat "$home/tmux-calls")"
+  [ -z "$(find "$home/state" -path '*.inbox*' -name '*.msg' 2>/dev/null)" ] \
+    || fail "the refused steer still wrote an inbox record"
+
+  out=$(env -u PI_CODING_AGENT -u FM_SUPERVISION_ACTOR CLAUDECODE=1 FM_HOME="$home" PATH="$fakebin:$PATH" \
+    "$ROOT/bin/fm-control.sh" task-held interrupt 2>&1)
+  status=$?
+  [ "$status" -eq 6 ] || fail "an unmarked main fm-control exited $status, not 6: $out"
+  assert_contains "$out" "leased to the branch supervision actor" "the fm-control refusal lost the holder"
+  out=$(env -u PI_CODING_AGENT -u FM_SUPERVISION_ACTOR CLAUDECODE=1 FM_HOME="$home" PATH="$fakebin:$PATH" \
+    "$ROOT/bin/fm-teardown.sh" task-held 2>&1)
+  status=$?
+  [ "$status" -eq 6 ] || fail "an unmarked main fm-teardown exited $status, not 6: $out"
+  [ -e "$home/state/task-held.meta" ] || fail "the refused teardown still removed the task record"
+
+  # Once the branch releases, the same unmarked main proceeds.
+  env -u PI_CODING_AGENT FM_HOME="$home" FM_SUPERVISION_ACTOR=branch \
+    "$ROOT/bin/fm-lease.sh" release task-held --actor branch || fail "branch release failed"
+  env -u PI_CODING_AGENT -u FM_SUPERVISION_ACTOR CLAUDECODE=1 FM_HOME="$home" FM_LEASE_HOLDER_PID=$$ \
+    "$ROOT/bin/fm-lease.sh" claim task-held || fail "an unmarked main could not claim after the branch released"
+
+  # A new session owning the lock makes the old session's lease stale for the
+  # unmarked main too, and its guard clears it.
+  env -u PI_CODING_AGENT FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_LEASE_HOLDER_PID=$$ \
+    "$ROOT/bin/fm-lease.sh" claim task-old --actor branch || fail "branch claim for the old session failed"
+  printf '%s\n' "$PPID" > "$home/state/.lock"
+  out=$(env -u PI_CODING_AGENT -u FM_SUPERVISION_ACTOR CLAUDECODE=1 FM_HOME="$home" \
+    "$ROOT/bin/fm-lease.sh" check task-old) || fail "check missed the old session's lease"
+  case "$out" in
+    *" stale") ;;
+    *) fail "a lease from a session that no longer holds the lock read as: $out" ;;
+  esac
+  pass "an unmarked main honors a live branch lease across processes and ignores a previous session's"
+}
+
+# A lease file engages the guard's claim serialization for an unmarked caller
+# too, so the branch cannot claim between that caller's check and its mutation.
+test_unmarked_guard_with_a_lease_file_holds_exclusivity_through_mutation() {
+  local home operation_pid claim_pid claim_status
+  home="$TMP_ROOT/unmarked-guard-mutation-home"
+  mkdir -p "$home/state"
+  printf '%s\n' "$$" > "$home/state/.lock"
+  printf 'branch\t999999\t123\n' > "$home/state/.lease-task-race"
+
+  # The positional parameter belongs to the nested shell.
+  # shellcheck disable=SC2016
+  # The mutation stand-in waits for release under a bound, so a failed
+  # assertion below cannot leave it holding the suite open.
+  env -u PI_CODING_AGENT -u FM_SUPERVISION_ACTOR CLAUDECODE=1 STATE="$home/state" \
+    FM_TEST_READY="$home/operation-ready" FM_TEST_RELEASE="$home/operation-release" bash -c '
+      . "$1"
+      fm_lease_guard task-race "probe"
+      trap "fm_lease_guard_release" EXIT
+      : > "$FM_TEST_READY"
+      i=0
+      while [ ! -e "$FM_TEST_RELEASE" ] && [ "$i" -lt 1500 ]; do sleep 0.01; i=$((i + 1)); done
+    ' _ "$ROOT/bin/fm-lease-lib.sh" >/dev/null 2>&1 &
+  operation_pid=$!
+  while [ ! -e "$home/operation-ready" ]; do sleep 0.01; done
+  [ ! -e "$home/state/.lease-task-race" ] || fail "the unmarked guard kept the dead session's lease"
+
+  env -u PI_CODING_AGENT FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_LEASE_HOLDER_PID=$$ \
+    "$ROOT/bin/fm-lease.sh" claim task-race --actor branch >/dev/null 2>&1 &
+  claim_pid=$!
+  sleep 0.2
+  kill -0 "$claim_pid" 2>/dev/null \
+    || fail "the branch claimed while the unmarked guarded mutation was still running"
+  [ ! -e "$home/state/.lease-task-race" ] \
+    || fail "the concurrent claim published a lease before the unmarked guarded mutation ended"
+
+  : > "$home/operation-release"
+  wait "$operation_pid" || fail "unmarked guarded mutation fixture failed"
+  wait "$claim_pid"; claim_status=$?
+  [ "$claim_status" -eq 0 ] || fail "claim did not proceed after the unmarked guarded mutation ended: $claim_status"
+  pass "a lease file makes an unmarked guard exclude a concurrent claim for the complete mutation"
+}
+
+# A home opted into the supervision host has a branch actor that can claim a
+# task no one has leased yet, so its unmarked main must exclude that first
+# claim for the whole guarded mutation, while a home without the opt-in keeps
+# taking no lock at all.
+test_host_home_unmarked_guard_excludes_the_first_claim() {
+  local home operation_pid claim_pid claim_status out
+  home="$TMP_ROOT/host-first-claim-home"
+  mkdir -p "$home/state" "$home/config"
+  printf '%s\n' "$$" > "$home/state/.lock"
+
+  # Without the opt-in the unmarked guard stays lock-free for an unleased task.
+  # The positional parameter belongs to the nested shell.
+  # shellcheck disable=SC2016
+  out=$(env -u PI_CODING_AGENT -u FM_SUPERVISION_ACTOR CLAUDECODE=1 FM_HOME="$home" STATE="$home/state" bash -c '
+    . "$1"
+    fm_lease_guard task-first "probe"
+    if [ -e "$STATE/.fm-lease-command.lock" ]; then echo lock-taken; else echo no-lock; fi
+  ' _ "$ROOT/bin/fm-lease-lib.sh" 2>&1)
+  [ "$out" = no-lock ] || fail "a home without config/supervision-host engaged the lease-command lock: $out"
+
+  : > "$home/config/supervision-host"
+  # The positional parameter belongs to the nested shell.
+  # shellcheck disable=SC2016
+  env -u PI_CODING_AGENT -u FM_SUPERVISION_ACTOR CLAUDECODE=1 FM_HOME="$home" STATE="$home/state" \
+    FM_TEST_READY="$home/operation-ready" FM_TEST_RELEASE="$home/operation-release" bash -c '
+      . "$1"
+      fm_lease_guard task-first "probe"
+      trap "fm_lease_guard_release" EXIT
+      : > "$FM_TEST_READY"
+      i=0
+      while [ ! -e "$FM_TEST_RELEASE" ] && [ "$i" -lt 1500 ]; do sleep 0.01; i=$((i + 1)); done
+    ' _ "$ROOT/bin/fm-lease-lib.sh" >/dev/null 2>&1 &
+  operation_pid=$!
+  while [ ! -e "$home/operation-ready" ]; do sleep 0.01; done
+  [ ! -e "$home/state/.lease-task-first" ] || fail "the guard created a lease for an unleased task"
+
+  env -u PI_CODING_AGENT FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_LEASE_HOLDER_PID=$$ \
+    "$ROOT/bin/fm-lease.sh" claim task-first --actor branch >/dev/null 2>&1 &
+  claim_pid=$!
+  sleep 0.2
+  kill -0 "$claim_pid" 2>/dev/null \
+    || fail "the host branch took the first claim while main's guarded mutation was still running"
+  [ ! -e "$home/state/.lease-task-first" ] \
+    || fail "the first claim published a lease before main's guarded mutation ended"
+
+  : > "$home/operation-release"
+  wait "$operation_pid" || fail "host-home guarded mutation fixture failed"
+  wait "$claim_pid"; claim_status=$?
+  [ "$claim_status" -eq 0 ] || fail "the first claim did not proceed after main's guarded mutation ended: $claim_status"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-lease.sh" check task-first) || fail "the first claim left no lease"
+  case "$out" in
+    "branch $$ "*" live") ;;
+    *) fail "the first claim recorded: $out" ;;
+  esac
+  pass "an opted-in home's unmarked main excludes the host's first claim for its whole mutation, and other homes take no lock"
 }
 
 # --- session-bound staleness and the loud accidental-override guard ---------
@@ -861,12 +1146,8 @@ test_away_record_relocates_main_owned_actions_to_the_branch() {
   [ "$status" -eq 6 ] || fail "attended branch fm-pr-merge exited $status, not 6: $out"
   assert_contains "$out" "$refusal" "attended refusal lost its wording"
 
-  # A proposal alone is not the posture: only a CONFIRMED record relocates.
-  FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" propose --spend 2 >/dev/null || fail "away propose failed"
-  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-pr-merge.sh" task-x https://github.com/o/r/pull/1 2>&1)
-  status=$?
-  [ "$status" -eq 6 ] || fail "an unconfirmed proposal relocated the merge (exit $status): $out"
-  FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" confirm >/dev/null || fail "away confirm failed"
+  # /afk is the go: the one entry call writes the record that relocates.
+  FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" enter --spend 2 >/dev/null || fail "away entry failed"
 
   # Under the record the partition passes and the merge script reaches its
   # OWN gate (no task record here), never the partition refusal.
@@ -931,8 +1212,7 @@ WRAPPER
   out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" "$root/bin/fm-spawn.sh" task-new --mode no-mistakes --yolo off 2>&1) || true
   assert_not_contains "$out" "caps concurrent workers" "a field-read after archive refused a main spawn via the spend cap"
   assert_not_contains "$out" "no readable spend cap" "a field-read after archive killed the spawn instead of restoring attended behavior"
-  FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" propose --spend 2 >/dev/null || fail "away re-propose failed"
-  FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" confirm >/dev/null || fail "away re-confirm failed"
+  FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" enter --spend 2 >/dev/null || fail "away re-entry failed"
 
   # Archive is absence: the attended refusal returns, byte for byte.
   FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" archive >/dev/null || fail "away archive failed"
@@ -974,8 +1254,7 @@ test_away_branch_spawn_requires_queued_dispatchable_work() {
 
 ## Done
 EOF
-  FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" propose --spend 2 >/dev/null || fail "away propose failed"
-  FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" confirm >/dev/null || fail "away confirm failed"
+  FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" enter --spend 2 >/dev/null || fail "away entry failed"
 
   out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_SUPERVISION_ACTOR=branch \
     "$ROOT/bin/fm-spawn.sh" task-arbitrary --mode no-mistakes --yolo off 2>&1)
@@ -1072,8 +1351,7 @@ fi
 exec "\$REAL" "\$@"
 WRAPPER
   chmod +x "$root/bin/fm-afk-contract.sh"
-  FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" propose --spend 1 >/dev/null || fail "away propose failed"
-  FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" confirm >/dev/null || fail "away confirm failed"
+  FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" enter --spend 1 >/dev/null || fail "away entry failed"
 
   FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
     "$root/bin/fm-spawn.sh" task-q1 --mode no-mistakes --yolo off \
@@ -1101,12 +1379,18 @@ test_outcome_startup_replay_stops_at_captain_barrier
 test_outcome_cursor_corruption_fails_closed
 test_cursor_advancement_refuses_ahead_processed_marker
 test_outcome_sequence_conflicts_fail_closed
+test_outcome_lookup_returns_exact_sequences_and_refuses_missing_rows
 test_outcome_non_jsonl_layout_fails_closed
 test_outcome_processed_marker_is_sequence_bound
+test_outcome_present_reads_without_advancing
+test_outcome_rows_carry_their_recorded_age
 test_lease_exclusivity_release_stale_and_sweep
 test_mutating_scripts_refuse_the_other_actors_lease
 test_main_owned_actions_refuse_the_branch_actor
 test_home_without_branch_is_untouched
+test_unmarked_main_honors_a_live_branch_lease
+test_unmarked_guard_with_a_lease_file_holds_exclusivity_through_mutation
+test_host_home_unmarked_guard_excludes_the_first_claim
 test_lease_liveness_binds_to_the_session_lock
 test_concurrent_stale_lease_claims_have_one_winner
 test_guard_stale_clear_cannot_delete_a_new_claim
