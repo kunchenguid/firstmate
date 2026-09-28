@@ -36,17 +36,31 @@ disableModelInvocation: frontmatter["disable-model-invocation"] === true,
 Consequence: with the upstream flag set, the skill's name and description never enter the system prompt, so it costs context only when a human invokes it.
 This is why the vendor copy keeps the flag unchanged.
 
-## Confirmed: `/skill:name` loads exactly one file
+## Confirmed: `/skill:show-me` loads the body, and registration alone does not
 
-```js
-// dist/core/agent-session.js
-const content = readFileSync(skill.filePath, "utf-8");
-const body = stripFrontmatter(content).trim();
-const skillBlock = `<skill name="${skill.name}" location="${skill.filePath}">\nReferences are relative to ${skill.baseDir}.\n\n${body}\n</skill>`;
+Run from a project copy that holds the skill at `.agents/skills/show-me/`, with the skill registered by path:
+
+```
+$ cd <project-copy>
+$ pi --skill <project-copy>/.agents/skills/show-me --no-context-files --offline \
+    --mode text --print "/skill:show-me Reply exactly two lines ..."
+SEEN=YES
+SIBLING=NO
 ```
 
-Consequence: sibling files such as `FIRSTMATE.md` are **not** injected by a forced skill load; they reach the agent only through an explicit read or link.
-That determined the vendor layout: the adaptation is a sibling so `SKILL.md` stays byte-for-byte upstream, and the sibling is referenced from inside `SKILL.md`'s own directory contract rather than appended into it.
+Two controls bracket that result, same flags, one variable changed each time:
+
+| Control | Result |
+|---|---|
+| No `--skill` registration at all | `SEEN=NO` - the command passes through as unknown text |
+| Registered from elsewhere while the cwd has no discovered copy | `SEEN=YES` - registration is what makes the name resolvable |
+| Ordinary prompt, no `/skill:` invocation, skill registered and discoverable | `LISTED=NO` - manual-only keeps it out of the system-prompt skill list |
+| Ask for the sibling by name instead (`name: peekaboo`) | `SEEN=NO` - expansion is keyed to the skill's own name |
+
+Consequences the vendor layout depends on:
+- A forced load injects only `SKILL.md`; `FIRSTMATE.md` never arrives unless read explicitly (`SIBLING=NO`), which is why the adaptation is referenced rather than assumed.
+- The cost gate is real: an ordinary session pays nothing for this skill until a human invokes it.
+- Registration and discovery are separate steps, so "installed" and "invocable" are different claims; both were needed above.
 
 ## Confirmed: discovery locations and the `skills/` gap
 
@@ -85,11 +99,14 @@ Calling it in this session returned `微信桥接未启动，请先在 TUI 执�
 ## Not proven
 
 - End-to-end delivery of a rendered diagram to a captain's WeChat conversation: blocked by the bridge being stopped above, so only the renderer and the tool contract are proven, not the round trip.
-- `/skill:show-me` resolving inside a live interactive firstmate session.
-  The disposable-project attempt (a copy under `.agents/skills/show-me/` with `--approve`) failed before answering with a provider `insufficient_quota` 429, so the command's registration is inferred from loader source rather than observed.
 - Any harness besides pi: claude, codex, opencode, grok, kimi, cursor, omp, and the rest of firstmate's verified adapters were not exercised for this skill.
 - Whether `chrome-devtools-axi` or `lavish-axi` is reachable in a given session; neither was available in the session that produced this record.
 - Rendering quality at realistic diagram sizes, and whether an attached HTML file previews usefully on a phone.
+
+## Reproducing these probes
+
+The portable regression is [`tests/fm-show-me-skill.test.sh`](../../tests/fm-show-me-skill.test.sh); run it with `bash tests/fm-show-me-skill.test.sh`.
+It drives the loader and the gating control above through pi itself, skips cleanly when pi is absent, and fails loudly on a provider quota refusal rather than reporting a pass it did not observe.
 
 ## Refreshing this record
 

@@ -79,14 +79,14 @@ Verified facts about the installed harness:
 - Pi discovers a skill as any directory containing `SKILL.md`, recursively, under `.agents/skills/` in the project and its ancestors, under `.pi/skills/`, under the global agent skill directories, or through an explicit `--skill <path>`; confirmed from pi 0.84.2's own skills documentation and loader source.
 - `skills/` at a repository root is **not** one of those discovery locations.
   So this directory is an installer-facing public surface, and it loads in a given session only after something installs it into a discovered location or passes it with `--skill`.
-- Project-local discovery (`.agents/skills/…`) applies only after the project is trusted for that session.
+- Registration and invocation are separate steps, and both were measured: with no `--skill` registration the `/skill:show-me` command resolves to nothing, while a registered copy injects its body when invoked.
+- While registered but not invoked, the skill does not appear in the system-prompt skill list at all, so an ordinary prompt pays nothing for it.
+- A forced load injects only this `SKILL.md`; reading [FIRSTMATE.md](FIRSTMATE.md) is a separate step, which is why every reference to it is a link.
 - Explicit `--skill` loading works from this session: a non-interactive run pointed at this directory started and completed cleanly.
-- `/skill:<name>` expands to the full body of that skill's single `SKILL.md` file, with relative references resolved against the skill directory.
 
 Unverified combinations; do not document or advertise these as supported until they are actually run:
 
-- Whether `/skill:show-me` resolves inside a real interactive firstmate session, as opposed to registering in principle.
-  A forced-load attempt in a disposable project copy was blocked by a model-quota refusal before it could answer, so the invocation itself is recorded as expected-but-unproven.
+- Whether `/skill:show-me` resolves inside a real interactive firstmate session; every measurement above used a non-interactive text run against a project copy, not the live pane.
 - Any harness other than pi: Claude Code, Codex, opencode, grok, kimi, cursor, omp and the rest named in firstmate's contract were not exercised for this skill.
 - Whether `chrome-devtools-axi` or `lavish-axi` is present in a given session; both were unavailable in the session that wrote this file, which is why rank 1's fallback wording is written first.
 - Rendering quality at real diagram sizes, and whether HTML attached as a chat file previews usefully on a phone; only the small proof-of-concept PNG was measured.

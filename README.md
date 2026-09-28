@@ -207,8 +207,12 @@ Firstmate's skills live in two separate places with different audiences:
 - `.agents/skills/` - agent-loaded skills (this section's table, plus firstmate's agent-only reference skills). Every one of these assumes a live firstmate home and is meaningless, or actively misleading, installed anywhere else, so each carries `metadata.internal: true` in its frontmatter. That flag hides them from installer discovery (tools like the [skills.sh](https://skills.sh) `npx skills add` installer) without affecting how firstmate itself loads them - frontmatter metadata is inert to the agent's own skill loader.
 - `skills/` - public, installer-facing skills meant to be installed standalone into any project, independent of firstmate.
   Each one is a self-contained skill with no dependency on firstmate's paths, tools, or vocabulary.
-  Today that is `skills/stow`, a generic session-knowledge-sweep skill that routes findings by explicit instruction first, then existing local conventions, then a private `.stow-notes.md` fallback, and curates tiered entries through decay, local archival, and user-approved on-demand offload proposals.
-  It intentionally shares no code with the firstmate-internal `.agents/skills/stow` it is named after, so the two can evolve independently.
+  Two live here:
+  - `skills/stow`, a generic session-knowledge-sweep skill that routes findings by explicit instruction first, then existing local conventions, then a private `.stow-notes.md` fallback, and curates tiered entries through decay, local archival, and user-approved on-demand offload proposals.
+    It intentionally shares no code with the firstmate-internal `.agents/skills/stow` it is named after, so the two can evolve independently.
+  - `skills/show-me`, a vendored HumanLayer skill whose provenance and license are recorded in [`UPSTREAM.md`](skills/show-me/UPSTREAM.md).
+    It answers a question with the smallest diagram that makes the point instead of a wall of prose, and ships manual-only (`disable-model-invocation: true`) so it costs context only when you invoke it.
+    Its [`FIRSTMATE.md`](skills/show-me/FIRSTMATE.md) swaps the upstream "open it in a browser" delivery for surfaces a captain actually receives.
 
 ## Documentation
 
