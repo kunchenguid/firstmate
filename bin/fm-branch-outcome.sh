@@ -62,9 +62,9 @@
 #     append. It is a read-only display source for readers that cannot read the
 #     unbounded store (the Claude Code Calm mod's supervision notes, whose file
 #     read rejects over 4 MiB); it is never authoritative, and a failed refresh
-#     leaves the stored outcome and its delivery untouched. present seeds it
-#     from the store when it is absent, so a home whose store predates it
-#     gains one at its next drain.
+#     leaves the stored outcome and its delivery untouched. seed-tail creates
+#     it from the store when it is absent, so a home whose store predates it
+#     gains one at its next session start.
 #   - Every mutation runs under $STATE/.branch-outcomes.lock so the branch
 #     extension and a concurrent session-start replay cannot interleave.
 #   - The store is written BEFORE the outcome is delivered to main
@@ -93,11 +93,11 @@
 #     "BRANCH OUTCOMES", docs/supervision-host.md "Captain outcomes"): under
 #     the lock, print every unread record and every unprocessed captain record
 #     (JSONL, ascending seq, each with an added "unread" boolean, and each
-#     captain record also with "recordedAgo"). It moves nothing and only
-#     seeds an absent display tail copy: off Pi that drain presentation is
-#     what the visible entry is, so the drain runs mark-read once it has
-#     presented the rows; it is the only reader that advances the cursor
-#     there. Prints nothing when nothing is unread or unprocessed.
+#     captain record also with "recordedAgo"). It moves nothing: off Pi that
+#     drain presentation is what the visible entry is, so the drain runs
+#     mark-read once it has presented the rows; it is the only reader that
+#     advances the cursor there. Prints nothing when nothing is unread or
+#     unprocessed.
 #     "recordedAgo" is how long before this read the row was appended, as
 #     whole minutes under an hour, whole hours under two days, else whole days
 #     (for example "0m", "5h", "6d"; a future epoch reads "0m"). It is the one
@@ -124,6 +124,11 @@
 #     acknowledge that row. Prints nothing when nothing replayable is unread.
 #     Run it only when the session holds the lock (fm-session-start.sh owns the
 #     call site).
+#   fm-branch-outcome.sh seed-tail
+#     Under the lock, write the display tail copy from the validated store
+#     when the store has rows and the copy is absent; otherwise change
+#     nothing. fm-session-start.sh runs it at every locked session start, on
+#     every harness and away posture, before the drain.
 set -eu
 
 SCRIPT_DIR="$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd "${d:-/}" && pwd)"
@@ -152,7 +157,7 @@ RECORDED_AGO_JQ='def recorded_ago: ([$now - .epoch, 0] | max) as $s
     else "\($s / 86400 | floor)d" end;'
 
 usage() {
-  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--silent true|false] | unread | mark-read --through <seq> | unprocessed | mark-processed --through <seq> | present | processed-init [--held-lock] | list [--recent <n>] | lookup --seqs <n,...> | startup-replay" >&2
+  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--silent true|false] | unread | mark-read --through <seq> | unprocessed | mark-processed --through <seq> | present | processed-init [--held-lock] | list [--recent <n>] | lookup --seqs <n,...> | startup-replay | seed-tail" >&2
   exit 2
 }
 
@@ -592,9 +597,6 @@ case "$CMD" in
       echo "error: refusing presentation because the outcome cursor or processed marker is out of order" >&2
       exit 1
     fi
-    if [ -s "$STORE" ] && [ ! -e "$OUTCOME_TAIL" ] && ! write_outcome_tail; then
-      echo "warning: the display tail copy could not be seeded from the outcome store" >&2
-    fi
     if [ -s "$STORE" ] && ! jq -c --argjson cursor "$CURSOR_SEQ" --argjson processed "$PROCESSED_SEQ" \
         --argjson now "$(date +%s)" "$RECORDED_AGO_JQ"'
         select(.seq > $cursor or (.verdict == "captain" and .seq > $processed))
@@ -751,6 +753,21 @@ case "$CMD" in
         fm_lock_release "$LOCK"
         exit 1
       fi
+    fi
+    fm_lock_release "$LOCK"
+    ;;
+  seed-tail)
+    [ "$#" -eq 0 ] || usage
+    fm_lock_acquire_wait "$LOCK"
+    if ! last_seq >/dev/null; then
+      fm_lock_release "$LOCK"
+      echo "error: refusing to seed the display tail copy because the outcome store is malformed or non-sequential" >&2
+      exit 1
+    fi
+    if [ -s "$STORE" ] && [ ! -e "$OUTCOME_TAIL" ] && ! write_outcome_tail; then
+      fm_lock_release "$LOCK"
+      echo "error: the display tail copy could not be seeded from the outcome store" >&2
+      exit 1
     fi
     fm_lock_release "$LOCK"
     ;;

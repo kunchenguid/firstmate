@@ -82,15 +82,17 @@ describe("supervision notes", () => {
     expect(journal.logs).toHaveLength(2);
   });
 
-  test("a tail copy that first appears after session start replays against the markers, even within the same second", async ($, on) => {
+  test("a tail copy that first appears after session start replays against the session-start markers, even within the same second", async ($, on) => {
     const { clock, files, journal } = world(on);
     await clock.set(100_000);
     files.set(CURSOR, "5\n");
     files.set(PROCESSED, "1\n");
     await $.session.start(sessionStart);
     expect(journal.logs).toEqual([]);
-    // A drain seeds the copy, or an append in the session's first second creates it, with every earlier row.
+    // Session start seeds the copy, or an append in the session's first second creates it, with every
+    // earlier row; the drain then reads the new routine row before the mod's first poll.
     files.set(TAIL, tail([...history, { seq: 6, task: "fm-new", verdict: "routine", summary: "fresh" }]));
+    files.set(CURSOR, "6\n");
     await clock.advance(POLL);
     expect(journal.logs).toEqual(["⚓ [seq 3] fm-b: decision waiting", "⛵ fm-new: fresh"]);
     await clock.advance(POLL);

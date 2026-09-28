@@ -31,9 +31,9 @@
 // slow timer follows the outcome store's display tail copy and the supervision host's
 // latch, and `$.ui.log` appends one dim line per new outcome or latch change, never
 // sent to the model. The first tail copy a session sees, at `session.start` or later,
-// replays the unread and unprocessed outcomes this session has not already shown. The
-// mod only reads the Firstmate home: the drain remains the one presenter that marks
-// outcomes read.
+// replays the outcomes unread or unprocessed at `session.start` that this session has
+// not already shown. The mod only reads the Firstmate home: the drain remains the one
+// presenter that marks outcomes read.
 // ../lib/fm-branch-notes.ts owns every line and which rows are due.
 //
 // Loading is lazy and cached within a session: a resumed transcript or a hot reload can
@@ -111,6 +111,8 @@ type NotesState = {
   tailStamp: string | undefined;
   healthStamp: string | undefined;
   lastSeen: number | undefined;
+  cursor: number;
+  processed: number;
   shown: number;
   health: HostHealth | undefined;
   sessionId: string | undefined;
@@ -268,6 +270,8 @@ async function startNotes($: EngineInterface): Promise<void> {
     tailStamp: undefined,
     healthStamp: health?.stamp,
     lastSeen: undefined,
+    cursor: parseOutcomeMarker(await readText($, `${state}/.branch-outcomes-cursor`)),
+    processed: parseOutcomeMarker(await readText($, `${state}/.branch-outcomes-processed`)),
     shown: sessionId === undefined ? 0 : sessionShownThrough(await readStored($), sessionId),
     health: parseHostHealth(health?.text),
     sessionId,
@@ -283,9 +287,10 @@ async function startNotes($: EngineInterface): Promise<void> {
 }
 
 /**
- * A line per outcome the tail copy gained. The first tail this session sees is replayed
- * against the store's read cursor and processed marker, whether it existed at session
- * start or appeared later, so a read routine or processed captain row is never shown.
+ * A line per outcome the tail copy gained. The first tail this session sees is the
+ * startup replay, whether it existed at session start or appeared later, judged against
+ * the read cursor and processed marker as they were at session start: a row read or
+ * processed before then is never shown, and one the drain read since still is.
  */
 async function followTail($: EngineInterface, current: NotesState): Promise<void> {
   const tail = await readIfChanged($, `${current.state}/.branch-outcomes-tail.jsonl`, current.tailStamp);
@@ -294,9 +299,7 @@ async function followTail($: EngineInterface, current: NotesState): Promise<void
   const rows = parseOutcomeTail(tail.text);
   let lines: string[];
   if (current.lastSeen === undefined) {
-    const cursor = parseOutcomeMarker(await readText($, `${current.state}/.branch-outcomes-cursor`));
-    const processed = parseOutcomeMarker(await readText($, `${current.state}/.branch-outcomes-processed`));
-    lines = replayOutcomeNotes(rows, cursor, processed, current.shown);
+    lines = replayOutcomeNotes(rows, current.cursor, current.processed, current.shown);
     current.lastSeen = rows[rows.length - 1]?.seq;
   } else {
     const fresh = newOutcomeNotes(rows, current.lastSeen);

@@ -326,10 +326,13 @@ test_branch_notes_over_the_store_owner() {
   outcome mark-read --through 4
   outcome mark-processed --through 4
   outcome append --task fm-e --verdict routine --summary 'reconciled the backlog'
-  # A home whose store predates the tail copy gains it at its next drain presentation.
+  # A home whose store predates the tail copy gains it at its next session start, and the
+  # session-start drain may read a routine row before the mod first sees that copy.
   rm -f "$state/.branch-outcomes-tail.jsonl"
-  outcome present
-  [ -s "$state/.branch-outcomes-tail.jsonl" ] || fail "the drain presentation did not seed the display tail copy"
+  cp "$state/.branch-outcomes-cursor" "$TMP_ROOT/notes-start-cursor"
+  outcome seed-tail
+  [ -s "$state/.branch-outcomes-tail.jsonl" ] || fail "seed-tail did not create the display tail copy"
+  outcome mark-read --through 5
   cat >"$TMP_ROOT/notes.mjs" <<'JS'
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
@@ -352,7 +355,9 @@ same(rows.map(notes.outcomeNoteLine), [
   "⚓ [seq 4] fm-d: decision answered",
   "⛵ fm-e: reconciled the backlog",
 ], "Pi's line for each row");
-const cursor = notes.parseOutcomeMarker(read(".branch-outcomes-cursor"));
+const cursor = notes.parseOutcomeMarker(readFileSync(process.env.NOTES_START_CURSOR, "utf8"));
+same(notes.replayOutcomeNotes(rows, notes.parseOutcomeMarker(read(".branch-outcomes-cursor")), 4), [],
+  "the markers after the drain read seq 5 would drop its sailboat, so the replay judges by the session-start cursor");
 same(notes.replayOutcomeNotes(rows, cursor, notes.parseOutcomeMarker(read(".branch-outcomes-processed"))),
   ["⛵ fm-e: reconciled the backlog"], "replay after main processed seq 4");
 same(notes.replayOutcomeNotes(rows, cursor, notes.parseOutcomeMarker(undefined)),
@@ -397,7 +402,7 @@ same(notes.hostHealthNote(health("k", 300), health("k2", 0)), undefined, "a new 
 same(notes.hostHealthNote(health("k", 0), health("k2", 300)), paused, "a trip under a new key");
 console.log("notes-ok");
 JS
-  out=$(NOTES_MOD=$MOD NOTES_STATE=$state run_node "$TMP_ROOT/notes.mjs" 2>&1) || fail "supervision notes: $out"
+  out=$(NOTES_MOD=$MOD NOTES_STATE=$state NOTES_START_CURSOR=$TMP_ROOT/notes-start-cursor run_node "$TMP_ROOT/notes.mjs" 2>&1) || fail "supervision notes: $out"
   assert_contains "$out" "notes-ok" "the supervision notes check did not complete"
   pass "the supervision notes read the store owner's tail copy and markers as Pi does: sailboat and anchor lines, silent rows skipped, bounded replay of unread and unprocessed rows not already shown in the session, and latch notes"
 }

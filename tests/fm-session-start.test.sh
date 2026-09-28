@@ -1712,6 +1712,33 @@ EOF
   pass "non-Pi session start neither sweeps nor replays Pi branch state"
 }
 
+test_session_start_seeds_the_outcome_display_tail_while_away() {
+  local rec root home fakebin out store tail
+  rec=$(new_world outcome-tail-seed)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  store="$home/state/branch-outcomes.jsonl"
+  tail="$home/state/.branch-outcomes-tail.jsonl"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-a --verdict captain --summary 'decision still waiting' >/dev/null \
+    || fail "could not store the captain outcome"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-read --through 1 || fail "could not mark the outcome read"
+  rm -f "$tail"
+  FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" enter --words 'away for the afternoon' >/dev/null \
+    || fail "could not record the away posture"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "away posture recorded" "the digest did not report the away posture"
+  [ -f "$tail" ] || fail "session start did not seed the display tail copy of an existing outcome store while away"
+  [ "$(cat "$tail")" = "$(cat "$store")" ] || fail "the seeded display tail is not the store's rows verbatim"
+  [ "$(cat "$home/state/.branch-outcomes-cursor")" = 1 ] || fail "seeding the display tail moved the read cursor"
+  [ ! -e "$home/state/.branch-outcomes-processed" ] || fail "seeding the display tail acknowledged the captain outcome"
+  pass "session start seeds an existing outcome store's absent display tail copy while away, moving no marker"
+}
+
 # --- deferred network stage -------------------------------------------------
 
 # install_slow_gh <fakebin> <seconds>: one external-network call the digest used
@@ -2980,6 +3007,7 @@ test_abnormal_digest_death_banners_and_exits_zero
 test_composition_invokes_real_scripts
 test_branch_outcome_replay_respects_captain_barrier_and_lease_sweep
 test_non_pi_session_start_leaves_branch_state_untouched
+test_session_start_seeds_the_outcome_display_tail_while_away
 test_backlog_compact_tasks_axi_omits_bodies_and_keeps_metadata
 test_backlog_queued_bound_discloses_its_remainder
 test_backlog_compact_manual_backend_skips_indented_bodies
