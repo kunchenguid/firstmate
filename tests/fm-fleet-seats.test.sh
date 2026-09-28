@@ -141,21 +141,22 @@ test_one_capacity_across_homes() {
   pass "the primary and a local secondmate share one capacity and pre-existing agents count"
 }
 
-test_busy_supervisors_count_and_idle_ones_do_not() {
-  local root="$TMP_ROOT/supervisors/primary" out status lockholder
+test_live_supervisors_hold_seats_even_while_idle() {
+  local root="$TMP_ROOT/supervisors/primary" mate="$TMP_ROOT/supervisors/mate" out status lockholder mateholder
   make_home "$root"
-  pools "$root" 3 ',"primary_model":"pool-model-a"'
+  make_home "$mate"
+  pools "$root" 5 ',"primary_model":"pool-model-a"'
   # A live primary session on the declared pooled model counts: no primary
   # busy record exists, so a live session is indeterminate.
   new_holder
   lockholder=$LAST_HOLDER
   printf '%s\n' "$lockholder" > "$root/state/.lock"
-  # Secondmate supervisors: busy and unknown count, provably idle does not,
-  # an idle record from an untrusted source does not prove idle, and a remote
-  # supervisor's busy state is never visible here.
   task_record "$root" mate-busy pool-model-a secondmate
   busy_record "$root" mate-busy busy
-  task_record "$root" mate-idle pool-model-a secondmate
+  task_record "$root" mate-idle pool-model-a secondmate "home=$mate"
+  new_holder
+  mateholder=$LAST_HOLDER
+  printf '%s\n' "$mateholder" > "$mate/state/.lock"
   busy_record "$root" mate-idle idle
   task_record "$root" mate-untrusted pool-model-a secondmate
   busy_record "$root" mate-untrusted idle claude-hook
@@ -164,21 +165,26 @@ test_busy_supervisors_count_and_idle_ones_do_not() {
   task_record "$root" mate-other some-other-model secondmate
 
   out=$(used_seats "$root")
-  assert_equals 4 "$out" "busy, untrusted-idle, and remote supervisors plus the live primary"
+  assert_equals 5 "$out" "all four supervisors plus the live primary"
   new_holder
   out=$(reserve "$root" w1 pool-model-a 2>&1)
   status=$?
   expect_code 4 "$status" "a worker while supervisors fill the pool"
   assert_contains "$out" ".primary" "the primary supervisor was not named as a holder"
-  assert_not_contains "$out" "mate-idle" "an idle supervisor was charged"
+  assert_contains "$out" "mate-idle" "an idle supervisor did not hold its seat"
 
-  # The busy supervisor settles and the primary session ends: both free seats.
   busy_record "$root" mate-busy idle
+  assert_equals 5 "$(used_seats "$root")" "an idle transition released a reserved supervisor seat"
   kill "$lockholder"
   wait "$lockholder" 2>/dev/null
-  out=$(used_seats "$root")
-  assert_equals 2 "$out" "seats after a supervisor went idle and the primary exited"
-  pass "busy or indeterminate supervisors, including the primary, count; provably idle ones do not"
+  assert_equals 4 "$(used_seats "$root")" "the primary's death did not release its seat"
+  task_record "$root" mate-idle some-other-model secondmate
+  assert_equals 3 "$(used_seats "$root")" "a supervisor's model exit did not release its seat"
+  task_record "$root" mate-idle pool-model-a secondmate "home=$mate"
+  kill "$mateholder"
+  wait "$mateholder" 2>/dev/null
+  assert_equals 3 "$(used_seats "$root")" "a dead secondmate supervisor retained a seat"
+  pass "live pooled supervisors keep seats while idle and release them on death or model exit"
 }
 
 test_explicit_model_required_while_pooled() {
@@ -242,7 +248,7 @@ test_simultaneous_reservations_never_overbook() {
   wait $racers
   granted=$(grep -lx 0 "$dir"/*.rc | wc -l | tr -d ' ')
   refused=$(grep -lx 4 "$dir"/*.rc | wc -l | tr -d ' ')
-  assert_equals 6 "$granted" "granted seats under contention"
+  assert_equals 6 "$granted" "granted seats under contention: $(cat "$dir"/*.out)"
   assert_equals 6 "$refused" "refused seats under contention"
   pass "twelve simultaneous reservations from two homes grant exactly six seats"
 }
@@ -274,6 +280,16 @@ test_unreachable_or_malformed_authority_refuses() {
 
   mate="$base/mate"
   make_local_secondmate "$mate" "$root" mate
+  printf 'invalid-parent-record\n' > "$mate/.fm-secondmate-parent"
+  new_holder
+  out=$(reserve "$mate" broken pool-model-a 2>&1)
+  expect_code 5 "$?" "a secondmate whose root binding is broken"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$root" > "$mate/.fm-secondmate-parent"
+  mv "$mate/state" "$mate/state-away"
+  new_holder
+  out=$(reserve "$root" missing pool-model-a 2>&1)
+  expect_code 5 "$?" "a registered local home whose state directory is missing"
+  mv "$mate/state-away" "$mate/state"
   chmod 000 "$mate/state"
   new_holder
   out=$(reserve "$root" l3 pool-model-a 2>&1)
@@ -295,7 +311,7 @@ test_unreachable_or_malformed_authority_refuses() {
   out=$(reserve "$root" l5 unrelated-model 2>&1)
   expect_code 5 "$?" "a malformed pool declaration"
   assert_contains "$out" "malformed" "malformed refusal reason"
-  pass "a held lock, a dead holder, an unreadable home, a malformed registry, and a malformed pool all refuse"
+  pass "a held lock, a dead holder, a missing or unreadable home, and malformed records refuse"
 }
 
 # --- remote secondmates -----------------------------------------------------
@@ -376,6 +392,11 @@ test_remote_policy_must_be_confirmed_before_any_grant() {
   assert_contains "$out" "holders=1" "the already-running remote agent was not reported"
   out=$(used_seats "$R_ROOT")
   assert_equals 1 "$out" "the already-running remote agent is counted at the primary"
+  rm -f "$R_ROOT/state/fleet-seats/remote-theshop.holders"
+  new_holder
+  out=$(reserve "$R_ROOT" absent-snapshot pool-model-a 2>&1)
+  expect_code 5 "$?" "a confirmed remote with no holder snapshot"
+  serve_remotes >/dev/null 2>&1 || fail "snapshot recovery serve failed"
 
   # A changed policy is unconfirmed again until the next serve.
   pools "$R_ROOT" 4
@@ -386,7 +407,7 @@ test_remote_policy_must_be_confirmed_before_any_grant() {
   new_holder
   out=$(reserve "$R_ROOT" p2 pool-model-a 2>&1) || fail "a grant after confirmation was refused: $out"
   assert_contains "$out" "used=2 capacity=4" "count after confirmation"
-  pass "the primary grants nothing until every remote confirms the current policy, and counts its running agents"
+  pass "the primary requires a current policy and readable snapshot for every remote"
 }
 
 test_remote_home_shares_the_fleet_capacity() {
@@ -417,9 +438,11 @@ test_remote_home_shares_the_fleet_capacity() {
   assert_contains "$(cat "$dir/shop-2.out")" "pool shared is full (3 of 3" "remote denial reason"
 
   # A relaunch of a seated remote id keeps its seat with no round trip.
-  out=$(FM_FLEET_SEATS_TEST_REMOTE_WAIT=1 seats "$R_REMOTE" reserve shop-1 --harness pi --model pool-model-a \
-    --holder-pid "$r1_holder" 2>&1) || fail "a seated remote relaunch was refused: $out"
-  assert_contains "$out" "already held" "remote relaunch"
+  remote_reserve_bg shop-1 pool-model-a "$dir/shop-1-relaunch"
+  r1_holder=$LAST_HOLDER
+  serve_remotes >/dev/null 2>&1 || fail "remote relaunch serve failed"
+  wait "$BG_PID"
+  expect_code 0 "$(cat "$dir/shop-1-relaunch.rc")" "a seated remote relaunch"
 
   # The remote spawn dies before publishing its record: the next serve frees
   # its seat, which becomes usable locally.
@@ -462,11 +485,9 @@ test_delivered_policy_governs_the_remote_home() {
   local out dir="$TMP_ROOT/remote-deliver-out"
   make_remote_fleet remote-deliver 2
   mkdir -p "$dir"
-  # No inherited declaration yet and never served: the remote knows no pool.
   new_holder
-  out=$(reserve "$R_REMOTE" before pool-model-a 2>&1) || fail "an unserved remote refused: $out"
-  assert_equals "" "$out" "an unserved remote with no declaration should reserve nothing"
-  rm -f "$R_REMOTE/state/before.meta"
+  out=$(reserve "$R_REMOTE" before pool-model-a 2>&1)
+  expect_code 5 "$?" "an unserved remote pooled launch"
   # Once served, the delivered policy applies even though no inherited copy
   # ever arrived: a pooled request waits for a grant, and a default model on
   # a multi-provider harness refuses.
@@ -476,19 +497,64 @@ test_delivered_policy_governs_the_remote_home() {
   expect_code 5 "$?" "a pooled remote request with no serve to answer it"
   out=$(reserve "$R_REMOTE" dflt default pi 2>&1)
   expect_code 5 "$?" "a remote harness default under a delivered policy"
-  # A stale inherited copy that dropped the pool does not override the
-  # delivered policy.
   printf '{"pools":[]}\n' > "$R_REMOTE/config/fleet-seats"
   new_holder
   out=$(FM_FLEET_SEATS_TEST_REMOTE_WAIT=2 reserve "$R_REMOTE" stale pool-model-a 2>&1)
   expect_code 5 "$?" "a stale inherited copy let a pooled model through"
-  # Removing the pool at the primary clears the remote on the next serve.
   rm -f "$R_ROOT/config/fleet-seats"
   serve_remotes >/dev/null 2>&1 || fail "clearing serve failed"
-  new_holder
-  out=$(reserve "$R_REMOTE" cleared pool-model-a 2>&1) || fail "a cleared remote still refused: $out"
-  assert_equals "" "$out" "a cleared remote should reserve nothing"
-  pass "the delivered policy governs a remote home over a missing or stale inherited copy, and a removal clears it"
+  remote_reserve_bg cleared pool-model-a "$dir/cleared"
+  serve_remotes >/dev/null 2>&1 || fail "unpooled confirmation serve failed"
+  wait "$BG_PID"
+  expect_code 0 "$(cat "$dir/cleared.rc")" "a cleared remote model after root confirmation"
+  assert_equals "" "$(cat "$dir/cleared.out")" "a cleared remote should reserve nothing"
+  pass "remote launches require a delivered policy and current root confirmation"
+}
+
+test_stale_remote_requests_refuse_before_launch() {
+  local dir="$TMP_ROOT/remote-stale-out" out
+  make_remote_fleet remote-stale 3
+  mkdir -p "$dir"
+  serve_remotes >/dev/null 2>&1 || fail "initial policy delivery failed"
+
+  printf '{"pools":[{"name":"shared","capacity":3,"models":["pool-model-a","pool-model-b","new-model"]}]}\n' \
+    > "$R_ROOT/config/fleet-seats"
+  remote_reserve_bg new-agent new-model "$dir/new"
+  out=$(serve_remotes 2>&1) || fail "changed policy delivery failed: $out"
+  wait "$BG_PID"
+  expect_code 5 "$(cat "$dir/new.rc")" "a new pooled model absent from the remote's old policy"
+  assert_contains "$(cat "$dir/new.out")" "policy changed" "stale unpooled request refusal"
+
+  remote_reserve_bg waiting pool-model-a "$dir/waiting"
+  printf '{"pools":[{"name":"shared","capacity":3,"models":["pool-model-b","new-model"]},{"name":"moved","capacity":3,"models":["pool-model-a"]}]}\n' \
+    > "$R_ROOT/config/fleet-seats"
+  out=$(serve_remotes 2>&1) || fail "moved policy delivery failed: $out"
+  wait "$BG_PID"
+  expect_code 5 "$(cat "$dir/waiting.rc")" "a request waiting in its former pool"
+  assert_contains "$(cat "$dir/waiting.out")" "policy changed" "wrong-pool request refusal"
+  [ -z "$(find "$R_REMOTE/state/fleet-seats/shared" -name '*.seat' 2>/dev/null)" ] \
+    || fail "a wrong-pool request left a granted seat"
+
+  remote_reserve_bg moved pool-model-a "$dir/moved"
+  serve_remotes >/dev/null 2>&1 || fail "current pool grant failed"
+  wait "$BG_PID"
+  expect_code 0 "$(cat "$dir/moved.rc")" "a new request using the current pool"
+  assert_contains "$(cat "$dir/moved.out")" "pool=moved" "current pool grant"
+  pass "newly pooled and moved models refuse stale remote requests before a current grant"
+}
+
+test_remote_without_pools_confirms_unpooled_models() {
+  local dir="$TMP_ROOT/remote-off-out"
+  make_remote_fleet remote-off 3
+  mkdir -p "$dir"
+  rm -f "$R_ROOT/config/fleet-seats"
+  serve_remotes >/dev/null 2>&1 || fail "empty policy delivery failed"
+  remote_reserve_bg unpooled unrelated-model "$dir/unpooled"
+  serve_remotes >/dev/null 2>&1 || fail "empty policy confirmation failed"
+  wait "$BG_PID"
+  expect_code 0 "$(cat "$dir/unpooled.rc")" "an unpooled model with no pool configured"
+  assert_equals "" "$(cat "$dir/unpooled.out")" "unpooled confirmation printed a seat grant"
+  pass "a remote without configured pools confirms unpooled models through the root"
 }
 
 test_remote_and_local_contention_never_overbooks() {
@@ -654,7 +720,7 @@ test_secondmate_spawn_takes_a_seat() {
 
 test_no_pool_configured_is_off
 test_one_capacity_across_homes
-test_busy_supervisors_count_and_idle_ones_do_not
+test_live_supervisors_hold_seats_even_while_idle
 test_explicit_model_required_while_pooled
 test_stale_reservations_recover_without_preempting_live_work
 test_simultaneous_reservations_never_overbook
@@ -663,6 +729,8 @@ test_remote_policy_must_be_confirmed_before_any_grant
 test_remote_home_shares_the_fleet_capacity
 test_unreachable_remote_is_never_free
 test_delivered_policy_governs_the_remote_home
+test_stale_remote_requests_refuse_before_launch
+test_remote_without_pools_confirms_unpooled_models
 test_remote_and_local_contention_never_overbooks
 test_primary_watcher_serves_remote_requests
 test_spawn_refuses_a_full_pool_before_any_record
