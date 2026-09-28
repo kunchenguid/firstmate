@@ -35,8 +35,10 @@ import { fileURLToPath } from "node:url";
 export const PAIRING_SCHEMA = "fm-feishu-pairing.v2";
 export const BINDING_SCHEMA = "fm-feishu-binding.v2";
 export const INBOUND_SCHEMA = "fm-feishu-inbound.v2";
+export const PROCESSED_INBOUND_SCHEMA = "fm-feishu-inbound-processed.v1";
 export const INBOUND_LEDGER_SCHEMA = "fm-feishu-inbound-ledger.v2";
 export const OUTBOUND_SCHEMA = "fm-feishu-assistant-outbound.v2";
+export const PROCESSED_OUTBOUND_SCHEMA = "fm-feishu-assistant-outbound-processed.v1";
 export const OUTBOUND_LEDGER_SCHEMA = "fm-feishu-outbound-ledger.v1";
 export const OUTBOUND_RECEIPT_SCHEMA = "fm-feishu-outbound-receipt.v1";
 export const OUTBOUND_INTENT_SCHEMA = "fm-feishu-outbound-registration-intent.v2";
@@ -543,7 +545,7 @@ function requireIso(value, label, { nullable = false } = {}) {
 }
 
 function validateInboundEvent(event) {
-  if (!new Set([LEGACY_INBOUND_SCHEMA, INBOUND_SCHEMA]).has(event.schema) || event.source !== "feishu") throw new Error("invalid Feishu inbound event schema or source");
+  if (!new Set([LEGACY_INBOUND_SCHEMA, INBOUND_SCHEMA, PROCESSED_INBOUND_SCHEMA]).has(event.schema) || event.source !== "feishu") throw new Error("invalid Feishu inbound event schema or source");
   requireString(event.message_id, "inbound message id", MESSAGE_ID);
   if (!Array.isArray(event.event_ids) || event.event_ids.some((id) => typeof id !== "string" || id.length === 0 || Buffer.byteLength(id, "utf8") > 512)) throw new Error("invalid Feishu inbound event ids");
   requireString(event.transport, "inbound transport", /^[A-Za-z0-9._-]+$/, 128);
@@ -554,7 +556,10 @@ function validateInboundEvent(event) {
   requireNullableString(event.reply_to, "inbound reply", MESSAGE_ID);
   requireNullableString(event.root_id, "inbound root id", /^(?:om_|omt_)[A-Za-z0-9_-]{4,128}$/);
   requireNullableString(event.thread_id, "inbound thread id", /^(?:om_|omt_)[A-Za-z0-9_-]{4,128}$/);
-  if (event.schema === LEGACY_INBOUND_SCHEMA) {
+  if (event.schema === PROCESSED_INBOUND_SCHEMA) {
+    requireIso(event.body_removed_at, "inbound body removal time");
+    if (Object.hasOwn(event, "text") || Object.hasOwn(event, "content")) throw new Error("processed Feishu inbound event retained message body");
+  } else if (event.schema === LEGACY_INBOUND_SCHEMA) {
     if (event.message_type !== "text") throw new Error("invalid legacy Feishu inbound message type");
     if (typeof event.text !== "string" || event.text.trim().length === 0 || Buffer.from(event.text, "utf8").toString("utf8") !== event.text) throw new Error("invalid Feishu inbound text");
   } else {
@@ -679,6 +684,28 @@ function validateOutbound(outbox) {
   return outbox;
 }
 
+function validateProcessedOutbound(outbox) {
+  if (outbox.schema !== PROCESSED_OUTBOUND_SCHEMA || outbox.source !== "pi-assistant") throw new Error("invalid processed Feishu outbox schema or source");
+  requireString(outbox.event_id, "processed outbound event id", OUTBOUND_EVENT_ID);
+  requireString(outbox.assistant_entry_id, "processed outbound Assistant entry", SESSION_ENTRY_ID);
+  requireSafeInteger(outbox.session_order, "processed outbound session order");
+  requireString(outbox.session_id, "processed outbound session", SESSION_ID);
+  requireString(outbox.binding_id, "processed outbound binding", /^bind_[a-f0-9]{24}$/);
+  requireSafeInteger(outbox.binding_generation, "processed outbound generation", { min: 1 });
+  requireString(outbox.destination_chat_id, "processed outbound destination", CHAT_ID);
+  requireString(outbox.text_hash, "processed outbound text hash", RECORD_HASH);
+  requireSafeInteger(outbox.chunk_count, "processed outbound chunk count", { min: 1 });
+  requireIso(outbox.session_entry_timestamp, "processed outbound Assistant entry time");
+  requireIso(outbox.created_at, "processed outbound creation time");
+  requireIso(outbox.body_removed_at, "processed outbound body removal time");
+  if (Object.hasOwn(outbox, "text") || Object.hasOwn(outbox, "chunks") || Object.hasOwn(outbox, "rendered_text_hash")) throw new Error("processed Feishu outbox retained message body");
+  return outbox;
+}
+
+function validateAnyOutbound(outbox) {
+  return outbox.schema === PROCESSED_OUTBOUND_SCHEMA ? validateProcessedOutbound(outbox) : validateOutbound(outbox);
+}
+
 function validateOutboundLedger(ledger) {
   if (ledger.schema !== OUTBOUND_LEDGER_SCHEMA) throw new Error("invalid Feishu outbound ledger schema");
   requireString(ledger.event_id, "outbound ledger event", OUTBOUND_EVENT_ID);
@@ -746,7 +773,7 @@ function validateRecordAtPath(path, record) {
     validateInboundMedia(record);
     if (path.split(/[\\/]/).pop() !== `${sha(record.media_id)}.json`) throw new Error("Feishu inbound media filename identity mismatch");
   } else if (parent === "outbox") {
-    validateOutbound(record);
+    validateAnyOutbound(record);
     if (path.split(/[\\/]/).pop() !== `${sha(record.event_id)}.json`) throw new Error("Feishu outbox filename identity mismatch");
   } else if (parent === "outbound-ledger") {
     validateOutboundLedger(record);
@@ -1229,7 +1256,7 @@ function retargetPendingOutboundLocked(paths, priorBinding, binding) {
   for (const name of safeJsonNames(paths.outbox)) {
     const outboxPath = join(paths.outbox, name);
     const ledgerPath = join(paths.outboundLedger, name);
-    const outbox = validateOutbound(readJson(outboxPath));
+    const outbox = validateAnyOutbound(readJson(outboxPath));
     const ledger = validateOutboundLedger(readJson(ledgerPath));
     if (!["pending", "retryable", "sending"].includes(ledger.state)) continue;
     if (outbox.binding_id !== priorBinding.binding_id || outbox.binding_generation !== priorBinding.generation || outbox.session_id !== priorBinding.session_id) continue;
@@ -1894,10 +1921,45 @@ function readyMediaForEvent(paths, event) {
 export function loadFeishuIngressContent(home, event) {
   const paths = ensurePrivateLayout(home);
   validateInboundEvent(event);
+  if (event.schema === PROCESSED_INBOUND_SCHEMA) return undefined;
   if (event.schema === LEGACY_INBOUND_SCHEMA) return [{ type: "text", text: event.text }];
   const media = readyMediaForEvent(paths, event);
   if (!media) return undefined;
   return event.content.map((part) => part.type === "text" ? { type: "text", text: part.text } : { type: "image", ...media.get(part.media_id) });
+}
+
+function cleanupFeishuMediaLocked(paths, nowMs, retentionMs) {
+  const removable = [];
+  const retainedCacheNames = new Set();
+  for (const name of safeJsonNames(paths.inboundMedia)) {
+    const path = join(paths.inboundMedia, name);
+    const media = validateInboundMedia(readJson(path));
+    const ledger = readJson(join(paths.inboundLedger, inboundFilename(media.message_id)), { optional: true });
+    const terminalAt = ledger?.state === "delivered" ? ledger.delivered_at : ledger?.state === "superseded" ? ledger.superseded_at : null;
+    if (!terminalAt || nowMs - Date.parse(terminalAt) < retentionMs) {
+      if (media.cache_filename) retainedCacheNames.add(media.cache_filename);
+      continue;
+    }
+    removable.push({ name, path, media });
+  }
+  let removedRecords = 0;
+  let removedBytes = 0;
+  for (const item of removable) {
+    if (item.media.cache_filename && !retainedCacheNames.has(item.media.cache_filename)) {
+      const cachePath = join(paths.inboundMediaCache, item.media.cache_filename);
+      if (existsSync(cachePath)) {
+        safeFile(cachePath);
+        const stat = lstatSync(cachePath);
+        removedBytes += stat.size;
+        unlinkSync(cachePath);
+        fsyncDirectory(paths.inboundMediaCache);
+      }
+    }
+    unlinkSync(item.path);
+    fsyncDirectory(paths.inboundMedia);
+    removedRecords += 1;
+  }
+  return { removedRecords, removedBytes };
 }
 
 export function cleanupFeishuMedia(home, options = {}) {
@@ -1907,38 +1969,96 @@ export function cleanupFeishuMedia(home, options = {}) {
     const retentionMs = Math.max(1, Number.isSafeInteger(options.retentionMs) && options.retentionMs > 0
       ? options.retentionMs
       : positiveInteger(process.env.FM_FEISHU_MEDIA_RETENTION_MS, DEFAULT_INBOUND_MEDIA_RETENTION_MS));
-    const removable = [];
-    const retainedCacheNames = new Set();
-    for (const name of safeJsonNames(paths.inboundMedia)) {
-      const path = join(paths.inboundMedia, name);
-      const media = validateInboundMedia(readJson(path));
-      const ledger = readJson(join(paths.inboundLedger, inboundFilename(media.message_id)), { optional: true });
-      const terminalAt = ledger?.state === "delivered" ? ledger.delivered_at : ledger?.state === "superseded" ? ledger.superseded_at : null;
-      if (!terminalAt || nowMs - Date.parse(terminalAt) < retentionMs) {
-        if (media.cache_filename) retainedCacheNames.add(media.cache_filename);
-        continue;
-      }
-      removable.push({ name, path, media });
-    }
-    let removedRecords = 0;
-    let removedBytes = 0;
-    for (const item of removable) {
-      if (item.media.cache_filename && !retainedCacheNames.has(item.media.cache_filename)) {
-        const cachePath = join(paths.inboundMediaCache, item.media.cache_filename);
-        if (existsSync(cachePath)) {
-          safeFile(cachePath);
-          const stat = lstatSync(cachePath);
-          removedBytes += stat.size;
-          unlinkSync(cachePath);
-          fsyncDirectory(paths.inboundMediaCache);
-        }
-      }
-      unlinkSync(item.path);
-      fsyncDirectory(paths.inboundMedia);
-      removedRecords += 1;
-    }
-    return { removedRecords, removedBytes };
+    return cleanupFeishuMediaLocked(paths, nowMs, retentionMs);
   });
+}
+
+function inboundEventHasBody(event) {
+  return event.schema !== PROCESSED_INBOUND_SCHEMA;
+}
+
+function cleanupProcessedInboundBodiesLocked(paths, nowMs) {
+  repairInboundLedgersLocked(paths);
+  const bodyRefsBefore = [];
+  const removedDeliveryRefs = [];
+  let pendingBodies = 0;
+  for (const name of safeJsonNames(paths.inboundLedger)) {
+    const ledger = validateInboundLedger(readJson(join(paths.inboundLedger, name)));
+    const eventPath = join(paths.inbox, name);
+    const event = validateInboundEvent(readJson(eventPath));
+    if (!inboundEventHasBody(event)) continue;
+    bodyRefsBefore.push(event.delivery_ref);
+    if (!new Set(["delivered", "superseded"]).has(ledger.state)) {
+      pendingBodies += 1;
+      continue;
+    }
+    const { text: _text, content: _content, ...identity } = event;
+    atomicJson(eventPath, {
+      ...identity,
+      schema: PROCESSED_INBOUND_SCHEMA,
+      body_removed_at: new Date(nowMs).toISOString(),
+    });
+    removedDeliveryRefs.push(event.delivery_ref);
+  }
+  const media = cleanupFeishuMediaLocked(paths, nowMs, 0);
+  return {
+    bodiesBefore: bodyRefsBefore.length,
+    bodiesAfter: pendingBodies,
+    removedBodies: removedDeliveryRefs.length,
+    retainedPendingBodies: pendingBodies,
+    removedDeliveryRefs,
+    removedMediaRecords: media.removedRecords,
+    removedMediaBytes: media.removedBytes,
+  };
+}
+
+function cleanupProcessedOutboundBodiesLocked(paths, nowMs) {
+  const bindingRaw = readJson(paths.activeBinding, { optional: true });
+  const binding = bindingRaw ? validateBindingRecord(bindingRaw) : undefined;
+  repairOutboundStateLocked(paths, binding);
+  let bodiesBefore = 0;
+  let bodiesAfter = 0;
+  let removedBodies = 0;
+  for (const name of safeJsonNames(paths.outbox)) {
+    const outboxPath = join(paths.outbox, name);
+    const outbox = validateAnyOutbound(readJson(outboxPath));
+    if (outbox.schema === PROCESSED_OUTBOUND_SCHEMA) continue;
+    bodiesBefore += 1;
+    const ledger = validateOutboundLedger(readJson(join(paths.outboundLedger, name)));
+    if (ledger.state !== "posted") {
+      bodiesAfter += 1;
+      continue;
+    }
+    const receipt = validateOutboundReceipt(readJson(join(paths.outboundReceipts, name)));
+    if (receipt.event_id !== outbox.event_id || receipt.chat_id !== outbox.destination_chat_id || receipt.message_ids.length !== outbox.chunks.length || receipt.idempotency_keys.some((key, index) => key !== outbox.chunks[index].idempotency_key)) {
+      throw new Error("posted Feishu outbound body lacks complete authoritative receipt evidence");
+    }
+    const { text: _text, chunks, rendered_text_hash: _renderedTextHash, ...identity } = outbox;
+    atomicJson(outboxPath, {
+      ...identity,
+      schema: PROCESSED_OUTBOUND_SCHEMA,
+      chunk_count: chunks.length,
+      body_removed_at: new Date(nowMs).toISOString(),
+    });
+    removedBodies += 1;
+  }
+  return { bodiesBefore, bodiesAfter, removedBodies };
+}
+
+export function cleanupProcessedFeishuBodies(home, options = {}) {
+  const paths = ensurePrivateLayout(home);
+  const nowMs = Number.isSafeInteger(options.nowMs) ? options.nowMs : Date.now();
+  const inbound = withLock(paths, "inbound-state", () => cleanupProcessedInboundBodiesLocked(paths, nowMs));
+  const outbound = withLock(paths, "outbound-state", () => cleanupProcessedOutboundBodiesLocked(paths, nowMs));
+  return {
+    bodiesBefore: inbound.bodiesBefore + outbound.bodiesBefore,
+    bodiesAfter: inbound.bodiesAfter + outbound.bodiesAfter,
+    removedBodies: inbound.removedBodies + outbound.removedBodies,
+    retainedUnprocessedBodies: inbound.bodiesAfter + outbound.bodiesAfter,
+    inbound,
+    outbound,
+    removedDeliveryRefs: inbound.removedDeliveryRefs,
+  };
 }
 
 function deliveryEventForLedger(event, ledger) {
@@ -2133,6 +2253,7 @@ export function findInboundDeliveryEvidence(home, deliveryRef) {
     return {
       event: deliveryEventForLedger(found.event, found.ledger),
       contentDigest: typeof found.ledger.content_digest === "string" ? found.ledger.content_digest : undefined,
+      bodyAvailable: inboundEventHasBody(found.event),
     };
   });
 }
@@ -2732,9 +2853,11 @@ function maxPendingOutbound(input = {}) {
 }
 
 function assertOutboundPair(name, outbox, ledger, binding) {
-  validateOutbound(outbox);
+  validateAnyOutbound(outbox);
   validateOutboundLedger(ledger);
-  if (name !== `${sha(outbox.event_id)}.json` || ledger.event_id !== outbox.event_id || ledger.binding_generation !== outbox.binding_generation || ledger.next_chunk > outbox.chunks.length) throw new Error("Feishu outbox and ledger identity do not match");
+  const chunkCount = outbox.schema === PROCESSED_OUTBOUND_SCHEMA ? outbox.chunk_count : outbox.chunks.length;
+  if (name !== `${sha(outbox.event_id)}.json` || ledger.event_id !== outbox.event_id || ledger.binding_generation !== outbox.binding_generation || ledger.next_chunk > chunkCount) throw new Error("Feishu outbox and ledger identity do not match");
+  if (outbox.schema === PROCESSED_OUTBOUND_SCHEMA && ledger.state !== "posted") throw new Error("processed Feishu outbox lacks authoritative posted state");
   if (binding && outbox.binding_generation === binding.generation && (outbox.binding_id !== binding.binding_id || outbox.session_id !== binding.session_id || outbox.destination_chat_id !== binding.chat_id)) throw new Error("Feishu outbox destination does not match the active binding");
 }
 
@@ -2752,23 +2875,27 @@ function supersedeRoutineOutboundLedger(ledger) {
 function reconcileOutboundReceiptLocked(paths, name, outbox, ledger) {
   const receipt = readJson(join(paths.outboundReceipts, name), { optional: true });
   const receivedChunks = receipt?.message_ids.length ?? 0;
+  const chunkCount = outbox.schema === PROCESSED_OUTBOUND_SCHEMA ? outbox.chunk_count : outbox.chunks.length;
   let repaired = 0;
   if (receipt) {
-    if (receipt.event_id !== outbox.event_id || receipt.chat_id !== outbox.destination_chat_id || receipt.idempotency_keys.length !== outbox.chunks.length || receipt.idempotency_keys.some((key, index) => key !== outbox.chunks[index].idempotency_key) || receivedChunks > outbox.chunks.length) throw new Error("Feishu outbound receipt does not match its immutable outbox");
+    const mismatchedIdempotency = outbox.schema === PROCESSED_OUTBOUND_SCHEMA
+      ? receipt.idempotency_keys.length !== chunkCount
+      : receipt.idempotency_keys.length !== chunkCount || receipt.idempotency_keys.some((key, index) => key !== outbox.chunks[index].idempotency_key);
+    if (receipt.event_id !== outbox.event_id || receipt.chat_id !== outbox.destination_chat_id || mismatchedIdempotency || receivedChunks > chunkCount) throw new Error("Feishu outbound receipt does not match its immutable outbox");
   }
-  if (ledger.state === "posted" && (!receipt || receivedChunks !== outbox.chunks.length || ledger.next_chunk !== outbox.chunks.length)) throw new Error("posted Feishu outbound ledger has no complete durable receipt");
+  if (ledger.state === "posted" && (!receipt || receivedChunks !== chunkCount || ledger.next_chunk !== chunkCount)) throw new Error("posted Feishu outbound ledger has no complete durable receipt");
   if (ledger.next_chunk > receivedChunks) throw new Error("Feishu outbound ledger advances beyond its durable receipt");
-  if (receivedChunks > ledger.next_chunk || (receivedChunks === outbox.chunks.length && ledger.state !== "posted")) {
+  if (receivedChunks > ledger.next_chunk || (receivedChunks === chunkCount && ledger.state !== "posted")) {
     const { attempt_id: _attemptId, last_attempt_ms: _lastAttemptMs, ...rest } = ledger;
     const updated = {
       ...rest,
-      state: receivedChunks === outbox.chunks.length ? "posted" : "pending",
+      state: receivedChunks === chunkCount ? "posted" : "pending",
       next_chunk: receivedChunks,
       retry_at_ms: 0,
       last_error: null,
       idempotency_started_ms: null,
       idempotency_expires_ms: null,
-      posted_at: receivedChunks === outbox.chunks.length ? receipt.posted_at : null,
+      posted_at: receivedChunks === chunkCount ? receipt.posted_at : null,
     };
     atomicJson(join(paths.outboundLedger, name), updated);
     return { ledger: updated, receipt, repaired: repaired + 1 };
@@ -2844,7 +2971,7 @@ export function persistAssistantOutboundIntent(home, input) {
     const intentId = stableId("reg_", `${binding.binding_id}\0${eventId}`, 40);
     const existingOutbox = readJson(join(paths.outbox, `${sha(eventId)}.json`), { optional: true });
     if (existingOutbox) {
-      validateOutbound(existingOutbox);
+      validateAnyOutbound(existingOutbox);
       if (existingOutbox.assistant_entry_id !== assistantEntryId || existingOutbox.session_order !== sessionOrder || existingOutbox.session_entry_timestamp !== sessionEntryTimestamp || existingOutbox.text_hash !== `sha256:${sha(text)}`) throw new Error("persisted Assistant entry conflicts with its existing Feishu outbound record");
       return { status: "duplicate", eventId };
     }

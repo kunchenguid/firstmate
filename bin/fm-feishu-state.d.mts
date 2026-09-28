@@ -1,8 +1,10 @@
 export const PAIRING_SCHEMA: string;
 export const BINDING_SCHEMA: string;
 export const INBOUND_SCHEMA: string;
+export const PROCESSED_INBOUND_SCHEMA: string;
 export const INBOUND_LEDGER_SCHEMA: string;
 export const OUTBOUND_SCHEMA: string;
+export const PROCESSED_OUTBOUND_SCHEMA: string;
 export const OUTBOUND_LEDGER_SCHEMA: string;
 export const OUTBOUND_RECEIPT_SCHEMA: string;
 export const OUTBOUND_INTENT_SCHEMA: string;
@@ -70,6 +72,7 @@ export interface InboundEvent {
   binding_generation: number;
   target_session_id: string;
   delivery_ref: string;
+  body_removed_at?: string;
 }
 
 export interface InboundLedger {
@@ -190,6 +193,24 @@ export function completeFeishuMediaDownload(home: string, claim: InboundMediaCla
 export function failFeishuMediaDownload(home: string, claim: InboundMediaClaim, errorKind: string, fence: { ownerNonce: string }, options?: { terminal?: boolean; retryAfterMs?: number; nowMs?: number }): boolean;
 export function loadFeishuIngressContent(home: string, event: InboundEvent): Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }> | undefined;
 export function cleanupFeishuMedia(home: string, options?: { nowMs?: number; retentionMs?: number }): { removedRecords: number; removedBytes: number };
+export interface ProcessedBodyCleanupResult {
+  bodiesBefore: number;
+  bodiesAfter: number;
+  removedBodies: number;
+  retainedUnprocessedBodies: number;
+  inbound: {
+    bodiesBefore: number;
+    bodiesAfter: number;
+    removedBodies: number;
+    retainedPendingBodies: number;
+    removedDeliveryRefs: string[];
+    removedMediaRecords: number;
+    removedMediaBytes: number;
+  };
+  outbound: { bodiesBefore: number; bodiesAfter: number; removedBodies: number };
+  removedDeliveryRefs: string[];
+}
+export function cleanupProcessedFeishuBodies(home: string, options?: { nowMs?: number }): ProcessedBodyCleanupResult;
 export function repairInboundLedgers(home: string): number;
 export function pendingFeishuIngress(home: string, fence: {
   sessionId: string;
@@ -212,7 +233,7 @@ export function reconcileFeishuIngress(home: string, markers: Array<{
 }, resetUnobservedOffers?: boolean): number;
 export function findInboundByDeliveryRef(home: string, deliveryRef: string): InboundEvent | undefined;
 export function recordInboundContentDigest(home: string, deliveryRef: string, contentDigest: string): boolean;
-export function findInboundDeliveryEvidence(home: string, deliveryRef: string): { event: InboundEvent; contentDigest: string | undefined } | undefined;
+export function findInboundDeliveryEvidence(home: string, deliveryRef: string): { event: InboundEvent; contentDigest: string | undefined; bodyAvailable: boolean } | undefined;
 export function claimLiveSession(home: string, binding: BindingRecord, session: {
   sessionId: string;
   sessionFile: string;

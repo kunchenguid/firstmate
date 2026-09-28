@@ -294,7 +294,7 @@ family_for_basename() {
     fm-test-run.test.sh|fm-test-isolation-proof.test.sh)
       printf '%s\n' pure-contract-unit
       ;;
-    fm-daemon.test.sh|fm-feishu-channel.test.sh|fm-guard-stale-banner.test.sh|fm-periodic-stow.test.sh|fm-pi-watch-extension.test.sh|\
+    fm-daemon.test.sh|fm-feishu-channel.test.sh|fm-feishu-processed-cleanup.test.sh|fm-guard-stale-banner.test.sh|fm-periodic-stow.test.sh|fm-pi-watch-extension.test.sh|\
     fm-session-lock-ancestry.test.sh|\
     fm-supervision-events.test.sh|fm-turnend-guard.test.sh|fm-wake-daemon-lifecycle-e2e.test.sh|\
     fm-wake-drain-unread-status.test.sh|\
@@ -643,6 +643,7 @@ tests/fm-control.test.sh 54301
 tests/fm-daemon.test.sh 26870
 tests/fm-documentation-audiences.test.sh 732
 tests/fm-feishu-channel.test.sh 3500
+tests/fm-feishu-processed-cleanup.test.sh 1000
 tests/fm-extension-binding.test.sh 7398
 tests/fm-fleet-snapshot-view.test.sh 8547
 tests/fm-fleet-sync.test.sh 37749
@@ -1330,6 +1331,7 @@ families_for_changed_path() {
     .pi/extensions/lib/fm-feishu-native-channel.ts|.pi/extensions/lib/fm-primary-ingress.ts|\
     package.json|package-lock.json)
       printf '%s\n' "__script__:fm-feishu-channel.test.sh"
+      printf '%s\n' "__script__:fm-feishu-processed-cleanup.test.sh"
       printf '%s\n' "__script__:fm-pi-primary-types.test.sh"
       ;;
     bin/fm-quota-axi-lib.sh)
