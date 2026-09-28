@@ -356,7 +356,7 @@ poll_response_filter() {  # <response-file> [rejection-file] [owner]
     exit 10 if !$streaming && !$control && $candidate eq $expected;
     exit $control if $control;
     write_all(*STDOUT, $candidate) unless $streaming;
-  ' "$1"
+  ' "$1" "${2-}" "${3-}"
 }
 
 # Minimum seconds between retry attempt starts. FM_LAVISH_POLL_RETRY_DELAY is a

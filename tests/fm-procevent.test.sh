@@ -1448,7 +1448,8 @@ SIGNAL_COUNT="$TMP_ROOT/lavish-firstmate-signal-count"
 SIGNAL_SETUP_PID="$TMP_ROOT/lavish-firstmate-signal-setup-pid"
 SIGNAL_SETUP_ONCE="$TMP_ROOT/lavish-firstmate-signal-setup-once"
 SIGNAL_SETUP_RELEASE="$TMP_ROOT/lavish-firstmate-signal-setup-release"
-export SIGNAL_COUNT SIGNAL_SETUP_PID SIGNAL_SETUP_ONCE SIGNAL_SETUP_RELEASE
+SIGNAL_REJECTION_OBSERVED="$TMP_ROOT/lavish-firstmate-signal-rejection-observed"
+export SIGNAL_COUNT SIGNAL_SETUP_PID SIGNAL_SETUP_ONCE SIGNAL_SETUP_RELEASE SIGNAL_REJECTION_OBSERVED
 cat > "$SIGNAL_BIN/mktemp" <<'SH'
 #!/bin/sh
 if [ -n "${FM_PROCEVENT_ADAPTER_READY_FD-}" ] && [ ! -e "$SIGNAL_SETUP_ONCE" ]; then
@@ -1478,7 +1479,11 @@ if [ "$n" = 1 ]; then
 else
   adapter=$(ps -o ppid= -p "$PPID" | tr -d ' ')
   (for _ in $(seq 1 100); do
-    if [ -s "$FM_LAVISH_REJECTED_SIGNAL" ]; then kill -TERM "$adapter"; exit; fi
+    if [ -s "$FM_LAVISH_REJECTED_SIGNAL" ]; then
+      : > "$SIGNAL_REJECTION_OBSERVED"
+      kill -TERM "$adapter"
+      exit
+    fi
     sleep 0.001
   done) >/dev/null 2>&1 &
   printf 'error: Lavish Editor already has an active poll listener (current listener: prior-owner; active for 12ms)\ncode: LISTENER_ACTIVE\n'
@@ -1520,6 +1525,8 @@ if PATH="$SIGNAL_BIN:$PATH" FM_HOME="$HFSIGNAL" FM_PROCEVENT_LAUNCH_CONFIRM_SECO
   --agent-reply-file "$TMP_ROOT/firstmate-signal-reply.txt" >/dev/null 2>&1; then
   fail "signalled listener conflict reported readiness"
 fi
+assert_present "$SIGNAL_REJECTION_OBSERVED" \
+  "listener conflict was not recorded before the signal race"
 assert_absent "$HFSIGNAL/state/procevent-inbox/$signal_id.1.accepted" \
   "signal after listener conflict stranded reply uncertainty"
 [ "$(find "$HFSIGNAL/state/procevent" -maxdepth 1 -type f -name ".$signal_id.reply.*" | wc -l | tr -d ' ')" = 1 ] \
