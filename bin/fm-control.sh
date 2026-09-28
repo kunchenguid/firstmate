@@ -954,17 +954,6 @@ record_note() {
         echo "First, check your instruction inbox: list $STATE/$ID.inbox/*.msg, act on"
         echo "each message in numeric order, then mv each handled file into"
         echo "$STATE/$ID.inbox/handled/. A steer sent before the relaunch survives there."
-        if [ "$KIND" = ship ] && [ "$(fm_meta_get "$META" mode)" = no-mistakes ]; then
-          # The validation run belongs to the branch, not to the agent that
-          # started it, so it outlives the relaunch; this plane never touches
-          # it, and the replacement must not duplicate or abandon it either.
-          echo
-          echo "A no-mistakes validation run for this branch may already be under way or"
-          echo "parked at a gate; it survived the relaunch. Before starting one, run"
-          echo "\`no-mistakes axi status\` in the local copy: if it shows a run for this"
-          echo "branch, reattach to it and answer its current gate as these instructions"
-          echo "say, and never start a second run or abort the one under way."
-        fi
         echo
         printf '%s\n' "$NOTE"
       } >> "$RELAUNCH_BRIEF" \

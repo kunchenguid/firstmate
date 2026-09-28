@@ -135,7 +135,8 @@ fm_agent_process_classify() {  # <name> <argv0> <args> [pid] -> agent|shell|othe
 # Linux reads /proc; any other platform needs lsof and ps. A process that exits
 # mid-scan, and a zombie that holds no working directory, are skipped.
 fm_agent_process_worktree_scan() {  # <worktree>
-  local wt=${1-} wt_real dir pid cwd name argv0 args stat rest lsof_out line cmd
+  local wt=${1-} wt_real dir pid cwd name argv0 args stat rest line cmd
+  local lsof_out lsof_err lsof_diag lsof_status=0
   local -a pids=() names=()
   if [ -z "$wt" ] || ! wt_real=$(cd "$wt" 2>/dev/null && pwd -P); then
     printf 'unreadable\tthe worktree %s cannot be resolved' "'$wt'"
@@ -182,12 +183,22 @@ fm_agent_process_worktree_scan() {  # <worktree>
     return 0
   fi
   # lsof exits 1 both for "no match" and for a partial failure, so an empty
-  # result is only trusted when lsof reported no error at all.
-  if ! lsof_out=$(lsof -a -u "$(id -u)" -d cwd -Fpcn 2>&1); then
-    case "$lsof_out" in
-      '') ;;
-      *) printf 'unreadable\tlsof could not list process working directories'; return 0 ;;
-    esac
+  # result is only trusted when lsof reported no error at all. Its diagnostics
+  # are kept out of the parsed stream: a host that warns about an unrelated
+  # file system - macOS does, for its system volumes - would otherwise have
+  # every warning line read as a malformed record, and no endpoint on it could
+  # ever be proven agent-free. `+c 0` asks for the untruncated command name, so
+  # a long harness name still classifies by name.
+  lsof_err=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-agent-scan.XXXXXX") || {
+    printf 'unreadable\tno scratch file could be created to read lsof diagnostics'
+    return 0
+  }
+  lsof_out=$(lsof -w +c 0 -a -u "$(id -u)" -d cwd -Fpcn 2>"$lsof_err") || lsof_status=$?
+  lsof_diag=$(head -n 1 -- "$lsof_err" 2>/dev/null) || lsof_diag=
+  rm -f -- "$lsof_err"
+  if [ "$lsof_status" -ne 0 ] && [ -n "$lsof_diag" ]; then
+    printf 'unreadable\tlsof could not list process working directories: %s' "$lsof_diag"
+    return 0
   fi
   pid=
   cmd=
@@ -206,13 +217,16 @@ fm_agent_process_worktree_scan() {  # <worktree>
 $lsof_out
 EOF_LSOF
   local i
-  for i in "${!pids[@]}"; do
-    args=$(ps -o args= -p "${pids[$i]}" 2>/dev/null) || continue
-    argv0=${args%% *}
-    if [ "$(fm_agent_process_classify "${names[$i]}" "$argv0" "$args" "${pids[$i]}")" = agent ]; then
-      printf 'agent\t%s %s' "${pids[$i]}" "${names[$i]:-$argv0}"
-      return 0
-    fi
-  done
+  if [ "${#pids[@]}" -gt 0 ]; then
+    for i in "${!pids[@]}"; do
+      args=$(LC_ALL=C ps -o args= -p "${pids[$i]}" 2>/dev/null) || continue
+      args=${args#"${args%%[![:space:]]*}"}
+      argv0=${args%%[[:space:]]*}
+      if [ "$(fm_agent_process_classify "${names[$i]}" "$argv0" "$args" "${pids[$i]}")" = agent ]; then
+        printf 'agent\t%s %s' "${pids[$i]}" "${names[$i]:-$argv0}"
+        return 0
+      fi
+    done
+  fi
   printf 'none\t'
 }

@@ -1939,8 +1939,6 @@ assert_tmux_reclaims() {  # <case-dir> <id> <what-was-staged>
   if [ -f "$dir/fake/nm-calls" ] && grep -Eq '(^|[[:space:]])(run|respond|abort|sync|cancel|rerun)([[:space:]]|$)' "$dir/fake/nm-calls"; then
     fail "the reclaim must never abort, answer, or start the task's validation run ($what): $(cat "$dir/fake/nm-calls")"
   fi
-  assert_contains "$(cat "$dir/home/data/$id/brief.md")" "never start a second run or abort the one under way" \
-    "the replacement must be told to reattach to the parked validation run ($what)"
   assert_contains "$(cat "$dir/home/data/$id/brief.md")" "the window was destroyed" \
     "the replacement must inherit the progress note ($what)"
   [ "$(journal_field "$dir" "$id" exit_result)" = endpoint-gone ] \
@@ -2457,8 +2455,6 @@ test_herdr_reclaim_keeps_the_task_whole() {
     "a reclaim truncated the status log"
   assert_contains "$(cat "$dir/home/data/rl75/brief.md")" "the pane was destroyed" \
     "the replacement must inherit the progress note"
-  assert_contains "$(cat "$dir/home/data/rl75/brief.md")" "never start a second run or abort the one under way" \
-    "the replacement must be told to reattach to the parked validation run"
   [ "$(journal_field "$dir" rl75 exit_result)" = endpoint-gone ] \
     || fail "the transaction should record that the endpoint was already gone"
   pass "reclaim: a herdr reclaim rebinds the endpoint and leaves the whole rest of the task alone"
