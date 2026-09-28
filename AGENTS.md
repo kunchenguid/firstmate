@@ -199,7 +199,7 @@ Fill the task subsections according to section 11.
 Before dispatch, resolve the captain's request into an intended outcome, explicit acceptance evidence, allowed scope and exclusions, and a concrete hard-block condition in that durable brief.
 Clarify only ambiguity that materially changes one of those four fields; routine authorized reversible next steps do not need another permission check.
 
-On an opted-in Pi primary, prefer `fm_short_submit` for a bounded read-only analysis or concretely authorized supported operation that fits [the short-task guide](docs/short-agents.md); MAIN submits, judges, and accepts the returned outcome without executing the task's individual commands, while work outside that boundary retains the ordinary fleet dispatch path below.
+On an opted-in Pi primary, prefer `fm_short_submit` for an independent read-only analysis or concretely authorized supported operation that fits [the short-task guide](docs/short-agents.md); MAIN submits, judges, and accepts the returned outcome without executing the task's individual commands, while work outside that boundary retains the ordinary fleet dispatch path below.
 
 ### Dispatch and supervision handoff
 

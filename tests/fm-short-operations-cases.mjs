@@ -50,7 +50,7 @@ fs.writeFileSync(path.join(seed,'one'),'2');git('-C',seed,'commit','-am','two');
 const service=new ShortAgents(home,root);
 const submittedIds=new Set(), originalSubmit=service.submit.bind(service);
 service.submit=(...args)=>{const result=originalSubmit(...args);submittedIds.add(result.id);return result;};
-const req=(key,steps=[{action:'sync',project}],goal='run')=>({key,goal,acceptance:'owner receipt',materials:[],operations:{authority:'isolated test fixture',expiresAt:Date.now()+60000,steps},budget:{timeMs:30000,outputTokens:3072}});
+const req=(key,steps=[{action:'sync',project}],goal='run')=>({key,goal,acceptance:'owner receipt',materials:[],operations:{authority:'isolated test fixture',expiresAt:Date.now()+60000,steps}});
 const wait=ms=>new Promise(r=>setTimeout(r,ms));
 async function terminal(id){for(let n=0;n<12000;n++){const s=service.status(id);if(s.finishedAt)return s;await wait(25);}throw Error('task did not terminate');}
 assert.equal(validate({key:'default',goal:'read',acceptance:'answer',materials:[]}).model,'gpt-5.6-luna');
@@ -59,9 +59,9 @@ assert.throws(()=>service.submit(req('unknown',[{action:'restart',task:'foo'}]))
 const missingAuthority=req('no-authority');delete missingAuthority.operations.authority;assert.throws(()=>service.submit(missingAuthority),/authority/);
 fs.writeFileSync(path.join(home,'state/.lock'),'1');assert.throws(()=>service.submit(req('wrong-primary')),/primary/);fs.writeFileSync(path.join(home,'state/.lock'),String(process.pid));
 const expired=req('expired');expired.operations.expiresAt=1;assert.throws(()=>service.submit(expired),/expired/);
-const request=req('sync');const a=service.submit(request);assert.equal(service.submit(request).id,a.id);
+const request={...req('sync'),budget:{timeMs:1,tools:1,outputTokens:1,requests:1}};const operationBegan=Date.now(),a=service.submit(request);assert.equal(service.submit(request).id,a.id);
 assert.equal(git('-C',project,'rev-parse','HEAD'),old,'submit did not execute the effect');
-const done=await terminal(a.id);assert.equal(done.state,'completed',JSON.stringify(done));
+const done=await terminal(a.id);assert.equal(done.state,'completed',JSON.stringify(done));assert.ok(done.finishedAt-operationBegan>1,'legacy wall budget does not stop an operation');assert.ok(!Object.hasOwn(JSON.parse(fs.readFileSync(path.join(service.dir(a.id),'request.json'))).input,'budget'));
 assert.equal(git('-C',project,'rev-parse','HEAD'),expected);
 const receipts=done.operations;assert.deepEqual(receipts,[{index:0,action:'sync',state:'completed'}]);
 assert.ok(!fs.existsSync(resource(home,request.operations.steps[0]).file));
@@ -382,7 +382,7 @@ if(process.env.FM_SHORT_CLEANUP_TARGET) {
   fs.writeFileSync(path.join(home,'state/cleanup-landed.meta'),landedMeta);
   const unrelatedMeta=`kind=ship\nspawn_gen=g-other\nworktree=${unrelated.path}\nproject=${cleanupProject}\n`;
   fs.writeFileSync(path.join(home,'state/unrelated-lab.meta'),unrelatedMeta);
-  const landedRequest=req('cleanup-landed',[{action:'cleanup',task:'cleanup-landed'}]);landedRequest.budget.timeMs=120000;landedRequest.operations.expiresAt=Date.now()+120000;
+  const landedRequest=req('cleanup-landed',[{action:'cleanup',task:'cleanup-landed'}]);landedRequest.operations.expiresAt=Date.now()+120000;
   const landed=service.submit(landedRequest),landedResult=await terminal(landed.id);
   if(landedResult.state!=='completed')console.log(fs.readFileSync(path.join(service.dir(landed.id),'operation-0.output.json'),'utf8'));
   assert.equal(landedResult.state,'completed',JSON.stringify(landedResult));
@@ -431,7 +431,7 @@ if(process.env.FM_SHORT_CLEANUP_TARGET) {
   assert.ok(firstReview.includes('# previous completion: decision_keys=\n'),'empty reviewed inventory remains in the audit trail');
   completion('complete',auditTask,auditTask);assert.equal(fs.readFileSync(auditMeta,'utf8'),firstReview,'repeated review is byte-idempotent');
   const auditService=new ShortAgents(auditHome,root);
-  const cleanupInput=(key)=>({key,goal:'run',acceptance:'owner receipt',materials:[],operations:{authority:'synthetic named-lab scout only',expiresAt:Date.now()+120000,steps:[{action:'cleanup',task:auditTask}]},budget:{timeMs:120000,outputTokens:3072}});
+  const cleanupInput=(key)=>({key,goal:'run',acceptance:'owner receipt',materials:[],operations:{authority:'synthetic named-lab scout only',expiresAt:Date.now()+120000,steps:[{action:'cleanup',task:auditTask}]}});
   // Emulate the historical writer's extra pair, then let the real completion
   // owner canonicalize it without dropping the pending choice or audit bytes.
   const oldPair=`decisions_reviewed=1\ndecision_keys=${auditTask}\n`;
@@ -478,7 +478,7 @@ if(process.env.FM_SHORT_INSTALL_LIVE==='1') {
   process.env.PATH=hashPath;process.env.FM_SHORT_HASH_LOG=hashLog;process.env.FM_SHORT_REAL_SHASUM=realShasum;
   assert.equal(execFileSync('bash',['-c','command -v sha256sum || true'],{encoding:'utf8'}),'');
   const destination=path.join(tmp,'installed');fs.mkdirSync(destination);
-  const installRequest=req('install',[{action:'install-shellcheck',destination}],'repeat');installRequest.budget.timeMs=300000;installRequest.operations.expiresAt=Date.now()+300000;
+  const installRequest=req('install',[{action:'install-shellcheck',destination}],'repeat');installRequest.operations.expiresAt=Date.now()+300000;
   const install=service.submit(installRequest),result=await terminal(install.id);
   assert.equal(result.state,'completed',JSON.stringify(result));
   assert.match(execFileSync(path.join(destination,'shellcheck'),['--version'],{encoding:'utf8'}),/version: 0.11.0/);

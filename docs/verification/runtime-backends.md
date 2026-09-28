@@ -1143,6 +1143,19 @@ Structural liveness permits the task-bound transcript read but does not itself i
 
 ## Pi headless short tasks
 
+On 2026-09-28, the portable exact-candidate suites passed after removing Firstmate's short-task input, output, request, tool-call, and wall-clock budgets while retaining operation grants, expiry, cancellation, process identity, durable receipts, and no replay.
+The lifecycle fixture submitted a request carrying all four legacy budget fields at values below the former minima and observed completion after the former wall deadline, across more tool calls, model requests, and streamed bytes than those fields allowed.
+It also captured five material entries including a file over 40,000 bytes, accepted goal and acceptance strings above the former limits, preserved a 4,096-character result through the public CLI, and verified that a stored v1 request remains readable without launching a duplicate child.
+The operation fixture submitted the same ignored one-unit legacy fields and completed a real isolated Git sync after the former deadline, while the existing cancellation, expired-grant, unauthorized-target, identity-drift, uncertain-effect, and settlement refusals remained green.
+
+```text
+$ bin/fm-test-run.sh tests/fm-short-agent.test.sh tests/fm-short-operations.test.sh tests/fm-pi-primary-types.test.sh
+ok - tracked Pi extensions pass strict no-emit typecheck against Pi 0.87.1
+ok - short-agent read boundary, asynchronous lifecycle and durable notification
+ok - short operation grants, real sync/recovery effects, receipts and refusals
+FM_TEST_SUMMARY total=3 failed=0 skipped_gate=0
+```
+
 On 2026-09-27, Pi 0.87.1 and Node v22.22.2 passed the isolated SDK guard with authenticated `openai-codex/gpt-5.6-luna` for both read-only analysis and an authorized fast-forward of a disposable local clone.
 Refresh with `FM_SHORT_AGENT_LIVE_E2E=1 FM_SHORT_LIVE_PROVIDER=openai-codex FM_SHORT_LIVE_MODEL=gpt-5.6-luna bin/fm-test-run.sh tests/fm-short-agent-live-e2e.test.sh`.
 Both submitted through the loaded candidate extension and returned before child completion; the parent answered another real-model prompt while each child was active.
@@ -1162,7 +1175,8 @@ Restoring the normal environment allowed the real fast-forward above without cha
 This demonstrates the diagnostic boundary and refusal behavior; it does not identify the cause of an earlier failure whose underlying transport evidence was not retained.
 The portable suites also cover nested/cyclic transport causes, secret exclusion, failure after a completed operation, refusal of provider-internal HTTP replay, and no operation replay after duplicate submission or reconciliation.
 Plugin admission tests reject missing or mismatched packages, failed loading, extra discovered extensions and unexpected tool registrations.
-Short sessions initialize the plugin compaction handlers but disable automatic compaction and end on output limits; this guard does not perform a primary `/compact`.
+Short sessions initialize the plugin compaction handlers but disable automatic compaction; provider or model context and output limits still apply and are not Firstmate controls.
+This guard does not perform a primary `/compact`.
 
 `tests/fm-short-operations.test.sh` uses a model fixture, real Git owners/effects, and a controlled Codebase forge to exercise merge-plus-sync, detached-checkout recovery, duplicate submission, cancellation, authority/identity drift, malformed output, partial success, and concurrent resource ownership.
 It also proves that a lost merge response is reconciled by owner readback and that an owner killed after a possible effect is not replayed after restart.
@@ -1180,4 +1194,4 @@ A freshly bound request then removes only the synthetic scout's endpoint and met
 The portable operation suite separately accepts only monotone legacy completion audit pairs, refuses repeated identity fields and malformed audit history, and refuses post-bind edits even when the final effective inventory is unchanged.
 The fixture chains use one model fixture invocation and one operation tool per chain; fixture responses are not real-provider token evidence.
 The optional install also repeats the tool call to prove receipt reuse without reinstalling.
-The portable read-only companion is `tests/fm-short-agent.test.sh`; [the operator guide](../short-agents.md) owns current use and limits.
+The portable read-only companion is `tests/fm-short-agent.test.sh`; [the operator guide](../short-agents.md) owns current use, compatibility, and provider-limit distinctions.

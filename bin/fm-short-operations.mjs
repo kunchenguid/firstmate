@@ -38,8 +38,8 @@ const fail = message => { throw Error(message); };
 function fields(value, names) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(k => !names.includes(k))) fail('unsupported operation fields');
 }
-function str(value, label, limit=4096) {
-  if (typeof value !== 'string' || !value || value.includes('\0') || Buffer.byteLength(value)>limit) fail(`invalid operation ${label}`);
+function str(value, label) {
+  if (typeof value !== 'string' || !value || value.includes('\0')) fail(`invalid operation ${label}`);
   return value;
 }
 function canonical(value) {
@@ -68,7 +68,7 @@ export function primaryOwner(home) {
 export function validateOperations(value) {
   if (value === undefined) return undefined;
   fields(value,['expiresAt','authority','steps']);
-  str(value.authority,'authority provenance',2048);
+  str(value.authority,'authority provenance');
   if(!Number.isSafeInteger(value.expiresAt) || value.expiresAt<=0) fail('invalid operation expiry');
   if(!Array.isArray(value.steps) || value.steps.length<1 || value.steps.length>4) fail('operation needs one to four finite steps');
   const steps=value.steps.map(s=>{
@@ -193,7 +193,6 @@ export function operationCurrent(home,request,index,{terminal=false}={}) {
   if(!terminal && exists(path.join(dir,'result.json'))) fail('short task is terminal');
   if(exists(path.join(dir,'revoked.json'))) fail('operation authority revoked');
   if(Date.now()>=request.input.operations.expiresAt) fail('operation authority expired');
-  if(Date.now()>=request.acceptedAt+request.input.budget.timeMs) fail('operation wall budget exhausted');
   const step=request.input.operations.steps[index], binding=request.operationBindings[index];
   if(!step || !binding) fail('operation outside grant');
   if(step.project) {
@@ -261,7 +260,7 @@ function settleMergeLocked(home,root,id,index,expectedMergeCommit) {
   const dir=path.join(home,'state/short-agents',id);
   const requestFile=path.join(dir,'request.json'),startedFile=path.join(dir,'started.json'),resultFile=path.join(dir,'result.json');
   const request=read(requestFile),started=read(startedFile),resultBytes=fs.readFileSync(resultFile,'utf8'),result=JSON.parse(resultBytes);
-  if(request.version!==1||request.id!==id||!request.input?.operations||!Array.isArray(request.operationBindings)||request.operationBindings.length!==request.input.operations.steps.length) fail('short merge settlement request identity is invalid');
+  if(![1,2].includes(request.version)||request.id!==id||!request.input?.operations||!Array.isArray(request.operationBindings)||request.operationBindings.length!==request.input.operations.steps.length) fail('short merge settlement request identity is invalid');
   if(!Number.isSafeInteger(index)||index<0||index>=request.input.operations.steps.length) fail('short merge settlement index is invalid');
   if(!(/^[a-f0-9]{40}$|^[a-f0-9]{64}$/).test(expectedMergeCommit??'')) fail('short merge settlement requires the independently observed merge commit');
   const step=request.input.operations.steps[index],binding=request.operationBindings[index];
@@ -421,8 +420,8 @@ export async function executeOperations(service,request,check) {
       // Never inherit caller overrides that could redirect a guarded owner.
       for(const key of ['FM_DATA_OVERRIDE','FM_PROJECTS_OVERRIDE','FM_LEASE_HOLDER_PID']) delete env[key];
       let output;
-      try {output=await exec('bash',[path.join(service.root,'bin',invocation.script),...invocation.args],{env,cwd:dir,timeout:Math.max(1,request.acceptedAt+request.input.budget.timeMs-Date.now()),maxBuffer:131072});}
-      catch(error) {output={stdout:error.stdout??'',stderr:error.stderr??'',error:String(error.message).slice(0,512)};}
+      try {output=await exec('bash',[path.join(service.root,'bin',invocation.script),...invocation.args],{env,cwd:dir,maxBuffer:Number.POSITIVE_INFINITY});}
+      catch(error) {output={stdout:error.stdout??'',stderr:error.stderr??'',error:String(error.message)};}
       fs.writeFileSync(path.join(dir,`operation-${index}.output.json`),JSON.stringify(output)+'\n',{mode:0o600});
       // Owners write verified postconditions, not a free-form success string.
       if(!exists(receiptFile)) {
