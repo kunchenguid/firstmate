@@ -74,11 +74,11 @@ const finalReplies = new Set<string>();
 // Each doorbell's record verdict, by record path. Records are immutable once published
 // but pruned after seven days, so every invalidation drops the cache and rechecks.
 const doorbellVerdicts = new Map<string, Promise<boolean>>();
-const sprite = createCalmWorkingShipSprite();
-let family: CalmShipPaletteFamily = "light";
 // Every Spinner site currently drawing the boat, by its requestId, with the mounted
-// Raster size a blit must repeat exactly.
-const sites = new Map<string, { columns: number; rows: number }>();
+// Raster size a blit must repeat exactly and its own boat/track state so a narrower
+// row cannot clamp or reverse the boat in a wider row.
+const sites = new Map<string, { columns: number; rows: number; sprite: ReturnType<typeof createCalmWorkingShipSprite> }>();
+let family: CalmShipPaletteFamily = "light";
 
 function isActivated($: EngineInterface): Promise<boolean> {
   if (activation === undefined) {
@@ -143,7 +143,6 @@ async function resetSession($: EngineInterface): Promise<void> {
   doorbellVerdicts.clear();
   sites.clear();
   stopTicker();
-  sprite.reset();
   family = "light";
   await ensureLoaded($);
 }
@@ -178,9 +177,9 @@ async function repaintShip($: EngineInterface): Promise<void> {
     stopTicker();
     return;
   }
-  sprite.tick();
   for (const [requestId, site] of sites) {
-    const packed = packCalmShipRasterCells(sprite.frame(site.columns, family), site.columns);
+    site.sprite.tick();
+    const packed = packCalmShipRasterCells(site.sprite.frame(site.columns, family), site.columns);
     const result = await $.ui.blit({
       requestId,
       key: CALM_SHIP_RASTER_KEY,
@@ -306,8 +305,18 @@ export const register: Register = (on) => {
       return next(e);
     }
     const columns = calmShipRasterColumns(e.viewport?.columns);
-    const packed = packCalmShipRasterCells(sprite.frame(columns, family), columns);
-    sites.set(e.requestId, { columns, rows: packed.rows });
+    let site = sites.get(e.requestId);
+    let packed: ReturnType<typeof packCalmShipRasterCells>;
+    if (site === undefined) {
+      const sprite = createCalmWorkingShipSprite();
+      packed = packCalmShipRasterCells(sprite.frame(columns, family), columns);
+      site = { columns, rows: packed.rows, sprite };
+      sites.set(e.requestId, site);
+    } else {
+      site.columns = columns;
+      packed = packCalmShipRasterCells(site.sprite.frame(columns, family), columns);
+      site.rows = packed.rows;
+    }
     startTicker($);
     const { Box, Raster } = $.ui.resolve(e);
     return Box({

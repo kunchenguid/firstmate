@@ -32,6 +32,10 @@ run_node() {  # <script-file>
   node --input-type=module <"$1"
 }
 
+json_encode() {
+  printf '%s' "$1" | node -e 'process.stdout.write(JSON.stringify(require("fs").readFileSync(0,"utf8")))'
+}
+
 test_plugin_shape() {
   local link resolved autoload
   link="$ROOT/.agents/skills/firstmate-calm"
@@ -48,7 +52,7 @@ test_plugin_shape() {
   [ ! -e "$MOD/SKILL.md" ] || fail "the mod carries a SKILL.md and would load as a skill on every harness"
   cat >"$TMP_ROOT/shape.mjs" <<JS
 import { readFileSync, readdirSync, existsSync } from "node:fs";
-const mod = "$MOD";
+const mod = $(json_encode "$MOD");
 const manifest = JSON.parse(readFileSync(\`\${mod}/.claude-plugin/plugin.json\`, "utf8"));
 if (manifest.name !== "firstmate-calm") throw new Error(\`manifest name \${manifest.name}\`);
 for (const key of ["commands", "agents", "skills", "hooks", "mcpServers", "lspServers", "outputStyles"]) {
@@ -76,8 +80,8 @@ test_shared_sprite_and_pi_rendering() {
   local out
   cat >"$TMP_ROOT/sprite.mjs" <<JS
 import { pathToFileURL } from "node:url";
-const pi = await import(pathToFileURL("$PI_SHIP").href);
-const core = await import(pathToFileURL("$MOD" + "/lib/fm-calm-working-ship-sprite.ts").href);
+const pi = await import(pathToFileURL($(json_encode "$PI_SHIP")).href);
+const core = await import(pathToFileURL($(json_encode "$MOD") + "/lib/fm-calm-working-ship-sprite.ts").href);
 const ESC = "\\u001b";
 const check = (condition, message) => { if (!condition) throw new Error(message); };
 // An independent reference painter: 24-bit escapes, or xterm-256 indexes, on each color change.
@@ -101,6 +105,8 @@ const cells = (row) => row.map((run) => run.text).join("");
 const RIGS = [core.CALM_WORKING_SHIP_SAIL_LEFT, core.CALM_WORKING_SHIP_SAIL_RIGHT];
 const rigOf = (text) => text.replace(/[╲╱]/, "│");
 const BARS = core.CALM_WORKING_SHIP_WAVE_BARS.join("");
+const TOP_BARS = (core.CALM_WORKING_SHIP_TOP_BARS ?? ["▔", "▀"]).join("");
+const ALLOWED = BARS + " " + TOP_BARS;
 check(pi.CALM_WORKING_SHIP_TICK_MS === core.CALM_WORKING_SHIP_TICK_MS, "Pi re-exports a different tick");
 check(core.CALM_WORKING_SHIP_TICK_MS <= 17, "the frame clock is slower than about sixty frames a second");
 let frames = 0;
@@ -116,7 +122,7 @@ for (const [family, mode] of [["dark", "truecolor"], ["light", "256color"]]) for
     if (width === 0) check(frame.length === 0, "zero width painted a row");
     if (width > 0) {
       for (const row of frame) {
-        check(cells(row).length <= width, \`a row overflowed width \${width}\`);
+        check([...cells(row)].length <= width, \`a row overflowed width \${width}\`);
         for (const run of row) {
           check(["plain", "water", "hull", "sail"].includes(run.color), \`unknown cell kind \${run.color}\`);
           for (const rgb of [run.fg, run.bg]) check(rgb === null || (Number.isInteger(rgb) && rgb >= 0 && rgb <= 0xffffff), \`bad color \${rgb}\`);
@@ -128,8 +134,8 @@ for (const [family, mode] of [["dark", "truecolor"], ["light", "256color"]]) for
         const { hull, sails } = core.calmWorkingShipBoatColors(family);
         const hullColumns = [], sailRows = [];
         frame.forEach((row, index) => {
-          check(cells(row).length === width, \`row \${index} does not fill width \${width}\`);
-          check([...cells(row)].every((glyph) => (BARS + " ▔▀").includes(glyph)), \`row \${index} drew a glyph outside the block set\`);
+          check([...cells(row)].length === width, \`row \${index} does not fill width \${width}\`);
+          check([...cells(row)].every((glyph) => (ALLOWED).includes(glyph)), \`row \${index} drew a glyph outside the block set\`);
           let column = 0;
           for (const run of row) for (const glyph of Array.from(run.text)) {
             if (run.fg === hull || run.bg === hull) hullColumns.push(column);
@@ -143,10 +149,10 @@ for (const [family, mode] of [["dark", "truecolor"], ["light", "256color"]]) for
         check(sailRows.every((row) => row < core.CALM_WORKING_SHIP_ROWS - 1), "a sail sank into the water body");
         check(frame.at(-1).every((run) => run.fg !== null), "the water body has a gap");
       } else if (width >= 3) {
-        check(frame.length === 1 && RIGS.includes(rigOf(cells(frame[0]).slice(sprite.position(), sprite.position() + 3))), \`width \${width} lost the rig-only fallback\`);
-        check(cells(frame[0]).length === width, \`width \${width} fallback is not full width\`);
+        check(frame.length === 1 && RIGS.includes(rigOf([...cells(frame[0])].slice(sprite.position(), sprite.position() + 3).join(""))), \`width \${width} lost the rig-only fallback\`);
+        check([...cells(frame[0])].length === width, \`width \${width} fallback is not full width\`);
       } else {
-        check(frame.length === 1 && [...cells(frame[0])].every((glyph) => BARS.includes(glyph)) && cells(frame[0]).length === width, \`width \${width} lost the water-only fallback\`);
+        check(frame.length === 1 && [...cells(frame[0])].every((glyph) => BARS.includes(glyph)) && [...cells(frame[0])].length === width, \`width \${width} lost the water-only fallback\`);
       }
     }
     animation.tick();
@@ -183,7 +189,7 @@ test_sea_and_boat_physics() {
   local out
   cat >"$TMP_ROOT/physics.mjs" <<JS
 import { pathToFileURL } from "node:url";
-const core = await import(pathToFileURL("$MOD" + "/lib/fm-calm-working-ship-sprite.ts").href);
+const core = await import(pathToFileURL($(json_encode "$MOD") + "/lib/fm-calm-working-ship-sprite.ts").href);
 const check = (condition, message) => { if (!condition) throw new Error(message); };
 const trains = core.CALM_WORKING_SHIP_WAVE_TRAINS;
 // Deep-water dispersion: phase speed grows with the square root of wavelength, so long
@@ -316,8 +322,8 @@ test_raster_packing() {
   cat >"$TMP_ROOT/raster.mjs" <<JS
 import { pathToFileURL } from "node:url";
 import { randomBytes } from "node:crypto";
-const raster = await import(pathToFileURL("$MOD" + "/lib/fm-calm-ship-raster.ts").href);
-const core = await import(pathToFileURL("$MOD" + "/lib/fm-calm-working-ship-sprite.ts").href);
+const raster = await import(pathToFileURL($(json_encode "$MOD") + "/lib/fm-calm-ship-raster.ts").href);
+const core = await import(pathToFileURL($(json_encode "$MOD") + "/lib/fm-calm-working-ship-sprite.ts").href);
 const check = (condition, message) => { if (!condition) throw new Error(message); };
 for (let length = 0; length <= 80; length += 1) {
   const bytes = new Uint8Array(randomBytes(length));
@@ -394,8 +400,8 @@ test_presentation_policy() {
   local out
   cat >"$TMP_ROOT/policy.mjs" <<JS
 import { pathToFileURL } from "node:url";
-const policy = await import(pathToFileURL("$MOD" + "/lib/fm-calm-presentation.ts").href);
-const piPreservation = await import(pathToFileURL("$ROOT" + "/.pi/extensions/lib/fm-calm-preservation.ts").href);
+const policy = await import(pathToFileURL($(json_encode "$MOD") + "/lib/fm-calm-presentation.ts").href);
+const piPreservation = await import(pathToFileURL($(json_encode "$ROOT") + "/.pi/extensions/lib/fm-calm-preservation.ts").href);
 const check = (condition, message) => { if (!condition) throw new Error(message); };
 const plugin = "/repo/.claude/mods/firstmate-calm";
 check(policy.calmPreferencePath({}, plugin) === "/repo/config/calm", "plugin-root fallback");
@@ -538,8 +544,8 @@ test_classifier_parity_with_shell_owner() {
   cat >"$TMP_ROOT/classify.mjs" <<JS
 import { pathToFileURL } from "node:url";
 import { readFileSync, writeFileSync } from "node:fs";
-const port = await import(pathToFileURL("$MOD" + "/lib/fm-operational-input.ts").href);
-const corpus = "$corpus";
+const port = await import(pathToFileURL($(json_encode "$MOD") + "/lib/fm-operational-input.ts").href);
+const corpus = $(json_encode "$corpus");
 const count = ${count};
 const lines = [];
 for (let index = 1; index <= count; index += 1) {
@@ -619,8 +625,8 @@ test_doorbell_parity_with_shell_owner() {
   cat >"$TMP_ROOT/doorbells.mjs" <<JS
 import { pathToFileURL } from "node:url";
 import { readFileSync, writeFileSync } from "node:fs";
-const port = await import(pathToFileURL("$MOD" + "/lib/fm-operational-input.ts").href);
-const dir = "$dir";
+const port = await import(pathToFileURL($(json_encode "$MOD") + "/lib/fm-operational-input.ts").href);
+const dir = $(json_encode "$dir");
 const lines = [];
 for (let index = 1; index <= ${count}; index += 1) {
   const record = port.firstmateOperationalDoorbellPath(readFileSync(\`\${dir}/case-\${index}.txt\`, "utf8"));

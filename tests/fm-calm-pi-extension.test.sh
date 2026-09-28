@@ -2992,7 +2992,8 @@ const ESC = "\u001b";
 const RESET = `${ESC}[39;49m`;
 const RIG = /[◢◿]│[◺◣]/;
 const WAVE_BARS = "▁▂▃▄▅▆▇█";
-const SCENE_GLYPHS = new RegExp(`^[ ${WAVE_BARS}▔▀]*$`);
+const TOP_BARS = "▔\u{1FB82}\u{1FB83}▀\u{1FB84}\u{1FB85}\u{1FB86}█";
+const SCENE_GLYPHS = new RegExp(`^[ ${WAVE_BARS}${TOP_BARS}]*$`, "u");
 const TRUECOLOR = { family: "dark", mode: "truecolor" };
 const PALETTE_256 = { family: "light", mode: "256color" };
 const strip = (text) => text.replace(new RegExp(`${ESC}\\[[0-9;]*m`, "g"), "");
@@ -3114,7 +3115,7 @@ for (let width = 1; width <= 120; width += 1) {
     check(frame.length === (full ? CALM_WORKING_SHIP_ROWS : 1), `width ${width} rendered ${frame.length} rows`);
     for (const line of frame) {
       check(visibleWidth(line) === width, `width ${width} rendered a ${visibleWidth(line)}-cell line`);
-      check(visibleWidth(line) === strip(line).length, `width ${width} let ANSI bytes or a wide glyph affect the geometry`);
+      check(visibleWidth(line) === [...strip(line)].length, `width ${width} let ANSI bytes or a wide glyph affect the geometry`);
     }
     if (full) check(boatOf(frame, step % 2 ? TRUECOLOR : PALETTE_256).left >= 0, `width ${width} lost its hull`);
     else if (width >= 3) check(RIG.test(strip(frame[0])), `width ${width} lost its rig`);

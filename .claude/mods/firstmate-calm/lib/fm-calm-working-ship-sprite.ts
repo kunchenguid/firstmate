@@ -703,10 +703,20 @@ function cellOf(sub: Int32Array, offset: number, colors: Uint32Array): Cell {
   if (split <= 0) return solid(upper, colors);
   const category = categoryOf(lower, upper);
   if (lower === SKY) {
-    // Only top-aligned glyphs can leave sky below; take the nearest of them.
-    const cover = LEVELS - split;
-    if (cover <= 2) return { glyph: TOP_EIGHTH, color: category, fg: colors[upper]!, bg: null };
-    if (cover <= 6) return { glyph: TOP_HALF, color: category, fg: colors[upper]!, bg: null };
+    // Draw the sail edge at its true sampled height using the eighth-cell
+    // lower-block set: a lower block of height `split` with sky as foreground
+    // (transparent) and sail as background leaves `LEVELS - split` of sail at
+    // the top, so the edge steps in eighths rather than snapping to 1/8, 1/2
+    // or full.
+    if (split >= 1 && split < LEVELS) {
+      return {
+        glyph: CALM_WORKING_SHIP_WAVE_BARS[split - 1]!,
+        color: category,
+        fg: null,
+        bg: colors[upper]!,
+      };
+    }
+    if (split >= LEVELS) return solid(upper, colors);
     return solid(upper, colors);
   }
   return {
