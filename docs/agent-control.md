@@ -97,7 +97,7 @@ The task's worktree, branch, commits, and uncommitted changes all survive that; 
 Two endpoint verdicts are agent-free, and both license a relaunch:
 
 - `dead` - the endpoint exists and confidently holds no agent. It is **adopted**, so the task keeps its exact recorded address.
-- gone, **proven** - there is no endpoint and therefore no agent, and it cannot be adopted, so the launch owner **creates one fresh endpoint in the recorded worktree** and the republished record rebinds the task to it.
+- gone, **proven** - there is no endpoint this seat can reach and no agent working in the recorded worktree, so nothing can be adopted: the launch owner **creates one fresh endpoint in the recorded worktree** and the republished record rebinds the task to it.
 
 That proof is its own step, because the classifier's `missing` is not one state: it conflates *the endpoint was destroyed* with *the endpoint is unreachable from here right now*.
 An unreachable endpoint can still hold the live agent a rebind would duplicate, so absence is proven and never inferred from a failed read - and whether it is provable at all is a property of the backend:
@@ -112,7 +112,7 @@ An unreachable endpoint can still hold the live agent a rebind would duplicate, 
   So the proof reads the process table instead (`fm_agent_process_worktree_scan` in `bin/fm-agent-process-lib.sh`: `/proc` on Linux, `lsof` and `ps` elsewhere): no process of this user that classifies as a verified harness is working anywhere under the recorded worktree.
   An agent found there refuses and names its process id; so does a process-table read that fails - on the `lsof` path that means a non-zero exit carrying diagnostics, not the file-system warnings some hosts print on every otherwise successful run.
   The replacement window opens on the tmux server and session this seat addresses, which is where an ordinary spawn from here would place it.
-  A window already carrying the task's `fm-<id>` name in that session is replaced when the liveness probe proves it agent-free, exactly as Herdr replaces a confirmed husk, so a stray window left by an earlier killed attempt cannot dead-end every later reclaim; anything the probe cannot clear refuses and names how to read that window.
+  A window already carrying the task's `fm-<id>` name in that session refuses the create rather than being closed and replaced, unlike a Herdr husk: `fm-<id>` carries no home identity and every seat outside tmux resolves to the one session `firstmate`, so closing it could destroy another home's deliberately preserved endpoint. The refusal names how to read that window, and says plainly that no control-plane command closes one this home's records do not name.
   A window that outlived its agent on a server this seat cannot address is left alone: it holds no agent, and it is not the task's endpoint any more.
 
 Every transient or self-contradicting read stays `unreadable` or `ambiguous` and still refuses, so a momentary backend failure can never be mistaken for absence.

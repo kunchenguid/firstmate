@@ -79,20 +79,17 @@ fm_backend_tmux_container_ensure() {
   fi
 }
 
-# fm_backend_tmux_create_task: create the task's window in <proj-abs>.
-# Prints the created window's stable window id on stdout for the caller to
-# target.
+# fm_backend_tmux_create_task: create the task's window in <proj-abs>,
+# refusing an existing <window-name> in <session>. Prints the created window's
+# stable window id on stdout for the caller to target.
 #
-# An existing <window-name> in <session> is replaced only when it is provably
-# agent-free, exactly as fm_backend_herdr_create_task replaces a confirmed
-# husk: a window left behind by a killed spawn, or a task window whose server
-# outlived its agent, would otherwise dead-end every later reclaim of that
-# task with no operator route back. fm_backend_tmux_agent_state owns that
-# proof and fails safe toward refusal, so `alive`, `ambiguous` and
-# `unreadable` all refuse, as does more than one window carrying the name -
-# no single read could clear them all. Ordering mirrors the Herdr adapter for
-# the same reason: the replacement is created BEFORE the husk is closed, so
-# the session never drops to zero windows.
+# The refusal never becomes a close-and-replace, unlike the Herdr adapter's
+# husk path: a herdr tab is addressed inside the session the record names,
+# while `fm-<id>` carries no home identity and every seat outside tmux
+# resolves to the one session `firstmate`, so two homes holding equal task ids
+# collide here. Closing the window this seat did not record would destroy
+# another home's deliberately preserved endpoint - the very dead-end the
+# reclaim exists to remove - so whose window it is stays the operator's call.
 #
 # Robustness (fm-spawn tmux window handling under a non-default captain config):
 #   - Capture a STABLE window id with -P -F '#{window_id}', and let tmux append
@@ -104,32 +101,14 @@ fm_backend_tmux_container_ensure() {
 # The returned window id lets callers target the window even if its name is ever
 # lost, so worktree discovery cannot fall back to the active client's window.
 fm_backend_tmux_create_task() {  # <session> <window-name> <proj-abs> -> prints window id
-  local ses=$1 wname=$2 proj_abs=$3 wid line dup_wid='' dup_count=0
-  while IFS= read -r line; do
-    [ -n "$line" ] || continue
-    [ "${line#* }" = "$wname" ] || continue
-    dup_count=$((dup_count + 1))
-    case "$line" in
-      '@'*' '*) dup_wid=${line%% *} ;;
-      *) dup_wid= ;;
-    esac
-  done <<EOF
-$(tmux list-windows -t "$ses" -F '#{window_id} #{window_name}')
-EOF
-  if [ "$dup_count" -gt 0 ] \
-     && { [ "$dup_count" -gt 1 ] || [ -z "$dup_wid" ] \
-          || [ "$(fm_backend_tmux_agent_state "$ses:$wname")" != dead ]; }; then
-    echo "error: window $ses:$wname already exists and could not be proven agent-free, so it is not replaced; read it with bin/fm-peek.sh $ses:$wname, and once no agent holds it retry this command" >&2
+  local ses=$1 wname=$2 proj_abs=$3 wid
+  if tmux list-windows -t "$ses" -F '#{window_name}' | grep -qx "$wname"; then
+    echo "error: window $ses:$wname already exists; read it with bin/fm-peek.sh $ses:$wname to see what holds it. No control-plane command closes a window this home's records do not name, so a leftover or another home's window has to be closed where it runs before this task can open its own" >&2
     return 1
   fi
   wid=$(tmux new-window -dP -F '#{window_id}' -t "$ses:" -n "$wname" -c "$proj_abs") || return 1
   tmux set-window-option -t "$wid" automatic-rename off 2>/dev/null || true
   tmux set-window-option -t "$wid" allow-rename off 2>/dev/null || true
-  if [ "$dup_count" -eq 1 ] && ! tmux kill-window -t "$dup_wid" 2>/dev/null; then
-    tmux kill-window -t "$wid" 2>/dev/null || true
-    echo "error: the agent-free window $ses:$wname could not be closed, so its replacement was withdrawn rather than leave two windows under one name" >&2
-    return 1
-  fi
   printf '%s\n' "$wid"
 }
 

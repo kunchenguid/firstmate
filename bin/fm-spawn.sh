@@ -3550,9 +3550,8 @@ if [ "$RELAUNCH" -eq 1 ]; then
     # no longer exist, and a record carries no socket identity to name another.
     # The absence proof already established that no agent works in the
     # worktree, so a window that outlived its agent on some other server holds
-    # nothing this could duplicate. create_task replaces a same-named window
-    # already in the session only when it proves that window agent-free, and
-    # refuses otherwise, so a reclaim never shares an endpoint either.
+    # nothing this could duplicate. create_task refuses a same-named window
+    # already in the session, so a reclaim never shares an endpoint either.
     # Until the record is republished the new window holds only a shell, and
     # the abort trap closes it if anything refuses before then.
     SES=$(fm_backend_tmux_container_ensure) || exit 1
