@@ -891,6 +891,9 @@ EOF
   printf 'Not urgent; ship it as planned.\n' > "$home/go.txt"
   run_captain "$home" answer sample-widget --decision-file "$home/go.txt" --release >/dev/null \
     || fail "answer --release failed on the held work item"
+  assert_present "$home/state/.wake-queue" "release did not enqueue a wake"
+  assert_grep "$(printf '\tcheck\tcaptain-hold-released:sample-widget\tcheck: captain hold released sample-widget')" \
+    "$home/state/.wake-queue" "release did not enqueue the expected check wake row"
   show=$(tasks_in "$home" show sample-widget --full)
   assert_contains "$show" "state: queued" "a released work item did not stay queued"
   assert_contains "$show" "held: no" "a released work item kept its hold"
@@ -921,6 +924,8 @@ EOF
     || fail "an empty answer label shifted the release close mode"
   assert_contains "$out" "closed: sample-empty-label-widget" \
     "the empty-label release was not accepted"
+  assert_grep "$(printf '\tcheck\tcaptain-hold-released:sample-empty-label-widget\tcheck: captain hold released sample-empty-label-widget')" \
+    "$home/state/.wake-queue" "answers --release did not enqueue the expected check wake row"
   show=$(tasks_in "$home" show sample-empty-label-widget --full)
   assert_contains "$show" "state: queued" "an empty-label release completed its work item"
   assert_contains "$show" "held: no" "an empty-label release did not lift the hold"

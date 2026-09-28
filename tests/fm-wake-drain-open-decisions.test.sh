@@ -115,7 +115,8 @@ test_no_open_decisions_prints_nothing() {
   if grep -F 'OPEN DECISIONS' "$out" >/dev/null; then
     fail "the empty case printed an OPEN DECISIONS section: $(cat "$out")"
   fi
-  [ ! -s "$out" ] || fail "the empty case with no queued wakes was not silent: $(cat "$out")"
+  extra=$(sed -E '/^ready=([0-9]+|unknown)$/d' "$out")
+  [ -z "$extra" ] || fail "the empty case with no queued wakes was not silent: $extra"
   pass "no open decisions across the fleet prints nothing"
 }
 
@@ -215,6 +216,180 @@ test_over_long_decision_note_is_capped_with_a_marker() {
   pass "an over-long open decision is cut to its per-item budget with the shared truncation marker"
 }
 
+test_wake_drain_prints_measured_ready_count() {
+  local dir state out fakebin
+  dir=$(make_case ready-count-measured)
+  state="$dir/state"
+  out="$dir/drain.out"
+  fakebin="$dir/fakebin"
+  mkdir -p "$fakebin" "$dir/data"
+  printf 'working: on it\n' > "$state/task1.status"
+  cat > "$fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  ready)
+    printf 'count: 13\nready: 13 unblocked queued tasks\n'
+    exit 0
+    ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/tasks-axi"
+
+  PATH="$fakebin:$PATH" FM_DATA_OVERRIDE="$dir/data" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "drain failed with measured ready count"
+  grep -Fx 'ready=13' "$out" >/dev/null \
+    || fail "drain did not print the measured ready count: $(cat "$out")"
+  pass "drain presentation prints the measured ready count"
+}
+
+test_wake_drain_prints_ready_count_zero() {
+  local dir state out fakebin
+  dir=$(make_case ready-count-zero)
+  state="$dir/state"
+  out="$dir/drain.out"
+  fakebin="$dir/fakebin"
+  mkdir -p "$fakebin" "$dir/data"
+  printf 'working: on it\n' > "$state/task1.status"
+  cat > "$fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  ready)
+    printf 'count: 0\nready: 0 unblocked queued tasks\n'
+    exit 0
+    ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/tasks-axi"
+
+  PATH="$fakebin:$PATH" FM_DATA_OVERRIDE="$dir/data" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "drain failed with zero ready count"
+  grep -Fx 'ready=0' "$out" >/dev/null \
+    || fail "drain did not print ready=0: $(cat "$out")"
+  pass "drain presentation prints ready=0 when tasks-axi reports zero ready tasks"
+}
+
+test_wake_drain_ready_count_fails_soft_when_unavailable() {
+  local dir state out fakebin
+  dir=$(make_case ready-count-unavailable)
+  state="$dir/state"
+  out="$dir/drain.out"
+  fakebin="$dir/fakebin"
+  mkdir -p "$fakebin" "$dir/data"
+  printf 'working: on it\n' > "$state/task1.status"
+  cat > "$fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$fakebin/tasks-axi"
+
+  PATH="$fakebin:$PATH" FM_DATA_OVERRIDE="$dir/data" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "drain exited nonzero when tasks-axi failed"
+  grep -Fx 'ready=unknown' "$out" >/dev/null \
+    || fail "drain did not fail soft with ready=unknown: $(cat "$out")"
+  pass "drain presentation fails soft with ready=unknown when tasks-axi is unavailable"
+}
+
+test_wake_drain_ready_count_fails_soft_on_timeout() {
+  local dir state out fakebin
+  dir=$(make_case ready-count-timeout)
+  state="$dir/state"
+  out="$dir/drain.out"
+  fakebin="$dir/fakebin"
+  mkdir -p "$fakebin" "$dir/data"
+  printf 'working: on it\n' > "$state/task1.status"
+  cat > "$fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+sleep 10
+exit 0
+SH
+  chmod +x "$fakebin/tasks-axi"
+
+  FM_READY_COUNT_TIMEOUT=1 PATH="$fakebin:$PATH" FM_DATA_OVERRIDE="$dir/data" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "drain exited nonzero when tasks-axi timed out"
+  grep -Fx 'ready=unknown' "$out" >/dev/null \
+    || fail "drain did not fail soft with ready=unknown on timeout: $(cat "$out")"
+  pass "drain presentation fails soft with ready=unknown when tasks-axi times out"
+}
+
+test_ready_count_survives_presentation_lock_contention() {
+  local dir state out fakebin holder i
+  dir=$(make_case ready-count-contended)
+  state="$dir/state"
+  out="$dir/drain.out"
+  fakebin="$dir/fakebin"
+  mkdir -p "$fakebin" "$dir/data"
+  cat > "$fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+printf 'count: 7\n'
+SH
+  chmod +x "$fakebin/tasks-axi"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_acquire_wait "$2"
+    printf "ready\n" > "$3"
+    exec sleep 30
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$state/.status-presentation-lock" "$dir/lock.ready" &
+  holder=$!
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -s "$dir/lock.ready" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -s "$dir/lock.ready" ] || { kill "$holder" 2>/dev/null || true; fail "presentation lock not acquired"; }
+  PATH="$fakebin:$PATH" FM_DATA_OVERRIDE="$dir/data" FM_STATE_OVERRIDE="$state" \
+    FM_STATUS_PRESENTATION_LOCK_TIMEOUT=1 "$DRAIN" > "$out" \
+    || { kill "$holder" 2>/dev/null || true; fail "contended drain failed"; }
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  grep -F 'STATUS PRESENTATION SKIPPED:' "$out" >/dev/null || fail "contention was not exercised"
+  [ "$(grep -Fxc 'ready=7' "$out")" -eq 1 ] || fail "contended drain omitted ready count: $(cat "$out")"
+  pass "presentation lock contention does not suppress ready count"
+}
+
+test_wake_drain_release_wake_and_ready_count() {
+  local dir state out err fakebin seq gen
+  dir=$(make_case release-wake-and-ready)
+  state="$dir/state"
+  out="$dir/drain.out"
+  err="$dir/drain.err"
+  fakebin="$dir/fakebin"
+  mkdir -p "$fakebin" "$dir/data"
+  printf 'working: on it\n' > "$state/task-rel.status"
+  cat > "$fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  ready)
+    printf 'count: 4\nready: 4 unblocked queued tasks\n'
+    exit 0
+    ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/tasks-axi"
+
+  append_wake "$state" check "captain-hold-released:task-rel" "check: captain hold released task-rel" \
+    || fail "queueing release wake failed"
+
+  PATH="$fakebin:$PATH" FM_DATA_OVERRIDE="$dir/data" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$err" \
+    || fail "drain failed on release wake"
+
+  grep -F 'check: captain hold released task-rel' "$out" >/dev/null \
+    || fail "release wake was not presented: $(cat "$out")"
+  grep -Fx 'ready=4' "$out" >/dev/null \
+    || fail "ready count line was not printed beside release wake: $(cat "$out")"
+  seq=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$err")
+  gen=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")
+  [ -n "$seq" ] && [ -n "$gen" ] || fail "drain omitted WAKE_ACK_REQUIRED"
+
+  PATH="$fakebin:$PATH" FM_DATA_OVERRIDE="$dir/data" FM_STATE_OVERRIDE="$state" "$DRAIN" \
+    --ack-through "$seq" --recovery-generation "$gen" >/dev/null 2>&1 \
+    || fail "acknowledging release wake failed"
+  [ ! -s "$state/.wake-queue" ] || fail "release wake was not consumed"
+  pass "release check wake and ready count are presented together and consumed"
+}
+
 test_buried_decision_still_surfaces
 test_over_long_decision_note_is_capped_with_a_marker
 test_explicit_resolution_closes_it
@@ -224,3 +399,9 @@ test_no_open_decisions_prints_nothing
 test_open_decision_surfaces_even_with_an_unrelated_queued_wake
 test_buried_decision_surfaces_on_the_empty_queue_fast_path
 test_status_symlink_is_not_followed
+test_wake_drain_prints_measured_ready_count
+test_wake_drain_prints_ready_count_zero
+test_wake_drain_ready_count_fails_soft_when_unavailable
+test_wake_drain_ready_count_fails_soft_on_timeout
+test_wake_drain_release_wake_and_ready_count
+test_ready_count_survives_presentation_lock_contention

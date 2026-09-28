@@ -74,7 +74,8 @@ test_newer_task_outcome_and_routine_latest_events_stay_silent() {
   if grep -F 'STATUS OUTCOME BACKSTOP (' "$out" >/dev/null; then
     fail "a newer branch outcome or routine latest event was re-presented: $(cat "$out")"
   fi
-  [ ! -s "$out" ] || fail "covered and routine latest events broke the silent drain contract: $(cat "$out")"
+  extra=$(sed -E '/^ready=([0-9]+|unknown)$/d' "$out")
+  [ -z "$extra" ] || fail "covered and routine latest events broke the silent drain contract: $extra"
   pass "a newer task-matching branch outcome suppresses the backstop and routine latest events stay silent"
 }
 
@@ -153,8 +154,9 @@ test_same_second_outcome_uses_status_causal_position() {
 
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$first_out" \
     || fail "main drain failed for same-second covered status"
-  [ ! -s "$first_out" ] \
-    || fail "a same-second handled status was re-presented: $(cat "$first_out")"
+  extra=$(sed -E '/^ready=([0-9]+|unknown)$/d' "$first_out")
+  [ -z "$extra" ] \
+    || fail "a same-second handled status was re-presented: $extra"
 
   printf 'failed: genuinely later same-second event\n' >> "$state/same-second.status"
   set_mtime "$epoch" "$state/same-second.status"
@@ -181,8 +183,9 @@ test_drain_does_not_scan_append_only_outcome_history() {
 
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
     || fail "main drain failed with large append-only outcome history"
-  [ ! -s "$out" ] \
-    || fail "drain consulted malformed lifetime history instead of the bounded task index: $(cat "$out")"
+  extra=$(sed -E '/^ready=([0-9]+|unknown)$/d' "$out")
+  [ -z "$extra" ] \
+    || fail "drain consulted malformed lifetime history instead of the bounded task index: $extra"
   pass "drain cost and suppression are independent of append-only outcome history"
 }
 
@@ -202,8 +205,9 @@ test_successful_backstop_is_idempotent_without_consuming_delayed_annotation() {
 
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$second_out" \
     || fail "second keyless backstop drain failed"
-  [ ! -s "$second_out" ] \
-    || fail "a successful backstop presentation repeated unchanged: $(cat "$second_out")"
+  extra=$(sed -E '/^ready=([0-9]+|unknown)$/d' "$second_out")
+  [ -z "$extra" ] \
+    || fail "a successful backstop presentation repeated unchanged: $extra"
 
   append_wake "$state" signal receipt-task.status 'signal: receipt-task.status' \
     || fail "could not publish the delayed signal"
@@ -215,7 +219,7 @@ test_successful_backstop_is_idempotent_without_consuming_delayed_annotation() {
 }
 
 test_output_failure_does_not_commit_the_backstop_receipt() {
-  local dir state fakebin out retry_out real_cat
+  local dir state fakebin out retry_out real_cat extra
   dir=$(make_case output-failure)
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -236,7 +240,8 @@ SH
 
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
     || fail "the top-level empty-queue drain changed its compatibility exit on an output failure"
-  [ ! -s "$out" ] || fail "the failed output consumer received unexpected bytes: $(cat "$out")"
+  extra=$(sed -E '/^ready=([0-9]+|unknown)$/d' "$out")
+  [ -z "$extra" ] || fail "the failed output consumer received unexpected bytes: $extra"
 
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$retry_out" \
     || fail "backstop retry failed after the output consumer recovered"
@@ -276,8 +281,9 @@ SH
     || fail "the uncommitted backstop did not retry after storage recovered: $(cat "$retry_out")"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$final_out" \
     || fail "post-recovery idempotence drain failed"
-  [ ! -s "$final_out" ] \
-    || fail "the successfully committed retry repeated: $(cat "$final_out")"
+  extra=$(sed -E '/^ready=([0-9]+|unknown)$/d' "$final_out")
+  [ -z "$extra" ] \
+    || fail "the successfully committed retry repeated: $extra"
   pass "receipt failure may repeat a presented backstop but cannot lose it"
 }
 
@@ -298,8 +304,9 @@ test_rejected_decision_line_surfaces_once_through_backstop() {
   fi
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$second_out" \
     || fail "second rejected-decision drain failed"
-  [ ! -s "$second_out" ] \
-    || fail "rejected decision backstop repeated unchanged: $(cat "$second_out")"
+  extra=$(sed -E '/^ready=([0-9]+|unknown)$/d' "$second_out")
+  [ -z "$extra" ] \
+    || fail "rejected decision backstop repeated unchanged: $extra"
   pass "captain-facing decisions rejected by the fold surface once"
 }
 
@@ -318,8 +325,9 @@ test_missing_index_self_heals_on_first_drain() {
 
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
     || fail "first drain failed while self-healing a missing outcome index"
-  [ ! -s "$out" ] \
-    || fail "self-healed index re-presented a handled outcome: $(cat "$out")"
+  extra=$(sed -E '/^ready=([0-9]+|unknown)$/d' "$out")
+  [ -z "$extra" ] \
+    || fail "self-healed index re-presented a handled outcome: $extra"
   [ -f "$state/.branch-outcome-index-ready" ] \
     || fail "first drain did not publish the outcome-index ready marker"
   if grep -F 'Pi supervision' "$out" >/dev/null; then
@@ -475,8 +483,9 @@ test_overbound_routine_event_stays_silent() {
   perl -e 'print "working: ", "x" x 70000, "\n"' > "$state/oversized.status"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
     || fail "main drain failed for an over-bound routine event"
-  [ ! -s "$out" ] \
-    || fail "unclassifiable over-bound routine event was presented: $(cat "$out")"
+  extra=$(sed -E '/^ready=([0-9]+|unknown)$/d' "$out")
+  [ -z "$extra" ] \
+    || fail "unclassifiable over-bound routine event was presented: $extra"
   pass "an over-bound unclassifiable routine event stays silent"
 }
 

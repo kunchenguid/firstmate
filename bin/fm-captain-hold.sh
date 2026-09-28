@@ -963,9 +963,23 @@ apply_pending_retained_artifact() {  # <task-id>
   esac
 }
 
+# A release makes held work dispatchable again, which is an event the next
+# supervision turn must see: closing the transition enqueues one `check:` wake
+# through bin/fm-wake-lib.sh so a release wakes the fleet rather than waiting
+# for a poll to notice the count moved. The wake is best-effort: a release
+# that landed but could not append still released the work, so the enqueue
+# failure is reported on stderr without failing the close.
+captain_hold_release_wake() {  # <task-id>
+  local id=$1 summary
+  summary=$(printf 'captain hold released %s' "$id" | LC_ALL=C tr -d '\000-\037\177' | cut -c1-200)
+  fm_wake_append check "captain-hold-released:$id" "check: $summary" 2>/dev/null ||
+    printf 'fm-captain-hold: released %s but could not enqueue its wake\n' "$id" >&2
+}
+
 close_answered() {  # <task-id> <release-0-or-1>
   if [ "$2" = 1 ]; then
-    tasks_axi unhold "$1" >/dev/null
+    tasks_axi unhold "$1" >/dev/null || return 1
+    captain_hold_release_wake "$1"
   else
     apply_pending_retained_artifact "$1" || return 1
     tasks_axi "done" "$1" >/dev/null
