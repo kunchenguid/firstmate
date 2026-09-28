@@ -1,9 +1,11 @@
 #!/bin/sh
 # Deterministic TeamClaude stand-in for the test suite.
-# Prints the MITM environment, reports a flat 95% threshold, and accepts status.
-# FM_TEST_TEAMCLAUDE_THRESHOLD replaces the reported threshold text and never
-# changes. FM_TEST_TEAMCLAUDE_THRESHOLD_FILE holds a threshold that
-# `threshold <n>` rewrites. FM_TEST_TEAMCLAUDE_SET_RC fails `threshold <n>`.
+# Prints the MITM environment, reports unified5h at 80% and unified7d at 95%,
+# and accepts status.
+# FM_TEST_TEAMCLAUDE_THRESHOLD replaces the reported default threshold and
+# never changes. FM_TEST_TEAMCLAUDE_THRESHOLD_FILE holds default=<n>% and
+# <bucket>=<n>% lines that `threshold <n>` and `threshold <bucket>=<n>` rewrite
+# the way TeamClaude does. FM_TEST_TEAMCLAUDE_SET_RC fails every set.
 # FM_TEST_TEAMCLAUDE_STATUS_RC replaces the status exit code.
 # FM_TEST_TEAMCLAUDE_HOLD_MS adds the API_TIMEOUT_MS line a hold config emits.
 # FM_TEST_TEAMCLAUDE_STDERR is written to stderr by every command.
@@ -30,25 +32,37 @@ EOF
     exit "${FM_TEST_TEAMCLAUDE_STATUS_RC:-0}"
     ;;
   threshold)
+    state=${FM_TEST_TEAMCLAUDE_THRESHOLD_FILE:-}
     if [ -n "${1:-}" ]; then
       if [ "${FM_TEST_TEAMCLAUDE_SET_RC:-0}" != 0 ]; then
         printf 'teamclaude stub: cannot write the proxy config\n' >&2
         exit "$FM_TEST_TEAMCLAUDE_SET_RC"
       fi
-      [ -z "${FM_TEST_TEAMCLAUDE_THRESHOLD_FILE:-}" ] \
-        || printf '%s%%\n' "$1" > "$FM_TEST_TEAMCLAUDE_THRESHOLD_FILE"
-      printf 'Switch threshold set to %s%%.\n' "$1"
+      if [ -n "$state" ]; then
+        case "$1" in
+          *=*)
+            for pair in "$@"; do
+              grep -v "^${pair%%=*}=" "$state" > "$state.tmp" 2>/dev/null
+              [ "${pair#*=}" = default ] || printf '%s%%\n' "$pair" >> "$state.tmp"
+              mv "$state.tmp" "$state"
+            done
+            ;;
+          *) printf 'default=%s%%\n' "$1" > "$state" ;;
+        esac
+      fi
+      printf 'Switch thresholds updated.\n'
       exit 0
     fi
-    if [ -n "${FM_TEST_TEAMCLAUDE_THRESHOLD_FILE:-}" ] && [ -f "$FM_TEST_TEAMCLAUDE_THRESHOLD_FILE" ]; then
-      printf 'Switch threshold: %s\n' "$(cat "$FM_TEST_TEAMCLAUDE_THRESHOLD_FILE")"
+    if [ -n "$state" ] && [ -f "$state" ]; then
+      awk -F= '$1 == "default" { d = $2; next } { b[++n] = $1 ": " $2 }
+        END { print "Switch threshold: " d; for (i = 1; i <= n; i++) print "  " b[i] }' "$state"
       exit 0
     fi
     if [ -n "${FM_TEST_TEAMCLAUDE_THRESHOLD:-}" ]; then
       printf 'Switch threshold: %s\n' "$FM_TEST_TEAMCLAUDE_THRESHOLD"
       exit 0
     fi
-    printf 'Switch threshold: 95%%\n'
+    printf 'Switch threshold: 95%%\n  unified5h: 80%%\n'
     ;;
   *)
     printf 'teamclaude stub: unsupported command %s\n' "$cmd" >&2

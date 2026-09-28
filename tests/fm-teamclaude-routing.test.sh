@@ -54,7 +54,7 @@ case "$cmd" in
     exit 1
     ;;
   threshold)
-    printf 'Switch threshold: 95%%\n'
+    printf 'Switch threshold: 95%%\n  unified5h: 80%%\n'
     ;;
   *) exit 1 ;;
 esac
@@ -102,38 +102,48 @@ test_down_proxy_refuses_loudly() {
   pass "a down TeamClaude proxy refuses with the proxy diagnostic and no direct fallback"
 }
 
-test_threshold_at_95_starts_without_reapplying() {
-  local out status file
-  file="$TMP_ROOT/threshold-already"
-  printf '95%%\n' > "$file"
-  out=$(FM_TEST_TEAMCLAUDE_THRESHOLD_FILE="$file" FM_TEST_TEAMCLAUDE_SET_RC=1 \
-    "$ROOT_BIN" claude-env 2>"$TMP_ROOT/threshold-already.err") && status=0 || status=$?
-  expect_code 0 "$status" "a 95% threshold must start without touching TeamClaude's config: $(cat "$TMP_ROOT/threshold-already.err")"
-  assert_contains "$out" "HTTPS_PROXY=" "the launch fragment is produced at 95%"
-  pass "a threshold already at 95% starts the worker without reapplying it"
+threshold_report() {  # <state-file>
+  FM_TEST_TEAMCLAUDE_THRESHOLD_FILE="$1" "$STUB/teamclaude" threshold
 }
 
-test_threshold_below_95_is_applied_before_the_launch() {
-  local out status file
+test_thresholds_at_policy_start_without_reapplying() {
+  local out status file state
+  file="$TMP_ROOT/threshold-already"
+  for state in 'default=95%|unified5h=80%' 'default=80%|unified7d=95%'; do
+    printf '%s\n' "$state" | tr '|' '\n' > "$file"
+    out=$(FM_TEST_TEAMCLAUDE_THRESHOLD_FILE="$file" FM_TEST_TEAMCLAUDE_SET_RC=1 \
+      "$ROOT_BIN" claude-env 2>"$TMP_ROOT/threshold-already.err") && status=0 || status=$?
+    expect_code 0 "$status" "thresholds already at 5h 80% and 7d 95% ($state) must start without a set: $(cat "$TMP_ROOT/threshold-already.err")"
+    assert_contains "$out" "HTTPS_PROXY=" "the launch fragment is produced when the thresholds match"
+  done
+  pass "thresholds already at unified5h 80% and unified7d 95% start the worker without reapplying them"
+}
+
+test_thresholds_off_policy_are_set_per_bucket() {
+  local out status file state
   file="$TMP_ROOT/threshold-applied"
-  printf '80%%\n' > "$file"
-  out=$(FM_TEST_TEAMCLAUDE_THRESHOLD_FILE="$file" "$ROOT_BIN" claude-env 2>"$TMP_ROOT/threshold.err") && status=0 || status=$?
-  expect_code 0 "$status" "a threshold TeamClaude accepts as 95% must let the launch start: $(cat "$TMP_ROOT/threshold.err")"
-  assert_equals "95%" "$(cat "$file")" "the launch must apply TeamClaude's 95% threshold"
-  assert_contains "$out" "HTTPS_PROXY=" "the launch fragment is produced once the threshold is 95%"
-  pass "a threshold other than 95% is set to 95% and verified before the launch"
+  for state in 'default=80%' 'default=95%'; do
+    printf '%s\n' "$state" > "$file"
+    out=$(FM_TEST_TEAMCLAUDE_THRESHOLD_FILE="$file" "$ROOT_BIN" claude-env 2>"$TMP_ROOT/threshold.err") && status=0 || status=$?
+    expect_code 0 "$status" "thresholds TeamClaude accepts must let the launch start ($state): $(cat "$TMP_ROOT/threshold.err")"
+    assert_contains "$out" "HTTPS_PROXY=" "the launch fragment is produced once the thresholds match"
+    assert_equals "Switch threshold: ${state#default=}"$'\n'"  unified5h: 80%"$'\n'"  unified7d: 95%" \
+      "$(threshold_report "$file")" \
+      "the launch must set unified5h to 80% and unified7d to 95% and leave the default ($state) alone"
+  done
+  pass "thresholds off the policy are set per bucket to 5h 80% and 7d 95%, never flattened"
 }
 
 test_threshold_read_ignores_stderr_noise() {
   local out status file
   file="$TMP_ROOT/threshold-noisy"
-  printf '95%%\n' > "$file"
+  printf 'default=95%%\nunified5h=80%%\n' > "$file"
   out=$(FM_TEST_TEAMCLAUDE_THRESHOLD_FILE="$file" FM_TEST_TEAMCLAUDE_SET_RC=1 \
     FM_TEST_TEAMCLAUDE_STDERR='(node:1) DeprecationWarning: noisy runtime' \
     "$ROOT_BIN" claude-env 2>"$TMP_ROOT/threshold-noisy.err") && status=0 || status=$?
-  expect_code 0 "$status" "a 95% threshold with stderr noise must start: $(cat "$TMP_ROOT/threshold-noisy.err")"
-  assert_contains "$out" "HTTPS_PROXY=" "the launch fragment is produced at a real 95%"
-  pass "a runtime warning on stderr does not hide a real 95% threshold"
+  expect_code 0 "$status" "matching thresholds with stderr noise must start: $(cat "$TMP_ROOT/threshold-noisy.err")"
+  assert_contains "$out" "HTTPS_PROXY=" "the launch fragment is produced when the thresholds match"
+  pass "a runtime warning on stderr does not hide matching thresholds"
 }
 
 test_claude_env_carries_the_hold_timeout() {
@@ -149,18 +159,19 @@ test_claude_env_carries_the_hold_timeout() {
   pass "claude-env passes TeamClaude's hold timeout to the Claude worker"
 }
 
-test_threshold_that_stays_off_95_refuses_loudly() {
+test_thresholds_that_stay_off_policy_refuse_loudly() {
   local out status
   out=$(FM_TEST_TEAMCLAUDE_THRESHOLD='80%' "$ROOT_BIN" claude-env 2>&1) && status=0 || status=$?
-  expect_code 1 "$status" "a threshold that does not become 95% must refuse"
-  assert_contains "$out" "still not a flat 95%" "the refusal must say the threshold could not be verified"
+  expect_code 1 "$status" "thresholds that do not reach the policy must refuse"
+  assert_contains "$out" "still unified5h=80% unified7d=80%" "the refusal must name the thresholds it read"
+  assert_contains "$out" "no direct fallback" "the refusal must say there is no direct fallback"
   assert_not_contains "$out" "HTTPS_PROXY=" "a refused launch must not produce the proxy fragment"
 
   out=$(FM_TEST_TEAMCLAUDE_THRESHOLD='80%' FM_TEST_TEAMCLAUDE_SET_RC=1 "$ROOT_BIN" claude-env 2>&1) && status=0 || status=$?
-  expect_code 1 "$status" "a threshold that cannot be applied must refuse"
-  assert_contains "$out" "teamclaude threshold 95\` failed" "the refusal must say applying the threshold failed"
+  expect_code 1 "$status" "thresholds that cannot be applied must refuse"
+  assert_contains "$out" "teamclaude threshold unified5h=80 unified7d=95\` failed" "the refusal must say applying the thresholds failed"
   assert_contains "$out" "cannot write the proxy config" "the refusal must keep TeamClaude's diagnostic"
-  pass "a threshold that cannot be applied or verified at 95% refuses the worker"
+  pass "thresholds that cannot be applied or verified refuse the worker"
 }
 
 test_codex_shim_resolves_to_the_real_binary() {
@@ -321,11 +332,11 @@ test_spawn_opencode_is_unchanged() {
 test_claude_env_is_mitm_without_a_direct_fallback
 test_missing_cli_refuses_loudly
 test_down_proxy_refuses_loudly
-test_threshold_at_95_starts_without_reapplying
-test_threshold_below_95_is_applied_before_the_launch
+test_thresholds_at_policy_start_without_reapplying
+test_thresholds_off_policy_are_set_per_bucket
 test_threshold_read_ignores_stderr_noise
 test_claude_env_carries_the_hold_timeout
-test_threshold_that_stays_off_95_refuses_loudly
+test_thresholds_that_stay_off_policy_refuse_loudly
 test_codex_shim_resolves_to_the_real_binary
 test_codex_config_points_at_the_proxy_without_a_second_rotator
 test_spawn_claude_carries_the_proxy_and_clears_a_direct_base_url

@@ -25,10 +25,13 @@
 # ag-awb).
 #
 # Rotation stays TeamClaude's. This script does not pick accounts. Every
-# routed launch requires `teamclaude threshold` to report a flat 95%. When it
-# does not, the launch runs `teamclaude threshold 95` (TeamClaude writes its
-# config and notifies the running proxy), reads the threshold again, and
-# refuses the worker when it still is not a flat 95%.
+# routed launch requires `teamclaude threshold` to report an effective
+# unified5h threshold of 80% and unified7d threshold of 95% (a bucket without
+# its own line uses the "Switch threshold" default). When either differs, the
+# launch runs `teamclaude threshold unified5h=80 unified7d=95` (TeamClaude
+# writes its config and notifies the running proxy), reads the thresholds
+# again, and refuses the worker when they still differ. It never sets one
+# flat number, which would drop the 5-hour bucket.
 #
 # omp is not this contract: its worker overlay does not rewrite provider
 # endpoints. The Herdr primary is started by Herdr's own agent command, not
@@ -125,8 +128,8 @@ EOF
   _FM_TC_READY=1
 }
 
-fm_teamclaude_threshold_is_95() {
-  local report extra errfile
+fm_teamclaude_threshold_ok() {
+  local report errfile
   errfile=$(mktemp "${TMPDIR:-/tmp}/fm-teamclaude.XXXXXX") || return 2
   if ! report=$(teamclaude threshold 2>"$errfile"); then
     fm_teamclaude_die "could not read TeamClaude's rotation threshold. Refusing to start this worker. There is no direct fallback." || true
@@ -135,23 +138,30 @@ fm_teamclaude_threshold_is_95() {
     return 2
   fi
   rm -f "$errfile"
-  _FM_TC_THRESHOLD=${report%%$'\n'*}
-  extra=$(printf '%s\n' "$report" | awk 'NR > 1 && $0 ~ /^  / { found = 1 } END { if (found) print "yes" }')
-  [ "$_FM_TC_THRESHOLD" = "Switch threshold: 95%" ] && [ -z "$extra" ]
+  _FM_TC_THRESHOLD=$(printf '%s\n' "$report" | awk '
+    /^Switch threshold: / { base = $3 }
+    /^  unified5h: / { h5 = $2 }
+    /^  unified7d: / { d7 = $2 }
+    END {
+      if (h5 == "") h5 = base
+      if (d7 == "") d7 = base
+      print "unified5h=" h5 " unified7d=" d7
+    }')
+  [ "$_FM_TC_THRESHOLD" = "unified5h=80% unified7d=95%" ]
 }
 
 fm_teamclaude_enforce_threshold() {
   local out rc
-  fm_teamclaude_threshold_is_95 && return 0 || rc=$?
+  fm_teamclaude_threshold_ok && return 0 || rc=$?
   [ "$rc" = 1 ] || return 1
-  if ! out=$(teamclaude threshold 95 2>&1); then
-    fm_teamclaude_die "TeamClaude's rotation threshold is not a flat 95% (${_FM_TC_THRESHOLD}) and \`teamclaude threshold 95\` failed. Refusing to start this worker. There is no direct fallback." || true
+  if ! out=$(teamclaude threshold unified5h=80 unified7d=95 2>&1); then
+    fm_teamclaude_die "TeamClaude's rotation thresholds are ${_FM_TC_THRESHOLD}, not unified5h=80% unified7d=95%, and \`teamclaude threshold unified5h=80 unified7d=95\` failed. Refusing to start this worker. There is no direct fallback." || true
     printf '%s\n' "$out" | sed 's/^/error: /' >&2
     return 1
   fi
-  fm_teamclaude_threshold_is_95 && return 0 || rc=$?
+  fm_teamclaude_threshold_ok && return 0 || rc=$?
   [ "$rc" = 1 ] || return 1
-  fm_teamclaude_die "TeamClaude's rotation threshold is still not a flat 95% after \`teamclaude threshold 95\` (${_FM_TC_THRESHOLD}). Refusing to start this worker. There is no direct fallback."
+  fm_teamclaude_die "TeamClaude's rotation thresholds are still ${_FM_TC_THRESHOLD} after \`teamclaude threshold unified5h=80 unified7d=95\`, not unified5h=80% unified7d=95%. Refusing to start this worker. There is no direct fallback."
 }
 
 fm_teamclaude_claude_env() {

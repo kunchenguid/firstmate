@@ -991,7 +991,9 @@ opencodex is left running because OpenCode workers still use it, and OpenCode la
 Pi and pi-signed workers do not go through TeamClaude for now; bead `ag-awb` tracks adding them back.
 The rotation threshold stays TeamClaude's own `teamclaude threshold` command.
 Firstmate does not keep a second rotator.
-Before a routed launch starts, Firstmate requires a flat 95%: it runs `teamclaude threshold 95` when the threshold differs, reads it again, and refuses the worker when it still is not a flat 95%.
+Before a routed launch starts, Firstmate requires TeamClaude to rotate at 80% of the 5-hour bucket (`unified5h`) and 95% of the weekly bucket (`unified7d`).
+When either differs, it runs `teamclaude threshold unified5h=80 unified7d=95`, reads the thresholds again, and refuses the worker when they still differ.
+It never sets one flat number, which would drop the 5-hour bucket.
 The Herdr primary is started by Herdr's own agent command, not by `fm-spawn`, so this routing does not change it.
 omp's worker overlay does not rewrite provider endpoints, so omp stays on the captain's own provider config.
 Every spawn backend sends the same launch command, so the routing covers tmux, Herdr, Zellij, Orca, and cmux workers alike.
