@@ -20,9 +20,17 @@ TS_BASE = os.environ.get("FM_JEV_TS_BASE", "https://api.typesafe.ai")
 TS_MODEL = os.environ.get("FM_JEV_TS_MODEL", "jev-latest")
 TS_TIMEOUT = float(os.environ.get("FM_JEV_TS_TIMEOUT", "5.0"))
 
-LOCAL_RE = re.compile(
-    r"^- ([A-Za-z0-9._-]+) - (.+?) \((?:host: [^;]+; root: [^;]+; )?home: [^;]+; scope: (.*?); projects: [^;]*; added \d{4}-\d{2}-\d{2}\)",
-    re.MULTILINE,
+# Mirrors secondmate_registry_parse_line in bin/fm-secondmate-registry-lib.sh.
+_SUFFIX = (
+    r"home:\s*([^;)]*);\s*scope:\s*(.*);\s*projects:\s*([^;)]*);\s*added\s+\d{4}-\d{2}-\d{2}\)\s*$"
+)
+LOCAL_RE = re.compile(r"^- ([A-Za-z0-9._-]+) - (.+) \(" + _SUFFIX)
+REMOTE_RE = re.compile(r"^- ([A-Za-z0-9._-]+) - (.+) \(host:\s*([^;)]*);\s*root:\s*([^;)]*);\s*" + _SUFFIX)
+
+CONTRACT_PREAMBLE = (
+    "[fm-from-firstmate] Routed intake task. It has no contract yet: before any work starts, "
+    "settle what to build or learn, how it ships, and how much autonomy the worker has "
+    "through your normal intake, and ask me for any of those you cannot establish. Task:"
 )
 
 
@@ -91,21 +99,44 @@ def withhold(text: str, never_send: list[str]) -> str:
     return text
 
 
-def parse_registry(reg_path: Path) -> dict[str, str]:
-    if not reg_path.exists():
+def live_secondmate(state_dir: Path, sm_id: str) -> bool:
+    # fm-send.sh resolves a task id only through its state/<id>.meta record.
+    try:
+        meta = (state_dir / f"{sm_id}.meta").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return "kind=secondmate" in meta.splitlines()
+
+
+def parse_registry(reg_path: Path, state_dir: Path) -> dict[str, str]:
+    if not reg_path.is_file():
         return {}
-    content = reg_path.read_text(encoding="utf-8", errors="replace")
     criteria = {}
-    for sm_id, summary, scope in LOCAL_RE.findall(content):
-        criteria[sm_id] = " ".join(scope.split())
+    for line in reg_path.read_text(encoding="utf-8", errors="replace").splitlines():
+        m = LOCAL_RE.match(line)
+        if m:
+            sm_id, home, scope = m.group(1), m.group(3), m.group(4)
+        else:
+            m = REMOTE_RE.match(line)
+            if not m:
+                continue
+            sm_id, home, scope = m.group(1), m.group(5), m.group(6)
+        if home.strip() and scope.strip() and live_secondmate(state_dir, sm_id):
+            criteria[sm_id] = " ".join(scope.split())
+    if not criteria:
+        return {}
 
     criteria["new_domain"] = (
         "No existing second mate covers this domain; requires creating a new dedicated second mate."
     )
     criteria["captain_direct"] = (
-        "A personal note, direct conversation, question, or directive specifically for Jon / the Captain."
+        "A personal note, direct conversation, question, or directive specifically for the Captain."
     )
     return criteria
+
+
+def dispatch_message(task_text: str) -> str:
+    return CONTRACT_PREAMBLE + " " + " ".join(task_text.split())
 
 
 def emit_result(
@@ -129,6 +160,8 @@ def emit_result(
             "probabilities": probabilities or {},
             "reason": reason,
         }
+        if action == "dispatch":
+            payload["dispatch_message"] = dispatch_message(task_text)
         print(json.dumps(payload, indent=2))
         sys.exit(exit_code)
 
@@ -142,7 +175,7 @@ def emit_result(
         print(f"reason={reason}")
     if action == "dispatch" and fm_root is not None:
         home = fm_root.resolve()
-        message = "[fm-from-firstmate] " + " ".join(task_text.split())[:200]
+        message = dispatch_message(task_text)
         argv = [str(home / "bin" / "fm-send.sh"), route, message]
         print(f"dispatch_cmd=FM_HOME={shlex.quote(str(home))} {shlex.join(argv)}")
     sys.exit(exit_code)
@@ -158,6 +191,7 @@ def main() -> None:
 
     fm_root = Path(os.environ.get("FM_HOME") or Path(__file__).resolve().parent.parent)
     reg_path = args.registry or (fm_root / "data" / "secondmates.md")
+    state_dir = Path(os.environ.get("FM_STATE_OVERRIDE") or fm_root / "state")
     config_dir = Path(os.environ.get("FM_CONFIG_OVERRIDE") or fm_root / "config")
 
     task_text = ""
@@ -184,12 +218,12 @@ def main() -> None:
             as_json=args.json,
         )
 
-    criteria = parse_registry(reg_path)
+    criteria = parse_registry(reg_path, state_dir)
     if not criteria:
         emit_result(
             "unavailable",
             "captain_direct",
-            reason="secondmate registry empty or not found",
+            reason="no live secondmate in the registry",
             task_text=task_text,
             as_json=args.json,
         )
@@ -258,7 +292,7 @@ def main() -> None:
     try:
         answers = data.get("answers", {})
         route_ans = answers.get("route", {})
-        choice = route_ans.get("choice", "captain_direct")
+        choice = route_ans.get("choice")
         confidence = float(route_ans.get("confidence", 0.0))
         probs = route_ans.get("probabilities", {})
 

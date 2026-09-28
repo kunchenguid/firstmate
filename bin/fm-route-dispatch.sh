@@ -57,11 +57,11 @@ ACTION=$(echo "$ROUTER_JSON" | jq -r '.action')
 ROUTE=$(echo "$ROUTER_JSON" | jq -r '.route')
 CONF=$(echo "$ROUTER_JSON" | jq -r '.confidence // 0')
 NOUL=$(echo "$ROUTER_JSON" | jq -r '.needs_new_noul // 0')
-CLEAN_TASK=$(printf '%s' "$TASK_INPUT" | tr '\n' ' ' | head -c 300)
+MESSAGE=$(echo "$ROUTER_JSON" | jq -r '.dispatch_message // empty')
 
 if [ "$AS_JSON" -eq 1 ]; then
   if [ "$EXECUTE" -eq 1 ] && [ "$ACTION" = dispatch ]; then
-    "$SCRIPT_DIR/fm-send.sh" "$ROUTE" "[fm-from-firstmate] $CLEAN_TASK" >&2
+    "$SCRIPT_DIR/fm-send.sh" "$ROUTE" "$MESSAGE" >&2
   fi
   printf '%s\n' "$ROUTER_JSON"
   exit 0
@@ -86,10 +86,10 @@ case "$ACTION" in
     printf '  3. Dispatch task to new secondmate inbox.\n'
     ;;
   dispatch)
-    SEND_CMD=$(printf 'FM_HOME=%q %q %q %q' "$(cd "$FM_HOME" && pwd)" "$SCRIPT_DIR/fm-send.sh" "$ROUTE" "[fm-from-firstmate] $CLEAN_TASK")
+    SEND_CMD=$(printf 'FM_HOME=%q %q %q %q' "$(cd "$FM_HOME" && pwd)" "$SCRIPT_DIR/fm-send.sh" "$ROUTE" "$MESSAGE")
     if [ "$EXECUTE" -eq 1 ]; then
       printf 'Executing dispatch to second mate: %s ...\n' "$ROUTE"
-      "$SCRIPT_DIR/fm-send.sh" "$ROUTE" "[fm-from-firstmate] $CLEAN_TASK"
+      "$SCRIPT_DIR/fm-send.sh" "$ROUTE" "$MESSAGE"
       printf 'Dispatched successfully to %s.\n' "$ROUTE"
     else
       printf 'Recommended dispatch command:\n  %s\n' "$SEND_CMD"

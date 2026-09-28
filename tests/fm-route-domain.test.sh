@@ -13,7 +13,7 @@ TDIR=$(fm_test_tmproot fm-route-test)
 
 # A private copy of bin/ so fm-send.sh can be faked and FM_HOME defaults to it.
 FAKE="$TDIR/home"
-mkdir -p "$FAKE/bin" "$FAKE/data"
+mkdir -p "$FAKE/bin" "$FAKE/data" "$FAKE/state"
 cp -R "$ROOT/bin/." "$FAKE/bin/"
 # shellcheck disable=SC2016
 printf '#!/usr/bin/env bash\nprintf "%%s\\n" "FM_HOME=$FM_HOME" "$@" > %q\n' "$TDIR/argv" > "$FAKE/bin/fm-send.sh"
@@ -26,7 +26,13 @@ cat <<'EOF' > "$REG"
 - portal-ops - Clinical operations and EMR work: Portal implementation, UrgentIQ and DoseSpot, provider onboarding. (home: /tmp/p; scope: Arcs Portal clinical operations, UrgentIQ, DoseSpot; projects: portal; added 2026-07-29)
 - seller-outreach - Seller lead generation and outreach for urgent-care clinics. (home: /tmp/s; scope: All urgent-care seller lead generation, campaigns, Flow; projects: agents-flow; added 2026-07-29)
 - websites - Rebuild of arcs.health and jonroosevelt.com frontend. (host: box; root: /r; home: /tmp/w; scope: Frontend website rebuild, UI components, Next.js, Framer Motion; projects: website-covenant; added 2026-08-06)
+- spaced-ops - Accepted whitespace variation. (home:/tmp/sp;scope:  spaced scope;projects: sp;  added  2026-08-06)
+- retired-ops - Registered but with no live task record. (home: /tmp/r; scope: retired work; projects: r; added 2026-08-06)
 EOF
+# Only secondmates with a live state/<id>.meta record can receive fm-send.sh.
+for id in portal-ops seller-outreach websites spaced-ops long-ops zorbex-ops; do
+  printf 'kind=secondmate\n' > "$FAKE/state/$id.meta"
+done
 
 # Stub Jev: the answer is chosen from a keyword in the task so every mapping is deterministic.
 cat > "$TDIR/stub.py" <<'PY'
@@ -37,12 +43,14 @@ ANSWERS = [
     ("drone", "new_domain", 0.9),
     ("emr-overflow", "portal-ops", 0.8),
     ("bogus", "not-a-secondmate", 0.0),
+    ("retired", "retired-ops", 0.0),
 ]
 RAW = {
     "null-answers": {"answers": None},
     "not-an-object": [1],
     "null-confidence": {"answers": {"route": {"choice": "portal-ops", "confidence": None}}},
     "null-noul": {"answers": {"route": {"choice": "portal-ops"}, "needs_new_secondmate": {"noul": None}}},
+    "no-choice": {"answers": {"route": {"confidence": 0.9}}},
 }
 class H(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
@@ -107,7 +115,18 @@ assert_contains "$out" "route=seller-outreach" "known domain routes to seller-ou
 [ "$(requests)" -eq $((before + 1)) ] || fail "one request expected"
 [ "$(last_request | field auth)" = "Bearer test-dummy-key" ] || fail "environment key must be sent"
 crit=$(last_request | python3 -c 'import json,sys; print(",".join(sorted(json.load(sys.stdin)["body"]["questions"]["route"]["criteria"])))')
-[ "$crit" = "captain_direct,new_domain,portal-ops,seller-outreach,websites" ] || fail "registry parse sent wrong criteria: $crit"
+[ "$crit" = "captain_direct,new_domain,portal-ops,seller-outreach,spaced-ops,websites" ] || fail "registry parse sent wrong criteria: $crit"
+out=$("$ROUTER" --task "retired work")
+assert_contains "$out" "action=unavailable" "a registered secondmate with no live record is never a route"
+
+# An empty or missing registry is unavailable and nothing is sent.
+before=$(requests)
+out=$("$ROUTER" --registry "$TDIR/no-registry.md" --task "seller leads")
+assert_contains "$out" "action=unavailable" "missing registry emits unavailable"
+: > "$TDIR/empty.md"
+out=$("$ROUTER" --registry "$TDIR/empty.md" --task "seller leads")
+assert_contains "$out" "action=unavailable" "empty registry emits unavailable"
+[ "$(requests)" -eq "$before" ] || fail "no request may be made without a live secondmate"
 
 # 4. The home's .env is the fallback key source.
 printf 'TYPESAFE_API_KEY="env-file-key"\n' > "$FAKE/.env"
@@ -145,6 +164,8 @@ assert_contains "$out" "action=unavailable" "unknown route choice is unavailable
 json=$("$ROUTER" --json --task "Good morning")
 [ "$(printf '%s' "$json" | field action)" = handle_direct ] || fail "json action wrong: $json"
 
+PREAMBLE="[fm-from-firstmate] Routed intake task. It has no contract yet: before any work starts, settle what to build or learn, how it ships, and how much autonomy the worker has through your normal intake, and ask me for any of those you cannot establish. Task:"
+
 # 7. dispatch_cmd is shell-safe for hostile task text and names the home's fm-send.sh.
 # shellcheck disable=SC2016
 EVIL='seller $(touch pwned1) `touch pwned2` \ "q" '"'"'s'"'"
@@ -157,7 +178,7 @@ rm -f "$TDIR/argv"
 [ ! -e "$RUNDIR/pwned1" ] && [ ! -e "$RUNDIR/pwned2" ] || fail "dispatch_cmd executed task text"
 [ "$(sed -n 1p "$TDIR/argv")" = "FM_HOME=$FAKE" ] || fail "dispatch_cmd must set FM_HOME to the home"
 [ "$(sed -n 2p "$TDIR/argv")" = "seller-outreach" ] || fail "dispatch_cmd route wrong"
-[ "$(sed -n 3p "$TDIR/argv")" = "[fm-from-firstmate] $EVIL" ] || fail "dispatch_cmd message altered: $(sed -n 3p "$TDIR/argv")"
+[ "$(sed -n 3p "$TDIR/argv")" = "$PREAMBLE $EVIL" ] || fail "dispatch_cmd message altered: $(sed -n 3p "$TDIR/argv")"
 
 # 8. Never-send values are withheld from every request field, including overlapping entries.
 CFG="$TDIR/config"; mkdir -p "$CFG"
@@ -197,7 +218,7 @@ assert_contains "$out" "action=unavailable" "unreadable never-send list fails cl
 [ "$(requests)" -eq "$before" ] || fail "nothing may be sent when the never-send list is unreadable"
 
 # 9. Malformed 200 responses are unavailable, not a crash.
-for word in null-answers not-an-object null-confidence null-noul; do
+for word in null-answers not-an-object null-confidence null-noul no-choice; do
   out=$("$ROUTER" --task "$word reply") || fail "$word response must not crash the router"
   assert_contains "$out" "action=unavailable" "$word response emits unavailable"
 done
@@ -222,7 +243,7 @@ cmd=$(printf '%s\n' "$out" | sed -n '/^Recommended dispatch command:/{n;s/^  //p
 rm -f "$TDIR/argv"
 (cd "$RUNDIR" && bash -c "$cmd")
 [ ! -e "$RUNDIR/pwned1" ] && [ ! -e "$RUNDIR/pwned2" ] || fail "dispatcher command executed task text"
-[ "$(sed -n 3p "$TDIR/argv")" = "[fm-from-firstmate] $EVIL" ] || fail "dispatcher command message altered"
+[ "$(sed -n 3p "$TDIR/argv")" = "$PREAMBLE $EVIL" ] || fail "dispatcher command message altered"
 
 rm -f "$TDIR/argv"
 "$DISPATCH" --task "seller leads" --execute >/dev/null
@@ -233,5 +254,12 @@ rm -f "$TDIR/argv"
 json=$("$DISPATCH" --task "seller leads" --json --execute 2>/dev/null)
 [ "$(printf '%s' "$json" | field action)" = dispatch ] || fail "--json --execute must emit json: $json"
 [ -e "$TDIR/argv" ] || fail "--json --execute must still dispatch"
+
+# A long brief reaches the second mate whole, under the contract preamble.
+BRIEF="$TDIR/brief.md"
+{ printf 'seller leads\n'; printf 'filler %.0s' $(seq 100); printf '\nFINAL-REQUIREMENT keep\n'; } > "$BRIEF"
+rm -f "$TDIR/argv"
+"$DISPATCH" --brief "$BRIEF" --execute >/dev/null
+[ "$(sed -n 3p "$TDIR/argv")" = "$PREAMBLE $(tr -s '\n' ' ' < "$BRIEF" | sed 's/ $//')" ] || fail "--execute must send the whole brief: $(sed -n 3p "$TDIR/argv")"
 
 pass "all fm-route-domain tests passed"
