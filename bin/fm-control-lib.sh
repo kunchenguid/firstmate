@@ -135,10 +135,11 @@ fm_control_harnesses() {
 }
 
 fm_control_harness_supported() {  # <harness>
-  local harness
+  local harness supported_harnesses
+  supported_harnesses=$(fm_control_harnesses)
   while read -r harness; do
     [ "$harness" = "${1-}" ] && return 0
-  done < <(fm_control_harnesses)
+  done <<< "$supported_harnesses"
   return 1
 }
 

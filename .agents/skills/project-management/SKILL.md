@@ -59,16 +59,30 @@ Clone into `projects/<name>` and add the registry entry only after the destinati
 A `no-mistakes` or `no-mistakes-prod-only` project must have an `origin` remote and must complete the initialization procedure below, because a conditional policy's product-facing work runs the pipeline while its internal-only work still takes the direct PR.
 A `direct-PR` project needs an `origin` remote but skips no-mistakes initialization.
 A `local-only` project may have no remote and skips no-mistakes initialization.
+After the clone and registry entry both succeed, follow the automatic Paseo registration step below before initialization.
 
 ## Create a project
 
 Creating a GitHub repository is outward-facing.
 Before making that remote change, propose the repository name, owner or organization, visibility, and delivery posture, defaulting visibility to private and the posture to `no-mistakes-prod-only`, then obtain the captain's explicit consent for those exact values; a stated default never replaces that consent.
 Use `gh-axi` for the approved GitHub operation and consult its current help rather than relying on remembered flags.
-After remote creation succeeds, clone it locally, add the registry entry, and initialize it according to its delivery posture.
+After remote creation succeeds, clone it locally and add the registry entry, then follow the automatic Paseo registration step below before initializing it according to its delivery posture.
 
 For a purely `local-only` project, create a local Git repository under its unused `projects/<name>` path, add the registry entry, and make no GitHub call.
 The captain's request to create that local project authorizes this local initialization, but it does not authorize an unmentioned remote repository.
+After the new checkout and registry entry both succeed, follow the automatic Paseo registration step below.
+
+## Automatic Paseo registration
+
+After any Firstmate project add or create leaves both its checkout and registry entry in place, run `bin/fm-paseo-project.sh --if-selected <name>`.
+It resolves the runtime backend for new tasks using the contract in [`docs/configuration.md`](../../../docs/configuration.md), and skips cleanly unless that backend is Paseo.
+If registration fails, report the failure; the checkout and registry entry remain in place as described in [`docs/paseo-backend.md`](../../../docs/paseo-backend.md).
+
+## Register a project in Paseo on request
+
+When asked to create a Paseo project for an existing Firstmate project, run `bin/fm-paseo-project.sh <name>`.
+This explicit request works regardless of the selected runtime backend.
+See [`docs/paseo-backend.md`](../../../docs/paseo-backend.md) for the helper's project eligibility and path-matching contract.
 
 ## Initialize
 

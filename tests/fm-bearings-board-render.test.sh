@@ -46,6 +46,10 @@ case "${1-}" in
     ;;
   *)
     real=$(cd "$(dirname "$1")" && pwd -P)/$(basename "$1")
+    mkdir -p "$FM_HOME/.lavish-axi"
+    jq -n --arg file "$real" \
+      --arg url 'http://127.0.0.1:47321/session/0123456789abcdef' \
+      '{sessions:{render:{file:$file,url:$url}}}' > "$FM_HOME/.lavish-axi/state.json"
     printf '%s\n' "$real" > "$FM_HOME/lavish-open"
     printf 'session:\n  status: opened\n'
     ;;
@@ -67,6 +71,7 @@ render_board() {  # <home> <underway-json> <charted-json> [charted_more] [charte
     charted:$charted, charted_more:$more, charted_warning_more:$warning_more}' > "$data"
   PATH="$home/fakebin:$PATH" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    LAVISH_AXI_STATE_DIR="$home/.lavish-axi" \
     FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
     "$BOARD" build "$data" >/dev/null || fail "the board did not build"
   node "$HARNESS" "$home/.lavish/bearings-board.html" \

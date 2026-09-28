@@ -83,8 +83,12 @@ fm_backend_paseo_workspace_text_id() { # <cli-output>
     -e 's/.*Using workspace \([^[:space:]]*\).*/\1/p' | tail -n 1
 }
 
-fm_backend_paseo_project_for_source() { # <source-clone>
-  local source=$1 source_path listing row project_id project_name project_path project_path_real matches=0 selected_id='' selected_name=''
+fm_backend_paseo_project_for_source() { # <source-clone> [--allow-missing]
+  local source=$1 allow_missing=${2:-} source_path listing row project_id project_name project_path project_path_real matches=0 selected_id='' selected_name=''
+  if [ "$#" -gt 2 ] || { [ -n "$allow_missing" ] && [ "$allow_missing" != --allow-missing ]; }; then
+    echo "error: invalid Paseo project lookup option" >&2
+    return 1
+  fi
   source_path=$(fm_backend_paseo_canonical_directory "$source") || {
     printf 'error: cannot resolve Paseo source directory %s\n' "$source" >&2
     return 1
@@ -99,7 +103,9 @@ fm_backend_paseo_project_for_source() { # <source-clone>
     printf '%s\n' "$listing" >&2
     return 1
   fi
-  while IFS=$'\t' read -r project_id project_name project_path; do
+  while IFS= read -r -d '' project_id &&
+        IFS= read -r -d '' project_name &&
+        IFS= read -r -d '' project_path; do
     [ -n "$project_id" ] && [ -n "$project_name" ] && [ -n "$project_path" ] || continue
     project_path_real=$(fm_backend_paseo_canonical_directory "$project_path" 2>/dev/null) || continue
     if [ "$project_path_real" = "$source_path" ]; then
@@ -107,9 +113,10 @@ fm_backend_paseo_project_for_source() { # <source-clone>
       selected_id=$project_id
       selected_name=$project_name
     fi
-  done < <(printf '%s\n' "$listing" | jq -r '.[] | [(.projectId // .id // ""), (.name // ""), (.path // "")] | @tsv' 2>/dev/null)
+  done < <(printf '%s\n' "$listing" | jq -j '.[] | ((.projectId // .id // "") | tostring), "\u0000", ((.name // "") | tostring), "\u0000", ((.path // "") | tostring), "\u0000"' 2>/dev/null)
   if [ "$matches" -ne 1 ]; then
     if [ "$matches" -eq 0 ]; then
+      [ "$allow_missing" = --allow-missing ] && return 2
       printf 'error: no registered Paseo project matches source path %s; refusing to create a project\n' "$source_path" >&2
     else
       printf 'error: %s Paseo projects match source path %s; refusing ambiguous project reuse\n' "$matches" "$source_path" >&2
