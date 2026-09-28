@@ -664,6 +664,10 @@ class Task:
             old_grant = prior.get('delegation')
             if old_grant and not old_grant['revoked']:
                 require(all(candidate.get(k) == prior.get(k) for k in ('goal_revision', 'brief_sha256', 'execution_generation')), 'revoke delegation before changing intent')
+                if grant != old_grant:
+                    require(grant and grant['revoked'] and all(
+                        grant.get(k) == old_grant.get(k) for k in old_grant if k not in ('revision', 'revoked')),
+                        'revoke the existing delegation before issuing a replacement')
             if grant != old_grant:
                 require(grant and grant['revision'] == (old_grant['revision'] + 1 if old_grant else 1), 'delegation revision must advance once')
                 require(candidate.get('precheck') is None, 'new delegation invalidates precheck')

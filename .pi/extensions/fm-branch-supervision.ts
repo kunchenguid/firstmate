@@ -1362,7 +1362,9 @@ export default function (pi: ExtensionAPI) {
           if (binding) {
             const current = await runCommandAsync("bash", [join(fmRoot, "bin/fm-task-state.sh"), "lifecycle", task], { env: scriptEnv });
             const record = current.status === 0 ? JSON.parse(current.stdout) : null;
-            if (!record || JSON.stringify(taskBinding(record)) !== JSON.stringify(binding) || record.delegation?.revoked) {
+            const expiresAt = Date.parse(record?.delegation?.expires_at || "");
+            if (!record || JSON.stringify(taskBinding(record)) !== JSON.stringify(binding) || record.delegation?.revoked ||
+                !Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
               return { content: [{ type: "text", text: "report refused: newer task intent invalidated this branch result" }], details: undefined, isError: true };
             }
           }

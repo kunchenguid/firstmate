@@ -5788,6 +5788,7 @@ const routineFailed = await report.execute("routine-mark-read-fails", { task: "b
 if (!routineFailed.isError || !routineFailed.content[0].text.includes("visible delivery or cursor advancement failed")) {
   throw new Error(`a failed routine cursor advance did not surface as an error: ${JSON.stringify(routineFailed)}`);
 }
+
 if (routineCopies(routineSummary) !== 1) {
   throw new Error(`the routine note was not delivered exactly once before the cursor failure: ${routineCopies(routineSummary)}`);
 }
@@ -5845,6 +5846,82 @@ EOF
   out=$(cat "$TMP_ROOT/node-output")
   expect_code 0 "$status" "a failed cursor write must keep the routine re-delivery shape and the captain deduplication: $out"
   pass "a failed cursor write re-delivers a routine note exactly once more while a captain outcome stays deduplicated"
+}
+
+test_expired_delegation_refuses_bound_branch_report() {
+  local repo home out status
+  repo="$TMP_ROOT/expired-delegation-report-root"
+  home="$TMP_ROOT/expired-delegation-report-home"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+await eval(`(async () => { ${process.env.DRIVER_PRELUDE}; globalThis.__t = { fire, dispatch, outcomeScript, defaultSessionCtx, home, realRoot }; })()`);
+const { fire, dispatch, outcomeScript, defaultSessionCtx, home, realRoot } = globalThis.__t;
+const { createHash } = await import("node:crypto");
+const { chmodSync, mkdirSync, readFileSync, writeFileSync } = await import("node:fs");
+const { spawnSync } = await import("node:child_process");
+const task = "branch-driver";
+const taskDir = `${home}/data/${task}`;
+mkdirSync(taskDir, { recursive: true });
+writeFileSync(`${taskDir}/brief.md`, "Continue the authorized task and report its result.\n");
+writeFileSync(`${home}/state/${task}.meta`, `project=${home}/projects/approved\nwindow=fm-branch-driver\nspawn_gen=g1\n`);
+const run = (args) => spawnSync(`${realRoot}/bin/fm-task-state.sh`, args, {
+  encoding: "utf8",
+  env: { ...process.env, FM_HOME: home, FM_STATE_OVERRIDE: `${home}/state`, FM_SUPERVISION_ACTOR: "main" },
+});
+let result = run(["enroll", task]);
+if (result.status !== 0) throw new Error(result.stderr);
+const lifecyclePath = `${taskDir}/lifecycle.json`;
+const record = JSON.parse(readFileSync(lifecyclePath, "utf8"));
+record.schema = "fm-task-lifecycle.v2";
+record.precheck = null;
+record.delegation = {
+  revision: 1,
+  issuer: "main",
+  authority_ref: `${taskDir}/brief.md`,
+  authority_sha256: createHash("sha256").update(readFileSync(`${taskDir}/brief.md`)).digest("hex"),
+  allowed: ["inspect", "precheck", "observe-receipt"],
+  edges: [],
+  expires_at: "2099-01-01T00:00:00Z",
+  revoked: false,
+};
+const proposal = `${home}/data/delegation-proposal.json`;
+writeFileSync(proposal, JSON.stringify(record));
+chmodSync(proposal, 0o600);
+result = run(["reconcile", task, "--expected-revision", String(record.revision), "--record", proposal]);
+if (result.status !== 0) throw new Error(result.stderr);
+
+await fire("session_start", {}, defaultSessionCtx);
+let reportResult;
+globalThis.__fmOnBranchPrompt = async ({ session }) => {
+  const report = session.options.customTools.find((tool) => tool.name === "fm_branch_report");
+  const actualNow = Date.now;
+  Date.now = () => Date.parse("2100-01-01T00:00:00Z");
+  try {
+    reportResult = await report.execute("expired-result", {
+      task,
+      verdict: "routine",
+      summary: "late delegated result",
+    }, undefined, undefined, {});
+  } finally {
+    Date.now = actualNow;
+  }
+};
+const offer = dispatch("signal: delegated task result");
+if (!offer.accepted) throw new Error("delegated wake was not accepted");
+await offer.settlement.then(() => null, () => null);
+if (!reportResult?.isError || !reportResult.content[0].text.includes("invalidated this branch result")) {
+  throw new Error(`expired delegation report was not refused: ${JSON.stringify(reportResult)}`);
+}
+if (outcomeScript(["list", "--recent", "50"]) !== "") {
+  throw new Error("expired delegation report reached the durable outcome store");
+}
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "an expired delegation must refuse its bound branch report: $out"
+  pass "expired delegation refuses a bound branch report before storage"
 }
 
 test_extension_registered_provider_resolves_in_the_branch() {
@@ -6451,6 +6528,7 @@ test_delivery_keeps_the_event_loop_live_and_ordered
 test_session_replacement_during_delivery_neither_loses_nor_duplicates
 test_store_failure_during_delivery_neither_loses_nor_duplicates
 test_mark_read_failure_keeps_routine_redelivery_and_captain_deduplication
+test_expired_delegation_refuses_bound_branch_report
 
 test_continuation_defers_reserved_admission_at_ui_boundary
 test_continuation_retries_definite_send_failure_and_isolates_stale_tasks

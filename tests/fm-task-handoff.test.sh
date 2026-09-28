@@ -418,9 +418,12 @@ call('fm-send.sh','source','--action-id',a['id'],'Fill the existing acceptance e
 call('fm-send.sh','source','--action-id',a['id'],'Fill the existing acceptance evidence.',actor='branch',extra={'FM_BRANCH_GENERATION':'old'},ok=False)
 call('fm-send.sh','source','--action-id',a['id'],'Fill the existing acceptance evidence.',actor='branch',extra={'FM_BRANCH_TASK_SCOPE':'["other"]'},ok=False)
 # Expiry is checked at the effect boundary, independently of model judgment.
-expired=copy.deepcopy(r);expired['delegation']['expires_at']='2020-01-01T00:00:00Z';expired['delegation']['revision']+=1;expired['precheck']=None;r=reconcile(expired)
+expired=copy.deepcopy(r);expired['delegation']['expires_at']='2020-01-01T00:00:00Z';expired['delegation']['revision']+=1;expired['precheck']=None;reconcile(expired,ok=False)
+revoked=copy.deepcopy(r);revoked['delegation']['revision']+=1;revoked['delegation']['revoked']=True;revoked['precheck']=None;r=reconcile(revoked)
+expired=copy.deepcopy(r);expired['delegation']['expires_at']='2020-01-01T00:00:00Z';expired['delegation']['revision']+=1;expired['delegation']['revoked']=False;r=reconcile(expired)
 call('fm-send.sh','source','--action-id',a['id'],'Fill the existing acceptance evidence.',actor='branch',ok=False)
-r['delegation']['expires_at']='2099-01-01T00:00:00Z';r['delegation']['revision']+=1;r=reconcile(r)
+revoked=copy.deepcopy(r);revoked['delegation']['revision']+=1;revoked['delegation']['revoked']=True;r=reconcile(revoked)
+r['delegation']['expires_at']='2099-01-01T00:00:00Z';r['delegation']['revision']+=1;r['delegation']['revoked']=False;r=reconcile(r)
 
 call('fm-send.sh','source','--action-id',a['id'],'Fill the existing acceptance evidence.',actor='branch',extra={'FM_BRANCH_INPUT_BARRIER':'1'},ok=False)
 session.write_text('{"type":"session","id":"s"}\n'+json.dumps(dict(type='custom',id='i1',parentId=None,customType='fm-continuation-input',data=dict(id='new',text='Change scope')))+'\n')
@@ -453,7 +456,7 @@ handled.write_bytes(actual)
 bad=copy.deepcopy(r);bad['goal_revision']+=1;reconcile(bad,ok=False)
 # Revoke preserves receipts/budgets and invalidates the old candidate.
 r['delegation']['revision']+=1;r['delegation']['revoked']=True;r['precheck']=None;r=reconcile(r)
-patch({'precheck':dict(check,delegation_revision=2)},ok=False)
+patch({'precheck':dict(check,delegation_revision=r['delegation']['revision']-1)},ok=False)
 # Explicit renewal and target generation binding for cross-task handoff.
 r['delegation']['revision']+=1;r['delegation']['revoked']=False;r=reconcile(r)
 a=new_action(r,'Deliver authorized prerequisite evidence.');r=patch({'next_action':a})
