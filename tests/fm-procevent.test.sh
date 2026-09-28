@@ -1330,6 +1330,12 @@ assert_absent "$HFREPLACED/state/procevent-inbox/$replaced_id.1.accepted" \
   "listener replacement retained stale acceptance uncertainty"
 [ "$(count_results "$HFREPLACED" "$replaced_id")" = 1 ] \
   || fail "listener replacement entered a control response into the feedback FIFO"
+replaced_raw_rc=0
+replaced_raw=$(PATH="$REPLACED_BIN:$PATH" FM_HOME="$HFREPLACED" \
+  "$ROOT/bin/fm-procevent-lavish.sh" poll "$REPLACED_ART") || replaced_raw_rc=$?
+[ "$replaced_raw_rc" -ne 0 ] || fail "displaced ordinary listener reported success"
+assert_contains "$replaced_raw" 'code: LISTENER_REPLACED' \
+  "displaced ordinary listener suppressed its Lavish response"
 pass "listener replacement acknowledges its persisted reply"
 
 HFLINGER="$TMP_ROOT/hflinger"; new_home "$HFLINGER"

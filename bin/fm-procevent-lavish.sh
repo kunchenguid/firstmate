@@ -377,7 +377,8 @@ poll_iteration_floor_wait() {
 cmd_poll() {
   local artifact=${1-} delay attempt=0 active_attempt=0 response status_file cleanup_command rc filter_rc iteration_started
   local pipeline_status pipeline_pid reply_file='' ready_fd=${FM_PROCEVENT_ADAPTER_READY_FD-}
-  local poll_owner=${FM_PROCEVENT_ADAPTER_OWNER-} reply_pending=0 acceptance_dir='' acceptance_signal='' node_options=''
+  local poll_owner=${FM_PROCEVENT_ADAPTER_OWNER-} reply_pending=0 reply_acceptance_path=0
+  local acceptance_dir='' acceptance_signal='' node_options=''
   [ -n "$artifact" ] || usage
   if [ "$#" -eq 3 ] && [ "${2-}" = --agent-reply-file ]; then
     reply_file=$3
@@ -428,6 +429,7 @@ JS
   done
   while :; do
     reply_pending=0
+    reply_acceptance_path=0
     iteration_started=$(poll_iteration_started) || die "cannot start the poll rate governor"
     [ -f "$artifact" ] && [ ! -L "$artifact" ] && [ -r "$artifact" ] \
       || die "artifact is no longer a readable file: $artifact"
@@ -450,6 +452,7 @@ JS
       exec 6> "$status_file" || die "cannot retain the poll status"
       rm -f -- "$acceptance_signal"
       if [ "$reply_pending" -eq 1 ]; then
+        reply_acceptance_path=1
         { HERDR_ENV=1 LAVISH_AXI_HERDR_CHIME=1 FM_LAVISH_ACCEPTED_SIGNAL="$acceptance_signal" \
             FM_PROCEVENT_ADAPTER_OWNER="$poll_owner" NODE_OPTIONS="$node_options" \
             lavish-axi poll "$artifact" --owner "$poll_owner" \
@@ -523,7 +526,10 @@ JS
         cat -- "$response"
         break
         ;;
-      12) break ;;
+      12)
+        [ "$reply_acceptance_path" -eq 1 ] || cat -- "$response"
+        break
+        ;;
       10)
         if [ "$reply_pending" -eq 1 ] && [ -n "$ready_fd" ]; then
           break
