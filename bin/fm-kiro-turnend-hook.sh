@@ -40,13 +40,13 @@
 #
 # Primary/secondmate registrations carry FM_KIRO_PRIMARY_HOOK=1:
 #   SessionStart      -> session-start digest into context, endpoint publication
-#   UserPromptSubmit  -> the drained wake queue while this session owns the home
-#                        lock; when the lock is free or its recorded pid is not a
-#                        live harness, the SessionStart path instead, because
-#                        Kiro fires SessionStart only for a conversation's first
-#                        prompt and a resumed primary would otherwise never
-#                        retake the lock
-#   Stop              -> the watcher re-arm backstop below
+#   UserPromptSubmit  -> endpoint ensure, then the drained wake queue while this
+#                        session owns the home lock; when the lock is free or its
+#                        recorded pid is not a live harness, the SessionStart
+#                        path instead, because Kiro fires SessionStart only for a
+#                        conversation's first prompt and a resumed primary would
+#                        otherwise never retake the lock
+#   Stop              -> endpoint ensure, then the watcher re-arm backstop below
 # Task-bound Stop hooks reach the same re-arm block after their task updates; it
 # acts only in primary scope for the lock-owning session. The re-arm forks into
 # its own session because bin/fm-watch-arm.sh waits for a whole watcher cycle
@@ -124,6 +124,21 @@ kiro_primary_session_open() {
   [ -z "$digest" ] || printf '%s\n' "$digest"
 }
 
+# Every-turn doorbell convergence for the lock-owning primary. Kiro fires
+# SessionStart only for a conversation's first prompt, so the hooks that run on
+# every turn keep the endpoint current (bin/fm-primary-endpoint-lib.sh owns the
+# ensure contract). Local and cheap: no network and no digest. <announce>=1
+# prints one context line only when this call (re)published, so the model learns
+# a doorbell the startup digest reported unavailable is now live; a current
+# record or a refusal stays silent.
+kiro_primary_endpoint_ensure() {  # <announce>
+  # shellcheck source=bin/fm-primary-endpoint-lib.sh
+  . "$SCRIPT_DIR/fm-primary-endpoint-lib.sh"
+  fm_primary_endpoint_ensure "$STATE" "$FM_ROOT" "$FM_HOME" || return 0
+  [ "$1" = 1 ] && [ "$FM_PRIMARY_ENDPOINT_ENSURED" = published ] || return 0
+  printf '%s\n' "KIRO_PRIMARY_ENDPOINT: structural wake doorbell published; the background watcher rings this pane for every actionable wake, so keep one cycle armed with bin/fm-watch-arm.sh and do not run foreground checkpoints."
+}
+
 # The tracked primary hook carries an explicit marker. A Firstmate worker
 # worktree inherits the tracked .kiro/hooks file from the repository, but the
 # shared primary-scope predicate makes that inherited invocation inert; its
@@ -154,6 +169,7 @@ if [ "${FM_KIRO_PRIMARY_HOOK:-0}" = 1 ]; then
         [ "$FM_LOCK_INSPECT_LIVE_HARNESS" != false ] || kiro_primary_session_open
         exit 0
       fi
+      kiro_primary_endpoint_ensure 1
       # The queue remains durable until the model runs the exact
       # WAKE_ACK_REQUIRED command this drain prints after handling its context.
       [ -s "$STATE/.wake-queue" ] || exit 0
@@ -297,8 +313,9 @@ fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 # shellcheck source=bin/fm-session-lock-lib.sh
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
 
-[ -e "$STATE/.afk" ] && exit 0
 fm_session_lock_owned_by_self "$STATE" || exit 0
+[ "${FM_KIRO_PRIMARY_HOOK:-0}" != 1 ] || kiro_primary_endpoint_ensure 0
+[ -e "$STATE/.afk" ] && exit 0
 fm_supervision_needed "$STATE" "$GRACE" || exit 0
 fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME" && exit 0
 

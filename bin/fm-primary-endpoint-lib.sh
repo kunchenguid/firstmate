@@ -4,10 +4,10 @@
 # A Kiro V3 primary cannot be continued from its Stop hook, so its background
 # watcher needs one structural way to start the next turn after it appends an
 # actionable row to the existing durable wake queue. This library records the
-# primary pane at SessionStart and rings one constant line after publication.
+# primary pane and rings one constant line after publication.
 # It creates no second queue, acknowledgement, retry ladder, or control plane.
 #
-# Record: state/.primary-endpoint, exactly seven lines:
+# Record: state/.primary-endpoint, exactly eight lines:
 #   schema=fm-primary-endpoint.v1
 #   harness=kiro-cli
 #   backend=tmux|herdr
@@ -17,7 +17,8 @@
 #   root=<absolute Firstmate code root>
 #   home=<absolute effective Firstmate home>
 #
-# Publication happens only after the SessionStart owner acquired the fleet lock.
+# Publication happens only for the session that holds the fleet lock: once at
+# SessionStart, then idempotently every turn through fm_primary_endpoint_ensure.
 # A ring revalidates the home, root, exact lock pid, process identity, outer
 # `kiro-cli` process name, backend target, and empty Kiro composer. Any stale,
 # malformed, moved, busy, pending, dead, or unsupported record is a quiet
@@ -71,68 +72,108 @@ fm_primary_endpoint_kiro_pid() {
   printf '%s' "$pid"
 }
 
-fm_primary_endpoint_publish() {  # <state-dir> <root> <home>
-  local state=$1 root=$2 home=$3 backend target pid lock_pid identity path tmp
+# Resolve what the record should say for this session right now, or fail with
+# FM_PRIMARY_ENDPOINT_ERROR. Sets the FM_PRIMARY_ENDPOINT_OBS_* globals. Local
+# and cheap: environment, one backend target probe, and the ancestry walk.
+FM_PRIMARY_ENDPOINT_OBS_STATE=
+FM_PRIMARY_ENDPOINT_OBS_ROOT=
+FM_PRIMARY_ENDPOINT_OBS_HOME=
+FM_PRIMARY_ENDPOINT_OBS_BACKEND=
+FM_PRIMARY_ENDPOINT_OBS_TARGET=
+FM_PRIMARY_ENDPOINT_OBS_PID=
+fm_primary_endpoint_observe() {  # <state-dir> <root> <home>
+  local state root home backend target pid lock_pid
   # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
   FM_PRIMARY_ENDPOINT_ERROR=
-  state=$(fm_primary_endpoint_abs_dir "$state")     || { fm_primary_endpoint_fail "state directory is absent, symlinked, or unresolved"; return 1; }
-  root=$(fm_primary_endpoint_abs_dir "$root")     || { fm_primary_endpoint_fail "Firstmate code root is absent, symlinked, or unresolved"; return 1; }
-  home=$(fm_primary_endpoint_abs_dir "$home")     || { fm_primary_endpoint_fail "effective Firstmate home is absent, symlinked, or unresolved"; return 1; }
-  backend=$(discover_supervisor_backend)     || { fm_primary_endpoint_fail "supervisor backend was not structurally discoverable"; return 1; }
-  target=$(discover_supervisor_target)     || { fm_primary_endpoint_fail "supervisor target was not structurally discoverable"; return 1; }
+  state=$(fm_primary_endpoint_abs_dir "$1") || { fm_primary_endpoint_fail "state directory is absent, symlinked, or unresolved"; return 1; }
+  root=$(fm_primary_endpoint_abs_dir "$2") || { fm_primary_endpoint_fail "Firstmate code root is absent, symlinked, or unresolved"; return 1; }
+  home=$(fm_primary_endpoint_abs_dir "$3") || { fm_primary_endpoint_fail "effective Firstmate home is absent, symlinked, or unresolved"; return 1; }
+  backend=$(discover_supervisor_backend) || { fm_primary_endpoint_fail "supervisor backend was not structurally discoverable"; return 1; }
+  target=$(discover_supervisor_target) || { fm_primary_endpoint_fail "supervisor target was not structurally discoverable"; return 1; }
   case "$backend" in
     tmux|herdr) ;;
     *) fm_primary_endpoint_fail "supervisor backend '$backend' is not supported by the Kiro doorbell"; return 1 ;;
   esac
   case "$target" in
-    ''|*$'
-'*|*$'
-'*|*[![:print:]]*)
+    ''|*$'\n'*|*$'\r'*|*[![:print:]]*)
       fm_primary_endpoint_fail "supervisor target is empty or contains unsafe bytes"
       return 1
       ;;
   esac
-  fm_backend_target_exists "$backend" "$target"     || { fm_primary_endpoint_fail "supervisor target '$target' is not readable on backend '$backend'"; return 1; }
-  pid=$(fm_primary_endpoint_kiro_pid)     || { fm_primary_endpoint_fail "outer Kiro session pid could not be resolved from hook ancestry"; return 1; }
+  fm_backend_target_exists "$backend" "$target" || { fm_primary_endpoint_fail "supervisor target '$target' is not readable on backend '$backend'"; return 1; }
+  pid=$(fm_primary_endpoint_kiro_pid) || { fm_primary_endpoint_fail "outer Kiro session pid could not be resolved from hook ancestry"; return 1; }
   lock_pid=$(cat "$state/.lock" 2>/dev/null || true)
   if [ "$lock_pid" != "$pid" ]; then
     fm_primary_endpoint_fail "fleet lock pid '${lock_pid:-absent}' does not match outer Kiro pid '$pid'"
     return 1
   fi
-  identity=$(fm_pid_identity "$pid")     || { fm_primary_endpoint_fail "outer Kiro pid identity could not be read"; return 1; }
+  FM_PRIMARY_ENDPOINT_OBS_STATE=$state
+  FM_PRIMARY_ENDPOINT_OBS_ROOT=$root
+  FM_PRIMARY_ENDPOINT_OBS_HOME=$home
+  FM_PRIMARY_ENDPOINT_OBS_BACKEND=$backend
+  FM_PRIMARY_ENDPOINT_OBS_TARGET=$target
+  FM_PRIMARY_ENDPOINT_OBS_PID=$pid
+}
+
+# Write the observed record atomically.
+fm_primary_endpoint_write_observed() {
+  local state=$FM_PRIMARY_ENDPOINT_OBS_STATE pid=$FM_PRIMARY_ENDPOINT_OBS_PID identity path tmp
+  identity=$(fm_pid_identity "$pid") || { fm_primary_endpoint_fail "outer Kiro pid identity could not be read"; return 1; }
   case "$identity" in
-    ''|*$'
-'*|*$'
-'*)
+    ''|*$'\n'*|*$'\r'*)
       fm_primary_endpoint_fail "outer Kiro pid identity is empty or multiline"
       return 1
       ;;
   esac
   path=$(fm_primary_endpoint_path "$state")
-  tmp=$(umask 077; mktemp "$state/.primary-endpoint.XXXXXXXXXXXX")     || { fm_primary_endpoint_fail "endpoint record temporary file could not be created"; return 1; }
+  tmp=$(umask 077; mktemp "$state/.primary-endpoint.XXXXXXXXXXXX") || { fm_primary_endpoint_fail "endpoint record temporary file could not be created"; return 1; }
   if ! {
-    printf 'schema=%s
-' "$FM_PRIMARY_ENDPOINT_SCHEMA"
-    printf 'harness=kiro-cli
-'
-    printf 'backend=%s
-' "$backend"
-    printf 'target=%s
-' "$target"
-    printf 'pid=%s
-' "$pid"
-    printf 'pid_identity=%s
-' "$identity"
-    printf 'root=%s
-' "$root"
-    printf 'home=%s
-' "$home"
+    printf 'schema=%s\n' "$FM_PRIMARY_ENDPOINT_SCHEMA"
+    printf 'harness=kiro-cli\n'
+    printf 'backend=%s\n' "$FM_PRIMARY_ENDPOINT_OBS_BACKEND"
+    printf 'target=%s\n' "$FM_PRIMARY_ENDPOINT_OBS_TARGET"
+    printf 'pid=%s\n' "$pid"
+    printf 'pid_identity=%s\n' "$identity"
+    printf 'root=%s\n' "$FM_PRIMARY_ENDPOINT_OBS_ROOT"
+    printf 'home=%s\n' "$FM_PRIMARY_ENDPOINT_OBS_HOME"
   } > "$tmp" || ! chmod 0600 "$tmp" || ! mv -f -- "$tmp" "$path"; then
     rm -f -- "$tmp" 2>/dev/null || true
     fm_primary_endpoint_fail "endpoint record could not be published atomically"
     return 1
   fi
   return 0
+}
+
+fm_primary_endpoint_publish() {  # <state-dir> <root> <home>
+  fm_primary_endpoint_observe "$1" "$2" "$3" || return 1
+  fm_primary_endpoint_write_observed
+}
+
+# fm_primary_endpoint_ensure: the per-turn owner. Kiro fires SessionStart only
+# for a conversation's first prompt, so a primary whose hooks arrived later, whose
+# pane moved, or whose outer pid changed would otherwise keep a missing or stale
+# doorbell for the rest of the session. The primary's UserPromptSubmit and Stop
+# hooks call this every turn. It converges on the record this session would
+# publish: a record that already loads and names this session's backend, target,
+# and pid is left untouched; anything else is republished. It refuses exactly
+# where publication refuses - above all when the fleet lock is not this
+# session's, so another session's record is never overwritten.
+# Sets FM_PRIMARY_ENDPOINT_ENSURED=current|published on success.
+FM_PRIMARY_ENDPOINT_ENSURED=
+fm_primary_endpoint_ensure() {  # <state-dir> <root> <home>
+  FM_PRIMARY_ENDPOINT_ENSURED=
+  fm_primary_endpoint_observe "$1" "$2" "$3" || return 1
+  if fm_primary_endpoint_load "$FM_PRIMARY_ENDPOINT_OBS_STATE" "$FM_PRIMARY_ENDPOINT_OBS_ROOT" "$FM_PRIMARY_ENDPOINT_OBS_HOME" \
+    && [ "$FM_PRIMARY_ENDPOINT_BACKEND" = "$FM_PRIMARY_ENDPOINT_OBS_BACKEND" ] \
+    && [ "$FM_PRIMARY_ENDPOINT_TARGET" = "$FM_PRIMARY_ENDPOINT_OBS_TARGET" ] \
+    && [ "$FM_PRIMARY_ENDPOINT_PID" = "$FM_PRIMARY_ENDPOINT_OBS_PID" ]; then
+    # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
+    FM_PRIMARY_ENDPOINT_ENSURED=current
+    return 0
+  fi
+  fm_primary_endpoint_write_observed || return 1
+  # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
+  FM_PRIMARY_ENDPOINT_ENSURED=published
 }
 
 fm_primary_endpoint_load() {  # <state-dir> <expected-root> <expected-home>
