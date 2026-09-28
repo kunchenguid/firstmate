@@ -296,11 +296,11 @@ fm_backend_paseo_workspace_ensure() { # <cwd>
   # An unreadable inventory refuses rather than reading as "none": Paseo
   # allows duplicate workspaces, so creating on a failed lookup would split
   # the project across two.
-  list=$(fm_backend_paseo_cli workspace ls --json 2>/dev/null) &&
-    printf '%s' "$list" | jq -e 'type == "array"' >/dev/null 2>&1 || {
+  if ! list=$(fm_backend_paseo_cli workspace ls --json 2>/dev/null) ||
+    ! printf '%s' "$list" | jq -e 'type == "array"' >/dev/null 2>&1; then
     echo "error: could not read the paseo workspace inventory; refusing to create a workspace for '$cwd'" >&2
     return 1
-  }
+  fi
   wsid=""
   if [ -n "${PASEO_WORKSPACE_ID:-}" ]; then
     wsid=$(printf '%s' "$list" |
