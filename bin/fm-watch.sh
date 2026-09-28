@@ -2982,7 +2982,7 @@ EOF
         # firstmate. Detection itself is unchanged from above.
         if [ "$kind" = secondmate ]; then
           case "$(pause_state_class "$w" "$task")" in
-            paused) handle_paused_stale "$w" "$task" "$h" ;;
+            paused) handle_paused_stale "$w" "$task" "$h" absorb-first-sight ;;
             *)      clear_pause_tracking "$key" ;;
           esac
         elif afk_present; then

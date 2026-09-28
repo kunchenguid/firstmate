@@ -4248,6 +4248,52 @@ test_secondmate_captain_held_resurfaces_in_normal_mode() {
   pass "a captain-held secondmate re-surfaces on the bounded normal-mode cadence"
 }
 
+# A secondmate's status signal is its first surface for a declared wait, so the
+# first stale sight of a fresh paused: or captain-held declaration stays quiet;
+# the same declaration still re-surfaces once the cadence elapses.
+test_secondmate_declared_wait_first_sight_is_absorbed() {
+  local spec name status_line crew_state expected dir state fakebin out capture_file statusf window key sig pid
+  for spec in \
+    'paused|paused: awaiting the upstream release|state: paused · source: status-log · awaiting the upstream release|awaiting external' \
+    'captain-held|captain-held [key=route]: tracked by task-decision-route|state: unknown · source: none · no current-state source available|awaiting the captain'
+  do
+    name=${spec%%|*}; spec=${spec#*|}
+    status_line=${spec%%|*}; spec=${spec#*|}
+    crew_state=${spec%%|*}; expected=${spec#*|}
+    dir=$(make_case "secondmate-first-sight-$name"); state="$dir/state"; fakebin="$dir/fakebin"
+    out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/mate.status"
+    window="test:fm-mate"
+    printf 'idle secondmate on a declared wait\n' > "$capture_file"
+    printf 'window=%s\nkind=secondmate\n' "$window" > "$state/mate.meta"
+    printf '%s\n' "$status_line" > "$statusf"
+    sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-mate_status"
+    key=$(printf '%s' "$window" | tr '.:/' '___')
+    printf '%s' "$(hash_text 'idle secondmate on a declared wait')" > "$state/.hash-$key"
+    printf '1\n' > "$state/.count-$key"
+
+    FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" FM_FAKE_CREW_STATE="$crew_state" \
+      watch_bg "$state" "$fakebin" "$out" env FM_PAUSE_RESURFACE_SECS=240
+    pid=$!
+    wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "[$name] secondmate first sight surfaced: $(cat "$out")"; }
+    wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "[$name] secondmate first sight surfaced: $(cat "$out")"; }
+    reap "$pid"
+    [ ! -s "$out" ] || fail "[$name] secondmate first sight printed a wake: $(cat "$out")"
+    [ ! -s "$state/.wake-queue" ] || fail "[$name] secondmate first sight queued a stale wake"
+    [ -e "$state/.paused-$key" ] || fail "[$name] secondmate first sight did not keep pause tracking"
+    ack_stopped_cycle "$state" || fail "[$name] could not acknowledge the quiet secondmate cycle"
+
+    set_mtime "$(( $(date +%s) - 500 ))" "$statusf"
+    sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-mate_status"
+    FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" FM_FAKE_CREW_STATE="$crew_state" \
+      watch_bg "$state" "$fakebin" "$out" env FM_PAUSE_RESURFACE_SECS=240
+    pid=$!
+    wait_for_exit "$pid" 100 || { reap "$pid"; fail "[$name] secondmate did not re-surface after the cadence"; }
+    grep -F "stale: $window" "$out" >/dev/null || fail "[$name] secondmate cadence recheck was not a stale wake"
+    grep -F "$expected" "$out" >/dev/null || fail "[$name] secondmate cadence recheck lost its reason: $(cat "$out")"
+  done
+  pass "a secondmate's fresh declared wait absorbs its first stale sight, then re-surfaces on the cadence"
+}
+
 test_secondmate_nonpaused_stale_remains_suppressed() {
   local dir state fakebin out capture_file statusf window key pane_hash sig pid
   dir=$(make_case secondmate-stale-suppressed); state="$dir/state"; fakebin="$dir/fakebin"
@@ -6642,6 +6688,7 @@ test_failed_wake_append_does_not_arm_the_captain_hold_throttle
 test_reheld_captain_call_starts_its_own_resurface_window
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_captain_held_resurfaces_in_normal_mode
+test_secondmate_declared_wait_first_sight_is_absorbed
 test_secondmate_nonpaused_stale_remains_suppressed
 test_secondmate_unpause_clears_pause_tracking
 test_nonterminal_stale_pause_transitions_reclassify_unchanged_hash
