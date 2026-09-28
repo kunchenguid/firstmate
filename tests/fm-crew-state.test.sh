@@ -2810,6 +2810,53 @@ SH
   pass "agent-free Pi quota pane does not trust stale busy or status evidence"
 }
 
+# A harness can exit after recording a terminal declaration, leaving only its
+# shell in the readable pane. Terminal outcomes remain current, while stale
+# working evidence is still rejected by the agent-free check below.
+test_no_run_terminal_status_survives_shell_only_endpoint() {
+  local kind verb d id out
+  for kind in ship scout; do
+    for verb in 'done' failed; do
+      reset_fakes
+      id="terminal-${kind}-${verb}"
+      d=$(new_case "$id")
+      make_repo_on_branch "$d/wt" "fm/$id"
+      make_fakebin "$d" >/dev/null
+      fm_write_meta "$d/state/$id.meta" \
+        "window=fm:fm-$id" "worktree=$d/wt" "kind=$kind" \
+        "mode=no-mistakes" "backend=tmux" "harness=pi"
+      printf '%s: harness exited after terminal outcome\n' "$verb" > \
+        "$d/state/$id.status"
+      cat > "$d/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  list-windows) printf 'fm-terminal-%s-%s\n' "${FM_FAKE_TERMINAL_KIND:-ship}" "${FM_FAKE_TERMINAL_VERB:-done}" ;;
+  display-message)
+    format=
+    for arg in "$@"; do format=$arg; done
+    case "$format" in
+      '#{pane_id}') printf '%%1\n' ;;
+      '#{pane_current_command}') printf 'zsh\n' ;;
+      '#{pane_tty}') printf '\n' ;;
+      *) printf '%%1\n' ;;
+    esac
+    ;;
+  capture-pane) printf 'terminal outcome\n> \n' ;;
+esac
+SH
+      chmod +x "$d/fakebin/tmux"
+      out=$(FM_FAKE_TERMINAL_KIND="$kind" FM_FAKE_TERMINAL_VERB="$verb" \
+        run_crew_state "$d" "$id")
+      assert_contains "$out" "state: $verb" \
+        "$kind $verb survives a shell-only endpoint"
+      assert_contains "$out" "source: status-log" \
+        "$kind $verb remains status-log sourced"
+    done
+  done
+  pass "terminal status survives a shell-only endpoint"
+}
+
 # (g) no run + idle pane -> the status-log verb, as-is
 test_no_run_idle_pane_uses_log() {
   reset_fakes
@@ -5644,6 +5691,7 @@ test_no_run_herdr_husk_dead_still_reads_gone
 test_no_run_herdr_idle_agent_status_outranked_by_record
 test_no_run_herdr_idle_agent_status_and_idle_record_stays_idle
 test_no_run_agent_free_pi_does_not_use_stale_state
+test_no_run_terminal_status_survives_shell_only_endpoint
 test_no_run_idle_pane_uses_log
 test_no_run_idle_pane_uses_keyed_log
 test_no_run_idle_pane_paused

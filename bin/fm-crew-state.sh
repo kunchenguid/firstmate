@@ -1311,8 +1311,21 @@ fi
 
 # A readable shell-only endpoint is an agent-free worker, not an idle worker.
 # Do this before accepting either a stale semantic busy record or the status log,
-# while leaving secondmate liveness to its routed status contract below.
+# while leaving secondmate liveness to its routed status contract below. A
+# terminal declaration is the exception: once the harness is positively gone,
+# preserve a valid ship/scout outcome instead of losing it to the death verdict.
 if [ "$KIND" != secondmate ] && crew_agent_gone; then
+  case "$LOG_VERB" in
+    "done")
+      if [ "$KIND" = ship ]; then
+        emit_ship_status_done
+      fi
+      emit "done" status-log "$(status_line_note "$LOG_LINE")"
+      ;;
+    failed)
+      emit failed status-log "$(status_line_note "$LOG_LINE")"
+      ;;
+  esac
   emit unknown none "backend target gone: $BACKEND_TARGET (agent gone, pane shell remains)"
 fi
 
