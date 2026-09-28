@@ -30,7 +30,7 @@ BUILTIN_ROUTES = ("new_domain", "captain_direct")
 # regexes here, so the two cannot drift apart as they already did once.
 REGISTRY_PARSE_SH = (
     'source "$1" || exit 1\n'
-    "while IFS= read -r line; do\n"
+    "while IFS= read -r line || [ -n \"$line\" ]; do\n"
     "  secondmate_registry_parse_line \"$line\" || continue\n"
     '  printf \'%s\\t%s\\t%s\\n\' '
     '"$SECONDMATE_REGISTRY_ID" "$SECONDMATE_REGISTRY_HOME" "$SECONDMATE_REGISTRY_SCOPE"\n'
@@ -156,8 +156,14 @@ def parse_registry(reg_path: Path, state_dir: Path) -> dict[str, str]:
     return criteria
 
 
-def dispatch_message(task_text: str) -> str:
-    return "[fm-from-firstmate] " + " ".join(task_text.split())
+def shell_word(value: str) -> str:
+    if not any(c < " " or c == "\x7f" for c in value):
+        return shlex.quote(value)
+    body = "".join(
+        f"\\x{ord(c):02x}" if c < " " or c == "\x7f" else "\\" + c if c in "\\'" else c
+        for c in value
+    )
+    return f"$'{body}'"
 
 
 def emit_result(
@@ -182,7 +188,7 @@ def emit_result(
             "reason": reason,
         }
         if action == "dispatch":
-            payload["dispatch_message"] = dispatch_message(task_text)
+            payload["dispatch_message"] = task_text
         print(json.dumps(payload, indent=2))
         sys.exit(exit_code)
 
@@ -196,9 +202,8 @@ def emit_result(
         print(f"reason={reason}")
     if action == "dispatch" and fm_root is not None:
         home = fm_root.resolve()
-        message = dispatch_message(task_text)
-        argv = [str(home / "bin" / "fm-send.sh"), route, message]
-        print(f"dispatch_cmd=FM_HOME={shlex.quote(str(home))} {shlex.join(argv)}")
+        argv = [str(home / "bin" / "fm-send.sh"), route, task_text]
+        print(f"dispatch_cmd=FM_HOME={shell_word(str(home))} {' '.join(map(shell_word, argv))}")
     sys.exit(exit_code)
 
 

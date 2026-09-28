@@ -169,10 +169,6 @@ assert_contains "$out" "action=unavailable" "unknown route choice is unavailable
 json=$("$ROUTER" --json --task "Good morning")
 [ "$(printf '%s' "$json" | field action)" = handle_direct ] || fail "json action wrong: $json"
 
-# The dispatched message carries only the from-firstmate marker; the router
-# states no contract of its own.
-PREAMBLE="[fm-from-firstmate]"
-
 # 7. dispatch_cmd is shell-safe for hostile task text and names the home's fm-send.sh.
 # shellcheck disable=SC2016
 EVIL='seller $(touch pwned1) `touch pwned2` \ "q" '"'"'s'"'"
@@ -185,7 +181,7 @@ rm -f "$TDIR/argv"
 [ ! -e "$RUNDIR/pwned1" ] && [ ! -e "$RUNDIR/pwned2" ] || fail "dispatch_cmd executed task text"
 [ "$(sed -n 1p "$TDIR/argv")" = "FM_HOME=$FAKE" ] || fail "dispatch_cmd must set FM_HOME to the home"
 [ "$(sed -n 2p "$TDIR/argv")" = "seller-outreach" ] || fail "dispatch_cmd route wrong"
-[ "$(sed -n 3p "$TDIR/argv")" = "$PREAMBLE $EVIL" ] || fail "dispatch_cmd message altered: $(sed -n 3p "$TDIR/argv")"
+[ "$(sed -n 3p "$TDIR/argv")" = "$EVIL" ] || fail "dispatch_cmd message altered: $(sed -n 3p "$TDIR/argv")"
 
 # 8. Never-send values are withheld from every request field, including overlapping entries.
 CFG="$TDIR/config"; mkdir -p "$CFG"
@@ -282,7 +278,7 @@ cmd=$(printf '%s\n' "$out" | sed -n '/^Recommended dispatch command:/{n;s/^  //p
 rm -f "$TDIR/argv"
 (cd "$RUNDIR" && bash -c "$cmd")
 [ ! -e "$RUNDIR/pwned1" ] && [ ! -e "$RUNDIR/pwned2" ] || fail "dispatcher command executed task text"
-[ "$(sed -n 3p "$TDIR/argv")" = "$PREAMBLE $EVIL" ] || fail "dispatcher command message altered"
+[ "$(sed -n 3p "$TDIR/argv")" = "$EVIL" ] || fail "dispatcher command message altered"
 
 rm -f "$TDIR/argv"
 "$DISPATCH" --task "seller leads" --execute >/dev/null
@@ -318,11 +314,55 @@ code=0; json=$("$DISPATCH" --brief "$HUGE" --json --execute 2>/dev/null) || code
 [ "$code" -eq 2 ] || fail "an oversized --json --execute message must exit 2, got $code"
 [ "$(printf '%s' "$json" | field dispatched)" = False ] || fail "an oversized message must be reported undispatched"
 
-# A long brief reaches the second mate whole, under the contract preamble.
+# A registry whose last entry has no trailing newline still offers that entry.
+REG_NONL="$TDIR/no-newline.md"
+head -n1 "$REG" > "$REG_NONL"
+sed -n 2p "$REG" | tr -d '\n' >> "$REG_NONL"
+"$ROUTER" --registry "$REG_NONL" --task "seller leads" >/dev/null
+crit=$(last_request | python3 -c 'import json,sys; print(",".join(sorted(json.load(sys.stdin)["body"]["questions"]["route"]["criteria"])))')
+[ "$crit" = "captain_direct,new_domain,portal-ops,seller-outreach" ] || fail "a final registry line without a newline must be parsed: $crit"
+
+# A multi-line brief reaches the real inbox byte-identical, while Jev sees one line.
 BRIEF="$TDIR/brief.md"
-{ printf 'seller leads\n'; printf 'filler %.0s' $(seq 100); printf '\nFINAL-REQUIREMENT keep\n'; } > "$BRIEF"
+cat > "$BRIEF" <<'EOF'
+seller leads for the spring campaign
+
+- call the Dallas clinics
+- email the Austin list
+
+```sh
+bin/fm-send.sh seller-outreach "done"
+```
+FINAL-REQUIREMENT keep
+EOF
+REAL="$TDIR/real-home"
+mkdir -p "$REAL/bin" "$REAL/data" "$REAL/state" "$TDIR/fakebin"
+cp -R "$ROOT/bin/." "$REAL/bin/"
+cp "$REG" "$REAL/data/secondmates.md"
+fm_write_secondmate_meta "$REAL/state/seller-outreach.meta" "$REAL" "sess:fm-seller-outreach"
+cat > "$TDIR/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  display-message)
+    for a in "$@"; do case "$a" in *cursor_y*) printf '1\n'; exit 0 ;; esac; done
+    printf 'fakepane\n' ;;
+  capture-pane) printf '╭────╮\n│    │\n╰────╯\n' ;;
+esac
+exit 0
+SH
+chmod +x "$TDIR/fakebin/tmux"
+PATH="$TDIR/fakebin:$PATH" FM_ROOT_OVERRIDE="$REAL" FM_HOME="$REAL" FM_SEND_SETTLE=0 \
+  "$REAL/bin/fm-route-dispatch.sh" --brief "$BRIEF" --execute >/dev/null 2>&1 || fail "real multi-line dispatch failed"
+body=$(bash -c '. "$1"; fm_task_inbox_body "$2"' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$REAL/state/seller-outreach.inbox/001.msg")
+[ "${body#*"$(head -n1 "$BRIEF")"}" != "$body" ] || fail "inbox record lost the brief: $body"
+[ "$(head -n1 "$BRIEF")${body#*"$(head -n1 "$BRIEF")"}" = "$(cat "$BRIEF")" ] || fail "inbox body must hold the brief byte-identical: $body"
+task=$(last_request | python3 -c 'import json,sys; print(json.load(sys.stdin)["body"]["state"]["task"])')
+[ "$task" = "$(tr -s '\n ' '  ' < "$BRIEF" | sed 's/ $//')" ] || fail "the Jev request must collapse the brief to one line: $task"
+
+# The text-mode dispatch command keeps a multi-line message on one runnable line.
+cmd=$("$ROUTER" --brief "$BRIEF" | sed -n 's/^dispatch_cmd=//p')
 rm -f "$TDIR/argv"
-"$DISPATCH" --brief "$BRIEF" --execute >/dev/null
-[ "$(sed -n 3p "$TDIR/argv")" = "$PREAMBLE $(tr -s '\n' ' ' < "$BRIEF" | sed 's/ $//')" ] || fail "--execute must send the whole brief: $(sed -n 3p "$TDIR/argv")"
+bash -c "$cmd"
+[ "$(tail -n +3 "$TDIR/argv")" = "$(cat "$BRIEF")" ] || fail "dispatch_cmd must carry the multi-line brief intact"
 
 pass "all fm-route-domain tests passed"
