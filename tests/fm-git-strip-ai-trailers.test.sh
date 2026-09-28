@@ -9,7 +9,7 @@ set -u
 
 # A fleet pane already carries GIT_CONFIG core.hooksPath. These cases set that
 # override themselves, so drop the inherited one before any git command.
-unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0
+unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 GIT_CONFIG_PARAMETERS
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -234,6 +234,62 @@ test_pane_hookspath_does_not_reroute_another_repository() {
   pass "a pane GIT_CONFIG hooksPath still chains the repository git is actually in"
 }
 
+write_refusing_pre_push() {  # <path> <marker>
+  cat >"$1" <<SH
+#!/usr/bin/env bash
+printf 'ran\n' >> "$2"
+exit 1
+SH
+  chmod 700 "$1"
+}
+
+# A publish guard installed as the repository's pre-push must run however the
+# pane's hooksPath reaches git: the pane export, git -c (GIT_CONFIG_PARAMETERS),
+# or a child process that inherits either one.
+test_repository_pre_push_runs_on_every_override_channel() {
+  local repo remote hooks marker label child_push
+  # shellcheck disable=SC2016 # the child shell expands its own positional args
+  child_push='git -C "$1" push -q origin "HEAD:refs/heads/$2"'
+  repo="$TMP_ROOT/guarded-push"
+  remote="$TMP_ROOT/guarded-remote.git"
+  make_repo "$repo"
+  git init -q --bare "$remote"
+  git -C "$repo" remote add origin "$remote"
+  marker="$TMP_ROOT/guarded-push.pre-push"
+  write_refusing_pre_push "$repo/.git/hooks/pre-push" "$marker"
+  hooks="$TMP_ROOT/hooks-guarded"
+  "$STRIP" install "$hooks" "$repo" || fail "install should succeed"
+  for label in env param env+param child-env child-param; do
+    rm -f "$marker"
+    case "$label" in
+    env) with_hooks_env "$hooks" git -C "$repo" push -q origin "HEAD:refs/heads/$label" 2>/dev/null ;;
+    param) git -C "$repo" -c core.hooksPath="$hooks" push -q origin "HEAD:refs/heads/$label" 2>/dev/null ;;
+    env+param) with_hooks_env "$hooks" git -C "$repo" -c core.hooksPath="$hooks" push -q origin "HEAD:refs/heads/$label" 2>/dev/null ;;
+    child-env) with_hooks_env "$hooks" sh -c "$child_push" _ "$repo" "$label" 2>/dev/null ;;
+    child-param) git -C "$repo" -c core.hooksPath="$hooks" -c "alias.guarded-push=!git push -q origin HEAD:refs/heads/$label" guarded-push 2>/dev/null ;;
+    esac && fail "push via $label succeeded past the repository's refusing pre-push hook"
+    [ -f "$marker" ] || fail "the repository's pre-push hook did not run via $label"
+    git -C "$remote" rev-parse -q --verify "refs/heads/$label" >/dev/null &&
+      fail "push via $label reached the remote despite the refusing pre-push hook"
+  done
+  pass "the repository's pre-push runs and can refuse under every hooksPath override channel"
+}
+
+test_git_c_override_still_strips_and_chains_commit_hooks() {
+  local repo hooks
+  repo="$TMP_ROOT/param-commit"
+  make_repo "$repo"
+  write_marker_hook "$repo/.git/hooks/pre-commit" param-pre-commit
+  hooks="$TMP_ROOT/hooks-param-commit"
+  "$STRIP" install "$hooks" "$repo" || fail "install should succeed"
+  printf 'note\n' >>"$repo/README.md"
+  git -C "$repo" add README.md
+  git -C "$repo" -c core.hooksPath="$hooks" commit -q --trailer 'Co-authored-by: Cursor <cursoragent@cursor.com>' -m 'fix: git -c override'
+  [ -f "$repo/param-pre-commit.ran" ] || fail "the project's pre-commit hook did not run under git -c core.hooksPath"
+  assert_not_contains "$(git -C "$repo" log -1 --format=%B)" "Co-authored-by: Cursor" \
+    "Cursor trailer survived a git -c core.hooksPath commit"
+  pass "a git -c hooksPath override still strips the trailer and chains the project's hooks"
+}
 
 test_strip_msgfile_alone_does_not_rewrite_author_fields() {
   local msg
@@ -255,6 +311,8 @@ test_relative_project_hookspath_still_runs
 test_inherited_hookspath_env_does_not_decide_the_chain
 test_project_hook_generated_after_install_still_runs
 test_pane_hookspath_does_not_reroute_another_repository
+test_repository_pre_push_runs_on_every_override_channel
+test_git_c_override_still_strips_and_chains_commit_hooks
 test_strip_msgfile_alone_does_not_rewrite_author_fields
 
 echo "# all fm-git-strip-ai-trailers tests passed"

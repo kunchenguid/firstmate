@@ -411,7 +411,6 @@ while [ "$attempt" -lt "$AUTOARM_ATTEMPTS" ]; do
     grep -Eq "$ACTIONABLE_RE" "$OUT" 2>/dev/null && ACTIONABLE=1
   fi
   [ "$ACTIONABLE" -eq 1 ] && break
-
   if [ "$HOST_MODE" -eq 1 ]; then
     # The host stood down because this session or generation no longer owns
     # supervision: whoever does owns continuity now.
@@ -429,6 +428,9 @@ while [ "$attempt" -lt "$AUTOARM_ATTEMPTS" ]; do
       OUT=
       continue
     fi
+    # A failed hand-back cannot be dismissed just because its successor
+    # watcher is healthy: the close is still undelivered.
+    [ "$HOST_RC" -eq 0 ] || break
   fi
 
   # A non-actionable close is benign when another verified watcher already owns

@@ -18,7 +18,7 @@ fi
 
 extension_segment=${FM_EXTENSION_BINDING_SEGMENT:-all}
 case "$extension_segment" in
-  all|coordinator|early-bind|early-validation|early-handshake|early-integrity|matrix|matrix-runtime|lifecycle-flow|lifecycle-lock|lifecycle-runner|lifecycle-state|lifecycle-invocation-cleanup|remote-envelope|remote-activation|remote-lifecycle|remote-retirement|example|coordinator-fail|coordinator-wait|coordinator-stubborn|coordinator-pass|coordinator-late-pass|coordinator-scheduler-block|coordinator-scheduler-late) ;;
+  all|coordinator|early-bind|early-validation|early-handshake|early-integrity|matrix|matrix-runtime|lifecycle-flow|lifecycle-order|lifecycle-lock|lifecycle-runner|lifecycle-state|lifecycle-invocation-cleanup|remote-envelope|remote-activation|remote-lifecycle|remote-retirement|example|coordinator-fail|coordinator-wait|coordinator-stubborn|coordinator-pass|coordinator-late-pass|coordinator-scheduler-block|coordinator-scheduler-late) ;;
   *) printf 'unknown extension-binding segment: %s\n' "$extension_segment" >&2; exit 64 ;;
 esac
 
@@ -59,6 +59,9 @@ crash_silent_start_pid=
 crash_silent_runner_pid=
 override_crash_start_pid=
 override_crash_runner_pid=
+order_register_pid=
+order_reconcile_pid=
+order_release=
 section_coordinator_pid=
 extension_test_cleanup() {
   [ -z "$concurrent_release" ] || touch "$concurrent_release" 2>/dev/null || true
@@ -94,6 +97,9 @@ extension_test_cleanup() {
   [ -z "$override_crash_start_pid" ] || kill -TERM "$override_crash_start_pid" 2>/dev/null || true
   [ -z "$override_crash_runner_pid" ] || kill -TERM -"$override_crash_runner_pid" 2>/dev/null || true
   [ -z "$handshake_orphan_pid" ] || kill -KILL "$handshake_orphan_pid" 2>/dev/null || true
+  [ -z "$order_release" ] || touch "$order_release" 2>/dev/null || true
+  [ -z "$order_register_pid" ] || kill -KILL "$order_register_pid" 2>/dev/null || true
+  [ -z "$order_reconcile_pid" ] || kill -TERM "$order_reconcile_pid" 2>/dev/null || true
   if [ -n "$section_coordinator_pid" ]; then
     kill -TERM "$section_coordinator_pid" 2>/dev/null || true
     wait "$section_coordinator_pid" 2>/dev/null || true
@@ -444,8 +450,9 @@ run_extension_section_lanes() {
   section_result_root=$(mktemp -d "$TMP_ROOT/section-lanes.XXXXXX") || return 1
   total=${#sections[@]}
   # Sixteen selectors are validated here. The bounded aggregate keeps its
-  # required end-to-end bind/invoke/capture/retirement, remote, and shipped
-  # example lanes; the other conformance cuts remain independently selectable.
+  # required end-to-end bind/invoke/capture/retirement, registration lock-order,
+  # remote, and shipped example lanes; the other conformance cuts remain
+  # independently selectable.
   maximum_sections=16
   maximum_concurrent=12
   [ "$total" -le "$maximum_sections" ] || return 64
@@ -557,7 +564,7 @@ if [ "$extension_segment" = all ] || [ "$extension_segment" = coordinator ]; the
     (
       trap - EXIT HUP INT
       trap 'terminate_section_lanes; exit 143' TERM
-      run_extension_section_lanes lifecycle-flow remote-lifecycle example
+      run_extension_section_lanes lifecycle-flow lifecycle-order remote-lifecycle example
     ) &
     section_coordinator_pid=$!
   fi
@@ -1096,6 +1103,64 @@ assert_absent "$H_FLOW/config/extensions.d/org.example.flow.json" "exact local b
 assert_present "$H_FLOW/data/extensions/retired-bindings/org.example.flow/${flow_binding_digest#sha256:}.json" "local binding retirement was not reversible"
 expect_failure "no home-local extension binding" env FM_HOME="$H_FLOW" "$HOST" resolve-process-event ext-flow
 pass "local binding retirement requires its exact identity and disables invocation"
+fi
+
+# --- registration against reconcile of an unhandled extension result ---------
+# Re-registering a source while reconcile republishes its unhandled extension
+# result must not deadlock. Registration holds binding resolution open here, so
+# reconcile reaches the source before registration asks for it.
+if section_enabled lifecycle-order; then
+P_ORDER="$PACKAGES/lock-order"
+order_marker="$TMP_ROOT/lock-order.marker"
+order_release="$TMP_ROOT/lock-order.release"
+make_package "$P_ORDER" org.example.lock-order ext-lock-order "$(printf 'handshake-block\n%s\n%s' "$order_marker" "$order_release")"
+H_ORDER="$HOMES/lock-order"; new_home "$H_ORDER"
+touch "$order_release"
+bind_package "$H_ORDER" "$P_ORDER" ext-lock-order >/dev/null
+FM_HOME="$H_ORDER" "$PROCEVENT" register-extension ext-lock-order order-source --config-ref good >/dev/null
+FM_HOME="$H_ORDER" "$PROCEVENT" start order-source > "$TMP_ROOT/lock-order-start.out" 2>&1 \
+  || fail "lock-order source did not capture its result"
+assert_absent "$H_ORDER/state/procevent/order-source.source" "lock-order terminal source stayed registered"
+assert_absent "$H_ORDER/state/procevent-inbox/order-source.1.handled" "lock-order result was not left unhandled"
+rm -f "$order_marker" "$order_release"
+FM_HOME="$H_ORDER" "$PROCEVENT" register-extension ext-lock-order order-source --config-ref no-result \
+  > "$TMP_ROOT/lock-order-register.out" 2>&1 &
+order_register_pid=$!
+wait_for_file "$order_marker" || fail "lock-order registration never entered binding resolution"
+FM_HOME="$H_ORDER" "$PROCEVENT" reconcile > "$TMP_ROOT/lock-order-reconcile.out" 2>&1 &
+order_reconcile_pid=$!
+for _ in $(seq 1 200); do
+  [ -L "$FM_PROCEVENT_CLAIM_ROOT/order-source.lock" ] && break
+  sleep 0.01
+done
+[ -L "$FM_PROCEVENT_CLAIM_ROOT/order-source.lock" ] || fail "neither lock-order contender took the source lock"
+sleep 0.2
+touch "$order_release"
+order_deadline=$((SECONDS + 12))
+while kill -0 "$order_register_pid" 2>/dev/null || kill -0 "$order_reconcile_pid" 2>/dev/null; do
+  if [ "$SECONDS" -ge "$order_deadline" ]; then
+    # Killing registration lets lock recovery free reconcile for cleanup.
+    kill -KILL "$order_register_pid" 2>/dev/null || true
+    wait "$order_register_pid" 2>/dev/null || true
+    order_register_pid=
+    wait "$order_reconcile_pid" 2>/dev/null || true
+    order_reconcile_pid=
+    fail "register-extension and reconcile deadlocked on an unhandled extension result"
+  fi
+  sleep 0.05
+done
+order_register_rc=0
+wait "$order_register_pid" || order_register_rc=$?
+order_register_pid=
+wait "$order_reconcile_pid" 2>/dev/null || true
+order_reconcile_pid=
+order_release=
+[ "$order_register_rc" -eq 0 ] || fail "lock-order registration failed: $(cat "$TMP_ROOT/lock-order-register.out")"
+assert_contains "$(cat "$TMP_ROOT/lock-order-reconcile.out")" "reconciled:" "lock-order reconcile did not complete its cycle"
+order_owner=$(sed -n 's/^owner-token: //p' "$TMP_ROOT/lock-order-register.out")
+FM_HOME="$H_ORDER" "$PROCEVENT" retire order-source --if-owner "$order_owner" >/dev/null
+FM_HOME="$H_ORDER" "$PROCEVENT" handled order-source 1 >/dev/null
+pass "register-extension and reconcile of an unhandled extension result take their locks in one order"
 fi
 
 # --- registration and retirement serialization plus lock recovery -------------
@@ -1819,7 +1884,7 @@ mkdir -p "$H_REMOTE_CONTROL/data" "$H_REMOTE" "$REMOTE_ROOT/bin"
 printf 'fixture\n' > "$REMOTE_ROOT/AGENTS.md"
 for remote_file in \
   fm-extension.mjs fm-extension-launch-barrier.mjs fm-extension.sh fm-procevent.sh fm-procevent-lib.sh fm-procevent-extension-capture.pl fm-procevent-lavish.sh \
-  fm-pr-lib.sh fm-wake-lib.sh fm-remote-entrypoint.sh fm-remote-job-lib.sh \
+  fm-pr-lib.sh fm-wake-lib.sh fm-path-lib.sh fm-remote-entrypoint.sh fm-remote-job-lib.sh \
   fm-remote-job-worker.sh; do
   cp "$ROOT/bin/$remote_file" "$REMOTE_ROOT/bin/$remote_file"
 done

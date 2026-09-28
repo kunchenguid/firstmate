@@ -47,8 +47,13 @@
 #                       every state/*.meta, a bounded state/*.status tail,
 #                       the away posture (state/.afk-contract and the legacy
 #                       state/.afk daemon flag), and a cheap per-task
-#                       endpoint-liveness read:
-#                       read-only, always runs.
+#                       endpoint-liveness read, each bounded and crash-
+#                       isolated so one task's read can never abort the
+#                       digest: read-only, always runs. The per-task reads
+#                       run serially, so with a wedged backend the stage's
+#                       ceiling is tasks x the per-read bound
+#                       (FM_SESSION_START_ENDPOINT_TIMEOUT, default 10s) and
+#                       can itself reach the digest's runtime bound.
 #   7. network checks - the result of the deferred network stage started back at
 #                       step 1, harvested WITHOUT waiting for it.
 #   8. context digest - data/projects.md, data/secondmates.md, data/captain.md,
@@ -59,7 +64,9 @@
 #                       block and deliberately never arms the watcher itself.
 #
 # Those nine names are also the runtime-bound stage list below, so a truncated
-# startup can name exactly which of them never ran.
+# startup can name exactly which of them never ran - and the parent banners
+# EVERY nonzero child exit, not only the bound: a child that dies or is killed
+# mid-stage must never truncate the digest silently.
 #
 # NO NETWORK ON THE BLOCKING PATH. This digest runs on a session-open hook that
 # blocks session initialization, so anything it waits for is time the captain
@@ -169,17 +176,20 @@
 # session initialization or Pi's first provider preflight while it runs, so an
 # unbounded digest is no longer merely slow - it can strand a whole session or
 # first turn behind one hung subprocess. Every remaining step is local, but
-# local is not the same as bounded: tool version probes, the backlog listing,
-# and the per-task endpoint reads are all unbounded subprocesses. So the whole
-# digest still runs as ONE bounded child of this script
-# (FM_SESSION_START_TIMEOUT, default 120s). The deferred network stage
+# local is not the same as bounded: tool version probes and the backlog
+# listing are unbounded subprocesses, while each per-task endpoint read runs
+# in its own crash-isolated child under FM_SESSION_START_ENDPOINT_TIMEOUT
+# (default 10s). So the whole digest still runs as ONE bounded child of this
+# script (FM_SESSION_START_TIMEOUT, default 120s). The deferred network stage
 # deliberately sits OUTSIDE that bound,
 # in its own process group under its own aggregate deadline, so a truncated
 # digest neither waits for it nor orphans it unbounded. The
 # child writes the digest straight to this script's stdout, so everything it
-# emitted before the bound was hit is already delivered; the parent then prints
-# a loud STARTUP TRUNCATED banner naming the stage that did not finish and the
-# sections that were therefore never emitted, and still exits 0. The child
+# emitted before the child stopped is already delivered; the parent then prints
+# a loud STARTUP TRUNCATED banner on ANY nonzero child exit - the runtime bound
+# or an unexpected child death, named with its exit status - naming the stage
+# that did not finish and the sections that were therefore never emitted, and
+# still exits 0. The child
 # records its progress in FM_SESSION_START_STAGE_FILE, which is also the flag
 # that tells a child it is the child - the parent never recurses.
 # Hosts without timeout, gtimeout, or perl use the shared pure-Bash watchdog, so
@@ -279,7 +289,8 @@ if [ -z "${FM_SESSION_START_STAGE_FILE:-}" ]; then
   # A non-positive or non-numeric budget is not a budget (`timeout 0` disables
   # the deadline outright), so an unusable value falls back to the default
   # rather than silently removing the bound.
-  case "$SESSION_START_BUDGET" in ''|*[!0-9]*|0) SESSION_START_BUDGET=120 ;; esac
+  case "$SESSION_START_BUDGET" in ''|*[!0-9]*) SESSION_START_BUDGET=120 ;; esac
+  [ "$SESSION_START_BUDGET" -gt 0 ] 2>/dev/null || SESSION_START_BUDGET=120
   SESSION_START_STAGE_FILE=$(mktemp "${TMPDIR:-/tmp}/fm-session-start-stage.XXXXXX" 2>/dev/null) || SESSION_START_STAGE_FILE=
   if [ -z "$SESSION_START_STAGE_FILE" ]; then
     # Without a breadcrumb the bound still holds; only the banner's precision
@@ -306,7 +317,11 @@ if [ -z "${FM_SESSION_START_STAGE_FILE:-}" ]; then
       "$SCRIPT_DIR/fm-session-start.sh"
   fi
   SESSION_START_RC=$?
-  if [ "$SESSION_START_RC" -eq 124 ]; then
+  # ANY nonzero child exit is a truncation: the banner contract promises that
+  # a stage that cannot print is named. Exit 124 is the bound firing; any
+  # other status means the child died or was killed mid-stage, which truncates
+  # silently when unbanned - the parent must banner it, never exit 0 around it.
+  if [ "$SESSION_START_RC" -ne 0 ]; then
     SESSION_START_LAST_STAGE=$(cat "$SESSION_START_STAGE_FILE" 2>/dev/null) || SESSION_START_LAST_STAGE=
     [ -n "$SESSION_START_LAST_STAGE" ] || SESSION_START_LAST_STAGE=unknown
     SESSION_START_PENDING=$(
@@ -316,14 +331,23 @@ if [ -z "${FM_SESSION_START_STAGE_FILE:-}" ]; then
     [ -n "${SESSION_START_PENDING# }" ] || SESSION_START_PENDING='(unknown - the digest may be incomplete anywhere)'
     BAR='●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
     printf '\n%s\n' "$BAR"
-    printf '●  STARTUP TRUNCATED - SESSION START HIT ITS %ss RUNTIME BOUND\n' "$SESSION_START_BUDGET"
+    if [ "$SESSION_START_RC" -eq 124 ]; then
+      printf '●  STARTUP TRUNCATED - SESSION START HIT ITS %ss RUNTIME BOUND\n' "$SESSION_START_BUDGET"
+    else
+      printf '●  STARTUP TRUNCATED - SESSION START DIED UNEXPECTEDLY (exit %s, not its runtime bound)\n' "$SESSION_START_RC"
+    fi
     printf '●  It stopped during the "%s" stage, so everything above is COMPLETE\n' "$SESSION_START_LAST_STAGE"
     printf '●  only up to that point.\n'
     printf '●  RECONCILE these stages before acting on anything they would have shown:\n'
     printf '●    %s\n' "${SESSION_START_PENDING% }"
     printf '●  Rerun bin/fm-session-start.sh now to finish taking the helm. If it truncates\n'
-    printf '●  again, raise FM_SESSION_START_TIMEOUT and report the slow stage - a stage that\n'
-    printf '●  cannot finish inside the bound is a fleet problem, not a reporting detail.\n'
+    if [ "$SESSION_START_RC" -eq 124 ]; then
+      printf '●  again, raise FM_SESSION_START_TIMEOUT and report the slow stage - a stage that\n'
+      printf '●  cannot finish inside the bound is a fleet problem, not a reporting detail.\n'
+    else
+      printf '●  again, report the exit status and the stage - raising the runtime bound\n'
+      printf '●  cannot help a digest that died, and a stage that dies is a fleet problem.\n'
+    fi
     printf '%s\n' "$BAR"
   fi
   rm -f "$SESSION_START_STAGE_FILE" 2>/dev/null || true
@@ -358,6 +382,12 @@ STATUS_TAIL=${FM_SESSION_START_STATUS_TAIL:-5}
 case "$STATUS_TAIL" in ''|*[!0-9]*) STATUS_TAIL=5 ;; esac
 QUEUED_LIMIT=${FM_SESSION_START_QUEUED_LIMIT:-20}
 case "$QUEUED_LIMIT" in ''|*[!0-9]*|0) QUEUED_LIMIT=20 ;; esac
+# One per-task endpoint read may never outlive this bound: a hung backend CLI
+# becomes that task's endpoint: error line instead of the digest's whole
+# runtime budget.
+ENDPOINT_TIMEOUT=${FM_SESSION_START_ENDPOINT_TIMEOUT:-10}
+case "$ENDPOINT_TIMEOUT" in ''|*[!0-9]*) ENDPOINT_TIMEOUT=10 ;; esac
+[ "$ENDPOINT_TIMEOUT" -gt 0 ] 2>/dev/null || ENDPOINT_TIMEOUT=10
 BACKLOG_FIELDS=blocked_by,hold_kind,hold_reason
 
 RULE='================================================================================'
@@ -535,6 +565,23 @@ print_status_tail() {
   while IFS= read -r line || [ -n "$line" ]; do
     fm_cap_line "$line"
   done < <(tail -n "$STATUS_TAIL" "$status")
+}
+
+# fm_session_start_endpoint_read <backend> <target> [expected-label]: ONE
+# bounded, crash-isolated endpoint-liveness read. The read runs in its own
+# bash under fm_run_timed's bound instead of in this digest process, because
+# a per-task backend liveness read that dies mid-read would otherwise take
+# every later stage with it. Isolation turns any death, hang, or nonzero
+# surprise in one task's read into that task's own endpoint line - never a
+# silently missing rest of digest. The inner bash re-sources fm-backend.sh
+# per read; that cost is a few milliseconds per task and buys the isolation.
+fm_session_start_endpoint_read() {  # <backend> <target> [expected-label]
+  local backend=$1 target=$2 label=${3:-}
+  # shellcheck disable=SC2016  # Positional parameters expand inside the child bash, not here.
+  fm_run_timed "$ENDPOINT_TIMEOUT" bash -c '
+    . "$1"
+    fm_backend_target_exists "$2" "$3" "$4"
+  ' _ "$SCRIPT_DIR/fm-backend.sh" "$backend" "$target" "$label"
 }
 
 hash_file_sha256() {
@@ -845,8 +892,16 @@ for meta in "$STATE"/*.meta; do
   target=$(fm_backend_target_of_meta "$meta")
   if [ -n "$window" ]; then
     backend=$(fm_backend_of_meta "$meta")
-    if fm_backend_target_exists "$backend" "${target:-$window}" "fm-$id"; then
+    endpoint_rc=0
+    fm_session_start_endpoint_read "$backend" "${target:-$window}" "fm-$id" || endpoint_rc=$?
+    # Only the timeout owner's own statuses mean the read itself failed: 124 is
+    # the bound firing and >=128 is a signal death. Every other nonzero status
+    # is the probe's own verdict that the endpoint is gone.
+    if [ "$endpoint_rc" -eq 0 ]; then
       printf 'endpoint: alive (backend=%s window=%s)\n' "$backend" "$window"
+    elif [ "$endpoint_rc" -eq 124 ] || [ "$endpoint_rc" -ge 128 ]; then
+      printf 'endpoint: error (backend=%s window=%s - the endpoint read died or hit its %ss bound; the digest continued past it)\n' \
+        "$backend" "$window" "$ENDPOINT_TIMEOUT"
     else
       printf 'endpoint: dead (backend=%s window=%s)\n' "$backend" "$window"
     fi

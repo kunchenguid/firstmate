@@ -51,8 +51,10 @@
 #            source when the window ended, so this generation cannot start until
 #            it is retired.
 # start      Claim the source, run its child to completion, durably capture the
-#            output, publish normalized wakes for pending results, then release
-#            the claim. It blocks for as long as the source blocks and is meant
+#            output, and publish normalized wakes for pending results. It then
+#            releases the claim, unless the adapter's `relisten` command says
+#            to poll again in this same runner. It blocks for as long as the
+#            source blocks and is meant
 #            to run as a supervised background process, never in a conversational
 #            turn. After publishing, it asks the source's own adapter whether the
 #            captured result ends the source and normally retires the registration
@@ -172,6 +174,15 @@
 # declared downstream channel an applied-and-acknowledged result would otherwise
 # go silent. An unhandled result stays eligible for bounded re-announcement on
 # every reconcile in both modes, exactly as before.
+#
+# Polling again is adapter-owned through the same kind of seam. An adapter that
+# answers exit 0 to `bin/fm-procevent-<adapter>.sh relisten` keeps this runner
+# and its claim across an empty result and across a capture, and the runner
+# polls the registration that claim still owns. It adopts a replacement
+# registration only when that same claim still owns it and the registered
+# command is unchanged. A missing command, an error, or any other exit releases
+# the claim after that one result, exactly as before. The runner still does not
+# refresh the owner lease, so a home that has gone still ends the poll.
 #
 # Keyed captain answers from built-in adapters use one more seam of the same kind,
 # and this runner still decides nothing about them. Some sources carry the
@@ -690,6 +701,11 @@ next_result_sequence() {  # <source-id>
   printf '%s\n' "$seq"
 }
 
+register_extension_locks_release() {  # <source-id>
+  extension_lifecycle_lock_release
+  fm_procevent_source_lock_release "$1"
+}
+
 cmd_register_extension() {
   local adapter=${1-} id=${2-} option=${3-} config_ref=${4-} resolution schema extension_id
   local extension_version capability_version package_digest binding_digest extra registration_token
@@ -702,19 +718,27 @@ cmd_register_extension() {
   if [ ! -x "$EXTENSION_HOST" ] || [ -L "$EXTENSION_HOST" ]; then
     die "the tracked extension host is unavailable"
   fi
-  extension_lifecycle_lock_acquire || die "cannot lock the extension lifecycle"
+  # The source lock comes before the extension lifecycle lock, the order every
+  # other path holding both uses: publishing or concluding a captured extension
+  # result holds the source lock while the extension host takes the lifecycle
+  # lock. The reverse order here would let both wait on each other forever.
+  fm_procevent_source_lock_acquire "$id" || die "cannot lock the source"
+  if ! extension_lifecycle_lock_acquire; then
+    fm_procevent_source_lock_release "$id"
+    die "cannot lock the extension lifecycle"
+  fi
   if ! resolution=$("$EXTENSION_HOST" resolve-process-event "$adapter"); then
-    extension_lifecycle_lock_release
+    register_extension_locks_release "$id"
     die "extension adapter verification failed: $adapter"
   fi
   if [ "$(printf '%s\n' "$resolution" | wc -l | tr -d ' ')" != 1 ]; then
-    extension_lifecycle_lock_release
+    register_extension_locks_release "$id"
     die "extension adapter resolution was malformed: $adapter"
   fi
   IFS=$'\t' read -r schema extension_id extension_version capability_version \
     package_digest binding_digest extra <<< "$resolution"
   if [ "$schema" != fm-extension-process-event-resolution.v1 ] || [ -n "$extra" ]; then
-    extension_lifecycle_lock_release
+    register_extension_locks_release "$id"
     die "extension adapter resolution was malformed: $adapter"
   fi
   if ! fm_procevent_extension_id_valid "$extension_id" \
@@ -722,37 +746,29 @@ cmd_register_extension() {
     || [ "$capability_version" != 1 ] \
     || ! fm_procevent_digest_valid "$package_digest" \
     || ! fm_procevent_digest_valid "$binding_digest"; then
-    extension_lifecycle_lock_release
+    register_extension_locks_release "$id"
     die "extension adapter identity was malformed: $adapter"
   fi
   if ! registration_token=$(new_extension_registration_token); then
-    extension_lifecycle_lock_release
+    register_extension_locks_release "$id"
     die "cannot create an extension registration identity"
-  fi
-  if ! fm_procevent_source_lock_acquire "$id"; then
-    extension_lifecycle_lock_release
-    die "cannot lock the source"
   fi
   if [ "$(source_kind "$id" 2>/dev/null || true)" = task-owned ]; then
     owner_task=$(source_owner_task "$id")
-    fm_procevent_source_lock_release "$id"
-    extension_lifecycle_lock_release
+    register_extension_locks_release "$id"
     die "cannot replace task-owned source $id owned by task $owner_task; steer that task to re-arm its board"
   fi
   if ! extension_registration_replacement_safe_locked "$id"; then
-    fm_procevent_source_lock_release "$id"
-    extension_lifecycle_lock_release
+    register_extension_locks_release "$id"
     die "cannot replace extension registration while its prior runner remains active: $id"
   fi
   if ! fm_procevent_extension_registration_publish_locked "$STATE" "$adapter" "$id" \
       "$extension_id" "$extension_version" "$capability_version" "$package_digest" \
       "$binding_digest" "$config_ref" "$registration_token"; then
-    fm_procevent_source_lock_release "$id"
-    extension_lifecycle_lock_release
+    register_extension_locks_release "$id"
     die "cannot publish the extension registration"
   fi
-  fm_procevent_source_lock_release "$id"
-  extension_lifecycle_lock_release
+  register_extension_locks_release "$id"
   owner_lease_refresh
   printf 'registered: %s (%s from %s@%s)\n' "$id" "$adapter" "$extension_id" "$extension_version"
   printf 'owner-token: %s\n' "$registration_token"
@@ -766,7 +782,7 @@ cmd_register_extension() {
 # and drains until `fm_procevent_mark_handled` records it.
 publish_result() {  # <result-file>
   local result=$1 id seq adapter line status=1 owner_task='' message='' record=''
-  local ring_backend ring_target ring_meta active
+  local ring_backend ring_target ring_meta inbox_dir handled_dir pre_existing existing new_record
   id=$(fm_procevent_result_source_id "$result")
   seq=$(fm_procevent_result_sequence "$result")
   fm_procevent_source_id_valid "$id" || return 1
@@ -794,20 +810,28 @@ publish_result() {  # <result-file>
         unset FM_PROCEVENT_CAPTURE_SOURCE_LOCK_HELD
         message="Lavish review feedback is captured for task $owner_task at $result. Read it with bin/fm-procevent-lavish.sh read $result, apply the round, and re-arm the board with the reply."
       fi
+      # Snapshot the records that already exist (active and handled) before
+      # the idempotent write, so a dedup match - including one already
+      # acknowledged in handled/ - is never treated as new. Only a write
+      # that actually creates a fresh record rings; an already-acknowledged
+      # record is never moved back out of handled/, and re-delivery of a
+      # still-unacknowledged one is left to the inbox re-ring ladder.
+      inbox_dir=$(fm_task_inbox_dir "$STATE" "$owner_task")
+      handled_dir=$(fm_task_inbox_handled_dir "$STATE" "$owner_task")
+      pre_existing=$(printf '%s\n' "$inbox_dir"/*.msg "$handled_dir"/*.msg 2>/dev/null)
       record=$(fm_task_inbox_write_idempotent "$STATE" "$owner_task" "$message" 2>/dev/null || true)
-      case "$record" in
-        */handled/*)
-          active=${record%/handled/*}/${record##*/}
-          if mv -- "$record" "$active" 2>/dev/null; then
-            record=$active
-          else
-            record=''
-          fi
-          ;;
-      esac
       [ -n "$record" ] && status=0
-      fm_procevent_source_lock_release "$id"
+      new_record=0
       if [ "$status" -eq 0 ]; then
+        new_record=1
+        while IFS= read -r existing; do
+          [ "$existing" = "$record" ] && { new_record=0; break; }
+        done <<EOF
+$pre_existing
+EOF
+      fi
+      fm_procevent_source_lock_release "$id"
+      if [ "$new_record" -eq 1 ]; then
         ring_meta="$STATE/$owner_task.meta"
         if [ -f "$ring_meta" ] && [ ! -L "$ring_meta" ]; then
           ring_backend=$(fm_backend_of_meta "$ring_meta" 2>/dev/null || true)
@@ -1049,6 +1073,59 @@ cmd_start() {
     fm_procevent_source_lock_release "$CLAIM_ID" 2>/dev/null || true
   }
   trap release_start_claim EXIT
+  # 0 when this runner should poll again. The adapter's relisten command is the
+  # only adapter-specific signal; a replacement registration is adopted only
+  # when this claim still owns it and the registered command is unchanged.
+  adopt_relisten() {
+    local script registration current now_adapter i
+    local -a previous=()
+    [ "$extension_owner" -eq 0 ] || return 1
+    script=$(adapter_script "$adapter")
+    [ -f "$script" ] && [ ! -L "$script" ] || return 1
+    "$script" relisten >/dev/null 2>&1 || return 1
+    registration=$(source_file "$id")
+    [ -f "$registration" ] && [ ! -L "$registration" ] || return 1
+    fm_procevent_source_lock_acquire "$id" || return 1
+    if ! fm_procevent_claim_load_locked "$id" 2>/dev/null \
+      || [ "$FM_PROCEVENT_CLAIM_HOME" != "$CLAIM_HOME" ] \
+      || [ "$FM_PROCEVENT_CLAIM_PID" != "$CLAIM_PID" ] \
+      || [ "$FM_PROCEVENT_CLAIM_TOKEN" != "$CLAIM_TOKEN" ] \
+      || [ "$FM_PROCEVENT_CLAIM_TERMINAL" != active ]; then
+      fm_procevent_source_lock_release "$id"
+      return 1
+    fi
+    now_adapter=$(read_adapter "$id" 2>/dev/null || true)
+    current=$(fm_pr_file_identity "$registration" 2>/dev/null || true)
+    previous=("${ARGV[@]}")
+    if [ "$now_adapter" != "$adapter" ] || [ -z "$current" ] || ! read_argv "$id"; then
+      ARGV=("${previous[@]}")
+      fm_procevent_source_lock_release "$id"
+      return 1
+    fi
+    if [ "${#ARGV[@]}" -ne "${#previous[@]}" ]; then
+      ARGV=("${previous[@]}")
+      fm_procevent_source_lock_release "$id"
+      return 1
+    fi
+    for i in "${!previous[@]}"; do
+      if [ "${ARGV[$i]}" != "${previous[$i]}" ]; then
+        ARGV=("${previous[@]}")
+        fm_procevent_source_lock_release "$id"
+        return 1
+      fi
+    done
+    if [ "$current" != "$CLAIM_REG_IDENTITY" ]; then
+      if ! fm_procevent_claim_adopt_registration_locked \
+        "$id" "$CLAIM_HOME" "$CLAIM_PID" "$CLAIM_TOKEN" "$current"; then
+        fm_procevent_source_lock_release "$id"
+        return 1
+      fi
+      CLAIM_REG_IDENTITY=$current
+    fi
+    fm_procevent_source_lock_release "$id" || return 1
+    exec 7<"$registration" || return 1
+    return 0
+  }
   # The inherited marker keeps the runner and its ordinary children from
   # accidentally refreshing the owner lease. A source that deliberately strips
   # it is outside this confused-agent-grade boundary.
@@ -1093,6 +1170,20 @@ cmd_start() {
   # Built-in adapters do not run the extension capture helper, so keep this
   # sentinel defined while sharing the no-result branch below under `set -u`.
   local truncated=0 capture_state='' durable='' reservation_terminal='' reservation_silent=''
+  # One poll per iteration. A relisten adapter stays in this process; every
+  # other adapter falls out after a single result.
+  while :; do
+  truncated=0
+  capture_state=
+  published_capture=0
+  handled_capture=0
+  self_announcing=0
+  rc=0
+  durable=
+  if [ "$extension_owner" -eq 0 ]; then
+    printf '%s\n' "$$" > "$runner" 2>/dev/null || true
+    chmod 0600 "$runner" 2>/dev/null || true
+  fi
   fm_procevent_launch_floor_wait "$STATE" "$id" "$CLAIM_REG_IDENTITY" "$launch_floor"
   case "$?" in
     0) ;;
@@ -1213,10 +1304,17 @@ EOF
   fi
 
   if [ "$capture_state" = no-result ] || { [ "$extension_owner" -eq 0 ] && [ "$rc" -ne 0 ] && [ ! -s "$out" ]; }; then
-    # No usable result. Leave the registration armed; the adapter decides
-    # whether a nonzero exit is terminal when it handles the next result.
+    # No usable result. Leave the registration armed; only a clean empty
+    # wait may continue under this owner. Failed reads await reconciliation.
     if [ "$extension_owner" -eq 0 ]; then
-      rm -f -- "$out" "$runner"
+      rm -f -- "$out"
+      STAGED_OUTPUT=
+    fi
+    if { [ "$capture_state" = no-result ] || [ "$rc" -eq 75 ]; } && adopt_relisten; then
+      continue
+    fi
+    if [ "$extension_owner" -eq 0 ]; then
+      rm -f -- "$runner"
     fi
     printf 'no-result: %s (exit %s)\n' "$id" "$rc"
     exit 0
@@ -1269,6 +1367,7 @@ EOF
   [ "$extension_owner" -eq 1 ] || rm -f -- "$runner"
   if [ "$self_announcing" -eq 1 ]; then
     if adapter_autohandle "$adapter" "$id" "$durable"; then
+      handled_capture=1
       printf 'autohandled: %s\n' "$id"
     else
       printf 'not-autohandled: %s (left for the handler; still unacknowledged)\n' "$id" >&2
@@ -1285,6 +1384,7 @@ EOF
   elif [ "$extension_owner" -eq 0 ] \
     && [ "$published_capture" -eq 1 ] \
     && adapter_autohandle "$adapter" "$id" "$durable"; then
+    handled_capture=1
     printf 'autohandled: %s\n' "$id"
   else
     printf 'not-autohandled: %s (left for the handler; still unacknowledged)\n' "$id" >&2
@@ -1302,6 +1402,11 @@ EOF
     fm_procevent_claim_capture_reservation_remove_locked || true
     exec 6<&-
   fi
+  if [ "$handled_capture" -eq 1 ] && adopt_relisten; then
+    continue
+  fi
+  break
+  done
 }
 
 # Retire a source this runner owns because its adapter classified the captured

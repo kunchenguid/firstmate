@@ -5,13 +5,15 @@
 # An absent source starts from {}; unreadable or malformed sources refuse.
 # Output: <state-dir>/<task-id>.devin-config.json, mode 600, atomically replaced.
 # No project or user config is edited. fm-control-lib.sh owns retirement.
-# Two settings are forced for every worker. read_config_from.claude=false,
+# read_config_from.claude=false is forced for every worker,
 # because Devin otherwise runs every Claude Code hook it finds (~/.claude and
 # the project's .claude/settings*.json), including Herdr's hook that reports
 # the pane as a Claude agent; it also drops Devin's CLAUDE.md, .claude/skills,
 # and Claude MCP imports, while AGENTS.md and .agents/skills still load.
-# attribution=false, because Devin otherwise adds a Co-Authored-By: Devin
-# trailer and a Generated with Devin line to commits and PRs.
+# attribution=false is forced too, because Devin otherwise adds a
+# Co-Authored-By: Devin trailer and a Generated with Devin line to commits
+# and PRs, unless FM_KEEP_AI_TRAILERS=1 (fm-spawn sets it when the home has
+# config/keep-ai-trailers); then the source's attribution setting is kept.
 # UserPromptSubmit opens a turn; Stop and SessionEnd close it. Devin 3000.11.1
 # emits no Stop on double-Escape cancellation, so fm-control invalidates its
 # state to unknown after delivering that interrupt, never fabricating idle.
@@ -29,6 +31,7 @@ STATE=${1:?state directory required}
 ID=${2:?task id required}
 GEN=${3:?busy generation required}
 SOURCE=${4:-$HOME/.config/devin/config.json}
+KEEP=${FM_KEEP_AI_TRAILERS:-0}
 case "$ID" in ''|*[!A-Za-z0-9._-]*) echo 'error: invalid task id' >&2; exit 1 ;; esac
 [ -d "$STATE" ] || { echo 'error: state directory missing' >&2; exit 1; }
 STATE=$(cd "$STATE" && pwd -P)
@@ -42,10 +45,10 @@ if [ ! -e "$SOURCE" ] && [ ! -L "$SOURCE" ]; then SOURCE=/dev/null; fi
 umask 077
 temp=$(mktemp "$STATE/.$ID.devin-config.XXXXXX")
 trap 'rm -f "$temp"' EXIT
-jq -s --arg submit "$submit" --arg stop "$stop" --arg end "$end" '
+jq -s --arg keep "$KEEP" --arg submit "$submit" --arg stop "$stop" --arg end "$end" '
   (if length == 0 then {} elif length == 1 then .[0] else error("expected one config object") end) |
   if type != "object" then error("expected config object") else . end |
-  .attribution = false |
+  (if $keep == "1" then . else .attribution = false end) |
   .read_config_from = ((.read_config_from // {}) + {claude: false}) |
   .hooks = (.hooks // {}) |
   def hook($cmd): {hooks: [{type: "command", command: $cmd, timeout: 10}]};
