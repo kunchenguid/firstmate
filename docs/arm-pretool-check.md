@@ -49,7 +49,7 @@ The marker guard closes the static gap anyway because it is cheap and provable p
 Tripwire: if a third strict-superset gap is ever found after this marker generalization, that falsifies the "provable per encoding class" claim and the decision flips to Option B - drop the prefilter and always invoke the classifier.
 Deeper decode-required obfuscation beyond the coupled marker set stays the classifier's and the post-arm liveness guards' responsibility.
 
-Malformed or empty stdin, invalid JSON, missing `jq` for stdin transport, missing Node, a missing classifier, or an invalid classifier response fail open with exit 0 and no output.
+Malformed or empty stdin, invalid JSON, missing `jq` for stdin transport, missing Node, a missing classifier, or an invalid classifier response fail open with the host's allow response defined below.
 This transport behavior prevents a broken hook from denying every shell tool call.
 Malformed or unsupported shell syntax that contains a protected command is a semantic classification result and fails closed.
 
@@ -148,10 +148,13 @@ Prose may improve without changing adapter behavior.
 
 ## Output contract
 
-- Allow returns exit 0 with both streams empty.
+- Allow returns exit 0 with both streams empty except for Cursor.
+- Cursor permission hooks require one JSON document even on allow: `--cursor` returns `{"permission":"allow"}` on stdout, including early, inert, and unavailable-classifier paths.
+- A parsed payload with a string `cursor_version` selects that same allow document for the Claude-settings duplicate, without changing genuine Claude events or relying on inherited environment markers.
+- Cursor deny returns exit 0 with `{"permission":"deny","user_message":"[code] reason"}` on stdout; the classification policy is unchanged.
 - Deny returns exit 2 and writes `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny"},"systemMessage":"[code] reason"}` to stderr.
 - Default deny mode also writes `{"decision":"deny","reason":"[code] reason"}` to stdout for Grok.
-- `--claude` suppresses stdout completely because Claude ignores a PreToolUse deny when stdout is nonempty.
+- For genuine Claude events, `--claude` suppresses stdout completely because Claude ignores a PreToolUse deny when stdout is nonempty.
 - Codex blocks on exit 2 and displays stderr.
 - OpenCode throws only when the checker exits 2.
 - Pi, pi-signed, and omp return `{block: true}` only when the checker exits 2.
@@ -168,7 +171,10 @@ Prose may improve without changing adapter behavior.
 | omp | `event.input.command` | `.omp/extensions/fm-primary-turnend-guard.ts` passes one `--command` argument and returns `{block: true, reason}` only for exit 2; omp surfaces the reason verbatim to the model (verified 18.1.2). |
 | Cursor | `.tool_input.command` | `.cursor/hooks.json` matches `tool_name` `Shell` and forwards stdin with `--cursor`. Cursor reads the RETURNED object rather than the exit status, so `--cursor` prints `{"permission":"deny","user_message":"[code] reason"}` on stdout and exits 0; only that rendering is verified to block the command and surface the reason. |
 
-Cursor also loads `<project>/.claude/settings.json`, so the tracked Claude entry receives the same event. Without `--cursor` a Cursor-delivered payload is that duplicate and allows without re-classifying, decided from the payload's own `cursor_version` by `bin/fm-hook-host-lib.sh`; [`turnend-guard.md`](turnend-guard.md#harness-integrations) owns why that predicate reads the payload rather than the environment.
+Cursor also loads `<project>/.claude/settings.json`, so the tracked Claude entry receives the same event.
+Without `--cursor` a Cursor-delivered payload is that duplicate and allows without re-classifying, decided from the payload's own `cursor_version` by `bin/fm-hook-host-lib.sh`; [`turnend-guard.md`](turnend-guard.md#harness-integrations) owns why that predicate reads the payload rather than the environment.
+The duplicate must still emit the Cursor allow document: an empty response from any sibling permission hook blocks the entire tool call.
+`tests/fm-cursor-primary.test.sh` exercises the registered stack, and `tests/fm-cursor-pretool-sdk-live-e2e.test.sh` checks it through the real SDK; [runtime verification](verification/runtime-backends.md#cursor-sdk-permission-hooks) records the live result.
 
 Grok project hooks require folder trust.
 Cursor project hooks require the workspace to be launched with `--trust`.

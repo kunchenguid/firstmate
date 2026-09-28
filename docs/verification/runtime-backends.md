@@ -2364,3 +2364,29 @@ A throwaway scout was spawned through `bin/fm-spawn.sh --scout --harness omp --m
 6. `bin/fm-control.sh <id> exit` stopped the agent and `bin/fm-teardown.sh` returned the worktree and closed the item.
 
 `FM_OMP_LIVE_E2E=1 tests/fm-omp-primary-live-e2e.test.sh` refreshes the primary evidence; the worker path above is refreshed by repeating the scout dispatch after any omp upgrade.
+
+## Cursor SDK permission hooks
+
+Verified on 2026-09-28 with `@cursor/sdk` 1.0.32, Node.js 26.10.0, and model `grok-4.7` on Linux.
+The live guard runs the tracked Cursor and Claude permission-hook registrations in a disposable primary-shaped repository.
+It does not load session-start or stop hooks and never executes a production watcher.
+Use an existing SDK login or `CURSOR_API_KEY`; set `FM_CURSOR_SDK_MODULE` to the installed SDK entry URL when it is outside the repository's module search path.
+
+```sh
+FM_CURSOR_PRETOOL_SDK_LIVE_E2E=1 \
+  bin/fm-test-run.sh tests/fm-cursor-pretool-sdk-live-e2e.test.sh
+```
+
+Observed output:
+
+```text
+harness: @cursor/sdk 1.0.32
+PASS Cursor SDK: Read, Shell and Edit completed through every registered hook
+PASS Cursor SDK: watcher and directory-change denials retain reasons and prevent side effects
+ok - Cursor SDK permission hooks allow ordinary tools and preserve denials
+```
+
+The allow proof requires completed SDK tool events with actual read and shell results plus the edit's on-disk marker.
+The deny proof requires both exact shell attempts, their `watcher-background` and `persistent-cd` reasons, and absent side-effect markers.
+Cursor Agent CLI 2026.09.26-dd393fe print mode allowed the same ordinary calls with the older silent responses, so it is not a substitute for the SDK guard.
+Portable protocol and genuine-Claude compatibility coverage lives in `tests/fm-cursor-primary.test.sh` and the three `tests/fm-*-pretool-check.test.sh` suites.

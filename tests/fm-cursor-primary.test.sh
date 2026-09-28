@@ -71,7 +71,7 @@ install_scripts() {
   mkdir -p "$dir/bin" "$dir/docs"
   for f in fm-turnend-guard-cursor.sh fm-turnend-guard.sh fm-sessionstart-cursor.sh \
            fm-sessionstart-run.sh fm-sessionstart-nudge.sh fm-arm-pretool-check.sh \
-           fm-cd-pretool-check.sh fm-claude-stop-autoarm.sh fm-hook-host-lib.sh \
+           fm-cd-pretool-check.sh fm-subagent-pretool-check.sh fm-claude-stop-autoarm.sh fm-hook-host-lib.sh \
            fm-primary-scope-lib.sh fm-supervision-lib.sh fm-wake-lib.sh fm-path-lib.sh \
            fm-session-lock-lib.sh fm-cursor-lib.sh fm-operational-input.sh \
            fm-supervision-instructions.sh fm-harness.sh fm-lock.sh \
@@ -241,7 +241,7 @@ test_pretool_guards_deduplicate_and_render_cursor_deny() {
   payload='{"tool_name":"Shell","tool_input":{"command":"bin/fm-watch-arm.sh &"},"cursor_version":"2026.08.11-e8db854"}'
   out=$(printf '%s' "$payload" | bash "$dir/bin/fm-arm-pretool-check.sh" 2>&1); status=$?
   expect_code 0 "$status" "the Claude-settings duplicate must allow under Cursor"
-  [ -z "$out" ] || fail "duplicate pretool entry produced output: $out"
+  [ "$out" = '{"permission":"allow"}' ] || fail "duplicate pretool entry must return one Cursor allow: $out"
 
   out=$(printf '%s' "$payload" | bash "$dir/bin/fm-arm-pretool-check.sh" --cursor 2>/dev/null); status=$?
   expect_code 0 "$status" "Cursor reads the decision object, so the deny path exits 0"
@@ -260,8 +260,96 @@ test_cd_guard_renders_cursor_deny() {
   decision=$(printf '%s' "$out" | jq -r '.permission // empty' 2>/dev/null)
   [ "$decision" = deny ] || fail "expected a Cursor deny object from the cd guard, got: $out"
   out=$(printf '%s' "$payload" | FM_HOME="$dir" bash "$dir/bin/fm-cd-pretool-check.sh" 2>&1)
-  [ -z "$out" ] || fail "the cd guard's Claude-settings duplicate produced output under Cursor: $out"
+  [ "$out" = '{"permission":"allow"}' ] || fail "the cd guard's duplicate must return one Cursor allow: $out"
   pass "fm-cd-pretool-check: Cursor duplicate allows, --cursor denies in Cursor's own shape"
+}
+
+# The complete registered permission-hook stack must return one document per
+# process. Empty stdout from even one sibling blocks an otherwise allowed tool.
+test_registered_pretool_stack_allows_cursor_tools() {
+  local dir tool payload command out rc
+  dir=$(make_primary_dir "$TMP_ROOT/registered-pretool")
+  for tool in Shell Read Edit Glob; do
+    payload=$(jq -nc --arg tool "$tool" '{tool_name:$tool,tool_input:{command:"printf ok"},cursor_version:"sdk-test"}')
+    while IFS= read -r command; do
+      rc=0
+      out=$(printf '%s' "$payload" | env -u GROK_AGENT -u GROK_HOOK_EVENT \
+        CLAUDE_PROJECT_DIR="$dir" CURSOR_PROJECT_DIR="$dir" FM_HOME="$dir" \
+        bash -c "$command" 2>"$TMP_ROOT/permission-stderr") || rc=$?
+      expect_code 0 "$rc" "registered permission hook must allow $tool"
+      [ "$out" = '{"permission":"allow"}' ] || fail "$tool: invalid allow from $command: $out"
+      [ ! -s "$TMP_ROOT/permission-stderr" ] || fail "$tool: allow emitted stderr"
+    done < <(
+      if [ "$tool" = Shell ]; then
+        jq -r '.hooks.preToolUse[].command' "$ROOT/.cursor/hooks.json"
+        jq -r '.hooks.PreToolUse[] | .hooks[].command' "$ROOT/.claude/settings.json"
+      else
+        jq -r '.hooks.PreToolUse[] | select(.matcher == ".*") | .hooks[].command' "$ROOT/.claude/settings.json"
+      fi
+    )
+  done
+  pass "every registered Cursor permission hook allows Shell, Read, Edit and Glob with one JSON document"
+}
+
+test_cursor_subagent_decisions_and_host_separation() {
+  local dir tool payload out rc marker
+  dir=$(make_primary_dir "$TMP_ROOT/cursor-subagent")
+  for tool in Read TaskList TaskCreate mcp__tracker__create_task Agent; do
+    payload=$(jq -nc --arg tool "$tool" '{tool_name:$tool,cursor_version:"sdk-test"}')
+    rc=0
+    out=$(printf '%s' "$payload" | FM_HOME="$dir" bash "$dir/bin/fm-subagent-pretool-check.sh" --claude) || rc=$?
+    expect_code 0 "$rc" "Cursor subagent checker returns its decision in JSON"
+    if [ "$tool" = Agent ]; then
+      printf '%s' "$out" | jq -se 'length == 1 and .[0].permission == "deny" and (.[0].user_message | startswith("[subagent-dispatch]"))' >/dev/null \
+        || fail "Cursor delegation must still be denied with its reason: $out"
+    else
+      [ "$out" = '{"permission":"allow"}' ] || fail "Cursor ordinary/exempt tool must allow: $out"
+    fi
+  done
+  # Inherited Cursor environment must not change a real Claude event's wire
+  # contract; a non-string marker is not Cursor identity either.
+  for marker in null 123 false; do
+    out=$(printf '{"tool_name":"Read","cursor_version":%s}' "$marker" | \
+      CURSOR_VERSION=leaked CURSOR_AGENT=1 bash "$dir/bin/fm-subagent-pretool-check.sh" --claude)
+    [ -z "$out" ] || fail "non-Cursor allow must remain silent: $out"
+  done
+  rc=0
+  printf '{"tool_name":"Agent"}' | CURSOR_VERSION=leaked FM_HOME="$dir" \
+    bash "$dir/bin/fm-subagent-pretool-check.sh" --claude >"$TMP_ROOT/claude-out" 2>"$TMP_ROOT/claude-err" || rc=$?
+  expect_code 2 "$rc" "genuine Claude delegation still denies with exit 2"
+  [ ! -s "$TMP_ROOT/claude-out" ] || fail "genuine Claude denial must keep stdout empty"
+  pass "Cursor delegation still denies and inherited markers do not change Claude output"
+}
+
+test_cursor_permission_early_allows() {
+  local dir script payload out command tool nojq
+  dir=$(make_primary_dir "$TMP_ROOT/cursor-early-allow")
+  nojq="$TMP_ROOT/cursor-no-jq"
+  mkdir -p "$nojq"
+  for tool in bash cat; do ln -s "$(command -v "$tool")" "$nojq/$tool"; done
+  for script in arm cd subagent; do
+    out=$(printf '%s' '{"cursor_version":"sdk-test"}' | PATH="$nojq" bash "$dir/bin/fm-$script-pretool-check.sh" --cursor)
+    [ "$out" = '{"permission":"allow"}' ] || fail "$script missing jq must emit a Cursor allow: $out"
+    out=$(cd "$dir/bin" && printf '{}' | bash "fm-$script-pretool-check.sh" --cursor)
+    [ "$out" = '{"permission":"allow"}' ] || fail "$script basename invocation must load the shared renderer: $out"
+    for payload in '' '{not-json' '{}' '{"cursor_version":"sdk-test"}'; do
+      out=$(printf '%s' "$payload" | bash "$dir/bin/fm-$script-pretool-check.sh" --cursor)
+      [ "$out" = '{"permission":"allow"}' ] || fail "$script broken/missing transport must emit one Cursor allow: $out"
+    done
+  done
+  for command in 'printf ok' 'echo fm-watch' '(cd /tmp && pwd)'; do
+    for script in arm cd; do
+      out=$(bash "$dir/bin/fm-$script-pretool-check.sh" --cursor --command "$command")
+      [ "$out" = '{"permission":"allow"}' ] || fail "$script fast/classified allow must return JSON: $out"
+    done
+  done
+  # Missing classifiers retain allow policy but still satisfy Cursor's schema.
+  rm "$dir/bin/fm-arm-command-policy.mjs" "$dir/bin/fm-cd-command-policy.mjs"
+  out=$(bash "$dir/bin/fm-arm-pretool-check.sh" --cursor --command 'bin/fm-watch-arm.sh &')
+  [ "$out" = '{"permission":"allow"}' ] || fail "missing arm classifier must allow in JSON"
+  out=$(bash "$dir/bin/fm-cd-pretool-check.sh" --cursor --command 'cd /tmp')
+  [ "$out" = '{"permission":"allow"}' ] || fail "missing cd classifier must allow in JSON"
+  pass "Cursor early, fast, classified and unavailable-classifier allows always emit one JSON document"
 }
 
 # --- PARK --------------------------------------------------------------------
@@ -775,6 +863,9 @@ test_autoarm_stands_down_on_cursor_payload
 test_sessionstart_run_stands_down_on_cursor_payload
 test_pretool_guards_deduplicate_and_render_cursor_deny
 test_cd_guard_renders_cursor_deny
+test_registered_pretool_stack_allows_cursor_tools
+test_cursor_subagent_decisions_and_host_separation
+test_cursor_permission_early_allows
 test_park_silent_when_nothing_in_flight
 test_park_delivers_actionable_wake_as_followup
 test_park_never_exits_two

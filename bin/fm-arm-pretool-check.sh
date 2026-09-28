@@ -26,7 +26,8 @@
 # background execution is not itself a policy signal.
 #
 # Exit/output contract:
-#   ALLOW - exit 0 and no output.
+#   ALLOW - exit 0, with {"permission":"allow"} on stdout for Cursor
+#           (--cursor or a Cursor-payload duplicate), otherwise no output.
 #   DENY - exit 2, a Claude-shaped deny object on stderr, and a Grok-shaped
 #          deny object on stdout unless --claude was supplied.
 #   DENY, --cursor - exit 0 and Cursor's own decision object on stdout. Cursor
@@ -48,6 +49,11 @@ BACKGROUND=""
 CLAUDE_MODE=0
 CURSOR_MODE=0
 
+HOOK_DIR=${BASH_SOURCE[0]%/*}
+[ "$HOOK_DIR" != "${BASH_SOURCE[0]}" ] || HOOK_DIR=.
+# shellcheck source=bin/fm-hook-host-lib.sh
+. "$HOOK_DIR/fm-hook-host-lib.sh"
+
 usage() {
   cat <<'EOF'
 Usage: fm-arm-pretool-check.sh [--command <cmd>] [--background true|false] [--claude|--cursor]
@@ -57,8 +63,8 @@ toolInput.command, or Claude/Codex/Cursor tool_input.command).
 Exits 0 to allow and 2 to deny.
 The deny reason is written to stderr, with a Grok decision object on stdout
 unless --claude is supplied.
-With --cursor, a deny is Cursor's own decision object on stdout and exit 0,
-because Cursor reads the returned object rather than the exit status.
+With --cursor, both allow and deny return a Cursor permission object on stdout
+and exit 0. A Cursor-payload duplicate also returns a Cursor allow object.
 Malformed transport and an unavailable classifier runtime fail open.
 EOF
 }
@@ -107,24 +113,22 @@ done
 
 if [ "$CMD_SET" -eq 0 ]; then
   PAYLOAD=$(cat 2>/dev/null || true)
-  [ -n "$PAYLOAD" ] || exit 0
-  command -v jq >/dev/null 2>&1 || exit 0
-  # shellcheck source=bin/fm-hook-host-lib.sh
-  . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/fm-hook-host-lib.sh"
+  [ -n "$PAYLOAD" ] || fm_hook_allow "$CURSOR_MODE"
+  command -v jq >/dev/null 2>&1 || fm_hook_allow "$CURSOR_MODE"
   # Cursor's own registration passes --cursor. Without it a Cursor-delivered
   # payload is the Claude-settings duplicate Cursor also loads, already
   # evaluated by that registration, so this copy allows without re-classifying.
   if [ "$CURSOR_MODE" -eq 0 ] && fm_hook_payload_is_foreign_host "$PAYLOAD"; then
-    exit 0
+    fm_hook_allow 1
   fi
-  CMD=$(printf '%s' "$PAYLOAD" | jq -r '(.toolInput.command // .tool_input.command // empty)' 2>/dev/null) || exit 0
-  [ -n "$CMD" ] || exit 0
+  CMD=$(printf '%s' "$PAYLOAD" | jq -r '(.toolInput.command // .tool_input.command // empty)' 2>/dev/null) || fm_hook_allow "$CURSOR_MODE"
+  [ -n "$CMD" ] || fm_hook_allow "$CURSOR_MODE"
   # Kept for transport parity only.
   # shellcheck disable=SC2034
   BACKGROUND=$(printf '%s' "$PAYLOAD" | jq -r '(.toolInput.background // .tool_input.background // false)' 2>/dev/null) || BACKGROUND=false
 fi
 
-[ -n "$CMD" ] || exit 0
+[ -n "$CMD" ] || fm_hook_allow "$CURSOR_MODE"
 
 # Strict-superset prefilter (transport only; owns zero classification semantics).
 # Every protected watcher execution and every broad watcher kill resolves to the
@@ -160,30 +164,30 @@ case "$CMD" in
   *)
     case "$PREFILTER" in
       *fm-watch*) ;;
-      *) exit 0 ;;
+      *) fm_hook_allow "$CURSOR_MODE" ;;
     esac
     ;;
 esac
 
-SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P) || exit 0
-ROOT=$(CDPATH='' cd -- "$SCRIPT_DIR/.." 2>/dev/null && pwd -P) || exit 0
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P) || fm_hook_allow "$CURSOR_MODE"
+ROOT=$(CDPATH='' cd -- "$SCRIPT_DIR/.." 2>/dev/null && pwd -P) || fm_hook_allow "$CURSOR_MODE"
 ACTIVE_HOME=${FM_HOME:-$ROOT}
 POLICY="$ROOT/bin/fm-arm-command-policy.mjs"
 
-command -v node >/dev/null 2>&1 || exit 0
-[ -f "$POLICY" ] || exit 0
+command -v node >/dev/null 2>&1 || fm_hook_allow "$CURSOR_MODE"
+[ -f "$POLICY" ] || fm_hook_allow "$CURSOR_MODE"
 
-POLICY_OUTPUT=$(node "$POLICY" --command "$CMD" --root "$ROOT" --home "$ACTIVE_HOME" 2>/dev/null) || exit 0
-[ -n "$POLICY_OUTPUT" ] || exit 0
+POLICY_OUTPUT=$(node "$POLICY" --command "$CMD" --root "$ROOT" --home "$ACTIVE_HOME" 2>/dev/null) || fm_hook_allow "$CURSOR_MODE"
+[ -n "$POLICY_OUTPUT" ] || fm_hook_allow "$CURSOR_MODE"
 
 TAB=$(printf '\t')
 DECISION=${POLICY_OUTPUT%%"$TAB"*}
-[ "$DECISION" = "deny" ] || exit 0
+[ "$DECISION" = "deny" ] || fm_hook_allow "$CURSOR_MODE"
 REST=${POLICY_OUTPUT#*"$TAB"}
-[ "$REST" != "$POLICY_OUTPUT" ] || exit 0
+[ "$REST" != "$POLICY_OUTPUT" ] || fm_hook_allow "$CURSOR_MODE"
 CODE=${REST%%"$TAB"*}
 REASON=${REST#*"$TAB"}
-[ -n "$CODE" ] && [ -n "$REASON" ] && [ "$REASON" != "$REST" ] || exit 0
+[ -n "$CODE" ] && [ -n "$REASON" ] && [ "$REASON" != "$REST" ] || fm_hook_allow "$CURSOR_MODE"
 
 json_escape() {
   printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr '\n' ' '

@@ -162,12 +162,10 @@ A tool removed from the schema stays removed, so a genuinely intended use of a l
 
 ## Output contract
 
-- Allow returns exit 0 with both streams empty.
-- Deny returns exit 2 and writes `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny"},"systemMessage":"[subagent-dispatch] ..."}` to stderr.
-- Default deny mode also writes `{"decision":"deny","reason":"[subagent-dispatch] ..."}` to stdout for Grok.
-- `--claude` suppresses stdout completely, because Claude Code ignores a PreToolUse deny when stdout is nonempty.
-  This is the same verified quirk recorded in [`arm-pretool-check.md`](arm-pretool-check.md), and the tracked Claude hook therefore passes `--claude`.
-- Malformed or empty stdin, invalid JSON, a payload with no tool name, and missing `jq` for stdin transport all fail open with exit 0 and no output.
+Uses the shared [permission-hook output contract](arm-pretool-check.md#output-contract), with `[subagent-dispatch]` as the deny reason prefix.
+`--cursor` or a parsed payload with a string `cursor_version` selects Cursor responses even when the tracked command passes `--claude`.
+Unlike the arm and cd duplicates, this is Cursor's only delegation checker, so it continues classifying the tool rather than standing down.
+Malformed or empty stdin, invalid JSON, a payload with no tool name, and missing `jq` for stdin transport all fail open with the selected host's allow response.
 
 The deny message names the real dispatch path.
 When `bin/fm-scout.sh` exists in the home the message first defers to the `AGENTS.md` intake classification, then routes work already classified as a scout there and authorized ship work with its bounded research to `bin/fm-brief.sh` then `bin/fm-spawn.sh`.
@@ -370,7 +368,8 @@ The other tracked Claude hook entries in `.claude/settings.json` refuse to run u
 This entry is the deliberate exception and stays unguarded: Grok is "inspected but not wired" above, so no `.grok/hooks/` registration covers the subagent-spawn event at all, and guarding it would remove the guard from Grok entirely rather than deduplicate it.
 The coverage it leaves is partial rather than correct - the tracked entry passes `--claude`, which suppresses exactly the stdout decision object Grok consumes - so treat this as incidental reach, not as Grok being wired.
 Wiring Grok properly still requires the matcher-token verification described above, and that is what closes this exception.
-The same exception now also covers Cursor, which loads the tracked Claude settings as well: `.cursor/hooks.json` registers no subagent-spawn matcher, so this entry stays unguarded there for the same reason, and its `--claude` rendering leaves Cursor the exit-2 and stderr path rather than Cursor's own decision object.
+The same exception also covers Cursor, which loads the tracked Claude settings: `.cursor/hooks.json` registers no subagent-spawn matcher, so this entry stays active there.
+Cursor payloads receive Cursor permission documents for both allow and deny; genuine Claude and Grok events keep their existing response paths.
 Cursor's subagent tool name has not been verified, and registering an unverified matcher would be a guess rather than coverage, so closing it needs the same verification step.
 
 This change does not close the deeper harness-agnostic defect.

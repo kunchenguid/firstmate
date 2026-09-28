@@ -22,7 +22,7 @@ Its threat model is agent mistakes, the same as the watcher-arm seatbelt: an acc
 ## Scope: plain firstmate checkouts only
 
 The guard fires only in a plain firstmate checkout where git-dir equals git-common-dir.
-It is a silent no-op (exit 0, no output) everywhere else, so it never interferes with a crewmate or scout that legitimately works inside its own project or firstmate task worktree.
+It allows everywhere else using the host's allow response, so it never interferes with a crewmate or scout that legitimately works inside its own project or firstmate task worktree.
 
 `bin/fm-cd-pretool-check.sh` owns its checkout detection; the turn-end guard's marker-aware scope is a separate contract (`docs/turnend-guard.md`).
 A plain, non-worktree checkout has `git rev-parse --git-dir` equal to `git rev-parse --git-common-dir`.
@@ -81,26 +81,19 @@ It does not permit `cd /home/project`, because an absolute-path `cd` remains a p
 - Grok sends stdin JSON at `.toolInput.command`.
 - OpenCode sends the exact command string through `--command <exact string>`.
 - Pi, pi-signed, and omp send the exact command string through `--command <exact string>`.
-- Cursor sends stdin JSON at `.tool_input.command` and adds `--cursor`, which renders the deny as Cursor's own returned decision object.
+- Cursor sends stdin JSON at `.tool_input.command` and adds `--cursor`, which renders both decisions as Cursor permission objects.
 
 Processing order is cheapest-first: a strict-superset prefilter, then the primary-checkout scope, then the Node policy owner.
 The prefilter removes ordinary single quotes, double quotes, backslashes, carriage returns, and newlines before fast-allowing any command that carries no `cd`, `pushd`, or `popd` substring and no quoting-decoder marker (`$'` ANSI-C or `$"` locale), so quoted or escaped command-word fragments delegate to the policy while most commands never pay for the git scoping calls or the Node process.
 The quoting-decoder marker set is coupled to the classifier's decoder set in `bin/fm-arm-command-policy.mjs`: adding any new quote or expansion form the classifier decodes requires extending the prefilter marker set in the same change, or it stops being a strict superset.
 
-Empty stdin, unparseable JSON, missing `jq` on the stdin path, missing Node, a missing policy owner, or an invalid policy response all fail open with exit 0 and no output.
+Empty stdin, unparseable JSON, missing `jq` on the stdin path, missing Node, a missing policy owner, or an invalid policy response all fail open with the host's allow response.
 A broken hook must never deny every shell tool call.
 
 ## Output contract
 
-Identical in shape to `docs/arm-pretool-check.md`:
-
-- Allow (and inert-outside-primary) returns exit 0 with both streams empty.
-- Deny returns exit 2 and writes `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny"},"systemMessage":"[persistent-cd] reason"}` to stderr.
-- Default deny mode also writes `{"decision":"deny","reason":"[persistent-cd] reason"}` to stdout for Grok.
-- `--claude` suppresses stdout completely because Claude ignores a PreToolUse deny when stdout is nonempty.
-- Codex blocks on exit 2 and displays stderr.
-- OpenCode throws only when the checker exits 2.
-- Pi, pi-signed, and omp return `{block: true}` only when the checker exits 2.
+Uses the shared [permission-hook output contract](arm-pretool-check.md#output-contract), including Cursor's explicit allow document for inert and duplicate invocations.
+Deny reasons keep the `[persistent-cd]` prefix.
 
 ## Shared classifier ownership
 

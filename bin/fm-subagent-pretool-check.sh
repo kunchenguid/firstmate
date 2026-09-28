@@ -38,11 +38,13 @@
 # CLI mode is for adapters that already hold the tool name (OpenCode, Pi).
 #
 # Exit/output contract (identical shape to bin/fm-cd-pretool-check.sh):
-#   ALLOW - exit 0 and no output.
+#   ALLOW - exit 0, with {"permission":"allow"} on stdout for Cursor
+#           (--cursor or a payload with string cursor_version), otherwise silent.
+#   CURSOR DENY - exit 0 with a permission=deny object and user_message.
 #   DENY - exit 2, a Claude-shaped deny object on stderr, and a Grok-shaped
 #          deny object on stdout unless --claude was supplied.
 #   INERT - not a genuine primary home (a crewmate/scout task worktree or a
-#           non-firstmate repo): exit 0 with no output, exactly like ALLOW.
+#           non-firstmate repo): same response as ALLOW.
 #   ESCAPE - FM_ALLOW_SUBAGENT=1 in the environment allows deliberately.
 #   FAIL OPEN - malformed or empty stdin, or missing jq for stdin transport.
 #
@@ -81,10 +83,16 @@ PLAN_ONLY_TOOLS='taskcreate taskupdate'
 TOOL=""
 TOOL_SET=0
 CLAUDE_MODE=0
+CURSOR_MODE=0
+
+HOOK_DIR=${BASH_SOURCE[0]%/*}
+[ "$HOOK_DIR" != "${BASH_SOURCE[0]}" ] || HOOK_DIR=.
+# shellcheck source=bin/fm-hook-host-lib.sh
+. "$HOOK_DIR/fm-hook-host-lib.sh"
 
 usage() {
   cat <<'EOF'
-Usage: fm-subagent-pretool-check.sh [--tool <tool-name>] [--claude]
+Usage: fm-subagent-pretool-check.sh [--tool <tool-name>] [--claude|--cursor]
 
 With no --tool, reads a PreToolUse-style JSON payload on stdin (Claude/Codex
 tool_name, or Grok toolName).
@@ -95,10 +103,12 @@ Do not ship that Claude-only list in tracked project settings, because linked
 worktrees inherit it and legitimate crewmates would lose their delegation tools.
 This hook remains as the shipped guard for future delegation-shaped names
 outside any local fixed list.
-Fires only in a genuine firstmate primary home; it is a silent no-op in a
+Fires only in a genuine firstmate primary home; it allows in a
 crewmate/scout task worktree or any non-firstmate repo, where a worker using
 delegation tools is legitimate.
 Exits 0 to allow and 2 to deny, naming the real crewmate dispatch path instead.
+With --cursor or a Cursor payload, both decisions return a Cursor permission
+object on stdout and exit 0. The payload selects the host even with --claude.
 Set FM_ALLOW_SUBAGENT=1 in the session environment to allow deliberately.
 Malformed transport fails open.
 EOF
@@ -121,6 +131,10 @@ while [ "$#" -gt 0 ]; do
       CLAUDE_MODE=1
       shift
       ;;
+    --cursor)
+      CURSOR_MODE=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -135,12 +149,17 @@ done
 
 if [ "$TOOL_SET" -eq 0 ]; then
   PAYLOAD=$(cat 2>/dev/null || true)
-  [ -n "$PAYLOAD" ] || exit 0
-  command -v jq >/dev/null 2>&1 || exit 0
-  TOOL=$(printf '%s' "$PAYLOAD" | jq -r '(.tool_name // .toolName // empty)' 2>/dev/null) || exit 0
+  [ -n "$PAYLOAD" ] || fm_hook_allow "$CURSOR_MODE"
+  command -v jq >/dev/null 2>&1 || fm_hook_allow "$CURSOR_MODE"
+  # This is Cursor's only delegation checker: select its response protocol,
+  # but keep classifying instead of standing down like the duplicated guards.
+  if fm_hook_payload_is_cursor "$PAYLOAD"; then
+    CURSOR_MODE=1
+  fi
+  TOOL=$(printf '%s' "$PAYLOAD" | jq -r '(.tool_name // .toolName // empty)' 2>/dev/null) || fm_hook_allow "$CURSOR_MODE"
 fi
 
-[ -n "$TOOL" ] || exit 0
+[ -n "$TOOL" ] || fm_hook_allow "$CURSOR_MODE"
 
 LC_ALL=C NORMALIZED=$(printf '%s' "$TOOL" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9')
 
@@ -149,11 +168,11 @@ LC_ALL=C NORMALIZED=$(printf '%s' "$TOOL" | tr '[:upper:]' '[:lower:]' | tr -cd 
 # here: an MCP server with a task or agent noun in a tool name is common and
 # blocking it would be a false positive with no bearing on fleet dispatch.
 case "$TOOL" in
-  mcp__*) exit 0 ;;
+  mcp__*) fm_hook_allow "$CURSOR_MODE" ;;
 esac
 
 for allowed in $OBSERVE_ONLY_TOOLS $PLAN_ONLY_TOOLS; do
-  [ "$NORMALIZED" != "$allowed" ] || exit 0
+  [ "$NORMALIZED" != "$allowed" ] || fm_hook_allow "$CURSOR_MODE"
 done
 
 MATCHED=""
@@ -162,16 +181,16 @@ for stem in $DELEGATION_STEMS; do
     *"$stem"*) MATCHED=$stem; break ;;
   esac
 done
-[ -n "$MATCHED" ] || exit 0
+[ -n "$MATCHED" ] || fm_hook_allow "$CURSOR_MODE"
 
 # The single deliberate escape hatch. It is an environment variable rather than
 # a flag or a state file so it must be set when the session is launched, which
 # makes a genuinely intended use possible and an accidental one impossible: no
 # in-session tool call can set it for the call that follows.
-[ "${FM_ALLOW_SUBAGENT:-}" != "1" ] || exit 0
+[ "${FM_ALLOW_SUBAGENT:-}" != "1" ] || fm_hook_allow "$CURSOR_MODE"
 
-SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P) || exit 0
-FM_ROOT=${FM_ROOT_OVERRIDE:-$(CDPATH='' cd -- "$SCRIPT_DIR/.." 2>/dev/null && pwd -P)} || exit 0
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P) || fm_hook_allow "$CURSOR_MODE"
+FM_ROOT=${FM_ROOT_OVERRIDE:-$(CDPATH='' cd -- "$SCRIPT_DIR/.." 2>/dev/null && pwd -P)} || fm_hook_allow "$CURSOR_MODE"
 FM_HOME=${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}
 STATE=${FM_STATE_OVERRIDE:-$FM_HOME/state}
 
@@ -184,7 +203,7 @@ STATE=${FM_STATE_OVERRIDE:-$FM_HOME/state}
 # inert (exit 0), never a block, so a broken environment never denies a call.
 # shellcheck source=bin/fm-primary-scope-lib.sh
 . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
-fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
+fm_primary_scope_matches "$FM_ROOT" "$STATE" || fm_hook_allow "$CURSOR_MODE"
 
 # Name the dedicated scout entry point only when this home carries it; degrade
 # to the two-step brief-then-spawn path when it does not, rather than naming a
@@ -202,6 +221,10 @@ json_escape() {
 }
 
 ESCAPED=$(json_escape "$REASON")
+if [ "$CURSOR_MODE" -eq 1 ]; then
+  printf '{"permission":"deny","user_message":"%s"}\n' "$ESCAPED"
+  exit 0
+fi
 printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny"},"systemMessage":"%s"}\n' "$ESCAPED" >&2
 [ "$CLAUDE_MODE" -eq 1 ] || printf '{"decision":"deny","reason":"%s"}\n' "$ESCAPED"
 exit 2

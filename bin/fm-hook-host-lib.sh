@@ -24,13 +24,28 @@
 # caller RUNS. A redundant run under Cursor wastes work; a skipped run under
 # Claude breaks the primary's supervision, which is the worse failure.
 
-# Return 0 when payload $1 was delivered by a foreign host whose own tracked
-# Firstmate registration already covers this event.
-fm_hook_payload_is_foreign_host() {  # <payload>
+# Return 0 when payload $1 was delivered by Cursor. Never use inherited
+# environment markers to select a hook response protocol.
+fm_hook_payload_is_cursor() {  # <payload>
   local payload=${1-}
   [ -n "$payload" ] || return 1
   command -v jq >/dev/null 2>&1 || return 1
   printf '%s' "$payload" | jq -e '
     type == "object" and has("cursor_version") and (.cursor_version | type) == "string"
   ' >/dev/null 2>&1
+}
+
+# Return 0 when the Cursor registration already covers this event.
+fm_hook_payload_is_foreign_host() {  # <payload>
+  fm_hook_payload_is_cursor "${1-}"
+}
+
+# Permission hooks require one decision document on Cursor, including inert
+# and unavailable-classifier paths. Other transports keep their silent allow.
+# Call only at an allow exit, never from an EXIT trap that could mask a deny.
+fm_hook_allow() {  # <cursor-mode: 0|1>
+  if [ "${1:-0}" -eq 1 ]; then
+    printf '%s\n' '{"permission":"allow"}'
+  fi
+  exit 0
 }

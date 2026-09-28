@@ -23,13 +23,14 @@
 # Claude-settings duplicate Cursor also loads.
 #
 # Exit/output contract (identical shape to bin/fm-arm-pretool-check.sh):
-#   ALLOW - exit 0 and no output.
+#   ALLOW - exit 0, with {"permission":"allow"} on stdout for Cursor
+#           (--cursor or a Cursor-payload duplicate), otherwise no output.
 #   DENY - exit 2, a Claude-shaped deny object on stderr, and a Grok-shaped
 #          deny object on stdout unless --claude was supplied.
 #   DENY, --cursor - exit 0 and Cursor's own decision object on stdout. Cursor
 #          reads the returned object rather than the exit status.
 #   INERT - not the real primary checkout (a crewmate/scout task worktree or a
-#           non-firstmate repo): exit 0 with no output, exactly like ALLOW.
+#           non-firstmate repo): same response as ALLOW.
 #   FAIL OPEN - malformed or empty stdin, missing jq for stdin transport,
 #               missing Node or policy owner, or an invalid policy response.
 #
@@ -45,19 +46,24 @@ CMD_SET=0
 CLAUDE_MODE=0
 CURSOR_MODE=0
 
+HOOK_DIR=${BASH_SOURCE[0]%/*}
+[ "$HOOK_DIR" != "${BASH_SOURCE[0]}" ] || HOOK_DIR=.
+# shellcheck source=bin/fm-hook-host-lib.sh
+. "$HOOK_DIR/fm-hook-host-lib.sh"
+
 usage() {
   cat <<'EOF'
 Usage: fm-cd-pretool-check.sh [--command <cmd>] [--claude|--cursor]
 
 With no --command, reads a PreToolUse-style JSON payload on stdin (Grok
 toolInput.command, or Claude/Codex tool_input.command).
-Fires only in the real primary firstmate checkout; it is a silent no-op in a
+Fires only in the real primary firstmate checkout; it allows in a
 crewmate/scout task worktree or any non-firstmate repo.
 Exits 0 to allow and 2 to deny a persistent top-level cwd change.
 The deny reason is written to stderr, with a Grok decision object on stdout
 unless --claude is supplied.
-With --cursor, a deny is Cursor's own decision object on stdout and exit 0,
-because Cursor reads the returned object rather than the exit status.
+With --cursor, both allow and deny return a Cursor permission object on stdout
+and exit 0. A Cursor-payload duplicate also returns a Cursor allow object.
 Malformed transport and an unavailable classifier runtime fail open.
 EOF
 }
@@ -97,20 +103,18 @@ done
 
 if [ "$CMD_SET" -eq 0 ]; then
   PAYLOAD=$(cat 2>/dev/null || true)
-  [ -n "$PAYLOAD" ] || exit 0
-  command -v jq >/dev/null 2>&1 || exit 0
-  # shellcheck source=bin/fm-hook-host-lib.sh
-  . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/fm-hook-host-lib.sh"
+  [ -n "$PAYLOAD" ] || fm_hook_allow "$CURSOR_MODE"
+  command -v jq >/dev/null 2>&1 || fm_hook_allow "$CURSOR_MODE"
   # Cursor's own registration passes --cursor. Without it a Cursor-delivered
   # payload is the Claude-settings duplicate Cursor also loads, already
   # evaluated by that registration, so this copy allows without re-classifying.
   if [ "$CURSOR_MODE" -eq 0 ] && fm_hook_payload_is_foreign_host "$PAYLOAD"; then
-    exit 0
+    fm_hook_allow 1
   fi
-  CMD=$(printf '%s' "$PAYLOAD" | jq -r '(.toolInput.command // .tool_input.command // empty)' 2>/dev/null) || exit 0
+  CMD=$(printf '%s' "$PAYLOAD" | jq -r '(.toolInput.command // .tool_input.command // empty)' 2>/dev/null) || fm_hook_allow "$CURSOR_MODE"
 fi
 
-[ -n "$CMD" ] || exit 0
+[ -n "$CMD" ] || fm_hook_allow "$CURSOR_MODE"
 
 # Strict-superset prefilter (transport only; owns zero classification
 # semantics). Strip syntax bytes that the classifier joins within a shell word
@@ -135,13 +139,13 @@ case "$CMD" in
   *)
     case "$PREFILTER" in
       *cd*|*pushd*|*popd*) ;;
-      *) exit 0 ;;
+      *) fm_hook_allow "$CURSOR_MODE" ;;
     esac
     ;;
 esac
 
-SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P) || exit 0
-FM_ROOT=${FM_ROOT_OVERRIDE:-$(CDPATH='' cd -- "$SCRIPT_DIR/.." 2>/dev/null && pwd -P)} || exit 0
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P) || fm_hook_allow "$CURSOR_MODE"
+FM_ROOT=${FM_ROOT_OVERRIDE:-$(CDPATH='' cd -- "$SCRIPT_DIR/.." 2>/dev/null && pwd -P)} || fm_hook_allow "$CURSOR_MODE"
 
 # Scope to a plain, non-worktree firstmate checkout, where git-dir equals
 # git-common-dir. A crewmate/scout task worktree - the shape bin/fm-spawn.sh
@@ -152,28 +156,28 @@ FM_ROOT=${FM_ROOT_OVERRIDE:-$(CDPATH='' cd -- "$SCRIPT_DIR/.." 2>/dev/null && pw
 # the turn-end guard's separate marker-aware scope. Any failure to confirm the
 # checkout is inert (exit 0), never a block, so a broken environment never
 # denies a shell command.
-[ -f "$FM_ROOT/AGENTS.md" ] || exit 0
-[ -d "$FM_ROOT/bin" ] || exit 0
-command -v git >/dev/null 2>&1 || exit 0
-GIT_DIR=$(git -C "$FM_ROOT" rev-parse --git-dir 2>/dev/null) || exit 0
-GIT_COMMON_DIR=$(git -C "$FM_ROOT" rev-parse --git-common-dir 2>/dev/null) || exit 0
-[ "$GIT_DIR" = "$GIT_COMMON_DIR" ] || exit 0
+[ -f "$FM_ROOT/AGENTS.md" ] || fm_hook_allow "$CURSOR_MODE"
+[ -d "$FM_ROOT/bin" ] || fm_hook_allow "$CURSOR_MODE"
+command -v git >/dev/null 2>&1 || fm_hook_allow "$CURSOR_MODE"
+GIT_DIR=$(git -C "$FM_ROOT" rev-parse --git-dir 2>/dev/null) || fm_hook_allow "$CURSOR_MODE"
+GIT_COMMON_DIR=$(git -C "$FM_ROOT" rev-parse --git-common-dir 2>/dev/null) || fm_hook_allow "$CURSOR_MODE"
+[ "$GIT_DIR" = "$GIT_COMMON_DIR" ] || fm_hook_allow "$CURSOR_MODE"
 
 POLICY="$FM_ROOT/bin/fm-cd-command-policy.mjs"
-command -v node >/dev/null 2>&1 || exit 0
-[ -f "$POLICY" ] || exit 0
+command -v node >/dev/null 2>&1 || fm_hook_allow "$CURSOR_MODE"
+[ -f "$POLICY" ] || fm_hook_allow "$CURSOR_MODE"
 
-POLICY_OUTPUT=$(node "$POLICY" --command "$CMD" 2>/dev/null) || exit 0
-[ -n "$POLICY_OUTPUT" ] || exit 0
+POLICY_OUTPUT=$(node "$POLICY" --command "$CMD" 2>/dev/null) || fm_hook_allow "$CURSOR_MODE"
+[ -n "$POLICY_OUTPUT" ] || fm_hook_allow "$CURSOR_MODE"
 
 TAB=$(printf '\t')
 DECISION=${POLICY_OUTPUT%%"$TAB"*}
-[ "$DECISION" = "deny" ] || exit 0
+[ "$DECISION" = "deny" ] || fm_hook_allow "$CURSOR_MODE"
 REST=${POLICY_OUTPUT#*"$TAB"}
-[ "$REST" != "$POLICY_OUTPUT" ] || exit 0
+[ "$REST" != "$POLICY_OUTPUT" ] || fm_hook_allow "$CURSOR_MODE"
 CODE=${REST%%"$TAB"*}
 REASON=${REST#*"$TAB"}
-[ -n "$CODE" ] && [ -n "$REASON" ] && [ "$REASON" != "$REST" ] || exit 0
+[ -n "$CODE" ] && [ -n "$REASON" ] && [ "$REASON" != "$REST" ] || fm_hook_allow "$CURSOR_MODE"
 
 json_escape() {
   printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr '\n' ' '
