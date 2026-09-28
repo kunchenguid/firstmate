@@ -157,6 +157,10 @@
 #      unreachable, and an alive endpoint whose scrollback read failed is still
 #      classified by step 4. Backends with no classifier keep reading a failed
 #      capture as gone. The fallback's own comment owns the per-verdict rules.
+#      A readable endpoint holding only its shell (the harness exited, for
+#      example on a provider usage-limit error) reads unknown · none as agent
+#      gone before a stale busy record or non-terminal status log can report
+#      working; a valid terminal done/failed declaration is still preserved.
 #
 # Read-only and side-effect free. Always exits 0 on a successful read regardless
 # of state; exit 2 only on a usage error (no id).
