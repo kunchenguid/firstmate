@@ -41,7 +41,7 @@ A post-PR real-image check remains an explicit captain action using the already 
 
 ## Focused behavioral result
 
-The processed-body lifecycle was verified on 2026-09-28 with Node `22.22.2` and Pi `0.87.1`.
+The processed-message file cleanup lifecycle was verified on 2026-09-28 with Node `22.22.2` and Pi `0.87.1`.
 
 ```console
 $ bash tests/fm-feishu-processed-cleanup.test.sh
