@@ -145,26 +145,6 @@ fm_guard_clear_stale_banner() {
   rm -f "$STALE_BANNER_MARKER" 2>/dev/null || true
 }
 
-# Repair a session lock that has gone missing out from under a still-live
-# main-session harness. Callers do not verify ownership before invoking this
-# guard, so the repair is limited to the main actor: a supervision-branch
-# actor runs in its own harness and must never record itself as the home's
-# session owner. If state/.lock has vanished - the literal "no session lock
-# present" gap a live watcher-arm plugin's sessionOwnsLock check reads as
-# ownerless - bin/fm-lock.sh is the one place that may write it, and its
-# acquire path resolves this session's own trusted anchor pid and writes it
-# fresh. Only the missing case is touched; a lock file that already exists,
-# whether held by this session or a genuine foreign live owner, is never
-# read, written, or otherwise disturbed here, so fm-lock.sh's
-# foreign-live-owner refusal keeps failing exactly as fast as before.
-# Best-effort and silent: a repair failure (no verifiable harness in the
-# ancestry, an unwritable state dir) leaves the gap exactly as it was and is
-# not this guard's alarm to raise.
-if [ "$READ_ONLY" -eq 0 ] && [ "$GUARD_ACTOR" = main ] \
-  && [ ! -e "$STATE/.lock" ] && [ ! -L "$STATE/.lock" ]; then
-  "$SCRIPT_DIR/fm-lock.sh" >/dev/null 2>&1 || true
-fi
-
 # Worktree-tangle alarm, checked FIRST and independent of in-flight tasks: the
 # firstmate PRIMARY checkout (FM_ROOT) must stay on its default branch. If a
 # crewmate's branch/commits landed here instead of in its own isolated worktree,
