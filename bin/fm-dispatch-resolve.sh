@@ -41,8 +41,10 @@
 #   "Typed dispatch resolution" owns this tool's operator contract.
 #
 # Never-send check: when the optional $FM_HOME/config/dispatch-never-send list
-#   exists, every string value of the built request is checked against it
-#   before the POST. Each non-blank, non-# line is a literal matched
+#   exists, every operator-controlled string of the built request - the project
+#   name, the task text, and each rule's `when` - is checked against it before
+#   the POST; the tool's own fixed question and option text carries no operator
+#   content and is not matched. Each non-blank, non-# line is a literal matched
 #   case-insensitively, with surrounding whitespace trimmed and every run of
 #   whitespace, on both sides, treated as one space. A match, or a list that
 #   is not a readable regular file, prints one
@@ -280,8 +282,12 @@ never_send_off() {
   exit 0
 }
 
-# Checks every string the request carries, so no text reaches the network
-# unchecked. grep's own stderr is discarded because it can echo the pattern.
+# Checks every operator-controlled string the request carries - the project
+# name, the task text, and each rule's `when` - so no text of yours reaches the
+# network unchecked. The tool's own fixed question and option vocabulary carries
+# no operator content, so it is not matched and a listed value that collides
+# with it alone never turns resolution off.
+# grep's own stderr is discarded because it can echo the pattern.
 never_send_check() {
   local list value n=0 rc
   [ -e "$NEVER_SEND_PATH" ] || [ -L "$NEVER_SEND_PATH" ] || return 0
@@ -289,7 +295,8 @@ never_send_check() {
     || never_send_off "$NEVER_SEND_PATH is not a readable regular file"
   # Collapse whitespace runs on both sides so a value the brief wraps across
   # lines or spaces differently still matches
-  jq -r '.. | strings | gsub("\\s+"; " ")' <<<"$REQUEST" > "$SEND_TEXT" 2>/dev/null \
+  jq -r '[.state, (.questions.rule.criteria | del(.default))]
+    | .. | strings | gsub("\\s+"; " ")' <<<"$REQUEST" > "$SEND_TEXT" 2>/dev/null \
     || never_send_off "could not extract the request text to check"
   list=$(jq -Rr 'gsub("\\s+"; " ")' "$NEVER_SEND_PATH" 2>/dev/null) \
     || never_send_off "could not read $NEVER_SEND_PATH"
@@ -302,7 +309,7 @@ never_send_check() {
     esac
     grep -qiF -e "$value" "$SEND_TEXT" 2>/dev/null; rc=$?
     case "$rc" in
-      0) never_send_off "brief text matches $NEVER_SEND_PATH line $n" ;;
+      0) never_send_off "brief, project, or rule text matches $NEVER_SEND_PATH line $n" ;;
       1) ;;
       *) never_send_off "could not check the request text against $NEVER_SEND_PATH line $n" ;;
     esac

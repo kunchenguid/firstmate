@@ -1108,6 +1108,7 @@ bin/fm-dispatch-resolve.sh data/<id>/brief.md --project <name>        # TOON blo
 **When firstmate invokes the resolver**
 
 Firstmate invokes the resolve path directly after writing the brief, without a preflight; the absent-key off line is handled exactly like every other non-clear outcome.
+
 **What the model receives**
 
 When on and at least one rule exists, the tool sends the project name and the brief's task-specific text as state.
@@ -1134,7 +1135,8 @@ Every entry is trimmed of surrounding whitespace, and any run of whitespace, in 
 Example Client Ltd
 ```
 
-Before the request is sent, every string in it is checked: the project name, the task text, each rule's `when`, and the fixed question text.
+Before the request is sent, every operator-controlled string in it is checked: the project name, the task text, and each rule's `when`.
+The tool's own fixed question and option text carries no operator content and is not checked, so a listed value that appears only in that vocabulary leaves resolution running.
 A match stops the request: the resolver behaves exactly as when it is off, printing one `dispatch-resolve: off (...; nothing sent)` line on stderr and nothing on stdout, making no network or quota call, and exiting 0, so firstmate dispatches through its existing intake.
 A list that is present but not a readable regular file also stops the request the same way rather than sending unchecked text.
 That one diagnostic names the list line number at most and never prints the listed value or the matching text.
@@ -1175,7 +1177,7 @@ No qualifying option, or two equally probable qualifying options, produces `ambi
 - The rule answer and the `escalation` answer must contain exactly every offered choice, use numeric probabilities from 0 through 1 that sum to approximately 1 within 0.01, and carry a confidence from 0 through 1; the `escalation` answer must also be present and name one of its own offered options, so a missing or unrecognized escalation answer is an `error` outcome, never read as "no escalation".
 - The classifier axes other than `escalation` are published evidence only: their choices and confidences ride on the `classification:` line and never gate the route, so low confidence on an axis no gate reads cannot veto an otherwise valid rule match.
 - An evidence axis that is missing, malformed, or answered outside its offered options is published as `unavailable` on the `classification:` line and changes nothing else, so one bad evidence distribution never discards a valid rule match.
-- The `escalation` axis can make the tool decline to emit a profile, but only when its own confidence reaches the same floor the rule answer must clear.
+- The `escalation` axis can make the tool decline to emit a profile, but only when its own confidence reaches the fixed 0.6 escalation floor, which a rule's `min_confidence` never raises.
 - A `yes` below the floor is published on the `classification:` line and routes as usual, so a near-coin-flip reading never spends a full intake.
 - No classifier answer can directly authorize a model launch, a merge, a sensitive action, or an exception to local policy, and a declared `approval` or rule-floor gate is always reported ahead of the classifier, whatever its confidence.
 

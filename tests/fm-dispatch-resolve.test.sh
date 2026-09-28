@@ -300,29 +300,49 @@ assert_contains "$(jq -r .state.task.brief "$LOG/body")" 'Acme-Ledger' "a list w
 printf '%s\n' '# private values' '' '  acme-ledger  ' > "$NEVER_SEND"
 reset_log
 TYPESAFE_API_KEY=$KEY run code out err "$PRIVATE_BRIEF" --project pager
-expect_withheld "a case-insensitive literal match" "brief text matches $NEVER_SEND line 3" 'acme-ledger' 'Acme-Ledger'
+expect_withheld "a case-insensitive literal match" "brief, project, or rule text matches $NEVER_SEND line 3" 'acme-ledger' 'Acme-Ledger'
 
 WRAPPED_BRIEF="$TMP_ROOT/wrapped-brief.md"
 printf '# Task\n## Captain'"'"'s intent\nFix the pager for Example Client\nLtd before\tthe\xc2\xa0release.\n' > "$WRAPPED_BRIEF"
 printf '%s\n' 'example  client ltd' > "$NEVER_SEND"
 reset_log
 TYPESAFE_API_KEY=$KEY run code out err "$WRAPPED_BRIEF" --project pager
-expect_withheld "a literal the brief wraps across lines" "brief text matches $NEVER_SEND line 1" 'example' 'Example'
+expect_withheld "a literal the brief wraps across lines" "brief, project, or rule text matches $NEVER_SEND line 1" 'example' 'Example'
 
 printf '%s\n' 'before the release' > "$NEVER_SEND"
 reset_log
 TYPESAFE_API_KEY=$KEY run code out err "$WRAPPED_BRIEF" --project pager
-expect_withheld "a literal the brief spaces with a tab and a no-break space" "brief text matches $NEVER_SEND line 1" 'release'
+expect_withheld "a literal the brief spaces with a tab and a no-break space" "brief, project, or rule text matches $NEVER_SEND line 1" 'release'
 
 printf '%s\n' 'orion-private' > "$NEVER_SEND"
 reset_log
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project orion-private
-expect_withheld "a project-name match" "brief text matches $NEVER_SEND line 1" 'orion-private'
+expect_withheld "a project-name match" "brief, project, or rule text matches $NEVER_SEND line 1" 'orion-private'
 
 printf '%s\n' 'stated root cause' > "$NEVER_SEND"
 reset_log
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project pager
-expect_withheld "a rule-criterion match" "brief text matches $NEVER_SEND line 1" 'stated root cause'
+expect_withheld "a rule-criterion match" "brief, project, or rule text matches $NEVER_SEND line 1" 'stated root cause'
+
+# Only operator-controlled content is matched: the tool's own fixed question and
+# option vocabulary is not, so a value that collides with it alone still routes.
+CREDENTIAL_BRIEF="$TMP_ROOT/credential-brief.md"
+cat > "$CREDENTIAL_BRIEF" <<'MD'
+# Task
+## Captain's intent
+Rotate the deploy credentials for the pager.
+MD
+printf '%s\n' 'credentials' > "$NEVER_SEND"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$PRIVATE_BRIEF" --project pager
+assert_contains "$out" '  status: clear' "a value only the fixed question text carries leaves resolution running"
+body=$(cat "$LOG/body")
+assert_contains "$(jq -r '.questions.escalation.instructions' <<<"$body")" 'credentials' "the fixed question text that carries the listed value is still sent"
+assert_not_contains "$(jq -r '[.state, (.questions.rule.criteria | del(.default))] | tostring' <<<"$body")" 'credentials' "no operator-controlled string carried the listed value"
+
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$CREDENTIAL_BRIEF" --project pager
+expect_withheld "the same value in the task text" "brief, project, or rule text matches $NEVER_SEND line 1" 'credentials'
 
 SECOND_HOME="$TMP_ROOT/secondmate-home"
 mkdir -p "$SECOND_HOME/config"
@@ -336,7 +356,7 @@ PRIMARY_HOME=$HOME_DIR
 HOME_DIR=$SECOND_HOME
 reset_log
 TYPESAFE_API_KEY=$KEY run code out err "$PRIVATE_BRIEF" --project pager
-expect_withheld "an inherited list in a secondmate home" "brief text matches $SECOND_HOME/config/dispatch-never-send line 1" 'acme-ledger' 'Acme-Ledger'
+expect_withheld "an inherited list in a secondmate home" "brief, project, or rule text matches $SECOND_HOME/config/dispatch-never-send line 1" 'acme-ledger' 'Acme-Ledger'
 HOME_DIR=$PRIMARY_HOME
 
 rm -f "$NEVER_SEND"
