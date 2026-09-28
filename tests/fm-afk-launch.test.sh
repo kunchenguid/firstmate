@@ -118,6 +118,51 @@ unit_retired_two_step_entry_is_refused() {
   rm -rf "$st"
 }
 
+# The entry-time reporting warning: `enter` states that exiting the agent (not
+# detaching) stops reporting for the window, and says whether the captain pane
+# holds a live agent when it can be read. Real tmux panes on a private tmux
+# server (TMUX_TMPDIR), so no shared tmux or Herdr session is touched.
+unit_enter_warns_that_exiting_the_agent_stops_reporting() {
+  local st sock shell_pane agent_pane out
+  if ! command -v tmux >/dev/null 2>&1; then
+    pass "enter reporting warning: SKIP (tmux absent)"
+    return 0
+  fi
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-warn.XXXXXX")
+  sock=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-warn-tmux.XXXXXX")
+  mkdir -p "$st/state"
+  cp "$(command -v sleep)" "$st/claude"
+  if ! env -u TMUX -u TMUX_PANE TMUX_TMPDIR="$sock" tmux new-session -d -s warn-shell 'bash --norc --noprofile' \
+    || ! env -u TMUX -u TMUX_PANE TMUX_TMPDIR="$sock" tmux new-session -d -s warn-agent "$st/claude 600"; then
+    fail "enter reporting warning: could not start private tmux panes"
+    env -u TMUX -u TMUX_PANE TMUX_TMPDIR="$sock" tmux kill-server 2>/dev/null || true
+    rm -rf "$st" "$sock"
+    return 0
+  fi
+  shell_pane=$(env -u TMUX -u TMUX_PANE TMUX_TMPDIR="$sock" tmux display-message -p -t warn-shell '#{pane_id}')
+  agent_pane=$(env -u TMUX -u TMUX_PANE TMUX_TMPDIR="$sock" tmux display-message -p -t warn-agent '#{pane_id}')
+  sleep 0.5
+  out=$(env -u TMUX -u TMUX_PANE TMUX_TMPDIR="$sock" FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET="$shell_pane" \
+    FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" enter --words 'merge it when green' 2>&1)
+  if printf '%s' "$out" | grep -F 'exiting the agent (for example /exit) stops all reporting for the rest of the window' >/dev/null \
+    && printf '%s' "$out" | grep -F "WARNING: this pane ($shell_pane) does not currently hold a live agent" >/dev/null \
+    && [ -f "$st/state/.afk-contract" ]; then
+    pass "enter: warns that exiting the agent stops reporting, and flags a pane left at a bare shell"
+  else
+    fail "enter: reporting warning or bare-shell pane read wrong: $out"
+  fi
+  out=$(env -u TMUX -u TMUX_PANE TMUX_TMPDIR="$sock" FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET="$agent_pane" \
+    FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" enter --words 'merge it when green' 2>&1)
+  if printf '%s' "$out" | grep -F "This pane ($agent_pane) currently holds a live agent." >/dev/null \
+    && ! printf '%s' "$out" | grep -F 'WARNING:' >/dev/null; then
+    pass "enter: reports a live agent in the captain pane without a warning"
+  else
+    fail "enter: a live agent pane was not reported as live: $out"
+  fi
+  env -u TMUX -u TMUX_PANE TMUX_TMPDIR="$sock" tmux kill-server 2>/dev/null || true
+  rm -rf "$st" "$sock"
+}
+
 unit_pi_never_launches_the_daemon() {
   local st harness out rc
   for harness in pi pi-signed; do
@@ -1187,6 +1232,76 @@ unit_native_entry_preserves_prepared_state() {
   rm -rf "$st"
 }
 
+# Restarting an unfinished window (state/.afk present, daemon dead) keeps a
+# terminal-failure marker and its held buffer for the return brief, on every
+# start entry; a fresh entry (no state/.afk) still clears the prior session's.
+seed_failed_window() {  # <home> <with-afk: 1|0>
+  mkdir -p "$1/state"
+  [ "$2" -eq 1 ] && printf 'away\n0\n' > "$1/state/.afk"
+  printf 'fm away-mode FAILED: reporting stopped\nBuffered items:\nitem\n' > "$1/state/.subsuper-inject-wedged"
+  printf 'done: PR https://x/y/pull/9\n' > "$1/state/.subsuper-escalations"
+  : > "$1/state/.subsuper-escalations.since"
+}
+
+failed_window_intact() {  # <home>
+  [ "$(head -1 "$1/state/.subsuper-inject-wedged" 2>/dev/null)" = 'fm away-mode FAILED: reporting stopped' ] \
+    && [ -s "$1/state/.subsuper-escalations" ] && [ -e "$1/state/.subsuper-escalations.since" ]
+}
+
+failed_window_cleared() {  # <home>
+  [ ! -e "$1/state/.subsuper-inject-wedged" ] && [ ! -e "$1/state/.subsuper-escalations" ] \
+    && [ ! -e "$1/state/.subsuper-escalations.since" ]
+}
+
+unit_restart_preserves_failed_window() {
+  local st entry with
+  for entry in start_main native launch_start; do
+    for with in 1 0; do
+      st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-restart.XXXXXX")
+      seed_failed_window "$st" "$with"
+      FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+        entry=$1; script=$2
+        . "$script"
+        case "$entry" in
+          start_main)
+            FM_AFK_DAEMON=/bin/true
+            fm_afk_start_main ;;
+          native)
+            fm_afk_launch_catchup_pending() { return 1; }
+            fm_afk_launch_daemon_allowed() { return 0; }
+            fm_afk_launch_record_require() { return 0; }
+            fm_afk_launch_reconcile() { return 0; }
+            fm_afk_launch_record_write() { return 0; }
+            fm_afk_launch_start_native ;;
+          launch_start)
+            fm_afk_launch_catchup_pending() { return 1; }
+            fm_afk_launch_daemon_allowed() { return 0; }
+            fm_afk_launch_record_require() { return 0; }
+            discover_supervisor_target() { echo %1; }
+            discover_supervisor_backend() { echo tmux; }
+            fm_afk_launch_reconcile() { return 0; }
+            fm_afk_launch_create_tmux() { return 0; }
+            fm_afk_launch_start ;;
+        esac
+      ' _ "$entry" "$([ "$entry" = start_main ] && echo "$START" || echo "$LAUNCH")" >/dev/null 2>&1
+      if [ "$with" -eq 1 ]; then
+        if failed_window_intact "$st"; then
+          pass "restart ($entry): an unfinished window's failure marker and buffer are preserved"
+        else
+          fail "restart ($entry): an unfinished window's failure marker or buffer was erased"
+        fi
+      else
+        if failed_window_cleared "$st"; then
+          pass "fresh entry ($entry): the prior session's failure marker and buffer are cleared"
+        else
+          fail "fresh entry ($entry): a prior session's failure marker or buffer leaked"
+        fi
+      fi
+      rm -rf "$st"
+    done
+  done
+}
+
 unit_close_failure_preserves_record() {
   local st
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-close-fail.XXXXXX")
@@ -1599,6 +1714,7 @@ e2e_tmux() {
 unit_clear_stale
 unit_enter_records_the_posture_in_one_step_without_a_daemon
 unit_retired_two_step_entry_is_refused
+unit_enter_warns_that_exiting_the_agent_stops_reporting
 unit_pi_never_launches_the_daemon
 unit_test_harness_seam_requires_the_marker
 unit_pi_enter_stop_does_not_claim_a_daemon_terminal
@@ -1633,6 +1749,7 @@ unit_supervision_host_quiet_fallback
 unit_supervision_host_quiet_after_afk
 unit_supervision_host_quiet_failed_start
 unit_native_entry_preserves_prepared_state
+unit_restart_preserves_failed_window
 unit_close_failure_preserves_record
 unit_record_publication_atomic
 unit_malformed_record_fails_closed

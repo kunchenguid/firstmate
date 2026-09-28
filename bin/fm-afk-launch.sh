@@ -68,7 +68,9 @@
 #                          [--expected-return <UTC ISO 8601>] [--spend <n>]
 #                              Write the away-posture record now, with no
 #                              separate confirmation, then print the entry
-#                              announcement and the read-back. With no words
+#                              announcement and the read-back, followed by the
+#                              reporting warning and whether this pane
+#                              currently holds a live agent. With no words
 #                              while away it is a refresh; new words replace
 #                              the mandate. On Pi this is the whole entry.
 #   fm-afk-launch.sh start     Capture the captain pane, then (unless the daemon
@@ -76,7 +78,9 @@
 #                              non-visible terminal for the detected backend and
 #                              record it. Idempotent: an already-running daemon
 #                              just refreshes state/.afk; a recorded-but-dead
-#                              terminal is reconciled (closed by id) first.
+#                              terminal is reconciled (closed by id) first. A
+#                              restart with state/.afk already present keeps the
+#                              window's artifacts; only a fresh entry clears them.
 #   fm-afk-launch.sh start-native
 #                              Prepare lifecycle state for a harness-native
 #                              background job and record that no terminal exists.
@@ -392,6 +396,25 @@ fm_afk_launch_enter() {
   fi
   "$FM_AFK_CONTRACT_CMD" enter "$@" || return
   fm_afk_launch_host_engine_note
+  fm_afk_launch_reporting_warning
+}
+
+# The entry-time reporting warning printed beside the read-back. A warning, never
+# a gate: docs/wedge-alarm.md "Terminal away-window failure" owns what happens
+# when the pane stops holding a live agent after entry.
+fm_afk_launch_reporting_warning() {
+  local target backend state
+  printf 'Reporting: the away posture reports into this pane. Detaching or closing the terminal client is fine, but exiting the agent (for example /exit) stops all reporting for the rest of the window; the window is then recorded as failed and the failure leads the return brief.\n'
+  if target=$(discover_supervisor_target) && backend=$(discover_supervisor_backend); then
+    state=$(supervisor_pane_agent_state "$backend" "$target" 2>/dev/null)
+  else
+    state=unresolved
+  fi
+  case "$state" in
+    alive) printf 'This pane (%s) currently holds a live agent.\n' "$target" ;;
+    dead|missing) printf 'WARNING: this pane (%s) does not currently hold a live agent (%s); reports would have nowhere to land.\n' "$target" "$state" ;;
+    *) printf 'Whether this pane holds a live agent could not be read (%s).\n' "${state:-unreadable}" ;;
+  esac
 }
 
 # The command run inside the created terminal. Real launch runs the shared
@@ -751,6 +774,10 @@ fm_afk_launch_start() {
   done
   if ! fm_afk_launch_reconcile; then
     result=1
+  elif [ "$had_afk" -eq 1 ]; then
+    # Restarting an unfinished window, not a fresh entry: preserve its
+    # artifacts (including a terminal-failure marker) for the return brief.
+    result=0
   else
     if fm_afk_clear_stale_artifacts "$FM_AFK_LAUNCH_STATE"; then
       result=0
@@ -808,7 +835,12 @@ fm_afk_launch_start_native() {
   done
   fm_afk_launch_reconcile || result=1
   if [ "$result" -eq 0 ]; then
-    if ! fm_afk_clear_stale_artifacts "$FM_AFK_LAUNCH_STATE"; then
+    # Restarting an unfinished window (state/.afk already existed) is not a
+    # fresh entry - preserve its artifacts, including a terminal-failure
+    # marker and its buffer, for the return brief.
+    if [ "$had_afk" -eq 1 ]; then
+      fm_afk_launch_flag_write || result=1
+    elif ! fm_afk_clear_stale_artifacts "$FM_AFK_LAUNCH_STATE"; then
       fm_afk_launch_log "failed to clear stale away-mode artifacts"
       result=1
     elif ! fm_afk_launch_flag_write; then

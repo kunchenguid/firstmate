@@ -14,15 +14,16 @@
 # records, never from conversation memory: the archived away-posture record
 # (bin/fm-afk-contract.sh), the supervision outcome store
 # (bin/fm-branch-outcome.sh), the held set in the backlog (tasks-axi), and the
-# status logs. Its order is fixed: supervisor health across the away window
-# first, then the captain's away instructions - their words verbatim, including
-# superseded in-session mandates - followed by the away session's account of
-# every visible action it took under them (each non-silent outcome-store row
-# from the window whose summary opens with the "per your away instructions:"
-# marker the branch prompt in bin/fm-branch-prompt.sh requires), then what is
-# waiting on the captain,
-# then what was tried and failed or could not be fixed, then landed work whose
-# task record is still live (the recorded PR carries the
+# status logs. Its order is fixed: a failed away window leads when the daemon
+# recorded one (docs/wedge-alarm.md "Terminal away-window failure"), then
+# supervisor health across the away window, then the captain's away
+# instructions - their words verbatim, including superseded in-session
+# mandates - followed by the away session's account of every visible action it
+# took under them (each non-silent outcome-store row from the window whose
+# summary opens with the "per your away instructions:" marker the branch
+# prompt in bin/fm-branch-prompt.sh requires), then what is waiting on the
+# captain, then what was tried and failed or could not be fixed, then landed
+# work whose task record is still live (the recorded PR carries the
 # merge-notification marker bin/fm-pr-lib.sh owns, read from durable records
 # only, never the forge - finished work that owes an ordinary teardown, which
 # is fleet work and so waits for the gate rather than holding it), then what
@@ -321,7 +322,7 @@ return_guard() {
 # --- supervisor health, snapshotted before anything is shut down ------------
 
 health_snapshot() {  # <evidence-file>
-  local evidence=$1 beat_age lines=""
+  local evidence=$1 beat_age lines="" wedge
   beat_age=$(fm_path_age "$STATE/.last-watcher-beat")
   if [ -e "$STATE/.watcher-down" ]; then
     # The marker survives past its episode in an acked:* state
@@ -346,8 +347,18 @@ GAP: the away daemon was not running at return (the away flag stood with no live
 GAP: the watcher beat was ${beat_age}s old at return (grace ${RETURN_GRACE}s)"
   fi
   if [ -s "$STATE/.subsuper-inject-wedged" ]; then
-    lines="$lines
-delivery wedged: $(head -1 "$STATE/.subsuper-inject-wedged" 2>/dev/null || true)"
+    wedge=$(head -1 "$STATE/.subsuper-inject-wedged" 2>/dev/null || true)
+    # The daemon's terminal away-window failure marker (bin/fm-supervise-daemon.sh
+    # AWAY_FAILED_PREFIX; docs/wedge-alarm.md "Terminal away-window failure").
+    case "$wedge" in
+      'fm away-mode FAILED:'*)
+        append_evidence failure "$wedge" "$evidence"
+        lines="$lines
+FAILED: away reporting stopped for the rest of the window (the failure leads this brief)" ;;
+      *)
+        lines="$lines
+delivery wedged: $wedge" ;;
+    esac
   fi
   if [ -z "$(printf '%s' "$lines" | tr -d '[:space:]')" ]; then
     lines="supervision ran through the away window with no detected gap (watcher beat ${beat_age}s old at return)"
@@ -456,7 +467,13 @@ render_return_brief() {  # <evidence-file> <blockers-file> <since-epoch> <drain-
   fi
   printf ' ===\n'
 
-  # 1. health, first, always.
+  # 0. a failed away window leads, ahead of everything else.
+  if grep -q "^evidence$(printf '\t')failure$(printf '\t')" "$evidence" 2>/dev/null; then
+    printf 'AWAY WINDOW FAILED - reporting into your pane stopped partway through this window:\n'
+    awk -F '\t' '$1 == "evidence" && $2 == "failure" { print "  - " $3 }' "$evidence"
+  fi
+
+  # 1. health, first after any failure, always.
   printf 'Supervisor health:\n'
   awk -F '\t' '$1 == "evidence" && ($2 == "health" || ($2 == "lifecycle" && ($3 ~ /^outcome store unreadable/ || $3 ~ /^status file unreadable:/ || $3 ~ /^away-posture record (unreadable|missing):/ || $3 ~ /^archived away-posture record/ || $3 ~ /^superseded away-posture record/))) { print "  - " $3 }' "$evidence"
 

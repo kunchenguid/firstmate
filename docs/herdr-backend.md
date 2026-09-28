@@ -803,6 +803,7 @@ On stop:
 3. The AFK flag is removed last.
 
 A fresh entry clears stale transient escalation caches, while durable queue and task records remain authoritative.
+Restarting an unfinished window (`state/.afk` already present) is not a fresh entry and keeps those artifacts ([`wedge-alarm.md`](wedge-alarm.md#terminal-away-window-failure)).
 
 ## Destructive lab safety
 

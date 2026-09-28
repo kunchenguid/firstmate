@@ -22,9 +22,34 @@ if [ -z "${FM_TEST_DAEMON_SOURCED:-}" ]; then
   . "$DAEMON"
 fi
 
+# tmux resolves its server from $TMUX before TMUX_TMPDIR, so the private-server
+# tests below could otherwise reach the caller's live tmux server.
+unset TMUX TMUX_PANE
 TMP_ROOT=$(fm_test_tmproot fm-daemon-tests)
 FM_DAEMON_PRIMARY_HARNESS=claude
 export FM_DAEMON_PRIMARY_HARNESS
+
+# private_tmux_server tests register their socket dir here so an assertion
+# failure (fail() exits the whole suite) still reaps the private server and
+# socket directory instead of leaking them.
+FM_DAEMON_TEST_TMUX_SOCKS=()
+fm_daemon_test_tmux_cleanup() {
+  local s
+  for s in "${FM_DAEMON_TEST_TMUX_SOCKS[@]:-}"; do
+    [ -n "$s" ] || continue
+    TMUX_TMPDIR="$s" tmux kill-server 2>/dev/null || true
+    rm -rf "$s"
+  done
+}
+fm_daemon_test_cleanup() {
+  fm_daemon_test_tmux_cleanup
+  fm_test_cleanup
+}
+trap fm_daemon_test_cleanup EXIT
+trap 'fm_daemon_test_cleanup; exit 130' INT
+trap 'fm_daemon_test_cleanup; exit 143' TERM
+trap 'fm_daemon_test_cleanup; exit 129' HUP
+trap 'fm_daemon_test_cleanup; exit 131' QUIT
 
 # What the pinned claude primary received: each typed line, with every
 # record-backed doorbell followed by the envelope its record holds.
@@ -2299,7 +2324,218 @@ test_max_defer_pending_composer_alarms_without_typing() {
   [ -s "$state/.subsuper-inject-wedged" ] || fail "pending composer did not raise a wedge alarm marker"
   [ -s "$state/.subsuper-escalations" ] || fail "buffer lost while composer was pending"
   grep -F 'human draft' "$dir/composer" >/dev/null || fail "pending composer content changed"
+  grep -F 'fm away-mode FAILED:' "$state/.subsuper-inject-wedged" >/dev/null \
+    && fail "a live agent holding pending text was failed terminally instead of alarming"
   pass "max-defer on a pending composer alarms without typing"
+}
+
+# Real panes on a private tmux server (TMUX_TMPDIR), so the process-level
+# classifier (supervisor_pane_agent_state) reads real foreground processes and
+# no shared tmux session is touched. Prints the socket dir; the caller exports
+# it as TMUX_TMPDIR and kills the server when done.
+private_tmux_server() {  # <dir>
+  local sock
+  command -v tmux >/dev/null 2>&1 || return 1
+  sock=$(mktemp -d "${TMPDIR:-/tmp}/fm-daemon-tmux.XXXXXX") || return 1
+  cp "$(command -v sleep)" "$1/claude"
+  printf '%s\n' "$sock"
+}
+
+# The 2026-09-20 incident: the captain exited the agent, leaving a bare shell in
+# the pane. The composer guard correctly reads that as unknown and defers, so a
+# max-defer wedge there can never clear by itself. The process-level classifier
+# proves the pane dead, so the away window must end as FAILED - a durable marker
+# the return brief leads with, plus exactly one active alert - instead of
+# deferring and re-alarming into a log nobody reads.
+test_max_defer_dead_shell_fails_window_terminally() {
+  local dir state sock pane log first
+  dir=$(make_supercase maxdefer-dead-shell)
+  state="$dir/state"
+  log="$dir/alert.log"; : > "$log"
+  sock=$(private_tmux_server "$dir") || { pass "max-defer dead shell: SKIP (tmux absent)"; return 0; }
+  FM_DAEMON_TEST_TMUX_SOCKS+=("$sock")
+  TMUX_TMPDIR="$sock" tmux new-session -d -s captain 'bash --norc --noprofile' \
+    || { rm -rf "$sock"; fail "max-defer dead shell: could not start a private tmux pane"; }
+  pane=$(TMUX_TMPDIR="$sock" tmux display-message -p -t captain '#{pane_id}')
+  sleep 0.5
+  escalate_add "$state" "done: PR https://x/y/pull/9 checks green"
+  echo $(( $(date +%s) - 600 )) > "$state/.subsuper-escalations.since"
+  afk_enter "$state"
+  AWAY_FAILED_NOTIFIED=0
+  TMUX_TMPDIR="$sock" FM_WEDGE_ALARM_LOG="$log" \
+    FM_WEDGE_ALARM_CHANNEL=herdr FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET="$pane" \
+    FM_ESCALATE_BATCH_SECS=99999 FM_MAX_DEFER_SECS=60 housekeeping "$state"
+  TMUX_TMPDIR="$sock" tmux capture-pane -p -t "$pane" | grep -F 'pull/9' >/dev/null \
+    && fail "typed an escalation into a dead-shell pane"
+  first=$(head -1 "$state/.subsuper-inject-wedged" 2>/dev/null || true)
+  case "$first" in
+    "fm away-mode FAILED:"*) ;;
+    *) fail "a max-defer wedge on a dead-shell pane did not fail the away window terminally: '$first'" ;;
+  esac
+  grep -F 'done: PR https://x/y/pull/9' "$state/.subsuper-inject-wedged" >/dev/null \
+    || fail "the failure record does not carry the undelivered escalation"
+  [ "$(grep -c '^herdr' "$log")" -eq 1 ] || fail "terminal failure did not fire exactly one active alert: $(cat "$log")"
+  grep -F 'away mode FAILED' "$log" >/dev/null || fail "the active alert does not name the failed window: $(cat "$log")"
+  grep -F 'done: PR https://x/y/pull/9' "$state/.subsuper-escalations" >/dev/null \
+    || fail "buffer lost after the terminal failure (must be held for the return brief)"
+  # Terminal, not a repeating defer: a later window (marker aged past max-defer,
+  # fresh process memory) neither re-alarms, re-attempts delivery, nor rewrites
+  # the failure into an ordinary wedge.
+  touch -m -d "@$(( $(date +%s) - 600 ))" "$state/.subsuper-inject-wedged" 2>/dev/null \
+    || touch -mt "$(date -r "$(( $(date +%s) - 600 ))" '+%Y%m%d%H%M.%S')" "$state/.subsuper-inject-wedged"
+  AWAY_FAILED_NOTIFIED=0
+  TMUX_TMPDIR="$sock" FM_WEDGE_ALARM_LOG="$log" \
+    FM_WEDGE_ALARM_CHANNEL=herdr FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET="$pane" \
+    FM_ESCALATE_BATCH_SECS=0 FM_MAX_DEFER_SECS=60 housekeeping "$state"
+  [ "$(grep -c '^herdr' "$log")" -eq 1 ] || fail "a failed window re-alarmed like a repeating defer: $(cat "$log")"
+  [ "$(head -1 "$state/.subsuper-inject-wedged")" = "$first" ] || fail "the failure record was rewritten after the window failed"
+  if TMUX_TMPDIR="$sock" FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET="$pane" escalate_flush "$state"; then
+    fail "escalate_flush delivered after the away window failed"
+  fi
+  TMUX_TMPDIR="$sock" tmux capture-pane -p -t "$pane" | grep -F 'pull/9' >/dev/null \
+    && fail "delivery was re-attempted after the window failed"
+  TMUX_TMPDIR="$sock" tmux kill-server 2>/dev/null || true
+  rm -rf "$sock"
+  pass "max-defer on a dead-shell pane fails the away window terminally: durable record, one alert, buffer held, no repeat"
+}
+
+# Missing proof of liveness is not proof of death: a live agent whose composer
+# reads unknown (here a blank, unidentified screen) past max-defer keeps the
+# ordinary, repeating wedge alarm and its buffer, so a later tick can deliver.
+test_max_defer_live_agent_unknown_composer_does_not_fail_window() {
+  local dir state sock pane log first
+  dir=$(make_supercase maxdefer-live-unknown)
+  state="$dir/state"
+  log="$dir/alert.log"; : > "$log"
+  sock=$(private_tmux_server "$dir") || { pass "max-defer live agent: SKIP (tmux absent)"; return 0; }
+  FM_DAEMON_TEST_TMUX_SOCKS+=("$sock")
+  TMUX_TMPDIR="$sock" tmux new-session -d -s captain "$dir/claude 600" \
+    || { rm -rf "$sock"; fail "max-defer live agent: could not start a private tmux pane"; }
+  pane=$(TMUX_TMPDIR="$sock" tmux display-message -p -t captain '#{pane_id}')
+  sleep 0.5
+  [ "$(TMUX_TMPDIR="$sock" supervisor_pane_agent_state tmux "$pane")" = alive ] \
+    || fail "fixture: the agent pane did not classify alive"
+  [ "$(TMUX_TMPDIR="$sock" fm_backend_composer_state tmux "$pane" 2>/dev/null)" = unknown ] \
+    || fail "fixture: the agent pane composer did not read unknown"
+  escalate_add "$state" "needs-decision: pick A"
+  echo $(( $(date +%s) - 600 )) > "$state/.subsuper-escalations.since"
+  afk_enter "$state"
+  AWAY_FAILED_NOTIFIED=0
+  WEDGE_ALARM_LAST_EPOCH=0
+  TMUX_TMPDIR="$sock" FM_WEDGE_ALARM_LOG="$log" \
+    FM_WEDGE_ALARM_CHANNEL=herdr FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET="$pane" \
+    FM_ESCALATE_BATCH_SECS=99999 FM_MAX_DEFER_SECS=60 housekeeping "$state"
+  first=$(head -1 "$state/.subsuper-inject-wedged" 2>/dev/null || true)
+  [ -n "$first" ] || fail "a live agent with an unknown composer raised no wedge marker"
+  case "$first" in
+    "fm away-mode FAILED:"*) fail "a live agent with an unknown composer failed the away window: '$first'" ;;
+  esac
+  away_window_failed "$state" && fail "away_window_failed reports a live agent's window as failed"
+  [ "$(grep -c '^herdr' "$log")" -eq 1 ] || fail "the ordinary wedge alarm did not fire: $(cat "$log")"
+  grep -F 'away mode FAILED' "$log" >/dev/null && fail "a live agent's wedge alerted as a failed window: $(cat "$log")"
+  [ -s "$state/.subsuper-escalations" ] || fail "buffer lost on a live agent's wedge"
+  TMUX_TMPDIR="$sock" tmux kill-server 2>/dev/null || true
+  rm -rf "$sock"
+  pass "max-defer on a live agent with an unknown composer keeps the repeating wedge, not a failed window"
+}
+
+# A captain pane id is classified by that pane, not by its window's name: a live
+# agent in a window whose name tmux would parse as another index or window.pane
+# (Claude Code's version title "2.1.19", or a plain "1") must still read alive,
+# never as the bare shell that the misparsed target happens to point at.
+test_supervisor_pane_state_ignores_index_like_window_names() {
+  local dir sock pane name
+  dir=$(make_supercase pane-state-window-name)
+  sock=$(private_tmux_server "$dir") || { pass "pane state by window name: SKIP (tmux absent)"; return 0; }
+  FM_DAEMON_TEST_TMUX_SOCKS+=("$sock")
+  TMUX_TMPDIR="$sock" tmux new-session -d -s cap 'bash --norc --noprofile' \
+    || { rm -rf "$sock"; fail "pane state by window name: could not start a private tmux session"; }
+  TMUX_TMPDIR="$sock" tmux new-window -d -t cap:1 'bash --norc --noprofile'
+  TMUX_TMPDIR="$sock" tmux new-window -d -t cap:2 'bash --norc --noprofile'
+  pane=$(TMUX_TMPDIR="$sock" tmux new-window -d -P -F '#{pane_id}' -t cap:5 "$dir/claude 600")
+  sleep 0.5
+  for name in 2.1.19 1; do
+    TMUX_TMPDIR="$sock" tmux rename-window -t "$pane" "$name"
+    [ "$(TMUX_TMPDIR="$sock" supervisor_pane_agent_state tmux "$pane")" = alive ] || {
+      TMUX_TMPDIR="$sock" tmux kill-server 2>/dev/null || true
+      rm -rf "$sock"
+      fail "a live agent pane in a window named '$name' did not classify alive"
+    }
+  done
+  TMUX_TMPDIR="$sock" tmux kill-server 2>/dev/null || true
+  rm -rf "$sock"
+  pass "a live agent pane classifies alive whatever its window is named"
+}
+
+test_max_defer_vanished_pane_fails_window_even_without_alert_channel() {
+  local dir state sock pane log first
+  dir=$(make_supercase maxdefer-pane-gone)
+  state="$dir/state"
+  log="$dir/alert.log"; : > "$log"
+  sock=$(private_tmux_server "$dir") || { pass "max-defer vanished pane: SKIP (tmux absent)"; return 0; }
+  FM_DAEMON_TEST_TMUX_SOCKS+=("$sock")
+  if ! TMUX_TMPDIR="$sock" tmux new-session -d -s keep "$dir/claude 600" \
+    || ! TMUX_TMPDIR="$sock" tmux new-session -d -s captain "$dir/claude 600"; then
+    TMUX_TMPDIR="$sock" tmux kill-server 2>/dev/null || true
+    rm -rf "$sock"
+    fail "max-defer vanished pane: could not start private tmux panes"
+  fi
+  pane=$(TMUX_TMPDIR="$sock" tmux display-message -p -t captain '#{pane_id}')
+  TMUX_TMPDIR="$sock" tmux kill-session -t captain
+  escalate_add "$state" "needs-decision: pick A"
+  echo $(( $(date +%s) - 600 )) > "$state/.subsuper-escalations.since"
+  afk_enter "$state"
+  AWAY_FAILED_NOTIFIED=0
+  # The main loop's pane-gone backoff runs the same escape (away_delivery_escape).
+  TMUX_TMPDIR="$sock" FM_WEDGE_ALARM_LOG="$log" \
+    FM_WEDGE_ALARM_CHANNEL=off FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET="$pane" \
+    FM_MAX_DEFER_SECS=60 away_delivery_escape "$state"
+  first=$(head -1 "$state/.subsuper-inject-wedged" 2>/dev/null || true)
+  case "$first" in
+    "fm away-mode FAILED:"*) ;;
+    *) fail "a vanished captain pane did not fail the away window: '$first'" ;;
+  esac
+  [ ! -s "$log" ] || fail "the off channel still fired an active alert"
+  [ -s "$state/.subsuper-escalations" ] || fail "buffer lost when the captain pane vanished"
+  TMUX_TMPDIR="$sock" tmux kill-server 2>/dev/null || true
+  rm -rf "$sock"
+  pass "a vanished captain pane fails the away window durably even when no active alert channel is configured"
+}
+
+# The terminal-failure marker is the durable record of a failed window, so it is
+# only ever published complete: an unwritable state dir leaves no marker, no
+# alert and no process-level "already notified" flag (the next tick retries);
+# a buffer that vanished before the write still publishes the failure record.
+test_away_window_fail_publishes_marker_atomically() {
+  local dir state log first
+  dir=$(make_supercase away-fail-atomic)
+  state="$dir/state"
+  log="$dir/alert.log"; : > "$log"
+  escalate_add "$state" "done: PR https://x/y/pull/9 checks green"
+  afk_enter "$state"
+  AWAY_FAILED_NOTIFIED=0
+  chmod a-w "$state"
+  if FM_WEDGE_ALARM_LOG="$log" FM_WEDGE_ALARM_CHANNEL=herdr away_window_fail "$state" 600; then
+    chmod u+w "$state"
+    fail "away_window_fail reported success although the marker could not be written"
+  fi
+  chmod u+w "$state"
+  [ ! -e "$state/.subsuper-inject-wedged" ] || fail "a failed marker write left a partial marker behind"
+  ! ls "$state"/.subsuper-inject-wedged.tmp.* >/dev/null 2>&1 || fail "a failed marker write leaked its temp file"
+  [ ! -s "$log" ] || fail "alerted although the window was not recorded: $(cat "$log")"
+  [ "$AWAY_FAILED_NOTIFIED" -eq 0 ] || fail "marked the window notified although it was not recorded"
+  away_window_failed "$state" && fail "the window reads as failed with no marker"
+  FM_WEDGE_ALARM_LOG="$log" FM_WEDGE_ALARM_CHANNEL=herdr away_window_fail "$state" 600 \
+    || fail "the retry after the state dir became writable did not record the failure"
+  first=$(head -1 "$state/.subsuper-inject-wedged")
+  case "$first" in "fm away-mode FAILED:"*) ;; *) fail "the retried marker does not lead with the failure: '$first'" ;; esac
+  [ "$(grep -c '^herdr' "$log")" -eq 1 ] || fail "the retry did not fire exactly one alert: $(cat "$log")"
+  rm -f "$state/.subsuper-inject-wedged" "$state/.subsuper-escalations"
+  AWAY_FAILED_NOTIFIED=0
+  FM_WEDGE_ALARM_LOG="$log" FM_WEDGE_ALARM_CHANNEL=off away_window_fail "$state" 600 \
+    || fail "a vanished buffer stopped the failure record from being published"
+  away_window_failed "$state" || fail "the failure record is not readable after a vanished-buffer write"
+  pass "the terminal-failure marker is published complete or not at all, and a failed write retries with one alert"
 }
 
 test_normal_flush_clears_stale_wedge_marker() {
@@ -3207,6 +3443,11 @@ test_submit_ack_reports_pending_on_persistent_swallow
 test_max_defer_empty_swallow_types_once_and_alarms
 test_max_defer_flushes_empty_idle_pane
 test_max_defer_pending_composer_alarms_without_typing
+test_max_defer_dead_shell_fails_window_terminally
+test_max_defer_live_agent_unknown_composer_does_not_fail_window
+test_supervisor_pane_state_ignores_index_like_window_names
+test_max_defer_vanished_pane_fails_window_even_without_alert_channel
+test_away_window_fail_publishes_marker_atomically
 test_normal_flush_clears_stale_wedge_marker
 test_oversized_digest_is_bounded_and_kept_durable
 test_digest_budget_counts_omitted_events

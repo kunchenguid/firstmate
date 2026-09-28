@@ -912,6 +912,29 @@ test_return_brief_health_leads_with_a_gap() {
   pass "the return brief leads with supervisor health and names every detected gap"
 }
 
+test_return_brief_leads_with_a_failed_away_window() {
+  local dir out fail_line health_line
+  dir="$TMP_ROOT/brief-failed-window"
+  install_runner "$dir"
+  contract_in "$dir" enter >/dev/null 2>&1 || fail "could not write the away-posture record"
+  touch "$dir/home/state/.last-watcher-beat"
+  # The daemon's terminal failure record (bin/fm-supervise-daemon.sh away_window_fail).
+  printf 'fm away-mode FAILED: reporting stopped at 2026-09-20T13:00:00+0000 after 65384s undelivered: the captain pane default:1 no longer holds a live agent (agent exited or pane closed); 1 escalation(s) held for the return brief\nBuffered items:\ndone: PR https://x/y/pull/9 checks green\n' \
+    > "$dir/home/state/.subsuper-inject-wedged"
+  printf 'done: PR https://x/y/pull/9 checks green\n' > "$dir/home/state/.subsuper-escalations"
+  : > "$dir/home/state/.fake-drain"
+  out=$(run_return "$dir" begin) || fail "a failed window with no blockers should still clear the gate: $out"
+  assert_contains "$out" 'AWAY WINDOW FAILED' "the failed window was not named"
+  assert_contains "$out" 'after 65384s undelivered: the captain pane default:1 no longer holds a live agent' "the failure detail was not carried"
+  assert_not_contains "$out" 'no detected gap' "a failed window was reported as clean"
+  fail_line=$(line_of "$out" 'AWAY WINDOW FAILED')
+  health_line=$(line_of "$out" 'Supervisor health:')
+  [ "$fail_line" -lt "$health_line" ] || fail "the failure did not lead the brief"
+  [ "$fail_line" -eq $(( $(line_of "$out" '=== Return brief') + 1 )) ] || fail "the failure is not the first line after the brief header"
+  assert_contains "$out" 'done: PR https://x/y/pull/9 checks green' "the undelivered escalation was not surfaced"
+  pass "the return brief leads with a failed away window instead of reporting a quiet success"
+}
+
 test_return_brief_does_not_report_an_acked_watcher_down_marker_as_a_gap() {
   local dir out
   dir="$TMP_ROOT/brief-acked-marker"
@@ -1036,5 +1059,6 @@ test_statusless_leftover_record_keeps_catchup_gated_until_cleanup
 test_statusful_leftover_record_lets_catchup_clear
 test_return_guard_refuses_while_the_record_exists
 test_return_brief_health_leads_with_a_gap
+test_return_brief_leads_with_a_failed_away_window
 test_return_brief_does_not_report_an_acked_watcher_down_marker_as_a_gap
 test_return_brief_without_a_record_reports_the_legacy_flag

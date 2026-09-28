@@ -270,7 +270,7 @@ case "${1:-}" in
     [ "$print" = 1 ] && printf 'fakepane\n'
     exit 0 ;;
   capture-pane) cat "$COMPOSER" 2>/dev/null; exit 0 ;;
-  list-windows) exit 0 ;;
+  list-windows) printf '0\n'; exit 0 ;;
   send-keys)
     shift
     text=""; is_enter=0; lit=0
