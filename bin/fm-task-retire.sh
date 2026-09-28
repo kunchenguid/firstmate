@@ -19,6 +19,9 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 id=${1-}
 [ -n "$id" ] || { printf 'usage: fm-task-retire.sh <task-id> [fm-teardown arguments...]\n' >&2; exit 2; }
+# shellcheck source=bin/fm-task-lifecycle-lib.sh
+. "$SCRIPT_DIR/fm-task-lifecycle-lib.sh"
+fm_task_lifecycle_forbid_delegated_control "$id" || exit 6
 meta="$STATE/$id.meta"
 
 if [ ! -f "$meta" ] || [ -L "$meta" ]; then

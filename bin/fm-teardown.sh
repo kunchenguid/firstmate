@@ -306,6 +306,9 @@ if [ "$FORCE" = --force ] && [ "$(fm_lease_actor)" = branch ]; then
   exit "$FM_LEASE_REFUSE_EXIT"
 fi
 fm_lease_guard "$ID" "teardown (fm-teardown)"
+# shellcheck source=bin/fm-task-lifecycle-lib.sh
+. "$SCRIPT_DIR/fm-task-lifecycle-lib.sh"
+fm_task_lifecycle_forbid_delegated_control "$ID" || { fm_lease_guard_release; exit 6; }
 
 META="$STATE/$ID.meta"
 TREEHOUSE_PROJECT_LOCK=

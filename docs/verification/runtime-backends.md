@@ -6,6 +6,15 @@ This record contains reusable version-scoped evidence for active runtime guarant
 The backend guides own current setup, safety boundaries, and limitations.
 Exact task chronology, branch names, temporary homes, local paths, process ids, thread ids, and delivery transcripts remain in private reports or PR evidence.
 
+## Delegated continuation on Pi
+
+The installed Pi 0.87.1 SDK and CLI passed the isolated delegated-continuation guard on 2026-09-28.
+Run `FM_PI_BRANCH_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-pi-branch-live-e2e.test.sh` to refresh this evidence without Herdr or external provider traffic.
+The guard uses a deterministic local provider with the real session, tool, extension and persistence owners.
+Its same-input v1/v2 comparison observed MAIN routine tool calls of 1 and 0 respectively; the delegated path persisted a provisional precheck while retaining an open goal and served an independent MAIN request before branch settlement.
+This measures routing and host concurrency, not model judgment quality or production latency.
+The final guard output was `ok - real Pi delegated continuation preserves open goals and handles MAIN input concurrently`.
+
 ## Live Pi continuation
 
 The 2026-09-26 Pi 0.87.1 / pi-openai-codex-compat 0.0.16 live run verified heartbeat delivery and retained task obligations through provider success and compaction on isolated Herdr.

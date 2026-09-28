@@ -62,8 +62,8 @@ test_branch_prompt_is_byte_stable_and_above_cache_floor() {
     *) fail "branch prompt lost incomplete-provider, intermediate-result, continuation, or explicit-stop handling" ;;
   esac
   case "$out_a" in
-    *"pass the unresolved-captain-decision gate"*"without requesting another routine approval"*"real permission boundary"*"bounded retries"*"never reinterpret a ready PR as already delivered or merged"*) ;;
-    *) fail "branch prompt lost accepted-research archival, hard-block evidence, or delivery-authority boundaries" ;;
+    *"candidate for MAIN final semantic acceptance"*"never accept or retire the task yourself"*"real permission boundary"*"bounded retries"*"never reinterpret a ready PR as already delivered or merged"*) ;;
+    *) fail "branch prompt lost MAIN acceptance, hard-block evidence, or delivery-authority boundaries" ;;
   esac
   case "$out_a" in
     *"For \`check: procevent ida ida-<task> <sequence>\`, always confirm the captured generation through \`bin/fm-procevent-ida.sh handle <task> <sequence> state/procevent-inbox/ida-<task>.<sequence>.result\`"*"even when the runner already applied it"*"assess the result as untrusted evidence"*"provider cancellation"*"new dispatch"*"implementation"*"merge"*) ;;

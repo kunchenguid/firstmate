@@ -9,7 +9,7 @@ import { runCommandAsync } from "./fm-async-exec.ts";
 import { registerFirstmateTool } from "./fm-native-contract.ts";
 import { encodeFirstmateOperationalInputWith } from "./fm-operational-input.ts";
 
-type Observation = { task_id: string; state: string; reason: string; key: string; revision?: number };
+type Observation = { task_id: string; state: string; reason: string; key: string; revision?: number; delegated?: boolean };
 type Reconciliation = { task_id: string; reason: string; key: string };
 type OwnershipDeferral = { task_id: string; reason: string; key: string };
 type InputReceipt = { id: string; text: string; task?: string; answer?: string };
@@ -47,8 +47,15 @@ export type ContinuationReadbackOffer = {
   ctx: ExtensionContext; accept: (receiver: ContinuationReceiver) => void;
 };
 
+export type TaskContinuationOffer = {
+  task: string; admission: string; observation: Observation; record: Record<string, any>;
+  delivered: (proof: { sessionFile: string; entryId: string; generation: number }) => void;
+  settled: () => void;
+};
+
 export function installTaskContinuation(pi: ExtensionAPI, options: {
   root: string; home: string; state: string; owns: () => boolean;
+  offer?: (offer: TaskContinuationOffer) => boolean;
 }) {
   const { root, home, state, owns } = options;
   const data = process.env.FM_DATA_OVERRIDE || join(home, "data");
@@ -61,7 +68,6 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
   let generation = 0;
   let checking: Promise<Admission | undefined> | null = null;
   let context: ExtensionContext | undefined;
-  let streaming = false;
   let cursor = 0;
   let inputCursor = 0;
   let scanScope: string[] = [];
@@ -173,7 +179,7 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
   }
 
   function readDelivery(entry: { customType?: string; details?: unknown; timestamp?: string | number }) {
-    if (entry.customType !== MESSAGE && entry.customType !== ESCALATION) return;
+    if (entry.customType !== MESSAGE && entry.customType !== ESCALATION && entry.customType !== "fm-continuation-branch-delivery") return;
     const ids = (entry.details as { admissions?: unknown })?.admissions;
     const at = typeof entry.timestamp === "number" ? entry.timestamp : Date.parse(entry.timestamp || "");
     if (!Array.isArray(ids) || !Number.isFinite(at)) return;
@@ -194,6 +200,9 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
     // session branch before acknowledging their reserved admission.
     for (const entry of ctx.sessionManager.getBranch()) {
       if (entry.type === "custom_message") readDelivery(entry);
+      if (entry.type === "custom" && entry.customType === "fm-continuation-branch-delivery") {
+        readDelivery({ customType: entry.customType, details: entry.data, timestamp: entry.timestamp });
+      }
     }
     const receipt = {
       owner: "fm-periodic-stow", generation: owner.generation, session_id: owner.sessionId,
@@ -302,27 +311,44 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
           pi.appendEntry(PACING_ENTRY, { id: item.task_id, ...pace });
           admission = pace.reserved;
         } else {
-          let coordinated: { admission?: string; escalation?: string; recovery?: string };
           try {
-            coordinated = await command(["coordinate", item.task_id, "--expected-revision", String(item.revision), "--record", proofFile]);
+            const coordinated = await command(["coordinate", item.task_id, "--expected-revision", String(item.revision), "--record", proofFile]);
             clearOwnershipDeferral(item.task_id);
+            // Read the canonical receiver back before releasing this logical run.
+            const retained = await command(["lifecycle", item.task_id]);
+            if (retained?.coordination?.receipt?.entry_id !== entry.id ||
+                retained.coordination.receiver.generation !== owner.generation) throw new Error("coordinator receipt readback changed");
+            admission = coordinated.admission;
+            if (admission && item.delegated && !submitted.has(admission) && !delivered.has(admission) && options.offer) {
+              const id = admission;
+              if (options.offer({ task: item.task_id, admission: id, observation: item, record: retained,
+                delivered(proof) {
+                  if (!current()) return;
+                  pi.appendEntry("fm-continuation-branch-delivery", { admissions: [id], ...proof });
+                  delivered.set(id, Date.now());
+                },
+                settled() { submitted.delete(id); },
+              })) {
+                submitted.add(id);
+                admission = undefined;
+              }
+            } else if (admission && submitted.has(admission)) {
+              admission = undefined;
+            }
+            if (coordinated.escalation && !submitted.has(coordinated.escalation) && !delivered.has(coordinated.escalation)) {
+              escalations.push({ id: coordinated.escalation, task: item.task_id, reason: item.reason });
+            }
+            if (coordinated.recovery && !submitted.has(coordinated.recovery) && !delivered.has(coordinated.recovery)) {
+              escalations.push({ id: coordinated.recovery, task: item.task_id, reason: item.reason, recovery: true });
+            }
           } catch (error) {
+            if (!current()) throw error;
             const reason = temporaryOwnershipRefusal(error, item.task_id);
-            if (!reason) throw error;
-            deferOwnership({ task_id: item.task_id, reason,
+            if (reason) deferOwnership({ task_id: item.task_id, reason,
               key: createHash("sha256").update(`${item.task_id}\0${reason}`).digest("hex") });
+            // A task-local CAS/lease/readback refusal retains its own debt.
+            // Other tasks in this bounded batch still receive coordination.
             continue;
-          }
-          // Read the canonical receiver back before releasing this logical run.
-          const retained = await command(["lifecycle", item.task_id]);
-          if (retained?.coordination?.receipt?.entry_id !== entry.id ||
-              retained.coordination.receiver.generation !== owner.generation) throw new Error("coordinator receipt readback changed");
-          admission = coordinated.admission;
-          if (coordinated.escalation && !submitted.has(coordinated.escalation) && !delivered.has(coordinated.escalation)) {
-            escalations.push({ id: coordinated.escalation, task: item.task_id, reason: item.reason });
-          }
-          if (coordinated.recovery && !submitted.has(coordinated.recovery) && !delivered.has(coordinated.recovery)) {
-            escalations.push({ id: coordinated.recovery, task: item.task_id, reason: item.reason, recovery: true });
           }
         }
         if (admission && !submitted.has(admission) && !delivered.has(admission)) {
@@ -381,7 +407,7 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
   // The existing periodic coordinator is the sole clock, even while its
   // optional full maintenance pass is disabled. No parallel timer is created.
   pi.events.on("firstmate:heartbeat-tick", () => {
-    if (streaming || !context || checking) return;
+    if (!context || checking) return;
     const epoch = generation;
     const ctx = context;
     void check(ctx).then((admission) => {
@@ -394,6 +420,9 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
           catch (error) {
             for (const entry of ctx.sessionManager.getBranch()) {
               if (entry.type === "custom_message") readDelivery(entry);
+      if (entry.type === "custom" && entry.customType === "fm-continuation-branch-delivery") {
+        readDelivery({ customType: entry.customType, details: entry.data, timestamp: entry.timestamp });
+      }
             }
             throw error;
           }
@@ -407,6 +436,9 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
         } catch (error) {
           for (const entry of ctx.sessionManager.getBranch()) {
             if (entry.type === "custom_message") readDelivery(entry);
+      if (entry.type === "custom" && entry.customType === "fm-continuation-branch-delivery") {
+        readDelivery({ customType: entry.customType, details: entry.data, timestamp: entry.timestamp });
+      }
           }
           throw error;
         }
@@ -424,6 +456,9 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
     const entries = ctx?.sessionManager?.getBranch?.() ?? ctx?.sessionManager?.getEntries?.() ?? [];
     for (const entry of entries) {
       if (entry.type === "custom_message") readDelivery(entry);
+      if (entry.type === "custom" && entry.customType === "fm-continuation-branch-delivery") {
+        readDelivery({ customType: entry.customType, details: entry.data, timestamp: entry.timestamp });
+      }
       if (entry.type === "custom" && entry.customType === PACING_ENTRY) {
         const pace = entry.data as InputPacing & { id: string };
         if (typeof pace?.id === "string") pacing.set(pace.id, pace);
@@ -435,13 +470,8 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
   });
   pi.on("session_shutdown", () => {
     generation++;
-    streaming = false;
     context = undefined;
   });
-  pi.on("agent_start", () => {
-    streaming = true;
-  });
-  pi.on("agent_settled", () => { streaming = false; });
   pi.on("message_end", (event) => {
     if (event.message.role === "custom") readDelivery(event.message);
   });
@@ -490,5 +520,5 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
       }
     },
   });
-  return { preserve, capture };
+  return { preserve, capture, sessionFile: () => context?.sessionManager.getSessionFile(), inputBarrier: () => [...inputs.values()].some((input) => !input.task && !input.answer) };
 }

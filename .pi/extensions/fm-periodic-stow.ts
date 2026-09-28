@@ -367,7 +367,7 @@ function activate(pi: ExtensionAPI, ctx: ExtensionContext): void {
     // Offer maintenance first; the continuation receiver rechecks idle/input
     // after its asynchronous readback, so it cannot overtake user input.
     checkDue(pi, ctx);
-    if (safeSettled(ctx)) pi.events.emit("firstmate:heartbeat-tick", {});
+    pi.events.emit("firstmate:heartbeat-tick", {});
   }, tickMs);
   checkDue(pi, ctx);
 }

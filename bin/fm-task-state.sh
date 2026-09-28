@@ -7,6 +7,8 @@
 #   fm-task-state.sh lifecycle|observe|enroll <task-id>
 #   fm-task-state.sh reconcile <task-id> --expected-revision N --record private.json
 #   fm-task-state.sh coordinate <task-id> --expected-revision N --record receipt.json
+#   fm-task-state.sh branch-patch <task-id> --expected-revision N --record patch.json
+#   fm-task-state.sh readback <task-id>
 #   fm-task-state.sh action <task-id> --action-id ID --phase PHASE [receipt flags]
 # Canonical schema and flags: bin/fm-task-lifecycle.py --help.
 #
@@ -26,7 +28,7 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # The task-local goal owner is opt-in through enrollment, independent of the
 # provider/process state below. No historical task is enrolled by a state read.
 case "${1:-}" in
-  lifecycle|observe|enroll|reconcile|action|coordinate)
+  lifecycle|observe|enroll|reconcile|action|coordinate|branch-patch|readback)
     operation=$1; shift
     id=${1:-}; [ -n "$id" ] || exit 2
     shift

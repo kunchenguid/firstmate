@@ -41,7 +41,7 @@ A lifecycle observation refusal never infers a receiver or execution state: it p
 An exact pending short-operation or live supervision-lease refusal instead stays a quiet, session-persisted ownership deferral with bounded backoff; it cannot escape the Pi settlement boundary, authorize an effect replay, or prevent unrelated task observations, while any other refusal remains an actionable reconciliation error.
 The task stays open: the escalation is neither an executor receipt nor a fabricated task blocker, and main must assign an authorized executor, reconcile a real dependency, or assess acceptance when it resumes.
 Between due recovery turns, the same clock continues bounded readback without blocking heartbeat maintenance or independent input.
-An admission deferred by UI, tool, input or compaction activity stays reserved in the existing owner until the complete safety check permits delivery; a persisted native message confirms delivery without spending another attempt.
+A MAIN admission deferred by UI, tool, input or compaction activity stays reserved in the existing owner until the complete safety check permits delivery; a persisted native message confirms delivery without spending another attempt.
 Both timer delivery and the final before-settle submission recheck those protections after asynchronous readback; before-settle does not require the still-active logical run to become idle.
 This safeguard applies while Pi is alive; it introduces no process-exit recovery, external watchdog, cleanup engine, or parallel lifecycle truth store.
 `tests/fm-task-handoff.test.sh`, `tests/fm-pi-branch-extension.test.sh`, and `tests/fm-periodic-stow-herdr-live-e2e.test.sh` exercise these boundaries through public interfaces.
@@ -188,7 +188,7 @@ A home upgraded with outcomes already delivered treats those rows as processed o
 The generated [Pi supervision protocol](supervision-protocols/pi.md) owns event ownership for merged outcomes and main's acknowledgement duty, while deterministic entry delivery owns captain visibility.
 A no-change heartbeat outcome explicitly reported with `task=fleet` and `silent=true` is also delivered silently with no rendered note, while every other `routine` outcome stays rendered with its sailboat prefix.
 The branch prompt's "Verdict: routine or captain" section owns the verdict criteria, including how requested work's finished results and its mere progress updates are classified; unsolicited routine outcomes remain routine sailboat notes, unchanged fleet reviews remain silent, and doubt escalates.
-Its "Goal-directed acceptance" section owns semantic review of material task returns: intermediate and provider-terminal results continue through existing authorized lifecycle paths when evidence is incomplete, accepted research retires after the existing unresolved-decision gate, explicit stops remain stopped, and delivery or merge authority never expands.
+Its "Goal-directed acceptance" section owns semantic review of material task returns: intermediate and provider-terminal results continue through existing authorized lifecycle paths when evidence is incomplete, complete evidence becomes a candidate for MAIN acceptance and retirement, explicit stops remain stopped, and delivery or merge authority never expands.
 Its "PR identity: copy or abstain" section owns where a PR URL in a summary or tool argument may come from: the task's ready status or `pr=` metadata, verbatim, or else only the identifier the branch actually has.
 Main can also read recent durable outcomes on demand through its `fm_branch_outcomes` tool outside the processing path.
 
@@ -246,3 +246,31 @@ Live guards: `FM_PI_BRANCH_LIVE_E2E=1 tests/fm-pi-branch-live-e2e.test.sh` exerc
 `FM_PI_BRANCH_RESPONSIVENESS_E2E=1 tests/fm-pi-branch-responsiveness-live-e2e.test.sh` answers the question only a real TUI can: it types into an isolated Pi pane while outcomes are delivered and fails if keystroke echo leaves the class of the same machine's extension-free floor.
 Record dated current results in [docs/verification/runtime-backends.md](verification/runtime-backends.md).
 The strict typecheck in `tests/fm-pi-primary-types.test.sh` pins the extension against the installed Pi package.
+
+## Delegated task continuation
+
+MAIN can explicitly upgrade an enrolled task to lifecycle v2 and issue a bounded delegation through the existing `fm-task-state.sh reconcile` owner.
+The schema, CAS rules, action bindings and exact command forms belong to [`fm-task-lifecycle.py`](../bin/fm-task-lifecycle.py).
+A v1 record keeps its existing MAIN continuation path; reads never enroll historical tasks or reopen accepted or archived goals.
+
+The branch receives delegated continuation admissions on its existing serial execution chain, independently of wake queue sequences.
+The single periodic-stow clock also permits bounded readback while MAIN is streaming; MAIN notifications retain their existing input and UI safety checks.
+The canonical coordination reservation and persistent retry budget survive session replacement, while actual branch-session entry persistence proves delivery.
+Cold Pi sessions defer persistence until the first assistant response, so an in-memory append never acknowledges that delivery.
+An admission or report proves neither worker receipt nor goal completion.
+
+For a delegated task, branch may compare bounded artifacts with the existing brief, record a provisional precheck, request missing evidence from the same worker, and transfer information along explicitly authorized dependency edges.
+It must use the existing action, inbox, handoff and receipt owners, preserving the selected delivery path without adding a reviewer.
+MAIN alone classifies new user input, decides scope and authority, dispatches new work, issues operation grants, accepts the final result and communicates with the user.
+Candidate, conflict and blocked prechecks return to MAIN for judgment; routine progress and healthy executor readback do not open a MAIN model turn.
+The initial delegation contract does not permit branch lifecycle control, merge, archival or independent short-result routing.
+
+Unclassified original input receipts prevent new delegated effects while allowing readback.
+MAIN revokes the old delegation before changing a brief or goal, then issues a new revision after classification.
+Status questions read the named task and its evidence without enrolling or sweeping historical work.
+Expired, revoked, stale-generation and mismatched task bindings refuse at the actual mutation boundary.
+An attempted or uncertain effect is read back by stable action identity, never replayed because a receipt is missing.
+
+Rollout is task-local opt-in and requires no migration or production activation.
+Rollback revokes delegations and leaves v2 records, effects and budgets intact for MAIN reconciliation; older binaries must refuse v2 rather than rewrite it as v1.
+Public-owner regression coverage is in `tests/fm-task-handoff.test.sh`, with SDK and concurrent notification coverage in the Pi extension tests.

@@ -49,6 +49,8 @@ Acknowledgement invocations and every other mutation-critical queue-lock acquire
 Main records its presented set in `state/.main-eligible-rows`.
 A branch grant is published through `bin/fm-wake-grant.sh` under that same lock in `state/.branch-eligible-rows`, bound to the live branch process and extension generation recorded in `state/.branch-eligible-owner`, and publication is refused if main already claimed any requested row.
 Synchronous acceptance transfers delivery into the branch settlement while carrying the watcher's exact sequence-to-task admission snapshot.
+The existing pending-actionable records and replacement claims retain unsettled deliveries independently, so a long branch settlement cannot block a later MAIN-only wake.
+Successor restoration stays serialized, and a verified successor failure retains its bounded retry until outstanding deliveries settle.
 Before publishing the grant after asynchronous queueing, the branch rechecks generation, selection revision, lock ownership, trigger disposition, every admitted sequence, and each resolved task identity; a changed or retired identity rejects settlement to watcher fallback without prompting.
 Acceptance therefore proves immediate branch eligibility and capacity to own the settlement, while the later grant proves the exact rows are still safe to execute.
 A busy branch instead reports an offered wake whose eligible rows its live grant already covers as already owned, and the watcher suppresses that main delivery because the in-flight turn's drain will present those rows; rows outside the live grant keep the single main fallback.

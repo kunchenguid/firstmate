@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Steer an ordinary task through its durable inbox or a verified local backend.
-# Usage: fm-send.sh <target> [--resolve-key <key>]... <text...>
+# Usage: fm-send.sh <target> [--action-id <prepared-lifecycle-id>] [--resolve-key <key>]... <text...>
 # Special key form: fm-send.sh <target> --key Enter
 # Recorded historical secondmate or remote-home targets refuse before delivery.
 # Text addressed by task selector uses the durable inbox except harness-native
@@ -199,6 +199,12 @@ RAW_TARGET=$1
 fm_send_resolve_target "$RAW_TARGET" || exit 1
 T=$RESOLVED_TARGET
 shift
+ACTION_ID=
+if [ "${1:-}" = --action-id ]; then
+  [ $# -ge 3 ] || { echo 'error: --action-id needs an id and body' >&2; exit 2; }
+  ACTION_ID=$2
+  shift 2
+fi
 
 # Supervision lease guard: a steer is overlap territory between the two Pi
 # supervision actors, so refuse while the OTHER actor holds this task's live
@@ -213,7 +219,14 @@ if [ -n "$TARGET_META" ]; then
     trap 'fm_lease_guard_release' EXIT
     # shellcheck source=bin/fm-task-lifecycle-lib.sh
     . "$SCRIPT_DIR/fm-task-lifecycle-lib.sh"
-    fm_task_lifecycle_execution_guard "$LEASE_GUARD_TASK" || exit 1
+    if [ -z "$ACTION_ID" ]; then
+      fm_task_lifecycle_execution_guard "$LEASE_GUARD_TASK" || exit 1
+      if [ "$(fm_lease_actor)" = branch ] && [ -f "${FM_DATA_OVERRIDE:-$FM_HOME/data}/$LEASE_GUARD_TASK/lifecycle.json" ]; then
+        fm_task_lifecycle read "$LEASE_GUARD_TASK" | jq -e '.schema != "fm-task-lifecycle.v2"' >/dev/null || {
+          echo 'REFUSED: delegated steer requires --action-id' >&2; exit 6;
+        }
+      fi
+    fi
   fi
 fi
 
@@ -309,7 +322,11 @@ if [ -n "$RESOLVE_KEYS" ]; then
     echo "error: --resolve-key needs a task selector resolved through this home's metadata; an explicit backend target has no decision ledger here" >&2
     exit 1
   fi
-  if [ "${1:-}" = "--key" ]; then
+  if [ -n "$ACTION_ID" ] && { [ "${1:-}" = --key ] || [ -n "$RESOLVE_KEYS" ] || [ -z "$TARGET_SELECTOR" ]; }; then
+  echo 'REFUSED: lifecycle actions require ordinary task inbox text' >&2
+  exit 6
+fi
+if [ "${1:-}" = "--key" ]; then
     echo "error: --resolve-key cannot accompany --key; answering a decision requires a text answer" >&2
     exit 1
   fi
@@ -413,6 +430,10 @@ fm_send_feed_resolved_holds() { # <answer-text>
 # before sending. A failed backend send is still surfaced below as a hard
 # error with the attempted resolution attached.
 
+if [ -n "$ACTION_ID" ] && { [ "${1:-}" = --key ] || [ -n "$RESOLVE_KEYS" ] || [ -z "$TARGET_SELECTOR" ]; }; then
+  echo 'REFUSED: lifecycle actions require ordinary task inbox text' >&2
+  exit 6
+fi
 if [ "${1:-}" = "--key" ]; then
   case "$*" in
   *--resolve-key*)
@@ -446,6 +467,9 @@ else
     *) INBOX_PLANE=1 ;;
     esac
   fi
+  if [ -n "$ACTION_ID" ] && [ "$INBOX_PLANE" != 1 ]; then
+    echo 'REFUSED: lifecycle actions cannot use the typed plane' >&2; exit 6
+  fi
   if [ "$INBOX_PLANE" = 1 ]; then
     INBOX_TASK_ID=$(fm_send_id_from_meta "$TARGET_META")
     INBOX_META_LOCK=$(fm_meta_lock_path "$TARGET_META") || exit 1
@@ -470,7 +494,19 @@ else
       echo "error: steer not sent to $INBOX_TASK_ID: the task retired or changed endpoint during target resolution" >&2
       exit 1
     fi
-    INBOX_RECORD=$(fm_task_inbox_write "$STATE" "$INBOX_TASK_ID" "$MESSAGE") || inbox_write_rc=$?
+    if [ -n "$ACTION_ID" ]; then
+      BODY_SHA=$(printf '%s' "$MESSAGE" | python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')
+      if ! fm_task_lifecycle effect "$INBOX_TASK_ID" --action-id "$ACTION_ID" --payload-sha256 "$BODY_SHA" >/dev/null; then
+        fm_lock_release "$INBOX_META_LOCK"
+        exit 6
+      fi
+      INBOX_RECORD=$(fm_task_inbox_write_handoff "$STATE" "$INBOX_TASK_ID" "$MESSAGE" "action.$ACTION_ID") || inbox_write_rc=$?
+      if [ "${inbox_write_rc:-0}" -eq 0 ]; then
+        fm_task_lifecycle bind-inbox "$INBOX_TASK_ID" --action-id "$ACTION_ID" --receipt-ref "$INBOX_RECORD" >/dev/null || inbox_write_rc=$?
+      fi
+    else
+      INBOX_RECORD=$(fm_task_inbox_write "$STATE" "$INBOX_TASK_ID" "$MESSAGE") || inbox_write_rc=$?
+    fi
     if [ "${inbox_write_rc:-0}" -ne 0 ]; then
       fm_lock_release "$INBOX_META_LOCK"
       echo "error: steer not sent to $INBOX_TASK_ID: its inbox record could not be written under $STATE/$INBOX_TASK_ID.inbox" >&2
