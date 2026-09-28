@@ -1390,9 +1390,10 @@ fm_firstmate_root_home() {
 #
 # Sets FM_LOCAL_FIRSTMATE_STATES to that list, <first-state> first and without
 # duplicates however each directory is spelled. Returns 1 with
-# FM_LOCAL_FIRSTMATE_ERROR naming what could not be proved - an unresolvable root, an unsafe or malformed registry, or an
-# unavailable registered local home - so a caller refuses rather than treating
-# an unreadable home as one with no tasks.
+# FM_LOCAL_FIRSTMATE_ERROR naming what could not be proved - an unresolvable
+# root, an unsafe or malformed registry, or an unavailable registered local
+# home - so a caller refuses rather than treating an unreadable home as one
+# with no tasks.
 # shellcheck disable=SC2034 # FM_LOCAL_FIRSTMATE_ERROR is read by callers.
 fm_local_firstmate_state_dirs() {  # <first-state>
   local first=$1 root home reg line child known existing i=0
