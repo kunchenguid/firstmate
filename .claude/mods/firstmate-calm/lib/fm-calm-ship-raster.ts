@@ -80,7 +80,7 @@ export function encodeBase64(bytes: Uint8Array): string {
 }
 
 export type CalmShipRasterCells = {
-  /** How many rows the packed grid has: the frame's, one or three. */
+  /** How many rows the packed grid has: one when narrow, five in the full scene. */
   rows: number;
   /** The packed `cells` string for a Raster of `columns` by `rows`. */
   cells: string;
