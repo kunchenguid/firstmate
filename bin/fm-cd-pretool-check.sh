@@ -104,13 +104,13 @@ done
 if [ "$CMD_SET" -eq 0 ]; then
   PAYLOAD=$(cat 2>/dev/null || true)
   [ -n "$PAYLOAD" ] || fm_hook_allow "$CURSOR_MODE"
-  command -v jq >/dev/null 2>&1 || fm_hook_allow "$CURSOR_MODE"
   # Cursor's own registration passes --cursor. Without it a Cursor-delivered
   # payload is the Claude-settings duplicate Cursor also loads, already
   # evaluated by that registration, so this copy allows without re-classifying.
-  if [ "$CURSOR_MODE" -eq 0 ] && fm_hook_payload_is_foreign_host "$PAYLOAD"; then
+  if [ "$CURSOR_MODE" -eq 0 ] && fm_hook_payload_is_cursor "$PAYLOAD"; then
     fm_hook_allow 1
   fi
+  command -v jq >/dev/null 2>&1 || fm_hook_allow "$CURSOR_MODE"
   CMD=$(printf '%s' "$PAYLOAD" | jq -r '(.toolInput.command // .tool_input.command // empty)' 2>/dev/null) || fm_hook_allow "$CURSOR_MODE"
 fi
 

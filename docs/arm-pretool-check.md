@@ -151,6 +151,7 @@ Prose may improve without changing adapter behavior.
 - Allow returns exit 0 with both streams empty except for Cursor.
 - Cursor permission hooks require one JSON document even on allow: `--cursor` returns `{"permission":"allow"}` on stdout, including early, inert, and unavailable-classifier paths.
 - A parsed payload with a string `cursor_version` selects that same allow document for the Claude-settings duplicate, without changing genuine Claude events or relying on inherited environment markers.
+  The three permission wrappers select the host before a missing-`jq` allow exit, using Node's JSON parser when `jq` is absent; missing `jq` still leaves non-Cursor allows silent.
 - Cursor deny returns exit 0 with `{"permission":"deny","user_message":"[code] reason"}` on stdout; the classification policy is unchanged.
 - Deny returns exit 2 and writes `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny"},"systemMessage":"[code] reason"}` to stderr.
 - Default deny mode also writes `{"decision":"deny","reason":"[code] reason"}` to stdout for Grok.

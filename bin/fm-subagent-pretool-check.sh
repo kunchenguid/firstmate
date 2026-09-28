@@ -150,12 +150,12 @@ done
 if [ "$TOOL_SET" -eq 0 ]; then
   PAYLOAD=$(cat 2>/dev/null || true)
   [ -n "$PAYLOAD" ] || fm_hook_allow "$CURSOR_MODE"
-  command -v jq >/dev/null 2>&1 || fm_hook_allow "$CURSOR_MODE"
   # This is Cursor's only delegation checker: select its response protocol,
   # but keep classifying instead of standing down like the duplicated guards.
   if fm_hook_payload_is_cursor "$PAYLOAD"; then
     CURSOR_MODE=1
   fi
+  command -v jq >/dev/null 2>&1 || fm_hook_allow "$CURSOR_MODE"
   TOOL=$(printf '%s' "$PAYLOAD" | jq -r '(.tool_name // .toolName // empty)' 2>/dev/null) || fm_hook_allow "$CURSOR_MODE"
 fi
 

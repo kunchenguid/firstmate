@@ -20,23 +20,35 @@
 # describes THIS event and cannot be inherited: Cursor stamps every hook payload
 # with its own `cursor_version`, and Claude never emits that key.
 #
-# Fail direction: when the host cannot be determined (no payload, no jq), the
-# caller RUNS. A redundant run under Cursor wastes work; a skipped run under
-# Claude breaks the primary's supervision, which is the worse failure.
+# Fail direction: when the host cannot be determined, the caller RUNS.
+# A redundant run under Cursor wastes work; a skipped run under Claude breaks
+# the primary's supervision, which is the worse failure.
 
 # Return 0 when payload $1 was delivered by Cursor. Never use inherited
 # environment markers to select a hook response protocol.
 fm_hook_payload_is_cursor() {  # <payload>
   local payload=${1-}
   [ -n "$payload" ] || return 1
-  command -v jq >/dev/null 2>&1 || return 1
-  printf '%s' "$payload" | jq -e '
-    type == "object" and has("cursor_version") and (.cursor_version | type) == "string"
-  ' >/dev/null 2>&1
+  if command -v jq >/dev/null 2>&1; then
+    printf '%s' "$payload" | jq -e '
+      type == "object" and has("cursor_version") and (.cursor_version | type) == "string"
+    ' >/dev/null 2>&1
+  else
+    command -v node >/dev/null 2>&1 || return 1
+    printf '%s' "$payload" | node -e '
+      try {
+        const payload = JSON.parse(require("node:fs").readFileSync(0, "utf8"));
+        process.exit(payload !== null && typeof payload === "object" &&
+          !Array.isArray(payload) && typeof payload.cursor_version === "string" ? 0 : 1);
+      } catch { process.exit(1); }
+    ' >/dev/null 2>&1
+  fi
 }
 
 # Return 0 when the Cursor registration already covers this event.
+# Non-permission lifecycle hooks retain their no-jq run-rather-than-skip rule.
 fm_hook_payload_is_foreign_host() {  # <payload>
+  command -v jq >/dev/null 2>&1 || return 1
   fm_hook_payload_is_cursor "${1-}"
 }
 

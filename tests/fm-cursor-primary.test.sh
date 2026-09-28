@@ -321,6 +321,42 @@ test_cursor_subagent_decisions_and_host_separation() {
   pass "Cursor delegation still denies and inherited markers do not change Claude output"
 }
 
+test_cursor_permission_without_jq() {
+  local nojq="$TMP_ROOT/permission-no-jq" tool script mode marker payload out rc
+  local -a mode_args
+  mkdir -p "$nojq"
+  for tool in bash cat node; do
+    ln -s "$(command -v "$tool")" "$nojq/$tool"
+  done
+  for script in arm cd subagent; do
+    for tool in Shell Read Edit; do
+      for mode in --claude default --cursor; do
+        mode_args=()
+        [ "$mode" = default ] || mode_args=("$mode")
+        for marker in '"sdk-test"' '""' absent null 42 true '{}' '[]' malformed; do
+          payload=$(jq -nc --arg tool "$tool" '{tool_name:$tool,tool_input:{command:"printf ok"}}')
+          case "$marker" in
+            absent) ;;
+            malformed) payload='{"cursor_version":"sdk-test",' ;;
+            *) payload=$(printf '%s' "$payload" | jq -c --argjson marker "$marker" '. + {cursor_version:$marker}') ;;
+          esac
+          rc=0
+          out=$(printf '%s' "$payload" | PATH="$nojq" CURSOR_VERSION=inherited CURSOR_INVOKED_AS=cursor-agent \
+            bash "$ROOT/bin/fm-$script-pretool-check.sh" "${mode_args[@]}" 2>"$TMP_ROOT/permission-no-jq.err") || rc=$?
+          expect_code 0 "$rc" "$script $tool $mode $marker without jq"
+          if [ "$mode" = --cursor ] || [ "$marker" = '"sdk-test"' ] || [ "$marker" = '""' ]; then
+            [ "$out" = '{"permission":"allow"}' ] || fail "$script $tool $mode $marker must emit exactly one Cursor allow: $out"
+          else
+            [ -z "$out" ] || fail "$script $tool $mode $marker must remain silent: $out"
+          fi
+          [ ! -s "$TMP_ROOT/permission-no-jq.err" ] || fail "$script $tool $mode $marker emitted stderr"
+        done
+      done
+    done
+  done
+  pass "permission hooks select only parsed Cursor strings without jq, retaining native and silent non-Cursor allows"
+}
+
 test_cursor_permission_early_allows() {
   local dir script payload out command tool nojq
   dir=$(make_primary_dir "$TMP_ROOT/cursor-early-allow")
@@ -865,6 +901,7 @@ test_pretool_guards_deduplicate_and_render_cursor_deny
 test_cd_guard_renders_cursor_deny
 test_registered_pretool_stack_allows_cursor_tools
 test_cursor_subagent_decisions_and_host_separation
+test_cursor_permission_without_jq
 test_cursor_permission_early_allows
 test_park_silent_when_nothing_in_flight
 test_park_delivers_actionable_wake_as_followup
