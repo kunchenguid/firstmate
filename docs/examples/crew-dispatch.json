@@ -21,8 +21,7 @@
         {
           "harness": "traex",
           "model": "gpt-5.6-sol",
-          "effort": "high",
-          "preferWhileLoadBelowPercent": 90
+          "effort": "high"
         },
         {
           "harness": "pi",
@@ -34,7 +33,7 @@
           "effort": "high"
         }
       ],
-      "why": "Use a strong coding profile for big, ambiguous work; the TraeX load threshold is an example local value, not shared policy."
+      "why": "Use the first task-fit profile whose model, authentication, effort, and runtime checks succeed."
     }
   ],
   "default": [

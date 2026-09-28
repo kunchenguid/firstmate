@@ -111,8 +111,7 @@ init_changed_fixture_repo() {
     fm-afk-pi-herdr-return-e2e.test.sh \
     fm-backend.test.sh \
     fm-pr-merge.test.sh \
-    fm-procevent-quota.test.sh \
-    fm-quota-choose.test.sh \
+    fm-profile-array-dispatch-live-e2e.test.sh \
     fm-pi-watch-extension.test.sh \
     fm-pi-windows-shell-invocation.test.sh \
     fm-afk-return.test.sh \
@@ -127,9 +126,6 @@ init_changed_fixture_repo() {
   : >"$repo/bin/fm-supervisor-target-lib.sh"
   : >"$repo/bin/fm-control-lib.sh"
   : >"$repo/bin/fm-timeout-lib.sh"
-  : >"$repo/bin/fm-procevent-quota.sh"
-  : >"$repo/bin/fm-quota-axi-lib.sh"
-  : >"$repo/bin/fm-quota-choose.sh"
   : >"$repo/bin/unmapped-source.sh"
   # A shared top-level test fixture read by two suites in different families,
   # beside a tests/ file nothing reads at all.
@@ -373,42 +369,14 @@ test_changed_dependency_selection_and_unmapped_failure() {
   git -C "$repo" add .agents/skills/harness-adapters/SKILL.md
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm harness-adapter-router-change
 
-  printf '\n' >>"$repo/bin/fm-procevent-quota.sh"
-  printf '\n' >>"$repo/bin/fm-quota-choose.sh"
-  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
-  assert_contains "$listed" "tests/fm-procevent-quota.test.sh" \
-    "quota process-event source selects its focused test"
-  assert_contains "$listed" "tests/fm-quota-choose.test.sh" \
-    "quota chooser source selects its focused test"
-  git -C "$repo" add bin/fm-procevent-quota.sh bin/fm-quota-choose.sh
-  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm quota-source-change
-
-  printf '\n' >>"$repo/bin/fm-quota-axi-lib.sh"
-  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
-  assert_contains "$listed" "tests/fm-procevent-quota.test.sh" \
-    "shared quota validator selects process-event coverage"
-  assert_contains "$listed" "tests/fm-quota-choose.test.sh" \
-    "shared quota validator selects chooser coverage"
-  git -C "$repo" add bin/fm-quota-axi-lib.sh
-  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm quota-validator-change
-
   printf '\n' >>"$repo/bin/fm-control-lib.sh"
   listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
   assert_contains "$listed" "tests/fm-backend.test.sh" \
     "control library keeps backend coverage"
   assert_contains "$listed" "tests/fm-session-start.test.sh" \
     "control library keeps session coverage"
-  assert_contains "$listed" "tests/fm-quota-choose.test.sh" \
-    "control library selects chooser coverage"
   git -C "$repo" add bin/fm-control-lib.sh
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm control-lib-change
-
-  printf '\n' >>"$repo/bin/fm-timeout-lib.sh"
-  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
-  assert_contains "$listed" "tests/fm-procevent-quota.test.sh" \
-    "timeout library selects quota polling coverage"
-  git -C "$repo" add bin/fm-timeout-lib.sh
-  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm timeout-lib-change
 
   printf '\n' >>"$repo/src/unmapped.ts"
   set +e
@@ -1292,14 +1260,14 @@ test_unmapped_new_test_never_inherits_family_concurrency() {
   chmod +x "$repo/bin/fm-test-run.sh"
   # Two members of the proven residual family, plus a test basename the family
   # map has never seen - the shape of any test added tomorrow.
-  for script in fm-procevent.test.sh fm-quota-choose.test.sh fm-zz-unmapped-fixture.test.sh; do
+  for script in fm-procevent.test.sh fm-public-followup.test.sh fm-zz-unmapped-fixture.test.sh; do
     printf '#!/usr/bin/env bash\necho "ok - %s fixture"\n' "$script" >"$repo/tests/$script"
     chmod +x "$repo/tests/$script"
   done
 
   set +e
   (cd "$repo" && bin/fm-test-run.sh --jobs 2 \
-    tests/fm-procevent.test.sh tests/fm-quota-choose.test.sh) \
+    tests/fm-procevent.test.sh tests/fm-public-followup.test.sh) \
     >"$tmp/family.out" 2>"$tmp/family.err"
   rc=$?
   set -e

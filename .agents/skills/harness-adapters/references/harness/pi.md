@@ -13,6 +13,7 @@ Verified on 2026-07-27 with Pi 0.82.0 unless a fact gives another version.
 | Model flag | `--model <model>`. |
 | Effort flag | `--thinking <low\|medium\|high\|xhigh\|max>`; the model must support the requested thinking level. |
 | Model discovery | Run the selected executable as `<executable> --list-models [search]`; Pi's installed `docs/models.md` owns how built-in, extension-registered, and custom provider/model entries reach that list. |
+| Authentication | Run the selected executable as `<executable> auth check --model <provider/model> --json`; omit `--credentials` so the check never prints the credential. |
 
 Native Codex sessions may request `ultra` through the native extension flag described by `../../../bin/fm-spawn.sh`; it is separate from Pi's thinking levels.
 Pi has no permission system, so workers are always autonomous.

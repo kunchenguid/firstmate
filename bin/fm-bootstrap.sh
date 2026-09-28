@@ -28,8 +28,6 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-backlog-transition-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
-# shellcheck source=bin/fm-quota-axi-lib.sh disable=SC1091
-. "$SCRIPT_DIR/fm-quota-axi-lib.sh"
 # shellcheck source=bin/fm-tangle-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-tangle-lib.sh"
 # shellcheck source=bin/fm-startup-memory-budget-lib.sh disable=SC1091
@@ -160,7 +158,7 @@ install_cmd() {
     treehouse) echo "curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh" ;;
     no-mistakes) echo "curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh" ;;
     gh-axi|chrome-devtools-axi) echo "npm install -g $1 && $1 setup hooks" ;;
-    tasks-axi|quota-axi) echo "npm install -g $1" ;;
+    tasks-axi) echo "npm install -g $1" ;;
     *) return 1 ;;
   esac
 }
@@ -186,7 +184,7 @@ missing_tool_diagnostic() {
 # fm_backend_required_tools (bin/fm-backend.sh). Retired configuration refuses
 # instead of installing an old terminal. A backend value with
 # no verified dependency set is reported before the universal checks continue.
-COMMON_TOOLS="node git gh no-mistakes gh-axi chrome-devtools-axi tasks-axi quota-axi"
+COMMON_TOOLS="node git gh no-mistakes gh-axi chrome-devtools-axi tasks-axi"
 BACKEND=$(fm_backend_name)
 BACKEND_VALID=1
 if ! BACKEND_TOOLS=$(fm_backend_required_tools "$BACKEND"); then
@@ -422,20 +420,12 @@ crew_dispatch_validate() {
     def malformed_optional_fields($items):
       ($items | any(has("model") and (((.model | type) != "string") or (.model | length) == 0)))
       or ($items | any(has("effort") and (((.effort | type) != "string") or (.effort | length) == 0)));
-    def malformed_load_preferences:
-      configured_profiles
-      | any(has("preferWhileLoadBelowPercent")
-        and (((.preferWhileLoadBelowPercent | type) != "number") or .preferWhileLoadBelowPercent <= 0));
-    def scalar_load_preferences:
-      ([.rules[]? | select((.use? | type) == "object") | .use]
-        + (if has("default") and (.default | type) == "object" then [.default] else [] end))
-      | any(has("preferWhileLoadBelowPercent"));
-    def wrong_harness_load_preferences:
-      configured_profiles
-      | any(has("preferWhileLoadBelowPercent") and .harness != "traex");
-    def modelless_load_preferences:
-      configured_profiles
-      | any(has("preferWhileLoadBelowPercent") and ((.model? | type) != "string" or (.model | length) == 0));
+    def removed_load_preferences:
+      configured_profiles | any(has("preferWhileLoadBelowPercent"));
+    def duplicate_profile_array($value):
+      if ($value | type) != "array" then false
+      else ([$value[] | tojson] | length) != ([$value[] | tojson] | unique | length)
+      end;
     def bad_efforts:
       configured_profiles
       | map({h: .harness, m: .model, e: .effort})
@@ -454,17 +444,16 @@ crew_dispatch_validate() {
     elif [(.rules // [])[]? | profiles(.use?)[]? | select((.harness? | type) != "string" or (.harness | length) == 0)] | length > 0 then "each use profile needs harness"
     elif malformed_optional_fields([(.rules // [])[]? | profiles(.use?)[]?]) then "use profile model and effort must be non-empty strings when present"
     elif [(.rules // [])[]? | select(has("select") and ((.select? | type) != "string" or (.select | length) == 0))] | length > 0 then "select must be a non-empty string"
-    elif [(.rules // [])[]? | .select? // empty | select(. != "quota-balanced")] | length > 0 then
-      "unknown select: " + ([ (.rules // [])[]? | .select? // empty | select(. != "quota-balanced") ] | unique | join(", "))
+    elif [(.rules // [])[]? | .select? // empty | select(. != "ordered")] | length > 0 then
+      "unknown select: " + ([ (.rules // [])[]? | .select? // empty | select(. != "ordered") ] | unique | join(", "))
     elif has("default") and ((.default | type) != "object" and (.default | type) != "array") then "default must be a profile object or non-empty profile array"
     elif has("default") and ((.default | type) == "array" and (.default | length) == 0) then "default needs at least one profile"
     elif has("default") and ([profiles(.default)[]? | select(type != "object")] | length) > 0 then "each default profile must be an object"
     elif has("default") and ([profiles(.default)[]? | select((.harness? | type) != "string" or (.harness | length) == 0)] | length) > 0 then "each default profile needs harness"
     elif has("default") and malformed_optional_fields([profiles(.default)[]?]) then "default profile model and effort must be non-empty strings when present"
-    elif malformed_load_preferences then "preferWhileLoadBelowPercent must be a positive number"
-    elif scalar_load_preferences then "preferWhileLoadBelowPercent is valid only in profile arrays"
-    elif wrong_harness_load_preferences then "preferWhileLoadBelowPercent is valid only for traex profiles"
-    elif modelless_load_preferences then "preferWhileLoadBelowPercent requires an explicit traex model"
+    elif [(.rules // [])[]? | select(duplicate_profile_array(.use?))] | length > 0 then "profile arrays must not contain duplicate profiles"
+    elif has("default") and duplicate_profile_array(.default) then "profile arrays must not contain duplicate profiles"
+    elif removed_load_preferences then "preferWhileLoadBelowPercent is no longer supported; order profiles by preference"
     else
       (configured_profiles
         | map(.harness)
@@ -489,12 +478,10 @@ crew_dispatch_validate() {
          elif ($p.effort? != null) then "/default"
          else "" end)
       + (if ($p.effort? != null) then "/" + ($p.effort | tostring) else "" end)
-      + (if ($p.preferWhileLoadBelowPercent? != null) then
-          "/prefer-load<" + ($p.preferWhileLoadBelowPercent | tostring)
-        else "" end);
+      ;
     def profile_set($value; $selector):
       if ($value | type) == "array" then
-        (($selector // "quota-balanced") + "[" + ([$value[] | profile(.)] | join(", ")) + "]")
+        (($selector // "ordered") + "[" + ([$value[] | profile(.)] | join(", ")) + "]")
       else profile($value)
       end;
     (["BOOTSTRAP_INFO: crew dispatch active config/crew-dispatch.json"]
@@ -738,9 +725,6 @@ detect_local_tools() {
   fi
   if command -v gh-axi >/dev/null 2>&1 && ! tool_version_at_least gh-axi "$GH_AXI_MIN"; then
     echo "MISSING: gh-axi (install: $(install_cmd gh-axi))"
-  fi
-  if command -v quota-axi >/dev/null 2>&1 && ! fm_quota_axi_compatible; then
-    echo "MISSING: quota-axi (install: $(install_cmd quota-axi))"
   fi
   if command -v tasks-axi >/dev/null 2>&1 && ! fm_tasks_axi_compatible; then
     echo "MISSING: tasks-axi (install: $(install_cmd tasks-axi))"
