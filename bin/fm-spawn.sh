@@ -52,8 +52,14 @@
 #   The adoption writes that cross-home claim itself, in the same task=/home=
 #   format a pool slot carries but inside the copy's own per-worktree git dir,
 #   so sibling ticket copies never share one claim and claiming never dirties
-#   the copy; an aborted spawn drops only its own claim and the wiring it armed,
-#   and teardown releases only its own. The ordinary base refresh below then
+#   the copy; a claim is this task's own only when it names both this task id
+#   and the home holding its record, so the same id from another home is another
+#   live owner. The adoption also saves the copy's own worktree wiring files
+#   (the gitignored .claude/settings.local.json and its siblings for the other
+#   harness families) beside that claim first, and refuses when one of them
+#   cannot be preserved and restored faithfully; an aborted spawn and teardown
+#   both put those originals back, remove only the wiring firstmate itself
+#   wrote, and release only this task's own claim. The ordinary base refresh below then
 #   refuses a copy carrying commits the origin default branch lacks rather than
 #   resetting them away. The task record carries worktree_source=adopted, which relaunch
 #   preserves and bin/fm-teardown.sh reads to leave the copy and its branch to
@@ -1237,7 +1243,7 @@ SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
 SPAWN_SLOT_CLAIMED=0
 SPAWN_WORKTREE_ADOPTED=0
 SPAWN_ADOPT_CLAIMED=0
-SPAWN_ADOPT_CLAIM_MARKER=
+SPAWN_ADOPT_WIRING_STORE=
 RELAUNCH_REPLACEMENT_PENDING=0
 RELAUNCH_REPLACEMENT_BUSY_GEN=
 RELAUNCH_REPLACEMENT_HARNESS=
@@ -1394,18 +1400,21 @@ spawn_abort_cleanup() {
   # pool slot self-heals: a spawn that aborts before its record is published has
   # to take back both its own claim and the wiring it armed inside that copy,
   # or the creator's next session inherits a hook naming a task that never was.
-  if [ "$SPAWN_WORKTREE_ADOPTED" = 1 ] && [ -n "${WT:-}" ] &&
-    [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
+  if [ -n "${WT:-}" ] && [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
     if [ "$SPAWN_ADOPT_CLAIMED" = 1 ]; then
       SPAWN_ADOPT_CLAIMED=0
       if [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" = 1 ]; then
-        fm_treehouse_slot_owner_release "$WT" "$ID" "$SPAWN_ADOPT_CLAIM_MARKER" || true
+        fm_adopted_worktree_owner_release "$WT" "$ID" "$STATE" || true
       else
         echo "warning: leaving task $ID's claim on adopted worktree $WT in place; the Treehouse project lock is no longer held, so the next spawn's claim replaces it" >&2
       fi
     fi
-    if ! clear_relaunch_harness_wiring "${HARNESS:-}" "$WT" "${STATE_REAL:-$STATE}" "$ID"; then
-      echo "warning: could not remove task $ID's wiring from adopted worktree $WT" >&2
+    if [ -n "$SPAWN_ADOPT_WIRING_STORE" ]; then
+      if ! clear_relaunch_harness_wiring "${HARNESS:-}" "$WT" "${STATE_REAL:-$STATE}" "$ID" ||
+        ! fm_control_restore_adopted_wiring "$WT" "$SPAWN_ADOPT_WIRING_STORE"; then
+        echo "warning: could not restore adopted worktree $WT's own harness wiring after task $ID's spawn aborted" >&2
+      fi
+      SPAWN_ADOPT_WIRING_STORE=
     fi
   fi
   if [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" = 1 ]; then
@@ -3475,7 +3484,31 @@ spawn_adopt_worktree() {
     exit 1
   fi
   spawn_adopt_claim_worktree
+  spawn_adopt_preserve_wiring
   SPAWN_WORKTREE_ADOPTED=1
+}
+
+# An adopted copy may already carry its creator's own copy of a file a launch
+# arms - $WT/.claude/settings.local.json is gitignored in a Claude project, so
+# the clean-copy check above cannot see it. Save the whole worktree-resident
+# wiring set before anything is armed, so teardown and an aborted spawn can hand
+# the copy back exactly as it was, and refuse before any endpoint exists when a
+# path cannot be saved and restored faithfully.
+spawn_adopt_preserve_wiring() {
+  local store
+  store=$(fm_adopted_worktree_wiring_store "$WT") || {
+    echo "error: could not resolve where to preserve adopted worktree '$WT''s own harness wiring" >&2
+    exit 1
+  }
+  if ! fm_control_preserve_adopted_wiring "$WT" "$store"; then
+    if [ -n "$FM_CONTROL_ADOPTED_WIRING_UNSAFE" ]; then
+      echo "error: adopted worktree '$WT' carries '$FM_CONTROL_ADOPTED_WIRING_UNSAFE', which a launch would overwrite but firstmate cannot preserve and restore (it is not a readable regular file, or the copy failed); refusing rather than destroying it" >&2
+    else
+      echo "error: could not preserve adopted worktree '$WT''s own harness wiring under $store; refusing rather than overwriting files firstmate cannot put back" >&2
+    fi
+    exit 1
+  fi
+  SPAWN_ADOPT_WIRING_STORE=$store
 }
 
 # The cross-home owner claim for an adopted copy. A pooled slot carries one
@@ -3486,31 +3519,34 @@ spawn_adopt_worktree() {
 # publication, in the copy's own per-worktree git dir so sibling ticket copies
 # never share one claim and the copy teardown inspects is never dirtied.
 spawn_adopt_claim_worktree() {
-  local owner_state
+  local owner_state SPAWN_ADOPT_CLAIM_MARKER
   SPAWN_ADOPT_CLAIM_MARKER=$(fm_adopted_worktree_owner_marker "$WT") || {
     echo "error: could not resolve the owner claim location for adopted worktree '$WT'" >&2
     exit 1
   }
-  fm_treehouse_slot_owner_state "$WT" "$ID" "$SPAWN_ADOPT_CLAIM_MARKER"
-  case "$FM_TREEHOUSE_SLOT_OWNER" in
-    other)
-      # A claim whose named task no longer has a record in its named home is
-      # spent, so it may be replaced; anything else is a live owner.
-      if [ "$FM_TREEHOUSE_SLOT_OWNER_HOME" = "$FM_HOME" ]; then
-        owner_state=$STATE
-      else
-        owner_state="$FM_TREEHOUSE_SLOT_OWNER_HOME/state"
-      fi
-      if [ -z "$FM_TREEHOUSE_SLOT_OWNER_HOME" ] || [ -e "$owner_state/$FM_TREEHOUSE_SLOT_OWNER_ID.meta" ]; then
-        echo "error: adopted worktree '$WT' is already claimed by task $FM_TREEHOUSE_SLOT_OWNER_ID (firstmate home ${FM_TREEHOUSE_SLOT_OWNER_HOME:-unknown}); refusing to launch a second worker into its copy" >&2
+  if ! fm_adopted_worktree_owner_is_mine "$WT" "$ID" "$STATE" "$SPAWN_ADOPT_CLAIM_MARKER"; then
+    case "$FM_TREEHOUSE_SLOT_OWNER" in
+      absent) : ;;
+      unsafe)
+        echo "error: adopted worktree '$WT' carries an owner claim that cannot be read, so it cannot be proved unclaimed; inspect or repair $SPAWN_ADOPT_CLAIM_MARKER (task= and home= lines)" >&2
         exit 1
-      fi
-      ;;
-    unsafe)
-      echo "error: adopted worktree '$WT' carries an owner claim that cannot be read, so it cannot be proved unclaimed; inspect or repair $SPAWN_ADOPT_CLAIM_MARKER (task= and home= lines)" >&2
-      exit 1
-      ;;
-  esac
+        ;;
+      *)
+        # A claim whose named task no longer has a record in its named home is
+        # spent, so it may be replaced; anything else is a live owner, including
+        # this same task id held by a different firstmate home.
+        if [ "$FM_TREEHOUSE_SLOT_OWNER_HOME" = "$FM_HOME" ]; then
+          owner_state=$STATE
+        else
+          owner_state="$FM_TREEHOUSE_SLOT_OWNER_HOME/state"
+        fi
+        if [ -z "$FM_TREEHOUSE_SLOT_OWNER_HOME" ] || [ -e "$owner_state/$FM_TREEHOUSE_SLOT_OWNER_ID.meta" ]; then
+          echo "error: adopted worktree '$WT' is already claimed by task $FM_TREEHOUSE_SLOT_OWNER_ID (firstmate home ${FM_TREEHOUSE_SLOT_OWNER_HOME:-unknown}); refusing to launch a second worker into its copy" >&2
+          exit 1
+        fi
+        ;;
+    esac
+  fi
   if ! fm_treehouse_slot_owner_claim "$WT" "$ID" "$FM_HOME" "$SPAWN_ADOPT_CLAIM_MARKER"; then
     echo "error: could not claim adopted worktree '$WT' for task $ID; refusing to launch a worker whose copy cannot later be proved to be its own" >&2
     exit 1

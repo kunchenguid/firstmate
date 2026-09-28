@@ -35,7 +35,7 @@ make_case() {
 
   git init --quiet -b main "$project"
   printf 'base\n' > "$project/README.md"
-  printf '.claude/worktrees/\n' > "$project/.gitignore"
+  printf '.claude/worktrees/\n.claude/settings.local.json\n.opencode/\n' > "$project/.gitignore"
   git -C "$project" add README.md .gitignore
   git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
   git clone --quiet --bare "$project" "$origin"
@@ -113,7 +113,80 @@ test_adoption_from_another_firstmate_home_is_refused() {
   assert_contains "$out" "already claimed by task $id" \
     "the symlinked spelling was not refused by the owner claim"
   [ ! -e "$other_home/state/$other_id.meta" ] || fail "the refused symlinked adoption published task metadata"
-  pass "an adopted copy another firstmate home holds is refused, however it is spelled"
+
+  # The ticket number is the natural task id for a copy named issue-<N>, so two
+  # homes dispatching the same id against one copy is the likeliest collision of
+  # all: a claim is this task's own only when the home matches too.
+  second_home "$CASE_DIR/home-three" "$id"
+  out=$(FM_FAKE_PANE_LOG="$PANE_LOG" fm_test_run_spawn "$CASE_DIR/home-three" "$CLAIM_DIR" "$FAKEBIN_DIR" \
+    "$id" "$PROJECT_DIR" --mode no-mistakes --yolo off --adopt-worktree "$CLAIM_DIR")
+  status=$?
+  [ "$status" -ne 0 ] || fail "a second firstmate home adopted a copy held under the same task id"$'\n'"$out"
+  assert_contains "$out" "already claimed by task $id" \
+    "the same-id cross-home refusal did not name the task holding the copy"
+  assert_contains "$out" "$HOME_DIR" \
+    "the same-id cross-home refusal did not name the firstmate home holding the copy"
+  [ ! -e "$CASE_DIR/home-three/state/$id.meta" ] \
+    || fail "the refused same-id cross-home adoption published task metadata"
+  assert_grep "home=$HOME_DIR" "$(git -C "$CLAIM_DIR" rev-parse --absolute-git-dir)/fm-adopted-owner" \
+    "the refused same-id adoption overwrote the owning home's claim"
+  pass "an adopted copy another firstmate home holds is refused, however it is spelled or named"
+}
+
+# The creator's own gitignored wiring file is invisible to the clean-copy check,
+# so adoption has to save it before arming and put it back afterwards. This is
+# the byte-for-byte contract on the file the creator handed over.
+test_adoption_preserves_the_copys_own_wiring_file() {
+  local id out status settings original
+  id='adopt-preserve-settings-a8'
+  make_case preserve-settings "$id"
+  printf 'claude\n' > "$HOME_DIR/config/crew-harness"
+  settings="$CLAIM_DIR/.claude/settings.local.json"
+  mkdir -p "$CLAIM_DIR/.claude"
+  printf '{"permissions":{"allow":["Bash(ls:*)"]}}\n' > "$settings"
+  original=$(cat "$settings")
+
+  out=$(run_spawn "$CLAIM_DIR" "$id" --mode no-mistakes --yolo off --adopt-worktree "$CLAIM_DIR")
+  status=$?
+  expect_code 0 "$status" "the adoption of a copy carrying its own settings should launch"$'\n'"$out"
+  [ "$(cat "$settings")" != "$original" ] \
+    || fail "the launch never armed its own wiring, so this test proves nothing"
+  assert_grep "worktree_source=adopted" "$HOME_DIR/state/$id.meta" \
+    "the adopted copy was not recorded as adopted"
+
+  FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_CONFIG_OVERRIDE="$HOME_DIR/config" PATH="$FAKEBIN_DIR:$PATH" \
+    "$ROOT/bin/fm-teardown.sh" "$id" --force > "$CASE_DIR/teardown.log" 2>&1
+  status=$?
+  expect_code 0 "$status" "teardown of the adopted task should succeed"$'\n'"$(cat "$CASE_DIR/teardown.log")"
+  [ "$(cat "$settings")" = "$original" ] \
+    || fail "teardown did not hand the creator's own settings file back byte-identical"$'\n'"$(cat "$settings")"
+  pass "a copy's own wiring file survives adoption and teardown byte-identical"
+}
+
+# A refusal that happens after the copy is claimed must not take the creator's
+# own wiring file with it: nothing of firstmate's was armed yet.
+test_refused_adoption_leaves_the_copys_own_wiring_file() {
+  local id out status settings original
+  id='adopt-refuse-keeps-settings-a9'
+  make_case refuse-keeps-settings "$id"
+  printf 'claude\n' > "$HOME_DIR/config/crew-harness"
+  settings="$CLAIM_DIR/.claude/settings.local.json"
+  mkdir -p "$CLAIM_DIR/.claude"
+  printf '{"permissions":{"allow":["Bash(git status:*)"]}}\n' > "$settings"
+  original=$(cat "$settings")
+  printf 'earlier work\n' > "$CLAIM_DIR/earlier.txt"
+  git -C "$CLAIM_DIR" add earlier.txt
+  git -C "$CLAIM_DIR" -c user.name=t -c user.email=t@t commit -qm earlier
+
+  out=$(run_spawn "$CLAIM_DIR" "$id" --mode no-mistakes --yolo off --adopt-worktree "$CLAIM_DIR")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn adopted a copy carrying unlanded commits"$'\n'"$out"
+  assert_contains "$out" "carries commits not on 'origin/main'" \
+    "the refusal did not name its condition"
+  [ "$(cat "$settings")" = "$original" ] \
+    || fail "a refused adoption destroyed the creator's own settings file"$'\n'"$(cat "$settings")"
+  pass "a refused adoption leaves the copy's own wiring file byte-identical"
 }
 
 # An adopted copy is its creator's, so nothing resets it the way a returned pool
@@ -321,6 +394,8 @@ test_adopted_worktree_is_recorded_and_entered_without_a_pool_allocation
 test_adopted_primary_checkout_is_refused_by_the_isolation_proof
 test_adoption_from_another_firstmate_home_is_refused
 test_aborted_adoption_leaves_no_firstmate_wiring_in_the_copy
+test_adoption_preserves_the_copys_own_wiring_file
+test_refused_adoption_leaves_the_copys_own_wiring_file
 test_stale_submodule_pin_is_not_reported_as_uncommitted_work
 test_unusable_adopted_paths_are_refused_with_their_condition
 test_adopt_worktree_is_refused_outside_a_first_ship_or_scout_dispatch

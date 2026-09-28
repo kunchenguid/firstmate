@@ -407,6 +407,83 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id>
   esac
 }
 
+# The worktree-resident subset of the table above, for every harness family:
+# the files a launch writes INSIDE the copy, never the firstmate-owned state
+# sidecars. A pooled slot is firstmate's own copy, so overwriting these costs
+# nothing there; an adopted copy (bin/fm-spawn.sh --adopt-worktree) belongs to
+# its creator, so this is the set that is preserved before arming and put back
+# at teardown. The sentinel state dir keeps state-side entries out of the
+# filter without restating which entries those are.
+FM_CONTROL_HARNESS_FAMILIES='claude codex opencode pi pi-signed omp agy devin grok kimi cursor gemini muse rovo'
+fm_control_worktree_wiring_paths() {  # <worktree>
+  local wt=${1-} family path
+  [ -n "$wt" ] || return 1
+  for family in $FM_CONTROL_HARNESS_FAMILIES; do
+    while IFS= read -r path; do
+      case $path in "$wt"/*) printf '%s\n' "$path" ;; esac
+    done <<EOF
+$(fm_control_harness_wiring_paths "$family" "$wt" "/nonexistent/fm-wiring-sentinel" wiring)
+EOF
+  done
+}
+
+# Copy an adopted copy's pre-existing worktree wiring into <store> before a
+# launch arms its own. A path that cannot be preserved and restored byte for
+# byte - a symlink, a directory, an unreadable file, a failed copy - is named in
+# FM_CONTROL_ADOPTED_WIRING_UNSAFE and refused, because the alternative is
+# silently destroying someone else's settings. <store> appears only once the
+# whole set is saved, so its presence is what licenses a later restore.
+FM_CONTROL_ADOPTED_WIRING_UNSAFE=
+fm_control_preserve_adopted_wiring() {  # <worktree> <store>
+  local wt=${1-} store=${2-} tmp path rel
+  [ -n "$wt" ] && [ -n "$store" ] || return 1
+  FM_CONTROL_ADOPTED_WIRING_UNSAFE=
+  tmp="$store.tmp.${BASHPID:-$$}"
+  rm -rf "$store" "$tmp" || return 1
+  mkdir -p "$tmp" || return 1
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    [ -e "$path" ] || [ -L "$path" ] || continue
+    if [ -L "$path" ] || [ ! -f "$path" ] || [ ! -r "$path" ]; then
+      FM_CONTROL_ADOPTED_WIRING_UNSAFE=$path
+      rm -rf "$tmp"
+      return 1
+    fi
+    rel=${path#"$wt"/}
+    mkdir -p "$tmp/$(dirname "$rel")" && cp -p "$path" "$tmp/$rel" || {
+      FM_CONTROL_ADOPTED_WIRING_UNSAFE=$path
+      rm -rf "$tmp"
+      return 1
+    }
+  done <<EOF
+$(fm_control_worktree_wiring_paths "$wt")
+EOF
+  mv -f "$tmp" "$store" 2>/dev/null || { rm -rf "$tmp"; return 1; }
+}
+
+# Put an adopted copy's worktree wiring back the way it was handed over:
+# restore every file <store> preserved, and remove only the ones firstmate wrote
+# where the copy carried none. A missing store means nothing was ever preserved
+# here, so nothing is this caller's to remove.
+fm_control_restore_adopted_wiring() {  # <worktree> <store>
+  local wt=${1-} store=${2-} path rel rc=0
+  [ -n "$wt" ] && [ -n "$store" ] || return 1
+  [ -d "$store" ] || return 0
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    rel=${path#"$wt"/}
+    if [ -f "$store/$rel" ] && [ ! -L "$store/$rel" ]; then
+      mkdir -p "$(dirname "$path")" && cp -p "$store/$rel" "$path" || rc=1
+    else
+      rm -f "$path" || rc=1
+    fi
+  done <<EOF
+$(fm_control_worktree_wiring_paths "$wt")
+EOF
+  [ "$rc" = 0 ] || return 1
+  rm -rf "$store" 2>/dev/null || true
+}
+
 # The firstmate-owned global turn-end registry entry a harness mints per task.
 # grok and kimi are the two adapters whose turn-end hook is global and gated by
 # a private token file; every other adapter's wiring is fully covered by

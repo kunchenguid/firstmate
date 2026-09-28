@@ -1462,11 +1462,51 @@ fm_treehouse_slot_owner_marker() {  # <worktree>
 # directory, so the pool slot's beside-the-copy marker would be one file for all
 # of them; the copy's own per-worktree git dir is private to that copy and lives
 # outside the tree teardown inspects, so claiming one never dirties it.
-fm_adopted_worktree_owner_marker() {  # <worktree>
+fm_adopted_worktree_git_dir() {  # <worktree>
   local worktree=$1 gitdir
   gitdir=$(git -C "$worktree" rev-parse --absolute-git-dir 2>/dev/null) || return 1
-  gitdir=$(CDPATH='' cd -- "$gitdir" 2>/dev/null && pwd -P) || return 1
+  (CDPATH='' cd -- "$gitdir" 2>/dev/null && pwd -P)
+}
+
+fm_adopted_worktree_owner_marker() {  # <worktree>
+  local gitdir
+  gitdir=$(fm_adopted_worktree_git_dir "$1") || return 1
   printf '%s/fm-adopted-owner\n' "$gitdir"
+}
+
+# Where an adopted copy's pre-existing worktree wiring is saved for teardown to
+# put back: beside the claim, private to this copy, outside the tree teardown
+# inspects.
+fm_adopted_worktree_wiring_store() {  # <worktree>
+  local gitdir
+  gitdir=$(fm_adopted_worktree_git_dir "$1") || return 1
+  printf '%s/fm-adopted-wiring\n' "$gitdir"
+}
+
+# An adopted copy's claim is a given record's own only when it names BOTH that
+# task id AND the firstmate home whose state dir holds the record. The task id
+# alone is not enough here: the ticket number is the natural id for a copy named
+# .claude/worktrees/issue-<N>, so two homes routinely carry the same id, and
+# matching on it would let one home overwrite or release the other's live claim.
+fm_adopted_worktree_owner_is_mine() {  # <worktree> <task-id> <state-dir> [marker]
+  local worktree=$1 id=$2 state=$3 marker=${4:-} owner_state record_state
+  [ -n "$marker" ] || marker=$(fm_adopted_worktree_owner_marker "$worktree") || return 1
+  fm_treehouse_slot_owner_state "$worktree" "$id" "$marker"
+  [ "$FM_TREEHOUSE_SLOT_OWNER" = mine ] || return 1
+  [ -n "$FM_TREEHOUSE_SLOT_OWNER_HOME" ] || return 1
+  owner_state=$(CDPATH='' cd -- "$FM_TREEHOUSE_SLOT_OWNER_HOME/state" 2>/dev/null && pwd -P) || return 1
+  record_state=$(CDPATH='' cd -- "$state" 2>/dev/null && pwd -P) || return 1
+  [ "$owner_state" = "$record_state" ]
+}
+
+# Drop a task's own claim on an adopted copy. Never removes a claim another home
+# or another task holds, so a teardown whose record is stale cannot strip the
+# evidence protecting the home that holds the copy now.
+fm_adopted_worktree_owner_release() {  # <worktree> <task-id> <state-dir>
+  local worktree=$1 id=$2 state=$3 marker
+  marker=$(fm_adopted_worktree_owner_marker "$worktree") || return 0
+  fm_adopted_worktree_owner_is_mine "$worktree" "$id" "$state" "$marker" || return 0
+  rm -f "$marker" 2>/dev/null || true
 }
 
 # Claim a pool slot for a task, replacing whatever the previous holder left.
@@ -1533,11 +1573,11 @@ fm_treehouse_slot_owner_state() {  # <worktree> <task-id> [marker]
 # Drop a task's own claim once its slot is back in the pool. Never removes
 # another task's claim, so a misdirected release cannot strip the evidence that
 # protects the slot's real owner.
-fm_treehouse_slot_owner_release() {  # <worktree> <task-id> [marker]
-  local worktree=$1 id=$2 marker=${3:-}
-  fm_treehouse_slot_owner_state "$worktree" "$id" "$marker"
+fm_treehouse_slot_owner_release() {  # <worktree> <task-id>
+  local worktree=$1 id=$2 marker
+  fm_treehouse_slot_owner_state "$worktree" "$id"
   [ "$FM_TREEHOUSE_SLOT_OWNER" = mine ] || return 0
-  [ -n "$marker" ] || marker=$(fm_treehouse_slot_owner_marker "$worktree") || return 0
+  marker=$(fm_treehouse_slot_owner_marker "$worktree") || return 0
   rm -f "$marker" 2>/dev/null || true
 }
 

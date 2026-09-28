@@ -1138,6 +1138,9 @@ test_adopted_worktree_teardown_skips_pool_return() {
   printf '{}\n' > "$case_dir/wt/.claude/settings.local.json"
   claim=$(git -C "$case_dir/wt" rev-parse --absolute-git-dir)/fm-adopted-owner
   printf 'task=task-x1\nhome=%s\n' "$case_dir" > "$claim"
+  # An empty preserve store is what adoption leaves when the copy carried no
+  # wiring of its own, so every wiring file present is firstmate's to remove.
+  mkdir -p "$(git -C "$case_dir/wt" rev-parse --absolute-git-dir)/fm-adopted-wiring"
   cat > "$case_dir/fakebin/treehouse" <<SH
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$case_dir/treehouse.log"
