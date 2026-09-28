@@ -536,6 +536,8 @@ JS
 JSON
   cat > "$repo/node_modules/typebox/index.js" <<'JS'
 export const Type = {
+  Array(items) { return { type: "array", items }; },
+  Null() { return { type: "null" }; },
   Object(properties, options) {
     return { type: "object", properties, ...(options ?? {}) };
   },
@@ -6163,6 +6165,25 @@ JS
   pass "$out"
 }
 
+test_native_semantic_lifecycle_with_installed_session_manager() {
+  local repo home sdk
+  sdk="${FM_PI_PACKAGE_DIR:-$(npm root -g)/@earendil-works/pi-coding-agent}"
+  if [ ! -f "$sdk/dist/index.js" ]; then
+    printf 'skip: semantic native workflow requires installed Pi SDK\n'
+    return
+  fi
+  repo="$TMP_ROOT/semantic-native-root"
+  home="$TMP_ROOT/semantic-native-home"
+  install_pi_branch_extension_fixture "$repo"
+  cp "$ROOT/.pi/extensions/fm-primary-pi-watch.ts" "$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  printf '#!/bin/sh\nprintf "watcher: healthy pid=1 (beacon 0s)\\n"\n' > "$repo/bin/fm-watch-arm.sh"
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  FM_HOME="$home" FM_NATIVE_SDK="$sdk" REAL_ROOT="$ROOT" \
+    FM_ROOT_OVERRIDE="$repo" FM_NATIVE_WATCH_PLUGIN="$repo/.pi/extensions/fm-primary-pi-watch.ts" \
+    PLUGIN="$repo/.pi/extensions/lib/fm-task-continuation.ts" \
+    node "$ROOT/tests/lifecycle-native.mjs" || fail "installed SDK semantic workflow failed"
+}
+
 test_continuation_defers_reserved_admission_at_ui_boundary() {
   continuation_ui_boundary_case heartbeat
   continuation_ui_boundary_case settle
@@ -6684,6 +6705,7 @@ test_store_failure_during_delivery_neither_loses_nor_duplicates
 test_mark_read_failure_keeps_routine_redelivery_and_captain_deduplication
 test_expired_delegation_refuses_bound_branch_report
 
+test_native_semantic_lifecycle_with_installed_session_manager
 test_continuation_defers_reserved_admission_at_ui_boundary
 test_continuation_retries_definite_send_failure_and_isolates_stale_tasks
 test_continuation_defers_pending_short_receipt_at_public_boundary

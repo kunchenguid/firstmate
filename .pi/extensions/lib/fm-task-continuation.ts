@@ -12,7 +12,8 @@ import { encodeFirstmateOperationalInputWith } from "./fm-operational-input.ts";
 type Observation = { task_id: string; state: string; reason: string; key: string; revision?: number; delegated?: boolean };
 type Reconciliation = { task_id: string; reason: string; key: string };
 type OwnershipDeferral = { task_id: string; reason: string; key: string };
-type InputReceipt = { id: string; text: string; task?: string; answer?: string };
+type InputReceipt = { id: string; text: string; task?: string; answer?: string;
+  update_brief?: boolean; pending?: boolean; route_entry_id?: string };
 type Admission = { content: string; admissions: string[]; escalations: { id: string; task: string; reason: string; recovery?: boolean; reconciliation?: boolean }[];
   canNotify: () => boolean; canContinue: () => boolean };
 type InputPacing = { key: string; attempts: number; after: number; reserved?: string; escalatedAt?: number;
@@ -116,7 +117,7 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
 
   function instruction(lines: string[]): string {
     return "Live task continuation obligations (presentation acknowledgements do not close these):\n" +
-      lines.join("\n") + "\nUse fm_task_continuation to inspect/enroll and reconcile through bin/fm-task-state.sh. " +
+      lines.join("\n") + "\nUse fm_task_continuation inspect/assess for semantic judgments and tool-derived CAS/evidence. " +
       "For each input receipt, route every requested task to its durable brief with action=route (task), " +
       "or record a substantive informational answer with action=answer (answer). " +
       "Main coordinates and judges acceptance; executors perform the operation chain. " +
@@ -148,7 +149,7 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
     const observations: Observation[] = [];
     const reconciliations: Reconciliation[] = [];
     const deferrals: OwnershipDeferral[] = [];
-    const unrouted = [...inputs.values()].filter((value) => !value.task && !value.answer);
+    const unrouted = [...inputs.values()].filter((value) => value.pending || !value.task && !value.answer);
     for (let i = 0; i < Math.min(BATCH, unrouted.length); i++) {
       const value = unrouted[(inputCursor + i) % unrouted.length];
       observations.push({ task_id: `input:${value.id}`,
@@ -164,13 +165,15 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
       if (ownership?.key && Date.now() < ownership.after) continue;
       try {
         if (lstatSync(join(data, id)).isSymbolicLink()) throw new Error("unsafe task directory");
+        await command(["refresh", id]);
         observations.push(await command(["observe", id]));
       } catch (error) {
         if (epoch !== generation || !owns()) throw error;
         const reason = String(error instanceof Error ? error.message : error).slice(0, 1200);
         const key = createHash("sha256").update(`${id}\0${reason}`).digest("hex");
         const temporary = temporaryOwnershipRefusal(error, id);
-        if (temporary) deferrals.push({ task_id: id, reason: temporary, key });
+        if (temporary) deferrals.push({ task_id: id, reason: temporary,
+          key: createHash("sha256").update(`${id}\0${temporary}`).digest("hex") });
         else reconciliations.push({ task_id: id, reason, key });
       }
     }
@@ -447,7 +450,7 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
     }).catch(() => { /* Pending evidence remains available at the next tick. */ });
   });
 
-  pi.on("session_start", (_event, ctx) => {
+  const restoreSession = (_event: unknown, ctx: ExtensionContext) => {
     generation++;
     context = ctx;
     inputs.clear();
@@ -465,9 +468,12 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
       }
       if (entry.type !== "custom" || entry.customType !== INPUT_ENTRY) continue;
       const value = entry.data as InputReceipt;
-      if (typeof value?.id === "string" && typeof value.text === "string") inputs.set(value.id, value);
+      if (typeof value?.id === "string" && typeof value.text === "string") inputs.set(value.id,
+        value.update_brief && !value.route_entry_id ? { ...value, route_entry_id: entry.id } : value);
     }
-  });
+  };
+  pi.on("session_start", restoreSession);
+  pi.on("session_tree", restoreSession);
   pi.on("session_shutdown", () => {
     generation++;
     context = undefined;
@@ -490,23 +496,59 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
 
   registerFirstmateTool(pi, {
     name: "fm_task_continuation", label: "Task continuation",
-    description: "Preserve and inspect live task obligations. Route an input receipt to an enrolled task with a durable brief, or attest that an informational input was answered. Task assessment/action CAS uses bin/fm-task-state.sh reconcile/action; no tool here executes or grants authority for an action.",
-    parameters: Type.Object({ action: Type.Union([Type.Literal("list"), Type.Literal("enroll"), Type.Literal("route"), Type.Literal("answer")]),
-      task: Type.Optional(Type.String()), input: Type.Optional(Type.String()), answer: Type.Optional(Type.String()) }),
+    description: "Inspect evidence and submit semantic assessments without lifecycle JSON or hashes. inspect binds evidence paths (include authority/payload/blocker paths); assess submits the returned basis and a judgment. route with update_brief appends the exact authenticated input and synchronizes intent under the existing lock; retry the same input after an interrupted update. No operation accepts a goal from process success or executes a prepared action.",
+    executionMode: "sequential",
+    parameters: Type.Object({ action: Type.Union([Type.Literal("list"), Type.Literal("enroll"), Type.Literal("route"), Type.Literal("answer"), Type.Literal("inspect"), Type.Literal("assess"), Type.Literal("refresh")]),
+      task: Type.Optional(Type.String()), input: Type.Optional(Type.String()), answer: Type.Optional(Type.String()),
+      update_brief: Type.Optional(Type.Boolean()), basis: Type.Optional(Type.String()),
+      evidence: Type.Optional(Type.Array(Type.String())),
+      judgment: Type.Optional(Type.Object({ disposition: Type.Union([Type.Literal("open"), Type.Literal("accepted"), Type.Literal("archived")]),
+        outcome: Type.String(), remaining_gap: Type.String(), authority_ref: Type.String(), evidence: Type.Array(Type.String()),
+        intent_changed: Type.Optional(Type.Boolean()), revoke_delegation: Type.Optional(Type.Boolean()),
+        next_action: Type.Optional(Type.Union([Type.Null(), Type.Object({ kind: Type.Union([Type.Literal("steer"), Type.Literal("readback"), Type.Literal("wait"), Type.Literal("decision"), Type.Literal("spawn"), Type.Literal("relaunch")]),
+          payload_ref: Type.String(), recheck_at: Type.String(), deadline: Type.String(), attempt_limit: Type.Optional(Type.Number()),
+          blocker: Type.Optional(Type.Object({ owner: Type.String(), dependency: Type.String(), release_ref: Type.String() })) })])) })) }),
     async execute(_id, params, _signal, _update, _ctx: ExtensionContext) {
       try {
         if (!owns()) throw new Error("this session does not own the fleet lock");
         let result: unknown;
         if (params.action === "list") {
-          result = { inputs: [...inputs.values()], tasks: existsSync(data) ? readdirSync(data).filter((id) => atom(id) && existsSync(join(data, id, "lifecycle.json"))) : [], instructions: "Use lifecycle/observe/reconcile/action via bin/fm-task-state.sh. A report or provider terminal state is not acceptance." };
+          result = { inputs: [...inputs.values()], tasks: existsSync(data) ? readdirSync(data).filter((id) => atom(id) && existsSync(join(data, id, "lifecycle.json"))) : [], instructions: "Use inspect with evidence paths, then assess with its basis and semantic judgment. Use route update_brief for additional authenticated user intent. A report or provider terminal state is not acceptance." };
         } else if (params.action === "enroll") {
-          result = await enroll(params.task || "");
+          await enroll(params.task || "");
+          result = await command(["inspect", params.task || ""]);
+        } else if (params.action === "inspect") {
+          result = await command(["inspect", params.task || "", ...(params.evidence || []).flatMap((ref) => ["--evidence", ref])]);
+        } else if (params.action === "assess") {
+          result = await command(["assess", params.task || "", "--basis", params.basis || "", "--judgment", JSON.stringify(params.judgment || {})]);
+        } else if (params.action === "refresh") {
+          result = await command(["refresh", params.task || ""]);
         } else {
           const input = inputs.get(params.input || "");
-          if (!input || input.task || input.answer) throw new Error("input is absent or already routed/answered");
+          if (!input || input.answer || input.task && !(params.action === "route" && params.task === input.task && params.update_brief && input.update_brief)) throw new Error("input is absent or already routed/answered");
           if (params.action === "route") {
-            await enroll(params.task || "");
-            result = { ...input, task: params.task };
+            if (!input.task) await enroll(params.task || "");
+            if (params.update_brief) {
+              const sessionFile = _ctx.sessionManager.getSessionFile();
+              if (!sessionFile) throw new Error("intent update requires a persisted native input session");
+              let routed = input;
+              if (!input.route_entry_id) {
+                routed = { ...input, task: params.task, update_brief: true, pending: true };
+                pi.appendEntry(INPUT_ENTRY, routed);
+                const entry = _ctx.sessionManager.getBranch().at(-1);
+                if (entry?.type !== "custom" || entry.customType !== INPUT_ENTRY) throw new Error("native route receipt was not persisted");
+                routed = { ...routed, route_entry_id: entry.id };
+                inputs.set(input.id, routed);
+              }
+              const updated = await command(["update-brief", params.task || "", "--session-file", sessionFile,
+                "--entry-id", routed.route_entry_id!, "--input", input.id]);
+              result = { ...routed, pending: false };
+              pi.appendEntry(INPUT_ENTRY, result);
+              inputs.set(input.id, result as InputReceipt);
+              return { content: [{ type: "text" as const, text: JSON.stringify(updated) }], details: undefined };
+            } else {
+              result = { ...input, task: params.task };
+            }
           } else {
             if (!params.answer?.trim()) throw new Error("substantive informational answer required; task work must be routed");
             result = { ...input, answer: params.answer };
@@ -520,5 +562,5 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
       }
     },
   });
-  return { preserve, capture, sessionFile: () => context?.sessionManager.getSessionFile(), inputBarrier: () => [...inputs.values()].some((input) => !input.task && !input.answer) };
+  return { preserve, capture, sessionFile: () => context?.sessionManager.getSessionFile(), inputBarrier: () => [...inputs.values()].some((input) => input.pending || !input.task && !input.answer) };
 }

@@ -27,7 +27,7 @@ fm_task_lifecycle() { # <read|reconcile|action|init|observe> <task> [arguments..
 }
 
 fm_task_lifecycle_mutate() (
-  local operation=$1 id=$2 lock
+  local operation=$1 id=$2 lock lifecycle_rc=0
   shift 2
   # shellcheck source=bin/fm-wake-lib.sh
   . "$FM_TASK_LIFECYCLE_BIN/fm-wake-lib.sh"
@@ -40,10 +40,36 @@ fm_task_lifecycle_mutate() (
   esac
   fm_lease_guard "$id" "goal reconciliation" || exit $?
   lock=$(fm_meta_lock_path "$STATE/$id.meta") || exit 1
-  trap 'fm_lock_release "$lock"; fm_lease_guard_release' EXIT
+  trap 'lifecycle_rc=$?; fm_lock_release "$lock"; fm_lease_guard_release; exit "$lifecycle_rc"' EXIT
   fm_lock_acquire_wait "$lock" || exit 1
   fm_task_lifecycle "$operation" "$id" "$@"
 )
+
+# Existing effect owners call this with their captured execution identity.
+# It records facts only; never accepts a goal or changes an outstanding action.
+# The caller already owns the task lease. Pass locked only inside its meta lock.
+fm_task_lifecycle_owner_receipt() ( # <task> <generation> <merge|cleanup> <facts-json> [locked]
+  local id=$1 generation=$2 kind=$3 facts=$4 lock receipt_rc=0
+  [ -e "${FM_DATA_OVERRIDE:-${FM_HOME:?}/data}/$id/lifecycle.json" ] || exit 0
+  if [ "${5:-}" != locked ]; then
+    lock=$(fm_meta_lock_path "${FM_STATE_OVERRIDE:-$FM_HOME/state}/$id.meta") || exit 1
+    fm_lock_acquire_wait "$lock" || exit 1
+    trap 'receipt_rc=$?; fm_lock_release "$lock"; exit "$receipt_rc"' EXIT
+  fi
+  fm_task_lifecycle owner-receipt "$id" --execution-generation "$generation" --kind "$kind" --facts "$facts" >/dev/null
+)
+
+# Preflight before the existing merge/cleanup owner's first external effect.
+# Semantic acceptance is separate; unknown state must be read back first.
+fm_task_lifecycle_receipt_preflight() { # <task>
+  local id=$1 record
+  [ -e "${FM_DATA_OVERRIDE:-${FM_HOME:?}/data}/$id/lifecycle.json" ] || return 0
+  record=$(fm_task_lifecycle read "$id") || return 1
+  printf '%s' "$record" | jq -e '.next_action.phase != "attempted" and .next_action.phase != "uncertain"' >/dev/null || {
+    echo 'REFUSED: outstanding lifecycle effect requires exact readback before merge or cleanup' >&2
+    return 1
+  }
+}
 
 # Ack owners call this only for exact task identities in their own row claim.
 # Under an outer presentation/queue lock this is read-only: enroll separately

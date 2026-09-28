@@ -598,8 +598,9 @@ test_extension_handoff_keeps_queued_wake_warning() {
   out=$(run_guard_case_extension "$dir")
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
-  assert_contains "$out" "queued wakes pending" \
-    "the queued-wake warning must still fire during an extension-owned hand-off"
+  assert_contains "$out" "queued wakes retained for the native supervision event owner" \
+    "the queued-wake notice must retain owner coordination during an extension-owned hand-off"
+  assert_not_contains "$out" "drain them" "native event ordering must not require manual warning-response commands"
   assert_not_contains "$out" "WATCHER DOWN - SUPERVISION IS OFF" \
     "a queued wake must not resurrect the watcher-down banner for a healthy hand-off"
   pass "fm-guard stale banner: queued-wake warning survives the extension hand-off tolerance"
@@ -636,8 +637,8 @@ test_branch_actor_is_not_told_to_drain_queued_wakes() {
   out=$(run_guard_case_extension "$dir")
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
-  assert_contains "$out" "queued wakes pending" \
-    "main must still be warned about the queued rows"
+  assert_contains "$out" "queued wakes retained" \
+    "main must still see the queued rows' retained owner"
   pass "fm-guard: the branch actor is never told to drain queued wakes while main still is"
 }
 

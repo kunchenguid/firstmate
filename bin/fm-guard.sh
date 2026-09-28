@@ -270,6 +270,8 @@ fi
 if "$queue_pending"; then
   if [ "$READ_ONLY" -eq 1 ]; then
     echo "WARNING: queued wakes pending - left untouched because this session lacks verified fleet-lock ownership." >&2
+  elif [ "$(fm_supervision_model)" = extension ] && [ "$GUARD_ACTOR" != branch ]; then
+    echo "NOTICE: queued wakes retained for the native supervision event owner; decisions and uncertain effects remain actionable." >&2
   elif [ "$GUARD_ACTOR" != branch ]; then
     echo "WARNING: queued wakes pending - drain them with bin/fm-wake-drain.sh before anything else." >&2
   fi

@@ -12,7 +12,7 @@
 # The task's existing per-task control lock serializes the captain-hold check
 # through that fast-forward. A still-held or unreadable row refuses before the
 # merge, so a captain approval must be recorded as an `answer --release` before
-# this entrypoint is invoked. The lock ends when the fast-forward returns;
+# this entrypoint is invoked. The lock ends after the fast-forward receipt;
 # docs/captain-hold-lifecycle.md owns the accepted merge-to-cleanup residual.
 # Usage: fm-merge-local.sh <task-id>
 set -eu
@@ -46,6 +46,9 @@ META="$STATE/$ID.meta"
 # shellcheck source=bin/fm-lease-lib.sh
 . "$SCRIPT_DIR/fm-lease-lib.sh"
 fm_lease_forbid_branch "local-only landing (fm-merge-local)"
+# shellcheck source=bin/fm-task-lifecycle-lib.sh
+. "$SCRIPT_DIR/fm-task-lifecycle-lib.sh"
+fm_task_lifecycle_receipt_preflight "$ID" || exit 1
 
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
 if ! fm_backlog_meta_spawn_gen_optional "$META" "$STATE"; then
@@ -128,8 +131,13 @@ case "$hold_status" in
 esac
 merge_status=0
 git -C "$PROJ" merge --ff-only "$BRANCH" >/dev/null || merge_status=$?
+[ "$merge_status" -eq 0 ] || exit "$merge_status"
+after=$(git -C "$PROJ" rev-parse "$DEFAULT")
+fm_task_lifecycle_owner_receipt "$ID" "$MERGE_EXPECTED_SPAWN_GEN" merge \
+  "$(jq -cn --arg url "local:$PROJ#$DEFAULT" --arg head "$after" '{url:$url,head:$head}')" || {
+  echo 'actionable: local merge landed but lifecycle receipt recording failed; read back the exact branch' >&2
+  exit 1
+}
 fm_lock_release "$MERGE_CONTROL_LOCK" || true
 MERGE_CONTROL_LOCK=
-[ "$merge_status" -eq 0 ] || exit "$merge_status"
-after=$(git -C "$PROJ" rev-parse --short "$DEFAULT")
 echo "merged $BRANCH into local $DEFAULT ($before -> $after) in $PROJ"

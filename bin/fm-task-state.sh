@@ -5,6 +5,10 @@
 # Usage:
 #   fm-task-state.sh <task-id>
 #   fm-task-state.sh lifecycle|observe|enroll <task-id>
+#   fm-task-state.sh inspect <task-id> [--evidence <path>]...
+#   fm-task-state.sh assess <task-id> --basis <inspect-token> --judgment '<semantic-json>'
+#   fm-task-state.sh refresh <task-id>
+# Native authenticated route updates use update-brief; see the canonical help.
 #   fm-task-state.sh reconcile <task-id> --expected-revision N --record private.json
 #   fm-task-state.sh coordinate <task-id> --expected-revision N --record receipt.json
 #   fm-task-state.sh branch-patch <task-id> --expected-revision N --record patch.json
@@ -28,7 +32,7 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # The task-local goal owner is opt-in through enrollment, independent of the
 # provider/process state below. No historical task is enrolled by a state read.
 case "${1:-}" in
-  lifecycle|observe|enroll|reconcile|action|coordinate|branch-patch|readback)
+  lifecycle|inspect|assess|update-brief|refresh|observe|enroll|reconcile|action|coordinate|branch-patch|readback)
     operation=$1; shift
     id=${1:-}; [ -n "$id" ] || exit 2
     shift
@@ -37,6 +41,7 @@ case "${1:-}" in
     case "$operation" in
       lifecycle) fm_task_lifecycle read "$id" "$@" ;;
       observe) fm_task_lifecycle observe "$id" "$@" ;;
+      inspect) fm_task_lifecycle inspect "$id" "$@" ;;
       enroll) fm_task_lifecycle_mutate init "$id" "$@" ;;
       *) fm_task_lifecycle_mutate "$operation" "$id" "$@" ;;
     esac

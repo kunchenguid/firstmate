@@ -507,6 +507,11 @@ test_verified_merge_records_pr_and_head() {
   mkdir -p "$case_dir/wt"
   add_gh_mocks "$case_dir" deadbeefcafefeed0000000000000000deadbeef
   : > "$case_dir/gh-axi.log"
+  mkdir -p "$case_dir/home/data/task-x1"
+  printf 'spawn_gen=lifecycle-merge-g1\n' >> "$case_dir/state/task-x1.meta"
+  printf 'Verify the requested behavior after merge.\n' > "$case_dir/home/data/task-x1/brief.md"
+  FM_HOME="$case_dir/home" FM_STATE_OVERRIDE="$case_dir/state" \
+    "$ROOT/bin/fm-task-state.sh" enroll task-x1 >/dev/null || fail "merge lifecycle enrollment failed"
 
   set +e
   run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/9 \
@@ -520,6 +525,8 @@ test_verified_merge_records_pr_and_head() {
   assert_grep 'pr_head=deadbeefcafefeed0000000000000000deadbeef' "$case_dir/state/task-x1.meta" \
     "records-before-merge: pr_head= was not recorded"
   assert_logged_gh_merge "$case_dir" 9 example/repo --squash
+  jq -e '.disposition == "open" and .owner_receipts.merge[-1].facts.head == "deadbeefcafefeed0000000000000000deadbeef"' \
+    "$case_dir/home/data/task-x1/lifecycle.json" >/dev/null || fail "forge receipt missing or auto-accepted the goal"
   pass "fm-pr-merge records pr= and pr_head= for a verified GitHub merge"
 }
 
