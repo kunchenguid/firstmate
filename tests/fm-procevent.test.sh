@@ -1072,8 +1072,24 @@ if pe "$HFLEGACY" retire "$legacy_id" \
 fi
 assert_present "$HFLEGACY/state/procevent/$legacy_id.source" \
   "pending legacy Lavish capture lost its registration ownership"
+if pe "$HFLEGACY" register lavish "$legacy_id" -- /bin/true \
+  > "$TMP_ROOT/firstmate-legacy-replace.out" 2> "$TMP_ROOT/firstmate-legacy-replace.err"; then
+  fail "generic registration replaced a pending legacy Lavish owner"
+fi
+if pe "$HFLEGACY" handled "$legacy_id" 1 \
+  > "$TMP_ROOT/firstmate-legacy-handled.out" 2> "$TMP_ROOT/firstmate-legacy-handled.err"; then
+  fail "generic acknowledgement bypassed a pending legacy Lavish reply"
+fi
 PATH="$LEGACY_BIN:$PATH" pe "$HFLEGACY" reconcile >/dev/null
 wait_for_lines "$LEGACY_LOG" 2 || fail "legacy recovery listener did not start"
+if PATH="$LEGACY_BIN:$PATH" FM_HOME="$HFLEGACY" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$LEGACY_ART" \
+  --agent-reply-file "$TMP_ROOT/nonexistent-legacy-reply" \
+  > "$TMP_ROOT/firstmate-legacy-missing.out" 2> "$TMP_ROOT/firstmate-legacy-missing.err"; then
+  fail "live legacy handoff accepted a missing reply"
+fi
+assert_present "$FM_PROCEVENT_CLAIM_ROOT/$legacy_id.claim" \
+  "failed live legacy handoff dropped machine-wide ownership"
 printf 'Answered after handoff.\n' > "$TMP_ROOT/firstmate-live-legacy-reply.txt"
 PATH="$LEGACY_BIN:$PATH" FM_HOME="$HFLEGACY" \
   "$ROOT/bin/fm-procevent-lavish.sh" arm "$LEGACY_ART" \
@@ -1159,6 +1175,17 @@ assert_present "$FM_PROCEVENT_CLAIM_ROOT/$ackfail_id.claim" \
   "acknowledgement failure released ownership before proving its poll stopped"
 [ "$(pe "$HFACKFAIL" list | awk -v id="$ackfail_id" '$1 == id { print $3 }')" = none ] \
   || fail "acknowledgement failure left a Lavish poll running without safe ownership"
+assert_present "$HFACKFAIL/state/procevent-inbox/$ackfail_id.1.accepted" \
+  "acknowledgement failure did not preserve durable reply acceptance uncertainty"
+printf 'duplicate reply attempt\n' > "$TMP_ROOT/firstmate-ack-fail-retry.txt"
+if PATH="$ACKFAIL_BIN:$PATH" FM_HOME="$HFACKFAIL" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$ACKFAIL_ART" \
+  --agent-reply-file "$TMP_ROOT/firstmate-ack-fail-retry.txt" \
+  > "$TMP_ROOT/firstmate-ack-fail-retry.out" 2> "$TMP_ROOT/firstmate-ack-fail-retry.err"; then
+  fail "Lavish re-arm retried a reply with ambiguous acceptance"
+fi
+[ "$(cat "$ACKFAIL_COUNT")" = 2 ] \
+  || fail "Lavish re-arm duplicated a reply after acknowledgement failure"
 pass "acknowledgement failure stops the poll before preserving ownership"
 
 HFNOREPLY="$TMP_ROOT/hfnoreply"; new_home "$HFNOREPLY"

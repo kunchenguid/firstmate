@@ -1254,6 +1254,37 @@ fm_procevent_is_handled() {
   [ -f "$marker" ] && [ ! -L "$marker" ]
 }
 
+fm_procevent_accepted_marker() {
+  printf '%s/%s.%s.accepted\n' "$(fm_procevent_inbox_dir "$1")" "$2" "$3"
+}
+
+fm_procevent_is_accepted() {
+  local marker; marker=$(fm_procevent_accepted_marker "$1" "$2" "$3")
+  [ -f "$marker" ] && [ ! -L "$marker" ]
+}
+
+fm_procevent_mark_accepted() {
+  local state=$1 id=$2 seq=$3 inbox result adapter_file marker tmp
+  fm_procevent_source_id_valid "$id" || return 2
+  case "$seq" in ''|*[!0-9]*) return 2 ;; esac
+  inbox=$(fm_procevent_inbox_dir "$state")
+  result="$inbox/$id.$seq.result"
+  adapter_file="$inbox/$id.$seq.adapter"
+  [ -f "$result" ] && [ ! -L "$result" ] || return 2
+  [ -f "$adapter_file" ] && [ ! -L "$adapter_file" ] || return 2
+  marker=$(fm_procevent_accepted_marker "$state" "$id" "$seq")
+  [ ! -L "$marker" ] || return 2
+  tmp=$(umask 077; mktemp "$inbox/.accepted.XXXXXX") || return 2
+  chmod 0600 "$tmp" || { rm -f -- "$tmp"; return 2; }
+  if ln "$tmp" "$marker" 2>/dev/null; then
+    rm -f -- "$tmp"
+    return 0
+  fi
+  rm -f -- "$tmp"
+  [ -f "$marker" ] && [ ! -L "$marker" ] && return 1
+  return 2
+}
+
 # fm_procevent_mark_handled <state> <source-id> <sequence>
 # The one durable handled acknowledgement per captured generation: keyed by the
 # exact source id and sequence, private at mode 0600, and path-safe through the
