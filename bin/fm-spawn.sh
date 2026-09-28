@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
+# Spawn a direct report: a crewmate in a treehouse, Orca, or Paseo worktree, or a
 # secondmate in its isolated firstmate home.
 # Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
 #        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
@@ -79,14 +79,15 @@
 #   docs/cmux-backend.md),
 #   then tmux.
 #   Spawn-capable backends are the reference tmux adapter, verified herdr
-#   adapter, and experimental zellij, orca, and cmux adapters. Orca owns both
-#   the task worktree and terminal, so ship/scout Orca spawns do not run
-#   treehouse get; cmux is a session provider only, exactly like herdr/zellij,
-#   so it does. Auto-detected herdr stays silent like tmux; auto-detected cmux
-#   prints a loud stderr notice; zellij and orca are never auto-detected.
+#   adapter, and experimental zellij, orca, cmux, and paseo adapters. Orca owns
+#   both the task worktree and terminal, while Paseo owns the task worktree and
+#   agent, so ship/scout spawns on either do not run treehouse get; cmux is a
+#   session provider only, exactly like herdr/zellij, so it does.
+#   Auto-detected herdr stays silent like tmux; auto-detected cmux prints a loud
+#   stderr notice; zellij, orca, and paseo are never auto-detected.
 #   codex-app is not a known backend yet; docs/codex-app-backend.md owns that
 #   blocked backend contract. Default tmux spawns do not write backend= to meta;
-#   absent backend= means tmux. cmux does not support --secondmate spawns yet.
+#   absent backend= means tmux. cmux and paseo do not support --secondmate spawns yet.
 #   A backend spawn refusal (missing dependency, version gate, unauthenticated
 #   socket, or unsupported secondmate mode) is terminal for that selected backend;
 #   callers must surface it instead of silently retrying another backend.
@@ -262,8 +263,10 @@
 #   blank lines and lines beginning with # are ignored. Invalid input refuses
 #   before launch, as do path inspection errors such as inaccessible config
 #   directories. An empty file retains only the operational floor below.
-#   Names are read once per spawn; values are expanded in the destination pane,
-#   not copied from the invoking process or written into the launch text.
+#   Names are read once per spawn; shell-backed launches expand values in the
+#   destination pane, not from the invoking process or from launch text.
+#   Paseo reads allowlisted values from the launching process and passes them
+#   as provider environment arguments; docs/paseo-backend.md owns its visibility.
 #   Unset names stay unset and empty values stay empty.
 #   The fixed operational floor is HOME PATH USER LOGNAME SHELL TERM COLORTERM
 #   LANG LC_ALL LC_CTYPE TMPDIR TMP TEMP GOTMPDIR, plus backend identity/routing:
@@ -1142,7 +1145,7 @@ parse_orca_worktree_result() {
 }
 
 spawn_abort_cleanup() {
-  local status=$?
+  local status=$? paseo_worktree_status='' paseo_cleanup_reason=''
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] &&
     [ "$SPAWN_META_PUBLISH_STARTED" = 1 ] &&
     [ -n "$SPAWN_META_TMP" ] &&
@@ -1230,6 +1233,29 @@ spawn_abort_cleanup() {
         fi
       fi
     fi
+  fi
+  if [ "${PASEO_DIRECT:-0}" = 1 ]; then
+    PASEO_DIRECT=0
+    if ! fm_backend_paseo_stop_status_proof "${PASEO_AGENT_ID:-}" >/dev/null 2>&1; then
+      paseo_cleanup_reason="Paseo agent stop could not be confirmed"
+    elif [ -z "${WT:-}" ] || [ ! -d "$WT" ]; then
+      paseo_cleanup_reason="worktree path is unavailable"
+    elif ! paseo_worktree_status=$(git -C "$WT" status --porcelain --untracked-files=all --ignored 2>/dev/null); then
+      paseo_cleanup_reason="worktree status could not be inspected"
+    elif [ -n "$paseo_worktree_status" ]; then
+      paseo_cleanup_reason="worktree contains uncommitted, untracked, or ignored files"
+    elif ! fm_backend_paseo_kill "${PASEO_AGENT_ID:-}" "${PASEO_WORKSPACE_ID:-}" >/dev/null 2>&1; then
+      paseo_cleanup_reason="Paseo agent or workspace archiving could not be confirmed"
+    fi
+    if [ -n "$paseo_cleanup_reason" ]; then
+      printf 'error: Paseo cleanup incomplete for agent %s and workspace %s after aborted spawn: %s; manually reconcile worktree %s\n' \
+        "${PASEO_AGENT_ID:-unknown}" "${PASEO_WORKSPACE_ID:-unknown}" \
+        "$paseo_cleanup_reason" "${WT:-unknown}" >&2
+    fi
+  fi
+  if [ -n "${PASEO_LEGACY_ENV_FILE:-}" ] &&
+    [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
+    rm -f -- "$PASEO_LEGACY_ENV_FILE" 2>/dev/null || true
   fi
   if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
     SPAWN_TASK_LOCK_HELD=0
@@ -1549,8 +1575,15 @@ if [ "$RELAUNCH" -eq 0 ]; then
     echo "error: backend=cmux does not support --secondmate spawns yet" >&2
     exit 1
   fi
+  if [ "$BACKEND" = paseo ] && [ "$KIND" = secondmate ]; then
+    echo "error: backend=paseo does not support --secondmate spawns yet" >&2
+    exit 1
+  fi
   if [ "$BACKEND" = orca ]; then
     fm_backend_orca_runtime_check || exit 1
+  fi
+  if [ "$BACKEND" = paseo ]; then
+    fm_backend_paseo_runtime_check || exit 1
   fi
 fi
 SPAWN_TASK_LOCK="$STATE/.spawn-$ID.lock"
@@ -1601,13 +1634,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
   RELAUNCH_TARGET=$FM_BACKEND_VALIDATED_TARGET
   fm_backend_validate_spawn "$BACKEND" || exit 1
   fm_backend_source "$BACKEND" || exit 1
-  # A relaunch must PROVE the previous agent is gone before it launches another
-  # one into the same endpoint, and only tmux and herdr have a recovery-grade
-  # classifier that can (bin/fm-control-lib.sh owns that capability table).
-  fm_control_backend_state_verified "$BACKEND" || {
+  if [ "$BACKEND" != paseo ] && ! fm_control_backend_state_verified "$BACKEND"; then
     echo "error: backend '$BACKEND' has no recovery-grade agent-state classifier, so a relaunch cannot prove the previous agent exited; refusing rather than risking two agents in one endpoint" >&2
     exit 1
-  }
+  fi
   if [ -n "${FM_CONTROL_HANDOFF_TX:-}" ]; then
     [ "$SPAWN_CONTROL_PARENT" = 1 ] || {
       echo "error: operator-attested handoff must be launched by its active fm-control transaction; refusing to rebind the task" >&2
@@ -1703,14 +1733,23 @@ if [ "$RELAUNCH" -eq 1 ]; then
   # owns that vocabulary). The proof itself lives in one place for the whole
   # control plane - fm_control_endpoint_absence_verdict - so `exit` and
   # `relaunch` cannot reach two different answers about one endpoint.
-  RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
   if [ "$RELAUNCH_HANDOFF" = 1 ]; then
+    RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
     [ "$RELAUNCH_STATE" = missing ] || {
       echo "error: attested handoff requires the original endpoint to remain missing; it now reads '$RELAUNCH_STATE', so refusing to create another endpoint" >&2
       exit 1
     }
     RELAUNCH_REBIND=1
-  elif [ "$RELAUNCH_STATE" = missing ]; then
+  elif [ "$BACKEND" = paseo ]; then
+    fm_backend_paseo_terminal_proof "$RELAUNCH_TARGET" || {
+      echo "error: Paseo task $ID's native status does not prove a closed or archived agent; refusing to launch another agent into its workspace" >&2
+      exit 1
+    }
+    RELAUNCH_STATE=dead
+  else
+    RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
+  fi
+  if [ "$RELAUNCH_HANDOFF" != 1 ] && [ "$BACKEND" != paseo ] && [ "$RELAUNCH_STATE" = missing ]; then
     RELAUNCH_ABSENCE=$(fm_control_endpoint_absence_verdict "$BACKEND" "$RELAUNCH_TARGET")
     case "${RELAUNCH_ABSENCE%%$'\t'*}" in
       gone) RELAUNCH_STATE=missing ;;
@@ -1731,6 +1770,13 @@ if [ "$RELAUNCH" -eq 1 ]; then
       ;;
   esac
   RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
+  if [ "$BACKEND" = paseo ]; then
+    PASEO_WORKSPACE_ID=$(fm_meta_get "$RELAUNCH_META" paseo_workspace_id)
+    [ -n "$PASEO_WORKSPACE_ID" ] || {
+      echo "error: Paseo task $ID has no recorded workspace; refusing to relaunch without its isolated worktree owner" >&2
+      exit 1
+    }
+  fi
   KIND=$(fm_meta_get "$RELAUNCH_META" kind)
   [ -n "$KIND" ] || KIND=ship
   # A secondmate whose endpoint is gone already has ONE owner for that
@@ -2790,7 +2836,7 @@ else
   WT=""
   BRIEF="$DATA/$ID/brief.md"
 fi
-if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ "$BACKEND" != paseo ]; then
   SPAWN_TREEHOUSE_PROJECT_LOCK=$(fm_treehouse_project_lock_path "$PROJ_ABS") || {
     echo "error: could not resolve the shared Treehouse project lock for $PROJ_ABS" >&2
     exit 1
@@ -2890,6 +2936,69 @@ fi
 
 BRIEF_DIR_REAL=$(cd "$(dirname "$BRIEF")" && pwd -P)
 BRIEF_REAL="$BRIEF_DIR_REAL/$(basename "$BRIEF")"
+
+# Paseo is a worktree-owning backend, so its public run command replaces the
+# treehouse/session setup and the shell launch-delivery path below. The adapter
+# returns the exact agent, workspace, and worktree identities that are later
+# persisted in this task's record.
+PASEO_DIRECT=0
+PASEO_AGENT_ID=
+if [ "$RELAUNCH" -ne 1 ] || [ "$BACKEND" != paseo ]; then
+  PASEO_WORKSPACE_ID=
+fi
+PASEO_LEGACY_ENV_FILE=
+PASEO_ENV_ARGS=()
+if [ "$BACKEND" = paseo ]; then
+  # Keep abort cleanup for environment files produced by earlier Paseo launches.
+  PASEO_LEGACY_ENV_FILE="$STATE/$ID.paseo-env"
+  if command -v shasum >/dev/null 2>&1; then
+    PASEO_HOME_TAG=$(printf '%s' "$FM_HOME" | shasum -a 256 | cut -c1-12)
+  else
+    PASEO_HOME_TAG=$(printf '%s' "$FM_HOME" | sha256sum | cut -c1-12)
+  fi
+  PASEO_ENV_ARGS=(
+    "FM_TASK_ID=$ID"
+    "FIRSTMATE_HOME=$FM_HOME"
+    "FIRSTMATE_STATE=$STATE"
+    "FM_TURNEND=$STATE/$ID.turn-ended"
+    "GOTMPDIR=/tmp/fm-$ID/gotmp"
+    "COMPACT_ADVISER_DISABLE=1"
+  )
+  if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
+    for paseo_env_name in $LAUNCH_ENV_NAMES; do
+      [ "$paseo_env_name" = PASEO_AGENT_ID ] && continue
+      paseo_env_value=${!paseo_env_name-}
+      [ "${!paseo_env_name+x}" = x ] || continue
+      case "$paseo_env_value" in
+        *$'\n'*|*$'\r'*)
+          echo "error: Paseo launch environment value for $paseo_env_name contains a line break" >&2
+          exit 1
+          ;;
+      esac
+      PASEO_ENV_ARGS+=("$paseo_env_name=$paseo_env_value")
+    done
+  fi
+  case "$HARNESS" in
+    claude*)
+      PASEO_ENV_ARGS+=("CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false" "CLAUDE_CODE_SEND_FEEDBACK=0")
+      [ -n "${CLAUDE_CONFIG_DIR:-}" ] && PASEO_ENV_ARGS+=("CLAUDE_CONFIG_DIR=$CLAUDE_CONFIG_DIR")
+      ;;
+    opencode*) PASEO_ENV_ARGS+=("OPENCODE_CONFIG_CONTENT={\"permission\":{\"*\":\"allow\"}}") ;;
+  esac
+  PASEO_RESULT=$(fm_backend_paseo_create_task "$ID" "$PROJ_ABS" "$BRIEF_REAL" "$HARNESS" "${MODEL:-}" "${EFFORT:-}" "$PASEO_HOME_TAG" "$PASEO_WORKSPACE_ID" "${PASEO_ENV_ARGS[@]}") || exit 1
+  IFS=$'\t' read -r PASEO_AGENT_ID PASEO_WORKSPACE_ID WT <<EOF
+$PASEO_RESULT
+EOF
+  [ -n "$PASEO_AGENT_ID" ] && [ -n "$PASEO_WORKSPACE_ID" ] && [ -n "$WT" ] || {
+    echo "error: Paseo returned incomplete task identities for $ID" >&2
+    exit 1
+  }
+  T=$PASEO_AGENT_ID
+  WT_TARGET=$T
+  PASEO_DIRECT=1
+  TASK_TMP="/tmp/fm-$ID"
+  (umask 077 && mkdir -p "$TASK_TMP/gotmp") || exit 1
+fi
 
 # PROJ_ABS can still carry a symlinked path component (e.g. macOS's /tmp ->
 # /private/tmp) when it came from the ship/scout branch's logical `pwd` above.
@@ -3228,7 +3337,9 @@ if [ -e "$STATE/$ID.backlog-close" ] || [ -L "$STATE/$ID.backlog-close" ]; then
 fi
 
 W="fm-$ID"
-if [ "$RELAUNCH" -eq 1 ]; then
+if [ "$RELAUNCH" -eq 1 ] && [ "$BACKEND" = paseo ]; then
+  :
+elif [ "$RELAUNCH" -eq 1 ]; then
   # A secondmate's home already resolved WT above through the same validation a
   # fresh secondmate spawn uses; every other kind takes the recorded worktree.
   # Either way the worktree is REUSED, never re-created: its branch, commits and
@@ -3933,7 +4044,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
     fi
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
-elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ "$BACKEND" != paseo ]; then
   spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
@@ -4015,9 +4126,11 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     SPAWN_SLOT_CLAIMED=1
   fi
 fi
-if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != paseo ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
 fi
+
+if [ "$BACKEND" != paseo ]; then
 
 # Pre-register Claude's workspace trust for the directory this launch starts in,
 # at the first point that directory is known and before any per-task state is
@@ -4483,6 +4596,8 @@ EOF
   esac
 fi
 
+fi
+
 # Delivery posture recorded in meta so fm-teardown's safety check and the
 # validate/merge stages can branch on it. A ship task carries the explicit
 # per-task decision validated above; a secondmate's posture is fixed; a scout
@@ -4546,7 +4661,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_agent_id paseo_workspace_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -4589,6 +4704,10 @@ preserve_relaunch_meta() {
   if [ "$BACKEND" = cmux ]; then
     echo "cmux_workspace_id=$CMUX_WORKSPACE_ID"
     echo "cmux_surface_id=$CMUX_SURFACE_ID"
+  fi
+  if [ "$BACKEND" = paseo ]; then
+    echo "paseo_agent_id=$PASEO_AGENT_ID"
+    echo "paseo_workspace_id=$PASEO_WORKSPACE_ID"
   fi
   if [ "$KIND" = secondmate ]; then
     echo "home=$PROJ_ABS"
@@ -4691,6 +4810,7 @@ fi
 "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
+if [ "$BACKEND" != paseo ]; then
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
 sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
@@ -5005,6 +5125,7 @@ if [ "$KIND" = secondmate ] && [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" != 1 ]; then
     fi
   fi
 fi
+fi
 
 # This is the commit point: all endpoint and harness delivery that can reject
 # the spawn has succeeded. Re-read and transition while holding the same
@@ -5049,10 +5170,15 @@ if [ "$SPAWN_BACKLOG_COMMIT_STATUS" -ne 0 ]; then
     echo "error: task $ID was republished but its backlog item could not be moved to In flight ($FM_BACKLOG_TRANSITION_ERROR); fix the backlog and re-run the relaunch" >&2
   fi
 fi
-trap - HUP INT TERM
 if [ "$SPAWN_BACKLOG_COMMIT_STATUS" -ne 0 ]; then
+  trap - HUP INT TERM
   exit "$SPAWN_BACKLOG_COMMIT_STATUS"
 fi
+# The provider-owned endpoint is now durable: metadata publication and the
+# backlog transition both succeeded. A deferred signal must not let the EXIT
+# cleanup path archive that committed worker/workspace pair.
+PASEO_DIRECT=0
+trap - HUP INT TERM
 if [ -n "$SPAWN_DEFERRED_SIGNAL" ]; then
   case "$SPAWN_DEFERRED_SIGNAL" in
   HUP) SPAWN_DEFERRED_SIGNAL_STATUS=129 ;;

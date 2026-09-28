@@ -297,7 +297,7 @@ Both recorded runtime identities now classify the exact `pi-launcher` foreground
 Backend applicability was reviewed across every spawn adapter.
 Tmux needs the exact `pi-launcher`, `pi-signed`, `pi`, and `Pi` process identities for recovery-grade liveness.
 Herdr uses native registered-agent state and needs no process-name branch.
-Zellij has no verified recovery-grade agent process probe, while Orca and cmux do not support secondmate spawns, so those three retain their existing generic ordinary-launch semantics without a new liveness matcher.
+Zellij and Paseo have no verified recovery-grade agent process probe, while Orca and cmux do not support secondmate spawns, so these four experimental adapters retain their existing generic ordinary-launch semantics without a new liveness matcher.
 
 The current classifier matrix and its refresh guard are recorded in [Composer classification matrix](#composer-classification-matrix), with portable shape coverage in `tests/fm-composer-lib.test.sh` and `tests/fm-composer-ghost.test.sh`.
 Kimi pointer delivery and OpenCode 1.18.4 busy-queue behavior remain pinned by `tests/fm-kimi-harness.test.sh`, `tests/fm-tmux-submit-busy.test.sh`, and `tests/fm-composer-lib.test.sh`.
@@ -305,7 +305,7 @@ Herdr's Claude idle-native submit confirmation is pinned by `tests/fm-backend-he
 
 ### Cleanup endpoint identity
 
-The cleanup identity boundary was validated on 2026-07-28 with tmux 3.6a and metadata fixtures for every supported backend.
+The cleanup identity boundary was validated on 2026-07-28 with tmux 3.6a and metadata fixtures for every supported backend covered by this evidence.
 
 ```sh
 tests/fm-teardown-endpoint-safety.test.sh
@@ -1713,6 +1713,24 @@ tests/fm-bootstrap.test.sh
 ```
 
 The fake-Orca suite covers readiness, registration, create response parsing, metadata routing, popup-safe submit, and path-matched release refusal.
+
+## Paseo
+
+Paseo 0.9.1 was live and reachable on 2026-09-23/24 through the existing daemon.
+A disposable labeled probe used `env -u PASEO_AGENT_ID`, `--background`, and the OpenCode provider.
+The adapter returned all three required identities: agent, workspace, and worktree path.
+The bounded live probe did not cover the full provider, status, control, workspace-archival, or environment-transport matrix; the portable suites below are the current evidence for those paths.
+
+```sh
+paseo --version
+paseo daemon status
+tests/fm-backend-paseo.test.sh
+tests/fm-busy-state.test.sh
+tests/fm-control.test.sh
+```
+
+Observed version and status were `0.9.1` and `connectedDaemon: reachable`.
+The portable suites cover provider refusal, native busy status, unverified liveness, unsupported key refusal, and the Paseo control route with a stubbed CLI.
 
 ## cmux
 

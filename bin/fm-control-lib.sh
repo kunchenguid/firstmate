@@ -35,8 +35,9 @@
 #   3. Per-backend capability: which named keys a runtime backend can deliver,
 #      and whether the backend has a recovery-grade agent-state classifier
 #      (bin/fm-backend.sh's fm_backend_agent_state) able to PROVE that an agent
-#      stopped. A verb whose postcondition cannot be proven on the recorded
-#      backend is refused rather than performed blind.
+#      stopped, or an adapter-owned native stop/status proof. A verb whose
+#      postcondition cannot be proven on the recorded backend is refused rather
+#      than performed blind.
 #
 # `resume` is deliberately NOT a verb. It is not deterministic across the
 # verified adapters: codex and grok resume only from a session id printed at
@@ -267,6 +268,9 @@ fm_control_backend_supports_key() {  # <backend> <key>
     tmux|herdr|zellij|cmux)
       case "$key" in Escape|Enter|C-c|C-u) return 0 ;; esac
       ;;
+    paseo)
+      case "$key" in C-c|ctrl+c|Ctrl-c|Ctrl-C) return 0 ;; esac
+      ;;
     orca)
       case "$key" in Enter|C-c) return 0 ;; esac
       ;;
@@ -274,11 +278,8 @@ fm_control_backend_supports_key() {  # <backend> <key>
   return 1
 }
 
-# Whether <backend> has a recovery-grade agent-state classifier. Only tmux and
-# herdr implement fm_backend_agent_state; zellij, orca, and cmux report
-# `unverified`, so no reading of theirs can prove an agent stopped. The control
-# plane refuses a stop-proving verb there instead of reporting an unprovable
-# transition as success.
+# Whether <backend> has a recovery-grade agent-state classifier. Paseo remains
+# `unverified`; its explicit control path uses native stop/status instead.
 fm_control_backend_state_verified() {  # <backend>
   case "${1-}" in
     tmux|herdr) return 0 ;;
@@ -344,6 +345,9 @@ fm_control_endpoint_absence_verdict() {  # <backend> <target>
         missing) printf 'gone\t' ;;
         *) printf 'unproven\tthe recorded herdr session'"'"'s server could not be started, or its pane could not be classified once it was running' ;;
       esac
+      ;;
+    paseo)
+      printf 'unproven\tPaseo status is not an endpoint-absence proof; use its native stop/status path instead'
       ;;
     *)
       printf 'unproven\tbackend %s has no recovery-grade classifier, so absence cannot be proven on it at all' "'$backend'"

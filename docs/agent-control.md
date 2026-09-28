@@ -34,11 +34,11 @@ A recorded `harness=` is not always an exact adapter name: a task launched from 
 | Verb | Effect | Postcondition |
 | --- | --- | --- |
 | `interrupt` | Deliver the harness's verified interrupt sequence while leaving the agent running. | Delivery succeeds while the endpoint still exists and the agent is still alive where the backend can classify that; cancellation is confirmed only from an adapter-owned acknowledgement and otherwise reports `cancel=unconfirmed`. |
-| `exit` | Stop the agent, preserving the endpoint, the worktree, and every uncommitted change. | The backend's recovery-grade classifier reports the agent gone. Already-stopped is idempotent success. An endpoint reading `missing` goes through the same [absence proof](#reclaiming-a-task-whose-endpoint-is-gone) the reclaim uses before anything is claimed about it, and only Herdr can supply one: proven gone reports `endpoint-gone` (the agent went with it, and the endpoint this verb normally preserves did not survive), a pane that turns out to be there and idle is the ordinary `already-stopped`, one whose agent is back takes the ordinary interrupt-then-exit path. A tmux `missing` always refuses rather than claim a stop it cannot see. |
-| `relaunch` | Replace the running agent with a new one in the same worktree - and the same endpoint whenever that endpoint still exists - on the exact recorded adapter or an explicitly chosen harness, model, and effort. | The new agent is alive on the endpoint the task's record now names, and that record names the harness that is actually running. |
+| `exit` | Stop the agent, preserving the endpoint, the worktree, and every uncommitted change where the backend can prove that outcome. | A recovery-grade backend reports the agent gone; Paseo uses native stop/status proof and falls back to archiving the agent when that proof is unavailable. Already-stopped is idempotent success. An endpoint reading `missing` goes through the same [absence proof](#reclaiming-a-task-whose-endpoint-is-gone) the reclaim uses before anything is claimed about it, and only Herdr can supply one: proven gone reports `endpoint-gone` (the agent went with it, and the endpoint this verb normally preserves did not survive), a pane that turns out to be there and idle is the ordinary `already-stopped`, one whose agent is back takes the ordinary interrupt-then-exit path. A tmux `missing` always refuses rather than claim a stop it cannot see. |
+| `relaunch` | Replace the running agent with a new one in the same worktree - and the same endpoint whenever that endpoint still exists - on the exact recorded adapter or an explicitly chosen harness, model, and effort. | The new agent passes the backend-specific readiness check on the endpoint the task's record now names, and that record names the harness that is actually running; Paseo readiness does not prove worker liveness. |
 | `handoff` | Rebind only the pinned legacy task `paseo-backend-adapter` after an attended, journaled operator confirmation, preserving the task's exact worktree and current changes. | The old tmux endpoint still reads `missing`, the task record matches its pinned identity, no second local task record claims its endpoint or worktree, and one unique tmux session is created for the replacement. This does not make tmux's absence proof stronger; the task-specific human attestations are the authority for this one handoff. |
 
-An exit that delivers lifecycle input but cannot prove the agent stopped fails with `exit=unconfirmed`, reports the observed agent state and any interrupt cancellation claim, and never claims that nothing changed.
+An exit that delivers lifecycle input but cannot prove the agent stopped fails with `exit=unconfirmed`, reports the observed agent state and any interrupt cancellation claim, and never claims that nothing changed, except that Paseo attempts its documented archive fallback before failing.
 Interrupt never rewrites busy state as proof of its own success.
 Claude exposes no lifecycle acknowledgement for a manual interrupt, so delivery succeeds with `cancel=unconfirmed` and its adapter-owned busy state remains as observed.
 muse's session log records `terminal=cancelled` for the interrupted run, so the control plane reports `cancel=confirmed` only after observing that exact acknowledgement.
@@ -192,8 +192,8 @@ If publication begins but its outcome is ambiguous, the endpoint is retained for
   Muse is a crewmate and scout adapter only, so relaunching a secondmate onto it refuses while its agent is still up rather than leaving that secondmate with no agent when the launch owner refuses.
 - A backend that cannot deliver the harness's interrupt key, or the composer clear that key needs, is refused rather than sent a different key.
   Orca's terminal API exposes only an interrupt and an Enter, so it can deliver neither Escape nor Ctrl+U.
-- `exit` and `relaunch` require a backend with a recovery-grade agent-state classifier - tmux and herdr - because without one the "the agent stopped" postcondition cannot be proven.
-  zellij, orca, and cmux are refused rather than reported as successful blind.
+- `exit` and `relaunch` require either a backend with a recovery-grade agent-state classifier - tmux and herdr - or Paseo's native stop/status path.
+  zellij, orca, and cmux are refused rather than reported as successful blind, while Paseo keeps liveness unverified and uses its explicit archive fallback for `exit`.
 - An ambiguous or unreadable endpoint state refuses.
   Only a positively classified state acts.
 - `exit`'s composer-empty check, above, is itself a fail-closed boundary that `relaunch` inherits by stopping the old agent through `exit`.
@@ -205,13 +205,14 @@ If publication begins but its outcome is ambiguous, the endpoint is retained for
 
 Backend capability comes from each adapter's real surface, not from a policy choice.
 
-| Backend | Escape | Enter | Ctrl+C | Ctrl+U | Recovery-grade agent state |
+| Backend | Escape | Enter | Ctrl+C | Ctrl+U | Recovery-grade agent state or native lifecycle proof |
 | --- | --- | --- | --- | --- | --- |
 | tmux | yes | yes | yes | yes | yes |
 | herdr | yes | yes | yes | yes | yes |
 | zellij | yes | yes | yes | yes | no |
 | cmux | yes | yes | yes | yes | no |
 | orca | no | yes | yes | no | no |
+| paseo | no | no | yes | no | native stop/status |
 
 Per-harness interrupt keys, repeat counts, composer clears, exit commands, and supported task kinds live in `bin/fm-control-lib.sh` and are exercised for every verified harness by `tests/fm-control.test.sh`, with adapters outside its lane pinning their control mechanics in their own harness suites.
 The empirical basis for each adapter's value is the `harness-adapters` skill's verification record for that adapter.

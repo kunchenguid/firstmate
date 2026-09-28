@@ -532,6 +532,18 @@ test_herdr_native_busy_only() {
   pass "herdr's native verdict is trusted for busy only, and records outrank it"
 }
 
+test_paseo_native_busy_precedes_codex_gate() {
+  local state out
+  state=$(new_state_dir paseo-native)
+  # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify
+  fm_backend_busy_state() { printf busy; }
+  out=$(fm_busy_classify paseo agent-test codex t1 "$state")
+  [ "$out" = "busy paseo-native" ] \
+    || fail "Paseo native busy must outrank Codex's unverified gate, got '$out'"
+  unset -f fm_backend_busy_state
+  pass "Paseo native busy status is consumed before the Codex unverified gate"
+}
+
 # The record parser runs inside sourcing callers (the watcher, the daemon, the
 # crew-state reader), so it must not disturb their shell: no clobbered
 # positional parameters and no changed glob setting.
@@ -623,6 +635,7 @@ test_kimi_unverified_gate
 test_cursor_ignores_rendered_and_native_signals
 test_dead_endpoint_overrides
 test_herdr_native_busy_only
+test_paseo_native_busy_precedes_codex_gate
 test_record_read_leaves_caller_shell_intact
 test_boolean_view_never_promotes_unknown
 

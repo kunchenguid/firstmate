@@ -31,9 +31,12 @@
 #              owned acknowledgement and otherwise reported unconfirmed. Busy
 #              state is never rewritten as proof of the action.
 #   exit       Stop the agent, preserving its terminal endpoint, worktree, and
-#              every uncommitted change. Interrupts first when the task reads
-#              busy, then submits the harness's exit command. Postcondition:
-#              the backend's recovery-grade classifier reports the agent gone.
+#              every uncommitted change where the backend can prove that
+#              outcome. Interrupts first when the task reads busy, then submits
+#              the harness's exit command. Paseo instead uses native stop/status
+#              proof and falls back to archiving the agent when that proof is
+#              unavailable. Postcondition: the backend's recovery-grade
+#              classifier or Paseo's explicit path reports a completed stop.
 #              Already-stopped is success (idempotent). An endpoint that reads
 #              `missing` is put through the control plane's per-backend absence
 #              proof (fm_control_endpoint_absence_verdict) before anything is
@@ -74,7 +77,9 @@
 #              inherits the local copy but none of the conversation; a
 #              secondmate reconciles its own home's records at startup, so its
 #              standing charter is never rewritten.
-#              Records a durable checkpoint and that note, exits the old agent,
+#              Paseo requires native idle status before reusing its recorded
+#              workspace and never claims worker liveness. Records a durable
+#              checkpoint and that note, exits the old agent,
 #              then delegates the launch to its single owner,
 #              bin/fm-spawn.sh --relaunch. A failure before publication keeps
 #              the prior durable record in place and reports the concrete
@@ -112,10 +117,9 @@
 #     is refused rather than guessed at.
 #   - A backend that cannot deliver the harness's interrupt key is refused
 #     (Orca's terminal API has no Escape).
-#   - `exit` and `relaunch` require a backend with a recovery-grade agent-state
-#     classifier (tmux, herdr), because without one the "the agent stopped"
-#     postcondition cannot be proven. zellij, orca, and cmux are refused rather
-#     than reported as successful blind.
+#   - `exit` and `relaunch` require a recovery-grade agent-state classifier or
+#     an adapter-owned native stop/status proof. Paseo uses the latter and keeps
+#     liveness unverified; zellij, orca, and cmux remain refused.
 #   - An ambiguous or unreadable endpoint state refuses; only a positively
 #     classified state acts.
 #   - A composer that visibly holds pending text refuses before an exit command
@@ -381,6 +385,9 @@ fm_control_harness_supported "$HARNESS" \
   || die "task $ID records harness '${RECORDED_HARNESS:-none}', which has no verified control mechanics; fm-control refuses to guess an interrupt key or exit command"
 
 fm_backend_validate "$BACKEND" || exit 1
+if [ "$BACKEND" = paseo ]; then
+  fm_backend_source paseo || exit 1
+fi
 
 # --- shared helpers ---------------------------------------------------------
 
@@ -413,6 +420,22 @@ wait_agent_state() {  # <timeout> <wanted>...
   return 1
 }
 
+wait_paseo_status() {  # <timeout>
+  local timeout=$1 status elapsed=0
+  while :; do
+    status=$(fm_backend_paseo_status "$T" 2>/dev/null || true)
+    if [ -n "$status" ]; then
+      printf '%s' "$status"
+      return 0
+    fi
+    awk -v e="$elapsed" -v t="$timeout" 'BEGIN{exit !(e < t)}' || break
+    sleep "$POLL"
+    elapsed=$(awk -v e="$elapsed" -v p="$POLL" 'BEGIN{printf "%.3f", e + p}')
+  done
+  printf '%s' "${status:-unknown}"
+  return 1
+}
+
 require_state_verified_backend() {  # <verb>
   fm_control_backend_state_verified "$BACKEND" && return 0
   die "task $ID runs on the $BACKEND backend, which has no recovery-grade agent-state classifier, so '$1' cannot prove the agent actually stopped; refusing rather than reporting an unproven transition as done"
@@ -425,9 +448,15 @@ require_state_verified_backend() {  # <verb>
 # composer would make the next submitted line concatenate onto it.
 send_interrupt_keys() {
   local key repeat clear i=0
-  key=$(fm_control_interrupt_key "$HARNESS")
-  repeat=$(fm_control_interrupt_repeat "$HARNESS")
-  clear=$(fm_control_interrupt_clear_key "$HARNESS")
+  if [ "$BACKEND" = paseo ]; then
+    key=C-c
+    repeat=1
+    clear=
+  else
+    key=$(fm_control_interrupt_key "$HARNESS")
+    repeat=$(fm_control_interrupt_repeat "$HARNESS")
+    clear=$(fm_control_interrupt_clear_key "$HARNESS")
+  fi
   fm_control_backend_supports_key "$BACKEND" "$key" \
     || die "harness $HARNESS interrupts with $key, which the $BACKEND backend cannot deliver; refusing to send a different key"
   [ -z "$clear" ] || fm_control_backend_supports_key "$BACKEND" "$clear" \
@@ -513,10 +542,22 @@ retire_busy_incarnation() {
   fi
 }
 
-# do_exit: stop the running agent, preserving endpoint and worktree. Prints
-# `already-stopped`, `endpoint-gone`, or `stopped`.
+# do_exit: stop the running agent, preserving endpoint and worktree where the
+# backend can prove that outcome. Paseo may report `archived` after its fallback.
 do_exit() {
   local state cmd verdict composer_state cancel absence interrupt_result=not-needed
+  if [ "$BACKEND" = paseo ]; then
+    if fm_backend_paseo_stop_status_proof "$T" "$EXIT_WAIT" "$POLL"; then
+      retire_busy_incarnation
+      printf 'stopped'
+    elif fm_backend_paseo_archive_agent "$T"; then
+      retire_busy_incarnation
+      printf 'archived'
+    else
+      die "Paseo could not prove task $ID stopped and its archive fallback failed; retaining the task record"
+    fi
+    return 0
+  fi
   require_state_verified_backend exit
   state=$(agent_state)
   case "$state" in
@@ -1013,7 +1054,7 @@ do_relaunch() {
   local exit_result state note_line
   local -a spawn_args
 
-  require_state_verified_backend relaunch
+  [ "$BACKEND" = paseo ] || require_state_verified_backend relaunch
   resolve_relaunch_profile
 
   if [ "$HANDOFF_MODE" = 1 ]; then
@@ -1123,9 +1164,15 @@ do_relaunch() {
     fi
   fi
 
-  state=$(wait_agent_state "$LAUNCH_WAIT" alive) || {
+  if [ "$BACKEND" = paseo ]; then
+    state=$(wait_paseo_status "$LAUNCH_WAIT") || {
+      die "the replacement agent for $ID did not expose a native Paseo status within ${LAUNCH_WAIT}s (status '$state')"
+    }
+  else
+    state=$(wait_agent_state "$LAUNCH_WAIT" alive) || {
     die "the replacement agent for $ID did not come up within ${LAUNCH_WAIT}s (endpoint reads '$state')"
-  }
+    }
+  fi
   RELAUNCH_AGENT_CONFIRMED=1
 
   journal_write complete "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"

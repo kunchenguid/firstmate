@@ -1016,6 +1016,13 @@ fm_busy_launch_prompt_parked() {  # <harness>
 fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
   local backend=$1 target=$2 harness=$3 id=$4 state=$5 tail40=${6-}
   local out rc r_state r_source native log
+  if [ "$backend" = paseo ] && command -v fm_backend_busy_state >/dev/null 2>&1; then
+    native=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null || true)
+    case "$native" in
+      busy) printf 'busy paseo-native'; return 0 ;;
+      idle) printf 'idle paseo-native'; return 0 ;;
+    esac
+  fi
   case "$harness" in
     kimi*)
       if ! fm_busy_kimi_verified; then

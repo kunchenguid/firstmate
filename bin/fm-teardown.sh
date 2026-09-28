@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Tear down a finished task: return the treehouse worktree, release the Orca
-# worktree, or retire a secondmate home; kill the recorded runtime endpoint,
+# Tear down a finished task: return the treehouse worktree, archive the Orca or
+# Paseo provider-owned worktree, or retire a secondmate home; kill the recorded runtime endpoint,
 # clear volatile state, and transition this home's backlog item for ship and
 # scout tasks before reporting success (a secondmate teardown transitions none,
 # since secondmates are not backlog items), then refresh/prune the project's
@@ -136,6 +136,9 @@
 # Orca tasks use the same safety checks, then close the recorded terminal and
 # remove the recorded worktree through `orca worktree rm`; teardown never guesses
 # an Orca target from ambient CLI state.
+# Paseo tasks use the same safety checks, then archive the recorded agent and
+# its separately durable workspace through the adapter; teardown never returns
+# or raw-deletes the provider-owned worktree.
 # A Herdr presentation journal never authorizes cleanup. Teardown still closes
 # only the exact task pane from ordinary endpoint metadata and never calls
 # `workspace close`. It retires the non-authoritative journal only when a
@@ -3488,6 +3491,11 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
       || { endpoint_close_refusal "$ID" "$BACKEND" "$T" 0; exit 1; }
   fi
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
+elif [ "$BACKEND" = paseo ] && [ "$KIND" != secondmate ]; then
+  # Paseo owns the isolated worktree. Do not return it through Treehouse or
+  # delete its branch here; archive the agent and its separately durable
+  # workspace record below.
+  :
 elif [ "$KIND" != secondmate ] && ! teardown_owns_worktree; then
   :
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
@@ -3563,6 +3571,9 @@ elif [ "$BACKEND" = herdr ]; then
   else
     echo "warning: herdr session presentation lock path is unavailable; skipping the pane close rather than closing unlocked" >&2
   fi
+elif [ "$BACKEND" = paseo ] && [ "$TEARDOWN_WINDOWLESS" != 1 ]; then
+  fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" paseo_workspace_id)" \
+    || { endpoint_close_refusal "$ID" "$BACKEND" "$T" 0; exit 1; }
 elif [ "$BACKEND" != orca ] && [ "$TEARDOWN_WINDOWLESS" != 1 ]; then
   fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" \
     || endpoint_close_refusal "$ID" "$BACKEND" "$T" 1 || exit 1
@@ -3660,6 +3671,7 @@ rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
   "$STATE/$ID.control-relaunch" "$STATE/$ID.control-relaunch.meta-prior" \
   "$STATE/$ID.control-relaunch.brief-prior" "$STATE/$ID.control-relaunch.note" \
   "$STATE/$ID.reconcile-nudged" "$STATE/$ID.gemini-settings.json" \
+  "$STATE/$ID.paseo-env" \
   "$STATE/.$ID.branch-outcome-index"
 # The steering inbox (bin/fm-task-inbox-lib.sh) is runtime state for the
 # retired endpoint; teardown only runs after landing is confirmed, so any
