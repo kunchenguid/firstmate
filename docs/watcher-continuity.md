@@ -399,6 +399,10 @@ A live foreign holder therefore cannot strand a TERM'd watcher in this marker-lo
 
 ## Regression coverage
 
+### OpenCode watch-arm plugin's arm-need decision
+
+`tests/fm-opencode-watch-arm-plugin.test.sh` covers the OpenCode primary plugin's `shouldArm`, which delegates to `fm_supervision_needed` in `bin/fm-supervision-lib.sh` rather than keeping its own partial copy of the "does this home need a watcher" predicate. These are real-process tests driving the plugin's exported coordinator against the real `bin/fm-watch-arm.sh` and `bin/fm-watch.sh` with an isolated state directory.
+
 ### Pi and OpenCode watch extension
 
 `tests/fm-pi-watch-extension.test.sh` checks Pi's first-cycle-or-explicit-repair tool metadata and ownership-based redundant-call no-ops.
