@@ -437,6 +437,8 @@ export function pathsForHome(home) {
     inbox: join(stateRoot, "inbox"),
     inboundLedger: join(stateRoot, "inbound-ledger"),
     inboundEventIds: join(stateRoot, "inbound-event-ids"),
+    inboundCleanup: join(stateRoot, "inbound-cleanup.json"),
+    outboundCleanup: join(stateRoot, "outbound-cleanup.json"),
     inboundPending: join(stateRoot, "inbound-pending"),
     inboundPendingCount: join(stateRoot, "inbound-pending-count"),
     inboundDeliveryMap: join(stateRoot, "inbound-delivery-map"),
@@ -813,6 +815,16 @@ function validateRecordAtPath(path, record) {
     requireString(record.event_id, "outbound pending event", OUTBOUND_EVENT_ID);
     requireIso(record.created_at, "outbound pending creation time");
     if (path.split(/[\\/]/).pop() !== `${sha(record.event_id)}.json`) throw new Error("Feishu outbound pending filename identity mismatch");
+  } else if (path.endsWith("/inbound-cleanup.json")) {
+    if (record.schema !== "fm-feishu-inbound-cleanup.v1") throw new Error("invalid inbound cleanup intent");
+    requireString(record.filename, "cleanup filename", /^[a-f0-9]{64}\.json$/);
+    requireString(record.delivery_ref, "cleanup delivery ref", DELIVERY_REF);
+    requireSafeInteger(record.binding_generation, "cleanup generation", { min: 1 });
+  } else if (path.endsWith("/outbound-cleanup.json")) {
+    if (record.schema !== "fm-feishu-outbound-cleanup.v1") throw new Error("invalid outbound cleanup intent");
+    validateCompletedReceipt(record.receipt);
+  } else if (parent === "inbound-event-ids" && record.schema === "fm-feishu-processed-inbound-id.v1") {
+    requireSafeInteger(record.binding_generation, "processed inbound generation", { min: 1 });
   } else if (parent === "inbound-event-ids") {
     if (record.schema !== "fm-feishu-inbound-event-id.v1") throw new Error("invalid Feishu event-id record schema");
     requireString(record.event_id_hash, "inbound event-id hash", RECORD_HASH);
@@ -1503,6 +1515,7 @@ function publishInboundRecordsLocked(paths, event, ledger, media = []) {
 }
 
 function repairInboundPublicationsLocked(paths) {
+  finishInboundCleanupLocked(paths);
   let repaired = 0;
   for (const name of safeJsonNames(paths.inboundPublications)) {
     completeInboundPublicationLocked(paths, name, readJson(join(paths.inboundPublications, name)));
@@ -1617,7 +1630,7 @@ export function publishFeishuInbound(home, raw, options = {}) {
     return { status: "quarantined", reason: "malformed-event" };
   }
   const filename = inboundFilename(messageId);
-  if (existsSync(join(paths.inbox, filename)) || existsSync(join(paths.inboundLedger, filename)) || inboundEventIdExists(paths, raw.event_id)) {
+  if (existsSync(join(paths.inbox, filename)) || existsSync(join(paths.inboundLedger, filename)) || inboundEventIdExists(paths, raw.event_id) || processedInboundIdentity(paths, stableId("in_", `${pairing.home_id}\0${messageId}`, 24))) {
     return withLock(paths, "inbound-state", () => {
       repairInboundPublicationsLocked(paths);
       return { status: "duplicate", messageIdHash: sha(messageId) };
@@ -1673,7 +1686,7 @@ export function publishFeishuInbound(home, raw, options = {}) {
       quarantine(paths, "authorization-changed", messageId, { ...audit, message_id_hash: sha(messageId) });
       return { status: "quarantined", reason: "authorization-changed", messageIdHash: sha(messageId) };
     }
-    if (existsSync(join(paths.inbox, filename)) || existsSync(join(paths.inboundLedger, filename)) || inboundEventIdExists(paths, raw.event_id)) {
+    if (existsSync(join(paths.inbox, filename)) || existsSync(join(paths.inboundLedger, filename)) || inboundEventIdExists(paths, raw.event_id) || processedInboundIdentity(paths, stableId("in_", `${pairing.home_id}\0${messageId}`, 24))) {
       return { status: "duplicate", messageIdHash: sha(messageId) };
     }
     const pressure = inboundResourcePressure(paths, options);
@@ -1979,68 +1992,133 @@ function inboundEventHasBody(event) {
   return event.schema !== PROCESSED_INBOUND_SCHEMA;
 }
 
+// These constant-size intents exist only while unlinking one proven terminal
+// record. Replay them before reading active records after an interrupted cleanup.
+function processedInboundIdentity(paths, deliveryRef) {
+  const record = readJson(join(paths.inboundEventIds, `${sha(`processed\0${deliveryRef}`)}.json`), { optional: true });
+  if (record) requireSchema(record, "fm-feishu-processed-inbound-id.v1", "processed inbound identity");
+  return record;
+}
+
+function finishInboundCleanupLocked(paths) {
+  const intent = readJson(paths.inboundCleanup, { optional: true });
+  if (!intent) return;
+  const ledger = readJson(join(paths.inboundLedger, intent.filename), { optional: true });
+  const event = readJson(join(paths.inbox, intent.filename), { optional: true });
+  const map = readJson(join(paths.inboundDeliveryMap, `${sha(intent.delivery_ref)}.json`), { optional: true });
+  const prior = processedInboundIdentity(paths, intent.delivery_ref);
+  if ((ledger && (ledger.state !== "delivered" || ledger.delivery_ref !== intent.delivery_ref || ledger.binding_generation !== intent.binding_generation)) ||
+      (event && event.delivery_ref !== intent.delivery_ref) || (map && map.filename !== intent.filename) ||
+      (prior && prior.binding_generation !== intent.binding_generation)) throw new Error("inbound cleanup intent conflicts with remaining evidence");
+  if (event && ledger) assertInboundPair(paths, intent.filename, event, ledger);
+  atomicJson(join(paths.inboundEventIds, `${sha(`processed\0${intent.delivery_ref}`)}.json`), {
+    schema: "fm-feishu-processed-inbound-id.v1",
+    binding_generation: intent.binding_generation,
+  });
+  removeIndexedFile(join(paths.inbox, intent.filename));
+  removeInboundPendingIndex(paths, intent.filename);
+  removeIndexedFile(join(paths.inboundDeliveryMap, `${sha(intent.delivery_ref)}.json`));
+  removeIndexedFile(join(paths.inboundLedger, intent.filename));
+  syncInboundPendingCount(paths);
+  removeIndexedFile(paths.inboundCleanup);
+}
+
+function validateCompletedReceipt(receipt) {
+  validateOutboundReceipt(receipt);
+  requireString(receipt.text_hash, "completed outbound text hash", RECORD_HASH);
+  if (!receipt.message_ids.length || receipt.message_ids.length !== receipt.idempotency_keys.length || receipt.idempotency_keys.some((key, index) => key !== stableId("fm", `${receipt.event_id}\0${index}`, 44))) {
+    throw new Error("invalid completed outbound receipt");
+  }
+  return receipt;
+}
+
+function finishOutboundCleanupLocked(paths) {
+  const intent = readJson(paths.outboundCleanup, { optional: true });
+  if (!intent) return;
+  const receipt = validateCompletedReceipt(intent.receipt);
+  const name = `${sha(receipt.event_id)}.json`;
+  const ledger = readJson(join(paths.outboundLedger, name), { optional: true });
+  const outbox = readJson(join(paths.outbox, name), { optional: true });
+  if (ledger && (ledger.state !== "posted" || ledger.next_chunk !== receipt.message_ids.length)) throw new Error("outbound cleanup intent conflicts with remaining ledger");
+  if (outbox && (outbox.text_hash !== receipt.text_hash || outbox.destination_chat_id !== receipt.chat_id || (outbox.chunk_count ?? outbox.chunks.length) !== receipt.message_ids.length)) throw new Error("outbound cleanup intent conflicts with remaining body");
+  atomicJson(join(paths.outboundReceipts, name), receipt);
+  removeIndexedFile(join(paths.outbox, name));
+  removeOutboundPendingIndex(paths, name);
+  removeIndexedFile(join(paths.outboundLedger, name));
+  removeIndexedFile(paths.outboundCleanup);
+}
+
 function cleanupProcessedInboundBodiesLocked(paths, nowMs) {
-  repairInboundLedgersLocked(paths);
+  repairInboundPublicationsLocked(paths);
+  // Media eligibility still needs the terminal ledger, so retire it first.
+  const media = cleanupFeishuMediaLocked(paths, nowMs, 0);
   let filesBefore = 0;
   let filesAfter = 0;
+  let removedLedgers = 0;
   const removedDeliveryRefs = [];
   for (const name of safeJsonNames(paths.inboundLedger)) {
     const ledger = validateInboundLedger(readJson(join(paths.inboundLedger, name)));
-    const eventPath = join(paths.inbox, name);
-    const rawEvent = readJson(eventPath, { optional: true });
-    if (!rawEvent) continue;
-    const event = validateInboundEvent(rawEvent);
-    filesBefore += 1;
+    const rawEvent = readJson(join(paths.inbox, name), { optional: true });
+    if (rawEvent) {
+      assertInboundPair(paths, name, rawEvent, ledger);
+      filesBefore += 1;
+    } else if (ledger.state !== "delivered") throw new Error("unfinished Feishu inbound ledger lost its message record");
     if (ledger.state !== "delivered") {
       filesAfter += 1;
       continue;
     }
-    unlinkSync(eventPath);
-    fsyncDirectory(paths.inbox);
-    removedDeliveryRefs.push(event.delivery_ref);
+    const map = readJson(join(paths.inboundDeliveryMap, `${sha(ledger.delivery_ref)}.json`));
+    if (map.filename !== name || map.message_id !== ledger.message_id) throw new Error("processed inbound map identity mismatch");
+    atomicJson(paths.inboundCleanup, {
+      schema: "fm-feishu-inbound-cleanup.v1", filename: name,
+      delivery_ref: ledger.delivery_ref, binding_generation: ledger.binding_generation,
+    });
+    finishInboundCleanupLocked(paths);
+    removedLedgers += 1;
+    removedDeliveryRefs.push(ledger.delivery_ref);
   }
-  const media = cleanupFeishuMediaLocked(paths, nowMs, 0);
   return {
-    filesBefore,
-    filesAfter,
-    removedFiles: removedDeliveryRefs.length,
-    retainedUnprocessedFiles: filesAfter,
-    removedDeliveryRefs,
-    removedMediaRecords: media.removedRecords,
-    removedMediaBytes: media.removedBytes,
+    filesBefore, filesAfter, removedFiles: filesBefore - filesAfter,
+    removedLedgers, removedMaps: removedLedgers,
+    retainedUnprocessedFiles: filesAfter, removedDeliveryRefs,
+    removedMediaRecords: media.removedRecords, removedMediaBytes: media.removedBytes,
   };
 }
 
 function cleanupProcessedOutboundBodiesLocked(paths) {
+  finishOutboundCleanupLocked(paths);
   const bindingRaw = readJson(paths.activeBinding, { optional: true });
   const binding = bindingRaw ? validateBindingRecord(bindingRaw) : undefined;
-  repairOutboundStateLocked(paths, binding);
   let filesBefore = 0;
   let filesAfter = 0;
   let removedFiles = 0;
-  for (const name of safeJsonNames(paths.outbox)) {
-    const outboxPath = join(paths.outbox, name);
-    const outbox = validateAnyOutbound(readJson(outboxPath));
-    filesBefore += 1;
-    const ledgerPath = join(paths.outboundLedger, name);
-    const ledger = validateOutboundLedger(readJson(ledgerPath));
-    if (ledger.state !== "posted") {
-      filesAfter += 1;
-      continue;
+  let removedLedgers = 0;
+  // Never enumerate historical receipts in periodic cleanup. Only active
+  // bodies/ledgers can need retirement; receipts are point-lookup evidence.
+  const names = new Set([...safeJsonNames(paths.outbox), ...safeJsonNames(paths.outboundLedger)]);
+  for (const name of names) {
+    const outbox = readJson(join(paths.outbox, name), { optional: true });
+    let ledger = readJson(join(paths.outboundLedger, name), { optional: true });
+    let receipt = readJson(join(paths.outboundReceipts, name), { optional: true });
+    if (outbox) {
+      filesBefore += 1;
+      ledger ??= newOutboundLedger(outbox);
+      assertOutboundPair(name, outbox, ledger, binding);
+      ({ ledger, receipt } = reconcileOutboundReceiptLocked(paths, name, outbox, ledger));
+      if (ledger.state !== "posted") { filesAfter += 1; continue; }
+      receipt = { ...receipt, text_hash: outbox.text_hash };
+    } else {
+      if (!ledger || !receipt) throw new Error("orphan Feishu outbound ledger");
+      assertProcessedOutboundEvidence(name, ledger, receipt);
+      receipt = { ...receipt, text_hash: ledger.text_hash };
     }
-    const receipt = validateOutboundReceipt(readJson(join(paths.outboundReceipts, name)));
-    const chunkCount = outbox.schema === PROCESSED_OUTBOUND_SCHEMA ? outbox.chunk_count : outbox.chunks.length;
-    const destinationChatId = outbox.destination_chat_id;
-    const idempotencyMismatch = receipt.idempotency_keys.length !== chunkCount || receipt.idempotency_keys.some((key, index) => key !== stableId("fm", `${outbox.event_id}\0${index}`, 44));
-    if (receipt.event_id !== outbox.event_id || receipt.chat_id !== destinationChatId || receipt.message_ids.length !== chunkCount || idempotencyMismatch) {
-      throw new Error("posted Feishu outbound body lacks complete authoritative receipt evidence");
-    }
-    atomicJson(ledgerPath, { ...ledger, text_hash: outbox.text_hash });
-    unlinkSync(outboxPath);
-    fsyncDirectory(paths.outbox);
-    removedFiles += 1;
+    validateCompletedReceipt(receipt);
+    atomicJson(paths.outboundCleanup, { schema: "fm-feishu-outbound-cleanup.v1", receipt });
+    finishOutboundCleanupLocked(paths);
+    removedLedgers += 1;
+    if (outbox) removedFiles += 1;
   }
-  return { filesBefore, filesAfter, removedFiles };
+  return { filesBefore, filesAfter, removedFiles, removedLedgers };
 }
 
 export function cleanupProcessedFeishuBodies(home, options = {}) {
@@ -2128,7 +2206,7 @@ export function repairInboundLedgers(home) {
 export function pendingFeishuIngress(home, fence) {
   const paths = ensurePrivateLayout(home);
   return withConfigurationLocks(paths, () => withLock(paths, "inbound-state", () => {
-    repairInboundLedgersLocked(paths);
+    repairInboundPublicationsLocked(paths);
     const pairingRaw = readJson(paths.pairing, { optional: true });
     const bindingRaw = readJson(paths.activeBinding, { optional: true });
     const pairing = pairingRaw ? validatePairingRecord(pairingRaw) : undefined;
@@ -2156,7 +2234,7 @@ export function pendingFeishuIngress(home, fence) {
 export function offerFeishuIngress(home, deliveryRef, fence) {
   const paths = ensurePrivateLayout(home);
   return withConfigurationLocks(paths, () => withLock(paths, "inbound-state", () => {
-    repairInboundLedgersLocked(paths);
+    repairInboundPublicationsLocked(paths);
     const binding = readJson(paths.activeBinding, { optional: true });
     if (!binding || binding.status !== "active" || binding.session_id !== fence.sessionId || binding.binding_id !== fence.bindingId || binding.generation !== fence.bindingGeneration) throw new Error("Feishu native-queue offer binding fence mismatch");
     const found = readInboundByDeliveryRef(paths, deliveryRef);
@@ -2193,7 +2271,7 @@ export function releaseFeishuIngressOffer(home, deliveryRef, error) {
 export function reconcileFeishuIngress(home, markers, fence, resetUnobservedOffers = false) {
   const paths = ensurePrivateLayout(home);
   return withLock(paths, "inbound-state", () => {
-    repairInboundLedgersLocked(paths);
+    repairInboundPublicationsLocked(paths);
     const markerByRef = new Map();
     for (const marker of markers) {
       if (marker.sessionId === fence.sessionId && marker.bindingGeneration === fence.bindingGeneration) markerByRef.set(marker.deliveryRef, marker);
@@ -2247,6 +2325,8 @@ export function findInboundDeliveryEvidence(home, deliveryRef) {
   requireString(deliveryRef, "inbound delivery ref", DELIVERY_REF);
   return withLock(paths, "inbound-state", () => {
     repairInboundPublicationsLocked(paths);
+    const processed = processedInboundIdentity(paths, deliveryRef);
+    if (processed) return { event: { delivery_ref: deliveryRef, binding_generation: processed.binding_generation }, bodyAvailable: false };
     const found = readInboundByDeliveryRef(paths, deliveryRef);
     if (!found) return undefined;
     return {
@@ -2915,13 +2995,16 @@ function assertProcessedOutboundEvidence(name, ledger, receipt) {
 }
 
 function repairOutboundStateLocked(paths, binding) {
+  finishOutboundCleanupLocked(paths);
   assertConfigurationIdentity(paths, undefined, binding);
   let repaired = 0;
   const outboxNames = safeJsonNames(paths.outbox);
   const outboxSet = new Set(outboxNames);
   const ledgerNames = safeJsonNames(paths.outboundLedger);
   const ledgerSet = new Set(ledgerNames);
-  for (const name of safeJsonNames(paths.outboundReceipts)) if (!ledgerSet.has(name)) throw new Error("orphan Feishu outbound receipt");
+  for (const name of safeJsonNames(paths.outboundReceipts)) {
+    if (!ledgerSet.has(name)) validateCompletedReceipt(readJson(join(paths.outboundReceipts, name)));
+  }
   for (const name of ledgerNames) {
     if (outboxSet.has(name)) continue;
     const ledger = readJson(join(paths.outboundLedger, name));
@@ -2982,6 +3065,7 @@ export function persistAssistantOutboundIntent(home, input) {
   if (text.trim().length === 0) return { status: "skipped", reason: "empty" };
   if (isLocalRoutineAssistantText(text)) return { status: "skipped", reason: "routine" };
   return withLock(paths, "outbound-state", () => {
+    finishOutboundCleanupLocked(paths);
     const pairingRaw = readJson(paths.pairing, { optional: true });
     const bindingRaw = readJson(paths.activeBinding, { optional: true });
     const pairing = pairingRaw ? validatePairingRecord(pairingRaw) : undefined;
@@ -2993,6 +3077,12 @@ export function persistAssistantOutboundIntent(home, input) {
     if (existingOutbox) {
       validateAnyOutbound(existingOutbox);
       if (existingOutbox.assistant_entry_id !== assistantEntryId || existingOutbox.session_order !== sessionOrder || existingOutbox.session_entry_timestamp !== sessionEntryTimestamp || existingOutbox.text_hash !== `sha256:${sha(text)}`) throw new Error("persisted Assistant entry conflicts with its existing Feishu outbound record");
+      return { status: "duplicate", eventId };
+    }
+    const completedReceipt = readJson(join(paths.outboundReceipts, `${sha(eventId)}.json`), { optional: true });
+    if (completedReceipt?.text_hash) {
+      validateCompletedReceipt(completedReceipt);
+      if (completedReceipt.text_hash !== `sha256:${sha(text)}`) throw new Error("persisted Assistant entry conflicts with its processed Feishu outbound identity");
       return { status: "duplicate", eventId };
     }
     const existingLedger = readJson(join(paths.outboundLedger, `${sha(eventId)}.json`), { optional: true });
@@ -3140,6 +3230,7 @@ export function registerAssistantOutbound(home, input) {
   }
   const filename = `${sha(eventId)}.json`;
   return withLock(paths, "outbound-state", () => {
+    finishOutboundCleanupLocked(paths);
     const currentBindingRaw = readJson(paths.activeBinding, { optional: true });
     const currentBinding = currentBindingRaw ? validateBindingRecord(currentBindingRaw) : undefined;
     if (!currentBinding || currentBinding.status !== "active" || currentBinding.binding_id !== binding.binding_id || currentBinding.generation !== binding.generation) {
@@ -3157,6 +3248,12 @@ export function registerAssistantOutbound(home, input) {
       ledger = reconcileOutboundReceiptLocked(paths, filename, outbox, ledger).ledger;
       if (["pending", "retryable", "sending"].includes(ledger.state)) writeOutboundPendingIndex(paths, filename, outbox);
       else removeOutboundPendingIndex(paths, filename);
+      return { status: "duplicate", eventId };
+    }
+    const completedReceipt = readJson(join(paths.outboundReceipts, filename), { optional: true });
+    if (completedReceipt?.text_hash) {
+      validateCompletedReceipt(completedReceipt);
+      if (completedReceipt.text_hash !== `sha256:${sha(text)}`) throw new Error("persisted Assistant entry conflicts with its processed Feishu outbound identity");
       return { status: "duplicate", eventId };
     }
     const processedLedger = readJson(join(paths.outboundLedger, filename), { optional: true });
@@ -3210,6 +3307,7 @@ export function claimNextOutbound(home, options = {}) {
   const binding = bindingRaw ? validateBindingRecord(bindingRaw) : undefined;
   const now = Number.isSafeInteger(options.nowMs) ? options.nowMs : Date.now();
   return withLock(paths, "outbound-state", () => {
+    finishOutboundCleanupLocked(paths);
     const candidates = [];
     for (const name of safeJsonNames(paths.outboundPending)) {
       const marker = readJson(join(paths.outboundPending, name));
@@ -3285,10 +3383,15 @@ export function failOutboundAttempt(home, claim, error, { ambiguous = false, ret
   const paths = ensurePrivateLayout(home);
   const now = Number.isSafeInteger(nowMs) ? nowMs : Date.now();
   return withLock(paths, "outbound-state", () => {
+    finishOutboundCleanupLocked(paths);
     const bindingRaw = readJson(paths.activeBinding, { optional: true });
     const binding = bindingRaw ? validateBindingRecord(bindingRaw) : undefined;
     const path = join(paths.outboundLedger, claim.filename);
-    const ledger = readJson(path);
+    const ledger = readJson(path, { optional: true });
+    if (!ledger) {
+      validateCompletedReceipt(readJson(join(paths.outboundReceipts, claim.filename)));
+      return false;
+    }
     const outbox = readJson(join(paths.outbox, claim.filename));
     assertOutboundPair(claim.filename, outbox, ledger, binding);
     if (ledger.attempt_id !== claim.ledger.attempt_id) return false;
@@ -3318,10 +3421,15 @@ export function receiptOutbound(home, claim, receipt) {
   const chatId = requireString(receipt.chatId, "outbound chat_id", CHAT_ID);
   if (chatId !== claim.outbox.destination_chat_id) throw new Error("Feishu receipt chat does not match the bound destination");
   return withLock(paths, "outbound-state", () => {
+    finishOutboundCleanupLocked(paths);
     const bindingRaw = readJson(paths.activeBinding, { optional: true });
     const binding = bindingRaw ? validateBindingRecord(bindingRaw) : undefined;
     const ledgerPath = join(paths.outboundLedger, claim.filename);
-    const ledger = readJson(ledgerPath);
+    const ledger = readJson(ledgerPath, { optional: true });
+    if (!ledger) {
+      validateCompletedReceipt(readJson(join(paths.outboundReceipts, claim.filename)));
+      return false;
+    }
     const outbox = readJson(join(paths.outbox, claim.filename));
     assertOutboundPair(claim.filename, outbox, ledger, binding);
     if (ledger.attempt_id !== claim.ledger.attempt_id) return false;

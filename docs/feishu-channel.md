@@ -173,8 +173,16 @@ A wrong session, stale generation, lost lock, or closed live owner leaves durabl
 The registered custom renderer verifies that metadata and the exact content against the durable accepted event, then renders only the captain's text and images with no title, source badge, slash instruction, delivery reference, or bridge framing.
 Immediately before provider conversion, the context hook performs the same verification and adds the source fence and slash-handling instruction to model text without changing persisted or rendered content.
 Verification matches the exact content against the immutable digest recorded in the private inbound ledger when the message is offered to Pi, so routine terminal media cleanup never changes trust, rendering, or fencing, and repeated provider/UI verification reuses that evidence without rereading media bytes or reacquiring Feishu state locks.
-A lifecycle-owned five-second pass deletes each local inbound message JSON file only after its ledger proves delivery, and deletes each local outbound message JSON file only after a complete successful-send receipt proves every chunk posted.
-The pass also deletes processed empty-body message files left by earlier versions, retains pending, offered, sending, retryable, partially posted, superseded-unsent, and delivery-uncertain message files without a count cap, and keeps only the existing minimal ledgers, receipts, delivery maps, and event identities needed to prevent replay and filter deleted inbound entries from later provider context.
+Ordinary 250ms ingress polling reads only pending indexes and unfinished publication intents; full inbox/ledger/map integrity recovery runs at startup or an explicit recovery boundary.
+The polling ownership check runs asynchronously and then rechecks the current runtime, binding, and live owner before dispatch; it does not cache ownership across ticks.
+Pi session-array traversal for Assistant capture remains a separate operation from Feishu directory enumeration and JSON parsing.
+A lifecycle-owned five-second pass deletes delivered inbound payloads, ledgers, and delivery maps, and deletes outbound payloads and ledgers only after a complete successful-send receipt proves every chunk posted.
+It includes earlier-version empty-body files and already-unlinked payloads whose eligible ledger/map residue remains.
+Pending, offered, sending, retryable, partially posted, superseded-unsent, and delivery-uncertain records remain intact without a count cap.
+Existing inbound event-ID evidence remains, together with processed delivery-reference membership containing only its schema and binding generation; this rejects same-message replay with a different event ID and filters retired context, but never authorizes message content.
+Successful outbound receipts retain the text hash for registration conflict detection and no-repeat delivery; neither these receipts nor processed inbound identities are enumerated by periodic cleanup or ingress polling.
+A single transient intent per direction makes interrupted unlink operations recoverable under the existing state lock, without a second historical ledger or archive.
+Unknown or unverifiable reserved Feishu custom messages are omitted from provider context, while unsigned native input never gains source authority from marker-shaped text.
 It never deletes remote Feishu history.
 A message persisted by an earlier build keeps its already-fenced model context, while display strips only its exact legacy prefix after the marker matches the durable accepted event.
 The metadata does not control outbound eligibility.

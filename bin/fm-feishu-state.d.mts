@@ -105,6 +105,8 @@ export interface StatePaths {
   inbox: string;
   inboundLedger: string;
   inboundEventIds: string;
+  inboundCleanup: string;
+  outboundCleanup: string;
   inboundPending: string;
   inboundPendingCount: string;
   inboundDeliveryMap: string;
@@ -203,11 +205,13 @@ export interface ProcessedBodyCleanupResult {
     filesAfter: number;
     removedFiles: number;
     retainedUnprocessedFiles: number;
+    removedLedgers: number;
+    removedMaps: number;
     removedDeliveryRefs: string[];
     removedMediaRecords: number;
     removedMediaBytes: number;
   };
-  outbound: { filesBefore: number; filesAfter: number; removedFiles: number };
+  outbound: { filesBefore: number; filesAfter: number; removedFiles: number; removedLedgers: number };
   removedDeliveryRefs: string[];
 }
 export function cleanupProcessedFeishuBodies(home: string, options?: { nowMs?: number }): ProcessedBodyCleanupResult;
