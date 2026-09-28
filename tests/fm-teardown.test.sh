@@ -3084,6 +3084,7 @@ test_teardown_records_the_task_pipeline_spend() {
   local case_dir rc=0 ledger
   case_dir=$(make_case pipeline-spend)
   write_meta "$case_dir" no-mistakes ship
+  : > "$case_dir/config/pipeline-spend"
   land_shippable_commit "$case_dir"
   mkdir -p "$case_dir/nm"
   python3 - "$case_dir/nm/state.sqlite" "$case_dir/project" "$(date +%s)" <<'PY'
@@ -3128,6 +3129,20 @@ PY
   ! git -C "$case_dir/project" show-ref --verify --quiet refs/heads/fm/task-x1 \
     || fail "pipeline-spend: teardown kept the task branch"
   pass "teardown records the task's pipeline spend before removing its branch and record"
+}
+
+test_teardown_skips_pipeline_spend_when_disabled() {
+  local case_dir rc=0
+  case_dir=$(make_case pipeline-spend-disabled)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "pipeline-spend-disabled: teardown should succeed"
+  assert_absent "$case_dir/data/pipeline-spend.jsonl" \
+    "pipeline-spend-disabled: teardown created a spend ledger without opt-in"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "pipeline-spend-disabled: teardown kept the task record"
+  pass 'teardown skips all pipeline-spend recording when the home has not opted in'
 }
 
 test_parked_own_run_is_aborted_before_teardown() {
@@ -4373,6 +4388,7 @@ test_persistent_index_lock_exhausts_retries_and_refuses_loudly
 test_empty_retry_wait_uses_default_without_aborting
 test_fractional_legacy_retry_wait_refuses_without_arithmetic_error
 test_teardown_records_the_task_pipeline_spend
+test_teardown_skips_pipeline_spend_when_disabled
 test_parked_own_run_is_aborted_before_teardown
 test_parked_own_run_concludes_on_passed_with_override_after_abort
 test_parked_own_run_concludes_on_passed_with_skips_after_abort

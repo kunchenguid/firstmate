@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Behavior tests for bin/fm-pipeline-spend.sh: a task's no-mistakes pipeline
 # spend reaches Firstmate's own records, attributed to the task, through the
-# script's public record command, reading back the ledger line it writes. Each case seeds a real SQLite state
-# database shaped like no-mistakes' own (repos, runs, agent_invocations) under
+# script's public record command, reading back the ledger line it writes. Each
+# enabled case seeds a real SQLite state database shaped like no-mistakes' own
+# (repos, runs, agent_invocations) under
 # a private NM_HOME, a real git task copy whose branch reflog starts at a known
 # time, and a fake no-mistakes CLI that only names the resolved repository.
 set -eu
@@ -28,7 +29,8 @@ BRANCH_ISO=$(TZ=UTC0 date -d "@$BRANCH_EPOCH" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
 # uninitialized-repository error when FAKE_NM_REPO is empty.
 make_case() {
   local d=$TMP_ROOT/$1
-  mkdir -p "$d/home/state" "$d/home/data" "$d/nm" "$d/fakebin"
+  mkdir -p "$d/home/state" "$d/home/data" "$d/home/config" "$d/nm" "$d/fakebin"
+  : > "$d/home/config/pipeline-spend"
   fm_git_init_commit "$d/project"
   GIT_COMMITTER_DATE="@$BRANCH_EPOCH +0000" git -C "$d/project" worktree add -q -b fm/task "$d/wt"
   fm_write_meta "$d/home/state/task.meta" \
@@ -41,6 +43,7 @@ make_case() {
     "spawn_gen=s$SPAWN_EPOCH.1.abc"
   cat > "$d/fakebin/no-mistakes" <<'SH'
 #!/usr/bin/env bash
+[ -z "${FAKE_NM_LOG:-}" ] || printf '%s\n' "$*" >> "$FAKE_NM_LOG"
 [ "$*" = axi ] || exit 1
 if [ -n "${FAKE_NM_REPO:-}" ]; then
   printf 'bin: no-mistakes\nrepo: %s\ncurrent_branch: fm/task\n' "$FAKE_NM_REPO"
@@ -109,7 +112,7 @@ PY
 spend() {
   local d=$1
   env -u FM_STATE_OVERRIDE -u FM_DATA_OVERRIDE FM_HOME="$d/home" NM_HOME="$d/nm" \
-    FAKE_NM_REPO="${FAKE_NM_REPO-$d/project}" PATH="$d/fakebin:$PATH" \
+    FAKE_NM_REPO="${FAKE_NM_REPO-$d/project}" FAKE_NM_LOG="$d/nm-invocations" PATH="$d/fakebin:$PATH" \
     "$SPEND" "$2" "${3:-task}"
 }
 
@@ -300,6 +303,17 @@ EOF
   pass 'record appends one line per task incarnation'
 }
 
+test_disabled_record_does_not_read_or_create_spend_data() {
+  local d
+  d=$(make_case disabled)
+  rm -f "$d/home/config/pipeline-spend" "$d/home/state/task.meta"
+  rm -rf "$d/home/data"
+  spend "$d" record >/dev/null || fail "record failed while the feature was disabled"
+  assert_absent "$d/home/data/pipeline-spend.jsonl" 'disabled recording created spend data'
+  assert_absent "$d/nm-invocations" 'disabled recording called no-mistakes'
+  pass 'an absent opt-in flag bypasses task, pipeline, and ledger reads and writes'
+}
+
 test_refusals() {
   local d rc
   d=$(make_case refusals)
@@ -325,4 +339,5 @@ test_repeated_review_rounds_in_a_resumed_session_are_not_double_counted
 test_absent_spend_is_zero_or_unavailable_never_invented
 test_older_state_without_delta_columns_counts_only_provable_rounds
 test_record_appends_once_per_task_incarnation
+test_disabled_record_does_not_read_or_create_spend_data
 test_refusals
