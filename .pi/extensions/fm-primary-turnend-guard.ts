@@ -17,6 +17,8 @@ type LockOwnership =
   | { kind: "missing" }
   | { kind: "other" };
 
+let guardGeneration = 0;
+
 const extensionFile = fileURLToPath(import.meta.url);
 const extensionDir = dirname(extensionFile);
 const root = resolve(extensionDir, "../..");
@@ -450,6 +452,7 @@ async function claimSessionstartMessage(
   if (generation.sessionId && currentSessionId && generation.sessionId !== currentSessionId) {
     return undefined;
   }
+  markLoaded();
   generation.delivered = true;
   return sessionstartMessage(generation, result);
 }
@@ -549,6 +552,8 @@ export default function (pi: ExtensionAPI) {
   registerSessionstartExitListener();
 
   pi.on?.("session_start", (event, ctx) => {
+    guardGeneration += 1;
+    guardFollowupActive = false;
     const reason = String((event as { reason?: unknown }).reason ?? "");
     const source = reason === "startup"
       ? startupRebuildSource(ctx) ?? "startup"
@@ -586,18 +591,68 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on?.("session_shutdown", async () => {
+    guardGeneration += 1;
     const generation = sessionstartGeneration;
     try {
       if (generation) await stopSessionstartGeneration(generation);
     } finally {
       if (sessionstartGeneration === generation) sessionstartGeneration = null;
       removeSessionstartExitListener();
+      releasePreflight();
     }
   });
 
-  pi.on("tool_call", async (event) => {
-    if (event.type !== "tool_call" || event.toolName !== "bash") return {};
-    const command = String((event.input as { command?: unknown })?.command ?? "");
+  // Optional wire contract: @howaboua/pi-codex-conversion/code-mode-preflight/v1.
+  // Nested calls bypass Pi tool_call; the broker supplies their evaluated input
+  // before execution. Never parse JavaScript to guess an eventual shell command.
+  const protocol = "@howaboua/pi-codex-conversion/code-mode-preflight/v1";
+  type ToolCall = { toolName: string; input: unknown };
+  type PreflightResult = { block?: false } | { block: true; reason: string };
+  type Broker = {
+    protocol: string;
+    isActive(): boolean;
+    register(check: (call: ToolCall) => Promise<PreflightResult>): () => void;
+  };
+  let broker: Broker | undefined;
+  let unregisterPreflight: (() => void) | undefined;
+  const unrecognized = (): PreflightResult => ({
+    block: true,
+    reason: "Firstmate cannot classify this execution payload; use exec_command with a nonempty string cmd.",
+  });
+  const checkToolCall = async (event: ToolCall, nested = false): Promise<PreflightResult> => {
+    const input = event.input && typeof event.input === "object" && !Array.isArray(event.input)
+      ? event.input as Record<string, unknown>
+      : undefined;
+    if (event.toolName === "exec" || event.toolName === "wait") {
+      if (!input || (event.toolName === "exec"
+        ? typeof input.code !== "string"
+        : typeof input.cell_id !== "string" || !input.cell_id)) return unrecognized();
+      if (!broker?.isActive()) return {
+        block: true,
+        reason: "Firstmate nested-command protection is unavailable; load a compatible Code Mode preflight broker before executing cells.",
+      };
+      return {};
+    }
+    if (event.toolName === "write_stdin") {
+      // Interactive fragments can complete earlier input, so cannot be judged
+      // as standalone commands. Polling and Ctrl-C do not submit shell text.
+      if (!input || (input.chars !== undefined && input.chars !== "" && input.chars !== "\u0003")) return {
+        block: true,
+        reason: "Firstmate cannot classify interactive stdin fragments; submit a complete command with exec_command instead.",
+      };
+      return {};
+    }
+    let command: string;
+    if (event.toolName === "bash") {
+      if (nested && (typeof input?.command !== "string" || !input.command || input.command.includes("\0"))) return unrecognized();
+      // Keep Pi's existing bash transport, including its empty-input behavior.
+      command = String((event.input as { command?: unknown })?.command ?? "");
+    } else if (event.toolName === "exec_command") {
+      // The package prepares legacy `command` only when `cmd` is absent.
+      const raw = input && ("cmd" in input ? input.cmd : input.command);
+      if (typeof raw !== "string" || !raw.trim() || raw.includes("\0")) return unrecognized();
+      command = raw;
+    } else return {};
     if (!command) return {};
     const cdResult = await runCdCheck(command);
     if (cdResult.code === 2) {
@@ -606,7 +661,31 @@ export default function (pi: ExtensionAPI) {
     const result = await runPretoolCheck(command);
     if (result.code !== 2) return {};
     return { block: true, reason: result.stderr.trim() || "denied by the watcher-arm PreToolUse seatbelt" };
+  };
+  pi.on("tool_call", (event) => event.type === "tool_call" ? checkToolCall(event) : {});
+  const stopDiscovery = pi.events?.on(`${protocol}/available`, (value: unknown) => {
+    const candidate = value as Partial<Broker> | null;
+    if (!candidate || candidate.protocol !== protocol ||
+        typeof candidate.isActive !== "function" || typeof candidate.register !== "function" ||
+        candidate === broker) return;
+    unregisterPreflight?.();
+    broker = undefined;
+    unregisterPreflight = candidate.register(async (call) => {
+      if (!call || typeof call.toolName !== "string" || !call.toolName) return unrecognized();
+      return checkToolCall(call, true);
+    });
+    if (typeof unregisterPreflight === "function") broker = candidate as Broker;
   });
+  // One session_shutdown handler owns every release, so a host that keeps a
+  // single handler per event still stops the session-start supervisor.
+  function releasePreflight(): void {
+    stopDiscovery?.();
+    unregisterPreflight?.();
+    unregisterPreflight = undefined;
+    broker = undefined;
+  }
+  // Subscribe first, then request: late brokers announce, early ones reply.
+  pi.events?.emit(`${protocol}/request`, { protocol });
 
   pi.on("agent_settled", async () => {
     if (guardFollowupActive) {
@@ -614,7 +693,31 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
-    const result = await runGuard();
+    const owner = guardGeneration;
+    let result = await runGuard();
+    if (owner !== guardGeneration) return;
+    if (result.code === 2) {
+      // The watcher owns the handshake and its existing readiness budget.
+      // Loaded markers or a fresh beacon alone never satisfy this guard.
+      const observation: { settled?: Promise<boolean>; timeoutMs?: number } = {};
+      pi.events?.emit("fm-watch:observe-continuity", observation);
+      const { settled, timeoutMs } = observation;
+      if (settled && typeof timeoutMs === "number" && Number.isFinite(timeoutMs) && timeoutMs > 0) {
+        await new Promise<void>((resolveWait) => {
+          const timer = setTimeout(resolveWait, timeoutMs);
+          void settled.then(() => {
+            clearTimeout(timer);
+            resolveWait();
+          }, () => {
+            clearTimeout(timer);
+            resolveWait();
+          });
+        });
+        if (owner !== guardGeneration) return;
+        result = await runGuard();
+      }
+    }
+    if (owner !== guardGeneration) return;
     if (result.code !== 2) return;
 
     guardFollowupActive = true;

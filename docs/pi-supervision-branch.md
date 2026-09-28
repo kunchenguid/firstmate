@@ -350,6 +350,9 @@ This is an accepted limit, not a status-line size contract.
 A missing or invalid outcome-index ready marker is rebuilt from the authoritative outcome rows by `processed-init` under the outcome lock.
 That rebuild runs on the next main drain, on every harness.
 Only a genuine store fault keeps that backstop skipped.
+The inactive-outcome scan shares the bounded index reader in `bin/fm-branch-outcome-lib.sh`, but requires stronger evidence before suppressing a duplicate result: matching spawn incarnation and strong status identity/offset, visible delivery, and processing of every relevant captain outcome.
+A later routine outcome cannot erase earlier unprocessed captain work.
+Legacy or uncertain provenance remains conservative; the producer's header owns index compatibility, and the scan never advances the branch's delivery or processing cursors.
 
 ## How the branch knows what the captain said
 

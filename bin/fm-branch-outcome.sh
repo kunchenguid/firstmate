@@ -10,6 +10,10 @@
 #     or status provenance remain valid and are treated as visible. A silent
 #     row must have verdict `routine`; the branch prompt and delivery consumers
 #     own the additional no-change eligibility rule.
+#     New rows also bind spawnGen (or "-" when no stable incarnation is known).
+#     Index v2 adds that incarnation and the latest captain seq within it to
+#     the existing seq/status endpoint/identity fields. Reading the index alone
+#     never proves delivery: the shared reader also checks read/processed cursors.
 #     Every read and append validates the complete log as a gap-free sequence;
 #     malformed, duplicate, or reordered rows fail closed.
 #     Existing lines are never rewritten, reordered, or deleted by any
@@ -123,13 +127,15 @@ SCRIPT_DIR="$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-branch-outcome-lib.sh
+. "$SCRIPT_DIR/fm-branch-outcome-lib.sh"
 
 STORE="$STATE/branch-outcomes.jsonl"
 CURSOR="$STATE/.branch-outcomes-cursor"
 PROCESSED="$STATE/.branch-outcomes-processed"
 LOCK="$STATE/.branch-outcomes.lock"
 MAX_SAFE_SEQ=9007199254740991
-OUTCOME_INDEX_VERSION=fm-branch-outcome-index-v1
+OUTCOME_INDEX_VERSION=$BRANCH_OUTCOME_INDEX_VERSION
 OUTCOME_INDEX_MAX_BYTES=512
 OUTCOME_INDEX_READY="$STATE/.branch-outcome-index-ready"
 # The "recordedAgo" field present and unprocessed add to captain rows (see the
@@ -218,7 +224,8 @@ last_seq() {
         keys == ["epoch", "seq", "summary", "task", "verdict", "wake"]
         or (keys == ["epoch", "seq", "silent", "summary", "task", "verdict", "wake"] and (.silent | type) == "boolean")
         or (
-          keys == ["epoch", "seq", "silent", "statusEndpoint", "statusIdent", "summary", "task", "verdict", "wake"]
+          (del(.spawnGen) | keys) == ["epoch", "seq", "silent", "statusEndpoint", "statusIdent", "summary", "task", "verdict", "wake"]
+          and ((has("spawnGen") | not) or ((.spawnGen | type) == "string" and (.spawnGen | test("^[A-Za-z0-9._-]{1,128}$"))))
           and (.silent | type) == "boolean"
           and ((.statusEndpoint | type) == "number" and .statusEndpoint >= 0 and .statusEndpoint <= 9007199254740991 and .statusEndpoint == (.statusEndpoint | floor))
           and ((.statusIdent | type) == "string" and (.statusIdent | test("[\\t\\n]") | not))
@@ -253,9 +260,11 @@ outcome_index_path() { # <task>
 }
 
 capture_status_position() { # <task>
-  local f="$STATE/$1.status" size ident size_after ident_after
+  local f="$STATE/$1.status" size ident size_after ident_after spawn
   CAPTURED_STATUS_ENDPOINT=0
   CAPTURED_STATUS_IDENT=-
+  CAPTURED_SPAWN=-
+  spawn=$(branch_outcome_spawn_gen "$STATE/$1.meta")
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
   size=$(_fm_status_file_size "$f") || return 0
   size=${size//[[:space:]]/}
@@ -268,13 +277,21 @@ capture_status_position() { # <task>
   case "$ident" in *$'\t'*|*$'\n'*|'') return 0 ;; esac
   CAPTURED_STATUS_ENDPOINT=$size
   CAPTURED_STATUS_IDENT=$ident
+  if [ "$spawn" = "$(branch_outcome_spawn_gen "$STATE/$1.meta")" ]; then
+    CAPTURED_SPAWN=$spawn
+  fi
 }
 
-write_outcome_index() { # <task> <seq> [<endpoint> <identity>]
+write_outcome_index() { # <task> <seq> [<endpoint> <identity> <spawn> <captain-seq>]
   local task=$1 seq=$2 endpoint=${3:-$CAPTURED_STATUS_ENDPOINT} ident=${4:-$CAPTURED_STATUS_IDENT} path tmp record
+  local spawn=${5:-$CAPTURED_SPAWN} captain=${6:-}
   path=$(outcome_index_path "$task") || return 1
-  record=$(printf '%s\t%s\t%s\t%s\n' "$OUTCOME_INDEX_VERSION" "$seq" \
-    "$endpoint" "$ident") || return 1
+  if [ -z "$captain" ]; then
+    captain=$(jq -rs --arg task "$task" --arg spawn "$spawn" \
+      '[.[] | select(.task == $task and ((.spawnGen // "-") == $spawn or (.spawnGen // "-") == "-") and .verdict == "captain") | .seq] | max // 0' "$STORE") || return 1
+  fi
+  record=$(printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$OUTCOME_INDEX_VERSION" "$seq" \
+    "$endpoint" "$ident" "$spawn" "$captain") || return 1
   [ "${#record}" -le "$OUTCOME_INDEX_MAX_BYTES" ] || return 1
   tmp=$(mktemp "$STATE/.branch-outcome-index.XXXXXX") || return 1
   chmod 0600 "$tmp" || { rm -f -- "$tmp"; return 1; }
@@ -290,20 +307,21 @@ publish_outcome_index_ready() { # <seq>
 }
 
 rebuild_outcome_indexes() {
-  local rows task seq epoch endpoint ident f mtime
+  local rows task seq epoch endpoint ident spawn captain f mtime
   rm -f -- "$OUTCOME_INDEX_READY" || return 1
   [ -s "$STORE" ] || { publish_outcome_index_ready 0; return; }
   rows=$(jq -r -s '
     map(select(.task != "fleet"))
     | group_by(.task)
-    | map(.[-1])[]
-    | [.task, (.seq | tostring), (.epoch | tostring),
-       ((.statusEndpoint // "") | tostring), (.statusIdent // "")]
+    | .[] | .[-1] as $last
+    | [$last.task, ($last.seq | tostring), ($last.epoch | tostring),
+       (($last.statusEndpoint // "-") | tostring), ($last.statusIdent // "-"), ($last.spawnGen // "-"),
+       ([.[] | select(.verdict == "captain" and ((.spawnGen // "-") == ($last.spawnGen // "-") or (.spawnGen // "-") == "-")) | .seq] | max // 0 | tostring)]
     | @tsv
   ' "$STORE") || return 1
-  while IFS=$(printf '\t') read -r task seq epoch endpoint ident; do
+  while IFS=$(printf '\t') read -r task seq epoch endpoint ident spawn captain; do
     [ -n "$task" ] || continue
-    if [ -z "$endpoint" ] || [ -z "$ident" ]; then
+    if [ "$endpoint" = - ] || [ "$ident" = - ]; then
       f="$STATE/$task.status"
       endpoint=0
       ident=-
@@ -324,7 +342,7 @@ rebuild_outcome_indexes() {
         esac
       fi
     fi
-    write_outcome_index "$task" "$seq" "$endpoint" "$ident" || return 1
+    write_outcome_index "$task" "$seq" "$endpoint" "$ident" "$spawn" "$captain" || return 1
   done <<EOF
 $rows
 EOF
@@ -496,10 +514,10 @@ case "$CMD" in
     SEQ=$(( LAST_SEQ + 1 ))
     capture_status_position "$TASK"
     rm -f -- "$OUTCOME_INDEX_READY" || { fm_lock_release "$LOCK"; exit 1; }
-    printf '{"seq":%s,"epoch":%s,"task":"%s","wake":"%s","verdict":"%s","summary":"%s","silent":%s,"statusEndpoint":%s,"statusIdent":"%s"}\n' \
+    printf '{"seq":%s,"epoch":%s,"task":"%s","wake":"%s","verdict":"%s","summary":"%s","silent":%s,"statusEndpoint":%s,"statusIdent":"%s","spawnGen":"%s"}\n' \
       "$SEQ" "$(date +%s)" "$(json_escape "$TASK")" "$(json_escape "$WAKE")" \
       "$VERDICT" "$(json_escape "$SUMMARY")" "$SILENT" "$CAPTURED_STATUS_ENDPOINT" \
-      "$(json_escape "$CAPTURED_STATUS_IDENT")" >> "$STORE"
+      "$(json_escape "$CAPTURED_STATUS_IDENT")" "$CAPTURED_SPAWN" >> "$STORE"
     # A task with neither a live meta nor a status log is retired: the branch
     # reports the teardown it just performed, and writing the index here would
     # recreate the footprint teardown removed. The outcome itself is still

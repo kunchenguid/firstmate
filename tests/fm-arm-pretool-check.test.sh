@@ -446,7 +446,102 @@ test_allow_is_silent_both_modes() {
   pass "allow is silent on both stdout and stderr in default and --claude mode"
 }
 
-# --- harness wiring: each adapter invokes the shared checker -----------------
+# --- Pi optional nested-command transport (no package or provider needed) ---
+
+test_pi_nested_command_transport() {
+  local dir
+  dir=$(fm_test_tmproot fm-pi-nested-pretool)
+  mkdir -p "$dir/bin" "$dir/.pi/extensions/lib"
+  git init -q "$dir"
+  : > "$dir/AGENTS.md"
+  cp "$ROOT"/bin/fm-{arm,cd}-pretool-check.sh "$ROOT"/bin/fm-{arm,cd}-command-policy.mjs "$dir/bin/"
+  cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$dir/.pi/extensions/"
+  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$dir/.pi/extensions/lib/"
+  FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$dir/state" node --input-type=module <<'JS' || fail "Pi nested-command transport regression"
+import assert from "node:assert/strict";
+import { pathToFileURL } from "node:url";
+import { spawnSync } from "node:child_process";
+const home = process.env.FM_HOME;
+const { default: guard } = await import(pathToFileURL(`${home}/.pi/extensions/fm-primary-turnend-guard.ts`));
+const protocol = "@howaboua/pi-codex-conversion/code-mode-preflight/v1";
+const handlers = new Map(), channels = new Map();
+const pi = {
+  on(name, fn) { handlers.set(name, [...(handlers.get(name) ?? []), fn]); },
+  events: {
+    on(name, fn) {
+      const set = channels.get(name) ?? new Set(); channels.set(name, set); set.add(fn);
+      return () => set.delete(fn);
+    },
+    emit(name, value) { for (const fn of channels.get(name) ?? []) fn(value); },
+  },
+};
+guard(pi);
+const call = async (toolName, input) => handlers.get("tool_call")[0]({ type: "tool_call", toolName, input });
+const exec = { code: 'await tools.exec_command({cmd:"true"})' };
+assert.equal((await call("exec", exec)).block, true, "absent broker must not silently lose command protection");
+pi.events.emit(`${protocol}/available`, { protocol: `${protocol}-unknown`, register() {} });
+assert.equal((await call("exec", exec)).block, true, "unrecognized protocol must not enable execution");
+let active = true;
+const checks = new Set();
+const broker = { protocol, isActive: () => active, register(fn) { checks.add(fn); return () => checks.delete(fn); } };
+pi.events.emit(`${protocol}/available`, broker);
+pi.events.emit(`${protocol}/available`, broker);
+assert.equal(checks.size, 1, "duplicate broker announcements must not duplicate checks");
+assert.deepEqual(await call("exec", exec), {});
+assert.deepEqual(await call("wait", { cell_id: "cell-1" }), {});
+const nested = (toolName, input) => [...checks][0]({ toolName, input });
+const cases = [
+  ["bin/fm-watch-arm.sh &", true],
+  ["cd projects/demo", true],
+  ["true; bin/fm-watch-arm.sh &", true],
+  ["printf '%s' 'cd projects/demo'", false],
+  ["git -C projects/demo status", false],
+  ["(cd projects/demo && pwd)", false],
+  ["printf '%s' 'bin/fm-watch-arm.sh &'", false],
+  ["bin/fm-watch-arm.sh", false],
+];
+for (const [command, denied] of cases) {
+  // Compare the adapter result and exact reason to both unchanged owners.
+  let expected = {};
+  for (const script of ["fm-cd-pretool-check.sh", "fm-arm-pretool-check.sh"]) {
+    const result = spawnSync(`${home}/bin/${script}`, ["--command", command], { encoding: "utf8" });
+    if (result.status === 2) { expected = { block: true, reason: result.stderr.trim() }; break; }
+  }
+  assert.equal(expected.block === true, denied, command);
+  assert.deepEqual(await call("bash", { command }), expected);
+  assert.deepEqual(await call("exec_command", { cmd: command }), expected);
+  assert.deepEqual(await nested("exec_command", { cmd: command }), expected);
+  assert.deepEqual(await nested("exec_command", { command }), expected, "legacy field");
+  assert.deepEqual(await nested("bash", { command }), expected);
+}
+for (const input of [null, [], {}, {cmd: null}, {cmd: 42}, {cmd: ""}, {cmd: "  "}, {cmd: "true\0"}, {cmd: null, command: "true"}]) {
+  assert.equal((await nested("exec_command", input)).block, true, JSON.stringify(input));
+}
+assert.equal((await nested("exec_command", {cmd:"cd projects/demo",command:"true"})).block, true, "cmd takes precedence");
+for (const input of [null, [], {}, {code: 12}]) assert.equal((await call("exec", input)).block, true);
+assert.equal((await call("wait", {})).block, true);
+for (const chars of ["cd projects/demo\n", "bin/fm-watch-arm.sh &\n", "\n", 42]) {
+  assert.equal((await nested("write_stdin", {session_id:1,chars})).block, true);
+}
+for (const chars of [undefined, "", "\u0003"]) assert.deepEqual(await nested("write_stdin", {session_id:1,chars}), {});
+assert.deepEqual(await call("bash", {}), {}, "preserve legacy empty bash");
+assert.deepEqual(await call("bash", {command:42}), {}, "preserve legacy bash coercion");
+assert.equal((await nested("bash", {})).block, true, "new nested payloads are strict");
+assert.deepEqual(await call("read", {path:"README.md"}), {});
+assert.deepEqual(await nested("read", {path:"README.md"}), {});
+active = false;
+assert.equal((await call("exec", exec)).block, true);
+const replacements = new Set();
+pi.events.emit(`${protocol}/available`, {protocol,isActive:()=>true,register(fn){ replacements.add(fn); return ()=>replacements.delete(fn); }});
+assert.equal(checks.size, 0, "replacement must detach old broker");
+assert.equal(replacements.size, 1);
+for (const handler of handlers.get("session_shutdown")) await handler();
+assert.equal(replacements.size, 0, "shutdown must detach broker");
+assert.equal(channels.get(`${protocol}/available`).size, 0, "shutdown must detach discovery");
+assert.equal((await call("exec", exec)).block, true);
+console.log("ok - Pi nested transport: command parity, malformed payloads, stdin, broker replacement and shutdown");
+JS
+}
 
 # --- shellcheck (belt-and-suspenders; CI/CONTRIBUTING.md also runs this) -----
 #
@@ -480,4 +575,5 @@ test_failopen_missing_node
 test_claude_mode_stdout_empty_on_deny
 test_default_mode_stdout_has_grok_json_on_deny
 test_allow_is_silent_both_modes
+test_pi_nested_command_transport
 test_shellcheck_clean

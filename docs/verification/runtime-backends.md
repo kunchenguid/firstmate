@@ -2328,6 +2328,58 @@ ok - under the away-posture record the wake carries the verbatim read-back tail,
 
 The merge suite and the security suite dominate the wall time.
 
+## Pi Code and Notebook command bridge
+
+Verified on 2026-09-10 with Pi 0.85.1, `@howaboua/pi-codex-conversion` 3.0.31, its pinned Deno 2.9.5, Node 26.8.1 (ABI 147), and a private Linux tmux server per case.
+The [transport contract and safety boundary](../arm-pretool-check.md#pi-code-and-notebook-mode) remain the operator-facing owner.
+The package was unpacked, not installed into a running home; tests supply its dependencies and pinned Deno inside disposable fixtures and never download them themselves.
+
+Published package source anchors:
+
+- `src/tools/code-mode/public-tools.ts:39-41,65-93` defines `exec({code})` and attaches the broker to execution context.
+- `src/adapter/code-mode.ts:119-125` and `src/tools/exec/command-tool.ts:15-23,49-57` define nested `exec_command({cmd,...})` and the legacy `command` preparation.
+- `src/tools/code-mode/preflight-protocol.ts:3-14` defines the versioned broker channels and evaluated nested-call payload.
+- `src/code-mode-preflight.ts:22-57` and `src/tools/code-mode/nested-tool-preflight.ts:23-93` establish discovery in either order and blocking before execution.
+- `src/tools/code-mode/delegate-runtime.ts:277-288` awaits preflight before invoking a nested tool; Notebook uses this same delegate through `invokeDirect`.
+- `src/adapter/activation/runtime-plan.ts:154-187` applies the selected execution mode with all-providers scope.
+
+Refresh with an unpacked, dependency-resolvable package and the matching pinned Deno binary:
+
+```sh
+FM_PI_NOTEBOOK_PACKAGE=/path/to/unpacked/package \
+FM_NOTEBOOK_DENO=/path/to/pinned/deno \
+FM_PI_PACKAGE_DIR=/path/to/pi-coding-agent \
+FM_PI_NOTEBOOK_LIVE=1 bin/fm-test-run.sh --jobs 1 tests/fm-pi-notebook-live-e2e.test.sh
+```
+
+All four cases printed `ok`: guard-first and guard-last, each with `azure-anthropic/claude-opus-5` and `azure-openai-responses/gpt-5.6` identities.
+Pi's real lifecycle and tool dispatch, the package's public tool registration, runtime-plan resolver, Notebook runtime, nested adapter and native shell executor ran in each case.
+Only model responses were deterministic local fixtures; no Azure transport, credentials, external model inference, full package entry-point activation, or production-home installation was exercised.
+The separate native Code Mode host was not launched; its use of the same published preflight/delegate path was inspected, while the live execution matrix exercised Notebook Mode.
+
+Observed supervision results:
+
+| Surface | Executed check and result | Limit |
+| --- | --- | --- |
+| Busy/idle | A five-second nested shell call left the real busy writer at `state=busy`; Pi `agent_settled` produced `state=idle` afterwards. | Lifecycle callbacks use the same event-to-writer contract as generated worker wiring; this is not an `fm-spawn` launch test. |
+| Turn end | No turn-ended marker existed during the call; real Pi `turn_end` touched it afterwards and the real watcher queued its notification. | One outer cell is one tool call, not a completed Pi turn per nested command. |
+| Status | Real `exec_command` appended working and terminal status; the real watcher emitted the status signal and preserved it in the durable queue. | Arbitrary direct runtime side effects do not automatically become status reports. |
+| Terminal | Captures at 160 columns showed nested command summaries and results with details both off and on; details-on additionally showed cell source. | Long commands truncate; the package can label a denied nested command `Ran`, so its denial reason and execution evidence are authoritative. |
+| Crash and recovery records | SIGKILL during a second active cell preserved queued outcomes and did not fabricate idle; a replacement busy generation rejected the old callback, and wake drain presented the retained event plus `WAKE_ACK_REQUIRED`. | Full worker relaunch, notebook checkpoint recovery, other operating systems and other backends were not tested. |
+| Command visibility | Dynamic `cmd` values reached the shared classifiers; both dangerous commands were rejected before shell entry, while legitimate commands ran. | Pi emitted only outer `exec` tool-call events; the optional published completion observer saw four nested commands, not direct runtime operations. |
+
+Direct `Deno.Command` and `Deno.chdir` still executed in these cases, explicitly asserted as the known boundary rather than reported as protected.
+Ordinary Notebook tool updates did not create the worker's native-harness `.progress` marker: busy/idle survives, but the existing long-turn age bound is not refreshed by nested activity.
+The smallest prospective visibility integration is a subscriber to the package's published completion hook feeding the existing generation-bound progress writer, not a second event queue or daemon; long silent cells would still have no intermediate command completion.
+This bridge does not install that observer into generated workers or change the watcher age policy.
+
+The runtime-hardening probe used the published kernel class and Deno 2.9.6 before testing the package-pinned binary above.
+`deno jupyter --deny-run --kernel --conn nonexistent` returned `unexpected argument '--deny-run'`; `jupyter-kernel.ts:252-260` supplies fixed Jupyter arguments, while `shared-runtime.ts:16-20` exposes only heap size, agent directory and profile options.
+`session-startup.ts:60-81` invokes a fixed bootstrap and then restores project/checkpoint state, with no published prelude callback; `deno-binary.ts:38-51` validates its cached binary by size and hash, so replacing it with a wrapper is not a supported configuration.
+In a live kernel, `Deno.permissions.revoke({name:"run"})` changed permission from `granted` to `prompt`, blocked both `Deno.Command` and `node:child_process`, and a subsequent permission request returned `denied`, but `Deno.chdir` still succeeded.
+Injecting revocation into every Pi cell is therefore a possible partial restriction, not a package bootstrap hook or a complete bridge: it disables legitimate direct subprocess libraries, runs after restoration and cannot classify synchronous cwd changes.
+Wrapping the kernel APIs or replacing bootstrap/launch methods would be a monkey patch of package internals, requiring renewed verification on updates; no such patch is included.
+
 ## Native Codex through Pi
 
 Verified on 2026-09-08 with Pi 0.85.1 and the installed `pi-codex-native` 0.2.1 adapter.

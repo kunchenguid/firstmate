@@ -159,7 +159,7 @@ test_outcome_startup_replay_preserves_silence() {
   [ -s "$home/state/.task-a.branch-outcome-index" ] \
     || fail "silent task outcome was omitted from the status-outcome backstop index"
   assert_contains "$(cat "$home/state/.task-a.branch-outcome-index")" \
-    "$(printf 'fm-branch-outcome-index-v1\t1\t')" "status-outcome backstop index lost the silent task outcome"
+    "$(printf 'fm-branch-outcome-index-v2\t1\t')" "status-outcome backstop index lost the silent task outcome"
   FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
     --task fleet --verdict routine --summary 'fleet reviewed, nothing changed' --silent true >/dev/null \
     || fail "silent heartbeat append failed"

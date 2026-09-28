@@ -1076,4 +1076,59 @@ test_missing_parent_binding_names_itself
 test_reconciliation_never_calls_forge
 test_reconciliation_sets_no_forge_mode_for_state_read
 
+test_main_branch_delivery_coverage() {
+  local out store seq count
+  make_world branch-coverage
+  write_child "$MAIN" child 'done: delivered result' incarnation-one
+  store="$ROOT/bin/fm-branch-outcome.sh"
+  seq=$(FM_HOME="$MAIN" "$store" append --task child --verdict captain --summary delivered)
+  FM_HOME="$MAIN" "$store" mark-read --through "$seq"
+  FM_HOME="$MAIN" "$store" mark-processed --through "$seq"
+  out=$(FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup)
+  [ -z "$out" ] || fail "processed causal coverage still published an inactive wake: $out"
+
+  printf 'done: cleanup evidence preserved\n' >> "$MAIN/state/child.status"
+  age "$MAIN/state/child.status"
+  seq=$(FM_HOME="$MAIN" "$store" append --task child --verdict routine --summary 'cleanup only')
+  FM_HOME="$MAIN" "$store" mark-read --through "$seq"
+  out=$(FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup)
+  [ -z "$out" ] || fail "covered cleanup still published a second result: $out"
+
+  printf 'done: genuinely new result\n' >> "$MAIN/state/child.status"
+  age "$MAIN/state/child.status"
+  out=$(FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup)
+  assert_contains "$out" 'inactive terminal outcome' 'new terminal bytes must remain due'
+  count=$(wake_count "$MAIN" 'inactive-outcome:')
+  FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup >/dev/null
+  [ "$(wake_count "$MAIN" 'inactive-outcome:')" = "$count" ] || fail 'retry duplicated unacknowledged publication'
+
+  make_world branch-unprocessed
+  write_child "$MAIN" child 'done: result' incarnation-one
+  seq=$(FM_HOME="$MAIN" "$store" append --task child --verdict captain --summary delivered)
+  FM_HOME="$MAIN" "$store" mark-read --through "$seq"
+  seq=$(FM_HOME="$MAIN" "$store" append --task child --verdict routine --summary 'still done')
+  FM_HOME="$MAIN" "$store" mark-read --through "$seq"
+  out=$(FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup)
+  assert_contains "$out" 'inactive terminal outcome' 'routine must not erase an unprocessed captain outcome'
+
+  make_world branch-new-incarnation
+  write_child "$MAIN" child 'done: same result text' incarnation-one
+  seq=$(FM_HOME="$MAIN" "$store" append --task child --verdict captain --summary delivered)
+  FM_HOME="$MAIN" "$store" mark-read --through "$seq"
+  FM_HOME="$MAIN" "$store" mark-processed --through "$seq"
+  # Reuse even the status inode and bytes: only spawn identity changes.
+  printf 'spawn_gen=incarnation-two\n' > "$MAIN/state/child.meta"
+  age "$MAIN/state/child.meta"
+  out=$(FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup)
+  assert_contains "$out" 'inactive terminal outcome' 'new spawn must not inherit an old receipt'
+
+  make_world branch-not-shown
+  write_child "$MAIN" child 'done: result' incarnation-one
+  FM_HOME="$MAIN" "$store" append --task child --verdict captain --summary stored >/dev/null
+  out=$(FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup)
+  assert_contains "$out" 'inactive terminal outcome' 'store append alone is not delivery'
+  pass 'main inactive outcomes require causal incarnation, display and processing receipts; new events and interrupted delivery survive'
+}
+test_main_branch_delivery_coverage
+
 echo "all inactive reconciliation tests passed"

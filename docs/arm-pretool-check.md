@@ -154,7 +154,7 @@ Prose may improve without changing adapter behavior.
 - `--claude` suppresses stdout completely because Claude ignores a PreToolUse deny when stdout is nonempty.
 - Codex blocks on exit 2 and displays stderr.
 - OpenCode throws only when the checker exits 2.
-- Pi, pi-signed, and omp return `{block: true}` only when the checker exits 2.
+- Pi, pi-signed, and omp map checker exit 2 to `{block: true}`; Pi's optional nested-command transport also rejects unrecognized execution payloads as described below.
 
 ## Harness wiring
 
@@ -164,7 +164,7 @@ Prose may improve without changing adapter behavior.
 | Claude | `.tool_input.command` | `.claude/settings.json` forwards stdin with `--claude`, leaving stdout empty and returning the stderr deny object. |
 | Grok | `.toolInput.command` | `.grok/hooks/fm-primary-pretool-check.json` forwards stdin and Grok consumes the stdout `decision=deny` object. |
 | OpenCode | `output.args.command` | `.opencode/plugins/fm-primary-pretool-check.js` passes one `--command` argument and throws only for exit 2. |
-| Pi / pi-signed | `event.input.command` | `.pi/extensions/fm-primary-turnend-guard.ts` passes one `--command` argument and returns `{block: true}` only for exit 2. |
+| Pi / pi-signed | `event.input.command` for `bash`; nested transport below | `.pi/extensions/fm-primary-turnend-guard.ts` passes one `--command` argument and maps checker exit 2 to `{block: true}`. |
 | omp | `event.input.command` | `.omp/extensions/fm-primary-turnend-guard.ts` passes one `--command` argument and returns `{block: true, reason}` only for exit 2; omp surfaces the reason verbatim to the model (verified 18.1.2). |
 | Cursor | `.tool_input.command` | `.cursor/hooks.json` matches `tool_name` `Shell` and forwards stdin with `--cursor`. Cursor reads the RETURNED object rather than the exit status, so `--cursor` prints `{"permission":"deny","user_message":"[code] reason"}` on stdout and exits 0; only that rendering is verified to block the command and surface the reason. |
 
@@ -174,6 +174,26 @@ Grok project hooks require folder trust.
 Cursor project hooks require the workspace to be launched with `--trust`.
 Every shell variable reference in a Grok hook command must carry an inline default such as `${GROK_WORKSPACE_ROOT:-}` because Grok expands the raw hook command before `bash -lc` runs it.
 The tracked Grok adapter therefore references `${GROK_WORKSPACE_ROOT:-}` directly instead of assigning and later reading a shell-local `$root` variable.
+
+### Pi Code and Notebook Mode
+
+The optional integration in `.pi/extensions/fm-primary-turnend-guard.ts` consumes the published `@howaboua/pi-codex-conversion/code-mode-preflight/v1` event-bus contract without importing or installing that package.
+Pi's `tool_call` sees only the outer `exec` cell (`{code: string}`) or `wait` continuation, not the nested tool calls.
+The broker supplies each nested tool's evaluated input before execution, so the same handler forwards the actual `exec_command` `cmd` string, or its published legacy `command` fallback when `cmd` is absent, to the unchanged cd and watcher classifiers in that order.
+Nested `bash` calls use `command`; ordinary Pi `bash` retains its existing coercion, empty-input and checker-failure behavior.
+No model name, provider, prompt or JavaScript-source heuristic participates in the decision.
+
+Discovery subscribes before requesting the broker, covering either extension load order, detaches a replaced broker and disposes on session shutdown.
+An absent or inactive compatible broker blocks outer `exec` and `wait` rather than allowing cells without nested-command protection.
+Malformed cell envelopes and malformed, empty or NUL-bearing nested command payloads are rejected with `{block: true, reason}`.
+`write_stdin` permits polling and Ctrl-C but rejects other nonempty input: fragments cannot be classified as complete shell commands independently of previous input.
+The shell classifiers retain their own documented scope and failure behavior; this integration changes transport recognition, not their policies.
+
+**This is a nested-shell-tool seatbelt, not a JavaScript or Deno sandbox.**
+Direct runtime subprocess APIs, `Deno.chdir`, imported code and profile restoration remain outside its scope.
+The integration neither rewrites cells nor patches the package's kernel, permissions or bootstrap.
+The package's shell-tool identity and preflight payload are pinned by the executable regression, while [`runtime-backends.md`](verification/runtime-backends.md#pi-code-and-notebook-command-bridge) records the published-source references and observed supervision limits.
+`tests/fm-arm-pretool-check.test.sh` covers portable transport parity and rejection; `tests/fm-pi-notebook-live-e2e.test.sh` exercises the published modules through real Pi and Deno without provider requests.
 
 ## Live validation record, 2026-07-09
 
