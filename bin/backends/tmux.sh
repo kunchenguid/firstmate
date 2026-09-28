@@ -91,6 +91,14 @@ fm_backend_tmux_container_ensure() {
 # another home's deliberately preserved endpoint - the very dead-end the
 # reclaim exists to remove - so whose window it is stays the operator's call.
 #
+# Because that refusal is the only thing standing between a reclaim and a
+# foreign window, absence of the name has to be READ, never inferred from an
+# empty stream: fm_backend_tmux_window_inventory's three-way status separates
+# "this session has no such window" from "the read failed", and only the first
+# licenses the create. tmux permits duplicate window names, and the record
+# persists the NAME form, so a second `fm-<id>` would leave every later
+# name-targeted read and write resolving to whichever one tmux matches first.
+#
 # Robustness (fm-spawn tmux window handling under a non-default captain config):
 #   - Capture a STABLE window id with -P -F '#{window_id}', and let tmux append
 #     at the next free index by targeting the session with a trailing colon
@@ -101,8 +109,14 @@ fm_backend_tmux_container_ensure() {
 # The returned window id lets callers target the window even if its name is ever
 # lost, so worktree discovery cannot fall back to the active client's window.
 fm_backend_tmux_create_task() {  # <session> <window-name> <proj-abs> -> prints window id
-  local ses=$1 wname=$2 proj_abs=$3 wid
-  if tmux list-windows -t "$ses" -F '#{window_name}' | grep -qx "$wname"; then
+  local ses=$1 wname=$2 proj_abs=$3 wid windows inventory_status
+  windows=$(fm_backend_tmux_window_inventory "$ses")
+  inventory_status=$?
+  if [ "$inventory_status" -eq 1 ]; then
+    echo "error: session $ses's windows could not be read, so whether $ses:$wname already exists is unknown; refusing rather than risk a second window under one name - retry once tmux answers again" >&2
+    return 1
+  fi
+  if [ "$inventory_status" -eq 0 ] && printf '%s\n' "$windows" | grep -qxF -- "$wname"; then
     echo "error: window $ses:$wname already exists; read it with bin/fm-peek.sh $ses:$wname to see what holds it. No control-plane command closes a window this home's records do not name, so a leftover or another home's window has to be closed where it runs before this task can open its own" >&2
     return 1
   fi

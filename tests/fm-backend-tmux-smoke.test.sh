@@ -43,6 +43,10 @@ cleanup_all() {
 SHIM_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-backend-smoke.XXXXXX")
 cat > "$SHIM_DIR/tmux" <<SH
 #!/usr/bin/env bash
+if [ -n "\${FM_SMOKE_LIST_WINDOWS_FAILS:-}" ] && [ "\${1:-}" = list-windows ]; then
+  echo 'lost server' >&2
+  exit 1
+fi
 exec "$REAL_TMUX" -L "$SOCKET" "\$@"
 SH
 chmod +x "$SHIM_DIR/tmux"
@@ -78,6 +82,17 @@ fi
 [ "$(tmux list-windows -t "$SESSION" -F '#{window_name}' | grep -cx "$WINDOW")" = 1 ] \
   || fail "a refused create must not add a second window under the name"
 pass "real tmux: fm_backend_tmux_create_task creates a window and refuses a duplicate without closing it"
+
+# An inventory read that FAILED is not evidence that the name is free. tmux
+# permits duplicate window names, so reading a failed read as "no duplicate"
+# would put a second window under one name and leave every later name-targeted
+# command resolving to whichever one tmux matches first.
+if FM_SMOKE_LIST_WINDOWS_FAILS=1 fm_backend_tmux_create_task "$SESSION" "$WINDOW" "$HOME" 2>/dev/null; then
+  fail "fm_backend_tmux_create_task should refuse when the window inventory cannot be read"
+fi
+[ "$(tmux list-windows -t "$SESSION" -F '#{window_name}' | grep -cx "$WINDOW")" = 1 ] \
+  || fail "a create refused for an unreadable inventory must not add a second window under the name"
+pass "real tmux: fm_backend_tmux_create_task refuses an unreadable window inventory rather than assuming the name is free"
 
 # --- send text + Enter -------------------------------------------------------
 

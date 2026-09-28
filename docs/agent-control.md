@@ -33,7 +33,7 @@ A recorded `harness=` is not always an exact adapter name: a task launched from 
 | Verb | Effect | Postcondition |
 | --- | --- | --- |
 | `interrupt` | Deliver the harness's verified interrupt sequence while leaving the agent running. | Delivery succeeds while the endpoint still exists and the agent is still alive where the backend can classify that; cancellation is confirmed only from an adapter-owned acknowledgement and otherwise reports `cancel=unconfirmed`. |
-| `exit` | Stop the agent, preserving the endpoint, the worktree, and every uncommitted change. | The backend's recovery-grade classifier reports the agent gone. Already-stopped is idempotent success. An endpoint reading `missing` goes through the same [absence proof](#reclaiming-a-task-whose-endpoint-is-gone) the reclaim uses before anything is claimed about it: proven gone reports `endpoint-gone` (the agent went with it, and nothing survived at the recorded address for this verb to preserve), a Herdr pane that turns out to be there and idle is the ordinary `already-stopped`, one whose agent is back takes the ordinary interrupt-then-exit path. An absence the proof cannot establish refuses rather than claim a stop it cannot see. |
+| `exit` | Stop the agent, preserving the endpoint, the worktree, and every uncommitted change. | The backend's recovery-grade classifier reports the agent gone. Already-stopped is idempotent success. An endpoint reading `missing` goes through the same [absence proof](#reclaiming-a-task-whose-endpoint-is-gone) the reclaim uses before anything is claimed about it: proven gone reports `endpoint-gone` (the agent is gone and there is no endpoint here for this verb to preserve - on tmux that rests on proving no agent works in the recorded worktree, not on proving the window destroyed), a Herdr pane that turns out to be there and idle is the ordinary `already-stopped`, one whose agent is back takes the ordinary interrupt-then-exit path. An absence the proof cannot establish refuses rather than claim a stop it cannot see. |
 | `relaunch` | Replace the running agent with a new one in the same worktree - and the same endpoint whenever that endpoint still exists - on the exact recorded adapter or an explicitly chosen harness, model, and effort. | The new agent is alive on the endpoint the task's record now names, and that record names the harness that is actually running. |
 
 An exit that delivers lifecycle input but cannot prove the agent stopped fails with `exit=unconfirmed`, reports the observed agent state and any interrupt cancellation claim, and never claims that nothing changed.
@@ -110,8 +110,9 @@ An unreachable endpoint can still hold the live agent a rebind would duplicate, 
 - **tmux proves the agent absent.** `list-windows` describes only the tmux server the *current process* addresses (its `TMUX_TMPDIR`/socket), and a task record carries no socket identity for its endpoint, so no tmux read can tell a destroyed window from one on a server this process cannot address.
   What a replacement would actually collide with is an agent still working in the task's worktree, and the kernel records every process's working directory whichever terminal server holds it.
   So the proof reads the process table instead (`fm_agent_process_worktree_scan` in `bin/fm-agent-process-lib.sh`, through `/proc`): no process of this user that classifies as a verified harness is working anywhere under the recorded worktree.
-  An agent found there refuses and names its process id, and so does any process whose working directory could not be read.
-  `/proc` is the only reader, because it answers for one exact process and says so when it cannot: a host without it refuses every tmux absence proof, so reclaiming a tmux task is unavailable there.
+  An agent found there refuses and names its process id, and so does any agent process whose working directory could not be read - a process that classifies as something other than an agent is skipped either way, so its unreadable directory refuses nothing.
+  `/proc` is the only reader, because it answers for one exact process and says so when it cannot: a host without it refuses every tmux absence proof, so **the tmux reclaim is Linux-only**.
+  On macOS, or any other host without `/proc`, a tmux task whose endpoint was destroyed cannot be reclaimed at all; the Herdr reclaim works on every platform, because its proof is a re-read of the recorded pane rather than a process scan.
   The refusal says that plainly and names the only route left - a seat that still addresses the recorded tmux server, where the window classifies directly and no absence proof is needed - and says that once that server is gone there is no such seat and no route.
   The replacement window opens on the tmux server and session this seat addresses, which is where an ordinary spawn from here would place it - even when the recorded session was read successfully and merely no longer holds the window.
   So a tmux reclaim can move the task into the reclaiming seat's session, unlike the Herdr rebind below, which pins the session the record names.
@@ -190,6 +191,10 @@ Backend capability comes from each adapter's real surface, not from a policy cho
 | zellij | yes | yes | yes | yes | no |
 | cmux | yes | yes | yes | yes | no |
 | orca | no | yes | yes | no | no |
+
+Reclaiming a destroyed endpoint is a narrower capability than recovery-grade agent state, because it needs a proof of absence rather than a reading of one endpoint.
+Herdr has it on every platform: it re-reads the recorded pane through that session's own socket.
+tmux has it on Linux only, because its proof is the `/proc` process scan above; on a host without `/proc` every tmux absence proof refuses, and no other backend proves absence at all.
 
 Per-harness interrupt keys, repeat counts, composer clears, exit commands, and supported task kinds live in `bin/fm-control-lib.sh` and are exercised for every verified harness by `tests/fm-control.test.sh`, with adapters outside its lane pinning their control mechanics in their own harness suites.
 The empirical basis for each adapter's value is the `harness-adapters` skill's verification record for that adapter.

@@ -314,11 +314,17 @@ fm_control_backend_state_verified() {  # <backend>
 # assignment made here could never reach them.
 #
 # The verdicts:
-#   gone     - absence is PROVEN: no agent, and no endpoint at the address the
-#              record names. A window may still survive elsewhere - on a tmux
-#              server this seat cannot address, or under a session name the
-#              record no longer matches, even on this seat's own server - and
-#              it holds no agent either way.
+#   gone     - absence is PROVEN, in the terms the backend can prove, and
+#              there is nothing here to adopt. Herdr proves the ENDPOINT: it
+#              re-read the recorded pane through the recorded session's own
+#              socket and the pane is not there. tmux proves only the AGENT:
+#              a record's `session:window` carries no socket, so the same
+#              address can name a live window on another server, and what the
+#              scan establishes is that no agent process works in the recorded
+#              worktree. A tmux window may therefore still survive elsewhere -
+#              on a server this seat cannot address, or under a session name
+#              the record no longer matches, even on this seat's own server -
+#              and it holds no agent either way.
 #   dead     - the endpoint is there after all and holds no agent.
 #   alive    - the endpoint is there and an agent is running in it.
 #   unproven - neither could be established; the caller must refuse.
