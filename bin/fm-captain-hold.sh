@@ -3,7 +3,7 @@
 #
 # The semantic policy is owned once by
 # .agents/skills/captain-hold-lifecycle/SKILL.md. This script never reads
-# report, visual-review, chat, or terminal prose to guess whether the captain
+# report, structured-review, chat, or terminal prose to guess whether the captain
 # owes an answer. The invoking agent decides what is genuinely waiting on the
 # captain; this script supplies guarded creation, a durable record of what the
 # captain actually said, the investigation completion gate, and the one
@@ -96,7 +96,7 @@
 # records a durable request under `state/reconcile-requests/`.
 #
 # `reconcile` is the verify-then-decide half. Both outcomes require the pending
-# request created by the captain's board selection. `close` is the moot outcome:
+# request created by the captain's captured-source selection. `close` is the moot outcome:
 # it requires the evidence that made the call moot, writes a `reconciled` resolution record
 # under a `Reconciliation evidence:` label so it can never read as the
 # captain's words, and closes the task. `note` is the still-active outcome: it
@@ -122,7 +122,7 @@
 # stores. `binding` prints the stored value verbatim and `answers` accepts it,
 # so the process-event runner's feed seam is unchanged.
 #
-# `complete` is the shared investigation and visual-review completion gate.
+# `complete` is the shared investigation and structured-review completion gate.
 # It attests, in the origin task's metadata, the reviewed inventory of
 # captain-held tasks that carry the origin's unresolved captain calls.
 # `--none` is an explicit semantic attestation that the just-reviewed surface
@@ -132,7 +132,7 @@
 # the inventory is unioned idempotently into the metadata, and every still-open
 # keyed status decision is transferred to its durable owner with a
 # `captain-held [key=...]` status close naming the inventory. Later review
-# passes may add ids. A post-teardown visual review can complete against the
+# passes may add ids. A post-teardown structured review can complete against the
 # surviving report and tasks without recreating task state.
 # `verify` is read-only and is called by scout teardown, so teardown cannot
 # erase a source before this gate has succeeded: every recorded inventory
@@ -1370,7 +1370,7 @@ RECONCILE_VALUE=reconcile
 reconcile_request_path() { printf '%s/%s.request\n' "$RECONCILE_DIR" "$1"; }
 
 # Idempotent per task: a repeated reconcile keeps the one request and its
-# original timestamp, so a re-delivered board answer never resets the clock on
+# original timestamp, so a re-delivered captured answer never resets the clock on
 # an obligation that is already open.
 reconcile_request_record() {  # <task-id> <provenance>
   local id=$1 source=$2 path tmp
@@ -1523,7 +1523,7 @@ reconcile_close() {
   load_decision "$evidence_file"
   acquire_task_control_lock "$id"
   reconcile_request_read "$id" \
-    || fail "task $id has no pending board-created reconcile request"
+    || fail "task $id has no pending captured-source reconcile request"
   require_tasks_axi
   task_show_or_fail "$id" "captain-held task $id is absent from this home's configured backlog (data directory $DATA)"
   state=$(show_field "$show" state)
@@ -1593,7 +1593,7 @@ reconcile_note() {
     || fail "note file exceeds 8192 bytes"
   acquire_task_control_lock "$id"
   reconcile_request_read "$id" \
-    || fail "task $id has no pending board-created reconcile request"
+    || fail "task $id has no pending captured-source reconcile request"
   require_tasks_axi
   command_open "$id" \
     || fail "task $id is not an open captain call; a note cannot keep a closed call open"

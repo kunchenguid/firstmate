@@ -1,16 +1,14 @@
 #!/usr/bin/env bash
-# Behavior tests for the generic process-to-event runner and its Lavish adapter.
+# Behavior tests for the generic process-to-event runner and retired-adapter compatibility.
 #
 # The source under test is a fake blocking process that returns only when its
 # trigger file appears, so completion is a real process event and no test here
-# depends on a discovery timer. The Lavish adapter is exercised through its own
-# public commands against the currently published poll shape; no live Lavish
-# server is started.
+# depends on a discovery timer. The retired Lavish adapter is exercised only as
+# a read-only parser for already captured result fixtures.
 #
-# Delivery is deliberately NOT asserted as at-least-once or lossless: the
-# published Lavish poll clears feedback destructively before returning it, so
-# the only durability under test is the runner's own - output that reached the
-# runner is stored before it is announced.
+# Delivery is deliberately NOT asserted as at-least-once or lossless: the only
+# durability under test is the runner's own - output that reached the runner is
+# stored before it is announced.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -606,348 +604,62 @@ assert_absent "$FM_PROCEVENT_CLAIM_ROOT/retire-fail-src.claim" \
   || fail "retirement recovery reran the terminal source"
 pass "failed terminal retirement is fail-closed and idempotently recoverable"
 
-# --- end-user-aligned regression: one Send & End, one captured result -------
-# The dogfood defect: a real armed Lavish source received one human `Send & End`
-# action, and the runner captured four results - the human's real feedback, then
-# recurring empty ended sessions - because it kept restarting a source whose own
-# adapter already knew the session had ended. Driven through the adapter's own
-# arm command against a stand-in for the published poll shape, so registration,
-# the runner, capture, publication, and retirement all run for real.
-HLT="$TMP_ROOT/hlt"; new_home "$HLT"
-LAVISH_BIN=$(fm_fakebin "$TMP_ROOT/lavish-stub")
-LAVISH_POLL_COUNT="$TMP_ROOT/lavish-poll-count"
-export LAVISH_POLL_COUNT
-cat > "$LAVISH_BIN/lavish-axi" <<'SH'
-#!/usr/bin/env bash
-# Stand-in for `lavish-axi poll <file>` around a human `Send & End`: the final
-# feedback is delivered exactly once carrying session_ended, and every later
-# poll returns an empty ended session immediately.
-n=$(cat "$LAVISH_POLL_COUNT" 2>/dev/null || echo 0)
-n=$((n + 1))
-printf '%s\n' "$n" > "$LAVISH_POLL_COUNT"
-if [ "$n" = 1 ]; then
-  printf 'session:\n  file: /review.html\n  status: feedback\n  session_ended: true\n  ended_by: user\nfeedback[1]{text}:\n  ship it\n'
-else
-  printf 'session:\n  file: /review.html\n  status: ended\n  ended_by: user\n'
-fi
-SH
-chmod +x "$LAVISH_BIN/lavish-axi"
-REVIEW_ART="$TMP_ROOT/review.html"
-printf '<h1>review</h1>\n' > "$REVIEW_ART"
-lavish_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$REVIEW_ART")
-fm_test_track_procevent_home "$HLT"
-PATH="$LAVISH_BIN:$PATH" FM_HOME="$HLT" "$ROOT/bin/fm-procevent-lavish.sh" arm "$REVIEW_ART" >/dev/null
-for _ in $(seq 1 6); do
-  PATH="$LAVISH_BIN:$PATH" pe "$HLT" reconcile >/dev/null
-  sleep 0.3
-done
-[ "$(cat "$LAVISH_POLL_COUNT")" = 1 ] \
-  || fail "an ended review kept being polled: $(cat "$LAVISH_POLL_COUNT") polls for one Send & End"
-[ "$(count_results "$HLT" "$lavish_id")" = 1 ] \
-  || fail "one Send & End produced $(count_results "$HLT" "$lavish_id") captured results"
-[ "$(wake_payloads "$HLT" | sort -u | grep -c .)" = 1 ] \
-  || fail "one Send & End produced more than one distinct event: $(wake_payloads "$HLT" | sort -u)"
-assert_contains "$(wake_payloads "$HLT")" "procevent lavish $lavish_id 1" "the human's final feedback is announced"
-assert_absent "$HLT/state/procevent/$lavish_id.source" "the ended review source retires automatically"
-assert_absent "$FM_PROCEVENT_CLAIM_ROOT/$lavish_id.claim" "the ended review releases its owned claim"
-LAVISH_RESULT=$(first_result "$HLT" "$lavish_id" || true)
-assert_grep 'ship it' "$LAVISH_RESULT" "automatic retirement retains the human's final feedback"
-out=$(PATH="$LAVISH_BIN:$PATH" FM_HOME="$HLT" "$ROOT/bin/fm-procevent-lavish.sh" retire "$REVIEW_ART")
-assert_contains "$out" "retired: $lavish_id" "explicit adapter retirement stays supported after automatic retirement"
-pass "one Send & End yields exactly one captured result, automatic retirement, and no recurring poll"
+# --- retired Lavish registrations preserve already captured results ---------
 
-# --- end-user-aligned regression: an empty board close is not news ------------
-# The captain's report: closing a review surface he had said nothing on still
-# put a wake in his chat whose entire content was that nothing happened. The
-# adapter now answers the runner's silence seam for exactly that shape, so the
-# result is captured and recorded handled without ever being announced. Driven
-# through the adapter's own arm command and the real runner, so registration,
-# capture, the silence verdict, and retirement all run for real.
-HEMPTY="$TMP_ROOT/hempty"; new_home "$HEMPTY"
-EMPTY_BIN=$(fm_fakebin "$TMP_ROOT/lavish-empty-stub")
-cat > "$EMPTY_BIN/lavish-axi" <<'SH'
-#!/usr/bin/env bash
-# Stand-in for `lavish-axi poll <file>` when the captain closes a board he said
-# nothing on: an ended session carrying no queued content at all.
-printf 'session:\n  file: /quiet.html\n  status: ended\n  ended_by: user\n'
-SH
-chmod +x "$EMPTY_BIN/lavish-axi"
-QUIET_ART="$TMP_ROOT/quiet-board.html"
-printf '<h1>quiet</h1>\n' > "$QUIET_ART"
-quiet_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$QUIET_ART")
-fm_test_track_procevent_home "$HEMPTY"
-PATH="$EMPTY_BIN:$PATH" FM_HOME="$HEMPTY" \
-  "$ROOT/bin/fm-procevent-lavish.sh" arm "$QUIET_ART" >/dev/null
-quiet_out=$(PATH="$EMPTY_BIN:$PATH" pe "$HEMPTY" start "$quiet_id" 2>&1)
-assert_not_contains "$quiet_out" "not-autohandled" \
-  "a durably silenced result was reported as still unacknowledged"
-# The handled marker is written at exactly the point the wake would otherwise
-# have been appended, so waiting on it - rather than on a fixed sleep - is what
-# makes "no wake" a real observation instead of a race the test won by being
-# early.
-QUIET_HANDLED="$HEMPTY/state/procevent-inbox/$quiet_id.1.handled"
-for _ in $(seq 1 100); do
-  [ -f "$QUIET_HANDLED" ] && break
-  sleep 0.1
-done
-[ -f "$QUIET_HANDLED" ] \
-  || fail "a silenced result was not durably recorded handled, so a later reconcile would announce it"
-[ "$(count_results "$HEMPTY" "$quiet_id")" = 1 ] \
-  || fail "an empty board close captured $(count_results "$HEMPTY" "$quiet_id") results instead of one"
-[ -z "$(wake_payloads "$HEMPTY")" ] \
-  || fail "an empty board close woke the captain: $(wake_payloads "$HEMPTY")"
-# Re-announcement is exactly what the handled marker exists to stop, so the
-# silence has to survive the reconcile that would otherwise republish it.
-PATH="$EMPTY_BIN:$PATH" pe "$HEMPTY" reconcile >/dev/null
-sleep 0.3
-[ -z "$(wake_payloads "$HEMPTY")" ] \
-  || fail "a later reconcile re-announced a silenced empty board close: $(wake_payloads "$HEMPTY")"
-assert_absent "$HEMPTY/state/procevent/$quiet_id.source" \
-  "an empty board close still retires its ended source"
-pass "an empty board close is captured and recorded handled without ever waking the captain"
+HLEGACY="$TMP_ROOT/retired-lavish"; new_home "$HLEGACY"
+mkdir -p "$HLEGACY/state/procevent-inbox" "$HLEGACY/state/decision-bindings"
+pe_register "$HLEGACY" lavish legacy-review -- /bin/echo obsolete-listener >/dev/null
+printf '%s\n' 'schema=fm-decision-binding.v1' 'origin=*' \
+  > "$HLEGACY/state/decision-bindings/legacy-review.origin"
+cat > "$HLEGACY/state/procevent-inbox/legacy-review.1.result" <<'EOF'
+session:
+  file: /retired.html
+  status: feedback
+prompts[1]{text,prompt,tag}:
+  "Keep","Context data: {\"schema\":\"fm-bearings-answer.v1\",\"question\":\"legacy-call\",\"selection\":\"keep\",\"note\":\"\"}","choice"
+EOF
+printf '%s\n' lavish > "$HLEGACY/state/procevent-inbox/legacy-review.1.adapter"
+printf '%s\n' \
+  'session:' \
+  '  file: /retired.html' \
+  '  status: feedback' \
+  'prompts[1]{text,prompt,tag}:' \
+  '  "Review later","Review later","message"' \
+  > "$HLEGACY/state/procevent-inbox/legacy-review.2.result"
+printf '%s\n' lavish > "$HLEGACY/state/procevent-inbox/legacy-review.2.adapter"
 
-# The other half of the same contract, on the same real path: a close that
-# carries what the captain actually said must still reach him. Same runner, same
-# adapter, one different response shape.
-HANSWER="$TMP_ROOT/hanswer"; new_home "$HANSWER"
-ANSWER_BIN=$(fm_fakebin "$TMP_ROOT/lavish-answer-stub")
-cat > "$ANSWER_BIN/lavish-axi" <<'SH'
-#!/usr/bin/env bash
-# Stand-in for `lavish-axi poll <file>` on a real `Send & End`: the captain's
-# own choice, delivered with session_ended.
-printf 'session:\n  file: /answered.html\n  status: feedback\n  session_ended: true\n  ended_by: user\nprompts[1]{tag,text,prompt}:\n  "choice","Option B","Context data: {\\"question\\":\\"noop-check-routing\\",\\"answer\\":\\"b\\"}"\n'
-SH
-chmod +x "$ANSWER_BIN/lavish-axi"
-ANSWER_ART="$TMP_ROOT/answered-board.html"
-printf '<h1>answered</h1>\n' > "$ANSWER_ART"
-answer_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$ANSWER_ART")
-fm_test_track_procevent_home "$HANSWER"
-PATH="$ANSWER_BIN:$PATH" FM_HOME="$HANSWER" \
-  "$ROOT/bin/fm-procevent-lavish.sh" arm "$ANSWER_ART" >/dev/null
-PATH="$ANSWER_BIN:$PATH" pe "$HANSWER" reconcile >/dev/null
-wait_for "$HANSWER/state/.wake-queue" \
-  || fail "a board close carrying the captain's real answer produced no wake"
-assert_contains "$(wake_payloads "$HANSWER")" "procevent lavish $answer_id 1" \
-  "a real board answer still reaches the captain"
-[ ! -f "$HANSWER/state/procevent-inbox/$answer_id.1.handled" ] \
-  || fail "a real board answer was recorded handled without ever being handled"
-pass "a board close carrying the captain's real answer is still announced"
+retire_out=$(FM_HOME="$HLEGACY" "$ROOT/bin/fm-procevent-lavish.sh" retire-registered) \
+  || fail "retired Lavish compatibility migration failed"
+assert_contains "$retire_out" "retired legacy Lavish sources: 1" \
+  "retired Lavish compatibility migration did not report its disposition"
+assert_absent "$HLEGACY/state/procevent/legacy-review.source" \
+  "retired Lavish registration remained eligible for relaunch"
+assert_present "$HLEGACY/state/procevent-inbox/legacy-review.1.result" \
+  "retired Lavish migration discarded a captured result"
+assert_present "$HLEGACY/state/decision-bindings/legacy-review.origin" \
+  "retired Lavish migration discarded a pending result's answer binding"
+answer=$("$ROOT/bin/fm-procevent-lavish.sh" answers \
+  "$HLEGACY/state/procevent-inbox/legacy-review.1.result")
+assert_contains "$answer" "$(printf 'legacy-call\tkeep\tKeep')" \
+  "retired Lavish compatibility parser lost a captured answer"
+pe "$HLEGACY" reconcile >/dev/null
+assert_contains "$(wake_payloads "$HLEGACY")" "procevent lavish legacy-review 1" \
+  "retired Lavish capture was not re-announced for handling"
+pe "$HLEGACY" handled legacy-review 1 >/dev/null
+assert_present "$HLEGACY/state/decision-bindings/legacy-review.origin" \
+  "handling one retired capture discarded another pending generation's answer binding"
+pe "$HLEGACY" handled legacy-review 2 >/dev/null
+assert_absent "$HLEGACY/state/decision-bindings/legacy-review.origin" \
+  "the final handled retired capture retained an obsolete answer binding"
+pe "$HLEGACY" reconcile >/dev/null
+[ "$(wake_payloads "$HLEGACY" | grep -c 'procevent lavish legacy-review' || true)" -eq 2 ] \
+  || fail "handled retired Lavish capture was re-announced"
+pass "retired Lavish registrations stop safely while captured answers remain available"
 
-# --- end-user-aligned regression: a transient poll interruption is not news ---
-# The dogfood defect: a live board listener can answer with exactly
-#     error: Lavish Editor poll response was interrupted
-#     code: SERVER_ERROR
-# while the board's marks remain available. Firstmate registered raw poll output,
-# so the generic runner captured that transient response and woke the whole fleet
-# over what is really an internal retry. Every scenario below runs through the
-# adapter's own arm command and the real runner, so registration, capture, and
-# publication are exercised for real.
-LAVISH_SCRIPTED_BIN=$(fm_fakebin "$TMP_ROOT/lavish-scripted-stub")
-cat > "$LAVISH_SCRIPTED_BIN/lavish-axi" <<'SH'
-#!/usr/bin/env bash
-# Stand-in for `lavish-axi poll <file>`, scripted per scenario: LAVISH_SCRIPT
-# names the response for each successive poll, one word per poll, and its last
-# word repeats forever. `interrupt` is the exact transient response the server
-# returns while the board's marks stay available.
-n=$(cat "$LAVISH_COUNT" 2>/dev/null || echo 0)
-n=$((n + 1))
-printf '%s\n' "$n" > "$LAVISH_COUNT"
-read -r -a plan <<< "$LAVISH_SCRIPT"
-i=$((n - 1))
-[ "$i" -ge "${#plan[@]}" ] && i=$((${#plan[@]} - 1))
-case "${plan[$i]}" in
-  interrupt)
-    printf 'error: Lavish Editor poll response was interrupted\ncode: SERVER_ERROR\n'; exit 1 ;;
-  near-interrupt)
-    printf 'error: Lavish Editor poll response was interrupted \ncode: SERVER_ERROR\n'; exit 1 ;;
-  other-server-error)
-    printf 'error: Lavish Editor session store is unavailable\ncode: SERVER_ERROR\n'; exit 1 ;;
-  feedback)
-    printf 'session:\n  file: /board.html\n  status: feedback\n  session_ended: true\n  ended_by: user\nfeedback[1]{text}:\n  ship it\n' ;;
-  stream)
-    printf 'x%.0s' {1..4096}
-    printf 'ready\n' > "$LAVISH_STREAM_READY"
-    while [ ! -e "$LAVISH_STREAM_RELEASE" ]; do sleep 0.05; done
-    printf '\n' ;;
-esac
-SH
-chmod +x "$LAVISH_SCRIPTED_BIN/lavish-axi"
-export LAVISH_COUNT LAVISH_SCRIPT
-
-DEFAULT_RATE_ART="$TMP_ROOT/default-rate-board.html"
-printf '<h1>default rate</h1>\n' > "$DEFAULT_RATE_ART"
-DEFAULT_RATE_COUNT="$TMP_ROOT/default-rate-count"
-PATH="$LAVISH_SCRIPTED_BIN:$PATH" LAVISH_COUNT="$DEFAULT_RATE_COUNT" LAVISH_SCRIPT=interrupt \
-  FM_LAVISH_POLL_RETRY_DELAY='' \
-  "$ROOT/bin/fm-procevent-lavish.sh" poll "$DEFAULT_RATE_ART" >/dev/null 2>&1 &
-DEFAULT_RATE_PID=$!
-perl -MTime::HiRes=sleep -e 'sleep 6.2'
-kill -TERM "$DEFAULT_RATE_PID" 2>/dev/null || true
-wait "$DEFAULT_RATE_PID" 2>/dev/null || true
-default_rate_count=$(cat "$DEFAULT_RATE_COUNT" 2>/dev/null || echo 0)
-[ "$default_rate_count" -ge 2 ] \
-  || fail "the default poll governor stopped an instantly returning source from making progress"
-[ "$default_rate_count" -le 2 ] \
-  || fail "the shipped poll governor allowed $default_rate_count iterations in 6.2 seconds"
-pass "the shipped poll governor bounds an instantly returning source"
-
-# A bounded test override keeps the retry policy's real bound under test without
-# making the suite wait out the production delay.
-export FM_LAVISH_POLL_RETRY_DELAY=1
-
-# Two interruptions, then the captain's real feedback: the retries are silent and
-# only the feedback becomes a captured result and a check wake.
-HRETRY="$TMP_ROOT/hretry"; new_home "$HRETRY"
-RETRY_ART="$TMP_ROOT/retry-board.html"
-printf '<h1>retry</h1>\n' > "$RETRY_ART"
-retry_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$RETRY_ART")
-fm_test_track_procevent_home "$HRETRY"
-LAVISH_COUNT="$TMP_ROOT/retry-count"; LAVISH_SCRIPT="interrupt interrupt feedback"
-PATH="$LAVISH_SCRIPTED_BIN:$PATH" FM_HOME="$HRETRY" \
-  "$ROOT/bin/fm-procevent-lavish.sh" arm "$RETRY_ART" >/dev/null
-PATH="$LAVISH_SCRIPTED_BIN:$PATH" pe "$HRETRY" reconcile >/dev/null
-wait_for "$HRETRY/state/.wake-queue" || fail "feedback after interrupted polls produced no wake"
-[ "$(cat "$LAVISH_COUNT")" = 3 ] \
-  || fail "the interrupted listener was polled $(cat "$LAVISH_COUNT") times, not the two quiet retries plus the delivering poll"
-[ "$(count_results "$HRETRY" "$retry_id")" = 1 ] \
-  || fail "a retried interruption produced $(count_results "$HRETRY" "$retry_id") captured results instead of one"
-[ "$(wake_payloads "$HRETRY" | sort -u | grep -c .)" = 1 ] \
-  || fail "a retried interruption woke the fleet: $(wake_payloads "$HRETRY" | sort -u)"
-assert_contains "$(wake_payloads "$HRETRY")" "procevent lavish $retry_id 1" \
-  "feedback arriving after quiet retries is captured and announced"
-assert_grep 'ship it' "$(first_result "$HRETRY" "$retry_id")" \
-  "the announced result is the captain's feedback, not the interruption"
-pass "a transient Lavish poll interruption is retried quietly and never announced"
-
-# Exhaustion is news: after the bounded retries the same exact response is
-# captured and announced normally rather than being swallowed forever.
-HEXH="$TMP_ROOT/hexh"; new_home "$HEXH"
-EXH_ART="$TMP_ROOT/exhaust-board.html"
-printf '<h1>exhaust</h1>\n' > "$EXH_ART"
-exh_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$EXH_ART")
-fm_test_track_procevent_home "$HEXH"
-LAVISH_COUNT="$TMP_ROOT/exhaust-count"; LAVISH_SCRIPT="interrupt"
-PATH="$LAVISH_SCRIPTED_BIN:$PATH" FM_HOME="$HEXH" \
-  "$ROOT/bin/fm-procevent-lavish.sh" arm "$EXH_ART" >/dev/null
-PATH="$LAVISH_SCRIPTED_BIN:$PATH" pe "$HEXH" start "$exh_id" >/dev/null
-[ "$(cat "$LAVISH_COUNT")" = 13 ] \
-  || fail "the retry bound polled $(cat "$LAVISH_COUNT") times, not the first poll plus 12 bounded retries"
-[ "$(count_results "$HEXH" "$exh_id")" = 1 ] \
-  || fail "exhaustion produced $(count_results "$HEXH" "$exh_id") captured results instead of one"
-assert_contains "$(wake_payloads "$HEXH")" "procevent lavish $exh_id 1" \
-  "the interruption that survives the bound is announced normally"
-assert_grep 'poll response was interrupted' "$(first_result "$HEXH" "$exh_id")" \
-  "the announced result is the exact interruption the server returned"
-PATH="$LAVISH_SCRIPTED_BIN:$PATH" FM_HOME="$HEXH" \
-  "$ROOT/bin/fm-procevent-lavish.sh" retire "$EXH_ART" >/dev/null
-pass "an interruption that outlives the bounded retries is captured and announced"
-
-# A different SERVER_ERROR is a genuine error, never a retry: no fail-open drift
-# from the one exact transient response this adapter owns.
-HOTHER="$TMP_ROOT/hother"; new_home "$HOTHER"
-OTHER_ART="$TMP_ROOT/other-board.html"
-printf '<h1>other</h1>\n' > "$OTHER_ART"
-other_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$OTHER_ART")
-fm_test_track_procevent_home "$HOTHER"
-LAVISH_COUNT="$TMP_ROOT/other-count"; LAVISH_SCRIPT="other-server-error"
-PATH="$LAVISH_SCRIPTED_BIN:$PATH" FM_HOME="$HOTHER" \
-  "$ROOT/bin/fm-procevent-lavish.sh" arm "$OTHER_ART" >/dev/null
-PATH="$LAVISH_SCRIPTED_BIN:$PATH" pe "$HOTHER" start "$other_id" >/dev/null
-[ "$(cat "$LAVISH_COUNT")" = 1 ] \
-  || fail "an unrelated SERVER_ERROR was retried $(cat "$LAVISH_COUNT") times instead of surfacing at once"
-assert_contains "$(wake_payloads "$HOTHER")" "procevent lavish $other_id 1" \
-  "an unrelated SERVER_ERROR is captured and announced immediately"
-PATH="$LAVISH_SCRIPTED_BIN:$PATH" FM_HOME="$HOTHER" \
-  "$ROOT/bin/fm-procevent-lavish.sh" retire "$OTHER_ART" >/dev/null
-pass "only the exact interruption is retried; an unrelated SERVER_ERROR still surfaces"
-unset FM_LAVISH_POLL_RETRY_DELAY
-
-# A whitespace variant is not the exact transient response and must surface on
-# the first poll instead of drifting into the quiet retry policy.
-HNEAR="$TMP_ROOT/hnear"; new_home "$HNEAR"
-NEAR_ART="$TMP_ROOT/near-board.html"
-printf '<h1>near</h1>\n' > "$NEAR_ART"
-near_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$NEAR_ART")
-fm_test_track_procevent_home "$HNEAR"
-LAVISH_COUNT="$TMP_ROOT/near-count"; LAVISH_SCRIPT="near-interrupt feedback"
-PATH="$LAVISH_SCRIPTED_BIN:$PATH" FM_HOME="$HNEAR" FM_LAVISH_POLL_RETRY_DELAY=1 \
-  "$ROOT/bin/fm-procevent-lavish.sh" arm "$NEAR_ART" >/dev/null
-PATH="$LAVISH_SCRIPTED_BIN:$PATH" FM_HOME="$HNEAR" pe "$HNEAR" start "$near_id" >/dev/null
-[ "$(cat "$LAVISH_COUNT")" = 1 ] \
-  || fail "a near-match interruption was retried instead of surfacing on its first poll"
-assert_contains "$(wake_payloads "$HNEAR")" "procevent lavish $near_id 1" \
-  "a whitespace variant of the interruption is captured and announced immediately"
-PATH="$LAVISH_SCRIPTED_BIN:$PATH" FM_HOME="$HNEAR" \
-  "$ROOT/bin/fm-procevent-lavish.sh" retire "$NEAR_ART" >/dev/null
-pass "only the literal two-line interruption enters the quiet retry policy"
-
-# The public arm boundary refuses invalid retry intervals before it publishes a
-# source registration, rather than arming a listener that can only fail later.
-HINVALID="$TMP_ROOT/hinvalid"; new_home "$HINVALID"
-INVALID_ART="$TMP_ROOT/invalid-delay-board.html"
-printf '<h1>invalid delay</h1>\n' > "$INVALID_ART"
-invalid_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$INVALID_ART")
-for invalid_delay in 0 61 invalid; do
-  invalid_status=0
-  invalid_out=$(PATH="$LAVISH_SCRIPTED_BIN:$PATH" FM_HOME="$HINVALID" \
-    FM_LAVISH_POLL_RETRY_DELAY="$invalid_delay" \
-    "$ROOT/bin/fm-procevent-lavish.sh" arm "$INVALID_ART" 2>&1) || invalid_status=$?
-  [ "$invalid_status" -ne 0 ] \
-    || fail "arm accepted invalid retry delay: $invalid_delay"
-  assert_contains "$invalid_out" "must be whole seconds from 1 to 60" \
-    "arm explains the rejected retry delay"
-  assert_absent "$HINVALID/state/procevent/$invalid_id.source" \
-    "arm publishes no source registration for an invalid retry delay"
-done
-pass "arm rejects malformed and out-of-range retry delays before registration"
-
-# Shell-safe cleanup must preserve a valid TMPDIR containing an apostrophe.
-QUOTED_TMPDIR="$TMP_ROOT/poll's-stage"
-mkdir -p "$QUOTED_TMPDIR"
-LAVISH_COUNT="$TMP_ROOT/quoted-count"; LAVISH_SCRIPT="feedback"
-PATH="$LAVISH_SCRIPTED_BIN:$PATH" TMPDIR="$QUOTED_TMPDIR" \
-  "$ROOT/bin/fm-procevent-lavish.sh" poll "$NEAR_ART" >/dev/null
-quoted_staged=("$QUOTED_TMPDIR"/fm-lavish-poll.*)
-[ ! -e "${quoted_staged[0]}" ] \
-  || fail "poll left its staged response behind in an apostrophe-containing TMPDIR"
-pass "poll cleanup safely handles an apostrophe-containing TMPDIR"
-
-HSTREAM="$TMP_ROOT/hstream"; new_home "$HSTREAM"
-STREAM_ART="$TMP_ROOT/stream-board.html"
-STREAM_TMPDIR="$TMP_ROOT/stream-stage"
-LAVISH_STREAM_READY="$TMP_ROOT/stream-ready"
-LAVISH_STREAM_RELEASE="$TMP_ROOT/stream-release"
-mkdir -p "$STREAM_TMPDIR"
-printf '<h1>stream</h1>\n' > "$STREAM_ART"
-stream_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$STREAM_ART")
-fm_test_track_procevent_home "$HSTREAM"
-LAVISH_COUNT="$TMP_ROOT/stream-count"; LAVISH_SCRIPT="stream"
-PATH="$LAVISH_SCRIPTED_BIN:$PATH" FM_HOME="$HSTREAM" \
-  "$ROOT/bin/fm-procevent-lavish.sh" arm "$STREAM_ART" >/dev/null
-PATH="$LAVISH_SCRIPTED_BIN:$PATH" TMPDIR="$STREAM_TMPDIR" \
-  LAVISH_STREAM_READY="$LAVISH_STREAM_READY" LAVISH_STREAM_RELEASE="$LAVISH_STREAM_RELEASE" \
-  FM_PROCEVENT_MAX_OUTPUT_BYTES=100 pe "$HSTREAM" reconcile >/dev/null
-wait_for "$LAVISH_STREAM_READY" || fail "streaming poll did not start"
-stream_staged=("$STREAM_TMPDIR"/fm-lavish-poll.*)
-[ -e "${stream_staged[0]}" ] || fail "streaming poll created no classifier staging file"
-[ "$(wc -c < "${stream_staged[0]}" | tr -d ' ')" -le 100 ] \
-  || fail "streaming poll exceeded its bounded classifier staging"
-: > "$LAVISH_STREAM_RELEASE"
-wait_for "$HSTREAM/state/.wake-queue" || fail "streaming poll produced no wake"
-stream_result=$(first_result "$HSTREAM" "$stream_id" || true)
-[ "$(wc -c < "$stream_result" | tr -d ' ')" -le 100 ] \
-  || fail "streaming poll bypassed the runner output bound"
-PATH="$LAVISH_SCRIPTED_BIN:$PATH" FM_HOME="$HSTREAM" \
-  "$ROOT/bin/fm-procevent-lavish.sh" retire "$STREAM_ART" >/dev/null
-pass "Lavish classification staging stays bounded while nonmatches stream"
-
-# --- end-user-aligned regression: the exact drain-before-handling restart cut
-# Reproduces the confirmed defect through the public interface end to end: a
-# real blocking source completes, its result is captured and published, the
-# wake is drained without any handling, a replacement session's reconcile must
-# resurface the exact same source and sequence, and only the owned handling
-# interface may retire it - safely and without ever authorizing a paired
-# effect a second time.
+# --- exact drain-before-handling restart cut -------------------------------
+# A blocking source completes, its result is captured and published, the wake
+# is drained without handling, and a replacement session must resurface that
+# exact source and sequence until the owned acknowledgement records handling.
 HW="$TMP_ROOT/hw"; new_home "$HW"
 TRIGW="$TMP_ROOT/trigger-restart-cut"
 pe_register "$HW" lavish restart-cut-src -- "$BLOCKER" "$TRIGW" "restart cut payload" >/dev/null
@@ -959,48 +671,39 @@ wait_for "$HW/state/.wake-queue" || fail "the restart-cut source published no ev
 assert_contains "$(wake_payloads "$HW")" "procevent lavish restart-cut-src 1" \
   "capture and publish reaches the wake queue before any handling"
 
-# Retire the registration now that the source has completed and captured its
-# one result. The fixture's trigger file persists on disk, so a still-armed
-# registration would let every further reconcile call restart the blocker and
-# capture a fresh generation; retiring leaves only the durable inbox and wake
-# state under test, matching the exact restart cut - the source side is done,
-# only the handling side is still open.
-# Publication precedes runner exit; wait for completion before retiring.
+# Publication precedes runner exit. Retire after completion so only the durable
+# inbox and wake state remain under test.
 wait "$restart_cut_start_pid" || fail "the restart-cut source did not complete"
 pe "$HW" retire restart-cut-src >/dev/null \
   || fail "the restart-cut registration was not retired"
 
-# Drain the wake without handling it: the end-user experience of a session
-# reading the wake queue at turn end without yet acting on this specific line.
 mv "$HW/state/.wake-queue" "$HW/state/.wake-queue.drained-unhandled"
 [ -z "$(wake_payloads "$HW")" ] || fail "the wake queue was not actually drained"
-
-# Simulate a replacement Firstmate session: reconcile runs cold, as it would on
-# a fresh process with no memory of the prior turn.
 out=$(pe "$HW" reconcile)
 assert_contains "$out" "published=1" \
   "a replacement session's reconcile resurfaces a drained-but-unhandled result"
 assert_contains "$(wake_payloads "$HW")" "procevent lavish restart-cut-src 1" \
   "the exact same captured source and sequence resurfaces, never a substitute"
 
-# Acknowledge handling through the owned interface.
 ack_out=$(pe "$HW" handled restart-cut-src 1)
 assert_contains "$ack_out" "handled: restart-cut-src 1" \
   "the first acknowledgement newly authorizes the paired effect"
-
 mv "$HW/state/.wake-queue" "$HW/state/.wake-queue.post-handle"
 out=$(pe "$HW" reconcile)
 assert_contains "$out" "published=0" \
   "a later reconcile does not resurface a result once it is durably handled"
-[ -z "$(wake_payloads "$HW")" ] || fail "a handled result was announced again: $(wake_payloads "$HW")"
+[ -z "$(wake_payloads "$HW")" ] \
+  || fail "a handled result was announced again: $(wake_payloads "$HW")"
 
 auth_count=0
 for _ in 1 2 3; do
   repeat_ack=$(pe "$HW" handled restart-cut-src 1)
-  assert_contains "$repeat_ack" "already-handled: restart-cut-src 1" "repeated acknowledgement stays safe and idempotent"
+  assert_contains "$repeat_ack" "already-handled: restart-cut-src 1" \
+    "repeated acknowledgement stays safe and idempotent"
   case "$repeat_ack" in handled:*) auth_count=$((auth_count + 1)) ;; esac
 done
-[ "$auth_count" -eq 0 ] || fail "a result already durably handled was authorized again: count=$auth_count"
+[ "$auth_count" -eq 0 ] \
+  || fail "a result already durably handled was authorized again: count=$auth_count"
 pass "a drained-but-unhandled result survives a replacement session and is retired only by explicit handling, never twice"
 
 HP="$TMP_ROOT/hp"; new_home "$HP"
@@ -1008,14 +711,16 @@ mkdir -p "$HP/state/procevent-inbox"
 for seq in 10 2 1; do
   printf '%s\n' "$seq" > "$HP/state/procevent-inbox/ordered-src.$seq.result"
   printf 'lavish\n' > "$HP/state/procevent-inbox/ordered-src.$seq.adapter"
-  chmod 0600 "$HP/state/procevent-inbox/ordered-src.$seq.result" "$HP/state/procevent-inbox/ordered-src.$seq.adapter"
+  chmod 0600 "$HP/state/procevent-inbox/ordered-src.$seq.result" \
+    "$HP/state/procevent-inbox/ordered-src.$seq.adapter"
 done
 pending=$(bash -c '. "$1/bin/fm-procevent-lib.sh"; fm_procevent_pending "$2"' _ "$ROOT" "$HP/state")
 expected=$(printf '%s\n' \
   "$HP/state/procevent-inbox/ordered-src.1.result" \
   "$HP/state/procevent-inbox/ordered-src.2.result" \
   "$HP/state/procevent-inbox/ordered-src.10.result")
-[ "$pending" = "$expected" ] || fail "pending results were not emitted in numeric sequence order: $pending"
+[ "$pending" = "$expected" ] \
+  || fail "pending results were not emitted in numeric sequence order: $pending"
 pe "$HP" reconcile >/dev/null
 deduped=$(FM_HOME="$HP" bash -c '
   . "$1/bin/fm-wake-lib.sh"
@@ -1025,7 +730,8 @@ expected=$(printf '%s\n' \
   'check: procevent lavish ordered-src 1' \
   'check: procevent lavish ordered-src 2' \
   'check: procevent lavish ordered-src 10')
-[ "$deduped" = "$expected" ] || fail "distinct result generations were coalesced or reordered: $deduped"
+[ "$deduped" = "$expected" ] \
+  || fail "distinct result generations were coalesced or reordered: $deduped"
 pass "pending results preserve numeric order and distinct wake identity"
 
 # --- two homes cannot both own one canonical source -------------------------
@@ -2127,25 +1833,7 @@ assert_contains "$bad_limit_out" "must be a nonnegative integer" "invalid output
 assert_absent "$FM_PROCEVENT_CLAIM_ROOT/bad-limit.claim" "invalid output bound leaves no source claim"
 pass "invalid output bounds fail closed"
 
-# --- the Lavish adapter uses the published poll shape -----------------------
-ART="$TMP_ROOT/artifact.html"
-printf '<h1>fixture</h1>\n' > "$ART"
-sid=$(FM_HOME="$TMP_ROOT/hg" "$ROOT/bin/fm-procevent-lavish.sh" source-id "$ART")
-case "$sid" in lavish-*) : ;; *) fail "adapter source id has an unexpected shape: $sid" ;; esac
-sid2=$(FM_HOME="$TMP_ROOT/hg" "$ROOT/bin/fm-procevent-lavish.sh" source-id "$ART")
-[ "$sid" = "$sid2" ] || fail "adapter source id is not stable"
-ART_ALIAS="$TMP_ROOT/artifact-alias.html"
-ln -s "$ART" "$ART_ALIAS"
-sid3=$(FM_HOME="$TMP_ROOT/hg" "$ROOT/bin/fm-procevent-lavish.sh" source-id "$ART_ALIAS")
-[ "$sid" = "$sid3" ] || fail "a final-component symlink produced a second source id"
-ART_NEWLINE="$TMP_ROOT/line-ending"$'\n'
-printf '<h1>newline fixture</h1>\n' > "$ART_NEWLINE"
-printf '<h1>sibling fixture</h1>\n' > "$TMP_ROOT/line-ending"
-newline_artifact_status=0
-newline_artifact_out=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$ART_NEWLINE" 2>&1) || newline_artifact_status=$?
-[ "$newline_artifact_status" -ne 0 ] || fail "Lavish source identity accepted an artifact path ending in a newline"
-assert_contains "$newline_artifact_out" "cannot contain newlines" "Lavish rejects newline paths before canonicalization"
-pass "the adapter derives physical identity without newline path corruption"
+# --- retired Lavish captures remain readable -------------------------------
 
 HS="$TMP_ROOT/hs"; new_home "$HS"
 mkdir -p "$HS/state/procevent"
@@ -2489,23 +2177,23 @@ for adapter in remote-reply when; do
 done
 pass "an adapter with no silence verdict keeps announcing every result"
 
-# --- the loss limitation is stated on the public interface ------------------
-# Checked through --help, the operator-facing surface, rather than by reading
-# implementation bytes.
+# --- the retired adapter exposes compatibility only -------------------------
 adapter_help=$("$ROOT/bin/fm-procevent-lavish.sh" --help 2>&1 || true)
-assert_contains "$adapter_help" "destructively clears" \
-  "the adapter's help states the destructive-source loss limitation"
-assert_contains "$adapter_help" "Never describe" \
-  "the adapter's help forbids an at-least-once or lossless description"
+assert_contains "$adapter_help" "retire-registered" \
+  "the adapter's help omits the legacy retirement command"
 assert_contains "$adapter_help" "read <result-file>" \
   "the adapter's help publishes the structured read command"
+assert_not_contains "$adapter_help" "arm <artifact" \
+  "the adapter still advertises an active arming surface"
+assert_not_contains "$adapter_help" "poll <artifact" \
+  "the adapter still advertises an active polling surface"
 
 runner_help=$("$ROOT/bin/fm-procevent.sh" --help 2>&1 || true)
 assert_contains "$runner_help" "Durability boundary" \
   "the runner's help scopes what it actually proves"
 assert_not_contains "$runner_help" "exactly-once" \
   "the runner's help claims no exactly-once delivery"
-pass "the published interfaces state the loss limitation and claim no lossless delivery"
+pass "the retired adapter is compatibility-only and the runner claims no lossless delivery"
 
 # --- launch pacing and guard startup ----------------------------------------
 

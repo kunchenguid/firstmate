@@ -36,9 +36,9 @@ EOF
   printf '%s\n' "$home"
 }
 
-# The Lavish review adapter, run against this suite's isolated home. The
-# machine-wide process-event claim root is redirected into the fixture so arming
-# a review here can never contend with a real one on this machine.
+# The retired Lavish result parser, run against this suite's isolated home.
+# It remains only to decode already-captured results during compatibility
+# retirement; it never launches or polls the removed provider.
 run_lavish() {  # <home> <command args...>
   local home=$1
   shift
@@ -621,7 +621,7 @@ SH
 }
 
 # Reproduces the loss exactly with privacy-safe synthetic names: the investigation
-# and visual review have ended, the only genuine unresolved captain call is report
+# and structured review have ended, the only genuine unresolved captain call is report
 # prose, no held backlog item or open status exists, and the authoritative
 # Bearings view correctly omits it. Completion must now refuse before teardown can
 # erase the source.
@@ -639,7 +639,7 @@ test_uninventoried_report_decision_refuses_completion() {
 ## Done
 EOF
   write_origin_meta "$home" "$id"
-  printf 'done: report and visual review complete\n' > "$home/state/$id.status"
+  printf 'done: report and structured review complete\n' > "$home/state/$id.status"
   cat > "$home/data/$id/report.md" <<'EOF'
 # Sample route review
 
@@ -1184,9 +1184,9 @@ test_out_of_band_close_is_recordable() {
   pass "an out-of-band close is recordable with the captain's word and nothing else"
 }
 
-# A post-teardown visual review completes against the surviving report and
+# A post-teardown report review completes against the surviving report and
 # durable tasks, with no volatile task metadata and no second decision database.
-test_visual_review_uses_shared_completion_owner() {
+test_report_review_uses_shared_completion_owner() {
   local home id json
   home=$(make_home visual-review)
   id=sample-board-review
@@ -1201,20 +1201,18 @@ test_visual_review_uses_shared_completion_owner() {
     || fail "completed investigation teardown failed: $(cat "$home/visual-teardown.err")"
   tasks_in "$home" "done" "$id" --report "data/$id/report.md" --keep 0 >/dev/null
 
-  mkdir -p "$home/.lavish"
-  printf '<html><body>Synthetic sample board</body></html>\n' > "$home/.lavish/sample-board.html"
   run_captain "$home" hold sample-layout-call --title "Choose the sample layout" \
     --reason "captain layout choice pending" --repo sample --origin "$id" >/dev/null \
-    || fail "post-teardown visual review could not use the shared hold owner"
+    || fail "post-teardown report review could not use the shared hold owner"
   run_captain "$home" complete "$id" sample-layout-call >/dev/null \
-    || fail "post-teardown visual review could not use the shared completion owner"
-  json=$(run_bearings "$home") || fail "Bearings failed after the ended visual review"
+    || fail "post-teardown report review could not use the shared completion owner"
+  json=$(run_bearings "$home") || fail "Bearings failed after the ended report review"
   printf '%s' "$json" | jq -e '
     .decisions_open | any(.id == "sample-layout-call" and .verb == "captain-hold")
-  ' >/dev/null || fail "ended visual review did not leave its durable Captain Call: $json"
+  ' >/dev/null || fail "ended report review did not leave its durable Captain Call: $json"
   [ ! -e "$home/data/visual-review-decisions.json" ] \
-    || fail "visual review created a second decision database"
-  pass "ended visual review follows the same captain-hold completion owner"
+    || fail "report review created a second decision database"
+  pass "ended report review follows the same captain-hold completion owner"
 }
 
 test_none_inventory_and_resolved_prose_do_not_create_holds() {
@@ -1278,7 +1276,7 @@ test_terminal_single_owner_status_decision_does_not_block_empty_inventory() {
 # answer time, a card-declared release mode frees held work, freeform prose can
 # forge nothing, and a replayed capture is idempotent.
 test_bound_channel_answers_close_at_answer_time() {
-  local home id sid artifact result out show rc
+  local home id sid result out show rc
   home=$(make_home channel-answer-closure)
   id=sample-eval-proposal
   mkdir -p "$home/data/$id"
@@ -1314,15 +1312,11 @@ test_bound_channel_answers_close_at_answer_time() {
     sample-old-reconcile-note sample-gated-work >/dev/null \
     || fail "completion failed for the deck's inventoried calls"
 
-  artifact="$home/data/$id/review.html"
-  printf '<h1>Sample eval proposal</h1>\n' > "$artifact"
-  fm_fake_exit0 "$home/fakebin" lavish-axi
-  sid=$(run_lavish "$home" source-id "$artifact") || fail "could not derive the review source id"
+  sid=retired-lavish-bound-source
   run_captain "$home" bind "$sid" >/dev/null \
     || fail "could not bind the review source to the keyed-answer intake"
   [ "$(run_captain "$home" binding "$sid")" = "(any)" ] \
     || fail "the recorded binding did not resolve to the collapsed marker"
-  run_lavish "$home" arm "$artifact" >/dev/null || fail "could not arm the review deck"
 
   result="$home/state/procevent-inbox/$sid.1.result"
   mkdir -p "$home/state/procevent-inbox"
@@ -1587,14 +1581,14 @@ test_reconcile_closes_with_evidence_or_keeps_the_call_open() {
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "reconcile closed a call without a pending board request"
-  assert_contains "$out" "no pending board-created reconcile request" \
+  assert_contains "$out" "no pending captured-source reconcile request" \
     "the ungated close refusal did not name the missing board request: $out"
   set +e
   out=$(run_captain "$home" reconcile note sample-active-call --note-file "$home/note.txt" 2>&1)
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "reconcile annotated a call without a pending board request"
-  assert_contains "$out" "no pending board-created reconcile request" \
+  assert_contains "$out" "no pending captured-source reconcile request" \
     "the ungated note refusal did not name the missing board request: $out"
 
   request_reconciles "$home" board-src sample-moot-call sample-active-call sample-mode-call \
@@ -1654,7 +1648,7 @@ test_reconcile_closes_with_evidence_or_keeps_the_call_open() {
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "a retired reconcile request appended a duplicate note"
-  assert_contains "$out" "no pending board-created reconcile request" \
+  assert_contains "$out" "no pending captured-source reconcile request" \
     "the duplicate-note refusal did not name the retired request: $out"
 
   printf 'sample-active-call\n' \
@@ -1799,7 +1793,7 @@ SH
 }
 
 test_unbound_source_closes_no_hold() {
-  local home id sid artifact result out show rc
+  local home id sid result out show rc
   home=$(make_home lavish-unbound)
   id=sample-unbound-review
   mkdir -p "$home/data/$id"
@@ -1812,11 +1806,7 @@ test_unbound_source_closes_no_hold() {
     --reason "captain only choice pending" --repo sample --origin "$id" >/dev/null \
     || fail "could not register the unbound call"
 
-  artifact="$home/data/$id/review.html"
-  printf '<h1>Unbound</h1>\n' > "$artifact"
-  fm_fake_exit0 "$home/fakebin" lavish-axi
-  sid=$(run_lavish "$home" source-id "$artifact") || fail "could not derive the unbound source id"
-  run_lavish "$home" arm "$artifact" >/dev/null || fail "could not arm the unbound review"
+  sid=retired-lavish-unbound-source
 
   result="$home/state/procevent-inbox/$sid.1.result"
   mkdir -p "$home/state/procevent-inbox"
@@ -3832,7 +3822,7 @@ test_hold_stamp_precedes_hold_visibility
 test_interrupted_answer_preserves_hold_age
 test_deferral_leaves_captains_call_until_due
 test_out_of_band_close_is_recordable
-test_visual_review_uses_shared_completion_owner
+test_report_review_uses_shared_completion_owner
 test_none_inventory_and_resolved_prose_do_not_create_holds
 test_terminal_single_owner_status_decision_does_not_block_empty_inventory
 test_bound_channel_answers_close_at_answer_time

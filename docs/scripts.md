@@ -17,7 +17,6 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-fleet-snapshot.sh`   | Print structured current-home fleet snapshot JSON (schema `fm-fleet-snapshot.v1`) |
 | `fm-fleet-view.sh`       | Render the fleet snapshot as a human Markdown view                                   |
 | `fm-bearings-snapshot.sh` | Project the bounded fleet snapshot to compact TOON; `--include-prs` adds live GitHub enrichment |
-| `fm-bearings-board.sh`   | Build and arm the stable interactive `/bearings lavish` fleet board                  |
 | `fm-update.sh`           | Guarded fast-forward self-update of the current Firstmate checkout |
 | `fm-captain-hold.sh`     | Hold tasks for the captain, record the captain's answers, gate investigation completion, and report record divergence between the status log and the backlog |
 | `fm-brief.sh`            | Scaffold ship (explicit `--mode`), scout, and Herdr-lab briefs, with Captain's intent and Firstmate spec subsections |

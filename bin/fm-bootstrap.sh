@@ -3,7 +3,6 @@
 # Usage:
 #   fm-bootstrap.sh
 #   fm-bootstrap.sh install <tool>...
-#   fm-bootstrap.sh lavish-compatible
 #
 # Detection prints only actionable diagnostics plus explicit BOOTSTRAP_INFO
 # facts. FM_BOOTSTRAP_DETECT_ONLY=1 skips all mutation. FM_BOOTSTRAP_NETWORK
@@ -160,7 +159,7 @@ install_cmd() {
     node|git|gh|curl|jq) echo "brew install $1  # or the platform's package manager" ;;
     treehouse) echo "curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh" ;;
     no-mistakes) echo "curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh" ;;
-    gh-axi|chrome-devtools-axi|lavish-axi) echo "npm install -g $1 && $1 setup hooks" ;;
+    gh-axi|chrome-devtools-axi) echo "npm install -g $1 && $1 setup hooks" ;;
     tasks-axi|quota-axi) echo "npm install -g $1" ;;
     *) return 1 ;;
   esac
@@ -204,7 +203,6 @@ NO_MISTAKES_MIN=1.46.0
 # tasks-axi feature probes are an independent defense-in-depth concern, not part
 # of its floor.
 GH_AXI_MIN=0.1.29
-LAVISH_AXI_MIN=0.1.46
 
 treehouse_supports_lease() {
   treehouse get --help 2>&1 | grep -Eq '(^|[^[:alnum:]_-])--lease([^[:alnum:]_-]|$)'
@@ -642,11 +640,6 @@ startup_memory_budget_setup() {
   fi
 }
 
-if [ "${1:-}" = "lavish-compatible" ]; then
-  tool_version_at_least lavish-axi "$LAVISH_AXI_MIN"
-  exit
-fi
-
 if [ "${1:-}" = "install" ]; then
   shift
   [ $# -gt 0 ] || { echo "usage: fm-bootstrap.sh install <tool>..." >&2; exit 1; }
@@ -717,6 +710,8 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ] && local_phase; then
       exit 1
     fi
   fi
+  "$SCRIPT_DIR/fm-procevent-lavish.sh" retire-registered \
+    || { echo "error: bootstrap could not retire legacy Lavish sources" >&2; exit 1; }
 fi
 
 # Local detection: presence, version floors, and configuration. Nothing here
@@ -743,9 +738,6 @@ detect_local_tools() {
   fi
   if command -v gh-axi >/dev/null 2>&1 && ! tool_version_at_least gh-axi "$GH_AXI_MIN"; then
     echo "MISSING: gh-axi (install: $(install_cmd gh-axi))"
-  fi
-  if ! tool_version_at_least lavish-axi "$LAVISH_AXI_MIN"; then
-    echo "PRESENTATION_UNAVAILABLE: lavish-axi (requires >=$LAVISH_AXI_MIN; install: $(install_cmd lavish-axi)) - nonvisual work may proceed with plain-text decisions and reports; install or upgrade before using Lavish"
   fi
   if command -v quota-axi >/dev/null 2>&1 && ! fm_quota_axi_compatible; then
     echo "MISSING: quota-axi (install: $(install_cmd quota-axi))"

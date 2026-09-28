@@ -275,7 +275,6 @@ cpu_count() {
 family_for_basename() {
   case "$1" in
     fm-agent-process.test.sh|fm-aime-cloud-worker.test.sh|fm-remote-agent.test.sh|fm-arm-pretool-check.test.sh|fm-ask-user-authority.test.sh|\
-    fm-bearings-board.test.sh|\
     fm-brief.test.sh|\
     fm-calm-pi-extension.test.sh|fm-cd-pretool-check.test.sh|\
     fm-classify-decision-key.test.sh|\
@@ -324,7 +323,6 @@ family_for_basename() {
       printf '%s\n' session-bootstrap
       ;;
     fm-afk-pi-herdr-return-e2e.test.sh|\
-    fm-bearings-board-lavish-live-e2e.test.sh|\
     fm-busy-transcript-live-e2e.test.sh|\
     fm-composer-matrix-live-e2e.test.sh|\
     fm-composer-codex-idle-live-e2e.test.sh|\
@@ -359,7 +357,7 @@ family_for_basename() {
     fm-afk-contract.test.sh|fm-afk-return.test.sh)
       printf '%s\n' afk
       ;;
-    fm-bearings-board-render.test.sh|fm-bearings-snapshot.test.sh|\
+    fm-bearings-snapshot.test.sh|\
     fm-fleet-snapshot-view.test.sh)
       printf '%s\n' snapshot-bearings
       ;;
@@ -626,8 +624,6 @@ tests/fm-ask-user-authority.test.sh 128
 tests/fm-backend.test.sh 20061
 tests/fm-backlog-atomicity.test.sh 161989
 tests/fm-backlog-read-bound.test.sh 24031
-tests/fm-bearings-board-render.test.sh 1528
-tests/fm-bearings-board.test.sh 4195
 tests/fm-bearings-snapshot.test.sh 116374
 tests/fm-bootstrap.test.sh 25208
 tests/fm-branch-supervision.test.sh 5729
@@ -1516,9 +1512,6 @@ families_for_changed_path() {
           || printf '%s\n' "__unmapped__:$path"
       fi
       ;;
-    tests/assets/board-render-harness.mjs)
-      printf '%s\n' "__script__:fm-bearings-board-render.test.sh"
-      ;;
     tests/lib.sh|tests/*-helpers.sh|tests/fixtures.sh|tests/*-fixture.sh)
       # Shared top-level test files, selected by the suites that name them.
       # Must stay below the tests/fixtures/*/* arm: a case glob's * spans /, so
@@ -1542,7 +1535,11 @@ families_for_changed_path() {
       fi
       ;;
     tests/*)
-      printf '%s\n' "__unmapped__:$path"
+      # A deleted test or test-only asset has no surviving suite to schedule.
+      # Existing paths still fail closed until their owner is mapped.
+      if [ -e "$path" ]; then
+        printf '%s\n' "__unmapped__:$path"
+      fi
       ;;
     README.md|VISION.md|LICENSE|assets/*|docs/*|skills/*|.gitignore)
       ;;

@@ -784,7 +784,6 @@ test_bootstrap_reports_missing_x_dependency() {
   home="$TMP_ROOT/boot-missing-x"; mkdir -p "$home"
   fakebin=$(fm_fakebin "$home")
   fm_fake_exit0 "$fakebin" herdr node no-mistakes chrome-devtools-axi curl
-  fm_fake_version_tool "$fakebin" lavish-axi FM_FAKE_LAVISH_AXI_VERSION 0.1.46
   cat > "$fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = --version ]; then
@@ -817,6 +816,7 @@ SH
   chmod +x "$fakebin/treehouse"
   printf 'FMX_PAIRING_TOKEN=tok-missing\n' > "$home/.env"
   out=$(PATH="$fakebin" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 \
     "$BASH" "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
   assert_contains "$out" "MISSING: jq" "bootstrap must report missing jq when X mode is opted in"
   assert_not_contains "$out" "FMX: X mode on" "bootstrap must not announce X mode when a dependency is missing"
