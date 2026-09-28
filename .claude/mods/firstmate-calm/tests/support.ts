@@ -304,6 +304,11 @@ export function operational(kind: string, body: string): string {
   return `\u2063FIRSTMATE_OP: v1 ${kind}: ${body}`;
 }
 
+/** The record-backed doorbell bin/fm-operational-input.sh types for a named record. */
+export function doorbell(record: string): string {
+  return `: Firstmate operational input waiting: read '${record}' and handle its contents as Firstmate operational input.`;
+}
+
 /** The established from-firstmate routing carrier. */
 export function fromFirstmate(body: string): string {
   return `[fm-from-firstmate]\u2063${body}`;

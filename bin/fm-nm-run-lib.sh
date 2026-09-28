@@ -2,20 +2,25 @@
 # Shared no-mistakes axi run attribution primitives.
 #
 # ONE owner for the no-mistakes run-attribution primitives used by
-# fm-crew-state.sh (read-only current-state reporting) and fm-teardown.sh
-# (pre-teardown run abort, see its "Fix 1" header comment). Both bind a run
-# by strict branch-and-head identity first, and both then recognize a provable
+# fm-crew-state.sh (read-only current-state reporting), fm-teardown.sh
+# (pre-teardown run abort, see its "Fix 1" header comment), and fm-dod-lib.sh
+# (the custody check a Gerrit no-mistakes ready report must pass). Crew-state binds
+# an EXECUTING run (pending, running, fixing or ci) on the task's branch
+# regardless of head (fm_nm_run_is_executing); every other run still needs
+# strict branch-and-head identity. Both callers then recognize a provable
 # pipeline-owned continuation through fm_nm_runs_status_for_worktree below:
-# crew-state for an ACTIVE run, so a fix round never reads as an older failed
-# run, and teardown for a run PARKED at a gate, so cleanup concludes it
+# crew-state for an ACTIVE run - parked, or executing with the daemon answered
+# down - so a fix round never reads as an older
+# failed run, and teardown for a run PARKED at a gate, so cleanup concludes it
 # instead of orphaning it. Getting this wrong in either
 # direction is unsafe: a false negative hides a genuinely parked run, and a
 # false positive lets teardown act on a run it does not own.
 #
-# Bounded call to `no-mistakes "$@"` in dir $1, timeout $2 seconds. The bounded
+# Bounded call to an arbitrary command in dir $1, timeout $2 seconds, and its
+# `no-mistakes "$@"` specialization. The bounded
 # form preserves stdout, stderr, and exit status; the checked form discards
 # stderr, while fm_nm_run keeps the fail-open query contract for read-only callers.
-fm_nm_run_bounded() {  # <dir> <timeout_secs> <args...>
+fm_nm_bounded() {  # <dir> <timeout_secs> <command> <args...>
   local dir=$1 timeout_secs=$2 have_timeout=none
   shift 2
   if command -v timeout >/dev/null 2>&1; then have_timeout=timeout
@@ -23,11 +28,17 @@ fm_nm_run_bounded() {  # <dir> <timeout_secs> <args...>
   elif command -v perl >/dev/null 2>&1; then have_timeout=perl
   fi
   case "$have_timeout" in
-    timeout)  ( cd "$dir" && timeout "$timeout_secs" no-mistakes "$@" ) ;;
-    gtimeout) ( cd "$dir" && gtimeout "$timeout_secs" no-mistakes "$@" ) ;;
-    perl)     ( cd "$dir" && perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$timeout_secs" no-mistakes "$@" ) ;;
+    timeout)  ( cd "$dir" && timeout "$timeout_secs" "$@" ) ;;
+    gtimeout) ( cd "$dir" && gtimeout "$timeout_secs" "$@" ) ;;
+    perl)     ( cd "$dir" && perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$timeout_secs" "$@" ) ;;
     *)        return 1 ;;
   esac
+}
+
+fm_nm_run_bounded() {  # <dir> <timeout_secs> <args...>
+  local dir=$1 timeout_secs=$2
+  shift 2
+  fm_nm_bounded "$dir" "$timeout_secs" no-mistakes "$@"
 }
 
 fm_nm_run_checked() {  # <dir> <timeout_secs> <args...>
@@ -76,9 +87,11 @@ fm_nm_resolve_commit() {  # <worktree> <sha-ish>
 #     (local work advanced outside the run, or the branch tip was rewritten)
 # A run head whose object this copy does not have cannot be proven here and is
 # rejected; fm_nm_runs_status_for_worktree below owns the one ledger-anchored
-# recognition for that case, and fm_nm_run_is_pipeline_owned_active below
-# carries the custody exemption: a live run whose pipeline currently owns the
-# branch binds without head equality.
+# recognition for that case, fm_nm_run_is_executing below is the current-state
+# exemption for a live run on this branch regardless of head, and
+# fm_nm_run_is_pipeline_owned_active below carries the custody exemption: ANY
+# active run - executing or parked - whose pipeline currently owns the branch
+# binds without head equality.
 #
 # This predicate binds one run at a time, and MORE THAN ONE recorded run can
 # bind to the same worktree at once: a run that died at the worktree's exact
@@ -115,6 +128,18 @@ fm_nm_run_status_class() {  # <status_word>
 # toolchain. A capped overview requires an optional Python 3 sqlite3 reader
 # for a read-only same-branch query of NM_HOME/state.sqlite (default:
 # ~/.no-mistakes/state.sqlite; relative NM_HOME resolves from the worktree).
+# Repo identity is the overview's own top-level `repo:` line, which every axi
+# release emits: it is the `working_path` the CLI itself resolved for the
+# queried worktree. That is NOT the task worktree path in general - a linked
+# git worktree resolves to its main clone's registered path (observed
+# 2026-09-22 on v1.79.0: every task copy of a firstmate home reports
+# `repo: <home clone>`, and looking the repo up by the task worktree path
+# matched no row, so every capped read reported the inventory unreadable).
+# The recorded spelling is matched exactly, so an overview without exactly one
+# absolute `repo:` line, or with one the inventory does not record, reads as
+# unreadable rather than guessed among candidates.
+# The reader subprocess is bounded by $4 seconds (default 10), so a contended
+# database can never outlast the caller's per-read budget.
 # If that reader or inventory is unavailable, report unknown with available
 # candidate ids rather than treating the displayed window as complete.
 # Structural completeness applies to the whole table; semantic validation
@@ -125,16 +150,18 @@ fm_nm_run_status_class() {  # <status_word>
 # live run must not hide a newer failure. If the newest is live and another
 # same-branch live run exists, neither has exclusive authority: report all
 # candidate ids as unknown. A newer live row can replace cancelled history,
-# but the caller must fetch its full status BY ID and prove branch/head or
-# active pipeline custody before using its steps. Never reuse another run's
-# gate detail. This is a read-only selection, not teardown authorization.
+# but the caller must fetch its full status BY ID and prove branch/head,
+# executing status, or active pipeline custody before using its steps.
+# Never reuse another run's gate detail.
+# This is a read-only selection, not teardown authorization.
 #
 # Prints selected|id|status|candidate-ids, unknown|reason, absent (no row
 # for this branch), or unavailable (CLI has no overview table). Malformed or
 # structurally truncated tables report unknown, retaining every readable
 # same-branch candidate id.
-fm_nm_select_run() {  # <branch> <axi-overview> <worktree>
-  local selection inventory available_ids
+fm_nm_select_run() {  # <branch> <axi-overview> <worktree> [timeout_secs]
+  local selection inventory available_ids timeout_secs=${4:-10}
+  case "$timeout_secs" in ''|*[!0-9]*) timeout_secs=10 ;; esac
   selection=$(printf '%s\n' "$2" | awk -v branch="$1" '
     function scalar(s) {
       sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s)
@@ -193,9 +220,9 @@ fm_nm_select_run() {  # <branch> <axi-overview> <worktree>
     inrows { inrows = 0 }
     END {
       if (!found) print "unavailable"
-      else if (bad || counts != 1 || seen != expected || seen != shown || total < shown)
+      else if (bad || counts != 1 || (seen+0) != (expected+0) || (seen+0) != (shown+0) || (total+0) < (shown+0))
         print "unknown|unreadable runs table; run ids: " ids
-      else if (shown < total) print "incomplete|" ids
+      else if ((shown+0) < (total+0)) print "incomplete|" ids
       else if (invalid_run) print "unknown|unreadable runs table; run ids: " ids
       else if (unknown_status) print "unknown|unrecognized run status; run ids: " ids
       else if (first == "") print "absent"
@@ -208,7 +235,7 @@ fm_nm_select_run() {  # <branch> <axi-overview> <worktree>
     incomplete\|*) available_ids=${selection#*|} ;;
     *) printf '%s\n' "$selection"; return ;;
   esac
-  if ! inventory=$(python3 - "$1" "$2" "$3" "$available_ids" 2>/dev/null <<'PY'
+  if ! inventory=$(fm_nm_bounded "$3" "$timeout_secs" python3 - "$1" "$2" "$3" "$available_ids" 2>/dev/null <<'PY'
 import json
 import os
 import re
@@ -229,7 +256,7 @@ try:
     root = Path(os.environ.get("NM_HOME") or Path.home() / ".no-mistakes")
     if not root.is_absolute():
         root = Path(worktree) / root
-    with closing(sqlite3.connect((root / "state.sqlite").as_uri() + "?mode=ro", uri=True, timeout=1)) as db:
+    with closing(sqlite3.connect((root / "state.sqlite").as_uri() + "?mode=ro", uri=True, timeout=30)) as db:
         db.execute("BEGIN")
         repo = db.execute("SELECT id FROM repos WHERE working_path = ?", (repo_path,)).fetchall()
         if len(repo) != 1:
@@ -262,7 +289,7 @@ PY
   fi
   case "$inventory" in
     unknown\|*) selection=$inventory ;;
-    *) selection=$(fm_nm_select_run "$1" "$inventory" "$3") ;;
+    *) selection=$(fm_nm_select_run "$1" "$inventory" "$3" "$timeout_secs") ;;
   esac
   case "$selection" in
     selected\|*|unknown\|*|absent) printf '%s\n' "$selection" ;;
@@ -280,6 +307,31 @@ fm_nm_branch_sync_state() {  # <toon-output>
   s=$(printf '%s\n' "$1" \
     | sed -n '/^[[:space:]]*branch_sync:[[:space:]]*$/,/^[^[:space:]][^:]*:/s/^[[:space:]]\{1,\}state:[[:space:]]*\(.*\)/\1/p' \
     | head -1)
+  fm_nm_strip_quotes "$s"
+}
+
+# One scalar from a nested block of the top-level `branch_sync:` block in
+# captured `axi status` TOON $1: `<sub>.<key>` such as `next_action.code` or
+# `pipeline.current_head`. Empty when either block or the key is absent.
+# Indentation bounds each block, so a same-named key in a sibling sub-block
+# (every sub-block of branch_sync carries its own `head`-like keys) is never
+# read in its place.
+fm_nm_branch_sync_nested() {  # <toon-output> <sub-block> <key>
+  local s
+  s=$(printf '%s\n' "$1" | awk -v sub_block="$2" -v key="$3" '
+    function indent(line) { match(line, /[^ ]/); return RSTART - 1 }
+    /^[^[:space:]]/ { in_sync = ($0 ~ /^branch_sync:[[:space:]]*$/); in_sub = 0; next }
+    !in_sync { next }
+    {
+      ind = indent($0)
+      if (in_sub && ind <= sub_ind) in_sub = 0
+      if (!in_sub && $0 ~ ("^[[:space:]]+" sub_block ":[[:space:]]*$")) { in_sub = 1; sub_ind = ind; next }
+      if (in_sub && ind > sub_ind && $0 ~ ("^[[:space:]]+" key ":")) {
+        sub(("^[[:space:]]+" key ":[[:space:]]*"), "")
+        print
+        exit
+      }
+    }')
   fm_nm_strip_quotes "$s"
 }
 
@@ -307,6 +359,57 @@ fm_nm_run_is_pipeline_owned_active() {  # <toon-output>
   fm_nm_run_is_active "$1"
 }
 
+# The gate evidence in an `axi status` TOON, as ONE set of patterns. Both
+# readers must agree exactly: fm_nm_run_is_parked below decides whether a run
+# keeps the strict head rule, and fm-crew-state.sh's nm_gate_step_row /
+# nm_gate_status / nm_has_gate render the `parked at <gate>` detail from the
+# same evidence. If a new parked marker is added to one reader only, an
+# unverified run's gate detail reaches the crew report.
+FM_NM_GATE_LINE_RE='^[[:space:]]*gate:[[:space:]]*'
+FM_NM_AWAITING_AGENT_RE='^[[:space:]]*awaiting_agent:'
+FM_NM_GATE_SCALAR_RE='^[[:space:]]*(status|state):[[:space:]]*"?(awaiting_approval|fix_review)"?[[:space:]]*$'
+FM_NM_GATE_ROW_RE='^[[:space:]]*[^,]+,[[:space:]]*"?(awaiting_approval|fix_review)"?[[:space:]]*,'
+
+# 0 if the run in captured `axi status` TOON $1 carries any of those PARKED
+# markers. The top-level `status:` word alone does NOT decide this: the CLI
+# leaves it at `running` while a run waits at a gate, so the word and the gate
+# markers routinely disagree.
+fm_nm_run_is_parked() {  # <toon-output>
+  printf '%s\n' "$1" | grep -Eq \
+    "$FM_NM_GATE_LINE_RE|$FM_NM_AWAITING_AGENT_RE|$FM_NM_GATE_SCALAR_RE|$FM_NM_GATE_ROW_RE"
+}
+
+# 0 if the run in captured `axi status` TOON $1 is EXECUTING: in flight and
+# actively working (pending, running, fixing, or ci), not parked at a gate.
+# Read-only current-state reporting (fm-crew-state.sh) treats an executing run
+# on the task's own branch as authoritative REGARDLESS of head: the pipeline
+# rebases the branch and commits fix rounds in its own checkout, so a live run's
+# head routinely differs from the task worktree's local head, and falling back
+# to an older run that matches the local head reads a working crew as failed.
+# A run parked at a gate keeps the strict head rule, and no destructive caller
+# uses this predicate: teardown stays on fm_nm_head_matches_worktree and the
+# ledger rule below.
+# This predicate reads the RECORD only; it cannot tell a live run from one whose
+# daemon died still saying `running`. The head-free route through it is the
+# caller's to license, and fm-crew-state.sh pairs it with an explicit
+# daemon-down probe for exactly that reason.
+# All four accepted words reach here on BOTH surfaces. The overview table
+# fm_nm_select_run validates carries a narrower column
+# (pending|running|completed|failed|cancelled, its unknown_status check), but that column is not
+# what this predicate reads: the selected-run route re-reads the run by id and
+# passes that DETAIL object, whose own vocabulary check admits `fixing` and `ci`
+# as live, and the legacy bare-status route passes the same detail shape.
+# Dropping them would report a fix round or a ci wait as idle, which is the
+# misreport this predicate exists to prevent.
+fm_nm_run_is_executing() {  # <toon-output>
+  fm_nm_run_is_active "$1" || return 1
+  fm_nm_run_is_parked "$1" && return 1
+  case "$(fm_nm_strip_quotes "$(fm_nm_field "$1" status)")" in
+    pending|running|fixing|ci) return 0 ;;
+  esac
+  return 1
+}
+
 # ONE owner for attribution from the pipeline's own runs ledger, replacing a
 # per-row scan-and-skip. The ledger is the real top-level `no-mistakes runs
 # --limit N` listing (plain text, no run id, no quoting, newest-first, columns
@@ -332,6 +435,11 @@ fm_nm_run_is_pipeline_owned_active() {  # <toon-output>
 #     ancestor, a terminal unresolvable row) prints nothing, so branch-name
 #     coincidence, arbitrary remote state, and other tasks' runs never match.
 # An older live row never displaces a newer terminal result.
+# There is no branch-name-only acceptance here: a live row whose head this copy
+# cannot tie to the worktree is not this worktree's run just because the branch
+# name matches. The one live bind is the EXECUTING record on the `axi status`
+# route (fm_nm_run_is_executing above), which the caller pairs with its own
+# liveness evidence.
 # Read-only: git reads resolve objects in place; custody never changes.
 fm_nm_runs_status_for_worktree() {  # <worktree> <branch> <runs-list-output> [expected-head]
   local wt=$1 branch=$2 list=$3 expected_head=${4:-}

@@ -32,6 +32,8 @@
 #   omp-ext          omp (Oh My Pi) per-task extension (agent_start/agent_end without willContinue)
 #   opencode-plugin  OpenCode per-task plugin (session.status)
 #   claude-hook      Claude lifecycle hooks (UserPromptSubmit/Stop/StopFailure/SessionEnd)
+#   devin-hook       Devin UserPromptSubmit / Stop / SessionEnd hooks; manual
+#                    cancellation emits no Stop, so control invalidates to unknown.
 #   gemini-hook      Gemini agent hooks (BeforeAgent opens; AfterAgent and
 #                    SessionEnd close)
 #   codex-hook, codex-appserver  reserved: Codex, gated by
@@ -39,26 +41,57 @@
 #   kimi-wire, kimi-hook  reserved: standalone Kimi, gated by fm_busy_kimi_verified
 # Firstmate-owned sources accepted for every converted adapter:
 #   fm-spawn         the launch-brief turn seeded at spawn
-#   fm-interrupt     the legacy Claude fm-send --key Escape idle event
+#   fm-interrupt     the legacy Claude fm-send --key Escape idle event, and the
+#                    unknown invalidation fm-control writes after a Devin interrupt
 #   fm-recovery      a documented recovery reset after relaunch
 # Classifier-only sources (never written into a record):
 #   endpoint-gone, herdr-native, grok-regex, rovo-regex, agy-regex, muse-session-log,
 #   cursor-transcript, missing, malformed, gen-mismatch, source-mismatch,
-#   kimi-unverified, codex-unverified, capture-failed, no-target
+#   kimi-unverified, codex-unverified, capture-failed, no-target, launch-prompt
 #
 # Classification (fm_busy_classify): busy | idle | unknown | dead, always
 # with the producing source as the second token. Precedence:
 #   1. dead endpoint (fm_busy_classify_live only) -> dead endpoint-gone
 #   2. standalone Kimi before verification       -> unknown kimi-unverified
-#   3. a valid, gen-matching, source-trusted record -> its state and source
+#   3. a valid, gen-matching, source-trusted record -> its state and source,
+#      UNLESS the record is still the untouched seed fm-spawn wrote at arm
+#      time (state=busy source=fm-spawn - no adapter hook has posted since
+#      launch) AND the caller supplied a captured tail that matches that
+#      harness's own recognized interactive-prompt signature (a trust
+#      dialog, sign-in screen, or first-run menu - fm_busy_launch_prompt_parked
+#      owns the per-harness table). That combination classifies unknown
+#      launch-prompt instead: the launch never actually started the brief, so
+#      it must not read as proof of an active turn. A record that has
+#      advanced past fm-spawn (any real hook event) is NEVER reclassified
+#      this way, however its rendered tail looks, so a genuinely working turn
+#      keeps its ordinary busy verdict and the general BUSY_TURN_MAX_SECS
+#      bound is unchanged.
 #   4. no record at all: herdr's native busy verdict is trusted as busy
 #      (generation state is sufficient for busy, not for idle), then the
 #      muse session-log and cursor transcript pull sources, then the
 #      Grok/Rovo/AGY temporary regex fallbacks classify a grok, rovo, or agy
 #      task from its rendered tail, then unknown missing
 #   5. malformed, stale, or untrusted records -> unknown, never a fallback
-# Grok, Rovo, and AGY are the ONLY rendered-text classifications that survive the
-# redesign, because none of their structured lifecycles was credited-live-verified
+#
+# fm_busy_launch_prompt_parked (the launch-prompt classifier-only source): a
+# launch whose busy record never advanced past the fm-spawn seed is
+# indistinguishable, from the record alone, between "still reading its
+# brief" and "parked on an interactive prompt the harness never gets past
+# without a human" - a Claude/Gemini/Pi workspace-trust dialog, a sign-in or
+# auth-method picker, or a first-run setup menu. Left alone this reads as
+# ordinary busy for the full BUSY_TURN_MAX_SECS (one hour) before the
+# separate wedge-suspect bound even looks at it. The signature table matches
+# each harness's own verified rendered dialog text (see
+# .agents/skills/harness-adapters/references/harness/*.md and
+# docs/verification/*.md for the evidence), scoped to the exact harness that
+# renders it so one adapter's ordinary output can never match another's
+# dialog. This is a best-effort backstop, not prevention: it never suppresses
+# a real busy verdict once any hook has posted, and it defers to whatever
+# harness-specific trust pre-registration already exists (fm-claude-trust.sh,
+# GEMINI_CLI_TRUST_WORKSPACE) to stop the dialog from appearing at all.
+# Apart from the launch-prompt backstop above, Grok, Rovo, and AGY are the ONLY
+# rendered-text busy fallbacks that survive the redesign, because none of their
+# structured lifecycles was credited-live-verified
 # in the approved audit (Rovo's clean ACP stopReason lives outside the TUI
 # path firstmate drives, see references/harness/rovo.md; agy 1.2.0 exposes no
 # hook surface at all, see references/harness/agy.md); each is scoped to
@@ -198,6 +231,7 @@ fm_busy_sources_for_harness() {  # <harness>
       ;;
     opencode*) adapter=opencode-plugin ;;
     gemini*) adapter=gemini-hook ;;
+    devin) adapter=devin-hook ;;
     pi|pi-signed) adapter=pi-ext ;;
     omp) adapter=omp-ext ;;
     kimi*)
@@ -867,12 +901,122 @@ fm_busy_agy_tail_busy() {
     | grep -qiE 'esc[[:space:]]+to[[:space:]]+cancel'
 }
 
+# --- launch-prompt signatures (fm_busy_launch_prompt_parked) ----------------
+#
+# Each function consumes a captured pane tail on stdin (the caller's whole
+# tail40, NOT reduced to the last 12 non-blank lines the way the Grok/Rovo/AGY
+# busy footers above are): a bordered dialog box renders many short lines of
+# pure border/padding (`│  ...  │`) that are NOT whitespace-only, so a 12-line
+# non-blank reduction was verified live to push the box's own heading text
+# (e.g. Gemini's "How would you like to authenticate for this project?")
+# outside the window entirely, silently defeating the match. Matching the
+# full capture avoids that trap; a signature is still best-effort exactly like
+# the footer fallbacks - a screen taller than the capture can still scroll a
+# signature out, so absence never proves the pane is NOT parked, only that
+# this check cannot confirm it.
+
+# fm_busy_claude_launch_prompt_tail: Claude's workspace-trust dialog
+# ("Quick safety check: Is this a project you created or one you trust?",
+# re-verified live on Claude Code 2.1.278, docs/verification/runtime-backends.md
+# "Launch-prompt backstop signatures") and its separate external-CLAUDE.md-
+# imports dialog ("Allow external CLAUDE.md file imports?", verified by
+# disassembly, .agents/skills/harness-adapters/references/harness/claude.md
+# "Hook trust" sibling section). fm-claude-trust.sh pre-registers both before
+# launch; this is the backstop for when that registration did not take effect.
+# Each dialog's own question text is paired with one of its own rendered
+# option/footer lines, both required together: the question text alone is
+# plausible self-referential prose a firstmate-repo worker could easily render
+# on its own (fm-claude-trust.sh's header literally quotes both questions),
+# but the option/footer pairing only ever renders inside the real dialog.
+fm_busy_claude_launch_prompt_tail() {
+  local buf
+  buf=$(cat)
+  if printf '%s' "$buf" | grep -qiE "${FM_BUSY_CLAUDE_TRUST_PROMPT_REGEX:-Quick safety check: Is this a project you created or one you trust\\?}" \
+    && printf '%s' "$buf" | grep -qiE 'No, exit|Enter to confirm'; then
+    return 0
+  fi
+  printf '%s' "$buf" | grep -qiE "${FM_BUSY_CLAUDE_IMPORTS_PROMPT_REGEX:-Allow external CLAUDE\\.md file imports\\?}" \
+    && printf '%s' "$buf" | grep -qiE 'No, disable external imports|Yes, allow external imports'
+}
+
+# fm_busy_pi_launch_prompt_tail: Pi's project-trust dialog. Live-verified on
+# pi 0.86.1 (2026-09-22) in a fresh untrusted worktree carrying a project-local
+# .pi/extensions/ file (the shape a real ship/scout spawn always launches
+# into): the rendered heading is "Trust project folder?" and its declining
+# option is literally "Do not trust". An initial guess sourced only from the
+# installed binary's UI strings ("Project trust", the internal panel-title
+# component name, not this dialog's own rendered heading) was proven wrong by
+# that live run and never matched the real screen - which is exactly why this
+# class of check must be proven end to end rather than read off strings or a
+# name. Matching BOTH the heading and "Do not trust" keeps this from firing on
+# a worker's own prose that happens to use the common word "trust" alone.
+# Covers omp too: it shares Pi's engine and the same project-trust gate.
+fm_busy_pi_launch_prompt_tail() {
+  local buf
+  buf=$(cat)
+  printf '%s' "$buf" | grep -qiE "${FM_BUSY_PI_LAUNCH_PROMPT_REGEX:-Trust project folder\\?}" \
+    && printf '%s' "$buf" | grep -qiE 'Do not trust'
+}
+
+# fm_busy_gemini_launch_prompt_tail: Gemini's workspace-trust dialog ("Do you
+# trust the files in this folder?"), its first-run auth-method picker ("How
+# would you like to authenticate for this project?"), and the credential
+# entry it falls through to with no resolvable key ("Enter Gemini API Key").
+# GEMINI_CLI_TRUST_WORKSPACE=true (fm-spawn.sh's launch template) already
+# suppresses the first; the other two have no pre-registration and are the
+# primary target of this backstop. The trust dialog and the auth-method picker
+# were live-verified on gemini 0.60.0 in a credential-less scratch environment
+# (docs/verification/runtime-backends.md "Launch-prompt backstop signatures"),
+# and each question is paired with one of its own rendered option lines,
+# required together, for the same reason as Claude's pairing above: the
+# question text alone is plausible prose this very file's own comments could
+# render. The auth-method picker's live capture is also what proved the
+# full-capture match necessary: its heading renders more than 12 non-blank-
+# looking lines above the bordered box's bottom border. The API-key entry
+# screen is carried over from .agents/skills/harness-adapters/references/
+# harness/gemini.md "Trust, and why the two documented options are not
+# equivalent" rather than this guard's own live capture, and stays a single
+# marker: it is reached only after actively selecting that auth method, so
+# self-referential prose is a materially smaller risk there.
+fm_busy_gemini_launch_prompt_tail() {
+  local buf
+  buf=$(cat)
+  if printf '%s' "$buf" | grep -qiE "${FM_BUSY_GEMINI_TRUST_PROMPT_REGEX:-Do you trust the files in this folder\\?}" \
+    && printf '%s' "$buf" | grep -qiE "Trust folder|Don't trust"; then
+    return 0
+  fi
+  if printf '%s' "$buf" | grep -qiE "${FM_BUSY_GEMINI_AUTH_PROMPT_REGEX:-How would you like to authenticate for this project\\?}" \
+    && printf '%s' "$buf" | grep -qiE 'Use Gemini API Key|No authentication method selected'; then
+    return 0
+  fi
+  printf '%s' "$buf" | grep -qiE "${FM_BUSY_GEMINI_APIKEY_PROMPT_REGEX:-Enter Gemini API Key}"
+}
+
+# fm_busy_launch_prompt_parked: dispatch to the signature above for <harness>,
+# or fail when this harness has none. Consumes the tail on stdin. Scoped to
+# exactly the harnesses fm-spawn.sh arms with the fm-spawn busy source
+# (claude*, opencode*, pi, pi-signed, omp, gemini) since only those can ever
+# read a pinned "busy fm-spawn" record; codex and standalone Kimi already
+# classify unknown before a record is ever consulted, and opencode ships no
+# trust dialog at all.
+fm_busy_launch_prompt_parked() {  # <harness>
+  case "${1:-}" in
+    claude*) fm_busy_claude_launch_prompt_tail ;;
+    pi | pi-signed | omp) fm_busy_pi_launch_prompt_tail ;;
+    gemini) fm_busy_gemini_launch_prompt_tail ;;
+    *) return 1 ;;
+  esac
+}
+
 # fm_busy_classify: semantic classification for a task whose endpoint the
 # caller has already established as present. Prints "<verdict> <source>":
 # busy|idle|unknown plus the producing source (see header). Never probes
-# process state. <tail40> is optional pre-captured plain output used only by
-# the grok, rovo, and agy arms; when absent each captures through
-# fm_backend_capture if available, else reports unknown capture-failed.
+# process state. <tail40> is optional pre-captured plain output: the grok,
+# rovo, and agy arms capture it themselves through fm_backend_capture when it
+# is absent (or report unknown capture-failed if that is unavailable too),
+# while the launch-prompt backstop below has no capture fallback of its own -
+# without a supplied tail40 it is skipped entirely and a record still pinned
+# at the fm-spawn seed keeps reading busy fm-spawn, unchanged.
 fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
   local backend=$1 target=$2 harness=$3 id=$4 state=$5 tail40=${6-}
   local out rc r_state r_source native log
@@ -914,7 +1058,12 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
     out=${out#* }
     r_source=${out%% *}
     if fm_busy_source_trusted "$harness" "$r_source"; then
-      printf '%s %s' "$r_state" "$r_source"
+      if [ "$r_state" = busy ] && [ "$r_source" = fm-spawn ] && [ -n "$tail40" ] \
+        && printf '%s' "$tail40" | fm_busy_launch_prompt_parked "$harness"; then
+        printf 'unknown launch-prompt'
+      else
+        printf '%s %s' "$r_state" "$r_source"
+      fi
     else
       printf 'unknown source-mismatch'
     fi
@@ -1039,7 +1188,8 @@ fm_busy_classify_live() {  # <backend> <target> <harness> <id> <state-dir> [expe
 # fm_busy_classify_meta: classify a task from its recorded metadata, so every
 # consumer resolves backend, target, and harness the same way instead of
 # re-deriving them. Requires fm-backend.sh to be sourced. <tail40> is
-# optional pre-captured plain output reused by the Grok arm.
+# optional pre-captured plain output reused by the contract's rendered-text
+# checks: the Grok/Rovo/AGY busy fallbacks and the launch-prompt backstop.
 fm_busy_classify_meta() {  # <meta-file> <id> <state-dir> [tail40]
   local meta=$1 id=$2 state=$3 tail40=${4-} backend target harness
   [ -f "$meta" ] || { printf 'unknown missing'; return 0; }

@@ -53,7 +53,7 @@ printf 'fixture\n' > "$REMOTE_ROOT/AGENTS.md"
 cp "$ROOT/bin/fm-remote-entrypoint.sh" "$ROOT/bin/fm-remote-job-lib.sh" \
   "$ROOT/bin/fm-remote-job-worker.sh" "$ROOT/bin/fm-remote-file.sh" \
   "$ROOT/bin/fm-backlog-receive.sh" "$ROOT/bin/fm-tasks-axi-lib.sh" \
-  "$ROOT/bin/fm-wake-lib.sh" "$REMOTE_ROOT/bin/"
+  "$ROOT/bin/fm-wake-lib.sh" "$ROOT/bin/fm-path-lib.sh" "$REMOTE_ROOT/bin/"
 ln -s "$(command -v tasks-axi)" "$REMOTE_ROOT/bin/tasks-axi"
 ln -s "$(command -v node)" "$REMOTE_ROOT/bin/node"
 chmod +x "$REMOTE_ROOT/bin"/*.sh
@@ -380,7 +380,7 @@ bash -c '. "$1"; fm_pending_reply_tick "$2"' _ "$ROOT/bin/fm-pending-reply-lib.s
   || fail "watcher tick did not escalate the undelivered wake, got $(grep '^phase=' "$escalated_rec")"
 [ -z "$(grep '^delivered_epoch=' "$escalated_rec" | cut -d= -f2-)" ] \
   || fail "escalation must not invent a delivery for the undelivered wake"
-[ "$(grep -cF "blocked [key=pending-reply-$escalated_corr]:" "$PARENT/state/ios.status")" -eq 1 ] \
+[ "$(grep -cF "blocked [key=pending-reply-$escalated_corr]" "$PARENT/state/ios.status")" -eq 1 ] \
   || fail "undelivered wake escalation was not published exactly once"
 set +e
 handoff_env "$ROOT/bin/fm-backlog-handoff.sh" --resume-pending > "$TMP_ROOT/wake-escalated-resume.out" 2>&1
@@ -398,7 +398,7 @@ assert_absent "$PARENT/state/.backlog-handoff-ios.wake-pending" "escalated wake 
   || fail "successful wake retry did not confirm delivery on the same correlation"
 [ "$(grep '^phase=' "$escalated_rec" | cut -d= -f2-)" = awaiting_report ] \
   || fail "delivered wake retry did not return the correlation to awaiting its report"
-[ "$(grep -cF "blocked [key=pending-reply-$escalated_corr]:" "$PARENT/state/ios.status")" -eq 1 ] \
+[ "$(grep -cF "blocked [key=pending-reply-$escalated_corr]" "$PARENT/state/ios.status")" -eq 1 ] \
   || fail "wake retry duplicated the published escalation"
 write_backlog '- [ ] after-escalated - next handoff flows once the escalated wake is retried (repo: alpha)'
 handoff_env "$ROOT/bin/fm-backlog-handoff.sh" ios after-escalated >/dev/null \

@@ -10,7 +10,8 @@
 #   - the Raster packing of that frame and its base64 encoder;
 #   - the pure presentation policy: home resolution, preference values, working notes;
 #   - the operational-input classifier's parity with bin/fm-operational-input.sh over
-#     envelopes the shell owner itself encodes, its legacy shapes, and near misses.
+#     envelopes the shell owner itself encodes, its legacy shapes, and near misses, and
+#     the record-backed doorbell port's parity with the owner's doorbell-kind.
 # The engine-bound behavior runs under tests/fm-calm-claude-mod-plugin.test.sh and the
 # real TUI under tests/fm-calm-claude-mod-live-e2e.test.sh.
 # shellcheck disable=SC2016 # Backticks are literal historical prompt markup in the corpus.
@@ -418,8 +419,85 @@ JS
   pass "the mod's operational-input classifier agrees with bin/fm-operational-input.sh on all $count corpus cases: every current kind the owner encodes, every legacy shape, and every near miss"
 }
 
+# The record-backed doorbell: the port's parse plus its record classification must match
+# the owner's doorbell-kind on doorbells the owner itself writes and on every near miss.
+test_doorbell_parity_with_shell_owner() {
+  local dir state inbox doorbell index=0 count out shell_verdict port_verdict mismatches=0 kind
+  dir="$TMP_ROOT/doorbells"
+  state="$dir/home/state"
+  inbox="$state/operational-inbox"
+  mkdir -p "$state"
+  for kind in $(canonical_generic_kinds); do
+    index=$((index + 1))
+    printf 'body for %s' "$kind" | FM_STATE_OVERRIDE="$state" "$OPERATIONAL_INPUT" record "$kind" \
+      | tr -d '\n' >"$dir/case-$index.txt" || fail "the owner could not publish a $kind record"
+  done
+  doorbell=$(cat "$dir/case-1.txt")
+  printf 'FIRSTMATE_OP: v1 watcher: ascii only' >"$inbox/9-ascii.msg"
+  printf '\342\201\243FIRSTMATE_OP: v1 bogus: body' >"$inbox/9-bogus.msg"
+  printf '\342\201\243FIRSTMATE_OP: legacy untyped' >"$inbox/9-legacy.msg"
+  printf '[fm-from-firstmate]\342\201\243routed' >"$inbox/9-routed.msg"
+  mkdir -p "$dir/elsewhere"
+  printf '\342\201\243FIRSTMATE_OP: v1 watcher: x' >"$dir/elsewhere/9-x.msg"
+  for out in \
+    "$inbox/9-ascii.msg" "$inbox/9-bogus.msg" "$inbox/9-legacy.msg" "$inbox/9-routed.msg" \
+    "$inbox/9-missing.msg" "$dir/elsewhere/9-x.msg" "$inbox/9-UPPER.msg" "$inbox/9_x.msg" \
+    "$inbox/.msg" "$inbox/9-x.txt" "relative/operational-inbox/9-x.msg" "$inbox/9 x.msg" \
+    "$inbox/it's.msg" "$inbox/9-é.msg"; do
+    index=$((index + 1))
+    printf ": Firstmate operational input waiting: read '%s' and handle its contents as Firstmate operational input." "$out" \
+      >"$dir/case-$index.txt"
+  done
+  for out in "$doorbell " " $doorbell" "${doorbell%.}" "$doorbell"$'\n' \
+    ": Firstmate operational input waiting: read '' and handle its contents as Firstmate operational input." \
+    ": Firstmate operational input waiting: read ' and handle its contents as Firstmate operational input." \
+    'FIRSTMATE_OP: v1 away-supervisor: typed by a human' ''; do
+    index=$((index + 1))
+    printf '%s' "$out" >"$dir/case-$index.txt"
+  done
+  count=$index
+  cat >"$TMP_ROOT/doorbells.mjs" <<JS
+import { pathToFileURL } from "node:url";
+import { readFileSync, writeFileSync } from "node:fs";
+const port = await import(pathToFileURL(${MOD@Q} + "/lib/fm-operational-input.ts").href);
+const dir = ${dir@Q};
+const lines = [];
+for (let index = 1; index <= ${count}; index += 1) {
+  const record = port.firstmateOperationalDoorbellPath(readFileSync(\`\${dir}/case-\${index}.txt\`, "utf8"));
+  let content;
+  try {
+    content = record === undefined ? undefined : readFileSync(record, "utf8");
+  } catch {
+    content = undefined;
+  }
+  lines.push(\`\${index}\\t\${(content === undefined ? undefined : port.firstmateOperationalRecordKind(content)) ?? "none"}\`);
+}
+writeFileSync(\`\${dir}/port-verdicts.tsv\`, lines.join("\\n") + "\\n");
+console.log("classified ${count}");
+JS
+  out=$(run_node "$TMP_ROOT/doorbells.mjs" 2>&1) || fail "doorbell port: $out"
+  assert_contains "$out" "classified $count" "the port did not classify every doorbell case"
+  index=1
+  while [ "$index" -le "$count" ]; do
+    shell_verdict=$("$OPERATIONAL_INPUT" doorbell-kind <"$dir/case-$index.txt" 2>/dev/null) || shell_verdict=none
+    port_verdict=$(awk -F '\t' -v i="$index" '$1 == i { print $2 }' "$dir/port-verdicts.tsv")
+    if [ "$shell_verdict" != "$port_verdict" ]; then
+      mismatches=$((mismatches + 1))
+      printf 'doorbell parity mismatch on case %s: shell=%s port=%s text=%s\n' "$index" "$shell_verdict" "$port_verdict" "$(cat "$dir/case-$index.txt")" >&2
+    fi
+    index=$((index + 1))
+  done
+  [ "$mismatches" -eq 0 ] || fail "the TypeScript doorbell port diverged from bin/fm-operational-input.sh on $mismatches of $count cases"
+  for kind in $(canonical_generic_kinds); do
+    grep -q "	$kind\$" "$dir/port-verdicts.tsv" || fail "the doorbell corpus never produced the $kind verdict"
+  done
+  grep -q '	none$' "$dir/port-verdicts.tsv" || fail "the doorbell corpus never produced a non-operational verdict"
+  pass "the mod's doorbell port agrees with bin/fm-operational-input.sh doorbell-kind on all $count cases: every record the owner writes and every unbacked or malformed near miss"
+}
+
 test_plugin_shape
 test_shared_sprite_and_pi_rendering
 test_raster_packing
 test_presentation_policy
 test_classifier_parity_with_shell_owner
+test_doorbell_parity_with_shell_owner

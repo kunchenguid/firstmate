@@ -187,9 +187,9 @@ Only `genuine-user-prompt`, `genuine-agent-response`, and `working-status` are p
 Every other audited class is policy-hidden when Pi exposes a supported presentation boundary, but semantic input is never transformed to enforce that preference.
 The home-local persistence schema is owned by [`docs/configuration.md`](configuration.md#calm-preference-configcalm).
 
-Current session-start, watcher, turn-end guard, away supervisor, and launch-brief inputs retain their versioned U+2063 static envelopes.
+On Pi, current session-start, watcher, turn-end guard, away supervisor, and launch-brief inputs use their versioned U+2063 static envelopes.
 The established leading `[fm-from-firstmate]` plus U+2063 routing carrier remains current so running secondmate charters remain compatible.
-An exact current static envelope remains sufficient provenance without nonce, source-authentication, replay-prevention, secondary-token, blocking, redaction, or private-retrieval machinery.
+Claude-bound typed away escalations and launch briefs instead use the record-backed carrier owned by `bin/fm-operational-input.sh`; its replay limit is described in [`calm.md`](calm.md#claude-code).
 Calm classifies only at Pi's transcript-presentation owner through the canonical parser and never replaces, reorders, or weakens those messages.
 
 The session-start nudge already originates as a non-displayed custom message, so it remains on that existing path while retaining model context and session persistence.
@@ -279,6 +279,24 @@ For the duplicate-turn fix and the latest presentation change, the launch templa
 The canonical encoder and every non-Pi delivery path remain unchanged, and the tmux, Herdr, Zellij, Orca, and cmux runtime surfaces continue to transport the same input selected by the harness adapter.
 Pi's Calm implementation changed only to consume the shared sprite core, while the new Claude Code mod changes drawings only; every producer and non-Pi transport remains unchanged.
 
+## Queued operational-row retention
+
+On Pi 0.87.1 with Calm persisted on, a Firstmate watcher notification sent while a tool held the turn was listed under the running turn as `Follow-up: FIRSTMATE_OP: v1 watcher: ...`, identical to Calm off.
+Pressing Escape moved that raw text into the editor and removed it from Pi's queue, and the session recorded no delivery of it, so a captain who cleared the editor lost the notification.
+The initiating trigger was a notification queued during a run.
+The exposure condition was that Pi draws queued input in `InteractiveMode.updatePendingMessagesDisplay` and restores it through `restoreQueuedMessagesToEditor`, a path separate from the `addMessageToChat` path the operational-user adapter covers.
+The visible symptom was the listed row and, after Escape, the raw text in the editor.
+
+Hiding the listed row alone would turn the Escape path into the defect issue #1588 describes: stock restore joins the whole queue into the editor, so a hidden notification would reappear as raw text.
+Keeping it queued across the restore needs the session's already-expanded queueing entry points (`_queueSteer` and `_queueFollowUp`) and, for the delivery below, `clearQueue`, `waitForIdle`, `sendUserMessage`, and `isIdle`.
+Those live on the session instance reached through `InteractiveMode.session`, so they are checked per session before the first row is hidden rather than at extension load.
+
+A counterfactual built from the closed PR #1620 adapter hid the row and kept the notification out of the editor, but Pi 0.87.1's `AgentSession._runAgentPrompt` stops continuing once an abort was requested, so the kept follow-up stayed queued until the captain's next prompt while the adapter announced a new turn.
+The shipped adapter therefore starts that turn itself once the aborted run settles: it takes the first queued message out, sends it with `sendUserMessage`, and puts the rest back behind it in Pi's delivery order.
+Navigating the session tree during a run takes the same path without an abort flag, restoring the queue and then calling `session.abort()`, so the adapter waits for every restore that kept a notification and starts the turn only if the session is then idle with messages still queued.
+Pi starts `navigateTree` in the same microtask run that resumes from that abort and marks the session busy before its first await, so the adapter yields one macrotask after each idle wait and waits again while the session is busy, which starts the turn on the navigated branch instead of racing the navigation on the abandoned one.
+The same real-Pi reproduction then delivered the notification exactly once in a new turn, returned a queued captain message to the editor, and left Calm off stock.
+
 ## Regression coverage
 
 `tests/fm-calm-pi-extension.test.sh` compares wrapped and stock renderers and verifies all seven built-ins plus `fm_watch_arm_pi`; `tests/fm-pi-branch-extension.test.sh` verifies `fm_branch_outcomes` Calm toggling, capability-probed all-line versus collapsed stock output, exact expanded output, and export rendering.
@@ -288,6 +306,8 @@ A native deterministic `/skill:ahoy` turn produces thinking, tool-call, and tool
 The operational provider path covers Calm loaded on, loaded off, default preference, extension absent, exact watcher delivery, narrow bare-marker legacy input, persisted restart replay, a genuine captain prompt, and adjacent notifications coalesced into one intended processing turn.
 It asserts one persisted and rendered captain answer, exact user-role operational envelopes in order, no replacement custom messages, one processing result, zero operational transcript rows, and the two-row neighboring-assistant geometry for live, adjacent, and restart paths.
 Quoted current markers, ASCII-only labels, ordinary text before a marker, unrelated U+2063 placement, and image-bearing input remain visible in component and native transcript checks.
+Queued-row coverage drives Pi's real listing and restore methods over a stand-in session for each capability-check branch, including a hidden row kept when the classifier cannot answer again and a refused continuation that re-queues instead of dropping, and repeats Escape in a real Pi TUI with Calm on, with a captain message queued beside the notification, and with Calm off.
+`tests/fm-calm-pi-queue-retention-live-e2e.test.sh` is the default-on, token-free guard that probes a running Pi session for every member the check requires and fails naming the installed Pi version.
 `tests/fm-pi-primary-live-e2e.test.sh` also proves the working ship replaces the built-in `Working...` row while Calm is active on the credentialed provider path, and that it clears when the run settles, before continuing its ordinary watcher lifecycle.
 `tests/fm-pi-primary-types.test.sh` performs strict no-emit TypeScript checking against whichever Pi declarations are installed, without pinning a version of its own.
 `tests/fm-calm-claude-mod.test.sh` needs no Claude Code binary: it proves the mod is one hooks module with no command, skill, agent, or classic hook path around its opt-in, that Pi's working ship renders byte-for-byte the shared sprite core painted in ANSI at every width and step, that the Raster packing lays that frame out exactly, that the mod resolves its home like Pi, that its live and restored working-note classifiers enforce the visibility boundaries [`calm.md`](calm.md#claude-code) owns, and that its operational-input classifier agrees with `bin/fm-operational-input.sh` on a corpus the shell owner itself encodes plus legacy shapes and near misses.
@@ -301,6 +321,7 @@ tests/fm-calm-pi-extension.test.sh
 tests/fm-pi-branch-extension.test.sh
 FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh
 tests/fm-pi-primary-types.test.sh
+tests/fm-calm-pi-queue-retention-live-e2e.test.sh
 tests/fm-calm-claude-mod.test.sh
 tests/fm-calm-claude-mod-plugin.test.sh
 FM_CLAUDE_CALM_LIVE_E2E=1 tests/fm-calm-claude-mod-live-e2e.test.sh
@@ -593,10 +614,13 @@ Error [ERR_MODULE_NOT_FOUND]: Cannot find package '@earendil-works/pi-server' im
 Installing `@earendil-works/pi-server@0.85.0` beside it restores the identical Calm rendering, and 0.85.1 no longer reaches that import.
 That packaging gap is a separate installation defect, not the renderer change above: it stops Pi from loading at all rather than altering any rendered row.
 
-The `could not render calm-mode HTML export DOM` failure was a headless-Chrome start-up flake, not a change in Pi's export shape.
+The `could not render calm-mode HTML export DOM` failure was a headless-Chrome start-up failure, not a change in Pi's export shape.
 It appeared in exactly one of the thirteen most recent CI runs, and that run installed the same Pi 0.85.1 as the runs immediately before and after it, which both passed.
 The render step is a vendor-tool step: the assertions that follow it are what protect the Calm conversation boundary.
-It now retries a bounded number of Chrome start-ups on a fresh profile and, when every attempt fails, reports the Chrome binary, its version, the installed Pi version, each attempt's exit status, whether that attempt was timed out, and Chrome's own stderr, so the next occurrence is diagnosable from the CI log alone.
+The failure later reproduced deterministically against Google Chrome for Testing 151.0.7922.34, whose first-run initialization never completes when Chrome is pointed at a brand-new `--user-data-dir`: the browser and its renderers start, but `--dump-dom` never returns, so every bounded attempt times out with no bytes.
+The render step now gives each attempt a private `HOME` (with `XDG_CONFIG_HOME` and `XDG_CACHE_HOME` beneath it) instead of an explicit `--user-data-dir` on Linux and every other non-Darwin system, because Chrome creates and initializes its own profile there and renders the same document in about a second, while removing that `HOME` still gives every attempt a private profile.
+macOS derives its profile directory from `~/Library` regardless of `HOME`, so Darwin keeps the explicit `--user-data-dir` that was this file's original isolation.
+It still retries a bounded number of Chrome start-ups and, when every attempt fails, reports the Chrome binary, its version, the installed Pi version, each attempt's exit status, whether that attempt was timed out, and Chrome's own stderr, so the next occurrence is diagnosable from the CI log alone.
 `test_export_dom_render_guard` in the same script pins that behavior with real processes and no browser.
 
 The complete Calm suite against installed Pi 0.85.1, with `FM_CHROME_BIN` naming the Chrome the render step used:
@@ -617,6 +641,35 @@ ok - Pi Calm working ship moves on a slow independent cadence over faster fixed-
 ok - the rendered-export-DOM guard renders in one pass, retries a bounded number of Chrome start-up failures, and reports the Chrome binary, Chrome version, Pi version, exit status, and Chrome diagnostic when every attempt fails
 ok - Pi calm native E2E replaces the stock working row with a moving, resize-clamped working ship that freezes and resumes across two working periods in one Pi session, clears on abort, keeps captain turns visible, hides exact operational user rows without changing persistence, restores stock rendering Calm-off, survives restart, and preserves export plus Ctrl+O behavior
 ```
+
+## 2026-09-24 Pi 0.87.1 queued-row retention verification
+
+The queued-row adapter was verified on Linux 7.0.0 x86_64, Node v22.23.1, and tmux against the globally installed `@earendil-works/pi-coding-agent` 0.87.1, with TypeScript 7.0.2 installed only for the typecheck.
+Every Pi run used a scratch home, project, agent directory, and session directory with a local faux provider, so no model request left the machine.
+
+```sh
+pi --version
+tests/fm-calm-pi-queue-retention-live-e2e.test.sh
+tests/fm-calm-pi-extension.test.sh
+tests/fm-pi-primary-types.test.sh
+```
+
+```text
+0.87.1
+ok - Pi 0.87.1 exposes every queue-retention member Calm preflights before hiding queued Firstmate rows
+ok - Calm hides queued Firstmate rows only on a session that can keep them, keeps hidden ones out of the editor on Escape, delivers them once in order, and leaves unsupported sessions and Calm off stock
+ok - Pi 0.87.1 with Calm on keeps a queued Firstmate notification unlisted, out of the editor on Escape, and delivers it once in a new announced turn, while Calm off stays stock
+ok - tracked Pi extensions pass strict no-emit typecheck against Pi 0.87.1
+```
+
+The rest of `tests/fm-calm-pi-extension.test.sh` passed unchanged in the same run.
+With a member name the running session does not have added to the adapter's required list, the live guard failed as designed:
+
+```text
+not ok - Pi 0.87.1 lacks the queue-retention capability Calm needs to hide queued Firstmate rows: session._queueNotARealMember
+```
+
+With the queued-row adapter left uninstalled, the real-Pi Escape case failed on the listed notification, `Pi Calm listed a queued Firstmate notification`.
 
 ## 2026-09-15 Claude Code 2.1.272 mods feasibility and the shipped mod
 
@@ -743,4 +796,48 @@ The flag-off session's settled screen, with the preference `on` on disk, drew Cl
 ⏺ The three words are alpha, beta, and gamma.
 
 ✻ Sautéed for 8s · done 11:07 AM
+```
+
+## 2026-09-25 Claude Code 2.1.280 verification and the record-backed operational doorbell
+
+Claude Code 2.1.280 removes invisible characters, U+2063 included, from every submitted prompt, whether typed, pasted, or passed as the launch prompt.
+A typed operational envelope first shows `Removed 1 invisible character · review and press Enter to send`, and the next Enter stores it as plain `FIRSTMATE_OP: ...` text that no consumer can tell apart from a human message.
+No setting or environment variable turns the removal off.
+For the current delivery and presentation contracts, see [`fm-operational-input.sh`](../bin/fm-operational-input.sh) and [`calm.md`](calm.md#claude-code).
+
+2.1.280 also logs the module load as `hooks module firstmate-calm@<source> loaded` (`@skills-dir` for the project auto-load path), so the live guard matches either form.
+
+Observed on 2.1.280 with the flag on, beyond the live guard:
+
+```text
+$ claude --version
+2.1.280 (Claude Code)
+
+$ bash tests/fm-calm-claude-mod.test.sh
+ok - the mod's operational-input classifier agrees with bin/fm-operational-input.sh on all 77 corpus cases: every current kind the owner encodes, every legacy shape, and every near miss
+ok - the mod's doorbell port agrees with bin/fm-operational-input.sh doorbell-kind on all 28 cases: every record the owner writes and every unbacked or malformed near miss
+
+$ bash tests/fm-calm-claude-mod-plugin.test.sh
+ok - Claude Code 2.1.280 (Claude Code) validates the Calm mod strictly at its folder and its auto-load path, hooking exactly the working row, tool, user, and assistant drawings and /calm
+ok - Claude Code 2.1.280 (Claude Code) runs the Calm mod's plugin test suites clean: persisted toggle, hidden rows, working notes, and the clock-driven working ship
+```
+
+The live guard in its current form is recorded on 2.1.282 in the next section.
+
+## 2026-09-25 Claude Code 2.1.282 reproduction on the installed build
+
+The failure was reproduced end to end on the installed Claude Code 2.1.282 in a disposable lab home and project on a private tmux socket, never touching the default tmux server or any real home.
+
+- Typed path: `tmux send-keys -l` of `⁣FIRSTMATE_OP: v1 away-supervisor: Supervisor escalate <test events>`, then Enter, left the composer showing `Removed 1 invisible character · review and press Enter to send`; a second Enter submitted it, and the stored session transcript held `FIRSTMATE_OP: v1 away-supervisor: Supervisor escalate ...` with no U+2063 byte.
+- Launch-prompt path: launching `claude` with the encoded launch-brief envelope as the prompt argument printed `Removed 1 invisible character from the launch prompt before sending it`; the stored transcript row kept the brief text but no U+2063.
+- With the record-backed doorbell: the away-mode daemon's `inject_msg` delivered the doorbell to the real Claude pane as a composer-visible ASCII line only, and the live guard passed.
+
+```text
+$ claude --version
+2.1.282 (Claude Code)
+
+$ FM_CLAUDE_CALM_LIVE_E2E=1 bash tests/fm-calm-claude-mod-live-e2e.test.sh
+ok - Claude Code 2.1.282 (Claude Code) with the flag unset: no hooks module, no /calm, stock working row, stock tool rows, preference on ignored
+ok - Claude Code 2.1.282 (Claude Code) with the flag on: the mod auto-loads from .claude/skills, /calm exists, the sailboat replaces and moves in the working row, tool rows and the record-backed operational doorbell draw at zero height, /calm restores and re-hides them while persisting the shared preference
+ok - Claude Code 2.1.282 (Claude Code) resumes the transcript with Calm's hidden rows still hidden and the preference intact
 ```

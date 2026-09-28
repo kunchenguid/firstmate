@@ -182,6 +182,11 @@ test_fixture_snapshot_json() {
       and (.actions.watch | contains("do not routinely fm-peek"))
   ' >/dev/null || fail "secondmate return-channel guidance missing"
   printf '%s' "$out" | jq -e '
+    .tasks[] | select(.id == "secondmate-task")
+    | .paths.status_log.last_event
+    | has("age_seconds") and .age_seconds == null
+  ' >/dev/null || fail "legacy event must have an explicit unknown age"
+  printf '%s' "$out" | jq -e '
     .tasks[] | select(.id == "cmux-task")
     | .backend == "cmux"
       and .paths.worktree.present == false
@@ -194,7 +199,60 @@ test_fixture_snapshot_json() {
     .backlog.records[] | select(.id == "done-task")
     | .state == "done" and .pr_url == "https://github.com/kunchenguid/firstmate/pull/7"
   ' >/dev/null || fail "done backlog PR row missing"
-  pass "fixture snapshot covers task rows, backlog rows, pointers, and stable ordering"
+
+  local line expected_age before after emitted epoch observed
+  printf 'secondmate-task\n' > "$home/secondmate-home/.fm-secondmate-home"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$home" \
+    > "$home/secondmate-home/.fm-secondmate-parent"
+  before=$(date +%s)
+  FM_HOME="$home/secondmate-home" "$ROOT/bin/fm-secondmate-report.sh" \
+    'done' 0123456789abcdef 'audit complete' || fail "parent report failed"
+  after=$(date +%s)
+  emitted=$(tail -1 "$home/state/secondmate-task.status")
+  # shellcheck source=bin/fm-classify-lib.sh
+  . "$ROOT/bin/fm-classify-lib.sh"
+  epoch=$(status_line_at_epoch "$emitted") || fail "new parent report has unknown time"
+  [ "$epoch" -ge "$before" ] && [ "$epoch" -le "$after" ] \
+    || fail "parent report did not record emission time"
+  for line in "$emitted" 'working: legacy' 'working [at=1700000000]: timed' \
+    'working [at=1700000200]: future' 'working [at=oops]: malformed'; do
+    printf '%s\n\n' "$line" > "$home/state/secondmate-task.status"
+    # Deliberately unrelated file age must never substitute for event age.
+    touch -t 202001010000 "$home/state/secondmate-task.status"
+    expected_age=null; observed=1700000100
+    case "$line" in
+      "$emitted") expected_age=100; observed=$((epoch + 100)) ;;
+      *1700000000*) expected_age=100 ;;
+    esac
+    out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW_EPOCH=$observed "$SNAPSHOT" --json)
+    printf '%s' "$out" | jq -e --argjson age "$expected_age" '
+      .tasks[] | select(.id == "secondmate-task")
+      | .paths.status_log.last_event
+      | has("age_seconds") and .age_seconds == $age
+        and (has("emitted_at_epoch") | not)
+    ' >/dev/null || fail "event age came from something other than the record: $line"
+    # parent_event age is the emission age; freshness is how old this snapshot's
+    # own observation of the file is, so the 2020 mtime must show up there and
+    # only there.
+    printf '%s' "$out" | jq -e --argjson age "$expected_age" '
+      .secondmate_current.records[] | select(.id == "secondmate-task")
+      | .current.state == "unknown"
+        and .parent_event.age_seconds == $age
+        and (.parent_event | has("emitted_at_epoch") | not)
+        and (.freshness.age_seconds | type) == "number"
+        and .freshness.age_seconds > 100000000
+    ' >/dev/null || fail "fallback confused event age, observation freshness, and current state: $line"
+    if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+      printf '$ touch -t 202001010000 %s\n' "$home/state/secondmate-task.status"
+      printf '$ FM_HOME=%s FM_SNAPSHOT_NOW_EPOCH=%s bin/fm-fleet-snapshot.sh --json\n' "$home" "$observed"
+      printf '%s' "$out" | jq '{
+        last_event: (.tasks[] | select(.id == "secondmate-task") | .paths.status_log.last_event),
+        secondmate: (.secondmate_current.records[] | select(.id == "secondmate-task")
+          | {current, parent_event, freshness})
+      }'
+    fi
+  done
+  pass "fixture snapshot covers task rows, backlog rows, pointers, stable ordering, and emission-time event age"
 }
 
 # R1 owner contract: main_inventory discloses orphan in-flight and unstructured

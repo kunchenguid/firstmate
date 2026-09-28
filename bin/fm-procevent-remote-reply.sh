@@ -9,6 +9,7 @@
 #   fm-procevent-remote-reply.sh terminal <result-file>
 #   fm-procevent-remote-reply.sh self-announcing
 #   fm-procevent-remote-reply.sh source-id <secondmate-id>
+#   fm-procevent-remote-reply.sh relisten
 #   fm-procevent-remote-reply.sh retire <secondmate-id>
 #
 # `arm` registers one blocking, non-destructive delta source for the remote
@@ -16,7 +17,10 @@
 # capture, publication, and one machine-wide source owner. Each captured delta is
 # terminal for that exact registration; `handle` validates and idempotently
 # ingests it, acknowledges the captured generation, then registers the next
-# cursor-anchored source. A continuity break is escalated and not re-armed.
+# cursor-anchored source. `relisten` tells that runner to poll again in the same
+# process, still holding the claim, after an empty window and after that re-arm.
+# A continuity break is escalated and not re-armed, so the registration is dropped
+# and the runner stops. The runner does not refresh the owner lease.
 #
 # `autohandle` is the runner's own entry into that same `handle`: it takes the
 # canonical source id instead of the secondmate id and is called by the runner
@@ -91,7 +95,7 @@ DOCUMENT_LOCAL_FAILURE=2
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,60p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,64p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 
 sha256_file() {
   if command -v shasum >/dev/null 2>&1; then
@@ -407,8 +411,10 @@ normalize_payload() { # <source> <destination>
 }
 
 # Adapter-authored escalations and notes use exact-byte append suppression.
-# Mirrored payload lines use their pre-rewrite source identity in
-# stage_mirror_lines instead, because delivery state can change between replays.
+# Their callers first apply fm-classify-lib.sh's retry contract and stamp only
+# the line they append. Mirrored payload lines keep their source time (or its
+# absence) and use their pre-rewrite source identity in stage_mirror_lines
+# instead, because delivery state can change between replays.
 # Returns 0 appended, 1 already present, 2 the write itself failed.
 append_status_once() { # <status-file> <line>
   grep -Fqx -- "$2" "$1" 2>/dev/null && return 1
@@ -528,7 +534,11 @@ cmd_ingest() {
   if [ "$class" = continuity-broken ]; then
     line="blocked [key=remote-reply-continuity-$id]: remote reply continuity broke for $id ($reason)"
     append_rc=0
-    append_status_once "$status_file" "$line" || append_rc=$?
+    if status_event_recorded "$status_file" "$line"; then
+      append_rc=1
+    else
+      append_status_once "$status_file" "$(status_stamp_line "$line")" || append_rc=$?
+    fi
     [ "$append_rc" -ne 2 ] || { fm_lock_release "$lock"; die "cannot append continuity escalation"; }
     fm_lock_release "$lock"
     printf 'continuity-broken: %s (%s)\n' "$id" "$reason"
@@ -587,9 +597,13 @@ EOF
   # fold, so it cannot stand open the way a keyed block did.
   while IFS=$'\t' read -r doc reason || [ -n "$doc" ]; do
     [ -n "$doc" ] || continue
+    line="note: remote document did not transfer for $id: $doc - $reason"
     append_rc=0
-    append_status_once "$status_file" "note: remote document did not transfer for $id: $doc - $reason" \
-      || append_rc=$?
+    if status_event_recorded "$status_file" "$line"; then
+      append_rc=1
+    else
+      append_status_once "$status_file" "$(status_stamp_line "$line")" || append_rc=$?
+    fi
     [ "$append_rc" -ne 2 ] || { fm_lock_release "$lock"; die "cannot append remote document note"; }
     [ "$append_rc" -ne 0 ] || appended=$((appended + 1))
   done <<EOF
@@ -757,6 +771,7 @@ case "${1:-}" in
   terminal) shift; [ "$#" -eq 1 ] || usage; [ -s "$1" ] ;;
   self-announcing) shift; [ "$#" -eq 0 ] || usage; exit 0 ;;
   source-id) shift; [ "$#" -eq 1 ] || usage; source_id "$1" ;;
+  relisten) shift; [ "$#" -eq 0 ] || usage; exit 0 ;;
   retire) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_retire "$@" ;;
   retire-quiesce-locked) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; require_parent_lifecycle_lock "$1"; cmd_retire_quiesce_locked "$@" ;;
   retire-finalize-locked) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; require_parent_lifecycle_lock "$1"; cmd_retire_finalize_locked "$@" ;;

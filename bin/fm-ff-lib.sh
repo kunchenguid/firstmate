@@ -251,6 +251,22 @@ remote_sync_failure_reason() { # <exit-status> <output>
   first_line "$2"
 }
 
+# Translate a remote inheritance push's combined output into an operator-
+# actionable reason. The push prints one "unchanged: <item>" line per item that
+# already matched before failing on the item that stopped it, so the plain
+# first line usually names an unrelated unchanged item rather than the error;
+# prefer the push's own "error: ..." line and fall back to the first line only
+# when it emitted none (an interrupted or unrecognized-shape failure).
+remote_inherit_failure_reason() { # <output>
+  local err
+  err=$(printf '%s\n' "$1" | grep -m1 '^error:') || true
+  if [ -n "$err" ]; then
+    first_line "$err"
+  else
+    first_line "$1"
+  fi
+}
+
 dirty_status() {
   local dir=$1 ignore_seed_marker=${2:-no}
   if [ "$ignore_seed_marker" = yes ]; then

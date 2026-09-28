@@ -123,7 +123,7 @@ case "$*" in
     jq -n --arg head "$(cat "$FORGE/head")" '{headRefOid:$head,reviewDecision:"APPROVED"}' ;;
   'pr view '*headRefOid*) cat "$FORGE/head" ;;
   'pr view '*state*) printf 'OPEN\n' ;;
-  'api repos/o/r/pulls/8')
+  'api repos/o/r/pulls/8'|'api repos/o/r/pulls/9'|'api repos/o/r/pulls/10')
     jq -n --arg head "$(cat "$FORGE/head")" --arg state "$(cat "$FORGE/state" 2>/dev/null || printf open)" '
       {state:(if $state == "open" then "open" else "closed" end),user:{login:"author"},head:{sha:$head},draft:false,
        mergeable:(if $state == "open" then true else null end),
@@ -132,8 +132,8 @@ case "$*" in
     jq -n --slurpfile labels "$FORGE/labels.json" '{state:"open",user:{login:"author"},labels:$labels[0]}' ;;
   'api repos/o/r/issues/'*'/events?'*) jq -s . "$FORGE/events.json" ;;
   'api repos/o/r/issues/'*'/comments?'*) jq -s . "$FORGE/comments.json" ;;
-  'api repos/o/r/pulls/8/reviews?'*) jq -s . "$FORGE/reviews.json" ;;
-  'api repos/o/r/pulls/8/comments?'*) jq -s . "$FORGE/inline.json" ;;
+  'api repos/o/r/pulls/'*'/reviews?'*) jq -s . "$FORGE/reviews.json" ;;
+  'api repos/o/r/pulls/'*'/comments?'*) jq -s . "$FORGE/inline.json" ;;
   'api repos/o/r/commits/'*'/check-runs?'*)
     printf '[{"check_runs":[{"name":"test","id":1,"status":"completed","conclusion":"success","started_at":"2026-09-16T08:00:00Z"}]}]\n' ;;
   'api repos/o/r/commits/'*'/statuses?'*) printf '[[]]\n' ;;
@@ -339,10 +339,8 @@ test_away_yolo_is_fleet_work() {
   with_home "$home" "$ROOT/bin/fm-pr-check.sh" delivery https://github.com/o/r/pull/8 >/dev/null \
     || fail 'could not register away delivery'
   printf 'yolo=on\n' >> "$home/state/delivery.meta"
-  with_home "$home" "$ROOT/bin/fm-afk-contract.sh" propose --grant delivery >/dev/null \
-    || fail 'could not propose away posture'
-  with_home "$home" "$ROOT/bin/fm-afk-contract.sh" confirm >/dev/null \
-    || fail 'could not confirm away posture'
+  with_home "$home" "$ROOT/bin/fm-afk-contract.sh" enter --words 'merge the delivery PR when green' >/dev/null \
+    || fail 'could not enter away posture'
   mutate_record "$home" delivery '.records[0].observation.can_merge=true'
   with_home "$home" "$ROOT/bin/fm-fleet-snapshot.sh" --contribution-input > "$home/input.json" \
     || fail 'could not collect contribution input for away posture'
@@ -364,10 +362,8 @@ test_away_yolo_cross_home_is_fleet_work() {
   with_home "$child" "$ROOT/bin/fm-pr-check.sh" delivery https://github.com/o/r/pull/8 >/dev/null \
     || fail 'could not register child away delivery'
   printf 'yolo=on\n' >> "$child/state/delivery.meta"
-  with_home "$child" "$ROOT/bin/fm-afk-contract.sh" propose --grant delivery >/dev/null \
-    || fail 'could not propose child away posture'
-  with_home "$child" "$ROOT/bin/fm-afk-contract.sh" confirm >/dev/null \
-    || fail 'could not confirm child away posture'
+  with_home "$child" "$ROOT/bin/fm-afk-contract.sh" enter --words 'merge the delivery PR when green' >/dev/null \
+    || fail 'could not enter child away posture'
   mutate_record "$child" delivery '.records[0].observation.can_merge=true'
   FM_SNAPSHOT_NOW="$NOW" with_home "$child" "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary > "$child/state/home-summary.json" \
     || fail 'could not collect child contribution summary'
@@ -548,6 +544,59 @@ test_unreadable_pending_is_not_empty() {
   pass 'unreadable pending signals refuse an empty-inbox claim'
 }
 
+# Each record's durable task identity is the directory the snapshot loop finds
+# it in, exactly as `basename "$(dirname "$file")"` named it, however the data
+# root is spelled and whatever bytes the directory name carries.
+test_record_task_identity_matches_dirname_basename() {
+  local home data name file want n=0 names=() tasks=() expected actual
+  home=$(new_home task-identity)
+  names=(plain dot.ted 'two words' -dash $'caf\xc3\xa9' $'nl\n' '*')
+  for data in "$home/data" "$home/data/" "$home/data//"; do
+    for name in "${names[@]}"; do
+      n=$((n + 1))
+      mkdir -p "$home/data/$name"
+      file="$data/$name/contributions.json"
+      want=$(basename "$(dirname "$file")")
+      jq -n --arg task "$want" --arg url "https://github.com/o/r/pull/$n" --arg token "t$n" \
+        '{schema:"fm-contributions.v1",task:$task,records:[{url:$url,kind:"pr",checked_at:null,error:null,
+          pending:[{token:$token}],seen:[],verdict:null,observation:null}]}' > "$file"
+      tasks+=("$want")
+    done
+    expected=$(printf '%s\0' "${tasks[@]}" | jq -Rs 'split("\u0000")[:-1] | sort')
+    actual=$(with_home "$home" env FM_DATA_OVERRIDE="$data" "$ROOT/bin/fm-contributions.sh" pending | jq '[.[].task] | sort') \
+      || fail "records under data root '$data' were refused"
+    [ "$actual" = "$expected" ] || fail "data root '$data' named tasks $actual, expected $expected"
+    rm -rf "${home:?}/data/"*/
+    tasks=()
+  done
+  mkdir -p "$home/data/named"
+  jq -n '{schema:"fm-contributions.v1",task:"other",records:[]}' > "$home/data/named/contributions.json"
+  if with_home "$home" "$ROOT/bin/fm-contributions.sh" pending > /dev/null 2>&1; then
+    fail 'a record naming another task was accepted'
+  fi
+  pass 'record task identity is the directory dirname/basename named'
+}
+
+# snapshot and pending are read-only: reading saved records never creates the
+# state directory or anything else, even in a home that has none.
+test_read_only_views_create_no_state() {
+  local home before after
+  home=$(new_home read-only-views)
+  record "$home" delivery 8 open mergeable
+  with_home "$home" "$ROOT/bin/fm-fleet-snapshot.sh" --contribution-input > "$TMP_ROOT/read-only-input.json" \
+    || fail 'could not collect contribution input'
+  rm -rf "${home:?}/state"
+  before=$(find "$home" | sort)
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" snapshot "$TMP_ROOT/read-only-input.json" --all \
+    | jq -e '.checked == 1' >/dev/null || fail 'snapshot did not read the saved record without a state directory'
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" pending | jq -e 'length == 0' >/dev/null \
+    || fail 'pending did not read the saved record without a state directory'
+  after=$(find "$home" | sort)
+  [ ! -e "$home/state" ] || fail 'a read-only contribution view created the state directory'
+  [ "$after" = "$before" ] || fail "a read-only contribution view created files: $(comm -13 <(printf '%s\n' "$before") <(printf '%s\n' "$after"))"
+  pass 'snapshot and pending create nothing in a home without state'
+}
+
 wrap_forge() { # home: log gh calls and apply per-call faults from $FORGE/fault
   local home=$1
   mv "$home/fakebin/gh" "$home/fakebin/gh-fixture"
@@ -556,7 +605,13 @@ wrap_forge() { # home: log gh calls and apply per-call faults from $FORGE/fault
 set -eu
 printf '%s\n' "$*" >> "$FORGE/calls"
 fault=$(cat "$FORGE/fault" 2>/dev/null || true)
+case "$fault" in latency) sleep "${FORGE_LATENCY:-2}" ;; esac
 case "$fault:$*" in
+  # Advance once before the parallel read wave; its readers share this clock.
+  reserve:'api repos/o/r/issues/9')
+    printf '%s\n' "$(( $(cat "$FORGE/clock") + 6 ))" > "$FORGE/clock" ;;
+  slow-wave:'api repos/o/r/pulls/8') sleep 3 ;;
+  slow-wave:'api repos/o/r/pulls/8/reviews?'*) sleep 6 ;;
   exhaust:'api repos/o/r/issues/8/comments?'*)
     printf '%s\n' "$(( $(cat "$FORGE/clock") + 100 ))" > "$FORGE/clock" ;;
   fail-late:'api repos/o/r/pulls/8/reviews?'*)
@@ -584,7 +639,9 @@ test_budget_exhaustion_keeps_prior_record() { # exhaust|hang
   wrap_forge "$home"
   mutate_record "$home" delivery '.records[0].checked_at="2026-09-15T08:00:00Z"'
   cp "$home/data/delivery/contributions.json" "$home/prior.json"
-  if [ "$mode" = exhaust ]; then /bin/date +%s > "$home/forge/clock"; fi
+  # Both modes freeze the clock: an unfrozen one can tick past a one-second
+  # budget before the first forge call, so nothing is ever observed.
+  /bin/date +%s > "$home/forge/clock"
   printf '%s\n' "$mode" > "$home/forge/fault"
   out=$(with_home "$home" env FM_CONTRIBUTIONS_BUDGET=1 "$ROOT/bin/fm-contributions.sh" poll) \
     || fail "poll failed when its budget ran out ($mode)"
@@ -729,7 +786,190 @@ test_done_task_open_pr_still_observed() {
   pass 'an open PR linked from a done task keeps being observed'
 }
 
-test_failure_wakes_once_per_episode() {
+test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain() {
+  local home out
+  home=$(new_home reservation)
+  forge_home "$home"
+  wrap_forge "$home"
+  printf -- '- [ ] filed - Measured defect https://github.com/o/r/issues/9 (repo: sample) (kind: ship)\n' >> "$home/data/backlog.md"
+  mutate_record "$home" delivery '.records[0].checked_at="2026-09-15T08:00:00Z"'
+  /bin/date +%s > "$home/forge/clock"
+  printf 'reserve\n' > "$home/forge/fault"
+  out=$(with_home "$home" env FM_CONTRIBUTIONS_BUDGET=20 "$ROOT/bin/fm-contributions.sh" poll) \
+    || fail 'reservation poll failed'
+  [ -z "$out" ] || fail "reservation poll printed an unavailable wake: $out"
+  jq -e --arg now "$NOW" '.records[0] | .checked_at == $now and .error == null' \
+    "$home/data/filed/contributions.json" >/dev/null \
+    || fail 'the first issue was not observed before reserving the remaining budget'
+  grep -F 'api repos/o/r/pulls/8' "$home/forge/calls" >/dev/null \
+    && fail 'a later PR began without the fifteen-second observation reservation'
+  jq -e '.records[0].checked_at == "2026-09-15T08:00:00Z"' "$home/data/delivery/contributions.json" >/dev/null \
+    || fail 'a later PR record changed when the poll deferred it for budget'
+  pass 'a later URL waits when fewer than fifteen seconds remain for its observation'
+}
+
+test_three_second_pr_reads_complete_fresh_in_one_cycle() { # 3-second reads: 8 sequential > 20s budget, parallel waves fit
+  local home out
+  home=$(new_home three-second-pr)
+  forge_home "$home"
+  wrap_forge "$home"
+  mutate_record "$home" delivery '.records[0].checked_at="2026-09-15T08:00:00Z" | .records[0].error="forge observation unavailable or changed during read"'
+  printf 'latency\n' > "$home/forge/fault"
+  out=$(with_home "$home" env FM_CONTRIBUTIONS_BUDGET=20 FORGE_LATENCY=3 "$ROOT/bin/fm-contributions.sh" poll) \
+    || fail 'a 3-second-read PR observation failed'
+  [ -z "$out" ] || fail "a fresh 3-second-read PR observation woke: $out"
+  jq -e --arg now "$NOW" '.records[0] | .checked_at == $now and .error == null' \
+    "$home/data/delivery/contributions.json" >/dev/null \
+    || fail 'a 3-second-read PR observation was not fresh within one cycle'
+  pass 'eight 3-second PR reads complete fresh within one 20-second poll cycle'
+}
+
+test_slow_read_deadline_kill_is_budget_refusal() {
+  local home out
+  home=$(new_home slow-kill)
+  forge_home "$home"
+  wrap_forge "$home"
+  mutate_record "$home" delivery '.records[0].checked_at="2026-09-15T08:00:00Z"'
+  cp "$home/data/delivery/contributions.json" "$home/prior.json"
+  /bin/date +%s > "$home/forge/clock"
+  printf 'latency\n' > "$home/forge/fault"
+  out=$(with_home "$home" env FM_CONTRIBUTIONS_BUDGET=20 FORGE_LATENCY=6 "$ROOT/bin/fm-contributions.sh" poll) \
+    || fail 'poll failed on a deadline-killed slow read'
+  [ -z "$out" ] || fail "a deadline-killed slow read printed an unavailable wake: $out"
+  cmp -s "$home/prior.json" "$home/data/delivery/contributions.json" \
+    || fail 'a deadline-killed slow read rewrote the prior record'
+  [ ! -s "$home/state/.wake-queue" ] || fail 'a deadline-killed slow read enqueued a wake'
+  pass 'a read killed at the five-second bound is budget refusal and stays silent'
+}
+
+test_unmeasured_url_does_not_starve_the_tail() {
+  local home out cycle at started elapsed task
+  home=$(new_home unmeasured-tail)
+  forge_home "$home"
+  wrap_forge "$home"
+  record "$home" second 9 open mergeable
+  record "$home" third 10 open mergeable
+  mutate_record "$home" delivery '.records[0].checked_at="2026-09-15T08:00:00Z"'
+  cp "$home/data/delivery/contributions.json" "$home/prior.json"
+  printf 'slow-wave\n' > "$home/forge/fault"
+  for cycle in 0 1 2; do
+    at=$(jq -nr --arg now "$NOW" --argjson cycle "$cycle" '(($now | fromdateiso8601) + ($cycle + 1) * 300) | todateiso8601')
+    started=$(/bin/date +%s)
+    out=$(with_home "$home" env FM_CONTRIBUTIONS_NOW="$at" FM_CONTRIBUTIONS_BUDGET=20 "$ROOT/bin/fm-contributions.sh" poll) \
+      || fail 'poll failed after an unmeasured first URL'
+    elapsed=$(( $(/bin/date +%s) - started ))
+    [ -z "$out" ] || fail "a poll after an unmeasured URL printed a wake: $out"
+    [ "$elapsed" -le 23 ] || fail "poll exceeded its elapsed budget: $elapsed seconds"
+    if [ "$cycle" -eq 0 ]; then
+      [ "$elapsed" -ge 8 ] || fail 'the slow head did not consume its core and parallel-wave budget'
+      if grep -Eq '^api repos/o/r/pulls/(9|10)$' "$home/forge/calls"; then
+        fail 'a tail PR began without its observation reserve'
+      fi
+    fi
+    cmp -s "$home/prior.json" "$home/data/delivery/contributions.json" \
+      || fail 'a timed-out observation changed its prior freshness or record'
+  done
+  for task in second third; do
+    jq -e --arg prior "$NOW" '.records[0] | .checked_at != $prior and .error == null' \
+      "$home/data/$task/contributions.json" >/dev/null \
+      || fail "successive polls starved $task behind the slow head"
+  done
+  [ ! -s "$home/state/.wake-queue" ] || fail 'routine slow reads enqueued a wake'
+  home=$(new_home sustained-slow-refresh)
+  forge_home "$home"
+  wrap_forge "$home"
+  record "$home" second 9 open mergeable
+  record "$home" third 10 open mergeable
+  record "$home" merged-one 90 merged mergeable
+  record "$home" closed-one 91 closed mergeable
+  record "$home" merged-two 92 merged mergeable
+  record "$home" closed-two 93 closed mergeable
+  mutate_record "$home" closed-two '.records[0].error="forge observation unavailable or changed during read"'
+  cp "$home/data/closed-two/contributions.json" "$home/terminal.json"
+  printf -- '- [ ] late-owner - Shared https://github.com/o/r/pull/93 (repo: sample) (kind: ship)\n' >> "$home/data/backlog.md"
+  for task in delivery second third; do
+    mutate_record "$home" "$task" '.records[0].checked_at="2026-09-16T07:55:00Z"'
+  done
+  printf 'latency\n' > "$home/forge/fault"
+  for cycle in 0 1 2 3 4 5; do
+    at=$(jq -nr --arg now "$NOW" --argjson cycle "$cycle" '(($now | fromdateiso8601) + $cycle * 300) | todateiso8601')
+    started=$(/bin/date +%s)
+    out=$(with_home "$home" env FM_CONTRIBUTIONS_NOW="$at" FM_CONTRIBUTIONS_BUDGET=20 FORGE_LATENCY=3 "$ROOT/bin/fm-contributions.sh" poll) \
+      || fail 'sustained slow-read poll failed'
+    elapsed=$(( $(/bin/date +%s) - started ))
+    [ "$elapsed" -ge 9 ] && [ "$elapsed" -le 23 ] \
+      || fail "slow successful poll did not respect its elapsed budget: $elapsed seconds"
+    [ -z "$out" ] || fail "slow successful reads printed a wake: $out"
+    for task in closed-two late-owner; do
+      jq -e --slurpfile prior "$home/terminal.json" '.records[0] | .error == null
+        and .checked_at == $prior[0].records[0].checked_at
+        and .observation == $prior[0].records[0].observation' \
+        "$home/data/$task/contributions.json" >/dev/null \
+        || fail "terminal settlement or freshness changed for $task"
+    done
+    if grep -Eq '^api repos/o/r/pulls/9[0-3]($|/)' "$home/forge/calls"; then
+      fail 'a retained terminal PR was read from the forge'
+    fi
+    if [ "$cycle" -ge 2 ]; then
+      for task in delivery second third; do
+        jq -e --arg at "$at" '.records[0] | .error == null
+          and (($at | fromdateiso8601) - (.checked_at | fromdateiso8601) <= 600)' \
+          "$home/data/$task/contributions.json" >/dev/null \
+          || fail "$task was not refreshed within three consecutive slow polls at $at"
+      done
+    fi
+  done
+  [ ! -s "$home/state/.wake-queue" ] || fail 'slow successful reads enqueued a wake'
+  pass 'rotation preserves timed-out records and refreshes every slow PR on successive cycles'
+}
+
+test_budget_is_cut_down_to_the_watcher_check_bound() {
+  local home out
+  home=$(new_home check-bound-budget)
+  forge_home "$home"
+  wrap_forge "$home"
+  mutate_record "$home" delivery '.records[0].checked_at="2026-09-15T08:00:00Z"'
+  cp "$home/data/delivery/contributions.json" "$home/prior.json"
+  /bin/date +%s > "$home/forge/clock"
+  printf 'hang\n' > "$home/forge/fault"
+  out=$(with_home "$home" env FM_CHECK_TIMEOUT=6 "$ROOT/bin/fm-contributions.sh" poll) \
+    || fail 'poll failed under a small watcher check bound'
+  [ -z "$out" ] || fail "a check-bound-capped poll printed a wake: $out"
+  cmp -s "$home/prior.json" "$home/data/delivery/contributions.json" \
+    || fail 'a poll observed with the full budget despite a six-second check bound'
+  [ ! -s "$home/state/.wake-queue" ] || fail 'a check-bound-capped poll enqueued a wake'
+  pass 'the effective budget is cut down to the watcher per-check bound with margin'
+}
+
+test_arm_plumbs_a_configured_budget_into_the_check_shim() {
+  local home out mode
+  for mode in configured inherited; do
+    home=$(new_home "arm-budget-$mode")
+    forge_home "$home"
+    wrap_forge "$home"
+    mutate_record "$home" delivery '.records[0].checked_at="2026-09-15T08:00:00Z"'
+    cp "$home/data/delivery/contributions.json" "$home/prior.json"
+    printf 'hang\n' > "$home/forge/fault"
+    if [ "$mode" = configured ]; then
+      with_home "$home" env FM_CONTRIBUTIONS_BUDGET=1 "$ROOT/bin/fm-contributions.sh" arm >/dev/null \
+        || fail 'arm with a configured budget failed'
+      out=$(with_home "$home" env -u FM_CONTRIBUTIONS_BUDGET bash "$home/state/contributions.check.sh") \
+        || fail 'configured check shim failed'
+    else
+      with_home "$home" env -u FM_CONTRIBUTIONS_BUDGET "$ROOT/bin/fm-contributions.sh" arm >/dev/null \
+        || fail 'arm without a configured budget failed'
+      out=$(with_home "$home" env FM_CONTRIBUTIONS_BUDGET=1 bash "$home/state/contributions.check.sh") \
+        || fail 'inherited-budget check shim failed'
+    fi
+    [ -z "$out" ] || fail "generated check printed an unavailable wake: $out"
+    grep -Fxq 'api repos/o/r/pulls/8' "$home/forge/calls" || fail 'generated check did not attempt a read'
+    cmp -s "$home/prior.json" "$home/data/delivery/contributions.json" \
+      || fail "generated check failed to preserve the $mode one-second budget"
+  done
+  pass 'generated checks enforce configured and inherited budgets at runtime'
+}
+
+test_unavailable_forge_records_error_and_wakes_once_per_episode() { # genuine outage, two consecutive cycles
   local home out line='contributions: observation unavailable for https://github.com/o/r/pull/8'
   local error='"forge observation unavailable or changed during read"'
   home=$(new_home failure-episode)
@@ -752,7 +992,7 @@ test_failure_wakes_once_per_episode() {
   printf 'down\n' > "$home/forge/fault"
   out=$(poll_at 2026-09-16T12:00:00Z)
   [ "$out" = "$line" ] || fail "a new failure after a successful read did not wake: $out"
-  pass 'a repeated read failure on an open PR records its error but wakes once per episode'
+  pass 'a genuinely unavailable forge records an error and wakes once per failure episode'
 }
 
 test_late_owner_keeps_failure_episode_suppressed() {
@@ -789,7 +1029,7 @@ test_late_owner_keeps_failure_episode_suppressed() {
 }
 
 failures=0
-for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_done_task_open_pr_still_observed test_failure_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed; do
+for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_record_task_identity_matches_dirname_basename test_read_only_views_create_no_state test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_done_task_open_pr_still_observed test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_slow_read_deadline_kill_is_budget_refusal test_unmeasured_url_does_not_starve_the_tail test_budget_is_cut_down_to_the_watcher_check_bound test_arm_plumbs_a_configured_budget_into_the_check_shim test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed; do
   ( "$test_name" ) || failures=$((failures + 1))
 done
 [ "$failures" -eq 0 ] || fail "$failures contribution regressions"

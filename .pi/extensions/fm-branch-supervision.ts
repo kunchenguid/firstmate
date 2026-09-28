@@ -20,8 +20,21 @@
 // file lives in .pi/extensions, so no
 // other harness ever loads it. Supervision is default-on for every task once
 // this Pi session owns the fleet lock: no captain grant file is required.
-// Away mode (or a broken branch between its bounded recovery probes) keeps
-// today's wake-to-main behavior untouched regardless.
+// A broken branch between its bounded recovery probes keeps today's
+// wake-to-main behavior.
+//
+// Postures (docs/pi-supervision-branch.md "Postures"): the away-posture
+// record state/.afk-contract (owner: bin/fm-afk-contract.sh) is read as a
+// file at the tail of every wake and at every captain-outcome presentation,
+// never inferred from chat and never placed in the byte-stable prompt prefix.
+// While it exists the branch takes every row the dispatcher offers, the
+// record's read-back is appended to the wake message so the branch knows the
+// posture and the recorded facts at execution time, captain-verdict outcomes
+// accumulate unprocessed in the store instead of opening the processing turn
+// on the parked main, and the guarded scripts pass the branch actor under
+// main's standing authority (bin/fm-lease-lib.sh). The first unmarked captain
+// message archives the record; the next run boundary then presents the
+// accumulated captain rows exactly as after any other gap.
 //
 // Prefix stability (the cache contract, owner: bin/fm-branch-prompt.sh
 // header): the branch's system prompt is the generator's byte-stable output,
@@ -97,6 +110,9 @@ import {
 } from "./lib/fm-calm-visibility.ts";
 import {
   activateEligibleRowsOwner,
+  afkPostureRecordPresent,
+  awayPostureTailFor,
+  branchWakePrompt,
   deactivateEligibleRowsOwner,
   FM_BRANCH_DISPATCH_EVENT,
   releaseEligibleRowsSnapshot,
@@ -123,11 +139,11 @@ const fmHome = process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || root;
 const fmRoot = process.env.FM_ROOT_OVERRIDE || root;
 const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
 const config = process.env.FM_CONFIG_OVERRIDE || `${fmHome}/config`;
-const afkFlag = join(state, ".afk");
 const sessionsDir = join(state, "branch-session");
 const sessionPointer = join(state, ".branch-session");
 const mirrorCursorFile = join(state, ".branch-mirror-cursor");
 const promptScript = join(fmRoot, "bin", "fm-branch-prompt.sh");
+const afkContractScript = join(fmRoot, "bin", "fm-afk-contract.sh");
 const outcomeScript = join(fmRoot, "bin", "fm-branch-outcome.sh");
 const leaseScript = join(fmRoot, "bin", "fm-lease.sh");
 const wakeGrantScript = join(fmRoot, "bin", "fm-wake-grant.sh");
@@ -172,8 +188,12 @@ const PROVIDER_REPROBE_MAX_MS = 60 * 60 * 1000;
 const PROCESSING_INSTRUCTION =
   "This is a supervision processing request delivered automatically by the supervision branch. " +
   "It was not typed by the captain. " +
-  "The outcomes below are already stored durably and already shown to the captain as anchor entries in this transcript; each fleet event is already handled, so do not re-drain, re-run, or acknowledge the wake. " +
-  "Process each outcome now as firstmate: give the captain a visible response where one is due, answer or escalate a decision, act on a blocker or failure, or record that no further action is needed. " +
+  "The outcomes below are stored durably, and each was recorded earlier, possibly before a restart or a switch of primary, so the captain may already have seen it and it may already have been handled; each fleet event is already handled, so do not re-drain, re-run, or acknowledge the wake. " +
+  "Each outcome says what was true when it was recorded and how long ago, so check the task's current state first. " +
+  "An abbreviated line is incomplete: read the full outcome before acting on, relaying, or acknowledging it, using that line's lookup --seqs command. " +
+  "First sort the outcomes by that current state into still open and already settled, such as a decision since answered, a PR since merged, or a task since finished. " +
+  "Your reply to the captain covers only the still-open outcomes: give the captain a visible response where one is due, answer or escalate a decision, or act on a blocker or failure. " +
+  "Write that reply as if the settled outcomes had never been listed: leave them out entirely, without naming them, summarizing them, or saying they are settled, because checking them is all the processing they need. " +
   "When every outcome below is processed, call fm_branch_processed with through={N} exactly once. " +
   "Until that call the outcomes stay open and are presented again; an answer that does not make that call never counts as processing.";
 type MirrorItem = { tag: "captain" | "main"; text: string };
@@ -188,6 +208,9 @@ type OutcomeRow = {
   silent: boolean;
 };
 type VisibleOutcomeRecord = OutcomeRow & { version: 1 };
+// An unprocessed captain row with the store's "recordedAgo" (bin/fm-branch-outcome.sh
+// owns its wording).
+type UnprocessedOutcome = OutcomeRow & { recordedAgo: string };
 type ProviderRecovery = {
   cooldownMs: number;
   retryNotBefore: number;
@@ -206,8 +229,8 @@ function offerEligible(offer: BranchDispatchOffer): boolean {
   return offer.eligible === true;
 }
 
-function afkActive(): boolean {
-  return existsSync(afkFlag);
+function isProcessingCustomMessage(message: { role?: string; customType?: string }): boolean {
+  return message.role === "custom" && message.customType === PROCESSING_MESSAGE_TYPE;
 }
 
 // Pi persists provider failures as ordinary assistant messages and resolves
@@ -466,7 +489,7 @@ function parseOutcomeRow(value: unknown): OutcomeRow | null {
   if (typeof row.summary !== "string" || !row.summary) return null;
   if (row.silent !== undefined && typeof row.silent !== "boolean") return null;
   const silent = row.silent === true;
-  if (silent && (row.task !== "fleet" || row.verdict !== "routine")) return null;
+  if (silent && row.verdict !== "routine") return null;
   return { seq: row.seq, task: row.task, verdict: row.verdict, summary: row.summary, silent };
 }
 
@@ -631,6 +654,8 @@ export default function (pi: ExtensionAPI) {
   // session generation.
   type ProcessingState = { sequences: string; through: number; triggered: number; pending: boolean; nextTurnQueued: boolean };
   let processing: ProcessingState | null = null;
+  let queuedProcessingContent: string | null = null;
+  let processingOpenedThisRun = false;
   let processedInitializedGeneration = -1;
   // One revision for BOTH selections: a model or effort change invalidates an
   // in-flight branch build exactly the same way.
@@ -970,7 +995,7 @@ export default function (pi: ExtensionAPI) {
     const message = {
       customType: "fm-branch-merge",
       content: `${MERGE_NOTE_BOAT} ${row.task}: ${row.summary}`,
-      display: !(row.task === "fleet" && row.silent),
+      display: !row.silent,
     };
     if (mainStreaming) pi.sendMessage(message, { deliverAs: "nextTurn" });
     else pi.sendMessage(message, {});
@@ -978,21 +1003,31 @@ export default function (pi: ExtensionAPI) {
 
   // Captain rows that are read (their visible entry exists) but not yet
   // acknowledged as processed by main, in sequence order. null means the store
-  // could not be read safely, never "nothing".
-  async function readUnprocessedOutcomes(expectedGeneration: number): Promise<OutcomeRow[] | null> {
+  // could not be read safely, never "nothing". A listed line that breaks the
+  // store's contract, its age included, is reported to main as a visible note
+  // and every row stays unprocessed until the store is healthy again.
+  async function readUnprocessedOutcomes(expectedGeneration: number): Promise<UnprocessedOutcome[] | null> {
     if (!(await generationOwnsLock(expectedGeneration))) return null;
     const listed = await runOutcomeScript(["unprocessed"]);
     if (!listed.ok) return null;
-    const rows: OutcomeRow[] = [];
+    const rows: UnprocessedOutcome[] = [];
     for (const line of listed.stdout.split("\n")) {
       if (!line) continue;
-      let row: OutcomeRow | null = null;
+      let row: UnprocessedOutcome | null = null;
       try {
-        row = parseOutcomeRow(JSON.parse(line));
+        const parsed = JSON.parse(line);
+        const outcome = parseOutcomeRow(parsed);
+        const recordedAgo = outcome?.verdict === "captain" ? (parsed as { recordedAgo?: unknown }).recordedAgo : undefined;
+        if (outcome && typeof recordedAgo === "string" && /^[0-9]+[mhd]$/.test(recordedAgo)) row = { ...outcome, recordedAgo };
       } catch {
         row = null;
       }
-      if (!row || row.verdict !== "captain") return null;
+      if (!row) {
+        deliverBranchHealthNote(
+          `Supervision branch could not present unprocessed captain outcomes: the outcome store listed a row that breaks its contract (${line.slice(0, 200)}). Nothing was marked processed; they are presented again once the store is healthy.`,
+        );
+        return null;
+      }
       rows.push(row);
     }
     return rows;
@@ -1002,9 +1037,11 @@ export default function (pi: ExtensionAPI) {
   // failure direction applies: a request that cannot be typed is still
   // delivered as plain text, because an untyped request main can still act on
   // beats an outcome that is never processed.
-  async function processingRequestInput(rows: OutcomeRow[]): Promise<string> {
+  async function processingRequestInput(rows: UnprocessedOutcome[]): Promise<string> {
     const through = rows[rows.length - 1].seq;
-    const listed = rows.map((row) => `[seq ${row.seq}] ${row.task}: ${row.summary}`).join("\n");
+    const listed = rows
+      .map((row) => `[seq ${row.seq}, recorded ${row.recordedAgo} ago] ${row.task}: ${row.summary}`)
+      .join("\n");
     const body = `${PROCESSING_INSTRUCTION.replace("{N}", String(through))}\n\n${listed}`;
     try {
       return await encodeFirstmateOperationalInputWith(runCommandAsync, "branch-outcome", body);
@@ -1013,8 +1050,9 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  // Present every unprocessed captain outcome to main as ONE sequence-keyed
-  // processing request. The first PROCESSING_TRIGGERED_ATTEMPTS presentations
+  // Present the oldest bounded batch of unprocessed captain outcomes to main
+  // as one sequence-keyed processing request. After its acknowledgement the
+  // next run boundary presents the next batch. The first PROCESSING_TRIGGERED_ATTEMPTS presentations
   // of a given sequence set open a turn of their own (queued as a follow-up
   // while main is busy); after that the request rides the captain's next
   // prompt instead, once per run, and a session replacement starts the
@@ -1024,6 +1062,16 @@ export default function (pi: ExtensionAPI) {
     const rows = await readUnprocessedOutcomes(expectedGeneration);
     if (rows === null) return false;
     if (rows.length === 0) {
+      processing = null;
+      return true;
+    }
+    // Away posture: main is parked, so no processing turn opens. The rows stay
+    // unprocessed in the store (their visible entries already exist), the
+    // volatile presentation state is dropped so the first presentation after
+    // the record is gone - the run boundary of the captain's return message,
+    // or session start - starts with a fresh triggered budget and hands them
+    // to main exactly as after any other gap.
+    if (afkPostureRecordPresent(state)) {
       processing = null;
       return true;
     }
@@ -1037,6 +1085,13 @@ export default function (pi: ExtensionAPI) {
     // on after it.
     const content = await processingRequestInput(rows);
     if (!(await generationOwnsLock(expectedGeneration))) return false;
+    // The record is re-read immediately before the request would open: a
+    // record that appeared during the encoding await cancels this request
+    // rather than delivering it to a main that has just been parked.
+    if (afkPostureRecordPresent(state)) {
+      processing = null;
+      return true;
+    }
     if (processing?.pending) return true;
     if (!processing || processing.sequences !== sequences) {
       processing = { sequences, through, triggered: 0, pending: false, nextTurnQueued: false };
@@ -1048,6 +1103,7 @@ export default function (pi: ExtensionAPI) {
     if (processing.triggered < PROCESSING_TRIGGERED_ATTEMPTS) {
       processing.triggered += 1;
       processing.pending = true;
+      queuedProcessingContent = content;
       pi.sendMessage(message, { triggerTurn: true, deliverAs: "followUp" });
     } else if (!processing.nextTurnQueued) {
       processing.nextTurnQueued = true;
@@ -1066,10 +1122,11 @@ export default function (pi: ExtensionAPI) {
   // multi-tool run never receives duplicate requests.
   async function reconcileUnreadOutcomes(expectedGeneration: number, present = true): Promise<boolean> {
     if (!(await generationOwnsLock(expectedGeneration))) return false;
-    // One-time migration per generation: a home whose outcomes were all
-    // delivered before the processed marker existed treats them as processed
-    // rather than re-presenting its whole history. Runs before any new row
-    // can be read below, so nothing delivered from here on is ever skipped.
+    // Once per generation: validate the store's markers and rebuild its
+    // bounded indexes before any row is read below. It never adopts delivered
+    // rows as processed, so an outcome main never acknowledged, including one
+    // a supervision-host drain presented before a switch to Pi, is presented
+    // again dated and check-first.
     if (processedInitializedGeneration !== expectedGeneration) {
       if (!(await runOutcomeScript(["processed-init"])).ok) return false;
       processedInitializedGeneration = expectedGeneration;
@@ -1130,7 +1187,7 @@ export default function (pi: ExtensionAPI) {
       name: "fm_branch_report",
       label: "Report supervision outcome",
       description:
-        "Record the outcome of one handled fleet event: write it durably to the outcome store, then merge it into the captain-facing main conversation. verdict captain persists an exact visible entry and opens one sequence-keyed processing turn on main that stays open until main acknowledges it; routine notes render unless silent marks a no-change heartbeat.",
+        "Record the outcome of one handled fleet event: write it durably to the outcome store, then merge it into the captain-facing main conversation. verdict captain persists an exact visible entry and opens one sequence-keyed processing turn on main that stays open until main acknowledges it; routine notes render unless silent marks an eligible no-change outcome.",
       parameters: Type.Object({
         task: Type.String({ description: "The task id the event belongs to (or 'fleet' for fleet-wide events)" }),
         verdict: Type.Union([Type.Literal("routine"), Type.Literal("captain")], {
@@ -1143,7 +1200,7 @@ export default function (pi: ExtensionAPI) {
         }),
         wake: Type.Optional(Type.String({ description: "The wake reason line this outcome answers" })),
         silent: Type.Optional(Type.Boolean({
-          description: "True only when a fleet-wide heartbeat review found literally nothing worth reporting; omit or use false whenever any action was taken or any routine result is worth a note",
+          description: "True only for an eligible routine no-change outcome; captain outcomes are never silent, and actions, state changes, or new results stay rendered",
         })),
       }),
       execute: async (_toolCallId, params) => {
@@ -1152,9 +1209,16 @@ export default function (pi: ExtensionAPI) {
         const summary = String((params as { summary: unknown }).summary || "").trim();
         const wake = String((params as { wake?: unknown }).wake ?? "").trim();
         const silent = (params as { silent?: unknown }).silent === true;
-        if (!task || !summary || (verdictRaw !== "routine" && verdictRaw !== "captain") || (silent && (task !== "fleet" || verdictRaw !== "routine"))) {
+        if (!task || !summary || (verdictRaw !== "routine" && verdictRaw !== "captain")) {
           return {
             content: [{ type: "text", text: "invalid report: task, verdict (routine|captain), and summary are required" }],
+            details: undefined,
+            isError: true,
+          };
+        }
+        if (silent && verdictRaw !== "routine") {
+          return {
+            content: [{ type: "text", text: "invalid report: --silent true requires the routine verdict" }],
             details: undefined,
             isError: true,
           };
@@ -1390,7 +1454,25 @@ ${context.command}
     }
   }
 
-  function enqueueWake(message: string, acceptedGeneration: number, recoveryProbe = false): Promise<void> {
+  // The away posture at the tail of a wake: the record's own read-back (the
+  // captain's words verbatim, the spend cap, expected return, and reach line)
+  // carried byte-for-byte, trailing blank lines included, plus the standing
+  // rule for acting under it. Read per wake so the byte-stable prefix never
+  // carries posture; a read-back that cannot be rendered still names the
+  // posture, because the record's presence is the fact the guarded scripts
+  // enforce either way.
+  async function awayPostureTail(): Promise<string> {
+    let readback = "";
+    try {
+      const rendered = await runCommandAsync("bash", [afkContractScript, "readback"], { cwd: fmRoot, env: scriptEnv });
+      if (rendered.status === 0) readback = rendered.stdout || "";
+    } catch {
+      readback = "";
+    }
+    return awayPostureTailFor(readback);
+  }
+
+  function enqueueWake(message: string, acceptedGeneration: number, recoveryProbe = false, acceptedAwayOnly = false): Promise<void> {
     const acceptedSelectionRevision = branchSelectionRevision;
     const delivery = branchChain
       .then(async () => {
@@ -1415,7 +1497,14 @@ ${context.command}
         await flushMirror(session, acceptedGeneration);
         if (!(await actingAsOwner(acceptedGeneration))) throw new Error("supervision session no longer owns the fleet lock");
         const heartbeat = /^heartbeat($|:)/.test(message);
-        const scope = scopeForUnreadWake(state, heartbeat);
+        // The posture is read here, at the tail of this wake, never earlier
+        // and never into the prompt prefix.
+        // Accepted confused-agent-grade residual (bin/fm-lease-lib.sh role-
+        // partition paragraph): the record is validated then may be archived
+        // mid-operation; every relocated action revalidates at its own gate;
+        // rows are store-first and the durable queue keeps them.
+        const afk = afkPostureRecordPresent(state);
+        const scope = scopeForUnreadWake(state, heartbeat, afk);
         // A newly-arrived main-owned (check-kind) row never bounces this
         // whole recheck back to main - scopeForUnreadWake excludes it from
         // eligibleSeqs rather than vetoing the scan, in a heartbeat review as
@@ -1427,7 +1516,12 @@ ${context.command}
         // scopeForUnreadWake itself marks corrupted (the queue or its
         // metadata could not be read safely, or an unresolvable task-local
         // row) still falls back to main.
-        if (scope.status === "empty" || (!scope.corrupted && scope.eligibleSeqs.length === 0)) return;
+        if (scope.status === "empty" || (!scope.corrupted && scope.eligibleSeqs.length === 0)) {
+          if (acceptedAwayOnly) {
+            throw new Error("accepted away-only wake is no longer branch-eligible");
+          }
+          return;
+        }
         if (scope.corrupted) {
           throw new Error("the unread wake queue could not be read safely");
         }
@@ -1443,11 +1537,17 @@ ${context.command}
         // the drain; that residual is accepted by the confused-agent-grade boundary.
         const reportRevisionBeforePrompt = durableReportRevision;
         const entryOffset = sessionManager.getEntries().length;
-        wakeTaskScope = heartbeat ? null : { rows: [...scope.eligibleSeqs], tasks: new Set(scope.eligibleTasks) };
+        // A claimed check row names no task, so a prompt carrying one is not
+        // scoped by task (only possible in the away posture).
+        wakeTaskScope = heartbeat || scope.checkSeqs.length > 0 || scope.heartbeatSeqs.length > 0
+          ? null
+          : { rows: [...scope.eligibleSeqs], tasks: new Set(scope.eligibleTasks) };
+        // Same residual: archive during snapshot publish or read-back still
+        // lets this prompt proceed; the guarded scripts revalidate, and the
+        // durable queue keeps every row (bin/fm-lease-lib.sh role-partition).
+        const postureTail = afk ? await awayPostureTail() : "";
         try {
-          await session.prompt(
-            `FIRSTMATE SUPERVISION WAKE: ${message}\n\nHandle this per your operating procedure and finish with fm_branch_report.`,
-          );
+          await session.prompt(branchWakePrompt(message, "fm_branch_report", postureTail));
         } finally {
           wakeTaskScope = null;
         }
@@ -1546,7 +1646,6 @@ ${context.command}
     // effects.
     if (!offerEligible(offer)) return;
     if (!generationOwnsLockSync(generation)) return; // cold start pre-lock, secondary session, or shutdown
-    if (afkActive()) return; // the away daemon owns supervision while afk
     const recoveryProbe = Boolean(
       branchBroken &&
       providerRecovery &&
@@ -1556,7 +1655,7 @@ ${context.command}
     if (branchBroken && !recoveryProbe) return; // main owns every wake inside the cooldown window
     if (!collectCurrentMainDialog()) return;
     if (recoveryProbe && providerRecovery) providerRecovery.probeInFlight = true;
-    offer.accept(enqueueWake(offer.message, generation, recoveryProbe));
+    offer.accept(enqueueWake(offer.message, generation, recoveryProbe, offer.awayOnly === true));
   });
 
   // Pi awaits every extension event handler, so an awaited ownership read
@@ -1575,12 +1674,15 @@ ${context.command}
     // getEntries() here loses the captain request that the next wake may answer.
     // Stage it verbatim and remember the future persisted index for turn_end's
     // duplicate suppression. Operational extension injections are not dialog.
-    const prompt = event.prompt.trim();
-    if (!prompt || isOperationalUserText(prompt)) return;
+    const prompt = event.prompt;
+    processingOpenedThisRun = queuedProcessingContent !== null && prompt === queuedProcessingContent;
+    if (processingOpenedThisRun) queuedProcessingContent = null;
+    const trimmed = prompt.trim();
+    if (!trimmed || isOperationalUserText(trimmed)) return;
     const file = currentMainSession.getSessionFile() ?? "";
     const index = mirrorCollection.collectAnchor?.index ?? currentMainSession.getEntries().length;
-    pendingMirror.push({ tag: "captain", text: prompt });
-    mirrorCollection.stagedCaptain = { file, index, text: prompt };
+    pendingMirror.push({ tag: "captain", text: trimmed });
+    mirrorCollection.stagedCaptain = { file, index, text: trimmed };
   });
 
   pi.on?.("agent_start", () => {
@@ -1588,6 +1690,15 @@ ${context.command}
     // Pi delivers a queued nextTurn copy with the prompt that starts this run,
     // so a fresh copy may be queued again once this run settles unacknowledged.
     if (processing) processing.nextTurnQueued = false;
+  });
+  pi.on?.("context", (event, ctx) => {
+    if (!afkPostureRecordPresent(state)) return;
+    const messages = event.messages ?? [];
+    const kept = messages.filter((message) => !isProcessingCustomMessage(message));
+    if (kept.length === messages.length) return;
+    processing = null;
+    if (processingOpenedThisRun) ctx?.abort?.();
+    return { messages: kept };
   });
   pi.on?.("agent_end", () => {
     mainStreaming = false;
@@ -1600,6 +1711,8 @@ ${context.command}
   // reply that only paraphrased it - and is presented again.
   pi.on?.("agent_settled", async () => {
     mainStreaming = false;
+    queuedProcessingContent = null;
+    processingOpenedThisRun = false;
     if (processing) processing.pending = false;
     const settledGeneration = generation;
     await enqueueDelivery(async () => {
@@ -2219,7 +2332,7 @@ ${context.command}
   });
 
   // Pi only calls this renderer for a message with display: true, which every
-  // routine note uses except an explicitly silent fleet heartbeat.
+  // routine note uses except an explicitly silent no-change outcome.
   pi.registerMessageRenderer?.("fm-branch-merge", (message, _options, theme) => {
     const note = textOfContent(message.content);
     const hasGlyph = note.startsWith(MERGE_NOTE_BOAT);

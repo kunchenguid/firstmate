@@ -39,7 +39,7 @@ make_hanging_tasks_axi() {  # <fakebin>
 #!/usr/bin/env bash
 set -u
 case "${1:-}" in
-  --version) printf '%s\n' '0.2.5'; exit 0 ;;
+  --version) printf '%s\n' '0.2.6'; exit 0 ;;
   update)
     [ "${2:-}" = --help ] || exit 0
     printf '%s\n' 'usage: tasks-axi update <id> [flags]' '  --body-file <path>' '  --archive-body'
@@ -285,7 +285,7 @@ cat > "$MIG_FAKEBIN/tasks-axi" <<'SH'
 #!/usr/bin/env bash
 set -u
 case "${1:-}" in
-  --version) printf '%s\n' '0.2.5'; exit 0 ;;
+  --version) printf '%s\n' '0.2.6'; exit 0 ;;
   show)
     [ -z "${2:-}" ] && { printf 'code: NOT_FOUND\n' >&2; exit 1; }
     # Only the prefixed migrated candidates wedge; the exact and legacy ids
@@ -391,7 +391,7 @@ exit 1
 SH
 chmod +x "$E2E_FAKEBIN/ps"
 fm_fake_exit0 "$E2E_FAKEBIN" tmux node chrome-devtools-axi gh treehouse
-fm_fake_version_tool "$E2E_FAKEBIN" lavish-axi FM_FAKE_LAVISH_AXI_VERSION 0.1.46
+fm_fake_version_tool "$E2E_FAKEBIN" lavish-axi FM_FAKE_LAVISH_AXI_VERSION 0.1.77
 fm_fake_version_tool "$E2E_FAKEBIN" gh-axi FM_FAKE_GH_AXI_VERSION 0.1.29
 fm_fake_version_tool "$E2E_FAKEBIN" no-mistakes FM_FAKE_NO_MISTAKES_VERSION \
   'no-mistakes version v1.46.0 (fake) 2026-06-27T00:02:18Z'

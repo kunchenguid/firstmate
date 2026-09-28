@@ -14,7 +14,12 @@
 #   - the zellij false-positive regression live (when zellij is installed): a
 #     pane whose content changes for reasons unrelated to submission must NOT
 #     report a delivered send, and a real claude-in-zellij `dump-screen
-#     --ansi` capture must classify empty through the zellij thin adapter.
+#     --ansi` capture must classify empty through the zellij thin adapter;
+#   - the CURSORLESS read of the same real idle pane, which is the read every
+#     non-tmux backend performs and the one a vendor's own footer rows can
+#     break: a harness that renders a statusLine or mode hint below its
+#     composer must never make an idle composer read `pending`, because that
+#     verdict is what skips a steer's doorbell fleet-wide.
 #
 # Run explicitly with FM_COMPOSER_MATRIX_LIVE=1. No prompt is ever submitted
 # to any harness, so no model tokens are spent. An absent harness is reported
@@ -110,8 +115,48 @@ check_harness_idle_empty() {  # <name> <launch-cmd...>
   else
     CHECKED=$((CHECKED + 1))
     pass "$name ($version): real idle composer classifies empty"
+    check_harness_idle_cursorless "$name" "$version" "$SESSION:$win"
   fi
   tmux -L "$SOCKET" kill-window -t "$SESSION:$win" 2>/dev/null || true
+}
+
+# The same proven-idle pane read the way every cursorless backend reads it
+# (herdr, zellij, cmux, orca): no #{cursor_y} to anchor the shape, so the
+# bottom-most shape on the screen wins. A vendor footer drawn BELOW the
+# composer - a statusLine, a permission-mode hint - lives exactly where that
+# rule looks, and a footer row opening with an agent prompt glyph used to be
+# selected as a composer holding typed text, skipping every doorbell to that
+# worker (live regression, claude 2.x on herdr 0.8.0, 2026-09-20).
+# `pending` is the one verdict that blocks a steer, so that is what this
+# refuses; `unknown` stays legitimate for a shape only identity can prove.
+check_harness_idle_cursorless() {  # <name> <version> <target>
+  local name=$1 version=$2 target=$3 pane caps verdict identity
+  pane=$(fm_tmux_composer_capture "$target") || {
+    FAILED=1
+    printf 'not ok - %s (%s): cursorless re-read could not capture the proven-idle pane\n' \
+      "$name" "$version" >&2
+    return 0
+  }
+  caps=$(printf 'styled=1\ncursor=0\nidentity=1\nrows=0')
+  verdict=$(fm_composer_classify_screen "$caps" "$pane")
+  if [ "$verdict" = need-identity ]; then
+    if ! identity=$(fm_tmux_composer_identity "$target") || [ -z "$identity" ]; then
+      identity='probe-absent'
+    fi
+    verdict=$(fm_composer_classify_screen "$caps" "$pane" '' "$identity")
+    [ "$verdict" != need-identity ] || verdict=unknown
+  fi
+  if [ "$verdict" = pending ]; then
+    printf '# %s cursorless pane tail:\n' "$name" >&2
+    tmux -L "$SOCKET" capture-pane -p -t "$target" 2>/dev/null \
+      | grep '[^[:space:]]' | tail -8 | sed 's/^/#   /' >&2
+    FAILED=1
+    printf 'not ok - %s (%s): a proven-idle composer read cursorless as pending; every steer to this harness would skip its doorbell\n' \
+      "$name" "$version" >&2
+  else
+    CHECKED=$((CHECKED + 1))
+    pass "$name ($version): the same idle pane read cursorless is not pending (verdict: $verdict)"
+  fi
 }
 
 # --- 1. Every installed verified harness must reach a proven-empty composer --

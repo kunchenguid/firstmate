@@ -195,6 +195,11 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
+# Shared secondmate endpoint probe + guarded relaunch; the watcher's poll tick
+# drives the same library so session start and ordinary supervision recover
+# from identical evidence through an identical path.
+# shellcheck source=/dev/null # Analyzed separately as a canonical lint root.
+. "$SCRIPT_DIR/fm-secondmate-liveness-lib.sh"
 # fm-timing-lib.sh is inert unless FM_TIMING_LOG names a file, which only the
 # deferred network stage sets, so an ordinary bootstrap run records nothing.
 # shellcheck source=bin/fm-timing-lib.sh disable=SC1091
@@ -626,7 +631,7 @@ secondmate_sync() {
       "$SCRIPT_DIR/fm-remote-inherit-push.sh" "$id" "$remote_generation" 2>&1); then
       if printf '%s\n' "$inherit_out" | grep -Eq '^(pushed|removed):'; then nudge_needed=1; fi
     else
-      echo "SECONDMATE_SYNC: secondmate $id: skipped: remote inheritance failed on $remote_host: $(first_line "$inherit_out")"
+      echo "SECONDMATE_SYNC: secondmate $id: skipped: remote inheritance failed on $remote_host: $(remote_inherit_failure_reason "$inherit_out")"
       converged=0
     fi
     [ "$remote_pending" -eq 0 ] || nudge_needed=1
@@ -684,7 +689,8 @@ report_relaunch() {  # <id> <cause> <where>
 }
 
 secondmate_liveness_sweep() {
-  # Idempotent secondmate liveness guarantee - SESSION START ONLY. The detailed
+  # Idempotent secondmate liveness guarantee at session start; the watcher's
+  # secondmate_liveness_tick owns the same guarantee mid-session. The detailed
   # state machine and its only recovery-authorizing states are owned by
   # fm_backend_agent_state. A missing tmux pane is not enough: tmux must prove
   # the window or session absent. This preserves duplicate prevention for
@@ -693,8 +699,8 @@ secondmate_liveness_sweep() {
   # lacked.
   # A meta with no window remains owned by secondmate-provisioning recovery.
   # Secondmate homes never contain kind=secondmate meta, so this is naturally a
-  # primary-only no-op there. Mid-session liveness remains explicitly out of
-  # scope and requires a separate periodic signal.
+  # primary-only no-op there. The probe/relaunch mechanics live in
+  # bin/fm-secondmate-liveness-lib.sh; this sweep keeps the reporting.
   [ -d "$STATE" ] || return 0
   local meta id remote_host label __fm_timing_stamp parallel=0
   SECONDMATE_RESPAWNED_IDS=""
@@ -731,123 +737,36 @@ secondmate_liveness_one_timed() {  # <meta> <id> <label>
 # timed; every `return` here was a `continue` in the loop and means exactly the
 # same thing - move on to the next secondmate. Respawned ids are recorded through
 # secondmate_note_respawned so a concurrent sweep can collect them after wait.
+# Probe classification, kill, and spawn live in fm-secondmate-liveness-lib.sh;
+# this function keeps this sweep's exact reporting.
 secondmate_liveness_one() {  # <meta> <id>
   local meta=$1 id=$2
-  local window harness backend target agent_state out cause remote_host remote_rc readiness_reason route_out remote_backend
-  window=$(fm_meta_get "$meta" window)
-  [ -n "$window" ] || return 0
-  harness=$(fm_meta_get "$meta" harness)
-  remote_host=$(fm_meta_get "$meta" remote_host)
-  if [ -n "$remote_host" ]; then
-    remote_rc=0
-    fm_remote_readiness_ensure "$SCRIPT_DIR" "$id" || remote_rc=$?
-    if [ "$remote_rc" -eq 255 ]; then
-      echo "SECONDMATE_LIVENESS: secondmate $id: skipped: remote host unavailable or endpoint state unknown; route preserved on $remote_host"
-      return 0
-    fi
-    if [ "$remote_rc" -ne 0 ]; then
-      readiness_reason=$(printf '%s\n' "$FM_REMOTE_READINESS_OUT" \
-        | awk '/^check [^=]+=(fixable|human):|^action:|^error:/ { print; exit }')
-      [ -n "$readiness_reason" ] || readiness_reason=$(first_line "$FM_REMOTE_READINESS_OUT")
-      [ -n "$readiness_reason" ] || readiness_reason="unknown readiness failure"
-      echo "SECONDMATE_LIVENESS: secondmate $id: skipped: remote readiness failed on $remote_host: $readiness_reason"
-      return 0
-    fi
-    if out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh state "$id" < /dev/null 2>/dev/null); then
-      remote_rc=0
-    else
-      remote_rc=$?
-    fi
-    if [ "$remote_rc" -eq 255 ]; then
-      echo "SECONDMATE_LIVENESS: secondmate $id: skipped: remote host unavailable or endpoint state unknown; route preserved on $remote_host"
-      return 0
-    fi
-    if [ "$remote_rc" -ne 0 ]; then
-      echo "SECONDMATE_LIVENESS: secondmate $id: skipped: remote endpoint probe unreadable on $remote_host"
-      return 0
-    fi
-    agent_state=$(printf '%s\n' "$out" | tail -1)
-    case "$agent_state" in
-      alive)
-        if route_out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh route "$id" < /dev/null 2>/dev/null); then
-          remote_rc=0
-        else
-          remote_rc=$?
-        fi
-        if [ "$remote_rc" -eq 255 ]; then
-          echo "SECONDMATE_LIVENESS: secondmate $id: skipped: remote host unavailable or endpoint route unknown; route preserved on $remote_host"
-          return 0
-        fi
-        if [ "$remote_rc" -ne 0 ]; then
-          echo "SECONDMATE_LIVENESS: secondmate $id: skipped: alive remote endpoint route is unreadable on $remote_host; inspect and migrate or retire it explicitly"
-          return 0
-        fi
-        remote_backend=$(printf '%s\n' "$route_out" | sed -n 's/^backend=//p' | tail -1)
-        if [ "$remote_backend" != herdr ]; then
-          echo "SECONDMATE_LIVENESS: secondmate $id: skipped: alive remote endpoint is recorded on backend '${remote_backend:-missing}'; migrate or retire it explicitly"
-          return 0
-        fi
-        [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" != 1 ] || echo "BOOTSTRAP_INFO: remote secondmate $id already live (host=$remote_host)"
-        ;;
-      dead|missing)
-        cause="remote endpoint $agent_state on its configured host"
-        if out=$(FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "$id" --secondmate 2>&1); then
-          secondmate_note_respawned "$id"
-          report_relaunch "$id" "$cause" "host=$remote_host"
-        else
-          echo "SECONDMATE_LIVENESS: secondmate $id: respawn failed after $cause: $(first_line "$out")"
-        fi
-        ;;
-      ambiguous|unreadable|unverified)
-        echo "SECONDMATE_LIVENESS: secondmate $id: skipped: remote endpoint state is $agent_state on $remote_host"
-        ;;
-      *) echo "SECONDMATE_LIVENESS: secondmate $id: skipped: remote endpoint returned an invalid state" ;;
-    esac
+  if ! fm_secondmate_liveness_lock "$id"; then
+    echo "SECONDMATE_LIVENESS: secondmate $id: skipped: another liveness check is already in progress"
     return 0
   fi
-  backend=$(fm_backend_of_meta "$meta")
-  target=$(fm_backend_target_of_meta "$meta")
-  [ -n "$target" ] || target="$window"
-  agent_state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null) || agent_state=unreadable
-  case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|omp) ;;
-    *)
-      case "$agent_state" in dead|missing) agent_state=unverified-harness ;; esac
+  fm_secondmate_liveness_probe "$meta" "$id" full
+  case "$FM_SM_LIVE_STATUS" in
+    silent)
       ;;
-  esac
-  case "$agent_state" in
     alive)
-      if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ]; then
-        echo "BOOTSTRAP_INFO: secondmate $id already live (backend=$backend)"
-      fi
+      [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" != 1 ] || echo "BOOTSTRAP_INFO: $FM_SM_LIVE_LINE"
       ;;
-    dead|missing)
-      if [ "$agent_state" = dead ]; then
-        cause="confirmed agent absence on existing endpoint"
-        fm_backend_kill "$backend" "$target" 2>/dev/null || true
-      else
-        cause="recorded endpoint confidently missing"
-      fi
-      if out=$(FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "$id" --secondmate 2>&1); then
+    relaunchable)
+      if fm_secondmate_liveness_relaunch "$meta" "$id"; then
         secondmate_note_respawned "$id"
-        report_relaunch "$id" "$cause" "backend=$backend"
+        report_relaunch "$id" "$FM_SM_LIVE_CAUSE" "$FM_SM_LIVE_WHERE"
+      elif [ "$FM_SM_LIVE_STATUS" = skipped ]; then
+        echo "SECONDMATE_LIVENESS: secondmate $id: skipped: $FM_SM_LIVE_REASON"
       else
-        echo "SECONDMATE_LIVENESS: secondmate $id: respawn failed after $cause: $(first_line "$out")"
+        echo "SECONDMATE_LIVENESS: secondmate $id: respawn failed after $FM_SM_LIVE_CAUSE: $(first_line "$FM_SM_LIVE_OUT")"
       fi
       ;;
-    ambiguous)
-      echo "SECONDMATE_LIVENESS: secondmate $id: skipped: existing endpoint has ambiguous agent process (backend=$backend)"
-      ;;
-    unreadable)
-      echo "SECONDMATE_LIVENESS: secondmate $id: skipped: endpoint probe unreadable (backend=$backend)"
-      ;;
-    unverified-harness)
-      echo "SECONDMATE_LIVENESS: secondmate $id: skipped: recorded harness '$harness' is unverified for recovery (backend=$backend)"
-      ;;
-    *)
-      echo "SECONDMATE_LIVENESS: secondmate $id: skipped: agent recovery classifier unverified (backend=$backend)"
+    skipped)
+      echo "SECONDMATE_LIVENESS: secondmate $id: skipped: $FM_SM_LIVE_REASON"
       ;;
   esac
+  fm_secondmate_liveness_unlock "$id"
   return 0
 }
 
@@ -923,7 +842,7 @@ NO_MISTAKES_MIN=1.46.0
 # tasks-axi feature probes are an independent defense-in-depth concern, not part
 # of its floor.
 GH_AXI_MIN=0.1.29
-LAVISH_AXI_MIN=0.1.46
+LAVISH_AXI_MIN=0.1.77
 
 treehouse_supports_lease() {
   treehouse get --help 2>&1 | grep -Eq '(^|[^[:alnum:]_-])--lease([^[:alnum:]_-]|$)'
@@ -1127,7 +1046,7 @@ crew_dispatch_validate() {
   if $typed_active; then
     verified_harnesses=$(fm_control_harnesses | jq -Rsc 'split("\n") | map(select(length > 0))')
   else
-    verified_harnesses='["claude","codex","opencode","pi","pi-signed","grok","kimi","cursor","agy","muse","rovo","omp"]'
+    verified_harnesses='["claude","codex","opencode","pi","pi-signed","grok","kimi","cursor","agy","muse","rovo","omp","devin"]'
   fi
   err=$(jq -r --argjson typed "$typed_active" --argjson verified_harnesses "$verified_harnesses" --arg provider_re "$FM_QUOTA_PROVIDER_ID_RE" '
     def verified($h): $verified_harnesses | index($h);
@@ -1194,6 +1113,7 @@ crew_dispatch_validate() {
     elif $typed and malformed_profile_floors([(.rules // [])[]? | profiles(.use?)[]?]) then "use profile floor needs scope and min_percent 0..100"
     elif $typed and ([(.rules // [])[]? | select(has("approval") and .approval != "captain")] | length > 0) then "approval must be \"captain\" when present"
     elif $typed and ([(.rules // [])[]? | select(has("floor") and floor_bad(.floor; true))] | length > 0) then "rule floor needs scope, min_percent 0..100, and provider matching ^[a-z0-9]+(-[a-z0-9]+)*\\z"
+    elif $typed and ([(.rules // [])[]? | select(has("min_confidence") and ((.min_confidence | type) != "number" or .min_confidence < 0 or .min_confidence > 1))] | length > 0) then "min_confidence must be a number from 0 through 1 when present"
     elif [(.rules // [])[]? | select(has("select") and ((.select? | type) != "string" or (.select | length) == 0))] | length > 0 then "select must be a non-empty string"
     elif [(.rules // [])[]? | .select? // empty | select(. != "quota-balanced")] | length > 0 then
       "unknown select: " + ([ (.rules // [])[]? | .select? // empty | select(. != "quota-balanced") ] | unique | join(", "))

@@ -73,6 +73,8 @@ cleanup_all() {
   [ -n "$WT1" ] && command -v treehouse >/dev/null 2>&1 && treehouse return --force "$WT1" >/dev/null 2>&1
   [ -n "$WT2" ] && command -v treehouse >/dev/null 2>&1 && treehouse return --force "$WT2" >/dev/null 2>&1
   herdr_safe_stop_and_delete "$SESSION"
+  # Spawn leaves each state/<id>.git-hooks strip dir read-only.
+  find "$TMP_ROOT" -type d -exec chmod u+rwx {} + 2>/dev/null
   rm -rf "$TMP_ROOT"
 }
 trap cleanup_all EXIT
@@ -104,6 +106,8 @@ printf 'off\n' > "$SM_HOME/config/herdr-presentation-spaces"
 printf '# scratch secondmate home AGENTS.md placeholder\n' > "$SM_HOME/AGENTS.md"
 printf 'e2esm1\n' > "$SM_HOME/.fm-secondmate-home"
 printf 'trivial e2e secondmate charter: nothing to do.\n' > "$SM_HOME/data/charter.md"
+printf '%s\n' 'projects/' 'state/' 'data/' 'config/' '.no-mistakes/' > "$SM_HOME/.gitignore"
+git -C "$SM_HOME" init -q -b main
 cat > "$SM_HOME/data/cm2/brief.md" <<'EOF'
 # Task
 ## Captain's intent

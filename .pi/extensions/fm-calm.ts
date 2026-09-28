@@ -6,10 +6,10 @@
 // with a disposable component factory, and setHiddenThinkingLabel().
 // ./lib/fm-calm-working-ship.ts owns the animated working presentation this file
 // installs. The focused tests pin those assumptions but never reject a
-// newer Pi solely for its version. The collapsed-thinking and operational-user
-// presentation adapters probe the exact API they patch and degrade independently with a
-// diagnostic (see installCalmPresentationAdapter below) if a future Pi removes it; Pi
-// still exposes no global renderer for arbitrary built-in or custom rows.
+// newer Pi solely for its version. The collapsed-thinking, operational-user, and
+// queued-operational presentation adapters probe the exact API they patch and degrade
+// independently with a diagnostic (see installCalmPresentationAdapter below) if a future
+// Pi removes it; Pi still exposes no global renderer for arbitrary built-in or custom rows.
 // docs/configuration.md owns the home-local Calm preference contract.
 //
 // Pi has one first-registration-wins ToolDefinition per tool name, with no merge or
@@ -49,6 +49,10 @@ import { Box, Container, getKeybindings, type Component } from "@earendil-works/
 import type { TSchema } from "typebox";
 import { installCalmAssistantLayout } from "./lib/fm-calm-assistant-layout.ts";
 import { installCalmOperationalUserLayout } from "./lib/fm-calm-operational-user-layout.ts";
+import {
+  installCalmPendingOperationalLayout,
+  refreshCalmPendingOperationalRows,
+} from "./lib/fm-calm-pending-operational-layout.ts";
 import {
   CALM_WORKING_SHIP_WIDGET_KEY,
   createCalmWorkingShipAnimation,
@@ -122,6 +126,7 @@ function installCalmPresentationAdapter(name: string, install: () => void): void
 export default function (pi: ExtensionAPI) {
   installCalmPresentationAdapter("collapsed-thinking", installCalmAssistantLayout);
   installCalmPresentationAdapter("operational-user-row", installCalmOperationalUserLayout);
+  installCalmPresentationAdapter("queued-operational-row", installCalmPendingOperationalLayout);
 
   let exportRendering = false;
   let removeTerminalInputHandler: (() => void) | undefined;
@@ -487,6 +492,7 @@ export default function (pi: ExtensionAPI) {
       // unchanged, which is what makes a toggle apply to rows already on screen.
       ctx.ui.setHiddenThinkingLabel(active ? "" : undefined);
       ctx.ui.setStatus("firstmate-calm", undefined);
+      refreshCalmPendingOperationalRows();
 
       const expanded = ctx.ui.getToolsExpanded();
       ctx.ui.setToolsExpanded(!expanded);
