@@ -41,12 +41,20 @@ A post-PR real-image check remains an explicit captain action using the already 
 
 ## Focused behavioral result
 
-The processed-message file cleanup lifecycle was verified on 2026-09-28 with Node `22.22.2` and Pi `0.87.1`.
+The processed-record cleanup and bounded-work ingress lifecycle was verified on 2026-09-29 with Node `22.22.2` and Pi `0.87.1`.
 
 ```console
 $ bash tests/fm-feishu-processed-cleanup.test.sh
+evidence - record classes {"before":{"inbox":3,"inboundLedger":3,"inboundDeliveryMap":3,"outbox":4,"outboundLedger":4,"outboundReceipts":2},"after":{"inbox":2,"inboundLedger":2,"inboundDeliveryMap":2,"outbox":3,"outboundLedger":3,"outboundReceipts":2}}
+evidence - interrupted cleanup recovery boundaries=11
+evidence - concurrent publication/ack/cleanup retained 8 pending and retired 8 delivered records
 evidence - message JSON files before=7 after=5; legacy processed files before=7 after=5
 ok - five-second Feishu cleanup unlinks only receipt-proven message files and preserves all unfinished work
+evidence - ingress scale {"history":0,"idle":{"ops":{"directories":10,"entries":0,"reads":10,"parses":10},"wallMs":35.24,"cpuMs":4.27},"work":{"ops":{"directories":8,"entries":2,"reads":11,"parses":11},"wallMs":43.28,"cpuMs":4.59},"cleanedIdle":{"ops":{"directories":15,"entries":0,"reads":11,"parses":11},"wallMs":34.87,"cpuMs":4.27}}
+evidence - ingress scale {"history":40,"idle":{"ops":{"directories":10,"entries":0,"reads":10,"parses":10},"wallMs":37.83,"cpuMs":3.25},"work":{"ops":{"directories":8,"entries":2,"reads":11,"parses":11},"wallMs":44.43,"cpuMs":5.06},"cleanedIdle":{"ops":{"directories":15,"entries":0,"reads":11,"parses":11},"wallMs":47.94,"cpuMs":4.92}}
+evidence - ingress scale {"history":1500,"idle":{"ops":{"directories":10,"entries":0,"reads":10,"parses":10},"wallMs":37.23,"cpuMs":3.18},"work":{"ops":{"directories":8,"entries":2,"reads":11,"parses":11},"wallMs":26.87,"cpuMs":3.14},"cleanedIdle":{"ops":{"directories":15,"entries":0,"reads":11,"parses":11},"wallMs":52.39,"cpuMs":3.41}}
+evidence - ingress scale {"history":3000,"idle":{"ops":{"directories":10,"entries":0,"reads":10,"parses":10},"wallMs":32.22,"cpuMs":3.42},"work":{"ops":{"directories":8,"entries":2,"reads":11,"parses":11},"wallMs":27.35,"cpuMs":3.18},"cleanedIdle":{"ops":{"directories":15,"entries":0,"reads":11,"parses":11},"wallMs":53.08,"cpuMs":3.71}}
+ok - ingress reads/parses/enumeration depend only on pending work; retained identities are point lookups
 ```
 
 The clock-controlled public-lifecycle fixture proves the pass does not run before five seconds, then reduces the inbound and outbound message-file count from seven to five by unlinking one delivered inbound JSON file and one fully receipted outbound JSON file while retaining five pending, offered, delivery-uncertain, partially posted, or unsent files.
