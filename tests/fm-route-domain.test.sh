@@ -38,6 +38,12 @@ ANSWERS = [
     ("emr-overflow", "portal-ops", 0.8),
     ("bogus", "not-a-secondmate", 0.0),
 ]
+RAW = {
+    "null-answers": {"answers": None},
+    "not-an-object": [1],
+    "null-confidence": {"answers": {"route": {"choice": "portal-ops", "confidence": None}}},
+    "null-noul": {"answers": {"route": {"choice": "portal-ops"}, "needs_new_secondmate": {"noul": None}}},
+}
 class H(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         raw = self.rfile.read(int(self.headers["Content-Length"]))
@@ -50,7 +56,11 @@ class H(http.server.BaseHTTPRequestHandler):
                 answers = {"route": {"choice": choice, "confidence": 0.8, "probabilities": {choice: 0.8}},
                            "needs_new_secondmate": {"noul": noul}}
                 break
-        out = json.dumps({"answers": answers}).encode()
+        reply = {"answers": answers}
+        for word, raw_reply in RAW.items():
+            if word in task:
+                reply = raw_reply
+        out = json.dumps(reply).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
@@ -160,13 +170,41 @@ done
 task=$(last_request | python3 -c 'import json,sys; print(json.load(sys.stdin)["body"]["state"]["task"])')
 [ "$task" = "seller outreach to [withheld] today" ] || fail "withheld task wrong: $task"
 
+# A value straddling the 140-character scope cut is still withheld.
+REG_LONG="$TDIR/long.md"
+pad=$(printf 'P%.0s' $(seq 131))
+printf -- '- long-ops - Long scope. (home: /tmp/l; scope: %s Zorbex Holdings group; projects: l; added 2026-08-01)\n' "$pad" > "$REG_LONG"
+printf 'Zorbex Holdings\n' > "$CFG/dispatch-never-send"
+FM_CONFIG_OVERRIDE="$CFG" "$ROUTER" --registry "$REG_LONG" --task "seller leads" >/dev/null
+body=$(last_request | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["body"]).lower())')
+assert_not_contains "$body" "zorbex" "never-send value straddling the scope cut must not leave the box"
+scope=$(last_request | python3 -c 'import json,sys; print(json.load(sys.stdin)["body"]["questions"]["route"]["criteria"]["long-ops"])')
+[ "${#scope}" -le 140 ] || fail "scope must still be capped at 140 characters: ${#scope}"
+
+# A secondmate id matching the list fails closed with nothing sent.
+REG_ID="$TDIR/id.md"
+printf -- '- zorbex-ops - Client work. (home: /tmp/z; scope: client work; projects: z; added 2026-08-01)\n' > "$REG_ID"
+printf 'zorbex\n' > "$CFG/dispatch-never-send"
+before=$(requests)
+out=$(FM_CONFIG_OVERRIDE="$CFG" "$ROUTER" --registry "$REG_ID" --task "seller leads")
+assert_contains "$out" "action=unavailable" "withheld secondmate id fails closed"
+[ "$(requests)" -eq "$before" ] || fail "nothing may be sent when a secondmate id is withheld"
+
 rm "$CFG/dispatch-never-send"; mkdir "$CFG/dispatch-never-send"
 before=$(requests)
 out=$(FM_CONFIG_OVERRIDE="$CFG" "$ROUTER" --task "seller leads")
 assert_contains "$out" "action=unavailable" "unreadable never-send list fails closed"
 [ "$(requests)" -eq "$before" ] || fail "nothing may be sent when the never-send list is unreadable"
 
-# 9. Dispatcher branches.
+# 9. Malformed 200 responses are unavailable, not a crash.
+for word in null-answers not-an-object null-confidence null-noul; do
+  out=$("$ROUTER" --task "$word reply") || fail "$word response must not crash the router"
+  assert_contains "$out" "action=unavailable" "$word response emits unavailable"
+done
+out=$("$DISPATCH" --task "null-answers reply") || fail "dispatcher must survive a malformed response"
+assert_contains "$out" "Router unavailable" "dispatcher falls back on a malformed response"
+
+# 10. Dispatcher branches.
 out=$("$DISPATCH" --task "Good morning")
 assert_contains "$out" "Status: Direct communication" "dispatcher handle_direct branch"
 out=$("$DISPATCH" --task "Drone firmware")

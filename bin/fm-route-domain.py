@@ -97,8 +97,7 @@ def parse_registry(reg_path: Path) -> dict[str, str]:
     content = reg_path.read_text(encoding="utf-8", errors="replace")
     criteria = {}
     for sm_id, summary, scope in LOCAL_RE.findall(content):
-        clean_scope = " ".join(scope.split())[:140]
-        criteria[sm_id] = clean_scope
+        criteria[sm_id] = " ".join(scope.split())
 
     criteria["new_domain"] = (
         "No existing second mate covers this domain; requires creating a new dedicated second mate."
@@ -206,6 +205,16 @@ def main() -> None:
             as_json=args.json,
         )
 
+    withheld_ids = [k for k in criteria if withhold(k, never_send) != k]
+    if withheld_ids:
+        emit_result(
+            "unavailable",
+            "captain_direct",
+            reason="a secondmate id matches the never-send list; nothing sent",
+            task_text=task_text,
+            as_json=args.json,
+        )
+
     clean_task = withhold(task_text, never_send)[:500]
     payload = {
         "model": TS_MODEL,
@@ -214,7 +223,7 @@ def main() -> None:
             "route": {
                 "type": "choice",
                 "instructions": "Which second mate domain should handle this incoming task or message?",
-                "criteria": {k: withhold(v, never_send) for k, v in criteria.items()},
+                "criteria": {k: withhold(v, never_send)[:140] for k, v in criteria.items()},
             },
             "needs_new_secondmate": {
                 "type": "noul",
@@ -246,14 +255,23 @@ def main() -> None:
             as_json=args.json,
         )
 
-    answers = data.get("answers", {})
-    route_ans = answers.get("route", {})
-    choice = route_ans.get("choice", "captain_direct")
-    confidence = float(route_ans.get("confidence", 0.0))
-    probs = route_ans.get("probabilities", {})
+    try:
+        answers = data.get("answers", {})
+        route_ans = answers.get("route", {})
+        choice = route_ans.get("choice", "captain_direct")
+        confidence = float(route_ans.get("confidence", 0.0))
+        probs = route_ans.get("probabilities", {})
 
-    noul_ans = answers.get("needs_new_secondmate", {})
-    noul_val = float(noul_ans.get("noul", 0.0))
+        noul_ans = answers.get("needs_new_secondmate", {})
+        noul_val = float(noul_ans.get("noul", 0.0))
+    except (AttributeError, TypeError, ValueError) as exc:
+        emit_result(
+            "unavailable",
+            "captain_direct",
+            reason=f"Jev returned a malformed response: {exc}",
+            task_text=task_text,
+            as_json=args.json,
+        )
 
     if not isinstance(choice, str) or choice not in criteria:
         emit_result(
