@@ -814,7 +814,7 @@ EOF
       || ! producers=$(printf '%s' "$runs" | jq -sc --arg head "$live_head" '
         [ .[] | if (.check_runs | type) == "array" then .check_runs[] else error("invalid check runs") end
           | if (.name | type) == "string" and (.app.id | type) == "number" and .head_sha == $head
-            then . else error("invalid check producer") end ]' 2>/dev/null); then
+            then {name, app: {id: .app.id}, head_sha} else error("invalid check producer") end ]' 2>/dev/null); then
       producers='[]'
       refusals="$refusals  - required check producers at head $live_head could not be read
 "
