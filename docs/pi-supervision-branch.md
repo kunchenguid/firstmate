@@ -31,7 +31,7 @@ This does not start or reset a branch, claim a wake, or acknowledge an outcome.
 | `disabled` | A fresh branch observation says away mode, reset, or shutdown currently disables handling. |
 | `idle` | The current process owns the lock and reports no pending work or latched fault; this is not proof of completed work. |
 | `processing` | A live admission is pending; the item summary distinguishes accepted-before-prompt from model/tool execution. |
-| `degraded` | The latest handling attempt failed or unexpectedly fell back to MAIN. |
+| `degraded` | A handling failure or unexpected MAIN fallback remains latched until a later durable branch result succeeds. |
 | `error` | The branch reports a construction, reconciliation, or provider health fault. |
 | `unknown` | Ownership or current evidence is missing, stale, inconsistent, or exceeds the bounded display capacity. |
 
