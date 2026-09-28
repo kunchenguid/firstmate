@@ -1050,6 +1050,8 @@ test_cross_repo_checks_use_head_repo() {
     || fail 'statuses must be read from the PR head repository, not the base repository'
   grep -qF "repos/o/r/commits/$HEAD_A/check-runs?" "$home/forge/calls" \
     && fail 'check-runs must not also be read from the base repository when the head repository is known'
+  grep -qF "repos/o/r/commits/$HEAD_A/statuses?" "$home/forge/calls" \
+    && fail 'statuses must not also be read from the base repository when the head repository is known'
   pass 'check-runs and statuses are read from the PR head repository when it differs from the base'
 }
 
