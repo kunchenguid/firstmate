@@ -115,6 +115,9 @@
 # leads with plain text, and opencode's own prompt character is `>`, a SHELL
 # glyph deliberately outside the agent set, so no opencode shape recorded here
 # can prove a left-bar envelope and open a zone under it.
+#                A pi stderr notice corrupted over an editor row (the
+#                pi-hermes-memory ⚠️/⏳ family) is furniture, never input;
+#                _fm_composer_row_is_pi_notice owns that rule.
 #
 # THE SAFETY RULE for glyphs: a bare shell prompt glyph (`>` `$` `%` `#`) -
 # what a pane shows once its agent has exited to a plain login shell - is a
@@ -1612,6 +1615,11 @@ EOF
     raw=$(_fm_composer_screen_row "$row" "$screen")
     content=$(_fm_composer_row_content "$raw" "$styled")
     placeholder_position=0
+    if [ "$FM_COMPOSER_SELECTED_KIND" = pi ] \
+       && _fm_composer_row_is_pi_notice "$raw" "$styled"; then
+      row=$((row + 1))
+      continue
+    fi
     case "$FM_COMPOSER_SELECTED_KIND" in
       bare)
         if [ "$row" -eq "$FM_COMPOSER_SELECTED_FIRST" ] \
@@ -1901,11 +1909,38 @@ fm_composer_queued_enter_verdict() {  # <composer-state> <busy|idle|unknown>
   fi
 }
 
+# Pi stderr notice rows (task fm-composer-warning-fp1): an extension
+# console.warn fired between TUI frames writes plain, unstyled text straight
+# to the terminal, overwriting the editor input row IN PLACE, so the pane
+# shows e.g. `⚠️ Live session indexing failed: database is locked` exactly
+# between the separator rules where a draft would sit (captured live on pi
+# 0.87.0: the row is a dangling `ESC[39m` plus plain text, no SGR 7 anywhere,
+# replacing the reverse-video cursor cell). Read as typed input, that row held
+# `pending` on an idle pane: fm-send skipped every doorbell ("composer visibly
+# holds pending text") and fm-control refused every relaunch ("not proven
+# empty"). A string family is unavoidable here and deliberately narrow: the
+# notice is frame corruption, not a pi-drawn surface, so it carries none of
+# pi's own styling, and the styling signals that could otherwise identify it
+# are disqualified as sole tests - herdr prefixes captured rows with SGR
+# resets (so a leading SGR is not discriminative), and PI_HARDWARE_CURSOR
+# removes the cursor cell from real typed rows, which would turn mere
+# cursor-cell absence into a false `empty` over a real draft. Every opening
+# below is read verbatim from pi-hermes-memory's own warn/info strings, the
+# only loaded Pi extension that writes this glyph-prefixed family to stderr,
+# so a real draft cannot collide with it. The SGR 7 guard is the second,
+# independent signal on styled captures: a row pi itself drew with the cursor
+# cell in it is live input even when its text equals a notice.
+FM_COMPOSER_PI_NOTICE_RE_DEFAULT="^(⚠️ (Live session indexing failed:|Auto-consolidation failed for '|Ephemeral session cleanup failed:|Session pruning failed:|Snapshot retention sweep failed:)|⏳ Auto-consolidation for ')"
+
 _fm_composer_classify_pi_rows() {  # <screen> <styled>
   local screen=$1 styled=$2 row raw content
   row=$((FM_COMPOSER_SCAN_PI_OPEN + 1))
   while [ "$row" -lt "$FM_COMPOSER_SCAN_PI_CLOSE" ]; do
     raw=$(_fm_composer_screen_row "$row" "$screen")
+    if _fm_composer_row_is_pi_notice "$raw" "$styled"; then
+      row=$((row + 1))
+      continue
+    fi
     content=$(_fm_composer_row_content "$raw" "$styled")
     fm_composer_normalize_trim_var content
     if [ -n "$content" ]; then
@@ -1915,6 +1950,30 @@ _fm_composer_classify_pi_rows() {  # <screen> <styled>
     row=$((row + 1))
   done
   printf 'empty'
+}
+
+# _fm_composer_row_is_pi_notice: 0 when the RAW row (and its styled flag) is
+# a pi stderr notice corrupted over the editor input row - the one rule this
+# file has for frame corruption rather than a drawn surface. Takes the raw
+# row because the SGR 7 cursor-cell guard must read the styling, not the
+# stripped text (rationale and byte evidence at
+# FM_COMPOSER_PI_NOTICE_RE_DEFAULT above). Under-stripping here only re-opens
+# the original false `pending`; the danger direction, a real draft losing its
+# verdict, is closed by the exact family plus the cursor-cell guard.
+# ponytail: a wrapped long notice (second row starts mid-sentence) does not
+# match the anchored family and reads pending again; widen to a two-row rule
+# only if long errors actually recur in fleet panes.
+_fm_composer_row_is_pi_notice() {  # <raw-row> <styled>
+  local raw=$1 styled=$2 content esc
+  content=$(_fm_composer_row_content "$raw" "$styled")
+  fm_composer_normalize_trim_var content
+  fm_composer_idle_matches "$content" \
+    "${FM_COMPOSER_PI_NOTICE_RE:-$FM_COMPOSER_PI_NOTICE_RE_DEFAULT}" sensitive || return 1
+  if [ "$styled" = 1 ]; then
+    esc=$(printf '\033')
+    printf '%s' "$raw" | LC_ALL=C grep -qF -- "${esc}[7m" && return 1
+  fi
+  return 0
 }
 
 _fm_composer_classify_bare_pi_overlap() {  # <screen> <styled> <has-identity> <identity> <bare-row>
