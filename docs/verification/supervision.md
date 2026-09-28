@@ -759,35 +759,6 @@ tests/fm-afk-return.test.sh
 tests/fm-branch-supervision.test.sh
 ```
 
-### Attended hand-back to an idle primary
-
-This supports [Attended](../supervision-host.md#attended): a close the host passes through to main wakes an interactive Claude primary that sits idle at its prompt, again for the next close after that turn, including the close of the successor the pass-through left running, while a remote reply listener stays owned.
-It was measured on 2026-09-27 on macOS 26.6.2 arm64 with Claude Code 2.1.283 (`haiku`) as an interactive primary on a private tmux socket, in a disposable lab copy of the tree with `config/supervision-host`, and a local append-only log standing in for the remote home.
-The control ran the same lab on the host at `3c2a91d7`, before the pass-through kept the recovery marker at downtime.
-
-```text
-$ FM_SUPERVISION_HOST_ATTENDED_LIVE_E2E=1 FM_SUPERVISION_HOST_ATTENDED_LIVE_CONTROL_REF=origin/main tests/fm-supervision-host-attended-live-e2e.test.sh
-# 18:53:40 control: host log: 1790560420	pass-through	attended	main-only
-# 18:55:10 control: after 90s no rewake and no primary command; ledger: epoch=1 owner_pid=60136 outcome=arming updated_at=1790560417; marker: announced:handling:60752.1790560419.Hqoksa; queued rows: 2
-ok - attended live control (2.1.283 (Claude Code)): on origin/main the idle primary is not woken, so the scenario catches the bug
-# 18:55:29 positive step 2: host log: 1790560529	pass-through	attended	main-only
-# 18:55:29 positive step 2: successor watcher pid 19399 alive; ledger: epoch=1 owner_pid=16228 outcome=arming updated_at=1790560526; marker: announced:downtime:16844.1790560528.qoZpvC
-# 18:55:35 positive step 2: rewake delivered at 1790560529 (Stop hook exited 2 with the banner); ledger: epoch=1 owner_pid=16228 outcome=rewake updated_at=1790560529 session_pid=11955 recovery_generation=16844.1790560528.qoZpvC
-# 18:55:35 positive step 2: primary turn ran: bin/fm-wake-drain.sh;bin/fm-wake-drain.sh --ack-through 2 --recovery-generation 16844.1790560528.qoZpvC;
-# 18:55:36 positive step 3: turn end re-armed: 1790560536	start	gen=host-25147-1790560536; still following successor 19399
-# 18:55:57 positive step 3/4: successor 19399 closed: arm_pid=25414 watcher_pid=19399 origin=attached started_at=1790560536 ended_at=1790560552 exit_code=unknown signal=unknown reason=attached-delivered-wake
-# 18:55:57 positive step 3/4: its close was delivered: rewake at 1790560553; host log: 1790560552	pass-through	attended	main-only
-# 18:56:20 positive step 4: listener mirrored it (1 ingested) and it was delivered at 1790560576; listener runner 17226 -> 17226, owned at every check
-ok - attended live (2.1.283 (Claude Code)): an idle primary is woken for three hand-offs, the successor's own close included, with the listener owned throughout
-```
-
-Deterministic entry points:
-
-```sh
-tests/fm-supervision-host.test.sh
-tests/fm-claude-stop-autoarm.test.sh
-```
-
 ## Wedge-alarm channels
 
 The two real notification channels were bounded manually on 2026-07-10 on macOS 26.5.2 with Herdr 0.7.3.
