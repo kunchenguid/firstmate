@@ -619,6 +619,42 @@ test_matrix_pi_separated_needs_identity() {
   pass "matrix: pi's separated composer needs identity + structure; the blank row alone never proves it"
 }
 
+# Pi-vim replaces the lower composer rule's right edge with its mode label.
+# Both ordinary modes preserve the same empty/pending verdicts; only blank
+# NORMAL may be normalized to INSERT by the adapter. Pending commands and Ex
+# mode are unsafe even though their content row is blank.
+test_matrix_pi_vim_modes() {
+  local insert normal pending_normal ex typed pi_idle
+  pi_idle=$(printf 'pi\tidle')
+  insert=$'transcript\n────────────────────────\n\n────────────── INSERT'
+  normal=$'transcript\n────────────────────────\n\n────────────── NORMAL'
+  pending_normal=$'transcript\n────────────────────────\n\n────────────── NORMAL d_'
+  ex=$'transcript\n────────────────────────\n\n────────────── EX :_'
+
+  assert_screen "pi-vim INSERT empty" empty "$CAPS_TMUX" "$insert" 2 "$pi_idle"
+  assert_screen "pi-vim NORMAL empty" empty "$CAPS_TMUX" "$normal" 2 "$pi_idle"
+  assert_screen "cursorless pi-vim INSERT empty" empty "$CAPS_STYLED" "$insert" '' "$pi_idle"
+  assert_screen "cursorless pi-vim NORMAL needs adapter normalization" unknown \
+    "$CAPS_STYLED" "$normal" '' "$pi_idle"
+  [ "$(fm_composer_pi_input_mode "$insert" 2)" = insert ] \
+    || fail "pi-vim INSERT mode was not recognized"
+  [ "$(fm_composer_pi_input_mode "$normal" 2)" = normal ] \
+    || fail "pi-vim NORMAL mode was not recognized"
+
+  typed=$'transcript\n────────────────────────\nkeep this draft\n────────────── NORMAL'
+  assert_screen "pi-vim NORMAL pending text" pending "$CAPS_TMUX" "$typed" 2 "$pi_idle"
+  [ "$(fm_composer_pi_input_mode "$typed" 2)" = normal ] \
+    || fail "pending text must not hide pi-vim NORMAL mode"
+
+  assert_screen "pi-vim pending command is unsafe" unknown "$CAPS_TMUX" "$pending_normal" 2 "$pi_idle"
+  assert_screen "pi-vim Ex mode is unsafe" unknown "$CAPS_TMUX" "$ex" 2 "$pi_idle"
+  [ "$(fm_composer_pi_input_mode "$pending_normal" 2)" = unsafe ] \
+    || fail "pi-vim pending NORMAL command must be unsafe"
+  [ "$(fm_composer_pi_input_mode "$ex" 2)" = unsafe ] \
+    || fail "pi-vim Ex mode must be unsafe"
+  pass "matrix: pi-vim NORMAL and INSERT classify safely without losing pending text"
+}
+
 test_matrix_pi_dollar_status_footer_is_empty() {
   # Pi's status row `$0.000 (sub) 5.4%/272k (auto)` at column 0 used to read
   # as a dead-shell prompt, so an idle separated composer classified unknown.
@@ -979,6 +1015,7 @@ test_matrix_herdr_halfblock_rule_bounds_bare_wrap
 test_matrix_omp_status_row_bounds_bare_composer
 test_matrix_codex_idle_starfield_furniture
 test_matrix_pi_separated_needs_identity
+test_matrix_pi_vim_modes
 test_matrix_pi_dollar_status_footer_is_empty
 test_matrix_opencode_leftbar_signals
 test_matrix_grok_titled_bottom_border

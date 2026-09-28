@@ -42,10 +42,24 @@ case "${1:-}" in
     fi
     cat "$COMPOSER" 2>/dev/null; exit 0 ;;
   send-keys)
-    shift; is_enter=0
+    shift; is_enter=0; is_insert=0; literal=''
     while [ "$#" -gt 0 ]; do
-      case "$1" in -t) shift ;; -l) ;; Enter) is_enter=1 ;; esac; shift
+      case "$1" in
+        -t) shift 2 ;;
+        -l) literal=${2:-}; shift 2 ;;
+        Enter) is_enter=1; shift ;;
+        i) is_insert=1; shift ;;
+        *) shift ;;
+      esac
     done
+    if [ "$is_insert" = 1 ]; then
+      [ -z "${FM_FAKE_SENT:-}" ] || printf 'i\n' >> "$FM_FAKE_SENT"
+      sed 's/ NORMAL$/ INSERT/' "$COMPOSER" > "$COMPOSER.next"
+      mv "$COMPOSER.next" "$COMPOSER"
+    fi
+    if [ -n "$literal" ]; then
+      [ -z "${FM_FAKE_SENT:-}" ] || printf 'literal:%s\n' "$literal" >> "$FM_FAKE_SENT"
+    fi
     if [ "$is_enter" = 1 ]; then
       [ -z "${FM_FAKE_SENT:-}" ] || printf 'Enter\n' >> "$FM_FAKE_SENT"
       if [ -n "${FM_FAKE_SWALLOW:-}" ] && [ -f "$FM_FAKE_SWALLOW" ]; then
@@ -255,6 +269,53 @@ test_unrecognized_state_skips_busy_conversion() {
   pass "fm_tmux_submit_enter_core: unrecognized states skip busy conversion"
 }
 
+test_pi_vim_normal_mode_enters_insert_before_literal_text() {
+  local dir fakebin composer sent vfile expected rc=0
+  dir="$TMP_ROOT/pi-vim-normal"
+  fakebin=$(make_submit_mock "$dir")
+  composer="$dir/composer"
+  sent="$dir/sent.log"
+  vfile="$dir/verdict"
+  printf '────────────────────────\n\n────────────── NORMAL\n' > "$composer"
+  : > "$sent"
+  (
+    # Emptiness remains shared-classifier responsibility; its Pi identity probe
+    # is covered by fm-composer-lib.test.sh. This test isolates send ordering.
+    fm_tmux_composer_state() { printf 'empty'; }
+    PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
+      fm_tmux_submit_core "win" ": lifecycle doorbell" 1 0.05 0.05 > "$vfile" 2>/dev/null
+  ) || rc=$?
+  expect_code 0 "$rc" "blank pi-vim NORMAL recovery should submit"
+  [ "$(cat "$vfile")" = empty ] \
+    || fail "blank pi-vim NORMAL submit should finish empty, got '$(cat "$vfile")'"
+  expected=$'i\nliteral:: lifecycle doorbell\nEnter'
+  [ "$(cat "$sent")" = "$expected" ] \
+    || fail "pi-vim NORMAL input order must be i, literal, Enter:"$'\n'"$(cat "$sent")"
+  pass "fm_tmux_submit_core: blank pi-vim NORMAL enters INSERT before lifecycle text"
+}
+
+test_pi_vim_pending_normal_refuses_without_typing() {
+  local dir fakebin composer sent vfile rc=0
+  dir="$TMP_ROOT/pi-vim-pending-normal"
+  fakebin=$(make_submit_mock "$dir")
+  composer="$dir/composer"
+  sent="$dir/sent.log"
+  vfile="$dir/verdict"
+  printf '────────────────────────\nkeep this draft\n────────────── NORMAL\n' > "$composer"
+  : > "$sent"
+  (
+    fm_tmux_composer_state() { printf 'pending'; }
+    PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
+      fm_tmux_submit_core "win" ": lifecycle doorbell" 1 0.05 0.05 > "$vfile" 2>/dev/null
+  ) || rc=$?
+  [ "$rc" -ne 0 ] || fail "pending pi-vim NORMAL must refuse submission"
+  [ "$(cat "$vfile")" = send-failed ] \
+    || fail "pending pi-vim NORMAL refusal should report send-failed"
+  [ ! -s "$sent" ] \
+    || fail "pending pi-vim NORMAL must preserve draft without keys:"$'\n'"$(cat "$sent")"
+  pass "fm_tmux_submit_core: pi-vim NORMAL preserves pending text"
+}
+
 test_claude_busy_signature_uses_real_capture_shapes() {
   local dir fakebin composer
   dir="$TMP_ROOT/claude-signature"
@@ -352,4 +413,6 @@ test_busy_pane_unknown_stays_unknown
 test_failed_baseline_capture_keeps_busy_unknown_unconfirmed
 test_busy_pane_ambiguous_pending_retries_without_conversion
 test_unrecognized_state_skips_busy_conversion
+test_pi_vim_normal_mode_enters_insert_before_literal_text
+test_pi_vim_pending_normal_refuses_without_typing
 test_claude_busy_signature_uses_real_capture_shapes

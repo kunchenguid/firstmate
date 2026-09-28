@@ -270,20 +270,17 @@ fm_task_inbox_doorbell_line() {  # <record-path>
     "$quoted" "$quoted"
 }
 
-# Ring the doorbell, best-effort: one endpoint-liveness pre-check, one advisory
+# Ring the doorbell, best-effort: one endpoint-liveness pre-check, one strict
 # composer pre-check, then the backend's submit machinery with a minimal retry
 # budget, verdict discarded.
-# Returns 0 rang, 1 skipped because the composer PROVENLY holds pending text
-# other than our own doorbell (the watcher re-rings later), 2 the backend send
-# failed, 3 skipped because the endpoint is positively dead or missing (nothing
-# typed; recovery owns the record). No return value is delivery proof; the
-# acknowledgement move is the only delivery signal.
-# The skip is deliberately narrow: only an exact `pending` verdict can defer,
-# because there our Enter could submit someone's real half-typed content.
-# `pending-unproven` and `unknown` still ring - the worst outcome is a garbled
-# CONSTANT line the worker recovers semantically, while skipping on ambiguous
-# verdicts would starve a harness whose idle screen the classifier cannot
-# positively identify (that classifier is advisory here by design).
+# Returns 0 rang, 1 skipped because composer emptiness was not proven (the
+# watcher re-rings later), 2 the backend send failed, 3 skipped because the
+# endpoint is positively dead or missing (nothing typed; recovery owns the
+# record). No return value is delivery proof; the acknowledgement move is the
+# only delivery signal.
+# Only exact `empty` authorizes a new line. Pending, pending-unproven, unknown,
+# and future verdicts all defer so a modal editor or unreadable composer never
+# interprets the constant doorbell as commands.
 # A pending composer holding exactly our own doorbell line is a previous ring
 # whose Enter never landed, so on an agent not reported busy it is submitted
 # rather than skipped; skipping it would block every later ring. On both paths
@@ -308,6 +305,8 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
       fm_backend_send_key "$backend" "$target" Enter "$label" >/dev/null 2>&1 || return 2
       return 0
       ;;
+    empty) ;;
+    *) return 1 ;;
   esac
   # Accepted residual race: terminal input and Enter are separate delivery
   # steps, so an agent exiting after the liveness check could leave a bare

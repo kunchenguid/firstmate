@@ -170,6 +170,16 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
   printf '%s' "$verdict"
 }
 
+# fm_tmux_composer_input_mode: thin tmux capture adapter over pi-vim's shared
+# structural mode parser. This does not prove emptiness or agent identity.
+fm_tmux_composer_input_mode() {  # <target> -> insert|normal|unsafe|unknown
+  local target=$1 cy pane
+  cy=$(fm_tmux_composer_cursor_row "$target") || { printf 'unknown'; return 0; }
+  case "$cy" in ''|*[!0-9]*) printf 'unknown'; return 0 ;; esac
+  pane=$(fm_tmux_composer_capture "$target") || { printf 'unknown'; return 0; }
+  fm_composer_pi_input_mode "$pane" "$cy"
+}
+
 # fm_tmux_pane_is_cursor: true when the pane's FOREGROUND process group contains
 # a genuine Cursor Agent CLI process. Cursor runs as a bundled node script, so
 # tmux's own #{pane_current_command} reports a bare `node`; identity therefore
@@ -283,8 +293,44 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [baseline-idle
   fm_composer_queued_enter_verdict "$state" "$busy_state"
 }
 
+# fm_tmux_prepare_text_input: normalize a blank pi-vim NORMAL composer to
+# INSERT before literal delivery. Positive empty proof is checked both before
+# the mode key and after Pi redraws; pending, unsafe, and changed screens refuse
+# without typing caller text. Non-modal composers need no preparation.
+fm_tmux_prepare_text_input() {  # <target> <settle>
+  local target=$1 settle=$2 mode state
+  mode=$(fm_tmux_composer_input_mode "$target")
+  case "$mode" in
+    insert|unknown) return 0 ;;
+    unsafe)
+      printf 'error: refusing text input into unsafe pi-vim mode\n' >&2
+      return 1
+      ;;
+    normal)
+      state=$(fm_tmux_composer_state "$target")
+      if [ "$state" != empty ]; then
+        printf 'error: refusing pi-vim NORMAL recovery with composer=%s\n' "$state" >&2
+        return 1
+      fi
+      tmux send-keys -t "$target" i 2>/dev/null || return 1
+      sleep "$settle"
+      mode=$(fm_tmux_composer_input_mode "$target")
+      state=$(fm_tmux_composer_state "$target")
+      if [ "$mode" != insert ] || [ "$state" != empty ]; then
+        printf 'error: pi-vim did not reach a proven empty INSERT composer (mode=%s composer=%s)\n' \
+          "$mode" "$state" >&2
+        return 1
+      fi
+      ;;
+  esac
+}
+
 fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle>
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 baseline_idle='' baseline_state err
+  if ! fm_tmux_prepare_text_input "$target" "$settle"; then
+    printf 'send-failed'
+    return 1
+  fi
   # The turn-started baseline must predate our own typing: a pane already
   # busy before the text lands can turn "busy" for reasons unrelated to our
   # Enter, so only a clean idle-to-busy transition may confirm a submit.
