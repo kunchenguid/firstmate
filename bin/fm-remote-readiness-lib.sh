@@ -22,8 +22,9 @@
 # not complete or a bounded run was abandoned. 255 means unknown remote
 # completion, so a caller preserves its route and reconciles on the same host
 # instead of treating it as a refusal.
-# FM_REMOTE_READINESS_OUT always holds the output of the last run, which carries
-# the check lines, the remaining human: gaps, and their exact operator actions.
+# FM_REMOTE_READINESS_OUT holds the output of the last run, which carries the
+# check lines, the remaining human: gaps, and their exact operator actions;
+# a bounded run abandoned at its bound leaves it empty.
 
 # FM_REMOTE_READINESS_OUT is consumed by the sourcing caller, so its every
 # assignment reads as unused here; the directive below is file-wide because it
@@ -36,30 +37,24 @@ FM_REMOTE_READINESS_LIB_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd 
 
 FM_REMOTE_READINESS_OUT=
 
-# One doctor run on the route's host. An empty bound runs it unbounded, the way
-# routed work runs; a positive bound abandons it and its whole process group at
-# the bound, which the caller reads as unknown completion.
-fm_remote_readiness_run() { # <bin-dir> <secondmate-id> <bound-seconds|''> [doctor-args...]
-  local bin_dir=$1 id=$2 bound=$3
+# One run whose output becomes FM_REMOTE_READINESS_OUT. An empty bound runs it
+# unbounded, the way routed work runs; a positive bound abandons the run and its
+# whole process group at the bound, returns 255, and discards its partial output
+# unread, so a truncated doctor report can never stand in for a verdict.
+fm_remote_readiness_step() { # <bin-dir> <secondmate-id> <bound-seconds|''> [doctor-args...]
+  local bin_dir=$1 id=$2 bound=$3 out rc
   shift 3
   if [ -n "$bound" ]; then
-    fm_exec_timed "$bound" 1 \
-      "$bin_dir/fm-on.sh" "$id" fm-remote-doctor.sh "$@" < /dev/null 2>&1
+    out=$(fm_exec_timed "$bound" 1 \
+      "$bin_dir/fm-on.sh" "$id" fm-remote-doctor.sh "$@" < /dev/null 2>&1)
+    rc=$?
+    if fm_timed_out "$rc"; then
+      FM_REMOTE_READINESS_OUT=
+      return 255
+    fi
   else
-    "$bin_dir/fm-on.sh" "$id" fm-remote-doctor.sh "$@" < /dev/null 2>&1
-  fi
-}
-
-# One run whose output becomes FM_REMOTE_READINESS_OUT. A bounded run abandoned
-# at its bound returns 255 and its partial output is discarded unread, so a
-# truncated doctor report can never stand in for a verdict.
-fm_remote_readiness_step() { # <bin-dir> <secondmate-id> <bound-seconds|''> [doctor-args...]
-  local out rc
-  out=$(fm_remote_readiness_run "$@")
-  rc=$?
-  if [ -n "$3" ] && fm_timed_out "$rc"; then
-    FM_REMOTE_READINESS_OUT=
-    return 255
+    out=$("$bin_dir/fm-on.sh" "$id" fm-remote-doctor.sh "$@" < /dev/null 2>&1)
+    rc=$?
   fi
   FM_REMOTE_READINESS_OUT=$out
   return "$rc"
