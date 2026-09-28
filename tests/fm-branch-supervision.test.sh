@@ -163,6 +163,29 @@ test_outcome_append_keeps_a_bounded_display_tail() {
   pass "outcome append refreshes a bounded, verbatim display tail of the newest rows without moving the cursor"
 }
 
+test_outcome_tail_keeps_whole_newest_rows_within_its_byte_budget() {
+  local home store tail first before
+  home="$TMP_ROOT/tail-bytes-home"
+  mkdir -p "$home/state"
+  store="$home/state/branch-outcomes.jsonl"
+  tail="$home/state/.branch-outcomes-tail.jsonl"
+  jq -nc 'range(1; 6) | {seq: ., epoch: 100, task: "task-\(.)", wake: "", verdict: "routine", summary: ("x" * 307200), silent: false}' \
+    > "$store"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-6 --verdict captain --summary 'small newest' >/dev/null || fail "append failed on a store of large rows"
+  [ "$(wc -c < "$tail" | tr -d ' ')" -le 1048576 ] || fail "the display tail exceeded its 1 MiB budget"
+  first=$(head -n 1 "$tail" | jq -r .seq) || fail "the display tail's first row is not whole JSON"
+  [ "$(cat "$tail")" = "$(tail -n "$((7 - first))" "$store")" ] || fail "the display tail is not a verbatim suffix of the store"
+  before=$(sed -n "$((first - 1))p" "$store" | wc -c | tr -d ' ')
+  [ $(( $(wc -c < "$tail" | tr -d ' ') + before )) -gt 1048576 ] || fail "the display tail dropped a row that fit its budget"
+
+  jq -nc '{seq: 7, epoch: 100, task: "task-7", wake: "", verdict: "routine", summary: ("y" * 1100000), silent: false}' >> "$store"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-8 --verdict routine --summary 'after the oversized row' >/dev/null || fail "append failed after an oversized row"
+  [ "$(jq -r .seq "$tail")" = 8 ] || fail "a row larger than the budget did not leave the display tail to the rows after it"
+  pass "the display tail keeps only whole newest rows within its 1 MiB budget, never shortening one"
+}
+
 test_outcome_seed_tail_creates_only_an_absent_display_tail() {
   local home store tail out
   home="$TMP_ROOT/tail-seed-home"
@@ -1433,6 +1456,7 @@ WRAPPER
 test_branch_prompt_is_byte_stable_and_above_cache_floor
 test_outcome_store_is_append_only_with_cursor_reads
 test_outcome_append_keeps_a_bounded_display_tail
+test_outcome_tail_keeps_whole_newest_rows_within_its_byte_budget
 test_outcome_seed_tail_creates_only_an_absent_display_tail
 test_outcome_startup_replay_preserves_silence
 test_outcome_startup_replay_stops_at_captain_barrier

@@ -100,6 +100,11 @@ const sites = new Map<string, { columns: number; rows: number }>();
 /** How often the supervision notes check the store's tail copy and the host's latch. */
 const BRANCH_NOTES_POLL_MS = 3000;
 /**
+ * A file changed this recently may be replaced again within its timestamp's resolution
+ * at the same size, so its size and time do not yet prove a later read unchanged.
+ */
+const SETTLED_MS = 5000;
+/**
  * The mod's store key for the sequence each session has followed the store through:
  * Claude Code 2.1.283 keeps `$.ui.log` lines in the session and restores them on
  * `--continue`, so a resumed session replays only what it has not already shown.
@@ -234,23 +239,28 @@ function doorbellIsOperational($: EngineInterface, text: string): Promise<boolea
   return verdict;
 }
 
-/** A file's text with the size and time it was read at, or undefined when it is missing or unchanged. */
+/**
+ * A file's text with the size and time it was read at, or undefined when it is missing or
+ * unchanged. A file too recently changed has no stamp, so the next check reads it again.
+ */
 async function readIfChanged(
   $: EngineInterface,
   path: string,
   stamp: string | undefined,
-): Promise<{ stamp: string; text: string } | undefined> {
+): Promise<{ stamp: string | undefined; text: string } | undefined> {
   let current: string;
+  let settled: boolean;
   try {
     if (!(await $.fs.exists(path))) return undefined;
     const stat = await $.fs.stat(path);
     current = `${stat.size}:${stat.mtimeMs}`;
+    settled = (await $.clock.now()) - stat.mtimeMs >= SETTLED_MS;
   } catch {
     return undefined;
   }
   if (current === stamp) return undefined;
   const text = await readText($, path);
-  return text === undefined ? undefined : { stamp: current, text };
+  return text === undefined ? undefined : { stamp: settled ? current : undefined, text };
 }
 
 /** Replay the due outcomes, then follow the store from its current tail. */

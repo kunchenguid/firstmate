@@ -58,8 +58,11 @@
 #     ready marker is absent or invalid, on every harness; only a genuine store
 #     fault keeps the lost-wake backstop skipped.
 #   - Tail copy: $STATE/.branch-outcomes-tail.jsonl holds the newest
-#     OUTCOME_TAIL_ROWS store lines verbatim, replaced atomically after each
-#     append. It is a read-only display source for readers that cannot read the
+#     OUTCOME_TAIL_ROWS store lines verbatim, and only as many of the newest
+#     as fit in OUTCOME_TAIL_MAX_BYTES (1 MiB): older rows leave first, a row
+#     is never shortened, and a newest row larger than the budget leaves the
+#     copy empty. It is replaced atomically after each append. It is a
+#     read-only display source for readers that cannot read the
 #     unbounded store (the Claude Code Calm mod's supervision notes, whose file
 #     read rejects over 4 MiB); it is never authoritative, and a failed refresh
 #     leaves the stored outcome and its delivery untouched. seed-tail creates
@@ -147,6 +150,7 @@ OUTCOME_INDEX_MAX_BYTES=512
 OUTCOME_INDEX_READY="$STATE/.branch-outcome-index-ready"
 OUTCOME_TAIL="$STATE/.branch-outcomes-tail.jsonl"
 OUTCOME_TAIL_ROWS=200
+OUTCOME_TAIL_MAX_BYTES=1048576
 # The "recordedAgo" field present and unprocessed add to captain rows (see the
 # usage above).
 # Callers pass --argjson now "$(date +%s)".
@@ -349,7 +353,16 @@ EOF
 write_outcome_tail() {
   local tmp
   tmp=$(mktemp "$STATE/.branch-outcomes-tail.XXXXXX") || return 1
-  if ! { tail -n "$OUTCOME_TAIL_ROWS" "$STORE" > "$tmp" && mv -f -- "$tmp" "$OUTCOME_TAIL"; }; then
+  if ! { tail -n "$OUTCOME_TAIL_ROWS" "$STORE" | LC_ALL=C awk -v budget="$OUTCOME_TAIL_MAX_BYTES" '
+        { row[NR] = $0 }
+        END {
+          first = NR + 1
+          while (first > 1 && total + length(row[first - 1]) + 1 <= budget) {
+            first--
+            total += length(row[first]) + 1
+          }
+          for (i = first; i <= NR; i++) print row[i]
+        }' > "$tmp" && mv -f -- "$tmp" "$OUTCOME_TAIL"; }; then
     rm -f -- "$tmp"
     return 1
   fi

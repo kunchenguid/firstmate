@@ -120,6 +120,24 @@ describe("supervision notes", () => {
     ]);
   });
 
+  test("a same-size replacement within one timestamp tick is still read and shown", async ($, on) => {
+    const { clock, files, mtimes, journal } = world(on);
+    await clock.set(1_000_000);
+    mtimes.set(TAIL, 1_000_000);
+    files.set(TAIL, tail(history));
+    files.set(CURSOR, "5\n");
+    files.set(PROCESSED, "3\n");
+    await $.session.start(sessionStart);
+    expect(journal.logs).toEqual([]);
+    const replaced = tail([...history.slice(1), { seq: 6, task: "fm-new", verdict: "captain", summary: "fresh anchor here" }]);
+    expect(replaced.length).toBe(tail(history).length);
+    files.set(TAIL, replaced);
+    await clock.advance(POLL);
+    expect(journal.logs).toEqual(["⚓ [seq 6] fm-new: fresh anchor here"]);
+    await clock.advance(POLL * 3);
+    expect(journal.logs).toHaveLength(1);
+  });
+
   test("a latch trip and its recovery each write Pi's health note, and a new session key alone writes none", async ($, on) => {
     const { clock, files, journal } = world(on);
     files.set(HEALTH, health("s1", 0));

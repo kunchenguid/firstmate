@@ -35,6 +35,8 @@ export type Journal = {
 export type World = {
   clock: MockClock;
   files: Map<string, string>;
+  /** A file's modification time, overriding the default stamp derived from its content. */
+  mtimes: Map<string, number>;
   journal: Journal;
   /** Set to deny every `$.ui.blit` from now on, as an unmounted site does. */
   denyBlits: (reason: string | undefined) => void;
@@ -74,6 +76,7 @@ export function world(on: On, options: WorldOptions = {}): World {
   mock.store(on);
   let sessionId = "session-1";
   const files = new Map<string, string>();
+  const mtimes = new Map<string, number>();
   if (options.preference !== undefined) files.set(PREFERENCE, options.preference);
   const journal: Journal = {
     commands: [],
@@ -95,12 +98,13 @@ export function world(on: On, options: WorldOptions = {}): World {
     return files.has(e.path) ? { value: files.get(e.path)! } : { deny: `ENOENT: ${e.path}` };
   });
   on("fs.exists", async (_$, e) => ({ value: files.has(e.path) }));
-  // A file's time is its content's hash, so every changed content restamps it.
+  // A file's time is its content's hash unless a test sets it, so every changed content restamps it.
   on("fs.stat", async (_$, e) => {
     const text = files.get(e.path);
     if (text === undefined) return { deny: `ENOENT: ${e.path}` };
     let mtimeMs = 0;
     for (const char of text) mtimeMs = (mtimeMs * 31 + char.codePointAt(0)!) % 2147483647;
+    mtimeMs = mtimes.get(e.path) ?? mtimeMs;
     return { value: { kind: "file" as const, size: text.length, mtimeMs } };
   });
   on("ui.log", async (_$, e) => {
@@ -163,6 +167,7 @@ export function world(on: On, options: WorldOptions = {}): World {
   return {
     clock,
     files,
+    mtimes,
     journal,
     denyBlits: (reason) => {
       blitDenial = reason;
