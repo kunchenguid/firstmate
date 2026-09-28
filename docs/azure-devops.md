@@ -53,8 +53,8 @@ An accepted request with unconfirmed landing returns a diagnostic and leaves mon
 
 Only a `completed` PR with successful merge evidence is considered merged.
 An `abandoned` PR is not a merge, even if its branch was pushed or equivalent content happens to be on the default branch.
-Azure cleanup additionally proves that clean local work is contained in the completed PR or landed default-branch content; later unlanded edits and commits are preserved.
-`bin/fm-teardown.sh` owns that complete cleanup test.
+Azure cleanup additionally proves that clean local work is contained in the completed PR's actual merge result or landed default-branch content; later unlanded edits and commits are preserved.
+`bin/fm-teardown.sh` owns the complete cleanup test, using the shared proof whose evidence and ambiguity limits are owned by `bin/fm-content-containment.py`.
 
 ## Conservative limits and verification
 
@@ -65,7 +65,7 @@ An unsupported policy response or unknown merge strategy needs operator attentio
 No optional tool installation or authentication repair is performed automatically.
 
 `tests/azure-pr-contract.py`, invoked by `tests/fm-pr-merge.test.sh`, covers the Azure CLI boundary with synthetic REST responses, including identity parsing, current policy revisions, build/check failures, revision races and accepted-but-unconfirmed completion.
-`tests/fm-teardown.test.sh` covers completed versus abandoned cleanup with real disposable Git repositories.
+`tests/fm-teardown.test.sh` covers completed versus abandoned cleanup, the combined positive/negative rewritten-history matrix with real disposable Git repositories, and independent small-history alignment oracles.
 `tests/fm-task-delivery.test.sh` and `tests/fm-review-diff.test.sh` cover prefix selection through scaffold, promotion, and comparison.
 These are deterministic regressions, not evidence that an Azure merge was performed live.
 A live completion test requires a separately approved disposable Azure repository; reading an existing project never authorizes a test PR, vote, policy change or merge there.

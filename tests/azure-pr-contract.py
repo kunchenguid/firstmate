@@ -173,6 +173,15 @@ class AzureContract(unittest.TestCase):
                                                           deleteSourceBranch=False, transitionWorkItems=False)))
         self.assertEqual(self.run_helper("merged").stdout, "merged\n")
 
+    def test_landed_identity_is_actual_merge_result_not_source_snapshot(self):
+        self.save("pullRequests", dict(self.pr, status="completed", closedDate="2026-01-01T00:00:00Z"))
+        result = self.run_helper("landed")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, MERGE + "\n")
+        self.assertNotEqual(MERGE, HEAD)
+        self.save("pullRequests", dict(self.pr, status="completed", closedDate="2026-01-01T00:00:00Z", lastMergeCommit={}))
+        self.assertNotEqual(self.run_helper("landed").returncode, 0)
+
     def test_refusal_matrix(self):
         cases = [dict(status="abandoned"), dict(isDraft=True), dict(mergeStatus="conflicts"),
                  dict(mergeStatus="queued"), dict(autoCompleteSetBy=dict(id="someone")),
