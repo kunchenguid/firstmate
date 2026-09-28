@@ -960,19 +960,19 @@ Scope of the earlier evidence: the installed signed `pi` CLI (0.82.0 at verifica
 The extension executes inside the signed CLI's own runtime, so a CLI upgrade can drift ahead of the pinned npm surface; refresh the SDK construction, picker, renderer, and type evidence after every Pi upgrade by rerunning the applicable live guard probes, picker regression, and strict typecheck above (point `FM_PI_PACKAGE_DIR` at a matching npm install when one exists).
 The live guard now drives both extensions through the watcher-owned settlement handshake, requires rejected branch settlement before main delivery, and verifies successor-delivery confirmation; rerun it against the matching importable Pi package to refresh end-to-end fallback evidence.
 
-### 2026-09-24 Pi 0.87.1 and Codex compatibility 0.0.16
+### 2026-09-28 Pi/Codex compatibility version-gate removal
 
-On Linux x86_64 with Node v22.22.2, the user installation at `/home/chengyuhang/.npm-global/bin/pi` reported Pi 0.87.1 and the Pi user-package store reported `pi-openai-codex-compat` 0.0.16.
-The compatibility package declared the Pi peer range `>=0.87.0 <0.88.0`.
+The branch loader no longer rejects initialization solely because Pi or `pi-openai-codex-compat` manifest versions differ from a pinned pair.
+The existing package identity, declared entrypoint, package provenance, extension startup, and active-tool isolation checks remain fail-closed.
 The host system library exposed through `GLIBCXX_3.4.30`, so `tree-sitter` 0.25.1 and `tree-sitter-bash` 0.25.1 were rebuilt from their npm sources with `npm rebuild --prefix ~/.pi/agent/npm tree-sitter tree-sitter-bash --build-from-source` rather than loading the incompatible published `tree-sitter` prebuild.
 Both rebuilt bindings resolved from their `build/Release` directories and loaded successfully together with `node-pty` 1.2.0-beta.15.
 
-The following commands exercised the exact installed pair and tracked integration:
+The following commands exercised the tracked integration, including the portable non-pinned-version admission case:
 
 ```text
 $ tests/fm-pi-branch-extension.test.sh
-ok - Codex branch lazily initializes only the verified Pi 0.87.1 and compatibility 0.0.16 pair without widening tools
-ok - unsupported versions plus package identity, provenance, containment, startup, and unexpected-tool failures return Codex wakes to main before prompting
+ok - Codex branch initializes with non-pinned Pi and compatibility versions without widening tools
+ok - package identity, provenance, containment, startup, and unexpected-tool failures return Codex wakes to main before prompting
 
 $ FM_PI_PACKAGE_DIR=<installed-pi> tests/fm-pi-primary-types.test.sh
 ok - tracked Pi extensions pass strict no-emit typecheck against Pi 0.87.1
@@ -1024,7 +1024,7 @@ On Linux x86_64 with Node v22.22.2, the installed Pi 0.85.1 CLI and an isolated 
 The fixture starts with delivered legacy endpoint outcomes and no branch pointer, lets the real primary extension reconcile history, then offers its first eligible synthetic notification through Pi's event bus.
 The fixture pins `minimal`; Pi retains its supported-level clamp, producing `low` in the current Luna request.
 It verifies lazy branch creation, provider startup, the exact `read`, guarded `bash`, and `fm_branch_report` request payload, a new report in the durable store and main's active session tree, and a persisted native compaction checkpoint.
-The portable suite at that time separately checked that cache migration preserved authoritative history and unprocessed captain results, and that mismatched, non-semver, missing, and future version declarations did not prevent valid runtime startup; the [current exact-pair admission evidence](#2026-09-24-pi-0871-and-codex-compatibility-0016) supersedes that historical admission behavior.
+The portable suite at that time separately checked that cache migration preserved authoritative history and unprocessed captain results, and that mismatched, non-semver, missing, and future version declarations did not prevent valid runtime startup; the [current version-gate removal evidence](#2026-09-28-picodex-compatibility-version-gate-removal) records the restored behavior.
 Package identity, provenance, containment, startup, failed tool restoration, and unexpected tool mutations retain their safe fallback regressions.
 
 ```sh
