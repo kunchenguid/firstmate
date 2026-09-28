@@ -47,18 +47,20 @@ validate_bound FM_BEARINGS_PR_LIMIT "$FM_BEARINGS_PR_LIMIT"
 usage() {
   cat <<'EOF'
 usage: fm-bearings-snapshot.sh [--json] [--include-prs] [--fields <list>]
+                               [--task <task-id>]
                                [--all-in-flight] [--all-decisions]
+                               [--all-retained]
                                [--all-landed]
                                [--all-reports] [--all-queued]
                                [--all-recorded-prs] [--all-unhealthy]
                                [--all-pr-repos]
 
 Compact bearings projection over fm-fleet-snapshot.sh. TOON by default.
-Closed non-working records appear separately; --all-in-flight also reveals all retained records.
+Closed non-working records are counted by default; --all-retained reveals their bounded detail.
 --include-prs additionally performs live GitHub discovery and checks.
 
 Default fields: schema, home, generated, prs, in_flight{id,kind,state,repo,name,doing},
-  retained_records{id,state,open_decisions,reason},
+  retained_record_count, retained_records{id,state,open_decisions,reason},
   decisions_open{id,key,verb,summary,owner}, landed{id,what,artifact,owner},
   gates{id,title,blocked_by,reason,owner,filed}, reports{id,path}, recorded_prs{id,url},
   unhealthy_endpoints{...} (only when non-empty), omitted{surface,reveal}.
@@ -66,7 +68,10 @@ Default gates are selected newest filed first before their bound; undated gates
   retain input order after dated gates.
 landed shows this home's Done rows, bounded by FM_BEARINGS_LANDED.
   --all-landed reveals the complete newest-first set.
+Targeted task read: --task <task-id> returns only that task's current target,
+  effective delivery authority, remaining issue, exact backlog detail, and evidence paths.
 Opt-in surfaces: --fields bodies|paths|actions|endpoints, --all-in-flight,
+  --all-retained,
   --all-decisions (all open decisions and captain holds in the bounded snapshot),
   --all-landed, --all-reports, --all-queued, --all-recorded-prs,
   --all-unhealthy, --all-pr-repos, --include-prs (adds candidate_prs).
@@ -79,12 +84,14 @@ INCLUDE_PRS=0
 ALL_REPORTS=0
 ALL_QUEUED=0
 ALL_IN_FLIGHT=0
+ALL_RETAINED=0
 ALL_DECISIONS=0
 ALL_LANDED=0
 ALL_RECORDED_PRS=0
 ALL_UNHEALTHY=0
 ALL_PR_REPOS=0
 FIELDS=""
+TASK_ID=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --json) FORMAT=json ;;
@@ -92,6 +99,7 @@ while [ $# -gt 0 ]; do
     --all-reports) ALL_REPORTS=1 ;;
     --all-queued) ALL_QUEUED=1 ;;
     --all-in-flight) ALL_IN_FLIGHT=1 ;;
+    --all-retained) ALL_RETAINED=1 ;;
     --all-decisions) ALL_DECISIONS=1 ;;
     --all-landed) ALL_LANDED=1 ;;
     --all-recorded-prs) ALL_RECORDED_PRS=1 ;;
@@ -99,13 +107,66 @@ while [ $# -gt 0 ]; do
     --all-pr-repos) ALL_PR_REPOS=1 ;;
     --fields) shift; FIELDS=${1:-} ;;
     --fields=*) FIELDS=${1#--fields=} ;;
+    --task) shift; TASK_ID=${1:-} ;;
+    --task=*) TASK_ID=${1#--task=} ;;
     -h|--help) usage; exit 0 ;;
     *) usage >&2; exit 2 ;;
   esac
   shift
 done
 
+case "$TASK_ID" in
+  ''|*[!A-Za-z0-9._-]*)
+    [ -z "$TASK_ID" ] || { echo "fm-bearings-snapshot: invalid task id" >&2; exit 2; }
+    ;;
+esac
+if [ -n "$TASK_ID" ] && { [ "$INCLUDE_PRS" = 1 ] || [ -n "$FIELDS" ] || [ "$ALL_REPORTS" = 1 ] \
+  || [ "$ALL_QUEUED" = 1 ] || [ "$ALL_IN_FLIGHT" = 1 ] || [ "$ALL_RETAINED" = 1 ] \
+  || [ "$ALL_DECISIONS" = 1 ] || [ "$ALL_LANDED" = 1 ] || [ "$ALL_RECORDED_PRS" = 1 ] \
+  || [ "$ALL_UNHEALTHY" = 1 ] || [ "$ALL_PR_REPOS" = 1 ]; }; then
+  echo "fm-bearings-snapshot: --task cannot be combined with fleet expansion options" >&2
+  exit 2
+fi
+
 command -v jq >/dev/null 2>&1 || { echo "fm-bearings-snapshot: jq not found" >&2; exit 1; }
+
+print_model() {  # <json-model>
+  local model=$1 toon
+  if [ "$FORMAT" = json ]; then
+    printf '%s\n' "$model"
+    return
+  fi
+  toon=$(printf '%s\n' "$model" | jq -r '
+    def q:
+      tostring
+      | if (. == "")
+          or test("^\\s|\\s$")
+          or (. == "true" or . == "false" or . == "null")
+          or test("^-?[0-9]+(\\.[0-9]+)?([eE][+-]?[0-9]+)?$")
+          or test("[:\"\\\\\\[\\]{},]")
+          or test("[[:cntrl:]]")
+          or test("^-")
+        then "\"" + (gsub("\\\\"; "\\\\") | gsub("\""; "\\\"") | gsub("\n"; "\\n") | gsub("\r"; "\\r") | gsub("\t"; "\\t")) + "\""
+        else . end;
+    def scal:
+      if . == null then "null"
+      elif type == "boolean" then (if . then "true" else "false" end)
+      elif type == "number" then tostring
+      else q end;
+    def emit($k; $v):
+      if ($v | type) == "array" then
+        if ($v | length) == 0 then "\($k): []"
+        else
+          ($v[0] | keys_unsorted) as $ks
+          | ( "\($k)[\($v | length)]{\($ks | map(q) | join(","))}:",
+              ($v[] as $row | "  " + ([ $ks[] as $kk | ($row[$kk] | scal) ] | join(","))) )
+        end
+      else "\($k): " + ($v | scal)
+      end;
+    [ to_entries[] | emit(.key; .value) ] | join("\n")
+  ') || { echo "fm-bearings-snapshot: TOON rendering failed" >&2; return 1; }
+  printf '%s\n' "$toon"
+}
 
 # The shared read-only away-return owner is consulted, not obeyed. An active
 # away window still refuses here: the correct answer to a bearings request then
@@ -132,9 +193,41 @@ if [ "$GUARD_RC" -eq 4 ]; then
 fi
 
 NOW=${FM_BEARINGS_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
-SNAP=$(FM_SNAPSHOT_NOW="$NOW" "$FLEET" --json) || exit $?
+if [ -n "$TASK_ID" ]; then
+  SNAP=$(FM_SNAPSHOT_NOW="$NOW" "$FLEET" --json --task "$TASK_ID") || exit $?
+else
+  SNAP=$(FM_SNAPSHOT_NOW="$NOW" "$FLEET" --json) || exit $?
+fi
 HOME_LABEL=$(printf '%s' "$SNAP" | jq -er '.fm_home | strings | split("/") | (.[-2:] | join("/"))') \
   || { echo "fm-bearings-snapshot: invalid canonical snapshot" >&2; exit 1; }
+
+if [ -n "$TASK_ID" ]; then
+  MODEL=$(printf '%s' "$SNAP" | jq -e --arg id "$TASK_ID" --arg home "$HOME_LABEL" --arg now "$NOW" '
+    ([.backlog.records[] | select(.structured and .id == $id)] | if length == 1 then .[0] else null end) as $record
+    | ([.tasks[] | select(.id == $id)] | if length == 1 then .[0] else null end) as $task
+    | if $record == null and $task == null then error("task not found: " + $id) else
+      {
+        schema:"fm-task-context.v1", home:$home, generated:$now, id:$id,
+        title:($record.title // $id), repo:($record.repo // $task.project // null),
+        kind:($record.kind // $task.kind // null), backlog_state:($record.state // null),
+        current_state:($task.current_state.state // null),
+        authority_brief:(.roots.data + "/" + $id + "/brief.md"),
+        delivery_mode:($task.mode // null), merge_posture:($task.yolo // null),
+        remaining_request:($record.hold_reason // null),
+        blocked_by:(($record.unresolved_blocker_ids // []) | join(",")),
+        hold_kind:($record.hold_kind // null), hold_until:($record.hold_until // null),
+        current_detail:($task.current_state.detail // null),
+        backlog_path:.backlog.path, backlog_row:($record.raw // null),
+        backlog_body:(($record.body_lines // []) | map({line:.})),
+        status_path:($task.paths.status_log.path // null), report_path:($task.paths.report.path // null),
+        lifecycle_path:(.roots.data + "/" + $id + "/lifecycle.json"),
+        omitted:[{surface:"other fleet tasks and history",reveal:"run the default snapshot"}]
+      }
+    end
+  ') || { echo "fm-bearings-snapshot: targeted task read failed" >&2; exit 1; }
+  print_model "$MODEL"
+  exit $?
+fi
 
 # --- optional live GitHub PR enrichment -------------------------------------
 PR_STATUS='not_requested (run: /bearings include PRs)'
@@ -248,6 +341,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   --argjson unhealthy_n "$FM_BEARINGS_UNHEALTHY" \
   --argjson include_prs "$INCLUDE_PRS" \
   --argjson all_in_flight "$ALL_IN_FLIGHT" \
+  --argjson all_retained "$ALL_RETAINED" \
   --argjson all_decisions "$ALL_DECISIONS" \
   --argjson all_landed "$ALL_LANDED" \
   --argjson all_reports "$ALL_REPORTS" \
@@ -349,7 +443,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
          | select(.structured and .hold_bucket != null)
          | select(($all_decisions == 1) or live_captain_call)
          | {id,key:.id,verb:"captain-hold",
-            summary:hold_summary(.title; .hold_reason),owner:"(main)"} ]) as $decisions_all
+            summary:hold_summary(.title; .hold_reason),owner:"(main)",
+            retrieve:("--task " + .id)} ]) as $decisions_all
   | ([ .backlog.records[]
          | . as $record
          | select(.structured and projected_deferred_hold) ]
@@ -421,12 +516,13 @@ MODEL=$(printf '%s' "$SNAP" | jq \
       generated: $now,
       prs: $prs,
       in_flight: (if $all_in_flight == 1 then $in_flight_all else $in_flight_all[:$in_flight_n] end),
+      retained_record_count: ([.tasks[] | select(.retained_record == true)] | length),
       retained_records: ([.tasks[] | select(.retained_record == true)
         | {id,state:.current_state.state,open_decisions:.hints.open_decisions,
            reason:(if .record_disposition == "archive_done"
                    then "backlog completion archived; execution record retained, cleanup unverified"
                    else "backlog closed; execution record retained, cleanup unverified" end)}]
-        | if $all_in_flight == 1 then . else .[:$in_flight_n] end),
+        | if $all_retained == 1 then .[:$in_flight_n] else [] end),
       decisions_open: (if $all_decisions == 1 then $decisions_all else $decisions_all[:$decisions_n] end),
       landed: ($done | map({id, what:(.title | trunc(70)),
                             artifact:(landed_artifact // "-"),owner:.home_id})),
@@ -457,7 +553,9 @@ MODEL=$(printf '%s' "$SNAP" | jq \
          | if $n > 0 then {surface:("main unstructured current backlog row(s): \($n)"), reveal:"inspect main data/backlog.md In flight and Queued free-form rows"} else empty end),
         (if $all_in_flight == 0 and ($in_flight_all | length) > $in_flight_n then {surface:("in_flight showing \($in_flight_n) of \($in_flight_all | length)"), reveal:"--all-in-flight"} else empty end),
         (([$snap.tasks[] | select(.retained_record == true)] | length) as $n
-         | if $all_in_flight == 0 and $n > $in_flight_n then {surface:("retained records showing \($in_flight_n) of \($n)"), reveal:"--all-in-flight"} else empty end),
+         | if $all_retained == 0 and $n > 0 then {surface:("retained records omitted: \($n)"), reveal:"--all-retained"}
+           elif $all_retained == 1 and $n > $in_flight_n then {surface:("retained records showing \($in_flight_n) of \($n)"), reveal:"raise FM_BEARINGS_IN_FLIGHT"}
+           else empty end),
         (if $all_decisions == 0 and ($decisions_all | length) > $decisions_n then {surface:("decisions_open showing \($decisions_n) of \($decisions_all | length)"), reveal:"--all-decisions"} else empty end),
         (if $all_decisions == 0 and $decisions_marked_deferred > 0 then {surface:("captain holds bucketed blocked, dated, or aged: \($decisions_marked_deferred)"), reveal:"--all-decisions"} else empty end),
         (if $all_queued == 0 and ($gates_all | length) > $gates_n then {surface:("gates showing \($gates_n) of \($gates_all | length)"), reveal:"--all-queued"} else empty end),
@@ -469,43 +567,4 @@ MODEL=$(printf '%s' "$SNAP" | jq \
         (if $include_prs == 1 then empty else {surface:"live PR discovery + checks", reveal:"--include-prs"} end) ]) }
 ') || { echo "fm-bearings-snapshot: projection failed" >&2; exit 1; }
 
-if [ "$FORMAT" = json ]; then
-  printf '%s\n' "$MODEL"
-  exit 0
-fi
-
-# --- TOON renderer (output boundary; parity with the JSON model) ------------
-# The model is a flat object of scalar fields plus arrays of uniform scalar
-# objects, so the encoder only needs object scalars, the tabular array form
-# (key[N]{fields}: + comma rows at +2 indent), and the empty-array form (key: []),
-# per the TOON spec. Quoting follows the spec exactly.
-TOON=$(printf '%s\n' "$MODEL" | jq -r '
-  def q:
-    tostring
-    | if (. == "")
-        or test("^\\s|\\s$")
-        or (. == "true" or . == "false" or . == "null")
-        or test("^-?[0-9]+(\\.[0-9]+)?([eE][+-]?[0-9]+)?$")
-        or test("[:\"\\\\\\[\\]{},]")
-        or test("[[:cntrl:]]")
-        or test("^-")
-      then "\"" + (gsub("\\\\"; "\\\\") | gsub("\""; "\\\"") | gsub("\n"; "\\n") | gsub("\r"; "\\r") | gsub("\t"; "\\t")) + "\""
-      else . end;
-  def scal:
-    if . == null then "null"
-    elif type == "boolean" then (if . then "true" else "false" end)
-    elif type == "number" then tostring
-    else q end;
-  def emit($k; $v):
-    if ($v | type) == "array" then
-      if ($v | length) == 0 then "\($k): []"
-      else
-        ($v[0] | keys_unsorted) as $ks
-        | ( "\($k)[\($v | length)]{\($ks | map(q) | join(","))}:",
-            ($v[] as $row | "  " + ([ $ks[] as $kk | ($row[$kk] | scal) ] | join(","))) )
-      end
-    else "\($k): " + ($v | scal)
-    end;
-  [ to_entries[] | emit(.key; .value) ] | join("\n")
-') || { echo "fm-bearings-snapshot: TOON rendering failed" >&2; exit 1; }
-printf '%s\n' "$TOON"
+print_model "$MODEL"

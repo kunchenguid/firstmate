@@ -10,18 +10,10 @@
 # mode is refused rather than silently rendered as the pipeline contract.
 # The block opens with the fixed machine-readable "Delivery contract: mode=<mode>"
 # line that bin/fm-spawn.sh checks a ship brief against.
-# This file is the one owner of the no-mistakes `--intent` contract: only the
-# brief's `## Captain's intent` subsection plus later captain words, never
-# `## Firstmate spec` and never the worker's own tradeoffs.
-# Author the subsection body and later relays as the actual words, without
-# adding speaker labels or direct address: the heading supplies provenance and
-# is not part of --intent. A legacy mixed Task instead marks each captain line
-# with `[captain] `; the selector returns its words, not that metadata prefix.
-# Previously stored speaker labels remain readable for compatibility only.
-# Never scrub literal examples or other content the captain actually supplied.
-# The string passed must be self-sufficient - it plus the codebase reconstructs
-# roughly the same specification - so a report, decision, or PR the intent
-# refers to is written into it as substance, never left as a pointer.
+# `.agents/skills/crewmate-no-mistakes/SKILL.md` is the one owner of the
+# conditional no-mistakes intent, gate, recovery, and completion procedure.
+# This file keeps only the generated trigger and the authoritative captain-word
+# section that must be present before that skill is needed.
 # bin/fm-brief.sh scaffolds those two `# Task` subsections; bin/fm-spawn.sh and
 # bin/fm-promote.sh refuse leftover `{TASK}` / `{FIRSTMATE_SPEC}` placeholders
 # and a `## Captain's intent` line opening with a Captain label or address
@@ -197,8 +189,7 @@ fm_brief_intent_overlay() {  # <captain-intent>
 This section supersedes every earlier brief instruction about constructing `--intent`, but not later clarifications actually supplied by the captain.
 Use everything under `## Captain intent authorized for --intent` through the end of this brief, including any nested subheadings but excluding that heading, plus any later words the captain actually supplied as `--intent`; never include Firstmate specification or other mixed Task content.
 Preserve those words without adding speaker labels or direct address.
-Firstmate-authored constraints, acceptance criteria, implementation details, decisions, and tradeoffs are specification, not captain intent.
-The Definition of done's rule that `--intent` must be self-sufficient still governs the string you pass: resolve any report, decision, or PR the intent below refers to into its substance rather than passing the pointer.
+The generated Definition of done names the conditional skill that owns the full intent, gate, recovery, and completion procedure.
 
 ## Captain intent authorized for --intent
 EOF
@@ -233,15 +224,6 @@ fm_brief_intent_address_line() {  # <file>
   '
 }
 
-fm_ask_user_escalation_block() {  # <data-dir> <task-id>
-  local data=$1 id=$2
-  cat <<EOF
-   For a no-mistakes ask-user gate specifically, escalate all ask-user findings as one event plus one snapshot file, using that same shape even when the gate holds only a single ask-user finding: write only the ask-user findings, verbatim and unparaphrased (id, severity, file, line, description, authority), to \`$data/$id/nm-<run>-findings.txt\`, then report the gate with
-   \`needs-decision [key=nm-<run>-<step>]: ask-user findings=<id1>,<id2>,... file=$data/$id/nm-<run>-findings.txt\`
-   naming every ask-user finding id from that gate. The status line only points at the file; it never restates or summarizes a finding's content.
-EOF
-}
-
 fm_dod_block() {  # <mode> <task-id>
   local mode=$1 id=$2
   case "$mode" in
@@ -273,38 +255,9 @@ Delivery contract: mode=no-mistakes
 The implementation phase reaches its first delivery checkpoint only when the brief's acceptance evidence is satisfied and the result is committed on your branch.
 When that is true, append \`done: {summary}\` to the status file and stop.
 Firstmate will then instruct you on the next delivery phase.
-For an ordinary no-mistakes task, that next phase is /no-mistakes validation and PR delivery.
-For deployable ByteDance-internal code with a BITS/PPE delivery surface, do not start no-mistakes until Firstmate has loaded \`bits-development\`, delivered the exact candidate through the BITS-owned source branch, created one fresh dedicated PPE for the first delivery through the newly created Dev Task or reused that task's existing PPE for a subsequent revision, and passed the required API or end-to-end test against that exact deployment.
-On that BITS/PPE path, the final no-mistakes pass is limited to review, tests, documentation, and lint; it must not own rebase, push, PR, or CI, and any code-changing final-validation fix returns to the existing Dev Task and source branch for exact push verification, same-PPE deployment, and API Test before another final pass.
-Once the Dev Task and its dedicated PPE exist, the subsequent-revision loop must not create a new Dev Task, MR, binding, Change Card, snapshot, environment, or PPE.
-
-You drive no-mistakes by responding to its gates, not by implementing fixes.
-Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
-When starting no-mistakes, pass \`--intent\` as only this brief's \`## Captain's intent\` subsection body, not its heading, plus any later words the captain actually said.
-Preserve the actual words without adding speaker labels or direct address; the subsection heading supplies provenance outside the pipeline input.
-For a legacy brief with no such subsection, include only words on lines marked \`[captain] \`, excluding that metadata prefix; never copy its mixed \`# Task\` wholesale.
-If it has no provenance-marked captain words, stop and ask firstmate instead of starting no-mistakes.
-Do not include \`## Firstmate spec\`, later Firstmate build constraints, or your own decisions and tradeoffs.
-The \`--intent\` string you pass must be self-sufficient: that string plus the codebase must let a reader reconstruct roughly the same specification, without depending on a separate report, a PR, or context that lives only in this conversation.
-When the captain's intent refers to a report, decision, or PR ("do items 1, 2, 3, and 7 of the report"), write the substance of the referenced items into \`--intent\` in the captain's terms, not only the pointer; that substance is the captain's ask by reference, while Firstmate's build instructions and your own decisions still stay out.
-This replaces the no-mistakes skill's advice to enrich \`--intent\` with decisions and tradeoffs; that advice does not apply to Firstmate-dispatched work.
-Do not hand-edit, commit, or fix findings yourself while a run is active - the pipeline applies every fix.
-
-One drive call blocks until the next gate or outcome, which can outlive a harness command limit; one fix round is capped around thirty minutes and multiple rounds can chain.
-So background the drive call and poll \`no-mistakes axi status\` from a separate call instead of sitting in one blocking hold your harness will kill.
-Where a harness's own command limit is not established, assume it bounds commands and use that same background-and-poll shape.
-A killed or timed-out call is never evidence the daemon died: the daemon accepts your response immediately and runs the round in the background, so the call was only ever waiting for a read while the run kept working.
-Reattach and keep going rather than reporting the pipeline blocked; rule 7 owns the checks that decide when a pipeline block is real.
-
-Two firstmate-specific rules layer on top of that guidance:
-- ask-user findings are never yours to answer: escalate to firstmate using rule 6's ask-user format and stop.
-  Firstmate applies \`ask-user-authority\` and obtains any required captain decision.
-  When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
-- NEVER pass \`--yes\` (or \`-y\`) to \`no-mistakes axi run\` or \`no-mistakes axi respond\`. It is banned fleet-wide.
-  It auto-resolves every gate including ask-user findings with no escalation, bypassing firstmate's authority check; answering your own ask-user finding is a hard rule violation.
-
-On the ordinary path, after /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. Your worker phase is finished; firstmate still owns semantic acceptance and the configured merge decision.
-On the BITS/PPE path, follow \`bits-development\` for the ready signal because BITS owns the MR and CI while no-mistakes validates only the already PPE-proven candidate.
+Before starting or resuming no-mistakes, handling one of its gates, or reporting a pipeline failure, read \`$FM_ROOT/.agents/skills/crewmate-no-mistakes/SKILL.md\` completely and follow it.
+That skill owns the conditional intent, ask-user, daemon-recovery, BITS/PPE boundary, and CI-ready completion procedure.
+Never merge the PR; Firstmate owns semantic acceptance and the configured merge decision.
 EOF
       ;;
     *)

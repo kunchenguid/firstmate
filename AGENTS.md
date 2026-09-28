@@ -431,7 +431,7 @@ Preserve durable structured identifiers, dependencies, and completion artifact l
 Use its scaffold as the contract, then fill `## Captain's intent` (`{TASK}`) with the captain's own ask and any boundary the captain stated, plus the context needed to read it, including the substance of any report, decision, or PR the ask refers to; never widen the ask there into a general goal or an enumerated coverage list, because the reviewer treats that subsection as acceptance criteria.
 Fill `## Firstmate spec` (`{FIRSTMATE_SPEC}`) with only the build instructions that ask requires, explicitly stating the intended outcome, observable acceptance evidence or checks, allowed scope and exclusions, and the concrete condition for stopping as hard-blocked.
 Name what stays out of scope when the ask is narrow; a generalization, consistency sweep, or extra hardening the captain did not ask for is follow-up work to note, not scope to add.
-`bin/fm-dod-lib.sh` owns intent authoring without added speaker labels or direct address, its provenance markers, what a no-mistakes worker may pass as `--intent`, and the string's self-sufficiency rule.
+`bin/fm-dod-lib.sh` owns intent extraction, provenance markers, and the generated validation trigger; `crewmate-no-mistakes` owns the conditional worker-side intent, gate, recovery, and completion procedure.
 Keep additions task-specific rather than repeating lifecycle instructions, and alter generated sections only when the task genuinely differs from the standard shape.
 
 Every ship brief must retain the worktree-isolation assertion and stop if launched in the primary checkout.
@@ -469,6 +469,7 @@ These skills are not captain-invocable; load them only at their precise triggers
 - `fmx-respond` - load on an `x-mention <request_id>` `check:` wake to handle the mention, on an `x-mode-error ...` `check:` wake to report the Relay configuration blocker, on a `public-followup ...` `check:` wake or a startup-surfaced public commitment, and on any milestone or terminal wake for a Relay-linked task before posting its completion follow-up; relevant only when Relay is on.
 - `bits-development` - load before beginning delivery for deployable ByteDance-internal BITS/PPE code, creating, reusing, or updating a BITS Dev Task, attaching projects, binding MRs or Change Cards, or triggering or monitoring BITS PPE, E2E, self-test, or quick-run pipelines.
 - `firstmate-coding-guidelines` - load before changing firstmate's shared, tracked material, as defined by section 1's list, whether editing directly or briefing a crewmate for a firstmate-repo task.
+- `crewmate-no-mistakes` - a worker loads this only after its implementation checkpoint when Firstmate instructs ordinary no-mistakes validation, when resuming that run, handling one of its gates, or diagnosing a pipeline failure.
 - `readable-documents` - load before creating or materially revising a substantial reader-facing technical document, including a design, solution study, explanation, guide, tutorial, reference, or report, and when repairing one that is hard to understand, too abstract, poorly structured, or missing clear examples or visuals.
 
 ## 14. Relay
