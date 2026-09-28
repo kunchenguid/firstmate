@@ -51,6 +51,7 @@ import {
   claimNextOutbound,
   claimTransportOwner,
   cleanupProcessedFeishuBodies,
+  convergeConfiguredSession,
   createPairing,
   failOutboundAttempt,
   findInboundByDeliveryRef,
@@ -310,6 +311,25 @@ const emptyFixture = stateOnlyHome("empty");
 const emptyResult = cleanupProcessedFeishuBodies(emptyFixture.target, { nowMs: clock });
 assert.equal(emptyResult.bodiesBefore, 0, "idle empty cleanup reported a body");
 assert.equal(emptyResult.removedBodies, 0, "idle empty cleanup removed a record");
+const supersededFixture = stateOnlyHome("superseded");
+const superseded = publishFeishuInbound(supersededFixture.target, inbound("superseded", "superseded inbound body"));
+convergeConfiguredSession(supersededFixture.target, {
+  appIdFingerprint: `sha256:${"2".repeat(64)}`,
+  allowedUser: "ou_replacement1234",
+  allowedChat: "oc_replacement1234",
+}, {
+  sessionId,
+  sessionFile: join(supersededFixture.target, "session.jsonl"),
+  sessionCwd: supersededFixture.target,
+  headerId: sessionId,
+  headerCwd: supersededFixture.target,
+  outboundAfterEntryId: null,
+});
+const supersededResult = cleanupProcessedFeishuBodies(supersededFixture.target, { nowMs: clock });
+assert.equal(supersededResult.removedBodies, 0, "superseded inbound body crossed the processed boundary");
+const retainedSuperseded = findInboundByDeliveryRef(supersededFixture.target, superseded.deliveryRef);
+assert.equal(retainedSuperseded.content[0].text, "superseded inbound body", "superseded inbound body was removed");
+assert(!Object.hasOwn(retainedSuperseded, "body_removed_at"), "superseded inbound gained a cleanup marker");
 for (const state of ["sending", "retryable"]) {
   const fixture = stateOnlyHome(state);
   registerAssistantOutbound(fixture.target, {

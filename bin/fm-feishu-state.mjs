@@ -1988,7 +1988,7 @@ function cleanupProcessedInboundBodiesLocked(paths, nowMs) {
     const event = validateInboundEvent(readJson(eventPath));
     if (!inboundEventHasBody(event)) continue;
     bodyRefsBefore.push(event.delivery_ref);
-    if (!new Set(["delivered", "superseded"]).has(ledger.state)) {
+    if (ledger.state !== "delivered") {
       pendingBodies += 1;
       continue;
     }
