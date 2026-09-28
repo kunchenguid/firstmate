@@ -284,7 +284,7 @@ family_for_basename() {
     fm-traex-harness.test.sh|fm-herdr-lab.test.sh|fm-lint.test.sh|\
     fm-harness-precedence.test.sh|fm-harness-support.test.sh|\
     fm-lint-workflows.test.sh|\
-    fm-short-agent.test.sh|fm-short-operations.test.sh|fm-operational-input.test.sh|fm-pi-primary-types.test.sh|\
+    fm-short-agent.test.sh|fm-short-operations.test.sh|fm-operational-input.test.sh|fm-pi-primary-types.test.sh|fm-pi-branch-status.test.sh|\
     fm-harness-adapter-references.test.sh|\
     fm-send-popup-settle.test.sh|fm-send-settle.test.sh|\
     fm-supervision-instructions.test.sh|fm-task-delivery.test.sh|\
@@ -332,7 +332,7 @@ family_for_basename() {
     fm-traex-harness-live-e2e.test.sh|\
     fm-herdr-version-floor-live-e2e.test.sh|\
     fm-herdr-pi-stale-registration-live-e2e.test.sh|\
-    fm-short-agent-live-e2e.test.sh|fm-short-operations-herdr.test.sh|fm-pi-branch-live-e2e.test.sh|\
+    fm-short-agent-live-e2e.test.sh|fm-short-operations-herdr.test.sh|fm-pi-branch-live-e2e.test.sh|fm-pi-branch-status-live.test.sh|\
     fm-calm-pi-herdr-live-e2e.test.sh|fm-pi-branch-responsiveness-live-e2e.test.sh|\
     fm-pi-primary-live-e2e.test.sh|fm-pi-codex-native.test.sh|\
     fm-sessionstart-hook-live-e2e.test.sh|fm-sessionstart-instruction-refresh-live-e2e.test.sh|\
@@ -661,6 +661,8 @@ tests/fm-no-mistakes-required.test.sh 370
 tests/fm-operational-input.test.sh 231
 tests/fm-pi-branch-extension.test.sh 22239
 tests/fm-pi-branch-live-e2e.test.sh 56
+tests/fm-pi-branch-status.test.sh 1162
+tests/fm-pi-branch-status-live.test.sh 7476
 tests/fm-pi-branch-responsiveness-live-e2e.test.sh 21
 tests/fm-pi-primary-live-e2e.test.sh 20
 tests/fm-pi-watch-extension.test.sh 42970
@@ -1327,6 +1329,9 @@ families_for_changed_path() {
       printf '%s\n' "__script__:fm-feishu-channel.test.sh"
       printf '%s\n' "__script__:fm-feishu-processed-cleanup.test.sh"
       printf '%s\n' "__script__:fm-pi-primary-types.test.sh"
+      ;;
+    .pi/extensions/fm-branch-status.ts|.pi/extensions/lib/fm-branch-activity.ts|tests/branch-status-live*)
+      printf '%s\n' __script__:fm-pi-branch-status.test.sh __script__:fm-pi-branch-status-live.test.sh __script__:fm-pi-primary-types.test.sh
       ;;
     .pi/extensions/fm-branch-supervision.ts|.pi/extensions/lib/fm-async-exec.ts|\
     .pi/extensions/lib/fm-branch-dispatch.ts|.pi/extensions/lib/fm-native-contract.ts)

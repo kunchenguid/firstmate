@@ -1204,3 +1204,38 @@ The portable operation suite separately accepts only monotone legacy completion 
 The fixture chains use one model fixture invocation and one operation tool per chain; fixture responses are not real-provider token evidence.
 The optional install also repeats the tool call to prove receipt reuse without reinstalling.
 The portable read-only companion is `tests/fm-short-agent.test.sh`; [the operator guide](../short-agents.md) owns current use, compatibility, and provider-limit distinctions.
+
+## Pi branch activity display
+
+Verified on 2026-09-29 (Asia/Shanghai) with Pi 0.87.1 and Node v22.22.2 on Linux using an isolated real Pi CLI pseudo-terminal and SDK branch.
+This display is independent of terminal backend lifecycle; the guard does not call Herdr or operate fleet endpoints.
+Other primary harnesses do not load Pi extensions, so this observational UI adds no Codex or TraeX runtime behavior.
+
+```sh
+bin/fm-test-run.sh tests/fm-pi-branch-status.test.sh tests/fm-pi-branch-status-live.test.sh tests/fm-pi-primary-types.test.sh
+```
+
+The real TUI guard captures the same installed Pi with and without the display extension and reports:
+
+```text
+VISIBLE Branch idle
+VISIBLE Completed: unknown
+VISIBLE model/tools
+VISIBLE durable branch result
+VISIBLE MAIN: check-main-only
+VISIBLE ownership-lost
+VISIBLE Branch disabled
+VISIBLE Branch unknown
+VISIBLE Branch error
+VISIBLE Branch unknown
+VISIBLE Branch
+REAL_TUI_OK mixedMainClaimExcluded=true providerCalls=2 conflictBeforePrompt=true reload=true
+```
+
+The successful branch keeps an old MAIN-claimed row in the same queue while the unrelated new row alone receives a grant and completes the real `fm_branch_report` tool and durable outcome owner with a synthetic local provider transport.
+The conflict case adds a MAIN claim after admission in the isolated home, uses the real pre-prompt classifier, and verifies that the accepted offer falls back without another provider request.
+The portable branch-extension suite separately exercises the final locked grant after a claim race and exact branch acknowledgement that leaves the old MAIN row untouched.
+The MAIN-only check uses the real trigger classifier; its routing observation is emitted by the fixture rather than a live fleet watcher.
+The error and aged-evidence cases inject explicitly synthetic health observations into the supported event bus to test real terminal rendering, not a production provider outage or a two-minute wall-clock wait.
+The portable test independently verifies that admission, mirror-independent observations, report-before-settlement and watcher no-op settlement never become successful completion, that 1000 notifications coalesce into one paint, and that shutdown/reload removes subscriptions and timers without changing unrelated queue/lock files or sending model messages.
+Private task evidence retains raw before/after ANSI output and individual visible transition captures; the [branch operator guide](../pi-supervision-branch.md#activity-in-the-pi-terminal) owns their interpretation.

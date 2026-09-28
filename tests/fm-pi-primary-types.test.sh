@@ -27,6 +27,8 @@ cleanup() {
 trap cleanup EXIT
 
 mkdir -p "$TMP_ROOT/.pi/extensions/lib" "$TMP_ROOT/bin" "$TMP_ROOT/node_modules/@earendil-works" "$TMP_ROOT/node_modules/@types"
+cp "$ROOT/.pi/extensions/fm-branch-status.ts" "$TMP_ROOT/.pi/extensions/"
+cp "$ROOT/.pi/extensions/lib/fm-branch-activity.ts" "$TMP_ROOT/.pi/extensions/lib/"
 cp "$ROOT/.pi/extensions/fm-branch-supervision.ts" "$TMP_ROOT/.pi/extensions/fm-branch-supervision.ts"
 cp "$ROOT/.pi/extensions/fm-short-agent.ts" "$TMP_ROOT/.pi/extensions/fm-short-agent.ts"
 cp "$ROOT/bin/fm-short-agent.mjs" "$ROOT/bin/fm-short-agent.d.mts" "$TMP_ROOT/bin/"

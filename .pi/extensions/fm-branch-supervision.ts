@@ -100,6 +100,8 @@ import {
   FIRSTMATE_CALM_PRESENTATION_EVENT,
 } from "./lib/fm-calm-visibility.ts";
 import {
+  BRANCH_HEALTH_EVENT,
+  BRANCH_HEALTH_REQUEST,
   activateEligibleRowsOwner,
   appendBranchRoutingTrace,
   deactivateEligibleRowsOwner,
@@ -422,8 +424,8 @@ let ownedLockPid = "";
 // stays the wait.
 const LOCK_ANCESTRY_DEPTH = 8;
 
-function readLockPid(): { lockPid: string; verdict: LockOwnership | null } {
-  ownedLockPid = "";
+function readLockPid(recordOwner = true): { lockPid: string; verdict: LockOwnership | null } {
+  if (recordOwner) ownedLockPid = "";
   let lockPid = "";
   try {
     lockPid = readFileSync(`${state}/.lock`, "utf8").trim();
@@ -434,28 +436,28 @@ function readLockPid(): { lockPid: string; verdict: LockOwnership | null } {
   return { lockPid, verdict: null };
 }
 
-function ownershipVerdict(lockPid: string, ancestryMatched: boolean): LockOwnership {
+function ownershipVerdict(lockPid: string, ancestryMatched: boolean, recordOwner = true): LockOwnership {
   if (ancestryMatched) {
-    ownedLockPid = lockPid;
+    if (recordOwner) ownedLockPid = lockPid;
     return "owned";
   }
   return pidAlive(lockPid) ? "other" : "missing";
 }
 
-async function lockOwnership(): Promise<LockOwnership> {
-  const { lockPid, verdict } = readLockPid();
+async function lockOwnership(recordOwner = true): Promise<LockOwnership> {
+  const { lockPid, verdict } = readLockPid(recordOwner);
   if (verdict) return verdict;
   let pid = String(process.pid);
   for (let i = 0; i < LOCK_ANCESTRY_DEPTH; i += 1) {
     if (pid === lockPid) {
-      const current = readLockPid();
+      const current = readLockPid(recordOwner);
       if (current.verdict || current.lockPid !== lockPid) return current.verdict ?? "other";
-      return ownershipVerdict(lockPid, true);
+      return ownershipVerdict(lockPid, true, recordOwner);
     }
     pid = await parentPid(pid);
     if (!pid || pid === "1") break;
   }
-  return ownershipVerdict(lockPid, false);
+  return ownershipVerdict(lockPid, false, recordOwner);
 }
 
 // Pi types its bash spawn hook as a synchronous function
@@ -1019,10 +1021,29 @@ export default function (pi: ExtensionAPI) {
     return model ? (clampThinkingLevel(model, chosen) as BranchEffort) : chosen;
   }
 
+  // Publish only bounded categories, never raw errors, task bodies or model text.
+  function publishHealth(owned: boolean): void {
+    try {
+      pi.events.emit(BRANCH_HEALTH_EVENT, { time: Date.now(), generation, owned,
+        disabled: shuttingDown || resetInProgress || afkActive(), broken: branchBrokenKind,
+        pending: unsettledWakeOffers, streaming: branch?.session.isStreaming === true });
+    } catch { /* Rendering must not affect ownership. */ }
+  }
+  let healthUnsubscribe: (() => void) | undefined;
+  const requestHealth = () => {
+    const expected = generation;
+    // An observation must not overwrite the authority path's captured holder PID.
+    void lockOwnership(false).then((ownership) => {
+      if (expected === generation) publishHealth(ownership === "owned");
+    }).catch(() => {});
+  };
+
   async function generationOwnsLock(expectedGeneration: number): Promise<boolean> {
     if (shuttingDown || expectedGeneration !== generation) return false;
     const ownership = await lockOwnership();
-    return !shuttingDown && expectedGeneration === generation && ownership === "owned";
+    const owned = !shuttingDown && expectedGeneration === generation && ownership === "owned";
+    if (expectedGeneration === generation) publishHealth(owned);
+    return owned;
   }
 
   // The synchronous counterpart, for the two places Pi's own API is
@@ -1392,7 +1413,7 @@ export default function (pi: ExtensionAPI) {
               seqs: [String(seq)],
               generation: toolGeneration,
               selectionRevision: branchSelectionRevision,
-            });
+            }, pi.events);
           }
           return {
             content: [{ type: "text", text: `recorded seq ${appended.stdout} and delivered [${verdict}] into main` }],
@@ -1617,6 +1638,13 @@ ${context.command}
       // reopening reads the in-memory record above, so a failed write costs
       // neither the live session nor its replacement.
     }
+    let lastPulse = 0;
+    created.session.subscribe?.(() => {
+      if (Date.now() - lastPulse < 1000 || branchGeneration !== generation) return;
+      lastPulse = Date.now();
+      // A pulse says work is alive, not that ownership or success is proved.
+      try { pi.events.emit(BRANCH_HEALTH_EVENT, { pulse: true, time: lastPulse, generation }); } catch {}
+    });
     return { session: created.session, sessionManager };
   }
 
@@ -1692,7 +1720,7 @@ ${context.command}
         seqs,
         generation: acceptedGeneration,
         selectionRevision: acceptedSelectionRevision,
-      });
+      }, pi.events);
     };
     const delivery = branchChain
       .then(async () => {
@@ -1730,7 +1758,7 @@ ${context.command}
         // scopeForUnreadWake itself marks corrupted (the queue or its
         // metadata could not be read safely, or an unresolvable task-local
         // row) still falls back to main.
-        if (scope.status === "empty") return;
+        if (scope.status === "empty") { trace("settlement", "empty-queue"); return; }
         if (scope.corrupted) {
           trace("recheck", "corrupt-queue");
           throw new Error("the unread wake queue could not be read safely");
@@ -1741,11 +1769,15 @@ ${context.command}
         // became unresolved while this asynchronous turn waited. Return that
         // still-durable row to the watcher; only a genuinely empty queue means
         // another actor already consumed it.
+        if (admittedSeqs.some((seq) => scope.mainOwnedRows.some((row) => row.seq === seq))) {
+          trace("recheck", "main-owned", admittedSeqs);
+          throw new Error("the wake rows are already claimed by main");
+        }
         if (admissionSeqs.length > 0 && admittedSeqs.some((seq) => !scope.eligibleSeqs.includes(seq))) {
           trace("recheck", "admitted-row-retired", admittedSeqs);
           throw new Error("wake scope changed before branch grant: admitted row retired");
         }
-        if (scope.eligibleSeqs.length === 0) return;
+        if (scope.eligibleSeqs.length === 0) { trace("settlement", "no-eligible-rows"); return; }
         if (!disposition.eligible) {
           trace("recheck", disposition.reason);
           throw new Error(`wake scope changed before branch grant: ${disposition.reason}`);
@@ -1771,7 +1803,10 @@ ${context.command}
           wakeGrantScript,
           String(acceptedGeneration),
         );
-        if (grant === "main-owned") throw new Error("the wake rows are already claimed by main");
+        if (grant === "main-owned") {
+          trace("grant", "main-owned", admittedSeqs);
+          throw new Error("the wake rows are already claimed by main");
+        }
         if (grant !== "published") throw new Error("could not record the branch's eligible row snapshot");
         trace("grant", "published", admittedSeqs);
         // A row can still arrive between this re-check and the model starting
@@ -1779,6 +1814,7 @@ ${context.command}
         const reportRevisionBeforePrompt = durableReportRevision;
         const entryOffset = sessionManager.getEntries().length;
         wakeTaskScope = heartbeat ? null : { rows: admittedSeqs, tasks: admittedTasks, token: offer.token };
+        trace("prompt", "started", admittedSeqs);
         try {
           await session.prompt(
             `FIRSTMATE SUPERVISION WAKE: ${message}\n\nHandle this per your operating procedure and finish with fm_branch_report.`,
@@ -1809,6 +1845,10 @@ ${context.command}
         trace("settlement", "reported-and-released", admittedSeqs);
       })
       .catch(async (error: unknown) => {
+        const detail = error instanceof Error ? error.message : "";
+        trace("failure", detail.includes("claimed by main") ? "main-owned" :
+          detail.includes("fleet lock") ? "fleet-lock-lost" :
+          detail.includes("provider failed") ? "provider-failed" : "handling-failed");
         await releaseEligibleRowsSnapshot(state, wakeGrantScript, String(acceptedGeneration));
         throw error;
       })
@@ -1825,6 +1865,11 @@ ${context.command}
     if (shuttingDown || resetInProgress || afkActive() || branchBroken || !generationOwnsLockSync(generation)) return false;
     const acceptedGeneration = generation;
     const selection = branchSelectionRevision;
+    const trace = (stage: string, reason: string) => appendBranchRoutingTrace(state, {
+      token: offer.admission, actor: "branch", stage, reason, trigger: "continuation",
+      generation: acceptedGeneration, selectionRevision: selection,
+    }, pi.events);
+    trace("admission", "accepted");
     const delivery = branchChain.then(async () => {
       if (acceptedGeneration !== generation || selection !== branchSelectionRevision ||
           !(await actingAsOwner(acceptedGeneration))) throw new Error("continuation receiver replaced");
@@ -1868,6 +1913,7 @@ ${context.command}
       branchTaskBindings = { [offer.task]: taskBinding(record) };
       continuationToolsRemaining = 8;
       const timeout = setTimeout(() => { void session.abort(); }, 120_000);
+      trace("prompt", "started");
       try {
         await session.prompt(`FIRSTMATE TASK CONTINUATION: ${offer.task}\n` +
           `Admission ${offer.admission}. This is not a queue wake: do not drain/ack queue rows.\n` +
@@ -1887,8 +1933,10 @@ ${context.command}
       const error = settledPromptProviderError(sessionManager, entryOffset);
       if (error || durableReportRevision <= before) throw new Error(error || "continuation settled without a durable outcome");
       recordDurableBranchReport(branchForTask.generation, branchForTask.selectionRevision);
+      trace("settlement", "reported-continuation");
     });
     branchChain = delivery.catch(async (error) => {
+      trace("failure", "continuation-failed");
       // Canonical reservation/budget remains due. Publish the failure through
       // the existing outcome owner, not a second event queue.
       if (acceptedGeneration === generation && await actingAsOwner(acceptedGeneration)) {
@@ -1896,7 +1944,7 @@ ${context.command}
           `Delegated continuation failed; obligation retained: ${String(error).slice(0, 1200)}`]);
         await enqueueDelivery(() => reconcileWithHealth(acceptedGeneration));
       }
-    }).catch(() => { /* Native reservation retains responsibility if failure reporting also fails. */ }).finally(offer.settled);
+    }).catch(() => { /* Native reservation retains responsibility if failure reporting also fails. */ }).finally(() => { requestHealth(); offer.settled(); });
     return true;
   }
 
@@ -2004,13 +2052,15 @@ ${context.command}
       seqs: Array.isArray(offer.eligibleSeqs) ? offer.eligibleSeqs : [],
       generation,
       selectionRevision: branchSelectionRevision,
-    });
+    }, pi.events);
     unsettledWakeOffers += 1;
     void settlement.then(() => {
       unsettledWakeOffers = Math.max(0, unsettledWakeOffers - 1);
+      requestHealth();
       if (reconcileProbe && reconcileRecovery) reconcileRecovery.probeInFlight = false;
     }, () => {
       unsettledWakeOffers = Math.max(0, unsettledWakeOffers - 1);
+      requestHealth();
       if (reconcileProbe && reconcileRecovery) reconcileRecovery.probeInFlight = false;
     });
     offer.accept(settlement);
@@ -2130,6 +2180,8 @@ ${context.command}
   // receives the dialog of the main session it is supervising from that
   // session's start.
   pi.on?.("session_start", async (_event, ctx) => {
+    healthUnsubscribe?.();
+    healthUnsubscribe = pi.events.on(BRANCH_HEALTH_REQUEST, requestHealth);
     rememberMainModel(ctx);
     currentMainSession = ctx?.sessionManager ?? null;
     // Every field this new generation depends on is set before the first
@@ -2294,6 +2346,8 @@ ${context.command}
     // Quiesce first, then release the grant for the generation that is
     // closing: setting shuttingDown before the await is what stops anything
     // new from being accepted while the release runs.
+    healthUnsubscribe?.();
+    healthUnsubscribe = undefined;
     const closingGeneration = generation;
     shuttingDown = true;
     resetInProgress = false;

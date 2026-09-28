@@ -20,6 +20,34 @@ The supervision branch itself is Pi-only by construction:
   A home on any harness that already has an outcome store still receives the shared drain compatibility recovery described in [Lost-wake outcome backstop](#lost-wake-outcome-backstop).
 - It does not change which harness is primary and never moves a home to Pi.
 
+## Activity in the Pi terminal
+
+The primary TUI shows a compact `Branch` widget above the editor.
+Run `/supervision-status` to toggle its detail lines and request a fresh read-only health observation.
+This does not start or reset a branch, claim a wake, or acknowledge an outcome.
+
+| State | Meaning |
+| --- | --- |
+| `disabled` | A fresh branch observation says away mode, reset, or shutdown currently disables handling. |
+| `idle` | The current process owns the lock and reports no pending work or latched fault; this is not proof of completed work. |
+| `processing` | A live admission is pending; the item summary distinguishes accepted-before-prompt from model/tool execution. |
+| `degraded` | A handling failure or unexpected MAIN fallback remains latched until a later durable branch result succeeds. |
+| `error` | The branch reports a construction, reconciliation, or provider health fault. |
+| `unknown` | Ownership or current evidence is missing, stale, inconsistent, or exceeds the bounded display capacity. |
+
+Details show the current wake kind and bounded item/batch count, latest completed branch result time, latest MAIN fallback, and latest error category.
+Only a branch settlement after a durable report counts as a completed result; acceptance, a loaded extension, mirrored conversation, a short-task outcome, and a quiet empty-queue return never count.
+A MAIN-only check or decision is an expected fallback and does not imply branch failure.
+The `ownership-lost` fallback category historically groups fleet-lock loss and wake rows already claimed by MAIN; the branch's `recheck: main-owned` or `grant: main-owned` observation distinguishes the latter without altering its safety guard.
+
+The presentation owner is `.pi/extensions/fm-branch-status.ts`, with its bounded read model in `lib/fm-branch-activity.ts`.
+It consumes branch/watcher observational events, reads at most the last 256 KiB and 200 routing records once on session start, and retains no message bodies or tool arguments.
+Historical records can establish the last result or failure, but never current processing.
+Refreshes coalesce over 100 ms, stream liveness pulses are limited to once per second, and a single two-minute expiry marks silent evidence unknown without polling or rescanning files.
+Shutdown and reload dispose subscriptions and timers; noninteractive modes allocate no display observer.
+Other primary harnesses and terminal backends gain no behavior or authority changes.
+The portable checks are `tests/fm-pi-branch-status.test.sh`; `tests/fm-pi-branch-status-live.test.sh` refreshes real-Pi rendered evidence under the [harness verification policy](verification/runtime-backends.md).
+
 ## Live task continuation
 
 Presentation acknowledgement does not establish task acceptance.
@@ -117,8 +145,12 @@ This safeguard applies while Pi is alive; it introduces no process-exit recovery
 - Autonomy: supervision is default-on for every task once a Pi primary session owns the fleet lock (docs/configuration.md "Pi supervision branch"); no captain grant file is required.
   A fleet-wide heartbeat is separately eligible when its safe subset contains a heartbeat row, a resolvable task-local signal or stale row, or an identity-bound iDA result check (see "Heartbeat routing" below).
   Main-owned checks, decision-owned signal/stale rows, and structurally valid unresolved task rows are excluded and remain queued; malformed or unreadable queue data and every watcher-failure alarm keep the whole wake on main.
+  The shared `scopeForUnreadWake` classifier also excludes the exact queued rows in `.main-eligible-rows` during admission and pre-prompt recheck.
+  A trigger matching a claimed signal/stale task alias, exact check payload, or claimed heartbeat stays on MAIN; unrelated new rows can form their own grant.
+  An absent MAIN record means no claim, while a malformed, unreadable, non-regular or changing record fails closed.
   The branch recomputes eligibility immediately before prompting the branch to drain and publishes the exact eligible row set to `state/.branch-eligible-rows` through `writeEligibleRowsSnapshot`.
-  After an independently eligible wake has already been offered, a newly-arrived main-owned row observed at that pre-drain recheck does not revoke the offer: it is excluded from the eligible set, so whatever else is currently eligible still reaches the branch, and the main-owned row stays queued for main's own drain.
+  After an independently eligible wake has already been offered, an unrelated MAIN-owned row observed at that pre-drain recheck does not revoke the offer: it remains outside the admitted set.
+  MAIN claiming an admitted row after admission rejects settlement; the final locked all-or-nothing grant check still arbitrates any later claim race.
   [`watcher-continuity.md`](watcher-continuity.md#per-actor-acknowledgement) owns the consume-side guarantee that neither actor can present or acknowledge the other's claim.
   Heartbeat keeps its own all-or-nothing recheck over the rows it can claim: it takes every branch-ownable unread row or none of them.
   A structurally valid unresolved task row is outside that claim and remains main-only; malformed or unreadable queue state still defers the whole review to main.

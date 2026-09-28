@@ -636,7 +636,7 @@ export default function (pi: ExtensionAPI) {
         ...scope.unresolvedRows.map((row) => ({ seq: row.seq, reason: "unresolved-task" as const })),
       ],
       generation: activeGeneration?.id,
-    });
+    }, pi.events);
     pi.events?.emit?.(FM_BRANCH_DISPATCH_EVENT, offer);
     appendBranchRoutingTrace(state, {
       token: pending.token,
@@ -645,7 +645,7 @@ export default function (pi: ExtensionAPI) {
       reason: offer.accepted ? "branch-accepted" : offer.declineReason,
       generation: activeGeneration?.id,
       elapsedMs: Date.now() - offeredAt,
-    });
+    }, pi.events);
     if (!offer.accepted) return null;
     return offer.settlement.then(
       () => {
@@ -656,7 +656,7 @@ export default function (pi: ExtensionAPI) {
           reason: "branch-complete",
           generation: activeGeneration?.id,
           elapsedMs: Date.now() - offeredAt,
-        });
+        }, pi.events);
       },
       (error) => {
         appendBranchRoutingTrace(state, {
@@ -666,7 +666,7 @@ export default function (pi: ExtensionAPI) {
           reason: routeFailureKind(error),
           generation: activeGeneration?.id,
           elapsedMs: Date.now() - offeredAt,
-        });
+        }, pi.events);
         throw error;
       },
     );
@@ -718,7 +718,7 @@ export default function (pi: ExtensionAPI) {
       stage: "main-delivery",
       reason: delivered ? "main-accepted" : "main-delivery-failed",
       generation: owner.id,
-    });
+    }, pi.events);
     return delivered;
   }
 
