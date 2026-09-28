@@ -501,18 +501,61 @@ write_response "$CLASSIFIER" rule_4 0.9
 jq '.answers.escalation.choice = "YES"' "$CLASSIFIER" > "$RESPONSE"
 reset_log
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
-assert_contains "$out" '  status: error' "a classifier choice outside its offered options is an error outcome"
-assert_contains "$out" '  reason: response is not a typed dispatch classifier answer' "an unrecognized classifier choice is never read as no escalation"
-assert_not_contains "$out" '  profile:' "an unrecognized classifier choice never yields a profile"
+assert_contains "$out" '  status: error' "an escalation choice outside its offered options is an error outcome"
+assert_contains "$out" '  reason: response is not a typed dispatch classifier answer' "an unrecognized escalation choice is never read as no escalation"
+assert_not_contains "$out" '  profile:' "an unrecognized escalation choice never yields a profile"
 
 reset_log
-write_response "$RESPONSE" rule_4 0.9
-jq 'del(.answers.risk)' "$RESPONSE" > "$TMP_ROOT/missing-axis.json"
-mv "$TMP_ROOT/missing-axis.json" "$RESPONSE"
+write_response "$CLASSIFIER" rule_4 0.9
+jq 'del(.answers.escalation)' "$CLASSIFIER" > "$RESPONSE"
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
-assert_contains "$out" '  status: error' "a missing classifier axis is an error outcome"
-assert_contains "$out" '  reason: response is not a typed dispatch classifier answer' "every declared classifier axis must be present and typed"
+assert_contains "$out" '  status: error' "a missing escalation axis is an error outcome"
+assert_contains "$out" '  reason: response is not a typed dispatch classifier answer' "the gating escalation axis must be present and typed"
+assert_not_contains "$out" '  profile:' "a missing escalation axis never yields a profile"
+
+reset_log
+write_response "$CLASSIFIER" rule_4 0.9
+jq 'del(.answers.risk)' "$CLASSIFIER" > "$RESPONSE"
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: clear' "a missing evidence axis never discards a valid rule match"
+assert_contains "$out" 'risk=unavailable' "a missing evidence axis is published as unavailable"
+assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "the matched route still resolves without that axis"
+
+reset_log
+write_response "$CLASSIFIER" rule_4 0.9
+jq '.answers.risk.probabilities.medium = 0.24' "$CLASSIFIER" > "$RESPONSE"
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: clear' "an evidence axis whose probabilities miss the tolerance never discards a valid rule match"
+assert_contains "$out" 'risk=unavailable' "a malformed evidence distribution is published as unavailable"
+assert_contains "$out" 'intent=bugfix(0.91)' "the well-formed evidence axes are still published"
+
+reset_log
+write_response "$CLASSIFIER" rule_4 0.9
+jq '.answers.domain.choice = "Project_Code"' "$CLASSIFIER" > "$RESPONSE"
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: clear' "an evidence choice outside its offered options never discards a valid rule match"
+assert_contains "$out" 'domain=unavailable' "an unrecognized evidence choice is published as unavailable, never as its nearest option"
 pass "classifier evidence never vetoes local routing, and only a confident escalation answer stops dispatch"
+
+# --- the accepted vocabulary is the vocabulary the request offered --------------
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+offered_answers=$(jq -c '.questions | map_values(
+    (.criteria | keys) as $ks |
+    {type: "choice", choice: $ks[0], confidence: 0.9,
+     probabilities: ($ks | map({key: ., value: (1 / ($ks | length))}) | from_entries)})' "$LOG/body")
+jq -n --argjson answers "$offered_answers" '
+  {model: "jev-1.13.0",
+   answers: ($answers | .rule.choice = "rule_4" | .rule.confidence = 0.95),
+   usage: {input_tokens: 812, output_tokens: 386}}' > "$RESPONSE"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+expect_code 0 "$code" "an answer drawn from the offered options exits 0"
+assert_contains "$out" '  status: clear' "an answer using exactly the options the request offered validates on every axis"
+assert_contains "$out" '  classification: intent=bugfix(0.9) domain=browser_visual(0.9) difficulty=high(0.9) risk=high(0.9) model_class=code_execution(0.9) escalation=no(0.9)' "every axis accepts its own offered options, so no axis carries a second option list"
+assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "the matched route resolves from that answer"
+pass "offered and accepted classifier vocabularies are one definition"
 
 # --- per-rule confidence floor ------------------------------------------------
 write_floor_response() {  # <path> <choice> <confidence> <rule_1> <rule_2> <rule_3> <rule_4> <default>

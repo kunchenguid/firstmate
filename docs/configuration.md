@@ -1171,9 +1171,10 @@ No qualifying option, or two equally probable qualifying options, produces `ambi
 
 **Classifier answer validation and evidence**
 
-- Response probabilities for the rule and every classifier axis must contain exactly every offered choice, use numeric values from 0 through 1, and sum to approximately 1 within 0.01.
-- Every classifier axis must also be present and answer with one of its own offered options; a missing axis or an unrecognized choice is an `error` outcome, never a silently ignored classification.
+- Each axis is validated against the options that axis actually offered in the request, so the offered vocabulary and the accepted vocabulary cannot drift apart.
+- The rule answer and the `escalation` answer must contain exactly every offered choice, use numeric probabilities from 0 through 1 that sum to approximately 1 within 0.01, and carry a confidence from 0 through 1; the `escalation` answer must also be present and name one of its own offered options, so a missing or unrecognized escalation answer is an `error` outcome, never read as "no escalation".
 - The classifier axes other than `escalation` are published evidence only: their choices and confidences ride on the `classification:` line and never gate the route, so low confidence on an axis no gate reads cannot veto an otherwise valid rule match.
+- An evidence axis that is missing, malformed, or answered outside its offered options is published as `unavailable` on the `classification:` line and changes nothing else, so one bad evidence distribution never discards a valid rule match.
 - The `escalation` axis can make the tool decline to emit a profile, but only when its own confidence reaches the same floor the rule answer must clear.
 - A `yes` below the floor is published on the `classification:` line and routes as usual, so a near-coin-flip reading never spends a full intake.
 - No classifier answer can directly authorize a model launch, a merge, a sensitive action, or an exception to local policy, and a declared `approval` or rule-floor gate is always reported ahead of the classifier, whatever its confidence.

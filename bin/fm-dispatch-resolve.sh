@@ -22,7 +22,10 @@
 #   fixed set of classifier questions for model-router evidence. Jev returns
 #   the matched rule, probabilities, confidence, typed judgments for intent,
 #   domain, difficulty, risk, likely model class, and whether the request should
-#   escalate. Everything after that is jq: the confidence floor (0.6 on the
+#   escalate. The rule and escalation answers must be well formed against the
+#   options the request offered; a malformed evidence axis publishes
+#   `unavailable` and leaves the route alone.
+#   Everything after that is jq: the confidence floor (0.6 on the
 #   answer confidence, or a rule's declared `min_confidence` on that rule's
 #   probability, falling to the most probable other option that clears its own
 #   floor), the rule's declared `approval` and `floor`, each profile's declared
@@ -51,7 +54,8 @@
 #   dispatch-resolve:
 #     status: clear | ambiguous | escalate | error
 #     model/latency_ms/tokens, rule (when excerpt) and confidence, probabilities
-#     classification: intent/domain/difficulty/risk/model_class/escalation with confidence
+#     classification: intent/domain/difficulty/risk/model_class/escalation with
+#       confidence, or `unavailable` for an evidence axis the answer malformed
 #     fallback: <runner-up rule taken when the picked rule missed its own floor>
 #     reason: <why the status is not clear>
 #     candidate: <harness>:<model> provider=.. scope=.. remaining=..% spendPriority=.. runway=.. -> eligible | eligible, unranked: <reason> | not eligible: <reason>
@@ -101,6 +105,26 @@ TS_MODEL=jev-latest
 TS_BASE=https://api.typesafe.ai
 TS_TIMEOUT=10
 DEFAULT_WHEN="No listed rule applies to this task."
+
+# The options offered for each question are built once into the request; the
+# response validator and the resolution program both read that one vocabulary
+# through $offered, so no axis has a second copy of its option list.
+# shellcheck disable=SC2016  # jq program text, not shell expansion
+ANSWER_JQ='
+  def well_formed($answers; $offered; $name):
+    ($offered[$name]) as $choices |
+    ($answers[$name]) as $a |
+    ($a.choice | type) == "string" and
+    ($a.confidence | type) == "number" and
+    $a.confidence >= 0 and $a.confidence <= 1 and
+    ($a.probabilities | type) == "object" and
+    (($a.probabilities | keys) == $choices) and
+    all($a.probabilities[]; type == "number" and . >= 0 and . <= 1) and
+    (($a.probabilities | [.[]] | add) as $total | $total >= 0.99 and $total <= 1.01);
+  def recognized($answers; $offered; $name):
+    well_formed($answers; $offered; $name) and
+    ($offered[$name] | index($answers[$name].choice)) != null;
+'
 
 die() { printf 'error: %s\n' "$1" >&2; exit 2; }
 no_rules() {
@@ -331,6 +355,7 @@ command -v curl >/dev/null 2>&1 || emit_error "curl not installed"
         escalation: {type: "choice", instructions: "Should Firstmate escalate before dispatch because the request may need captain approval, a sensitive decision, unclear scope, credentials, destructive or irreversible action, or a safety boundary?", criteria: {no: "No escalation appears necessary before normal Firstmate policy checks.", yes: "Escalation appears necessary before dispatch or action."}}
       }
     }')
+  OFFERED=$(jq -c '.questions | map_values(.criteria | keys)' <<<"$REQUEST") || emit_error "could not read the offered classifier options"
   never_send_check
   T0=$(fm_timing_now_ms)
   HTTP=$(printf '%s' "$REQUEST" | curl -sS --max-time "$TS_TIMEOUT" -o "$RESP_FILE" -w '%{http_code}' \
@@ -340,27 +365,10 @@ command -v curl >/dev/null 2>&1 || emit_error "curl not installed"
   T1=$(fm_timing_now_ms)
   LAT_MS=$(( T1 - T0 ))
   [ "$HTTP" = 200 ] || emit_error "http $HTTP after ${LAT_MS} ms: $(head -c 200 "$RESP_FILE" 2>/dev/null | tr '\n' ' ')"
-jq -e --slurpfile rules "$RULES" '
-    def choice_answer($name; $choices):
-      (.answers[$name]) as $a |
-      ($a.choice | type) == "string" and
-      ($a.confidence | type) == "number" and
-      $a.confidence >= 0 and $a.confidence <= 1 and
-      ($a.probabilities | type) == "object" and
-      (($a.probabilities | keys | sort) == ($choices | sort)) and
-      all($a.probabilities[]; type == "number" and . >= 0 and . <= 1) and
-      (($a.probabilities | [.[]] | add) as $total | $total >= 0.99 and $total <= 1.01);
-    def classifier_answer($name; $choices):
-      (.answers[$name].choice) as $choice |
-      choice_answer($name; $choices) and ($choices | index($choice)) != null;
-    (($rules[0].rules | to_entries | map("rule_" + ((.key + 1) | tostring))) + ["default"]) as $rule_choices |
-    choice_answer("rule"; $rule_choices) and
-    classifier_answer("intent"; ["bugfix","design","documentation","implementation","investigation","operations","other","review"]) and
-    classifier_answer("domain"; ["browser_visual","docs","firstmate","github","infrastructure","project_code","unknown"]) and
-    classifier_answer("difficulty"; ["high","low","medium","xhigh"]) and
-    classifier_answer("risk"; ["high","low","medium","sensitive"]) and
-    classifier_answer("model_class"; ["code_execution","current_web","small_fast","standard","strong_reasoning","vision"]) and
-    classifier_answer("escalation"; ["no","yes"]) and
+jq -e --argjson offered "$OFFERED" "$ANSWER_JQ"'
+    (.answers) as $answers |
+    well_formed($answers; $offered; "rule") and
+    recognized($answers; $offered; "escalation") and
     ((has("usage") | not) or
       ((.usage | type) == "object" and
        (.usage.input_tokens | type) == "number" and
@@ -374,10 +382,14 @@ fm_quota_json_valid < "$QUOTA" || emit_error "quota-axi --json returned an inval
 
 # ---- resolution: declared gates + quota evidence + argmax, all in jq ------------
 RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg none_criterion "$DEFAULT_WHEN" --argjson pmap "$PMAP" \
-  --slurpfile resp "$RESP_FILE" --slurpfile rules "$RULES" --slurpfile quota "$QUOTA" "$FM_QUOTA_ROW_JQ"'
+  --argjson offered "$OFFERED" \
+  --slurpfile resp "$RESP_FILE" --slurpfile rules "$RULES" --slurpfile quota "$QUOTA" "$FM_QUOTA_ROW_JQ$ANSWER_JQ"'
   ($resp[0]) as $r | ($rules[0]) as $cfg | ($quota[0]) as $q | ($r.answers.rule) as $a |
   def ans($name): $r.answers[$name];
-  def c($name): {choice: ans($name).choice, confidence: ans($name).confidence};
+  def c($name):
+    if recognized($r.answers; $offered; $name)
+    then {choice: ans($name).choice, confidence: ans($name).confidence}
+    else {choice: "unavailable", confidence: null} end;
   def profiles($v): if ($v | type) == "array" then $v elif ($v | type) == "object" then [$v] else [] end;
   def prov($p; $lane): quota_row($q; $p; $lane);
   def rows($p; $lane): (prov($p; $lane) | .quotaSemantics.effectiveAvailability // []);
@@ -526,12 +538,13 @@ TEXT=$(jq -r '
   def flat: tostring | gsub("[\t\r\n]"; " ");
   def show($value): ($value // "-") | flat;
   def shell_arg: flat | @sh;
+  def axis($a): if $a.confidence == null then ($a.choice | flat) else "\($a.choice | flat)(\($a.confidence | flat))" end;
   "dispatch-resolve:",
   "  status: \(.status | flat)",
   "  model: \(show(.model))   latency_ms: \(show(.latency_ms))   tokens: \(show(.tokens.input_tokens))/\(show(.tokens.output_tokens))",
   "  rule: \(.rule | flat) (\(.rule_when | flat))   confidence: \(.confidence | flat)",
   "  probabilities: \([.probabilities | to_entries[] | "\(.key | flat)=\(.value | flat)"] | join(" "))",
-  "  classification: intent=\(.classification.intent.choice | flat)(\(.classification.intent.confidence | flat)) domain=\(.classification.domain.choice | flat)(\(.classification.domain.confidence | flat)) difficulty=\(.classification.difficulty.choice | flat)(\(.classification.difficulty.confidence | flat)) risk=\(.classification.risk.choice | flat)(\(.classification.risk.confidence | flat)) model_class=\(.classification.model_class.choice | flat)(\(.classification.model_class.confidence | flat)) escalation=\(.classification.escalation.choice | flat)(\(.classification.escalation.confidence | flat))",
+  "  classification: intent=\(axis(.classification.intent)) domain=\(axis(.classification.domain)) difficulty=\(axis(.classification.difficulty)) risk=\(axis(.classification.risk)) model_class=\(axis(.classification.model_class)) escalation=\(axis(.classification.escalation))",
   (if .fallback then "  fallback: \(.fallback | flat)" else empty end),
   (if .reason then "  reason: \(.reason | flat)" else empty end),
   (if .note then "  note: \(.note | flat)" else empty end),
