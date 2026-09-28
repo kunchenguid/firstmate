@@ -6150,6 +6150,91 @@ JS
   pass "$out"
 }
 
+test_continuation_defers_pending_short_receipt_at_public_boundary() {
+  local repo home out rc
+  repo="$TMP_ROOT/continuation-short-root"; home="$TMP_ROOT/continuation-short-home"
+  install_pi_branch_extension_fixture "$repo"
+  mkdir -p "$home/state" "$home/data/a-reserved" "$home/data/b-unrelated"
+  printf 'Preserve a short-owned operation without replay.\n' >"$home/data/a-reserved/brief.md"
+  printf 'Continue unrelated task processing.\n' >"$home/data/b-unrelated/brief.md"
+  cat >"$repo/bin/fm-task-state.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s %s\n' "${1:-}" "${2:-}" >> "$FM_HOME/lifecycle-calls"
+if [ "${1:-}" = coordinate ] && [ "${2:-}" = a-reserved ] && [ ! -e "$FM_HOME/injected" ]; then
+  : > "$FM_HOME/injected"
+  printf '{"fixture":"pending receipt"}\n' > "$FM_STATE_OVERRIDE/.short-operation-a-reserved.json"
+fi
+exec "$REAL_ROOT/bin/fm-task-state.sh" "$@"
+SH
+  chmod +x "$repo/bin/fm-task-state.sh"
+  cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/"
+  set +e
+  out=$(PLUGIN="$repo/.pi/extensions/lib/fm-task-continuation.ts" REAL_ROOT="$ROOT" FM_ROOT_OVERRIDE="$repo" FM_HOME="$home" node --input-type=module 2>&1 <<'JS'
+import {appendFileSync,readFileSync,rmSync,writeFileSync} from 'node:fs';
+const home=process.env.FM_HOME,handlers=new Map(),events=new Map(),entries=[];
+const file=home+'/session.jsonl';
+writeFileSync(home+'/state/.lock',process.pid+'\n');
+writeFileSync(file,JSON.stringify({type:'session',id:'short-boundary',version:3})+'\n');
+const ctx={isIdle:()=>true,hasPendingMessages:()=>false,hasUI:false,ui:{getEditorText:()=>''},sessionManager:{getSessionFile:()=>file,getSessionId:()=> 'short-boundary',getLeafId:()=>entries.at(-1)?.id,getBranch:()=>entries,getEntries:()=>entries}};
+function persist(row){row={...row,id:'e'+entries.length,parentId:entries.at(-1)?.id??null,timestamp:new Date().toISOString()};entries.push(row);appendFileSync(file,JSON.stringify(row)+'\n');return row;}
+const pi={on:(name,fn)=>handlers.set(name,[...(handlers.get(name)||[]),fn]),events:{on:(name,fn)=>events.set(name,[...(events.get(name)||[]),fn]),emit:(name,arg)=>{for(const fn of events.get(name)||[])fn(arg)}},registerTool(){},registerCommand(){},sendMessage(){throw Error('idle notification was not expected');},appendEntry:(customType,data)=>persist({type:'custom',customType,data})};
+const fire=async(name)=>{const results=[];for(const fn of handlers.get(name)||[])results.push(await fn({type:name,entries:[],continue:false,context:{},outcome:'completed'},ctx));return results;};
+const persistDrafts=results=>{for(const entry of results.filter(Boolean).flatMap(result=>result.entries||[]))persist(entry);};
+const record=task=>JSON.parse(readFileSync(`${home}/data/${task}/lifecycle.json`));
+const calls=()=>readFileSync(home+'/lifecycle-calls','utf8').trim().split('\n');
+const {installTaskContinuation}=await import(process.env.PLUGIN);
+const periodic=(await import(process.env.REAL_ROOT+'/.pi/extensions/fm-periodic-stow.ts')).default;
+const continuation=installTaskContinuation(pi,{root:process.env.FM_ROOT_OVERRIDE,home,state:home+'/state',owns:()=>true});
+periodic(pi);
+await fire('session_start');pi.appendEntry('seed',{});
+await continuation.preserve(['a-reserved','b-unrelated']);
+
+// This is the public Pi boundary that produced the incident. The fixture adds
+// the operation reservation after observe and before coordinate, reproducing
+// the real TOCTOU without calling a private continuation helper.
+const first=await fire('agent_before_settle');persistDrafts(first);
+if(!first.some(result=>result?.continue))throw Error('unrelated task did not continue after the short receipt appeared');
+if(record('a-reserved').coordination)throw Error('short-owned task invented a coordination receipt');
+if(!record('b-unrelated').coordination)throw Error('unrelated task was not coordinated');
+const pace=entries.filter(entry=>entry.customType==='fm-continuation-input-pacing'&&entry.data.id==='ownership:a-reserved').at(-1);
+if(!pace?.data.key||pace.data.attempts!==1||pace.data.after<=Date.now())throw Error('temporary ownership was not durably paced');
+if(calls().filter(call=>call==='coordinate a-reserved').length!==1)throw Error('reservation race was retried inside one boundary');
+
+await fire('session_shutdown');await fire('session_start');
+const reservedCallCount=calls().filter(call=>call.endsWith(' a-reserved')).length;
+const paced=await fire('agent_before_settle');persistDrafts(paced);
+if(calls().filter(call=>call.endsWith(' a-reserved')).length!==reservedCallCount)throw Error('restart bypassed the durable ownership backoff');
+
+// Make the existing heartbeat-owned retry due while the live reservation is
+// still present. It must remain a quiet deferral, not become an exception or
+// an invented completion.
+pi.appendEntry('fm-continuation-input-pacing',{id:'ownership:a-reserved',key:pace.data.key,attempts:pace.data.attempts,after:0});
+await fire('session_shutdown');await fire('session_start');
+const stillOwned=await fire('agent_before_settle');persistDrafts(stillOwned);
+if(stillOwned.some(result=>result?.continue&&JSON.stringify(result).includes('a-reserved')))throw Error('live short owner produced a continuation admission');
+if(record('a-reserved').coordination)throw Error('live short owner was accepted without a receipt');
+
+// Once the fixture's reservation is released, the same public boundary may
+// coordinate the unfinished task exactly once. No operation effect is ever
+// called by this test or by the continuation extension.
+rmSync(home+'/state/.short-operation-a-reserved.json');
+const latest=entries.filter(entry=>entry.customType==='fm-continuation-input-pacing'&&entry.data.id==='ownership:a-reserved').at(-1);
+pi.appendEntry('fm-continuation-input-pacing',{id:'ownership:a-reserved',key:latest.data.key,attempts:latest.data.attempts,after:0});
+await fire('session_shutdown');await fire('session_start');
+const released=await fire('agent_before_settle');persistDrafts(released);
+if(!released.some(result=>result?.continue&&JSON.stringify(result).includes('a-reserved: pending')))throw Error('released reservation did not resume its unfinished task');
+if(!record('a-reserved').coordination)throw Error('released task lacks the canonical coordination receipt');
+if(calls().some(call=>/^(merge|cleanup) /.test(call)))throw Error('continuation replayed an operation effect');
+console.log('public agent_before_settle keeps pending short ownership durable and paced; unrelated work continues; release resumes once without replay');
+process.exit(0);
+JS
+  )
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "pending short receipt public event boundary: $out"
+  pass "$out"
+}
+
 test_continuation_survives_ack_compaction_and_unrelated_input() {
   local repo home out rc
   repo="$TMP_ROOT/continuation-root"; home="$TMP_ROOT/continuation-home"
@@ -6364,4 +6449,5 @@ test_mark_read_failure_keeps_routine_redelivery_and_captain_deduplication
 
 test_continuation_defers_reserved_admission_at_ui_boundary
 test_continuation_retries_definite_send_failure_and_isolates_stale_tasks
+test_continuation_defers_pending_short_receipt_at_public_boundary
 test_continuation_survives_ack_compaction_and_unrelated_input
