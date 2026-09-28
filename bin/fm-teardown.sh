@@ -143,6 +143,16 @@
 # These refusals are not relaxed by --force: --force authorizes discarding THIS
 # task's unlanded work, never another task's live work. Nothing of this task's
 # own is removed by a refusal; reconcile whichever record is wrong and re-run.
+# One explicit secondmate-retirement recovery is narrower than that refusal.
+# Repeated --retire-obsolete-duplicate-child flags must name the complete child
+# set, all direct scout records for one pool slot. Teardown proceeds without
+# touching that already-returned slot only after each exact Herdr pane is gone,
+# Treehouse reports the slot available with no processes or lease, Git reports
+# it clean, the slot carries no owner claim, and no record in another local home
+# names it. The descendant task-set, metadata, Herdr presentation, and project
+# locks bind those endpoint and slot identities through child-record retirement;
+# any missing, changed, live, ambiguous, unapproved, or cross-home evidence
+# keeps the ordinary refusal and changes nothing.
 # Orca is not a pool slot and proves its path through
 # require_orca_worktree_path_match instead.
 # Orca tasks use the same safety checks, then close the recorded terminal and
@@ -174,9 +184,15 @@
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
 # Usage: fm-teardown.sh <task-id> [--force] [--legacy-record]
+#                       [--retire-obsolete-duplicate-child <child-task-id>]...
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
 #   when the captain has explicitly said to discard the work.
+#   --retire-obsolete-duplicate-child is valid only with --force for a local
+#   secondmate. Every current descendant must be named exactly once. The option
+#   recovers only the proved already-returned duplicate-scout shape described in
+#   the worktree-slot contract above; it never authorizes discarding another
+#   child, relaxing endpoint proof, or touching the shared slot.
 #   --legacy-record accepts a task record that predates the spawn_gen field:
 #   teardown then proceeds only when the recorded endpoint is confirmed dead or
 #   agent-less (bin/fm-backend.sh's recovery-grade classifier), and without
@@ -378,11 +394,26 @@ fi
 ID=$1
 FORCE=
 LEGACY_RECORD_GIVEN=0
+RETIRE_OBSOLETE_DUPLICATE_CHILDREN=()
 shift
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --force) FORCE=--force ;;
     --legacy-record) LEGACY_RECORD_GIVEN=1 ;;
+    --retire-obsolete-duplicate-child)
+      shift
+      if [ "$#" -eq 0 ] || ! fm_task_id_path_safe "$1"; then
+        echo "error: invalid obsolete duplicate child recovery request" >&2
+        exit 2
+      fi
+      for _teardown_obsolete_child in "${RETIRE_OBSOLETE_DUPLICATE_CHILDREN[@]+"${RETIRE_OBSOLETE_DUPLICATE_CHILDREN[@]}"}"; do
+        if [ "$_teardown_obsolete_child" = "$1" ]; then
+          echo "error: obsolete duplicate child $1 was named more than once" >&2
+          exit 2
+        fi
+      done
+      RETIRE_OBSOLETE_DUPLICATE_CHILDREN+=("$1")
+      ;;
     *)
       echo "error: invalid teardown request" >&2
       exit 2
@@ -390,6 +421,11 @@ while [ "$#" -gt 0 ]; do
   esac
   shift
 done
+unset _teardown_obsolete_child
+if [ "${#RETIRE_OBSOLETE_DUPLICATE_CHILDREN[@]}" -gt 0 ] && [ "$FORCE" != --force ]; then
+  echo "error: obsolete duplicate child recovery requires --force and explicit discard approval" >&2
+  exit 2
+fi
 fm_backlog_directory_present "$STATE" "state directory" || {
   echo "error: teardown refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
   exit 1
@@ -448,6 +484,7 @@ DESCENDANT_TASK_IDS=()
 DESCENDANT_TASK_KINDS=()
 DESCENDANT_TASK_HOMES=()
 DESCENDANT_TREEHOUSE_LOCK_PATHS=()
+PROVEN_OBSOLETE_DUPLICATE_CHILDREN=()
 teardown_release_locks() {
   local status=$? i
   if declare -F teardown_release_herdr_locks >/dev/null 2>&1; then
@@ -1001,6 +1038,10 @@ remote_secondmate_teardown() {
   local remote_host remote_root remote_home kind route_host route_root route_home out rc tmp
   remote_host=$(fm_meta_get "$META" remote_host)
   [ -n "$remote_host" ] || return 3
+  if [ "${#RETIRE_OBSOLETE_DUPLICATE_CHILDREN[@]}" -gt 0 ]; then
+    echo "REFUSED: obsolete duplicate child recovery is local-only; remote retirement changed nothing" >&2
+    return 1
+  fi
   kind=$(fm_meta_get "$META" kind)
   [ "$kind" = secondmate ] || { echo "REFUSED: remote placement metadata is valid only for a secondmate" >&2; return 1; }
   remote_root=$(fm_meta_get "$META" remote_root)
@@ -1136,6 +1177,10 @@ ORCA_PATH_MATCH_VERIFIED=0
 CLEANUP_RECOVERY=$TEARDOWN_CLEANUP_RECOVERY
 
 KIND=$TEARDOWN_META_KIND
+if [ "${#RETIRE_OBSOLETE_DUPLICATE_CHILDREN[@]}" -gt 0 ] && [ "$KIND" != secondmate ]; then
+  echo "REFUSED: obsolete duplicate child recovery is valid only for a secondmate retirement; nothing was changed" >&2
+  exit 1
+fi
 EXPECTED_TREEHOUSE_PROJECT_LOCK=
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] \
    && fm_treehouse_pool_slot "$PROJ" "$WT"; then
@@ -2353,6 +2398,25 @@ collect_local_firstmate_states() {
   done
 }
 
+teardown_array_contains() {  # <needle> <values...>
+  local needle=$1 value
+  shift
+  for value in "$@"; do
+    [ "$value" != "$needle" ] || return 0
+  done
+  return 1
+}
+
+obsolete_duplicate_collision_is_proven() {  # <record-state> <record-id> <other-state> <other-id> <field>
+  local record_state=$1 record_id=$2 other_state=$3 other_id=$4 field=$5 recovery_state
+  [ "${#PROVEN_OBSOLETE_DUPLICATE_CHILDREN[@]}" -gt 0 ] || return 1
+  recovery_state="$HOME_PATH/state"
+  [ "$record_state" = "$recovery_state" ] && [ "$other_state" = "$recovery_state" ] || return 1
+  [ "$field" = worktree ] || return 1
+  teardown_array_contains "$record_id" "${PROVEN_OBSOLETE_DUPLICATE_CHILDREN[@]}" || return 1
+  teardown_array_contains "$other_id" "${PROVEN_OBSOLETE_DUPLICATE_CHILDREN[@]}"
+}
+
 require_exclusive_worktree_slot_record() {
   local record_meta=$1 record_id=$2 record_state=$3 worktree=$4
   local slot state_dir other other_id field other_path other_slot
@@ -2372,6 +2436,9 @@ require_exclusive_worktree_slot_record() {
         [ -n "$other_path" ] || continue
         other_slot=$(canonical_existing_dir "$other_path") || continue
         [ "$other_slot" = "$slot" ] || continue
+        if obsolete_duplicate_collision_is_proven "$record_state" "$record_id" "$state_dir" "$other_id" "$field"; then
+          continue
+        fi
         echo "REFUSED: task $record_id's recorded worktree $slot is also task $other_id's recorded $field." >&2
         echo "Returning that pool slot would kill $other_id's processes and reset its copy, so nothing was changed - not even with --force." >&2
         echo "Reconcile whichever record is wrong (bin/fm-crew-state.sh $record_id; bin/fm-crew-state.sh $other_id), then re-run teardown." >&2
@@ -2922,6 +2989,152 @@ preflight_descendant_task_locks() {
   done
 }
 
+require_available_unclaimed_clean_slot() {  # <project> <worktree> <record-id>
+  local project=$1 worktree=$2 record_id=$3 slot status_json count row reported_path reported_slot dirty
+  if ! command -v treehouse >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
+    echo "REFUSED: obsolete duplicate recovery cannot inspect Treehouse and JSON state; forced teardown changed nothing" >&2
+    return 1
+  fi
+  slot=$(canonical_existing_dir "$worktree") || {
+    echo "REFUSED: obsolete duplicate recovery cannot resolve the recorded child slot; forced teardown changed nothing" >&2
+    return 1
+  }
+  status_json=$( (CDPATH='' cd -- "$project" && treehouse status --json) 2>/dev/null) || {
+    echo "REFUSED: obsolete duplicate recovery cannot read Treehouse status for $slot; forced teardown changed nothing" >&2
+    return 1
+  }
+  count=$(printf '%s' "$status_json" | jq -r --arg slot "$slot" '
+    if type == "array" then [.[] | select(.path == $slot)] | length else -1 end
+  ' 2>/dev/null) || count=
+  [ "$count" = 1 ] || {
+    echo "REFUSED: obsolete duplicate recovery found ${count:-unreadable} exact Treehouse entries for $slot, not one; forced teardown changed nothing" >&2
+    return 1
+  }
+  row=$(printf '%s' "$status_json" | jq -cer --arg slot "$slot" '.[] | select(.path == $slot)' 2>/dev/null) || {
+    echo "REFUSED: obsolete duplicate recovery cannot parse Treehouse state for $slot; forced teardown changed nothing" >&2
+    return 1
+  }
+  if ! printf '%s' "$row" | jq -e '
+      .status == "available"
+      and (.processes | type) == "array" and (.processes | length) == 0
+      and ((.lease_id == null) or (.lease_id == ""))
+      and ((.lease_holder == null) or (.lease_holder == ""))
+      and ((.leased_at == null) or (.leased_at == ""))
+    ' >/dev/null 2>&1; then
+    echo "REFUSED: obsolete duplicate recovery requires $slot to be available, process-free, and unleased; forced teardown changed nothing" >&2
+    return 1
+  fi
+  reported_path=$(printf '%s' "$row" | jq -er '.path | select(type == "string" and length > 0)' 2>/dev/null) || return 1
+  reported_slot=$(canonical_existing_dir "$reported_path") || return 1
+  [ "$reported_slot" = "$slot" ] || {
+    echo "REFUSED: obsolete duplicate recovery saw the Treehouse slot identity change; forced teardown changed nothing" >&2
+    return 1
+  }
+  if ! dirty=$(git -C "$slot" status --porcelain=v1 --untracked-files=all 2>/dev/null); then
+    echo "REFUSED: obsolete duplicate recovery cannot inspect Git state for $slot; forced teardown changed nothing" >&2
+    return 1
+  fi
+  [ -z "$dirty" ] || {
+    echo "REFUSED: obsolete duplicate recovery requires a clean returned slot at $slot; forced teardown changed nothing" >&2
+    return 1
+  }
+  fm_treehouse_slot_owner_state "$slot" "$record_id"
+  [ "$FM_TREEHOUSE_SLOT_OWNER" = absent ] || {
+    echo "REFUSED: obsolete duplicate recovery requires no slot-owner claim at $slot (found $FM_TREEHOUSE_SLOT_OWNER); forced teardown changed nothing" >&2
+    return 1
+  }
+}
+
+prove_obsolete_duplicate_children() {
+  local recovery_state i state task_id meta kind backend worktree project slot project_path target session
+  local base_slot='' base_project='' requested found
+  local -a ids slots
+  [ "${#RETIRE_OBSOLETE_DUPLICATE_CHILDREN[@]}" -gt 0 ] || return 0
+  [ "${#RETIRE_OBSOLETE_DUPLICATE_CHILDREN[@]}" -ge 2 ] || {
+    echo "REFUSED: obsolete duplicate recovery must name every member of a duplicate child set; forced teardown changed nothing" >&2
+    return 1
+  }
+  [ "${#DESCENDANT_TASK_IDS[@]}" -eq "${#RETIRE_OBSOLETE_DUPLICATE_CHILDREN[@]}" ] || {
+    echo "REFUSED: obsolete duplicate recovery must name the complete descendant set so unapproved work is preserved; forced teardown changed nothing" >&2
+    return 1
+  }
+  recovery_state="$HOME_PATH/state"
+  ids=()
+  slots=()
+  for ((i=0; i < ${#DESCENDANT_TASK_IDS[@]}; i++)); do
+    state=${DESCENDANT_TASK_STATES[$i]}
+    task_id=${DESCENDANT_TASK_IDS[$i]}
+    meta="$state/$task_id.meta"
+    [ "$state" = "$recovery_state" ] || {
+      echo "REFUSED: obsolete duplicate recovery applies only to direct child records; forced teardown changed nothing" >&2
+      return 1
+    }
+    teardown_array_contains "$task_id" "${RETIRE_OBSOLETE_DUPLICATE_CHILDREN[@]}" || {
+      echo "REFUSED: descendant task $task_id was not explicitly approved for obsolete duplicate retirement; forced teardown changed nothing" >&2
+      return 1
+    }
+    kind=$(meta_value "$meta" kind)
+    [ "$kind" = scout ] || {
+      echo "REFUSED: obsolete duplicate child $task_id is not a scout record; forced teardown changed nothing" >&2
+      return 1
+    }
+    backend=$(fm_backend_of_meta "$meta")
+    [ "$backend" = herdr ] || {
+      echo "REFUSED: obsolete duplicate child $task_id does not have a provable Herdr endpoint; forced teardown changed nothing" >&2
+      return 1
+    }
+    worktree=$(meta_value "$meta" worktree)
+    project=$(meta_value "$meta" project)
+    fm_treehouse_pool_slot "$project" "$worktree" || {
+      echo "REFUSED: obsolete duplicate child $task_id no longer names a Treehouse pool slot; forced teardown changed nothing" >&2
+      return 1
+    }
+    slot=$(canonical_existing_dir "$worktree") || return 1
+    project_path=$(canonical_existing_dir "$project") || return 1
+    if [ -z "$base_slot" ]; then
+      base_slot=$slot
+      base_project=$project_path
+    elif [ "$slot" != "$base_slot" ] || [ "$project_path" != "$base_project" ]; then
+      echo "REFUSED: obsolete duplicate recovery requires one unchanged project and slot identity; forced teardown changed nothing" >&2
+      return 1
+    fi
+    fm_backend_validate_task_endpoint "$meta" "$task_id" || return 1
+    [ "$FM_BACKEND_VALIDATED_BACKEND" = herdr ] || return 1
+    target=$FM_BACKEND_VALIDATED_TARGET
+    fm_backend_herdr_parse_target "$target" || return 1
+    session=$FM_BACKEND_HERDR_SESSION
+    teardown_herdr_session_lock_held "$session" || {
+      echo "REFUSED: obsolete duplicate child $task_id has no held Herdr presentation lock; forced teardown changed nothing" >&2
+      return 1
+    }
+    fm_backend_herdr_endpoint_confirmed_gone "$target" || {
+      echo "REFUSED: obsolete duplicate child $task_id's exact Herdr pane is present or ambiguous; forced teardown changed nothing" >&2
+      return 1
+    }
+    ids+=("$task_id")
+    slots+=("$slot")
+  done
+  for requested in "${RETIRE_OBSOLETE_DUPLICATE_CHILDREN[@]}"; do
+    found=0
+    for task_id in "${ids[@]}"; do
+      [ "$task_id" != "$requested" ] || found=$((found + 1))
+    done
+    [ "$found" -eq 1 ] || {
+      echo "REFUSED: obsolete duplicate child $requested did not resolve to one unchanged direct record; forced teardown changed nothing" >&2
+      return 1
+    }
+  done
+  require_available_unclaimed_clean_slot "$base_project" "$base_slot" "${ids[0]}" || return 1
+  PROVEN_OBSOLETE_DUPLICATE_CHILDREN=("${ids[@]}")
+  for ((i=0; i < ${#ids[@]}; i++)); do
+    require_exclusive_worktree_slot_record "$recovery_state/${ids[$i]}.meta" "${ids[$i]}" "$recovery_state" "${slots[$i]}" || {
+      PROVEN_OBSOLETE_DUPLICATE_CHILDREN=()
+      return 1
+    }
+  done
+  echo "teardown: proved obsolete duplicate scouts ${ids[*]} have gone endpoints and share returned clean slot $base_slot; retiring only their records and leaving that slot untouched" >&2
+}
+
 preflight_descendant_treehouse_slots() {
   local i state task_id meta kind backend target worktree project lock_path held owner_rc
   for ((i=0; i < ${#DESCENDANT_TASK_IDS[@]}; i++)); do
@@ -2957,6 +3170,7 @@ preflight_descendant_treehouse_slots() {
       DESCENDANT_LOCK_PATHS+=("$lock_path")
     fi
   done
+  prove_obsolete_duplicate_children || return 1
   for ((i=0; i < ${#DESCENDANT_TASK_IDS[@]}; i++)); do
     state=${DESCENDANT_TASK_STATES[$i]}
     task_id=${DESCENDANT_TASK_IDS[$i]}
@@ -3193,7 +3407,7 @@ endpoint_close_refusal() {  # <subject> <backend> <target> <honors-force>
 }
 
 cleanup_firstmate_home_children() {
-  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc child_busy_gen child_owner_rc
+  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc child_busy_gen child_owner_rc child_obsolete_duplicate
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -3209,13 +3423,17 @@ cleanup_firstmate_home_children() {
     else
       child_t=$(fm_backend_target_of_meta "$child_meta")
     fi
+    child_obsolete_duplicate=0
+    if teardown_array_contains "$child_id" "${PROVEN_OBSOLETE_DUPLICATE_CHILDREN[@]+"${PROVEN_OBSOLETE_DUPLICATE_CHILDREN[@]}"}"; then
+      child_obsolete_duplicate=1
+    fi
     if [ "$child_backend" = orca ] && [ "$child_kind" != secondmate ]; then
       child_orca_worktree_id=$(require_orca_worktree_id "$child_meta") || return 1
       if [ -n "$child_wt" ] && [ -e "$child_wt" ]; then
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
       fi
     fi
-    if [ -n "$child_t" ]; then
+    if [ -n "$child_t" ] && [ "$child_obsolete_duplicate" -eq 0 ]; then
       if [ "$child_backend" = herdr ]; then
         fm_backend_herdr_parse_target "$child_t" || return 1
         if ! teardown_herdr_session_lock_held "$FM_BACKEND_HERDR_SESSION"; then
@@ -3237,7 +3455,12 @@ cleanup_firstmate_home_children() {
           || { endpoint_close_refusal "child $child_id" "$child_backend" "$child_t" 0; return 1; }
       fi
     fi
-    if [ "$child_kind" = secondmate ]; then
+    if [ "$child_obsolete_duplicate" -eq 1 ]; then
+      # The proof above established that this record no longer owns its shared
+      # returned slot. Retire only firstmate-owned artifacts; do not close an
+      # already-gone pane or reset/return a pool slot that belongs to the pool.
+      :
+    elif [ "$child_kind" = secondmate ]; then
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
       if [ -n "$child_home" ] && [ -d "$child_home" ]; then
@@ -3342,11 +3565,11 @@ if [ "$KIND" = secondmate ]; then
     validate_firstmate_home_children_removal "$HOME_PATH" || exit 1
     preflight_descendant_task_locks "$HOME_PATH" || exit 1
     validate_firstmate_home_children_removal "$HOME_PATH" || exit 1
-    preflight_descendant_treehouse_slots || exit 1
     if [ "$BACKEND" = herdr ]; then
       teardown_herdr_preflight_target "$T" "$ID" || exit 1
     fi
     preflight_firstmate_home_herdr_children "$HOME_PATH" || exit 1
+    preflight_descendant_treehouse_slots || exit 1
   fi
 fi
 

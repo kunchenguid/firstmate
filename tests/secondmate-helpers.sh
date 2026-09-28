@@ -111,6 +111,10 @@ case "${1:-}" in
     fi
     exit 0
     ;;
+  status)
+    [ "${2:-}" = --json ] || exit 2
+    printf '%s\n' "${FM_FAKE_TREEHOUSE_STATUS_JSON:-[]}"
+    ;;
   return)
     shift
     target=

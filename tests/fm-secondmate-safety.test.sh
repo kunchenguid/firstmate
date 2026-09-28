@@ -2058,6 +2058,177 @@ EOF
   pass "forced secondmate teardown refuses duplicated descendant pool slots"
 }
 
+test_secondmate_force_teardown_recovers_proven_obsolete_duplicate_scouts() {
+  local home subhome otherhome childproj childwt fakebin log err rc available_json busy_json child pane
+  local -a recovery_args
+  home="$TMP_ROOT/force-obsolete-duplicate-home"
+  subhome="$TMP_ROOT/force-obsolete-duplicate-subhome"
+  otherhome="$TMP_ROOT/force-obsolete-duplicate-other-home"
+  childproj="$subhome/projects/alpha"
+  childwt="$TMP_ROOT/force-obsolete-duplicate-pool/10/alpha"
+  err="$TMP_ROOT/force-obsolete-duplicate.err"
+  mkdir -p "$home/state" "$home/data" "$subhome/state" "$otherhome/state" "$(dirname "$childwt")"
+  fm_git_worktree "$childproj" "$childwt" obsolete-duplicate-child
+  printf '{"worktrees":[{"name":"10","path":"%s"}]}\n' "$childwt" \
+    > "$TMP_ROOT/force-obsolete-duplicate-pool/treehouse-state.json"
+  printf 'domain\n' > "$subhome/.fm-secondmate-home"
+  printf 'other\n' > "$otherhome/.fm-secondmate-home"
+  cat > "$home/state/domain.meta" <<EOF
+window=firstmate:fm-domain
+worktree=$subhome
+project=$subhome
+harness=echo
+kind=secondmate
+mode=secondmate
+yolo=off
+home=$subhome
+projects=alpha
+EOF
+  cat > "$home/data/secondmates.md" <<EOF
+- domain - design domain (home: $subhome; scope: design domain; projects: alpha; added 2026-06-22)
+- other - other domain (home: $otherhome; scope: other domain; projects: alpha; added 2026-06-22)
+EOF
+  pane=1
+  for child in old-run old-recovery; do
+    cat > "$subhome/state/$child.meta" <<EOF
+window=retired:w1:p$pane
+endpoint_task_id=$child
+backend=herdr
+herdr_session=retired
+herdr_workspace_id=w1
+herdr_tab_id=w1:t$pane
+herdr_pane_id=w1:p$pane
+worktree=$childwt
+project=$childproj
+harness=pi
+kind=scout
+mode=no-mistakes
+yolo=off
+spawn_gen=obsolete-$child
+EOF
+    pane=$((pane + 1))
+  done
+  fakebin=$(make_fake_tmux "$TMP_ROOT/force-obsolete-duplicate-fake")
+  log="$TMP_ROOT/force-obsolete-duplicate-fake/tmux.log"
+  cat > "$fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf 'herdr %s\n' "$*" >> "${FM_FAKE_TMUX_LOG:?}"
+case "${1:-} ${2:-}" in
+  "session list")
+    printf '{"sessions":[{"name":"retired","default":false,"running":true,"socket_path":"%s"}]}\n' "${FM_FAKE_HERDR_SOCKET:?}"
+    ;;
+  "pane get")
+    pane=${3:-}
+    if [ -n "${FM_FAKE_HERDR_LIVE_PANE:-}" ] && [ "$pane" = "$FM_FAKE_HERDR_LIVE_PANE" ]; then
+      printf '{"result":{"pane":{"pane_id":"%s","tab_id":"w1:t-live","workspace_id":"w1"}}}\n' "$pane"
+    else
+      printf '{"error":{"code":"pane_not_found"}}\n'
+    fi
+    ;;
+  *)
+    printf '{"error":{"code":"unsupported_test_call"}}\n'
+    exit 1
+    ;;
+esac
+SH
+  chmod +x "$fakebin/herdr"
+  available_json=$(jq -cn --arg path "$childwt" '[{
+    name:"10", path:$path, status:"available", flavor:"git",
+    lease_id:"", lease_holder:"", leased_at:null, processes:[]
+  }]')
+  busy_json=$(jq -cn --arg path "$childwt" '[{
+    name:"10", path:$path, status:"in-use", flavor:"git",
+    lease_id:"", lease_holder:"", leased_at:null,
+    processes:[{pid:99999,name:"worker"}]
+  }]')
+  recovery_args=(
+    domain --force
+    --retire-obsolete-duplicate-child old-run
+    --retire-obsolete-duplicate-child old-recovery
+  )
+
+  set +e
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/force-obsolete-duplicate-fake/pane.txt" \
+    FM_FAKE_HERDR_SOCKET="$TMP_ROOT/force-obsolete-duplicate-fake/retired.sock" \
+    FM_FAKE_TREEHOUSE_STATUS_JSON="$available_json" \
+    "$ROOT/bin/fm-teardown.sh" domain --force \
+      --retire-obsolete-duplicate-child old-run >/dev/null 2>"$err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "obsolete duplicate recovery accepted an incomplete child approval set"
+  assert_present "$subhome/state/old-run.meta" "incomplete recovery removed the first child record"
+  assert_present "$subhome/state/old-recovery.meta" "incomplete recovery removed the second child record"
+  assert_contains "$(cat "$err")" "name every member" "incomplete recovery refusal did not name the approval gap"
+
+  set +e
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/force-obsolete-duplicate-fake/pane.txt" \
+    FM_FAKE_HERDR_SOCKET="$TMP_ROOT/force-obsolete-duplicate-fake/retired.sock" \
+    FM_FAKE_HERDR_LIVE_PANE=w1:p2 FM_FAKE_TREEHOUSE_STATUS_JSON="$available_json" \
+    "$ROOT/bin/fm-teardown.sh" "${recovery_args[@]}" >/dev/null 2>"$err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "obsolete duplicate recovery accepted a present child endpoint"
+  assert_present "$subhome/state/old-run.meta" "live-endpoint refusal removed the first child record"
+  assert_present "$subhome/state/old-recovery.meta" "live-endpoint refusal removed the second child record"
+  assert_contains "$(cat "$err")" "exact Herdr pane is present or ambiguous" "live-endpoint refusal did not name its failed proof"
+
+  set +e
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/force-obsolete-duplicate-fake/pane.txt" \
+    FM_FAKE_HERDR_SOCKET="$TMP_ROOT/force-obsolete-duplicate-fake/retired.sock" \
+    FM_FAKE_TREEHOUSE_STATUS_JSON="$busy_json" \
+    "$ROOT/bin/fm-teardown.sh" "${recovery_args[@]}" >/dev/null 2>"$err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "obsolete duplicate recovery accepted an occupied Treehouse slot"
+  assert_present "$subhome/state/old-run.meta" "occupied-slot refusal removed the first child record"
+  assert_present "$subhome/state/old-recovery.meta" "occupied-slot refusal removed the second child record"
+  assert_contains "$(cat "$err")" "available, process-free, and unleased" "occupied-slot refusal did not name its failed proof"
+
+  cat > "$otherhome/state/foreign.meta" <<EOF
+window=firstmate:fm-foreign
+worktree=$childwt
+project=$childproj
+harness=echo
+kind=ship
+mode=no-mistakes
+yolo=off
+EOF
+  set +e
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/force-obsolete-duplicate-fake/pane.txt" \
+    FM_FAKE_HERDR_SOCKET="$TMP_ROOT/force-obsolete-duplicate-fake/retired.sock" \
+    FM_FAKE_TREEHOUSE_STATUS_JSON="$available_json" \
+    "$ROOT/bin/fm-teardown.sh" "${recovery_args[@]}" >/dev/null 2>"$err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "obsolete duplicate recovery ignored another home's slot claim"
+  assert_present "$subhome/state/old-run.meta" "cross-home refusal removed the first child record"
+  assert_present "$subhome/state/old-recovery.meta" "cross-home refusal removed the second child record"
+  assert_present "$otherhome/state/foreign.meta" "cross-home refusal removed the foreign record"
+  assert_contains "$(cat "$err")" "task foreign" "cross-home refusal did not name the foreign claimant"
+  rm -f "$otherhome/state/foreign.meta"
+
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/force-obsolete-duplicate-fake/pane.txt" \
+    FM_FAKE_HERDR_SOCKET="$TMP_ROOT/force-obsolete-duplicate-fake/retired.sock" \
+    FM_FAKE_TREEHOUSE_STATUS_JSON="$available_json" \
+    "$ROOT/bin/fm-teardown.sh" "${recovery_args[@]}" >/dev/null 2>"$err" \
+    || fail "proved obsolete duplicate scout recovery did not retire the secondmate"
+  assert_absent "$subhome" "proved obsolete duplicate recovery left the retired secondmate home"
+  assert_absent "$home/state/domain.meta" "proved obsolete duplicate recovery left parent metadata"
+  assert_present "$childwt" "proved obsolete duplicate recovery touched the returned shared slot"
+  assert_contains "$(cat "$err")" "leaving that slot untouched" "successful recovery did not report its bounded action"
+  grep -F "treehouse return --force $childwt" "$log" >/dev/null \
+    && fail "proved obsolete duplicate recovery returned the shared slot"
+  grep -F 'pane close' "$log" >/dev/null \
+    && fail "proved obsolete duplicate recovery tried to close an already-gone child pane"
+  pass "secondmate force teardown retires only an explicitly approved, proved obsolete duplicate scout set"
+}
+
 test_secondmate_force_teardown_preserves_child_on_unproven_lock() {
   local home subhome childproj childwt fakebin log err rc lock
   home="$TMP_ROOT/force-lock-home"
@@ -3081,6 +3252,7 @@ test_secondmate_teardown_refuses_failed_leased_home_return
 test_secondmate_teardown_removes_plain_clone_home_without_treehouse_return
 test_secondmate_force_teardown_discards_child_work
 test_secondmate_force_teardown_refuses_duplicated_child_slot
+test_secondmate_force_teardown_recovers_proven_obsolete_duplicate_scouts
 test_secondmate_force_teardown_preserves_child_on_unproven_lock
 test_secondmate_force_teardown_allows_non_state_operational_dir_symlinks_inside_home
 test_secondmate_force_teardown_refuses_operational_dir_symlink_outside_home
