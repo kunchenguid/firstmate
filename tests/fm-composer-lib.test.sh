@@ -669,6 +669,84 @@ test_matrix_pi_dollar_status_footer_is_empty() {
     || fail "a bare dollar prompt below a glyph must still invalidate cursorless selection, got '$out'"
   pass "matrix: a dollar-first pi status footer reads empty; dead shells still refuse"
 }
+test_matrix_pi_stderr_notice_rows() {
+  # Real pi 0.87.0 pane bytes (captured live through `tmux capture-pane -e`
+  # on an isolated idle pi; the same corruption was caught twice the same day
+  # on fleet panes): an extension console.warn fired between TUI frames and
+  # its plain text overwrote the editor input row IN PLACE, so the notice sat
+  # exactly between the separator rules where a draft would sit, with the
+  # reverse-video cursor cell gone. Read as typed input, that row held
+  # `pending` on a genuinely empty composer: every doorbell was skipped
+  # ("composer visibly holds pending text") and every relaunch refused
+  # ("not proven empty"). An Enter probe proved the editor empty both times.
+  # The rule and its styling evidence live at
+  # FM_COMPOSER_PI_NOTICE_RE_DEFAULT / _fm_composer_row_is_pi_notice.
+  local rules notice typed pi_idle pi_working out herdr_rules herdr_notice herdr_typed
+  pi_idle=$(printf 'pi\tidle')
+  pi_working=$(printf 'pi\tworking')
+  rules="${ESC}[38;2;80;80;80m────────────────────────${ESC}[0m"
+  notice="${ESC}[39m⚠️ Live session indexing failed: database is locked"
+  typed="fix the login bug${ESC}[7m ${ESC}[0m"
+  # 1. The incident: notice alone, idle pi - the composer the Enter probe
+  #    proved empty must read empty on every capability profile that can
+  #    prove the separated pair.
+  assert_screen "pi stderr notice alone on herdr, idle" empty \
+    "$CAPS_STYLED" $'transcript\n'"$rules"$'\n'"$notice"$'\n'"$rules" '' "$pi_idle"
+  assert_screen "pi stderr notice alone with cursor on it, idle" empty \
+    "$CAPS_TMUX" $'transcript\n'"$rules"$'\n'"$notice"$'\n'"$rules" 2 "$pi_idle"
+  assert_screen "pi stderr notice alone on plain capture, idle" empty \
+    $'styled=0\ncursor=0\nidentity=1\nrows=20' \
+    $'transcript\n────────────────────────\n⚠️ Live session indexing failed: database is locked\n────────────────────────' '' "$pi_idle"
+  # A working or unidentifiable pi still refuses; the notice row must not
+  # weaken the identity gate that owns the separated shape.
+  assert_screen "pi stderr notice alone, working identity" unknown \
+    "$CAPS_STYLED" $'transcript\n'"$rules"$'\n'"$notice"$'\n'"$rules" '' "$pi_working"
+  assert_screen "pi stderr notice alone without identity" unknown \
+    "$CAPS_STYLED_NOID" $'transcript\n'"$rules"$'\n'"$notice"$'\n'"$rules"
+  # 2. The whole pi-hermes-memory stderr family, verbatim from its warn/info
+  #    strings, through the herdr serializer's verified byte form (SGR-reset
+  #    row prefixes, its own border colour).
+  herdr_rules="${ESC}[0m${ESC}[38;2;129;162;190m────────────────────────${ESC}[0m"
+  for notice_text in \
+    '⚠️ Live session indexing failed: database is locked' \
+    "⚠️ Auto-consolidation failed for 'memory': no reason reported" \
+    "⏳ Auto-consolidation for 'memory' deferred: another session holds the consolidation lock" \
+    '⚠️ Ephemeral session cleanup failed: disk full' \
+    '⚠️ Session pruning failed: io timeout' \
+    '⚠️ Snapshot retention sweep failed: read-only fs'; do
+    herdr_notice="${ESC}[0m$notice_text"
+    assert_screen "pi stderr notice family member reads empty: $notice_text" empty \
+      "$CAPS_STYLED" $'transcript\n'"$herdr_rules"$'\n'"$herdr_notice"$'\n'"$herdr_rules" '' "$pi_idle"
+  done
+  # 3. The rule must not weaken detection of real pending text. A real draft
+  #    keeps its cursor cell and stays pending; the notice ABOVE a real draft
+  #    (both visible, the corruption plus the repaint) still reads pending;
+  #    a near-miss warning pi never writes stays pending; and even the exact
+  #    notice text typed by a human keeps its cursor cell and stays pending.
+  herdr_typed="${ESC}[0mfix the login bug${ESC}[7m ${ESC}[0m"
+  assert_screen "real typed draft under the herdr serializer" pending \
+    "$CAPS_STYLED" $'transcript\n'"$herdr_rules"$'\n'"$herdr_typed"$'\n'"$herdr_rules" '' "$pi_idle"
+  assert_screen "notice row above a real draft still pending" pending \
+    "$CAPS_STYLED" $'transcript\n'"$herdr_rules"$'\n'"${ESC}[0m⚠️ Live session indexing failed: database is locked"$'\n'"$herdr_typed"$'\n'"$herdr_rules" '' "$pi_idle"
+  assert_screen "a warning pi never writes stays pending" pending \
+    "$CAPS_STYLED" $'transcript\n'"$herdr_rules"$'\n'"${ESC}[0m⚠️ Something unrelated failed: nope"$'\n'"$herdr_rules" '' "$pi_idle"
+  assert_screen "exact notice text typed as a draft stays pending" pending \
+    "$CAPS_STYLED" $'transcript\n'"$herdr_rules"$'\n'"${ESC}[0m⚠️ Live session indexing failed: database is locked${ESC}[7m ${ESC}[0m"$'\n'"$herdr_rules" '' "$pi_idle"
+  # The family is byte-exact: the bare U+26A0 without its VS16 is not the
+  # extension's emitted form and must not match.
+  assert_screen "bare warning sign without VS16 stays pending" pending \
+    "$CAPS_STYLED" $'transcript\n'"$herdr_rules"$'\n'"${ESC}[0m⚠ Live session indexing failed: database is locked"$'\n'"$herdr_rules" '' "$pi_idle"
+  # 4. Extraction: the notice must never come back as composer content, and
+  #    a real draft above which it fired must survive extraction intact.
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" \
+    $'transcript\n'"$herdr_rules"$'\n'"$herdr_notice"$'\n'"$herdr_rules")
+  [ -z "$out" ] || fail "the stderr notice must never be extracted as composer content, got '$out'"
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" \
+    $'transcript\n'"$herdr_rules"$'\n'"${ESC}[0m⚠️ Live session indexing failed: database is locked"$'\n'"$herdr_typed"$'\n'"$herdr_rules")
+  [ "$out" = 'fix the login bug' ] \
+    || fail "a real draft must survive extraction beside the notice, got '$out'"
+  pass "matrix: pi stderr notice rows are furniture, real drafts beside them stay pending"
+}
 
 test_matrix_opencode_leftbar_signals() {
   # Real idle opencode: `┃`-prefixed rows holding an "Ask anything" hint,
@@ -980,6 +1058,7 @@ test_matrix_omp_status_row_bounds_bare_composer
 test_matrix_codex_idle_starfield_furniture
 test_matrix_pi_separated_needs_identity
 test_matrix_pi_dollar_status_footer_is_empty
+test_matrix_pi_stderr_notice_rows
 test_matrix_opencode_leftbar_signals
 test_matrix_grok_titled_bottom_border
 test_matrix_kimi_bordered_shell_glyph_box
