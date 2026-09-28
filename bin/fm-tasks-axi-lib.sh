@@ -140,6 +140,80 @@ fm_tasks_axi_backend_from_toml() {  # <toml-path>
   ' "$toml"
 }
 
+# Read one quoted scalar from the [markdown] table. Return 1 when the key is
+# absent and 2 when it is present but not a non-empty quoted string. tasks-axi
+# applies project values ahead of the user config, so archive resolution below
+# can mirror the producer without asking a non-existent archive-list command.
+fm_tasks_axi_markdown_value_from_toml() {  # <toml-path> <key>
+  local toml=$1 key=$2
+  [ -f "$toml" ] || return 1
+  LC_ALL=C awk -v wanted="$key" '
+    function trim(value) {
+      sub(/^[[:space:]]+/, "", value)
+      sub(/[[:space:]]+$/, "", value)
+      return value
+    }
+    BEGIN { markdown=0; seen=0; valid=0; single=sprintf("%c", 39) }
+    {
+      line=$0
+      sub(/[[:space:]]*#.*/, "", line)
+      line=trim(line)
+      if (line ~ /^\[[^]]+\]$/) {
+        markdown=(line == "[markdown]")
+        next
+      }
+      if (markdown && line ~ ("^" wanted "[[:space:]]*=")) {
+        seen=1
+        sub("^" wanted "[[:space:]]*=[[:space:]]*", "", line)
+        line=trim(line)
+        if (length(line) >= 2 &&
+            ((substr(line, 1, 1) == "\"" && substr(line, length(line), 1) == "\"") ||
+             (substr(line, 1, 1) == single && substr(line, length(line), 1) == single))) {
+          value=substr(line, 2, length(line) - 2)
+          if (length(value) > 0) {
+            print value
+            valid=1
+          }
+        }
+        exit
+      }
+    }
+    END {
+      if (valid) exit 0
+      if (seen) exit 2
+      exit 1
+    }
+  ' "$toml"
+}
+
+# Resolve the markdown Done archive exactly where tasks-axi writes it when
+# fm-tasks-axi.sh addresses <data-dir>/backlog.md. Return 1 for a non-markdown
+# backend (there is no local archive file to inspect) and 2 for invalid config.
+fm_tasks_axi_markdown_archive_resolve() {  # <tasks-axi-working-directory> <data-dir>
+  local root=$1 data=$2 backend config archive rc
+  backend=$(fm_tasks_axi_backend_resolve "$root") || return $?
+  [ "$backend" = markdown ] || return 1
+
+  config="$root/.tasks.toml"
+  archive=$(fm_tasks_axi_markdown_value_from_toml "$config" archive)
+  rc=$?
+  if [ "$rc" -eq 1 ] && [ -n "${HOME:-}" ]; then
+    config="$HOME/.tasks-axi/config.toml"
+    archive=$(fm_tasks_axi_markdown_value_from_toml "$config" archive)
+    rc=$?
+  fi
+  case "$rc" in
+    0)
+      case "$archive" in
+        /*) printf '%s\n' "$archive" ;;
+        *) printf '%s/%s\n' "$root" "$archive" ;;
+      esac
+      ;;
+    1) printf '%s/done-archive.md\n' "${data%/}" ;;
+    *) return 2 ;;
+  esac
+}
+
 # Resolve the active tasks-axi backend with the same precedence as tasks-axi.
 fm_tasks_axi_backend_resolve() {  # <tasks-axi-working-directory>
   local root=$1 backend

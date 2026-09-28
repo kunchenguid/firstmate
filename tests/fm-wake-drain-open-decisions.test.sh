@@ -184,6 +184,104 @@ test_over_long_decision_note_is_capped_with_a_marker() {
   pass "an over-long open decision is cut to its per-item budget with the shared truncation marker"
 }
 
+task_in() {  # <home> <tasks-axi arguments...>
+  local home=$1
+  shift
+  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" "$ROOT/bin/fm-tasks-axi.sh" "$@"
+}
+
+open_decisions_body() {  # <drain-output>
+  awk '
+    /^OPEN DECISIONS \(/ { in_section=1; next }
+    in_section && /^(RECORD DIVERGENCE|WAKE_ACK_REQUIRED)/ { exit }
+    in_section { print }
+  ' "$1"
+}
+
+test_terminal_and_parked_history_does_not_reopen_work() {
+  local dir state out err second body
+  command -v tasks-axi >/dev/null 2>&1 || {
+    pass "skipped terminal decision projection regression: tasks-axi not installed"
+    return
+  }
+  dir=$(make_case retired-history)
+  state="$dir/state"
+  out="$dir/drain.out"
+  err="$dir/drain.err"
+  second="$dir/second.out"
+  mkdir -p "$dir/data" "$dir/records"
+  cat > "$dir/.tasks.toml" <<'EOF'
+backend = "markdown"
+
+[markdown]
+path = "data/backlog.md"
+archive = "records/completed.md"
+done_keep = 0
+EOF
+
+  task_in "$dir" add archived-blocker 'Archived blocker' --kind scout --start >/dev/null
+  task_in "$dir" 'done' archived-blocker --report data/archived-blocker/report.md --keep 0 >/dev/null
+  printf 'needs-decision [key=old]: historical blocker must not reopen execution\n' > "$state/archived-blocker.status"
+
+  task_in "$dir" add parked-blocker 'Parked blocker' --kind scout --queue >/dev/null
+  task_in "$dir" hold parked-blocker --reason 'explicit archive boundary' --kind parked >/dev/null
+  printf 'blocked [key=old-wait]: historical wait must not reopen execution\n' > "$state/parked-blocker.status"
+
+  task_in "$dir" add active-decision 'Active decision' --kind scout --start >/dev/null
+  printf 'needs-decision [key=live]: choose the active path\n' > "$state/active-decision.status"
+  printf 'needs-decision [key=unknown]: preserve an unclassified integrity problem\n' > "$state/unknown-decision.status"
+
+  task_in "$dir" add archived-outcome 'Archived outcome' --kind scout --start >/dev/null
+  task_in "$dir" 'done' archived-outcome --report data/archived-outcome/report.md --keep 0 >/dev/null
+  printf 'done: meaningful result was never handed off\n' > "$state/archived-outcome.status"
+
+  task_in "$dir" add archived-note 'Archived note' --kind scout --start >/dev/null
+  task_in "$dir" 'done' archived-note --report data/archived-note/report.md --keep 0 >/dev/null
+  printf 'note: unread answer from archived work stays visible once\n' > "$state/archived-note.status"
+
+  append_wake "$state" signal archived-blocker.status 'signal: archived blocker' \
+    || fail "could not queue the archived task's raw wake"
+  FM_HOME="$dir" FM_DATA_OVERRIDE="$dir/data" FM_STATE_OVERRIDE="$state" \
+    "$DRAIN" > "$out" 2> "$err" || fail "mixed active/archive drain failed"
+
+  grep "$(printf '\tsignal\tarchived-blocker.status\t')" "$out" >/dev/null \
+    || fail "the archived task's actionable raw wake was hidden: $(cat "$out")"
+  grep -F 'archived-outcome done: meaningful result was never handed off' "$out" >/dev/null \
+    || fail "the archived task's unreported outcome was hidden: $(cat "$out")"
+  grep -F 'archived-note note: unread answer from archived work stays visible once' "$out" >/dev/null \
+    || fail "the archived task's unread note was hidden: $(cat "$out")"
+  body=$(open_decisions_body "$out")
+  case "$body" in
+    *'active-decision [key=live] needs-decision: choose the active path'*) ;;
+    *) fail "the active task's independent decision disappeared: $body" ;;
+  esac
+  case "$body" in
+    *'unknown-decision [key=unknown] needs-decision: preserve an unclassified integrity problem'*) ;;
+    *) fail "the unknown task's decision/integrity evidence disappeared: $body" ;;
+  esac
+  case "$body" in
+    *'archived-blocker'*|*'parked-blocker'*)
+      fail "terminal or explicitly parked history reopened work through OPEN DECISIONS: $body"
+      ;;
+  esac
+
+  ack_drain_err "$state" "$err" || fail "the mixed raw wake did not acknowledge through its generation guard"
+  FM_HOME="$dir" FM_DATA_OVERRIDE="$dir/data" FM_STATE_OVERRIDE="$state" \
+    "$DRAIN" > "$second" || fail "second mixed active/archive drain failed"
+  body=$(open_decisions_body "$second")
+  case "$body" in *'active-decision'*'unknown-decision'*|*'unknown-decision'*'active-decision'*) ;; *)
+    fail "active and unknown decisions did not remain independently open: $body" ;;
+  esac
+  case "$body" in *'archived-blocker'*|*'parked-blocker'*)
+    fail "retired historical blockers repeated on the next drain: $body" ;;
+  esac
+  if grep -F 'meaningful result was never handed off' "$second" >/dev/null \
+    || grep -F 'unread answer from archived work' "$second" >/dev/null; then
+    fail "one-shot archived outcome/note repeated after successful presentation: $(cat "$second")"
+  fi
+  pass "terminal and parked status history cannot reopen work while raw wakes, active decisions, unknown evidence, notes, outcomes, and guarded ack survive"
+}
+
 test_buried_decision_still_surfaces
 test_over_long_decision_note_is_capped_with_a_marker
 test_explicit_resolution_closes_it
@@ -192,3 +290,4 @@ test_no_open_decisions_prints_nothing
 test_open_decision_surfaces_even_with_an_unrelated_queued_wake
 test_buried_decision_surfaces_on_the_empty_queue_fast_path
 test_status_symlink_is_not_followed
+test_terminal_and_parked_history_does_not_reopen_work

@@ -59,9 +59,10 @@
 #     delegates local agents to bin/fm-crew-state.sh.
 #     paths.status_log.last_event is historical wake-event data only, never
 #     current state.
-#     retained_record separates a closed backlog row with no current working
-#     evidence from active inventory. It is not proof of endpoint cleanup or
-#     successful acceptance; endpoint evidence and open decisions stay visible.
+#     record_disposition separates current backlog state from the configured
+#     tasks-axi Done archive. retained_record is true for a closed current row or
+#     archive record with no current working evidence. It is not proof of endpoint
+#     cleanup or successful acceptance; endpoint evidence stays visible.
 #     hints.open_decisions is the keyed open-decision set returned by
 #     fm-classify-lib.sh's authoritative status_open_decisions fold and reconciled
 #     against current_state; hints.pending_decision and hints.blocked_event are
@@ -139,6 +140,9 @@ esac
 # shellcheck source=bin/fm-classify-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-task-disposition-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-task-disposition-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-timeout-lib.sh"  # fm_run_timed: the shared hard bound
@@ -851,6 +855,7 @@ scout_report_lines() {
 }
 
 BACKLOG_JSON=$(backlog_json) || { echo "fm-fleet-snapshot: backlog read failed" >&2; exit 1; }
+TASK_DISPOSITIONS=$(fm_task_disposition_snapshot "$DATA" 2>/dev/null || true)
 prefetch_task_current_states || { echo "fm-fleet-snapshot: task observation failed" >&2; exit 1; }
 TASKS_JSON=$(task_json_lines) || { echo "fm-fleet-snapshot: task snapshot failed" >&2; exit 1; }
 
@@ -877,6 +882,7 @@ jq -n \
   --arg data "$DATA" \
   --arg config "$CONFIG" \
   --arg projects "$PROJECTS" \
+  --arg task_dispositions "$TASK_DISPOSITIONS" \
   --slurpfile backlog "$BACKLOG_JSON_FILE" \
   --slurpfile tasks "$TASKS_JSON_FILE" \
   --slurpfile main_inventory "$MAIN_INVENTORY_JSON_FILE" \
@@ -885,6 +891,8 @@ jq -n \
    | ($tasks[0]) as $tasks
    | ($main_inventory[0]) as $main_inventory
    | ($scout_reports[0]) as $scout_reports
+   | (reduce ($task_dispositions | split("\n")[] | select(length > 0) | split("\t")) as $row
+       ({}; if ($row | length) == 2 then .[$row[0]] = $row[1] else . end)) as $dispositions
    | def backlog_by_id($id): ($backlog.records[]? | select(.structured == true and .id == $id) | .) // null;
    def task_by_id($id): ($tasks[]? | select(.id == $id) | .) // null;
    def report_kind($id): (task_by_id($id).kind // backlog_by_id($id).kind // "scout");
@@ -894,8 +902,11 @@ jq -n \
      fm_home:$fm_home,
      roots:{fm_root:$fm_root,state:$state,data:$data,config:$config,projects:$projects},
      backlog:$backlog,
-     tasks:($tasks | map(. + {backlog:backlog_by_id(.id)}
-       | . + {retained_record:(.backlog.state == "done" and .current_state.state != "working")})),
+     tasks:($tasks | map(.id as $id
+       | . + {backlog:backlog_by_id($id)}
+       | . + {record_disposition:($dispositions[$id] // "unknown")}
+       | . + {retained_record:((.record_disposition == "done" or .record_disposition == "archive_done")
+           and .current_state.state != "working")})),
      main_inventory:$main_inventory,
      scout_reports:($scout_reports | map(. + {kind:report_kind(.id)}))
    }'

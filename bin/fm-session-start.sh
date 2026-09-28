@@ -7,7 +7,8 @@
 # fm-bootstrap.sh, then separately read data/projects.md, data/captain.md and
 # data/learnings.md, then run
 # fm-lock.sh, fm-wake-drain.sh, then read data/backlog.md, selected identity
-# fields from every state/*.meta, and the newest event from every state/*.status.
+# fields from every state/*.meta, classified by its authoritative task-record
+# disposition, and the newest event from every state/*.status.
 # Every one of those reads is UNCONDITIONAL at every session start, so they
 # belong in a script, not in N agent turns.
 #
@@ -330,8 +331,8 @@ PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
-# shellcheck source=bin/fm-tasks-axi-lib.sh
-. "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+# shellcheck source=bin/fm-task-disposition-lib.sh
+. "$SCRIPT_DIR/fm-task-disposition-lib.sh"
 # shellcheck source=bin/fm-public-followup-lib.sh
 . "$SCRIPT_DIR/fm-public-followup-lib.sh"
 # shellcheck source=bin/fm-trace-context-lib.sh
@@ -628,16 +629,34 @@ print_meta_summary() { # <meta-file> <task-id>
 }
 
 print_work_inventory() {
-  local tmp meta id slot=0 active=0 pid rc=0
-  local -a outputs=() pids=()
+  local tmp meta id disposition dispositions slot=0 active=0 pid rc=0
+  local active_n=0 inactive_n=0 integrity_n=0 output
+  local -a outputs=() pids=() active_outputs=() inactive_outputs=() integrity_outputs=()
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-session-start-fleet.XXXXXX") || {
     printf 'inventory unavailable: could not allocate private temporary storage\n'
     return 0
   }
+  dispositions=$(fm_task_disposition_snapshot "$DATA" 2>/dev/null || true)
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
     id=$(basename "$meta" .meta)
     outputs[slot]="$tmp/$slot.out"
+    output=${outputs[slot]}
+    disposition=$(fm_task_disposition_for "$dispositions" "$id" 2>/dev/null || printf unknown)
+    case "$disposition" in
+      active)
+        active_outputs[active_n]=$output
+        active_n=$((active_n + 1))
+        ;;
+      queued|parked|done|archive_done)
+        inactive_outputs[inactive_n]=$output
+        inactive_n=$((inactive_n + 1))
+        ;;
+      *)
+        integrity_outputs[integrity_n]=$output
+        integrity_n=$((integrity_n + 1))
+        ;;
+    esac
     print_meta_summary "$meta" "$id" >"${outputs[slot]}" &
     pids[active]=$!
     slot=$((slot + 1)); active=$((active + 1))
@@ -649,8 +668,19 @@ print_work_inventory() {
   if [ "$active" -gt 0 ]; then
     for pid in "${pids[@]}"; do wait "$pid" || rc=1; done
   fi
-  if [ "$slot" -eq 0 ]; then printf '(none)\n'; else
-    for meta in "${outputs[@]}"; do cat "$meta"; done
+  subsection "Work under way (authoritative active task records)"
+  if [ "$active_n" -eq 0 ]; then printf '(none)\n'; else
+    for output in "${active_outputs[@]}"; do cat "$output"; done
+  fi
+  subsection "Queued and retained task records (not current work)"
+  printf 'Queued, parked, Done, and archived identities remain available for recovery without being presented as active work.\n'
+  if [ "$inactive_n" -eq 0 ]; then printf '(none)\n'; else
+    for output in "${inactive_outputs[@]}"; do cat "$output"; done
+  fi
+  subsection "Task record integrity (unknown or ambiguous disposition)"
+  printf 'These identities are visible for reconciliation but are not inferred to be current work.\n'
+  if [ "$integrity_n" -eq 0 ]; then printf '(none)\n'; else
+    for output in "${integrity_outputs[@]}"; do cat "$output"; done
   fi
   [ "$rc" -eq 0 ] || printf 'inventory warning: one or more task summaries failed; inspect state/*.meta directly.\n'
   rm -rf -- "$tmp"
@@ -937,7 +967,6 @@ stage fleet-state
 section "FLEET STATE"
 print_backlog_compact "$DATA/backlog.md" "data/backlog.md"
 
-subsection "Work under way (one concise row per state/*.meta)"
 print_work_inventory
 
 subsection "Orphan status logs (state/*.status without matching .meta)"

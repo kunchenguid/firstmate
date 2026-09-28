@@ -1253,6 +1253,62 @@ EOF
   pass "session start: the tasks-axi compatibility verdict is computed once and reused"
 }
 
+test_task_metadata_is_partitioned_by_authoritative_disposition() {
+  local rec root home fakebin out under_way inactive integrity id count
+  rec=$(new_world disposition-inventory)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_pi "$fakebin"
+  cat > "$root/.tasks.toml" <<'EOF'
+backend = "markdown"
+
+[markdown]
+archive = "data/done-archive.md"
+EOF
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] active-task - Active Task (repo: firstmate) (kind: ship)
+- [ ] ambiguous-task - Ambiguous Task (repo: firstmate) (kind: ship)
+
+## Queued
+- [ ] queued-task - Queued Task (repo: firstmate) (kind: ship)
+- [ ] parked-task - Parked Task (repo: firstmate) (kind: ship) (hold-kind: parked)
+- [ ] ambiguous-task - Duplicate Ambiguous Task (repo: firstmate) (kind: ship)
+
+## Done
+- [x] done-task - Done Task (repo: firstmate) (kind: ship)
+EOF
+  cat > "$home/data/done-archive.md" <<'EOF'
+## Archived 2026-09
+- [x] archived-task - Archived Task (repo: firstmate) (kind: ship)
+EOF
+  for id in active-task queued-task parked-task done-task archived-task ambiguous-task unknown-task; do
+    printf 'kind=ship\nproject=firstmate\n' > "$home/state/$id.meta"
+  done
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  under_way=$(printf '%s\n' "$out" | awk '$0 == "Work under way (authoritative active task records)" {show=1; next} $0 == "Queued and retained task records (not current work)" {exit} show')
+  inactive=$(printf '%s\n' "$out" | awk '$0 == "Queued and retained task records (not current work)" {show=1; next} $0 == "Task record integrity (unknown or ambiguous disposition)" {exit} show')
+  integrity=$(printf '%s\n' "$out" | awk '$0 == "Task record integrity (unknown or ambiguous disposition)" {show=1; next} $0 == "Orphan status logs (state/*.status without matching .meta)" {exit} show')
+
+  assert_contains "$under_way" "--- active-task ---" "session start omitted the authoritative active task"
+  assert_not_contains "$under_way" "--- queued-task ---" "session start presented queued metadata as work under way"
+  assert_not_contains "$under_way" "--- done-task ---" "session start presented Done metadata as work under way"
+  assert_contains "$inactive" "--- queued-task ---" "session start hid queued task metadata"
+  assert_contains "$inactive" "--- parked-task ---" "session start hid parked task metadata"
+  assert_contains "$inactive" "--- done-task ---" "session start hid Done task metadata"
+  assert_contains "$inactive" "--- archived-task ---" "session start hid archive-retained task metadata"
+  assert_contains "$integrity" "--- ambiguous-task ---" "session start hid ambiguous task metadata"
+  assert_contains "$integrity" "--- unknown-task ---" "session start hid unknown task metadata"
+  for id in active-task queued-task parked-task done-task archived-task ambiguous-task unknown-task; do
+    count=$(printf '%s\n' "$out" | grep -F -c -- "--- $id ---" || true)
+    [ "$count" -eq 1 ] || fail "session start summarized $id $count times instead of once"
+  done
+  pass "session start partitions every task metadata record once by authoritative disposition"
+}
+
 # --- fleet-state digest: compact backlog rendering --------------------------
 
 # A backlog whose Done section, held row, blocked row, and plain queued rows can
@@ -2135,6 +2191,7 @@ test_herdr_backend_diagnostics_follow_real_session_start
 test_inactive_reconcile_never_blocks_the_digest
 test_read_only_session_declares_skipped_network_checks
 test_tasks_axi_compatibility_is_probed_once
+test_task_metadata_is_partitioned_by_authoritative_disposition
 test_latest_status_event_and_late_unread_note
 test_status_tail_line_cap
 test_orphan_status_logs_are_printed

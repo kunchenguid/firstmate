@@ -99,6 +99,86 @@ EOF
   pass "fleet snapshot keeps ordinary work active and preserves historical secondmate records as unsupported"
 }
 
+test_view_uses_authoritative_task_disposition() {
+  local home fakebin out view under_way retained integrity queued
+  home=$(make_home disposition-view)
+  fakebin=$(make_fakebin "$home")
+  cat > "$home/.tasks.toml" <<'EOF'
+backend = "markdown"
+
+[markdown]
+archive = "data/done-archive.md"
+EOF
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] active-task - Active Task (repo: alpha) (kind: ship)
+- [ ] ambiguous-task - Ambiguous Task (repo: alpha) (kind: ship)
+
+## Queued
+- [ ] queued-task - Queued Task (repo: alpha) (kind: ship)
+- [ ] parked-task - Parked Task (repo: alpha) (kind: ship) (hold-kind: parked)
+- [ ] ambiguous-task - Duplicate Ambiguous Task (repo: alpha) (kind: ship)
+
+## Done
+- [x] done-task - Done Task (repo: alpha) (kind: ship)
+- [x] closed-working - Closed But Working Task (repo: alpha) (kind: ship)
+EOF
+  cat > "$home/data/done-archive.md" <<'EOF'
+## Archived 2026-09
+- [x] archived-task - Archived Task (repo: alpha) (kind: ship)
+EOF
+  for id in active-task queued-task done-task archived-task ambiguous-task unknown-task; do
+    printf 'kind=secondmate\nproject=alpha\n' > "$home/state/$id.meta"
+  done
+  mkdir -p "$home/projects/parked-task" "$home/projects/closed-working"
+  fm_test_write_herdr_meta "$home/state/parked-task.meta" \
+    "window=fmtest:w3:p1" "endpoint_task_id=parked-task" \
+    "backend=herdr" "herdr_session=fmtest" "herdr_workspace_id=w3" \
+    "herdr_tab_id=w3:t1" "herdr_pane_id=w3:p1" \
+    "project=alpha" "worktree=$home/projects/parked-task" "harness=pi" "kind=ship"
+  fm_test_write_herdr_meta "$home/state/closed-working.meta" \
+    "window=fmtest:w4:p1" "endpoint_task_id=closed-working" \
+    "backend=herdr" "herdr_session=fmtest" "herdr_workspace_id=w4" \
+    "herdr_tab_id=w4:t1" "herdr_pane_id=w4:p1" \
+    "project=alpha" "worktree=$home/projects/closed-working" "harness=pi" "kind=ship"
+
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s\n' "$out" | jq -e '
+    (.tasks | any(.id == "active-task" and .record_disposition == "active"))
+      and (.tasks | any(.id == "queued-task" and .record_disposition == "queued"))
+      and (.tasks | any(.id == "parked-task" and .record_disposition == "parked"))
+      and (.tasks | any(.id == "done-task" and .record_disposition == "done" and .retained_record == true))
+      and (.tasks | any(.id == "archived-task" and .record_disposition == "archive_done" and .retained_record == true))
+      and (.tasks | any(.id == "ambiguous-task" and .record_disposition == "ambiguous"))
+      and (.tasks | any(.id == "unknown-task" and .record_disposition == "unknown"))
+      and (.tasks | any(.id == "parked-task" and .record_disposition == "parked" and .current_state.state == "working"))
+      and (.tasks | any(.id == "closed-working" and .record_disposition == "done" and .current_state.state == "working" and .retained_record == false))
+  ' >/dev/null || fail "task disposition snapshot did not preserve active, queued, terminal, and integrity states: $out"
+
+  view=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$VIEW")
+  under_way=$(printf '%s\n' "$view" | awk '$0 == "## Under Way" {show=1; next} /^## / && show {exit} show')
+  retained=$(printf '%s\n' "$view" | awk '$0 == "## Retained execution records" {show=1; next} /^## / && show {exit} show')
+  integrity=$(printf '%s\n' "$view" | awk '$0 == "## Task record integrity" {show=1; next} /^## / && show {exit} show')
+  queued=$(printf '%s\n' "$view" | awk '$0 == "## Queued" {show=1; next} /^## / && show {exit} show')
+  assert_contains "$under_way" "active-task" "active in-flight metadata was not rendered Under Way"
+  assert_not_contains "$under_way" "queued-task" "queued metadata was rendered Under Way"
+  assert_not_contains "$under_way" "parked-task" "parked metadata was rendered Under Way"
+  assert_not_contains "$under_way" "done-task" "Done metadata was rendered Under Way"
+  assert_not_contains "$under_way" "archived-task" "archived metadata was rendered Under Way"
+  assert_not_contains "$under_way" "closed-working" "closed metadata with stale working evidence was rendered Under Way"
+  assert_not_contains "$under_way" "ambiguous-task" "ambiguous metadata was rendered Under Way"
+  assert_not_contains "$under_way" "unknown-task" "unknown metadata was rendered Under Way"
+  assert_contains "$retained" "done-task" "Done metadata was not rendered as retained"
+  assert_contains "$retained" "archived-task" "archive-retained metadata was not rendered as retained"
+  assert_contains "$integrity" "ambiguous-task" "ambiguous metadata disappeared instead of surfacing as integrity"
+  assert_contains "$integrity" "unknown-task" "unknown metadata disappeared instead of surfacing as integrity"
+  assert_contains "$integrity" "parked-task" "parked metadata with working evidence disappeared instead of surfacing as integrity"
+  assert_contains "$integrity" "closed-working" "closed metadata with working evidence disappeared instead of surfacing as integrity"
+  assert_contains "$queued" "queued-task" "queued backlog row disappeared from the Queued section"
+  assert_contains "$queued" "parked-task" "parked backlog row disappeared from the Queued section"
+  pass "fleet view uses authoritative disposition for Under Way while retaining terminal and integrity visibility"
+}
+
 test_removed_home_summary_mode_is_rejected() {
   local home rc
   home=$(make_home removed-mode)
@@ -113,4 +193,5 @@ test_removed_home_summary_mode_is_rejected() {
 
 test_empty_snapshot_and_view
 test_main_home_inventory_and_historical_refusal
+test_view_uses_authoritative_task_disposition
 test_removed_home_summary_mode_is_rejected

@@ -52,6 +52,25 @@ printf '%s\n' "$SNAPSHOT" | jq -r '
     else "\($r.blocked_by) - \($r.blocked_reason)" end;
   def backlog_row($r):
     "| \($r.id // "-") | \(dash($r.title // $r.raw)) | \(dash($r.repo)) | \(dash($r.kind)) | \(blocker($r)) | \(dash($r.pr_url // $r.report_path // $r.local_note)) |";
+  def under_way($t):
+    ($t.retained_record != true)
+      and ((($t.record_disposition == "active")
+              and ($t.backlog.state == "in_flight" or $t.current_state.state == "working"))
+           or (($t.record_disposition == "unknown")
+              and (($t.hints.open_decisions // []) | length) > 0));
+  def integrity_record($t):
+    (under_way($t) | not)
+      and ($t.retained_record != true)
+      and (($t.record_disposition == "unknown")
+        or ($t.record_disposition == "ambiguous")
+        or ($t.record_disposition == "active")
+        or ((($t.record_disposition == "done")
+             or ($t.record_disposition == "archive_done")
+             or ($t.record_disposition == "queued")
+             or ($t.record_disposition == "parked"))
+            and $t.current_state.state == "working"));
+  def integrity_row($t):
+    "| \($t.id) | \($t.record_disposition) | \($t.current_state.state) / \($t.current_state.source) | \($t.kind) | \(dash($t.backlog.repo // $t.project)) | \($t.backend) | \(endpoint_of($t)) | \(artifact($t)) | \(path_of($t)) |";
 
   "# Fleet View",
   "",
@@ -59,13 +78,13 @@ printf '%s\n' "$SNAPSHOT" | jq -r '
   "Home: \(.fm_home)",
   "",
   "## Under Way",
-  (if ([.tasks[] | select(.retained_record != true)] | length) == 0 then
+  (if ([.tasks[] | select(under_way(.))] | length) == 0 then
     (if (.tasks | length) == 0 then "No live task metadata found."
      else "No tasks currently classified as under way." end)
    else
     "| ID | Current | Kind | Repo/Project | Backend | Endpoint | Artifact | Path | Watch / return channel |",
     "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
-    (.tasks[] | select(.retained_record != true) | task_row(.))
+    (.tasks[] | select(under_way(.)) | task_row(.))
    end),
   "",
   "## Retained execution records",
@@ -76,6 +95,16 @@ printf '%s\n' "$SNAPSHOT" | jq -r '
     "| ID | Current | Kind | Repo/Project | Backend | Endpoint | Artifact | Path | Watch / return channel |",
     "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     (.tasks[] | select(.retained_record == true) | task_row(.))
+   end),
+  "",
+  "## Task record integrity",
+  "Unclassified or contradictory execution records; visible for reconciliation, not presented as active work.",
+  (if ([.tasks[] | select(integrity_record(.))] | length) == 0 then
+    "No task-record integrity findings."
+   else
+    "| ID | Disposition | Current | Kind | Repo/Project | Backend | Endpoint | Artifact | Path |",
+    "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+    (.tasks[] | select(integrity_record(.)) | integrity_row(.))
    end),
   "",
   "## Queued",
