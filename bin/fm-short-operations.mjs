@@ -216,6 +216,10 @@ export function operationReceipts(dir) {
   return fs.readdirSync(dir).filter(x=>/^operation-\d+\.receipt\.json$/.test(x)).sort().map(x=>{
     const receipt=read(path.join(dir,x)), step=request.input.operations?.steps[receipt.index];
     if(!step || x!==`operation-${receipt.index}.receipt.json` || receipt.id!==request.id || receipt.nonce!==request.nonce || !['completed','refused'].includes(receipt.state) || receipt.action!==commandFor(step).action) fail('malformed operation receipt');
+    if(receipt.settlement!==undefined) {
+      if(receipt.settlement!=='dead-owner-codebase-readback'||receipt.action!=='merge') fail('malformed operation settlement');
+      recordedProcessIdentity(receipt.effectExecutor,'settled merge executor');
+    }
     if(receipt.state==='completed') {
       const e=receipt.evidence;
       if(!e || ((receipt.action==='sync'||receipt.action==='merge') && !/^[a-f0-9]{40,64}$/.test(e.head)) || (receipt.action==='install-shellcheck' && (!/^[a-f0-9]{64}$/.test(e.sha256)||typeof e.version!=='string')) || (receipt.action==='cleanup' && (e.taskRecordRemoved!==true || e.endpointConfirmedGone!==true || e.bookkeepingComplete!==true || e.copyDisposition!=='returned-or-already-absent'))) fail('malformed operation postcondition');
@@ -227,6 +231,83 @@ export function operationReceipts(dir) {
 function sameLiveProcess(identity) {
   try {const now=processIdentity(identity.pid);return ['pid','start','boot'].every(k=>now[k]===identity[k]);}
   catch(error) {if(error.code==='ENOENT'||error.code==='ESRCH'||error.message.includes('zombie')) return false;throw error;}
+}
+
+function recordedProcessIdentity(identity,label) {
+  fields(identity,['pid','parent','start','boot']);
+  if(!Number.isSafeInteger(identity.pid)||identity.pid<=1||!Number.isSafeInteger(identity.parent)||identity.parent<1||!/^\d+$/.test(identity.start??'')||!/^[a-f0-9-]{36}$/.test(identity.boot??'')) fail(`invalid ${label} identity`);
+  return identity;
+}
+
+function codebaseMergeReadback(root,url,head) {
+  const library=path.join(root,'bin/fm-pr-lib.sh');
+  let output;
+  try {
+    output=execFileSync('bash',['-c',
+      '. "$1"; fm_pr_url_parse "$2" && [ "$FM_PR_PROVIDER" = codebase ] || exit 2; FM_PR_MERGE_HEAD=$3; command -v bytedcli >/dev/null && command -v jq >/dev/null || exit 2; fm_pr_codebase_confirm_merged || exit $?; printf "%s\\t%s\\n" "$FM_PR_MERGE_HEAD" "$FM_PR_CODEBASE_MERGE_COMMIT"',
+      'short-merge-readback',library,url,head],{encoding:'utf8',timeout:30000,stdio:['ignore','pipe','pipe']}).trim();
+  } catch(error) {
+    const detail=String(error.stderr??'').trim();
+    fail(detail?`Codebase merge readback refused: ${detail}`:'Codebase merge readback refused');
+  }
+  const parts=output.split('\t');
+  if(parts.length!==2||parts[0]!==head||!(/^[a-f0-9]{40}$|^[a-f0-9]{64}$/).test(parts[1])) fail('Codebase merge readback returned invalid evidence');
+  return {head:parts[0],mergeCommit:parts[1]};
+}
+
+function settleMergeLocked(home,root,id,index,expectedMergeCommit) {
+  const dir=path.join(home,'state/short-agents',id);
+  const requestFile=path.join(dir,'request.json'),startedFile=path.join(dir,'started.json'),resultFile=path.join(dir,'result.json');
+  const request=read(requestFile),started=read(startedFile),resultBytes=fs.readFileSync(resultFile,'utf8'),result=JSON.parse(resultBytes);
+  if(request.version!==1||request.id!==id||!request.input?.operations||!Array.isArray(request.operationBindings)||request.operationBindings.length!==request.input.operations.steps.length) fail('short merge settlement request identity is invalid');
+  if(!Number.isSafeInteger(index)||index<0||index>=request.input.operations.steps.length) fail('short merge settlement index is invalid');
+  if(!(/^[a-f0-9]{40}$|^[a-f0-9]{64}$/).test(expectedMergeCommit??'')) fail('short merge settlement requires the independently observed merge commit');
+  const step=request.input.operations.steps[index],binding=request.operationBindings[index];
+  if(step?.action!=='merge'||!step.url?.startsWith('https://code.byted.org/')) fail('short merge settlement supports Codebase merge effects only');
+  if(binding.pr!==step.url||!(/^[a-f0-9]{40}$|^[a-f0-9]{64}$/).test(binding.pr_head??'')||!equal(metadata(home,step.task),binding)) fail('operation task/process/generation identity changed');
+  if(result.id!==id||!['blocked','cancelled','timeout','interrupted','budget'].includes(result.state)||result.evidence!==dir||!Number.isSafeInteger(result.finishedAt)) fail('short merge settlement requires the preserved unsuccessful terminal result');
+  if(started.nonce!==request.nonce||started.pid!==started.identity?.pid||!Number.isSafeInteger(started.at)) fail('short runner identity changed');
+  recordedProcessIdentity(started.identity,'short runner');
+  if(sameLiveProcess(started.identity)) fail('short merge settlement requires the original runner to be dead');
+  const intentFile=path.join(dir,`operation-${index}.intent.json`),effectFile=path.join(dir,`operation-${index}.effect.json`),receiptFile=path.join(dir,`operation-${index}.receipt.json`);
+  const intent=read(intentFile),effect=read(effectFile);
+  fields(intent,['nonce','index','step','at']);fields(effect,['id','nonce','index','owner','at']);
+  if(intent.nonce!==request.nonce||intent.index!==index||!equal(intent.step,step)||!Number.isSafeInteger(intent.at)) fail('operation intent identity changed');
+  if(effect.id!==id||effect.nonce!==request.nonce||effect.index!==index||!Number.isSafeInteger(effect.at)) fail('operation effect identity changed');
+  recordedProcessIdentity(effect.owner,'merge executor');
+  if(effect.owner.parent!==started.pid||effect.owner.boot!==started.identity.boot) fail('merge executor is not bound to the original runner');
+  if(sameLiveProcess(effect.owner)) fail('short merge settlement requires the original executor to be dead');
+  if(!(request.acceptedAt<=started.at&&started.at<=intent.at&&intent.at<=effect.at&&effect.at<=result.finishedAt)) fail('short merge settlement chronology is invalid');
+  const expectedMarkers=resources(home,step).map(({file,target})=>({file,record:{home,id,nonce:request.nonce,index,target}}));
+  if(exists(receiptFile)) {
+    const receipt=operationReceipts(dir).find(value=>value.index===index);
+    if(receipt?.settlement!=='dead-owner-codebase-readback'||receipt.evidence.head!==binding.pr_head||receipt.evidence.mergeCommit!==expectedMergeCommit) fail('operation already has a different completion receipt');
+    for(const marker of expectedMarkers) if(exists(marker.file)&&!equal(read(marker.file),marker.record)) fail('operation reservation identity changed');
+  } else {
+    for(const marker of expectedMarkers) if(!equal(read(marker.file),marker.record)) fail('operation reservation identity changed');
+    const evidence=codebaseMergeReadback(root,step.url,binding.pr_head);
+    if(evidence.mergeCommit!==expectedMergeCommit) fail('Codebase merge commit does not match the independently observed merge commit');
+    if(!equal(read(requestFile),request)||fs.readFileSync(resultFile,'utf8')!==resultBytes||!equal(metadata(home,step.task),binding)||!equal(read(intentFile),intent)||!equal(read(effectFile),effect)) fail('short merge settlement evidence changed during readback');
+    for(const marker of expectedMarkers) if(!equal(read(marker.file),marker.record)) fail('operation reservation identity changed during readback');
+    if(!publish(receiptFile,{id,nonce:request.nonce,index,action:'merge',state:'completed',at:Date.now(),executor:processIdentity(process.pid),settlement:'dead-owner-codebase-readback',effectExecutor:effect.owner,evidence})) fail('operation completion receipt changed during settlement');
+  }
+  const receipt=operationReceipts(dir).find(value=>value.index===index);
+  for(const marker of expectedMarkers) {
+    if(!exists(marker.file)) continue;
+    if(!equal(read(marker.file),marker.record)) fail('operation reservation identity changed after settlement');
+    fs.unlinkSync(marker.file);
+  }
+  return {id,index,state:'completed',action:'merge',settlement:receipt.settlement,evidence:receipt.evidence,result:result.state,reservationsReleased:expectedMarkers.length};
+}
+
+export function settleMergeReceipt(home,root,id,index,expectedMergeCommit) {
+  primaryOwner(home);
+  const dir=path.join(home,'state/short-agents',id),script=fileURLToPath(import.meta.url);
+  const output=execFileSync('bash',['-c',
+    '. "$1"; fm_lock_acquire_wait_bounded "$2" 5 || exit 1; trap \'fm_lock_release "$2"\' EXIT; "$3" "$4" _settle-merge-locked "$5" "$6" "$7" "$8" "$9"',
+    'short-settle',path.join(root,'bin/fm-wake-lib.sh'),path.join(dir,'reconcile.lock'),process.execPath,script,home,root,id,String(index),expectedMergeCommit],
+  {encoding:'utf8',env:{...process.env,FM_HOME:home,FM_ROOT_OVERRIDE:root,FM_STATE_OVERRIDE:path.join(home,'state')}});
+  return JSON.parse(output);
 }
 export function reconcileOperationReceipts(home,request) {
   if(!request.input.operations) return;
@@ -365,6 +446,7 @@ if(process.argv[1] && fs.realpathSync(process.argv[1])===fs.realpathSync(fileURL
   try {
     const [command,action,...args]=process.argv.slice(2);
     if(command==='reconcile') reconcileLocked(action,JSON.parse(fs.readFileSync(0,'utf8')));
+    else if(command==='_settle-merge-locked') console.log(JSON.stringify(settleMergeLocked(action,args[0],args[1],Number(args[2]),args[3])));
     else if(command==='verify') verifyOwner(action,args);
     else if(command==='effect') {
       const v=verifyOwner(action,args);

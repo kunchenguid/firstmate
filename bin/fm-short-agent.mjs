@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Opt-in headless bounded jobs; read-only unless explicitly granted operations. CLI: models | submit <request.json> |
-// status <id> | result <id> | cancel <id> | reconcile. Requires explicit FM_HOME.
+// status <id> | result <id> | cancel <id> | reconcile | settle-merge <id> <index>:<merge-commit>.
+// Requires explicit FM_HOME.
 // Request: {key, goal, acceptance, provider?, model?, materials:[absolute file],
 // budget:{timeMs,tools,outputTokens,requests}, operations?}. See --help for limits.
 // Default openai-codex/gpt-5.6-luna; explicit overrides never fall back.
@@ -21,7 +22,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { spawn, execFile } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
-import { validateOperations, bindOperations, executeOperations, processIdentity, operationReceipts, primaryOwner, reconcileOperationReceipts } from './fm-short-operations.mjs';
+import { validateOperations, bindOperations, executeOperations, processIdentity, operationReceipts, primaryOwner, reconcileOperationReceipts, settleMergeReceipt } from './fm-short-operations.mjs';
 import { shortPluginLoader, shortPlugin, shortPluginEnvironment } from './fm-short-plugin.mjs';
 const exec = promisify(execFile);
 const script = fileURLToPath(import.meta.url);
@@ -389,7 +390,7 @@ async function run(home, id) {
 async function main() {
   const [command, arg, id] = process.argv.slice(2);
   if (command === '_run') return run(arg, id);
-  if (command === '--help') { console.log('FM_HOME=/absolute/home node bin/fm-short-agent.mjs models|submit request.json|status id|result id|cancel id|reconcile\nRequest: key, goal (<=8192 bytes), acceptance (<=4096), optional provider/model (default openai-codex/gpt-5.6-luna), materials (0..4 canonical regular files <=32768 bytes each), budget {timeMs:1000..300000, tools:1..32, outputTokens:64..8192, requests:1..8}. Optional operations {authority, expiresAt, steps}: sync/recover-sync {project}, merge {task,url}, cleanup {task} (Herdr only), install-shellcheck {destination}; 1..4 ordered steps, canonical existing targets, primary lock ancestry and Linux /proc required. Output token reservations are provider caps; input is byte-bounded. No terminal, worktree, replay, or arbitrary tools.'); return; }
+  if (command === '--help') { console.log('FM_HOME=/absolute/home node bin/fm-short-agent.mjs models|submit request.json|status id|result id|cancel id|reconcile|settle-merge id index:expected-merge-commit\nRequest: key, goal (<=8192 bytes), acceptance (<=4096), optional provider/model (default openai-codex/gpt-5.6-luna), materials (0..4 canonical regular files <=32768 bytes each), budget {timeMs:1000..300000, tools:1..32, outputTokens:64..8192, requests:1..8}. Optional operations {authority, expiresAt, steps}: sync/recover-sync {project}, merge {task,url}, cleanup {task} (Herdr only), install-shellcheck {destination}; 1..4 ordered steps, canonical existing targets, primary lock ancestry and Linux /proc required. settle-merge is a MAIN-owned, readback-only recovery for a dead Codebase merge executor with an exact retained effect and reservations; it requires an independently observed merge commit and never runs later steps. Output token reservations are provider caps; input is byte-bounded. No terminal, worktree, replay, or arbitrary tools.'); return; }
   if (command === 'models') {
     await initializeNetwork();
     const sdk = await import(pathToFileURL(sdkEntry()).href), runtime = await sdk.ModelRuntime.create();
@@ -401,6 +402,11 @@ async function main() {
   else if (command === 'status' || command === 'result') result = service.status(arg);
   else if (command === 'cancel') { result = service.cancel(arg); await service.notify(arg); }
   else if (command === 'reconcile') result = { jobs: await service.reconcile() };
+  else if (command === 'settle-merge') {
+    const match = /^(\d+):([a-f0-9]{40}|[a-f0-9]{64})$/.exec(id ?? '');
+    if (!match) throw Error('settle-merge requires index:expected-merge-commit');
+    result = settleMergeReceipt(service.home, service.root, arg, Number(match[1]), match[2]);
+  }
   else throw Error('use --help');
   console.log(JSON.stringify(result));
 }

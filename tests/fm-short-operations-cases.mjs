@@ -2,11 +2,12 @@ import { pluginFixture } from './fm-short-plugin-fixture.mjs';
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import path from 'node:path';
+import {createHash} from 'node:crypto';
 import {execFile,execFileSync} from 'node:child_process';
 import {pathToFileURL} from 'node:url';
 const [root,tmp]=process.argv.slice(2);
 const {ShortAgents,validate}=await import(pathToFileURL(path.join(root,'bin/fm-short-agent.mjs')));
-const {resource,processIdentity,bindOperations}=await import(pathToFileURL(path.join(root,'bin/fm-short-operations.mjs')));
+const {resource,processIdentity,bindOperations,settleMergeReceipt}=await import(pathToFileURL(path.join(root,'bin/fm-short-operations.mjs')));
 const home=path.join(tmp,'home'),pkg=path.join(tmp,'sdk');
 fs.mkdirSync(path.join(home,'state'),{recursive:true});
 fs.writeFileSync(path.join(home,'state/.lock'),String(process.pid));
@@ -110,7 +111,7 @@ if(verb==='merge'){s.calls++;s.merged=true;fs.writeFileSync(f,JSON.stringify(s))
  process.kill(effect.owner.pid,'SIGKILL');process.exit(9);
 }if(s.lost)process.exit(9);console.log(JSON.stringify({status:'success',data:{merged:true}}));}
 else if(verb==='status') console.log(JSON.stringify({status:'success',data:{repository:{path:'example/shortlab'},merge_request:{id:'123',number:7,status:s.merged?'merged':'open',url,source_branch:'topic',target_branch:'main',source_commit_id:head},mergeability:{mergeable:!s.red,checks:[{passed:!s.red}],failed_checks:s.red?['red']:[]},review:{status:'passed'},check_runs:{summary:'no_checks',total_count:0,page_size:100,passed_count:0,failed_count:0,running_count:0,items:[]}}}));
-else if(verb==='get')console.log(JSON.stringify({status:'success',data:{repository:{path:'example/shortlab'},merge_request:{Id:'123',Number:7,Status:s.merged?'merged':'open',URL:url,SourceBranchName:'topic',TargetBranchName:'main',MergeCommitId:'d'.repeat(40)},version:{SourceCommitId:head}}}));
+else if(verb==='get'){if(s.getFails)process.exit(9);console.log(JSON.stringify(s.getMalformed?{status:'success',data:[]}:{status:'success',data:{repository:{path:s.getRepo||'example/shortlab'},merge_request:{Id:'123',Number:7,Status:s.merged?'merged':'open',URL:s.getUrl||url,SourceBranchName:'topic',TargetBranchName:'main',MergeCommitId:s.getMerge||'d'.repeat(40)},version:{SourceCommitId:s.getHead||head}}}));}
 else process.exit(2);
 `,{mode:0o755});
 process.env.PATH=fakebin+path.delimiter+process.env.PATH;
@@ -138,6 +139,7 @@ for(const invalid of [
 fs.writeFileSync(auditFile,baseMeta+legacyAudit);
 writeTask('merge-one');
 const mergeStep={action:'merge',task:'merge-one',url:'https://code.byted.org/example/shortlab/merge_requests/7'};
+const expectedMergeCommit='d'.repeat(40);
 writeTask('merge-leased');
 const lease=command=>execFileSync('bash',[path.join(root,'bin/fm-lease.sh'),command,'merge-leased','--actor','main'],{env:{...process.env,FM_HOME:home,FM_STATE_OVERRIDE:path.join(home,'state'),FM_SUPERVISION_ACTOR:'main'},stdio:'pipe'});
 lease('claim');
@@ -166,8 +168,41 @@ writeTask('merge-crash');fs.writeFileSync(forge,JSON.stringify({merged:false,cal
 const crashRequest=req('crash-effect',[{...mergeStep,task:'merge-crash'}]);const crashed=service.submit(crashRequest);
 assert.equal((await terminal(crashed.id)).state,'blocked');assert.equal(JSON.parse(fs.readFileSync(forge)).calls,1);
 await new ShortAgents(home,root).reconcile();assert.equal(new ShortAgents(home,root).submit(crashRequest).state,'blocked');assert.equal(JSON.parse(fs.readFileSync(forge)).calls,1);assert.ok(fs.existsSync(resource(home,crashRequest.operations.steps[0]).file));
-// Reset only this isolated fixture's proven-dead attempt before unrelated cases.
-for(const file of fs.readdirSync(path.join(home,'state')).filter(x=>x.startsWith('.short-')&&x.endsWith('.json'))) {const f=path.join(home,'state',file),r=JSON.parse(fs.readFileSync(f));if(r.id===crashed.id)fs.unlinkSync(f);}
+const crashedDir=service.dir(crashed.id),crashedEffect=JSON.parse(fs.readFileSync(path.join(crashedDir,'operation-0.effect.json')));
+const crashedMarkers=[resource(home,crashRequest.operations.steps[0]),{target:`merge:${mergeStep.url}`,file:path.join(home,'state',`.short-merge-${createHash('sha256').update(mergeStep.url).digest('hex')}.json`)}];
+for(const marker of crashedMarkers)assert.ok(fs.existsSync(marker.file),'blocked lifecycle retains exact reservation');
+const settleCallsBefore=JSON.parse(fs.readFileSync(forge)).calls;
+const crashedResultBefore=fs.readFileSync(path.join(crashedDir,'result.json'),'utf8');
+const settled=JSON.parse(execFileSync(process.execPath,[path.join(root,'bin/fm-short-agent.mjs'),'settle-merge',crashed.id,`0:${expectedMergeCommit}`],{encoding:'utf8',env:{...process.env,FM_HOME:home}}));
+assert.deepEqual(settled.evidence,{head:'c'.repeat(40),mergeCommit:'d'.repeat(40)});assert.equal(settled.result,'blocked');assert.equal(settled.reservationsReleased,2);
+assert.equal(JSON.parse(fs.readFileSync(forge)).calls,settleCallsBefore,'settlement issued no merge');
+for(const marker of crashedMarkers)assert.ok(!fs.existsSync(marker.file),'settlement released only matching reservation');
+const settledReceipt=JSON.parse(fs.readFileSync(path.join(crashedDir,'operation-0.receipt.json')));
+assert.equal(settledReceipt.settlement,'dead-owner-codebase-readback');assert.deepEqual(settledReceipt.effectExecutor,crashedEffect.owner);assert.equal(service.status(crashed.id).state,'blocked');
+assert.equal(fs.readFileSync(path.join(crashedDir,'result.json'),'utf8'),crashedResultBefore,'settlement retains the original failed model result');
+fs.writeFileSync(crashedMarkers[0].file,JSON.stringify({home,id:crashed.id,nonce:JSON.parse(fs.readFileSync(path.join(crashedDir,'request.json'))).nonce,index:0,target:crashedMarkers[0].target}));
+assert.deepEqual(settleMergeReceipt(home,root,crashed.id,0,expectedMergeCommit),settled,'repeated settlement converges');
+assert.ok(!fs.existsSync(crashedMarkers[0].file),'retry finishes reservation cleanup after receipt publication');
+writeTask('merge-settle-refusal');fs.writeFileSync(forge,JSON.stringify({merged:false,calls:0,crash:true}));
+const refusalRequest=req('settle-refusal',[{...mergeStep,task:'merge-settle-refusal'}]),refusal=service.submit(refusalRequest);
+assert.equal((await terminal(refusal.id)).state,'blocked');const refusalDir=service.dir(refusal.id),refusalMarker=resource(home,refusalRequest.operations.steps[0]).file;
+const refusalRunner=JSON.parse(fs.readFileSync(path.join(refusalDir,'started.json'))).identity;
+for(let n=0;n<400;n++){try{if(processIdentity(refusalRunner.pid).start!==refusalRunner.start)break;}catch{break;}if(n===399)throw Error('refusal fixture runner did not exit');await wait(25);}
+const refusalEffectPath=path.join(refusalDir,'operation-0.effect.json'),refusalEffectText=fs.readFileSync(refusalEffectPath,'utf8');
+const refusalStartedPath=path.join(refusalDir,'started.json'),refusalStartedText=fs.readFileSync(refusalStartedPath,'utf8'),liveRunner=processIdentity(process.pid);
+fs.writeFileSync(refusalStartedPath,JSON.stringify({...JSON.parse(refusalStartedText),pid:liveRunner.pid,identity:liveRunner}));assert.throws(()=>settleMergeReceipt(home,root,refusal.id,0,expectedMergeCommit),/runner to be dead/);fs.writeFileSync(refusalStartedPath,refusalStartedText);
+fs.writeFileSync(forge,JSON.stringify({merged:false,calls:1}));assert.throws(()=>settleMergeReceipt(home,root,refusal.id,0,expectedMergeCommit),/not merged|readback refused/i);assert.ok(fs.existsSync(refusalMarker));
+fs.writeFileSync(forge,JSON.stringify({merged:true,calls:1,getFails:true}));assert.throws(()=>settleMergeReceipt(home,root,refusal.id,0,expectedMergeCommit),/could not be confirmed|readback refused/i);assert.ok(fs.existsSync(refusalMarker));
+fs.writeFileSync(forge,JSON.stringify({merged:true,calls:1,getHead:'e'.repeat(40)}));assert.throws(()=>settleMergeReceipt(home,root,refusal.id,0,expectedMergeCommit),/source head|readback refused/i);assert.ok(fs.existsSync(refusalMarker));
+fs.writeFileSync(forge,JSON.stringify({merged:true,calls:1,getMalformed:true}));assert.throws(()=>settleMergeReceipt(home,root,refusal.id,0,expectedMergeCommit),/could not be confirmed|readback refused/i);assert.ok(fs.existsSync(refusalMarker));
+fs.writeFileSync(forge,JSON.stringify({merged:true,calls:1}));assert.throws(()=>settleMergeReceipt(home,root,refusal.id,0,'f'.repeat(40)),/merge commit does not match/);assert.ok(fs.existsSync(refusalMarker));
+const mismatchedMarker=JSON.parse(fs.readFileSync(refusalMarker));fs.writeFileSync(refusalMarker,JSON.stringify({...mismatchedMarker,nonce:'wrong'}));assert.throws(()=>settleMergeReceipt(home,root,refusal.id,0,expectedMergeCommit),/reservation identity changed/);fs.writeFileSync(refusalMarker,JSON.stringify(mismatchedMarker));
+const refusalEffect=JSON.parse(refusalEffectText),live=processIdentity(process.pid);fs.writeFileSync(refusalEffectPath,JSON.stringify({...refusalEffect,owner:{...live,parent:JSON.parse(fs.readFileSync(path.join(refusalDir,'started.json'))).pid}}));assert.throws(()=>settleMergeReceipt(home,root,refusal.id,0,expectedMergeCommit),/executor to be dead/);fs.writeFileSync(refusalEffectPath,refusalEffectText);
+fs.writeFileSync(forge,JSON.stringify({merged:true,calls:1,getRepo:'other/repo'}));assert.throws(()=>settleMergeReceipt(home,root,refusal.id,0,expectedMergeCommit),/repository.*changed|readback refused/i);assert.ok(fs.existsSync(refusalMarker));
+const refusalMeta=path.join(home,'state/merge-settle-refusal.meta'),refusalMetaText=fs.readFileSync(refusalMeta,'utf8');fs.writeFileSync(refusalMeta,refusalMetaText.replace('spawn_gen=g1','spawn_gen=g2'));assert.throws(()=>settleMergeReceipt(home,root,refusal.id,0,expectedMergeCommit),/identity changed/);fs.writeFileSync(refusalMeta,refusalMetaText);
+assert.throws(()=>settleMergeReceipt(home,root,a.id,0,expectedMergeCommit),/Codebase merge effects only/,'unsupported effects cannot be settled');
+const unrelatedReservation=path.join(home,'state/.short-operation-unrelated.json');fs.writeFileSync(unrelatedReservation,'{"unrelated":true}');
+fs.writeFileSync(forge,JSON.stringify({merged:true,calls:1}));settleMergeReceipt(home,root,refusal.id,0,expectedMergeCommit);assert.ok(!fs.existsSync(refusalMarker));assert.equal(fs.readFileSync(unrelatedReservation,'utf8'),'{"unrelated":true}');fs.unlinkSync(unrelatedReservation);
 // A completed first action survives a refused later action.
 fs.writeFileSync(forge,JSON.stringify({merged:false,calls:0,red:false,lost:false}));writeTask('merge-partial');
 fs.writeFileSync(path.join(project,'dirty'),'preserved');
