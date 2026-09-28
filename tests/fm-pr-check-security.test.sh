@@ -189,7 +189,8 @@ case " $* " in
     printf '%s\n' '[]'
     ;;
   *" api repos/"*"/branches/"*)
-    printf '%s\n' '{"name":"main","protected":false}'
+    branch_json=${FM_TEST_GH_BRANCH_JSON:-'{"name":"main","protected":false}'}
+    printf '%s\n' "$branch_json"
     ;;
   *" api repos/"*"/pulls/"*)
     printf '%s\n' "{\"state\":\"open\",\"user\":{\"login\":\"author\"},\"head\":{\"sha\":\"${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}\"},\"draft\":false,\"mergeable\":true,\"merged_at\":null}"
@@ -2179,13 +2180,13 @@ test_merged_poll_retires_once() {
 # episode is keyed by the PR head too: a re-pushed head that is blocked again
 # with no clear reading in between (CI went green and the base advanced
 # between two sweeps) starts a fresh episode with its own timer.
-green_blocked_cycle() {  # <dir> <out> <mergeStateStatus> <conclusion> <threshold-secs> [head-sha]
+green_blocked_cycle() {  # <dir> <out> <mergeStateStatus> <conclusion> <threshold-secs> [head-sha] [extra-rollup-entries]
   local dir=$1 out=$2 merge_state=$3 conclusion=$4 threshold=$5 rc
-  local head=${6:-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}
+  local head=${6:-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa} extra=${7:-}
   rm -f "$dir/home/state/.last-check"
   set +e
   FM_PR_GREEN_BLOCKED_SECS="$threshold" FM_TEST_GH_STATE=OPEN FM_TEST_GH_LOG="$dir/gh.log" \
-    FM_TEST_GH_ROLLUP_JSON="{\"state\":\"OPEN\",\"isDraft\":false,\"mergeable\":\"MERGEABLE\",\"mergeStateStatus\":\"$merge_state\",\"headRefOid\":\"$head\",\"statusCheckRollup\":[{\"__typename\":\"CheckRun\",\"name\":\"ci\",\"status\":\"COMPLETED\",\"conclusion\":\"$conclusion\"}]}" \
+    FM_TEST_GH_ROLLUP_JSON="{\"state\":\"OPEN\",\"isDraft\":false,\"mergeable\":\"MERGEABLE\",\"mergeStateStatus\":\"$merge_state\",\"headRefOid\":\"$head\",\"baseRefName\":\"main\",\"statusCheckRollup\":[{\"__typename\":\"CheckRun\",\"name\":\"ci\",\"status\":\"COMPLETED\",\"conclusion\":\"$conclusion\"}${extra:+,$extra}]}" \
     run_watcher_bounded "$dir/home" "$dir/fakebin" > "$out" 2> "$out.err"
   rc=$?
   set -e
@@ -2239,6 +2240,85 @@ test_green_unmergeable_pr_alerts_once_per_episode() {
   esac
   ! grep -F ' pr merge' "$dir/gh.log" >/dev/null || fail "the green-unmergeable alert attempted a merge"
   pass "a green but unmergeable PR raises one wake per stuck episode, keyed by URL and head, after the threshold"
+}
+
+# A required check that has not reported is absent from the rollup rather than
+# red, so a behind-its-base PR with an empty-looking green rollup has not
+# passed CI. The probe consults the base branch's required set (the same read
+# bin/fm-pr-merge.sh gates on) and treats an unreported required check as
+# clear: no episode starts and no alert fires, however long it sits. Once that
+# check reports green the PR is genuinely stuck and the alert fires.
+test_green_pr_with_unreported_required_check_does_not_alert() {
+  local dir state url=https://github.com/o/r/pull/1
+  dir=$(make_case green-unreported-required)
+  state="$dir/home/state"
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
+  write_poll_meta "$state" task-a "$url"
+  seed_canonical_poll "$dir" task-a "$url"
+  add_stop_custom_check "$dir"
+  export FM_TEST_GH_BRANCH_JSON='{"name":"main","protected":true,"protection":{"required_status_checks":{"contexts":["ci","lint"],"checks":[]}}}'
+
+  green_blocked_cycle "$dir" "$dir/w1.out" BEHIND SUCCESS 0
+  case "$(cat "$dir/w1.out")" in
+    check:*z-stop.check.sh:*stop-cycle) ;;
+    *) fail "a behind-its-base PR whose required check has not reported raised an alert: $(cat "$dir/w1.out")" ;;
+  esac
+  [ ! -e "$state/task-a.pr-green-blocked" ] || fail "an unreported required check opened a green-unmergeable episode"
+  grep -F 'api repos/o/r/branches/main' "$dir/gh.log" >/dev/null \
+    || fail "the probe did not read the base branch's required checks"
+
+  green_blocked_cycle "$dir" "$dir/w2.out" BEHIND SUCCESS 0 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+    '{"__typename":"CheckRun","name":"lint","status":"COMPLETED","conclusion":"SUCCESS"}'
+  case "$(cat "$dir/w2.out")" in
+    *"task-a.check.sh: green-unmergeable $url for "*"m: branch is behind the base branch") ;;
+    *) fail "a behind-its-base PR with every required check reported green did not alert: $(cat "$dir/w2.out")" ;;
+  esac
+  unset FM_TEST_GH_BRANCH_JSON
+  pass "an unreported required check keeps a behind-its-base PR out of the green-unmergeable alert until it reports"
+}
+
+# A merged pull request never reaches the tick's clear reading: the watcher
+# retires its poll first. The episode record retires with the poll rather than
+# waiting for task teardown. A closed pull request keeps its poll (the poll
+# only reports merges) and the tick's clear reading ends the episode instead.
+test_merged_poll_leaves_no_green_blocked_record() {
+  local dir state rc url=https://github.com/o/r/pull/1
+  dir=$(make_case merged-green-blocked-record)
+  state="$dir/home/state"
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
+  write_poll_meta "$state" task-a "$url"
+  seed_canonical_poll "$dir" task-a "$url"
+  add_stop_custom_check "$dir"
+  printf '%s aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 1 1\n' "$url" > "$state/task-a.pr-green-blocked"
+
+  set +e
+  FM_TEST_GH_STATE=MERGED FM_TEST_GH_LOG="$dir/gh.log" \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/w1.out" 2> "$dir/w1.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "merged watcher cycle failed: $(cat "$dir/w1.err")"
+  case "$(cat "$dir/w1.out")" in check:*task-a.check.sh:*merged) ;; *) fail "the merge was not reported: $(cat "$dir/w1.out")" ;; esac
+  ack_watcher_cycle "$state" || fail "merged cycle acknowledgement failed"
+  assert_poll_absent "$state" task-a
+  [ ! -e "$state/task-a.pr-green-blocked" ] || fail "the merged poll's retirement left the green-unmergeable episode record"
+
+  dir=$(make_case closed-green-blocked-record)
+  state="$dir/home/state"
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
+  write_poll_meta "$state" task-a "$url"
+  seed_canonical_poll "$dir" task-a "$url"
+  add_stop_custom_check "$dir"
+  printf '%s aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 1 1\n' "$url" > "$state/task-a.pr-green-blocked"
+  set +e
+  FM_TEST_GH_STATE=CLOSED FM_TEST_GH_LOG="$dir/gh.log" \
+    FM_TEST_GH_ROLLUP_JSON='{"state":"CLOSED","isDraft":false,"mergeable":"UNKNOWN","mergeStateStatus":"UNKNOWN","headRefOid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","baseRefName":"main","statusCheckRollup":[]}' \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/w2.out" 2> "$dir/w2.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "closed watcher cycle failed: $(cat "$dir/w2.err")"
+  case "$(cat "$dir/w2.out")" in check:*z-stop.check.sh:*stop-cycle) ;; *) fail "a closed PR raised a wake: $(cat "$dir/w2.out")" ;; esac
+  [ ! -e "$state/task-a.pr-green-blocked" ] || fail "a closed PR's clear reading left the green-unmergeable episode record"
+  pass "a merged poll retires its green-unmergeable episode record and a closed PR's clear reading ends it"
 }
 
 # A poll's own retirement state is scoped to ONE registration, so it cannot by
@@ -3524,6 +3604,8 @@ test_gerrit_ready_gate_reads_the_published_tree
 test_gerrit_nm_ready_gate_requires_recovered_custody
 test_merged_poll_retires_once
 test_green_unmergeable_pr_alerts_once_per_episode
+test_green_pr_with_unreported_required_check_does_not_alert
+test_merged_poll_leaves_no_green_blocked_record
 test_merged_poll_reregistration_after_notification_is_absorbed
 test_merged_poll_retries_a_failed_upward_report
 test_self_merge_and_poll_publish_one_outcome

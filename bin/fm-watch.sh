@@ -2551,7 +2551,10 @@ if ! fm_pr_poll_retirement_recover_all "$STATE" "$SCRIPT_DIR/fm-pr-poll.sh"; the
 fi
 
 # Shared by both the first-notification and already-notified paths below so
-# the retirement sequence (bin/fm-pr-lib.sh) is stated once.
+# the retirement sequence (bin/fm-pr-lib.sh) is stated once. The green-
+# unmergeable episode record (pr_green_blocked_tick below) retires with the
+# poll: a merged pull request never reaches the tick's clear reading, so
+# nothing else would end its episode before task teardown.
 retire_merged_pr_poll() {  # <id>
   local id=$1
   if fm_pr_poll_retirement_publish "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" merged; then
@@ -2560,6 +2563,7 @@ retire_merged_pr_poll() {  # <id>
   else
     triage_log "merged PR poll retirement deferred because its canonical snapshot changed for $id"
   fi
+  rm -f "$STATE/$id.pr-green-blocked"
 }
 
 # A green pull request that cannot merge raises no merge poll output, so an
@@ -2567,12 +2571,14 @@ retire_merged_pr_poll() {  # <id>
 # with nobody told. bin/fm-pr-green-blocked.sh reads the forge; this owns the
 # episode: state/<id>.pr-green-blocked records "<url> <head-sha>
 # <first-seen-epoch> <alerted>" from the first blocked reading, one wake fires
-# once the episode is PR_GREEN_BLOCKED_SECS old, and a clear reading (merged,
-# closed, a red or pending check, or mergeable again) ends it, so a later
-# block is a new episode. An episode is keyed by URL and head: a re-pushed
-# head that is blocked again before any clear reading (a rebase whose CI went
-# green between two sweeps while the base advanced) starts a fresh episode
-# with its own timer rather than hiding inside the alerted one. An unknown
+# once the episode is PR_GREEN_BLOCKED_SECS old, and a clear reading (closed,
+# a red or pending check, an unreported required check, or mergeable again)
+# ends it, so a later block is a new episode; a merge ends it through
+# retire_merged_pr_poll, which runs before this tick would. An episode is
+# keyed by URL and head: a re-pushed head that is blocked again before any
+# clear reading (a rebase whose CI went green between two sweeps while the
+# base advanced) starts a fresh episode with its own timer rather than hiding
+# inside the alerted one. An unknown
 # reading changes nothing. The wake row is queued before the episode is
 # marked alerted, preferring a rare duplicate over silence.
 # Runs under the caller's PR poll control lock; wakes (and exits) only when due.

@@ -6,22 +6,24 @@
 #
 # Prints exactly one line:
 #   blocked <head-sha> <reason>
-#                     every check is green (bin/fm-pr-lib.sh's
-#                     fm_pr_github_checks_not_green owns what green means, the
-#                     same rule bin/fm-pr-merge.sh gates on) and the pull
+#                     every check is green and every check the base branch
+#                     requires has reported (bin/fm-pr-lib.sh's
+#                     fm_pr_github_checks_not_green and
+#                     fm_pr_github_read_required_contexts own those rules, the
+#                     same ones bin/fm-pr-merge.sh gates on) and the pull
 #                     request still cannot merge: a draft, conflicts with its
 #                     base, a branch behind its base, or base-branch protection
-#                     such as a missing review or required check; <head-sha> is
-#                     the head commit the reading describes, so the caller can
-#                     tell a re-pushed head that is blocked again from the same
-#                     stuck head
+#                     such as a missing review; <head-sha> is the head commit
+#                     the reading describes, so the caller can tell a re-pushed
+#                     head that is blocked again from the same stuck head
 #   clear             the stuck condition does not hold: the pull request is
-#                     merged or closed, a check is red or pending, or GitHub
-#                     reports it mergeable
+#                     merged or closed, a check is red or pending, a required
+#                     check has not reported (its CI has not passed, however
+#                     green the rollup looks), or GitHub reports it mergeable
 # and nothing when the answer is unknown: a failed read, an unreadable payload,
-# a missing head commit, a missing jq, or mergeability GitHub has not computed
-# yet. The caller keeps its episode unchanged on silence, so a flaky read
-# neither opens nor ends one.
+# a missing head commit or base branch, an unreadable required-check source, a
+# missing jq, or mergeability GitHub has not computed yet. The caller keeps its
+# episode unchanged on silence, so a flaky read neither opens nor ends one.
 # It never merges, updates a branch, or writes anything. GitLab and Gerrit are
 # not probed: this is GitHub-only.
 #
@@ -40,13 +42,13 @@ fi
 fm_pr_url_parse "$1" && [ "$FM_PR_PROVIDER" = github ] || exit 0
 command -v gh >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 || exit 0
 
-json=$(gh pr view "$FM_PR_URL" --json state,isDraft,mergeable,mergeStateStatus,headRefOid,statusCheckRollup 2>/dev/null) || exit 0
+json=$(gh pr view "$FM_PR_URL" --json state,isDraft,mergeable,mergeStateStatus,headRefOid,baseRefName,statusCheckRollup 2>/dev/null) || exit 0
 [ -n "$json" ] || exit 0
 fields=$(printf '%s' "$json" | jq -r '
   if type == "object" then
-    (.state // "" | tostring) + " " + (.mergeable // "" | tostring) + " " + (.mergeStateStatus // "" | tostring) + " " + (.headRefOid // "" | tostring)
+    (.state // "" | tostring) + " " + (.mergeable // "" | tostring) + " " + (.mergeStateStatus // "" | tostring) + " " + (.headRefOid // "" | tostring) + " " + (.baseRefName // "" | tostring)
   else error("not an object") end' 2>/dev/null) || exit 0
-read -r state mergeable merge_state head <<EOF
+read -r state mergeable merge_state head base <<EOF
 $fields
 EOF
 draft=$(fm_pr_json_draft_state "$json")
@@ -66,16 +68,31 @@ case "$head" in
 esac
 
 if [ "$draft" = true ]; then
-  echo "blocked $head pull request is a draft"
+  reason='pull request is a draft'
 elif [ "$mergeable" = CONFLICTING ] || [ "$merge_state" = DIRTY ]; then
-  echo "blocked $head merge conflicts with the base branch"
+  reason='merge conflicts with the base branch'
 elif [ "$merge_state" = BEHIND ]; then
-  echo "blocked $head branch is behind the base branch"
+  reason='branch is behind the base branch'
 elif [ "$merge_state" = BLOCKED ]; then
-  echo "blocked $head base-branch protection refuses the merge (a required review or required check)"
+  reason='base-branch protection refuses the merge (a required review or another branch rule)'
 else
   case "$merge_state" in
     CLEAN|HAS_HOOKS|UNSTABLE) echo clear ;;
   esac
+  exit 0
 fi
+
+# A required check that has not reported is absent from the rollup rather than
+# red, so a green rollup alone does not mean CI has passed. Only a pull request
+# whose every required check has reported is stuck; an unreadable required
+# source leaves the answer unknown.
+[ -n "$base" ] || exit 0
+fm_pr_github_read_required_contexts "$FM_PR_OWNER" "$FM_PR_REPO" "$base" || exit 0
+producers=$(fm_pr_github_read_check_producers "$FM_PR_OWNER" "$FM_PR_REPO" "$head" "$FM_PR_GITHUB_REQUIRED") || exit 0
+missing=$(fm_pr_github_required_checks_missing "$json" "$FM_PR_GITHUB_REQUIRED" "$producers") || exit 0
+if [ -n "$missing" ]; then
+  echo clear
+  exit 0
+fi
+echo "blocked $head $reason"
 exit 0
