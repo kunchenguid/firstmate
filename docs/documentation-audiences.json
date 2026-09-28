@@ -501,6 +501,26 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/show-me-skill-pi.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "skills/show-me/SKILL.md",
+      "audience": "public-product"
+    },
+    {
+      "path": "skills/show-me/FIRSTMATE.md",
+      "audience": "public-product"
+    },
+    {
+      "path": "skills/show-me/UPSTREAM.md",
+      "audience": "public-product"
+    },
+    {
+      "path": "skills/show-me/upstream-LICENSE.txt",
+      "audience": "public-product"
+    },
+    {
       "path": "docs/verification/rovo.md",
       "audience": "maintainer-verification"
     },
