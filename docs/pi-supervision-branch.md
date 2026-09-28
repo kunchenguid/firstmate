@@ -412,7 +412,7 @@ Together, these let a cold start that acquires the lock through the startup dige
 Display is only half of a captain outcome.
 The other half is processing, because a blocker, a decision, or a ready PR needs main to act, not only the captain to see it.
 
-1. After the visible entry exists and the read cursor has passed it, the extension hands every still-unprocessed captain row to main as one hidden, typed `fm-branch-process` request (kind `branch-outcome`).
+1. After the visible entry exists and the read cursor has passed it, the extension hands the oldest batch of at most 32 still-unprocessed captain rows to main as one hidden, typed `fm-branch-process` request (kind `branch-outcome`), and presents the next batch after main acknowledges that one.
    The request lists each `[seq N, recorded <age> ago] task: summary`, with the age from the store's `recordedAgo` (`bin/fm-branch-outcome.sh` owns its wording), and asks main to check the task's current state first.
    Summaries over 1024 characters are abbreviated within that bound and point to `bin/fm-branch-outcome.sh lookup --seqs <N>` for the full outcome.
    Main must read the full outcome for any abbreviated line before acting on, relaying, or acknowledging it.
