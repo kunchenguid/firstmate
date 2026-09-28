@@ -124,10 +124,12 @@ A firstmate home already carries a saved decision for its own path, and the cont
 
 ## Not proven
 
+One item previously listed here is now measured and moved to the section above: discovery of the internal `.agents/skills/show-me/` copy.
+
 - End-to-end delivery of a rendered diagram to a captain's WeChat conversation. Attempted twice from this task, including with a real rendered PNG sitting in the project directory, and both attempts returned `微信桥接未启动，请先在 TUI 执行 /wechat start`.
   The renderer and the tool contract are proven; the round trip is not, and it needs a session whose bridge is started.
 - Any harness besides pi: claude, codex, opencode, grok, kimi, cursor, omp, and the rest of firstmate's verified adapters were not exercised for this skill.
-- Whether `chrome-devtools-axi` or `lavish-axi` is reachable in a given session; neither was available in the session that produced this record.
+- Whether `chrome-devtools-axi` or the interactive board tool is reachable in a given session; neither was available in the sessions that produced this record.
 - Rendering quality at realistic diagram sizes, and whether an attached HTML file previews usefully on a phone.
 
 ## Reproducing these probes
