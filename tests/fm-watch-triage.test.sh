@@ -4650,7 +4650,7 @@ term_watcher_with_held_marker_lock() {  # <dir> [release-ticks]
   FM_STATE_OVERRIDE="$state" bash -c '
     . "$1" || exit 1
     lock=$2 held=$3 release=$4 contended=$5 release_ticks=$6
-    fm_lock_try_acquire "$lock" || exit 1
+    fm_lock_acquire_wait_max "$lock" 5 || exit 1
     if [ -n "$release_ticks" ]; then
       record="$(fm_lock_link_owner "$lock")/pid"
       mkfifo "$record.fifo" "$record.retry" && mv -f "$record.fifo" "$record" || exit 1

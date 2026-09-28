@@ -36,9 +36,9 @@
 # interactive commands behind its wait window.
 # fm_remote_job_command_preemptible names the read-only long-poll class
 # (fm-remote-delta-read.sh, the reply-log delta read). The worker preempts a
-# running preemptible job as soon as a non-preemptible job is queued for the
-# same home and publishes exit 76 with emptied stdout and stderr, distinct from
-# the poll's exit 75 elapsed-window-with-no-data result. The delta read is
+# running preemptible job on its next queue pass after a non-preemptible job is
+# queued for the same home and publishes exit 76 with emptied stdout and
+# stderr, distinct from the poll's exit 75 elapsed-window-with-no-data result. The delta read is
 # non-destructive and cursor-anchored, so the caller's normal re-arm re-reads
 # the same data and a preempted poll loses nothing.
 #

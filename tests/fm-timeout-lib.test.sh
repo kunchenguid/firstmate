@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Behavior tests for bin/fm-timeout-lib.sh's exec-style bound, fm_exec_timed:
+# Behavior tests for bin/fm-timeout-lib.sh's bounds, fm_exec_timed and fm_run_timed:
 # TERM to the command's process group at the bound, KILL once the grace has
 # passed, a forwarded signal, the caller replaced rather than wrapped, and a
 # refusal instead of an unbounded run when nothing on the host can enforce the
@@ -31,6 +31,18 @@ exec_timed() {
   (
     . "$ROOT/bin/fm-timeout-lib.sh"
     PATH=$path fm_exec_timed "$@"
+  )
+}
+
+RUN124="$TMP_ROOT/run124-bin"
+mkdir -p "$RUN124"
+printf '#!/bin/sh\nshift 3\n"$@"\nexit 124\n' > "$RUN124/timeout"
+chmod +x "$RUN124/timeout"
+
+run_timed() {
+  (
+    . "$ROOT/bin/fm-timeout-lib.sh"
+    PATH="$RUN124:$PATH" fm_run_timed "$@"
   )
 }
 
@@ -312,8 +324,25 @@ test_timed_out_names_exactly_the_bound_statuses() {
   pass "fm_timed_out accepts 124 and 137 and nothing else"
 }
 
+test_run_timed_reports_the_bound_when_the_wrapper_records_a_signal_death() {
+  local rc=0
+  run_timed 5 bash -c 'kill -TERM $$' || rc=$?
+  [ "$rc" -eq 124 ] || fail "a bound-killed read leaked the signal death as its own status (rc=$rc)"
+  pass 'fm_run_timed reports 124 when the bound TERMs a read whose wrapper recorded 143'
+}
+
+test_run_timed_passes_a_natural_exit_through_a_fired_bound() {
+  local out rc=0
+  out=$(run_timed 5 bash -c 'echo through') || rc=$?
+  [ "$rc" -eq 0 ] || fail "a completed read lost its own status to the fired bound (rc=$rc)"
+  [ "$out" = through ] || fail 'a completed read lost its output to the fired bound'
+  pass 'fm_run_timed passes a natural exit through when the bound fired after completion'
+}
+
 test_passes_the_command_status_and_output_through
 test_runs_with_nounset_without_bashpid
+test_run_timed_reports_the_bound_when_the_wrapper_records_a_signal_death
+test_run_timed_passes_a_natural_exit_through_a_fired_bound
 test_term_ends_a_cooperative_command_at_the_bound
 test_kill_ends_a_term_ignoring_command_after_the_grace
 test_the_bound_replaces_the_calling_shell
