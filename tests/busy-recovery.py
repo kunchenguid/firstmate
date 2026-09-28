@@ -57,6 +57,12 @@ meta = (f'harness={harness}\nkind=scout\nworktree={cwd}\nproject={cwd}\n'
         f'backend=herdr\nwindow=fm-lab-fixture:w1:p2\nbusy_gen={gen}\nspawn_gen=s-original\n'
         'launch_state=unconfirmed\n'
         'herdr_session=fm-lab-fixture\nherdr_workspace_id=w1\nherdr_tab_id=w1:t2\nherdr_pane_id=w1:p2\n')
+meta = (('# previous completion: decisions_reviewed=1\n'
+         '# previous completion: decision_keys=older\n') * 2
+        + (' \t# busy_gen=historical\n' * 2)
+        + ('\t# window=old:w9:p9\n' * 2)
+        + meta
+        + 'decisions_reviewed=1\ndecision_keys=current\n')
 (state / 'worker.meta').write_text(meta)
 call('python3', reader, 'init', state, 'worker', harness, cwd, base / 'sessions', 'herdr', 'fm-lab-fixture:w1:p2')
 call('python3', reader, 'activate', state, 'worker')

@@ -25,6 +25,8 @@ session id, verified schema version, metadata generation and endpoint must match
 Binding is sticky: inode replacement, truncation or rewriting any observed prefix
 is unknown, never permission to choose a different session. Duplicate candidates
 are unknown at discovery; after binding only that exact file is read. No timestamps or rendered output decide state.
+Metadata comments, including indented history, are ignored; duplicate effective
+assignments still refuse identity verification.
 
 Before known text input, fence-text records its SHA-256 and the last observed
 ordinal under the same lock. Only a later exact typed UserMessage in the bound
@@ -92,6 +94,8 @@ def require(ok, reason=""):
 def metadata(state, task):
     values = {}
     for line in (state / (task + ".meta")).read_text().splitlines():
+        if line.lstrip().startswith("#"):
+            continue
         key, sep, value = line.partition("=")
         if sep:
             require(key not in values)

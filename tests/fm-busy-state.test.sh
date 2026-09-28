@@ -483,6 +483,52 @@ fm_backend_send_text_submit herdr lab:w1:p1 "$2" 1 .01 .01
         return {'type': 'event_msg', 'payload': {'type': 'item_completed',
             'thread_id': thread, 'turn_id': turn,
             'item': {'type': 'UserMessage', 'id': 'user-' + str(len(log.read_text().splitlines())), 'content': [{'type': 'text', 'text': text}]}}}
+    # Completion preserves superseded audit assignments as comments. Repeated
+    # history and indented comments must not become effective identity fields.
+    comments = ('# previous completion: decisions_reviewed=1\n'
+                '# previous completion: decision_keys=older\n') * 2
+    comments += (' \t# busy_gen=historical\n' * 2 +
+                 '\t# window=old:w9:p9\n' * 2)
+    commented_meta = comments + meta + 'decisions_reviewed=1\ndecision_keys=current\n'
+    reset(); append(complete)
+    (state/'worker.meta').write_text(commented_meta)
+    expect('idle', 'repeated completion history and indented comments are ignored')
+    assert text_fence('after completion audit').returncode == 0
+    expect('unknown', 'comments do not consume pending text')
+    append({'type':'event_msg','payload':{'type':'task_started','turn_id':'turn-2','root_turn_id':'turn-2'}})
+    append(user('after completion audit', 'turn-2'))
+    append({'type':'event_msg','payload':{'type':'task_complete','turn_id':'turn-2'}})
+    expect('idle', 'normal text receipt settles with completion history retained')
+    for invalid, label in [
+        (commented_meta + f'busy_gen={gen}\n', 'duplicate effective generation'),
+        (commented_meta + 'harness=other\n', 'conflicting effective harness'),
+        (commented_meta.replace(f'busy_gen={gen}\n', 'busy_gen=other\n'), 'changed effective generation'),
+        (commented_meta.replace('window=lab:w1:p1\n', 'window=lab:w9:p9\n'), 'wrong effective endpoint'),
+    ]:
+        reset(); append(complete)
+        (state/'worker.meta').write_text(invalid)
+        expect('unknown', label + ' still refuses beside comments')
+        assert text_fence('must not be sent').returncode != 0, label
+    reset(); append(complete)
+    (state/'worker.meta').write_text(commented_meta)
+    wrong = copy.deepcopy(records); wrong[0]['payload']['originator'] = 'other-tui'
+    write(wrong + [complete])
+    expect('unknown', 'comments cannot authorize invalid transcript provenance')
+    assert text_fence('must not be sent').returncode != 0
+    reset(); append(complete)
+    (state/'worker.meta').write_text(commented_meta)
+    run('python3', reader, 'fence-target', state, 'herdr', 'lab:w1:p1')
+    run('python3', reader, 'fence-target', state, 'herdr', 'lab:w1:p1')
+    expect('unknown', 'legacy input watermark survives completion history')
+    assert text_fence('new text after old fences').returncode == 0
+    accounted = json.loads((state/'worker.busy-session').read_text())
+    assert accounted['required_starts'] == 3 and len(accounted['pending_inputs']) == 1
+    append({'type':'event_msg','payload':{'type':'task_started','turn_id':'turn-2','root_turn_id':'turn-2'}})
+    append(user('new text after old fences', 'turn-2'))
+    append({'type':'event_msg','payload':{'type':'task_complete','turn_id':'turn-2'}})
+    expect('unknown', 'consuming new text cannot clear the older root-start watermark')
+    accounted = json.loads((state/'worker.busy-session').read_text())
+    assert accounted['required_starts'] == 3 and accounted['pending_inputs'] == []
     reset(); expect('busy', 'bind before in-turn steering')
     assert text_fence('steer one').returncode == 0
     assert text_fence('steer two').returncode == 0
