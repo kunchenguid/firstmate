@@ -249,11 +249,11 @@ The mod never touches tool execution, prompts, or the stored transcript.
 ### Claude Code support bounds
 
 The bounds of the Claude Code support below are recorded with evidence in [`calm-mode-feasibility.md`](calm-mode-feasibility.md#2026-09-15-claude-code-21272-mods-feasibility-and-the-shipped-mod).
-Evidence for 2.1.280 and the record-backed doorbell is also in its [2026-09-25 record](calm-mode-feasibility.md#2026-09-25-claude-code-21280-verification-and-the-record-backed-operational-doorbell) and [2.1.282 reproduction](calm-mode-feasibility.md#2026-09-25-claude-code-21282-reproduction-on-the-installed-build).
+Evidence for 2.1.280 and the record-backed doorbell is also in its [2026-09-25 record](calm-mode-feasibility.md#2026-09-25-claude-code-21280-verification-and-the-record-backed-operational-doorbell) and [2.1.282 reproduction](calm-mode-feasibility.md#2026-09-25-claude-code-21282-reproduction-on-the-installed-build), and for the physically modelled sea and the riding boat in its [2026-09-26 record](calm-mode-feasibility.md#2026-09-26-physically-modelled-sea-on-claude-code-21283-and-pi-0871) and [2026-09-28 record](calm-mode-feasibility.md#2026-09-28-the-boat-rides-the-sea-on-claude-code-21283-and-pi-0871).
 
 - The function-hooks surface is early access and default-off.
   Claude Code states that its API may change between releases without notice.
-  The mod is verified on Claude Code 2.1.272, 2.1.280, and 2.1.282 and refuses nothing newer.
+  The mod is verified on Claude Code 2.1.272, 2.1.280, 2.1.282, and 2.1.283 and refuses nothing newer.
 - Firstmate's typed producers bound for a Claude Code pane ride the record-backed doorbell, so they hide like any operational row.
   Those producers are the away-mode daemon's escalations and a worker's launch brief.
   Only an envelope that reaches Claude Code some other way, as bare typed or launch-prompt text, arrives without its U+2063 and stays visible.

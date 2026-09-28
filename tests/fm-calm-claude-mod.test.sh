@@ -48,7 +48,7 @@ test_plugin_shape() {
   [ ! -e "$MOD/SKILL.md" ] || fail "the mod carries a SKILL.md and would load as a skill on every harness"
   cat >"$TMP_ROOT/shape.mjs" <<JS
 import { readFileSync, readdirSync, existsSync } from "node:fs";
-const mod = ${MOD@Q};
+const mod = "$MOD";
 const manifest = JSON.parse(readFileSync(\`\${mod}/.claude-plugin/plugin.json\`, "utf8"));
 if (manifest.name !== "firstmate-calm") throw new Error(\`manifest name \${manifest.name}\`);
 for (const key of ["commands", "agents", "skills", "hooks", "mcpServers", "lspServers", "outputStyles"]) {
@@ -76,8 +76,8 @@ test_shared_sprite_and_pi_rendering() {
   local out
   cat >"$TMP_ROOT/sprite.mjs" <<JS
 import { pathToFileURL } from "node:url";
-const pi = await import(pathToFileURL(${PI_SHIP@Q}).href);
-const core = await import(pathToFileURL(${MOD@Q} + "/lib/fm-calm-working-ship-sprite.ts").href);
+const pi = await import(pathToFileURL("$PI_SHIP").href);
+const core = await import(pathToFileURL("$MOD" + "/lib/fm-calm-working-ship-sprite.ts").href);
 const ESC = "\\u001b";
 const check = (condition, message) => { if (!condition) throw new Error(message); };
 // An independent reference painter: 24-bit escapes, or xterm-256 indexes, on each color change.
@@ -183,7 +183,7 @@ test_sea_and_boat_physics() {
   local out
   cat >"$TMP_ROOT/physics.mjs" <<JS
 import { pathToFileURL } from "node:url";
-const core = await import(pathToFileURL(${MOD@Q} + "/lib/fm-calm-working-ship-sprite.ts").href);
+const core = await import(pathToFileURL("$MOD" + "/lib/fm-calm-working-ship-sprite.ts").href);
 const check = (condition, message) => { if (!condition) throw new Error(message); };
 const trains = core.CALM_WORKING_SHIP_WAVE_TRAINS;
 // Deep-water dispersion: phase speed grows with the square root of wavelength, so long
@@ -316,8 +316,8 @@ test_raster_packing() {
   cat >"$TMP_ROOT/raster.mjs" <<JS
 import { pathToFileURL } from "node:url";
 import { randomBytes } from "node:crypto";
-const raster = await import(pathToFileURL(${MOD@Q} + "/lib/fm-calm-ship-raster.ts").href);
-const core = await import(pathToFileURL(${MOD@Q} + "/lib/fm-calm-working-ship-sprite.ts").href);
+const raster = await import(pathToFileURL("$MOD" + "/lib/fm-calm-ship-raster.ts").href);
+const core = await import(pathToFileURL("$MOD" + "/lib/fm-calm-working-ship-sprite.ts").href);
 const check = (condition, message) => { if (!condition) throw new Error(message); };
 for (let length = 0; length <= 80; length += 1) {
   const bytes = new Uint8Array(randomBytes(length));
@@ -394,8 +394,8 @@ test_presentation_policy() {
   local out
   cat >"$TMP_ROOT/policy.mjs" <<JS
 import { pathToFileURL } from "node:url";
-const policy = await import(pathToFileURL(${MOD@Q} + "/lib/fm-calm-presentation.ts").href);
-const piPreservation = await import(pathToFileURL(${ROOT@Q} + "/.pi/extensions/lib/fm-calm-preservation.ts").href);
+const policy = await import(pathToFileURL("$MOD" + "/lib/fm-calm-presentation.ts").href);
+const piPreservation = await import(pathToFileURL("$ROOT" + "/.pi/extensions/lib/fm-calm-preservation.ts").href);
 const check = (condition, message) => { if (!condition) throw new Error(message); };
 const plugin = "/repo/.claude/mods/firstmate-calm";
 check(policy.calmPreferencePath({}, plugin) === "/repo/config/calm", "plugin-root fallback");
@@ -538,8 +538,8 @@ test_classifier_parity_with_shell_owner() {
   cat >"$TMP_ROOT/classify.mjs" <<JS
 import { pathToFileURL } from "node:url";
 import { readFileSync, writeFileSync } from "node:fs";
-const port = await import(pathToFileURL(${MOD@Q} + "/lib/fm-operational-input.ts").href);
-const corpus = ${corpus@Q};
+const port = await import(pathToFileURL("$MOD" + "/lib/fm-operational-input.ts").href);
+const corpus = "$corpus";
 const count = ${count};
 const lines = [];
 for (let index = 1; index <= count; index += 1) {
@@ -619,8 +619,8 @@ test_doorbell_parity_with_shell_owner() {
   cat >"$TMP_ROOT/doorbells.mjs" <<JS
 import { pathToFileURL } from "node:url";
 import { readFileSync, writeFileSync } from "node:fs";
-const port = await import(pathToFileURL(${MOD@Q} + "/lib/fm-operational-input.ts").href);
-const dir = ${dir@Q};
+const port = await import(pathToFileURL("$MOD" + "/lib/fm-operational-input.ts").href);
+const dir = "$dir";
 const lines = [];
 for (let index = 1; index <= ${count}; index += 1) {
   const record = port.firstmateOperationalDoorbellPath(readFileSync(\`\${dir}/case-\${index}.txt\`, "utf8"));

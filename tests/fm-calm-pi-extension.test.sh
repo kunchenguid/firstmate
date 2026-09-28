@@ -2969,8 +2969,8 @@ const [{ initTheme, theme }, { visibleWidth, setCapabilities }] = await Promise.
   import(pathToFileURL(`${packageRoot}/dist/modes/interactive/theme/theme.js`).href),
   import(pathToFileURL(`${packageRoot}/node_modules/@earendil-works/pi-tui/dist/index.js`).href),
 ]);
-initTheme("dark");
 setCapabilities({ images: null, trueColor: true, hyperlinks: false });
+initTheme("dark");
 
 const ship = await import(
   `${pathToFileURL(`${process.cwd()}/lib/fm-calm-working-ship.ts`).href}?ship=${Date.now()}`
@@ -3192,7 +3192,7 @@ for (const width of [40, 16, 9, 8, 6, 4, 3]) {
   animation.render(40);
   const frozen = { column: animation.position(), direction: animation.direction(), time: animation.seaTime(), velocity: animation.velocity() };
   check(frozen.column > 0, `continuity setup never left the left edge: ${frozen.column}`);
-  const frozenFrame = animation.render(40);
+  const frozenFrame = animation.render(40, calmWorkingShipPaint(theme));
 
   const first = createCalmWorkingShipWidget(tui, animation, theme);
   first.dispose();
