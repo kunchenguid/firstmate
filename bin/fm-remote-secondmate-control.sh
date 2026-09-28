@@ -390,10 +390,17 @@ cmd_sync() {
 }
 
 cmd_update() {
-  local id=$1 update_out root_status
+  local id=$1 update_out root_status home_remote
   validate_id "$id"
   validate_home "$id"
+  # The code-root update below runs with FM_HOME pointed at the code root, so it
+  # would read the code root's own config/update-remote - a file the primary's
+  # inheritance never writes, because inherited material lands in the secondmate
+  # HOME. Resolve the home's inherited answer here and pass it in, or this host
+  # would keep following origin while the rest of the fleet followed the fork.
+  home_remote=$(FM_HOME="$TARGET_HOME" fm_update_remote)
   if ! update_out=$(FM_HOME="$FM_ROOT" FM_ROOT_OVERRIDE="$FM_ROOT" \
+    FM_UPDATE_REMOTE="$home_remote" \
     "$SCRIPT_DIR/fm-update.sh" 2>&1); then
     [ -z "$update_out" ] || printf '%s\n' "$update_out" >&2
     die "remote code root update failed"
@@ -403,7 +410,7 @@ cmd_update() {
     'firstmate: updated '*|'firstmate: already current'*) ;;
     *)
       [ -z "$update_out" ] || printf '%s\n' "$update_out" >&2
-      die "remote code root did not complete a safe origin update"
+      die "remote code root did not complete a safe update from $home_remote"
       ;;
   esac
   cmd_sync "$id"

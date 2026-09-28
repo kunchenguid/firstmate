@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Push the declared inherited-material allowlist to one remote secondmate route.
-# Usage: fm-remote-inherit-push.sh <secondmate-id> <generation>
+# Usage: fm-remote-inherit-push.sh <secondmate-id> <generation> [<config-item>]
+#
+# With <config-item>, only that one declared config/ item is pushed; the
+# self-update precondition in bin/fm-update.sh uses it so no unrelated item can
+# block an update.
 #
 # The item set is derived from the ONE declared owner
 # (FM_INHERITABLE_CONFIG in bin/fm-config-inherit-lib.sh), the same declaration
@@ -29,9 +33,10 @@ sha256_file() {
 file_link_count() {
   if [ "$(uname)" = Darwin ]; then /usr/bin/stat -f %l "$1" 2>/dev/null; else stat -c %h "$1" 2>/dev/null; fi
 }
-[ "$#" -eq 2 ] || { echo "usage: fm-remote-inherit-push.sh <secondmate-id> <generation>" >&2; exit 2; }
+[ "$#" -eq 2 ] || [ "$#" -eq 3 ] || { echo "usage: fm-remote-inherit-push.sh <secondmate-id> <generation> [<config-item>]" >&2; exit 2; }
 ID=$1
 GENERATION=$2
+ONLY_ITEM=${3:-}
 case "$ID" in ''|*[!A-Za-z0-9._-]*) die "invalid secondmate id: $ID" ;; esac
 case "$GENERATION" in ''|*[!0-9]*) die "generation must be a positive integer" ;; esac
 [ "${#GENERATION}" -le 18 ] && [ "$GENERATION" -ge 1 ] || die "generation is outside the supported range"
@@ -44,6 +49,10 @@ EMPTY="$TMP/empty"
 EMPTY_HASH=$(sha256_file "$EMPTY") || die "cannot hash empty inheritance payload"
 
 ITEMS=$(fm_config_inherit_items)
+if [ -n "$ONLY_ITEM" ]; then
+  printf '%s\n' "$ITEMS" | grep -qxF -- "config/$ONLY_ITEM" || die "not a declared inherited config item: $ONLY_ITEM"
+  ITEMS="config/$ONLY_ITEM"
+fi
 while IFS= read -r rel; do
   [ -n "$rel" ] || continue
   if [ "${FM_CONFIG_INHERIT_LIVE:-0}" = 1 ]; then

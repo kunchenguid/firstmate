@@ -5,7 +5,9 @@
 # This is the one implementation of "advance a firstmate checkout to a base by a
 # clean fast-forward, never forcing, merging, or stashing" used by every sync
 # path:
-#   - /updatefirstmate (bin/fm-update.sh) pulls from origin: base_mode "origin".
+#   - /updatefirstmate (bin/fm-update.sh) pulls from this home's configured
+#     update remote: base_mode "origin", which names origin unless
+#     config/update-remote selects another (fm_update_remote below).
 #   - the local-HEAD secondmate sync (bin/fm-spawn.sh on launch, bin/fm-bootstrap.sh
 #     on startup) follows the PRIMARY checkout's current default-branch commit:
 #     base_mode is that local commit, with NO fetch and no origin dependency.
@@ -47,13 +49,45 @@ first_line() {
   printf '%s\n' "$1" | sed -n '1s/[[:space:]]\{1,\}/ /g;1p'
 }
 
-default_branch() {
-  local dir=$1 ref branch
-  ref=$(git -C "$dir" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
-  if [ -n "$ref" ]; then
-    echo "${ref#origin/}"
-    return 0
+# The git remote this HOME self-updates from: the first word of the first
+# non-empty line of config/update-remote, or "origin" when that file is absent
+# or blank. One home has one answer, read from $FM_HOME rather than from each
+# target checkout, because the whole point of the setting is that the primary
+# and every secondmate home it advances converge on the SAME remote; the
+# inheritance list in bin/fm-config-inherit-lib.sh is what keeps their copies
+# converged, and a remote home resolves its own inherited copy when
+# bin/fm-remote-secondmate-control.sh runs this library there.
+# A configured remote that the target repo does not define is a SKIP naming the
+# remote, never a silent fall back to origin: following the wrong main is the
+# exact failure this setting exists to prevent.
+# docs/configuration.md "Self-update remote" owns the operator-facing contract.
+# FM_UPDATE_REMOTE overrides the file. It exists for the one caller that cannot
+# read the right config itself: a remote route's code-root update runs with
+# FM_HOME pointed at the CODE ROOT, while the inherited copy of this setting
+# lands in that host's secondmate HOME, so bin/fm-remote-secondmate-control.sh
+# resolves it from the home and passes it in. Tests use it the same way.
+fm_update_remote() {
+  local home=${FM_HOME:-} value=${FM_UPDATE_REMOTE:-}
+  if [ -z "$value" ] && [ -n "$home" ] && [ -f "$home/config/update-remote" ]; then
+    value=$(sed -n '/[^[:space:]]/{s/^[[:space:]]*//;s/[[:space:]].*$//;p;q;}' \
+      "$home/config/update-remote" 2>/dev/null || true)
   fi
+  printf '%s\n' "${value:-origin}"
+}
+
+# The default branch of <dir>, preferring [remote]'s recorded HEAD, then
+# origin's, then a local main/master. [remote] defaults to origin, so a caller
+# that names none resolves exactly as it always did; ff_target names the
+# configured update remote for the firstmate homes it advances.
+default_branch() {
+  local dir=$1 preferred=${2:-origin} ref branch candidate
+  for candidate in "$preferred" origin; do
+    ref=$(git -C "$dir" symbolic-ref --quiet --short "refs/remotes/$candidate/HEAD" 2>/dev/null || true)
+    if [ -n "$ref" ]; then
+      echo "${ref#"$candidate"/}"
+      return 0
+    fi
+  done
   for branch in main master; do
     if git -C "$dir" show-ref --verify --quiet "refs/heads/$branch"; then
       echo "$branch"
@@ -208,15 +242,19 @@ validate_secondmate_home() {
 # the local-HEAD sync never fetches.
 FETCHED=""
 fetch_once() {
-  local dir=$1 common
+  local dir=$1 remote=${2:-origin} common key
   common=$(git -C "$dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
+  # Key the once-per-run cache by remote as well as by object store: worktrees
+  # of one repo share a store, so one fetch still serves them all, but two
+  # different remotes are two different fetches of that same store.
   if [ -n "$common" ]; then
+    key="$remote:$common"
     case " $FETCHED " in
-      *" $common "*) return 0 ;;
+      *" $key "*) return 0 ;;
     esac
   fi
-  if git -C "$dir" fetch origin --prune --quiet 2>/dev/null; then
-    [ -n "$common" ] && FETCHED="$FETCHED $common"
+  if git -C "$dir" fetch "$remote" --prune --quiet 2>/dev/null; then
+    [ -n "$common" ] && FETCHED="$FETCHED $key"
     return 0
   fi
   return 1
@@ -368,8 +406,9 @@ live_secondmate_meta_records() {
 #   FF_INSTR  = comma list of changed instruction paths (only when updated)
 #
 # base_mode selects where the fast-forward base comes from:
-#   origin       - fetch origin and advance to origin/<default> (the /updatefirstmate
-#                  path); requires an origin remote and network reachability.
+#   origin       - fetch this home's configured update remote and advance to
+#                  <remote>/<default> (the /updatefirstmate path); requires that
+#                  remote to exist here and to be reachable.
 #   <commit-ish> - advance to that LOCAL commit with NO fetch and no origin
 #                  dependency (the local-HEAD secondmate sync). The commit must
 #                  already exist in the target's object store, which it always does
@@ -396,23 +435,26 @@ ff_target() {
     return 0
   fi
 
-  local default base cur instr local_rev base_rev before after out
-  default=$(default_branch "$dir") || {
+  local default base cur instr local_rev base_rev before after out remote
+  remote=$(fm_update_remote)
+  default=$(default_branch "$dir" "$remote") || {
     echo "$label: skipped: cannot determine default branch"
     return 0
   }
 
-  # Resolve the fast-forward base from base_mode (see header).
+  # Resolve the fast-forward base from base_mode (see header). base_mode
+  # "origin" means "this home's configured update remote", which IS origin
+  # unless config/update-remote names another one.
   if [ "$base_mode" = origin ]; then
-    if ! git -C "$dir" remote get-url origin >/dev/null 2>&1; then
-      echo "$label: skipped: no origin remote"
+    if ! git -C "$dir" remote get-url "$remote" >/dev/null 2>&1; then
+      echo "$label: skipped: no $remote remote"
       return 0
     fi
-    if ! fetch_once "$dir"; then
+    if ! fetch_once "$dir" "$remote"; then
       echo "$label: skipped: fetch failed"
       return 0
     fi
-    base="origin/$default"
+    base="$remote/$default"
   else
     base="$base_mode"
   fi

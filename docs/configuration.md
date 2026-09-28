@@ -8,6 +8,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | What you want to configure | Start here |
 | --- | --- |
 | Firstmate's code, private files, or project location | [FM_HOME](#fm_home) and [operational home layout](#operational-home-layout-and-state) |
+| Which remote this fleet self-updates from | [Self-update remote](#self-update-remote-configupdate-remote) |
 | Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
 | Worker permissions, accounts, or environment | [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), and [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist) |
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
@@ -330,6 +331,48 @@ The file is read at every wake, so a change applies at the next one without a re
 
 It is local to each home and not part of secondmate inherited configuration.
 While the file exists, main's lease-checked commands also take the per-task lease lock, so a claim by the host's engine cannot race a mutation main already started (`bin/fm-lease-lib.sh`).
+
+## Self-update remote (config/update-remote)
+
+The optional local, gitignored `config/update-remote` names the git remote `/updatefirstmate` fast-forwards this home from.
+Absent or blank means `origin`, which is what every home does by default, so a fleet that never creates the file behaves exactly as before.
+Create it to run a fleet from its own fork instead of from the upstream project.
+
+The file holds one remote name on its first non-empty line; anything after the first word on that line is ignored.
+
+```
+fork
+```
+
+`bin/fm-ff-lib.sh`'s `fm_update_remote` is the single owner of that resolution, and every self-update path reads it: the running firstmate repo, each local secondmate home, and each remote route's home through `bin/fm-remote-secondmate-control.sh`.
+The setting changes only the self-update base.
+It does not change where branches are pushed, where pull requests are opened, or what `origin` means to any other command, so a fleet can follow its own fork and keep offering the same fixes to the upstream project.
+
+### One answer per fleet
+
+The remote is resolved once per home from `$FM_HOME/config/update-remote`, not per checkout, and it is part of the inherited configuration the primary pushes into every secondmate home (`bin/fm-config-inherit-lib.sh`).
+Homes that follow different remotes drift apart silently, so the primary's value wins and is re-pushed at every convergence point, exactly like the other inherited settings.
+Set it in the primary home and let the ordinary secondmate convergence carry it; a remote route receives it over the same inherited-material push.
+`/updatefirstmate` also delivers `config/update-remote` alone to each remote route immediately before updating it, and reports the route as not converged instead of updating it when that delivery fails; no other inherited item can block the update.
+A remote host whose Firstmate code root predates the setting refuses the item and would follow `origin`, so it is updated as before only when the configured remote is `origin`; otherwise it is not updated at all, and the operator brings its code root onto the configured remote's default branch by hand, then reruns `/updatefirstmate`.
+On a remote route the code root on that host is updated first and the persistent home then follows that code root, so `bin/fm-remote-secondmate-control.sh` reads the home's inherited copy and passes it to the code-root update as `FM_UPDATE_REMOTE`.
+That environment variable overrides the file for one command and exists for that hand-off and for tests; it is not how an operator configures a home.
+
+### When the remote is missing
+
+A configured remote that a target repo does not define is reported as a skipped target naming that remote, and nothing is fetched or advanced there:
+
+```
+firstmate: skipped: no fork remote
+```
+
+That is deliberate rather than a fall back to `origin`.
+Following the wrong main is the failure this setting exists to prevent, so an unconfigured target stays where it is until an operator adds the remote or corrects the file.
+A standalone-clone secondmate home therefore needs the remote added to its own clone; a linked-worktree home shares the primary's remotes and needs nothing.
+
+Fast-forward-only remains the rule on every path.
+Pointing a home at a remote whose default branch is not a descendant of that home's current commit is a divergence, so the update skips it, recording a durable reconciliation marker for a secondmate home, rather than forcing, merging, or stashing ([Operational home layout and state](#operational-home-layout-and-state)).
+Before changing the file, confirm the new remote's default branch already contains the home's current commit.
 
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 
@@ -705,7 +748,7 @@ The tracked root `.gitignore` ignores both markers, so validation can read them 
 This does not relax protection for any other untracked file.
 An existing linked-worktree home that predates this rule advances through its marker-only state during its next bootstrap or spawn local sync, after which Git ignores the marker normally.
 
-A local standalone-clone home cannot receive a primary-local commit through that no-fetch sync, so it receives the rule through `/updatefirstmate`'s origin refresh instead.
+A local standalone-clone home cannot receive a primary-local commit through that no-fetch sync, so it receives the rule through `/updatefirstmate`'s update-remote refresh instead.
 
 ## Harness support
 
@@ -2245,6 +2288,7 @@ FM_PROJECTS_OVERRIDE=    # alternate projects dir, mainly for tests
 FM_CONFIG_OVERRIDE=      # alternate config dir, mainly for tests
 FM_PROC_ROOT_OVERRIDE=   # alternate /proc root for Linux process-identity reads in fm-wake-lib.sh and fm-teardown.sh, mainly for tests
 FM_BACKEND=             # optional runtime backend override for new spawns; tmux/herdr/zellij/orca/cmux support ship/scout spawns, codex-app is not accepted
+FM_UPDATE_REMOTE=        # override config/update-remote for one self-update command; used by the remote-route code-root hand-off and by tests
 FM_TRACE_CONTEXT=       # optional trace-context override; see "Trace context propagation"
 FM_TASK_ID=             # internal task-worker marker fm-spawn.sh exports into ship and scout panes, never set by hand; bin/fm-test-run.sh refuses to execute in the repository primary checkout while it is set
 HERDR_SESSION=default  # herdr-only: named session for normal backend ops; not enough for destructive cleanup (docs/herdr-backend.md)
