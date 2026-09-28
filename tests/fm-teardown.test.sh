@@ -727,6 +727,157 @@ test_teardown_closes_the_backlog_item_itself() {
   pass "teardown closes its own backlog item before reporting success"
 }
 
+# Files a landed task actually leaves under data/<id>/. The symlink matches a
+# render-temp name so cleanup must leave it unfollowed.
+seed_generated_launch_inputs() {
+  local case_dir=$1 dir="$1/data/task-x1"
+  mkdir -p "$dir"
+  printf 'brief\n' > "$dir/brief.md"
+  printf 'launch\n' > "$dir/launch-brief.md"
+  printf 'instructions\n' > "$dir/ship-instructions.md"
+  printf 'temp\n' > "$dir/.launch-brief.md.4242"
+  printf 'promote temp\n' > "$dir/.brief.md.promote.4242"
+  printf 'scout temp\n' > "$dir/.brief.md.scout.4242"
+  printf 'ship temp\n' > "$dir/.ship-instructions.md.4242"
+  printf 'report body\n' > "$dir/report.md"
+  printf '{}\n' > "$dir/contributions.json"
+  printf 'operator note\n' > "$dir/notes.md"
+  printf 'outside\n' > "$case_dir/brief-target"
+  ln -s "$case_dir/brief-target" "$dir/.launch-brief.md.linked"
+}
+
+assert_generated_launch_inputs_removed() {
+  local dir=$1/data/task-x1
+  assert_absent "$dir/brief.md" "landed teardown left brief.md"
+  assert_absent "$dir/launch-brief.md" "landed teardown left launch-brief.md"
+  assert_absent "$dir/ship-instructions.md" "landed teardown left ship-instructions.md"
+  assert_absent "$dir/.launch-brief.md.4242" "landed teardown left a launch-brief render temp"
+  assert_absent "$dir/.brief.md.promote.4242" "landed teardown left a promote brief temp"
+  assert_absent "$dir/.brief.md.scout.4242" "landed teardown left a scout brief temp"
+  assert_absent "$dir/.ship-instructions.md.4242" "landed teardown left a ship-instructions render temp"
+  assert_present "$dir/report.md" "landed teardown removed report.md"
+  assert_present "$dir/contributions.json" "landed teardown removed contributions.json"
+  assert_present "$dir/notes.md" "landed teardown removed an unrelated task file"
+  assert_present "$dir/.launch-brief.md.linked" "landed teardown removed a non-regular launch input"
+  [ "$(cat "$1/brief-target")" = "outside" ] \
+    || fail "landed teardown followed a launch-input symlink"
+}
+
+assert_generated_launch_inputs_kept() {
+  local dir=$1/data/task-x1
+  assert_present "$dir/brief.md" "teardown removed brief.md"
+  assert_present "$dir/launch-brief.md" "teardown removed launch-brief.md"
+  assert_present "$dir/ship-instructions.md" "teardown removed ship-instructions.md"
+  assert_present "$dir/.launch-brief.md.4242" "teardown removed a launch-brief render temp"
+  assert_present "$dir/report.md" "teardown removed report.md"
+  assert_present "$dir/contributions.json" "teardown removed contributions.json"
+  assert_present "$dir/notes.md" "teardown removed an unrelated task file"
+}
+
+test_landed_teardown_removes_generated_briefs_and_keeps_the_report() {
+  local case_dir rc
+  case_dir=$(make_case landed-brief-cleanup)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  seed_backlog_in_flight "$case_dir"
+  seed_generated_launch_inputs "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "landed-brief-cleanup: teardown should succeed: $(cat "$case_dir/stderr")"
+  assert_absent "$case_dir/state/task-x1.meta" "landed-brief-cleanup: task record still present"
+  assert_generated_launch_inputs_removed "$case_dir"
+  assert_grep "leaving $case_dir/data/task-x1/.launch-brief.md.linked" "$case_dir/stderr" \
+    "landed teardown did not say it left the non-regular launch input"
+  [ "$(backlog_row_state "$case_dir")" = "done" ] \
+    || fail "landed-brief-cleanup: backlog item was not closed"
+  pass "landed teardown removes generated briefs and keeps the report"
+}
+
+test_refused_teardown_keeps_generated_briefs() {
+  local case_dir rc
+  case_dir=$(make_case refused-brief-cleanup)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "unpushed work"
+  seed_generated_launch_inputs "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "refused-brief-cleanup: teardown should refuse unlanded work"
+  assert_present "$case_dir/state/task-x1.meta" "refused-brief-cleanup: refusal removed the task record"
+  assert_generated_launch_inputs_kept "$case_dir"
+  pass "a refused teardown leaves generated briefs in place"
+}
+
+test_forced_teardown_keeps_generated_briefs() {
+  local case_dir rc
+  case_dir=$(make_case forced-brief-cleanup)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "unpushed work"
+  seed_generated_launch_inputs "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "forced-brief-cleanup: --force should tear the task down: $(cat "$case_dir/stderr")"
+  assert_absent "$case_dir/state/task-x1.meta" "forced-brief-cleanup: task record still present"
+  assert_generated_launch_inputs_kept "$case_dir"
+  pass "a forced teardown leaves generated briefs for a successor spawn"
+}
+
+test_captain_held_teardown_keeps_generated_briefs() {
+  local case_dir rc
+  case_dir=$(make_case retained-brief-cleanup)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  seed_backlog_in_flight "$case_dir"
+  seed_generated_launch_inputs "$case_dir"
+  FM_HOME="$case_dir" FM_STATE_OVERRIDE="$case_dir/state" \
+    FM_DATA_OVERRIDE="$case_dir/data" FM_CONFIG_OVERRIDE="$case_dir/config" \
+    "$ROOT/bin/fm-captain-hold.sh" hold task-x1 --reason "captain must decide" \
+    >/dev/null \
+    || fail "retained-brief-cleanup: could not hold the task"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "retained-brief-cleanup: teardown should succeed: $(cat "$case_dir/stderr")"
+  assert_absent "$case_dir/state/task-x1.meta" "retained-brief-cleanup: task record still present"
+  assert_generated_launch_inputs_kept "$case_dir"
+  pass "a captain-held teardown leaves generated briefs for a successor spawn"
+}
+
+test_landed_scout_teardown_removes_briefs_and_keeps_the_report() {
+  local case_dir rc dir
+  case_dir=$(make_case scout-brief-cleanup)
+  write_meta "$case_dir" no-mistakes scout
+  printf '%s\n' 'decisions_reviewed=1' 'decision_keys=' >> "$case_dir/state/task-x1.meta"
+  seed_generated_launch_inputs "$case_dir"
+  dir="$case_dir/data/task-x1"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "scout-brief-cleanup: teardown should succeed: $(cat "$case_dir/stderr")"
+  assert_absent "$case_dir/state/task-x1.meta" "scout-brief-cleanup: task record still present"
+  assert_generated_launch_inputs_removed "$case_dir"
+  [ "$(cat "$dir/report.md")" = "report body" ] \
+    || fail "scout-brief-cleanup: report.md contents changed"
+  pass "landed scout teardown removes generated briefs and keeps the report"
+}
+
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator() {
   local case_dir out backlog_path
   case_dir=$(make_case tasks-axi-manual-optout)
@@ -4252,6 +4403,11 @@ test_forced_secondmate_own_missing_adapter_sibling_refuses_before_child_cleanup
 test_retained_sources_still_reach_the_ordinary_refusal
 test_local_only_fork_remote_allows
 test_teardown_closes_the_backlog_item_itself
+test_landed_teardown_removes_generated_briefs_and_keeps_the_report
+test_refused_teardown_keeps_generated_briefs
+test_forced_teardown_keeps_generated_briefs
+test_captain_held_teardown_keeps_generated_briefs
+test_landed_scout_teardown_removes_briefs_and_keeps_the_report
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows

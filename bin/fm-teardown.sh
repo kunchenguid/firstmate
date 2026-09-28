@@ -88,8 +88,11 @@
 # session-start sweep could still close, while a journal bound to any other pane
 # - or a version 1 attempt whose workspace is still present or unreadable - may
 # name a live quarantined space and is retained for that sweep.
-# data/<id>/ is deliberately left in place: a successor spawn reads brief.md
-# from it.
+# data/<id>/ stays. A landed ship or scout close removes generated launch inputs
+# there: brief.md, launch-brief.md, ship-instructions.md, and their in-progress
+# render temps. report.md and every other durable record, including
+# contributions.json, stay. A --force discard and a captain-held retain leave
+# the briefs, because a successor spawn of that same id still reads brief.md.
 # Worktree-slot ownership (teardown-slot-collision): a treehouse pool slot is
 # reused across tasks, so a stale, duplicated, or drifted worktree= record can
 # name a slot a DIFFERENT live task now holds. Cleanup kills every process under
@@ -175,7 +178,8 @@
 # leased home and state in place instead of hiding a still-held lease.
 # Usage: fm-teardown.sh <task-id> [--force] [--legacy-record]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
-#   checks, and discards secondmate child work for kind=secondmate. Only use it
+#   checks, and discards secondmate child work for kind=secondmate. It also
+#   leaves generated launch briefs in place for a successor spawn. Only use it
 #   when the captain has explicitly said to discard the work.
 #   --legacy-record accepts a task record that predates the spawn_gen field:
 #   teardown then proceeds only when the recorded endpoint is confirmed dead or
@@ -1406,6 +1410,46 @@ retire_busy_state() {
   elif [ -f "$state_dir/$id.busy-gen" ]; then
     "$SCRIPT_DIR/fm-busy-event.sh" retire "$state_dir" "$id" --current-gen
   fi
+}
+
+# Drop generated launch inputs after a landed ship or scout close. The task
+# directory itself stays, and so does every file this function does not name:
+# report.md is the scout deliverable, and contributions.json is the durable
+# observation record. A symlink or other non-regular input is left in place
+# rather than followed. A --force discard and a captain-held retain skip this
+# entirely so a successor spawn can still read brief.md.
+remove_landed_launch_briefs() {
+  local dir path name
+  [ "$KIND" = ship ] || [ "$KIND" = scout ] || return 0
+  [ "$FORCE" != --force ] || return 0
+  [ "${BACKLOG_TRANSITION:-close}" != retain ] || return 0
+  dir=$DATA/$ID
+  [ -e "$dir" ] || [ -L "$dir" ] || return 0
+  if [ -L "$dir" ] || [ ! -d "$dir" ]; then
+    echo "warning: leaving generated launch inputs for $ID; $dir is not a real directory" >&2
+    return 0
+  fi
+  for name in brief.md launch-brief.md ship-instructions.md; do
+    path=$dir/$name
+    [ -e "$path" ] || [ -L "$path" ] || continue
+    if [ -L "$path" ] || [ ! -f "$path" ]; then
+      echo "warning: leaving $path; landed teardown removes only a regular generated launch input" >&2
+      continue
+    fi
+    rm -f -- "$path" || return 1
+  done
+  while IFS= read -r -d '' path; do
+    if [ -L "$path" ] || [ ! -f "$path" ]; then
+      echo "warning: leaving $path; landed teardown removes only a regular generated launch input" >&2
+      continue
+    fi
+    rm -f -- "$path" || return 1
+  done < <(find "$dir" -mindepth 1 -maxdepth 1 \( \
+      -name '.launch-brief.md.*' -o \
+      -name '.ship-instructions.md.*' -o \
+      -name '.brief.md.promote.*' -o \
+      -name '.brief.md.scout.*' \
+    \) -print0)
 }
 
 validate_pr_poll_cleanup() {
@@ -3796,6 +3840,10 @@ if [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ];
     echo "warning: retaining herdr presentation journal for $ID; it still names a projected workspace the session-start sweep owns, not the closed endpoint" >&2
   fi
 fi
+# Generated launch briefs are not the deliverable. Remove them only after the
+# endpoint is gone and every earlier refusal has already kept the task intact,
+# and before the record itself goes, so a failed removal can still be retried.
+remove_landed_launch_briefs || exit 1
 # The record is gone, so the backlog must not still show this task in flight
 # when teardown reports success. Still under this task's meta lock, so a steer
 # racing the same id stays serialized exactly as it was before. A captain-held
