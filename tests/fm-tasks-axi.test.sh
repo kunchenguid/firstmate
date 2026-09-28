@@ -217,13 +217,15 @@ test_guard_remedy_protects_live_home_code_root() {
   assert_contains "$out" "code-root $dir/home/data/backlog.md is not this home's $dir/relocated/backlog.md" \
     "a checkout home's own code-root copy beside its relocated data was not reported"
   assert_contains "$out" "move it aside" "a code-root copy inside this home lost its move-aside remedy"
-  pass "the code-root remedy never moves another live home's records"
+  pass "the code-root remedy never moves a durably identified home's records"
 }
 
-# A genuine split layout: the code root is not a home in use, so its copy is a
-# true stray fork and must keep a clearable move-aside remedy - including when
-# the code root still carries state/ and a dead session lock from its own
-# earlier use as a home, or this home's registered parent lives elsewhere.
+# A genuine split layout: the code root has no durable home identity - no
+# marker, no registration, not an ancestor on this home's parent chain - so its
+# copy is a true stray fork and must keep a clearable move-aside remedy,
+# including when the code root still carries state/ and a dead session lock
+# from its own earlier use as a home, or this home's registered parent lives
+# elsewhere.
 test_guard_remedy_moves_stray_code_root_copy() {
   local dir out remedy holder
   dir=$(make_split guard-remedy-stray)
@@ -242,7 +244,67 @@ test_guard_remedy_moves_stray_code_root_copy() {
   assert_contains "$remedy" "move it aside" "a stray code-root backlog lost its move-aside remedy"
   assert_not_contains "$remedy" "leave the code-root file in place" \
     "a leftover state/ directory made a stray code-root backlog read as another home's record"
-  pass "a stray code-root backlog outside any home in use keeps its move-aside remedy"
+  pass "a stray code-root backlog with no durable home identity keeps its move-aside remedy"
+}
+
+local_parent_record() {  # <home> <parent-home>
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$2" > "$1/.fm-secondmate-parent"
+}
+
+# Nested secondmates: A is a primary checkout home, B a non-checkout secondmate
+# of A, and C a non-checkout secondmate of B. A's bootstrap run for C compares
+# A's data/, which is A's own live record however far up C's chain A sits.
+test_guard_remedy_protects_ancestor_code_root() {
+  local dir out
+  dir="$TMP_ROOT/guard-remedy-ancestor"
+  make_checkout_home "$dir/a"
+  mkdir -p "$dir/b/data" "$dir/b/state" "$dir/c/data" "$dir/c/state" "$dir/c/config"
+  printf '## In flight\n\n## Queued\n\n- [ ] a-1: the primary home'"'"'s own row\n\n## Done\n' \
+    > "$dir/a/data/backlog.md"
+  printf '## Done\n' > "$dir/a/data/done-archive.md"
+  printf '# Secondmates\n\n- bee - a secondmate (home: %s; scope: b work; projects: none; added 2026-09-01)\n' \
+    "$dir/b" > "$dir/a/data/secondmates.md"
+  printf '# Secondmates\n\n- cee - a nested secondmate (home: %s; scope: c work; projects: none; added 2026-09-01)\n' \
+    "$dir/c" > "$dir/b/data/secondmates.md"
+  printf 'bee\n' > "$dir/b/.fm-secondmate-home"
+  printf 'cee\n' > "$dir/c/.fm-secondmate-home"
+  local_parent_record "$dir/b" "$dir/a"
+  local_parent_record "$dir/c" "$dir/b"
+  empty_backlog "$dir/c/data/backlog.md"
+  printf '## Done\n' > "$dir/c/data/done-archive.md"
+  out=$(bootstrap_backlog_lines "$dir/a" "$dir/c")
+  assert_contains "$out" "code-root $dir/a/data/backlog.md" "the ancestor code root's backlog was not compared"
+  assert_contains "$out" "code-root $dir/a/data/done-archive.md" "the ancestor code root's archive was not compared"
+  assert_not_contains "$out" "move it aside" "the remedy moved a grandparent home's live records"
+  pass "the code-root remedy never moves an ancestor home's records"
+}
+
+# A parent chain that cannot be followed to its root - a cycle, a parent home
+# that is gone, or a malformed record - cannot prove the code root is a stray,
+# so it must never produce the move-aside remedy.
+test_guard_remedy_fails_safe_on_broken_parent_chain() {
+  local dir out
+  dir=$(make_split guard-remedy-broken-chain)
+  rm "$dir/code/data/backlog.md"
+  empty_backlog "$dir/code/data/backlog.md"
+  mkdir -p "$dir/p1" "$dir/p2"
+  local_parent_record "$dir/home" "$dir/p1"
+  local_parent_record "$dir/p1" "$dir/p2"
+  local_parent_record "$dir/p2" "$dir/p1"
+  out=$(bootstrap_backlog_lines "$dir/code" "$dir/home")
+  assert_contains "$out" "is not this home's $dir/home/data/backlog.md" "a code-root backlog beside a cyclic chain was not reported"
+  assert_not_contains "$out" "move it aside" "a cyclic parent chain produced the move-aside remedy"
+
+  local_parent_record "$dir/home" "$dir/gone"
+  out=$(bootstrap_backlog_lines "$dir/code" "$dir/home")
+  assert_contains "$out" "is not this home's $dir/home/data/backlog.md" "a code-root backlog beside a truncated chain was not reported"
+  assert_not_contains "$out" "move it aside" "a truncated parent chain produced the move-aside remedy"
+
+  printf 'not a parent record\n' > "$dir/home/.fm-secondmate-parent"
+  out=$(bootstrap_backlog_lines "$dir/code" "$dir/home")
+  assert_contains "$out" "is not this home's $dir/home/data/backlog.md" "a code-root backlog beside a malformed chain was not reported"
+  assert_not_contains "$out" "move it aside" "a malformed parent record produced the move-aside remedy"
+  pass "a parent chain that cannot be followed never produces the move-aside remedy"
 }
 
 test_guard_silent_for_single_home() {
@@ -391,6 +453,8 @@ test_guard_silent_for_cross_home_checkout
 test_guard_reports_fork_beside_home_with_own_tasks_config
 test_guard_remedy_protects_live_home_code_root
 test_guard_remedy_moves_stray_code_root_copy
+test_guard_remedy_protects_ancestor_code_root
+test_guard_remedy_fails_safe_on_broken_parent_chain
 if [ "$HAVE_TASKS_AXI" = 1 ]; then
   test_bare_tasks_axi_fork_is_detected
   test_wrapper_writes_through_to_home

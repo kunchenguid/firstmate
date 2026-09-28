@@ -1481,12 +1481,19 @@ home_code_root() {
 # another home is a durable identity fact, never present activity: a home
 # between sessions - restarting, crashed, or a sibling's idle leased copy - is
 # still a home and its records are still live. The code root is another home
-# when it carries its own .fm-secondmate-home marker, is this home's registered
-# parent, or is registered as a secondmate home in this home's registry or its
-# parent's. A directory that merely looks like a home - a state/ or a dead lock
+# when it carries its own .fm-secondmate-home marker, is registered as a
+# secondmate home in this home's registry, or is any ancestor on this home's
+# .fm-secondmate-parent chain or registered in any ancestor's registry. The
+# chain is walked to its root, which is a home with no parent record or a
+# remote parent. A chain that cannot be followed - a malformed or unreadable
+# record, a parent home that is gone, a cycle, or one longer than any real
+# fleet - protects the code root, because moving a live record aside cannot be
+# undone. A directory that merely looks like a home - a state/ or a dead lock
 # left behind when the home moved out of the code root - carries no marker or
 # registration, so its copy is a genuine stray the reader merges and moves
 # aside, which clears the line.
+FM_CODE_ROOT_ANCESTOR_BOUND=64
+
 code_root_registered_in() {  # <registry> <code-root>
   local reg=$1 root=$2 line
   [ -f "$reg" ] && [ ! -L "$reg" ] || return 1
@@ -1499,16 +1506,32 @@ code_root_registered_in() {  # <registry> <code-root>
 }
 
 code_root_is_other_live_home() {  # <code-root>
-  local root=$1
+  local root=$1 home record parent parent_key seen depth=0
   [ "$root" -ef "$FM_HOME" ] && return 1
   [ -f "$root/$FM_BACKEND_HOMETAG_SECONDMATE_MARKER" ] && return 0
   code_root_registered_in "$DATA/secondmates.md" "$root" && return 0
-  if fm_secondmate_parent_record_parse "$FM_HOME/.fm-secondmate-parent" 2>/dev/null \
-    && [ -n "$FM_SECONDMATE_PARENT_HOME" ]; then
-    [ "$FM_SECONDMATE_PARENT_HOME" -ef "$root" ] && return 0
-    code_root_registered_in "$FM_SECONDMATE_PARENT_HOME/data/secondmates.md" "$root" && return 0
-  fi
-  return 1
+  home=$FM_HOME
+  seen=$(cd "$home" 2>/dev/null && pwd -P) || return 0
+  while :; do
+    record="$home/.fm-secondmate-parent"
+    [ -e "$record" ] || [ -L "$record" ] || return 1
+    depth=$((depth + 1))
+    [ "$depth" -le "$FM_CODE_ROOT_ANCESTOR_BOUND" ] || return 0
+    fm_secondmate_parent_record_parse "$record" 2>/dev/null || return 0
+    [ "$FM_SECONDMATE_PARENT_ROUTE" = local ] || return 1
+    parent=$FM_SECONDMATE_PARENT_HOME
+    [ "$parent" -ef "$root" ] && return 0
+    parent_key=$(cd "$parent" 2>/dev/null && pwd -P) || return 0
+    case "
+$seen
+" in *"
+$parent_key
+"*) return 0 ;; esac
+    code_root_registered_in "$parent/data/secondmates.md" "$root" && return 0
+    seen="$seen
+$parent_key"
+    home=$parent
+  done
 }
 
 detect_code_root_backlog_fork() {
