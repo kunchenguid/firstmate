@@ -408,7 +408,7 @@ Each arm owner's own suite covers its host mode against a stub host.
 | `tests/fm-afk-launch.test.sh` | `/quiet` on an opted-in home: the statement, the paused statement, each named missing part, the quiet daemon fallback that carries its recorded mode, a failed quiet start that archives its quiet record, and the refusal under a live away record until the return. |
 | `tests/fm-afk-return.test.sh` | The return's drain-owned read-cursor advance through the away window on a host home, and none on Pi. |
 | `tests/fm-supervision-host-live-e2e.test.sh` | Runs a real engine turn; opt-in because it spends tokens. |
-| `tests/fm-supervision-host-attended-live-e2e.test.sh` | Opt-in credentialed guard for repeated attended main-only hand-backs to an idle Claude primary, the successor's own close, and a stand-in remote listener; accepts a pre-fix ref for a negative control. |
+| `tests/fm-supervision-host-attended-live-e2e.test.sh` | Opt-in credentialed guard for repeated attended main-only hand-backs to an idle Claude primary, the successor's own close, a close that turns main-only at its turn, and a stand-in remote listener; accepts a pre-fix ref for a negative control. |
 | `tests/fm-host-mirror-live-e2e.test.sh` | Proves the Claude and Cursor mirror writers against the real harnesses; opt-in because it spends tokens. |
 
 [verification/supervision.md](verification/supervision.md#supervision-host) records the dated live results.

@@ -1117,6 +1117,36 @@ test_claude_stop_hook_delivers_a_close_that_turns_main_only_at_its_turn() {
   pass "host+hook: a close that turns main-only at its turn rewakes main and keeps its successor watcher"
 }
 
+# If the at-turn hand-back cannot publish downtime, the healthy successor
+# cannot turn that undelivered close into a silent Stop-hook success.
+test_claude_stop_hook_notifies_when_at_turn_downtime_write_fails() {
+  local home real_mktemp
+  home=$(make_primary_home hook-turns-main-only-write-fails)
+  turn_main_only_at_second_offer "$home"
+  real_mktemp=$(command -v mktemp)
+  cat > "$home/fakebin/mktemp" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *'/state/.watcher-down.tmp.'*)
+    [ "\$(cat "\$FM_HOME/offer-count" 2>/dev/null)" != 2 ] || exit 1 ;;
+esac
+exec "$real_mktemp" "\$@"
+SH
+  chmod +x "$home/fakebin/mktemp"
+  start_hook_session "$home"
+  turn_end "$home"
+  wait_until 150 watcher_live "$home" || fail "hook write failure: no watcher started"
+  append_status "$home" 'step one'
+  wait_until 250 hook_exited "$home" || fail "hook write failure: the Stop hook did not finish"
+  [ "$(cat "$home/offer-count" 2>/dev/null)" -ge 2 ] || fail "fixture: the close did not turn main-only at its turn"
+  assert_re 'pass-through[[:space:]]+downtime-unrestored' "$home/state/.supervision-host.log" "fixture: downtime publication did not fail"
+  assert_re '^(pending|announced):handling:' "$home/state/.watcher-down" "fixture: the marker unexpectedly became downtime"
+  expect_code 2 "$(cat "$home/hook.rc")" "the Stop hook must notify main instead of dropping the close"
+  assert_grep 'firstmate watcher auto-arm FAILED' "$home/hook.err" "main must receive the failure notification"
+  assert_re 'outcome=failed ' "$home/state/.claude-autoarm-epoch" "the failure must be committed"
+  pass "host+hook: failed at-turn downtime write notifies main despite a healthy successor"
+}
+
 # The successor a pass-through leaves closes while main's rewoken turn is still
 # running, so no arm is attached to read it: the next turn end must still
 # deliver that close instead of stranding it in the queue.
@@ -2410,6 +2440,7 @@ test_close_accepted_away_that_turns_attended_passes_to_main
 test_attended_close_that_turns_main_only_before_its_turn_passes_to_main
 test_claude_stop_hook_delivers_a_main_only_pass_through
 test_claude_stop_hook_delivers_a_close_that_turns_main_only_at_its_turn
+test_claude_stop_hook_notifies_when_at_turn_downtime_write_fails
 test_successor_close_during_main_turn_is_delivered_at_the_next_turn_end
 test_primary_without_a_verified_mirror_runs_away_only
 test_attended_wake_carries_the_dialog_mirror
