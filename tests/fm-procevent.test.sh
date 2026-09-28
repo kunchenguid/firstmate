@@ -1197,7 +1197,7 @@ else
   printf '%s\n' store-fail > "$STOREFAIL_OWNERS/$owner"
   trap 'rm -f -- "$STOREFAIL_OWNERS/$owner"' EXIT
   sleep 0.2
-  printf 'error: failed to persist agent reply\ncode: SERVER_ERROR\n'
+  printf 'error: Lavish Editor server connection failed\ncode: SERVER_ERROR\n'
   exit 1
 fi
 SH
@@ -1218,12 +1218,20 @@ if PATH="$STOREFAIL_BIN:$PATH" FM_HOME="$HFSTOREFAIL" FM_PROCEVENT_LAUNCH_CONFIR
   fail "Lavish storage failure was reported as accepted"
 fi
 assert_absent "$HFSTOREFAIL/state/procevent-inbox/$storefail_id.1.handled" \
-  "owner visibility acknowledged a reply that Lavish failed to store"
-assert_absent "$HFSTOREFAIL/state/procevent-inbox/$storefail_id.1.accepted" \
-  "proven storage failure remained ambiguously accepted"
-[ "$(find "$HFSTOREFAIL/state/procevent" -maxdepth 1 -type f -name ".$storefail_id.reply.*" | wc -l | tr -d ' ')" = 1 ] \
-  || fail "storage failure did not retain the staged reply for recovery"
-pass "Lavish storage failure never acknowledges a reply"
+  "pre-header disconnect acknowledged an unconfirmed reply"
+assert_present "$HFSTOREFAIL/state/procevent-inbox/$storefail_id.1.accepted" \
+  "pre-header disconnect lost durable reply acceptance uncertainty"
+[ "$(find "$HFSTOREFAIL/state/procevent" -maxdepth 1 -type f -name ".$storefail_id.reply.*" | wc -l | tr -d ' ')" = 0 ] \
+  || fail "pre-header disconnect retained a stage that could post twice"
+printf 'Do not duplicate.\n' > "$TMP_ROOT/firstmate-store-fail-retry.txt"
+if PATH="$STOREFAIL_BIN:$PATH" FM_HOME="$HFSTOREFAIL" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$STOREFAIL_ART" \
+  --agent-reply-file "$TMP_ROOT/firstmate-store-fail-retry.txt" >/dev/null 2>&1; then
+  fail "pre-header disconnect allowed an ambiguous reply retry"
+fi
+[ "$(cat "$STOREFAIL_COUNT")" = 2 ] \
+  || fail "pre-header disconnect submitted the reply more than once"
+pass "pre-header disconnect preserves reply uncertainty"
 
 HFINTERRUPT="$TMP_ROOT/hfinterrupt"; new_home "$HFINTERRUPT"
 INTERRUPT_BIN=$(fm_fakebin "$TMP_ROOT/lavish-firstmate-interrupt-stub")

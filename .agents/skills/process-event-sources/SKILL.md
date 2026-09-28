@@ -37,7 +37,7 @@ bin/fm-procevent-lavish.sh arm <artifact.html>
 After handling each nonterminal round, write the exact captain-facing response to a private, nonblank file and re-arm the same artifact with `--agent-reply-file <path>` before sending that response in main chat.
 That re-arm stages one same-session reply, records acceptance uncertainty before exposing it, waits for a prior server listener to release without takeover, and records the round handled only when the exact poll request synchronously receives Lavish's post-persistence confirmation; owner visibility alone is not acceptance. If no response belongs in the session, re-arm without a reply file.
 Do not separately acknowledge a nonterminal firstmate-owned Lavish round with the generic `handled` command.
-A conclusive pre-submission failure preserves the capture and ownership for retry. An interrupted request or post-acceptance acknowledgement failure keeps its uncertainty marker and refuses another reply for that round so recovery cannot post it twice.
+A conclusive pre-submission failure or active-listener rejection preserves the capture and ownership for retry. Any other post-submission failure, including a disconnect before response headers, or a post-acceptance acknowledgement failure keeps its uncertainty marker and refuses another reply for that round so recovery cannot post it twice.
 
 A worker-owned board uses `bin/fm-procevent-lavish.sh arm <artifact.html> --for <task-id>` and re-arms with its reply after each nonterminal round; the existing handled marker is the acknowledgement.
 Arm it once, then re-arm only when a round is actually waiting: arming again with nothing to acknowledge is refused, because it would discard the reply your listener is still holding.

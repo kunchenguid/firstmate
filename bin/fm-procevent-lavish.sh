@@ -478,6 +478,10 @@ JS
       filter_rc=$?
       exec 6>&-
       IFS= read -r rc < "$status_file" || die "cannot read the poll status"
+      if [ "$reply_pending" -eq 1 ] && [ -n "$ready_fd" ] \
+        && [ "$filter_rc" -ne 11 ] && [ "$rc" -ne 0 ]; then
+        rm -f -- "$reply_file" || die "cannot preserve ambiguous reply acceptance"
+      fi
       if [ -n "$ready_fd" ] && [ "$rc" -eq 0 ]; then
         [ "$reply_pending" -eq 0 ] || rm -f -- "$reply_file" \
           || die "cannot consume accepted agent reply file: $reply_file"
@@ -510,7 +514,6 @@ JS
         ;;
       10)
         if [ "$reply_pending" -eq 1 ] && [ -n "$ready_fd" ]; then
-          rm -f -- "$reply_file" || die "cannot preserve ambiguous reply acceptance"
           break
         elif [ "$attempt" -lt "$POLL_RETRY_LIMIT" ]; then
           attempt=$((attempt + 1))
