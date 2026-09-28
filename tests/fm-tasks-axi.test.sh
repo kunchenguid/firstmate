@@ -163,28 +163,41 @@ test_guard_reports_fork_beside_home_with_own_tasks_config() {
   pass "a home's own .tasks.toml does not hide a code-root fork"
 }
 
-# The remedy must never move another live home's records. A code root is a
-# home in use only on evidence of use - this home's registered parent, or a
-# live session holding its session lock - never because a directory such as
-# state/ merely exists there. A code-root copy inside the home (a checkout
-# home whose data directory is relocated) is this home's to move.
+# The remedy must never move another home's records. Whether the code root is
+# another home is a durable identity fact - its own .fm-secondmate-home marker,
+# this home's registered parent, or a secondmate home in a registry - so a home
+# between sessions, with no live process, is still protected. A code-root copy
+# inside the home (a checkout home whose data directory is relocated) is this
+# home's to move.
 test_guard_remedy_protects_live_home_code_root() {
-  local dir out remedy holder
+  local dir out remedy
   dir=$(make_split guard-remedy-live)
   rm "$dir/code/data/backlog.md"
   empty_backlog "$dir/code/data/backlog.md"
-  holder=$(hold_session_lock "$dir/code/state")
+  mkdir -p "$dir/code/state"
+  printf 'sibling\n' > "$dir/code/.fm-secondmate-home"
   out=$(bootstrap_backlog_lines "$dir/code" "$dir/home")
-  kill "$holder" 2>/dev/null || true
-  wait "$holder" 2>/dev/null || true
   assert_contains "$out" "is not this home's $dir/home/data/backlog.md" \
-    "a regular code-root backlog in a live home was not reported"
+    "a regular code-root backlog in another home was not reported"
   remedy=${out##* - }
   assert_contains "$remedy" "leave the code-root file in place, because it is another live home's record" \
-    "a code root whose session lock a live session holds was not identified as another live home's record"
+    "a code root carrying its own secondmate-home marker between sessions was not identified as another home's record"
   assert_contains "$remedy" "only rows whose task id has a record in this home and none in $dir/code" \
     "the live-home remedy did not say how to tell which rows are this home's"
-  assert_not_contains "$remedy" "move it aside" "the remedy moved another live home's backlog"
+  assert_not_contains "$remedy" "move it aside" "the remedy moved a marked secondmate home's backlog"
+  rm "$dir/code/.fm-secondmate-home"
+
+  mkdir -p "$dir/parent/data"
+  printf '# Secondmates\n\n- sibling - a sibling home (home: %s; scope: sibling work; projects: none; added 2026-09-01)\n' \
+    "$dir/code" > "$dir/parent/data/secondmates.md"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$dir/parent" \
+    > "$dir/home/.fm-secondmate-parent"
+  out=$(bootstrap_backlog_lines "$dir/code" "$dir/home")
+  remedy=${out##* - }
+  assert_contains "$remedy" "leave the code-root file in place, because it is another live home's record" \
+    "a code root registered as a secondmate home in the parent's registry was not identified as another home's record"
+  assert_not_contains "$remedy" "move it aside" "the remedy moved a registered sibling home's backlog"
+  rm "$dir/parent/data/secondmates.md"
 
   printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$dir/code" \
     > "$dir/home/.fm-secondmate-parent"

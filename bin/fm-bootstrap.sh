@@ -197,8 +197,10 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
 # shellcheck source=bin/fm-secondmate-parent-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-secondmate-parent-lib.sh"
-# shellcheck source=bin/fm-session-lock-lib.sh disable=SC1091
-. "$SCRIPT_DIR/fm-session-lock-lib.sh"
+# shellcheck source=bin/fm-secondmate-registry-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
+# shellcheck source=bin/fm-backend-hometag-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-backend-hometag-lib.sh"
 # Shared secondmate endpoint probe + guarded relaunch; the watcher's poll tick
 # drives the same library so session start and ordinary supervision recover
 # from identical evidence through an identical path.
@@ -1475,21 +1477,38 @@ home_code_root() {
   fi
 }
 
-# The remedy never moves another home's records while that home is in use.
-# Only evidence of use counts: the code root is this home's registered parent,
-# or a live verified-harness session holds its session lock right now. A
-# directory that merely looks like a home - a state/ left behind when the home
-# moved out of the code root, or a dead lock - is not in use, so its copy is a
-# genuine stray the reader merges and moves aside, which clears the line.
+# The remedy never moves another home's records. Whether the code root is
+# another home is a durable identity fact, never present activity: a home
+# between sessions - restarting, crashed, or a sibling's idle leased copy - is
+# still a home and its records are still live. The code root is another home
+# when it carries its own .fm-secondmate-home marker, is this home's registered
+# parent, or is registered as a secondmate home in this home's registry or its
+# parent's. A directory that merely looks like a home - a state/ or a dead lock
+# left behind when the home moved out of the code root - carries no marker or
+# registration, so its copy is a genuine stray the reader merges and moves
+# aside, which clears the line.
+code_root_registered_in() {  # <registry> <code-root>
+  local reg=$1 root=$2 line
+  [ -f "$reg" ] && [ ! -L "$reg" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    secondmate_registry_parse_line "$line" || continue
+    [ "$SECONDMATE_REGISTRY_REMOTE" -eq 1 ] && continue
+    [ "$SECONDMATE_REGISTRY_HOME" -ef "$root" ] && return 0
+  done < "$reg"
+  return 1
+}
+
 code_root_is_other_live_home() {  # <code-root>
   local root=$1
   [ "$root" -ef "$FM_HOME" ] && return 1
+  [ -f "$root/$FM_BACKEND_HOMETAG_SECONDMATE_MARKER" ] && return 0
+  code_root_registered_in "$DATA/secondmates.md" "$root" && return 0
   if fm_secondmate_parent_record_parse "$FM_HOME/.fm-secondmate-parent" 2>/dev/null \
-    && [ -n "$FM_SECONDMATE_PARENT_HOME" ] && [ "$FM_SECONDMATE_PARENT_HOME" -ef "$root" ]; then
-    return 0
+    && [ -n "$FM_SECONDMATE_PARENT_HOME" ]; then
+    [ "$FM_SECONDMATE_PARENT_HOME" -ef "$root" ] && return 0
+    code_root_registered_in "$FM_SECONDMATE_PARENT_HOME/data/secondmates.md" "$root" && return 0
   fi
-  fm_session_lock_inspect "$root/state"
-  [ "$FM_LOCK_INSPECT_STATE" = held ]
+  return 1
 }
 
 detect_code_root_backlog_fork() {
