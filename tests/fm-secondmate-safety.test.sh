@@ -2060,6 +2060,7 @@ EOF
 
 test_secondmate_force_teardown_recovers_proven_obsolete_duplicate_scouts() {
   local home subhome otherhome childproj childwt fakebin log err rc available_json busy_json child pane
+  local before dirty_file claim
   local -a recovery_args
   home="$TMP_ROOT/force-obsolete-duplicate-home"
   subhome="$TMP_ROOT/force-obsolete-duplicate-subhome"
@@ -2108,6 +2109,12 @@ spawn_gen=obsolete-$child
 EOF
     pane=$((pane + 1))
   done
+  before="$TMP_ROOT/force-obsolete-duplicate-before"
+  mkdir -p "$before"
+  cp "$home/state/domain.meta" "$before/domain.meta"
+  cp "$home/data/secondmates.md" "$before/secondmates.md"
+  cp "$subhome/state/old-run.meta" "$before/old-run.meta"
+  cp "$subhome/state/old-recovery.meta" "$before/old-recovery.meta"
   fakebin=$(make_fake_tmux "$TMP_ROOT/force-obsolete-duplicate-fake")
   log="$TMP_ROOT/force-obsolete-duplicate-fake/tmux.log"
   cat > "$fakebin/herdr" <<'SH'
@@ -2187,6 +2194,64 @@ SH
   assert_present "$subhome/state/old-run.meta" "occupied-slot refusal removed the first child record"
   assert_present "$subhome/state/old-recovery.meta" "occupied-slot refusal removed the second child record"
   assert_contains "$(cat "$err")" "available, process-free, and unleased" "occupied-slot refusal did not name its failed proof"
+
+  dirty_file="$childwt/unsubmitted-finance-work.txt"
+  printf 'pending finance work\n' > "$dirty_file"
+  cp "$dirty_file" "$before/unsubmitted-finance-work.txt"
+  : > "$log"
+  set +e
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/force-obsolete-duplicate-fake/pane.txt" \
+    FM_FAKE_HERDR_SOCKET="$TMP_ROOT/force-obsolete-duplicate-fake/retired.sock" \
+    FM_FAKE_TREEHOUSE_STATUS_JSON="$available_json" \
+    "$ROOT/bin/fm-teardown.sh" "${recovery_args[@]}" >/dev/null 2>"$err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "obsolete duplicate recovery accepted a dirty returned slot"
+  cmp -s "$before/domain.meta" "$home/state/domain.meta" \
+    || fail "dirty-slot refusal changed the parent task record"
+  cmp -s "$before/secondmates.md" "$home/data/secondmates.md" \
+    || fail "dirty-slot refusal changed the secondmate registry"
+  cmp -s "$before/old-run.meta" "$subhome/state/old-run.meta" \
+    || fail "dirty-slot refusal changed the first child record"
+  cmp -s "$before/old-recovery.meta" "$subhome/state/old-recovery.meta" \
+    || fail "dirty-slot refusal changed the second child record"
+  cmp -s "$before/unsubmitted-finance-work.txt" "$dirty_file" \
+    || fail "dirty-slot refusal changed the unsubmitted checkout content"
+  assert_contains "$(cat "$err")" "requires a clean returned slot" "dirty-slot refusal did not name its failed proof"
+  grep -F 'pane close' "$log" >/dev/null && fail "dirty-slot refusal tried to close a child pane"
+  grep -F 'treehouse return' "$log" >/dev/null && fail "dirty-slot refusal tried to return the shared slot"
+  grep -F 'kill-window' "$log" >/dev/null && fail "dirty-slot refusal killed an endpoint"
+  rm -f "$dirty_file"
+
+  claim="${childwt%/*}/.fm-slot-owner"
+  printf 'task=current-owner\nhome=%s\n' "$otherhome" > "$claim"
+  cp "$claim" "$before/slot-owner"
+  : > "$log"
+  set +e
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/force-obsolete-duplicate-fake/pane.txt" \
+    FM_FAKE_HERDR_SOCKET="$TMP_ROOT/force-obsolete-duplicate-fake/retired.sock" \
+    FM_FAKE_TREEHOUSE_STATUS_JSON="$available_json" \
+    "$ROOT/bin/fm-teardown.sh" "${recovery_args[@]}" >/dev/null 2>"$err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "obsolete duplicate recovery accepted a claimed returned slot"
+  cmp -s "$before/domain.meta" "$home/state/domain.meta" \
+    || fail "claimed-slot refusal changed the parent task record"
+  cmp -s "$before/secondmates.md" "$home/data/secondmates.md" \
+    || fail "claimed-slot refusal changed the secondmate registry"
+  cmp -s "$before/old-run.meta" "$subhome/state/old-run.meta" \
+    || fail "claimed-slot refusal changed the first child record"
+  cmp -s "$before/old-recovery.meta" "$subhome/state/old-recovery.meta" \
+    || fail "claimed-slot refusal changed the second child record"
+  cmp -s "$before/slot-owner" "$claim" \
+    || fail "claimed-slot refusal changed the existing owner claim"
+  assert_contains "$(cat "$err")" "requires no slot-owner claim" "claimed-slot refusal did not name its failed proof"
+  grep -F 'pane close' "$log" >/dev/null && fail "claimed-slot refusal tried to close a child pane"
+  grep -F 'treehouse return' "$log" >/dev/null && fail "claimed-slot refusal tried to return the shared slot"
+  grep -F 'kill-window' "$log" >/dev/null && fail "claimed-slot refusal killed an endpoint"
+  rm -f "$claim"
 
   cat > "$otherhome/state/foreign.meta" <<EOF
 window=firstmate:fm-foreign
