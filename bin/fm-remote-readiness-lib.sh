@@ -25,7 +25,9 @@
 # FM_REMOTE_READINESS_OUT always holds the output of the last run, which carries
 # the check lines, the remaining human: gaps, and their exact operator actions.
 
-# Consumed by the sourcing caller, so every assignment reads as unused here.
+# FM_REMOTE_READINESS_OUT is consumed by the sourcing caller, so its every
+# assignment reads as unused here; the directive below is file-wide because it
+# precedes the first command.
 # shellcheck disable=SC2034
 FM_REMOTE_READINESS_LIB_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 
