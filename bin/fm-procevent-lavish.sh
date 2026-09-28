@@ -198,7 +198,7 @@ cmd_source_id() {
 }
 
 cmd_arm() {
-  local artifact='' task='' reply_file='' id real owner listening
+  local artifact='' task='' reply_file='' id real owner listening registration_output registration_identity
   local -a listener=()
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -229,20 +229,23 @@ cmd_arm() {
   listener=("$SCRIPT_DIR/fm-procevent-lavish.sh" poll "$real")
   [ -z "$reply_file" ] || listener+=(--agent-reply-file "$reply_file")
   if [ -n "$task" ]; then
-    FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" register-task lavish "$id" "$task" -- \
-      "${listener[@]}" || exit 1
+    registration_output=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" register-task lavish "$id" "$task" -- \
+      "${listener[@]}") || exit 1
   else
     # This adapter's own listener command, which runs the plain blocking form
     # with no --timeout-ms so completion is a server event, and absorbs only
     # the exact transient interruption.
-    FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" register-lavish "$id" \
-      -- "${listener[@]}" || exit 1
+    registration_output=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" register-lavish "$id" \
+      -- "${listener[@]}") || exit 1
   fi
+  registration_identity=$(printf '%s\n' "$registration_output" | sed -n 's/^registration-identity: //p' | head -1)
+  case "$registration_identity" in ''|*[!0-9:]*) die "cannot identify the published Lavish registration: $id" ;; esac
+  printf '%s\n' "$registration_output"
   # Registration is not a running listener. Readiness is the process-event
   # owner's evidence for this generation; a miss retires a source that never
   # started so arm does not leave it registered.
   listening=0
-  FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" ensure-listening "$id" || listening=$?
+  FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" ensure-listening "$id" "$registration_identity" || listening=$?
   if [ "$listening" -eq 3 ]; then
     printf 'still-listening: %s\n' "$id"
     printf 'artifact: %s\n' "$real"

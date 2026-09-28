@@ -972,11 +972,33 @@ assert_not_contains "$(cat "$FREPLY_ARGS")" 'Confirmed in session.' \
 PATH="$FREPLY_BIN:$PATH" pe "$HFREPLY" reconcile >/dev/null
 [ "$(cat "$FREPLY_COUNT")" = 2 ] \
   || fail "recovery duplicated firstmate's same-session Lavish reply"
+printf 'Superseded FIFO response.\n' > "$TMP_ROOT/firstmate-reply-superseded.txt"
+superseded_registration=$(pe "$HFREPLY" register-lavish "$freply_id" -- \
+  "$ROOT/bin/fm-procevent-lavish.sh" poll "$FREPLY_ART" \
+  --agent-reply-file "$TMP_ROOT/firstmate-reply-superseded.txt")
+superseded_identity=$(printf '%s\n' "$superseded_registration" \
+  | sed -n 's/^registration-identity: //p' | head -1)
 printf 'Second FIFO response.\n' > "$TMP_ROOT/firstmate-reply-2.txt"
 PATH="$FREPLY_BIN:$PATH" FM_HOME="$HFREPLY" \
   "$ROOT/bin/fm-procevent-lavish.sh" arm "$FREPLY_ART" \
   --agent-reply-file "$TMP_ROOT/firstmate-reply-2.txt" \
-  > "$TMP_ROOT/firstmate-reply-2-arm.out"
+  > "$TMP_ROOT/firstmate-reply-2-arm.out" &
+freply_arm_pid=$!
+for _ in $(seq 1 100); do
+  [ -f "$HFREPLY/state/procevent-inbox/$freply_id.2.accepted" ] && break
+  sleep 0.01
+done
+assert_present "$HFREPLY/state/procevent-inbox/$freply_id.2.accepted" \
+  "reply acceptance uncertainty was not durable before Lavish exposure"
+if pe "$HFREPLY" ensure-listening "$freply_id" "$superseded_identity" \
+  > "$TMP_ROOT/firstmate-superseded-ensure.out" 2> "$TMP_ROOT/firstmate-superseded-ensure.err"; then
+  fail "superseded Lavish registration confirmed another generation's reply"
+fi
+assert_not_contains "$(cat "$FREPLY_LOG")" 'Superseded FIFO response.' \
+  "superseded Lavish reply reached the session"
+assert_not_contains "$(cat "$FREPLY_LOG")" 'poll3 reply: Second FIFO response.' \
+  "Lavish saw the reply before its acceptance uncertainty was durable"
+wait "$freply_arm_pid"
 assert_contains "$(cat "$TMP_ROOT/firstmate-reply-2-arm.out")" "armed: $freply_id" \
   "second FIFO reply did not confirm its own listener"
 assert_not_contains "$(cat "$TMP_ROOT/firstmate-reply-2-arm.out")" "still-listening" \

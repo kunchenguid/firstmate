@@ -844,8 +844,13 @@ cmd_register_lavish_owner() {
       rm -f -- "$stale"
     done
   fi
+  registration_identity=$(fm_pr_file_identity "$(source_file "$id")" 2>/dev/null) || {
+    fm_procevent_source_lock_release "$id"
+    die "cannot identify the published Lavish registration: $id"
+  }
   fm_procevent_source_lock_release "$id"
   owner_lease_refresh
+  printf 'registration-identity: %s\n' "$registration_identity"
   if [ "$firstmate_owner" -eq 1 ]; then
     printf 'registered: %s (%s)\n' "$id" "$adapter"
   else
@@ -1304,6 +1309,7 @@ cmd_start() {
   export FM_PROCEVENT_IN_RUNNER=1
   start_owner_guard "$id" || die "cannot start the runner's owner guard: $id"
   local runner inbox reservation_dir staging launch_ready launch_reply launch_pid adapter_ready='' adapter_ready_pipe=''
+  local reply_uncertain=0 reply_stage=''
   if [ "$extension_owner" -eq 1 ]; then
     staging=$(fm_procevent_extension_staging_prepare "$STATE") \
       || die "cannot safely prepare the external registry staging boundary"
@@ -1431,6 +1437,16 @@ EOF
         fm_procevent_source_lock_release "$id"
         die "cannot retain the adapter readiness boundary: $id"
       }
+      if [ "${#ARGV[@]}" -eq 5 ] && [ "${ARGV[3]}" = --agent-reply-file ]; then
+        reply_stage=${ARGV[4]}
+        if ! fm_procevent_mark_accepted "$STATE" "$id" "$reply_round" >/dev/null 2>&1; then
+          exec 5>&- 4<&- 3>&-
+          rm -f -- "$launch_ready" "$adapter_ready_pipe"
+          fm_procevent_source_lock_release "$id"
+          die "cannot preserve Lavish reply acceptance uncertainty: $id $reply_round"
+        fi
+        reply_uncertain=1
+      fi
       FM_PROCEVENT_ADAPTER_READY_FD=3 \
         FM_PROCEVENT_ADAPTER_OWNER="firstmate-$CLAIM_TOKEN" \
         "${ARGV[@]}" >&5 5>&- 4<&- 2>/dev/null &
@@ -1445,10 +1461,14 @@ EOF
       exec 3>&-
       IFS= read -r adapter_ready < "$adapter_ready_pipe" || adapter_ready=
       rm -f -- "$adapter_ready_pipe"
+      if [ "$reply_uncertain" -eq 1 ] && [ "$adapter_ready" != ready ] \
+        && [ -f "$reply_stage" ] && [ ! -L "$reply_stage" ]; then
+        rm -f -- "$(fm_procevent_accepted_marker "$STATE" "$id" "$reply_round")"
+        reply_uncertain=0
+      fi
       if [ "$adapter_ready" = ready ] \
         && ! fm_procevent_is_handled "$STATE" "$id" "$reply_round"; then
-        if ! fm_procevent_mark_accepted "$STATE" "$id" "$reply_round" >/dev/null 2>&1 \
-          || ! fm_procevent_mark_handled "$STATE" "$id" "$reply_round" >/dev/null 2>&1; then
+        if ! fm_procevent_mark_handled "$STATE" "$id" "$reply_round" >/dev/null 2>&1; then
           exec 5>&- 4<&-
           rm -f -- "$launch_ready"
           fm_procevent_source_lock_release "$id"
@@ -2121,8 +2141,8 @@ generation_can_launch() {  # <source-id>
 # launch stamp advancing. Returns as soon as either appears. A fixed sleep is
 # not success.
 cmd_ensure_listening() {
-  local id=${1-} identity before mark stamp deadline window started_once=0 listening round_aware=0 reply_round=''
-  [ "$#" -eq 1 ] || usage
+  local id=${1-} expected_identity=${2-} identity before mark stamp deadline window started_once=0 listening round_aware=0 reply_round=''
+  { [ "$#" -eq 1 ] || [ "$#" -eq 2 ]; } || usage
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
   window=$(fm_procevent_launch_confirm_seconds) \
     || die "FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS must be whole seconds from $FM_PROCEVENT_LAUNCH_CONFIRM_MIN_SECONDS to $FM_PROCEVENT_LAUNCH_CONFIRM_MAX_SECONDS"
@@ -2130,6 +2150,10 @@ cmd_ensure_listening() {
     || die "source is not registered: $id"
   identity=$(fm_pr_file_identity "$(source_file "$id")" 2>/dev/null) \
     || die "cannot identify the registration: $id"
+  if [ -n "$expected_identity" ] && [ "$identity" != "$expected_identity" ]; then
+    printf 'error: registration was superseded before listening: %s\n' "$id" >&2
+    return 1
+  fi
   if [ "$(source_kind "$id" 2>/dev/null || true)" = lavish-owned ]; then
     reply_round=$(source_field "$id" reply_round 2>/dev/null || true)
     case "$reply_round" in ''|*[!0-9]*) ;; *) round_aware=1 ;; esac
@@ -2144,7 +2168,17 @@ cmd_ensure_listening() {
     listening=0
     generation_is_listening "$id" "$identity" || listening=$?
     if [ "$round_aware" -eq 1 ]; then
-      fm_procevent_is_handled "$STATE" "$id" "$reply_round" && return 0
+      fm_procevent_source_lock_acquire "$id" || return 1
+      mark=$(fm_pr_file_identity "$(source_file "$id")" 2>/dev/null || true)
+      if [ "$mark" != "$identity" ]; then
+        fm_procevent_source_lock_release "$id"
+        return 1
+      fi
+      if fm_procevent_is_handled "$STATE" "$id" "$reply_round"; then
+        fm_procevent_source_lock_release "$id"
+        return 0
+      fi
+      fm_procevent_source_lock_release "$id"
     elif [ "$listening" -eq 0 ]; then
       return 0
     fi
