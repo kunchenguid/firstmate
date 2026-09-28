@@ -290,10 +290,14 @@ fm_herdr_session_cleanup >/dev/null 2>&1
 pass "v2 cleanup requires and accepts the exact journal endpoint binding"
 reset_fixture
 : > "$FIXTURE_DIR/empty-tab"
+assert_preserved "unbound v1 empty task tab"
+reset_fixture
+: > "$FIXTURE_DIR/empty-tab"
+write_v2 "$FM_HOME" "$WS" "$TAB" "$PANE"
 fm_herdr_session_cleanup >/dev/null 2>&1
 [ ! -e "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] || fail "empty task tab cleanup kept the journal"
 [ "$(cat "$CLOSE_LOG")" = "tab close $TAB" ] || fail "empty task tab cleanup did not close the exact tab: $(cat "$CLOSE_LOG")"
-pass "empty task tab cleanup closes the exact agent-free tab"
+pass "bound v2 empty task tab cleanup closes the exact agent-free tab"
 reset_fixture
 : > "$FIXTURE_DIR/empty-tab"
 printf '%s\n' "$TAB" > "$FIXTURE_DIR/active-tab"

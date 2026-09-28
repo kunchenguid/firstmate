@@ -136,7 +136,8 @@ fm_herdr_cleanup_snapshot_candidate() { # <snapshot> <workspace> <title> <token>
     | select($workspaces[0].tab_count == 1 and ($workspaces[0].pane_count == 1 or $workspaces[0].pane_count == 0))
     | select($tabs | length == 1)
     | select(($panes | length == 1 and $workspaces[0].pane_count == 1)
-            or ($panes | length == 0 and $workspaces[0].pane_count == 0))
+            or ($panes | length == 0 and $workspaces[0].pane_count == 0
+                and $bound_workspace != "" and $bound_tab != ""))
     | select($panes | length == 0 or $panes[0].tab_id == $tabs[0].tab_id)
     | select($bound_workspace == "" or $workspace == $bound_workspace)
     | select($bound_tab == "" or $tabs[0].tab_id == $bound_tab)
