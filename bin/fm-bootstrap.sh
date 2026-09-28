@@ -195,6 +195,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
+# shellcheck source=bin/fm-secondmate-parent-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-secondmate-parent-lib.sh"
 # Shared secondmate endpoint probe + guarded relaunch; the watcher's poll tick
 # drives the same library so session start and ordinary supervision recover
 # from identical evidence through an identical path.
@@ -1461,9 +1463,18 @@ detect_local_config() {
 # checkout's data/ is then another home's live backlog, never a fork of this
 # one. Only a home with no .tasks.toml borrows the invoking code root.
 #
-# The remedy never names or moves a file outside this home: a code-root copy
-# beyond it can be another home's live record, so the reader copies this home's
-# rows in and leaves that file alone.
+# The remedy never moves another live home's records: a code root that is
+# itself a live home (it has its own state/, or it is this home's registered
+# parent) keeps its file, so the reader copies this home's rows in and leaves
+# it alone. Any other code-root copy is a genuine stray and is moved aside.
+code_root_is_other_live_home() {  # <code-root>
+  local root=$1
+  [ "$root" -ef "$FM_HOME" ] && return 1
+  [ -d "$root/state" ] && return 0
+  fm_secondmate_parent_record_parse "$FM_HOME/.fm-secondmate-parent" 2>/dev/null \
+    && [ -n "$FM_SECONDMATE_PARENT_HOME" ] && [ "$FM_SECONDMATE_PARENT_HOME" -ef "$root" ]
+}
+
 detect_code_root_backlog_fork() {
   local name code_root root_copy remedy
   code_root=$FM_ROOT
@@ -1473,10 +1484,10 @@ detect_code_root_backlog_fork() {
     root_copy="$code_root/data/$name"
     [ -e "$root_copy" ] || [ -L "$root_copy" ] || continue
     [ "$root_copy" -ef "$DATA/$name" ] && continue
-    if [ "$code_root" -ef "$FM_HOME" ]; then
-      remedy="merge it into this home's copy and move it aside"
+    if code_root_is_other_live_home "$code_root"; then
+      remedy="copy only this home's rows into $DATA/$name and leave the code-root file in place, because it is another live home's record"
     else
-      remedy="copy only this home's rows into $DATA/$name and leave the code-root file in place, because it can be another home's live record"
+      remedy="merge it into this home's copy and move it aside"
     fi
     echo "BACKLOG_RECONCILE: code-root $root_copy is not this home's $DATA/$name; a tasks-axi write may have landed there instead of this home, so rows may be missing here - $remedy"
   done

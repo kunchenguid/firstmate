@@ -125,24 +125,36 @@ test_guard_silent_for_cross_home_checkout() {
   pass "another checkout's bootstrap stays silent for a home that is its own checkout"
 }
 
-# The remedy may only ever act inside the home being bootstrapped. A code root
-# beyond the home can be another home's live record, so its line must not name
-# that file in the remedy or move it; a code-root copy inside the home (a
-# checkout home whose data directory is relocated) is this home's to move.
-test_guard_remedy_stays_inside_home() {
+# The remedy must never move another live home's records. A code root that is
+# itself a live home (its own state/, or this home's registered parent) keeps
+# its file; a code-root copy inside the home (a checkout home whose data
+# directory is relocated) is this home's to move.
+test_guard_remedy_protects_live_home_code_root() {
   local dir out remedy
-  dir=$(make_split guard-remedy)
+  dir=$(make_split guard-remedy-live)
   rm "$dir/code/data/backlog.md"
   empty_backlog "$dir/code/data/backlog.md"
+  mkdir -p "$dir/code/state"
   out=$(bootstrap_backlog_lines "$dir/code" "$dir/home")
   assert_contains "$out" "is not this home's $dir/home/data/backlog.md" \
-    "a regular code-root backlog outside the home was not reported"
+    "a regular code-root backlog in a live home was not reported"
   remedy=${out##* - }
   assert_contains "$remedy" "$dir/home/data/backlog.md" "the remedy did not name this home's copy"
-  assert_not_contains "$remedy" "$dir/code" "the remedy named a path outside this home"
-  assert_not_contains "$remedy" "move it aside" "the remedy moved a file outside this home"
+  assert_contains "$remedy" "leave the code-root file in place, because it is another live home's record" \
+    "a live home's code-root backlog was not identified as another live home's record"
+  assert_not_contains "$remedy" "move it aside" "the remedy moved another live home's backlog"
+
+  rmdir "$dir/code/state"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$dir/code" \
+    > "$dir/home/.fm-secondmate-parent"
+  out=$(bootstrap_backlog_lines "$dir/code" "$dir/home")
+  remedy=${out##* - }
+  assert_contains "$remedy" "leave the code-root file in place, because it is another live home's record" \
+    "the registered parent home's code-root backlog was not identified as a live home's record"
+  assert_not_contains "$remedy" "move it aside" "the remedy moved the registered parent home's backlog"
 
   mkdir -p "$dir/relocated"
+  rm "$dir/home/.fm-secondmate-parent"
   cp "$ROOT/.tasks.toml" "$dir/home/.tasks.toml"
   empty_backlog "$dir/relocated/backlog.md"
   out=$(PATH="$BASE_PATH" FM_HOME="$dir/home" FM_DATA_OVERRIDE="$dir/relocated" \
@@ -151,7 +163,28 @@ test_guard_remedy_stays_inside_home() {
   assert_contains "$out" "code-root $dir/home/data/backlog.md is not this home's $dir/relocated/backlog.md" \
     "a checkout home's own code-root copy beside its relocated data was not reported"
   assert_contains "$out" "move it aside" "a code-root copy inside this home lost its move-aside remedy"
-  pass "the code-root remedy moves only a file inside the home being bootstrapped"
+  pass "the code-root remedy never moves another live home's records"
+}
+
+# A genuine split layout: the code root is not a live home (no state/, not a
+# registered parent), so its copy is a true stray fork and must keep a
+# clearable move-aside remedy.
+test_guard_remedy_moves_stray_code_root_copy() {
+  local dir out remedy
+  dir=$(make_split guard-remedy-stray)
+  rm "$dir/code/data/backlog.md"
+  empty_backlog "$dir/code/data/backlog.md"
+  mkdir -p "$dir/parent/state"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$dir/parent" \
+    > "$dir/home/.fm-secondmate-parent"
+  out=$(bootstrap_backlog_lines "$dir/code" "$dir/home")
+  assert_contains "$out" "is not this home's $dir/home/data/backlog.md" \
+    "a stray code-root backlog was not reported"
+  remedy=${out##* - }
+  assert_contains "$remedy" "move it aside" "a stray code-root backlog lost its move-aside remedy"
+  assert_not_contains "$remedy" "leave the code-root file in place" \
+    "a stray code-root backlog was protected as another home's record"
+  pass "a stray code-root backlog outside any live home keeps its move-aside remedy"
 }
 
 test_guard_silent_for_single_home() {
@@ -297,7 +330,8 @@ test_guard_reports_regular_code_root_backlog
 test_guard_reports_foreign_link_and_archive
 test_guard_silent_for_single_home
 test_guard_silent_for_cross_home_checkout
-test_guard_remedy_stays_inside_home
+test_guard_remedy_protects_live_home_code_root
+test_guard_remedy_moves_stray_code_root_copy
 if [ "$HAVE_TASKS_AXI" = 1 ]; then
   test_bare_tasks_axi_fork_is_detected
   test_wrapper_writes_through_to_home
