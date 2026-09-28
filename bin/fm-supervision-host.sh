@@ -48,8 +48,10 @@
 #     that is unsafe or holds nothing for the branch) stay main's. That
 #     pass-through starts the successor watcher cycle and leaves it running
 #     before the close is printed, so supervision continues when the session
-#     drops the handoff. The watcher singleton lock makes the session's next
-#     arm attach to that cycle instead of starting a second one;
+#     drops the handoff. It confirms no handling handoff, so the recovery
+#     marker still reads downtime and the re-arm owner delivers the close to
+#     main. The watcher singleton lock makes the session's next arm attach to
+#     that cycle instead of starting a second one;
 #   - away (the record exists): every close goes to the engine.
 # Every turn that starts attended meets that rule again at its start, so a
 # close accepted away whose turn starts attended (the captain returned in
@@ -625,20 +627,15 @@ detach_successor() {
   SUCCESSOR_PID=
 }
 
-# Start the same successor a handled wake starts, confirm its handoff, and
-# leave it running. A failed start or handoff stops anything this call
-# started and returns 1; the caller still prints the close unchanged.
+# Start the same successor a handled wake starts and leave it running. It
+# confirms no handling handoff: main, not the engine, handles this close, and
+# the re-arm owner delivers it only while the recovery marker still reads
+# downtime (autoarm_commit in bin/fm-claude-stop-autoarm.sh). A failed start
+# returns 1; the caller still prints the close unchanged.
 leave_successor_for_main() {
   if ! start_successor "$CLOSED_ARM_PID"; then
     log_line "pass-through	successor-unverified	$(printf '%s\n' "$REASON" | head -n 1)"
     return 1
-  fi
-  if [ -n "$SUCCESSOR_GENERATION" ]; then
-    if ! "$SCRIPT_DIR/fm-watch-arm.sh" --handling-delivered "$SUCCESSOR_GENERATION" --watcher-pid "$SUCCESSOR_WATCHER" >/dev/null 2>&1; then
-      log_line "pass-through	handoff-unconfirmed	$(printf '%s\n' "$REASON" | head -n 1)"
-      retire_successor
-      return 1
-    fi
   fi
   detach_successor
 }
@@ -1064,6 +1061,13 @@ while :; do
     # The successor this turn already started and confirmed stays up. Retiring
     # it is what left no watcher after a close that became main-only.
     detach_successor
+    # Main handles this close after all, so hand back the downtime the handoff
+    # above consumed: the re-arm owner delivers the close only while the
+    # recovery marker reads downtime (leave_successor_for_main).
+    if [ -n "$SUCCESSOR_GENERATION" ] \
+      && ! fm_recovery_marker_publish "$STATE/.watcher-down" downtime >/dev/null 2>&1; then
+      log_line "pass-through	downtime-unrestored	$(printf '%s\n' "$REASON" | head -n 1)"
+    fi
     emit
     exit 0
   fi
