@@ -1209,6 +1209,7 @@ spawn_fresh_commit_rollback() {
   if fm_backlog_atomic_transition rollback "$STATE/$ID.meta" \
     "$FM_ROOT/bin/fm-busy-event.sh" "$STATE" "$ID" "${BUSY_GEN:-}"; then
     SPAWN_FRESH_COMMIT_PENDING=0
+    "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
     return 0
   fi
   echo "error: $FM_BACKLOG_TRANSITION_ERROR" >&2
@@ -5468,6 +5469,11 @@ if [ -n "$SPAWN_DEFERRED_SIGNAL" ]; then
 fi
 fm_lock_release "$SPAWN_META_LOCK"
 SPAWN_META_LOCK_HELD=0
+# The refresh before launch delivery ran while the record existed but its backlog
+# item was still Queued, so the ledger it published reads that live child as
+# unowned. Republish now that the In-flight commit is durable; no other trigger
+# is guaranteed to run soon in a home whose foreground turn is not supervising.
+"$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
 
 SPAWN_DELIVERY=
 [ -z "$MODE" ] || SPAWN_DELIVERY=" mode=$MODE yolo=$YOLO"

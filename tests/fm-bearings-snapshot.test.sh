@@ -2845,6 +2845,59 @@ EOF
   pass "mixed secondmate roles, partial state, and captain readiness project independently"
 }
 
+# A remote secondmate's Codex scout is deliberately unverifiable, and a worker
+# can be live a moment before its backlog row moves In flight. Neither may hide
+# the independent children that are provably working, and each cause must
+# stay reported instead of one masking the other.
+test_unknown_child_keeps_independent_live_children_visible() {
+  local home mate fakebin summary
+  home=$(make_home unknown-child-visibility)
+  mate="$TMP_ROOT/unknown-child-visibility-mate"
+  make_valid_secondmate_home visible "$mate"
+  mkdir -p "$mate/projects/owned-ship" "$mate/projects/unowned-ship" "$mate/projects/unverified-scout"
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+- [ ] owned-ship - Fix the review edges (repo: visible) (kind: ship)
+- [ ] unverified-scout - Analyse detection (repo: visible) (kind: scout)
+
+## Queued
+
+## Done
+EOF
+  fm_write_meta "$mate/state/owned-ship.meta" \
+    "window=firstmate:fm-owned-ship" "worktree=$mate/projects/owned-ship" "project=visible" \
+    "harness=claude" "kind=ship" "mode=direct-PR"
+  record_claude_state "$mate/state" owned-ship busy
+  fm_write_meta "$mate/state/unowned-ship.meta" \
+    "window=firstmate:fm-unowned-ship" "worktree=$mate/projects/unowned-ship" "project=visible" \
+    "harness=claude" "kind=ship" "mode=direct-PR"
+  record_claude_state "$mate/state" unowned-ship busy
+  fm_write_meta "$mate/state/unverified-scout.meta" \
+    "window=firstmate:dead-unverified-scout" "worktree=$mate/projects/unverified-scout" "project=visible" \
+    "harness=codex" "kind=scout" "mode=no-mistakes"
+
+  fakebin=$(make_fakebin "$home")
+  summary=$(PATH="$fakebin:$PATH" FM_HOME="$mate" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary) \
+    || fail "the home summary producer failed"
+  printf '%s' "$summary" | jq -e '
+    .valid == false
+    and .state == "unknown"
+    and .invalidity.kind == "unowned_current"
+    and .invalidity.ids == ["unowned-ship"]
+    and .invalidities == [{kind:"unowned_current",ids:["unowned-ship"]},
+                          {kind:"child_current_unavailable",ids:["unverified-scout"]}]
+    and (.reason | contains("child current state unavailable: unverified-scout"))
+    and (.reason | contains("unowned-ship=working"))
+    and ([.active_children[].id] | sort) == ["owned-ship","unowned-ship"]
+    and (.active_children[] | select(.id == "unowned-ship") | .owned == false)
+    and (.active_children[] | select(.id == "owned-ship") | has("owned") | not)
+    and .counts.active_children == 2
+    and (any(.endpoints[]; .id == "unverified-scout" and .state == "unknown"))
+  ' >/dev/null || fail "an unknown child hid or masked independent live children: $summary"
+  pass "an unavailable child state keeps independently live children and every invalidity cause visible"
+}
+
 test_main_captain_readiness_matches_secondmate_projection() {
   local home fakebin json
   home=$(make_home main-captain-readiness)
@@ -3397,6 +3450,7 @@ test_nameless_legacy_summary_uses_its_durable_identifier
 test_newest_filed_gates_are_selected_before_snapshot_bounds
 test_underway_and_gate_rows_carry_the_durable_name_and_filed_date
 test_mixed_secondmate_roles_partial_state_and_captain_readiness
+test_unknown_child_keeps_independent_live_children_visible
 test_main_captain_readiness_matches_secondmate_projection
 test_completed_scout_report_not_pending
 test_open_decision_surfaces_end_to_end

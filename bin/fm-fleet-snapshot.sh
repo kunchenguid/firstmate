@@ -90,6 +90,11 @@
 #     freshness is "cached" only for the cache source, and observed_at/age_seconds
 #     come from the selected summary's generation. Every successfully sampled home also carries
 #     reconcile_inventory independently of projection trust.
+#     A home summary reports its first invalidity in invalidity and every cause it
+#     detected, in the same order, in invalidities[] (kind and ids), so one cause
+#     never masks another. A working child with no in-flight backlog item is still
+#     live work: it appears in active_children with owned:false instead of being
+#     dropped, so an unavailable or contradicted sibling never hides it.
 #     Actionable captain holds appear in decisions_open; every captain hold remains
 #     in the bounded queued inventory with its structured classification metadata.
 #     Before that queued bound is applied, non-captain-actionable rows are selected
@@ -1057,7 +1062,15 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
             repo:(($work.repo // .project // null) | if . == null then null else trunc(120) end),
             name:(($work.title // null) | if . == null then null else trunc(70) end),
             source:.current_state.source,
-            doing:((.current_state.detail // "") | trunc(120))} ]) as $active_all
+            doing:((.current_state.detail // "") | trunc(120))} ]
+       + [ $tasks[]
+           | select(.kind != "secondmate" and .current_state.state == "working")
+           | select(.id as $id | [$owned_in_flight[].id] | index($id) | not)
+           | {id,kind,state:.current_state.state,
+              repo:((.project // null) | if . == null then null else trunc(120) end),
+              name:null,owned:false,
+              source:.current_state.source,
+              doing:((.current_state.detail // "") | trunc(120))} ]) as $active_all
     | ($captain_holds_all
        + ([ $tasks[] as $t | ($t.hints.open_decisions // [])[]
             | {id:$t.id,key,verb,summary:(.summary | trunc(160)),reason:null,source:"status"} ])) as $decisions_all
@@ -1081,13 +1094,16 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
        and ($orphan_in_flight | length) == 0
        and ($unowned_children | length) == 0
        and ($terminal_in_flight | length) == 0) as $valid
-    | (if ($strict_invalidities | length) > 0 then $strict_invalidities[0].reason
-       elif ($unknown_children | length) > 0 then
-         "child current state unavailable: " + ($unknown_children | map(.id) | join(", "))
+    | ($strict_invalidities
+       + [if ($unknown_children | length) > 0 then
+            {kind:"child_current_unavailable",ids:($unknown_children | map(.id)),
+             reason:("child current state unavailable: " + ($unknown_children | map(.id) | join(", ")))}
+          else empty end]) as $all_invalidities
+    | (if ($all_invalidities | length) > 0 then $all_invalidities | map(.reason) | join("; ")
        else null end) as $reason
-    | (if ($strict_invalidities | length) > 0 then $strict_invalidities[0] | del(.reason)
-       elif ($unknown_children | length) > 0 then {kind:"child_current_unavailable",ids:($unknown_children | map(.id))}
+    | (if ($all_invalidities | length) > 0 then $all_invalidities[0] | del(.reason)
        else {kind:null,ids:[]} end) as $invalidity
+    | ($all_invalidities | map(del(.reason))) as $invalidities
     | (if ($valid | not)
           and (($unknown_children | length) > 0
                or (["orphan_in_flight","unowned_current","terminal_in_flight"]
@@ -1107,6 +1123,7 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
         valid:$valid,
         reason:$reason,
         invalidity:$invalidity,
+        invalidities:$invalidities,
         state:$state,
         active_children:$active_all[:$child_n],
         decisions_open:$decisions_all[:$decisions_n],
@@ -1880,7 +1897,7 @@ secondmate_current_json() {  # <parent-tasks-json-file> <output-file>
         |
         {id:$id,home:$home,host:($host | if . == "" then null else . end),remote:$remote,registered:$registered,
          spawn_gen:($spawn_gen | if . == "" then null else . end),
-         current:{state:$state,reason:(if $summary_valid then null else "structured home state invalid: " + ($summary.reason // "unknown reason") end)},invalidity:$summary.invalidity,
+         current:{state:$state,reason:(if $summary_valid then null else "structured home state invalid: " + ($summary.reason // "unknown reason") end)},invalidity:$summary.invalidity,invalidities:($summary.invalidities // []),
          reconcile_inventory:$summary.invalidity,
          provenance:{selected:"structured-home",structured_home:$home,summary_source:$summary_source,summary_valid:$summary_valid,
            trust:(if $summary_valid then "complete" else "partial-structured" end),parent_event_role:"historical-only"},

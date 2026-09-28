@@ -788,6 +788,13 @@ test_dispatch_moves_the_item_in_flight_in_the_same_run() {
     "markdown dispatch did not pass the backlog file to show"
   [ "$(row_state "$case_dir" "$id")" = in_flight ] \
     || fail "spawn reported success with its backlog item still $(row_state "$case_dir" "$id")"
+  # The published ledger must describe the committed state: a summary computed
+  # between record publication and the In-flight commit reads this live child as
+  # unowned_current and stays that way until an unrelated refresh.
+  jq -e --arg id "$id" '
+    .valid == true and .invalidity.kind == null and any(.endpoints[]; .id == $id)
+  ' "$(home_of "$case_dir")/state/home-summary.json" >/dev/null \
+    || fail "spawn left a home summary that does not own $id: $(jq -c '{valid,reason,invalidity}' "$(home_of "$case_dir")/state/home-summary.json")"
   pass "dispatch publishes the record and moves the backlog item In flight in one run"
 }
 
@@ -1342,6 +1349,10 @@ test_dispatch_leaves_no_record_when_the_transition_fails() {
     "a failed backlog transition left the task's armed busy generation behind"
   [ "$(row_state "$case_dir" "$id")" = queued ] \
     || fail "a failed dispatch left the backlog item in $(row_state "$case_dir" "$id")"
+  if jq -e --arg id "$id" 'any(.endpoints[]?; .id == $id)' \
+    "$(home_of "$case_dir")/state/home-summary.json" >/dev/null 2>&1; then
+    fail "a rolled-back dispatch left $id in the published home summary"
+  fi
   pass "a failed backlog transition fails the dispatch loudly and leaves no record"
 }
 

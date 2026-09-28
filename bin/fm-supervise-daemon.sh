@@ -627,8 +627,24 @@ _seen_status_path() {  # <state> <task>
 # hiding earlier events and repeated event text from suppressing a new occurrence.
 # An absent, malformed, identity-mismatched, or legacy marker reads 0, so the
 # whole log is classified and uncertainty prefers a duplicate over event loss.
+#
+# A daemon with no marker at all for a task (a fresh away session, or the first
+# run after this marker family was introduced) starts from the offset the
+# primary session's presentation cursor already recorded for that same log
+# identity, instead of replaying every historical event the primary session has
+# already been shown as fresh escalations. An unreadable cursor, a changed log
+# identity, or no cursor row still reads 0, and a marker that exists but is
+# unusable keeps reading 0, so uncertainty still prefers a duplicate over loss.
 status_seen_offset() {  # <state> <task>
-  status_presentation_marker_offset "$(_seen_status_path "$1" "$2")" "$1/$2.status"
+  local marker offset
+  marker=$(_seen_status_path "$1" "$2")
+  if [ ! -e "$marker" ] && [ ! -L "$marker" ] \
+    && offset=$(status_presentation_cursor_offset "$1/$2.status" 2>/dev/null) \
+    && [ -n "$offset" ]; then
+    printf '%s' "$offset"
+    return 0
+  fi
+  status_presentation_marker_offset "$marker" "$1/$2.status"
 }
 
 # Commit <task>'s successfully classified endpoint, so the heartbeat catch-all
