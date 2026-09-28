@@ -667,8 +667,14 @@ fm_backend_send_text_submit herdr lab:w1:p1 next 1 .01 .01
     expect('unknown','canonical task path mismatch')
     reset(); wrong=copy.deepcopy(records);wrong[0]['payload']['session_id']='session-other';write(wrong)
     expect('unknown','session identity mismatch')
-    reset(); wrong=copy.deepcopy(records);wrong[0]['payload']['cli_version']='999.0.0';write(wrong)
-    expect('unknown','unverified version')
+    for compatible_version in ('0.158.0', '9999.0.0-future'):
+        reset(); compatible=copy.deepcopy(records);compatible[0]['payload']['cli_version']=compatible_version;write(compatible)
+        expect('busy','descriptive CLI version '+compatible_version+' does not gate admission')
+    for malformed_version in (None, '', {'unexpected':'shape'}):
+        reset(); malformed=copy.deepcopy(records);malformed[0]['payload']['cli_version']=malformed_version;write(malformed)
+        expect('unknown','malformed descriptive CLI version refuses identity')
+    reset(); malformed=copy.deepcopy(records);del malformed[0]['payload']['cli_version'];write(malformed)
+    expect('unknown','missing descriptive CLI version refuses identity')
     reset(); wrong=copy.deepcopy(records);wrong[2]['payload']['item']['content'][0]['text']='FIRSTMATE_BUSY_GENERATION=old';write(wrong)
     append(complete);expect('unknown','reused slot old launch generation')
     reset(); (state/'worker.busy-gen').write_text('replacement\n');expect('unknown','retired busy generation')

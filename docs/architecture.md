@@ -164,7 +164,7 @@ Every classification returns a verdict of busy, idle, unknown, or dead together 
 
 Pi reports its turn lifecycle through the Firstmate-owned extension's `agent_start` and `agent_settled`, confirmed by `ctx.isIdle()`.
 Model providers used through Pi inherit that lifecycle.
-Managed Codex and TraeX workers on Herdr use their bound structured transcript after structural process liveness is established; missing, unsupported, or unbound evidence remains unknown.
+Managed Codex and TraeX workers on Herdr use their bound structured transcript after structural process liveness is established; CLI version metadata is descriptive and never an admission gate, while missing, malformed, or unbound structural evidence remains unknown.
 Legacy TraeX tasks without transcript wiring retain Herdr's native busy-only fallback, while legacy Codex tasks remain `codex-unverified`.
 
 Missing, malformed, stale, untrusted, or unverified semantic state is unknown, never idle, and unknown is never promoted to busy either.

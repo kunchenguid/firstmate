@@ -163,10 +163,10 @@ Push-source passes polled `state/<id>.busy-state`; pull-source passes used the p
 | Harness | Version verified | Semantic source | Observed result |
 | --- | --- | --- | --- |
 | Pi | 0.82.0 | Extension `agent_start` / `agent_settled` with `ctx.isIdle()` | The spawn seed `busy source=fm-spawn`, then `busy source=pi-ext event=agent-start`, then `idle source=pi-ext event=agent-settled`; the turn-end marker was still touched. |
-| Codex | codex-cli 0.157.1 | Bound structured transcript | 2026-09-27 default interactive TUI: multiple exact in-turn input receipts preserved busy and then settled idle without invented root starts; the guard also retained lifecycle, failure, interrupt, process-exit, and endpoint-exit coverage. Local simulated provider; see the guard below. |
-| TraeX | 0.207.1 internal | Bound structured transcript | The same 2026-09-27 input-receipt and lifecycle guard passed; native Herdr unknown did not mask the transcript. |
+| Codex | codex-cli 0.158.0 | Bound structured transcript | 2026-09-29 default interactive TUI: multiple exact in-turn input receipts preserved busy and then settled idle without invented root starts; the guard also retained lifecycle, failure, interrupt, process-exit, and endpoint-exit coverage. Local simulated provider; see the guard below. |
+| TraeX | 0.207.1 internal | Bound structured transcript | The same 2026-09-29 input-receipt and lifecycle guard passed; native Herdr unknown did not mask the transcript. |
 
-The 2026-09-27 Codex 0.157.1 and TraeX 0.207.1 in-turn steering refresh, including the before/after consumption evidence and current guard, is recorded in [runtime backend verification](runtime-backends.md#in-turn-transcript-input-consumption).
+The 2026-09-29 Codex 0.158.0 and TraeX 0.207.1 in-turn steering refresh, including the before/after consumption evidence and current guard, is recorded in [runtime backend verification](runtime-backends.md#in-turn-transcript-input-consumption).
 
 The earlier Codex 0.145.0 probe on 2026-07-28 tried two push paths, both refused:
 
@@ -186,7 +186,7 @@ Current default-TUI refresh (Linux, named Herdr lab, private mount/PID/network n
 FM_BUSY_TRANSCRIPT_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-busy-transcript-live-e2e.test.sh
 ```
 
-The 2026-09-25 run on Herdr 0.8.0 passed all ten per-tool lifecycle assertions with Codex 0.156.1 and TraeX 0.207.1.
+The 2026-09-29 run on Herdr 0.8.0 passed all per-tool lifecycle and input-consumption assertions with Codex 0.158.0 and TraeX 0.207.1.
 The exact stable success lines were:
 
 ```text
@@ -205,7 +205,7 @@ ok - traex endpoint death
 The guard preserves the managed TUI flags and positional operational brief; it does not use `exec`, `--no-daemon`, a remote app-server, or shared daemon configuration.
 Provider responses and HTTP 401 are simulated; tool execution, interrupt keys, vendor transcript emission, process exit and classification run for real.
 This does not verify an authenticated provider's availability or the allocator that provisions a worktree.
-The exact binding, supported versions, record-size limit, missing-log behavior and conservative submission-fence rules belong to [`fm-busy-transcript.py`](../../bin/fm-busy-transcript.py).
+The exact binding, version-independent structural identity, record-size limit, missing-log behavior and conservative submission-fence rules belong to [`fm-busy-transcript.py`](../../bin/fm-busy-transcript.py).
 Manual input that bypasses Firstmate's send path has only the vendor log's observation timing; it has no Firstmate submission fence.
 The portable regressions also cover stale generations, child/mismatched/ambiguous sessions, queued submissions and missing, corrupt, truncated or replaced logs.
 
