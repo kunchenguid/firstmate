@@ -162,8 +162,11 @@
 # every later adoption of the copy refuse; teardown warns for each case in its
 # own terms, naming the copy and the store, and reports the handback as
 # incomplete rather than clean.
-# The copy itself is left to its creator; the landed-work
-# gates, process reaping, and record cleanup run exactly as for a pooled copy.
+# The copy itself is left to its creator, and so is anything running inside it:
+# teardown never reaps a process under an adopted copy, because sessions
+# sharing that checkout legitimately work there; a process still holding the
+# copy is named and left alone. This task's own tasktmp is still reaped, and
+# the landed-work gates and record cleanup run exactly as for a pooled copy.
 # Orca tasks use the same safety checks, then close the recorded terminal and
 # remove the recorded worktree through `orca worktree rm`; teardown never guesses
 # an Orca target from ambient CLI state.
@@ -2188,6 +2191,17 @@ reap_task_backend_process_group() {  # <label>
   fi
 }
 
+# An adopted copy is its creator's, so a process running in it is not this
+# task's to kill even when teardown cannot attribute it: name what is still
+# running there and leave it alone.
+report_adopted_worktree_processes() {  # <worktree>
+  local wt=$1
+  command -v lsof >/dev/null 2>&1 || return 0
+  task_pids_under_roots "$wt" || return 0
+  [ -n "$TASK_PIDS" ] || return 0
+  echo "teardown: leaving process(es) running under adopted worktree $wt for $ID untouched: $(printf '%s' "$TASK_PIDS" | tr '\n' ' ')" >&2
+}
+
 # Reap every process rooted (by cwd) under this task's own worktree or tasktmp
 # - both unique per task and never shared - before either is removed. TERM
 # first, then KILL after a short grace period for anything still alive; a
@@ -2501,7 +2515,7 @@ teardown_hand_back_adopted_worktree() {  # <worktree> <task-id> <state-dir> <rec
     case "$rc" in
       0) ;;
       3) echo "warning: adopted worktree $wt was restored to the wiring its creator handed over, but the preserve store at $store could not be removed; every later adoption of that copy refuses until it is" >&2 ;;
-      *) echo "warning: adopted worktree $wt was only partly restored to the wiring its creator handed over: some paths were put back or removed and others could not be, so that copy may now hold a mix of task $id's wiring and its creator's own files. The preserved originals are retained at $store; inspect both before that copy is used again" >&2 ;;
+      *) echo "warning: adopted worktree $wt was not fully restored to the wiring its creator handed over, so that copy may now hold a mix of task $id's wiring and its creator's own files. The preserved originals are retained at $store; inspect both before that copy is used again" >&2 ;;
     esac
   fi
   fm_adopted_worktree_owner_release "$wt" "$id" "$state"
@@ -3616,7 +3630,12 @@ fi
 # not by task-worktree cleanup.
 if [ "$KIND" != secondmate ] && teardown_owns_worktree; then
   conclude_task_no_mistakes_run "$WT"
-  reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
+  if [ "$WORKTREE_SOURCE" = adopted ]; then
+    report_adopted_worktree_processes "$WT"
+    reap_task_worktree_processes tasktmp "$TASK_TMP"
+  else
+    reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
+  fi
 elif [ "$KIND" != secondmate ]; then
   reap_task_worktree_processes tasktmp "$TASK_TMP"
 fi
@@ -3914,7 +3933,7 @@ elif [ "$WORKTREE_SOURCE" = adopted ] && [ "$KIND" != secondmate ]; then
   if [ "$TEARDOWN_ADOPTED_RESTORE_FAILED" = 1 ]; then
     echo "teardown $ID complete (window ${T:-none}; adopted worktree $WT was NOT cleanly handed back to its creator - see the warning above; the copy and its branch are untouched)"
   else
-    echo "teardown $ID complete (window ${T:-none}; adopted worktree $WT left in place for its creator)"
+    echo "teardown $ID complete (window ${T:-none}; adopted worktree $WT left in place for its creator, with any process still running in it untouched)"
   fi
 elif teardown_owns_worktree; then
   echo "teardown $ID complete (window ${T:-none}, worktree $WT)"

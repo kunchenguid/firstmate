@@ -1208,7 +1208,7 @@ test_adopted_worktree_teardown_warns_when_restore_fails() {
   chmod u+w "$case_dir/wt/.claude" "$settings"
 
   expect_code 0 "$rc" "adopted-restore-fails: teardown should still complete"$'\n'"$(cat "$case_dir/stderr")"
-  assert_contains "$(cat "$case_dir/stderr")" "adopted worktree $case_dir/wt was only partly restored" \
+  assert_contains "$(cat "$case_dir/stderr")" "adopted worktree $case_dir/wt was not fully restored" \
     "adopted-restore-fails: teardown reported success without warning that the restore failed"
   assert_not_contains "$(cat "$case_dir/stderr")" "nothing was removed from it" \
     "adopted-restore-fails: the warning claimed nothing was removed after a partial restore"
@@ -1390,7 +1390,7 @@ test_adopted_worktree_teardown_refuses_directory_wiring_path() {
   set -e
 
   expect_code 0 "$rc" "adopted-directory-wiring: teardown should still complete"$'\n'"$(cat "$case_dir/stderr")"
-  assert_contains "$(cat "$case_dir/stderr")" "adopted worktree $case_dir/wt was only partly restored" \
+  assert_contains "$(cat "$case_dir/stderr")" "adopted worktree $case_dir/wt was not fully restored" \
     "adopted-directory-wiring: teardown reported a clean handback over a wiring path it could not restore"
   [ ! -e "$settings/settings.local.json" ] \
     || fail "adopted-directory-wiring: the restore nested the creator's original inside the directory"
@@ -1401,6 +1401,38 @@ test_adopted_worktree_teardown_refuses_directory_wiring_path() {
   assert_not_contains "$(cat "$case_dir/stdout")" "left in place for its creator" \
     "adopted-directory-wiring: teardown still reported the copy as cleanly handed back"
   pass "an adopted teardown refuses a wiring path that became a directory instead of copying into it"
+}
+
+# Several sessions share the checkout an adopted copy lives in, so a process
+# running under that copy is not this task's to kill: teardown names it and
+# leaves it alone, unlike a pooled slot where anything left is a leak.
+test_adopted_worktree_teardown_leaves_processes_in_the_copy_alone() {
+  local case_dir rc pid
+  case_dir=$(make_case adopted-live-process)
+  write_adopted_meta "$case_dir" claude
+  mkdir -p "$(git -C "$case_dir/wt" rev-parse --absolute-git-dir)/fm-adopted-wiring"
+
+  ( cd "$case_dir/wt" && exec sleep 300 ) &
+  pid=$!
+  disown
+  sleep 0.3
+  kill -0 "$pid" 2>/dev/null || fail "adopted-live-process: setup sleeper did not start"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  if ! kill -0 "$pid" 2>/dev/null; then
+    fail "adopted-live-process: teardown killed a process running in its creator's copy"
+  fi
+  kill -KILL "$pid" 2>/dev/null || true
+  expect_code 0 "$rc" "adopted-live-process: teardown should succeed"$'\n'"$(cat "$case_dir/stderr")"
+  assert_not_contains "$(cat "$case_dir/stderr")" "reaping leaked worktree process" \
+    "adopted-live-process: teardown reaped processes under a copy it hands back"
+  assert_contains "$(cat "$case_dir/stderr")" "leaving process(es) running under adopted worktree $case_dir/wt" \
+    "adopted-live-process: teardown said nothing about the process it left running"
+  pass "an adopted teardown names the processes still running in the copy and leaves them alone"
 }
 
 # The store left behind makes every later adoption of the copy refuse, so a
@@ -4607,6 +4639,7 @@ test_adopted_worktree_teardown_reports_unresolvable_claim
 test_adopted_worktree_teardown_keeps_unarmed_creator_wiring
 test_adopted_worktree_teardown_replaces_symlinked_wiring
 test_adopted_worktree_teardown_refuses_directory_wiring_path
+test_adopted_worktree_teardown_leaves_processes_in_the_copy_alone
 test_adopted_worktree_teardown_reports_unremovable_store
 test_content_fallback_refreshes_stale_origin_ref
 test_dirty_worktree_refuses
