@@ -3974,12 +3974,13 @@ while :; do
     triage_log "inactive-outcome reconciliation unavailable"
   fi
 
-  # Fleet seat grants for remote secondmates (bin/fm-fleet-seats.sh owns the
-  # contract). Mechanical and silent: only the fleet root serves, only with
-  # pools configured, at most every FM_FLEET_SEATS_SERVE_INTERVAL seconds, and
-  # each remote call is bounded inside the script.
-  if [ -e "$CONFIG/fleet-seats" ] \
-    && [ "$(age_of "$STATE/.fleet-seats-served")" -ge "${FM_FLEET_SEATS_SERVE_INTERVAL:-30}" ]; then
+  # Fleet seat policy and grants for remote secondmates (bin/fm-fleet-seats.sh
+  # owns the contract). Mechanical and silent: only the fleet root serves, only
+  # while pools are configured or were before (so a removal reaches every
+  # remote), at most every 30 seconds, and each remote call is bounded inside
+  # the script.
+  if { [ -e "$CONFIG/fleet-seats" ] || [ -d "$STATE/fleet-seats" ]; } \
+    && [ "$(age_of "$STATE/.fleet-seats-served")" -ge 30 ]; then
     touch "$STATE/.fleet-seats-served" 2>/dev/null || true
     if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
       "$SCRIPT_DIR/fm-fleet-seats.sh" serve-remotes >/dev/null 2>&1; then

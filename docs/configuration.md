@@ -2080,56 +2080,57 @@ The live rule-match evidence is recorded in [`verification/dispatch-resolve.md`]
 
 ## Fleet seat pools (config/fleet-seats)
 
-`config/fleet-seats` is an optional local, gitignored JSON file in the primary home that caps how many task workers may run at once on a shared model route across the whole fleet, rather than per home.
-Without it, no spawn is capped.
+`config/fleet-seats` is an optional local, gitignored JSON file in the primary home that caps how many agents may be active at once on a shared model endpoint across the whole fleet, rather than per home.
+Without it, nothing is capped and every spawn behaves as before.
 [`bin/fm-fleet-seats.sh`](../bin/fm-fleet-seats.sh) owns the accounting mechanics and exit codes; this section owns the operator contract.
 
 ```json
 {
   "pools": [
-    { "name": "john-qwen", "capacity": 6, "models": ["john-lan/qwen3.8-flash-next", "john-remote/qwen3.8-flash-next"] }
-  ]
+    { "name": "local-endpoint", "capacity": 4, "models": ["provider-a/model-x", "provider-b/model-x"] }
+  ],
+  "primary_model": "provider-a/model-x"
 }
 ```
 
 | Field | Requirement |
 | --- | --- |
-| `name` | Required, unique, letters, digits, `.`, `_`, or `-`. |
-| `capacity` | Required whole number of seats, `0` or more. |
-| `models` | Required non-empty list of exact `--model` strings; one model belongs to at most one pool. |
+| `pools[].name` | Required, unique, letters, digits, `.`, `_`, or `-`. |
+| `pools[].capacity` | Required whole number of seats, `0` or more. |
+| `pools[].models` | Required non-empty list of exact `--model` strings; one model belongs to at most one pool. |
+| `primary_model` | Optional exact model the primary supervisor runs on; declare it when the primary itself uses a pooled model. |
 
-List every provider spelling that reaches the same endpoint in one pool, because a pool matches the exact model string a spawn passes.
+List every provider spelling that reaches the same endpoint in one pool, because a pool matches the exact model string a launch passes.
+The pool names, capacities, and models are the operator's own choice; nothing is built in.
 
 **What a seat is**
 
-- A seat is one active agent slot: a ship or scout whose task record names a pooled model.
-- A seat is not an inference request, so the endpoint's own request concurrency is a separate limit this file does not measure.
-- A worker holds its seat from spawn until cleanup removes its task record, including while it waits for review or merge.
-- A relaunch onto a model outside the pool frees the seat, and a relaunch on the same route keeps it even when the pool is full.
-- A persistent secondmate agent is a home, not a task worker, so it never holds a seat.
-- A spawn without an explicit `--model` records the harness default and is not matched to a pool, so pooled routes must pass the model explicitly.
+- A seat is one active agent slot, never an inference request, so the endpoint's own request concurrency is a separate limit this file does not measure.
+- A ship or scout on a pooled model holds a seat from spawn until cleanup removes its task record, including while it waits for review or merge; a relaunch onto another model frees it, and a relaunch on the same route keeps it even when the pool is full.
+- A secondmate supervisor on a pooled model holds a seat unless its semantic busy record proves it idle; busy, unknown, or unreadable state counts, and a remote secondmate's state is never visible to the primary, so it always counts.
+- The primary supervisor holds a seat while its session is live, when `primary_model` names a pooled model; no primary busy record exists, so a live primary is indeterminate and counts.
+- While any pool is configured, a launch on `pi`, `pi-signed`, `omp`, or `opencode` must pass an explicit `--model`, because that harness's own default could be a pooled model nothing counted.
 
 **Which homes share a pool**
 
-- The primary home and every local secondmate whose parent binding leads to it share the primary's pools, capacity, and one lock.
-- The count includes every pooled task record in the primary and in each local secondmate registered in `data/secondmates.md`, so workers launched before the file existed are counted.
-- A remote secondmate shares the same capacity through the existing primary-to-remote transport: its spawn files a seat request in its own home and waits, and the primary's watcher answers every remote's requests about every 30 seconds while holding the fleet lock.
-- The primary counts each remote's seats from that remote's last answer, so a remote the primary cannot currently reach keeps its seats counted rather than freeing them.
-- A remote request the primary does not answer within 90 seconds is withdrawn and refused, so a remote home never launches a pooled worker the primary has not counted.
+- The primary home and every local secondmate whose parent binding leads to it share the primary's pools and one lock, so simultaneous launches cannot both take the last seat.
+- The count includes every pooled agent recorded in the primary and in each local secondmate registered in `data/secondmates.md`, so agents launched before the file existed are counted.
+- A remote secondmate shares the same capacity through the existing primary-to-remote transport: the primary's watcher delivers the current pool declaration to each remote about every 30 seconds while holding the fleet lock, and a remote launch files a seat request in its own home and waits for that answer.
+- The primary grants no pooled seat while any registered remote has not confirmed the current declaration, and it counts each remote's seats from that remote's last answer, so an unreachable remote keeps its seats counted rather than freeing them.
+- A remote request the primary does not answer within 90 seconds is withdrawn and refused, and removing this file clears every remote on the next delivery.
 
 **Refusals**
 
 - `fm-spawn.sh` reserves the seat before any endpoint, worktree, or record exists, so a refusal costs nothing to unwind.
 - A full pool refuses with the current holders listed.
-- An unreachable, unreadable, locked, or malformed authority also refuses, because an uncounted seat is never treated as free.
-- Neither refusal changes the route: firstmate picks the overflow route from `config/crew-dispatch.json` at its own model and effort, or holds the task.
-- A reservation left by a spawn that died before publishing its record is reclaimed at the next reservation; a live task record is never reclaimed.
-
-Run `bin/fm-fleet-seats.sh status` from any local home to see each pool's capacity, used and free seats, and holders before choosing a pooled route at intake.
+- An unreachable, unconfirmed, unreadable, locked, or malformed authority also refuses, including an unparseable secondmate registry record, because an uncounted seat is never treated as free.
+- A running agent, including a primary that starts while the pool is full, is never refused or preempted; new pooled launches refuse until the count is back under capacity.
+- No refusal changes the route: firstmate picks the overflow route from `config/crew-dispatch.json` at its own model and effort, or holds the task.
+- A reservation left by a launch that died before publishing its record is reclaimed at the next reservation; a live task record is never reclaimed.
 
 **Inheritance**
 
-Secondmate homes inherit this file from the primary so a remote home knows which models need a seat; capacity always comes from the primary's own copy.
+Secondmate homes inherit this file from the primary; a remote home's inherited copy covers only the time before the primary's first delivery, and capacity always comes from the primary.
 
 ## Toolchain
 

@@ -1384,6 +1384,15 @@ spawn_remote_secondmate() {
       return 1
     fi
   fi
+  # A remote secondmate supervisor on a pooled model takes its fleet seat
+  # before the host is touched (bin/fm-fleet-seats.sh owns the contract).
+  if ! FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG FM_DATA_OVERRIDE=$DATA \
+    "$SCRIPT_DIR/fm-fleet-seats.sh" reserve "$id" --harness "$harness" --model "${model#-}" --holder-pid "$$"; then
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: spawn refused - remote secondmate $id has no fleet seat for model ${model#-} (see the fleet-seats line above)" >&2
+    return 1
+  fi
   # Gate the host before anything is published or transferred, so a host that
   # cannot hold a durable Herdr endpoint refuses here rather than half-way
   # through a launch. This is also the readiness gate every liveness relaunch
@@ -3314,19 +3323,17 @@ if [ -n "$WORKER_ACCOUNT" ] && [ "$HARNESS" = claude ]; then
   fi
 fi
 
-# Fleet seat pool (bin/fm-fleet-seats.sh owns the contract): a ship or scout on
-# a pooled model reserves its fleet-wide seat before any endpoint, worktree, or
-# record exists, so a full pool or an unreachable authority refuses at no
-# unwind cost. This process is the reservation's holder until the published
-# task record takes over, and a relaunch on the same route keeps its seat. A
-# secondmate is a persistent home, not a task worker, and holds no seat.
-if [ "$KIND" != secondmate ]; then
-  FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG FM_DATA_OVERRIDE=$DATA \
-    "$SCRIPT_DIR/fm-fleet-seats.sh" reserve "$ID" --model "${MODEL:-default}" --holder-pid "$$" || {
-    echo "error: spawn refused - task $ID has no fleet seat for model ${MODEL:-default} (see the fleet-seats line above)" >&2
-    exit 1
-  }
-fi
+# Fleet seat pool (bin/fm-fleet-seats.sh owns the contract): a ship, scout, or
+# local secondmate supervisor on a pooled model reserves its fleet-wide seat
+# before any endpoint, worktree, or record exists, so a full pool or an
+# unreachable authority refuses at no unwind cost. This process is the
+# reservation's holder until the published task record takes over, and a
+# relaunch on the same route keeps its seat.
+FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG FM_DATA_OVERRIDE=$DATA \
+  "$SCRIPT_DIR/fm-fleet-seats.sh" reserve "$ID" --harness "$HARNESS" --model "${MODEL:-default}" --holder-pid "$$" || {
+  echo "error: spawn refused - $ID has no fleet seat for model ${MODEL:-default} (see the fleet-seats line above)" >&2
+  exit 1
+}
 
 secondmate_registry_value() {
   secondmate_registry_field "$DATA/secondmates.md" "$1" "$2"
