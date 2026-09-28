@@ -414,7 +414,9 @@ test_branch_noop_leaves_handed_note_to_the_successor() {
   wait_for_exit "$child" 50 \
     || fail "a handling successor kept blocking on the note the second no-op left: $(cat "$out")"
   grep -Fx "check: undelivered queued wake: $later" "$out" >/dev/null \
-    || fail "a second branch no-op handed an already-announced note to main again: $(cat "$out")"
+    || fail "a second branch no-op did not surface only the later note: $(cat "$out")"
+  grep -F "$note" "$out" >/dev/null \
+    && fail "a second branch no-op handed an already-announced note to main again: $(cat "$out")"
 
   foreign_watch_bg "$dir" "$out" 1
   child=$!
