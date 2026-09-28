@@ -30,9 +30,10 @@
 // Supervision notes, whether Calm is on or off, as Pi shows them regardless of Calm: a
 // slow timer follows the outcome store's display tail copy and the supervision host's
 // latch, and `$.ui.log` appends one dim line per new outcome or latch change, never
-// sent to the model. `session.start` replays the unread and unprocessed outcomes this
-// session has not already shown. The mod only reads the Firstmate home: the drain
-// remains the one presenter that marks outcomes read.
+// sent to the model. The first tail copy a session sees, at `session.start` or later,
+// replays the unread and unprocessed outcomes this session has not already shown. The
+// mod only reads the Firstmate home: the drain remains the one presenter that marks
+// outcomes read.
 // ../lib/fm-branch-notes.ts owns every line and which rows are due.
 //
 // Loading is lazy and cached within a session: a resumed transcript or a hot reload can
@@ -106,12 +107,11 @@ const BRANCH_NOTES_POLL_MS = 3000;
 const BRANCH_NOTES_SHOWN_KEY = "supervision-notes-shown-through";
 // What the notes have shown in this session; each `session.start` replaces it.
 type NotesState = {
-  tailPath: string;
-  healthPath: string;
+  state: string;
   tailStamp: string | undefined;
   healthStamp: string | undefined;
   lastSeen: number | undefined;
-  sinceEpoch: number;
+  shown: number;
   health: HostHealth | undefined;
   sessionId: string | undefined;
   remembered: number | undefined;
@@ -261,33 +261,50 @@ async function startNotes($: EngineInterface): Promise<void> {
     },
     $.plugin.root,
   );
-  const tailPath = `${state}/.branch-outcomes-tail.jsonl`;
-  const healthPath = `${state}/.supervision-host-health`;
-  const tail = await readIfChanged($, tailPath, undefined);
-  const rows = parseOutcomeTail(tail?.text);
-  const cursor = parseOutcomeMarker(await readText($, `${state}/.branch-outcomes-cursor`));
-  const processed = parseOutcomeMarker(await readText($, `${state}/.branch-outcomes-processed`));
   const sessionId = await $.session.id().catch(() => undefined);
-  const shown = sessionId === undefined ? 0 : sessionShownThrough(await readStored($), sessionId);
-  for (const line of replayOutcomeNotes(rows, cursor, processed, shown)) $.ui.log(line);
-  const health = await readIfChanged($, healthPath, undefined);
-  notes = {
-    tailPath,
-    healthPath,
-    tailStamp: tail?.stamp,
+  const health = await readIfChanged($, `${state}/.supervision-host-health`, undefined);
+  const current: NotesState = {
+    state,
+    tailStamp: undefined,
     healthStamp: health?.stamp,
-    lastSeen: rows[rows.length - 1]?.seq,
-    sinceEpoch: Math.floor((await $.clock.now()) / 1000),
+    lastSeen: undefined,
+    shown: sessionId === undefined ? 0 : sessionShownThrough(await readStored($), sessionId),
     health: parseHostHealth(health?.text),
     sessionId,
     remembered: undefined,
   };
-  await rememberShown($, notes);
+  await followTail($, current);
+  notes = current;
   if (notesTimer === undefined) {
     notesTimer = $.clock.every(BRANCH_NOTES_POLL_MS, () => {
       void pollNotes($);
     });
   }
+}
+
+/**
+ * A line per outcome the tail copy gained. The first tail this session sees is replayed
+ * against the store's read cursor and processed marker, whether it existed at session
+ * start or appeared later, so a read routine or processed captain row is never shown.
+ */
+async function followTail($: EngineInterface, current: NotesState): Promise<void> {
+  const tail = await readIfChanged($, `${current.state}/.branch-outcomes-tail.jsonl`, current.tailStamp);
+  if (tail === undefined) return;
+  current.tailStamp = tail.stamp;
+  const rows = parseOutcomeTail(tail.text);
+  let lines: string[];
+  if (current.lastSeen === undefined) {
+    const cursor = parseOutcomeMarker(await readText($, `${current.state}/.branch-outcomes-cursor`));
+    const processed = parseOutcomeMarker(await readText($, `${current.state}/.branch-outcomes-processed`));
+    lines = replayOutcomeNotes(rows, cursor, processed, current.shown);
+    current.lastSeen = rows[rows.length - 1]?.seq;
+  } else {
+    const fresh = newOutcomeNotes(rows, current.lastSeen);
+    lines = fresh.lines;
+    current.lastSeen = fresh.lastSeen;
+  }
+  for (const line of lines) $.ui.log(line);
+  await rememberShown($, current);
 }
 
 async function readStored($: EngineInterface): Promise<unknown> {
@@ -318,15 +335,8 @@ async function pollNotes($: EngineInterface): Promise<void> {
   if (current === undefined || notesPolling) return;
   notesPolling = true;
   try {
-    const tail = await readIfChanged($, current.tailPath, current.tailStamp);
-    if (tail !== undefined) {
-      current.tailStamp = tail.stamp;
-      const fresh = newOutcomeNotes(parseOutcomeTail(tail.text), current.lastSeen, current.sinceEpoch);
-      current.lastSeen = fresh.lastSeen;
-      for (const line of fresh.lines) $.ui.log(line);
-      await rememberShown($, current);
-    }
-    const health = await readIfChanged($, current.healthPath, current.healthStamp);
+    await followTail($, current);
+    const health = await readIfChanged($, `${current.state}/.supervision-host-health`, current.healthStamp);
     if (health !== undefined) {
       current.healthStamp = health.stamp;
       const next = parseHostHealth(health.text);

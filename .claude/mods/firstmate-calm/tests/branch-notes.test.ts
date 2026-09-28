@@ -82,13 +82,40 @@ describe("supervision notes", () => {
     expect(journal.logs).toHaveLength(2);
   });
 
-  test("a tail copy that first appears after session start shows only rows recorded since then", async ($, on) => {
+  test("a tail copy that first appears after session start replays against the markers, even within the same second", async ($, on) => {
     const { clock, files, journal } = world(on);
-    await clock.set(1_000_000);
+    await clock.set(100_000);
+    files.set(CURSOR, "5\n");
+    files.set(PROCESSED, "1\n");
     await $.session.start(sessionStart);
-    files.set(TAIL, tail([...history, { seq: 6, task: "fm-new", verdict: "captain", summary: "fresh", epoch: 1_000 }]));
+    expect(journal.logs).toEqual([]);
+    // A drain seeds the copy, or an append in the session's first second creates it, with every earlier row.
+    files.set(TAIL, tail([...history, { seq: 6, task: "fm-new", verdict: "routine", summary: "fresh" }]));
     await clock.advance(POLL);
-    expect(journal.logs).toEqual(["⚓ [seq 6] fm-new: fresh"]);
+    expect(journal.logs).toEqual(["⚓ [seq 3] fm-b: decision waiting", "⛵ fm-new: fresh"]);
+    await clock.advance(POLL);
+    expect(journal.logs).toHaveLength(2);
+  });
+
+  test("rows that arrive faster than the tail copy holds are counted in one line, not dropped silently", async ($, on) => {
+    const { clock, files, journal } = world(on);
+    files.set(TAIL, tail(history));
+    files.set(CURSOR, "5\n");
+    files.set(PROCESSED, "3\n");
+    await $.session.start(sessionStart);
+    files.set(
+      TAIL,
+      tail([
+        { seq: 9, task: "fm-i", verdict: "routine", summary: "kept" },
+        { seq: 10, task: "fm-j", verdict: "captain", summary: "newest" },
+      ]),
+    );
+    await clock.advance(POLL);
+    expect(journal.logs).toEqual([
+      "⛵ 3 earlier supervision outcomes not shown; bin/fm-branch-outcome.sh list shows them",
+      "⛵ fm-i: kept",
+      "⚓ [seq 10] fm-j: newest",
+    ]);
   });
 
   test("a latch trip and its recovery each write Pi's health note, and a new session key alone writes none", async ($, on) => {

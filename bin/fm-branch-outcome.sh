@@ -62,8 +62,9 @@
 #     append. It is a read-only display source for readers that cannot read the
 #     unbounded store (the Claude Code Calm mod's supervision notes, whose file
 #     read rejects over 4 MiB); it is never authoritative, and a failed refresh
-#     leaves the stored outcome and its delivery untouched. It first appears
-#     with the next append.
+#     leaves the stored outcome and its delivery untouched. present seeds it
+#     from the store when it is absent, so a home whose store predates it
+#     gains one at its next drain.
 #   - Every mutation runs under $STATE/.branch-outcomes.lock so the branch
 #     extension and a concurrent session-start replay cannot interleave.
 #   - The store is written BEFORE the outcome is delivered to main
@@ -92,11 +93,11 @@
 #     "BRANCH OUTCOMES", docs/supervision-host.md "Captain outcomes"): under
 #     the lock, print every unread record and every unprocessed captain record
 #     (JSONL, ascending seq, each with an added "unread" boolean, and each
-#     captain record also with "recordedAgo"). It moves nothing: off Pi that
-#     drain presentation is what the visible entry is, so the drain runs
-#     mark-read once it has presented the rows; it is the only reader that
-#     advances the cursor there. Prints nothing when nothing is unread or
-#     unprocessed.
+#     captain record also with "recordedAgo"). It moves nothing and only
+#     seeds an absent display tail copy: off Pi that drain presentation is
+#     what the visible entry is, so the drain runs mark-read once it has
+#     presented the rows; it is the only reader that advances the cursor
+#     there. Prints nothing when nothing is unread or unprocessed.
 #     "recordedAgo" is how long before this read the row was appended, as
 #     whole minutes under an hour, whole hours under two days, else whole days
 #     (for example "0m", "5h", "6d"; a future epoch reads "0m"). It is the one
@@ -590,6 +591,9 @@ case "$CMD" in
       fm_lock_release "$LOCK"
       echo "error: refusing presentation because the outcome cursor or processed marker is out of order" >&2
       exit 1
+    fi
+    if [ -s "$STORE" ] && [ ! -e "$OUTCOME_TAIL" ] && ! write_outcome_tail; then
+      echo "warning: the display tail copy could not be seeded from the outcome store" >&2
     fi
     if [ -s "$STORE" ] && ! jq -c --argjson cursor "$CURSOR_SEQ" --argjson processed "$PROCESSED_SEQ" \
         --argjson now "$(date +%s)" "$RECORDED_AGO_JQ"'

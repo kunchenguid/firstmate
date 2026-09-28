@@ -236,6 +236,8 @@ Each note is appended to the transcript as its own system-notice row, which Clau
 Silent routine outcomes show nothing.
 The mod checks the outcome store's display tail copy and the host's latch file every 3 seconds, so a note can land a few seconds after its outcome.
 At each session start it first replays every captain outcome main has not acknowledged and every unread routine note, the newest 20 with a count of any older ones.
+A home whose outcome store predates that tail copy gains one at its next drain, and the first tail copy a session sees is replayed the same way whenever it appears.
+If more outcomes arrive between two checks than the tail copy holds, one line counts the ones not shown.
 Claude Code keeps each note in the session as a display-only entry and restores it on `claude --continue`, so the mod remembers in its own plugin store how far each session has followed the outcomes, and a resumed session replays only outcomes it has not shown.
 The mod only reads these files: the drain remains the only presenter that marks outcomes read or processed.
 Only a home that runs the supervision host has outcomes to show.

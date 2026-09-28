@@ -326,6 +326,10 @@ test_branch_notes_over_the_store_owner() {
   outcome mark-read --through 4
   outcome mark-processed --through 4
   outcome append --task fm-e --verdict routine --summary 'reconciled the backlog'
+  # A home whose store predates the tail copy gains it at its next drain presentation.
+  rm -f "$state/.branch-outcomes-tail.jsonl"
+  outcome present
+  [ -s "$state/.branch-outcomes-tail.jsonl" ] || fail "the drain presentation did not seed the display tail copy"
   cat >"$TMP_ROOT/notes.mjs" <<'JS'
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
@@ -360,11 +364,18 @@ const replay = notes.replayOutcomeNotes(many, 0, 0);
 same(replay.length, 21, "replay bound");
 same(replay[0], "⛵ 5 earlier supervision notes not replayed; bin/fm-branch-outcome.sh list shows them", "omitted count");
 same(replay[1], "⛵ t6: s", "the newest rows are kept");
-same(notes.newOutcomeNotes(rows, 4, 0), { lines: ["⛵ fm-e: reconciled the backlog"], lastSeen: 5 }, "rows above the anchor");
-same(notes.newOutcomeNotes(rows, 5, 0), { lines: [], lastSeen: 5 }, "nothing new");
-same(notes.newOutcomeNotes(rows.slice(0, 2), 5, 0), { lines: [], lastSeen: 2 }, "a replaced store re-anchors without replay");
-same(notes.newOutcomeNotes([{ ...rows[0], epoch: 50 }, { ...rows[4], epoch: 200 }], undefined, 100).lines,
-  ["⛵ fm-e: reconciled the backlog"], "with no anchor, rows recorded since the session started");
+same(notes.newOutcomeNotes(rows, 4), { lines: ["⛵ fm-e: reconciled the backlog"], lastSeen: 5 }, "rows above the anchor");
+same(notes.newOutcomeNotes(rows, 5), { lines: [], lastSeen: 5 }, "nothing new");
+same(notes.newOutcomeNotes(rows.slice(0, 2), 5), { lines: [], lastSeen: 2 }, "a replaced store re-anchors without replay");
+same(notes.newOutcomeNotes(rows.slice(2), 1), {
+  lines: [
+    "⛵ 1 earlier supervision outcome not shown; bin/fm-branch-outcome.sh list shows them",
+    "⚓ [seq 3] fm-c: PR https://example.test/pr/3 green merge?",
+    "⚓ [seq 4] fm-d: decision answered",
+    "⛵ fm-e: reconciled the backlog",
+  ],
+  lastSeen: 5,
+}, "rows that left the tail before a poll are counted, not dropped silently");
 same(notes.replayOutcomeNotes(rows, cursor, 0, 3), ["⚓ [seq 4] fm-d: decision answered", "⛵ fm-e: reconciled the backlog"],
   "rows this session already showed are not replayed on resume");
 same(notes.replayOutcomeNotes(rows, cursor, 0, 99).length, 3, "a shown sequence past the tail is a replaced store");

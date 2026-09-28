@@ -108,20 +108,22 @@ export function replayOutcomeNotes(
 }
 
 /**
- * The lines for rows appended since `lastSeen`, and the new last seen sequence. With no
- * anchor yet (the tail copy did not exist at session start), rows recorded from
- * `sinceEpoch` on are the new ones. A tail that ends below the anchor is a replaced
- * store: re-anchor there without replaying it.
+ * The lines for rows appended since `lastSeen`, and the new last seen sequence. Rows that
+ * arrived faster than the tail copy holds are counted in one line rather than dropped
+ * silently. A tail that ends below the anchor is a replaced store: re-anchor there
+ * without replaying it.
  */
-export function newOutcomeNotes(
-  rows: readonly OutcomeRow[],
-  lastSeen: number | undefined,
-  sinceEpoch: number,
-): { lines: string[]; lastSeen: number | undefined } {
+export function newOutcomeNotes(rows: readonly OutcomeRow[], lastSeen: number): { lines: string[]; lastSeen: number } {
   const last = rows.length === 0 ? lastSeen : rows[rows.length - 1]!.seq;
-  if (lastSeen !== undefined && last !== undefined && last < lastSeen) return { lines: [], lastSeen: last };
-  const fresh = rows.filter((row) => (lastSeen === undefined ? row.epoch >= sinceEpoch : row.seq > lastSeen));
+  if (last < lastSeen) return { lines: [], lastSeen: last };
+  const fresh = rows.filter((row) => row.seq > lastSeen);
   const lines = fresh.map(outcomeNoteLine).filter((line): line is string => line !== undefined);
+  const missed = (fresh[0]?.seq ?? lastSeen + 1) - lastSeen - 1;
+  if (missed > 0) {
+    lines.unshift(
+      `${BRANCH_NOTE_BOAT} ${missed} earlier supervision ${missed === 1 ? "outcome" : "outcomes"} not shown; bin/fm-branch-outcome.sh list shows them`,
+    );
+  }
   return { lines, lastSeen: last };
 }
 

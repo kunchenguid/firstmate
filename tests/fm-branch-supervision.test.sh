@@ -163,6 +163,31 @@ test_outcome_append_keeps_a_bounded_display_tail() {
   pass "outcome append refreshes a bounded, verbatim display tail of the newest rows without moving the cursor"
 }
 
+test_outcome_present_seeds_an_absent_display_tail() {
+  local home store tail out
+  home="$TMP_ROOT/tail-seed-home"
+  mkdir -p "$home/state"
+  store="$home/state/branch-outcomes.jsonl"
+  tail="$home/state/.branch-outcomes-tail.jsonl"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" present >/dev/null || fail "present failed on an empty home"
+  [ ! -e "$tail" ] || fail "present seeded a display tail from an absent store"
+
+  jq -nc 'range(1; 206) | {seq: ., epoch: 100, task: "task-\(.)", wake: "", verdict: (if . == 204 then "captain" else "routine" end), summary: "row \(.)", silent: false}' \
+    > "$store"
+  printf '205\n' > "$home/state/.branch-outcomes-cursor"
+  printf '203\n' > "$home/state/.branch-outcomes-processed"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" present) || fail "present failed on a store that predates the tail"
+  [ "$(printf '%s\n' "$out" | jq -r .seq)" = 204 ] || fail "seeding changed what present prints: $out"
+  [ "$(cat "$tail")" = "$(tail -n 200 "$store")" ] || fail "present did not seed the display tail with the store's newest rows"
+  [ "$(cat "$home/state/.branch-outcomes-cursor")" = 205 ] || fail "seeding the display tail moved the read cursor"
+  [ "$(cat "$home/state/.branch-outcomes-processed")" = 203 ] || fail "seeding the display tail moved the processed marker"
+
+  printf 'kept\n' > "$tail"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" present >/dev/null || fail "present failed with a display tail"
+  [ "$(cat "$tail")" = kept ] || fail "present rewrote an existing display tail"
+  pass "outcome present seeds an absent display tail from the store's newest rows without moving a marker, and leaves an existing one to append"
+}
+
 test_outcome_startup_replay_preserves_silence() {
   local home replay out status store
   home="$TMP_ROOT/store-silent-home"
@@ -1399,6 +1424,7 @@ WRAPPER
 test_branch_prompt_is_byte_stable_and_above_cache_floor
 test_outcome_store_is_append_only_with_cursor_reads
 test_outcome_append_keeps_a_bounded_display_tail
+test_outcome_present_seeds_an_absent_display_tail
 test_outcome_startup_replay_preserves_silence
 test_outcome_startup_replay_stops_at_captain_barrier
 test_outcome_cursor_corruption_fails_closed
