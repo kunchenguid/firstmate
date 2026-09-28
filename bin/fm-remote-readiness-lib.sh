@@ -25,13 +25,13 @@
 # FM_REMOTE_READINESS_OUT always holds the output of the last run, which carries
 # the check lines, the remaining human: gaps, and their exact operator actions.
 
+# Consumed by the sourcing caller, so every assignment reads as unused here.
+# shellcheck disable=SC2034
 FM_REMOTE_READINESS_LIB_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$FM_REMOTE_READINESS_LIB_DIR/fm-timeout-lib.sh"
 
-# Consumed by the sourcing caller, so every assignment reads as unused here.
-# shellcheck disable=SC2034
 FM_REMOTE_READINESS_OUT=
 
 # One doctor run on the route's host. An empty bound runs it unbounded, the way
