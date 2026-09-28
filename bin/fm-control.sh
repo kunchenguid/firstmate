@@ -604,7 +604,7 @@ do_exit() {
           # alive path: interrupt if busy, then the harness's exit command.
           ;;
         *)
-          die "task $ID's endpoint $T reads 'missing', but ${absence#*$'\t'}; exit will not claim an agent stopped at an address it cannot trust, nor send lifecycle input to one, and relaunch refuses for the same reason. That reason is what would have to change before bin/fm-control.sh $ID $VERB_RETRY can act"
+          die "task $ID's endpoint $T reads 'missing', but ${absence#*$'\t'}; exit will not claim an agent stopped at an address it cannot trust, nor send lifecycle input to one, and relaunch refuses for the same reason"
           ;;
       esac
       ;;

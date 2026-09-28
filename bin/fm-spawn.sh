@@ -1762,7 +1762,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
       dead) RELAUNCH_STATE=dead ;;
       alive) RELAUNCH_STATE=alive ;;
       *)
-        echo "error: task $ID's recorded endpoint $RELAUNCH_TARGET reads 'missing', but ${RELAUNCH_ABSENCE#*$'\t'}. An endpoint that cannot be proven absent may still hold a live agent on this task's worktree; refusing rather than launching a second agent into it (bin/fm-control.sh $ID exit and relaunch refuse it for the same reason; that reason is what would have to change before bin/fm-control.sh $ID relaunch --note \"<why>\" can reclaim the task)" >&2
+        echo "error: task $ID's recorded endpoint $RELAUNCH_TARGET reads 'missing', but ${RELAUNCH_ABSENCE#*$'\t'}. An endpoint that cannot be proven absent may still hold a live agent on this task's worktree; refusing rather than launching a second agent into it (bin/fm-control.sh $ID exit and relaunch refuse it for the same reason)" >&2
         exit 1
         ;;
     esac
