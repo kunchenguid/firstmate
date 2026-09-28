@@ -394,9 +394,11 @@ test_mate_waiting_on_its_decision_is_not_woken() {
   arm_answer "$dir" sm1
   printf 'needs-decision [key=pick]: alpha or beta?\n' > "$dir/home/state/sm1.status"
   # A live watcher keeps its down banner out of the refusal each send reports.
+  # A fresh beat alone proves one only under the autoarm model, so pin it rather
+  # than inherit whatever model the host harness implies.
   touch "$dir/home/state/.last-watcher-beat"
 
-  out=$(run_restart "$dir" sm1); rc=$?
+  out=$(FM_SUPERVISION_MODEL=autoarm run_restart "$dir" sm1); rc=$?
 
   expect_code 3 "$rc" "a deferred mate must not be reported as reloaded"$'\n'"$out"
   assert_contains "$out" "unreached: sm1:" "a mate that received nothing must be reported unreached"
