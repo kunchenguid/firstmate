@@ -584,9 +584,12 @@ test_no_mistakes_dod_ci_gate_feedback() {
     "no-mistakes DOD must bound a single CI-gate wait by the harness command bound"
   assert_grep "Every poll reads the PR itself, not only its checks" "$brief" \
     "no-mistakes DOD must make every CI poll read the PR's reviews and comments"
-  # shellcheck disable=SC2016  # single quotes are deliberate: the backticked gh api paths must stay literal
-  assert_grep '`gh api repos/<owner>/<repo>/pulls/<n>/reviews`, `.../pulls/<n>/comments`, and `.../issues/<n>/comments`' "$brief" \
-    "no-mistakes DOD must name the review, review-comment, and issue-comment reads"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticked gh-axi reads must stay literal
+  assert_grep '`gh-axi pr checks <n>`' "$brief" \
+    "no-mistakes DOD must name the gh-axi checks read"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticked gh-axi reads must stay literal
+  assert_grep '`gh-axi pr view <n> --comments --reviews`' "$brief" \
+    "no-mistakes DOD must name the gh-axi review and comment read"
   assert_grep "is work for the gate, never a non-required check to dismiss" "$brief" \
     "no-mistakes DOD must forbid dismissing review-bot or maintainer feedback"
   # shellcheck disable=SC2016  # single quotes are deliberate: the backticked respond command must stay literal
