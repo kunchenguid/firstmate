@@ -64,6 +64,28 @@ test_passes_the_command_status_and_output_through() {
   pass "fm_exec_timed passes a command's status and output through unchanged"
 }
 
+# Stock macOS Bash has no BASHPID. Unset it on newer shells too, so this
+# regression exercises that boundary without requiring a second interpreter.
+# Both direct replacement and the ordinary nested-subshell caller must work.
+test_exec_timed_works_without_bashpid() {
+  local out rc nested
+  for nested in no yes; do
+    rc=0
+    out=$(PATH=$PERL_ONLY bash -uc '
+      . "$1/bin/fm-timeout-lib.sh"
+      unset BASHPID
+      if [ "$2" = yes ]; then
+        (fm_exec_timed 5 1 bash -c "echo compatible; exit 7")
+      else
+        fm_exec_timed 5 1 bash -c "echo compatible; exit 7"
+      fi
+    ' _ "$ROOT" "$nested" 2>&1) || rc=$?
+    [ "$rc" -eq 7 ] || fail "missing BASHPID changed the command status (nested=$nested, rc=$rc: $out)"
+    [ "$out" = compatible ] || fail "missing BASHPID changed the command output (nested=$nested: $out)"
+  done
+  pass "fm_exec_timed works without BASHPID in direct and subshell callers"
+}
+
 # A command that honors TERM ends at the bound, long before the grace would
 # have forced it, and is gone afterwards.
 test_term_ends_a_cooperative_command_at_the_bound() {
@@ -106,13 +128,13 @@ test_the_bound_replaces_the_calling_shell() {
   dir="$TMP_ROOT/replace"
   mkdir -p "$dir"
   for path in "$PATH" "$PERL_ONLY"; do
-    rm -f "$dir/caller" "$dir/parent"
+    rm -f "$dir/parent"
     (
       . "$ROOT/bin/fm-timeout-lib.sh"
-      printf '%s\n' "$BASHPID" > "$dir/caller"
       PATH=$path fm_exec_timed 5 1 bash -c 'echo "$PPID" > "$1"' _ "$dir/parent"
-    ) || fail "the bounded probe failed under PATH=$path"
-    caller=$(cat "$dir/caller")
+    ) &
+    caller=$!
+    wait "$caller" || fail "the bounded probe failed under PATH=$path"
     parent=$(cat "$dir/parent")
     [ "$caller" = "$parent" ] \
       || fail "the command's parent $parent is not the replaced caller $caller under PATH=$path"
@@ -211,10 +233,10 @@ test_an_owner_that_dies_during_startup_ends_the_command() {
   PATH=$PERL_ONLY bash -c '
     . "$1/bin/fm-timeout-lib.sh"
     (
-      echo "$BASHPID" > "$2/watchdog"
       while kill -0 "$$" 2>/dev/null; do sleep 0.05; done
       fm_exec_timed 60 1 bash -c "exec sleep 300"
     ) >/dev/null 2>&1 &
+    echo "$!" > "$2/watchdog"
     exit 0
   ' _ "$ROOT" "$dir"
   wait_for_file "$dir/watchdog"
@@ -328,6 +350,7 @@ test_run_timed_passes_a_natural_exit_through_a_fired_bound() {
 }
 
 test_passes_the_command_status_and_output_through
+test_exec_timed_works_without_bashpid
 test_run_timed_reports_the_bound_when_the_wrapper_records_a_signal_death
 test_run_timed_passes_a_natural_exit_through_a_fired_bound
 test_term_ends_a_cooperative_command_at_the_bound
