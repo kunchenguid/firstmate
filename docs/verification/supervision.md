@@ -510,7 +510,7 @@ Turn-end hook capability (PTY probes, one turn each):
 
 Conclusion: kiro-cli cannot block the turn end or deliver a follow-up, so `bin/fm-kiro-turnend-hook.sh`'s `Stop` branch is a re-arm backstop only; the 2026-09-21 entry below records the structural doorbell that replaced the foreground checkpoint as the primary path (`docs/turnend-guard.md`, `docs/supervision-protocols/kiro-cli.md`).
 
-Session-start / launch gate end-to-end: launching `kiro-cli chat --trust-all-tools --agent firstmate-kiro "<brief>"` under an isolated `KIRO_HOME` built by `bin/fm-spawn.sh`'s `build_kiro_home` (settings/cli.json `chat.disableTrustAllConfirmation=true`, `chat.allowAnimations=false`; `agents/firstmate-kiro.json` wiring the tracked `bin/fm-kiro-turnend-hook.sh`) produced:
+Session-start / launch gate end-to-end: launching `kiro-cli chat --trust-all-tools --agent firstmate-kiro "<brief>"` under an isolated `KIRO_HOME` built by `bin/fm-kiro-lib.sh`'s `fm_kiro_build_task_home` (settings/cli.json `chat.disableTrustAllConfirmation=true`, `chat.allowAnimations=false`; `agents/firstmate-kiro.json` wiring the tracked `bin/fm-kiro-turnend-hook.sh`) produced:
 
 ```text
 trust dialog rendered: False

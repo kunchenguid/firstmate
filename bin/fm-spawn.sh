@@ -2120,22 +2120,23 @@ launch_template() {
   #     the positional brief until answered - a state firstmate's arrow-less key
   #     plane cannot clear, so the key is required, not cosmetic), plus
   #     chat.allowAnimations=false for a stable screen-scrape baseline;
-  #   - agents/__KIROAGENT__.json registers the firstmate-owned `stop` turn-end
-  #     hook selected with --agent __KIROAGENT__. That hook serves BOTH roles -
-  #     the crewmate/primary turn-ended touch guarded by the per-task
-  #     worktree pointer, and the primary supervision re-arm backstop - exactly
-  #     as one tracked script, bin/fm-kiro-turnend-hook.sh (see its header and
+  #   - the task's generated lifecycle hooks (bin/fm-kiro-lib.sh) name the one
+  #     tracked script, bin/fm-kiro-turnend-hook.sh, by absolute path with this
+  #     KIRO_HOME baked in, so they bind to this task from any folder and in a
+  #     session resumed without this launch environment (see its header and
   #     docs/turnend-guard.md).
   # The KIRO_* scope variables pin this task's config store, data dir, and chat
-  # log to firstmate-owned per-task paths.
+  # log to firstmate-owned per-task paths. FM_KIRO_BUSY_GEN is the incarnation
+  # token the hook prefers over any recorded generation, and FM_KIRO_TASK_ID and
+  # FM_KIRO_STATE must agree with the registry entry the hook binds to.
   # The foreign primary markers are cleared for the same reason cursor clears
   # them: kiro-cli does not scrub an inherited CLAUDECODE, and bin/fm-harness.sh
   # must not read a kiro-cli worker as its launcher (though its anchored ancestry
   # already outranks a retained marker). --model and --effort are natively
   # supported (effort low|medium|high|xhigh|max, verified in chat --help). Busy
-  # state is a rendered-tail fallback (bin/fm-busy-lib.sh); nothing is armed as a
-  # busy writer.
-  kiro-cli) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u GEMINI_CLI -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u KIRO_ACP_NATIVE -u KIRO_ACP_PERMISSION_MODE -u KIRO_CLI_ACP_CLIENT_NAME -u KIRO_SESSION_ID FM_KIRO_HOOK=__KIROHOOK__ FM_KIRO_TASK_ID=__KIROTASK__ FM_KIRO_STATE=__KIROSTATE__ FM_KIRO_BUSY_GEN=__KIROBUSYGEN__ FM_KIRO_TURNEND_POINTER=__KIROPOINTER__ KIRO_HOME=__KIROHOME__ KIRO_DATA_DIR=__KIRODATADIR__ KIRO_CHAT_LOG_FILE=__KIROCHATLOG__ __KIROBIN__ chat __KIROENGINEFLAG____KIROTRUSTFLAG__--agent __KIROAGENT__ __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+  # state comes from those generation-bound hooks, with the rendered tail as the
+  # fallback (bin/fm-busy-lib.sh).
+  kiro-cli) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u GEMINI_CLI -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u KIRO_ACP_NATIVE -u KIRO_ACP_PERMISSION_MODE -u KIRO_CLI_ACP_CLIENT_NAME -u KIRO_SESSION_ID FM_KIRO_TASK_ID=__KIROTASK__ FM_KIRO_STATE=__KIROSTATE__ FM_KIRO_BUSY_GEN=__KIROBUSYGEN__ KIRO_HOME=__KIROHOME__ KIRO_DATA_DIR=__KIRODATADIR__ KIRO_CHAT_LOG_FILE=__KIROCHATLOG__ __KIROBIN__ chat __KIROENGINEFLAG____KIROTRUSTFLAG__--agent __KIROAGENT__ __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
   # grok (Grok Build TUI): a positional prompt starts the supervised interactive
   # session. --always-approve auto-approves every tool execution (verified: the
   # crewmate runs fully autonomously, no permission gate), which an unattended
@@ -2512,55 +2513,6 @@ resolve_kiro_binary() {
   fi
   echo "error: kiro-cli executable not found; searched PATH for 'kiro-cli' and fallback '$fallback' (this is the agent CLI, not the /usr/bin/kiro IDE)" >&2
   return 1
-}
-
-# Build the firstmate-owned isolated KIRO_HOME <dir> for ONE task with:
-#   settings/cli.json          - chat.disableTrustAllConfirmation=true (suppress
-#                                the --trust-all-tools startup dialog, VERIFIED
-#                                LIVE to otherwise render with its default on
-#                                "No, exit" and block the launch) and
-#                                chat.allowAnimations=false (freeze the spinner
-#                                to one static frame for a stable screen-scrape
-#                                baseline);
-#   agents/<agent>.json        - selects the firstmate-owned agent, granting all
-#                                tools to match --trust-all-tools and registering
-#                                the `stop` turn-end hook (bin/fm-kiro-turnend-hook.sh),
-#                                kept out of the project's own .kiro/;
-#   agents/fm-turn-end.d/<tok> - this task's registry entry naming
-#                                state/<id>.turn-ended. The shared hook touches
-#                                that file only when the workspace's
-#                                isolated-home .fm-kiro-turnend pointer carries
-#                                <tok>, so a stray kiro-cli session under this KIRO_HOME that
-#                                is not this task changes nothing (the grok/kimi
-#                                guard shape).
-# The whole state/<id>.kiro-home directory is rewritten fresh on every spawn and
-# retired by bin/fm-teardown.sh's `rm -rf`, so no separate registry cleanup is
-# needed (bin/fm-control-lib.sh's auth path is empty for kiro-cli).
-build_kiro_home() {  # <kiro-home-dir> <v2-agent-name> <turn-end-path> <token-out-var>
-  local home=$1 v2_agent=$2 turnend=$3 token_var=$4
-  local hook auth_dir auth_file old_umask
-  hook="$FM_ROOT/bin/fm-kiro-turnend-hook.sh"
-  [ -x "$hook" ] || {
-    echo "error: kiro-cli turn-end hook missing or not executable at $hook" >&2
-    return 1
-  }
-  rm -rf "$home" || return 1
-  fm_kiro_write_settings "$home" || return 1
-  if [ -n "$v2_agent" ]; then
-    fm_kiro_write_v2_agent "$home" "$v2_agent" || return 1
-  fi
-  auth_dir="$home/agents/fm-turn-end.d"
-  mkdir -p "$auth_dir" || return 1
-  old_umask=$(umask)
-  umask 077
-  auth_file=$(mktemp "$auth_dir/fm.XXXXXXXXXXXX") || {
-    umask "$old_umask"
-    return 1
-  }
-  umask "$old_umask"
-  printf '%s\n' "$turnend" > "$auth_file" || return 1
-  printf -v "$token_var" '%s' "${auth_file##*/}"
-  return 0
 }
 
 resolve_muse_binary() {
@@ -4295,10 +4247,11 @@ rovo_endpoint_cleanup() {
 # BOTH-CASES trust handling the cross-ship reconciliation requires
 # (docs/verification/supervision.md; issue steer-a33eee48). The
 # --trust-all-tools startup confirmation dialog renders ONLY when the resolved
-# KIRO_HOME does not carry chat.disableTrustAllConfirmation=true. build_kiro_home
-# writes that key, so a firstmate launch normally never sees the dialog and this
-# gate proceeds straight to the ordinary ready signal. If the dialog renders
-# anyway (a home missing the key), this gate REFUSES rather than answering it:
+# KIRO_HOME does not carry chat.disableTrustAllConfirmation=true.
+# fm_kiro_build_task_home writes that key, so a firstmate launch normally never
+# sees the dialog and this gate proceeds straight to the ordinary ready signal.
+# If the dialog renders anyway (a home missing the key), this gate REFUSES
+# rather than answering it:
 # unlike kimi, kiro-cli's dialog defaults its selection to the NEGATIVE option
 # ("No, exit"), with "Yes, I accept" reachable only by an arrow keypress that
 # firstmate's Enter/Escape/Ctrl-C key plane cannot send, so a blind Enter would
@@ -5317,20 +5270,16 @@ devin)
 agy) LAUNCH=${LAUNCH//__AGYBIN__/"$(shell_quote "$AGY_BIN")"} ;;
 kiro-cli)
   # The ONE build site for the per-task KIRO_HOME, for EVERY kind (ship, scout,
-  # secondmate). It lands here because build_kiro_home needs STATE_REAL, TURNEND,
-  # and WT, all of which exist by now. It writes:
-  #   settings/cli.json        - chat.disableTrustAllConfirmation=true (the
-  #     --trust-all-tools dialog is VERIFIED LIVE to otherwise render with its
-  #     default on "No, exit" and block the launch) and chat.allowAnimations=false;
-  #   agents/__KIROAGENT__.json - the firstmate-owned V2 agent, when selected;
-  #   agents/fm-turn-end.d/<tok> - this task's registry entry naming $TURNEND;
-  #   project/.kiro/ - the V3 project agent and hooks, copied byte-for-byte as
-  #     regular files into the worktree because Kiro discovers V3 project
-  #     configuration from cwd while ignoring symlinked payloads.
-  # The isolated-home pointer below carries the matching token, so the shared hook
-  # touches state/<id>.turn-ended for THIS task only (the grok/kimi guard shape),
-  # and the same hook re-arms primary supervision for a primary/secondmate
-  # session (bin/fm-kiro-turnend-hook.sh header; docs/turnend-guard.md).
+  # secondmate). It lands here because it needs STATE_REAL, TURNEND, and WT, all
+  # of which exist by now. fm_kiro_build_task_home (bin/fm-kiro-lib.sh) owns
+  # the home's settings, the explicit V2 agent, the turn-end registry entry, and
+  # the pointer carrying its token; the V3 project agent and hooks are then
+  # copied byte-for-byte as regular files into the worktree because Kiro
+  # discovers V3 project configuration from cwd while ignoring symlinked
+  # payloads. The shared hook therefore touches state/<id>.turn-ended for THIS
+  # task only (the grok/kimi guard shape), and the same hook re-arms primary
+  # supervision for a primary/secondmate session (bin/fm-kiro-turnend-hook.sh
+  # header; docs/turnend-guard.md).
   # A secondmate takes its turn-end wiring from here, so the crewmate-only wiring
   # block below deliberately has no kiro-cli arm.
   KIRO_HOME_DIR="$STATE_REAL/$ID.kiro-home"
@@ -5338,8 +5287,7 @@ kiro-cli)
   if [ "$KIRO_ENGINE" = v2 ]; then
     KIRO_V2_AGENT_NAME=$(fm_kiro_v2_agent_name "$ID") || exit 1
   fi
-  KIRO_TURNEND_TOKEN=
-  if ! build_kiro_home "$KIRO_HOME_DIR" "$KIRO_V2_AGENT_NAME" "$TURNEND" KIRO_TURNEND_TOKEN; then
+  if ! KIRO_TURNEND_TOKEN=$(fm_kiro_build_task_home "$KIRO_HOME_DIR" "$KIRO_V2_AGENT_NAME" "$TURNEND"); then
     echo "error: could not build the isolated KIRO_HOME at $KIRO_HOME_DIR" >&2
     exit 1
   fi
@@ -5352,13 +5300,10 @@ kiro-cli)
     exclude_path "$(fm_kiro_v3_hook_relpath "$ID")"
   fi
   printf '%s\n' "$KIRO_TURNEND_TOKEN" >"$STATE_REAL/$ID.kiro-turnend-token"
-  printf 'token=%s\n' "$KIRO_TURNEND_TOKEN" >"$KIRO_HOME_DIR/.fm-kiro-turnend"
   exclude_path '.fm-kiro-turnend'
-  LAUNCH=${LAUNCH//__KIROHOOK__/"$(shell_quote "$FM_ROOT/bin/fm-kiro-turnend-hook.sh")"}
   LAUNCH=${LAUNCH//__KIROTASK__/"$(shell_quote "$ID")"}
   LAUNCH=${LAUNCH//__KIROSTATE__/"$(shell_quote "$STATE_REAL")"}
   LAUNCH=${LAUNCH//__KIROBUSYGEN__/"$(shell_quote "${BUSY_GEN:-}")"}
-  LAUNCH=${LAUNCH//__KIROPOINTER__/"$(shell_quote "$KIRO_HOME_DIR/.fm-kiro-turnend")"}
   LAUNCH=${LAUNCH//__KIROHOME__/"$(shell_quote "$KIRO_HOME_DIR")"}
   LAUNCH=${LAUNCH//__KIRODATADIR__/"$(shell_quote "$KIRO_HOME_DIR/data")"}
   LAUNCH=${LAUNCH//__KIROCHATLOG__/"$(shell_quote "$KIRO_HOME_DIR/chat.log")"}

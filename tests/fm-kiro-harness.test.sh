@@ -22,12 +22,15 @@
 #      --no-interactive and it does NOT type a pointer into the composer.
 #      The agent file's tool list alone is not trust: a V3 agent declaring it
 #      still stops on fs_write's Replace in File with a human approval prompt.
-#   5. The turn-end signal is the TRACKED, firstmate-owned stop hook
-#      (bin/fm-kiro-turnend-hook.sh) registered in the per-task KIRO_HOME that
-#      bin/fm-spawn.sh builds - never a per-task generated hook, never into the
-#      project's .kiro/, never editing a captain-shared file. The hook's
-#      turn-ended touch fires only through a matching workspace pointer plus
-#      registry token, and its PRIMARY re-arm runs only in primary scope.
+#   5. The turn-end signal is the TRACKED, firstmate-owned adapter
+#      (bin/fm-kiro-turnend-hook.sh), never editing a captain-shared file.
+#      Every Firstmate-owned hook command reaches it from any folder without
+#      launcher environment, so a session resumed with plain kiro-cli keeps its
+#      hooks. Its turn-ended touch fires only through a matching isolated-home
+#      pointer plus registry token, a resumed worker writes busy state only
+#      under its own recorded conversation, a resumed primary retakes only a
+#      dead owner's lock, and its PRIMARY re-arm runs only in primary scope
+#      without holding the turn end.
 #   6. The launch gate refuses a rendered trust dialog (whose default is
 #      "No, exit") without ever pressing Enter, and confirms a live TUI.
 #   7. Busy state is the pinned rendered-tail fallback alone (nothing armed,
@@ -273,7 +276,7 @@ test_kiro_semantic_busy_source_is_registered() {
 }
 
 test_kiro_hooks_drive_semantic_busy_idle_and_progress() {
-  local id rec state kh hook auth gen out new_gen manifest busy_event
+  local id rec state kh hook gen out new_gen manifest busy_event
   id="kiro-semantic-z5-$$"
   rec=$(make_kiro_spawn_case semantic "$id")
   read_kiro_spawn_record "$rec"
@@ -281,7 +284,6 @@ test_kiro_hooks_drive_semantic_busy_idle_and_progress() {
   state="$HOME_DIR/state"
   kh="$state/$id.kiro-home"
   hook="$ROOT/bin/fm-kiro-turnend-hook.sh"
-  auth="$kh/agents/fm-turn-end.d"
   busy_event="$ROOT/bin/fm-busy-event.sh"
   gen=$(cat "$state/$id.busy-gen" 2>/dev/null) || fail "Kiro spawn did not arm a busy generation"
   out=$(fm_busy_classify tmux fake:win kiro-cli "$id" "$state" 'no rendered anchors')
@@ -300,7 +302,7 @@ test_kiro_hooks_drive_semantic_busy_idle_and_progress() {
   drive_kiro_hook() {  # <event> <generation>
     local event=$1 event_gen=$2
     printf '{"hook_event_name":"%s","cwd":"%s"}
-' "$event" "$WT_DIR" |       (cd "$WT_DIR" && FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$state"         KIRO_HOME="$kh" KIRO_WORKSPACE_ROOT="$WT_DIR" FM_KIRO_TURNEND_POINTER="$kh/.fm-kiro-turnend"         FM_KIRO_TASK_ID="$id" FM_KIRO_STATE="$state" FM_KIRO_BUSY_GEN="$event_gen"         bash "$hook" "$auth")
+' "$event" "$WT_DIR" |       (cd "$WT_DIR" && FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$state"         KIRO_HOME="$kh" KIRO_WORKSPACE_ROOT="$WT_DIR"         FM_KIRO_TASK_ID="$id" FM_KIRO_STATE="$state" FM_KIRO_BUSY_GEN="$event_gen"         bash "$hook")
   }
 
   rm -f "$state/$id.turn-ended"
@@ -554,14 +556,13 @@ test_kiro_launch_is_the_interactive_tui_with_brief_model_effort_and_scope() {
   assert_contains "$launch" "KIRO_CHAT_LOG_FILE=" "launch did not scope KIRO_CHAT_LOG_FILE per task"
   assert_contains "$launch" "env -u CLAUDECODE" "launch did not clear the inherited launcher markers"
   assert_contains "$launch" "-u KIRO_ACP_PERMISSION_MODE" "launch did not clear inherited ACP permission state"
-  assert_contains "$launch" "FM_KIRO_HOOK=" "launch did not bind the tracked project hook adapter"
-  assert_contains "$launch" "FM_KIRO_TURNEND_POINTER='$HOME_DIR/state/$id.kiro-home/.fm-kiro-turnend'" "launch did not bind the isolated-home turn-end pointer"
+  assert_contains "$launch" "FM_KIRO_BUSY_GEN='$(cat "$HOME_DIR/state/$id.busy-gen")'" \
+    "launch did not carry the armed incarnation generation"
   assert_contains "$launch" "encode launch-brief" "launch must carry the brief positionally"
   assert_not_contains "$launch" "__KIROBIN__" "launch left its binary placeholder unsubstituted"
   assert_not_contains "$launch" "__KIROHOME__" "launch left its KIRO_HOME placeholder unsubstituted"
   assert_not_contains "$launch" "__KIROAGENT__" "launch left its agent placeholder unsubstituted"
   assert_not_contains "$launch" "__KIROENGINEFLAG__" "launch left its engine placeholder unsubstituted"
-  assert_not_contains "$launch" "__KIROHOOK__" "launch left its hook placeholder unsubstituted"
   assert_not_contains "$launch" "__BRIEF__" "launch left its brief placeholder unsubstituted"
   # The unified launch never types a pointer into the composer.
   [ ! -s "$CASE_DIR/pointer.log" ] \
@@ -740,7 +741,12 @@ test_kiro_turn_end_wiring_lands_in_a_per_task_kiro_home() {
     if(!h?.action?.command) process.exit(1);
     process.stdout.write(h.action.command);
   ' "$home_hook") || fail "V3 project hook is invalid"
-  assert_contains "$hook_command" 'FM_KIRO_HOOK' "V3 Stop hook must resolve the tracked adapter from launch scope"
+  mkdir -p "$CASE_DIR/foreign-cwd"
+  rm -f "$HOME_DIR/state/$id.turn-ended"
+  printf '{"session_id":"sess_wire","hook_event_name":"Stop","cwd":"%s"}' "$WT_DIR" \
+    | (cd "$CASE_DIR/foreign-cwd" && env -i HOME="$HOME_DIR" PATH="$BASE_PATH" /bin/sh -c "$hook_command")
+  assert_present "$HOME_DIR/state/$id.turn-ended" \
+    "V3 Stop hook must reach this task from a foreign folder without launcher environment"
   token=$(cat "$HOME_DIR/state/$id.kiro-turnend-token" 2>/dev/null) || fail "state token missing"
   pointer=$(cat "$kh/.fm-kiro-turnend" 2>/dev/null) || fail "isolated-home pointer missing"
   [ "$pointer" = "token=$token" ] || fail "isolated-home pointer '$pointer' does not name the state token '$token'"
@@ -755,7 +761,7 @@ test_kiro_turn_end_wiring_lands_in_a_per_task_kiro_home() {
 }
 
 test_kiro_guarded_hook_touches_turn_ended_only_on_a_matching_pointer() {
-  local id rec kh hook token other
+  local id rec kh hook other_home
   id="kiro-hook-z7-$$"
   rec=$(make_kiro_spawn_case hook "$id")
   read_kiro_spawn_record "$rec"
@@ -763,29 +769,27 @@ test_kiro_guarded_hook_touches_turn_ended_only_on_a_matching_pointer() {
   kh="$HOME_DIR/state/$id.kiro-home"
   hook="$ROOT/bin/fm-kiro-turnend-hook.sh"
   [ -x "$hook" ] || fail "the tracked hook is missing or not executable at $hook"
-  token=$(cat "$HOME_DIR/state/$id.kiro-turnend-token")
-  # A matching pointer in the workspace lets the hook touch turn-ended. The
-  # payload is required (the hook drains stdin), the registry dir is passed
-  # explicitly, and the home/state overrides mirror what the launched pane
-  # carries so no ambient FM_* can leak into the case.
-  kiro_hook_env() { # <workspace>
-    printf '%s\n' "{\"hook_event_name\":\"stop\",\"cwd\":\"$1\"}"
+  # The payload is required (the hook drains stdin), the task's KIRO_HOME is
+  # passed the way the generated hook command passes it, and the home/state
+  # overrides keep any ambient FM_* from leaking into the case.
+  kiro_hook_stop() { # <workspace> <kiro-home>
+    printf '%s\n' "{\"hook_event_name\":\"stop\",\"cwd\":\"$1\"}" \
+      | (cd "$1" && env -u KIRO_HOME FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
+        FM_KIRO_TASK_ID="$id" FM_KIRO_STATE="$HOME_DIR/state" bash "$hook" --kiro-home "$2")
   }
   rm -f "$HOME_DIR/state/$id.turn-ended"
-  kiro_hook_env "$WT_DIR" | FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
-    KIRO_WORKSPACE_ROOT="$WT_DIR" FM_KIRO_TURNEND_POINTER="$kh/.fm-kiro-turnend" FM_KIRO_TASK_ID="$id" FM_KIRO_STATE="$HOME_DIR/state" bash "$hook" "$kh/agents/fm-turn-end.d"
+  kiro_hook_stop "$WT_DIR" "$kh"
   assert_present "$HOME_DIR/state/$id.turn-ended" "a matching pointer must let the hook touch turn-ended"
-  # A workspace with no pointer leaves the hook a no-op.
-  other="$CASE_DIR/other-ws"; mkdir -p "$other"
+  # A home carrying the registry but no pointer leaves the hook a no-op.
+  other_home="$CASE_DIR/other-home"
+  mkdir -p "$other_home/agents" "$CASE_DIR/other-ws"
+  cp -R "$kh/agents/fm-turn-end.d" "$other_home/agents/"
   rm -f "$HOME_DIR/state/$id.turn-ended"
-  kiro_hook_env "$other" | FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
-    KIRO_WORKSPACE_ROOT="$other" FM_KIRO_TASK_ID="$id" FM_KIRO_STATE="$HOME_DIR/state" bash "$hook" "$kh/agents/fm-turn-end.d"
-  assert_absent "$HOME_DIR/state/$id.turn-ended" "a workspace with no pointer must leave the hook a no-op"
+  kiro_hook_stop "$CASE_DIR/other-ws" "$other_home"
+  assert_absent "$HOME_DIR/state/$id.turn-ended" "a home with no pointer must leave the hook a no-op"
   # A pointer naming a token the registry does not know is a no-op.
-  rm -f "$HOME_DIR/state/$id.turn-ended"
-  printf 'token=fm.notarealtoken1\n' > "$WT_DIR/.fm-kiro-turnend"
-  kiro_hook_env "$WT_DIR" | FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
-    KIRO_WORKSPACE_ROOT="$WT_DIR" FM_KIRO_TASK_ID="$id" FM_KIRO_STATE="$HOME_DIR/state" bash "$hook" "$kh/agents/fm-turn-end.d"
+  printf 'token=fm.notarealtoken1\n' > "$other_home/.fm-kiro-turnend"
+  kiro_hook_stop "$CASE_DIR/other-ws" "$other_home"
   assert_absent "$HOME_DIR/state/$id.turn-ended" "an unknown token must leave the hook a no-op"
   pass "fm-spawn: the tracked kiro-cli stop hook touches turn-ended only on a matching pointer+token"
 }
@@ -824,11 +828,252 @@ SH
   rm -f "$HOME_DIR/state/$id.turn-ended"
   printf '{"hook_event_name":"stop","cwd":"%s"}\n' "$WT_DIR" \
     | FM_ROOT_OVERRIDE="$shimroot" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
-      KIRO_WORKSPACE_ROOT="$WT_DIR" FM_KIRO_TURNEND_POINTER="$kh/.fm-kiro-turnend" FM_KIRO_TASK_ID="$id" FM_KIRO_STATE="$HOME_DIR/state" bash "$hook" "$kh/agents/fm-turn-end.d"
+      KIRO_WORKSPACE_ROOT="$WT_DIR" FM_KIRO_TASK_ID="$id" FM_KIRO_STATE="$HOME_DIR/state" bash "$hook" --kiro-home "$kh"
   assert_present "$HOME_DIR/state/$id.turn-ended" "the turn-ended touch must still fire in a crew worktree"
   [ ! -s "$arm_log" ] \
     || fail "the primary re-arm must stand down in a linked crew/scout worktree"
   pass "fm-spawn: the tracked kiro-cli hook re-arms only in primary scope"
+}
+
+# --- 5. hook commands: any folder, no launcher environment ------------------
+
+# Print every command a Kiro hook document registers: the V3 `.kiro/hooks`
+# array shape or the V2 agent's per-event map.
+kiro_hook_commands() {  # <hook-document>
+  jq -r 'if (.hooks | type) == "array" then .hooks[].action.command else .hooks[][].command end' "$1"
+}
+
+test_every_firstmate_kiro_hook_command_works_from_any_folder_without_launch_env() {
+  # Kiro runs each hook command through /bin/sh, and a session resumed with
+  # plain kiro-cli carries none of the launcher's exports. Every Firstmate-owned
+  # registration must therefore reach the tracked adapter from an unrelated
+  # folder with a scrubbed environment: a relative script path or an env-only
+  # fallback exits 127 here and leaves no probe arrival. The tracked documents
+  # are enumerated, so a new tracked hook file is covered without editing this.
+  local id v2_id rec foreign probe entry workspace doc cmd rc before after checked=0
+  local v2_case v2_home v2_wt primary_dir primary_fake
+  local -a docs=()
+  id="kiro-anyfolder-z15-$$"
+  rec=$(make_kiro_spawn_case anyfolder "$id")
+  read_kiro_spawn_record "$rec"
+  run_kiro_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" --model auto >/dev/null 2>&1 \
+    || fail "V3 Kiro spawn for the any-folder case failed"
+  docs+=("$WT_DIR|$WT_DIR/.kiro/hooks/fm-firstmate-$id.json")
+
+  v2_id="kiro-anyfolder-v2-z15-$$"
+  rec=$(make_kiro_spawn_case anyfolder-v2 "$v2_id")
+  IFS='|' read -r v2_case v2_home _ v2_wt _ <<EOF
+$rec
+EOF
+  FM_KIRO_ENGINE=v2 run_kiro_spawn "$v2_case" "$v2_home" "$v2_case/project" "$v2_wt" "$v2_case/fake/fakebin" \
+    "$v2_id" --model auto >/dev/null 2>&1 || fail "V2 Kiro spawn for the any-folder case failed"
+  docs+=("$v2_wt|$v2_home/state/$v2_id.kiro-home/agents/firstmate-kiro-v2-$v2_id.json")
+
+  primary_dir="$TMP_ROOT/anyfolder-primary"
+  primary_fake=$(fm_fakebin "$primary_dir/fake")
+  cat > "$primary_fake/kiro-cli" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = --version ] && echo "kiro-cli 2.22.1"
+exit 0
+SH
+  chmod +x "$primary_fake/kiro-cli"
+  mkdir -p "$primary_dir/home/state"
+  PATH="$primary_fake:$BASE_PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$primary_dir/home" \
+    "$ROOT/bin/fm-kiro-primary.sh" --v2 >/dev/null 2>&1 || fail "V2 primary launcher failed"
+  docs+=("$ROOT|$primary_dir/home/state/.kiro-primary-home/agents/firstmate-kiro-v2.json")
+
+  while IFS= read -r doc; do
+    [ -n "$doc" ] && docs+=("$ROOT|$ROOT/$doc")
+  done <<EOF
+$(git -C "$ROOT" ls-files -- '.kiro/hooks/*.json')
+EOF
+
+  foreign="$TMP_ROOT/anyfolder-foreign"
+  probe="$TMP_ROOT/anyfolder.probe"
+  mkdir -p "$foreign"
+  : > "$probe"
+  for entry in "${docs[@]}"; do
+    workspace=${entry%%|*}
+    doc=${entry#*|}
+    assert_present "$doc" "Firstmate-owned Kiro hook document is missing"
+    while IFS= read -r cmd; do
+      [ -n "$cmd" ] || continue
+      before=$(grep -c '^at=' "$probe")
+      rc=0
+      printf '{"session_id":"sess_anyfolder","hook_event_name":"PreToolUse","cwd":"%s"}' "$workspace" \
+        | (cd "$foreign" && env -i HOME="$foreign" PATH="$BASE_PATH" \
+          FM_KIRO_HOOK_PROBE_FILE="$probe" FM_STATE_OVERRIDE="$foreign/no-state" /bin/sh -c "$cmd") \
+        >/dev/null 2>&1 || rc=$?
+      after=$(grep -c '^at=' "$probe")
+      [ "$rc" -eq 0 ] && [ "$after" -eq $((before + 1)) ] \
+        || fail "a hook command in $doc did not reach the tracked adapter from $foreign without launcher environment (exit $rc): $cmd"
+      checked=$((checked + 1))
+    done <<EOF
+$(kiro_hook_commands "$doc")
+EOF
+  done
+  [ "$checked" -ge 17 ] || fail "only $checked Kiro hook commands were exercised; the registrations were not all found"
+  grep -q "^at=.* pwd=$foreign\$" "$probe" || fail "the probe did not record the foreign folder as the hook's working directory"
+  pass "every Firstmate-owned Kiro hook command ($checked) reaches the adapter from any folder without launcher environment"
+}
+
+test_kiro_resumed_worker_hooks_bind_only_through_the_recorded_session() {
+  # A worker resumed with plain `kiro-cli --resume-id` has no FM_KIRO_* or
+  # KIRO_HOME in its environment. Its task hook still binds through the baked
+  # KIRO_HOME, and it may write busy state only under the generation a launched
+  # incarnation recorded for that same conversation, so a relaunch still
+  # rejects every older conversation.
+  local id rec state kh doc gen new_gen out foreign
+  local -a launched relaunched
+  id="kiro-resume-z16-$$"
+  rec=$(make_kiro_spawn_case resume "$id")
+  read_kiro_spawn_record "$rec"
+  run_kiro_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" --model auto >/dev/null 2>&1 \
+    || fail "Kiro spawn for the resume case failed"
+  state="$HOME_DIR/state"
+  kh="$state/$id.kiro-home"
+  doc="$WT_DIR/.kiro/hooks/fm-firstmate-$id.json"
+  gen=$(cat "$state/$id.busy-gen") || fail "Kiro spawn did not arm a busy generation"
+  foreign="$CASE_DIR/foreign"
+  mkdir -p "$foreign"
+  launched=(FM_KIRO_TASK_ID="$id" FM_KIRO_STATE="$state" FM_KIRO_BUSY_GEN="$gen" KIRO_HOME="$kh")
+  fire() {  # <trigger> <session-id> [launch environment...]
+    local trigger=$1 session=$2 cmd
+    shift 2
+    cmd=$(jq -r --arg t "$trigger" '.hooks[] | select(.trigger == $t) | .action.command' "$doc")
+    printf '{"session_id":"%s","hook_event_name":"%s","cwd":"%s"}' "$session" "$trigger" "$WT_DIR" \
+      | (cd "$foreign" && env -i HOME="$HOME_DIR" PATH="$BASE_PATH" FM_STATE_OVERRIDE="$foreign/no-state" \
+        "$@" /bin/sh -c "$cmd")
+  }
+  classify() { fm_busy_classify tmux fake:win kiro-cli "$id" "$state" 'no rendered anchors'; }
+
+  rm -f "$state/$id.turn-ended"
+  fire Stop sess_a
+  assert_present "$state/$id.turn-ended" "a resumed worker's Stop must still notify its own task"
+  out=$(classify)
+  [ "$out" = "busy fm-spawn" ] || fail "no launched incarnation spoke for sess_a yet, so busy state must not move, got '$out'"
+
+  fire UserPromptSubmit sess_a "${launched[@]}"
+  [ "$(classify)" = "busy kiro-hook" ] || fail "the launched incarnation's prompt must open busy"
+
+  rm -f "$state/$id.turn-ended" "$state/$id.progress"
+  fire Stop sess_a
+  [ "$(classify)" = "idle kiro-hook" ] || fail "the resumed conversation's Stop must close busy state"
+  assert_present "$state/$id.turn-ended" "the resumed conversation's Stop must notify the task"
+  fire UserPromptSubmit sess_a
+  [ "$(classify)" = "busy kiro-hook" ] || fail "the resumed conversation's prompt must open busy state"
+  fire PreToolUse sess_a
+  assert_present "$state/$id.progress" "the resumed conversation's tool use must publish progress"
+  fire Stop sess_a
+  [ "$(classify)" = "idle kiro-hook" ] || fail "the resumed conversation's final Stop must close busy state"
+
+  fire UserPromptSubmit sess_other
+  [ "$(classify)" = "idle kiro-hook" ] || fail "a conversation the incarnation never recorded must change nothing"
+
+  new_gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" "$id") || fail "Kiro generation replacement failed"
+  relaunched=(FM_KIRO_TASK_ID="$id" FM_KIRO_STATE="$state" FM_KIRO_BUSY_GEN="$new_gen" KIRO_HOME="$kh")
+  fire UserPromptSubmit sess_a
+  [ "$(classify)" = "busy fm-spawn" ] || fail "an older resumed conversation must not write under a replacement generation"
+  fire Stop sess_b "${relaunched[@]}"
+  [ "$(classify)" = "idle kiro-hook" ] || fail "the replacement incarnation's Stop must close busy state"
+  fire UserPromptSubmit sess_a
+  fire UserPromptSubmit sess_a "${launched[@]}"
+  [ "$(classify)" = "idle kiro-hook" ] || fail "no older conversation or incarnation may reopen busy after a relaunch"
+  fire UserPromptSubmit sess_b
+  [ "$(classify)" = "busy kiro-hook" ] || fail "the replacement incarnation's own conversation must bind when resumed"
+  pass "Kiro: a resumed worker reaches its task and binds only through its recorded conversation"
+}
+
+test_kiro_resumed_primary_retakes_a_dead_lock_and_stop_returns_promptly() {
+  # Kiro fires SessionStart only for a conversation's first prompt, so a
+  # primary resumed after its old process died reaches UserPromptSubmit with a
+  # dead lock owner. The tracked hook must take the helm there, never while a
+  # live session holds the lock, and its Stop re-arm must not hold the turn end
+  # for the watcher cycle bin/fm-watch-arm.sh waits on.
+  local dir root state log harness dead owner prompt_cmd stop_cmd out elapsed i
+  dir="$TMP_ROOT/resumed-primary"
+  root="$dir/firstmate"
+  state="$root/state"
+  log="$dir/calls.log"
+  mkdir -p "$root/bin" "$state" "$dir/foreign"
+  git -C "$root" init -q
+  : > "$root/AGENTS.md"
+  for f in "$ROOT"/bin/*; do ln -s "$f" "$root/bin/${f##*/}"; done
+  rm -f "$root/bin/fm-sessionstart-run.sh" "$root/bin/fm-watch-arm.sh" "$root/bin/fm-wake-drain.sh"
+  cat > "$root/bin/fm-sessionstart-run.sh" <<SH
+#!/usr/bin/env bash
+printf 'session-open %s\n' "\$*" >> '$log'
+"\$(dirname "\$0")/fm-lock.sh" >/dev/null 2>&1 || printf 'lock refused\n' >> '$log'
+printf 'DIGEST: fake session start\n'
+SH
+  cat > "$root/bin/fm-watch-arm.sh" <<SH
+#!/usr/bin/env bash
+sleep 4
+printf 'arm\n' >> '$log'
+SH
+  cat > "$root/bin/fm-wake-drain.sh" <<SH
+#!/usr/bin/env bash
+printf 'drain\n' >> '$log'
+SH
+  chmod +x "$root/bin/fm-sessionstart-run.sh" "$root/bin/fm-watch-arm.sh" "$root/bin/fm-wake-drain.sh"
+  : > "$state/task.meta"
+  : > "$log"
+  harness=$(fm_fakebin "$dir/harness")
+  ln -s /bin/bash "$harness/kiro-cli"
+  prompt_cmd=$(jq -r '.hooks[] | select(.trigger == "UserPromptSubmit") | .action.command' "$ROOT/.kiro/hooks/fm-firstmate.json")
+  stop_cmd=$(jq -r '.hooks[] | select(.trigger == "Stop") | .action.command' "$ROOT/.kiro/hooks/fm-firstmate.json")
+  cat > "$dir/session.sh" <<'SH'
+fire() {  # <event> <command>
+  printf '{"session_id":"sess_resumed","hook_event_name":"%s","cwd":"%s"}' "$1" "$FM_TEST_ROOT" | /bin/sh -c "$2"
+}
+printf '%s\n' "$$" > "$FM_TEST_DIR/session.pid"
+fire UserPromptSubmit "$FM_TEST_PROMPT_CMD" > "$FM_TEST_DIR/prompt.out"
+fire UserPromptSubmit "$FM_TEST_PROMPT_CMD" >> "$FM_TEST_DIR/prompt.out"
+[ "${FM_TEST_STOP:-0}" = 1 ] || exit 0
+start=$SECONDS
+fire Stop "$FM_TEST_STOP_CMD"
+printf '%s\n' $((SECONDS - start)) > "$FM_TEST_DIR/stop.seconds"
+SH
+  run_session() {  # [FM_TEST_STOP=1]
+    (cd "$dir/foreign" && env -i HOME="$dir" PATH="$BASE_PATH" FM_TEST_DIR="$dir" FM_TEST_ROOT="$root" \
+      FM_TEST_PROMPT_CMD="$prompt_cmd" FM_TEST_STOP_CMD="$stop_cmd" "$@" "$harness/kiro-cli" "$dir/session.sh")
+  }
+
+  "$harness/kiro-cli" -c 'sleep 30; :' &
+  owner=$!
+  printf '%s\n' "$owner" > "$state/.lock"
+  run_session
+  kill "$owner" 2>/dev/null || true
+  wait "$owner" 2>/dev/null || true
+  assert_not_contains "$(cat "$log")" "session-open" "a live lock owner must keep a second session read-only"
+  [ "$(cat "$state/.lock")" = "$owner" ] || fail "a second session must never rewrite a live owner's lock"
+
+  sh -c 'exit 0' &
+  dead=$!
+  wait "$dead" 2>/dev/null || true
+  printf '%s\n' "$dead" > "$state/.lock"
+  : > "$log"
+  printf '{"session_id":"sess_inherited","hook_event_name":"UserPromptSubmit","cwd":"%s"}' "$dir/foreign" \
+    | (cd "$dir/foreign" && env -i HOME="$dir" PATH="$BASE_PATH" FM_KIRO_PRIMARY_HOOK=1 \
+      "$harness/kiro-cli" "$root/bin/fm-kiro-turnend-hook.sh") >/dev/null
+  assert_not_contains "$(cat "$log")" "session-open" \
+    "a primary registration declared by another workspace must never open this home's session"
+  run_session FM_TEST_STOP=1
+  out=$(cat "$dir/prompt.out")
+  [ "$(grep -c '^session-open --source startup$' "$log")" -eq 1 ] \
+    || fail "a resumed primary's first prompt must run the session-open path exactly once: $(cat "$log")"
+  assert_contains "$out" "DIGEST: fake session start" "the session-open digest must reach the prompt's context"
+  assert_contains "$out" "KIRO_PRIMARY_ENDPOINT:" "the session-open path must report the doorbell endpoint"
+  [ "$(head -n 1 "$state/.lock")" = "$(cat "$dir/session.pid")" ] \
+    || fail "the resumed primary did not retake the dead owner's lock"
+  elapsed=$(cat "$dir/stop.seconds")
+  [ "$elapsed" -le 2 ] || fail "the Stop re-arm held the turn end for ${elapsed}s"
+  if command -v setsid >/dev/null 2>&1; then
+    i=0
+    while [ "$i" -lt 100 ] && ! grep -q '^arm$' "$log"; do sleep 0.1; i=$((i + 1)); done
+    grep -q '^arm$' "$log" || fail "the resumed primary's Stop never reached the watcher re-arm"
+  fi
+  pass "Kiro: a resumed primary retakes a dead lock on its first prompt and Stop re-arms without holding the turn"
 }
 
 test_kiro_effort_xhigh_and_max_ride_the_launch() {
@@ -943,7 +1188,7 @@ test_kiro_primary_launcher_defaults_v3_and_persists_its_home() {
 if [ "${1:-}" = --version ]; then printf 'kiro-cli 2.22.1\n'; exit 0; fi
 printf 'args=' >> "$FM_PRIMARY_KIRO_LOG"
 printf ' <%s>' "$@" >> "$FM_PRIMARY_KIRO_LOG"
-printf '\nhome=%s\ndata=%s\nlog=%s\nhook=%s\n'   "${KIRO_HOME:-}" "${KIRO_DATA_DIR:-}" "${KIRO_CHAT_LOG_FILE:-}" "${FM_KIRO_HOOK:-}"   >> "$FM_PRIMARY_KIRO_LOG"
+printf '\nhome=%s\ndata=%s\nlog=%s\n'   "${KIRO_HOME:-}" "${KIRO_DATA_DIR:-}" "${KIRO_CHAT_LOG_FILE:-}"   >> "$FM_PRIMARY_KIRO_LOG"
 SH
   chmod +x "$fakebin/kiro-cli"
   PATH="$fakebin:$BASE_PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$dir/home"     FM_PRIMARY_KIRO_LOG="$log" "$ROOT/bin/fm-kiro-primary.sh" --model auto
@@ -1115,6 +1360,9 @@ test_kiro_unreadable_viewport_fails_loudly
 test_kiro_turn_end_wiring_lands_in_a_per_task_kiro_home
 test_kiro_guarded_hook_touches_turn_ended_only_on_a_matching_pointer
 test_kiro_primary_rearm_stands_down_outside_primary_scope
+test_every_firstmate_kiro_hook_command_works_from_any_folder_without_launch_env
+test_kiro_resumed_worker_hooks_bind_only_through_the_recorded_session
+test_kiro_resumed_primary_retakes_a_dead_lock_and_stop_returns_promptly
 test_kiro_effort_xhigh_and_max_ride_the_launch
 test_kiro_v2_is_only_an_explicit_compatibility_fallback
 test_kiro_v3_project_files_are_regular_copies_and_refuse_different_existing
