@@ -122,10 +122,12 @@ fm_agent_process_classify() {  # <name> <argv0> <args> [pid] -> agent|shell|othe
 # replacement join an agent that is still running on this task's local copy? -
 # without trusting a runtime backend that could not see the endpoint.
 #
-# Only processes owned by the current user are read: a worker is always
+# Only processes whose /proc entry this user owns are read: a worker is always
 # launched as that user, and another user's working directory is not readable
-# anyway. Each process is classified by fm_agent_process_classify, so this
-# answers from the same name vocabulary as every liveness probe.
+# anyway. A non-dumpable process is skipped along with them, because Linux
+# gives its /proc entry to root - no verified harness is non-dumpable, so none
+# is skipped that way. Each process is classified by fm_agent_process_classify,
+# so this answers from the same name vocabulary as every liveness probe.
 #
 # Prints "<verdict>\t<detail>", always exactly one TAB:
 #   none        - every readable process was read and none is an agent there
@@ -147,7 +149,7 @@ fm_agent_process_worktree_scan() {  # <worktree>
     return 0
   fi
   if [ ! -r /proc/self/cmdline ] || [ ! -L /proc/self/cwd ]; then
-    printf 'unreadable\tthis host has no /proc, so nothing here can prove no agent is working in the recorded worktree; drive the task from a seat that addresses its recorded tmux server, where its window classifies directly and no absence proof is needed'
+    printf 'unreadable\tthe absence proof reads /proc and this host has none, so reclaiming a tmux task is unavailable here. The only route left is a seat that still addresses the recorded tmux server, where the window classifies directly and no absence proof is needed - and once that server is gone there is no such seat, and no route'
     return 0
   fi
   for dir in /proc/[0-9]*; do
@@ -159,10 +161,10 @@ fm_agent_process_worktree_scan() {  # <worktree>
         *) continue ;;
       esac
     else
-      # A process that exited mid-scan, or a zombie, has no working
-      # directory left. A privileged or non-dumpable one (a per-session
-      # sshd, ssh-agent) hides its link from its own user; that is only a
-      # gap when the process is itself an agent, checked below.
+      # A process that exited mid-scan, or a zombie, has no working directory
+      # left. The refusal below covers only the race that reaches here: the
+      # link vanishing from a /proc directory this user still owns, mid-exec
+      # or mid-exit.
       [ -d "$dir" ] || continue
       stat=$(cat "$dir/stat" 2>/dev/null) || continue
       rest=${stat##*) }

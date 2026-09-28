@@ -43,9 +43,9 @@
 #              is merely unreachable from this seat: herdr re-reads the pane in
 #              the session the record names, and tmux proves no agent process
 #              is still working in the recorded worktree. Proven gone reports
-#              `endpoint-gone` rather than `already-stopped`, because no
-#              endpoint this seat can reach survived for this verb to
-#              preserve; a herdr pane that turns out to be there and idle is
+#              `endpoint-gone` rather than `already-stopped`, because nothing
+#              survived at the recorded address for this verb to preserve; a
+#              herdr pane that turns out to be there and idle is
 #              the ordinary `already-stopped`; one whose agent is back takes
 #              the ordinary interrupt-then-exit path. An absence that cannot be proven -
 #              an agent process still in the worktree, or a process table that
@@ -578,8 +578,8 @@ do_exit() {
         gone)
           # Proven gone, so the agent that lived in it went with it: exit's
           # postcondition already holds and there is nothing to send. Its own
-          # outcome rather than `already-stopped`, because no endpoint this
-          # seat can reach survived for this verb to preserve. The worktree
+          # outcome rather than `already-stopped`, because nothing survived
+          # at the recorded address for this verb to preserve. The worktree
           # and every uncommitted change are untouched, and `relaunch`
           # re-creates the endpoint from here.
           printf 'endpoint-gone'
@@ -598,7 +598,7 @@ do_exit() {
           # alive path: interrupt if busy, then the harness's exit command.
           ;;
         *)
-          die "task $ID's endpoint $T reads 'missing', but ${absence#*$'\t'}; exit will not claim an agent stopped at an address it cannot trust, nor send lifecycle input to one, and relaunch refuses for the same reason; once that changes, retry bin/fm-control.sh $ID $VERB"
+          die "task $ID's endpoint $T reads 'missing', but ${absence#*$'\t'}; exit will not claim an agent stopped at an address it cannot trust, nor send lifecycle input to one, and relaunch refuses for the same reason. That reason is what would have to change before bin/fm-control.sh $ID $VERB can act"
           ;;
       esac
       ;;

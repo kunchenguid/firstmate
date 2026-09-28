@@ -314,7 +314,11 @@ fm_control_backend_state_verified() {  # <backend>
 # assignment made here could never reach them.
 #
 # The verdicts:
-#   gone     - absence is PROVEN: no endpoint this seat can reach, and no agent.
+#   gone     - absence is PROVEN: no agent, and no endpoint at the address the
+#              record names. A window may still survive elsewhere - on a tmux
+#              server this seat cannot address, or under a session name the
+#              record no longer matches, even on this seat's own server - and
+#              it holds no agent either way.
 #   dead     - the endpoint is there after all and holds no agent.
 #   alive    - the endpoint is there and an agent is running in it.
 #   unproven - neither could be established; the caller must refuse.

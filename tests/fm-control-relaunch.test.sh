@@ -2001,7 +2001,9 @@ test_tmux_refuses_a_gone_window_while_an_agent_works_in_the_worktree() {
   expect_code 1 "$rc" "relaunch must refuse while an agent still works in the worktree"$'\n'"$out"
   assert_contains "$out" "agent process $WORKTREE_AGENT_PID" \
     "the refusal must name the agent process it found"
-  assert_contains "$out" "bin/fm-control.sh rl65 relaunch reclaims the task" \
+  assert_contains "$out" "stop that process where it runs" \
+    "the refusal must name what would have to change before the task can be reclaimed"
+  assert_contains "$out" "bin/fm-control.sh rl65 relaunch can reclaim the task" \
     "the refusal must name the command that reclaims the task once the agent is stopped"
   brief_before=$(cat "$dir/home/data/rl65/brief.md")
   out=$(run_control "$dir" rl65 exit); rc=$?
