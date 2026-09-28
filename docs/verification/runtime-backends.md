@@ -179,7 +179,7 @@ ok - traex multiple in-turn steering receipts settle without invented starts
 
 The same guard covers fresh launch, exact original-process recovery, single-message steering, interruption, tool and simulated API failures, process exit and endpoint death.
 It does not establish authenticated provider availability.
-The reader validates `cli_version` only as nonempty descriptive metadata and does not admit or reject a structurally valid transcript by its version value.
+Portable coverage demonstrates that nonempty future `cli_version` values do not change transcript admission; the stable compatibility contract is owned by [Busy state is semantic, per adapter](../architecture.md#busy-state-is-semantic-per-adapter).
 The accounting, structural transcript admission, bounded refusal categories and conservative legacy-input limits belong to [`fm-busy-transcript.py`](../../bin/fm-busy-transcript.py).
 Portable coverage in `tests/fm-busy-state.test.sh` additionally separates partial and complete reads, unmatched and duplicate inputs, append-only compaction, unsupported replacement/rotation, malformed records and wrong identity.
 

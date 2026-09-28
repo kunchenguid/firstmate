@@ -6,7 +6,7 @@ Verified on 2026-06-11 with codex-cli 0.139.0 unless a fact gives a newer versio
 
 | Fact | Value |
 |---|---|
-| Busy state | Managed workers use the task-bound transcript reader owned by `bin/fm-busy-transcript.py`; missing or unsupported evidence remains unknown. Current verification: [semantic busy state](../../../../../docs/verification/supervision.md#semantic-busy-state). |
+| Busy state | Managed workers use the task-bound transcript reader owned by `bin/fm-busy-transcript.py`; [architecture](../../../../../docs/architecture.md#busy-state-is-semantic-per-adapter) owns version-independent admission and unknown-state boundaries, with current evidence in [semantic busy state](../../../../../docs/verification/supervision.md#semantic-busy-state). |
 | Exit command | `/quit`; its slash popup needs about one second between text and Enter, which the shared submit path used by the control plane handles. |
 | Interrupt | Single Escape. |
 | Skill invocation | `$<skill>`, for example `$no-mistakes`; Codex rejects `/<skill>` as "Unrecognized command". |
