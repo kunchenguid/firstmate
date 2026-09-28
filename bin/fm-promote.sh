@@ -182,15 +182,18 @@ INSTRUCTIONS=
 BRIEF_ORIGINAL=
 BRIEF_REPLACEMENT=
 INSTRUCTIONS_PUBLISHED=0
+PROMOTION_COMMITTED=0
 promote_cleanup() {
   local status=$?
   [ -z "$TMP" ] || rm -f -- "$TMP" 2>/dev/null || true
   [ -z "$BRIEF_REPLACEMENT" ] || rm -f -- "$BRIEF_REPLACEMENT" 2>/dev/null || true
-  if [ "$status" -ne 0 ] && [ "$INSTRUCTIONS_PUBLISHED" = 1 ] && [ -n "$INSTRUCTIONS" ]; then
+  if [ "$PROMOTION_COMMITTED" = 1 ]; then
+    [ -z "$BRIEF_ORIGINAL" ] || rm -f -- "$BRIEF_ORIGINAL" 2>/dev/null || true
+  elif [ "$status" -ne 0 ] && [ "$INSTRUCTIONS_PUBLISHED" = 1 ] && [ -n "$INSTRUCTIONS" ]; then
     rm -f -- "$INSTRUCTIONS" 2>/dev/null || true
-  fi
-  if [ -n "$BRIEF_ORIGINAL" ] && [ -e "$BRIEF_ORIGINAL" ]; then
-    mv -f -- "$BRIEF_ORIGINAL" "$SCOUT_BRIEF" 2>/dev/null || true
+    if [ -n "$BRIEF_ORIGINAL" ] && [ -e "$BRIEF_ORIGINAL" ]; then
+      mv -f -- "$BRIEF_ORIGINAL" "$SCOUT_BRIEF" 2>/dev/null || true
+    fi
   fi
   if [ "$META_LOCK_HELD" = 1 ]; then
     META_LOCK_HELD=0
@@ -511,6 +514,7 @@ if ! fm_backlog_atomic_transition publish "$TMP" "$META" "task record" "$STATE";
   echo "error: task record for $ID could not be published ($FM_BACKLOG_TRANSITION_ERROR)" >&2
   exit 1
 fi
+PROMOTION_COMMITTED=1
 TMP=
 rm -f -- "$BRIEF_ORIGINAL" 2>/dev/null || true
 BRIEF_ORIGINAL=
