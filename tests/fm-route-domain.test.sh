@@ -169,7 +169,9 @@ assert_contains "$out" "action=unavailable" "unknown route choice is unavailable
 json=$("$ROUTER" --json --task "Good morning")
 [ "$(printf '%s' "$json" | field action)" = handle_direct ] || fail "json action wrong: $json"
 
-PREAMBLE="[fm-from-firstmate] Routed intake task. It has no contract yet: before any work starts, settle what to build or learn, how it ships, and how much autonomy the worker has through your normal intake, and ask me for any of those you cannot establish. Task:"
+# The dispatched message carries only the from-firstmate marker; the router
+# states no contract of its own.
+PREAMBLE="[fm-from-firstmate]"
 
 # 7. dispatch_cmd is shell-safe for hostile task text and names the home's fm-send.sh.
 # shellcheck disable=SC2016

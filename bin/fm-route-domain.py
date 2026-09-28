@@ -25,17 +25,16 @@ TS_TIMEOUT = float(os.environ.get("FM_JEV_TS_TIMEOUT", "5.0"))
 SIGNAL_FLOOR = 0.7
 BUILTIN_ROUTES = ("new_domain", "captain_direct")
 
-# Mirrors secondmate_registry_parse_line in bin/fm-secondmate-registry-lib.sh.
-_SUFFIX = (
-    r"home:\s*([^;)]*);\s*scope:\s*(.*);\s*projects:\s*([^;)]*);\s*added\s+\d{4}-\d{2}-\d{2}\)\s*$"
-)
-LOCAL_RE = re.compile(r"^- ([A-Za-z0-9._-]+) - (.+) \(" + _SUFFIX)
-REMOTE_RE = re.compile(r"^- ([A-Za-z0-9._-]+) - (.+) \(host:\s*([^;)]*);\s*root:\s*([^;)]*);\s*" + _SUFFIX)
-
-CONTRACT_PREAMBLE = (
-    "[fm-from-firstmate] Routed intake task. It has no contract yet: before any work starts, "
-    "settle what to build or learn, how it ships, and how much autonomy the worker has "
-    "through your normal intake, and ask me for any of those you cannot establish. Task:"
+# The registry format has one owner, secondmate_registry_parse_line in
+# bin/fm-secondmate-registry-lib.sh. Call it rather than re-expressing its
+# regexes here, so the two cannot drift apart as they already did once.
+REGISTRY_PARSE_SH = (
+    'source "$1" || exit 1\n'
+    "while IFS= read -r line; do\n"
+    "  secondmate_registry_parse_line \"$line\" || continue\n"
+    '  printf \'%s\\t%s\\t%s\\n\' '
+    '"$SECONDMATE_REGISTRY_ID" "$SECONDMATE_REGISTRY_HOME" "$SECONDMATE_REGISTRY_SCOPE"\n'
+    "done\n"
 )
 
 
@@ -113,19 +112,36 @@ def live_secondmate(state_dir: Path, sm_id: str) -> bool:
     return "kind=secondmate" in meta.splitlines()
 
 
+def parse_registry_lines(reg_path: Path) -> list[tuple[str, str, str]]:
+    """Parse the registry through its canonical owner, returning (id, home, scope)."""
+    lib = Path(__file__).resolve().parent / "fm-secondmate-registry-lib.sh"
+    if not lib.is_file():
+        return []
+    try:
+        proc = subprocess.run(
+            ["bash", "-c", REGISTRY_PARSE_SH, "_", str(lib)],
+            input=reg_path.read_text(encoding="utf-8", errors="replace"),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if proc.returncode != 0:
+        return []
+    rows = []
+    for out_line in proc.stdout.splitlines():
+        parts = out_line.split("\t")
+        if len(parts) == 3:
+            rows.append((parts[0], parts[1], parts[2]))
+    return rows
+
+
 def parse_registry(reg_path: Path, state_dir: Path) -> dict[str, str]:
     if not reg_path.is_file():
         return {}
     criteria = {}
-    for line in reg_path.read_text(encoding="utf-8", errors="replace").splitlines():
-        m = LOCAL_RE.match(line)
-        if m:
-            sm_id, home, scope = m.group(1), m.group(3), m.group(4)
-        else:
-            m = REMOTE_RE.match(line)
-            if not m:
-                continue
-            sm_id, home, scope = m.group(1), m.group(5), m.group(6)
+    for sm_id, home, scope in parse_registry_lines(reg_path):
         if home.strip() and scope.strip() and live_secondmate(state_dir, sm_id):
             criteria[sm_id] = " ".join(scope.split())
     if not criteria:
@@ -141,7 +157,7 @@ def parse_registry(reg_path: Path, state_dir: Path) -> dict[str, str]:
 
 
 def dispatch_message(task_text: str) -> str:
-    return CONTRACT_PREAMBLE + " " + " ".join(task_text.split())
+    return "[fm-from-firstmate] " + " ".join(task_text.split())
 
 
 def emit_result(
