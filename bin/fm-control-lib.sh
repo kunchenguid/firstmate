@@ -413,18 +413,22 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id>
 # nothing there; an adopted copy (bin/fm-spawn.sh --adopt-worktree) belongs to
 # its creator, so this is the set that is preserved before arming and put back
 # at teardown. The sentinel state dir keeps state-side entries out of the
-# filter without restating which entries those are.
-FM_CONTROL_HARNESS_FAMILIES='claude codex opencode pi pi-signed omp agy devin grok kimi cursor gemini muse rovo'
+# filter without restating which entries those are, and the families come from
+# fm_control_harnesses so a new adapter cannot be wired into a worktree without
+# appearing here.
 fm_control_worktree_wiring_paths() {  # <worktree>
   local wt=${1-} family path
   [ -n "$wt" ] || return 1
-  for family in $FM_CONTROL_HARNESS_FAMILIES; do
+  while IFS= read -r family; do
+    [ -n "$family" ] || continue
     while IFS= read -r path; do
       case $path in "$wt"/*) printf '%s\n' "$path" ;; esac
     done <<EOF
 $(fm_control_harness_wiring_paths "$family" "$wt" "/nonexistent/fm-wiring-sentinel" wiring)
 EOF
-  done
+  done <<EOF
+$(fm_control_harnesses)
+EOF
 }
 
 # Copy an adopted copy's pre-existing worktree wiring into <store> before a
@@ -432,14 +436,20 @@ EOF
 # byte - a symlink, a directory, an unreadable file, a failed copy - is named in
 # FM_CONTROL_ADOPTED_WIRING_UNSAFE and refused, because the alternative is
 # silently destroying someone else's settings. <store> appears only once the
-# whole set is saved, so its presence is what licenses a later restore.
+# whole set is saved, so its presence is what licenses a later restore - and an
+# existing <store> means an earlier adoption's originals are still waiting to be
+# restored, so this returns 2 rather than replacing them with wiring firstmate
+# itself armed over them.
 FM_CONTROL_ADOPTED_WIRING_UNSAFE=
 fm_control_preserve_adopted_wiring() {  # <worktree> <store>
   local wt=${1-} store=${2-} tmp path rel
   [ -n "$wt" ] && [ -n "$store" ] || return 1
   FM_CONTROL_ADOPTED_WIRING_UNSAFE=
+  if [ -e "$store" ] || [ -L "$store" ]; then
+    return 2
+  fi
   tmp="$store.tmp.${BASHPID:-$$}"
-  rm -rf "$store" "$tmp" || return 1
+  rm -rf "$tmp" || return 1
   mkdir -p "$tmp" || return 1
   while IFS= read -r path; do
     [ -n "$path" ] || continue

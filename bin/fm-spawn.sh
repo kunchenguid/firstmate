@@ -3495,19 +3495,27 @@ spawn_adopt_worktree() {
 # the copy back exactly as it was, and refuse before any endpoint exists when a
 # path cannot be saved and restored faithfully.
 spawn_adopt_preserve_wiring() {
-  local store
+  local store rc=0
   store=$(fm_adopted_worktree_wiring_store "$WT") || {
     echo "error: could not resolve where to preserve adopted worktree '$WT''s own harness wiring" >&2
     exit 1
   }
-  if ! fm_control_preserve_adopted_wiring "$WT" "$store"; then
-    if [ -n "$FM_CONTROL_ADOPTED_WIRING_UNSAFE" ]; then
-      echo "error: adopted worktree '$WT' carries '$FM_CONTROL_ADOPTED_WIRING_UNSAFE', which a launch would overwrite but firstmate cannot preserve and restore (it is not a readable regular file, or the copy failed); refusing rather than destroying it" >&2
-    else
-      echo "error: could not preserve adopted worktree '$WT''s own harness wiring under $store; refusing rather than overwriting files firstmate cannot put back" >&2
-    fi
-    exit 1
-  fi
+  fm_control_preserve_adopted_wiring "$WT" "$store" || rc=$?
+  case "$rc" in
+    0) ;;
+    2)
+      echo "error: adopted worktree '$WT' still holds harness wiring preserved at $store by an earlier adoption; those are its creator's originals waiting to be restored, so this dispatch refuses rather than replacing them. Tear that task down (or remove the store once its copy is back as its creator left it) and dispatch again." >&2
+      exit 1
+      ;;
+    *)
+      if [ -n "$FM_CONTROL_ADOPTED_WIRING_UNSAFE" ]; then
+        echo "error: adopted worktree '$WT' carries '$FM_CONTROL_ADOPTED_WIRING_UNSAFE', which a launch would overwrite but firstmate cannot preserve and restore (it is not a readable regular file, or the copy failed); refusing rather than destroying it" >&2
+      else
+        echo "error: could not preserve adopted worktree '$WT''s own harness wiring under $store; refusing rather than overwriting files firstmate cannot put back" >&2
+      fi
+      exit 1
+      ;;
+  esac
   SPAWN_ADOPT_WIRING_STORE=$store
 }
 

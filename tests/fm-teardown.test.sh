@@ -1170,6 +1170,37 @@ SH
   pass "an adopted worktree is left to its creator, never returned to a Treehouse pool"
 }
 
+# A restore that cannot put the creator's file back must say so: the record is
+# removed either way, so a silent failure leaves a hook naming a deleted task
+# live in someone else's copy with nothing in the output to show for it.
+test_adopted_worktree_teardown_warns_when_restore_fails() {
+  local case_dir rc store settings
+  case_dir=$(make_case adopted-restore-fails)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' "worktree_source=adopted" >> "$case_dir/state/task-x1.meta"
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  store=$(git -C "$case_dir/wt" rev-parse --absolute-git-dir)/fm-adopted-wiring
+  mkdir -p "$store/.claude" "$case_dir/wt/.claude"
+  printf '{"creator":true}\n' > "$store/.claude/settings.local.json"
+  settings="$case_dir/wt/.claude/settings.local.json"
+  printf '{"firstmate":true}\n' > "$settings"
+  chmod a-w "$settings"
+  chmod a-w "$case_dir/wt/.claude"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  chmod u+w "$case_dir/wt/.claude" "$settings"
+
+  expect_code 0 "$rc" "adopted-restore-fails: teardown should still complete"$'\n'"$(cat "$case_dir/stderr")"
+  assert_contains "$(cat "$case_dir/stderr")" "could not restore adopted worktree $case_dir/wt" \
+    "adopted-restore-fails: teardown reported success without warning that the restore failed"
+  pass "an adopted teardown whose restore fails says so instead of reporting a clean handback"
+}
+
 # The claim is the cross-home mutual exclusion on an adopted copy, so a teardown
 # whose record is stale must never strip the claim that protects the home that
 # actually holds the copy now.
@@ -4364,6 +4395,7 @@ test_pr_check_records_remote_head_when_local_lags
 test_content_in_default_fallback_allows
 test_adopted_worktree_teardown_skips_pool_return
 test_adopted_worktree_teardown_leaves_another_homes_claim
+test_adopted_worktree_teardown_warns_when_restore_fails
 test_content_fallback_refreshes_stale_origin_ref
 test_dirty_worktree_refuses
 test_gh_error_and_content_absent_refuses

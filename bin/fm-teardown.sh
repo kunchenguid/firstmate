@@ -3270,9 +3270,12 @@ cleanup_firstmate_home_children() {
       # firstmate wrote, and drops only this child's own claim - never the copy,
       # its branch, or another home's claim on it.
       if [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
-        child_wiring_store=$(fm_adopted_worktree_wiring_store "$child_wt" 2>/dev/null) &&
-          fm_control_restore_adopted_wiring "$child_wt" "$child_wiring_store" || true
-        fm_adopted_worktree_owner_release "$child_wt" "$child_id" "$sub_state" || true
+        child_wiring_store=$(fm_adopted_worktree_wiring_store "$child_wt" 2>/dev/null) || child_wiring_store=
+        if [ -z "$child_wiring_store" ] ||
+          ! fm_control_restore_adopted_wiring "$child_wt" "$child_wiring_store"; then
+          echo "warning: could not restore adopted worktree $child_wt to the wiring its creator handed over (store ${child_wiring_store:-unresolved}); task $child_id's hook files may still be live in that copy" >&2
+        fi
+        fm_adopted_worktree_owner_release "$child_wt" "$child_id" "$sub_state"
       fi
     elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
       # The same ownership determination as the parent's own slot: a child
@@ -3612,9 +3615,12 @@ elif [ "$WORKTREE_SOURCE" = adopted ] && [ "$KIND" != secondmate ]; then
   # only the files firstmate wrote are removed, and only this task's own claim
   # is released - a claim another home holds on the same copy is left alone.
   if [ -d "$WT" ]; then
-    ADOPT_WIRING_STORE=$(fm_adopted_worktree_wiring_store "$WT" 2>/dev/null) &&
-      fm_control_restore_adopted_wiring "$WT" "$ADOPT_WIRING_STORE" || true
-    fm_adopted_worktree_owner_release "$WT" "$ID" "$STATE" || true
+    ADOPT_WIRING_STORE=$(fm_adopted_worktree_wiring_store "$WT" 2>/dev/null) || ADOPT_WIRING_STORE=
+    if [ -z "$ADOPT_WIRING_STORE" ] ||
+      ! fm_control_restore_adopted_wiring "$WT" "$ADOPT_WIRING_STORE"; then
+      echo "warning: could not restore adopted worktree $WT to the wiring its creator handed over (store ${ADOPT_WIRING_STORE:-unresolved}); task $ID's hook files may still be live in that copy" >&2
+    fi
+    fm_adopted_worktree_owner_release "$WT" "$ID" "$STATE"
   fi
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)

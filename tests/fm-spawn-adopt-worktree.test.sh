@@ -164,6 +164,43 @@ test_adoption_preserves_the_copys_own_wiring_file() {
   pass "a copy's own wiring file survives adoption and teardown byte-identical"
 }
 
+# Re-running the same first dispatch against a copy already holding a live
+# adoption must not re-preserve firstmate's own armed wiring as if it were the
+# creator's: the originals saved by the first adoption are still pending restore.
+test_redispatch_refuses_rather_than_replacing_preserved_originals() {
+  local id out status settings original store
+  id='adopt-redispatch-store-b1'
+  make_case redispatch-store "$id"
+  printf 'claude\n' > "$HOME_DIR/config/crew-harness"
+  settings="$CLAIM_DIR/.claude/settings.local.json"
+  mkdir -p "$CLAIM_DIR/.claude"
+  printf '{"permissions":{"allow":["Bash(rg:*)"]}}\n' > "$settings"
+  original=$(cat "$settings")
+
+  out=$(run_spawn "$CLAIM_DIR" "$id" --mode no-mistakes --yolo off --adopt-worktree "$CLAIM_DIR")
+  status=$?
+  expect_code 0 "$status" "the first adoption should launch"$'\n'"$out"
+  store=$(git -C "$CLAIM_DIR" rev-parse --absolute-git-dir)/fm-adopted-wiring
+  [ -d "$store" ] || fail "the first adoption preserved nothing, so this test proves nothing"
+
+  out=$(run_spawn "$CLAIM_DIR" "$id" --mode no-mistakes --yolo off --adopt-worktree "$CLAIM_DIR")
+  status=$?
+  [ "$status" -ne 0 ] || fail "a second first-dispatch adopted a copy whose originals are still held"$'\n'"$out"
+  assert_contains "$out" "still holds harness wiring preserved at" \
+    "the redispatch refusal did not name the preserved originals it would have replaced"
+  [ "$(cat "$store/.claude/settings.local.json")" = "$original" ] \
+    || fail "the refused redispatch replaced the creator's preserved original with firstmate's armed wiring"
+
+  FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_CONFIG_OVERRIDE="$HOME_DIR/config" PATH="$FAKEBIN_DIR:$PATH" \
+    "$ROOT/bin/fm-teardown.sh" "$id" --force > "$CASE_DIR/teardown.log" 2>&1
+  status=$?
+  expect_code 0 "$status" "teardown of the adopted task should succeed"$'\n'"$(cat "$CASE_DIR/teardown.log")"
+  [ "$(cat "$settings")" = "$original" ] \
+    || fail "teardown after a refused redispatch handed back firstmate's wiring as the creator's settings"$'\n'"$(cat "$settings")"
+  pass "a redispatch onto a live adoption refuses instead of replacing the preserved originals"
+}
+
 # A refusal that happens after the copy is claimed must not take the creator's
 # own wiring file with it: nothing of firstmate's was armed yet.
 test_refused_adoption_leaves_the_copys_own_wiring_file() {
@@ -396,6 +433,7 @@ test_adoption_from_another_firstmate_home_is_refused
 test_aborted_adoption_leaves_no_firstmate_wiring_in_the_copy
 test_adoption_preserves_the_copys_own_wiring_file
 test_refused_adoption_leaves_the_copys_own_wiring_file
+test_redispatch_refuses_rather_than_replacing_preserved_originals
 test_stale_submodule_pin_is_not_reported_as_uncommitted_work
 test_unusable_adopted_paths_are_refused_with_their_condition
 test_adopt_worktree_is_refused_outside_a_first_ship_or_scout_dispatch
