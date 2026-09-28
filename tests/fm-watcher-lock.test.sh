@@ -12,6 +12,7 @@ WATCH="$ROOT/bin/fm-watch.sh"
 WATCH_ARM="$ROOT/bin/fm-watch-arm.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
 LIB="$ROOT/bin/fm-wake-lib.sh"
+REGISTER="$ROOT/bin/fm-check-register.sh"
 
 # An arm only reports its typed failure after wait_for_healthy_successor has
 # spent the whole confirmation budget, so cases that wait for that failure must
@@ -1357,6 +1358,133 @@ test_stopped_watcher_is_live_but_stale_then_exit_is_classified() {
   pass "SIGSTOP distinguishes live PID from stale beacon and termination records the exit class"
 }
 
+# The real guard predicate, judged with the same grace the watcher itself runs
+# with: bin/fm-claude-stop-autoarm.sh exports its resolved FM_GUARD_GRACE to the
+# watcher it forks precisely so both sides read one value (docs/turnend-guard.md
+# "Guard grace and the poll cadence").
+watcher_reported_down() {  # <home> <state> <grace>
+  local home=$1 state=$2 grace=$3
+  ! FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$1"; fm_watcher_healthy "$2" "$3" "$4" "$5"' \
+    _ "$LIB" "$state" "$WATCH" "$grace" "$home"
+}
+
+beacon_age() {  # <state>
+  FM_STATE_OVERRIDE="$1" bash -c '. "$1"; fm_path_age "$2"' \
+    _ "$LIB" "$1/.last-watcher-beat"
+}
+
+test_long_cycle_does_not_report_a_live_watcher_down() {
+  # The beacon is a liveness signal emitted once per poll cycle and read against
+  # a FIXED grace. A cycle's length grows with the fleet, so that pairing must
+  # eventually report a working watcher as down - and it breaks hardest on the
+  # busiest home, where supervision matters most. Six trusted custom checks, one
+  # second each, make a single sweep outlast the grace with the watcher
+  # demonstrably alive and demonstrably making progress through the sweep.
+  local dir state fakebin out grace pid i lock_pid down_age
+  dir=$(make_case long-cycle-beacon)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  grace=5
+  for i in 1 2 3 4 5 6; do
+    printf '#!/usr/bin/env bash\nsleep 1\n' > "$state/slow$i.check.sh"
+    chmod 0700 "$state/slow$i.check.sh"
+    FM_STATE_OVERRIDE="$state" "$REGISTER" "slow$i" > /dev/null \
+      || fail "could not register the slow custom check slow$i"
+  done
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_GUARD_GRACE="$grace" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=0 \
+    FM_CHECK_TIMEOUT=10 FM_HEARTBEAT=999999 FM_SECONDMATE_LIVENESS_SECS=99999999 \
+    "$WATCH" > "$out" 2> "$dir/watch.err" &
+  pid=$!
+  i=0
+  lock_pid=
+  while [ "$i" -lt 100 ]; do
+    lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+    [ "$lock_pid" = "$pid" ] && [ -e "$state/.last-watcher-beat" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$lock_pid" = "$pid" ] \
+    || fail "slow-cycle watcher did not take the lock: $(cat "$dir/watch.err")"
+
+  # Sample across more than two whole sweeps. Every sample taken while this
+  # watcher is alive and still holds the lock must read healthy.
+  down_age=
+  i=0
+  while [ "$i" -lt 80 ]; do
+    is_live_non_zombie "$pid" || break
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$pid" ] || break
+    if watcher_reported_down "$dir" "$state" "$grace"; then
+      down_age=$(beacon_age "$state")
+      break
+    fi
+    sleep 0.25
+    i=$((i + 1))
+  done
+  if [ -n "$down_age" ]; then
+    kill "$pid" 2>/dev/null || true
+    wait_for_exit "$pid" 100
+    fail "a live watcher mid-sweep was reported down (beacon age ${down_age}s, grace ${grace}s)"
+  fi
+  is_live_non_zombie "$pid" \
+    || fail "slow-cycle watcher exited during the sweep: $(cat "$dir/watch.err")"
+  # A short sample run would pass this case without ever observing a whole
+  # sweep, so the budget must have been spent rather than escaped.
+  [ "$i" -eq 80 ] \
+    || fail "sampling stopped after $i reads; the watcher stopped holding its own lock"
+  kill "$pid" 2>/dev/null || true
+  wait_for_exit "$pid" 100
+  pass "a poll cycle longer than the grace keeps a live watcher's beacon fresh"
+}
+
+test_stopped_watcher_beacon_still_ages_into_a_down_verdict() {
+  # The other half of the same contract, and the reason the fix above may only
+  # ADD in-cycle touches rather than refresh the beacon on someone else's
+  # behalf: the guard is the only reader that notices a watcher that has
+  # stopped. Nothing here backdates the beacon by hand - the watcher is stopped
+  # and its beacon is left to age on its own, so a detached beater or an
+  # unconditional refresh would keep this verdict healthy and fail the case.
+  local dir state fakebin out grace pid i lock_pid
+  dir=$(make_case stopped-beacon-ages)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  grace=2
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_GUARD_GRACE="$grace" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 \
+    FM_HEARTBEAT=999999 FM_SECONDMATE_LIVENESS_SECS=99999999 \
+    "$WATCH" > "$out" 2> "$dir/watch.err" &
+  pid=$!
+  i=0
+  lock_pid=
+  while [ "$i" -lt 100 ]; do
+    lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+    [ "$lock_pid" = "$pid" ] && [ -e "$state/.last-watcher-beat" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$lock_pid" = "$pid" ] \
+    || fail "stoppable watcher did not take the lock: $(cat "$dir/watch.err")"
+  watcher_reported_down "$dir" "$state" "$grace" \
+    && fail "a freshly polling watcher was reported down"
+
+  kill -STOP "$pid" 2>/dev/null || fail "could not SIGSTOP the watcher"
+  # Longer than the grace, and longer than any in-cycle touch cadence derived
+  # from it, so only a real beat could keep this verdict healthy.
+  sleep $((grace + 3))
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_alive "$2"' _ "$LIB" "$pid" \
+    || fail "the stopped watcher was not classified as a live pid"
+  watcher_reported_down "$dir" "$state" "$grace" \
+    || fail "a stopped watcher kept a fresh beacon (age $(beacon_age "$state")s, grace ${grace}s)"
+
+  kill -CONT "$pid" 2>/dev/null || true
+  kill -TERM "$pid" 2>/dev/null || true
+  wait_for_exit "$pid" 100
+  pass "a stopped watcher's beacon still ages into a down verdict"
+}
+
 test_pid_identity_is_locale_invariant() {
   # The portable fallback records its process identity under one locale, then
   # arm/guard/turn-end re-read it under the machine's ambient locale. ps's lstart
@@ -1585,3 +1713,5 @@ test_arm_waits_for_peer_beacon_after_child_stands_down
 test_arm_fails_loud_when_no_fresh_watcher_confirmable
 test_cycle_exit_ledger_links_successor_and_stays_bounded
 test_stopped_watcher_is_live_but_stale_then_exit_is_classified
+test_long_cycle_does_not_report_a_live_watcher_down
+test_stopped_watcher_beacon_still_ages_into_a_down_verdict

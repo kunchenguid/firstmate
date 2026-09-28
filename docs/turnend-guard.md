@@ -206,8 +206,21 @@ With `state/.afk` absent the daemon lock proves nothing and the strict watcher p
 
 ### Guard grace and the poll cadence
 
-`bin/fm-watch.sh` touches `state/.last-watcher-beat` once per cycle, immediately before its terminal wait (`event_wait_or_sleep`) as well as at the top of the next cycle.
-A healthy watcher's beacon can therefore legitimately age up to `FM_POLL` seconds between touches.
+`bin/fm-watch.sh` touches `state/.last-watcher-beat` unconditionally at the top of every cycle.
+It also re-touches it at the item boundaries of the cycle's variable-length loops - the pending-reply records, the secondmate liveness relaunches, the armed-check sweep, the recorded-window stale scan, and the per-task status scans - and just before the terminal wait, but only once the previous touch is `BEAT_INTERVAL` old.
+`BEAT_INTERVAL` derives from the resolved grace, and `bin/fm-watch.sh` is the single owner of that derivation and of the `FM_BEAT_INTERVAL` override.
+A healthy watcher's beacon therefore ages at most `BEAT_INTERVAL` plus the longer of one bounded step or `FM_POLL` between touches, rather than the whole cycle's accumulated per-task work.
+
+That relationship is the reason for the in-cycle touches.
+A liveness signal emitted once per variable-length loop and read against a fixed threshold must eventually report a working watcher as down, and it does so most readily on the homes carrying the most work, because their cycles are the longest.
+Emitting the beacon mid-cycle is honest, because a beat claims only that this process is alive and that is true at every boundary it is emitted from.
+The throttle only ever removes touches relative to an unconditional call, so a healthy short cycle keeps its historical one-touch-per-cycle cadence and every reader of that cadence is unaffected.
+
+Detection of a watcher that has genuinely stopped is unchanged, and that is the property the in-cycle touches may not weaken, because this beacon is the only thing that notices such a watcher.
+A stopped process emits nothing, so its beacon ages past the grace and every reader reports it down within `max(300, FM_POLL + 60)` seconds of its last touch.
+Nothing refreshes the beacon from a detached process or on a timer, and every beat sits between two pieces of work, so a watcher wedged inside a single step never reaches the next boundary and still reads down.
+The largest bounded step between two beats is one secondmate relaunch at `FM_SECONDMATE_LIVENESS_TIMEOUT` (120 seconds by default), or one armed check at `FM_CHECK_TIMEOUT` (30 seconds by default); a home that raises either past the grace less `BEAT_INTERVAL` can again read down during that single step.
+An unbounded step, such as a backend capture that hangs, is exactly the wedge this verdict must catch.
 
 A fixed 300-second grace default stops correctly bounding staleness once a home's `FM_POLL` reaches or exceeds it.
 A perfectly healthy watcher mid-wait would then read stale at the edge of every full poll cycle by definition.
