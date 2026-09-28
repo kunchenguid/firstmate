@@ -197,6 +197,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
 # shellcheck source=bin/fm-secondmate-parent-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-secondmate-parent-lib.sh"
+# shellcheck source=bin/fm-session-lock-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
 # Shared secondmate endpoint probe + guarded relaunch; the watcher's poll tick
 # drives the same library so session start and ordinary supervision recover
 # from identical evidence through an identical path.
@@ -1458,34 +1460,48 @@ detect_local_config() {
 # merged here.
 #
 # The code root is the one this home's own sessions run from, not the checkout
-# this script happens to live in. A home that carries its own tracked
-# .tasks.toml is a Firstmate checkout and so is its own code root; the invoking
-# checkout's data/ is then another home's live backlog, never a fork of this
-# one. Only a home with no .tasks.toml borrows the invoking code root.
-#
-# The remedy never moves another live home's records: a code root that is
-# itself a live home (it has its own state/, or it is this home's registered
-# parent) keeps its file, so the reader copies this home's rows in and leaves
-# it alone. Any other code-root copy is a genuine stray and is moved aside.
+# this script happens to live in. A home that is itself a Firstmate checkout
+# (its own AGENTS.md and bin/fm-bootstrap.sh, as a leased secondmate worktree
+# is) runs its own scripts and so is its own code root; the invoking checkout's
+# data/ is then another home's live backlog, never a fork of this one. Any
+# other home borrows the invoking code root - including one that carries its
+# own .tasks.toml only to select a backlog adapter, because its sessions still
+# run tasks-axi from that code root.
+home_code_root() {
+  if [ -f "$FM_HOME/AGENTS.md" ] && [ -f "$FM_HOME/bin/fm-bootstrap.sh" ]; then
+    printf '%s\n' "$FM_HOME"
+  else
+    printf '%s\n' "$FM_ROOT"
+  fi
+}
+
+# The remedy never moves another home's records while that home is in use.
+# Only evidence of use counts: the code root is this home's registered parent,
+# or a live verified-harness session holds its session lock right now. A
+# directory that merely looks like a home - a state/ left behind when the home
+# moved out of the code root, or a dead lock - is not in use, so its copy is a
+# genuine stray the reader merges and moves aside, which clears the line.
 code_root_is_other_live_home() {  # <code-root>
   local root=$1
   [ "$root" -ef "$FM_HOME" ] && return 1
-  [ -d "$root/state" ] && return 0
-  fm_secondmate_parent_record_parse "$FM_HOME/.fm-secondmate-parent" 2>/dev/null \
-    && [ -n "$FM_SECONDMATE_PARENT_HOME" ] && [ "$FM_SECONDMATE_PARENT_HOME" -ef "$root" ]
+  if fm_secondmate_parent_record_parse "$FM_HOME/.fm-secondmate-parent" 2>/dev/null \
+    && [ -n "$FM_SECONDMATE_PARENT_HOME" ] && [ "$FM_SECONDMATE_PARENT_HOME" -ef "$root" ]; then
+    return 0
+  fi
+  fm_session_lock_inspect "$root/state"
+  [ "$FM_LOCK_INSPECT_STATE" = held ]
 }
 
 detect_code_root_backlog_fork() {
   local name code_root root_copy remedy
-  code_root=$FM_ROOT
-  [ -f "$FM_HOME/.tasks.toml" ] && code_root=$FM_HOME
+  code_root=$(home_code_root)
   [ "$code_root/data" -ef "$DATA" ] && return 0
   for name in backlog.md done-archive.md; do
     root_copy="$code_root/data/$name"
     [ -e "$root_copy" ] || [ -L "$root_copy" ] || continue
     [ "$root_copy" -ef "$DATA/$name" ] && continue
     if code_root_is_other_live_home "$code_root"; then
-      remedy="copy only this home's rows into $DATA/$name and leave the code-root file in place, because it is another live home's record"
+      remedy="leave the code-root file in place, because it is another live home's record, and copy into $DATA/$name only rows whose task id has a record in this home and none in $code_root, where a record is a state/<id>.* file or a data/<id>/ directory"
     else
       remedy="merge it into this home's copy and move it aside"
     fi
