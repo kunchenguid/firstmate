@@ -21,6 +21,7 @@ import { execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { publish as atomicPublish } from './fm-short-agent.mjs';
+const CODEBASE_MERGE_READBACK_TIMEOUT_MS=180000;
 function publish(file,value) {
   const created=atomicPublish(file,value);
   if(created) {
@@ -245,8 +246,9 @@ function codebaseMergeReadback(root,url,head) {
   try {
     output=execFileSync('bash',['-c',
       '. "$1"; fm_pr_url_parse "$2" && [ "$FM_PR_PROVIDER" = codebase ] || exit 2; FM_PR_MERGE_HEAD=$3; command -v bytedcli >/dev/null && command -v jq >/dev/null || exit 2; fm_pr_codebase_read_identity && fm_pr_codebase_confirm_merged || exit $?; printf "%s\\t%s\\n" "$FM_PR_MERGE_HEAD" "$FM_PR_CODEBASE_MERGE_COMMIT"',
-      'short-merge-readback',library,url,head],{encoding:'utf8',timeout:30000,stdio:['ignore','pipe','pipe']}).trim();
+      'short-merge-readback',library,url,head],{encoding:'utf8',timeout:CODEBASE_MERGE_READBACK_TIMEOUT_MS,stdio:['ignore','pipe','pipe']}).trim();
   } catch(error) {
+    if(error?.code==='ETIMEDOUT') fail(`Codebase merge readback refused: timed out after ${CODEBASE_MERGE_READBACK_TIMEOUT_MS}ms`);
     const detail=String(error.stderr??'').trim();
     fail(detail?`Codebase merge readback refused: ${detail}`:'Codebase merge readback refused');
   }

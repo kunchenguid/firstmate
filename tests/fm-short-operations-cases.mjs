@@ -102,7 +102,7 @@ fs.writeFileSync(forge,JSON.stringify({merged:false,calls:0,red:false,lost:false
 process.env.FM_SHORT_TEST_FORGE=forge;
 fs.writeFileSync(path.join(fakebin,'bytedcli'),`#!/usr/bin/env node
 const fs=require('fs');const f=process.env.FM_SHORT_TEST_FORGE,s=JSON.parse(fs.readFileSync(f));
-const verb=process.argv[5];let head='c'.repeat(40);if(verb==='status'){s.statusReads=(s.statusReads||0)+1;fs.writeFileSync(f,JSON.stringify(s));if(s.bad){console.log('null');process.exit(0);}if(s.changed&&s.statusReads>1)head='d'.repeat(40);}
+const verb=process.argv[5];let head='c'.repeat(40);if(verb==='status'){s.statusReads=(s.statusReads||0)+1;fs.writeFileSync(f,JSON.stringify(s));if(s.statusDelayMs)Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,s.statusDelayMs);if(s.bad){console.log('null');process.exit(0);}if(s.changed&&s.statusReads>1)head='d'.repeat(40);}
 const url='https://code.byted.org/example/shortlab/merge_requests/7';
 if(verb==='merge'){s.calls++;s.merged=true;fs.writeFileSync(f,JSON.stringify(s));if(s.crash){
  const path=require('path'),effect=JSON.parse(fs.readFileSync(path.join(process.env.FM_HOME,'state/short-agents',process.env.FM_SHORT_TASK,'operation-0.effect.json')));
@@ -111,9 +111,23 @@ if(verb==='merge'){s.calls++;s.merged=true;fs.writeFileSync(f,JSON.stringify(s))
  process.kill(effect.owner.pid,'SIGKILL');process.exit(9);
 }if(s.lost)process.exit(9);console.log(JSON.stringify({status:'success',data:{merged:true}}));}
 else if(verb==='status') console.log(JSON.stringify({status:'success',data:{repository:{path:'example/shortlab'},merge_request:{id:s.statusMissingId?undefined:'123',number:7,status:s.merged?'merged':'open',url,source_branch:'topic',target_branch:s.statusTarget||'main',source_commit_id:head},mergeability:{mergeable:!s.red,checks:[{passed:!s.red}],failed_checks:s.red?['red']:[]},review:{status:'passed'},check_runs:{summary:'no_checks',total_count:0,page_size:100,passed_count:0,failed_count:0,running_count:0,items:[]}}}));
-else if(verb==='get'){if(s.getFails)process.exit(9);console.log(JSON.stringify(s.getMalformed?{status:'success',data:[]}:{status:'success',data:{repository:{path:s.getRepo||'example/shortlab'},merge_request:{Id:s.getId||'123',Number:7,Status:s.merged?'merged':'open',URL:s.getUrl||url,SourceBranchName:'topic',TargetBranchName:s.getTarget||'main',MergeCommitId:s.getMerge||'d'.repeat(40)},version:{SourceCommitId:s.getHead||head}}}));}
+else if(verb==='get'){if(s.getDelayMs)Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,s.getDelayMs);if(s.getFails)process.exit(9);console.log(JSON.stringify(s.getMalformed?{status:'success',data:[]}:{status:'success',data:{repository:{path:s.getRepo||'example/shortlab'},merge_request:{Id:s.getId||'123',Number:7,Status:s.merged?'merged':'open',URL:s.getUrl||url,SourceBranchName:'topic',TargetBranchName:s.getTarget||'main',MergeCommitId:s.getMerge||'d'.repeat(40)},version:{SourceCommitId:s.getHead||head}}}));}
 else process.exit(2);
 `,{mode:0o755});
+const timeoutHook=path.join(tmp,'short-readback-timeout-hook.mjs');
+fs.writeFileSync(timeoutHook,`import childProcess from 'node:child_process';
+import fs from 'node:fs';
+import {syncBuiltinESMExports} from 'node:module';
+const original=childProcess.execFileSync;
+childProcess.execFileSync=function(command,args,options={}) {
+  if(command==='bash'&&Array.isArray(args)&&args.includes('short-merge-readback')) {
+    fs.writeFileSync(process.env.FM_SHORT_TIMEOUT_PROBE,String(options.timeout));
+    return original.call(this,command,args,{...options,timeout:50});
+  }
+  return original.call(this,command,args,options);
+};
+syncBuiltinESMExports();
+`);
 process.env.PATH=fakebin+path.delimiter+process.env.PATH;
 fs.mkdirSync(path.join(home,'data'),{recursive:true});fs.mkdirSync(path.join(home,'config'),{recursive:true});
 fs.writeFileSync(path.join(home,'data/backlog.md'),'## In flight\n\n## Queued\n\n## Done\n');
@@ -203,10 +217,18 @@ fs.writeFileSync(forge,JSON.stringify({merged:true,calls:1,getRepo:'other/repo'}
 for(const identityFailure of [{statusMissingId:true},{getId:'other-id'},{getTarget:'release'}]) {
  fs.writeFileSync(forge,JSON.stringify({merged:true,calls:1,...identityFailure}));assert.throws(settleRefusalCli,/identity.*changed|could not be confirmed|readback refused/i);assert.ok(fs.existsSync(refusalMarker));assert.ok(!fs.existsSync(path.join(refusalDir,'operation-0.receipt.json')));
 }
+const timeoutProbe=path.join(tmp,'short-readback-timeout-probe');
+fs.writeFileSync(forge,JSON.stringify({merged:true,calls:1,statusDelayMs:5000}));
+const timeoutProtectedFiles=[path.join(refusalDir,'request.json'),path.join(refusalDir,'result.json'),refusalEffectPath,refusalMarker,crashedMarkers[1].file];
+const timeoutProtectedBytes=timeoutProtectedFiles.map(file=>fs.readFileSync(file,'utf8'));
+const timeoutAt=Date.now();
+assert.throws(()=>execFileSync(process.execPath,[path.join(root,'bin/fm-short-agent.mjs'),'settle-merge',refusal.id,`0:${expectedMergeCommit}`],{encoding:'utf8',env:{...process.env,FM_HOME:home,NODE_OPTIONS:`--import=${pathToFileURL(timeoutHook).href}`,FM_SHORT_TIMEOUT_PROBE:timeoutProbe}}),/Codebase merge readback refused: timed out after 180000ms/);
+assert.ok(Date.now()-timeoutAt<5000,'bounded readback timeout refuses the public settlement command');
+assert.equal(fs.readFileSync(timeoutProbe,'utf8'),'180000');assert.equal(JSON.parse(fs.readFileSync(forge)).calls,1);assert.deepEqual(timeoutProtectedFiles.map(file=>fs.readFileSync(file,'utf8')),timeoutProtectedBytes,'timeout preserves exact operation evidence and reservations');assert.ok(!fs.existsSync(path.join(refusalDir,'operation-0.receipt.json')));
 const refusalMeta=path.join(home,'state/merge-settle-refusal.meta'),refusalMetaText=fs.readFileSync(refusalMeta,'utf8');fs.writeFileSync(refusalMeta,refusalMetaText.replace('spawn_gen=g1','spawn_gen=g2'));assert.throws(()=>settleMergeReceipt(home,root,refusal.id,0,expectedMergeCommit),/identity changed/);fs.writeFileSync(refusalMeta,refusalMetaText);
 assert.throws(()=>settleMergeReceipt(home,root,a.id,0,expectedMergeCommit),/Codebase merge effects only/,'unsupported effects cannot be settled');
 const unrelatedReservation=path.join(home,'state/.short-operation-unrelated.json');fs.writeFileSync(unrelatedReservation,'{"unrelated":true}');
-fs.writeFileSync(forge,JSON.stringify({merged:true,calls:1}));settleMergeReceipt(home,root,refusal.id,0,expectedMergeCommit);assert.ok(!fs.existsSync(refusalMarker));assert.equal(fs.readFileSync(unrelatedReservation,'utf8'),'{"unrelated":true}');fs.unlinkSync(unrelatedReservation);
+fs.writeFileSync(forge,JSON.stringify({merged:true,calls:1,statusDelayMs:15500,getDelayMs:15500}));const slowReadbackAt=Date.now();settleMergeReceipt(home,root,refusal.id,0,expectedMergeCommit);assert.ok(Date.now()-slowReadbackAt>=30000,'legitimate aggregate readback may exceed the former 30s budget');assert.ok(!fs.existsSync(refusalMarker));assert.equal(fs.readFileSync(unrelatedReservation,'utf8'),'{"unrelated":true}');assert.equal(JSON.parse(fs.readFileSync(forge)).calls,1,'slow settlement never replays the merge');fs.unlinkSync(unrelatedReservation);
 // A completed first action survives a refused later action.
 fs.writeFileSync(forge,JSON.stringify({merged:false,calls:0,red:false,lost:false}));writeTask('merge-partial');
 fs.writeFileSync(path.join(project,'dirty'),'preserved');
