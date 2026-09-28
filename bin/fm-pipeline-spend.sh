@@ -9,13 +9,15 @@
 # data/pipeline-spend.jsonl, at most once per task incarnation (task id plus
 # the record's spawn_gen): repeating it for an incarnation already in the
 # ledger appends nothing, so a retried cleanup never counts a task twice.
+# Recording is disabled unless config/pipeline-spend is present; in that case
+# this command exits before reading task metadata, no-mistakes state, or ledger.
 # bin/fm-teardown.sh calls record for every ship task whose local copy it
 # cleans up, before it deletes the task branch this script attributes runs by
 # and before it removes state/<id>.meta. The ledger is private and gitignored
 # with the rest of data/.
-# Exit status: 0 when a record was recorded or already present (including one
-# whose source is unavailable), 1 when the task record is missing, names a
-# secondmate, or the record could not be built or written, 2 for bad usage.
+# Exit status: 0 when a record was recorded or already present, its source is
+# unavailable, or recording is disabled; 1 when the task record is missing,
+# names a secondmate, or the record could not be built or written; 2 for bad usage.
 #
 # Source. no-mistakes keeps each agent invocation's token usage only in its
 # local state database, one agent_invocations row per invocation; its
@@ -82,6 +84,7 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-$FM_ROOT}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
@@ -103,6 +106,7 @@ esac
 [ "$#" -eq 2 ] || { usage >&2; exit 2; }
 ID=$2
 fm_task_id_path_safe "$ID" || { echo "fm-pipeline-spend: invalid task id" >&2; exit 2; }
+[ -e "$CONFIG/pipeline-spend" ] || exit 0
 TIMEOUT=30
 
 META="$STATE/$ID.meta"

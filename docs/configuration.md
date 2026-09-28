@@ -77,7 +77,7 @@ Each effective `FM_HOME` contains private operational directories.
 
 - Project and secondmate registries.
 - Captain preferences and optional shared captain preferences.
-- Learnings, backlog, briefs, scout reports, and the per-task no-mistakes pipeline-spend ledger.
+- Learnings, backlog, briefs, scout reports, and the optional per-task no-mistakes pipeline-spend ledger.
 - Explicitly installed content-addressed extension packages under `data/extensions/packages/`.
 
 `state/` holds runtime records:
@@ -565,6 +565,12 @@ See [`trace-context.md`](trace-context.md) for carrier semantics, supported rout
 ## Fleet activity ledger (config/fleet-ledger)
 
 See [`fleet-ledger.md`](fleet-ledger.md) for the opt-in setup, record contract, and limits.
+
+## No-mistakes pipeline spend (config/pipeline-spend)
+
+The optional local, gitignored `config/pipeline-spend` presence flag opts this home into recording per-task no-mistakes pipeline spend in `data/pipeline-spend.jsonl` during teardown.
+When the flag is absent, teardown skips recording and the recorder exits before reading task metadata, no-mistakes state, or the spend ledger.
+An existing ledger is left untouched while recording is disabled.
 
 ## Turn-end pane-churn absorb (config/turnend-churn-absorb)
 
