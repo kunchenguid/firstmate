@@ -403,7 +403,8 @@ engine_snapshot() {  # <evidence-file> <since-epoch>
 ${summary%%$'\n'*}
 EOF
   if fm_supervision_host_config "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" "$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null)" \
-    && retry=$(fm_supervision_host_paused_until "$STATE"); then
+    && retry=$(fm_supervision_host_paused_until "$STATE") \
+    && { [ -z "$recovered" ] || [ "$retry" -gt "$recovered" ]; }; then
     paused=1
     if [ "$(date +%s)" -lt "$retry" ]; then
       state="still paused at return: every wake reaches main until $(epoch_to_iso "$retry"), then one wake probes the engine again"

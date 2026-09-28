@@ -1147,6 +1147,33 @@ $recovered${tab}recovered${tab}after a successful probe"
   pass "a lost second trip append does not attach the current pause to a recovered episode"
 }
 
+test_return_brief_does_not_invent_a_trip_while_recovery_is_being_saved() {
+  local dir out now first recovered tab section first_iso recovered_iso
+  dir="$TMP_ROOT/brief-recovery-save-interleaving"
+  tab=$(printf '\t')
+  install_runner "$dir"
+  now=$(date +%s)
+  printf '%s\n' "$((now - 120))" > "$dir/home/state/.afk"
+  first=$((now - 60))
+  recovered=$((now - 30))
+  seed_host_latch "$dir" 2 300 "$((recovered - 1))" "$first${tab}latch${tab}errors=2${tab}cooldown=300s
+$recovered${tab}recovered${tab}after a successful probe"
+  touch "$dir/home/state/.last-watcher-beat"
+  : > "$dir/home/state/.fake-drain"
+  out=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" FM_CONFIG_OVERRIDE="$dir/home/config" \
+    "$dir/bin/fm-afk-return.sh" begin 2>&1) || fail "a recovery being saved should not hold the gate: $out"
+  section=$(printf '%s\n' "$out" | sed -n '/^Tried and failed, or could not be fixed:$/,/^Landed, cleanup due:$/p')
+  first_iso=$(date -u -r "$first" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d "@$first" +%Y-%m-%dT%H:%M:%SZ)
+  recovered_iso=$(date -u -r "$recovered" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d "@$recovered" +%Y-%m-%dT%H:%M:%SZ)
+  [ "$(printf '%s\n' "$section" | grep -c '  - the supervision session latched')" -eq 1 ] \
+    || fail "a recovery before health_save invented another latch: $section"
+  assert_contains "$section" "  - the supervision session latched at $first_iso after 2 consecutive engine errors and paused away supervision (last cooldown 300s); it recovered at $recovered_iso after a successful probe" \
+    "the recovered trip was not reported as the only latch"
+  assert_not_contains "$section" 'trip time unavailable' "a recovery before health_save was reported as a new trip"
+  assert_not_contains "$section" 'still paused at return' "a recovered episode was reported as paused"
+  pass "a recovered row preceding the stale retry time does not invent a second trip"
+}
+
 test_return_brief_keeps_trip_row_count_after_probe() {
   local dir out now tab
   dir="$TMP_ROOT/brief-trip-count"
@@ -1353,6 +1380,7 @@ test_return_brief_does_not_report_an_acked_watcher_down_marker_as_a_gap
 test_return_brief_reports_only_an_open_downtime_episode_as_a_gap
 test_return_brief_reports_an_engine_latch_in_the_window
 test_return_brief_keeps_recovered_trip_when_next_append_is_lost
+test_return_brief_does_not_invent_a_trip_while_recovery_is_being_saved
 test_return_brief_keeps_trip_row_count_after_probe
 test_return_brief_ignores_previous_main_session
 test_return_brief_keeps_in_window_history_across_main_restart
