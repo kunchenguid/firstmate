@@ -20,6 +20,8 @@ from pathlib import Path
 TS_BASE = os.environ.get("FM_JEV_TS_BASE", "https://api.typesafe.ai")
 TS_MODEL = os.environ.get("FM_JEV_TS_MODEL", "jev-latest")
 TS_TIMEOUT = float(os.environ.get("FM_JEV_TS_TIMEOUT", "5.0"))
+# One floor for both Jev signals: a route below it (or non-finite) is handled
+# direct, never dispatched; a noul at or above it charters a new secondmate.
 SIGNAL_FLOOR = 0.7
 BUILTIN_ROUTES = ("new_domain", "captain_direct")
 

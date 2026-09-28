@@ -6,7 +6,10 @@
 #   fm-route-dispatch.sh --brief <file> [--execute] [--json]
 #
 # If --execute is specified, it automatically dispatches matched tasks to the
-# owning second mate using bin/fm-send.sh.
+# owning second mate using bin/fm-send.sh. A dispatch message over
+# MAX_MESSAGE_BYTES is refused unsent (exit 2). With --json --execute, the
+# router JSON is always printed, extended with `dispatched` and
+# `send_exit_code`, and the script exits with the send status.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
