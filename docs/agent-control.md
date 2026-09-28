@@ -147,7 +147,9 @@ The Herdr rebind registers no abort cleanup, so a refusal in the window between 
 The stray pane holds a bare shell - the harness is not delivered until after publication - so the next reclaim cleans up after it: the re-created tab carries the same `fm-<id>` label, `tab create` finds it, classifies it a husk, and closes and replaces it.
 That self-heals only when the retry resolves the *same* workspace, which the placement rule above does not guarantee.
 The worktree and the task's records are unaffected either way.
-A tmux rebind does register that cleanup: a refusal between creating the fresh window and republishing the record closes that window, so a retry never meets a same-named window of its own making.
+A tmux rebind does register that cleanup, within two bounds it states rather than assumes.
+It closes the fresh window only while no record names it: publication can report failure after its rename has already landed, and from that moment the window is the task's recorded endpoint, so the cleanup leaves it alone.
+A close tmux cannot confirm warns rather than passing silently, and the duplicate-name refusal above then catches the leftover window on the next reclaim instead of reusing it.
 
 ### Failure and rollback
 
