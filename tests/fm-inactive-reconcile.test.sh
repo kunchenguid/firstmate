@@ -98,6 +98,52 @@ write_child() { # <home> <id> <status> [spawn-gen]
   age "$home/state/$id.meta" "$home/state/$id.status" "$home/state/$id.turn-ended"
 }
 
+# A ship child with the real git topology bin/fm-landing-lib.sh's
+# work_is_landed() actually inspects: a bare origin, a project clone with a
+# genuine `origin` remote and origin/HEAD, and a worktree on its own task
+# branch distinct from the default branch - unlike write_child's single
+# untracked directory, whose "origin/main" is a bare ref pointing nowhere.
+# No pr= is recorded, so the landing proof falls to the content-in-default
+# check exactly like a yolo-merged or no-CI ship. Args: <home> <id> <land>
+# where land=yes pushes the worktree's exact file change onto origin's
+# default branch first (simulating a squash merge), and land=no leaves it
+# only local and unpushed.
+write_landing_child() { # <home> <id> <land>
+  local home=$1 id=$2 land=$3 origin project wt tmp
+  origin="$home/origin-$id.git"
+  project="$home/projects/$id-proj"
+  wt="$home/projects/$id"
+  git init -q --bare "$origin"
+  git -C "$origin" symbolic-ref HEAD refs/heads/main
+  tmp="$home/_seed-$id"
+  git clone -q "$origin" "$tmp"
+  git -C "$tmp" -c user.email=t@t -c user.name=t commit -q --allow-empty -m 'origin baseline'
+  git -C "$tmp" push -q origin main
+  rm -rf "$tmp"
+  git clone -q "$origin" "$project"
+  git -C "$project" remote set-head origin main 2>/dev/null || true
+  git -C "$project" worktree add -q -b "fm/$id" "$wt" main
+  printf 'task change\n' > "$wt/feature.txt"
+  git -C "$wt" add feature.txt
+  git -C "$wt" -c user.email=t@t -c user.name=t commit -q -m 'task work'
+  if [ "$land" = yes ]; then
+    tmp="$home/_land-$id"
+    git clone -q "$origin" "$tmp"
+    printf 'task change\n' > "$tmp/feature.txt"
+    git -C "$tmp" add feature.txt
+    git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m 'squash feature.txt'
+    git -C "$tmp" push -q origin HEAD:main
+    rm -rf "$tmp"
+  fi
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" "worktree=$wt" "project=$project" \
+    'harness=codex' 'kind=ship' 'mode=no-mistakes' 'yolo=off' \
+    "spawn_gen=s${BASHPID:-$$}.$RANDOM"
+  printf 'working: finishing up\n' > "$home/state/$id.status"
+  : > "$home/state/$id.turn-ended"
+  age "$home/state/$id.meta" "$home/state/$id.status" "$home/state/$id.turn-ended"
+}
+
 write_mate_meta() {
   fm_write_secondmate_meta "$MAIN/state/mate.meta" "$MATE"
   printf 'working: delegated scope\n' > "$MAIN/state/mate.status"
@@ -123,7 +169,9 @@ run_report() { # <home> <child>
 }
 
 wake_count() { # <home> <key prefix>
-  grep -c "$2" "$1/state/.wake-queue" 2>/dev/null || true
+  local n
+  n=$(grep -c "$2" "$1/state/.wake-queue" 2>/dev/null) || true
+  printf '%s\n' "${n:-0}"
 }
 
 outcome_count() { # <home> <suffix>
@@ -841,9 +889,14 @@ test_scan_marker_replaces_symlink_safely() {
   pass "scan marker replaces a symlink without overwriting its target"
 }
 
+# unknown is deliberately excluded from this loop: unlike working/paused/parked,
+# an unknown verdict now gets one independent landing check (see
+# test_unknown_state_with_unlanded_content_is_not_flagged below), so its
+# "does not report" case needs a fixture with a real, genuinely unlanded
+# worktree rather than write_child's single-directory fixture.
 test_nonterminal_and_captain_held_states_do_not_report() {
   local state
-  for state in working paused parked unknown; do
+  for state in working paused parked; do
     make_world "nonterminal-$state"; write_child "$MAIN" child 'working: still active'
     FM_FAKE_CREW_STATE="$state" run_reconcile "$MAIN" --startup
     [ "$(outcome_count "$MAIN" pending)" = 0 ] || fail "$state produced a terminal outcome"
@@ -1038,6 +1091,49 @@ SH
   pass "reconciliation state reads set no-forge mode"
 }
 
+# Root-cause regression: fm-crew-state.sh deliberately reports unknown, never
+# an optimistic done, when no no-mistakes run is attributed to a crew and its
+# endpoint cannot be read (its own header, step 5) - exactly how a genuinely
+# landed task whose run record aged out of the ledger, or whose pane simply
+# closed after finishing, is reported back here. Before this fix, an unknown
+# verdict was indistinguishable from a still-working crew and reconciliation
+# never looked further, so a ship whose content had already landed on the
+# default branch (the common squash-merge-then-delete-branch flow) stayed
+# invisible - correctly landed by bin/fm-teardown.sh's own work_is_landed(),
+# but never routed toward teardown.
+test_unknown_state_with_landed_content_is_flagged_done() {
+  local record
+  make_world landed-unknown
+  write_landing_child "$MAIN" child yes
+  FM_FAKE_CREW_STATE='unknown' run_reconcile "$MAIN" --startup
+  [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 1 ] \
+    || fail "a genuinely landed ship stuck at unknown was not flagged for teardown"
+  [ "$(outcome_count "$MAIN" pending)" = 1 ] \
+    || fail "the landed verdict did not retain a presentation receipt"
+  record=$(find "$MAIN/state/terminal-outcomes" -type f -name '*.pending' | head -1)
+  [ -n "$record" ] || fail "no presentation receipt was written"
+  grep -Fxq 'state=done' "$record" \
+    || fail "an unknown verdict proven landed was not recorded as done: $(cat "$record")"
+  grep -Fxq 'task_id=child' "$record" || fail "the presentation receipt named the wrong task"
+  pass "an unknown verdict for genuinely landed content is flagged done and routed to teardown"
+}
+
+# The mirror case: an unknown verdict for work that never landed anywhere -
+# still local and unpushed, with no PR and no matching content on the default
+# branch - must not be fast-tracked into a terminal outcome just because no
+# run was attributed to it. The independent landing check must not turn an
+# absence of evidence into an optimistic done.
+test_unknown_state_with_unlanded_content_is_not_flagged() {
+  make_world unlanded-unknown
+  write_landing_child "$MAIN" child no
+  FM_FAKE_CREW_STATE='unknown' run_reconcile "$MAIN" --startup
+  [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 0 ] \
+    || fail "genuinely unlanded work was flagged for teardown"
+  [ "$(outcome_count "$MAIN" pending)" = 0 ] \
+    || fail "genuinely unlanded work left a presentation receipt"
+  pass "an unknown verdict for genuinely unlanded work is left alone"
+}
+
 test_main_direct_terminal_presentation_receipt
 test_branch_ack_retires_inactive_outcome_receipt
 test_unpushed_ci_ready_done_is_not_published
@@ -1075,5 +1171,7 @@ test_notice_recovery_does_not_duplicate_wake
 test_missing_parent_binding_names_itself
 test_reconciliation_never_calls_forge
 test_reconciliation_sets_no_forge_mode_for_state_read
+test_unknown_state_with_landed_content_is_flagged_done
+test_unknown_state_with_unlanded_content_is_not_flagged
 
 echo "all inactive reconciliation tests passed"
