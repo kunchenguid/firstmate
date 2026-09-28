@@ -1038,7 +1038,7 @@ if [ -n "$owner" ]; then
 fi
 case "$n" in
   1) trigger=$LEGACY_TRIGGER1 ;;
-  3) trigger=$LEGACY_TRIGGER3 ;;
+  2|3) trigger=$LEGACY_TRIGGER3 ;;
   *) trigger="$LEGACY_LOG.never" ;;
 esac
 while [ ! -e "$trigger" ]; do sleep 0.02; done
@@ -1081,7 +1081,8 @@ if pe "$HFLEGACY" handled "$legacy_id" 1 \
   fail "generic acknowledgement bypassed a pending legacy Lavish reply"
 fi
 PATH="$LEGACY_BIN:$PATH" pe "$HFLEGACY" reconcile >/dev/null
-wait_for_lines "$LEGACY_LOG" 2 || fail "legacy recovery listener did not start"
+[ "$(cat "$LEGACY_COUNT")" = 1 ] \
+  || fail "reconciliation relaunched a legacy Lavish source with an open round"
 if PATH="$LEGACY_BIN:$PATH" FM_HOME="$HFLEGACY" \
   "$ROOT/bin/fm-procevent-lavish.sh" arm "$LEGACY_ART" \
   --agent-reply-file "$TMP_ROOT/nonexistent-legacy-reply" \
@@ -1099,9 +1100,9 @@ assert_contains "$(cat "$TMP_ROOT/firstmate-live-legacy-arm.out")" "armed: $lega
   "live legacy handoff did not confirm the reply-carrying listener"
 assert_not_contains "$(cat "$TMP_ROOT/firstmate-live-legacy-arm.out")" "still-listening" \
   "live legacy handoff reported the superseded listener as successful"
-wait_for_lines "$LEGACY_LOG" 3 || fail "reply-carrying listener did not replace the live legacy listener"
-[ "$(tail -n 1 "$LEGACY_LOG")" = 'poll3 reply: Answered after handoff.' ] \
-  || fail "live legacy handoff did not post the reply in the session"
+wait_for_lines "$LEGACY_LOG" 2 || fail "reply-carrying listener did not replace the legacy generation"
+[ "$(tail -n 1 "$LEGACY_LOG")" = 'poll2 reply: Answered after handoff.' ] \
+  || fail "legacy handoff did not post the reply in the session"
 touch "$LEGACY_TRIGGER3"
 for _ in $(seq 1 100); do
   [ ! -e "$HFLEGACY/state/procevent/$legacy_id.source" ] && break

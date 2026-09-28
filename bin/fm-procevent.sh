@@ -822,11 +822,6 @@ cmd_register_lavish_owner() {
     die "cannot publish Lavish registration"
   }
   if [ "$handoff" -eq 1 ]; then
-    if ! fm_procevent_claim_reclaim_locked "$id" "$owner" "$pid" "$token"; then
-      [ -z "$prior_record" ] || rm -f -- "$prior_record"
-      fm_procevent_source_lock_release "$id"
-      die "cannot finish handing off the firstmate-owned Lavish listener: $id"
-    fi
     rm -f -- "$(staging_file "$id" "$token")" "$(runner_file "$id")"
   fi
   if [ "$firstmate_owner" -eq 0 ]; then
@@ -1187,7 +1182,7 @@ cmd_start() {
       printf 'round-open: %s\n' "$id"
       exit 0
     fi
-  elif [ "$kind" = lavish-owned ]; then
+  elif source_is_builtin_lavish_locked "$id"; then
     reply_round=$(lavish_rearm_round_locked "$id" 2>/dev/null || true)
     task_pending=$(source_pending "$id" | head -1)
     if [ -n "$reply_round" ] && fm_procevent_is_accepted "$STATE" "$id" "$reply_round"; then
@@ -1915,7 +1910,7 @@ cmd_reconcile() {
           fm_procevent_source_lock_release "$id"
           continue
         fi
-        if [ "$kind" = lavish-owned ] && [ -n "$task_pending" ]; then
+        if source_is_builtin_lavish_locked "$id" && [ -n "$task_pending" ]; then
           lavish_reply_round=$(lavish_rearm_round_locked "$id" 2>/dev/null || true)
           pending_round=$(fm_procevent_result_sequence "$task_pending" 2>/dev/null || true)
           if [ -z "$lavish_reply_round" ] \

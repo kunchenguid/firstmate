@@ -666,13 +666,11 @@ fm_procevent_claim_recorded_state_root_valid() {
 }
 
 fm_procevent_claim_protects_pending_lavish_locked() {  # <source-id>
-  local id=$1 state registration adapter identity inbox
+  local id=$1 state registration adapter inbox
   state=${FM_PROCEVENT_CLAIM_STATE_ROOT:-}
   registration="$FM_PROCEVENT_CLAIM_REG_DIR/$id.source"
   [ -n "$state" ] && fm_procevent_claim_recorded_state_root_valid || return 1
   [ -f "$registration" ] && [ ! -L "$registration" ] || return 1
-  identity=$(fm_pr_file_identity "$registration" 2>/dev/null) || return 1
-  [ "$identity" = "$FM_PROCEVENT_CLAIM_REG_IDENTITY" ] || return 1
   adapter=$(sed -n 's/^adapter=//p' "$registration" | head -1)
   [ "$adapter" = lavish ] || return 1
   inbox=$(fm_procevent_inbox_dir "$state")
