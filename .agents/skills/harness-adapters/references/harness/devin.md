@@ -19,7 +19,7 @@ The router owns the crewmate/scout-only boundary; primary and secondmate integra
 | Marker | None; anchored native `devin` ancestry identifies the adapter and outranks foreign inherited markers. |
 | Trust dialogs | The launch skips workspace trust for this run; the spawn owner carries the exact flags. |
 | Imported config | The worker config sets `read_config_from.claude` false, so no Claude Code hook, `CLAUDE.md` rule, `.claude/skills`, or Claude MCP entry is imported; `AGENTS.md` and `.agents/skills` still load. |
-| Commit attribution | The worker config sets `attribution` false, Devin's switch for its `Co-Authored-By` trailer and `Generated with Devin` line. |
+| Commit attribution | Unless the home sets `config/keep-ai-trailers` (`../../../../../docs/configuration.md` "Commit attribution"), the worker config sets `attribution` false, Devin's switch for its `Co-Authored-By` trailer and `Generated with Devin` line; with the flag, the user config's setting (default on) is kept. |
 
 ## Worker lifecycle limits
 

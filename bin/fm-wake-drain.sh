@@ -13,7 +13,7 @@
 # presentation-path locks (default 10); queue mutation locks remain blocking.
 set -u
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd "${d:-/}" && pwd)"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
@@ -572,12 +572,19 @@ EOF
 #     mark-processed target, the newest presented row, acknowledges exactly
 #     what was presented and always at least the oldest row. An unprocessed
 #     captain row is never adopted as processed, so a home that opts in
-#     mid-session cannot lose its first captain outcome.
-#   - Routine outcomes are listed once, for awareness, the way the Pi branch's
-#     routine notes reach main's transcript without a turn; silent fleet
-#     reviews never appear. The newest that fit a byte cap are listed, and the
-#     older ones collapse into a count, since bin/fm-branch-outcome.sh list
-#     keeps them all.
+#     mid-session cannot lose its first captain outcome. Each line names how
+#     long ago its row was recorded (the store's "recordedAgo"), because a row
+#     main never acknowledged can come back long after its situation settled
+#     (after a harness or posture switch, or an upgrade whose earlier
+#     presenter never advanced the read cursor), and the section asks main to
+#     check the task's current state first and reply to the captain only
+#     about outcomes still open, as if settled ones had never been listed,
+#     then acknowledge every presented outcome, settled and open alike.
+#   - Visible routine outcomes are listed once, for awareness, the way the Pi
+#     branch's routine notes reach main's transcript without a turn; silent
+#     routine outcomes never appear. The newest visible rows that fit a byte
+#     cap are listed, and older visible rows collapse into a count, since
+#     bin/fm-branch-outcome.sh list keeps them all.
 # Once the section is printed, the store's read cursor advances through every
 # presented row, which is what lets mark-processed accept main's
 # acknowledgement and keeps a routine row from repeating; a drain stopped
@@ -611,7 +618,7 @@ print_branch_outcomes_section() {
       map(select(.verdict == "captain")) | sort_by(.seq)
       | reduce .[] as $r ({count: {}, lines: []};
           .count[$r.task] += 1
-          | .lines += ["\($r.seq)\t\($r.task)\t[seq \($r.seq)\(if .count[$r.task] > 1 then ", newest of \(.count[$r.task]) for this task" else "" end)] \($r.task): \($r.summary | gsub("[\t\n\r]"; " "))"])
+          | .lines += ["\($r.seq)\t\($r.task)\t[seq \($r.seq)\(if .count[$r.task] > 1 then ", newest of \(.count[$r.task]) for this task" else "" end), recorded \($r.recordedAgo) ago] \($r.task): \($r.summary | gsub("[\t\n\r]"; " "))"])
       | .lines[]' 2>/dev/null) \
     || ! routine=$(printf '%s\n' "$rows" | jq -rs 'map(select(.unread and .verdict == "routine" and .silent != true)) | sort_by(.seq) | reverse | .[]
       | "[seq \(.seq)] \(.task): \(.summary | gsub("[\t\n\r]"; " "))"' 2>/dev/null) \
@@ -646,7 +653,7 @@ print_branch_outcomes_section() {
 $captain
 ROWS
   if [ "$shown" -gt 0 ]; then
-    text="BRANCH OUTCOMES (captain outcomes the supervision session recorded for you, one line per task, oldest first - process each as firstmate: tell the captain, land or merge what is ready, answer or escalate a decision, or act on a blocker):
+    text="BRANCH OUTCOMES (captain outcomes the supervision session recorded for you, one line per task, oldest first; each says what was true when it was recorded, so check the task's current state first, including its still-open decisions listed above under OPEN DECISIONS, and sort them into still open and already settled, such as a decision since answered, a PR since merged, or a task since finished - process the still-open ones as firstmate: tell the captain, land or merge what is ready, answer or escalate a decision, or act on a blocker; your reply to the captain covers only those, as if the settled ones had never been listed, and a settled one needs only the acknowledgement):
 "
     for line in "${captain_lines[@]}"; do
       text="$text$line

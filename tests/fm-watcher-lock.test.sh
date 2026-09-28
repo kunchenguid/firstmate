@@ -22,6 +22,23 @@ ARM_FAIL_EXIT_POLLS=400
 
 TMP_ROOT=$(fm_test_tmproot fm-watcher-lock-tests)
 
+# Execute the actual disposable-checkout guard before any watcher can start.
+lab="$TMP_ROOT/marked-lab"
+foreign_state="$TMP_ROOT/foreign-state"
+checkout="$TMP_ROOT/.no-mistakes/worktrees/guard/bin"
+mkdir -p "$lab" "$foreign_state" "$checkout"
+. "$ROOT/bin/fm-gate-refuse-lib.sh"
+fm_gate_lab_mark "$lab" || fail "could not mark the watcher lab"
+cp "$WATCH_ARM" "$ROOT/bin/fm-gate-refuse-lib.sh" "$checkout/"
+if env -u FM_GATE_REFUSE_BYPASS -u FM_STATE_OVERRIDE FM_HOME="$lab" STATE="$foreign_state" \
+  bash "$checkout/fm-watch-arm.sh" > "$TMP_ROOT/lab-guard.out" 2>&1; then
+  fail "disposable watcher accepted an inherited state outside its lab"
+fi
+grep -q 'refusing to arm from a disposable validation checkout' "$TMP_ROOT/lab-guard.out" \
+  || fail "disposable watcher did not reject the relocated state"
+[ ! -e "$foreign_state/.watch.lock" ] || fail "disposable watcher touched outside state"
+pass "disposable watcher refuses inherited state outside its marked lab"
+
 drain_and_ack() {  # <state>
   local state=$1 err sequence generation
   err="$state/.test-drain.err"

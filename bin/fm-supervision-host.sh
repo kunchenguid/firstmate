@@ -45,12 +45,17 @@
 #     engine errors, and the Pi branch's offer rule
 #     (bin/fm-branch-dispatch.mjs offer) says the branch may take this close,
 #     so main-only classes (check triggers, decision-owned triggers, a scan
-#     that is unsafe or holds nothing for the branch) stay main's;
+#     that is unsafe or holds nothing for the branch) stay main's. That
+#     pass-through starts the successor watcher cycle and leaves it running
+#     before the close is printed, so supervision continues when the session
+#     drops the handoff. The watcher singleton lock makes the session's next
+#     arm attach to that cycle instead of starting a second one;
 #   - away (the record exists): every close goes to the engine.
 # Every turn that starts attended meets that rule again at its start, so a
 # close accepted away whose turn starts attended (the captain returned in
 # between) or an attended close whose task turned main-only while the
-# successor started reaches main exactly as the arm printed it.
+# successor started reaches main exactly as the arm printed it, and that
+# successor cycle stays running.
 # A close the engine takes is handled in one order: it starts and verifies the
 # successor watcher cycle and confirms the handling handoff (the order
 # docs/watcher-continuity.md owns), computes the rows the branch may claim in
@@ -74,13 +79,14 @@
 # "supervision-host:" line saying why main has this wake, after stopping the
 # successor cycle so main's next turn end starts from the same state as
 # without the host. Whenever the captain returned during an away engine turn
-# that recorded outcomes, handled or not, the return brief was rendered before
-# they existed, so the host exits with the close, one "supervision-host:" line
-# naming them, and one line per outcome, for main to relay. The host injects
-# nothing and has no delivery path of its own; the owner's existing wake path
-# is the only way main hears from it, and its fallback is always to exit with
-# the close's own reason line. That handoff is only a prompt: each outcome
-# recorded after the return is already a durable queued wake
+# that recorded visible outcomes, handled or not, the return brief was rendered
+# before they existed, so the host exits with the close, one "supervision-host:"
+# line naming them, and one line per visible outcome, for main to relay. The
+# host injects nothing and has no delivery path of its own; the owner's
+# existing wake path is the only way main hears from it, and its fallback is
+# always to exit with the close's own reason line. That handoff is only a
+# prompt: each non-silent outcome recorded after the return is already a
+# durable queued wake
 # (bin/fm-branch-report.sh), so it still reaches main when the host dies at the
 # turn's end or its owner drops the handoff, as a superseded Cursor park does.
 #
@@ -529,26 +535,50 @@ exit_to_main() {  # <why> [further lines]
   exit 0
 }
 
+# The outcome store (bin/fm-branch-outcome.sh) owns and validates these rows.
 # True when the captain returned during this close's engine turn and that turn
-# recorded outcomes; sets RETURNED_SEQS to their store rows.
+# recorded visible outcomes; sets RETURNED_ROWS and RETURNED_SEQS. A lookup
+# failure is distinct from a valid turn with no visible outcomes.
+TURN_RECEIPT_SEQS=
+RETURNED_ROWS=
+RETURNED_SEQS=
+RETURNED_LOOKUP_FAILED=0
 returned_during_turn() {
+  TURN_RECEIPT_SEQS=
+  RETURNED_ROWS=
   RETURNED_SEQS=
+  RETURNED_LOOKUP_FAILED=0
   [ -n "$LAST_TURN" ] && [ "$TURN_POSTURE" = away ] && [ ! -f "$STATE/.afk-contract" ] || return 1
-  RETURNED_SEQS=$(awk -F '\t' -v turn="$LAST_TURN" '$1 == turn { printf "%s%s", sep, $2; sep = ", " }' "$RECEIPTS" 2>/dev/null)
+  if ! TURN_RECEIPT_SEQS=$(awk -F '\t' -v turn="$LAST_TURN" \
+    '$1 == turn { printf "%s%s", sep, $2; sep = "," }' "$RECEIPTS" 2>/dev/null); then
+    RETURNED_LOOKUP_FAILED=1
+    return 1
+  fi
+  [ -n "$TURN_RECEIPT_SEQS" ] || return 1
+  if ! RETURNED_ROWS=$("$SCRIPT_DIR/fm-branch-outcome.sh" lookup --seqs "$TURN_RECEIPT_SEQS" 2>/dev/null); then
+    RETURNED_LOOKUP_FAILED=1
+    return 1
+  fi
+  if ! RETURNED_SEQS=$(printf '%s\n' "$RETURNED_ROWS" \
+    | jq -rs 'map(select(.silent != true) | .seq | tostring) | join(", ")'); then
+    RETURNED_LOOKUP_FAILED=1
+    return 1
+  fi
   [ -n "$RETURNED_SEQS" ]
 }
 
-# The outcomes one turn recorded, one "supervision-host:" line each, from its
-# receipts and the store (bin/fm-branch-outcome.sh owns the rows).
-turn_outcome_lines() {  # <turn>
-  local seqs
-  seqs=$(awk -F '\t' -v turn="$1" '$1 == turn { printf "%s%s", sep, $2; sep = "," }' "$RECEIPTS" 2>/dev/null)
-  [ -n "$seqs" ] || return 0
-  "$SCRIPT_DIR/fm-branch-outcome.sh" list --recent 1000 2>/dev/null \
-    | jq -r --arg seqs "$seqs" '($seqs | split(",") | map(tonumber)) as $want
-        | select(.seq as $q | $want | index($q))
-        | "supervision-host: outcome \(.seq) for \(.task) [\(.verdict)]: \(.summary)"' 2>/dev/null \
+# One "supervision-host:" line per visible outcome selected above.
+turn_outcome_lines() {
+  [ -n "$RETURNED_ROWS" ] || return 0
+  printf '%s\n' "$RETURNED_ROWS" \
+    | jq -r 'select(.silent != true)
+        | "supervision-host: outcome \(.seq) for \(.task) [\(.verdict)]: \(.summary)"' \
     | tr -d '\r'
+}
+
+turn_outcome_lookup_warning() {
+  printf 'supervision-host: outcome lookup failed for turn receipt rows %s; visible outcomes may require manual review' \
+    "${TURN_RECEIPT_SEQS:-unknown}"
 }
 
 stand_down() {  # <why>
@@ -581,6 +611,36 @@ start_successor() {  # <predecessor-arm-pid>
     [ "$(date +%s)" -lt "$deadline" ] || return 1
     sleep 0.2
   done
+}
+
+# Drop the successor from this host's cleanup without stopping it. The shell
+# signals background jobs when it exits, and this arm's handler would then
+# stop the watcher, so disown it first. The capture file stays tracked so the
+# EXIT trap unlinks it; the arm already holds that descriptor and keeps
+# waiting on the watcher.
+detach_successor() {
+  [ -n "${SUCCESSOR_PID:-}" ] || return 0
+  disown "$SUCCESSOR_PID" 2>/dev/null || true
+  forget_process "$SUCCESSOR_PID"
+  SUCCESSOR_PID=
+}
+
+# Start the same successor a handled wake starts, confirm its handoff, and
+# leave it running. A failed start or handoff stops anything this call
+# started and returns 1; the caller still prints the close unchanged.
+leave_successor_for_main() {
+  if ! start_successor "$CLOSED_ARM_PID"; then
+    log_line "pass-through	successor-unverified	$(printf '%s\n' "$REASON" | head -n 1)"
+    return 1
+  fi
+  if [ -n "$SUCCESSOR_GENERATION" ]; then
+    if ! "$SCRIPT_DIR/fm-watch-arm.sh" --handling-delivered "$SUCCESSOR_GENERATION" --watcher-pid "$SUCCESSOR_WATCHER" >/dev/null 2>&1; then
+      log_line "pass-through	handoff-unconfirmed	$(printf '%s\n' "$REASON" | head -n 1)"
+      retire_successor
+      return 1
+    fi
+  fi
+  detach_successor
 }
 
 # The engine conversation for this turn: the recorded one while it belongs to
@@ -959,6 +1019,9 @@ while :; do
   if [ ! -f "$STATE/.afk-contract" ]; then
     if ! attended_acceptor "$(printf '%s\n' "$REASON" | head -n 1)"; then
       log_line "pass-through	attended	$ATTENDED_WHY	$(printf '%s\n' "$REASON" | head -n 1)"
+      if [ "$ATTENDED_WHY" = main-only ]; then
+        leave_successor_for_main || true
+      fi
       emit
       exit 0
     fi
@@ -993,19 +1056,24 @@ while :; do
   fi
 
   # The captain returned during that turn: the return brief was rendered
-  # before its outcomes existed, so main relays them now, handled or not.
+  # before its visible outcomes existed, so main relays them now, handled or not.
   handle_wake "$REASON"
   HANDLE_RC=$?
   if [ "$HANDLE_RC" -eq 2 ]; then
     log_line "pass-through	attended	$ATTENDED_WHY	$(printf '%s\n' "$REASON" | head -n 1)"
-    retire_successor
+    # The successor this turn already started and confirmed stays up. Retiring
+    # it is what left no watcher after a close that became main-only.
+    detach_successor
     emit
     exit 0
   fi
   if [ "$HANDLE_RC" -ne 0 ]; then
     if returned_during_turn; then
-      exit_to_main "the away session could not take this wake: $HANDLE_WHY; this wake is yours, and the captain returned during its turn, so relay the outcomes it recorded (store rows $RETURNED_SEQS, listed next and in bin/fm-branch-outcome.sh list) to the captain" \
-        "$(turn_outcome_lines "$LAST_TURN")${HEALTH_NOTE:+$'\n'$HEALTH_NOTE}"
+      exit_to_main "the away session could not take this wake: $HANDLE_WHY; this wake is yours, and the captain returned during its turn, so relay the visible outcomes it recorded (store rows $RETURNED_SEQS, listed next and in bin/fm-branch-outcome.sh list) to the captain" \
+        "$(turn_outcome_lines)${HEALTH_NOTE:+$'\n'$HEALTH_NOTE}"
+    elif [ "$RETURNED_LOOKUP_FAILED" -eq 1 ]; then
+      exit_to_main "the away session could not take this wake: $HANDLE_WHY; this wake is yours, and the captain returned during its turn, but the recorded outcomes could not be verified" \
+        "$(turn_outcome_lookup_warning)${HEALTH_NOTE:+$'\n'$HEALTH_NOTE}"
     fi
     if [ "$TURN_POSTURE" = away ]; then
       exit_to_main "the away session could not take this wake: $HANDLE_WHY; this wake is yours" "$HEALTH_NOTE"
@@ -1013,8 +1081,11 @@ while :; do
     exit_to_main "the supervision session could not take this wake: $HANDLE_WHY; this wake is yours" "$HEALTH_NOTE"
   fi
   if returned_during_turn; then
-    exit_to_main "the captain returned while the away session was handling this wake, which it finished after the return brief was rendered; relay its outcomes (store rows $RETURNED_SEQS, listed next and in bin/fm-branch-outcome.sh list) to the captain" \
-      "$(turn_outcome_lines "$LAST_TURN")"
+    exit_to_main "the captain returned while the away session was handling this wake, which it finished after the return brief was rendered; relay its visible outcomes (store rows $RETURNED_SEQS, listed next and in bin/fm-branch-outcome.sh list) to the captain" \
+      "$(turn_outcome_lines)"
+  elif [ "$RETURNED_LOOKUP_FAILED" -eq 1 ]; then
+    exit_to_main "the captain returned while the away session was handling this wake, but the recorded outcomes could not be verified; main must review them" \
+      "$(turn_outcome_lookup_warning)"
   fi
   # Attended captain outcomes are main's to process; away they wait for the
   # return, including when the captain left while this turn ran. The close

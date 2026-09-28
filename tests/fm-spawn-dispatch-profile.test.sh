@@ -1055,7 +1055,7 @@ test_claude_forwards_firstmate_config_dir_when_set() {
   status=$?
   expect_code 0 "$status" "claude spawn with CLAUDE_CONFIG_DIR set should succeed"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "CLAUDE_CONFIG_DIR='$CASE_DIR/claude-work' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\",\"attribution\":{\"commit\":\"\",\"pr\":\"\",\"sessionUrl\":false}}'" \
+  assert_contains "$launch" "CLAUDE_CONFIG_DIR='$CASE_DIR/claude-work' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions $(claude_worker_add_dirs "$HOME_DIR" "$id")--settings '{\"feedbackDrafts\":\"off\",\"attribution\":{\"commit\":\"\",\"pr\":\"\",\"sessionUrl\":false}}'" \
     "claude launch did not forward firstmate's CLAUDE_CONFIG_DIR to the crewmate pane"
   pass "claude forwards firstmate's CLAUDE_CONFIG_DIR so the crewmate uses the same credential store"
 }
@@ -1141,11 +1141,17 @@ test_non_claude_harness_ignores_config_dir() {
 # launch must therefore carry the policy itself, or a spawned worker writes
 # Co-Authored-By and Claude-Session trailers into commits and PR bodies.
 assert_attribution_policy() {  # <launch-command> <what>
-  local launch=$1 what=$2
-  assert_contains "$launch" '"attribution":' "$what launch carries no attribution policy"
-  assert_contains "$launch" '"commit":""' "$what launch does not silence the commit trailer"
-  assert_contains "$launch" '"pr":""' "$what launch does not silence the PR-body attribution"
-  assert_contains "$launch" '"sessionUrl":false' "$what launch does not silence the session URL"
+  local launch=$1 what=$2 settings
+  settings=$(claude_settings_json_arg "$launch")
+  printf '%s' "$settings" | jq -e '.feedbackDrafts == "off" and .attribution == {"commit":"","pr":"","sessionUrl":false}' >/dev/null \
+    || fail "$what launch settings JSON does not disable Claude attribution: $settings"
+}
+
+assert_attribution_policy_absent() {  # <launch-command> <what>
+  local launch=$1 what=$2 settings
+  settings=$(claude_settings_json_arg "$launch")
+  printf '%s' "$settings" | jq -e '.feedbackDrafts == "off" and (has("attribution") | not)' >/dev/null \
+    || fail "$what launch settings JSON still disables Claude attribution: $settings"
 }
 
 test_claude_task_launch_carries_control_channel_authority() {
@@ -1220,7 +1226,57 @@ test_claude_crewmate_launch_carries_the_attribution_policy() {
   expect_code 0 "$status" "claude crewmate spawn should succeed"$'\n'"$out"
   launch=$(cat "$LAUNCH_LOG")
   assert_attribution_policy "$launch" "claude crewmate"
+  [ -d "$HOME_DIR/state/$id.git-hooks" ] || fail "default config did not install the AI trailer hooks"
   pass "a claude crewmate launch carries the attribution-off policy in its own settings"
+}
+
+test_keep_ai_trailers_omits_attribution_settings_and_strip_hooks() {
+  local rec id out status launch
+  id=profile-claude-keep-attribution-z25
+  rec=$(make_spawn_case profile-claude-keep-attribution claude "$id")
+  read_case_record "$rec"
+  : > "$HOME_DIR/config/keep-ai-trailers"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "claude spawn with keep-ai-trailers should succeed"$'\n'"$out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_attribution_policy_absent "$launch" "opted-in claude"
+  assert_not_contains "$launch" 'GIT_CONFIG_KEY_0=core.hooksPath' \
+    "opted-in launch still overrides the repository hooksPath"
+  [ ! -e "$HOME_DIR/state/$id.git-hooks" ] \
+    || fail "opted-in launch installed AI trailer strip hooks"
+  pass "keep-ai-trailers omits Claude attribution settings and the pane strip hooks"
+}
+
+test_keep_ai_trailers_reaches_secondmate_crew_launches() {
+  local rec sm_rec sm_id crew_id sm out status launch
+  sm_id=profile-keep-attribution-sm-z26
+  crew_id=profile-keep-attribution-crew-z27
+  rec=$(make_spawn_case profile-keep-attribution-primary claude "$sm_id")
+  sm_rec=$(make_spawn_case profile-keep-attribution-sm claude "$crew_id")
+  read_case_record "$rec"
+  : > "$HOME_DIR/config/keep-ai-trailers"
+  sm="${sm_rec#*|}"
+  sm="${sm%%|*}"
+  make_seeded_secondmate_home "$sm" "$sm_id"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$sm_id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "secondmate spawn with keep-ai-trailers should succeed"$'\n'"$out"
+  [ -e "$sm/config/keep-ai-trailers" ] || fail "secondmate home did not inherit config/keep-ai-trailers"
+
+  read_case_record "$sm_rec"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$crew_id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "secondmate crew spawn should succeed"$'\n'"$out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_attribution_policy_absent "$launch" "secondmate crew claude"
+  assert_not_contains "$launch" 'GIT_CONFIG_KEY_0=core.hooksPath' \
+    "secondmate crew launch still overrides the repository hooksPath"
+  [ ! -e "$HOME_DIR/state/$crew_id.git-hooks" ] \
+    || fail "secondmate crew launch installed AI trailer strip hooks"
+  pass "keep-ai-trailers is inherited so a secondmate's crew launch keeps AI trailers"
 }
 
 test_claude_secondmate_launch_carries_the_attribution_policy() {
@@ -1562,12 +1618,44 @@ SH
 # config/claude-permission-mode (bin/fm-spawn.sh header): absent and `bypass`
 # must both produce today's launch byte-for-byte, `auto` swaps only the
 # permission flag, and any other token refuses before endpoint or metadata.
+claude_settings_json_arg() {  # <launch>
+  local command=$1
+  while [[ "$command" == export\ *\;* ]]; do
+    command=${command#*; }
+  done
+  eval "set -- $command"
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = --settings ]; then
+      shift
+      printf '%s' "$1"
+      return 0
+    fi
+    shift
+  done
+  return 1
+}
+
 claude_launch_brief_arg() {  # <launch>
-  local command=${1#*; }
+  local command=$1
+  while [[ "$command" == export\ *\;* ]]; do
+    command=${command#*; }
+  done
   (
     eval "set -- ${command#*; }"
     eval "printf '%s' \"\${$#}\""
   )
+}
+
+# The --add-dir segment every Claude worker launch now carries between the
+# permission flag and --settings, real-path resolved the way the spawn's
+# claude_add_dirs_flag resolves it. Prints a trailing space so callers can
+# drop it straight into an expected command.
+claude_worker_add_dirs() {  # <home> <id>
+  local state_real data_real root_real
+  state_real=$(cd "$1/state" && pwd -P)
+  data_real=$(cd "$1/data" && pwd -P)
+  root_real=$(cd "$ROOT" && pwd -P)
+  printf '%s ' "--add-dir '$state_real/operational-inbox' --add-dir '$state_real/$2.inbox' --add-dir '$data_real/$2' --add-dir '$root_real/.agents/skills'"
 }
 
 claude_expected_launch() {  # <launch> <home> <id> <permission-flag>
@@ -1576,7 +1664,7 @@ claude_expected_launch() {  # <launch> <home> <id> <permission-flag>
   [ "$(printf '%s' "$doorbell" | "$ROOT/bin/fm-operational-input.sh" doorbell-kind)" = launch-brief ] \
     || doorbell="not a launch-brief doorbell"
   quoted="'$(printf '%s' "$doorbell" | sed "s/'/'\\\\''/g")'"
-  printf '%s' "export COMPACT_ADVISER_DISABLE=1; $(ai_trailer_hooks_prefix "$2" "$3")env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude $4 --settings '{\"feedbackDrafts\":\"off\",\"attribution\":{\"commit\":\"\",\"pr\":\"\",\"sessionUrl\":false}}' $CLAUDE_CONTROL_CHANNEL_FLAG $quoted"
+  printf '%s' "export COMPACT_ADVISER_DISABLE=1; $(ai_trailer_hooks_prefix "$2" "$3")env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude $4 $(claude_worker_add_dirs "$2" "$3")--settings '{\"feedbackDrafts\":\"off\",\"attribution\":{\"commit\":\"\",\"pr\":\"\",\"sessionUrl\":false}}' $CLAUDE_CONTROL_CHANNEL_FLAG $quoted"
 }
 
 test_claude_permission_mode_bypass_matches_absent_launch() {
@@ -1625,9 +1713,48 @@ test_claude_permission_mode_auto_reaches_scout_launch() {
   status=$?
   expect_code 0 "$status" "claude scout spawn with claude-permission-mode=auto should succeed"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "claude --permission-mode auto --settings" "scout launch did not carry --permission-mode auto"
+  assert_contains "$launch" "claude --permission-mode auto " "scout launch did not carry --permission-mode auto"
   assert_not_contains "$launch" "--dangerously-skip-permissions" "scout launch must not request bypass mode"
   pass "config/claude-permission-mode=auto reaches scout launches too"
+}
+
+# A Claude worker's Firstmate channel files all live outside its worktree cwd
+# (launch record in state/operational-inbox, steers in state/<id>.inbox, brief
+# in data/<id>), and since Claude Code 2.1.257 the first file-tool read of
+# them under --permission-mode auto parks the pane on a one-time interactive
+# question; a "Block" answer on the machine then refuses the same reads even
+# under bypass. Drive the real emitted launch through a claude stub that
+# models that working-directory check: every channel path must resolve inside
+# the pane cwd or an --add-dir, under both permission modes, for ships and
+# scouts alike.
+test_claude_worker_launch_covers_task_channel_dirs() {
+  local mode kind rec id out status launch reqs eval_out eval_rc
+  for mode in bypass auto; do
+    for kind in ship scout; do
+      id="adddir-$mode-$kind"
+      rec=$(make_spawn_case "adddir-$mode-$kind" claude "$id")
+      read_case_record "$rec"
+      printf '%s\n' "$mode" > "$HOME_DIR/config/claude-permission-mode"
+      fm_fake_claude_outside_read_gate "$FAKEBIN_DIR"
+      reqs="$CASE_DIR/channel-requirements.txt"
+      printf '%s\n' "$HOME_DIR/state/$id.inbox" "$HOME_DIR/data/$id" "$ROOT/.agents/skills" > "$reqs"
+
+      if [ "$kind" = ship ]; then
+        out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+      else
+        out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout)
+      fi
+      status=$?
+      expect_code 0 "$status" "claude $kind spawn under $mode should succeed"$'\n'"$out"
+      launch=$(cat "$LAUNCH_LOG")
+
+      eval_out=$(fm_eval_launch "$launch" "$WT_DIR" "$FAKEBIN_DIR" "FM_FAKE_CLAUDE_REQUIREMENTS=$reqs" 2>&1)
+      eval_rc=$?
+      [ "$eval_rc" -eq 0 ] \
+        || fail "claude $kind launch under $mode would hit the outside-read gate"$'\n'"$eval_out"
+    done
+  done
+  pass "claude worker launches cover the task-channel directories in bypass and auto modes"
 }
 
 test_claude_permission_mode_invalid_refuses_before_endpoint_or_metadata() {
@@ -1712,6 +1839,7 @@ test_claude_omits_config_dir_prefix_when_unset
 test_claude_permission_mode_bypass_matches_absent_launch
 test_claude_permission_mode_auto_swaps_only_the_permission_flag
 test_claude_permission_mode_auto_reaches_scout_launch
+test_claude_worker_launch_covers_task_channel_dirs
 test_claude_permission_mode_invalid_refuses_before_endpoint_or_metadata
 test_non_claude_harness_ignores_claude_permission_mode
 test_non_claude_harness_ignores_config_dir
@@ -1719,6 +1847,8 @@ test_claude_task_launch_carries_control_channel_authority
 test_claude_secondmate_launch_omits_task_control_channel_authority
 test_claude_long_launch_is_delivered_intact
 test_claude_crewmate_launch_carries_the_attribution_policy
+test_keep_ai_trailers_omits_attribution_settings_and_strip_hooks
+test_keep_ai_trailers_reaches_secondmate_crew_launches
 test_claude_secondmate_launch_carries_the_attribution_policy
 test_active_dispatch_profile_does_not_block_secondmate_launch
 

@@ -50,7 +50,7 @@ test_branch_prompt_is_byte_stable_and_above_cache_floor() {
     *) fail "branch prompt lost the inlined recovery playbook" ;;
   esac
   case "$out_a" in
-    *"Report verdict captain for the finished result of work the captain requested, even when that result is healthy."*"A start or still-working update on requested work that brings no new artifact, finding, or decision is verdict routine."*"Keep an unsolicited routine outcome as verdict routine"*"Keep an unchanged fleet review silent"*) ;;
+    *"Report verdict captain for the finished result of work the captain requested, even when that result is healthy."*"A start or still-working update on requested work that brings no new artifact, finding, or decision is verdict routine."*"Set silent true for a task-level routine outcome only when it says the worker is still busy, nothing new has happened since the last outcome, and no action was taken."*"Any routine outcome reporting an action, state change, or new result stays rendered; captain outcomes are never silent."*"Keep an unsolicited routine outcome as verdict routine"*"Keep an unchanged fleet review silent"*) ;;
     *) fail "branch prompt lost the requested-result, progress-routine, or routine-silence rules" ;;
   esac
   case "$out_a" in
@@ -149,40 +149,44 @@ test_outcome_startup_replay_preserves_silence() {
     --task task-a --verdict captain --summary 'blocked' --silent true 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "append accepted a silent captain outcome"
-  assert_contains "$out" "silent outcomes must be routine fleet outcomes" "silent captain refusal lost its diagnostic"
-  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
-    --task task-a --verdict routine --summary 'healthy' --silent true 2>&1)
-  status=$?
-  [ "$status" -ne 0 ] || fail "append accepted a silent task-scoped outcome"
-  assert_contains "$out" "silent outcomes must be routine fleet outcomes" "silent task refusal lost its diagnostic"
-  [ ! -e "$store" ] || fail "refused silent outcomes changed the durable store"
+  assert_contains "$out" "silent outcomes must have the routine verdict" "silent captain refusal lost its diagnostic"
+  [ ! -e "$store" ] || fail "refused silent captain outcome changed the durable store"
 
+  printf 'working: still building\n' > "$home/state/task-a.status"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-a --verdict routine --summary 'worker still busy, nothing new, no action taken' --silent true >/dev/null \
+    || fail "silent task-scoped routine append failed"
+  [ -s "$home/state/.task-a.branch-outcome-index" ] \
+    || fail "silent task outcome was omitted from the status-outcome backstop index"
+  assert_contains "$(cat "$home/state/.task-a.branch-outcome-index")" \
+    "$(printf 'fm-branch-outcome-index-v1\t1\t')" "status-outcome backstop index lost the silent task outcome"
   FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
     --task fleet --verdict routine --summary 'fleet reviewed, nothing changed' --silent true >/dev/null \
-    || fail "silent outcome append failed"
+    || fail "silent heartbeat append failed"
   FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
     --task task-1 --verdict routine --summary 'worker recovered automatically' >/dev/null \
     || fail "visible outcome append failed"
 
   replay=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" startup-replay) || fail "mixed startup replay failed"
-  assert_not_contains "$replay" "fleet reviewed, nothing changed" "startup replay printed a silent outcome"
+  assert_not_contains "$replay" "fleet reviewed, nothing changed" "startup replay printed a silent heartbeat outcome"
+  assert_not_contains "$replay" "worker still busy, nothing new, no action taken" "startup replay printed a silent task outcome"
   assert_contains "$replay" "worker recovered automatically" "startup replay lost a visible routine outcome"
   [ -z "$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unread)" ] \
     || fail "startup replay did not mark the silent and visible rows read"
 
-  printf '%s\n' '{"seq":3,"epoch":1,"task":"task-legacy","wake":"","verdict":"routine","summary":"legacy visible outcome"}' \
+  printf '%s\n' '{"seq":4,"epoch":1,"task":"task-legacy","wake":"","verdict":"routine","summary":"legacy visible outcome"}' \
     >> "$home/state/branch-outcomes.jsonl"
   replay=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" startup-replay) || fail "legacy startup replay failed"
   assert_contains "$replay" "legacy visible outcome" "startup replay hid a legacy row with no silent field"
   [ -z "$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unread)" ] \
     || fail "startup replay did not mark the legacy row read"
 
-  printf '%s\n' '{"seq":4,"epoch":1,"task":"task-bad","wake":"","verdict":"captain","summary":"poisoned","silent":true}' >> "$store"
+  printf '%s\n' '{"seq":5,"epoch":1,"task":"task-bad","wake":"","verdict":"captain","summary":"poisoned","silent":true}' >> "$store"
   out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unread 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "unread accepted a stored silent captain outcome"
   assert_contains "$out" "malformed or non-sequential" "stored silent captain refusal lost its diagnostic"
-  pass "only routine fleet outcomes can be silent"
+  pass "routine task and fleet no-change outcomes stay stored and silent captain outcomes are refused"
 }
 
 test_outcome_startup_replay_stops_at_captain_barrier() {
@@ -317,6 +321,31 @@ test_outcome_sequence_conflicts_fail_closed() {
   pass "middle sequence conflicts fail closed for every store read and append"
 }
 
+test_outcome_lookup_returns_exact_sequences_and_refuses_missing_rows() {
+  local home out status selected
+  home="$TMP_ROOT/store-exact-lookup-home"
+  mkdir -p "$home/state"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-1 --verdict routine --summary first >/dev/null || fail "lookup fixture append 1 failed"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-2 --verdict routine --summary second --silent true >/dev/null || fail "lookup fixture append 2 failed"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-3 --verdict captain --summary third >/dev/null || fail "lookup fixture append 3 failed"
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" lookup --seqs 3,1) \
+    || fail "lookup refused existing sequences 3 and 1"
+  selected=$(printf '%s\n' "$out" | jq -sr '[.[].seq] | join(",")')
+  [ "$selected" = "3,1" ] || fail "lookup changed requested sequence order: $selected"
+  assert_contains "$out" '"task":"task-1"' "lookup omitted the first requested row"
+  assert_contains "$out" '"task":"task-3"' "lookup omitted the second requested row"
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" lookup --seqs 1,4 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "lookup accepted a missing sequence"
+  assert_contains "$out" "requested outcome sequences are missing" "missing-row lookup lost its diagnostic"
+  pass "outcome lookup returns exact sequence rows and distinguishes missing receipts"
+}
+
 test_outcome_non_jsonl_layout_fails_closed() {
   local home store snapshot out status
   home="$TMP_ROOT/store-physical-layout-home"
@@ -383,6 +412,37 @@ test_outcome_present_reads_without_advancing() {
   FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-processed --through 2 || fail "the presented captain row could not be acknowledged"
   [ -z "$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" present)" ] || fail "an acknowledged store still presented rows"
   pass "outcome store: present shows each routine row once and each captain row until it is acknowledged"
+}
+
+# Both presenters name how long ago each captain row was recorded, in the one
+# wording the store owns: minutes under an hour, hours under two days, then
+# days, with a clock that moved backwards reading as just recorded. It is
+# computed at read time and never written into the store, and routine rows
+# carry no age.
+test_outcome_rows_carry_their_recorded_age() {
+  local home store now snapshot out
+  home="$TMP_ROOT/store-age-home"
+  mkdir -p "$home/state"
+  store="$home/state/branch-outcomes.jsonl"
+  now=$(date +%s)
+  local epoch seq=0
+  for epoch in $((now + 600)) $((now - 125)) $((now - 90 * 60)) $((now - 47 * 3600)) $((now - 49 * 3600)) $((now - 6 * 86400 - 60)); do
+    seq=$((seq + 1))
+    printf '{"seq":%s,"epoch":%s,"task":"task-%s","wake":"","verdict":"captain","summary":"row %s","silent":false}\n' \
+      "$seq" "$epoch" "$seq" "$seq" >> "$store"
+  done
+  printf '{"seq":7,"epoch":%s,"task":"task-7","wake":"","verdict":"routine","summary":"row 7","silent":false}\n' \
+    "$((now - 86400))" >> "$store"
+  snapshot=$(cat "$store")
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" present) || fail "present failed"
+  [ "$(printf '%s\n' "$out" | jq -r '.recordedAgo // "none"' | tr '\n' ' ')" = "0m 2m 1h 47h 2d 6d none " ] \
+    || fail "present did not name each captain row's recorded age, and only theirs: $out"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-read --through 7 || fail "mark-read failed"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unprocessed) || fail "unprocessed failed"
+  [ "$(printf '%s\n' "$out" | jq -r '"\(.seq):\(.recordedAgo)"' | tr '\n' ' ')" = "1:0m 2:2m 3:1h 4:47h 5:2d 6:6d " ] \
+    || fail "unprocessed did not name each row's recorded age: $out"
+  [ "$(cat "$store")" = "$snapshot" ] || fail "reading the age changed the store"
+  pass "outcome store: present and unprocessed name each captain row's recorded age without writing it"
 }
 
 test_outcome_processed_marker_is_sequence_bound() {
@@ -465,9 +525,9 @@ test_outcome_processed_marker_is_sequence_bound() {
   [ "$(cat "$marker")" = 999999999999999999999999999999999 ] \
     || fail "out-of-range marker refusal changed the marker"
 
-  # Migration: a home with delivered history and no marker starts processed
-  # at its read cursor, so that history is not re-presented; an absent marker
-  # otherwise reads as zero, the safe direction.
+  # A home with delivered history and no marker cannot tell a read row from
+  # an acknowledged one, so processed-init never adopts the read cursor: the
+  # absent marker keeps reading as zero, the safe direction.
   home="$TMP_ROOT/store-processed-migration-home"
   mkdir -p "$home/state"
   FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
@@ -476,10 +536,10 @@ test_outcome_processed_marker_is_sequence_bound() {
   assert_contains "$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unprocessed)" '"seq":1' \
     "an absent marker hid a delivered captain row instead of reading as zero"
   FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" processed-init || fail "migration processed-init failed"
-  [ "$(cat "$home/state/.branch-outcomes-processed")" = 1 ] || fail "processed-init did not start at the read cursor"
-  [ -z "$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unprocessed)" ] \
-    || fail "migrated history was re-presented for processing"
-  pass "the processed marker is sequence-bound, never ahead of the read cursor, never backwards, and migrates delivered history once"
+  [ ! -e "$home/state/.branch-outcomes-processed" ] || fail "processed-init created the marker from the read cursor"
+  assert_contains "$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unprocessed)" '"seq":1' \
+    "processed-init adopted a delivered but unacknowledged captain row as processed"
+  pass "the processed marker is sequence-bound, never ahead of the read cursor, never backwards, and never adopts delivered history"
 }
 
 # --- lease contract -----------------------------------------------------------
@@ -1319,9 +1379,11 @@ test_outcome_startup_replay_stops_at_captain_barrier
 test_outcome_cursor_corruption_fails_closed
 test_cursor_advancement_refuses_ahead_processed_marker
 test_outcome_sequence_conflicts_fail_closed
+test_outcome_lookup_returns_exact_sequences_and_refuses_missing_rows
 test_outcome_non_jsonl_layout_fails_closed
 test_outcome_processed_marker_is_sequence_bound
 test_outcome_present_reads_without_advancing
+test_outcome_rows_carry_their_recorded_age
 test_lease_exclusivity_release_stale_and_sweep
 test_mutating_scripts_refuse_the_other_actors_lease
 test_main_owned_actions_refuse_the_branch_actor
