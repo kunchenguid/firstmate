@@ -431,6 +431,7 @@ test_launcher_identity_resolves_the_exact_pane_tab_and_workspace() {
     || fail "launcher_identity should resolve the launcher's own pane, tab, and workspace, got '$out'"
   assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''get'$'\x1f''w7:p3' "launcher_identity did not read its own pane"
   assert_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''get'$'\x1f''w7:t3' "launcher_identity did not cross-check the owning tab"
+  assert_not_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''list' "an exact snapshot must not pay for a pane-list re-resolution"
   pass "fm_backend_herdr_launcher_identity: resolves the launcher's exact workspace even when a same-labeled workspace sorts first"
 }
 
@@ -525,6 +526,118 @@ test_launcher_identity_refuses_a_workspace_missing_from_the_session() {
   expect_code 1 "$status" "a launcher workspace absent from the session listing must refuse"
   assert_contains "$out" "stale parent identity" "the stale-workspace refusal did not explain itself"
   pass "fm_backend_herdr_launcher_identity: refuses when the launcher's workspace is gone from its own session"
+}
+
+test_launcher_identity_stale_snapshot_resolves_the_unique_cwd_match() {
+  local dir log resp fb out fake
+  dir="$TMP_ROOT/launcher-stale-live"; mkdir -p "$dir/responses" "$dir/fakecwd"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  fake=$(cd "$dir/fakecwd" && pwd -P)
+  printf '{"sessions":[{"name":"fmtest","running":true,"socket_path":"/tmp/fm-herdr-unit/fmtest.sock"}]}\n' > "$resp/1.out"
+  # The observed stale shape: the requested wVQ:p2 (its workspace wVQ is
+  # destroyed) comes back describing the focused wVS:p1, which must NEVER be
+  # adopted - it is whoever happens to be focused, not the launcher.
+  printf '{"result":{"pane":{"pane_id":"wVS:p1","tab_id":"wVS:t1","workspace_id":"wVS","focused":true}}}\n' > "$resp/2.out"
+  # One pane-list snapshot: exactly one pane's live foreground cwd is ours.
+  printf '%s\n' "{\"result\":{\"panes\":[{\"pane_id\":\"wVS:p1\",\"tab_id\":\"wVS:t1\",\"workspace_id\":\"wVS\",\"foreground_cwd\":\"/elsewhere\"},{\"pane_id\":\"wX9:p4\",\"tab_id\":\"wX9:t4\",\"workspace_id\":\"wX9\",\"foreground_cwd\":\"$fake\"},{\"pane_id\":\"wX9:p5\",\"tab_id\":\"wX9:t5\",\"workspace_id\":\"wX9\",\"foreground_cwd\":\"/other\"}]}}" > "$resp/3.out"
+  printf '{"result":{"tab":{"tab_id":"wX9:t4","workspace_id":"wX9"}}}\n' > "$resp/4.out"
+  printf '{"result":{"workspaces":[{"workspace_id":"wVS","label":"fm-"},{"workspace_id":"wX9","label":"firstmate"}]}}\n' > "$resp/5.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FAKECWD="$fake" \
+    HERDR_ENV=1 HERDR_PANE_ID=wVQ:p2 HERDR_SESSION=fmtest HERDR_SOCKET_PATH=/tmp/fm-herdr-unit/fmtest.sock \
+    bash -c 'cd "$FAKECWD" && . "$0/bin/backends/herdr.sh"; fm_backend_herdr_launcher_identity fmtest || exit 1
+      printf "%s|%s|%s" "$FM_BACKEND_HERDR_LAUNCHER_PANE_ID" "$FM_BACKEND_HERDR_LAUNCHER_TAB_ID" "$FM_BACKEND_HERDR_LAUNCHER_WORKSPACE_ID"' "$ROOT" )
+  [ "$out" = 'wX9:p4|wX9:t4|wX9' ] \
+    || fail "launcher_identity should adopt the unique cwd-matching pane, got '$out'"
+  assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''list' "launcher_identity did not take a live pane-list snapshot"
+  assert_not_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''get'$'\x1f''wVS:t1' "launcher_identity must never cross-check the mismatched stale record's tab"
+  pass "fm_backend_herdr_launcher_identity: a stale snapshot resolves to the unique cwd-matching pane, never the focused fallback"
+}
+
+test_launcher_identity_stale_snapshot_without_a_pane_list_refuses() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/launcher-stale-dead"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"sessions":[{"name":"fmtest","running":true,"socket_path":"/tmp/fm-herdr-unit/fmtest.sock"}]}\n' > "$resp/1.out"
+  printf '{"result":{"pane":{"pane_id":"wVS:p1","tab_id":"wVS:t1","workspace_id":"wVS","focused":true}}}\n' > "$resp/2.out"
+  printf '1\n' > "$resp/3.exit"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    HERDR_ENV=1 HERDR_PANE_ID=wVQ:p2 HERDR_SESSION=fmtest HERDR_SOCKET_PATH=/tmp/fm-herdr-unit/fmtest.sock \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_launcher_identity fmtest' "$ROOT" 2>&1 )
+  status=$?
+  expect_code 1 "$status" "a stale snapshot with no live pane list must refuse, not adopt the focused fallback"
+  assert_contains "$out" "wVQ:p2" "the stale-snapshot refusal did not name the pane it could not resolve"
+  pass "fm_backend_herdr_launcher_identity: refuses a stale snapshot when no live pane resolves"
+}
+
+test_launcher_identity_stale_snapshot_with_a_contradictory_cwd_match_refuses() {
+  local dir log resp fb out status fake
+  dir="$TMP_ROOT/launcher-stale-contradictory"; mkdir -p "$dir/responses" "$dir/fakecwd"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  fake=$(cd "$dir/fakecwd" && pwd -P)
+  printf '{"sessions":[{"name":"fmtest","running":true,"socket_path":"/tmp/fm-herdr-unit/fmtest.sock"}]}\n' > "$resp/1.out"
+  printf '1\n' > "$resp/2.exit"
+  printf '%s\n' "{\"result\":{\"panes\":[{\"pane_id\":\"wX9:p4\",\"tab_id\":\"wX9:t4\",\"workspace_id\":\"wX9\",\"foreground_cwd\":\"$fake\"}]}}" > "$resp/3.out"
+  # The matched pane's own tab disagrees about the owning workspace.
+  printf '{"result":{"tab":{"tab_id":"wX9:t4","workspace_id":"wZZ"}}}\n' > "$resp/4.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FAKECWD="$fake" \
+    HERDR_ENV=1 HERDR_PANE_ID=wVQ:p2 HERDR_SESSION=fmtest HERDR_SOCKET_PATH=/tmp/fm-herdr-unit/fmtest.sock \
+    bash -c 'cd "$FAKECWD" && . "$0/bin/backends/herdr.sh"; fm_backend_herdr_launcher_identity fmtest' "$ROOT" 2>&1 )
+  status=$?
+  expect_code 1 "$status" "a cwd-matching pane that disagrees with its own tab must refuse"
+  assert_contains "$out" "contradictory parent identity" "the contradictory cwd-match refusal did not explain itself"
+  pass "fm_backend_herdr_launcher_identity: the cwd-match fallback passes the same contradiction proof"
+}
+
+test_launcher_identity_stale_snapshot_with_no_cwd_match_refuses() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/launcher-stale-nomatch"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"sessions":[{"name":"fmtest","running":true,"socket_path":"/tmp/fm-herdr-unit/fmtest.sock"}]}\n' > "$resp/1.out"
+  printf '{"result":{"pane":{"pane_id":"wVS:p1","tab_id":"wVS:t1","workspace_id":"wVS","focused":true}}}\n' > "$resp/2.out"
+  printf '{"result":{"panes":[{"pane_id":"wVS:p1","tab_id":"wVS:t1","workspace_id":"wVS","foreground_cwd":"/elsewhere"}]}}\n' > "$resp/3.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    HERDR_ENV=1 HERDR_PANE_ID=wVQ:p2 HERDR_SESSION=fmtest HERDR_SOCKET_PATH=/tmp/fm-herdr-unit/fmtest.sock \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_launcher_identity fmtest' "$ROOT" 2>&1 )
+  status=$?
+  expect_code 1 "$status" "a stale snapshot no live pane matches must refuse"
+  assert_contains "$out" "wVQ:p2" "the no-match refusal did not name the pane it could not resolve"
+  assert_not_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''get' "a refusal with no cwd match must not cross-check any tab"
+  pass "fm_backend_herdr_launcher_identity: refuses a stale snapshot no live pane matches"
+}
+
+test_launcher_identity_stale_snapshot_with_a_shared_cwd_refuses() {
+  local dir log resp fb out status fake
+  dir="$TMP_ROOT/launcher-stale-shared"; mkdir -p "$dir/responses" "$dir/fakecwd"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  fake=$(cd "$dir/fakecwd" && pwd -P)
+  printf '{"sessions":[{"name":"fmtest","running":true,"socket_path":"/tmp/fm-herdr-unit/fmtest.sock"}]}\n' > "$resp/1.out"
+  printf '1\n' > "$resp/2.exit"
+  # Two panes share the foreground cwd: genuine ambiguity, adopt neither.
+  printf '%s\n' "{\"result\":{\"panes\":[{\"pane_id\":\"wX9:p4\",\"tab_id\":\"wX9:t4\",\"workspace_id\":\"wX9\",\"foreground_cwd\":\"$fake\"},{\"pane_id\":\"wX9:p5\",\"tab_id\":\"wX9:t5\",\"workspace_id\":\"wX9\",\"foreground_cwd\":\"$fake\"}]}}" > "$resp/3.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FAKECWD="$fake" \
+    HERDR_ENV=1 HERDR_PANE_ID=wVQ:p2 HERDR_SESSION=fmtest HERDR_SOCKET_PATH=/tmp/fm-herdr-unit/fmtest.sock \
+    bash -c 'cd "$FAKECWD" && . "$0/bin/backends/herdr.sh"; fm_backend_herdr_launcher_identity fmtest' "$ROOT" 2>&1 )
+  status=$?
+  expect_code 1 "$status" "a stale snapshot matching two live panes must refuse, not pick one"
+  assert_not_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''get' "a shared-cwd refusal must not cross-check either candidate tab"
+  pass "fm_backend_herdr_launcher_identity: refuses a stale snapshot when the cwd is genuinely ambiguous"
+}
+
+test_workspace_ensure_stale_snapshot_without_a_cwd_match_still_refuses_ambiguity() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/ensure-stale-ambiguous"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"sessions":[{"name":"fmtest","running":true,"socket_path":"/tmp/fm-herdr-unit/fmtest.sock"}]}\n' > "$resp/1.out"
+  printf '{"result":{"pane":{"pane_id":"wVS:p1","tab_id":"wVS:t1","workspace_id":"wVS","focused":true}}}\n' > "$resp/2.out"
+  printf '{"result":{"panes":[{"pane_id":"wVS:p1","tab_id":"wVS:t1","workspace_id":"wVS","foreground_cwd":"/elsewhere"}]}}\n' > "$resp/3.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    HERDR_ENV=1 HERDR_PANE_ID=wVQ:p2 HERDR_SESSION=fmtest HERDR_SOCKET_PATH=/tmp/fm-herdr-unit/fmtest.sock \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_ensure fmtest /tmp' "$ROOT" 2>&1 )
+  status=$?
+  expect_code 3 "$status" "a stale snapshot with no cwd match must still refuse instead of placing the worker"
+  assert_contains "$out" "wVQ:p2" "the refusal did not carry the underlying unresolvable-pane reason"
+  assert_not_contains "$(cat "$log")" $'\x1f''workspace'$'\x1f''create' "a refused placement must not mint a workspace"
+  pass "fm_backend_herdr_workspace_ensure: an unresolvable stale snapshot still refuses instead of placing the worker"
 }
 
 # --- workspace_ensure placement ---------------------------------------------
@@ -4625,6 +4738,12 @@ test_launcher_identity_refuses_a_pane_from_another_server_socket
 test_launcher_identity_refuses_an_unreadable_pane
 test_launcher_identity_refuses_a_pane_and_tab_that_disagree
 test_launcher_identity_refuses_a_workspace_missing_from_the_session
+test_launcher_identity_stale_snapshot_resolves_the_unique_cwd_match
+test_launcher_identity_stale_snapshot_without_a_pane_list_refuses
+test_launcher_identity_stale_snapshot_with_a_contradictory_cwd_match_refuses
+test_launcher_identity_stale_snapshot_with_no_cwd_match_refuses
+test_launcher_identity_stale_snapshot_with_a_shared_cwd_refuses
+test_workspace_ensure_stale_snapshot_without_a_cwd_match_still_refuses_ambiguity
 test_workspace_ensure_prefers_the_launcher_over_the_first_label_match
 test_workspace_ensure_refuses_an_ambiguous_label_with_no_launcher
 test_workspace_ensure_other_home_ignores_the_launcher_identity

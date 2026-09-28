@@ -1742,19 +1742,22 @@ fm_backend_herdr_workspace_find() {  # <session>
 #   FM_BACKEND_HERDR_LAUNCHER_WORKSPACE_ID
 #
 # Returns:
-#   0 - one exact, self-consistent launcher pane/tab/workspace in <session>.
+#   0 - one exact, self-consistent launcher pane/tab/workspace in <session>:
+#       either the claimed HERDR_PANE_ID itself, or - when that snapshot is
+#       stale - the calling process's own live pane resolved below.
 #   2 - this process is NOT running in a herdr pane (no HERDR_PANE_ID at all),
 #       so there is no launcher workspace to inherit and the caller falls back
 #       to its per-home container. HERDR_ENV=1 on its own is only a backend
 #       SELECTION marker (bin/fm-backend.sh's fm_backend_detect), never a
-#       parent binding - herdr always injects the pane id alongside it.
-#   1 - a launcher pane IS claimed but its binding is missing, stale,
-#       contradictory, or belongs to another herdr session. The caller must
-#       refuse before creating or publishing any worker endpoint rather than
-#       degrading to a label search.
+#       parent binding - herdr always injects the pane id alongside it. A
+#       STALE snapshot never returns 2: it is resolved live or refused.
+#   1 - a launcher pane IS claimed but neither the claimed id nor a live
+#       resolution verifies (missing, contradictory, or another session's).
+#       The caller must refuse before creating or publishing any worker
+#       endpoint rather than degrading to a label search.
 fm_backend_herdr_launcher_identity() {  # <session>
   local session=$1 pane=${HERDR_PANE_ID:-} claimed_session claimed_socket session_socket
-  local pane_out tab_out list tab workspace
+  local pane_out tab_out list tab workspace pane_list here match cur_pane cur_tab cur_workspace
   FM_BACKEND_HERDR_LAUNCHER_PANE_ID=""
   FM_BACKEND_HERDR_LAUNCHER_TAB_ID=""
   FM_BACKEND_HERDR_LAUNCHER_WORKSPACE_ID=""
@@ -1788,10 +1791,7 @@ fm_backend_herdr_launcher_identity() {  # <session>
     return 1
   fi
 
-  pane_out=$(fm_backend_herdr_cli "$session" pane get "$pane" 2>/dev/null) || {
-    echo "error: herdr launcher pane '$pane' could not be read in session '$session'; refusing to place a worker without its exact parent workspace" >&2
-    return 1
-  }
+  pane_out=$(fm_backend_herdr_cli "$session" pane get "$pane" 2>/dev/null) || pane_out=""
   tab=$(printf '%s' "$pane_out" | jq -r --arg pane "$pane" '
     select(.result.pane.pane_id == $pane)
     | select((.result.pane.tab_id | type) == "string" and (.result.pane.tab_id | length) > 0)
@@ -1802,6 +1802,62 @@ fm_backend_herdr_launcher_identity() {  # <session>
     | select((.result.pane.workspace_id | type) == "string" and (.result.pane.workspace_id | length) > 0)
     | .result.pane.workspace_id
   ' 2>/dev/null)
+  if [ -z "$tab" ] || [ -z "$workspace" ]; then
+    # Stale-snapshot live resolution. The injected HERDR_PANE_ID is a
+    # launch-time snapshot: after a later workspace mutation herdr answers
+    # `pane get` with a record describing a DIFFERENT pane (observed live:
+    # requested wVQ:p2 came back as the focused wVS:p1) or fails outright,
+    # so the == filter above keeps nothing. That is a stale identity, not an
+    # ambiguous one, and refusing here strands every later spawn from a
+    # long-lived pane. The replacement read is a single `pane list` snapshot
+    # matched on foreground_cwd against this process's own canonical working
+    # directory, adopted only on a session-global UNIQUE match. foreground_cwd
+    # is herdr's live kernel-observed view of the pane's foreground process,
+    # so it survives workspace moves that the snapshot never hears about
+    # (verified live: a worktree cwd matched exactly its own pane, and the
+    # captain's fm_home matched exactly his). Deliberately NOT `pane
+    # current`: verified against the real binary that it honors the stale
+    # HERDR_PANE_ID and falls back to the focused pane for an unknown id -
+    # adopting it would place the worker beside whoever the captain happens
+    # to be looking at, not the launcher (observed: a wX1:p2 caller was
+    # handed the focused wVS:p1). The mismatched `pane get` record is NEVER
+    # adopted for the same reason. Falling through to the caller's per-home
+    # label lookup is likewise refused here on purpose: the per-home label
+    # ('firstmate') need not match the launcher's workspace label (the
+    # captain's is 'fm-'), so that path mints a stray workspace instead of
+    # landing beside the launcher (that label mismatch is reported, not
+    # silently re-schemed). A second stable-identity rule (terminal_id,
+    # cwd+agent) would add its own mis-identification modes for nothing this
+    # live read does not already provide. Zero or several cwd matches refuse
+    # with 1 below - a shared foreground cwd is genuine ambiguity. Whatever
+    # single pane is adopted still passes the exact same tab-agreement and
+    # workspace-membership proofs below, so a genuinely contradictory or
+    # foreign binding still refuses with 1.
+    pane_list=$(fm_backend_herdr_cli "$session" pane list 2>/dev/null) || pane_list=""
+    here=$(cd "$PWD" 2>/dev/null && pwd -P 2>/dev/null) || here=""
+    if [ -n "$here" ]; then
+      match=$(printf '%s' "$pane_list" | jq -r --arg cwd "$here" '
+        [.result.panes[]?
+          | select(.foreground_cwd == $cwd)
+          | select((.pane_id | type) == "string" and (.pane_id | length) > 0)
+          | select((.tab_id | type) == "string" and (.tab_id | length) > 0)
+          | select((.workspace_id | type) == "string" and (.workspace_id | length) > 0)
+          | "\(.pane_id)\t\(.tab_id)\t\(.workspace_id)"]
+        | if length == 1 then .[0] else empty end
+      ' 2>/dev/null) || match=""
+      if [ -n "$match" ]; then
+        cur_pane=${match%%$'\t'*}
+        match=${match#*$'\t'}
+        cur_tab=${match%%$'\t'*}
+        cur_workspace=${match#*$'\t'}
+        if [ -n "$cur_pane" ] && [ -n "$cur_tab" ] && [ -n "$cur_workspace" ]; then
+          pane=$cur_pane
+          tab=$cur_tab
+          workspace=$cur_workspace
+        fi
+      fi
+    fi
+  fi
   if [ -z "$tab" ] || [ -z "$workspace" ]; then
     echo "error: herdr launcher pane '$pane' returned an ambiguous tab or workspace identity in session '$session'; refusing to place a worker without its exact parent workspace" >&2
     return 1
