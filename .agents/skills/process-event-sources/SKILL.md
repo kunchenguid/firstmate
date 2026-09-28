@@ -11,7 +11,7 @@ description: >-
   durable result read, which wakes must be routed to their adapter instead of
   acknowledged generically, the handled acknowledgement contract, the one-owner
   rule, the precise durability boundary, the AIME and iDA applying paths, and
-  and compatibility handling for already captured results from retired adapters.
+  compatibility handling for already captured results from retired adapters.
 user-invocable: false
 metadata:
   internal: true
