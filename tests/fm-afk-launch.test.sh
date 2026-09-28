@@ -437,6 +437,7 @@ unit_mode_quiet_daemon_to_away() {
       || fail "$command: could not enter quiet mode"
     printf 'quiet\n%s\n' "$(date '+%s')" > "$st/state/.afk"
     sleep 600 &
+    # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
     sleep_pid=$!
     lock="$st/state/.supervise-daemon.lock"
     mkdir -p "$lock"
