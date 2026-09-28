@@ -317,9 +317,10 @@
 #   restart, and it is inherited into secondmate homes (bin/fm-config-inherit-lib.sh).
 # Claude worker agent (config/crew-claude-agent):
 #   Opt-in. Absent keeps today's claude launch byte-for-byte. A present file
-#   holds one Claude agent name (letters, digits, '-', '_', optionally
-#   plugin:agent, at most 128 characters; surrounding blanks and one final
-#   newline are ignored), and every claude SHIP and SCOUT template launch,
+#   holds one Claude agent name (ASCII letters, digits, '-', '_', optionally
+#   plugin:agent, at most 128 characters; each component starts with a letter
+#   or digit; trailing newlines, then surrounding blanks, are ignored), and
+#   every claude SHIP and SCOUT template launch,
 #   relaunches included, then carries `--agent <name>`, which selects that agent profile
 #   for the worker session and overrides any `agent` key in the captain's
 #   Claude settings. A secondmate launch never carries it, because a secondmate

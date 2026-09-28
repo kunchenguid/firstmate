@@ -838,9 +838,9 @@ A home file rather than a dispatch-profile field owns this setting because it na
 
 ### Accepted values and refusals
 
-The file holds one agent name on one line; surrounding spaces or tabs and a final newline are ignored.
-A name is letters, digits, `-`, or `_`, starting with a letter or digit, optionally namespaced as `plugin:agent`, and at most 128 characters.
-Any other content, including an empty file, a second line, whitespace inside the name, or a shell metacharacter, refuses Claude ship and scout template launches from that home.
+Trailing newlines are removed first, then surrounding spaces or tabs; the remaining value must be one agent name.
+A name uses ASCII letters, digits, `-`, or `_`, optionally namespaced as `plugin:agent`, and is at most 128 characters; each component must start with a letter or digit.
+Any other content, including an empty value, an embedded newline, whitespace inside the name, or a shell metacharacter, refuses Claude ship and scout template launches from that home.
 An unreadable file refuses the same way.
 Other harnesses, raw launch commands, and secondmate launches do not validate this setting.
 This happens before any endpoint, worktree, or task record exists; remove the file to launch without an agent.

@@ -13,7 +13,9 @@ Busy hooks verified 2026-07-28 on Claude Code 2.1.220.
 | Model | `--model <model>`; discover through the interactive `/model` picker, with alias or full-name shape documented by `claude --help`. |
 | Effort | `--effort <low\|medium\|high\|xhigh\|max>`, verified on 2.1.196. |
 | Permissions | `--dangerously-skip-permissions` by default, or `--permission-mode auto` when `config/claude-permission-mode` is `auto`; the `auto` shape verified on 2.1.269. See [`Claude permission mode`](../../../../../docs/configuration.md#claude-permission-mode-configclaude-permission-mode) for the launch grant and configuration. |
-| Worker agent | Ship and scout launches carry `--agent <name>` only when `config/crew-claude-agent` names one; secondmate launches never do. On 2.1.284 `--agent` composed with the permission flag, `--settings`, and `--append-system-prompt`, and an unknown name printed `--agent '<name>' not found. Available agents: ...` and exited 1 in both interactive and `-p` mode, so a missing profile surfaces as a worker that did not start. See [`Claude worker agent`](../../../../../docs/configuration.md#claude-worker-agent-configcrew-claude-agent). |
+| Worker agent | See [`Claude worker agent`](../../../../../docs/configuration.md#claude-worker-agent-configcrew-claude-agent) for profile selection and launch scope. |
+
+On 2.1.284 `--agent` composed with the permission flag, `--settings`, and `--append-system-prompt`, and an unknown name printed `--agent '<name>' not found. Available agents: ...` and exited 1 in both interactive and `-p` mode, so a missing profile surfaces as a worker that did not start.
 
 ## Workspace trust
 
