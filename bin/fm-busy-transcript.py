@@ -21,7 +21,7 @@ The check command writes no records. Apply must receive its exact receipt and
 never replaces an existing conflicting gen, process binding or spawn_gen.
 The launch prompt carries FIRSTMATE_BUSY_GENERATION=<gen>. Only a root CLI
 session whose FIRST typed UserMessage contains that whole line may bind. Cwd,
-session id, verified schema version, metadata generation and endpoint must match.
+session id, metadata generation and endpoint must match.
 Binding is sticky: inode replacement, truncation or rewriting any observed prefix
 is unknown, never permission to choose a different session. Duplicate candidates
 are unknown at discovery; after binding only that exact file is read. No timestamps or rendered output decide state.
@@ -38,7 +38,7 @@ and remains unknown. A failed pre-input read now refuses transport; a complete
 retry can observe state without inventing an input. No timeout clears a fence.
 last_refusal retains only a bounded stage/category, never exception or input
 text; stderr exposes the same categories even when identity prevents writing.
-Unreadable/corrupt evidence, unverified versions and logs over 32 MiB fail closed.
+Unreadable/corrupt evidence, malformed metadata and logs over 32 MiB fail closed.
 This is a pull source, not a busy-state event writer or turn-end notifier.
 """
 
@@ -52,7 +52,7 @@ import sys
 import time
 
 
-VERSIONS = {"codex": ("0.156.1", "0.157.1"), "traex": ("0.207.1",)}
+HARNESSES = frozenset(("codex", "traex"))
 LIMIT = 32 * 1024 * 1024
 
 
@@ -207,7 +207,7 @@ def process_binding(state, task, data):
     # Narrow recovery capability: Linux-local Herdr Codex/TraeX only. A saved
     # transcript by itself never proves which live process owns an endpoint.
     require(sys.platform == "linux" and data["backend"] == "herdr")
-    require(data["harness"] in VERSIONS)
+    require(data["harness"] in HARNESSES)
     meta = metadata(state, task)
     require(meta.get("kind") in ("ship", "scout") and not meta.get("remote_host"))
     require(meta.get("endpoint_task_id", task) == task, "recorded endpoint task identity differs from the task")
@@ -285,7 +285,8 @@ def identity(payload, data):
         payload.get("source") == "cli"
         and payload.get("thread_source") == "user"
         and payload.get("originator") == data["harness"] + "-tui"
-        and payload.get("cli_version") in VERSIONS[data["harness"]]
+        and isinstance(payload.get("cli_version"), str)
+        and bool(payload.get("cli_version"))
         and payload.get("id") == payload.get("session_id")
         and isinstance(payload.get("id"), str)
         and bool(payload.get("id"))
@@ -478,7 +479,7 @@ def fence(state, backend, target, check_only=False, text=None):
             continue
         if (meta.get("backend", "tmux"), meta.get("window")) == (backend, target):
             binding = state / (path.stem + ".busy-session")
-            if meta.get("harness") in VERSIONS and (meta.get("busy_gen") or binding.exists() or binding.is_symlink()):
+            if meta.get("harness") in HARNESSES and (meta.get("busy_gen") or binding.exists() or binding.is_symlink()):
                 tasks.add(path.stem)
     for path in state.glob("*.busy-session"):
         # A damaged unrelated binding must not affect another adapter's input.
@@ -556,7 +557,7 @@ def main():
                 print(json.dumps(proof, sort_keys=True))
     elif command == "init":
         task, harness, cwd, sessions, backend, target = args
-        require(harness in VERSIONS)
+        require(harness in HARNESSES)
         with Lock(state, task):
             gen = (state / (task + ".busy-gen")).read_text().strip()
             require(bool(gen) and all(c.isalnum() or c in "._-" for c in gen))

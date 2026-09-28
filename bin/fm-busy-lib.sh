@@ -32,8 +32,9 @@
 # Missing, malformed, mismatched or unsupported evidence stays unknown.
 #
 # Codex and TraeX managed workers use the task-bound pull reader in
-# fm-busy-transcript.py, which owns binding, verified versions and submission
-# fences. They arm an unknown record for generation ownership only; the reader
+# fm-busy-transcript.py, which owns binding, structural identity and submission
+# fences. Descriptive CLI versions never gate admission. They arm an unknown
+# record for generation ownership only; the reader
 # never trusts that seed as evidence of activity. tmux/Herdr process liveness
 # must be verified before reading; other backends remain unknown. Missing
 # bindings on legacy Codex tasks remain codex-unverified; legacy TraeX retains

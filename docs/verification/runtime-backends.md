@@ -156,7 +156,7 @@ herdr 0.7.5
 
 ### In-turn transcript input consumption
 
-Verified on 2026-09-27 with Herdr 0.8.0, Codex 0.157.1 and TraeX 0.207.1 on Linux.
+Verified on 2026-09-29 with Herdr 0.8.0, Codex 0.158.0 and TraeX 0.207.1 on Linux.
 The named-lab guard below uses installed default TUIs and a local simulated provider inside private namespaces.
 It submits two durable doorbells during one actual root turn, verifies both typed UserMessage events belong to that turn, checks one tool execution reads and acknowledges both records, and observes busy followed by idle through the public classifier.
 The provider advances only after actual tool-result requests, so speculative requests cannot substitute for execution.
@@ -164,7 +164,10 @@ The prior start-count fence reproduced busy followed by unknown for both adapter
 Private task evidence preserves independent before/after transcript hashes and the bounded event inventory.
 
 ```sh
-FM_BUSY_TRANSCRIPT_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-busy-transcript-live-e2e.test.sh
+HERDR_LAB_HELPER=/home/chengyuhang/firstmate/bin/fm-herdr-lab.sh \
+  FM_BUSY_TRANSCRIPT_LAB_TASK=remove-codex-transcript-version-gate-20260929 \
+  FM_BUSY_TRANSCRIPT_LIVE_E2E=1 \
+  bin/fm-test-run.sh tests/fm-busy-transcript-live-e2e.test.sh
 ```
 
 The additional stable success lines are:
@@ -176,7 +179,8 @@ ok - traex multiple in-turn steering receipts settle without invented starts
 
 The same guard covers fresh launch, exact original-process recovery, single-message steering, interruption, tool and simulated API failures, process exit and endpoint death.
 It does not establish authenticated provider availability.
-The accounting, version admission, bounded refusal categories and conservative legacy-input limits belong to [`fm-busy-transcript.py`](../../bin/fm-busy-transcript.py).
+The reader validates `cli_version` only as nonempty descriptive metadata and does not admit or reject a structurally valid transcript by its version value.
+The accounting, structural transcript admission, bounded refusal categories and conservative legacy-input limits belong to [`fm-busy-transcript.py`](../../bin/fm-busy-transcript.py).
 Portable coverage in `tests/fm-busy-state.test.sh` additionally separates partial and complete reads, unmatched and duplicate inputs, append-only compaction, unsupported replacement/rotation, malformed records and wrong identity.
 
 ### TraeX thin worker adapter
