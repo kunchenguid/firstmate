@@ -5,24 +5,25 @@ Audience: maintainer verification.
 This record holds reusable version-scoped evidence for the runner's active guarantees.
 `docs/configuration.md` owns the operating contract, each script's header and `--help` own its mechanics, and `.agents/skills/process-event-sources/SKILL.md` owns the handling procedure.
 
-Verified on 2026-07-31 on macOS (Darwin 25.5.0) with `lavish-axi` 0.1.45 installed.
-Generic keyed-answer feed verified on 2026-08-16 on the same platform, against the same published poll response shape.
+The original lifecycle evidence was recorded on 2026-07-31 on macOS (Darwin 25.5.0) with `lavish-axi` 0.1.45 installed.
+The exclusive-listener and reply-file interface was re-verified on 2026-09-28 on macOS (Darwin 25.4.0) with `lavish-axi` 0.1.77 installed.
+Generic keyed-answer feed verified on 2026-08-16 on macOS (Darwin 25.5.0), against the same published poll response shape.
 Cross-origin keyed-answer feed verified on 2026-08-19 through the real runner and Lavish adapter interface.
 Trusted external `process-event-adapter/1` binding conformance and the runnable `file-signal` example were verified on 2026-08-27 on macOS (Darwin 25.5.0) with Node v25.9.0.
 
 ## The published Lavish poll interface the adapter wraps
 
-Verified at implementation time without upgrading the installed build:
+Re-verified against the supported-floor build:
 
 ```sh
 $ lavish-axi --version
-0.1.45
+0.1.77
 $ lavish-axi poll --help | head -1
-Usage: lavish-axi poll <html-file> [--agent-reply "..."]
+Usage: lavish-axi poll <html-file> [--owner <label>] [--takeover] [--agent-reply "..."] [--agent-reply-file <path>]
 ```
 
-The same help states that the command "long-polls indefinitely".
-The adapter therefore registers the plain blocking form with no timeout flag, so a completion is a real server-side event rather than a timer expiry.
+The same help states that the command "long-polls indefinitely", that a second listener receives `LISTENER_ACTIVE` unless `--takeover` is used, that takeover displaces the earlier listener with `LISTENER_REPLACED`, and that `--agent-reply-file -` reads the reply from standard input.
+The adapter therefore registers the plain blocking form with no timeout flag, uses `--owner` for listener identity, streams replies through standard input, and never requests takeover.
 
 This build exposes no capabilities command and no multiplexed or subscription endpoint:
 
@@ -35,7 +36,7 @@ code: VALIDATION_ERROR   # exit 2
 Exit 2 with `VALIDATION_ERROR` is positive proof the subcommand does not exist, because the word is parsed as a filename.
 Note that `lavish-axi <anything> --help` exits 0 for any argument, including a nonsense subcommand, so a `--help` exit code can never be used as a capability probe.
 
-The adapter requires none of those extra commands or endpoints: delivery uses the published poll shape above.
+The adapter requires none of those extra commands or endpoints because delivery uses the published poll shape above.
 Its separate routing lookup reads the board's saved Lavish session; the adapter header owns that contract.
 
 ## Why an ended Lavish review is terminal
@@ -102,6 +103,7 @@ Exercised by `tests/fm-procevent.test.sh` against a fake blocking source whose c
 | generic built-in keyed-answer feed | `tests/fm-captain-hold-lifecycle.test.sh` drives a bound built-in source through the real runner with a fixture adapter that only prints keyed lines, proving any bound built-in channel reaches the one keyed-answer intake: named captain-held tasks close at capture time, a card-declared release mode frees held work, keys naming no captain-held task skip, freeform prose forges nothing, matching answer-and-mode replays are idempotent while mode mismatches refuse, an unbound source closes nothing, and capture remains independent of the handler wake. |
 | structured reconcile feed | The same suite drives the optional `reconciles` adapter seam through the real runner and proves only a bound captured source can create a request; the ordinary keyed-answer and chat paths refuse the reserved value without closing or creating a request, versioned selection stays separate from its note, rollout-compatible ordinary legacy answers still pass, and legacy reconcile-shaped values feed neither intake. |
 | adapter-owned silence verdict | an ordinary firstmate-owned Lavish source driven against a stand-in poll that returns an empty ended session captures its result, records it durably handled, appends no wake, and stays silent through a later `reconcile` that would otherwise republish it, while still retiring its ended source; the same real path with a `Send & End` response carrying the captain's choice still publishes its `check` wake and is left unacknowledged for the handler |
+| firstmate-owned Lavish rounds | focused fixtures drive replies through the public arm interface and prove FIFO same-session posting, exact-generation acceptance before acknowledgement, preserved machine-wide ownership through live legacy migration, bounded no-takeover listener-conflict recovery, concurrent draining of large immediate feedback, and duplicate refusal after ambiguous submission or acknowledgement failure |
 | worker-owned Lavish rounds | one three-round fixture arms a board for an identity-matched task endpoint, delivers nonterminal and terminal captures directly to that task's steering inbox without a firstmate `check` wake, acknowledges each nonterminal round through a successful re-arm, redelivers an inbox note filed before acknowledgement, refuses a second armer and every early retirement, and concludes the terminal round through `handled` without another poll; focused fixtures also pin failed re-arm rollback, generation-specific reply staging, one reply post across transient poll retries, unreachable-owner refusal, interrupted conclusion recovery, and repeat acknowledgement isolation |
 | Lavish handled-status classification | an executable fixture table pins exact `feedback`, `ended`, `waiting`, and `browser_disconnected` mappings, including `browser_disconnected` to `disconnected`; the same suite proves that status is nonterminal and receives a zero-answer silence verdict |
 | session-derived Lavish routing | the three-round worker fixture starts its first listener under conflicting ambient host/port values and configuration, then recovers later listeners while that conflicting configuration remains, and proves every reply/poll uses the board's saved session endpoint; direct polls cover Unicode artifact paths, hostnames, IPv6, session endpoint changes, quiet retries, and refusal before reply consumption when session evidence is absent or invalid; spawn coverage still proves the configured opening address enters the worker launch |

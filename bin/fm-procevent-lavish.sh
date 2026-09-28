@@ -99,12 +99,14 @@
 # `read` is the presentation command summarized above; keyed intake remains
 # the separate `answers` contract described here.
 #
-# It wraps ONLY the currently published interface, verified against 0.1.45:
-#   Usage: lavish-axi poll <html-file> [--agent-reply "..."]
-# and that command "long-polls indefinitely" server-side. The adapter therefore
-# runs the plain blocking form with no timeout flag, so results arrive as real
-# server-side events. It adds no periodic discovery, no timer fallback, and no
-# dependency on any unreleased capability.
+# It wraps ONLY the currently published interface, verified against 0.1.77:
+#   Usage: lavish-axi poll <html-file> [--owner <label>] [--takeover]
+#          [--agent-reply "..."] [--agent-reply-file <path>]
+# That command "long-polls indefinitely" server-side. The adapter therefore
+# runs the plain blocking form with no timeout flag, identifies firstmate-owned
+# listeners with --owner, and streams multiline replies through
+# --agent-reply-file -. It adds no periodic discovery, timer fallback, takeover,
+# or dependency on any unreleased capability.
 #
 # BOUNDED QUIET RETRY, owned here and nowhere else. A live listener can be cut
 # short by the server with exactly this two-line response while the session's
@@ -290,7 +292,8 @@ poll_response_filter() {  # <response-file> [rejection-file] [owner]
   perl -e '
     use strict;
     use warnings;
-    my ($stage, $rejection, $owner) = @ARGV;
+    my ($stage, $rejection, $owner, $max_output) = @ARGV;
+    $max_output = 1048576 unless defined($max_output) && $max_output =~ /\A[0-9]+\z/;
     my $expected = "error: Lavish Editor poll response was interrupted\ncode: SERVER_ERROR\n";
     my $active = "error: Lavish Editor already has an active poll listener";
     my $replaced = "error: Lavish Editor poll listener was replaced by a takeover\ncode: LISTENER_REPLACED\n";
@@ -299,7 +302,7 @@ poll_response_filter() {  # <response-file> [rejection-file] [owner]
     binmode STDIN;
     binmode STDOUT;
     binmode $staged;
-    my ($candidate, $streaming, $control) = ("", 0, 0);
+    my ($candidate, $streaming, $control, $staged_bytes) = ("", 0, 0, 0);
     sub write_all {
       my ($handle, $bytes) = @_;
       my $offset = 0;
@@ -322,7 +325,11 @@ poll_response_filter() {  # <response-file> [rejection-file] [owner]
       my $take = length($chunk) < $room ? length($chunk) : $room;
       my $prefix = substr($chunk, 0, $take);
       $candidate .= $prefix;
-      write_all($staged, $prefix);
+      if ($staged_bytes < $max_output) {
+        my $staged_prefix = substr($prefix, 0, $max_output - $staged_bytes);
+        write_all($staged, $staged_prefix);
+        $staged_bytes += length($staged_prefix);
+      }
       if ($candidate =~ /^\Q$active\E[^\n]*\ncode: LISTENER_ACTIVE\n/) {
         if (length($rejection)) {
           open my $rejected, ">", $rejection or exit 2;
@@ -356,7 +363,7 @@ poll_response_filter() {  # <response-file> [rejection-file] [owner]
     exit 10 if !$streaming && !$control && $candidate eq $expected;
     exit $control if $control;
     write_all(*STDOUT, $candidate) unless $streaming;
-  ' "$1" "${2-}" "${3-}"
+  ' "$1" "${2-}" "${3-}" "${FM_PROCEVENT_MAX_OUTPUT_BYTES:-1048576}"
 }
 
 # Minimum seconds between retry attempt starts. FM_LAVISH_POLL_RETRY_DELAY is a
