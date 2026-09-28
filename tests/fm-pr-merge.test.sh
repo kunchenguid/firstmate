@@ -232,6 +232,17 @@ case "${1:-} ${2:-}" in
     # The required-check reads: the branch itself, and its rules read without
     # the merge-queue filter the queue reader below applies.
     case " $* " in
+      *" repos/"*"/contents/scripts/full-suite.sh?ref="*)
+        # The full-suite opt-in read answers GitHub's 404 unless a case says
+        # the base branch carries the script or that the read fails.
+        if [ -f "${FM_TEST_GH_FULL_SUITE_READ_FAIL:-}" ]; then
+          echo 'gh: Server Error (HTTP 502)' >&2
+          exit 1
+        fi
+        [ ! -f "${FM_TEST_GH_FULL_SUITE_PRESENT:-}" ] || exit 0
+        echo 'gh: Not Found (HTTP 404)' >&2
+        exit 1
+        ;;
       *" repos/"*"/commits/"*"/check-runs"*)
         case "$*" in
           *"/commits/$(cat "$FM_TEST_GH_HEAD")/check-runs"*) ;;
@@ -459,6 +470,10 @@ run_pr_merge() {
   FM_TEST_GH_BRANCH_FAIL="$case_dir/github-branch-fail" \
   FM_TEST_GH_REQUIRED_RULES="$case_dir/github-required-rules.json" \
   FM_TEST_GH_REQUIRED_RULES_FAIL="$case_dir/github-required-rules-fail" \
+  FM_TEST_GH_FULL_SUITE_PRESENT="$case_dir/github-full-suite-present" \
+  FM_TEST_GH_FULL_SUITE_READ_FAIL="$case_dir/github-full-suite-read-fail" \
+  FM_TEST_FULL_SUITE_LOG="$case_dir/full-suite.log" \
+  FM_TEST_FULL_SUITE_GREEN="$case_dir/full-suite-green-heads" \
   FM_TEST_META_AT_MERGE="$case_dir/meta-at-merge" \
   FM_TEST_AWAY_RECORD_AFTER_VIEW="$case_dir/away-record-after-view" \
   FM_TEST_ROOT="$ROOT" \
@@ -3665,6 +3680,222 @@ test_allow_missing_follows_the_allow_red_rules() {
   pass "fm-pr-merge --allow-missing is single use, attended-only, and GitHub-only like --allow-red"
 }
 
+# The project clone's copy of a full-suite script. Like the real one, it keys a
+# pass on the commit: `check <sha>` exits 0 only for a sha listed as green, and
+# refuses any other. Every call is logged with its working directory and base.
+# Args: case_dir [green-sha]...
+add_full_suite_script() {
+  local case_dir=$1 sha
+  shift
+  mkdir -p "$case_dir/project/scripts"
+  : > "$case_dir/full-suite.log"
+  : > "$case_dir/full-suite-green-heads"
+  for sha in "$@"; do
+    printf '%s\n' "$sha" >> "$case_dir/full-suite-green-heads"
+  done
+  cat > "$case_dir/project/scripts/full-suite.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'cwd=%s base=%s args=%s\n' "$PWD" "${FULL_SUITE_BASE-<unset>}" "$*" >> "$FM_TEST_FULL_SUITE_LOG"
+[ "${1:-}" = check ] && [ "$#" -eq 2 ] || { echo 'usage: full-suite.sh check <sha>' >&2; exit 2; }
+if grep -qxF "$2" "$FM_TEST_FULL_SUITE_GREEN"; then
+  echo "full-suite: OK - $2 passed the full suite"
+  exit 0
+fi
+echo "full-suite: REFUSED - $2 has no green full run (example/full-suite: none)."
+exit 1
+SH
+  chmod +x "$case_dir/project/scripts/full-suite.sh"
+}
+
+test_full_suite_pass_at_the_verified_head_merges() {
+  local case_dir head
+  head=f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1
+  case_dir=$(make_case full-suite-green)
+  add_gh_mocks "$case_dir" "$head"
+  : > "$case_dir/github-full-suite-present"
+  add_full_suite_script "$case_dir" "$head"
+  run_required_case "$case_dir" 120
+
+  expect_code 0 "$RC" "full-suite-green: a pass at the verified head should merge: $(cat "$case_dir/stderr")"
+  assert_grep 'api --silent repos/example/repo/contents/scripts/full-suite.sh?ref=main' "$case_dir/gh.log" \
+    "full-suite-green: the opt-in was not read from the live base branch"
+  [ "$(cat "$case_dir/full-suite.log")" = "cwd=$case_dir/project base=main args=check $head" ] \
+    || fail "full-suite-green: the clone's check was not asked about exactly the verified head: $(cat "$case_dir/full-suite.log")"
+  assert_logged_gh_merge "$case_dir" 120 example/repo --squash
+  assert_grep "verified: the full suite passed at head $head" "$case_dir/stderr" \
+    "full-suite-green: the full-suite pass was not reported as verified"
+  pass "fm-pr-merge merges an opted-in repository once its full-suite check passes at the verified head"
+}
+
+test_full_suite_pass_keys_on_the_head_not_the_branch() {
+  local case_dir head earlier
+  head=f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2
+  earlier=e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2
+  case_dir=$(make_case full-suite-earlier-head)
+  add_gh_mocks "$case_dir" "$head"
+  printf 'pr_head=%s\n' "$earlier" >> "$case_dir/state/task-x1.meta"
+  : > "$case_dir/github-full-suite-present"
+  add_full_suite_script "$case_dir" "$earlier"
+  run_required_case "$case_dir" 121
+
+  expect_code 1 "$RC" "full-suite-earlier-head: a pass on an earlier commit must not admit the merge"
+  assert_grep "the full suite must have passed at head $head" "$case_dir/stderr" \
+    "full-suite-earlier-head: the refusal did not name the head being merged"
+  assert_grep "scripts/full-suite.sh check exited 1; its own output follows, quoted:" "$case_dir/stderr" \
+    "full-suite-earlier-head: the refusal did not name the failed check"
+  assert_grep "      > full-suite: REFUSED - $head has no green full run" "$case_dir/stderr" \
+    "full-suite-earlier-head: the check's own output was not quoted"
+  assert_no_grep "$earlier" "$case_dir/full-suite.log" \
+    "full-suite-earlier-head: the recorded earlier head was checked instead of the live one"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "full-suite-earlier-head: gh pr merge ran without a pass at the head being merged"
+  pass "fm-pr-merge refuses a full-suite pass recorded on any commit but the head being merged"
+}
+
+test_full_suite_refusal_is_reported_with_every_other_failure() {
+  local case_dir head
+  head=f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3
+  case_dir=$(make_case full-suite-and-red)
+  add_gh_mocks "$case_dir" "$head"
+  write_github_red_json "$case_dir" "$head" lint
+  write_github_required "$case_dir" ruleset:validate
+  : > "$case_dir/github-full-suite-present"
+  add_full_suite_script "$case_dir"
+  run_required_case "$case_dir" 122
+
+  expect_code 1 "$RC" "full-suite-and-red: every failure must refuse"
+  assert_grep "check 'lint' is not green" "$case_dir/stderr" \
+    "full-suite-and-red: the red check was not reported"
+  assert_grep "required check 'validate' has not reported" "$case_dir/stderr" \
+    "full-suite-and-red: the unreported check was not reported"
+  assert_grep "the full suite must have passed at head $head" "$case_dir/stderr" \
+    "full-suite-and-red: the full-suite refusal was not reported beside the others"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "full-suite-and-red: gh pr merge ran"
+  pass "fm-pr-merge reports a full-suite refusal together with every other failing condition"
+}
+
+test_full_suite_requirement_needs_the_clone_copy() {
+  local case_dir head
+  head=f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4
+
+  case_dir=$(make_case full-suite-clone-lacks-script)
+  add_gh_mocks "$case_dir" "$head"
+  : > "$case_dir/github-full-suite-present"
+  run_required_case "$case_dir" 123
+  expect_code 1 "$RC" "full-suite-clone-lacks-script: a stale clone must refuse, not skip the requirement"
+  assert_grep "the project clone $case_dir/project has no executable copy of it" "$case_dir/stderr" \
+    "full-suite-clone-lacks-script: the refusal did not name the clone"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "full-suite-clone-lacks-script: gh pr merge ran"
+
+  case_dir=$(make_case full-suite-script-not-executable)
+  add_gh_mocks "$case_dir" "$head"
+  : > "$case_dir/github-full-suite-present"
+  add_full_suite_script "$case_dir" "$head"
+  chmod -x "$case_dir/project/scripts/full-suite.sh"
+  run_required_case "$case_dir" 124
+  expect_code 1 "$RC" "full-suite-script-not-executable: a copy that cannot run must refuse"
+  assert_grep "has no executable copy of it" "$case_dir/stderr" \
+    "full-suite-script-not-executable: the refusal did not say why"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "full-suite-script-not-executable: gh pr merge ran"
+
+  case_dir=$(make_case full-suite-no-recorded-clone)
+  add_gh_mocks "$case_dir" "$head"
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" \
+    "worktree=$case_dir/wt" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  : > "$case_dir/github-full-suite-present"
+  run_required_case "$case_dir" 125
+  expect_code 1 "$RC" "full-suite-no-recorded-clone: a task with no clone must refuse"
+  assert_grep "task task-x1 records no project clone to check it from" "$case_dir/stderr" \
+    "full-suite-no-recorded-clone: the refusal did not say why"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "full-suite-no-recorded-clone: gh pr merge ran"
+  pass "fm-pr-merge refuses an opted-in merge when it has no clone copy of the check to run"
+}
+
+test_full_suite_opt_in_read_failure_refuses() {
+  local case_dir head
+  head=f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5
+  case_dir=$(make_case full-suite-read-fails)
+  add_gh_mocks "$case_dir" "$head"
+  : > "$case_dir/github-full-suite-read-fail"
+  add_full_suite_script "$case_dir" "$head"
+  run_required_case "$case_dir" 126
+
+  expect_code 1 "$RC" "full-suite-read-fails: an unreadable opt-in must refuse"
+  assert_grep 'whether base branch main carries scripts/full-suite.sh could not be read' "$case_dir/stderr" \
+    "full-suite-read-fails: the refusal did not name the unreadable opt-in"
+  [ ! -s "$case_dir/full-suite.log" ] || fail "full-suite-read-fails: the clone's check ran on an unread opt-in"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "full-suite-read-fails: gh pr merge ran"
+  pass "fm-pr-merge refuses when the base branch's full-suite opt-in cannot be read"
+}
+
+test_full_suite_requirement_has_no_waiver() {
+  local case_dir head
+  head=f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6
+
+  case_dir=$(make_case full-suite-no-waiver)
+  add_gh_mocks "$case_dir" "$head"
+  : > "$case_dir/github-full-suite-present"
+  add_full_suite_script "$case_dir"
+  run_required_case "$case_dir" 127 --attended-override \
+    --allow-red example/full-suite --allow-missing example/full-suite -- --admin
+  expect_code 1 "$RC" "full-suite-no-waiver: no waiver or override may skip the requirement"
+  assert_grep "the full suite must have passed at head $head" "$case_dir/stderr" \
+    "full-suite-no-waiver: the refusal did not name the requirement"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "full-suite-no-waiver: gh pr merge ran under a waiver"
+
+  case_dir=$(make_case full-suite-away)
+  add_gh_mocks "$case_dir" "$head"
+  : > "$case_dir/github-full-suite-present"
+  add_full_suite_script "$case_dir"
+  write_away_record "$case_dir" --words 'merge task-x1 when green'
+  run_required_case "$case_dir" 128
+  expect_code 1 "$RC" "full-suite-away: the requirement must hold under away authority"
+  assert_grep "the full suite must have passed at head $head" "$case_dir/stderr" \
+    "full-suite-away: the refusal did not name the requirement"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "full-suite-away: gh pr merge ran while away"
+  pass "fm-pr-merge applies the full-suite requirement under every waiver, override, and posture"
+}
+
+test_repository_without_full_suite_merges_as_before() {
+  local case_dir head
+  head=f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7
+
+  # A clone whose own copy would refuse proves the base branch, not the clone,
+  # decides whether the requirement applies.
+  case_dir=$(make_case full-suite-absent-on-base)
+  add_gh_mocks "$case_dir" "$head"
+  add_full_suite_script "$case_dir"
+  run_required_case "$case_dir" 129
+  expect_code 0 "$RC" "full-suite-absent-on-base: a base without the script should merge as before: $(cat "$case_dir/stderr")"
+  [ ! -s "$case_dir/full-suite.log" ] || fail "full-suite-absent-on-base: the clone's check ran for a base without the script"
+  assert_no_grep 'full suite' "$case_dir/stderr" \
+    "full-suite-absent-on-base: a base without the script was held to the requirement"
+  assert_logged_gh_merge "$case_dir" 129 example/repo --squash
+
+  case_dir=$(make_gitlab_case full-suite-gitlab)
+  : > "$case_dir/github-full-suite-present"
+  add_full_suite_script "$case_dir"
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$MR_URL" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  RC=$?
+  set -e
+  expect_code 0 "$RC" "full-suite-gitlab: a GitLab merge should not read the requirement: $(cat "$case_dir/stderr")"
+  [ ! -s "$case_dir/full-suite.log" ] || fail "full-suite-gitlab: the clone's check ran for a GitLab merge"
+  assert_no_grep 'contents/scripts/full-suite.sh' "$case_dir/gh.log" \
+    "full-suite-gitlab: a GitLab merge read the GitHub opt-in"
+  pass "fm-pr-merge merges a repository without the full-suite script, and any GitLab merge, as before"
+}
+
 test_gitlab_head_override_args_refuse_before_recording
 test_secondmate_merge_reports_upward_once
 test_secondmate_merge_reports_on_the_local_route
@@ -3718,3 +3949,10 @@ test_allow_missing_follows_the_allow_red_rules
 test_required_producer_identity
 test_app_bound_required_status_context_matches_by_name
 test_required_partial_reads_report_all_failures
+test_full_suite_pass_at_the_verified_head_merges
+test_full_suite_pass_keys_on_the_head_not_the_branch
+test_full_suite_refusal_is_reported_with_every_other_failure
+test_full_suite_requirement_needs_the_clone_copy
+test_full_suite_opt_in_read_failure_refuses
+test_full_suite_requirement_has_no_waiver
+test_repository_without_full_suite_merges_as_before

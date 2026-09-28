@@ -79,6 +79,30 @@
 # setting, which the merge API applies, and imposing squash there would override
 # that convention rather than mirror the GitHub default.
 #
+# A GitHub repository can also require the full test suite to have passed at
+# the exact head being merged, for a workflow whose own validation runs only the
+# tests a change can reach. It opts in by carrying scripts/full-suite.sh on the
+# pull request's base branch, which github_verify_full_suite below reads live
+# from the forge rather than from the project clone's checkout, because a stale
+# checkout that predates the script would otherwise skip the requirement
+# without a word. GitHub's 404 for that path is the only answer that leaves the
+# merge as it would be without the script; any other failed read refuses. An
+# opted-in merge runs the script from the task's recorded project= clone as
+# `check <head>` on the verified head, with FULL_SUITE_BASE set to the live
+# base, and refuses unless it exits 0, reporting that alongside every other
+# failing condition. The script owns what counts as a pass. The same verified
+# head is what --match-head-commit binds, so a pass recorded on any other commit
+# cannot admit the merge. This only looks for a pass already recorded and never
+# runs the suite. A task with no recorded clone, or a clone with no executable
+# copy of the script, refuses, and neither waiver nor --attended-override skips
+# the requirement. GitLab merges do not read it.
+# This is a merge-path backstop, not enforcement. A merge made outside this
+# script, including one made by hand on GitHub, bypasses it completely, and a
+# base branch that advances between the check and the merge is not re-checked.
+# The complete control is making the script's status context a required status
+# check in the base branch's protection, which GitHub enforces for every merger
+# and which needs repository admin to configure.
+#
 # A GitLab merge is refused unless every pre-merge condition holds, each read
 # live at merge time rather than taken from recorded metadata: the merge request
 # is open, detailed_merge_status is mergeable, has_conflicts is false,
@@ -704,6 +728,66 @@ github_required_checks_missing() {
   ' 2>/dev/null || return 1
 }
 
+# The full-suite requirement for one verified head and its live base, whose
+# contract the header owns. Sets FM_PR_FULL_SUITE_REFUSALS to refusal lines,
+# empty when the requirement holds or the base does not carry the script, and
+# FM_PR_FULL_SUITE_VERIFIED to a verified line only when the check passed.
+# Args: head base
+FM_PR_FULL_SUITE_SCRIPT=scripts/full-suite.sh
+FM_PR_FULL_SUITE_REFUSALS=
+FM_PR_FULL_SUITE_VERIFIED=
+github_verify_full_suite() {
+  local head=$1 base=$2 ref err_file err_text project script output line rc=0
+  local required="base branch $base carries $FM_PR_FULL_SUITE_SCRIPT, so the full suite must have passed at head $head"
+  FM_PR_FULL_SUITE_REFUSALS=
+  FM_PR_FULL_SUITE_VERIFIED=
+  ref=$(github_urlencode_path_segment "$base")
+  if ! err_file=$(mktemp "${TMPDIR:-/tmp}/fm-pr-merge-full-suite.XXXXXX"); then
+    FM_PR_FULL_SUITE_REFUSALS="  - whether base branch $base carries $FM_PR_FULL_SUITE_SCRIPT could not be read, so a required full-suite pass cannot be ruled out
+"
+    return 0
+  fi
+  if ! gh api --silent "repos/$PR_OWNER/$PR_REPO/contents/$FM_PR_FULL_SUITE_SCRIPT?ref=$ref" \
+    >/dev/null 2>"$err_file"; then
+    err_text=$(cat "$err_file" 2>/dev/null || true)
+    rm -f "$err_file"
+    case "$err_text" in
+      *"(HTTP 404)"*) return 0 ;;
+    esac
+    FM_PR_FULL_SUITE_REFUSALS="  - whether base branch $base carries $FM_PR_FULL_SUITE_SCRIPT could not be read, so a required full-suite pass cannot be ruled out
+"
+    return 0
+  fi
+  rm -f "$err_file"
+
+  project=$(grep '^project=' "$META" | tail -1 | cut -d= -f2- || true)
+  if [ -z "$project" ]; then
+    FM_PR_FULL_SUITE_REFUSALS="  - $required, but task $ID records no project clone to check it from
+"
+    return 0
+  fi
+  script="$project/$FM_PR_FULL_SUITE_SCRIPT"
+  if [ ! -f "$script" ] || [ ! -x "$script" ]; then
+    FM_PR_FULL_SUITE_REFUSALS="  - $required, but the project clone $project has no executable copy of it to check with; bring that clone's checkout up to date
+"
+    return 0
+  fi
+  output=$(cd "$project" && FULL_SUITE_BASE="$base" "$script" check "$head" 2>&1 </dev/null) || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    FM_PR_FULL_SUITE_VERIFIED="verified: the full suite passed at head $head, per $script check"
+    return 0
+  fi
+  FM_PR_FULL_SUITE_REFUSALS="  - $required, but $script check exited $rc; its own output follows, quoted:
+"
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    FM_PR_FULL_SUITE_REFUSALS="$FM_PR_FULL_SUITE_REFUSALS      > $line
+"
+  done <<OUTPUT
+$output
+OUTPUT
+}
+
 # Pre-merge conditions from a live PR view, base requirements, and head producers.
 # Sets FM_PR_MERGE_HEAD to the verified head on success.
 github_verify_mergeable() {
@@ -830,6 +914,9 @@ $missing
 EOF
   fi
 
+  github_verify_full_suite "$live_head" "$base"
+  refusals="$refusals$FM_PR_FULL_SUITE_REFUSALS"
+
   if [ -n "$refusals" ]; then
     printf 'error: refusing to merge %s\n' "$URL" >&2
     printf '%s' "$refusals" >&2
@@ -839,6 +926,7 @@ EOF
   fi
   printf 'verified: %s is open and mergeable, with every unwaived required check reported and every unwaived check green at head %s\n' \
     "$URL" "$live_head" >&2
+  [ -z "$FM_PR_FULL_SUITE_VERIFIED" ] || printf '%s\n' "$FM_PR_FULL_SUITE_VERIFIED" >&2
   FM_PR_MERGE_HEAD=$live_head
   FM_PR_GITHUB_BASE=$base
 }
