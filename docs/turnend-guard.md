@@ -294,6 +294,10 @@ The registrations in detail:
   The discriminator is the payload's own `transcript_path`, not the environment and not the shared foreign-host predicate above.
   pi-code stamps it with Pi's session file under `/.pi/`, a path component a Claude transcript never carries.
   The stand-down fails toward running, matching the guards above, so no payload, no `jq`, or no `transcript_path` still arms, and every other Claude-shaped hook pi-code delivers keeps running.
+- AGY registers a `Stop` hook in `.agents/hooks.json` and delegates to `bin/fm-turnend-guard-agy.sh`.
+  The hook adapter verifies primary scope, checks the `executionNum` budget (defaulting to 1 continuation per turn) to prevent infinite loops, and invokes `bin/fm-turnend-guard.sh`.
+  If the guard returns exit code 2, the adapter returns `{"decision": "continue", "reason": "<instructions>"}` on stdout and exits 0, which compels a continuation turn carrying the repair instruction.
+  When supervision is healthy or not needed, or when `executionNum` reaches the budget, it returns `{"decision": "allow"}` and exits 0.
 
 ### Claude and Codex blocking
 

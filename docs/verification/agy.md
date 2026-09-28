@@ -133,7 +133,7 @@ $ herdr agent get w2:p1 --session fm-lab-firstmate-agy-ad-1599574-8823
 
 Herdr tracks agy natively (`antigravity-cli` integration, detected as `agent=agy`), so `fm_backend_herdr_pane_agent_state` returns `live` for every registered agy status and no exit-detection hardening was needed.
 The tmux adapter classifies the anchored process name `agy` as `agent` through the shared name vocabulary in `bin/fm-agent-process-lib.sh`, the muse/omp precedent for short bare-word names.
-agy stays out of the session-lock name vocabulary in `bin/fm-session-lock-lib.sh`, where the other crewmate-only adapters are also absent.
+`bin/fm-session-lock-lib.sh` recognizes `agy` in `FM_HARNESS_RE` (`^agy$`) and `FM_HARNESS_NAMES`, enabling an AGY primary session to hold this home's session lock (`state/.lock`).
 
 ## Composer: unknown by design
 
@@ -153,18 +153,44 @@ Same-copy relaunch held: `bin/fm-control.sh relaunch --note` replaced the worker
 Exit held: `bin/fm-control.sh exit` stopped the worker, the registry returned `agent_not_found`, and the pane remained a lone shell in the worktree with all work intact.
 No automatic quota failover was exercised or claimed; every handoff above was an explicit supervised relaunch.
 
+## Primary integration: structured lifecycle hooks (AGY 1.2.11)
+
+Verified on 2026-09-25 with `agy 1.2.11` on macOS and Linux through Herdr and tmux.
+AGY exposes native lifecycle hooks configured in `.agents/hooks.json` that execute synchronously and exchange structured JSON payloads on stdin and stdout:
+- `SessionStart`: AGY executes `bin/fm-sessionstart-agy.sh --source startup` at session open.
+  The script executes `bin/fm-sessionstart-run.sh` and returns `{"injectSteps": [{"ephemeralMessage": "$DIGEST"}]}` on stdout.
+  The initial fleet state and operating instructions are injected directly into model context before the first turn.
+- `PreToolUse`: AGY executes `bin/fm-pretool-check-agy.sh` before every tool call (configured with `matcher: "*"`).
+  The payload delivers `toolCall.name` and arguments (`toolCall.args.CommandLine`, `toolCall.args.command`, `toolCall.args.cmd`).
+  Subagent delegation-shaped tools are evaluated with `bin/fm-subagent-pretool-check.sh --tool "$TOOL_NAME"`.
+  Command execution tools are evaluated against `bin/fm-arm-pretool-check.sh --command "$CMD"` (denying asynchronous backgrounding, pipes, or bundling of watcher commands) and `bin/fm-cd-pretool-check.sh --command "$CMD"` (denying persistent directory changes into `projects/`).
+  A policy denial returns `{"decision": "deny", "reason": "..."}`, causing AGY to reject the tool execution and inform the model.
+- `Stop`: AGY executes `bin/fm-turnend-guard-agy.sh` at turn completion.
+  The payload carries `executionNum`, `terminationReason`, `fullyIdle`, and `workspacePaths`.
+  The hook checks `executionNum` against the turn-end block budget (default 1); once reached, it returns `{"decision": "allow"}` to prevent runaway loops.
+  Otherwise, it evaluates watcher health via `bin/fm-turnend-guard.sh`.
+  If supervision is active and unheld, `bin/fm-turnend-guard.sh` exits 2 and the adapter returns `{"decision": "continue", "reason": "..."}` on stdout, forcing a continuation turn with the repair instructions.
+  When supervision is healthy or not needed, it returns `{"decision": "allow"}`.
+
+Supervision wait protocol:
+- Documented in `docs/supervision-protocols/agy.md`.
+- Uses the foreground checkpoint model: `bin/fm-watch-checkpoint.sh --seconds "${FM_AGY_WATCH_CHECKPOINT:-${FM_CODEX_WATCH_CHECKPOINT:-180}}"`.
+- Drains queued wakes, takes the checkpoint, and handles wakes without backgrounding.
+
 ## What is still unproven
 
 The unauthenticated failure mode was never observed; this host's agy runs signed in, so any auth prompt is a fail-loud credential blocker, not a handled dialog.
 No slash-skill invocation form was verified, so skill invocation stays natural language.
 `--continue` and `--conversation` resume were never exercised; recovery uses deterministic relaunch from the brief on disk.
-No primary or secondmate behavior was built or tested, and none is claimed.
+Secondmate support on `agy` remains unverified and refused by `bin/fm-spawn.sh`.
 
 ## Refreshing this record
 
-Run the portable suite and the live guard after any agy upgrade, because the process name, marker set, trust dialog text, and rendered busy/interrupt text are all vendor-controlled surfaces that the spawn gate and the busy fallback match verbatim:
+Run the portable suites and live guards after any agy upgrade:
 
 ```
 bin/fm-test-run.sh tests/fm-agy-harness.test.sh
+bin/fm-test-run.sh tests/fm-agy-primary.test.sh
 FM_AGY_SIGNALS_LIVE=1 bin/fm-test-run.sh tests/fm-agy-signals-live-e2e.test.sh
+FM_AGY_PRIMARY_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-agy-primary-live-e2e.test.sh
 ```
