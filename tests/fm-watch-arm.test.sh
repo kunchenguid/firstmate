@@ -1440,9 +1440,37 @@ test_late_genuine_ack_after_bound_settle_still_resurfaces_queued_row() {
   pass "watch-arm: a genuine ack after a bound settle still resurfaces a newer queued row on re-arm"
 }
 
+# With an empty queue an announced-but-unacknowledged episode is never
+# reopened: every plain restart leaves that generation announced, starts no
+# resurface, and keeps the watcher up without spending the reopen bound.
 test_stuck_unacked_recovery_settles_after_bounded_reopen() {
-  check_stuck_unacked_recovery_settles bounded-reopen 0
-  pass "watch-arm: a stuck unacknowledged recovery episode settles after a bounded number of reopens instead of looping forever"
+  local dir home state fakebin i
+  local FM_RECOVERY_REOPEN_LIMIT=2
+  export FM_RECOVERY_REOPEN_LIMIT
+  dir=$(make_case bounded-reopen)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  mkdir -p "$home/data"
+  printf 'announced:downtime:seedgen1\n' > "$state/.watcher-down"
+  chmod 0600 "$state/.watcher-down"
+
+  i=0
+  while [ "$i" -le "$FM_RECOVERY_REOPEN_LIMIT" ]; do
+    i=$((i + 1))
+    start_rearm_arm "$home" "$state" "$fakebin" "$dir/arm-$i.out"
+    is_live_non_zombie "$ARM_PID" \
+      || fail "empty-queue restart $i did not keep the watcher up: $(cat "$dir/arm-$i.out")"
+    ! grep -F 'check: rearm-resurface' "$dir/arm-$i.out" >/dev/null \
+      || fail "empty-queue restart $i resurfaced an episode with nothing queued: $(cat "$dir/arm-$i.out")"
+    [ "$(cat "$state/.watcher-down" 2>/dev/null || true)" = 'announced:downtime:seedgen1' ] \
+      || fail "empty-queue restart $i changed the announced generation: $(cat "$state/.watcher-down" 2>/dev/null)"
+    [ ! -e "$state/.watcher-down.reopen-count" ] \
+      || fail "empty-queue restart $i spent the reopen bound"
+    kill "$ARM_PID" 2>/dev/null || true
+    wait "$ARM_PID" 2>/dev/null || true
+  done
+  pass "watch-arm: a stuck unacknowledged recovery episode with an empty queue keeps the watcher up on every restart"
 }
 
 test_stuck_unacked_recovery_with_queued_rows_stays_up_after_settling() {
