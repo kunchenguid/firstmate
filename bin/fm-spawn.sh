@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--adopt-worktree <path>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--adopt-worktree <path>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
@@ -38,6 +38,23 @@
 #   prints a one-line deviation notice and continues, because the registered
 #   prefix is the captain's standing preference and the brief agreement above
 #   already guarantees the worker's instructions match the branch.
+#   --adopt-worktree <path> makes a FIRST ship or scout dispatch launch into a
+#   worktree the caller already created, such as a project's own ticket-claim
+#   copy, instead of allocating a Treehouse pool slot: `treehouse get` is never
+#   sent and no slot claim is written. The copy must pass the same isolation proof
+#   a pooled slot passes, so the repository primary checkout, the spawning
+#   project, and anything that is not a worktree root refuse exactly as they would
+#   for a pooled slot. Before any endpoint exists it also refuses a path that does
+#   not exist, is not a worktree of the spawning project's repository, is itself a
+#   Treehouse pool slot (pool slots are allocated here, never adopted, so teardown
+#   keeps returning them), is already recorded by another task in this home, or
+#   has uncommitted changes. The ordinary base refresh below then refuses a copy
+#   carrying commits the origin default branch lacks rather than resetting them
+#   away. The task record carries worktree_source=adopted, which relaunch
+#   preserves and bin/fm-teardown.sh reads to leave the copy and its branch to
+#   their creator instead of returning them to a pool. The flag is refused with
+#   --relaunch, --secondmate, batch pairs, and the orca backend, which creates
+#   its own worktree.
 #   Ship/scout launches always put fm-dod-lib.sh's current worker role scope
 #   first in the private launch-brief overlay, including the exact task-owned
 #   steering inbox. This never rewrites a project's instruction files or a
@@ -644,6 +661,7 @@ MODE=
 YOLO=
 BRANCH_PREFIX=fm/
 TRACEPARENT_ARG=
+ADOPT_WT=
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
@@ -652,6 +670,7 @@ MODE_SET=0
 YOLO_SET=0
 BRANCH_PREFIX_SET=0
 TRACEPARENT_SET=0
+ADOPT_SET=0
 RELAUNCH=0
 POS=()
 want_value=
@@ -695,6 +714,10 @@ for a in "$@"; do
     traceparent)
       TRACEPARENT_ARG=$a
       TRACEPARENT_SET=1
+      ;;
+    adopt-worktree)
+      ADOPT_WT=$a
+      ADOPT_SET=1
       ;;
     *)
       echo "error: internal parser state for --$want_value" >&2
@@ -754,6 +777,11 @@ for a in "$@"; do
     TRACEPARENT_ARG=${a#--traceparent=}
     TRACEPARENT_SET=1
     ;;
+  --adopt-worktree) want_value=adopt-worktree ;;
+  --adopt-worktree=*)
+    ADOPT_WT=${a#--adopt-worktree=}
+    ADOPT_SET=1
+    ;;
   *) POS+=("$a") ;;
   esac
 done
@@ -789,6 +817,14 @@ done
   echo "error: --traceparent requires a non-empty value" >&2
   exit 1
 }
+[ "$ADOPT_SET" -eq 0 ] || [ -n "$ADOPT_WT" ] || {
+  echo "error: --adopt-worktree requires a non-empty value" >&2
+  exit 1
+}
+if [ "$ADOPT_SET" -eq 1 ] && { [ "$RELAUNCH" -eq 1 ] || [ "$KIND" = secondmate ]; }; then
+  echo "error: --adopt-worktree applies only to a first ship or scout dispatch; a relaunch reuses the task's recorded worktree and a secondmate runs in its own home" >&2
+  exit 1
+fi
 # A parent-delivered carrier replaces this home's own resolution, so it is
 # refused unless it is a secondmate spawn carrying a strictly valid W3C value.
 # Nothing else may reach the pane's TRACEPARENT export.
@@ -1194,6 +1230,7 @@ SPAWN_TASK_SET_LOCK_HELD=0
 SPAWN_TREEHOUSE_PROJECT_LOCK=
 SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
 SPAWN_SLOT_CLAIMED=0
+SPAWN_WORKTREE_ADOPTED=0
 RELAUNCH_REPLACEMENT_PENDING=0
 RELAUNCH_REPLACEMENT_BUSY_GEN=
 RELAUNCH_REPLACEMENT_HARNESS=
@@ -1445,6 +1482,10 @@ if [ "$RELAUNCH" -eq 1 ] && [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart"
   exit 1
 fi
 if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in */*) false ;; *) true ;; esac then
+  if [ "$ADOPT_SET" -eq 1 ]; then
+    echo "error: --adopt-worktree is single-task only; adopt one worktree per spawn" >&2
+    exit 1
+  fi
   if [ "$KIND" != secondmate ] && [ -z "$HARNESS_ARG" ] && [ -f "$CONFIG/crew-dispatch.json" ]; then
     echo "error: config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules (the consultation backstop, so the rules are never silently skipped)." >&2
     exit 1
@@ -3248,7 +3289,7 @@ spawn_worktree_isolated() { # <path>
 validate_spawn_worktree() { # <source> <inspect-target>
   local source=$1 inspect_target=$2
   if ! spawn_worktree_isolated "$WT"; then
-    echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${SPAWN_WT_TOP:-none}'; spawning project '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
+    echo "error: $source did not yield an isolated worktree (resolved '$WT': $SPAWN_WT_REASON; worktree root '${SPAWN_WT_TOP:-none}'; spawning project '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
     exit 1
   fi
 }
@@ -3309,16 +3350,17 @@ spawn_worktree_has_origin_config() { # <worktree>
 }
 
 freshen_spawn_worktree_base() { # <worktree>
-  local worktree=$1 default target expected actual status
+  local worktree=$1 default target expected actual status label=pooled
+  [ "$SPAWN_WORKTREE_ADOPTED" = 0 ] || label=adopted
   status=$(git -C "$worktree" -c core.quotePath=false status --porcelain) || {
-    echo "error: could not inspect pooled worktree '$worktree' before refreshing its base" >&2
+    echo "error: could not inspect $label worktree '$worktree' before refreshing its base" >&2
     return 1
   }
   if [ -n "$status" ]; then
     if describe_stale_submodule_pins "$worktree" "$status"; then
-      echo "error: pooled worktree '$worktree' has a stale submodule checkout, not uncommitted work; refusing to launch and leaving it untouched" >&2
+      echo "error: $label worktree '$worktree' has a stale submodule checkout, not uncommitted work; refusing to launch and leaving it untouched" >&2
     else
-      echo "error: pooled worktree '$worktree' is not clean; refusing to discard uncommitted work while refreshing its base" >&2
+      echo "error: $label worktree '$worktree' is not clean; refusing to discard uncommitted work while refreshing its base" >&2
     fi
     return 1
   fi
@@ -3326,36 +3368,86 @@ freshen_spawn_worktree_base() { # <worktree>
     return 0
   fi
   if ! git -C "$worktree" fetch --quiet origin; then
-    echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+    echo "error: could not fetch origin for $label worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
   fi
   if ! git -C "$worktree" remote set-head origin --auto >/dev/null 2>&1; then
-    echo "error: could not resolve origin's current default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+    echo "error: could not resolve origin's current default branch for $label worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
   fi
   default=$(default_branch "$worktree") || {
-    echo "error: could not determine origin's default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+    echo "error: could not determine origin's default branch for $label worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
   }
   target="origin/$default"
   if ! git -C "$worktree" fetch --quiet origin "+refs/heads/$default:refs/remotes/origin/$default"; then
-    echo "error: could not fetch '$target' for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+    echo "error: could not fetch '$target' for $label worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
   fi
   expected=$(git -C "$worktree" rev-parse --verify --quiet "$target^{commit}" 2>/dev/null) || {
-    echo "error: '$target' is not a commit for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+    echo "error: '$target' is not a commit for $label worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
   }
+  # An adopted copy is its creator's branch, so resetting it may only move it
+  # forward: commits the default branch lacks mean this is not a fresh start.
+  if [ "$label" = adopted ] && ! git -C "$worktree" merge-base --is-ancestor HEAD "$expected"; then
+    echo "error: adopted worktree '$worktree' carries commits not on '$target'; a first dispatch cannot tell earlier work from a fresh start, so it refuses rather than reset them away" >&2
+    return 1
+  fi
   if ! git -C "$worktree" reset --hard "$target" >/dev/null; then
-    echo "error: could not reset pooled worktree '$worktree' to '$target'; refusing to launch from a potentially stale base" >&2
+    echo "error: could not reset $label worktree '$worktree' to '$target'; refusing to launch from a potentially stale base" >&2
     return 1
   fi
   actual=$(git -C "$worktree" rev-parse --verify --quiet HEAD 2>/dev/null || true)
   if [ "$actual" != "$expected" ]; then
-    echo "error: pooled worktree '$worktree' is at '${actual:-unknown}', not current '$target' ('$expected'); refusing to launch" >&2
+    echo "error: $label worktree '$worktree' is at '${actual:-unknown}', not current '$target' ('$expected'); refusing to launch" >&2
     return 1
   fi
 }
+
+# --adopt-worktree (header above): prove the caller's copy before any endpoint
+# exists, then use it as WT in place of a Treehouse allocation.
+spawn_adopt_worktree() {
+  local meta other_wt adopt_common proj_common status
+  if [ "$BACKEND" = orca ]; then
+    echo "error: --adopt-worktree cannot be used with the orca backend, which creates and owns its own task worktree" >&2
+    exit 1
+  fi
+  WT=$(cd "$ADOPT_WT" 2>/dev/null && pwd -P) || {
+    echo "error: adopted worktree '$ADOPT_WT' does not exist or is not a readable directory" >&2
+    exit 1
+  }
+  validate_spawn_worktree "--adopt-worktree" "$WT"
+  adopt_common=$(git -C "$WT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) &&
+    adopt_common=$(cd "$adopt_common" && pwd -P) || adopt_common=
+  proj_common=$(git -C "$PROJ_ABS" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) &&
+    proj_common=$(cd "$proj_common" && pwd -P) || proj_common=
+  if [ -z "$adopt_common" ] || [ "$adopt_common" != "$proj_common" ]; then
+    echo "error: adopted worktree '$WT' is not a git worktree of project '$PROJ_ABS' (its repository is '${adopt_common:-unknown}', the project's is '${proj_common:-unknown}')" >&2
+    exit 1
+  fi
+  if fm_treehouse_pool_slot "$PROJ_ABS" "$WT"; then
+    echo "error: adopted worktree '$WT' is a Treehouse pool slot; pool slots are allocated by spawn, never adopted, so teardown can return them" >&2
+    exit 1
+  fi
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] && [ ! -L "$meta" ] && [ "$meta" != "$STATE/$ID.meta" ] || continue
+    other_wt=$(fm_meta_get "$meta" worktree)
+    [ -n "$other_wt" ] && [ "$(real_path_or_raw "$other_wt")" = "$WT" ] || continue
+    echo "error: adopted worktree '$WT' is already recorded for task $(basename "$meta" .meta); refusing to launch a second worker into its copy" >&2
+    exit 1
+  done
+  status=$(git -C "$WT" status --porcelain) || {
+    echo "error: could not inspect adopted worktree '$WT'" >&2
+    exit 1
+  }
+  if [ -n "$status" ]; then
+    echo "error: adopted worktree '$WT' has uncommitted changes; a first dispatch cannot tell whose work they are, so it refuses rather than reset them away" >&2
+    exit 1
+  fi
+  SPAWN_WORKTREE_ADOPTED=1
+}
+[ "$ADOPT_SET" -eq 0 ] || spawn_adopt_worktree
 
 herdr_projection_meta_field_exact() { # <meta> <key>
   local meta=$1 key=$2 count
@@ -4215,7 +4307,7 @@ elif [ "$RELAUNCH" -eq 1 ]; then
     fi
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
-elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ "$SPAWN_WORKTREE_ADOPTED" = 0 ]; then
   spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
@@ -4867,6 +4959,9 @@ preserve_relaunch_meta() {
   echo "window=$META_WINDOW"
   echo "endpoint_task_id=$ID"
   echo "worktree=$WT"
+  # Absent means a pooled or backend-owned copy, so a pooled record stays
+  # byte-identical; relaunch preserves this line as an unowned key.
+  [ "$SPAWN_WORKTREE_ADOPTED" = 0 ] || echo "worktree_source=adopted"
   echo "project=$PROJ_ABS"
   echo "harness=$HARNESS"
   echo "kind=$KIND"

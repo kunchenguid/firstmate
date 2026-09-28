@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Tear down a finished task: return the treehouse worktree, release the Orca
-# worktree, or retire a secondmate home; kill the recorded runtime endpoint,
+# worktree, leave an adopted worktree to its creator, or retire a secondmate
+# home; kill the recorded runtime endpoint,
 # clear volatile state, and transition this home's backlog item for ship and
 # scout tasks before reporting success (a secondmate teardown transitions none,
 # since secondmates are not backlog items), then refresh/prune the project's
@@ -145,6 +146,12 @@
 # own is removed by a refusal; reconcile whichever record is wrong and re-run.
 # Orca is not a pool slot and proves its path through
 # require_orca_worktree_path_match instead.
+# An adopted worktree (worktree_source=adopted, written by bin/fm-spawn.sh
+# --adopt-worktree) is not a pool slot either: it is its creator's copy, so
+# teardown never returns it to a pool, resets it, deletes its branch, or removes
+# it, even when a forced secondmate teardown discards child work. It removes only
+# firstmate's own hook wiring and leaves the copy to its creator; the landed-work
+# gates, process reaping, and record cleanup run exactly as for a pooled copy.
 # Orca tasks use the same safety checks, then close the recorded terminal and
 # remove the recorded worktree through `orca worktree rm`; teardown never guesses
 # an Orca target from ambient CLI state.
@@ -1104,6 +1111,7 @@ fi
 # (and must keep refusing it for control/kill callers), so teardown skips the
 # validator rather than probing or closing an ambient current window.
 WT=$(fm_meta_get "$META" worktree)
+WORKTREE_SOURCE=$(fm_meta_get "$META" worktree_source)
 PROJ=$(fm_meta_get "$META" project)
 T_ORCA=
 if [ "$TEARDOWN_WINDOWLESS" = 1 ]; then
@@ -3009,7 +3017,8 @@ validate_firstmate_home_children_removal() {
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
         require_orca_worktree_path_match "$child_orca_worktree_id" "$child_wt" || return 1
       fi
-    elif [ -n "$child_wt" ] && [ -e "$child_wt" ]; then
+    elif [ -n "$child_wt" ] && [ -e "$child_wt" ] &&
+      [ "$(meta_value "$child_meta" worktree_source)" != adopted ]; then
       child_proj=$(meta_value "$child_meta" project)
       validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
     fi
@@ -3251,6 +3260,14 @@ cleanup_firstmate_home_children() {
           "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
       fi
       fm_backend_remove_worktree "$child_backend" "$child_orca_worktree_id" || return 1
+    elif [ "$(meta_value "$child_meta" worktree_source)" = adopted ]; then
+      # An adopted copy is its creator's, never a pool slot: even a forced
+      # discard only removes firstmate's wiring, never the copy or its branch.
+      if [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
+        rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
+          "$child_wt/.opencode/plugins/fm-busy-state.js" \
+          "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
+      fi
     elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
       # The same ownership determination as the parent's own slot: a child
       # slot reassigned to another task is not this child's to kill, reset,
@@ -3584,6 +3601,13 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
 elif [ "$KIND" != secondmate ] && ! teardown_owns_worktree; then
   :
+elif [ "$WORKTREE_SOURCE" = adopted ] && [ "$KIND" != secondmate ]; then
+  # Adopted, not leased (see script header): only firstmate's own wiring leaves.
+  if [ -d "$WT" ]; then
+    rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
+      "$WT/.opencode/plugins/fm-busy-state.js" \
+      "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
+  fi
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
   if [ "$branch" != "HEAD" ]; then
@@ -3839,6 +3863,8 @@ if [ -d "$STATE" ]; then
 fi
 if [ "$TEARDOWN_LEGACY_ACCEPTED" = 1 ]; then
   echo "teardown $ID complete (window ${T:-none}, worktree $WT, legacy record accepted without spawn_gen: endpoint $TEARDOWN_LEGACY_ENDPOINT, incarnation $TEARDOWN_META_SPAWN_GEN)"
+elif [ "$WORKTREE_SOURCE" = adopted ] && [ "$KIND" != secondmate ]; then
+  echo "teardown $ID complete (window ${T:-none}; adopted worktree $WT left in place for its creator)"
 elif teardown_owns_worktree; then
   echo "teardown $ID complete (window ${T:-none}, worktree $WT)"
 else

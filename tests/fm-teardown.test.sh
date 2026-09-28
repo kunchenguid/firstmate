@@ -1123,6 +1123,46 @@ SH
   pass "worktree whose content already landed in the default branch is torn down (content fallback)"
 }
 
+# An adopted worktree (bin/fm-spawn.sh --adopt-worktree) is its creator's copy,
+# never a Treehouse lease: teardown must not return it to a pool, reset it, or
+# delete its claim branch, while the landed-work gate and record cleanup still run.
+test_adopted_worktree_teardown_skips_pool_return() {
+  local case_dir rc
+  case_dir=$(make_case adopted-worktree)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' "worktree_source=adopted" >> "$case_dir/state/task-x1.meta"
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  mkdir -p "$case_dir/wt/.claude"
+  printf '{}\n' > "$case_dir/wt/.claude/settings.local.json"
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/treehouse.log"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "adopted-worktree: teardown should succeed for landed work"$'\n'"$(cat "$case_dir/stderr")"
+  assert_absent "$case_dir/treehouse.log" \
+    "adopted-worktree: teardown tried to return an adopted worktree to a Treehouse pool: $(cat "$case_dir/treehouse.log" 2>/dev/null)"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "adopted-worktree: teardown left the task record behind"
+  [ -d "$case_dir/wt" ] || fail "adopted-worktree: teardown removed its creator's copy"
+  [ "$(git -C "$case_dir/wt" symbolic-ref --short HEAD 2>/dev/null)" = fm/task-x1 ] \
+    || fail "adopted-worktree: teardown detached or deleted the copy's branch"
+  assert_absent "$case_dir/wt/.claude/settings.local.json" \
+    "adopted-worktree: teardown left firstmate's hook wiring in the adopted copy"
+  assert_contains "$(cat "$case_dir/stdout")" "adopted worktree $case_dir/wt left in place" \
+    "adopted-worktree: teardown did not say the adopted copy was left to its creator"
+  pass "an adopted worktree is left to its creator, never returned to a Treehouse pool"
+}
+
 test_content_fallback_refreshes_stale_origin_ref() {
   local case_dir rc
   case_dir=$(make_case content-stale-ref)
@@ -4289,6 +4329,7 @@ test_squash_merged_stale_local_refuses_when_forge_unreachable
 test_pr_check_does_not_refresh_stale_pr_head
 test_pr_check_records_remote_head_when_local_lags
 test_content_in_default_fallback_allows
+test_adopted_worktree_teardown_skips_pool_return
 test_content_fallback_refreshes_stale_origin_ref
 test_dirty_worktree_refuses
 test_gh_error_and_content_absent_refuses
