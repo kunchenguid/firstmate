@@ -5,6 +5,9 @@
 # scout tasks before reporting success (a secondmate teardown transitions none,
 # since secondmates are not backlog items), then refresh/prune the project's
 # clone for PR-based ship tasks.
+# After a successful teardown it runs this home's local teardown hooks
+# (config/teardown-hooks/, docs/teardown-hooks.md), each bounded by
+# FM_TEARDOWN_HOOK_TIMEOUT seconds (default 120); a hook can only warn.
 # An endpoint whose close could not do its job REFUSES before any record naming
 # it is removed: those records are the only thing that names what survived, so
 # reporting such a close as a completed cleanup strands the endpoint instead of
@@ -3801,4 +3804,25 @@ elif teardown_owns_worktree; then
 else
   echo "teardown $ID complete (window ${T:-none}; pool slot $WT left to task $TEARDOWN_SLOT_REASSIGNED_TO${TEARDOWN_SLOT_REASSIGNED_HOME:+ (home $TEARDOWN_SLOT_REASSIGNED_HOME)}, which it was reassigned to)"
 fi
+# Local teardown hooks (docs/teardown-hooks.md): every executable in this
+# home's gitignored config/teardown-hooks/ runs once the task is fully gone,
+# with the task id, each under its own bound. A hook can only warn; the
+# teardown above has already succeeded. An absent directory costs one test.
+run_teardown_hooks() {
+  local dir=$CONFIG/teardown-hooks hook rc bound=${FM_TEARDOWN_HOOK_TIMEOUT:-120}
+  [ -d "$dir" ] || return 0
+  case "$bound" in ''|*[!0-9]*|0) bound=120 ;; esac
+  for hook in "$dir"/*; do
+    [ -f "$hook" ] && [ -x "$hook" ] || continue
+    rc=0
+    FM_TEARDOWN_TASK_ID=$ID FM_TEARDOWN_KIND=$KIND FM_TEARDOWN_PROJECT=${PROJ:-} \
+      FM_TEARDOWN_WORKTREE=${WT:-} fm_run_timed "$bound" "$hook" "$ID" </dev/null || rc=$?
+    if fm_timed_out "$rc"; then
+      echo "warning: teardown hook $(basename "$hook") for $ID was stopped after ${bound}s" >&2
+    elif [ "$rc" -ne 0 ]; then
+      echo "warning: teardown hook $(basename "$hook") for $ID exited $rc" >&2
+    fi
+  done
+}
+run_teardown_hooks
 backlog_refresh_reminder

@@ -1142,6 +1142,80 @@ test_content_fallback_refreshes_stale_origin_ref() {
   pass "content fallback refreshes origin default before comparing trees"
 }
 
+# Local teardown hooks (docs/teardown-hooks.md) run after a successful
+# teardown, in name order, with the task id; a failing or overrunning hook only
+# warns, and a non-executable file never runs.
+add_teardown_hooks() {  # <case-dir>
+  local case_dir=$1 hooks="$1/config/teardown-hooks"
+  mkdir -p "$hooks"
+  cat > "$hooks/10-record" <<'SH'
+#!/usr/bin/env bash
+printf '10 %s %s %s\n' "$1" "$FM_TEARDOWN_TASK_ID" "$FM_TEARDOWN_KIND" >> "$(dirname "$0")/../../hook-log"
+SH
+  cat > "$hooks/20-fails" <<'SH'
+#!/usr/bin/env bash
+printf '20 ran\n' >> "$(dirname "$0")/../../hook-log"
+exit 3
+SH
+  cat > "$hooks/30-hangs" <<'SH'
+#!/usr/bin/env bash
+printf '30 started\n' >> "$(dirname "$0")/../../hook-log"
+sleep 30
+printf '30 finished\n' >> "$(dirname "$0")/../../hook-log"
+SH
+  cat > "$hooks/40-record" <<'SH'
+#!/usr/bin/env bash
+printf '40 %s\n' "$1" >> "$(dirname "$0")/../../hook-log"
+SH
+  cat > "$hooks/50-not-executable" <<'SH'
+#!/usr/bin/env bash
+printf '50 ran\n' >> "$(dirname "$0")/../../hook-log"
+SH
+  chmod +x "$hooks/10-record" "$hooks/20-fails" "$hooks/30-hangs" "$hooks/40-record"
+}
+
+test_teardown_runs_local_hooks_after_success() {
+  local case_dir rc
+  case_dir=$(make_case hooks-run)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "fix the thing"
+  add_fork_with_pushed_branch "$case_dir"
+  add_teardown_hooks "$case_dir"
+
+  set +e
+  FM_TEARDOWN_HOOK_TIMEOUT=2 run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "hooks-run: a failing or overrunning hook must not fail a teardown that succeeded"
+  [ "$(cat "$case_dir/hook-log")" = "$(printf '%s\n' '10 task-x1 task-x1 ship' '20 ran' '30 started' '40 task-x1')" ] \
+    || fail "hooks-run: hooks did not run in name order with the task id, or the stopped hook finished: $(cat "$case_dir/hook-log")"
+  grep -q 'teardown hook 20-fails for task-x1 exited 3' "$case_dir/stderr" \
+    || fail "hooks-run: a failing hook was not reported: $(cat "$case_dir/stderr")"
+  grep -q 'teardown hook 30-hangs for task-x1 was stopped after 2s' "$case_dir/stderr" \
+    || fail "hooks-run: an overrunning hook was not stopped and reported: $(cat "$case_dir/stderr")"
+  assert_absent "$case_dir/state/task-x1.meta" "hooks-run: the task record survived the teardown"
+  pass "teardown runs local hooks in name order after success, and a failing or overrunning hook only warns"
+}
+
+test_refused_teardown_runs_no_hooks() {
+  local case_dir rc
+  case_dir=$(make_case hooks-refused)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  printf '%s\n' "uncommitted edit" > "$case_dir/wt/feature.txt"
+  add_teardown_hooks "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "hooks-refused: teardown should refuse a dirty worktree"
+  assert_absent "$case_dir/hook-log" "hooks-refused: a refused teardown ran a hook"
+  pass "a refused teardown runs no local hook"
+}
+
 test_dirty_worktree_refuses() {
   local case_dir rc pr_head
   case_dir=$(make_case dirty-wt)
@@ -4100,6 +4174,8 @@ test_pr_check_records_remote_head_when_local_lags
 test_content_in_default_fallback_allows
 test_content_fallback_refreshes_stale_origin_ref
 test_dirty_worktree_refuses
+test_teardown_runs_local_hooks_after_success
+test_refused_teardown_runs_no_hooks
 test_gh_error_and_content_absent_refuses
 test_legacy_record_without_the_flag_refuses
 test_windowless_legacy_record_with_gone_worktree_tears_down

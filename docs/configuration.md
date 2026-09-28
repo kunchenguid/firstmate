@@ -566,6 +566,10 @@ See [`trace-context.md`](trace-context.md) for carrier semantics, supported rout
 
 See [`fleet-ledger.md`](fleet-ledger.md) for the opt-in setup, record contract, and limits.
 
+## Teardown hooks (config/teardown-hooks/)
+
+See [`teardown-hooks.md`](teardown-hooks.md) for what runs after a successful teardown, what each hook receives, and its time bound.
+
 ## Turn-end pane-churn absorb (config/turnend-churn-absorb)
 
 The optional local, gitignored `config/turnend-churn-absorb` presence flag opts this home into a default-off third form of positive work evidence in watcher triage.
