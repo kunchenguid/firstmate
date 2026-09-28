@@ -263,7 +263,7 @@ For a delegated task, branch may compare bounded artifacts with the existing bri
 It must use the existing action, inbox, handoff and receipt owners, preserving the selected delivery path without adding a reviewer.
 MAIN alone classifies new user input, decides scope and authority, dispatches new work, issues operation grants, accepts the final result and communicates with the user.
 Candidate, conflict and blocked prechecks return to MAIN for judgment; routine progress and healthy executor readback do not open a MAIN model turn.
-The initial delegation contract does not permit branch lifecycle control, merge, archival or independent short-result routing.
+The initial delegation contract does not permit spawn or executor replacement, interrupt/exit/relaunch, lifecycle control, merge, archival, operation or short grants, or independent short-result routing.
 
 Unclassified original input receipts prevent new delegated effects while allowing readback.
 MAIN revokes the old delegation before changing a brief or goal, then issues a new revision after classification.
