@@ -480,26 +480,33 @@ EOF
 }
 
 # Put an adopted copy's worktree wiring back the way it was handed over:
-# restore every file <store> preserved, and remove only the ones firstmate wrote
-# where the copy carried none. A missing store means nothing was ever preserved
-# here, so nothing is this caller's to remove.
-fm_control_restore_adopted_wiring() {  # <worktree> <store>
-  local wt=${1-} store=${2-} path rel rc=0
+# restore every file <store> preserved, and remove only the paths the recorded
+# harness arms where the copy carried none - a relaunch retires the prior
+# harness's wiring, so those are the only ones firstmate can have written. A
+# restored path that became a symlink is replaced, never written through. A
+# missing store means nothing was ever preserved here, so nothing is this
+# caller's to remove. Returns 1 when some path could not be put back (the store
+# is kept), and 3 when every path was but the store itself could not be removed.
+fm_control_restore_adopted_wiring() {  # <worktree> <store> <recorded-harness>
+  local wt=${1-} store=${2-} family armed path rel rc=0
   [ -n "$wt" ] && [ -n "$store" ] || return 1
   [ -d "$store" ] || return 0
+  family=$(fm_control_harness_family "${3-}") || family=
+  armed=$(fm_control_harness_wiring_paths "$family" "$wt" /nonexistent/fm-wiring-sentinel wiring)
   while IFS= read -r path; do
     [ -n "$path" ] || continue
     rel=${path#"$wt"/}
     if [ -f "$store/$rel" ] && [ ! -L "$store/$rel" ]; then
-      mkdir -p "$(dirname "$path")" && cp -p "$store/$rel" "$path" || rc=1
-    else
+      { [ ! -L "$path" ] || rm -f "$path"; } &&
+        mkdir -p "$(dirname "$path")" && cp -p "$store/$rel" "$path" || rc=1
+    elif printf '%s\n' "$armed" | grep -qxF -- "$path"; then
       rm -f "$path" || rc=1
     fi
   done <<EOF
 $(fm_control_worktree_wiring_paths "$wt")
 EOF
   [ "$rc" = 0 ] || return 1
-  rm -rf "$store" 2>/dev/null || true
+  rm -rf "$store" 2>/dev/null || return 3
 }
 
 # The firstmate-owned global turn-end registry entry a harness mints per task.

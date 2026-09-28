@@ -149,16 +149,19 @@
 # An adopted worktree (worktree_source=adopted, written by bin/fm-spawn.sh
 # --adopt-worktree) is not a pool slot either: it is its creator's copy, so
 # teardown never returns it to a pool, resets it, deletes its branch, or removes
-# it, even when a forced secondmate teardown discards child work. It restores any
-# worktree wiring file the copy already carried when it was adopted (saved by
-# spawn in the copy's per-worktree git dir), removes only the wiring files
-# firstmate itself wrote, and releases only this task's own owner claim - a
-# claim another home or another task holds on the same copy is never touched.
-# That store is the only proof of which files firstmate wrote, so a store that is
-# gone removes nothing at all, while a store that cannot be fully applied is
-# retained and leaves the copy possibly part restored; teardown warns for each
-# case in its own terms, naming the copy and the store, and reports the handback
-# as incomplete rather than clean.
+# it, even when a forced secondmate teardown discards child work. Only while the
+# copy still carries this task's own owner claim, it restores any worktree
+# wiring file the copy already carried when it was adopted (saved by spawn in
+# the copy's per-worktree git dir), replacing rather than writing through a path
+# that became a symlink, removes only the wiring the recorded harness armed, and
+# releases that claim; a copy claimed by another home or task, or no longer
+# claimed at all, is left entirely untouched. That store is the only proof of
+# which files firstmate wrote, so a store that is gone removes nothing at all, a
+# store that cannot be fully applied is retained and leaves the copy possibly
+# part restored, and a store that cannot be removed after a full restore makes
+# every later adoption of the copy refuse; teardown warns for each case in its
+# own terms, naming the copy and the store, and reports the handback as
+# incomplete rather than clean.
 # The copy itself is left to its creator; the landed-work
 # gates, process reaping, and record cleanup run exactly as for a pooled copy.
 # Orca tasks use the same safety checks, then close the recorded terminal and
@@ -2471,6 +2474,40 @@ teardown_owns_worktree() {
   [ "$TEARDOWN_SLOT_REASSIGNED" != 1 ]
 }
 
+# Hand an adopted copy back to its creator (see script header), warning in its
+# own terms for every way the handback is incomplete. The claim is checked
+# before anything is restored: a record whose claim was already released -
+# say, by an earlier teardown that could not then remove the record - no longer
+# owns that copy's wiring or preserve store, which may belong to whoever
+# adopted the copy since. Returns 1 when the handback is not complete.
+teardown_hand_back_adopted_worktree() {  # <worktree> <task-id> <state-dir> <recorded-harness>
+  local wt=$1 id=$2 state=$3 harness=$4 store holder rc=0
+  [ -d "$wt" ] || return 0
+  store=$(fm_adopted_worktree_wiring_store "$wt" 2>/dev/null) || store=
+  if ! fm_adopted_worktree_owner_is_mine "$wt" "$id" "$state"; then
+    case "$FM_TREEHOUSE_SLOT_OWNER" in
+      absent) holder="its owner claim is gone" ;;
+      unsafe) holder="its owner claim cannot be read" ;;
+      *) holder="it is claimed by task $FM_TREEHOUSE_SLOT_OWNER_ID${FM_TREEHOUSE_SLOT_OWNER_HOME:+ (home $FM_TREEHOUSE_SLOT_OWNER_HOME)}" ;;
+    esac
+    echo "warning: adopted worktree $wt is no longer task $id's - $holder - so its wiring and the originals preserved at ${store:-an unresolvable store path} cannot be proved to be this task's; nothing in that copy was restored, removed, or released" >&2
+    return 1
+  fi
+  if [ -z "$store" ] || [ ! -d "$store" ]; then
+    echo "warning: could not restore adopted worktree $wt to the wiring its creator handed over: the originals spawn preserved at ${store:-an unresolvable store path} are gone, so nothing in that copy can be proved to be firstmate's; nothing was removed from it and task $id's hook files may still be live there" >&2
+    rc=1
+  else
+    fm_control_restore_adopted_wiring "$wt" "$store" "$harness" || rc=$?
+    case "$rc" in
+      0) ;;
+      3) echo "warning: adopted worktree $wt was restored to the wiring its creator handed over, but the preserve store at $store could not be removed; every later adoption of that copy refuses until it is" >&2 ;;
+      *) echo "warning: adopted worktree $wt was only partly restored to the wiring its creator handed over: some paths were put back or removed and others could not be, so that copy may now hold a mix of task $id's wiring and its creator's own files. The preserved originals are retained at $store; inspect both before that copy is used again" >&2 ;;
+    esac
+  fi
+  fm_adopted_worktree_owner_release "$wt" "$id" "$state"
+  [ "$rc" = 0 ]
+}
+
 firstmate_home_has_treehouse_slot() {
   local home=$1
   worktree_registered_for_project "$FM_ROOT" "$home"
@@ -3212,7 +3249,7 @@ endpoint_close_refusal() {  # <subject> <backend> <target> <honors-force>
 }
 
 cleanup_firstmate_home_children() {
-  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc child_busy_gen child_owner_rc child_wiring_store
+  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc child_busy_gen child_owner_rc
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -3274,15 +3311,10 @@ cleanup_firstmate_home_children() {
       # An adopted copy is its creator's, never a pool slot: even a forced
       # discard restores the wiring the copy came with, removes only the files
       # firstmate wrote, and drops only this child's own claim - never the copy,
-      # its branch, or another home's claim on it.
-      if [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
-        child_wiring_store=$(fm_adopted_worktree_wiring_store "$child_wt" 2>/dev/null) || child_wiring_store=
-        if [ -z "$child_wiring_store" ] || [ ! -d "$child_wiring_store" ]; then
-          echo "warning: could not restore adopted worktree $child_wt to the wiring its creator handed over: the originals spawn preserved at ${child_wiring_store:-an unresolvable store path} are gone, so nothing in that copy can be proved to be firstmate's; nothing was removed from it and task $child_id's hook files may still be live there" >&2
-        elif ! fm_control_restore_adopted_wiring "$child_wt" "$child_wiring_store"; then
-          echo "warning: adopted worktree $child_wt was only partly restored to the wiring its creator handed over: some paths were put back or removed and others could not be, so that copy may now hold a mix of task $child_id's wiring and its creator's own files. The preserved originals are retained at $child_wiring_store; inspect both before that copy is used again" >&2
-        fi
-        fm_adopted_worktree_owner_release "$child_wt" "$child_id" "$sub_state"
+      # its branch, or anything in it while another home or task holds it.
+      if [ -n "$child_wt" ]; then
+        teardown_hand_back_adopted_worktree "$child_wt" "$child_id" "$sub_state" \
+          "$(meta_value "$child_meta" harness)" || true
       fi
     elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
       # The same ownership determination as the parent's own slot: a child
@@ -3620,18 +3652,9 @@ elif [ "$KIND" != secondmate ] && ! teardown_owns_worktree; then
 elif [ "$WORKTREE_SOURCE" = adopted ] && [ "$KIND" != secondmate ]; then
   # Adopted, not leased (see script header): the copy's own wiring is put back,
   # only the files firstmate wrote are removed, and only this task's own claim
-  # is released - a claim another home holds on the same copy is left alone.
-  if [ -d "$WT" ]; then
-    ADOPT_WIRING_STORE=$(fm_adopted_worktree_wiring_store "$WT" 2>/dev/null) || ADOPT_WIRING_STORE=
-    if [ -z "$ADOPT_WIRING_STORE" ] || [ ! -d "$ADOPT_WIRING_STORE" ]; then
-      TEARDOWN_ADOPTED_RESTORE_FAILED=1
-      echo "warning: could not restore adopted worktree $WT to the wiring its creator handed over: the originals spawn preserved at ${ADOPT_WIRING_STORE:-an unresolvable store path} are gone, so nothing in that copy can be proved to be firstmate's; nothing was removed from it and task $ID's hook files may still be live there" >&2
-    elif ! fm_control_restore_adopted_wiring "$WT" "$ADOPT_WIRING_STORE"; then
-      TEARDOWN_ADOPTED_RESTORE_FAILED=1
-      echo "warning: adopted worktree $WT was only partly restored to the wiring its creator handed over: some paths were put back or removed and others could not be, so that copy may now hold a mix of task $ID's wiring and its creator's own files. The preserved originals are retained at $ADOPT_WIRING_STORE; inspect both before that copy is used again" >&2
-    fi
-    fm_adopted_worktree_owner_release "$WT" "$ID" "$STATE"
-  fi
+  # is released - a copy another home or task holds now is left entirely alone.
+  teardown_hand_back_adopted_worktree "$WT" "$ID" "$STATE" "$(fm_meta_get "$META" harness)" ||
+    TEARDOWN_ADOPTED_RESTORE_FAILED=1
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
   if [ "$branch" != "HEAD" ]; then
@@ -3889,7 +3912,7 @@ if [ "$TEARDOWN_LEGACY_ACCEPTED" = 1 ]; then
   echo "teardown $ID complete (window ${T:-none}, worktree $WT, legacy record accepted without spawn_gen: endpoint $TEARDOWN_LEGACY_ENDPOINT, incarnation $TEARDOWN_META_SPAWN_GEN)"
 elif [ "$WORKTREE_SOURCE" = adopted ] && [ "$KIND" != secondmate ]; then
   if [ "$TEARDOWN_ADOPTED_RESTORE_FAILED" = 1 ]; then
-    echo "teardown $ID complete (window ${T:-none}; adopted worktree $WT was NOT restored to the wiring its creator handed over - see the warning above; the copy and its branch are untouched)"
+    echo "teardown $ID complete (window ${T:-none}; adopted worktree $WT was NOT cleanly handed back to its creator - see the warning above; the copy and its branch are untouched)"
   else
     echo "teardown $ID complete (window ${T:-none}; adopted worktree $WT left in place for its creator)"
   fi

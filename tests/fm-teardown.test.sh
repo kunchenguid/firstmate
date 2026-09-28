@@ -1123,6 +1123,18 @@ SH
   pass "worktree whose content already landed in the default branch is torn down (content fallback)"
 }
 
+# An adopted-worktree record for task-x1 recorded on <harness>, with shippable
+# landed work and this task's own owner claim on the copy.
+write_adopted_meta() {
+  local case_dir=$1 harness=$2
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' "worktree_source=adopted" "harness=$harness" >> "$case_dir/state/task-x1.meta"
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  printf 'task=task-x1\nhome=%s\n' "$case_dir" > "$(git -C "$case_dir/wt" rev-parse --absolute-git-dir)/fm-adopted-owner"
+}
+
 # An adopted worktree (bin/fm-spawn.sh --adopt-worktree) is its creator's copy,
 # never a Treehouse lease: teardown must not return it to a pool, reset it, or
 # delete its claim branch, while the landed-work gate and record cleanup still run.
@@ -1130,7 +1142,7 @@ test_adopted_worktree_teardown_skips_pool_return() {
   local case_dir rc claim
   case_dir=$(make_case adopted-worktree)
   write_meta "$case_dir" no-mistakes ship
-  printf '%s\n' "worktree_source=adopted" >> "$case_dir/state/task-x1.meta"
+  printf '%s\n' "worktree_source=adopted" "harness=claude" >> "$case_dir/state/task-x1.meta"
   wt_commit "$case_dir" "shippable work"
   git -C "$case_dir/wt" push -q origin fm/task-x1
   git -C "$case_dir/project" fetch -q origin
@@ -1176,19 +1188,16 @@ SH
 test_adopted_worktree_teardown_warns_when_restore_fails() {
   local case_dir rc store settings
   case_dir=$(make_case adopted-restore-fails)
-  write_meta "$case_dir" no-mistakes ship
-  printf '%s\n' "worktree_source=adopted" >> "$case_dir/state/task-x1.meta"
-  wt_commit "$case_dir" "shippable work"
-  git -C "$case_dir/wt" push -q origin fm/task-x1
-  git -C "$case_dir/project" fetch -q origin
+  write_adopted_meta "$case_dir" claude
   store=$(git -C "$case_dir/wt" rev-parse --absolute-git-dir)/fm-adopted-wiring
   mkdir -p "$store/.claude" "$case_dir/wt/.claude"
   printf '{"creator":true}\n' > "$store/.claude/settings.local.json"
   settings="$case_dir/wt/.claude/settings.local.json"
   printf '{"firstmate":true}\n' > "$settings"
-  # A second armed path outside the unwritable dir: its removal succeeds while
+  # A second preserved path outside the unwritable dir: its restore succeeds while
   # the settings restore fails, which is the mixed state the warning must describe.
-  printf 'token=abc\n' > "$case_dir/wt/.fm-grok-turnend"
+  printf 'creator\n' > "$store/.fm-grok-turnend"
+  printf 'changed\n' > "$case_dir/wt/.fm-grok-turnend"
   chmod a-w "$settings"
   chmod a-w "$case_dir/wt/.claude"
 
@@ -1203,8 +1212,8 @@ test_adopted_worktree_teardown_warns_when_restore_fails() {
     "adopted-restore-fails: teardown reported success without warning that the restore failed"
   assert_not_contains "$(cat "$case_dir/stderr")" "nothing was removed from it" \
     "adopted-restore-fails: the warning claimed nothing was removed after a partial restore"
-  assert_absent "$case_dir/wt/.fm-grok-turnend" \
-    "adopted-restore-fails: this test no longer produces the partial state it describes"
+  [ "$(cat "$case_dir/wt/.fm-grok-turnend")" = creator ] \
+    || fail "adopted-restore-fails: this test no longer produces the partial state it describes"
   assert_contains "$(cat "$case_dir/stderr")" "retained at $store" \
     "adopted-restore-fails: the warning did not say where the unrestored originals are kept"
   assert_not_contains "$(cat "$case_dir/stdout")" "left in place for its creator" \
@@ -1219,11 +1228,7 @@ test_adopted_worktree_teardown_warns_when_restore_fails() {
 test_adopted_worktree_teardown_warns_when_store_is_missing() {
   local case_dir rc settings
   case_dir=$(make_case adopted-store-missing)
-  write_meta "$case_dir" no-mistakes ship
-  printf '%s\n' "worktree_source=adopted" >> "$case_dir/state/task-x1.meta"
-  wt_commit "$case_dir" "shippable work"
-  git -C "$case_dir/wt" push -q origin fm/task-x1
-  git -C "$case_dir/project" fetch -q origin
+  write_adopted_meta "$case_dir" claude
   mkdir -p "$case_dir/wt/.claude"
   settings="$case_dir/wt/.claude/settings.local.json"
   printf '{"firstmate":true}\n' > "$settings"
@@ -1249,15 +1254,22 @@ test_adopted_worktree_teardown_warns_when_store_is_missing() {
 # whose record is stale must never strip the claim that protects the home that
 # actually holds the copy now.
 test_adopted_worktree_teardown_leaves_another_homes_claim() {
-  local case_dir rc claim
+  local case_dir rc claim store
   case_dir=$(make_case adopted-foreign-claim)
   write_meta "$case_dir" no-mistakes ship
   printf '%s\n' "worktree_source=adopted" >> "$case_dir/state/task-x1.meta"
   wt_commit "$case_dir" "shippable work"
   git -C "$case_dir/wt" push -q origin fm/task-x1
   git -C "$case_dir/project" fetch -q origin
+  printf '%s\n' "harness=claude" >> "$case_dir/state/task-x1.meta"
   claim=$(git -C "$case_dir/wt" rev-parse --absolute-git-dir)/fm-adopted-owner
   printf 'task=other-task\nhome=%s\n' "$case_dir/other-home" > "$claim"
+  # The home that adopted the copy after this record's claim was released keeps
+  # its own preserved originals and its own live wiring there.
+  store=$(git -C "$case_dir/wt" rev-parse --absolute-git-dir)/fm-adopted-wiring
+  mkdir -p "$store/.claude" "$case_dir/wt/.claude"
+  printf '{"creator":true}\n' > "$store/.claude/settings.local.json"
+  printf '{"other-task":true}\n' > "$case_dir/wt/.claude/settings.local.json"
 
   set +e
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
@@ -1268,7 +1280,93 @@ test_adopted_worktree_teardown_leaves_another_homes_claim() {
   [ -f "$claim" ] || fail "adopted-foreign-claim: teardown removed another home's claim on the adopted copy"
   assert_grep 'task=other-task' "$claim" \
     "adopted-foreign-claim: teardown rewrote another home's claim on the adopted copy"
-  pass "an adopted teardown releases only its own owner claim"
+  [ "$(cat "$case_dir/wt/.claude/settings.local.json")" = '{"other-task":true}' ] \
+    || fail "adopted-foreign-claim: teardown replaced the live wiring of the task that holds the copy now"
+  [ -f "$store/.claude/settings.local.json" ] \
+    || fail "adopted-foreign-claim: teardown consumed the preserved originals of the task that holds the copy now"
+  assert_contains "$(cat "$case_dir/stderr")" "claimed by task other-task" \
+    "adopted-foreign-claim: teardown did not say the copy is now another task's"
+  pass "an adopted teardown restores and releases nothing on a copy another task now holds"
+}
+
+# Only the wiring the recorded harness arms is firstmate's to remove: a file the
+# creator adds during the task at another harness's path was never armed here.
+test_adopted_worktree_teardown_keeps_unarmed_creator_wiring() {
+  local case_dir rc settings
+  case_dir=$(make_case adopted-unarmed-wiring)
+  write_adopted_meta "$case_dir" codex
+  mkdir -p "$(git -C "$case_dir/wt" rev-parse --absolute-git-dir)/fm-adopted-wiring" "$case_dir/wt/.claude"
+  settings="$case_dir/wt/.claude/settings.local.json"
+  printf '{"creator-added":true}\n' > "$settings"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "adopted-unarmed-wiring: teardown should succeed for landed work"$'\n'"$(cat "$case_dir/stderr")"
+  [ -f "$settings" ] \
+    || fail "adopted-unarmed-wiring: teardown deleted a wiring file a codex launch never armed"
+  assert_contains "$(cat "$case_dir/stdout")" "left in place for its creator" \
+    "adopted-unarmed-wiring: teardown did not report a clean handback"
+  pass "an adopted teardown removes only the wiring its recorded harness armed"
+}
+
+# A preserved wiring file swapped for a symlink during the task must be replaced,
+# never written through, or the restore overwrites a file outside the copy.
+test_adopted_worktree_teardown_replaces_symlinked_wiring() {
+  local case_dir rc store settings outside
+  case_dir=$(make_case adopted-symlinked-wiring)
+  write_adopted_meta "$case_dir" claude
+  store=$(git -C "$case_dir/wt" rev-parse --absolute-git-dir)/fm-adopted-wiring
+  mkdir -p "$store/.claude" "$case_dir/wt/.claude"
+  printf '{"creator":true}\n' > "$store/.claude/settings.local.json"
+  outside="$case_dir/outside.json"
+  printf 'outside\n' > "$outside"
+  settings="$case_dir/wt/.claude/settings.local.json"
+  ln -s "$outside" "$settings"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "adopted-symlinked-wiring: teardown should succeed for landed work"$'\n'"$(cat "$case_dir/stderr")"
+  [ "$(cat "$outside")" = outside ] \
+    || fail "adopted-symlinked-wiring: the restore wrote through a symlink to a file outside the copy"
+  [ -f "$settings" ] && [ ! -L "$settings" ] && [ "$(cat "$settings")" = '{"creator":true}' ] \
+    || fail "adopted-symlinked-wiring: the creator's original was not put back in place of the symlink"
+  pass "an adopted teardown replaces a symlinked wiring path rather than writing through it"
+}
+
+# The store left behind makes every later adoption of the copy refuse, so a
+# failure to remove it after a full restore is not a clean handback.
+test_adopted_worktree_teardown_reports_unremovable_store() {
+  local case_dir rc store settings
+  case_dir=$(make_case adopted-store-stuck)
+  write_adopted_meta "$case_dir" claude
+  store=$(git -C "$case_dir/wt" rev-parse --absolute-git-dir)/fm-adopted-wiring
+  mkdir -p "$store/.claude" "$case_dir/wt/.claude"
+  printf '{"creator":true}\n' > "$store/.claude/settings.local.json"
+  settings="$case_dir/wt/.claude/settings.local.json"
+  printf '{"firstmate":true}\n' > "$settings"
+  chmod a-w "$store/.claude"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  chmod u+w "$store/.claude"
+
+  expect_code 0 "$rc" "adopted-store-stuck: teardown should still complete"$'\n'"$(cat "$case_dir/stderr")"
+  [ "$(cat "$settings")" = '{"creator":true}' ] \
+    || fail "adopted-store-stuck: this test no longer produces a full restore"
+  [ -d "$store" ] || fail "adopted-store-stuck: this test no longer produces a store that cannot be removed"
+  assert_contains "$(cat "$case_dir/stderr")" "$store" \
+    "adopted-store-stuck: teardown did not name the store it failed to remove"
+  assert_not_contains "$(cat "$case_dir/stdout")" "left in place for its creator" \
+    "adopted-store-stuck: teardown reported a clean handback while leaving a store that refuses the next adoption"
+  pass "an adopted teardown reports a preserve store it could not remove"
 }
 
 test_content_fallback_refreshes_stale_origin_ref() {
@@ -4441,6 +4539,9 @@ test_adopted_worktree_teardown_skips_pool_return
 test_adopted_worktree_teardown_leaves_another_homes_claim
 test_adopted_worktree_teardown_warns_when_restore_fails
 test_adopted_worktree_teardown_warns_when_store_is_missing
+test_adopted_worktree_teardown_keeps_unarmed_creator_wiring
+test_adopted_worktree_teardown_replaces_symlinked_wiring
+test_adopted_worktree_teardown_reports_unremovable_store
 test_content_fallback_refreshes_stale_origin_ref
 test_dirty_worktree_refuses
 test_gh_error_and_content_absent_refuses

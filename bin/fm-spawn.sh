@@ -1413,7 +1413,7 @@ spawn_abort_cleanup() {
       spawn_adopt_unwind_rc=0
       clear_relaunch_harness_wiring "${HARNESS:-}" "$WT" "${STATE_REAL:-$STATE}" "$ID" ||
         spawn_adopt_unwind_rc=1
-      fm_control_restore_adopted_wiring "$WT" "$SPAWN_ADOPT_WIRING_STORE" ||
+      fm_control_restore_adopted_wiring "$WT" "$SPAWN_ADOPT_WIRING_STORE" "${HARNESS:-}" ||
         spawn_adopt_unwind_rc=1
       if [ "$spawn_adopt_unwind_rc" != 0 ]; then
         echo "warning: could not fully restore adopted worktree $WT's own harness wiring after task $ID's spawn aborted; inspect that copy and $SPAWN_ADOPT_WIRING_STORE before it is handed back" >&2
