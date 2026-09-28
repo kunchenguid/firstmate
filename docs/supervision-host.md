@@ -208,7 +208,7 @@ The drain's header owns the section's bounds; these rules keep it bounded and in
 
 The section runs only for main on an opted-in home whose primary is not Pi, and never while the away record exists.
 The drain is the only presenter of these outcomes and the only owner of their read cursor, the away window's included: the return brief counts the window's outcomes and points at the section instead of listing them.
-On a Claude Code primary the Calm mod also shows each outcome to the captain as a dim transcript line ([`calm.md`](calm.md#supervision-notes-on-claude-code)); it only reads the store, so it moves no marker and adds nothing to main's context.
+On a Claude Code primary the Calm mod also shows each outcome to the captain as a display-only system-notice row ([`calm.md`](calm.md#supervision-notes-on-claude-code)); it only reads the store, so it moves no marker and adds nothing to main's context.
 A long away window no longer requires a drain per outcome: each task's captain outcomes collapse to one line, subject to the captain byte cap, and visible routine notes past the section's limit collapse into a count; after main acknowledges all captain outcomes no later drain shows anything from the window again.
 A drain that cannot read or project the store (jq missing included), print the section, or advance its read cursor says so and marks nothing it has not shown as read, and it exits nonzero, so the return keeps its catch-up gated until a check drains again and records the presentation, rather than clearing over outcomes a later drain would present again.
 The section's budgets count bytes in any locale, so a multibyte summary is cut on a whole UTF-8 character boundary to fit them.
