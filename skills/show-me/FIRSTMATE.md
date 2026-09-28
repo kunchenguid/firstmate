@@ -80,6 +80,7 @@ Verified facts about the installed harness:
 - `skills/` at a repository root is **not** one of those discovery locations.
   So this directory is an installer-facing public surface, and it loads in a given session only after something installs it into a discovered location or passes it with `--skill`.
 - Registration and invocation are separate steps, and both were measured: with no `--skill` registration the `/skill:show-me` command resolves to nothing, while a registered copy injects its body when invoked.
+- The command must be the **first token** of the message. Writing prose that merely names it does not load it; pi leaves the unknown text alone.
 - While registered but not invoked, the skill does not appear in the system-prompt skill list at all, so an ordinary prompt pays nothing for it.
 - A forced load injects only this `SKILL.md`; reading [FIRSTMATE.md](FIRSTMATE.md) is a separate step, which is why every reference to it is a link.
 - Explicit `--skill` loading works from this session: a non-interactive run pointed at this directory started and completed cleanly.

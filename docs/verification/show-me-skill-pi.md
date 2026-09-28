@@ -43,9 +43,8 @@ Run from a project copy that holds the skill at `.agents/skills/show-me/`, with 
 ```
 $ cd <project-copy>
 $ pi --skill <project-copy>/.agents/skills/show-me --no-context-files --offline \
-    --mode text --print "/skill:show-me Reply exactly two lines ..."
-SEEN=YES
-SIBLING=NO
+    --mode text --print "/skill:show-me Report exactly three lines ..."
+SEEN=YES, SIBLING=NO, LISTED=NO
 ```
 
 Two controls bracket that result, same flags, one variable changed each time:
@@ -53,13 +52,12 @@ Two controls bracket that result, same flags, one variable changed each time:
 | Control | Result |
 |---|---|
 | No `--skill` registration at all | `SEEN=NO` - the command passes through as unknown text |
-| Registered from elsewhere while the cwd has no discovered copy | `SEEN=YES` - registration is what makes the name resolvable |
-| Ordinary prompt, no `/skill:` invocation, skill registered and discoverable | `LISTED=NO` - manual-only keeps it out of the system-prompt skill list |
-| Ask for the sibling by name instead (`name: peekaboo`) | `SEEN=NO` - expansion is keyed to the skill's own name |
+| Registered while the cwd holds no discovered copy | `SEEN=YES` - the explicit path is what makes the name resolvable |
+| Same prompt without the leading `/skill:` token | `SEEN=NO` - naming the command in prose does not load it |
 
 Consequences the vendor layout depends on:
 - A forced load injects only `SKILL.md`; `FIRSTMATE.md` never arrives unless read explicitly (`SIBLING=NO`), which is why the adaptation is referenced rather than assumed.
-- The cost gate is real: an ordinary session pays nothing for this skill until a human invokes it.
+- Expansion keys on the message's **leading** token: a prompt that says "you were invoked with /skill:show-me" answers `SEEN=NO`. Any automation that forces this skill must send the literal command first.
 - Registration and discovery are separate steps, so "installed" and "invocable" are different claims; both were needed above.
 
 ## Confirmed: discovery locations and the `skills/` gap
@@ -106,7 +104,11 @@ Calling it in this session returned `微信桥接未启动，请先在 TUI 执�
 ## Reproducing these probes
 
 The portable regression is [`tests/fm-show-me-skill.test.sh`](../../tests/fm-show-me-skill.test.sh); run it with `bash tests/fm-show-me-skill.test.sh`.
-It drives the loader and the gating control above through pi itself, skips cleanly when pi is absent, and fails loudly on a provider quota refusal rather than reporting a pass it did not observe.
+It checks the vendor copy, its license bytes, and every delivery rule without spending a model token, finishes in about a tenth of a second, and skips the loader question when pi is absent.
+The loader observations above come from the same file's live guard, which submits prompts and therefore sits behind `FM_SHOW_ME_LIVE=1` per `tests/lib.sh`'s `fm_live_gate`.
+Run it after a pi upgrade with `FM_SHOW_ME_LIVE=1 bash tests/fm-show-me-skill.test.sh`.
+That guard must stay last in the file: a skipped `fm_live_gate` exits the script successfully, so anything appended after it would stop running without ever failing.
+When the guard does run, it refuses to convert a provider quota refusal into a pass and reports it as a failure instead.
 
 ## Refreshing this record
 
