@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Security and regression tests for canonical PR parsing, static merge polls,
-# private atomic artifacts, authenticated custom checks, and teardown cleanup.
+# Security and regression tests for canonical PR parsing, static merge polls
+# and their checks-green landing prompt, private atomic artifacts,
+# authenticated custom checks, and teardown cleanup.
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -13,6 +14,7 @@ set -u
 PR_CHECK="$ROOT/bin/fm-pr-check.sh"
 PR_MERGE="$ROOT/bin/fm-pr-merge.sh"
 POLL="$ROOT/bin/fm-pr-poll.sh"
+GREEN_POLL="$ROOT/bin/fm-pr-green-poll.sh"
 WATCH="$ROOT/bin/fm-watch.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 REGISTER="$ROOT/bin/fm-check-register.sh"
@@ -141,6 +143,30 @@ SH
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case "${1:-} ${2:-}" in
   "api graphql")
+    case " $* " in
+      *statusCheckRollup*)
+        # The checks-green read: a response in GitHub's shape, run through the
+        # caller's own --jq program with the real jq, as gh itself applies it.
+        [ "${FM_TEST_GH_GREEN_FAIL:-0}" = 0 ] || exit 1
+        filter=
+        while [ "$#" -gt 0 ]; do
+          if [ "$1" = --jq ]; then
+            filter=${2-}
+            break
+          fi
+          shift
+        done
+        green_head=${FM_TEST_GH_GREEN_HEAD:-${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}}
+        if [ -n "${FM_TEST_GH_GREEN_RAW:-}" ]; then
+          printf '%s\n' "$FM_TEST_GH_GREEN_RAW"
+        else
+          printf '{"data":{"repository":{"pullRequest":{"state":"%s","headRefOid":"%s","baseRefName":"%s","commits":{"nodes":[{"commit":{"oid":"%s","statusCheckRollup":%s}}]}}}}}\n' \
+            "${FM_TEST_GH_GREEN_STATE:-OPEN}" "$green_head" "${FM_TEST_GH_GREEN_BASE:-main}" "${FM_TEST_GH_GREEN_OID:-$green_head}" \
+            "${FM_TEST_GH_GREEN_ROLLUP:-null}"
+        fi | "${FM_TEST_JQ:-jq}" -r "$filter"
+        exit
+        ;;
+    esac
     printf '%s\n' \
       "state=${FM_TEST_GH_GRAPHQL_STATE:-MERGED}" \
       "merged=${FM_TEST_GH_GRAPHQL_MERGED:-true}" \
@@ -150,6 +176,14 @@ case "${1:-} ${2:-}" in
     ;;
   "pr view")
     case " $* " in
+      *" --json state,headRefOid,baseRefName,statusCheckRollup "*)
+        [ "${FM_TEST_GH_GREEN_VIEW_FAIL:-0}" = 0 ] || exit 1
+        runs=${FM_TEST_GH_GREEN_CHECK_RUNS:-'[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS"}]'}
+        "${FM_TEST_JQ:-jq}" -nc --arg head "${FM_TEST_GH_GREEN_VIEW_HEAD:-$FM_TEST_GH_GREEN_HEAD}" \
+          --arg base "${FM_TEST_GH_GREEN_BASE:-main}" --argjson runs "$runs" \
+          '{state:"OPEN",headRefOid:$head,baseRefName:$base,statusCheckRollup:$runs}'
+        exit
+        ;;
       *statusCheckRollup*)
         printf '%s\n' "{\"state\":\"OPEN\",\"isDraft\":false,\"mergeable\":\"MERGEABLE\",\"mergeStateStatus\":\"CLEAN\",\"headRefOid\":\"${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}\",\"baseRefName\":\"main\",\"statusCheckRollup\":[{\"__typename\":\"CheckRun\",\"name\":\"ci\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\"}]}"
         exit 0
@@ -163,6 +197,23 @@ case "${1:-} ${2:-}" in
         exit 0
         ;;
     esac
+    ;;
+  "pr checks")
+    case " $* " in
+      *" --required "*)
+        if [ "${FM_TEST_GH_REQUIRED_UNAVAILABLE:-0}" != 0 ]; then
+          printf '%s' "${FM_TEST_GH_REQUIRED_ERROR-no required checks reported on the 'feature' branch}" >&2
+          exit 1
+        fi
+        checks=${FM_TEST_GH_REQUIRED_CHECKS:-'[{"name":"ci","workflow":"CI","bucket":"pass"}]'}
+        ;;
+      *)
+        [ "${FM_TEST_GH_CHECKS_FAIL:-0}" = 0 ] || exit 1
+        checks=${FM_TEST_GH_ALL_CHECKS:-'[{"name":"ci","workflow":"CI","bucket":"pass"}]'}
+        ;;
+    esac
+    printf '%s\n' "$checks"
+    exit "${FM_TEST_GH_CHECKS_RC:-0}"
     ;;
   "pr merge")
     [ -z "${FM_TEST_GH_MERGE_HOOK:-}" ] || "$FM_TEST_GH_MERGE_HOOK"
@@ -182,10 +233,18 @@ case " $* " in
   *" api --paginate repos/"*"/rules/branches/"*merge_queue*)
     ;;
   *" api --paginate repos/"*"/rules/branches/"*)
-    printf '%s\n' '[]'
+    [ "${FM_TEST_GH_RULES_FAIL:-0}" = 0 ] || exit 1
+    printf '%s\n' "${FM_TEST_GH_RULES:-[]}"
+    ;;
+  *" api --paginate repos/"*"/commits/"*"/check-runs "*)
+    [ "${FM_TEST_GH_PRODUCERS_FAIL:-0}" = 0 ] || exit 1
+    producers=${FM_TEST_GH_PRODUCERS:-'{"check_runs":[]}'}
+    printf '%s\n' "$producers"
     ;;
   *" api repos/"*"/branches/"*)
-    printf '%s\n' '{"name":"main","protected":false}'
+    [ "${FM_TEST_GH_BRANCH_FAIL:-0}" = 0 ] || exit 1
+    branch=${FM_TEST_GH_BRANCH:-'{"name":"main","protected":false}'}
+    printf '%s\n' "$branch"
     ;;
   *" api repos/"*"/pulls/"*)
     printf '%s\n' "{\"state\":\"open\",\"user\":{\"login\":\"author\"},\"head\":{\"sha\":\"${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}\"},\"draft\":false,\"mergeable\":true,\"merged_at\":null}"
@@ -1003,6 +1062,93 @@ test_static_poll_contract() {
   pass "static poll is silent except for one merged line and remains watcher-bounded"
 }
 
+GREEN_HEAD_A=1111111111111111111111111111111111111111
+GREEN_HEAD_B=2222222222222222222222222222222222222222
+GREEN_CHECKS_KEY=$(printf '%s\n' '[["CI","ci"]]' | fm_pr_sha256 -)
+
+run_green_poll() {  # <dir> <green poll args>...
+  local dir=$1
+  shift
+  FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_JQ="$REAL_JQ" PATH="$dir/fakebin:$BASE_PATH" \
+    bash "$GREEN_POLL" "$@"
+}
+
+# A refused request reads nothing at all and prints nothing.
+assert_green_poll_refuses() {  # <dir> <label> <green poll args>...
+  local dir=$1 label=$2 out
+  shift 2
+  : > "$dir/gh.log"
+  out=$(FM_TEST_GH_GREEN_HEAD=$GREEN_HEAD_A FM_TEST_GH_GREEN_ROLLUP='{"state":"SUCCESS"}' \
+    run_green_poll "$dir" "$@")
+  [ -z "$out" ] || fail "the green read answered $label: $out"
+  [ ! -s "$dir/gh.log" ] || fail "the green read queried the forge for $label"
+}
+
+# The checks-green read is one exact line the watcher turns into a landing
+# prompt, so every reading short of an open pull request that GitHub calls
+# green at exactly the recorded head, and every failed or refused read, stays
+# silent rather than inviting a merge attempt.
+test_green_poll_contract() {
+  local dir state url out reading rollup
+  dir=$(make_case green-poll-contract)
+  state="$dir/home/state"
+  url=https://github.com/o/r/pull/7
+
+  out=$(FM_TEST_GH_GREEN_HEAD=$GREEN_HEAD_A FM_TEST_GH_GREEN_ROLLUP='{"state":"SUCCESS"}' \
+    run_green_poll "$dir" "$url" "$GREEN_HEAD_A")
+  [ "$out" = "checks-green $GREEN_CHECKS_KEY" ] || fail "an open pull request green at its recorded head was not reported: $out"
+  assert_grep '-f owner=o -f repo=r -F number=7' "$dir/gh.log" \
+    "the green read did not address the validated pull request"
+
+  for reading in OPEN:PENDING OPEN:FAILURE OPEN:ERROR OPEN:EXPECTED OPEN:null MERGED:SUCCESS CLOSED:SUCCESS; do
+    case "${reading#*:}" in
+      null) rollup=null ;;
+      *) rollup="{\"state\":\"${reading#*:}\"}" ;;
+    esac
+    out=$(FM_TEST_GH_GREEN_STATE=${reading%%:*} FM_TEST_GH_GREEN_HEAD=$GREEN_HEAD_A \
+      FM_TEST_GH_GREEN_ROLLUP="$rollup" run_green_poll "$dir" "$url" "$GREEN_HEAD_A")
+    [ -z "$out" ] || fail "the green read reported $reading as green"
+  done
+  out=$(FM_TEST_GH_GREEN_HEAD=$GREEN_HEAD_B FM_TEST_GH_GREEN_ROLLUP='{"state":"SUCCESS"}' \
+    run_green_poll "$dir" "$url" "$GREEN_HEAD_A")
+  [ -z "$out" ] || fail "the green read reported a head the pull request has moved past"
+  out=$(FM_TEST_GH_GREEN_HEAD=$GREEN_HEAD_A FM_TEST_GH_GREEN_OID=$GREEN_HEAD_B \
+    FM_TEST_GH_GREEN_ROLLUP='{"state":"SUCCESS"}' run_green_poll "$dir" "$url" "$GREEN_HEAD_A")
+  [ -z "$out" ] || fail "the green read trusted a rollup read from a different commit"
+  out=$(FM_TEST_GH_GREEN_RAW='{"data":{"repository":{"pullRequest":null}}}' \
+    run_green_poll "$dir" "$url" "$GREEN_HEAD_A")
+  [ -z "$out" ] || fail "the green read reported a pull request GitHub could not find"
+  out=$(FM_TEST_GH_GREEN_FAIL=1 FM_TEST_GH_GREEN_ROLLUP='{"state":"SUCCESS"}' \
+    run_green_poll "$dir" "$url" "$GREEN_HEAD_A")
+  [ -z "$out" ] || fail "the green read reported green after gh failed"
+
+  assert_green_poll_refuses "$dir" "a GitLab merge request" \
+    https://gitlab.com/g/p/-/merge_requests/7 "$GREEN_HEAD_A"
+  assert_green_poll_refuses "$dir" "a non-canonical URL" https://github.com/o/r/pull/07 "$GREEN_HEAD_A"
+  assert_green_poll_refuses "$dir" "an uppercase head" "$url" ABCDEF0123456789ABCDEF0123456789ABCDEF01
+  assert_green_poll_refuses "$dir" "a short head" "$url" 111111111111111111111111111111111111111
+  assert_green_poll_refuses "$dir" "a multiline head" "$url" "$GREEN_HEAD_A"$'\nx'
+  assert_green_poll_refuses "$dir" "a missing head" "$url"
+  assert_green_poll_refuses "$dir" "an extra argument" "$url" "$GREEN_HEAD_A" extra
+
+  # The marker suppresses only its exact private head-and-check-set record.
+  ! fm_pr_poll_green_already_notified "$state" task-a github github.com o/r 7 "$GREEN_HEAD_A" "$GREEN_CHECKS_KEY" \
+    || fail "an absent marker read as a delivered checks-green wake"
+  fm_pr_poll_green_mark_notified "$state" task-a github github.com o/r 7 "$GREEN_HEAD_A" "$GREEN_CHECKS_KEY" \
+    || fail "could not record a delivered checks-green wake"
+  [ "$(file_mode "$state/task-a.pr-poll-green-notified")" = 600 ] || fail "the checks-green marker was not private"
+  fm_pr_poll_green_already_notified "$state" task-a github github.com o/r 7 "$GREEN_HEAD_A" "$GREEN_CHECKS_KEY" \
+    || fail "the recorded head did not read as already woken"
+  ! fm_pr_poll_green_already_notified "$state" task-a github github.com o/r 7 "$GREEN_HEAD_B" "$GREEN_CHECKS_KEY" \
+    || fail "a new head read as already woken"
+  ! fm_pr_poll_green_already_notified "$state" task-a github github.com o/r 8 "$GREEN_HEAD_A" "$GREEN_CHECKS_KEY" \
+    || fail "another pull request read as already woken"
+  chmod 0644 "$state/task-a.pr-poll-green-notified"
+  ! fm_pr_poll_green_already_notified "$state" task-a github github.com o/r 7 "$GREEN_HEAD_A" "$GREEN_CHECKS_KEY" \
+    || fail "a non-private marker suppressed a checks-green wake"
+  pass "the checks-green read speaks only for an open pull request green at exactly its recorded head"
+}
+
 test_atomic_interruption_leaves_no_partial_artifact() {
   local dir rc
   dir=$(make_case interrupted-write)
@@ -1459,6 +1605,8 @@ test_teardown_removes_poll_artifacts() {
   printf 'data\n' > "$dir/home/state/task-a.pr-poll"
   printf 'registration\n' > "$dir/home/state/task-a.pr-poll-registration"
   printf 'trust\n' > "$dir/home/state/task-a.check-trust"
+  fm_pr_poll_green_mark_notified "$dir/home/state" task-a github github.com o/r 18 "$GREEN_HEAD_A" "$GREEN_CHECKS_KEY" \
+    || fail "could not seed the checks-green marker"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -1473,6 +1621,7 @@ SH
   [ ! -e "$dir/home/state/task-a.pr-poll" ] || fail "teardown left the sidecar"
   [ ! -e "$dir/home/state/task-a.pr-poll-registration" ] || fail "teardown left the PR poll registration"
   [ ! -e "$dir/home/state/task-a.check-trust" ] || fail "teardown left the custom check registration"
+  [ ! -e "$dir/home/state/task-a.pr-poll-green-notified" ] || fail "teardown left the checks-green marker"
 
   dir=$(make_case teardown-retirement-receipt)
   fakebin="$dir/fakebin"
@@ -2830,6 +2979,168 @@ test_gitlab_merged_poll_retires() {
   pass "GitHub and GitLab exact merged results share one retirement path"
 }
 
+# --- checks-green landing prompt ----------------------------------------------
+
+# One watcher cycle while the forge reports the pull request open at <head> with
+# the given combined check state; the gh log is reset first so each cycle's
+# forge reads can be inspected on their own.
+run_green_cycle() {  # <dir> <label> <head> <rollup-json>
+  local dir=$1 label=$2 rc=0
+  : > "$dir/gh.log"
+  set +e
+  FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_JQ="$REAL_JQ" FM_TEST_GH_STATE=OPEN \
+    FM_TEST_GH_GREEN_HEAD=$3 FM_TEST_GH_GREEN_ROLLUP=$4 \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/$label.out" 2> "$dir/$label.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "$label watcher cycle failed: $(cat "$dir/$label.err")"
+}
+
+task_a_check_rows() {  # <state>
+  grep -c $'\tcheck\t.*task-a.check.sh\t' "$1/.wake-queue" 2>/dev/null || true
+}
+
+# A direct-PR worker reports ready as soon as its pull request is open, before
+# CI finishes, so a yolo task's merge poll also says when the recorded head
+# turns green. It deduplicates by recorded head and passing check set, merges
+# nothing, leaves the poll armed, and a later merge still wakes and retires it.
+test_checks_green_wakes_per_head_and_check_set() {
+  local dir state url armed marker error branch runs
+  url=https://github.com/o/r/pull/7
+  dir=$(make_case checks-green-once-per-head)
+  state="$dir/home/state"
+  fm_write_meta "$state/task-a.meta" \
+    'window=firstmate:fm-task-a' 'endpoint_task_id=task-a' "worktree=$dir/wt" \
+    "project=$dir/project" 'kind=ship' 'mode=direct-PR' 'yolo=on'
+  FM_TEST_GH_HEAD=$GREEN_HEAD_A run_check_entry "$dir" task-a "$url" >/dev/null 2> "$dir/arm-a.err" \
+    || fail "could not arm the yolo direct-PR merge poll: $(cat "$dir/arm-a.err")"
+  grep -qxF "pr_head=$GREEN_HEAD_A" "$state/task-a.meta" || fail "arming did not record the pull request head"
+  retire_contributions_observer "$dir"
+  add_stop_custom_check "$dir"
+  armed=$(poll_artifact_snapshot "$state" task-a)
+
+  run_green_cycle "$dir" green-a "$GREEN_HEAD_A" '{"state":"SUCCESS"}'
+  case "$(cat "$dir/green-a.out")" in
+    "check: "*"/task-a.check.sh: checks-green") ;;
+    *) fail "a green recorded head did not wake with checks-green: $(cat "$dir/green-a.out")" ;;
+  esac
+  [ "$(task_a_check_rows "$state")" -eq 1 ] || fail "the checks-green wake did not queue exactly one row"
+  [ -f "$state/task-a.pr-poll-green-notified" ] || fail "the checks-green wake did not record its head"
+  [ "$(poll_artifact_snapshot "$state" task-a)" = "$armed" ] || fail "the checks-green wake changed the armed poll"
+  assert_no_grep 'pr merge' "$dir/gh.log" "the checks-green wake merged the pull request"
+  [ ! -e "$state/task-a.merge-authority" ] || fail "the checks-green wake recorded merge authority"
+  ack_watcher_cycle "$state" || fail "checks-green wake acknowledgement failed"
+
+  marker=$(fm_pr_sha256 "$state/task-a.pr-poll-green-notified")
+  for error in '' 'network timeout' 'HTTP 401: Bad credentials' 'API rate limit exceeded'; do
+    FM_TEST_GH_REQUIRED_UNAVAILABLE=1 FM_TEST_GH_REQUIRED_ERROR="$error" \
+      FM_TEST_GH_ALL_CHECKS='[{"name":"ci","workflow":"CI","bucket":"pass"},{"name":"lint","workflow":"CI","bucket":"pass"}]' \
+      run_green_cycle "$dir" required-error "$GREEN_HEAD_A" '{"state":"SUCCESS"}'
+    [ "$(task_a_check_rows "$state")" -eq 0 ] || fail "a required-check read error queued another wake: $error"
+    [ "$(fm_pr_sha256 "$state/task-a.pr-poll-green-notified")" = "$marker" ] \
+      || fail "a required-check read error changed the notified check set: $error"
+    assert_no_grep 'pr checks https://github.com/o/r/pull/7 --json' "$dir/gh.log" \
+      "a required-check read error fell back to all checks: $error"
+    ack_watcher_cycle "$state" || fail "required-check error control wake acknowledgement failed"
+  done
+
+  run_green_cycle "$dir" green-a-again "$GREEN_HEAD_A" '{"state":"SUCCESS"}'
+  case "$(cat "$dir/green-a-again.out")" in
+    check:*z-stop.check.sh:*stop-cycle) ;;
+    *) fail "an already-woken head woke again: $(cat "$dir/green-a-again.out")" ;;
+  esac
+  [ "$(task_a_check_rows "$state")" -eq 0 ] || fail "an already-woken head queued another row"
+  ack_watcher_cycle "$state" || fail "control wake acknowledgement failed"
+
+  branch='{"protected":true,"protection":{"required_status_checks":{"contexts":["ci","review"]}}}'
+  runs='[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS"},{"__typename":"CheckRun","name":"review","status":"COMPLETED","conclusion":"SUCCESS"}]'
+  FM_TEST_GH_BRANCH="$branch" run_green_cycle "$dir" required-absent "$GREEN_HEAD_A" '{"state":"SUCCESS"}'
+  [ "$(task_a_check_rows "$state")" -eq 0 ] || fail "an absent required check woke firstmate"
+  ack_watcher_cycle "$state" || fail "absent-check control wake acknowledgement failed"
+
+  FM_TEST_GH_BRANCH="$branch" FM_TEST_GH_REQUIRED_CHECKS='[{"name":"ci","workflow":"CI","bucket":"pass"},{"name":"review","workflow":"","bucket":"pending"}]' \
+    FM_TEST_GH_CHECKS_RC=8 run_green_cycle "$dir" required-expected "$GREEN_HEAD_A" '{"state":"SUCCESS"}'
+  [ "$(task_a_check_rows "$state")" -eq 0 ] || fail "an expected required check woke firstmate"
+  ack_watcher_cycle "$state" || fail "expected-check control wake acknowledgement failed"
+
+  FM_TEST_GH_BRANCH="$branch" FM_TEST_GH_GREEN_CHECK_RUNS="$runs" \
+    FM_TEST_GH_REQUIRED_CHECKS='[{"name":"ci","workflow":"CI","bucket":"pass"},{"name":"review","workflow":"","bucket":"pass"}]' \
+    run_green_cycle "$dir" required-passed "$GREEN_HEAD_A" '{"state":"SUCCESS"}'
+  case "$(cat "$dir/required-passed.out")" in
+    "check: "*"/task-a.check.sh: checks-green") ;;
+    *) fail "a later required success on the same head did not wake again" ;;
+  esac
+  [ "$(task_a_check_rows "$state")" -eq 1 ] || fail "later required success did not queue one wake"
+  ack_watcher_cycle "$state" || fail "later required success acknowledgement failed"
+
+  # Ordering and duplicate rows do not change the passing set's identity.
+  FM_TEST_GH_BRANCH="$branch" FM_TEST_GH_GREEN_CHECK_RUNS="$runs" \
+    FM_TEST_GH_REQUIRED_CHECKS='[{"name":"review","workflow":"","bucket":"pass"},{"name":"ci","workflow":"CI","bucket":"pass"},{"name":"ci","workflow":"CI","bucket":"pass"}]' \
+    run_green_cycle "$dir" required-reordered "$GREEN_HEAD_A" '{"state":"SUCCESS"}'
+  [ "$(task_a_check_rows "$state")" -eq 0 ] || fail "reordered passing checks woke again"
+  ack_watcher_cycle "$state" || fail "reordered-check control wake acknowledgement failed"
+
+  # The worker pushed a fix and reported ready again, so the new head is
+  # recorded, and it wakes once its own checks are green.
+  FM_TEST_GH_HEAD=$GREEN_HEAD_B run_check_entry "$dir" task-a "$url" >/dev/null 2> "$dir/arm-b.err" \
+    || fail "could not re-arm the merge poll at a new head: $(cat "$dir/arm-b.err")"
+  retire_contributions_observer "$dir"
+  run_green_cycle "$dir" green-b "$GREEN_HEAD_B" '{"state":"SUCCESS"}'
+  case "$(cat "$dir/green-b.out")" in
+    "check: "*"/task-a.check.sh: checks-green") ;;
+    *) fail "a newly recorded head that turned green did not wake: $(cat "$dir/green-b.out")" ;;
+  esac
+  ack_watcher_cycle "$state" || fail "second checks-green acknowledgement failed"
+
+  run_merged_poll_cycle "$dir"
+  case "$(cat "$dir/watch.out")" in
+    check:*task-a.check.sh:*merged) ;;
+    *) fail "a merge after a checks-green wake did not wake: $(cat "$dir/watch.out")" ;;
+  esac
+  assert_poll_absent "$state" task-a
+  pass "a yolo direct-PR poll wakes per head and passing check set and still retires on merge"
+}
+
+# Arm one task's poll with the given delivery fields and, when given, a head
+# recorded after its pr= line, where bin/fm-pr-check.sh writes it.
+seed_green_task() {  # <dir> <id> <url> <head-or-empty> <meta field>...
+  local dir=$1 id=$2 url=$3 head=$4
+  shift 4
+  write_poll_meta "$dir/home/state" "$id" "$url" "$@"
+  [ -z "$head" ] || printf 'pr_head=%s\n' "$head" >> "$dir/home/state/$id.meta"
+  seed_canonical_poll "$dir" "$id" "$url"
+}
+
+# Only a direct-PR task with yolo=on and a recorded GitHub head gets the green
+# read, and a pull request whose live head moved past the recorded one stays
+# silent, because the recorded head is the one its worker reported ready. One
+# sweep covers every case, and only moved-head, pull request 11, is read.
+test_checks_green_needs_a_yolo_direct_pr_recorded_head() {
+  local dir state id
+  dir=$(make_case checks-green-ineligible)
+  state="$dir/home/state"
+  seed_green_task "$dir" yolo-off https://github.com/o/r/pull/7 "$GREEN_HEAD_A" mode=direct-PR yolo=off
+  seed_green_task "$dir" no-mistakes https://github.com/o/r/pull/8 "$GREEN_HEAD_A" mode=no-mistakes yolo=on
+  seed_green_task "$dir" no-head https://github.com/o/r/pull/9 "" mode=direct-PR yolo=on
+  seed_green_task "$dir" gitlab https://gitlab.com/g/p/-/merge_requests/10 "$GREEN_HEAD_A" mode=direct-PR yolo=on
+  seed_green_task "$dir" moved-head https://github.com/o/r/pull/11 "$GREEN_HEAD_A" mode=direct-PR yolo=on
+  add_stop_custom_check "$dir"
+  FM_TEST_GLAB_LOG="$dir/glab.log" \
+    run_green_cycle "$dir" ineligible "$GREEN_HEAD_B" '{"state":"SUCCESS"}'
+  case "$(cat "$dir/ineligible.out")" in
+    check:*z-stop.check.sh:*stop-cycle) ;;
+    *) fail "an ineligible or moved-head task woke on green checks: $(cat "$dir/ineligible.out")" ;;
+  esac
+  [ "$(grep -c statusCheckRollup "$dir/gh.log")" -eq 1 ] \
+    || fail "the sweep did not make exactly the moved-head task's green read: $(cat "$dir/gh.log")"
+  grep statusCheckRollup "$dir/gh.log" | grep -F -- '-F number=11' >/dev/null \
+    || fail "the one green read was not the moved-head task's"
+  for id in yolo-off no-mistakes no-head gitlab moved-head; do
+    [ ! -e "$state/$id.pr-poll-green-notified" ] || fail "$id recorded a checks-green wake"
+  done
+  pass "the checks-green wake is limited to a yolo direct-PR task's recorded GitHub head"
+}
+
 # --- poll-path merge authority ----------------------------------------------
 
 write_away_record() {  # <dir> [<fm-afk-contract.sh enter args>...]
@@ -3439,6 +3750,120 @@ SH
   pass "device re-record publication waits without rewriting its registration"
 }
 
+test_green_poll_missing_required() {
+  local dir out source fallback branch rules runs result checks
+  dir=$(make_case green-missing-required)
+  for source in classic ruleset; do
+    branch='{"protected":false}'
+    rules='[]'
+    if [ "$source" = classic ]; then
+      branch='{"protected":true,"protection":{"required_status_checks":{"contexts":["review"]}}}'
+    else
+      rules='[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"review"}]}}]'
+    fi
+    for fallback in 0 1; do
+      for result in absent pending fail pass skipping neutral status; do
+        runs='[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS"}]'
+        checks='[{"name":"ci","workflow":"CI","bucket":"pass"}]'
+        case "$result" in
+          pending) runs='[{"__typename":"CheckRun","name":"review","status":"QUEUED","conclusion":null}]' ;;
+          fail) runs='[{"__typename":"CheckRun","name":"review","status":"COMPLETED","conclusion":"FAILURE"}]' ;;
+          pass|skipping|neutral)
+            runs='[{"__typename":"CheckRun","name":"review","status":"COMPLETED","conclusion":"SUCCESS"}]'
+            [ "$result" != skipping ] || runs=${runs/SUCCESS/SKIPPED}
+            [ "$result" != neutral ] || runs=${runs/SUCCESS/NEUTRAL}
+            checks='[{"name":"review","bucket":"pass"}]'
+            [ "$result" = pass ] || checks=${checks/pass/skipping}
+            ;;
+          status)
+            runs='[{"__typename":"StatusContext","context":"review","state":"SUCCESS"}]'
+            checks='[{"name":"review","bucket":"pass"}]'
+            ;;
+        esac
+        out=$(FM_TEST_GH_GREEN_HEAD=$GREEN_HEAD_A FM_TEST_GH_GREEN_ROLLUP='{"state":"SUCCESS"}' \
+          FM_TEST_GH_BRANCH="$branch" FM_TEST_GH_RULES="$rules" FM_TEST_GH_REQUIRED_UNAVAILABLE=$fallback \
+          FM_TEST_GH_GREEN_CHECK_RUNS="$runs" FM_TEST_GH_REQUIRED_CHECKS="$checks" FM_TEST_GH_ALL_CHECKS="$checks" \
+          run_green_poll "$dir" https://github.com/o/r/pull/7 "$GREEN_HEAD_A")
+        case "$result" in
+          absent|pending|fail) [ -z "$out" ] || fail "$source $result requirement announced green (fallback=$fallback)" ;;
+          *) [[ "$out" = checks-green\ * ]] || fail "$source satisfied requirement stayed silent (fallback=$fallback, result=$result)" ;;
+        esac
+      done
+    done
+  done
+  pass "base requirements must be reported and satisfied before required or fallback checks announce green"
+}
+
+test_green_poll_requirement_reads() {
+  local dir out failure producers
+  dir=$(make_case green-requirement-reads)
+  for failure in branch rules producers view stale-head; do
+    out=$(FM_TEST_GH_GREEN_HEAD=$GREEN_HEAD_A FM_TEST_GH_GREEN_ROLLUP='{"state":"SUCCESS"}' \
+      FM_TEST_GH_BRANCH='{"protected":true,"protection":{"required_status_checks":{"checks":[{"context":"ci","app_id":7}]}}}' \
+      FM_TEST_GH_PRODUCERS='{"check_runs":[{"name":"ci","app":{"id":7},"head_sha":"'"$GREEN_HEAD_A"'"}]}' \
+      FM_TEST_GH_BRANCH_FAIL=$([ "$failure" != branch ] && echo 0 || echo 1) \
+      FM_TEST_GH_RULES_FAIL=$([ "$failure" != rules ] && echo 0 || echo 1) \
+      FM_TEST_GH_PRODUCERS_FAIL=$([ "$failure" != producers ] && echo 0 || echo 1) \
+      FM_TEST_GH_GREEN_VIEW_FAIL=$([ "$failure" != view ] && echo 0 || echo 1) \
+      FM_TEST_GH_GREEN_VIEW_HEAD=$([ "$failure" != stale-head ] && echo "$GREEN_HEAD_A" || echo "$GREEN_HEAD_B") \
+      run_green_poll "$dir" https://github.com/o/r/pull/7 "$GREEN_HEAD_A")
+    [ -z "$out" ] || fail "an unreadable or stale $failure read announced green"
+  done
+  for producers in \
+    '{"check_runs":[]}' \
+    '{"check_runs":[{"name":"ci","app":{"id":8},"head_sha":"'"$GREEN_HEAD_A"'"}]}' \
+    '{"check_runs":[{"name":"ci","app":{"id":7},"head_sha":"'"$GREEN_HEAD_B"'"}]}'; do
+    out=$(FM_TEST_GH_GREEN_HEAD=$GREEN_HEAD_A FM_TEST_GH_GREEN_ROLLUP='{"state":"SUCCESS"}' \
+      FM_TEST_GH_BRANCH='{"protected":true,"protection":{"required_status_checks":{"checks":[{"context":"ci","app_id":7}]}}}' \
+      FM_TEST_GH_PRODUCERS="$producers" run_green_poll "$dir" https://github.com/o/r/pull/7 "$GREEN_HEAD_A")
+    [ -z "$out" ] || fail "a missing or mismatched required producer announced green"
+  done
+  out=$(FM_TEST_GH_GREEN_HEAD=$GREEN_HEAD_A FM_TEST_GH_GREEN_ROLLUP='{"state":"SUCCESS"}' \
+    FM_TEST_GH_BRANCH='{"protected":true,"protection":{"required_status_checks":{"checks":[{"context":"ci","app_id":7}]}}}' \
+    FM_TEST_GH_PRODUCERS='{"check_runs":[{"name":"ci","app":{"id":7},"head_sha":"'"$GREEN_HEAD_A"'"}]}' \
+    run_green_poll "$dir" https://github.com/o/r/pull/7 "$GREEN_HEAD_A")
+  [ "$out" = "checks-green $GREEN_CHECKS_KEY" ] || fail "a satisfied app-bound requirement did not announce green"
+  pass "green reads require readable base rules and exact-head required producers"
+}
+
+test_green_poll_check_lists() {
+  local dir out checks fallback bucket
+  dir=$(make_case green-check-lists)
+  for fallback in 0 1; do
+    # A successful combined rollup cannot override an empty, malformed, or
+    # nonpassing list, whether it is required checks or the fallback all-checks read.
+    for bucket in pending fail cancel EXPECTED; do
+      checks='[{"name":"ci","bucket":"pass"},{"name":"review","bucket":"'"$bucket"'"}]'
+      out=$(FM_TEST_GH_GREEN_HEAD=$GREEN_HEAD_A FM_TEST_GH_GREEN_ROLLUP='{"state":"SUCCESS"}' \
+        FM_TEST_GH_REQUIRED_UNAVAILABLE=$fallback FM_TEST_GH_REQUIRED_CHECKS="$checks" FM_TEST_GH_ALL_CHECKS="$checks" \
+        run_green_poll "$dir" https://github.com/o/r/pull/7 "$GREEN_HEAD_A")
+      [ -z "$out" ] || fail "bucket $bucket was green (fallback=$fallback)"
+    done
+    checks='[{"name":"ci","workflow":"CI","bucket":"skipping"}]'
+    out=$(FM_TEST_GH_GREEN_HEAD=$GREEN_HEAD_A FM_TEST_GH_GREEN_ROLLUP='{"state":"SUCCESS"}' \
+      FM_TEST_GH_REQUIRED_UNAVAILABLE=$fallback FM_TEST_GH_REQUIRED_CHECKS="$checks" FM_TEST_GH_ALL_CHECKS="$checks" \
+      run_green_poll "$dir" https://github.com/o/r/pull/7 "$GREEN_HEAD_A")
+    [ "$out" = "checks-green $GREEN_CHECKS_KEY" ] || fail "skipped or neutral checks were not green (fallback=$fallback)"
+    for checks in '[]' null 'not-json' '[{"name":"ci"}]'; do
+      out=$(FM_TEST_GH_GREEN_HEAD=$GREEN_HEAD_A FM_TEST_GH_GREEN_ROLLUP='{"state":"SUCCESS"}' \
+        FM_TEST_GH_REQUIRED_UNAVAILABLE=$fallback FM_TEST_GH_REQUIRED_CHECKS="$checks" FM_TEST_GH_ALL_CHECKS="$checks" \
+        run_green_poll "$dir" https://github.com/o/r/pull/7 "$GREEN_HEAD_A")
+      [ -z "$out" ] || fail "invalid check list was green (fallback=$fallback): $checks"
+    done
+  done
+  out=$(FM_TEST_GH_GREEN_HEAD=$GREEN_HEAD_A FM_TEST_GH_GREEN_ROLLUP='{"state":"SUCCESS"}' \
+    FM_TEST_GH_REQUIRED_UNAVAILABLE=1 run_green_poll "$dir" https://github.com/o/r/pull/7 "$GREEN_HEAD_A")
+  [ "$out" = "checks-green $GREEN_CHECKS_KEY" ] || fail "all reported checks passing did not permit fallback green"
+  out=$(FM_TEST_GH_GREEN_HEAD=$GREEN_HEAD_A FM_TEST_GH_GREEN_ROLLUP='{"state":"SUCCESS"}' \
+    FM_TEST_GH_REQUIRED_UNAVAILABLE=1 FM_TEST_GH_CHECKS_FAIL=1 \
+    run_green_poll "$dir" https://github.com/o/r/pull/7 "$GREEN_HEAD_A")
+  [ -z "$out" ] || fail "an unavailable fallback announced green"
+  pass "required and fallback check lists require nonempty, entirely passing checks"
+}
+
+test_green_poll_missing_required
+test_green_poll_requirement_reads
+test_green_poll_check_lists
 test_parser_matrix
 test_gitlab_merge_watch
 test_gerrit_merge_watch
@@ -3447,6 +3872,8 @@ test_gerrit_ready_gate_reads_the_published_tree
 test_gerrit_nm_ready_gate_requires_recovered_custody
 test_merged_poll_retires_once
 test_merged_poll_reregistration_after_notification_is_absorbed
+test_checks_green_wakes_per_head_and_check_set
+test_checks_green_needs_a_yolo_direct_pr_recorded_head
 test_merged_poll_retries_a_failed_upward_report
 test_self_merge_and_poll_publish_one_outcome
 test_merged_poll_row_carries_the_merge_authority
@@ -3471,6 +3898,7 @@ test_direct_pr_unpushed_commit_refuses_registration
 test_valid_recording_and_merge_derivation
 test_rejected_metacharacter_bytes_are_inert
 test_static_poll_contract
+test_green_poll_contract
 test_atomic_interruption_leaves_no_partial_artifact
 test_concurrent_watcher_sees_only_complete_publication
 test_poll_publication_refuses_unsafe_destinations

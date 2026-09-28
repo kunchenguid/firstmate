@@ -19,6 +19,138 @@
 # The receipt binds the terminal observation to the canonical registration and
 # lets a restart finish fixed-path removal without executing state-file bytes.
 
+# --- GitHub base-branch required checks --------------------------------------
+# bin/fm-pr-merge.sh and bin/fm-pr-green-poll.sh share these helpers.
+# github_read_required_contexts and github_read_check_producers address the
+# caller's PR_OWNER and PR_REPO; callers must set both first.
+
+github_urlencode_path_segment() {
+  local LC_ALL=C input=$1 encoded='' char octet hex
+  while [ -n "$input" ]; do
+    char=${input%"${input#?}"}
+    input=${input#?}
+    case "$char" in
+      [-._~a-zA-Z0-9]) encoded=$encoded$char ;;
+      *)
+        printf -v octet '%d' "'$char"
+        [ "$octet" -ge 0 ] || octet=$((octet + 256))
+        printf -v hex '%02X' "$octet"
+        encoded=$encoded%$hex
+        ;;
+    esac
+  done
+  printf '%s' "$encoded"
+}
+
+# Whether a failed branch-rules read (the gh stderr given) is GitHub's
+# plan-gated 403 ("Upgrade to GitHub Pro or make this repository public"),
+# which means the repository's plan cannot expose branch rules at all, on
+# GitHub or GitHub Enterprise Server - not that this script failed to read
+# them, and not that the token lacks a permission. Such a repository has no
+# active ruleset rule of any kind. Any other failure (auth, rate limit,
+# network, a 404, an unrelated 403) is not this and stays unreadable.
+github_branch_rules_unavailable_on_plan() {
+  case "$1" in
+    *"Upgrade to GitHub Pro or make this repository public"*) return 0 ;;
+  esac
+  return 1
+}
+
+FM_PR_GITHUB_REQUIRED=
+FM_PR_GITHUB_REQUIRED_ERROR=
+github_read_required_contexts() {
+  local base=$1 branch_path branch_json rules_json classic='' ruleset='' api_err api_err_text
+  FM_PR_GITHUB_REQUIRED='[]'
+  FM_PR_GITHUB_REQUIRED_ERROR=
+  branch_path=$(github_urlencode_path_segment "$base")
+
+  if ! branch_json=$(gh api "repos/$PR_OWNER/$PR_REPO/branches/$branch_path" 2>/dev/null) \
+    || [ -z "$branch_json" ] \
+    || ! classic=$(printf '%s' "$branch_json" | jq -c '
+      if type != "object" or (.protected | type) != "boolean" then
+        error("branch payload is unreadable")
+      elif .protected == false then
+        empty
+      elif (.protection.required_status_checks | type) != "object" then
+        error("branch protection summary is unreadable")
+      else
+        .protection.required_status_checks
+        | ((.checks // []) | if type == "array" then .[] else error("invalid checks") end
+           | {context, app_id}),
+          ((.contexts // []) | if type == "array" then .[] else error("invalid contexts") end
+           | {context: ., app_id: null})
+        | if (.context | type) == "string" and (.context | length) > 0
+             and (.app_id == null or (.app_id | type) == "number")
+          then . else error("invalid required check") end
+        | if .app_id == -1 then .app_id = null else . end
+      end' 2>/dev/null); then
+    classic=''
+    FM_PR_GITHUB_REQUIRED_ERROR="the branch protection summary for base branch $base could not be read"
+  fi
+
+  if ! api_err=$(mktemp "${TMPDIR:-/tmp}/fm-pr-merge-required-rules.XXXXXX"); then
+    FM_PR_GITHUB_REQUIRED_ERROR="${FM_PR_GITHUB_REQUIRED_ERROR:+$FM_PR_GITHUB_REQUIRED_ERROR
+}the branch rules for base branch $base could not be read"
+  else
+    if ! rules_json=$(gh api --paginate "repos/$PR_OWNER/$PR_REPO/rules/branches/$branch_path" 2>"$api_err"); then
+      api_err_text=$(cat "$api_err" 2>/dev/null)
+      if ! github_branch_rules_unavailable_on_plan "$api_err_text"; then
+        FM_PR_GITHUB_REQUIRED_ERROR="${FM_PR_GITHUB_REQUIRED_ERROR:+$FM_PR_GITHUB_REQUIRED_ERROR
+}the branch rules for base branch $base could not be read"
+      fi
+    elif [ -z "$rules_json" ] || ! ruleset=$(printf '%s' "$rules_json" | jq -c '
+        if type != "array" then error("rules payload is unreadable") else .[] end
+        | select(type != "object" or .type == "required_status_checks")
+        | if type == "object" and (.parameters.required_status_checks | type) == "array"
+          then .parameters.required_status_checks[] else error("invalid required check rule") end
+        | if type == "object" and (.context | type) == "string" and (.context | length) > 0
+             and (.integration_id == null or (.integration_id | type) == "number")
+          then {context, app_id: .integration_id} else error("invalid required check rule") end
+        | if .app_id == -1 then .app_id = null else . end' 2>/dev/null); then
+      ruleset=''
+      FM_PR_GITHUB_REQUIRED_ERROR="${FM_PR_GITHUB_REQUIRED_ERROR:+$FM_PR_GITHUB_REQUIRED_ERROR
+}the branch rules for base branch $base could not be read"
+    fi
+    rm -f "$api_err"
+  fi
+
+  # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
+  FM_PR_GITHUB_REQUIRED=$(printf '%s\n%s\n' "$classic" "$ruleset" | jq -sc '
+    unique_by([.context, .app_id]) | group_by(.context)
+    | map(if any(.[]; .app_id != null) then map(select(.app_id != null)) else . end) | add // []')
+  [ -z "$FM_PR_GITHUB_REQUIRED_ERROR" ]
+}
+
+github_required_checks_missing() {
+  local json=$1 required=$2 producers=$3
+  printf '%s' "$json" | jq -r --argjson required "$required" --argjson producers "$producers" '
+    if (.statusCheckRollup | type) != "array" then error("no check rollup") else . end
+    | .statusCheckRollup as $reported
+    | $required
+    | map(. as $requirement
+      | select(any($reported[];
+          if $requirement.app_id == null then
+            (if .__typename == "CheckRun" then .name else .context end) == $requirement.context
+          elif .__typename == "CheckRun" then
+            .name == $requirement.context
+            and any($producers[]; .name == $requirement.context and .app.id == $requirement.app_id)
+          else
+            .context == $requirement.context
+          end) | not)
+      | .context) | unique[]
+  ' 2>/dev/null || return 1
+}
+
+github_read_check_producers() {
+  local head=$1 runs
+  runs=$(gh api --paginate "repos/$PR_OWNER/$PR_REPO/commits/$head/check-runs" 2>/dev/null) \
+    && [ -n "$runs" ] || return 1
+  printf '%s' "$runs" | jq -sc --arg head "$head" '
+    [ .[] | if (.check_runs | type) == "array" then .check_runs[] else error("invalid check runs") end
+      | if (.name | type) == "string" and (.app.id | type) == "number" and .head_sha == $head
+        then . else error("invalid check producer") end ]' 2>/dev/null
+}
+
 FM_PR_PROVIDER=
 FM_PR_URL=
 FM_PR_HOST=
@@ -1394,6 +1526,83 @@ fm_pr_poll_merge_notified_remove() {  # <state> <id>
   local state=$1 id=$2 marker
   fm_pr_task_id_valid "$id" || return 1
   marker="$state/$id.pr-poll-merge-notified"
+  [ -e "$marker" ] || [ -L "$marker" ] || return 0
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+  rm -f -- "$marker"
+}
+
+# --- checks-green notification marker ----------------------------------------
+# bin/fm-pr-green-poll.sh would read green on every sweep while a yolo
+# direct-PR task's recorded head stays open and green, so this marker holds that
+# reading to one wake per head and passing check set. It binds the canonical PR
+# identity, head, and check-set digest, so newly passing checks wake again. It
+# records a delivered wake and never grants merge authority. Anything but an
+# exact private record reads as not yet notified, which errs toward a repeated
+# wake rather than a lost one.
+fm_pr_poll_green_marker_matches() {  # <marker> <device> <provider> <host> <path> <number> <head> <checks>
+  local marker=$1 device=$2 expected_provider=$3 expected_host=$4 expected_path=$5 expected_number=$6
+  local expected_head=$7 expected_checks=$8 version provider host path number head checks
+  fm_pr_private_file_valid "$marker" 600 "$device" || return 1
+  exec 8< "$marker" || return 1
+  IFS= read -r version <&8 || { exec 8<&-; return 1; }
+  IFS= read -r provider <&8 || { exec 8<&-; return 1; }
+  IFS= read -r host <&8 || { exec 8<&-; return 1; }
+  IFS= read -r path <&8 || { exec 8<&-; return 1; }
+  IFS= read -r number <&8 || { exec 8<&-; return 1; }
+  IFS= read -r head <&8 || { exec 8<&-; return 1; }
+  IFS= read -r checks <&8 || { exec 8<&-; return 1; }
+  if IFS= read -r _extra <&8; then
+    exec 8<&-
+    return 1
+  fi
+  exec 8<&-
+  [ "$version" = fm-pr-poll-green-notified-v2 ] \
+    && [ "$provider" = "$expected_provider" ] \
+    && [ "$host" = "$expected_host" ] \
+    && [ "$path" = "$expected_path" ] \
+    && [ "$number" = "$expected_number" ] \
+    && [ "$head" = "$expected_head" ] \
+    && [ "$checks" = "$expected_checks" ]
+}
+
+fm_pr_poll_green_already_notified() {  # <state> <id> <provider> <host> <path> <number> <head> <checks>
+  local state=$1 id=$2 state_device
+  fm_pr_task_id_valid "$id" || return 1
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  state_device=$(fm_pr_file_device "$state") || return 1
+  fm_pr_poll_green_marker_matches "$state/$id.pr-poll-green-notified" "$state_device" \
+    "$3" "$4" "$5" "$6" "$7" "$8"
+}
+
+fm_pr_poll_green_mark_notified() {  # <state> <id> <provider> <host> <path> <number> <head> <checks>
+  local state=$1 id=$2 provider=$3 host=$4 path=$5 number=$6 head=$7 checks=$8 marker tmp state_device
+  fm_pr_task_id_valid "$id" || return 1
+  fm_pr_head_valid "$head" || return 1
+  [[ "$checks" =~ ^[0-9a-f]{64}$ ]] || return 1
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  state_device=$(fm_pr_file_device "$state") || return 1
+  marker="$state/$id.pr-poll-green-notified"
+  fm_pr_regular_destination_on_device_or_absent "$marker" "$state_device" || return 1
+  tmp=$(umask 077 && mktemp "$state/.fm-pr-poll-green-notified.XXXXXX") || return 1
+  if ! printf '%s\n' \
+      fm-pr-poll-green-notified-v2 "$provider" "$host" "$path" "$number" "$head" "$checks" > "$tmp" \
+    || ! chmod 0600 "$tmp" \
+    || ! fm_pr_poll_green_marker_matches "$tmp" "$state_device" \
+      "$provider" "$host" "$path" "$number" "$head" "$checks" \
+    || ! fm_pr_regular_destination_on_device_or_absent "$marker" "$state_device" \
+    || ! mv -f -- "$tmp" "$marker" \
+    || ! fm_pr_poll_green_marker_matches "$marker" "$state_device" \
+      "$provider" "$host" "$path" "$number" "$head" "$checks"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
+
+# Removed at teardown with the merge-notified marker above.
+fm_pr_poll_green_notified_remove() {  # <state> <id>
+  local state=$1 id=$2 marker
+  fm_pr_task_id_valid "$id" || return 1
+  marker="$state/$id.pr-poll-green-notified"
   [ -e "$marker" ] || [ -L "$marker" ] || return 0
   [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
   rm -f -- "$marker"
