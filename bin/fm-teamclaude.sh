@@ -18,7 +18,8 @@
 # localhost to NO_PROXY/no_proxy, so only the loopback base URL skips a
 # proxy. When the first `codex` on PATH is an opencodex autostart shim (the
 # marker "opencodex codex autostart shim"), the launch executes the sibling
-# `<codex>.opencodex-real` instead of the shim. opencodex is not stopped and
+# `<codex>.opencodex-real` instead of the shim, and refuses the worker when
+# that sibling is missing or not executable. opencodex is not stopped and
 # OpenCode launches are not rewritten.
 #
 # Pi and pi-signed launches do not go through TeamClaude for now (bead
@@ -201,23 +202,22 @@ fm_teamclaude_resolve_codex() {
         printf '%s\n' "$sibling"
         return 0
       fi
-      continue
+      fm_teamclaude_die "the first codex on PATH ($candidate) is the opencodex autostart shim, and its real binary $sibling is missing or not executable. Refusing to start this worker because the shim would run Codex through opencodex instead of TeamClaude."
+      return 1
     fi
     printf '%s\n' "$candidate"
     return 0
   done
-  return 1
+  # No codex on PATH: print nothing and leave the launch's bare `codex`.
+  return 0
 }
 
 fm_teamclaude_codex_exec() {
   local resolved first
   fm_teamclaude_require_proxy || return 1
-  if ! resolved=$(fm_teamclaude_resolve_codex); then
-    printf '%s\n' codex
-    return 0
-  fi
+  resolved=$(fm_teamclaude_resolve_codex) || return 1
   first=$(command -v codex 2>/dev/null || true)
-  if [ -n "$first" ] && [ "$first" = "$resolved" ]; then
+  if [ -z "$resolved" ] || [ "$first" = "$resolved" ]; then
     printf '%s\n' codex
     return 0
   fi
@@ -243,7 +243,7 @@ fm_teamclaude_splice_codex() {
   while [ -n "$rest" ]; do
     word=${rest%% *}
     case "$word" in
-      [A-Za-z_][A-Za-z0-9_]*=*)
+      [A-Za-z_]*=*)
         prefix="$prefix$word "
         case "$rest" in
           *" "*) rest=${rest#* } ;;

@@ -197,6 +197,77 @@ SH
   pass "an opencodex autostart shim is not the Codex binary a worker runs"
 }
 
+test_codex_shim_without_its_real_binary_refuses_loudly() {
+  local bin_dir out status
+  bin_dir="$TMP_ROOT/shim-only-path"
+  mkdir -p "$bin_dir"
+  cat > "$bin_dir/codex" <<'SH'
+#!/bin/sh
+# opencodex codex autostart shim
+printf 'shim\n'
+SH
+  chmod +x "$bin_dir/codex"
+  out=$(PATH="$bin_dir:$STUB:/usr/bin:/bin" "$ROOT_BIN" codex-exec 2>&1) && status=0 || status=$?
+  expect_code 1 "$status" "a shim with no real binary beside it must refuse"
+  assert_contains "$out" "opencodex autostart shim" "the refusal must name the shim"
+  assert_contains "$out" "$bin_dir/codex.opencodex-real" "the refusal must name the missing real binary"
+  printf '#!/bin/sh\nprintf real\n' > "$bin_dir/codex.opencodex-real"
+  chmod -x "$bin_dir/codex.opencodex-real"
+  out=$(PATH="$bin_dir:$STUB:/usr/bin:/bin" "$ROOT_BIN" codex-exec 2>&1) && status=0 || status=$?
+  expect_code 1 "$status" "a shim whose real binary is not executable must refuse"
+  assert_contains "$out" "missing or not executable" "the refusal must say the real binary is unusable"
+  pass "an opencodex shim without a usable real binary refuses instead of running the shim"
+}
+
+test_spawn_codex_shim_without_its_real_binary_refuses() {
+  local rec out status
+  rec=$(make_case codex-shim-only codex tc-codex-shim-only-a1)
+  read_case "$rec"
+  cat > "$FAKEBIN_DIR/codex" <<'SH'
+#!/bin/sh
+# opencodex codex autostart shim
+printf 'shim\n'
+SH
+  chmod +x "$FAKEBIN_DIR/codex"
+  out=$(run_spawn tc-codex-shim-only-a1 "$PROJ_DIR" --mode no-mistakes --yolo off) && status=0 || status=$?
+  expect_code 1 "$status" "codex spawn must refuse when only the shim is on PATH"
+  assert_contains "$out" "opencodex autostart shim" "the spawn refusal must name the shim"
+  [ ! -s "$LAUNCH_LOG" ] || fail "a refused codex spawn still typed a launch command"
+  [ ! -e "$HOME_DIR/state/tc-codex-shim-only-a1.meta" ] || fail "a refused codex spawn wrote task metadata"
+  pass "a Codex spawn with only the opencodex shim stops before a worker exists"
+}
+
+test_spawn_raw_codex_with_a_one_letter_assignment_bypasses_the_shim() {
+  local rec out status launch seen
+  rec=$(make_case codex-raw-assign codex tc-codex-raw-a1)
+  read_case "$rec"
+  cat > "$FAKEBIN_DIR/codex" <<'SH'
+#!/bin/sh
+# opencodex codex autostart shim
+printf 'shim\n'
+SH
+  cat > "$FAKEBIN_DIR/codex.opencodex-real" <<'SH'
+#!/bin/sh
+printf 'bin=%s\n' "$0"
+printf 'A=%s\n' "${A-unset}"
+SH
+  chmod +x "$FAKEBIN_DIR/codex" "$FAKEBIN_DIR/codex.opencodex-real"
+  out=$(run_spawn tc-codex-raw-a1 "$PROJ_DIR" "A=1 codex --dangerously-bypass-approvals-and-sandbox" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "a raw codex launch with a one-letter assignment should spawn: $out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" 'model_provider="teamclaude"' \
+    "the raw codex launch must select the TeamClaude provider"
+  seen=$(env -i HOME="$TMP_ROOT/pane" PATH="$FAKEBIN_DIR:$STUB:/usr/bin:/bin" /bin/sh -c "$launch") \
+    || fail "the emitted raw codex launch failed to run"
+  assert_contains "$seen" "bin=$FAKEBIN_DIR/codex.opencodex-real" \
+    "a leading one-letter assignment must not keep the shim as the process"
+  assert_contains "$seen" "A=1" "the leading assignment must still reach the real binary"
+  printf '%s\n' "$seen" | grep -qx shim \
+    && fail "the shim must not have been the process that ran"
+  pass "a raw codex launch after a one-letter assignment runs the real binary, not the shim"
+}
+
 test_codex_config_points_at_the_proxy_without_a_second_rotator() {
   local out
   out=$("$ROOT_BIN" codex-config) || fail "codex-config failed"
@@ -338,9 +409,12 @@ test_threshold_read_ignores_stderr_noise
 test_claude_env_carries_the_hold_timeout
 test_thresholds_that_stay_off_policy_refuse_loudly
 test_codex_shim_resolves_to_the_real_binary
+test_codex_shim_without_its_real_binary_refuses_loudly
 test_codex_config_points_at_the_proxy_without_a_second_rotator
 test_spawn_claude_carries_the_proxy_and_clears_a_direct_base_url
 test_spawn_down_proxy_refuses_before_a_worker_exists
 test_spawn_codex_bypasses_the_shim_and_skips_the_proxy_only_for_loopback
+test_spawn_codex_shim_without_its_real_binary_refuses
+test_spawn_raw_codex_with_a_one_letter_assignment_bypasses_the_shim
 test_spawn_pi_does_not_use_teamclaude
 test_spawn_opencode_is_unchanged
