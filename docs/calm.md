@@ -224,7 +224,7 @@ The Pi extension keeps its standard ANSI blue and yellow.
 ### Supervision notes on Claude Code
 
 With the flag on, the mod shows the supervision notes Pi shows, whether Calm is on or off, because on Pi they are supervision UI rather than Calm UI.
-Each note is one dim line appended to the transcript, drawn like a system notice and never sent to the model:
+Each note is appended to the transcript as its own system-notice row, which Claude Code draws in gray behind a `⏺` bullet and the mod's name (`firstmate-calm:`), and never sends to the model:
 
 | Line | When |
 | --- | --- |
@@ -235,7 +235,8 @@ Each note is one dim line appended to the transcript, drawn like a system notice
 
 Silent routine outcomes show nothing.
 The mod checks the outcome store's display tail copy and the host's latch file every 3 seconds, so a note can land a few seconds after its outcome.
-At each session start, including `claude --continue`, it first replays every captain outcome main has not acknowledged and every unread routine note, the newest 20 with a count of any older ones.
+At each session start it first replays every captain outcome main has not acknowledged and every unread routine note, the newest 20 with a count of any older ones.
+Claude Code keeps each note in the session as a display-only entry and restores it on `claude --continue`, so the mod remembers in its own plugin store how far each session has followed the outcomes, and a resumed session replays only outcomes it has not shown.
 The mod only reads these files: the drain remains the only presenter that marks outcomes read or processed.
 Only a home that runs the supervision host has outcomes to show.
 
@@ -268,16 +269,16 @@ Record verdicts are cached until a drawing invalidation (including a `/calm` tog
 
 Nothing is rewritten.
 Hidden rows remain in the message, model context, session storage, and exports.
-The mod never touches tool execution, prompts, or the stored transcript.
+The mod never touches tool execution or prompts, and adds to the stored transcript only its display-only supervision notes.
 
 ### Claude Code support bounds
 
 The bounds of the Claude Code support below are recorded with evidence in [`calm-mode-feasibility.md`](calm-mode-feasibility.md#2026-09-15-claude-code-21272-mods-feasibility-and-the-shipped-mod).
-Evidence for 2.1.280 and the record-backed doorbell is also in its [2026-09-25 record](calm-mode-feasibility.md#2026-09-25-claude-code-21280-verification-and-the-record-backed-operational-doorbell) and [2.1.282 reproduction](calm-mode-feasibility.md#2026-09-25-claude-code-21282-reproduction-on-the-installed-build).
+Evidence for 2.1.280 and the record-backed doorbell is also in its [2026-09-25 record](calm-mode-feasibility.md#2026-09-25-claude-code-21280-verification-and-the-record-backed-operational-doorbell) and [2.1.282 reproduction](calm-mode-feasibility.md#2026-09-25-claude-code-21282-reproduction-on-the-installed-build), and for the supervision notes in the [2.1.283 record](calm-mode-feasibility.md#2026-09-28-claude-code-21283-supervision-notes).
 
 - The function-hooks surface is early access and default-off.
   Claude Code states that its API may change between releases without notice.
-  The mod is verified on Claude Code 2.1.272, 2.1.280, and 2.1.282 and refuses nothing newer.
+  The mod is verified on Claude Code 2.1.272, 2.1.280, 2.1.282, and 2.1.283 and refuses nothing newer.
 - Firstmate's typed producers bound for a Claude Code pane ride the record-backed doorbell, so they hide like any operational row.
   Those producers are the away-mode daemon's escalations and a worker's launch brief.
   Only an envelope that reaches Claude Code some other way, as bare typed or launch-prompt text, arrives without its U+2063 and stays visible.
@@ -291,8 +292,8 @@ Evidence for 2.1.280 and the record-backed doorbell is also in its [2026-09-25 r
 - The sailboat is painted through Claude Code's Raster element, whose colors are RGB quantized to 256-color escapes rather than the standard 16-color ANSI codes Pi's widget emits.
 - The detailed transcript view (`ctrl+o`) keeps its per-message timestamp and model headers where hidden assistant rows sat, because those headers are not a hookable drawing.
 - Collapsed thinking never appears in Claude Code's default view.
-- Supervision notes are transcript lines rather than messages: session storage, `/export`, and `claude --continue` keep none of them, and the session-start replay covers only outcomes still unread or unprocessed.
-  Each note is plain dim text, so its glyph cannot take its own color as on Pi.
+- Supervision notes are system-notice rows rather than Pi's rendered entries: Claude Code draws them in one gray with its own bullet and the mod's name, so the glyph cannot take its own color as on Pi.
+  A new session replays only outcomes still unread or unprocessed, not the whole history.
 - A captain outcome still wakes main through a `Stop hook feedback` row, which fires no hookable drawing, so its anchor line appears beside that row rather than replacing it.
   The mod has no thinking drawing to hide in other views.
 

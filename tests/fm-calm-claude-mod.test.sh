@@ -365,6 +365,16 @@ same(notes.newOutcomeNotes(rows, 5, 0), { lines: [], lastSeen: 5 }, "nothing new
 same(notes.newOutcomeNotes(rows.slice(0, 2), 5, 0), { lines: [], lastSeen: 2 }, "a replaced store re-anchors without replay");
 same(notes.newOutcomeNotes([{ ...rows[0], epoch: 50 }, { ...rows[4], epoch: 200 }], undefined, 100).lines,
   ["⛵ fm-e: reconciled the backlog"], "with no anchor, rows recorded since the session started");
+same(notes.replayOutcomeNotes(rows, cursor, 0, 3), ["⚓ [seq 4] fm-d: decision answered", "⛵ fm-e: reconciled the backlog"],
+  "rows this session already showed are not replayed on resume");
+same(notes.replayOutcomeNotes(rows, cursor, 0, 99).length, 3, "a shown sequence past the tail is a replaced store");
+let stored = notes.recordSessionShownThrough(undefined, "s1", 4);
+stored = notes.recordSessionShownThrough(stored, "s2", 7);
+stored = notes.recordSessionShownThrough(stored, "s1", 9);
+same(stored, [["s2", 7], ["s1", 9]], "one entry per session, newest last");
+same([notes.sessionShownThrough(stored, "s1"), notes.sessionShownThrough(stored, "s3"), notes.sessionShownThrough("junk", "s1")], [9, 0, 0], "shown lookups");
+for (let i = 0; i < 30; i += 1) stored = notes.recordSessionShownThrough(stored, `x${i}`, i + 1);
+same([stored.length, stored[stored.length - 1]], [20, ["x29", 30]], "the store keeps the newest 20 sessions");
 const health = (key, cooldown) => notes.parseHostHealth(`key=${key}\nerrors=2\ncooldown=${cooldown}\nretry_after=9\n`);
 const paused = "⛵ Supervision session paused after repeated engine errors; main will handle wakes while it cools down.";
 const recovered = "⛵ Supervision session recovered after a successful cooldown probe.";
@@ -378,7 +388,7 @@ console.log("notes-ok");
 JS
   out=$(NOTES_MOD=$MOD NOTES_STATE=$state run_node "$TMP_ROOT/notes.mjs" 2>&1) || fail "supervision notes: $out"
   assert_contains "$out" "notes-ok" "the supervision notes check did not complete"
-  pass "the supervision notes read the store owner's tail copy and markers as Pi does: sailboat and anchor lines, silent rows skipped, bounded replay of unread and unprocessed rows, and latch notes"
+  pass "the supervision notes read the store owner's tail copy and markers as Pi does: sailboat and anchor lines, silent rows skipped, bounded replay of unread and unprocessed rows not already shown in the session, and latch notes"
 }
 
 # The classifier parity corpus: envelopes the shell owner encodes itself, its legacy

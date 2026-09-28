@@ -13,6 +13,8 @@ export const BRANCH_NOTE_BOAT = "⛵";
 export const BRANCH_NOTE_ANCHOR = "⚓";
 /** At most this many lines replay at session start, newest kept. */
 export const BRANCH_NOTES_REPLAY_LIMIT = 20;
+/** How many sessions' last shown sequence the mod's store keeps, newest kept. */
+export const BRANCH_NOTES_SESSIONS_KEPT = 20;
 
 export type FirstmateStateEnvironment = {
   readonly FM_HOME?: string | undefined;
@@ -82,10 +84,20 @@ export function outcomeNoteLine(row: OutcomeRow): string | undefined {
 /**
  * The session-start replay, as Pi's startup replay presents the store: every captain row
  * main has not acknowledged as processed and every unread visible routine row, bounded
- * to the newest few with one line counting any that were left out.
+ * to the newest few with one line counting any that were left out. Rows through
+ * `shownThrough` are already in this session's restored transcript and are skipped,
+ * unless the tail ends below it (a replaced store).
  */
-export function replayOutcomeNotes(rows: readonly OutcomeRow[], cursor: number, processed: number): string[] {
-  const due = rows.filter((row) => (row.verdict === "captain" ? row.seq > processed : row.seq > cursor));
+export function replayOutcomeNotes(
+  rows: readonly OutcomeRow[],
+  cursor: number,
+  processed: number,
+  shownThrough = 0,
+): string[] {
+  const shown = shownThrough > (rows[rows.length - 1]?.seq ?? 0) ? 0 : shownThrough;
+  const due = rows.filter(
+    (row) => row.seq > shown && (row.verdict === "captain" ? row.seq > processed : row.seq > cursor),
+  );
   const lines = due.map(outcomeNoteLine).filter((line): line is string => line !== undefined);
   if (lines.length <= BRANCH_NOTES_REPLAY_LIMIT) return lines;
   const omitted = lines.length - BRANCH_NOTES_REPLAY_LIMIT;
@@ -111,6 +123,22 @@ export function newOutcomeNotes(
   const fresh = rows.filter((row) => (lastSeen === undefined ? row.epoch >= sinceEpoch : row.seq > lastSeen));
   const lines = fresh.map(outcomeNoteLine).filter((line): line is string => line !== undefined);
   return { lines, lastSeen: last };
+}
+
+/** The last sequence a session has followed the store through, from the mod's store value; 0 when unknown. */
+export function sessionShownThrough(stored: unknown, sessionId: string): number {
+  if (!Array.isArray(stored)) return 0;
+  const entry = stored.find((item) => Array.isArray(item) && item[0] === sessionId);
+  return entry !== undefined && Number.isSafeInteger(entry[1]) && entry[1] > 0 ? entry[1] : 0;
+}
+
+/** The store value with this session's last followed sequence recorded as its newest entry. */
+export function recordSessionShownThrough(stored: unknown, sessionId: string, seq: number): [string, number][] {
+  const others = (Array.isArray(stored) ? stored : []).filter(
+    (item): item is [string, number] =>
+      Array.isArray(item) && typeof item[0] === "string" && item[0] !== sessionId && Number.isSafeInteger(item[1]),
+  );
+  return [...others, [sessionId, seq] as [string, number]].slice(-BRANCH_NOTES_SESSIONS_KEPT);
 }
 
 export type HostHealth = { readonly key: string; readonly cooling: boolean };

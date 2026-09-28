@@ -12,6 +12,10 @@
 #      restores them and persists off, /calm hides them again and persists on, all
 #      without a Calm output row in the transcript.
 #   3. `claude --continue` restores the transcript with those rows still hidden.
+#   4. With Calm off, the supervision notes draw from a store bin/fm-branch-outcome.sh
+#      writes: the session-start replay, new sailboat and anchor lines, and the latch
+#      note, without moving a store marker or reaching the model, and a resume shows
+#      each anchor once.
 # The project and FM_HOME are isolated; Claude keeps using its existing managed
 # authentication and one trusted temporary folder. A few Haiku turns are submitted.
 # shellcheck disable=SC2016 # the model, not this test shell, reads the prompt text
@@ -434,3 +438,67 @@ send '/exit'
 enter
 sleep 1
 pass "Claude Code $CLAUDE_VERSION resumes the transcript with Calm's hidden rows still hidden and the preference intact"
+
+# --- 4. Supervision notes: shown with Calm off, from the store the host writes ----
+STATE_DIR="$FM_HOME_DIR/state"
+DEBUG_LOG_NOTES="$LAB/debug-notes.log"
+mkdir -p "$STATE_DIR"
+outcome() {
+  FM_HOME="$FM_HOME_DIR" bash "$ROOT/bin/fm-branch-outcome.sh" "$@" >/dev/null \
+    || fail "bin/fm-branch-outcome.sh $1 failed in the lab home"
+}
+outcome append --task fm-live-a --verdict captain --summary 'LIVE_PROCESSED_CAPTAIN acknowledged earlier'
+outcome append --task fm-live-b --verdict captain --summary 'LIVE_REPLAY_CAPTAIN still open'
+outcome mark-read --through 2
+outcome mark-processed --through 1
+printf 'key=live-key\nerrors=0\ncooldown=0\nretry_after=0\n' >"$STATE_DIR/.supervision-host-health"
+printf 'off\n' >"$FM_HOME_DIR/config/calm"
+launch "$DEBUG_LOG_NOTES" 1
+wait_idle
+wait_screen '⚓ [seq 2] fm-live-b: LIVE_REPLAY_CAPTAIN still open' 'the session-start replay of an unprocessed captain outcome' 200
+outcome append --task fm-live-c --verdict routine --summary 'LIVE_ROUTINE_NOTE worker healthy'
+outcome append --task fm-live-d --verdict routine --summary 'LIVE_SILENT_NOTE no change' --silent true
+outcome append --task fm-live-e --verdict captain --summary 'LIVE_NEW_CAPTAIN PR ready for review'
+wait_screen '⛵ fm-live-c: LIVE_ROUTINE_NOTE worker healthy' 'the routine sailboat note' 200
+wait_screen '⚓ [seq 5] fm-live-e: LIVE_NEW_CAPTAIN PR ready for review' 'the new captain anchor line' 200
+printf 'key=live-key\nerrors=2\ncooldown=300\nretry_after=0\n' >"$STATE_DIR/.supervision-host-health"
+wait_screen 'Supervision session paused after repeated engine errors' 'the latch-trip note' 200
+notes_screen=$(screen)
+case "$notes_screen" in
+  *'LIVE_PROCESSED_CAPTAIN'*|*'LIVE_SILENT_NOTE'*)
+    printf '%s\n' "$notes_screen" >&2
+    fail "a processed captain outcome or a silent routine outcome drew a supervision note"
+    ;;
+esac
+[ "$(cat "$STATE_DIR/.branch-outcomes-cursor")" = 2 ] || fail "the supervision notes moved the store's read cursor"
+[ "$(cat "$STATE_DIR/.branch-outcomes-processed")" = 1 ] || fail "the supervision notes moved the processed marker"
+[ "$(cat "$FM_HOME_DIR/config/calm")" = off ] || fail "the supervision notes changed the Calm preference"
+# The notes never reach the model: a real turn asked to quote them quotes none. The
+# answer token is spelled out rather than typed, so the echoed prompt cannot match it.
+send 'Quote verbatim every line of this conversation that contains a sailboat emoji or an anchor emoji, other than this request. If there are none, reply with only the words green, harbor, and lantern in uppercase joined by underscores.'
+enter
+wait_screen 'GREEN_HARBOR_LANTERN' 'the model reporting that it sees no supervision note' 400
+sleep 2
+send '/exit'
+enter
+sleep 2
+notes_session=$(grep -rlF 'GREEN_HARBOR_LANTERN' "$HOME/.claude/projects/"*"$(basename "$LAB" | tr -c 'A-Za-z0-9\n' -)"* 2>/dev/null | head -n 1)
+[ -n "$notes_session" ] || fail "could not find the session transcript Claude Code stored for the notes turn"
+if jq -e 'select(.type == "assistant") | .message.content | tostring | test("LIVE_")' "$notes_session" >/dev/null 2>&1; then
+  fail "the model quoted a supervision note, so the notes reached its context: $notes_session"
+fi
+# Claude Code 2.1.283 keeps each note in the session as a display-only entry and
+# restores it on resume, so the resumed session replays only what it has not shown.
+outcome append --task fm-live-f --verdict captain --summary 'LIVE_WHILE_CLOSED captain outcome'
+launch "$DEBUG_LOG_NOTES" 1 --continue
+wait_screen '⚓ [seq 6] fm-live-f: LIVE_WHILE_CLOSED captain outcome' 'the replay of an outcome recorded while the session was closed' 400
+sleep 4
+resumed_notes=$(screen)
+[ "$(printf '%s\n' "$resumed_notes" | grep -c 'LIVE_REPLAY_CAPTAIN')" = 1 ] || {
+  printf '%s\n' "$resumed_notes" >&2
+  fail "the resumed session did not show the earlier anchor exactly once"
+}
+send '/exit'
+enter
+sleep 1
+pass "Claude Code $CLAUDE_VERSION with Calm off shows the supervision notes: the session-start anchor for an unprocessed captain outcome, a sailboat for a new routine outcome, an anchor for a new captain outcome, and the latch-trip note, skipping processed and silent outcomes, moving no store marker, never reaching the model, and on resume showing each anchor once"

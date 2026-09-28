@@ -30,8 +30,9 @@
 // Supervision notes, whether Calm is on or off, as Pi shows them regardless of Calm: a
 // slow timer follows the outcome store's display tail copy and the supervision host's
 // latch, and `$.ui.log` appends one dim line per new outcome or latch change, never
-// sent to the model. `session.start` replays the unread and unprocessed outcomes. The
-// mod only reads: the drain remains the one presenter that marks outcomes read.
+// sent to the model. `session.start` replays the unread and unprocessed outcomes this
+// session has not already shown. The mod only reads the Firstmate home: the drain
+// remains the one presenter that marks outcomes read.
 // ../lib/fm-branch-notes.ts owns every line and which rows are due.
 //
 // Loading is lazy and cached within a session: a resumed transcript or a hot reload can
@@ -69,7 +70,9 @@ import {
   parseHostHealth,
   parseOutcomeMarker,
   parseOutcomeTail,
+  recordSessionShownThrough,
   replayOutcomeNotes,
+  sessionShownThrough,
   type HostHealth,
 } from "../lib/fm-branch-notes.ts";
 
@@ -95,6 +98,12 @@ let palette: CalmShipRasterPalette = CALM_SHIP_RASTER_PALETTES.light;
 const sites = new Map<string, { columns: number; rows: number }>();
 /** How often the supervision notes check the store's tail copy and the host's latch. */
 const BRANCH_NOTES_POLL_MS = 3000;
+/**
+ * The mod's store key for the sequence each session has followed the store through:
+ * Claude Code 2.1.283 keeps `$.ui.log` lines in the session and restores them on
+ * `--continue`, so a resumed session replays only what it has not already shown.
+ */
+const BRANCH_NOTES_SHOWN_KEY = "supervision-notes-shown-through";
 // What the notes have shown in this session; each `session.start` replaces it.
 type NotesState = {
   tailPath: string;
@@ -104,6 +113,8 @@ type NotesState = {
   lastSeen: number | undefined;
   sinceEpoch: number;
   health: HostHealth | undefined;
+  sessionId: string | undefined;
+  remembered: number | undefined;
 };
 let notes: NotesState | undefined;
 let notesTimer: { cancel(): void } | undefined;
@@ -119,8 +130,11 @@ function isActivated($: EngineInterface): Promise<boolean> {
   return activation;
 }
 
+// A missing file is checked first because every rejected read or stat is an error in
+// Claude Code's debug log, and the supervision notes look for absent files every tick.
 async function readText($: EngineInterface, path: string): Promise<string | undefined> {
   try {
+    if (!(await $.fs.exists(path))) return undefined;
     return await $.fs.read(path);
   } catch {
     return undefined;
@@ -226,6 +240,7 @@ async function readIfChanged(
 ): Promise<{ stamp: string; text: string } | undefined> {
   let current: string;
   try {
+    if (!(await $.fs.exists(path))) return undefined;
     const stat = await $.fs.stat(path);
     current = `${stat.size}:${stat.mtimeMs}`;
   } catch {
@@ -252,7 +267,9 @@ async function startNotes($: EngineInterface): Promise<void> {
   const rows = parseOutcomeTail(tail?.text);
   const cursor = parseOutcomeMarker(await readText($, `${state}/.branch-outcomes-cursor`));
   const processed = parseOutcomeMarker(await readText($, `${state}/.branch-outcomes-processed`));
-  for (const line of replayOutcomeNotes(rows, cursor, processed)) $.ui.log(line);
+  const sessionId = await $.session.id().catch(() => undefined);
+  const shown = sessionId === undefined ? 0 : sessionShownThrough(await readStored($), sessionId);
+  for (const line of replayOutcomeNotes(rows, cursor, processed, shown)) $.ui.log(line);
   const health = await readIfChanged($, healthPath, undefined);
   notes = {
     tailPath,
@@ -262,11 +279,36 @@ async function startNotes($: EngineInterface): Promise<void> {
     lastSeen: rows[rows.length - 1]?.seq,
     sinceEpoch: Math.floor((await $.clock.now()) / 1000),
     health: parseHostHealth(health?.text),
+    sessionId,
+    remembered: undefined,
   };
+  await rememberShown($, notes);
   if (notesTimer === undefined) {
     notesTimer = $.clock.every(BRANCH_NOTES_POLL_MS, () => {
       void pollNotes($);
     });
+  }
+}
+
+async function readStored($: EngineInterface): Promise<unknown> {
+  try {
+    return await $.store.get(BRANCH_NOTES_SHOWN_KEY);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Record how far this session has followed the store, when that moved. */
+async function rememberShown($: EngineInterface, current: NotesState): Promise<void> {
+  if (current.sessionId === undefined || current.lastSeen === undefined || current.lastSeen === current.remembered) return;
+  try {
+    await $.store.set(
+      BRANCH_NOTES_SHOWN_KEY,
+      recordSessionShownThrough(await readStored($), current.sessionId, current.lastSeen),
+    );
+    current.remembered = current.lastSeen;
+  } catch {
+    // An unwritable store only means a later resume may replay a line again.
   }
 }
 
@@ -282,6 +324,7 @@ async function pollNotes($: EngineInterface): Promise<void> {
       const fresh = newOutcomeNotes(parseOutcomeTail(tail.text), current.lastSeen, current.sinceEpoch);
       current.lastSeen = fresh.lastSeen;
       for (const line of fresh.lines) $.ui.log(line);
+      await rememberShown($, current);
     }
     const health = await readIfChanged($, current.healthPath, current.healthStamp);
     if (health !== undefined) {

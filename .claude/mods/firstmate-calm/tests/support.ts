@@ -40,6 +40,8 @@ export type World = {
   denyBlits: (reason: string | undefined) => void;
   /** Set to reject every `$.fs.write` from now on. */
   failWrites: (reason: string | undefined) => void;
+  /** Set the id `$.session.id()` answers from now on, as a new or resumed session has. */
+  setSessionId: (id: string) => void;
 };
 
 export type WorldOptions = {
@@ -69,6 +71,8 @@ export function world(on: On, options: WorldOptions = {}): World {
     ...(functionHooks === undefined ? {} : { CLAUDE_CODE_ENABLE_FUNCTION_HOOKS: functionHooks }),
   });
   const clock = mock.clock(on);
+  mock.store(on);
+  let sessionId = "session-1";
   const files = new Map<string, string>();
   if (options.preference !== undefined) files.set(PREFERENCE, options.preference);
   const journal: Journal = {
@@ -90,6 +94,7 @@ export function world(on: On, options: WorldOptions = {}): World {
     journal.fsReads.push(e.path);
     return files.has(e.path) ? { value: files.get(e.path)! } : { deny: `ENOENT: ${e.path}` };
   });
+  on("fs.exists", async (_$, e) => ({ value: files.has(e.path) }));
   // A file's time is its content's hash, so every changed content restamps it.
   on("fs.stat", async (_$, e) => {
     const text = files.get(e.path);
@@ -128,6 +133,7 @@ export function world(on: On, options: WorldOptions = {}): World {
     return { value: [...(options.messages ?? [])] as SessionMessage[] };
   });
   on("session.start", async (_$, e) => ({ cwd: e.cwd }));
+  on("session.id", async () => ({ value: sessionId }));
   on("config.list", async () => {
     journal.configLists += 1;
     return {
@@ -163,6 +169,9 @@ export function world(on: On, options: WorldOptions = {}): World {
     },
     failWrites: (reason) => {
       writeFailure = reason;
+    },
+    setSessionId: (id) => {
+      sessionId = id;
     },
   };
 }

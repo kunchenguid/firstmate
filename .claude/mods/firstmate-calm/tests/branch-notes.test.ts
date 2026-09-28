@@ -108,15 +108,21 @@ describe("supervision notes", () => {
     expect(journal.logs).toHaveLength(2);
   });
 
-  test("a hot reload or resume replays the rows still due and follows from the tail again", async ($, on) => {
-    const { clock, files, journal } = world(on);
+  test("a resumed session replays only outcomes it has not shown, and a new session replays every due one", async ($, on) => {
+    const { clock, files, journal, setSessionId } = world(on);
     files.set(TAIL, tail(history));
     files.set(CURSOR, "5\n");
     files.set(PROCESSED, "2\n");
     await $.session.start(sessionStart);
+    expect(journal.logs).toEqual(["⚓ [seq 3] fm-b: decision waiting"]);
+    // Resumed (or hot reloaded): its restored transcript already holds seq 3.
+    files.set(TAIL, tail([...history, { seq: 6, task: "fm-h", verdict: "captain", summary: "while closed" }]));
     await $.session.start(sessionStart);
-    expect(journal.logs).toEqual(["⚓ [seq 3] fm-b: decision waiting", "⚓ [seq 3] fm-b: decision waiting"]);
+    expect(journal.logs).toEqual(["⚓ [seq 3] fm-b: decision waiting", "⚓ [seq 6] fm-h: while closed"]);
     await clock.advance(POLL);
     expect(journal.logs).toHaveLength(2);
+    setSessionId("session-2");
+    await $.session.start(sessionStart);
+    expect(journal.logs.slice(2)).toEqual(["⚓ [seq 3] fm-b: decision waiting", "⚓ [seq 6] fm-h: while closed"]);
   });
 });
