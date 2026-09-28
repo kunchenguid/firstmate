@@ -49,7 +49,7 @@ ok - five-second Feishu cleanup removes only receipt-proven bodies and preserves
 ```
 
 The clock-controlled public-lifecycle fixture proves the pass does not run before five seconds, then removes one delivered inbound body and one fully receipted outbound body while retaining five pending, offered, delivery-uncertain, partially posted, or unsent bodies.
-It also proves empty and repeated passes are harmless, runtime shutdown disposes the timer, restart readback does not rehydrate compacted inbound content, compacted identities still deduplicate inbound replay and outbound registration, and sending and retryable records remain intact.
+It also proves empty and repeated passes are harmless, runtime shutdown disposes the timer, restart readback does not rehydrate compacted inbound content, compacted identities still deduplicate inbound replay and outbound registration, and superseded inbound, sending, and retryable records remain intact.
 
 ```console
 $ bash tests/fm-feishu-channel.test.sh
