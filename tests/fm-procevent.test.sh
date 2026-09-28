@@ -1445,7 +1445,20 @@ pass "lingering Lavish listener recovers without takeover"
 HFSIGNAL="$TMP_ROOT/hfsignal"; new_home "$HFSIGNAL"
 SIGNAL_BIN=$(fm_fakebin "$TMP_ROOT/lavish-firstmate-signal-stub")
 SIGNAL_COUNT="$TMP_ROOT/lavish-firstmate-signal-count"
-export SIGNAL_COUNT
+SIGNAL_SETUP_PID="$TMP_ROOT/lavish-firstmate-signal-setup-pid"
+SIGNAL_SETUP_ONCE="$TMP_ROOT/lavish-firstmate-signal-setup-once"
+SIGNAL_SETUP_RELEASE="$TMP_ROOT/lavish-firstmate-signal-setup-release"
+export SIGNAL_COUNT SIGNAL_SETUP_PID SIGNAL_SETUP_ONCE SIGNAL_SETUP_RELEASE
+cat > "$SIGNAL_BIN/mktemp" <<'SH'
+#!/bin/sh
+if [ -n "${FM_PROCEVENT_ADAPTER_READY_FD-}" ] && [ ! -e "$SIGNAL_SETUP_ONCE" ]; then
+  : > "$SIGNAL_SETUP_ONCE"
+  printf '%s\n' "$PPID" > "$SIGNAL_SETUP_PID"
+  while [ ! -e "$SIGNAL_SETUP_RELEASE" ]; do sleep 0.01; done
+fi
+exec /usr/bin/mktemp "$@"
+SH
+chmod +x "$SIGNAL_BIN/mktemp"
 cat > "$SIGNAL_BIN/lavish-axi" <<'SH'
 #!/bin/sh
 [ "$#" -gt 0 ] || exit 0
@@ -1478,6 +1491,26 @@ fm_test_track_procevent_home "$HFSIGNAL"
 PATH="$SIGNAL_BIN:$PATH" FM_HOME="$HFSIGNAL" \
   "$ROOT/bin/fm-procevent-lavish.sh" arm "$SIGNAL_ART" >/dev/null
 wait_capture "$HFSIGNAL" "$signal_id" || fail "signal fixture did not capture feedback"
+printf 'Retryable after setup signal.\n' > "$TMP_ROOT/firstmate-signal-setup-reply.txt"
+PATH="$SIGNAL_BIN:$PATH" FM_HOME="$HFSIGNAL" FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS=1 \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$SIGNAL_ART" \
+  --agent-reply-file "$TMP_ROOT/firstmate-signal-setup-reply.txt" >/dev/null 2>&1 &
+signal_arm_pid=$!
+for _ in $(seq 1 100); do
+  [ -s "$SIGNAL_SETUP_PID" ] && break
+  sleep 0.01
+done
+assert_present "$SIGNAL_SETUP_PID" "reply adapter did not reach acceptance-helper setup"
+signal_adapter_pid=$(cat "$SIGNAL_SETUP_PID")
+kill -TERM "$signal_adapter_pid"
+touch "$SIGNAL_SETUP_RELEASE"
+if wait "$signal_arm_pid"; then
+  fail "pre-submission signal reported reply readiness"
+fi
+assert_absent "$HFSIGNAL/state/procevent-inbox/$signal_id.1.accepted" \
+  "signal during acceptance-helper setup stranded reply uncertainty"
+[ "$(find "$HFSIGNAL/state/procevent" -maxdepth 1 -type f -name ".$signal_id.reply.*" | wc -l | tr -d ' ')" = 1 ] \
+  || fail "signal during acceptance-helper setup discarded the staged reply"
 printf 'Retryable after conflict.\n' > "$TMP_ROOT/firstmate-signal-reply.txt"
 if PATH="$SIGNAL_BIN:$PATH" FM_HOME="$HFSIGNAL" FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS=1 \
   "$ROOT/bin/fm-procevent-lavish.sh" arm "$SIGNAL_ART" \

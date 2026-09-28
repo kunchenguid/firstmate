@@ -386,10 +386,35 @@ poll_iteration_floor_wait() {
 }
 
 cmd_poll() {
-  local artifact=${1-} delay attempt=0 active_attempt=0 response status_file cleanup_command rc filter_rc iteration_started
+  local artifact=${1-} delay attempt=0 active_attempt=0 response='' status_file='' rc filter_rc iteration_started
   local pipeline_status pipeline_pid reply_file='' ready_fd=${FM_PROCEVENT_ADAPTER_READY_FD-}
   local poll_owner=${FM_PROCEVENT_ADAPTER_OWNER-} reply_pending=0 reply_acceptance_path=0 submission_started=0
-  local acceptance_dir='' acceptance_signal='' node_options=''
+  local acceptance_dir='' acceptance_signal='' node_options='' signal
+  reject_unsubmitted() {
+    if [ -n "$ready_fd" ] && [ "$submission_started" -eq 0 ]; then
+      printf 'rejected\n' >&3 2>/dev/null || true
+    fi
+  }
+  adapter_cleanup() {
+    [ -z "$response" ] || rm -f -- "$response"
+    [ -z "$status_file" ] || rm -f -- "$status_file"
+    [ -z "$acceptance_dir" ] || rm -rf -- "$acceptance_dir"
+  }
+  adapter_exit() {
+    reject_unsubmitted
+    adapter_cleanup
+  }
+  adapter_signal_exit() {
+    local caught=$1
+    reject_unsubmitted
+    adapter_cleanup
+    trap - "$caught"
+    kill -"$caught" "$$"
+  }
+  trap adapter_exit EXIT
+  for signal in INT TERM HUP; do
+    trap "adapter_signal_exit $signal" "$signal"
+  done
   [ -n "$artifact" ] || usage
   if [ "$#" -eq 3 ] && [ "${2-}" = --agent-reply-file ]; then
     reply_file=$3
@@ -426,32 +451,6 @@ syncBuiltinESMExports();
 JS
     node_options="${NODE_OPTIONS:+$NODE_OPTIONS }--require=$acceptance_dir/accept.cjs"
   fi
-  printf -v cleanup_command 'rm -f -- %q %q; rm -rf -- %q' "$response" "$status_file" "$acceptance_dir"
-  reject_unsubmitted() {
-    if [ -n "$ready_fd" ] && [ "$submission_started" -eq 0 ]; then
-      printf 'rejected\n' >&3 2>/dev/null || true
-    fi
-  }
-  adapter_exit() {
-    reject_unsubmitted
-    eval "$cleanup_command"
-  }
-  adapter_signal_exit() {
-    local caught=$1
-    reject_unsubmitted
-    eval "$cleanup_command"
-    trap - "$caught"
-    kill -"$caught" "$$"
-  }
-  trap adapter_exit EXIT
-  # Retirement stops this listener by signalling its process group, and bash runs
-  # no EXIT trap for an uncaught signal, so each one cleans up the staged
-  # response and then re-raises itself with the default disposition, leaving the
-  # process dying exactly as the runner expects.
-  local signal
-  for signal in INT TERM HUP; do
-    trap "adapter_signal_exit $signal" "$signal"
-  done
   while :; do
     reply_pending=0
     reply_acceptance_path=0
@@ -579,7 +578,7 @@ JS
     esac
   done
   trap - EXIT
-  eval "$cleanup_command"
+  adapter_cleanup
   return "$rc"
 }
 
