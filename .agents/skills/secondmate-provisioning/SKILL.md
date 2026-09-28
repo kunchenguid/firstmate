@@ -261,7 +261,8 @@ Raw deletion is unsupported because a blocking process-event child can outlive i
 
 With `--force`, teardown is the explicit discard path.
 The worktree-slot ownership contract in `bin/fm-teardown.sh` still applies: `--force` never authorizes returning a descendant pool slot that another task may own.
-It kills child windows, discards child work and state inside the secondmate home, removes the route, releases the lease, and removes the retired secondmate home.
+The script header owns the one narrower recovery for a complete, explicitly approved set of obsolete duplicate scout records that all point at an already-returned slot; that path retires only those child records and leaves the gone panes and shared slot untouched.
+Otherwise, forced teardown closes child endpoints and discards child work and state inside the secondmate home; both paths remove the route, release the secondmate home's own lease, and remove the retired home.
 If forced teardown contends with a fresh task publication in any affected home, one command refuses without publishing or removing task state; treat that refusal as terminal and inspect the other operation before retrying.
 Relaunch and non-forced teardown remain outside that serialization.
 Never use `--force` unless the captain explicitly said to discard the work.
