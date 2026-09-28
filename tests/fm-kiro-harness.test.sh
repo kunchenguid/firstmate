@@ -1137,6 +1137,16 @@ test_kiro_v3_project_files_are_regular_copies_and_refuse_different_existing() {
   pass "fm-kiro-lib: Kiro uses regular isolated-home copies and refuses a different file"
 }
 
+test_kiro_project_skills_resolve_to_the_firstmate_skill_tree() {
+  local kiro_skills agents_skills
+  kiro_skills=$(cd "$ROOT/.kiro/skills" 2>/dev/null && pwd -P) \
+    || fail "kiro-cli discovers project skills only in .kiro/skills, which does not resolve in this checkout"
+  agents_skills=$(cd "$ROOT/.agents/skills" && pwd -P)
+  assert_equals "$agents_skills" "$kiro_skills" ".kiro/skills must resolve to .agents/skills"
+  assert_present "$ROOT/.kiro/skills/stow/SKILL.md" "kiro-cli must reach the stow skill through .kiro/skills"
+  pass "Kiro project skills: .kiro/skills resolves to the Firstmate .agents/skills tree"
+}
+
 test_kiro_v3_agents_grant_concrete_tools_never_a_wildcard() {
   # Kiro's allowedTools grants no wildcard: a V3 agent declaring ["*"] still
   # stopped on fs_write's Replace in File with a human approval dialog (two
@@ -1367,6 +1377,7 @@ test_kiro_effort_xhigh_and_max_ride_the_launch
 test_kiro_v2_is_only_an_explicit_compatibility_fallback
 test_kiro_v3_project_files_are_regular_copies_and_refuse_different_existing
 test_kiro_v3_agents_grant_concrete_tools_never_a_wildcard
+test_kiro_project_skills_resolve_to_the_firstmate_skill_tree
 test_kiro_primary_launcher_defaults_v3_and_persists_its_home
 test_kiro_secondmate_uses_v3_project_scope_and_isolated_home
 test_kiro_missing_binary_refuses_before_pane_creation
