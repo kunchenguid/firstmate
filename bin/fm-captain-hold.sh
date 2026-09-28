@@ -20,6 +20,7 @@
 # and secondmate-home ownership aligned with the work that discovered the call.
 #
 # Usage:
+#   fm-captain-hold.sh park <task-id> --reason <reason>
 #   fm-captain-hold.sh hold <task-id> --reason <reason> \
 #     [--title <title>] [--repo <repo>] [--origin <origin-id>] [--until YYYY-MM-DD]
 #   fm-captain-hold.sh answer <task-id> --decision-file <path> [--release]
@@ -30,7 +31,7 @@
 #   fm-captain-hold.sh binding <source-id>
 #   fm-captain-hold.sh complete <origin-id> (--none | <task-id>...)
 #   fm-captain-hold.sh verify <origin-id>
-#   fm-captain-hold.sh open <task-id> [--identity] [--distinguish-absent]
+#   fm-captain-hold.sh open <task-id> [--identity] [--distinguish-absent] [--include-parked]
 #   fm-captain-hold.sh diverged
 #   fm-captain-hold.sh reconcile list
 #   fm-captain-hold.sh reconcile close <task-id> --evidence-file <path>
@@ -181,6 +182,12 @@
 # crew task reaches a due stale alarm - its open backlog hold need not appear in
 # the task's last status line - and on a 0 bounds repeated alarms from new pane
 # hashes for the decision.
+# `--include-parked` widens the positive verdict to a not-Done row held with
+# hold kind `parked`, a desk disposition that is not a captain call. Only the
+# watcher's stale bound asks for it; every closer keeps the captain-only meaning
+# above. A raw `tasks-axi unhold` followed by `tasks-axi hold --kind parked`
+# bypasses the occurrence tracking provided by `park`, so the re-park's first
+# stale sight may be absorbed within the four-hour re-surface window.
 #
 # `diverged` is the read-only guard over the seam between the two records of
 # one captain call. See "record divergence" beside command_diverged below.
@@ -1857,12 +1864,53 @@ EOF
 # exist holds nothing. Every read failure over a record that DOES exist is a 2,
 # printed to stderr, because a mechanical closer must never read "cannot tell"
 # as permission to close.
+command_park() {  # <task-id> --reason <reason>
+  local id=${1:-} reason='' show body stamp tmp
+  [ "$#" -gt 0 ] || { usage >&2; exit 2; }
+  shift
+  [ "${1:-}" = --reason ] && [ "$#" -eq 2 ] || { usage >&2; exit 2; }
+  reason=$2
+  validate_slug task-id "$id"
+  validate_one_line reason "$reason"
+  acquire_task_control_lock "$id"
+  require_tasks_axi
+  task_show_or_fail "$id" "task $id is absent from this home's backlog"
+  show=$TASK_SHOW_OUTPUT
+  [ "$(show_field "$show" state)" != "done" ] || fail "task $id is already closed"
+  if [ "$(show_field_value "$show" held)" = yes ]; then
+    [ "$(show_field_value "$show" hold_kind)" = parked ] || fail "task $id has another hold"
+  else
+    body=$(show_field_value "$show" body)
+    if [[ $body =~ ^Parked\ hold\ occurrence:\ [0-9a-f]{32}($|$'\n\n') ]]; then
+      if [[ $body == *$'\n\n'* ]]; then
+        body=${body#*$'\n\n'}
+      else
+        body=''
+      fi
+    fi
+    stamp=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n') || fail "cannot create parked hold identity"
+    tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-park-stamp.XXXXXX") || fail "cannot stage parked hold identity"
+    if ! printf 'Parked hold occurrence: %s\n\n%s\n' "$stamp" "$body" > "$tmp"; then
+      rm -f -- "$tmp"
+      fail "cannot stage parked hold identity"
+    fi
+    if ! tasks_axi update "$id" --body-file "$tmp" >/dev/null; then
+      rm -f -- "$tmp"
+      fail "cannot record parked hold identity"
+    fi
+    rm -f -- "$tmp"
+  fi
+  tasks_axi hold "$id" --reason "$reason" --kind parked >/dev/null \
+    || fail "could not park task $id"
+}
+
 command_open() {  # <task-id> [--identity] [--distinguish-absent]
-  local id='' identity=0 distinguish_absent=0 data state root file backend show shown_body
+  local id='' identity=0 distinguish_absent=0 include_parked=0 data state root file backend show shown_body
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --identity) identity=1 ;;
       --distinguish-absent) distinguish_absent=1 ;;
+      --include-parked) include_parked=1 ;;
       -*) usage >&2; exit 2 ;;
       *)
         [ -z "$id" ] || { usage >&2; exit 2; }
@@ -1913,6 +1961,20 @@ command_open() {  # <task-id> [--identity] [--distinguish-absent]
       fi
       return 0
     fi
+    if [ "$include_parked" -eq 1 ] && [ "$state" != "done" ] \
+      && [ "$FM_BACKLOG_ROW_HOLD_KIND" = parked ]; then
+      if [ "$identity" -eq 1 ]; then
+        task_show "$id" || {
+          printf 'fm-captain-hold: parked hold %s is open but its record could not be read\n' "$id" >&2
+          exit 2
+        }
+        shown_body=$(show_field_value "$TASK_SHOW_OUTPUT" body)
+        printf 'parked:%s:%s\n' \
+          "$(show_field_value "$TASK_SHOW_OUTPUT" hold_reason | cksum | cut -d' ' -f1)" \
+          "$(printf '%s\n' "$shown_body" | sed -n '1s/^Parked hold occurrence: \([0-9a-f]*\)$/\1/p')"
+      fi
+      return 0
+    fi
     return 1
   fi
   if [ "$FM_BACKLOG_ROW_RESULT" = not_found ]; then
@@ -1924,6 +1986,7 @@ command_open() {  # <task-id> [--identity] [--distinguish-absent]
 }
 
 case "${1:-}" in
+  park) shift; command_park "$@" ;;
   hold) shift; command_hold "$@" ;;
   answer) shift; command_answer "$@" ;;
   answers) shift; command_answers "$@" ;;
