@@ -131,8 +131,18 @@ def load_never_send(config_dir: Path) -> list[str]:
 
 def withhold(text: str, never_send: list[str]) -> str:
     text = " ".join(text.split())
-    for value in never_send:
-        text = re.sub(re.escape(value), "[withheld]", text, flags=re.IGNORECASE)
+    spans = []
+    for value in sorted(never_send, key=len, reverse=True):
+        for m in re.finditer(f"(?=({re.escape(value)}))", text, flags=re.IGNORECASE):
+            spans.append((m.start(1), m.end(1)))
+    merged: list[list[int]] = []
+    for start, end in sorted(spans):
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    for start, end in reversed(merged):
+        text = text[:start] + "[withheld]" + text[end:]
     return text
 
 

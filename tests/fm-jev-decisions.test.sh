@@ -176,6 +176,12 @@ if grep -qi "example client" "$TDIR/requests.log"; then
   fail "never-send value reached the Jev request"
 fi
 assert_contains "$(cat "$TDIR/requests.log")" "[withheld]" "never-send value is replaced in the request"
+printf 'Acme\nAcme Health Partners\nHealth Partners Group\n' > "$TDIR/ns-config/dispatch-never-send"
+printf '%s\t%s\t%s\t%s\n' ns active-overlap needs-decision "acme health partners group owes X" > "$TDIR/ns.tsv"
+: > "$TDIR/requests.log"
+FM_CONFIG_OVERRIDE="$TDIR/ns-config" "$DECISION_SH" --input "$TDIR/ns.tsv" --json >/dev/null
+sent_note=$(python3 -c 'import json,sys; print(json.loads(open(sys.argv[1]).readline())["state"]["note"])' "$TDIR/requests.log")
+[ "$sent_note" = "[withheld] owes X" ] || fail "overlapping never-send values must leave no fragment: $sent_note"
 mkdir -p "$TDIR/bad-config/dispatch-never-send"
 : > "$TDIR/requests.log"
 bad=$(FM_CONFIG_OVERRIDE="$TDIR/bad-config" "$DECISION_SH" --input "$TDIR/ns.tsv" --json 2>/dev/null)
