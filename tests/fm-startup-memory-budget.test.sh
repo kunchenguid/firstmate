@@ -22,13 +22,6 @@ if [ "${1:-}" = --version ]; then
 fi
 exit 0
 SH
-  cat > "$fakebin/quota-axi" <<'SH'
-#!/usr/bin/env bash
-if [ "${1:-}" = --version ]; then
-  printf '%s\n' 'quota-axi 0.1.29 (fake)'
-fi
-exit 0
-SH
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 exit 0

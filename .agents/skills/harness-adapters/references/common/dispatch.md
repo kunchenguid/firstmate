@@ -6,7 +6,7 @@ Load this with the selected tool reference for dispatch, start, or adapter verif
 
 Use the router's detection and safety sections for static crew harness resolution and all explicit overrides.
 `config/crew-dispatch.json` can override that static default for one crewmate or scout with concrete harness, model, and effort axes.
-For a profile array, load `quota-array-dispatch` for completion-aware candidate choice and any configured telemetry constraint after establishing harness and provider facts here.
+For a profile array, load `profile-array-dispatch` for task-fit filtering and configured-order choice after establishing harness and provider facts here.
 
 ## Owners
 

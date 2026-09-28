@@ -336,7 +336,7 @@ family_for_basename() {
     fm-calm-pi-herdr-live-e2e.test.sh|fm-pi-branch-responsiveness-live-e2e.test.sh|\
     fm-pi-primary-live-e2e.test.sh|fm-pi-codex-native.test.sh|\
     fm-sessionstart-hook-live-e2e.test.sh|fm-sessionstart-instruction-refresh-live-e2e.test.sh|\
-    fm-quota-array-dispatch-live-e2e.test.sh|\
+    fm-profile-array-dispatch-live-e2e.test.sh|\
     fm-send-inbox-doorbell-live-e2e.test.sh|fm-stow-local-skill-live-e2e.test.sh|\
     fm-readable-documents-live-e2e.test.sh)
       printf '%s\n' live-harness-optin
@@ -365,9 +365,9 @@ family_for_basename() {
     fm-busy-state.test.sh|\
     fm-extension-binding.test.sh|fm-gitignore-config.test.sh|\
     fm-no-mistakes-required.test.sh|fm-pi-branch-extension.test.sh|\
-    fm-procevent-quota.test.sh|fm-procevent-when.test.sh|fm-procevent.test.sh|\
+    fm-procevent-when.test.sh|fm-procevent.test.sh|\
     fm-live-gate.test.sh|\
-    fm-public-followup.test.sh|fm-quota-choose.test.sh|\
+    fm-public-followup.test.sh|\
     fm-spawn-pool-base-freshen.test.sh|\
     fm-test-fixture-cleanup.test.sh|fm-test-fixtures.test.sh|\
     fm-inbox.test.sh|fm-wake-drain-open-decisions-cursor.test.sh|\
@@ -666,14 +666,12 @@ tests/fm-pi-watch-extension.test.sh 42970
 tests/fm-pi-windows-shell-invocation.test.sh 5121
 tests/fm-periodic-stow.test.sh 21332
 tests/fm-pr-check-security.test.sh 172215
-tests/fm-procevent-quota.test.sh 1949
 tests/fm-procevent-when.test.sh 17392
 tests/fm-procevent.test.sh 69715
 tests/fm-public-followup.test.sh 196745
-tests/fm-quota-array-dispatch-live-e2e.test.sh 21
+tests/fm-profile-array-dispatch-live-e2e.test.sh 50
 tests/fm-readable-documents-live-e2e.test.sh 8400
 tests/fm-stow-local-skill-live-e2e.test.sh 8400
-tests/fm-quota-choose.test.sh 1461
 tests/fm-send-inbox-doorbell-live-e2e.test.sh 22
 tests/fm-send-inbox.test.sh 38956
 tests/fm-send-resolve-key.test.sh 19619
@@ -1328,17 +1326,6 @@ families_for_changed_path() {
       printf '%s\n' "__script__:fm-feishu-channel.test.sh"
       printf '%s\n' "__script__:fm-pi-primary-types.test.sh"
       ;;
-    bin/fm-quota-axi-lib.sh)
-      printf '%s\n' session-bootstrap
-      printf '%s\n' "__script__:fm-procevent-quota.test.sh"
-      printf '%s\n' "__script__:fm-quota-choose.test.sh"
-      ;;
-    bin/fm-procevent-quota.sh)
-      printf '%s\n' "__script__:fm-procevent-quota.test.sh"
-      ;;
-    bin/fm-quota-choose.sh)
-      printf '%s\n' "__script__:fm-quota-choose.test.sh"
-      ;;
     .pi/extensions/fm-branch-supervision.ts|.pi/extensions/lib/fm-async-exec.ts|\
     .pi/extensions/lib/fm-branch-dispatch.ts|.pi/extensions/lib/fm-native-contract.ts)
       # The portable suites that actually load these files, named one by one.
@@ -1403,13 +1390,12 @@ families_for_changed_path() {
       ;;
     bin/fm-timeout-lib.sh)
       # The shared hard bound: session start's runtime bound, the fleet/bearings
-      # snapshots, the vendor auth probe, the stow cascade's per-home step, and
-      # the wedge detector's worktree write probe all depend on it.
+      # snapshots, the stow cascade's per-home step, and the wedge detector's
+      # worktree write probe all depend on it.
       printf '%s\n' session-bootstrap
       printf '%s\n' snapshot-bearings
       printf '%s\n' pure-contract-unit
       printf '%s\n' watcher-wake-lock
-      printf '%s\n' "__script__:fm-procevent-quota.test.sh"
       ;;
     bin/fm-pr-*|bin/fm-merge-local.sh|bin/fm-teardown.sh|bin/fm-review-diff.sh|\
     bin/fm-x-*|bin/fm-check*)
@@ -1425,7 +1411,6 @@ families_for_changed_path() {
     bin/fm-control-lib.sh)
       printf '%s\n' backend-dispatch
       printf '%s\n' session-bootstrap
-      printf '%s\n' "__script__:fm-quota-choose.test.sh"
       ;;
     bin/fm-composer-lib.sh)
       # The shared shape catalogue is vendor-rendered signal; a change to it
@@ -1471,7 +1456,7 @@ families_for_changed_path() {
     bin/fm-ff-lib.sh|bin/fm-gotmp*|bin/*pretool*)
       printf '%s\n' pure-contract-unit
       ;;
-    .agents/skills/quota-array-dispatch/SKILL.md)
+    .agents/skills/profile-array-dispatch/SKILL.md)
       printf '%s\n' pure-contract-unit
       printf '%s\n' live-harness-optin
       ;;

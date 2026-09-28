@@ -28,7 +28,7 @@ Harness identity is independent of model provider.
 `harness=pi` with `model=xai/grok-*` is Pi using xAI, not standalone Grok Build, and does not require Grok CLI login.
 
 No script resolves credential provenance for you.
-Establish it from the tool's discovery surface and `quota-axi auth --json` per-provider sources, and show the reasoning rather than inferring it from a name.
+Establish it from the selected harness or provider's authoritative discovery and authentication surfaces, and show the reasoning rather than inferring it from a name.
 
 ## Discovery
 
@@ -39,4 +39,4 @@ For an unfamiliar namespace, establish support and provider identity from that h
 An account-reaching listing that omits a model is concrete unsupported evidence; block the candidate and quote it.
 An unreachable surface establishes nothing; report uncertainty instead of a verdict.
 
-For a matched profile array, return to `quota-array-dispatch` only after establishing every candidate's harness support, provider relationship, and uncertainty.
+For a matched profile array, return to `profile-array-dispatch` only after establishing every candidate's harness support, provider relationship, authentication state, and uncertainty.
