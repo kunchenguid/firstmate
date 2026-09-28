@@ -16,7 +16,7 @@
 // drawings and leaves the stored transcript, model context, and session storage alone.
 //
 // Presentation while Calm is on, sharing Pi Calm's goals where the mods API allows:
-// the stock working row (`Spinner`) becomes the three-row sailboat, repainted through
+// the stock working row (`Spinner`) becomes the four-row sailboat, repainted through
 // `$.ui.blit` on the sprite's own tick; `ToolUse`, `ToolResult`, and `ToolGroup` rows
 // draw as zero-height boxes; a `UserMessage` whose text the canonical operational-input
 // classifier recognizes, or a record-backed doorbell whose record holds a current

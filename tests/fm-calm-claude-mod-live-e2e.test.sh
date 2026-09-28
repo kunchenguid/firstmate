@@ -19,6 +19,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/calm-boat-helpers.sh
+. "$(dirname "${BASH_SOURCE[0]}")/calm-boat-helpers.sh"
 
 fm_live_gate opt-in FM_CLAUDE_CALM_LIVE_E2E claude tmux
 
@@ -34,10 +36,8 @@ DEBUG_LOG_ON="$LAB/debug-on.log"
 DEBUG_LOG_RESUME="$LAB/debug-resume.log"
 SOCKET="fm-calm-claude-$$"
 SESSION="fm-calm-claude-e2e"
-# The hull's raked left end is unique to the boat; the rig is a jib, mast, and mainsail
-# mirrored by heading, with the mast leaning as the boat pitches.
-HULL='◥'
-RIG_PATTERN='(◢|◿)(│|╲|╱)(◺|◣)'
+# The boat is drawn in shaded blocks, so it is located by color in a colored capture.
+BOAT_CAPTURE="$LAB/boat-capture.txt"
 
 cleanup() {
   local i=0
@@ -165,12 +165,15 @@ command_listed() {  # <command>
   return $((1 - listed))
 }
 
-rig_shown() {  # <screen text>
-  printf '%s\n' "$1" | grep -Eq "$RIG_PATTERN"
+# Where the working ship shows on screen right now, as calm_boat_scan prints it, or
+# nothing when no boat shows.
+boat_scan() {
+  tmux -L "$SOCKET" capture-pane -p -e -t "$SESSION" >"$BOAT_CAPTURE" 2>/dev/null || true
+  calm_boat_scan "$BOAT_CAPTURE"
 }
 
-hull_column() {  # <screen text>
-  printf '%s\n' "$1" | awk -v hull="$HULL" 'index($0, hull) { print index($0, hull); exit }'
+boat_shown() {
+  [ -n "$(boat_scan)" ]
 }
 
 # The answer names words that live only in notes.txt, so the settled turn is told apart
@@ -197,11 +200,8 @@ wait_settled() {  # <what> [iterations]
         fail "Claude Code $CLAUDE_VERSION exited while waiting for $what"
         ;;
       *'gamma'*)
-        if ! working_row_shown "$shot"; then
-          case "$shot" in
-            *"$HULL"*) ;;
-            *) return 0 ;;
-          esac
+        if ! working_row_shown "$shot" && ! boat_shown; then
+          return 0
         fi
         ;;
     esac
@@ -235,15 +235,11 @@ saw_working=0
 i=0
 while [ "$i" -lt 600 ]; do
   off_frame=$(screen)
-  if rig_shown "$off_frame"; then
+  if boat_shown; then
     printf '%s\n' "$off_frame" >&2
     fail "the working ship appeared although the flag is unset"
   fi
   case "$off_frame" in
-    *"$HULL"*)
-      printf '%s\n' "$off_frame" >&2
-      fail "the working ship appeared although the flag is unset"
-      ;;
     *'CLAUDE_EXIT='*)
       printf '%s\n' "$off_frame" >&2
       fail "Claude Code $CLAUDE_VERSION exited during the flag-off turn"
@@ -292,18 +288,24 @@ fi
 command_listed calm || fail "Claude Code $CLAUDE_VERSION does not list /calm with the flag on"
 send "$PROMPT"
 enter
-wait_screen "$HULL" 'the working ship during a real turn' 200
-boat_one=$(screen)
-if ! rig_shown "$boat_one"; then
-  printf '%s\n' "$boat_one" >&2
-  fail "the working ship lost its rig"
+boat_one=""
+i=0
+while [ "$i" -lt 200 ] && [ -z "$boat_one" ]; do
+  boat_one=$(boat_scan)
+  sleep 0.25
+  i=$((i + 1))
+done
+[ -n "$boat_one" ] || fail "Claude Code $CLAUDE_VERSION never showed the working ship during a real turn"
+if [ "$(printf '%s\n' "$boat_one" | cut -d' ' -f6)" -eq 0 ]; then
+  cat "$BOAT_CAPTURE" >&2
+  fail "the working ship lost its sails"
 fi
-column_one=$(hull_column "$boat_one")
+column_one=${boat_one%% *}
 column_two=$column_one
 i=0
 while [ "$i" -lt 120 ]; do
-  boat_two=$(screen)
-  column_two=$(hull_column "$boat_two")
+  boat_two=$(boat_scan)
+  column_two=${boat_two%% *}
   if [ -n "$column_two" ] && [ "$column_two" != "$column_one" ]; then
     break
   fi
@@ -314,9 +316,8 @@ done
   || fail "the working ship never moved (hull stayed at column $column_one)"
 wait_settled 'the turn with the flag on'
 on_settled=$(screen)
-rig_shown "$on_settled" && fail "the working ship stayed on screen after the turn settled"
+boat_shown && fail "the working ship stayed on screen after the turn settled"
 case "$on_settled" in
-  *"$HULL"*) fail "the working ship stayed on screen after the turn settled" ;;
   *'Bash('*|*'shell command'*|*'notes.txt)'*)
     printf '%s\n' "$on_settled" >&2
     fail "a tool row drew while Calm was on"

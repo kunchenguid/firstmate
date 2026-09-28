@@ -118,22 +118,30 @@ for (const [family, mode] of [["dark", "truecolor"], ["light", "256color"]]) for
       for (const row of frame) {
         check(cells(row).length <= width, \`a row overflowed width \${width}\`);
         for (const run of row) {
-          check(["plain", "water", "hull", "sail", "mast"].includes(run.color), \`unknown cell kind \${run.color}\`);
+          check(["plain", "water", "hull", "sail"].includes(run.color), \`unknown cell kind \${run.color}\`);
           for (const rgb of [run.fg, run.bg]) check(rgb === null || (Number.isInteger(rgb) && rgb >= 0 && rgb <= 0xffffff), \`bad color \${rgb}\`);
           if (run.color === "plain") check(run.fg === null && run.bg === null && /^ +$/.test(run.text), "plain padding carried color or glyphs");
         }
       }
-      if (width >= 5) {
-        check(frame.length === 3, \`width \${width} did not paint three rows\`);
-        const [rig, surface, body] = frame.map(cells);
-        const at = surface.indexOf(core.CALM_WORKING_SHIP_HULL_LEFT);
-        check(at === sprite.position(), \`the hull is drawn at \${at}, not column \${sprite.position()}\`);
-        check(surface[at + 4] === core.CALM_WORKING_SHIP_HULL_RIGHT, "the hull's far end is missing");
-        check(rig === " ".repeat(at + 1) + rig.slice(at + 1) && RIGS.includes(rigOf(rig.slice(at + 1))), \`the rig is not centered over the hull: \${JSON.stringify(rig)}\`);
-        check(surface.length === width && body === "█".repeat(width), "the sea rows do not fill the width");
-        check([...surface.slice(0, at) + surface.slice(at + 1, at + 4) + surface.slice(at + 5)].every((glyph) => BARS.includes(glyph)), "a sea cell is not an eighth block");
-        const waterline = frame[1].filter((run) => run.color === "hull" && run.bg !== null);
-        check(cells(waterline).length === 3 && waterline.every((run) => /^[▁▂▃▄▅]+$/.test(run.text)), "the hull's waterline left its draft range");
+      if (width >= core.CALM_WORKING_SHIP_HULL_LENGTH) {
+        check(frame.length === core.CALM_WORKING_SHIP_ROWS, \`width \${width} did not paint \${core.CALM_WORKING_SHIP_ROWS} rows\`);
+        const { hull, sails } = core.calmWorkingShipBoatColors(family);
+        const hullColumns = [], sailRows = [];
+        frame.forEach((row, index) => {
+          check(cells(row).length === width, \`row \${index} does not fill width \${width}\`);
+          check([...cells(row)].every((glyph) => (BARS + " ▔▀").includes(glyph)), \`row \${index} drew a glyph outside the block set\`);
+          let column = 0;
+          for (const run of row) for (const glyph of Array.from(run.text)) {
+            if (run.fg === hull || run.bg === hull) hullColumns.push(column);
+            if (sails.includes(run.fg) || sails.includes(run.bg)) sailRows.push(index);
+            column += 1;
+          }
+        });
+        check(hullColumns.length > 0 && sailRows.length > 0, \`width \${width} step \${step} lost the hull or its sails\`);
+        const middle = (Math.min(...hullColumns) + Math.max(...hullColumns) + 1) / 2;
+        check(Math.abs(middle - (sprite.position() + core.CALM_WORKING_SHIP_HULL_LENGTH / 2)) <= 1.5, \`the hull is drawn around \${middle}, away from column \${sprite.position()}\`);
+        check(sailRows.every((row) => row < core.CALM_WORKING_SHIP_ROWS - 1), "a sail sank into the water body");
+        check(frame.at(-1).every((run) => run.fg !== null), "the water body has a gap");
       } else if (width >= 3) {
         check(frame.length === 1 && RIGS.includes(rigOf(cells(frame[0]).slice(sprite.position(), sprite.position() + 3))), \`width \${width} lost the rig-only fallback\`);
         check(cells(frame[0]).length === width, \`width \${width} fallback is not full width\`);
@@ -158,7 +166,7 @@ for (const [family, mode] of [["dark", "truecolor"], ["light", "256color"]]) for
   animation.restoreLastRendered(); sprite.restoreLastRendered();
   check(animation.position() === sprite.position() && animation.seaTime() === sprite.seaTime(), "restore diverged");
   check(sprite.seaTime() === 90 * core.CALM_WORKING_SHIP_TICK_MS && sprite.position() === frozen.position && sprite.velocity() === frozen.velocity && sprite.pitch() === frozen.pitch, "restore did not land on the last painted state");
-  sprite.clampToWidth(6);
+  sprite.clampToWidth(core.CALM_WORKING_SHIP_HULL_LENGTH + 1);
   check(sprite.position() === 1 && sprite.direction() === -1, "a hidden clamp did not turn the boat at the new edge");
   check(sprite.seaTime() === frozen.time, "a hidden clamp advanced the sea");
   sprite.reset();
@@ -210,42 +218,82 @@ check(highest <= amplitude * 1.05 && lowest >= -amplitude * 1.05, "the surface l
   const sprite = core.createCalmWorkingShipSprite();
   const surfaces = new Set();
   for (let step = 0; step < 240; step += 1) {
-    const surface = sprite.frame(200)[1].map((run) => run.text).join("");
+    const surface = sprite.frame(200)[2].map((run) => run.text).join("");
     surfaces.add(surface);
-    const sample = surface.slice(8);
+    const sample = surface.slice(12);
     for (let period = 1; period <= 40; period += 1) check(sample.slice(0, -period) !== sample.slice(period), \`the sea collapsed into a \${period}-cell cycle\`);
     sprite.tick();
   }
   check(surfaces.size > 60, "the sea barely moved over four seconds");
 }
 // The boat: calm cruise, surges with the swell, eases into each edge, turns through zero
-// speed, never leaves its track, and pitches with the water.
+// speed, never leaves its track, rides up and down with the water under it, tilts to
+// its slope, and keeps rocking between waves.
 {
   const sprite = core.createCalmWorkingShipSprite();
-  const width = 40, span = 35;
+  const width = 40, span = 40 - core.CALM_WORKING_SHIP_HULL_LENGTH;
   sprite.frame(width);
   let lastVelocity = sprite.velocity(), speeds = [], positions = new Set(), directions = new Set(), pitches = new Set();
-  let lastPosition = sprite.position();
+  let lastPosition = sprite.position(), lastPitch = sprite.pitch(), lastHeave = sprite.heave();
+  let lowest = Infinity, highest = -Infinity, rockings = 0, lastRate = 0;
+  const hullTops = new Set();
+  const { hull } = core.calmWorkingShipBoatColors("dark");
   for (let step = 0; step < 60 * 90; step += 1) {
     sprite.tick();
-    sprite.frame(width);
+    const frame = sprite.frame(width);
     const position = sprite.position();
     check(position >= 0 && position <= span, \`the boat left its track at \${position}\`);
     check(Math.abs(position - lastPosition) <= 1, "the boat jumped more than one column in one frame");
     check(Math.abs(sprite.velocity() - lastVelocity) < 0.05, "the boat's speed changed abruptly");
     check(Math.abs(sprite.pitch()) < 0.4, "the boat pitched unrealistically far");
+    check(Math.abs(sprite.pitch() - lastPitch) < 0.05 && Math.abs(sprite.heave() - lastHeave) < 0.05, "the boat jerked between frames");
+    const rate = sprite.pitch() - lastPitch;
+    if (rate * lastRate < 0) rockings += 1;
+    lastRate = rate;
     lastVelocity = sprite.velocity();
     lastPosition = position;
+    lastPitch = sprite.pitch();
+    lastHeave = sprite.heave();
+    lowest = Math.min(lowest, sprite.heave());
+    highest = Math.max(highest, sprite.heave());
     speeds.push(Math.abs(sprite.velocity()));
     positions.add(position);
     directions.add(sprite.direction());
     pitches.add(Math.sign(Math.round(sprite.pitch() * 100)));
+    // Where the hull's top shows: its row and the eighth-block height it is drawn to.
+    const top = frame.findIndex((row) => row.some((run) => run.fg === hull || run.bg === hull));
+    const topRun = frame[top].find((run) => run.fg === hull || run.bg === hull);
+    hullTops.add(top + ":" + topRun.text[0]);
   }
   const mean = speeds.reduce((sum, speed) => sum + speed, 0) / speeds.length;
   check(mean > 0.6 && mean < 1.4, \`mean speed \${mean} columns a second is not a calm cruise\`);
   check(positions.has(0) && positions.has(span), "the boat never reached both edges");
   check(directions.has(1) && directions.has(-1), "the boat never came about");
   check(pitches.has(1) && pitches.has(-1), "the boat never pitched both ways");
+  check(highest - lowest > 0.4, \`the boat heaved only \${highest - lowest} rows: it does not ride the waves\`);
+  check(rockings > 90 * 0.8, \`the boat rocked only \${rockings} times in ninety seconds\`);
+  check(hullTops.size >= 6, \`the hull was drawn at only \${hullTops.size} heights: it does not visibly rise and fall\`);
+}
+// The boat floats where the water is: its heave follows the mean water height under it.
+{
+  const sprite = core.createCalmWorkingShipSprite();
+  const width = 60;
+  sprite.frame(width);
+  let product = 0, heaves = 0, waters = 0, heaveSquares = 0, waterSquares = 0, samples = 0;
+  for (let step = 0; step < 60 * 60; step += 1) {
+    sprite.tick();
+    sprite.frame(width);
+    const seconds = sprite.seaTime() / 1000;
+    let water = 0;
+    for (let offset = 0; offset < core.CALM_WORKING_SHIP_HULL_LENGTH; offset += 1) water += core.calmWorkingShipSea(sprite.position() + offset + 0.5, seconds).height;
+    water /= core.CALM_WORKING_SHIP_HULL_LENGTH;
+    const heave = sprite.heave();
+    product += heave * water; heaves += heave; waters += water;
+    heaveSquares += heave * heave; waterSquares += water * water; samples += 1;
+  }
+  const covariance = product / samples - (heaves / samples) * (waters / samples);
+  const correlation = covariance / Math.sqrt((heaveSquares / samples - (heaves / samples) ** 2) * (waterSquares / samples - (waters / samples) ** 2));
+  check(correlation > 0.7, \`the boat's heave follows the water under it only weakly (\${correlation})\`);
 }
 // Two sprites never share state, and equal histories paint identical frames.
 {
@@ -260,7 +308,7 @@ console.log("physics-ok");
 JS
   out=$(run_node "$TMP_ROOT/physics.mjs" 2>&1) || fail "sea physics: $out"
   assert_contains "$out" "physics-ok" "the sea physics check did not complete"
-  pass "the shared sea follows deep-water dispersion with consistent slopes and non-repeating travel, and the boat cruises calmly, turns smoothly at both edges, and pitches with the water"
+  pass "the shared sea follows deep-water dispersion with consistent slopes and non-repeating travel, and the boat cruises calmly, turns smoothly at both edges, heaves with the water under it, pitches both ways, keeps rocking between waves, and is drawn visibly rising and falling"
 }
 
 test_raster_packing() {

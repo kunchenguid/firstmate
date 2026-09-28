@@ -1,7 +1,7 @@
 // Firstmate's Calm-only animated working presentation for Pi.
 //
-// Calm replaces Pi's stock working row with a small sailboat on a simulated sea while
-// one logical agent run is active. The sea physics, shading, floating boat, cadence,
+// Calm replaces Pi's stock working row with a small sailboat riding a simulated sea
+// while one logical agent run is active. The sea physics, shading, floating boat, cadence,
 // and freeze/resume state are owned by the harness-neutral
 // ./fm-calm-working-ship-sprite.ts (a tracked symlink into the Claude Code Calm mod,
 // which both harnesses share); this module owns only Pi's rendering of those frames as
@@ -18,7 +18,7 @@
 //
 // Continuity: one extension-owned animation instance survives hide/show within the same
 // Pi process and Calm extension lifetime. Disposing the widget freezes the boat, its
-// springs, and the sea clock without advancing them for hidden wall time. The next
+// motion, and the sea clock without advancing them for hidden wall time. The next
 // working period resumes from that exact logical state. A fresh session or new
 // extension lifetime calls reset() and starts at the normal initial position. State is
 // never a module-level or process-global singleton.
@@ -170,6 +170,7 @@ export function createCalmWorkingShipAnimation(): CalmWorkingShipAnimation {
     direction: sprite.direction,
     velocity: sprite.velocity,
     pitch: sprite.pitch,
+    heave: sprite.heave,
     seaTime: sprite.seaTime,
     restoreLastRendered: sprite.restoreLastRendered,
     reset: sprite.reset,
