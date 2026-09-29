@@ -174,9 +174,10 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
 # structural mode parser. This does not prove emptiness or agent identity.
 fm_tmux_composer_input_mode() {  # <target> -> insert|normal|unknown
   local target=$1 cy pane
-  cy=$(fm_tmux_composer_cursor_row "$target") || { printf 'unknown'; return 0; }
-  case "$cy" in ''|*[!0-9]*) printf 'unknown'; return 0 ;; esac
-  pane=$(fm_tmux_composer_capture "$target") || { printf 'unknown'; return 0; }
+  cy=$(fm_tmux_composer_cursor_row "$target") || return 1
+  case "$cy" in ''|*[!0-9]*) return 1 ;; esac
+  pane=$(fm_tmux_composer_capture "$target") || return 1
+  [ -n "$pane" ] || return 1
   fm_composer_pi_input_mode "$pane" "$cy"
 }
 
@@ -299,7 +300,10 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [baseline-idle
 # typing caller text. Non-modal composers need no preparation.
 fm_tmux_prepare_text_input() {  # <target> <settle>
   local target=$1 settle=$2 mode state
-  mode=$(fm_tmux_composer_input_mode "$target")
+  if ! mode=$(fm_tmux_composer_input_mode "$target"); then
+    printf 'error: cannot verify pi-vim input mode\n' >&2
+    return 1
+  fi
   case "$mode" in
     insert|unknown) return 0 ;;
     normal)

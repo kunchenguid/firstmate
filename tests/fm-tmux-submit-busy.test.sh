@@ -204,23 +204,23 @@ test_busy_pane_unknown_stays_unknown() {
   pass "fm_tmux_submit_enter_core: busy conversion is limited to proven pending input"
 }
 
-test_failed_baseline_capture_keeps_busy_unknown_unconfirmed() {
-  local dir fakebin composer vfile
-  dir="$TMP_ROOT/failed-baseline"
+test_failed_mode_capture_refuses_before_literal_text() {
+  local dir fakebin composer sent vfile rc=0
+  dir="$TMP_ROOT/failed-mode-capture"
   fakebin=$(make_submit_mock "$dir")
   composer="$dir/composer"
+  sent="$dir/sent.log"
   vfile="$dir/verdict"
-  printf '│ > unbounded\n' > "$composer"
-  touch "$dir/.swallow"
-  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" \
+  printf '────────────────────────\n\n────────────── NORMAL\n' > "$composer"
+  : > "$sent"
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
     FM_FAKE_CAPTURE_COUNT="$dir/captures" FM_FAKE_FAIL_FIRST_CAPTURE=1 \
-    FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 FM_FAKE_APPEND_BUSY=1 \
-    fm_tmux_submit_core "win" "fix" 3 0.05 0.05 > "$vfile" 2>/dev/null
-  [ "$(cat "$vfile")" = unknown ] \
-    || fail "a failed idle-baseline capture must not let a later busy footer confirm delivery, got '$(cat "$vfile")'"
-  grep -q 'Working' "$composer" \
-    || fail "failed-baseline regression did not render the post-Enter busy footer"
-  pass "fm_tmux_submit_core: failed baseline capture disables busy unknown conversion"
+    fm_tmux_submit_core "win" ": lifecycle doorbell" 3 0.05 0.05 > "$vfile" 2>/dev/null || rc=$?
+  [ "$rc" -ne 0 ] || fail "a failed mode capture must refuse submission"
+  [ "$(cat "$vfile")" = send-failed ] \
+    || fail "a failed mode capture should report send-failed, got '$(cat "$vfile")'"
+  [ ! -s "$sent" ] || fail "a failed mode capture allowed literal text: $(cat "$sent")"
+  pass "fm_tmux_submit_core: failed mode capture refuses before literal text"
 }
 
 test_busy_pane_ambiguous_pending_retries_without_conversion() {
@@ -410,7 +410,7 @@ test_placeholder_like_bare_input_retries_swallowed_enter
 test_busy_pane_composer_clears_first_try
 test_idle_pane_composer_clears_first_try
 test_busy_pane_unknown_stays_unknown
-test_failed_baseline_capture_keeps_busy_unknown_unconfirmed
+test_failed_mode_capture_refuses_before_literal_text
 test_busy_pane_ambiguous_pending_retries_without_conversion
 test_unrecognized_state_skips_busy_conversion
 test_pi_vim_normal_mode_enters_insert_before_literal_text

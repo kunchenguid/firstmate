@@ -106,12 +106,13 @@ $sorted
 EOF
 }
 
-# herdr_submit_identity_prefix: submit first asks `agent get` which harness
-# the pane runs. A non-Claude harness skips the payload proof, so a fixture
-# numbered for the old send-text-first sequence moves one slot later.
+# herdr_submit_identity_prefix: submit asks `agent get` which harness the pane
+# runs, then reads its screen for modal input preparation. A fixture numbered
+# from the old send-text-first sequence moves two slots later.
 herdr_submit_identity_prefix() {  # <resp-dir> <agent>
-  herdr_submit_shift "$1" 1
+  herdr_submit_shift "$1" 2
   printf '{"result":{"agent":{"agent":"%s","agent_status":"idle"}}}\n' "$2" > "$1/1.out"
+  printf '  ❯\n' > "$1/2.out"
 }
 
 # herdr_submit_claude_prefix: a Claude pane adds the identity probe, an empty
@@ -4362,8 +4363,8 @@ test_send_text_submit_detects_landed_send() {
   assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''send-text'$'\x1f''w1:p2'$'\x1f''hello captain' "send_text_submit did not type the literal text first"
   enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
   [ "$enter_count" -eq 1 ] || fail "send_text_submit should not need a second Enter for a plain message with no popup, sent $enter_count Enter(s)"
-  [ "$(grep -c $'\x1f''pane'$'\x1f''read' "$log")" -eq 0 ] || fail "send_text_submit must never read the composer/pane content for confirmation anymore"
-  pass "fm_backend_herdr_send_text_submit: reports 'empty' once agent_status reports working after one Enter, without ever reading the composer"
+  [ "$(grep -c $'\x1f''pane'$'\x1f''read' "$log")" -eq 1 ] || fail "send_text_submit should read once for modal preparation and not for confirmation"
+  pass "fm_backend_herdr_send_text_submit: modal preparation does not replace native submit confirmation"
 }
 
 test_send_text_submit_pi_vim_normal_enters_insert_before_text() {
@@ -4408,6 +4409,37 @@ test_send_text_submit_pi_vim_pending_normal_preserves_text() {
   pass "fm_backend_herdr_send_text_submit: pending Pi NORMAL remains untouched"
 }
 
+test_send_text_submit_refuses_when_pi_identity_recheck_fails() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/submit-pi-vim-identity-fail"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '1\n' > "$resp/1.exit"
+  printf 'transcript\n────────────────────────\n\n────────────── NORMAL\n' > "$resp/2.out"
+  printf 'transcript\n────────────────────────\n\n────────────── NORMAL\n' > "$resp/3.out"
+  printf '1\n' > "$resp/4.exit"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit lab:w1:p2 ": lifecycle doorbell" 1 0.01 0' "$ROOT" 2>/dev/null )
+  [ "$out" = send-failed ] || fail "an unproven Pi identity recheck should refuse, got '$out'"
+  [ "$(grep -c $'\x1f''pane'$'\x1f''send-' "$log" || true)" -eq 0 ] \
+    || fail "identity failure allowed lifecycle input into Pi NORMAL: $(cat "$log")"
+  pass "fm_backend_herdr_send_text_submit: failed Pi identity recheck refuses input"
+}
+
+test_send_text_submit_refuses_when_mode_capture_fails() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/submit-mode-capture-fail"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"agent":{"agent":"codex","agent_status":"idle"}}}\n' > "$resp/1.out"
+  printf '1\n' > "$resp/2.exit"
+  printf '1\n' > "$resp/3.exit"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit lab:w1:p2 ": lifecycle doorbell" 1 0.01 0' "$ROOT" 2>/dev/null )
+  [ "$out" = send-failed ] || fail "a failed mode capture should refuse, got '$out'"
+  [ "$(grep -c $'\x1f''pane'$'\x1f''send-' "$log" || true)" -eq 0 ] \
+    || fail "capture failure allowed lifecycle input: $(cat "$log")"
+  pass "fm_backend_herdr_send_text_submit: failed mode capture refuses input"
+}
+
 test_send_text_submit_detects_swallowed_enter() {
   local dir log resp fb out
   dir="$TMP_ROOT/submit-swallow"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -4433,10 +4465,12 @@ test_send_text_submit_replays_literal_send_stderr() {
   dir="$TMP_ROOT/submit-send-stderr"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   err="$dir/stderr"
   # 1: agent get (a non-Claude identity skips the payload proof)
-  # 2: send-text fails the way an oversized argument does, before herdr runs
+  # 2: modal preparation capture
+  # 3: send-text fails the way an oversized argument does, before herdr runs
   printf '{"result":{"agent":{"agent":"codex","agent_status":"idle"}}}\n' > "$resp/1.out"
-  printf 'herdr: Argument list too long\n' > "$resp/2.err"
-  printf '126\n' > "$resp/2.exit"
+  printf '  ❯\n' > "$resp/2.out"
+  printf 'herdr: Argument list too long\n' > "$resp/3.err"
+  printf '126\n' > "$resp/3.exit"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 3 0.01 0.01' "$ROOT" 2>"$err" )
@@ -4710,7 +4744,7 @@ test_send_text_submit_confirms_despite_codex_idle_tip_composer() {
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "reply with just OK" 3 0.01 0.01' "$ROOT" )
   [ "$out" = empty ] || fail "send_text_submit should confirm via agent_status alone even for a harness whose idle composer shows dynamic tip text, got '$out'"
-  [ "$(grep -c $'\x1f''pane'$'\x1f''read' "$log")" -eq 0 ] || fail "send_text_submit must never call 'pane read' - a codex-style dynamic idle-tip composer can never mislead a confirmation path that does not read it"
+  [ "$(grep -c $'\x1f''pane'$'\x1f''read' "$log")" -eq 1 ] || fail "send_text_submit should read once for modal preparation and never use it as confirmation"
   pass "fm_backend_herdr_send_text_submit: confirms submission via native agent-state alone, immune to a codex-style dynamic idle-tip composer that would have misread as 'pending' under the old composer-based confirmation"
 }
 
@@ -5169,16 +5203,17 @@ test_send_text_submit_three_paste_placeholders_submit_the_long_payload() {
   pass "fm_backend_herdr_send_text_submit: three paste placeholders with no literal remainder submit the long payload"
 }
 
-# A non-Claude harness keeps the unproven type-then-Enter path: its composer
-# is never read before Enter, so a harness-specific placeholder or an
-# unselectable composer cannot turn a landed send into send-failed.
+# A non-Claude harness keeps the unproven payload path: the preparation read
+# checks only for a modal Pi composer and does not interpret harness-specific
+# placeholder content as a payload proof.
 test_send_text_submit_non_claude_skips_the_payload_proof() {
   local agent dir log resp fb out enter_count text
   text=$(herdr_long_payload 1492)
   for agent in codex missing; do
     dir="$TMP_ROOT/submit-non-claude-$agent"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-    printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/3.out"
-    printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/5.out"
+    printf '  ❯\n' > "$resp/2.out"
+    printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/4.out"
+    printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/6.out"
     if [ "$agent" = missing ]; then
       printf '1\n' > "$resp/1.exit"
     else
@@ -5188,7 +5223,7 @@ test_send_text_submit_non_claude_skips_the_payload_proof() {
     out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
       bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0.01 0.01' "$ROOT" "$text" )
     [ "$out" = empty ] || fail "a $agent pane should keep the type-then-Enter path and confirm from agent_status, got '$out'"
-    [ "$(grep -c $'\x1f''pane'$'\x1f''read' "$log")" -eq 0 ] || fail "a $agent pane must not have its composer read before Enter"
+    [ "$(grep -c $'\x1f''pane'$'\x1f''read' "$log")" -eq 1 ] || fail "a $agent pane should receive only its modal preparation read before Enter"
     enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
     [ "$enter_count" -eq 1 ] || fail "a $agent pane should be submitted once, sent $enter_count Enter(s)"
   done
@@ -5971,6 +6006,8 @@ test_wait_for_working_treats_blocked_as_submit_active
 test_send_text_submit_detects_landed_send
 test_send_text_submit_pi_vim_normal_enters_insert_before_text
 test_send_text_submit_pi_vim_pending_normal_preserves_text
+test_send_text_submit_refuses_when_pi_identity_recheck_fails
+test_send_text_submit_refuses_when_mode_capture_fails
 test_send_text_submit_detects_swallowed_enter
 test_send_text_submit_replays_literal_send_stderr
 test_send_text_submit_popup_autocomplete_requires_second_enter

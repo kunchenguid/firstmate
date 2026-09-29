@@ -3215,17 +3215,22 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|pending-unprove
 
 fm_backend_herdr_composer_input_mode() {  # <target> -> insert|normal|unknown
   local target=$1 cap
-  if cap=$(fm_backend_herdr_visible_capture_ansi "$target" 2>/dev/null) \
-     || cap=$(fm_backend_herdr_visible_capture "$target"); then
-    fm_composer_pi_input_mode "$cap"
+  if cap=$(fm_backend_herdr_visible_capture_ansi "$target" 2>/dev/null) && [ -n "$cap" ]; then
+    :
+  elif cap=$(fm_backend_herdr_visible_capture "$target") && [ -n "$cap" ]; then
+    :
   else
-    printf 'unknown'
+    return 1
   fi
+  fm_composer_pi_input_mode "$cap"
 }
 
 fm_backend_herdr_prepare_text_input() {  # <target> <settle>
   local target=$1 settle=$2 mode state
-  mode=$(fm_backend_herdr_composer_input_mode "$target")
+  if ! mode=$(fm_backend_herdr_composer_input_mode "$target"); then
+    printf 'error: cannot verify pi-vim input mode\n' >&2
+    return 1
+  fi
   case "$mode" in
     insert|unknown) return 0 ;;
     normal)
@@ -3466,16 +3471,14 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
   # that then starts a turn must not report empty. Other harnesses keep the
   # unproven type-then-Enter path.
   identity=$(fm_backend_herdr_agent_identity_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE") || identity=
-  if [ "${identity%%$'\t'*}" = pi ] \
-     && ! fm_backend_herdr_prepare_text_input "$target" "$settle"; then
-    printf 'send-failed'
-    return 0
-  fi
   if [ "${identity%%$'\t'*}" = claude ]; then
     proof=1
     content=$(fm_backend_herdr_composer_content "$target") \
       || { printf 'send-failed'; return 0; }
     [ -z "${content//[$' \t\r\n\v\f']/}" ] || { printf 'send-failed'; return 0; }
+  elif ! fm_backend_herdr_prepare_text_input "$target" "$settle"; then
+    printf 'send-failed'
+    return 0
   fi
   fm_backend_herdr_send_literal "$target" "$text" || { printf 'send-failed'; return 0; }
   sleep "$settle"
