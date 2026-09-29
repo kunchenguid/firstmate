@@ -3,9 +3,10 @@
 # of the held-delivery obligations it creates.
 #
 # OPT-IN AND OFF BY DEFAULT. A focus window exists only after the captain sets
-# one (the /focus skill runs `set`); with no record every command below behaves
-# as if the feature did not exist: route always says deliver, drain-section and
-# held print nothing, and status says off.
+# one (the /focus skill runs `set`). With no window record, route always says
+# deliver and status says off; drain-section and held still present any
+# undelivered obligations from a previous window. With neither a window nor
+# pending obligations, both print nothing.
 #
 # WHAT IT CHANGES. Only WHEN a non-urgent captain-facing outcome from a project
 # outside the focus reaches the captain, never WHETHER it does. While a window
@@ -34,7 +35,7 @@
 #                              A record that cannot be parsed reads as no window
 #                              (deliver everything) and is reported, never
 #                              silently obeyed.
-#   state/focus-windows/       archived records, one per cleared window.
+#   state/focus-windows/       records archived on clear or timed expiry.
 #   state/focus-held.jsonl     append-only held-delivery obligations, one JSON
 #                              object per line: {"seq":N,"epoch":N,"task":"...",
 #                              "project":"...","class":"...","summary":"..."}.

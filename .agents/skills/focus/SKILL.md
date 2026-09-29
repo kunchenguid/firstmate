@@ -39,7 +39,8 @@ Before any captain-facing report of an outcome, run `bin/fm-focus.sh route --tas
 
 Choosing the class is your judgment; when an outcome fits an urgent class and a holdable one, choose the urgent class.
 For a secondmate's outcome, pass `--project` copied from the structured Bearings row or the secondmate's own record, never inferred from prose.
-Report the outcome now only when `route` prints `deliver`; on `held`, leave it out of the reply, because the ledger now owns it.
+For an outcome interruption, report it now only when `route` prints `deliver`; on `held`, leave it out of the reply, because the ledger now owns it.
+Requested Bearings digests and boards follow the [`bearings` presentation contract](../bearings/SKILL.md), including all held outcomes.
 If `route` fails, report the outcome now.
 The window never changes authority: merges, answers, and escalations follow their usual rules, and a held decision stays open and answerable.
 

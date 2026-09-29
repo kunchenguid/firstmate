@@ -149,12 +149,13 @@ Only the exact answer value `merge` authorizes a merge; an answer carrying a fre
 This skill is the one owner of the `/bearings` chat-response format; the snapshot and classifier own the data that feeds it, and no other file restates this contract.
 Every `/bearings` chat response renders EXACTLY these four sections, in THIS order, and nothing else structural (there is no At Anchor section):
 
-1. **Captain's Call** - ONLY unsuppressed items that need the captain's own action now: a decision to make, a PR to approve or merge, a credential or login to provide, or a blocker only the captain can clear.
+1. **Captain's Call** - unsuppressed items that need the captain's own action now: a decision to make, a PR to approve or merge, a credential or login to provide, or a blocker only the captain can clear, plus the focus-delivery summary specified below.
    Deferred or aged holds follow the presentation safety rule above instead.
    Include `contributions.captain` rows in this section, deduplicating any row already represented by its live captain hold or merge call.
    Group the section by project so one project's items are read and answered together: a short project heading, then that project's items, with groups in the order the snapshot's `decisions_open` rows arrive (the command's header owns that grouping) and items keeping their order inside each group.
    A merge, credential, or contribution item joins its project's group when its task's structured record names the project, and otherwise the one group for items with no recorded project, like a row whose `repo` is null; grouping never drops or hides an item.
-   When the snapshot carries `focus`, open the section by naming the focus projects and when the window ends, and list every `focus.held` outcome under its project marked as held for the focus window; the `focus` skill owns what holding means, and a held item is never left out of the digest.
+   When the snapshot carries `focus`, open the section with its current state: name the projects and deadline for an active window, identify an ended or cleared window, or disclose an unreadable record.
+   List every `focus.held` outcome under its project, including when no focus projects remain; the `focus` skill owns whether it is still held or due for delivery, and an undelivered item is never left out of the digest.
    Show the other contribution actors only as counts beside the checked/known coverage, and disclose `captain_omitted`, `unmeasured_homes`, stale verdicts and checks with no verdict when nonzero.
    Empty-state: "Nothing needs your action right now" is allowed only when `contributions.proven_clear` is true and the existing decision set is empty.
    When the section is empty but coverage is incomplete, say that no decision is recorded and give the checked/known count; a missing coverage field is also unverified.
@@ -173,7 +174,7 @@ Rules that keep the contract unambiguous:
 - A captain hold appears in exactly one decision bucket: an unsuppressed live hold is in Captain's Call, while a blocked, dated, or aged hold is in Charted Next; `--all-decisions` moves the latter into Captain's Call and removes its gate.
 - Underway independently reports active work, so an actively worked captain-held task may appear there plus its one decision bucket.
 - A secondmate home can contribute to more than one section at once. Each active child is an Underway row regardless of the home-level `bearings_state`, while that same home's live captain hold is Captain's Call and its queued or external holds stay Charted Next. Do not hide active children because the home also has an open captain hold.
-- The strict boundary keeps action-free items OUT of Captain's Call: a working or validating task, a queued item blocked on another task or a date, landed work, a completed scout's report pointer, a declared `paused:` external wait, and a bare recorded PR with no merge-ready signal each belong to one of the other three sections, never Captain's Call.
+- Apart from the focus-delivery summary specified above, the strict boundary keeps action-free items OUT of Captain's Call: a working or validating task, a queued item blocked on another task or a date, landed work, a completed scout's report pointer, a declared `paused:` external wait, and a bare recorded PR with no merge-ready signal each belong to one of the other three sections, never Captain's Call.
 - A secondmate's own home-level row is not an Underway unit: `externally_held` belongs in Charted Next, and `unknown` belongs there as an unavailable-state gate unless its reason requires the captain's action.
 - Do not suppress separately projected decisions, landed records, or gates from a `partial-structured` home merely because that secondmate's own row is `unknown` or its `invalidity` reports an inventory mismatch.
 - Include the required direct address to the captain inside one item or empty-state sentence.
