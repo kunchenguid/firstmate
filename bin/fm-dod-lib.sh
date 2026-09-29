@@ -63,6 +63,21 @@
 # report, read back from the forge; a lane that deliberately holds a draft
 # declares a paused wait instead. bin/fm-pr-check.sh refuses to arm merge
 # monitoring on a draft through the same reading bin/fm-pr-merge.sh uses.
+# The no-mistakes block is also the one owner of the worker's conduct at the CI
+# gate: every poll reads the PR's reviews and comments, not only its checks;
+# review-bot or maintainer feedback is fed to a parked gate through
+# `no-mistakes axi respond --action fix`, never dismissed as a non-required
+# check; feedback that lands while no gate is parked is a keyed
+# `needs-decision [key=pr-<n>-<comment-id>]` line carrying the comment inline
+# that, for that decision only, replaces rule 6's stop: the worker keeps polling
+# behind it until firstmate answers dismiss (reply on the PR) or fix, which the
+# worker adds to the next parked gate, and `done:` waits until no such decision
+# is open and the PR holds no unactioned feedback; a maintainer-only wait (fork-workflow approval,
+# flaky-job rerun) is a `[key=nm-<run>-ci-wait]` declared-external-wait line,
+# keyed apart from the gate's own ask-user key so the worker's `resolved` never
+# folds away an escalation only firstmate may close, that the worker resumes
+# from itself, never `blocked:`; and no single wait exceeds the harness command
+# bound the block already names.
 # This file is the one owner of the no-mistakes `--intent` contract: only the
 # brief's `## Captain's intent` subsection plus later captain words, never
 # `## Firstmate spec` and never the worker's own tradeoffs.
@@ -341,6 +356,10 @@ EOF
 fm_dod_block() {  # <mode> <task-id> [branch] [<forge>]
   local mode=$1 id=$2 forge=${4:-none}
   local branch=${3:-fm/$id}
+  # Same declared-wait verb the brief renders (bin/fm-brief.sh PAUSED_VERB), so
+  # an override still classifies; falls back to the literal when this library is
+  # sourced without bin/fm-classify-lib.sh.
+  local paused_verb=${FM_CLASSIFY_PAUSED_VERB:-${FM_CLASSIFY_PAUSED_VERB_DEFAULT:-paused}}
   fm_forge_valid_for_mode "$forge" "$mode" fm_dod_block || return 1
   case "$mode:$forge" in
     direct-PR:gerrit)
@@ -432,6 +451,13 @@ That first \`done:\` is the handoff that starts the pipeline, which owns the pus
 EOF
       fm_nm_driving_block "$forge"
       cat <<EOF
+
+At the CI gate, poll about once a minute with one poll per command, and never put a single wait longer than your harness's command bound into one command.
+Every poll reads the PR itself, not only its checks: \`gh-axi pr checks <n>\`, then the PR's review submissions, inline review comments, and issue comments with \`gh-axi pr view <n> --comments --reviews\`.
+A failing review-bot check, a review-bot finding, or a maintainer comment asking for a change is work for the gate, never a non-required check to dismiss: when \`no-mistakes axi status\` shows a parked gate, feed each item to it with \`no-mistakes axi respond --action fix\`, adding any finding the gate does not list yet as \`no-mistakes axi respond --help\` describes, and let the fix round commit and push.
+When review feedback arrives and \`no-mistakes axi status\` shows no parked gate, escalate it inline in a keyed status line - append \`needs-decision [at=<epoch>] [key=pr-<n>-<comment-id>]: review feedback: {comment URL} {what it asks for}\` - then, for this decision only in place of rule 6's stop, keep polling about once a minute and wait for firstmate's reply instead of stopping, processing and acknowledging your Firstmate instruction inbox on each poll as that section describes, since the reply arrives there; on dismiss, reply on the PR; on fix, feed it to the next parked gate or CI-ready decision point as above when one comes, and when the run reaches CI green or its final outcome first, bring this branch up to the run's pushed head first by following \`branch_sync.next_action\` from \`no-mistakes axi status\` and running the \`no-mistakes axi sync\` command it prints when it names one (an already synchronized branch needs none), then commit it as post-pipeline follow-up work on top of this same branch so every pipeline fix commit remains present, then drive a new \`no-mistakes\` run with the same \`--intent\` to its outcome before \`done:\`.
+Before appending \`done:\`, re-read the PR's reviews and comments and route any unactioned feedback through those paths first; never append \`done:\` while a \`pr-<n>-<comment-id>\` decision you opened is still unanswered.
+A wait only a maintainer can clear - GitHub's fork-workflow approval (\`action_required\` with no job run) or a rerun of a flaky job - is an external wait under rule 4, not a blocker: append \`$paused_verb [at=<epoch>] [key=nm-<run>-ci-wait]: <what must happen>\`, re-append that same keyed line after any later status event of your own while the wait is still open (a review-feedback \`needs-decision\` or its \`resolved\` line), keep polling, and when it clears append \`resolved [at=<epoch>] [key=nm-<run>-ci-wait]: <how it cleared>\` yourself and continue; never report it as \`blocked:\` and never stop on it.
 
 After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), read the PR back from the forge and confirm it is not a draft (\`gh-axi pr view <number>\` must print \`draft: no\`, where <number> is the PR number from your PR URL); if it is a draft, mark it ready with \`gh-axi pr ready <number>\`.
 A draft cannot be merged, so a done report on one leaves the merge unasked.

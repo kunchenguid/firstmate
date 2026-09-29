@@ -134,26 +134,17 @@ fm_quota_json_valid() {
   ' >/dev/null 2>&1
 }
 
-fm_quota_single_provider_table() {
-  printf '%s\n' \
-    'claude claude' \
-    'codex codex' \
-    'grok grok' \
-    'kimi kimi' \
-    'cursor cursor' \
-    'agy agy' \
-    'muse meta'
-}
-
 fm_quota_single_provider_for_harness() {
-  local harness provider
-  while read -r harness provider; do
-    if [ "$harness" = "$1" ]; then
-      printf '%s\n' "$provider"
-      return 0
-    fi
-  done < <(fm_quota_single_provider_table)
-  return 1
+  case "$1" in
+    claude) printf 'claude\n' ;;
+    codex)  printf 'codex\n' ;;
+    grok)   printf 'grok\n' ;;
+    kimi)   printf 'kimi\n' ;;
+    cursor) printf 'cursor\n' ;;
+    agy)    printf 'agy\n' ;;
+    muse)   printf 'meta\n' ;;
+    *)      return 1 ;;
+  esac
 }
 
 fm_quota_provider_for_harness() {

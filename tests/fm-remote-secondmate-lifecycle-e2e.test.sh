@@ -352,20 +352,12 @@ if [ "\${1:-}" = clone ]; then
 fi
 if [ "\${1:-}" = clone ] && [ -n "\${FM_FAKE_CLONE_HOLD_DIR:-}" ] \
   && [ "\$(dirname "\${!#}")" = "\$FM_FAKE_CLONE_HOLD_DIR" ]; then
-  hold_dest="\${!#}"
-  "$REAL_GIT" "\$@" &
+  # Launch the clone already stopped: signalling it after it starts loses the
+  # hold whenever the local clone finishes first on a loaded runner.
+  ( kill -STOP "\$BASHPID"; exec "$REAL_GIT" "\$@" ) &
   hold_git=\$!
-  hold_state() { ps -o stat= -p "\$hold_git" 2>/dev/null | tr -d '[:space:]'; }
-  while [ ! -d "\$hold_dest/.git/objects" ]; do
-    case "\$(hold_state)" in ''|Z*) wait "\$hold_git"; exit \$? ;; esac
-    sleep 0.005
-  done
-  kill -STOP "\$hold_git" 2>/dev/null || true
   while :; do
-    case "\$(hold_state)" in
-      T*) break ;;
-      ''|Z*) wait "\$hold_git"; exit \$? ;;
-    esac
+    case "\$(ps -o stat= -p "\$hold_git" 2>/dev/null | tr -d '[:space:]')" in T*) break ;; esac
     sleep 0.005
   done
   touch "$TMP_ROOT/race-clone.held"
