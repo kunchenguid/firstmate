@@ -12,6 +12,12 @@
 #   fm-herdr-lab.sh stop <session>
 #   fm-herdr-lab.sh teardown <session>
 #
+# Pass --isolated-xdg before the command to give the lab its own
+# XDG_CONFIG_HOME, XDG_DATA_HOME, and XDG_STATE_HOME under the lab state
+# directory, so plugin install/link inside the lab never reads or writes the
+# live user's Herdr plugin registry. Without the flag every Herdr call
+# inherits the caller's XDG environment unchanged. Use the flag on every
+# command for one lab session (FM_HERDR_LAB_ISOLATED_XDG=1 is equivalent).
 # Session names must begin with "fm-lab-" and can never be "default".
 # The name command sanitizes the label, caps it at 16 characters, and appends
 # process/random suffixes to keep generated socket paths short.
@@ -60,16 +66,45 @@ fm_herdr_lab_tripwire_path() { # <session>
   printf '%s/%s.fleet-state.json' "$(fm_herdr_lab_state_dir)" "$1"
 }
 
+fm_herdr_lab_xdg_base() { # <session>
+  printf '%s/%s.xdg' "$(fm_herdr_lab_state_dir)" "$1"
+}
+
+# Prints the session's isolated XDG base after creating its config, data,
+# and state directories.
+fm_herdr_lab_ensure_isolated_xdg() { # <session>
+  local base
+  base=$(fm_herdr_lab_xdg_base "$1")
+  mkdir -p "$base/config" "$base/data" "$base/state" || {
+    fm_herdr_lab_error "cannot create isolated XDG directories under $base"
+    return 1
+  }
+  printf '%s' "$base"
+}
+
+fm_herdr_lab_exec() { # <session> <herdr arguments...>
+  local name=$1
+  shift
+  if [ "${FM_HERDR_LAB_ISOLATED_XDG:-0}" = 1 ]; then
+    local base
+    base=$(fm_herdr_lab_ensure_isolated_xdg "$name") || return 1
+    XDG_CONFIG_HOME="$base/config" XDG_DATA_HOME="$base/data" \
+      XDG_STATE_HOME="$base/state" HERDR_SESSION="$name" herdr "$@"
+  else
+    HERDR_SESSION="$name" herdr "$@"
+  fi
+}
+
 fm_herdr_lab_raw() { # <session> <herdr arguments...>
   local name=$1 i
   shift
   local -a args=("$@")
   for ((i = 0; i < ${#args[@]}; i++)); do
     [ "${args[i]}" = -- ] || continue
-    HERDR_SESSION="$name" herdr "${args[@]:0:i}" --session "$name" "${args[@]:i}"
+    fm_herdr_lab_exec "$name" "${args[@]:0:i}" --session "$name" "${args[@]:i}"
     return
   done
-  HERDR_SESSION="$name" herdr "$@" --session "$name"
+  fm_herdr_lab_exec "$name" "$@" --session "$name"
 }
 
 fm_herdr_lab_session_list() { # <session>
@@ -273,7 +308,7 @@ fm_herdr_lab_viewer_session_stopped_or_absent() { # <session>
 }
 
 fm_herdr_lab_viewer_start() { # <session>
-  local name=$1 record log launcher launcher_pid waited attempt reason pid interrupt_traps=0 timeout=$fm_herdr_lab_viewer_timeout_seconds
+  local name=$1 record log launcher launcher_pid waited attempt reason pid interrupt_traps=0 timeout=$fm_herdr_lab_viewer_timeout_seconds base
   fm_herdr_lab_validate_name "$name" || return 1
   command -v herdr >/dev/null 2>&1 || { fm_herdr_lab_error "herdr is required"; return 1; }
   command -v jq >/dev/null 2>&1 || { fm_herdr_lab_error "jq is required"; return 1; }
@@ -302,7 +337,13 @@ fm_herdr_lab_viewer_start() { # <session>
     trap 'trap - INT TERM; [ -z "${launcher_pid:-}" ] || fm_herdr_lab_cancel_viewer_launcher "$launcher_pid"; exit 130' INT
     trap 'trap - INT TERM; [ -z "${launcher_pid:-}" ] || fm_herdr_lab_cancel_viewer_launcher "$launcher_pid"; exit 143' TERM
   fi
-  nohup python3 "$launcher" "$name" "$record" >"$log" 2>&1 &
+  if [ "${FM_HERDR_LAB_ISOLATED_XDG:-0}" = 1 ]; then
+    base=$(fm_herdr_lab_ensure_isolated_xdg "$name") || return 1
+    XDG_CONFIG_HOME="$base/config" XDG_DATA_HOME="$base/data" \
+      XDG_STATE_HOME="$base/state" nohup python3 "$launcher" "$name" "$record" >"$log" 2>&1 &
+  else
+    nohup python3 "$launcher" "$name" "$record" >"$log" 2>&1 &
+  fi
   launcher_pid=$!
 
   waited=0
@@ -509,7 +550,8 @@ fm_herdr_lab_teardown() { # <session>
     return 1
   }
   if ! printf '%s' "$sessions" | jq -e --arg name "$name" '.sessions[]? | select(.name == $name)' >/dev/null 2>&1; then
-    fm_herdr_lab_verify_tripwire "$name"
+    fm_herdr_lab_verify_tripwire "$name" || return 1
+    rm -rf "$(fm_herdr_lab_xdg_base "$name")"
     return
   fi
   fm_herdr_lab_stop "$name" >/dev/null 2>&1 || true
@@ -528,7 +570,8 @@ fm_herdr_lab_teardown() { # <session>
     fi
     return 1
   fi
-  fm_herdr_lab_verify_tripwire "$name"
+  fm_herdr_lab_verify_tripwire "$name" || return 1
+  rm -rf "$(fm_herdr_lab_xdg_base "$name")"
 }
 
 fm_herdr_lab_name() { # <label>
@@ -542,11 +585,16 @@ fm_herdr_lab_name() { # <label>
 }
 
 fm_herdr_lab_usage() {
-  sed -n '2,15p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 fm_herdr_lab_main() {
   local command=${1:-}
+  if [ "$command" = --isolated-xdg ]; then
+    FM_HERDR_LAB_ISOLATED_XDG=1
+    shift
+    command=${1:-}
+  fi
   case "$command" in
     name)
       [ "$#" -eq 2 ] || { fm_herdr_lab_usage >&2; return 2; }
