@@ -82,6 +82,10 @@
 #                (`─…─ readme typo correction ─`), which is why a rule is not
 #                required to be nothing but `─`
 #                (_fm_composer_titled_separator_row owns that exact geometry).
+#                A human can type a row wearing that geometry, so a titled
+#                OPENING rule never proves a container on its own: the pair it
+#                opens may claim `empty` only when a glyph row inside it
+#                proves the shape, never on identity alone.
 #
 # THE COMPOSER FOOTER ZONE (task firstmate-doorbell-vals-pending-p1): a
 # harness draws its own furniture BELOW the composer - a user statusLine, a
@@ -772,10 +776,16 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
 # titled bordered border, applied to this family's rule.
 # Every byte test is a literal substring or literal-string removal, never a
 # character class over `─`, so the answer is identical under LC_ALL=C.
-# The shared 8-column floor stays in force, so a title wide enough to leave
-# fewer than eight leading rule columns (claude truncates a title at
-# `columns - 7`, leaving at least four) falls back to a refusal rather than
-# widening the floor for one harness.
+# The leading-run floor is FOUR columns here, not the solid form's eight,
+# because four is claude's own guaranteed minimum rather than a chosen number:
+# Claude Code 2.1.x's composer border builder declares `CFe=4, yJ=3`,
+# truncates the title to `columns - 7`, and then emits
+# `"─" x (columns - titleWidth - 3)`, so the leading run is at least
+# `columns - (columns - 7) - 3 = 4`. An eight-column floor therefore rejected
+# claude's own rule whenever a long session title met a narrow pane, which is
+# the very failure this predicate exists to end. The solid form keeps its
+# eight-column floor: there the width IS the proof that the row is a rule,
+# while here that proof is carried by the geometry below.
 _fm_composer_titled_separator_row() {  # <trimmed-row>
   local row=$1 rest dashes title
   case "$row" in
@@ -786,7 +796,7 @@ _fm_composer_titled_separator_row() {  # <trimmed-row>
   [ -n "$dashes" ] || return 1
   [ -z "${dashes//─/}" ] || return 1
   case "$dashes" in
-    *────────*) ;;
+    *────*) ;;
     *) return 1 ;;
   esac
   title=${rest#* }
@@ -800,8 +810,8 @@ _fm_composer_titled_separator_row() {  # <trimmed-row>
 
 # _fm_composer_pi_separator_row: THE separator rule of the `separated` shape -
 # a solid rule of nothing but `─`, at least 8 columns wide, or the
-# title-bearing form above. The width floor is a literal substring test so it
-# is byte-exact in every locale.
+# title-bearing form above with its own four-column leading floor. Each width
+# floor is a literal substring test so it is byte-exact in every locale.
 _fm_composer_pi_separator_row() {  # <trimmed-row>
   local row=$1
   [ -n "$row" ] || return 1
@@ -839,6 +849,13 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
   FM_COMPOSER_SCAN_PI_OPEN=-1
   FM_COMPOSER_SCAN_PI_CLOSE=-1
   FM_COMPOSER_SCAN_PI_LAST_SEPARATOR=-1
+  # Whether the SELECTED pair's OPENING rule carried a title. A title-bearing
+  # rule is claude's, and a row a human typed can wear the same geometry, so
+  # the row is not by itself proof that a container opened there. Recorded on
+  # the one pass that already tests every row, and consulted where it matters:
+  # the identity-only pi path, the single place a blank separated region turns
+  # into `empty` on nothing but structure plus an agent name.
+  FM_COMPOSER_SCAN_PI_OPEN_TITLED=0
   # The glyph PROOF of each envelope: the first row strictly inside it whose
   # content leads with an agent prompt glyph once its side borders are
   # stripped, and that glyph. This is what tells a composer container from a
@@ -851,6 +868,7 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
   FM_COMPOSER_SCAN_LEFTBAR_GLYPH_ROW=-1
   FM_COMPOSER_SCAN_LEFTBAR_GLYPH=
   local leftbar_start=-1 pi_open=-1 pi_lines=0 pi_max
+  local pi_open_titled=0 sep_titled
   local probe row_glyph row_glyph_row
   local box_glyph_row=-1 box_glyph='' pi_glyph_row=-1 pi_glyph=''
   pi_max=$FM_COMPOSER_PI_MAX_LINES
@@ -893,15 +911,19 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
         row_glyph_row=$row
       fi
     fi
-    # Pi separator rows: a solid `─` rule at least 8 columns wide. A separator
-    # closes the preceding candidate and immediately opens the next, so an
-    # earlier transcript rule can never outrank the live bottom composer pair.
+    # Pi separator rows: a solid `─` rule at least 8 columns wide, or claude's
+    # title-bearing rule. A separator closes the preceding candidate and
+    # immediately opens the next, so an earlier transcript rule can never
+    # outrank the live bottom composer pair.
     if _fm_composer_pi_separator_row "$trimmed"; then
       FM_COMPOSER_SCAN_PI_LAST_SEPARATOR=$row
+      sep_titled=0
+      if _fm_composer_titled_separator_row "$trimmed"; then sep_titled=1; fi
       if [ "$pi_open" -ge 0 ]; then
         FM_COMPOSER_SCAN_PI_PAIR_FOUND=1
         FM_COMPOSER_SCAN_PI_OPEN=$pi_open
         FM_COMPOSER_SCAN_PI_CLOSE=$row
+        FM_COMPOSER_SCAN_PI_OPEN_TITLED=$pi_open_titled
         if [ "$pi_lines" -le "$pi_max" ]; then
           FM_COMPOSER_SCAN_PI_PAIR_VALID=1
         else
@@ -911,6 +933,7 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
         FM_COMPOSER_SCAN_PI_GLYPH=$pi_glyph
       fi
       pi_open=$row
+      pi_open_titled=$sep_titled
       pi_lines=0
       pi_glyph_row=-1
       pi_glyph=''
@@ -1865,6 +1888,15 @@ _fm_composer_classify_bare_pi_overlap() {  # <screen> <styled> <has-identity> <i
 # is drawn above the separator pair, so the composer region looks free while the
 # keys would answer the prompt instead of composing (issue #2797). Structure
 # cannot disprove that, so a blocked pi defers rather than claiming empty.
+# A TITLE-BEARING opening rule is the one shape this conjunction cannot close
+# over: that geometry belongs to claude's composer border, but a human can
+# type a row that wears it, and then the "separator" is the draft itself, the
+# region above it is real held text, and the region below it is empty. An
+# idle pi would turn that into `empty` and the next caller would type over a
+# visibly held draft. The claude shape that needs the titled rule proves
+# itself another way - the `❯` glyph row INSIDE the pair, through
+# _fm_composer_classify_bare_pi_overlap - and never reaches this identity-only
+# path, so refusing here costs it nothing.
 _fm_composer_pi_verdict() {  # <screen> <styled> <has_identity> <identity>
   local screen=$1 styled=$2 has_identity=$3 identity=$4 agent agent_status state
   if [ "$has_identity" != 1 ]; then
@@ -1888,6 +1920,10 @@ _fm_composer_pi_verdict() {  # <screen> <styled> <has_identity> <identity>
   state=$(_fm_composer_classify_pi_rows "$screen" "$styled")
   if [ "$state" = pending ]; then
     printf 'pending'
+    return 0
+  fi
+  if [ "$FM_COMPOSER_SCAN_PI_OPEN_TITLED" = 1 ]; then
+    printf 'unknown'
     return 0
   fi
   case "$agent_status" in

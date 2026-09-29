@@ -306,6 +306,79 @@ test_titled_composer_border_geometry_is_bounded() {
   pass "the titled composer rule is bounded to claude's own border geometry"
 }
 
+test_titled_composer_border_leading_run_floor() {
+  # The leading-run floor, measured on the recorded pane with ONLY the leading
+  # rule run of its opening rule substituted. Four is claude's own guaranteed
+  # minimum: its border builder truncates the title to `columns - 7` and emits
+  # `"─" x (columns - titleWidth - 3)`, so the leading run never falls below
+  # `columns - (columns - 7) - 3 = 4`. A higher floor rejected claude's own
+  # rule whenever a long session title met a narrow pane, which is the very
+  # false `pending` this capture records; three columns is below claude's
+  # minimum and must keep refusing.
+  local capture head open tail prefix suffix run i n screen out
+  capture=$(cat "$ROOT/tests/captures/claude-2.1.259-herdr-0.8.0/titled-composer-border.ansi")
+  head=$(printf '%s\n' "$capture" | sed -n '1,3p')
+  open=$(printf '%s\n' "$capture" | sed -n '4p')
+  tail=$(printf '%s\n' "$capture" | sed -n '5,$p')
+  # The recorded opening rule is <SGR><leading run>` readme typo correction `<one rule glyph><SGR reset>.
+  prefix=${open%%─*}
+  suffix=" readme typo correction ─"${open##*─}
+  [ "$prefix" != "$open" ] \
+    || fail "the recorded opening rule should carry a leading rule run"
+  for n in 3 4 5 6 7 8; do
+    run=''
+    i=0
+    while [ "$i" -lt "$n" ]; do run="${run}─"; i=$((i + 1)); done
+    screen="$head"$'\n'"${prefix}${run}${suffix}"$'\n'"$tail"
+    if [ "$n" -lt 4 ]; then
+      out=$(fm_composer_classify_screen "$CAPS_STYLED" "$screen" '' probe-absent)
+      [ "$out" != empty ] \
+        || fail "$n leading rule columns is below claude's minimum and must not prove a composer"
+      out=$(LC_ALL=C fm_composer_classify_screen "$CAPS_STYLED" "$screen" '' probe-absent)
+      [ "$out" != empty ] \
+        || fail "$n leading rule columns must not prove a composer under LC_ALL=C"
+    else
+      assert_screen "$n leading rule columns on the recorded pane" empty \
+        "$CAPS_STYLED" "$screen" '' probe-absent
+      out=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$screen")
+      [ -z "$out" ] \
+        || fail "$n leading rule columns must extract no content, got '$out'"
+    fi
+  done
+  pass "claude's titled rule is recognized down to its own four-column leading run"
+}
+
+test_titled_rule_never_turns_a_pi_draft_into_empty() {
+  # The asymmetry this file states: widening a shape may move a verdict only
+  # toward refusing, never toward `empty`. Pi's separated composer is proven
+  # by identity plus structure alone - no glyph row inside the pair - so a
+  # DRAFT row that happens to wear claude's titled-rule geometry would
+  # otherwise become the opening rule of a pair whose region is empty, and an
+  # idle pi would then authorize typing over a visibly held draft. The held
+  # text here is `please add a divider:` followed by the divider the human is
+  # drafting; before the titled rule was accepted at all this read `pending`
+  # with both rows as its content.
+  local screen out pi_idle
+  pi_idle=$(printf 'pi\tidle')
+  screen=$'transcript\n────────────────────────\nplease add a divider:\n──────── section ─\n────────────────────────'
+  out=$(fm_composer_classify_screen "$CAPS_STYLED" "$screen" '' "$pi_idle")
+  [ "$out" != empty ] \
+    || fail "an idle pi must not read empty over a draft row shaped like a titled rule"
+  out=$(LC_ALL=C fm_composer_classify_screen "$CAPS_STYLED" "$screen" '' "$pi_idle")
+  [ "$out" != empty ] \
+    || fail "an idle pi must not read empty over such a draft under LC_ALL=C"
+  # The same bound on a done pi, the other status that authorizes injection.
+  out=$(fm_composer_classify_screen "$CAPS_STYLED" "$screen" '' "$(printf 'pi\tdone')")
+  [ "$out" != empty ] \
+    || fail "a done pi must not read empty over a draft row shaped like a titled rule"
+  # And the claude shape the titled rule exists for is untouched: it proves
+  # itself with the `❯` glyph row INSIDE the pair, never through identity.
+  screen=$'transcript line\n──────────── readme typo correction ─\n❯'"$NBSP"$'\n────────────────'
+  assert_screen "claude's titled pair still proves itself" empty \
+    "$CAPS_STYLED" "$screen" '' "$(printf 'claude\tidle')"
+  pass "a titled opening rule never lets an identity-only pi verdict reach empty"
+}
+
 test_composer_footer_demotion_needs_a_proven_pair() {
   # The demotion is bounded in three directions, and each bound is a case
   # where a lower glyph row IS the live composer.
@@ -1059,6 +1132,8 @@ test_matrix_claude_arrow_statusline_footer
 test_captured_claude_titled_composer_border
 test_titled_composer_border_keeps_refusing_real_input
 test_titled_composer_border_geometry_is_bounded
+test_titled_composer_border_leading_run_floor
+test_titled_rule_never_turns_a_pi_draft_into_empty
 test_composer_footer_demotion_needs_a_proven_pair
 test_composer_footer_zone_is_shape_independent
 test_composer_footer_zone_refuses_rather_than_allows
