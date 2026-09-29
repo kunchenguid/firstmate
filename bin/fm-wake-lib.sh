@@ -1167,6 +1167,7 @@ fm_recovery_marker_sweep_stale() {
     [ -e "$scratch" ] || [ -L "$scratch" ] || continue
     [ "$(fm_path_age "$scratch")" -ge "$FM_RECOVERY_TMP_STALE_AFTER" ] || continue
     if [ -d "$scratch" ] && [ ! -L "$scratch" ]; then
+      rm -f -- "$scratch/marker" 2>/dev/null || true
       fm_lock_discard_owner "$scratch"
     else
       rm -f -- "$scratch" 2>/dev/null || true

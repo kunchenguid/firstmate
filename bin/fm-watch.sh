@@ -2471,12 +2471,12 @@ trap watcher_cleanup EXIT
 watcher_stop_signals
 if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" != 1 ]; then
   if ! fm_recovery_marker_reopen_announced "$WATCHER_DOWNTIME_MARKER" "$FM_RECOVERY_LOCK_BOUND"; then
-    echo "watcher: recovery state could not be reopened safely; retaining stale lock evidence" >&2
+    echo "watcher: recovery state could not be reopened safely; the cleanup trap publishes downtime and releases the watch lock" >&2
     exit 1
   fi
 fi
 if ! fm_recovery_marker_arm_check "$WATCHER_DOWNTIME_MARKER" "$FM_RECOVERY_LOCK_BOUND"; then
-  echo "watcher: recovery state could not be consumed safely; retaining stale lock evidence" >&2
+  echo "watcher: recovery state could not be consumed safely; the cleanup trap publishes downtime and releases the watch lock" >&2
   exit 1
 fi
 if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ]; then

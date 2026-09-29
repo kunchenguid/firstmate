@@ -502,6 +502,40 @@ test_sweep_collects_dead_owner_records_only() {
   pass "startup sweep collects only provably-dead leaked owner records"
 }
 
+# The marker-scratch sweep must actually collect the quarantine directories it
+# promises to reclaim: a failed arm-check repair moves the unreadable marker
+# into ${marker}.invalid.*/marker, so the sweep has to drop that file before
+# its conservative directory discard, or every quarantine dir survives forever
+# and keeps bloating state/. Scratch younger than FM_RECOVERY_TMP_STALE_AFTER,
+# and a directory holding content the repair never writes, must stay.
+test_marker_sweep_collects_abandoned_scratch_only() {
+  local dir state marker rc
+  dir=$(make_case marker-sweep-stale)
+  state="$dir/state"
+  marker="$state/.watcher-down"
+  mkdir "$marker.invalid.AGED01" "$marker.invalid.FRESH1" "$marker.invalid.KEEPER"
+  printf 'announced:downtime:1.1700000000.abcDEF\n' > "$marker.invalid.AGED01/marker"
+  printf 'announced:downtime:1.1700000000.abcDEF\n' > "$marker.invalid.FRESH1/marker"
+  printf 'announced:downtime:1.1700000000.abcDEF\n' > "$marker.invalid.KEEPER/marker"
+  : > "$marker.tmp.AGED02"
+  : > "$marker.tmp.FRESH2"
+  : > "$marker.invalid.KEEPER/foreign"
+  touch -t 200001010000 "$marker.invalid.AGED01" "$marker.invalid.KEEPER" "$marker.tmp.AGED02"
+  rc=0
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_recovery_marker_sweep_stale "$2"
+    [ ! -e "$2.invalid.AGED01" ] || exit 8
+    [ ! -e "$2.tmp.AGED02" ] || exit 9
+    [ -d "$3/.watcher-down.invalid.FRESH1" ] || exit 10
+    [ -e "$3/.watcher-down.tmp.FRESH2" ] || exit 11
+    [ -d "$3/.watcher-down.invalid.KEEPER" ] || exit 12
+    exit 0
+  ' _ "$LIB" "$marker" "$state" || rc=$?
+  [ "$rc" -eq 0 ] || fail "marker scratch sweep misclassified abandoned scratch (rc=$rc)"
+  pass "marker scratch sweep collects aged quarantine dirs and tmp files only"
+}
+
 test_lock_reclaims_dead_steal_owner_without_nested_markers() {
   local dir state lockdir fakebin lnlog rc
   dir=$(make_case lock-dead-steal-owner)
@@ -1719,6 +1753,7 @@ test_lock_steals_dead_pid_lock
 test_lock_reaps_dangling_steal_link_with_gone_owner
 test_recovery_marker_waits_are_bounded_on_startup_path
 test_sweep_collects_dead_owner_records_only
+test_marker_sweep_collects_abandoned_scratch_only
 test_lock_stale_steal_single_winner_under_concurrency
 test_lock_reclaims_dead_steal_owner_without_nested_markers
 test_lock_recovers_dead_nested_steal_chain
