@@ -3170,6 +3170,59 @@ test_wedge_threshold_keeps_a_wait_past_a_default_key_answer() {
 # recheck is the one who can clear it, so wording it as an external dependency to
 # confirm points them away from the only action that ends the wait. The sibling
 # absorber makes exactly this distinction, and a lane routed here must not lose it.
+# --- past demand-deep-inspection the unchanged pane leaves the wedge clock ---
+# The marker's own wording forbids re-absorbing on the run-step/pane state, so
+# every further escalation of the SAME unchanged pane cost a supervising turn it
+# could do nothing new with: 46 of 69 such wakes over one 14-day sample already
+# carried the marker. Past the threshold the pane moves to the bounded
+# PAUSE_RESURFACE_SECS recheck instead, and both directions are pinned here: the
+# escalations BEFORE the marker keep the unchanged ladder, and the bounded
+# recheck still eventually re-surfaces the pane so it cannot rot invisibly.
+test_wedge_past_demand_inspect_moves_to_the_long_recheck() {
+  local dir state fakebin out capture window key n queued
+  local working='state: working · source: run-step · ci running'
+
+  dir=$(wedge_threshold_fixture demand-inspect-cadence 'working: validation under way' 0)
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  window="test:fm-wedge"; key=$(printf '%s' "$window" | tr ':/.' '___')
+
+  n=1
+  while [ "$n" -le 3 ]; do
+    FM_TEST_PAUSE_RESURFACE=999999 wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$working" exit \
+      || fail "an unchanged working lane stopped escalating at threshold $n: $(cat "$out")"
+    ack_stopped_cycle "$state" || fail "could not acknowledge wedge escalation $n"
+    grep -F "possible wedge, escalation $n" "$out" >/dev/null \
+      || fail "the ladder before the marker did not reach escalation $n: $(cat "$out")"
+    n=$((n + 1))
+  done
+  grep -F 'demand-deep-inspection' "$out" >/dev/null \
+    || fail "the third escalation lost the demand-deep-inspection wording: $(cat "$out")"
+
+  # The next threshold on the same unchanged pane: the closer look is already
+  # demanded, so it must not spend another wake on the 240s clock.
+  queued=$(wedge_stale_wakes "$state" "$window")
+  : > "$out"
+  FM_TEST_PAUSE_RESURFACE=999999 wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$working" absorb \
+    || fail "an unchanged pane re-escalated on the wedge clock after deep inspection was demanded: $(cat "$out")"
+  [ "$(wedge_stale_wakes "$state" "$window")" -eq "$queued" ] \
+    || fail "a pane past the demand marker queued another wedge wake inside the recheck cadence: $(cat "$state/.wake-queue")"
+  [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null)" = 3 ] \
+    || fail "the absorbed recheck advanced the escalation count to $(cat "$state/.wedge-escalations-$key" 2>/dev/null)"
+
+  # Bounded, not silenced: once the recheck cadence elapses the same pane
+  # re-surfaces, with the count and marker it had already earned.
+  set_mtime "$(( $(date +%s) - 2000 ))" "$state/.wedge-escalations-$key"
+  : > "$out"
+  FM_TEST_PAUSE_RESURFACE=1200 wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$working" exit \
+    || fail "the long recheck never re-surfaced a pane past the demand marker: $(cat "$out")"
+  grep -F "possible wedge, escalation 4" "$out" >/dev/null \
+    || fail "the long recheck lost the escalation count: $(cat "$out")"
+  grep -F 'demand-deep-inspection' "$out" >/dev/null \
+    || fail "the long recheck lost the demand-deep-inspection wording: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the long-cadence recheck"
+  pass "a pane past demand-deep-inspection leaves the wedge clock for the bounded recheck, while the escalations before it are unchanged"
+}
+
 test_wedge_threshold_recheck_names_the_captain_for_a_held_lane() {
   local dir state fakebin out capture window key n armed_timer
   local working='state: working · source: run-step · ci running'
@@ -6732,6 +6785,7 @@ test_live_declared_wait_churn_honors_the_resurface_throttle
 test_live_paused_until_controls_recheck_time
 test_wedge_threshold_defers_to_a_declared_wait_under_a_working_verdict
 test_wedge_threshold_keeps_a_wait_past_a_default_key_answer
+test_wedge_past_demand_inspect_moves_to_the_long_recheck
 test_wedge_threshold_recheck_names_the_captain_for_a_held_lane
 test_wedge_threshold_defers_to_a_parked_gate_awaiting_a_human
 test_wedge_threshold_parked_gate_needs_an_unanswered_decision
