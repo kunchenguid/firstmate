@@ -34,12 +34,23 @@
 # poll       The registered listener command `arm` publishes, not a command to
 #            run in a conversational turn. It runs the published blocking poll
 #            and prints its response verbatim, absorbing only the one exact
-#            transient interruption described below. A task-owned arm consumes
-#            its staged reply file once - reading and removing it before the
+#            transient interruption described below. An arm that carries a
+#            reply, task-owned or firstmate-owned, stages it for the listener,
+#            which consumes that file once - reading and removing it before the
 #            poll - and hands the contents to the published `--agent-reply`
 #            argument; later retries poll without that reply. That post is best
 #            effort: a crash while consuming drops that one round's reply
 #            instead of posting it twice. See the note at the consume site.
+# arm        Register the board's listener and wait until it is running.
+#            `--for <task-id>` makes the board worker-owned. `--agent-reply-file`
+#            is one reply answering every round still pending on the board; the
+#            re-arm acknowledges each and prints `acknowledged: <source-id>
+#            <sequence>` for it. docs/configuration.md "Reply to a Lavish round"
+#            owns what the owner checks before and after. Without `--for` it
+#            registers through the runner's `register-reply`, which is refused
+#            unless the board is registered and a captured round is waiting, so
+#            a retired, ended, or never-armed board takes no reply, and stops
+#            the board's earlier listener so the reply is posted by the next poll.
 # terminal   Exit 0 when the captured result means this Lavish source will never
 #            produce another result, so the runner may retire it; any other exit
 #            keeps it armed. This is the generic adapter contract bin/fm-procevent.sh
@@ -221,7 +232,6 @@ cmd_arm() {
     esac
   done
   [ -n "$artifact" ] || usage
-  [ -z "$reply_file" ] || [ -n "$task" ] || usage
   command -v lavish-axi >/dev/null 2>&1 || die "lavish-axi is not installed"
   poll_retry_delay >/dev/null
   id=$(cmd_source_id "$artifact") || exit 1
@@ -232,6 +242,9 @@ cmd_arm() {
   if [ -n "$task" ]; then
     FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" register-task lavish "$id" "$task" -- \
       "${listener[@]}" || exit 1
+  elif [ -n "$reply_file" ]; then
+    FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" register-reply lavish "$id" -- \
+      "${listener[@]}" || exit 1
   else
     # This adapter's own listener command, which runs the plain blocking form
     # with no --timeout-ms so completion is a server event, and absorbs only
@@ -241,7 +254,8 @@ cmd_arm() {
   fi
   # Registration is not a running listener. Readiness is the process-event
   # owner's evidence for this generation; a miss retires a source that never
-  # started so arm does not leave it registered.
+  # started so arm does not leave it registered. An arm carrying a reply has
+  # staged it and acknowledged its rounds, so it stays registered for reconcile.
   listening=0
   FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" ensure-listening "$id" || listening=$?
   if [ "$listening" -eq 3 ]; then
@@ -252,12 +266,14 @@ cmd_arm() {
     exit 0
   fi
   if [ "$listening" -ne 0 ]; then
-    owner=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" list 2>/dev/null \
-      | awk -v id="$id" '$1 == id { print $3; exit }')
-    case "$owner" in
-      live|orphaned|task:*/listening|task:*/round-open) ;;
-      *) FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" retire "$id" >/dev/null 2>&1 || true ;;
-    esac
+    if [ -z "$reply_file" ]; then
+      owner=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" list 2>/dev/null \
+        | awk -v id="$id" '$1 == id { print $3; exit }')
+      case "$owner" in
+        live|orphaned|task:*/listening|task:*/round-open) ;;
+        *) FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" retire "$id" >/dev/null 2>&1 || true ;;
+      esac
+    fi
     exit 1
   fi
   printf 'armed: %s\n' "$id"

@@ -1365,6 +1365,362 @@ wait_for_lines "$REARM_ROOT/replies" 2 \
   || fail "the acknowledging re-arm did not hand the board its own generation's reply"
 pass "a worker-owned board is armed once and re-armed only to acknowledge an open round"
 
+# --- end-user-aligned regression: firstmate's reply reaches its own board -----
+# Firstmate applies the captain's feedback on a board it armed itself and
+# re-arms with its reply, which must appear in the Lavish conversation just as
+# a worker's does. Unlike a worker's board, a firstmate board is relaunched by
+# the next supervision cycle before firstmate has replied, so the re-arm meets
+# a live listener that carries no reply and must not leave the reply waiting
+# behind it. Polls 2 and 4 are those relaunched listeners and never deliver.
+HFMREPLY="$TMP_ROOT/hfmreply"; new_home "$HFMREPLY"
+FMREPLY_ROOT="$TMP_ROOT/lavish-fmreply-root"; mkdir -p "$FMREPLY_ROOT"; export FMREPLY_ROOT
+FMREPLY_BIN=$(fm_fakebin "$TMP_ROOT/lavish-fmreply-stub")
+cat > "$FMREPLY_BIN/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+set -eu
+n=$(cat "$FMREPLY_ROOT/count" 2>/dev/null || echo 0)
+n=$((n + 1))
+printf '%s\n' "$n" > "$FMREPLY_ROOT/count"
+if [ "${1-}" = poll ] && [ "${3-}" = --agent-reply ]; then
+  printf 'poll%s reply: %s\n' "$n" "$4" >> "$FMREPLY_ROOT/replies"
+fi
+while [ ! -e "$FMREPLY_ROOT/trigger$n" ]; do
+  [ "$SECONDS" -lt "${FM_TEST_STUB_MAX_BLOCK_SECONDS:-120}" ] || exit 75
+  sleep 0.02
+done
+case "$n" in
+  1|3)
+    printf 'session:\n  status: feedback\nprompts[1]{uid,prompt,selector,tag,text}:\n  "","round %s","","message",""\n' "$n"
+    ;;
+  *)
+    printf 'session:\n  status: feedback\n  session_ended: true\nprompts[1]{uid,prompt,selector,tag,text}:\n  "","final words","","message",""\n'
+    ;;
+esac
+SH
+chmod +x "$FMREPLY_BIN/lavish-axi"
+FMREPLY_ART="$FMREPLY_ROOT/board.html"
+printf '<h1>firstmate reply</h1>\n' > "$FMREPLY_ART"
+lavish_session "$FMREPLY_ART"
+fmreply_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$FMREPLY_ART")
+fm_test_track_procevent_home "$HFMREPLY"
+printf 'Renamed the payment step.\n' > "$FMREPLY_ROOT/reply1"
+printf 'Moved the chart above the table.\n' > "$FMREPLY_ROOT/reply2"
+fmreply_arm() {  # [arm arguments...]
+  PATH="$FMREPLY_BIN:$PATH" FM_HOME="$HFMREPLY" \
+    "$ROOT/bin/fm-procevent-lavish.sh" arm "$FMREPLY_ART" "$@"
+}
+fmreply_polls() { cat "$FMREPLY_ROOT/count" 2>/dev/null || echo 0; }
+fmreply_wait_polls() {  # <count>
+  for _ in $(seq 1 200); do [ "$(fmreply_polls)" = "$1" ] && return 0; sleep 0.03; done
+  return 1
+}
+fmreply_arm >/dev/null || fail "firstmate could not arm its own board"
+fmreply_wait_polls 1 || fail "the firstmate board's first listener never polled"
+if fmreply_arm --agent-reply-file "$FMREPLY_ROOT/reply1" \
+  >/dev/null 2>"$FMREPLY_ROOT/idle-reply.err"; then
+  fail "a firstmate reply was accepted with no captured round to answer"
+fi
+assert_contains "$(cat "$FMREPLY_ROOT/idle-reply.err")" "no captured round is waiting" \
+  "the refused idle reply did not say no round was waiting"
+[ ! -s "$FMREPLY_ROOT/replies" ] \
+  || fail "a refused idle reply still reached the board: $(cat "$FMREPLY_ROOT/replies")"
+touch "$FMREPLY_ROOT/trigger1"
+wait_capture "$HFMREPLY" "$fmreply_id" \
+  || fail "the captain's first round on the firstmate board was never captured"
+assert_contains "$(wake_payloads "$HFMREPLY")" "procevent lavish $fmreply_id 1" \
+  "the captain's round on a firstmate board did not wake firstmate"
+PATH="$FMREPLY_BIN:$PATH" pe "$HFMREPLY" reconcile >/dev/null 2>&1 || true
+fmreply_wait_polls 2 || fail "the supervision cycle did not relaunch the firstmate board's listener"
+cp "$HFMREPLY/state/procevent/$fmreply_id.source" "$FMREPLY_ROOT/generation-one.source"
+if fmreply_arm --agent-reply-file "$FMREPLY_ROOT/never-written" >/dev/null 2>&1; then
+  fail "a firstmate re-arm carrying a nonexistent reply path was accepted"
+fi
+cmp -s "$FMREPLY_ROOT/generation-one.source" "$HFMREPLY/state/procevent/$fmreply_id.source" \
+  || fail "a refused firstmate reply replaced the board's registration"
+[ ! -f "$HFMREPLY/state/procevent-inbox/$fmreply_id.1.handled" ] \
+  || fail "a refused firstmate reply still acknowledged the open round"
+[ "$(pe "$HFMREPLY" list | awk -v id="$fmreply_id" '$1 == id { print $3 }')" = live ] \
+  || fail "a refused firstmate reply stopped the listener serving the board"
+fmreply_arm --agent-reply-file "$FMREPLY_ROOT/reply1" > "$FMREPLY_ROOT/arm1.out" \
+  || fail "firstmate could not re-arm its board with its reply"
+assert_contains "$(cat "$FMREPLY_ROOT/arm1.out")" "armed: $fmreply_id" \
+  "the reply re-arm was not reported listening"
+assert_not_contains "$(cat "$FMREPLY_ROOT/arm1.out")" "still-listening" \
+  "the reply re-arm left the reply waiting behind a listener that carries none"
+fmreply_wait_polls 3 || fail "the reply generation's listener never polled"
+wait_for_lines "$FMREPLY_ROOT/replies" 1 || fail "firstmate's reply never reached the board"
+[ "$(cat "$FMREPLY_ROOT/replies")" = "poll3 reply: Renamed the payment step." ] \
+  || fail "firstmate's reply was not posted once by the next poll: $(cat "$FMREPLY_ROOT/replies")"
+[ -f "$HFMREPLY/state/procevent-inbox/$fmreply_id.1.handled" ] \
+  || fail "the reply re-arm did not acknowledge the round it answers"
+[ -f "$FMREPLY_ROOT/reply1" ] || fail "the reply re-arm consumed firstmate's own reply file"
+pass "a firstmate reply re-arm posts the reply once through the next poll and acknowledges the round"
+
+# A relaunch of the reply generation after its next round must poll without the
+# reply it already posted, and the following reply replaces that listener too.
+touch "$FMREPLY_ROOT/trigger3"
+for _ in $(seq 1 100); do
+  [ -e "$HFMREPLY/state/procevent-inbox/$fmreply_id.2.result" ] \
+    && [ ! -e "$FM_PROCEVENT_CLAIM_ROOT/$fmreply_id.claim" ] && break
+  sleep 0.05
+done
+[ -e "$HFMREPLY/state/procevent-inbox/$fmreply_id.2.result" ] \
+  || fail "the captain's second round on the firstmate board was never captured"
+PATH="$FMREPLY_BIN:$PATH" pe "$HFMREPLY" reconcile >/dev/null 2>&1 || true
+fmreply_wait_polls 4 || fail "the reply generation's listener was not relaunched"
+fmreply_arm --agent-reply-file "$FMREPLY_ROOT/reply2" > "$FMREPLY_ROOT/arm2.out" \
+  || fail "firstmate could not re-arm its board with its second reply"
+assert_contains "$(cat "$FMREPLY_ROOT/arm2.out")" "armed: $fmreply_id" \
+  "the second reply re-arm was not reported listening"
+fmreply_wait_polls 5 || fail "the second reply generation's listener never polled"
+wait_for_lines "$FMREPLY_ROOT/replies" 2 || fail "firstmate's second reply never reached the board"
+printf '%s\n' 'poll3 reply: Renamed the payment step.' 'poll5 reply: Moved the chart above the table.' \
+  > "$FMREPLY_ROOT/expected-replies"
+cmp -s "$FMREPLY_ROOT/expected-replies" "$FMREPLY_ROOT/replies" \
+  || fail "firstmate's replies were not each posted once, by the poll after their re-arm: $(cat "$FMREPLY_ROOT/replies")"
+[ -f "$HFMREPLY/state/procevent-inbox/$fmreply_id.2.handled" ] \
+  || fail "the second reply re-arm did not acknowledge the round it answers"
+pass "a relaunched reply generation never reposts its reply"
+
+# A review the captain ended with Send & End takes no reply: its listener never
+# polls again, so a reply could never be shown, and firstmate acknowledges that
+# final round with handled as before.
+touch "$FMREPLY_ROOT/trigger5"
+for _ in $(seq 1 100); do
+  [ -e "$HFMREPLY/state/procevent-inbox/$fmreply_id.3.result" ] \
+    && [ ! -e "$HFMREPLY/state/procevent/$fmreply_id.source" ] && break
+  sleep 0.05
+done
+[ ! -e "$HFMREPLY/state/procevent/$fmreply_id.source" ] \
+  || fail "the ended firstmate board was not retired"
+if fmreply_arm --agent-reply-file "$FMREPLY_ROOT/reply2" \
+  >/dev/null 2>"$FMREPLY_ROOT/terminal-reply.err"; then
+  fail "a firstmate reply re-armed a review that had ended"
+fi
+assert_contains "$(cat "$FMREPLY_ROOT/terminal-reply.err")" "terminal" \
+  "the refused reply to an ended review did not say it was terminal"
+[ ! -e "$HFMREPLY/state/procevent/$fmreply_id.source" ] \
+  || fail "a refused reply to an ended review registered the board again"
+assert_contains "$(pe "$HFMREPLY" handled "$fmreply_id" 3)" "handled: $fmreply_id 3" \
+  "the ended round could not be acknowledged"
+if fmreply_arm --agent-reply-file "$FMREPLY_ROOT/reply2" \
+  >/dev/null 2>"$FMREPLY_ROOT/ended-reply.err"; then
+  fail "a firstmate reply re-armed an ended review after its final round was acknowledged"
+fi
+assert_contains "$(cat "$FMREPLY_ROOT/ended-reply.err")" "no captured round is waiting" \
+  "the refused reply to an acknowledged ended review did not say no round was waiting"
+[ ! -e "$HFMREPLY/state/procevent/$fmreply_id.source" ] \
+  || fail "a reply to an acknowledged ended review registered the board again"
+[ "$(fmreply_polls)" = 5 ] || fail "the ended firstmate board was polled again: $(fmreply_polls) polls"
+FMREPLY_FRESH="$FMREPLY_ROOT/fresh.html"
+printf '<h1>never armed</h1>\n' > "$FMREPLY_FRESH"
+lavish_session "$FMREPLY_FRESH"
+fmreply_fresh_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$FMREPLY_FRESH")
+if PATH="$FMREPLY_BIN:$PATH" FM_HOME="$HFMREPLY" "$ROOT/bin/fm-procevent-lavish.sh" arm \
+  "$FMREPLY_FRESH" --agent-reply-file "$FMREPLY_ROOT/reply1" >/dev/null 2>"$FMREPLY_ROOT/fresh-reply.err"; then
+  fail "a firstmate reply armed a board that was never armed"
+fi
+assert_contains "$(cat "$FMREPLY_ROOT/fresh-reply.err")" "no captured round is waiting" \
+  "the refused reply to a never-armed board did not say no round was waiting"
+[ ! -e "$HFMREPLY/state/procevent/$fmreply_fresh_id.source" ] \
+  || fail "a reply to a never-armed board registered it"
+[ "$(fmreply_polls)" = 5 ] || fail "a refused reply to a never-armed board started a listener"
+pass "a firstmate reply is refused once the review has ended or before it was ever armed"
+
+# Rounds can stack on a firstmate board: its listener is relaunched while a
+# round waits, so the captain can send another before firstmate replies. One
+# reply re-arm answers every pending round, acknowledges each, and says so; a
+# later wake for a covered round is already handled, and a second reply with
+# nothing left to answer is refused. Polls 1 and 2 deliver the two rounds,
+# poll 3 is the relaunched listener that carries no reply, and poll 4 is the
+# reply generation.
+HFMSTACK="$TMP_ROOT/hfmstack"; new_home "$HFMSTACK"
+FMSTACK_ROOT="$TMP_ROOT/lavish-fmstack-root"; mkdir -p "$FMSTACK_ROOT"; export FMSTACK_ROOT
+FMSTACK_BIN=$(fm_fakebin "$TMP_ROOT/lavish-fmstack-stub")
+cat > "$FMSTACK_BIN/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+set -eu
+n=$(cat "$FMSTACK_ROOT/count" 2>/dev/null || echo 0)
+n=$((n + 1))
+printf '%s\n' "$n" > "$FMSTACK_ROOT/count"
+if [ "${1-}" = poll ] && [ "${3-}" = --agent-reply ]; then
+  printf 'poll%s reply: %s\n' "$n" "$4" >> "$FMSTACK_ROOT/replies"
+fi
+while [ ! -e "$FMSTACK_ROOT/trigger$n" ]; do
+  [ "$SECONDS" -lt "${FM_TEST_STUB_MAX_BLOCK_SECONDS:-120}" ] || exit 75
+  sleep 0.02
+done
+printf 'session:\n  status: feedback\nprompts[1]{uid,prompt,selector,tag,text}:\n  "","round %s","","message",""\n' "$n"
+SH
+chmod +x "$FMSTACK_BIN/lavish-axi"
+FMSTACK_ART="$FMSTACK_ROOT/board.html"
+printf '<h1>stacked rounds</h1>\n' > "$FMSTACK_ART"
+lavish_session "$FMSTACK_ART"
+fmstack_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$FMSTACK_ART")
+fm_test_track_procevent_home "$HFMSTACK"
+printf 'Applied both rounds.\n' > "$FMSTACK_ROOT/reply"
+fmstack_arm() {  # [arm arguments...]
+  PATH="$FMSTACK_BIN:$PATH" FM_HOME="$HFMSTACK" \
+    "$ROOT/bin/fm-procevent-lavish.sh" arm "$FMSTACK_ART" "$@"
+}
+fmstack_polls() { cat "$FMSTACK_ROOT/count" 2>/dev/null || echo 0; }
+fmstack_wait_polls() {  # <count>
+  for _ in $(seq 1 200); do [ "$(fmstack_polls)" = "$1" ] && return 0; sleep 0.03; done
+  return 1
+}
+fmstack_wait_round() {  # <sequence>
+  for _ in $(seq 1 100); do
+    [ -e "$HFMSTACK/state/procevent-inbox/$fmstack_id.$1.result" ] \
+      && [ ! -e "$FM_PROCEVENT_CLAIM_ROOT/$fmstack_id.claim" ] && return 0
+    sleep 0.05
+  done
+  return 1
+}
+fmstack_arm >/dev/null || fail "firstmate could not arm the stacked-rounds board"
+fmstack_wait_polls 1 || fail "the stacked-rounds board's first listener never polled"
+touch "$FMSTACK_ROOT/trigger1"
+fmstack_wait_round 1 || fail "the captain's first stacked round was never captured"
+PATH="$FMSTACK_BIN:$PATH" pe "$HFMSTACK" reconcile >/dev/null 2>&1 || true
+fmstack_wait_polls 2 || fail "the stacked-rounds listener was not relaunched after round one"
+touch "$FMSTACK_ROOT/trigger2"
+fmstack_wait_round 2 || fail "the captain's second stacked round was never captured"
+assert_contains "$(wake_payloads "$HFMSTACK")" "procevent lavish $fmstack_id 2" \
+  "the captain's second stacked round did not wake firstmate"
+PATH="$FMSTACK_BIN:$PATH" pe "$HFMSTACK" reconcile >/dev/null 2>&1 || true
+fmstack_wait_polls 3 || fail "the stacked-rounds listener was not relaunched after round two"
+# The consolidated acknowledgement is all or nothing: when the second round's
+# marker cannot be recorded (a dangling link where it belongs), the first
+# round's marker is withdrawn too, so both rounds stay pending.
+fmstack_inbox="$HFMSTACK/state/procevent-inbox"
+cp "$HFMSTACK/state/procevent/$fmstack_id.source" "$FMSTACK_ROOT/before-failed.source"
+ln -s "$FMSTACK_ROOT/nowhere" "$fmstack_inbox/$fmstack_id.2.handled"
+if fmstack_arm --agent-reply-file "$FMSTACK_ROOT/reply" >/dev/null 2>"$FMSTACK_ROOT/partial.err"; then
+  fail "a reply re-arm succeeded although one of its rounds could not be acknowledged"
+fi
+rm -f -- "$fmstack_inbox/$fmstack_id.2.handled"
+assert_contains "$(cat "$FMSTACK_ROOT/partial.err")" "cannot acknowledge captured round: $fmstack_inbox/$fmstack_id.2.result" \
+  "the failed reply re-arm did not name the round it could not acknowledge"
+[ ! -e "$fmstack_inbox/$fmstack_id.1.handled" ] \
+  || fail "a failed reply re-arm left the first stacked round acknowledged"
+[ ! -e "$fmstack_inbox/$fmstack_id.2.handled" ] \
+  || fail "a failed reply re-arm left the second stacked round acknowledged"
+cmp -s "$FMSTACK_ROOT/before-failed.source" "$HFMSTACK/state/procevent/$fmstack_id.source" \
+  || fail "a failed reply re-arm did not restore the board's registration"
+[ -z "$(find "$HFMSTACK/state/procevent" -name ".$fmstack_id.reply.*" -print)" ] \
+  || fail "a failed reply re-arm left its reply staged"
+[ ! -s "$FMSTACK_ROOT/replies" ] || fail "a failed reply re-arm still posted its reply"
+fmstack_arm --agent-reply-file "$FMSTACK_ROOT/reply" > "$FMSTACK_ROOT/arm.out" \
+  || fail "firstmate could not re-arm the stacked-rounds board with its reply"
+assert_contains "$(cat "$FMSTACK_ROOT/arm.out")" "acknowledged: $fmstack_id 1" \
+  "the reply re-arm did not report acknowledging the first stacked round"
+assert_contains "$(cat "$FMSTACK_ROOT/arm.out")" "acknowledged: $fmstack_id 2" \
+  "the reply re-arm did not report acknowledging the second stacked round"
+assert_contains "$(cat "$FMSTACK_ROOT/arm.out")" "armed: $fmstack_id" \
+  "the stacked-rounds reply re-arm was not reported listening"
+fmstack_wait_polls 4 || fail "the stacked-rounds reply generation's listener never polled"
+wait_for_lines "$FMSTACK_ROOT/replies" 1 || fail "the consolidated reply never reached the board"
+[ "$(cat "$FMSTACK_ROOT/replies")" = "poll4 reply: Applied both rounds." ] \
+  || fail "the consolidated reply was not posted once by the next poll: $(cat "$FMSTACK_ROOT/replies")"
+assert_contains "$(pe "$HFMSTACK" handled "$fmstack_id" 2)" "already-handled: $fmstack_id 2" \
+  "a later wake for a round the consolidated reply answered was not already handled"
+if fmstack_arm --agent-reply-file "$FMSTACK_ROOT/reply" >/dev/null 2>"$FMSTACK_ROOT/again.err"; then
+  fail "a second reply re-arm was accepted after the consolidated reply answered every round"
+fi
+assert_contains "$(cat "$FMSTACK_ROOT/again.err")" "no captured round is waiting" \
+  "the refused second reply did not say no round was waiting"
+pass "one firstmate reply re-arm answers and acknowledges every stacked round"
+
+# A board firstmate retired takes no reply even while a nonterminal round is
+# still waiting on it: the reply re-arm must not register the board again.
+touch "$FMSTACK_ROOT/trigger4"
+fmstack_wait_round 3 || fail "the captain's third round on the stacked-rounds board was never captured"
+pe "$HFMSTACK" retire "$fmstack_id" >/dev/null || fail "firstmate could not retire its own board"
+if fmstack_arm --agent-reply-file "$FMSTACK_ROOT/reply" >/dev/null 2>"$FMSTACK_ROOT/retired.err"; then
+  fail "a firstmate reply re-armed a board it had retired"
+fi
+assert_contains "$(cat "$FMSTACK_ROOT/retired.err")" "the board is not armed" \
+  "the refused reply to a retired board did not say the board is not armed"
+[ ! -e "$HFMSTACK/state/procevent/$fmstack_id.source" ] \
+  || fail "a reply to a retired board registered it again"
+[ ! -e "$fmstack_inbox/$fmstack_id.3.handled" ] \
+  || fail "a refused reply to a retired board acknowledged its waiting round"
+[ "$(fmstack_polls)" = 4 ] || fail "a refused reply to a retired board started a listener: $(fmstack_polls) polls"
+pass "a firstmate reply is refused on a board it retired while a round waits"
+
+# A reply re-arm has already stopped the earlier listener, acknowledged its
+# rounds, and staged the reply by the time arm confirms the new listener, so a
+# confirm miss must leave that registration for reconcile rather than retire
+# the board and lose the reply. The miss is injected at the runner's public
+# ensure-listening boundary; every other runner command is the real one.
+HFMMISS="$TMP_ROOT/hfmmiss"; new_home "$HFMMISS"
+FMMISS_ROOT="$TMP_ROOT/lavish-fmmiss-root"; mkdir -p "$FMMISS_ROOT"; export FMMISS_ROOT
+FMMISS_BIN=$(fm_fakebin "$TMP_ROOT/lavish-fmmiss-stub")
+cat > "$FMMISS_BIN/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+set -eu
+n=$(cat "$FMMISS_ROOT/count" 2>/dev/null || echo 0)
+n=$((n + 1))
+printf '%s\n' "$n" > "$FMMISS_ROOT/count"
+if [ "${1-}" = poll ] && [ "${3-}" = --agent-reply ]; then
+  printf 'poll%s reply: %s\n' "$n" "$4" >> "$FMMISS_ROOT/replies"
+fi
+while [ ! -e "$FMMISS_ROOT/trigger$n" ]; do
+  [ "$SECONDS" -lt "${FM_TEST_STUB_MAX_BLOCK_SECONDS:-120}" ] || exit 75
+  sleep 0.02
+done
+printf 'session:\n  status: feedback\nprompts[1]{uid,prompt,selector,tag,text}:\n  "","round %s","","message",""\n' "$n"
+SH
+chmod +x "$FMMISS_BIN/lavish-axi"
+FMMISS_TOOLS="$FMMISS_ROOT/bin"; mkdir -p "$FMMISS_TOOLS"
+for tool in "$ROOT"/bin/*; do
+  [ "${tool##*/}" = fm-procevent.sh ] || ln -s "$tool" "$FMMISS_TOOLS/${tool##*/}"
+done
+cat > "$FMMISS_TOOLS/fm-procevent.sh" <<SH
+#!/usr/bin/env bash
+if [ "\${1-}" = ensure-listening ]; then
+  printf 'error: listener is not running: %s\n' "\${2-}" >&2
+  exit 1
+fi
+exec "$ROOT/bin/fm-procevent.sh" "\$@"
+SH
+chmod +x "$FMMISS_TOOLS/fm-procevent.sh"
+FMMISS_ART="$FMMISS_ROOT/board.html"
+printf '<h1>confirm miss</h1>\n' > "$FMMISS_ART"
+lavish_session "$FMMISS_ART"
+fmmiss_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$FMMISS_ART")
+fm_test_track_procevent_home "$HFMMISS"
+printf 'Tightened the header.\n' > "$FMMISS_ROOT/reply"
+fmmiss_polls() { cat "$FMMISS_ROOT/count" 2>/dev/null || echo 0; }
+fmmiss_wait_polls() {  # <count>
+  for _ in $(seq 1 200); do [ "$(fmmiss_polls)" = "$1" ] && return 0; sleep 0.03; done
+  return 1
+}
+PATH="$FMMISS_BIN:$PATH" FM_HOME="$HFMMISS" "$ROOT/bin/fm-procevent-lavish.sh" arm "$FMMISS_ART" >/dev/null \
+  || fail "firstmate could not arm the confirm-miss board"
+fmmiss_wait_polls 1 || fail "the confirm-miss board's first listener never polled"
+touch "$FMMISS_ROOT/trigger1"
+wait_capture "$HFMMISS" "$fmmiss_id" || fail "the captain's round on the confirm-miss board was never captured"
+PATH="$FMMISS_BIN:$PATH" pe "$HFMMISS" reconcile >/dev/null 2>&1 || true
+fmmiss_wait_polls 2 || fail "the confirm-miss board's listener was not relaunched"
+if PATH="$FMMISS_BIN:$PATH" FM_HOME="$HFMMISS" "$FMMISS_TOOLS/fm-procevent-lavish.sh" arm "$FMMISS_ART" \
+  --agent-reply-file "$FMMISS_ROOT/reply" > "$FMMISS_ROOT/arm.out" 2>"$FMMISS_ROOT/arm.err"; then
+  fail "a reply re-arm whose listener could not be confirmed reported success"
+fi
+assert_contains "$(cat "$FMMISS_ROOT/arm.out")" "acknowledged: $fmmiss_id 1" \
+  "the unconfirmed reply re-arm did not report the round it acknowledged"
+assert_not_contains "$(cat "$FMMISS_ROOT/arm.out")" "armed: $fmmiss_id" \
+  "an unconfirmed reply re-arm was reported listening"
+[ -e "$HFMMISS/state/procevent/$fmmiss_id.source" ] \
+  || fail "an unconfirmed reply re-arm retired a board whose round it had already acknowledged"
+[ -f "$HFMMISS/state/procevent-inbox/$fmmiss_id.1.handled" ] \
+  || fail "the unconfirmed reply re-arm did not acknowledge the round it answers"
+PATH="$FMMISS_BIN:$PATH" pe "$HFMMISS" reconcile >/dev/null 2>&1 || true
+fmmiss_wait_polls 3 || fail "reconcile did not relaunch the kept reply generation"
+wait_for_lines "$FMMISS_ROOT/replies" 1 || fail "the kept reply generation never posted the reply"
+[ "$(cat "$FMMISS_ROOT/replies")" = "poll3 reply: Tightened the header." ] \
+  || fail "the kept reply was not posted once by the relaunched poll: $(cat "$FMMISS_ROOT/replies")"
+pass "a reply re-arm that cannot confirm its listener keeps the board for reconcile to post the reply"
+
 # The other half of the same contract, on the same real path: a close that
 # carries what the captain actually said must still reach him. Same runner, same
 # adapter, one different response shape.
@@ -4670,7 +5026,7 @@ done
 [ ! -e "$drain_claim" ] || fail "the first generation of the draining fixture never exited"
 # Stand the first generation's claim back up on a live process so the re-arm
 # meets it still held, then release it partway through the confirm window.
-setsid sleep 60 &
+perl -MPOSIX=setsid -e 'setsid() >= 0 or exit 1; exec @ARGV' sleep 60 &
 drain_holder=$!
 # Read the identity only once the holder has exec'd sleep: mid-exec its cmdline
 # can read empty, and a pre-exec identity would never match the live holder.

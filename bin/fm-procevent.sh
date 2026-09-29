@@ -6,6 +6,7 @@
 # Usage:
 #   fm-procevent.sh register <adapter> <source-id> -- <argv>...
 #   fm-procevent.sh register-task <adapter> <source-id> <task-id> -- <argv>...
+#   fm-procevent.sh register-reply <adapter> <source-id> -- <argv>...
 #   fm-procevent.sh register-extension <adapter> <source-id> --config-ref <reference>
 #   fm-procevent.sh start <source-id>
 #   fm-procevent.sh ensure-listening <source-id>
@@ -29,7 +30,18 @@
 #            Record a worker-owned built-in source. Its one source record
 #            persists across rounds, and re-registration by the same task
 #            acknowledges nonterminal captured rounds without touching the
-#            source claim. Terminal rounds are concluded with `handled`.
+#            source claim, printing `acknowledged: <id> <seq>` for each.
+#            Terminal rounds are concluded with `handled`.
+# register-reply
+#            Record a firstmate-owned built-in source generation whose argv
+#            carries `--agent-reply-file`, one reply answering every round
+#            still pending. It stages the reply and acknowledges each open
+#            nonterminal round exactly as register-task does, and is refused
+#            when the board is not registered, when no captured round is
+#            waiting, or when a waiting round is terminal.
+#            A firstmate board keeps listening between rounds, so it also
+#            stops this home's listener from the earlier generation the way
+#            `retire` does, making the next poll the one that posts the reply.
 # register-extension
 #            Resolve an explicitly enabled home-local process-event-adapter/1
 #            binding, verify its package and handshake, and record the source
@@ -549,9 +561,9 @@ cmd_register() {
 }
 
 cmd_register_task() {
-  local adapter=${1-} id=${2-} task=${3-} sep=${4-} result pending pending_adapter
-  local reply_source='' reply_dest='' stale arg i adopting=0 pending_owner prior_record=''
-  local pending_rounds=0
+  local adapter=${1-} id=${2-} task=${3-} sep=${4-} pending pending_adapter
+  local reply_source='' reply_dest='' arg adopting=0 pending_owner prior_record=''
+  local pending_rounds=0 seq
   local -a argv=()
   shift 4 2>/dev/null || usage
   [ "$adapter" = lavish ] || die "register-task is reserved for the Lavish adapter"
@@ -603,33 +615,13 @@ cmd_register_task() {
     fm_procevent_source_lock_release "$id"
     die "cannot re-arm source $id: task $task already holds this board and no captured round is waiting to be acknowledged"
   fi
-  # Each generation stages its reply under its own path, so nothing a failed
-  # re-arm does can reach the reply the prior registration still references.
-  i=0
-  while [ "$i" -lt "${#argv[@]}" ]; do
-    if [ "${argv[$i]}" = --agent-reply-file ]; then
-      [ "$((i + 1))" -lt "${#argv[@]}" ] || { fm_procevent_source_lock_release "$id"; usage; }
-      reply_source=${argv[$((i + 1))]}
-      [ -f "$reply_source" ] && [ ! -L "$reply_source" ] || {
-        [ -z "$reply_dest" ] || rm -f -- "$reply_dest"
-        fm_procevent_source_lock_release "$id"
-        die "agent reply file does not exist: $reply_source"
-      }
-      reply_dest=$(umask 077; mktemp "$REG/.$id.reply.XXXXXX") || {
-        fm_procevent_source_lock_release "$id"
-        die "cannot stage agent reply"
-      }
-      if ! cat -- "$reply_source" > "$reply_dest" || ! chmod 0600 "$reply_dest"; then
-        rm -f -- "$reply_dest"
-        fm_procevent_source_lock_release "$id"
-        die "cannot persist agent reply"
-      fi
-      argv[i + 1]=$reply_dest
-      i=$((i + 2))
-    else
-      i=$((i + 1))
-    fi
-  done
+  reply_stage_locked "$id"
+  case "$?" in
+    0) ;;
+    2) fm_procevent_source_lock_release "$id"; usage ;;
+    *) fm_procevent_source_lock_release "$id"; die "$REPLY_STAGE_ERROR" ;;
+  esac
+  reply_dest=$REPLY_STAGED
   if [ "$adopting" -eq 0 ]; then
     prior_record=$(umask 077; mktemp "$REG/.$id.prior.XXXXXX") || {
       [ -z "$reply_dest" ] || rm -f -- "$reply_dest"
@@ -651,25 +643,229 @@ cmd_register_task() {
   fi
   # Re-arm is the worker's acknowledgement of every open nonterminal round.
   # It deliberately does not inspect, acquire, release, or replace the claim.
-  while IFS= read -r pending; do
-    [ -n "$pending" ] || continue
-    result=$pending
-    fm_procevent_mark_handled "$STATE" "$id" "$(fm_procevent_result_sequence "$result")" >/dev/null 2>&1 || {
-      [ -z "$prior_record" ] || mv -f -- "$prior_record" "$(source_file "$id")"
-      [ -z "$reply_dest" ] || rm -f -- "$reply_dest"
-      fm_procevent_source_lock_release "$id"
-      die "cannot acknowledge captured round: $result"
-    }
-  done < <(source_pending "$id")
-  [ -z "$prior_record" ] || rm -f -- "$prior_record"
-  for stale in "$REG/.$id.reply."*; do
-    [ -e "$stale" ] || continue
-    case "$stale" in "$reply_dest") continue ;; esac
-    rm -f -- "$stale"
-  done
+  if ! rearm_acknowledge_locked "$id" "$prior_record" "$reply_dest"; then
+    fm_procevent_source_lock_release "$id"
+    die "cannot acknowledge captured round: $REARM_ACK_FAILED"
+  fi
   fm_procevent_source_lock_release "$id"
   owner_lease_refresh
   printf 'registered: %s (%s, task=%s)\n' "$id" "$adapter" "$task"
+  for seq in "${REARM_ACKNOWLEDGED[@]+"${REARM_ACKNOWLEDGED[@]}"}"; do printf 'acknowledged: %s %s\n' "$id" "$seq"; done
+}
+
+# The reply half of re-arm, shared by every owner that can answer a round so
+# there is one consumption contract. Each generation stages its reply under its
+# own path, so nothing a failed re-arm does can reach the reply the prior
+# registration still references. It rewrites the caller's `argv` array in place
+# to point at the private copy and sets REPLY_STAGED to it; exit 2 is a usage
+# error and exit 1 sets REPLY_STAGE_ERROR, with nothing left staged either way.
+# The caller holds the source lock.
+reply_stage_locked() {  # <source-id>
+  local id=$1 i=0 reply_source
+  REPLY_STAGED=''
+  REPLY_STAGE_ERROR=''
+  while [ "$i" -lt "${#argv[@]}" ]; do
+    if [ "${argv[$i]}" = --agent-reply-file ]; then
+      if [ "$((i + 1))" -ge "${#argv[@]}" ]; then
+        [ -z "$REPLY_STAGED" ] || rm -f -- "$REPLY_STAGED"
+        REPLY_STAGED=''
+        return 2
+      fi
+      reply_source=${argv[$((i + 1))]}
+      if [ ! -f "$reply_source" ] || [ -L "$reply_source" ]; then
+        [ -z "$REPLY_STAGED" ] || rm -f -- "$REPLY_STAGED"
+        REPLY_STAGED=''
+        REPLY_STAGE_ERROR="agent reply file does not exist: $reply_source"
+        return 1
+      fi
+      [ -z "$REPLY_STAGED" ] || rm -f -- "$REPLY_STAGED"
+      REPLY_STAGED=$(umask 077; mktemp "$REG/.$id.reply.XXXXXX") || {
+        REPLY_STAGED=''
+        REPLY_STAGE_ERROR="cannot stage agent reply"
+        return 1
+      }
+      if ! cat -- "$reply_source" > "$REPLY_STAGED" || ! chmod 0600 "$REPLY_STAGED"; then
+        rm -f -- "$REPLY_STAGED"
+        REPLY_STAGED=''
+        REPLY_STAGE_ERROR="cannot persist agent reply"
+        return 1
+      fi
+      argv[i + 1]=$REPLY_STAGED
+      i=$((i + 2))
+    else
+      i=$((i + 1))
+    fi
+  done
+  return 0
+}
+
+# Acknowledge every open captured round of a just-published re-arm and sweep
+# earlier generations' staged replies. REARM_ACKNOWLEDGED lists the sequences
+# acknowledged. The acknowledgement is all or nothing: when one round cannot be
+# recorded, the rounds this call already recorded are pending again, the prior
+# registration is restored, this generation's reply is removed, REARM_ACK_FAILED
+# names the round, and the caller refuses the re-arm. The caller holds the
+# source lock, which every handled marker is recorded under.
+rearm_acknowledge_locked() {  # <source-id> <prior-record-or-empty> <staged-reply-or-empty>
+  local id=$1 prior=$2 reply=$3 pending seq stale
+  REARM_ACK_FAILED=''
+  REARM_ACKNOWLEDGED=()
+  while IFS= read -r pending; do
+    [ -n "$pending" ] || continue
+    seq=$(fm_procevent_result_sequence "$pending")
+    fm_procevent_mark_handled "$STATE" "$id" "$seq" >/dev/null 2>&1 || {
+      for seq in "${REARM_ACKNOWLEDGED[@]+"${REARM_ACKNOWLEDGED[@]}"}"; do
+        rm -f -- "$(fm_procevent_handled_marker "$STATE" "$id" "$seq")"
+      done
+      REARM_ACKNOWLEDGED=()
+      [ -z "$prior" ] || mv -f -- "$prior" "$(source_file "$id")"
+      [ -z "$reply" ] || rm -f -- "$reply"
+      REARM_ACK_FAILED=$pending
+      return 1
+    }
+    REARM_ACKNOWLEDGED+=("$seq")
+  done < <(source_pending "$id")
+  [ -z "$prior" ] || rm -f -- "$prior"
+  for stale in "$REG/.$id.reply."*; do
+    [ -e "$stale" ] || continue
+    case "$stale" in "$reply") continue ;; esac
+    rm -f -- "$stale"
+  done
+  return 0
+}
+
+# A firstmate-owned board answers a round the way a worker-owned one does: the
+# re-arm that carries the reply is the acknowledgement, so it needs a round to
+# answer and a registration to re-arm, and the reply rides the same staging and one-shot consumption. Rounds
+# can stack on a firstmate board, so one reply answers and acknowledges every
+# round still pending when it re-arms. The
+# one difference is the listener. A worker's board is not relaunched while its
+# round is open, but a firstmate board is, within one supervision cycle, and
+# that listener holds no reply. It is stopped here the way `retire` stops one,
+# so the reply generation's listener is the next poll. The published poll
+# keeps undelivered feedback queued for the next poll when a waiting poll is
+# stopped; the loss limitation in bin/fm-procevent-lavish.sh still applies.
+cmd_register_reply() {
+  local adapter=${1-} id=${2-} sep=${3-} pending pending_adapter pending_owner arg
+  local registered=0 pending_rounds=0 has_reply=0 claim_state stop_state
+  local reply_dest='' prior_record='' owner pid token identity seq
+  local -a argv=()
+  shift 3 2>/dev/null || usage
+  [ "$adapter" = lavish ] || die "register-reply is reserved for the Lavish adapter"
+  fm_procevent_source_id_valid "$id" || die "source id must be path-safe and at most 64 characters: $id"
+  [ "$sep" = -- ] || usage
+  [ "$#" -ge 1 ] || die "register-reply needs at least one argv element after --"
+  argv=("$@")
+  for arg in "${argv[@]}"; do
+    case "$arg" in *$'\n'*) die "argv elements cannot contain newlines" ;; esac
+    [ "$arg" != --agent-reply-file ] || has_reply=1
+  done
+  [ "$has_reply" -eq 1 ] || die "register-reply needs an --agent-reply-file in its argv; arm without a reply uses register"
+  [ -f "$(adapter_script "$adapter")" ] || die "no installed adapter for: $adapter"
+  state_root_bind create || die "cannot safely prepare the process-event state root"
+  (umask 077; mkdir -p "$REG") || die "cannot prepare the process-event registry"
+  fm_procevent_source_lock_acquire "$id" || die "cannot lock the source"
+  if [ -e "$(source_file "$id")" ] || [ -L "$(source_file "$id")" ]; then
+    registered=1
+    if [ "$(source_kind "$id" 2>/dev/null || true)" = task-owned ]; then
+      pending_owner=$(source_owner_task "$id")
+      fm_procevent_source_lock_release "$id"
+      die "cannot arm task-owned Lavish source $id owned by task $pending_owner; steer that task to re-arm its board"
+    fi
+    fm_procevent_extension_registration_load_locked "$STATE" "$id"
+    if [ "$?" -ne 1 ] || [ "$(read_adapter "$id" 2>/dev/null || true)" != "$adapter" ]; then
+      fm_procevent_source_lock_release "$id"
+      die "cannot reply on source $id: it is not a firstmate-owned $adapter registration"
+    fi
+  fi
+  while IFS= read -r pending; do
+    [ -n "$pending" ] || continue
+    pending_rounds=$((pending_rounds + 1))
+    pending_owner=$(fm_procevent_result_owner_task "$pending" 2>/dev/null || true)
+    if [ -n "$pending_owner" ]; then
+      fm_procevent_source_lock_release "$id"
+      die "cannot arm source $id while its unacknowledged capture $pending belongs to task $pending_owner; that owner acknowledges it first"
+    fi
+    pending_adapter=$(fm_procevent_result_adapter "$pending" 2>/dev/null || true)
+    if [ -n "$pending_adapter" ] && adapter_result_is_terminal "$pending_adapter" "$pending"; then
+      fm_procevent_source_lock_release "$id"
+      die "cannot reply to terminal Lavish result $pending; the review has ended, so acknowledge it with bin/fm-procevent.sh handled"
+    fi
+  done < <(source_pending "$id")
+  if [ "$pending_rounds" -eq 0 ]; then
+    fm_procevent_source_lock_release "$id"
+    die "cannot re-arm source $id with a reply: no captured round is waiting to be acknowledged"
+  fi
+  if [ "$registered" -eq 0 ]; then
+    fm_procevent_source_lock_release "$id"
+    die "cannot re-arm source $id with a reply: the board is not armed, so its waiting round is acknowledged with bin/fm-procevent.sh handled"
+  fi
+  owner=''
+  fm_procevent_claim_state_locked "$id"
+  claim_state=$?
+  case "$claim_state" in
+    0)
+      if ! fm_procevent_claim_owned_by_state "$STATE" "$FM_HOME"; then
+        fm_procevent_source_lock_release "$id"
+        die "cannot re-arm source $id with a reply: another home's listener is serving this board"
+      fi
+      owner=$FM_PROCEVENT_CLAIM_HOME
+      pid=$FM_PROCEVENT_CLAIM_PID
+      token=$FM_PROCEVENT_CLAIM_TOKEN
+      identity=$FM_PROCEVENT_CLAIM_IDENTITY
+      ;;
+    1)
+      if fm_procevent_claim_undisplaceable_locked "$id"; then
+        fm_procevent_source_lock_release "$id"
+        die "cannot re-arm source $id with a reply: its earlier listener's process group may still be polling the board"
+      fi
+      ;;
+    *)
+      fm_procevent_source_lock_release "$id"
+      die "cannot re-arm source $id with a reply: its current listener cannot be proved stopped"
+      ;;
+  esac
+  reply_stage_locked "$id"
+  case "$?" in
+    0) ;;
+    2) fm_procevent_source_lock_release "$id"; usage ;;
+    *) fm_procevent_source_lock_release "$id"; die "$REPLY_STAGE_ERROR" ;;
+  esac
+  reply_dest=$REPLY_STAGED
+  prior_record=$(umask 077; mktemp "$REG/.$id.prior.XXXXXX") || {
+    rm -f -- "$reply_dest"
+    fm_procevent_source_lock_release "$id"
+    die "cannot stage the registration this re-arm replaces: $id"
+  }
+  if ! cat -- "$(source_file "$id")" > "$prior_record"; then
+    rm -f -- "$prior_record" "$reply_dest"
+    fm_procevent_source_lock_release "$id"
+    die "cannot read the registration this re-arm replaces: $id"
+  fi
+  if [ -n "$owner" ]; then
+    stop_runner_pid "$pid" "$identity"
+    stop_state=$?
+    if [ "$stop_state" -eq 2 ] \
+      || ! fm_procevent_claim_reclaim_locked "$id" "$owner" "$pid" "$token" 2>/dev/null; then
+      rm -f -- "$prior_record" "$reply_dest"
+      fm_procevent_source_lock_release "$id"
+      die "cannot stop the earlier listener; the board keeps its current registration: $id"
+    fi
+    rm -f -- "$(staging_file "$id" "$token")" "$(runner_file "$id")"
+  fi
+  if ! fm_procevent_registration_publish_locked "$STATE" "$adapter" "$id" "${argv[@]}"; then
+    rm -f -- "$prior_record" "$reply_dest"
+    fm_procevent_source_lock_release "$id"
+    die "cannot publish the registration"
+  fi
+  if ! rearm_acknowledge_locked "$id" "$prior_record" "$reply_dest"; then
+    fm_procevent_source_lock_release "$id"
+    die "cannot acknowledge captured round: $REARM_ACK_FAILED"
+  fi
+  fm_procevent_source_lock_release "$id"
+  owner_lease_refresh
+  printf 'registered: %s (%s, reply)\n' "$id" "$adapter"
+  for seq in "${REARM_ACKNOWLEDGED[@]+"${REARM_ACKNOWLEDGED[@]}"}"; do printf 'acknowledged: %s %s\n' "$id" "$seq"; done
 }
 
 new_extension_registration_token() {
@@ -2523,6 +2719,7 @@ unset FM_PROCEVENT_CAPTURE_PINNED_INBOX FM_PROCEVENT_CAPTURE_ABSOLUTE_INBOX \
 case "${1-}" in
   register)           shift; cmd_register "$@" ;;
   register-task)      shift; cmd_register_task "$@" ;;
+  register-reply)     shift; cmd_register_reply "$@" ;;
   register-extension) shift; cmd_register_extension "$@" ;;
   start)              shift; cmd_start_public "$@" ;;
   ensure-listening)   shift; cmd_ensure_listening "$@" ;;

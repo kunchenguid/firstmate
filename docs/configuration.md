@@ -1840,7 +1840,7 @@ A long-polling external process is registered as a *source* through its adapter,
 
 **Open the Lavish artifact first**
 
-Before arming any Lavish source, open its artifact with `lavish-axi` so the saved session identifies the board's server; each poll attempt derives its host and port from that session and refuses missing or invalid session evidence before consuming a staged worker reply.
+Before arming any Lavish source, open its artifact with `lavish-axi` so the saved session identifies the board's server; each poll attempt derives its host and port from that session and refuses missing or invalid session evidence before consuming a staged reply.
 
 **Retry interrupted Lavish polls**
 
@@ -1849,6 +1849,38 @@ This start-to-start governor is a no-op after a normally blocking poll but caps 
 
 Real feedback, ended and missing sessions, any other `SERVER_ERROR`, and that same interruption still standing once the bound is spent are all captured and announced normally; `FM_LAVISH_POLL_RETRY_DELAY` is a bounded 1 to 60 second test override for the interval only, and the runner itself stays adapter-agnostic.
 An already-armed Lavish source keeps its registered listener command until it is retired and armed again, so retire the source, then arm it again to adopt this retry policy.
+
+**Reply to a Lavish round**
+
+An owner that has applied captured nonterminal feedback answers it in the board's Conversation panel by re-arming the board with `--agent-reply-file <path>`, and that re-arm is the acknowledgement.
+Firstmate re-arms its own board with `bin/fm-procevent-lavish.sh arm <artifact.html> --agent-reply-file <path>`, and a worker adds `--for <task-id>` as the crew-hosted contract below requires.
+The file's contents are copied into that generation's private staging file and passed once to the published `--agent-reply` argument, leaving the caller's file in place.
+
+One reply answers every round still pending when the reply re-arm runs, and the re-arm acknowledges each of those rounds and prints `acknowledged: <source-id> <sequence>` for every one.
+A firstmate board keeps listening while firstmate applies feedback, so the captain can send another round in the meantime.
+Immediately before a reply re-arm, firstmate therefore checks the board's pending rounds, each a `state/procevent-inbox/<source-id>.<sequence>.result` with no `.handled` marker beside it, and reads and applies any it has not read, so the reply covers them.
+After the re-arm, firstmate compares the printed `acknowledged` sequences with the rounds it actually read.
+Any acknowledged sequence it did not read must still be read and applied, with its answer given in chat, because a further reply re-arm is refused with no round waiting.
+A later wake for an acknowledged sequence reports `already-handled` from `handled`: that records only that the re-arm acknowledged it, not that its feedback was read.
+A reply re-arm needs both an existing registration and at least one unacknowledged nonterminal round.
+Without a waiting round it is refused, so a generation already carrying a reply is never replaced before its listener posts it.
+Without a registration it is refused, so an explicitly retired, ended, or never-armed board takes no reply, even with a round still waiting.
+It is also refused for a terminal round, because no later poll could show the reply.
+A failed re-arm leaves the prior registration and its referenced reply unchanged, including when its required acknowledgement cannot be recorded.
+That acknowledgement is all or nothing: if any round's cannot be recorded, every round the re-arm covered stays pending and eligible for re-announcement.
+A reply re-arm whose new listener cannot be confirmed exits non-zero but keeps the new registration, because its rounds are already acknowledged and its reply staged, so the next `reconcile` relaunches it and that poll posts the reply.
+
+A worker's board is not relaunched while its round is open, but a firstmate board keeps listening between rounds, so by the time firstmate replies the supervision cycle has usually relaunched a listener that carries no reply.
+A firstmate reply re-arm therefore stops that earlier listener the way `retire` does and starts the reply generation's listener, so the next poll posts the reply.
+It refuses instead when another home owns that listener or when it cannot prove the listener stopped.
+The published poll keeps feedback queued when a waiting poll is stopped before feedback arrives; the Lavish limit in the durability guarantees below still covers a result the stopped poll had already returned.
+
+Reply posting is best effort by design.
+The listener consumes the staged file only after validating its own setup and the board artifact.
+The one loss window is a rare crash between consuming the file and making the call, which drops that round's reply rather than posting it twice.
+
+This path keeps no receipt, retry, or idempotency record.
+Robust reply delivery waits on lavish-axi's exclusive listener.
 
 ### Crew-hosted Lavish review boards
 
@@ -1871,17 +1903,8 @@ Re-arm is that acknowledgement and nothing else: the board is armed once while n
 
 **Stage an agent reply**
 
-Re-arm never acquires, releases, or hands off the source claim.
-It may carry `--agent-reply-file <path>`.
-The file's contents are copied into that generation's private staging file and passed once to the published `--agent-reply` argument.
-
-A failed re-arm leaves the prior registration and its referenced reply unchanged, including when its required acknowledgement cannot be recorded.
-Reply posting is best effort by design.
-The listener consumes the staged file only after validating its own setup and the board artifact.
-The one loss window is a rare crash between consuming the file and making the call, which drops that round's reply rather than posting it twice.
-
-This path keeps no receipt, retry, or idempotency record.
-Robust reply delivery waits on lavish-axi's exclusive listener.
+A worker's re-arm never acquires, releases, or hands off the source claim.
+It may carry `--agent-reply-file <path>`, which follows the [Lavish round reply contract](#process-to-event-sources-stateprocevent) above.
 
 **Deliver feedback to the worker**
 
@@ -2198,7 +2221,7 @@ A value this command cannot use is refused by name before anything is launched, 
 
 The runner proves exactly one durability boundary: output that reached the runner is stored at mode `0600` before any event referencing it is published, and a captured result with no durable handled acknowledgement remains eligible for bounded re-announcement across any number of drains and restarts, not only the crash window right after capture.
 
-- `bin/fm-procevent.sh handled <source-id> <sequence>` is the only thing that stops re-announcement: a generation-keyed, private, path-safe, durable, and idempotent acknowledgement that atomically checks and deduplicates by the exact source and sequence, so a paired effect gated on its first-time-vs-repeat report is never authorized twice.
+- `bin/fm-procevent.sh handled <source-id> <sequence>`, or a [Lavish reply re-arm](#process-to-event-sources-stateprocevent) that records the same marker, is the only thing that stops re-announcement: a generation-keyed, private, path-safe, durable, and idempotent acknowledgement that atomically checks and deduplicates by the exact source and sequence, so a paired effect gated on its first-time-vs-repeat report is never authorized twice.
 - Default and fallback `check` publication is still best-effort, so the same source and sequence can repeat even before any restart; handlers deduplicate that identity rather than assuming a wake is unique.
 - The runner proves nothing about the source side, and the handled acknowledgement proves nothing about a paired external effect performed before it: a crash between that effect and the acknowledgement call can still repeat the effect on replay, so this is never a generic exactly-once guarantee.
 - The published `lavish-axi poll` clears feedback destructively before returning it, so a result lost between that clearing and the runner reading process output is unrecoverable.

@@ -34,9 +34,17 @@ For a Lavish review artifact firstmate owns:
 bin/fm-procevent-lavish.sh arm <artifact.html>
 ```
 
+After applying the nonterminal feedback on a board you own, answer the captain in its Conversation panel by re-arming it with your reply before you acknowledge the rounds:
+
+```sh
+bin/fm-procevent-lavish.sh arm <artifact.html> --agent-reply-file <reply.md>
+```
+
+That one reply answers and acknowledges every round still pending on the board, printing `acknowledged: <source-id> <sequence>` for each; follow the [round reply contract](../../../docs/configuration.md#process-to-event-sources-stateprocevent) for checking pending rounds right before the re-arm and for any acknowledged sequence you never read, since its `already-handled` does not mean you read it.
+It is refused on a board that is not armed, including a retired, ended, or never-armed one, when no unacknowledged round is waiting, and when a waiting round is terminal.
 A worker-owned board uses `bin/fm-procevent-lavish.sh arm <artifact.html> --for <task-id>` and re-arms with its reply after each nonterminal round; the existing handled marker is the acknowledgement.
 Arm it once, then re-arm only when a round is actually waiting: arming again with nothing to acknowledge is refused, because it would discard the reply your listener is still holding.
-Posting that reply is best effort: a rare crash while the listener consumes the staged file drops that one round's reply rather than posting it twice, and robust reply delivery waits on lavish-axi's exclusive listener.
+The [round reply contract](../../../docs/configuration.md#process-to-event-sources-stateprocevent) owns reply staging, the refusals, and why posting the reply is best effort.
 A terminal round is never re-armed: the board stays yours until you acknowledge it with `bin/fm-procevent.sh handled <source-id> <sequence>`, which retires it, and until then `retire` refuses the board too.
 Never arm a board that a live task hosts; follow the crew-hosted Lavish board contract in [`docs/configuration.md`](../../../docs/configuration.md#crew-hosted-lavish-review-boards).
 
@@ -112,7 +120,7 @@ Two rules the commands cannot enforce for you:
   ```sh
   bin/fm-procevent.sh handled <source-id> <sequence>
   ```
-  This call is atomically deduplicated by the exact source and sequence: it prints `handled: <id> <seq>` only the first time and `already-handled: <id> <seq>` on every repeat, so a paired effect gated on that distinction is never authorized twice. Reading the event line or the result file is not handling - only this call durably retires the wake, so call it every time, including on a repeat wake for a sequence you already acted on.
+  This call is atomically deduplicated by the exact source and sequence: it prints `handled: <id> <seq>` only the first time and `already-handled: <id> <seq>` on every repeat, so a paired effect gated on that distinction is never authorized twice. Reading the event line or the result file is not handling - only this call, or the Lavish reply re-arm above, durably retires the wake, so call it every time, including on a repeat wake for a sequence you already acted on.
 : Ask the adapter what the result means rather than parsing it yourself.
   `bin/fm-procevent.sh classify <result-file>` routes through the immutable built-in or extension identity captured with that result; for Lavish, its existing direct command returns `feedback`, `ended`, `waiting`, `disconnected`, `missing`, or `unknown`.
   Consume a Lavish capture with `bin/fm-procevent-lavish.sh read <result-file>` rather than grepping the raw file: that command reports declared and presented item counts plus a completeness verdict, enumerates every captured queued item while retaining supplied element identity, and surfaces a `tag=message` freeform message as its own field, labeling it as session-ending only when the session ended.
