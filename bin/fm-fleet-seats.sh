@@ -132,7 +132,7 @@ SERVE_TIMEOUT=20
 SERVE_BACKOFF=${FM_FLEET_SEATS_TEST_BACKOFF:-120}
 
 usage() {
-  echo "usage: fm-fleet-seats.sh reserve <id> --harness <harness> --model <model|default> --holder-pid <pid> [--raw-launch] [--relaunch-hold <token>] | cancel-relaunch <id> --token <token> | serve-remotes | serve --digest <digest> [--allowance <pool>=<n>]..." >&2
+  echo "usage: fm-fleet-seats.sh reserve <id> --harness <harness> --model <model|default> --holder-pid <pid> [--raw-launch] [--relaunch-hold <token>] | cancel-relaunch <id> --token <token> [--confirmed-dead] | reconcile-relaunch <id> --token <token> --model <model> --holder-pid <pid> | serve-remotes | serve --digest <digest> [--allowance <pool>=<n>]..." >&2
   exit 2
 }
 
@@ -183,7 +183,7 @@ policy_digest() { jq -cS . "$1" | cksum | tr -s ' ' '-' | cut -d- -f1-2; }
 resolve_authority() {
   local home_canon root
   ROOT_REMOTE=0 ROOT_SELF=0
-  ROOT_STATE='' ROOT_CONFIG='' ROOT_DATA=''
+  ROOT_HOME='' ROOT_STATE='' ROOT_CONFIG='' ROOT_DATA=''
   home_canon=$(canon_dir "$FM_HOME") || return 1
   root=$(fm_firstmate_root_home "$home_canon") || return 1
   if [ -e "$root/.fm-secondmate-parent" ] || [ -L "$root/.fm-secondmate-parent" ]; then
@@ -192,6 +192,7 @@ resolve_authority() {
     ROOT_REMOTE=1
     return 0
   fi
+  ROOT_HOME=$root
   if [ "$root" = "$home_canon" ]; then
     ROOT_SELF=1
     ROOT_STATE=$STATE ROOT_CONFIG=$CONFIG ROOT_DATA=$DATA
@@ -209,6 +210,16 @@ meta_state() {
   fi
   [ -f "$meta" ] && [ -r "$meta" ] || { echo unreadable; return; }
   kind=$(sed -n 's/^kind=//p' "$meta" | tail -1)
+  if [ -n "$(sed -n 's/^remote_host=//p' "$meta" | tail -1)" ]; then
+    case "$(sed -n 's/^fleet_seat_state=//p' "$meta" | tail -1)" in
+      dead)
+        [ -n "$(sed -n 's/^fleet_seat_dead_token=//p' "$meta" | tail -1)" ] \
+          || { echo unreadable; return; }
+        echo dead; return ;;
+      '') ;;
+      *) echo unreadable; return ;;
+    esac
+  fi
   if [ "$kind" = secondmate ] && [ -z "$(sed -n 's/^remote_host=//p' "$meta" | tail -1)" ]; then
     home=$(sed -n 's/^home=//p' "$meta" | tail -1)
     if [ -n "$home" ] && [ -d "$home/state" ]; then
@@ -255,15 +266,25 @@ write_record() {
   } > "$path.tmp.$$" && mv -f "$path.tmp.$$" "$path"
 }
 
+remote_hold_confirmed_dead() {
+  local state_out
+  state_out=$(FM_HOME="$ROOT_HOME" FM_STATE_OVERRIDE="$ROOT_STATE" \
+    FM_CONFIG_OVERRIDE="$ROOT_CONFIG" FM_DATA_OVERRIDE="$ROOT_DATA" \
+    fm_run_timed 20 "$SCRIPT_DIR/fm-on.sh" "$1" \
+      fm-remote-secondmate-control.sh state "$1" </dev/null 2>/dev/null) || return 1
+  [ "$state_out" = dead ]
+}
+
 # seat_records <root> <models-file> <remove-stale 0|1>: "<state>\t<id>" per live record.
 seat_records() {
-  local dir=$1 models=$2 remove_stale=$3 f st task model verdict
+  local dir=$1 models=$2 remove_stale=$3 f st task model verdict hold
   [ -d "$dir" ] || return 0
   for f in "$dir"/*/*.seat "$dir"/.[!.]*/*.seat "$dir"/..?*/*.seat; do
     [ -f "$f" ] || continue
     st=$(record_field "$f" state)
     task=$(record_field "$f" task)
     model=$(record_field "$f" model)
+    hold=$(record_field "$f" hold)
     if [ -z "$st" ] || [ -z "$task" ]; then
       [ "$remove_stale" -eq 0 ] || rm -f "$f"
       continue
@@ -273,15 +294,35 @@ seat_records() {
       [ "$remove_stale" -eq 0 ] || rm -f "$f"
       continue
     fi
-    if ! grep -Fxq -- "$model" "$models"; then
-      if [ "$remove_stale" -eq 1 ] \
-        && ! holder_alive "$(record_field "$f" pid)" "$(record_field "$f" pid_identity)"; then
+    verdict=$(meta_state "$st/$task.meta" "$models")
+    if [ "$verdict" = dead ]; then
+      if [ "$hold" = relaunch ] \
+        && [ "$(record_field "$f" nonce)" != "$(record_field "$st/$task.meta" fleet_seat_dead_token)" ]; then
+        if ! holder_alive "$(record_field "$f" pid)" "$(record_field "$f" pid_identity)" ] \
+          && [ "$st" = "$ROOT_STATE" ] && remote_hold_confirmed_dead "$task"; then
+          [ "$remove_stale" -eq 0 ] || rm -f "$f"
+          continue
+        fi
+        grep -Fxq -- "$model" "$models" && printf '%s\t%s\n' "$st" "$task"
+      elif [ "$remove_stale" -eq 1 ]; then
         rm -f "$f"
       fi
       continue
     fi
-    verdict=$(meta_state "$st/$task.meta" "$models")
-    if [ "$(record_field "$f" hold)" = relaunch ]; then
+    if [ "$hold" = relaunch ] && [ "$verdict" = absent ] \
+      && ! holder_alive "$(record_field "$f" pid)" "$(record_field "$f" pid_identity)" ] \
+      && [ "$st" = "$ROOT_STATE" ] && remote_hold_confirmed_dead "$task"; then
+      [ "$remove_stale" -eq 0 ] || rm -f "$f"
+      continue
+    fi
+    if ! grep -Fxq -- "$model" "$models"; then
+      if [ "$hold" != relaunch ] && [ "$remove_stale" -eq 1 ] \
+        && ! holder_alive "$(record_field "$f" pid)" "$(record_field "$f" pid_identity)" ]; then
+        rm -f "$f"
+      fi
+      continue
+    fi
+    if [ "$hold" = relaunch ]; then
       if [ "$verdict" != pooled ] || [ "$(record_field "$st/$task.meta" model)" != "$model" ]; then
         printf '%s\t%s\n' "$st" "$task"
         continue
@@ -425,7 +466,7 @@ require_explicit_model() {
 
 CMD=${1:-}
 shift 2>/dev/null || true
-TASK='' MODEL='' HOLDER='' HARNESS='' DIGEST_ARG='' RAW_LAUNCH=0 RELAUNCH_TOKEN=''
+TASK='' MODEL='' HOLDER='' HARNESS='' DIGEST_ARG='' RAW_LAUNCH=0 RELAUNCH_TOKEN='' CONFIRMED_DEAD=0
 ALLOWANCES=''
 case "$CMD" in
   reserve)
@@ -449,8 +490,19 @@ case "$CMD" in
     TASK=${1:-}
     shift 2>/dev/null || true
     id_ok "$TASK" || usage
-    [ "${1:-}" = --token ] && [ "$#" -eq 2 ] || usage
-    RELAUNCH_TOKEN=$2
+    [ "${1:-}" = --token ] && [ "$#" -ge 2 ] || usage
+    RELAUNCH_TOKEN=$2; shift 2
+    if [ "${1:-}" = --confirmed-dead ]; then CONFIRMED_DEAD=1; shift; fi
+    [ "$#" -eq 0 ] || usage
+    case "$RELAUNCH_TOKEN" in ''|*[!A-Za-z0-9._-]*) usage ;; esac
+    ;;
+  reconcile-relaunch)
+    TASK=${1:-}
+    shift 2>/dev/null || true
+    id_ok "$TASK" || usage
+    [ "${1:-}" = --token ] && [ "${3:-}" = --model ] \
+      && [ "${5:-}" = --holder-pid ] && [ "$#" -eq 6 ] || usage
+    RELAUNCH_TOKEN=$2 MODEL=$4 HOLDER=$6
     case "$RELAUNCH_TOKEN" in ''|*[!A-Za-z0-9._-]*) usage ;; esac
     ;;
   serve-remotes) [ "$#" -eq 0 ] || usage ;;
@@ -499,7 +551,7 @@ elif [ "$CMD" = serve-remotes ] && [ "$ROOT_SELF" -eq 1 ] \
   exit 0
 fi
 
-[ "$CMD" = cancel-relaunch ] || command -v jq >/dev/null 2>&1 || unavailable "jq is not installed"
+case "$CMD" in cancel-relaunch) ;; *) command -v jq >/dev/null 2>&1 || unavailable "jq is not installed" ;; esac
 TMPD=$(mktemp -d "${TMPDIR:-/tmp}/fm-fleet-seats.XXXXXX") || unavailable "cannot create a scratch directory"
 LOCK_HELD=
 REGISTRY_ERROR=
@@ -512,17 +564,70 @@ trap cleanup EXIT
 if [ "$CMD" = cancel-relaunch ]; then
   [ "$ROOT_SELF" -eq 1 ] || unavailable "only the fleet root can cancel a remote relaunch seat"
   SEATROOT=$ROOT_STATE/fleet-seats
-  [ -d "$SEATROOT" ] || exit 0
   CALLER_STATE=$(canon_dir "$STATE") || unavailable "this home's state directory $STATE is missing"
   lock_or_refuse "$ROOT_STATE/.fleet-seats.lock"
+  if [ "$CONFIRMED_DEAD" -eq 1 ]; then
+    meta=$CALLER_STATE/$TASK.meta
+    [ -f "$meta" ] && [ ! -L "$meta" ] && [ -r "$meta" ] \
+      && [ -n "$(record_field "$meta" remote_host)" ] \
+      || unavailable "the confirmed dead remote supervisor record for $TASK is unavailable"
+    { printf 'fleet_seat_state=dead\nfleet_seat_dead_token=%s\n' "$RELAUNCH_TOKEN"; \
+      sed '/^fleet_seat_state=/d; /^fleet_seat_dead_token=/d' "$meta"; } \
+      > "$meta.tmp.$$" && chmod 0600 "$meta.tmp.$$" \
+      && mv -f "$meta.tmp.$$" "$meta" \
+      || unavailable "cannot record the confirmed dead supervisor $TASK"
+  fi
+  for f in "$SEATROOT"/*/"$(seat_name "$CALLER_STATE" "$TASK")".seat; do
+    [ -f "$f" ] || continue
+    [ "$(record_field "$f" state)" = "$CALLER_STATE" ] || continue
+    [ "$(record_field "$f" task)" = "$TASK" ] || continue
+    [ "$(record_field "$f" hold)" = relaunch ] || continue
+    if [ "$CONFIRMED_DEAD" -eq 0 ]; then
+      [ "$(record_field "$f" nonce)" = "$RELAUNCH_TOKEN" ] || continue
+    fi
+    rm -f "$f" || unavailable "cannot cancel the confirmed failed relaunch seat for $TASK"
+  done
+  exit 0
+fi
+
+if [ "$CMD" = reconcile-relaunch ]; then
+  [ "$ROOT_SELF" -eq 1 ] || unavailable "only the fleet root can reconcile a remote launch"
+  [ -e "$ROOT_CONFIG/fleet-seats" ] || exit 0
+  validate_pools "$ROOT_CONFIG/fleet-seats" || unavailable "the fleet seat policy is malformed"
+  case "$MODEL" in ''|-|default) unavailable "the confirmed remote model is unresolved" ;; esac
+  fm_pid_alive "$HOLDER" || unavailable "holder pid $HOLDER is not a running process"
+  CALLER_STATE=$(canon_dir "$STATE") || unavailable "this home's state directory $STATE is missing"
+  SEATROOT=$ROOT_STATE/fleet-seats
+  lock_or_refuse "$ROOT_STATE/.fleet-seats.lock"
+  old=
   for f in "$SEATROOT"/*/"$(seat_name "$CALLER_STATE" "$TASK")".seat; do
     [ -f "$f" ] || continue
     [ "$(record_field "$f" state)" = "$CALLER_STATE" ] || continue
     [ "$(record_field "$f" task)" = "$TASK" ] || continue
     [ "$(record_field "$f" hold)" = relaunch ] || continue
     [ "$(record_field "$f" nonce)" = "$RELAUNCH_TOKEN" ] || continue
-    rm -f "$f" || unavailable "cannot cancel the confirmed failed relaunch seat for $TASK"
+    old=$f
+    break
   done
+  [ -n "$old" ] || unavailable "the remote launch hold for $TASK is missing"
+  line=$(pool_for_model "$ROOT_CONFIG/fleet-seats" "$MODEL")
+  if [ -n "$line" ]; then
+    pool=${line%%$'\t'*}
+    mkdir -p "$SEATROOT/$pool" || unavailable "cannot create the confirmed model's seat directory"
+    target=$SEATROOT/$pool/$(seat_name "$CALLER_STATE" "$TASK").seat
+    if [ -e "$target" ] && [ "$target" != "$old" ]; then
+      [ "$(record_field "$target" state)" = "$CALLER_STATE" ] \
+        && [ "$(record_field "$target" task)" = "$TASK" ] \
+        && [ "$(record_field "$target" model)" = "$MODEL" ] \
+        || unavailable "another seat record already owns the confirmed model for $TASK"
+    else
+      write_record "$target" "$CALLER_STATE" "$TASK" "$MODEL" "$HOLDER" "$RELAUNCH_TOKEN" '' relaunch \
+        || unavailable "cannot account for the confirmed remote model $MODEL"
+    fi
+    [ "$target" = "$old" ] || rm -f "$old" || unavailable "cannot retire the unconfirmed model's seat"
+  else
+    rm -f "$old" || unavailable "cannot retire the unconfirmed model's seat"
+  fi
   exit 0
 fi
 
@@ -784,6 +889,7 @@ elif [ "$?" -eq 3 ]; then
 else
   unavailable "${REGISTRY_ERROR:-a fleet task record cannot be read}"
 fi
+EXISTING_HOLD=0
 if [ -n "$RELAUNCH_TOKEN" ]; then
   for f in "$SEATROOT"/*/"$(seat_name "$CALLER_STATE" "$TASK")".seat; do
     [ -f "$f" ] || continue
@@ -791,6 +897,10 @@ if [ -n "$RELAUNCH_TOKEN" ]; then
     [ "$(record_field "$f" task)" = "$TASK" ] || continue
     [ "$(record_field "$f" hold)" = relaunch ] || continue
     [ "$(record_field "$f" nonce)" = "$RELAUNCH_TOKEN" ] && continue
+    if [ "$(record_field "$f" model)" = "$MODEL" ]; then
+      EXISTING_HOLD=1
+      continue
+    fi
     if [ "$(record_field "$CALLER_STATE/$TASK.meta" model)" = "$(record_field "$f" model)" ] \
       && [ -n "$(record_field "$CALLER_STATE/$TASK.meta" remote_host)" ]; then
       rm -f "$f" || unavailable "cannot retire the published relaunch seat for $TASK"
@@ -807,8 +917,10 @@ if ! grep -Fxq -- "$KEY" "$TMPD/holders" && [ "$USED" -ge "$CAP" ]; then
 fi
 
 SEAT=$SEATROOT/$POOL/$(seat_name "$CALLER_STATE" "$TASK").seat
-write_record "$SEAT" "$CALLER_STATE" "$TASK" "$MODEL" "$HOLDER" "$RELAUNCH_TOKEN" '' "${RELAUNCH_TOKEN:+relaunch}" \
-  || unavailable "cannot write $SEAT"
+if [ "$EXISTING_HOLD" -eq 0 ]; then
+  write_record "$SEAT" "$CALLER_STATE" "$TASK" "$MODEL" "$HOLDER" "$RELAUNCH_TOKEN" '' "${RELAUNCH_TOKEN:+relaunch}" \
+    || unavailable "cannot write $SEAT"
+fi
 if grep -Fxq -- "$KEY" "$TMPD/holders"; then
   echo "fleet-seats: reserved pool=$POOL id=$TASK (already held) used=$USED capacity=$CAP"
 else

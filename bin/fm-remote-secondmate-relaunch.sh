@@ -59,8 +59,13 @@ RELAUNCH_OUT=$(fm_run_timed 300 "$SCRIPT_DIR/fm-on.sh" "$ID" fm-remote-secondmat
   rc=$?
   printf '%s\n' "$RELAUNCH_OUT" >&2
   if printf '%s\n' "$RELAUNCH_OUT" | grep -Eq '^relaunch_failure=(prelaunch|launch)$'; then
-    "$SCRIPT_DIR/fm-fleet-seats.sh" cancel-relaunch "$ID" --token "$RELAUNCH_TOKEN" \
-      || die "the confirmed failed relaunch seat for $ID could not be released"
+    if printf '%s\n' "$RELAUNCH_OUT" | grep -Fxq 'relaunch_failure=launch'; then
+      "$SCRIPT_DIR/fm-fleet-seats.sh" cancel-relaunch "$ID" --token "$RELAUNCH_TOKEN" --confirmed-dead \
+        || die "the confirmed failed relaunch seat for $ID could not be released"
+    else
+      "$SCRIPT_DIR/fm-fleet-seats.sh" cancel-relaunch "$ID" --token "$RELAUNCH_TOKEN" \
+        || die "the confirmed failed relaunch seat for $ID could not be released"
+    fi
   fi
   exit "$rc"
 }
@@ -95,7 +100,7 @@ META_TMP=$(mktemp "$STATE/.fm-remote-relaunch-meta.XXXXXX") || {
 # a task that already had one armed.
 while IFS= read -r line || [ -n "$line" ]; do
   case "$line" in
-    harness=*|model=*|effort=*) ;;
+    harness=*|model=*|effort=*|fleet_seat_state=*|fleet_seat_dead_token=*) ;;
     *) printf '%s\n' "$line" >> "$META_TMP" ;;
   esac
 done < "$META"

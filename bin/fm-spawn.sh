@@ -1266,7 +1266,8 @@ fi
 
 spawn_remote_secondmate() {
   local id=$1 remote host root home harness positional model effort backend out rc meta tmp
-  local remote_backend remote_target remote_harness remote_herdr_session registry_lock remote_lock remote_generation
+  local remote_backend remote_target remote_harness remote_model remote_herdr_session registry_lock remote_lock remote_generation
+  local requested_model model_mismatch=0
   local remote_traceparent remote_recorded_traceparent sm_primary_head sync_out sync_rc account_config
   local -a launch_args
   id=${POS[0]:-}
@@ -1497,6 +1498,7 @@ spawn_remote_secondmate() {
   remote_backend=$(printf '%s\n' "$out" | sed -n 's/^backend=//p' | tail -1)
   remote_target=$(printf '%s\n' "$out" | sed -n 's/^target=//p' | tail -1)
   remote_harness=$(printf '%s\n' "$out" | sed -n 's/^harness=//p' | tail -1)
+  remote_model=$(printf '%s\n' "$out" | sed -n 's/^model=//p' | tail -1)
   remote_herdr_session=$(printf '%s\n' "$out" | sed -n 's/^herdr_session=//p' | tail -1)
   if [ "$remote_backend" != herdr ]; then
     fm_lock_release "$remote_lock" || true
@@ -1518,6 +1520,27 @@ spawn_remote_secondmate() {
     fm_lock_release "$SPAWN_TASK_LOCK" || true
     echo "error: remote launch returned Herdr session '${remote_herdr_session:-missing}', expected 'fm-remote'; preserving the remote route for reconciliation" >&2
     return 1
+  fi
+  if [ -z "$remote_model" ] || [ "$remote_model" = - ]; then
+    fm_lock_release "$remote_lock" || true
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: remote launch did not confirm its model; preserving its fleet seat for reconciliation" >&2
+    return 1
+  fi
+  requested_model=${model#-}
+  if [ "$remote_model" != "$requested_model" ]; then
+    if ! FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG FM_DATA_OVERRIDE=$DATA \
+      "$SCRIPT_DIR/fm-fleet-seats.sh" reconcile-relaunch "$id" --token "$seat_token" \
+      --model "$remote_model" --holder-pid "$$"; then
+      fm_lock_release "$remote_lock" || true
+      fm_lock_release "$registry_lock" || true
+      fm_lock_release "$SPAWN_TASK_LOCK" || true
+      echo "error: remote secondmate $id confirmed model ${remote_model:-default}, but its fleet seat could not be reconciled" >&2
+      return 1
+    fi
+    model=$remote_model
+    model_mismatch=1
   fi
   # Record what the remote endpoint ACTUALLY carries, read back from its own
   # launch, rather than what this side hoped to deliver. That keeps the #995
@@ -1573,6 +1596,13 @@ spawn_remote_secondmate() {
     return 1
   fi
   [ ! -e "$CONFIG/fleet-ledger" ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" dispatched "$id" secondmate "" "$harness" "${model#-}" || true
+  if [ "$model_mismatch" -eq 1 ]; then
+    if [ -e "$CONFIG/fleet-seats" ] || [ -L "$CONFIG/fleet-seats" ]; then
+      echo "error: remote secondmate $id remains on confirmed model ${remote_model:-default}; requested model $requested_model was not launched" >&2
+      return 1
+    fi
+    echo "warning: remote secondmate $id remains on confirmed model ${remote_model:-default}; requested model $requested_model was not launched" >&2
+  fi
   echo "spawned $id harness=$harness kind=secondmate mode=secondmate yolo=off window=remote:$id worktree=$home remote=$host backend=$remote_backend"
   return 0
 }

@@ -178,14 +178,15 @@ cmd_launch() {
   local current meta out herdr_session
 
   validate_id "$id"
-  validate_home "$id"
+  ( validate_home "$id" ) || prelaunch_die "remote secondmate home validation failed"
   case "$harness" in
     claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|omp) ;;
     *) prelaunch_die "unverified remote secondmate harness: $harness" ;;
   esac
   case "$effort" in -|low|medium|high|xhigh|max|ultra) ;; *) prelaunch_die "invalid remote secondmate effort: $effort" ;; esac
   if [ "$effort" = ultra ]; then
-    "$SCRIPT_DIR/fm-harness.sh" validate-native-effort "$harness" "$model" "$effort" || return 1
+    "$SCRIPT_DIR/fm-harness.sh" validate-native-effort "$harness" "$model" "$effort" \
+      || prelaunch_die "remote secondmate native effort validation failed"
   fi
   # Herdr is required on this host, not merely preferred: its server belongs to
   # the GUI login session, so the endpoint survives every SSH disconnection that
@@ -250,7 +251,7 @@ cmd_relaunch() {
   local -a control_args
 
   validate_id "$id"
-  validate_home "$id"
+  ( validate_home "$id" ) || prelaunch_die "remote secondmate home validation failed"
   case "$harness" in
     claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|omp) ;;
     *) prelaunch_die "unverified remote secondmate harness: $harness" ;;
@@ -258,7 +259,8 @@ cmd_relaunch() {
   case "$effort" in -|default|low|medium|high|xhigh|max|ultra) ;; *) prelaunch_die "invalid remote secondmate effort: $effort" ;; esac
   case "$model" in *[[:space:]]*) prelaunch_die "invalid remote secondmate model: $model" ;; esac
   if [ "$effort" = ultra ]; then
-    "$SCRIPT_DIR/fm-harness.sh" validate-native-effort "$harness" "$model" "$effort" || return 1
+    "$SCRIPT_DIR/fm-harness.sh" validate-native-effort "$harness" "$model" "$effort" \
+      || prelaunch_die "remote secondmate native effort validation failed"
   fi
   remote_endpoint_require "$id"
   [ "$model" != - ] || model=default
