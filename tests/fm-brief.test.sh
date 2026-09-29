@@ -1034,7 +1034,7 @@ test_scout_and_secondmate_scaffold() {
 
 # Contract: a waiting worker spends no turns. A decision wait ends the turn, an
 # external wait sleeps in one bounded blocking shell command sized per harness,
-# and nothing tells a worker to list its inbox or poll a pipeline between holds.
+# and a waiting worker neither polls its inbox nor polls a pipeline between holds.
 test_workers_wait_without_spending_turns() {
   local home id brief
   home="$TMP_ROOT/wait-home"
@@ -1057,8 +1057,9 @@ test_workers_wait_without_spending_turns() {
       "$id: the wait a Claude Code worker may use is not named"
     assert_grep "reattach with \`no-mistakes axi run --wait\` instead, and never send the same \`respond\` again" "$brief" \
       "$id: a timed-out respond must reattach with axi run, never resend its answer"
-    assert_grep "never list the inbox on your own" "$brief" "$id: unprompted inbox listing is not forbidden"
-    assert_no_grep "natural checkpoint" "$brief" "$id: the brief still invites unprompted inbox listing"
+    assert_grep "Do not poll or list the inbox while waiting; a waiting instruction rings." "$brief" \
+      "$id: polling the inbox while waiting is not forbidden"
+    assert_grep "natural checkpoint" "$brief" "$id: the flag dropped the natural-checkpoint inbox check"
   done
   brief="$home/data/brief-wait-ship/brief.md"
   assert_grep "issue the same foreground call again" "$brief" \
@@ -1069,8 +1070,9 @@ test_workers_wait_without_spending_turns() {
     FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-wait-sm --secondmate --no-projects >/dev/null 2>&1 \
     || fail "fm-brief.sh secondmate scaffold exited non-zero"
   brief="$home/data/brief-wait-sm/brief.md"
-  assert_grep "never list the inbox on your own" "$brief" "secondmate: unprompted inbox listing is not forbidden"
-  assert_no_grep "natural checkpoint" "$brief" "secondmate: the charter still invites unprompted inbox listing"
+  assert_grep "Do not poll or list the inbox while waiting; a waiting instruction rings." "$brief" \
+    "secondmate: polling the inbox while waiting is not forbidden"
+  assert_grep "natural checkpoint" "$brief" "secondmate: the flag dropped the natural-checkpoint inbox check"
   pass "fm-brief: workers end the turn on a decision, wait in one bounded shell command, and never poll"
 }
 
@@ -1085,6 +1087,7 @@ test_wait_no_turns_absent_keeps_the_previous_brief() {
   brief="$home/data/brief-wait-off/brief.md"
   assert_no_grep "end your turn at once" "$brief" "an absent flag still added the waiting section"
   assert_grep "natural checkpoint" "$brief" "an absent flag dropped the unprompted inbox check"
+  assert_no_grep "Do not poll or list the inbox while waiting" "$brief" "an absent flag still added the no-poll inbox line"
   assert_grep "background the drive call" "$brief" "an absent flag replaced the backgrounded drive text"
   assert_no_grep "issue the same foreground call again" "$brief" \
     "an absent flag still asked for the foreground reattach"
