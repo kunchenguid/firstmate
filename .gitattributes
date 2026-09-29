@@ -1,2 +1,6 @@
 # Bash parses shell scripts with LF line endings on every supported platform.
 *.sh text eol=lf
+
+# Recorded terminal captures are byte-level evidence; their CR line endings
+# and control bytes are the fixture, so they must never be normalized.
+tests/captures/**/*.ansi -text
