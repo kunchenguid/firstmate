@@ -10,7 +10,7 @@ TMP_ROOT=$(fm_test_tmproot fm-teardown-endpoint-safety)
 # The fixture binds normal task records to Herdr; historical refusal is
 # covered by fm-retired-backends.test.sh, without weakening these lock tests.
 write_herdr_meta() {
-  local file=$1 arg id window='' binding=0
+  local file=$1 arg id window='' binding=0 generation=0
   shift
   id=$(basename "$file" .meta)
   local args=()
@@ -18,10 +18,12 @@ write_herdr_meta() {
     case "$arg" in
       window=*:fm-*) window="window=isolated:w1:p-$id"; args+=("$window") ;;
       endpoint_task_id=*) binding=1; args+=("$arg") ;;
+      spawn_gen=*) generation=1; args+=("$arg") ;;
       *) args+=("$arg") ;;
     esac
   done
   [ "$binding" = 1 ] || args+=("endpoint_task_id=$id")
+  [ "$generation" = 1 ] || args+=("spawn_gen=s-$id")
   fm_write_meta "$file" "backend=herdr" "herdr_session=isolated" \
     "herdr_workspace_id=w1" "herdr_tab_id=w1:t-$id" "herdr_pane_id=w1:p-$id" "${args[@]}"
 }
@@ -79,7 +81,7 @@ mark_case_as_treehouse_pool() {  # <case>
 
 claim_pool_slot() {  # <case> <task-id> [home]
   local dir=$1 id=$2 home=${3:-$1/home}
-  printf 'task=%s\nhome=%s\n' "$id" "$home" > "$dir/pool/1/.fm-slot-owner"
+  printf 'task=%s\nhome=%s\nspawn_gen=s-%s\n' "$id" "$home" "$id" > "$dir/pool/1/.fm-slot-owner"
 }
 
 run_case() {  # <case> <id>

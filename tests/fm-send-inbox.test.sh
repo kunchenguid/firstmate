@@ -324,7 +324,7 @@ PY
   FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" reconcile t1 --expected-revision 1 --record "$dir/home/candidate.json" >/dev/null || fail 'prepare action'
   run_send "$dir" "$dir/error" -- t1 --action-id t1.g1.a1 --expected-generation s1 "$payload" || fail "send goal: $(cat "$dir/error")"
   mv "$dir/home/state/t1.inbox/001.msg" "$dir/home/state/t1.inbox/handled/"
-  run_send "$dir" "$dir/error" -- t1 --action-id t1.g1.a1 --expected-generation s1 "$payload" || fail 'replay confirmed goal'
+  run_send "$dir" "$dir/error" -- t1 --action-id t1.g1.a1 --expected-generation s1 "$payload" || fail "replay confirmed goal: $(cat "$dir/error")"
   [ ! -e "$dir/home/state/t1.inbox/002.msg" ] || fail 'duplicate action enqueued'
   if run_send "$dir" "$dir/error" -- t1 --action-id t1.g1.a1 --expected-generation s1 changed; then fail 'action collision accepted'; fi
   jq -e '.next_action.phase=="confirmed" and .next_action.attempts==1' "$dir/home/data/t1/lifecycle.json" >/dev/null || fail 'missing action receipt'

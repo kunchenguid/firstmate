@@ -401,10 +401,10 @@ fm_control_require_recoverable_harness "$(fm_meta_get "$META" harness)" || exit 
 . "$SCRIPT_DIR/fm-task-lifecycle-lib.sh"
 TEARDOWN_LIFECYCLE_MODE=$(fm_task_lifecycle mode "$ID") || exit 1
 case "$TEARDOWN_LIFECYCLE_MODE" in
-  open|unknown) echo 'REFUSED: task goal still requires reconciliation; no cleanup performed' >&2; exit 1 ;;
+  unknown) echo 'REFUSED: task goal state is unknown; no cleanup performed' >&2; exit 1 ;;
 esac
 ENDPOINT_PHASE_DONE=0
-if [ "$ENDPOINT_ONLY" = 1 ] || { [ "$TEARDOWN_LIFECYCLE_MODE" != legacy ] && [ "$(fm_meta_get "$META" backend)" = herdr ]; }; then
+if [ "$ENDPOINT_ONLY" = 1 ] || { { [ "$TEARDOWN_LIFECYCLE_MODE" = accepted ] || [ "$TEARDOWN_LIFECYCLE_MODE" = archived ]; } && [ "$(fm_meta_get "$META" backend)" = herdr ]; }; then
   # This branch is before all worktree, slot, branch and record retirement
   # operations. It owns only positive endpoint identity and its receipts.
   # shellcheck source=bin/fm-teardown-endpoint-lib.sh
@@ -433,7 +433,7 @@ TEARDOWN_META_KIND=$(fm_meta_get "$META" kind)
   echo "REFUSED: task $ID is a historical secondmate record; automatic teardown is no longer supported and its home was left untouched" >&2
   exit 1
 }
-TEARDOWN_META_SPAWN_GEN=
+TEARDOWN_META_SPAWN_GEN=$(fm_meta_get "$META" spawn_gen)
 TEARDOWN_LEGACY_PENDING=0
 TEARDOWN_LEGACY_ACCEPTED=0
 TEARDOWN_LEGACY_ENDPOINT=

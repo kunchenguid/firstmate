@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Steer an ordinary task through its durable inbox or a verified local backend.
-# Usage: fm-send.sh <target> [--action-id <prepared-lifecycle-id>] [--resolve-key <key>]... <text...>
+# Usage: fm-send.sh <target> [--action-id <prepared-lifecycle-id> --expected-generation <spawn-gen>] [--resolve-key <key>]... <text...>
 # Special key form: fm-send.sh <target> --key Enter
 # Recorded historical secondmate or remote-home targets refuse before delivery.
 # Text addressed by task selector uses the durable inbox except harness-native
@@ -236,7 +236,6 @@ fi
 # message exactly as before, so ordinary sends are byte-identical.
 RESOLVE_KEYS=
 FIRE_AND_FORGET_ID=
-ACTION_ID=
 EXPECTED_GENERATION=
 fm_send_add_resolve_key() { # <key>
   local k=$1
@@ -525,9 +524,13 @@ else
     fi
     if [ -n "$ACTION_ID" ]; then
       BODY_SHA=$(printf '%s' "$MESSAGE" | python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')
-      if ! fm_task_lifecycle effect "$INBOX_TASK_ID" --action-id "$ACTION_ID" --payload-sha256 "$BODY_SHA" >/dev/null; then
+      EFFECT_RESULT=$(fm_task_lifecycle effect "$INBOX_TASK_ID" --action-id "$ACTION_ID" --payload-sha256 "$BODY_SHA") || {
         fm_lock_release "$INBOX_META_LOCK"
         exit 6
+      }
+      if [ "$(printf '%s' "$EFFECT_RESULT" | jq -r '.next_action.phase')" = confirmed ]; then
+        fm_lock_release "$INBOX_META_LOCK"
+        exit 0
       fi
       INBOX_RECORD=$(fm_task_inbox_write_handoff "$STATE" "$INBOX_TASK_ID" "$MESSAGE" "action.$ACTION_ID") || inbox_write_rc=$?
       if [ "${inbox_write_rc:-0}" -eq 0 ]; then

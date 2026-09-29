@@ -320,7 +320,7 @@ class Task:
                     require(text(continuation.get('release_ref')) and bool(re.fullmatch(r'[a-f0-9]{64}', str(continuation.get('release_sha256', '')))), 'blocker needs observable release condition')
                 else:
                     raise Refusal('unsupported continuation type')
-        if action and record['disposition'] != 'open':
+        if action and record['disposition'] == 'accepted':
             require(action['phase'] in ('confirmed', 'refused'), 'unreconciled action prevents terminal acceptance')
         if current:
             require(record.get('brief_sha256') == digest(regular(self.directory / 'brief.md')), 'brief changed; explicit reconciliation required')
@@ -506,10 +506,11 @@ class Task:
     def readback(self, args):
         record = self.read()
         require(record, 'no lifecycle to read back')
-        self.delegated(record, 'observe-receipt')
+        if os.environ.get('FM_SUPERVISION_ACTOR', 'main') == 'branch':
+            self.delegated(record, 'observe-receipt')
         action = record.get('next_action')
         require(action and action['phase'] in ('attempted', 'uncertain'), 'no uncertain action to read back')
-        if not action.get('continuation') and action['kind'] == 'steer':
+        if action['kind'] == 'steer':
             inbox = self.state / (self.id + '.inbox')
             matches = []
             for directory in (inbox, inbox / 'handled'):
@@ -548,9 +549,17 @@ class Task:
         require(record and record['disposition'] == 'open', 'effect requires an open goal')
         action = record.get('next_action')
         require(action and action['id'] == args.action_id and action['kind'] == 'steer', 'effect action identity mismatch')
-        require(action['phase'] == 'prepared', 'effect may have happened; readback required')
         require(action['payload_sha256'] == args.payload_sha256, 'effect body differs from prepared action')
         self.reference(action['payload_ref'], action['payload_sha256'])
+        if action['phase'] == 'confirmed':
+            return record
+        if action['phase'] in ('attempted', 'uncertain'):
+            record = self.readback(args)
+            action = record['next_action']
+            args.phase = 'confirmed'
+            args.receipt_ref = action.get('receipt_ref')
+            return self.action(args)
+        require(action['phase'] == 'prepared', 'effect cannot execute')
         if os.environ.get('FM_SUPERVISION_ACTOR', 'main') == 'branch':
             self.delegated(record, 'steer-same-intent', effect=True)
         args.phase = 'attempted'
@@ -1074,7 +1083,15 @@ class Task:
         if os.environ.get('FM_SUPERVISION_ACTOR', 'main') == 'branch' and args.phase == 'confirmed':
             require(action.get('continuation', {}).get('type') == 'executor', 'branch confirmation requires actual executor receipt')
         if args.phase == 'confirmed' and action.get('continuation', {}).get('type') == 'executor':
-            require(self.observe_executor(action['continuation'])[0] == 'running', 'executor has not acknowledged its exact instruction')
+            continuation = action['continuation']
+            if continuation.get('inbox_id'):
+                receipt = Path(action['receipt_ref'])
+                if receipt.parent == self.state / (self.id + '.inbox') / 'handled':
+                    self.reference(str(receipt), action['receipt_sha256'])
+                else:
+                    require(self.observe_executor(continuation)[0] == 'running', 'executor has not acknowledged its exact instruction')
+            else:
+                require(self.observe_executor(continuation)[0] == 'running', 'executor has not acknowledged its exact instruction')
         action['phase'] = args.phase
         record['revision'] += 1
         self.write(record)

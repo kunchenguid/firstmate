@@ -189,16 +189,14 @@ teardown_endpoint_phase() { # <expected-spawn-gen>; leaves durable metadata inta
       fm_backend_herdr_projection_target_tab_mutation_allowed "$ENDPOINT_SESSION" "$ENDPOINT_TAB" || {
         teardown_endpoint_refuse agent_exit focused-or-unverified-target-tab; return 1;
       }
-      # Undelivered outcomes and real decisions remain gates before mutation.
+      # Real decisions remain gates before mutation. Endpoint-only cleanup
+      # retains the task, status, outcome and report records for later delivery.
       if [ "$(fm_meta_get "$META" kind)" = scout ]; then
         if [ ! -f "$DATA/$ID/report.md" ] || \
           ! "$SCRIPT_DIR/fm-captain-hold.sh" verify "$ID" >/dev/null; then
           teardown_endpoint_refuse pane_close completion-gate-pending; return 1;
         fi
       fi
-      "$SCRIPT_DIR/fm-inactive-reconcile.sh" report "$ID" || {
-        teardown_endpoint_refuse pane_close parent-result-undelivered; return 1;
-      }
       agent=$(fm_backend_herdr_pane_agent_state "$ENDPOINT_SESSION" "$ENDPOINT_PANE")
       case "$agent" in
         live) teardown_endpoint_receipt agent_exit pending graceful-control-exit || return 1; return 11 ;;
