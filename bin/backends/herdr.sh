@@ -3505,9 +3505,14 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
   identity=$(fm_backend_herdr_agent_identity_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE") || identity=
   if [ "${identity%%$'\t'*}" = claude ]; then
     proof=1
-    content=$(fm_backend_herdr_composer_content "$target") \
-      || { printf 'send-failed'; return 0; }
-    [ -z "${content//[$' \t\r\n\v\f']/}" ] || { printf 'send-failed'; return 0; }
+    if [ "$require_empty" = require-empty ]; then
+      [ "$(fm_backend_herdr_composer_state "$target")" = empty ] \
+        || { printf 'send-failed'; return 0; }
+    else
+      content=$(fm_backend_herdr_composer_content "$target") \
+        || { printf 'send-failed'; return 0; }
+      [ -z "${content//[$' \t\r\n\v\f']/}" ] || { printf 'send-failed'; return 0; }
+    fi
   elif ! fm_backend_herdr_prepare_text_input "$target" "$settle" "$require_empty"; then
     printf 'send-failed'
     return 0

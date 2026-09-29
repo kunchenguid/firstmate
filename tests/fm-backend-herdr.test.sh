@@ -4504,6 +4504,20 @@ test_send_text_submit_refuses_unproven_unknown_preparation() {
   pass "fm_backend_herdr_send_text_submit: lifecycle preparation requires empty proof"
 }
 
+test_send_text_submit_claude_lifecycle_requires_fresh_empty_proof() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/submit-claude-lifecycle-unknown"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}\n' > "$resp/1.out"
+  printf 'redrawing pane\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit lab:w1:p2 ": lifecycle doorbell" 1 0.01 0 "" require-empty' "$ROOT" 2>/dev/null )
+  [ "$out" = send-failed ] || fail "an unproven Claude lifecycle composer should refuse, got '$out'"
+  [ "$(grep -c $'\x1f''pane'$'\x1f''send-' "$log" || true)" -eq 0 ] \
+    || fail "Claude received lifecycle input without fresh empty proof: $(cat "$log")"
+  pass "fm_backend_herdr_send_text_submit: Claude lifecycle input requires fresh empty proof"
+}
+
 test_send_text_submit_generic_unknown_composer_still_submits() {
   local dir log resp fb out
   dir="$TMP_ROOT/submit-generic-unknown"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -6092,6 +6106,7 @@ test_send_text_submit_generic_pi_unproven_modes_still_submit
 test_send_text_submit_refuses_when_pi_identity_recheck_fails
 test_send_text_submit_refuses_when_mode_capture_fails
 test_send_text_submit_refuses_unproven_unknown_preparation
+test_send_text_submit_claude_lifecycle_requires_fresh_empty_proof
 test_send_text_submit_generic_unknown_composer_still_submits
 test_send_text_submit_detects_swallowed_enter
 test_send_text_submit_replays_literal_send_stderr

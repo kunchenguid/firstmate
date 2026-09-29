@@ -93,12 +93,8 @@ launch_cmd() {  # <name>
   esac
 }
 
-# Wait for the harness to look steerable. 0 = the composer classified a
-# proven empty; 2 = the readiness budget expired without an empty verdict but
-# also without a pending one. The caller's legacy path still proceeds on 2,
-# so this guard cannot refresh evidence for the current strict production gate
-# until that allowance is removed; production sends no lifecycle text unless
-# composer emptiness is proven.
+# Wait for the harness to look steerable. Only a proven-empty composer is
+# ready; every other verdict fails closed like the production lifecycle gate.
 wait_ready() {  # <window>
   local win=$1 i=0 budget=60 verdict dismissed=0 screen
   while [ "$i" -lt "$budget" ]; do
@@ -116,10 +112,7 @@ wait_ready() {  # <window>
     fi
     sleep 1
   done
-  case "$verdict" in
-    pending) return 1 ;;
-  esac
-  return 2
+  return 1
 }
 
 check_harness_doorbell() {  # <name>
@@ -134,14 +127,13 @@ check_harness_doorbell() {  # <name>
     -- bash -lc "$cmd" \
     || { FAILED=1; printf 'not ok - %s (%s): could not launch in the isolated tmux server\n' "$name" "$version" >&2; return 0; }
   wait_ready "$win"; ready_rc=$?
-  if [ "$ready_rc" -eq 1 ]; then
+  if [ "$ready_rc" -ne 0 ]; then
     FAILED=1
-    printf 'not ok - %s (%s): composer stayed visibly pending; the pane is not steerable\n' "$name" "$version" >&2
+    printf 'not ok - %s (%s): composer emptiness was not proven; the pane is not steerable\n' "$name" "$version" >&2
     tmux -L "$SOCKET" capture-pane -p -t "$SESSION:$win" 2>/dev/null | grep '[^[:space:]]' | tail -6 | sed 's/^/#   /' >&2
     tmux -L "$SOCKET" kill-window -t "$SESSION:$win" 2>/dev/null || true
     return 0
   fi
-  [ "$ready_rc" -eq 0 ] || note "$name ($version): idle composer never classified empty; proceeding as production does (advisory check skips only on pending)"
   printf 'window=%s:%s\nkind=ship\nharness=%s\n' "$SESSION" "$win" "$name" > "$home/state/$task.meta"
   if ! FM_HOME="$home" FM_ROOT_OVERRIDE="$home" "$ROOT/bin/fm-send.sh" "$task" \
     "Firstmate live check: run exactly this shell command now: touch $acted - then follow the mv instruction you were given for this message. Reply with one short line." \
