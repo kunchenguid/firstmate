@@ -35,6 +35,8 @@
 #               the tmux pi foreground-process probe). Identity is what makes
 #               Pi's blank separated composer provable; with identity=0 that
 #               shape stays `unknown`.
+#   normalize=1 the adapter can switch a proven blank pi-vim NORMAL composer
+#               to INSERT before text delivery (tmux and herdr).
 #   rows=<n>    the capture's bounded row count (informational).
 #
 # THE STRICT BLANK-ROW RULE (captain decision blank-row-injection-posture,
@@ -750,10 +752,8 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
 # fail safe by default.
 
 # _fm_composer_pi_separator_mode_var: recognize Pi's lower separator with or
-# without pi-vim's mode label. The rendered label replaces the rule's right
-# edge, so classification strips only exact labels emitted by pi-vim. A plain
-# NORMAL label is recoverable; pending NORMAL commands and non-input modes are
-# unsafe. Narrow terminals that truncate away the mode keyword stay unknown.
+# without an exact pi-vim INSERT or NORMAL label. The rendered label replaces
+# the rule's right edge. Every other label stays unrecognized.
 _fm_composer_pi_separator_mode_var() {  # <out-var> <trimmed-row>
   local __fmpm_out=$1 __fmpm_row=$2 __fmpm_rule __fmpm_mode=plain
   [ -n "$__fmpm_row" ] || return 1
@@ -761,12 +761,6 @@ _fm_composer_pi_separator_mode_var() {  # <out-var> <trimmed-row>
   case "$__fmpm_row" in
     *' INSERT') __fmpm_rule=${__fmpm_row%' INSERT'}; __fmpm_mode=insert ;;
     *' NORMAL') __fmpm_rule=${__fmpm_row%' NORMAL'}; __fmpm_mode=normal ;;
-    *' NORMAL '*) __fmpm_rule=${__fmpm_row%%' NORMAL '*}; __fmpm_mode=unsafe ;;
-    *' EX '*) __fmpm_rule=${__fmpm_row%%' EX '*}; __fmpm_mode=unsafe ;;
-    *' VISUAL') __fmpm_rule=${__fmpm_row%' VISUAL'}; __fmpm_mode=unsafe ;;
-    *' VISUAL '*) __fmpm_rule=${__fmpm_row%%' VISUAL '*}; __fmpm_mode=unsafe ;;
-    *' V-LINE') __fmpm_rule=${__fmpm_row%' V-LINE'}; __fmpm_mode=unsafe ;;
-    *' V-LINE '*) __fmpm_rule=${__fmpm_row%%' V-LINE '*}; __fmpm_mode=unsafe ;;
   esac
   [ -z "${__fmpm_rule//─/}" ] || return 1
   case "$__fmpm_rule" in
@@ -1628,35 +1622,45 @@ EOF
 }
 
 # fm_composer_pi_input_mode: report pi-vim's structurally proven mode for the
-# separated composer containing <cursor-row>. Identity is intentionally not
-# required: this answer selects safe keyboard normalization, never proves that
-# the composer is empty. The ordinary classifier remains the emptiness owner.
-fm_composer_pi_input_mode() {  # <screen> <cursor-row> -> insert|normal|unsafe|unknown
-  local screen=$1 cy=$2 plain
-  case "$cy" in ''|*[!0-9]*) printf 'unknown'; return 0 ;; esac
+# selected separated composer. Identity is intentionally not required: this
+# answer selects keyboard normalization, while the ordinary classifier remains
+# the emptiness owner.
+fm_composer_pi_input_mode() {  # <screen> [cursor-row] -> insert|normal|unknown
+  local screen=$1 cy=${2:-} plain
+  case "$cy" in *[!0-9]*) printf 'unknown'; return 0 ;; esac
   plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
   _fm_composer_scan_screen "$plain" "$cy"
   if [ "$FM_COMPOSER_SCAN_PI_PAIR_FOUND" != 1 ] \
-     || [ "$FM_COMPOSER_SCAN_PI_PAIR_VALID" != 1 ] \
-     || [ "$cy" -le "$FM_COMPOSER_SCAN_PI_OPEN" ] \
-     || [ "$cy" -ge "$FM_COMPOSER_SCAN_PI_CLOSE" ]; then
+     || [ "$FM_COMPOSER_SCAN_PI_PAIR_VALID" != 1 ]; then
+    printf 'unknown'
+    return 0
+  fi
+  if [ -n "$cy" ]; then
+    if [ "$cy" -le "$FM_COMPOSER_SCAN_PI_OPEN" ] \
+       || [ "$cy" -ge "$FM_COMPOSER_SCAN_PI_CLOSE" ]; then
+      printf 'unknown'
+      return 0
+    fi
+  elif ! _fm_composer_select_cursorless "$plain" \
+       || [ "$FM_COMPOSER_SELECTED_KIND" != pi ]; then
     printf 'unknown'
     return 0
   fi
   case "$FM_COMPOSER_SCAN_PI_MODE" in
-    insert|normal|unsafe) printf '%s' "$FM_COMPOSER_SCAN_PI_MODE" ;;
+    insert|normal) printf '%s' "$FM_COMPOSER_SCAN_PI_MODE" ;;
     *) printf 'unknown' ;;
   esac
 }
 
 fm_composer_classify_screen() {  # <caps> <screen> [cursor_row] [identity]
   local caps=$1 screen=$2 cy=${3:-} identity=${4:-}
-  local styled=0 cursor=0 has_identity=0 kv plain
+  local styled=0 cursor=0 has_identity=0 can_normalize=0 kv plain
   while IFS= read -r kv; do
     case "$kv" in
       styled=1) styled=1 ;;
       cursor=1) cursor=1 ;;
       identity=1) has_identity=1 ;;
+      normalize=1) can_normalize=1 ;;
     esac
   done <<EOF
 $caps
@@ -1688,7 +1692,7 @@ EOF
       if [ "$FM_COMPOSER_SCAN_PI_PAIR_FOUND" = 1 ] \
          && [ "$cy" -gt "$FM_COMPOSER_SCAN_PI_OPEN" ] \
          && [ "$cy" -lt "$FM_COMPOSER_SCAN_PI_CLOSE" ]; then
-        _fm_composer_classify_bare_pi_overlap "$screen" "$styled" "$has_identity" "$identity" "$cy" 1
+        _fm_composer_classify_bare_pi_overlap "$screen" "$styled" "$has_identity" "$identity" "$cy" "$can_normalize"
       else
         _fm_composer_classify_bare_row "$screen" "$styled" "$cy"
       fi
@@ -1709,7 +1713,7 @@ EOF
     if [ "$FM_COMPOSER_SCAN_PI_PAIR_FOUND" = 1 ] \
        && [ "$cy" -gt "$FM_COMPOSER_SCAN_PI_OPEN" ] \
        && [ "$cy" -lt "$FM_COMPOSER_SCAN_PI_CLOSE" ]; then
-      _fm_composer_pi_verdict "$screen" "$styled" "$has_identity" "$identity" 1
+      _fm_composer_pi_verdict "$screen" "$styled" "$has_identity" "$identity" "$can_normalize"
       return 0
     fi
     if [ "$FM_COMPOSER_SCAN_CURSOR_EDGE" = 1 ]; then
@@ -1730,7 +1734,7 @@ EOF
   fi
   case "$FM_COMPOSER_SELECTED_KIND" in
     pi)
-      _fm_composer_pi_verdict "$screen" "$styled" "$has_identity" "$identity" 0
+      _fm_composer_pi_verdict "$screen" "$styled" "$has_identity" "$identity" "$can_normalize"
       ;;
     box)
       _fm_composer_classify_rows "$screen" "$styled" "$FM_COMPOSER_SELECTED_AMBIG" \
@@ -1744,7 +1748,7 @@ EOF
          && [ "$FM_COMPOSER_SELECTED_FIRST" -gt "$FM_COMPOSER_SCAN_PI_OPEN" ] \
          && [ "$FM_COMPOSER_SELECTED_FIRST" -lt "$FM_COMPOSER_SCAN_PI_CLOSE" ]; then
         _fm_composer_classify_bare_pi_overlap "$screen" "$styled" "$has_identity" "$identity" \
-          "$FM_COMPOSER_SELECTED_FIRST" 0
+          "$FM_COMPOSER_SELECTED_FIRST" "$can_normalize"
       else
         _fm_composer_classify_bare_row "$screen" "$styled" "$FM_COMPOSER_SELECTED_FIRST"
       fi
@@ -1875,12 +1879,7 @@ _fm_composer_pi_verdict() {  # <screen> <styled> <has_identity> <identity> <can-
     printf 'pending'
     return 0
   fi
-  # Pending pi-vim operators, Ex mode, and visual modes draw an empty composer
-  # but route keyboard input somewhere other than ordinary insertion. They can
-  # never authorize lifecycle text; plain NORMAL and INSERT are safe once the
-  # adapter also proves emptiness.
-  if [ "$FM_COMPOSER_SCAN_PI_MODE" = unsafe ] \
-     || { [ "$FM_COMPOSER_SCAN_PI_MODE" = normal ] && [ "$can_normalize" != 1 ]; }; then
+  if [ "$FM_COMPOSER_SCAN_PI_MODE" = normal ] && [ "$can_normalize" != 1 ]; then
     printf 'unknown'
     return 0
   fi

@@ -86,7 +86,7 @@ fm_tmux_composer_cursor_row() {  # <target>
 # fm_tmux_composer_caps: the tmux capability descriptor - static data, not
 # logic (see the capability model in bin/fm-composer-lib.sh).
 fm_tmux_composer_caps() {
-  printf 'styled=1\ncursor=1\nidentity=1\nrows=0\n'
+  printf 'styled=1\ncursor=1\nidentity=1\nnormalize=1\nrows=0\n'
 }
 
 # fm_tmux_composer_identity: the tmux agent-identity probe backing the
@@ -172,7 +172,7 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
 
 # fm_tmux_composer_input_mode: thin tmux capture adapter over pi-vim's shared
 # structural mode parser. This does not prove emptiness or agent identity.
-fm_tmux_composer_input_mode() {  # <target> -> insert|normal|unsafe|unknown
+fm_tmux_composer_input_mode() {  # <target> -> insert|normal|unknown
   local target=$1 cy pane
   cy=$(fm_tmux_composer_cursor_row "$target") || { printf 'unknown'; return 0; }
   case "$cy" in ''|*[!0-9]*) printf 'unknown'; return 0 ;; esac
@@ -295,17 +295,13 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [baseline-idle
 
 # fm_tmux_prepare_text_input: normalize a blank pi-vim NORMAL composer to
 # INSERT before literal delivery. Positive empty proof is checked both before
-# the mode key and after Pi redraws; pending, unsafe, and changed screens refuse
-# without typing caller text. Non-modal composers need no preparation.
+# the mode key and after Pi redraws; pending and changed screens refuse without
+# typing caller text. Non-modal composers need no preparation.
 fm_tmux_prepare_text_input() {  # <target> <settle>
   local target=$1 settle=$2 mode state
   mode=$(fm_tmux_composer_input_mode "$target")
   case "$mode" in
     insert|unknown) return 0 ;;
-    unsafe)
-      printf 'error: refusing text input into unsafe pi-vim mode\n' >&2
-      return 1
-      ;;
     normal)
       state=$(fm_tmux_composer_state "$target")
       if [ "$state" != empty ]; then

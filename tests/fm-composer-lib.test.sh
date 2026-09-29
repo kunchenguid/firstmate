@@ -155,8 +155,8 @@ test_real_text_is_pending() {
 
 ESC=$(printf '\033')
 NBSP=$(printf '\302\240')
-CAPS_TMUX=$'styled=1\ncursor=1\nidentity=1\nrows=0'
-CAPS_STYLED=$'styled=1\ncursor=0\nidentity=1\nrows=20'      # herdr
+CAPS_TMUX=$'styled=1\ncursor=1\nidentity=1\nnormalize=1\nrows=0'
+CAPS_STYLED=$'styled=1\ncursor=0\nidentity=1\nnormalize=1\nrows=20' # herdr
 CAPS_STYLED_NOID=$'styled=1\ncursor=0\nidentity=0\nrows=20' # zellij
 CAPS_PLAIN=$'styled=0\ncursor=0\nidentity=0\nrows=20'       # cmux, orca
 
@@ -620,9 +620,8 @@ test_matrix_pi_separated_needs_identity() {
 }
 
 # Pi-vim replaces the lower composer rule's right edge with its mode label.
-# Both ordinary modes preserve the same empty/pending verdicts; only blank
-# NORMAL may be normalized to INSERT by the adapter. Pending commands and Ex
-# mode are unsafe even though their content row is blank.
+# Both exact ordinary modes preserve the same empty/pending verdicts. Other
+# labels are not recognized as separator rows.
 test_matrix_pi_vim_modes() {
   local insert normal pending_normal ex typed pi_idle
   pi_idle=$(printf 'pi\tidle')
@@ -634,24 +633,26 @@ test_matrix_pi_vim_modes() {
   assert_screen "pi-vim INSERT empty" empty "$CAPS_TMUX" "$insert" 2 "$pi_idle"
   assert_screen "pi-vim NORMAL empty" empty "$CAPS_TMUX" "$normal" 2 "$pi_idle"
   assert_screen "cursorless pi-vim INSERT empty" empty "$CAPS_STYLED" "$insert" '' "$pi_idle"
-  assert_screen "cursorless pi-vim NORMAL needs adapter normalization" unknown \
+  assert_screen "cursorless pi-vim NORMAL empty with adapter normalization" empty \
     "$CAPS_STYLED" "$normal" '' "$pi_idle"
   [ "$(fm_composer_pi_input_mode "$insert" 2)" = insert ] \
     || fail "pi-vim INSERT mode was not recognized"
   [ "$(fm_composer_pi_input_mode "$normal" 2)" = normal ] \
     || fail "pi-vim NORMAL mode was not recognized"
+  [ "$(fm_composer_pi_input_mode "$normal")" = normal ] \
+    || fail "cursorless pi-vim NORMAL mode was not recognized"
 
   typed=$'transcript\n────────────────────────\nkeep this draft\n────────────── NORMAL'
   assert_screen "pi-vim NORMAL pending text" pending "$CAPS_TMUX" "$typed" 2 "$pi_idle"
   [ "$(fm_composer_pi_input_mode "$typed" 2)" = normal ] \
     || fail "pending text must not hide pi-vim NORMAL mode"
 
-  assert_screen "pi-vim pending command is unsafe" unknown "$CAPS_TMUX" "$pending_normal" 2 "$pi_idle"
-  assert_screen "pi-vim Ex mode is unsafe" unknown "$CAPS_TMUX" "$ex" 2 "$pi_idle"
-  [ "$(fm_composer_pi_input_mode "$pending_normal" 2)" = unsafe ] \
-    || fail "pi-vim pending NORMAL command must be unsafe"
-  [ "$(fm_composer_pi_input_mode "$ex" 2)" = unsafe ] \
-    || fail "pi-vim Ex mode must be unsafe"
+  assert_screen "pi-vim pending command is unknown" unknown "$CAPS_TMUX" "$pending_normal" 2 "$pi_idle"
+  assert_screen "pi-vim Ex mode is unknown" unknown "$CAPS_TMUX" "$ex" 2 "$pi_idle"
+  [ "$(fm_composer_pi_input_mode "$pending_normal" 2)" = unknown ] \
+    || fail "pi-vim pending NORMAL command must stay unknown"
+  [ "$(fm_composer_pi_input_mode "$ex" 2)" = unknown ] \
+    || fail "pi-vim Ex mode must stay unknown"
   pass "matrix: pi-vim NORMAL and INSERT classify safely without losing pending text"
 }
 

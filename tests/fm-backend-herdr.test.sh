@@ -3970,6 +3970,18 @@ test_composer_state_pi_separator_idle_is_empty() {
   pass "fm_backend_herdr_composer_state: a native idle Pi separator composer reads empty"
 }
 
+test_composer_state_pi_vim_normal_is_recoverable() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-pi-vim-normal"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf 'transcript\n────────────────────────\n\n────────────── NORMAL\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"pi","agent_status":"idle"}}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state lab:w1:p2' "$ROOT" )
+  [ "$out" = empty ] || fail "a blank Pi NORMAL composer should be recoverable on Herdr, got '$out'"
+  pass "fm_backend_herdr_composer_state: blank Pi NORMAL is recoverable"
+}
+
 test_composer_state_pi_dollar_status_footer_is_empty() {
   # `$0.000 (sub) 5.4%/272k (auto)` at column 0 made herdr composer_state
   # unknown, so exit and relaunch refused on an otherwise idle Pi pane.
@@ -4352,6 +4364,48 @@ test_send_text_submit_detects_landed_send() {
   [ "$enter_count" -eq 1 ] || fail "send_text_submit should not need a second Enter for a plain message with no popup, sent $enter_count Enter(s)"
   [ "$(grep -c $'\x1f''pane'$'\x1f''read' "$log")" -eq 0 ] || fail "send_text_submit must never read the composer/pane content for confirmation anymore"
   pass "fm_backend_herdr_send_text_submit: reports 'empty' once agent_status reports working after one Enter, without ever reading the composer"
+}
+
+test_send_text_submit_pi_vim_normal_enters_insert_before_text() {
+  local dir log resp fb out i_line text_line enter_line
+  dir="$TMP_ROOT/submit-pi-vim-normal"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"agent":{"agent":"pi","agent_status":"idle"}}}\n' > "$resp/1.out"
+  printf 'transcript\n────────────────────────\n\n────────────── NORMAL\n' > "$resp/2.out"
+  printf 'transcript\n────────────────────────\n\n────────────── NORMAL\n' > "$resp/3.out"
+  printf '{"result":{"agent":{"agent":"pi","agent_status":"idle"}}}\n' > "$resp/4.out"
+  printf 'transcript\n────────────────────────\n\n────────────── INSERT\n' > "$resp/6.out"
+  printf 'transcript\n────────────────────────\n\n────────────── INSERT\n' > "$resp/7.out"
+  printf '{"result":{"agent":{"agent":"pi","agent_status":"idle"}}}\n' > "$resp/8.out"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/10.out"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/12.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit lab:w1:p2 ": lifecycle doorbell" 1 0.01 0' "$ROOT" )
+  [ "$out" = empty ] || fail "blank Pi NORMAL recovery should submit on Herdr, got '$out'"
+  i_line=$(grep -n $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''i' "$log" | cut -d: -f1)
+  text_line=$(grep -n $'\x1f''pane'$'\x1f''send-text'$'\x1f''w1:p2'$'\x1f'': lifecycle doorbell' "$log" | cut -d: -f1)
+  enter_line=$(grep -n $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log" | cut -d: -f1)
+  [ -n "$i_line" ] && [ "$i_line" -lt "$text_line" ] && [ "$text_line" -lt "$enter_line" ] \
+    || fail "Herdr must switch NORMAL to INSERT before literal text and Enter: $(cat "$log")"
+  [ "$(grep -c $'\x1f''pane'$'\x1f''read' "$log")" -eq 4 ] \
+    || fail "Pi NORMAL recovery must capture mode and emptiness before and after switching"
+  pass "fm_backend_herdr_send_text_submit: blank Pi NORMAL reaches INSERT before text"
+}
+
+test_send_text_submit_pi_vim_pending_normal_preserves_text() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/submit-pi-vim-pending"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"agent":{"agent":"pi","agent_status":"idle"}}}\n' > "$resp/1.out"
+  printf 'transcript\n────────────────────────\nkeep this draft\n────────────── NORMAL\n' > "$resp/2.out"
+  printf 'transcript\n────────────────────────\nkeep this draft\n────────────── NORMAL\n' > "$resp/3.out"
+  printf '{"result":{"agent":{"agent":"pi","agent_status":"idle"}}}\n' > "$resp/4.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit lab:w1:p2 ": lifecycle doorbell" 1 0.01 0' "$ROOT" 2>/dev/null )
+  [ "$out" = send-failed ] || fail "pending Pi NORMAL should refuse on Herdr, got '$out'"
+  [ "$(grep -c $'\x1f''pane'$'\x1f''send-' "$log" || true)" -eq 0 ] \
+    || fail "pending Pi NORMAL received input instead of preserving its draft: $(cat "$log")"
+  pass "fm_backend_herdr_send_text_submit: pending Pi NORMAL remains untouched"
 }
 
 test_send_text_submit_detects_swallowed_enter() {
@@ -5892,6 +5946,7 @@ test_composer_state_unknown_on_capture_failure
 test_composer_state_unknown_when_no_composer_row_found
 test_composer_state_pi_parked_prompt_is_not_empty
 test_composer_state_pi_separator_idle_is_empty
+test_composer_state_pi_vim_normal_is_recoverable
 test_composer_state_pi_dollar_status_footer_is_empty
 test_composer_state_pi_separator_real_text_is_pending
 test_composer_state_pi_incomplete_separator_below_stale_generic_is_unknown
@@ -5914,6 +5969,8 @@ test_wait_for_working_returns_idle_when_never_busy_but_readable
 test_wait_for_working_returns_unknown_when_never_readable
 test_wait_for_working_treats_blocked_as_submit_active
 test_send_text_submit_detects_landed_send
+test_send_text_submit_pi_vim_normal_enters_insert_before_text
+test_send_text_submit_pi_vim_pending_normal_preserves_text
 test_send_text_submit_detects_swallowed_enter
 test_send_text_submit_replays_literal_send_stderr
 test_send_text_submit_popup_autocomplete_requires_second_enter
