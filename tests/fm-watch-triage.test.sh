@@ -6543,12 +6543,12 @@ paused_until_fixture() {  # <name> <until-epoch> <status-age-secs>
   printf '%s\n' "$dir"
 }
 
-until_watch() {  # <dir> <cadence> -> pid in UNTIL_PID
+until_watch() {  # <dir> <cadence> [until-ceiling] -> pid in UNTIL_PID
   local dir=$1
   PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_WINDOW=test:fm-until FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" \
     FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available' \
     FM_STATE_OVERRIDE="$dir/state" FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
-    FM_PAUSE_RESURFACE_SECS="$2" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_PAUSE_RESURFACE_SECS="$2" FM_PAUSE_UNTIL_MAX_SECS="${3:-$2}" FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$dir/watch.out" 2>&1 &
   UNTIL_PID=$!
 }
@@ -6575,11 +6575,38 @@ test_paused_until_wrong_year_is_bounded_by_the_cadence() {
     || { reap "$UNTIL_PID"; fail "a wrong-year declared time silenced the wait beyond the recheck cadence"; }
   grep -F 'stale: test:fm-until' "$dir/watch.out" >/dev/null \
     || fail "the bounded wrong-year recheck did not print a stale wake: $(cat "$dir/watch.out")"
-  grep -F 'declared time is beyond the recheck cadence' "$dir/watch.out" >/dev/null \
+  grep -F 'declared time is beyond the recheck ceiling' "$dir/watch.out" >/dev/null \
     || fail "the bounded recheck gave the wrong reason: $(cat "$dir/watch.out")"
   grep -F 'declared clearing time has passed' "$dir/watch.out" >/dev/null \
     && fail "the bounded recheck falsely claimed the future declared time passed"
   pass "a wrong-year declared time cannot silence the watcher beyond the recheck cadence"
+}
+
+test_paused_until_extends_the_recheck_past_the_flat_cadence() {
+  local dir state
+  dir=$(paused_until_fixture until-extends "$(( $(date +%s) + 31536000 ))" 300); state="$dir/state"
+  until_watch "$dir" 240 86400
+  if ! wait_poll_cycle "$state" "$UNTIL_PID" || ! wait_poll_cycle "$state" "$UNTIL_PID"; then
+    reap "$UNTIL_PID"; fail "a declared time past the flat cadence did not extend the recheck: $(cat "$dir/watch.out")"
+  fi
+  [ ! -s "$state/.wake-queue" ] || fail "a declared time inside the ceiling was still queued for a recheck"
+  grep -F 'declared time not reached' "$state/.watch-triage.log" >/dev/null \
+    || fail "the extended absorb did not cite the declared time in the triage log"
+  reap "$UNTIL_PID"
+  pass "a declared time beyond the flat cadence extends the recheck up to the ceiling"
+}
+
+# The ceiling is clamped up to the flat cadence, so configuring it lower can
+# never make a wait that names its clearing time noisier than one that does not.
+test_paused_until_ceiling_below_the_cadence_is_clamped_up() {
+  local dir state
+  dir=$(paused_until_fixture until-clamped "$(( $(date +%s) + 31536000 ))" 300); state="$dir/state"
+  until_watch "$dir" 240 1
+  wait_for_exit "$UNTIL_PID" 100 \
+    || { reap "$UNTIL_PID"; fail "a clamped ceiling silenced the wait beyond the flat cadence"; }
+  grep -F 'declared time is beyond the recheck ceiling' "$dir/watch.out" >/dev/null \
+    || fail "the clamped recheck gave the wrong reason: $(cat "$dir/watch.out")"
+  pass "an until ceiling below the flat cadence is clamped up to it"
 }
 
 test_paused_until_that_passed_is_rechecked_before_the_cadence() {
@@ -6750,4 +6777,6 @@ test_afk_one_shot_never_hands_off_captain_held_under_away_record
 test_captain_held_rechecked_under_a_quiet_record
 test_paused_until_near_future_is_quiet_before_the_cadence
 test_paused_until_wrong_year_is_bounded_by_the_cadence
+test_paused_until_extends_the_recheck_past_the_flat_cadence
+test_paused_until_ceiling_below_the_cadence_is_clamped_up
 test_paused_until_that_passed_is_rechecked_before_the_cadence
