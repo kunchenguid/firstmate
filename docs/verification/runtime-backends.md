@@ -2364,3 +2364,71 @@ A throwaway scout was spawned through `bin/fm-spawn.sh --scout --harness omp --m
 6. `bin/fm-control.sh <id> exit` stopped the agent and `bin/fm-teardown.sh` returned the worktree and closed the item.
 
 `FM_OMP_LIVE_E2E=1 tests/fm-omp-primary-live-e2e.test.sh` refreshes the primary evidence; the worker path above is refreshed by repeating the scout dispatch after any omp upgrade.
+
+## Pi question attention
+
+Verified 2026-09-29 on macOS arm64 with Pi 0.84.3, Herdr 0.9.1-upavloff.0482778c (protocol 23), Herdr's generated Pi integration version 9, pi-askuserquestion 1.0.0, and @narumitw/pi-plan-mode 0.58.3.
+The transition contract is owned by [`registerFirstmateDecisionAttention`](../../.pi/extensions/lib/fm-native-contract.ts); the live guard's header owns installation selectors and lab controls.
+The guard runs the real Pi tool loop and question components with an in-process provider that performs no network requests and reports zero model usage.
+It loads the tracked primary watcher, acquires only the fixture home's lock after session startup, substitutes a dormant watcher child for fleet supervision, and installs Herdr's real reporter only inside the fixture.
+The plan question uses the installed question module with enabled/current lifecycle callbacks; this verifies its real questionnaire and result contract, not the complete plan-mode workflow.
+All Herdr commands use the isolated lab helper, including teardown and the live-default tripwire.
+
+```bash
+bash bin/fm-test-run.sh tests/fm-pi-herdr-attention-live-e2e.test.sh
+```
+
+Relevant output:
+
+```text
+# Pi 0.84.3; Herdr 0.9.1-upavloff.0482778c (protocol 23)
+# pi-signed unavailable; separate launcher not exercised
+startup=idle
+single-open=blocked
+agent-wait=blocked
+single-submit-gap=blocked
+single-settled=idle
+multi-open=blocked
+multi-tab=blocked
+multi-submit-gap=blocked
+multi-settled=idle
+cancel-gap=blocked
+cancel-unresolved=blocked
+reopened=blocked
+reopened-submit-gap=blocked
+resolved=idle
+plan-open=blocked
+plan-cancel-unresolved=blocked
+session-recovery=idle
+replacement-session-open=blocked
+replacement-session-settled=idle
+ok - real question lifecycle, balanced holds, exact root identity, and authoritative recovery
+ok - Pi 0.84.3: token-free Herdr attention integration
+```
+
+The result barrier keeps the real tool result pending after UI submission, so the blocked assertions cover the gap before authoritative processing resumes.
+Herdr's `agent wait --until blocked` also returned the exact root pane and session with `screen_detection_skipped=true`, proving the hook report reaches the notification-facing API.
+The captured multi-question UI showed the second question after Right and retained blocked throughout navigation.
+The portable case in `tests/fm-pi-watch-extension.test.sh` covers duplicate events, other producers' holds, unresolved cancellation, unrelated input and answers, tool failure, late events from a replaced runtime sharing the same session ID, foreign children, RPC mode, late startup lock acquisition, home ownership loss, and pane identity mismatch.
+
+Compatibility review:
+
+| Surface | Reviewed integration and scope |
+| --- | --- |
+| Pi and pi-signed primary | Shared primary extension and `fm-native-contract.ts`; real installed Pi exercised above, pi-signed launcher absent. |
+| Native harness inside Pi | Existing `firstmate:native-tools` discovery and `codex-native:progress` remain unchanged; the installed native adapter is absent, so its external transport was not live-tested. |
+| Pi supervision branch and workers | Branch imports only `registerFirstmateTool`; `fm-spawn.sh` still publishes its generation-bound busy/progress records independently. |
+| Herdr | Existing reporter owns `pane.report_agent`; `herdr.sh` and `herdr-eventwait.py` retain status classification and event routing. |
+| tmux, cmux, Zellij, Orca | Reviewed backend dispatch in `fm-backend.sh` and adapter surfaces; the bridge registers no hooks without explicit Herdr pane/socket environment. |
+| Claude, Codex, Cursor | Their tracked command hooks use separate primary startup/turn-end entry points and do not import the Pi native contract. |
+| OpenCode and omp | Separate watcher/turn-end plugins; omp's shared operational-input module is unchanged. |
+| Grok and Kimi | Existing hook/instruction startup and turn-end paths do not consume this Pi extension event bridge. |
+
+The available native-adapter guard reports an explicit capability skip when `pi-codex-native` is absent; that is not native-transport coverage.
+
+The strict extension typecheck also passed against the installed Pi 0.84.3 declarations with TypeScript 7.0.2:
+
+```text
+bash bin/fm-test-run.sh tests/fm-pi-primary-types.test.sh
+ok - tracked Pi extensions pass strict no-emit typecheck against Pi 0.84.3
+```

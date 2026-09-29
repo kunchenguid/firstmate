@@ -4405,6 +4405,118 @@ EOF
   pass "OpenCode healthy arm output does not suppress the turn-end guard"
 }
 
+test_pi_decision_attention() {
+  local out status
+  out=$(PLUGIN="$ROOT/.pi/extensions/lib/fm-native-contract.ts" HERDR_ENV=1 HERDR_PANE_ID=attention-root HERDR_SOCKET_PATH=/isolated/attention.sock node --input-type=module 2>&1 <<'JS'
+import assert from 'node:assert/strict';
+import {pathToFileURL} from 'node:url';
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+const handlers = new Map(), reports = [];
+let owns = false, reporterCount = 1; // Another extension already owns one hold.
+const pi = {
+  on(name, fn) { const list = handlers.get(name) || []; list.push(fn); handlers.set(name, list); },
+  events: { emit(name, data) { assert.equal(name, 'herdr:blocked'); reports.push(data); reporterCount += data.active ? 1 : -1; assert(reporterCount >= 1); } },
+};
+mod.registerFirstmateDecisionAttention(pi, () => owns);
+function context(id, mode = 'tui') {
+  return {mode, hasUI: true, sessionManager: {getSessionId: () => id}, isIdle: () => idle};
+}
+let idle = false;
+const root = context('root'), child = context('child'), headless = context('headless', 'rpc');
+const emit = async (name, data = {}, ctx = root) => { for (const fn of handlers.get(name) || []) await fn({type:name, ...data}, ctx); };
+const call = (id, name = 'ask_user_question', ctx = root, count = 1) => emit('tool_call', {toolCallId:id, toolName:name, input:{questions:Array.from({length:count}, (_, i) => ({question:`Q${i}`}))}}, ctx);
+const result = (id, details, name = 'ask_user_question', ctx = root) => emit('tool_result', {toolCallId:id, toolName:name, details}, ctx);
+const states = () => reports.map(x => x.active);
+await emit('session_start');
+owns = true; // Session-start digest can acquire the home lock after this hook.
+await call('one');
+assert.deepEqual(states(), [true], 'opening a one-question form must publish blocked');
+assert.equal(reports[0].identity.kind, 'root');
+assert.equal(reports[0].identity.sessionId, 'root');
+assert.equal(reports[0].identity.paneId, 'attention-root');
+assert.equal(reports[0].identity.socketPath, '/isolated/attention.sock');
+await call('one');
+await emit('tool_execution_update', {toolCallId:'one', toolName:'ask_user_question', partialResult:{tab:1}});
+assert.deepEqual(states(), [true], 'repeated open/navigation must not increment the reporter count');
+await result('one', {cancelled:false, answers:{Q0:'A'}});
+assert.deepEqual(states(), [true], 'submit must wait for authoritative processing');
+await emit('turn_start');
+assert.deepEqual(states(), [true,false]);
+await call('one');
+assert.deepEqual(states(), [true,false], 'late duplicate open cannot resurrect a completed call');
+await call('multi', 'ask_user_question', root, 3);
+await call('child', 'ask_user_question', child);
+await result('multi', {cancelled:false}, 'ask_user_question', child);
+await emit('turn_start', {}, child);
+assert.deepEqual(states(), [true,false,true], 'child events cannot open or clear the root hold');
+await result('multi', {cancelled:true, answers:{}});
+await emit('turn_start');
+idle = true;
+await emit('agent_settled');
+assert.deepEqual(states(), [true,false,true], 'cancel leaves an unresolved question blocked after automatic continuation/settle');
+await emit('tool_call', {toolCallId:'unrelated',toolName:'ask_user_question',input:{questions:[{question:'Different question'}]}});
+await result('unrelated', {cancelled:false});
+await emit('agent_settled');
+assert.deepEqual(states(), [true,false,true], 'an unrelated answer cannot resolve the cancelled questions');
+await call('replacement', 'plan_mode_question', root, 3);
+await result('replacement', {cancelled:false, answers:[{id:'a',answer:'A'},{id:'b',answer:'B'}]}, 'plan_mode_question');
+await emit('agent_settled');
+assert.deepEqual(states(), [true,false,true,false], 'answered replacement resolves the cancelled hold at authoritative settle');
+await call('error', 'plan_mode_question');
+await result('error', {cancelled:true, reason:'plan_mode_inactive'}, 'plan_mode_question');
+await emit('agent_settled');
+assert.deepEqual(states().slice(-2), [true,false], 'true non-form closure recovers');
+await call('blocked-tool');
+await emit('tool_execution_end', {toolCallId:'blocked-tool',toolName:'ask_user_question',isError:true,result:{details:undefined}});
+await emit('agent_settled');
+assert.deepEqual(states().slice(-2), [true,false], 'blocked/throwing tool without a result hook recovers');
+await call('cancelled');
+await result('cancelled', {cancelled:true});
+await emit('input', {source:'extension'});
+await emit('agent_start');
+assert.equal(states().at(-1), true, 'operational follow-ups do not dismiss an unresolved decision');
+await emit('input', {source:'interactive'});
+idle = false;
+await emit('agent_start');
+assert.equal(states().at(-1), true, 'unrelated interactive input cannot resolve a cancelled decision');
+await call('open');
+await emit('agent_settled');
+assert.equal(states().at(-1), true, 'settle cannot dismiss a form whose tool is still open');
+const oldGeneration = reports.at(-1).identity.generation;
+await emit('session_shutdown');
+const replacement = context('root');
+await emit('session_start', {}, replacement);
+await call('open', 'ask_user_question', replacement);
+assert.notEqual(reports.at(-1).identity.generation, oldGeneration);
+const before = reports.length;
+await result('open', {cancelled:false}, 'ask_user_question', root);
+await emit('turn_start', {}, root);
+assert.equal(reports.length, before, 'stale runtime events cannot release the new generation even with the same session/call ids');
+await emit('session_shutdown', {}, replacement);
+await emit('session_start', {}, headless);
+await call('rpc', 'ask_user_question', headless);
+assert.equal(reports.length, before + 1, 'headless subagent never acquires pane attention');
+await emit('session_start', {}, replacement);
+owns = false;
+await call('foreign-home', 'ask_user_question', replacement);
+assert.equal(reports.length, before + 1, 'lost home ownership cannot publish');
+owns = true;
+process.env.HERDR_PANE_ID = 'another-pane';
+await call('wrong-pane', 'ask_user_question', replacement);
+assert.equal(reports.length, before + 1, 'changed pane identity cannot publish');
+assert.equal(reporterCount, 1, 'balanced attention holds preserve another producer');
+const registrations = [...handlers.values()].flat().length;
+delete process.env.HERDR_ENV;
+mod.registerFirstmateDecisionAttention(pi, () => true);
+assert.equal([...handlers.values()].flat().length, registrations, 'non-Herdr backends install no attention hooks');
+JS
+)
+  status=$?
+  expect_code 0 "$status" "Pi decision attention failed: $out"
+  pass "Pi decision attention: open, navigation, submit, cancellation, recovery, duplicates, and root/generation isolation"
+}
+
+test_pi_decision_attention
 test_pi_extension_reports_external_healthy_watcher
 test_pi_tool_returns_agent_tool_result
 test_pi_redundant_tool_call_is_owned_noop

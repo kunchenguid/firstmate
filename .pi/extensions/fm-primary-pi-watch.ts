@@ -41,7 +41,7 @@ import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
 import { Box, Container, Text, type Component } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { registerFirstmateTool } from "./lib/fm-native-contract.ts";
+import { registerFirstmateDecisionAttention, registerFirstmateTool } from "./lib/fm-native-contract.ts";
 import {
   afkPostureRecordPresent,
   branchOfferForWake,
@@ -551,6 +551,8 @@ process.once("exit", cleanupOnProcessExit);
 export default function (pi: ExtensionAPI) {
   let generation = createGeneration();
   activateGeneration(generation);
+  registerFirstmateDecisionAttention(pi, () =>
+    generationIsLive(generation) && lockOwnership() === "owned");
 
   let calmPresentation: CalmPresentationState = {
     active: false,
