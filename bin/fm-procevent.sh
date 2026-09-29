@@ -29,9 +29,12 @@
 # register-firstmate
 # register-task
 #            Record a Firstmate- or worker-owned Lavish source. Its one source
-#            record persists across rounds, and re-registration by the same
-#            owner acknowledges nonterminal captured rounds without touching
-#            the source claim. Task-owned terminal rounds use `handled`.
+#            record persists across rounds. Once that owned record exists,
+#            re-registration by the same owner acknowledges a nonterminal round
+#            without touching the source claim. A matching plain Firstmate
+#            registration from the legacy lifecycle is first quiesced for its
+#            one-round migration. Terminal captures use `handled` instead of
+#            re-registration; for a task-owned board that also retires it.
 # register-extension
 #            Resolve an explicitly enabled home-local process-event-adapter/1
 #            binding, verify its package and handshake, and record the source
@@ -68,9 +71,8 @@
 #            acknowledgement yet - regardless of any earlier publication - and
 #            start a runner for any registered source that has no live owner and
 #            no open Firstmate- or task-owned Lavish round. This is liveness
-#            repair only - it never
-#            discovers results by
-#            polling the source, because the child blocks on the source itself.
+#            repair only - it never discovers results by polling the source,
+#            because the child blocks on the source itself.
 #            A start is REPORTED only once it is confirmed: starting a runner is
 #            detached and its errors reach no caller, so a source that cannot
 #            start would otherwise be counted exactly like one that is

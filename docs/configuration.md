@@ -1846,7 +1846,15 @@ An already-armed Lavish source keeps its registered listener command until it is
 
 ### Firstmate-hosted Lavish review boards
 
-Firstmate arms a board with `bin/fm-procevent-lavish.sh arm <artifact.html>`. After feedback is captured, the listener remains paused on that open round instead of starting another reply-less poll. Firstmate reads the capture, writes its response to a file, and runs `bin/fm-procevent-lavish.sh arm <artifact.html> --agent-reply-file <path>`. That re-arm acknowledges the captured round and starts the next poll with the response posted to the same saved Lavish session. The staged reply is consumed once, so later listener recovery cannot post it again.
+Firstmate arms a board with `bin/fm-procevent-lavish.sh arm <artifact.html>`.
+An initial arm carrying `--agent-reply-file`, or any repeated arm before a round is captured, is refused without creating or replacing a listener.
+After a nonterminal capture, the source remains registered but no new poll starts while that round is open.
+Firstmate reads the capture, writes its response to a file, and runs `bin/fm-procevent-lavish.sh arm <artifact.html> --agent-reply-file <path>`.
+A reply-bearing re-arm that reports `armed` acknowledges exactly that captured round and starts the next poll carrying the response to the same saved Lavish session.
+The shared staged-reply behavior and its best-effort loss boundary are described in the **Stage an agent reply** paragraph below.
+A terminal Firstmate-owned source retires itself; when its capture is announced, Firstmate acknowledges it with `bin/fm-procevent.sh handled <source-id> <sequence>` and does not re-arm it.
+When a board still has the matching plain Firstmate registration from before this lifecycle, the first reply-bearing re-arm stops any live legacy listener and migrates only if exactly one unacknowledged nonterminal round can still be proven.
+Otherwise migration is refused without marking any captured round handled.
 
 ### Crew-hosted Lavish review boards
 
