@@ -543,7 +543,7 @@ fm_backlog_done() {  # <data-dir> <id> [flag...]
 fm_backlog_row_artifact_supported() {
   local id=$1 flag=${2:-} value=${3:-}
   case "$flag" in
-    --pr) return 0 ;;
+    --pr) ! fm_backlog_pr_is_gerrit_change "$value" ;;
     --report) [ "$value" = "data/$id/report.md" ] ;;
     *) return 1 ;;
   esac
@@ -575,11 +575,11 @@ fm_backlog_retain() {  # <data-dir> <id> [flag...]
         fi
         ;;
       --pr)
-        if fm_backlog_pr_is_gerrit_change "$arg"; then
-          deliverable="${deliverable:+$deliverable; }Gerrit change $arg"
-        else
+        if fm_backlog_row_artifact_supported "$id" --pr "$arg"; then
           deliverable="${deliverable:+$deliverable; }PR $arg"
           row_args=(--pr "$arg")
+        else
+          deliverable="${deliverable:+$deliverable; }Gerrit change $arg"
         fi
         ;;
       --note) deliverable="${deliverable:+$deliverable; }$arg" ;;
