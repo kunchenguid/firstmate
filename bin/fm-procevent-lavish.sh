@@ -34,12 +34,10 @@
 # poll       The registered listener command `arm` publishes, not a command to
 #            run in a conversational turn. It runs the published blocking poll
 #            and prints its response verbatim, absorbing only the one exact
-#            transient interruption described below. A task-owned arm consumes
-#            its staged reply file once - reading and removing it before the
-#            poll - and hands the contents to the published `--agent-reply`
-#            argument; later retries poll without that reply. That post is best
-#            effort: a crash while consuming drops that one round's reply
-#            instead of posting it twice. See the note at the consume site.
+#            transient interruption described below. When supported, a staged
+#            reply is synchronously accepted with `lavish-axi reply` before the
+#            listener is registered; older compatible versions keep the legacy
+#            best-effort `poll --agent-reply` path.
 # terminal   Exit 0 when the captured result means this Lavish source will never
 #            produce another result, so the runner may retire it; any other exit
 #            keeps it armed. This is the generic adapter contract bin/fm-procevent.sh
@@ -100,12 +98,10 @@
 # `read` is the presentation command summarized above; keyed intake remains
 # the separate `answers` contract described here.
 #
-# It wraps ONLY the currently published interface, verified against 0.1.45:
-#   Usage: lavish-axi poll <html-file> [--agent-reply "..."]
-# and that command "long-polls indefinitely" server-side. The adapter therefore
-# runs the plain blocking form with no timeout flag, so results arrive as real
-# server-side events. It adds no periodic discovery, no timer fallback, and no
-# dependency on any unreleased capability.
+# It wraps the published `lavish-axi poll` and `lavish-axi reply` interfaces,
+# verified against 0.1.80. `poll` long-polls indefinitely; `reply` exits only
+# after the server confirms acceptance. Older compatible versions retain the
+# legacy poll-with-reply path, without the synchronous handoff guarantee.
 #
 # BOUNDED QUIET RETRY, owned here and nowhere else. A live listener can be cut
 # short by the server with exactly this two-line response while the session's
@@ -180,6 +176,18 @@ apply_session_host() {  # <artifact>
   export LAVISH_AXI_HOST LAVISH_AXI_PORT
 }
 
+lavish_reply_compatible() {
+  "$FM_ROOT/bin/fm-bootstrap.sh" lavish-reply-compatible >/dev/null 2>&1
+}
+
+post_lavish_reply() {  # <artifact> <reply-file>
+  local output
+  if ! output=$(lavish-axi reply "$1" --agent-reply-file "$2" 2>&1); then
+    [ -n "$output" ] || output="lavish-axi reply exited nonzero"
+    die "Lavish did not accept the staged reply: $output"
+  fi
+}
+
 # Canonical identity is physical, not the path string: Lavish itself keys a
 # session on the realpath of the artifact, so two names for one file are one
 # source and must never become two owners.
@@ -228,6 +236,11 @@ cmd_arm() {
   real=$(perl -MCwd=realpath -e '$p = realpath($ARGV[0]); defined($p) or exit 1; print "$p\n"' "$artifact" 2>/dev/null) \
     || die "cannot resolve the artifact path: $artifact"
   listener=("$SCRIPT_DIR/fm-procevent-lavish.sh" poll "$real")
+  if [ -n "$reply_file" ] && lavish_reply_compatible; then
+    apply_session_host "$real"
+    post_lavish_reply "$real" "$reply_file"
+    reply_file=''
+  fi
   [ -z "$reply_file" ] || listener+=(--agent-reply-file "$reply_file")
   if [ -n "$task" ]; then
     FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" register-task lavish "$id" "$task" -- \
@@ -392,19 +405,20 @@ cmd_poll() {
     [ -f "$artifact" ] && [ ! -L "$artifact" ] && [ -r "$artifact" ] \
       || die "artifact is no longer a readable file: $artifact"
     apply_session_host "$artifact"
-    # Posting a round's reply is BEST EFFORT and deliberately carries no delivery
-    # machinery. The staged file is the only record that a reply is owed, so it is
-    # consumed HERE - after every non-posting step that could abort this poll has
-    # already succeeded - leaving one narrow window: a crash between consuming the
-    # file and the call below drops this one round's reply rather than posting it
-    # twice. A listener that starts with no staged file simply polls without one.
-    # Robust delivery waits on lavish-axi's own exclusive listener; do not add a
-    # receipt, retry, or idempotency marker here.
+    # Newer Lavish builds expose a one-shot reply command whose success is the
+    # server's acceptance receipt. Consume the staged file only after that
+    # confirmation; older compatible builds retain the published poll reply
+    # behavior and its best-effort delivery boundary.
     if [ -f "$reply_file" ] && [ ! -L "$reply_file" ]; then
-      reply_text=$(cat -- "$reply_file") \
-        || die "cannot read agent reply file: $reply_file"
-      rm -f -- "$reply_file" || die "cannot consume agent reply file: $reply_file"
-      reply_pending=1
+      if lavish_reply_compatible; then
+        post_lavish_reply "$artifact" "$reply_file"
+        rm -f -- "$reply_file" || die "cannot consume agent reply file: $reply_file"
+      else
+        reply_text=$(cat -- "$reply_file") \
+          || die "cannot read agent reply file: $reply_file"
+        rm -f -- "$reply_file" || die "cannot consume agent reply file: $reply_file"
+        reply_pending=1
+      fi
     fi
     if [ "$reply_pending" -eq 1 ]; then
       lavish-axi poll "$artifact" --agent-reply "$reply_text" | poll_response_filter "$response"
