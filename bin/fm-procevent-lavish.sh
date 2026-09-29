@@ -251,7 +251,7 @@ cmd_arm() {
     owner=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" list 2>/dev/null \
       | awk -v id="$id" '$1 == id { print $3; exit }')
     case "$owner" in
-      live|orphaned|firstmate/listening|firstmate/round-open|task:*/listening|task:*/round-open) ;;
+      live|orphaned|task:*/listening|task:*/round-open) ;;
       *) FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" retire "$id" >/dev/null 2>&1 || true ;;
     esac
     exit 1

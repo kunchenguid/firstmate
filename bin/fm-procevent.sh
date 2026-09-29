@@ -578,6 +578,8 @@ cmd_register_lavish() {
   local adapter=${1-} id=${2-} task=${3-} sep=${4-} result pending pending_adapter
   local reply_source='' reply_dest='' stale arg i adopting=0 migrating=0 pending_owner prior_record=''
   local pending_rounds=0 kind=firstmate-owned current_kind owner_name=Firstmate has_reply=0
+  local owner pid token identity stop_state migration_result='' migration_sequence='' migration_identity=''
+  local recheck='' recheck_count=0 recheck_identity=''
   local -a argv=()
   shift 4 2>/dev/null || usage
   [ "$adapter" = lavish ] || die "Lavish ownership registration is reserved for the Lavish adapter"
@@ -626,6 +628,26 @@ cmd_register_lavish() {
   else
     adopting=1
   fi
+  if [ "$migrating" -eq 1 ] \
+      && { [ -e "$(fm_procevent_claim_path "$id")" ] || [ -L "$(fm_procevent_claim_path "$id")" ]; }; then
+    if ! fm_procevent_claim_load_locked "$id" 2>/dev/null \
+        || ! fm_procevent_claim_owned_by_state "$STATE" "$FM_HOME"; then
+      fm_procevent_source_lock_release "$id"
+      die "cannot quiesce legacy Firstmate source ownership: $id"
+    fi
+    owner=$FM_PROCEVENT_CLAIM_HOME
+    pid=$FM_PROCEVENT_CLAIM_PID
+    token=$FM_PROCEVENT_CLAIM_TOKEN
+    identity=$FM_PROCEVENT_CLAIM_IDENTITY
+    stop_runner_pid "$pid" "$identity"
+    stop_state=$?
+    if [ "$stop_state" -eq 2 ] \
+        || ! fm_procevent_claim_reclaim_locked "$id" "$owner" "$pid" "$token"; then
+      fm_procevent_source_lock_release "$id"
+      die "cannot quiesce legacy Firstmate listener: $id"
+    fi
+    rm -f -- "$(staging_file "$id" "$token")" "$(runner_file "$id")"
+  fi
   while IFS= read -r pending; do
     [ -n "$pending" ] || continue
     pending_rounds=$((pending_rounds + 1))
@@ -640,6 +662,21 @@ cmd_register_lavish() {
     if [ -n "$pending_adapter" ] && adapter_result_is_terminal "$pending_adapter" "$pending"; then
       fm_procevent_source_lock_release "$id"
       die "cannot re-arm terminal Lavish result $pending; stop and conclude the review"
+    fi
+    if [ "$migrating" -eq 1 ]; then
+      migration_result=$pending
+      migration_sequence=$(fm_procevent_result_sequence "$pending" 2>/dev/null || true)
+      migration_identity=$(fm_pr_file_identity "$pending" 2>/dev/null || true)
+      case "$migration_sequence" in
+        ''|*[!0-9]*)
+          fm_procevent_source_lock_release "$id"
+          die "cannot identify legacy Firstmate captured round: $pending"
+          ;;
+      esac
+      if [ -z "$migration_identity" ]; then
+        fm_procevent_source_lock_release "$id"
+        die "cannot identify legacy Firstmate captured round: $pending"
+      fi
     fi
   done < <(source_pending "$id")
   if [ "$adopting" -eq 0 ] && [ "$pending_rounds" -eq 0 ]; then
@@ -692,22 +729,45 @@ cmd_register_lavish() {
       die "cannot read the registration this re-arm replaces: $id"
     fi
   fi
+  if [ "$migrating" -eq 1 ]; then
+    while IFS= read -r recheck; do
+      [ -n "$recheck" ] || continue
+      recheck_count=$((recheck_count + 1))
+      recheck_identity=$(fm_pr_file_identity "$recheck" 2>/dev/null || true)
+      [ "$recheck" = "$migration_result" ] \
+        && [ "$recheck_identity" = "$migration_identity" ] || recheck_count=2
+    done < <(source_pending "$id")
+    if [ "$recheck_count" -ne 1 ]; then
+      rm -f -- "$prior_record" "$reply_dest"
+      fm_procevent_source_lock_release "$id"
+      die "cannot prove one legacy Firstmate captured round for migration: $id"
+    fi
+  fi
   if ! fm_procevent_lavish_registration_publish_locked "$STATE" "$adapter" "$id" "$task" "${argv[@]}"; then
     [ -z "$prior_record" ] || rm -f -- "$prior_record"
     [ -z "$reply_dest" ] || rm -f -- "$reply_dest"
     fm_procevent_source_lock_release "$id"
     die "cannot publish $owner_name Lavish registration"
   fi
-  while IFS= read -r pending; do
-    [ -n "$pending" ] || continue
-    result=$pending
-    fm_procevent_mark_handled "$STATE" "$id" "$(fm_procevent_result_sequence "$result")" >/dev/null 2>&1 || {
+  if [ "$migrating" -eq 1 ]; then
+    fm_procevent_mark_handled "$STATE" "$id" "$migration_sequence" >/dev/null 2>&1 || {
       [ -z "$prior_record" ] || mv -f -- "$prior_record" "$(source_file "$id")"
       [ -z "$reply_dest" ] || rm -f -- "$reply_dest"
       fm_procevent_source_lock_release "$id"
-      die "cannot acknowledge captured round: $result"
+      die "cannot acknowledge captured round: $migration_result"
     }
-  done < <(source_pending "$id")
+  else
+    while IFS= read -r pending; do
+      [ -n "$pending" ] || continue
+      result=$pending
+      fm_procevent_mark_handled "$STATE" "$id" "$(fm_procevent_result_sequence "$result")" >/dev/null 2>&1 || {
+        [ -z "$prior_record" ] || mv -f -- "$prior_record" "$(source_file "$id")"
+        [ -z "$reply_dest" ] || rm -f -- "$reply_dest"
+        fm_procevent_source_lock_release "$id"
+        die "cannot acknowledge captured round: $result"
+      }
+    done < <(source_pending "$id")
+  fi
   [ -z "$prior_record" ] || rm -f -- "$prior_record"
   for stale in "$REG/.$id.reply."*; do
     [ -e "$stale" ] || continue

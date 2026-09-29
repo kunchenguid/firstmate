@@ -879,16 +879,29 @@ fi
   || fail "a mismatched legacy registration acknowledged Firstmate's round"
 pe "$HLEGACY" register lavish "$legacy_id" -- \
   "$ROOT/bin/fm-procevent-lavish.sh" poll "$LEGACY_ART" >/dev/null
-PATH="$FIRSTMATE_BIN:$PATH" FM_HOME="$HLEGACY" \
+PATH="$FIRSTMATE_BIN:$PATH" pe "$HLEGACY" reconcile >/dev/null
+for _ in $(seq 1 100); do
+  [ "$(cat "$LEGACY_ROOT/count" 2>/dev/null || true)" = 3 ] && break
+  sleep 0.02
+done
+[ "$(cat "$LEGACY_ROOT/count" 2>/dev/null || true)" = 3 ] \
+  || fail "the legacy listener did not enter its active reply-less poll"
+legacy_arm_out=$(PATH="$FIRSTMATE_BIN:$PATH" FM_HOME="$HLEGACY" \
   "$ROOT/bin/fm-procevent-lavish.sh" arm "$LEGACY_ART" \
-    --agent-reply-file "$LEGACY_ROOT/reply" >/dev/null
+    --agent-reply-file "$LEGACY_ROOT/reply")
+assert_contains "$legacy_arm_out" "armed: $legacy_id" \
+  "legacy migration did not replace its active reply-less listener"
+assert_not_contains "$legacy_arm_out" "still-listening" \
+  "legacy migration left the active reply-less listener in place"
 wait_for "$LEGACY_ROOT/replies" \
   || fail "the upgraded legacy session did not receive Firstmate's reply"
 [ "$(cat "$LEGACY_ROOT/replies")" = "legacy revision complete" ] \
   || fail "the upgraded legacy session received the wrong reply"
 [ -f "$HLEGACY/state/procevent-inbox/$legacy_id.2.handled" ] \
   || fail "the upgraded legacy reply did not acknowledge its capture"
-touch "$LEGACY_ROOT/trigger3"
+[ "$(cat "$LEGACY_ROOT/count" 2>/dev/null || true)" = 4 ] \
+  || fail "the migrated reply did not start a replacement Lavish poll"
+touch "$LEGACY_ROOT/trigger4"
 wait_capture "$HLEGACY" "$legacy_id" \
   || fail "the upgraded legacy Lavish session did not settle"
 pass "only the matching legacy Firstmate registration enters the reply lifecycle"
