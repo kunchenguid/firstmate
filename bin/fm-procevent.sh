@@ -32,7 +32,7 @@
 #            source claim. Terminal rounds are concluded with `handled`. A
 #            staged `--agent-reply-file` is handed to the adapter's
 #            `deliver-reply` under the source lock once the task is eligible,
-#            so a refused arm never posts it and a failed post publishes nothing.
+#            so a refused arm never posts it and a failed post publishes no registration.
 # register-extension
 #            Resolve an explicitly enabled home-local process-event-adapter/1
 #            binding, verify its package and handshake, and record the source
