@@ -68,13 +68,17 @@
 // rides the replacement handoff.
 //
 // Interrupted-run recovery (stated once here):
-// A follow-up waits in omp's queue until the run ends. An Escape while omp
-// shows its working animation moves every queued user message into the editor
+// A follow-up waits in omp's queue until the run ends. omp reads not idle
+// inside a natural agent_end while it awaits session_stop, so a wake that
+// closes then is still sent as a follow-up and can stay queued behind the
+// advisor's note once omp settles. An Escape while omp shows its working
+// animation moves every queued user message into the editor
 // (merged ahead of any draft, each segment joined by one blank line), aborts
 // with the user-interrupt reason, and suppresses omp's follow-up-only resume,
 // so the wake sits unsent in the composer. An empty Enter mid-run aborts the
 // same way without the restore, stranding the wake in omp's queue. On a plain
-// agent_end (never willContinue) this file waits for omp to settle, then:
+// agent_end (never willContinue) this file waits for omp to settle, then,
+// with any wake still unconsumed, including one sent during the settle:
 //   1. idle, nothing queued, and the editor holds an unconsumed wake's exact
 //      text: exactly that text leaves the editor, every other character (a
 //      captain's queued message or draft) stays byte for byte, and the token
@@ -82,8 +86,9 @@
 //      delivers the wake again;
 //   2. idle, messages still queued, and no unconsumed wake in the editor: one
 //      operational steer, never a second copy of a wake, starts a turn; a
-//      queued steer clears the suppression, and omp delivers the stranded
-//      wakes after it. Each stranded wake earns at most one steer.
+//      queued steer clears the suppression or passes the advisor's note, and
+//      omp delivers the stranded wakes after it. Each stranded wake earns at
+//      most one steer.
 // Each agent_end is checked once, and only the latest one pending settle acts.
 // A blind Enter from the parent is never safe here because the restored text
 // can hold what the captain typed; tests/fm-omp-interrupt-live-e2e.test.sh
@@ -635,13 +640,13 @@ export default function (pi: ExtensionAPI) {
   // The interrupted-run recovery stated in this file's header, run once per
   // plain agent_end after omp settles.
   async function recoverInterruptedRun(owner: SessionGeneration, ctx: OmpHandlerContext | undefined): Promise<void> {
-    if (!generationIsLive(owner) || owner.unconsumedWakes.size === 0) return;
+    if (!generationIsLive(owner)) return;
     const check = ++owner.interruptCheck;
     await new Promise<void>((resolveSettle) => {
       const timer = setTimeout(resolveSettle, interruptSettleMs);
       timer.unref();
     });
-    if (!generationIsLive(owner) || owner.interruptCheck !== check) return;
+    if (!generationIsLive(owner) || owner.interruptCheck !== check || owner.unconsumedWakes.size === 0) return;
     // omp reads not idle inside a natural agent_end; after the settle wait an
     // omp still running a turn or drain is left alone.
     if (typeof ctx?.isIdle !== "function" || ctx.isIdle() !== true) return;
@@ -674,7 +679,7 @@ export default function (pi: ExtensionAPI) {
     for (const token of stranded) owner.steeredWakes.add(token);
     const steer = encodeFirstmateOperationalInput(
       "watcher",
-      "Firstmate supervision continues in a new turn: an interrupted run left Firstmate watcher wakes queued, and they follow this message. Run bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.",
+      "Firstmate supervision continues in a new turn: Firstmate watcher wakes are still queued, and they follow this message. Run bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.",
     );
     await pi.sendUserMessage(steer, { deliverAs: "steer" });
   }
