@@ -747,7 +747,12 @@ cmd_down() {
   for n in {1..40}; do
     refresh_pairs
     survivors=$(live_pids "$pairs")
-    [ -n "$survivors" ] || break
+    if [ -z "$survivors" ]; then
+      sleep 0.5
+      refresh_pairs
+      survivors=$(live_pids "$pairs")
+      [ -n "$survivors" ] || break
+    fi
     if [ "$n" -ge 20 ]; then
       # shellcheck disable=SC2086 # One identity-checked pid per word.
       kill -9 $survivors 2>/dev/null || true

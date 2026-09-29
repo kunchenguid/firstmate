@@ -438,7 +438,7 @@ SH
 start_group bash "$TMP_ROOT/late-rewriter.sh" "$HOME/.claude.json" "$LATE/home" "$TMP_ROOT/late-child"
 LATE_ROOT=$!
 printf '%s\n' "$LATE_ROOT" >> "$TMP_ROOT/pids"
-for n in {1..50}; do
+for ((attempt=0; attempt<50; attempt++)); do
   [ -s "$TMP_ROOT/late-child.ready" ] && break
   sleep 0.1
 done
