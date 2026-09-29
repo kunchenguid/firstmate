@@ -12,7 +12,7 @@
 #     reservation until cleanup removes the record or a relaunch republishes it
 #     on a model outside the pool;
 #   - every live secondmate supervisor whose task record in the root names a
-#     pooled model, including idle supervisors;
+#     pooled model, even when its busy record reports idle;
 #   - the primary supervisor, keyed "<root-state>\t.primary", when the root's
 #     config/fleet-seats declares "primary_model" in a pool and the root's
 #     session lock is not provably free or stale (bin/fm-session-lock-lib.sh).
@@ -27,7 +27,8 @@
 # both take the last seat.
 #
 # COUNTING AT THE ROOT. Under the root lock, a pool's holders are the union of:
-#   - live seat records in <root>/state/fleet-seats/<pool>/*.seat. A record is
+#   - live seat records in <root>/state/fleet-seats/*/*.seat, matched to the
+#     current pool by recorded model. A record is
 #     live while its task record is pooled and active (as above), or while its
 #     reserving process (recorded pid plus pid identity) still runs, which
 #     covers a spawn that reserved before publishing its record. A record that
@@ -68,13 +69,12 @@
 #     require a seat grant. A timeout withdraws the request and refuses unless
 #     confirmation landed first.
 #
-# EXPLICIT MODELS. While any pool is configured, a ship, scout, or secondmate
-# on a multi-provider harness (pi, pi-signed, omp, opencode) refuses without an
-# explicit --model, because that harness's own default could be a pooled model
-# nothing counted.
+# EXPLICIT MODELS. While any pool is configured, every launch needs a verified
+# explicit model. A harness default or raw launch command cannot prove its
+# actual model and refuses before dispatch.
 #
 # Usage:
-#   fm-fleet-seats.sh reserve <id> --harness <harness> --model <model|default> --holder-pid <pid>
+#   fm-fleet-seats.sh reserve <id> --harness <harness> --model <model|default> --holder-pid <pid> [--raw-launch]
 #       Reserve a seat for this home's <id> when <model> belongs to a pool.
 #       Prints nothing and exits 0 when no pool names the model (or no pool is
 #       configured locally); prints "fleet-seats: reserved ..." on success.
@@ -130,7 +130,7 @@ SERVE_TIMEOUT=20
 SERVE_BACKOFF=${FM_FLEET_SEATS_TEST_BACKOFF:-120}
 
 usage() {
-  echo "usage: fm-fleet-seats.sh reserve <id> --harness <harness> --model <model|default> --holder-pid <pid> | serve-remotes | serve --digest <digest> [--allowance <pool>=<n>]..." >&2
+  echo "usage: fm-fleet-seats.sh reserve <id> --harness <harness> --model <model|default> --holder-pid <pid> [--raw-launch] | serve-remotes | serve --digest <digest> [--allowance <pool>=<n>]..." >&2
   exit 2
 }
 
@@ -251,16 +251,29 @@ write_record() {
   } > "$path.tmp.$$" && mv -f "$path.tmp.$$" "$path"
 }
 
-# seat_records <dir> <models-file> <remove-stale 0|1>: "<state>\t<id>" per live record.
+# seat_records <root> <models-file> <remove-stale 0|1>: "<state>\t<id>" per live record.
 seat_records() {
-  local dir=$1 models=$2 remove_stale=$3 f st task verdict
+  local dir=$1 models=$2 remove_stale=$3 f st task model verdict
   [ -d "$dir" ] || return 0
-  for f in "$dir"/*.seat; do
+  for f in "$dir"/*/*.seat "$dir"/.[!.]*/*.seat "$dir"/..?*/*.seat; do
     [ -f "$f" ] || continue
     st=$(record_field "$f" state)
     task=$(record_field "$f" task)
+    model=$(record_field "$f" model)
     if [ -z "$st" ] || [ -z "$task" ]; then
       [ "$remove_stale" -eq 0 ] || rm -f "$f"
+      continue
+    fi
+    if [ -z "$model" ]; then
+      holder_alive "$(record_field "$f" pid)" "$(record_field "$f" pid_identity)" && return 1
+      [ "$remove_stale" -eq 0 ] || rm -f "$f"
+      continue
+    fi
+    if ! grep -Fxq -- "$model" "$models"; then
+      if [ "$remove_stale" -eq 1 ] \
+        && ! holder_alive "$(record_field "$f" pid)" "$(record_field "$f" pid_identity)"; then
+        rm -f "$f"
+      fi
       continue
     fi
     verdict=$(meta_state "$st/$task.meta" "$models")
@@ -335,7 +348,7 @@ root_holders() {
   UNCONFIRMED=
   registry_homes || return 1
   {
-    seat_records "$dir/$pool" "$models" "$remove_stale"
+    seat_records "$dir" "$models" "$remove_stale" || return 1
     while IFS= read -r home_state; do
       pooled_records "$home_state" "$models" || return 1
     done < "$TMPD/local-homes"
@@ -364,7 +377,7 @@ remote_holders() {
   local pool=$1 models=$2 remove_stale=$3 own
   own=$(canon_dir "$STATE") || return 1
   {
-    seat_records "$STATE/fleet-seats/$pool" "$models" "$remove_stale"
+    seat_records "$STATE/fleet-seats" "$models" "$remove_stale" || return 1
     pooled_records "$own" "$models" || return 1
   } > "$TMPD/holders.raw" || return 1
   sort -u "$TMPD/holders.raw"
@@ -392,17 +405,16 @@ print_full() {  # <pool> <used> <cap> <holders-file|->
 # require_explicit_model <pools-file>: refuse a harness default while pools exist.
 require_explicit_model() {
   [ "$(pool_count "$1")" -gt 0 ] || return 0
-  case "$MODEL" in ''|default) ;; *) return 0 ;; esac
-  case "$HARNESS" in
-    pi|pi-signed|omp|opencode)
-      unavailable "harness $HARNESS launches its own default model, which may be pooled; pass an explicit --model while fleet seat pools are configured"
-      ;;
+  [ "$RAW_LAUNCH" -eq 0 ] \
+    || unavailable "a raw launch command cannot verify its actual model while fleet seat pools are configured"
+  case "$MODEL" in
+    ''|-|default) unavailable "harness $HARNESS launches an unverified default model; pass an explicit --model while fleet seat pools are configured" ;;
   esac
 }
 
 CMD=${1:-}
 shift 2>/dev/null || true
-TASK='' MODEL='' HOLDER='' HARNESS='' DIGEST_ARG=''
+TASK='' MODEL='' HOLDER='' HARNESS='' DIGEST_ARG='' RAW_LAUNCH=0
 ALLOWANCES=''
 case "$CMD" in
   reserve)
@@ -414,6 +426,7 @@ case "$CMD" in
         --model) MODEL=${2:-}; shift 2 || usage ;;
         --harness) HARNESS=${2:-}; shift 2 || usage ;;
         --holder-pid) HOLDER=${2:-}; shift 2 || usage ;;
+        --raw-launch) RAW_LAUNCH=1; shift ;;
         *) usage ;;
       esac
     done
