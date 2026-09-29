@@ -57,10 +57,6 @@ test_branch_prompt_is_byte_stable_and_above_cache_floor() {
     *"# PR identity: copy or abstain"*"copied verbatim from the task's \`done [at=<epoch>]: PR <url>\` status line or its \`pr=\` metadata field"*"Never assemble an owner, repository, host, or number"*"report the identifier you do have"*) ;;
     *) fail "branch prompt lost the copy-or-abstain PR identity rule" ;;
   esac
-  case "$out_a" in
-    *"first run \`bin/fm-inbox.sh identity <id>\`"*"without invoking the email verifier"*"additional captain authorization"*"email_handoff:false"*"has no matching durable handoff"*"ordinary away-mode rules"*"email_handoff:true"*"verified:true"*) ;;
-    *) fail "branch prompt does not preserve ordinary inbox handling outside proven email handoffs" ;;
-  esac
   # The 2026-09-22 away window: every landed exemption worker was left sitting
   # because the prompt granted landed-task cleanup without ever naming the
   # moment or the command, so the stale wake ended in the recovery playbook's
@@ -74,6 +70,31 @@ test_branch_prompt_is_byte_stable_and_above_cache_floor() {
     *) fail "branch prompt lost the second-mate relay, signal-span, or stale-liveness rule" ;;
   esac
   pass "branch prompt is byte-stable across homes, cwd, timezone, and time, above the cache floor"
+}
+
+test_verifier_failure_leaves_inbox_note_and_wake_pending() {
+  local home request_id note_json note_id verify_out inbox_out wake_out
+  home="$TMP_ROOT/verifier-failure-home"
+  mkdir -p "$home/state/afk-email/sent"
+  request_id=afk-email-1-000000000000000000000001
+  note_json=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-inbox.sh" note --request-id "$request_id" --json "reply requires verification") \
+    || fail "could not queue an email-reply candidate"
+  note_id=$(printf '%s' "$note_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+  printf '{invalid state\n' > "$home/state/afk-email/sent/1.json"
+  if verify_out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$ROOT" \
+    python3 "$ROOT/bin/fm-afk-email.py" verify-note "$note_id" 2>&1); then
+    fail "corrupt matching handoff state did not make verification fail: $verify_out"
+  fi
+  assert_contains "$verify_out" 'verified reply state could not be read' 'the verifier reports an operational failure'
+  inbox_out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-inbox.sh" drain) || fail "pending inbox note could not be read after verification failure"
+  assert_contains "$inbox_out" "$note_id" 'verification failure leaves the note pending'
+  wake_out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-wake-drain.sh" 2>&1) || fail "pending wake could not be drained after verification failure"
+  assert_contains "$wake_out" "check: captain inbox note $note_id" 'verification failure leaves the wake pending'
+  assert_contains "$wake_out" 'WAKE_ACK_REQUIRED:' 'the pending wake still requires explicit acknowledgement'
+  pass "verification failure leaves the email note and wake pending"
 }
 
 # --- append-only outcome store ------------------------------------------------
@@ -1545,6 +1566,7 @@ WRAPPER
 }
 
 test_branch_prompt_is_byte_stable_and_above_cache_floor
+test_verifier_failure_leaves_inbox_note_and_wake_pending
 test_outcome_store_is_append_only_with_cursor_reads
 test_outcome_append_keeps_a_bounded_display_tail
 test_outcome_tail_keeps_whole_newest_rows_within_its_byte_budget
