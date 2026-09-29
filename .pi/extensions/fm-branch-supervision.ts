@@ -645,6 +645,7 @@ export default function (pi: ExtensionAPI) {
   }
   const AFK_EMAIL_DEBOUNCE_MS = 15000;
   const AFK_EMAIL_RETRY_MS = 60000;
+  let afkEmailFailureNotified = false;
   let afkEmailFlushTimer: ReturnType<typeof setTimeout> | undefined;
 
   function scheduleAfkEmailFlush(delayMs = AFK_EMAIL_DEBOUNCE_MS): void {
@@ -654,6 +655,7 @@ export default function (pi: ExtensionAPI) {
       if (!afkPostureRecordPresent(state)) return;
       const queued = await runCommandAsync(mailScript, ["afk-email", "queue-unprocessed"], { env: scriptEnv });
       const flushed = await runCommandAsync(mailScript, ["afk-email", "flush"], { env: scriptEnv });
+      if (queued.status === 0 && flushed.status === 0) afkEmailFailureNotified = false;
       if (!afkPostureRecordPresent(state)) return;
       if (queued.status !== 0 || flushed.status !== 0) {
         if (!afkEmailFailureNotified) {

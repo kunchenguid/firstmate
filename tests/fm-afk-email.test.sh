@@ -684,6 +684,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
+import subprocess
 
 root = Path(sys.argv[1])
 home = Path(sys.argv[2])
@@ -751,8 +752,51 @@ def deny_posture_read(command, *args, **kwargs):
     return real_run(command, *args, **kwargs)
 mail.subprocess.run = deny_posture_read
 poll_and_assert("unreadable posture")
+mail.subprocess.run = real_run
+fallback_env = os.environ.copy()
+for name in ("FM_MAIL_USER", "FM_MAIL_PASS", "FM_IMAP_HOST", "FM_IMAP_PORT", "FM_SMTP_HOST", "FM_SMTP_PORT"):
+    fallback_env.pop(name, None)
+fallback_env["FM_AFK_EMAIL_TO"] = "johnpoyser@gmail.com"
+fallback_env["FM_TEST_HARNESS"] = "pi"
+contract = str(root / "bin" / "fm-afk-contract.sh")
+config = home / ".env"
+disabled_config = home / ".env.disabled"
+subprocess.run(["bash", contract, "archive"], env=fallback_env, check=True, stdout=subprocess.DEVNULL)
+config.rename(disabled_config)
+try:
+    subprocess.run(["bash", contract, "enter"], env=fallback_env, check=True, stdout=subprocess.DEVNULL)
+finally:
+    disabled_config.rename(config)
+assert mail.afk_email_context() == (None, True, False)
+
+class FallbackMailbox:
+    untagged_responses = {"UIDVALIDITY": [b"44"]}
+    fetches = []
+
+    def select(self, *_): pass
+    def logout(self): pass
+
+    def uid(self, command, uid, fetch_spec):
+        if command == "search":
+            return "OK", [b"3"]
+        self.fetches.append((uid.decode(), fetch_spec))
+        assert fetch_spec == "(BODY.PEEK[HEADER])", fetch_spec
+        header = (
+            b"From: attacker@example.com\r\n"
+            b"Authentication-Results: mx.google.com; dkim=pass header.d=gmail.com\r\n\r\n"
+        )
+        return "OK", [(b"1 RFC822.SIZE 100", header)]
+
+fallback_mailbox = FallbackMailbox()
+mail.connect_mailbox = lambda: fallback_mailbox
+output = StringIO()
+with redirect_stdout(output):
+    assert mail.cmd_poll_list() == 0
+rows = {fields[0]: fields for fields in (line.split("\t") for line in output.getvalue().splitlines()[1:] if line)}
+assert rows["3"][4] == "ignored", rows
+assert fallback_mailbox.fetches == [("3", "(BODY.PEEK[HEADER])")], fallback_mailbox.fetches
 PY
-  pass "invalid and unreadable away records suppress normal mail and retain retry eligibility"
+  pass "invalid postures fail closed and fallback away filters non-owner mail"
 }
 
 test_read_gates_unauthenticated_bodies_during_away() {

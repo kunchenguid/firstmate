@@ -183,7 +183,7 @@ def afk_email_context():
             return None, True, True
         reach = afk_record_field('reach_channels')
         if reach == 'none':
-            return None, False, False
+            return None, True, False
         if reach != 'email':
             return None, True, True
     except (OSError, subprocess.SubprocessError):
