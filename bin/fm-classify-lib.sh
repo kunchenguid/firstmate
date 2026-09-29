@@ -119,8 +119,9 @@ FM_CLASSIFY_PAUSED_VERB_DEFAULT='paused'
 # time or the FM_PAUSE_UNTIL_MAX_SECS ceiling below, whichever comes first, so a
 # named time can pull a recheck earlier AND push it later. Both consumers read
 # FM_PAUSE_RESURFACE_SECS with this default so
-# the cadence has one owner. An item held for the captain is not rechecked at all
-# while the away-posture record exists (bin/fm-watch.sh owns that rule).
+# the cadence has one owner. An item held for the captain takes
+# FM_CAPTAIN_HOLD_RESURFACE_SECS instead of this cadence, and is not rechecked
+# at all while the away-posture record exists (bin/fm-watch.sh owns both rules).
 # shellcheck disable=SC2034 # Read by the watcher and daemon (fm-watch.sh, fm-supervise-daemon.sh), not this lib.
 FM_PAUSE_RESURFACE_SECS_DEFAULT=14400
 
