@@ -195,12 +195,6 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
-# shellcheck source=bin/fm-secondmate-parent-lib.sh disable=SC1091
-. "$SCRIPT_DIR/fm-secondmate-parent-lib.sh"
-# shellcheck source=bin/fm-secondmate-registry-lib.sh disable=SC1091
-. "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
-# shellcheck source=bin/fm-backend-hometag-lib.sh disable=SC1091
-. "$SCRIPT_DIR/fm-backend-hometag-lib.sh"
 # Shared secondmate endpoint probe + guarded relaunch; the watcher's poll tick
 # drives the same library so session start and ordinary supervision recover
 # from identical evidence through an identical path.
@@ -1477,63 +1471,6 @@ home_code_root() {
   fi
 }
 
-# The remedy never moves another home's records. Whether the code root is
-# another home is a durable identity fact, never present activity: a home
-# between sessions - restarting, crashed, or a sibling's idle leased copy - is
-# still a home and its records are still live. The code root is another home
-# when it carries its own .fm-secondmate-home marker, is registered as a
-# secondmate home in this home's registry, or is any ancestor on this home's
-# .fm-secondmate-parent chain or registered in any ancestor's registry. The
-# chain is walked to its root, which is a home with no parent record or a
-# remote parent. A chain that cannot be followed - a malformed or unreadable
-# record, a parent home that is gone, a cycle, or one longer than any real
-# fleet - protects the code root, because moving a live record aside cannot be
-# undone. A directory that merely looks like a home - a state/ or a dead lock
-# left behind when the home moved out of the code root - carries no marker or
-# registration, so its copy is a genuine stray the reader merges and moves
-# aside, which clears the line.
-FM_CODE_ROOT_ANCESTOR_BOUND=64
-
-code_root_registered_in() {  # <registry> <code-root>
-  local reg=$1 root=$2 line
-  [ -f "$reg" ] && [ ! -L "$reg" ] || return 1
-  while IFS= read -r line || [ -n "$line" ]; do
-    secondmate_registry_parse_line "$line" || continue
-    [ "$SECONDMATE_REGISTRY_REMOTE" -eq 1 ] && continue
-    [ "$SECONDMATE_REGISTRY_HOME" -ef "$root" ] && return 0
-  done < "$reg"
-  return 1
-}
-
-code_root_is_other_live_home() {  # <code-root>
-  local root=$1 home record parent parent_key seen depth=0
-  [ "$root" -ef "$FM_HOME" ] && return 1
-  [ -f "$root/$FM_BACKEND_HOMETAG_SECONDMATE_MARKER" ] && return 0
-  code_root_registered_in "$DATA/secondmates.md" "$root" && return 0
-  home=$FM_HOME
-  seen=$(cd "$home" 2>/dev/null && pwd -P) || return 0
-  while :; do
-    record="$home/.fm-secondmate-parent"
-    [ -e "$record" ] || [ -L "$record" ] || return 1
-    depth=$((depth + 1))
-    [ "$depth" -le "$FM_CODE_ROOT_ANCESTOR_BOUND" ] || return 0
-    fm_secondmate_parent_record_parse "$record" 2>/dev/null || return 0
-    [ "$FM_SECONDMATE_PARENT_ROUTE" = local ] || return 1
-    parent=$FM_SECONDMATE_PARENT_HOME
-    [ "$parent" -ef "$root" ] && return 0
-    parent_key=$(cd "$parent" 2>/dev/null && pwd -P) || return 0
-    case "
-$seen
-" in *"
-$parent_key
-"*) return 0 ;; esac
-    code_root_registered_in "$parent/data/secondmates.md" "$root" && return 0
-    seen="$seen
-$parent_key"
-    home=$parent
-  done
-}
-
 detect_code_root_backlog_fork() {
   local name code_root root_copy remedy
   code_root=$(home_code_root)
@@ -1542,10 +1479,10 @@ detect_code_root_backlog_fork() {
     root_copy="$code_root/data/$name"
     [ -e "$root_copy" ] || [ -L "$root_copy" ] || continue
     [ "$root_copy" -ef "$DATA/$name" ] && continue
-    if code_root_is_other_live_home "$code_root"; then
-      remedy="leave the code-root file in place, because it is another live home's record, and copy into $DATA/$name only rows whose task id has a record in this home and none in $code_root, where a record is a state/<id>.* file or a data/<id>/ directory"
+    if [ "$code_root" -ef "$FM_HOME" ]; then
+      remedy="it is inside this home, so merge it into this home's copy and move it aside"
     else
-      remedy="merge it into this home's copy and move it aside"
+      remedy="this check cannot tell whether that file is another home's live record, so never move, rewrite, or delete it on this line alone; copy into $DATA/$name only rows it has that this home's records claim (a state/<id>.* file or data/<id>/ directory here), report any row neither home's records claim to the captain, and run every later backlog command through bin/fm-tasks-axi.sh"
     fi
     echo "BACKLOG_RECONCILE: code-root $root_copy is not this home's $DATA/$name; a tasks-axi write may have landed there instead of this home, so rows may be missing here - $remedy"
   done
