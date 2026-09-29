@@ -43,11 +43,10 @@
 #            instead of posting it twice. See the note at the consume site.
 # arm        Register the board's listener and wait until it is running.
 #            `--for <task-id>` makes the board worker-owned. `--agent-reply-file`
-#            is one reply answering every round still pending on the board, so
-#            the owner reads and handles all of them first; the re-arm
-#            acknowledges each and prints `acknowledged: <source-id> <sequence>`
-#            for it, and a later wake for a covered sequence reports
-#            already-handled because that reply answered it. Without `--for` it
+#            is one reply answering every round still pending on the board; the
+#            re-arm acknowledges each and prints `acknowledged: <source-id>
+#            <sequence>` for it. docs/configuration.md "Reply to a Lavish round"
+#            owns what the owner checks before and after. Without `--for` it
 #            registers through the runner's `register-reply`, which is refused
 #            when no captured round is waiting, so an ended or never-armed board
 #            takes no reply, and stops the board's earlier listener so the reply

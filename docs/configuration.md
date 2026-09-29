@@ -1856,8 +1856,12 @@ An owner that has applied captured nonterminal feedback answers it in the board'
 Firstmate re-arms its own board with `bin/fm-procevent-lavish.sh arm <artifact.html> --agent-reply-file <path>`, and a worker adds `--for <task-id>` as the crew-hosted contract below requires.
 The file's contents are copied into that generation's private staging file and passed once to the published `--agent-reply` argument, leaving the caller's file in place.
 
-One reply answers every round still pending when the reply re-arm runs, so the owner reads and handles all of them before re-arming.
-The re-arm acknowledges each of those rounds and prints `acknowledged: <source-id> <sequence>` for every one, and a later wake for a covered sequence reports `already-handled` from `handled` because the consolidated reply answered it.
+One reply answers every round still pending when the reply re-arm runs, and the re-arm acknowledges each of those rounds and prints `acknowledged: <source-id> <sequence>` for every one.
+A firstmate board keeps listening while firstmate applies feedback, so the captain can send another round in the meantime.
+Immediately before a reply re-arm, firstmate therefore checks the board's pending rounds, each a `state/procevent-inbox/<source-id>.<sequence>.result` with no `.handled` marker beside it, and reads and applies any it has not read, so the reply covers them.
+After the re-arm, firstmate compares the printed `acknowledged` sequences with the rounds it actually read.
+Any acknowledged sequence it did not read must still be read and applied, with its answer given in chat, because a further reply re-arm is refused with no round waiting.
+A later wake for an acknowledged sequence reports `already-handled` from `handled`: that records only that the re-arm acknowledged it, not that its feedback was read.
 A reply re-arm is refused when no unacknowledged nonterminal round is waiting, so a generation already carrying a reply is never replaced before its listener posts it, and an ended or never-armed board takes no reply.
 It is also refused for a terminal round, because no later poll could show the reply.
 A failed re-arm leaves the prior registration and its referenced reply unchanged, including when its required acknowledgement cannot be recorded.

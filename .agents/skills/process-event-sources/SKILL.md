@@ -40,8 +40,7 @@ After applying the nonterminal feedback on a board you own, answer the captain i
 bin/fm-procevent-lavish.sh arm <artifact.html> --agent-reply-file <reply.md>
 ```
 
-That one reply answers every round still pending on the board, so read and handle all of them before re-arming, not only the round that woke you.
-The re-arm acknowledges each of those rounds and prints `acknowledged: <source-id> <sequence>` for every one it covered, so a later wake or `handled` call for a covered sequence reports `already-handled` because the consolidated reply answered it.
+That one reply answers and acknowledges every round still pending on the board, printing `acknowledged: <source-id> <sequence>` for each; follow the [round reply contract](../../../docs/configuration.md#process-to-event-sources-stateprocevent) for checking pending rounds right before the re-arm and for any acknowledged sequence you never read, since its `already-handled` does not mean you read it.
 It is refused when no unacknowledged round is waiting, including on an ended or never-armed board, and when a waiting round is terminal.
 A worker-owned board uses `bin/fm-procevent-lavish.sh arm <artifact.html> --for <task-id>` and re-arms with its reply after each nonterminal round; the existing handled marker is the acknowledgement.
 Arm it once, then re-arm only when a round is actually waiting: arming again with nothing to acknowledge is refused, because it would discard the reply your listener is still holding.
