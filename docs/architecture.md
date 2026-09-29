@@ -185,7 +185,7 @@ It leads with a prominent bordered tangle banner, while `bin/fm-guard.sh` owns t
 On every verified primary harness, tracked hook integration gives the primary session a push-based backstop: when work, a process-event source, a registered custom check, or Relay polling needs supervision and no supervision owner provably holds this home with a fresh beacon, blocking-capable Stop hooks block and nonblocking turn-end integrations force one bounded follow-up.
 The guard covers the main primary and genuinely marked secondmate homes, exempts child crewmate/scout worktrees, is loop-safe per harness, and is documented in [turnend-guard.md](turnend-guard.md).
 
-Away mode is a posture of the one supervision session, recorded in `state/.afk-contract` by `bin/fm-afk-contract.sh` in the same turn as `/afk` with no wait for a further go and read back in plain sentences only after entry; Pi refuses entry unless `FM_AFK_EMAIL_TO` is exactly `johnpoyser@gmail.com`, announces email reach when the mail plane is also configured, and otherwise records hold-for-return ([`afk-email.md`](afk-email.md)).
+Away mode is a posture of the one supervision session, recorded in `state/.afk-contract` by `bin/fm-afk-contract.sh` in the same turn as `/afk` with no wait for a further go and read back in plain sentences only after entry; see [Away email on Pi](afk-email.md) for Pi's optional email reach.
 
 
 

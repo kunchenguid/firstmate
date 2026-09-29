@@ -194,7 +194,7 @@ While attended, a captain-facing branch outcome (verdict `captain`) is saved as 
 It then opens one processing turn on main for that sequence.
 The turn stays open until main acknowledges the sequence through its `fm_branch_processed` tool.
 While away, the entry is saved, but processing waits until the away-posture record is archived.
-When configured, Pi email reach sends the same captain-facing outcome set to the captain's mailbox through the [away-email delivery path](afk-email.md).
+Pi away-email delivery is documented in [Away email on Pi](afk-email.md).
 
 
 
@@ -1407,8 +1407,7 @@ The mail plane (`bin/fm-mail.sh`) reads unseen IMAP messages and sends one SMTP 
 
 **Polling and delivery guarantees**
 Its `poll` command surfaces each eligible message as a durable `check: mail <uid>` wake, which is also what the standing received-mail check runs each watcher cycle.
-During an active or malformed Pi away posture, only mail from `johnpoyser@gmail.com` with Google's Gmail-aligned DKIM or DMARC pass is eligible; other or unauthenticated messages are silently cursor-recorded without body reads or wakes.
-The `read` command fetches and prints bodies only for that authenticated owner while away; ordinary attended reads remain unchanged.
+Pi away-mode sender filtering and authenticated-body rules are documented in [Away email on Pi](afk-email.md).
 
 
 

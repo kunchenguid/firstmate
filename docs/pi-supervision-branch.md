@@ -575,7 +575,6 @@ A leftover `state/.afk` flag declines nothing.
   [Away email on Pi](afk-email.md) owns operator setup, message validation, and limits.
   The first run boundary after the record is archived, ordinarily the captain's return message, presents the accumulated rows with a fresh triggered budget exactly as after any other gap.
   `bin/fm-afk-return.sh` lists them under "waiting on you".
-  When email reach is selected, captain-facing outcomes use the [Away email on Pi](afk-email.md) delivery path.
 
 
 
