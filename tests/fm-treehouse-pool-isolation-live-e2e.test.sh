@@ -99,11 +99,26 @@ test_shared_root_hands_out_a_foreign_slot() {
     || fail "the second clone could not acquire from the shared root"
 
   owner=$(owning_clone_of "$wt_b") || fail "could not read which clone owns the acquired worktree"
-  [ "$owner" = "$(cd "$clone_a" && pwd -P)" ] || fail \
-    "a returned slot under a shared root is no longer handed to the other clone on $TREEHOUSE_VERSION; re-derive this guard against the new behavior"
-  git -C "$clone_b" worktree list | grep -F "$wt_b" >/dev/null && fail \
-    "the acquiring clone unexpectedly lists the foreign slot as its own worktree"
-  pass "under a shared root a free slot is still a worktree of the other clone ($TREEHOUSE_VERSION)"
+  case "$owner" in
+    "$(cd "$clone_a" && pwd -P)")
+      # Older Treehouse releases leave the returned checkout linked to the first
+      # clone, which is the collision this guard originally captured.
+      git -C "$clone_b" worktree list | grep -F "$wt_b" >/dev/null && fail \
+        "the acquiring clone unexpectedly lists the foreign slot as its own worktree"
+      pass "under a shared root a free slot is still a worktree of the other clone ($TREEHOUSE_VERSION)"
+      ;;
+    "$(cd "$clone_b" && pwd -P)")
+      # Newer releases clean and relink the returned checkout, so the vendor no
+      # longer exhibits the historical foreign-slot collision. Keep the guard
+      # useful by requiring the acquired worktree to belong to its acquirer.
+      git -C "$clone_b" worktree list | grep -F "$wt_b" >/dev/null \
+        || fail "the acquiring clone does not list its returned slot as its own worktree"
+      pass "under a shared root Treehouse returns the slot to the acquiring clone ($TREEHOUSE_VERSION)"
+      ;;
+    *)
+      fail "a shared-root slot belongs to an unexpected clone: $owner"
+      ;;
+  esac
 }
 
 test_per_home_roots_acquire_concurrently_without_contention() {
