@@ -661,6 +661,66 @@ SH
   pass "fm-mail: a rollback failure never releases a wake the drain could acknowledge without a durable record"
 }
 
+test_away_ignored_mail_does_not_consume_poll_budget() {
+  local harness out
+  harness="$TMP_ROOT/away-ignored-budget-harness.py"
+  cat > "$harness" <<'PYEOF'
+import email
+import os
+import sys
+from io import StringIO
+from contextlib import redirect_stdout
+
+os.environ.update({
+    'FM_MAIL_USER': 't', 'FM_MAIL_PASS': 'p',
+    'FM_IMAP_HOST': 'imap.gmail.com', 'FM_IMAP_PORT': '993',
+    'FM_SMTP_HOST': 'smtp.test', 'FM_SMTP_PORT': '465',
+    'FM_MAIL_CURSOR': sys.argv[1], 'FM_MAIL_RETRY': sys.argv[2],
+    'FM_MAIL_POLL_MAX_WAKES': '1', 'FM_AFK_POSTURE': '1',
+})
+owner = 'johnpoyser@gmail.com'
+body = b'From: johnpoyser@gmail.com\r\nSubject: reply\r\n\r\nFM-AFK-REPLY test answer'
+class FakeConn:
+    untagged_responses = {'UIDVALIDITY': [b'90009']}
+    def login(self, *args): pass
+    def select(self, *args): return ('OK', [])
+    def uid(self, command, uid=None, spec=None):
+        if command == 'search':
+            return ('OK', [b'1 2 3 4'])
+        number = uid.decode()
+        if 'HEADER' in spec:
+            sender = owner if number == '4' else 'intruder@example.net'
+            auth = 'Authentication-Results: mx.google.com; dkim=pass header.d=gmail.com\r\n' if number == '4' else ''
+            header = f'From: {sender}\r\n{auth}Subject: mail {number}\r\n\r\n'.encode()
+            return ('OK', [(f'RFC822.SIZE {len(body)}'.encode(), header)])
+        return ('OK', [(f'RFC822.SIZE {len(body)}'.encode(), body)])
+    def logout(self): pass
+
+import imaplib
+imaplib.IMAP4_SSL = lambda *args, **kwargs: FakeConn()
+import subprocess
+subprocess.run = lambda *args, **kwargs: type('Result', (), {'returncode': 0, 'stdout': '', 'stderr': ''})()
+import importlib.util
+spec = importlib.util.spec_from_file_location('fm_mail', sys.argv[3])
+mail = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mail)
+mail.afk_email_context = lambda: (owner, True, False)
+output = StringIO()
+with redirect_stdout(output):
+    result = mail.cmd_poll_list()
+assert result == 0
+print(output.getvalue(), end='')
+PYEOF
+  printf 'uidvalidity=90009\n' > "$HOME_DIR/state/.mail-seen"
+  : > "$HOME_DIR/state/.mail-retry"
+  out=$(python3 "$harness" "$HOME_DIR/state/.mail-seen" "$HOME_DIR/state/.mail-retry" "$ROOT/bin/fm-mail.py" 2>&1)
+  assert_contains "$out" $'4\t\tjohnpoyser@gmail.com\tmail 4\tok' \
+    "owner reply beyond ignored mail remains within the poll's delivery budget"
+  assert_contains "$out" $'1\t\tintruder@example.net\tmail 1\tignored' \
+    "ignored messages remain reported for the attended return path"
+  pass "fm-mail: ignored away mail does not consume the bounded owner-reply budget"
+}
+
 test_poll_retry_surfaces_under_new_mail_flood() {
   local harness out
   harness="$TMP_ROOT/retry-budget-harness.py"
@@ -2703,6 +2763,7 @@ test_poll_retry_position_not_saved_when_row_emitted
 test_poll_retry_small_window_rotates_past_unfetchable_prefix
 test_poll_cap_one_turn_not_saved_before_emit
 test_poll_cap_one_turn_not_saved_when_retry_pos_write_fails
+test_away_ignored_mail_does_not_consume_poll_budget
 test_poll_retry_surfaces_under_new_mail_flood
 test_poll_resurfaces_degraded_uid_whose_wake_never_recorded
 test_poll_cap_one_never_suppresses_new_mail

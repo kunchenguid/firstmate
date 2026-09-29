@@ -1951,7 +1951,8 @@ test_away_record_parks_main_and_presents_after_archive() {
   mkdir -p "$home/state" "$home/config"
   install_pi_branch_extension_fixture "$repo"
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+    FM_AFK_EMAIL_TO=johnpoyser@gmail.com DRIVER_PRELUDE="$DRIVER_PRELUDE" \
+    node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 const prelude = process.env.DRIVER_PRELUDE;
 await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, sentToMain, mainEntries, outcomeScript, defaultSessionCtx, home, realRoot, bus, approvedProject }; })()`);
 const { fire, dispatch, settle, sentToMain, mainEntries, outcomeScript, defaultSessionCtx, home, realRoot, bus, approvedProject } = globalThis.__t;
@@ -2189,7 +2190,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, utimesSync } from "node:fs";
 
 const state = `${home}/state`;
-const env = { ...process.env, FM_HOME: home, FM_STATE_OVERRIDE: state, FM_CONFIG_OVERRIDE: `${home}/config` };
+const env = { ...process.env, FM_HOME: home, FM_STATE_OVERRIDE: state, FM_CONFIG_OVERRIDE: `${home}/config`, FM_AFK_EMAIL_TO: "johnpoyser@gmail.com" };
 const run = (args, label, extra = {}) => {
   const result = spawnSync("bash", args, { encoding: "utf8", env: { ...env, ...extra } });
   if (result.status !== 0) throw new Error(`${label} failed: ${result.stderr}`);
@@ -2294,7 +2295,8 @@ test_away_only_wake_rejects_when_record_is_archived_before_drain() {
   mkdir -p "$home/state" "$home/config"
   install_pi_branch_extension_fixture "$repo"
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+    FM_AFK_EMAIL_TO=johnpoyser@gmail.com DRIVER_PRELUDE="$DRIVER_PRELUDE" \
+    node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 const prelude = process.env.DRIVER_PRELUDE;
 await eval(`(async () => { ${prelude}; globalThis.__t = { fire, home, realRoot, bus, makeOffer, mainUserMessages, approvedProject }; })()`);
 const { fire, home, realRoot, bus, makeOffer, mainUserMessages, approvedProject } = globalThis.__t;
@@ -2359,7 +2361,8 @@ test_away_claimed_heartbeat_on_a_task_wake_lifts_task_scoping() {
   mkdir -p "$home/state" "$home/config"
   install_pi_branch_extension_fixture "$repo"
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+    FM_AFK_EMAIL_TO=johnpoyser@gmail.com DRIVER_PRELUDE="$DRIVER_PRELUDE" \
+    node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 const prelude = process.env.DRIVER_PRELUDE;
 await eval(`(async () => { ${prelude}; globalThis.__t = { fire, settle, home, realRoot, bus, makeOffer, approvedProject, defaultSessionCtx }; })()`);
 const { fire, settle, home, realRoot, bus, makeOffer, approvedProject, defaultSessionCtx } = globalThis.__t;

@@ -694,12 +694,13 @@ def cmd_poll_list():
 
                 status = 'degraded'
             out.append((uid, idate, fr, subj, status))
-            if is_retry:
-                retry_emitted += 1
-                if first_retry_emitted_index == -1:
-                    first_retry_emitted_index = retry_idx
-            else:
-                new_emitted += 1
+            if status != 'ignored':
+                if is_retry:
+                    retry_emitted += 1
+                    if first_retry_emitted_index == -1:
+                        first_retry_emitted_index = retry_idx
+                else:
+                    new_emitted += 1
         # Finish every IMAP round-trip before emit or persist so a hung
         # logout cannot run after the retry-scan position advances. Then emit
         # the mailbox generation guard and each message row (uid, date, from,
