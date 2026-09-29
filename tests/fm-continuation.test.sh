@@ -154,10 +154,15 @@ case "${1:-}" in
     done
     payload=${1:-}
     if [ "$literal" = 1 ]; then
+      case "$payload" in
+        ". '"*"'") staged=${payload#". '"}; staged=${staged%"'"}; [ ! -f "$staged" ] || payload=$(cat "$staged") ;;
+      esac
       printf '%s\n' "$payload" >> "$D/literal"
       case "$payload" in
         /exit|/quit) printf 'zsh' > "$D/command" ;;
-        *'encode launch-brief'*) cat "$D/becomes" > "$D/command" ;;
+        *'encode launch-brief'* | *'Firstmate operational input waiting: read'*)
+          cat "$D/becomes" > "$D/command"
+          ;;
       esac
     else
       printf '%s\n' "$payload" >> "$D/keys"
@@ -236,7 +241,7 @@ run_control() {  # <case-dir> <args...>
   env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
     HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' \
     FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
-    FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=0.05 FM_CONTROL_LAUNCH_WAIT=0.05 \
+    FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=0.05 FM_CONTROL_LAUNCH_WAIT=0.25 \
     "$CONTROL" "$@" 2>&1
 }
 
