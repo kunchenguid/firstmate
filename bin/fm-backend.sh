@@ -491,7 +491,7 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
         return 1
       fi
       fm_backend_source herdr || {
-        echo "REFUSED: Herdr adapter could not be loaded for task $id; preserving task state." >&2
+        echo "REFUSED: required herdr source could not be loaded for task $id; nothing was changed (task state preserved)." >&2
         return 1
       }
       if ! fm_backend_herdr_task_binding_validate "$meta" "$recorded_session" "$workspace"; then
