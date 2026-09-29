@@ -5,7 +5,7 @@
 # no-mistakes review/fix/document/test/lint/pr/rebase/ci agent never adopts that
 # identity or drives the fleet. Trusted-only: a pushed branch cannot turn this off,
 # so it is honored only from the default-branch copy of this file. Layered above
-# the NO_MISTAKES_GATE lifecycle refusal (bin/fm-gate-refuse-lib.sh) and the
+# gate-context lifecycle boundary (bin/fm-gate-refuse-lib.sh) and the
 # HEAD-continuity guard; see docs/architecture.md "No-mistakes gate authority boundary."
 disable_project_settings: true
 
@@ -40,6 +40,8 @@ test:
     Run live Herdr scenarios only through bin/fm-herdr-lab.sh with a named non-default fm-lab-* session, following that helper's prepare, provision, run, and teardown contract exactly.
     Never touch the live default Herdr session or fleet panes.
     Prefer a throwaway lab for spawn, long-launch, and Claude-path proofs, and tear it down in the same evidence turn.
+    To run a real primary inside the gate, mint a disposable lab home: `LAB=$(mktemp -d "${TMPDIR:-/tmp}/fm-lab.XXXXXX")` then `bin/fm-lab-home.sh create "$LAB"` and `mkdir -p "$LAB/tmux"`; write the scenario's opt-in flag (e.g. `touch "$LAB/config/supervision-host"`), and remove the lab in the same evidence turn with `rm -rf "$LAB"`. Lifecycle calls against any other home stay refused.
+    Start the harness CLI as the session command on the lab's private tmux socket, from the run worktree: `env -u NO_MISTAKES_GATE -u FM_GATE_REFUSE_BYPASS -u FM_ROOT_OVERRIDE -u FM_STATE_OVERRIDE -u FM_DATA_OVERRIDE -u FM_CONFIG_OVERRIDE -u FM_PROJECTS_OVERRIDE TMUX_TMPDIR="$LAB/tmux" tmux -L fm-lab new-session -d -s primary -c "$PWD" -e FM_HOME="$LAB" <cli>`, where <cli> is the harness's own launch command using the machine's existing login: claude -> `claude`, codex -> `codex`, cursor -> `cursor-agent`, opencode -> `opencode`, grok -> `grok`, omp -> `omp`. Drive, inspect, and stop that primary only through the same socket - `TMUX_TMPDIR="$LAB/tmux" tmux -L fm-lab send-keys -t primary ...`, `TMUX_TMPDIR="$LAB/tmux" tmux -L fm-lab capture-pane -p -t primary`, `TMUX_TMPDIR="$LAB/tmux" tmux -L fm-lab kill-server` - never the default tmux server; the firstmate scripts the primary runs inherit $TMUX from its pane, which names that same fm-lab socket inside the lab. The lab primary's scripts run from the gate worktree, whose git-common-dir triggers the gate check, and the marked lab home permits lifecycle without a bypass; the `env -u` list keeps inherited fleet-path overrides out of the fixture primary's environment so all paths resolve inside the lab. For a Herdr primary use a named non-default fm-lab-* session via bin/fm-herdr-lab.sh instead. If the harness CLI is absent or its login is unavailable, report the scenario untested; never fake the CLI, the login, or the evidence.
     Do not mutate the operator primary checkout, real fleet FM_HOME state, or production credentials, and keep git changes otherwise inside the run worktree.
     Read docs/herdr-backend.md and the bin/fm-herdr-lab.sh header as the owners of Herdr lab mechanics rather than reproducing that manual here.
     Ship or scout briefs that will drive Herdr lifecycle still require --herdr-lab at scaffold time; these Test-agent instructions are not a substitute for that brief flag.

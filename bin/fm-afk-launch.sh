@@ -78,6 +78,9 @@
 # FM_AFK_MODE (away|quiet, default away) declares which mode a `start` entry
 # requests; leave it unset for a plain refresh of an already-running daemon
 # so its current mode is preserved (bin/fm-afk-start.sh fm_afk_flag_write).
+# FM_TEST_HARNESS pins only this launch path's primary harness when
+# FM_TEST_SEAM=1 and its value is a known harness token; otherwise detection
+# remains real. tests/lib.sh arms the marker for isolated suites.
 set -u
 
 FM_AFK_LAUNCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -190,6 +193,16 @@ fm_afk_launch_usage() {
 }
 
 fm_afk_launch_primary_harness() {
+  # Keep the test pin local to this launch path; fm-harness.sh's production
+  # detect_own precedence never reads either variable (see header).
+  if [ "${FM_TEST_SEAM:-}" = 1 ]; then
+    case "${FM_TEST_HARNESS:-}" in
+      claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin | unknown)
+        printf '%s' "$FM_TEST_HARNESS"
+        return
+        ;;
+    esac
+  fi
   "$FM_AFK_LAUNCH_DIR/fm-harness.sh" 2>/dev/null || printf unknown
 }
 

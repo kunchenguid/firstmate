@@ -10,6 +10,7 @@ EXT="$ROOT/.pi/extensions/fm-calm.ts"
 ASSISTANT_LAYOUT="$ROOT/.pi/extensions/lib/fm-calm-assistant-layout.ts"
 PRESERVATION="$ROOT/.pi/extensions/lib/fm-calm-preservation.ts"
 OPERATIONAL_USER_LAYOUT="$ROOT/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
+PENDING_OPERATIONAL_LAYOUT="$ROOT/.pi/extensions/lib/fm-calm-pending-operational-layout.ts"
 VISIBILITY="$ROOT/.pi/extensions/lib/fm-calm-visibility.ts"
 WORKING_SHIP="$ROOT/.pi/extensions/lib/fm-calm-working-ship.ts"
 WORKING_SHIP_SPRITE="$ROOT/.pi/extensions/lib/fm-calm-working-ship-sprite.ts"
@@ -190,6 +191,7 @@ test_home_resolution() {
   cp "$ASSISTANT_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
   cp "$PRESERVATION" "$fixture/project/.pi/extensions/lib/fm-calm-preservation.ts"
   cp "$OPERATIONAL_USER_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
+  cp "$PENDING_OPERATIONAL_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-pending-operational-layout.ts"
   cp "$VISIBILITY" "$fixture/project/.pi/extensions/lib/fm-calm-visibility.ts"
   cp "$WORKING_SHIP" "$fixture/project/.pi/extensions/lib/fm-calm-working-ship.ts"
   cp "$WORKING_SHIP_SPRITE" "$fixture/project/.pi/extensions/lib/fm-calm-working-ship-sprite.ts"
@@ -314,6 +316,7 @@ test_pi_compat_degraded_adapter() {
   cp "$ASSISTANT_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
   cp "$PRESERVATION" "$fixture/project/.pi/extensions/lib/fm-calm-preservation.ts"
   cp "$OPERATIONAL_USER_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
+  cp "$PENDING_OPERATIONAL_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-pending-operational-layout.ts"
   cp "$VISIBILITY" "$fixture/project/.pi/extensions/lib/fm-calm-visibility.ts"
   cp "$WORKING_SHIP" "$fixture/project/.pi/extensions/lib/fm-calm-working-ship.ts"
   cp "$WORKING_SHIP_SPRITE" "$fixture/project/.pi/extensions/lib/fm-calm-working-ship-sprite.ts"
@@ -415,6 +418,7 @@ test_pi_compat_missing_adapter_exports() {
   cp "$ASSISTANT_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
   cp "$PRESERVATION" "$fixture/project/.pi/extensions/lib/fm-calm-preservation.ts"
   cp "$OPERATIONAL_USER_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
+  cp "$PENDING_OPERATIONAL_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-pending-operational-layout.ts"
   cp "$VISIBILITY" "$fixture/project/.pi/extensions/lib/fm-calm-visibility.ts"
   cp "$WORKING_SHIP" "$fixture/project/.pi/extensions/lib/fm-calm-working-ship.ts"
   cp "$WORKING_SHIP_SPRITE" "$fixture/project/.pi/extensions/lib/fm-calm-working-ship-sprite.ts"
@@ -431,10 +435,12 @@ test_pi_compat_missing_adapter_exports() {
   out=$(cd "$fixture/project" && node --input-type=module 2>&1 <<'JS'
 const assistant = await import("./.pi/extensions/lib/fm-calm-assistant-layout.ts");
 const operational = await import("./.pi/extensions/lib/fm-calm-operational-user-layout.ts");
+const pending = await import("./.pi/extensions/lib/fm-calm-pending-operational-layout.ts");
 
 for (const [name, install, expected] of [
   ["collapsed-thinking", assistant.installCalmAssistantLayout, "AssistantMessageComponent"],
   ["operational-user-row", operational.installCalmOperationalUserLayout, "InteractiveMode"],
+  ["queued-operational-row", pending.installCalmPendingOperationalLayout, "InteractiveMode"],
 ]) {
   let reason;
   try {
@@ -454,6 +460,319 @@ JS
   [ "$status" -eq 0 ] || fail "Pi calm missing-adapter-export path failed: $out"
   [ -z "$out" ] || fail "Pi calm missing-adapter-export test printed output: $out"
   pass "missing Pi presentation class exports reach the independent adapter degradation path"
+}
+
+# Pi draws queued input in its own listing, and Escape empties that queue into the editor.
+# This drives Pi's real listing and restore methods over a stand-in session so every
+# branch of the queue-retention preflight is pinned without a harness; the tmux case in
+# test_queued_operational_escape_e2e covers the same path in a real Pi.
+test_queued_operational_rows() {
+  local fixture out status
+  if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+    echo "skip: node or npm not found for Pi Calm queued-row test"
+    return 0
+  fi
+  if [ ! -f "$PI_PACKAGE_DIR/package.json" ]; then
+    echo "skip: installed @earendil-works/pi-coding-agent package not found"
+    return 0
+  fi
+
+  fixture="$TMP_ROOT/queued-operational-rows"
+  mkdir -p "$fixture/lib" "$fixture/node_modules/@earendil-works"
+  cp "$PENDING_OPERATIONAL_LAYOUT" "$fixture/lib/fm-calm-pending-operational-layout.ts"
+  cp "$VISIBILITY" "$fixture/lib/fm-calm-visibility.ts"
+  cp "$PI_OPERATIONAL_INPUT" "$fixture/lib/fm-operational-input.ts"
+  ln -s "$PI_PACKAGE_DIR" "$fixture/node_modules/@earendil-works/pi-coding-agent"
+  ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/node_modules/@earendil-works/pi-tui"
+  ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$fixture/node_modules/typebox"
+  printf '%s\n' '{"type":"module"}' >"$fixture/package.json"
+  # Lets the fixture take the classifier away mid-run, the way a missing or broken
+  # bin/fm-operational-input.sh would.
+  cat >"$fixture/operational-input-probe.sh" <<'SH'
+#!/usr/bin/env bash
+[ -e "$FM_CLASSIFIER_DOWN" ] && exit 3
+exec "$FM_OPERATIONAL_INPUT_OWNER" "$@"
+SH
+  chmod +x "$fixture/operational-input-probe.sh"
+
+  out=$(cd "$fixture" && \
+    FM_OPERATIONAL_INPUT_SCRIPT="$fixture/operational-input-probe.sh" \
+    FM_OPERATIONAL_INPUT_OWNER="$OPERATIONAL_INPUT" \
+    FM_CLASSIFIER_DOWN="$fixture/classifier-down" \
+    PI_PACKAGE_DIR="$PI_PACKAGE_DIR" \
+    node --input-type=module 2>&1 <<'JS'
+import { rmSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const packageRoot = process.env.PI_PACKAGE_DIR;
+const [{ InteractiveMode }, { initTheme }] = await Promise.all([
+  import(pathToFileURL(`${packageRoot}/dist/modes/interactive/interactive-mode.js`).href),
+  import(pathToFileURL(`${packageRoot}/dist/modes/interactive/theme/theme.js`).href),
+]);
+initTheme("dark");
+const layout = await import("./lib/fm-calm-pending-operational-layout.ts");
+const visibility = await import("./lib/fm-calm-visibility.ts");
+const operationalInput = await import("./lib/fm-operational-input.ts");
+layout.installCalmPendingOperationalLayout();
+
+const check = (condition, message) => {
+  if (!condition) throw new Error(message);
+};
+const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
+const stripAnsi = (text) => text.replace(/\x1b\[[0-9;]*m/g, "");
+const watcherOne = operationalInput.encodeFirstmateOperationalInput("watcher", "QUEUED_MONITOR_ONE");
+const watcherTwo = operationalInput.encodeFirstmateOperationalInput("watcher", "QUEUED_MONITOR_TWO");
+const legacyAway = "⁣Supervisor escalate (QUEUED_LEGACY_AWAY)";
+const captainText = "CAPTAIN_QUEUED_TEXT";
+// A captain can type the marker's words; only the authenticated envelope may hide.
+const lookalike = "FIRSTMATE_OP: v1 away-supervisor: CAPTAIN_TYPED_LOOKALIKE";
+const operationalTexts = [watcherOne, watcherTwo, legacyAway];
+
+// Implements every session member the retention relies on with Pi's own semantics:
+// queueing appends, clearQueue empties both lists, and a prompt only starts when idle.
+function makeSession({ missing = [], rejectPrompt = false } = {}) {
+  const session = {
+    steering: [],
+    followUp: [],
+    prompts: [],
+    aborts: 0,
+    idle: false,
+    idleWaiters: [],
+    getSteeringMessages() { return this.steering; },
+    getFollowUpMessages() { return this.followUp; },
+    clearQueue() {
+      const cleared = { steering: [...this.steering], followUp: [...this.followUp] };
+      this.steering = [];
+      this.followUp = [];
+      return cleared;
+    },
+    async _queueSteer(text) { this.steering.push(text); },
+    async _queueFollowUp(text) { this.followUp.push(text); },
+    waitForIdle() {
+      return this.idle ? Promise.resolve() : new Promise((resolve) => this.idleWaiters.push(resolve));
+    },
+    async sendUserMessage(text) {
+      if (rejectPrompt) throw new Error("fixture: prompt refused");
+      this.prompts.push(text);
+      this.idle = false;
+    },
+    abort() {
+      this.aborts += 1;
+      this.idle = true;
+      for (const resolve of this.idleWaiters.splice(0)) resolve();
+      return Promise.resolve();
+    },
+    get isIdle() { return this.idle; },
+  };
+  for (const name of missing) delete session[name];
+  return session;
+}
+
+function makeHost(session) {
+  const host = Object.create(InteractiveMode.prototype);
+  const children = [];
+  Object.assign(host, {
+    // Pi reads its session through runtimeHost, which a session replacement swaps.
+    runtimeHost: { session },
+    compactionQueuedMessages: [],
+    statuses: [],
+    warnings: [],
+    editorText: "",
+    pendingMessagesContainer: {
+      clear() { children.length = 0; },
+      addChild(child) { children.push(child); },
+    },
+    editor: {
+      getText: () => host.editorText,
+      setText: (text) => { host.editorText = text; },
+    },
+    getAppKeyDisplay: () => "Alt+Up",
+    showStatus(message) { host.statuses.push(message); },
+    showWarning(message) { host.warnings.push(message); },
+    rows() {
+      return children.flatMap((child) => child.render(200)).map(stripAnsi).join("\n");
+    },
+  });
+  return host;
+}
+
+const assertNoOperationalText = (text, context) => {
+  for (const needle of ["⁣", "FIRSTMATE_OP: v1 watcher", "QUEUED_MONITOR", "QUEUED_LEGACY_AWAY"]) {
+    check(!text.includes(needle), `${context} exposed operational text ${JSON.stringify(needle)}: ${JSON.stringify(text)}`);
+  }
+};
+
+visibility.setCalmPresentation(true);
+
+// 1. Supported session: hidden while queued, kept on Escape, delivered once in a new turn.
+{
+  const session = makeSession();
+  const host = makeHost(session);
+  session.steering.push(watcherTwo);
+  session.followUp.push(watcherOne, captainText, legacyAway, lookalike);
+  host.updatePendingMessagesDisplay();
+  const rows = host.rows();
+  assertNoOperationalText(rows, "queued listing under Calm");
+  check(rows.includes(`Follow-up: ${captainText}`), `captain's queued row disappeared: ${rows}`);
+  check(rows.includes(lookalike), `an unauthenticated lookalike was hidden: ${rows}`);
+  check(rows.includes("to edit all queued messages"), `dequeue hint missing: ${rows}`);
+  check(host.warnings.length === 0, `a supported session warned: ${host.warnings}`);
+
+  host.editorText = "CAPTAIN_DRAFT";
+  const restored = host.restoreQueuedMessagesToEditor({ abort: true });
+  assertNoOperationalText(host.editorText, "editor after Escape");
+  check(host.editorText === `${captainText}\n\n${lookalike}\n\nCAPTAIN_DRAFT`, `editor text changed: ${JSON.stringify(host.editorText)}`);
+  check(restored === 2, `restore reported ${restored} messages instead of the two captain-authored ones`);
+  check(session.aborts === 1, "Escape did not abort the run");
+  assertNoOperationalText(host.rows(), "queued listing after Escape");
+
+  await settle();
+  check(JSON.stringify(session.prompts) === JSON.stringify([watcherTwo]), `continuation prompt was ${JSON.stringify(session.prompts)}`);
+  check(JSON.stringify(session.steering) === "[]", `steering left behind: ${JSON.stringify(session.steering)}`);
+  check(JSON.stringify(session.followUp) === JSON.stringify([watcherOne, legacyAway]), `follow-ups lost their order: ${JSON.stringify(session.followUp)}`);
+  const delivered = [...session.prompts, ...session.steering, ...session.followUp];
+  for (const text of operationalTexts) {
+    check(delivered.filter((value) => value === text).length === 1, `notification not kept exactly once: ${JSON.stringify(text)}`);
+  }
+  check(JSON.stringify(host.statuses) === JSON.stringify([layout.CALM_SUPERVISION_CONTINUES_NOTICE]), `continuation notice: ${JSON.stringify(host.statuses)}`);
+  assertNoOperationalText(host.statuses.join("\n"), "continuation notice");
+}
+
+// 2. The dequeue key restores captain text while the run keeps going: nothing restarts.
+{
+  const session = makeSession();
+  const host = makeHost(session);
+  session.followUp.push(captainText, watcherOne);
+  host.updatePendingMessagesDisplay();
+  const restored = host.restoreQueuedMessagesToEditor();
+  check(restored === 1 && host.editorText === captainText, `dequeue restored ${restored}: ${JSON.stringify(host.editorText)}`);
+  check(JSON.stringify(session.followUp) === JSON.stringify([watcherOne]), `dequeue lost the notification: ${JSON.stringify(session.followUp)}`);
+  await settle();
+  check(session.prompts.length === 0 && host.statuses.length === 0, "a dequeue while the run is still active started or announced a turn");
+}
+
+// 2b. Navigating the session tree during a run restores without abort, aborts the run, and
+//     then holds the session busy while it navigates: the hidden notification waits for the
+//     navigation to finish and is then delivered exactly once in a new turn.
+{
+  const session = makeSession();
+  const host = makeHost(session);
+  session.followUp.push(captainText, watcherOne);
+  host.updatePendingMessagesDisplay();
+  host.restoreQueuedMessagesToEditor();
+  await session.abort();
+  session.idle = false;
+  assertNoOperationalText(host.editorText, "editor after tree navigation");
+  check(host.editorText === captainText, `tree navigation restored ${JSON.stringify(host.editorText)}`);
+  await settle();
+  check(session.prompts.length === 0 && host.statuses.length === 0, `a turn started during tree navigation: ${JSON.stringify(session.prompts)}`);
+  session.idle = true;
+  for (const resolve of session.idleWaiters.splice(0)) resolve();
+  await settle();
+  check(JSON.stringify(session.prompts) === JSON.stringify([watcherOne]), `tree navigation continuation prompt was ${JSON.stringify(session.prompts)}`);
+  check(JSON.stringify(session.followUp) === "[]", `tree navigation left the notification queued: ${JSON.stringify(session.followUp)}`);
+  check(JSON.stringify(host.statuses) === JSON.stringify([layout.CALM_SUPERVISION_CONTINUES_NOTICE]), `tree navigation notice: ${JSON.stringify(host.statuses)}`);
+}
+
+// 3. A row already hidden stays hidden on Escape even if the classifier cannot answer again.
+{
+  const session = makeSession();
+  const host = makeHost(session);
+  session.followUp.push(watcherOne, captainText);
+  host.updatePendingMessagesDisplay();
+  writeFileSync(process.env.FM_CLASSIFIER_DOWN, "");
+  try {
+    host.restoreQueuedMessagesToEditor({ abort: true });
+  } finally {
+    rmSync(process.env.FM_CLASSIFIER_DOWN, { force: true });
+  }
+  assertNoOperationalText(host.editorText, "editor after Escape with the classifier down");
+  await settle();
+  check(JSON.stringify(session.prompts) === JSON.stringify([watcherOne]), `hidden notification not delivered: ${JSON.stringify(session.prompts)}`);
+}
+
+// 4. Compaction-held notifications are kept but never reach the agent queue, so no turn
+//    starts and none is announced.
+{
+  const session = makeSession();
+  const host = makeHost(session);
+  host.compactionQueuedMessages.push({ text: watcherOne, mode: "followUp" }, { text: captainText, mode: "followUp" });
+  host.updatePendingMessagesDisplay();
+  assertNoOperationalText(host.rows(), "compaction-queued listing");
+  host.restoreQueuedMessagesToEditor({ abort: true });
+  assertNoOperationalText(host.editorText, "editor after Escape during compaction");
+  check(host.editorText === captainText, `captain compaction text not restored: ${JSON.stringify(host.editorText)}`);
+  check(JSON.stringify(host.compactionQueuedMessages) === JSON.stringify([{ text: watcherOne, mode: "followUp" }]), `compaction notification not kept: ${JSON.stringify(host.compactionQueuedMessages)}`);
+  await settle();
+  check(session.prompts.length === 0, "compaction-only retention started a turn");
+  check(host.statuses.length === 0, `compaction-only retention announced a turn: ${JSON.stringify(host.statuses)}`);
+}
+
+// 5. A continuation Pi refuses to start puts the notification back instead of losing it.
+{
+  const session = makeSession({ rejectPrompt: true });
+  const host = makeHost(session);
+  session.followUp.push(watcherOne);
+  host.updatePendingMessagesDisplay();
+  host.restoreQueuedMessagesToEditor({ abort: true });
+  await settle();
+  check(JSON.stringify(session.followUp) === JSON.stringify([watcherOne]), `refused continuation dropped the notification: ${JSON.stringify(session.followUp)}`);
+}
+
+// 6. Sessions missing any retention member: nothing is hidden, one warning, stock Escape.
+for (const missing of ["_queueSteer", "_queueFollowUp", "sendUserMessage", "waitForIdle"]) {
+  const session = makeSession({ missing: [missing] });
+  const host = makeHost(session);
+  session.followUp.push(watcherOne, captainText);
+  host.updatePendingMessagesDisplay();
+  host.updatePendingMessagesDisplay();
+  const rows = host.rows();
+  check(rows.includes("QUEUED_MONITOR_ONE"), `session without ${missing} hid a row it cannot keep: ${rows}`);
+  check(JSON.stringify(host.warnings) === JSON.stringify([layout.CALM_QUEUED_ROWS_UNSUPPORTED_WARNING]), `session without ${missing} warned ${JSON.stringify(host.warnings)}`);
+  assertNoOperationalText(layout.CALM_QUEUED_ROWS_UNSUPPORTED_WARNING, "compatibility warning");
+  host.restoreQueuedMessagesToEditor({ abort: true });
+  check(host.editorText === `${watcherOne}\n\n${captainText}`, `session without ${missing} changed stock Escape: ${JSON.stringify(host.editorText)}`);
+  check(host.warnings.length === 1, `session without ${missing} warned again on Escape`);
+  await settle();
+  check(session.prompts.length === 0 && host.statuses.length === 0, `session without ${missing} started a turn`);
+}
+
+// 7. Calm off is stock; turning it off while rows are hidden keeps them out of the editor
+//    until the listing is redrawn, and the redraw follows the new choice.
+{
+  visibility.setCalmPresentation(false);
+  const session = makeSession();
+  const host = makeHost(session);
+  session.followUp.push(watcherOne, captainText);
+  host.updatePendingMessagesDisplay();
+  check(host.rows().includes("QUEUED_MONITOR_ONE"), "Calm off hid a queued row");
+  host.restoreQueuedMessagesToEditor();
+  check(host.editorText === `${watcherOne}\n\n${captainText}`, `Calm off changed stock dequeue: ${JSON.stringify(host.editorText)}`);
+
+  visibility.setCalmPresentation(true);
+  const toggled = makeSession();
+  const toggledHost = makeHost(toggled);
+  toggled.followUp.push(watcherOne, captainText);
+  toggledHost.updatePendingMessagesDisplay();
+  visibility.setCalmPresentation(false);
+  toggledHost.restoreQueuedMessagesToEditor();
+  assertNoOperationalText(toggledHost.editorText, "editor after Calm turned off over a hidden row");
+  check(toggledHost.editorText === captainText, `captain text not restored after the toggle: ${JSON.stringify(toggledHost.editorText)}`);
+  check(JSON.stringify(toggled.followUp) === JSON.stringify([watcherOne]), `toggle-time Escape lost the notification: ${JSON.stringify(toggled.followUp)}`);
+  check(toggledHost.rows().includes("QUEUED_MONITOR_ONE"), "Calm off kept a queued row hidden after Pi redrew the listing");
+  visibility.setCalmPresentation(true);
+  layout.refreshCalmPendingOperationalRows();
+  assertNoOperationalText(toggledHost.rows(), "queued listing after turning Calm on");
+  visibility.setCalmPresentation(false);
+  layout.refreshCalmPendingOperationalRows();
+  check(toggledHost.rows().includes("QUEUED_MONITOR_ONE"), "turning Calm off did not redraw the hidden row");
+}
+JS
+)
+  status=$?
+  [ "$status" -eq 0 ] || fail "Pi Calm queued operational rows: $out"
+  [ -z "$out" ] || fail "Pi Calm queued-row test printed output: $out"
+  pass "Calm hides queued Firstmate rows only on a session that can keep them, keeps hidden ones out of the editor on Escape, delivers them once in order, and leaves unsupported sessions and Calm off stock"
 }
 
 test_builtin_gate_load_time() {
@@ -477,6 +796,7 @@ test_builtin_gate_load_time() {
   cp "$ASSISTANT_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
   cp "$PRESERVATION" "$fixture/project/.pi/extensions/lib/fm-calm-preservation.ts"
   cp "$OPERATIONAL_USER_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
+  cp "$PENDING_OPERATIONAL_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-pending-operational-layout.ts"
   cp "$VISIBILITY" "$fixture/project/.pi/extensions/lib/fm-calm-visibility.ts"
   cp "$WORKING_SHIP" "$fixture/project/.pi/extensions/lib/fm-calm-working-ship.ts"
   cp "$WORKING_SHIP_SPRITE" "$fixture/project/.pi/extensions/lib/fm-calm-working-ship-sprite.ts"
@@ -565,6 +885,7 @@ test_calm_activation_collision_and_regression_bound() {
   cp "$ASSISTANT_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
   cp "$PRESERVATION" "$fixture/project/.pi/extensions/lib/fm-calm-preservation.ts"
   cp "$OPERATIONAL_USER_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
+  cp "$PENDING_OPERATIONAL_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-pending-operational-layout.ts"
   cp "$VISIBILITY" "$fixture/project/.pi/extensions/lib/fm-calm-visibility.ts"
   cp "$WORKING_SHIP" "$fixture/project/.pi/extensions/lib/fm-calm-working-ship.ts"
   cp "$WORKING_SHIP_SPRITE" "$fixture/project/.pi/extensions/lib/fm-calm-working-ship-sprite.ts"
@@ -781,6 +1102,7 @@ test_rendering_and_session_lifecycle() {
   cp "$ASSISTANT_LAYOUT" "$fixture/lib/fm-calm-assistant-layout.ts"
   cp "$PRESERVATION" "$fixture/lib/fm-calm-preservation.ts"
   cp "$OPERATIONAL_USER_LAYOUT" "$fixture/lib/fm-calm-operational-user-layout.ts"
+  cp "$PENDING_OPERATIONAL_LAYOUT" "$fixture/lib/fm-calm-pending-operational-layout.ts"
   cp "$VISIBILITY" "$fixture/lib/fm-calm-visibility.ts"
   cp "$WORKING_SHIP" "$fixture/lib/fm-calm-working-ship.ts"
   cp "$WORKING_SHIP_SPRITE" "$fixture/lib/fm-calm-working-ship-sprite.ts"
@@ -1500,6 +1822,7 @@ test_calm_mid_turn_working_notes() {
   cp "$ASSISTANT_LAYOUT" "$fixture/lib/fm-calm-assistant-layout.ts"
   cp "$PRESERVATION" "$fixture/lib/fm-calm-preservation.ts"
   cp "$OPERATIONAL_USER_LAYOUT" "$fixture/lib/fm-calm-operational-user-layout.ts"
+  cp "$PENDING_OPERATIONAL_LAYOUT" "$fixture/lib/fm-calm-pending-operational-layout.ts"
   cp "$VISIBILITY" "$fixture/lib/fm-calm-visibility.ts"
   cp "$WORKING_SHIP" "$fixture/lib/fm-calm-working-ship.ts"
   cp "$WORKING_SHIP_SPRITE" "$fixture/lib/fm-calm-working-ship-sprite.ts"
@@ -1806,6 +2129,7 @@ test_operational_followup_turn_e2e() {
   cp "$ASSISTANT_LAYOUT" "$project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
   cp "$PRESERVATION" "$project/.pi/extensions/lib/fm-calm-preservation.ts"
   cp "$OPERATIONAL_USER_LAYOUT" "$project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
+  cp "$PENDING_OPERATIONAL_LAYOUT" "$project/.pi/extensions/lib/fm-calm-pending-operational-layout.ts"
   cp "$VISIBILITY" "$project/.pi/extensions/lib/fm-calm-visibility.ts"
   cp "$WORKING_SHIP" "$project/.pi/extensions/lib/fm-calm-working-ship.ts"
   cp "$WORKING_SHIP_SPRITE" "$project/.pi/extensions/lib/fm-calm-working-ship-sprite.ts"
@@ -2153,6 +2477,202 @@ JS
   pass "Pi operational follow-up E2E processes exact user-role notifications once while Calm hides current and adjacent rows, Calm off and absent render them, and restart preserves semantics"
 }
 
+# The real-Pi counterpart of test_queued_operational_rows: a watcher notification queued
+# while a tool holds the turn, then Escape, exactly as a captain would press it.
+test_queued_operational_escape_e2e() {
+  local project home config sessions version pane session_file i
+  if ! command -v pi >/dev/null 2>&1 || ! command -v tmux >/dev/null 2>&1; then
+    echo "skip: pi or tmux not found for Pi Calm queued-row Escape E2E"
+    return 0
+  fi
+  version=$(pi --version 2>/dev/null || true)
+  record_pi_version_evidence "$version" "Pi Calm queued-row Escape E2E"
+
+  project="$TMP_ROOT/queued-escape-project"
+  home="$TMP_ROOT/queued-escape-home"
+  config="$TMP_ROOT/queued-escape-config"
+  sessions="$TMP_ROOT/queued-escape-sessions"
+  mkdir -p "$project/.pi/extensions/lib" "$home/config" "$config" "$sessions"
+  fm_git_init_commit "$project"
+  cp "$EXT" "$project/.pi/extensions/fm-calm.ts"
+  cp "$ASSISTANT_LAYOUT" "$project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
+  cp "$PRESERVATION" "$project/.pi/extensions/lib/fm-calm-preservation.ts"
+  cp "$OPERATIONAL_USER_LAYOUT" "$project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
+  cp "$PENDING_OPERATIONAL_LAYOUT" "$project/.pi/extensions/lib/fm-calm-pending-operational-layout.ts"
+  cp "$VISIBILITY" "$project/.pi/extensions/lib/fm-calm-visibility.ts"
+  cp "$WORKING_SHIP" "$project/.pi/extensions/lib/fm-calm-working-ship.ts"
+  cp "$WORKING_SHIP_SPRITE" "$project/.pi/extensions/lib/fm-calm-working-ship-sprite.ts"
+  cp "$PI_OPERATIONAL_INPUT" "$project/.pi/extensions/lib/fm-operational-input.ts"
+  printf '%s\n' '{"followUpMode":"all"}' >"$config/settings.json"
+
+  cat >"$project/queued-escape-e2e.ts" <<'TS'
+import { writeFileSync } from "node:fs";
+import { createFauxCore, fauxAssistantMessage, fauxText, fauxToolCall } from "@earendil-works/pi-ai";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
+import { encodeFirstmateOperationalInput } from "./.pi/extensions/lib/fm-operational-input.ts";
+
+let label = "";
+
+function lastUserText(messages: readonly { role: string; content: unknown }[]): string {
+  const user = [...messages].reverse().find((message) => message.role === "user");
+  if (!user) return "";
+  if (typeof user.content === "string") return user.content;
+  return (user.content as { type: string; text?: string }[])
+    .filter((block) => block.type === "text")
+    .map((block) => block.text ?? "")
+    .join("\n");
+}
+
+export default function (pi: ExtensionAPI): void {
+  const faux = createFauxCore({
+    api: "queued-escape-e2e-api",
+    provider: "queued-escape-e2e",
+    models: [{
+      id: "deterministic",
+      name: "Calm queued-row Escape E2E",
+      reasoning: false,
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 4096,
+      maxTokens: 128,
+    }],
+    tokenSize: { min: 1, max: 1 },
+  });
+  // The captain prompt holds the turn in a tool; a monitoring notification gets its own reply.
+  const respond = (context: { messages: readonly { role: string; content: unknown }[] }) => {
+    const text = lastUserText(context.messages);
+    if (text.includes(`MONITOR_${label}`)) return fauxAssistantMessage([fauxText(`MONITOR_HANDLED_${label}`)]);
+    if (context.messages[context.messages.length - 1]?.role === "user") {
+      return fauxAssistantMessage([fauxToolCall("hold_turn", {}, { id: `hold_${label}` })], { stopReason: "toolUse" });
+    }
+    return fauxAssistantMessage([fauxText(`CAPTAIN_ANSWER_${label}`)]);
+  };
+  pi.registerProvider("queued-escape-e2e", {
+    baseUrl: "http://127.0.0.1/unused",
+    apiKey: "test-only",
+    api: faux.api,
+    models: faux.models,
+    streamSimple: faux.streamSimple,
+  });
+  pi.registerTool({
+    name: "hold_turn",
+    label: "hold_turn",
+    description: "Hold the turn open until it is aborted.",
+    parameters: Type.Object({}),
+    async execute(_id, _params, signal) {
+      await pi.sendUserMessage(
+        encodeFirstmateOperationalInput("watcher", `MONITOR_${label}_ONE`),
+        { deliverAs: "followUp" },
+      );
+      writeFileSync(process.env.QUEUED_ESCAPE_HELD as string, label);
+      await new Promise<void>((resolve) => signal?.addEventListener("abort", () => resolve(), { once: true }));
+      return { content: [{ type: "text", text: "released" }], details: {} };
+    },
+  });
+  pi.registerCommand("queued-escape-e2e", {
+    description: "Hold one captain turn open while a monitoring notification queues.",
+    handler: async (args, ctx) => {
+      label = args.trim();
+      const model = ctx.modelRegistry.find("queued-escape-e2e", "deterministic");
+      if (!model || !(await pi.setModel(model))) throw new Error("queued-escape E2E model unavailable");
+      faux.setResponses(Array.from({ length: 8 }, () => respond));
+      pi.sendUserMessage(`CAPTAIN_PROMPT_${label}`);
+    },
+  });
+}
+TS
+
+  run_queued_escape_case() {
+    local calm_state=$1 label=$2 captain_queued=$3 held="$TMP_ROOT/queued-escape-held-$2"
+    tmux -L "$TMUX_SOCKET" kill-session -t "$TMUX_SESSION" 2>/dev/null || true
+    printf '%s\n' "$calm_state" >"$home/config/calm"
+    mkdir -p "$sessions/$label"
+    tmux -L "$TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" -x 160 -y 36 \
+      "cd '$project' && env FM_HOME='$home' PI_CODING_AGENT_DIR='$config' FM_OPERATIONAL_INPUT_SCRIPT='$OPERATIONAL_INPUT' QUEUED_ESCAPE_HELD='$held' PI_OFFLINE=1 pi --approve --no-context-files --no-skills --no-prompt-templates --no-extensions -e ./.pi/extensions/fm-calm.ts -e ./queued-escape-e2e.ts --session-dir '$sessions/$label'; rc=\$?; printf '\nPI_EXIT=%s\n' \"\$rc\"; sleep 20"
+    wait_for_text "$TMP_ROOT/queued-escape-pane" 'queued-escape-e2e.ts' \
+      || fail "Pi queued-row $label case did not reach the ready composer"
+    tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/queued-escape-e2e $label"
+    tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
+    i=0
+    while [ ! -e "$held" ] && [ "$i" -lt 200 ]; do
+      sleep 0.05
+      i=$((i + 1))
+    done
+    [ -e "$held" ] || fail "Pi queued-row $label case never queued the monitoring notification"
+    if [ "$captain_queued" = yes ]; then
+      tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "CAPTAIN_QUEUED_$label"
+      tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-Enter
+      wait_for_text "$TMP_ROOT/queued-escape-pane" "Follow-up: CAPTAIN_QUEUED_$label" \
+        || fail "Pi queued-row $label case did not list the captain's queued follow-up"
+    elif [ "$calm_state" = on ]; then
+      # Nothing appears to wait for, so give Pi's listing a moment to repaint.
+      sleep 1
+      tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S -600 >"$TMP_ROOT/queued-escape-pane"
+    else
+      wait_for_text "$TMP_ROOT/queued-escape-pane" "Follow-up:" \
+        || fail "Pi queued-row $label case never listed the queued notification"
+    fi
+    pane=$(cat "$TMP_ROOT/queued-escape-pane")
+    if [ "$calm_state" = on ]; then
+      assert_not_contains "$pane" "MONITOR_${label}_ONE" "Pi Calm listed a queued Firstmate notification"
+    else
+      assert_contains "$pane" "Follow-up: ⁣FIRSTMATE_OP: v1 watcher: MONITOR_${label}_ONE" "Pi Calm off changed the stock queued listing"
+    fi
+
+    tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Escape
+    if [ "$calm_state" = on ]; then
+      i=0
+      while [ "$i" -lt 200 ]; do
+        session_file=$(find "$sessions/$label" -type f -name '*.jsonl' | head -1)
+        [ -n "$session_file" ] && grep -Fq "MONITOR_HANDLED_$label" "$session_file" && break
+        sleep 0.05
+        i=$((i + 1))
+      done
+      wait_for_text "$TMP_ROOT/queued-escape-pane" "MONITOR_HANDLED_$label" \
+        || fail "Pi Calm did not deliver the notification kept across Escape"
+      pane=$(cat "$TMP_ROOT/queued-escape-pane")
+      assert_not_contains "$pane" "MONITOR_${label}_ONE" "Pi Calm exposed a hidden notification after Escape"
+      assert_not_contains "$pane" "FIRSTMATE_OP" "Pi Calm exposed operational text after Escape"
+      assert_contains "$pane" "Firstmate supervision continues in a new turn." "Pi Calm restarted a turn silently after Escape"
+      if [ "$captain_queued" = yes ]; then
+        [ "$(tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" | grep -c "^CAPTAIN_QUEUED_$label *\$")" -eq 1 ] \
+          || fail "Pi Calm did not return the captain's queued text to the editor on Escape"
+      fi
+    else
+      wait_for_text "$TMP_ROOT/queued-escape-pane" "aborted" \
+        || fail "Pi Calm off Escape did not abort the turn"
+      sleep 1
+      tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$TMP_ROOT/queued-escape-pane"
+      pane=$(cat "$TMP_ROOT/queued-escape-pane")
+      assert_contains "$pane" "FIRSTMATE_OP: v1 watcher: MONITOR_${label}_ONE" "Pi Calm off changed stock Escape, which restores every queued message to the editor"
+      session_file=$(find "$sessions/$label" -type f -name '*.jsonl' | head -1)
+    fi
+
+    node - "$session_file" "$label" "$calm_state" <<'JS' || fail "Pi queued-row $label case persisted the wrong delivery"
+const fs = require("node:fs");
+const [file, label, calm] = process.argv.slice(2);
+const entries = fs.readFileSync(file, "utf8").trim().split("\n").map(JSON.parse);
+const text = (content) => typeof content === "string"
+  ? content
+  : (content ?? []).filter((item) => item.type === "text").map((item) => item.text).join("\n");
+const users = entries.filter((entry) => entry.type === "message" && entry.message.role === "user").map((entry) => text(entry.message.content));
+const handled = entries.filter((entry) => entry.type === "message" && entry.message.role === "assistant" && text(entry.message.content) === `MONITOR_HANDLED_${label}`);
+const notification = `⁣FIRSTMATE_OP: v1 watcher: MONITOR_${label}_ONE`;
+const expected = calm === "on" ? 1 : 0;
+if (users.filter((value) => value === notification).length !== expected) throw new Error(`notification delivered ${users.filter((value) => value === notification).length} times: ${JSON.stringify(users)}`);
+if (handled.length !== expected) throw new Error(`notification handled ${handled.length} times`);
+if (users.some((value) => value.includes(`CAPTAIN_QUEUED_${label}`))) throw new Error("captain's restored text was sent instead of returned to the editor");
+JS
+    tmux -L "$TMUX_SOCKET" kill-session -t "$TMUX_SESSION" 2>/dev/null || true
+  }
+
+  run_queued_escape_case on queued_on no
+  run_queued_escape_case on queued_mixed yes
+  run_queued_escape_case off queued_off no
+  pass "Pi $version with Calm on keeps a queued Firstmate notification unlisted, out of the editor on Escape, and delivers it once in a new announced turn, while Calm off stays stock"
+}
+
 test_hidden_block_geometry_e2e() {
   local project home config sessions session_file snapshot expanded_snapshot calm_off_snapshot restarted_snapshot
   local version skill_line final_line gap i
@@ -2182,6 +2702,7 @@ test_hidden_block_geometry_e2e() {
   cp "$ASSISTANT_LAYOUT" "$project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
   cp "$PRESERVATION" "$project/.pi/extensions/lib/fm-calm-preservation.ts"
   cp "$OPERATIONAL_USER_LAYOUT" "$project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
+  cp "$PENDING_OPERATIONAL_LAYOUT" "$project/.pi/extensions/lib/fm-calm-pending-operational-layout.ts"
   cp "$VISIBILITY" "$project/.pi/extensions/lib/fm-calm-visibility.ts"
   cp "$WORKING_SHIP" "$project/.pi/extensions/lib/fm-calm-working-ship.ts"
   cp "$WORKING_SHIP_SPRITE" "$project/.pi/extensions/lib/fm-calm-working-ship-sprite.ts"
@@ -2418,6 +2939,7 @@ test_working_ship_geometry_and_lifecycle() {
   cp "$ASSISTANT_LAYOUT" "$fixture/lib/fm-calm-assistant-layout.ts"
   cp "$PRESERVATION" "$fixture/lib/fm-calm-preservation.ts"
   cp "$OPERATIONAL_USER_LAYOUT" "$fixture/lib/fm-calm-operational-user-layout.ts"
+  cp "$PENDING_OPERATIONAL_LAYOUT" "$fixture/lib/fm-calm-pending-operational-layout.ts"
   cp "$VISIBILITY" "$fixture/lib/fm-calm-visibility.ts"
   cp "$WORKING_SHIP" "$fixture/lib/fm-calm-working-ship.ts"
   cp "$WORKING_SHIP_SPRITE" "$fixture/lib/fm-calm-working-ship-sprite.ts"
@@ -3449,6 +3971,7 @@ test_interactive_terminal_e2e() {
   cp "$ASSISTANT_LAYOUT" "$project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
   cp "$PRESERVATION" "$project/.pi/extensions/lib/fm-calm-preservation.ts"
   cp "$OPERATIONAL_USER_LAYOUT" "$project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
+  cp "$PENDING_OPERATIONAL_LAYOUT" "$project/.pi/extensions/lib/fm-calm-pending-operational-layout.ts"
   cp "$VISIBILITY" "$project/.pi/extensions/lib/fm-calm-visibility.ts"
   cp "$WORKING_SHIP" "$project/.pi/extensions/lib/fm-calm-working-ship.ts"
   cp "$WORKING_SHIP_SPRITE" "$project/.pi/extensions/lib/fm-calm-working-ship-sprite.ts"
@@ -4299,11 +4822,13 @@ test_home_resolution
 test_pi_compat_no_upper_bound
 test_pi_compat_degraded_adapter
 test_pi_compat_missing_adapter_exports
+test_queued_operational_rows
 test_builtin_gate_load_time
 test_calm_activation_collision_and_regression_bound
 test_rendering_and_session_lifecycle
 test_calm_mid_turn_working_notes
 test_operational_followup_turn_e2e
+test_queued_operational_escape_e2e
 test_hidden_block_geometry_e2e
 test_working_ship_geometry_and_lifecycle
 test_export_dom_render_guard
