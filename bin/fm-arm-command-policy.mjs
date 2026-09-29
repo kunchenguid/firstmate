@@ -26,12 +26,17 @@ const REASONS = {
   "broad-watcher-kill": "a broad process kill targeting the firstmate watcher is forbidden",
   "unclassifiable-protected-command": "unsupported or malformed shell syntax contains a protected watcher command",
   "watcher-direct": "bin/fm-watch.sh must not be run directly; arm the watcher with bin/fm-watch-arm.sh or run bin/fm-watch-checkpoint.sh instead",
+  "watcher-owner-held": "this primary's watcher is owned by its doorbell owner (bin/fm-primary-doorbell.sh), which already keeps a cycle running and rings this pane; do not arm a watcher or run a checkpoint yourself, and if supervision looks down run bin/fm-primary-doorbell.sh ensure once",
 };
 
 function parseArguments(argv) {
-  const result = { command: "", root: "", home: "" };
+  const result = { command: "", root: "", home: "", ownerHeld: false };
   for (let i = 0; i < argv.length; i += 1) {
     const name = argv[i];
+    if (name === "--owner-held") {
+      result.ownerHeld = true;
+      continue;
+    }
     if (name === "--command" || name === "--root" || name === "--home") {
       if (i + 1 >= argv.length) throw new Error(`${name} requires a value`);
       result[name.slice(2)] = argv[i + 1];
@@ -912,12 +917,17 @@ function blessedProgram(analysis, context) {
   return true;
 }
 
-function decision(command, root, home) {
+// ownerHeld: the caller proved that an arm owner outside the model already
+// keeps this primary's watcher running (the Kiro doorbell owner), so any
+// executed watcher, arm, or checkpoint command is denied, not only the unsafe
+// shapes below.
+function decision(command, root, home, ownerHeld = false) {
   const context = { root: path.normalize(root), home: path.normalize(home), protectedVariables: new Set(), watcherPatterns: new Set(), watcherPids: new Set() };
   const analysis = analyzeProgram(command, context);
   if (analysis.broadKill) return deny("broad-watcher-kill");
   if (analysis.error && analysis.protectedFound) return deny("unclassifiable-protected-command");
   if (!analysis.protectedFound) return { decision: "allow" };
+  if (ownerHeld) return deny("watcher-owner-held");
   if (analysis.nodeInfos?.some((info) => info.protectedKind === "watch")) return deny("watcher-direct");
   if (analysis.nestedProtected) return deny("watcher-nested");
 
@@ -959,7 +969,7 @@ if (invokedDirectly()) {
     if (!args.command) {
       process.stdout.write("allow\n");
     } else {
-      const result = decision(args.command, args.root, args.home);
+      const result = decision(args.command, args.root, args.home, args.ownerHeld);
       if (result.decision === "allow") {
         process.stdout.write("allow\n");
       } else {

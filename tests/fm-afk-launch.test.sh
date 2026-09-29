@@ -951,6 +951,32 @@ unit_supervision_host_other_harnesses_run_no_away_daemon() {
   rm -rf "$st"
 }
 
+# A Kiro primary runs the host through its doorbell owner, so an away `start`
+# on an opted-in kiro-cli home refuses the daemon exactly as on opencode.
+unit_supervision_host_kiro_start_refuses_like_opencode() {
+  local harness st out rc kiro_out kiro_rc open_out open_rc
+  for harness in opencode kiro-cli; do
+    st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-host-kiro.XXXXXX")
+    mkdir -p "$st/state" "$st/config"
+    : > "$st/config/supervision-host"
+    enter_posture "$st" || fail "$harness: could not enter fixture posture"
+    out=$(FM_TEST_SEAM=1 FM_TEST_HARNESS="$harness" FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start 2>&1)
+    rc=$?
+    [ ! -e "$st/state/.afk" ] && [ ! -e "$st/state/.afk-daemon-terminal" ] && [ -f "$st/state/.afk-contract" ] \
+      || fail "$harness: an away start on an opted-in home launched a daemon or lost the record: $out"
+    FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1 || true
+    rm -rf "$st"
+    out=$(printf '%s' "$out" | sed "s|$st|<home>|g; s|this $harness home|this <harness> home|g")
+    if [ "$harness" = kiro-cli ]; then kiro_out=$out; kiro_rc=$rc; else open_out=$out; open_rc=$rc; fi
+  done
+  [ "$kiro_rc" -ne 0 ] || fail "kiro-cli: an away start on an opted-in home did not refuse: $kiro_out"
+  printf '%s' "$kiro_out" | grep -F 'not launched on this <harness> home, which runs the supervision host' >/dev/null \
+    || fail "kiro-cli: the refusal must name the host: $kiro_out"
+  [ "$kiro_rc" = "$open_rc" ] && [ "$kiro_out" = "$open_out" ] \
+    || fail "kiro-cli refused differently from opencode (rc $kiro_rc vs $open_rc): '$kiro_out' vs '$open_out'"
+  pass "supervision host: away start on an opted-in kiro-cli home refuses the daemon exactly as on opencode"
+}
+
 # An opted-in Claude home for the /quiet units: the verified engine (a stub),
 # this shell as the main session's lock holder, and a valid dialog mirror, so
 # the attended supervision host runs. quiet_in <home> runs a command there.
@@ -1628,6 +1654,7 @@ unit_tmux_absence_distinguishes_probe_failure
 unit_native_lifecycle
 unit_supervision_host_claude_home_runs_no_away_daemon
 unit_supervision_host_other_harnesses_run_no_away_daemon
+unit_supervision_host_kiro_start_refuses_like_opencode
 unit_supervision_host_quiet_statement
 unit_supervision_host_quiet_fallback
 unit_supervision_host_quiet_after_afk

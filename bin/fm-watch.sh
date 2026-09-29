@@ -2670,13 +2670,6 @@ while :; do
     exit 1
   }
 
-  # Kiro primary re-ring ladder: a doorbell refused while the pane was busy
-  # left its row durable; ring once more for the newest unrung row now that the
-  # composer may be idle. A no-op without a published endpoint or pending row.
-  if [ -f "$STATE/.primary-endpoint" ] && [ -s "$STATE/.wake-queue" ]; then
-    fm_primary_endpoint_ring_pending "$STATE" "$FM_ROOT" "$FM_HOME" || true
-  fi
-
   # Process-to-event liveness repair. This never discovers a result by polling:
   # each registered source has its own child blocking on that source, and this
   # only republishes results already captured durably and restarts a source

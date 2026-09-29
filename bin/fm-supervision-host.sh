@@ -12,8 +12,9 @@
 # (bin/fm-turnend-guard-cursor.sh), the OpenCode TUI plugin
 # (.opencode/plugins/fm-primary-watch-arm.js), the omp watch extension
 # (.omp/extensions/fm-primary-omp-watch.ts), Grok's model-owned background arm
-# (docs/supervision-protocols/grok.md), and Codex's foreground checkpoint
-# (bin/fm-watch-checkpoint.sh). To that owner it IS an arm: it prints the
+# (docs/supervision-protocols/grok.md), Codex's foreground checkpoint
+# (bin/fm-watch-checkpoint.sh), and the Kiro doorbell owner
+# (bin/fm-primary-doorbell.sh). To that owner it IS an arm: it prints the
 # arm's own lines and exits only when main is needed, and stays parked across
 # every close it handled itself. Each owner passes its harness as
 # FM_SUPERVISION_HOST_PRIMARY, which the engine carries as the primary pin.
@@ -113,7 +114,11 @@
 #
 # OWNERSHIP. Before activation, every successor cycle, and every engine turn
 # the host proves this session still holds the fleet lock
-# (bin/fm-session-lock-lib.sh) and, when launched by the auto-arm, that the
+# (bin/fm-session-lock-lib.sh) - or, for the detached Kiro doorbell owner,
+# which runs outside the primary's process tree, that the endpoint record
+# still names the live lock-owning pid the owner passed as
+# FM_SUPERVISION_HOST_SERVED_PID (bin/fm-primary-endpoint-lib.sh) - and, when
+# launched by the auto-arm, that the
 # auto-arm generation it serves (FM_SUPERVISION_HOST_AUTOARM_GEN owned by
 # FM_SUPERVISION_HOST_OWNER_PID) is still current; otherwise it stands down
 # with a "supervision-host:" line and leaves the decision to its owner; a
@@ -202,6 +207,8 @@ COOLDOWN_MAX=3600
 AUTOARM_GEN=${FM_SUPERVISION_HOST_AUTOARM_GEN:-}
 AUTOARM_OWNER=${FM_SUPERVISION_HOST_OWNER_PID:-}
 PRIMARY=${FM_SUPERVISION_HOST_PRIMARY:-}
+SERVED_PID=${FM_SUPERVISION_HOST_SERVED_PID:-}
+case "$SERVED_PID" in *[!0-9]*) SERVED_PID= ;; esac
 [ -n "$PRIMARY" ] || PRIMARY=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 # The owner's predecessor arm belongs to the first cycle only.
 OWNER_PREDECESSOR=${FM_WATCH_PREDECESSOR_ARM_PID:-}
@@ -411,8 +418,22 @@ retire_arm() {  # <pid> <output-file>
   [ -z "$out" ] || rm -f "$out" 2>/dev/null || true
 }
 
+# The session this host serves still owns the home. The Kiro doorbell owner is
+# detached from the primary's ancestry, so for it the proof is the endpoint
+# record naming the served pid as the live lock owner.
+host_session_owns_lock() {
+  if [ "$PRIMARY" = kiro-cli ] && [ -n "$SERVED_PID" ]; then
+    # shellcheck source=bin/fm-primary-endpoint-lib.sh
+    [ -n "${FM_PRIMARY_ENDPOINT_LIB_DIR:-}" ] || . "$SCRIPT_DIR/fm-primary-endpoint-lib.sh"
+    fm_primary_endpoint_load "$STATE" "$FM_ROOT" "$FM_HOME" || return 1
+    [ "$FM_PRIMARY_ENDPOINT_PID" = "$SERVED_PID" ]
+    return
+  fi
+  fm_session_lock_owned_by_self "$STATE"
+}
+
 host_still_owner() {
-  fm_session_lock_owned_by_self "$STATE" || return 1
+  host_session_owns_lock || return 1
   [ -n "$AUTOARM_GEN" ] || return 0
   fm_autoarm_ledger_read "$STATE" || return 1
   [ "$FM_AUTOARM_GEN" = "$AUTOARM_GEN" ] && [ "$FM_AUTOARM_OWNER" = "$AUTOARM_OWNER" ] \
@@ -490,6 +511,10 @@ await_close() {
     sleep "$POLL"
   done
   wait "$ARM_PID" 2>/dev/null || true
+  # An arm that closed before a poll streamed its status line still owes the
+  # owner that line now: a close the engine takes keeps this host running, and
+  # an owner waiting for readiness would otherwise retire it mid-turn.
+  [ "$READY_PENDING" -eq 0 ] || stream_ready_line
   ARM_TEXT=$(cat "$ARM_OUT" 2>/dev/null || true)
   if [ -n "$READY_LINE" ]; then
     # Already printed: drop its first occurrence from this first close.

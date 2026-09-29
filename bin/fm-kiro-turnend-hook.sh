@@ -40,22 +40,34 @@
 #
 # Primary/secondmate registrations carry FM_KIRO_PRIMARY_HOOK=1:
 #   SessionStart      -> session-start digest into context, endpoint publication
-#   UserPromptSubmit  -> endpoint ensure, then the drained wake queue while this
+#   UserPromptSubmit  -> endpoint ensure, the dialog-mirror entry, doorbell-owner
+#                        ensure, any supervision-host note the owner kept, then
+#                        the drained wake queue while this
 #                        session owns the home lock; when the lock is free or its
 #                        recorded pid is not a live harness, the SessionStart
 #                        path instead, because Kiro fires SessionStart only for a
 #                        conversation's first prompt and a resumed primary would
 #                        otherwise never retake the lock
-#   Stop              -> endpoint ensure, then the watcher re-arm backstop below
-# Task-bound Stop hooks reach the same re-arm block after their task updates; it
-# acts only in primary scope for the lock-owning session. The re-arm forks into
-# its own session because bin/fm-watch-arm.sh waits for a whole watcher cycle
-# while Kiro holds the turn end until every Stop hook exits.
+#   PreToolUse        -> blocks (exit 2) a model-run watcher arm or checkpoint
+#                        while the doorbell owner can run (kiro_primary_arm_seatbelt)
+#   Stop              -> the dialog-mirror entry, endpoint ensure, then `bin/fm-primary-doorbell.sh
+#                        ensure`, which keeps the one doorbell owner running;
+#                        that owner, not this hook, owns watcher continuity and
+#                        the ring for this pane
+# SessionStart and the lock-owning UserPromptSubmit also run that ensure, so an
+# owner also supervises the turn it starts in.
+# Task-bound Stop hooks reach the same block after their task updates; it acts
+# only in primary scope for the lock-owning session. When no doorbell owner can
+# run because no endpoint loads (ensure exit 3), the block falls back to forking
+# one bin/fm-watch-arm.sh cycle into its own session, which only keeps the
+# durable queue fed: the arm waits out a whole watcher cycle while Kiro holds
+# the turn end until every Stop hook exits.
 #
 # Usage: fm-kiro-turnend-hook.sh [--kiro-home <dir>]   (hook payload on stdin)
 #
 # Every path exits 0 and stays quiet unless a primary context hook deliberately
-# writes context. A lifecycle writer refusal must never break Kiro's own turn.
+# writes context, except the primary PreToolUse seatbelt, whose exit 2 blocks
+# one tool call. A lifecycle writer refusal must never break Kiro's own turn.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -111,13 +123,65 @@ case "$EVENT" in
   *) exit 0 ;;
 esac
 
+# The context line that selects the doorbell protocol. The doorbell owner, not
+# the model, keeps the watcher running, so the line forbids a model-run arm.
+KIRO_DOORBELL_PUBLISHED='KIRO_PRIMARY_ENDPOINT: structural wake doorbell published; the doorbell owner (bin/fm-primary-doorbell.sh) keeps the watcher running and rings this pane for every actionable wake, so never run bin/fm-watch-arm.sh or a foreground checkpoint yourself.'
+
+# Keep the one doorbell owner running for this primary. Quiet by design: the
+# owner's own records say why it could not start, and the caller decides on any
+# fallback from the exit status (bin/fm-primary-doorbell.sh header).
+kiro_primary_doorbell_owner_ensure() {
+  "$SCRIPT_DIR/fm-primary-doorbell.sh" ensure </dev/null >/dev/null 2>&1
+}
+
+# Block a model-run watcher arm or checkpoint while the doorbell owner can run
+# for this lock-owning primary (a loadable endpoint, no away flag): Kiro blocks
+# a tool call on PreToolUse exit 2 and shows the model its stderr (verified live,
+# kiro-cli 2.24.1). bin/fm-arm-command-policy.mjs, through
+# bin/fm-arm-pretool-check.sh --owner-held, owns which commands count; a payload
+# that cannot name a watcher script, or any failed check here, allows.
+kiro_primary_arm_seatbelt() {
+  case "$PAYLOAD" in *fm-watch*|*"\$'"*|*'$"'*) ;; *) return 0 ;; esac
+  [ ! -e "$STATE/.afk" ] || return 0
+  # shellcheck source=bin/fm-session-lock-lib.sh
+  . "$SCRIPT_DIR/fm-session-lock-lib.sh"
+  fm_session_lock_owned_by_self "$STATE" || return 0
+  # shellcheck source=bin/fm-primary-endpoint-lib.sh
+  . "$SCRIPT_DIR/fm-primary-endpoint-lib.sh"
+  fm_primary_endpoint_load "$STATE" "$FM_ROOT" "$FM_HOME" || return 0
+  printf '%s' "$PAYLOAD" | "$SCRIPT_DIR/fm-arm-pretool-check.sh" --claude --owner-held >/dev/null
+  [ "$?" -ne 2 ] || exit 2
+}
+
+# Record this turn's captain prompt or MAIN reply in the supervision host's
+# dialog mirror; a silent no-op unless the home opted into the host
+# (bin/fm-host-mirror.sh owns the gate, the Kiro writer, and the file).
+kiro_primary_mirror() {
+  printf '%s' "$PAYLOAD" | "$SCRIPT_DIR/fm-host-mirror.sh" hook kiro-cli >/dev/null 2>&1 || true
+}
+
+# Attach, once, the supervision-host lines the doorbell owner kept for this
+# turn (bin/fm-primary-doorbell.sh "SUPERVISION HOST"). The note is taken by an
+# atomic rename first, so a line the owner appends meanwhile waits for the next
+# turn instead of being cleared unseen.
+kiro_primary_doorbell_note() {
+  local note="$STATE/.primary-doorbell-note" taken
+  [ -s "$note" ] || return 0
+  taken="$note.taken.$$"
+  mv -f -- "$note" "$taken" 2>/dev/null || return 0
+  printf '%s\n' 'KIRO_PRIMARY_DOORBELL_NOTE: the supervision host handed this wake to you; treat the following lines as its close and reason, then drain and acknowledge as usual:'
+  tail -c 8192 -- "$taken" 2>/dev/null || true
+  rm -f -- "$taken" 2>/dev/null || true
+}
+
 kiro_primary_session_open() {
   local digest
   digest=$("$SCRIPT_DIR/fm-sessionstart-run.sh" --source startup 2>&1 || true)
   # shellcheck source=bin/fm-primary-endpoint-lib.sh
   . "$SCRIPT_DIR/fm-primary-endpoint-lib.sh"
   if fm_primary_endpoint_publish "$STATE" "$FM_ROOT" "$FM_HOME"; then
-    digest="${digest}${digest:+$'\n'}KIRO_PRIMARY_ENDPOINT: structural wake doorbell published; the background watcher rings this pane for every actionable wake, so keep one cycle armed with bin/fm-watch-arm.sh and do not run foreground checkpoints."
+    digest="${digest}${digest:+$'\n'}$KIRO_DOORBELL_PUBLISHED"
+    kiro_primary_doorbell_owner_ensure || true
   else
     digest="${digest}${digest:+$'\n'}KIRO_PRIMARY_ENDPOINT: structural wake doorbell unavailable ($FM_PRIMARY_ENDPOINT_ERROR); use the foreground checkpoint fallback."
   fi
@@ -136,7 +200,7 @@ kiro_primary_endpoint_ensure() {  # <announce>
   . "$SCRIPT_DIR/fm-primary-endpoint-lib.sh"
   fm_primary_endpoint_ensure "$STATE" "$FM_ROOT" "$FM_HOME" || return 0
   [ "$1" = 1 ] && [ "$FM_PRIMARY_ENDPOINT_ENSURED" = published ] || return 0
-  printf '%s\n' "KIRO_PRIMARY_ENDPOINT: structural wake doorbell published; the background watcher rings this pane for every actionable wake, so keep one cycle armed with bin/fm-watch-arm.sh and do not run foreground checkpoints."
+  printf '%s\n' "$KIRO_DOORBELL_PUBLISHED"
 }
 
 # The tracked primary hook carries an explicit marker. A Firstmate worker
@@ -170,13 +234,20 @@ if [ "${FM_KIRO_PRIMARY_HOOK:-0}" = 1 ]; then
         exit 0
       fi
       kiro_primary_endpoint_ensure 1
+      kiro_primary_mirror
+      kiro_primary_doorbell_owner_ensure || true
+      kiro_primary_doorbell_note
       # The queue remains durable until the model runs the exact
       # WAKE_ACK_REQUIRED command this drain prints after handling its context.
       [ -s "$STATE/.wake-queue" ] || exit 0
       "$SCRIPT_DIR/fm-wake-drain.sh" 2>&1 || true
       exit 0
       ;;
-    pre-tool-use|post-tool-use)
+    pre-tool-use)
+      kiro_primary_arm_seatbelt
+      exit 0
+      ;;
+    post-tool-use)
       exit 0
       ;;
     stop)
@@ -300,8 +371,8 @@ case "$EVENT_KIND" in
     ;;
 esac
 
-# Primary/secondmate Stop re-arm backstop. A worker's task-bound hook reaches
-# this block too and stops at the lock-ownership check for its home.
+# Primary/secondmate Stop continuity. A worker's task-bound hook reaches this
+# block too and stops at the lock-ownership check for its home.
 # shellcheck source=bin/fm-primary-scope-lib.sh
 . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
@@ -314,7 +385,14 @@ fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
 
 fm_session_lock_owned_by_self "$STATE" || exit 0
-[ "${FM_KIRO_PRIMARY_HOOK:-0}" != 1 ] || kiro_primary_endpoint_ensure 0
+if [ "${FM_KIRO_PRIMARY_HOOK:-0}" = 1 ]; then
+  kiro_primary_mirror
+  kiro_primary_endpoint_ensure 0
+  kiro_primary_doorbell_owner_ensure
+  # Only a primary with no loadable endpoint (exit 3) falls back to the plain
+  # arm below; a cooling-down or failed owner already rang its own notice.
+  [ "$?" -eq 3 ] || exit 0
+fi
 [ -e "$STATE/.afk" ] && exit 0
 fm_supervision_needed "$STATE" "$GRACE" || exit 0
 fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME" && exit 0

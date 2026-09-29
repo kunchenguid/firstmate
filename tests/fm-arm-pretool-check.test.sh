@@ -248,6 +248,40 @@ test_direct_policy_contract() {
   assert_policy direct-heredoc-watcher $'deny\twatcher-redirection' "$heredoc_watcher"
 }
 
+assert_owner_held_policy() {
+  local id=$1 expected=$2 command=$3 output
+  output=$(node "$POLICY" --root "$ROOT" --home "$ROOT" --owner-held --command "$command") \
+    || fail "$id owner-held policy invocation failed"
+  case "$output" in
+    "$expected"|"$expected"$'\t'*) : ;;
+    *) fail "$id owner-held policy expected $expected, got: $output" ;;
+  esac
+  pass "owner-held policy $id: $expected"
+}
+
+test_owner_held_policy_contract() {
+  assert_policy owner-free-arm allow 'bin/fm-watch-arm.sh'
+  assert_owner_held_policy owner-held-arm $'deny\twatcher-owner-held' 'bin/fm-watch-arm.sh'
+  assert_owner_held_policy owner-held-checkpoint $'deny\twatcher-owner-held' 'bin/fm-watch-checkpoint.sh --seconds 180'
+  assert_owner_held_policy owner-held-background $'deny\twatcher-owner-held' 'exec bin/fm-watch-arm.sh --restart &'
+  assert_owner_held_policy owner-held-data-grep allow 'grep -n fm-watch-arm.sh docs/x.md'
+  assert_owner_held_policy owner-held-doorbell-ensure allow 'bin/fm-primary-doorbell.sh ensure'
+}
+
+test_owner_held_kiro_stdin_claude_deny() {
+  local out err rc err_file payload
+  payload='{"session_id":"s","hook_event_name":"PreToolUse","cwd":"/x","tool_name":"execute_bash","tool_input":{"command":"bin/fm-watch-arm.sh"}}'
+  err_file=$(mktemp "${TMPDIR:-/tmp}/fm-arm-pretool-owner-held.XXXXXX")
+  out=$(printf '%s' "$payload" | "$CHECK" --claude --owner-held 2>"$err_file")
+  rc=$?
+  err=$(cat "$err_file")
+  rm -f "$err_file"
+  [ "$rc" -eq 2 ] || fail "owner-held Kiro payload must deny with exit 2, got $rc: $err"
+  [ -z "$out" ] || fail "owner-held --claude deny must leave stdout empty, got: $out"
+  assert_contains "$err" watcher-owner-held "owner-held deny stderr must name watcher-owner-held: $err"
+  pass "owner-held stdin: Kiro-shaped arm payload denied with watcher-owner-held on stderr only"
+}
+
 # --- CLI parsing -------------------------------------------------------------
 
 test_command_equals_form() {
@@ -560,6 +594,8 @@ test_shellcheck_clean() {
 
 test_full_acceptance_matrix
 test_direct_policy_contract
+test_owner_held_policy_contract
+test_owner_held_kiro_stdin_claude_deny
 test_command_equals_form
 test_background_flag_accepted_and_non_gating
 test_unknown_flag_errors

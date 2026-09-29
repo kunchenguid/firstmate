@@ -9,9 +9,15 @@
 # mirror file, its cursor, its lock, the feed, and the verified-writer list.
 #
 # WRITERS. Code-owned turn surfaces append here, never the model: Claude
-# through its prompt-submit and Stop hooks, and Cursor through its
-# beforeSubmitPrompt and afterAgentResponse hooks. Codex, Grok, OpenCode, and
-# omp have no writer (docs/supervision-host.md "The dialog mirror"). A writer
+# through its prompt-submit and Stop hooks, Cursor through its
+# beforeSubmitPrompt and afterAgentResponse hooks, and Kiro through its
+# UserPromptSubmit hook (the payload's `prompt`) and its Stop hook, whose
+# payload carries no reply text, so MAIN's text is the turn's last non-reasoning
+# assistant entry in the session transcript the payload's session_id names
+# (~/.kiro/sessions/<workspace>/<session_id>/messages.jsonl). A Kiro prompt that
+# is one of the doorbell owner's constant lines (": Firstmate ...") is fleet
+# machinery and is dropped. Codex, Grok, OpenCode, and omp have no writer
+# (docs/supervision-host.md "The dialog mirror"). A writer
 # appends captain text (the submitted prompt) and MAIN text (the turn's final
 # assistant message), never tool traffic, as said, with only the whitespace at
 # the very end of the message trimmed. A prompt the shared operational-input
@@ -64,8 +70,8 @@
 #
 # VERIFIED WRITERS. `verified <harness>` exits 0 for a primary whose writers
 # were proven against the real harness to record a session's dialog from its
-# first captain prompt (docs/supervision-host.md "The dialog mirror"): Claude
-# and Cursor. The host runs the attended posture only on those
+# first captain prompt (docs/supervision-host.md "The dialog mirror"): Claude,
+# Cursor, and Kiro. The host runs the attended posture only on those
 # (fm_supervision_host_attended_ready), and every other primary keeps the
 # attended behavior it has without the host.
 #
@@ -90,7 +96,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
-FM_HOST_MIRROR_VERIFIED='claude cursor'
+FM_HOST_MIRROR_VERIFIED='claude cursor kiro-cli'
 MIRROR_CAP=4000
 MIRROR_KEEP=200
 FEED_CAP=16000
@@ -144,6 +150,43 @@ ENTRIES='if . == "" or endswith("\n") then .[:-1] else error("unterminated mirro
     then . else error("invalid mirror entry") end'
 
 # A writer records only the lock-owning primary session's dialog.
+# Kiro's entry for one hook payload, in the three-part shape the hook branch
+# reads (tag, id, text), or nothing. A captain entry is the submitted prompt,
+# keyed by the session, the hook's arrival second, and the hook process id
+# (unique per invocation) because the payload carries no prompt id; a main entry is the last non-reasoning assistant entry of the
+# session transcript's newest execution, keyed by that execution id.
+kiro_hook_entry() {
+  local event session transcript
+  event=$(printf '%s' "$PAYLOAD" | jq -r '.hook_event_name // empty' 2>/dev/null) || return 1
+  session=$(printf '%s' "$PAYLOAD" | jq -r '.session_id // empty' 2>/dev/null) || return 1
+  case "$session" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  case "$event" in
+    UserPromptSubmit|userPromptSubmit)
+      printf '%s' "$PAYLOAD" | jq -r --arg id "kiro:$session:$(date +%s):$$" '
+        ((.prompt // "") | tostring | sub("\\s+\\z"; "")) as $text
+        | select($text != "" and ($text | startswith(": Firstmate ") | not))
+        | "captain\n\($id)\n\($text)"' 2>/dev/null
+      ;;
+    Stop|stop)
+      for transcript in "$HOME"/.kiro/sessions/*/"$session"/messages.jsonl; do
+        [ -f "$transcript" ] || continue
+        tail -n 2000 -- "$transcript" | jq -rRs '
+          [split("\n")[] | fromjson? | select(type == "object")] as $entries
+          | ([$entries[] | select(.payload.type == "turn_start") | .payload.executionId] | last) as $exec
+          | select($exec != null)
+          | [$entries[] | select(.payload.type == "assistant" and .payload.executionId == $exec
+              and (.payload.operationType // "") != "Reasoning")
+            | (.payload.content // "") | tostring] | last
+          | select(. != null)
+          | sub("\\s+\\z"; "") as $text
+          | select($text != "")
+          | "main\n\($exec)\n\($text)"' 2>/dev/null
+        return 0
+      done
+      ;;
+  esac
+}
+
 writer_in_scope() {
   # shellcheck source=bin/fm-primary-scope-lib.sh
   . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
@@ -227,6 +270,16 @@ case "$1" in
       . "$SCRIPT_DIR/fm-hook-host-lib.sh"
       # Cursor loads the tracked Claude settings too; its own entries mirror it.
       fm_hook_payload_is_foreign_host "$PAYLOAD" && exit 0
+    fi
+    if [ "$2" = kiro-cli ]; then
+      PARSED=$(kiro_hook_entry) || exit 0
+      [ -n "$PARSED" ] || exit 0
+      TAG=$(printf '%s\n' "$PARSED" | sed -n '1p')
+      ID=$(printf '%s\n' "$PARSED" | sed -n '2p')
+      TEXT=$(printf '%s\n' "$PARSED" | sed '1,2d')
+      writer_in_scope || exit 0
+      append_entry "$TAG" "$TEXT" "$ID"
+      exit 0
     fi
     # One line per field: event, tag, id; the text follows as the remainder.
     PARSED=$(printf '%s' "$PAYLOAD" | jq -r '

@@ -419,7 +419,7 @@ test_recreated_mirror_continues_past_both_cursors() {
 # proven to record the session's dialog from its first captain prompt.
 test_only_proven_writers_are_verified() {
   local harness
-  for harness in claude cursor; do
+  for harness in claude cursor kiro-cli; do
     "$MIRROR" verified "$harness" || fail "$harness has proven writers but is not verified"
   done
   for harness in codex grok opencode omp pi kimi unknown; do
@@ -428,10 +428,73 @@ test_only_proven_writers_are_verified() {
     fi
   done
   expect_code 2 "$("$MIRROR" verified >/dev/null 2>&1; echo $?)" "verified without a harness must be a usage error"
-  pass "only Claude and Cursor, the primaries with proven writers, have a verified dialog mirror"
+  pass "only Claude, Cursor, and Kiro, the primaries with proven writers, have a verified dialog mirror"
+}
+
+# Kiro's writer runs under a lock-owning process named kiro-cli (a copied bash,
+# as tests/fm-primary-endpoint.test.sh does) and reads its main reply from the
+# session transcript under $HOME/.kiro/sessions, shaped as kiro-cli 2.24.1
+# writes it.
+cp "$(command -v bash)" "$FAKEBIN/kiro-cli"
+chmod +x "$FAKEBIN/kiro-cli"
+FAKE_KIRO="$FAKEBIN/kiro-cli"
+KIRO_SESSION=sess_4f1c2a
+KIRO_HOME="$TMP_ROOT/kiro-login"
+mkdir -p "$KIRO_HOME/.kiro/sessions/wsx/$KIRO_SESSION" "$KIRO_HOME/.kiro/sessions/wsx/sess_empty"
+cat > "$KIRO_HOME/.kiro/sessions/wsx/$KIRO_SESSION/messages.jsonl" <<'JSONL'
+{"id":"u1","timestamp":"2026-01-01T00:00:00Z","payload":{"type":"user","content":"hello"}}
+{"id":"e1-turn-start","timestamp":"2026-01-01T00:00:01Z","payload":{"type":"turn_start","executionId":"e1"}}
+{"id":"a1","timestamp":"2026-01-01T00:00:02Z","payload":{"type":"assistant","content":"thinking...","operationType":"Reasoning","executionId":"e1"}}
+{"id":"a2","timestamp":"2026-01-01T00:00:03Z","payload":{"type":"assistant","content":"first part","executionId":"e1"}}
+{"id":"a3","timestamp":"2026-01-01T00:00:04Z","payload":{"type":"assistant","content":"final reply","executionId":"e1"}}
+JSONL
+
+as_kiro_session() {  # <home> <script>
+  FM_HOME="$1" HOME="$KIRO_HOME" PRIMARY_ROOT="$PRIMARY_ROOT" MIRROR="$MIRROR" KIRO_SESSION="$KIRO_SESSION" "$FAKE_KIRO" -c \
+    'printf "%s\n" "$$" > "$FM_HOME/state/.lock"; '"$2"
+}
+
+KIRO_SAY='kiro() {  # <UserPromptSubmit|Stop> [<prompt>] [<session>]
+  if [ "$1" = UserPromptSubmit ]; then
+    jq -cn --arg s "${3:-$KIRO_SESSION}" --arg p "$2" --arg c "$PRIMARY_ROOT" "{session_id: \$s, hook_event_name: \"UserPromptSubmit\", cwd: \$c, prompt: \$p}"
+  else
+    jq -cn --arg s "${3:-$KIRO_SESSION}" --arg c "$PRIMARY_ROOT" "{session_id: \$s, hook_event_name: \"Stop\", cwd: \$c}"
+  fi | FM_ROOT_OVERRIDE="$PRIMARY_ROOT" "$MIRROR" hook kiro-cli
+}
+'
+
+test_kiro_writer_mirrors_prompt_and_final_reply() {
+  local home
+  home=$(make_home kiro)
+  as_kiro_session "$home" "$KIRO_SAY"'
+    kiro UserPromptSubmit "hello"
+    kiro UserPromptSubmit ": Firstmate wake waiting: run the drain"
+    kiro Stop
+    kiro Stop
+    kiro Stop "" sess_empty
+    kiro Stop "" sess_absent
+  ' || fail "the Kiro writer failed"
+  assert_equals "captain|hello
+main|final reply" "$(entries "$home")" \
+    "Kiro must mirror the prompt and only the last non-reasoning reply of the newest execution, once"
+  assert_equals "e1" "$(jq -r 'select(.tag == "main") | .id' "$home/state/.host-mirror.jsonl")" \
+    "a Kiro main entry must be keyed by its execution id"
+  assert_contains "$(jq -r 'select(.tag == "captain") | .id' "$home/state/.host-mirror.jsonl")" "kiro:$KIRO_SESSION:" \
+    "a Kiro captain entry must be keyed by its session"
+  pass "mirror: Kiro mirrors the captain prompt and the execution's final reply once, never a doorbell, reasoning, or a session without a transcript"
+}
+
+test_kiro_writer_is_inert_without_the_opt_in() {
+  local home
+  home=$(make_home kiro-no-opt-in 0)
+  as_kiro_session "$home" "$KIRO_SAY"'kiro UserPromptSubmit "hello"; kiro Stop' || fail "the inert Kiro writer failed"
+  assert_absent "$home/state/.host-mirror.jsonl" "a home without config/supervision-host must mirror no Kiro dialog"
+  pass "mirror: the Kiro writer writes nothing on a home that did not opt in"
 }
 
 test_every_harness_registration_writes_the_mirror
+test_kiro_writer_mirrors_prompt_and_final_reply
+test_kiro_writer_is_inert_without_the_opt_in
 test_writers_are_inert_without_the_opt_in
 test_only_proven_writers_are_verified
 test_home_without_the_flag_is_untouched

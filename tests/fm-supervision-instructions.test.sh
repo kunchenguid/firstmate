@@ -82,6 +82,26 @@ test_supervision_host_protocol_on_every_arm_owner() {
   pass "renderer gives each non-Pi arm owner the host protocol in its own terms, and grok arms the host"
 }
 
+test_supervision_host_protocol_on_an_opted_in_kiro_home() {
+  local home config plain hosted intro away
+  home="$TMP_ROOT/kiro-host-home"
+  config="$TMP_ROOT/kiro-host-config"
+  mkdir -p "$home/state" "$config"
+  intro="The doorbell owner runs the supervision host in the arm's place"
+  # shellcheck disable=SC2016 # Literal backticks from the rendered Markdown.
+  away='as a doorbell turn whose `UserPromptSubmit` context carries the close'
+  plain=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness kiro-cli)
+  assert_not_contains "$plain" "$intro" "a kiro-cli home without config/supervision-host rendered the host intro"
+  assert_not_contains "$plain" "$away" "a kiro-cli home without config/supervision-host rendered the host away line"
+  : > "$config/supervision-host"
+  hosted=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness kiro-cli)
+  assert_contains "$hosted" "$intro" "an opted-in kiro-cli home did not render the host intro"
+  assert_contains "$hosted" "$away" "an opted-in kiro-cli home did not render the UserPromptSubmit away line"
+  assert_contains "$hosted" "a headless supervision session takes the wakes" "an opted-in kiro-cli home did not render the attended engine posture its verified mirror enables"
+  assert_not_contains "$hosted" "no verified dialog mirror feeds a supervision session from this harness yet" "an opted-in kiro-cli home rendered the pass-through attended line"
+  pass "renderer adds the kiro-cli supervision-host protocol, attended engine posture included, only on an opted-in home"
+}
+
 test_unknown_fallback() {
   local out
   out=$("$RENDER" --harness not-real)
@@ -222,22 +242,26 @@ test_cross_harness_ordinary_continuation_and_repair_matrix() {
   assert_contains "$out" "foreground checkpoint" "codex recovery line lost its checkpoint repair"
   assert_contains "$out" "bin/fm-watch-checkpoint.sh" "codex recovery line lost the checkpoint command"
 
-  # kiro-cli's structural path is the watcher doorbell into the published
+  # kiro-cli's structural path is the doorbell owner ringing the published
   # primary pane, selected by the session-start KIRO_PRIMARY_ENDPOINT line; the
-  # foreground checkpoint stays as the fallback when no endpoint is published,
-  # and the stop hook is a re-arm backstop that cannot wake the turn by itself.
+  # model never arms a watcher there. The foreground checkpoint stays as the
+  # fallback when no endpoint is published, and the stop hook's plain re-arm is
+  # then only a backstop that cannot wake the turn by itself.
   out=$("$RENDER" --harness kiro-cli)
   assert_contains "$out" "primary harness: kiro-cli" "kiro-cli heading missing"
-  assert_contains "$out" "Mode: kiro-cli structural doorbell, foreground checkpoint fallback." "kiro-cli snippet missing"
-  assert_contains "$out" "bin/fm-watch-arm.sh" "kiro-cli snippet lost the background watcher arm for the doorbell path"
+  assert_contains "$out" "Mode: kiro-cli doorbell owner, foreground checkpoint fallback." "kiro-cli snippet missing"
+  assert_contains "$out" "bin/fm-primary-doorbell.sh" "kiro-cli snippet does not name the doorbell owner"
+  assert_contains "$out" "never run \`bin/fm-watch-arm.sh\`" "kiro-cli snippet does not forbid a model-run arm on the doorbell path"
   ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
   assert_contains "$ordinary" "KIRO_PRIMARY_ENDPOINT published" "kiro-cli ordinary-wake line does not select the doorbell path from the digest"
   assert_contains "$ordinary" "WAKE_ACK_REQUIRED" "kiro-cli ordinary-wake line lost the acknowledgement on the doorbell path"
   assert_contains "$ordinary" "next foreground" "kiro-cli ordinary-wake line lost its foreground checkpoint fallback"
   assert_contains "$ordinary" "bin/fm-watch-checkpoint.sh" "kiro-cli ordinary-wake line lost the checkpoint command"
   assert_contains "$ordinary" "backstop" "kiro-cli ordinary-wake line does not flag the stop hook as a backstop that never wakes the turn"
+  assert_not_contains "$ordinary" "bin/fm-watch-arm.sh" "kiro-cli ordinary-wake line tells the model to arm a watcher"
   out=$("$RENDER" --harness kiro-cli --repair-line)
-  assert_contains "$out" "bin/fm-watch-arm.sh" "kiro-cli recovery line lost its doorbell-path watcher arm"
+  assert_contains "$out" "bin/fm-primary-doorbell.sh ensure" "kiro-cli recovery line does not repair through the doorbell owner"
+  assert_not_contains "$out" "bin/fm-watch-arm.sh" "kiro-cli recovery line still tells the model to arm a watcher"
   assert_contains "$out" "foreground checkpoint" "kiro-cli recovery line lost its checkpoint fallback repair"
   assert_contains "$out" "bin/fm-watch-checkpoint.sh" "kiro-cli recovery line lost the checkpoint command"
 
@@ -304,6 +328,7 @@ test_pi_snippet_uses_effective_extension_path() {
 
 test_supervision_host_protocol_only_on_an_opted_in_claude_home
 test_supervision_host_protocol_on_every_arm_owner
+test_supervision_host_protocol_on_an_opted_in_kiro_home
 test_selected_harness_block_only
 test_unknown_fallback
 test_conditional_stanzas

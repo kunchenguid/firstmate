@@ -813,6 +813,24 @@ test_branch_outcomes_keep_a_drain_presented_outcome_across_an_index_repair() {
   pass "drain: an outcome the host drain presented but main never acknowledged survives an outcome index repair"
 }
 
+# A first cycle that closes before the host's first poll streamed its status
+# line must still print that line while the host keeps running on the engine
+# turn, or an owner that waits for readiness (the Kiro doorbell owner, the
+# OpenCode plugin, the omp extension) retires the host mid-turn. A long poll
+# makes the arm close inside the host's first sleep.
+test_early_first_close_still_streams_the_ready_line() {
+  local home
+  home=$(make_home early-close away)
+  append_status "$home" 'already waiting before the host started'
+  FM_SUPERVISION_HOST_POLL=5 start_host "$home"
+  wait_until 400 handled_at_least "$home" 1 \
+    || fail "early close: the away wake was not handled: $(cat "$home/host.out"; cat "$home/state/.supervision-host.log" 2>/dev/null)"
+  assert_re '^watcher: (started|attached) pid=' "$home/host.out" \
+    "early close: the host never printed its first cycle's status line while it kept running"
+  host_exited "$home" && fail "early close: the host exited instead of parking: $(cat "$home/host.out")"
+  pass "host: a first cycle that closes before the first poll still streams its status line while the engine handles the wake"
+}
+
 test_attended_routine_wake_is_handled_on_the_engine_and_stays_off_main() {
   local home first drained
   home=$(make_home attended-routine attended)
@@ -2208,6 +2226,53 @@ test_host_outside_the_lock_owner_stands_down() {
   pass "host: a host outside the session-lock owner stands down without arming"
 }
 
+# A Kiro primary's doorbell owner runs the host outside the primary's ancestry,
+# so the host proves ownership through the endpoint record naming the served
+# pid. A copied bash named kiro-cli owns the lock and publishes that record
+# through a thin tmux fake; the host runs detached from it.
+test_kiro_served_pid_proves_ownership_through_the_endpoint() {
+  local home kbin kiro other out rc
+  home=$(make_home kiro-served attended)
+  kbin="$home/kirobin"
+  mkdir -p "$kbin"
+  cp "$(command -v bash)" "$kbin/kiro-cli"
+  printf '#!/usr/bin/env bash\ncase "$1" in display-message) printf "%%%%1\\n" ;; esac\nexit 0\n' > "$kbin/tmux"
+  chmod +x "$kbin/kiro-cli" "$kbin/tmux"
+  # The record names the root the host resolves (wake-helpers' FM_ROOT_OVERRIDE).
+  FM_HOME="$home" PATH="$kbin:$PATH" TMUX_PANE=primary:0 FM_REPO_ROOT="$ROOT" \
+    FM_ENDPOINT_ROOT="${FM_ROOT_OVERRIDE:-$ROOT}" "$kbin/kiro-cli" -c '
+    printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+    . "$FM_REPO_ROOT/bin/fm-primary-endpoint-lib.sh"
+    fm_primary_endpoint_publish "$FM_HOME/state" "$FM_ENDPOINT_ROOT" "$FM_HOME" || exit 9
+    while :; do sleep 1; done' </dev/null >"$home/kiro.out" 2>&1 &
+  kiro=$!
+  printf '%s\n' "$kiro" >> "$home/claude-pids"
+  wait_until 50 test -f "$home/state/.primary-endpoint" \
+    || fail "kiro served: the fake Kiro session did not publish its endpoint: $(cat "$home/kiro.out")"
+
+  # The endpoint load also proves the recorded pane exists, so the host sees
+  # the same tmux fake the session published through.
+  FM_HOME="$home" FM_CREW_STATE_BIN="$home/fakebin/fm-crew-state.sh" PATH="$kbin:$home/fakebin:$PATH" \
+    FM_SUPERVISION_HOST_PRIMARY=kiro-cli FM_SUPERVISION_HOST_SERVED_PID="$kiro" \
+    "$HOST" park > "$home/host.out" 2>&1 &
+  printf '%s\n' "$!" >> "$home/claude-pids"
+  first_line() { grep -qE '^(watcher: |supervision-host)' "$home/host.out"; }
+  wait_until 300 first_line || fail "kiro served: the host printed nothing: $(cat "$home/host.out")"
+  assert_no_re 'stood down' "$home/host.out" "a host serving the endpoint's lock owner stood down"
+  assert_re '^watcher: (started|attached) pid=' "$home/host.out" "a host serving the endpoint's lock owner did not start its cycle"
+  stop_home_processes "$home"
+
+  "$kbin/kiro-cli" -c 'sleep 30' &
+  other=$!
+  printf '%s\n' "$other" >> "$home/claude-pids"
+  out=$(FM_HOME="$home" FM_CREW_STATE_BIN="$home/fakebin/fm-crew-state.sh" PATH="$kbin:$home/fakebin:$PATH" \
+    FM_SUPERVISION_HOST_PRIMARY=kiro-cli FM_SUPERVISION_HOST_SERVED_PID="$other" "$HOST" park 2>&1); rc=$?
+  expect_code 0 "$rc" "a host serving a pid the endpoint does not name exits 0"
+  assert_contains "$out" "supervision-host stood down:" "a host serving a pid the endpoint does not name must stand down"
+  kill -TERM "$other" 2>/dev/null || true
+  pass "host: a kiro-cli host proves ownership through the endpoint naming its served pid, and stands down for any other pid"
+}
+
 test_superseded_host_leaves_the_owner_untouched() {
   local home owner watcher lock_pid
   home=$(make_home superseded away)
@@ -2264,6 +2329,7 @@ test_branch_outcomes_date_an_outcome_carried_across_a_switch_off_pi
 test_branch_outcomes_keep_an_unshown_outcome_until_acknowledged
 test_branch_outcomes_keep_a_drain_presented_outcome_across_a_switch_to_pi
 test_branch_outcomes_keep_a_drain_presented_outcome_across_an_index_repair
+test_early_first_close_still_streams_the_ready_line
 test_attended_routine_wake_is_handled_on_the_engine_and_stays_off_main
 test_attended_captain_outcome_reaches_main_through_branch_outcomes
 test_captain_leaving_mid_turn_keeps_its_captain_outcome_for_the_return
@@ -2303,4 +2369,5 @@ test_first_cycle_status_streams_and_owner_options_reach_it
 test_unchanged_held_outcome_reaches_the_captain_once_until_a_new_event
 test_unverified_engine_hands_every_away_wake_to_main
 test_host_outside_the_lock_owner_stands_down
+test_kiro_served_pid_proves_ownership_through_the_endpoint
 test_superseded_host_leaves_the_owner_untouched

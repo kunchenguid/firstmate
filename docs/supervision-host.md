@@ -22,11 +22,11 @@ An arm owner is the component in each primary harness that starts watcher cycles
 
 The host is opt-in per home through `config/supervision-host`; [configuration.md](configuration.md#supervision-host-configsupervision-host) owns the file.
 Without the file every home behaves exactly as it does without the host.
-Today it runs beside a Claude, Cursor, OpenCode, omp, Grok, or Codex primary: away on all six, and attended on Claude and Cursor, the primaries with a verified [dialog mirror](#the-dialog-mirror).
+Today it runs beside a Claude, Cursor, OpenCode, omp, Grok, Codex, or Kiro primary: away on all seven, and attended on Claude, Cursor, and Kiro, the primaries with a verified [dialog mirror](#the-dialog-mirror).
 
 ### Behavior by posture and harness
 
-- Attended (no away-posture record `state/.afk-contract`) on Claude and Cursor, the engine takes the wakes the Pi branch would take and never wakes main for a routine outcome; see [Postures](#postures).
+- Attended (no away-posture record `state/.afk-contract`) on Claude, Cursor, and Kiro, the engine takes the wakes the Pi branch would take and never wakes main for a routine outcome; see [Postures](#postures).
   Every other close reaches main exactly as the plain watcher arm delivers it.
 - Attended on OpenCode, omp, Grok, and Codex, the host is a pass-through: every close reaches main as without the host.
 - Away (the record exists), the host hands each close to the engine.
@@ -72,8 +72,10 @@ The host's header owns the output contract they read.
 | omp | the watch extension, `.omp/extensions/fm-primary-omp-watch.ts`, which restarts its own successor after each close | the extension's `watcher` follow-up |
 | Grok | the model's tracked background call, rendered as `bin/fm-supervision-host.sh park` at session start | the background task's completion notification |
 | Codex | the foreground checkpoint, `bin/fm-watch-checkpoint.sh`, in the watcher's place | the checkpoint's own output |
+| Kiro | the doorbell owner, `bin/fm-primary-doorbell.sh`, which restarts its own successor park after each close | a doorbell turn whose `UserPromptSubmit` context carries the host's lines |
 
-Hook, plugin, extension, and checkpoint owners pass their harness as the primary pin.
+Hook, plugin, extension, checkpoint, and doorbell owners pass their harness as the primary pin.
+The Kiro doorbell owner runs outside the primary's process tree, so it also passes the pid it serves, and the host proves ownership through the endpoint record instead of its own ancestry.
 Grok's model-owned call relies on primary detection.
 The host pins dispatched work to the primary's crew harness rather than the engine's.
 
@@ -145,9 +147,10 @@ A new engine conversation re-anchors on the current main session's newest entrie
 A wake's entries count as delivered only once its engine turn is accepted with its report, so a turn that fails, records nothing, or is stopped leaves them to be fed again.
 An attended wake whose mirror is missing, unreadable, or fails the feed's validation reaches main with `the dialog mirror could not be read` before any engine turn; an away wake never reads the mirror or moves its cursor.
 A captain message typed while an engine turn is already running reaches the engine at its next wake.
-A captain prompt whose hook write fails is not mirrored, so the engine may judge the next attended wake without it; Claude and Cursor have no later source for it.
+A captain prompt whose hook write fails is not mirrored, so the engine may judge the next attended wake without it; Claude, Cursor, and Kiro have no later source for it.
 
-Claude and Cursor have writers, proven against the real harness to record the session's dialog from its first captain prompt, so only they run the attended posture.
+Claude, Cursor, and Kiro have writers, proven against the real harness to record the session's dialog from its first captain prompt, so only they run the attended posture.
+Kiro's `Stop` payload carries no reply text, so its writer takes main's side from the session transcript (`bin/fm-host-mirror.sh` owns the reading).
 Codex has no writer yet: a supervising Codex main stays inside one turn across its foreground checkpoints, so a captain message typed then fires no prompt or Stop hook, and only a reader of its transcript could record it.
 Grok and OpenCode have no writer, because their session takes the fleet lock during its first turn, so that turn's captain prompt could never be recorded.
 omp has no verified writer, because no omp was available to prove one against.
@@ -277,7 +280,7 @@ But a host absorbs its own wakes, so it ends its park itself before that registr
 
 `FM_SUPERVISION_HOST_PARK_SECONDS` sets that boundary (default 27,000).
 A value that is not a positive integer below 28,800 is treated as the default.
-The OpenCode, omp, and Grok owners have no hook timeout and keep the same default, so their parks end on the same cadence.
+The OpenCode, omp, Grok, and Kiro owners have no hook timeout and keep the same default, so their parks end on the same cadence.
 
 ### At the boundary
 
@@ -287,7 +290,7 @@ Main drains and acknowledges, and the owner starts the next park:
 | Primary | When the next park starts |
 |---|---|
 | Claude and Cursor | At the next turn end. |
-| OpenCode and omp | At once. |
+| OpenCode, omp, and Kiro | At once. |
 | Grok | At the model's re-arm. |
 
 The host checks the boundary on every loop pass, so closes that are already waiting cannot carry it past the boundary.
@@ -336,6 +339,7 @@ Each engine turn's line carries these fields, and this log is where engine cost 
 
 A verified engine is a headless mode of a harness whose isolation, actor propagation, promptless permissions, bounding, and caching were measured.
 Today the only verified engine is Claude's print mode, measured on Claude Code 2.1.278 and 2.1.281.
+kiro-cli 2.24.1's `chat --no-interactive` was measured on 2026-09-29 and is not a verified engine: even with `KIRO_HOME` set it loads the operator's global `~/.kiro` steering, skills, agents, and permissions, it reports a turn's cost only in credits, and a caller cannot yet show that a denied tool call is refused.
 
 ### Claude print mode behavior
 
@@ -386,8 +390,8 @@ Such a process is never recorded and survives the turn, the same residual `bin/f
 The default model is `sonnet`, which handled every measured wake correctly at a fraction of a larger model's cost.
 `config/supervision-host` can name another.
 
-The Claude engine runs beside any of the six primaries, but only a Claude primary selects it by default.
-A Cursor, OpenCode, omp, Grok, or Codex home names it (`claude`, optionally with a model) in `config/supervision-host`.
+The Claude engine runs beside any of the seven primaries, but only a Claude primary selects it by default.
+A Cursor, OpenCode, omp, Grok, Codex, or Kiro home names it (`claude`, optionally with a model) in `config/supervision-host`.
 `/afk` there says so when the file selects no engine.
 
 ## Verification
@@ -403,10 +407,12 @@ Each arm owner's own suite covers its host mode against a stub host.
 | `tests/fm-omp-harness.test.sh` | The omp arm owner's host mode against a stub host. |
 | `tests/fm-watch-checkpoint.test.sh` | The Codex checkpoint's host mode against a stub host. |
 | `tests/fm-supervision-instructions.test.sh` | The rendered protocol, including Grok's arm command. |
-| `tests/fm-host-mirror.test.sh` | The dialog mirror's writers through the tracked Claude and Cursor registrations, the opt-in gate, the feed, and the verified-writer list. |
+| `tests/fm-host-mirror.test.sh` | The dialog mirror's writers through the tracked Claude and Cursor registrations and the Kiro writer against a fake transcript, the opt-in gate, the feed, and the verified-writer list. |
+| `tests/fm-primary-doorbell.test.sh` | The Kiro doorbell owner's host mode against a stub host. |
 | `tests/fm-afk-launch.test.sh` | `/quiet` on an opted-in home: the statement, the paused statement, each named missing part, the quiet daemon fallback that carries its recorded mode, a failed quiet start that archives its quiet record, and the refusal under a live away record until the return. |
 | `tests/fm-afk-return.test.sh` | The return's drain-owned read-cursor advance through the away window on a host home, and none on Pi. |
 | `tests/fm-supervision-host-live-e2e.test.sh` | Runs a real engine turn; opt-in because it spends tokens. |
 | `tests/fm-host-mirror-live-e2e.test.sh` | Proves the Claude and Cursor mirror writers against the real harnesses; opt-in because it spends tokens. |
+| `tests/fm-kiro-host-mirror-live-e2e.test.sh` | Proves the Kiro mirror writer against a real Kiro primary from its first prompt; opt-in because it spends tokens. |
 
 [verification/supervision.md](verification/supervision.md#supervision-host) records the dated live results.

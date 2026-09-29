@@ -11,8 +11,16 @@
 # See docs/arm-pretool-check.md for the complete contract and validation record.
 #
 # Usage:
-#   <PreToolUse JSON on stdin> | bin/fm-arm-pretool-check.sh
-#   bin/fm-arm-pretool-check.sh --command '<cmd>' [--background true|false]
+#   <PreToolUse JSON on stdin> | bin/fm-arm-pretool-check.sh [--owner-held]
+#   bin/fm-arm-pretool-check.sh --command '<cmd>' [--background true|false] [--owner-held]
+#
+# --owner-held is passed by a caller that proved an arm owner outside the model
+# already keeps this primary's watcher running (the Kiro primary's PreToolUse
+# hook while bin/fm-primary-doorbell.sh can run); the policy then denies every
+# executed watcher, arm, or checkpoint command, not only the unsafe shapes.
+# Kiro delivers the same .tool_input.command shape and blocks on exit 2,
+# showing stderr to the model (verified live, kiro-cli 2.24.1), so its hook
+# uses --claude rendering.
 #
 # Stdin mode extracts .toolInput.command for Grok or .tool_input.command for
 # Claude and Codex. Cursor delivers the same .tool_input.command shape with
@@ -47,10 +55,11 @@ CMD_SET=0
 BACKGROUND=""
 CLAUDE_MODE=0
 CURSOR_MODE=0
+OWNER_HELD=0
 
 usage() {
   cat <<'EOF'
-Usage: fm-arm-pretool-check.sh [--command <cmd>] [--background true|false] [--claude|--cursor]
+Usage: fm-arm-pretool-check.sh [--command <cmd>] [--background true|false] [--claude|--cursor] [--owner-held]
 
 With no --command, reads a PreToolUse-style JSON payload on stdin (Grok
 toolInput.command, or Claude/Codex/Cursor tool_input.command).
@@ -91,6 +100,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --cursor)
       CURSOR_MODE=1
+      shift
+      ;;
+    --owner-held)
+      OWNER_HELD=1
       shift
       ;;
     -h|--help)
@@ -173,7 +186,9 @@ POLICY="$ROOT/bin/fm-arm-command-policy.mjs"
 command -v node >/dev/null 2>&1 || exit 0
 [ -f "$POLICY" ] || exit 0
 
-POLICY_OUTPUT=$(node "$POLICY" --command "$CMD" --root "$ROOT" --home "$ACTIVE_HOME" 2>/dev/null) || exit 0
+POLICY_ARGS=(--command "$CMD" --root "$ROOT" --home "$ACTIVE_HOME")
+[ "$OWNER_HELD" -eq 0 ] || POLICY_ARGS+=(--owner-held)
+POLICY_OUTPUT=$(node "$POLICY" "${POLICY_ARGS[@]}" 2>/dev/null) || exit 0
 [ -n "$POLICY_OUTPUT" ] || exit 0
 
 TAB=$(printf '\t')

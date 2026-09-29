@@ -19,7 +19,7 @@ In this document, an arm is one run of `bin/fm-watch-arm.sh`, which starts a wat
 
 ## Ownership
 
-On Pi, omp, OpenCode, Cursor, and Claude primaries, one component owns re-arming the watcher.
+On Pi, omp, OpenCode, Cursor, Claude, and Kiro primaries, one component owns re-arming the watcher.
 Codex and Grok keep their own protocols; see [Manual recovery and other harnesses](#manual-recovery-and-other-harnesses).
 
 | Harness | Re-arm owner |
@@ -29,6 +29,7 @@ Codex and Grok keep their own protocols; see [Manual recovery and other harnesse
 | OpenCode | `.opencode/plugins/fm-primary-watch-arm.js` |
 | Cursor | `.cursor/hooks.json` `stop` hook (`bin/fm-turnend-guard-cursor.sh`) |
 | Claude | `.claude/settings.json` Stop `asyncRewake` hook (`bin/fm-claude-stop-autoarm.sh`) |
+| Kiro | The doorbell owner `bin/fm-primary-doorbell.sh`, kept running by the `.kiro/hooks/fm-firstmate.json` `Stop` hook |
 
 On a non-Pi primary, a home opted into the supervision host also changes what the owner runs; see [Supervision host](#supervision-host).
 
@@ -78,6 +79,15 @@ omp's replacement follows its own generation-owner contract in `.omp/extensions/
 Cursor's `.cursor/hooks.json` `stop` hook (`bin/fm-turnend-guard-cursor.sh`) owns routine tokenless re-arm for a Cursor primary.
 It re-arms by parking that awaited hook on `bin/fm-watch-arm.sh` and returning an actionable close as one follow-up.
 [`turnend-guard.md`](turnend-guard.md#harness-integrations) owns its Pi-host stand-down, loop bounds, and supersession baton.
+
+### Kiro doorbell owner
+
+A Kiro V3 hook cannot keep a session supervised across turns, so the owner lives outside the harness: `bin/fm-primary-doorbell.sh` is one detached process per home, serving the session that `state/.primary-endpoint` names.
+The primary's `SessionStart`, lock-owning `UserPromptSubmit`, and `Stop` hooks run its idempotent `ensure`, so a missing or dead owner is back by the next hook.
+It follows the successor-first ordering below with the doorbell ring as its delivery, and it is the only component that types into the primary pane.
+The model never arms a watcher on this path: the `PreToolUse` hook blocks a model-run arm or checkpoint while the owner can run, and the only model-run repair is one `bin/fm-primary-doorbell.sh ensure`.
+The script's header owns the loop, the ring's retry and drop, the failure handling, the exit conditions, and the records.
+Without a loadable endpoint no owner can run, and the `Stop` hook falls back to one plain arm that only keeps the durable queue fed ([`turnend-guard.md`](turnend-guard.md#harness-integrations)).
 
 ### Claude Stop hook
 
@@ -464,6 +474,20 @@ It checks that a newly appended keyed decision is classified without rereading e
 - Bounded and successor-linked lifecycle rows.
 - A SIGSTOP counterfactual that distinguishes a live PID from a stale beacon before classifying termination.
 
+### Kiro doorbell owner suite
+
+`tests/fm-primary-doorbell.test.sh` drives the real owner against a stub arm, a fake Kiro composer, and a real Kiro-named lock owner, and checks that:
+
+- One owner runs per home, including under concurrent `ensure` calls.
+- An actionable close starts the handling successor and confirms the handoff before exactly one ring.
+- A busy pane defers the ring, and a wake the session handled meanwhile drops it.
+- An unacknowledged recovery episode rings with an empty queue.
+- A row queued without a close of its own rings once, and a close whose rows a ring already covered does not ring again.
+- The owner stands down, stops its arm, and releases its lock when the fleet lock moves or away mode starts.
+- Repeated arm failure rings one continuity-failure line and then cools down.
+
+`tests/fm-primary-endpoint.test.sh` pins that the watcher's own `wake` no longer types into the endpoint and that the `Stop` hook ensures the owner, falling back to one plain arm only when no owner can run.
+
 ### Claude auto-arm and turn-end guard
 
 `tests/fm-subagent-pretool-check.test.sh` proves Claude retains only the non-status Bash seatbelts.
@@ -503,7 +527,7 @@ It also covers generation-claim single-flight, stuck-claim supersession, superse
 
 ## Active limits and verification
 
-The goal is continuity without a Pi, omp, or OpenCode model-memory re-arm step.
+The goal is continuity without a Pi, omp, OpenCode, or Kiro model-memory re-arm step.
 No zero-latency guarantee is claimed, because lock verification, watcher startup, and bounded retry delays remain deliberate safety work.
 OpenCode support targets persistent TUI sessions rather than headless `opencode run`.
 

@@ -55,49 +55,25 @@ run_as_kiro() {  # <case-dir> <mode>
       fm_primary_endpoint_publish "$state" "$FM_ROOT_OVERRIDE" "$FM_HOME"
       case "$mode" in
         direct)
-          fm_primary_endpoint_ring_kiro_wake "$state" "$FM_ROOT_OVERRIDE" "$FM_HOME"
-          : > "$FM_PRIMARY_TEST_SEND_LOG"
-          if FM_WATCH_FOREGROUND_CHECKPOINT=1 \
-             fm_primary_endpoint_ring_kiro_wake "$state" "$FM_ROOT_OVERRIDE" "$FM_HOME"; then
-            exit 21
-          fi
-          [ ! -s "$FM_PRIMARY_TEST_SEND_LOG" ] || exit 22
-          export FM_PRIMARY_TEST_SCREEN=${FM_PRIMARY_TEST_SCREEN%/*}/pending.screen
-          if fm_primary_endpoint_ring_kiro_wake "$state" "$FM_ROOT_OVERRIDE" "$FM_HOME"; then
+          log=$FM_PRIMARY_TEST_SEND_LOG
+          fm_primary_endpoint_ring_kiro "$state" "$FM_ROOT_OVERRIDE" "$FM_HOME" wake || exit 21
+          mv "$log" "$log.wake"; : > "$log"
+          fm_primary_endpoint_ring_kiro "$state" "$FM_ROOT_OVERRIDE" "$FM_HOME" failure || exit 22
+          mv "$log" "$log.failure"; : > "$log"
+          if fm_primary_endpoint_ring_kiro "$state" "$FM_ROOT_OVERRIDE" "$FM_HOME" bogus; then
             exit 23
           fi
-          [ ! -s "$FM_PRIMARY_TEST_SEND_LOG" ] || exit 24
+          [ ! -s "$log" ] || exit 24
+          export FM_PRIMARY_TEST_SCREEN=${FM_PRIMARY_TEST_SCREEN%/*}/pending.screen
+          if fm_primary_endpoint_ring_kiro "$state" "$FM_ROOT_OVERRIDE" "$FM_HOME" wake; then
+            exit 25
+          fi
+          [ ! -s "$log" ] || exit 26
           ;;
         wake)
           fm_wake_append check primary-doorbell "check: primary doorbell"
           . "$FM_ROOT_OVERRIDE/bin/fm-push-transition-lib.sh"
           wake "check: primary doorbell"
-          ;;
-        reping)
-          rings() { grep -c ' Enter' "$FM_PRIMARY_TEST_SEND_LOG" || true; }
-          fm_wake_append check reping-a "check: reping a"
-          fm_primary_endpoint_ring_pending "$state" "$FM_ROOT_OVERRIDE" "$FM_HOME" || exit 31
-          [ "$(rings)" = 1 ] || exit 32
-          # The newest row is already rung: an idle pane is not rung again.
-          if fm_primary_endpoint_ring_pending "$state" "$FM_ROOT_OVERRIDE" "$FM_HOME"; then exit 33; fi
-          [ "$(rings)" = 1 ] || exit 34
-          # A newer row rings once more.
-          fm_wake_append check reping-b "check: reping b"
-          fm_primary_endpoint_ring_pending "$state" "$FM_ROOT_OVERRIDE" "$FM_HOME" || exit 35
-          [ "$(rings)" = 2 ] || exit 36
-          # A busy pane refuses quietly and leaves the marker behind, so the
-          # next idle poll rings for the same row.
-          fm_wake_append check reping-c "check: reping c"
-          export FM_PRIMARY_TEST_SCREEN=${FM_PRIMARY_TEST_SCREEN%/*}/pending.screen
-          if fm_primary_endpoint_ring_pending "$state" "$FM_ROOT_OVERRIDE" "$FM_HOME"; then exit 37; fi
-          [ "$(rings)" = 2 ] || exit 38
-          export FM_PRIMARY_TEST_SCREEN=${FM_PRIMARY_TEST_SCREEN%/*}/idle.screen
-          fm_primary_endpoint_ring_pending "$state" "$FM_ROOT_OVERRIDE" "$FM_HOME" || exit 39
-          [ "$(rings)" = 3 ] || exit 40
-          # An acknowledged (empty) queue never rings.
-          : > "$state/.wake-queue"
-          if fm_primary_endpoint_ring_pending "$state" "$FM_ROOT_OVERRIDE" "$FM_HOME"; then exit 41; fi
-          [ "$(rings)" = 3 ] || exit 42
           ;;
       esac
 FAKE_KIRO
@@ -109,47 +85,36 @@ FAKE_KIRO
 }
 
 test_direct_ring_and_safety_guards() {
-  local dir="$TMP_ROOT/direct" record sent
-  run_as_kiro "$dir" direct || fail "identity-bound direct ring scenario failed"
+  local dir="$TMP_ROOT/direct" record sent rc=0
+  run_as_kiro "$dir" direct > "$dir.out" 2>&1 || rc=$?
+  [ "$rc" = 0 ] || fail "identity-bound direct ring scenario failed at step $rc: $(cat "$dir.out")"
   record="$dir/home/state/.primary-endpoint"
   assert_present "$record" "SessionStart publication did not create a primary endpoint record"
   assert_grep 'schema=fm-primary-endpoint.v1' "$record" "endpoint schema is missing"
   assert_grep 'harness=kiro-cli' "$record" "endpoint is not Kiro-scoped"
-  # The first successful send was cleared inside the scenario only after its
-  # assertions, so repeat once under a fresh Kiro identity to inspect bytes.
-  run_as_kiro "$dir-inspect" wake > "$dir/wake.out" 2>&1 \
-    || fail "wake integration scenario failed: $(cat "$dir/wake.out")"
-  sent=$(cat "$dir-inspect/send.log")
+  sent=$(cat "$dir/send.log.wake")
   assert_contains "$sent" ': Firstmate wake waiting:' "Kiro primary doorbell was not typed"
   assert_contains "$sent" 'fm-wake-drain.sh' "doorbell did not point at the existing drain owner"
   assert_contains "$sent" ' Enter' "doorbell was not submitted"
-  pass "primary endpoint: lock-bound Kiro ring sends once and foreground/pending guards stay silent"
+  sent=$(cat "$dir/send.log.failure")
+  assert_contains "$sent" 'watcher continuity FAILED' "the continuity-failure ring was not typed"
+  assert_contains "$sent" 'fm-primary-doorbell.sh' "the continuity-failure ring did not name the doorbell owner"
+  assert_contains "$sent" ' Enter' "the continuity-failure ring was not submitted"
+  pass "primary endpoint: lock-bound Kiro ring types the wake or failure line, and unknown kinds and pending composers stay silent"
 }
 
-test_watcher_wake_rings_after_durable_queue_publication() {
+test_watcher_wake_never_types_into_the_endpoint() {
   local dir="$TMP_ROOT/wake" out
   out=$(run_as_kiro "$dir" wake) || fail "central wake integration failed: $out"
   assert_contains "$out" 'check: primary doorbell' "central wake did not emit its actionable reason"
   assert_present "$dir/home/state/.wake-queue" "central wake did not retain the durable queue row"
   assert_grep 'primary-doorbell' "$dir/home/state/.wake-queue" "queued wake lost its key"
-  assert_grep 'Firstmate wake waiting:' "$dir/send.log" "central wake did not ring the Kiro endpoint"
-  pass "watcher wake: durable queue publication precedes the structural Kiro doorbell"
+  [ ! -s "$dir/send.log" ] || fail "the watcher typed into the Kiro endpoint: $(cat "$dir/send.log")"
+  pass "watcher wake: keeps the durable row and leaves ringing to the doorbell owner"
 }
 
 test_direct_ring_and_safety_guards
-test_watcher_wake_rings_after_durable_queue_publication
-
-test_reping_ladder_rings_once_per_newest_row() {
-  # A doorbell refused while the pane was busy must be rung again by a later
-  # poll, exactly once per newest queued row, and never for an idle pane whose
-  # newest row was already rung or for an acknowledged queue.
-  local dir="$TMP_ROOT/reping" rc=0
-  run_as_kiro "$dir" reping > "$TMP_ROOT/reping.out" 2>&1 || rc=$?
-  [ "$rc" -eq 0 ] || fail "re-ring ladder scenario failed at step $rc: $(cat "$TMP_ROOT/reping.out")"
-  assert_present "$dir/home/state/.primary-doorbell-rung" "re-ring ladder left no record of the sequence last rung"
-  pass "re-ring ladder: one ring per newest queued row, retried after a busy refusal, silent when idle or acknowledged"
-}
-test_reping_ladder_rings_once_per_newest_row
+test_watcher_wake_never_types_into_the_endpoint
 
 test_primary_hook_delivers_startup_and_unacknowledged_wake_context() {
   local dir="$TMP_ROOT/primary-hook" shim home state hook out
@@ -216,11 +181,20 @@ make_ensure_case() {  # <case-dir>
   cat > "$root/bin/fm-primary-scope-lib.sh" <<'SH'
 fm_primary_scope_matches() { return 0; }
 SH
-  cat > "$root/bin/fm-supervision-lib.sh" <<'SH'
-fm_supervision_needed() { return 1; }
+  cat > "$root/bin/fm-supervision-lib.sh" <<SH
+fm_supervision_needed() { [ "\$(cat '$dir/needed' 2>/dev/null)" = 1 ]; }
 SH
   printf '#!/usr/bin/env bash\nprintf "SESSION-DIGEST\\n"\n' > "$root/bin/fm-sessionstart-run.sh"
-  printf '#!/usr/bin/env bash\nexit 0\n' > "$root/bin/fm-watch-arm.sh"
+  cat > "$root/bin/fm-watch-arm.sh" <<SH
+#!/usr/bin/env bash
+printf 'arm\\n' >> '$dir/arm.log'
+SH
+  cat > "$root/bin/fm-primary-doorbell.sh" <<SH
+#!/usr/bin/env bash
+printf 'doorbell %s\\n' "\$*" >> '$dir/doorbell.log'
+exit "\$(cat '$dir/doorbell.rc' 2>/dev/null || echo 0)"
+SH
+  chmod +x "$root/bin/fm-watch-arm.sh" "$root/bin/fm-primary-doorbell.sh"
   : > "$dir/send.log"
 }
 
@@ -324,3 +298,143 @@ test_ensure_refuses_another_sessions_lock() {
 
 test_every_turn_hooks_ensure_the_doorbell
 test_ensure_refuses_another_sessions_lock
+
+test_prompt_hook_attaches_the_doorbell_note_once() {
+  local dir="$TMP_ROOT/doorbell-note" note out
+  make_ensure_case "$dir"
+  note="$dir/home/state/.primary-doorbell-note"
+  printf 'supervision-host: cycle boundary test\n' > "$note"
+  out=$(run_ensure_hook "$dir" UserPromptSubmit self) || fail "doorbell-note scenario failed: $out"
+  printf '%s\n' "$out" | grep -A1 '^KIRO_PRIMARY_DOORBELL_NOTE: ' | grep -qx 'supervision-host: cycle boundary test' \
+    || fail "UserPromptSubmit did not attach the note after its header: $out"
+  assert_absent "$note" "UserPromptSubmit left the doorbell note behind"
+  out=$(run_ensure_hook "$dir" UserPromptSubmit self) || fail "second doorbell-note scenario failed: $out"
+  assert_not_contains "$out" 'KIRO_PRIMARY_DOORBELL_NOTE' "a second UserPromptSubmit attached the note again: $out"
+  pass "Kiro primary hooks: the lock-owning UserPromptSubmit attaches the doorbell note once and removes it"
+}
+test_prompt_hook_attaches_the_doorbell_note_once
+
+test_stop_hook_ensures_the_doorbell_owner() {
+  local dir="$TMP_ROOT/stop-doorbell" other out i
+  make_ensure_case "$dir"
+  printf '1\n' > "$dir/needed"
+  arm_count() { grep -c '^arm$' "$dir/arm.log" 2>/dev/null || true; }
+
+  # A running doorbell owner is the whole Stop continuity: no arm is forked.
+  out=$(run_ensure_hook "$dir" Stop self) || fail "Stop doorbell scenario failed: $out"
+  assert_grep 'doorbell ensure' "$dir/doorbell.log" "Stop did not ensure the doorbell owner"
+  sleep 1
+  assert_absent "$dir/arm.log" "Stop armed a watcher although the doorbell owner is running"
+
+  # No owner can run: Stop falls back to exactly one detached arm.
+  printf '3\n' > "$dir/doorbell.rc"
+  : > "$dir/doorbell.log"
+  out=$(run_ensure_hook "$dir" Stop self) || fail "Stop fallback scenario failed: $out"
+  assert_grep 'doorbell ensure' "$dir/doorbell.log" "Stop fallback did not try the doorbell owner first"
+  i=0
+  while [ "$(arm_count)" = 0 ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+  sleep 0.3
+  assert_equals "$(arm_count)" 1 "Stop fallback did not arm exactly one watcher"
+
+  # Another session's lock: neither the owner nor an arm.
+  rm -f "$dir/arm.log" "$dir/doorbell.log"
+  "$FAKEBIN/kiro-cli" -c 'sleep 60' &
+  other=$!
+  out=$(run_ensure_hook "$dir" Stop "$other") || fail "Stop foreign-lock scenario failed: $out"
+  sleep 1
+  assert_absent "$dir/doorbell.log" "a foreign-lock Stop ensured the doorbell owner"
+  assert_absent "$dir/arm.log" "a foreign-lock Stop armed a watcher"
+  kill "$other" 2>/dev/null || true
+  wait "$other" 2>/dev/null || true
+  pass "Kiro primary Stop: ensures the doorbell owner, falls back to one arm only when no owner can run, and ignores a foreign lock"
+}
+test_stop_hook_ensures_the_doorbell_owner
+
+
+# Run a PreToolUse payload for <command> through the shipped hook below a
+# kiro-cli process. <setup> is one of: owner (this session owns the lock and
+# publishes its doorbell), foreign (publishes, then the lock moves to <other>),
+# afk (publishes, then the away flag appears), noendpoint (owns the lock but
+# publishes nothing). Writes the hook's exit status to $dir/seatbelt.rc and its
+# stderr to $dir/seatbelt.err.
+run_seatbelt_hook() {  # <case-dir> <command> <setup> [other-pid]
+  local dir=$1 cmd=$2 setup=$3 other=${4:-} hook inner
+  hook="$dir/root/bin/fm-kiro-turnend-hook.sh"
+  jq -cn --arg command "$cmd" \
+    '{session_id:"s",hook_event_name:"PreToolUse",tool_name:"execute_bash",tool_input:{command:$command}}' \
+    > "$dir/seatbelt.json"
+  rm -f "$dir/seatbelt.rc" "$dir/seatbelt.err" "$dir/home/state/.afk" "$dir/home/state/.primary-endpoint"
+  inner="bash '$hook' < '$dir/seatbelt.json' 2> '$dir/seatbelt.err'; printf '%s\n' \$? > '$dir/seatbelt.rc'"
+  PATH="$FAKEBIN:$PATH" FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" \
+    FM_ROOT_OVERRIDE="$dir/root" FM_KIRO_PRIMARY_HOOK=1 TMUX_PANE=primary:0 \
+    "$FAKEBIN/kiro-cli" -c "
+      printf '%s\n' \"\$\$\" > '$dir/home/state/.lock'
+      if [ '$setup' != noendpoint ]; then
+        . '$dir/root/bin/fm-primary-endpoint-lib.sh'
+        fm_primary_endpoint_publish '$dir/home/state' '$dir/root' '$dir/home' || exit 7
+      fi
+      case '$setup' in
+        foreign) printf '%s\n' '$other' > '$dir/home/state/.lock' ;;
+        afk) : > '$dir/home/state/.afk' ;;
+      esac
+      $(fm_nested_bash_command 10 "$inner")
+      true"  # keeps the kiro-cli frame from exec'ing into the nested shell
+}
+
+test_pretool_seatbelt_blocks_only_an_owner_held_arm() {
+  local dir="$TMP_ROOT/seatbelt" other rc
+  make_ensure_case "$dir"
+  printf '1\n' > "$dir/needed"
+
+  run_seatbelt_hook "$dir" 'bin/fm-watch-arm.sh --restart' owner || fail "seatbelt owner scenario failed"
+  rc=$(cat "$dir/seatbelt.rc")
+  assert_equals "$rc" 2 "an owner-held arm was not blocked: $(cat "$dir/seatbelt.err")"
+  assert_grep watcher-owner-held "$dir/seatbelt.err" "the seatbelt block did not name watcher-owner-held"
+
+  run_seatbelt_hook "$dir" 'ls' owner || fail "seatbelt ls scenario failed"
+  assert_equals "$(cat "$dir/seatbelt.rc")" 0 "the seatbelt blocked an unrelated command"
+
+  "$FAKEBIN/kiro-cli" -c 'sleep 60' &
+  other=$!
+  run_seatbelt_hook "$dir" 'bin/fm-watch-arm.sh --restart' foreign "$other" || fail "seatbelt foreign scenario failed"
+  assert_equals "$(cat "$dir/seatbelt.rc")" 0 "the seatbelt blocked an arm under another session's lock"
+  kill "$other" 2>/dev/null || true
+  wait "$other" 2>/dev/null || true
+
+  run_seatbelt_hook "$dir" 'bin/fm-watch-arm.sh --restart' afk || fail "seatbelt afk scenario failed"
+  assert_equals "$(cat "$dir/seatbelt.rc")" 0 "the seatbelt blocked an arm in away mode"
+
+  run_seatbelt_hook "$dir" 'bin/fm-watch-arm.sh --restart' noendpoint || fail "seatbelt noendpoint scenario failed"
+  assert_equals "$(cat "$dir/seatbelt.rc")" 0 "the seatbelt blocked an arm with no doorbell record"
+  pass "Kiro primary PreToolUse: blocks a model-run arm only for the lock owner with a published doorbell and no away flag"
+}
+test_pretool_seatbelt_blocks_only_an_owner_held_arm
+
+test_published_line_forbids_a_model_arm() {
+  local dir="$TMP_ROOT/published-line" out line
+  make_ensure_case "$dir"
+  out=$(run_ensure_hook "$dir" UserPromptSubmit self) || fail "published-line scenario failed: $out"
+  line=$(printf '%s\n' "$out" | grep 'KIRO_PRIMARY_ENDPOINT: structural wake doorbell published')
+  [ -n "$line" ] || fail "UserPromptSubmit did not print the published line: $out"
+  assert_contains "$line" 'never run bin/fm-watch-arm.sh' "the published line does not forbid a model arm: $line"
+  case "$line" in *'keep one cycle armed'*) fail "the published line still tells the model to arm: $line" ;; esac
+  assert_grep 'doorbell ensure' "$dir/doorbell.log" "lock-owning UserPromptSubmit did not ensure the doorbell owner"
+  pass "Kiro primary UserPromptSubmit: ensures the doorbell owner and its published line forbids a model-run arm"
+}
+test_published_line_forbids_a_model_arm
+
+test_stop_falls_back_only_when_no_owner_can_run() {
+  local dir="$TMP_ROOT/stop-rc" out rc
+  make_ensure_case "$dir"
+  printf '1\n' > "$dir/needed"
+  for rc in 4 1; do
+    printf '%s\n' "$rc" > "$dir/doorbell.rc"
+    rm -f "$dir/arm.log" "$dir/doorbell.log"
+    out=$(run_ensure_hook "$dir" Stop self) || fail "Stop rc=$rc scenario failed: $out"
+    assert_grep 'doorbell ensure' "$dir/doorbell.log" "Stop rc=$rc did not try the doorbell owner"
+    sleep 1
+    assert_absent "$dir/arm.log" "Stop fell back to an arm when the doorbell owner exited $rc"
+  done
+  pass "Kiro primary Stop: no fallback arm when the doorbell owner is cooling down (4) or failed (1)"
+}
+test_stop_falls_back_only_when_no_owner_can_run

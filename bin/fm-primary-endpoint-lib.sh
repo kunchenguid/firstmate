@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# fm-primary-endpoint-lib.sh - identity-bound primary endpoint and Kiro wake ring.
+# fm-primary-endpoint-lib.sh - identity-bound primary endpoint and Kiro doorbell.
 #
-# A Kiro V3 primary cannot be continued from its Stop hook, so its background
-# watcher needs one structural way to start the next turn after it appends an
-# actionable row to the existing durable wake queue. This library records the
-# primary pane and rings one constant line after publication.
-# It creates no second queue, acknowledgement, retry ladder, or control plane.
+# A Kiro V3 primary cannot be continued from its Stop hook, so the only way to
+# start its next turn after a durable wake is to type into its pane. This
+# library owns the record of that pane and the constant lines typed into it.
+# It creates no second queue, acknowledgement, or control plane: the doorbell
+# only tells the model to handle the existing durable wake queue.
 #
 # Record: state/.primary-endpoint, exactly eight lines:
 #   schema=fm-primary-endpoint.v1
@@ -20,13 +20,12 @@
 # Publication happens only for the session that holds the fleet lock: once at
 # SessionStart, then idempotently every turn through fm_primary_endpoint_ensure.
 # A ring revalidates the home, root, exact lock pid, process identity, outer
-# `kiro-cli` process name, backend target, and empty Kiro composer. Any stale,
+# `kiro-cli` process name, backend target, and empty Kiro composer; any stale,
 # malformed, moved, busy, pending, dead, or unsupported record is a quiet
-# refusal; the durable wake remains queued, and the watcher's poll loop rings
-# again for the queue's newest unrung row once the pane is idle
-# (state/.primary-doorbell-rung records the sequence last rung). Away mode keeps
-# its existing daemon injection owner, and a foreground checkpoint sets
-# FM_WATCH_FOREGROUND_CHECKPOINT=1 so watcher stdout remains its only delivery.
+# refusal. bin/fm-primary-doorbell.sh is the only caller that rings: it owns
+# watcher continuity for this primary and retries a refused ring on its own
+# poll, so the watcher itself never types into the pane. Away mode keeps its
+# existing daemon injection owner.
 #
 # Requires no caller-prepared globals. Sourcing is side-effect-free apart from
 # the existing fm-wake-lib state-directory behavior reached by its dependencies.
@@ -243,35 +242,30 @@ fm_primary_endpoint_doorbell_line() {  # <root>
   printf ': Firstmate wake waiting: handle the durable wake context attached by the Kiro UserPromptSubmit hook; if none was attached, run %s now, then run the exact WAKE_ACK_REQUIRED command after handling.' "$drain"
 }
 
-fm_primary_endpoint_ring_kiro_wake() {  # <state-dir> <root> <home>
-  local state=$1 root=$2 home=$3 composer line verdict
-  [ "${FM_WATCH_FOREGROUND_CHECKPOINT:-0}" != 1 ] || return 1
+fm_primary_endpoint_failure_line() {  # <root>
+  local root=$1 drain owner
+  drain=$(fm_primary_endpoint_shell_quote "$root/bin/fm-wake-drain.sh") || return 1
+  owner=$(fm_primary_endpoint_shell_quote "$root/bin/fm-primary-doorbell.sh") || return 1
+  printf ': Firstmate watcher continuity FAILED: the doorbell owner stopped after repeated failed watcher starts; run %s and handle it, read state/.primary-doorbell-failed and state/.watch-cycle-exits.log, then run %s ensure once.' "$drain" "$owner"
+}
+
+# fm_primary_endpoint_ring_kiro <state-dir> <root> <home> <wake|failure>
+# Type one constant line into the published pane and submit it, or return 1
+# without typing anything when the record does not load, away mode is active,
+# or the composer is not provably empty.
+fm_primary_endpoint_ring_kiro() {
+  local state=$1 root=$2 home=$3 kind=$4 composer line verdict
   [ ! -e "$state/.afk" ] || return 1
   fm_primary_endpoint_load "$state" "$root" "$home" || return 1
+  case "$kind" in
+    wake) line=$(fm_primary_endpoint_doorbell_line "$FM_PRIMARY_ENDPOINT_ROOT") || return 1 ;;
+    failure) line=$(fm_primary_endpoint_failure_line "$FM_PRIMARY_ENDPOINT_ROOT") || return 1 ;;
+    *) return 1 ;;
+  esac
   composer=$(fm_backend_composer_state "$FM_PRIMARY_ENDPOINT_BACKEND" \
     "$FM_PRIMARY_ENDPOINT_TARGET" '' kiro-cli 2>/dev/null) || return 1
   [ "$composer" = empty ] || return 1
-  line=$(fm_primary_endpoint_doorbell_line "$FM_PRIMARY_ENDPOINT_ROOT") || return 1
   verdict=$(fm_backend_send_text_submit "$FM_PRIMARY_ENDPOINT_BACKEND" \
     "$FM_PRIMARY_ENDPOINT_TARGET" "$line" 1 0.4 0.3 2>/dev/null) || return 1
   [ "$verdict" != send-failed ]
-}
-
-# fm_primary_endpoint_ring_pending: the re-ring ladder. Ring once for the
-# queue's newest row and record its sequence in state/.primary-doorbell-rung, so
-# a doorbell refused while the pane was busy is rung again by a later watcher
-# poll once the composer is empty, while an idle pane whose newest row was
-# already rung is left alone. Both the watcher's wake publication and its poll
-# loop call this, so there is one ring owner and one marker. A quiet refusal
-# leaves the marker untouched; an empty queue or absent endpoint is a no-op.
-fm_primary_endpoint_ring_pending() {  # <state-dir> <root> <home>
-  local state=$1 root=$2 home=$3 seq last
-  [ -s "$state/.wake-queue" ] || return 1
-  [ -f "$state/.primary-endpoint" ] || return 1
-  seq=$(tail -n 1 -- "$state/.wake-queue" | cut -f2)
-  case "$seq" in ''|*[!0-9]*) return 1 ;; esac
-  last=$(cat "$state/.primary-doorbell-rung" 2>/dev/null || true)
-  [ "$seq" != "$last" ] || return 1
-  fm_primary_endpoint_ring_kiro_wake "$state" "$root" "$home" || return 1
-  printf '%s\n' "$seq" > "$state/.primary-doorbell-rung"
 }
