@@ -18,13 +18,16 @@
 # A closed or merged pull request reports that terminal state and nothing else.
 # Unresolved review-thread state is out of this command's scope.
 #
-# Usage: fm-pr-state.sh <pr-url>
-#   Prints one line per blocker it can see and nothing when it sees none.
+# Usage: fm-pr-state.sh <pr-url> [task-id]
+#   Prints identity and merge-target facts before any blocker.
 #   Blockers do not change the successful exit status; lookup or usage refusal
 #   exits non-zero.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+STATE_DIR="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
@@ -42,7 +45,7 @@ if [ "${1:-}" = --help ] || [ "${1:-}" = -h ]; then
   usage
   exit 0
 fi
-[ "$#" -eq 1 ] || die "usage: fm-pr-state.sh <pr-url>"
+{ [ "$#" -eq 1 ] || [ "$#" -eq 2 ]; } || die "usage: fm-pr-state.sh <pr-url> [task-id]"
 command -v gh >/dev/null 2>&1 || die "gh is required"
 
 URL=$1
@@ -53,6 +56,33 @@ fi
 PATH_PART=$FM_PR_PATH
 NUMBER=$FM_PR_NUMBER
 ENDPOINT="/repos/$PATH_PART/pulls/$NUMBER"
+TASK_OWNER=${2:-unknown}
+MERGE_AUTHORITY=unknown
+YOLO_SOURCE=unknown
+if [ "$TASK_OWNER" != unknown ]; then
+  fm_pr_task_id_valid "$TASK_OWNER" || die 'invalid task owner'
+  TASK_META="$STATE_DIR/$TASK_OWNER.meta"
+  [ -f "$TASK_META" ] && [ ! -L "$TASK_META" ] || die 'task owner metadata unavailable'
+  [ "$(sed -n 's/^pr=//p' "$TASK_META" | tail -1)" = "$URL" ] || die 'task owner does not own PR'
+  MERGE_AUTHORITY=$(sed -n 's/^merge_authority=//p' "$TASK_META" | tail -1)
+  YOLO_SOURCE=$(sed -n 's/^pr_yolo_source=//p' "$TASK_META" | tail -1)
+  [ -n "$MERGE_AUTHORITY" ] || MERGE_AUTHORITY=unknown
+  [ -n "$YOLO_SOURCE" ] || YOLO_SOURCE=unknown
+fi
+IDENTITY=$(gh api "$ENDPOINT" --jq '[.head.repo.full_name, .base.repo.full_name, .base.ref, .base.sha] | @tsv') \
+  || die "could not read PR ownership and base for $URL"
+IFS=$'\t' read -r HEAD_REPO BASE_REPO BASE_REF BASE_SHA <<< "$IDENTITY"
+if [ -z "$HEAD_REPO" ] || [ -z "$BASE_REPO" ] || [ -z "$BASE_REF" ] \
+  || ! fm_pr_head_valid "$BASE_SHA"; then
+  die "GitHub returned incomplete PR ownership or base for $URL"
+fi
+[ "$BASE_REPO" = "$PATH_PART" ] || die "PR base repository disagrees with URL for $URL"
+DEFAULT_REF=$(gh api "/repos/$BASE_REPO" --jq '.default_branch') || die "could not read default branch for $BASE_REPO"
+[ -n "$DEFAULT_REF" ] || die "default branch is empty for $BASE_REPO"
+STACKED=no
+[ "$BASE_REF" = "$DEFAULT_REF" ] || STACKED=yes
+printf 'PR: %s task_owner=%s head_repo=%s base_repo=%s base_ref=%s base_sha=%s merge_target=%s:%s stacked=%s merge_authority=%s yolo_source=%s\n' \
+  "$URL" "$TASK_OWNER" "$HEAD_REPO" "$BASE_REPO" "$BASE_REF" "$BASE_SHA" "$BASE_REPO" "$BASE_REF" "$STACKED" "$MERGE_AUTHORITY" "$YOLO_SOURCE"
 
 CORE=$(gh pr view "$URL" \
   --json state,mergedAt,isDraft,headRefOid,author,mergeable,reviewDecision --jq '

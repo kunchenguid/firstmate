@@ -871,6 +871,15 @@ task_json_lines() {
       --arg pr "$pr" \
       --arg pr_source "$pr_source" \
       --arg pr_head "$(meta_value "$meta" pr_head)" \
+      --arg task_owner "$(meta_value "$meta" task_owner)" \
+      --arg head_repo "$(meta_value "$meta" head_repo)" \
+      --arg base_repo "$(meta_value "$meta" base_repo)" \
+      --arg base_ref "$(meta_value "$meta" base_ref)" \
+      --arg base_sha "$(meta_value "$meta" base_sha)" \
+      --arg merge_target "$(meta_value "$meta" merge_target)" \
+      --arg stacked "$(meta_value "$meta" stacked)" \
+      --arg pr_merge_authority "$(meta_value "$meta" merge_authority)" \
+      --arg pr_yolo_source "$(meta_value "$meta" pr_yolo_source)" \
       --arg agent_alive "$agent_alive" \
       --arg observed_at "$SNAPSHOT_NOW" \
       --arg last_event_raw "$last_event_raw" \
@@ -910,7 +919,16 @@ task_json_lines() {
                   elif $agent_alive == "alive" or $agent_alive == "dead" then $agent_alive
                   else "unknown" end),
           observed_at:$observed_at,freshness:"fresh"},
-        pr:{url:($pr | if . == "" then null else . end),source:$pr_source,head:($pr_head | if . == "" then null else . end)},
+        pr:{url:($pr | if . == "" then null else . end),source:$pr_source,head:($pr_head | if . == "" then null else . end),
+          task_owner:($task_owner | if . == "" then null else . end),
+          head_repo:($head_repo | if . == "" then null else . end),
+          base_repo:($base_repo | if . == "" then null else . end),
+          base_ref:($base_ref | if . == "" then null else . end),
+          base_sha:($base_sha | if . == "" then null else . end),
+          merge_target:($merge_target | if . == "" then null else . end),
+          stacked:($stacked | if . == "" then null else . end),
+          merge_authority:($pr_merge_authority | if . == "" then null else . end),
+          yolo_source:($pr_yolo_source | if . == "" then null else . end)},
         hints:{
           pending_decision:$pending_decision,
           blocked_event:$blocked_event,

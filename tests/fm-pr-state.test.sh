@@ -28,6 +28,12 @@ set -o pipefail
 head=c2eac54c17a1ddc2633ad51b83e21e5fe888142e
 serve() {
   case "$*" in
+    "api /repos/o/r --jq .default_branch")
+      printf '{"default_branch":"main"}\n'
+      ;;
+    "api /repos/o/r/pulls/7 --jq "*)
+      printf '{"head":{"repo":{"full_name":"o/r"}},"base":{"repo":{"full_name":"o/r"},"ref":"%s","sha":"%s"}}\n' "${FM_TEST_BASE_REF-main}" "$head"
+      ;;
     "pr view "*" --json state,mergedAt,isDraft,headRefOid,author,mergeable,reviewDecision --jq "*)
       jq -n --arg head "$head" --arg state "${FM_TEST_STATE-OPEN}" \
         --arg merged "${FM_TEST_MERGED_AT-}" --arg draft "${FM_TEST_DRAFT-false}" \
@@ -67,7 +73,24 @@ SH
 chmod +x "$FAKEBIN/gh"
 
 run_state() {
-  PATH="$FAKEBIN:$PATH" "$SCRIPT" https://github.com/o/r/pull/7
+  local out
+  out=$(PATH="$FAKEBIN:$PATH" "$SCRIPT" https://github.com/o/r/pull/7) || return $?
+  printf '%s\n' "$out" | sed '1d'
+}
+
+test_identity_names_stacked_merge_target() {
+  local out state_dir
+  state_dir="$TMP_ROOT/identity-state"
+  mkdir -p "$state_dir"
+  printf 'kind=ship\npr=https://github.com/o/r/pull/7\nmerge_authority=firstmate\npr_yolo_source=project-record\n' > "$state_dir/task-7.meta"
+  out=$(FM_STATE_OVERRIDE="$state_dir" FM_TEST_BASE_REF=feature/base PATH="$FAKEBIN:$PATH" "$SCRIPT" https://github.com/o/r/pull/7 task-7) \
+    || fail 'stacked PR identity was refused'
+  assert_contains "$out" 'task_owner=task-7 head_repo=o/r base_repo=o/r base_ref=feature/base' \
+    'PR outcome lost task ownership or stacked base'
+  assert_contains "$out" 'merge_target=o/r:feature/base' 'PR outcome lost merge target'
+  assert_contains "$out" 'stacked=yes' 'stacked PR was not flagged'
+  assert_contains "$out" 'merge_authority=firstmate yolo_source=project-record' 'PR outcome lost merge authority'
+  pass 'PR identity names task owner and stacked merge target'
 }
 
 # reviews "<login> <state> <commit> <submitted_at>"... prints the JSON array
@@ -270,6 +293,7 @@ test_refusals_exit_nonzero() {
 }
 
 test_clean_pr_is_silent_and_ignores_skipped_checks
+test_identity_names_stacked_merge_target
 test_terminal_state_is_the_whole_report
 test_draft_is_a_blocker
 test_stale_blocking_reviews_explain_a_blocking_decision

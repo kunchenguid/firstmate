@@ -2847,6 +2847,23 @@ EOF
   if [ -n "$pending" ]; then
     sleep "$SIGNAL_GRACE"
     pending=$(printf '%s\n%s' "$pending" "$(scan_signals)")
+    # Review routing is driven by the status transition itself. Only tasks
+    # explicitly configured for independent review enter the dispatch plane.
+    while IFS=$(printf '\t') read -r _seen _signature signal_file; do
+      case "$signal_file" in "$STATE"/*.status) ;; *) continue ;; esac
+      review_id=${signal_file##*/}; review_id=${review_id%.status}
+      review_meta="$STATE/$review_id.meta"
+      if [ ! -f "$review_meta" ] || ! grep -q '^review_class=' "$review_meta"; then
+        continue
+      fi
+      review_route_rc=0
+      "$SCRIPT_DIR/fm-review-route.sh" scan "$review_id" >/dev/null || review_route_rc=$?
+      if [ "$review_route_rc" -ne 0 ] && [ "$review_route_rc" -ne 3 ]; then
+        fm_wake_append check "review-route-$review_id" "review routing needs attention: task=$review_id" || exit 1
+      fi
+    done <<EOF_REVIEW_SIGNALS
+$pending
+EOF_REVIEW_SIGNALS
     # The final coalesced signal set is the watcher-carried status-change
     # trigger for this home's published summary. Start it before either
     # surfacing or absorbing the signal, but never wait on it: see

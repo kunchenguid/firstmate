@@ -132,9 +132,34 @@ if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/d
     PR_HEAD=$REMOTE_HEAD
   fi
 fi
+TASK_OWNER=$ID
+HEAD_REPO=unknown BASE_REPO=unknown BASE_REF=unknown BASE_SHA=unknown MERGE_TARGET=unknown STACKED=unknown
+if [ "$PROVIDER" = github ]; then
+  command -v gh >/dev/null 2>&1 || { echo 'error: GitHub PR identity requires gh' >&2; exit 1; }
+  IDENTITY=$(gh api "/repos/$PROJECT_PATH/pulls/$NUMBER" --jq '[.head.repo.full_name, .base.repo.full_name, .base.ref, .base.sha] | @tsv' 2>/dev/null) \
+    || { echo "error: could not read PR owner and base for $URL" >&2; exit 1; }
+  IFS=$'\t' read -r HEAD_REPO BASE_REPO BASE_REF BASE_SHA <<< "$IDENTITY"
+  if [ -z "$HEAD_REPO" ] || [ -z "$BASE_REPO" ] || [ -z "$BASE_REF" ] \
+    || ! fm_pr_head_valid "$BASE_SHA"; then
+    echo "error: incomplete PR owner or base for $URL" >&2
+    exit 1
+  fi
+  [ "$BASE_REPO" = "$PROJECT_PATH" ] \
+    || { echo "error: PR base repository $BASE_REPO disagrees with $PROJECT_PATH" >&2; exit 1; }
+  MERGE_TARGET="$BASE_REPO:$BASE_REF"
+  DEFAULT_REF=$(gh api "/repos/$BASE_REPO" --jq '.default_branch' 2>/dev/null) \
+    || { echo "error: could not read default branch for $BASE_REPO" >&2; exit 1; }
+  [ -n "$DEFAULT_REF" ] || { echo "error: default branch is empty for $BASE_REPO" >&2; exit 1; }
+  STACKED=no
+  [ "$BASE_REF" = "$DEFAULT_REF" ] || STACKED=yes
+fi
 
 MODE=$(grep '^mode=' "$META" | tail -1 | cut -d= -f2- || true)
 PROJECT=$(grep '^project=' "$META" | tail -1 | cut -d= -f2- || true)
+PR_YOLO=$(grep '^yolo=' "$META" | tail -1 | cut -d= -f2- || true)
+YOLO_SOURCE=$(grep '^yolo_source=' "$META" | tail -1 | cut -d= -f2- || true)
+[ -n "$YOLO_SOURCE" ] || YOLO_SOURCE=task-record
+case "$PR_YOLO" in on) MERGE_AUTHORITY=firstmate ;; off) MERGE_AUTHORITY=operator ;; *) MERGE_AUTHORITY=unknown ;; esac
 # The gate is asked about the ready report this task's worker was told to give;
 # on a Gerrit change both publishing modes report the same published line.
 case "$PROVIDER:$MODE" in
@@ -181,10 +206,12 @@ STATE_DEVICE=$(fm_pr_file_device "$STATE") || exit 1
 META_TMP=$(mktemp "$STATE/.fm-pr-meta.XXXXXX") || exit 1
 while IFS= read -r line || [ -n "$line" ]; do
   case "$line" in
-    pr=*|pr_head=*) ;;
+    pr=*|pr_head=*|task_owner=*|head_repo=*|base_repo=*|base_ref=*|base_sha=*|merge_target=*|stacked=*|merge_authority=*|pr_yolo_source=*) ;;
     *) printf '%s\n' "$line" >> "$META_TMP" || exit 1 ;;
   esac
 done < "$META"
+printf 'task_owner=%s\nhead_repo=%s\nbase_repo=%s\nbase_ref=%s\nbase_sha=%s\nmerge_target=%s\nstacked=%s\nmerge_authority=%s\npr_yolo_source=%s\n' \
+  "$TASK_OWNER" "$HEAD_REPO" "$BASE_REPO" "$BASE_REF" "$BASE_SHA" "$MERGE_TARGET" "$STACKED" "$MERGE_AUTHORITY" "$YOLO_SOURCE" >> "$META_TMP" || exit 1
 printf 'pr=%s\n' "$URL" >> "$META_TMP" || exit 1
 [ -z "$PR_HEAD" ] || printf 'pr_head=%s\n' "$PR_HEAD" >> "$META_TMP" || exit 1
 chmod 0600 "$META_TMP" || exit 1
@@ -216,6 +243,11 @@ else
   echo "error: could not publish PR poll" >&2
   exit 1
 fi
+if [ "${FM_PR_CHECK_MERGE:-}" != 1 ] && grep -q '^review_class=' "$META"; then
+  REVIEW_ROUTE_RC=0
+  "$SCRIPT_DIR/fm-review-route.sh" scan "$ID" || REVIEW_ROUTE_RC=$?
+  case "$REVIEW_ROUTE_RC" in 0|3) ;; *) exit 1 ;; esac
+fi
 # Opt-in fleet activity ledger (docs/fleet-ledger.md); off costs one file test.
 # The merge-time re-record is not a new review-ready PR, so it writes nothing.
 [ ! -e "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/fleet-ledger" ] || [ "${FM_PR_CHECK_MERGE:-}" = 1 ] \
@@ -241,10 +273,12 @@ PR_MODE=$(grep '^mode=' "$META" | tail -1 | cut -d= -f2- || true)
 PR_YOLO=$(grep '^yolo=' "$META" | tail -1 | cut -d= -f2- || true)
 [ -z "$PR_MODE" ] || READY_LINE="$READY_LINE mode=$(fm_parent_channel_clean_note "$PR_MODE")"
 [ -z "$PR_YOLO" ] || READY_LINE="$READY_LINE yolo=$(fm_parent_channel_clean_note "$PR_YOLO")"
+READY_LINE="$READY_LINE task_owner=$TASK_OWNER head_repo=$HEAD_REPO base_repo=$BASE_REPO base_ref=$BASE_REF base_sha=$BASE_SHA merge_target=$MERGE_TARGET stacked=$STACKED merge_authority=$MERGE_AUTHORITY yolo_source=$YOLO_SOURCE"
 READY_RC=0
 fm_parent_channel_report "$FM_HOME" "$STATE" "$READY_LINE" || READY_RC=$?
 case "$READY_RC" in
   0|1) ;;
   *) printf 'actionable: PR %s is registered but its ready line did not reach the parent channel (rc=%s)\n' "$URL" "$READY_RC" >&2 ;;
 esac
-printf 'armed: state/%s.check.sh\n' "$ID"
+printf 'armed: state/%s.check.sh pr=%s task_owner=%s head_repo=%s base_repo=%s base_ref=%s base_sha=%s merge_target=%s stacked=%s merge_authority=%s yolo_source=%s\n' \
+  "$ID" "$URL" "$TASK_OWNER" "$HEAD_REPO" "$BASE_REPO" "$BASE_REF" "$BASE_SHA" "$MERGE_TARGET" "$STACKED" "$MERGE_AUTHORITY" "$YOLO_SOURCE"

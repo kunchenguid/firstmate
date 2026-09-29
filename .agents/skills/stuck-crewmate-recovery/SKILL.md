@@ -32,6 +32,7 @@ Recover a genuinely stuck remote mate only through `bin/fm-spawn.sh <id> --secon
 
 Treat the digest's endpoint result as a presence signal, not proof that the task's work or validation run is gone.
 Read the targeted current state with `bin/fm-crew-state.sh <id>` before deciding to relaunch.
+For a PR, read its recorded `task_owner`, `base_repo`, `base_ref`, and `merge_target` before routing repair or cleanup; a stacked PR lands on its recorded base rather than main.
 A no-mistakes run matched to the crew's branch and current code remains authoritative when the endpoint is dead: handle a terminal or parked run through the normal lifecycle, and keep supervising an active run instead of creating a duplicate worker.
 
 When no authoritative run accounts for the task, inspect only its recorded backend and worktree inventory.

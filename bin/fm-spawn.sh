@@ -642,6 +642,7 @@ EFFORT=
 BACKEND_ARG=
 MODE=
 YOLO=
+YOLO_SOURCE=
 BRANCH_PREFIX=fm/
 TRACEPARENT_ARG=
 HARNESS_SET=0
@@ -650,6 +651,7 @@ EFFORT_SET=0
 BACKEND_SET=0
 MODE_SET=0
 YOLO_SET=0
+YOLO_SOURCE_SET=0
 BRANCH_PREFIX_SET=0
 TRACEPARENT_SET=0
 RELAUNCH=0
@@ -687,6 +689,10 @@ for a in "$@"; do
     yolo)
       YOLO=$a
       YOLO_SET=1
+      ;;
+    yolo-source)
+      YOLO_SOURCE=$a
+      YOLO_SOURCE_SET=1
       ;;
     branch-prefix)
       BRANCH_PREFIX=$a
@@ -743,6 +749,11 @@ for a in "$@"; do
   --yolo=*)
     YOLO=${a#--yolo=}
     YOLO_SET=1
+    ;;
+  --yolo-source) want_value=yolo-source ;;
+  --yolo-source=*)
+    YOLO_SOURCE=${a#--yolo-source=}
+    YOLO_SOURCE_SET=1
     ;;
   --branch-prefix) want_value="branch-prefix" ;;
   --branch-prefix=*)
@@ -831,6 +842,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: --relaunch reuses the task's recorded yolo posture; --yolo cannot override it" >&2
     exit 1
   }
+  [ "$YOLO_SOURCE_SET" -eq 0 ] || {
+    echo "error: --relaunch reuses the task's recorded yolo source" >&2
+    exit 1
+  }
   [ "$BRANCH_PREFIX_SET" -eq 0 ] || {
     echo "error: --relaunch reuses the task's recorded ship branch; --branch-prefix cannot override it" >&2
     exit 1
@@ -867,7 +882,12 @@ else
       exit 1
       ;;
     esac
+    case "$YOLO_SOURCE" in
+    ''|project-record|explicit-call) ;;
+    *) echo "error: --yolo-source must be project-record or explicit-call" >&2; exit 1 ;;
+    esac
   else
+    [ "$YOLO_SOURCE_SET" -eq 0 ] || { echo 'error: --yolo-source applies only to ships' >&2; exit 1; }
     [ "$MODE_SET" -eq 0 ] || {
       echo "error: --mode applies only to ship spawns; a scout delivers a report and a secondmate records its own fixed posture" >&2
       exit 1
@@ -1460,6 +1480,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   # spanning several modes is two invocations rather than a silent mixed dispatch.
   [ "$MODE_SET" -eq 0 ] || shared_args+=(--mode "$MODE")
   [ "$YOLO_SET" -eq 0 ] || shared_args+=(--yolo "$YOLO")
+  [ "$YOLO_SOURCE_SET" -eq 0 ] || shared_args+=(--yolo-source "$YOLO_SOURCE")
   [ "$BRANCH_PREFIX_SET" -eq 0 ] || shared_args+=(--branch-prefix "$BRANCH_PREFIX")
   for pair in "${POS[@]}"; do
     case "$pair" in
@@ -1778,6 +1799,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fi
   MODE=$(fm_meta_get "$RELAUNCH_META" mode)
   YOLO=$(fm_meta_get "$RELAUNCH_META" yolo)
+  YOLO_SOURCE=$(fm_meta_get "$RELAUNCH_META" yolo_source)
   if [ "$KIND" = ship ]; then
     BRANCH=$(fm_meta_get "$RELAUNCH_META" branch)
     [ -n "$BRANCH" ] || BRANCH="fm/$ID"
@@ -4859,7 +4881,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo yolo_source branch tasktmp model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -4874,6 +4896,7 @@ preserve_relaunch_meta() {
   echo "kind=$KIND"
   [ -z "$MODE" ] || echo "mode=$MODE"
   [ -z "$YOLO" ] || echo "yolo=$YOLO"
+  [ -z "$YOLO_SOURCE" ] || echo "yolo_source=$YOLO_SOURCE"
   [ -z "${BRANCH:-}" ] || echo "branch=$BRANCH"
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"

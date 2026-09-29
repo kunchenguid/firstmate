@@ -84,7 +84,8 @@ For a contribution wake or linked-issue filing, go directly to Contribution foll
    This is the only file-mode write allowed by the skill.
    The detailed report includes:
    - **Title** - `# Bearings - <day> <YYYY-MM-DD>` (use "Morning status" only when the captain specifically asks for a morning brief), followed by two or three sentences framing where things stand.
-   - **Captain's Call** - every unsuppressed open decision summarized with its options from the structured decision record, plus each PR ready to merge and each needed credential or login, every PR with the full `https://...` URL, never a bare `#number`.
+   - **Captain's Call** - every unsuppressed open decision summarized with its options from the structured decision record, plus each operator-authorized PR ready to merge and each needed credential or login, every PR with the full `https://...` URL, never a bare `#number`.
+     A ready PR whose recorded `pr.merge_authority` is `firstmate` belongs in the merge action queue, not a repeated merge question; recheck live project posture and merge eligibility before acting.
    - **Recently Landed** - the bounded current recent-completions baseline from structured state across the main fleet and every registered secondmate home, rendered in full on every run.
    - **Underway** - each live direct report making progress, with its current state, and the plans or main pickup pointers worth reopening (`data/<id>/report.md` files, `.lavish/*.html` boards).
    - **Charted Next** - queued or gated work, including deferred or aged captain-hold safety gates and any main-inventory integrity warning, with each item's blocker, date, age, or integrity reason.
