@@ -79,8 +79,9 @@ Decision-only events such as `resolved` never become current state or leak their
 In that status-log fallback, a declared external wait reports the distinct `paused` state with its reason.
 The semantic branch reports working only on an exact busy verdict and names the source that produced it; an unknown verdict never becomes working, never permits the status-log fallback, and never becomes a silent idle.
 `bin/fm-fleet-view.sh` renders that snapshot as Markdown for humans, while `bin/fm-bearings-snapshot.sh` provides the bounded bearings projection, so both views consume one structured contract instead of reparsing raw fleet files.
+For a decision that needs full action context, Bearings' exact-task projection limits collection and output to that identity instead of expanding fleet-wide bodies.
 The snapshot classifies a main-home task record as retained when its current backlog row is closed, or its identity exists in tasks-axi's configured Done archive after retention pruning, and there is no current working evidence.
-The human fleet view separates retained records from Under Way, and Bearings keeps their execution evidence visible without presenting it as active work.
+The human fleet view separates retained records from Under Way, while Bearings reports their total by default, preserves rows with open decisions, and reveals bounded purely historical rows only on request without presenting them as active work.
 An ordinary queued row has its own `queued` disposition and, like an explicit parked row, is not Under Way; the human fleet view keeps contradictory current working evidence visible as task-record integrity.
 Bearings also exposes closed records with current working evidence and unknown or ambiguous records without open decisions as task-record-integrity gates, while leaving parked rows on its queued surface.
 An unknown execution record with an open decision remains visible as current work rather than being silently treated as archived.
@@ -274,8 +275,8 @@ Deployable ByteDance-internal BITS/PPE work resolves to task mode `no-mistakes` 
 Each task's mode and `yolo` merge posture are firstmate's decision at intake.
 The mode is passed explicitly to `bin/fm-brief.sh`, and both values are passed explicitly to `bin/fm-spawn.sh` and `bin/fm-promote.sh`; each command refuses to guess the values it consumes.
 A ship brief records its mode as a fixed machine-readable line and the spawn refuses to launch on a different one, so the worker's instructions and the recorded task delivery cannot diverge.
-`bin/fm-dod-lib.sh` is the one owner of that mode's definition of done, rendered into a generated ship brief, the ship instructions a promoted scout receives, and that scout's own `brief.md` so a later relaunch reads the same contract, so a promoted worker cannot be handed a weaker contract than a briefed one.
-It is also the one owner of the no-mistakes `--intent` contract those workers follow.
+`bin/fm-dod-lib.sh` is the one owner of that mode's generated definition of done, rendered into a ship brief, the ship instructions a promoted scout receives, and that scout's own `brief.md` so a later relaunch reads the same contract and cannot receive a weaker one.
+Its no-mistakes block owns the implementation checkpoint and validation trigger; `.agents/skills/crewmate-no-mistakes/SKILL.md` owns the conditional worker-side intent, gate, recovery, BITS/PPE boundary, and completion procedure loaded at that boundary.
 `data/projects.md` records each project's standing posture and optional `+yolo` merge flag as the captain's default and as context for that decision, including the conditional `no-mistakes-prod-only` policy; a ship spawn that drops below the registered rigor prints a deviation notice and continues.
 `bin/fm-project-mode.sh` remains the one registry parser for the mechanical consumers that have no task in hand: fleet sync's `local-only` skip and home seeding's refusal and no-mistakes initialization.
 When a selected delivery path calls for a diff, `bin/fm-review-diff.sh` refreshes the authoritative base and, when task meta records `pr=`, always fetches and compares against `refs/pull/<n>/head` by default (recorded `pr_head=` is only an offline fallback) before falling back to the local branch with a warning.

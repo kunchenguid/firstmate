@@ -39,9 +39,12 @@ During that invocation it never tears down a task, merges a PR, dispatches new w
    A decision is simply a task held for the captain (`captain-hold-lifecycle`), whatever its kind.
    The canonical snapshot assigns every captain hold exactly one bucket from structured fields only: `blocked` when any blocker is unresolved, else `dated` while `hold_until` is in the future, else `aged` when an undated hold has reached the configured age threshold, else `live`.
    Never use hold-reason or body prose to classify or place a decision.
-   Treat `retained_records` as preserved execution evidence, never as Underway; any unresolved captain action remains independently represented by the snapshot's structured decision surfaces.
+   Treat `retained_record_count` as the default historical-preservation signal and keep `retained_records` out of routine prose; use `--all-retained` only when cleanup or recovery actually needs those identities.
+   Retained records remain preserved execution evidence, never Underway; any unresolved captain action remains independently represented by the snapshot's structured decision surfaces.
    A `live` hold appears in Captain's Call; `blocked`, `dated`, and `aged` holds appear as disclosed Charted Next gates stating their structured reason.
    Use `--all-decisions` to reveal every captain hold available within the bounded snapshot and remove each revealed gate from Charted Next so the buckets remain exclusive.
+   A compact decision row carries its exact `--task <task-id>` retrieval command.
+   Use that targeted read whenever the summary does not contain the concrete request, options, credential requirement, remaining issue, or authority and evidence pointers needed to act; never compensate with `--fields bodies` or an unbounded whole-fleet dump.
    Aging is only a presentation safety net, and re-holding with `--until` remains the durable deferral.
    Do not scrape reports, visual-review artifacts, raw status-event tails, or visible conversation history to supplement current state.
    A queued item under `gates` only becomes "next work" when its blocker is gone and its time/date gate has arrived.

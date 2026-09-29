@@ -365,21 +365,17 @@ STUB
   done
 
   payload="$TMP_ROOT/promote-dod/payload-promote-dod-no-mistakes"
-  assert_grep "ask-user findings are never yours to answer: escalate to firstmate" "$payload" \
-    "promoted no-mistakes worker did not receive the ask-user escalation rule"
-  assert_grep "write only the ask-user findings, verbatim and unparaphrased (id, severity, file, line, description, authority)" "$payload" \
-    "promoted no-mistakes worker did not receive the ask-user-only snapshot contract"
-  assert_grep 'needs-decision [key=nm-<run>-<step>]: ask-user findings=<id1>,<id2>,... file='"$home/data/promote-dod-no-mistakes/nm-<run>-findings.txt" "$payload" \
-    "promoted no-mistakes worker did not receive the structured escalation event"
-  assert_grep "NEVER pass \`--yes\` (or \`-y\`)" "$payload" \
-    "promoted no-mistakes worker did not receive the --yes prohibition"
-  assert_grep "It is banned fleet-wide" "$payload" \
-    "promoted no-mistakes worker did not receive the fleet-wide ban wording"
+  assert_grep "crewmate-no-mistakes/SKILL.md\` completely" "$payload" \
+    "promoted no-mistakes worker did not receive the conditional-procedure trigger"
+  assert_contains "$(cat "$payload")" "Task data directory: \`$home/data/promote-dod-no-mistakes\`." \
+    "promoted no-mistakes worker did not receive its exact absolute task data directory"
+  assert_no_grep "nm-<run>-findings.txt" "$payload" \
+    "promoted no-mistakes payload duplicated the conditional ask-user wire format"
 
   payload="$TMP_ROOT/promote-dod/payload-promote-dod-direct-pr"
   assert_grep "supersede the scout delivery rules and report-based Definition of done" "$payload" \
     "promoted worker retained the scout delivery contract"
-  assert_grep "status protocol; the instruction inbox and its acknowledgement; the escalation rules, including ask-user; and every safety rule" "$payload" \
+  assert_grep "status protocol; the instruction inbox and its acknowledgement; the general escalation rules; and every safety rule" "$payload" \
     "promoted worker lost the scout protocols and safety rules that still apply"
 
   # The faster paths keep their own contracts rather than inheriting the pipeline's.
@@ -540,9 +536,9 @@ EOF
   assert_grep "plus any later words the captain actually supplied" \
     "$home/data/$id/launch-brief.md" \
     "migrated launch contract excluded later captain clarifications"
-  assert_grep "The Definition of done's rule that \`--intent\` must be self-sufficient still governs" \
+  assert_grep "generated Definition of done names the conditional skill" \
     "$home/data/$id/launch-brief.md" \
-    "migrated launch contract's overlay dropped the self-sufficiency pointer"
+    "migrated launch contract's overlay dropped the conditional-procedure pointer"
 
   id=delivery-legacy-unmarked-no-mistakes
   mkdir -p "$home/data/$id"

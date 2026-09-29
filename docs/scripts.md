@@ -14,13 +14,13 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-bootstrap.sh`        | Detect toolchain and fleet problems, run the locked session-start sweeps, and install approved tools |
 | `fm-startup-network.sh`  | Run session start's network checks and inactive-outcome scan off its blocking path, retaining reports and durable findings |
 | `fm-fleet-sync.sh`       | Refresh project clones with safe fast-forwards, self-heals, `STUCK:` reports, branch pruning, and bounded recovery from an orphaned `.git/packed-refs.lock` |
-| `fm-fleet-snapshot.sh`   | Print structured current-home fleet snapshot JSON (schema `fm-fleet-snapshot.v1`) |
+| `fm-fleet-snapshot.sh`   | Print structured current-home fleet or exact-task snapshot JSON (schema `fm-fleet-snapshot.v1`) |
 | `fm-fleet-view.sh`       | Render the fleet snapshot as a human Markdown view                                   |
-| `fm-bearings-snapshot.sh` | Project the bounded fleet snapshot to compact TOON; `--include-prs` adds live GitHub enrichment |
+| `fm-bearings-snapshot.sh` | Project bounded fleet state to compact TOON or JSON, with exact-task reads and opt-in historical or live-PR detail |
 | `fm-update.sh`           | Guarded fast-forward self-update of the current Firstmate checkout |
 | `fm-captain-hold.sh`     | Hold tasks for the captain, record the captain's answers, gate investigation completion, and report record divergence between the status log and the backlog |
 | `fm-brief.sh`            | Scaffold ship (explicit `--mode`), scout, and Herdr-lab briefs, with Captain's intent and Firstmate spec subsections |
-| [`fm-dod-lib.sh`](../bin/fm-dod-lib.sh) | Own ship/scout worker role scope, ship definitions of done, and the no-mistakes `--intent` contract |
+| [`fm-dod-lib.sh`](../bin/fm-dod-lib.sh) | Own ship/scout worker role scope, ship definitions of done, intent extraction, and the conditional validation-skill trigger |
 | `fm-herdr-lab.sh`        | Provision and guardedly operate an isolated, never-default Herdr lab session         |
 | `fm-herdr-lab-viewer.py` | The pty engine behind `fm-herdr-lab.sh viewer`: one real foreground Herdr client on a non-zero window grid |
 | `fm-install-herdr.sh`    | Install CI's exact-version Herdr pin with official asset URL, SHA-256, and protocol checks |

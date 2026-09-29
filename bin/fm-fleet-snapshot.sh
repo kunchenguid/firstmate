@@ -3,6 +3,9 @@
 #
 # Output contract: `--json` prints one object with schema
 # `fm-fleet-snapshot.v1`.
+# `--task <task-id>` keeps that schema but limits task observations and output
+# records to one exact identity; fleet-level inventory validity is then marked
+# not evaluated rather than inferred from the partial view.
 # The command does not acquire the session lock, drain wakes, arm watchers,
 # mutate backlog state, or write reports.
 #
@@ -151,7 +154,7 @@ esac
 
 usage() {
   cat <<'EOF'
-usage: fm-fleet-snapshot.sh --json
+usage: fm-fleet-snapshot.sh --json [--task <task-id>]
 
 Print a structured snapshot of the firstmate fleet.
 JSON is the stable machine-readable output contract.
@@ -167,10 +170,32 @@ since date, and re-holding with --until remains the durable deferral.
 EOF
 }
 
-case "${1:---json}" in
-  --json) ;;
-  -h|--help) usage; exit 0 ;;
-  *) usage >&2; exit 2 ;;
+TARGET_TASK_ID=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --json) ;;
+    --task)
+      [ $# -gt 1 ] || { echo "fm-fleet-snapshot: --task requires a task id" >&2; usage >&2; exit 2; }
+      case "$2" in ''|-*) echo "fm-fleet-snapshot: --task requires a non-option task id" >&2; usage >&2; exit 2 ;; esac
+      shift
+      TARGET_TASK_ID=$1
+      ;;
+    --task=*)
+      TARGET_TASK_ID=${1#--task=}
+      case "$TARGET_TASK_ID" in
+        '') echo "fm-fleet-snapshot: --task requires a task id" >&2; usage >&2; exit 2 ;;
+        -*) echo "fm-fleet-snapshot: --task requires a non-option task id" >&2; usage >&2; exit 2 ;;
+      esac
+      ;;
+    -h|--help) usage; exit 0 ;;
+    *) usage >&2; exit 2 ;;
+  esac
+  shift
+done
+case "$TARGET_TASK_ID" in
+  ''|*[!A-Za-z0-9._-]*)
+    [ -z "$TARGET_TASK_ID" ] || { echo "fm-fleet-snapshot: invalid task id" >&2; exit 2; }
+    ;;
 esac
 
 command -v jq >/dev/null 2>&1 || { echo "fm-fleet-snapshot: jq not found" >&2; exit 1; }
@@ -565,6 +590,7 @@ prefetch_task_current_states() {
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
     id=$(basename "$meta" .meta)
+    [ -z "$TARGET_TASK_ID" ] || [ "$id" = "$TARGET_TASK_ID" ] || continue
     captured_meta="$SNAPSHOT_TASK_DIR/$id.meta"
     if ! cp -- "$meta" "$captured_meta" 2>"$captured_meta.copy-error"; then
       # Teardown may unlink a task after the glob selected it but before cp opens
@@ -896,6 +922,7 @@ jq -n \
   --arg config "$CONFIG" \
   --arg projects "$PROJECTS" \
   --arg task_dispositions "$TASK_DISPOSITIONS" \
+  --arg task_filter "$TARGET_TASK_ID" \
   --slurpfile backlog "$BACKLOG_JSON_FILE" \
   --slurpfile tasks "$TASKS_JSON_FILE" \
   --slurpfile main_inventory "$MAIN_INVENTORY_JSON_FILE" \
@@ -914,12 +941,13 @@ jq -n \
      generated:$generated,
      fm_home:$fm_home,
      roots:{fm_root:$fm_root,state:$state,data:$data,config:$config,projects:$projects},
-     backlog:$backlog,
+     backlog:($backlog | if $task_filter == "" then . else .records |= map(select(.id == $task_filter)) end),
      tasks:($tasks | map(.id as $id
        | . + {backlog:backlog_by_id($id)}
        | . + {record_disposition:($dispositions[$id] // "unknown")}
        | . + {retained_record:((.record_disposition == "done" or .record_disposition == "archive_done")
            and .current_state.state != "working")})),
-     main_inventory:$main_inventory,
-     scout_reports:($scout_reports | map(. + {kind:report_kind(.id)}))
+     main_inventory:(if $task_filter == "" then $main_inventory
+       else {valid:null,reason:"not evaluated in targeted task projection",orphan_in_flight:[],unstructured_current_count:0} end),
+     scout_reports:($scout_reports | map(select($task_filter == "" or .id == $task_filter) | . + {kind:report_kind(.id)}))
    }'

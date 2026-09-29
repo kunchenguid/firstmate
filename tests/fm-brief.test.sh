@@ -266,8 +266,8 @@ test_ship_mode_is_explicit_not_registry() {
   brief="$home/data/brief-explicit-a5/brief.md"
   grep -qx "Delivery contract: mode=no-mistakes" "$brief" \
     || fail "registered direct-PR posture overrode the explicit --mode"
-  assert_grep "For an ordinary no-mistakes task, that next phase is /no-mistakes validation and PR delivery." "$brief" \
-    "explicit no-mistakes brief did not render the ordinary pipeline definition of done"
+  assert_grep "crewmate-no-mistakes/SKILL.md\` completely" "$brief" \
+    "explicit no-mistakes brief did not render the conditional pipeline trigger"
 
   # An unregistered project is not a blocker either, because nothing is looked up.
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-explicit-a6 never-registered --mode local-only >/dev/null 2>&1 \
@@ -328,77 +328,27 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
   pass "fm-brief.sh: faster paths use configured authority without stacked review"
 }
 
-# Pin the specific line the bug lived on: the no-mistakes DOD's no-mistakes
-# reference must render as plain prose with no dangling apostrophe artifact.
+# Conditional no-mistakes procedure stays out of every generated brief while
+# the executable output keeps one precise trigger to its readable owner.
 test_no_mistakes_dod_wording() {
-  local home id brief spelling
+  local home id brief bytes
   home="$TMP_ROOT/wording-home"
   mkdir -p "$home/data"
   id="brief-wording-b1"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   assert_present "$brief" "brief was not scaffolded"
-  for spelling in 'Captain:' "Captain's words:" "Captain's ask:" "Captain's intent:" 'Captain,'; do
-    assert_no_grep "$spelling" "$brief" "rendered intent contract still teaches operator-address labels"
-  done
-  assert_grep '[captain]' "$brief" "rendered intent contract must explain the neutral legacy provenance marker"
-  assert_grep "no-mistakes itself provides for the mechanics" "$brief" \
-    "no-mistakes DOD lost its guidance-reference sentence"
-  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
-  assert_grep '`no-mistakes axi run --help`' "$brief" \
-    "no-mistakes DOD must render literal backticks around the help command"
-  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
-  assert_grep '`help`' "$brief" \
-    "no-mistakes DOD must render literal backticks around help"
-  assert_grep "pass \`--intent\` as only this brief's \`## Captain's intent\`" "$brief" \
-    "no-mistakes DOD must require --intent to be the Captain's intent subsection"
-  assert_grep "plus any later words the captain actually said" "$brief" \
-    "no-mistakes DOD must allow later captain words in --intent"
-  assert_grep "Do not include \`## Firstmate spec\`" "$brief" \
-    "no-mistakes DOD must keep Firstmate spec out of --intent"
-  assert_grep "or your own decisions and tradeoffs" "$brief" \
-    "no-mistakes DOD must keep worker tradeoffs out of --intent"
-  assert_grep "This replaces the no-mistakes skill's advice to enrich \`--intent\`" "$brief" \
-    "no-mistakes DOD must override the external skill's enrich-with-decisions guidance"
-  # A bare reference cannot preserve the captain's ask, so the rendered DOD states
-  # the self-sufficiency rule and requires referenced material to be resolved into
-  # its substance.
-  assert_grep "The \`--intent\` string you pass must be self-sufficient" "$brief" \
-    "no-mistakes DOD must require a self-sufficient --intent string"
-  assert_grep "write the substance of the referenced items into \`--intent\`" "$brief" \
-    "no-mistakes DOD must tell the worker to resolve report, decision, and PR references into substance"
-  assert_grep "do not start no-mistakes until Firstmate has loaded \`bits-development\`" "$brief" \
-    "no-mistakes DOD must route deployable BITS/PPE work before validation"
-  assert_grep "created one fresh dedicated PPE for the first delivery through the newly created Dev Task or reused that task's existing PPE for a subsequent revision" "$brief" \
-    "no-mistakes DOD must distinguish one-time PPE creation from subsequent reuse"
-  assert_grep "passed the required API or end-to-end test against that exact deployment" "$brief" \
-    "no-mistakes DOD must place the exact-candidate deployment test before final validation"
-  assert_grep "must not own rebase, push, PR, or CI" "$brief" \
-    "no-mistakes DOD must keep BITS delivery phases outside the final validation pass"
-  assert_grep "any code-changing final-validation fix returns to the existing Dev Task and source branch for exact push verification, same-PPE deployment, and API Test" "$brief" \
-    "no-mistakes DOD must reuse the existing task and PPE after a code-changing fix"
-  assert_grep "must not create a new Dev Task, MR, binding, Change Card, snapshot, environment, or PPE" "$brief" \
-    "no-mistakes DOD must forbid duplicate delivery objects in the subsequent-revision loop"
-  assert_grep "BITS owns the MR and CI" "$brief" \
-    "no-mistakes DOD must use the BITS-owned ready signal"
-  # The apostrophe in "firstmate's authority check" is now structurally safe
-  # (no `$(...)` wrapper around the heredoc), so it renders verbatim instead of
-  # being reworded or escaped away. test_no_heredoc_in_command_substitution
-  # guards the structure that makes it safe.
-  assert_grep "firstmate's authority check" "$brief" \
-    "no-mistakes DOD lost the apostrophe prose that the structural fix makes parse-safe"
-
-  # The --yes ban is a fleet-wide prohibition, not a preference, and it must not
-  # claim an enforcement the tool does not provide: this is instruction only.
-  assert_grep "NEVER pass \`--yes\` (or \`-y\`) to \`no-mistakes axi run\` or \`no-mistakes axi respond\`. It is banned fleet-wide." "$brief" \
-    "no-mistakes DOD must state the --yes ban as a prohibition"
-  assert_grep "answering your own ask-user finding is a hard rule violation" "$brief" \
-    "no-mistakes DOD must say why --yes is banned"
-  assert_no_grep "Avoid \`--yes\`" "$brief" \
-    "no-mistakes DOD still states the --yes ban as a preference"
-  assert_no_grep "no-mistakes refuses" "$brief" \
-    "no-mistakes DOD must not claim the tool itself refuses --yes"
-  pass "fm-brief.sh: no-mistakes DOD keeps its apostrophe prose and bans --yes outright"
+  assert_grep "crewmate-no-mistakes/SKILL.md\` completely" "$brief" \
+    "no-mistakes brief did not route its conditional procedure to the skill owner"
+  assert_no_grep "One drive call blocks until the next gate" "$brief" \
+    "conditional pipeline mechanics were duplicated into the generated brief"
+  assert_no_grep "Never stop, restart, or update the shared" "$brief" \
+    "conditional daemon recovery was duplicated into the generated brief"
+  bytes=$(wc -c < "$brief" | tr -d ' ')
+  [ "$bytes" -lt 7000 ] || fail "no-mistakes brief did not remain bounded: $bytes bytes"
+  assert_present "$ROOT/.agents/skills/crewmate-no-mistakes/SKILL.md" \
+    "the generated trigger points to no readable procedure owner"
+  pass "fm-brief.sh: no-mistakes brief keeps a bounded trigger to its conditional procedure"
 }
 
 test_ask_user_escalation_format() {
@@ -410,29 +360,10 @@ test_ask_user_escalation_format() {
   brief="$home/data/$id/brief.md"
   assert_present "$brief" "brief was not scaffolded"
 
-  # A no-mistakes ask-user gate must escalate its ask-user findings as one status
-  # event plus one verbatim findings snapshot file, using that same shape even
-  # for a single finding, never paraphrased into the status line.
-  assert_grep "escalate all ask-user findings as one event plus one snapshot file" "$brief" \
-    "ship rule 6 lost the one-event-plus-snapshot-file ask-user contract"
-  assert_grep "using that same shape even when the gate holds only a single ask-user finding" "$brief" \
-    "ship rule 6 must require the same shape for a single finding"
-  assert_grep "write only the ask-user findings, verbatim and unparaphrased (id, severity, file, line, description, authority)" "$brief" \
-    "ship rule 6 must limit the verbatim axi slice to ask-user findings"
-  # shellcheck disable=SC2016  # single quotes are deliberate: backticks and the key/findings/file tokens must stay literal
-  assert_grep 'needs-decision [key=nm-<run>-<step>]: ask-user findings=<id1>,<id2>,... file='"$home/data/$id/nm-<run>-findings.txt" "$brief" \
-    "ship rule 6 must render the exact needs-decision ask-user status line"
-  assert_grep "$home/data/$id/nm-<run>-findings.txt" "$brief" \
-    "ship rule 6 must point the snapshot file under this task's own data directory"
-  assert_grep "The status line only points at the file; it never restates or summarizes a finding's content." "$brief" \
-    "ship rule 6 must forbid paraphrasing ask-user findings into the status line"
-
-  # The DOD's own ask-user paragraph must point back at rule 6's format
-  # (one-owner rule) rather than restating or bare-citing it.
-  assert_grep "escalate to firstmate using rule 6's ask-user format" "$brief" \
-    "no-mistakes DOD ask-user paragraph must point at rule 6's format instead of a bare citation"
-  assert_no_grep "escalate to firstmate (rule 6) and stop." "$brief" \
-    "no-mistakes DOD ask-user paragraph still uses the old bare rule-6 pointer"
+  assert_grep "That skill owns the conditional intent, ask-user, daemon-recovery" "$brief" \
+    "no-mistakes brief did not route ask-user handling to its single owner"
+  assert_no_grep "nm-<run>-findings.txt" "$brief" \
+    "generated brief duplicated the conditional ask-user wire format"
 
   other_id="brief-no-ask-user-scout"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$other_id" some-proj --scout >/dev/null 2>&1
@@ -450,7 +381,7 @@ test_ask_user_escalation_format() {
       "$mode brief received a no-mistakes-only decision case"
   done
 
-  pass "fm-brief.sh: no-mistakes ask-user findings use one event plus a verbatim snapshot"
+  pass "fm-brief.sh: no-mistakes ask-user mechanics remain behind the precise skill trigger"
 }
 
 test_ship_project_memory_wording() {

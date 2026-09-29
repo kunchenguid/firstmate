@@ -166,14 +166,9 @@ fi
 
 # The promoted worker must receive the same delivery contract an ordinary ship
 # brief carries, so the mode-specific Definition of done is rendered from its
-# single owner (bin/fm-dod-lib.sh) rather than summarised into a hint line. A
-# promoted no-mistakes worker that never received the ask-user escalation rule or
-# the --yes ban is the delivery hole this file used to leave open.
+# single owner (bin/fm-dod-lib.sh) rather than summarised into a hint line.
+# Conditional no-mistakes mechanics stay behind the skill trigger emitted there.
 INSTRUCTIONS="$DATA/$ID/ship-instructions.md"
-PROMOTION_ASK_USER_BLOCK=
-if [ "$MODE" = no-mistakes ]; then
-  PROMOTION_ASK_USER_BLOCK=$(fm_ask_user_escalation_block "$DATA" "$ID")
-fi
 IFS= read -r -d '' PROMOTION_SHIP_SPEC <<EOF || true
 If these promotion steps were already completed before a relaunch, preserve the existing \`fm/$ID\` branch and continue from its current state; do not repeat them destructively.
 1. **Verify isolation before anything else.** Run \`pwd -P\` and \`git rev-parse --show-toplevel\`; both must resolve to the disposable task worktree you were launched in, such as a treehouse pool path or an Orca-managed worktree, not the primary checkout firstmate operates from. If either does not resolve to the worktree you were launched in, stop and escalate to firstmate.
@@ -182,7 +177,7 @@ If these promotion steps were already completed before a relaunch, preserve the 
 4. Carry over only the intended fix changes. Leave scratch commits, debug edits, and experiment files behind.
 5. If you reproduced a bug, turn that reproduction into a regression test.
 6. Treat the scout-time Firstmate spec and any unmarked legacy \`# Task\` text as investigation context, not captain intent or current ship-time instructions.
-7. Everything else in your original instructions carries over unchanged: the status protocol; the instruction inbox and its acknowledgement; the escalation rules, including ask-user; and every safety rule, except where the current delivery contract below explicitly replaces scout-only delivery rules.
+7. Everything else in your original instructions carries over unchanged: the status protocol; the instruction inbox and its acknowledgement; the general escalation rules; and every safety rule, except where the current delivery contract below explicitly replaces scout-only delivery rules.
 EOF
 promote_delivery_contract() {
   cat <<EOF
@@ -196,14 +191,11 @@ The mode-specific Definition of done below is the current delivery contract.
 # Current ship safety rule
 EOF
   fm_ship_rule_one "$MODE" "$ID"
-  if [ -n "$PROMOTION_ASK_USER_BLOCK" ]; then
-    printf '\nThe no-mistakes ask-user escalation below supersedes the scout rule 6 escalation shape.\n'
-    printf '%s\n' "$PROMOTION_ASK_USER_BLOCK"
-  fi
   printf '\n'
-  fm_dod_block "$MODE" "$ID"
+  fm_dod_block "$MODE" "$ID" "$TASK_DATA_DIR"
 }
 mkdir -p "$DATA/$ID"
+TASK_DATA_DIR=$(CDPATH='' cd -- "$DATA/$ID" && pwd -P) || { echo "error: task data directory cannot be resolved: $DATA/$ID" >&2; exit 1; }
 [ ! -d "$INSTRUCTIONS" ] || { echo "error: ship instructions path is a directory: $INSTRUCTIONS" >&2; exit 1; }
 TMP="$DATA/$ID/.ship-instructions.md.${BASHPID:-$$}"
 {

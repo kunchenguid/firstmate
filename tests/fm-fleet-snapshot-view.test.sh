@@ -26,6 +26,7 @@ make_fakebin() {
   fb=$(fm_fakebin "$1")
   cat > "$fb/herdr" <<'SH'
 #!/usr/bin/env bash
+[ -z "${HERDR_LOG:-}" ] || printf '%s\n' "$*" >> "$HERDR_LOG"
 case "$1 ${2:-}" in
   'status --json') echo '{"server":{"running":true}}' ;;
   'pane get') jq -n --arg p "$3" '{result:{pane:{pane_id:$p}}}' ;;
@@ -191,7 +192,65 @@ test_removed_home_summary_mode_is_rejected() {
   pass "fleet snapshot rejects the removed secondmate home-summary mode"
 }
 
+test_targeted_snapshot_observes_only_one_task() {
+  local home fakebin out log item id pane
+  home=$(make_home targeted)
+  fakebin=$(make_fakebin "$home")
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] target-task - Target Task (repo: alpha) (kind: ship)
+- [ ] other-task - Other Task (repo: alpha) (kind: ship)
+
+## Queued
+
+## Done
+EOF
+  for item in target-task:p-target other-task:p-other; do
+    id=${item%%:*}
+    pane=${item##*:}
+    fm_test_write_herdr_meta "$home/state/$id.meta" \
+      "window=fmtest:w1:$pane" "endpoint_task_id=$id" \
+      "backend=herdr" "herdr_session=fmtest" "herdr_workspace_id=w1" \
+      "herdr_tab_id=w1:t1" "herdr_pane_id=$pane" \
+      "worktree=$home/projects/ship" "project=alpha" "harness=pi" \
+      "kind=ship" "mode=no-mistakes"
+  done
+  log="$home/herdr.log"
+  out=$(PATH="$fakebin:$PATH" HERDR_LOG="$log" FM_HOME="$home" "$SNAPSHOT" --json --task target-task) \
+    || fail "targeted fleet snapshot failed"
+  printf '%s\n' "$out" | jq -e '
+    [.tasks[].id] == ["target-task"]
+      and [.backlog.records[].id] == ["target-task"]
+      and .main_inventory.valid == null
+  ' >/dev/null || fail "targeted snapshot returned unrelated fleet records: $out"
+  assert_grep "p-target" "$log" "targeted snapshot did not observe its selected task"
+  assert_no_grep "p-other" "$log" "targeted snapshot performed process reads for another task"
+  pass "targeted fleet snapshot narrows both output and process observations to one task"
+}
+
+test_targeted_snapshot_requires_a_value() {
+  local home out rc
+  home=$(make_home malformed-target)
+  for arg in --task --task= --task=-other; do
+    set +e
+    out=$(FM_HOME="$home" "$SNAPSHOT" "$arg" 2>&1)
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "$arg silently fell back to a broad fleet snapshot"
+    assert_contains "$out" "--task requires" "$arg did not report its missing task id"
+  done
+  set +e
+  out=$(FM_HOME="$home" "$SNAPSHOT" --task --json 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "--task consumed another option and ran a broad fleet snapshot"
+  assert_contains "$out" "--task requires a non-option task id" "--task accepted an option as its task id"
+  pass "fleet snapshot rejects malformed targeted reads before broad fallback"
+}
+
 test_empty_snapshot_and_view
 test_main_home_inventory_and_historical_refusal
 test_view_uses_authoritative_task_disposition
 test_removed_home_summary_mode_is_rejected
+test_targeted_snapshot_observes_only_one_task
+test_targeted_snapshot_requires_a_value
