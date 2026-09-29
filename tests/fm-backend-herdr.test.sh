@@ -107,13 +107,12 @@ EOF
 }
 
 # herdr_submit_identity_prefix: submit asks `agent get` which harness the pane
-# runs, then proves a nonmodal composer empty. A fixture numbered from the old
-# send-text-first sequence moves three slots later.
+# runs, then checks whether the composer is modal. A fixture numbered from the
+# old send-text-first sequence moves two slots later.
 herdr_submit_identity_prefix() {  # <resp-dir> <agent>
-  herdr_submit_shift "$1" 3
+  herdr_submit_shift "$1" 2
   printf '{"result":{"agent":{"agent":"%s","agent_status":"idle"}}}\n' "$2" > "$1/1.out"
   printf '  ❯\n' > "$1/2.out"
-  printf '  ❯\n' > "$1/3.out"
 }
 
 # herdr_submit_claude_prefix: a Claude pane adds the identity probe, an empty
@@ -4364,7 +4363,7 @@ test_send_text_submit_detects_landed_send() {
   assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''send-text'$'\x1f''w1:p2'$'\x1f''hello captain' "send_text_submit did not type the literal text first"
   enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
   [ "$enter_count" -eq 1 ] || fail "send_text_submit should not need a second Enter for a plain message with no popup, sent $enter_count Enter(s)"
-  [ "$(grep -c $'\x1f''pane'$'\x1f''read' "$log")" -eq 2 ] || fail "send_text_submit should identify and prove nonmodal input without reading for confirmation"
+  [ "$(grep -c $'\x1f''pane'$'\x1f''read' "$log")" -eq 1 ] || fail "send_text_submit should inspect mode without reading for confirmation"
   pass "fm_backend_herdr_send_text_submit: modal preparation does not replace native submit confirmation"
 }
 
@@ -4382,7 +4381,7 @@ test_send_text_submit_pi_vim_normal_enters_insert_before_text() {
   printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/12.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit lab:w1:p2 ": lifecycle doorbell" 1 0.01 0' "$ROOT" )
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit lab:w1:p2 ": lifecycle doorbell" 1 0.01 0 "" require-empty' "$ROOT" )
   [ "$out" = empty ] || fail "blank Pi NORMAL recovery should submit on Herdr, got '$out'"
   i_line=$(grep -n $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''i' "$log" | cut -d: -f1)
   text_line=$(grep -n $'\x1f''pane'$'\x1f''send-text'$'\x1f''w1:p2'$'\x1f'': lifecycle doorbell' "$log" | cut -d: -f1)
@@ -4403,7 +4402,7 @@ test_send_text_submit_pi_vim_pending_normal_preserves_text() {
   printf '{"result":{"agent":{"agent":"pi","agent_status":"idle"}}}\n' > "$resp/4.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit lab:w1:p2 ": lifecycle doorbell" 1 0.01 0' "$ROOT" 2>/dev/null )
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit lab:w1:p2 ": lifecycle doorbell" 1 0.01 0 "" require-empty' "$ROOT" 2>/dev/null )
   [ "$out" = send-failed ] || fail "pending Pi NORMAL should refuse on Herdr, got '$out'"
   [ "$(grep -c $'\x1f''pane'$'\x1f''send-' "$log" || true)" -eq 0 ] \
     || fail "pending Pi NORMAL received input instead of preserving its draft: $(cat "$log")"
@@ -4419,7 +4418,7 @@ test_send_text_submit_pi_vim_insert_requires_fresh_empty_proof() {
   printf '{"result":{"agent":{"agent":"pi","agent_status":"idle"}}}\n' > "$resp/4.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit lab:w1:p2 ": lifecycle doorbell" 1 0.01 0' "$ROOT" 2>/dev/null )
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit lab:w1:p2 ": lifecycle doorbell" 1 0.01 0 "" require-empty' "$ROOT" 2>/dev/null )
   [ "$out" = send-failed ] || fail "pending Pi INSERT should refuse on Herdr, got '$out'"
   [ "$(grep -c $'\x1f''pane'$'\x1f''send-' "$log" || true)" -eq 0 ] \
     || fail "pending Pi INSERT received lifecycle input: $(cat "$log")"
@@ -4433,7 +4432,7 @@ test_send_text_submit_pi_vim_unsupported_mode_refuses() {
   printf 'transcript\n────────────────────────\n\n────────────── NORMAL d_\n' > "$resp/2.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit lab:w1:p2 ": lifecycle doorbell" 1 0.01 0' "$ROOT" 2>/dev/null )
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit lab:w1:p2 ": lifecycle doorbell" 1 0.01 0 "" require-empty' "$ROOT" 2>/dev/null )
   [ "$out" = send-failed ] || fail "unsupported Pi mode should refuse on Herdr, got '$out'"
   [ "$(grep -c $'\x1f''pane'$'\x1f''send-' "$log" || true)" -eq 0 ] \
     || fail "unsupported Pi mode received lifecycle input: $(cat "$log")"
@@ -4449,7 +4448,7 @@ test_send_text_submit_refuses_when_pi_identity_recheck_fails() {
   printf '1\n' > "$resp/4.exit"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit lab:w1:p2 ": lifecycle doorbell" 1 0.01 0' "$ROOT" 2>/dev/null )
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit lab:w1:p2 ": lifecycle doorbell" 1 0.01 0 "" require-empty' "$ROOT" 2>/dev/null )
   [ "$out" = send-failed ] || fail "an unproven Pi identity recheck should refuse, got '$out'"
   [ "$(grep -c $'\x1f''pane'$'\x1f''send-' "$log" || true)" -eq 0 ] \
     || fail "identity failure allowed lifecycle input into Pi NORMAL: $(cat "$log")"
@@ -4464,7 +4463,7 @@ test_send_text_submit_refuses_when_mode_capture_fails() {
   printf '1\n' > "$resp/3.exit"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit lab:w1:p2 ": lifecycle doorbell" 1 0.01 0' "$ROOT" 2>/dev/null )
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit lab:w1:p2 ": lifecycle doorbell" 1 0.01 0 "" require-empty' "$ROOT" 2>/dev/null )
   [ "$out" = send-failed ] || fail "a failed mode capture should refuse, got '$out'"
   [ "$(grep -c $'\x1f''pane'$'\x1f''send-' "$log" || true)" -eq 0 ] \
     || fail "capture failure allowed lifecycle input: $(cat "$log")"
@@ -4479,11 +4478,27 @@ test_send_text_submit_refuses_unproven_unknown_preparation() {
   printf 'redrawing pane\n' > "$resp/3.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit lab:w1:p2 ": lifecycle doorbell" 1 0.01 0' "$ROOT" 2>/dev/null )
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit lab:w1:p2 ": lifecycle doorbell" 1 0.01 0 "" require-empty' "$ROOT" 2>/dev/null )
   [ "$out" = send-failed ] || fail "an unknown preparation should refuse, got '$out'"
   [ "$(grep -c $'\x1f''pane'$'\x1f''send-' "$log" || true)" -eq 0 ] \
     || fail "unknown preparation received lifecycle input: $(cat "$log")"
-  pass "fm_backend_herdr_send_text_submit: unknown preparation requires empty proof"
+  pass "fm_backend_herdr_send_text_submit: lifecycle preparation requires empty proof"
+}
+
+test_send_text_submit_generic_unknown_composer_still_submits() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/submit-generic-unknown"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"agent":{"agent":"rovo","agent_status":"idle"}}}\n' > "$resp/1.out"
+  printf '> Type @ to mention files\n' > "$resp/2.out"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/4.out"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/6.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit lab:w1:p2 "read the brief" 1 0.01 0' "$ROOT" )
+  [ "$out" = empty ] || fail "a generic Rovo-style composer should still submit, got '$out'"
+  assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''send-text'$'\x1f''w1:p2'$'\x1f''read the brief' \
+    "generic unknown preparation blocked Rovo text"
+  pass "fm_backend_herdr_send_text_submit: generic Rovo-style composers still submit"
 }
 
 test_send_text_submit_detects_swallowed_enter() {
@@ -4511,13 +4526,12 @@ test_send_text_submit_replays_literal_send_stderr() {
   dir="$TMP_ROOT/submit-send-stderr"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   err="$dir/stderr"
   # 1: agent get (a non-Claude identity skips the payload proof)
-  # 2-3: nonmodal empty preparation proof
-  # 4: send-text fails the way an oversized argument does, before herdr runs
+  # 2: modal input check
+  # 3: send-text fails the way an oversized argument does, before herdr runs
   printf '{"result":{"agent":{"agent":"codex","agent_status":"idle"}}}\n' > "$resp/1.out"
   printf '  ❯\n' > "$resp/2.out"
-  printf '  ❯\n' > "$resp/3.out"
-  printf 'herdr: Argument list too long\n' > "$resp/4.err"
-  printf '126\n' > "$resp/4.exit"
+  printf 'herdr: Argument list too long\n' > "$resp/3.err"
+  printf '126\n' > "$resp/3.exit"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 3 0.01 0.01' "$ROOT" 2>"$err" )
@@ -4791,7 +4805,7 @@ test_send_text_submit_confirms_despite_codex_idle_tip_composer() {
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "reply with just OK" 3 0.01 0.01' "$ROOT" )
   [ "$out" = empty ] || fail "send_text_submit should confirm via agent_status alone even for a harness whose idle composer shows dynamic tip text, got '$out'"
-  [ "$(grep -c $'\x1f''pane'$'\x1f''read' "$log")" -eq 2 ] || fail "send_text_submit should prove nonmodal input without using it as confirmation"
+  [ "$(grep -c $'\x1f''pane'$'\x1f''read' "$log")" -eq 1 ] || fail "send_text_submit should inspect mode without using it as confirmation"
   pass "fm_backend_herdr_send_text_submit: confirms submission via native agent-state alone, immune to a codex-style dynamic idle-tip composer that would have misread as 'pending' under the old composer-based confirmation"
 }
 
@@ -5259,9 +5273,8 @@ test_send_text_submit_non_claude_skips_the_payload_proof() {
   for agent in codex missing; do
     dir="$TMP_ROOT/submit-non-claude-$agent"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
     printf '  ❯\n' > "$resp/2.out"
-    printf '  ❯\n' > "$resp/3.out"
-    printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/5.out"
-    printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/7.out"
+    printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/4.out"
+    printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/6.out"
     if [ "$agent" = missing ]; then
       printf '1\n' > "$resp/1.exit"
     else
@@ -5271,7 +5284,7 @@ test_send_text_submit_non_claude_skips_the_payload_proof() {
     out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
       bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0.01 0.01' "$ROOT" "$text" )
     [ "$out" = empty ] || fail "a $agent pane should keep the type-then-Enter path and confirm from agent_status, got '$out'"
-    [ "$(grep -c $'\x1f''pane'$'\x1f''read' "$log")" -eq 2 ] || fail "a $agent pane should receive only its nonmodal preparation reads before Enter"
+    [ "$(grep -c $'\x1f''pane'$'\x1f''read' "$log")" -eq 1 ] || fail "a $agent pane should receive only its mode check before Enter"
     enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
     [ "$enter_count" -eq 1 ] || fail "a $agent pane should be submitted once, sent $enter_count Enter(s)"
   done
@@ -6059,6 +6072,7 @@ test_send_text_submit_pi_vim_unsupported_mode_refuses
 test_send_text_submit_refuses_when_pi_identity_recheck_fails
 test_send_text_submit_refuses_when_mode_capture_fails
 test_send_text_submit_refuses_unproven_unknown_preparation
+test_send_text_submit_generic_unknown_composer_still_submits
 test_send_text_submit_detects_swallowed_enter
 test_send_text_submit_replays_literal_send_stderr
 test_send_text_submit_popup_autocomplete_requires_second_enter

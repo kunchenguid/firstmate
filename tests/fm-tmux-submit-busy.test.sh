@@ -216,7 +216,7 @@ test_failed_mode_capture_refuses_before_literal_text() {
   : > "$sent"
   PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
     FM_FAKE_CAPTURE_COUNT="$dir/captures" FM_FAKE_FAIL_CAPTURE_N=2 \
-    fm_tmux_submit_core "win" ": lifecycle doorbell" 3 0.05 0.05 > "$vfile" 2>/dev/null || rc=$?
+    fm_tmux_submit_core "win" ": lifecycle doorbell" 3 0.05 0.05 "" require-empty > "$vfile" 2>/dev/null || rc=$?
   [ "$rc" -ne 0 ] || fail "a failed mode capture must refuse submission"
   [ "$(cat "$vfile")" = send-failed ] \
     || fail "a failed mode capture should report send-failed, got '$(cat "$vfile")'"
@@ -284,7 +284,7 @@ test_pi_vim_normal_mode_enters_insert_before_literal_text() {
     # is covered by fm-composer-lib.test.sh. This test isolates send ordering.
     fm_tmux_composer_state() { printf 'empty'; }
     PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
-      fm_tmux_submit_core "win" ": lifecycle doorbell" 1 0.05 0.05 > "$vfile" 2>/dev/null
+      fm_tmux_submit_core "win" ": lifecycle doorbell" 1 0.05 0.05 "" require-empty > "$vfile" 2>/dev/null
   ) || rc=$?
   expect_code 0 "$rc" "blank pi-vim NORMAL recovery should submit"
   [ "$(cat "$vfile")" = empty ] \
@@ -307,7 +307,7 @@ test_pi_vim_pending_normal_refuses_without_typing() {
   (
     fm_tmux_composer_state() { printf 'pending'; }
     PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
-      fm_tmux_submit_core "win" ": lifecycle doorbell" 1 0.05 0.05 > "$vfile" 2>/dev/null
+      fm_tmux_submit_core "win" ": lifecycle doorbell" 1 0.05 0.05 "" require-empty > "$vfile" 2>/dev/null
   ) || rc=$?
   [ "$rc" -ne 0 ] || fail "pending pi-vim NORMAL must refuse submission"
   [ "$(cat "$vfile")" = send-failed ] \
@@ -329,7 +329,7 @@ test_pi_vim_insert_with_pending_text_refuses_without_typing() {
   (
     fm_tmux_composer_state() { printf 'pending'; }
     PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
-      fm_tmux_submit_core "win" ": lifecycle doorbell" 1 0.05 0.05 > "$vfile" 2>/dev/null
+      fm_tmux_submit_core "win" ": lifecycle doorbell" 1 0.05 0.05 "" require-empty > "$vfile" 2>/dev/null
   ) || rc=$?
   [ "$rc" -ne 0 ] || fail "pending pi-vim INSERT must refuse submission"
   [ "$(cat "$vfile")" = send-failed ] \
@@ -349,7 +349,7 @@ test_nonmodal_empty_composer_still_submits() {
   printf '╭─────╮\n│ >   │\n╰─────╯\n' > "$composer"
   : > "$sent"
   PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
-    fm_tmux_submit_core "win" ": lifecycle doorbell" 1 0.05 0.05 > "$vfile" 2>/dev/null || rc=$?
+    fm_tmux_submit_core "win" ": lifecycle doorbell" 1 0.05 0.05 "" require-empty > "$vfile" 2>/dev/null || rc=$?
   expect_code 0 "$rc" "proven empty nonmodal composer should submit"
   [ "$(cat "$vfile")" = empty ] \
     || fail "proven empty nonmodal submit should finish empty"
@@ -368,13 +368,31 @@ test_unknown_preparation_refuses_without_typing() {
   printf 'redrawing pane\n' > "$composer"
   : > "$sent"
   PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
-    fm_tmux_submit_core "win" ": lifecycle doorbell" 1 0.05 0.05 > "$vfile" 2>/dev/null || rc=$?
+    fm_tmux_submit_core "win" ": lifecycle doorbell" 1 0.05 0.05 "" require-empty > "$vfile" 2>/dev/null || rc=$?
   [ "$rc" -ne 0 ] || fail "unknown preparation must refuse submission"
   [ "$(cat "$vfile")" = send-failed ] \
     || fail "unknown preparation refusal should report send-failed"
   [ ! -s "$sent" ] \
     || fail "unknown preparation received lifecycle input: $(cat "$sent")"
-  pass "fm_tmux_submit_core: unknown preparation requires fresh empty proof"
+  pass "fm_tmux_submit_core: lifecycle preparation requires fresh empty proof"
+}
+
+test_generic_unknown_composer_still_submits() {
+  local dir fakebin composer sent vfile rc=0
+  dir="$TMP_ROOT/generic-unknown"
+  fakebin=$(make_submit_mock "$dir")
+  composer="$dir/composer"
+  sent="$dir/sent.log"
+  vfile="$dir/verdict"
+  printf '>\n' > "$composer"
+  : > "$sent"
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
+    fm_tmux_submit_core "win" "agy steer" 1 0.05 0.05 > "$vfile" 2>/dev/null || rc=$?
+  expect_code 0 "$rc" "generic unknown composer should retain submit behavior"
+  [ "$(cat "$vfile")" = empty ] || fail "generic unknown submit should finish empty"
+  [ "$(cat "$sent")" = $'literal:agy steer\nEnter' ] \
+    || fail "generic unknown composer received wrong input: $(cat "$sent")"
+  pass "fm_tmux_submit_core: generic Agy-style composers still submit"
 }
 
 test_pi_vim_unsupported_mode_refuses_without_typing() {
@@ -498,5 +516,6 @@ test_pi_vim_pending_normal_refuses_without_typing
 test_pi_vim_insert_with_pending_text_refuses_without_typing
 test_nonmodal_empty_composer_still_submits
 test_unknown_preparation_refuses_without_typing
+test_generic_unknown_composer_still_submits
 test_pi_vim_unsupported_mode_refuses_without_typing
 test_claude_busy_signature_uses_real_capture_shapes

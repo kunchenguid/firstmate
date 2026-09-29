@@ -3225,14 +3225,18 @@ fm_backend_herdr_composer_input_mode() {  # <target> -> insert|normal|unsupporte
   fm_composer_pi_input_mode "$cap"
 }
 
-fm_backend_herdr_prepare_text_input() {  # <target> <settle>
-  local target=$1 settle=$2 mode state
+fm_backend_herdr_prepare_text_input() {  # <target> <settle> [require-empty]
+  local target=$1 settle=$2 require_empty=${3:-} mode state
   if ! mode=$(fm_backend_herdr_composer_input_mode "$target"); then
-    printf 'error: cannot verify pi-vim input mode\n' >&2
-    return 1
+    if [ "$require_empty" = require-empty ]; then
+      printf 'error: cannot verify pi-vim input mode\n' >&2
+      return 1
+    fi
+    return 0
   fi
   case "$mode" in
     unknown)
+      [ "$require_empty" = require-empty ] || return 0
       state=$(fm_backend_herdr_composer_state "$target")
       if [ "$state" != empty ]; then
         printf 'error: refusing unproven input preparation with composer=%s\n' "$state" >&2
@@ -3479,8 +3483,9 @@ fm_backend_herdr_composer_clear() {  # <target> <text>
   return 1
 }
 
-fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle>
-  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 i=0 verdict baseline confirm_sleep
+fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label] [require-empty]
+  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 require_empty=${7:-}
+  local i=0 verdict baseline confirm_sleep
   local raw_status footer_baseline='' allow_rendered=0 enter_sent=0 identity proof=0 content
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   # Claude on Herdr is the live-verified truncation shape: Enter is withheld
@@ -3493,7 +3498,7 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
     content=$(fm_backend_herdr_composer_content "$target") \
       || { printf 'send-failed'; return 0; }
     [ -z "${content//[$' \t\r\n\v\f']/}" ] || { printf 'send-failed'; return 0; }
-  elif ! fm_backend_herdr_prepare_text_input "$target" "$settle"; then
+  elif ! fm_backend_herdr_prepare_text_input "$target" "$settle" "$require_empty"; then
     printf 'send-failed'
     return 0
   fi
