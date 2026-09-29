@@ -39,7 +39,10 @@
 #                          also carries a "demand-deep-inspection" marker so the
 #                          wake payload itself, not just repetition, forces a
 #                          closer look instead of another routine supervision
-#                          resume. Unless afk is active. A pane about to escalate
+#                          resume, and further unchanged escalations then move to
+#                          the bounded PAUSE_RESURFACE_SECS recheck cadence
+#                          instead of repeating on the wedge clock.
+#                          Unless afk is active. A pane about to escalate
 #                          that can account for its quiet - a `paused:` external
 #                          wait or a verified `captain-held` transfer its worker
 #                          declared, or, where config/wedge-defer-parked-gate
@@ -1127,9 +1130,13 @@ secondmate_liveness_tick() {
 # no longer a one-off. At the threshold, wedge_timer_check appends a
 # "demand-deep-inspection" marker to the wake payload so the wake reason itself
 # (not just repetition the supervisor has to notice on its own) forces a closer
-# look instead of another routine supervision resume. Reset wherever a window's
-# pane/hash state resets to genuinely active (see the two rm-on-reset call sites
-# below).
+# look instead of another routine supervision resume. Past the threshold the
+# closer look is already demanded, so an unchanged pane moves to the bounded
+# PAUSE_RESURFACE_SECS recheck cadence rather than re-escalating every
+# STALE_ESCALATE_SECS; this file's own mtime is that cadence's throttle, which is
+# why the counter is written only when an escalation actually fires. Reset
+# wherever a window's pane/hash state resets to genuinely active (see the two
+# rm-on-reset call sites below), which also restores the ordinary ladder.
 FM_WEDGE_DEMAND_INSPECT_COUNT=${FM_WEDGE_DEMAND_INSPECT_COUNT:-3}
 
 # One bounded re-surface for a pane the watcher is deliberately absorbing, so no
@@ -1530,7 +1537,21 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
         if wedge_dead_record "$win" "$since_file" "$label" "$age" "$hash" "$task"; then
           return 0
         fi
-        n=$(( $(cat "$escalation_file" 2>/dev/null || echo 0) + 1 ))
+        n=$(cat "$escalation_file" 2>/dev/null || echo 0)
+        # Past the demand threshold the closer look is already demanded and the
+        # pane has not changed since, so repeating it on the STALE_ESCALATE_SECS
+        # clock adds nothing a supervisor can act on: drop to the same bounded
+        # PAUSE_RESURFACE_SECS recheck every other absorb here uses, throttled by
+        # the counter file's own mtime (the moment of the last escalation), so the
+        # window still cannot rot invisibly. Any pane change clears the counter
+        # upstream and restores the ordinary ladder.
+        if [ "$n" -ge "$FM_WEDGE_DEMAND_INSPECT_COUNT" ] \
+          && [ "$(age_of "$escalation_file")" -lt "$PAUSE_RESURFACE_SECS" ]; then
+          date +%s > "$since_file"
+          triage_log "absorbed $label (deep inspection already demanded at escalation $n, idle ${age}s, rechecked on a long cadence): $win"
+          return 0
+        fi
+        n=$(( n + 1 ))
         echo "$n" > "$escalation_file"
         reason="stale: $win (idle ${age}s, possible wedge, escalation $n)"
         if [ "$n" -ge "$FM_WEDGE_DEMAND_INSPECT_COUNT" ]; then
