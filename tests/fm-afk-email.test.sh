@@ -468,6 +468,71 @@ PY
   pass "captain outcomes batch with full URLs and redaction, while reply codes are item-bound, one-use, and sender-checked"
 }
 
+test_completed_pending_handoff_verifies_after_return_without_reopening_replies() {
+  local home entered request_id note_json note_id verification out reply_body note_count
+  home=$(make_home pending-handoff-after-return configured)
+  run_contract "$home" FM_TEST_HARNESS=pi >/dev/null 2>&1 || fail "configured entry failed"
+  entered=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$REPO/bin/fm-afk-contract.sh" field entered_epoch)
+  request_id=afk-email-1-111111111111111111111111
+  note_json=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$REPO" \
+    "$REPO/bin/fm-inbox.sh" note --request-id "$request_id" --json "reply requires verification") \
+    || fail "could not create a note for the persisted pending handoff"
+  note_id=$(printf '%s' "$note_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$REPO" \
+    "$REPO/bin/fm-inbox.sh" show "$note_id" > "$home/note-body" \
+    || fail "could not read the persisted handoff note"
+  python3 - "$home/state" "$home/note-body" "$entered" "$note_id" "$request_id" <<'PY'
+import hashlib, json, sys
+from pathlib import Path
+state, body_path, entered, note_id, request_id = sys.argv[1:]
+entered = int(entered)
+body = Path(body_path).read_text(encoding="utf-8")
+mail_key = request_id.rsplit("-", 1)[1]
+pending = Path(state) / "afk-email" / "pending"
+pending.mkdir(parents=True, exist_ok=True)
+def item(seq, task, token):
+    return {
+        "seq": seq,
+        "task": task,
+        "summary": "captain outcome",
+        "away_epoch": entered,
+        "token": token,
+        "token_hash": hashlib.sha256(token.encode("ascii")).hexdigest(),
+        "send_started_epoch": entered + 1,
+        "send_expires_epoch": entered + 86401,
+    }
+completed = item(1, "ui", "FM-AFK-AAAAAAAAAAAAAAAA")
+completed.update({
+    "handoff_request_id": request_id,
+    "handoff_mail_key": mail_key,
+    "handoff_body_hash": hashlib.sha256(body.encode("utf-8")).hexdigest(),
+    "used_epoch": entered + 2,
+    "used_mail_key": mail_key,
+    "used_request_id": request_id,
+    "used_note_id": note_id,
+})
+(pending / "1.json").write_text(json.dumps(completed), encoding="utf-8")
+(pending / "2.json").write_text(json.dumps(item(2, "api", "FM-AFK-BBBBBBBBBBBBBBBB")), encoding="utf-8")
+PY
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$REPO" \
+    "$REPO/bin/fm-afk-contract.sh" archive >/dev/null || fail "away posture archive failed"
+  verification=$(run_email "$home" verify-note "$note_id") \
+    || fail "completed pending handoff could not be verified after return: $verification"
+  python3 - "$verification" "$note_id" <<'PY'
+import json, sys
+result = json.loads(sys.argv[1])
+assert result["email_handoff"] and result["verified"], result
+assert result["id"] == sys.argv[2] and result["seq"] == 1 and result["task"] == "ui", result
+PY
+  reply_body='FM-AFK-REPLY FM-AFK-BBBBBBBBBBBBBBBB\nnew after-return reply'
+  out=$(printf '[{"uidvalidity":"44","uid":"78","from":"%s","body":"%s"}]' \
+    "$AFK_OWNER_EMAIL" "$reply_body" | run_email "$home" receive-batch 2>&1) \
+    || fail "post-return mail poll failed: $out"
+  note_count=$(find "$home/state/inbox" -maxdepth 1 -name '*.note' -print | wc -l | tr -d ' ')
+  [ "$note_count" = 1 ] || fail "post-return reply intake created a new note"
+  pass "completed pending handoffs verify after return while new replies stay closed"
+}
+
 test_unreadable_token_state_keeps_reply_retryable() {
   local home entered out send_index token reply_body
   home=$(make_home unreadable-token-state configured)
@@ -2202,6 +2267,7 @@ test_away_mail_requires_gmail_and_nonblank_settings
 
 
 test_batched_mail_redacts_secrets_and_replies_are_item_bound
+test_completed_pending_handoff_verifies_after_return_without_reopening_replies
 test_unreadable_token_state_keeps_reply_retryable
 test_unmatched_reply_request_id_is_untrusted_and_ackable
 

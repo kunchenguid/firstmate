@@ -727,14 +727,11 @@ def validate_handoff_state_item(path, store):
             or not re.fullmatch(r"[a-f0-9]{24}", used_mail_key)
         ):
             raise ValueError("away-email state is malformed")
-    if present_used_fields and present_handoff_fields and item["used_mail_key"] != item["handoff_mail_key"]:
-        raise ValueError("away-email state is malformed")
     if present_used_handoff_fields:
         if (
             not present_handoff_fields
             or not isinstance(item["used_request_id"], str)
             or item["used_request_id"] != item["handoff_request_id"]
-            or item["used_mail_key"] != item["handoff_mail_key"]
             or not isinstance(item["used_note_id"], str)
             or not NOTE_ID_RE.fullmatch(item["used_note_id"])
         ):
@@ -742,14 +739,13 @@ def validate_handoff_state_item(path, store):
     return item
 
 
-def handoff_record(request_id, sent_only=False):
+def handoff_record(request_id):
 
 
     requested_id = request_id if isinstance(request_id, str) and request_id else None
     matches = []
-    stores = (("sent", SENT),) if sent_only else (("sent", SENT), ("pending", PENDING))
     with afk_state_lock():
-        for store, directory in stores:
+        for store, directory in (("sent", SENT), ("pending", PENDING)):
             try:
                 paths = sorted(directory.iterdir())
             except FileNotFoundError:
@@ -810,7 +806,7 @@ def verify_note(note_id):
 
 
     try:
-        item = handoff_record(request_id, sent_only=posture is None)
+        item = handoff_record(request_id)
 
 
     except (OSError, ValueError):
