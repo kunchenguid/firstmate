@@ -10,7 +10,7 @@
 #   2. the session-start digest reaches model context before the first turn
 #      and the session lock names the omp process (ancestry detection);
 #   3. fm_watch_arm_omp starts a real watcher, an actionable close spawns a
-#      ledger-linked successor, and the wake arrives as one follow-up turn;
+#      ledger-linked successor, and the wake arrives as one wake turn;
 #   4. with the successor watcher frozen until its beacon passes the lab grace,
 #      the next turn end is genuinely unsupervised, so session_stop must compel
 #      the turn-end guard continuation and the model reaches for the tool.
@@ -238,7 +238,7 @@ while [ "$i" -lt 240 ]; do
 done
 grep -Eq 'reason=actionable-signal.*successor=started:[0-9]+' "$PROJECT/state/.watch-cycle-exits.log" 2>/dev/null \
   || fail "omp extension did not start and ledger-link a successor after the actionable close"
-wait_for_log "FIRSTMATE WATCHER WAKE: signal:" 240 || fail "the actionable close was not delivered to main as a watcher follow-up"
+wait_for_log "FIRSTMATE WATCHER WAKE: signal:" 240 || fail "the actionable close was not delivered to main as a watcher wake"
 wait_for_agent_ends 3 360 || fail "omp did not finish the wake turn"
 arm_calls=$(tool_call_count fm_watch_arm_omp)
 [ "$arm_calls" -eq 1 ] || fail "the model re-armed from memory instead of the extension (fm_watch_arm_omp call count $arm_calls)"

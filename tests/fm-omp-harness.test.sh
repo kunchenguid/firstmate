@@ -28,11 +28,14 @@
 #   6. The turn-end guard extension compels one continuation on exit 2 and
 #      stands down when the payload already carries stop_hook_active.
 #   7. The watch extension arms through fm_watch_arm_omp and delivers an
-#      actionable close as one follow-up. After a plain agent_end it recovers a
-#      wake an interrupted run left unsent: a wake an Escape restored into the
-#      editor leaves the editor exactly and is delivered again once, and wakes
-#      an empty Enter stranded in omp's queue earn one distinct steer. A fake
-#      host cannot reproduce omp's restore, so only this policy is pinned here;
+#      actionable close as one wake: a follow-up while omp runs, and a plain
+#      user message that starts its own turn while omp is idle, even when the
+#      conversation ends in an advisor note rather than an assistant reply.
+#      After a plain agent_end it recovers a wake an interrupted run left
+#      unsent: a wake an Escape restored into the editor leaves the editor
+#      exactly and is delivered again once, and wakes an empty Enter stranded
+#      in omp's queue earn one distinct steer. A fake host cannot reproduce
+#      omp's queue, restore, or advisor, so only this policy is pinned here;
 #      FM_OMP_INTERRUPT_LIVE_E2E=1 tests/fm-omp-interrupt-live-e2e.test.sh
 #      re-checks the omp behavior it assumes.
 set -u
@@ -676,8 +679,10 @@ await settle();
 if (editorWrites.length !== 1 || editorWrites[0] !== expected) {
   throw new Error(`the editor must lose exactly the wake text: ${JSON.stringify(editorWrites)}`);
 }
-if (sent.length !== 2 || sent[1].m !== wake || sent[1].o?.deliverAs !== "followUp") {
-  throw new Error(`the wake must go out once more as the same follow-up: ${JSON.stringify(sent.slice(1))}`);
+// omp is idle after the settle wait, so the recovered wake goes out as a plain
+// user message that starts its own turn, never as an idle follow-up.
+if (sent.length !== 2 || sent[1].m !== wake || sent[1].o !== undefined) {
+  throw new Error(`the wake must go out once more as the same plain message: ${JSON.stringify(sent.slice(1))}`);
 }
 const arms = readFileSync(process.env.FM_ARM_LOG, "utf8").split("\n").filter((row) => row.startsWith("arm="));
 if (arms.length !== 2) throw new Error(`redelivery must reuse the running successor, saw ${arms.length} arm launches`);
@@ -770,6 +775,120 @@ EOF
   expect_code 0 "$status" "omp watch extension empty-Enter recovery: $out"
   [ -z "$out" ] || fail "omp watch extension empty-Enter recovery test printed output: $out"
   pass ".omp watch extension: wakes an empty Enter stranded earn one distinct steer and are consumed once"
+}
+
+# omp starts a turn for a follow-up queued while it is idle only when the
+# conversation ends in an assistant reply or a tool result, and its advisor
+# appends a note after a final answer, so an idle main once kept every wake
+# queued until someone typed. The fake host below applies those delivery rules
+# (the idle case of tests/fm-omp-interrupt-live-e2e.test.sh re-checks them
+# against a real omp): each wake to an idle main must start its own turn
+# whatever the conversation ends in, and a wake that arrives mid-run must wait
+# for that run to finish rather than interrupt it.
+test_watch_extension_starts_a_turn_for_an_idle_wake() {
+  local repo home out status
+  repo="$TMP_ROOT/watch-idle/repo"; home="$TMP_ROOT/watch-idle/home"
+  install_omp_extension_fixture "$repo"
+  mkdir -p "$home/state"
+  # Arm cycle n closes with wake n once the test creates state/.fire-<n>.
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = --handling-delivered ] && exit 0
+n=$(( $(cat "${FM_HOME:?}/state/.arm-count" 2>/dev/null || echo 0) + 1 ))
+printf '%s\n' "$n" > "$FM_HOME/state/.arm-count"
+printf 'watcher: started pid=%s (beacon 0s) recovery-generation=gen-%s\n' "$$" "$n"
+while [ ! -e "$FM_HOME/state/.fire-$n" ]; do sleep 0.05; done
+printf 'signal: omp-idle wake %s\n' "$n"
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_OMP_ARM_READY_TIMEOUT_MS=3000 \
+    FM_WATCH_REARM_RETRY_LIMIT=1 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 \
+    EXT="$repo/.omp/extensions/fm-primary-omp-watch.ts" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+import { writeFileSync, existsSync } from "node:fs";
+const state = `${process.env.FM_HOME}/state`;
+writeFileSync(`${state}/.lock`, `${process.pid}\n`);
+const handoff = `${state}/extensions/omp-primary-watch/session-replacement-actionable.json`;
+const handlers = new Map();
+// The fake omp: a run is open while streaming; the conversation's last
+// message decides whether an idle follow-up can start a turn.
+let streaming = false; let tail = "assistant";
+const followUps = []; const turns = []; const interruptions = [];
+const ctx = { isIdle: () => !streaming, hasPendingMessages: () => followUps.length > 0 };
+const userStart = (text) => handlers.get("message_start")({ type: "message_start", message: { role: "user", content: [{ type: "text", text }] } }, ctx);
+const startRun = async (text) => {
+  streaming = true;
+  await handlers.get("before_agent_start")({ type: "before_agent_start", prompt: text }, ctx);
+  await userStart(text);
+  turns.push(text);
+};
+// The run's loop takes queued follow-ups before it ends with a final answer.
+const endRun = async () => {
+  while (followUps.length > 0) {
+    const next = followUps.shift();
+    await userStart(next);
+    turns.push(next);
+  }
+  streaming = false; tail = "assistant";
+  await handlers.get("agent_end")({ type: "agent_end" }, ctx);
+};
+const pi = {
+  on(e, h) { handlers.set(e, h); },
+  registerCommand() {},
+  registerTool() {},
+  sendUserMessage(m, o) {
+    if (o?.deliverAs === "followUp") {
+      followUps.push(m);
+      if (!streaming && (tail === "assistant" || tail === "toolResult")) {
+        setTimeout(async () => { await startRun(followUps.shift()); await endRun(); }, 5);
+      }
+    } else if (o?.deliverAs !== undefined) {
+      throw new Error(`unexpected delivery mode ${o.deliverAs}`);
+    } else if (streaming) {
+      interruptions.push(m);
+    } else {
+      setTimeout(async () => { await startRun(m); await endRun(); }, 5);
+    }
+    return undefined;
+  },
+};
+const waitFor = async (what, check) => {
+  for (let i = 0; i < 80; i += 1) {
+    if (check()) return;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  throw new Error(`${what}; turns ${JSON.stringify(turns)}, queued follow-ups ${JSON.stringify(followUps)}, interruptions ${JSON.stringify(interruptions)}`);
+};
+const wakeTurn = (n) => turns.some((t) => t.includes(`FIRSTMATE WATCHER WAKE: signal: omp-idle wake ${n}\n`));
+const mod = await import(pathToFileURL(process.env.EXT).href);
+mod.default(pi);
+await handlers.get("session_start")({ type: "session_start" }, ctx);
+// The captain's turn ends with a final answer, then the advisor appends its
+// note: main is idle and the conversation no longer ends in an assistant reply.
+await startRun("captain: what is the fleet doing?");
+await endRun();
+tail = "custom";
+for (const n of [1, 2]) {
+  writeFileSync(`${state}/.fire-${n}`, "");
+  await waitFor(`idle wake ${n} never started a turn`, () => wakeTurn(n) && !streaming);
+  tail = "custom";
+}
+// A wake that arrives mid-run waits for the run instead of interrupting it.
+await startRun("captain: a long task");
+writeFileSync(`${state}/.fire-3`, "");
+await waitFor("the mid-run wake was never handed to omp", () => followUps.length > 0 || interruptions.length > 0);
+if (interruptions.length > 0 || wakeTurn(3)) throw new Error(`a mid-run wake interrupted the run: ${JSON.stringify(interruptions)}`);
+await endRun();
+if (!wakeTurn(3)) throw new Error(`the mid-run wake did not follow the run: ${JSON.stringify(turns)}`);
+await handlers.get("session_shutdown")({}, {});
+if (existsSync(handoff)) throw new Error("every delivered wake was consumed, so none may ride the replacement handoff");
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "omp watch extension idle delivery: $out"
+  [ -z "$out" ] || fail "omp watch extension idle delivery test printed output: $out"
+  pass ".omp watch extension: each wake to an idle main starts a turn even after an advisor note, and a mid-run wake waits for the run"
 }
 
 # An opted-in home spawns the supervision host in the arm's place; its streamed
@@ -1000,6 +1119,7 @@ test_turnend_guard_extension_compels_one_continuation
 test_watch_extension_arms_and_delivers
 test_watch_extension_recovers_a_wake_an_escape_restored
 test_watch_extension_steers_past_a_wake_an_empty_enter_stranded
+test_watch_extension_starts_a_turn_for_an_idle_wake
 test_watch_extension_runs_the_supervision_host
 test_watch_extension_replays_a_host_only_boundary_across_replacement
 test_watch_extension_delivers_a_split_host_close_whole

@@ -47,15 +47,25 @@
 // Stale callbacks from a prior generation are no-ops against the active replacement.
 //
 // Delivery versus consumption (stated once here):
-// A main follow-up is delivered once omp accepts it (sendUserMessage returns).
-// The successor pipeline never waits for the model to read it: a follow-up
-// queued while main is streaming joins the running run without ever raising
-// before_agent_start, so waiting on that event stalls every later close.
-// Consumption is tracked only so a replacement can replay a follow-up omp had
-// not consumed. An idle main consumes at before_agent_start; a streaming main
-// consumes at the user message_start carrying the exact wake text; either
-// event finishes the pending record, and a still-unconsumed record rides the
-// replacement handoff.
+// A wake is delivered once omp accepts it (sendUserMessage returns). While
+// main is streaming, the wake is a follow-up that joins the running run
+// without interrupting it. While main is idle (isIdle() on the latest handler
+// context), the wake is a plain user message, which omp starts as a turn at
+// once. An idle follow-up is not enough: omp starts a turn for a follow-up
+// queued while idle only when the conversation ends in an assistant reply or
+// a tool result, and omp's advisor appends its note after a final answer, so
+// an idle follow-up waited in omp's queue until someone typed (seen on omp
+// 18.3.5, 18.4.2, and 18.4.3; the idle case of
+// tests/fm-omp-interrupt-live-e2e.test.sh re-checks it). With no handler
+// context yet, the wake stays a follow-up.
+// The successor pipeline never waits for the model to read a wake: a
+// follow-up queued while main is streaming joins the running run without ever
+// raising before_agent_start, so waiting on that event stalls every later
+// close. Consumption is tracked only so a replacement can replay a wake omp
+// had not consumed. An idle main consumes at before_agent_start; a streaming
+// main consumes at the user message_start carrying the exact wake text;
+// either event finishes the pending record, and a still-unconsumed record
+// rides the replacement handoff.
 //
 // Interrupted-run recovery (stated once here):
 // A follow-up waits in omp's queue until the run ends. An Escape while omp
@@ -575,6 +585,9 @@ process.once("exit", cleanupOnProcessExit);
 export default function (pi: ExtensionAPI) {
   let generation = createGeneration();
   activateGeneration(generation);
+  // The latest handler context omp passed in; its isIdle() picks how a wake is
+  // delivered (header: "Delivery versus consumption").
+  let latestContext: OmpHandlerContext | undefined;
 
   async function sendWake(
     owner: SessionGeneration,
@@ -588,7 +601,8 @@ export default function (pi: ExtensionAPI) {
     );
     if (pending) owner.unconsumedWakes.set(pending.token, { content, pending });
     try {
-      await pi.sendUserMessage(content, { deliverAs: "followUp" });
+      const idle = latestContext?.isIdle?.() === true;
+      await pi.sendUserMessage(content, idle ? undefined : { deliverAs: "followUp" });
     } catch (error) {
       if (pending) owner.unconsumedWakes.delete(pending.token);
       throw error;
@@ -600,8 +614,8 @@ export default function (pi: ExtensionAPI) {
     return generationIsLive(owner);
   }
 
-  // omp consumed a main follow-up: an idle main at before_agent_start, a
-  // streaming main at the user message_start that joins the running run.
+  // omp consumed a main wake: an idle main at before_agent_start, a streaming
+  // main at the user message_start that joins the running run.
   function consumeWake(owner: SessionGeneration, text: string): void {
     for (const [token, wake] of owner.unconsumedWakes) {
       if (wake.content !== text) continue;
@@ -1162,15 +1176,18 @@ export default function (pi: ExtensionAPI) {
     return result;
   }
 
-  pi.on?.("before_agent_start", (event) => {
+  pi.on?.("before_agent_start", (event, ctx) => {
+    latestContext = ctx ?? latestContext;
     consumeWake(generation, String((event as { prompt?: unknown })?.prompt ?? ""));
   });
-  pi.on?.("message_start", (event) => {
+  pi.on?.("message_start", (event, ctx) => {
+    latestContext = ctx ?? latestContext;
     const message = (event as { message?: { role?: unknown; content?: unknown } })?.message;
     if (!message || message.role !== "user") return;
     consumeWake(generation, userMessageText(message.content));
   });
   pi.on?.("agent_end", (event, ctx) => {
+    latestContext = ctx ?? latestContext;
     if (event && typeof event === "object" && "willContinue" in event && event.willContinue === true) return;
     const owner = generation;
     void recoverInterruptedRun(owner, ctx).catch((error) => {
@@ -1179,7 +1196,8 @@ export default function (pi: ExtensionAPI) {
     });
   });
 
-  pi.on?.("session_start", async () => {
+  pi.on?.("session_start", async (_event, ctx) => {
+    latestContext = ctx ?? latestContext;
     if (generation.stopping) generation = createGeneration();
     activateGeneration(generation);
     markLoaded();
