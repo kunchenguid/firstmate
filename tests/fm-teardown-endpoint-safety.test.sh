@@ -690,6 +690,25 @@ test_returned_slot_submodules_follow_the_returned_base() {
     "synced returned worktree: submodule 'ui' is checked out at $SUB_PIN1, but this base records $SUB_PIN2" \
     "teardown did not report the submodule pin it synced"
 
+  # A landed pin is proven by any remote-tracking ref; no remote HEAD ref is needed.
+  dir=$(make_case slot-submodule-no-remote-head)
+  mark_case_as_treehouse_pool_with_submodule "$dir"
+  add_resetting_treehouse "$dir"
+  slot="$dir/pool/1/project"
+  git -C "$slot/ui" remote set-head origin --delete >/dev/null
+  [ -z "$(git -C "$slot/ui" for-each-ref 'refs/remotes/*/HEAD')" ] \
+    || fail "the fixture still has a remote HEAD ref"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  FM_FAKE_RETURN_BASE=$BASE_SHA run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "a submodule without a remote HEAD ref failed the teardown: $(cat "$dir/stderr")"
+  [ "$(git -C "$slot/ui" rev-parse HEAD)" = "$SUB_PIN2" ] \
+    || fail "teardown did not sync a landed pin for lack of a remote HEAD ref"
+  [ -z "$(git -C "$slot" status --porcelain)" ] \
+    || fail "the slot is dirty: $(git -C "$slot" status --porcelain)"
+  pass "fm-teardown: a landed submodule pin syncs without a remote HEAD ref"
+
   # A submodule commit that exists nowhere else is left where the task left it.
   dir=$(make_case slot-submodule-unpushed)
   mark_case_as_treehouse_pool_with_submodule "$dir"
@@ -710,28 +729,8 @@ test_returned_slot_submodules_follow_the_returned_base() {
     "teardown did not say it left the unsyncable slot alone"
   pass "fm-teardown: a returned slot's submodules follow the returned base, and unpushed submodule work is left alone"
 
-  # A commit reachable only through a stale non-default remote-tracking ref has
-  # not landed, so it is left where the task left it.
-  dir=$(make_case slot-submodule-stale-ref)
-  mark_case_as_treehouse_pool_with_submodule "$dir"
-  add_resetting_treehouse "$dir"
-  slot="$dir/pool/1/project"
-  printf 'abandoned\n' > "$slot/ui/abandoned.txt"
-  git -C "$slot/ui" add abandoned.txt
-  git -C "$slot/ui" -c user.name=test -c user.email=test@example.invalid commit -qm abandoned
-  unpushed=$(git -C "$slot/ui" rev-parse HEAD)
-  git -C "$slot/ui" update-ref refs/remotes/origin/abandoned "$unpushed"
-  fm_write_meta "$dir/home/state/$id.meta" \
-    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
-    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
-  FM_FAKE_RETURN_BASE=$BASE_SHA run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" \
-    || fail "a stale remote-tracking ref failed the teardown: $(cat "$dir/stderr")"
-  [ "$(git -C "$slot/ui" rev-parse HEAD)" = "$unpushed" ] \
-    || fail "teardown moved a submodule off a commit only a stale remote-tracking ref holds"
-  pass "fm-teardown: a stale remote-tracking ref does not make submodule work safe to move"
-
-  # Nested submodules are never moved by the sync: the returned base's pin moves
-  # the top-level submodule only, and the slot is left for the operator to judge.
+  # Nested submodules follow their moved parent pin once each passes the same
+  # safety check, so the returned slot ends clean.
   dir=$(make_case slot-submodule-nested)
   mark_case_as_treehouse_pool_with_submodule "$dir"
   add_resetting_treehouse "$dir"
@@ -771,9 +770,11 @@ test_returned_slot_submodules_follow_the_returned_base() {
     || fail "a nested submodule failed the teardown: $(cat "$dir/stderr")"
   [ "$(git -C "$slot/ui" rev-parse HEAD)" = "$x2" ] \
     || fail "teardown did not move the top-level submodule onto the base's pin"
-  [ "$(git -C "$slot/ui/deep" rev-parse HEAD)" = "$d1" ] \
-    || fail "teardown moved a nested submodule that nothing checked"
-  pass "fm-teardown: nested submodules are not moved by the sync"
+  [ "$(git -C "$slot/ui/deep" rev-parse HEAD)" = "$d2" ] \
+    || fail "teardown left the nested submodule on its old pin"
+  [ -z "$(git -C "$slot" status --porcelain)" ] \
+    || fail "the slot is dirty: $(git -C "$slot" status --porcelain)"
+  pass "fm-teardown: nested submodules follow the moved pin and the slot ends clean"
 
   # A final status that fails must not read as a clean, synced slot.
   dir=$(make_case slot-submodule-status-fails)

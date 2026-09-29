@@ -741,28 +741,22 @@ test_stale_submodule_pin_of_unknown_origin_explains_itself() {
   pass "a stale submodule pin of unknown origin refuses while naming both pins and no remedy"
 }
 
-# The remaining cases run in a Treehouse slot the spawn acquires, where stale-pin
-# residue would be synced, to prove real work never passes for that residue.
-test_stale_remote_tracking_ref_does_not_make_submodule_work_safe_to_move() {
-  local rec id out status unpushed
-  id='pool-sub-stale-ref-r18'
-  rec=$(make_submodule_case sub-stale-ref "$id" slot)
+test_landed_submodule_pin_syncs_without_a_remote_head_ref() {
+  local rec id out status
+  id='pool-sub-no-head-r19'
+  rec=$(make_submodule_case sub-no-head "$id" slot)
   read_submodule_case "$rec"
+  git -C "$POOL_DIR/ui" remote set-head origin --delete >/dev/null
   strand_submodule_pin_like_treehouse
-  printf 'abandoned submodule work\n' > "$POOL_DIR/ui/abandoned.txt"
-  git -C "$POOL_DIR/ui" add abandoned.txt
-  git -C "$POOL_DIR/ui" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
-    commit -qm abandoned-submodule-work
-  unpushed=$(git -C "$POOL_DIR/ui" rev-parse HEAD)
-  # A leftover tracking ref of a branch the remote no longer has still contains it.
-  git -C "$POOL_DIR/ui" update-ref refs/remotes/origin/abandoned "$unpushed"
 
   out=$(run_submodule_spawn "$id" --mode no-mistakes --yolo off)
   status=$?
-  [ "$status" -ne 0 ] || fail "spawn launched from a slot whose submodule commit only a stale tracking ref holds"
-  [ "$(git -C "$POOL_DIR/ui" rev-parse HEAD)" = "$unpushed" ] \
-    || fail "spawn moved the submodule off a commit only a stale tracking ref holds"
-  pass "a submodule commit held only by a stale remote-tracking ref is not moved"
+  expect_code 0 "$status" "a landed pin without a remote HEAD ref should be synced"$'\n'"$out"
+  [ "$(git -C "$POOL_DIR/ui" rev-parse HEAD)" = "$SUBPIN2" ] \
+    || fail "the spawn did not move the submodule onto the base's pin"
+  [ -z "$(git -C "$POOL_DIR" status --porcelain)" ] \
+    || fail "the synced slot is not clean: $(git -C "$POOL_DIR" status --porcelain)"
+  pass "a landed submodule pin syncs without a remote HEAD ref"
 }
 
 test_unpushed_submodule_commit_is_still_uncommitted_work() {
@@ -965,7 +959,7 @@ test_update_none_submodule_stays_unpopulated
 test_uninitializable_submodule_warns_and_launches
 test_unfetchable_submodule_pin_refuses
 test_stale_submodule_pin_of_unknown_origin_explains_itself
-test_stale_remote_tracking_ref_does_not_make_submodule_work_safe_to_move
+test_landed_submodule_pin_syncs_without_a_remote_head_ref
 test_unpushed_submodule_commit_is_still_uncommitted_work
 test_work_inside_submodule_is_still_uncommitted_work
 test_stale_pin_carrying_real_work_is_not_called_stale

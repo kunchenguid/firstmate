@@ -1568,7 +1568,7 @@ fm_treehouse_slot_owner_release() {  # <worktree> <task-id>
 # checked out at <have>, but this base records <want>", for the caller to report.
 # Both are left empty whenever the test fails.
 fm_submodule_stale_pins() {  # <worktree> <porcelain-status>
-  local worktree=$1 status=$2 line path want have prefix unpushed heads lines=
+  local worktree=$1 status=$2 line path want have prefix unpushed lines=
   local -a paths=()
   FM_SUBMODULE_STALE_PIN_LINES=
   FM_SUBMODULE_STALE_PIN_PATHS=()
@@ -1584,12 +1584,9 @@ fm_submodule_stale_pins() {  # <worktree> <porcelain-status>
     want=$(git -C "$worktree" rev-parse --verify --quiet "HEAD:$path" 2>/dev/null) || return 1
     have=$(git -C "$worktree/$path" rev-parse --verify --quiet HEAD 2>/dev/null) || return 1
     [ "$want" != "$have" ] || return 1
-    # Only a remote's default-branch ref proves a commit landed; any other
-    # remote-tracking ref may be a stale leftover of an abandoned branch.
-    heads=$(git -C "$worktree/$path" for-each-ref --format='%(refname)' 'refs/remotes/*/HEAD' 2>/dev/null) || return 1
-    [ -n "$heads" ] || return 1
-    # shellcheck disable=SC2086 # Ref names hold no whitespace.
-    unpushed=$(git -C "$worktree/$path" log --format=%H --max-count=1 "$have" --not $heads -- 2>/dev/null) || return 1
+    # A commit reachable from a remote-tracking ref has landed; one reachable
+    # from none is of unknown origin and is never moved.
+    unpushed=$(git -C "$worktree/$path" log --format=%H --max-count=1 "$have" --not --remotes -- 2>/dev/null) || return 1
     [ -z "$unpushed" ] || return 1
     paths+=("$path")
     lines+="submodule '$path' is checked out at $have, but this base records $want"$'\n'
@@ -1604,15 +1601,33 @@ EOF
 }
 
 # Check the pins fm_submodule_stale_pins just approved out at the commits the
-# worktree's HEAD records, fetching a missing commit on demand. Only those paths
-# are touched, never their nested submodules, always on a detached HEAD (see above). Returns git's own verdict;
-# callers read the worktree's status afterwards to decide what it means.
+# worktree's HEAD records, fetching a missing commit on demand, then do the same
+# for each moved submodule's nested pins, each passing the same test first (a
+# nested submodule that fails it is left untouched). Always on a detached HEAD
+# (see above). Returns git's own verdict; callers read the worktree's status
+# afterwards to decide what it means.
 fm_submodule_sync_stale_pins() {  # <worktree>
   local worktree=$1
   # The lines and the paths are set together, and an unset array trips `set -u`.
   [ -n "${FM_SUBMODULE_STALE_PIN_LINES:-}" ] || return 0
-  git -C "$worktree" submodule --quiet update --checkout -- \
-    "${FM_SUBMODULE_STALE_PIN_PATHS[@]}" >/dev/null
+  local -a paths=("${FM_SUBMODULE_STALE_PIN_PATHS[@]}")
+  local path
+  git -C "$worktree" submodule --quiet update --checkout -- "${paths[@]}" >/dev/null || return 1
+  for path in "${paths[@]}"; do
+    fm_submodule_sync_nested_pins "$worktree/$path" || return 1
+  done
+}
+
+fm_submodule_sync_nested_pins() {  # <submodule-dir>
+  local dir=$1 status path
+  status=$(git -C "$dir" status --porcelain 2>/dev/null) || return 0
+  [ -n "$status" ] || return 0
+  fm_submodule_stale_pins "$dir" "$status" || return 0
+  local -a paths=("${FM_SUBMODULE_STALE_PIN_PATHS[@]}")
+  git -C "$dir" submodule --quiet update --checkout -- "${paths[@]}" >/dev/null || return 1
+  for path in "${paths[@]}"; do
+    fm_submodule_sync_nested_pins "$dir/$path" || return 1
+  done
 }
 
 fm_failure_episode_reset() {
