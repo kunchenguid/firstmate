@@ -2791,7 +2791,8 @@ parked_watch_round() {  # <state> <fakebin> <out> <capture> <window> <exit|absor
     FM_FAKE_CREW_STATE='state: paused · source: status-log · parked' \
     FM_WATCH_HANDLING_SUCCESSOR=1 \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
-    FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_PAUSE_RESURFACE_SECS=999 FM_CAPTAIN_HOLD_RESURFACE_SECS=999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
   pid=$!
   if [ "$mode" = exit ]; then
