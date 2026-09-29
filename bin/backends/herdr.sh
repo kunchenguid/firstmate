@@ -19,9 +19,10 @@
 # workspace is a non-authoritative visual projection containing only the normal
 # task pane. Its random token and mutable label never authorize lookup,
 # adoption, reuse, closure, deletion, task ownership, or endpoint selection.
-# A version 2 journal can participate in replacing only its exact same-identity
-# endpoint after metadata, home, session, workspace, tab, pane, parent, shape,
-# focus, and agent-absence checks all agree under the session lock.
+# A journal with the complete compatible binding fields can participate in
+# replacing only its exact same-identity endpoint after metadata, home,
+# session, workspace, tab, pane, parent, shape, focus, and agent-absence checks
+# all agree under the session lock; its version label is diagnostic.
 # Every ambiguous recovered launch uses the default flat home workspace when
 # duplicate-agent risk is independently absent.
 # Target resolution stays parallel to the tmux adapter in both layouts.
@@ -138,6 +139,8 @@ FM_BACKEND_HERDR_ESCALATED_PREFIX=".herdr-escalated-"
 # Version 2 additionally binds the successful projection's exact home,
 # session, workspace, tab, pane, parent, and presentation labels so a resumed
 # spawn can replace one verified agent-free husk under the session lock.
+# Readers classify these capabilities from complete field groups rather than
+# requiring a known version label, and retain unknown additive fields.
 # No send, capture, Treehouse, or general task-ownership path reads it.
 FM_BACKEND_HERDR_PRESENTATION_JOURNAL_SUFFIX=".herdr-presentation"
 
@@ -751,8 +754,8 @@ fm_backend_herdr_projection_bind_execution() { # <journal> <task> <spawn-gen>
   mv -f "$tmp" "$journal"
 }
 
-# fm_backend_herdr_projection_journal_token: validate and read either journal
-# version's non-authoritative visual correlator.
+# fm_backend_herdr_projection_journal_token: validate a compatible journal and
+# read its non-authoritative visual correlator.
 fm_backend_herdr_projection_journal_token() {  # <journal> <task-id>
   fm_backend_herdr_projection_journal_snapshot "$1" "$2" || return 1
   printf '%s' "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID"

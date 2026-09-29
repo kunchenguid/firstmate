@@ -123,11 +123,12 @@
 # own is removed by a refusal; reconcile whichever record is wrong and re-run.
 # Retired backend and worktree ownership records refuse before cleanup;
 # an old provider-owned copy is never returned through Treehouse.
-# A Herdr presentation journal never authorizes cleanup. Teardown still closes
-# only the exact task pane from ordinary endpoint metadata and never calls
-# `workspace close`. It retires the non-authoritative journal only when a
-# read-only token correlation agrees with that endpoint and pane closure is
-# confirmed. Otherwise the journal stays quarantined for manual inspection.
+# A Herdr presentation journal never authorizes cleanup by itself. Teardown
+# requires matching ordinary endpoint metadata plus the structural journal and
+# session-continuity evidence owned by docs/task-lifecycle.md, closes only the
+# exact task pane, and never calls `workspace close`. It retires the journal
+# only when pane closure is confirmed; otherwise the journal stays quarantined
+# for manual inspection.
 # Projected closes share the presentation-order lock, refuse to close the
 # captain's active tab, and restore the exact response-derived pre-close tab
 # if Herdr's last-pane cleanup focuses an unrelated neighboring workspace.

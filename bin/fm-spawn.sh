@@ -1298,7 +1298,7 @@ herdr_projection_meta_field_exact() { # <meta> <key>
 # A stale presentation journal never grants launch authority.
 # Under the session lock, authoritative metadata must identify one positively
 # dead or agent-free endpoint before token inspection may allow flat fallback.
-# Exact Herdr fields are retained for the narrower version 2 reclaim path.
+# Exact Herdr fields are retained for the narrower structurally bound reclaim path.
 herdr_projection_existing_meta_allows_flat() { # <meta>
   local meta=$1 old_backend old_target old_session old_pane old_state target_session target_pane
   HERDR_RECOVERY_BACKEND=""
