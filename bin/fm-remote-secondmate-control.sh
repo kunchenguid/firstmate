@@ -181,16 +181,16 @@ cmd_launch() {
   validate_home "$id"
   case "$harness" in
     claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|omp) ;;
-    *) die "unverified remote secondmate harness: $harness" ;;
+    *) prelaunch_die "unverified remote secondmate harness: $harness" ;;
   esac
-  case "$effort" in -|low|medium|high|xhigh|max|ultra) ;; *) die "invalid remote secondmate effort: $effort" ;; esac
+  case "$effort" in -|low|medium|high|xhigh|max|ultra) ;; *) prelaunch_die "invalid remote secondmate effort: $effort" ;; esac
   if [ "$effort" = ultra ]; then
     "$SCRIPT_DIR/fm-harness.sh" validate-native-effort "$harness" "$model" "$effort" || return 1
   fi
   # Herdr is required on this host, not merely preferred: its server belongs to
   # the GUI login session, so the endpoint survives every SSH disconnection that
   # a remote route depends on. bin/fm-remote-doctor.sh is the readiness owner.
-  case "$selected_backend" in herdr) ;; *) die "a remote secondmate runs only on the herdr backend, not '$selected_backend'" ;; esac
+  case "$selected_backend" in herdr) ;; *) prelaunch_die "a remote secondmate runs only on the herdr backend, not '$selected_backend'" ;; esac
   mkdir -p "$CONTROL_STATE" "$CONTROL_DATA"
   meta=$(meta_path "$id")
   if [ -f "$meta" ]; then

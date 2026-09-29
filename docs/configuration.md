@@ -2095,7 +2095,7 @@ Without it, nothing is capped and every spawn behaves as before.
 
 | Field | Requirement |
 | --- | --- |
-| `pools[].name` | Required, unique, letters, digits, `.`, `_`, or `-`. |
+| `pools[].name` | Required, unique, letters, digits, `.`, `_`, or `-`; `.` and `..` are invalid names. |
 | `pools[].capacity` | Required whole number of seats, `0` or more. |
 | `pools[].models` | Required non-empty list of exact `--model` strings; one model belongs to at most one pool. |
 | `primary_model` | Optional exact model the primary supervisor runs on; declare it when the primary itself uses a pooled model. |
@@ -2117,7 +2117,7 @@ The pool names, capacities, and models are the operator's own choice; nothing is
 - The count includes every pooled agent recorded in the primary and in each local secondmate registered in `data/secondmates.md`, so agents launched before the file existed are counted.
 - A live legacy ship, scout, or secondmate record with a default, empty, or missing model occupies a seat in every declared pool until its model is resolved or the record is retired. A record with a resolved unpooled model occupies none.
 - A remote secondmate shares the same capacity through the existing primary-to-remote transport: while a declaration exists or needs clearing, the primary's watcher delivers the current pool declaration to each remote about every 30 seconds while holding the fleet lock, and a pooled remote launch files a seat request in its own home and waits for that answer.
-- A remote secondmate relaunch reserves at the primary before host control starts. Its seat remains counted until the primary publishes the confirmed route; an uncertain host result or failed parent publication retains the reservation for reconciliation. A confirmed prelaunch refusal or failed replacement launch releases it.
+- An initial remote secondmate launch or relaunch reserves at the primary before host launch control starts. Its seat remains counted until the primary publishes the confirmed route; an uncertain host result or failed parent publication retains the reservation for reconciliation. A confirmed prelaunch refusal or failed replacement launch releases it.
 - The primary grants no pooled seat while any registered remote has not confirmed the current declaration or its holder snapshot is absent. It counts each remote's seats from that remote's last answer, so an unreachable remote keeps its seats counted rather than freeing them.
 - An in-flight seat remains counted by its recorded model when that model moves between pools, including before the agent publishes a task record.
 - Once a nonempty policy is delivered, remote launches wait for the next primary serve to confirm the current declaration, including models the last policy called unpooled; a request from an old declaration or old pool is refused. Before first delivery, an inherited declaration can identify a pooled launch that must refuse until delivery. A home with no declaration, or a delivered empty declaration, launches as before.

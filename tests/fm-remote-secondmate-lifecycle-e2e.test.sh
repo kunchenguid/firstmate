@@ -215,6 +215,11 @@ if [ "${FM_FAKE_SSH_MODE:-normal}" = doctor-fixable ] \
   exit 0
 fi
 case "${FM_FAKE_SSH_MODE:-normal}:$command_name:$command_rel" in
+  launch-prelaunch-refusal:fm-remote-secondmate-control.sh:*)
+    [ "$_command_action" = launch ] || exit 93
+    printf 'relaunch_failure=prelaunch\n' >&2
+    exit 1
+    ;;
   launch-nonherdr-route:fm-remote-secondmate-control.sh:*)
     [ "$_command_action" = launch ] || exit 93
     printf 'schema=fm-remote-secondmate-control.v1\n'
@@ -868,7 +873,54 @@ launches_after_inherit=0
 [ "$launches_before_inherit" -eq "$launches_after_inherit" ] \
   || fail "remote spawn reached launch after ambiguous partial inheritance"
 assert_absent "$PARENT/state/ios.meta" "failed remote inheritance published launch metadata"
-out=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate)
+printf '{"pools":[{"name":"shared","capacity":1,"models":["pool-model-a"]}]}\n' \
+  > "$PARENT/config/fleet-seats"
+remote_env "$ROOT/bin/fm-fleet-seats.sh" serve-remotes >/dev/null \
+  || fail "remote seat policy could not be confirmed before launch"
+if FM_FAKE_SSH_MODE=launch-prelaunch-refusal remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate \
+  --model pool-model-a > "$TMP_ROOT/spawn-prelaunch-refusal.out" 2>&1; then
+  fail "remote spawn accepted a confirmed prelaunch refusal"
+fi
+assert_grep 'relaunch_failure=prelaunch' "$TMP_ROOT/spawn-prelaunch-refusal.out" \
+  "the remote launch did not reach its confirmed prelaunch refusal"
+assert_absent "$PARENT/state/ios.meta" "confirmed prelaunch refusal published metadata"
+[ -z "$(find "$PARENT/state/fleet-seats" -name '*.seat' -print -quit)" ] \
+  || fail "a confirmed prelaunch refusal retained its reservation"
+cat > "$FAKEBIN/mv" <<SH
+#!/usr/bin/env bash
+for arg in "\$@"; do last=\$arg; done
+[ "\$last" != "$PARENT/state/ios.meta" ] || exit 1
+exec /bin/mv "\$@"
+SH
+chmod +x "$FAKEBIN/mv"
+if PATH="$FAKEBIN:$PATH" remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate \
+  --model pool-model-a > "$TMP_ROOT/spawn-publication-failure.out" 2>&1; then
+  fail "remote spawn reported success after parent publication failed"
+fi
+assert_grep 'task record could not be published' "$TMP_ROOT/spawn-publication-failure.out" \
+  "the injected parent publication failure was not reached"
+assert_absent "$PARENT/state/ios.meta" "failed parent publication unexpectedly published metadata"
+[ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios)" = alive ] \
+  || fail "the publication failure fixture did not launch a remote agent"
+if remote_env "$ROOT/bin/fm-fleet-seats.sh" reserve another --harness codex --model pool-model-a \
+  --holder-pid "$$" > "$TMP_ROOT/spawn-held-seat.out" 2>&1; then
+  fail "an unpublished remote agent lost its primary reservation"
+fi
+assert_grep 'pool shared is full' "$TMP_ROOT/spawn-held-seat.out" \
+  "the unpublished remote agent did not consume the sole seat"
+assert_grep 'ios' "$TMP_ROOT/spawn-held-seat.out" \
+  "the retained seat did not identify the launched remote supervisor"
+mv "$PARENT"/state/ios.meta.tmp.* "$PARENT/state/ios.meta" \
+  || fail "the confirmed remote route could not be reconciled"
+out=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate --model pool-model-a)
+if remote_env "$ROOT/bin/fm-fleet-seats.sh" reserve another --harness codex --model pool-model-a \
+  --holder-pid "$$" > "$TMP_ROOT/spawn-published-seat.out" 2>&1; then
+  fail "a published remote supervisor lost its seat"
+fi
+assert_grep 'pool shared is full' "$TMP_ROOT/spawn-published-seat.out" \
+  "the published supervisor did not consume the sole seat"
+rm -f "$PARENT/config/fleet-seats"
+pass "remote initial launch retains its seat through failed publication and releases confirmed refusals"
 assert_contains "$out" 'remote=remote-mac backend=herdr' "remote spawn did not report separate host and backend dimensions"
 assert_grep 'remote_host=remote-mac' "$PARENT/state/ios.meta" "parent metadata omitted the remote host"
 assert_grep 'remote_backend=herdr' "$PARENT/state/ios.meta" "parent metadata omitted the remote-local backend"

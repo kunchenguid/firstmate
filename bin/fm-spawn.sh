@@ -1384,15 +1384,6 @@ spawn_remote_secondmate() {
       return 1
     fi
   fi
-  # A remote secondmate supervisor on a pooled model takes its fleet seat
-  # before the host is touched (bin/fm-fleet-seats.sh owns the contract).
-  if ! FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG FM_DATA_OVERRIDE=$DATA \
-    "$SCRIPT_DIR/fm-fleet-seats.sh" reserve "$id" --harness "$harness" --model "${model#-}" --holder-pid "$$"; then
-    fm_lock_release "$registry_lock" || true
-    fm_lock_release "$SPAWN_TASK_LOCK" || true
-    echo "error: spawn refused - remote secondmate $id has no fleet seat for model ${model#-} (see the fleet-seats line above)" >&2
-    return 1
-  fi
   # Gate the host before anything is published or transferred, so a host that
   # cannot hold a durable Herdr endpoint refuses here rather than half-way
   # through a launch. This is also the readiness gate every liveness relaunch
@@ -1471,6 +1462,17 @@ spawn_remote_secondmate() {
   fi
   launch_args=("$id" "$harness" "$model" "$effort" "$backend")
   [ -z "$remote_traceparent" ] || launch_args+=("$remote_traceparent")
+  local seat_token
+  seat_token="$(date +%s).$$.$RANDOM"
+  if ! FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG FM_DATA_OVERRIDE=$DATA \
+    "$SCRIPT_DIR/fm-fleet-seats.sh" reserve "$id" --harness "$harness" --model "${model#-}" \
+    --holder-pid "$$" --relaunch-hold "$seat_token"; then
+    fm_lock_release "$remote_lock" || true
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: spawn refused - remote secondmate $id has no fleet seat for model ${model#-} (see the fleet-seats line above)" >&2
+    return 1
+  fi
   if out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh launch \
     "${launch_args[@]}" </dev/null 2>&1); then
     rc=0
@@ -1478,6 +1480,11 @@ spawn_remote_secondmate() {
     rc=$?
   fi
   if [ "$rc" -ne 0 ]; then
+    if printf '%s\n' "$out" | grep -Fxq 'relaunch_failure=prelaunch'; then
+      FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG FM_DATA_OVERRIDE=$DATA \
+        "$SCRIPT_DIR/fm-fleet-seats.sh" cancel-relaunch "$id" --token "$seat_token" \
+        || echo "error: the confirmed failed launch seat for $id could not be released" >&2
+    fi
     fm_lock_release "$remote_lock" || true
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
