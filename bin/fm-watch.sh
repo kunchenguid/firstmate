@@ -149,6 +149,21 @@
 #                          budget and is parked until a probe reads it live
 #                          again (FM_SECONDMATE_LIVENESS_MAX_ATTEMPTS and
 #                          FM_SECONDMATE_LIVENESS_WINDOW_SECS)
+#   check: <id> auto-relaunched after session-end
+#                          an in-flight ship or scout recorded event=session-end
+#                          and its endpoint was recovery-grade dead or missing;
+#                          relaunched through bin/fm-control.sh relaunch, which
+#                          keeps the recorded worktree
+#                          (bin/fm-session-end-relaunch-lib.sh)
+#   check: <id> auto-relaunch failed after session-end: <detail>
+#                          the same evidence authorized recovery but the
+#                          relaunch failed; the attempt is ledgered and counts
+#                          toward the caps below
+#   check: <id> auto-relaunch paused after <n> attempt(s) in <s>s; ...
+#                          the task exceeded one automatic relaunch per 30
+#                          minutes or 3 per day; one wake
+#                          per session-end generation, then silence until that
+#                          generation changes or the window allows another try
 # For normal supervision, resume the session-start primary-harness protocol
 # after each printed reason. Direct duplicate invocations of this script still
 # no-op through the watcher singleton lock. A live holder whose beacon is stale
@@ -236,6 +251,17 @@ WATCH_HOME_EXISTED=0
 # and wake emission (secondmate_liveness_tick below).
 # shellcheck source=/dev/null # Analyzed separately as a canonical lint root.
 . "$SCRIPT_DIR/fm-secondmate-liveness-lib.sh"
+# In-flight ship/scout session-end relaunch. The library owns eligibility,
+# the deliberate-exit skip, and the attempt caps. This watcher only scans
+# and wakes (session_end_relaunch_tick below).
+# shellcheck source=/dev/null # Analyzed separately as a canonical lint root.
+. "$SCRIPT_DIR/fm-session-end-relaunch-lib.sh"
+
+session_end_relaunch_tick() {
+  fm_session_end_relaunch_scan "$STATE" || return 1
+  [ -z "${FM_SESSION_END_WAKE:-}" ] || wake "$FM_SESSION_END_WAKE"
+}
+
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
@@ -2664,6 +2690,15 @@ while :; do
     echo "watcher: secondmate liveness check failed" >&2
     exit 1
   }
+  # An in-flight ship or scout whose SessionEnd record says the worker is
+  # gone is relaunched through the existing control path. The tick wakes and
+  # exits the cycle like every other wake, so a restarted watcher sees the
+  # replacement rather than launching a second one.
+  session_end_relaunch_tick || {
+    echo "watcher: session-end relaunch check failed" >&2
+    exit 1
+  }
+
 
   # A live secondmate endpoint does not prove that its own wake loop is alive.
   # Observe the foreign queue before the rest of this cycle so an aged row wakes

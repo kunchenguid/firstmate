@@ -5,8 +5,15 @@
 # Usage: fm-control.sh <task-id> interrupt
 #        fm-control.sh <task-id> exit
 #        fm-control.sh <task-id> relaunch [--harness <name>] [--model <name>]
-#                                         [--effort <level>]
+#                                         [--effort <level>] [--claude-debug]
 #                                         (--note <text> | --note-file <path>)
+# --claude-debug is relaunch-only and off by default.
+# It is passed through to fm-spawn and refused unless the replacement harness is claude.
+# It turns on Claude's --debug log and its diagnostics file state/<id>.claude-diagnostics.jsonl, which names the signal of the next stop.
+# The spawn header owns what the flag adds to the launch.
+# The exit verb writes state/<id>.control-exit, bound to the current busy generation, before it types the exit command.
+# A completed exit retires the busy record, so the session-end tick already skips it; the marker covers an exit whose command was delivered but whose agent did not stop within the exit wait.
+# bin/fm-session-end-relaunch-lib.sh owns how that marker is read.
 #
 # Why this exists, and how it differs from fm-send.sh. bin/fm-send.sh is the
 # DATA plane: conversational text for the agent to read, always routing-marked
@@ -238,6 +245,7 @@ MODEL_SET=0
 EFFORT_SET=0
 NOTE=
 NOTE_SET=0
+CLAUDE_DEBUG=0
 control_want_value=
 for control_arg in "$@"; do
   if [ -n "$control_want_value" ]; then
@@ -273,6 +281,7 @@ for control_arg in "$@"; do
       NOTE=$(cat "${control_arg#--note-file=}")
       NOTE_SET=1
       ;;
+    --claude-debug) CLAUDE_DEBUG=1 ;;
     *) die "unexpected argument '$control_arg'" ;;
   esac
 done
@@ -282,8 +291,8 @@ if [ -n "$control_want_value" ]; then
 fi
 
 if [ "$VERB" != relaunch ]; then
-  [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] && [ "$NOTE_SET" = 0 ] \
-    || die "--harness, --model, --effort, and --note apply to 'relaunch' only"
+  [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] && [ "$NOTE_SET" = 0 ] && [ "$CLAUDE_DEBUG" = 0 ] \
+    || die "--harness, --model, --effort, --note, and --claude-debug apply to 'relaunch' only"
 fi
 [ "$HARNESS_SET" = 0 ] || [ -n "$NEW_HARNESS" ] || die "--harness requires a non-empty value"
 [ "$MODEL_SET" = 0 ] || [ -n "$NEW_MODEL" ] || die "--model requires a non-empty value"
@@ -641,10 +650,25 @@ do_exit() {
   # authoritative proof is the agent-state wait below. The retried Enter still
   # matters, because a slash command opens a completion popup on some TUIs that
   # swallows the first Enter.
+  # A deliberate exit verb records the busy generation before anything is typed.
+  # A completed exit retires the busy record anyway; the marker keeps a later
+  # SessionEnd deliberate when the agent outlives the exit wait and this
+  # transaction dies before that retire. Relaunch calls this function too and
+  # must not mark its own replacement stop as a deliberate exit.
+  if [ "$VERB" = exit ]; then
+    local gen_file gen
+    gen_file=$(fm_busy_gen_path "$STATE" "$ID")
+    gen=$(cat "$gen_file" 2>/dev/null || true)
+    [ -n "$gen" ] || gen=-
+    printf 'gen=%s\n' "$gen" > "$STATE/$ID.control-exit" \
+      || die "could not record that this exit of $ID was deliberate; nothing was typed"
+  fi
   verdict=$(fm_backend_send_text_submit "$BACKEND" "$T" "$cmd" "$EXIT_RETRIES" "$POLL" 1.2 "$LABEL") \
-    || die "the exit command could not be sent to task $ID on $BACKEND"
-  [ "$verdict" != send-failed ] \
-    || die "the exit command could not be sent to task $ID on $BACKEND"
+    || verdict=send-failed
+  if [ "$verdict" = send-failed ]; then
+    [ "$VERB" != exit ] || rm -f -- "$STATE/$ID.control-exit"
+    die "the exit command could not be sent to task $ID on $BACKEND"
+  fi
   state=$(wait_agent_state "$EXIT_WAIT" dead) || {
     die "exit-delivered $ID interrupt=$interrupt_result exit-command=delivered agent-state=$state exit=unconfirmed; the agent did not stop within ${EXIT_WAIT}s"
   }
@@ -965,6 +989,9 @@ do_relaunch() {
 
   require_state_verified_backend relaunch
   resolve_relaunch_profile
+  if [ "$CLAUDE_DEBUG" = 1 ] && [ "$TARGET_HARNESS" != claude ]; then
+    die "--claude-debug applies only to a claude relaunch; $ID would be replaced on $TARGET_HARNESS"
+  fi
 
   case "$KIND" in
     ship|scout)
@@ -1006,6 +1033,7 @@ do_relaunch() {
   RELAUNCH_TX="${BASHPID:-$$}.$(date -u +%Y%m%dT%H%M%SZ).$RANDOM"
   journal_write launching "${CHECKPOINT_LINES[@]}" "$note_line" "relaunch_tx=$RELAUNCH_TX"
   spawn_args=("$ID" --relaunch --harness "$TARGET_HARNESS")
+  [ "$CLAUDE_DEBUG" = 0 ] || spawn_args+=(--claude-debug)
   [ "$TARGET_MODEL" = default ] || spawn_args+=(--model "$TARGET_MODEL")
   [ "$TARGET_EFFORT" = default ] || spawn_args+=(--effort "$TARGET_EFFORT")
   if FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" \

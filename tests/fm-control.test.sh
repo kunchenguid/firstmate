@@ -126,6 +126,7 @@ case "${1:-}" in
     done
     payload=${1:-}
     if [ "$literal" = 1 ]; then
+      [ -z "${FM_FAKE_SEND_FAILS:-}" ] || exit 1
       printf '%s\n' "$payload" >> "$D/literal"
       if [ -z "${FM_FAKE_NEVER_DIES:-}" ] \
          && { [ "$payload" = /exit ] || [ "$payload" = /quit ]; }; then
@@ -766,6 +767,23 @@ test_relaunch_only_flags_are_rejected_on_other_verbs() {
 
 # --- 5. lifecycle states ----------------------------------------------------
 
+test_failed_exit_send_leaves_no_deliberate_exit_marker() {
+  local dir out rc gen
+  dir=$(new_case exit-send-fails)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" t1)
+  printf 'busy_gen=%s\n' "$gen" >> "$dir/home/state/t1.meta"
+  out=$(env FM_FAKE_SEND_FAILS=1 PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" \
+    FM_FAKE_DIR="$dir/fake" FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=0.05 \
+    "$CONTROL" t1 exit 2>&1); rc=$?
+  expect_code 1 "$rc" "an exit whose command could not be sent should fail: $out"
+  assert_contains "$out" "could not be sent" "the failure should say the exit command was not sent"
+  [ ! -e "$dir/home/state/t1.control-exit" ] \
+    || fail "a failed exit send left a deliberate-exit marker: $(cat "$dir/home/state/t1.control-exit")"
+  pass "fm-control exit: a failed exit send leaves no deliberate-exit marker"
+}
+
 test_already_stopped_exit_is_idempotent() {
   local dir out rc
   dir=$(new_case idempotent)
@@ -1095,6 +1113,7 @@ test_verb_allowlist_is_closed
 test_resume_is_refused_with_its_reason
 test_relaunch_only_flags_are_rejected_on_other_verbs
 test_already_stopped_exit_is_idempotent
+test_failed_exit_send_leaves_no_deliberate_exit_marker
 test_missing_tmux_endpoint_refuses_rather_than_claiming_a_stop
 test_interrupt_refuses_when_no_agent_runs
 test_ambiguous_endpoint_refuses
