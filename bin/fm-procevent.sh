@@ -411,9 +411,29 @@ source_field() {  # <source-id> <field>
 }
 source_kind() { source_field "$1" kind; }
 source_owner_task() { source_field "$1" owner_task; }
+source_ack_through() {
+  local value
+  value=$(source_field "$1" ack_through 2>/dev/null || true)
+  case "$value" in ''|*[!0-9]*) value=0 ;; esac
+  printf '%s\n' "$value"
+}
 # Every captured round of one source with no handled acknowledgement yet.
 source_pending() {  # <source-id>
   fm_procevent_pending "$STATE" | awk -v id="$1" 'index($0, "/" id ".") { print }'
+}
+# A task re-arm may launch over only the rounds this registration is accepting.
+# Any later capture still owns the board and blocks another listener.
+source_pending_blocks_launch_locked() {  # <source-id>
+  local id=$1 through pending seq
+  [ "$(source_kind "$id" 2>/dev/null || true)" = task-owned ] || return 1
+  through=$(source_ack_through "$id")
+  while IFS= read -r pending; do
+    [ -n "$pending" ] || continue
+    seq=$(fm_procevent_result_sequence "$pending" 2>/dev/null || true)
+    case "$seq" in ''|*[!0-9]*) return 0 ;; esac
+    [ "$seq" -le "$through" ] || return 0
+  done < <(source_pending "$id")
+  return 1
 }
 # The registration record is a worker-owned board's ONLY ownership evidence, so
 # it cannot be retired while a captured round of it is still unacknowledged.
@@ -500,6 +520,24 @@ read_argv() {  # <source-id>
   [ "${#ARGV[@]}" -eq "$n" ]
 }
 
+# Accept only the rounds this task registration replaced. Called with its
+# listener child waiting behind the launch barrier, so acknowledgement cannot
+# race ahead of the reply handoff.
+task_registration_accept_locked() {  # <source-id>
+  local id=$1 through pending seq status
+  [ "$(source_kind "$id" 2>/dev/null || true)" = task-owned ] || return 0
+  through=$(source_ack_through "$id")
+  while IFS= read -r pending; do
+    [ -n "$pending" ] || continue
+    seq=$(fm_procevent_result_sequence "$pending" 2>/dev/null || true)
+    case "$seq" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$seq" -le "$through" ] || continue
+    fm_procevent_mark_handled "$STATE" "$id" "$seq" >/dev/null 2>&1
+    status=$?
+    case "$status" in 0|1) ;; *) return 1 ;; esac
+  done < <(source_pending "$id")
+}
+
 extension_registration_replacement_safe_locked() {  # <source-id>
   local id=$1 owner_state claim_state
   if [ ! -e "$(source_file "$id")" ] && [ ! -L "$(source_file "$id")" ]; then
@@ -549,9 +587,9 @@ cmd_register() {
 }
 
 cmd_register_task() {
-  local adapter=${1-} id=${2-} task=${3-} sep=${4-} result pending pending_adapter
-  local reply_source='' reply_dest='' stale arg i adopting=0 pending_owner prior_record=''
-  local pending_rounds=0
+  local adapter=${1-} id=${2-} task=${3-} sep=${4-} pending pending_adapter pending_seq
+  local reply_source='' reply_dest='' stale arg i adopting=0 pending_owner
+  local pending_rounds=0 ack_through=0
   local -a argv=()
   shift 4 2>/dev/null || usage
   [ "$adapter" = lavish ] || die "register-task is reserved for the Lavish adapter"
@@ -598,6 +636,14 @@ cmd_register_task() {
       fm_procevent_source_lock_release "$id"
       die "cannot re-arm terminal Lavish result $pending; stop and conclude the review"
     fi
+    pending_seq=$(fm_procevent_result_sequence "$pending" 2>/dev/null || true)
+    case "$pending_seq" in
+      ''|*[!0-9]*)
+        fm_procevent_source_lock_release "$id"
+        die "cannot identify captured round: $pending"
+        ;;
+    esac
+    [ "$pending_seq" -le "$ack_through" ] || ack_through=$pending_seq
   done < <(source_pending "$id")
   if [ "$adopting" -eq 0 ] && [ "$pending_rounds" -eq 0 ]; then
     fm_procevent_source_lock_release "$id"
@@ -630,38 +676,15 @@ cmd_register_task() {
       i=$((i + 1))
     fi
   done
-  if [ "$adopting" -eq 0 ]; then
-    prior_record=$(umask 077; mktemp "$REG/.$id.prior.XXXXXX") || {
-      [ -z "$reply_dest" ] || rm -f -- "$reply_dest"
-      fm_procevent_source_lock_release "$id"
-      die "cannot stage the registration this re-arm replaces: $id"
-    }
-    if ! cat -- "$(source_file "$id")" > "$prior_record"; then
-      rm -f -- "$prior_record"
-      [ -z "$reply_dest" ] || rm -f -- "$reply_dest"
-      fm_procevent_source_lock_release "$id"
-      die "cannot read the registration this re-arm replaces: $id"
-    fi
-  fi
-  if ! fm_procevent_task_registration_publish_locked "$STATE" "$adapter" "$id" "$task" "${argv[@]}"; then
-    [ -z "$prior_record" ] || rm -f -- "$prior_record"
+  if ! fm_procevent_task_registration_publish_locked "$STATE" "$adapter" "$id" "$task" \
+      "$ack_through" "${argv[@]}"; then
     [ -z "$reply_dest" ] || rm -f -- "$reply_dest"
     fm_procevent_source_lock_release "$id"
     die "cannot publish task-owned registration"
   fi
-  # Re-arm is the worker's acknowledgement of every open nonterminal round.
-  # It deliberately does not inspect, acquire, release, or replace the claim.
-  while IFS= read -r pending; do
-    [ -n "$pending" ] || continue
-    result=$pending
-    fm_procevent_mark_handled "$STATE" "$id" "$(fm_procevent_result_sequence "$result")" >/dev/null 2>&1 || {
-      [ -z "$prior_record" ] || mv -f -- "$prior_record" "$(source_file "$id")"
-      [ -z "$reply_dest" ] || rm -f -- "$reply_dest"
-      fm_procevent_source_lock_release "$id"
-      die "cannot acknowledge captured round: $result"
-    }
-  done < <(source_pending "$id")
-  [ -z "$prior_record" ] || rm -f -- "$prior_record"
+  # The listener launch acknowledges these rounds only after its child accepts
+  # the handoff. Until then the captures stay open and a retry may replace this
+  # registration without reposting its staged reply.
   for stale in "$REG/.$id.reply."*; do
     [ -e "$stale" ] || continue
     case "$stale" in "$reply_dest") continue ;; esac
@@ -969,8 +992,9 @@ cmd_start_public() {
 }
 
 cmd_start() {
-  local id=${1-} adapter out rc claimed bound_rc published_capture=0 handled_capture=0 self_announcing=0 task_owner='' task_pending
+  local id=${1-} adapter out rc claimed bound_rc published_capture=0 handled_capture=0 self_announcing=0 task_owner=''
   local extension_owner=0 extension_load_state extension_sequence='' extension_request_id=''
+  local adapter_handshake=0 adapter_ready='' handshake_deadline handshake_window
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
   require_runner_group
   fm_procevent_source_lock_acquire "$id" || die "cannot lock source: $id"
@@ -988,8 +1012,7 @@ cmd_start() {
   fi
   if [ "$(source_kind "$id" 2>/dev/null || true)" = task-owned ]; then
     task_owner=$(source_owner_task "$id" 2>/dev/null || true)
-    task_pending=$(source_pending "$id" | head -1)
-    if [ -n "$task_pending" ]; then
+    if source_pending_blocks_launch_locked "$id"; then
       fm_procevent_source_lock_release "$id"
       printf 'round-open: %s\n' "$id"
       exit 0
@@ -1033,6 +1056,11 @@ cmd_start() {
       die "extension registration owner is unreadable: $id"
       ;;
   esac
+  if [ -n "$task_owner" ] && [ "$extension_owner" -eq 0 ] \
+      && [ "${ARGV[0]-}" = "$SCRIPT_DIR/fm-procevent-lavish.sh" ] \
+      && [ "${ARGV[1]-}" = poll ]; then
+    adapter_handshake=1
+  fi
   exec 7<"$(source_file "$id")" || {
     fm_procevent_source_lock_release "$id"
     die "cannot retain registration identity: $id"
@@ -1131,7 +1159,7 @@ cmd_start() {
   # it is outside this confused-agent-grade boundary.
   export FM_PROCEVENT_IN_RUNNER=1
   start_owner_guard "$id" || die "cannot start the runner's owner guard: $id"
-  local launch_floor runner inbox reservation_dir staging launch_ready launch_reply launch_pid
+  local launch_floor runner inbox reservation_dir staging launch_pipe launch_ready launch_go launch_reply launch_pid ready_stamp
   launch_floor=$(fm_procevent_launch_floor_seconds) \
     || die "FM_PROCEVENT_LAUNCH_FLOOR_SECONDS must be whole seconds from $FM_PROCEVENT_LAUNCH_FLOOR_MIN_SECONDS to $FM_PROCEVENT_LAUNCH_FLOOR_MAX_SECONDS"
   if [ "$extension_owner" -eq 1 ]; then
@@ -1211,6 +1239,14 @@ cmd_start() {
       "$launch_ready" -- "${ARGV[@]}" > "$launch_reply" &
     launch_pid=$!
     while [ ! -s "$REG/$launch_ready" ] && kill -0 "$launch_pid" 2>/dev/null; do sleep 0.01; done
+    if [ ! -s "$REG/$launch_ready" ] \
+        || ! task_registration_accept_locked "$id" \
+        || ! fm_procevent_listener_ready_mark_locked "$STATE" "$id" "$CLAIM_REG_IDENTITY" "$CLAIM_TOKEN"; then
+      fm_procevent_source_lock_release "$id"
+      wait "$launch_pid" 2>/dev/null || true
+      rm -f -- "$REG/$launch_ready" "$launch_reply"
+      die "cannot accept the source launch boundary: $id"
+    fi
     fm_procevent_source_lock_release "$id" \
       || die "cannot release the source launch boundary: $id"
     wait "$launch_pid" || {
@@ -1246,26 +1282,80 @@ EOF
       die "cannot stage output"
     }
     STAGED_OUTPUT=$out
-    launch_ready="$REG/.$id.$CLAIM_TOKEN.launch-pipe"
-    mkfifo -m 600 "$launch_ready" || {
+    launch_pipe="$REG/.$id.$CLAIM_TOKEN.launch-pipe"
+    launch_ready="$REG/.$id.$CLAIM_TOKEN.launch-ready"
+    launch_go="$REG/.$id.$CLAIM_TOKEN.launch-go"
+    adapter_ready="$REG/.$id.$CLAIM_TOKEN.adapter-ready"
+    if ! (umask 077; : > "$launch_ready" \
+        && { [ "$adapter_handshake" -eq 0 ] || : > "$adapter_ready"; }) \
+        || ! mkfifo -m 600 "$launch_pipe" "$launch_go"; then
+      rm -f -- "$launch_pipe" "$launch_ready" "$launch_go" "$adapter_ready"
       fm_procevent_source_lock_release "$id"
       die "cannot prepare the source launch boundary: $id"
-    }
-    exec 5<> "$launch_ready" || {
-      rm -f -- "$launch_ready"
+    fi
+    exec 5<> "$launch_pipe" 3<> "$launch_go" || {
+      rm -f -- "$launch_pipe" "$launch_ready" "$launch_go" "$adapter_ready"
       fm_procevent_source_lock_release "$id"
       die "cannot retain the source launch boundary: $id"
     }
-    exec 4< "$launch_ready" || {
-      exec 5>&-
-      rm -f -- "$launch_ready"
+    exec 4< "$launch_pipe" || {
+      exec 5>&- 3>&-
+      rm -f -- "$launch_pipe" "$launch_ready" "$launch_go" "$adapter_ready"
       fm_procevent_source_lock_release "$id"
       die "cannot retain the source output boundary: $id"
     }
-    "${ARGV[@]}" >&5 5>&- 4<&- 2>/dev/null &
+    (
+      printf 'ready\n' > "$launch_ready" || exit 125
+      IFS= read -r launch_signal <&3 || exit 125
+      [ "$launch_signal" = go ] || exit 125
+      if [ "$adapter_handshake" -eq 1 ]; then
+        FM_PROCEVENT_LAUNCH_READY_FILE=$adapter_ready \
+          FM_PROCEVENT_LAUNCH_GO_FD=3 exec "${ARGV[@]}"
+      fi
+      exec 3>&-
+      exec "${ARGV[@]}"
+    ) >&5 5>&- 4<&- 2>/dev/null &
     launch_pid=$!
-    exec 5>&-
-    rm -f -- "$launch_ready"
+    while [ ! -s "$launch_ready" ] && kill -0 "$launch_pid" 2>/dev/null; do sleep 0.01; done
+    ready_stamp=$(fm_procevent_listener_ready_path "$STATE" "$id" "$CLAIM_REG_IDENTITY") || ready_stamp=
+    if [ ! -s "$launch_ready" ] || [ -z "$ready_stamp" ]; then
+      printf 'stop\n' >&3 2>/dev/null || true
+      exec 5>&- 3>&-
+      wait "$launch_pid" 2>/dev/null || true
+      rm -f -- "$launch_pipe" "$launch_ready" "$launch_go" "$adapter_ready"
+      fm_procevent_source_lock_release "$id"
+      die "cannot accept the source launch boundary: $id"
+    fi
+    if [ "$adapter_handshake" -eq 1 ]; then
+      printf 'go\n' >&3 || true
+      handshake_window=$(fm_procevent_launch_confirm_seconds) || handshake_window=3
+      handshake_deadline=$((SECONDS + 10#$handshake_window + 1))
+      while [ ! -s "$adapter_ready" ] && kill -0 "$launch_pid" 2>/dev/null \
+          && [ "$SECONDS" -lt "$handshake_deadline" ]; do sleep 0.01; done
+    fi
+    if { [ "$adapter_handshake" -eq 1 ] && [ ! -s "$adapter_ready" ]; } \
+        || ! task_registration_accept_locked "$id"; then
+      printf 'stop\n' >&3 2>/dev/null || true
+      exec 5>&- 3>&-
+      wait "$launch_pid" 2>/dev/null || true
+      rm -f -- "$launch_pipe" "$launch_ready" "$launch_go" "$adapter_ready"
+      fm_procevent_source_lock_release "$id"
+      die "cannot accept the source launch boundary: $id"
+    fi
+    printf 'go\n' >&3 || {
+      exec 5>&- 3>&-
+      wait "$launch_pid" 2>/dev/null || true
+      rm -f -- "$launch_pipe" "$launch_ready" "$launch_go" "$adapter_ready"
+      fm_procevent_source_lock_release "$id"
+      die "cannot release the source launch boundary: $id"
+    }
+    if ! fm_procevent_listener_ready_mark_locked "$STATE" "$id" "$CLAIM_REG_IDENTITY" "$CLAIM_TOKEN"; then
+      exec 5>&- 3>&-
+      fm_procevent_source_lock_release "$id"
+      die "cannot record the source launch boundary: $id"
+    fi
+    exec 5>&- 3>&-
+    rm -f -- "$launch_pipe" "$launch_ready" "$launch_go" "$adapter_ready"
     fm_procevent_source_lock_release "$id" \
       || die "cannot release the source launch boundary: $id"
     perl -e '
@@ -1661,7 +1751,7 @@ stranded_leaderless_detail() {  # <source-id>
 }
 
 cmd_reconcile() {
-  local rec id published started=0 stopped=0 uncertain=0 failed=0 claim owner pid token identity claim_state stop_state task_pending
+  local rec id published started=0 stopped=0 uncertain=0 failed=0 claim owner pid token identity claim_state stop_state
   local launch_identity launch_stamp launch_mark unconfirmed entry
   local -a launched=()
   # Rejected before anything is launched, and by name. A window this command
@@ -1723,12 +1813,9 @@ cmd_reconcile() {
       if [ -f "$(source_file "$id")" ] && [ ! -L "$(source_file "$id")" ]; then
         fm_procevent_claim_state_locked "$id"
         claim_state=$?
-        if [ "$(source_kind "$id" 2>/dev/null || true)" = task-owned ]; then
-          task_pending=$(source_pending "$id" | head -1)
-          if [ -n "$task_pending" ]; then
-            fm_procevent_source_lock_release "$id"
-            continue
-          fi
+        if source_pending_blocks_launch_locked "$id"; then
+          fm_procevent_source_lock_release "$id"
+          continue
         fi
         if [ "$claim_state" -eq 1 ] && fm_procevent_claim_undisplaceable_locked "$id"; then
           # A stale claim whose process group still has members, which can mean
@@ -1748,16 +1835,13 @@ cmd_reconcile() {
             fm_procevent_source_lock_release "$id"
             continue
           fi
-          # Snapshot the launch-pacing stamp for the registration generation
-          # this launch will run under, while the source lock still keeps that
-          # registration from being replaced underneath it. The runner writes
-          # this stamp after it claims and before it runs the source command,
-          # and nothing removes it on the way out, so an advanced or newly
-          # appeared value is durable evidence the launch got going.
+          # Snapshot the accepted-listener token for this registration. A live
+          # claim is ready only when this token matches its claim; a fast source
+          # is ready when the token advances after this snapshot.
           launch_identity=$(fm_pr_file_identity "$(source_file "$id")" 2>/dev/null) || launch_identity=
           launch_mark=
           if [ -n "$launch_identity" ] \
-            && launch_stamp=$(fm_procevent_launch_floor_stamp_path "$STATE" "$id" "$launch_identity"); then
+            && launch_stamp=$(fm_procevent_listener_ready_path "$STATE" "$id" "$launch_identity"); then
             launch_mark=$(cat -- "$launch_stamp" 2>/dev/null || true)
           fi
           fm_procevent_source_lock_release "$id"
@@ -1849,7 +1933,7 @@ launch_entry_listed() {  # <entry> <newline-separated entries>
 # Every launch shares ONE window rather than taking a window each, so a whole
 # fleet of failing sources costs a watcher cycle the same bounded wait as one.
 confirm_launched_runners() {  # <source-id><TAB><registration-identity><TAB><launch-stamp-before>...
-  local deadline window entry id rest identity before state stamp mark
+  local deadline window entry id rest identity before readiness
   local -a pending=("$@") remaining=()
   window=$(fm_procevent_launch_confirm_seconds) || return 1
   # A zero-padded window is a valid value to its validator, which reads base 10;
@@ -1868,23 +1952,9 @@ confirm_launched_runners() {  # <source-id><TAB><registration-identity><TAB><lau
       rest=${entry#*$'\t'}
       identity=${rest%%$'\t'*}
       before=${rest#*$'\t'}
-      state=1
-      if fm_procevent_source_lock_try_acquire "$id"; then
-        fm_procevent_claim_state_locked "$id"
-        state=$?
-        fm_procevent_source_lock_release "$id"
-      fi
-      if [ "$state" -eq 0 ]; then
-        continue
-      fi
-      mark=
-      if [ -n "$identity" ] \
-        && stamp=$(fm_procevent_launch_floor_stamp_path "$STATE" "$id" "$identity"); then
-        mark=$(cat -- "$stamp" 2>/dev/null || true)
-      fi
-      if [ -n "$mark" ] && [ "$mark" != "$before" ]; then
-        continue
-      fi
+      readiness=0
+      generation_readiness "$id" "$identity" "$before" || readiness=$?
+      case "$readiness" in 0|4) continue ;; esac
       remaining+=("$entry")
     done
     pending=("${remaining[@]+"${remaining[@]}"}")
@@ -1895,41 +1965,80 @@ confirm_launched_runners() {  # <source-id><TAB><registration-identity><TAB><lau
   [ "${#pending[@]}" -eq 0 ] || printf '%s\n' "${pending[@]}"
 }
 
-# 0 when this registration generation holds a live claim, 3 when another
-# generation does, 1 otherwise.
-generation_is_listening() {  # <source-id> <registration-identity>
-  local id=$1 identity=$2 state result=1
-  fm_procevent_source_lock_try_acquire "$id" || return 1
+# Read readiness under the source lock. A live claim is ready only when its
+# token matches the accepted-listener token; a source that already exited is
+# ready only when that token advanced after the caller's snapshot. Exit 4
+# reports a task-owned terminal round that won the handoff race.
+generation_readiness() {  # <source-id> <registration-identity> <ready-token-before>
+  local id=$1 identity=$2 before=$3 current state result=1 ready mark='' pending adapter
+  if [ -n "$identity" ] \
+      && ready=$(fm_procevent_listener_ready_path "$STATE" "$id" "$identity") \
+      && [ -f "$ready" ] && [ ! -L "$ready" ]; then
+    mark=$(cat -- "$ready" 2>/dev/null || true)
+  fi
+  if ! fm_procevent_source_lock_try_acquire "$id"; then
+    mark=
+    if [ -n "$identity" ] \
+        && ready=$(fm_procevent_listener_ready_path "$STATE" "$id" "$identity") \
+        && [ -f "$ready" ] && [ ! -L "$ready" ]; then
+      mark=$(cat -- "$ready" 2>/dev/null || true)
+    fi
+    [ -z "$mark" ] || [ "$mark" = "$before" ] || return 0
+    return 1
+  fi
+  current=$(fm_pr_file_identity "$(source_file "$id")" 2>/dev/null || true)
+  mark=
+  if [ -n "$identity" ] \
+      && ready=$(fm_procevent_listener_ready_path "$STATE" "$id" "$identity") \
+      && [ -f "$ready" ] && [ ! -L "$ready" ]; then
+    mark=$(cat -- "$ready" 2>/dev/null || true)
+  fi
+  if [ "$current" = "$identity" ] \
+      && [ "$(source_kind "$id" 2>/dev/null || true)" = task-owned ]; then
+    while IFS= read -r pending; do
+      [ -n "$pending" ] || continue
+      adapter=$(fm_procevent_result_adapter "$pending" 2>/dev/null || true)
+      if [ -n "$adapter" ] && adapter_result_is_terminal "$adapter" "$pending"; then
+        fm_procevent_source_lock_release "$id"
+        return 4
+      fi
+    done < <(source_pending "$id")
+  fi
   fm_procevent_claim_state_locked "$id"
   state=$?
   if [ "$state" -eq 0 ]; then
     result=3
-    [ "$FM_PROCEVENT_CLAIM_REG_IDENTITY" != "$identity" ] || result=0
-  fi
-  fm_procevent_source_lock_release "$id"
-  return "$result"
-}
-
-# 0 when no live, uncertain, leaderless, terminal, or undisplaceable claim
-# blocks a launch, the same rule reconcile applies.
-generation_can_launch() {  # <source-id>
-  local id=$1 state result=1
-  fm_procevent_source_lock_try_acquire "$id" || return 1
-  fm_procevent_claim_state_locked "$id"
-  state=$?
-  if [ "$state" -eq 1 ] && ! fm_procevent_claim_undisplaceable_locked "$id"; then
+    if [ "$FM_PROCEVENT_CLAIM_REG_IDENTITY" = "$identity" ] \
+        && [ -n "$mark" ] && [ "$mark" = "$FM_PROCEVENT_CLAIM_TOKEN" ]; then
+      result=0
+    fi
+  elif [ -n "$mark" ] && [ "$mark" != "$before" ]; then
     result=0
   fi
   fm_procevent_source_lock_release "$id"
   return "$result"
 }
 
-# Public readiness for one source. Same evidence reconcile uses after a launch:
-# a live claim bound to this registration generation, or that generation's
-# launch stamp advancing. Returns as soon as either appears. A fixed sleep is
-# not success.
+# 0 when no live, uncertain, leaderless, terminal, undisplaceable claim, or
+# unaccepted task round blocks a launch, the same rule reconcile applies.
+generation_can_launch() {  # <source-id>
+  local id=$1 state result=1
+  fm_procevent_source_lock_try_acquire "$id" || return 1
+  fm_procevent_claim_state_locked "$id"
+  state=$?
+  if [ "$state" -eq 1 ] && ! fm_procevent_claim_undisplaceable_locked "$id" \
+      && ! source_pending_blocks_launch_locked "$id"; then
+    result=0
+  fi
+  fm_procevent_source_lock_release "$id"
+  return "$result"
+}
+
+# Public readiness for one source. Same accepted-listener token reconcile uses
+# after a launch. Returns only when the live claim owns that token or the token
+# advances after a fast source exits. A fixed sleep is not success.
 cmd_ensure_listening() {
-  local id=${1-} identity before mark stamp deadline window started_once=0 listening
+  local id=${1-} identity before stamp deadline window started_once=0 listening
   [ "$#" -eq 1 ] || usage
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
   window=$(fm_procevent_launch_confirm_seconds) \
@@ -1939,21 +2048,17 @@ cmd_ensure_listening() {
   identity=$(fm_pr_file_identity "$(source_file "$id")" 2>/dev/null) \
     || die "cannot identify the registration: $id"
   before=
-  if stamp=$(fm_procevent_launch_floor_stamp_path "$STATE" "$id" "$identity"); then
+  if stamp=$(fm_procevent_listener_ready_path "$STATE" "$id" "$identity"); then
     before=$(cat -- "$stamp" 2>/dev/null || true)
   fi
   deadline=$((SECONDS + 10#$window + 1))
   while :; do
     listening=0
-    generation_is_listening "$id" "$identity" || listening=$?
-    [ "$listening" -ne 0 ] || return 0
-    mark=
-    if stamp=$(fm_procevent_launch_floor_stamp_path "$STATE" "$id" "$identity"); then
-      mark=$(cat -- "$stamp" 2>/dev/null || true)
-    fi
-    if [ -n "$mark" ] && [ "$mark" != "$before" ]; then
-      return 0
-    fi
+    generation_readiness "$id" "$identity" "$before" || listening=$?
+    case "$listening" in
+      0) return 0 ;;
+      4) return 4 ;;
+    esac
     if [ "$started_once" -eq 0 ] && generation_can_launch "$id"; then
       detach_runner "$id"
       started_once=1

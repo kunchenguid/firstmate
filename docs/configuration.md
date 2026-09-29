@@ -1853,23 +1853,23 @@ After opening the artifact as required above, the worker arms it with `bin/fm-pr
 
 `arm` prints `armed` only after the process-event owner confirms this registration generation's listener is running, and otherwise returns nonzero without that line.
 
-- The confirmation is the same live claim or launch-stamp evidence `reconcile` already uses, bounded by `FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS`, and a failed confirmation retires a source that never started unless `retire` refuses because something may still own it, in which case the registration stays for `reconcile` or a human.
+- The confirmation is the same accepted-listener token `reconcile` uses, matched to the live claim or observed advancing after a fast listener exits, bounded by `FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS`; a failed confirmation retires a source that never started unless `retire` refuses because something may still own it, in which case the registration stays for `reconcile` or a human.
 - An earlier registration's listener that releases the board inside the confirm window lets the new registration start, and `arm` then reports `armed` as usual.
 - When a live listener from an earlier registration of the same board still holds it when the window ends, `arm` exits zero with `still-listening` instead of `armed`, because that earlier listener keeps serving the board and the new registration takes effect only after the source is retired and armed again.
 - The arm is refused unless that task id has valid, identity-matching endpoint metadata, because a board whose owner has no endpoint would collect feedback nobody can be told about.
 
 **Acknowledge a round by re-arming**
 
-The registration persists as one task-owned source record, while each captured nonterminal round remains open until the worker re-arms and the existing handled marker acknowledges that round.
-Re-arm is that acknowledgement and nothing else: the board is armed once while no record exists, and a further arm by the same owner is refused unless an unacknowledged nonterminal round is waiting, so a generation already carrying a reply is never replaced before its listener posts it.
+The registration persists as one task-owned source record, while each captured nonterminal round remains open until the worker re-arms and the replacement listener accepts that round's reply handoff before writing its handled marker.
+The board is armed once while no record exists, and a further arm by the same owner is refused unless an unacknowledged nonterminal round is waiting, so a generation already carrying a reply is never replaced before its listener posts it.
 
 **Stage an agent reply**
 
-Re-arm never acquires, releases, or hands off the source claim.
+Re-arm publishes the next listener generation while the captured round remains open.
 It may carry `--agent-reply-file <path>`.
 The file's contents are copied into that generation's private staging file and passed once to the published `--agent-reply` argument.
 
-A failed re-arm leaves the prior registration and its referenced reply unchanged, including when its required acknowledgement cannot be recorded.
+A failure before the listener accepts the handoff leaves the captured round open and the staged reply available for retry.
 Reply posting is best effort by design.
 The listener consumes the staged file only after validating its own setup and the board artifact.
 The one loss window is a rare crash between consuming the file and making the call, which drops that round's reply rather than posting it twice.

@@ -245,18 +245,45 @@ fm_procevent_launch_floor_stamp_path() {  # <state-root> <source-id> <registrati
   printf '%s\n' "$reg/$2.$identity.last-launch"
 }
 
+fm_procevent_listener_ready_path() {  # <state-root> <source-id> <registration-identity>
+  local reg identity
+  case "$3" in *:*) ;; *) return 1 ;; esac
+  case "$3" in ''|*[!0-9:]*) return 1 ;; esac
+  fm_procevent_source_id_valid "$2" || return 1
+  reg=$(fm_procevent_registry_dir "$1") || return 1
+  identity=${3//:/-}
+  printf '%s\n' "$reg/$2.$identity.listener-ready"
+}
+
+fm_procevent_listener_ready_mark_locked() {  # <state-root> <source-id> <registration-identity> <claim-token>
+  local ready tmp
+  [ -n "$4" ] || return 1
+  ready=$(fm_procevent_listener_ready_path "$1" "$2" "$3") || return 1
+  [ ! -L "$ready" ] || return 1
+  tmp=$(umask 077; mktemp "${ready}.XXXXXX") || return 1
+  if printf '%s\n' "$4" > "$tmp" && chmod 0600 "$tmp" && mv -f -- "$tmp" "$ready"; then
+    return 0
+  fi
+  rm -f -- "$tmp"
+  return 1
+}
+
 fm_procevent_launch_floor_reset_locked() {  # <state-root> <source-id> <registration-identity>
-  local stamp
+  local stamp ready
   stamp=$(fm_procevent_launch_floor_stamp_path "$1" "$2" "$3") || return 1
-  rm -f -- "$stamp"
+  ready=$(fm_procevent_listener_ready_path "$1" "$2" "$3") || return 1
+  rm -f -- "$stamp" "$ready"
 }
 
 fm_procevent_launch_floor_prune_locked() {  # <state-root> <source-id> <registration-identity>
-  local reg keep stamp
+  local reg keep keep_ready stamp
   keep=$(fm_procevent_launch_floor_stamp_path "$1" "$2" "$3") || return 1
+  keep_ready=$(fm_procevent_listener_ready_path "$1" "$2" "$3") || return 1
   reg=$(fm_procevent_registry_dir "$1") || return 1
-  for stamp in "$reg/$2".*.last-launch "$reg/$2.last-launch"; do
+  for stamp in "$reg/$2".*.last-launch "$reg/$2.last-launch" \
+      "$reg/$2".*.listener-ready "$reg/$2.listener-ready"; do
     [ "$stamp" = "$keep" ] && continue
+    [ "$stamp" = "$keep_ready" ] && continue
     [ -e "$stamp" ] || [ -L "$stamp" ] || continue
     rm -f -- "$stamp" || return 1
   done
@@ -391,13 +418,15 @@ fm_procevent_registration_publish_locked() {  # <state> <adapter> <source-id> <a
 }
 
 # Publish one task-owned registration. The single source record persists across
-# rounds; the handled marker, not a second ownership record, holds the round open.
-fm_procevent_task_registration_publish_locked() {  # <state> <adapter> <source-id> <task-id> <argv...>
-  local state=$1 adapter=$2 id=$3 task=$4 reg dest tmp arg identity
-  shift 4
+# rounds; ack_through names the rounds its next listener must accept before they
+# can be marked handled.
+fm_procevent_task_registration_publish_locked() {  # <state> <adapter> <source-id> <task-id> <ack-through> <argv...>
+  local state=$1 adapter=$2 id=$3 task=$4 ack_through=$5 reg dest tmp arg identity
+  shift 5
   fm_procevent_adapter_valid "$adapter" || return 1
   fm_procevent_source_id_valid "$id" || return 1
   fm_pr_task_id_valid "$task" || return 1
+  case "$ack_through" in ''|*[!0-9]*) return 1 ;; esac
   [ "$#" -ge 1 ] || return 1
   for arg in "$@"; do
     case "$arg" in *$'\n'*) return 1 ;; esac
@@ -411,6 +440,7 @@ fm_procevent_task_registration_publish_locked() {  # <state> <adapter> <source-i
     printf 'adapter=%s\n' "$adapter"
     printf 'kind=task-owned\n'
     printf 'owner_task=%s\n' "$task"
+    printf 'ack_through=%s\n' "$ack_through"
     printf 'argc=%s\n' "$#"
     printf 'argv:\n'
     printf '%s\n' "$@"
