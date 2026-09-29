@@ -19,6 +19,8 @@
 #     exact disclosed remainder
 #   - orphan status logs whose task meta has already disappeared
 #   - per-task endpoint-liveness lines for a live and a dead Herdr target
+#   - remote task startup projection uses durable local state, marks deferred
+#     freshness, and never blocks any supported harness on provider readback
 #   - composition: the script invokes the real fm-lock.sh/fm-bootstrap.sh/
 #     fm-wake-drain.sh (their real, distinctive output appears verbatim), it
 #     does not reimplement their logic
@@ -975,6 +977,86 @@ EOF
   pass "session start recovers native remote-agent state without a local endpoint"
 }
 
+test_remote_agent_startup_never_waits_for_provider_readback() {
+  local harness rec root home fakebin out reemit id=remote-hang state_dir calls count n
+  local start_s elapsed_s reemit_start_s reemit_elapsed_s
+  for harness in pi codex traex; do
+    rec=$(new_world "remote-agent-durable-$harness")
+    IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+    make_fake_toolchain "$fakebin"
+    make_fake_ps_harness "$fakebin" "$harness"
+    calls="$home/bytedcli.calls"
+    cat > "$fakebin/bytedcli" <<'SH'
+#!/usr/bin/env bash
+printf 'called\n' >> "${FM_FAKE_BYTEDCLI_CALLS:?}"
+trap '' TERM
+sleep 600
+SH
+    chmod +x "$fakebin/bytedcli"
+    n=1
+    while [ "$n" -le 51 ]; do
+      printf 'kind=ship\nexecutor=local-agent\nbackend=herdr\n' \
+        > "$home/state/local-$(printf '%02d' "$n").meta"
+      n=$((n + 1))
+    done
+    state_dir="$home/state/remote-tasks/$id"
+    mkdir -p "$state_dir"
+    cat > "$home/state/$id.meta" <<EOF
+kind=scout
+executor=remote-agent
+provider=ida
+task_type=research
+remote_state=$state_dir
+EOF
+    chmod 0600 "$home/state/$id.meta"
+    cat > "$state_dir/state.json" <<EOF
+{"schema":"fm-remote-agent-task-state.v1","task_id":"$id","executor":"remote-agent","provider":"ida","task_type":"research","revision":1,"phase":"running","instruction_file":"$home/data/$id/instructions.txt","instruction_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","bytedcli_version":"0.128.0","outcome":null,"error_class":null,"provider_checkpoint":"identity-reconciled","waiter":"armed","result_availability":"unavailable","result_path":null,"report_path":null,"provider_state":{"region":"sg","identity":"user","session_marker":"firstmate:$id:aaaaaaaaaaaaaaaa","session_id":"70001","task_id":"80001","agent_id":"9001","agent_name":"iDA Test","model":"ida-test","provider_status":"running"},"created_at":"2026-08-19T00:00:00Z","updated_at":"2026-08-19T00:00:00Z"}
+EOF
+    chmod 0600 "$state_dir/state.json"
+    printf 'needs-decision: [key=remote-check] preserve this durable decision\n' > "$home/state/$id.status"
+    append_wake "$home/state" signal "$id" 'needs-decision: [key=remote-check] preserve this durable decision' \
+      || fail "$harness fixture could not seed its durable wake"
+
+    start_s=$SECONDS
+    out=$(FM_SESSION_START_TIMEOUT=12 FM_FAKE_BYTEDCLI_CALLS="$calls" \
+      run_named_harness_session_start "$harness" "$home" "$root" "$fakebin:$BASE_PATH")
+    elapsed_s=$((SECONDS - start_s))
+
+    assert_not_contains "$out" "STARTUP TRUNCATED - SESSION START HIT ITS" \
+      "$harness startup exceeded the fixed 12-second bound"
+    assert_contains "$out" "state: working · source: remote-state · provider=ida phase=running outcome=none freshness=durable-local remote-readback=deferred" \
+      "$harness startup invented fresh provider state or hid the deferred readback"
+    assert_contains "$out" "needs-decision: [key=remote-check] preserve this durable decision" \
+      "$harness startup lost the durable decision while rendering the fleet"
+    count=$(printf '%s\n' "$out" | grep -E -c '^--- (local-[0-9]+|remote-hang) ---$')
+    [ "$count" -eq 52 ] || fail "$harness startup rendered $count of 52 task identities"
+    [ ! -e "$calls" ] || fail "$harness startup invoked the non-returning provider reader"
+    assert_grep 'remote-check' "$home/state/.wake-queue" \
+      "$harness startup removed the unacknowledged durable wake"
+
+    if [ "$harness" = pi ]; then
+      reemit_start_s=$SECONDS
+      reemit=$(FM_SESSION_START_TIMEOUT=12 FM_FAKE_BYTEDCLI_CALLS="$calls" \
+        run_named_harness_session_start "$harness" "$home" "$root" "$fakebin:$BASE_PATH" \
+          --reemit --source compact)
+      reemit_elapsed_s=$((SECONDS - reemit_start_s))
+      assert_not_contains "$reemit" "STARTUP TRUNCATED - SESSION START HIT ITS" \
+        "Pi context re-emit exceeded the fixed 12-second bound"
+      assert_contains "$reemit" "needs-decision: [key=remote-check] preserve this durable decision" \
+        "Pi context re-emit lost the durable decision"
+      [ ! -e "$calls" ] || fail "Pi context re-emit invoked the non-returning provider reader"
+      printf '# durable remote startup harness=%s tasks=52 elapsed_s=%s reemit_elapsed_s=%s\n' \
+        "$harness" "$elapsed_s" "$reemit_elapsed_s"
+    else
+      printf '# durable remote startup harness=%s tasks=52 elapsed_s=%s\n' \
+        "$harness" "$elapsed_s"
+    fi
+  done
+  pass "all supported harness digests render 52 identities without waiting on remote readback"
+}
+
 # --- composition: real scripts run, not reimplemented ------------------------
 
 test_composition_invokes_real_scripts() {
@@ -1226,7 +1308,7 @@ SH
   pass "session start: a read-only session declares its skipped network checks rather than dropping them"
 }
 
-# The compatibility verdict costs three tasks-axi subprocesses and one session
+# The compatibility verdict costs two capability probes and one session
 # start needs it twice. The digest must pay for it once.
 test_tasks_axi_compatibility_is_probed_once() {
   local rec root home fakebin log probes
@@ -1243,11 +1325,14 @@ EOF
   FM_FAKE_TASKS_AXI_LOG="$log" run_session_start "$home" "$root" "$fakebin:$BASE_PATH" >/dev/null
 
   probes=$(grep -c -- '--version' "$log" || true)
-  [ "$probes" -eq 1 ] \
-    || fail "tasks-axi was version-probed $probes times in one session start: $(cat "$log")"
+  [ "$probes" -eq 0 ] \
+    || fail "tasks-axi compatibility regressed to a version probe: $(cat "$log")"
   probes=$(grep -c -- 'update --help' "$log" || true)
   [ "$probes" -eq 1 ] \
     || fail "tasks-axi update --help ran $probes times in one session start: $(cat "$log")"
+  probes=$(grep -c -- 'mv --help' "$log" || true)
+  [ "$probes" -eq 1 ] \
+    || fail "tasks-axi mv --help ran $probes times in one session start: $(cat "$log")"
   assert_grep 'ready --file' "$log" "the backlog listing never ran, so the verdict was not actually reused"
   pass "session start: the tasks-axi compatibility verdict is computed once and reused"
 }
@@ -1650,6 +1735,36 @@ EOF
   assert_absent "${TMPDIR:-/tmp}/fm-session-start-stage" "the stage breadcrumb leaked a fixed-name file"
 
   pass "a session start inside its budget prints no truncation banner"
+}
+
+test_stage_timing_records_only_monotonic_durations() {
+  local rec root home fakebin out timing stages count
+  rec=$(new_world stage-timing)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_pi "$fakebin"
+  timing="$home/session-start-timing.tsv"
+  : > "$timing"
+
+  out=$(FM_SESSION_START_TIMING_FILE="$timing" \
+    run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" "NEXT STEP" "timed session start did not complete"
+  stages='lock bootstrap wake-queue supervision-instructions read-once fleet-state network-checks context next-step'
+  for stage_name in $stages; do
+    count=$(awk -F '\t' -v stage="$stage_name" \
+      '$1 == "v1" && $2 == "stage" && $3 == stage && $4 ~ /^[0-9]+$/ { count++ } END { print count+0 }' \
+      "$timing")
+    [ "$count" -eq 1 ] || fail "timing file recorded $count entries for $stage_name"
+  done
+  [ "$(wc -l < "$timing" | tr -d ' ')" -eq 9 ] \
+    || fail "timing file contained fields beyond the nine stage durations: $(cat "$timing")"
+  awk -F '\t' 'NF != 4 || $1 != "v1" || $2 != "stage" || $4 !~ /^[0-9]+$/ { exit 1 }' "$timing" \
+    || fail "timing file contained a non-duration payload: $(cat "$timing")"
+
+  pass "opt-in startup timing records one monotonic duration per stage and no content bodies"
 }
 
 test_runtime_bound_leaves_harness_ancestry_headroom() {
@@ -2197,6 +2312,7 @@ test_orphan_status_logs_are_printed
 test_endpoint_liveness_historical
 test_endpoint_liveness_herdr
 test_remote_agent_startup_recovery
+test_remote_agent_startup_never_waits_for_provider_readback
 test_composition_invokes_real_scripts
 test_branch_outcome_replay_respects_captain_barrier_and_lease_sweep
 test_non_pi_session_start_leaves_branch_state_untouched
@@ -2217,6 +2333,7 @@ test_pi_diagnostic_rejects_previous_session_loaded_marker
 test_runtime_bound_truncates_loudly_and_exits_zero
 test_portable_timeout_escalates_term_resistant_process
 test_runtime_bound_leaves_a_healthy_digest_untouched
+test_stage_timing_records_only_monotonic_durations
 test_runtime_bound_leaves_harness_ancestry_headroom
 test_agents_baseline_stays_at_true_start_and_reemits_on_every_drifted_pi_compact
 test_read_only_pi_compact_refreshes_against_its_own_session_identity

@@ -4,6 +4,7 @@
 #
 # Usage:
 #   fm-task-state.sh <task-id>
+#   fm-task-state.sh --durable-only <task-id>
 #   fm-task-state.sh lifecycle|observe|enroll <task-id>
 #   fm-task-state.sh inspect <task-id> [--evidence <path>]...
 #   fm-task-state.sh assess <task-id> --basis <inspect-token> --judgment '<semantic-json>'
@@ -22,6 +23,9 @@
 # executor=remote-agent delegates to the explicitly recorded AIME or iDA
 # provider. Unknown executor/provider records fail closed and never fall
 # through to pane, worktree, harness, or runtime-backend semantics.
+# `--durable-only` keeps remote-provider refresh off the caller's blocking path.
+# It prints the validated local provider record and marks any freshness gap;
+# ordinary calls retain provider-aware current-state reconciliation.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -31,6 +35,11 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 export FM_HOME
 # shellcheck source=bin/fm-task-lifecycle-lib.sh
 . "$SCRIPT_DIR/fm-task-lifecycle-lib.sh"
+DURABLE_ONLY=0
+if [ "${1:-}" = --durable-only ]; then
+  DURABLE_ONLY=1
+  shift
+fi
 # The task-local goal owner is opt-in through enrollment, independent of the
 # provider/process state below. No historical task is enrolled by a state read.
 case "${1:-}" in
@@ -75,15 +84,30 @@ case "$executor" in
   cloud-worker)
     provider=$(meta_value provider)
     case "$provider" in
-      aime) exec "$SCRIPT_DIR/fm-cloud-research-aime.sh" state "$id" ;;
+      aime)
+        if [ "$DURABLE_ONLY" -eq 1 ]; then
+          exec "$SCRIPT_DIR/fm-cloud-research-aime.sh" state "$id" --durable-only
+        fi
+        exec "$SCRIPT_DIR/fm-cloud-research-aime.sh" state "$id"
+        ;;
       *) printf 'state: unknown · source: none · unsupported cloud provider=%s\n' "${provider:-missing}" ;;
     esac
     ;;
   remote-agent)
     provider=$(meta_value provider)
     case "$provider" in
-      aime) exec "$SCRIPT_DIR/fm-cloud-research-aime.sh" state "$id" ;;
-      ida) exec "$SCRIPT_DIR/fm-remote-agent-ida.sh" state "$id" ;;
+      aime)
+        if [ "$DURABLE_ONLY" -eq 1 ]; then
+          exec "$SCRIPT_DIR/fm-cloud-research-aime.sh" state "$id" --durable-only
+        fi
+        exec "$SCRIPT_DIR/fm-cloud-research-aime.sh" state "$id"
+        ;;
+      ida)
+        if [ "$DURABLE_ONLY" -eq 1 ]; then
+          exec "$SCRIPT_DIR/fm-remote-agent-ida.sh" state "$id" --durable-only
+        fi
+        exec "$SCRIPT_DIR/fm-remote-agent-ida.sh" state "$id"
+        ;;
       *) printf 'state: unknown · source: none · unsupported remote provider=%s\n' "${provider:-missing}" ;;
     esac
     ;;

@@ -10,7 +10,7 @@
 # record and checkpoints attempted before the sole create. Replaying the action
 # only reads back a same-message marker/task correlation; adjacency or a newest
 # task never proves identity. Missing correlation remains submission-unknown.
-#   fm-remote-agent-ida.sh state <task-id>
+#   fm-remote-agent-ida.sh state <task-id> [--durable-only]
 #   fm-remote-agent-ida.sh artifacts <task-id>
 #   fm-remote-agent-ida.sh interrupt-wait <task-id>
 #   fm-remote-agent-ida.sh cancel <task-id> --authorize-provider-cancel
@@ -371,9 +371,25 @@ cmd_adopt() (
 )
 
 cmd_state() (
-  local id=${1-} root observation state status kind availability class
-  [ "$#" -eq 1 ] || usage
+  local id=${1-} root observation state status kind availability class durable_only=0
+  if [ "$#" -eq 2 ] && [ "$2" = --durable-only ]; then durable_only=1
+  elif [ "$#" -ne 1 ]; then usage
+  fi
   if ! fm_ida_state_load "$id"; then printf 'state: unknown · source: remote-state · provider=ida invalid-state\n'; return; fi
+  if [ "$durable_only" -eq 1 ]; then
+    state=$(fm_remote_phase_current_state "$REMOTE_STATE_PHASE")
+    case "$REMOTE_STATE_PHASE" in
+      submitted|running|result-unavailable)
+        printf 'state: %s · source: remote-state · provider=ida phase=%s outcome=%s freshness=durable-local remote-readback=deferred\n' \
+          "$state" "$REMOTE_STATE_PHASE" "${REMOTE_STATE_OUTCOME:-none}"
+        ;;
+      *)
+        printf 'state: %s · source: remote-state · provider=ida phase=%s outcome=%s freshness=durable-local\n' \
+          "$state" "$REMOTE_STATE_PHASE" "${REMOTE_STATE_OUTCOME:-none}"
+        ;;
+    esac
+    return
+  fi
   case "$REMOTE_STATE_PHASE" in
     terminal-success|terminal-failure|terminal-cancelled|submission-not-started|submission-unknown|ambiguous)
       state=$(fm_remote_phase_current_state "$REMOTE_STATE_PHASE")
