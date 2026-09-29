@@ -1489,7 +1489,7 @@ fm_firstmate_root_home() {
 # and re-trigger the import-approval prompt the default $HOME-based root avoids.
 # Set TREEHOUSE_ROOT outside those homes to clear the refusal.
 fm_treehouse_home_root() {  # <home>
-  local home=$1 abs base slug hash derived active_home root_home
+  local home=$1 abs base slug hash derived active_home root_home suffix parent
   abs=$(CDPATH='' cd -- "$home" 2>/dev/null && pwd -P) || return 1
   base=${TREEHOUSE_ROOT:-${HOME:-}}
   case "$base" in
@@ -1497,11 +1497,26 @@ fm_treehouse_home_root() {  # <home>
     *) return 1 ;;
   esac
   # Normalize an existing base so two spellings of one directory cannot produce
-  # two roots; a base Treehouse has yet to create is kept as given rather than
-  # refused, minus any trailing slashes.
+  # two roots. A base Treehouse has yet to create still has its existing
+  # ancestor resolved through pwd -P: an ancestor symlinked into a Firstmate
+  # home must be caught by the prefix check below exactly as if the base
+  # already existed, or a not-yet-created root could lexically dodge the
+  # refusal while `treehouse --root` still creates the pool inside that home
+  # once the OS resolves the symlink.
   if [ -d "$base" ]; then
     base=$(CDPATH='' cd -- "$base" 2>/dev/null && pwd -P) || return 1
   else
+    suffix=
+    parent=$base
+    while [ "$parent" != / ] && [ ! -d "$parent" ]; do
+      suffix="/${parent##*/}$suffix"
+      parent=${parent%/*}
+      [ -n "$parent" ] || parent=/
+    done
+    if [ -d "$parent" ]; then
+      parent=$(CDPATH='' cd -- "$parent" 2>/dev/null && pwd -P) || return 1
+    fi
+    base="${parent%/}$suffix"
     while [ "${base%/}" != "$base" ] && [ "$base" != / ]; do base=${base%/}; done
   fi
   [ -n "$base" ] || return 1

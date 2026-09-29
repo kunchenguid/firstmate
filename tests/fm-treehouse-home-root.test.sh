@@ -120,6 +120,35 @@ test_root_rejects_bases_inside_active_or_root_home() {
   pass "the derived worktree root stays outside the active and root Firstmate homes"
 }
 
+test_root_rejects_base_via_symlinked_ancestor_into_home() {
+  local base root_home active_home link err
+  base="$TMP_ROOT/reject-symlink"
+  root_home="$base/root-home"
+  active_home="$root_home/secondmate"
+  mkdir -p "$active_home"
+  printf '%s\n' \
+    'schema=fm-secondmate-parent.v1' \
+    'route=local' \
+    "parent_home=$root_home" > "$active_home/.fm-secondmate-parent"
+
+  # The base's leaf directory does not exist yet, but an existing ancestor is a
+  # symlink into the active home. The OS resolves that symlink when the base is
+  # eventually created, so the derivation must resolve it too, or the lexical
+  # prefix check below is compared against an unresolved path that never
+  # matches even though the base physically lands inside the home.
+  link="$base/link-into-active"
+  ln -s "$active_home" "$link"
+
+  err="$base/symlink.err"
+  if FM_HOME="$active_home" TREEHOUSE_ROOT="$link/not-yet-created" \
+    fm_treehouse_home_root "$active_home" >/dev/null 2>"$err"; then
+    fail "a not-yet-created base reached through a symlinked ancestor into the active home was accepted"
+  fi
+  assert_contains "$(cat "$err")" "inside the active Firstmate home or its root home" \
+    "the symlinked-ancestor rejection did not explain the unsafe derived root"
+  pass "a not-yet-created base reached through a symlinked ancestor into a home is still rejected"
+}
+
 # Build a spawn fixture under <case>/ and echo "<home> <project> <pool> <fakebin>".
 make_spawn_case() {  # <name> <id>
   local name=$1 id=$2 case_dir home project pool fakebin
@@ -240,6 +269,7 @@ test_home_seed_return_resolves_from_the_path() {
 test_root_is_per_home_and_spelling_independent
 test_root_falls_back_to_home_and_fails_closed
 test_root_rejects_bases_inside_active_or_root_home
+test_root_rejects_base_via_symlinked_ancestor_into_home
 test_spawn_allocates_from_its_own_home_root
 test_home_seed_leases_from_the_seeding_home_root
 test_home_seed_return_resolves_from_the_path
