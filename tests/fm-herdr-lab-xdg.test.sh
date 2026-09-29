@@ -36,13 +36,20 @@ lab_state=absent
 
 case "$1 ${2:-}" in
   "session list")
+    # Like real Herdr, which derives the default session's socket from the
+    # config dir, the live default reads running only under the real XDG
+    # tree; under any other XDG tree it reads not-running.
+    real_config=${FM_FAKE_HERDR_REAL_CONFIG:-$HOME/.config}
+    current_config=${XDG_CONFIG_HOME:-$HOME/.config}
+    default_running=false
+    [ "$current_config" = "$real_config" ] && default_running=true
     if [ "$lab_state" = absent ] || [ "$lab_state" = deleted ]; then
-      jq -nc '{sessions:[{default:true,name:"default",running:true,socket_path:"/tmp/fake-default.sock"}]}'
+      jq -nc --argjson running "$default_running" '{sessions:[{default:true,name:"default",running:$running,socket_path:"/tmp/fake-default.sock"}]}'
     else
       running=false
       [ "$lab_state" = running ] && running=true
-      jq -nc --arg name "$session" --argjson running "$running" \
-        '{sessions:[{default:true,name:"default",running:true,socket_path:"/tmp/fake-default.sock"},{default:false,name:$name,running:$running,socket_path:("/tmp/" + $name + ".sock")}]}'
+      jq -nc --arg name "$session" --argjson running "$running" --argjson default_running "$default_running" \
+        '{sessions:[{default:true,name:"default",running:$default_running,socket_path:"/tmp/fake-default.sock"},{default:false,name:$name,running:$running,socket_path:("/tmp/" + $name + ".sock")}]}'
     fi
     ;;
   "server --session")
@@ -83,6 +90,7 @@ lab_cli() {
   PATH="$FAKEBIN:$PATH" HOME="$FAKE_HOME" \
     FM_FAKE_HERDR_STATE="$FAKE_STATE" \
     FM_FAKE_HERDR_LOG="$FAKE_LOG" \
+    FM_FAKE_HERDR_REAL_CONFIG="${FM_FAKE_HERDR_REAL_CONFIG:-}" \
     FM_HERDR_LAB_STATE_DIR="$TRIPWIRES" \
     bash "$ROOT/bin/fm-herdr-lab.sh" "$@"
 }
@@ -133,6 +141,8 @@ test_default_behavior_still_inherits_caller_xdg() {
   local sentinel="$FAKE_HOME/sentinel"
   mkdir -p "$plugin_src" "$sentinel/config" "$sentinel/data" "$sentinel/state"
   : > "$FAKE_LOG"
+  # The sentinel is this test's live tree, so the default reads running there.
+  export FM_FAKE_HERDR_REAL_CONFIG="$sentinel/config"
   XDG_CONFIG_HOME="$sentinel/config" XDG_DATA_HOME="$sentinel/data" XDG_STATE_HOME="$sentinel/state" \
     lab_cli provision "$name" || fail "default provision failed"
   assert_absent "$TRIPWIRES/$name.xdg" "default provision created an isolated XDG tree unasked"
@@ -156,6 +166,25 @@ test_help_names_the_flag() {
   pass "fm-herdr-lab: --help documents --isolated-xdg"
 }
 
+test_isolated_provision_observes_live_default() {
+  local name="fm-lab-xdg-live-$$"
+  local live="$TMP_ROOT/live-home"
+  mkdir -p "$live/config" "$live/data" "$live/state"
+  # The live default session exists only under the real XDG tree; the lab
+  # XDG tree starts empty. Provision must snapshot fleet state with the
+  # caller environment, or the tripwire refuses every time.
+  export FM_FAKE_HERDR_REAL_CONFIG="$live/config"
+  XDG_CONFIG_HOME="$live/config" XDG_DATA_HOME="$live/data" XDG_STATE_HOME="$live/state" \
+    lab_cli --isolated-xdg provision "$name" \
+    || fail "isolated provision did not observe the live default session"
+  XDG_CONFIG_HOME="$live/config" XDG_DATA_HOME="$live/data" XDG_STATE_HOME="$live/state" \
+    lab_cli --isolated-xdg teardown "$name" || fail "isolated teardown failed"
+  assert_absent "$TRIPWIRES/$name.fleet-state.json" "teardown left its tripwire behind"
+  unset FM_FAKE_HERDR_REAL_CONFIG
+  pass "fm-herdr-lab: --isolated-xdg snapshots fleet state with the caller XDG so the live default is observed"
+}
+
 test_isolated_lab_links_inside_lab_only
 test_default_behavior_still_inherits_caller_xdg
 test_help_names_the_flag
+test_isolated_provision_observes_live_default
