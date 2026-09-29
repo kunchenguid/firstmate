@@ -1528,7 +1528,8 @@ spawn_remote_secondmate() {
     echo "error: remote launch did not confirm its model; preserving its fleet seat for reconciliation" >&2
     return 1
   fi
-  requested_model=${model#-}
+  requested_model=$model
+  [ "$requested_model" != - ] || requested_model=default
   if [ "$remote_model" != "$requested_model" ]; then
     if ! FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG FM_DATA_OVERRIDE=$DATA \
       "$SCRIPT_DIR/fm-fleet-seats.sh" reconcile-relaunch "$id" --token "$seat_token" \

@@ -220,6 +220,11 @@ case "${FM_FAKE_SSH_MODE:-normal}:$command_name:$command_rel" in
     printf 'dead\n'
     exit 0
     ;;
+  state-missing:fm-remote-secondmate-control.sh:*)
+    [ "$_command_action" = state ] || exit 93
+    printf 'missing\n'
+    exit 0
+    ;;
   launch-prelaunch-refusal:fm-remote-secondmate-control.sh:*)
     [ "$_command_action" = launch ] || exit 93
     printf 'relaunch_failure=prelaunch\n' >&2
@@ -232,6 +237,16 @@ case "${FM_FAKE_SSH_MODE:-normal}:$command_name:$command_rel" in
     printf 'target=fm-remote:w1:p2\n'
     printf 'herdr_session=fm-remote\n'
     printf 'harness=codex\n'
+    exit 0
+    ;;
+  launch-default-model:fm-remote-secondmate-control.sh:*)
+    [ "$_command_action" = launch ] || exit 93
+    printf 'schema=fm-remote-secondmate-control.v1\n'
+    printf 'backend=herdr\n'
+    printf 'target=%s\n' "$FM_FAKE_ROUTE_TARGET"
+    printf 'herdr_session=fm-remote\n'
+    printf 'harness=codex\n'
+    printf 'model=default\n'
     exit 0
     ;;
   launch-nonherdr-route:fm-remote-secondmate-control.sh:*)
@@ -983,6 +998,22 @@ if ! FM_FAKE_SSH_MODE=state-dead remote_env "$ROOT/bin/fm-fleet-seats.sh" reserv
 fi
 kill "$dead_probe_pid" 2>/dev/null || true
 wait "$dead_probe_pid" 2>/dev/null || true
+if FM_FAKE_SSH_MODE=launch-missing-model remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate \
+  --model pool-model-a > "$TMP_ROOT/spawn-missing-endpoint.out" 2>&1; then
+  fail "the unpublished endpoint fixture unexpectedly published a model"
+fi
+missing_endpoint_seat=$(find "$PARENT/state/fleet-seats" -name '*.seat' \
+  -exec grep -l '^task=ios$' {} + | head -1)
+[ -n "$missing_endpoint_seat" ] || fail "the unpublished endpoint fixture lost its seat"
+sleep 600 >/dev/null 2>&1 &
+missing_probe_pid=$!
+if ! FM_FAKE_SSH_MODE=state-missing remote_env "$ROOT/bin/fm-fleet-seats.sh" reserve missing-probe \
+  --harness codex --model pool-model-a --holder-pid "$missing_probe_pid" \
+  > "$TMP_ROOT/spawn-missing-endpoint-seat.out" 2>&1; then
+  fail "a confirmed missing unpublished endpoint kept its seat"
+fi
+kill "$missing_probe_pid" 2>/dev/null || true
+wait "$missing_probe_pid" 2>/dev/null || true
 rm -f "$PARENT"/state/ios.meta.tmp.*
 out=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate --model pool-model-a)
 if remote_env "$ROOT/bin/fm-fleet-seats.sh" reserve another --harness codex --model pool-model-a \
@@ -1009,6 +1040,20 @@ remote_env "$ROOT/bin/fm-fleet-seats.sh" reserve another --harness codex --model
   || fail "the unlaunched requested model kept a seat"
 rm -f "$PARENT/config/fleet-seats"
 pass "remote initial launch reconciles death, publication, and confirmed models"
+cp "$PARENT/state/ios.meta" "$TMP_ROOT/ios-before-default-retry.meta" \
+  || fail "could not preserve the explicit-model parent route"
+default_route_target=$(sed -n 's/^remote_target=//p' "$PARENT/state/ios.meta")
+if ! default_out=$(FM_FAKE_ROUTE_TARGET="$default_route_target" FM_FAKE_SSH_MODE=launch-default-model \
+  remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate 2>&1); then
+  fail "an undeclared unpinned remote spawn was refused: $default_out"
+fi
+assert_not_contains "$default_out" 'requested model' \
+  "equivalent default spellings were reported as a model mismatch"
+assert_equals '' "$(sed -n 's/^model=//p' "$PARENT/state/ios.meta")" \
+  "an unpinned remote route gained an explicit model"
+cp "$TMP_ROOT/ios-before-default-retry.meta" "$PARENT/state/ios.meta" \
+  || fail "could not restore the explicit-model parent route"
+pass "undeclared unpinned remote spawn preserves default-model behavior"
 assert_contains "$out" 'remote=remote-mac backend=herdr' "remote spawn did not report separate host and backend dimensions"
 assert_grep 'remote_host=remote-mac' "$PARENT/state/ios.meta" "parent metadata omitted the remote host"
 assert_grep 'remote_backend=herdr' "$PARENT/state/ios.meta" "parent metadata omitted the remote-local backend"

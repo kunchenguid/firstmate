@@ -1916,6 +1916,8 @@ test_stop_transport_failure_reconciles_a_dead_agent() {
     || fail "the journal should retain the pre-stop phase on a partial stop"
   [ "$(journal_field "$dir" rl25 rollback)" = prior-record-kept-agent-dead ] \
     || fail "rollback should reconcile the observed dead agent"
+  assert_contains "$out" "relaunch_failure=launch" "a confirmed stopped agent was reported as a prelaunch refusal"
+  assert_not_contains "$out" "relaunch_failure=prelaunch" "a confirmed stopped agent kept its old-seat signal"
   assert_contains "$out" "no agent is running" "the failure should report the reconciled dead state"
   assert_grep "preserve this after stop" "$dir/home/data/rl25/brief.md" \
     "the progress note should survive once the old agent has stopped"
