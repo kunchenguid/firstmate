@@ -48,6 +48,10 @@ ACK_REMOVED=0
 PRESENTED_MAX=0
 ACK_FINGERPRINTS=
 ACK_NOTICE_FINGERPRINTS=
+OPEN_PAGE_NEXT=
+OPEN_PAGE_FP=
+SUPPRESSED_TERMINAL_SEQS=
+SUPPRESSED_TERMINAL_COUNT=0
 PRESENTATION_LOCK_TIMEOUT=${FM_STATUS_PRESENTATION_LOCK_TIMEOUT:-10}
 BRANCH_OUTCOMES_RC=0
 case "$PRESENTATION_LOCK_TIMEOUT" in ''|*[!0-9]*|0) PRESENTATION_LOCK_TIMEOUT=10 ;; esac
@@ -253,8 +257,8 @@ assert_watcher_liveness() {
 # The helper ignores non-presentation and legacy keys, so this is a narrow
 # receipt path rather than a second interpretation of general check wakes.
 inactive_outcome_fingerprints() { # <sequence> <key-prefix> [<rows-file>]
-  local cutoff=$1 prefix=$2 rows=${3:-} epoch seq kind key payload
-  while IFS=$(printf '\t') read -r epoch seq kind key payload; do
+  local cutoff=$1 prefix=$2 rows=${3:-} seq kind key payload
+  while IFS=$(printf '\t') read -r _epoch seq kind key payload; do
     [ "$kind" = check ] || continue
     case "$seq" in ''|*[!0-9]*) continue ;; esac
     [ "$seq" -le "$cutoff" ] || continue
@@ -467,50 +471,89 @@ EOF
 # common case.
 print_open_decisions_section() {
   local snapshot=${1:-} open task key verb note line item_bytes=220 global_bytes=4000
-  local output='' used=0 shown=0 omitted=0 bytes
+  local output='' used=0 shown=0 total=0 bytes page_file page_data page_fp page_start next_start
+  local -a lines=()
 
   if [ -n "$snapshot" ]; then
     open=$(scan_open_decisions_snapshot "$STATE" "$snapshot") || return 1
   else
     open=$(scan_open_decisions_incremental "$STATE") || return 1
   fi
-  [ -n "$open" ] || return 0
+  [ -n "$open" ] || {
+    OPEN_PAGE_NEXT=0
+    rm -f -- "$STATE/.open-decisions-page" 2>/dev/null || true
+    return 0
+  }
+
+  # OPEN DECISIONS is a fleet-wide current set rather than an append-only
+  # stream. Keep a tiny durable page cursor so a large fleet is walked over
+  # successive drains instead of advancing the status cursor past omitted rows.
+  page_fp=$(printf '%s\n' "$open" | cksum | awk '{print $1 ":" $2}') || return 1
+  OPEN_PAGE_FP=$page_fp
+  page_file="$STATE/.open-decisions-page"
+  page_start=0
+  if [ -f "$page_file" ] && [ ! -L "$page_file" ] \
+    && page_data=$(LC_ALL=C command cat "$page_file" 2>/dev/null); then
+    while IFS=$(printf '\t') read -r version saved_fp saved_start extra; do
+      [ "$version" = v1 ] && [ -z "$extra" ] || continue
+      case "$saved_start" in ''|*[!0-9]*) continue ;; esac
+      [ "$saved_fp" = "$page_fp" ] && page_start=$saved_start
+    done <<EOF
+$page_data
+EOF
+  fi
 
   while IFS=$(printf '\t') read -r task key verb note; do
     [ -n "$task" ] || continue
     line="$task"
     [ "$key" = default ] || line="$line [key=$key]"
     line="$line $verb: $note"
-    # The shared cut counts the item's own characters; the trailing newline this
-    # section's global budget also pays for is this caller's, so the per-item
-    # allowance passed down is one short of the cap.
     fm_cap_line_var "$line" $((item_bytes - 1))
     line=$FM_LINE_CAP_LINE
-    bytes=$(( ${#line} + 1 ))
-    if [ $((used + bytes)) -gt "$global_bytes" ]; then
-      omitted=$((omitted + 1))
-      continue
-    fi
-    output="$output$line
-"
-    used=$((used + bytes))
-    shown=$((shown + 1))
+    lines+=("$line")
   done <<EOF
 $open
 EOF
+  total=${#lines[@]}
+  [ "$total" -gt 0 ] || return 0
+  [ "$page_start" -lt "$total" ] || page_start=0
 
-  [ "$shown" -gt 0 ] || [ "$omitted" -gt 0 ] || return 0
-  printf 'OPEN DECISIONS (still open, folded from the durable status logs - not just the latest line):\n' || return 1
+  # Select one contiguous page. The next page is committed only after the
+  # prepared presentation reaches stdout, so an interrupted drain retries the
+  # same decisions and never loses a page.
+  local i
+  for ((i=page_start; i<total; i++)); do
+    line=${lines[i]}
+    bytes=$(( ${#line} + 1 ))
+    if [ $((used + bytes)) -gt "$global_bytes" ]; then break; fi
+    output="${output}${line}"$'\n'
+    used=$((used + bytes))
+    shown=$((shown + 1))
+  done
+  [ "$shown" -gt 0 ] || return 1
+  next_start=$((page_start + shown))
+  [ "$next_start" -lt "$total" ] || next_start=0
+  OPEN_PAGE_NEXT=$next_start
+  printf 'OPEN DECISIONS (still open, folded from the durable status logs - page %d-%d of %d):\n' \
+    "$((page_start + 1))" "$((page_start + shown))" "$total" || return 1
   printf '%s' "$output" || return 1
-  if [ "$omitted" -gt 0 ]; then
-    printf 'OPEN DECISIONS: %d more omitted (byte cap)\n' "$omitted" || return 1
+  if [ "$next_start" -ne 0 ]; then
+    printf 'OPEN DECISIONS: page continues on the next drain.\n' || return 1
   fi
-  # Answerer-closes hint, printed at exactly the moment an answer gets written:
-  # the send that answers a listed decision also closes it, so closure never
-  # depends on the busy worker writing a matching resolved line (contract:
-  # bin/fm-send.sh header).
   printf "OPEN DECISIONS: close one by answering it: bin/fm-send.sh <task> --resolve-key <key> '<answer>'\n" || return 1
 }
+
+commit_open_decisions_page() {
+  local page_file="$STATE/.open-decisions-page" tmp
+  if [ "${OPEN_PAGE_NEXT:-0}" -eq 0 ]; then
+    rm -f -- "$page_file" 2>/dev/null || true
+    return 0
+  fi
+  tmp=$(mktemp "$STATE/.open-decisions-page.tmp.XXXXXX") || return 1
+  printf 'v1\t%s\t%s\n' "$OPEN_PAGE_FP" "$OPEN_PAGE_NEXT" > "$tmp" || { rm -f "$tmp"; return 1; }
+  mv -f -- "$tmp" "$page_file"
+}
+
 
 # Print the RECORD DIVERGENCE section: every captain call whose two records
 # contradict each other - the status log says a key was resolved outright while
@@ -771,6 +814,10 @@ print_status_sections() {
     return 1
   fi
   if ! status_commit_presentation_snapshot "$STATE" "$acknowledged"; then
+    rm -f -- "$prepared"
+    return 1
+  fi
+  if ! commit_open_decisions_page; then
     rm -f -- "$prepared"
     return 1
   fi
@@ -1052,14 +1099,53 @@ awk -F '\t' -v seqs="$ACTOR_ROWS_FILE" '
 RAW_ROWS=$(fm_wake_print_deduped "$DRAIN_VIEW_TMP") || exit "$?"
 rm -f -- "$DRAIN_VIEW_TMP" || exit 1
 DRAIN_VIEW_TMP=
+# A scheduled-workflow failure that arrives after its PR has an authoritative
+# merged receipt and its task is terminal is stale terminal noise. Keep the row
+# in the durable queue and consume it with this wake, but omit the repeated
+# payload from the worker-facing turn. Any uncertainty keeps the notice loud.
+SUPPRESSED_TERMINAL_SEQS=
+SUPPRESSED_TERMINAL_COUNT=0
+while IFS=$(printf '\t') read -r _epoch seq kind key payload; do
+  [ "$kind" = check ] || continue
+  case "$key" in
+    *.check.sh) task=${key##*/}; task=${task%.check.sh} ;;
+    *) continue ;;
+  esac
+  printf '%s' "$payload" | grep -Eiq '(scheduled[[:space:]_-]*workflow.*(fail|red)|bot.*approv|approv.*bot|approval.*(already|merged)|approved.*(already|merged))' || continue
+  [ -e "$STATE/$task.pr-poll-merge-notified" ] || continue
+  [ -f "$STATE/$task.status" ] && [ ! -L "$STATE/$task.status" ] || continue
+  terminal=$(awk '
+    $0 ~ /^(done|failed)([[:space:]]|\[|:)/ {
+      sub(/[[:space:]]*\[key=[^]]+\]/, "")
+      sub(/[[:space:]]*:.*/, "")
+      last=$1
+    }
+    END { print last }
+  ' "$STATE/$task.status" 2>/dev/null)
+  [ -n "$terminal" ] || continue
+  SUPPRESSED_TERMINAL_SEQS="${SUPPRESSED_TERMINAL_SEQS}${seq}"$'\n'
+  SUPPRESSED_TERMINAL_COUNT=$((SUPPRESSED_TERMINAL_COUNT + 1))
+done <<EOF
+$RAW_ROWS
+EOF
 ACK_THROUGH=$(printf '%s\n' "$RAW_ROWS" | awk -F '\t' '$2 ~ /^[0-9]+$/ && $2 > max { max=$2 } END { print max + 0 }') || exit 1
 case "${FM_WAKE_DRAIN_TEST_DELAY_BEFORE_COMMIT:-0}" in
   0) ;;
   ''|*[!0-9]*) ;;
   *) sleep "$FM_WAKE_DRAIN_TEST_DELAY_BEFORE_COMMIT" ;;
 esac
+if [ "$SUPPRESSED_TERMINAL_COUNT" -gt 0 ]; then
+  printf 'WAKE TERMINAL NOTICES SUPPRESSED: %s repeated terminal notice(s) for merged, closed task(s).\n' "$SUPPRESSED_TERMINAL_COUNT"
+fi
 if [ -n "$RAW_ROWS" ]; then
-  printf '%s\n' "$RAW_ROWS" || exit "$?"
+  while IFS= read -r row; do
+    [ -n "$row" ] || continue
+    seq=$(printf '%s\n' "$row" | awk -F '\t' '{print $2}')
+    if printf '%s' "$SUPPRESSED_TERMINAL_SEQS" | grep -Fqx "$seq"; then continue; fi
+    printf '%s\n' "$row" || exit "$?"
+  done <<EOF
+$RAW_ROWS
+EOF
 fi
 fm_recovery_marker_snapshot "$RECOVERY_MARKER" || exit 1
 RECOVERY_MARKER_TOKEN=$FM_RECOVERY_MARKER_TOKEN
