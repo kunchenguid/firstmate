@@ -34,9 +34,9 @@
 #     covers a spawn that reserved before publishing its record. A record that
 #     is neither is stale and removed; a live task record is never reclaimed,
 #     so recovery never preempts running work.
-#   - pooled active task records in the root home and in every local
-#     secondmate registered in the root's data/secondmates.md, so agents
-#     launched before a pool existed count without any reservation.
+#   - pooled active task records in the root home and local descendants
+#     reached through each home's data/secondmates.md, so agents launched
+#     before a pool existed count without any reservation.
 #   - the primary supervisor, as above.
 #   - for each registered remote secondmate, the holders that home returned
 #     from its last successful serve, cached in
@@ -364,15 +364,18 @@ primary_counts() {
   return 0
 }
 
-# registry_homes: fill $TMPD/local-homes (canonical state dirs) and
-# $TMPD/remote-ids from the root registry. A record line that parses under
-# neither form fails, because its home's agents would go uncounted.
-registry_homes() {
-  local reg=$ROOT_DATA/secondmates.md line home
-  : > "$TMPD/local-homes"
-  : > "$TMPD/remote-ids"
-  canon_dir "$ROOT_STATE" >> "$TMPD/local-homes" || return 1
-  [ -e "$reg" ] || return 0
+registry_homes_walk() {
+  local home=$1 home_state=$2 depth=$3 reg line child child_state
+  grep -Fxq -- "$home" "$TMPD/seen-homes" && return 0
+  [ "$depth" -le 64 ] || { REGISTRY_ERROR="secondmate registry nesting exceeds 64 homes"; return 1; }
+  printf '%s\n' "$home" >> "$TMPD/seen-homes" || return 1
+  printf '%s\n' "$home_state" >> "$TMPD/local-homes" || return 1
+  if [ "$depth" -eq 0 ]; then
+    reg=$ROOT_DATA/secondmates.md
+  else
+    reg=$home/data/secondmates.md
+  fi
+  [ -e "$reg" ] || [ -L "$reg" ] || return 0
   [ -f "$reg" ] && [ -r "$reg" ] || return 1
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in '- '*) ;; *) continue ;; esac
@@ -381,13 +384,27 @@ registry_homes() {
       return 1
     fi
     if [ "$SECONDMATE_REGISTRY_REMOTE" -eq 1 ]; then
+      if grep -Fxq -- "$SECONDMATE_REGISTRY_ID" "$TMPD/remote-ids"; then
+        REGISTRY_ERROR="duplicate remote secondmate id: $SECONDMATE_REGISTRY_ID"
+        return 1
+      fi
       printf '%s\n' "$SECONDMATE_REGISTRY_ID" >> "$TMPD/remote-ids"
       continue
     fi
-    home=$SECONDMATE_REGISTRY_HOME
-    [ -d "$home" ] && [ -d "$home/state" ] || return 1
-    canon_dir "$home/state" >> "$TMPD/local-homes" || return 1
+    child=$(canon_dir "$SECONDMATE_REGISTRY_HOME") || return 1
+    [ -d "$child/state" ] || return 1
+    child_state=$(canon_dir "$child/state") || return 1
+    registry_homes_walk "$child" "$child_state" "$((depth + 1))" || return 1
   done < "$reg"
+}
+
+registry_homes() {
+  local root_state
+  : > "$TMPD/local-homes" || return 1
+  : > "$TMPD/remote-ids" || return 1
+  : > "$TMPD/seen-homes" || return 1
+  root_state=$(canon_dir "$ROOT_STATE") || return 1
+  registry_homes_walk "$ROOT_HOME" "$root_state" 0
 }
 
 # root_holders <pool> <models-file> <remove-stale 0|1> [excluded-remote-id]:

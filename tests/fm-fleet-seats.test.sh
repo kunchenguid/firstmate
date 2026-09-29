@@ -212,6 +212,49 @@ test_one_capacity_across_homes() {
   pass "the primary and a local secondmate share one capacity and pre-existing agents count"
 }
 
+test_nested_secondmate_records_share_capacity() {
+  local root="$TMP_ROOT/nested/primary" child="$TMP_ROOT/nested/child" grandchild="$TMP_ROOT/nested/grandchild" out status row
+  make_home "$root"
+  pools "$root" 1
+  make_local_secondmate "$child" "$root" child
+  make_local_secondmate "$grandchild" "$child" grandchild
+  task_record "$grandchild" existing pool-model-a
+  new_holder
+  out=$(reserve "$root" next pool-model-a 2>&1)
+  status=$?
+  expect_code 4 "$status" "a primary launch while a nested secondmate holds the only seat"
+  assert_contains "$out" "existing" "the nested pre-existing agent was absent from the holders"
+
+  printf -- '- broken - Mate with a damaged record. (home: %s; added 2026-09-28)\n' "$grandchild" \
+    >> "$child/data/secondmates.md"
+  out=$(reserve "$root" malformed pool-model-a 2>&1)
+  expect_code 5 "$?" "an unparseable nested registry record"
+  assert_contains "$out" "unparseable secondmate registry line" "nested registry corruption was skipped"
+  row=$(sed -n '1p' "$child/data/secondmates.md")
+  printf '%s\n' "$row" > "$child/data/secondmates.md"
+
+  mv "$grandchild/state" "$grandchild/state-away"
+  out=$(reserve "$root" missing pool-model-a 2>&1)
+  expect_code 5 "$?" "a registered nested state directory that is missing"
+  mv "$grandchild/state-away" "$grandchild/state"
+  chmod 000 "$grandchild/state"
+  out=$(reserve "$root" unreadable pool-model-a 2>&1)
+  status=$?
+  chmod 755 "$grandchild/state"
+  if [ "$(id -u)" -ne 0 ]; then
+    expect_code 5 "$status" "a registered nested state directory that cannot be listed"
+  fi
+
+  pools "$root" 2
+  row=$(cat "$child/data/secondmates.md")
+  printf '%s\n' "$row" >> "$child/data/secondmates.md"
+  printf -- '- revisit - Root cycle. (home: %s; scope: tests; projects: ; added 2026-09-28)\n' "$root" \
+    >> "$grandchild/data/secondmates.md"
+  out=$(reserve "$root" next pool-model-a 2>&1) || fail "repeated or cyclic homes prevented a valid reservation: $out"
+  assert_contains "$out" "used=2 capacity=2" "a repeated nested home was counted more than once"
+  pass "nested local homes count existing agents once and refuse ambiguous occupancy"
+}
+
 test_live_supervisors_hold_seats_even_while_idle() {
   local root="$TMP_ROOT/supervisors/primary" mate="$TMP_ROOT/supervisors/mate" out status lockholder mateholder
   make_home "$root"
@@ -853,6 +896,7 @@ test_no_pool_configured_is_off
 test_pool_names_do_not_escape_the_seat_directory
 test_legacy_unresolved_models_count_in_every_pool
 test_one_capacity_across_homes
+test_nested_secondmate_records_share_capacity
 test_live_supervisors_hold_seats_even_while_idle
 test_explicit_model_required_while_pooled
 test_stale_reservations_recover_without_preempting_live_work
