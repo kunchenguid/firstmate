@@ -1609,6 +1609,80 @@ assert_contains "$(cat "$FMSTACK_ROOT/again.err")" "no captured round is waiting
   "the refused second reply did not say no round was waiting"
 pass "one firstmate reply re-arm answers and acknowledges every stacked round"
 
+# A reply re-arm has already stopped the earlier listener, acknowledged its
+# rounds, and staged the reply by the time arm confirms the new listener, so a
+# confirm miss must leave that registration for reconcile rather than retire
+# the board and lose the reply. The miss is injected at the runner's public
+# ensure-listening boundary; every other runner command is the real one.
+HFMMISS="$TMP_ROOT/hfmmiss"; new_home "$HFMMISS"
+FMMISS_ROOT="$TMP_ROOT/lavish-fmmiss-root"; mkdir -p "$FMMISS_ROOT"; export FMMISS_ROOT
+FMMISS_BIN=$(fm_fakebin "$TMP_ROOT/lavish-fmmiss-stub")
+cat > "$FMMISS_BIN/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+set -eu
+n=$(cat "$FMMISS_ROOT/count" 2>/dev/null || echo 0)
+n=$((n + 1))
+printf '%s\n' "$n" > "$FMMISS_ROOT/count"
+if [ "${1-}" = poll ] && [ "${3-}" = --agent-reply ]; then
+  printf 'poll%s reply: %s\n' "$n" "$4" >> "$FMMISS_ROOT/replies"
+fi
+while [ ! -e "$FMMISS_ROOT/trigger$n" ]; do
+  [ "$SECONDS" -lt "${FM_TEST_STUB_MAX_BLOCK_SECONDS:-120}" ] || exit 75
+  sleep 0.02
+done
+printf 'session:\n  status: feedback\nprompts[1]{uid,prompt,selector,tag,text}:\n  "","round %s","","message",""\n' "$n"
+SH
+chmod +x "$FMMISS_BIN/lavish-axi"
+FMMISS_TOOLS="$FMMISS_ROOT/bin"; mkdir -p "$FMMISS_TOOLS"
+for tool in "$ROOT"/bin/*; do
+  [ "${tool##*/}" = fm-procevent.sh ] || ln -s "$tool" "$FMMISS_TOOLS/${tool##*/}"
+done
+cat > "$FMMISS_TOOLS/fm-procevent.sh" <<SH
+#!/usr/bin/env bash
+if [ "\${1-}" = ensure-listening ]; then
+  printf 'error: listener is not running: %s\n' "\${2-}" >&2
+  exit 1
+fi
+exec "$ROOT/bin/fm-procevent.sh" "\$@"
+SH
+chmod +x "$FMMISS_TOOLS/fm-procevent.sh"
+FMMISS_ART="$FMMISS_ROOT/board.html"
+printf '<h1>confirm miss</h1>\n' > "$FMMISS_ART"
+lavish_session "$FMMISS_ART"
+fmmiss_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$FMMISS_ART")
+fm_test_track_procevent_home "$HFMMISS"
+printf 'Tightened the header.\n' > "$FMMISS_ROOT/reply"
+fmmiss_polls() { cat "$FMMISS_ROOT/count" 2>/dev/null || echo 0; }
+fmmiss_wait_polls() {  # <count>
+  for _ in $(seq 1 200); do [ "$(fmmiss_polls)" = "$1" ] && return 0; sleep 0.03; done
+  return 1
+}
+PATH="$FMMISS_BIN:$PATH" FM_HOME="$HFMMISS" "$ROOT/bin/fm-procevent-lavish.sh" arm "$FMMISS_ART" >/dev/null \
+  || fail "firstmate could not arm the confirm-miss board"
+fmmiss_wait_polls 1 || fail "the confirm-miss board's first listener never polled"
+touch "$FMMISS_ROOT/trigger1"
+wait_capture "$HFMMISS" "$fmmiss_id" || fail "the captain's round on the confirm-miss board was never captured"
+PATH="$FMMISS_BIN:$PATH" pe "$HFMMISS" reconcile >/dev/null 2>&1 || true
+fmmiss_wait_polls 2 || fail "the confirm-miss board's listener was not relaunched"
+if PATH="$FMMISS_BIN:$PATH" FM_HOME="$HFMMISS" "$FMMISS_TOOLS/fm-procevent-lavish.sh" arm "$FMMISS_ART" \
+  --agent-reply-file "$FMMISS_ROOT/reply" > "$FMMISS_ROOT/arm.out" 2>"$FMMISS_ROOT/arm.err"; then
+  fail "a reply re-arm whose listener could not be confirmed reported success"
+fi
+assert_contains "$(cat "$FMMISS_ROOT/arm.out")" "acknowledged: $fmmiss_id 1" \
+  "the unconfirmed reply re-arm did not report the round it acknowledged"
+assert_not_contains "$(cat "$FMMISS_ROOT/arm.out")" "armed: $fmmiss_id" \
+  "an unconfirmed reply re-arm was reported listening"
+[ -e "$HFMMISS/state/procevent/$fmmiss_id.source" ] \
+  || fail "an unconfirmed reply re-arm retired a board whose round it had already acknowledged"
+[ -f "$HFMMISS/state/procevent-inbox/$fmmiss_id.1.handled" ] \
+  || fail "the unconfirmed reply re-arm did not acknowledge the round it answers"
+PATH="$FMMISS_BIN:$PATH" pe "$HFMMISS" reconcile >/dev/null 2>&1 || true
+fmmiss_wait_polls 3 || fail "reconcile did not relaunch the kept reply generation"
+wait_for_lines "$FMMISS_ROOT/replies" 1 || fail "the kept reply generation never posted the reply"
+[ "$(cat "$FMMISS_ROOT/replies")" = "poll3 reply: Tightened the header." ] \
+  || fail "the kept reply was not posted once by the relaunched poll: $(cat "$FMMISS_ROOT/replies")"
+pass "a reply re-arm that cannot confirm its listener keeps the board for reconcile to post the reply"
+
 # The other half of the same contract, on the same real path: a close that
 # carries what the captain actually said must still reach him. Same runner, same
 # adapter, one different response shape.

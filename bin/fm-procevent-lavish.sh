@@ -254,7 +254,8 @@ cmd_arm() {
   fi
   # Registration is not a running listener. Readiness is the process-event
   # owner's evidence for this generation; a miss retires a source that never
-  # started so arm does not leave it registered.
+  # started so arm does not leave it registered. An arm carrying a reply has
+  # staged it and acknowledged its rounds, so it stays registered for reconcile.
   listening=0
   FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" ensure-listening "$id" || listening=$?
   if [ "$listening" -eq 3 ]; then
@@ -265,12 +266,14 @@ cmd_arm() {
     exit 0
   fi
   if [ "$listening" -ne 0 ]; then
-    owner=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" list 2>/dev/null \
-      | awk -v id="$id" '$1 == id { print $3; exit }')
-    case "$owner" in
-      live|orphaned|task:*/listening|task:*/round-open) ;;
-      *) FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" retire "$id" >/dev/null 2>&1 || true ;;
-    esac
+    if [ -z "$reply_file" ]; then
+      owner=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" list 2>/dev/null \
+        | awk -v id="$id" '$1 == id { print $3; exit }')
+      case "$owner" in
+        live|orphaned|task:*/listening|task:*/round-open) ;;
+        *) FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" retire "$id" >/dev/null 2>&1 || true ;;
+      esac
+    fi
     exit 1
   fi
   printf 'armed: %s\n' "$id"

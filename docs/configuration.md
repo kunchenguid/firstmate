@@ -1865,6 +1865,7 @@ A later wake for an acknowledged sequence reports `already-handled` from `handle
 A reply re-arm is refused when no unacknowledged nonterminal round is waiting, so a generation already carrying a reply is never replaced before its listener posts it, and an ended or never-armed board takes no reply.
 It is also refused for a terminal round, because no later poll could show the reply.
 A failed re-arm leaves the prior registration and its referenced reply unchanged, including when its required acknowledgement cannot be recorded.
+A reply re-arm whose new listener cannot be confirmed exits non-zero but keeps the new registration, because its rounds are already acknowledged and its reply staged, so the next `reconcile` relaunches it and that poll posts the reply.
 
 A worker's board is not relaunched while its round is open, but a firstmate board keeps listening between rounds, so by the time firstmate replies the supervision cycle has usually relaunched a listener that carries no reply.
 A firstmate reply re-arm therefore stops that earlier listener the way `retire` does and starts the reply generation's listener, so the next poll posts the reply.
