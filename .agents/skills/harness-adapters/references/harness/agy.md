@@ -38,9 +38,9 @@ The unauthenticated failure mode was not observed, so treat any auth prompt or r
 
 ## Detection
 
-Detected by ancestry alone: `../../../../../bin/fm-harness.sh` matches the anchored process name `agy`, never `*agy*`.
+Detected by ancestry alone: `../../../../../bin/fm-harness.sh` matches the anchored process name `agy` or `agy-real`, never `*agy*`.
 No environment marker is promoted: `AGENT=1` observed on a live TUI is an inherited launcher value, not an agy identity, and agy does not clear an inherited `CLAUDECODE` - but a structural agy ancestor now outranks that retained marker, which `../../../../../bin/fm-harness.sh` decides without depending on the spawn's own launch-boundary marker clearing.
-agy is deliberately absent from the session-lock name vocabulary in `../../../../../bin/fm-session-lock-lib.sh`, where muse, gemini, and rovo are also absent: a crewmate-only adapter must never own a home session lock.
+`agy` and `agy-real` are recognized in `../../../../../bin/fm-session-lock-lib.sh` so Antigravity CLI can hold the session lock when acting as supervisor.
 
 ## Worker busy state and turn end
 
@@ -50,6 +50,5 @@ Teardown removes nothing agy-specific because the spawn leaves nothing behind.
 
 ## Primary integration
 
-Unsupported and unverified.
-`../../../../../docs/supervision-protocols/` carries no agy protocol, no turn-end guard adapter exists for it, and this adapter verified only the crewmate-side launch, busy state, interrupt, and exit.
-`references/common/primary-hooks.md`'s unsupported-boundary rule applies: never invent a wake protocol from a similar TUI.
+Antigravity CLI is recognized as an active primary supervisor for session locking via `../../../../../bin/fm-session-lock-lib.sh` and ancestry detection (`agy` / `agy-real`).
+`../../../../../docs/supervision-protocols/` falls back to `unknown.md` for watcher wake instructions.
