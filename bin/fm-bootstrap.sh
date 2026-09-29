@@ -1483,7 +1483,7 @@ detect_code_root_backlog_fork() {
     if [ "$code_root" -ef "$FM_HOME" ]; then
       remedy="it is inside this home, so merge it into this home's copy and move it aside"
     else
-      remedy="this check cannot tell whether that file is another home's live record, so never move, rewrite, or delete it on this line alone; copy into $DATA/$name only rows it has that this home's records claim (a state/<id>.* file or data/<id>/ directory here), report any row neither home's records claim to the captain, and run every later backlog command through bin/fm-tasks-axi.sh"
+      remedy="this check cannot tell whether that file is another home's live record, so never move, rewrite, or delete it on this line alone; a matching task id alone is not ownership evidence; copy into $DATA/$name only rows corroborated as the same task by this home's records (state/<id>.* or data/<id>/ contents here) and whose id has no record in $code_root; leave ambiguous rows untouched and report them to the captain, including every row both homes' records claim or neither home's records claim (queued rows may have no records yet); run every later backlog command through bin/fm-tasks-axi.sh"
     fi
     echo "BACKLOG_RECONCILE: code-root $root_copy is not this home's $DATA/$name; a tasks-axi write may have landed there instead of this home, so rows may be missing here - $remedy"
   done

@@ -188,7 +188,7 @@ test_guard_remedy_never_moves_external_code_root() {
   assert_contains "$out" "is not this home's $dir/home/data/backlog.md" "a code-root backlog was not reported"
   remedy=${out##* - }
   assert_contains "$remedy" "this check cannot tell whether that file is another home's live record" "the non-destructive remedy was not used"
-  assert_contains "$remedy" "report any row neither home's records claim to the captain" "the row-recovery instruction was missing"
+  assert_contains "$remedy" "leave ambiguous rows untouched and report them to the captain" "the row-recovery instruction was missing"
   assert_not_contains "$remedy" "move it aside" "the remedy moved an external code root's backlog"
   
   rm "$dir/code/.fm-secondmate-home"
@@ -219,6 +219,46 @@ test_guard_silent_for_single_home() {
   out=$(bootstrap_backlog_lines "$dir" "$dir")
   assert_equals "" "$out" "FM_HOME naming the code root was reported as a fork"
   pass "bootstrap stays silent when the code root is the home"
+}
+
+# The warning is an operator-facing recovery instruction, not an automatic
+# row merger. Check that emitted contract with colliding IDs and unclaimed
+# queued rows, and prove that inspection leaves both homes' books untouched.
+test_guard_row_recovery_requires_unambiguous_ownership() {
+  local dir out line name before
+  dir=$(make_split guard-row-ownership)
+  rm "$dir/code/data/backlog.md"
+  mkdir -p "$dir/code/state" "$dir/code/data/shared-data" "$dir/home/data/shared-data"
+  printf 'task: target work\n' > "$dir/home/state/shared-state.status"
+  printf 'task: unrelated code-root work\n' > "$dir/code/state/shared-state.status"
+  printf 'task: target-only work\n' > "$dir/home/state/target-only.status"
+  for name in backlog.md done-archive.md; do
+    printf '## Queued\n\n- [ ] shared-state: unrelated code-root work\n- [ ] shared-data: another colliding task\n- [ ] unclaimed: queued without records in either home\n- [ ] target-only: target-only work\n' \
+      > "$dir/code/data/$name"
+    printf '## Queued\n\n- [ ] shared-state: target work\n- [ ] shared-data: target data-backed task\n' \
+      > "$dir/home/data/$name"
+  done
+  before=$(cksum "$dir/code/data/"*.md "$dir/home/data/"*.md)
+  out=$(bootstrap_backlog_lines "$dir/code" "$dir/home")
+  for name in backlog.md done-archive.md; do
+    line=$(printf '%s\n' "$out" | grep -F "code-root $dir/code/data/$name is not")
+    assert_contains "$line" "a matching task id alone is not ownership evidence" \
+      "the emitted recovery instruction treats an overlapping id as ownership"
+    assert_contains "$line" "only rows corroborated as the same task by this home's records" \
+      "the emitted recovery instruction lacks positive task evidence"
+    assert_contains "$line" "whose id has no record in $dir/code" \
+      "the emitted recovery instruction ignores competing code-root records"
+    assert_contains "$line" "leave ambiguous rows untouched and report them to the captain" \
+      "ambiguous recovery rows were not escalated"
+    assert_contains "$line" "including every row both homes' records claim or neither home's records claim" \
+      "colliding or unclaimed rows were silently excluded from recovery"
+    assert_contains "$line" "queued rows may have no records yet" \
+      "a missing queued row without records was treated as irrelevant"
+    assert_not_contains "$line" "move it aside" "recovery moved another home's file"
+  done
+  assert_equals "$before" "$(cksum "$dir/code/data/"*.md "$dir/home/data/"*.md)" \
+    "the ownership warning changed a home's backlog or archive"
+  pass "recovery guidance requires task evidence and escalates overlapping ids and unclaimed queued rows without writes"
 }
 
 # The end-to-end fork: a bare tasks-axi write from the code root. Whatever the
@@ -352,6 +392,7 @@ test_guard_silent_for_single_home
 test_guard_silent_for_cross_home_checkout
 test_guard_reports_fork_beside_home_with_own_tasks_config
 test_guard_remedy_never_moves_external_code_root
+test_guard_row_recovery_requires_unambiguous_ownership
 if [ "$HAVE_TASKS_AXI" = 1 ]; then
   test_bare_tasks_axi_fork_is_detected
   test_wrapper_writes_through_to_home

@@ -63,9 +63,11 @@ When any diagnostic needs captain attention, report the plain consequence and re
 - `BACKLOG_RECONCILE: <id>: worker record exists but its backlog item could not be moved to In flight: <reason>` - this home owns a worker whose backlog item is still queued, and the reconciliation could not correct it.
   Until it is corrected, the fleet view reads that worker as work no backlog item owns; resolve the named backlog problem and rerun session start.
 - `BACKLOG_RECONCILE: code-root <file> is not this home's <file>; ...` - a tasks-axi write may have addressed this home's code root instead of this home, so either copy may hold rows the other lacks; [`docs/configuration.md`](../../../docs/configuration.md) ("Backlog backend") owns why, and `detect_code_root_backlog_fork` in `bin/fm-bootstrap.sh` owns which code root it compares.
-  Neither copy is a safe winner: first select only code-root rows whose task id has a `state/<id>.*` file or `data/<id>/` directory in this home.
+  Neither copy is a safe winner, and a matching task id alone does not prove ownership: compare each code-root row's contents with this home's `state/<id>.*` files or `data/<id>/` contents and check for the same id in the code-root home's records.
+  Select only rows corroborated as the same task by this home's records with no same-id record in the code-root home; when evidence is missing, conflicting, or cannot be inspected, leave the row untouched and report the ambiguity to the captain.
+  This includes every row both homes' records claim or neither home's records claim, including queued rows that have no task records yet.
   Merge those rows into this home's file by task id, resolve each conflicting id to its most recent real transition, check this home's archive before treating a missing Done row as lost, and verify the merged id set equals the union of this home's existing ids and the selected ids before installing it.
-  Leave every other row where it is, report any row neither home's records claim to the captain instead of guessing, tell the captain which rows were recovered, and run every later backlog command through `bin/fm-tasks-axi.sh`.
+  Leave rows belonging to the code-root home where they are, tell the captain which rows were recovered and which still need a decision, and run every later backlog command through `bin/fm-tasks-axi.sh`.
   The line clears only when the code-root file is gone or is this home's file.
   Moving the code-root file aside is a captain-confirmed step taken after firstmate has established from the registry and live sessions that no home uses that code root's `data/`, never on the line's say-so.
   Re-linking the code-root copy is never the fix, because the next cwd-relative tasks-axi write replaces the link again.
