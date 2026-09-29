@@ -6,6 +6,44 @@ This record contains reusable version-scoped evidence for active runtime guarant
 The backend guides own current setup, safety boundaries, and limitations.
 Exact task chronology, branch names, temporary homes, local paths, process ids, thread ids, and delivery transcripts remain in private reports or PR evidence.
 
+## Compatible runtime representations (2026-09-30)
+
+Linux verification used Codex 0.158.0, TraeX 0.207.1 and Herdr 0.8.0 protocol 20.
+The named non-default Herdr lab passed the real TUI guard with the default-session tripwire intact:
+
+```sh
+FM_BUSY_TRANSCRIPT_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-busy-transcript-live-e2e.test.sh
+```
+
+```text
+ok - codex compatible binding label and additive diagnostics retain live identity
+ok - codex ordinary launch observed through public lifecycle without steering
+ok - traex compatible binding label and additive diagnostics retain live identity
+ok - traex ordinary launch observed through public lifecycle without steering
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=103752
+```
+
+This guard uses the installed vendor TUIs with an isolated simulated provider, including real transcript completion, interrupts, tool failure, steering acknowledgement and process death.
+It does not establish compatibility with untested future event semantics or external provider availability.
+The portable `tests/fm-busy-state.test.sh` and `tests/fm-task-handoff.test.sh` retain conflicting-generation, target, payload, uncertain-effect and synthetic-busy negatives.
+`tests/busy-recovery.py`, run by the busy-state suite, accepts compact or pretty-printed transport JSON while refusing extra documents and mismatched identities.
+
+The installed Herdr schema returns `WorkspaceMoveParams.required` in workspace/index order; the production capability probe accepts that order and its equivalent reversed order.
+The method, protocol and required parameter contract still control admission.
+`tests/fm-backend-herdr.test.sh` exercises projection with both schema orders; the isolated installed schema probe also passed.
+The installed Pi 0.87.1 extension typecheck passed; Pi APIs were unchanged by these reader corrections.
+`tests/fm-branch-endpoint.test.sh` verifies exact opaque Herdr endpoint routing, including named sessions and historical task aliases, while duplicate ownership, duplicate identity fields, symlinked metadata and hard-linked metadata remain unowned.
+This is deterministic routing evidence, not a guarantee about model-generated task arguments.
+The same candidate also passed the installed cleanup lifecycle guard described under [independent task workspace cleanup](#independent-task-workspace-cleanup).
+The portable lifecycle suite verifies that identical additive cleanup receipts replay idempotently while removing even a diagnostic field from an already recorded receipt remains an evidence collision.
+
+Herdr 0.8.0 protocol 20 reports explicit JSON null in both session fields for `status --json --session default`, while `session list --json` identifies that same running socket as `name: "default"`.
+The default status was captured read-only by the session owner; the independent session-list observation used the authorized named lab helper and passed its default-session tripwire.
+`tests/fm-teardown-endpoint-safety.test.sh` exercises the public cleanup owner with this representation for legacy and launch-bound journals, an additive response, and the literal default spelling.
+Missing identities, null named-session identities, foreign client/socket identities, duplicate session entries, stopped sessions and newer socket timestamps remain refused before effects.
+The same candidate passed `FM_HERDR_LIFECYCLE_E2E=1 bin/fm-test-run.sh tests/fm-teardown-lifecycle-herdr-e2e.test.sh` through the authorized named lab helper, reporting `FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=45340`.
+No live default cleanup was performed; the real default representation and the executable cleanup fixtures are distinct evidence.
+
 ## Delegated continuation on Pi
 
 The installed Pi 0.87.1 SDK and CLI passed the isolated delegated-continuation guard on 2026-09-28.

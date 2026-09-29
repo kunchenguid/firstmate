@@ -10,8 +10,10 @@ Usage: init STATE ID HARNESS CWD SESSIONS BACKEND TARGET
        recover-check STATE ID ORIGINAL_TERMINAL ORIGINAL_PID
        recover-apply STATE ID RECEIPT (internal fm-busy-event recovery writer)
 
-Owns <id>.busy-session (v1 JSON). The existing busy-gen and busy-state.lock
-serialize init/read/submission fencing with arm/retire. No vendor file is written.
+Owns <id>.busy-session; its writer emits v1 JSON, while readers bind the
+semantic identity fields and treat the version label and additive diagnostics
+as descriptive. The existing busy-gen and busy-state.lock serialize
+init/read/submission fencing with arm/retire. No vendor file is written.
 The optional process_binding records the original terminal, native PID/start,
 shell PID/start and kernel boot identity after in-place recovery. Every later
 read/text/key guard verifies that seal against Herdr and Linux /proc. Recovery
@@ -151,10 +153,20 @@ class Lock:
         self.path.rmdir()
 
 
+def unique_fields(pairs):
+    result = {}
+    for key, value in pairs:
+        require(key not in result, "malformed-record")
+        result[key] = value
+    return result
+
+
 def load(state, task, recovery=False):
-    data = json.loads((state / (task + ".busy-session")).read_text())
+    data = json.loads((state / (task + ".busy-session")).read_text(), object_pairs_hook=unique_fields)
     meta = metadata(state, task)
-    require(data["version"] == 1)
+    # The writer label is diagnostic. Admission is bound to the task, launch,
+    # process and transcript evidence below, including pending input accounting.
+    require(isinstance(data, dict), "malformed-record")
     gen_path = state / (task + ".busy-gen")
     require(not gen_path.is_symlink())
     if not recovery or gen_path.exists():
@@ -184,9 +196,15 @@ fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane process-info --pane "$FM_B
 '''
     result = subprocess.run(["bash", "-c", script, "busy-provenance", str(owner), target],
                             capture_output=True, text=True, timeout=15, check=True)
-    rows = result.stdout.splitlines()
-    require(len(rows) == 2)
-    return json.loads(rows[0])["result"]["pane"], json.loads(rows[1])["result"]["process_info"]
+    # CLI JSON can be compact or pretty-printed. Require exactly two complete
+    # documents, not two physical lines; chatter or a third response still fails.
+    decoder = json.JSONDecoder(object_pairs_hook=unique_fields)
+    raw = result.stdout.lstrip()
+    pane, end = decoder.raw_decode(raw)
+    raw = raw[end:].lstrip()
+    info, end = decoder.raw_decode(raw)
+    require(not raw[end:].strip(), "malformed-record")
+    return pane["result"]["pane"], info["result"]["process_info"]
 
 
 def process_start(pid):

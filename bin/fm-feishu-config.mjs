@@ -117,9 +117,11 @@ export function readFeishuConfig(home) {
   const secure = readSecureFile(path);
   if (secure === undefined) return { status: "absent", path };
   const { raw, stat } = secure;
-  if (raw.length === 0 || !raw.endsWith("\n")) throw configError("the local configuration must end with one newline");
+  if (raw.length === 0) throw configError("the local configuration is empty");
   const values = new Map();
-  for (const [index, line] of raw.slice(0, -1).split("\n").entries()) {
+  // LF and CRLF delimit the same records; the final delimiter is optional.
+  // Bare CRs, shell syntax, duplicate keys and unknown settings still refuse.
+  for (const [index, line] of raw.split(/\r?\n/).entries()) {
     const lineNumber = index + 1;
     if (line.length === 0 || line.startsWith("#")) continue;
     const separator = line.indexOf("=");

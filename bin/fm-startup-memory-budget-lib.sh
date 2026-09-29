@@ -3,7 +3,7 @@
 # Usage: . bin/fm-startup-memory-budget-lib.sh
 #
 # The local, primary-authoritative config/startup-memory-budget setting is one
-# strictly formatted positive decimal value followed by one newline.  The
+# positive decimal value with optional surrounding ASCII whitespace.  The
 # locked primary bootstrap owns first materialization.  This library owns safe
 # parsing, default publication, and the portable prompt-memory estimate used by
 # bin/fm-startup-memory-budget.sh and the internal /stow skill.
@@ -44,7 +44,7 @@ fm_startup_memory_budget_config_dir_safe() {
 
 # fm_startup_memory_budget_file_valid <path>
 # Sets FM_STARTUP_MEMORY_BUDGET_VALUE only for a regular, single-linked file
-# containing exactly one positive decimal value and one terminating newline.
+# containing one positive decimal value; normalize whitespace and leading zeros.
 fm_startup_memory_budget_file_valid() {
   local path=$1 links value
   FM_STARTUP_MEMORY_BUDGET_VALUE=""
@@ -68,20 +68,22 @@ fm_startup_memory_budget_file_valid() {
     fm_startup_memory_budget_fail "file is hardlinked"
     return 1
   fi
-  value=$(<"$path") || {
-    fm_startup_memory_budget_fail "could not read file"
+  # Parse bytes before shell substitution can discard NULs or trailing newlines.
+  # Do not concatenate tokens: "4 2" and "4\n2" are ambiguous, not 42.
+  value=$(python3 - "$path" <<'PYVALUE'
+import pathlib, re, sys
+match = re.fullmatch(rb"[ \t\r\n]*([0-9]+)[ \t\r\n]*", pathlib.Path(sys.argv[1]).read_bytes())
+if not match:
+    sys.exit(1)
+value = match[1].lstrip(b"0")
+if not value:
+    sys.exit(1)
+print(value.decode("ascii"))
+PYVALUE
+  ) || {
+    fm_startup_memory_budget_fail "value must be one positive decimal integer"
     return 1
   }
-  case "$value" in
-    ''|0|*[!0-9]*|0*)
-      fm_startup_memory_budget_fail "value must be one positive decimal integer"
-      return 1
-      ;;
-  esac
-  if ! printf '%s\n' "$value" | cmp -s "$path" -; then
-    fm_startup_memory_budget_fail "file must contain exactly one value followed by one newline"
-    return 1
-  fi
   FM_STARTUP_MEMORY_BUDGET_VALUE=$value
   return 0
 }
@@ -140,7 +142,7 @@ fm_startup_memory_budget_materialize() {
   fi
   rm -f "$tmp"
   # Another actor may have created the file.  Accept it only if it now meets
-  # the same safe, exact format - never replace or guess at it.
+  # the same safe numeric contract - never replace or guess at it.
   fm_startup_memory_budget_read "$config_dir" >/dev/null
 }
 

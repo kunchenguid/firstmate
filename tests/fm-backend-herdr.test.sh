@@ -2960,7 +2960,7 @@ test_projection_order_moves_only_exact_new_workspace_and_preserves_relative_orde
   printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate","focused":false},{"workspace_id":"w2","label":"firstmate/old · p:AbCdEfGhIjKlMnOpQrStUv","focused":false},{"workspace_id":"w3","label":"2ndmate-alpha","focused":false},{"workspace_id":"w4","label":"2ndmate-bravo","focused":true},{"workspace_id":"w5","label":"└ new · p:ZyXwVuTsRqPoNmLkJiHgFe","focused":false}]}}' > "$resp/1.out"
   printf '%s\n' '{"client":{"version":"0.7.4","protocol":16},"server":{"running":true}}' > "$resp/2.out"
   # shellcheck disable=SC2016 # $defs is a literal JSON Schema key.
-  printf '%s\n' '{"schemas":{"request":{"oneOf":[{"properties":{"method":{"const":"workspace.move"}}}],"$defs":{"WorkspaceMoveParams":{"required":["workspace_id","insert_index"],"properties":{"insert_index":{"type":"integer"}}}}}}}' > "$resp/3.out"
+  printf '%s\n' '{"schemas":{"request":{"oneOf":[{"properties":{"method":{"const":"workspace.move"}}}],"$defs":{"WorkspaceMoveParams":{"required":["insert_index","workspace_id"],"properties":{"insert_index":{"type":"integer"}}}}}}}' > "$resp/3.out"
   printf '%s\n' '{"sessions":[{"name":"fmtest","running":true,"socket_path":"/tmp/fmtest.sock"}]}' > "$resp/4.out"
   cat > "$mover" <<'SH'
 #!/usr/bin/env bash
@@ -5227,3 +5227,35 @@ test_wait_transition_stream_absorb_clears_then_timeout
 test_wait_transition_reader_failure_returns_2
 test_wait_transition_bad_ack_returns_2_and_cleans_up
 test_wait_transition_clean_timeout_returns_1
+
+test_workspace_move_schema_semantics() {
+  local variant dir resp fb rc expected
+  for variant in reversed additive missing extra wrong-type duplicate; do
+    dir="$TMP_ROOT/move-schema-$variant"
+    resp="$dir/responses"; mkdir -p "$resp"
+    printf '%s\n' '{"client":{"protocol":20}}' > "$resp/1.out"
+    python3 - "$variant" > "$resp/2.out" <<'PYSCHEMA'
+import json,sys
+required=['workspace_id','insert_index']; props={'insert_index':{'type':'integer'}}
+variant=sys.argv[1]
+if variant=='reversed': required.reverse()
+if variant=='missing': required.remove('workspace_id')
+if variant=='extra': required.append('new_required_permission')
+if variant=='duplicate': required.append('workspace_id')
+if variant=='wrong-type': props['insert_index']['type']='string'
+if variant=='additive': props['optional_diagnostic']={'type':'string'}
+print(json.dumps({'schemas':{'request':{'oneOf':[{'properties':{'method':{'const':'workspace.move'}}}],
+ '$defs':{'WorkspaceMoveParams':{'required':required,'properties':props,'description':'future diagnostic'}}}}}))
+PYSCHEMA
+    fb=$(make_herdr_fakebin "$dir")
+    rc=0
+    PATH="$fb:$PATH" FM_HERDR_SCRIPT_STATUS=1 FM_HERDR_LOG="$dir/log" FM_HERDR_RESPONSES="$resp" \
+      bash -c '. "$1/bin/backends/herdr.sh"; fm_backend_herdr_workspace_move_capable fixture' _ "$ROOT" || rc=$?
+    expected=5
+    case "$variant" in reversed|additive) expected=0 ;; esac
+    [ "$rc" = "$expected" ] || fail "workspace move $variant schema returned $rc, expected $expected"
+  done
+  pass "workspace move accepts equivalent required order and optional diagnostics; incompatible schema still refuses"
+}
+
+test_workspace_move_schema_semantics

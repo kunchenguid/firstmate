@@ -2183,6 +2183,19 @@ for body in \
   fi
   grep -Fq "$APP_SECRET" "$TMP_ROOT/config-refusal.err" && fail "config refusal exposed a credential"
 done
+# Equivalent line endings must not alter channel or credential identity.
+write_feishu_config "$CONFIG_REFUSAL_HOME" true
+cp "$CONFIG_REFUSAL_HOME/config/feishu.env" "$TMP_ROOT/config-canonical.env"
+for format in no-newline crlf; do
+  python3 - "$TMP_ROOT/config-canonical.env" "$CONFIG_REFUSAL_HOME/config/feishu.env" "$format" <<'PYCONFIG'
+from pathlib import Path
+import sys
+raw = Path(sys.argv[1]).read_bytes()
+Path(sys.argv[2]).write_bytes(raw.rstrip(b"\n") if sys.argv[3] == "no-newline" else raw.replace(b"\n", b"\r\n"))
+PYCONFIG
+  [ "$(run_config_check "$CONFIG_REFUSAL_HOME")" = '{"status":"enabled"}' ] \
+    || fail "equivalent $format Feishu config was refused"
+done
 write_feishu_config "$CONFIG_REFUSAL_HOME" true
 chmod 644 "$CONFIG_REFUSAL_HOME/config/feishu.env"
 if run_config_check "$CONFIG_REFUSAL_HOME" >"$TMP_ROOT/config-mode.out" 2>"$TMP_ROOT/config-mode.err"; then

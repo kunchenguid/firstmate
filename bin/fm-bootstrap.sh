@@ -199,14 +199,9 @@ if ! BACKEND_TOOLS=$(fm_backend_required_tools "$BACKEND"); then
 fi
 TOOLS="$BACKEND_TOOLS $COMMON_TOOLS"
 NO_MISTAKES_MIN=1.46.0
-# AXI-FAMILY FLOOR POLICY. Every axi-family floor is the CURRENT LATEST published
-# version of that tool, captain-bumped periodically to keep the whole fleet on the
-# newest axi tools. It is NOT the minimum feature-introduced version. These floors
-# are expected to drift upward as new versions ship. Never lower a floor to the
-# earliest release that happens to satisfy some depended-on behavior. The
-# tasks-axi feature probes are an independent defense-in-depth concern, not part
-# of its floor.
-GH_AXI_MIN=0.1.29
+# Agent-facing wrappers are discovered through their installed help at use time.
+# Presence is sufficient here, as for chrome-devtools-axi; actual operations
+# retain their exit-status and authoritative readback requirements.
 
 treehouse_supports_lease() {
   treehouse get --help 2>&1 | grep -Eq '(^|[^[:alnum:]_-])--lease([^[:alnum:]_-]|$)'
@@ -736,9 +731,6 @@ detect_local_tools() {
   fi
   if command -v no-mistakes >/dev/null 2>&1 && ! tool_version_at_least no-mistakes "$NO_MISTAKES_MIN"; then
     echo "MISSING: no-mistakes (install: $(install_cmd no-mistakes))"
-  fi
-  if command -v gh-axi >/dev/null 2>&1 && ! tool_version_at_least gh-axi "$GH_AXI_MIN"; then
-    echo "MISSING: gh-axi (install: $(install_cmd gh-axi))"
   fi
   if command -v tasks-axi >/dev/null 2>&1 && ! fm_tasks_axi_compatible; then
     echo "MISSING: tasks-axi (install: $(install_cmd tasks-axi))"

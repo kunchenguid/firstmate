@@ -340,6 +340,22 @@ call('fm-task-state.sh','enroll','target');assert state('observe')['state']=='ar
 # Newly spawned work can bind its launch brief, but a submitted-launch busy
 # seed is not observed execution. Existing harness readers own that distinction.
 t=call('fm-task-state.sh','lifecycle','target')
+# Ordinary dispatch already binds this brief/generation, without a separate
+# prepared action. Its published launch and actual activity are enough for
+# observation, not for semantic acceptance or retry authorization.
+with (home/'state/target.meta').open('a') as f: f.write('launch_state=confirmed\n')
+assert call('fm-task-state.sh','observe','target')['state']=='pending'
+(bin/'fm-crew-state.sh').write_text('#!/bin/sh\nprintf "state: working · doing: harness busy (pi-ext)\\n"\n')
+before=(home/'data/target/lifecycle.json').read_bytes()
+assert call('fm-task-state.sh','observe','target')['state']=='running', 'ordinary published launch lost its brief receipt'
+assert (home/'data/target/lifecycle.json').read_bytes()==before, 'readback changed semantic authority'
+m=home/'state/target.meta';original=m.read_text()
+for phase in ('prepared','unconfirmed'):
+    m.write_text(original.replace('launch_state=confirmed','launch_state='+phase))
+    assert call('fm-task-state.sh','observe','target')['state']=='pending', 'uncertain launch became execution proof'
+m.write_text(original)
+(bin/'fm-crew-state.sh').write_text('#!/bin/sh\nprintf "state: working · doing: harness busy (fm-spawn)\\n"\n')
+assert call('fm-task-state.sh','observe','target')['state']=='pending', 'synthetic busy seed became execution proof'
 t['next_action_seq']=2
 t['next_action']=dict(a,id='target.g1.a1',kind='spawn',phase='prepared',attempts=0,
     continuation=dict(type='executor',task_id='target',execution_generation='g1',brief_sha256=sha(home/'data/target/brief.md')))

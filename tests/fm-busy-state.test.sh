@@ -667,6 +667,17 @@ fm_backend_send_text_submit herdr lab:w1:p1 next 1 .01 .01
     expect('unknown','canonical task path mismatch')
     reset(); wrong=copy.deepcopy(records);wrong[0]['payload']['session_id']='session-other';write(wrong)
     expect('unknown','session identity mismatch')
+    for binding_version in (1, 2, 'future-compatible'):
+        reset(); saved=json.loads(binding);saved['version']=binding_version;saved['diagnostics']={'writer':'future'}
+        (state/'worker.busy-session').write_text(json.dumps(saved))
+        expect('busy', 'compatible binding label '+str(binding_version))
+        append(complete);expect('idle', 'compatible binding retains terminal accounting')
+        persisted=json.loads((state/'worker.busy-session').read_text())
+        assert persisted['version']==binding_version and persisted['diagnostics']=={'writer':'future'}
+        saved['target']='lab:w2:p9';(state/'worker.busy-session').write_text(json.dumps(saved))
+        expect('unknown','future binding cannot authorize conflicting target')
+    reset(); (state/'worker.busy-session').write_text('{"gen":"conflict",'+binding.lstrip()[1:])
+    expect('unknown','duplicate binding identity cannot be hidden by a compatible label')
     for compatible_version in ('0.158.0', '9999.0.0-future'):
         reset(); compatible=copy.deepcopy(records);compatible[0]['payload']['cli_version']=compatible_version;write(compatible)
         expect('busy','descriptive CLI version '+compatible_version+' does not gate admission')

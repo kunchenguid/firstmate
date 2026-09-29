@@ -28,6 +28,8 @@ Local, iDA and AIME dispatch initialize records for new executions as well.
 Use the task-state header's read and reconciliation interface to submit a private candidate with the expected revision.
 An unassigned task is valid.
 For a local launch, the launch owner binds its execution generation only after launch delivery and the backlog commit both succeed; metadata left by an attempted but unconfirmed launch remains unknown for reconciliation.
+When ordinary dispatch has no prepared lifecycle action, observation can still prove execution from the bound brief, matching generation, confirmed launch publication and actual harness activity.
+A synthetic launch busy marker cannot supply that proof, and observation never creates an action or accepts the goal.
 
 Save the semantic assessment and any prepared action before acknowledging its wake.
 An inactive-goal wake with a known lifecycle revision refuses acknowledgement until that revision advances, while an unknown lifecycle record refuses acknowledgement until it is repaired.
@@ -58,6 +60,10 @@ An archived goal retains any attempted or uncertain business action as evidence,
 An attempted or uncertain cleanup action still requires exact readback before cleanup can proceed.
 Concrete cleanup metadata keeps a terminal goal due for reconciliation until the cleanup owner records the complete generation-bound receipt; that supervision does not authorize business execution to resume.
 A complete cleanup receipt makes the terminal goal quiet without erasing its retained evidence.
+The due reader evaluates the required cleanup postconditions semantically: additive diagnostics and historical ShortTask request version labels do not change the verdict, while persisted receipt bytes remain immutable evidence.
+Main can retain an accepted or archived disposition while recording a prepared, unattempted cleanup wait with an evidence-bound dependency.
+That wait defers cleanup reconciliation only until its recheck or deadline; changed or missing release evidence requests readback immediately.
+It cannot replace an unresolved effect or authorize business execution.
 A temporary parked or externally waiting task stays open.
 
 Absent lifecycle records retain legacy behavior until explicitly reconciled.
@@ -88,10 +94,13 @@ A journal with the complete launch-identity field group binds the execution gene
 A journal without launch fields but with the complete exact-endpoint field group can also authorize cleanup when the current owned Herdr session demonstrably predates the unchanged journal and cleanup re-reads matching workspace, tab, pane, terminal and shell identity before mutation.
 For a correlator-only journal, the task's independently validated meta endpoint can supply the exact session, workspace, tab and pane only when meta and lifecycle agree on a standard spawn generation and the current owned Herdr session demonstrably predates the unchanged journal.
 Partial or conflicting identity groups, replaced sessions, malformed generations, labels alone and shared-directory membership do not acquire deletion authority.
+Herdr's explicit null client/server session representation is accepted only for a requested `default` session whose status socket matches the unique running session-list entry; missing fields and null named-session identities remain unverified.
 Endpoint cleanup closes only an exact idle task pane, preserves focused user tabs and active siblings, verifies workspace absence separately, and leaves directory safety checks in place.
 Its cleanup-only backlog transition can recover bookkeeping after an actual close without deleting resource metadata or repeating endpoint/directory effects.
 Pool-directory return still follows the [existing teardown safety contract](architecture.md#delivery-modes-are-explicit-per-task): only an exact task-and-generation slot claim authorizes return, while a missing or ambiguous claim retains the cleanup obligation.
 Whole-session snapshots can detect concurrent resource changes but cannot make Herdr's separate inspection and close operations atomic.
+The due reader recognizes current cleanup-owner facts and assessed historical ShortTask completion chains through the read-only contract in [`fm-task-lifecycle.py`](../bin/fm-task-lifecycle.py).
+A result summary alone cannot retire a cleanup obligation; incomplete, conflicting, or unbound evidence remains due for readback without replay.
 
 ## Verification
 

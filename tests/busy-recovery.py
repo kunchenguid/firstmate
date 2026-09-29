@@ -95,20 +95,22 @@ try:
         transport.write_text(json.dumps({'pane': p, 'process_info': i}))
     set_transport()
     shim = wrap / 'herdr'
-    shim.write_text('#!/usr/bin/env python3\nimport json,sys,time\nfrom pathlib import Path\n'
+    shim.write_text('#!/usr/bin/env python3\nimport json,sys,time,os\nfrom pathlib import Path\n'
+                   'dump=lambda obj: json.dumps(obj, indent=2 if os.environ.get("FM_TEST_JSON_PRETTY") else None)\n'
                    f'data=json.loads(Path({str(transport)!r}).read_text())\n'
                    f'hold=Path({str(base / "hold")!r})\n'
                    f'send_log=Path({str(send_log)!r})\n'
                    'if hold.exists():\n hold.with_suffix(".entered").touch(); time.sleep(4)\n'
                    'args=sys.argv[1:]\n'
-                   'if args[:2]==["pane","get"]:\n print(json.dumps({"result":{"pane":data["pane"]}}))\n'
-                   'elif args[:2]==["pane","process-info"]:\n print(json.dumps({"result":{"type":"pane_process_info","process_info":data["process_info"]}}))\n'
+                   'if args[:2]==["pane","get"]:\n print(dump({"result":{"pane":data["pane"]}}))\n'
+                   'elif args[:2]==["pane","process-info"]:\n print(dump({"result":{"type":"pane_process_info","process_info":data["process_info"]}}))\n'
                    'elif args[:2]==["agent","get"]:\n print(json.dumps({"result":{"agent":{"agent":data["pane"]["agent"],"agent_status":"idle","pane_id":data["pane"]["pane_id"],"cwd":data["pane"]["foreground_cwd"],"foreground_cwd":data["pane"]["foreground_cwd"]}}}))\n'
                    'elif args[:2]==["pane","read"]:\n print("╭────╮\\n│    │\\n╰────╯")\n'
                    'elif args[:2]==["pane","send-text"]:\n send_log.write_text(send_log.read_text() + args[3] + "\\n" if send_log.exists() else args[3] + "\\n")\n'
                    'elif args[:2]==["pane","send-keys"]:\n pass\n'
                    'elif args and args[0]=="status":\n print(json.dumps({"server":{"running":True}}))\n'
-                   'else:\n sys.exit(1)\n')
+                   'else:\n sys.exit(1)\n'
+                   'if os.environ.get("FM_TEST_JSON_EXTRA"): print("{}")\n')
     shim.chmod(0o755)
     def reset():
         (state / 'worker.meta').write_text(meta)
@@ -133,6 +135,14 @@ try:
     (state / 'worker.inbox/.ring-state').write_text('001.msg\t3\t1\n')
     (state / 'worker.inbox/.escalated').write_text('001.msg\n')
     before = snapshot_files()
+    env['FM_TEST_JSON_PRETTY'] = '1'
+    pretty_proof = check()
+    env.pop('FM_TEST_JSON_PRETTY')
+    assert pretty_proof == check(), 'JSON formatting changed the exact recovery identity'
+    env['FM_TEST_JSON_EXTRA'] = '1'
+    check(ok=False)
+    env.pop('FM_TEST_JSON_EXTRA')
+    print('ok - pretty and compact Herdr JSON preserve the same recovery proof')
     proof = check()
     assert snapshot_files() == before, 'preflight changed records'
     stale_lock = state / 'worker.busy-state.lock'

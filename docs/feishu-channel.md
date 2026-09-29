@@ -45,6 +45,7 @@ $ ${EDITOR:-vi} config/feishu.env
 ```
 
 Set `FM_FEISHU_ENABLED=true` and add the exact App ID, App Secret, captain open ID, and P2P chat ID required by the [configuration schema](configuration.md#feishu-current-pi-channel).
+LF and CRLF line endings are supported, with an optional final newline.
 Do not quote values or add shell syntax.
 Do not export the credentials.
 The file is local and gitignored.
