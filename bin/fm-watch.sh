@@ -2588,9 +2588,10 @@ watcher_cleanup() {
   pr_poll_control_release || cleanup_status=1
   if [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" = "${WATCHER_PID:-}" ]; then
     owns_lock=1
-    if [ "${WATCHER_RECOVERY_PENDING:-0}" -eq 1 ] \
-      && [ "${FM_WATCH_DELIVERED_REASON:-}" = "check: rearm-resurface" ]; then
-      transition=release-lock-existing
+    if [ "${WATCHER_RECOVERY_PENDING:-0}" -eq 1 ]; then
+      case "${FM_WATCH_DELIVERED_REASON:-}" in
+        "check: rearm-resurface"*) transition=release-lock-existing ;;
+      esac
     fi
   fi
   fm_active_check_stop || cleanup_status=1
@@ -2664,19 +2665,80 @@ rerecord_device_shifted_pr_poll() {  # <id>
   return 0
 }
 
+# A resurface nobody acknowledges is re-delivered by the next turn end, which
+# in 2026-09 spent 45 minutes and ~500M cache-read tokens re-firing every few
+# seconds after one denied drain. Each consecutive undelivered resurface waits
+# longer, and at the cap the watcher stops re-firing and keeps supervising.
+RESURFACE_STREAK_FILE="$STATE/.resurface-streak"
+RESURFACE_STREAK_CAP=${FM_RESURFACE_STREAK_CAP:-5}
+case "$RESURFACE_STREAK_CAP" in ''|*[!0-9]*|0) RESURFACE_STREAK_CAP=5 ;; esac
+RESURFACE_BACKOFF_BASE=${FM_RESURFACE_BACKOFF_BASE:-5}
+case "$RESURFACE_BACKOFF_BASE" in ''|*[!0-9]*) RESURFACE_BACKOFF_BASE=5 ;; esac
+RESURFACE_BACKOFF_MAX=${FM_RESURFACE_BACKOFF_MAX:-300}
+case "$RESURFACE_BACKOFF_MAX" in ''|*[!0-9]*|0) RESURFACE_BACKOFF_MAX=300 ;; esac
+
+# Acknowledging a wake clears the streak (bin/fm-wake-drain.sh), and a queue
+# whose byte length moved is new or consumed work rather than the same
+# unanswered wake, so the record only ever counts resurfaces of one unchanged
+# queue.
+resurface_streak_read() {  # -> RESURFACE_STREAK RESURFACE_LAST RESURFACE_SIG
+  local line rest
+  line=$(cat "$RESURFACE_STREAK_FILE" 2>/dev/null || true)
+  RESURFACE_STREAK=${line%% *}
+  rest=${line#* }
+  RESURFACE_LAST=${rest%% *}
+  RESURFACE_SIG=${line##* }
+  case "$RESURFACE_STREAK" in ''|*[!0-9]*) RESURFACE_STREAK=0 ;; esac
+  case "$RESURFACE_LAST" in ''|*[!0-9]*) RESURFACE_LAST=0 ;; esac
+  case "$RESURFACE_SIG" in ''|*[!0-9]*) RESURFACE_SIG=-1 ;; esac
+}
+
+resurface_queue_signature() {
+  local size
+  size=$(wc -c < "$FM_WAKE_QUEUE" 2>/dev/null | tr -d '[:space:]')
+  case "$size" in ''|*[!0-9]*) size=0 ;; esac
+  printf '%s' "$size"
+}
+
 resurface_after_downtime() {
+  local streak now delay steps sig
   # Handling successors already have a predecessor-delivered wake on the way.
   # Re-announcing from this cycle is what turned a lost handshake into an
   # unbounded recovery loop; stay in the poll loop and supervise instead.
   if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ]; then
     return 0
   fi
+  # The marker gate stays first so a cycle with nothing to recover reaches no
+  # command substitution at all: one parsed mid-poll can swallow a pending TERM
+  # on bash 5.2 (tests/fm-watch-triage.test.sh, TERM inside a blocked poll).
   if [ "$WATCHER_RECOVERY_PENDING" -ne 1 ]; then
     if ! fm_recovery_marker_arm_check "$WATCHER_DOWNTIME_MARKER"; then
       echo "watcher: recovery state could not be consumed safely" >&2
       exit 1
     fi
     [ "$FM_RECOVERY_MARKER_ACTION" = recover ] || return 0
+  fi
+  resurface_streak_read
+  sig=$(resurface_queue_signature)
+  streak=$((RESURFACE_STREAK + 1))
+  [ "$sig" = "$RESURFACE_SIG" ] || streak=1
+  now=$(date +%s)
+  if [ "$streak" -gt 1 ]; then
+    steps=$((streak - 2))
+    [ "$steps" -le 16 ] || steps=16
+    delay=$((RESURFACE_BACKOFF_BASE << steps))
+    [ "$delay" -le "$RESURFACE_BACKOFF_MAX" ] || delay=$RESURFACE_BACKOFF_MAX
+    # Withholding the delivery is safe: the queue row is durable, so the next
+    # cycle's arm check re-opens the episode when the backoff has elapsed.
+    [ "$now" -ge $((RESURFACE_LAST + delay)) ] || return 0
+  fi
+  if [ "$streak" -gt "$RESURFACE_STREAK_CAP" ]; then
+    triage_log "resurface suppressed after $RESURFACE_STREAK_CAP unacknowledged deliveries; supervision continues without re-firing until a wake is acknowledged"
+    return 0
+  fi
+  printf '%s %s %s\n' "$streak" "$now" "$sig" > "$RESURFACE_STREAK_FILE" 2>/dev/null || true
+  if [ "$streak" -eq "$RESURFACE_STREAK_CAP" ]; then
+    wake "check: rearm-resurface unacknowledged $streak times - the queued wake was never acknowledged, so this is the last automatic re-delivery: drain the queue and run its exact WAKE_ACK_REQUIRED command, or supervision keeps running without resurfacing it"
   fi
   wake "check: rearm-resurface"
 }
