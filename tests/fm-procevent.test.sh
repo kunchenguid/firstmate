@@ -4627,9 +4627,9 @@ PATH="$LIVE/bin:$PATH" FM_HOME="$LIVE/home" \
 pass "re-arm over a live earlier listener reports it still serving the board"
 
 # A worker re-arms as soon as its round is published, which can land while the
-# earlier generation's runner is still finishing and holding the claim. Once
-# that claim is released inside the confirm window, arm must start the new
-# generation carrying the worker's reply and report it armed.
+# earlier generation's runner is still finishing and holding the claim. This
+# fixture also holds the Lavish boundary before accepting the staged reply, to
+# prove that arm's listener-readiness result is not a reply-delivery receipt.
 DRAIN="$TMP_ROOT/draining-rearm"
 mkdir -p "$DRAIN/bin" "$DRAIN/home/state"
 export DRAIN
@@ -4660,7 +4660,8 @@ PATH="$DRAIN/bin:$PATH" FM_HOME="$DRAIN/home" \
   --agent-reply-file "$DRAIN/reply1" >/dev/null \
   || fail "the first generation of the draining fixture did not arm"
 [ ! -s "$DRAIN/replies" ] \
-  || fail "arm returned only after the listener posted its staged reply; this fixture must expose the handoff window"
+  || fail "arm unexpectedly waited for the listener to post its staged reply"
+pass "arm readiness does not confirm that Lavish has accepted its staged reply"
 drain_claim="$FM_PROCEVENT_CLAIM_ROOT/$drain_id.claim"
 cp "$drain_claim" "$DRAIN/generation-one.claim"
 touch "$DRAIN/release1"
