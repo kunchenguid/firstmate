@@ -23,6 +23,7 @@ import subprocess
 import sys
 import email
 import smtplib
+from contextlib import contextmanager
 from email.header import decode_header, make_header
 from email.message import EmailMessage
 from email.utils import formatdate, getaddresses
@@ -56,6 +57,8 @@ socket.setdefaulttimeout(MAIL_TIMEOUT)
 MAX_PREVIEW = 200
 READ_LIMIT = 20
 MAX_AFK_BODY_BYTES = 256 * 1024
+ROOT = Path(__file__).resolve().parent.parent
+STATE = Path(os.environ.get('FM_STATE_OVERRIDE') or Path(os.environ.get('FM_HOME') or ROOT) / 'state')
 OWNER_EMAIL = Path(__file__).resolve().with_name('fm-afk-owner-email').read_text(encoding='ascii').strip()
 
 
@@ -63,22 +66,74 @@ class AfkBodyFetchError(Exception):
     pass
 
 
-
-
-
-
-
-class AfkBodyFetchError(Exception):
-    pass
-
-
-
-
-
-
-
-class AfkBodyFetchError(Exception):
-    pass
+@contextmanager
+def away_posture_operation():
+    contract = Path(__file__).resolve().with_name('fm-afk-contract.sh')
+    lock_script = (
+        '. "$1"\n'
+        "trap 'fm_afk_contract_lock_release || true' EXIT\n"
+        'fm_afk_contract_lock_hold "$2" || exit 1\n'
+        'printf "locked\\n"\n'
+        'IFS= read -r release\n'
+        '[ "$release" = release ]\n'
+    )
+    env = os.environ.copy()
+    env.setdefault('FM_HOME', str(ROOT))
+    try:
+        process = subprocess.Popen(
+            ['bash', '-c', lock_script, 'fm-mail-away-lock', str(contract), str(STATE)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            text=True,
+            env=env,
+        )
+    except OSError as error:
+        raise RuntimeError('could not start away-posture lock owner') from error
+    if process.stdout.readline() != 'locked\n':
+        result = process.wait()
+        process.stdout.close()
+        raise RuntimeError(f'could not acquire away-posture lock (exit {result})')
+    old_posture = os.environ.get('FM_AFK_POSTURE')
+    old_locked = os.environ.get('FM_AFK_CONTRACT_LOCK_HELD')
+    try:
+        try:
+            (STATE / '.afk-contract').lstat()
+            active = True
+        except FileNotFoundError:
+            active = False
+        except OSError:
+            active = True
+        if active:
+            try:
+                posture = subprocess.run(
+                    [str(contract), 'mode'], stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL, text=True, env=env,
+                )
+                if posture.returncode == 0 and posture.stdout.strip() == 'quiet':
+                    active = False
+            except (OSError, subprocess.SubprocessError):
+                active = True
+        os.environ['FM_AFK_POSTURE'] = '1' if active else '0'
+        os.environ['FM_AFK_CONTRACT_LOCK_HELD'] = '1'
+        yield
+    finally:
+        if process.poll() is None:
+            try:
+                process.stdin.write('release\n')
+                process.stdin.flush()
+            except (BrokenPipeError, OSError):
+                pass
+            process.stdin.close()
+            process.wait()
+        process.stdout.close()
+        if old_posture is None:
+            os.environ.pop('FM_AFK_POSTURE', None)
+        else:
+            os.environ['FM_AFK_POSTURE'] = old_posture
+        if old_locked is None:
+            os.environ.pop('FM_AFK_CONTRACT_LOCK_HELD', None)
+        else:
+            os.environ['FM_AFK_CONTRACT_LOCK_HELD'] = old_locked
 
 
 def afk_record_field(name):
@@ -196,6 +251,8 @@ def gmail_aligned(domain):
 
 
 def gmail_authentication_pass(message):
+    if IMH.casefold() != 'imap.gmail.com':
+        return False
     receiver_result = message.get('Authentication-Results')
     if receiver_result is None:
         return False
@@ -867,6 +924,13 @@ def cmd_poll_list():
 
 def main():
     cmd = sys.argv[1] if len(sys.argv) > 1 else ''
+    if cmd in ('read', 'poll_list'):
+        try:
+            with away_posture_operation():
+                return cmd_read() if cmd == 'read' else cmd_poll_list()
+        except Exception as error:
+            print('fm-mail away-posture error:', error, file=sys.stderr)
+            return 1
     if cmd == 'read':
         return cmd_read()
     if cmd == 'send':
@@ -875,8 +939,6 @@ def main():
         return cmd_send(sys.argv[2], sys.argv[3], sys.argv[4])
     if cmd == 'seen':
         return cmd_seen(sys.argv[2] if len(sys.argv) > 2 else '')
-    if cmd == 'poll_list':
-        return cmd_poll_list()
     raise SystemExit('unknown command')
 
 

@@ -68,7 +68,9 @@ def valid_mail_port(value):
 
 def mail_configuration():
     required = ["FM_MAIL_USER", "FM_MAIL_PASS", "FM_IMAP_HOST", "FM_SMTP_HOST"]
-    if any(not os.environ.get(name) for name in required):
+    if any(not os.environ.get(name, "").strip() for name in required):
+        return None
+    if os.environ.get("FM_IMAP_HOST", "").casefold() != "imap.gmail.com":
         return None
     if not valid_mail_port(os.environ.get("FM_IMAP_PORT", "993")) or not valid_mail_port(
         os.environ.get("FM_SMTP_PORT", "465")
@@ -211,17 +213,22 @@ def safe_text(value, limit=4000):
 
 
 def redact_secrets(text):
-    secret_values = set()
-    for key, value in os.environ.items():
-        if SECRET_ENV_RE.search(key) and value:
-
-
-
-
-            secret_values.add(value)
-    replacement = "[redacted]"
-    if any(secret in replacement for secret in secret_values):
-        replacement = ""
+    secret_values = {
+        value for key, value in os.environ.items()
+        if SECRET_ENV_RE.search(key) and value
+    }
+    replacement = next(
+        (candidate for candidate in ("[redacted]", "[hidden]", "[removed]", "[withheld]")
+         if not any(secret in candidate for secret in secret_values)),
+        None,
+    )
+    if replacement is None:
+        marker = next(
+            chr(codepoint)
+            for codepoint in (*range(0xE000, 0xF900), *range(0xF0000, 0xFFFFE))
+            if all(chr(codepoint) not in secret for secret in secret_values)
+        )
+        replacement = marker * 3
     for secret in sorted(secret_values, key=len, reverse=True):
         text = text.replace(secret, replacement)
 
@@ -694,7 +701,7 @@ def validate_handoff_state_item(path, store):
     return item
 
 
-def handoff_record(request_id, posture):
+def handoff_record(request_id):
     requested_id = request_id if isinstance(request_id, str) and request_id else None
     matches = []
     with afk_state_lock():
@@ -712,7 +719,6 @@ def handoff_record(request_id, posture):
                 if (
                     requested_id is not None
                     and item.get("handoff_request_id") == requested_id
-                    and item["away_epoch"] == posture["entered_epoch"]
                 ):
                     matches.append(item)
     if not matches:
@@ -754,8 +760,9 @@ def verify_note(note_id):
 
 
 
+
     try:
-        item = handoff_record(request_id, posture)
+        item = handoff_record(request_id)
     except (OSError, ValueError):
         print("fm-afk-email: verified reply state could not be read", file=sys.stderr)
         return 1
@@ -836,6 +843,8 @@ def token_record(token):
 
 
 def receive_batch():
+    if os.environ.get("FM_AFK_CONTRACT_LOCK_HELD") == "1":
+        return receive_batch_while_contract_locked()
     try:
         with afk_contract_lock():
             return receive_batch_while_contract_locked()

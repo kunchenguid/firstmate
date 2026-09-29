@@ -22,17 +22,15 @@ Add the following values to this Firstmate home's gitignored `.env`:
 ```sh
 FM_MAIL_USER=mailbox@example.com
 FM_MAIL_PASS=your-mailbox-app-password
-FM_IMAP_HOST=imap.example.com
+FM_IMAP_HOST=imap.gmail.com
 FM_SMTP_HOST=smtp.example.com
 FM_AFK_EMAIL_TO=johnpoyser@gmail.com
 ```
 
 `FM_MAIL_USER`, `FM_MAIL_PASS`, `FM_IMAP_HOST`, and `FM_SMTP_HOST` are the existing mail-plane settings.
+Use the Gmail receiving mailbox for IMAP; other IMAP hosts keep Pi away mode on hold-for-return.
 `FM_AFK_EMAIL_TO` must be exactly `johnpoyser@gmail.com`; this fixed destination is also the only permitted reply identity.
-
-
-
-
+Away email requires the receiving IMAP mailbox to be Gmail at `imap.gmail.com`, so the topmost `Authentication-Results` field can be trusted as Gmail's receiver-generated result.
 The mail plane requires implicit TLS on IMAP port 993 and SMTP port 465 by default; STARTTLS and port 587 are not supported.
 Set `FM_IMAP_PORT` or `FM_SMTP_PORT` only when your provider uses different implicit-TLS ports.
 

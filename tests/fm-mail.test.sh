@@ -29,6 +29,18 @@ test_missing_secret_fails_cleanly() {
   pass "fm-mail: missing required configuration fails cleanly naming the variable"
 }
 
+test_whitespace_only_required_settings_fail() {
+  local name
+  for name in FM_MAIL_USER FM_MAIL_PASS FM_IMAP_HOST FM_SMTP_HOST; do
+    if env FM_HOME="$HOME_DIR" FM_MAIL_USER=test FM_MAIL_PASS=pass \
+      FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test "$name=   " "$MAIL" status \
+      >"$TMP_ROOT/whitespace.out" 2>&1; then
+      fail "status accepted whitespace-only $name"
+    fi
+  done
+  pass "fm-mail: whitespace-only required settings fail cleanly"
+}
+
 test_env_overrides_env_file() {
   local env_home out
   env_home="$TMP_ROOT/envfile-home"
@@ -2646,6 +2658,7 @@ SH
 }
 
 test_missing_secret_fails_cleanly
+test_whitespace_only_required_settings_fail
 test_env_overrides_env_file
 test_status_without_network
 test_help_plumbing
