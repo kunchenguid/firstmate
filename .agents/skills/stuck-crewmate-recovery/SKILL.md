@@ -15,7 +15,6 @@ metadata:
 Use this playbook when the session-start digest reports an ordinary direct report's endpoint dead or its metadata has no window, or when a direct report is stale, looping, repeatedly confused, asking a question its brief already answers, unresponsive, or when a steer failed to land.
 
 Interrupt, stop, and relaunch a worker through `bin/fm-control.sh <task-id> interrupt|exit|relaunch`, which resolves the recorded runtime itself, verifies each action, and never tears down or discards anything ([`docs/agent-control.md`](../../../docs/agent-control.md)).
-That plane covers workers running in this home; a remotely placed secondmate is refused by name and reconciled through `secondmate-provisioning` instead.
 Read the [durable task assessment](../../../docs/task-lifecycle.md) first: an archived task has no recovery mandate, and an uncertain automatic action must be reconciled through its existing receipt before another effect.
 Load `harness-adapters` before a resume command or a harness-specific skill invocation, and whenever the adapter's own quirks matter.
 The target window's harness is recorded as `harness=` in `state/<id>.meta`.
@@ -23,7 +22,7 @@ The target window's harness is recorded as `harness=` in `state/<id>.meta`.
 ## Session-start reconciliation for a dead ordinary direct report
 
 This procedure covers ordinary `kind=ship` and `kind=scout` direct reports.
-Historical records for removed worker kinds are preserved and refused by the lifecycle commands; do not reinterpret or mutate them.
+Historical records for removed worker kinds, including `secondmate`, are preserved and refused by the lifecycle commands; do not reinterpret or mutate them.
 
 Treat the digest's endpoint result as a presence signal, not proof that the task's work or validation run is gone.
 Read the targeted current state with `bin/fm-crew-state.sh <id>` before deciding to relaunch.

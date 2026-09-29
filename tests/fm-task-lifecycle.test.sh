@@ -4,15 +4,18 @@ set -eu
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 TMP_ROOT=$(fm_test_tmproot fm-task-lifecycle)
 export FM_HOME="$TMP_ROOT/home"
-mkdir -p "$FM_HOME/data/a" "$FM_HOME/data/b" "$FM_HOME/state"
+mkdir -p "$FM_HOME/data/a" "$FM_HOME/data/b" "$FM_HOME/data/c" "$FM_HOME/state"
 printf 'outcome: deliver the full result\n' > "$FM_HOME/data/a/brief.md"
 cp "$FM_HOME/data/a/brief.md" "$FM_HOME/data/b/brief.md"
+cp "$FM_HOME/data/a/brief.md" "$FM_HOME/data/c/brief.md"
 printf 'spawn_gen=s1\nkind=scout\n' > "$FM_HOME/state/a.meta"
 printf 'spawn_gen=s2\nkind=scout\n' > "$FM_HOME/state/b.meta"
+printf 'spawn_gen=s3\nkind=scout\n' > "$FM_HOME/state/c.meta"
 CLI="$ROOT/bin/fm-task-state.sh"
 LIB="$ROOT/bin/fm-task-lifecycle.py"
 python3 "$LIB" init a >/dev/null
 python3 "$LIB" init b >/dev/null
+python3 "$LIB" init c >/dev/null
 "$CLI" lifecycle a > "$TMP_ROOT/input.json"
 chmod 600 "$TMP_ROOT/input.json"
 python3 - "$TMP_ROOT/input.json" <<'PY'
@@ -83,14 +86,17 @@ pass 'lost wake recovers through bounded existing scan; unchanged observations d
 # Repeating an outcome reuses its original delivery sequence, including while
 # it is still unprocessed by main. No pending captain outcome is discarded.
 OUTCOME="$ROOT/bin/fm-branch-outcome.sh"
-one=$("$OUTCOME" append --task b --verdict captain --summary 'Artifact needs completion')
-two=$("$OUTCOME" append --task b --verdict captain --summary 'Same evidence, changed wording')
+one=$("$OUTCOME" append --task b --verdict captain --summary 'Artifact needs completion' --wake 'signal: result-one')
+two=$("$OUTCOME" append --task b --verdict captain --summary 'Artifact needs completion' --wake 'signal: result-one')
 test "$one" = "$two"
-"$OUTCOME" mark-read --through "$one"
-"$OUTCOME" unprocessed | jq -e --argjson seq "$one" '.seq==$seq' >/dev/null
-"$OUTCOME" mark-processed --through "$one"
+three=$("$OUTCOME" append --task b --verdict captain --summary 'Different late result' --wake 'signal: result-two')
+test "$three" -gt "$two"
+"$OUTCOME" mark-read --through "$three"
+"$OUTCOME" unprocessed | jq -se --argjson one "$one" --argjson three "$three" \
+  'map(.seq)==[$one,$three]' >/dev/null
+"$OUTCOME" mark-processed --through "$three"
 test -z "$("$OUTCOME" unprocessed)"
-pass 'same evidence reuses original outcome and retains unprocessed acknowledgement'
+pass 'exact outcome replay reuses its sequence while a distinct late result is retained independently'
 
 # Intake may have a brief and accepted goal before an executor is assigned.
 # Discover it through the existing backlog owner, never by scanning data dirs.
@@ -117,6 +123,20 @@ if "$ROOT/bin/fm-inactive-reconcile.sh" acknowledge "$fp" >/dev/null 2>&1; then 
 test -f "${pending%.pending}.presented"
 pass 'unassigned accepted request survives lost wake; acknowledge follows persisted reconciliation'
 
+# A lifecycle record that cannot be validated must keep its pending recovery
+# notification. Presentation alone cannot turn unknown state into reconciliation.
+mkdir -p "$FM_HOME/data/broken"
+printf 'Recover this damaged lifecycle\n' > "$FM_HOME/data/broken/brief.md"
+printf 'spawn_gen=s-broken\nkind=scout\n' > "$FM_HOME/state/broken.meta"
+printf '{}\n' > "$FM_HOME/data/broken/lifecycle.json"
+chmod 600 "$FM_HOME/data/broken/lifecycle.json"
+"$ROOT/bin/fm-inactive-reconcile.sh" scan --startup >/dev/null
+broken_pending=$(grep -l '^task_id=broken$' "$FM_HOME/state/terminal-outcomes/"*.pending)
+broken_fp=${broken_pending##*/}; broken_fp=${broken_fp%.pending}
+if "$ROOT/bin/fm-inactive-reconcile.sh" acknowledge "$broken_fp" >/dev/null 2>&1; then fail 'unknown lifecycle wake was acknowledged'; fi
+test -f "$broken_pending"
+pass 'unknown lifecycle state keeps its durable recovery notification pending'
+
 "$CLI" lifecycle queued > "$TMP_ROOT/input.json"
 python3 - "$TMP_ROOT/input.json" <<'PY'
 import json,sys
@@ -136,6 +156,24 @@ PY
 "$CLI" action queued --action-id queued.g1.a1 --phase confirmed --receipt-ref data/queued/brief.md --receipt-sha256 "$sha" >/dev/null
 python3 "$LIB" due queued | jq -e '.due and .record.disposition=="open"' >/dev/null
 pass 'confirmed readback keeps unfinished goal supervised'
+
+# Terminal goal cleanup is due while concrete resources remain, and becomes
+# quiet only after the complete cleanup owner receipt is durably recorded.
+"$CLI" lifecycle c | jq '.disposition="accepted" | .assessment.remaining_gap=""' > "$TMP_ROOT/input.json"
+"$CLI" reconcile c --expected-revision 1 --record "$TMP_ROOT/input.json" >/dev/null
+python3 "$LIB" due c | jq -e '.due==true' >/dev/null
+printf '{"schema":"fm-task-cleanup.v1","task_id":"c"}\n' > "$FM_HOME/state/c.cleanup.json"
+chmod 600 "$FM_HOME/state/c.cleanup.json"
+python3 "$LIB" link-cleanup c >/dev/null
+rm "$FM_HOME/state/c.meta"
+python3 "$LIB" owner-receipt c --kind cleanup --execution-generation s3 \
+  --facts '{"taskRecordRemoved":true,"endpointConfirmedGone":true,"copyDisposition":"returned-or-already-absent","bookkeepingComplete":true}' >/dev/null
+terminal_due=$(python3 "$LIB" due c)
+if ! printf '%s\n' "$terminal_due" | jq -e '.due==false' >/dev/null; then
+  printf 'terminal cleanup remained due: %s\n' "$terminal_due" >&2
+  exit 1
+fi
+pass 'terminal cleanup is supervised before its complete owner receipt and quiet afterward'
 
 # Exact new authority can reopen a historical Done goal; old status events
 # cannot change the structured disposition or inherit its old acceptance.
@@ -190,9 +228,8 @@ import { pathToFileURL } from 'node:url';
 const root=process.env.LIFECYCLE_ROOT, home=process.env.LIFECYCLE_HOME, state=home+'/state';
 const lib=await import(pathToFileURL(root+'/.pi/extensions/lib/fm-branch-dispatch.ts'));
 const before=readFileSync(state+'/.wake-queue','utf8');
-const modes=await lib.lifecycleModesForWake(root,home,state);
+const {modes,scope}=await lib.scopeForUnreadWakeWithLifecycle(root,home,state,false);
 if(modes.stopped!=='archived') throw new Error('reader did not validate stopped generation');
-const scope=lib.scopeForUnreadWake(state,false,modes);
 if(JSON.stringify(scope.eligibleSeqs)!=='["2"]' || !scope.needsDecisionKeys.includes('fm-stopped')) throw new Error('archive routing lost late result or resumed stale work');
 if(readFileSync(state+'/.wake-queue','utf8')!==before) throw new Error('routing consumed a pending result');
 JS

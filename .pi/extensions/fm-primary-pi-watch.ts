@@ -37,6 +37,7 @@ import {
   FM_BRANCH_DISPATCH_EVENT,
   scopeForUnreadWake,
   lifecycleModesForWake,
+  scopeForUnreadWakeWithLifecycle,
 } from "./lib/fm-branch-dispatch.ts";
 import {
   type CalmPresentationState,
@@ -693,12 +694,13 @@ export default function (pi: ExtensionAPI) {
   pi.on("tool_call", async (event) => {
     if (event.toolName !== "fm_task_continuation" && event.toolName !== "bash") return;
     if (!activeGeneration || lockOwnership() !== "owned") return;
-    const scope = scopeForUnreadWake(state, false);
+    const { modes, scope } = await scopeForUnreadWakeWithLifecycle(fmRoot, fmHome, state, false);
+    if (!activeGeneration || lockOwnership() !== "owned") return;
     if (!scope.eligible || scope.corrupted) return;
     const pending: PendingActionableClose = { version: 1,
       token: `operation-${process.pid}-${Date.now()}`, message: "signal:", predecessorArmPid: "" };
     try {
-      const settlement = offerWakeToBranch(pending.message, pending);
+      const settlement = offerWakeToBranch(pending.message, pending, modes);
       if (settlement) await settlement;
     } catch {
       // Ordinary watcher delivery retains the semantic decision or failure.

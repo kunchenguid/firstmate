@@ -1418,6 +1418,29 @@ test_dispatch_rolls_back_before_a_failed_launch_delivery() {
   pass "dispatch commits neither record nor backlog state before launch delivery succeeds"
 }
 
+test_failed_launch_delivery_does_not_confirm_goal_action() {
+  local case_dir id home candidate out rc=0
+  id=atomic-dispatch-action-delivery-fails
+  case_dir=$(make_home dispatch-action-delivery-fails "$id")
+  home=$(home_of "$case_dir")
+  add_item "$case_dir" "$id"
+  FM_HOME="$home" "$ROOT/bin/fm-task-state.sh" init "$id" >/dev/null
+  candidate="$case_dir/action.json"
+  FM_HOME="$home" "$ROOT/bin/fm-task-state.sh" lifecycle "$id" | jq \
+    '.next_action={id:"atomic-dispatch-action-delivery-fails.g1.a1",kind:"spawn",phase:"prepared",expected_execution_generation:"unassigned-g1",payload_ref:.assessment.evidence[0].ref,payload_sha256:.assessment.evidence[0].sha256,receipt_ref:null,attempts:0,attempt_limit:1,recheck_at:"2000-01-01T00:00:00Z",deadline:"2099-01-01T00:00:00Z"} | .next_action_seq=2' > "$candidate"
+  chmod 600 "$candidate"
+  FM_HOME="$home" "$ROOT/bin/fm-task-state.sh" reconcile "$id" --expected-revision 1 --record "$candidate" >/dev/null
+  break_launch_delivery "$case_dir"
+
+  out=$(run_spawn "$case_dir" "$id" "$case_dir/project" --mode no-mistakes --yolo off \
+    --action-id "$id.g1.a1" --expected-generation unassigned-g1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "spawn reported success though action launch delivery failed"
+  jq -e '.execution_generation=="unassigned-g1" and .next_action.phase=="attempted" and .next_action.attempts==1' \
+    "$home/data/$id/lifecycle.json" >/dev/null \
+    || fail "failed launch delivery was recorded as a confirmed new execution"
+  pass "failed launch delivery retains an attempted action and never confirms a new execution"
+}
+
 test_dispatch_defers_interruption_across_backlog_commit() {
   local timing case_dir id out rc
   for timing in before after; do
@@ -3095,6 +3118,7 @@ if [ "${FM_BACKLOG_ENROLLED_ONLY:-0}" = 1 ]; then
   test_immediate_child_absolute_data_dispatches_and_completes
   test_bare_relative_data_dispatches_and_completes
   test_interrupted_destructive_cleanup_leaves_a_recoverable_close
+  test_failed_launch_delivery_does_not_confirm_goal_action
   test_home_without_a_backlog_dispatches_and_completes
   test_dispatch_and_completion_are_structural
   test_refused_directory_cleanup_keeps_the_goal_closed
@@ -3131,6 +3155,7 @@ test_dispatch_preserves_record_when_postlaunch_transition_fails
 test_dispatch_preserves_record_despite_removal_failure
 test_dispatch_preserves_busy_despite_removal_failure
 test_dispatch_rolls_back_before_a_failed_launch_delivery
+test_failed_launch_delivery_does_not_confirm_goal_action
 test_dispatch_defers_interruption_across_backlog_commit
 test_deferred_signal_reads_back_preserved_state
 test_deferred_signal_never_claims_unverified_preservation

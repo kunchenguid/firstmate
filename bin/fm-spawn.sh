@@ -1949,14 +1949,11 @@ if [ "$RELAUNCH" -eq 0 ]; then
   SPAWN_META_TMP=
 fi
 
-# Freeze acceptance independently of launch completion. Publication before a
-# failed launch remains recoverable under this task's existing metadata lock.
+# The lifecycle binding is committed only after launch delivery succeeds below.
+# Metadata published before a failed launch remains an unknown execution that
+# recovery must inspect; it is never promoted to a confirmed action receipt.
 # shellcheck source=bin/fm-task-lifecycle-lib.sh
 . "$SCRIPT_DIR/fm-task-lifecycle-lib.sh"
-if [ "$KIND" != secondmate ] && [ "$RELAUNCH" = 0 ]; then
-  FM_HOME="$FM_HOME" fm_task_lifecycle bind-execution "$ID" \
-    --expected-generation "$LIFECYCLE_OLD_GENERATION" --action-id "$LIFECYCLE_ACTION_ID" >/dev/null || exit 1
-fi
 if [ "$RELAUNCH" = 0 ] && [ "$BACKEND" = herdr ] && [ -f "$STATE/$ID.herdr-presentation" ]; then
   fm_backend_herdr_projection_bind_execution "$STATE/$ID.herdr-presentation" "$ID" "$SPAWN_GEN" || \
     echo "warning: launch identity could not be bound; independent endpoint cleanup will retain this endpoint" >&2
@@ -2241,6 +2238,10 @@ if [ "$SPAWN_BACKLOG_COMMIT_STATUS" -ne 0 ]; then
   exit "$SPAWN_BACKLOG_COMMIT_STATUS"
 fi
 spawn_record_launch_state confirmed
+if [ "$KIND" != secondmate ] && [ "$RELAUNCH" = 0 ]; then
+  FM_HOME="$FM_HOME" fm_task_lifecycle bind-execution "$ID" \
+    --expected-generation "$LIFECYCLE_OLD_GENERATION" --action-id "$LIFECYCLE_ACTION_ID" >/dev/null || exit 1
+fi
 if [ -n "$SPAWN_DEFERRED_SIGNAL" ]; then
   case "$SPAWN_DEFERRED_SIGNAL" in
   HUP) SPAWN_DEFERRED_SIGNAL_STATUS=129 ;;

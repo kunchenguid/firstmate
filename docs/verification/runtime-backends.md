@@ -1163,9 +1163,11 @@ Missing directories do not prevent positively identified dedicated workspace rem
 The helper verifies that the default session is unchanged after teardown.
 No model harness or remote research provider participates in this test.
 
-The current safety boundary is a verified version 3 launch journal and final identity readback.
+The endpoint safety boundary is a verified version 3 launch journal and final identity readback.
 An old journal or an unverified terminal remains a cleanup obligation.
+Directory return is a separate phase and remains subject to the [positive slot-ownership proof](../architecture.md#delivery-modes-are-explicit-per-task).
 Herdr has no atomic compare-and-close transaction, so concurrent external mutations can be detected and retained but cannot be excluded by a Firstmate lock alone.
+
 ## Pi headless short tasks
 
 On 2026-09-28, the portable exact-candidate suites passed after removing Firstmate's short-task input, output, request, tool-call, and wall-clock budgets while retaining operation grants, expiry, cancellation, process identity, durable receipts, and no replay.

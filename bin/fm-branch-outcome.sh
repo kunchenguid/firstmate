@@ -12,9 +12,10 @@
 #     malformed, duplicate, or reordered rows fail closed.
 #     Existing lines are never rewritten, reordered, or deleted.
 #     Lifecycle rows additionally carry evidenceKey and taskGeneration.
-#     Append reuses the original sequence for that exact task/generation/key;
-#     neither delivery nor processed cursors move on reuse. A caller without
-#     these options inherits the current lifecycle binding when one exists.
+#     Append reuses the original sequence only for the exact task, generation,
+#     evidence key, wake, verdict, summary, and silent value; neither delivery
+#     nor processed cursors move on reuse. A caller without these options
+#     inherits the current lifecycle binding when one exists.
 #     The read state lives
 #     entirely in the cursor sidecar so marking outcomes read cannot disturb
 #     the log. Retention: the log is small (one line per handled fleet event)
@@ -497,7 +498,9 @@ case "$CMD" in
     fi
     if [ -n "$EVIDENCE_KEY" ] && [ -s "$STORE" ]; then
       EXISTING_SEQ=$(jq -rs --arg task "$TASK" --arg generation "$TASK_GENERATION" --arg key "$EVIDENCE_KEY" \
-        '[.[] | select(.task==$task and .taskGeneration==$generation and .evidenceKey==$key)] | last | .seq // empty' "$STORE")
+        --arg wake "$WAKE" --arg verdict "$VERDICT" --arg summary "$SUMMARY" --argjson silent "$SILENT" \
+        '[.[] | select(.task==$task and .taskGeneration==$generation and .evidenceKey==$key and
+          .wake==$wake and .verdict==$verdict and .summary==$summary and .silent==$silent)] | last | .seq // empty' "$STORE")
       if [ -n "$EXISTING_SEQ" ]; then
         fm_lock_release "$LOCK"
         printf '%s\n' "$EXISTING_SEQ"

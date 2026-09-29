@@ -367,6 +367,7 @@ test_reused_pool_slot_refuses_before_touching_the_other_task() {
   write_herdr_meta "$dir/home/state/$id.meta" \
     "window=firstmate:fm-$id" "endpoint_task_id=$id" \
     "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  claim_pool_slot "$dir" "$id"
   write_herdr_meta "$dir/home/state/$other.meta" \
     "window=firstmate:fm-$other" "endpoint_task_id=$other" \
     "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
@@ -404,6 +405,7 @@ test_sole_slot_record_still_tears_down() {
   write_herdr_meta "$dir/home/state/$id.meta" \
     "window=firstmate:fm-$id" "endpoint_task_id=$id" \
     "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  claim_pool_slot "$dir" "$id"
   # A neighbouring task on its OWN slot must not look like a collision.
   mkdir -p "$dir/other-worktree"
   write_herdr_meta "$dir/home/state/neighbour.meta" \
@@ -435,6 +437,7 @@ test_recorded_endpoint_that_changed_directory_still_tears_down() {
   write_herdr_meta "$dir/home/state/$id.meta" \
     "window=firstmate:fm-$id" "endpoint_task_id=$id" \
     "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  claim_pool_slot "$dir" "$id"
 
   run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" \
     || fail "teardown refused its recorded endpoint after it changed directory: $(cat "$dir/stderr")"
@@ -548,9 +551,9 @@ test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot() {
   pass "fm-teardown: a pool slot claimed by another task is left alone while the task's own cleanup finishes"
 }
 
-# The two states that must never become a false refusal: the task's own claim,
-# and no claim at all (a slot taken before claims existed, or already returned).
-test_own_and_absent_slot_claims_still_tear_down() {
+# Only an exact task/generation claim authorizes slot return. Historical slots
+# without a claim retain their directory and task record for reconciliation.
+test_own_claim_tears_down_and_absent_claim_is_retained() {
   local dir id=owned-task
 
   dir=$(make_case slot-claim-own)
@@ -573,13 +576,19 @@ test_own_and_absent_slot_claims_still_tear_down() {
     "window=firstmate:fm-$id" "endpoint_task_id=$id" \
     "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
 
-  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" \
-    || fail "teardown of an unclaimed slot failed: $(cat "$dir/stderr")"
-  assert_absent "$dir/home/state/$id.meta" "unclaimed-slot teardown left the task record"
-  grep -Fq "treehouse <return>" "$dir/runtime.log" \
-    || fail "unclaimed-slot teardown did not return its pool slot: $(cat "$dir/runtime.log")"
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "teardown accepted an unclaimed pool slot without positive ownership"
+  assert_present "$dir/home/state/$id.meta" "unclaimed-slot teardown removed the cleanup obligation"
+  assert_present "$dir/worktree/sentinel" "unclaimed-slot teardown changed the recorded directory"
+  [ ! -s "$dir/runtime.log" ] \
+    || fail "unclaimed-slot teardown reached the runtime: $(cat "$dir/runtime.log")"
+  assert_contains "$(cat "$dir/stderr")" "has no slot-owner claim" \
+    "unclaimed-slot refusal should name the missing positive identity"
 
-  pass "fm-teardown: a task's own slot claim, and an unclaimed slot, both still tear down"
+  pass "fm-teardown: an exact claim returns its slot while an unclaimed slot retains its cleanup obligation"
 }
 
 test_historical_secondmate_record_refuses_without_mutation() {
@@ -618,6 +627,6 @@ test_bare_relative_origin_shares_project_lock_with_clone
 test_reused_pool_slot_refuses_before_touching_the_other_task
 test_sole_slot_record_still_tears_down
 test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot
-test_own_and_absent_slot_claims_still_tear_down
+test_own_claim_tears_down_and_absent_claim_is_retained
 test_recorded_endpoint_that_changed_directory_still_tears_down
 test_historical_secondmate_record_refuses_without_mutation

@@ -1423,11 +1423,25 @@ def main():
                 return
             if args.operation == 'due':
                 action = result.get('next_action') if result else None
+                cleanup_history = (result or {}).get('owner_receipts', {}).get('cleanup', [])
+                cleanup_complete = bool(result and any(
+                    proof.get('execution_generation') == result['execution_generation'] and
+                    proof.get('facts') == {'taskRecordRemoved': True, 'endpointConfirmedGone': True,
+                                           'copyDisposition': 'returned-or-already-absent', 'bookkeepingComplete': True}
+                    for proof in cleanup_history))
+                cleanup_obligation = bool(result and result['disposition'] in ('accepted', 'archived') and
+                                          not cleanup_complete and
+                                          ((task.state / (task.id + '.meta')).exists() or
+                                           result.get('cleanup_ref') or
+                                           (task.state / (task.id + '.cleanup.json')).exists()))
                 # An action receipt proves its effect, never goal acceptance.
                 # A future bounded wait defers reconciliation; even a confirmed
                 # action leaves an open goal due once that bound is reached.
+                # Terminal goals remain due only while a concrete resource or
+                # cleanup receipt is unfinished; a complete owner receipt stops
+                # the bounded scanner from publishing another generation.
                 due = bool(result and ((action and stamp(action['recheck_at']) <= stamp(now())) or
-                                       (not action and result['disposition'] == 'open') or result.get('cleanup_ref')))
+                                       (not action and result['disposition'] == 'open') or cleanup_obligation))
                 expired = bool(action and stamp(action['deadline']) <= stamp(now()))
                 observations = []
                 for path in (task.directory / 'report.md', task.state / (task.id + '.cleanup.json')):

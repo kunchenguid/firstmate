@@ -172,6 +172,7 @@ run_control() {  # <case-dir> <args...>
     FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=0.05 FM_CONTROL_LAUNCH_WAIT=0.05 \
     FM_REAL_GIT="${FM_REAL_GIT:-}" FM_FAKE_GIT_FAILURE="${FM_FAKE_GIT_FAILURE:-}" \
     FM_REAL_MV="${FM_REAL_MV:-}" FM_FAKE_COMPLETE_JOURNAL_MV_FAIL="${FM_FAKE_COMPLETE_JOURNAL_MV_FAIL:-}" \
+    FM_FAKE_JOURNAL_PHASE_FAIL="${FM_FAKE_JOURNAL_PHASE_FAIL:-}" \
     FM_FAKE_META_PUBLISH_MV_FAIL="${FM_FAKE_META_PUBLISH_MV_FAIL:-}" \
     FM_FAKE_TRACE_PREPARE="${FM_FAKE_TRACE_PREPARE:-}" \
     FM_FAKE_TRACE_RELEASE="${FM_FAKE_TRACE_RELEASE:-}" \
@@ -216,6 +217,13 @@ make_mv_failure_stub() {  # <case-dir>
 if [ -n "${FM_FAKE_COMPLETE_JOURNAL_MV_FAIL:-}" ]; then
   for path in "$@"; do
     if [ -f "$path" ] && grep -Fqx 'phase=complete' "$path"; then
+      exit 1
+    fi
+  done
+fi
+if [ -n "${FM_FAKE_JOURNAL_PHASE_FAIL:-}" ]; then
+  for path in "$@"; do
+    if [ -f "$path" ] && grep -Fqx "phase=$FM_FAKE_JOURNAL_PHASE_FAIL" "$path"; then
       exit 1
     fi
   done
@@ -863,6 +871,26 @@ test_checkpoint_refuses_uninspectable_head_and_status() {
   pass "fm-control relaunch: checkpoint inspection failures refuse before stopping"
 }
 
+test_pre_exit_rollback_restores_lifecycle_brief_binding() {
+  local dir out rc old_sha current_sha real_mv
+  dir=$(new_case lifecycle-brief-rollback rl45)
+  add_ship_task "$dir" rl45 pi
+  printf 'spawn_gen=s-rl45\n' >> "$dir/home/state/rl45.meta"
+  FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" init rl45 >/dev/null
+  old_sha=$(jq -r '.brief_sha256' "$dir/home/data/rl45/lifecycle.json")
+  real_mv=$(command -v mv)
+  make_mv_failure_stub "$dir"
+  out=$(FM_REAL_MV="$real_mv" FM_FAKE_JOURNAL_PHASE_FAIL=stopping \
+    run_control "$dir" rl45 relaunch --note "this note must roll back with its binding"); rc=$?
+  expect_code 1 "$rc" "a pre-exit journal failure should fail closed"$'\n'"$out"
+  current_sha=$(FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" lifecycle rl45 | jq -r '.brief_sha256') \
+    || fail "restored instructions left the lifecycle unreadable"
+  [ "$current_sha" = "$old_sha" ] || fail "restored instructions kept the replacement brief hash"
+  assert_no_grep "this note must roll back with its binding" "$dir/home/data/rl45/brief.md" \
+    "pre-exit rollback left the replacement note in the instructions"
+  pass "fm-control relaunch: pre-exit rollback restores instructions and lifecycle binding atomically"
+}
+
 # --- 5. failure after the agent is stopped -----------------------------------
 
 test_launch_failure_keeps_the_prior_record_and_reports_it() {
@@ -1303,6 +1331,7 @@ test_missing_worktree_refuses_before_stopping_anything
 test_missing_instructions_refuse_before_stopping_anything
 test_checkpoint_refusal_leaves_the_record_byte_identical
 test_checkpoint_refuses_uninspectable_head_and_status
+test_pre_exit_rollback_restores_lifecycle_brief_binding
 test_launch_failure_keeps_the_prior_record_and_reports_it
 test_prepublication_failure_keeps_concurrent_durable_metadata
 test_post_publication_launch_failure_keeps_the_new_record

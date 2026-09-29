@@ -454,7 +454,12 @@ acknowledge() { # <fingerprint>
   [ "$phase" = presentation ] || return 0
   observed=$(record_value "$pending" lifecycle_revision)
   case "$observed" in
-    ''|unknown) ;;
+    '') ;;
+    unknown)
+      task=$(record_value "$pending" task_id)
+      printf 'REFUSED: repair task %s lifecycle state before acknowledging its unknown goal wake\n' "$task" >&2
+      return 1
+      ;;
     *)
       task=$(record_value "$pending" task_id)
       current=$(fm_task_lifecycle read "$task" 2>/dev/null | jq -r '.revision // 0') || return 1

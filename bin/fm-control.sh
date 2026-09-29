@@ -549,6 +549,15 @@ journal_write() {  # <phase> [extra-line]...
   return 1
 }
 
+restore_relaunch_instructions() {
+  [ -n "$RELAUNCH_BRIEF" ] && [ -f "$BRIEF_PRIOR" ] || return 0
+  cp -p "$BRIEF_PRIOR" "$RELAUNCH_BRIEF" || return 1
+  if [ "$KIND" != secondmate ] && [ -f "$DATA/$ID/lifecycle.json" ]; then
+    fm_task_lifecycle_under_meta refresh-brief "$ID" \
+      --expected-generation "$(fm_meta_get "$META" spawn_gen)" >/dev/null || return 1
+  fi
+}
+
 relaunch_rollback() {
   local state
   [ "$RELAUNCH_ACTIVE" = 1 ] || return 0
@@ -558,21 +567,25 @@ relaunch_rollback() {
     checkpoint|noted)
       # The old agent was never touched. Restore the instructions byte-exact so
       # a refused relaunch leaves nothing behind.
-      if [ -n "$RELAUNCH_BRIEF" ] && [ -f "$BRIEF_PRIOR" ]; then
-        cp -p "$BRIEF_PRIOR" "$RELAUNCH_BRIEF" 2>/dev/null || true
+      if restore_relaunch_instructions; then
+        journal_write "failed:$RELAUNCH_PHASE" "rollback=instructions-restored" || true
+        echo "error: relaunch of $ID was refused before its agent was touched; nothing changed" >&2
+      else
+        journal_write "failed:$RELAUNCH_PHASE" "rollback=instructions-restore-incomplete" || true
+        echo "error: relaunch of $ID was refused before its agent was touched, but its instructions and lifecycle binding could not both be restored; reconcile the retained records" >&2
       fi
-      journal_write "failed:$RELAUNCH_PHASE" "rollback=instructions-restored" || true
-      echo "error: relaunch of $ID was refused before its agent was touched; nothing changed" >&2
       ;;
     stopping)
       state=$(agent_state 2>/dev/null || printf unknown)
       case "$state" in
         alive)
-          if [ -n "$RELAUNCH_BRIEF" ] && [ -f "$BRIEF_PRIOR" ]; then
-            cp -p "$BRIEF_PRIOR" "$RELAUNCH_BRIEF" 2>/dev/null || true
+          if restore_relaunch_instructions; then
+            journal_write "failed:$RELAUNCH_PHASE" "rollback=instructions-restored-agent-alive" || true
+            echo "error: relaunch of $ID failed while stopping the old agent, which is still running; its original instructions were restored" >&2
+          else
+            journal_write "failed:$RELAUNCH_PHASE" "rollback=instructions-restore-incomplete-agent-alive" || true
+            echo "error: relaunch of $ID failed while stopping the old agent, which is still running, but its instructions and lifecycle binding could not both be restored; reconcile the retained records" >&2
           fi
-          journal_write "failed:$RELAUNCH_PHASE" "rollback=instructions-restored-agent-alive" || true
-          echo "error: relaunch of $ID failed while stopping the old agent, which is still running; its original instructions were restored" >&2
           ;;
         dead)
           journal_write "failed:$RELAUNCH_PHASE" "rollback=prior-record-kept-agent-dead" || true

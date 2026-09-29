@@ -405,6 +405,16 @@ export async function lifecycleModesForWake(root: string, home: string, state: s
   } catch { return failed; }
 }
 
+export async function scopeForUnreadWakeWithLifecycle(
+  root: string,
+  home: string,
+  state: string,
+  heartbeat: boolean,
+): Promise<{ modes: Record<string, string>; scope: UnreadWakeScope }> {
+  const modes = await lifecycleModesForWake(root, home, state);
+  return { modes, scope: scopeForUnreadWake(state, heartbeat, modes) };
+}
+
 export function scopeForUnreadWake(state: string, heartbeat: boolean, lifecycleModes: Record<string, string> = {}): UnreadWakeScope {
   let queue = "";
   try {

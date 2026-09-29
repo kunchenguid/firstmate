@@ -96,12 +96,11 @@
 # the pool handed the slot on. Refusing instead would strand the record, because
 # bin/fm-backend.sh's endpoint validation refuses an empty or missing worktree=
 # unconditionally, so there is no line an operator could clear to get past it.
-# A claim that cannot be read proves nothing either way and refuses; inspect or
-# repair the claim file at the printed path and re-run - never remove it, since
-# an absent claim proceeds and would return a slot that may be another task's. An
-# absent claim - a slot taken before claims existed, or already returned - keeps
-# exactly the record-scan protection it had before, because refusing it would
-# strand every task in flight across that change on no evidence at all.
+# A claim that cannot be read, or an absent claim beside a live recorded slot,
+# proves no ownership and refuses; inspect, repair, or conservatively migrate
+# the exact task and execution generation at the printed path before retrying.
+# A recorded directory that is already absent has no slot to return and skips
+# this proof without gaining authority over another path.
 # Why Treehouse's own state cannot answer this for crewmate slots, and why the
 # claim file sits on top of it, is owned by bin/fm-wake-lib.sh's slot-owner
 # claim comment.
@@ -1510,10 +1509,10 @@ require_exclusive_task_worktree_slot() {
 # state so each caller gates its slot steps on one determination; the claimant
 # stays in FM_TREEHOUSE_SLOT_OWNER_ID and FM_TREEHOUSE_SLOT_OWNER_HOME.
 #
-# An absent claim proceeds as the slot's owner: a slot taken before claims
-# existed, or already returned to the pool, carries none, and refusing those
-# would strand every task in flight across the change for no evidence at all.
-# Those keep exactly the record-scan protection they had before.
+# An absent claim proves no ownership. Structured terminal cleanup may already
+# have closed its positively identified endpoint before reaching this check,
+# but the directory, slot and task record remain as a concrete reconciliation
+# obligation until a matching generation claim exists.
 TEARDOWN_SLOT_REASSIGNED_RC=3
 require_owned_worktree_slot_record() {  # <task-id> <worktree> <spawn-gen>
   local record_id=$1 worktree=$2 generation=$3 marker
@@ -1524,7 +1523,13 @@ require_owned_worktree_slot_record() {  # <task-id> <worktree> <spawn-gen>
   esac
   fm_treehouse_slot_owner_state "$worktree" "$record_id" "$generation"
   case "$FM_TREEHOUSE_SLOT_OWNER" in
-    mine|absent) return 0 ;;
+    mine) return 0 ;;
+    absent)
+      marker=$(fm_treehouse_slot_owner_marker "$worktree" 2>/dev/null) || marker="beside $worktree"
+      echo "REFUSED: task $record_id's recorded worktree $worktree has no slot-owner claim, so this execution cannot prove it still owns the directory or slot; retaining the cleanup obligation and changing neither - not even with --force." >&2
+      echo "Reconcile or conservatively migrate the claim at $marker with this task and execution generation, then re-run teardown." >&2
+      return 1
+      ;;
     other)
       echo "warning: task $record_id's recorded worktree $worktree was reassigned to task $FM_TREEHOUSE_SLOT_OWNER_ID${FM_TREEHOUSE_SLOT_OWNER_HOME:+ (home $FM_TREEHOUSE_SLOT_OWNER_HOME)}, which claimed that pool slot after this record was written; that slot is no longer $record_id's, so its processes, copy, and claim are left untouched and only $record_id's own cleanup runs." >&2
       return "$TEARDOWN_SLOT_REASSIGNED_RC"
