@@ -34,7 +34,7 @@
 #   (k) no-mistakes + merged PR but HEAD moved afterward        -> REFUSE (stale PR)
 #   (l) no-mistakes + stale origin/main but fetched content     -> ALLOW  (fresh fetch)
 #   (m) no-mistakes + local HEAD ancestor of merged PR head     -> ALLOW  (lagging local)
-#   (n) no-mistakes + replayed unpushed patch in merged PR head -> ALLOW  (replayed local)
+#   (n) no-mistakes + replayed patch and parent both landed -> ALLOW; a missing parent -> REFUSE
 #   (o) fm-pr-check rerun after HEAD moved                      -> no stale pr_head
 #   (p) fm-pr-check when local HEAD lags                        -> record remote PR head
 #   (q) no-mistakes + NO pr= recorded, PR discovered by branch  -> ALLOW  (yolo/no-CI merge)
@@ -1435,39 +1435,54 @@ test_merged_pr_refuses_unlanded_submodule_gitlink_update_despite_ignore_settings
   pass "merged PR containment preserves unlanded gitlink updates despite ignore settings"
 }
 
-test_squash_merged_pr_allows_replayed_unpushed_patch() {
-  local case_dir rc parent_head pr_head
-  case_dir=$(make_case squash-replayed-patch)
-  write_meta "$case_dir" no-mistakes ship
-  wt_commit_file "$case_dir" local-parent.txt parent "local parent"
-  parent_head=$(git -C "$case_dir/wt" rev-parse HEAD)
-  git -C "$case_dir/wt" push -q origin "$parent_head:refs/heads/fm/task-x1"
-  git -C "$case_dir/project" fetch -q origin fm/task-x1
-  wt_commit_file "$case_dir" feature.txt hello "add feature"
-  append_pr_meta_url "$case_dir"
-  pr_head=$(land_equivalent_patch_on_origin_branch "$case_dir" pr-head feature.txt hello "add feature")
-  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+test_squash_merged_pr_contains_the_replayed_patch_and_parent() {
+  local case_dir rc parent_head pr_head local_head parent_landed
+  for parent_landed in no yes; do
+    case_dir=$(make_case "squash-replayed-patch-parent-$parent_landed")
+    write_meta "$case_dir" no-mistakes ship
+    wt_commit_file "$case_dir" local-parent.txt parent "local parent"
+    parent_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+    git -C "$case_dir/wt" push -q origin "$parent_head:refs/heads/fm/task-x1"
+    git -C "$case_dir/project" fetch -q origin fm/task-x1
+    # Merely publishing a parent on the source branch does not establish that
+    # its content landed. Only this control puts it in the merged result's base.
+    if [ "$parent_landed" = yes ]; then
+      git -C "$case_dir/wt" push -q origin "$parent_head:refs/heads/main"
+    fi
+    wt_commit_file "$case_dir" feature.txt hello "add feature"
+    local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+    append_pr_meta_url "$case_dir"
+    pr_head=$(land_equivalent_patch_on_origin_branch "$case_dir" pr-head feature.txt hello "replay feature in merged result")
+    [ "$local_head" != "$pr_head" ] || fail "replayed-patch fixture did not rewrite the local commit"
+    add_gh_pr_merged_for_head "$case_dir" "$pr_head"
 
-  set +e
-  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
-  rc=$?
-  set -e
-
-  expect_code 0 "$rc" "squash-replayed-patch: teardown should succeed when unpushed local patch is in the merged PR head"
-  ! grep -q REFUSED "$case_dir/stderr" || fail "squash-replayed-patch: teardown printed a REFUSED line"
-  pass "squash-merged PR accepts replayed unpushed local patches contained in the PR head"
+    rc=0
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    if [ "$parent_landed" = yes ]; then
+      expect_code 0 "$rc" "replayed patch and parent are both landed: $(cat "$case_dir/stderr")"
+      [ ! -e "$case_dir/state/task-x1.meta" ] || fail "landed replay kept the task record"
+    else
+      expect_code 1 "$rc" "replayed patch cannot cover its published but unlanded parent"
+      assert_refusal_retained_task_state "$case_dir" unlanded-replayed-parent "$local_head"
+      [ "$(git -C "$case_dir/wt" show HEAD:local-parent.txt)" = parent ] \
+        || fail "refusal lost the unlanded parent contents"
+    fi
+  done
+  pass "replayed local patches permit cleanup only when their parent changes also landed"
 }
 
 test_merged_pr_patch_matching_preserves_indentation() {
   local case_dir mode rc pr_head local_head expected
-  for mode in exact amended old-git; do
+  for mode in exact amended; do
     case_dir=$(make_case "pr-indentation-$mode")
     write_meta "$case_dir" no-mistakes ship
-    # A pushed parent makes the YAML patch the only unpushed commit, while
+    # A landed parent makes the YAML patch the only unpushed commit, while
     # giving the local replay a different parent from the recorded PR head.
+    # The parent is also in the merged result's base, so only the YAML bytes
+    # decide containment.
     wt_commit_file "$case_dir" local-parent.txt parent "local parent"
-    git -C "$case_dir/wt" push -q origin HEAD:refs/heads/fm/task-x1
-    git -C "$case_dir/project" fetch -q origin fm/task-x1
+    git -C "$case_dir/wt" push -q origin HEAD:refs/heads/fm/task-x1 HEAD:refs/heads/main
+    git -C "$case_dir/project" fetch -q origin fm/task-x1 main
     wt_commit_file "$case_dir" config.yml $'a:\n  b: 1' "add YAML"
     append_pr_meta_url "$case_dir"
     pr_head=$(land_equivalent_patch_on_origin_branch "$case_dir" pr-head config.yml $'a:\n  b: 1' "add YAML")
@@ -1477,25 +1492,12 @@ test_merged_pr_patch_matching_preserves_indentation() {
       printf 'a:\nb: 1\n' > "$case_dir/wt/config.yml"
       git -C "$case_dir/wt" add -- config.yml
       git -C "$case_dir/wt" commit -q --amend --no-edit
-    elif [ "$mode" = old-git ]; then
-      cat > "$case_dir/fakebin/git" <<'SH'
-#!/usr/bin/env bash
-if [ "${1:-}" = patch-id ]; then
-  printf '%s\n' "$*" >> "$FM_PATCH_ID_LOG"
-  if [ "${2:-}" = --verbatim ]; then
-    echo 'error: unknown option `verbatim`' >&2
-    exit 129
-  fi
-fi
-exec "$REAL_GIT_FOR_TEST" "$@"
-SH
-      chmod +x "$case_dir/fakebin/git"
     fi
     local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
     [ "$local_head" != "$pr_head" ] || fail "$mode: fixture did not diverge"
 
     set +e
-    FM_PATCH_ID_LOG="$case_dir/patch-id.log" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
     rc=$?
     set -e
 
@@ -1506,12 +1508,8 @@ SH
       assert_grep REFUSED "$case_dir/stderr" "$mode: no refusal diagnostic"
       assert_refusal_retained_task_state "$case_dir" "$mode" "$local_head"
     fi
-    if [ "$mode" = old-git ]; then
-      assert_grep 'patch-id --verbatim' "$case_dir/patch-id.log" "old-git: capability rejection was not exercised"
-      ! grep -q -- --stable "$case_dir/patch-id.log" || fail "old-git: fell back to whitespace-insensitive matching"
-    fi
   done
-  pass "merged PR patch matching preserves indentation, allows exact replays, and refuses unsupported Git"
+  pass "merged PR containment preserves indentation and allows exact replays"
 }
 
 test_merged_pr_with_later_local_commit_refuses() {
@@ -1737,12 +1735,13 @@ test_pr_check_records_remote_head_when_local_lags() {
   pass "fm-pr-check records the remote PR head when the local worktree lags"
 }
 
-# Exercise Git's capability/error boundary through the real teardown entry point.
-# Only merge-tree is intercepted; history, fetches, and preservation checks are real.
-test_content_fallback_git_capability_boundary() {
+# Exercise the containment proof's unknown boundary through the real teardown
+# entry point. Only the proof helper's Git rev-list is intercepted; history,
+# fetches, and preservation checks are otherwise real.
+test_content_fallback_proof_capability_boundary() {
   local mode case_dir rc head
-  for mode in unsupported contained conflict unlanded error; do
-    case_dir=$(make_case "content-git-$mode")
+  for mode in contained conflict unlanded error; do
+    case_dir=$(make_case "content-proof-$mode")
     write_meta "$case_dir" no-mistakes ship
     wt_commit_file "$case_dir" feature.txt hello "add feature"
     case "$mode" in
@@ -1754,17 +1753,12 @@ test_content_fallback_git_capability_boundary() {
     cat > "$case_dir/fakebin/git" <<'SH'
 #!/usr/bin/env bash
 args=("$@")
+[ "${1:-}" != --no-replace-objects ] || shift
 if [ "${1:-}" = -C ]; then shift 2; fi
-if [ "${1:-}" = merge-tree ]; then
-  printf '%s\n' "$*" >> "${FM_TEST_MERGE_TREE_LOG:?}"
-  case "${FM_TEST_MERGE_TREE_MODE:?}" in
-    unsupported)
-      echo "error: unknown option 'write-tree'" >&2
-      exit 129 ;;
-    error)
-      echo 'fatal: unable to read tree object' >&2
-      exit 128 ;;
-  esac
+if [ "${1:-}" = rev-list ] && [ "${FM_TEST_PROOF_MODE:?}" = error ]; then
+  printf '%s\n' "$*" >> "${FM_TEST_PROOF_LOG:?}"
+  echo 'fatal: unable to read commit object' >&2
+  exit 128
 fi
 exec "$REAL_GIT_FOR_TEST" "${args[@]}"
 SH
@@ -1776,49 +1770,39 @@ SH
     chmod +x "$case_dir/fakebin/git" "$case_dir/fakebin/treehouse"
 
     set +e
-    FM_TEST_MERGE_TREE_MODE="$mode" \
-      FM_TEST_MERGE_TREE_LOG="$case_dir/merge-tree.log" \
+    FM_TEST_PROOF_MODE="$mode" \
+      FM_TEST_PROOF_LOG="$case_dir/proof.log" \
       FM_TEST_TREEHOUSE_LOG="$case_dir/treehouse.log" \
       run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
     rc=$?
     set -e
 
-    grep -q -- 'merge-tree --write-tree' "$case_dir/merge-tree.log" \
-      || fail "content-git-$mode: never attempted the containment proof"
     if [ "$mode" = contained ]; then
-      expect_code 0 "$rc" "content-git-contained: supported containment should allow cleanup"
-      assert_present "$case_dir/treehouse.log" "content-git-contained: cleanup never ran"
-      assert_absent "$case_dir/state/task-x1.meta" "content-git-contained: task record survived cleanup"
+      expect_code 0 "$rc" "content-proof-contained: supported containment should allow cleanup"
+      assert_present "$case_dir/treehouse.log" "content-proof-contained: cleanup never ran"
+      assert_absent "$case_dir/state/task-x1.meta" "content-proof-contained: task record survived cleanup"
       continue
     fi
-    expect_code 1 "$rc" "content-git-$mode: teardown must refuse"
-    assert_refusal_retained_task_state "$case_dir" "content-git-$mode" "$head"
-    assert_absent "$case_dir/treehouse.log" "content-git-$mode: cleanup ran despite refusal"
+    expect_code 1 "$rc" "content-proof-$mode: teardown must refuse"
+    assert_refusal_retained_task_state "$case_dir" "content-proof-$mode" "$head"
+    assert_absent "$case_dir/treehouse.log" "content-proof-$mode: cleanup ran despite refusal"
     case "$mode" in
-      unsupported|error)
+      error)
+        assert_present "$case_dir/proof.log" "content-proof-error: the injected Git failure was never reached"
         grep -q 'content-landed proof unavailable' "$case_dir/stderr" \
-          || fail "content-git-$mode: unavailable proof was reported as unlanded work"
+          || fail "content-proof-error: unavailable proof was reported as unlanded work"
         ! grep -q 'not landed' "$case_dir/stderr" \
-          || fail "content-git-$mode: unavailable proof still claims work is not landed"
-        if [ "$mode" = unsupported ]; then
-          grep -q -- 'merge-tree --write-tree.*Git 2.38' "$case_dir/stderr" \
-            || fail 'content-git-unsupported: missing capability and Git requirement were not named'
-        else
-          grep -q 'Git exit 128' "$case_dir/stderr" \
-            || fail 'content-git-error: unrelated Git failure was not identified'
-          ! grep -q 'Git 2.38' "$case_dir/stderr" \
-            || fail 'content-git-error: unrelated failure was mislabeled as old Git'
-        fi
+          || fail "content-proof-error: unavailable proof still claims work is not landed"
         ;;
       *)
         grep -q 'not landed' "$case_dir/stderr" \
-          || fail "content-git-$mode: genuine unlanded-work refusal changed"
+          || fail "content-proof-$mode: genuine unlanded-work refusal changed"
         ! grep -q 'proof unavailable' "$case_dir/stderr" \
-          || fail "content-git-$mode: supported Git was reported as unavailable"
+          || fail "content-proof-$mode: a completed proof was reported as unavailable"
         ;;
     esac
   done
-  pass 'content fallback distinguishes unavailable Git proof, containment, conflicts, and unlanded content'
+  pass 'content fallback distinguishes an unavailable proof from containment, conflicts, and unlanded content'
 }
 
 test_content_fallback_refuses_unlanded_submodule_gitlink_update_despite_ignore_settings() {
@@ -6713,7 +6697,7 @@ SH
 }
 
 test_hidden_untracked_work_refuses_before_return
-test_content_fallback_git_capability_boundary
+test_content_fallback_proof_capability_boundary
 test_work_written_at_reap_boundary_is_preserved
 test_status_archive_opt_in
 test_record_export_config_absent_never_reads_the_exporter
@@ -6781,7 +6765,7 @@ test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
 test_no_pr_recorded_discovers_merged_pr_by_branch_allows
 test_merged_pr_refuses_unicode_merge_only_adjustment
 test_merged_pr_refuses_unlanded_submodule_gitlink_update_despite_ignore_settings
-test_squash_merged_pr_allows_replayed_unpushed_patch
+test_squash_merged_pr_contains_the_replayed_patch_and_parent
 test_merged_pr_patch_matching_preserves_indentation
 test_merged_pr_with_later_local_commit_refuses
 test_merged_pr_history_with_reapplied_local_change_refuses
