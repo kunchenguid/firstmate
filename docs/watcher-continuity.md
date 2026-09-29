@@ -194,7 +194,10 @@ It enters its poll loop immediately and keeps scanning signals, stale panes, and
 - No PreToolUse hook denies fleet commands based on watcher status.
 - A genuine auto-arm failure describes the automatic mechanism as broken and never directs a routine manual background arm.
 - Terminal arm-output classification (`started`, `attached`, or `FAILED`) remains defense in depth for the manual recovery path.
-- Codex retains its bounded foreground checkpoint protocol.
+- Codex keeps bounded foreground checkpoints during a turn, and `bin/fm-codex-idle-continuity.sh` owns reconciliation after the allowing stop.
+  That supervisor backgrounds one arm and waits on it so it can stop the arm when Codex exits.
+  Only the session that owns `state/.lock` starts it, reclaiming a dead recorded owner first as the Claude auto-arm does.
+  Codex homes that opted into `config/supervision-host` are not covered yet ([#5899](https://github.com/kunchenguid/firstmate/issues/5899)) and start no idle supervisor.
 - Grok retains its tracked background-task notification protocol.
 
 No adapter starts a replacement with a fire-and-forget shell `&` from a model command.
@@ -510,6 +513,6 @@ The other harnesses rely on these mechanisms:
 - Claude depends on the Stop `asyncRewake` rewake.
 - Cursor depends on its awaited stop-hook park.
 - Grok retains native background-completion notifications.
-- Codex retains bounded foreground checkpoints.
+- Codex retains bounded foreground checkpoints during a turn and the Stop-started idle supervisor after it.
 
 [`verification/supervision.md`](verification/supervision.md#watcher-continuity) records the current cross-harness live evidence, the dated Stop-owned Claude auto-arm results, and exact opt-in commands.

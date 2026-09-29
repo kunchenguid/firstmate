@@ -24,6 +24,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 SECONDS_ARG=${FM_CODEX_WATCH_CHECKPOINT:-180}
+FAILURE_NOTICE="$STATE/.codex-idle-continuity-failure-notified"
 
 usage() {
   cat <<'EOF'
@@ -62,6 +63,26 @@ case "$SECONDS_ARG" in
   ''|*[!0-9]*) echo "error: --seconds must be a positive integer" >&2; exit 2 ;;
   0) echo "error: --seconds must be greater than zero" >&2; exit 2 ;;
 esac
+
+# A second session sharing this home must not stop the lock owner's idle
+# supervisor. When this process does own the lock, handover has to finish
+# before a watcher starts; a startup that has not recorded its pid yet is
+# still that supervisor.
+handover_idle_supervisor() {
+  if [ -f "$SCRIPT_DIR/fm-session-lock-lib.sh" ]; then
+    # shellcheck source=bin/fm-session-lock-lib.sh
+    . "$SCRIPT_DIR/fm-session-lock-lib.sh"
+    if ! fm_session_lock_owned_by_self "$STATE"; then
+      return 0
+    fi
+  fi
+  "$SCRIPT_DIR/fm-codex-idle-continuity.sh" --handover
+}
+
+handover_idle_supervisor || {
+  echo "checkpoint: the idle supervisor did not finish handing over" >&2
+  exit 1
+}
 
 OUT=$(mktemp "${TMPDIR:-/tmp}/fm-watch-checkpoint.out.XXXXXX") || exit 1
 ERR=$(mktemp "${TMPDIR:-/tmp}/fm-watch-checkpoint.err.XXXXXX") || {
@@ -136,10 +157,12 @@ if fm_supervision_host_enabled "$CONFIG" codex; then
     | grep -Ev '^supervision-host: cycle boundary' >/dev/null; then
     grep -Ev '^watcher: (started|attached) ' "$OUT"
     [ ! -s "$ERR" ] || cat "$ERR" >&2
+    rm -f "$FAILURE_NOTICE"
     exit 0
   fi
   if grep -E '^supervision-host: cycle boundary' "$OUT" >/dev/null 2>&1; then
     printf 'checkpoint: no actionable wake within %ss\n' "$BOUND"
+    rm -f "$FAILURE_NOTICE"
     exit 124
   fi
   [ ! -s "$OUT" ] || cat "$OUT"
@@ -160,6 +183,7 @@ set -e
 if grep -E '^(signal:|stale:|check:|heartbeat($|:))' "$OUT" >/dev/null 2>&1; then
   cat "$OUT"
   [ ! -s "$ERR" ] || cat "$ERR" >&2
+  rm -f "$FAILURE_NOTICE"
   exit 0
 fi
 
@@ -172,6 +196,7 @@ fi
 
 if [ "$RC" -eq 124 ]; then
   printf 'checkpoint: no actionable wake within %ss\n' "$SECONDS_ARG"
+  rm -f "$FAILURE_NOTICE"
   exit 124
 fi
 
