@@ -2086,23 +2086,31 @@ fm_wake_seq_read() {
 # stale, or heartbeat close may be taken by a branch that presents only its
 # granted rows, so it leaves the record alone. bin/fm-watch.sh
 # (queue_handover_surface) surfaces a queued check row above the record once.
-# The record only moves forward. A missing, malformed, or reset-counter value
-# reads as 0, which errs toward surfacing a still-queued row once more rather
-# than holding it.
-watch_queue_handed_read() {  # <output-variable>
-  local _handed=0 _last
+# The record only moves forward. A counter read of 0 is unknown rather than a
+# reset: .wake-queue.seq is rewritten in place, so a read outside
+# FM_WAKE_QUEUE_LOCK can see it empty mid-append. Only a positive counter below
+# the record is a real reset (the counter file was recreated), and then the
+# record reads as 0, which errs toward surfacing a still-queued row once more
+# rather than holding it. A missing or malformed record also reads as 0.
+watch_queue_handed_read() {  # <output-variable> [counter]
+  local _handed=0 _last=${2-}
   IFS= read -r _handed 2>/dev/null < "$STATE/.watch-queue-handed" || true
   case "$_handed" in ''|*[!0-9]*) _handed=0 ;; esac
   _handed=$((10#$_handed))
-  fm_wake_seq_read _last
-  [ "$_handed" -le "$_last" ] || _handed=0
+  case "$_last" in ''|*[!0-9]*) fm_wake_seq_read _last ;; esac
+  if [ "$((10#$_last))" -gt 0 ] && [ "$_handed" -gt "$((10#$_last))" ]; then
+    _handed=0
+  fi
   printf -v "$1" '%s' "$_handed"
 }
 
 watch_queue_handed_write() {  # <sequence>
-  local tmp
+  local current tmp
+  case "$1" in ''|*[!0-9]*) return 1 ;; esac
+  watch_queue_handed_read current "$1"
+  [ "$((10#$1))" -gt "$current" ] || return 0
   tmp=$(mktemp "$STATE/.watch-queue-handed.XXXXXX") || return 1
-  if ! printf '%s\n' "$1" > "$tmp" || ! mv -f -- "$tmp" "$STATE/.watch-queue-handed"; then
+  if ! printf '%s\n' "$((10#$1))" > "$tmp" || ! mv -f -- "$tmp" "$STATE/.watch-queue-handed"; then
     rm -f -- "$tmp"
     return 1
   fi

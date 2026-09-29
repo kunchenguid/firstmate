@@ -408,9 +408,51 @@ test_main_claimed_note_is_not_surfaced_again() {
   pass "a note main's drain already claimed is not surfaced again before acknowledgement"
 }
 
+# T7: .wake-queue.seq is rewritten in place, so a check close that reads it
+# without the queue lock can see it empty mid-append. That unknown read must
+# not lower the handover record, or the next successor re-surfaces a row its
+# predecessor already handed over.
+test_torn_counter_read_keeps_the_handover_record() {
+  local dir state out child seq
+  dir=$(make_case torn-counter-read)
+  dir=$(cd "$dir" && pwd -P)
+  state="$dir/state"
+  out="$dir/watch.out"
+  mkdir -p "$dir/data" "$dir/config"
+
+  foreign_note "$dir" "handed note" >/dev/null || fail "the inbox note was not queued"
+  foreign_watch_bg "$dir" "$out" 0
+  child=$!
+  wait_for_exit "$child" 100 || fail "the predecessor did not hand over the queued note: $(cat "$out")"
+  seq=$(cat "$state/.wake-queue.seq")
+  [ "$(cat "$state/.watch-queue-handed" 2>/dev/null)" = "$seq" ] \
+    || fail "the check close did not record the handed sequence $seq"
+
+  : > "$state/.wake-queue.seq"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    # shellcheck disable=SC1090,SC1091
+    . "$1/bin/fm-push-transition-lib.sh"
+    watch_queue_handed_read handed
+    [ "$handed" = "$2" ] || { echo "torn counter read reset the record to $handed" >&2; exit 3; }
+    wake "check: close during a foreign append"
+  ' _ "$ROOT" "$seq" >/dev/null || fail "a torn counter read changed the handover record"
+  [ "$(cat "$state/.watch-queue-handed" 2>/dev/null)" = "$seq" ] \
+    || fail "a check close with a torn counter read lowered the handover record to $(cat "$state/.watch-queue-handed" 2>/dev/null)"
+  printf '%s\n' "$seq" > "$state/.wake-queue.seq"
+
+  foreign_watch_bg "$dir" "$out" 1
+  child=$!
+  stays_blocking "$state" "$child" \
+    || fail "a successor re-surfaced a handed row after a torn counter read: $(cat "$out")"
+  kill -TERM "$child" 2>/dev/null || true
+  wait "$child" 2>/dev/null || true
+  pass "a torn queue counter read never lowers the handover record"
+}
+
 test_handling_successor_does_not_go_blind
 test_unacknowledged_recovery_is_announced_once_per_generation
 test_handling_successor_surfaces_a_foreign_append_once
 test_afk_successor_leaves_foreign_appends_to_the_daemon
 test_signal_close_leaves_a_raced_note_to_the_successor
 test_main_claimed_note_is_not_surfaced_again
+test_torn_counter_read_keeps_the_handover_record
