@@ -77,6 +77,14 @@ case "$FM_FAKE_RELAUNCH_MODE" in
     printf 'error: unverified remote secondmate harness: %s\n' "$harness" >&2
     exit 1
     ;;
+  confirmed-failure)
+    printf 'relaunch_failure=prelaunch\n' >&2
+    printf 'error: unverified remote secondmate harness: %s\n' "$harness" >&2
+    exit 1
+    ;;
+  publication-failure)
+    chmod 0500 "$FM_FAKE_RELAUNCH_STATE"
+    ;;
   confirm-other)
     harness=claude
     model=claude-opus-5-5
@@ -98,7 +106,23 @@ chmod +x "$FAKEBIN/fake-ssh"
 run_relaunch() {  # <args...>
   env FM_HOME="$HOME_DIR" FM_SSH_BIN="$FAKEBIN/fake-ssh" \
     FM_FAKE_RELAUNCH_MODE="${FM_FAKE_RELAUNCH_MODE:-}" \
+    FM_FAKE_RELAUNCH_STATE="$HOME_DIR/state" \
     "$ROOT/bin/fm-remote-secondmate-relaunch.sh" "$@" 2>&1
+}
+
+seed_pool() {
+  local digest
+  rm -rf "$HOME_DIR/state/fleet-seats"
+  mkdir -p "$HOME_DIR/state/fleet-seats"
+  printf '{"pools":[{"name":"shared","capacity":1,"models":["pool-model-a"]}]}\n' > "$HOME_DIR/config/fleet-seats"
+  digest=$(jq -cS . "$HOME_DIR/config/fleet-seats" | cksum | tr -s ' ' '-' | cut -d- -f1-2)
+  printf '%s\n' "$digest" > "$HOME_DIR/state/fleet-seats/remote-ios.policy"
+  : > "$HOME_DIR/state/fleet-seats/remote-ios.holders"
+}
+
+probe_pool() {
+  FM_HOME="$HOME_DIR" "$ROOT/bin/fm-fleet-seats.sh" reserve probe \
+    --harness pi --model pool-model-a --holder-pid "$$" 2>&1
 }
 
 # --- a successful relaunch republishes the parent's own route record --------
@@ -188,5 +212,62 @@ expect_code 0 "$RC" "a confirmed remote relaunch should succeed with an armed PR
 fm_pr_poll_artifacts_valid "$HOME_DIR/state" ios "$ROOT/bin/fm-pr-poll.sh" \
   || fail "a remote relaunch broke PR poll authentication by writing harness/model/effort after pr="
 pass "a remote relaunch keeps an already-armed PR poll authenticating"
+
+reset_meta
+seed_pool
+fm_write_meta "$HOME_DIR/state/busy.meta" "kind=ship" "model=pool-model-a"
+OUT=$(run_relaunch ios claude pool-model-a medium); RC=$?
+[ "$RC" -ne 0 ] || fail "a full fleet pool granted a remote supervisor relaunch"
+assert_contains "$OUT" "pool shared is full" "a full fleet pool did not refuse before the host call"
+assert_grep 'model=openai-codex/gpt-5.6-sol' "$HOME_DIR/state/ios.meta" \
+  "a refused relaunch changed the parent route"
+pass "a full fleet pool refuses a remote supervisor relaunch"
+
+reset_meta
+rm -f "$HOME_DIR/state/busy.meta"
+seed_pool
+OUT=$(run_relaunch ios claude pool-model-a medium); RC=$?
+expect_code 0 "$RC" "a seated remote relaunch should succeed: $OUT"
+assert_grep 'model=pool-model-a' "$HOME_DIR/state/ios.meta" \
+  "the successful relaunch did not publish its pooled model"
+OUT=$(probe_pool); RC=$?
+expect_code 4 "$RC" "a worker after a successful pooled remote relaunch"
+pass "a successful remote relaunch keeps its fleet seat"
+
+reset_meta
+perl -pi -e 's/^model=.*/model=pool-model-a/' "$HOME_DIR/state/ios.meta"
+seed_pool
+OUT=$(run_relaunch ios claude pool-model-a medium); RC=$?
+expect_code 0 "$RC" "an existing pooled supervisor should keep its full-pool seat: $OUT"
+OUT=$(probe_pool); RC=$?
+expect_code 4 "$RC" "a worker after a same-model remote relaunch"
+pass "a same-model remote relaunch keeps its existing seat"
+
+reset_meta
+seed_pool
+FM_FAKE_RELAUNCH_MODE=confirmed-failure
+OUT=$(run_relaunch ios notaharness pool-model-a medium); RC=$?
+unset FM_FAKE_RELAUNCH_MODE
+[ "$RC" -ne 0 ] || fail "a confirmed host refusal succeeded"
+assert_contains "$OUT" "unverified remote secondmate harness" "the confirmed host refusal was lost"
+OUT=$(probe_pool); RC=$?
+expect_code 0 "$RC" "a worker after a confirmed host refusal: $OUT"
+pass "a confirmed prelaunch failure releases the relaunch seat"
+
+reset_meta
+seed_pool
+FM_FAKE_RELAUNCH_MODE=publication-failure
+OUT=$(run_relaunch ios claude pool-model-a medium); RC=$?
+unset FM_FAKE_RELAUNCH_MODE
+chmod 0700 "$HOME_DIR/state"
+[ "$RC" -ne 0 ] || fail "a failed parent publication was reported as successful"
+assert_grep 'model=openai-codex/gpt-5.6-sol' "$HOME_DIR/state/ios.meta" \
+  "the parent record unexpectedly published after its write failed"
+OUT=$(probe_pool); RC=$?
+expect_code 4 "$RC" "a worker after host launch and parent publication failure"
+OUT=$(run_relaunch ios claude pool-model-a medium); RC=$?
+[ "$RC" -ne 0 ] || fail "a later relaunch replaced the unresolved seat"
+assert_contains "$OUT" "earlier remote relaunch" "the unresolved seat did not block another relaunch"
+pass "a publication failure retains the remote relaunch seat"
 
 echo "ALL TESTS PASSED"
