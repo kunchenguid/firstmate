@@ -71,14 +71,21 @@ export function registerFirstmateDecisionAttention(
   let held = false;
   const questionTool = (name: string): boolean =>
     name === "ask_user_question" || name === "plan_mode_question";
-  const current = (ctx: ExtensionContext): boolean => {
+  const sameOwner = (ctx: ExtensionContext): boolean => {
     try {
-      return !!owner && ownsPrimary() && ctx.mode === "tui" && ctx.hasUI &&
+      return !!owner &&
         ctx.sessionManager === owner.manager &&
         ctx.sessionManager.getSessionId() === owner.identity.sessionId &&
         process.env.HERDR_PANE_ID === paneId && process.env.HERDR_SOCKET_PATH === socketPath;
     } catch {
       // Pi deliberately throws from contexts belonging to a retired runtime.
+      return false;
+    }
+  };
+  const current = (ctx: ExtensionContext): boolean => {
+    try {
+      return ctx.mode === "tui" && ctx.hasUI && ownsPrimary() && sameOwner(ctx);
+    } catch {
       return false;
     }
   };
@@ -114,9 +121,9 @@ export function registerFirstmateDecisionAttention(
   pi.on("session_start", (_event, ctx) => {
     // Startup may acquire the home lock later in before_agent_start. Capture
     // identity now; current() still requires ownership for every tool event.
-    if (ctx.mode !== "tui" || !ctx.hasUI || (owner && !ownsPrimary())) return;
+    if (ctx.mode !== "tui" || !ctx.hasUI) return;
     const sessionId = ctx.sessionManager.getSessionId();
-    if (!sessionId || current(ctx)) return;
+    if (!sessionId || sameOwner(ctx)) return;
     publish(false);
     calls.clear();
     owner = {
@@ -149,7 +156,7 @@ export function registerFirstmateDecisionAttention(
     if (current(ctx) && ctx.isIdle()) finish();
   });
   pi.on("session_shutdown", (_event, ctx) => {
-    if (!current(ctx)) return;
+    if (!sameOwner(ctx)) return;
     publish(false);
     owner = undefined;
     calls.clear();
