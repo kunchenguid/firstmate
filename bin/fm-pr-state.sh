@@ -6,8 +6,9 @@
 # invocation time. It never posts, requests, approves, or merges.
 # It reports on checks that have reported. A required context that has never
 # reported on this head is absent from what this command reads and cannot be
-# enumerated here. Empty output therefore means that no reported required check
-# is failing or pending; it does not mean the pull request is ready to merge.
+# enumerated here. No blocker line after the identity line therefore means that
+# no reported required check is failing or pending; it does not mean the pull
+# request is ready to merge.
 # When nothing has reported, or nothing required has, that is printed rather
 # than read as ready. Advisory checks do not block and are omitted.
 # A pull request that only awaits an approval (reviewDecision REVIEW_REQUIRED)
@@ -15,7 +16,7 @@
 # block; review history is printed only to explain CHANGES_REQUESTED, naming
 # each reviewer whose latest verdict still requests changes and marking it
 # STALE when it was left at a superseded head.
-# A closed or merged pull request reports that terminal state and nothing else.
+# A closed or merged pull request reports that terminal state and no blockers.
 # Unresolved review-thread state is out of this command's scope.
 #
 # Usage: fm-pr-state.sh <pr-url> [task-id]
