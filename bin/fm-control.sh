@@ -930,7 +930,7 @@ relaunch_rollback() {
           ;;
         dead)
           journal_write "failed:$RELAUNCH_PHASE" "rollback=prior-record-kept-agent-dead" || true
-          echo 'relaunch_failure=prelaunch' >&2
+          echo 'relaunch_failure=launch' >&2
           echo "error: $ID's agent stopped but relaunch did not reach replacement launch; no agent is running, and its work plus progress note are preserved at $WT" >&2
           ;;
         *)

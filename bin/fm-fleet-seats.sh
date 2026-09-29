@@ -266,13 +266,13 @@ write_record() {
   } > "$path.tmp.$$" && mv -f "$path.tmp.$$" "$path"
 }
 
-remote_hold_confirmed_dead() {
+remote_hold_confirmed_absent() {
   local state_out
   state_out=$(FM_HOME="$ROOT_HOME" FM_STATE_OVERRIDE="$ROOT_STATE" \
     FM_CONFIG_OVERRIDE="$ROOT_CONFIG" FM_DATA_OVERRIDE="$ROOT_DATA" \
     fm_run_timed 20 "$SCRIPT_DIR/fm-on.sh" "$1" \
       fm-remote-secondmate-control.sh state "$1" </dev/null 2>/dev/null) || return 1
-  [ "$state_out" = dead ]
+  case "$state_out" in dead|missing) return 0 ;; *) return 1 ;; esac
 }
 
 # seat_records <root> <models-file> <remove-stale 0|1>: "<state>\t<id>" per live record.
@@ -299,7 +299,7 @@ seat_records() {
       if [ "$hold" = relaunch ] \
         && [ "$(record_field "$f" nonce)" != "$(record_field "$st/$task.meta" fleet_seat_dead_token)" ]; then
         if ! holder_alive "$(record_field "$f" pid)" "$(record_field "$f" pid_identity)" ] \
-          && [ "$st" = "$ROOT_STATE" ] && remote_hold_confirmed_dead "$task"; then
+          && [ "$st" = "$ROOT_STATE" ] && remote_hold_confirmed_absent "$task"; then
           [ "$remove_stale" -eq 0 ] || rm -f "$f"
           continue
         fi
@@ -311,7 +311,7 @@ seat_records() {
     fi
     if [ "$hold" = relaunch ] && [ "$verdict" = absent ] \
       && ! holder_alive "$(record_field "$f" pid)" "$(record_field "$f" pid_identity)" ] \
-      && [ "$st" = "$ROOT_STATE" ] && remote_hold_confirmed_dead "$task"; then
+      && [ "$st" = "$ROOT_STATE" ] && remote_hold_confirmed_absent "$task"; then
       [ "$remove_stale" -eq 0 ] || rm -f "$f"
       continue
     fi
