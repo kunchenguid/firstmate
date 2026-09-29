@@ -83,11 +83,6 @@ def mail_configuration():
     if not valid_mail_port(os.environ.get("FM_IMAP_PORT", "993")) or not valid_mail_port(
         os.environ.get("FM_SMTP_PORT", "465")
     ):
-
-        return None
-    if not valid_mail_port(os.environ.get("FM_IMAP_PORT", "993")) or not valid_mail_port(
-        os.environ.get("FM_SMTP_PORT", "465")
-    ):
         return None
     recipient = os.environ.get("FM_AFK_EMAIL_TO", "").strip()
     addresses = getaddresses([recipient])
@@ -747,13 +742,14 @@ def validate_handoff_state_item(path, store):
     return item
 
 
-def handoff_record(request_id):
+def handoff_record(request_id, sent_only=False):
 
 
     requested_id = request_id if isinstance(request_id, str) and request_id else None
     matches = []
+    stores = (("sent", SENT),) if sent_only else (("sent", SENT), ("pending", PENDING))
     with afk_state_lock():
-        for store, directory in (("sent", SENT), ("pending", PENDING)):
+        for store, directory in stores:
             try:
                 paths = sorted(directory.iterdir())
             except FileNotFoundError:
@@ -807,9 +803,6 @@ def verify_note(note_id):
         print(json.dumps({"email_handoff": False, "verified": False}, separators=(",", ":")))
         return 0
     posture = live_record()
-    if posture is None:
-        print("fm-afk-email: away posture could not be validated for an email handoff", file=sys.stderr)
-        return 1
 
 
 
@@ -817,7 +810,7 @@ def verify_note(note_id):
 
 
     try:
-        item = handoff_record(request_id)
+        item = handoff_record(request_id, sent_only=posture is None)
 
 
     except (OSError, ValueError):
@@ -834,6 +827,16 @@ def verify_note(note_id):
 
 
 
+        return 0
+    if posture is None and (
+        item.get("used_request_id") != request_id
+        or item.get("used_note_id") != note_id
+        or type(item.get("used_epoch")) is not int
+    ):
+        print(json.dumps({"email_handoff": False, "verified": False}, separators=(",", ":")))
+        return 0
+    if posture is not None and item["away_epoch"] != posture["entered_epoch"]:
+        print(json.dumps({"email_handoff": False, "verified": False}, separators=(",", ":")))
         return 0
     body = inbox_note_body(note_id)
     if body is None:

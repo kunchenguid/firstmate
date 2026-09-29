@@ -109,12 +109,17 @@ def away_posture_operation():
             active = True
         if active:
             try:
-                posture = subprocess.run(
-                    [str(contract), 'mode'], stdout=subprocess.PIPE,
-                    stderr=subprocess.DEVNULL, text=True, env=env,
+                validated = subprocess.run(
+                    [str(contract), 'validate'], stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL, env=env,
                 )
-                if posture.returncode == 0 and posture.stdout.strip() == 'quiet':
-                    active = False
+                if validated.returncode == 0:
+                    posture = subprocess.run(
+                        [str(contract), 'mode'], stdout=subprocess.PIPE,
+                        stderr=subprocess.DEVNULL, text=True, env=env,
+                    )
+                    if posture.returncode == 0 and posture.stdout.strip() == 'quiet':
+                        active = False
             except (OSError, subprocess.SubprocessError):
                 active = True
         os.environ['FM_AFK_POSTURE'] = '1' if active else '0'
@@ -139,18 +144,6 @@ def away_posture_operation():
             os.environ.pop('FM_AFK_CONTRACT_LOCK_HELD', None)
         else:
             os.environ['FM_AFK_CONTRACT_LOCK_HELD'] = old_locked
-
-
-
-
-
-
-
-
-
-class AfkBodyFetchError(Exception):
-    pass
-
 
 
 def afk_record_field(name):
