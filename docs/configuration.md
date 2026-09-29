@@ -158,6 +158,8 @@ It places that marker in the private first message because SG may automatically 
 It repeats that reconciliation after a timeout or ambiguous submission before deciding state.
 A unique match is adopted; multiple matches, a truncated listing, provider unavailability, or unresolved identity becomes a preserved unavailable or ambiguous state and never authorizes a silent duplicate create.
 Restart adoption and startup recovery use the durable marker and session id and re-arm the existing process-event source without pretending a local endpoint exists.
+An enrolled goal that remains incomplete after an iDA terminal report can continue only through the lifecycle-bound same-session followup described in the [task lifecycle](task-lifecycle.md); `bin/fm-remote-agent-ida.sh --help` owns the exact invocation.
+That path never authorizes a fresh research session or provider switch, and unavailable or uncorrelatable provider support remains an explicit goal gap.
 
 `bin/fm-procevent-ida.sh` owns first submission, session readback, normalized state transitions, report creation, acknowledgement, and re-arming.
 Provider-running or idle-but-processing state is healthy.

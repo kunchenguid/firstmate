@@ -54,6 +54,8 @@ No monitoring default authorizes additional model spend, query spend, merging, f
 Accepted and explicitly archived records leave ordinary busy/stale checks and automatic business continuation.
 Their existing late results, unprocessed branch outcomes and keyed decisions remain deliverable.
 Moving an open goal to archived requires distinct explicit stop authority; its brief or existing acceptance authority cannot be reused for that transition.
+An archived goal retains any attempted or uncertain business action as evidence, but that action is neither due nor executable and does not block independently authorized cleanup.
+An attempted or uncertain cleanup action still requires exact readback before cleanup can proceed.
 Concrete cleanup metadata keeps a terminal goal due for reconciliation until the cleanup owner records the complete generation-bound receipt; that supervision does not authorize business execution to resume.
 A complete cleanup receipt makes the terminal goal quiet without erasing its retained evidence.
 A temporary parked or externally waiting task stays open.
@@ -72,7 +74,7 @@ A stopped supervisor with no successor cannot make progress; durable obligations
 
 ## Remote results and resource cleanup
 
-[iDA continuation](configuration.md#remote-research-agents) uses the existing provider adapter's same-session followup entry point.
+[`fm-remote-agent-ida.sh`](../bin/fm-remote-agent-ida.sh) exposes the existing provider adapter's same-session followup entry point.
 It freezes the old terminal state and report, submits at most once, and binds the new provider task to a new execution generation.
 A lost response permits only readback: task ordering or a single newly listed task does not identify the submission.
 Without a uniquely correlated official response, the action remains uncertain and reports the missing provider identity.
@@ -80,6 +82,7 @@ A fresh dispatch cannot reuse a task identity that already owns a previous remot
 AIME's existing lifecycle remains compatible; iDA followup support grants no new AIME continuation capability.
 
 [`fm-teardown.sh`](../bin/fm-teardown.sh) owns independent endpoint cleanup and [`fm-teardown-endpoint-lib.sh`](../bin/fm-teardown-endpoint-lib.sh) owns its receipt stages and retained reasons.
+An enrolled open goal retains its endpoint, directory, slot and task records; cleanup begins only after semantic acceptance or a separately authorized archive, and discard authority does not bypass that boundary.
 New Herdr launches bind a version 3 presentation journal to the execution generation, server instance, terminal identity and shell identity.
 Older journals cannot acquire deletion authority from labels or a shared directory.
 Endpoint cleanup closes only an exact idle task pane, preserves focused user tabs and active siblings, verifies workspace absence separately, and leaves directory safety checks in place.
@@ -91,5 +94,6 @@ Whole-session snapshots can detect concurrent resource changes but cannot make H
 
 [`tests/fm-task-lifecycle.test.sh`](../tests/fm-task-lifecycle.test.sh) covers revision conflicts, pending effects, explicit stop, generation mismatch, lost wake recovery, unassigned requests, unknown-record acknowledgement, terminal cleanup receipts and exact outcome replay.
 The existing send, control, remote-agent and backlog suites exercise their respective effect owners.
+[`tests/fm-teardown-endpoint-safety.test.sh`](../tests/fm-teardown-endpoint-safety.test.sh) covers the open-goal cleanup barrier, archived business-action retention and uncertain cleanup readback.
 [`tests/fm-teardown-lifecycle-herdr-e2e.test.sh`](../tests/fm-teardown-lifecycle-herdr-e2e.test.sh) requires an explicitly authorized named-session helper and verifies real mixed/focused workspace behavior, active sibling preservation and interrupted bookkeeping.
 Its helper is the only route to Herdr and verifies the default-session tripwire on teardown.
