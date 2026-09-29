@@ -4636,12 +4636,13 @@ export DRAIN
 cat > "$DRAIN/bin/lavish-axi" <<'SH'
 #!/usr/bin/env bash
 set -eu
-[ "${3-}" != --agent-reply ] || printf '%s\n' "$4" >> "$DRAIN/replies"
 printf 'poll\n' >> "$DRAIN/polls"
+if [ "$(wc -l < "$DRAIN/polls")" -eq 1 ]; then
+  while [ ! -e "$DRAIN/release1" ]; do sleep 0.02; done
+fi
+[ "${3-}" != --agent-reply ] || printf '%s\n' "$4" >> "$DRAIN/replies"
 if [ "$(wc -l < "$DRAIN/polls")" -ge 2 ]; then
   while [ ! -e "$DRAIN/release2" ]; do sleep 0.02; done
-else
-  while [ ! -e "$DRAIN/release1" ]; do sleep 0.02; done
 fi
 printf 'session:\n  status: feedback\nprompts[1]{uid,prompt,selector,tag,text}:\n  "","next round","","message",""\n'
 SH
@@ -4658,6 +4659,8 @@ PATH="$DRAIN/bin:$PATH" FM_HOME="$DRAIN/home" \
   "$ROOT/bin/fm-procevent-lavish.sh" arm "$drain_art" --for worker-drain \
   --agent-reply-file "$DRAIN/reply1" >/dev/null \
   || fail "the first generation of the draining fixture did not arm"
+[ ! -s "$DRAIN/replies" ] \
+  || fail "arm returned only after the listener posted its staged reply; this fixture must expose the handoff window"
 drain_claim="$FM_PROCEVENT_CLAIM_ROOT/$drain_id.claim"
 cp "$drain_claim" "$DRAIN/generation-one.claim"
 touch "$DRAIN/release1"
