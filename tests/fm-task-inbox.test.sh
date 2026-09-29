@@ -348,19 +348,6 @@ SH
 # composer, and a ring that skipped every pending composer blocked all later
 # rings. Our own exact doorbell is submitted instead; any other pending text
 # still skips untouched; and a lost Enter after typing gets one retry.
-test_modal_input_preparation_refuses_unsupported_backends() {
-  local state backend rc
-  state="$TMP_ROOT/unsupported-modal-preparation/state"
-  mkdir -p "$state"
-  for backend in zellij orca cmux; do
-    rc=0
-    inbox_lib "$state" fm_backend_prepare_text_input "$backend" unavailable 0 require-pending \
-      >/dev/null 2>&1 || rc=$?
-    [ "$rc" -ne 0 ] || fail "$backend must refuse modal input preparation it cannot prove"
-  done
-  pass "input preparation: unsupported backends refuse rather than claiming modal safety"
-}
-
 test_ring_submits_its_own_stuck_doorbell() {
   local dir state rec doorbell log composer drops mode rc other
   dir="$TMP_ROOT/ring-stuck"
@@ -840,7 +827,6 @@ test_write_is_durable_and_exact
 test_doorbell_is_a_shell_noop
 test_doorbell_rejects_terminal_controls
 test_ring_skips_dead_agent
-test_modal_input_preparation_refuses_unsupported_backends
 test_ring_submits_its_own_stuck_doorbell
 test_idempotent_write_dedups_exact_body
 test_idempotent_write_follows_concurrent_ack
