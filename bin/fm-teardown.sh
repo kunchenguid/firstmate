@@ -1841,6 +1841,22 @@ work_is_landed() {
   content_in_default
 }
 
+# Is the recorded PR confirmed CLOSED without merging (rejected)? Only true
+# when gh positively reports a closed, non-merged state; any other outcome -
+# open, merged, no PR recorded, or a gh lookup error - returns non-zero so the
+# caller falls back to its existing recorded-PR allowance rather than
+# refusing on an inconclusive read.
+pr_is_closed_unmerged() {
+  local target state
+  [ -n "$PR_URL" ] || return 1
+  target=$PR_URL
+  state=$(cd "$WT" && gh pr view "$target" --json state -q '.state' 2>/dev/null) || return 1
+  case "$state" in
+    CLOSED|closed) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # The completion links this teardown already holds locally. A retained scout
 # keeps its report as the held deliverable, while a force-closed scout is
 # recorded as discarded with no report. A local-only ship lands on local main,
@@ -2262,7 +2278,7 @@ validate_worktree_teardown_safety() {
       branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
       TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY=$branch
     fi
-    if ! work_is_landed "$branch" && { [ -n "$unpushed" ] || [ -z "$PR_URL" ]; }; then
+    if ! work_is_landed "$branch" && { [ -n "$unpushed" ] || [ -z "$PR_URL" ] || pr_is_closed_unmerged; }; then
       if [ -n "${CONTENT_LANDED_PROOF_ERROR:-}" ]; then
         echo "REFUSED: content-landed proof unavailable for worktree $WT: $CONTENT_LANDED_PROOF_ERROR." >&2
         echo "Restore or upgrade Git and retry the content check." >&2
