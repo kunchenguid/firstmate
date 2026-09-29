@@ -119,6 +119,34 @@ test_no_open_decisions_prints_nothing() {
   pass "no open decisions across the fleet prints nothing"
 }
 
+test_open_decisions_page_across_drains() {
+  local dir state first second i
+  dir=$(make_case paged-open)
+  state="$dir/state"
+  first="$dir/first.out"
+  second="$dir/second.out"
+  i=1
+  while [ "$i" -le 80 ]; do
+    printf 'needs-decision [key=page-%02d]: choose the bounded page entry %02d\n' "$i" "$i" > "$state/task-page-$i.status"
+    i=$((i + 1))
+  done
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$first" || fail "first paged decision drain failed"
+  grep -F 'page continues on the next drain' "$first" >/dev/null \
+    || fail "the first open-decision page did not advertise continuation"
+  grep -F 'task-page-1' "$first" >/dev/null || fail "the first page omitted its first decision"
+  if grep -F 'task-page-80' "$first" >/dev/null; then
+    fail "the first open-decision page exceeded its byte budget"
+  fi
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$second" || fail "second paged decision drain failed"
+  grep -F 'task-page-80' "$second" >/dev/null || fail "the next open-decision page omitted its final decision"
+  if grep -F 'task-page-1' "$second" >/dev/null; then
+    fail "the durable page cursor restarted instead of advancing"
+  fi
+  pass "open decisions paginate across drains without hiding the tail"
+}
+
 test_open_decision_surfaces_even_with_an_unrelated_queued_wake() {
   local dir state out
   dir=$(make_case fleet-wide)
@@ -221,6 +249,7 @@ test_explicit_resolution_closes_it
 test_later_unrelated_terminal_line_does_not_close_it
 test_reserved_key_namespace_is_owned_by_its_library
 test_no_open_decisions_prints_nothing
+test_open_decisions_page_across_drains
 test_open_decision_surfaces_even_with_an_unrelated_queued_wake
 test_buried_decision_surfaces_on_the_empty_queue_fast_path
 test_status_symlink_is_not_followed

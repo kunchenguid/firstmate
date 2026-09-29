@@ -227,6 +227,34 @@ test_drain_dedupes_obvious_duplicates() {
   pass "drain collapses obvious duplicate heartbeat and signal records"
 }
 
+test_drain_suppresses_terminal_bot_notice_for_merged_task() {
+  local dir state out err sequence generation
+  dir=$(make_case terminal-bot-notice)
+  state="$dir/state"
+  out="$dir/drain.out"
+  err="$dir/drain.err"
+  printf 'done: PR merged\n' > "$state/task-terminal.status"
+  printf '%s\n' fm-pr-poll-merge-notified-v1 github github.com o/r 7 \
+    > "$state/task-terminal.pr-poll-merge-notified"
+  append_wake "$state" check "$state/task-terminal.check.sh" \
+    'check: task-terminal.check.sh: bot approval for already merged PR' \
+    || fail "terminal bot notice append failed"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$err" || fail "terminal bot notice drain failed"
+  grep -F 'WAKE TERMINAL NOTICES SUPPRESSED: 1' "$out" >/dev/null \
+    || fail "merged terminal notice did not produce one suppression summary"
+  if grep -F 'bot approval for already merged PR' "$out" >/dev/null; then
+    fail "merged terminal notice payload was presented after suppression"
+  fi
+  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")
+  [ -n "$sequence" ] && [ -n "$generation" ] || fail "suppressed terminal notice omitted its acknowledgement boundary"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" \
+    || fail "suppressed terminal notice acknowledgement failed"
+  [ ! -s "$state/.wake-queue" ] || fail "suppressed terminal notice remained queued after acknowledgement"
+  pass "merged terminal bot notices collapse to one summary and remain acknowledgeable"
+}
+
 # Run one watcher leg of the foreign-stall case at fake time <now>. Each leg
 # waits on what the watcher observably did, never on a wall-clock budget: a
 # loaded machine can take seconds to reach the first poll, and a leg cut off
@@ -3399,6 +3427,7 @@ test_not_working_stale_enqueue_before_suppressor
 test_check_output_is_queued
 test_atomic_double_drain
 test_drain_dedupes_obvious_duplicates
+test_drain_suppresses_terminal_bot_notice_for_merged_task
 test_drain_asserts_watcher_liveness
 test_structural_signal_enrichment_preserves_raw_rows
 test_enrichment_preserves_all_unread_lines_and_status_file_failures
