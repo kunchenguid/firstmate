@@ -12,6 +12,7 @@
 #   fm-procevent-lavish.sh source-id <artifact.html>
 #   fm-procevent-lavish.sh retire <artifact.html>
 #   fm-procevent-lavish.sh poll <artifact.html> [--agent-reply-file <path>]
+#   fm-procevent-lavish.sh deliver-reply poll <artifact.html> --agent-reply-file <path>
 #
 # classify   Print the lifecycle state a handler should act on: feedback, ended,
 #            waiting, disconnected, missing, or unknown.
@@ -34,10 +35,16 @@
 # poll       The registered listener command `arm` publishes, not a command to
 #            run in a conversational turn. It runs the published blocking poll
 #            and prints its response verbatim, absorbing only the one exact
-#            transient interruption described below. When supported, a staged
-#            reply is synchronously accepted with `lavish-axi reply` before the
-#            listener is registered; older compatible versions keep the legacy
+#            transient interruption described below. A staged reply still
+#            present when it starts is posted before the long-poll: through
+#            `lavish-axi reply` when supported, otherwise through the legacy
 #            best-effort `poll --agent-reply` path.
+# deliver-reply
+#            Run by `fm-procevent.sh register-task` under the source lock, only
+#            after the task is eligible to own the board, with the listener argv
+#            it is about to publish. Exit 0 once Lavish accepts the staged reply,
+#            3 when the installed Lavish lacks synchronous reply so the listener
+#            keeps the legacy path, and any other status when the reply failed.
 # terminal   Exit 0 when the captured result means this Lavish source will never
 #            produce another result, so the runner may retire it; any other exit
 #            keeps it armed. This is the generic adapter contract bin/fm-procevent.sh
@@ -236,11 +243,6 @@ cmd_arm() {
   real=$(perl -MCwd=realpath -e '$p = realpath($ARGV[0]); defined($p) or exit 1; print "$p\n"' "$artifact" 2>/dev/null) \
     || die "cannot resolve the artifact path: $artifact"
   listener=("$SCRIPT_DIR/fm-procevent-lavish.sh" poll "$real")
-  if [ -n "$reply_file" ] && lavish_reply_compatible; then
-    apply_session_host "$real"
-    post_lavish_reply "$real" "$reply_file"
-    reply_file=''
-  fi
   [ -z "$reply_file" ] || listener+=(--agent-reply-file "$reply_file")
   if [ -n "$task" ]; then
     FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" register-task lavish "$id" "$task" -- \
@@ -276,6 +278,13 @@ cmd_arm() {
   printf 'armed: %s\n' "$id"
   printf 'artifact: %s\n' "$real"
   [ -z "$task" ] || printf 'owner-task: %s\n' "$task"
+}
+
+cmd_deliver_reply() {
+  [ "$#" -eq 4 ] && [ "$1" = poll ] && [ "$3" = --agent-reply-file ] || usage
+  lavish_reply_compatible || exit 3
+  apply_session_host "$2"
+  post_lavish_reply "$2" "$4"
 }
 
 cmd_retire() {
@@ -827,6 +836,7 @@ case "${1-}" in
   arm)       shift; cmd_arm "$@" ;;
   retire)    shift; cmd_retire "$@" ;;
   poll)      shift; cmd_poll "$@" ;;
+  deliver-reply) shift; cmd_deliver_reply "$@" ;;
   source-id) shift; cmd_source_id "$@" ;;
   classify)  shift; cmd_classify "$@" ;;
   terminal)  shift; cmd_terminal "$@" ;;

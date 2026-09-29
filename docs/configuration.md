@@ -1874,8 +1874,8 @@ Re-arm acknowledges that round and registers the next listener: the board is arm
 
 Re-arm never acquires, releases, or hands off the source claim.
 It may carry `--agent-reply-file <path>`.
-With lavish-axi 0.1.80 or newer, the adapter posts the file through `lavish-axi reply` and waits for the server's acceptance before registering or arming the long-poll listener.
-A failed or timed-out reply stops the arm before it registers a listener, so the worker cannot hand the board back as ready.
+With lavish-axi 0.1.80 or newer, the reply is posted through `lavish-axi reply` under the source lock only after the arm passes its endpoint, ownership, and pending-round checks, and the server's acceptance is awaited before the listener is registered or armed.
+A refused arm never posts the reply, and a failed or timed-out reply stops the arm before it registers a listener or acknowledges the round, so the worker cannot hand the board back as ready and can retry the same arm.
 
 Older compatible Lavish versions keep the prior behavior: the reply is staged into the listener and sent through `poll --agent-reply`, which cannot confirm acceptance before its long-poll returns.
 That compatibility path retains its best-effort delivery boundary and does not provide the synchronous handoff guarantee.
