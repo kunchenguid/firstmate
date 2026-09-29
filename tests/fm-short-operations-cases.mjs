@@ -22,7 +22,7 @@ export const SessionManager={inMemory:()=>({getBranch:()=>[]})};
 export const SettingsManager={inMemory:x=>x};
 export async function createAgentSession(o) {
  const messages=[];
- return {session:{messages,systemPrompt:o.resourceLoader.getSystemPrompt(),getActiveToolNames:()=>o.tools,async bindExtensions(){o.modelRuntime.provider={};},subscribe(){},dispose(){},getLastAssistantText:()=> 'complete',
+ return {session:{messages,systemPrompt:o.resourceLoader.getSystemPrompt(),getActiveToolNames:()=>o.tools,async bindExtensions(options){if(process.env.FM_FIXTURE_BIND_ERROR)options.onError({event:'session_start',error:'fixture'});o.modelRuntime.provider={};},subscribe(){},dispose(){},getLastAssistantText:()=> 'complete',
  async prompt(prompt) {
   const p=JSON.parse(prompt);
   const transportFailure=()=>o.modelRuntime.streamSimple({}, {fail:true}, {fetch:async()=>{throw new TypeError('fetch failed',{cause:Object.assign(new Error('hidden'),{code:'ECONNRESET'})});}});
@@ -59,6 +59,14 @@ assert.throws(()=>service.submit(req('unknown',[{action:'restart',task:'foo'}]))
 const missingAuthority=req('no-authority');delete missingAuthority.operations.authority;assert.throws(()=>service.submit(missingAuthority),/authority/);
 fs.writeFileSync(path.join(home,'state/.lock'),'1');assert.throws(()=>service.submit(req('wrong-primary')),/primary/);fs.writeFileSync(path.join(home,'state/.lock'),String(process.pid));
 const expired=req('expired');expired.operations.expiresAt=1;assert.throws(()=>service.submit(expired),/expired/);
+const initProject=path.join(tmp,'plugin-init-project');git('clone',remote,initProject);const initBefore=git('-C',initProject,'rev-parse','HEAD');
+process.env.FM_FIXTURE_BIND_ERROR='1';
+const initFailure=service.submit(req('plugin-init-failure',[{action:'sync',project:initProject}]));
+delete process.env.FM_FIXTURE_BIND_ERROR;
+const initResult=await terminal(initFailure.id);
+assert.equal(initResult.state,'blocked');assert.equal(initResult.stage,'plugin-initialization');assert.equal(initResult.requests,0);assert.equal(initResult.toolCalls,0);
+assert.ok(!fs.existsSync(path.join(service.dir(initFailure.id),'operation-0.intent.json')));assert.ok(!fs.existsSync(path.join(service.dir(initFailure.id),'operation-0.receipt.json')));
+assert.equal(git('-C',initProject,'rev-parse','HEAD'),initBefore,'plugin initialization failure made no operation effect');
 const request={...req('sync'),budget:{timeMs:1,tools:1,outputTokens:1,requests:1}};const operationBegan=Date.now(),a=service.submit(request);assert.equal(service.submit(request).id,a.id);
 assert.equal(git('-C',project,'rev-parse','HEAD'),old,'submit did not execute the effect');
 const done=await terminal(a.id);assert.equal(done.state,'completed',JSON.stringify(done));assert.ok(done.finishedAt-operationBegan>1,'legacy wall budget does not stop an operation');assert.ok(!Object.hasOwn(JSON.parse(fs.readFileSync(path.join(service.dir(a.id),'request.json'))).input,'budget'));
