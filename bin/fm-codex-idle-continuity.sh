@@ -34,11 +34,23 @@
 # stdout and stderr are the hook output.
 #
 # The supervisor owns only the idle gap. bin/fm-watch-checkpoint.sh runs
-# `--handover` before it starts a watcher: that stops this home's supervisor,
-# matched by its recorded pid identity, and waits for the watcher lock to be
-# free, so the turn's checkpoint owns supervision until the next allowing
-# stop starts a fresh supervisor. An arm cycle that ends because another
-# owner took or ended the watcher is a handover, not a failure.
+# `--handover` before it starts a watcher, and only when this process's
+# session owns state/.lock: that stops this home's supervisor, matched by its
+# recorded pid identity, and waits for the watcher lock to be free, so the
+# turn's checkpoint owns supervision until the next allowing stop starts a
+# fresh supervisor. A checkpoint from any other session leaves the owner's
+# supervisor running. The lock directory is written before the detached
+# supervisor exists, with the hook pid in `starting`, and neither a second
+# stop nor a handover treats that directory as stale until `pid` is recorded
+# or the hook pid is dead. An arm cycle that ends because another owner took
+# or ended the watcher is a handover, not a failure. A later
+# `attached watcher ... stalled` line is a failure even when an earlier line
+# said `watcher: attached`.
+#
+# When the recorded Codex owner exits, the supervisor stops a watcher only
+# when this supervisor's own arm printed `watcher: started`. An arm that only
+# attached is following a watcher someone else started, and a home-wide
+# `--stop` would take that watcher down with the owner.
 #
 # After three failed arms the supervisor queues one `check:` line and records
 # the episode in state/.codex-idle-continuity-failure-notified. While that
@@ -82,13 +94,42 @@ supervisor_live() {
 }
 
 reclaim_stale_lock() {
+  local starter
   supervisor_live && return 1
+  # pid is written by the child after the parent has already created the lock.
+  # Until that write, the hook pid in `starting` is the proof the lock is live.
+  if [ -f "$LOCK/starting" ] && [ ! -s "$LOCK/pid" ]; then
+    IFS= read -r starter < "$LOCK/starting" || starter=
+    case "$starter" in
+      ''|*[!0-9]*) ;;
+      *) kill -0 "$starter" 2>/dev/null && return 1 ;;
+    esac
+  fi
   rm -rf "$LOCK"
   return 0
 }
 
 stop_home_supervisor() {
-  local pid identity i
+  local pid identity i starter
+  if [ ! -s "$LOCK/pid" ] && [ -f "$LOCK/starting" ]; then
+    IFS= read -r starter < "$LOCK/starting" || starter=
+    i=0
+    while [ "$i" -lt 50 ] && [ ! -s "$LOCK/pid" ]; do
+      case "$starter" in
+        ''|*[!0-9]*) break ;;
+      esac
+      kill -0 "$starter" 2>/dev/null || break
+      sleep 0.1
+      i=$((i + 1))
+    done
+    if [ ! -s "$LOCK/pid" ]; then
+      case "$starter" in
+        ''|*[!0-9]*) return 0 ;;
+      esac
+      kill -0 "$starter" 2>/dev/null && return 1
+      return 0
+    fi
+  fi
   [ -f "$LOCK/pid" ] || return 0
   # shellcheck source=bin/fm-wake-lib.sh
   . "$SCRIPT_DIR/fm-wake-lib.sh"
@@ -111,7 +152,7 @@ stop_home_supervisor() {
 }
 
 ensure_supervisor() {  # <session-id>
-  local owner session=$1 lock_pid recover_session_lock=0
+  local owner session=$1 lock_pid recover_session_lock=0 i
   # shellcheck source=bin/fm-primary-scope-lib.sh
   . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
   # shellcheck source=bin/fm-supervision-lib.sh
@@ -144,12 +185,23 @@ ensure_supervisor() {  # <session-id>
   reclaim_stale_lock || true
   mkdir -p "$STATE"
   mkdir "$LOCK" 2>/dev/null || return 0
+  # Record the hook pid before the child exists so a second stop cannot
+  # reclaim this directory in the gap before `pid` is written.
+  printf '%s\n' "$$" > "$LOCK/starting"
   printf '%s\n' "$owner" > "$LOCK/owner"
   printf '%s\n' "$session" > "$LOCK/session"
   if ! perl -MPOSIX -e 'defined(my $pid = fork) or exit 1; exit 0 if $pid; POSIX::setsid(); exec @ARGV or exit 127' \
     "$0" --supervise </dev/null >/dev/null 2>&1; then
     rm -rf "$LOCK"
     return 0
+  fi
+  i=0
+  while [ "$i" -lt 50 ] && [ ! -s "$LOCK/pid" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if [ ! -s "$LOCK/pid" ]; then
+    rm -rf "$LOCK"
   fi
 }
 
@@ -171,9 +223,40 @@ actionable_text() {
 }
 
 handed_over() {
-  awk '/^watcher: attached / { found = 1 }
-    /^watcher: FAILED - watcher cycle exited [0-9]+ / { if ($7 + 0 > 128) found = 1 }
-    END { exit !found }'
+  # The last arm outcome wins. An earlier `watcher: attached` does not hide a
+  # later stall; a clean attached close or a signal exit still is a handover.
+  awk '
+    /^watcher: attached / { outcome = "handover" }
+    /^watcher: started / { outcome = "started" }
+    /^watcher: FAILED - watcher cycle exited [0-9]+ / {
+      if ($7 + 0 > 128) outcome = "handover"; else outcome = "failed"
+    }
+    /^watcher: FAILED - cycle ended without an actionable reason/ {
+      if (outcome == "handover" || outcome == "started") outcome = "handover"; else outcome = "failed"
+    }
+    /^watcher: FAILED - attached watcher pid=/ && / stalled / { outcome = "failed" }
+    /^watcher: FAILED - no live watcher/ { outcome = "failed" }
+    END { exit (outcome == "handover") ? 0 : 1 }
+  '
+}
+
+attached_only() {
+  [ -f "$LOCK/arm.out" ] || return 1
+  grep -q '^watcher: attached ' "$LOCK/arm.out" || return 1
+  ! grep -q '^watcher: started ' "$LOCK/arm.out"
+}
+
+owner_left() {
+  if ! attached_only; then
+    "$ARM" --stop >/dev/null 2>&1 || true
+  fi
+  if [ -n "${arm_pid:-}" ]; then
+    kill -TERM "$arm_pid" 2>/dev/null || true
+    wait "$arm_pid" 2>/dev/null || true
+    arm_pid=
+  fi
+  rm -rf "$LOCK"
+  exit 0
 }
 
 end_supervision() {
@@ -199,6 +282,7 @@ supervise() {
   . "$SCRIPT_DIR/fm-wake-lib.sh"
   fm_pid_identity "$$" > "$LOCK/pid-identity" || { rm -rf "$LOCK"; exit 0; }
   printf '%s\n' "$$" > "$LOCK/pid"
+  rm -f "$LOCK/starting"
   trap end_supervision TERM INT
   # shellcheck source=bin/fm-supervision-lib.sh
   . "$SCRIPT_DIR/fm-supervision-lib.sh"
@@ -209,9 +293,7 @@ supervise() {
     arm_pid=$!
     while kill -0 "$arm_pid" 2>/dev/null; do
       if ! kill -0 "$owner" 2>/dev/null; then
-        "$ARM" --stop >/dev/null 2>&1 || true
-        kill "$arm_pid" 2>/dev/null || true
-        break
+        owner_left
       fi
       sleep 0.5
     done
@@ -236,6 +318,9 @@ supervise() {
     fi
     sleep 1
   done
+  if ! kill -0 "$owner" 2>/dev/null; then
+    owner_left
+  fi
   end_supervision
 }
 

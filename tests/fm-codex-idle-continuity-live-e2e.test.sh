@@ -57,6 +57,14 @@ supervisor_owner() {
   cat "$HOME_DIR/state/.codex-idle-continuity.lock/owner" 2>/dev/null || true
 }
 
+pane_text() {
+  tmux -L "$SOCKET" capture-pane -p -S -300 -t idle 2>/dev/null || true
+}
+
+captures() {
+  pane_text | grep -c 'process-event result captured' || true
+}
+
 send_prompt() {
   tmux -L "$SOCKET" send-keys -t idle "$1"
   sleep 1
@@ -116,13 +124,19 @@ send_prompt 'Reply with exactly OK2. Do not retire, register, or modify any proc
 supervised=0
 last=$(hits)
 rearmed=0
+delivered=0
+baseline=0
 for _ in $(seq 1 360); do
   kill -0 "$codex_pid" 2>/dev/null || fail "Codex exited before the idle gap"
   now=$(hits)
   if turn_idle && [ "$(supervisor_owner)" = "$codex_pid" ]; then
     supervised=1
-    if [ "$now" -gt "$last" ]; then
+    if [ "$rearmed" -eq 0 ] && [ "$now" -gt "$last" ]; then
       rearmed=1
+      baseline=$(captures)
+    fi
+    if [ "$rearmed" -eq 1 ] && [ "$(captures)" -gt "$baseline" ]; then
+      delivered=1
       break
     fi
   fi
@@ -131,4 +145,5 @@ for _ in $(seq 1 360); do
 done
 [ "$supervised" = 1 ] || fail "no idle supervisor owned by Codex pid $codex_pid (owner: $(supervisor_owner | grep . || echo none))"
 [ "$rearmed" = 1 ] || fail "the idle supervisor did not re-arm the ownerless source ($(hits) hits)"
-printf 'ok - %s Stop re-armed an ownerless source while the interactive session idled\n' "$CODEX_VERSION"
+[ "$delivered" = 1 ] || fail "an actionable close never reached the Codex thread"
+printf 'ok - %s Stop re-armed an ownerless source and queued its close into the idle thread\n' "$CODEX_VERSION"

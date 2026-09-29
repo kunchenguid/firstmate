@@ -177,9 +177,10 @@ allowing_stop() {
     FM_CODEX_IDLE_OWNER_PID="$owner" FM_CODEX_IDLE_QUEUE="$QUEUE_BIN" \
     as_lock_owner "$TURNS" "$CONT" >/dev/null || fail "allowing stop failed"
 }
-checkpoint() {  # <seconds>; sets CP_RC
+checkpoint() {  # <seconds>; sets CP_RC. Runs as the session-lock owner, as a Codex turn does.
   CP_RC=0
-  FM_ROOT_OVERRIDE="$TURNS" FM_HOME="$TURNS" "$ROOT/bin/fm-watch-checkpoint.sh" --seconds "$1" \
+  as_lock_owner "$TURNS" env FM_ROOT_OVERRIDE="$TURNS" FM_HOME="$TURNS" \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds "$1" \
     >"$TMP_ROOT/cp.out" 2>"$TMP_ROOT/cp.err" || CP_RC=$?
 }
 
@@ -195,6 +196,12 @@ for turn in 1 2 3; do
   wait_until 50 supervisor_owns_watcher || fail "turn $turn idle boundary did not restore continuity"
 done
 printf 'ok - each new turn checkpoint takes over from the idle supervisor and the next stop restores it\n'
+
+foreign_rc=0
+FM_ROOT_OVERRIDE="$TURNS" FM_HOME="$TURNS" "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 1 \
+  >"$TMP_ROOT/foreign-cp.out" 2>"$TMP_ROOT/foreign-cp.err" || foreign_rc=$?
+supervisor_up || fail "a checkpoint from a session that does not own the lock stopped the idle supervisor (rc=$foreign_rc)"
+printf 'ok - a checkpoint from a session that does not own the lock leaves the idle supervisor running\n'
 
 FM_ROOT_OVERRIDE="$TURNS" FM_HOME="$TURNS" "$CONT" --handover </dev/null || fail "handover of a live supervisor failed"
 [ ! -d "$TLOCK" ] || fail "handover left the idle supervisor running"
@@ -230,6 +237,8 @@ case "\$(cat '$STUB/mode')" in
   away) : > '$SSTATE/.afk'; printf 'watcher: started pid=1 (beacon fresh)\nsignal: demo away close\n' ;;
   handover) printf 'watcher: attached pid=1 (beacon 0s)\nwatcher: FAILED - cycle ended without an actionable reason\n' ;;
   taken) printf 'watcher: started pid=1 (beacon fresh)\nwatcher: FAILED - watcher cycle exited 143 without an actionable reason\n' ;;
+  stall) printf 'watcher: attached pid=1 (beacon 0s)\nwatcher: FAILED - attached watcher pid=1 stalled (beacon 9s at or past hard bound 8s)\n' ;;
+  hold) printf 'watcher: attached pid=1 (beacon 0s)\n'; exec sleep 600 ;;
   broken) printf 'watcher: FAILED - no live watcher with a fresh beacon\n' ;;
 esac
 exit 1
@@ -344,6 +353,54 @@ wait_until 75 at_least_arms 1 || fail "a stop after the recorded lock owner died
 [ "$(cat "$SSTATE/.lock")" != 9999999 ] || fail "the dead session-lock owner was not reclaimed"
 FM_ROOT_OVERRIDE="$STUB" FM_HOME="$STUB" "$STUB/bin/fm-codex-idle-continuity.sh" --handover </dev/null \
   || fail "handover of the reclaimed-lock supervisor failed"
-kill "$owner" 2>/dev/null || true
-wait "$owner" 2>/dev/null || true
 printf 'ok - a dead recorded session owner is reclaimed before the idle supervisor starts\n'
+
+rm -f "$SSTATE/.codex-idle-continuity-failure-notified"
+sleep 30 &
+starter=$!
+rm -rf "$SLOCK"
+mkdir "$SLOCK"
+printf '%s\n' "$starter" > "$SLOCK/starting"
+printf '%s\n' "$owner" > "$SLOCK/owner"
+: > "$STUB/arms"
+stub_stop
+[ "$(cat "$SLOCK/starting" 2>/dev/null)" = "$starter" ] \
+  || fail "a second stop reclaimed a startup lock that had not recorded its supervisor pid"
+[ ! -s "$SLOCK/pid" ] || fail "a second stop started a supervisor while startup still held the lock"
+handover_rc=0
+FM_ROOT_OVERRIDE="$STUB" FM_HOME="$STUB" "$STUB/bin/fm-codex-idle-continuity.sh" --handover </dev/null \
+  || handover_rc=$?
+[ "$handover_rc" -ne 0 ] || fail "handover treated a supervisor that had not recorded its pid as already stopped"
+[ -d "$SLOCK" ] || fail "handover removed a startup lock that had not recorded its supervisor pid"
+kill "$starter" 2>/dev/null || true
+wait "$starter" 2>/dev/null || true
+stub_stop
+wait_until 75 pid_in_live "$SLOCK/pid" || fail "a startup lock whose hook pid had died was not reclaimed"
+FM_ROOT_OVERRIDE="$STUB" FM_HOME="$STUB" "$STUB/bin/fm-codex-idle-continuity.sh" --handover </dev/null \
+  || fail "handover of the reclaimed startup supervisor failed"
+printf 'ok - a startup lock is not reclaimed or handed over until the supervisor pid is recorded\n'
+
+rm -f "$SSTATE/.codex-idle-continuity-failure-notified"
+printf 'stall\n' > "$STUB/mode"
+: > "$STUB/arms"
+: > "$STUB/queue"
+stub_stop
+wait_until 75 test ! -d "$SLOCK" || fail "an attached watcher that later stalled never ended the supervisor"
+[ "$(arms)" -eq 3 ] || fail "a stall after attached spent $(arms) arms instead of 3"
+grep -F 'check: codex idle continuity stopped after 3 failed watcher arms' "$STUB/queue" >/dev/null \
+  || fail "a stall after attached queued no give-up check: $(cat "$STUB/queue" 2>/dev/null)"
+printf 'ok - a stall after watcher: attached spends the failure budget\n'
+
+rm -f "$SSTATE/.codex-idle-continuity-failure-notified"
+printf 'hold\n' > "$STUB/mode"
+: > "$STUB/arms"
+: > "$STUB/stops"
+: > "$STUB/queue"
+stub_stop
+wait_until 75 grep -q '^watcher: attached ' "$SLOCK/arm.out" \
+  || fail "the held arm never reported attached: $(cat "$SLOCK/arm.out" 2>/dev/null)"
+kill "$owner" 2>/dev/null || true
+wait_until 50 test ! -d "$SLOCK" || fail "the supervisor survived its Codex owner while attached"
+[ ! -s "$STUB/stops" ] || fail "owner exit stopped a watcher the supervisor had only attached to"
+wait "$owner" 2>/dev/null || true
+printf 'ok - owner exit does not stop a watcher the supervisor only attached to\n'

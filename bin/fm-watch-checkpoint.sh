@@ -64,7 +64,25 @@ case "$SECONDS_ARG" in
   0) echo "error: --seconds must be greater than zero" >&2; exit 2 ;;
 esac
 
-"$SCRIPT_DIR/fm-codex-idle-continuity.sh" --handover || true
+# A second session sharing this home must not stop the lock owner's idle
+# supervisor. When this process does own the lock, handover has to finish
+# before a watcher starts; a startup that has not recorded its pid yet is
+# still that supervisor.
+handover_idle_supervisor() {
+  if [ -f "$SCRIPT_DIR/fm-session-lock-lib.sh" ]; then
+    # shellcheck source=bin/fm-session-lock-lib.sh
+    . "$SCRIPT_DIR/fm-session-lock-lib.sh"
+    if ! fm_session_lock_owned_by_self "$STATE"; then
+      return 0
+    fi
+  fi
+  "$SCRIPT_DIR/fm-codex-idle-continuity.sh" --handover
+}
+
+handover_idle_supervisor || {
+  echo "checkpoint: the idle supervisor did not finish handing over" >&2
+  exit 1
+}
 
 OUT=$(mktemp "${TMPDIR:-/tmp}/fm-watch-checkpoint.out.XXXXXX") || exit 1
 ERR=$(mktemp "${TMPDIR:-/tmp}/fm-watch-checkpoint.err.XXXXXX") || {
