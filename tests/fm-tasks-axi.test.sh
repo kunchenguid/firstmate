@@ -109,19 +109,6 @@ make_checkout_home() {  # <dir>
   cp "$ROOT/.tasks.toml" "$1/.tasks.toml"
 }
 
-# A live verified-harness process holding <state>/.lock, the way a running
-# session holds its home's lock. bash stays the process image (the trailing
-# no-op defeats exec of the last command) under an argv[0] named claude.
-hold_session_lock() {  # <state-dir>; prints the holder pid
-  local fakebin="$TMP_ROOT/fakebin" pid
-  mkdir -p "$fakebin" "$1"
-  [ -e "$fakebin/claude" ] || ln -s /bin/bash "$fakebin/claude"
-  "$fakebin/claude" -c 'sleep 60; :' >/dev/null 2>&1 &
-  pid=$!
-  printf '%s\n' "$pid" > "$1/.lock"
-  printf '%s\n' "$pid"
-}
-
 # The reported cross-home false positive: another checkout's bootstrap run
 # with FM_HOME naming a secondmate home that is itself a Firstmate checkout.
 # The invoking checkout's data/ is its own home's live backlog, not a fork of
@@ -164,47 +151,69 @@ test_guard_reports_fork_beside_home_with_own_tasks_config() {
   pass "a home's own .tasks.toml does not hide a code-root fork"
 }
 
-# The remedy must never move another home's records. Whether the code root is
-# another home is a durable identity fact - its own .fm-secondmate-home marker,
-# this home's registered parent, or a secondmate home in a registry - so a home
-# between sessions, with no live process, is still protected. A code-root copy
-# inside the home (a checkout home whose data directory is relocated) is this
-# home's to move.
+# None of these home-identity hints proves whether the code-root books are
+# live. The same conservative diagnostic must survive all of them.
 test_guard_remedy_never_moves_external_code_root() {
-  local dir out remedy holder
+  local dir out remedy layout
   dir=$(make_split guard-remedy-external)
   rm "$dir/code/data/backlog.md"
   empty_backlog "$dir/code/data/backlog.md"
   mkdir -p "$dir/code/state"
-  printf 'sibling
-' > "$dir/code/.fm-secondmate-home"
-  
-  # Also simulate stray/broken chain/ancestor/stale state
-  holder=$(hold_session_lock "$dir/code/state")
-  kill "$holder" 2>/dev/null || true
-  wait "$holder" 2>/dev/null || true
-  
-  out=$(bootstrap_backlog_lines "$dir/code" "$dir/home")
-  assert_contains "$out" "is not this home's $dir/home/data/backlog.md" "a code-root backlog was not reported"
-  remedy=${out##* - }
-  assert_contains "$remedy" "this check cannot tell whether that file is another home's live record" "the non-destructive remedy was not used"
-  assert_contains "$remedy" "leave ambiguous rows untouched and report them to the captain" "the row-recovery instruction was missing"
-  assert_not_contains "$remedy" "move it aside" "the remedy moved an external code root's backlog"
-  
-  rm "$dir/code/.fm-secondmate-home"
-  
-  # Relocated data
-  rm -rf "$dir/home/.fm-secondmate-parent" "$dir/home/bin"
+  for layout in unmarked marker registry parent cycle stale-state; do
+    case "$layout" in
+      marker) printf 'sibling\n' > "$dir/code/.fm-secondmate-home" ;;
+      registry) printf '| sibling | %s | sibling scope |\n' "$dir/code" > "$dir/home/data/secondmates.md" ;;
+      parent) printf '%s\n' "$dir/code" > "$dir/home/.fm-secondmate-parent" ;;
+      cycle) printf '%s\n' "$dir/home" > "$dir/code/.fm-secondmate-parent" ;;
+      stale-state) printf '999999999\n' > "$dir/code/state/.lock" ;;
+    esac
+    out=$(bootstrap_backlog_lines "$dir/code" "$dir/home")
+    assert_contains "$out" "is not this home's $dir/home/data/backlog.md" "$layout: a code-root backlog was not reported"
+    remedy=${out##* - }
+    assert_contains "$remedy" "this check cannot tell whether that file is another home's live record" "$layout: the non-destructive remedy was not used"
+    assert_contains "$remedy" "leave ambiguous rows untouched and report them to the captain" "$layout: the row-recovery instruction was missing"
+    assert_not_contains "$remedy" "move it aside" "$layout: the remedy moved an external code root's backlog"
+  done
+  pass "external code roots never get move-aside based on markers, registries, parent chains, cycles, or stale state"
+}
+
+# FM_DATA_OVERRIDE selects the current invocation's books, not every session's
+# books. Exercise the real checkout bootstrap with and without the override;
+# neither the warning nor its remedy may endanger the normal-data records.
+test_guard_relocated_data_preserves_potentially_live_records() {
+  local dir out normal name line before
+  dir="$TMP_ROOT/guard-relocated-live"
   mkdir -p "$dir/relocated"
   make_checkout_home "$dir/home"
-  empty_backlog "$dir/relocated/backlog.md"
+  printf 'task: normal-data work\n' > "$dir/home/state/shared.status"
+  for name in backlog.md done-archive.md; do
+    printf '## Queued\n\n- [ ] shared: normal-data work\n- [ ] queued: normal-data work without records\n' > "$dir/home/data/$name"
+    printf '## Queued\n\n- [ ] relocated: separate relocated-data work\n' > "$dir/relocated/$name"
+  done
+  before=$(cksum "$dir/home/data/"*.md "$dir/relocated/"*.md)
+  normal=$(PATH="$BASE_PATH" FM_HOME="$dir/home" FM_BOOTSTRAP_DETECT_ONLY=1 \
+    FM_BOOTSTRAP_NETWORK=skip bash "$dir/home/bin/fm-bootstrap.sh" 2>&1) || fail "normal-data bootstrap failed"
+  assert_not_contains "$normal" "BACKLOG_RECONCILE: code-root" "normal-data bootstrap reported its own books"
   out=$(PATH="$BASE_PATH" FM_HOME="$dir/home" FM_DATA_OVERRIDE="$dir/relocated" \
-    FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_NETWORK=skip "$BOOTSTRAP" 2>&1 \
-    | grep '^BACKLOG_RECONCILE: code-root' || true)
-  assert_contains "$out" "code-root $dir/home/data/backlog.md is not this home's $dir/relocated/backlog.md" \
-    "a checkout home's own code-root copy beside its relocated data was not reported"
-  assert_contains "$out" "it is inside this home, so merge it into this home's copy and move it aside" "a code-root copy inside this home lost its move-aside remedy"
-  pass "a code root outside the home never gets move-aside regardless of marker, registry, parent chain, cycle, or stale state/, while relocated-data keeps move-aside"
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_NETWORK=skip bash "$dir/home/bin/fm-bootstrap.sh" 2>&1) || fail "relocated-data bootstrap failed"
+  assert_equals "$before" "$(cksum "$dir/home/data/"*.md "$dir/relocated/"*.md)" \
+    "relocated-data bootstrap mutated a backlog or archive"
+  for name in backlog.md done-archive.md; do
+    line=$(printf '%s\n' "$out" | grep -F "BACKLOG_RECONCILE: code-root $dir/home/data/$name is not this home's $dir/relocated/$name")
+    assert_contains "$line" "a tasks-axi write may have landed there" "relocated-data fork was not reported cautiously"
+    assert_not_contains "$line" "move it aside" "relocated-data warning prescribes moving potentially live normal-data records"
+    assert_contains "$line" "never move, rewrite, or delete it on this line alone" "relocated-data warning lacks the standalone safety boundary"
+    assert_contains "$line" "this home's normal-data sessions" "the warning overlooks sessions using the normal data directory"
+    assert_contains "$line" "a matching task id alone is not ownership evidence" "shared records were treated as ownership proof"
+    assert_contains "$line" "leave ambiguous rows untouched and report them to the captain" "relocated-data row ambiguity was not escalated"
+    assert_contains "$line" "queued rows may have no records yet" "unclaimed queued rows were silently lost"
+  done
+  normal=$(PATH="$BASE_PATH" FM_HOME="$dir/home" FM_BOOTSTRAP_DETECT_ONLY=1 \
+    FM_BOOTSTRAP_NETWORK=skip bash "$dir/home/bin/fm-bootstrap.sh" 2>&1) || fail "normal-data bootstrap failed after override"
+  assert_not_contains "$normal" "BACKLOG_RECONCILE: code-root" "the override changed later normal-data addressing"
+  assert_equals "$before" "$(cksum "$dir/home/data/"*.md "$dir/relocated/"*.md)" \
+    "normal-data recheck mutated a backlog or archive"
+  pass "relocated-data warning protects normal-data records and surfaces row ambiguity without mutating either copy"
 }
 
 test_guard_silent_for_single_home() {
@@ -392,6 +401,7 @@ test_guard_silent_for_single_home
 test_guard_silent_for_cross_home_checkout
 test_guard_reports_fork_beside_home_with_own_tasks_config
 test_guard_remedy_never_moves_external_code_root
+test_guard_relocated_data_preserves_potentially_live_records
 test_guard_row_recovery_requires_unambiguous_ownership
 if [ "$HAVE_TASKS_AXI" = 1 ]; then
   test_bare_tasks_axi_fork_is_detected
