@@ -207,7 +207,6 @@ missing_provider=$(jq -r '
 ' "$RULES" | while IFS=$'\t' read -r location harness; do
   if ! fm_quota_single_provider_for_harness "$harness" >/dev/null; then
     printf '%s\t%s\n' "$location" "$harness"
-    break
   fi
 done)
 if [ -n "$missing_provider" ]; then

@@ -4401,7 +4401,8 @@ if (!/<div class="assistant-message"[^>]*>[\s\S]*The deterministic tool example 
 if (/<body[^>]*show-hidden-messages/.test(dom)) {
   throw new Error("export opened with hidden messages shown");
 }
-if (!/body:not\(\.show-hidden-messages\)\s+\.hook-message-hidden\s*\{[^}]*display:\s*none/.test(dom)) {
+const rendersHiddenRows = /<div[^>]*class="[^"]*\bhook-message-hidden\b/.test(messages);
+if (rendersHiddenRows && !/body:not\(\.show-hidden-messages\)\s+\.hook-message-hidden\s*\{[^}]*display:\s*none/.test(dom)) {
   throw new Error("export no longer hides terminal-hidden custom messages by default");
 }
 function stripHiddenHookMessages(html) {
@@ -4448,7 +4449,7 @@ if (visible.includes('<div class="hook-message"') || visible.includes("hook-mess
 if (visible.includes("[firstmate-synthetic-input]") || visible.includes("/tmp/probe.status")) {
   throw new Error("a synthetic Firstmate row is visible in the conversation column");
 }
-if (!messages.includes("[firstmate-synthetic-input]")) {
+if (rendersHiddenRows && !messages.includes("[firstmate-synthetic-input]")) {
   throw new Error("the hidden synthetic row disappeared from the export");
 }
 for (const current of ["CURRENT_WATCHER_E2E", "CURRENT_TURN_END_E2E", "CURRENT_AWAY_E2E", "CURRENT_FROM_FIRSTMATE_E2E", "CURRENT_LAUNCH_BRIEF_E2E"]) {

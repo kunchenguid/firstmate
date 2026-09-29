@@ -253,7 +253,7 @@ EOF
     [ "$EXISTING_ORIGIN" = "$ORIGIN" ] || die "project $NAME origin differs from the requested route"
   else
     printf '%s\n' "$NAME" >> "$CREATED_PROJECTS"
-    git clone --quiet -- "$ORIGIN" "$DEST" || die "could not clone project $NAME on the remote host"
+    git clone --no-local --quiet -- "$ORIGIN" "$DEST" || die "could not clone project $NAME on the remote host"
     if [ "$MODE" = no-mistakes ]; then
       command -v no-mistakes >/dev/null 2>&1 || die "no-mistakes is unavailable for project $NAME"
       (cd "$DEST" && no-mistakes init >/dev/null && no-mistakes doctor >/dev/null) \
