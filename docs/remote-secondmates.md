@@ -21,11 +21,11 @@ Firstmate does not support placing an individual worker remotely or failing a re
 
 ## Where the remote agent runs
 
-The remote second-mate agent itself always runs on the [Herdr backend](herdr-backend.md) in the shared `fm-remote` session.
+The remote second-mate agent itself always runs on the [Herdr backend](herdr-backend.md) in the configured remote-secondmate session (`FM_REMOTE_HERDR_SESSION`, default `default`).
 Every path that provisions or launches one refuses a host that is not ready for it.
 
-- `fm-remote` is reserved for remote fleet work and must not be used for personal work.
-- The user's interactive Herdr session remains `default` and is not a remote-secondmate prerequisite.
+- The configured session is shared remote fleet infrastructure and must not be stopped or repurposed out from under the mates.
+- By default that session is `default`, so the captain sees remote mates from his own Herdr client; pointing `FM_REMOTE_HERDR_SESSION` elsewhere moves them without editing code.
 - Herdr's remote-session server belongs to the host's own GUI login session rather than to the SSH connection.
   As a result, the agent's endpoint survives every disconnection the primary's supervision depends on.
 - Local second mates are unaffected and keep their ordinary backend and session selection.
@@ -243,7 +243,7 @@ bin/fm-on.sh <secondmate-id|ssh-alias> fm-remote-doctor.sh --fix
 Over the plain SSH doctor bootstrap, it writes and reloads two Firstmate-owned launch agents on macOS:
 
 - `dev.firstmate.remote-job`.
-- `dev.firstmate.herdr.fm-remote`.
+- `dev.firstmate.herdr.<session>`, derived from the configured session so the two cannot disagree, but only for a dedicated (non-`default`) session: the shared `default` session is host-owned and never gets a Firstmate agent.
 
 Both are scoped with `LimitLoadToSessionType=Aqua` and bootstrapped in `gui/<uid>`.
 
@@ -263,9 +263,9 @@ Every claude pane under such a server falls back to a stale plaintext credential
 ### How the guard converges on one server
 
 Herdr's own SSH remote attach starts a server born in another session when it finds none.
-At boot, that server wins the `fm-remote` socket, because sshd accepts connections before the login session exists.
+At boot, that server wins the remote-secondmate session socket, because sshd accepts connections before the login session exists.
 The guard is what makes the launch agent converge.
-It acts on whichever server owns the `fm-remote` socket:
+It acts on whichever server owns that session socket:
 
 | Socket owner | Guard action |
 | --- | --- |
@@ -288,8 +288,9 @@ The guard's header owns the decision table, and [`bin/fm-remote-herdr-owner-lib.
 Its limits:
 
 - It never installs packages or overwrites a non-Firstmate file at a reserved wrapper path.
-- The dedicated Herdr launch agent owns only the remote-secondmate `fm-remote` server.
-  It does not inspect, rewrite, start, stop, or require the user's interactive `default` session or its `dev.firstmate.herdr` launch agent.
+- On a dedicated session, the Herdr launch agent owns only that session's server.
+  On the shared `default` session Firstmate manages no server: it is the same server the user interacts with, which is the point, and the doctor only verifies it runs.
+  A leftover `dev.firstmate.herdr.fm-remote` agent is retired by `fm-remote-doctor.sh --fix` only once its session is provably not running; while it may still serve live mates it is left alone.
 - It re-derives every check from the host afterwards, so what it prints is the state after the repair rather than the intent of one.
 
 ### Steps only a person can take
@@ -415,14 +416,14 @@ The primary then takes these steps:
 1. It resolves the verified secondmate harness and optional model and effort.
 2. It runs the same readiness gate the seed runs.
 3. It transfers the inherited-material allowlist.
-4. It asks the remote host to launch on Herdr in `fm-remote`.
+4. It asks the remote host to launch on Herdr in the configured remote-secondmate session (default `default`).
 
-All remote secondmates on one host share `fm-remote` and retain separate `2ndmate-<id>` workspaces inside it.
+All remote secondmates on one host share that session and retain separate `2ndmate-<id>` workspaces inside it.
 
 ### Refused and unsupported launches
 
 - An explicit request for any other backend is refused rather than honored, and the remote host refuses one too.
-- An existing remote endpoint recorded in another Herdr session, including `default`, is classified as unverified and left untouched.
+- An existing remote endpoint recorded in a Herdr session other than the configured one is classified as unverified and left untouched.
   Launch, liveness recovery, control, and retirement refuse it until an operator explicitly migrates it, instead of attempting a live cutover.
 - A launch after a host has drifted out of readiness fails with the doctor's own gap text instead of leaving a half-created endpoint.
 - Raw launch commands are not accepted for remote secondmates.
@@ -651,7 +652,7 @@ It refuses while any of these holds:
 - The primary has an unfinished backlog outbox.
 - A routed reply remains unresolved.
 
-It closes only the retiring secondmate's panes or `2ndmate-<id>` workspace in `fm-remote`.
+It closes only the retiring secondmate's panes or `2ndmate-<id>` workspace in the configured session.
 It never stops the shared session or removes a sibling secondmate's workspace or panes.
 SSH exit 255 preserves both the route and local records because completion is unknown.
 `--force` remains the explicit discard path and requires the same captain authority as local secondmate discard.

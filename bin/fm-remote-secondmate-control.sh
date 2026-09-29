@@ -15,9 +15,10 @@
 #   fm-remote-secondmate-control.sh retire <id> [--force]
 #
 # Remote placement ends here, but the second-mate agent always runs on the
-# Herdr backend in the dedicated fm-remote session, so launch refuses any other
-# selection rather than reading this home's config/backend. The interactive
-# default session remains for the user's work.
+# Herdr backend in the configured remote-secondmate session
+# (FM_REMOTE_HERDR_SESSION, default `default`), so launch refuses any other
+# selection rather than reading this home's config/backend. The session
+# default keeps remote mates visible from the captain's own Herdr client.
 # fm-spawn/fm-send/fm-teardown keep owning the local endpoint mechanics.
 # The home's own workers keep their ordinary backend selection.
 # bin/fm-remote-doctor.sh owns that host's readiness for Herdr.
@@ -36,7 +37,7 @@
 # agent's endpoint record; the home's own
 # state/*.meta remains reserved for workers the secondmate supervises.
 # Retirement closes only this secondmate's panes or workspace and never
-# stops fm-remote or removes a sibling secondmate's workspace or panes.
+# stops the remote-secondmate session or removes a sibling secondmate's workspace or panes.
 #
 # Relaunch is not a second lifecycle implementation: it runs the ORDINARY local
 # control plane here, because from this host the mate is a plain local
@@ -59,7 +60,10 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 TARGET_HOME=${FM_HOME:?FM_HOME is required}
 CONTROL_STATE="$TARGET_HOME/state/parent-route"
 CONTROL_DATA="$TARGET_HOME/data/.parent-route"
-REMOTE_HERDR_SESSION=fm-remote
+# Same deployment choice bin/fm-remote-doctor.sh owns: FM_REMOTE_HERDR_SESSION
+# points the remote-secondmate session elsewhere without editing code, and
+# defaults to `default`.
+REMOTE_HERDR_SESSION=${FM_REMOTE_HERDR_SESSION:-default}
 
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
@@ -251,7 +255,7 @@ cmd_relaunch() {
   [ "$effort" != - ] || effort=default
   control_args=("$id" relaunch --harness "$harness" --model "$model" --effort "$effort")
   # The same launch-boundary facts cmd_launch establishes: the endpoint lives in
-  # the dedicated fm-remote session, and the parent already owns both convergence
+  # the configured remote-secondmate session, and the parent already owns both convergence
   # legs, so the host-local spawn must not re-sync or re-inherit against this
   # host's own Firstmate copy.
   HERDR_SESSION="$REMOTE_HERDR_SESSION" FM_HOME="$FM_ROOT" FM_ROOT_OVERRIDE="$FM_ROOT" \

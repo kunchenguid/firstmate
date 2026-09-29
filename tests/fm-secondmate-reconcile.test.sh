@@ -106,13 +106,13 @@ make_remote_secondmate_home() {  # <name> -> echoes remote home dir
   printf '%s\n' "$1" > "$rh/.fm-secondmate-home"
   printf '# remote secondmate home fixture\n' > "$rh/AGENTS.md"
   cat > "$rh/state/parent-route/$1.meta" <<META
-window=fm-remote:p1
+window=default:p1
 worktree=-
 project=-
 backend=herdr
 endpoint_task_id=$1
 harness=claude
-herdr_session=fm-remote
+herdr_session=default
 herdr_workspace_id=w1
 herdr_tab_id=t1
 herdr_pane_id=p1
@@ -139,8 +139,8 @@ yolo=off
 remote_host=$host
 remote_root=/remote/root
 remote_backend=herdr
-remote_herdr_session=fm-remote
-remote_target=fm-remote:p1
+remote_herdr_session=default
+remote_target=default:p1
 META
   cat > "$home/data/secondmates.md" <<EOF
 - $id - remote fixture domain (host: $host; root: /remote/root; home: $rhome; scope: remote fixture; projects: sample; added 2026-08-26)

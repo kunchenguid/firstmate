@@ -7,7 +7,9 @@
 # a fake uname that selects the platform under test. The holders are real
 # non-platform processes (jq blocked on a fifo) whose environment carries the
 # birth markers bin/fm-remote-herdr-owner-lib.sh reads, so the Aqua-versus-SSH
-# verdict is exercised for real. Nothing here touches the runner's own launch
+# verdict is exercised for real. This suite pins FM_REMOTE_HERDR_SESSION to
+# fm-remote (the override path); tests/fm-remote-session-config.test.sh owns
+# the unset default and the legacy-agent retirement. Nothing here touches the runner's own launch
 # agents, login session, or herdr server.
 set -u
 
@@ -322,6 +324,7 @@ doctor() {
     SHELL="${CASE_ENV_SHELL-${SHELL-}}" \
     FM_REMOTE_JOB_PLATFORM_OVERRIDE="${CASE_PLATFORM_OVERRIDE-}" \
     FM_REMOTE_JOB_ACTIVE="${CASE_REMOTE_JOB_ACTIVE-1}" \
+    FM_REMOTE_HERDR_SESSION="${CASE_HERDR_SESSION-fm-remote}" \
     "$ROOT/bin/fm-remote-doctor.sh" "$@" 2>&1
   )
   DOCTOR_RC=$?
