@@ -777,7 +777,7 @@ if [ "${3-}" = --agent-reply ]; then
   printf '%s\n' "$4" >> "$FIRSTMATE_ROOT/replies"
 fi
 while [ ! -e "$FIRSTMATE_ROOT/trigger$n" ]; do sleep 0.02; done
-if [ "$n" = 1 ]; then
+if [ "$n" = 1 ] || { [ "$n" = 2 ] && [ -e "$FIRSTMATE_ROOT/two-feedback" ]; }; then
   printf 'session:\n  status: feedback\nprompts[1]{uid,prompt,selector,tag,text}:\n  "","please revise","","message",""\n'
 else
   printf 'session:\n  status: ended\n  session_ended: true\n'
@@ -789,6 +789,14 @@ printf '<h1>Firstmate review</h1>\n' > "$FIRSTMATE_ART"
 lavish_session "$FIRSTMATE_ART"
 firstmate_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$FIRSTMATE_ART")
 fm_test_track_procevent_home "$HFIRSTMATE"
+printf 'unsolicited reply\n' > "$FIRSTMATE_ROOT/unsolicited"
+if PATH="$FIRSTMATE_BIN:$PATH" FM_HOME="$HFIRSTMATE" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$FIRSTMATE_ART" \
+    --agent-reply-file "$FIRSTMATE_ROOT/unsolicited" >/dev/null 2>"$FIRSTMATE_ROOT/unsolicited.err"; then
+  fail "Firstmate posted a reply before any Lavish round was captured"
+fi
+[ ! -e "$FIRSTMATE_ROOT/count" ] \
+  || fail "an unsolicited Firstmate reply started a Lavish listener"
 PATH="$FIRSTMATE_BIN:$PATH" FM_HOME="$HFIRSTMATE" \
   "$ROOT/bin/fm-procevent-lavish.sh" arm "$FIRSTMATE_ART" >/dev/null
 touch "$FIRSTMATE_ROOT/trigger1"
@@ -822,6 +830,7 @@ LEGACY_ROOT="$TMP_ROOT/lavish-firstmate-legacy-root"; mkdir -p "$LEGACY_ROOT"
 export FIRSTMATE_ROOT="$LEGACY_ROOT"
 LEGACY_ART="$LEGACY_ROOT/board.html"
 printf '<h1>Legacy Firstmate review</h1>\n' > "$LEGACY_ART"
+touch "$LEGACY_ROOT/two-feedback"
 lavish_session "$LEGACY_ART"
 legacy_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$LEGACY_ART")
 pe_register "$HLEGACY" lavish "$legacy_id" -- \
@@ -831,7 +840,33 @@ wait_for "$LEGACY_ROOT/count" || fail "the legacy Firstmate listener never start
 touch "$LEGACY_ROOT/trigger1"
 wait_capture "$HLEGACY" "$legacy_id" \
   || fail "the legacy Firstmate listener did not capture feedback"
+PATH="$FIRSTMATE_BIN:$PATH" pe "$HLEGACY" reconcile >/dev/null
+for _ in $(seq 1 100); do
+  [ "$(cat "$LEGACY_ROOT/count" 2>/dev/null || true)" = 2 ] && break
+  sleep 0.02
+done
+[ "$(cat "$LEGACY_ROOT/count" 2>/dev/null || true)" = 2 ] \
+  || fail "the legacy listener did not open its second round"
+touch "$LEGACY_ROOT/trigger2"
+for _ in $(seq 1 100); do
+  [ "$(count_results "$HLEGACY" "$legacy_id")" = 2 ] \
+    && [ ! -e "$FM_PROCEVENT_CLAIM_ROOT/$legacy_id.claim" ] && break
+  sleep 0.02
+done
+[ "$(count_results "$HLEGACY" "$legacy_id")" = 2 ] \
+  || fail "the legacy listener did not capture both pending rounds"
 printf 'legacy revision complete\n' > "$LEGACY_ROOT/reply"
+if PATH="$FIRSTMATE_BIN:$PATH" FM_HOME="$HLEGACY" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$LEGACY_ART" \
+    --agent-reply-file "$LEGACY_ROOT/reply" >/dev/null 2>"$LEGACY_ROOT/multiple.err"; then
+  fail "one Firstmate reply acknowledged multiple legacy Lavish rounds"
+fi
+[ ! -f "$HLEGACY/state/procevent-inbox/$legacy_id.1.handled" ] \
+  && [ ! -f "$HLEGACY/state/procevent-inbox/$legacy_id.2.handled" ] \
+  || fail "refused multi-round migration acknowledged a legacy capture"
+[ ! -e "$LEGACY_ROOT/replies" ] \
+  || fail "refused multi-round migration posted Firstmate's reply"
+pe "$HLEGACY" handled "$legacy_id" 1 >/dev/null
 printf '<h1>Different review</h1>\n' > "$LEGACY_ROOT/other.html"
 pe "$HLEGACY" register lavish "$legacy_id" -- \
   "$ROOT/bin/fm-procevent-lavish.sh" poll "$LEGACY_ROOT/other.html" >/dev/null
@@ -840,7 +875,7 @@ if PATH="$FIRSTMATE_BIN:$PATH" FM_HOME="$HLEGACY" \
     --agent-reply-file "$LEGACY_ROOT/reply" >/dev/null 2>"$LEGACY_ROOT/mismatch.err"; then
   fail "a mismatched plain registration entered the Firstmate reply lifecycle"
 fi
-[ ! -f "$HLEGACY/state/procevent-inbox/$legacy_id.1.handled" ] \
+[ ! -f "$HLEGACY/state/procevent-inbox/$legacy_id.2.handled" ] \
   || fail "a mismatched legacy registration acknowledged Firstmate's round"
 pe "$HLEGACY" register lavish "$legacy_id" -- \
   "$ROOT/bin/fm-procevent-lavish.sh" poll "$LEGACY_ART" >/dev/null
@@ -851,9 +886,9 @@ wait_for "$LEGACY_ROOT/replies" \
   || fail "the upgraded legacy session did not receive Firstmate's reply"
 [ "$(cat "$LEGACY_ROOT/replies")" = "legacy revision complete" ] \
   || fail "the upgraded legacy session received the wrong reply"
-[ -f "$HLEGACY/state/procevent-inbox/$legacy_id.1.handled" ] \
+[ -f "$HLEGACY/state/procevent-inbox/$legacy_id.2.handled" ] \
   || fail "the upgraded legacy reply did not acknowledge its capture"
-touch "$LEGACY_ROOT/trigger2"
+touch "$LEGACY_ROOT/trigger3"
 wait_capture "$HLEGACY" "$legacy_id" \
   || fail "the upgraded legacy Lavish session did not settle"
 pass "only the matching legacy Firstmate registration enters the reply lifecycle"

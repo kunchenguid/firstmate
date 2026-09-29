@@ -646,7 +646,11 @@ cmd_register_lavish() {
     fm_procevent_source_lock_release "$id"
     die "cannot re-arm source $id: $owner_name already holds this board and no captured round is waiting to be acknowledged"
   fi
-  if [ -z "$task" ] && [ "$adopting" -eq 0 ] && [ "$has_reply" -eq 0 ]; then
+  if [ -z "$task" ] && [ "$has_reply" -eq 1 ] && [ "$pending_rounds" -ne 1 ]; then
+    fm_procevent_source_lock_release "$id"
+    die "cannot post a Firstmate reply unless exactly one captured round is waiting"
+  fi
+  if [ -z "$task" ] && [ "$pending_rounds" -gt 0 ] && [ "$has_reply" -eq 0 ]; then
     fm_procevent_source_lock_release "$id"
     die "cannot re-arm Firstmate-owned source $id without its reply"
   fi
