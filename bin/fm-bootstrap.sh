@@ -154,6 +154,9 @@
 #        fm-bootstrap.sh lavish-compatible
 #          Exit 0 when lavish-axi meets LAVISH_AXI_MIN, 1 otherwise, printing
 #          nothing; bin/fm-brief.sh uses it to gate scout Lavish hosting.
+#        fm-bootstrap.sh chrome-devtools-compatible
+#          Exit 0 when chrome-devtools-axi meets CHROME_DEVTOOLS_AXI_MIN, 1
+#          otherwise, printing nothing.
 set -u
 
 TYPESAFE_API_KEY_PRIVATE=${TYPESAFE_API_KEY:-}
@@ -842,6 +845,7 @@ NO_MISTAKES_MIN=1.46.0
 # tasks-axi feature probes are an independent defense-in-depth concern, not part
 # of its floor.
 GH_AXI_MIN=0.1.29
+CHROME_DEVTOOLS_AXI_MIN=0.1.35
 LAVISH_AXI_MIN=0.1.77
 
 treehouse_supports_lease() {
@@ -1306,6 +1310,11 @@ if [ "${1:-}" = "lavish-compatible" ]; then
   exit
 fi
 
+if [ "${1:-}" = "chrome-devtools-compatible" ]; then
+  tool_version_at_least chrome-devtools-axi "$CHROME_DEVTOOLS_AXI_MIN"
+  exit
+fi
+
 if [ "${1:-}" = "install" ]; then
   shift
   [ $# -gt 0 ] || { echo "usage: fm-bootstrap.sh install <tool>..." >&2; exit 1; }
@@ -1401,6 +1410,9 @@ detect_local_tools() {
   fi
   if command -v gh-axi >/dev/null 2>&1 && ! tool_version_at_least gh-axi "$GH_AXI_MIN"; then
     echo "MISSING: gh-axi (install: $(install_cmd gh-axi))"
+  fi
+  if command -v chrome-devtools-axi >/dev/null 2>&1 && ! tool_version_at_least chrome-devtools-axi "$CHROME_DEVTOOLS_AXI_MIN"; then
+    echo "MISSING: chrome-devtools-axi (install: $(install_cmd chrome-devtools-axi))"
   fi
   if ! tool_version_at_least lavish-axi "$LAVISH_AXI_MIN"; then
     echo "PRESENTATION_UNAVAILABLE: lavish-axi (requires >=$LAVISH_AXI_MIN; install: $(install_cmd lavish-axi)) - nonvisual work may proceed with plain-text decisions and reports; install or upgrade before using Lavish"
