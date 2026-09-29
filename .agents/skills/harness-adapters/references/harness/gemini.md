@@ -2,7 +2,7 @@
 
 Google's `gemini` TUI, verified end to end on 2026-09-04 with gemini-cli 0.58.0 on Linux.
 Launch shape: `GEMINI_CLI_TRUST_WORKSPACE=true gemini -y "$(cat <brief>)"`.
-Verified as a CREWMATE and SCOUT adapter only; `../../../../../bin/fm-spawn.sh` refuses a secondmate launch on it because `../../../../../docs/supervision-protocols/` carries no gemini wake protocol.
+[Harness support](../../../../../docs/configuration.md#harness-support) owns the task-kind boundary and unverified secondmate exception.
 
 ## Operating facts
 

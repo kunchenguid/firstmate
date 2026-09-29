@@ -24,8 +24,8 @@ Operational paths keep the context named by their owner: `config/` and active-ho
 
 ## Non-negotiable safety
 
-Never dispatch a crewmate or secondmate on an unverified adapter.
-If `config/crew-harness` or `config/secondmate-harness` names one, tell the captain under `../../../AGENTS.md` section 9 that the requested worker runtime is not verified, use firstmate's own verified runtime for current work, and ask only whether to verify the requested runtime for future work.
+Never dispatch a crewmate or secondmate on an unverified adapter except under the [unverified secondmate acceptance contract](../../../docs/configuration.md#unverified-secondmate-harness-configunverified-secondmate-harness).
+Outside that exception, if `config/crew-harness` or `config/secondmate-harness` names one, tell the captain under `../../../AGENTS.md` section 9 that the requested worker runtime is not verified, use firstmate's own verified runtime for current work, and ask only whether to verify the requested runtime for future work.
 Do not pause current work for that choice.
 
 On `unknown`, ask the captain instead of guessing.
@@ -35,7 +35,7 @@ For recovery and control, use the exact `harness=` in `state/<id>.meta`; never i
 Deliver lifecycle actions only through `../../../bin/fm-control.sh <task-id> interrupt|exit|relaunch`.
 Never type an interrupt key or exit command through `fm-send`, where routing-marked lifecycle text becomes chat.
 Trust handling is complete only when inspection proves the target started processing its instructions; delivery success alone is not proof.
-Muse, Gemini, AGY, and Devin are verified only for crewmate and scout work, never a secondmate or primary.
+The [harness support reference](../../../docs/configuration.md#harness-support) owns task-kind restrictions and the scope of the acceptance exception.
 
 ## Detection
 

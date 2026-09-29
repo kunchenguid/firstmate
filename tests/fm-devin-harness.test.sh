@@ -125,4 +125,9 @@ assert_present "$home/state/devin-worker.devin-config.json" 'spawn did not wire 
 if out=$(fm_test_run_spawn "$home" "$wt" "$fakebin" devin-sm "$proj" --secondmate --harness devin 2>&1)
 then fail 'Devin secondmate launch accepted'; fi
 assert_contains "$out" 'crewmate/scout adapter only' 'wrong secondmate refusal'
+mkdir -p "$home/config"; : > "$home/config/unverified-secondmate-harness"
+if out=$(fm_test_run_spawn "$home" "$wt" "$fakebin" devin-sm "$proj" --secondmate --harness devin 2>&1)
+then fail 'unverified-secondmate flag widened Devin to a secondmate'; fi
+assert_contains "$out" 'crewmate/scout adapter only' 'flagged Devin secondmate not refused'
+rm -f "$home/config/unverified-secondmate-harness"
 pass "scout launch carries Fusion, autonomy, typed brief and hooks; effort recorded only"

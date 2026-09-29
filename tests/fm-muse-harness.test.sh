@@ -277,7 +277,7 @@ test_spawn_maps_effort_and_model() {
     "medium|--reasoning-effort 'medium'"
     "high|--reasoning-effort 'high'"
     "xhigh|--reasoning-effort 'xhigh'"
-    "max|--reasoning-effort 'ultra'"
+    "max|--reasoning-effort 'max'"
   )
   local entry effort expect
   for entry in "${cases[@]}"; do
@@ -293,9 +293,13 @@ EOF
     launch=$(cat "$home/launch.log")
     assert_contains "$launch" "$expect" "muse effort $effort did not map to '$expect'"
     assert_contains "$launch" "--model 'muse-spark-1.2'" "muse spawn dropped the model axis"
+    # muse closes its ultra_reasoning_effort gate and silently downgrades ultra
+    # to xhigh, so no shared level may be rendered as ultra - least of all max,
+    # which would then deliver xhigh under a max label.
+    assert_not_contains "$launch" 'ultra' "muse effort $effort rendered the gated ultra level"
   done
-  # ultra is muse's max-class level and must be reachable ONLY through an
-  # explicit max, never as the fallback when no effort was chosen.
+  # max is muse's real top level and must be reachable ONLY through an explicit
+  # max, never as the fallback when no effort was chosen.
   rec=$(make_spawn_case effort-default)
   IFS='|' read -r case_dir home proj wt fakebin id <<EOF
 $rec
@@ -304,7 +308,7 @@ EOF
     || fail "muse spawn without an effort axis failed"
   launch=$(cat "$home/launch.log")
   assert_not_contains "$launch" '--reasoning-effort' "muse spawn invented an effort when none was chosen"
-  pass "muse maps the shared effort vocabulary and reaches ultra only via explicit max"
+  pass "muse maps the shared effort vocabulary literally and reaches max only when explicitly chosen"
 }
 
 # An unauthenticated muse pane does not exit: it sits on an OAuth device-code
@@ -386,27 +390,54 @@ EOF
   pass "muse resolves relative XDG roots before preflight and launch"
 }
 
-# muse has no primary supervision protocol, and its Claude-compatible hook
-# dialect rejects the model-reawakening handlers a firstmate primary needs, so a
-# secondmate on muse could never arm a supervision cycle.
-test_spawn_refuses_secondmate() {
-  local case_dir home fakebin id out status
-  case_dir="$TMP_ROOT/secondmate"
-  home="$case_dir/home"
-  fakebin=$(make_spawn_fakebin "$case_dir/fake")
-  id="muse-secondmate-x1"
-  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config" "$case_dir/muse"
-  printf 'charter\n' > "$home/data/$id/brief.md"
-  out=$(cd "$case_dir" && FM_ROOT_OVERRIDE='' FM_HOME="$home" \
-    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" META_API_KEY=test-key \
-    PATH="$fakebin:$PATH" \
-    "$SPAWN" "$id" muse --secondmate 2>&1)
-  status=$?
-  [ "$status" -ne 0 ] || fail "muse was accepted as a secondmate harness"
-  assert_contains "$out" "crewmate/scout adapter only" "muse secondmate refusal did not explain the boundary"
-  pass "muse is refused as a secondmate harness"
+# The exception is explicit and local-only; exercise the real spawn gates.
+test_spawn_local_secondmate_requires_acceptance() {
+  local rec case_dir home proj wt fakebin id out rc accepted
+  for accepted in no yes; do
+    rec=$(make_spawn_case "secondmate-$accepted")
+    IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$rec
+EOF
+    mkdir -p "$proj/bin"
+    printf '# Firstmate\n' > "$proj/AGENTS.md"
+    printf '%s\n' "$id" > "$proj/.fm-secondmate-home"
+    [ "$accepted" = no ] || touch "$home/config/unverified-secondmate-harness"
+    rc=0
+    out=$(run_muse_spawn "$home" "$proj" "$proj" "$fakebin" "$id" --secondmate) || rc=$?
+    if [ "$accepted" = yes ]; then
+      expect_code 0 "$rc" "accepted local Muse secondmate should launch: $out"
+      assert_contains "$out" "NOT a verified secondmate adapter" "accepted launch omitted its warning"
+      assert_contains "$out" "spawned $id harness=muse" "accepted launch did not finish"
+      assert_contains "$(cat "$home/launch.log")" "$fakebin/muse" "accepted launch did not submit Muse"
+      assert_grep 'kind=secondmate' "$home/state/$id.meta" "launch did not record a secondmate"
+    else
+      [ "$rc" -ne 0 ] || fail "unaccepted local Muse secondmate launched"
+      assert_contains "$out" "crewmate/scout adapter only" "unaccepted launch lacked its refusal reason"
+      [ ! -s "$home/launch.log" ] || fail "unaccepted launch submitted a command"
+      [ ! -e "$home/state/$id.meta" ] || fail "unaccepted launch recorded a task"
+    fi
+  done
+  pass "local Muse secondmate requires acceptance and warns when launching"
+}
+
+test_spawn_remote_secondmate_exception_is_local_only() {
+  local rec case_dir home proj wt fakebin id harness out rc
+  for harness in muse gemini agy; do
+    rec=$(make_spawn_case "remote-$harness")
+    IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$rec
+EOF
+    touch "$home/config/unverified-secondmate-harness"
+    printf -- '- %s - Remote test (host: test-host; root: /remote/code; home: /remote/mate; scope: test; projects: -; added 2026-09-29)\n' "$id" > "$home/data/secondmates.md"
+    rc=0
+    out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_SPAWN_NO_GUARD=1 \
+      PATH="$fakebin:$PATH" "$SPAWN" "$id" --secondmate --harness "$harness" 2>&1) || rc=$?
+    [ "$rc" -ne 0 ] || fail "accepted remote $harness secondmate launched"
+    assert_contains "$out" "unverified-secondmate exception covers local secondmates only" \
+      "remote $harness refusal did not explain the local-only boundary"
+    [ ! -e "$home/state/$id.meta" ] || fail "remote refusal recorded a task"
+  done
+  pass "accepted Muse, Gemini, and AGY remote secondmates refuse with a local-only diagnostic"
 }
 
 test_spawn_writes_busy_binding_and_teardown_removes_it() {
@@ -947,6 +978,8 @@ EOF
   pass "Muse preflight respects the allowlist while retaining stored authentication"
 }
 
+test_spawn_local_secondmate_requires_acceptance
+test_spawn_remote_secondmate_exception_is_local_only
 test_spawn_environment_allowlist_credential_preflight
 test_detects_versioned_process_ancestor
 test_detection_is_anchored
@@ -957,7 +990,6 @@ test_spawn_refuses_without_credential
 test_spawn_refuses_caller_only_environment_credential
 test_spawn_accepts_stored_credential
 test_spawn_resolves_relative_xdg_roots
-test_spawn_refuses_secondmate
 test_spawn_writes_busy_binding_and_teardown_removes_it
 test_muse_escape_aliases_clear_the_composer
 test_non_muse_escape_does_not_clear

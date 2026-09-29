@@ -27,7 +27,13 @@ unset _FM_SESSION_LOCK_LIB_DIR
 # Known harness command names; extend when a new adapter is verified. omp is
 # anchored exactly like pi: its process name is the bare word `omp` (verified,
 # omp 18.1.11), and a substring match would claim ompd or comp.
-FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$|^omp$'
+# muse is anchored the same way bin/fm-harness.sh anchors it: the launcher
+# ~/.local/bin/muse execs ~/.local/bin/muse-bin-<version>, so the live process
+# basename is `muse` or starts with `muse-bin-`, never a bare *muse* substring
+# (musescore, amuse). This lets a Muse secondmate own its home lock without
+# admitting unrelated process names; tests/fm-session-lock-ancestry.test.sh
+# covers both launcher and versioned identities plus decoys.
+FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$|^omp$|^muse$|^muse-bin-'
 
 # The same harnesses as exact executable names. Keep in sync with
 # FM_HARNESS_RE. Used only for the stricter path evidence below, where the

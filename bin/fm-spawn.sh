@@ -380,14 +380,15 @@
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
 # muse installs no hook at all - its plugin engine is off in the default build - so
 # it writes state/<id>.muse-session to bind the pane to muse's own session event
-# log; muse, gemini, agy, and devin are crewmate/scout only and are refused for --secondmate.
+# log. docs/configuration.md "Unverified secondmate harness" owns the task-kind
+# acceptance exception.
 # rovo installs no hook either - its eventHooks fire at tool granularity only,
 # never turn-end - so it carries no busy-source wiring at all and no turn-end
 # hook. A positional brief is dead-on-arrival (rovo loads, never works, and drops
 # to an idle shell), so rovo launches BARE and receives an absolute brief pointer
 # only after a TUI readiness gate, then a delivery-confirmation gate - the same
 # launch-then-send shape as kimi. Its busy state is a screen-scrape fallback like
-# grok. rovo is crewmate/scout only and is refused for --secondmate, like muse.
+# grok. rovo is crewmate/scout only and is refused for --secondmate.
 # agy installs no hook either - it exposes no hook surface at all - so it
 # carries no busy-source wiring and no turn-end hook. Its brief rides the launch
 # command, but a fresh worktree would park it on a folder-trust dialog, so the
@@ -937,6 +938,13 @@ spawn_remote_secondmate() {
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
     echo "error: remote secondmate spawn requires a verified harness adapter, not a raw launch command: $harness" >&2
+    case "$harness" in
+    muse | gemini | agy)
+      if [ -n "${FM_HOME:-}" ] && [ -f "$FM_HOME/config/unverified-secondmate-harness" ]; then
+        echo "error: the unverified-secondmate exception covers local secondmates only; it does not permit remote $harness secondmates" >&2
+      fi
+      ;;
+    esac
     return 1
     ;;
   esac
@@ -2249,26 +2257,22 @@ case "$ARG3" in
   ;;
 esac
 
-# muse, gemini, agy, and devin are verified as CREWMATE/SCOUT adapters only. A secondmate is
-# a firstmate instance, so it needs a primary supervision protocol.
-# gemini has none: docs/supervision-protocols/ carries no gemini wake protocol
-# and this task verified only crewmate-side launch, busy state, interrupt, and
-# exit, so a gemini secondmate is refused rather than stood up on an unverified
-# supervision path. muse has none either, and its
-# Claude-compatible hook dialect explicitly rejects the model-reawakening and
-# asyncRewake handlers that firstmate's primary turn-end supervision is built on
-# (muse 0.1.0-R708.1). Refusing here keeps that gap loud instead of standing up a
-# secondmate whose supervision cycle could never be armed.
-# agy has none either: it exposes no hook surface for primary supervision and
-# docs/supervision-protocols/ carries no agy wake protocol (agy 1.2.0).
-# devin has none either: only its worker lifecycle hooks are verified, and
-# docs/supervision-protocols/ carries no devin wake protocol (devin 3000.11.1).
+# These adapters lack verified secondmate supervision. Muse has a foreground
+# checkpoint snippet, not Stop-hook rewakes; Gemini, AGY, and Devin have no
+# harness-specific snippet. docs/configuration.md "Unverified secondmate
+# harness" owns the acceptance contract and persistent per-home rationale.
+# Keep this launch gate aligned with fm_control_harness_supports_kind so a
+# relaunch cannot stop the current agent before discovering this refusal.
 if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = agy ] || [ "$HARNESS" = devin ]; }; then
-  echo "error: $HARNESS is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
-  exit 1
+  if [ "$HARNESS" != devin ] && [ -n "${FM_HOME:-}" ] && [ -f "$FM_HOME/config/unverified-secondmate-harness" ]; then
+    echo "warning: $HARNESS is NOT a verified secondmate adapter. Launching it only because config/unverified-secondmate-harness records the captain's explicit acceptance; this mate's supervision is unproven, so verify it by hand." >&2
+  else
+    echo "error: $HARNESS is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
+    exit 1
+  fi
 fi
 
-# rovo carries the same primary-supervision gap as muse: no turn-end hook, no
+# rovo has no turn-end hook and no
 # verified primary integration, so a secondmate (a firstmate instance that must
 # itself act as a primary) could never be supervised. Refuse loudly rather than
 # standing one up with no way to arm its watch cycle.
@@ -2640,17 +2644,12 @@ effort_flag_for_harness() {
     printf ',"agent":{"build":{"model":"%s","variant":"%s"}}' "$model_json" "$effort"
     ;;
   muse)
-    # muse 0.1.0-R708.1 --reasoning-effort accepts none|minimal|low|medium|
-    # high|xhigh|ultra and defaults to high, so low..xhigh map straight across.
-    # ultra is muse's max-CLASS level, so firstmate's max maps onto it - but
-    # only ever as an EXPLICIT captain choice, never as a fallback, because
-    # AGENTS.md section 4 forbids selecting max without captain preference and
-    # the omitted effort here leaves muse on its own high default. muse's extra
-    # none/minimal levels sit below firstmate's shared vocabulary and are
-    # deliberately unreachable rather than remapped onto low.
+    # Preserve the requested level: substituting ultra for max silently
+    # delivers xhigh on Muse Code 1.1.1. Let Muse refuse missing entitlement
+    # rather than selecting a fallback. The operating contract is owned by
+    # .agents/skills/harness-adapters/references/harness/muse.md.
     case "$effort" in
-    low | medium | high | xhigh) printf -- '--reasoning-effort %s ' "$(shell_quote "$effort")" ;;
-    max) printf -- '--reasoning-effort %s ' "$(shell_quote ultra)" ;;
+    low | medium | high | xhigh | max) printf -- '--reasoning-effort %s ' "$(shell_quote "$effort")" ;;
     esac
     ;;
     # rovo has no --effort flag on `run`; its effort mapping rides
