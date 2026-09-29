@@ -58,9 +58,12 @@ printf 'Explicitly stop this task\n' > "$FM_HOME/data/a/stop.txt"
 "$CLI" reconcile a --expected-revision 4 --record "$TMP_ROOT/input.json" >/dev/null
 test "$(python3 "$LIB" mode a)" = archived
 if "$CLI" action a --action-id a.g1.a1 --phase prepared >/dev/null 2>&1; then fail 'archived action restarted'; fi
+mv "$FM_HOME/state/a.meta" "$TMP_ROOT/a.meta"
+python3 "$LIB" due a | jq -e '.due==false and .expired==false and .record.next_action.phase=="attempted"' >/dev/null
+mv "$TMP_ROOT/a.meta" "$FM_HOME/state/a.meta"
 "$CLI" lifecycle a | jq '.disposition="open"' > "$TMP_ROOT/input.json"
 if "$CLI" reconcile a --expected-revision 5 --record "$TMP_ROOT/input.json" >/dev/null 2>&1; then fail 'archive reopened without authority'; fi
-pass 'explicit archive retains pending effects without authorizing recovery'
+pass 'explicit archive retains pending effects without authorizing recovery or ordinary supervision'
 
 printf 'spawn_gen=s3\n' > "$FM_HOME/state/a.meta"
 if python3 "$LIB" mode a > "$TMP_ROOT/mode" 2>/dev/null; then fail 'old disposition crossed generation'; fi

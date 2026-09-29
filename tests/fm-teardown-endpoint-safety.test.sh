@@ -43,7 +43,7 @@ printf ' <%s>' "$@" >> "${FM_RUNTIME_LOG:?}"
 printf '\n' >> "${FM_RUNTIME_LOG:?}"
 case "$1 ${2:-}" in
   'session list') jq -n --arg socket "${FM_RUNTIME_LOG}.sock" '{sessions:[{name:"isolated",running:true,socket_path:$socket}]}' ;;
-  'status --json') echo '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}' ;;
+  'status --json') jq -n --arg socket "${FM_RUNTIME_LOG}.sock" '{client:{version:"0.7.1",protocol:14},server:{running:true,session:"isolated",socket:$socket,version:"0.7.1",protocol:14}}' ;;
   'pane get')
     if [ -e "${FM_RUNTIME_LOG}.$3.closed" ]; then
       echo '{"error":{"code":"pane_not_found"}}'
@@ -52,6 +52,7 @@ case "$1 ${2:-}" in
         '{result:{pane:{pane_id:$p,workspace_id:"w1",tab_id:"w1:t1",foreground_cwd:$cwd}}}'
     fi ;;
   'pane close') touch "${FM_RUNTIME_LOG}.$3.closed" ;;
+  'workspace list') echo '{"result":{"workspaces":[]}}' ;;
   *) echo '{}' ;;
 esac
 SH
@@ -64,6 +65,63 @@ exit 0
 SH
   chmod +x "$TMP_ROOT/$dir/fakebin/herdr" "$TMP_ROOT/$dir/fakebin/treehouse"
   printf '%s\n' "$TMP_ROOT/$dir"
+}
+
+stage_absent_bound_endpoint() {  # <case> <id>
+  local dir=$1 id=$2 socket instance journal label
+  socket="$dir/runtime.log.sock"
+  instance=$(python3 - "$socket" <<'PY'
+import hashlib,os,socket,sys
+p=sys.argv[1]
+s=socket.socket(socket.AF_UNIX); s.bind(p); s.close()
+st=os.lstat(p)
+print(hashlib.sha256(repr((st.st_dev,st.st_ino,st.st_mtime_ns,st.st_ctime_ns)).encode()).hexdigest())
+PY
+  ) || fail 'cannot create fixture socket identity'
+  label=$(bash -c '. "$1/bin/backends/herdr.sh"; fm_backend_herdr_projection_workspace_label "$2" abcdefghijklmnopqrstuv' _ "$ROOT" "$id")
+  journal="$dir/home/state/$id.herdr-presentation"
+  cat > "$journal" <<EOF
+version=3
+task_id=$id
+projection_id=abcdefghijklmnopqrstuv
+home=$(cd "$dir/home" && pwd -P)
+session=isolated
+workspace_id=w1
+tab_id=w1:t-$id
+pane_id=w1:p-$id
+parent_workspace_id=anchor
+parent_label=anchor
+workspace_label=$label
+task_label=fm-$id
+spawn_gen=s-$id
+terminal_id=t-$id
+session_instance=$instance
+shell_pid=$$
+shell_start=synthetic-shell
+EOF
+  chmod 600 "$journal"
+  : > "$dir/runtime.log.w1:p-$id.closed"
+}
+
+stage_archived_action() {  # <case> <id> <kind> <phase>
+  local dir=$1 id=$2 kind=$3 phase=$4 candidate receipt_sha action_id="$id.g1.a1"
+  mkdir -p "$dir/home/data/$id"
+  printf 'Deliver the complete requested result\n' > "$dir/home/data/$id/brief.md"
+  FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" init "$id" >/dev/null
+  candidate="$dir/$id-action.json"
+  FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" lifecycle "$id" | jq --arg id "$action_id" --arg kind "$kind" \
+    '.next_action={id:$id,kind:$kind,phase:"prepared",expected_execution_generation:.execution_generation,payload_ref:.assessment.evidence[0].ref,payload_sha256:.assessment.evidence[0].sha256,receipt_ref:null,attempts:0,attempt_limit:1,recheck_at:"2000-01-01T00:00:00Z",deadline:"2099-01-01T00:00:00Z"} | .next_action_seq=2' > "$candidate"
+  chmod 600 "$candidate"
+  FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" reconcile "$id" --expected-revision 1 --record "$candidate" >/dev/null
+  FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" action "$id" --action-id "$action_id" --phase attempted >/dev/null \
+    || fail 'fixture action attempt failed'
+  if [ "$phase" = uncertain ]; then
+    receipt_sha=$(shasum -a 256 "$dir/home/data/$id/brief.md" | awk '{print $1}')
+    FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" action "$id" --action-id "$action_id" --phase uncertain \
+      --receipt-ref "data/$id/brief.md" --receipt-sha256 "$receipt_sha" >/dev/null \
+      || fail 'fixture uncertain action receipt failed'
+  fi
+  fm_test_archive_goal "$dir/home" "$id"
 }
 
 mark_case_as_treehouse_pool() {  # <case>
@@ -657,7 +715,55 @@ test_open_goal_preserves_resources_before_cleanup() {
   pass 'fm-teardown: open goals retain endpoint, slot, worktree and records even with a partial report or force'
 }
 
+test_archived_business_action_allows_only_independent_endpoint_cleanup() {
+  local dir id=archived-business retained=shared-owner rc=0
+  dir=$(make_case archived-business-action)
+  write_herdr_meta "$dir/home/state/$id.meta" \
+    "window=isolated:fm-$id" "worktree=$dir/worktree" \
+    "project=$dir/project" "kind=ship"
+  write_herdr_meta "$dir/home/state/$retained.meta" \
+    "window=isolated:fm-$retained" "worktree=$dir/worktree" \
+    "project=$dir/project" "kind=ship"
+  stage_archived_action "$dir" "$id" steer attempted
+  stage_absent_bound_endpoint "$dir" "$id"
+
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
+    "$TEARDOWN" "$id" --endpoint-only --expect-spawn-gen "s-$id" \
+    > "$dir/stdout" 2> "$dir/stderr" || rc=$?
+  [ "$rc" -eq 0 ] || fail "archived business action blocked endpoint cleanup: $(cat "$dir/stderr")"
+  jq -e '.phases.pane_close.state=="confirmed" and .phases.directory_return.reason_code=="retained-shared-reference"' \
+    "$dir/home/state/$id.cleanup.json" >/dev/null || fail 'endpoint and directory cleanup were not accounted independently'
+  FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" lifecycle "$id" \
+    | jq -e '.disposition=="archived" and .next_action.kind=="steer" and .next_action.phase=="attempted"' >/dev/null \
+    || fail 'archived business action evidence was changed by endpoint cleanup'
+  assert_present "$dir/home/state/$id.meta" 'endpoint-only cleanup removed the task record'
+  assert_present "$dir/worktree/sentinel" 'endpoint cleanup removed a shared directory'
+  ! grep -Fq 'pane <close>' "$dir/runtime.log" || fail 'already-absent endpoint was closed again'
+
+  id=archived-cleanup
+  dir=$(make_case archived-cleanup-action)
+  write_herdr_meta "$dir/home/state/$id.meta" \
+    "window=isolated:fm-$id" "worktree=$dir/worktree" \
+    "project=$dir/project" "kind=ship"
+  stage_archived_action "$dir" "$id" cleanup uncertain
+  stage_absent_bound_endpoint "$dir" "$id"
+  : > "$dir/runtime.log"
+  rc=0
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
+    "$TEARDOWN" "$id" --endpoint-only --expect-spawn-gen "s-$id" \
+    > "$dir/stdout" 2> "$dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] || fail 'uncertain archived cleanup effect was retried without readback'
+  assert_contains "$(cat "$dir/stderr")" 'requires exact readback' \
+    'uncertain cleanup refusal did not require readback'
+  [ ! -s "$dir/runtime.log" ] || fail 'uncertain cleanup reached the endpoint before readback'
+  assert_present "$dir/home/state/$id.meta" 'uncertain cleanup removed the task record'
+  pass 'fm-teardown: archived business effects permit independent endpoint cleanup while uncertain cleanup still requires readback'
+}
+
 test_open_goal_preserves_resources_before_cleanup
+test_archived_business_action_allows_only_independent_endpoint_cleanup
 test_invalid_endpoint_records_refuse_before_mutation
 test_control_lock_contention_refuses_before_mutation
 test_non_pool_teardown_ignores_task_set_lock

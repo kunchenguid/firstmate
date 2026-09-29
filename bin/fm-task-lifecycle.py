@@ -1440,9 +1440,10 @@ def main():
                 # Terminal goals remain due only while a concrete resource or
                 # cleanup receipt is unfinished; a complete owner receipt stops
                 # the bounded scanner from publishing another generation.
-                due = bool(result and ((action and stamp(action['recheck_at']) <= stamp(now())) or
-                                       (not action and result['disposition'] == 'open') or cleanup_obligation))
-                expired = bool(action and stamp(action['deadline']) <= stamp(now()))
+                open_goal = bool(result and result['disposition'] == 'open')
+                due = bool(result and ((open_goal and action and stamp(action['recheck_at']) <= stamp(now())) or
+                                       (open_goal and not action) or cleanup_obligation))
+                expired = bool(open_goal and action and stamp(action['deadline']) <= stamp(now()))
                 observations = []
                 for path in (task.directory / 'report.md', task.state / (task.id + '.cleanup.json')):
                     if path.exists() or path.is_symlink():

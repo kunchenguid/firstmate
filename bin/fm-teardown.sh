@@ -318,7 +318,7 @@ fm_lease_guard "$ID" "teardown (fm-teardown)"
 # shellcheck source=bin/fm-task-lifecycle-lib.sh
 . "$SCRIPT_DIR/fm-task-lifecycle-lib.sh"
 fm_task_lifecycle_forbid_delegated_control "$ID" || { fm_lease_guard_release; exit 6; }
-fm_task_lifecycle_receipt_preflight "$ID" || { fm_lease_guard_release; exit 6; }
+fm_task_lifecycle_receipt_preflight "$ID" cleanup || { fm_lease_guard_release; exit 6; }
 
 META="$STATE/$ID.meta"
 TREEHOUSE_PROJECT_LOCK=

@@ -65,11 +65,14 @@ fm_task_lifecycle_owner_receipt() ( # <task> <generation> <merge|cleanup> <facts
 
 # Preflight before the existing merge/cleanup owner's first external effect.
 # Semantic acceptance is separate; unknown state must be read back first.
-fm_task_lifecycle_receipt_preflight() { # <task>
-  local id=$1 record
+fm_task_lifecycle_receipt_preflight() { # <task> [merge|cleanup]
+  local id=$1 effect=${2:-merge} record
   [ -e "${FM_DATA_OVERRIDE:-${FM_HOME:?}/data}/$id/lifecycle.json" ] || return 0
   record=$(fm_task_lifecycle read "$id") || return 1
-  printf '%s' "$record" | jq -e '.next_action.phase != "attempted" and .next_action.phase != "uncertain"' >/dev/null || {
+  printf '%s' "$record" | jq -e --arg effect "$effect" '
+    (.next_action.phase != "attempted" and .next_action.phase != "uncertain") or
+    ($effect == "cleanup" and .disposition == "archived" and .next_action.kind != "cleanup")
+  ' >/dev/null || {
     echo 'REFUSED: outstanding lifecycle effect requires exact readback before merge or cleanup' >&2
     return 1
   }
