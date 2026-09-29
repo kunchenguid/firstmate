@@ -152,14 +152,14 @@ fm_pr_forge_host_valid() {
 fm_pr_gitlab_path_valid() {
   local path=${1-} segment
   local LC_ALL=C
-  local -a segments
+  local -a path_segments
   [ "${#path}" -ge 3 ] && [ "${#path}" -le 1024 ] || return 1
   case "$path" in
     /*|*/|*//*) return 1 ;;
   esac
-  IFS=/ read -ra segments <<< "$path"
-  [ "${#segments[@]}" -ge 2 ] && [ "${#segments[@]}" -le 20 ] || return 1
-  for segment in "${segments[@]}"; do
+  IFS=/ read -ra path_segments <<< "$path"
+  [ "${#path_segments[@]}" -ge 2 ] && [ "${#path_segments[@]}" -le 20 ] || return 1
+  for segment in "${path_segments[@]}"; do
     [ "${#segment}" -ge 1 ] && [ "${#segment}" -le 255 ] || return 1
     case "$segment" in
       .|..|-*|*.git|*.atom|*[!A-Za-z0-9._-]*) return 1 ;;
@@ -178,14 +178,14 @@ fm_pr_gitlab_path_valid() {
 fm_pr_gerrit_path_valid() {
   local path=${1-} segment
   local LC_ALL=C
-  local -a segments
+  local -a path_segments
   [ "${#path}" -ge 1 ] && [ "${#path}" -le 1024 ] || return 1
   case "$path" in
     /*|*/|*//*) return 1 ;;
   esac
-  IFS=/ read -ra segments <<< "$path"
-  [ "${#segments[@]}" -ge 1 ] && [ "${#segments[@]}" -le 20 ] || return 1
-  for segment in "${segments[@]}"; do
+  IFS=/ read -ra path_segments <<< "$path"
+  [ "${#path_segments[@]}" -ge 1 ] && [ "${#path_segments[@]}" -le 20 ] || return 1
+  for segment in "${path_segments[@]}"; do
     [ "${#segment}" -ge 1 ] && [ "${#segment}" -le 255 ] || return 1
     case "$segment" in
       .|..|-*|*.git|*[!A-Za-z0-9._-]*) return 1 ;;
