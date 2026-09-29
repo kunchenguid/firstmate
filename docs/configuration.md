@@ -2107,9 +2107,9 @@ The pool names, capacities, and models are the operator's own choice; nothing is
 
 - A seat is one active agent slot, never an inference request, so the endpoint's own request concurrency is a separate limit this file does not measure.
 - A ship or scout on a pooled model holds a seat from spawn until cleanup removes its task record, including while it waits for review or merge; a relaunch onto another model frees it, and a relaunch on the same route keeps it even when the pool is full.
-- A live secondmate supervisor on a pooled model holds a seat, including while idle. This reserves capacity for its next turn; a proven local session death, removal of a remote supervisor record, or a move to an unpooled model releases it. Ambiguous remote liveness keeps the seat counted.
+- Every live secondmate supervisor on a pooled model holds a seat, even when its busy record says idle. This strict capacity choice reserves room for its next turn; a proven local session death, removal of a remote supervisor record, or a move to an unpooled model releases it. Ambiguous remote liveness keeps the seat counted.
 - The primary supervisor holds a seat while its session is live, when `primary_model` names a pooled model; no primary busy record exists, so a live primary is indeterminate and counts.
-- While any pool is configured, a launch on `pi`, `pi-signed`, `omp`, or `opencode` must pass an explicit `--model`, because that harness's own default could be a pooled model nothing counted.
+- While any pool is configured, every launch needs an explicit, verified `--model`. A harness default on any adapter or a raw launch command is refused because its actual model cannot be counted reliably. With no declaration, those launches behave as before.
 
 **Which homes share a pool**
 
@@ -2117,6 +2117,7 @@ The pool names, capacities, and models are the operator's own choice; nothing is
 - The count includes every pooled agent recorded in the primary and in each local secondmate registered in `data/secondmates.md`, so agents launched before the file existed are counted.
 - A remote secondmate shares the same capacity through the existing primary-to-remote transport: while a declaration exists or needs clearing, the primary's watcher delivers the current pool declaration to each remote about every 30 seconds while holding the fleet lock, and a pooled remote launch files a seat request in its own home and waits for that answer.
 - The primary grants no pooled seat while any registered remote has not confirmed the current declaration or its holder snapshot is absent. It counts each remote's seats from that remote's last answer, so an unreachable remote keeps its seats counted rather than freeing them.
+- An in-flight seat remains counted by its recorded model when that model moves between pools, including before the agent publishes a task record.
 - Once a nonempty policy is delivered, remote launches wait for the next primary serve to confirm the current declaration, including models the last policy called unpooled; a request from an old declaration or old pool is refused. Before first delivery, an inherited declaration can identify a pooled launch that must refuse until delivery. A home with no declaration, or a delivered empty declaration, launches as before.
 - A remote request the primary does not answer within 90 seconds is withdrawn and refused, and removing this file clears every remote on the next delivery.
 

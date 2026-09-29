@@ -122,6 +122,9 @@ test_no_pool_configured_is_off() {
   expect_code 0 "$status" "reserve with no pool"
   assert_equals "" "$out" "reserve with no pool should print nothing"
   out=$(reserve "$home" t2 default 2>&1) || fail "a harness default was refused with no pool: $out"
+  out=$(seats "$home" reserve raw-off --harness claude --model default --holder-pid "$LAST_HOLDER" --raw-launch 2>&1)
+  expect_code 0 "$?" "a raw launch without a declaration"
+  assert_equals "" "$out" "an undeclared raw launch printed a seat refusal"
   out=$(reserve_without_jq "$home" reserve t3 --harness pi --model pool-model-a --holder-pid "$LAST_HOLDER" 2>&1)
   expect_code 0 "$?" "an undeclared primary without jq"
   assert_equals "" "$out" "an undeclared primary without jq printed a reservation"
@@ -219,8 +222,14 @@ test_explicit_model_required_while_pooled() {
   assert_contains "$out" "pass an explicit --model" "explicit-model refusal reason"
   out=$(reserve "$root" d2 default omp 2>&1)
   expect_code 5 "$?" "an omp default while pooled"
-  out=$(reserve "$root" d3 default claude 2>&1) || fail "a single-provider default was refused: $out"
-  pass "a harness default that could be pooled is refused while pools exist"
+  out=$(reserve "$root" d3 default claude 2>&1)
+  expect_code 5 "$?" "a Claude default while pooled"
+  out=$(reserve "$root" d4 default codex 2>&1)
+  expect_code 5 "$?" "a Codex default while pooled"
+  out=$(seats "$root" reserve raw --harness claude --model pool-model-a --holder-pid "$LAST_HOLDER" --raw-launch 2>&1)
+  expect_code 5 "$?" "a raw launch with an explicit claimed model"
+  assert_contains "$out" "raw launch command cannot verify" "raw-command refusal reason"
+  pass "declared pools reject harness defaults and raw launch commands"
 }
 
 test_stale_reservations_recover_without_preempting_live_work() {
@@ -566,6 +575,36 @@ test_stale_remote_requests_refuse_before_launch() {
   pass "newly pooled and moved models refuse stale remote requests before a current grant"
 }
 
+test_inflight_remote_seat_follows_model_between_pools() {
+  local dir="$TMP_ROOT/remote-move-out" out inflight
+  make_remote_fleet remote-move 1
+  mkdir -p "$dir"
+  printf '{"pools":[{"name":"former","capacity":1,"models":["pool-model-a"]},{"name":"other","capacity":1,"models":["pool-model-b"]}]}\n' \
+    > "$R_ROOT/config/fleet-seats"
+  serve_remotes >/dev/null 2>&1 || fail "initial policy delivery failed"
+  remote_reserve_bg inflight pool-model-a "$dir/inflight"
+  inflight=$LAST_HOLDER
+  serve_remotes >/dev/null 2>&1 || fail "in-flight remote grant failed"
+  wait "$BG_PID"
+  expect_code 0 "$(cat "$dir/inflight.rc")" "the remote in-flight grant"
+
+  printf '{"pools":[{"name":"current","capacity":1,"models":["pool-model-a"]},{"name":"other","capacity":1,"models":["pool-model-b"]}]}\n' \
+    > "$R_ROOT/config/fleet-seats"
+  out=$(serve_remotes 2>&1) || fail "policy move delivery failed: $out"
+  assert_contains "$out" "holders=1" "the in-flight seat vanished during the move"
+  new_holder
+  out=$(reserve "$R_ROOT" local pool-model-a 2>&1)
+  expect_code 4 "$?" "a local launch into the moved pool while its remote seat is live"
+  assert_contains "$out" "remote:theshop" "the moved seat is absent from the root's holders"
+
+  kill "$inflight"
+  wait "$inflight" 2>/dev/null
+  serve_remotes >/dev/null 2>&1 || fail "dead in-flight seat recovery failed"
+  new_holder
+  out=$(reserve "$R_ROOT" local pool-model-a 2>&1) || fail "the dead in-flight seat stayed held: $out"
+  pass "a live in-flight remote seat follows its model across pools and frees on death"
+}
+
 test_remote_without_pools_confirms_unpooled_models() {
   local out
   make_remote_fleet remote-off 3
@@ -709,6 +748,24 @@ test_spawn_refuses_a_full_pool_before_any_record() {
   pass "a pooled spawn into a full pool refuses before any record, and another route still launches"
 }
 
+test_spawn_rejects_unverified_models() {
+  local out
+  spawn_case spawn-model-proof
+  pools "$HOME_DIR" 1
+  out=$(in_home "$ROOT/bin/fm-spawn.sh" "$TASK" "$PROJ_DIR" --mode local-only --yolo off \
+    --harness claude 2>&1)
+  expect_code 1 "$?" "a default-model spawn with a declared pool"
+  assert_contains "$out" "unverified default model" "the default-model spawn did not reach the seat refusal"
+  assert_absent "$HOME_DIR/state/$TASK.meta" "a refused default-model spawn published a task record"
+
+  out=$(in_home "$ROOT/bin/fm-spawn.sh" "$TASK" "$PROJ_DIR" 'claude --model pool-model-a' \
+    --mode local-only --yolo off --model pool-model-a 2>&1)
+  expect_code 1 "$?" "a raw launch with a declared pool"
+  assert_contains "$out" "raw launch command cannot verify" "the raw launch did not reach the seat refusal"
+  assert_absent "$HOME_DIR/state/$TASK.meta" "a refused raw launch published a task record"
+  pass "spawn rejects unverified default and raw-command models before publication"
+}
+
 test_spawn_holds_a_seat_until_cleanup() {
   local out
   spawn_case spawn-seat
@@ -757,9 +814,11 @@ test_remote_home_shares_the_fleet_capacity
 test_unreachable_remote_is_never_free
 test_delivered_policy_governs_the_remote_home
 test_stale_remote_requests_refuse_before_launch
+test_inflight_remote_seat_follows_model_between_pools
 test_remote_without_pools_confirms_unpooled_models
 test_remote_and_local_contention_never_overbooks
 test_primary_watcher_serves_remote_requests
 test_spawn_refuses_a_full_pool_before_any_record
+test_spawn_rejects_unverified_models
 test_spawn_holds_a_seat_until_cleanup
 test_secondmate_spawn_takes_a_seat

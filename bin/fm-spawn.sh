@@ -3329,8 +3329,10 @@ fi
 # unreachable authority refuses at no unwind cost. This process is the
 # reservation's holder until the published task record takes over, and a
 # relaunch on the same route keeps its seat.
+FLEET_SEAT_ARGS=(reserve "$ID" --harness "$HARNESS" --model "${MODEL:-default}" --holder-pid "$$")
+[ "$RAW_LAUNCH" -eq 0 ] || FLEET_SEAT_ARGS+=(--raw-launch)
 FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG FM_DATA_OVERRIDE=$DATA \
-  "$SCRIPT_DIR/fm-fleet-seats.sh" reserve "$ID" --harness "$HARNESS" --model "${MODEL:-default}" --holder-pid "$$" || {
+  "$SCRIPT_DIR/fm-fleet-seats.sh" "${FLEET_SEAT_ARGS[@]}" || {
   echo "error: spawn refused - $ID has no fleet seat for model ${MODEL:-default} (see the fleet-seats line above)" >&2
   exit 1
 }
