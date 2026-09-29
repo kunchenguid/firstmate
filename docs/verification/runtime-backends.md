@@ -831,7 +831,7 @@ The command run against each client was `<client> pane --help`, which is client-
 process-info  Show pane process information
 ```
 
-This proves subcommand presence in the client only, not the server response shape, which is measured only on 0.9.0 above.
+This proves subcommand presence in the client only, not the server response shape, which is measured on 0.8.0 and 0.9.0 above.
 
 The live guard that refreshes this record runs by default wherever Herdr and Pi are installed, spends no model token, and fails naming both versions:
 

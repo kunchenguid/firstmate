@@ -282,7 +282,7 @@ Structural `live` does not establish semantic busy or idle, and does not relax t
 No registered status outranks the process view, because an agent killed mid-turn leaves `working` behind just as a quit one leaves `idle`, and the native busy verdict is verified the same way so a shell-only pane never reads busy.
 The `pane process-info` subcommand that this process-level proof depends on is present in every supported release client from the 0.7.1 floor upward (measured 2026-09-10 on the pinned 0.7.1, 0.7.3, 0.7.4, and 0.7.5 release clients - [verification](verification/runtime-backends.md) "Stale agent registration").
 The response shape the adapter parses (`result.type` of `pane_process_info`, `process_info.shell_pid`, and `foreground_processes` entries carrying `name`, `argv0`, `argv`, and `cmdline`) is verified live on Herdr 0.8.0 and 0.9.0, with the idle-shell proof's narrower parse previously verified on 0.7.5.
-A server response below 0.9.0 has not been measured for this parse.
+A server response below 0.8.0 has not been measured for this parse.
 An unreadable or unparseable process view reads `unknown`, which refuses lifecycle verbs and recovery rather than trusting the registration.
 
 The generic Herdr agent-liveness probe reuses that pane classifier, then applies one recovery-only exception.

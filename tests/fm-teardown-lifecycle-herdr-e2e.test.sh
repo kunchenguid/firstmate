@@ -89,9 +89,26 @@ EOF
   chmod 600 "$LAB_DIR/accepted.json"
   "$ROOT/bin/fm-task-state.sh" reconcile "$id" --expected-revision 1 --record "$LAB_DIR/accepted.json" >/dev/null
 }
-# Real installed harnesses, without prompts or synthetic report-agent state.
+# Real installed harnesses, without model prompts or synthetic report-agent state.
 # Public control and teardown must distinguish process existence from screen
 # recognition. Keep a dirty local file and the report as preservation witnesses.
+mkdir -p "$LAB_DIR/codex-home"
+cat > "$LAB_DIR/codex-home/config.toml" <<EOF
+model = "lifecycle-test"
+model_provider = "lifecycle-test"
+
+[features]
+hooks = false
+
+[model_providers.lifecycle-test]
+name = "Lifecycle test"
+base_url = "http://127.0.0.1:9/v1"
+wire_api = "responses"
+requires_openai_auth = false
+
+[projects."$ROOT"]
+trust_level = "trusted"
+EOF
 checked=0
 for harness in traex codex pi; do
   if ! command -v "$harness" >/dev/null 2>&1; then
@@ -106,12 +123,16 @@ for harness in traex codex pi; do
   pane=$(jq -r '.result.pane.pane_id // .result.root_pane.pane_id' "$LAB_DIR/live-$harness.json")
   case "$harness" in
     traex) launch='traex -y' ;;
-    codex) launch='codex --dangerously-bypass-approvals-and-sandbox' ;;
+    codex)
+      printf -v launch 'CODEX_HOME=%q codex --dangerously-bypass-approvals-and-sandbox' \
+        "$LAB_DIR/codex-home"
+      ;;
     pi) launch='pi --no-approve' ;;
   esac
   call pane run "$pane" "$launch" >/dev/null
   ready=0
   dismissed=0
+  trusted=0
   sleep 8 # Let the real loading composer give way to the installed footer.
   for ((attempt=0; attempt<80; attempt++)); do
     if [ "$(fm_backend_herdr_pane_process_state "$HERDR_LAB_SESSION" "$pane")" = agent ] &&
@@ -120,9 +141,13 @@ for harness in traex codex pi; do
       ready=1
       break
     fi
-    if [ "$harness" = codex ] && [ "$dismissed" = 0 ]; then
+    if [ "$harness" = codex ]; then
       screen=$(call pane read "$pane" --source recent --lines 200)
-      if [[ "$screen" == *'Update now'* && "$screen" == *'esc skip'* ]]; then
+      if [ "$trusted" = 0 ] &&
+         { [[ "$screen" == *'Trust this folder?'* ]] || [[ "$screen" == *'Do you trust the contents of this directory?'* ]]; }; then
+        call pane send-keys "$pane" Enter >/dev/null
+        trusted=1
+      elif [ "$dismissed" = 0 ] && [[ "$screen" == *'Update now'* && "$screen" == *'esc skip'* ]]; then
         call pane send-keys "$pane" Escape >/dev/null
         dismissed=1
       fi
