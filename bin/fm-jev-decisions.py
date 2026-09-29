@@ -27,6 +27,7 @@ from pathlib import Path
 TS_BASE = os.environ.get("FM_JEV_TS_BASE", "https://api.typesafe.ai")
 TS_MODEL = os.environ.get("FM_JEV_TS_MODEL", "jev-latest")
 TS_TIMEOUT = float(os.environ.get("FM_JEV_TS_TIMEOUT", "5.0"))
+CANONICAL_HOME = Path("/opt/ra/firstmate")
 
 DECISION_CRITERIA = {
     "stale_historical": (
@@ -87,6 +88,8 @@ def get_api_key(fm_root: Path) -> str | None:
 
     # 3. Try vault injection wrapper if available
     run_py = fm_root / "bin" / "jev-typesafe-run.py"
+    if not run_py.exists():
+        run_py = CANONICAL_HOME / "bin" / "jev-typesafe-run.py"
 
     if run_py.exists():
         try:
@@ -241,8 +244,12 @@ def classify_decision(
         item.confidence = float(cat_ans.get("confidence", 0.0))
         item.probabilities = cat_ans.get("probabilities", {})
 
-        act_ans = answers.get("actionable_now", {})
-        item.actionable_noul = float(act_ans.get("noul", 0.0))
+        noul = (answers.get("actionable_now") or {}).get("noul")
+        if isinstance(noul, bool) or not isinstance(noul, (int, float)):
+            item.category = "unavailable"
+            item.error = f"Jev returned no valid actionable_now noul: {noul!r}"
+            return item
+        item.actionable_noul = float(noul)
 
         # Assign recommendations
         if item.category == "stale_historical":
@@ -306,6 +313,17 @@ def format_table(items: list[DecisionItem]) -> str:
     return "\n".join(lines)
 
 
+def send_ledger(state: Path, selector: str) -> Path | None:
+    """The status file fm-send --resolve-key closes for selector (fm_backend_task_id_for_selector + fm-send.sh:630)."""
+    if ":" in selector:
+        return None
+    ids = [selector] + ([selector[3:]] if selector.startswith("fm-") else [])
+    for task_id in ids:
+        if (state / f"{task_id}.meta").is_file():
+            return state / f"{task_id}.status"
+    return None
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Triage open Firstmate decisions using Jev System One")
     parser.add_argument("--task", type=str, help="Specific task ID to triage (e.g. websites, verifier)")
@@ -327,7 +345,7 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    fm_root = Path(os.environ.get("FM_HOME", "/opt/ra/firstmate"))
+    fm_root = Path(os.environ.get("FM_HOME", str(CANONICAL_HOME)))
     state_dir = args.state_dir or Path(os.environ.get("FM_STATE_OVERRIDE") or fm_root / "state")
     classify_lib = fm_root / "bin" / "fm-classify-lib.sh"
     config_dir = Path(os.environ.get("FM_CONFIG_OVERRIDE") or fm_root / "config")
@@ -411,13 +429,17 @@ def main() -> None:
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [executor.submit(classify_decision, item, api_key, never_send, send_prefix) for item in items]
             classified_items = [f.result() for f in futures]
-        # fm-send resolves its target through state/<task>.meta (or <id>.meta for an
-        # fm-<id> selector); a torn-down task has neither.
         for item in classified_items:
-            metas = [item.task] + ([item.task[3:]] if item.task.startswith("fm-") else [])
-            if item.resolve_cmd and not any((send_state / f"{m}.meta").is_file() for m in metas):
+            if not item.resolve_cmd:
+                continue
+            ledger = send_ledger(send_state, item.task)
+            origin = args.status_file or send_state / f"{item.task}.status"
+            if ledger is None:
                 item.resolve_cmd = ""
                 item.suggested_action += " (task metadata gone; close it by hand)"
+            elif ledger.resolve() != origin.resolve():
+                item.resolve_cmd = ""
+                item.suggested_action += f" (fm-send would close {ledger}, not {origin}; close it by hand)"
 
     # Filters
     filtered_items = classified_items

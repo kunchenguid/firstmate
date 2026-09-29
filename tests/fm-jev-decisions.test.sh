@@ -36,12 +36,21 @@ class H(http.server.BaseHTTPRequestHandler):
             return
         body = json.loads(raw)
         key = body["state"]["key"]
+        if key.startswith("noul-rejected"):
+            self.send_response(400)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"error": "unsupported question type: noul"}')
+            return
         answers = {}
         for prefix, (choice, noul) in ANSWERS.items():
             if key.startswith(prefix):
                 answers = {"category": {"choice": choice, "confidence": 0.8, "probabilities": {choice: 0.8}},
                            "actionable_now": {"noul": noul}}
                 break
+        if key.startswith("noul-dropped"):
+            answers = {"category": {"choice": "actionable_now", "confidence": 0.8},
+                       "actionable_now": {"error": "unsupported question type: noul"}}
         out = json.dumps({"answers": answers}).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -170,11 +179,25 @@ gone=$("$DECISION_SH" --all --state-dir "$GONE" --resolve-cmds)
 [ "$gone" = "# No actionable resolve commands generated." ] || fail "torn-down task must not get a resolve cmd: $gone"
 assert_contains "$("$DECISION_SH" --all --state-dir "$GONE")" "task metadata gone" "torn-down task is flagged for manual close"
 
-# 7c. An fm-<id> selector resolves through <id>.meta, as fm-send does.
+# 7c. A resolve cmd is kept only when fm-send would close the ledger the decision came from.
 LEGACY="$TDIR/legacy state"; mkdir -p "$LEGACY"
 printf 'blocked [key=old-dep]: superseded dependency\n' > "$LEGACY/fm-delta.status"
+printf 'blocked [key=old-dep]: a different decision\n' > "$LEGACY/delta.status"
 : > "$LEGACY/delta.meta"
-assert_contains "$("$DECISION_SH" --all --state-dir "$LEGACY" --resolve-cmds)" "fm-delta" "fm-<id> selector keeps its resolve cmd via <id>.meta"
+legacy=$("$DECISION_SH" --status-file "$LEGACY/fm-delta.status" --json)
+[ "$(printf '%s' "$legacy" | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["resolve_cmd"])')" = "" ] ||
+  fail "fm-delta.status must not get a cmd fm-send would apply to delta.status: $legacy"
+assert_contains "$legacy" "close it by hand" "ledger mismatch is flagged for manual close"
+: > "$LEGACY/fm-delta.meta"
+rm -f "$TDIR/argv"
+(cd "$RUNDIR" && bash -c "$(FM_HOME="$FAKE" "$DECISION_SH" --status-file "$LEGACY/fm-delta.status" --resolve-cmds)")
+[ "$(sed -n 3p "$TDIR/argv")" = fm-delta ] || fail "fm-delta.meta makes fm-delta.status resolvable"
+
+# 7d. An endpoint that rejects or drops the noul question leaves the batch unavailable.
+printf '%s\t%s\t%s\t%s\n' n noul-rejected needs-decision "x" n noul-dropped needs-decision "y" > "$TDIR/noul.tsv"
+noul=$("$DECISION_SH" --input "$TDIR/noul.tsv" --json)
+[ "$(printf '%s' "$noul" | python3 -c 'import json,sys; print(",".join(i["category"] for i in json.load(sys.stdin)))')" = unavailable,unavailable ] ||
+  fail "a rejected noul answer must report unavailable: $noul"
 
 # 8. A key configured only in the home's .env is used.
 ENVHOME="$TDIR/envhome"; mkdir -p "$ENVHOME"
