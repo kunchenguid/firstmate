@@ -51,7 +51,9 @@
 # `(repo: <name>)` metadata. Project names are compared exactly.
 #
 # DELIVERY. Obligations become due when the window is cleared or its until
-# passes. `clear` prints them at once, grouped by project; while they remain
+# passes. The existing watcher calls `expire` each cycle to queue a durable
+# wake before archiving a timed-out window. `clear` prints obligations at once,
+# grouped by project; while they remain
 # undelivered, every bin/fm-wake-drain.sh presentation (and so the session-start
 # digest) prints the same FOCUS HELD section, so a restart or a lost reply
 # cannot drop them. Main delivers them to the captain together, then runs the
@@ -63,6 +65,9 @@
 #   fm-focus.sh clear
 #       End the window (archive its record) and print every undelivered
 #       obligation grouped by project with the acknowledgement command.
+#   fm-focus.sh expire
+#       Watcher entry point: queue an expiry wake and archive an ended window.
+#       Print the wake reason only when a window expired.
 #   fm-focus.sh status [--json]
 #       `off`, `on ...`, or `ended ...`, with the undelivered count; --json
 #       prints {active,ended,projects,set,until,held:[...]} for the snapshot.
@@ -253,6 +258,25 @@ cmd_set() {
   printf '\n'
 }
 
+cmd_expire() {
+  local reason="check: focus-window-ended" now
+  fm_lock_acquire_wait "$LOCK"
+  window_state
+  if [ "$WINDOW_STATE" != ended ]; then
+    fm_lock_release "$LOCK"
+    return 0
+  fi
+  fm_wake_append check focus-window-ended "$reason" || {
+    fm_lock_release "$LOCK"; die "cannot queue the focus expiry"
+  }
+  now=$(now_epoch)
+  if ! { mkdir -p "$ARCHIVE_DIR" && mv -f "$RECORD" "$ARCHIVE_DIR/window-$now"; }; then
+    fm_lock_release "$LOCK"; die "cannot archive the focus record"
+  fi
+  fm_lock_release "$LOCK"
+  printf '%s\n' "$reason"
+}
+
 cmd_clear() {
   local now rows
   fm_lock_acquire_wait "$LOCK"
@@ -418,6 +442,7 @@ sub=${1:-}
 case "$sub" in
   set) cmd_set "$@" ;;
   clear) cmd_clear ;;
+  expire) cmd_expire ;;
   status) cmd_status "$@" ;;
   route) cmd_route "$@" ;;
   held) cmd_held ;;

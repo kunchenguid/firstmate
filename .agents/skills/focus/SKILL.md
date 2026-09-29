@@ -45,6 +45,7 @@ The window never changes authority: merges, answers, and escalations follow thei
 
 ## Delivering held outcomes
 
-When the window is cleared or its time runs out, `clear` or the drain's `FOCUS HELD` section lists every held outcome grouped by project.
+When the window is cleared, `clear` lists every held outcome grouped by project.
+At timed expiry, the existing watcher queues a durable wake on its next cycle, and the drain's `FOCUS HELD` section lists them.
 Tell the captain all of them in one reply, one project at a time, after checking current state so an outcome that has since settled is described as settled.
 Then run the printed `bin/fm-focus.sh delivered --through <seq>`; until then every drain presents them again, so an interrupted reply loses nothing.

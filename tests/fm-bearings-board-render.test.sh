@@ -333,8 +333,28 @@ EOF
   pass "the focus banner lists every held outcome and leaves held decisions answerable"
 }
 
+test_cleared_focus_keeps_pending_obligations_visible() {
+  local home focus_json out
+  home=$(make_home cleared-focus)
+  FM_HOME="$home" "$ROOT/bin/fm-focus.sh" set alpha >/dev/null
+  FM_HOME="$home" "$ROOT/bin/fm-focus.sh" route --task beta-call --project beta \
+    --class decision --summary "beta still needs a call" >/dev/null
+  FM_HOME="$home" "$ROOT/bin/fm-focus.sh" clear >/dev/null
+  focus_json=$(FM_HOME="$home" "$ROOT/bin/fm-focus.sh" status --json | jq '
+    {projects, until, held:[.held[] | {repo:.project, class, summary}]}')
+  out=$(render_call "$home" "[$(decision_card beta-call '"beta"' 'Beta call')]" "$focus_json")
+  printf '%s' "$out" | jq -e '
+    .error == "" and .focus.hidden == false
+      and (.focus.lines[0] | test("Focus ended") and test("1 held"))
+      and (.focus.lines[1] | test("beta still needs a call"))
+      and ([.call[].title] == ["Beta call"])
+  ' >/dev/null || fail "clearing focus hid pending obligations: $out"
+  pass "cleared focus accepts empty projects and renders every pending obligation"
+}
+
 test_captains_call_is_grouped_by_project_without_dropping_a_card
 test_the_focus_window_lists_every_held_outcome_on_the_board
+test_cleared_focus_keeps_pending_obligations_visible
 test_an_underway_row_leads_with_the_task_name_and_keeps_its_run_status
 test_an_underway_identifier_label_is_not_replaced_by_run_status
 test_charted_next_reads_newest_filed_first

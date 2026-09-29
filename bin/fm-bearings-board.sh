@@ -198,7 +198,7 @@ validate_payload() {  # <data.json>
       (has("focus") | not) or (.focus == null)
       or (.focus
         | type == "object"
-          and (.projects | type == "array") and ((.projects | length) > 0)
+          and (.projects | type == "array")
           and ([.projects[] | nonempty_string] | all)
           and ((has("until") | not) or (.until == null) or (.until | type == "string"))
           and (.held | type == "array")

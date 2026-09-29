@@ -115,6 +115,34 @@ test_an_expired_window_holds_nothing_more_and_its_obligations_come_due() {
   pass "an expired window stops holding and presents what it held"
 }
 
+test_the_idle_watcher_wakes_at_expiry() {
+  local home mode now until pid out
+  for mode in attended away; do
+    home=$(make_focus_home "watch-expiry-$mode")
+    [ "$mode" != away ] || touch "$home/state/.afk"
+    now=$(date -u +%s)
+    until=$(jq -nr --argjson now "$now" '$now + 4 | todate')
+    NOW_EPOCH=$now focus "$home" set alpha --until "$until" >/dev/null || fail "could not set timed focus"
+    NOW_EPOCH=$now focus "$home" route --task beta-call --class decision --summary "beta due" >/dev/null
+    NOW_EPOCH=$now focus "$home" expire > "$home/early"
+    assert_equals "$(cat "$home/early")" "" "expiry woke before the deadline"
+    PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+      FM_DATA_OVERRIDE="$home/data" FM_POLL=0.1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+      "$ROOT/bin/fm-watch.sh" > "$home/watch-out" 2> "$home/watch-err" &
+    pid=$!
+    wait_for_exit "$pid" 150 || fail "idle $mode watcher did not wake at expiry"
+    assert_contains "$(cat "$home/watch-out")" "check: focus-window-ended" "watcher lost the expiry wake"
+    assert_absent "$home/state/focus-window" "expired window was not archived"
+    out=$(drain "$home") || fail "expiry drain failed"
+    assert_contains "$out" "beta due" "expiry wake lost the held obligation"
+    assert_contains "$out" "FOCUS HELD" "expiry did not make delivery due"
+    assert_equals "$(focus "$home" expire)" "" "archived window expired twice"
+    focus "$home" delivered --through 1 >/dev/null
+    assert_equals "$(focus "$home" held)" "" "acknowledgement retained the obligation"
+  done
+  pass "idle attended and away watchers wake at expiry and preserve delivery until acknowledgement"
+}
+
 test_a_damaged_record_delivers_everything() {
   local home
   home=$(make_focus_home damaged)
@@ -130,4 +158,5 @@ test_no_window_is_inert
 test_urgent_and_unknown_project_outcomes_always_come_through
 test_held_outcomes_are_listed_while_set_and_delivered_grouped_after_clear
 test_an_expired_window_holds_nothing_more_and_its_obligations_come_due
+test_the_idle_watcher_wakes_at_expiry
 test_a_damaged_record_delivers_everything
