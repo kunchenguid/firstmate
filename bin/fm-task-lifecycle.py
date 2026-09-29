@@ -62,7 +62,8 @@ Optional next_action.continuation has exactly one of these observation contracts
 Unknown, stale, missing or uncertain effects are due for readback, never replay.
 An action receipt is not goal acceptance. Acceptance is main's evidence-backed
 assessment with an empty remaining_gap. Archived goals never request execution.
-No cleanup, remote-followup, historical enrollment, or provider success acceptance. A supervisor supplies the
+Cleanup receipts and remote-followup effects use this same record; they never
+authorize historical enrollment or provider success acceptance. A supervisor supplies the
 assessment; we check revision, scope, evidence and transition invariants.
 Store: data/<task>/lifecycle.json (0600, single-link, bounded, atomic replace).
 Absent => legacy; invalid/changed brief/execution generation => unknown.
@@ -120,7 +121,7 @@ DELEGATED_SCHEMA = 'fm-task-lifecycle.v2'
 PERMISSIONS = {'inspect', 'precheck', 'steer-same-intent', 'observe-receipt', 'handoff'}
 MAX_BYTES = 262144
 MAX_INT = 9007199254740991
-KINDS = {'steer', 'relaunch', 'spawn', 'readback', 'wait', 'decision'}
+KINDS = {'steer', 'relaunch', 'spawn', 'readback', 'wait', 'decision', 'cleanup', 'remote-followup'}
 PHASES = {'prepared', 'attempted', 'confirmed', 'refused', 'uncertain'}
 
 
@@ -319,7 +320,7 @@ class Task:
                     require(text(continuation.get('release_ref')) and bool(re.fullmatch(r'[a-f0-9]{64}', str(continuation.get('release_sha256', '')))), 'blocker needs observable release condition')
                 else:
                     raise Refusal('unsupported continuation type')
-        if action and record['disposition'] != 'open':
+        if action and record['disposition'] == 'accepted':
             require(action['phase'] in ('confirmed', 'refused'), 'unreconciled action prevents terminal acceptance')
         if current:
             require(record.get('brief_sha256') == digest(regular(self.directory / 'brief.md')), 'brief changed; explicit reconciliation required')
@@ -505,10 +506,11 @@ class Task:
     def readback(self, args):
         record = self.read()
         require(record, 'no lifecycle to read back')
-        self.delegated(record, 'observe-receipt')
+        if os.environ.get('FM_SUPERVISION_ACTOR', 'main') == 'branch':
+            self.delegated(record, 'observe-receipt')
         action = record.get('next_action')
         require(action and action['phase'] in ('attempted', 'uncertain'), 'no uncertain action to read back')
-        if not action.get('continuation') and action['kind'] == 'steer':
+        if action['kind'] == 'steer':
             inbox = self.state / (self.id + '.inbox')
             matches = []
             for directory in (inbox, inbox / 'handled'):
@@ -547,9 +549,17 @@ class Task:
         require(record and record['disposition'] == 'open', 'effect requires an open goal')
         action = record.get('next_action')
         require(action and action['id'] == args.action_id and action['kind'] == 'steer', 'effect action identity mismatch')
-        require(action['phase'] == 'prepared', 'effect may have happened; readback required')
         require(action['payload_sha256'] == args.payload_sha256, 'effect body differs from prepared action')
         self.reference(action['payload_ref'], action['payload_sha256'])
+        if action['phase'] == 'confirmed':
+            return record
+        if action['phase'] in ('attempted', 'uncertain'):
+            record = self.readback(args)
+            action = record['next_action']
+            args.phase = 'confirmed'
+            args.receipt_ref = action.get('receipt_ref')
+            return self.action(args)
+        require(action['phase'] == 'prepared', 'effect cannot execute')
         if os.environ.get('FM_SUPERVISION_ACTOR', 'main') == 'branch':
             self.delegated(record, 'steer-same-intent', effect=True)
         args.phase = 'attempted'
@@ -1073,7 +1083,15 @@ class Task:
         if os.environ.get('FM_SUPERVISION_ACTOR', 'main') == 'branch' and args.phase == 'confirmed':
             require(action.get('continuation', {}).get('type') == 'executor', 'branch confirmation requires actual executor receipt')
         if args.phase == 'confirmed' and action.get('continuation', {}).get('type') == 'executor':
-            require(self.observe_executor(action['continuation'])[0] == 'running', 'executor has not acknowledged its exact instruction')
+            continuation = action['continuation']
+            if continuation.get('inbox_id'):
+                receipt = Path(action['receipt_ref'])
+                if receipt.parent == self.state / (self.id + '.inbox') / 'handled':
+                    self.reference(str(receipt), action['receipt_sha256'])
+                else:
+                    require(self.observe_executor(continuation)[0] == 'running', 'executor has not acknowledged its exact instruction')
+            else:
+                require(self.observe_executor(continuation)[0] == 'running', 'executor has not acknowledged its exact instruction')
         action['phase'] = args.phase
         record['revision'] += 1
         self.write(record)
@@ -1188,6 +1206,107 @@ class Task:
                 'delegated': delegated, 'revision': record['revision']}
 
 
+    def authorize(self, args):
+        record = self.read()
+        require(record and record['disposition'] == 'open', 'execution requires an open goal')
+        action = record.get('next_action')
+        require(action and action['id'] == args.action_id and action['kind'] == args.kind,
+                'action identity/kind conflict')
+        require(action['expected_execution_generation'] == args.expected_generation,
+                'execution generation conflict')
+        require(action['phase'] in ('prepared', 'attempted', 'confirmed'), 'action cannot execute')
+        require(action['phase'] == 'confirmed' or stamp(action['deadline']) >= stamp(now()), 'action deadline expired; read back existing effects without executing')
+        payload = self.reference(action['payload_ref'], action['payload_sha256'])
+        require(sys.stdin.buffer.read(MAX_BYTES + 1) == payload, 'action payload collision')
+        if action['phase'] == 'prepared':
+            args.phase = 'attempted'
+            return self.action(args)
+        return record
+
+    def link_cleanup(self):
+        record = self.read()
+        require(record and record['disposition'] in ('accepted', 'archived'), 'cleanup needs terminal disposition')
+        receipt = self.state / (self.id + '.cleanup.json')
+        regular(receipt, True)
+        evidence = {'ref': str(receipt), 'sha256': digest(regular(receipt, True))}
+        if record.get('cleanup_ref') == str(receipt) and evidence in record['assessment']['evidence']:
+            return record
+        record['cleanup_ref'] = str(receipt)
+        record['assessment']['evidence'] = [item for item in record['assessment']['evidence'] if item['ref'] != str(receipt)] + [evidence]
+        record['revision'] += 1
+        self.write(record)
+        return record
+
+    def cleanup_read(self):
+        record = self.read()
+        require(record and record['disposition'] in ('accepted', 'archived'), 'cleanup needs terminal disposition')
+        result = load(self.state / (self.id + '.cleanup.json'))
+        require(result.get('schema') == 'fm-task-cleanup.v1' and result.get('task_id') == self.id and
+                result.get('spawn_gen') == record['execution_generation'] and
+                result.get('goal_revision') == record['goal_revision'], 'cleanup receipt identity conflict')
+        require(isinstance(result.get('phases'), dict), 'invalid cleanup phases')
+        return result
+
+    def cleanup_binding(self, args):
+        """Validate or persist an immutable binding before endpoint effects.
+
+        Teardown owns the receipt; these are its common bounded/private-file
+        mechanics, used instead of a second file-safety implementation.
+        """
+        result = self.cleanup_read()
+        journal = self.state / (self.id + '.herdr-presentation')
+        binding = digest(regular(journal))
+        prior = result.get('journal_sha256')
+        require(prior is None or prior == binding, 'cleanup launch binding changed')
+        print(binding)
+        return None
+
+    def bind_execution(self, args):
+        record = self.read(current=False)
+        if record is None:
+            return self.init()
+        generation = self.generation()
+        require(generation is not None, 'execution must publish metadata first')
+        action = record.get('next_action')
+        if generation == record['execution_generation']:
+            if action and action['id'] == args.action_id and action['phase'] == 'uncertain' and args.phase != 'uncertain':
+                require(action['kind'] == 'remote-followup', 'uncertain local execution requires its control owner')
+                args.phase = 'confirmed'
+                args.receipt_ref = str(self.state / 'remote-tasks' / self.id / 'state.json')
+                args.receipt_sha256 = digest(regular(Path(args.receipt_ref), True))
+                return self.action(args)
+            return record
+        require(record['disposition'] == 'open', 'cannot bind new execution to a terminal goal')
+        require(record['execution_generation'] == args.expected_generation, 'old execution generation conflict')
+        if action and action['phase'] not in ('confirmed', 'refused'):
+            require(action['id'] == args.action_id and action['kind'] in ('spawn', 'relaunch', 'remote-followup'), 'unconfirmed action prevents replacing execution')
+            require(args.phase != 'uncertain' or action['kind'] == 'remote-followup', 'only remote submission has a prepared new generation')
+            action['phase'] = ('uncertain' if args.phase == 'uncertain' else
+                               'attempted' if action.get('continuation', {}).get('type') == 'executor' else 'confirmed')
+            receipt = (self.state / 'remote-tasks' / self.id / 'state.json'
+                       if action['kind'] == 'remote-followup' else self.state / (self.id + '.meta'))
+            action['receipt_ref'] = str(receipt)
+            action['receipt_sha256'] = digest(regular(receipt))
+        if action:
+            action['result_execution_generation'] = generation
+        record['execution_generation'] = generation
+        record['brief_sha256'] = digest(regular(self.directory / 'brief.md'))
+        record['revision'] += 1
+        self.write(record)
+        return record
+
+    def refresh_brief(self, args):
+        record = self.read(current=False)
+        if record is None:
+            return None
+        require(record['disposition'] == 'open' and record['execution_generation'] == args.expected_generation == self.generation(), 'brief refresh generation/disposition conflict')
+        sha = digest(regular(self.directory / 'brief.md'))
+        if sha != record['brief_sha256']:
+            record['brief_sha256'] = sha
+            record['revision'] += 1
+            self.write(record)
+        return record
+
     def init(self):
         prior = self.read()
         if prior:
@@ -1214,7 +1333,7 @@ class Task:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('operation', choices=('read', 'inspect', 'assess', 'update-brief', 'refresh', 'owner-receipt', 'init', 'reconcile', 'action', 'observe', 'coordinate', 'branch-patch', 'effect', 'bind-inbox', 'handoff-binding', 'handoff-effect', 'readback'))
+    parser.add_argument('operation', choices=('read', 'inspect', 'assess', 'update-brief', 'refresh', 'owner-receipt', 'init', 'reconcile', 'action', 'observe', 'coordinate', 'branch-patch', 'effect', 'bind-inbox', 'handoff-binding', 'handoff-effect', 'readback', 'mode', 'modes', 'due', 'authorize', 'link-cleanup', 'cleanup-read', 'cleanup-binding', 'bind-execution', 'refresh-brief'))
     parser.add_argument('task')
     parser.add_argument('--expected-revision', type=int)
     parser.add_argument('--record')
@@ -1230,11 +1349,25 @@ def main():
     parser.add_argument('--session-file')
     parser.add_argument('--entry-id')
     parser.add_argument('--input')
-    parser.add_argument('--kind', choices=('merge', 'cleanup'))
+    parser.add_argument('--kind', choices=tuple(KINDS | {'merge'}))
     parser.add_argument('--execution-generation')
     parser.add_argument('--facts')
+    parser.add_argument('--expected-generation')
     args = parser.parse_args()
     try:
+        if args.operation == 'modes':
+            require(args.task is not None and len(args.task.encode()) <= MAX_BYTES, 'invalid task batch size')
+            tasks = json.loads(args.task)
+            require(isinstance(tasks, list) and len(tasks) <= 1000 and all(atom(t) for t in tasks), 'invalid task batch')
+            modes = {}
+            for task_id in tasks:
+                try:
+                    record = Task(task_id).read()
+                    modes[task_id] = record['disposition'] if record else 'legacy'
+                except (Refusal, OSError, ValueError, TypeError, KeyError):
+                    modes[task_id] = 'unknown'
+            print(json.dumps(modes))
+            return
         task = Task(args.task)
         if args.operation == 'inspect':
             result = task.inspect(args.evidence)
@@ -1270,10 +1403,71 @@ def main():
             result = task.action(args)
         elif args.operation == 'observe':
             result = task.observe()
+        elif args.operation == 'authorize':
+            result = task.authorize(args)
+        elif args.operation == 'link-cleanup':
+            result = task.link_cleanup()
+        elif args.operation == 'cleanup-binding':
+            task.cleanup_binding(args)
+            return
+        elif args.operation == 'cleanup-read':
+            result = task.cleanup_read()
+        elif args.operation == 'bind-execution':
+            result = task.bind_execution(args)
+        elif args.operation == 'refresh-brief':
+            result = task.refresh_brief(args)
         else:
             result = task.read()
+            if args.operation == 'mode':
+                print(result['disposition'] if result else 'legacy')
+                return
+            if args.operation == 'due':
+                action = result.get('next_action') if result else None
+                cleanup_history = (result or {}).get('owner_receipts', {}).get('cleanup', [])
+                cleanup_complete = bool(result and any(
+                    proof.get('execution_generation') == result['execution_generation'] and
+                    proof.get('facts') == {'taskRecordRemoved': True, 'endpointConfirmedGone': True,
+                                           'copyDisposition': 'returned-or-already-absent', 'bookkeepingComplete': True}
+                    for proof in cleanup_history))
+                cleanup_obligation = bool(result and result['disposition'] in ('accepted', 'archived') and
+                                          not cleanup_complete and
+                                          ((task.state / (task.id + '.meta')).exists() or
+                                           result.get('cleanup_ref') or
+                                           (task.state / (task.id + '.cleanup.json')).exists()))
+                # An action receipt proves its effect, never goal acceptance.
+                # A future bounded wait defers reconciliation; even a confirmed
+                # action leaves an open goal due once that bound is reached.
+                # Terminal goals remain due only while a concrete resource or
+                # cleanup receipt is unfinished; a complete owner receipt stops
+                # the bounded scanner from publishing another generation.
+                open_goal = bool(result and result['disposition'] == 'open')
+                due = bool(result and ((open_goal and action and stamp(action['recheck_at']) <= stamp(now())) or
+                                       (open_goal and not action) or cleanup_obligation))
+                expired = bool(open_goal and action and stamp(action['deadline']) <= stamp(now()))
+                observations = []
+                for path in (task.directory / 'report.md', task.state / (task.id + '.cleanup.json')):
+                    if path.exists() or path.is_symlink():
+                        try:
+                            observed = digest(regular(path))
+                            observations.append(observed)
+                            if result and not any(item['sha256'] == observed and
+                                                  (task.home / item['ref']).resolve() == path.resolve()
+                                                  for item in result['assessment']['evidence']):
+                                due = True
+                        except (Refusal, OSError):
+                            observations.append('unreadable')
+                            due = True
+                print(json.dumps({'due': due, 'expired': expired, 'observed_evidence_key': digest(json.dumps(observations).encode()), 'record': result}))
+                return
         print(json.dumps(result, ensure_ascii=False))
     except (Refusal, OSError, ValueError, TypeError, KeyError, subprocess.TimeoutExpired) as error:
+        if args.operation == 'mode':
+            # Homes without this task data predate the optional lifecycle record.
+            home = Path(os.environ.get('FM_DATA_OVERRIDE', str(Path(os.environ.get('FM_HOME', '.')) / 'data')))
+            if atom(args.task) and not (home / args.task).exists():
+                print('legacy')
+                return
+            print('unknown')
         print('REFUSED: lifecycle: ' + str(error), file=sys.stderr)
         sys.exit(1)
 

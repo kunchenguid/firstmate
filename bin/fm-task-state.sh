@@ -28,21 +28,26 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
-
+export FM_HOME
+# shellcheck source=bin/fm-task-lifecycle-lib.sh
+. "$SCRIPT_DIR/fm-task-lifecycle-lib.sh"
 # The task-local goal owner is opt-in through enrollment, independent of the
 # provider/process state below. No historical task is enrolled by a state read.
 case "${1:-}" in
-  lifecycle|inspect|assess|update-brief|refresh|observe|enroll|reconcile|action|coordinate|branch-patch|readback)
+  lifecycle|inspect|assess|update-brief|refresh|observe|enroll|init|reconcile|action|coordinate|branch-patch|readback|modes)
     operation=$1; shift
     id=${1:-}; [ -n "$id" ] || exit 2
     shift
     # shellcheck source=bin/fm-task-lifecycle-lib.sh
     . "$SCRIPT_DIR/fm-task-lifecycle-lib.sh"
     case "$operation" in
+      modes)
+        . "$SCRIPT_DIR/fm-timeout-lib.sh"
+        fm_run_timed 2 python3 "$SCRIPT_DIR/fm-task-lifecycle.py" modes "$id" ;;
       lifecycle) fm_task_lifecycle read "$id" "$@" ;;
       observe) fm_task_lifecycle observe "$id" "$@" ;;
       inspect) fm_task_lifecycle inspect "$id" "$@" ;;
-      enroll) fm_task_lifecycle_mutate init "$id" "$@" ;;
+      enroll|init) fm_task_lifecycle_mutate init "$id" "$@" ;;
       *) fm_task_lifecycle_mutate "$operation" "$id" "$@" ;;
     esac
     exit $?

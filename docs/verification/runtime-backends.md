@@ -1154,6 +1154,20 @@ That run observed TraeX reporting native `agent_status=unknown` while its `traex
 The busy reader uses the existing structural process probe in that case; exact `traex` and `traecli` names are recognized, with real-process decoy coverage in `tests/fm-agent-process-live-e2e.test.sh`.
 Structural liveness permits the task-bound transcript read but does not itself infer busy or idle.
 
+## Independent task workspace cleanup
+
+Verified on 2026-09-25 with Herdr 0.8.0 / protocol 20, a named non-default session, and synthetic task records.
+`tests/fm-teardown-lifecycle-herdr-e2e.test.sh` routes every actual backend operation through an explicitly configured isolation helper.
+It closes an exact non-focused task pane, preserves an active sibling process and mixed workspace, refuses focused or active targets and stale generations, and replays failed backlog bookkeeping after a real close.
+Missing directories do not prevent positively identified dedicated workspace removal; reports remain byte-identical.
+The helper verifies that the default session is unchanged after teardown.
+No model harness or remote research provider participates in this test.
+
+The endpoint safety boundary is a verified version 3 launch journal and final identity readback.
+An old journal or an unverified terminal remains a cleanup obligation.
+Directory return is a separate phase and remains subject to the [positive slot-ownership proof](../architecture.md#delivery-modes-are-explicit-per-task).
+Herdr has no atomic compare-and-close transaction, so concurrent external mutations can be detected and retained but cannot be excluded by a Firstmate lock alone.
+
 ## Pi headless short tasks
 
 On 2026-09-28, the portable exact-candidate suites passed after removing Firstmate's short-task input, output, request, tool-call, and wall-clock budgets while retaining operation grants, expiry, cancellation, process identity, durable receipts, and no replay.

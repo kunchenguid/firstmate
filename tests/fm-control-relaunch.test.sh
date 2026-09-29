@@ -172,6 +172,7 @@ run_control() {  # <case-dir> <args...>
     FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=0.05 FM_CONTROL_LAUNCH_WAIT=0.05 \
     FM_REAL_GIT="${FM_REAL_GIT:-}" FM_FAKE_GIT_FAILURE="${FM_FAKE_GIT_FAILURE:-}" \
     FM_REAL_MV="${FM_REAL_MV:-}" FM_FAKE_COMPLETE_JOURNAL_MV_FAIL="${FM_FAKE_COMPLETE_JOURNAL_MV_FAIL:-}" \
+    FM_FAKE_JOURNAL_PHASE_FAIL="${FM_FAKE_JOURNAL_PHASE_FAIL:-}" \
     FM_FAKE_META_PUBLISH_MV_FAIL="${FM_FAKE_META_PUBLISH_MV_FAIL:-}" \
     FM_FAKE_TRACE_PREPARE="${FM_FAKE_TRACE_PREPARE:-}" \
     FM_FAKE_TRACE_RELEASE="${FM_FAKE_TRACE_RELEASE:-}" \
@@ -216,6 +217,13 @@ make_mv_failure_stub() {  # <case-dir>
 if [ -n "${FM_FAKE_COMPLETE_JOURNAL_MV_FAIL:-}" ]; then
   for path in "$@"; do
     if [ -f "$path" ] && grep -Fqx 'phase=complete' "$path"; then
+      exit 1
+    fi
+  done
+fi
+if [ -n "${FM_FAKE_JOURNAL_PHASE_FAIL:-}" ]; then
+  for path in "$@"; do
+    if [ -f "$path" ] && grep -Fqx "phase=$FM_FAKE_JOURNAL_PHASE_FAIL" "$path"; then
       exit 1
     fi
   done
@@ -288,6 +296,31 @@ SH
 }
 
 # --- 1. same-harness relaunch -----------------------------------------------
+
+test_durable_action_relaunch_replay() {
+  local dir before out rc
+  dir=$(new_case goal-replay rlgoal)
+  add_ship_task "$dir" rlgoal pi
+  printf 'spawn_gen=s-original\n' >> "$dir/home/state/rlgoal.meta"
+  printf 'Continue the missing acceptance work' > "$dir/home/data/rlgoal/note.txt"
+  FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" init rlgoal >/dev/null || fail 'goal init'
+  python3 - "$dir/home" <<'PYGOAL'
+import json,sys,hashlib,os
+h=sys.argv[1]; p=h+'/data/rlgoal/lifecycle.json'; d=json.load(open(p)); note=h+'/data/rlgoal/note.txt'
+d['next_action']={'id':'rlgoal.g1.a1','kind':'relaunch','phase':'prepared','expected_execution_generation':'s-original','payload_ref':note,'payload_sha256':hashlib.sha256(open(note,'rb').read()).hexdigest(),'receipt_ref':None,'attempts':0,'attempt_limit':2,'recheck_at':'2000-01-01T00:00:00Z','deadline':'2099-01-01T00:00:00Z'}
+d['next_action_seq']=2
+p=h+'/candidate.json';json.dump(d,open(p,'w'));os.chmod(p,0o600)
+PYGOAL
+  FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" reconcile rlgoal --expected-revision 1 --record "$dir/home/candidate.json" >/dev/null || fail 'prepare relaunch'
+  out=$(run_control "$dir" rlgoal relaunch --note 'Continue the missing acceptance work' --action-id rlgoal.g1.a1 --expected-generation s-original); rc=$?
+  expect_code 0 "$rc" "durable relaunch failed: $out"
+  before=$(cat "$dir/fake/literal")
+  out=$(run_control "$dir" rlgoal relaunch --note 'Continue the missing acceptance work' --action-id rlgoal.g1.a1 --expected-generation s-original); rc=$?
+  expect_code 0 "$rc" "durable relaunch replay failed: $out"
+  [ "$before" = "$(cat "$dir/fake/literal")" ] || fail 'replay issued another agent effect'
+  FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" lifecycle rlgoal | jq -e '.next_action.phase=="confirmed" and .next_action.attempts==1 and .next_action.expected_execution_generation=="s-original" and .next_action.result_execution_generation==.execution_generation and .execution_generation!="s-original"' >/dev/null || fail 'replacement lost its expected/result generation binding'
+  pass 'durable relaunch preserves original generation and replays without duplicate exit or launch'
+}
 
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
   local dir out rc gen_before gen_after
@@ -838,6 +871,26 @@ test_checkpoint_refuses_uninspectable_head_and_status() {
   pass "fm-control relaunch: checkpoint inspection failures refuse before stopping"
 }
 
+test_pre_exit_rollback_restores_lifecycle_brief_binding() {
+  local dir out rc old_sha current_sha real_mv
+  dir=$(new_case lifecycle-brief-rollback rl45)
+  add_ship_task "$dir" rl45 pi
+  printf 'spawn_gen=s-rl45\n' >> "$dir/home/state/rl45.meta"
+  FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" init rl45 >/dev/null
+  old_sha=$(jq -r '.brief_sha256' "$dir/home/data/rl45/lifecycle.json")
+  real_mv=$(command -v mv)
+  make_mv_failure_stub "$dir"
+  out=$(FM_REAL_MV="$real_mv" FM_FAKE_JOURNAL_PHASE_FAIL=stopping \
+    run_control "$dir" rl45 relaunch --note "this note must roll back with its binding"); rc=$?
+  expect_code 1 "$rc" "a pre-exit journal failure should fail closed"$'\n'"$out"
+  current_sha=$(FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" lifecycle rl45 | jq -r '.brief_sha256') \
+    || fail "restored instructions left the lifecycle unreadable"
+  [ "$current_sha" = "$old_sha" ] || fail "restored instructions kept the replacement brief hash"
+  assert_no_grep "this note must roll back with its binding" "$dir/home/data/rl45/brief.md" \
+    "pre-exit rollback left the replacement note in the instructions"
+  pass "fm-control relaunch: pre-exit rollback restores instructions and lifecycle binding atomically"
+}
+
 # --- 5. failure after the agent is stopped -----------------------------------
 
 test_launch_failure_keeps_the_prior_record_and_reports_it() {
@@ -1253,6 +1306,8 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
   pass "relaunch heals an item that drifted out of In flight while the task stayed live"
 }
 
+test_durable_action_relaunch_replay
+
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
@@ -1276,6 +1331,7 @@ test_missing_worktree_refuses_before_stopping_anything
 test_missing_instructions_refuse_before_stopping_anything
 test_checkpoint_refusal_leaves_the_record_byte_identical
 test_checkpoint_refuses_uninspectable_head_and_status
+test_pre_exit_rollback_restores_lifecycle_brief_binding
 test_launch_failure_keeps_the_prior_record_and_reports_it
 test_prepublication_failure_keeps_concurrent_durable_metadata
 test_post_publication_launch_failure_keeps_the_new_record

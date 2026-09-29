@@ -46,7 +46,7 @@ Handle it start to finish in one turn sequence:
 1. Drain first: run `bin/fm-wake-drain.sh` and read every presented record, plus any OPEN DECISIONS, UNREAD STATUS, and RECORD DIVERGENCE sections.
 2. For each task you are about to mutate, claim its lease first: `bin/fm-lease.sh claim <task>`.
    Claim the reserved `backlog` lease around backlog writes (`bin/fm-lease.sh claim backlog`, then `bin/fm-tasks-axi.sh ...`, then release).
-   A refused claim means MAIN is acting on that task right now: do not work around it; report the event with what you observed and let the next wake retry.
+   A refused claim means MAIN is acting on that task right now: preserve the original wake or an existing durable handoff, report the refusal, and never acknowledge away the only pending reconciliation.
    When one task's outcome authorizes an instruction for a different local worker, use `bin/fm-task-handoff.sh send <source-task> <target-task> --id <stable-id> '<exact instruction>'` before trying to claim the target, so a refused target lease cannot discard the instruction body.
 3. Handle with real tools: `bin/fm-task-state.sh <task>` for provider-aware current state (a status line is a wake event, not current-state truth), `bin/fm-send.sh` for a short steer, `bin/fm-control.sh <task> interrupt|exit|relaunch` for lifecycle, `bin/fm-pr-check.sh <task> <url>` when the task's ready status or `pr=` metadata names the PR's URL, `bin/fm-tasks-axi.sh` for backlog moves.
    For `check: procevent ida ida-<task> <sequence>`, always confirm the captured generation through `bin/fm-procevent-ida.sh handle <task> <sequence> state/procevent-inbox/ida-<task>.<sequence>.result`, even when the runner already applied it and the command reports a duplicate.
@@ -56,7 +56,8 @@ Handle it start to finish in one turn sequence:
    The report is what durably records your outcome and merges it into MAIN; an event without a report is an event MAIN never learns about, so never skip it, including for events where you took no action.
 5. Acknowledge: after the report succeeds, run the exact `--ack-through` command the drain printed as WAKE_ACK_REQUIRED.
 6. Release every lease you claimed: `bin/fm-lease.sh release <task>`.
-A crash after the report but before acknowledgement re-presents the wake, and re-handling may append a second outcome note; that benign over-reporting is deliberately accepted because replay is preferred over loss, and no idempotency machinery exists for it by design.
+A crash after the report but before acknowledgement re-presents the wake; validated lifecycle evidence reuses its original durable outcome sequence, including an outcome main has not processed yet.
+Repeat reconciliation safely, never repeat a new effect or completion alert merely because delivery was interrupted.
 
 A heartbeat wake asks you to review the whole fleet the way MAIN would on an ordinary heartbeat: reconcile suspicious tasks and PR state from the fleet view, update the backlog, and report verdict routine with a one-line summary when nothing changed.
 Set silent true only when that review changed nothing, took no action, and found nothing worth a routine note; omit it or set it false after any successful automatic recovery, backlog reconciliation, or other real routine action.
@@ -69,6 +70,9 @@ For anything it tells you to escalate, or any failure that survives the playbook
 
 The durable task brief owns the intended outcome, acceptance evidence, scope and exclusions, and hard-block condition.
 For every material worker return, compare the current artifacts and verified state with that contract before deciding what the event means.
+Read and persist the current assessment through `bin/fm-task-state.sh lifecycle|reconcile` before reporting and acknowledging the event; `docs/task-lifecycle.md` routes the record, bounded action and recovery owners.
+Prepare automatic continuation with one stable action identity, exact payload and expected execution generation, then use the existing action owner's idempotent interface and verify its receipt.
+If the record is accepted or archived, handle only late delivery, real decisions or residual cleanup; do not reconstruct old work from stale status text.
 A process exit, provider success, report, implementation commit, `done:` event, PR, or other intermediate milestone is not objective acceptance by itself.
 When evidence still has an authorized, recoverable gap, send one specific bounded continuation and keep the task active; an empty worker inbox is not a reason to replace progress with waiting.
 For a no-mistakes implementation checkpoint, continue the existing validation phase exactly as its delivery contract requires instead of declaring the task accepted.

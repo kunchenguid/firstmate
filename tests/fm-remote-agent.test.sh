@@ -114,9 +114,16 @@ case "$args" in
           printf 'tool:%s\n' "$tool" >>"$log"
           if [ "$tool" = list_commands ]; then
             if [ "${FM_IDA_FAKE_NO_MODEL_CAPABILITY:-0}" = 1 ]; then model_option=; else model_option=' --model <name>'; fi
+            if [ "${FM_IDA_FAKE_NO_FOLLOWUP:-0}" = 1 ]; then
+              printf '{"jsonrpc":"2.0","id":%s,"result":{"content":[{"type":"text","text":"no continuation capability"}],"isError":false}}\n' "$request_id"
+              continue
+            fi
             text=$(printf 'bytedcli ida deep-research create — Options: --content <text> --name <name>%s --timeout-ms <milliseconds>
 bytedcli ida session raw list — Options: --agent-id <id>
 bytedcli ida session get — Options: --session-id <id>
+bytedcli ida deep-research list — Options: --session-id <id>
+bytedcli ida deep-research get — Options: --session-id <id> --task-id <id>
+bytedcli ida deep-research create — Options: --session-id <id> --no-wait
 bytedcli ida chat completion close — Options: --session-id <id>' "$model_option" | jq -Rs .)
             printf '{"jsonrpc":"2.0","id":%s,"result":{"content":[{"type":"text","text":%s}],"isError":false}}\n' "$request_id" "$text"
             continue
@@ -172,6 +179,9 @@ bytedcli ida chat completion close — Options: --session-id <id>' "$model_optio
     ;;
   *" ida --region sg model list "*)
     success '{"models":[{"name":"ida-research-test"},{"name":"ida-explicit-test"}]}'
+    ;;
+  *" ida --region sg deep-research list "*)
+    success '{"session":{"id":70001},"tasks":[{"task_id":80001,"terminal_status":"completed"}]}'
     ;;
   *" ida --region sg deep-research artifact list "*)
     case "$mode" in
@@ -1313,6 +1323,7 @@ test_abandon_after_authoritative_zero_match() {
   creates=$(grep -F -c 'command:ida-region-sg-deep-research-create' "$home/bytedcli.log" || true)
   [ "$creates" -eq 1 ] || fail "abandonment path issued another create"
   FM_HOME="$home" "$RETIRE" "$id" >/dev/null 2>&1 && fail "abandoned retirement bypassed the decision gate"
+  fm_test_archive_goal "$home" "$id"
   printf 'decisions_reviewed=1\ndecision_keys=\n' >>"$home/state/$id.meta"
   FM_HOME="$home" "$RETIRE" "$id" >/dev/null || fail "decision-complete abandoned retirement failed"
   assert_absent "$home/state/$id.meta" "retirement retained abandoned iDA metadata"
@@ -1355,6 +1366,7 @@ test_cancellation_and_retirement_authority() {
     "legacy durable version was not retained as informational report metadata"
   rc=0; FM_HOME="$home" "$RETIRE" "$id" >"$home/retire.out" 2>"$home/retire.err" || rc=$?
   [ "$rc" -ne 0 ] || fail "retirement bypassed the decision gate"
+  fm_test_archive_goal "$home" "$id"
   printf 'decisions_reviewed=1\ndecision_keys=\n' >>"$home/state/$id.meta"
   FM_HOME="$home" "$RETIRE" "$id" >/dev/null || fail "decision-complete iDA retirement failed"
   assert_absent "$home/state/$id.meta" "retirement retained iDA metadata"
@@ -1376,6 +1388,7 @@ test_retirement_pairs_backlog_and_preserves_failed_close() {
     : > "$home/sessions.tsv"
     FM_IDA_FAKE_MODE=success dispatch_ida "$home" "$fakebin" "$id" >/dev/null || fail "retirement fixture dispatch failed"
     wait_phase "$home" "$id" terminal-success || fail "retirement fixture did not complete"
+    fm_test_archive_goal "$home" "$id"
     printf 'decisions_reviewed=1\ndecision_keys=\n' >> "$home/state/$id.meta"
     if [ "$mode" = held ]; then
       TASKS_AXI_BACKEND=markdown tasks-axi hold "$id" --file "$home/data/backlog.md" --kind captain --reason 'Pending independent acceptance' >/dev/null || fail "hold fixture failed"
@@ -1492,6 +1505,76 @@ SH
   pass "new AIME tasks explicitly select remote-agent while the legacy schema and lifecycle remain intact"
 }
 
+test_followup_identity_and_unknown_submission() {
+  local home fakebin id=ida-followup old_sha creates outcome rc=0
+  home=$(new_home followup); fakebin=$(make_fake_bytedcli "$home"); write_ida_config "$home"; new_task "$home" "$id"
+  : > "$home/bytedcli.log"; : > "$home/sessions.tsv"
+  dispatch_ida "$home" "$fakebin" "$id" >/dev/null || fail 'initial followup fixture dispatch'
+  wait_phase "$home" "$id" terminal-success || fail 'initial followup fixture terminal'
+  old_sha=$(shasum -a 256 "$home/data/$id/report.md" | cut -d' ' -f1)
+  printf 'Read existing artifacts only; retain the original query identities. Supply the missing CSV link.\n' > "$home/data/$id/followup.txt"
+  chmod 600 "$home/data/$id/followup.txt"
+  python3 - "$home" "$id" <<'PY'
+import json,hashlib,pathlib,sys
+h=pathlib.Path(sys.argv[1]);task=sys.argv[2];p=h/'data'/task
+d=json.loads((p/'lifecycle.json').read_text());d['assessment']['outcome']='Provider terminal; requested CSV still missing'
+d['assessment']['remaining_gap']='CSV link absent';payload=p/'followup.txt'
+d['next_action']={'id':task+'.g1.a1','kind':'remote-followup','phase':'prepared','expected_execution_generation':'remote-1',
+'payload_ref':str(payload),'payload_sha256':hashlib.sha256(payload.read_bytes()).hexdigest(),'receipt_ref':None,
+'attempts':0,'attempt_limit':1,'recheck_at':'2000-01-01T00:00:00Z','deadline':'2099-01-01T00:00:00Z'}
+d['next_action_seq']=2
+out=h/'next.json';out.write_text(json.dumps(d));out.chmod(0o600)
+PY
+  FM_HOME="$home" "$STATE_CMD" reconcile "$id" --expected-revision 1 --record "$home/next.json" >/dev/null || fail 'prepare remote goal action'
+  local REMOTE_TASK_ID=80002
+  if FM_IDA_FAKE_NO_FOLLOWUP=1 run_ida "$home" "$fakebin" followup "$id" --action-id "$id.g1.a1" --expected-terminal-generation 1 --instructions "$home/data/$id/followup.txt" > "$home/unsupported.out" 2>&1; then fail 'unsupported continuation accepted'; fi
+  assert_grep 'unsupported-continuation' "$home/unsupported.out" 'missing capability reason'
+  [ "$(grep -c '^command:ida-region-sg-deep-research-create$' "$home/bytedcli.log")" = 1 ] || fail 'capability refusal created a remote turn'
+  pass 'unsupported continuation refuses before create without fallback'
+  outcome=$(run_ida "$home" "$fakebin" followup "$id" --action-id "$id.g1.a1" --expected-terminal-generation 1 --instructions "$home/data/$id/followup.txt" 2>&1) || fail "followup: $outcome"
+  jq -e '.generation==2 and .provider_state.task_id=="80002" and .provider_state.parent_task_id=="80001"' "$(state_file "$home" "$id")" >/dev/null || fail 'followup did not bind new turn'
+  jq -e '.phase=="terminal-success" and .provider_state.task_id=="80001"' "$home/state/remote-tasks/$id/generations/1.json" >/dev/null || fail 'prior terminal overwritten'
+  [ "$old_sha" = "$(shasum -a 256 "$home/data/$id/turn-1-report.md" | cut -d' ' -f1)" ] || fail 'prior report changed'
+  run_ida "$home" "$fakebin" followup "$id" --action-id "$id.g1.a1" --expected-terminal-generation 1 --instructions "$home/data/$id/followup.txt" >/dev/null || fail 'same followup replay'
+  creates=$(grep -c '^command:ida-region-sg-deep-research-create$' "$home/bytedcli.log")
+  [ "$creates" = 2 ] || fail "followup replay created $creates total requests"
+  pass 'same-session followup freezes prior terminal/report and replays without duplicate create'
+
+  # A second fresh fixture loses the create response. Session message order
+  # and one new turn cannot establish the marker/turn binding.
+  id=ida-followup-unknown
+  home=$(new_home followup-unknown); fakebin=$(make_fake_bytedcli "$home"); write_ida_config "$home"; new_task "$home" "$id"
+  : > "$home/bytedcli.log"; : > "$home/sessions.tsv"
+  REMOTE_TASK_ID=80001
+  dispatch_ida "$home" "$fakebin" "$id" >/dev/null || fail 'unknown fixture dispatch'
+  wait_phase "$home" "$id" terminal-success
+  printf 'Read existing artifacts only\n' > "$home/data/$id/followup.txt"
+  chmod 600 "$home/data/$id/followup.txt"
+  python3 - "$home" "$id" <<'PY'
+import json,hashlib,pathlib,sys
+h=pathlib.Path(sys.argv[1]);t=sys.argv[2];p=h/'data'/t;d=json.loads((p/'lifecycle.json').read_text());f=p/'followup.txt'
+d['next_action']={'id':t+'.g1.a1','kind':'remote-followup','phase':'prepared','expected_execution_generation':'remote-1',
+'payload_ref':str(f),'payload_sha256':hashlib.sha256(f.read_bytes()).hexdigest(),'receipt_ref':None,'attempts':0,'attempt_limit':1,
+'recheck_at':'2000-01-01T00:00:00Z','deadline':'2099-01-01T00:00:00Z'};d['next_action_seq']=2
+f=h/'next.json';f.write_text(json.dumps(d));f.chmod(0o600)
+PY
+  FM_HOME="$home" "$STATE_CMD" reconcile "$id" --expected-revision 1 --record "$home/next.json" >/dev/null || fail 'prepare unknown action'
+  REMOTE_TASK_ID=80002
+  FM_IDA_FAKE_MODE=timeout-created run_ida "$home" "$fakebin" followup "$id" --action-id "$id.g1.a1" --expected-terminal-generation 1 --instructions "$home/data/$id/followup.txt" >/dev/null 2>&1 || rc=$?
+  [ "$rc" != 0 ] || fail 'lost response reported success'
+  if run_ida "$home" "$fakebin" followup "$id" --action-id "$id.g1.a1" --expected-terminal-generation 1 --instructions "$home/data/$id/followup.txt" > "$home/replay" 2>&1; then fail 'ambiguous turn adopted by order'; fi
+  [ "$(grep -c '^command:ida-region-sg-deep-research-create$' "$home/bytedcli.log")" = 2 ] || fail 'ambiguous followup was created twice'
+  [ "$(phase_of "$home" "$id")" = submission-unknown ] || fail 'unknown submission lost'
+  FM_HOME="$home" "$STATE_CMD" lifecycle "$id" | jq -e '.disposition=="open" and .execution_generation=="remote-2" and .next_action.phase=="uncertain" and .next_action.expected_execution_generation=="remote-1"' >/dev/null || fail 'ambiguous submission lost supervised goal identity'
+  pass 'lost followup response remains unknown; replay performs reads only and never repeats create'
+}
+
+if [ "${FM_REMOTE_TEST_CASE:-}" = followup ]; then
+  test_followup_identity_and_unknown_submission
+  exit 0
+fi
+
+test_followup_identity_and_unknown_submission
 test_artifact_discovery_projects_before_stdout
 test_dispatch_model_selection_and_validation
 test_ida_usage_help_boundary

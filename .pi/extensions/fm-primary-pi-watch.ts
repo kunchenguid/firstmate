@@ -36,6 +36,8 @@ import {
   dispositionForWakeTrigger,
   FM_BRANCH_DISPATCH_EVENT,
   scopeForUnreadWake,
+  lifecycleModesForWake,
+  scopeForUnreadWakeWithLifecycle,
 } from "./lib/fm-branch-dispatch.ts";
 import {
   type CalmPresentationState,
@@ -596,15 +598,16 @@ export default function (pi: ExtensionAPI) {
     return confirmHandlingDelivery(snapshot());
   }
 
-  function offerWakeToBranch(message: string, pending: PendingActionableClose): Promise<void> | null {
+  function offerWakeToBranch(message: string, pending: PendingActionableClose, modes: Record<string, string>): Promise<void> | null {
     const offeredAt = Date.now();
     const heartbeat = /^heartbeat($|:)/.test(message);
     // A check-kind close stays on main except for the exact task-scoped iDA
     // result payload whose captured identity scopeForUnreadWake validated.
     // That narrow exception does not let any other check trigger slip past
     // main merely because another currently unread row is eligible.
-    const scope = scopeForUnreadWake(state, heartbeat);
-    const idaResultRows = /^check:/.test(message)
+    const isCheckTrigger = /^check:/.test(message);
+    const scope = scopeForUnreadWake(state, heartbeat, modes);
+    const idaResultRows = isCheckTrigger
       ? scope.eligibleIdaResults.filter((result) => result.trigger === message).map((result) => result.row)
       : [];
     // A signal close containing a needs-decision status file, or a stale close
@@ -691,12 +694,13 @@ export default function (pi: ExtensionAPI) {
   pi.on("tool_call", async (event) => {
     if (event.toolName !== "fm_task_continuation" && event.toolName !== "bash") return;
     if (!activeGeneration || lockOwnership() !== "owned") return;
-    const scope = scopeForUnreadWake(state, false);
+    const { modes, scope } = await scopeForUnreadWakeWithLifecycle(fmRoot, fmHome, state, false);
+    if (!activeGeneration || lockOwnership() !== "owned") return;
     if (!scope.eligible || scope.corrupted) return;
     const pending: PendingActionableClose = { version: 1,
       token: `operation-${process.pid}-${Date.now()}`, message: "signal:", predecessorArmPid: "" };
     try {
-      const settlement = offerWakeToBranch(pending.message, pending);
+      const settlement = offerWakeToBranch(pending.message, pending, modes);
       if (settlement) await settlement;
     } catch {
       // Ordinary watcher delivery retains the semantic decision or failure.
@@ -723,7 +727,9 @@ export default function (pi: ExtensionAPI) {
       }
     }
     if (!repairFailed) {
-      const branchDelivery = offerWakeToBranch(message, pending);
+      const modes = await lifecycleModesForWake(fmRoot, fmHome, state);
+      if (!generationIsLive(owner)) return false;
+      const branchDelivery = offerWakeToBranch(message, pending, modes);
       if (branchDelivery) {
         try {
           await branchDelivery;

@@ -10,7 +10,7 @@ TMP_ROOT=$(fm_test_tmproot fm-teardown-endpoint-safety)
 # The fixture binds normal task records to Herdr; historical refusal is
 # covered by fm-retired-backends.test.sh, without weakening these lock tests.
 write_herdr_meta() {
-  local file=$1 arg id window='' binding=0
+  local file=$1 arg id window='' binding=0 generation=0
   shift
   id=$(basename "$file" .meta)
   local args=()
@@ -18,10 +18,12 @@ write_herdr_meta() {
     case "$arg" in
       window=*:fm-*) window="window=isolated:w1:p-$id"; args+=("$window") ;;
       endpoint_task_id=*) binding=1; args+=("$arg") ;;
+      spawn_gen=*) generation=1; args+=("$arg") ;;
       *) args+=("$arg") ;;
     esac
   done
   [ "$binding" = 1 ] || args+=("endpoint_task_id=$id")
+  [ "$generation" = 1 ] || args+=("spawn_gen=s-$id")
   fm_write_meta "$file" "backend=herdr" "herdr_session=isolated" \
     "herdr_workspace_id=w1" "herdr_tab_id=w1:t-$id" "herdr_pane_id=w1:p-$id" "${args[@]}"
 }
@@ -41,7 +43,7 @@ printf ' <%s>' "$@" >> "${FM_RUNTIME_LOG:?}"
 printf '\n' >> "${FM_RUNTIME_LOG:?}"
 case "$1 ${2:-}" in
   'session list') jq -n --arg socket "${FM_RUNTIME_LOG}.sock" '{sessions:[{name:"isolated",running:true,socket_path:$socket}]}' ;;
-  'status --json') echo '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}' ;;
+  'status --json') jq -n --arg socket "${FM_RUNTIME_LOG}.sock" '{client:{version:"0.7.1",protocol:14},server:{running:true,session:"isolated",socket:$socket,version:"0.7.1",protocol:14}}' ;;
   'pane get')
     if [ -e "${FM_RUNTIME_LOG}.$3.closed" ]; then
       echo '{"error":{"code":"pane_not_found"}}'
@@ -50,6 +52,7 @@ case "$1 ${2:-}" in
         '{result:{pane:{pane_id:$p,workspace_id:"w1",tab_id:"w1:t1",foreground_cwd:$cwd}}}'
     fi ;;
   'pane close') touch "${FM_RUNTIME_LOG}.$3.closed" ;;
+  'workspace list') echo '{"result":{"workspaces":[]}}' ;;
   *) echo '{}' ;;
 esac
 SH
@@ -62,6 +65,64 @@ exit 0
 SH
   chmod +x "$TMP_ROOT/$dir/fakebin/herdr" "$TMP_ROOT/$dir/fakebin/treehouse"
   printf '%s\n' "$TMP_ROOT/$dir"
+}
+
+stage_absent_bound_endpoint() {  # <case> <id>
+  local dir=$1 id=$2 socket instance journal label
+  socket="$dir/runtime.log.sock"
+  instance=$(python3 - "$socket" <<'PY'
+import hashlib,os,socket,sys
+p=sys.argv[1]
+s=socket.socket(socket.AF_UNIX); s.bind(p); s.close()
+st=os.lstat(p)
+print(hashlib.sha256(repr((st.st_dev,st.st_ino,st.st_mtime_ns,st.st_ctime_ns)).encode()).hexdigest())
+PY
+  ) || fail 'cannot create fixture socket identity'
+  label=$(bash -c '. "$1/bin/backends/herdr.sh"; fm_backend_herdr_projection_workspace_label "$2" abcdefghijklmnopqrstuv' _ "$ROOT" "$id")
+  journal="$dir/home/state/$id.herdr-presentation"
+  cat > "$journal" <<EOF
+version=3
+task_id=$id
+projection_id=abcdefghijklmnopqrstuv
+home=$(cd "$dir/home" && pwd -P)
+session=isolated
+workspace_id=w1
+tab_id=w1:t-$id
+pane_id=w1:p-$id
+parent_workspace_id=anchor
+parent_label=anchor
+workspace_label=$label
+task_label=fm-$id
+spawn_gen=s-$id
+terminal_id=t-$id
+session_instance=$instance
+shell_pid=$$
+shell_start=synthetic-shell
+EOF
+  chmod 600 "$journal"
+  : > "$dir/runtime.log.w1:p-$id.closed"
+}
+
+stage_archived_action() {  # <case> <id> <kind> <phase>
+  local dir=$1 id=$2 kind=$3 phase=$4 candidate receipt_sha action_id
+  action_id="$id.g1.a1"
+  mkdir -p "$dir/home/data/$id"
+  printf 'Deliver the complete requested result\n' > "$dir/home/data/$id/brief.md"
+  FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" init "$id" >/dev/null
+  candidate="$dir/$id-action.json"
+  FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" lifecycle "$id" | jq --arg id "$action_id" --arg kind "$kind" \
+    '.next_action={id:$id,kind:$kind,phase:"prepared",expected_execution_generation:.execution_generation,payload_ref:.assessment.evidence[0].ref,payload_sha256:.assessment.evidence[0].sha256,receipt_ref:null,attempts:0,attempt_limit:1,recheck_at:"2000-01-01T00:00:00Z",deadline:"2099-01-01T00:00:00Z"} | .next_action_seq=2' > "$candidate"
+  chmod 600 "$candidate"
+  FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" reconcile "$id" --expected-revision 1 --record "$candidate" >/dev/null
+  FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" action "$id" --action-id "$action_id" --phase attempted >/dev/null \
+    || fail 'fixture action attempt failed'
+  if [ "$phase" = uncertain ]; then
+    receipt_sha=$(shasum -a 256 "$dir/home/data/$id/brief.md" | awk '{print $1}')
+    FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" action "$id" --action-id "$action_id" --phase uncertain \
+      --receipt-ref "data/$id/brief.md" --receipt-sha256 "$receipt_sha" >/dev/null \
+      || fail 'fixture uncertain action receipt failed'
+  fi
+  fm_test_archive_goal "$dir/home" "$id"
 }
 
 mark_case_as_treehouse_pool() {  # <case>
@@ -79,7 +140,7 @@ mark_case_as_treehouse_pool() {  # <case>
 
 claim_pool_slot() {  # <case> <task-id> [home]
   local dir=$1 id=$2 home=${3:-$1/home}
-  printf 'task=%s\nhome=%s\n' "$id" "$home" > "$dir/pool/1/.fm-slot-owner"
+  printf 'task=%s\nhome=%s\nspawn_gen=s-%s\n' "$id" "$home" "$id" > "$dir/pool/1/.fm-slot-owner"
 }
 
 run_case() {  # <case> <id>
@@ -365,6 +426,7 @@ test_reused_pool_slot_refuses_before_touching_the_other_task() {
   write_herdr_meta "$dir/home/state/$id.meta" \
     "window=firstmate:fm-$id" "endpoint_task_id=$id" \
     "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  claim_pool_slot "$dir" "$id"
   write_herdr_meta "$dir/home/state/$other.meta" \
     "window=firstmate:fm-$other" "endpoint_task_id=$other" \
     "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
@@ -402,6 +464,7 @@ test_sole_slot_record_still_tears_down() {
   write_herdr_meta "$dir/home/state/$id.meta" \
     "window=firstmate:fm-$id" "endpoint_task_id=$id" \
     "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  claim_pool_slot "$dir" "$id"
   # A neighbouring task on its OWN slot must not look like a collision.
   mkdir -p "$dir/other-worktree"
   write_herdr_meta "$dir/home/state/neighbour.meta" \
@@ -433,6 +496,7 @@ test_recorded_endpoint_that_changed_directory_still_tears_down() {
   write_herdr_meta "$dir/home/state/$id.meta" \
     "window=firstmate:fm-$id" "endpoint_task_id=$id" \
     "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  claim_pool_slot "$dir" "$id"
 
   run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" \
     || fail "teardown refused its recorded endpoint after it changed directory: $(cat "$dir/stderr")"
@@ -546,9 +610,9 @@ test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot() {
   pass "fm-teardown: a pool slot claimed by another task is left alone while the task's own cleanup finishes"
 }
 
-# The two states that must never become a false refusal: the task's own claim,
-# and no claim at all (a slot taken before claims existed, or already returned).
-test_own_and_absent_slot_claims_still_tear_down() {
+# Only an exact task/generation claim authorizes slot return. Historical slots
+# without a claim retain their directory and task record for reconciliation.
+test_own_claim_tears_down_and_absent_claim_is_retained() {
   local dir id=owned-task
 
   dir=$(make_case slot-claim-own)
@@ -571,13 +635,19 @@ test_own_and_absent_slot_claims_still_tear_down() {
     "window=firstmate:fm-$id" "endpoint_task_id=$id" \
     "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
 
-  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" \
-    || fail "teardown of an unclaimed slot failed: $(cat "$dir/stderr")"
-  assert_absent "$dir/home/state/$id.meta" "unclaimed-slot teardown left the task record"
-  grep -Fq "treehouse <return>" "$dir/runtime.log" \
-    || fail "unclaimed-slot teardown did not return its pool slot: $(cat "$dir/runtime.log")"
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "teardown accepted an unclaimed pool slot without positive ownership"
+  assert_present "$dir/home/state/$id.meta" "unclaimed-slot teardown removed the cleanup obligation"
+  assert_present "$dir/worktree/sentinel" "unclaimed-slot teardown changed the recorded directory"
+  [ ! -s "$dir/runtime.log" ] \
+    || fail "unclaimed-slot teardown reached the runtime: $(cat "$dir/runtime.log")"
+  assert_contains "$(cat "$dir/stderr")" "has no slot-owner claim" \
+    "unclaimed-slot refusal should name the missing positive identity"
 
-  pass "fm-teardown: a task's own slot claim, and an unclaimed slot, both still tear down"
+  pass "fm-teardown: an exact claim returns its slot while an unclaimed slot retains its cleanup obligation"
 }
 
 test_historical_secondmate_record_refuses_without_mutation() {
@@ -605,6 +675,96 @@ test_historical_secondmate_record_refuses_without_mutation() {
   pass "fm-teardown: historical secondmate records and homes are preserved by refusal"
 }
 
+test_open_goal_preserves_resources_before_cleanup() {
+  local dir id=open-goal variant rc
+  local -a args=()
+  for variant in normal forced endpoint-only; do
+    dir=$(make_case "open-goal-$variant")
+    mark_case_as_treehouse_pool "$dir"
+    write_herdr_meta "$dir/home/state/$id.meta" \
+      "window=isolated:fm-$id" "worktree=$dir/worktree" \
+      "project=$dir/project" "kind=scout"
+    claim_pool_slot "$dir" "$id"
+    mkdir -p "$dir/home/data/$id"
+    printf 'Deliver the complete requested result\n' > "$dir/home/data/$id/brief.md"
+    printf 'Only a partial milestone is complete\n' > "$dir/home/data/$id/report.md"
+    # No user decision remains, but the requested result is still unfinished.
+    FM_HOME="$dir/home" "$ROOT/bin/fm-captain-hold.sh" complete "$id" --none >/dev/null
+    FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" init "$id" >/dev/null
+    cp "$dir/home/state/$id.meta" "$dir/meta-before"
+    cp "$dir/home/data/$id/lifecycle.json" "$dir/goal-before"
+    cp "$dir/pool/1/.fm-slot-owner" "$dir/claim-before"
+    args=()
+    case "$variant" in
+      forced) args=(--force) ;;
+      endpoint-only) args=(--endpoint-only --expect-spawn-gen "s-$id") ;;
+    esac
+    rc=0
+    FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+      FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
+      "$TEARDOWN" "$id" "${args[@]}" > "$dir/stdout" 2> "$dir/stderr" || rc=$?
+    [ "$rc" -ne 0 ] || fail "$variant teardown accepted an unfinished goal"
+    assert_contains "$(cat "$dir/stderr")" 'task goal is still open' \
+      "$variant teardown did not refuse for the unfinished goal"
+    cmp -s "$dir/meta-before" "$dir/home/state/$id.meta" || fail "$variant changed task metadata"
+    cmp -s "$dir/goal-before" "$dir/home/data/$id/lifecycle.json" || fail "$variant changed the goal"
+    cmp -s "$dir/claim-before" "$dir/pool/1/.fm-slot-owner" || fail "$variant changed the slot claim"
+    assert_present "$dir/worktree/sentinel" "$variant removed unfinished work"
+    assert_present "$dir/home/data/$id/report.md" "$variant removed the partial report"
+    [ ! -s "$dir/runtime.log" ] || fail "$variant reached endpoint or slot cleanup for an open goal"
+  done
+  pass 'fm-teardown: open goals retain endpoint, slot, worktree and records even with a partial report or force'
+}
+
+test_archived_business_action_allows_only_independent_endpoint_cleanup() {
+  local dir id=archived-business retained=shared-owner rc=0
+  dir=$(make_case archived-business-action)
+  write_herdr_meta "$dir/home/state/$id.meta" \
+    "window=isolated:fm-$id" "worktree=$dir/worktree" \
+    "project=$dir/project" "kind=ship"
+  write_herdr_meta "$dir/home/state/$retained.meta" \
+    "window=isolated:fm-$retained" "worktree=$dir/worktree" \
+    "project=$dir/project" "kind=ship"
+  stage_archived_action "$dir" "$id" steer attempted
+  stage_absent_bound_endpoint "$dir" "$id"
+
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
+    "$TEARDOWN" "$id" --endpoint-only --expect-spawn-gen "s-$id" \
+    > "$dir/stdout" 2> "$dir/stderr" || rc=$?
+  [ "$rc" -eq 0 ] || fail "archived business action blocked endpoint cleanup: $(cat "$dir/stderr")"
+  jq -e '.phases.pane_close.state=="confirmed" and .phases.directory_return.reason_code=="retained-shared-reference"' \
+    "$dir/home/state/$id.cleanup.json" >/dev/null || fail 'endpoint and directory cleanup were not accounted independently'
+  FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" lifecycle "$id" \
+    | jq -e '.disposition=="archived" and .next_action.kind=="steer" and .next_action.phase=="attempted"' >/dev/null \
+    || fail 'archived business action evidence was changed by endpoint cleanup'
+  assert_present "$dir/home/state/$id.meta" 'endpoint-only cleanup removed the task record'
+  assert_present "$dir/worktree/sentinel" 'endpoint cleanup removed a shared directory'
+  ! grep -Fq 'pane <close>' "$dir/runtime.log" || fail 'already-absent endpoint was closed again'
+
+  id=archived-cleanup
+  dir=$(make_case archived-cleanup-action)
+  write_herdr_meta "$dir/home/state/$id.meta" \
+    "window=isolated:fm-$id" "worktree=$dir/worktree" \
+    "project=$dir/project" "kind=ship"
+  stage_archived_action "$dir" "$id" cleanup uncertain
+  stage_absent_bound_endpoint "$dir" "$id"
+  : > "$dir/runtime.log"
+  rc=0
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
+    "$TEARDOWN" "$id" --endpoint-only --expect-spawn-gen "s-$id" \
+    > "$dir/stdout" 2> "$dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] || fail 'uncertain archived cleanup effect was retried without readback'
+  assert_contains "$(cat "$dir/stderr")" 'requires exact readback' \
+    'uncertain cleanup refusal did not require readback'
+  [ ! -s "$dir/runtime.log" ] || fail 'uncertain cleanup reached the endpoint before readback'
+  assert_present "$dir/home/state/$id.meta" 'uncertain cleanup removed the task record'
+  pass 'fm-teardown: archived business effects permit independent endpoint cleanup while uncertain cleanup still requires readback'
+}
+
+test_open_goal_preserves_resources_before_cleanup
+test_archived_business_action_allows_only_independent_endpoint_cleanup
 test_invalid_endpoint_records_refuse_before_mutation
 test_control_lock_contention_refuses_before_mutation
 test_non_pool_teardown_ignores_task_set_lock
@@ -616,6 +776,6 @@ test_bare_relative_origin_shares_project_lock_with_clone
 test_reused_pool_slot_refuses_before_touching_the_other_task
 test_sole_slot_record_still_tears_down
 test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot
-test_own_and_absent_slot_claims_still_tear_down
+test_own_claim_tears_down_and_absent_claim_is_retained
 test_recorded_endpoint_that_changed_directory_still_tears_down
 test_historical_secondmate_record_refuses_without_mutation

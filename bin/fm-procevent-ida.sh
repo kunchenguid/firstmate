@@ -497,6 +497,10 @@ submit_observation() { # <id> <root>
 observe_or_submit() ( # <id> <allow-submit:true|false>
   local id=$1 allow_submit=$2 root session_id
   fm_ida_state_load "$id" || die "iDA task state is missing or invalid"
+  if jq -e '.provider_state.followup_action_id != null and .provider_state.task_id == null' "$REMOTE_STATE_FILE" >/dev/null; then
+    ambiguous_observation "$id" reconcile followup-turn-identity-unproven 0 "$IDA_STATE_SESSION_ID"
+    return
+  fi
   if [ -n "$IDA_STATE_SESSION_ID" ]; then session_observation "$id" "$IDA_STATE_SESSION_ID" session; return; fi
   root=$(temp_root)
   trap 'rm -rf -- "$root"' EXIT
@@ -510,6 +514,9 @@ observe_or_submit() ( # <id> <allow-submit:true|false>
   elif [ "$LIST_TRUNCATED" = true ]; then
     ambiguous_observation "$id" reconcile truncated-session-list 0
   elif [ "$allow_submit" = true ] && [ "$REMOTE_STATE_PHASE" = submission-not-started ]; then
+    # shellcheck source=bin/fm-task-lifecycle-lib.sh
+    . "$SCRIPT_DIR/fm-task-lifecycle-lib.sh"
+    fm_task_lifecycle_execution_allowed "$id" || die 'task disposition forbids provider submission'
     submit_observation "$id" "$root"
   else
     ambiguous_observation "$id" reconcile session-marker-not-found 0
@@ -629,7 +636,25 @@ cmd_handle_locked() {
   source=$(fm_remote_source_id ida "$id") || die "invalid iDA task id"
   case "$seq" in ''|*[!0-9]*) die "sequence must be nonnegative" ;; esac
   fm_ida_state_load "$id" || die "iDA task state is missing or invalid"
-  fm_ida_observation_validate "$result" "$id" "$IDA_STATE_MARKER" || die "iDA observation is malformed"
+  if ! fm_ida_observation_validate "$result" "$id" "$IDA_STATE_MARKER"; then
+    local prior prior_marker old_match=0
+    for prior in "$(fm_remote_task_dir "$id")/generations/"*.json; do
+      fm_remote_state_validate_file "$prior" || continue
+      prior_marker=$(jq -r '.provider_state.session_marker' "$prior")
+      fm_ida_observation_validate "$result" "$id" "$prior_marker" || continue
+      old_match=$((old_match+1))
+    done
+    [ "$old_match" = 1 ] || die 'iDA observation identity is unproven'
+    # The captured old result and frozen terminal remain durable; acknowledge
+    # this exact late event without applying it to the new turn's state.
+    if ! fm_procevent_is_handled "$STATE" "$source" "$seq"; then
+      local late_note="note: retained earlier iDA turn evidence source=$source sequence=$seq; current execution unchanged"
+      grep -Fx "$late_note" "$STATE/$id.status" >/dev/null 2>&1 || fm_remote_status_append "$id" "$late_note" || die 'cannot publish retained earlier-turn evidence'
+      "$SCRIPT_DIR/fm-procevent.sh" handled "$source" "$seq" >/dev/null || die 'cannot acknowledge retained earlier-turn result'
+    fi
+    printf 'handled: %s earlier-turn-preserved=true\n' "$id"
+    return 0
+  fi
   if fm_procevent_is_handled "$STATE" "$source" "$seq"; then printf 'handled: %s duplicate=true\n' "$id"; return 0; fi
   case "$REMOTE_STATE_PHASE" in
     terminal-success|terminal-failure|terminal-cancelled)

@@ -619,3 +619,26 @@ fm_test_base_path_sans() {
   done
   printf '%s\n' "$dir"
 }
+
+# An explicit supervisor decision for provider-retirement fixtures, separate
+# from process terminal state and the independent captain-hold gate.
+fm_test_archive_goal() { # <home> <task>
+  local fixture_home=$1 task=$2 record revision authority fixture_data
+  fixture_data=${FM_DATA_OVERRIDE:-$fixture_home/data}
+  record="$fixture_data/$task/lifecycle.json"
+  [ -f "$record" ] || return 0
+  authority="$fixture_data/$task/test-stop.txt"
+  printf 'Explicitly stop this synthetic task after retaining its provider result.\n' > "$authority"
+  chmod 600 "$authority"
+  revision=$(jq -r '.revision' "$record")
+  python3 - "$record" "$authority" <<'PY'
+import hashlib,json,pathlib,sys
+p=pathlib.Path(sys.argv[1]); a=pathlib.Path(sys.argv[2]); d=json.loads(p.read_text())
+d['disposition']='archived'; d['assessment']['authority_ref']=str(a)
+d['assessment']['outcome']='Fixture supervisor explicitly stopped this task'
+d['assessment']['evidence'].append({'ref':str(a),'sha256':hashlib.sha256(a.read_bytes()).hexdigest()})
+f=p.parent/'test-assessment.json';f.write_text(json.dumps(d));f.chmod(0o600)
+PY
+  FM_HOME="$fixture_home" "$ROOT/bin/fm-task-state.sh" reconcile "$task" --expected-revision "$revision" \
+    --record "$fixture_data/$task/test-assessment.json" >/dev/null || fail 'fixture archive decision failed'
+}

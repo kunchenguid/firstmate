@@ -326,12 +326,11 @@ r['next_action']=a;r['next_action_seq']=5;r=reconcile(r)
 x=state('observe');assert x['state']=='blocked' and state('observe')['key']==x['key']
 (home/'data/dependency').write_text('approval recorded for exact operation')
 x=state('observe');assert x['state']=='pending' and state('observe')['key']==x['key']
-# Explicit archive refuses until the outstanding action has owner readback.
-bad=copy.deepcopy(r);bad['disposition']='archived';reconcile(bad,ok=False)
-r=receipt('refused')
+# Explicit archive retains the outstanding action without authorizing it again.
 (home/'data/stop').write_text('Explicitly stop this request; retain its local work.')
 r['disposition']='archived';r['assessment']['authority_ref']='data/stop';r=reconcile(r)
 assert state('observe')['state']=='archived'
+assert r['next_action']['phase']=='prepared'
 call('fm-control.sh','source','relaunch','--note','must not revive stopped work',ok=False)
 call('fm-task-handoff.sh','send','source','target','--id','stopped-request','must not revive stopped work',ok=False)
 assert len(list(queued.rglob('*.msg')))==2
@@ -413,33 +412,33 @@ check=dict(delegation_revision=1,basis_key=state('observe')['basis_key'],conclus
 r=patch({'precheck':check});revision=r['revision'];assert patch({'precheck':check})['revision']==revision
 # Exact same-intent steer: denied body, intake barrier and stale generation have zero effects.
 a=new_action(r);r=patch({'next_action':a})
-call('fm-send.sh','source','--action-id',a['id'],'Different body',actor='branch',ok=False)
-call('fm-send.sh','source','--action-id',a['id'],'Fill the existing acceptance evidence.',actor='branch',extra={'FM_BRANCH_TASK_BINDINGS':'{}'},ok=False)
-call('fm-send.sh','source','--action-id',a['id'],'Fill the existing acceptance evidence.',actor='branch',extra={'FM_BRANCH_GENERATION':'old'},ok=False)
-call('fm-send.sh','source','--action-id',a['id'],'Fill the existing acceptance evidence.',actor='branch',extra={'FM_BRANCH_TASK_SCOPE':'["other"]'},ok=False)
+call('fm-send.sh','source','--action-id',a['id'],'--expected-generation','g1','Different body',actor='branch',ok=False)
+call('fm-send.sh','source','--action-id',a['id'],'--expected-generation','g1','Fill the existing acceptance evidence.',actor='branch',extra={'FM_BRANCH_TASK_BINDINGS':'{}'},ok=False)
+call('fm-send.sh','source','--action-id',a['id'],'--expected-generation','g1','Fill the existing acceptance evidence.',actor='branch',extra={'FM_BRANCH_GENERATION':'old'},ok=False)
+call('fm-send.sh','source','--action-id',a['id'],'--expected-generation','g1','Fill the existing acceptance evidence.',actor='branch',extra={'FM_BRANCH_TASK_SCOPE':'["other"]'},ok=False)
 # Expiry is checked at the effect boundary, independently of model judgment.
 expired=copy.deepcopy(r);expired['delegation']['expires_at']='2020-01-01T00:00:00Z';expired['delegation']['revision']+=1;expired['precheck']=None;reconcile(expired,ok=False)
 revoked=copy.deepcopy(r);revoked['delegation']['revision']+=1;revoked['delegation']['revoked']=True;revoked['precheck']=None;r=reconcile(revoked)
 expired=copy.deepcopy(r);expired['delegation']['expires_at']='2020-01-01T00:00:00Z';expired['delegation']['revision']+=1;expired['delegation']['revoked']=False;r=reconcile(expired)
-call('fm-send.sh','source','--action-id',a['id'],'Fill the existing acceptance evidence.',actor='branch',ok=False)
+call('fm-send.sh','source','--action-id',a['id'],'--expected-generation','g1','Fill the existing acceptance evidence.',actor='branch',ok=False)
 revoked=copy.deepcopy(r);revoked['delegation']['revision']+=1;revoked['delegation']['revoked']=True;r=reconcile(revoked)
 r['delegation']['expires_at']='2099-01-01T00:00:00Z';r['delegation']['revision']+=1;r['delegation']['revoked']=False;r=reconcile(r)
 
-call('fm-send.sh','source','--action-id',a['id'],'Fill the existing acceptance evidence.',actor='branch',extra={'FM_BRANCH_INPUT_BARRIER':'1'},ok=False)
+call('fm-send.sh','source','--action-id',a['id'],'--expected-generation','g1','Fill the existing acceptance evidence.',actor='branch',extra={'FM_BRANCH_INPUT_BARRIER':'1'},ok=False)
 session.write_text('{"type":"session","id":"s"}\n'+json.dumps(dict(type='custom',id='i1',parentId=None,customType='fm-continuation-input',data=dict(id='new',text='Change scope')))+'\n')
-call('fm-send.sh','source','--action-id',a['id'],'Fill the existing acceptance evidence.',actor='branch',ok=False)
+call('fm-send.sh','source','--action-id',a['id'],'--expected-generation','g1','Fill the existing acceptance evidence.',actor='branch',ok=False)
 assert not (home/'state/source.inbox').exists()
 with session.open('a') as f:f.write(json.dumps(dict(type='custom',id='i2',parentId='i1',customType='fm-continuation-input',data=dict(id='new',text='Change scope',answer='Classified informational input')))+'\n')
 # Inject a process boundary failure after the real enqueue, before receipt binding.
 owner=bin/'fm-task-lifecycle.py';candidate=owner.read_text()
 owner.write_text(candidate.replace("        elif args.operation == 'bind-inbox':", "        elif args.operation == 'bind-inbox':\n            raise Refusal('fixture crash after enqueue')"))
-call('fm-send.sh','source','--action-id',a['id'],'Fill the existing acceptance evidence.',actor='branch',ok=False)
+call('fm-send.sh','source','--action-id',a['id'],'--expected-generation','g1','Fill the existing acceptance evidence.',actor='branch',ok=False)
 owner.write_text(candidate)
 assert not state('lifecycle')['next_action'].get('continuation')
 state('readback','source',actor='branch')
 assert len(list((home/'state/source.inbox').glob('*.msg')))==1
 r=state('lifecycle');assert r['next_action']['phase']=='attempted'
-call('fm-send.sh','source','--action-id',a['id'],'Fill the existing acceptance evidence.',actor='branch',ok=False)
+call('fm-send.sh','source','--action-id',a['id'],'--expected-generation','g1','Fill the existing acceptance evidence.',actor='branch',ok=False)
 msg=next((home/'state/source.inbox').glob('*.msg'));handled=msg.parent/'handled'/msg.name
 # Durable enqueue is not executor acknowledgement.
 state('action','source','--action-id',a['id'],'--phase','confirmed','--receipt-ref',str(msg),'--receipt-sha256',sha(msg),actor='branch',ok=False)

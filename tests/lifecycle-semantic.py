@@ -135,7 +135,7 @@ payload.write_text('Execute the exact authorized operation.')
 action = dict(kind='steer', payload_ref='data/payload', recheck_at='2026-01-01T00:00:00Z', deadline='2099-01-01T00:00:00Z')
 r = assess(dict(judgment, next_action=action))
 action_id = r['next_action']['id']
-call('fm-send.sh', 'task', '--action-id', action_id, payload.read_text())
+call('fm-send.sh', 'task', '--action-id', action_id, '--expected-generation', 'g1', payload.read_text())
 assert state('lifecycle')['next_action']['phase'] == 'attempted'
 assert state('refresh')['next_action']['phase'] == 'attempted'
 forge = home / 'forge'

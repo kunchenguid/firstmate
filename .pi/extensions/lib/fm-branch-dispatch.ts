@@ -378,7 +378,44 @@ function mainClaimRows(state: string): Set<string> {
   return new Set(rows);
 }
 
-export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWakeScope {
+// One shell/Python reader owns schema and generation validation. This adapter
+// only batches existing records off the TUI thread; it never interprets JSON
+// disposition files independently. Failure routes the affected tasks to main.
+export async function lifecycleModesForWake(root: string, home: string, state: string): Promise<Record<string, string>> {
+  let tasks: string[];
+  try {
+    const data = process.env.FM_DATA_OVERRIDE || `${home}/data`;
+    tasks = readdirSync(state).filter((name) => name.endsWith(".meta"))
+      .map((name) => name.slice(0, -5))
+      .filter((task) => {
+        try { lstatSync(`${data}/${task}/lifecycle.json`); return true; }
+        catch (error) { return (error as NodeJS.ErrnoException).code !== "ENOENT"; }
+      });
+  } catch { return { "*": "unknown" }; }
+  if (tasks.length === 0) return {};
+  const failed = Object.fromEntries(tasks.map((task) => [task, "unknown"]));
+  const result = await runCommandAsync("bash", [`${root}/bin/fm-task-state.sh`, "modes", JSON.stringify(tasks)], {
+    env: { ...process.env, FM_HOME: home, FM_STATE_OVERRIDE: state },
+  });
+  if (result.status !== 0) return failed;
+  try {
+    const modes = JSON.parse(result.stdout);
+    if (!tasks.every((task) => ["open", "accepted", "archived", "unknown", "legacy"].includes(modes[task]))) return failed;
+    return modes;
+  } catch { return failed; }
+}
+
+export async function scopeForUnreadWakeWithLifecycle(
+  root: string,
+  home: string,
+  state: string,
+  heartbeat: boolean,
+): Promise<{ modes: Record<string, string>; scope: UnreadWakeScope }> {
+  const modes = await lifecycleModesForWake(root, home, state);
+  return { modes, scope: scopeForUnreadWake(state, heartbeat, modes) };
+}
+
+export function scopeForUnreadWake(state: string, heartbeat: boolean, lifecycleModes: Record<string, string> = {}): UnreadWakeScope {
   let queue = "";
   try {
     queue = readFileSync(`${state}/.wake-queue`, "utf8");
@@ -479,6 +516,13 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
     } else if (kind === "stale") {
       task = taskByKey.get(key) ?? taskByKey.get(key.replace(/^fm-/, "")) ?? "";
       project = metadata.get(key) ?? metadata.get(key.replace(/^fm-/, "")) ?? "";
+      const mode = lifecycleModes[task] ?? lifecycleModes["*"] ?? "legacy";
+      if (mode !== "open" && mode !== "legacy") {
+        // The row remains durable and main handles it as disposition/cleanup,
+        // never as a branch recovery. Late signal/provider results still flow.
+        needsDecisionKeys.push(key);
+        continue;
+      }
       if (task) {
         const statusPath = `${state}/${task}.status`;
         if (!staleDecisionOwnership.has(statusPath)) {

@@ -7,7 +7,11 @@
 # unknown and never grant execution authority. No source-time side effects.
 FM_TASK_LIFECYCLE_BIN="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-fm_task_lifecycle() { # <read|reconcile|action|init|observe> <task> [arguments...]
+fm_task_lifecycle() { # <read|reconcile|action|init|mode|due> <task> [arguments...]
+  if [ "$1" = mode ]; then
+    local path="${FM_DATA_OVERRIDE:-${FM_HOME:?}/data}/$2/lifecycle.json"
+    if [ ! -e "$path" ] && [ ! -L "$path" ]; then printf 'legacy\n'; return 0; fi
+  fi
   local lifecycle_home=${FM_HOME:?}
   case "${FM_SUPERVISION_ACTOR:-main}:$1" in
     branch:branch-patch|branch:effect|branch:bind-inbox|branch:handoff-binding|branch:handoff-effect|branch:readback|branch:action)
@@ -61,14 +65,37 @@ fm_task_lifecycle_owner_receipt() ( # <task> <generation> <merge|cleanup> <facts
 
 # Preflight before the existing merge/cleanup owner's first external effect.
 # Semantic acceptance is separate; unknown state must be read back first.
-fm_task_lifecycle_receipt_preflight() { # <task>
-  local id=$1 record
+fm_task_lifecycle_receipt_preflight() { # <task> [merge|cleanup]
+  local id=$1 effect=${2:-merge} record
   [ -e "${FM_DATA_OVERRIDE:-${FM_HOME:?}/data}/$id/lifecycle.json" ] || return 0
   record=$(fm_task_lifecycle read "$id") || return 1
-  printf '%s' "$record" | jq -e '.next_action.phase != "attempted" and .next_action.phase != "uncertain"' >/dev/null || {
+  printf '%s' "$record" | jq -e --arg effect "$effect" '
+    (.next_action.phase != "attempted" and .next_action.phase != "uncertain") or
+    ($effect == "cleanup" and .disposition == "archived" and .next_action.kind != "cleanup")
+  ' >/dev/null || {
     echo 'REFUSED: outstanding lifecycle effect requires exact readback before merge or cleanup' >&2
     return 1
   }
+}
+
+# Existing action owners already hold their lease guard for the whole control
+# transaction. Acquire only the inner metadata lock; never release their lease
+# from a child process or recursively take the non-reentrant lease lock.
+fm_task_lifecycle_under_meta() (
+  local operation=$1 id=$2 lock
+  shift 2
+  lock=$(fm_meta_lock_path "$STATE/$id.meta") || exit 1
+  trap 'fm_lock_release "$lock"' EXIT
+  fm_lock_acquire_wait "$lock" || exit 1
+  fm_task_lifecycle "$operation" "$id" "$@"
+)
+
+fm_task_lifecycle_execution_allowed() { # <task>; legacy behavior stays compatible
+  local mode
+  mode=$(fm_task_lifecycle mode "$1") || return 1
+  case "$mode" in open|legacy) return 0 ;; esac
+  printf 'REFUSED: task %s execution disposition is %s; reconcile its durable goal before continuing\n' "$1" "$mode" >&2
+  return 1
 }
 
 # Ack owners call this only for exact task identities in their own row claim.

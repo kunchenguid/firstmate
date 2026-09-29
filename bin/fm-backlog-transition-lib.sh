@@ -5,7 +5,9 @@
 # caller that already sourced it keeps its memoised compatibility verdict).
 #
 # INVARIANT. In ordinary successful lifecycle state, `state/<id>.meta` exists
-# <=> this home's backlog row for <id> is In flight; the one teardown crash
+# <=> this home's backlog row for <id> is In flight, except a validated terminal
+# lifecycle record may retain cleanup-only metadata without restarting work.
+# The lifecycle reader owns disposition/generation validation; the teardown crash
 # window is represented by `state/<id>.backlog-close`. The script performing the
 # mechanical record change owns the paired backlog transition and runs it in the
 # same process, under the per-task meta lock it already holds, before it reports
@@ -60,6 +62,7 @@
 # replay simply retires the record.
 
 # Set by fm_backlog_transition_applies for a return-1 exemption.
+FM_BACKLOG_TRANSITION_LIB_DIR="$(cd "${BASH_SOURCE[0]%/*}" && pwd)"
 # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
 FM_BACKLOG_TRANSITION_SKIP=
 # Set by the mutating helpers when they return non-zero.
@@ -80,7 +83,7 @@ FM_BACKLOG_CLOSE_REPLAY_RESULT=
 # re-deriving a deadline here. It is stateless, so the memoisation reason this
 # library does not source fm-tasks-axi-lib.sh does not apply.
 # shellcheck source=bin/fm-timeout-lib.sh disable=SC1091
-. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-timeout-lib.sh"
+. "$FM_BACKLOG_TRANSITION_LIB_DIR/fm-timeout-lib.sh"
 
 # Latched when a row read hits its bound. fm_backlog_row_show runs inside a
 # command substitution, so the subshell can READ this latch but cannot set it;
@@ -1008,7 +1011,7 @@ fm_backlog_close_marker_validate() {  # <marker-path> <authorized-data-dir> <exp
     return 1
   fi
   case "$mode" in
-    close|retain) ;;
+    close|retain|cleanup-only) ;;
     *)
       FM_BACKLOG_TRANSITION_ERROR="invalid transition mode in pending-close record $marker"
       return 1
@@ -1165,6 +1168,9 @@ fm_backlog_close_marker_stage() {  # <temporary-path> <id> <data-dir> <spawn-gen
   if [ "${1:-}" = --retain ]; then
     mode=retain
     shift
+  elif [ "${1:-}" = --cleanup-only ]; then
+    mode=cleanup-only
+    shift
   fi
   for arg in "$@"; do
     if [ "$previous_arg" = --note ] && [ "$arg" = "local main" ]; then
@@ -1241,12 +1247,40 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
   marker_spawn_gen=$FM_BACKLOG_CLOSE_VALIDATED_SPAWN_GEN
   cleanup_incomplete=$FM_BACKLOG_CLOSE_VALIDATED_CLEANUP_INCOMPLETE
   mode=$FM_BACKLOG_CLOSE_VALIDATED_MODE
-  [ "$mode" = close ] || mode_flags=(--retain)
+  case "$mode" in retain) mode_flags=(--retain) ;; cleanup-only) mode_flags=(--cleanup-only) ;; esac
   args=("${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]+"${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]}"}")
   if [ "${args[0]-}" = --note ]; then
     args[1]="local main"
   fi
   meta="$state/$id.meta"
+  if [ "$mode" = cleanup-only ]; then
+    # This paired transition closes the business row, never the resource
+    # record. Restart recovery must not re-run endpoint/directory effects.
+    local lifecycle cleanup_kind receipt
+    lifecycle=$(FM_HOME="${FM_HOME:?}" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" \
+      python3 "$FM_BACKLOG_TRANSITION_LIB_DIR/fm-task-lifecycle.py" read "$id") || return 1
+    printf '%s' "$lifecycle" | jq -e --arg generation "$marker_spawn_gen" \
+      '.execution_generation==$generation and (.disposition=="accepted" or .disposition=="archived") and .cleanup_ref!=null' >/dev/null || return 1
+    receipt=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" \
+      python3 "$FM_BACKLOG_TRANSITION_LIB_DIR/fm-task-lifecycle.py" cleanup-read "$id") || return 1
+    printf '%s' "$receipt" | jq -e '.phases.pane_close.state=="confirmed"' >/dev/null || return 1
+    fm_backlog_row_probe "$data" "$id" || return 1
+    cleanup_kind=close
+    [ "$FM_BACKLOG_ROW_HOLD_KIND" != captain ] || cleanup_kind=retain
+    if [ "$cleanup_kind" = retain ]; then
+      fm_backlog_retain "$data" "$id" "${args[@]+"${args[@]}"}" || return 1
+    else
+      fm_backlog_done "$data" "$id" "${args[@]+"${args[@]}"}" || return 1
+    fi
+    # shellcheck source=bin/fm-teardown-endpoint-lib.sh
+    . "$FM_BACKLOG_TRANSITION_LIB_DIR/fm-teardown-endpoint-lib.sh"
+    fm_teardown_cleanup_record_closed "$state" "$id" "$data" || return 1
+    fm_backlog_close_marker_remove "$marker" "$state" || return 1
+    if [ "$cleanup_kind" = retain ]; then FM_BACKLOG_CLOSE_REPLAY_RESULT=retained_incomplete
+    else FM_BACKLOG_CLOSE_REPLAY_RESULT=closed_incomplete
+    fi
+    return 0
+  fi
   if [ -e "$meta" ] || [ -L "$meta" ]; then
     if ! fm_backlog_record_present "$meta" "task record" "$state"; then
       FM_BACKLOG_TRANSITION_ERROR="unsafe interrupted task record at $meta"
