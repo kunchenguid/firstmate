@@ -178,7 +178,11 @@ if ! printf '%s\n' "$terminal_due" | jq -e '.due==false' >/dev/null; then
 fi
 pass 'terminal cleanup is supervised before its complete owner receipt and quiet afterward'
 python3 "$LIB" owner-receipt c --kind cleanup --execution-generation s3 \
-  --facts '{"taskRecordRemoved":true,"endpointConfirmedGone":true,"copyDisposition":"returned-or-already-absent","bookkeepingComplete":true}' >/dev/null
+  --facts '{"taskRecordRemoved":true,"endpointConfirmedGone":true,"copyDisposition":"returned-or-already-absent","bookkeepingComplete":true,"diagnostic":"future-compatible"}' >/dev/null
+if python3 "$LIB" owner-receipt c --kind cleanup --execution-generation s3 \
+  --facts '{"taskRecordRemoved":true,"endpointConfirmedGone":true,"copyDisposition":"returned-or-already-absent","bookkeepingComplete":true}' >/dev/null 2>&1; then
+  fail 'changed cleanup receipt facts replaced the original evidence'
+fi
 # An accepted business goal can retain a bounded physical-cleanup dependency.
 python3 - "$FM_HOME" "$LIB" <<'PYWAIT'
 import copy, json, os, subprocess, sys
