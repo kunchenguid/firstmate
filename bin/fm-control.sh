@@ -914,6 +914,7 @@ relaunch_rollback() {
         cp -p "$BRIEF_PRIOR" "$RELAUNCH_BRIEF" 2>/dev/null || true
       fi
       journal_write "failed:$RELAUNCH_PHASE" "rollback=instructions-restored" || true
+      echo 'relaunch_failure=prelaunch' >&2
       echo "error: relaunch of $ID was refused before its agent was touched; nothing changed" >&2
       ;;
     stopping)
@@ -924,10 +925,12 @@ relaunch_rollback() {
             cp -p "$BRIEF_PRIOR" "$RELAUNCH_BRIEF" 2>/dev/null || true
           fi
           journal_write "failed:$RELAUNCH_PHASE" "rollback=instructions-restored-agent-alive" || true
+          echo 'relaunch_failure=prelaunch' >&2
           echo "error: relaunch of $ID failed while stopping the old agent, which is still running; its original instructions were restored" >&2
           ;;
         dead)
           journal_write "failed:$RELAUNCH_PHASE" "rollback=prior-record-kept-agent-dead" || true
+          echo 'relaunch_failure=prelaunch' >&2
           echo "error: $ID's agent stopped but relaunch did not reach replacement launch; no agent is running, and its work plus progress note are preserved at $WT" >&2
           ;;
         *)
@@ -940,6 +943,7 @@ relaunch_rollback() {
             cp -p "$BRIEF_PRIOR" "$RELAUNCH_BRIEF" 2>/dev/null || true
           fi
           journal_write "failed:$RELAUNCH_PHASE" "rollback=instructions-restored-agent-state-$state" || true
+          echo 'relaunch_failure=prelaunch' >&2
           echo "error: relaunch of $ID failed while stopping the old agent and its state is '$state', so it was not proven stopped; its original instructions were restored and the durable record was retained for recovery" >&2
           ;;
       esac
@@ -960,6 +964,8 @@ relaunch_rollback() {
         echo "error: $ID was relaunched on $TARGET_HARNESS but no running agent could be confirmed; its work is preserved at $WT" >&2
       else
         journal_write "failed:$RELAUNCH_PHASE" "rollback=prior-record-kept" || true
+        state=$(agent_state 2>/dev/null || printf unknown)
+        [ "$state" != dead ] || echo 'relaunch_failure=launch' >&2
         echo "error: $ID's agent was stopped but the replacement did not launch; no agent is running, and its work plus the recorded progress note are preserved at $WT" >&2
       fi
       ;;

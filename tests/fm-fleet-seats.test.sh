@@ -128,11 +128,40 @@ test_no_pool_configured_is_off() {
   out=$(reserve_without_jq "$home" reserve t3 --harness pi --model pool-model-a --holder-pid "$LAST_HOLDER" 2>&1)
   expect_code 0 "$?" "an undeclared primary without jq"
   assert_equals "" "$out" "an undeclared primary without jq printed a reservation"
+  task_record "$home" legacy-default default
+  out=$(reserve "$home" no-declaration pool-model-a 2>&1)
+  expect_code 0 "$?" "a legacy default record without a declaration"
+  assert_equals "" "$out" "an undeclared home counted a legacy default record"
   pools "$home" 1
   out=$(reserve_without_jq "$home" reserve t4 --harness pi --model pool-model-a --holder-pid "$LAST_HOLDER" 2>&1)
   expect_code 5 "$?" "a declared pool without jq"
   assert_contains "$out" "jq is not installed" "the missing-jq fixture did not disable jq"
   pass "without config/fleet-seats a reservation is a silent no-op"
+}
+
+test_legacy_unresolved_models_count_in_every_pool() {
+  local root="$TMP_ROOT/legacy-default/primary" out shape model
+  make_home "$root"
+  printf '{"pools":[{"name":"first","capacity":1,"models":["pool-model-a"]},{"name":"second","capacity":1,"models":["pool-model-b"]}]}\n' \
+    > "$root/config/fleet-seats"
+  new_holder
+  for shape in default empty missing; do
+    case "$shape" in
+      default) task_record "$root" legacy default ship ;;
+      empty) task_record "$root" legacy '' scout ;;
+      missing) printf 'kind=secondmate\nremote_host=remote-mac\nharness=pi\n' > "$root/state/legacy.meta" ;;
+    esac
+    for model in pool-model-a pool-model-b; do
+      out=$(reserve "$root" next "$model" 2>&1)
+      expect_code 4 "$?" "a $shape legacy record before a $model launch"
+      assert_contains "$out" "legacy" "the unresolved $shape record was absent from the holders"
+    done
+    rm -f "$root/state/legacy.meta"
+  done
+  task_record "$root" legacy unrelated-model
+  out=$(reserve "$root" first pool-model-a 2>&1) || fail "a resolved unpooled record blocked the first pool: $out"
+  out=$(reserve "$root" second pool-model-b 2>&1) || fail "a resolved unpooled record blocked the second pool: $out"
+  pass "legacy default, empty, and missing models occupy every declared pool"
 }
 
 test_one_capacity_across_homes() {
@@ -803,6 +832,7 @@ test_secondmate_spawn_takes_a_seat() {
 }
 
 test_no_pool_configured_is_off
+test_legacy_unresolved_models_count_in_every_pool
 test_one_capacity_across_homes
 test_live_supervisors_hold_seats_even_while_idle
 test_explicit_model_required_while_pooled

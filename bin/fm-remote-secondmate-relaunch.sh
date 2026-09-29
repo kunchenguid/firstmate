@@ -58,7 +58,7 @@ RELAUNCH_OUT=$(fm_run_timed 300 "$SCRIPT_DIR/fm-on.sh" "$ID" fm-remote-secondmat
   relaunch "$ID" "$HARNESS" "$MODEL" "$EFFORT" </dev/null 2>&1) || {
   rc=$?
   printf '%s\n' "$RELAUNCH_OUT" >&2
-  if printf '%s\n' "$RELAUNCH_OUT" | grep -Fxq 'relaunch_failure=prelaunch'; then
+  if printf '%s\n' "$RELAUNCH_OUT" | grep -Eq '^relaunch_failure=(prelaunch|launch)$'; then
     "$SCRIPT_DIR/fm-fleet-seats.sh" cancel-relaunch "$ID" --token "$RELAUNCH_TOKEN" \
       || die "the confirmed failed relaunch seat for $ID could not be released"
   fi

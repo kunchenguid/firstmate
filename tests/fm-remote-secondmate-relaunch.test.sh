@@ -82,6 +82,15 @@ case "$FM_FAKE_RELAUNCH_MODE" in
     printf 'error: unverified remote secondmate harness: %s\n' "$harness" >&2
     exit 1
     ;;
+  launch-failure)
+    printf 'relaunch_failure=launch\n' >&2
+    printf 'error: replacement launch failed; no agent is running\n' >&2
+    exit 1
+    ;;
+  uncertain-failure)
+    printf 'error: remote relaunch result is unknown\n' >&2
+    exit 255
+    ;;
   publication-failure)
     chmod 0500 "$FM_FAKE_RELAUNCH_STATE"
     ;;
@@ -184,6 +193,7 @@ OUT=$(run_relaunch local1 claude - -); RC=$?
 assert_contains "$OUT" "not a remotely placed secondmate" \
   "the refusal should explain the tool this task needs instead"
 pass "a local secondmate is refused by the remote relaunch tool"
+rm -f "$HOME_DIR/state/local1.meta"
 
 # --- a relaunch keeps an already-armed PR poll authenticating ---------------
 # fm-pr-check.sh now refuses to arm a poll on a kind=secondmate record, but a
@@ -253,6 +263,27 @@ assert_contains "$OUT" "unverified remote secondmate harness" "the confirmed hos
 OUT=$(probe_pool); RC=$?
 expect_code 0 "$RC" "a worker after a confirmed host refusal: $OUT"
 pass "a confirmed prelaunch failure releases the relaunch seat"
+
+reset_meta
+seed_pool
+FM_FAKE_RELAUNCH_MODE=launch-failure
+OUT=$(run_relaunch ios claude pool-model-a medium); RC=$?
+unset FM_FAKE_RELAUNCH_MODE
+[ "$RC" -ne 0 ] || fail "a confirmed replacement launch failure succeeded"
+assert_contains "$OUT" "replacement launch failed" "the host's confirmed launch failure was lost"
+OUT=$(probe_pool); RC=$?
+expect_code 0 "$RC" "a worker after confirmed replacement launch failure: $OUT"
+pass "a confirmed replacement launch failure releases the relaunch seat"
+
+reset_meta
+seed_pool
+FM_FAKE_RELAUNCH_MODE=uncertain-failure
+OUT=$(run_relaunch ios claude pool-model-a medium); RC=$?
+unset FM_FAKE_RELAUNCH_MODE
+[ "$RC" -ne 0 ] || fail "an uncertain remote completion succeeded"
+OUT=$(probe_pool); RC=$?
+expect_code 4 "$RC" "a worker after uncertain remote completion"
+pass "an uncertain remote result keeps its relaunch seat"
 
 reset_meta
 seed_pool
