@@ -173,6 +173,7 @@ test_invalid_mail_ports_keep_afk_on_hold() {
       rc=0
       out=$(env FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.gmail.com \
 
+
         FM_SMTP_HOST=smtp.example.test FM_AFK_EMAIL_TO="$AFK_OWNER_EMAIL" \
         "$port=$value" python3 "$REPO/bin/fm-afk-email.py" configured 2>&1) || rc=$?
       [ "$rc" -ne 0 ] || fail "AFK shared configuration accepted $port=$value"
@@ -210,6 +211,7 @@ PY
     || fail "non-Gmail IMAP enabled away email"
   pass "away email requires a Gmail receiving mailbox and nonblank transport values"
 }
+
 
 
 test_destination_is_required_for_pi_entry() {
@@ -451,6 +453,7 @@ PY
   verification=$(run_email "$home" verify-note "$note_id") \
     || fail "completed reply handoff could not be verified after return: $verification"
   assert_contains "$verification" '"verified":true' 'persisted matching handoff remains verifiable after return'
+
 
   printf '{invalid json\n' > "$sent1"
   if verification=$(run_email "$home" verify-note "$note_id" 2>&1); then
@@ -764,6 +767,7 @@ test_read_gates_unauthenticated_bodies_during_away() {
   run_contract "$home" FM_TEST_HARNESS=pi >/dev/null 2>&1 || fail "configured entry failed"
   cp "$home/state/.afk-contract" "$home/valid-away-record"
 
+
   fakepy="$TMP_ROOT/read-auth-python"
   mkdir -p "$fakepy"
   cat > "$fakepy/sitecustomize.py" <<'PY'
@@ -866,6 +870,7 @@ path.write_text(path.read_text().replace("imap.example.test", "imap.gmail.com"))
 PY
 
 
+
   printf 'version: 99\nentered_epoch: 100\nreach_channels: email\n' > "$home/state/.afk-contract"
   : > "$fetch_log"
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$REPO" \
@@ -917,6 +922,36 @@ PY
   assert_not_contains "$fetches" $'1\t(BODY.PEEK[])' 'a stale off-posture snapshot cannot fetch an unauthenticated body'
 
 
+
+  rm "$home/state/.afk-contract"
+  started="$TMP_ROOT/read-race.locked"
+  release="$TMP_ROOT/read-race.release"
+  : > "$fetch_log"
+  (
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$REPO" \
+      bash -c '
+        . "$1"
+        fm_afk_contract_lock_hold "$2" || exit 1
+        : > "$3"
+        while [ ! -e "$4" ]; do sleep 0.01; done
+        fm_afk_contract_lock_release
+      ' fm-test "$REPO/bin/fm-afk-contract.sh" "$home/state" "$started" "$release"
+  ) &
+  lock_pid=$!
+  wait_for_file "$started" || fail "away-posture race lock did not start"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$REPO" \
+    PYTHONPATH="$fakepy" FM_MAIL_TEST_FETCH_LOG="$fetch_log" "$REPO/bin/fm-mail.sh" read \
+    > "$TMP_ROOT/read-race.out" 2>&1 &
+  read_pid=$!
+  sleep 0.1
+  cp "$home/valid-away-record" "$home/state/.afk-contract"
+  touch "$release"
+  wait "$lock_pid" || fail "away-posture race lock failed"
+  wait "$read_pid" || fail "mail read failed after the away posture changed: $(cat "$TMP_ROOT/read-race.out")"
+  out=$(cat "$TMP_ROOT/read-race.out")
+  assert_not_contains "$out" 'private attacker body' 'a posture written while read waits for the shared lock blocks unauthenticated bodies'
+  fetches=$(cat "$fetch_log")
+  assert_not_contains "$fetches" $'1\t(BODY.PEEK[])' 'a stale off-posture snapshot cannot fetch an unauthenticated body'
 
   rm "$home/state/.afk-contract"
   : > "$fetch_log"
@@ -1032,6 +1067,7 @@ os.environ.update({
     "FM_MAIL_USER": "owner@example.com",
     "FM_MAIL_PASS": "test-secret",
     "FM_IMAP_HOST": "imap.gmail.com",
+
 
     "FM_IMAP_PORT": "993",
     "FM_SMTP_HOST": "smtp.example.test",
@@ -1799,6 +1835,7 @@ test_reply_survives_crash_after_smtp_acceptance() {
   accepted_body="$home/state/accepted-body.txt"
   if FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$REPO" \
     FM_MAIL_USER=owner@example.com FM_MAIL_PASS=test-secret FM_IMAP_HOST=imap.example.test \
+
     FM_SMTP_HOST=smtp.example.test FM_AFK_EMAIL_TO=johnpoyser@gmail.com \
     FM_TEST_ACCEPTED_BODY="$accepted_body" python3 - "$REPO/bin/fm-afk-email.py" <<'PY'
 import importlib.util
@@ -1992,6 +2029,7 @@ EOF
   assert_contains "$summary" '] is needed' 'redacted summary retains its ending'
   assert_not_contains "$summary" 'abc' 'configured secret is absent from pending state'
 
+
   python3 - "$home/state/afk-email/pending/1.json" <<'PY'
 import json, sys
 path = sys.argv[1]
@@ -2036,6 +2074,7 @@ PY
   assert_not_contains "$summary" 'a' 'short secret cannot survive in the redacted summary or marker'
   pass "short secrets cannot erase the redaction marker or unrelated outcome text"
 }
+
 
 
 test_flush_holds_away_lock_until_send_completes() {
@@ -2163,6 +2202,7 @@ test_shared_owner_source_drives_configuration_and_sender_auth
 test_invalid_mail_ports_keep_afk_on_hold
 test_away_mail_requires_gmail_and_nonblank_settings
 
+
 test_batched_mail_redacts_secrets_and_replies_are_item_bound
 test_unreadable_token_state_keeps_reply_retryable
 test_unmatched_reply_request_id_is_untrusted_and_ackable
@@ -2207,6 +2247,7 @@ test_expired_and_unknown_codes_are_untrusted
 test_reply_survives_crash_after_smtp_acceptance
 test_short_configured_secret_is_redacted_before_storage_and_send
 test_redaction_marker_cannot_be_eaten_by_a_short_secret
+
 
 test_flush_holds_away_lock_until_send_completes
 test_receive_batch_holds_away_lock_through_reply_handoff

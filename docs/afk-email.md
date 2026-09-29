@@ -38,6 +38,7 @@ Use the Gmail receiving mailbox for IMAP; other IMAP hosts keep Pi away mode on 
 Away email requires the receiving IMAP mailbox to be Gmail at `imap.gmail.com`, so the topmost `Authentication-Results` field can be trusted as Gmail's receiver-generated result.
 
 
+
 The mail plane requires implicit TLS on IMAP port 993 and SMTP port 465 by default; STARTTLS and port 587 are not supported.
 Set `FM_IMAP_PORT` or `FM_SMTP_PORT` only when your provider uses different implicit-TLS ports.
 

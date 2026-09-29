@@ -103,6 +103,7 @@ fi
 for r in FM_MAIL_USER FM_MAIL_PASS FM_IMAP_HOST FM_SMTP_HOST; do
   if [ "${1:-}" != afk-email ] && ! [[ "${!r:-}" =~ [^[:space:]] ]]; then
 
+
     echo "fm-mail: missing required \$FM_HOME/.env value: $r" >&2
     echo "fm-mail: add $r (and the other three FM_MAIL_* values) to $ENV_FILE" >&2
     exit 1

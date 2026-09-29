@@ -1439,7 +1439,7 @@ FM_IMAP_HOST=   # IMAP server hostname
 FM_SMTP_HOST=   # SMTP server hostname
 ```
 
-Pi's optional `/afk` email destination is separate from general mail transport; see [Away email on Pi](afk-email.md) for its required setting and setup gate.
+Pi's optional `/afk` email destination is separate from general mail transport; see [Away email on Pi](afk-email.md) for its required setting, Gmail receiving-mailbox requirement, and setup gate.
 
 Pi's optional `/afk` email destination is separate from general mail transport; see [Away email on Pi](afk-email.md) for its required setting, Gmail receiving-mailbox requirement, and setup gate.
 

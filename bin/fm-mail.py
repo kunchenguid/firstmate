@@ -59,6 +59,7 @@ socket.setdefaulttimeout(MAIL_TIMEOUT)
 MAX_PREVIEW = 200
 READ_LIMIT = 20
 MAX_AFK_BODY_BYTES = 256 * 1024
+
 ROOT = Path(__file__).resolve().parent.parent
 STATE = Path(os.environ.get('FM_STATE_OVERRIDE') or Path(os.environ.get('FM_HOME') or ROOT) / 'state')
 OWNER_EMAIL = Path(__file__).resolve().with_name('fm-afk-owner-email').read_text(encoding='ascii').strip()
@@ -97,6 +98,7 @@ def away_posture_operation():
         raise RuntimeError(f'could not acquire away-posture lock (exit {result})')
     old_posture = os.environ.get('FM_AFK_POSTURE')
     old_locked = os.environ.get('FM_AFK_CONTRACT_LOCK_HELD')
+
     try:
         try:
             (STATE / '.afk-contract').lstat()
@@ -117,6 +119,7 @@ def away_posture_operation():
                 active = True
         os.environ['FM_AFK_POSTURE'] = '1' if active else '0'
         os.environ['FM_AFK_CONTRACT_LOCK_HELD'] = '1'
+
         yield
     finally:
         if process.poll() is None:
@@ -147,6 +150,7 @@ def away_posture_operation():
 
 class AfkBodyFetchError(Exception):
     pass
+
 
 
 def afk_record_field(name):

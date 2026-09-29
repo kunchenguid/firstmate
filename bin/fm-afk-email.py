@@ -83,6 +83,7 @@ def mail_configuration():
     if not valid_mail_port(os.environ.get("FM_IMAP_PORT", "993")) or not valid_mail_port(
         os.environ.get("FM_SMTP_PORT", "465")
     ):
+
         return None
     if not valid_mail_port(os.environ.get("FM_IMAP_PORT", "993")) or not valid_mail_port(
         os.environ.get("FM_SMTP_PORT", "465")
@@ -247,6 +248,7 @@ def redact_secrets(text):
             if all(chr(codepoint) not in secret for secret in secret_values)
         )
         replacement = marker * 3
+
 
     for secret in sorted(secret_values, key=len, reverse=True):
         text = text.replace(secret, replacement)
@@ -747,6 +749,7 @@ def validate_handoff_state_item(path, store):
 
 def handoff_record(request_id):
 
+
     requested_id = request_id if isinstance(request_id, str) and request_id else None
     matches = []
     with afk_state_lock():
@@ -764,6 +767,7 @@ def handoff_record(request_id):
                 if (
                     requested_id is not None
                     and item.get("handoff_request_id") == requested_id
+
 
                 ):
                     matches.append(item)
@@ -814,6 +818,7 @@ def verify_note(note_id):
 
     try:
         item = handoff_record(request_id)
+
 
     except (OSError, ValueError):
         print("fm-afk-email: verified reply state could not be read", file=sys.stderr)
