@@ -190,9 +190,7 @@ def extract_decisions_from_bash(func: str, classify_lib: Path, target: Path, tas
     return parse_decision_lines(proc.stdout, task)
 
 
-def classify_decision(
-    item: DecisionItem, api_key: str | None, never_send: list[str], send_prefix: str
-) -> DecisionItem:
+def classify_decision(item: DecisionItem, api_key: str | None, never_send: list[str]) -> DecisionItem:
     if not api_key:
         item.category = "unavailable"
         item.error = "TYPESAFE_API_KEY unavailable"
@@ -258,10 +256,6 @@ def classify_decision(
                 item.suggested_action = "Confirm the pending reply is no longer owed before closing it"
             else:
                 item.suggested_action = "Archive or resolve superseded historical decision"
-                item.resolve_cmd = send_prefix + shlex.join(
-                    [item.task, "--resolve-key", item.key,
-                     "auto-resolved: superseded historical decision"]
-                )
         elif item.category == "external_block":
             item.suggested_action = "Investigate external host, route, or credentials dependency"
         elif item.category == "policy_spend":
@@ -272,7 +266,6 @@ def classify_decision(
     except Exception as exc:
         item.category = "unavailable"
         item.suggested_action = ""
-        item.resolve_cmd = ""
         item.error = str(exc)
 
     return item
@@ -332,7 +325,7 @@ def main() -> None:
     parser.add_argument("--all", action="store_true", help="Scan all status files in state dir")
     parser.add_argument("--state-dir", type=Path, help="State directory override")
     parser.add_argument("--json", action="store_true", help="Emit JSON output")
-    parser.add_argument("--resolve-cmds", action="store_true", help="Emit copy-pasteable resolve commands for stale items")
+    parser.add_argument("--resolve-cmds", action="store_true", help="Emit copy-pasteable resolve commands for the listed decisions (filter with --category)")
     parser.add_argument("--category", type=str, help="Filter output by category (e.g. stale_historical)")
     parser.add_argument("--min-noul", type=float, default=0.0, help="Filter by minimum actionable noul score")
     parser.add_argument("--max-workers", type=int, default=8, help="Max concurrent Jev API requests")
@@ -427,19 +420,22 @@ def main() -> None:
     else:
         max_workers = min(args.max_workers, len(items))
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = [executor.submit(classify_decision, item, api_key, never_send, send_prefix) for item in items]
+            futures = [executor.submit(classify_decision, item, api_key, never_send) for item in items]
             classified_items = [f.result() for f in futures]
-        for item in classified_items:
-            if not item.resolve_cmd:
-                continue
-            ledger = send_ledger(send_state, item.task)
-            origin = args.status_file or send_state / f"{item.task}.status"
-            if ledger is None:
-                item.resolve_cmd = ""
-                item.suggested_action += " (task metadata gone; close it by hand)"
-            elif ledger.resolve() != origin.resolve():
-                item.resolve_cmd = ""
-                item.suggested_action += f" (fm-send would close {ledger}, not {origin}; close it by hand)"
+
+    # Resolve commands are mechanics: offered for every decision fm-send can close exactly,
+    # whatever Jev's advisory category; the agent chooses which (if any) to run.
+    for item in classified_items:
+        ledger = send_ledger(send_state, item.task)
+        origin = args.status_file or send_state / f"{item.task}.status"
+        if ledger is None:
+            item.suggested_action += " (task metadata gone; close it by hand)"
+        elif ledger.resolve() != origin.resolve():
+            item.suggested_action += f" (fm-send would close {ledger}, not {origin}; close it by hand)"
+        else:
+            item.resolve_cmd = send_prefix + shlex.join(
+                [item.task, "--resolve-key", item.key, "decision closed by the first mate"]
+            )
 
     # Filters
     filtered_items = classified_items

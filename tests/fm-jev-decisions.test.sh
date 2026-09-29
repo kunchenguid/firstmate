@@ -131,16 +131,19 @@ assert_contains "$cmds" "$FAKE/bin/fm-send.sh" "resolve cmd names the home's own
 [ "$(sed -n 1p "$TDIR/argv")" = "$EVIL_TASK" ] || fail "resolve cmd must pass the task verbatim"
 [ "$(sed -n 3p "$TDIR/argv")" = "$EVIL_KEY" ] || fail "resolve cmd must pass the key verbatim"
 
-# 5. Pending replies may still be owed: stale ones get no auto-resolve command.
+# 5. Jev's category is advisory: every closable decision gets the same neutral resolve
+#    command (the agent picks which to run), and pending replies ask to confirm first.
 WORDING="$TDIR/wording.tsv"
 printf '%s\t%s\t%s\t%s\n' \
   w pending-reply-cfg blocked "pending-reply-missed: task=w request=CONFIG_REREAD" \
-  w pending-reply-other blocked "pending-reply-missed: task=w request=STATUS_PING" \
+  w active-now needs-decision "choose now" \
+  w quota-up needs-decision "approve spend" \
+  w missing-answer needs-decision "jev gives no category" \
   > "$WORDING"
 : > "$EVIL_STATE/w.meta"
 wording=$(FM_STATE_OVERRIDE="$EVIL_STATE" "$DECISION_SH" --input "$WORDING" --json)
-[ "$(printf '%s' "$wording" | python3 -c 'import json,sys; print(",".join(sorted(i["category"] + ":" + i["resolve_cmd"] for i in json.load(sys.stdin))))')" = "stale_historical:,stale_historical:" ] ||
-  fail "stale pending replies must not get an auto-resolve command: $wording"
+[ "$(printf '%s' "$wording" | python3 -c 'import json,sys; print(",".join(sorted(i["key"] for i in json.load(sys.stdin) if i["resolve_cmd"].endswith("\x27decision closed by the first mate\x27"))))')" = "active-now,missing-answer,pending-reply-cfg,quota-up" ] ||
+  fail "resolve commands must not depend on the Jev category: $wording"
 assert_contains "$wording" "no longer owed" "pending reply suggestion asks to confirm the reply is not owed"
 
 # 6. Status-file extraction: tab-bearing notes keep key/verb intact, --all is read-only.
