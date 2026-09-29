@@ -60,6 +60,7 @@ An archived goal retains any attempted or uncertain business action as evidence,
 An attempted or uncertain cleanup action still requires exact readback before cleanup can proceed.
 Concrete cleanup metadata keeps a terminal goal due for reconciliation until the cleanup owner records the complete generation-bound receipt; that supervision does not authorize business execution to resume.
 A complete cleanup receipt makes the terminal goal quiet without erasing its retained evidence.
+The due reader evaluates the required cleanup postconditions semantically: additive diagnostics and historical ShortTask request version labels do not change the verdict, while persisted receipt bytes remain immutable evidence.
 Main can retain an accepted or archived disposition while recording a prepared, unattempted cleanup wait with an evidence-bound dependency.
 That wait defers cleanup reconciliation only until its recheck or deadline; changed or missing release evidence requests readback immediately.
 It cannot replace an unresolved effect or authorize business execution.

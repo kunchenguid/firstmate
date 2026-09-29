@@ -371,7 +371,7 @@ There is no shared learnings file by captain decision.
 The locked mutable bootstrap path materializes its visible default of `7500` estimated tokens in a primary home when the file is absent.
 The file must contain one positive base-10 integer in a regular, single-linked file beneath a non-symlinked `config/` directory.
 Surrounding ASCII whitespace, CRLF line endings, a missing final newline, and leading zeros are normalized on read without rewriting the file; multiple values and embedded control bytes are rejected.
-Malformed, multi-line, symlinked, hardlinked, special, or otherwise unsafe values are rejected rather than treated as a default.
+Symlinked, hardlinked, special, or otherwise unsafe files are rejected rather than treated as a default.
 Use `bin/fm-startup-memory-budget.sh read` to validate and print the effective value, or `bin/fm-startup-memory-budget.sh report` to account for the three files.
 The stable local estimate is `ceil(UTF-8 bytes / 3)` per file, a conservative portable approximation rather than a provider-exact tokenizer.
 The helper's header owns exact parsing, publication, and report output mechanics.
@@ -531,10 +531,10 @@ While the file remains present, no crewmate or scout spawn may proceed without a
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with either an exact install command or manual instructions.
 It installs automatically supported tools only after you say go; manual-only tools remain for you to install from the printed instructions.
 Required tools come in two parts: a universal toolchain every home needs regardless of backend, and a per-backend delta that follows the runtime backend actually resolved for this home.
-The essential universal toolchain is node, git, gh with GitHub auth via `gh auth login`, no-mistakes v1.46.0 or newer, compatible gh-axi, chrome-devtools-axi, compatible tasks-axi per "Backlog backend" above, Python 3.9 or newer, and jq.
+The essential universal toolchain is node, git, gh with GitHub auth via `gh auth login`, no-mistakes v1.46.0 or newer, gh-axi, chrome-devtools-axi, compatible tasks-axi per "Backlog backend" above, Python 3.9 or newer, and jq.
 Python and jq validate the bounded durable task lifecycle records; no additional Python packages are required.
-[`bin/fm-bootstrap.sh`](../bin/fm-bootstrap.sh) checks tool presence and genuine API prerequisites; [`bin/fm-tasks-axi-lib.sh`](../bin/fm-tasks-axi-lib.sh) owns the backlog capability probe.
-The gh-axi and tasks-axi release labels do not determine compatibility.
+[`bin/fm-bootstrap.sh`](../bin/fm-bootstrap.sh) checks gh-axi presence and genuine API prerequisites; each gh-axi operation follows its installed help and verifies its result, while [`bin/fm-tasks-axi-lib.sh`](../bin/fm-tasks-axi-lib.sh) owns the backlog capability probe.
+The gh-axi and tasks-axi release labels do not gate compatibility.
 This section is the single owner of that universal toolchain list; backend guides' prerequisites point here and add only their backend-specific tools.
 In that list, no-mistakes runs the validation pipeline, gh-axi and chrome-devtools-axi cover GitHub and browser operations, and tasks-axi backs backlog mutations.
 The Herdr terminal requires `herdr`, `jq` and the `treehouse` worktree provider in addition to the universal toolchain.

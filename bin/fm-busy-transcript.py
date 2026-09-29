@@ -10,8 +10,10 @@ Usage: init STATE ID HARNESS CWD SESSIONS BACKEND TARGET
        recover-check STATE ID ORIGINAL_TERMINAL ORIGINAL_PID
        recover-apply STATE ID RECEIPT (internal fm-busy-event recovery writer)
 
-Owns <id>.busy-session (v1 JSON). The existing busy-gen and busy-state.lock
-serialize init/read/submission fencing with arm/retire. No vendor file is written.
+Owns <id>.busy-session; its writer emits v1 JSON, while readers bind the
+semantic identity fields and treat the version label and additive diagnostics
+as descriptive. The existing busy-gen and busy-state.lock serialize
+init/read/submission fencing with arm/retire. No vendor file is written.
 The optional process_binding records the original terminal, native PID/start,
 shell PID/start and kernel boot identity after in-place recovery. Every later
 read/text/key guard verifies that seal against Herdr and Linux /proc. Recovery

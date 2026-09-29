@@ -32,7 +32,7 @@ The installed Herdr schema returns `WorkspaceMoveParams.required` in workspace/i
 The method, protocol and required parameter contract still control admission.
 `tests/fm-backend-herdr.test.sh` exercises projection with both schema orders; the isolated installed schema probe also passed.
 The installed Pi 0.87.1 extension typecheck passed; Pi APIs were unchanged by these reader corrections.
-`tests/fm-branch-endpoint.test.sh` verifies exact opaque Herdr endpoint routing, including named sessions and historical task aliases, while duplicate ownership, duplicate identity fields and other-home symlink metadata remain unowned.
+`tests/fm-branch-endpoint.test.sh` verifies exact opaque Herdr endpoint routing, including named sessions and historical task aliases, while duplicate ownership, duplicate identity fields, symlinked metadata and hard-linked metadata remain unowned.
 This is deterministic routing evidence, not a guarantee about model-generated task arguments.
 The same candidate also passed the installed cleanup lifecycle guard described under [independent task workspace cleanup](#independent-task-workspace-cleanup).
 The portable lifecycle suite verifies that identical additive cleanup receipts replay idempotently while removing even a diagnostic field from an already recorded receipt remains an evidence collision.
