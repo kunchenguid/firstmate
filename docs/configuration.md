@@ -1876,9 +1876,12 @@ Re-arm never acquires, releases, or hands off the source claim.
 It may carry `--agent-reply-file <path>`.
 With lavish-axi 0.1.80 or newer, the reply is posted through `lavish-axi reply` under the source lock only after the arm passes its endpoint, ownership, and pending-round checks, and the server's acceptance is awaited before the listener is registered or armed.
 A refused arm never posts the reply, and a failed or timed-out reply stops the arm before it registers a listener or acknowledges the round, so the worker cannot hand the board back as ready and can retry the same arm.
+If Lavish accepts the reply but the local registration then fails, retrying the arm posts that reply again; this rare duplicate is a known, benign limitation.
 
 Older compatible Lavish versions keep the prior behavior: the reply is staged into the listener and sent through `poll --agent-reply`, which cannot confirm acceptance before its long-poll returns.
 That compatibility path retains its best-effort delivery boundary and does not provide the synchronous handoff guarantee.
+Only a version probe that confirms an older compatible release selects that path.
+When `lavish-axi` is missing, its version cannot be read, or it is below the board floor, the arm and any reply-carrying listener fail without posting, and the staged reply is kept for a retry.
 The Lavish version floors and feature probe are owned by `bin/fm-bootstrap.sh`.
 
 **Deliver feedback to the worker**

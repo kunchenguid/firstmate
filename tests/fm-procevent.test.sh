@@ -4791,6 +4791,49 @@ PATH="$POLL_REPLY/bin:$PATH" \
 [ ! -e "$POLL_REPLY/reply-file" ] || fail "direct poll left its accepted staged reply behind"
 pass "direct poll confirms a new-version reply before polling"
 
+# An unreadable Lavish version is not a confirmed older release: arm and a
+# reply-carrying listener fail closed without posting or falling back to poll.
+UNKNOWN="$TMP_ROOT/unknown-version"
+mkdir -p "$UNKNOWN/bin" "$UNKNOWN/home/state"
+export UNKNOWN
+cat > "$UNKNOWN/bin/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1-}" in
+  --version) exit 1 ;;
+  reply|poll) printf '%s\n' "$*" >> "$UNKNOWN/calls"; exit 0 ;;
+  *) exit 2 ;;
+esac
+SH
+chmod +x "$UNKNOWN/bin/lavish-axi"
+unknown_art="$UNKNOWN/board.html"
+printf '<h1>unknown version</h1>\n' > "$unknown_art"
+lavish_session "$unknown_art"
+unknown_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$unknown_art")
+fm_test_track_procevent_home "$UNKNOWN/home"
+new_task_endpoint "$UNKNOWN/home" worker-unknown
+printf 'reply for an unknown version\n' > "$UNKNOWN/reply-file"
+unknown_rc=0
+unknown_out=$(PATH="$UNKNOWN/bin:$PATH" FM_HOME="$UNKNOWN/home" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$unknown_art" --for worker-unknown \
+  --agent-reply-file "$UNKNOWN/reply-file" 2>&1) || unknown_rc=$?
+[ "$unknown_rc" -ne 0 ] || fail "arm fell back to a legacy reply when the Lavish version was unknown"
+assert_contains "$unknown_out" 'cannot confirm a supported lavish-axi version' \
+  "an unknown Lavish version lacked a clear arm diagnostic: $unknown_out"
+[ ! -e "$UNKNOWN/home/state/procevent/$unknown_id.source" ] \
+  || fail "arm registered a board while the Lavish version was unknown"
+[ ! -e "$UNKNOWN/calls" ] || fail "arm reached the board with an unknown Lavish version: $(cat "$UNKNOWN/calls")"
+[ "$(cat "$UNKNOWN/reply-file")" = 'reply for an unknown version' ] \
+  || fail "arm consumed the worker's reply while the Lavish version was unknown"
+cp "$UNKNOWN/reply-file" "$UNKNOWN/staged-reply"
+unknown_rc=0
+PATH="$UNKNOWN/bin:$PATH" "$ROOT/bin/fm-procevent-lavish.sh" poll "$unknown_art" \
+  --agent-reply-file "$UNKNOWN/staged-reply" >/dev/null 2>&1 || unknown_rc=$?
+[ "$unknown_rc" -ne 0 ] || fail "a reply-carrying poll proceeded with an unknown Lavish version"
+[ ! -e "$UNKNOWN/calls" ] || fail "a reply-carrying poll reached the board with an unknown Lavish version: $(cat "$UNKNOWN/calls")"
+[ "$(cat "$UNKNOWN/staged-reply")" = 'reply for an unknown version' ] \
+  || fail "a reply-carrying poll consumed its staged reply with an unknown Lavish version"
+pass "an unknown Lavish version fails arm and poll closed, keeping the staged reply"
+
 # A worker re-arms as soon as its round is published, which can land while the
 # earlier generation's runner is still finishing and holding the claim. The
 # Lavish 0.1.80 stand-in records synchronous reply acceptance before its poll.

@@ -43,8 +43,9 @@
 #            Run by `fm-procevent.sh register-task` under the source lock, only
 #            after the task is eligible to own the board, with the listener argv
 #            it is about to publish. Exit 0 once Lavish accepts the staged reply,
-#            3 when the installed Lavish lacks synchronous reply so the listener
-#            keeps the legacy path, and any other status when the reply failed.
+#            3 when the installed Lavish is a confirmed older release without
+#            synchronous reply so the listener keeps the legacy path, and any
+#            other status when the reply failed or the version is unknown.
 # terminal   Exit 0 when the captured result means this Lavish source will never
 #            produce another result, so the runner may retire it; any other exit
 #            keeps it armed. This is the generic adapter contract bin/fm-procevent.sh
@@ -184,7 +185,12 @@ apply_session_host() {  # <artifact>
 }
 
 lavish_reply_compatible() {
-  "$FM_ROOT/bin/fm-bootstrap.sh" lavish-reply-compatible >/dev/null 2>&1
+  local status=0
+  "$FM_ROOT/bin/fm-bootstrap.sh" lavish-reply-compatible >/dev/null 2>&1 || status=$?
+  case "$status" in
+    0|1) return "$status" ;;
+  esac
+  die "cannot confirm a supported lavish-axi version, so the staged reply was not posted; retry once \`lavish-axi --version\` reports a supported release"
 }
 
 post_lavish_reply() {  # <artifact> <reply-file>
