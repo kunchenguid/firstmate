@@ -671,6 +671,15 @@ jq '(.providers[] | select(.provider == "cursor") | .quotaSemantics.effectiveAva
 TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$CURSOR_NO_GROK" run code out err "$BRIEF"
 assert_contains "$out" 'candidate: cursor:cursor-grok-4.6-medium  provider=cursor  scope=all_models  remaining=0%  spendPriority=-  runway=exhausted_now  -> not eligible: runway exhausted_now at all_models' "Cursor Grok falls back to all_models without grok_bot"
 assert_contains "$out" 'candidate: cursor:grok-4.7-medium  provider=cursor  scope=all_models  remaining=0%  spendPriority=-  runway=exhausted_now  -> not eligible: runway exhausted_now at all_models' "bare Grok also falls back without grok_bot"
+
+CURSOR_GROK_SPENT="$TMP_ROOT/cursor-grok-spent.json"
+jq '(.providers[] | select(.provider == "cursor") | .quotaSemantics.effectiveAvailability) |=
+  (map(if .scope == "all_models" then .effectivePercentRemaining = 100 | .runway.status = "through_reset" else . end) +
+   [{"scope":"grok_bot","status":"known","effectivePercentRemaining":0,"runway":{"status":"exhausted_now"}}])' "$QUOTA" > "$CURSOR_GROK_SPENT"
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$CURSOR_GROK_SPENT" run code out err "$BRIEF"
+assert_contains "$out" 'candidate: cursor:cursor-grok-4.6-medium  provider=cursor  scope=grok_bot  remaining=0%  spendPriority=-  runway=exhausted_now  -> not eligible: runway exhausted_now at grok_bot' "Cursor-prefixed Grok stays bound to an exhausted grok_bot"
+assert_contains "$out" 'candidate: cursor:grok-4.7-medium  provider=cursor  scope=grok_bot  remaining=0%  spendPriority=-  runway=exhausted_now  -> not eligible: runway exhausted_now at grok_bot' "bare Grok stays bound to an exhausted grok_bot"
+assert_contains "$out" 'candidate: cursor:composer-2  provider=cursor  scope=all_models  remaining=100%' "other Cursor models still use the available all_models"
 cp "$BASE_RULES" "$RULES"
 pass "Cursor Grok scope binding follows the reported allowance"
 

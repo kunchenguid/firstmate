@@ -722,6 +722,16 @@ jq '(.providers[] | select(.provider == "cursor") | .quotaSemantics.effectiveAva
   "$CURSOR_GROK" > "$LAB/cursor-no-grok.json"
 out=$(call_choose --snapshot "$LAB/cursor-no-grok.json" --candidate cursor:grok-4.7-medium)
 [ "$out" = "none" ] || fail "Cursor Grok without grok_bot escaped all_models: $out"
+jq '(.providers[] | select(.provider == "cursor") | .quotaSemantics.effectiveAvailability) = [
+  { "scope": "all_models", "status": "known", "effectivePercentRemaining": 100, "runway": { "status": "through_reset" } },
+  { "scope": "grok_bot", "status": "known", "effectivePercentRemaining": 0, "runway": { "status": "exhausted_now" } } ]' \
+  "$SCHEMA6" > "$LAB/cursor-grok-spent.json"
+for model in grok-4.7-medium cursor-grok-4.6-medium; do
+  out=$(call_choose --snapshot "$LAB/cursor-grok-spent.json" --candidate "cursor:$model")
+  [ "$out" = "none" ] || fail "Cursor Grok $model with exhausted grok_bot fell back to all_models: $out"
+done
+out=$(call_choose --snapshot "$LAB/cursor-grok-spent.json" --candidate cursor:grok-4.7-medium --candidate cursor:composer-2)
+[ "$out" = "cursor composer-2" ] || fail "non-Grok Cursor model did not use available all_models: $out"
 ok "Cursor Grok binds to grok_bot when reported and other Cursor models keep all_models"
 
 cat > "$SCHEMA6_TOON" <<'TOON'
