@@ -1602,6 +1602,22 @@ work_is_landed() {
   content_in_default
 }
 
+# Is the recorded PR confirmed CLOSED without merging (rejected)? Only true
+# when gh positively reports a closed, non-merged state; any other outcome -
+# open, merged, no PR recorded, or a gh lookup error - returns non-zero so the
+# caller falls back to its existing recorded-PR allowance rather than
+# refusing on an inconclusive read.
+pr_is_closed_unmerged() {
+  local target state
+  [ -n "$PR_URL" ] || return 1
+  target=$PR_URL
+  state=$(cd "$WT" && gh pr view "$target" --json state -q '.state' 2>/dev/null) || return 1
+  case "$state" in
+    CLOSED|closed) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # The completion links this teardown already holds locally. A scout's
 # deliverable is its report, a local-only ship lands on local main, and every
 # other ship carries the PR recorded on its own record.
@@ -1922,7 +1938,7 @@ validate_worktree_teardown_safety() {
       branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
       TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY=$branch
     fi
-    if ! work_is_landed "$branch" && { [ -n "$unpushed" ] || [ -z "$PR_URL" ]; }; then
+    if ! work_is_landed "$branch" && { [ -n "$unpushed" ] || [ -z "$PR_URL" ] || pr_is_closed_unmerged; }; then
       echo "REFUSED: worktree $WT has work that is not landed." >&2
       [ -n "$unpushed" ] && printf 'unpushed commits:\n%s\n' "$unpushed" >&2
       echo "Open a PR and land it, merge the work into the default branch, or get the captain's explicit OK to discard, then --force." >&2

@@ -273,6 +273,35 @@ SH
   chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
 }
 
+# Override GitHub lookups to report PR 7 as closed without merging (rejected).
+add_gh_pr_closed_unmerged() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "pr list")
+    printf '%s\n' "count: 1 (showing first 1)" "pull_requests[1]{number,state}:" "  7,closed" ; exit 0 ;;
+  "pr view")
+    printf '%s\n' "pull_request:" "  number: 7" "  state: closed" ; exit 0 ;;
+esac
+exit 0
+SH
+  cat > "$case_dir/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "pr view")
+    case "$*" in
+      *"state,headRefOid,url"*) echo "error: pull request not found" >&2 ; exit 1 ;;
+      *"-q .state"*) printf '%s\n' 'CLOSED' ; exit 0 ;;
+    esac
+    ;;
+esac
+echo "error: pull request not found" >&2
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
+}
+
 # Squash-merged history whose pipeline rebased the branch onto a newer main that
 # edited the same shared file. A local copy left behind by that rebase holds
 # different content for the shared file, so its per-commit patch ids against the
@@ -871,6 +900,30 @@ test_no_mistakes_pushed_with_open_pr_allowed() {
 
   expect_code 0 "$rc" "nm-pushed-open-pr: teardown should proceed"
   pass "pushed work with a recorded open PR is not refused"
+}
+
+test_no_mistakes_pushed_with_closed_unmerged_pr_refuses() {
+  local case_dir rc head
+  case_dir=$(make_case nm-pushed-closed-pr)
+  write_meta "$case_dir" no-mistakes ship
+  printf 'pr=https://github.com/o/r/pull/7\n' >> "$case_dir/state/task-x1.meta"
+  wt_commit_file "$case_dir" feature.txt hello "contribution work"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  seed_backlog_in_flight "$case_dir"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  add_gh_pr_closed_unmerged "$case_dir"
+
+  set +e
+  FM_HOME="$case_dir" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "nm-pushed-closed-pr: teardown should refuse"
+  grep -q REFUSED "$case_dir/stderr" \
+    || fail "nm-pushed-closed-pr: no REFUSED line in stderr"
+  assert_refusal_retained_task_state "$case_dir" nm-pushed-closed-pr "$head"
+  pass "pushed work with a recorded but closed-unmerged PR is refused"
 }
 
 test_no_mistakes_truly_unpushed_refuses() {
@@ -4327,6 +4380,7 @@ test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_no_mistakes_pushed_unmerged_refuses
 test_no_mistakes_pushed_with_open_pr_allowed
+test_no_mistakes_pushed_with_closed_unmerged_pr_refuses
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_secondmate_pr_registration_publishes_ready_line
