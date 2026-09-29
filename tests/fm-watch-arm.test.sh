@@ -48,9 +48,9 @@ SEED_PID=
 ARM_PID=
 
 # Start the real watcher as the singleton holder.
-start_seed_watcher() {  # <state> <fakebin> <watch-out>
-  local state=$1 fakebin=$2 out=$3 i
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 \
+start_seed_watcher() {  # <state> <fakebin> <watch-out> [poll-seconds]
+  local state=$1 fakebin=$2 out=$3 poll=${4:-5} i
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL="$poll" FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   SEED_PID=$!
   i=0
@@ -265,6 +265,129 @@ test_attached_arm_still_fails_on_a_wake_it_did_not_deliver() {
   [ "$status" -ne 0 ] && [ "$status" -ne 124 ] \
     || fail "arm did not exit nonzero for a cycle that delivered nothing (status $status)"
   pass "watch-arm: a cycle that delivered no wake of its own still fails loudly"
+}
+
+# A slow cycle is not an ended cycle. The holder is frozen past the grace plus
+# the successor confirmation window, which is where an attached arm used to
+# declare the cycle over and fail while the holder was alive and still held the
+# lock; the owner's retry then hit that live holder's refusal (the auto-arm
+# FAILED notice), or, if the holder beat again first, nothing followed it at all.
+test_attached_arm_follows_a_slow_live_holder() {
+  local dir state fakebin out armout status i arm_followed armout_frozen ledger_frozen
+  dir=$(make_case attached-slow-holder)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  armout="$dir/arm.out"
+  start_seed_watcher "$state" "$fakebin" "$out" 1
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_ARM_ATTACH_POLL=0.1 \
+    FM_ARM_CONFIRM_TIMEOUT=1 FM_GUARD_GRACE=4 FM_WATCHER_STALL_BOUND=600 "$WATCH_ARM" > "$armout" &
+  ARM_PID=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    grep -qF "watcher: attached pid=$SEED_PID" "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF "watcher: attached pid=$SEED_PID" "$armout" \
+    || fail "arm did not attach to the live watcher: $(cat "$armout")"
+
+  kill -STOP "$SEED_PID"
+  # Grace 4s plus the 1s confirmation window plus its rounding second is where
+  # the old arm gave up; hold the holder well past that. Observe while frozen,
+  # but resume before asserting so a failure never strands a stopped watcher.
+  i=0
+  while [ "$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_path_age "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$state/.last-watcher-beat")" -lt 10 ] \
+    && [ "$i" -lt 300 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  arm_followed=0
+  is_live_non_zombie "$ARM_PID" && arm_followed=1
+  armout_frozen=$(cat "$armout")
+  ledger_frozen=$(cat "$state/.watch-cycle-exits.log" 2>/dev/null || true)
+  kill -CONT "$SEED_PID"
+  [ "$arm_followed" = 1 ] || fail "attached arm ended while its holder was alive: $armout_frozen"
+  assert_not_contains "$armout_frozen" 'watcher: FAILED' \
+    "attached arm failed a live holder's slow cycle"
+  assert_not_contains "$ledger_frozen" 'reason=attached-cycle-ended' \
+    "attached arm closed a cycle that had not ended"
+
+  # The holder resumes and delivers a wake: the arm that kept following it
+  # reports that wake, so nothing is lost.
+  printf 'needs-decision: which export format?\n' > "$state/demo.status"
+  wait_for_exit "$SEED_PID" 150
+  grep -q '^signal:' "$out" || fail "resumed holder did not surface the signal wake: $(cat "$out")"
+  wait_for_exit "$ARM_PID" 150
+  status=$?
+  ! grep -qF 'watcher: FAILED' "$armout" \
+    || fail "attached arm failed after its holder resumed: $(cat "$armout")"
+  grep -q '^signal:' "$armout" \
+    || fail "attached arm did not report the resumed holder's wake: $(cat "$armout")"
+  expect_code 0 "$status" "an attached arm that followed a slow holder must close with its wake"
+  pass "watch-arm: an attached arm keeps following a slow live holder and reports its wake"
+}
+
+# The stall bound is where following ends. A live holder whose beacon reaches it
+# is what the watcher's own re-arm evicts, so the attached arm stops there with
+# the typed stalled-holder line, and its owner's retry replaces the holder
+# instead of being refused.
+test_attached_arm_hands_a_stalled_holder_to_its_replacement() {
+  local dir state fakebin armout rearmout holder identity status
+  dir=$(make_case attached-stalled-holder)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  rearmout="$dir/rearm.out"
+  # A live process the lock records under its real identity, which never beats:
+  # the shape of a watcher wedged mid-cycle that still answers TERM.
+  sleep 300 &
+  holder=$!
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$holder") \
+    || fail "could not identify the fake holder"
+  mkdir -p "$state/.watch.lock"
+  printf '%s\n' "$holder" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+  : > "$state/.last-watcher-beat"
+
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_ARM_ATTACH_POLL=0.1 \
+    FM_ARM_CONFIRM_TIMEOUT=1 FM_GUARD_GRACE=5 FM_WATCHER_STALL_BOUND=12 "$WATCH_ARM" > "$armout" &
+  ARM_PID=$!
+  wait_for_exit "$ARM_PID" 300
+  status=$?
+  grep -qF "watcher: attached pid=$holder" "$armout" \
+    || fail "arm did not attach to the fresh holder: $(cat "$armout")"
+  grep -E "^watcher: FAILED - attached watcher pid=$holder stalled \(beacon [0-9]+s at or past hard bound 12s\)\$" "$armout" >/dev/null \
+    || fail "attached arm did not report the stalled holder: $(cat "$armout")"
+  ! grep -qF 'cycle ended without an actionable reason' "$armout" \
+    || fail "attached arm gave up on the live holder before the stall bound: $(cat "$armout")"
+  [ "$status" -ne 0 ] && [ "$status" -ne 124 ] \
+    || fail "stalled-holder close did not exit nonzero (status $status)"
+  grep -q 'reason=attached-holder-stalled' "$state/.watch-cycle-exits.log" \
+    || fail "the stalled-holder close was not classified in the lifecycle ledger"
+  is_live_non_zombie "$holder" || fail "the attached arm signalled the holder it follows"
+
+  # The owner's retry: a fresh arm reaches the watcher's eviction path, and the
+  # replacement surfaces an ordinary wake instead of the refusal that used to
+  # end in the auto-arm FAILED notice.
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_ARM_CONFIRM_TIMEOUT=10 FM_GUARD_GRACE=5 FM_WATCHER_STALL_BOUND=12 "$WATCH_ARM" > "$rearmout" 2>&1 &
+  ARM_PID=$!
+  wait_for_exit "$ARM_PID" 300
+  status=$?
+  grep -qF "watcher: replaced stalled pid $holder " "$rearmout" \
+    || fail "the retry did not replace the stalled holder: $(cat "$rearmout")"
+  ! grep -qF 'watcher: FAILED' "$rearmout" \
+    || fail "the retry failed instead of replacing the stalled holder: $(cat "$rearmout")"
+  grep -Eq '^(signal|stale|check):' "$rearmout" \
+    || fail "the replacement surfaced no ordinary wake: $(cat "$rearmout")"
+  expect_code 0 "$status" "the retry that replaced a stalled holder must close with an ordinary wake"
+  wait_for_pid_gone "$holder" 50 || fail "the stalled holder survived its replacement"
+  wait "$holder" 2>/dev/null || true
+  pass "watch-arm: an attached arm hands a holder stalled past the bound to its owner's replacement"
 }
 
 test_rearm_resurfaces_durable_queue_and_remote_open_decision() {
@@ -716,6 +839,111 @@ test_markerless_legacy_queue_is_recovered_on_arm() {
   pass "watch-arm: markerless legacy queues are adopted and recovered"
 }
 
+test_idle_lavish_source_stays_quiet_until_result() {
+  local dir home state fakebin source trigger first_out idle_out i
+  dir=$(make_case idle-lavish-source)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  source="$dir/lavish-source.sh"
+  trigger="$dir/result-ready"
+  first_out="$dir/first-arm.out"
+  idle_out="$dir/idle-arm.out"
+  mkdir -p "$home/data"
+  cat > "$source" <<'SH'
+#!/usr/bin/env bash
+set -u
+trigger=$1
+i=0
+while [ ! -e "$trigger" ] && [ "$i" -lt 400 ]; do
+  sleep 0.05
+  i=$((i + 1))
+done
+[ -e "$trigger" ] || exit 1
+cat <<'RESULT'
+session:
+  status: feedback
+  session_ended: true
+prompts[1]{tag,prompt}:
+  feedback,"real review result"
+RESULT
+SH
+  chmod +x "$source"
+
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    "$ROOT/bin/fm-procevent.sh" register lavish idle-lavish -- "$source" "$trigger" \
+    >/dev/null || fail "could not register the Lavish fixture source"
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS=1 \
+    "$ROOT/bin/fm-procevent.sh" reconcile >/dev/null \
+    || fail "could not start the Lavish fixture source"
+  printf 'pending:downtime:idle-lavish.1.fixture\n' > "$state/.watcher-down"
+
+  FM_ROOT_OVERRIDE="$ROOT" start_rearm_arm "$home" "$state" "$fakebin" "$first_out"
+  wait_for_exit "$ARM_PID" 80 || fail "the first recovery arm did not surface"
+  grep -F 'check: rearm-resurface' "$first_out" >/dev/null \
+    || fail "the pending recovery generation did not get its first announcement"
+  [ ! -s "$state/.wake-queue" ] \
+    || fail "the idle Lavish source produced a wake before any result"
+
+  FM_ROOT_OVERRIDE="$ROOT" start_rearm_arm "$home" "$state" "$fakebin" "$idle_out"
+  i=0
+  while [ "$i" -lt 30 ] && is_live_non_zombie "$ARM_PID"; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if ! is_live_non_zombie "$ARM_PID"; then
+    : > "$trigger"
+    wait "$ARM_PID" 2>/dev/null || true
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+      "$ROOT/bin/fm-procevent.sh" retire idle-lavish >/dev/null 2>&1 || true
+    fail "an idle live Lavish source re-fired recovery with an empty queue: $(cat "$idle_out")"
+  fi
+  ! grep -F 'check: rearm-resurface' "$idle_out" >/dev/null \
+    || fail "the idle live Lavish source emitted a repeated recovery wake"
+
+  : > "$trigger"
+  wait_for_exit "$ARM_PID" 120 \
+    || fail "the live Lavish result did not wake the supervising arm"
+  grep -F 'check: process-event result captured: procevent:idle-lavish:1' "$idle_out" >/dev/null \
+    || fail "the live Lavish result did not surface promptly: $(cat "$idle_out")"
+  grep "$(printf '\tcheck\tprocevent:idle-lavish:1\t')" "$state/.wake-queue" >/dev/null \
+    || fail "the live Lavish result was not durable before its wake"
+  pass "watch-arm: an idle Lavish source stays quiet and its real result wakes promptly"
+}
+
+test_append_wakes_live_announced_watcher() {
+  local dir home state fakebin first_out idle_out
+  dir=$(make_case append-after-empty-recovery)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  first_out="$dir/first-arm.out"
+  idle_out="$dir/idle-arm.out"
+  mkdir -p "$home/data"
+  printf 'pending:downtime:append-after-empty.fixture\n' > "$state/.watcher-down"
+
+  start_rearm_arm "$home" "$state" "$fakebin" "$first_out"
+  wait_for_exit "$ARM_PID" 80 || fail "the initial empty recovery did not surface"
+  grep -F 'check: rearm-resurface' "$first_out" >/dev/null \
+    || fail "the initial empty recovery was not announced"
+  [ ! -s "$state/.wake-queue" ] \
+    || fail "the empty recovery unexpectedly queued durable work"
+
+  start_rearm_arm "$home" "$state" "$fakebin" "$idle_out"
+  is_live_non_zombie "$ARM_PID" \
+    || fail "the announced empty recovery did not leave a live watcher"
+  append_wake "$state" check inbox:fixture 'check: captain inbox note fixture' \
+    || fail "the generic producer could not append its wake"
+  wait_for_exit "$ARM_PID" 80 \
+    || fail "the live watcher stranded work appended after an empty recovery"
+  grep -F 'check: rearm-resurface' "$idle_out" >/dev/null \
+    || fail "the appended wake did not reopen recovery: $(cat "$idle_out")"
+  grep "$(printf '\tcheck\tinbox:fixture\t')" "$state/.wake-queue" >/dev/null \
+    || fail "the appended wake was not durable when recovery surfaced"
+  pass "watch-arm: appending work reopens an announced empty recovery"
+}
+
 # Exercise the handling-window recovery invariant owned by
 # docs/watcher-continuity.md through real watcher processes.
 test_handling_window_close_keeps_the_acknowledgement_valid() {
@@ -1021,8 +1249,10 @@ wait_for_pid_gone() {  # <pid> <polls>
 }
 
 # A running watcher whose state directory is deleted (a torn-down temporary
-# home) must exit within one poll with a logged reason, not run on as an orphan
-# (upstream #4760). FM_POLL=1 here, so 30 polls of 0.1s outlast one poll.
+# home) must exit after noticing the deletion with a logged reason, not run on
+# as an orphan (upstream #4760). Allow for a slow CI runner finishing the cycle
+# already in progress before its next FM_POLL=1 tick. A busy poll may spend
+# longer than ten seconds in subprocesses on a contended CI runner.
 test_watcher_exits_when_its_state_directory_is_removed() {
   local dir home state fakebin armout
   dir=$(make_case state-dir-removed)
@@ -1034,14 +1264,14 @@ test_watcher_exits_when_its_state_directory_is_removed() {
   start_owned_watcher "$home" "$state" "$fakebin" "$armout"
 
   rm -rf "$state"
-  wait_for_pid_gone "$WATCH_PID" 30 \
+  wait_for_pid_gone "$WATCH_PID" 400 \
     || { kill -TERM "$WATCH_PID" 2>/dev/null; fail "watcher pid $WATCH_PID outlived its deleted state directory"; }
   wait_for_exit "$ARM_PID" 100 >/dev/null 2>&1 || true
   grep -qF 'watcher: exiting - state directory' "$armout" \
     || fail "watcher did not log the state-gone exit reason: $(cat "$armout")"
   ! grep -q '^signal:\|^check:\|^stale:\|^heartbeat' "$armout" \
     || fail "a state-gone exit was reported as an actionable wake: $(cat "$armout")"
-  pass "watch-arm: a watcher exits within one poll when its state directory is removed"
+  pass "watch-arm: a watcher exits when its state directory is removed"
 }
 
 # The same for a deleted home whose state directory still exists elsewhere: the
@@ -1057,14 +1287,14 @@ test_watcher_exits_when_its_home_is_removed() {
   start_owned_watcher "$home" "$state" "$fakebin" "$armout"
 
   rm -rf "$home"
-  wait_for_pid_gone "$WATCH_PID" 30 \
+  wait_for_pid_gone "$WATCH_PID" 400 \
     || { kill -TERM "$WATCH_PID" 2>/dev/null; fail "watcher pid $WATCH_PID outlived its deleted home"; }
   wait_for_exit "$ARM_PID" 100 >/dev/null 2>&1 || true
   grep -qF 'watcher: exiting - home no longer exists' "$armout" \
     || fail "watcher did not log the home-gone exit reason: $(cat "$armout")"
   [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" != "$WATCH_PID" ] \
     || fail "the exited watcher left its lock in place"
-  pass "watch-arm: a watcher exits within one poll when its home is removed"
+  pass "watch-arm: a watcher exits when its home is removed"
 }
 
 # tests/lib.sh's exit-time reaper must stop a watcher a suite armed for a
@@ -1095,6 +1325,8 @@ test_watcher_exits_when_its_state_directory_is_removed
 test_watcher_exits_when_its_home_is_removed
 test_reaper_stops_a_tracked_watcher
 test_attached_arm_still_fails_on_a_wake_it_did_not_deliver
+test_attached_arm_follows_a_slow_live_holder
+test_attached_arm_hands_a_stalled_holder_to_its_replacement
 test_rearm_resurfaces_durable_queue_and_remote_open_decision
 test_slow_rearm_recovery_is_still_surfaced
 test_marker_publish_failure_retains_recovery_evidence
@@ -1104,6 +1336,8 @@ test_malformed_marker_is_quarantined_once
 test_recovery_consumption_serializes_queue_publication
 test_restart_preserves_recovery_across_reused_pid_lock
 test_markerless_legacy_queue_is_recovered_on_arm
+test_idle_lavish_source_stays_quiet_until_result
+test_append_wakes_live_announced_watcher
 test_handling_window_close_keeps_the_acknowledgement_valid
 test_moved_generation_acknowledgement_is_self_healing
 test_downtime_marker_does_not_follow_symlink

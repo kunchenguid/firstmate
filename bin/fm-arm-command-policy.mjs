@@ -619,6 +619,8 @@ function shellInvocation(position) {
   const name = basename(position.command.value);
   if (!["sh", "bash", "zsh"].includes(name)) return null;
   const words = position.words;
+  let readsStdin = false;
+  let optionsEnded = false;
   for (let i = position.index + 1; i < words.length; i += 1) {
     const option = words[i];
     if (/^-[A-Za-z]*c[A-Za-z]*$/.test(option.value)) {
@@ -630,7 +632,18 @@ function shellInvocation(position) {
       i += 1;
       continue;
     }
+    if (!optionsEnded && /^-[A-Za-z]*s[A-Za-z]*$/.test(option.value)) readsStdin = true;
+    if (option.value === "--") {
+      // `--` ends option parsing: after -s a later `-c` is only a positional
+      // parameter, and a later `-s` never switches to reading stdin.
+      if (readsStdin) return { kind: "stdin", payload: null, operand: words[i + 1] || null };
+      optionsEnded = true;
+    }
     if (option.value === "--" || /^[-+]/.test(option.value)) continue;
+    // With -s the shell still reads its program from stdin; the operand is only
+    // a positional parameter, kept as `operand` so a protected path there still
+    // fails closed.
+    if (readsStdin) return { kind: "stdin", payload: null, operand: option };
     return { kind: "script", payload: option };
   }
   return { kind: "stdin", payload: null };
@@ -788,7 +801,7 @@ function analyzeProgram(command, context, depth = 0) {
 
     const shell = shellInvocation(position);
     const shellPayload = shell?.kind === "command" ? shell.payload : null;
-    const shellScript = shell?.kind === "script" ? shell.payload : null;
+    const shellScript = shell?.kind === "script" ? shell.payload : shell?.operand || null;
     const sourceScript = sourcedScript(position);
     const literalEvalPayload = evalPayload(position);
     const heredocPayloads = shellHeredocPayloads(tokens, position);

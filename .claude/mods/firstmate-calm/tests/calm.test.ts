@@ -4,6 +4,7 @@ import { describe, expect, test, type Engine } from "claude-code/testing";
 import {
   assistantMessage,
   calmCommand,
+  doorbell,
   fromFirstmate,
   HOME,
   isHidden,
@@ -22,11 +23,15 @@ const sessionStart = { cwd: "/work", surface: "terminal" as const, isInteractive
 
 describe("activation", () => {
   async function expectInert($: Engine, on: Parameters<typeof world>[0], functionHooks: string | undefined) {
-    const { clock, journal } = world(on, {
+    const { clock, files, journal } = world(on, {
       functionHooks,
       preference: "on\n",
       messages: [{ role: "assistant", text: "Working", toolUses: [{ name: "Bash" }] }],
     });
+    files.set(
+      `${HOME}/state/.branch-outcomes-tail.jsonl`,
+      '{"seq":1,"epoch":0,"task":"fm-x","wake":"","verdict":"captain","summary":"PR ready","silent":false}\n',
+    );
     await $.session.start(sessionStart);
     const drawings = await Promise.all([
       $.ui.render(spinner()),
@@ -37,12 +42,13 @@ describe("activation", () => {
       $.ui.render(assistantMessage("Working")),
     ]);
     expect(drawings.every(isStock)).toBe(true);
-    await clock.advance(220 * 8);
+    await clock.advance(220 * 16);
     expect(journal.commands).toHaveLength(0);
     expect(journal.blits).toHaveLength(0);
     expect(journal.invalidations).toHaveLength(0);
     expect(journal.toasts).toHaveLength(0);
     expect(journal.fsReads).toHaveLength(0);
+    expect(journal.logs).toHaveLength(0);
     expect(journal.sessionMessageReads).toBe(0);
     expect(journal.configLists).toBe(0);
   }
@@ -202,6 +208,45 @@ describe("operational user rows", () => {
       expect(isStock(await $.ui.render(userMessage(text))), JSON.stringify(text)).toBe(true);
     }
   });
+
+  // A harness that strips U+2063 from submitted prompts receives a plain doorbell naming
+  // a record that holds the envelope; only the record makes the row Firstmate's.
+  const inbox = `${HOME}/state/operational-inbox`;
+  const backed = `${inbox}/1790000000-0123456789abcdef.msg`;
+  const unbacked = `${inbox}/1790000000-fedcba9876543210.msg`;
+  const asciiRecord = `${inbox}/1790000000-aaaaaaaaaaaaaaaa.msg`;
+
+  test("hides a doorbell only when the record it names holds a current envelope", async ($, on) => {
+    const { files, journal } = world(on, { preference: "on\n" });
+    files.set(backed, operational("away-supervisor", "Supervisor escalate: done: PR 1"));
+    files.set(asciiRecord, "FIRSTMATE_OP: v1 away-supervisor: ascii only");
+    expect(isHidden(await $.ui.render(userMessage(doorbell(backed))))).toBe(true);
+    expect(isStock(await $.ui.render(userMessage(doorbell(unbacked))))).toBe(true);
+    expect(isStock(await $.ui.render(userMessage(doorbell(asciiRecord))))).toBe(true);
+    expect(isStock(await $.ui.render(userMessage(`${doorbell(backed)} and more`)))).toBe(true);
+    expect(isStock(await $.ui.render(userMessage(doorbell("relative/operational-inbox/1-a.msg"))))).toBe(true);
+    // Records are immutable once published, so one read serves every redraw of the row.
+    const readsBefore = journal.fsReads.filter((path) => path === backed).length;
+    expect(isHidden(await $.ui.render(userMessage(doorbell(backed))))).toBe(true);
+    expect(journal.fsReads.filter((path) => path === backed).length).toBe(readsBefore);
+  });
+
+  test("shows a hidden doorbell again once a toggle redraws it after its record is pruned", async ($, on) => {
+    const { files } = world(on, { preference: "on\n" });
+    files.set(backed, operational("away-supervisor", "escalate"));
+    expect(isHidden(await $.ui.render(userMessage(doorbell(backed))))).toBe(true);
+    files.delete(backed);
+    await $.command.run(calmCommand());
+    await $.command.run(calmCommand());
+    expect(isStock(await $.ui.render(userMessage(doorbell(backed))))).toBe(true);
+  });
+
+  test("leaves a backed doorbell to the engine while off, without reading its record", async ($, on) => {
+    const { files, journal } = world(on);
+    files.set(backed, operational("away-supervisor", "escalate"));
+    expect(isStock(await $.ui.render(userMessage(doorbell(backed))))).toBe(true);
+    expect(journal.fsReads).not.toContain(backed);
+  });
 });
 
 describe("mid-turn working notes", () => {
@@ -333,7 +378,7 @@ describe("mid-turn working notes", () => {
       result: { answer: "Done.", toolUses: [{ name: "Bash", input: {} }], stopReason: "tool_use" },
     });
     await runStep($);
-    expect(journal.fsReads).toHaveLength(2);
+    expect(journal.fsReads.filter((path) => path === PREFERENCE)).toHaveLength(2);
     expect(journal.sessionMessageReads).toBe(2);
     expect(isHidden(await $.ui.render(assistantMessage("Done.", "session-two-note")))).toBe(true);
   });

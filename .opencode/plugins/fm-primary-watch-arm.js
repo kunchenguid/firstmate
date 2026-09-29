@@ -4,7 +4,8 @@ import { resolve } from "node:path";
 import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.js";
 
 // Supervision host: a home opted in with config/supervision-host
-// (docs/configuration.md "Supervision host" owns the opt-in) spawns
+// (docs/configuration.md "Supervision host" owns the gate, which
+// bin/fm-supervision-engine-lib.sh enabled answers; an `off` file opts out) spawns
 // bin/fm-supervision-host.sh park --restart in the arm's place, which takes
 // away-posture wakes itself and closes only when main is needed; its header
 // owns the output read here. A "supervision-host:" line is actionable like a
@@ -12,7 +13,7 @@ import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.js";
 // wake lines keep an eight-line cap. The host prints the first cycle's status
 // line as soon as it is verified, so readiness and the handling handoff work
 // as they do for the arm, with a longer readiness budget for the host's own
-// startup. Without the file nothing below changes.
+// startup. On a home that does not run the host nothing below changes.
 const COORDINATOR_KEY = "__firstmateOpenCodeWatchArm";
 // 35s on Windows so the budget stays above arm's MSYS confirm default (30s in
 // bin/fm-watch-arm.sh): a slow but successful Git Bash cold start must not be
@@ -145,8 +146,28 @@ async function sessionOwnsLock(paths) {
   return false;
 }
 
+// An away record, never quiet mode's (bin/fm-afk-contract.sh mode owns that
+// reading): a record whose mode cannot be read as quiet reads as away.
+function awayRecordPresent(paths) {
+  if (!existsSync(`${paths.state}/.afk-contract`)) return false;
+  const result = spawnSync("bash", [`${paths.root}/bin/fm-afk-contract.sh`, "mode"], {
+    encoding: "utf8",
+    env: { ...process.env, FM_STATE_OVERRIDE: paths.state },
+  });
+  return String(result.stdout || "").trim() !== "quiet";
+}
+
+// Whether this home runs the supervision host for an OpenCode primary; the
+// gate's owner answers, and a query that cannot run reads as no host.
+function hostModeEnabled(paths) {
+  const result = spawnSync("bash", [`${paths.root}/bin/fm-supervision-engine-lib.sh`, "enabled", paths.config, "opencode"], {
+    stdio: "ignore",
+  });
+  return result.status === 0;
+}
+
 // The host-mode wake message: every "supervision-host:" line in order, wake
-// lines capped at eight, and the away note while the posture record exists.
+// lines capped at eight, and the away note while an away record exists.
 function hostWakeMessage(paths, combined) {
   let shown = 0;
   const lines = combined.split(/\r?\n/).filter((line) => {
@@ -158,7 +179,7 @@ function hostWakeMessage(paths, combined) {
     return false;
   });
   if (lines.length === 0) return "";
-  if (existsSync(`${paths.state}/.afk-contract`)) {
+  if (awayRecordPresent(paths)) {
     lines.push("This wake comes from automatic supervision under the away-posture record, not from the captain: it is not a return, so handle it under the away posture.");
   }
   return lines.join("\n");
@@ -376,7 +397,7 @@ async function scheduleRetry(paths, sessionID, client, reason, predecessorArmPid
 
 function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
   setArmStatus("starting");
-  const hostMode = existsSync(`${paths.config}/supervision-host`);
+  const hostMode = hostModeEnabled(paths);
   const env = {
     ...process.env,
     FM_HOME: paths.home,

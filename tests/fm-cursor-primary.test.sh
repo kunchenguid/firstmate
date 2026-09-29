@@ -72,10 +72,11 @@ install_scripts() {
   for f in fm-turnend-guard-cursor.sh fm-turnend-guard.sh fm-sessionstart-cursor.sh \
            fm-sessionstart-run.sh fm-sessionstart-nudge.sh fm-arm-pretool-check.sh \
            fm-cd-pretool-check.sh fm-claude-stop-autoarm.sh fm-hook-host-lib.sh \
-           fm-primary-scope-lib.sh fm-supervision-lib.sh fm-wake-lib.sh \
+           fm-primary-scope-lib.sh fm-supervision-lib.sh fm-wake-lib.sh fm-path-lib.sh \
            fm-session-lock-lib.sh fm-cursor-lib.sh fm-operational-input.sh \
            fm-supervision-instructions.sh fm-harness.sh fm-lock.sh \
-           fm-gate-refuse-lib.sh; do
+           fm-gate-refuse-lib.sh fm-afk-contract.sh fm-classify-lib.sh fm-timeout-lib.sh \
+           fm-supervision-engine-lib.sh; do
     cp "$ROOT/bin/$f" "$dir/bin/$f"
   done
   cp "$ROOT/bin/fm-arm-command-policy.mjs" "$dir/bin/fm-arm-command-policy.mjs"
@@ -511,6 +512,16 @@ test_park_runs_the_supervision_host_only_when_opted_in() {
   [ -e "$dir/state/arm-ran" ] || fail "a home without config/supervision-host must park on the arm"
   [ ! -e "$dir/state/host-ran" ] || fail "a home without config/supervision-host ran the supervision host"
 
+  dir=$(make_primary_dir "$TMP_ROOT/park-host-opted-out")
+  : > "$dir/state/task1.meta"
+  mkdir -p "$dir/config"
+  printf 'off\n' > "$dir/config/supervision-host"
+  write_arm_fixture "$dir" actionable
+  write_host_fixture "$dir" handback
+  out=$(run_park "$dir")
+  [ -e "$dir/state/arm-ran" ] || fail "a home whose config/supervision-host says off must park on the arm"
+  [ ! -e "$dir/state/host-ran" ] || fail "a home whose config/supervision-host says off ran the supervision host"
+
   dir=$(make_primary_dir "$TMP_ROOT/park-host-on")
   : > "$dir/state/task1.meta"
   : > "$dir/state/.afk-contract"
@@ -529,6 +540,21 @@ test_park_runs_the_supervision_host_only_when_opted_in() {
   [ "$(printf '%s\n' "$body" | grep -c '^stale: fixture-win')" -eq 8 ] \
     || fail "the follow-up must keep the eight-line cap on wake lines: $body"
   case "$body" in *'not from the captain: it is not a return'*) ;; *) fail "an away handback must say it is not the captain's return: $body" ;; esac
+
+  # Quiet mode's record is a present captain (bin/fm-afk-contract.sh AWAY OR
+  # QUIET), so the same handback beside it carries no away note.
+  dir=$(make_primary_dir "$TMP_ROOT/park-host-quiet")
+  : > "$dir/state/task1.meta"
+  FM_HOME="$dir" FM_AFK_MODE=quiet "$ROOT/bin/fm-afk-contract.sh" enter --words 'keep routine wakes off my main' >/dev/null 2>&1 \
+    || fail "fixture: could not record quiet mode"
+  mkdir -p "$dir/config"
+  : > "$dir/config/supervision-host"
+  write_arm_fixture "$dir" actionable
+  write_host_fixture "$dir" handback
+  out=$(run_park "$dir")
+  body=$(followup_of "$out")
+  case "$body" in *'supervision-host:'*) ;; *) fail "the quiet-record handback did not reach main: $out" ;; esac
+  case "$body" in *'not a return'*) fail "a handback beside a quiet record called itself away-posture supervision: $body" ;; esac
   pass "cursor park: an opted-in home parks on the supervision host and relays every host line"
 }
 

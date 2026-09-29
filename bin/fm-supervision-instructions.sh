@@ -2,11 +2,14 @@
 # Render the primary-harness supervision operating block for session start and
 # the short repair line used by guards and turn-end hooks. On a non-Pi primary
 # with a supervision protocol (claude, cursor, opencode, omp, grok, codex) whose
-# home opted into the supervision host (config/supervision-host), the block
+# home runs the supervision host (fm_supervision_host_enabled in
+# bin/fm-supervision-engine-lib.sh: by default on Claude, by
+# config/supervision-host elsewhere, never with an `off` file), the block
 # adds one state line and the host's main-side protocol
 # (docs/supervision-protocols/supervision-host.md, whose lines tagged
 # "{<harness>,...} " render only for the listed harnesses), and Grok's arm
-# command becomes the host; without that file the output is unchanged.
+# command becomes the host; on a home that does not run it the output is
+# unchanged.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -107,7 +110,9 @@ HOST_SNIPPET=
 grok_arm='bin/fm-watch-arm.sh'
 case "$HARNESS" in
   claude|cursor|opencode|omp|grok|codex)
-    if [ -f "$CONFIG/supervision-host" ]; then
+    # shellcheck source=bin/fm-supervision-engine-lib.sh
+    . "$SCRIPT_DIR/fm-supervision-engine-lib.sh"
+    if fm_supervision_host_enabled "$CONFIG" "$HARNESS"; then
       HOST_SNIPPET="$DOC_DIR/supervision-host.md"
       grok_arm='bin/fm-supervision-host.sh park'
     fi
@@ -264,7 +269,7 @@ else
   printf '%s\n' '- X mode: inactive; use the default watcher cadence.'
 fi
 if [ -n "$HOST_SNIPPET" ]; then
-  printf '%s\n' '- Supervision host: on; it takes away-posture wakes itself and hands the rest to you (protocol at the end of this block).'
+  printf '%s\n' '- Supervision host: on; it takes away-posture wakes and, where the dialog mirror is verified, eligible attended wakes itself, and hands the rest to you (protocol at the end of this block).'
 fi
 ordinary_wake_line
 printf '\n'

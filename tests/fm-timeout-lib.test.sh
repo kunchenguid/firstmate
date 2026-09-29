@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Behavior tests for bin/fm-timeout-lib.sh's exec-style bound, fm_exec_timed:
+# Behavior tests for bin/fm-timeout-lib.sh's bounds, fm_exec_timed and fm_run_timed:
 # TERM to the command's process group at the bound, KILL once the grace has
 # passed, a forwarded signal, the caller replaced rather than wrapped, and a
 # refusal instead of an unbounded run when nothing on the host can enforce the
@@ -31,6 +31,18 @@ exec_timed() {
   (
     . "$ROOT/bin/fm-timeout-lib.sh"
     PATH=$path fm_exec_timed "$@"
+  )
+}
+
+RUN124="$TMP_ROOT/run124-bin"
+mkdir -p "$RUN124"
+printf '#!/bin/sh\nshift 3\n"$@"\nexit 124\n' > "$RUN124/timeout"
+chmod +x "$RUN124/timeout"
+
+run_timed() {
+  (
+    . "$ROOT/bin/fm-timeout-lib.sh"
+    PATH="$RUN124:$PATH" fm_run_timed "$@"
   )
 }
 
@@ -160,6 +172,64 @@ test_a_signal_to_the_bounding_process_reaches_the_command() {
   pass "fm_exec_timed forwards a TERM it receives to the bounded command"
 }
 
+# A caller that names its owner before launching the watchdog is watched even
+# when that owner died while the watchdog was still starting: the watchdog's
+# parent is then not the named owner, so the escalation starts at once rather
+# than at the bound.
+test_a_named_owner_that_is_gone_ends_the_command() {
+  local dir gone rc=0 started elapsed pid
+  dir="$TMP_ROOT/owner"
+  mkdir -p "$dir"
+  sleep 0 &
+  gone=$!
+  wait "$gone" 2>/dev/null || true
+  started=$SECONDS
+  (
+    . "$ROOT/bin/fm-timeout-lib.sh"
+    PATH=$PERL_ONLY FM_EXEC_TIMED_OWNER_PID=$gone \
+      fm_exec_timed 60 1 bash -c 'echo $$ > "$1"; exec sleep 300' _ "$dir/pid"
+  ) || rc=$?
+  elapsed=$((SECONDS - started))
+  [ "$elapsed" -lt 15 ] || fail "a watchdog whose named owner was gone ran to its bound (${elapsed}s)"
+  [ "$rc" -ne 0 ] || fail "a command ended by its owner's death reported success"
+  if [ -s "$dir/pid" ]; then
+    pid=$(cat "$dir/pid")
+    ! kill -0 "$pid" 2>/dev/null || fail "the bounded command outlived its named owner"
+  fi
+  pass "fm_exec_timed ends the command when its named owner is already gone"
+}
+
+# With no named owner the calling script is captured before the watchdog
+# starts, so a script that dies while its subshell is still on the way into
+# fm_exec_timed - the watchdog then starts already reparented - is still
+# detected instead of leaving the command running to its bound.
+test_an_owner_that_dies_during_startup_ends_the_command() {
+  local dir watchdog started
+  dir="$TMP_ROOT/startup-owner"
+  mkdir -p "$dir"
+  # shellcheck disable=SC2016
+  PATH=$PERL_ONLY bash -c '
+    . "$1/bin/fm-timeout-lib.sh"
+    (
+      echo "$BASHPID" > "$2/watchdog"
+      while kill -0 "$$" 2>/dev/null; do sleep 0.05; done
+      fm_exec_timed 60 1 bash -c "exec sleep 300"
+    ) >/dev/null 2>&1 &
+    exit 0
+  ' _ "$ROOT" "$dir"
+  wait_for_file "$dir/watchdog"
+  watchdog=$(cat "$dir/watchdog")
+  started=$SECONDS
+  while kill -0 "$watchdog" 2>/dev/null; do
+    if [ "$((SECONDS - started))" -ge 15 ]; then
+      kill -KILL "$watchdog" 2>/dev/null || true
+      fail "a watchdog whose owner died during startup ran on toward its bound"
+    fi
+    sleep 0.02
+  done
+  pass "fm_exec_timed ends the command when its owner dies during watchdog startup"
+}
+
 # perl is preferred whenever it exists, because only its watchdog can reap a
 # leftover descendant after replacing the caller.
 test_perl_is_preferred_over_timeout() {
@@ -242,12 +312,31 @@ test_timed_out_names_exactly_the_bound_statuses() {
   pass "fm_timed_out accepts 124 and 137 and nothing else"
 }
 
+test_run_timed_reports_the_bound_when_the_wrapper_records_a_signal_death() {
+  local rc=0
+  run_timed 5 bash -c 'kill -TERM $$' || rc=$?
+  [ "$rc" -eq 124 ] || fail "a bound-killed read leaked the signal death as its own status (rc=$rc)"
+  pass 'fm_run_timed reports 124 when the bound TERMs a read whose wrapper recorded 143'
+}
+
+test_run_timed_passes_a_natural_exit_through_a_fired_bound() {
+  local out rc=0
+  out=$(run_timed 5 bash -c 'echo through') || rc=$?
+  [ "$rc" -eq 0 ] || fail "a completed read lost its own status to the fired bound (rc=$rc)"
+  [ "$out" = through ] || fail 'a completed read lost its output to the fired bound'
+  pass 'fm_run_timed passes a natural exit through when the bound fired after completion'
+}
+
 test_passes_the_command_status_and_output_through
+test_run_timed_reports_the_bound_when_the_wrapper_records_a_signal_death
+test_run_timed_passes_a_natural_exit_through_a_fired_bound
 test_term_ends_a_cooperative_command_at_the_bound
 test_kill_ends_a_term_ignoring_command_after_the_grace
 test_the_bound_replaces_the_calling_shell
 test_a_descendant_holding_the_output_cannot_outlast_the_bound
 test_a_signal_to_the_bounding_process_reaches_the_command
+test_a_named_owner_that_is_gone_ends_the_command
+test_an_owner_that_dies_during_startup_ends_the_command
 test_perl_is_preferred_over_timeout
 test_refuses_rather_than_running_unbounded
 test_rejects_malformed_bounds_before_running_anything

@@ -198,8 +198,10 @@ test_prose_and_malformed_tokens_never_become_transitions() {
       *"close-$i [key=victim] needs-decision: a real captain decision"*) : ;;
       *) fail "an impostor closed a real decision: '$line' -> $view" ;;
     esac
+    # The backstop may show the unparsed line itself. Only the open-decisions
+    # section, which prints "[key=" before the verb, records a real transition.
     case "$view" in
-      *"open-$i "*) fail "an impostor opened a decision nobody raised: '$line' -> $view" ;;
+      *"open-$i [key="*) fail "an impostor opened a decision nobody raised: '$line' -> $view" ;;
     esac
     i=$((i + 1))
   done
@@ -241,10 +243,10 @@ test_token_first_word_never_impersonates_a_transition() {
 
   view=$(drain_open "$state" "$out")
   case "$view" in
-    *'token-first-needs '*) fail "a token-first needs-decision opened a decision: $view" ;;
+    *'token-first-needs [key='*) fail "a token-first needs-decision opened a decision: $view" ;;
   esac
   case "$view" in
-    *'token-first-blocked '*) fail "a token-first blocked opened a decision: $view" ;;
+    *'token-first-blocked [key='*) fail "a token-first blocked opened a decision: $view" ;;
   esac
   case "$view" in
     *'token-first-resolved'*'[key=stays-open-resolved]'*'a real captain decision'*) : ;;

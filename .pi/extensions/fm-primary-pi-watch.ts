@@ -44,9 +44,9 @@ import { Type } from "typebox";
 import { registerFirstmateTool } from "./lib/fm-native-contract.ts";
 import {
   afkPostureRecordPresent,
+  branchOfferForWake,
   createBranchDispatchOffer,
   FM_BRANCH_DISPATCH_EVENT,
-  scopeForUnreadWake,
 } from "./lib/fm-branch-dispatch.ts";
 import {
   type CalmPresentationState,
@@ -651,46 +651,9 @@ export default function (pi: ExtensionAPI) {
   }
 
   function offerWakeToBranch(message: string): Promise<void> | null {
-    const heartbeat = /^heartbeat($|:)/.test(message);
-    // A check-kind close (merge-confirmation polls, Relay mentions,
-    // credential/auth failures, and every other legitimately main-only
-    // class - docs/pi-supervision-branch.md) is never routed to the branch
-    // even when other currently-unread rows are individually eligible: this
-    // watcher cycle's own triggering event stays on main, exactly as before
-    // scopeForUnreadWake stopped letting a co-present check row veto the
-    // whole scan. That relaxation is what lets an UNRELATED eligible
-    // signal/stale row still reach the branch on this cycle; it must never
-    // also let a check-kind trigger itself slip past main's delivery.
-    const isCheckTrigger = /^check:/.test(message);
-    // The away posture collapses the partition below: every actionable row is
-    // branch-eligible and the trigger class no longer forces anything to main
-    // (lib/fm-branch-dispatch.ts owns the per-row rule).
-    const afk = afkPostureRecordPresent(state);
-    const scope = scopeForUnreadWake(state, heartbeat, afk);
-    // A signal close containing a needs-decision status file, or a stale close
-    // for a captain-held task, gets the identical main-only treatment as a
-    // check-kind trigger. The cross-reference deliberately includes every
-    // unread decision row: until that row is read, a later signal or stale
-    // trigger for the same task stays on main. Other tasks and heartbeat
-    // handling remain independent.
-    const triggerKeys = /^signal:/.test(message)
-      ? message
-        .slice("signal:".length)
-        .split(/\s+/)
-        .filter(Boolean)
-        .map((path) => path.split("/").pop() ?? path)
-      : /^stale:/.test(message)
-        ? [message.slice("stale:".length).trim().split(/\s+/, 1)[0]].filter(Boolean)
-        : [];
-    const taskIdentity = (key: string): string =>
-      scope.taskByWakeKey[key] ?? scope.taskByWakeKey[key.replace(/^fm-/, "")] ?? key;
-    const needsDecisionTasks = new Set(scope.needsDecisionKeys.map(taskIdentity));
-    const isNeedsDecisionTrigger = triggerKeys.some((key) => needsDecisionTasks.has(taskIdentity(key)));
-    const attendedEligible = !isCheckTrigger && !isNeedsDecisionTrigger && (
-      afk ? scopeForUnreadWake(state, heartbeat, false).eligible : scope.eligible
-    );
-    const eligible = afk ? scope.eligible : attendedEligible;
-    const awayOnly = Boolean(eligible && !attendedEligible);
+    // lib/fm-branch-dispatch.ts owns the offer rule for one close, shared with
+    // the supervision host off Pi (bin/fm-branch-dispatch.mjs offer).
+    const { scope, heartbeat, eligible, awayOnly } = branchOfferForWake(state, message, afkPostureRecordPresent(state));
     const offer = createBranchDispatchOffer(message, scope.projects, heartbeat, eligible, awayOnly);
     pi.events?.emit?.(FM_BRANCH_DISPATCH_EVENT, offer);
     return offer.accepted ? offer.settlement : null;

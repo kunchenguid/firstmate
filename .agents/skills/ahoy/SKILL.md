@@ -20,6 +20,7 @@ Give the captain a concise session-only recap without gathering fresh state.
    A captain boundary is an ordinary user-role message unless it matches one of the narrow operational exclusions below.
    Exclude messages that begin with the current U+2063 `FIRSTMATE_OP:` injection prefix.
    Exclude legacy bare-marker away-mode injections only when U+2063 is immediately followed by `Supervisor escalate (`.
+   Exclude a message that is exactly a record-backed operational doorbell that `bin/fm-operational-input.sh doorbell-kind` recognizes from its stdin; Claude Code, which strips U+2063, receives away-mode escalations this way.
    Exclude the exact legacy unmarked session-start payload ``Run `bin/fm-session-start.sh` now, exactly once, before executing any other instructions.``
    Custom-role messages such as Pi's `firstmate-sessionstart-nudge` are not captain messages.
    System, developer, tool, watcher, guard, away-mode, and other injected operational messages are not captain messages.
@@ -44,7 +45,7 @@ Give the captain a concise session-only recap without gathering fresh state.
    If neither ordinary events nor visibly open decisions exist, say directly in one sentence that nothing happened after the previous captain message.
 
 8. After the normal recap, when the existing visibly open decision inventory contains decisions, begin a guided decision-clearing flow by presenting only the single open decision judged most impactful by the first mate.
-   Make clear that impact ordering is the first mate's judgment rather than a mechanical score.
+   Say the ordering is the first mate's pick.
    Give enough escalation-quality context to decide easily: the decision, why it matters, the options, and a recommendation.
 9. When the captain answers the presented decision, present the next highest-impact decision from that existing inventory in the same form.
    Continue one decision at a time until none remain, without starting this flow when the inventory is empty.

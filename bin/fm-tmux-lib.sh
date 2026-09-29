@@ -41,10 +41,15 @@
 # probe, and the capability descriptor - plus the busy detection and submit
 # cores that consume the shared verdict.
 
+# The sibling directory is derived without forking dirname, because a backend
+# probe can re-source this adapter inside a subshell on every watcher cycle.
+_FM_TMUX_LIB_DIR=${BASH_SOURCE[0]%/*}
+[ "$_FM_TMUX_LIB_DIR" != "${BASH_SOURCE[0]}" ] || _FM_TMUX_LIB_DIR=.
 # shellcheck source=bin/fm-composer-lib.sh
-. "$(dirname -- "${BASH_SOURCE[0]}")/fm-composer-lib.sh"
+. "${_FM_TMUX_LIB_DIR:-/}/fm-composer-lib.sh"
 # shellcheck source=bin/fm-cursor-lib.sh
-. "$(dirname -- "${BASH_SOURCE[0]}")/fm-cursor-lib.sh"
+. "${_FM_TMUX_LIB_DIR:-/}/fm-cursor-lib.sh"
+unset _FM_TMUX_LIB_DIR
 
 
 # fm_tmux_strip_ghost: thin adapter over the shared, fleet-wide ghost extractor
