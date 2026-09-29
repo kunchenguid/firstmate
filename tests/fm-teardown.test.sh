@@ -73,6 +73,7 @@ REAL_LSOF_FOR_TEST=$(command -v lsof)
 export REAL_LSOF_FOR_TEST
 
 # Build a fresh sandbox for one test case. Sets up:
+#   $CASE/active-home/  - isolated supervisor home, beside removable child homes
 #   $CASE/state/        - firstmate state dir (with a fresh watcher beacon)
 #   $CASE/fakebin/      - mocks for treehouse, tmux (PATH-prepended by caller)
 #   $CASE/origin.git/   - bare upstream repo (so the project clone has origin)
@@ -83,7 +84,7 @@ make_case() {
   local name=$1 case_dir fakebin
   case_dir="$TMP_ROOT/$name"
   fakebin="$case_dir/fakebin"
-  mkdir -p "$case_dir/state" "$case_dir/config" "$case_dir/data" "$fakebin"
+  mkdir -p "$case_dir/active-home" "$case_dir/state" "$case_dir/config" "$case_dir/data" "$fakebin"
 
   # Mocks for the post-check teardown steps. Refuse logic exits before these
   # run; the ALLOW cases need them so the script can complete cleanly.
@@ -701,7 +702,9 @@ run_teardown() {
   # FM_DATA_OVERRIDE is pinned to the case dir because teardown closes this
   # home's backlog item itself; without it $DATA would resolve to the real
   # repo's own home and a test could mutate live records.
-  FM_HOME="${FM_HOME:-$case_dir}" FM_ROOT_OVERRIDE="$ROOT" \
+  # Child homes and worktrees must be siblings of the supervisor home, not
+  # descendants of it: the removal guard correctly refuses the latter layout.
+  FM_HOME="${FM_HOME:-$case_dir/active-home}" FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_DATA_OVERRIDE="$case_dir/data" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
