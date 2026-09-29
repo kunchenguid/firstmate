@@ -434,22 +434,36 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean, lifecycleM
   // The task id behind each key a signal or stale row may carry: the task id
   // itself, or the endpoint its metadata records.
   const taskByKey = new Map<string, string>();
+  const bind = (key: string, task: string, project: string) => {
+    // An endpoint is opaque, including its colons. Multiple claims remain
+    // unowned instead of depending on directory iteration order.
+    if (taskByKey.has(key) && taskByKey.get(key) !== task) {
+      taskByKey.set(key, "");
+      metadata.set(key, "");
+    } else {
+      taskByKey.set(key, task);
+      if (project) metadata.set(key, project);
+    }
+  };
   try {
     for (const name of readdirSync(state)) {
       if (!name.endsWith(".meta")) continue;
       const task = name.slice(0, -5);
-      const fields = readFileSync(`${state}/${name}`, "utf8").split(/\r?\n/);
-      const project = fields.find((line) => line.startsWith("project="))?.slice(8) ?? "";
-      const window = fields.find((line) => line.startsWith("window="))?.slice(7) ?? "";
+      const path = `${state}/${name}`;
+      const stat = lstatSync(path);
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 ||
+          (typeof process.getuid === "function" && stat.uid !== process.getuid())) continue;
+      const fields = readFileSync(path, "utf8").split(/\r?\n/);
+      const projectFields = fields.filter((line) => line.startsWith("project="));
+      const windows = fields.filter((line) => line.startsWith("window="));
+      if (projectFields.length !== 1 || windows.length > 1) continue;
+      const project = projectFields[0].slice(8);
+      const window = windows[0]?.slice(7) ?? "";
       if (project) {
-        metadata.set(task, project);
-        taskByKey.set(task, task);
-        taskByKey.set(`${task}.status`, task);
-        taskByKey.set(`${task}.turn-ended`, task);
-        if (window) {
-          metadata.set(window, project);
-          taskByKey.set(window, task);
-        }
+        bind(task, task, project);
+        bind(`${task}.status`, task, "");
+        bind(`${task}.turn-ended`, task, "");
+        if (window) bind(window, task, project);
       }
     }
   } catch {
