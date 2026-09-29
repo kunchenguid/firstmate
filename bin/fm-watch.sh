@@ -2401,13 +2401,6 @@ while ! fm_lock_try_acquire "$WATCH_LOCK"; do
           EVICTED_BEAT_AGE=$beat_age
           continue
         fi
-        if ! fm_pid_alive "$FM_LOCK_HELD_PID"; then
-          # A recorded holder that is provably dead is not "already running":
-          # say so and name the reclamation refusal, so an operator reads the
-          # stale lock's actual condition instead of hunting a live watcher.
-          echo "watcher: stale lock names pid $FM_LOCK_HELD_PID which is not running and could not be reclaimed${FM_LOCK_REFUSED_REASON:+ ($FM_LOCK_REFUSED_REASON)}; inspect $WATCH_LOCK and $WATCHER_DOWNTIME_MARKER.lock before re-arming." >&2
-          exit 1
-        fi
         echo "watcher: lock held by live pid $FM_LOCK_HELD_PID but heartbeat is stale for ${beat_age}s (>${WATCHER_STALE_GRACE}s); inspect or stop that watcher before re-arming." >&2
         exit 1
       fi
