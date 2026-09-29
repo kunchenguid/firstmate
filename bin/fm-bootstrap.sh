@@ -1450,8 +1450,9 @@ detect_local_config() {
 
 # Shadow-backlog check. When this home's data directory is not its code root's,
 # a code-root data/backlog.md or data/done-archive.md that is not this home's
-# own file is a queue a cwd-relative tasks-axi write has already forked; a link
-# into the home does not survive such a write (docs/configuration.md "Backlog
+# own file may be a queue a cwd-relative tasks-axi write forked, or another
+# home's live record; a link into the home does not survive such a write
+# (docs/configuration.md "Backlog
 # backend" owns why). Detect-only: neither copy is a safe winner, so nothing is
 # merged here.
 #
