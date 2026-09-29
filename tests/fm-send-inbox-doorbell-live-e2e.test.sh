@@ -21,7 +21,8 @@
 # FM_SEND_INBOX_LIVE_HARNESSES="claude codex ..." when needed, and tune the
 # per-harness wait with FM_SEND_INBOX_LIVE_TIMEOUT (seconds, default 240).
 # Record the dated per-harness result in
-# docs/verification/runtime-backends.md ("Steering-inbox doorbell").
+# docs/verification/runtime-backends.md ("Steering-inbox doorbell") only after
+# this guard requires proven readiness like the current production ring.
 #
 # Folder trust: harnesses launch with the repo root as cwd, which the
 # operator's machine has normally already trusted; a trust dialog is a real
@@ -94,11 +95,10 @@ launch_cmd() {  # <name>
 
 # Wait for the harness to look steerable. 0 = the composer classified a
 # proven empty; 2 = the readiness budget expired without an empty verdict but
-# also without a pending one. The caller proceeds on 2 with a note, because
-# that mirrors production exactly: the send path's composer check is ADVISORY
-# and skips only on visibly pending text, so a harness whose idle screen the
-# classifier cannot positively identify still gets its doorbell (the composer
-# matrix guard, not this one, owns re-proving the classifier per release).
+# also without a pending one. The caller's legacy path still proceeds on 2,
+# so this guard cannot refresh evidence for the current strict production gate
+# until that allowance is removed; production sends no lifecycle text unless
+# composer emptiness is proven.
 wait_ready() {  # <window>
   local win=$1 i=0 budget=60 verdict dismissed=0 screen
   while [ "$i" -lt "$budget" ]; do
