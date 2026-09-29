@@ -804,7 +804,7 @@ while [ ! -e "$FM_HOME/state/.fire-$n" ]; do sleep 0.05; done
 printf 'signal: omp-idle wake %s\n' "$n"
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_OMP_ARM_READY_TIMEOUT_MS=3000 FM_OMP_INTERRUPT_SETTLE_MS=1500 \
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_OMP_ARM_READY_TIMEOUT_MS=3000 FM_OMP_INTERRUPT_SETTLE_MS=100 \
     FM_WATCH_REARM_RETRY_LIMIT=1 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 \
     EXT="$repo/.omp/extensions/fm-primary-omp-watch.ts" node --input-type=module 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
@@ -892,13 +892,16 @@ if (interruptions.length > 0 || wakeTurn(3)) throw new Error(`a mid-run wake int
 await endRun();
 if (!wakeTurn(3)) throw new Error(`the mid-run wake did not follow the run: ${JSON.stringify(turns)}`);
 // A wake that closes while omp settles a natural agent_end is a follow-up; omp
-// then settles idle behind the advisor note with that follow-up still queued.
+// stays not idle well past one settle interval, then settles idle behind the
+// advisor note with that follow-up still queued.
 await startRun("captain: one more question");
 streaming = false; settling = true;
 await handlers.get("agent_end")({ type: "agent_end" }, ctx);
 writeFileSync(`${state}/.fire-4`, "");
 await waitFor("the settling wake was never handed to omp", () => followUps.length > 0 || interruptions.length > 0);
 if (interruptions.length > 0) throw new Error(`a settling wake was not a follow-up: ${JSON.stringify(interruptions)}`);
+await new Promise((r) => setTimeout(r, 600));
+if (steers.length !== 0 || wakeTurn(4)) throw new Error(`nothing may start while omp still settles: ${JSON.stringify(steers)}`);
 tail = "custom"; settling = false;
 await waitFor("a wake queued while omp settled never started a turn", () => wakeTurn(4) && !streaming);
 if (steers.length !== 1) throw new Error(`the settling wake must earn exactly one steer: ${JSON.stringify(steers)}`);

@@ -77,8 +77,10 @@
 // with the user-interrupt reason, and suppresses omp's follow-up-only resume,
 // so the wake sits unsent in the composer. An empty Enter mid-run aborts the
 // same way without the restore, stranding the wake in omp's queue. On a plain
-// agent_end (never willContinue) this file waits for omp to settle, then,
-// with any wake still unconsumed, including one sent during the settle:
+// agent_end (never willContinue) this file re-checks every
+// FM_OMP_INTERRUPT_SETTLE_MS until omp reads idle, for at most 60 s so a slow
+// session_stop turn-end guard is outlasted, then, with any wake still
+// unconsumed, including one sent during the settle:
 //   1. idle, nothing queued, and the editor holds an unconsumed wake's exact
 //      text: exactly that text leaves the editor, every other character (a
 //      captain's queued message or draft) stays byte for byte, and the token
@@ -89,7 +91,8 @@
 //      queued steer clears the suppression or passes the advisor's note, and
 //      omp delivers the stranded wakes after it. Each stranded wake earns at
 //      most one steer.
-// Each agent_end is checked once, and only the latest one pending settle acts.
+// Each agent_end is checked once, and only the latest one pending settle acts;
+// a later agent_end or a replaced generation ends an earlier check.
 // A blind Enter from the parent is never safe here because the restored text
 // can hold what the captain typed; tests/fm-omp-interrupt-live-e2e.test.sh
 // re-checks omp's restore and strand behavior against a real omp.
@@ -207,6 +210,7 @@ const armReadyTimeoutMs = positiveInteger(
 const hostReadyTimeoutMs = Math.max(armReadyTimeoutMs, 30000);
 const armRetireTimeoutMs = positiveInteger("FM_WATCH_ARM_RETIRE_TIMEOUT_MS", 1000);
 const interruptSettleMs = positiveInteger("FM_OMP_INTERRUPT_SETTLE_MS", 300);
+const interruptSettleCapMs = 60000;
 const repairOnlyHint = "call fm_watch_arm_omp again only after a later notification says the cycle is missing, failed, or unhealthy";
 const shuttingDownMessage = "watcher: not armed - omp session is shutting down";
 
@@ -640,16 +644,19 @@ export default function (pi: ExtensionAPI) {
   // The interrupted-run recovery stated in this file's header, run once per
   // plain agent_end after omp settles.
   async function recoverInterruptedRun(owner: SessionGeneration, ctx: OmpHandlerContext | undefined): Promise<void> {
-    if (!generationIsLive(owner)) return;
+    if (!generationIsLive(owner) || typeof ctx?.isIdle !== "function") return;
     const check = ++owner.interruptCheck;
-    await new Promise<void>((resolveSettle) => {
-      const timer = setTimeout(resolveSettle, interruptSettleMs);
-      timer.unref();
-    });
-    if (!generationIsLive(owner) || owner.interruptCheck !== check || owner.unconsumedWakes.size === 0) return;
-    // omp reads not idle inside a natural agent_end; after the settle wait an
-    // omp still running a turn or drain is left alone.
-    if (typeof ctx?.isIdle !== "function" || ctx.isIdle() !== true) return;
+    // omp reads not idle inside a natural agent_end while session_stop runs;
+    // an omp still busy at the cap is left alone.
+    const deadline = Date.now() + interruptSettleCapMs;
+    do {
+      await new Promise<void>((resolveSettle) => {
+        const timer = setTimeout(resolveSettle, interruptSettleMs);
+        timer.unref();
+      });
+      if (!generationIsLive(owner) || owner.interruptCheck !== check) return;
+    } while (ctx.isIdle() !== true && Date.now() < deadline);
+    if (ctx.isIdle() !== true || owner.unconsumedWakes.size === 0) return;
     const editor: unknown = ctx.ui?.getEditorText?.();
     if (typeof editor !== "string") return;
     const queued = ctx.hasPendingMessages?.() === true;
