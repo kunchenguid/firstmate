@@ -1554,7 +1554,8 @@ fm_treehouse_slot_owner_release() {  # <worktree> <task-id>
 #
 # A stale pin is safe to move exactly when this test passes: the submodule's own
 # tree is clean, and the commit it has checked out is contained in one of its
-# remotes. fm_submodule_sync_stale_pins then checks the recorded pin out on a
+# remotes, and it has no nested submodules (in its checkout or at the recorded
+# commit). fm_submodule_sync_stale_pins then checks the recorded pin out on a
 # detached HEAD whatever update mode the project configures, so no branch is
 # rebased, merged, moved, or removed and nothing reachable from a ref is lost.
 # The containment check reads local refs only and never fetches, so it stays
@@ -1588,6 +1589,14 @@ fm_submodule_stale_pins() {  # <worktree> <porcelain-status>
     # from none is of unknown origin and is never moved.
     unpushed=$(git -C "$worktree/$path" log --format=%H --max-count=1 "$have" --not --remotes -- 2>/dev/null) || return 1
     [ -z "$unpushed" ] || return 1
+    # A submodule with nested submodules is never synced: neither its current
+    # checkout nor the commit this base records may carry a .gitmodules. The
+    # fetch only makes the recorded commit inspectable; it moves nothing.
+    [ ! -e "$worktree/$path/.gitmodules" ] || return 1
+    git -C "$worktree/$path" cat-file -e "$want^{commit}" 2>/dev/null \
+      || git -C "$worktree/$path" fetch --quiet >/dev/null 2>&1 || true
+    git -C "$worktree/$path" cat-file -e "$want^{commit}" 2>/dev/null || return 1
+    ! git -C "$worktree/$path" cat-file -e "$want:.gitmodules" 2>/dev/null || return 1
     paths+=("$path")
     lines+="submodule '$path' is checked out at $have, but this base records $want"$'\n'
   done <<EOF
@@ -1601,33 +1610,15 @@ EOF
 }
 
 # Check the pins fm_submodule_stale_pins just approved out at the commits the
-# worktree's HEAD records, fetching a missing commit on demand, then do the same
-# for each moved submodule's nested pins, each passing the same test first (a
-# nested submodule that fails it is left untouched). Always on a detached HEAD
-# (see above). Returns git's own verdict; callers read the worktree's status
-# afterwards to decide what it means.
+# worktree's HEAD records, fetching a missing commit on demand. Always on a
+# detached HEAD (see above). Returns git's own verdict; callers read the
+# worktree's status afterwards to decide what it means.
 fm_submodule_sync_stale_pins() {  # <worktree>
   local worktree=$1
   # The lines and the paths are set together, and an unset array trips `set -u`.
   [ -n "${FM_SUBMODULE_STALE_PIN_LINES:-}" ] || return 0
   local -a paths=("${FM_SUBMODULE_STALE_PIN_PATHS[@]}")
-  local path
-  git -C "$worktree" submodule --quiet update --checkout -- "${paths[@]}" >/dev/null || return 1
-  for path in "${paths[@]}"; do
-    fm_submodule_sync_nested_pins "$worktree/$path" || return 1
-  done
-}
-
-fm_submodule_sync_nested_pins() {  # <submodule-dir>
-  local dir=$1 status path
-  status=$(git -C "$dir" status --porcelain 2>/dev/null) || return 0
-  [ -n "$status" ] || return 0
-  fm_submodule_stale_pins "$dir" "$status" || return 0
-  local -a paths=("${FM_SUBMODULE_STALE_PIN_PATHS[@]}")
-  git -C "$dir" submodule --quiet update --checkout -- "${paths[@]}" >/dev/null || return 1
-  for path in "${paths[@]}"; do
-    fm_submodule_sync_nested_pins "$dir/$path" || return 1
-  done
+  git -C "$worktree" submodule --quiet update --checkout -- "${paths[@]}" >/dev/null
 }
 
 fm_failure_episode_reset() {

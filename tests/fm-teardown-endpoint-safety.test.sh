@@ -729,52 +729,38 @@ test_returned_slot_submodules_follow_the_returned_base() {
     "teardown did not say it left the unsyncable slot alone"
   pass "fm-teardown: a returned slot's submodules follow the returned base, and unpushed submodule work is left alone"
 
-  # Nested submodules follow their moved parent pin once each passes the same
-  # safety check, so the returned slot ends clean.
+  # A submodule whose recorded commit has nested submodules is never synced.
   dir=$(make_case slot-submodule-nested)
   mark_case_as_treehouse_pool_with_submodule "$dir"
   add_resetting_treehouse "$dir"
   slot="$dir/pool/1/project"
-  local nested="$dir/nested-origin" sub="$dir/sub-origin" x1 x2 d1 d2 g=(-c user.name=test -c user.email=test@example.invalid -c protocol.file.allow=always)
+  local nested="$dir/nested-origin" sub="$dir/sub-origin" x1 g=(-c user.name=test -c user.email=test@example.invalid -c protocol.file.allow=always)
   git init -q -b main "$nested"
   printf 'd1\n' > "$nested/n.txt"
   git -C "$nested" add n.txt
   git -C "$nested" "${g[@]}" commit -qm d1
-  d1=$(git -C "$nested" rev-parse HEAD)
-  printf 'd2\n' > "$nested/n.txt"
-  git -C "$nested" "${g[@]}" commit -qam d2
-  d2=$(git -C "$nested" rev-parse HEAD)
-  git -C "$nested" checkout -q "$d1"
   git -C "$sub" checkout -q main
   git -C "$sub" "${g[@]}" submodule --quiet add "file://$nested" deep
   git -C "$sub" "${g[@]}" commit -qm add-deep
   x1=$(git -C "$sub" rev-parse HEAD)
-  git -C "$sub/deep" fetch -q origin
-  git -C "$sub/deep" checkout -q "$d2"
-  git -C "$sub" "${g[@]}" commit -qam move-deep
-  x2=$(git -C "$sub" rev-parse HEAD)
   git -C "$sub" checkout -q --detach
-  git -C "$slot/ui" "${g[@]}" fetch -q origin
-  git -C "$slot/ui" checkout -q "$x1"
-  git -C "$slot/ui" "${g[@]}" submodule --quiet update --init
-  git -C "$slot/ui/deep" fetch -q origin
   git -C "$dir/project/ui" "${g[@]}" fetch -q origin
-  git -C "$dir/project/ui" checkout -q "$x2"
+  git -C "$dir/project/ui" checkout -q "$x1"
   git -C "$dir/project" add ui
-  git -C "$dir/project" "${g[@]}" commit -qm move-pin-again
+  git -C "$dir/project" "${g[@]}" commit -qm move-pin-nested
   BASE_SHA=$(git -C "$dir/project" rev-parse HEAD)
+  local before
+  before=$(git -C "$slot/ui" rev-parse HEAD)
   fm_write_meta "$dir/home/state/$id.meta" \
     "window=firstmate:fm-$id" "endpoint_task_id=$id" \
     "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
   FM_FAKE_RETURN_BASE=$BASE_SHA run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" \
     || fail "a nested submodule failed the teardown: $(cat "$dir/stderr")"
-  [ "$(git -C "$slot/ui" rev-parse HEAD)" = "$x2" ] \
-    || fail "teardown did not move the top-level submodule onto the base's pin"
-  [ "$(git -C "$slot/ui/deep" rev-parse HEAD)" = "$d2" ] \
-    || fail "teardown left the nested submodule on its old pin"
-  [ -z "$(git -C "$slot" status --porcelain)" ] \
-    || fail "the slot is dirty: $(git -C "$slot" status --porcelain)"
-  pass "fm-teardown: nested submodules follow the moved pin and the slot ends clean"
+  [ "$(git -C "$slot/ui" rev-parse HEAD)" = "$before" ] \
+    || fail "teardown moved a submodule that has nested submodules"
+  assert_contains "$(cat "$dir/stderr")" "was left as is" \
+    "teardown did not say it left the nested-submodule slot alone"
+  pass "fm-teardown: a submodule with nested submodules is left untouched"
 
   # A final status that fails must not read as a clean, synced slot.
   dir=$(make_case slot-submodule-status-fails)

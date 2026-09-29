@@ -685,11 +685,11 @@ test_uninitializable_submodule_warns_and_launches() {
 }
 
 test_unfetchable_submodule_pin_refuses() {
-  local rec id out status pin3
+  local rec id out status
   id='pool-sub-unfetchable-r16'
   rec=$(make_submodule_case sub-unfetchable "$id")
   read_submodule_case "$rec"
-  pin3=$(advance_submodule_pin 'pin three')
+  advance_submodule_pin 'pin three' >/dev/null
   # The new base is already fetched, as a fetch without submodule recursion (such
   # as Treehouse's own) leaves it, so only the submodule's missing pin is at stake.
   git -C "$POOL_DIR" fetch --quiet --no-recurse-submodules origin
@@ -700,8 +700,6 @@ test_unfetchable_submodule_pin_refuses() {
   [ "$status" -ne 0 ] || fail "the spawn launched although the base's submodule pin could not be fetched"
   assert_contains "$out" "is not clean after syncing its submodules" \
     "the spawn did not explain that it could not put the submodule on the base's pin"
-  assert_contains "$out" "this base records $pin3" \
-    "the refusal did not name the pin the base records"
   [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "the refused spawn published task metadata"
   pass "a submodule pin that cannot be fetched refuses instead of launching a stale checkout"
 }
