@@ -1742,24 +1742,82 @@ test_projection_journal_v2_binds_and_advances_exact_endpoint() {
       "$FM_BACKEND_HERDR_JOURNAL_PANE_ID" \
       "$FM_BACKEND_HERDR_JOURNAL_PARENT_WORKSPACE_ID" \
       "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL"
+    sed "s/^version=2$/version=future-17/" "$journal" > "$journal.future" || exit 1
+    printf "future_optional=value\n" >> "$journal.future"
+    mv "$journal.future" "$journal"
     fm_backend_herdr_projection_journal_replace_endpoint \
       "$journal" fm-hibit-r1 w2:t2 w2:p2 w2:t3 w2:p3 || exit 1
     fm_backend_herdr_projection_journal_snapshot "$journal" fm-hibit-r1 || exit 1
-    printf "%s|%s\n" "$FM_BACKEND_HERDR_JOURNAL_TAB_ID" "$FM_BACKEND_HERDR_JOURNAL_PANE_ID"
-  ' "$ROOT" "$state" "$home") || fail "version 2 projection journal binding failed"
+    printf "%s|%s|%s\n" "$FM_BACKEND_HERDR_JOURNAL_VERSION" "$FM_BACKEND_HERDR_JOURNAL_TAB_ID" "$FM_BACKEND_HERDR_JOURNAL_PANE_ID"
+  ' "$ROOT" "$state" "$home") || fail "projection journal binding or compatible-label endpoint advance failed"
   token=$(sed -n 's/^projection_id=//p' "$state/fm-hibit-r1.herdr-presentation")
   [ "$(printf '%s\n' "$out" | sed -n '1p')" = "2|$home_real|w2|w2:t2|w2:p2|w1|└ hibit-r1 · p:$token" ] \
     || fail "version 2 projection journal did not retain exact home/endpoint/parent binding: $out"
-  [ "$(printf '%s\n' "$out" | sed -n '2p')" = "w2:t3|w2:p3" ] \
+  [ "$(printf '%s\n' "$out" | sed -n '2p')" = "future-17|w2:t3|w2:p3" ] \
     || fail "version 2 projection journal did not advance the exact replacement endpoint: $out"
-  [ "$(wc -l < "$state/fm-hibit-r1.herdr-presentation" | tr -d '[:space:]')" = 12 ] \
-    || fail "version 2 projection journal must have exactly 12 fields"
+  if [ "$(wc -l < "$state/fm-hibit-r1.herdr-presentation" | tr -d '[:space:]')" != 13 ] \
+    || ! grep -Fxq 'future_optional=value' "$state/fm-hibit-r1.herdr-presentation"; then
+    fail "compatible endpoint replacement did not retain the future label and additive field"
+  fi
   printf 'pane_id=duplicate\n' >> "$state/fm-hibit-r1.herdr-presentation"
   if bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_journal_snapshot "$1" fm-hibit-r1' \
     "$ROOT" "$state/fm-hibit-r1.herdr-presentation"; then
     fail "duplicate version 2 journal fields must be ambiguous"
   fi
   pass "herdr presentation journal: version 2 binds exact home/endpoint/parent identities and advances atomically"
+}
+
+test_projection_journal_capabilities_ignore_format_labels_and_additive_fields() {
+  local dir state home journal token label
+  dir="$TMP_ROOT/projection-journal-capabilities"; state="$dir/state"; home="$dir/home"
+  mkdir -p "$state" "$home"
+  token=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_journal_create "$1" capability' "$ROOT" "$state") \
+    || fail 'could not create capability journal'
+  journal="$state/capability.herdr-presentation"
+  label=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_workspace_label capability "$1"' "$ROOT" "$token")
+  bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_projection_journal_write_v2 "$1" capability "$2" "$3" lab w1 w1:t1 w1:p1 parent owner "$4" fm-capability
+  ' "$ROOT" "$journal" "$token" "$home" "$label" || fail 'could not bind capability journal'
+
+  sed -i 's/^version=2$/version=future-17/' "$journal"
+  printf 'future_optional=value\n' >> "$journal"
+  bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_projection_journal_snapshot "$1" capability
+    [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = future-17 ]
+    [ "$FM_BACKEND_HERDR_JOURNAL_HAS_ENDPOINT" = 1 ]
+    [ "$FM_BACKEND_HERDR_JOURNAL_HAS_LAUNCH_IDENTITY" = 0 ]
+  ' "$ROOT" "$journal" || fail 'future label or additive field blocked a structurally complete endpoint journal'
+
+  sed -i '/^parent_/d; /^workspace_label=/d; /^task_label=/d' "$journal"
+  bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_projection_journal_snapshot "$1" capability
+    [ "$FM_BACKEND_HERDR_JOURNAL_HAS_ENDPOINT" = 1 ]
+  ' "$ROOT" "$journal" || fail 'missing optional presentation fields blocked exact endpoint capability'
+
+  printf 'spawn_gen=s1\n' >> "$journal"
+  if bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_journal_snapshot "$1" capability' "$ROOT" "$journal"; then
+    fail 'a partial launch-identity group was accepted as compatible'
+  fi
+  sed -i '/^spawn_gen=/d' "$journal"
+  printf 'pane_id=conflict\n' >> "$journal"
+  if bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_journal_snapshot "$1" capability' "$ROOT" "$journal"; then
+    fail 'conflicting endpoint identity was accepted as compatible'
+  fi
+
+  printf 'version=1\ntask_id=capability\nprojection_id=%s\n' "$token" > "$journal"
+  bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_projection_journal_snapshot "$1" capability
+    [ "$FM_BACKEND_HERDR_JOURNAL_HAS_ENDPOINT" = 0 ]
+  ' "$ROOT" "$journal" || fail 'attempt-only v1 journal did not remain readable without gaining endpoint authority'
+  printf 'spawn_gen=s1.2.3\n' >> "$journal"
+  if bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_journal_snapshot "$1" capability' "$ROOT" "$journal"; then
+    fail 'launch identity without an endpoint group was accepted as a correlator-only journal'
+  fi
+  pass 'herdr presentation journal: structural capabilities, not format labels, govern compatibility'
 }
 
 test_projection_create_uses_exact_response_ids_and_leaves_one_task_pane() {
@@ -3299,6 +3357,10 @@ test_projection_reclaim_replaces_only_exact_husk_and_advances_binding() {
   ' "$ROOT" "$state" "$home_real") || fail "could not create exact reclaim journal fixture"
   journal="$state/fm-hibit-r1.herdr-presentation"
   label="└ hibit-r1 · p:$token"
+  sed 's/^version=2$/version=future-17/' "$journal" > "$journal.future" \
+    || fail "could not prepare compatible future-label reclaim journal"
+  printf 'future_optional=value\n' >> "$journal.future"
+  mv "$journal.future" "$journal"
   printf '%s\n' "{\"result\":{\"workspaces\":[{\"workspace_id\":\"w0\",\"label\":\"firstmate\",\"focused\":false,\"active_tab_id\":\"w0:t1\"},{\"workspace_id\":\"w1\",\"label\":\"firstmate\",\"focused\":true,\"active_tab_id\":\"w1:t1\"},{\"workspace_id\":\"w2\",\"label\":\"$label\",\"focused\":false,\"active_tab_id\":\"w2:t2\"}]}}" > "$resp/1.out"
   printf '%s\n' '{"result":{"tabs":[{"tab_id":"w2:t2","label":"fm-fm-hibit-r1"}]}}' > "$resp/2.out"
   printf '%s\n' '{"result":{"panes":[{"pane_id":"w2:p2","tab_id":"w2:t2"}]}}' > "$resp/3.out"
@@ -5039,6 +5101,7 @@ test_release_floor_verdict_survives_losing_either_signal
 test_presentation_preference_reports_three_distinct_states
 test_projection_journal_is_atomic_and_uses_128_bit_token
 test_projection_journal_v2_binds_and_advances_exact_endpoint
+test_projection_journal_capabilities_ignore_format_labels_and_additive_fields
 test_projection_create_uses_exact_response_ids_and_leaves_one_task_pane
 test_projection_create_never_closes_a_concurrent_same_label_tab
 test_projection_focus_snapshot_requires_exact_workspace_and_tab

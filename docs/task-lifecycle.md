@@ -83,8 +83,11 @@ AIME's existing lifecycle remains compatible; iDA followup support grants no new
 
 [`fm-teardown.sh`](../bin/fm-teardown.sh) owns independent endpoint cleanup and [`fm-teardown-endpoint-lib.sh`](../bin/fm-teardown-endpoint-lib.sh) owns its receipt stages and retained reasons.
 An enrolled open goal retains its endpoint, directory, slot and task records; cleanup begins only after semantic acceptance or a separately authorized archive, and discard authority does not bypass that boundary.
-New Herdr launches bind a version 3 presentation journal to the execution generation, server instance, terminal identity and shell identity.
-Older journals cannot acquire deletion authority from labels or a shared directory.
+Herdr presentation-journal versions are diagnostic rather than cleanup permission gates.
+A journal with the complete launch-identity field group binds the execution generation, server instance, terminal identity and shell identity directly.
+A journal without launch fields but with the complete exact-endpoint field group can also authorize cleanup when the current owned Herdr session demonstrably predates the unchanged journal and cleanup re-reads matching workspace, tab, pane, terminal and shell identity before mutation.
+For a correlator-only journal, the task's independently validated meta endpoint can supply the exact session, workspace, tab and pane only when meta and lifecycle agree on a standard spawn generation and the current owned Herdr session demonstrably predates the unchanged journal.
+Partial or conflicting identity groups, replaced sessions, malformed generations, labels alone and shared-directory membership do not acquire deletion authority.
 Endpoint cleanup closes only an exact idle task pane, preserves focused user tabs and active siblings, verifies workspace absence separately, and leaves directory safety checks in place.
 Its cleanup-only backlog transition can recover bookkeeping after an actual close without deleting resource metadata or repeating endpoint/directory effects.
 Pool-directory return still follows the [existing teardown safety contract](architecture.md#delivery-modes-are-explicit-per-task): only an exact task-and-generation slot claim authorizes return, while a missing or ambiguous claim retains the cleanup obligation.
