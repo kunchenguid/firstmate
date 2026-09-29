@@ -188,8 +188,12 @@ const PROVIDER_REPROBE_MAX_MS = 60 * 60 * 1000;
 const PROCESSING_INSTRUCTION =
   "This is a supervision processing request delivered automatically by the supervision branch. " +
   "It was not typed by the captain. " +
-  "The outcomes below are already stored durably and already shown to the captain as anchor entries in this transcript; each fleet event is already handled, so do not re-drain, re-run, or acknowledge the wake. " +
-  "Process each outcome now as firstmate: give the captain a visible response where one is due, answer or escalate a decision, act on a blocker or failure, or record that no further action is needed. " +
+  "The outcomes below are stored durably, and each was recorded earlier, possibly before a restart or a switch of primary, so the captain may already have seen it and it may already have been handled; each fleet event is already handled, so do not re-drain, re-run, or acknowledge the wake. " +
+  "Each outcome says what was true when it was recorded and how long ago, so check the task's current state first. " +
+  "An abbreviated line is incomplete: read the full outcome before acting on, relaying, or acknowledging it, using that line's lookup --seqs command. " +
+  "First sort the outcomes by that current state into still open and already settled, such as a decision since answered, a PR since merged, or a task since finished. " +
+  "Your reply to the captain covers only the still-open outcomes: give the captain a visible response where one is due, answer or escalate a decision, or act on a blocker or failure. " +
+  "Write that reply as if the settled outcomes had never been listed: leave them out entirely, without naming them, summarizing them, or saying they are settled, because checking them is all the processing they need. " +
   "When every outcome below is processed, call fm_branch_processed with through={N} exactly once. " +
   "Until that call the outcomes stay open and are presented again; an answer that does not make that call never counts as processing.";
 type MirrorItem = { tag: "captain" | "main"; text: string };
@@ -204,6 +208,9 @@ type OutcomeRow = {
   silent: boolean;
 };
 type VisibleOutcomeRecord = OutcomeRow & { version: 1 };
+// An unprocessed captain row with the store's "recordedAgo" (bin/fm-branch-outcome.sh
+// owns its wording).
+type UnprocessedOutcome = OutcomeRow & { recordedAgo: string };
 type ProviderRecovery = {
   cooldownMs: number;
   retryNotBefore: number;
@@ -482,7 +489,7 @@ function parseOutcomeRow(value: unknown): OutcomeRow | null {
   if (typeof row.summary !== "string" || !row.summary) return null;
   if (row.silent !== undefined && typeof row.silent !== "boolean") return null;
   const silent = row.silent === true;
-  if (silent && (row.task !== "fleet" || row.verdict !== "routine")) return null;
+  if (silent && row.verdict !== "routine") return null;
   return { seq: row.seq, task: row.task, verdict: row.verdict, summary: row.summary, silent };
 }
 
@@ -988,7 +995,7 @@ export default function (pi: ExtensionAPI) {
     const message = {
       customType: "fm-branch-merge",
       content: `${MERGE_NOTE_BOAT} ${row.task}: ${row.summary}`,
-      display: !(row.task === "fleet" && row.silent),
+      display: !row.silent,
     };
     if (mainStreaming) pi.sendMessage(message, { deliverAs: "nextTurn" });
     else pi.sendMessage(message, {});
@@ -996,21 +1003,31 @@ export default function (pi: ExtensionAPI) {
 
   // Captain rows that are read (their visible entry exists) but not yet
   // acknowledged as processed by main, in sequence order. null means the store
-  // could not be read safely, never "nothing".
-  async function readUnprocessedOutcomes(expectedGeneration: number): Promise<OutcomeRow[] | null> {
+  // could not be read safely, never "nothing". A listed line that breaks the
+  // store's contract, its age included, is reported to main as a visible note
+  // and every row stays unprocessed until the store is healthy again.
+  async function readUnprocessedOutcomes(expectedGeneration: number): Promise<UnprocessedOutcome[] | null> {
     if (!(await generationOwnsLock(expectedGeneration))) return null;
     const listed = await runOutcomeScript(["unprocessed"]);
     if (!listed.ok) return null;
-    const rows: OutcomeRow[] = [];
+    const rows: UnprocessedOutcome[] = [];
     for (const line of listed.stdout.split("\n")) {
       if (!line) continue;
-      let row: OutcomeRow | null = null;
+      let row: UnprocessedOutcome | null = null;
       try {
-        row = parseOutcomeRow(JSON.parse(line));
+        const parsed = JSON.parse(line);
+        const outcome = parseOutcomeRow(parsed);
+        const recordedAgo = outcome?.verdict === "captain" ? (parsed as { recordedAgo?: unknown }).recordedAgo : undefined;
+        if (outcome && typeof recordedAgo === "string" && /^[0-9]+[mhd]$/.test(recordedAgo)) row = { ...outcome, recordedAgo };
       } catch {
         row = null;
       }
-      if (!row || row.verdict !== "captain") return null;
+      if (!row) {
+        deliverBranchHealthNote(
+          `Supervision branch could not present unprocessed captain outcomes: the outcome store listed a row that breaks its contract (${line.slice(0, 200)}). Nothing was marked processed; they are presented again once the store is healthy.`,
+        );
+        return null;
+      }
       rows.push(row);
     }
     return rows;
@@ -1020,9 +1037,11 @@ export default function (pi: ExtensionAPI) {
   // failure direction applies: a request that cannot be typed is still
   // delivered as plain text, because an untyped request main can still act on
   // beats an outcome that is never processed.
-  async function processingRequestInput(rows: OutcomeRow[]): Promise<string> {
+  async function processingRequestInput(rows: UnprocessedOutcome[]): Promise<string> {
     const through = rows[rows.length - 1].seq;
-    const listed = rows.map((row) => `[seq ${row.seq}] ${row.task}: ${row.summary}`).join("\n");
+    const listed = rows
+      .map((row) => `[seq ${row.seq}, recorded ${row.recordedAgo} ago] ${row.task}: ${row.summary}`)
+      .join("\n");
     const body = `${PROCESSING_INSTRUCTION.replace("{N}", String(through))}\n\n${listed}`;
     try {
       return await encodeFirstmateOperationalInputWith(runCommandAsync, "branch-outcome", body);
@@ -1031,8 +1050,9 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  // Present every unprocessed captain outcome to main as ONE sequence-keyed
-  // processing request. The first PROCESSING_TRIGGERED_ATTEMPTS presentations
+  // Present the oldest bounded batch of unprocessed captain outcomes to main
+  // as one sequence-keyed processing request. After its acknowledgement the
+  // next run boundary presents the next batch. The first PROCESSING_TRIGGERED_ATTEMPTS presentations
   // of a given sequence set open a turn of their own (queued as a follow-up
   // while main is busy); after that the request rides the captain's next
   // prompt instead, once per run, and a session replacement starts the
@@ -1102,10 +1122,11 @@ export default function (pi: ExtensionAPI) {
   // multi-tool run never receives duplicate requests.
   async function reconcileUnreadOutcomes(expectedGeneration: number, present = true): Promise<boolean> {
     if (!(await generationOwnsLock(expectedGeneration))) return false;
-    // One-time migration per generation: a home whose outcomes were all
-    // delivered before the processed marker existed treats them as processed
-    // rather than re-presenting its whole history. Runs before any new row
-    // can be read below, so nothing delivered from here on is ever skipped.
+    // Once per generation: validate the store's markers and rebuild its
+    // bounded indexes before any row is read below. It never adopts delivered
+    // rows as processed, so an outcome main never acknowledged, including one
+    // a supervision-host drain presented before a switch to Pi, is presented
+    // again dated and check-first.
     if (processedInitializedGeneration !== expectedGeneration) {
       if (!(await runOutcomeScript(["processed-init"])).ok) return false;
       processedInitializedGeneration = expectedGeneration;
@@ -1166,7 +1187,7 @@ export default function (pi: ExtensionAPI) {
       name: "fm_branch_report",
       label: "Report supervision outcome",
       description:
-        "Record the outcome of one handled fleet event: write it durably to the outcome store, then merge it into the captain-facing main conversation. verdict captain persists an exact visible entry and opens one sequence-keyed processing turn on main that stays open until main acknowledges it; routine notes render unless silent marks a no-change heartbeat.",
+        "Record the outcome of one handled fleet event: write it durably to the outcome store, then merge it into the captain-facing main conversation. verdict captain persists an exact visible entry and opens one sequence-keyed processing turn on main that stays open until main acknowledges it; routine notes render unless silent marks an eligible no-change outcome.",
       parameters: Type.Object({
         task: Type.String({ description: "The task id the event belongs to (or 'fleet' for fleet-wide events)" }),
         verdict: Type.Union([Type.Literal("routine"), Type.Literal("captain")], {
@@ -1179,7 +1200,7 @@ export default function (pi: ExtensionAPI) {
         }),
         wake: Type.Optional(Type.String({ description: "The wake reason line this outcome answers" })),
         silent: Type.Optional(Type.Boolean({
-          description: "True only when a fleet-wide heartbeat review found literally nothing worth reporting; omit or use false whenever any action was taken or any routine result is worth a note",
+          description: "True only for an eligible routine no-change outcome; captain outcomes are never silent, and actions, state changes, or new results stay rendered",
         })),
       }),
       execute: async (_toolCallId, params) => {
@@ -1188,9 +1209,16 @@ export default function (pi: ExtensionAPI) {
         const summary = String((params as { summary: unknown }).summary || "").trim();
         const wake = String((params as { wake?: unknown }).wake ?? "").trim();
         const silent = (params as { silent?: unknown }).silent === true;
-        if (!task || !summary || (verdictRaw !== "routine" && verdictRaw !== "captain") || (silent && (task !== "fleet" || verdictRaw !== "routine"))) {
+        if (!task || !summary || (verdictRaw !== "routine" && verdictRaw !== "captain")) {
           return {
             content: [{ type: "text", text: "invalid report: task, verdict (routine|captain), and summary are required" }],
+            details: undefined,
+            isError: true,
+          };
+        }
+        if (silent && verdictRaw !== "routine") {
+          return {
+            content: [{ type: "text", text: "invalid report: --silent true requires the routine verdict" }],
             details: undefined,
             isError: true,
           };
@@ -2304,7 +2332,7 @@ ${context.command}
   });
 
   // Pi only calls this renderer for a message with display: true, which every
-  // routine note uses except an explicitly silent fleet heartbeat.
+  // routine note uses except an explicitly silent no-change outcome.
   pi.registerMessageRenderer?.("fm-branch-merge", (message, _options, theme) => {
     const note = textOfContent(message.content);
     const hasGlyph = note.startsWith(MERGE_NOTE_BOAT);

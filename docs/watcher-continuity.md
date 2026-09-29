@@ -30,7 +30,7 @@ Codex and Grok keep their own protocols; see [Manual recovery and other harnesse
 | Cursor | `.cursor/hooks.json` `stop` hook (`bin/fm-turnend-guard-cursor.sh`) |
 | Claude | `.claude/settings.json` Stop `asyncRewake` hook (`bin/fm-claude-stop-autoarm.sh`) |
 
-On a non-Pi primary, a home opted into the supervision host also changes what the owner runs; see [Supervision host](#supervision-host).
+On a non-Pi primary, a home that runs the supervision host also changes what the owner runs; see [Supervision host](#supervision-host).
 
 ### Pi, omp, and OpenCode adapters
 
@@ -82,6 +82,7 @@ It re-arms by parking that awaited hook on `bin/fm-watch-arm.sh` and returning a
 ### Claude Stop hook
 
 Claude's `.claude/settings.json` Stop `asyncRewake` hook (`bin/fm-claude-stop-autoarm.sh`) owns routine tokenless re-arm.
+Do not run the hook as a manual arm from a tool turn: a short-lived tool process cannot own its park; its header and help own the invocation contract.
 The hook fires on every Stop.
 On each Stop, an eligible primary with supervision need admits one home-scoped owner, which foregrounds `bin/fm-watch-arm.sh` inside the hook-owned process tree.
 While supervision is still needed and away mode remains inactive, an actionable close wakes the idle session through exit 2.
@@ -118,10 +119,9 @@ The Claude turn-end guard owns that notice commit contract, the monotonic failur
 
 ### Supervision host
 
-On a non-Pi primary, a home opted into the supervision host runs `bin/fm-supervision-host.sh` in place of the arm its re-arm owner would start.
+On a non-Pi primary, a home that runs the supervision host runs `bin/fm-supervision-host.sh` in place of the arm its re-arm owner would start.
 The host owns successive watcher cycles through the same arm.
-It starts and confirms each successor before its engine handles an away wake, and it stops its cycle before handing a wake back.
-So the recovery and acknowledgement contracts below apply unchanged ([supervision-host.md](supervision-host.md)).
+The host's successor and pass-through lifecycle is owned by [supervision-host.md](supervision-host.md#postures); the arm's recovery and acknowledgement contracts below still apply.
 
 ## Actionable wake ordering
 
@@ -207,21 +207,25 @@ In its `--claude` mode it cooperates with the auto-arm.
 
 A recovery episode is one generation of the `state/.watcher-down` marker.
 It is retired only by the generation-bound acknowledgement the drain prints as `WAKE_ACK_REQUIRED`.
+The away return brief treats a still-open handling episode as a wake in progress, not watcher downtime; an open downtime episode remains a gap.
 
 ### Announcement
 
 An unacknowledged downtime generation is announced at most once.
-The first recovery marks that generation announced, and later arms wait until a new down stretch mints a new generation.
-A non-successor watcher start after an announced-but-unacked episode is a new down stretch.
-It mints a fresh generation so buried decisions still resurface once.
+The first recovery marks that generation announced, and later empty-queue arms leave it announced until durable work or interrupted handling makes recovery pending again.
+A non-successor watcher start checks the durable queue and recovery marker under their locks.
+If an announced-but-unacknowledged episode has an empty queue, the arm leaves that generation announced, making repeated empty-queue arms idempotent while a long-poll source is merely alive.
+If a durable row arrived after the announcement, the arm opens a fresh pending downtime generation so buried work still resurfaces once.
 
 ### Generation reuse
 
 An ordinary watcher close attempts to publish downtime, and every durable queue append publishes it.
 A handling successor closing to resurface recovery preserves the existing marker instead.
 If EXIT cleanup cannot acquire the downtime-marker lock within its bound, it retains the stale singleton for the next arm to publish the missing downtime before clearing that lock (see [Grace, beacon, and stop signals](#grace-beacon-and-stop-signals)).
-A downtime republication of any pending episode reuses its generation instead of minting a new one, and an already-announced generation stays announced.
-That reuse keeps a watcher close inside the handling window from orphaning the acknowledgement already presented and from trapping later arms in repeated recovery presentation.
+A downtime republication of a pending episode reuses its generation.
+A watcher close leaves an announced downtime episode announced, while a successful durable append opens a fresh pending generation so a live watcher can recover the new work.
+An announced handling episode becomes pending downtime on the same generation because its handling turn may have been interrupted.
+That handling republication gives a successor exactly one recovery presentation without orphaning the acknowledgement already printed for that generation.
 
 ### What an acknowledgement retires
 
@@ -235,7 +239,7 @@ It is a non-fatal result that names its own remedy: re-drain, then acknowledge t
 
 The acknowledgement retires the marker only when no rows remain after sequence-bound consumption.
 A concurrently appended wake has a higher sequence, remains queued, and keeps the episode pending for presentation.
-Consequently, an empty-queue downtime publication during handling can be retired by the outstanding acknowledgement without a dedicated recovery turn.
+Consequently, a watcher close during handling republishes the same generation as pending and forces one recovery turn even when no queue row remains, while the outstanding generation-bound acknowledgement stays valid.
 An acknowledged episode does not freeze the generation, because the next downtime after it opens an episode of its own.
 
 ## Per-actor acknowledgement
@@ -432,6 +436,8 @@ They also prove that a legacy or handoff-phase watcher marker from an absent rep
 - Interrupted handling replay.
 - Generation-bound acknowledgement.
 - A persistent live successor after recovery.
+- An idle live Lavish source that stays quiet until its real result wakes promptly.
+- An append that reopens an announced empty recovery.
 - A watcher close inside the handling window that must leave the printed acknowledgement valid.
 - A re-arm whose recovery cycle is slowed after confirmation and must still surface rather than read as a watcher that stayed live.
 - The self-healing moved-generation acknowledgement that consumes its handled rows and names its remedy.

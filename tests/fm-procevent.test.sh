@@ -1068,32 +1068,87 @@ PATH="$ADOPT_BIN:$PATH" FM_HOME="$HNOMETA" \
   || fail "a board was refused for a task that does have an endpoint"
 pass "a worker-owned board is only armed for an owner its feedback can reach"
 
-# --- end-user-aligned regression: an open round is re-delivered --------------
-# Filing the steering note away is not acknowledging the round. A worker that
-# moved the note aside and then crashed still owes the round, so the next
-# reconcile has to put a live note back in its inbox rather than ring an empty
-# one.
+# --- end-user-aligned regression: acknowledging a delivered note stops the ring
+# The move into handled/ is the worker's own acknowledgement (the inbox
+# contract), so a later reconcile that finds the same captured round must
+# never move that note back into the active inbox or ring the worker again:
+# only a write that actually creates a fresh record rings, and re-delivery of
+# a still-open round is left to the inbox's own re-ring ladder.
 HREDELIVER="$TMP_ROOT/hredeliver"; new_home "$HREDELIVER"
+RING_BIN=$(fm_fakebin "$TMP_ROOT/ring-tmux-stub")
+cat > "$RING_BIN/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  send-keys)
+    shift
+    literal=0
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -t) shift 2 ;;
+        -l) literal=1; shift ;;
+        *) break ;;
+      esac
+    done
+    [ "$literal" = 1 ] && printf '%s\n' "${1:-}" >> "${FM_SEND_LOG:-/dev/null}"
+    exit 0 ;;
+  display-message)
+    for a in "$@"; do
+      case "$a" in
+        *cursor_y*) printf '1\n'; exit 0 ;;
+      esac
+    done
+    printf 'fakepane\n'; exit 0 ;;
+  capture-pane)
+    printf '╭────╮\n│    │\n╰────╯\n'
+    exit 0 ;;
+  list-windows) printf 'fm-worker-6\n'; exit 0 ;;
+esac
+exit 0
+SH
+chmod +x "$RING_BIN/tmux"
 REDELIVER_ART="$TMP_ROOT/redeliver-board.html"
 printf '<h1>redeliver</h1>\n' > "$REDELIVER_ART"
 lavish_session "$REDELIVER_ART"
 redeliver_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$REDELIVER_ART")
 fm_test_track_procevent_home "$HREDELIVER"
 new_task_endpoint "$HREDELIVER" worker-6
-PATH="$ADOPT_BIN:$PATH" FM_HOME="$HREDELIVER" \
+RING_LOG="$TMP_ROOT/redeliver-ring.log"; : > "$RING_LOG"
+PATH="$RING_BIN:$ADOPT_BIN:$PATH" FM_SEND_LOG="$RING_LOG" FM_HOME="$HREDELIVER" \
   "$ROOT/bin/fm-procevent-lavish.sh" arm "$REDELIVER_ART" --for worker-6 >/dev/null
 wait_capture "$HREDELIVER" "$redeliver_id" \
   || fail "the first worker-owned round was never captured"
 [ -f "$HREDELIVER/state/worker-6.inbox/001.msg" ] \
   || fail "the first worker-owned round never reached the worker inbox"
+wait_for_lines "$RING_LOG" 1 \
+  || fail "the newly captured round never rang its owner's doorbell"
+[ "$(wc -l < "$RING_LOG" | tr -d ' ')" = 1 ] \
+  || fail "a single newly captured round rang more than once: $(cat "$RING_LOG")"
+i=0
+while [ "$i" -lt 5 ]; do
+  PATH="$RING_BIN:$ADOPT_BIN:$PATH" FM_SEND_LOG="$RING_LOG" pe "$HREDELIVER" reconcile >/dev/null 2>&1 || true
+  i=$((i + 1))
+done
+[ "$(wc -l < "$RING_LOG" | tr -d ' ')" = 1 ] \
+  || fail "an unchanged active note re-rang the doorbell on every reconcile: $(cat "$RING_LOG")"
+[ -f "$HREDELIVER/state/worker-6.inbox/001.msg" ] \
+  || fail "repeated reconciles dropped the still-active note from the inbox"
 mv "$HREDELIVER/state/worker-6.inbox/001.msg" \
   "$HREDELIVER/state/worker-6.inbox/handled/001.msg"
-PATH="$ADOPT_BIN:$PATH" pe "$HREDELIVER" reconcile >/dev/null 2>&1 || true
-[ -f "$HREDELIVER/state/worker-6.inbox/001.msg" ] \
-  || fail "a round still open after its note was filed away was never re-delivered"
+i=0
+while [ "$i" -lt 5 ]; do
+  PATH="$RING_BIN:$ADOPT_BIN:$PATH" FM_SEND_LOG="$RING_LOG" pe "$HREDELIVER" reconcile >/dev/null 2>&1 || true
+  i=$((i + 1))
+done
+[ "$(wc -l < "$RING_LOG" | tr -d ' ')" = 1 ] \
+  || fail "acknowledging the note did not stop repeated doorbell rings across reconciles: $(cat "$RING_LOG")"
+[ ! -f "$HREDELIVER/state/worker-6.inbox/001.msg" ] \
+  || fail "an already-acknowledged note was resurrected into the active inbox"
+[ -f "$HREDELIVER/state/worker-6.inbox/handled/001.msg" ] \
+  || fail "an already-acknowledged note vanished instead of staying acknowledged"
 [ ! -f "$HREDELIVER/state/procevent-inbox/$redeliver_id.1.handled" ] \
-  || fail "re-delivering the note acknowledged the round it is still asking for"
-pass "an open worker-owned round is re-delivered after its note was filed away"
+  || fail "reconcile closed the round on its own, without the owner's explicit handled call"
+pass "an acknowledged note is never resurrected and stops ringing across repeated reconciles"
 
 # --- end-user-aligned regression: a conclude only closes its own round --------
 # Acknowledging a terminal round retires the board it belongs to. The same

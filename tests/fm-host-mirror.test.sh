@@ -31,10 +31,13 @@ git init -q "$PRIMARY_ROOT"
 : > "$PRIMARY_ROOT/AGENTS.md"
 ln -s "$ROOT/bin" "$PRIMARY_ROOT/bin"
 
-make_home() {  # <name> [opted-in: 1|0]
+make_home() {  # <name> [config/supervision-host: 1 (empty file) | 0 (none) | off]
   local home="$TMP_ROOT/$1"
   mkdir -p "$home/state" "$home/config"
-  [ "${2:-1}" != 1 ] || : > "$home/config/supervision-host"
+  case "${2:-1}" in
+    1) : > "$home/config/supervision-host" ;;
+    off) printf 'off\n' > "$home/config/supervision-host" ;;
+  esac
   printf '%s\n' "$home"
 }
 
@@ -87,12 +90,13 @@ main|cursor main" "$out" "every tracked registration must write its captain prom
   pass "mirror: the Claude and Cursor registrations each write the captain's prompt and main's reply"
 }
 
-# Non-host invariance: on a home without config/supervision-host, every tracked
-# mirror registration prints nothing and leaves the home's state byte-for-byte
-# as it was, even for the lock-owning primary session in a primary checkout.
-test_home_without_the_flag_is_untouched() {
+# Non-host invariance: on a home whose config/supervision-host says off, every
+# tracked mirror registration prints nothing and leaves the home's state
+# byte-for-byte as it was, even for the lock-owning primary session in a
+# primary checkout.
+test_home_that_opted_out_is_untouched() {
   local home before after
-  home=$(make_home without-flag 0)
+  home=$(make_home opted-out off)
   printf 'working: demo\n' > "$home/state/demo.status"
   # The fixture's own session lock is written by as_session, not by a writer.
   snapshot() { (cd "$1/state" && find . -type f ! -name .lock | LC_ALL=C sort | while IFS= read -r f; do printf '%s %s\n' "$f" "$(cksum < "$f")"; done); }
@@ -106,26 +110,48 @@ test_home_without_the_flag_is_untouched() {
     run "$CURSOR_PROMPT" "{\"hook_event_name\":\"beforeSubmitPrompt\",\"prompt\":\"hello\",\"cursor_version\":\"x\"}"
     run "$CLAUDE_STOP" "{\"hook_event_name\":\"Stop\",\"last_assistant_message\":\"hi\"}"
     run "$CURSOR_RESPONSE" "{\"hook_event_name\":\"afterAgentResponse\",\"text\":\"hi\",\"cursor_version\":\"x\"}"
-  ' > "$home/writers.out" 2>&1 || fail "a mirror registration failed on a home without the flag: $(cat "$home/writers.out")"
-  [ ! -s "$home/writers.out" ] || fail "a mirror registration printed on a home without the flag: $(cat "$home/writers.out")"
+  ' > "$home/writers.out" 2>&1 || fail "a mirror registration failed on a home that opted out: $(cat "$home/writers.out")"
+  [ ! -s "$home/writers.out" ] || fail "a mirror registration printed on a home that opted out: $(cat "$home/writers.out")"
   after=$(snapshot "$home")
-  assert_equals "$before" "$after" "a mirror writer changed the state of a home without the flag"
-  pass "mirror: a home without the flag is untouched by every tracked mirror registration"
+  assert_equals "$before" "$after" "a mirror writer changed the state of a home that opted out"
+  pass "mirror: a home whose config/supervision-host says off is untouched by every tracked mirror registration"
 }
 
-test_writers_are_inert_without_the_opt_in() {
+# Default-on for Claude: with no config/supervision-host, the Claude
+# registrations write the mirror, while Cursor's stay file-gated and write
+# nothing.
+test_home_without_the_file_mirrors_only_claude() {
+  local home out
+  home=$(make_home without-file 0)
+  CLAUDE_PROMPT=$(claude_cmd UserPromptSubmit) CLAUDE_STOP=$(claude_cmd Stop) \
+  CURSOR_PROMPT=$(cursor_cmd beforeSubmitPrompt) CURSOR_RESPONSE=$(cursor_cmd afterAgentResponse) \
+  as_session "$home" '
+    run() { printf "%s" "$2" | env CLAUDE_PROJECT_DIR="$PRIMARY_ROOT" CURSOR_PROJECT_DIR="$PRIMARY_ROOT" \
+      bash -c "cd \"$PRIMARY_ROOT\" && $1"; }
+    run "$CLAUDE_PROMPT" "{\"hook_event_name\":\"UserPromptSubmit\",\"prompt_id\":\"c1\",\"prompt\":\"claude captain\"}"
+    run "$CLAUDE_STOP" "{\"hook_event_name\":\"Stop\",\"prompt_id\":\"c1\",\"last_assistant_message\":\"claude main\"}"
+    run "$CURSOR_PROMPT" "{\"hook_event_name\":\"beforeSubmitPrompt\",\"generation_id\":\"u1\",\"prompt\":\"cursor captain\",\"cursor_version\":\"x\"}"
+    run "$CURSOR_RESPONSE" "{\"hook_event_name\":\"afterAgentResponse\",\"generation_id\":\"u1\",\"text\":\"cursor main\",\"cursor_version\":\"x\"}"
+  ' || fail "a tracked mirror hook failed"
+  out=$(entries "$home")
+  assert_equals "captain|claude captain
+main|claude main" "$out" "only the Claude registrations may write the mirror on a home without the file"
+  pass "mirror: without config/supervision-host the Claude registrations write the mirror and Cursor's stay inert"
+}
+
+test_writers_are_inert_on_a_home_that_opted_out() {
   local home crew out
-  home=$(make_home no-opt-in 0)
+  home=$(make_home opted-out-writer off)
   as_session "$home" '
     printf "%s" "{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"hello\"}" | "$MIRROR" hook claude
   ' || fail "an inert writer failed"
-  assert_absent "$home/state/.host-mirror.jsonl" "a home without config/supervision-host must mirror nothing"
+  assert_absent "$home/state/.host-mirror.jsonl" "a home whose config/supervision-host says off must mirror nothing"
   crew="$TMP_ROOT/crew-worktree"
   mkdir -p "$crew"
   out=$(printf '%s' '{"hook_event_name":"UserPromptSubmit","prompt":"hello"}' | FM_HOME="$crew" "$MIRROR" hook claude 2>&1)
   [ -z "$out" ] || fail "an inert writer printed: $out"
-  assert_absent "$crew/state" "an inert writer must create nothing in a home without config/"
-  pass "mirror: writers stay silent and write nothing on a home that did not opt in"
+  assert_absent "$crew/state" "an inert writer must create nothing in a home without config/ or state/"
+  pass "mirror: writers stay silent and write nothing on a home that opted out or has no state"
 }
 
 test_operational_foreign_and_unowned_input_is_dropped() {
@@ -432,9 +458,10 @@ test_only_proven_writers_are_verified() {
 }
 
 test_every_harness_registration_writes_the_mirror
-test_writers_are_inert_without_the_opt_in
+test_writers_are_inert_on_a_home_that_opted_out
 test_only_proven_writers_are_verified
-test_home_without_the_flag_is_untouched
+test_home_that_opted_out_is_untouched
+test_home_without_the_file_mirrors_only_claude
 test_operational_foreign_and_unowned_input_is_dropped
 test_internal_whitespace_is_recorded_verbatim
 test_entries_are_deduplicated_and_capped

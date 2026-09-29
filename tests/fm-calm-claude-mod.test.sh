@@ -9,6 +9,7 @@
 #     the core changed nothing Pi draws;
 #   - the Raster packing of that frame and its base64 encoder;
 #   - the pure presentation policy: home resolution, preference values, working notes;
+#   - the pure supervision-note lines over a tail copy bin/fm-branch-outcome.sh writes;
 #   - the operational-input classifier's parity with bin/fm-operational-input.sh over
 #     envelopes the shell owner itself encodes, its legacy shapes, and near misses, and
 #     the record-backed doorbell port's parity with the owner's doorbell-kind.
@@ -50,7 +51,7 @@ test_plugin_shape() {
 import { readFileSync, readdirSync, existsSync } from "node:fs";
 const mod = ${MOD@Q};
 const manifest = JSON.parse(readFileSync(\`\${mod}/.claude-plugin/plugin.json\`, "utf8"));
-if (manifest.name !== "firstmate-calm") throw new Error(\`manifest name \${manifest.name}\`);
+if (manifest.name !== "fm") throw new Error(\`manifest name \${manifest.name}\`);
 for (const key of ["commands", "agents", "skills", "hooks", "mcpServers", "lspServers", "outputStyles"]) {
   if (key in manifest) throw new Error(\`manifest declares \${key}, which would load while the flag is off\`);
 }
@@ -312,6 +313,100 @@ JS
   pass "the Calm policy resolves the shared preference exactly as Pi does, reads on, max, and off as Pi does, and shares Pi's 240-character-or-newline preservation behavior while classifying working notes by stop reason, tool use, and restored transcript shape"
 }
 
+test_branch_notes_over_the_store_owner() {
+  local home state out
+  home="$TMP_ROOT/notes-home"
+  state="$home/state"
+  mkdir -p "$state"
+  outcome() { FM_HOME="$home" bash "$ROOT/bin/fm-branch-outcome.sh" "$@" >/dev/null || fail "fm-branch-outcome.sh $1 failed"; }
+  outcome append --task fm-a --verdict routine --summary 'worker healthy, "quoted"'
+  outcome append --task fm-b --verdict routine --summary 'no change' --silent true
+  outcome append --task fm-c --verdict captain --summary $'PR https://example.test/pr/3 green\nmerge?'
+  outcome append --task fm-d --verdict captain --summary 'decision answered'
+  outcome mark-read --through 4
+  outcome mark-processed --through 4
+  outcome append --task fm-e --verdict routine --summary 'reconciled the backlog'
+  # A home whose store predates the tail copy gains it at its next session start, and the
+  # session-start drain may read a routine row before the mod first sees that copy.
+  rm -f "$state/.branch-outcomes-tail.jsonl"
+  cp "$state/.branch-outcomes-cursor" "$TMP_ROOT/notes-start-cursor"
+  outcome seed-tail
+  [ -s "$state/.branch-outcomes-tail.jsonl" ] || fail "seed-tail did not create the display tail copy"
+  outcome mark-read --through 5
+  cat >"$TMP_ROOT/notes.mjs" <<'JS'
+import { readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const notes = await import(pathToFileURL(`${process.env.NOTES_MOD}/lib/fm-branch-notes.ts`).href);
+const check = (condition, message) => { if (!condition) throw new Error(message); };
+const same = (actual, expected, message) => check(JSON.stringify(actual) === JSON.stringify(expected), `${message}: ${JSON.stringify(actual)}`);
+const state = process.env.NOTES_STATE;
+const read = (name) => readFileSync(`${state}/${name}`, "utf8");
+const plugin = "/repo/.claude/mods/firstmate-calm";
+same(notes.firstmateStateDirectory({}, plugin), "/repo/state", "code-root fallback");
+same(notes.firstmateStateDirectory({ FM_ROOT_OVERRIDE: "/r", FM_HOME: "/h" }, plugin), "/h/state", "FM_HOME beats FM_ROOT_OVERRIDE");
+same(notes.firstmateStateDirectory({ FM_HOME: "/h", FM_STATE_OVERRIDE: "/s" }, plugin), "/s", "FM_STATE_OVERRIDE beats the home");
+// A torn last line, as a reader racing a writer that is not atomic would see, is skipped.
+const rows = notes.parseOutcomeTail(read(".branch-outcomes-tail.jsonl") + '{"seq":6,"epoch":');
+same(rows.map((row) => row.seq), [1, 2, 3, 4, 5], "rows the store owner wrote");
+same(rows.map(notes.outcomeNoteLine), [
+  '⛵ fm-a: worker healthy, "quoted"',
+  undefined,
+  "⚓ [seq 3] fm-c: PR https://example.test/pr/3 green merge?",
+  "⚓ [seq 4] fm-d: decision answered",
+  "⛵ fm-e: reconciled the backlog",
+], "Pi's line for each row");
+const cursor = notes.parseOutcomeMarker(readFileSync(process.env.NOTES_START_CURSOR, "utf8"));
+same(notes.replayOutcomeNotes(rows, notes.parseOutcomeMarker(read(".branch-outcomes-cursor")), 4), [],
+  "the markers after the drain read seq 5 would drop its sailboat, so the replay judges by the session-start cursor");
+same(notes.replayOutcomeNotes(rows, cursor, notes.parseOutcomeMarker(read(".branch-outcomes-processed"))),
+  ["⛵ fm-e: reconciled the backlog"], "replay after main processed seq 4");
+same(notes.replayOutcomeNotes(rows, cursor, notes.parseOutcomeMarker(undefined)),
+  ["⚓ [seq 3] fm-c: PR https://example.test/pr/3 green merge?", "⚓ [seq 4] fm-d: decision answered", "⛵ fm-e: reconciled the backlog"],
+  "an absent processed marker replays every captain row, the safe direction");
+for (const bad of ["", "x", "07", "-1", "99999999999999999999"]) same(notes.parseOutcomeMarker(bad), 0, `marker ${bad}`);
+const many = Array.from({ length: 25 }, (_, i) => ({ seq: i + 1, epoch: 0, task: `t${i + 1}`, verdict: "routine", summary: "s", silent: false }));
+const replay = notes.replayOutcomeNotes(many, 0, 0);
+same(replay.length, 21, "replay bound");
+same(replay[0], "⛵ 5 earlier supervision notes not replayed; bin/fm-branch-outcome.sh list shows them", "omitted count");
+same(replay[1], "⛵ t6: s", "the newest rows are kept");
+same(notes.newOutcomeNotes(rows, 4), { lines: ["⛵ fm-e: reconciled the backlog"], lastSeen: 5 }, "rows above the anchor");
+same(notes.newOutcomeNotes(rows, 5), { lines: [], lastSeen: 5 }, "nothing new");
+same(notes.newOutcomeNotes(rows.slice(0, 2), 5), { lines: [], lastSeen: 2 }, "a replaced store re-anchors without replay");
+same(notes.newOutcomeNotes(rows.slice(2), 1), {
+  lines: [
+    "⛵ 1 earlier supervision outcome not shown; bin/fm-branch-outcome.sh list shows them",
+    "⚓ [seq 3] fm-c: PR https://example.test/pr/3 green merge?",
+    "⚓ [seq 4] fm-d: decision answered",
+    "⛵ fm-e: reconciled the backlog",
+  ],
+  lastSeen: 5,
+}, "rows that left the tail before a poll are counted, not dropped silently");
+same(notes.replayOutcomeNotes(rows, cursor, 0, 3), ["⚓ [seq 4] fm-d: decision answered", "⛵ fm-e: reconciled the backlog"],
+  "rows this session already showed are not replayed on resume");
+same(notes.replayOutcomeNotes(rows, cursor, 0, 99).length, 3, "a shown sequence past the tail is a replaced store");
+let stored = notes.recordSessionShownThrough(undefined, "s1", 4);
+stored = notes.recordSessionShownThrough(stored, "s2", 7);
+stored = notes.recordSessionShownThrough(stored, "s1", 9);
+same(stored, [["s2", 7], ["s1", 9]], "one entry per session, newest last");
+same([notes.sessionShownThrough(stored, "s1"), notes.sessionShownThrough(stored, "s3"), notes.sessionShownThrough("junk", "s1")], [9, 0, 0], "shown lookups");
+for (let i = 0; i < 30; i += 1) stored = notes.recordSessionShownThrough(stored, `x${i}`, i + 1);
+same([stored.length, stored[stored.length - 1]], [20, ["x29", 30]], "the store keeps the newest 20 sessions");
+const health = (key, cooldown) => notes.parseHostHealth(`key=${key}\nerrors=2\ncooldown=${cooldown}\nretry_after=9\n`);
+const paused = "⛵ Supervision session paused after repeated engine errors; main will handle wakes while it cools down.";
+const recovered = "⛵ Supervision session recovered after a successful cooldown probe.";
+same(notes.parseHostHealth(undefined), undefined, "no latch file");
+same(notes.hostHealthNote(health("k", 0), health("k", 300)), paused, "trip");
+same(notes.hostHealthNote(health("k", 300), health("k", 600)), undefined, "a longer cooldown is not a new trip");
+same(notes.hostHealthNote(health("k", 600), health("k", 0)), recovered, "recovery");
+same(notes.hostHealthNote(health("k", 300), health("k2", 0)), undefined, "a new main session's fresh latch");
+same(notes.hostHealthNote(health("k", 0), health("k2", 300)), paused, "a trip under a new key");
+console.log("notes-ok");
+JS
+  out=$(NOTES_MOD=$MOD NOTES_STATE=$state NOTES_START_CURSOR=$TMP_ROOT/notes-start-cursor run_node "$TMP_ROOT/notes.mjs" 2>&1) || fail "supervision notes: $out"
+  assert_contains "$out" "notes-ok" "the supervision notes check did not complete"
+  pass "the supervision notes read the store owner's tail copy and markers as Pi does: sailboat and anchor lines, silent rows skipped, bounded replay of unread and unprocessed rows not already shown in the session, and latch notes"
+}
+
 # The classifier parity corpus: envelopes the shell owner encodes itself, its legacy
 # shapes, and near misses. Each case is one file so multi-line bodies stay exact.
 canonical_generic_kinds() {
@@ -499,5 +594,6 @@ test_plugin_shape
 test_shared_sprite_and_pi_rendering
 test_raster_packing
 test_presentation_policy
+test_branch_notes_over_the_store_owner
 test_classifier_parity_with_shell_owner
 test_doorbell_parity_with_shell_owner
