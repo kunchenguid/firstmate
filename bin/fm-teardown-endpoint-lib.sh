@@ -181,10 +181,10 @@ teardown_endpoint_phase() { # <expected-spawn-gen>; leaves durable metadata inta
     ENDPOINT_PANE=$(fm_backend_meta_exact_value "$META" herdr_pane_id) || {
       teardown_endpoint_refuse pane_close historical-endpoint-identity-missing; return 1;
     }
-    [[ "$expected" =~ ^s[0-9]+\.[0-9]+\.[0-9]+$ ]] && \
-      fm_backend_herdr_session_predates_file "$ENDPOINT_SESSION" "$journal" || {
+    if ! [[ "$expected" =~ ^s[0-9]+\.[0-9]+\.[0-9]+$ ]] || \
+      ! fm_backend_herdr_session_predates_file "$ENDPOINT_SESSION" "$journal"; then
       teardown_endpoint_refuse pane_close legacy-session-continuity-unproven; return 1;
-    }
+    fi
     ENDPOINT_INSTANCE=$(fm_backend_herdr_session_instance "$ENDPOINT_SESSION") || {
       teardown_endpoint_refuse pane_close session-unreadable; return 1;
     }

@@ -1956,7 +1956,7 @@ fi
 . "$SCRIPT_DIR/fm-task-lifecycle-lib.sh"
 if [ "$RELAUNCH" = 0 ] && [ "$BACKEND" = herdr ] && [ -f "$STATE/$ID.herdr-presentation" ]; then
   fm_backend_herdr_projection_bind_execution "$STATE/$ID.herdr-presentation" "$ID" "$SPAWN_GEN" || \
-    echo "warning: launch identity could not be bound; independent endpoint cleanup will retain this endpoint" >&2
+    echo "warning: launch identity could not be bound; cleanup will rely on independently sufficient structural evidence or retain this endpoint safely" >&2
 fi
 
 # Fuse the backlog In-flight transition into the publication that just created
@@ -2270,7 +2270,7 @@ if [ "$KIND" != secondmate ] && [ "$RELAUNCH" = 1 ]; then
 fi
 if [ "$RELAUNCH" = 1 ] && [ "$BACKEND" = herdr ] && [ -f "$STATE/$ID.herdr-presentation" ]; then
   fm_backend_herdr_projection_bind_execution "$STATE/$ID.herdr-presentation" "$ID" "$SPAWN_GEN" || \
-    echo "warning: replacement launch identity unavailable; endpoint cleanup retained" >&2
+    echo "warning: replacement launch identity could not be bound; cleanup will rely on independently sufficient structural evidence or retain this endpoint safely" >&2
 fi
 fm_lock_release "$SPAWN_META_LOCK"
 SPAWN_META_LOCK_HELD=0
