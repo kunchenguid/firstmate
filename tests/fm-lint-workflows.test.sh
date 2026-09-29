@@ -166,16 +166,6 @@ EOF
 YAML
 }
 
-test_current_workflows_pass() {
-  local out rc
-  rc=0
-  out=$("$LINT_WF" 2>&1) || rc=$?
-  [ "$rc" -eq 0 ] || fail "current workflows must parse, got $rc"$'\n'"$out"
-  assert_contains "$out" "workflow files valid" \
-    "current-workflow lint did not report a valid count"
-  pass "current .github/workflows YAML files parse"
-}
-
 test_col0_heredoc_fails_with_clear_error() {
   local tmp out rc
   tmp=$(fm_test_tmproot fm-lint-wf-col0)
@@ -515,7 +505,6 @@ SH
 }
 
 test_pins_an_explicit_version
-test_current_workflows_pass
 test_col0_heredoc_fails_with_clear_error
 test_valid_fixture_passes
 test_empty_workflows_dir_fails

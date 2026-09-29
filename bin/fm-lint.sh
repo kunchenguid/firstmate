@@ -18,7 +18,9 @@
 # every production shell separately as a canonical, source-aware root.
 # The default (no explicit-path) path also runs bin/fm-lint-workflows.sh so a
 # malformed GitHub workflow, including a self-broken ci.yml, fails locally
-# before merge instead of only failing to run as CI.
+# before merge instead of only failing to run as CI. A checkout with no
+# .github/workflows directory tracks no workflows, so that check is skipped
+# with a note; a present directory with no workflow files still fails.
 #
 # With no explicit paths, the file set and source-following posture depend
 # on context:
@@ -389,6 +391,10 @@ fm_lint_usage() {
 # ShellCheck-only override so callers can target one shell root.
 fm_lint_run_workflows() {
   [ "$EXPLICIT_PATHS" -eq 0 ] || return 0
+  if [ ! -d "$ROOT/.github/workflows" ]; then
+    printf 'fm-lint.sh: no .github/workflows directory; workflow lint skipped\n' >&2
+    return 0
+  fi
   "$SELF_DIR/fm-lint-workflows.sh"
 }
 

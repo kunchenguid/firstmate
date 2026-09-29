@@ -9,6 +9,11 @@
 # HEAD-continuity guard; see docs/architecture.md "No-mistakes gate authority boundary."
 disable_project_settings: true
 
+# This fork tracks no GitHub Actions workflows, so a PR registers zero checks.
+# Trusted-only: honored from the default-branch copy; docs/configuration.md
+# "Gate defaults" owns the contract.
+no_ci: true
+
 # Trusted documentation placement policy for the Document step.
 # The audience inventory and coding guideline own the detail; keep this as a
 # pointer so gate instructions cannot become a second prose policy.
@@ -22,7 +27,7 @@ document:
     evidence destination, and unique safety facts, then review the complete
     branch diff again after every documentation or lint fix.
 
-# Pin lint to the same owner CI invokes instead of leaving it to no-mistakes'
+# Pin lint to the repository's lint owner instead of leaving it to no-mistakes'
 # default handling, which does not invoke the repository's canonical lint gate.
 # `bin/fm-lint.sh` owns the context-sensitive ShellCheck modes and GitHub
 # workflow lint via pinned actionlint in `bin/fm-lint-workflows.sh`.

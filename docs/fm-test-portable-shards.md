@@ -2,6 +2,7 @@
 
 `bin/fm-test-run.sh` owns portable lane composition and execution.
 `bin/fm-test-isolation-proof.sh` owns the proven-isolated candidate set.
+This fork tracks no GitHub Actions workflows, so the CI runners, artifacts, and job timeouts below describe the upstream firstmate layout these lanes were sized for; the lanes themselves still run locally through `bin/fm-test-run.sh`.
 
 ## Verification inputs
 
@@ -54,7 +55,7 @@ On [PR 1495](https://github.com/kunchenguid/firstmate/pull/1495), its main step 
 Each shard is still strictly serial in itself, and separate runners mean no two of these stateful scripts ever share a machine, so the split needs no concurrency isolation proof.
 
 `bin/fm-test-run.sh` owns `n` and refuses any lane whose `of<n>` disagrees with it.
-`.github/workflows/ci.yml` derives the same `n` from `strategy.job-total` rather than a literal, so changing the shard count in either file without the other fails the lane loudly instead of leaving part of the required suite unrun.
+Upstream `.github/workflows/ci.yml` derives the same `n` from `strategy.job-total` rather than a literal, so changing the shard count in either file without the other fails the lane loudly instead of leaving part of the required suite unrun.
 
 Assignment is longest-processing-time bin packing over per-script duration hints embedded in `bin/fm-test-run.sh`.
 The serial hints were refreshed from successful per-script records in the `fm-test-timing-portable-serial-*` artifacts of the complete green [run 35279383618](https://github.com/kunchenguid/firstmate/actions/runs/35279383618) and the available completed shards of [run 35282466441](https://github.com/kunchenguid/firstmate/actions/runs/35282466441) on 2026-09-17.
@@ -73,7 +74,7 @@ Nine serial runners pack the refreshed measurements into a longest modeled scrip
 The longest script, `tests/fm-watch-triage.test.sh`, legitimately occupies one whole shard and is the indivisible floor for this layout.
 This is a packing estimate, not measured new-workflow execution or an end-to-end latency guarantee.
 Job timeouts remain hang tripwires under the policy in [Timeouts](#timeouts) below; they are not the desired healthy duration.
-`tests/fm-ci-workflow.test.sh` compares the parsed CI matrix to the executable runner lanes, and the runner rejects parallel `--jobs` on a serial lane even when that shard has only one member.
+Upstream `tests/fm-ci-workflow.test.sh` compares the parsed CI matrix to the executable runner lanes, and the runner rejects parallel `--jobs` on a serial lane even when that shard has only one member.
 
 Refresh the CI-derived hints by downloading the per-shard timing artifacts from several green CI runs and replacing the `portable_serial_weight_hints` table in `bin/fm-test-run.sh` with the slowest measured `duration_ms` per `path`:
 
@@ -102,7 +103,7 @@ It reports the unmeasured serial share as `serial_unhinted=` and refuses when th
 
 Portable shards, each portable serial shard, and the Herdr lane upload runner-generated timing JSON.
 `bin/fm-test-run.sh --aggregate-json` creates the combined summary artifact.
-`.github/workflows/ci.yml` owns the exact artifact names and aggregation wiring.
+Upstream `.github/workflows/ci.yml` owns the exact artifact names and aggregation wiring.
 
 ## Lint partitions and end-to-end latency
 
@@ -134,6 +135,6 @@ A lane that reaches its tier bound is wedged, not slow, so change the policy her
 | Normal | lint partitions, portable parallel shards, portable serial shards, macOS stock Bash | 30 minutes, one value shared by every job in the tier | One shared hang tripwire keeps every ordinary test and lint lane on the same policy instead of allowing per-lane packing estimates or one-off caps to set the bound. |
 | Heavy | Herdr | family-run step 20 minutes under a 75-minute job-level last-resort backstop | Healthy runs finish in about 7-10 minutes, so the step tripwire fails a wedged suite while the `always()` cleanup and timing upload still run, and the job cap only catches a hang outside that step. |
 
-[`.github/workflows/ci.yml`](../.github/workflows/ci.yml) holds the executable values and names each job's tier beside its `timeout-minutes`.
-[`tests/fm-ci-workflow.test.sh`](../tests/fm-ci-workflow.test.sh) holds the policy against the parsed workflow: every job belongs to exactly one tier, the workflow carries exactly three distinct job-level values, the fast tier stays within 5-10 minutes, the normal jobs share one 30-minute budget, and the Herdr family-run step is the 20-minute tripwire below its job backstop with an `always()` teardown after it.
+Upstream `.github/workflows/ci.yml` holds the executable values and names each job's tier beside its `timeout-minutes`.
+Upstream `tests/fm-ci-workflow.test.sh` holds the policy against the parsed workflow: every job belongs to exactly one tier, the workflow carries exactly three distinct job-level values, the fast tier stays within 5-10 minutes, the normal jobs share one 30-minute budget, and the Herdr family-run step is the 20-minute tripwire below its job backstop with an `always()` teardown after it.
 A passing coverage guard does not establish a healthy job duration; refresh the healthy figures above from the lanes' uploaded timing artifacts.

@@ -415,7 +415,7 @@ family_for_basename() {
     fm-claude-stop-autoarm.test.sh|fm-cursor-harness.test.sh|\
     fm-dispatch-resolve.test.sh|\
     fm-extension-binding.test.sh|fm-gitignore-config.test.sh|\
-    fm-no-mistakes-required.test.sh|fm-peek-remote.test.sh|\
+    fm-peek-remote.test.sh|\
     fm-pending-reply.test.sh|fm-pi-branch-extension.test.sh|\
     fm-procevent-quota.test.sh|fm-procevent-when.test.sh|fm-procevent.test.sh|\
     fm-live-gate.test.sh|\
@@ -709,7 +709,6 @@ tests/fm-calm-claude-mod-plugin.test.sh 172
 tests/fm-calm-claude-mod.test.sh 1252
 tests/fm-calm-pi-extension.test.sh 45128
 tests/fm-check-unregister.test.sh 464
-tests/fm-ci-workflow.test.sh 2073
 tests/fm-classify-corr-token.test.sh 49294
 tests/fm-classify-decision-key.test.sh 3336
 tests/fm-claude-stop-autoarm-live-e2e.test.sh 45
@@ -759,7 +758,6 @@ tests/fm-mail.test.sh 9703
 tests/fm-muse-harness.test.sh 40970
 tests/fm-muse-signals-live-e2e.test.sh 77
 tests/fm-nm-test-contract.test.sh 128
-tests/fm-no-mistakes-required.test.sh 247
 tests/fm-omp-harness.test.sh 47734
 tests/fm-omp-primary-live-e2e.test.sh 46
 tests/fm-on.test.sh 11001
@@ -1624,7 +1622,7 @@ families_for_changed_path() {
     .agents/skills/*/SKILL.md)
       printf '%s\n' pure-contract-unit
       ;;
-    .github/workflows/ci.yml|.no-mistakes.yaml)
+    .no-mistakes.yaml)
       printf '%s\n' pure-contract-unit
       printf '%s\n' real-herdr-gated
       ;;

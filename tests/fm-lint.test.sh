@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
 # Parity guard for firstmate's shell-lint definition.
 #
-# bin/fm-lint.sh is the single owner invoked by CI
-# (.github/workflows/ci.yml) and by the pre-push gate (.no-mistakes.yaml
-# commands.lint). CI runs its two full-rigor canonical partitions; the local
-# gate uses its context-selected default. Their selection differs deliberately,
-# while this owner keeps analysis flags, configuration, and tool versions from
-# drifting.
+# bin/fm-lint.sh is the single owner invoked by the pre-push gate
+# (.no-mistakes.yaml commands.lint) and by any CI that selects its two
+# full-rigor canonical partitions; the local gate uses its context-selected
+# default. Their selection differs deliberately, while this owner keeps
+# analysis flags, configuration, and tool versions from drifting.
 # Regression origin: with no commands.lint configured, the local no-mistakes
 # lint step never ran the deterministic shell lint, so PRs passed local
 # validation yet failed CI on info/warning findings such as SC2015, SC1007, and
@@ -588,9 +587,38 @@ test_zero_changed_files_exits_clean() {
   [ "$rc" -eq 0 ] || fail "zero changed lint targets must exit 0, got $rc"$'\n'"$out"
   assert_contains "$out" "ShellCheck 0.11.0" "zero-changed run did not print the ShellCheck version line"
   assert_contains "$out" "no changed lint targets" "zero-changed run did not note the empty target set"
-  assert_contains "$out" "workflow files valid" \
-    "zero-changed run skipped workflow YAML validation"
+  assert_contains "$out" "workflow lint skipped" \
+    "zero-changed run did not note the absent workflows directory"
   pass "fm-lint.sh exits 0 with a note when the local branch has no changed lint targets"
+}
+
+test_default_path_skips_workflow_lint_only_without_a_workflows_dir() {
+  local tmp fakebin log out rc
+  tmp=$(fm_test_tmproot fm-lint-no-workflows-dir)
+  fakebin=$(fm_fakebin "$tmp")
+  log="$tmp/shellcheck.log"
+  mkdir -p "$tmp/repo/bin/backends" "$tmp/repo/tests"
+  cp "$LINT" "$tmp/repo/bin/fm-lint.sh"
+  cp "$ROOT/bin/fm-timeout-lib.sh" "$tmp/repo/bin/fm-timeout-lib.sh"
+  cp "$ROOT/bin/fm-lint-workflows.sh" "$tmp/repo/bin/fm-lint-workflows.sh"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$tmp/repo/bin/backends/noop.sh"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$tmp/repo/tests/noop.test.sh"
+  chmod +x "$tmp/repo/bin/fm-lint.sh" "$tmp/repo/bin/fm-lint-workflows.sh"
+  fm_lint_stub_shellcheck "$fakebin" "$log"
+
+  rc=0
+  out=$(cd "$tmp/repo" && CI=true PATH="$fakebin:$PATH" "$tmp/repo/bin/fm-lint.sh" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "a checkout with no workflows directory failed lint (exit $rc)"$'\n'"$out"
+  assert_contains "$out" "no .github/workflows directory; workflow lint skipped" \
+    "the absent workflows directory was not reported as a skipped check"
+
+  mkdir -p "$tmp/repo/.github/workflows"
+  rc=0
+  out=$(cd "$tmp/repo" && CI=true PATH="$fakebin:$PATH" "$tmp/repo/bin/fm-lint.sh" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "an empty workflows directory passed lint"$'\n'"$out"
+  assert_contains "$out" "no GitHub workflow files found" \
+    "the empty workflows directory did not reach the workflow lint refusal"
+  pass "fm-lint.sh skips workflow lint only when the workflows directory is absent"
 }
 
 test_list_files_respects_changed_mode() {
@@ -796,11 +824,10 @@ test_changed_mode_hides_cross_file_codes_that_ci_still_sees() {
   local tmp fakebin diff_file fixture out rc test_root lint
   tmp=$(fm_test_tmproot fm-lint-local-exclude-behavior)
   test_root="$tmp/repo"
-  mkdir -p "$test_root/bin/backends" "$test_root/tests" "$test_root/.github/workflows"
+  mkdir -p "$test_root/bin/backends" "$test_root/tests"
   lint="$test_root/bin/fm-lint.sh"
   cp "$LINT" "$lint"
   cp "$ROOT/bin/fm-lint-workflows.sh" "$test_root/bin/"
-  cp "$ROOT"/.github/workflows/* "$test_root/.github/workflows/"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$test_root/bin/backends/noop.sh"
   fixture="$test_root/tests/fm-lint-local-exclude-fixture.test.sh"
   cat > "$fixture" <<'SH'
@@ -1903,6 +1930,7 @@ test_ci_forces_full_lint_even_with_empty_diff
 test_main_branch_forces_full_lint
 test_explicit_path_bypasses_changed_logic
 test_zero_changed_files_exits_clean
+test_default_path_skips_workflow_lint_only_without_a_workflows_dir
 test_list_files_respects_changed_mode
 test_changed_mode_drops_external_sources_and_excludes_cross_file_codes
 test_changed_mode_invokes_shellcheck_once_per_root

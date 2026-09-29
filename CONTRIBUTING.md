@@ -9,10 +9,7 @@ We require this to reduce the maintainer's burden of reviewing and merging contr
 `no-mistakes` puts a local git proxy in front of your real remote.
 Pushing through it runs an AI-driven review/test/lint pipeline in an isolated worktree, forwards the push upstream only after every check passes, and opens a clean PR automatically.
 
-A GitHub Actions check (`Require no-mistakes`) runs on PRs targeting `main` and requires both the deterministic signature and a parseable structured attestation from no-mistakes v1.46.0 or newer.
-The attestation must bind to the current PR head commit and report the review, test, and document steps as completed, so a stale attestation, a missing `head_sha`, or a skipped required step fails.
-It evaluates every PR opening and body edit independently, reruns after head synchronization or reopening, and prevents a later edit from replacing an earlier pending compliance check.
-GitHub Actions and Dependabot are exempt so their automation keeps working, but other contributor PRs that do not satisfy the attestation contract will not be reviewed or merged.
+This fork runs no GitHub Actions check for that rule; see [GitHub Actions on this fork](#github-actions-on-this-fork).
 
 ## Workflow
 
@@ -32,22 +29,11 @@ GitHub Actions and Dependabot are exempt so their automation keeps working, but 
 
 See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/start-here/quick-start/) for the full first-run walkthrough.
 
-## Maintaining required checks
+## GitHub Actions on this fork
 
-GitHub required checks are configured in the repository's existing main ruleset, not activated by committing workflow YAML.
-When applying this CI layout, preserve its existing pull-request, merge-method, linear-history, deletion, non-fast-forward, and administrator-bypass settings.
-Add required status checks with `strict_required_status_checks_policy: false`; a main update alone must not force a branch update and retest.
-Bind the checks to the GitHub Actions app already producing them, rather than accepting the same context from any integration.
-No new app installation or manual runner setup is needed for that setting.
-
-Require the actual job contexts: `Lint 1`, `Lint 2`, `Test coverage guard`, `Repo invariants`, `Stock macOS Bash snapshot compatibility`, `Behavior portable parallel 1`, `Behavior portable parallel 2`, `Behavior portable serial 1` through `Behavior portable serial 9`, `Behavior tests (Herdr)`, `Behavior timing aggregate`, and `PR must be raised via no-mistakes`.
-The last name is the compliance job context, not its workflow title; its existing automation exceptions remain unchanged.
-The timing aggregate is not a substitute for individual jobs because it can succeed while collecting evidence from a failed run.
-
-Apply the approved rule change only after the corresponding workflow is green and landed, confirming exact names and the Actions integration id from real checks first.
-Snapshot the current ruleset, amend that same rule with the authenticated GitHub API or settings UI, and read back both the ruleset and effective branch rules.
-Verify missing or red checks prevent ordinary merging without creating a test merge; administrator override intentionally remains available.
-Coordinate any workflow rollback with its required-check names so a retired check cannot leave ordinary merges waiting forever.
+This fork tracks no `.github/workflows/` files, so no pull request or `main` push runs GitHub Actions and no required status check exists.
+Validation is local: `bin/fm-lint.sh`, `bin/fm-test-run.sh`, and the no-mistakes pipeline, whose trusted `.no-mistakes.yaml` declares that the repository has no CI.
+Nothing enforces broad regression before merge, so run `bin/fm-test-run.sh --all` deliberately when a change needs it.
 
 ## Repo conventions
 
@@ -60,13 +46,13 @@ Coordinate any workflow rollback with its required-check names so a retired chec
   Everything personal to one captain's fleet (`.env`, `data/`, `state/`, `config/`, `projects/`, `.no-mistakes/`) is gitignored; never commit it.
   The root `.tasks.toml` is tracked `tasks-axi` config for `data/backlog.md`; compatible `tasks-axi` is the default backend for routine backlog mutations, with the compatibility definition owned by [`docs/configuration.md`](docs/configuration.md) ("Backlog backend").
   A local `config/backlog-backend=manual` opt-out forces firstmate's routine backlog updates to hand-editing and stays gitignored; validated secondmate handoffs still delegate through `tasks-axi mv`.
-  A local `config/backend` file explicitly overrides runtime auto-detection for new task endpoints and stays gitignored; spawn-supported values are `tmux`, `herdr` (which has its own required CI lane), and `zellij`, `orca`, and `cmux`, which remain experimental with no dedicated real-backend CI lane, while `codex-app` is documented only in `docs/codex-app-backend.md`.
+  A local `config/backend` file explicitly overrides runtime auto-detection for new task endpoints and stays gitignored; spawn-supported values are `tmux`, `herdr` (which has its own real-Herdr test lane), and `zellij`, `orca`, and `cmux`, which remain experimental with no dedicated real-backend CI lane, while `codex-app` is documented only in `docs/codex-app-backend.md`.
   It does not make `data/` tracked.
 - Helper scripts in `bin/` are plain bash.
   Each starts with a usage header comment; keep it accurate when you change behavior.
   Test scripts and helpers in `tests/` are plain bash too.
   `bin/fm-lint.sh` must pass: it is the single owner of the lint definition (the shellcheck file set, config, pinned shellcheck version, pinned actionlint workflow lint, and the backend-purity check rejecting direct Beads CLI calls in core `bin/` scripts).
-  CI uses its full canonical partitions; the no-mistakes pre-push gate uses its context-selected default.
+  The no-mistakes pre-push gate uses its context-selected default; `--partition` still selects its full canonical partitions.
   `docs/fm-test-portable-shards.md` owns partition verification and performance evidence.
   Its header and `--help` output own the exact local lint modes, file-set selection, and analysis flags.
   A malformed `.github/workflows/*.yml`, including a self-broken `ci.yml`, fails that local lint path before merge because a broken workflow cannot report its own breakage.
@@ -93,13 +79,13 @@ Firstmate's wrapper still matters: crewmates route every `ask-user` finding to f
 [`docs/configuration.md`](docs/configuration.md#gate-defaults-no-mistakesyaml) owns the tracked `.no-mistakes.yaml` gate defaults.
 The `firstmate-coding-guidelines` skill owns the rule that local no-mistakes Test stays intent-targeted rather than configuring `commands.test`.
 Verify the same way the gate does: reach for `bin/fm-test-run.sh` with the subjects you care about rather than chaining `bash tests/a.test.sh && bash tests/b.test.sh`, because a list of script paths gets the same bounded concurrency as `--changed`.
-The pipeline publishes that evidence itself, so never hand-commit `.no-mistakes/` paths onto a feature branch; CI rejects them as tracked personal fleet paths.
+The pipeline publishes that evidence itself, so never hand-commit `.no-mistakes/` paths onto a feature branch; they are gitignored personal fleet paths.
 
 Check and test the toolbelt before pushing:
 
 ```sh
 while IFS= read -r script; do /bin/bash -n "$script" || exit; done < <(bin/fm-lint.sh --list-files)   # syntax-check the shell surface fm-lint.sh will cover (changed files locally, full set in CI/on main)
-bin/fm-lint.sh   # lint that shell surface plus GitHub workflows via pinned actionlint; the single owner CI and the no-mistakes gate both run
+bin/fm-lint.sh   # lint that shell surface plus any GitHub workflows via pinned actionlint; the single owner the no-mistakes gate runs
 bin/fm-test-run.sh tests/<subject>.test.sh   # one script (primary local focus path, timed)
 bin/fm-test-run.sh tests/<a>.test.sh tests/<b>.test.sh   # several subjects at once: bounded automatic concurrency
 bin/fm-test-run.sh --family pure-contract-unit   # ordinary family-scoped local path (serial, timed)
@@ -108,7 +94,7 @@ bin/fm-test-run.sh --changed --jobs 1   # explicit serial override
 bin/fm-test-run.sh --changed --max-wall-ms 300000   # same automatic path with a post-run five-minute result check
 bin/fm-test-run.sh --proven-isolated --jobs 4   # explicit local parallel of the individually proven set
 bin/fm-test-run.sh --lane portable-serial   # portable serial remainder (watcher/AFK/tmux/stateful)
-bin/fm-test-run.sh --list-lanes   # discover exact lane names, including the current CI serial shards
+bin/fm-test-run.sh --list-lanes   # discover exact lane names, including the portable serial shards
 bin/fm-test-run.sh --check-coverage   # prove portable shards + serial + serial shards + Herdr equal the full inventory
 bin/fm-test-run.sh --all   # deliberate complete regression (optional local full walk; not no-mistakes Test)
 bin/fm-test-isolation-proof.sh --list   # proven portable parallel candidate set
@@ -122,14 +108,12 @@ EOF
 tmp=$(mktemp -d) && printf 'done: smoke\n' > "$tmp/smoke.status" && FM_STATE_OVERRIDE="$tmp" FM_SIGNAL_GRACE=1 FM_POLL=1 FM_HEARTBEAT=999999 bin/fm-watch-arm.sh  # watcher re-arm smoke test (prints arm status, then an actionable signal)
 ```
 
-`bin/fm-test-run.sh` is the single owner of behavior-suite selection, portable CI lane composition, bounded concurrency admission, per-script timing markers, family totals, the coverage guard, and the optional JSON timing artifact.
+`bin/fm-test-run.sh` is the single owner of behavior-suite selection, portable lane composition, bounded concurrency admission, per-script timing markers, family totals, the coverage guard, and the optional JSON timing artifact.
 Its header and `--help` own the flags, family labels, lanes, and changed-file map; this section only documents the entry points.
 `bin/fm-test-isolation-proof.sh` remains the single owner of the portable candidate proof and reusable family proof harness; see `docs/fm-test-isolation-proof.md`.
 Portable shard balance evidence lives in `docs/fm-test-portable-shards.md`.
 Family selection is the ordinary local path; `--all` is deliberate full regression only.
-CI owns broad regression across required portable parallel shards, the portable serial lane's separate-runner shards, the Herdr lane, lint, invariants, the coverage guard, and stock macOS Bash compatibility in [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
-Pushing a new head to a pull request cancels that pull request's still-running CI so only the current head is validated; pushes to `main` are never cancelled, and the workflow owns that contract and its rationale.
-Use `bin/fm-test-run.sh --list-lanes` for exact lane names and `--help` for `--jobs` rules and required gate-skip flags when reproducing a lane locally.
+Use `bin/fm-test-run.sh --list-lanes` for exact lane names and `--help` for `--jobs` rules and required gate-skip flags when running a lane locally.
 Leave the `sleep 0.1` cadence in the suites' bounded condition waits alone.
 Those sleeps look like recoverable overhead - `fm-watch-triage.test.sh` alone issues about 1,900 of them, each paying a flat ~100ms scheduler wake-up penalty on macOS - but they are not overhead added to the clock; they are how a test waits for a subject that only moves on `fm-watch.sh`'s own one-second `FM_POLL` cadence.
 Sampling less often does not remove that wait, it only delays detection: raising the interval to 0.5s and charging each sample proportionally measured `fm-watch-triage.test.sh` at 435s and 440s against 390s and 393s for the unchanged script, back to back on 2026-09-03, because each of its ~40 poll-cycle waits and ~73 process-exit waits paid up to half a second more.
