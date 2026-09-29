@@ -2335,6 +2335,7 @@ FM_ARM_CONFIRM_TIMEOUT=30   # seconds fm-watch-arm waits to confirm a fresh watc
 FM_ARM_ATTACH_POLL=0.5  # seconds between checks while fm-watch-arm follows an attached watcher cycle (bin/fm-watch-arm.sh header)
 FM_OPENCODE_ARM_READY_TIMEOUT_MS=35000   # milliseconds the OpenCode primary watcher plugin waits for an arm attempt to report started, healthy, wake, or failure; kept above the arm's 30s confirm budget so a slow but successful startup is not SIGTERMed mid-confirmation
 FM_PI_ARM_READY_TIMEOUT_MS=35000   # milliseconds the Pi watcher extension waits for a successor arm to report started or attached; kept above the arm's 30s confirm budget so a slow but successful startup is not SIGTERMed mid-confirmation
+FM_OMP_ARM_READY_TIMEOUT_MS=35000   # milliseconds the omp watcher extension waits for an arm attempt to report started, healthy, wake, or failure; kept above the arm's 30s confirm budget so a slow but successful startup is not SIGTERMed mid-confirmation (.omp/extensions/fm-primary-omp-watch.ts)
 FM_WATCH_ARM_RETIRE_TIMEOUT_MS=1000   # milliseconds Pi/OpenCode wait for an unready successor arm to exit before abandoning retries
 FM_WATCH_REARM_RETRY_BASE_MS=250   # Pi/OpenCode adapter base delay for continuity restoration retries
 FM_WATCH_REARM_RETRY_MAX_MS=4000   # Pi/OpenCode adapter cap for exponential continuity retry delay
