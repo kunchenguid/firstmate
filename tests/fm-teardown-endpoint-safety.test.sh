@@ -853,8 +853,23 @@ test_cleanup_uses_structural_identity_across_journal_versions() {
   id=stale-session
   dir=$(make_case "$id")
   create_fixture_socket "$dir/runtime.log.sock"
-  local stale_generation
-  stale_generation="s$(date +%s).$$.456"
+  rm -f "$dir/runtime.log.sock"
+  local stale_generation stale_second
+  stale_second=$(python3 - "$dir/runtime.log.sock" <<'PY'
+import os, socket, sys
+path = sys.argv[1]
+while True:
+    sock = socket.socket(socket.AF_UNIX)
+    sock.bind(path)
+    ctime_ns = os.lstat(path).st_ctime_ns
+    sock.close()
+    if ctime_ns % 1_000_000_000:
+        print(ctime_ns // 1_000_000_000)
+        break
+    os.unlink(path)
+PY
+  ) || fail 'cannot create replacement fixture socket'
+  stale_generation="s${stale_second}.$$.456"
   write_herdr_meta "$dir/home/state/$id.meta" \
     "window=isolated:fm-$id" "worktree=$dir/worktree" \
     "project=$dir/project" "kind=ship" "spawn_gen=$stale_generation"
@@ -862,13 +877,20 @@ test_cleanup_uses_structural_identity_across_journal_versions() {
   stage_absent_bound_endpoint "$dir" "$id"
   sed -n '1,3p' "$dir/home/state/$id.herdr-presentation" > "$dir/v1"
   mv "$dir/v1" "$dir/home/state/$id.herdr-presentation"
-  rm -f "$dir/runtime.log.sock"
-  sleep 0.01
-  python3 - "$dir/runtime.log.sock" <<'PY'
-import socket, sys
-s = socket.socket(socket.AF_UNIX)
-s.bind(sys.argv[1])
-s.close()
+  python3 - "$dir/runtime.log.sock" "$dir/home/state/$id.herdr-presentation" "$stale_second" <<'PY'
+import os, sys
+socket_stat = os.lstat(sys.argv[1])
+journal = sys.argv[2]
+second = int(sys.argv[3])
+journal_stat = os.lstat(journal)
+os.utime(journal, ns=(journal_stat.st_atime_ns, second * 1_000_000_000))
+journal_stat = os.lstat(journal)
+if socket_stat.st_ctime_ns // 1_000_000_000 != second:
+    sys.exit(1)
+if journal_stat.st_mtime_ns // 1_000_000_000 != second:
+    sys.exit(1)
+if journal_stat.st_mtime_ns >= socket_stat.st_ctime_ns:
+    sys.exit(1)
 PY
   rc=0
   FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \

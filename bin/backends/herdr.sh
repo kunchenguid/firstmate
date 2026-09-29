@@ -725,26 +725,6 @@ sys.exit(0 if s.st_ctime_ns <= j.st_mtime_ns else 1)
 PY
 }
 
-# A correlator-only legacy journal can use the task's independently validated
-# meta endpoint only when the current owned session demonstrably predates the
-# recorded spawn generation. The generation shape is owned by fm-spawn.sh;
-# comparing whole seconds matches its date +%s precision.
-fm_backend_herdr_session_predates_generation() { # <session> <spawn-gen>
-  local session=$1 generation=$2 status socket
-  status=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null) || return 1
-  socket=$(printf '%s' "$status" | jq -er --arg session "$session" \
-    'select(.server.running == true and .server.session == $session) | .server.socket | select(type == "string" and startswith("/"))') || return 1
-  python3 - "$socket" "$generation" <<'PY'
-import os, re, stat, sys
-s = os.lstat(sys.argv[1])
-m = re.fullmatch(r"s([0-9]+)\.([0-9]+)\.([0-9]+)", sys.argv[2])
-if not stat.S_ISSOCK(s.st_mode) or s.st_uid != os.getuid() or m is None:
-    sys.exit(1)
-launch_second = int(m.group(1))
-sys.exit(0 if s.st_ctime_ns // 1_000_000_000 <= launch_second else 1)
-PY
-}
-
 fm_backend_herdr_projection_bind_execution() { # <journal> <task> <spawn-gen>
   local journal=$1 id=$2 generation=$3 session pane info process terminal shell_pid shell_start instance tmp
   fm_backend_herdr_projection_journal_snapshot "$journal" "$id" || return 1
