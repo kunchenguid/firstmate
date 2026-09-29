@@ -39,6 +39,7 @@ export function registerFirstmateTool<TParams extends TSchema, TDetails, TState>
 // Pi owns tool execution and session replacement; Herdr's installed Pi
 // integration owns pane state. This helper contributes ONE balanced attention
 // hold to that integration, never a busy-state record or a second reporter.
+// Without that downstream reporter, this event has no notification effect.
 // Only validated named question tools in this primary's exact TUI runtime
 // acquire it. Native progress/child events on the shared bus are not root tool
 // events and must not be translated into this hold.
@@ -71,6 +72,22 @@ export function registerFirstmateDecisionAttention(
   let held = false;
   const questionTool = (name: string): boolean =>
     name === "ask_user_question" || name === "plan_mode_question";
+  const opensQuestionForm = (tool: string, questions: unknown[]): boolean => {
+    if (tool !== "ask_user_question") return true;
+    const questionTexts = new Set<unknown>();
+    for (const question of questions) {
+      const input = question as { question?: unknown; options?: unknown[] };
+      if (questionTexts.has(input.question)) return false;
+      questionTexts.add(input.question);
+      const labels = new Set<unknown>();
+      for (const option of input.options ?? []) {
+        const label = (option as { label?: unknown }).label;
+        if (labels.has(label)) return false;
+        labels.add(label);
+      }
+    }
+    return true;
+  };
   const sameOwner = (ctx: ExtensionContext): boolean => {
     try {
       return !!owner &&
@@ -134,7 +151,7 @@ export function registerFirstmateDecisionAttention(
   pi.on("tool_call", (event, ctx) => {
     if (!current(ctx) || !questionTool(event.toolName) || calls.has(event.toolCallId)) return;
     const questions = (event.input as { questions?: unknown }).questions;
-    if (!Array.isArray(questions) || questions.length === 0) return;
+    if (!Array.isArray(questions) || questions.length === 0 || !opensQuestionForm(event.toolName, questions)) return;
     calls.set(event.toolCallId, {
       tool: event.toolName,
       questions: questions.map((question) => JSON.stringify([question?.id ?? "", question?.question])),

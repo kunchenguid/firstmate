@@ -2371,6 +2371,7 @@ Verified 2026-09-29 on macOS arm64 with Pi 0.84.3, Herdr 0.9.1-upavloff.0482778c
 The transition contract is owned by [`registerFirstmateDecisionAttention`](../../.pi/extensions/lib/fm-native-contract.ts); the live guard's header owns installation selectors and lab controls.
 The guard runs the real Pi tool loop and question components with an in-process provider that performs no network requests and reports zero model usage.
 It loads the tracked primary watcher, acquires only the fixture home's lock after session startup, substitutes a dormant watcher child for fleet supervision, and installs Herdr's real reporter only inside the fixture.
+The installed reporter is a downstream consumer that Firstmate does not install or configure; the recorded live workspace lacks that consumer and its manifest has no blocked rule, so this isolated-lab proof is not proof of live Telegram delivery.
 The plan question uses the installed question module with enabled/current lifecycle callbacks; this verifies its real questionnaire and result contract, not the complete plan-mode workflow.
 All Herdr commands use the isolated lab helper, including teardown and the live-default tripwire.
 

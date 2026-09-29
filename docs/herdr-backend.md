@@ -742,6 +742,7 @@ The portable halves are pinned by `tests/fm-backend-herdr.test.sh` (the read, ag
 
 Firstmate's Pi primary connects interactive question tools to the installed Herdr Pi integration through the attention contract in [`fm-native-contract.ts`](../.pi/extensions/lib/fm-native-contract.ts).
 Install Herdr's Pi integration alongside Firstmate's primary extensions for decision forms to reach Herdr's blocked notifications; [`runtime-backends.md`](verification/runtime-backends.md#pi-question-attention) owns the token-free live verification and supported-version evidence.
+The integration is a downstream consumer: Firstmate neither installs it nor configures its manifest, and without its blocked rule `herdr:blocked` has no notification effect.
 
 ## Push events and polling fallback
 

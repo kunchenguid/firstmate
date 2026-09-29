@@ -4429,6 +4429,21 @@ const result = (id, details, name = 'ask_user_question', ctx = root) => emit('to
 const states = () => reports.map(x => x.active);
 await emit('session_start');
 owns = true; // Session-start digest can acquire the home lock after this hook.
+await emit('tool_call', {toolCallId:'duplicate-question',toolName:'ask_user_question',input:{questions:[
+  {question:'Repeat',options:[{label:'One'},{label:'Two'}]},
+  {question:'Repeat',options:[{label:'Three'},{label:'Four'}]},
+]}});
+await result('duplicate-question', {cancelled:true});
+idle = true;
+await emit('agent_settled');
+assert.deepEqual(states(), [], 'a pre-form duplicate question rejection cannot publish blocked');
+await emit('tool_call', {toolCallId:'duplicate-option',toolName:'ask_user_question',input:{questions:[
+  {question:'Different',options:[{label:'Repeat'},{label:'Repeat'}]},
+]}});
+await result('duplicate-option', {cancelled:true});
+await emit('agent_settled');
+assert.deepEqual(states(), [], 'a pre-form duplicate option rejection cannot publish blocked');
+idle = false;
 await call('one');
 assert.deepEqual(states(), [true], 'opening a one-question form must publish blocked');
 assert.equal(reports[0].identity.kind, 'root');

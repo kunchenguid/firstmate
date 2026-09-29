@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Token-free Pi/Herdr attention guard: real question components, installed Pi,
 # generated Herdr reporter, and tracked primary extension in an isolated home.
+# The fixture reporter proves pane state only, never live Telegram delivery.
 # A local provider supplies tool calls; a result barrier exposes the submit gap.
 # FM_PI_BIN, FM_PI_ASK_USER_EXTENSION, FM_PI_PLAN_QUESTION_MODULE select installs.
 # FM_HERDR_LAB_HELPER selects the guarded lifecycle helper, never raw Herdr.
