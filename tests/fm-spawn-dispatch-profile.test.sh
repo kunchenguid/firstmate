@@ -677,81 +677,57 @@ test_cursor_failed_catalog_probe_does_not_block_spawn() {
   pass "cursor preserves the requested model when its live catalog is unreachable"
 }
 
-test_opencode_threads_model_and_effort_variant() {
-  local rec id out status launch
-  id=profile-opencode-z7
-  rec=$(make_spawn_case profile-opencode opencode "$id")
-  read_case_record "$rec"
-
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model anthropic/claude-sonnet-4-5 --effort high)
-  status=$?
-  expect_code 0 "$status" "opencode spawn with model and effort should succeed"
-  assert_meta_profile "$HOME_DIR/state/$id.meta" opencode anthropic/claude-sonnet-4-5 high
-  launch=$(cat "$LAUNCH_LOG")
-  # opencode 1.18.32's config schema carries per-model reasoning effort as
-  # agent.<name>.variant, so the effort rides the OPENCODE_CONFIG_CONTENT JSON
-  # the launch already writes, keyed to the resolved model on the default
-  # build agent, never as a launch flag.
-  assert_contains "$launch" \
-    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"},\"agent\":{\"build\":{\"model\":\"anthropic/claude-sonnet-4-5\",\"variant\":\"high\"}}}' opencode --model 'anthropic/claude-sonnet-4-5' --prompt" \
-    "opencode launch did not write the effort as the build agent's variant in its config"
-  assert_not_contains "$launch" "--effort" "opencode launch must not pass unsupported --effort"
-  assert_not_contains "$launch" "--variant" "opencode launch must not pass run-only --variant"
-  assert_not_contains "$launch" "--thinking" "opencode launch must not pass pi thinking flag"
-  pass "opencode receives --model and the effort as its config's agent variant"
-}
-
-test_opencode_without_effort_keeps_launch_config_unchanged() {
-  local rec id out status launch
-  id=profile-opencode-noeffort-z7b
-  rec=$(make_spawn_case profile-opencode-noeffort opencode "$id")
-  read_case_record "$rec"
-
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model anthropic/claude-sonnet-4-5)
-  status=$?
-  expect_code 0 "$status" "opencode spawn without effort should succeed"
-  assert_meta_profile "$HOME_DIR/state/$id.meta" opencode anthropic/claude-sonnet-4-5 default
-  launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" \
-    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"}}' opencode --model 'anthropic/claude-sonnet-4-5' --prompt" \
-    "opencode launch without effort must keep the permission-only config byte-identical"
-  assert_not_contains "$launch" '"variant"' "opencode launch without effort must not write a variant"
-  pass "opencode without an effort keeps its launch config unchanged"
-}
-
-test_opencode_emits_variant_for_openai_family_effort() {
-  local rec id out status launch
-  id=profile-opencode-openai-z7c
-  rec=$(make_spawn_case profile-opencode-openai opencode "$id")
-  read_case_record "$rec"
-
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model openai/gpt-5.6-sol --effort xhigh)
-  status=$?
-  expect_code 0 "$status" "opencode spawn with an openai model and effort should succeed"
-  assert_meta_profile "$HOME_DIR/state/$id.meta" opencode openai/gpt-5.6-sol xhigh
-  launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" \
-    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"},\"agent\":{\"build\":{\"model\":\"openai/gpt-5.6-sol\",\"variant\":\"xhigh\"}}}' opencode --model 'openai/gpt-5.6-sol' --prompt" \
-    "opencode launch did not write the openai family effort as the build agent's variant"
-  pass "opencode emits the variant for an effort the openai family exposes"
-}
-
-test_opencode_omits_variant_when_model_family_lacks_effort() {
-  local rec id out status launch
-  id=profile-opencode-omit-z7d
-  rec=$(make_spawn_case profile-opencode-omit opencode "$id")
-  read_case_record "$rec"
-
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model anthropic/claude-sonnet-4-5 --effort medium)
-  status=$?
-  expect_code 0 "$status" "opencode spawn with an unsupported family effort should succeed"
-  assert_meta_profile "$HOME_DIR/state/$id.meta" opencode anthropic/claude-sonnet-4-5 medium
-  launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" \
-    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"}}' opencode --model 'anthropic/claude-sonnet-4-5' --prompt" \
-    "opencode must keep the permission-only config when the model family lacks the effort"
-  assert_not_contains "$launch" '"variant"' "opencode must omit the variant when the model family lacks the effort"
-  pass "opencode omits the variant for an effort outside the model family's list"
+test_opencode_threads_model_and_ignores_effort_axis() {
+  local rec id out status launch args_file mini_mode
+  for mini_mode in 1 0 2; do
+    id="profile-opencode-$mini_mode-z7"
+    rec=$(make_spawn_case "profile-opencode-$mini_mode" opencode "$id")
+    read_case_record "$rec"
+    args_file="$CASE_DIR/opencode-args"
+    cat > "$FAKEBIN_DIR/opencode" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = mini ] && [ "${2:-}" = --help ]; then
+  if [ "${FM_FAKE_OPENCODE_MINI:-1}" = 1 ]; then
+    printf '%s\n' 'Usage: opencode mini [options]'
+    exit 0
+  fi
+  if [ "${FM_FAKE_OPENCODE_MINI:-1}" = 2 ]; then
+    printf '%s\n' 'Usage: opencode [options] [command]' 'Commands: run, auth, models'
+    exit 0
+  fi
+  exit 127
+fi
+printf '%s\n' "$@" > "$FM_FAKE_OPENCODE_ARGS"
+SH
+    chmod +x "$FAKEBIN_DIR/opencode"
+    out=$(FM_FAKE_OPENCODE_MINI="$mini_mode" \
+      run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+        --model anthropic/claude-sonnet-4-5 --effort high)
+    status=$?
+    expect_code 0 "$status" "OpenCode spawn with mini-supported=$mini_mode should succeed: $out"
+    assert_meta_profile "$HOME_DIR/state/$id.meta" opencode anthropic/claude-sonnet-4-5 high
+    launch=$(cat "$LAUNCH_LOG")
+    FM_FAKE_OPENCODE_MINI="$mini_mode" FM_FAKE_OPENCODE_ARGS="$args_file" \
+      PATH="$FAKEBIN_DIR:$PATH" bash -c "$launch" \
+      || fail "OpenCode launch failed for mini-supported=$mini_mode"
+    if [ "$mini_mode" = 1 ]; then
+      [ "$(sed -n '1p' "$args_file")" = mini ] \
+        || fail "OpenCode v2 launch did not select the mini interface"
+    else
+      [ "$(sed -n '1p' "$args_file")" = --model ] \
+        || fail "legacy OpenCode launch did not retain its top-level interface"
+    fi
+    grep -Fxq 'anthropic/claude-sonnet-4-5' "$args_file" \
+      || fail "OpenCode launch did not pass the requested model"
+    grep -Fxq -- '--prompt' "$args_file" \
+      || fail "OpenCode launch did not pass its worker prompt"
+    grep -Fq 'FIRSTMATE_OP: v1 launch-brief' "$args_file" \
+      || fail "OpenCode launch did not deliver the encoded worker brief"
+    assert_not_contains "$launch" "--effort" "OpenCode launch must not pass unsupported --effort"
+    assert_not_contains "$launch" "--variant" "OpenCode launch must not pass run-only --variant"
+    assert_not_contains "$launch" "--thinking" "OpenCode launch must not pass pi thinking flag"
+  done
+  pass "OpenCode v2 and legacy interactive launch forms preserve model and prompt while omitting effort"
 }
 
 test_native_effort_validator_keeps_axes_separate() {
