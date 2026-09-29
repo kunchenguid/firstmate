@@ -116,12 +116,25 @@ FM_CLASSIFY_PAUSED_VERB_DEFAULT='paused'
 # recheck is a backstop, not progress, and an hourly one only produced nagging
 # (the 2026-09-07 away-window audit). A worker that knows when its wait clears
 # names it with `until` (status_paused_until below) and is rechecked at that
-# time or this cadence bound, whichever comes first. Both consumers read
+# time or the FM_PAUSE_UNTIL_MAX_SECS ceiling below, whichever comes first, so a
+# named time can pull a recheck earlier AND push it later. Both consumers read
 # FM_PAUSE_RESURFACE_SECS with this default so
 # the cadence has one owner. An item held for the captain is not rechecked at all
 # while the away-posture record exists (bin/fm-watch.sh owns that rule).
 # shellcheck disable=SC2034 # Read by the watcher and daemon (fm-watch.sh, fm-supervise-daemon.sh), not this lib.
 FM_PAUSE_RESURFACE_SECS_DEFAULT=14400
+
+# Ceiling on how far a VERIFIED future `until` may push its own recheck past the
+# flat cadence above. A wait declared days out was being rechecked every four
+# hours purely because nothing honored the declared time upward (the
+# 2026-09-29 wake-cost audit); the worker brief already promises that naming
+# `until` buys a longer cadence. Twenty-four hours by default: still finite, so a
+# forgotten multi-day wait re-surfaces daily rather than never. Consumers clamp
+# this up to FM_PAUSE_RESURFACE_SECS, so configuring it lower can never make a
+# time-naming wait noisier than a plain one. A malformed or absent `until` never
+# reaches this ceiling and keeps the flat cadence.
+# shellcheck disable=SC2034 # Read by the watcher and daemon (fm-watch.sh, fm-supervise-daemon.sh), not this lib.
+FM_PAUSE_UNTIL_MAX_SECS_DEFAULT=86400
 
 # fm_utc_iso_to_epoch <YYYY-MM-DDTHH:MM[:SS]Z>: the one portable UTC ISO 8601
 # reader shared by the declared-wait vocabulary and the away-posture record
