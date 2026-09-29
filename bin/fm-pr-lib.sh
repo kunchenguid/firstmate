@@ -280,6 +280,15 @@ fm_pr_url_parse() {
     FM_PR_NUMBER=${BASH_REMATCH[4]}
     return 0
   fi
+  pattern='^https://bitbucket\.org/([A-Za-z0-9][A-Za-z0-9_-]{0,99})/([A-Za-z0-9][A-Za-z0-9._-]{0,99})/pull-requests/([1-9][0-9]*)$'
+  if [[ "$raw" =~ $pattern ]]; then
+    FM_PR_PROVIDER=bitbucket
+    FM_PR_URL=$raw
+    FM_PR_HOST=bitbucket.org
+    FM_PR_PATH="${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+    FM_PR_NUMBER=${BASH_REMATCH[3]}
+    return 0
+  fi
   # The path class contains "/" and "-", so this match is greedy to the last
   # "/-/merge_requests/". Any earlier separator therefore lands inside the
   # captured path, where the reserved "-" segment is refused.
@@ -334,6 +343,88 @@ fm_pr_url_parse() {
   # shellcheck disable=SC2034
   FM_PR_REPO=${BASH_REMATCH[3]}
   FM_PR_NUMBER=${BASH_REMATCH[4]}
+}
+
+# Bitbucket Cloud reads use the URL's workspace/repository, not a CLI context.
+# Headless credentials are optional user-owned material; parse only named keys,
+# never source the file as shell code or consult keychain-only `auth status`.
+# The caller runs these helpers from the trusted code root, never a state copy.
+fm_pr_bitbucket_cli() (
+  local key value credentials="${HOME}/.config/firstmate/bkt.env"
+  # shellcheck source=bin/fm-env-lib.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/fm-env-lib.sh"
+  for key in BKT_USERNAME BKT_TOKEN BKT_AUTH_METHOD; do
+    if [ -z "${!key:-}" ]; then
+      value=$(fmx_env_get "$key" "$credentials") || return 1
+      [ -z "$value" ] || export "$key=$value"
+    fi
+  done
+  export BKT_HOST=https://bitbucket.org
+  bkt "$@"
+)
+
+# bkt 0.30.0 wraps PRs and checks in different envelopes. Require the exact
+# addressed PR and destination repository, including on a merged result.
+fm_pr_bitbucket_read() {  # <workspace/repo> <number>
+  local path=$1 number=$2 json
+  json=$(fm_pr_bitbucket_cli pr view "$number" --workspace "${path%%/*}" --repo "${path#*/}" --json 2>/dev/null) || return 1
+  printf '%s' "$json" | jq -ce --arg path "$path" --arg number "$number" '
+    select(type == "object" and .workspace + "/" + .repo == $path)
+    | .pull_request
+    | select(type == "object" and (.id | tostring) == $number
+        and .destination.repository.full_name == $path
+        and (.state == "OPEN" or .state == "MERGED" or .state == "DECLINED" or .state == "SUPERSEDED"))
+  ' 2>/dev/null
+}
+
+# Cloud often supplies only a 12-character source hash. Resolve that immutable
+# commit through the source repository (which can be a fork), never a branch
+# name or the local copy. Failure simply leaves optional pr_head unrecorded.
+fm_pr_bitbucket_head() {  # <workspace/repo> <number>
+  local record head source json full
+  record=$(fm_pr_bitbucket_read "$1" "$2") || return 1
+  head=$(printf '%s' "$record" | jq -er '.source.commit.hash') || return 1
+  if fm_pr_head_valid "$head"; then
+    printf '%s\n' "$head"
+    return 0
+  fi
+  [[ "$head" =~ ^[0-9a-f]{12,39}$ ]] || return 1
+  source=$(printf '%s' "$record" | jq -er '.source.repository.full_name') || return 1
+  # Reuse the canonical URL owner for the source repository's path validation.
+  ( fm_pr_url_parse "https://bitbucket.org/$source/pull-requests/1" ) || return 1
+  json=$(fm_pr_bitbucket_cli api "/repositories/$source/commit/$head" --json 2>/dev/null) || return 1
+  full=$(printf '%s' "$json" | jq -er '.hash') || return 1
+  fm_pr_head_valid "$full" && [[ "$full" = "$head"* ]] || return 1
+  printf '%s\n' "$full"
+}
+
+# Observations are not merge authorization. No checks, pending/unknown checks,
+# malformed data, and failed reads are all silent. Only a nonempty, entirely
+# terminal set at the PR's current head produces a checks result; a second PR
+# read rejects a push or close during the checks read. A merged PR bypasses CI.
+fm_pr_bitbucket_poll() {  # <workspace/repo> <number>
+  local path=$1 number=$2 record head checks result after
+  record=$(fm_pr_bitbucket_read "$path" "$number") || return 0
+  case "$(printf '%s' "$record" | jq -r '.state')" in
+    MERGED) printf 'merged\n'; return 0 ;;
+    OPEN) ;;
+    *) return 0 ;;
+  esac
+  head=$(printf '%s' "$record" | jq -er '.source.commit.hash') || return 0
+  [[ "$head" =~ ^[0-9a-f]{12,64}$ ]] || return 0
+  checks=$(fm_pr_bitbucket_cli pr checks "$number" --workspace "${path%%/*}" --repo "${path#*/}" --json 2>/dev/null) || return 0
+  result=$(printf '%s' "$checks" | jq -er --arg path "$path" --arg number "$number" --arg head "$head" '
+    select(type == "object" and .workspace + "/" + .repo == $path
+      and (.pull_request | tostring) == $number and .commit == $head)
+    | .statuses
+    | select(type == "array" and length > 0)
+    | select(all(.[]; type == "object" and (.key | type) == "string" and (.key | length) > 0
+        and (.state == "SUCCESSFUL" or .state == "FAILED" or .state == "STOPPED")))
+    | if all(.[]; .state == "SUCCESSFUL") then "passed" else "failed" end
+  ' 2>/dev/null) || return 0
+  after=$(fm_pr_bitbucket_read "$path" "$number") || return 0
+  printf '%s' "$after" | jq -e --arg head "$head" '.state == "OPEN" and .source.commit.hash == $head' >/dev/null || return 0
+  printf 'checks %s at %s\n' "$result" "$head"
 }
 
 fm_pr_head_valid() {
@@ -917,6 +1008,38 @@ fm_pr_poll_snapshot_matches() {
   [ "$FM_PR_REG_CHECK_IDENTITY" = "$FM_PR_POLL_SNAPSHOT_CHECK_IDENTITY" ] || return 1
   [ "$reg_hash" = "$FM_PR_POLL_SNAPSHOT_REG_HASH" ] || return 1
   [ "$reg_identity" = "$FM_PR_POLL_SNAPSHOT_REG_IDENTITY" ]
+}
+
+# Publish each terminal checks observation once per canonical PR, head, and
+# verdict, under the caller's per-task control lock. The marker only suppresses
+# repeated notifications: it is never evidence of a green or landed merge.
+# Queue before marking so an interrupted write cannot lose a notification;
+# interruption between the two may replay it (the merge outcome's same
+# at-least-once boundary). Returns 2 for an already notified observation.
+fm_pr_poll_notify_checks() {  # <state> <id> <template> <result> <reason>
+  local state=$1 id=$2 template=$3 result=$4 reason=$5 marker device key tmp
+  [[ "$result" =~ ^checks\ (passed|failed)\ at\ [0-9a-f]{12,64}$ ]] || return 1
+  fm_pr_poll_snapshot_matches "$state" "$id" "$template" || return 1
+  marker="$state/$id.pr-checks-notified"
+  device=$(fm_pr_file_device "$state") || return 1
+  fm_pr_regular_destination_on_device_or_absent "$marker" "$device" || return 1
+  key="$FM_PR_POLL_SNAPSHOT_URL $result"
+  if [ -e "$marker" ]; then
+    fm_pr_private_file_valid "$marker" 600 "$device" || return 1
+    if grep -qxF "$key" "$marker"; then
+      return 2
+    fi
+  fi
+  tmp=$(mktemp "$state/.fm-pr-checks-notified.XXXXXX") || return 1
+  if ! chmod 0600 "$tmp" \
+    || { [ -e "$marker" ] && ! cp "$marker" "$tmp"; } \
+    || ! printf '%s\n' "$key" >> "$tmp" \
+    || ! fm_pr_private_file_valid "$tmp" 600 "$device" \
+    || ! fm_wake_append check "$state/$id.check.sh" "$reason" \
+    || ! mv -f -- "$tmp" "$marker"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
 }
 
 fm_pr_poll_retirement_parse() {

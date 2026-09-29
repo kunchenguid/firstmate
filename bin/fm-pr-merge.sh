@@ -10,7 +10,8 @@
 # pull request is addressed through tea by the derived owner and repository
 # plus a "tea login" resolved fresh from the parsed host on every run. A Gerrit
 # change is refused outright: that adapter is read-only, and the refusal at the
-# parse below owns why.
+# parse below owns why. Bitbucket Cloud monitoring is supported, but merging is
+# refused: no atomic expected-head guard is available to bind the verified head.
 #
 # Merge method on GitHub defaults to --squash when the caller passes none of
 # --squash, --merge, --rebase, or --method after the optional -- separator.
@@ -237,6 +238,12 @@ PROJECT_URL="https://$FM_PR_HOST/$FM_PR_PATH"
 # colleagues and by any audit of the repository. Firstmate must not manufacture
 # one. The server permitting self-approval is what makes this a policy boundary
 # rather than a capability limit, so it is enforced here rather than assumed.
+if [ "$PROVIDER" = bitbucket ]; then
+  # bkt 0.30.0 closes the source branch by default. Future guarded support must
+  # also opt out of that deletion unless explicitly authorized.
+  echo "error: Bitbucket Cloud merge refused: no atomic head guard is available on this forge, so the verified head cannot be bound at merge time; merge manually after checking the head (this is not an atomic guarantee), and note that bkt closes the source branch by default" >&2
+  exit 2
+fi
 if [ "$PROVIDER" = gerrit ]; then
   echo "error: firstmate does not submit a Gerrit change: submitting requires an attributed human approval it must not manufacture, so a human submits the change on the server" >&2
   exit 2

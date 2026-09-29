@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Static watcher program for a validated pull request, merge request, or Gerrit
 # change poll sidecar.
-# It emits exactly one merged line for a merged change and stays silent
-# otherwise, including on every error, so a failed lookup can never be read as
-# a merge. The provider-tagged identity is data in the sidecar and is never
+# It emits exactly one merged line for a merged change. Bitbucket additionally
+# emits a terminal checks observation; bin/fm-pr-lib.sh owns its interpretation
+# and durable notification deduplication. Other states and every read error are
+# silent, so a failed lookup can never be read as a merge. The provider-tagged identity is data in the sidecar and is never
 # interpolated into this source: these bytes are identical for every task.
 # Each provider is read through its own standard CLI, gh for GitHub, glab for
 # GitLab, gerrit-axi for Gerrit, and tea for Forgejo, so an upstream checkout
@@ -75,6 +76,19 @@ case "$provider" in
     [ "$url" = "https://$host/$owner/$repo/pull/$number" ] || exit 0
     state=$(GH_HOST=$host gh pr view "$url" --json state -q .state 2>/dev/null) || exit 0
     [ "$state" = MERGED ] && printf '%s\n' merged
+    ;;
+  bitbucket)
+    # The watcher executes this trusted program after authenticating the copied
+    # artifact, not the state-directory copy itself. Never source code adjacent
+    # to a copied .check.sh: its directory contains data, not trusted libraries.
+    [ "${0##*/}" = fm-pr-poll.sh ] || exit 0
+    script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd) || exit 0
+    # shellcheck source=bin/fm-pr-lib.sh
+    . "$script_dir/fm-pr-lib.sh"
+    fm_pr_url_parse "$url" || exit 0
+    [ "$FM_PR_PROVIDER" = "$provider" ] && [ "$FM_PR_HOST" = "$host" ] \
+      && [ "$FM_PR_PATH" = "$path" ] && [ "$FM_PR_NUMBER" = "$number" ] || exit 0
+    fm_pr_bitbucket_poll "$path" "$number"
     ;;
   gitlab)
     [ "${#host}" -ge 1 ] && [ "${#host}" -le 253 ] || exit 0
