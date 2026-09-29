@@ -440,30 +440,7 @@ captain_held_silenced() {  # <status-line>
   status_is_captain_held "$1" && away_record_present
 }
 
-# captain_hold_within_ceiling <age-secs>: 0 while an unanswered captain call
-# that old is still inside CAPTAIN_HOLD_RESURFACE_SECS. An age that is not plain
-# digits - a record this watcher could not read - is never inside it, so an
-# unreadable hold keeps the ordinary cadence rather than buying open-ended
-# silence.
-captain_hold_within_ceiling() {  # <age-secs>
-  case "${1-}" in ''|*[!0-9]*) return 1 ;; esac
-  [ "$1" -lt "$CAPTAIN_HOLD_RESURFACE_SECS" ]
-}
 
-# captain_hold_age <call-identity>: seconds since the hold-set stamp inside the
-# lifecycle identity fm-captain-hold.sh prints, which dates the CALL rather than
-# the status log that may predate or outlive it. Prints nothing and returns 1
-# when the stamp is absent or malformed.
-captain_hold_age() {  # <call-identity>
-  local stamp=${1%%#*} epoch now
-  case "$stamp" in
-    [0-9][0-9][0-9][0-9]-[0-1][0-9]-[0-3][0-9]) stamp="${stamp}T00:00:00Z" ;;
-  esac
-  epoch=$(fm_utc_iso_to_epoch "$stamp") || return 1
-  now=$(date +%s)
-  [ "$epoch" -le "$now" ] || return 1
-  printf '%s' "$(( now - epoch ))"
-}
 
 hash_pane() {
   if command -v md5 >/dev/null 2>&1; then md5 -q; else md5sum | cut -d' ' -f1; fi
@@ -1888,12 +1865,25 @@ captain_call_declaration() {  # <task> <call-identity>
 }
 
 # 0 when <declaration> has already been alarmed for this window inside the
-# current PAUSE_RESURFACE_SECS. A pure read: recording an alarm is the caller's,
-# so the throttle is never advanced by a sighting it just absorbed.
-stale_wait_throttled() {  # <window-key> <declaration>
-  local throttle="$STATE/.paused-resurfaced-$1"
+# current PAUSE_RESURFACE_SECS, or inside <bound> when a caller passes its own.
+# A pure read: recording an alarm is the caller's, so the throttle is never
+# advanced by a sighting it just absorbed.
+stale_wait_throttled() {  # <window-key> <declaration> [bound-secs]
+  local throttle="$STATE/.paused-resurfaced-$1" bound=${3:-$PAUSE_RESURFACE_SECS}
   [ "$(cat "$throttle" 2>/dev/null || true)" = "$2" ] \
-    && [ "$(age_of "$throttle")" -lt "$PAUSE_RESURFACE_SECS" ]
+    && [ "$(age_of "$throttle")" -lt "$bound" ]
+}
+
+# The bound an UNANSWERED captain call is silent for once its first sight has
+# alarmed. The first sight still reaches the captain either way: the throttle
+# only absorbs a declaration it has already recorded, and the declaration
+# carries the call's own identity, so re-holding starts a fresh window.
+captain_hold_bound() {
+  if [ "$CAPTAIN_HOLD_RESURFACE_SECS" -gt "$PAUSE_RESURFACE_SECS" ]; then
+    printf '%s' "$CAPTAIN_HOLD_RESURFACE_SECS"
+  else
+    printf '%s' "$PAUSE_RESURFACE_SECS"
+  fi
 }
 
 # The same bound, for a stale window whose last line IS captain-relevant. That
@@ -1928,14 +1918,12 @@ stale_wait_record() {  # <window-key>
 # hold still shows; a hold whose own stamp cannot be read rejoins it immediately,
 # because an unreadable record must not buy open-ended silence.
 captain_call_stale_bound() {  # <window-key> <task>
-  local key=$1 task=$2 age
+  local key=$1 task=$2
   STALE_WAIT_DECLARATION=
   task_captain_call_open "$task" || return 1
   STALE_WAIT_DECLARATION=$(captain_call_declaration "$task" "$CAPTAIN_CALL_IDENTITY")
   away_record_present && return 0
-  age=$(captain_hold_age "$CAPTAIN_CALL_IDENTITY") || age=
-  captain_hold_within_ceiling "$age" && return 0
-  stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION"
+  stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION" "$(captain_hold_bound)"
 }
 
 # Surface a stale pane no classifier could resolve, so firstmate inspects it: it
@@ -1984,14 +1972,12 @@ surface_nonterminal_stale() {  # <window> <hash>
     STALE_WAIT_DECLARATION=$(stale_wait_declaration "$task")
     if captain_held_silenced "$last"; then
       throttled=0
-    elif captain_hold_within_ceiling "$(age_of "$STATE/$task.status")"; then
-      # Attended, the same silence the away record buys: the declared transfer
-      # IS the unanswered test here - an answer replaces the line with a
-      # `resolved` one and leaves this branch - so the log's own age dates the
-      # wait, and a recheck inside the ceiling only restates it.
-      throttled=0
     else
-      stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION" && throttled=0
+      # With a present captain the declared transfer IS the unanswered test - an
+      # answer replaces the line with a `resolved` one and leaves this branch -
+      # so a recheck inside the hold's own bound could only restate it.
+      stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION" "$(captain_hold_bound)" \
+        && throttled=0
     fi
   elif captain_call_stale_bound "$key" "$task"; then
     bounded=0
