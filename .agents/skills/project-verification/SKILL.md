@@ -32,7 +32,8 @@ The map is the repo's maintained verification source, and a proof that drives on
 
 ## Prove it end to end before handoff
 
-Run the generated skill once before handoff: launch, doctor, drive one mapped feature, capture evidence, clean up.
+Run the generated skill once before handoff as a smoke test: launch, doctor, drive one mapped feature, capture evidence, clean up.
+That single pass proves the skill runs end to end; it is not full coverage, so every other path the feature map lists must also be driven before handoff.
 The evidence must survive cleanup.
 A generated skill that was never executed is a draft, not a deliverable.
 
