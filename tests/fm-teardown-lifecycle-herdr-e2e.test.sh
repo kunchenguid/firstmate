@@ -45,15 +45,28 @@ call workspace create --label anchor --cwd "$ROOT" --focus > "$LAB_DIR/anchor.js
 anchor=$(jq -r '.result.workspace.workspace_id' "$LAB_DIR/anchor.json")
 anchor_tab=$(jq -r '.result.tab.tab_id' "$LAB_DIR/anchor.json")
 setup_task() {
-  local id=$1 file=$2 gen=$3 path=$4 pane tab ws journal
+  local id=$1 file=$2 gen=$3 path=$4 format=${5:-launch} pane tab ws journal
   mkdir -p "$FM_HOME/data/$id"
   pane=$(jq -r '.result.pane.pane_id // .result.root_pane.pane_id' "$file")
   tab=$(jq -r '.result.tab.tab_id' "$file")
   ws=$(jq -r '.result.workspace.workspace_id // .result.tab.workspace_id' "$file")
   journal="$FM_HOME/state/$id.herdr-presentation"
   printf 'version=1\ntask_id=%s\nprojection_id=abcdefghijklmnopqrstuv\n' "$id" > "$journal"
-  fm_backend_herdr_projection_journal_write_v2 "$journal" "$id" abcdefghijklmnopqrstuv "$FM_HOME" "$HERDR_LAB_SESSION" "$ws" "$tab" "$pane" "$anchor" anchor "$(fm_backend_herdr_projection_workspace_label "$id" abcdefghijklmnopqrstuv)" "fm-$id"
-  fm_backend_herdr_projection_bind_execution "$journal" "$id" "$gen"
+  if [ "$format" != v1 ]; then
+    fm_backend_herdr_projection_journal_write_v2 "$journal" "$id" abcdefghijklmnopqrstuv "$FM_HOME" "$HERDR_LAB_SESSION" "$ws" "$tab" "$pane" "$anchor" anchor "$(fm_backend_herdr_projection_workspace_label "$id" abcdefghijklmnopqrstuv)" "fm-$id"
+  fi
+  case "$format" in
+    v1) ;;
+    launch) fm_backend_herdr_projection_bind_execution "$journal" "$id" "$gen" ;;
+    v2) ;;
+    future)
+      fm_backend_herdr_projection_bind_execution "$journal" "$id" "$gen"
+      sed -i 's/^version=3$/version=future-9/' "$journal"
+      sed -i '/^parent_/d; /^workspace_label=/d; /^task_label=/d' "$journal"
+      printf 'future_optional=value\n' >> "$journal"
+      ;;
+    *) fail "unknown journal fixture format: $format" ;;
+  esac
   cat > "$FM_HOME/state/$id.meta" <<EOF
 backend=herdr
 window=$HERDR_LAB_SESSION:$pane
@@ -82,8 +95,17 @@ call pane send-text "$sibling" 'sleep 300' >/dev/null
 call pane send-keys "$sibling" Enter >/dev/null
 sleep 1
 call pane process-info --pane "$sibling" > "$LAB_DIR/sibling-before.json"
+call tab create --workspace "$mixed" --label legacy-completed --cwd "$ROOT" --no-focus > "$LAB_DIR/legacy-completed.json"
+legacy_gen="s$(date +%s).$$.101"
+setup_task legacy-task "$LAB_DIR/legacy-completed.json" "$legacy_gen" "$ROOT" v1
+"$ROOT/bin/fm-teardown.sh" legacy-task --endpoint-only --expect-spawn-gen "$legacy_gen"
+call pane list > "$LAB_DIR/legacy-after.json"
+legacy_pane=$(jq -r '.result.pane.pane_id // .result.root_pane.pane_id' "$LAB_DIR/legacy-completed.json")
+jq -e --arg pane "$legacy_pane" '.result.panes | all(.pane_id!=$pane)' "$LAB_DIR/legacy-after.json"
+printf 'PASS v1 correlator journal cleans exact pane from independently bound meta and generation\n'
+
 call tab create --workspace "$mixed" --label completed --cwd "$ROOT" --no-focus > "$LAB_DIR/completed.json"
-setup_task mixed-task "$LAB_DIR/completed.json" s-mixed "$ROOT"
+setup_task mixed-task "$LAB_DIR/completed.json" s-mixed "$ROOT" v2
 report_before=$(shasum -a 256 "$FM_HOME/data/mixed-task/report.md")
 "$ROOT/bin/fm-teardown.sh" mixed-task --endpoint-only --expect-spawn-gen s-mixed
 call pane process-info --pane "$sibling" > "$LAB_DIR/sibling-after.json"
@@ -102,7 +124,7 @@ jq -e '.phases.agent_exit.state=="retained" and .phases.agent_exit.reason_code==
 printf 'PASS absent pane retains an independent unknown agent-exit obligation\n'
 
 call workspace create --label missing-directory --cwd "$ROOT" --no-focus > "$LAB_DIR/missing.json"
-setup_task missing-task "$LAB_DIR/missing.json" s-missing "$LAB_DIR/never-existed"
+setup_task missing-task "$LAB_DIR/missing.json" s-missing "$LAB_DIR/never-existed" future
 "$ROOT/bin/fm-teardown.sh" missing-task --endpoint-only --expect-spawn-gen s-missing
 jq -e '.phases.workspace_remove.state=="confirmed" and .phases.directory_return.state=="retained"' "$FM_HOME/state/missing-task.cleanup.json"
 printf 'PASS missing directory does not prevent exact dedicated workspace removal\n'

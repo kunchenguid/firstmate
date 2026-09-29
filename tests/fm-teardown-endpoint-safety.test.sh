@@ -67,17 +67,23 @@ SH
   printf '%s\n' "$TMP_ROOT/$dir"
 }
 
+create_fixture_socket() { # <socket>
+  python3 - "$1" <<'PY'
+import socket,sys
+s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.close()
+PY
+}
+
 stage_absent_bound_endpoint() {  # <case> <id>
   local dir=$1 id=$2 socket instance journal label
   socket="$dir/runtime.log.sock"
+  [ -S "$socket" ] || create_fixture_socket "$socket" || fail 'cannot create fixture socket'
   instance=$(python3 - "$socket" <<'PY'
-import hashlib,os,socket,sys
-p=sys.argv[1]
-s=socket.socket(socket.AF_UNIX); s.bind(p); s.close()
-st=os.lstat(p)
+import hashlib,os,sys
+st=os.lstat(sys.argv[1])
 print(hashlib.sha256(repr((st.st_dev,st.st_ino,st.st_mtime_ns,st.st_ctime_ns)).encode()).hexdigest())
 PY
-  ) || fail 'cannot create fixture socket identity'
+  ) || fail 'cannot read fixture socket identity'
   label=$(bash -c '. "$1/bin/backends/herdr.sh"; fm_backend_herdr_projection_workspace_label "$2" abcdefghijklmnopqrstuv' _ "$ROOT" "$id")
   journal="$dir/home/state/$id.herdr-presentation"
   cat > "$journal" <<EOF
@@ -763,8 +769,122 @@ test_archived_business_action_allows_only_independent_endpoint_cleanup() {
   pass 'fm-teardown: archived business effects permit independent endpoint cleanup while uncertain cleanup still requires readback'
 }
 
+test_cleanup_uses_structural_identity_across_journal_versions() {
+  local dir id rc
+
+  for version in 2 future-9; do
+    id="compatible-$version"
+    dir=$(make_case "$id")
+    write_herdr_meta "$dir/home/state/$id.meta" \
+      "window=isolated:fm-$id" "worktree=$dir/worktree" \
+      "project=$dir/project" "kind=ship"
+    stage_archived_action "$dir" "$id" steer attempted
+    stage_absent_bound_endpoint "$dir" "$id"
+    sed -i "s/^version=3$/version=$version/; /^spawn_gen=/d; /^terminal_id=/d; /^session_instance=/d; /^shell_pid=/d; /^shell_start=/d" \
+      "$dir/home/state/$id.herdr-presentation"
+    [ "$version" = 2 ] || printf 'future_optional=value\n' >> "$dir/home/state/$id.herdr-presentation"
+    rc=0
+    FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+      FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
+      "$TEARDOWN" "$id" --endpoint-only --expect-spawn-gen "s-$id" \
+      > "$dir/stdout" 2> "$dir/stderr" || rc=$?
+    [ "$rc" -eq 0 ] || fail "$version exact-endpoint journal was rejected: $(cat "$dir/stderr")"
+    jq -e '.phases.pane_close.state=="confirmed" and .phases.pane_close.reason_code=="already-absent"' \
+      "$dir/home/state/$id.cleanup.json" >/dev/null || fail "$version compatible cleanup did not record exact absence"
+  done
+
+  id=v1-independent-meta
+  dir=$(make_case "$id")
+  create_fixture_socket "$dir/runtime.log.sock"
+  local v1_generation
+  v1_generation="s$(date +%s).$$.123"
+  write_herdr_meta "$dir/home/state/$id.meta" \
+    "window=isolated:fm-$id" "worktree=$dir/worktree" \
+    "project=$dir/project" "kind=ship" "spawn_gen=$v1_generation"
+  stage_archived_action "$dir" "$id" steer attempted
+  stage_absent_bound_endpoint "$dir" "$id"
+  sed -n '1,3p' "$dir/home/state/$id.herdr-presentation" > "$dir/v1"
+  mv "$dir/v1" "$dir/home/state/$id.herdr-presentation"
+  rc=0
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
+      "$TEARDOWN" "$id" --endpoint-only --expect-spawn-gen "$v1_generation" \
+    > "$dir/stdout" 2> "$dir/stderr" || rc=$?
+  [ "$rc" -eq 0 ] || fail "v1 journal with independent endpoint and generation proof was rejected: $(cat "$dir/stderr")"
+  jq -e '.phases.pane_close.state=="confirmed" and .phases.pane_close.reason_code=="already-absent"' \
+    "$dir/home/state/$id.cleanup.json" >/dev/null || fail 'v1 compatible cleanup did not record exact absence'
+
+  id=v1-unprovable-generation
+  dir=$(make_case "$id")
+  write_herdr_meta "$dir/home/state/$id.meta" \
+    "window=isolated:fm-$id" "worktree=$dir/worktree" \
+    "project=$dir/project" "kind=ship"
+  stage_archived_action "$dir" "$id" steer attempted
+  stage_absent_bound_endpoint "$dir" "$id"
+  sed -n '1,3p' "$dir/home/state/$id.herdr-presentation" > "$dir/v1"
+  mv "$dir/v1" "$dir/home/state/$id.herdr-presentation"
+  rc=0
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
+      "$TEARDOWN" "$id" --endpoint-only --expect-spawn-gen "s-$id" \
+      > "$dir/stdout" 2> "$dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] || fail 'v1 journal with unprovable generation gained cleanup authority'
+  assert_contains "$(cat "$dir/stderr")" 'legacy-session-continuity-unproven' \
+    'v1 refusal did not name the missing generation/session continuity evidence'
+
+  id=partial-launch
+  dir=$(make_case "$id")
+  write_herdr_meta "$dir/home/state/$id.meta" \
+    "window=isolated:fm-$id" "worktree=$dir/worktree" \
+    "project=$dir/project" "kind=ship"
+  stage_archived_action "$dir" "$id" steer attempted
+  stage_absent_bound_endpoint "$dir" "$id"
+  sed -i '/^terminal_id=/d; /^session_instance=/d; /^shell_pid=/d; /^shell_start=/d' \
+    "$dir/home/state/$id.herdr-presentation"
+  rc=0
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
+    "$TEARDOWN" "$id" --endpoint-only --expect-spawn-gen "s-$id" \
+    > "$dir/stdout" 2> "$dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] || fail 'partial launch identity was accepted'
+  assert_contains "$(cat "$dir/stderr")" 'malformed-or-conflicting-launch-identity' \
+    'partial launch identity refusal was not concrete'
+
+  id=stale-session
+  dir=$(make_case "$id")
+  create_fixture_socket "$dir/runtime.log.sock"
+  local stale_generation
+  stale_generation="s$(date +%s).$$.456"
+  write_herdr_meta "$dir/home/state/$id.meta" \
+    "window=isolated:fm-$id" "worktree=$dir/worktree" \
+    "project=$dir/project" "kind=ship" "spawn_gen=$stale_generation"
+  stage_archived_action "$dir" "$id" steer attempted
+  stage_absent_bound_endpoint "$dir" "$id"
+  sed -n '1,3p' "$dir/home/state/$id.herdr-presentation" > "$dir/v1"
+  mv "$dir/v1" "$dir/home/state/$id.herdr-presentation"
+  rm -f "$dir/runtime.log.sock"
+  sleep 0.01
+  python3 - "$dir/runtime.log.sock" <<'PY'
+import socket, sys
+s = socket.socket(socket.AF_UNIX)
+s.bind(sys.argv[1])
+s.close()
+PY
+  rc=0
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
+      "$TEARDOWN" "$id" --endpoint-only --expect-spawn-gen "$stale_generation" \
+    > "$dir/stdout" 2> "$dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] || fail 'legacy endpoint from a replaced Herdr session was accepted'
+  assert_contains "$(cat "$dir/stderr")" 'legacy-session-continuity-unproven' \
+    'stale session refusal did not name the missing continuity evidence'
+
+  pass 'fm-teardown: v1 meta proof and v2/future journals use structural identity while missing or partial essential evidence stays retained'
+}
+
 test_open_goal_preserves_resources_before_cleanup
 test_archived_business_action_allows_only_independent_endpoint_cleanup
+test_cleanup_uses_structural_identity_across_journal_versions
 test_invalid_endpoint_records_refuse_before_mutation
 test_control_lock_contention_refuses_before_mutation
 test_non_pool_teardown_ignores_task_set_lock

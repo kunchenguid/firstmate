@@ -1156,15 +1156,20 @@ Structural liveness permits the task-bound transcript read but does not itself i
 
 ## Independent task workspace cleanup
 
-Verified on 2026-09-25 with Herdr 0.8.0 / protocol 20, a named non-default session, and synthetic task records.
+Verified again on 2026-09-30 with the installed Herdr protocol, a named non-default session, and the candidate cleanup implementation.
 `tests/fm-teardown-lifecycle-herdr-e2e.test.sh` routes every actual backend operation through an explicitly configured isolation helper.
-It closes an exact non-focused task pane, preserves an active sibling process and mixed workspace, refuses focused or active targets and stale generations, and replays failed backlog bookkeeping after a real close.
+It closes exact non-focused task panes from both a correlator-only version 1 journal with independent meta/lifecycle proof and a version 2 journal, accepts a structurally compatible future label with an additive field, preserves an active sibling process and mixed workspace, refuses focused or active targets and stale generations, and replays failed backlog bookkeeping after a real close.
+`tests/fm-backend-autodetect-smoke.test.sh` additionally launches through the ordinary spawn owner, verifies that the new journal retains the complete launch-identity capability, then completes the ordinary accepted-task teardown path.
 Missing directories do not prevent positively identified dedicated workspace removal; reports remain byte-identical.
 The helper verifies that the default session is unchanged after teardown.
 No model harness or remote research provider participates in this test.
 
-The endpoint safety boundary is a verified version 3 launch journal and final identity readback.
-An old journal or an unverified terminal remains a cleanup obligation.
+The endpoint safety boundary is independently sufficient structural identity, not a journal version string.
+A complete launch identity remains the strongest path.
+For an older exact-endpoint journal without launch fields, cleanup additionally proves that the current owned Herdr session predates the unchanged journal, captures the current terminal and shell identities, and applies the same final identity readback immediately before close.
+For a correlator-only journal, exact endpoint authority comes only from this task's independently validated meta, whose spawn generation must match lifecycle and whose current owned session must predate that generation; this recovers old tasks without inventing historical launch fields.
+Correlator-only journals without that generation/session proof, partial or conflicting identity groups, replaced sessions and unverified terminals remain cleanup obligations with concrete refusal reasons.
+Future version labels and unknown additive fields do not block otherwise sufficient evidence.
 Directory return is a separate phase and remains subject to the [positive slot-ownership proof](../architecture.md#delivery-modes-are-explicit-per-task).
 Herdr has no atomic compare-and-close transaction, so concurrent external mutations can be detected and retained but cannot be excluded by a Firstmate lock alone.
 

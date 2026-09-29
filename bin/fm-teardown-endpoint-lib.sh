@@ -4,7 +4,8 @@
 # binding, exact launch journal hash, and independent phase postconditions.
 # No operation in this file returns a directory, releases a slot, resets git,
 # traverses/kills processes by path, removes task metadata, or closes a whole
-# workspace. v1/v2 projection journals retain legacy-identity-unproven.
+# workspace. Journal format labels are diagnostic; structural capabilities
+# decide whether cleanup has enough independent identity evidence.
 # A confirmed close is never repeated; structured absence is verified again.
 
 # Narrow replay hook for the existing backlog-close owner, which already
@@ -119,8 +120,21 @@ teardown_endpoint_identity() {
   [ "$start" = "$ENDPOINT_SHELL_START" ]
 }
 
+teardown_endpoint_capture_current_identity() {
+  local info process start
+  info=$(fm_backend_herdr_cli "$ENDPOINT_SESSION" pane get "$ENDPOINT_PANE" 2>/dev/null) || return 1
+  ENDPOINT_TERMINAL=$(printf '%s' "$info" | jq -er --arg pane "$ENDPOINT_PANE" --arg ws "$ENDPOINT_WORKSPACE" \
+    --arg tab "$ENDPOINT_TAB" '.result.pane | select(.pane_id==$pane and .workspace_id==$ws and .tab_id==$tab) | .terminal_id | select(type=="string" and length>0)') || return 1
+  process=$(fm_backend_herdr_cli "$ENDPOINT_SESSION" pane process-info --pane "$ENDPOINT_PANE" 2>/dev/null) || return 1
+  ENDPOINT_SHELL=$(printf '%s' "$process" | jq -er --arg pane "$ENDPOINT_PANE" \
+    '.result.process_info | select(.pane_id==$pane) | .shell_pid | select(type=="number" and .>1)') || return 1
+  start=$(LC_ALL=C ps -p "$ENDPOINT_SHELL" -o lstart=) || return 1
+  [ -n "$start" ] || return 1
+  ENDPOINT_SHELL_START=$start
+}
+
 teardown_endpoint_phase() { # <expected-spawn-gen>; leaves durable metadata intact
-  local expected=$1 lifecycle journal lock before after before_ws after_ws siblings focus agent pane_status
+  local expected=$1 lifecycle journal lock before after before_ws after_ws siblings focus agent pane_status legacy_structural=0
   # shellcheck source=bin/fm-task-lifecycle-lib.sh
   . "$SCRIPT_DIR/fm-task-lifecycle-lib.sh"
   lifecycle=$(fm_task_lifecycle read "$ID") || return 1
@@ -140,22 +154,58 @@ teardown_endpoint_phase() { # <expected-spawn-gen>; leaves durable metadata inta
   fm_backend_validate_task_endpoint "$META" "$ID" || { teardown_endpoint_refuse pane_close metadata-identity-invalid; return 1; }
   fm_backend_source herdr || return 1
   journal="$STATE/$ID.herdr-presentation"
-  if ! fm_backend_herdr_projection_journal_snapshot "$journal" "$ID" || \
-     [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" != 3 ]; then
-    teardown_endpoint_refuse pane_close legacy-identity-unproven; return 1
+  if ! fm_backend_herdr_projection_journal_snapshot "$journal" "$ID"; then
+    teardown_endpoint_refuse pane_close malformed-or-conflicting-launch-identity; return 1
   fi
-  [ "$FM_BACKEND_HERDR_JOURNAL_SPAWN_GEN" = "$expected" ] && \
+  if [ "$FM_BACKEND_HERDR_JOURNAL_HAS_ENDPOINT" = 1 ]; then
     [ "$FM_BACKEND_HERDR_JOURNAL_HOME" = "$(cd "$FM_HOME" && pwd -P)" ] || {
+        teardown_endpoint_refuse pane_close launch-generation-mismatch; return 1;
+    }
+    ENDPOINT_SESSION=$FM_BACKEND_HERDR_JOURNAL_SESSION
+    ENDPOINT_WORKSPACE=$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID
+    ENDPOINT_TAB=$FM_BACKEND_HERDR_JOURNAL_TAB_ID
+    ENDPOINT_PANE=$FM_BACKEND_HERDR_JOURNAL_PANE_ID
+  else
+    # v1 journals are non-authoritative correlators. Use only the exact endpoint
+    # already validated from this task's meta, then independently bind it to the
+    # lifecycle generation and the continuously owned Herdr session.
+    ENDPOINT_SESSION=$(fm_backend_meta_exact_value "$META" herdr_session) || {
+      teardown_endpoint_refuse pane_close historical-endpoint-identity-missing; return 1;
+    }
+    ENDPOINT_WORKSPACE=$(fm_backend_meta_exact_value "$META" herdr_workspace_id) || {
+      teardown_endpoint_refuse pane_close historical-endpoint-identity-missing; return 1;
+    }
+    ENDPOINT_TAB=$(fm_backend_meta_exact_value "$META" herdr_tab_id) || {
+      teardown_endpoint_refuse pane_close historical-endpoint-identity-missing; return 1;
+    }
+    ENDPOINT_PANE=$(fm_backend_meta_exact_value "$META" herdr_pane_id) || {
+      teardown_endpoint_refuse pane_close historical-endpoint-identity-missing; return 1;
+    }
+    fm_backend_herdr_session_predates_generation "$ENDPOINT_SESSION" "$expected" || {
+      teardown_endpoint_refuse pane_close legacy-session-continuity-unproven; return 1;
+    }
+    ENDPOINT_INSTANCE=$(fm_backend_herdr_session_instance "$ENDPOINT_SESSION") || {
+      teardown_endpoint_refuse pane_close session-unreadable; return 1;
+    }
+    legacy_structural=1
+  fi
+  if [ "$FM_BACKEND_HERDR_JOURNAL_HAS_LAUNCH_IDENTITY" = 1 ]; then
+    [ "$FM_BACKEND_HERDR_JOURNAL_SPAWN_GEN" = "$expected" ] || {
       teardown_endpoint_refuse pane_close launch-generation-mismatch; return 1;
     }
-  ENDPOINT_SESSION=$FM_BACKEND_HERDR_JOURNAL_SESSION
-  ENDPOINT_WORKSPACE=$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID
-  ENDPOINT_TAB=$FM_BACKEND_HERDR_JOURNAL_TAB_ID
-  ENDPOINT_PANE=$FM_BACKEND_HERDR_JOURNAL_PANE_ID
-  ENDPOINT_TERMINAL=$FM_BACKEND_HERDR_JOURNAL_TERMINAL_ID
-  ENDPOINT_INSTANCE=$FM_BACKEND_HERDR_JOURNAL_SESSION_INSTANCE
-  ENDPOINT_SHELL=$FM_BACKEND_HERDR_JOURNAL_SHELL_PID
-  ENDPOINT_SHELL_START=$FM_BACKEND_HERDR_JOURNAL_SHELL_START
+    ENDPOINT_TERMINAL=$FM_BACKEND_HERDR_JOURNAL_TERMINAL_ID
+    ENDPOINT_INSTANCE=$FM_BACKEND_HERDR_JOURNAL_SESSION_INSTANCE
+    ENDPOINT_SHELL=$FM_BACKEND_HERDR_JOURNAL_SHELL_PID
+    ENDPOINT_SHELL_START=$FM_BACKEND_HERDR_JOURNAL_SHELL_START
+  elif [ "$legacy_structural" != 1 ]; then
+    fm_backend_herdr_session_predates_file "$ENDPOINT_SESSION" "$journal" || {
+      teardown_endpoint_refuse pane_close legacy-session-continuity-unproven; return 1;
+    }
+    ENDPOINT_INSTANCE=$(fm_backend_herdr_session_instance "$ENDPOINT_SESSION") || {
+      teardown_endpoint_refuse pane_close session-unreadable; return 1;
+    }
+    legacy_structural=1
+  fi
   ENDPOINT_JOURNAL_HASH=$(fm_task_lifecycle cleanup-binding "$ID") || {
     teardown_endpoint_refuse pane_close launch-binding-changed; return 1;
   }
@@ -185,6 +235,11 @@ teardown_endpoint_phase() { # <expected-spawn-gen>; leaves durable metadata inta
       teardown_endpoint_receipt pane_close confirmed already-absent || return 1
       ;;
     present)
+      if [ "$legacy_structural" = 1 ]; then
+        teardown_endpoint_capture_current_identity || {
+          teardown_endpoint_refuse pane_close legacy-current-identity-unproven; return 1;
+        }
+      fi
       teardown_endpoint_identity || { teardown_endpoint_refuse pane_close "$ENDPOINT_IDENTITY_REASON"; return 1; }
       fm_backend_herdr_projection_target_tab_mutation_allowed "$ENDPOINT_SESSION" "$ENDPOINT_TAB" || {
         teardown_endpoint_refuse agent_exit focused-or-unverified-target-tab; return 1;
