@@ -136,11 +136,15 @@ WORDING="$TDIR/wording.tsv"
 printf '%s\t%s\t%s\t%s\n' \
   w pending-reply-cfg blocked "pending-reply-missed: task=w request=CONFIG_REREAD" \
   w pending-reply-other blocked "pending-reply-missed: task=w request=STATUS_PING" \
+  w active-now needs-decision "choose now" \
+  w quota-up needs-decision "approve spend" \
+  w missing-answer needs-decision "jev gives no category" \
+  w old-dep blocked "superseded dependency" \
   > "$WORDING"
 : > "$EVIL_STATE/w.meta"
 wording=$(FM_STATE_OVERRIDE="$EVIL_STATE" "$DECISION_SH" --input "$WORDING" --json)
-[ "$(printf '%s' "$wording" | python3 -c 'import json,sys; print(",".join(sorted(i["category"] + ":" + i["resolve_cmd"] for i in json.load(sys.stdin))))')" = "stale_historical:,stale_historical:" ] ||
-  fail "stale pending replies must not get an auto-resolve command: $wording"
+[ "$(printf '%s' "$wording" | python3 -c 'import json,sys; print(",".join(sorted(i["key"] for i in json.load(sys.stdin) if i["resolve_cmd"])))')" = "old-dep" ] ||
+  fail "only non-pending stale items may get a resolve command: $wording"
 assert_contains "$wording" "no longer owed" "pending reply suggestion asks to confirm the reply is not owed"
 
 # 6. Status-file extraction: tab-bearing notes keep key/verb intact, --all is read-only.
