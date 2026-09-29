@@ -104,7 +104,8 @@ EOF
 }
 
 stage_archived_action() {  # <case> <id> <kind> <phase>
-  local dir=$1 id=$2 kind=$3 phase=$4 candidate receipt_sha action_id="$id.g1.a1"
+  local dir=$1 id=$2 kind=$3 phase=$4 candidate receipt_sha action_id
+  action_id="$id.g1.a1"
   mkdir -p "$dir/home/data/$id"
   printf 'Deliver the complete requested result\n' > "$dir/home/data/$id/brief.md"
   FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" init "$id" >/dev/null
