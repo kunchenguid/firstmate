@@ -448,11 +448,13 @@ test_ownership_proof_is_omp_keyed() {
 
 install_omp_extension_fixture() {  # <repo>
   local repo=$1
-  mkdir -p "$repo/.omp/extensions" "$repo/.pi/extensions/lib" "$repo/bin" "$repo/node_modules/typebox"
+  mkdir -p "$repo/.omp/extensions" "$repo/.pi/extensions/lib" "$repo/bin" "$repo/node_modules/typebox" "$repo/projects/foo"
   cp "$ROOT/.omp/extensions/fm-primary-turnend-guard.ts" "$ROOT/.omp/extensions/fm-primary-omp-watch.ts" "$repo/.omp/extensions/"
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$ROOT/.pi/extensions/lib/fm-sessionstart-supervisor.mjs" "$repo/.pi/extensions/lib/"
-  cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/"
-  chmod +x "$repo/bin/fm-operational-input.sh"
+  cp "$ROOT/bin/fm-operational-input.sh" "$ROOT/bin/fm-project-write-pretool-check.sh" "$ROOT/bin/fm-project-write-command-policy.mjs" "$ROOT/bin/fm-arm-command-policy.mjs" "$ROOT/bin/fm-hook-host-lib.sh" "$repo/bin/"
+  git -C "$repo" init -q
+  : > "$repo/AGENTS.md"
+  chmod +x "$repo/bin/fm-operational-input.sh" "$repo/bin/fm-project-write-pretool-check.sh"
   printf '{"name":"typebox","type":"module","exports":"./index.js"}\n' > "$repo/node_modules/typebox/package.json"
   printf 'export const Type = { Object(p) { return { type: "object", properties: p }; } };\n' > "$repo/node_modules/typebox/index.js"
 }
@@ -476,9 +478,10 @@ SH
   # shellcheck disable=SC2016 # $2 expands in the generated script
   printf '#!/usr/bin/env bash\nprintf "OMP DIGEST source=%%s\\n" "$2"\n' > "$repo/bin/fm-sessionstart-run.sh"
   chmod +x "$repo/bin/"*.sh
-  out=$(FM_GUARD_LOG="$TMP_ROOT/guard/guard.log" FM_HOME="$home" EXT="$repo/.omp/extensions/fm-primary-turnend-guard.ts" node --input-type=module 2>&1 <<'EOF'
+  out=$(FM_GUARD_LOG="$TMP_ROOT/guard/guard.log" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" EXT="$repo/.omp/extensions/fm-primary-turnend-guard.ts" node --input-type=module 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
 import { readFileSync, existsSync } from "node:fs";
+process.chdir(process.env.FM_ROOT_OVERRIDE);
 const handlers = new Map();
 const pi = { on(e, h) { handlers.set(e, h); }, sendMessage() {} };
 const mod = await import(pathToFileURL(process.env.EXT).href);
@@ -498,6 +501,10 @@ const second = await handlers.get("before_agent_start")({ type: "before_agent_st
 if (!second?.message?.content?.includes("source=clear")) throw new Error(`in-process replacement did not map to clear: ${JSON.stringify(second)}`);
 const allowed = await handlers.get("tool_call")({ type: "tool_call", toolName: "bash", input: { command: "ls" } }, {});
 if (allowed.block) throw new Error("an ordinary command was blocked");
+const projectGit = await handlers.get("tool_call")({ type: "tool_call", toolName: "bash", input: { command: "git -C projects/foo fetch origin" } }, {});
+if (projectGit.block !== true || !projectGit.reason.includes("[project-write]")) throw new Error(`project Git mutation was not blocked: ${JSON.stringify(projectGit)}`);
+const projectFile = await handlers.get("tool_call")({ type: "tool_call", toolName: "write", input: { file_path: "projects/foo/new.txt", content: "x" } }, {});
+if (projectFile.block !== true || !projectFile.reason.includes("[project-write]")) throw new Error(`native project write was not blocked: ${JSON.stringify(projectFile)}`);
 const blocked = await handlers.get("tool_call")({ type: "tool_call", toolName: "bash", input: { command: "bin/fm-watch-arm.sh &" } }, {});
 if (blocked.block !== true || !blocked.reason.includes("seatbelt")) throw new Error(`backgrounded arm was not blocked: ${JSON.stringify(blocked)}`);
 const r1 = await handlers.get("session_stop")({ type: "session_stop", stop_hook_active: false }, {});
@@ -515,7 +522,7 @@ EOF
   status=$?
   expect_code 0 "$status" "omp turn-end guard extension contract: $out"
   [ -z "$out" ] || fail "omp guard extension test printed output: $out"
-  pass ".omp turn-end guard: digest delivery, seatbelt block, one compelled continuation, flagged stop stands down"
+  pass ".omp turn-end guard: project writes, digest delivery, seatbelt block, and one compelled continuation"
 }
 
 test_watch_extension_arms_and_delivers() {

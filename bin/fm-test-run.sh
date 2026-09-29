@@ -280,7 +280,7 @@ family_for_basename() {
     fm-arm-pretool-check.test.sh|fm-ask-user-authority.test.sh|\
     fm-bearings-board.test.sh|\
     fm-brief.test.sh|fm-dod-lib.test.sh|fm-vendor-auth-probe.test.sh|\
-    fm-calm-pi-extension.test.sh|fm-cd-pretool-check.test.sh|\
+    fm-calm-pi-extension.test.sh|fm-cd-pretool-check.test.sh|fm-project-write-pretool-check.test.sh|\
     fm-classify-decision-key.test.sh|\
     fm-composer-ghost.test.sh|fm-composer-lib.test.sh|\
     fm-crew-state.test.sh|fm-captain-hold-lifecycle.test.sh|\
@@ -371,7 +371,7 @@ family_for_basename() {
     fm-send-inbox-doorbell-live-e2e.test.sh|\
     fm-calm-claude-mod-plugin.test.sh|fm-calm-claude-mod-live-e2e.test.sh|\
     fm-calm-pi-queue-retention-live-e2e.test.sh|\
-    fm-herdr-submit-confirm-live-e2e.test.sh)
+    fm-herdr-submit-confirm-live-e2e.test.sh|fm-project-write-live-e2e.test.sh)
       printf '%s\n' live-harness-optin
       ;;
     fm-backend-herdr.test.sh|fm-backend-tmux-smoke.test.sh|fm-backend.test.sh|\
@@ -1524,12 +1524,44 @@ families_for_changed_path() {
       printf '%s\n' __script__:fm-pi-primary-types.test.sh
       printf '%s\n' live-harness-optin
       ;;
-    bin/fm-sessionstart-run.sh|.claude/settings.json|.codex/hooks.json|\
-    .pi/extensions/fm-primary-turnend-guard.ts)
+    .claude/settings.json|.codex/hooks.json)
+      printf '%s\n' __script__:fm-project-write-pretool-check.test.sh
+      printf '%s\n' __script__:fm-turnend-guard.test.sh
+      printf '%s\n' __script__:fm-project-write-live-e2e.test.sh
+      printf '%s\n' __script__:fm-pi-windows-shell-invocation.test.sh
+      printf '%s\n' pure-contract-unit
+      printf '%s\n' live-harness-optin
+      printf '%s\n' session-bootstrap
+      ;;
+    bin/fm-sessionstart-run.sh|.pi/extensions/fm-primary-turnend-guard.ts)
       # The run tier's two harness-supplied facts (source vocabulary and
       # context-reset stdout injection) only show up against a real harness.
+      printf '%s\n' __script__:fm-turnend-guard.test.sh
       printf '%s\n' __script__:fm-pi-windows-shell-invocation.test.sh
+      printf '%s\n' __script__:fm-project-write-pretool-check.test.sh
+      printf '%s\n' __script__:fm-project-write-live-e2e.test.sh
       printf '%s\n' session-bootstrap
+      printf '%s\n' live-harness-optin
+      ;;
+    .omp/extensions/fm-primary-turnend-guard.ts)
+      printf '%s\n' __script__:fm-project-write-pretool-check.test.sh
+      printf '%s\n' __script__:fm-omp-harness.test.sh
+      printf '%s\n' __script__:fm-project-write-live-e2e.test.sh
+      printf '%s\n' pure-contract-unit
+      printf '%s\n' live-harness-optin
+      ;;
+    .cursor/hooks.json)
+      printf '%s\n' __script__:fm-project-write-pretool-check.test.sh
+      printf '%s\n' __script__:fm-cursor-primary.test.sh
+      printf '%s\n' __script__:fm-project-write-live-e2e.test.sh
+      printf '%s\n' pure-contract-unit
+      printf '%s\n' live-harness-optin
+      ;;
+    .opencode/plugins/fm-primary-project-write-check.js|.grok/hooks/fm-primary-project-write-check.json|\
+    bin/fm-project-write-pretool-check.sh|bin/fm-project-write-command-policy.mjs)
+      printf '%s\n' __script__:fm-project-write-pretool-check.test.sh
+      printf '%s\n' __script__:fm-project-write-live-e2e.test.sh
+      printf '%s\n' pure-contract-unit
       printf '%s\n' live-harness-optin
       ;;
     bin/fm-extension.mjs|bin/fm-extension.sh|docs/examples/process-event-extension/*)

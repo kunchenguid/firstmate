@@ -28,6 +28,12 @@
         "type": "command",
         "command": "\"$CURSOR_PROJECT_DIR\"/bin/fm-cd-pretool-check.sh --cursor",
         "timeout": 10
+      },
+      {
+        "matcher": ".*",
+        "type": "command",
+        "command": "\"$CURSOR_PROJECT_DIR\"/bin/fm-project-write-pretool-check.sh --cursor",
+        "timeout": 10
       }
     ],
     "beforeSubmitPrompt": [

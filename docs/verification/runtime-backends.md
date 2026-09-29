@@ -107,6 +107,37 @@ A single-process harness has no descendant that adds a distinct verdict, which i
 The portable regression pins every half without any harness installed: `tests/fm-harness-precedence.test.sh` asserts that this two-process topology decides at comm strength, that the descent probe reaches a strength the top-of-session probe cannot, that a sibling branch answering a foreign harness contributes no verdict, that a foreign args-only verdict at the deepest vantage leaves the comm-strength identity intact, and that equal-depth ties choose the comm-strength leaf regardless of process ordering.
 The run did not reach `opencode`, `pi`, `pi-signed`, `grok`, `kimi`, or `muse`, which were not installed, and stopped at the same pre-existing liveness failure for `cursor` 3.18.9, whose resolved binary on that machine is the editor rather than `cursor-agent`; those adapters are unverified by this run.
 
+## Primary project-write PreToolUse guard
+
+The portable acceptance matrix is owned by `tests/fm-project-write-pretool-check.test.sh`.
+Real hook execution is prompt-submitting and opt-in through `tests/fm-project-write-live-e2e.test.sh`.
+Verified on 2026-09-26 on macOS with Claude Code 2.1.283, codex-cli 0.156.1, and Pi 0.87.1:
+
+```sh
+FM_PROJECT_WRITE_LIVE_E2E=1 env -u FM_HOME -u FM_PI_HARNESS bin/fm-test-run.sh tests/fm-project-write-pretool-check.test.sh tests/fm-project-write-live-e2e.test.sh
+```
+
+Each harness was launched in a disposable plain Git checkout with its tracked project-write hook or Pi extension and a scratch `projects/foo/` target.
+Each prompt requested one shell redirection that would create `projects/foo/WRITE_GUARD_SENTINEL`.
+All three installed harnesses reported the hook denial, and the sentinel was absent in each checkout.
+
+Observed output:
+
+```text
+ok - claude 2.1.283 (Claude Code): real PreToolUse denied the project write
+ok - codex codex-cli 0.156.1: real PreToolUse denied the project write
+ok - pi 0.87.1: real PreToolUse denied the project write
+skip: live: grok absent
+skip: live: opencode absent
+skip: live: separate pi-signed binary absent; the shared Pi hook API is exercised as pi
+skip: live: omp absent
+skip: live: cursor-agent absent
+ok - project-write live guard exercised 3 installed primary harness(es)
+```
+
+Grok, OpenCode, omp, Cursor Agent, and a separate pi-signed executable were not installed during this run.
+The live result proves these three installed surfaces only; portable parity tests cover the other hook payload and configuration shapes.
+
 ## tmux
 
 Foreground-process behavior was verified on 2026-07-07 with tmux 3.6a on macOS.

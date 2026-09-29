@@ -7,9 +7,9 @@
 //
 // This file is the sole owner of firstmate's shell command classification.
 // The tokenizer and command-position analysis (Lexer, splitProgram,
-// commandPosition) are exported so the sibling cd-guard policy
-// (bin/fm-cd-command-policy.mjs) reuses the same proven parser instead of
-// duplicating shell lexing; see docs/cd-guard.md. The watcher-arm decision
+// commandPosition) are exported so the sibling cd- and project-write policies
+// reuse the same proven parser instead of duplicating shell lexing; see
+// docs/cd-guard.md and docs/project-write-guard.md. The watcher-arm decision
 // procedure below stays private to this file. The CLI entry point at the bottom
 // runs only when this module is invoked directly, never on import.
 
@@ -273,6 +273,7 @@ export class Lexer {
   }
 
   readControlOperator() {
+    if (/^(?:&>>|&>|>\|)/.test(this.source.slice(this.index))) return "";
     for (const operator of ["&&", "||", "|&", ";;", ";", "&", "|"]) {
       if (this.source.startsWith(operator, this.index)) {
         this.index += operator.length;
@@ -284,7 +285,7 @@ export class Lexer {
 
   readRedirection() {
     const remaining = this.source.slice(this.index);
-    const match = remaining.match(/^(\d+)?(<<<|<<-|<<|>>|<>|>&|<&|>|<)(?:&?[0-9-]+)?/);
+    const match = remaining.match(/^(\d+)?(<<<|<<-|<<|&>>|&>|>\||>>|<>|>&|<&|>|<)(?:&?[0-9-]+)?/);
     if (!match) return "";
     this.index += match[0].length;
     const inlineTarget = /(?:>&|<&)[0-9-]+$/.test(match[0]);
@@ -940,7 +941,7 @@ function deny(code) {
 }
 
 // Run the CLI only when invoked directly (node fm-arm-command-policy.mjs ...),
-// never when imported by a sibling policy such as bin/fm-cd-command-policy.mjs.
+// never when imported by sibling policies such as bin/fm-cd-command-policy.mjs.
 function invokedDirectly() {
   const entry = process.argv[1];
   if (!entry) return false;

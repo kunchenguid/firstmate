@@ -504,6 +504,20 @@ function runCdCheck(command: string): Promise<{ code: number; stderr: string }> 
   return runChecker("fm-cd-pretool-check.sh", command);
 }
 
+function runProjectWriteCheck(payload: string): Promise<{ code: number; stderr: string }> {
+  return new Promise((resolveResult) => {
+    const child = spawn(`${root}/bin/fm-project-write-pretool-check.sh`, [], {
+      stdio: ["pipe", "ignore", "pipe"],
+    });
+    let stderr = "";
+    child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+    child.on("error", () => resolveResult({ code: 0, stderr: "" }));
+    child.on("close", (code) => resolveResult({ code: code ?? 0, stderr }));
+    child.stdin.on("error", () => {});
+    child.stdin.end(payload);
+  });
+}
+
 export default function (pi: ExtensionAPI) {
   let sessionstartGeneration: SessionstartGeneration | null = null;
   let sessionstartExitListenerRegistered = false;
@@ -581,7 +595,12 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on?.("tool_call", async (event) => {
-    if (!event || event.type !== "tool_call" || event.toolName !== "bash") return {};
+    if (!event || event.type !== "tool_call") return {};
+    const projectResult = await runProjectWriteCheck(JSON.stringify({ tool_name: event.toolName, tool_input: event.input }));
+    if (projectResult.code === 2) {
+      return { block: true, reason: projectResult.stderr.trim() || "denied by the project-write PreToolUse guard" };
+    }
+    if (event.toolName !== "bash") return {};
     const command = String((event.input as { command?: unknown })?.command ?? "");
     if (!command) return {};
     const cdResult = await runCdCheck(command);
