@@ -208,11 +208,6 @@ meta_state() {
     return
   fi
   [ -f "$meta" ] && [ -r "$meta" ] || { echo unreadable; return; }
-  model=$(sed -n 's/^model=//p' "$meta" | tail -1)
-  if [ -z "$model" ] || ! grep -Fxq -- "$model" "$models"; then
-    echo other
-    return
-  fi
   kind=$(sed -n 's/^kind=//p' "$meta" | tail -1)
   if [ "$kind" = secondmate ] && [ -z "$(sed -n 's/^remote_host=//p' "$meta" | tail -1)" ]; then
     home=$(sed -n 's/^home=//p' "$meta" | tail -1)
@@ -220,6 +215,12 @@ meta_state() {
       fm_session_lock_inspect "$home/state"
       case "$FM_LOCK_INSPECT_STATE" in free|stale) echo other; return ;; esac
     fi
+  fi
+  model=$(sed -n 's/^model=//p' "$meta" | tail -1)
+  case "$model" in ''|default|-) echo unreadable; return ;; esac
+  if ! grep -Fxq -- "$model" "$models"; then
+    echo other
+    return
   fi
   echo pooled
 }
