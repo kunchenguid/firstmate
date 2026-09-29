@@ -1438,11 +1438,7 @@ FM_IMAP_HOST=   # IMAP server hostname
 FM_SMTP_HOST=   # SMTP server hostname
 ```
 
-Pi's optional `/afk` email destination is separate from general mail transport; see [Away email on Pi](afk-email.md) for its Gmail receiving-mailbox requirement and setup gate. The destination must be:
-
-```sh
-FM_AFK_EMAIL_TO=johnpoyser@gmail.com
-```
+Pi's optional `/afk` email destination is separate from general mail transport; [Away email on Pi](afk-email.md) owns its fixed destination, Gmail receiving-mailbox requirement, and setup gate.
 
 `FM_IMAP_PORT` (default 993; integer 1..65535), `FM_SMTP_PORT` (default 465; integer 1..65535), `FM_MAIL_TIMEOUT` (default 20 seconds), and `FM_MAIL_POLL_MAX_WAKES` (default 20, valid 1..200) are optional.
 
