@@ -68,7 +68,8 @@
 #                closing border, holding the idle hint, blank rows, and a
 #                mode/model footer line.
 #   separated  - pi: content rows between two solid horizontal `─` rules, no
-#                glyph and no side border. Provable only with a live agent
+#                glyph and no side border (either rule may carry an embedded
+#                title, which stays a separator). Provable only with a live agent
 #                identity reporting an idle/done pi (herdr `agent
 #                get`; the tmux foreground-process probe), because a blank
 #                region between two transcript rules is otherwise exactly the
@@ -754,15 +755,34 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
 
 # _fm_composer_pi_separator_row: a solid pi separator - nothing but `─`, at
 # least 8 columns wide. The width floor is a literal substring test so it is
-# byte-exact in every locale.
+# byte-exact in every locale. A TITLED separator - claude 2.1.284 renders its
+# composer title inside the upper rule (`──...── ultracode ─`, verified live
+# through Herdr on claude 2.1.284) - still counts when it opens with a full
+# 8-column rule run, closes with the rule glyph, and holds a real title
+# between them, mirroring the grok titled-bottom tolerance. The floor stays on
+# the leading run so a short transcript divider cannot qualify, and a spurious
+# pair still needs a second rule within FM_COMPOSER_PI_MAX_LINES: a pair that
+# closes over a bare agent-glyph row classifies through that same bare row,
+# while any other pair still needs a pi identity to prove anything, so this
+# can only ever move a verdict toward refusing, never toward a false `empty`.
 _fm_composer_pi_separator_row() {  # <trimmed-row>
-  local row=$1
+  local row=$1 middle
   [ -n "$row" ] || return 1
-  [ -z "${row//─/}" ] || return 1
+  if [ -z "${row//─/}" ]; then
+    case "$row" in
+      *────────*) return 0 ;;
+    esac
+    return 1
+  fi
   case "$row" in
-    *────────*) return 0 ;;
+    '────────'*'─') ;;
+    *) return 1 ;;
   esac
-  return 1
+  middle=${row#'────────'}
+  middle=${middle%'─'}
+  fm_composer_normalize_trim_var middle
+  [ -n "${middle//─/}" ] || return 1
+  [ -n "$middle" ]
 }
 
 # Row-scan results are returned through FM_COMPOSER_SCAN_* globals (bash 3.2

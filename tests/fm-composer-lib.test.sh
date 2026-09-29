@@ -219,6 +219,45 @@ test_matrix_claude_arrow_statusline_footer() {
   pass "matrix: claude's arrow statusline is footer furniture, not a composer holding text"
 }
 
+test_matrix_claude_titled_upper_separator() {
+  # Real claude 2.1.284 on herdr (captured live 2026-09-29, herdr 0.9.1,
+  # Opus 5.5): the idle composer is a bare `❯`+U+00A0 row between two `─`
+  # rules, but the UPPER rule carries the harness title (`──...── ultracode ─`).
+  # The untitled classifier rejected that rule, so no pair was proven and the
+  # lone lower rule vetoed the bare-`❯` fallback: every idle claude pane read
+  # `unknown` (refusing fm-control exit/relaunch as "not proven empty") and
+  # the inbox proof read failed, so fm_task_inbox_ring returned 2 (send-failed)
+  # and every steer sat unread while `herdr agent prompt` still delivered.
+  # A titled rule that opens with a full 8-column run and closes with the rule
+  # glyph is still a separator, and the pair over the `❯` row proves the composer.
+  local run top bottom pair footer screen typed out claude_idle
+  claude_idle=$(printf 'claude\tidle')
+  run='────────────────────────────────────────'
+  top="$run ultracode ─"
+  bottom='──────────────────────────────────────────────────'
+  pair=$(printf 'transcript line\n%s\n❯%s\n%s' "$top" "$NBSP" "$bottom")
+  footer=$'\n  …/proj | Opus 5.5 (1M context)\n  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 3 agents'
+  screen="$pair$footer"
+  assert_screen "claude idle under a titled upper rule on herdr" empty "$CAPS_STYLED" "$screen" '' "$claude_idle"
+  assert_screen "claude idle under a titled upper rule on zellij" empty "$CAPS_STYLED_NOID" "$screen"
+  assert_screen "claude idle under a titled upper rule on cmux/orca" empty "$CAPS_PLAIN" "$screen"
+  assert_screen "claude idle under a titled upper rule on tmux" empty "$CAPS_TMUX" "$screen" 2 probe-absent
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$screen")
+  [ -z "$out" ] || fail "a titled-rule idle composer must extract empty, got '$out'"
+  case "$out" in *'bypass permissions'*|*'Opus 5.5'*) fail "composer furniture must never extract as content, got '$out'" ;; esac
+  # The protection this must NOT remove: real unsubmitted text in that same
+  # titled composer, under that same footer, still refuses.
+  typed=$(printf 'transcript line\n%s\n❯ fix the login bug\n%s' "$top" "$bottom")
+  typed="$typed$footer"
+  assert_screen "claude typed under a titled upper rule" pending "$CAPS_STYLED" "$typed" '' "$claude_idle"
+  # And the width floor holds for titles too: a short titled divider proves no
+  # pair, so the lone lower rule still vetoes the bare row instead of proving it.
+  screen=$(printf 'transcript line\n─── hi ─\n❯%s\n%s%s' "$NBSP" "$bottom" "$footer")
+  out=$(fm_composer_classify_screen "$CAPS_STYLED_NOID" "$screen")
+  [ "$out" != empty ] || fail "a short titled divider must never prove an empty composer, got '$out'"
+  pass "matrix: claude's titled upper separator still proves the idle composer"
+}
+
 test_composer_footer_demotion_needs_a_proven_pair() {
   # The demotion is bounded in three directions, and each bound is a case
   # where a lower glyph row IS the live composer.
@@ -1047,6 +1086,7 @@ test_idle_placeholder_case_mode_is_explicit
 test_real_text_is_pending
 test_matrix_claude_bare_nbsp_row
 test_matrix_claude_arrow_statusline_footer
+test_matrix_claude_titled_upper_separator
 test_composer_footer_demotion_needs_a_proven_pair
 test_composer_footer_zone_is_shape_independent
 test_composer_footer_zone_refuses_rather_than_allows
