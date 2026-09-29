@@ -40,8 +40,10 @@
 # open the session. The internal Pi prerequisite's silent exit 3 never reaches a
 # harness hook; it only distinguishes intentional ineligibility before provider
 # preflight. A lock another live session holds and a truncated digest are
-# reported inside the digest, while broken GitHub auth arrives through the
-# deferred network result inline or as a wake, for exactly that reason.
+# reported inside the digest, while broken registered-forge authentication,
+# including GitHub auth, arrives through the deferred network result inline or as
+# a wake, for exactly that reason. The result is scoped to the registered forge
+# rather than assuming every home uses GitHub.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
