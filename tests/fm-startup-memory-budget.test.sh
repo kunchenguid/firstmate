@@ -111,6 +111,17 @@ test_safe_parser_rejects_ambiguous_and_unsafe_values() {
   printf '42\n' > "$home/config/startup-memory-budget"
   [ "$(FM_HOME="$home" "$BUDGET" read)" = 42 ] || fail "valid positive decimal budget was rejected"
 
+  local representation
+  for representation in '42' $'42\r\n' $' \t0042 \n\n'; do
+    printf '%s' "$representation" > "$home/config/startup-memory-budget"
+    [ "$(FM_HOME="$home" "$BUDGET" read)" = 42 ] || fail "equivalent decimal budget was rejected"
+  done
+  printf '4 2\n' > "$home/config/startup-memory-budget"
+  expect_rejected_read "$home" 'value must be one positive decimal integer'
+  printf '4\n2\n' > "$home/config/startup-memory-budget"
+  expect_rejected_read "$home" 'value must be one positive decimal integer'
+  printf '42\0\n' > "$home/config/startup-memory-budget"
+  expect_rejected_read "$home" 'value must be one positive decimal integer'
   printf '0\n' > "$home/config/startup-memory-budget"
   expect_rejected_read "$home" 'value must be one positive decimal integer'
   printf '42\nextra\n' > "$home/config/startup-memory-budget"

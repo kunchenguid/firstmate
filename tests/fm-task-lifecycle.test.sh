@@ -170,13 +170,117 @@ chmod 600 "$FM_HOME/state/c.cleanup.json"
 python3 "$LIB" link-cleanup c >/dev/null
 rm "$FM_HOME/state/c.meta"
 python3 "$LIB" owner-receipt c --kind cleanup --execution-generation s3 \
-  --facts '{"taskRecordRemoved":true,"endpointConfirmedGone":true,"copyDisposition":"returned-or-already-absent","bookkeepingComplete":true}' >/dev/null
+  --facts '{"taskRecordRemoved":true,"endpointConfirmedGone":true,"copyDisposition":"returned-or-already-absent","bookkeepingComplete":true,"diagnostic":"future-compatible"}' >/dev/null
 terminal_due=$(python3 "$LIB" due c)
 if ! printf '%s\n' "$terminal_due" | jq -e '.due==false' >/dev/null; then
   printf 'terminal cleanup remained due: %s\n' "$terminal_due" >&2
   exit 1
 fi
 pass 'terminal cleanup is supervised before its complete owner receipt and quiet afterward'
+python3 "$LIB" owner-receipt c --kind cleanup --execution-generation s3 \
+  --facts '{"taskRecordRemoved":true,"endpointConfirmedGone":true,"copyDisposition":"returned-or-already-absent","bookkeepingComplete":true}' >/dev/null
+# An accepted business goal can retain a bounded physical-cleanup dependency.
+python3 - "$FM_HOME" "$LIB" <<'PYWAIT'
+import copy, json, os, subprocess, sys
+from pathlib import Path
+home=Path(sys.argv[1]); lib=sys.argv[2]; task='cleanup-wait'
+directory=home/'data'/task; directory.mkdir(); (directory/'brief.md').write_bytes((home/'data/c/brief.md').read_bytes())
+record=json.loads((home/'data/c/lifecycle.json').read_text()); record.update(task_id=task,cleanup_ref=None,owner_receipts={})
+p=directory/'lifecycle.json'; p.write_text(json.dumps(record)); p.chmod(0o600)
+meta=home/'state'/f'{task}.meta'; meta.write_text('spawn_gen=s3\n')
+release=directory/'release.md'; release.write_text('Upstream repair pending\n')
+def call(*args, ok=True):
+    result=subprocess.run([sys.executable,lib,*args],capture_output=True,text=True,check=False)
+    if ok: assert result.returncode==0, result.stderr
+    else: assert result.returncode!=0, 'unsafe terminal transition accepted'
+    return json.loads(result.stdout) if result.returncode==0 else None
+def assess(kind='wait'):
+    basis=call('inspect',task,'--evidence',str(release))['basis']
+    return call('assess',task,'--basis',basis,'--judgment',json.dumps({
+        'disposition':'accepted','outcome':'Business result accepted; cleanup retained','remaining_gap':'',
+        'authority_ref':str(release),'evidence':[str(release)],'next_action':{
+            'kind':kind,'payload_ref':str(release),'recheck_at':'2099-01-01T00:00:00Z',
+            'deadline':'2099-02-01T00:00:00Z','blocker':{'owner':'repair-task',
+            'dependency':'compatible cleanup reader','release_ref':str(release)}}}),ok=(kind=='wait'))
+original=p.read_bytes()
+assess('steer')
+assert p.read_bytes()==original, 'terminal execution refusal mutated record'
+assess()
+assert call('due',task)['due'] is False, 'bounded terminal cleanup wait was immediately due'
+assert call('observe',task)['state']=='accepted', 'cleanup wait reopened business goal'
+release.write_text('Repair delivered\n')
+assert call('due',task)['due'] is True, 'changed dependency did not wake cleanup'
+release.write_text('Upstream repair pending\n')
+r=json.loads(p.read_text());r['next_action']['recheck_at']='2000-01-01T00:00:00Z';p.write_text(json.dumps(r))
+assert call('due',task)['due'] is True, 'cleanup recheck bound ignored'
+r['next_action']['deadline']='2000-01-02T00:00:00Z';p.write_text(json.dumps(r))
+assert call('due',task)['expired'] is True, 'cleanup deadline ignored'
+print('ok - terminal cleanup waits stay bounded without reopening or granting execution')
+PYWAIT
+# Additive producer diagnostics stay digest-bound but do not change postconditions.
+python3 - "$FM_HOME/data/c/lifecycle.json" <<'PYFACTS'
+import json,hashlib,sys
+from pathlib import Path
+p=Path(sys.argv[1]);record=json.loads(p.read_text());proof=record['owner_receipts']['cleanup'][0]
+proof['facts']['diagnostics']={'writer':'future'}
+proof['sha256']=hashlib.sha256(json.dumps(proof['facts'],sort_keys=True).encode()).hexdigest()
+p.write_text(json.dumps(record))
+PYFACTS
+python3 "$LIB" due c | jq -e '.due==false' >/dev/null
+
+
+# Old ShortTask results remain effect evidence when their exact operation chain
+# proves this task and generation; model summary prose alone proves nothing.
+python3 - "$LIB" "$FM_HOME" <<'PY'
+import copy, hashlib, json, os, pathlib, subprocess, sys
+lib, home = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+task = 'legacy-cleanup'
+directory = home/'data'/task;directory.mkdir()
+(directory/'brief.md').write_bytes((home/'data/c/brief.md').read_bytes())
+def write(p, value):
+    p.write_text(json.dumps(value));p.chmod(0o600)
+def due():
+    p=subprocess.run(['python3',str(lib),'due',task],capture_output=True,text=True)
+    assert p.returncode == 0, p.stderr
+    return json.loads(p.stdout)['due']
+short='short-'+hashlib.sha256(b'legacy-cleanup').hexdigest()
+root=home/'state/short-agents'/short;root.mkdir(parents=True)
+result={'id':short,'state':'completed','evidence':str(root),'summary':'Summary is not proof'}
+request={'version':1,'id':short,'nonce':'original-nonce','input':{'key':'legacy-cleanup','operations':{'steps':[{'action':'cleanup','task':task}]}},
+         'operationBindings':[{'spawn_gen':'s3','endpoint_task_id':task}]}
+facts={'taskRecordRemoved':True,'endpointConfirmedGone':True,'copyDisposition':'returned-or-already-absent','bookkeepingComplete':True}
+receipt={'id':short,'nonce':request['nonce'],'index':0,'action':'cleanup','state':'completed','evidence':facts}
+record=json.loads((home/'data/c/lifecycle.json').read_text())
+record.update(task_id=task,cleanup_ref=str(root/'result.json'),owner_receipts={})
+record['assessment']['authority_ref']=str(directory/'brief.md')
+record['assessment']['evidence']=[{'ref':str(directory/'brief.md'),'sha256':hashlib.sha256((directory/'brief.md').read_bytes()).hexdigest()}]
+def reset():
+    for name,value in [('request.json',request),('result.json',result),('operation-0.receipt.json',receipt)]:write(root/name,value)
+    data=copy.deepcopy(record)
+    data['assessment']['evidence'].append({'ref':str(root/'result.json'),'sha256':hashlib.sha256((root/'result.json').read_bytes()).hexdigest()})
+    write(directory/'lifecycle.json',data)
+reset()
+before={p:p.read_bytes() for p in root.iterdir()}
+assert due() is False, 'complete historical operation receipt kept cleanup due'
+assert before=={p:p.read_bytes() for p in root.iterdir()}, 'readback modified operation evidence'
+for version in (1,2,'future-compatible'):
+    reset();r=copy.deepcopy(request);r['version']=version;r['diagnostics']={'writer':'future'};write(root/'request.json',r)
+    r=copy.deepcopy(receipt);r['evidence']['diagnostics']={'elapsed':3};write(root/'operation-0.receipt.json',r)
+    assert due() is False, 'additive receipt fields changed cleanup evidence'
+for filename,key,value in [('request.json','nonce','other'),('result.json','state','interrupted'),('operation-0.receipt.json','state','refused'),('operation-0.receipt.json','id','short-'+'f'*64),('operation-0.receipt.json','index',True)]:
+    reset();p=root/filename;r=json.loads(p.read_text());r[key]=value;write(p,r)
+    assert due() is True,(filename,key)
+for field,value in [('spawn_gen','other'),('endpoint_task_id','other')]:
+    reset();r=copy.deepcopy(request);r['operationBindings'][0][field]=value;write(root/'request.json',r);assert due() is True,field
+reset();r=copy.deepcopy(request);r['input']['operations']['steps'].append(r['input']['operations']['steps'][0]);r['operationBindings'].append(r['operationBindings'][0]);write(root/'request.json',r);assert due() is True,'ambiguous cleanup steps'
+for field,value in [('endpointConfirmedGone',False),('bookkeepingComplete',1),('copyDisposition','retained')]:
+    reset();r=copy.deepcopy(receipt);r['evidence'][field]=value;write(root/'operation-0.receipt.json',r);assert due() is True,field
+reset();(root/'operation-0.receipt.json').unlink();assert due() is True,'model result alone became proof'
+reset();p=root/'operation-0.receipt.json';other=home/'state/other.json';other.write_bytes(p.read_bytes());p.unlink();p.symlink_to(other);assert due() is True,'symlink receipt accepted';p.unlink()
+reset();meta=home/'state'/f'{task}.meta';meta.write_text('spawn_gen=s3\n');assert due() is True,'remaining resources ignored';meta.unlink()
+reset();r=json.loads((directory/'lifecycle.json').read_text());r['disposition']='open';r['assessment']['remaining_gap']='More work';write(directory/'lifecycle.json',r);assert due() is True,'cleanup became goal acceptance'
+print('ok - legacy and additive cleanup receipts quiet only verified terminal tasks without replay')
+PY
 
 # Exact new authority can reopen a historical Done goal; old status events
 # cannot change the structured disposition or inherit its old acceptance.

@@ -25,6 +25,9 @@ the same route after interruption; a different unexplained byte sequence refuses
 refresh records a verified executor receipt/start without semantic acceptance.
 Merge and cleanup owners alone call owner-receipt inside their guarded effects;
 owner_receipts holds exact generation-bound observed facts, never permissions.
+The due reader also recognizes assessed historical ShortTask results through
+their same-home request, nonce, exact cleanup step, execution binding and complete
+operation receipt. Missing/conflicting evidence remains due; readback never replays.
 inspect/assess/update-brief/refresh return the current judgment/action and receipt
 summary; lifecycle retains the complete coordination and recovery history.
 coordinate --expected-revision N --record private.json records a native
@@ -51,6 +54,8 @@ Optional next_action.continuation has exactly one of these observation contracts
   executor: {type, task_id, execution_generation, handoff_id} OR
             {type, task_id, execution_generation, inbox_id, sha256} OR
             {type, task_id, execution_generation, brief_sha256}.
+    Ordinary actionless dispatch can use its confirmed launch publication with
+    the lifecycle-bound brief and execution generation for the same observation.
     A spawn brief needs observed pi-ext/Codex/TraeX transcript activity, never
     the synthetic fm-spawn busy seed, process presence, or a status report.
     A matching handled inbox message plus current working executor proves receipt;
@@ -169,6 +174,13 @@ def unique_object(pairs):
 
 def load(path):
     return json.loads(regular(path, True), object_pairs_hook=unique_object)
+
+
+def complete_cleanup_facts(facts):
+    """Known postconditions, not incidental extra diagnostic fields, prove completion."""
+    return (isinstance(facts, dict) and facts.get('taskRecordRemoved') is True and
+            facts.get('endpointConfirmedGone') is True and facts.get('bookkeepingComplete') is True and
+            facts.get('copyDisposition') == 'returned-or-already-absent')
 
 
 def stamp(value):
@@ -321,7 +333,10 @@ class Task:
                 else:
                     raise Refusal('unsupported continuation type')
         if action and record['disposition'] == 'accepted':
-            require(action['phase'] in ('confirmed', 'refused'), 'unreconciled action prevents terminal acceptance')
+            require(action['phase'] in ('confirmed', 'refused') or
+                    (action['kind'] == 'wait' and action['phase'] == 'prepared' and action['attempts'] == 0 and
+                     action.get('continuation', {}).get('type') == 'blocker'),
+                    'unreconciled action prevents terminal acceptance')
         if current:
             require(record.get('brief_sha256') == digest(regular(self.directory / 'brief.md')), 'brief changed; explicit reconciliation required')
             generation = self.generation()
@@ -957,8 +972,7 @@ class Task:
         if args.kind == 'merge':
             require(set(facts) == {'url', 'head'} and text(facts['url']) and isinstance(facts['head'], str), 'invalid merge receipt')
         else:
-            require(facts == {'taskRecordRemoved': True, 'endpointConfirmedGone': True,
-                             'copyDisposition': 'returned-or-already-absent', 'bookkeepingComplete': True}, 'incomplete cleanup receipt')
+            require(complete_cleanup_facts(facts), 'incomplete cleanup receipt')
             require(not (self.state / (self.id + '.meta')).exists(), 'cleanup task record still exists')
         proof = {'execution_generation': args.execution_generation, 'facts': facts,
                  'sha256': digest(json.dumps(facts, sort_keys=True).encode())}
@@ -1097,14 +1111,20 @@ class Task:
         self.write(record)
         return record
 
-    def observe_executor(self, continuation):
+    def observe_executor(self, continuation, published_launch=False):
         target = continuation['task_id']
         fields = {}
-        for line in regular(self.state / (target + '.meta')).decode().splitlines():
+        meta = self.state / (target + '.meta')
+        if published_launch and not meta.exists() and not meta.is_symlink():
+            return 'pending', 'ordinary launch has no publication receipt'
+        for line in regular(meta).decode().splitlines():
             key, sep, value = line.partition('=')
             if sep:
                 require(key not in fields, 'duplicate executor metadata')
                 fields[key] = value
+        if published_launch and (fields.get('executor', 'local-agent') != 'local-agent' or
+                                 fields.get('kind') == 'secondmate' or fields.get('launch_state') != 'confirmed'):
+            return 'pending', 'ordinary local launch has no confirmed publication receipt'
         require(fields.get('spawn_gen') == continuation['execution_generation'], 'executor generation changed')
         require(fields.get('executor', 'local-agent') == 'local-agent' and fields.get('kind') != 'secondmate', 'executor receipt requires an ordinary local task')
         directory = self.state / (target + '.inbox')
@@ -1164,6 +1184,13 @@ class Task:
         observation = ''
         if disposition == 'open':
             state, reason = 'pending', 'no verified continuation; compare remaining acceptance with the brief'
+            if not action and record['execution_generation'] != 'unassigned-g1':
+                # Ordinary dispatch binds the exact brief and generation without
+                # preparing a lifecycle action. Read the same structural start
+                # proof as an explicit spawn, without inventing an effect/action.
+                state, reason = self.observe_executor(dict(type='executor', task_id=self.id,
+                    execution_generation=record['execution_generation'], brief_sha256=record['brief_sha256']),
+                    published_launch=True)
             if action:
                 continuation = action.get('continuation', {})
                 if action['phase'] in ('attempted', 'uncertain'):
@@ -1236,6 +1263,64 @@ class Task:
         record['revision'] += 1
         self.write(record)
         return record
+
+    def cleanup_complete(self, record):
+        """Read current owner facts or the historical ShortTask effect chain.
+
+        This projects existing evidence only. It never imports receipts, changes
+        disposition, calls a tool, or authorizes repeating a cleanup effect.
+        """
+        meta = self.state / (self.id + '.meta')
+        if meta.exists() or meta.is_symlink():
+            return False
+        if any(proof['execution_generation'] == record['execution_generation'] and
+               complete_cleanup_facts(proof['facts'])
+               for proof in record.get('owner_receipts', {}).get('cleanup', [])):
+            return True
+        ref = record.get('cleanup_ref')
+        if not ref:
+            return False
+        try:
+            path = Path(ref)
+            if not path.is_absolute():
+                path = self.home / path
+            root = self.state / 'short-agents'
+            require(path.name == 'result.json' and path.parent.parent == root and
+                    re.fullmatch(r'short-[a-f0-9]{64}', path.parent.name), 'not a ShortTask result')
+            require(path.resolve(strict=True) == path, 'unsafe ShortTask result path')
+            evidence = [item for item in record['assessment']['evidence']
+                        if (self.home / item['ref']).resolve() == path]
+            require(len(evidence) == 1, 'unbound historical cleanup result')
+            self.reference(str(path), evidence[0]['sha256'])
+            result = load(path)
+            request = load(path.parent / 'request.json')
+            require(result.get('id') == request.get('id') == path.parent.name and
+                    result.get('state') == 'completed' and result.get('evidence') == str(path.parent),
+                    'historical cleanup result identity conflict')
+            require(atom(request.get('nonce')), 'missing ShortTask nonce')
+            require(text(request['input'].get('key')) and
+                    request['id'] == 'short-' + digest(request['input']['key'].encode()), 'ShortTask key conflict')
+            steps = request['input']['operations']['steps']
+            bindings = request['operationBindings']
+            require(isinstance(steps, list) and isinstance(bindings, list) and
+                    len(steps) == len(bindings), 'invalid historical operation chain')
+            indices = [i for i, step in enumerate(steps) if isinstance(step, dict) and
+                       step.get('action') == 'cleanup' and step.get('task') == self.id]
+            require(len(indices) == 1, 'ambiguous cleanup step')
+            index = indices[0]
+            binding = bindings[index]
+            require(binding.get('spawn_gen') == record['execution_generation'] and
+                    binding.get('endpoint_task_id', self.id) == self.id, 'cleanup generation conflict')
+            receipt = load(path.parent / f'operation-{index}.receipt.json')
+            require(receipt.get('id') == request['id'] and receipt.get('nonce') == request['nonce'] and
+                    type(receipt.get('index')) is int and receipt['index'] == index and
+                    receipt.get('action') == 'cleanup' and receipt.get('state') == 'completed',
+                    'historical cleanup effect identity conflict')
+            return complete_cleanup_facts(receipt.get('evidence'))
+        except (Refusal, OSError, ValueError, TypeError, KeyError, AttributeError):
+            # Missing/conflicting evidence retains the existing readback duty;
+            # no shape mismatch is permission to replay an uncertain operation.
+            return False
 
     def cleanup_read(self):
         record = self.read()
@@ -1423,12 +1508,7 @@ def main():
                 return
             if args.operation == 'due':
                 action = result.get('next_action') if result else None
-                cleanup_history = (result or {}).get('owner_receipts', {}).get('cleanup', [])
-                cleanup_complete = bool(result and any(
-                    proof.get('execution_generation') == result['execution_generation'] and
-                    proof.get('facts') == {'taskRecordRemoved': True, 'endpointConfirmedGone': True,
-                                           'copyDisposition': 'returned-or-already-absent', 'bookkeepingComplete': True}
-                    for proof in cleanup_history))
+                cleanup_complete = bool(result and task.cleanup_complete(result))
                 cleanup_obligation = bool(result and result['disposition'] in ('accepted', 'archived') and
                                           not cleanup_complete and
                                           ((task.state / (task.id + '.meta')).exists() or
@@ -1437,13 +1517,22 @@ def main():
                 # An action receipt proves its effect, never goal acceptance.
                 # A future bounded wait defers reconciliation; even a confirmed
                 # action leaves an open goal due once that bound is reached.
+                # A bounded, evidence-bound terminal wait defers only cleanup.
                 # Terminal goals remain due only while a concrete resource or
                 # cleanup receipt is unfinished; a complete owner receipt stops
                 # the bounded scanner from publishing another generation.
+                if cleanup_obligation and action and action['kind'] == 'wait' and action['phase'] == 'prepared':
+                    continuation = action.get('continuation', {})
+                    if (continuation.get('type') == 'blocker' and
+                            stamp(now()) < stamp(action['recheck_at']) and stamp(now()) < stamp(action['deadline'])):
+                        try:
+                            cleanup_obligation = digest(task.reference(continuation['release_ref'])) != continuation['release_sha256']
+                        except (Refusal, OSError):
+                            pass  # Missing release evidence requires readback, never a replay.
                 open_goal = bool(result and result['disposition'] == 'open')
                 due = bool(result and ((open_goal and action and stamp(action['recheck_at']) <= stamp(now())) or
                                        (open_goal and not action) or cleanup_obligation))
-                expired = bool(open_goal and action and stamp(action['deadline']) <= stamp(now()))
+                expired = bool((open_goal or cleanup_obligation) and action and stamp(action['deadline']) <= stamp(now()))
                 observations = []
                 for path in (task.directory / 'report.md', task.state / (task.id + '.cleanup.json')):
                     if path.exists() or path.is_symlink():

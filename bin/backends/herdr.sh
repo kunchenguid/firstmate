@@ -1229,7 +1229,7 @@ fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-i
 # fm_backend_herdr_workspace_move_capable: verify that one guarded raw
 # workspace.move request is possible in <session>: python3 for the transport,
 # the minimum protocol, and the exact whitelisted method and parameter
-# schema. Silent; each caller owns its own warning wording.
+# schema (required names form an unordered set). Silent; callers own warnings.
 # Return codes: 1 python3 missing, 2 protocol unreadable, 3 protocol too old,
 # 4 schema unreadable, 5 method or parameter schema unsupported.
 fm_backend_herdr_workspace_move_capable() {  # <session>
@@ -1243,7 +1243,7 @@ fm_backend_herdr_workspace_move_capable() {  # <session>
   schema=$(fm_backend_herdr_cli "$session" api schema --json 2>/dev/null) || return 4
   printf '%s' "$schema" | jq -e '
     any(.schemas.request.oneOf[]?; .properties.method.const == "workspace.move")
-    and .schemas.request["$defs"].WorkspaceMoveParams.required == ["workspace_id", "insert_index"]
+    and (.schemas.request["$defs"].WorkspaceMoveParams.required | sort) == ["insert_index", "workspace_id"]
     and .schemas.request["$defs"].WorkspaceMoveParams.properties.insert_index.type == "integer"
   ' >/dev/null 2>&1 || return 5
 }

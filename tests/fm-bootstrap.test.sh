@@ -282,7 +282,7 @@ treehouse --lease support is accepted silently without quota-axi^1^0.2.4^manual^
 treehouse without --lease reports an upgrade, gh auth is fine^0^0.2.4^-^grep^MISSING: treehouse (install: curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh)^NEEDS_GH_AUTH
 compatible tasks-axi is silent by default^1^0.2.4^-^empty^^
 missing tasks-axi is required by default^1^-^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
-incompatible tasks-axi is required by default^1^0.1.0^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
+older capable tasks-axi is accepted by default^1^0.1.0^-^empty^^
 tasks-axi without archive-body is required by default^1^0.2.4:noarchive^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
 tasks-axi without multi-id mv is required by default^1^0.2.4:nomulti^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
 manual backlog backend still requires missing tasks-axi^1^-^manual^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
@@ -321,7 +321,7 @@ ROWS
   pass "bootstrap enforces no-mistakes minimum version"
 }
 
-test_gh_axi_min_version() {
+test_gh_axi_version_is_diagnostic() {
   local label version mode case_dir fakebin out missing n
   missing='MISSING: gh-axi (install: npm install -g gh-axi && gh-axi setup hooks)'
   n=0
@@ -345,11 +345,11 @@ minimum gh-axi version is accepted^0.1.29^empty
 newer gh-axi patch is accepted^0.1.30^empty
 newer gh-axi minor is accepted^0.2.0^empty
 newer gh-axi major is accepted^1.0.0^empty
-older gh-axi patch reports an upgrade^0.1.19^missing
-much older gh-axi minor reports an upgrade^0.0.9^missing
-unparseable gh-axi version reports an upgrade^gh-axi development build^missing
+older gh-axi remains usable^0.1.19^empty
+older gh-axi minor remains usable^0.0.9^empty
+development gh-axi remains usable^gh-axi development build^empty
 ROWS
-  pass "bootstrap enforces gh-axi minimum version"
+  pass "bootstrap treats gh-axi versions as diagnostics"
 }
 
 test_lavish_axi_is_not_a_dependency() {
@@ -384,7 +384,7 @@ test_bootstrap_retires_legacy_lavish_registration() {
   pass "bootstrap retires legacy Lavish registrations without a provider dependency"
 }
 
-test_tasks_axi_min_version() {
+test_tasks_axi_capabilities() {
   local label version mode case_dir fakebin out missing n archive_body multi_id
   missing='MISSING: tasks-axi (install: npm install -g tasks-axi)'
   n=0
@@ -423,13 +423,13 @@ minimum tasks-axi version is accepted^0.2.4^empty
 newer tasks-axi patch is accepted^0.2.5^empty
 newer tasks-axi minor is accepted^0.3.0^empty
 newer tasks-axi major is accepted^1.0.0^empty
-older tasks-axi with features reports an upgrade^0.1.1^missing
-the patch just below the floor reports an upgrade^0.2.3^missing
-unparseable tasks-axi version reports an upgrade^tasks-axi development build^missing
+older tasks-axi with features is accepted^0.1.1^empty
+previous tasks-axi with features is accepted^0.2.3^empty
+development tasks-axi with features is accepted^tasks-axi development build^empty
 tasks-axi at floor without archive-body reports an upgrade^0.2.4:noarchive^missing
 tasks-axi at floor without multi-id reports an upgrade^0.2.4:nomulti^missing
 ROWS
-  pass "bootstrap enforces tasks-axi minimum version"
+  pass "bootstrap checks tasks-axi capabilities independently of release labels"
 }
 
 
@@ -795,7 +795,7 @@ SH
 }
 
 
-# The verdict costs three subprocesses, so a caller that already has it can hand
+# The verdict costs two subprocesses, so a caller that already has it can hand
 # it over - but only one hop, and never onward into a spawned agent's
 # environment, where it could outlive a tasks-axi upgrade.
 # assert_timing_record <log> <scope> <name> <detail> <msg>: one bin/fm-timing-lib.sh
@@ -835,7 +835,7 @@ SH
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TASKS_AXI_LOG="$log" FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   assert_contains "$out" "MISSING: tasks-axi (install:" "the unaided run did not probe tasks-axi"
-  assert_grep '--version' "$log" "the unaided run never ran the probe"
+  assert_grep 'update --help' "$log" "the unaided run never ran the probe"
 
   # With it, the probe is skipped entirely and the handed-in verdict is used.
   : > "$log"
@@ -939,10 +939,10 @@ ROWS
 
 test_bootstrap_reporting
 test_no_mistakes_min_version
-test_gh_axi_min_version
+test_gh_axi_version_is_diagnostic
 test_lavish_axi_is_not_a_dependency
 test_bootstrap_retires_legacy_lavish_registration
-test_tasks_axi_min_version
+test_tasks_axi_capabilities
 test_git_is_required_with_supported_install_instruction
 test_retired_backends_report_configuration_refusal
 test_session_provider_backends_do_not_require_tmux

@@ -230,7 +230,7 @@ esac
             gen = command(root / 'bin/fm-busy-event.sh', 'arm', state, tool, '--state', 'unknown')
             pane_data = json.loads(herdr('pane', 'get', pane))['result']['pane']
             (state / (tool + '.meta')).write_text(f'harness={tool}\nkind=scout\nworktree={project}\nbackend=herdr\nwindow={target}\nbusy_gen={gen}\n'
-                f'herdr_session={session}\nherdr_workspace_id={pane_data["workspace_id"]}\nherdr_tab_id={pane_data["tab_id"]}\nherdr_pane_id={pane}\n')
+                f'spawn_gen={gen}\nlaunch_state=confirmed\nherdr_session={session}\nherdr_workspace_id={pane_data["workspace_id"]}\nherdr_tab_id={pane_data["tab_id"]}\nherdr_pane_id={pane}\n')
             sessions = lab / (tool + '-home') / ('sessions' if tool == 'codex' else 'cli/sessions')
             command('python3', reader, 'init', state, tool, tool, project, sessions, 'herdr', target)
             def control(action):
@@ -268,6 +268,15 @@ esac
             command('python3', reader, 'activate', state, tool)
             wait('idle ' + tool + '-transcript')
             print('ok - ' + tool + ' default TUI startup and completion', flush=True)
+            binding_path = state / (tool + '.busy-session')
+            compatible = json.loads(binding_path.read_text())
+            compatible['version'] = 'future-compatible'
+            compatible['diagnostics'] = {'writer': 'live-compatibility-guard'}
+            binding_path.write_text(json.dumps(compatible))
+            wait('idle ' + tool + '-transcript')
+            assert json.loads(binding_path.read_text())['diagnostics'] == compatible['diagnostics']
+            print('ok - ' + tool + ' compatible binding label and additive diagnostics retain live identity', flush=True)
+
             # Restore the actual original generation, then exercise subsequent
             # text/key/state paths with the recovered process seal in place.
             info = json.loads(herdr('pane', 'process-info', '--pane', pane))['result']['process_info']
@@ -347,6 +356,16 @@ esac
             mode.write_text('hold')
             send('Hold the simulated response.')
             wait('busy ' + tool + '-transcript')
+            # Public lifecycle observation uses the ordinary launch receipt and
+            # actual installed vendor activity without requiring an extra steer.
+            data = state.parent / 'data' / tool
+            data.mkdir(parents=True, exist_ok=True)
+            (data / 'brief.md').write_text('Disposable compatibility observation.\n')
+            life_env = dict(recovery_env, FM_HOME=str(state.parent))
+            command('python3', root / 'bin/fm-task-lifecycle.py', 'init', tool, env=life_env)
+            observation = json.loads(command(root / 'bin/fm-task-state.sh', 'observe', tool, env=life_env))
+            assert observation['state'] == 'running', observation
+            print('ok - ' + tool + ' ordinary launch observed through public lifecycle without steering', flush=True)
             control('interrupt')
             wait('idle ' + tool + '-transcript')
             print('ok - ' + tool + ' active turn and user interrupt', flush=True)

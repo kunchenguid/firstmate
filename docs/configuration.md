@@ -275,7 +275,7 @@ An unreadable backend configuration can refuse lifecycle work before the no-back
 It moves in-scope `## Queued` items only and refuses `## In flight` and historical `## Done` records, which stay with their home for pruning or archiving.
 Handoff item bodies must use at least two leading spaces, and the helper refuses a selected item with a single-space or tab-indented continuation rather than risk orphaning it.
 Because bootstrap requires `tasks-axi` on `PATH` on every profile, that delegation works fleet-wide, and the `config/backlog-backend=manual` knob governs firstmate's own hand-editing of its backlog, not this validated helper.
-Compatible means the installed build passes the shared version and feature probe owned by [`bin/fm-tasks-axi-lib.sh`](../bin/fm-tasks-axi-lib.sh), including the atomic multi-ID move required by handoff delegation.
+Compatible means the installed build passes the shared capability probe owned by [`bin/fm-tasks-axi-lib.sh`](../bin/fm-tasks-axi-lib.sh), including the atomic multi-ID move required by handoff delegation.
 Bootstrap requires compatible `tasks-axi` on every profile; see "Toolchain" below for missing-tool reporting and silent default-backend behavior.
 Set the local, gitignored `config/backlog-backend` file to `manual` to force manual backlog editing and suppress the verbose `BOOTSTRAP_INFO: tasks-axi available` fact, not missing-tool reporting.
 A `manual` home owns its backlog file outright: the lifecycle transitions above are skipped there, dispatch and completion never fail over the file's contents, and a completed teardown prints the hand edit that is owed instead.
@@ -369,7 +369,8 @@ There is no shared learnings file by captain decision.
 ## Startup memory budget (config/startup-memory-budget)
 
 The locked mutable bootstrap path materializes its visible default of `7500` estimated tokens in a primary home when the file is absent.
-The file must be one positive base-10 integer followed by exactly one newline in a regular, single-linked file beneath a non-symlinked `config/` directory.
+The file must contain one positive base-10 integer in a regular, single-linked file beneath a non-symlinked `config/` directory.
+Surrounding ASCII whitespace, CRLF line endings, a missing final newline, and leading zeros are normalized on read without rewriting the file; multiple values and embedded control bytes are rejected.
 Malformed, multi-line, symlinked, hardlinked, special, or otherwise unsafe values are rejected rather than treated as a default.
 Use `bin/fm-startup-memory-budget.sh read` to validate and print the effective value, or `bin/fm-startup-memory-budget.sh report` to account for the three files.
 The stable local estimate is `ceil(UTF-8 bytes / 3)` per file, a conservative portable approximation rather than a provider-exact tokenizer.
@@ -532,7 +533,8 @@ It installs automatically supported tools only after you say go; manual-only too
 Required tools come in two parts: a universal toolchain every home needs regardless of backend, and a per-backend delta that follows the runtime backend actually resolved for this home.
 The essential universal toolchain is node, git, gh with GitHub auth via `gh auth login`, no-mistakes v1.46.0 or newer, compatible gh-axi, chrome-devtools-axi, compatible tasks-axi per "Backlog backend" above, Python 3.9 or newer, and jq.
 Python and jq validate the bounded durable task lifecycle records; no additional Python packages are required.
-[`bin/fm-bootstrap.sh`](../bin/fm-bootstrap.sh) owns the axi-family floor policy and the gh-axi floor, while [`bin/fm-tasks-axi-lib.sh`](../bin/fm-tasks-axi-lib.sh) holds its own tool's floor constant.
+[`bin/fm-bootstrap.sh`](../bin/fm-bootstrap.sh) checks tool presence and genuine API prerequisites; [`bin/fm-tasks-axi-lib.sh`](../bin/fm-tasks-axi-lib.sh) owns the backlog capability probe.
+The gh-axi and tasks-axi release labels do not determine compatibility.
 This section is the single owner of that universal toolchain list; backend guides' prerequisites point here and add only their backend-specific tools.
 In that list, no-mistakes runs the validation pipeline, gh-axi and chrome-devtools-axi cover GitHub and browser operations, and tasks-axi backs backlog mutations.
 The Herdr terminal requires `herdr`, `jq` and the `treehouse` worktree provider in addition to the universal toolchain.
