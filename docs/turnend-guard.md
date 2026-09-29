@@ -231,6 +231,8 @@ Once the live holder's beacon is stale past `FM_WATCHER_STALL_BOUND` (default th
 
 A watcher wedged mid-cycle can therefore no longer refuse every replacement indefinitely.
 `bin/fm-watch.sh`'s header owns the exact wording and the survives-TERM fallback.
+Below that bound a live holder with a stale beacon is a slow cycle, not an ended one, so an arm attached to it keeps following it and stops only at the bound, with a typed stalled-holder failure its owner's retry turns into the replacement above.
+`fm_watcher_stall_bound` in `bin/fm-wake-lib.sh` is the one derivation both read, and `bin/fm-watch-arm.sh`'s header owns the attached arm's exact behavior.
 
 The auto-arm hook additionally exports its resolved `FM_GUARD_GRACE` when it forks `bin/fm-watch-arm.sh`.
 The arm wrapper and the watcher it may start then judge staleness with the exact same value the hook just judged it with, whether that value came from an operator override or the poll-derived default.

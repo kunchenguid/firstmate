@@ -32,11 +32,20 @@
 #   watcher: FAILED - cycle ended without an actionable reason
 #                                                        - a clean cycle ended with no wake and no
 #                                                          verified healthy successor
+#   watcher: FAILED - attached watcher pid=<N> stalled (beacon <age>s at or past hard bound <bound>s)
+#                                                        - the followed holder is alive but its beacon
+#                                                          reached the stall bound
 # It NEVER reports started/attached/healthy off a stale beacon or a dead/reused pid: a
 # stale-beacon or dead-pid holder either self-heals (the fresh child steals the
 # dead lock per the singleton self-eviction/steal path and is confirmed) or this
 # returns the FAILED line. On started it waits the child and propagates the wake
-# reason; on attached it stays live across identity-matched successors. A cycle
+# reason; on attached it stays live across identity-matched successors. Once
+# attached, a stale beacon alone does not end the followed cycle: while that
+# holder is alive and the lock still names it under the same identity, the arm
+# keeps following it, as a started arm waits out a slow child, until the lock
+# changes or the beacon reaches fm_watcher_stall_bound (bin/fm-wake-lib.sh), the
+# age at which the watcher's own re-arm evicts it; there it fails with the
+# stalled-holder line so its owner's retry replaces the holder. A cycle
 # that ends with no reason line and no healthy successor is resolved against the
 # watcher's identity-bound delivery record: a matching record reports that wake
 # and exits 0, and only a cycle that delivered nothing is the typed nonzero
@@ -117,6 +126,9 @@ esac
 CONFIRM_TIMEOUT=${FM_ARM_CONFIRM_TIMEOUT:-$ARM_CONFIRM_DEFAULT}
 # Poll interval while attached to an existing healthy watcher.
 ATTACH_POLL=${FM_ARM_ATTACH_POLL:-0.5}
+# The beacon age at which the watcher's own re-arm evicts a live holder; an
+# attached arm follows a slow holder up to it (attach_and_wait).
+STALL_BOUND=$(fm_watcher_stall_bound)
 CYCLE_LOG="$STATE/.watch-cycle-exits.log"
 CYCLE_LOG_LOCK="$STATE/.watch-cycle-exits.lock"
 CYCLE_LOG_MAX_BYTES=${FM_WATCH_CYCLE_LOG_MAX_BYTES:-262144}
@@ -343,12 +355,28 @@ close_unobserved_cycle() {
   return 1
 }
 
+# True while <pid> is alive and this home's watcher lock still names it under
+# the identity this arm's current cycle attached to, whatever its beacon age.
+attached_holder_live() {
+  local pid=$1 lock_pid
+  lock_pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
+  [ "$lock_pid" = "$pid" ] || return 1
+  fm_pid_alive "$pid" || return 1
+  fm_watcher_lock_matches_pid "$STATE" "$WATCH" "$pid" "$FM_HOME" || return 1
+  [ "$FM_WATCHER_MATCHED_IDENTITY" = "$cycle_watcher_identity" ]
+}
+
 # Stay alive across identity-matched healthy holders. If one cycle ends, attach
 # to a verified successor. With no successor, report the wake that cycle durably
 # delivered, or fail loudly - never a clean empty completion that an adapter could
 # mistake for a no-op.
+# A stale beacon alone does not end the followed cycle: while the holder is alive
+# and the lock still names it under the same identity, it is a slow cycle, which
+# a started arm tolerates by waiting on its child, so this arm keeps following it.
+# Only at the stall bound, where the watcher's own re-arm evicts a live holder,
+# does it fail with the typed stalled-holder line so its owner's retry replaces it.
 attach_and_wait() {
-  local attached_pid=$1
+  local attached_pid=$1 age
   while :; do
     if healthy_watcher; then
       if [ "$HEALTHY_PID" != "$attached_pid" ] || [ "$HEALTHY_IDENTITY" != "$cycle_watcher_identity" ]; then
@@ -359,6 +387,16 @@ attach_and_wait() {
       fi
       sleep "$ATTACH_POLL"
       continue
+    fi
+    if attached_holder_live "$attached_pid"; then
+      age=$(fm_path_age "$BEAT")
+      if [ "$age" -lt "$STALL_BOUND" ]; then
+        sleep "$ATTACH_POLL"
+        continue
+      fi
+      cycle_log_append unknown unknown attached-holder-stalled none
+      echo "watcher: FAILED - attached watcher pid=$attached_pid stalled (beacon ${age}s at or past hard bound ${STALL_BOUND}s)"
+      return 1
     fi
     if wait_for_healthy_successor; then
       cycle_log_append unknown unknown attached-cycle-ended "attached:$HEALTHY_PID"

@@ -141,6 +141,18 @@ fm_poll_derived_grace() {
   printf '%s\n' "$derived"
 }
 
+# fm_watcher_stall_bound [poll-seconds]
+# Hard bound on a live watcher holder's beacon age: FM_WATCHER_STALL_BOUND,
+# defaulting to 3x the watcher's stale grace (FM_WATCHER_STALE_GRACE, else
+# FM_GUARD_GRACE, else fm_poll_derived_grace). Under it a live holder with a
+# stale beacon is a slow cycle; at or past it bin/fm-watch.sh evicts that holder
+# and bin/fm-watch-arm.sh stops following it, so both read this one definition.
+fm_watcher_stall_bound() {
+  local poll=${1:-${FM_POLL:-15}} grace
+  grace=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-$(fm_poll_derived_grace "$poll")}}
+  printf '%s\n' "${FM_WATCHER_STALL_BOUND:-$((grace * 3))}"
+}
+
 # fm_watcher_lock_unheld <state>
 # True when the watcher lock or its symlinked owner directory is absent, or when
 # the existing lock records no pid at all. Any non-empty pid remains held here;

@@ -1086,6 +1086,94 @@ test_tick_skips_terminal_and_reuses_target_observation() {
   pass "tick skips terminal records and reuses target observations"
 }
 
+# Records are never pruned, so a home accumulates thousands of settled ones. The
+# tick selects the records it has work for in one pass and leaves every settled
+# record alone: it must not block on a settled record's per-record lock that a
+# live foreign process holds, and it still does the work the selected records need.
+test_tick_leaves_settled_records_alone() {
+  local home state settled closed open_esc awaiting rec i copy holder tick_pid ticked=0 open lib
+  local sums_before sums_after holder_lock_pid
+  home=$(setup_parent settled-store)
+  state="$home/state"
+  # Reset the fixture clock after isolated subshell tests.
+  # shellcheck disable=SC2031
+  export FM_PENDING_REPLY_NOW=5200
+  # A resolved record that never escalated, and one whose escalation closed.
+  settled=$(fm_pending_reply_create "$home" "$state" hibit "settled request")
+  fm_pending_reply_mark_delivered "$state" "$settled"
+  printf 'done [corr=%s]: settled reply\n' "$settled" >> "$state/hibit.status"
+  fm_pending_reply_try_resolve "$state" "$settled" || fail "settled fixture should resolve"
+  closed=$(fm_pending_reply_create "$home" "$state" hibit "closed escalation")
+  fm_pending_reply_mark_delivered "$state" "$closed"
+  rec=$(fm_pending_reply_path "$state" "$closed")
+  fm_pending_reply_set "$rec" phase escalated
+  fm_pending_reply_set "$rec" escalated_epoch 5100
+  printf 'blocked [key=pending-reply-%s]: pending-reply-missed: task=hibit pending-reply-id=%s request=closed escalation\n' \
+    "$closed" "$closed" >> "$state/hibit.status"
+  printf 'done [corr=%s]: late reply\n' "$closed" >> "$state/hibit.status"
+  fm_pending_reply_try_resolve "$state" "$closed" || fail "closed-escalation fixture should resolve"
+  [ -n "$(fm_pending_reply_get "$rec" escalation_closed_epoch)" ] || fail "fixture escalation did not close"
+  # Many settled copies, as a long-lived home accumulates.
+  i=0
+  while [ "$i" -lt 300 ]; do
+    copy=$(printf '%016x' $((0x5e7700000000 + i)))
+    for rec in "$settled" "$closed"; do
+      sed "s/^corr_id=.*/corr_id=$copy/" "$(fm_pending_reply_path "$state" "$rec")" \
+        > "$(fm_pending_reply_path "$state" "$copy")"
+      copy=$(printf '%016x' $((0x5e7780000000 + i)))
+    done
+    i=$((i + 1))
+  done
+  # Work the tick still owes: a resolved record whose escalation close did not
+  # land, and a delivered request whose correlated report is in the parent status.
+  open_esc=$(fm_pending_reply_create "$home" "$state" esc "open escalation")
+  fm_pending_reply_mark_delivered "$state" "$open_esc"
+  rec=$(fm_pending_reply_path "$state" "$open_esc")
+  printf 'blocked [key=pending-reply-%s]: pending-reply-missed: task=esc pending-reply-id=%s request=open escalation\n' \
+    "$open_esc" "$open_esc" > "$state/esc.status"
+  printf 'done [corr=%s]: late reply\n' "$open_esc" >> "$state/esc.status"
+  fm_pending_reply_set "$rec" escalated_epoch 5150
+  fm_pending_reply_set "$rec" resolved_via status
+  fm_pending_reply_set "$rec" phase resolved
+  awaiting=$(fm_pending_reply_create "$home" "$state" open "awaiting report")
+  fm_pending_reply_mark_delivered "$state" "$awaiting"
+  printf 'done [corr=%s]: the report\n' "$awaiting" > "$state/open.status"
+  sums_before=$(cd "$(fm_pending_reply_dir "$state")" && cksum 00005e77* "$settled" "$closed")
+  [ "$(printf '%s\n' "$sums_before" | wc -l | tr -d ' ')" -eq 602 ] || fail "settled fixture store is incomplete"
+
+  # A live foreign process holds one settled record's per-record lock.
+  lib="$ROOT/bin/fm-wake-lib.sh"
+  bash -c '. "$1"; fm_lock_acquire_wait "$2" && : > "$3"; exec sleep 300' _ \
+    "$lib" "$state/.pending-reply-00005e7700000000.lock" "$home/held" &
+  holder=$!
+  for _ in $(seq 1 100); do [ -e "$home/held" ] && break; sleep 0.1; done
+  [ -e "$home/held" ] || { kill "$holder" 2>/dev/null; fail "foreign holder never took the lock"; }
+
+  fm_pending_reply_tick "$state" &
+  tick_pid=$!
+  for _ in $(seq 1 600); do
+    case "$(ps -p "$tick_pid" -o stat= 2>/dev/null)" in ''|Z*) ticked=1; break ;; esac
+    sleep 0.1
+  done
+  [ "$ticked" = 1 ] || kill -TERM "$tick_pid" 2>/dev/null
+  wait "$tick_pid" 2>/dev/null || true
+  holder_lock_pid=$(cat "$state/.pending-reply-00005e7700000000.lock/pid" 2>/dev/null || true)
+  kill -TERM "$holder" 2>/dev/null
+  wait "$holder" 2>/dev/null || true
+
+  [ "$ticked" = 1 ] || fail "the tick blocked on a settled record's foreign-held lock"
+  [ "$holder_lock_pid" = "$holder" ] || fail "the tick disturbed the foreign holder's lock (pid=$holder_lock_pid)"
+  sums_after=$(cd "$(fm_pending_reply_dir "$state")" && cksum 00005e77* "$settled" "$closed")
+  [ "$sums_before" = "$sums_after" ] || fail "the tick rewrote settled records"
+  [ -n "$(fm_pending_reply_get "$(fm_pending_reply_path "$state" "$open_esc")" escalation_closed_epoch)" ] \
+    || fail "the tick did not close the resolved record's open escalation"
+  open=$(status_open_decisions "$state/esc.status")
+  [ -z "$open" ] || fail "the resolved record's escalation stayed open: $open"
+  [ "$(phase_of "$state" "$awaiting")" = resolved ] \
+    || fail "the tick did not resolve the awaiting record from its correlated report"
+  pass "the tick leaves settled records alone and still does the selected records' work"
+}
+
 test_correlations_reuse_only_for_matching_open_task() {
   local dir fb log home state got corr1 corr2 corr3 rec
   dir="$TMP_ROOT/corr-reuse"; mkdir -p "$dir"
@@ -1629,6 +1717,7 @@ test_busy_idle_observation_via_backend_abstraction
 test_unknown_backend_state_uses_capture_fallback
 test_kimi_capture_fallback_uses_recorded_harness
 test_tick_skips_terminal_and_reuses_target_observation
+test_tick_leaves_settled_records_alone
 test_correlations_reuse_only_for_matching_open_task
 test_tick_end_to_end_missed_then_escalate
 test_failed_send_discards_undelivered_expectation

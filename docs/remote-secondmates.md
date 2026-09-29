@@ -99,6 +99,7 @@ It distinguishes preemption from a wait window that closes with no data:
 
 - Only a genuinely quiet window proves channel freshness.
 - Either outcome can re-arm without losing data.
+- The parent's reply listener polls again under the same claim after either one, so a same-home command such as the per-cycle liveness probe never tears the listener down; [`bin/fm-procevent-remote-reply.sh`](../bin/fm-procevent-remote-reply.sh) owns that mapping.
 
 ### Cancelled and orphaned jobs
 

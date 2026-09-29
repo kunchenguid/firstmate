@@ -847,11 +847,56 @@ set +e
 wait "$PREEMPTED_SOURCE"
 preempted_rc=$?
 set -e
-[ "$preempted_rc" -eq "$FM_REMOTE_JOB_PREEMPTED_EXIT" ] \
-  || fail "the reply poll did not expose remote-job preemption: $preempted_rc"
+[ "$preempted_rc" -eq 75 ] \
+  || fail "a preempted reply poll did not report a closed window: $preempted_rc"
 assert_absent "$PARENT/state/remote-replies/ios.caught-up" \
   "a preempted reply poll published a caught-up watermark"
-pass "a preempted reply poll cannot publish channel freshness"
+pass "a preempted reply poll reports a closed window without publishing channel freshness"
+
+# The per-cycle liveness probe is a non-preemptible job for the same remote home,
+# so the job worker preempts the listener's long-poll on every watcher cycle.
+# That must not cost the listener: it keeps its claim and polls again, and the
+# watcher's reconcile has nothing to relaunch.
+: > "$TMP_ROOT/preempted-polls"
+FM_REMOTE_REPLY_POLL_LOG="$TMP_ROOT/preempted-polls" FM_PROCEVENT_LAUNCH_FLOOR_SECONDS=1 \
+  remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null 2>&1 &
+PREEMPTED_RUNNER=$!
+wait_for "$CLAIMS/$SID.claim" || fail "the preempted-listener case never claimed the source"
+HELD_PID=$(sed -n '2p' "$CLAIMS/$SID.claim")
+running_poll=''
+for _ in $(seq 1 100); do
+  for job in "$TMP_ROOT"/remote-jobs/jobs/job-*; do
+    [ -d "$job" ] || continue
+    if [ "$(fm_remote_job_read_state "$job" 2>/dev/null || true)" = running ]; then
+      running_poll=$job
+      break 2
+    fi
+  done
+  sleep 0.05
+done
+[ -n "$running_poll" ] || fail "the listener's poll did not begin running before preemption"
+remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-file.sh get data/reply/report.md 262144 >/dev/null
+polls=0
+for _ in $(seq 1 120); do
+  polls=$(wc -l < "$TMP_ROOT/preempted-polls" | tr -d ' ')
+  [ "$polls" -ge 2 ] && break
+  sleep 0.25
+done
+[ "$polls" -ge 2 ] || fail "the preempted listener did not poll again"
+case "$(ps -p "$PREEMPTED_RUNNER" -o stat= 2>/dev/null)" in
+  ''|Z*) fail "a preempted poll ended the reply listener" ;;
+esac
+[ "$(reply_owner)" = live ] || fail "a preempted poll released the listener's claim"
+[ "$(sed -n '2p' "$CLAIMS/$SID.claim")" = "$HELD_PID" ] \
+  || fail "a preempted poll replaced the reply listener"
+reconcile_out=$(remote_env "$ROOT/bin/fm-procevent.sh" reconcile)
+assert_contains "$reconcile_out" 'started=0' \
+  "reconcile relaunched a listener after a preempted poll"
+[ "$(sed -n '2p' "$CLAIMS/$SID.claim")" = "$HELD_PID" ] \
+  || fail "reconcile replaced the preempted listener"
+stop_reply_listener || fail "the preempted listener did not stop"
+wait "$PREEMPTED_RUNNER" 2>/dev/null || true
+pass "a preempted reply poll keeps its listener and reconcile launches nothing"
 
 # A quiet window is the one moment this channel can prove it is NOT behind, and
 # the parent's pending-reply guard needs that proof: a remote report that exists
