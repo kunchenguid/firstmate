@@ -27,11 +27,6 @@ contract() {  # <home> <args...>
   env -u FM_MAIL_USER -u FM_MAIL_PASS -u FM_IMAP_HOST -u FM_SMTP_HOST -u FM_AFK_EMAIL_TO \
     FM_AFK_EMAIL_TO=johnpoyser@gmail.com FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$CONTRACT" "$@"
 
-
-
-
-
-
 }
 
 # A confirmed record in the retired version 1 shape, exactly as the clause
@@ -607,6 +602,17 @@ test_quiet_record_reads_as_a_present_captain_holding_nothing() {
 # The mode written follows who is present: an /afk entry over quiet mode (a
 # refresh included) makes the record away, and a quiet entry never turns a
 # standing away record quiet, because the captain's return comes first.
+test_quiet_entry_does_not_require_email_destination() {
+  local home out rc=0
+  home=$(make_home quiet-without-email)
+  out=$(env -u FM_AFK_EMAIL_TO -u FM_MAIL_USER -u FM_MAIL_PASS -u FM_IMAP_HOST -u FM_SMTP_HOST \
+    FM_TEST_HARNESS=pi FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_AFK_MODE=quiet \
+    "$CONTRACT" enter 2>&1) || rc=$?
+  expect_code 0 "$rc" "quiet entry must not require an email destination"
+  [ "$(contract "$home" mode)" = quiet ] || fail "quiet entry without email configuration did not record quiet mode"
+  pass "quiet entry remains available without an email destination"
+}
+
 test_away_entry_over_quiet_mode_becomes_away_and_quiet_never_masks_away() {
   local home out quiet_entered
   home=$(make_home quiet-to-away)
@@ -648,4 +654,5 @@ test_version_1_record_still_validates_reads_and_archives
 test_version_1_record_is_replaced_by_a_version_2_record
 test_record_changes_refuse_while_a_reader_holds_the_lock
 test_quiet_record_reads_as_a_present_captain_holding_nothing
+test_quiet_entry_does_not_require_email_destination
 test_away_entry_over_quiet_mode_becomes_away_and_quiet_never_masks_away

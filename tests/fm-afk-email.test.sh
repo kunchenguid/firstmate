@@ -13,22 +13,12 @@ mv "$REPO/bin/fm-mail.sh" "$REPO/bin/fm-mail-real.sh"
 CAPTURE="$TMP_ROOT/sent"
 AFK_OWNER_EMAIL=johnpoyser@gmail.com
 
-
-
-
-
-
 mkdir -p "$CAPTURE"
 export CAPTURE
 cat > "$REPO/bin/fm-mail.sh" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 if [ "${1:-}" = afk-email ] || [ "${1:-}" = read ]; then
-
-
-
-
-
 
   exec "$(dirname "$0")/fm-mail-real.sh" "$@"
 fi
@@ -37,11 +27,6 @@ if [ "${FM_TEST_SMTP_FAIL:-}" = 1 ]; then
   printf 'fake SMTP rejected message\n' >&2
   exit 1
 fi
-
-
-
-
-
 
 count=$(find "$CAPTURE" -maxdepth 1 -name '*.txt' | wc -l | tr -d ' ')
 path="$CAPTURE/$count.txt"
@@ -54,11 +39,6 @@ if [ -n "${FM_TEST_SMTP_STARTED:-}" ] && [ -n "${FM_TEST_SMTP_RELEASE:-}" ]; the
     sleep 0.02
   done
 fi
-
-
-
-
-
 
 printf 'fake SMTP accepted\n' >&2
 SH
@@ -75,23 +55,11 @@ make_home() {  # <name> [configured] [recipient]
   if [ "${2:-}" = configured ]; then
     cat > "$home/.env" <<ENV
 
-
-
-
-
 FM_MAIL_USER=owner@example.com
 FM_MAIL_PASS=mail-secret-not-to-leak
 FM_IMAP_HOST=imap.gmail.com
 FM_SMTP_HOST=smtp.example.test
 FM_AFK_EMAIL_TO=${3:-$AFK_OWNER_EMAIL}
-
-
-
-
-
-
-
-
 
 ENV
   fi
@@ -113,11 +81,6 @@ run_email() {  # <home> <command>
     -u FM_SMTP_HOST -u FM_SMTP_PORT -u FM_AFK_EMAIL_TO \
     FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$REPO" \
     "$REPO/bin/fm-mail.sh" afk-email "$command" "$@"
-
-
-
-
-
 
 }
 
@@ -151,12 +114,6 @@ wait_for_file() {  # <path>
   done
   [ -e "$path" ]
 }
-
-
-
-
-
-
 
 # Pi entry requires the fixed owner destination; other harnesses keep hold-for-return.
 test_invalid_mail_ports_keep_afk_on_hold() {
@@ -210,8 +167,6 @@ PY
   pass "away email requires a Gmail receiving mailbox and nonblank transport values"
 }
 
-
-
 test_destination_is_required_for_pi_entry() {
   local home out
   home=$(make_home missing-destination)
@@ -221,9 +176,6 @@ test_destination_is_required_for_pi_entry() {
   assert_contains "$out" 'FM_AFK_EMAIL_TO must be exactly johnpoyser@gmail.com' 'missing destination refusal is explicit'
   assert_not_contains "$out" 'email reach active' 'entry is refused before any active-email announcement'
   [ ! -e "$home/state/.afk-contract" ] || fail "missing destination wrote an away record"
-
-
-
 
   home=$(make_home wrong-destination configured other@example.com)
   if out=$(run_contract "$home" FM_TEST_HARNESS=pi 2>&1); then
@@ -322,31 +274,16 @@ PY
   cp "$ROOT/bin/fm-afk-owner-email" "$REPO/bin/fm-afk-owner-email"
   pass "AFK configuration and mail authentication use the shared owner value"
 
-
-
 }
 
 test_batched_mail_redacts_secrets_and_replies_are_item_bound() {
   local home out entered body reply_body token1 token2 sent1 sent2 inbox note note_id verification
-
-
-
-
-
 
   home=$(make_home configured configured)
   out=$(run_contract "$home" FM_TEST_HARNESS=pi 2>&1) || fail "configured Pi entry failed: $out"
   assert_contains "$out" 'email reach active.' 'configured Pi entry announces email reach'
   assert_contains "$out" 'Captain-facing outcomes are emailed to the configured address' 'record announces email delivery'
   [ "$(run_email "$home" configured)" = "$AFK_OWNER_EMAIL" ] || fail "mail config did not return the fixed away-email destination"
-
-
-
-
-
-
-
-
 
   [ "$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$REPO/bin/fm-afk-contract.sh" field reach_channels)" = email ] \
     || fail "configured Pi posture did not record email reach"
@@ -393,28 +330,12 @@ test_batched_mail_redacts_secrets_and_replies_are_item_bound() {
     fail "valid reply handoff errored: $out"
   fi
 
-
-
-
-
-
-
-
-
-
-
-
   assert_contains "$out" 'received 1 verified and 0 untrusted' 'matching sender and code are accepted'
   note=$(find "$inbox" -maxdepth 1 -name '*.note' -print -quit)
   [ -n "$note" ] || fail "accepted reply did not enter the existing inbox"
   assert_contains "$(cat "$note")" 'outcome seq 1 on task ui only' 'the reply is bound to its exact outcome'
   assert_contains "$(cat "$note")" 'Please merge the UI pull request' 'the captain words reach the inbox'
   assert_not_contains "$(cat "$note")" 'Release the API now' 'Outlook-quoted content for other items is excluded'
-
-
-
-
-
 
   note_id=$(basename "$note" .note)
   verification=$(run_email "$home" verify-note "$note_id") || fail "verified note authentication failed: $verification"
@@ -423,21 +344,11 @@ import json, sys
 result = json.loads(sys.argv[1])
 assert result["email_handoff"] is True, result
 
-
-
-
-
-
 assert result["verified"] is True, result
 assert result["seq"] == 1, result
 assert result["task"] == "ui", result
 assert result["id"] == sys.argv[2], result
 PY
-
-
-
-
-
 
   [ -n "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("used_epoch", ""))' "$sent1")" ] \
     || fail "accepted code was not marked consumed"
@@ -452,7 +363,6 @@ PY
   verification=$(run_email "$home" verify-note "$note_id") \
     || fail "completed reply handoff could not be verified after return: $verification"
   assert_contains "$verification" '"verified":true' 'persisted matching handoff remains verifiable after return'
-
 
   printf '{invalid json\n' > "$sent1"
   if verification=$(run_email "$home" verify-note "$note_id" 2>&1); then
@@ -548,11 +458,6 @@ test_unreadable_token_state_keeps_reply_retryable() {
   reply_body=$(printf 'FM-AFK-REPLY %s\nanswer' "$token")
   if out=$(message "$home" 301 "$AFK_OWNER_EMAIL" 'Re: Firstmate away update' "$reply_body" 2>&1); then
 
-
-
-
-
-
     fail "unreadable token state was treated as an untrusted message: $out"
   fi
   assert_contains "$out" 'token state could not be checked; mail poll will retry' 'token-state failure keeps mail retryable'
@@ -560,12 +465,6 @@ test_unreadable_token_state_keeps_reply_retryable() {
     || fail "reply with unreadable token state created an inbox note"
   pass "unreadable reply token state leaves mail retryable"
 }
-
-
-
-
-
-
 
 test_unmatched_reply_request_id_is_untrusted_and_ackable() {
   local home note_json note_id verification out
@@ -589,18 +488,7 @@ PY
   assert_contains "$out" "acked $note_id" 'an unmatched reply-shaped note can be acknowledged'
   pass "an unmatched reply-shaped note remains an ordinary non-email inbox note"
 
-
-
-
-
-
 }
-
-
-
-
-
-
 
 test_failed_send_keeps_outcomes_queued() {
   local home entered out
@@ -693,21 +581,6 @@ test_processed_marker_cannot_suppress_outcomes() {
   pass "processed markers cannot suppress or invent outcome progress"
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 test_invalid_away_record_does_not_enable_email() {
   local home out
   home=$(make_home invalid-record configured)
@@ -728,23 +601,13 @@ test_invalid_or_unreadable_posture_suppresses_mail() {
   local home
   home=$(make_home invalid-posture-poll configured)
 
-
-
-
-
-
-
   run_contract "$home" FM_TEST_HARNESS=pi >/dev/null 2>&1 || fail "configured entry failed"
   python3 - "$REPO" "$home" <<'PY' || fail "invalid or unreadable posture did not fail closed"
-
 
 import importlib.util
 import os
 import sys
 from contextlib import redirect_stderr, redirect_stdout
-
-
-
 
 from io import StringIO
 from pathlib import Path
@@ -870,7 +733,6 @@ test_read_gates_unauthenticated_bodies_during_away() {
   run_contract "$home" FM_TEST_HARNESS=pi >/dev/null 2>&1 || fail "configured entry failed"
   cp "$home/state/.afk-contract" "$home/valid-away-record"
 
-
   fakepy="$TMP_ROOT/read-auth-python"
   mkdir -p "$fakepy"
   cat > "$fakepy/sitecustomize.py" <<'PY'
@@ -902,9 +764,6 @@ messages = {
         b"Content-Type: text/plain; charset=utf-8\r\n\r\nprivate forged Gmail pass body\r\n"
     ),
 
-
-
-
 }
 
 class FakeMailbox:
@@ -920,9 +779,6 @@ class FakeMailbox:
     def uid(self, command, uid, spec):
         if command == "search":
             return "OK", [b"1 2 3 4"]
-
-
-
 
         raw = messages[uid]
         with open(os.environ["FM_MAIL_TEST_FETCH_LOG"], "a", encoding="utf-8") as log:
@@ -947,8 +803,6 @@ PY
   assert_contains "$fetches" $'3\t(BODY.PEEK[])' 'trusted pass above a sender copy permits the body read'
   assert_not_contains "$fetches" $'4\t(BODY.PEEK[])' 'receiver failure above a forged pass blocks the body read'
 
-
-
   assert_not_contains "$fetches" $'1\t(BODY.PEEK[])' 'spoofed sender body is never fetched while away'
   assert_not_contains "$fetches" $'2\t(BODY.PEEK[])' 'unauthenticated sender body is never fetched while away'
 
@@ -972,8 +826,6 @@ path = Path(sys.argv[1])
 path.write_text(path.read_text().replace("imap.example.test", "imap.gmail.com"))
 PY
 
-
-
   printf 'version: 99\nentered_epoch: 100\nreach_channels: email\nmode: quiet\n' > "$home/state/.afk-contract"
   : > "$fetch_log"
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$REPO" \
@@ -983,16 +835,11 @@ PY
   assert_not_contains "$out" 'private unauthenticated body' 'malformed away posture still hides unauthenticated bodies'
   assert_not_contains "$out" 'private forged Gmail pass body' 'malformed posture still rejects a sender pass below receiver failure'
 
-
-
-
   fetches=$(cat "$fetch_log")
   assert_contains "$fetches" $'3\t(BODY.PEEK[])' 'malformed posture still allows the authenticated owner body'
   assert_not_contains "$fetches" $'1\t(BODY.PEEK[])' 'malformed posture never fetches a spoofed sender body'
   assert_not_contains "$fetches" $'2\t(BODY.PEEK[])' 'malformed posture never fetches an unauthenticated body'
   assert_not_contains "$fetches" $'4\t(BODY.PEEK[])' 'malformed posture never fetches a forged-pass body'
-
-
 
   rm "$home/state/.afk-contract"
   started="$TMP_ROOT/read-race.locked"
@@ -1023,8 +870,6 @@ PY
   assert_not_contains "$out" 'private attacker body' 'a posture written while read waits for the shared lock blocks unauthenticated bodies'
   fetches=$(cat "$fetch_log")
   assert_not_contains "$fetches" $'1\t(BODY.PEEK[])' 'a stale off-posture snapshot cannot fetch an unauthenticated body'
-
-
 
   rm "$home/state/.afk-contract"
   started="$TMP_ROOT/read-race.locked"
@@ -1064,9 +909,6 @@ PY
   assert_contains "$out" 'private attacker body' 'attended read still shows bodies without an away record'
   assert_contains "$out" 'private unauthenticated body' 'attended read retains normal access without an away record'
   assert_contains "$out" 'private forged Gmail pass body' 'attended read still shows bodies without away authentication gating'
-
-
-
 
   fetches=$(cat "$fetch_log")
   assert_contains "$fetches" $'1\t(BODY.PEEK[])' 'attended read fetches the first unseen body'
@@ -1128,7 +970,6 @@ test_poll_fetches_bodies_only_for_configured_sender_and_within_size_limit() {
   home=$(make_home body-scope configured johnpoyser@gmail.com)
   run_contract "$home" FM_TEST_HARNESS=pi >/dev/null 2>&1 || fail "configured entry failed"
 
-
   entered=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$REPO/bin/fm-afk-contract.sh" field entered_epoch)
   write_outcomes "$home" "$entered"
   run_email "$home" queue-unprocessed >/dev/null || fail "queueing outcomes failed"
@@ -1138,9 +979,6 @@ test_poll_fetches_bodies_only_for_configured_sender_and_within_size_limit() {
   token2=$(grep -oE 'FM-AFK-[A-Za-z0-9_-]{16}' "$CAPTURE/$send_index.txt" | sed -n '2p')
   [ -n "$token" ] && [ -n "$token2" ] || fail "sent update omitted a reply token"
   python3 - "$ROOT" "$home" "$token" "$token2" <<'PY'
-
-
-
 
 import importlib.util
 import os
@@ -1155,12 +993,6 @@ home = Path(sys.argv[2])
 reply_token = sys.argv[3]
 recovery_token = sys.argv[4]
 
-
-
-
-
-
-
 state = home / "state"
 os.environ.update({
     "FM_HOME": str(home),
@@ -1169,13 +1001,9 @@ os.environ.update({
     "FM_AFK_POSTURE": "1",
     "FM_AFK_EMAIL_TO": "johnpoyser@gmail.com",
 
-
-
-
     "FM_MAIL_USER": "owner@example.com",
     "FM_MAIL_PASS": "test-secret",
     "FM_IMAP_HOST": "imap.gmail.com",
-
 
     "FM_IMAP_PORT": "993",
     "FM_SMTP_HOST": "smtp.example.test",
@@ -1199,14 +1027,6 @@ headers = {
     "7": b"From: other@example.com\r\nAuthentication-Results: mx.google.com; dmarc=pass header.from=gmail.com\r\nSubject: other sender\r\n\r\n",
     "8": b"From: johnpoyser@gmail.com\r\nAuthentication-Results: mx.google.com; dkim=fail header.d=gmail.com; dmarc=fail header.from=gmail.com\r\nSubject: forged From\r\n\r\n",
     "9": b"From: johnpoyser@gmail.com\r\nAuthentication-Results: mx.google.com; dkim=pass header.d=attacker.com; dmarc=fail header.from=gmail.com\r\nSubject: unaligned signer\r\n\r\n",
-
-
-
-
-
-
-
-
 
 }
 bodies = {
@@ -1238,35 +1058,13 @@ bodies = {
     "8": b"From: johnpoyser@gmail.com\r\nSubject: forged From\r\nContent-Type: text/plain\r\n\r\nshould not be read",
     "9": b"From: johnpoyser@gmail.com\r\nSubject: unaligned signer\r\nContent-Type: text/plain\r\n\r\nshould not be read",
 
-
-
-
-
-
-
-
-
-
-
-
 }
 class FakeMailbox:
     untagged_responses = {"UIDVALIDITY": [b"44"]}
     body_fetches = []
     search_ids = b"1 2 3 4 6 7 8 9"
 
-
-
-
-
-
     fail_body_fetch = False
-
-
-
-
-
-
 
     def login(self, *_): pass
     def select(self, *_): pass
@@ -1275,14 +1073,6 @@ class FakeMailbox:
     def uid(self, command, uid, fetch_spec):
         if command == "search":
             return "OK", [self.search_ids]
-
-
-
-
-
-
-
-
 
         key = uid.decode()
         if "RFC822.SIZE" in fetch_spec:
@@ -1295,11 +1085,6 @@ class FakeMailbox:
             self.body_fetches.append(key)
             if self.fail_body_fetch:
                 return "NO", []
-
-
-
-
-
 
             return "OK", [(f"{key} (BODY[]<0> {{{len(bodies[key])}}}".encode(), bodies[key]), b")"]
         raise AssertionError(f"unexpected fetch spec: {fetch_spec}")
@@ -1316,18 +1101,10 @@ assert set(initial_rows) == {"1", "2", "3", "4", "6", "7", "8", "9"}, initial_ro
 assert all(initial_rows[uid][4] == "ignored" for uid in ("1", "7", "8", "9")), initial_rows
 assert initial_rows["6"][4] == "ignored", initial_rows["6"]
 
-
-
-
 assert initial_rows["3"][4] == "ok", initial_rows["3"]
 assert "body exceeds 256 KiB" in initial_rows["3"][3], initial_rows["3"]
 assert initial_rows["4"][4] == "ok", initial_rows["4"]
 assert "answer exceeds 8,000 characters" in initial_rows["4"][3], initial_rows["4"]
-
-
-
-
-
 
 assert "reply in mail UID 4 rejected; answer exceeds 8000 characters" in initial_error.getvalue()
 notes = list((state / "inbox").glob("*.note"))
@@ -1336,11 +1113,6 @@ note = notes[0].read_text(encoding="utf-8").split("--\n", 1)[1]
 words = note.split("Captain's words:\n", 1)[1].rstrip("\n")
 assert words == "a" * 8000 and len(words) == 8000, len(words)
 assert mailbox.body_fetches == ["2", "4"], mailbox.body_fetches
-
-
-
-
-
 
 mailbox.body_fetches.clear()
 mailbox.fail_body_fetch = True
@@ -1352,14 +1124,6 @@ assert poll_lines[0] == "uidvalidity\t44", poll_lines
 poll_rows = {fields[0]: fields for fields in (line.split("\t") for line in poll_lines[1:])}
 assert set(poll_rows) == {"1", "2", "3", "4", "6", "7", "8", "9"}, poll_rows
 assert all(poll_rows[uid][4] == "ignored" for uid in ("1", "6", "7", "8", "9")), poll_rows
-
-
-
-
-
-
-
-
 
 assert poll_rows["2"][4] == "degraded", poll_rows["2"]
 assert poll_rows["3"][4] == "ok", poll_rows["3"]
@@ -1376,31 +1140,16 @@ recovery_rows = {fields[0]: fields for fields in (line.split("\t") for line in r
 assert set(recovery_rows) == {"1", "2", "3", "4", "6", "7", "8", "9"}, recovery_rows
 assert all(recovery_rows[uid][4] == "ignored" for uid in ("1", "6", "7", "8", "9")), recovery_rows
 
-
-
-
-
-
 assert recovery_rows["2"][4] == "ok", recovery_rows["2"]
 assert recovery_rows["4"][4] == "ok", recovery_rows["4"]
 assert "reply in mail UID 4 rejected; answer exceeds 8000 characters" in recovery_error.getvalue()
 assert mailbox.body_fetches == ["2", "4"], mailbox.body_fetches
-
-
-
-
-
 
 recipient = os.environ.pop("FM_AFK_EMAIL_TO")
 try:
     assert mail.afk_email_context() == (None, True, False)
     (state / ".mail-seen").write_text("uidvalidity=44\n1\n2\n3\n4\n6\n7\n8\n9\n", encoding="utf-8")
     mailbox.search_ids = b"1 2 3 4 5 6 7 8 9"
-
-
-
-
-
 
     mailbox.body_fetches.clear()
     outage_output = StringIO()
@@ -1411,16 +1160,9 @@ try:
     assert set(outage_rows) == {"5"}, outage_rows
     assert outage_rows["5"][4] == "degraded", outage_rows["5"]
 
-
-
     assert mailbox.body_fetches == [], mailbox.body_fetches
 
     (state / ".mail-seen").write_text("uidvalidity=44\n1\n2\n3\n4\n5\n6\n7\n8\n9\n", encoding="utf-8")
-
-
-
-
-
 
     (state / ".mail-retry").write_text("5\n", encoding="utf-8")
     retry_output = StringIO()
@@ -1453,14 +1195,6 @@ assert "FORWARDED_ATTACHMENT_SECRET" not in recovered_note
 (state / ".mail-retry").unlink()
 mailbox.search_ids = b"1 2 3 4 6 7 8 9"
 
-
-
-
-
-
-
-
-
 real_run = mail.subprocess.run
 def fail_handoff(command, *args, **kwargs):
     if isinstance(command, list) and command[-1] == "receive-batch":
@@ -1479,26 +1213,10 @@ handoff_lines = handoff_output.getvalue().splitlines()
 handoff_rows = {fields[0]: fields for fields in (line.split("\t") for line in handoff_lines[1:])}
 assert set(handoff_rows) == {"1", "2", "3", "4", "6", "7", "8", "9"}, handoff_rows
 
-
-
-
-
-
 assert handoff_rows["2"][4] == "degraded", handoff_rows["2"]
 assert handoff_rows["4"][4] == "degraded", handoff_rows["4"]
 assert "away-email reply handoff failed" in handoff_error.getvalue(), handoff_error.getvalue()
 assert mailbox.body_fetches == ["2", "4"], mailbox.body_fetches
-
-
-
-
-
-
-
-
-
-
-
 
 (state / ".afk-contract").write_text("version: 99\nentered_epoch: 1\nreach_channels: email\n")
 mailbox.body_fetches.clear()
@@ -1636,8 +1354,6 @@ PY
   assert_contains "$out" 'received 0 verified and 1 untrusted' 'a pending-token reply remains single-use after the sent transition'
   pass "reply tokens survive the SMTP-accepted, sent-record-crash window"
 
-
-
 }
 
 test_over_limit_reply_is_explicitly_rejected() {
@@ -1768,8 +1484,6 @@ PY
   assert_contains "$out" 'received 0 verified and 1 untrusted' 'a pending-token reply remains single-use after the sent transition'
   pass "reply tokens survive the SMTP-accepted, sent-record-crash window"
 
-
-
 }
 
 test_over_limit_reply_is_explicitly_rejected() {
@@ -1899,8 +1613,6 @@ PY
     || fail "replayed reply errored: $out"
   assert_contains "$out" 'received 0 verified and 1 untrusted' 'a pending-token reply remains single-use after the sent transition'
   pass "reply tokens survive the SMTP-accepted, sent-record-crash window"
-
-
 
 }
 
@@ -2036,11 +1748,6 @@ PY
 test_expired_and_unknown_codes_are_untrusted() {
   local home out entered token sent reply_body send_index
 
-
-
-
-
-
   home=$(make_home expiry configured)
   run_contract "$home" FM_TEST_HARNESS=pi >/dev/null 2>&1 || fail "configured entry failed"
   entered=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$REPO/bin/fm-afk-contract.sh" field entered_epoch)
@@ -2050,11 +1757,6 @@ test_expired_and_unknown_codes_are_untrusted() {
   run_email "$home" flush >/dev/null || fail "flush failed"
   sent="$home/state/afk-email/sent/1.json"
   token=$(grep -oE 'FM-AFK-[A-Za-z0-9_-]{16}' "$CAPTURE/$send_index.txt" | sed -n '1p')
-
-
-
-
-
 
   python3 - "$sent" <<'PY'
 import json, sys
@@ -2091,7 +1793,6 @@ EOF
   assert_contains "$summary" 'the credential [' 'redacted summary retains its surrounding text'
   assert_contains "$summary" '] is needed' 'redacted summary retains its ending'
   assert_not_contains "$summary" 'abc' 'configured secret is absent from pending state'
-
 
   python3 - "$home/state/afk-email/pending/1.json" <<'PY'
 import json, sys
@@ -2137,8 +1838,6 @@ PY
   assert_not_contains "$summary" 'a' 'short secret cannot survive in the redacted summary or marker'
   pass "short secrets cannot erase the redaction marker or unrelated outcome text"
 }
-
-
 
 test_flush_holds_away_lock_until_send_completes() {
   local home entered started release archive_out flush_rc archive_rc
@@ -2250,68 +1949,35 @@ SH
   pass "away-email reply handoff holds the return lock through inbox delivery"
 }
 
-
-
-
-
 test_destination_is_required_for_pi_entry
 test_shared_owner_source_drives_configuration_and_sender_auth
-
-
-
-
 
 # The active feature is tested with synthetic mail and a local fake SMTP command; no network or mailbox is used.
 test_invalid_mail_ports_keep_afk_on_hold
 test_away_mail_requires_gmail_and_nonblank_settings
-
 
 test_batched_mail_redacts_secrets_and_replies_are_item_bound
 test_completed_pending_handoff_verifies_after_return_without_reopening_replies
 test_unreadable_token_state_keeps_reply_retryable
 test_unmatched_reply_request_id_is_untrusted_and_ackable
 
-
-
-
-
-
 test_failed_send_keeps_outcomes_queued
 test_live_email_posture_requires_runtime_config
 test_missing_outcome_store_is_empty_but_invalid_store_fails
 test_processed_marker_cannot_suppress_outcomes
 
-
-
-
-
-
-
-
-
-
-
-
 test_invalid_away_record_does_not_enable_email
 test_invalid_or_unreadable_posture_suppresses_mail
 test_read_gates_unauthenticated_bodies_during_away
-
-
-
-
-
 
 test_voice_inbox_note_remains_ordinary_during_away_mode
 test_poll_fetches_bodies_only_for_configured_sender_and_within_size_limit
 test_over_limit_reply_is_explicitly_rejected
 
-
-
 test_expired_and_unknown_codes_are_untrusted
 test_reply_survives_crash_after_smtp_acceptance
 test_short_configured_secret_is_redacted_before_storage_and_send
 test_redaction_marker_cannot_be_eaten_by_a_short_secret
-
 
 test_flush_holds_away_lock_until_send_completes
 test_receive_batch_holds_away_lock_through_reply_handoff

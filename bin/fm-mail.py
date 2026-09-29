@@ -29,9 +29,6 @@ from email.message import EmailMessage
 from email.utils import formatdate, getaddresses
 from pathlib import Path
 
-
-
-
 USER = os.environ['FM_MAIL_USER']
 PW = os.environ['FM_MAIL_PASS']
 IMH = os.environ['FM_IMAP_HOST']
@@ -39,7 +36,6 @@ IMP = int(os.environ['FM_IMAP_PORT'])
 STH = os.environ['FM_SMTP_HOST']
 STP = int(os.environ['FM_SMTP_PORT'])
 CTX = ssl.create_default_context()
-
 
 def mail_timeout():
     """Seconds for IMAP/SMTP sockets. Invalid or non-positive values become 20."""
@@ -52,7 +48,6 @@ def mail_timeout():
         value = 20.0
     return value
 
-
 MAIL_TIMEOUT = mail_timeout()
 socket.setdefaulttimeout(MAIL_TIMEOUT)
 
@@ -64,10 +59,8 @@ ROOT = Path(__file__).resolve().parent.parent
 STATE = Path(os.environ.get('FM_STATE_OVERRIDE') or Path(os.environ.get('FM_HOME') or ROOT) / 'state')
 OWNER_EMAIL = Path(__file__).resolve().with_name('fm-afk-owner-email').read_text(encoding='ascii').strip()
 
-
 class AfkBodyFetchError(Exception):
     pass
-
 
 @contextmanager
 def away_posture_operation():
@@ -145,7 +138,6 @@ def away_posture_operation():
         else:
             os.environ['FM_AFK_CONTRACT_LOCK_HELD'] = old_locked
 
-
 def afk_record_field(name):
     contract = os.path.join(os.path.dirname(__file__), 'fm-afk-contract.sh')
     env = os.environ.copy()
@@ -159,15 +151,9 @@ def afk_record_field(name):
     )
     return result.stdout.strip() if result.returncode == 0 else None
 
-
 def afk_email_context():
     if os.environ.get('FM_AFK_POSTURE') != '1':
         return None, False, False
-
-
-
-
-
 
     contract = os.path.join(os.path.dirname(__file__), 'fm-afk-contract.sh')
     env = os.environ.copy()
@@ -191,11 +177,6 @@ def afk_email_context():
     helper = os.path.join(os.path.dirname(__file__), 'fm-afk-email.py')
     try:
 
-
-
-
-
-
         configured = subprocess.run(
             [sys.executable, helper, 'configured'],
             stdout=subprocess.PIPE,
@@ -212,37 +193,11 @@ def afk_email_context():
         return None, True, True
     return recipient, True, False
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 def fetched_literal(data):
     for item in data or []:
         if isinstance(item, tuple) and len(item) > 1 and isinstance(item[1], bytes):
             return item[1]
     return None
-
 
 def fetched_size(data):
     for item in data or []:
@@ -253,18 +208,15 @@ def fetched_size(data):
             return int(match.group(1))
     return None
 
-
 def from_is_configured(header, recipient):
     addresses = getaddresses([header or ''])
     return len(addresses) == 1 and addresses[0][1].strip().casefold() == recipient.casefold()
-
 
 def authentication_property(clause, name):
     match = re.search(
         rf'(?<![A-Za-z0-9_-]){re.escape(name)}=([^;\s]+)', clause, re.IGNORECASE
     )
     return match.group(1).strip("\"'") if match else None
-
 
 def gmail_aligned(domain):
     domain = str(domain or '').strip().strip("\"'").casefold()
@@ -273,7 +225,6 @@ def gmail_aligned(domain):
     domain = domain.rstrip('.')
     return domain == 'gmail.com' or domain.endswith('.gmail.com')
 
-
 def gmail_authentication_pass(message):
     if IMH.casefold() != 'imap.gmail.com':
         return False
@@ -281,9 +232,6 @@ def gmail_authentication_pass(message):
     if receiver_result is None:
         return False
     clauses = str(receiver_result).split(';')
-
-
-
 
     authserv = clauses[0].strip().split()
     if not authserv or authserv[0].casefold() != 'mx.google.com':
@@ -300,13 +248,6 @@ def gmail_authentication_pass(message):
                 return True
     return False
 
-
-
-
-
-
-
-
 def dec(s):
     """Decode an RFC-2047 header to display text, tolerating malformed input."""
     if not s:
@@ -316,19 +257,16 @@ def dec(s):
     except Exception:
         return str(s)
 
-
 def clean(s):
     """Collapse tabs/newlines/CR in a header value to single spaces so a
     crafted Subject/From can never split the tab-separated poll row or inject
     a fake uid line for the bash layer; strip surrounding whitespace too."""
     return re.sub(r'[\t\r\n]+', ' ', s or '').strip()
 
-
 def connect_mailbox():
     m = imaplib.IMAP4_SSL(IMH, IMP, ssl_context=CTX, timeout=MAIL_TIMEOUT)
     m.login(USER, PW)
     return m
-
 
 def plain_body(msg):
     """Return inline text/plain content, excluding attachments and embedded mail."""
@@ -350,11 +288,6 @@ def plain_body(msg):
         if payload is None:
             return
 
-
-
-
-
-
         charset = part.get_content_charset() or 'utf-8'
         try:
             chunks.append(payload.decode(charset, 'replace'))
@@ -364,13 +297,6 @@ def plain_body(msg):
     if msg is not None:
         collect(msg)
     return '\n'.join(chunks)
-
-
-
-
-
-
-
 
 def body_preview(msg):
     """First non-empty text/plain line, else first non-empty text/html line,
@@ -395,7 +321,6 @@ def body_preview(msg):
     except Exception:
         return ''
     return ''
-
 
 def cmd_read():
     try:
@@ -425,8 +350,6 @@ def cmd_read():
                 mi = email.message_from_bytes(header_bytes)
                 trusted_sender = (
                     from_is_configured(dec(mi.get('From')), OWNER_EMAIL)
-
-
 
                     and gmail_authentication_pass(mi)
                 )
@@ -470,7 +393,6 @@ def cmd_read():
         print('fm-mail read error:', e)
         return 1
 
-
 def cmd_send(to, subj, body):
     try:
         if body == '-':
@@ -490,12 +412,10 @@ def cmd_send(to, subj, body):
         print('fm-mail send error:', e)
         return 1
 
-
 def cmd_seen(cursor_path):
     line = open(cursor_path).read().strip() if os.path.exists(cursor_path) else '(none)'
     print('cursor:', line)
     return 0
-
 
 def load_cursor(cursor_path):
     """Return (stored_generation, seen_uids) from the local cursor file."""
@@ -514,7 +434,6 @@ def load_cursor(cursor_path):
                 seen.add(line)
     return stored_gen, seen
 
-
 def load_retry(retry_path):
     """Return (retry_set, retry_order) from the local retry file."""
     retry = set()
@@ -530,7 +449,6 @@ def load_retry(retry_path):
             ordered.append(uid)
     return retry, ordered
 
-
 def load_retry_pos(pos_path, n):
     """Return the durable retry-scan start position, clamped into range."""
     if not pos_path:
@@ -543,7 +461,6 @@ def load_retry_pos(pos_path, n):
         return 0
     return pos % n
 
-
 def retry_scan_window(order, pos, window):
     """Take the bounded retry scan starting at the durable position, wrapping
     around the end of the retry file. cmd_poll_list owns when and by how much
@@ -555,7 +472,6 @@ def retry_scan_window(order, pos, window):
     if len(order) <= window:
         return rotated
     return rotated[:window]
-
 
 def save_retry_pos(pos_path, order_len, window, pos):
     """Persist the next retry-scan start position: (pos + window) mod order_len.
@@ -571,7 +487,6 @@ def save_retry_pos(pos_path, order_len, window, pos):
     with open(pos_path, 'w', encoding='utf-8') as f:
         f.write(str(next_pos) + '\n')
 
-
 def load_turn(path):
     """Return the durable alternating-turn flag (0=new,1=retry) for a single
     contended slot."""
@@ -582,7 +497,6 @@ def load_turn(path):
     except (OSError, ValueError):
         return 0
 
-
 def save_turn(path, turn):
     """Persist the alternating-turn flag. A failed write propagates so the
     poll fails closed rather than silently selecting the same class forever."""
@@ -590,7 +504,6 @@ def save_turn(path, turn):
         return
     with open(path, 'w', encoding='utf-8') as f:
         f.write(str(turn % 2) + '\n')
-
 
 def cmd_poll_list():
     # Bound the expensive header fetches: only uids not already recorded in the
@@ -647,20 +560,7 @@ def cmd_poll_list():
         retry_candidates = [u for u in retry_window if u in seen]
         recipient, afk_email_active, invalid_posture = afk_email_context()
 
-
-
-
-
-
         afk_enabled = recipient is not None
-
-
-
-
-
-
-
-
 
         afk_messages = []
         turn_path = os.environ.get('FM_MAIL_TURN', '')
@@ -716,11 +616,6 @@ def cmd_poll_list():
                     new_emitted += 1
                 continue
 
-
-
-
-
-
             # A raised or empty header FETCH is treated as a failure for THIS uid only,
             # so one bad message can never abort the bounded scan: a new uid is
             # surfaced degraded, a retry uid is left for a later scan step, and
@@ -735,11 +630,6 @@ def cmd_poll_list():
                     raise ValueError('no header data')
                 mi = email.message_from_bytes(header_bytes)
 
-
-
-
-
-
                 uid = clean(u)
                 idate = clean(dec(mi.get('Date')))
                 subj = clean(dec(mi.get('Subject')))
@@ -749,11 +639,6 @@ def cmd_poll_list():
                     or not gmail_authentication_pass(mi)
                 )
                 if afk_enabled and not ignored and from_is_configured(fr, recipient):
-
-
-
-
-
 
                     try:
                         message_size = fetched_size(msg)
@@ -777,11 +662,6 @@ def cmd_poll_list():
                             subj = clean(
                                 f'[away-mode reply not processed: message body exceeds 256 KiB] {subj}')
 
-
-
-
-
-
                     except AfkBodyFetchError:
                         raise
                     except Exception as error:
@@ -792,17 +672,6 @@ def cmd_poll_list():
                 out.append((uid, idate, fr, subj, 'degraded'))
                 new_emitted += 1
                 continue
-
-
-
-
-
-
-
-
-
-
-
 
             except Exception:
                 if afk_email_active:
@@ -822,11 +691,6 @@ def cmd_poll_list():
                 continue
             status = 'ignored' if ignored else ('retry' if is_retry else 'ok')
             if not ignored and afk_email_active and not afk_enabled:
-
-
-
-
-
 
                 status = 'degraded'
             out.append((uid, idate, fr, subj, status))
@@ -902,17 +766,6 @@ def cmd_poll_list():
                 if result.stderr:
                     sys.stderr.write(result.stderr)
 
-
-
-
-
-
-
-
-
-
-
-
         print('uidvalidity\t%s' % uidv)
         for uid, idate, fr, subj, status in out:
             print('%s\t%s\t%s\t%s\t%s' % (uid, idate, fr, subj, status))
@@ -978,7 +831,6 @@ def cmd_poll_list():
             except Exception:
                 pass
 
-
 def main():
     cmd = sys.argv[1] if len(sys.argv) > 1 else ''
     if cmd in ('read', 'poll_list'):
@@ -997,7 +849,6 @@ def main():
     if cmd == 'seen':
         return cmd_seen(sys.argv[2] if len(sys.argv) > 2 else '')
     raise SystemExit('unknown command')
-
 
 if __name__ == '__main__':
     sys.exit(main())

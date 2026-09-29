@@ -13,7 +13,6 @@
 # only when the full mail plane is configured, otherwise the exact
 # hold-for-return fallback remains in force.
 
-
 #
 # AWAY OR QUIET. The same record also backs daemon-backed quiet mode, which a
 # quiet entry marks with `mode: quiet`: the captain is present there, so a quiet
@@ -26,9 +25,6 @@
 # entry over no record or over a quiet record writes one: an away entry over a
 # quiet record, a refresh included, rewrites it as away, and a quiet entry never
 # turns a standing away record quiet (the captain's return comes first).
-
-
-
 
 #
 # ENTRY IS THE GO. `/afk` itself is the captain's go: `enter` writes the record
@@ -414,7 +410,6 @@ fm_afk_contract_render_readback() {  # <path>
     esac
   fi
 
-
   words=$(fm_afk_contract_read_words "$path"; rc=$?; printf x; exit "$rc") || return 1
   words=${words%x}
   if [ -n "$words" ]; then
@@ -433,7 +428,6 @@ fm_afk_contract_render_announcement() {  # <path>
       "$(fm_afk_contract_read_field "$path" confirmed)" "$FM_AFK_CONTRACT_QUIET_HOLDS_NOTHING"
     return 0
   fi
-
 
   expected=$(fm_afk_contract_read_field "$path" expected_return)
   words=$(fm_afk_contract_read_words "$path"; rc=$?; printf x; exit "$rc") || return 1
@@ -533,13 +527,10 @@ fm_afk_contract_cmd_enter() {
   local record legacy now now_epoch session_entered session_entered_epoch staged archived archived_tmp standing=''
   local harness destination owner_email require_owner_destination
 
-
   record=$(fm_afk_contract_path)
   legacy=$(fm_afk_contract_legacy_proposal_path)
   FM_AFK_CONTRACT_ENTRY_MODE=away
   [ "${FM_AFK_MODE:-}" != quiet ] || FM_AFK_CONTRACT_ENTRY_MODE=quiet
-
-
 
   harness=$("$FM_AFK_CONTRACT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
   require_owner_destination=0
@@ -549,7 +540,12 @@ fm_afk_contract_cmd_enter() {
   if [ -f "$record" ] && [ "$(fm_afk_contract_read_field "$record" reach_channels)" = email ]; then
     require_owner_destination=1
   fi
-  if [ "$require_owner_destination" -eq 1 ]; then
+  if [ -f "$record" ]; then
+    fm_afk_contract_validate "$record" || return 1
+    standing=$(fm_afk_contract_record_mode "$record")
+    [ "$standing" = quiet ] || FM_AFK_CONTRACT_ENTRY_MODE=away
+  fi
+  if [ "$require_owner_destination" -eq 1 ] && [ "$FM_AFK_CONTRACT_ENTRY_MODE" = away ]; then
     if [ ! -r "$FM_AFK_CONTRACT_DIR/fm-afk-owner-email" ]; then
       fm_afk_contract_log 'away-email owner identity is unavailable; refusing entry'
       return 1
@@ -564,17 +560,8 @@ fm_afk_contract_cmd_enter() {
     )
     if [ "$destination" != "$owner_email" ]; then
       fm_afk_contract_log "FM_AFK_EMAIL_TO must be exactly $owner_email for Pi away mode; refusing entry"
-
-
       return 1
     fi
-  fi
-  if [ -f "$record" ]; then
-
-
-    fm_afk_contract_validate "$record" || return 1
-    standing=$(fm_afk_contract_record_mode "$record")
-    [ "$standing" = quiet ] || FM_AFK_CONTRACT_ENTRY_MODE=away
   fi
   if [ -f "$record" ] && [ -z "$WORDS" ] && [ "$standing" = "$FM_AFK_CONTRACT_ENTRY_MODE" ]; then
     if [ "$standing" = quiet ]; then
@@ -606,11 +593,6 @@ fm_afk_contract_cmd_enter() {
   case "$harness" in
     pi|pi-signed)
       if [ -x "$FM_AFK_CONTRACT_DIR/fm-mail.sh" ] && "$FM_AFK_CONTRACT_DIR/fm-mail.sh" afk-email configured >/dev/null 2>&1; then
-
-
-
-
-
 
         FM_AFK_CONTRACT_REACH_CHANNELS=email
         FM_AFK_CONTRACT_REACH_ANNOUNCED='Captain-facing outcomes are emailed to the configured address; replies with a current item code reach the away session.'

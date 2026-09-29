@@ -211,7 +211,11 @@ test_poll_records_ignored_and_deferred_without_waking() {
   cat > "$fakebin/python3" <<'SH'
 #!/usr/bin/env bash
 printf 'uidvalidity\t54321\n'
-printf '41\t\tjohnpoyser@gmail.com\tforged\tignored\n'
+if [ -e "$FM_HOME/returned" ]; then
+  printf '41\t\tattacker@example.com\tforged\tok\n'
+else
+  printf '41\t\tjohnpoyser@gmail.com\tforged\tignored\n'
+fi
 printf '42\t\t(unverified sender)\t\tdeferred\n'
 printf '43\t\tjohnpoyser@gmail.com\tverified\tok\n'
 SH
@@ -224,7 +228,7 @@ SH
   assert_not_contains "$out" "woke for 41" "forged sender is never woken"
   assert_not_contains "$out" "woke for 42" "unverified sender is never woken"
   cursor=$(cat "$ignored_home/state/.mail-seen")
-  assert_contains "$cursor" "41" "ignored uid is durably cursor-recorded"
+  assert_not_contains "$cursor" "41" "away-ignored uid remains unseen for attended polling"
   assert_contains "$cursor" "42" "unverified uid is durably cursor-recorded"
   retry=$(cat "$ignored_home/state/.mail-retry")
   assert_contains "$retry" "42" "unverified uid remains retryable without a wake"
@@ -233,13 +237,17 @@ SH
   assert_not_contains "$wakeq" "forged" "forged From never reaches the wake queue"
   assert_not_contains "$wakeq" "unverified" "unverified mail never reaches the wake queue"
 
+  touch "$ignored_home/returned"
   rc=0
   out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
     FM_HOME="$ignored_home" PATH="$fakebin:$PATH" "$MAIL" poll 2>&1) || rc=$?
-  expect_code 0 "$rc" "repeat poll of ignored and deferred rows must succeed"
+  expect_code 0 "$rc" "attended poll after return must succeed"
+  assert_contains "$out" "woke for 41" "mail ignored while away is reported after return"
   assert_not_contains "$out" "woke for 43" "already surfaced owner mail never re-wakes"
-  assert_contains "$out" "no new mail" "silent rows do not create durable wakes"
-  pass "fm-mail: ignored and unverified messages stay silent"
+  assert_contains "$(cat "$ignored_home/state/.mail-seen")" "41" "attended delivery records the formerly ignored uid"
+  wakeq=$(cat "$ignored_home/state/.wake-queue")
+  assert_contains "$wakeq" "mail from attacker@example.com - forged" "attended polling reports the message after away filtering ends"
+  pass "fm-mail: away-ignored mail remains unseen and surfaces after return"
 }
 
 test_poll_resurfaces_uid_after_generation_change() {

@@ -103,7 +103,6 @@ fi
 for r in FM_MAIL_USER FM_MAIL_PASS FM_IMAP_HOST FM_SMTP_HOST; do
   if [ "${1:-}" != afk-email ] && ! [[ "${!r:-}" =~ [^[:space:]] ]]; then
 
-
     echo "fm-mail: missing required \$FM_HOME/.env value: $r" >&2
     echo "fm-mail: add $r (and the other three FM_MAIL_* values) to $ENV_FILE" >&2
     exit 1
@@ -135,9 +134,6 @@ validate_mail_port() {
 if [ "${1:-}" != afk-email ] || [ "${2:-}" != destination ]; then
   validate_mail_port FM_IMAP_PORT "$IMAP_PORT" || exit 1
   validate_mail_port FM_SMTP_PORT "$SMTP_PORT" || exit 1
-
-
-
 
 fi
 MAIL_MAX_WAKES="${FM_MAIL_POLL_MAX_WAKES:-20}"
@@ -187,12 +183,6 @@ TURN="$STATE_DIR/.mail-turn"
 # environment so credentials never reach argv.
 run_py() {
   env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE_DIR" FM_MAIL_USER="$FM_MAIL_USER" FM_MAIL_PASS="$FM_MAIL_PASS" \
-
-
-
-
-
-
   FM_IMAP_HOST="$IMAP_HOST" FM_IMAP_PORT="$IMAP_PORT" \
   FM_SMTP_HOST="$SMTP_HOST" FM_SMTP_PORT="$SMTP_PORT" \
   FM_MAIL_CURSOR="$CURSOR" FM_MAIL_RETRY="$RETRY" \
@@ -219,14 +209,6 @@ fm-mail.sh send <to> <subject> <body | ->
 fm-mail.sh poll
 fm-mail.sh status
 fm-mail.sh afk-email destination|configured|queue-unprocessed|flush|verify-note <id>
-
-
-
-
-
-
-
-
 
 EOF
 }
@@ -593,16 +575,8 @@ mail_poll() {
     need_wake=0
     case "$status" in
       ignored)
-        if ! mail_cursor_add "$uid"; then
-          echo "fm-mail: could not record ignored uid $uid; retried on next poll" >&2
-          fm_lock_release "$STATE_DIR/.mail-seen.lock"
-          return 1
-        fi
-        if ! mail_retry_remove "$uid"; then
-          echo "fm-mail: could not clear ignored uid $uid from retry set" >&2
-          fm_lock_release "$STATE_DIR/.mail-seen.lock"
-          return 1
-        fi
+        # Away-only filtering must not consume the UID: attended polling can
+        # surface it after the captain returns.
         ;;
       deferred)
         if ! mail_retry_add "$uid" || ! mail_cursor_add "$uid"; then

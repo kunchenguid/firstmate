@@ -16,11 +16,6 @@ import time
 from contextlib import contextmanager
 from email.utils import getaddresses
 
-
-
-
-
-
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -37,18 +32,10 @@ MAX_BATCH_BYTES = 24000
 MAX_REPLY_CHARS = 8000
 OWNER_EMAIL = Path(__file__).resolve().with_name("fm-afk-owner-email").read_text(encoding="ascii").strip()
 
-
-
 TOKEN_RE = re.compile(r"^FM-AFK-[A-Za-z0-9_-]{16}$")
-
 
 class AfkContractLockError(RuntimeError):
     pass
-
-
-
-
-
 
 NOTE_ID_RE = re.compile(r"^(?!.*\.\.)[A-Za-z0-9._-]+$")
 REPLY_LINE_RE = re.compile(r"^FM-AFK-REPLY (FM-AFK-[A-Za-z0-9_-]{16})$")
@@ -59,7 +46,6 @@ SECRET_ENV_RE = re.compile(
     re.IGNORECASE,
 )
 
-
 def valid_mail_port(value):
     if not value.isascii() or not value.isdigit():
         return False
@@ -67,12 +53,6 @@ def valid_mail_port(value):
     return bool(normalized) and (
         len(normalized) < 5 or len(normalized) == 5 and normalized <= "65535"
     )
-
-
-
-
-
-
 
 def mail_configuration():
     required = ["FM_MAIL_USER", "FM_MAIL_PASS", "FM_IMAP_HOST", "FM_SMTP_HOST"]
@@ -90,18 +70,13 @@ def mail_configuration():
         not recipient
         or recipient != OWNER_EMAIL
 
-
-
-
         or not EMAIL_RE.fullmatch(recipient)
         or len(addresses) != 1
         or addresses[0][1].casefold() != recipient.casefold()
     ):
         return None
 
-
     return {"recipient": recipient}
-
 
 def contract_value(command, field=None):
     script = ROOT / "bin" / "fm-afk-contract.sh"
@@ -117,7 +92,6 @@ def contract_value(command, field=None):
     )
     return result.stdout.strip() if result.returncode == 0 else None
 
-
 def live_record():
     if contract_value("validate") is None:
         return None
@@ -129,7 +103,6 @@ def live_record():
         return None
     return {"entered_epoch": entered}
 
-
 @contextmanager
 def afk_state_lock():
     AFK_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -138,7 +111,6 @@ def afk_state_lock():
         os.chmod(LOCK, 0o600)
         fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
         yield
-
 
 @contextmanager
 def afk_contract_lock():
@@ -179,19 +151,6 @@ def afk_contract_lock():
             process.wait()
         process.stdout.close()
 
-
-
-
-
-
-
-
-
-
-
-
-
-
 def atomic_json(path, value):
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(path.parent, 0o700)
@@ -208,23 +167,19 @@ def atomic_json(path, value):
         except FileNotFoundError:
             pass
 
-
 def read_json(path):
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
 
-
 def token_digest(token):
     return hashlib.sha256(token.encode("ascii")).hexdigest()
-
 
 def safe_text(value, limit=4000):
     value = re.sub(r"[\r\n\t]+", " ", str(value or ""))
     value = "".join(char for char in value if char >= " " and char != "\x7f")
     return value.strip()[:limit]
-
 
 def redact_secrets(text):
     secret_values = {
@@ -244,17 +199,10 @@ def redact_secrets(text):
         )
         replacement = marker * 3
 
-
     for secret in sorted(secret_values, key=len, reverse=True):
         text = text.replace(secret, replacement)
 
-
-
-
-
-
     return text
-
 
 def outcomes_by_seq():
     result = subprocess.run(
@@ -275,14 +223,8 @@ def outcomes_by_seq():
             rows[row["seq"]] = row
     except ValueError:
 
-
-
-
-
-
         return None
     return rows
-
 
 def outcome_marker(path):
     try:
@@ -306,7 +248,6 @@ def outcome_marker(path):
         raise ValueError("outcome marker is out of range")
     return marker
 
-
 def live_mail_context():
     posture = live_record()
     if posture is None:
@@ -316,18 +257,12 @@ def live_mail_context():
         print("fm-afk-email: mail configuration is missing for live email away posture", file=sys.stderr)
     return posture, config
 
-
 def queue_unprocessed():
     posture, config = live_mail_context()
     if posture is None:
         return 0
     if config is None:
         return 1
-
-
-
-
-
 
     rows = outcomes_by_seq()
     if rows is None:
@@ -342,11 +277,6 @@ def queue_unprocessed():
     except ValueError:
         print("fm-afk-email: outcome markers are invalid; pending email was not queued", file=sys.stderr)
         return 1
-
-
-
-
-
 
     PENDING.mkdir(mode=0o700, parents=True, exist_ok=True)
     SENT.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -370,11 +300,6 @@ def queue_unprocessed():
             "task": safe_text(redact_secrets(str(row.get("task", ""))), 160),
             "summary": safe_text(redact_secrets(str(row.get("summary", "")))),
 
-
-
-
-
-
             "token": token,
             "token_hash": token_digest(token),
             "away_epoch": posture["entered_epoch"],
@@ -386,7 +311,6 @@ def queue_unprocessed():
     print(f"queued {queued} away-email item(s)")
     return 0
 
-
 def flush():
     try:
         with afk_contract_lock():
@@ -395,13 +319,7 @@ def flush():
         print(f"fm-afk-email: {error}; no email was sent", file=sys.stderr)
         return 1
 
-
 def flush_while_contract_locked():
-
-
-
-
-
 
     posture, config = live_mail_context()
     if posture is None:
@@ -409,14 +327,6 @@ def flush_while_contract_locked():
     if config is None:
         return 1
     with afk_state_lock():
-
-
-
-
-
-
-
-
 
         candidates = []
         for path in sorted(PENDING.glob("*.json"), key=lambda item: int(item.stem) if item.stem.isdigit() else 0):
@@ -436,11 +346,6 @@ def flush_while_contract_locked():
                 ):
                     if field in sent_item:
                         item[field] = sent_item[field]
-
-
-
-
-
 
             candidates.append((path, item))
             if len(candidates) >= MAX_BATCH_ITEMS:
@@ -481,11 +386,6 @@ def flush_while_contract_locked():
             item["send_expires_epoch"] = send_started_epoch + TOKEN_TTL
             atomic_json(path, item)
 
-
-
-
-
-
         lines.extend([
             "Replies from the configured address with an unexpired item code are treated as your words for that item only.",
             "Other messages are untrusted and cannot answer an item.",
@@ -517,11 +417,6 @@ def flush_while_contract_locked():
                 if field in item:
                     sent_item[field] = item[field]
 
-
-
-
-
-
             atomic_json(SENT / path.name, sent_item)
             path.unlink(missing_ok=True)
         temporary = AFK_DIR / f".last-sent.{os.getpid()}.tmp"
@@ -530,7 +425,6 @@ def flush_while_contract_locked():
         os.replace(temporary, last_sent_path)
         print(f"sent {len(included)} away-email item(s)")
     return 0
-
 
 def extract_reply(body):
     lines = str(body or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
@@ -550,16 +444,10 @@ def extract_reply(body):
             or QUOTED_HEADER_RE.match(stripped)
         ):
 
-
-
-
-
-
             break
         answer_lines.append(line)
     answer = "\n".join(answer_lines).strip()
     return match.group(1), answer
-
 
 def inbox_identity(note_id):
     result = subprocess.run(
@@ -583,7 +471,6 @@ def inbox_identity(note_id):
         return None
     return identity
 
-
 def inbox_note_body(note_id):
     result = subprocess.run(
         [str(ROOT / "bin" / "fm-inbox.sh"), "show", note_id],
@@ -593,7 +480,6 @@ def inbox_note_body(note_id):
         env=os.environ.copy(),
     )
     return result.stdout if result.returncode == 0 else None
-
 
 def inbox_note(request_id, body):
     command = [str(ROOT / "bin" / "fm-inbox.sh"), "note", "--request-id", request_id, "--json", "-"]
@@ -623,7 +509,6 @@ def inbox_note(request_id, body):
         print("fm-afk-email: inbox handoff could not be confirmed; mail poll will retry", file=sys.stderr)
         return None
     return note_id
-
 
 def validate_handoff_state_item(path, store):
     try:
@@ -671,11 +556,6 @@ def validate_handoff_state_item(path, store):
             or item["sent_epoch"] != item["send_started_epoch"]
             or item["expires_epoch"] != item["send_expires_epoch"]
         ):
-
-
-
-
-
 
             raise ValueError("away-email state is malformed")
     else:
@@ -738,9 +618,7 @@ def validate_handoff_state_item(path, store):
             raise ValueError("away-email state is malformed")
     return item
 
-
 def handoff_record(request_id):
-
 
     requested_id = request_id if isinstance(request_id, str) and request_id else None
     matches = []
@@ -760,7 +638,6 @@ def handoff_record(request_id):
                     requested_id is not None
                     and item.get("handoff_request_id") == requested_id
 
-
                 ):
                     matches.append(item)
     if not matches:
@@ -773,21 +650,9 @@ def handoff_record(request_id):
             raise ValueError("away-email handoff state is ambiguous")
     return reference
 
-
-
-
-
-
-
-
 def verify_note(note_id):
     if not isinstance(note_id, str) or not NOTE_ID_RE.fullmatch(note_id):
         print(json.dumps({"email_handoff": False, "verified": False}, separators=(",", ":")))
-
-
-
-
-
 
         return 0
     identity = inbox_identity(note_id)
@@ -800,28 +665,14 @@ def verify_note(note_id):
         return 0
     posture = live_record()
 
-
-
-
-
-
     try:
         item = handoff_record(request_id)
-
 
     except (OSError, ValueError):
         print("fm-afk-email: verified reply state could not be read", file=sys.stderr)
         return 1
     if item is None:
         print(json.dumps({"email_handoff": False, "verified": False}, separators=(",", ":")))
-
-
-
-
-
-
-
-
 
         return 0
     if posture is None and (
@@ -845,11 +696,6 @@ def verify_note(note_id):
     print(json.dumps({
         "email_handoff": True,
 
-
-
-
-
-
         "verified": True,
         "id": note_id,
         "request_id": request_id,
@@ -857,13 +703,6 @@ def verify_note(note_id):
         "task": item["task"],
     }, separators=(",", ":")))
     return 0
-
-
-
-
-
-
-
 
 def token_record(token):
     digest = token_digest(token)
@@ -883,11 +722,6 @@ def token_record(token):
                 continue
             if store == "pending":
 
-
-
-
-
-
                 started = item.get("send_started_epoch")
                 expires = item.get("send_expires_epoch")
                 if not isinstance(started, int) or not isinstance(expires, int):
@@ -901,13 +735,7 @@ def token_record(token):
         if matches:
             return matches[0]
 
-
-
-
-
-
     return None, None
-
 
 def receive_batch():
     if os.environ.get("FM_AFK_CONTRACT_LOCK_HELD") == "1":
@@ -920,24 +748,13 @@ def receive_batch():
         print(f"fm-afk-email: {error}; reply was not handed off", file=sys.stderr)
         return 1
 
-
 def receive_batch_while_contract_locked():
-
-
-
-
-
 
     posture, config = live_mail_context()
     if posture is None:
         return 0
     if config is None:
         return 1
-
-
-
-
-
 
     try:
         messages = json.load(sys.stdin)
@@ -950,13 +767,7 @@ def receive_batch_while_contract_locked():
     with afk_state_lock():
         return receive_messages(messages, posture, config)
 
-
 def receive_messages(messages, posture, config):
-
-
-
-
-
 
     accepted = 0
     untrusted = 0
@@ -975,11 +786,6 @@ def receive_messages(messages, posture, config):
         if token and len(answer) > MAX_REPLY_CHARS:
             print(f"fm-afk-event\treply-rejected\t{uid}\tanswer-too-long", file=sys.stderr)
 
-
-
-
-
-
             print(
                 f"fm-afk-email: reply in mail UID {uid} rejected; answer exceeds {MAX_REPLY_CHARS} characters",
                 file=sys.stderr,
@@ -991,14 +797,6 @@ def receive_messages(messages, posture, config):
         except (OSError, ValueError):
             print("fm-afk-email: away-email token state could not be checked; mail poll will retry", file=sys.stderr)
             return 1
-
-
-
-
-
-
-
-
 
         now = int(time.time())
         if item and item.get("used_mail_key") == mail_key:
@@ -1013,11 +811,6 @@ def receive_messages(messages, posture, config):
             and not item.get("used_epoch")
             and bool(answer.strip())
             and item.get("handoff_mail_key", mail_key) == mail_key
-
-
-
-
-
 
         )
         if valid:
@@ -1034,11 +827,6 @@ def receive_messages(messages, posture, config):
             if "send_started_epoch" in item:
                 item.pop("sent_epoch", None)
                 item.pop("expires_epoch", None)
-
-
-
-
-
 
             item["handoff_request_id"] = request_id
             item["handoff_mail_key"] = mail_key
@@ -1057,14 +845,8 @@ def receive_messages(messages, posture, config):
         untrusted += 1
         continue
 
-
-
-
-
-
     print(f"received {accepted} verified and {untrusted} untrusted away-email message(s)")
     return 0
-
 
 def main():
     command = sys.argv[1] if len(sys.argv) > 1 else ""
@@ -1078,11 +860,6 @@ def main():
         print(config["recipient"])
         return 0
 
-
-
-
-
-
     if command == "queue-unprocessed":
         return queue_unprocessed()
     if command == "flush":
@@ -1093,16 +870,7 @@ def main():
         return verify_note(sys.argv[2])
     print("usage: fm-afk-email.py destination|configured|queue-unprocessed|flush|receive-batch|verify-note <id>", file=sys.stderr)
 
-
-
-
-
-
-
-
-
     return 2
-
 
 if __name__ == "__main__":
     sys.exit(main())
