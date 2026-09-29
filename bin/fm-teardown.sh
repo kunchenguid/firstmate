@@ -116,7 +116,8 @@
 # task's: whatever unlanded work it had in that slot was already destroyed when
 # the pool handed the slot on. Refusing instead would strand the record, because
 # bin/fm-backend.sh's endpoint validation refuses an empty or missing worktree=
-# unconditionally, so there is no line an operator could clear to get past it.
+# on every record but a scout's explicit no-worktree marker, so there is no line
+# an operator could clear to get a ship record past it.
 # A claim that cannot be read proves nothing either way and refuses; inspect or
 # repair the claim file at the printed path and re-run - never remove it, since
 # an absent claim proceeds and would return a slot that may be another task's. An
@@ -126,6 +127,18 @@
 # Why Treehouse's own state cannot answer this for crewmate slots, and why the
 # claim file sits on top of it, is owned by bin/fm-wake-lib.sh's slot-owner
 # claim comment.
+# A scout record whose worktree= line was deliberately replaced by the explicit
+# no-worktree marker - for example after its former pool slot was found to
+# belong to another task - is cleaned up without any local copy.
+# bin/fm-backend.sh's fm_backend_meta_no_worktree owns the marker, its exact
+# shape, and why only a non-Orca scout may carry it; a record that merely lacks
+# worktree= still refuses. Teardown validates and closes the recorded endpoint
+# exactly as strictly as for any task, keeps data/<id>/ and the scout report
+# gate, removes the volatile state and record, and lands the backlog transition,
+# while every step that would read or touch a worktree or Treehouse slot is
+# skipped: no no-mistakes run conclusion, no process kill under a worktree (only
+# the per-task tasktmp root is reaped), no branch or hook removal in a worktree,
+# no Treehouse return, and no slot claim change.
 # The recorded endpoint's exact task identity and the record's spawn incarnation
 # are validated separately
 # before cleanup. Its current working directory is only incidental process
@@ -1114,6 +1127,18 @@ else
   BACKEND=$FM_BACKEND_VALIDATED_BACKEND
   T=$FM_BACKEND_VALIDATED_TARGET
   [ "$BACKEND" != orca ] || T_ORCA=$T
+fi
+# A scout record carrying the explicit no-worktree marker (owned by
+# bin/fm-backend.sh's fm_backend_meta_no_worktree, which the validator above
+# already enforced) names no local copy, so teardown_owns_worktree skips every
+# step that would read or touch one. A malformed marker refuses here as well,
+# covering the windowless path that skipped the validator.
+TEARDOWN_NO_WORKTREE=0
+if fm_backend_meta_no_worktree "$META" "$ID"; then
+  TEARDOWN_NO_WORKTREE=1
+  WT=
+elif [ "$?" -ne 1 ]; then
+  exit 1
 fi
 # The recorded backend, including every sibling its adapter sources, has to
 # be readable before the first destructive step. --force does not override
@@ -2450,7 +2475,7 @@ require_owned_task_worktree_slot() {
 }
 
 teardown_owns_worktree() {
-  [ "$TEARDOWN_SLOT_REASSIGNED" != 1 ]
+  [ "$TEARDOWN_NO_WORKTREE" != 1 ] && [ "$TEARDOWN_SLOT_REASSIGNED" != 1 ]
 }
 
 firstmate_home_has_treehouse_slot() {
@@ -3839,6 +3864,8 @@ if [ -d "$STATE" ]; then
 fi
 if [ "$TEARDOWN_LEGACY_ACCEPTED" = 1 ]; then
   echo "teardown $ID complete (window ${T:-none}, worktree $WT, legacy record accepted without spawn_gen: endpoint $TEARDOWN_LEGACY_ENDPOINT, incarnation $TEARDOWN_META_SPAWN_GEN)"
+elif [ "$TEARDOWN_NO_WORKTREE" = 1 ]; then
+  echo "teardown $ID complete (window ${T:-none}; record marks no worktree, so no local copy or pool slot was touched)"
 elif teardown_owns_worktree; then
   echo "teardown $ID complete (window ${T:-none}, worktree $WT)"
 else

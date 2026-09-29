@@ -644,6 +644,57 @@ test_record_bound_to_another_task_is_refused() {
   pass "fm-control: a record whose endpoint identity names another task is refused"
 }
 
+# rewrite_worktree_line <case-dir> <id> <replacement-line-or-empty>: replace
+# the record's worktree= line, or drop it when the replacement is empty.
+rewrite_worktree_line() {
+  local meta="$1/home/state/$2.meta"
+  { grep -v '^worktree=' "$meta" || true; [ -z "$3" ] || printf '%s\n' "$3"; } > "$meta.tmp"
+  mv "$meta.tmp" "$meta"
+}
+
+# A record with no worktree= still refuses every verb; only the explicit
+# scout-only no_worktree=1 marker lets interrupt and exit reach the recorded
+# endpoint, and relaunch still refuses for want of a local copy.
+test_no_worktree_record_needs_the_explicit_scout_marker() {
+  local dir out rc
+  dir=$(new_case no-worktree-missing)
+  add_task "$dir" t1 claude scout
+  alive_as "$dir" claude
+  rewrite_worktree_line "$dir" t1 ""
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 1 "$rc" "a record with no worktree= should still refuse"
+  assert_contains "$out" "missing, empty, or ambiguous worktree identity" \
+    "the default refusal should be unchanged"
+  [ -z "$(literals "$dir")" ] || fail "a record with no worktree= must receive no bytes"
+
+  dir=$(new_case no-worktree-ship)
+  add_task "$dir" t1 claude ship
+  alive_as "$dir" claude
+  rewrite_worktree_line "$dir" t1 "no_worktree=1"
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 1 "$rc" "a ship record may not use the no-worktree marker"
+  assert_contains "$out" "is not exactly kind=scout" "the refusal should name the scout-only limit"
+  [ -z "$(literals "$dir")" ] || fail "a ship record carrying the marker must receive no bytes"
+
+  dir=$(new_case no-worktree-scout)
+  add_task "$dir" t1 claude scout
+  alive_as "$dir" claude
+  rewrite_worktree_line "$dir" t1 "no_worktree=1"
+  out=$(run_control "$dir" t1 interrupt); rc=$?
+  expect_code 0 "$rc" "interrupt should reach a marked scout's endpoint"$'\n'"$out"
+  [ "$(keys_sent "$dir")" = Escape ] || fail "interrupt should send the verified key, got: $(keys_sent "$dir")"
+  out=$(run_control "$dir" t1 relaunch --note "resume"); rc=$?
+  [ "$rc" -ne 0 ] || fail "relaunch should refuse a record with no worktree"
+  assert_contains "$out" "has no recorded worktree" "relaunch should name the missing local copy"
+  [ -z "$(literals "$dir")" ] || fail "a refused relaunch must type nothing"
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "exit should stop a marked scout's agent"$'\n'"$out"
+  [ "$(literals "$dir")" = /exit ] || fail "exit should type the verified command, got: $(literals "$dir")"
+  assert_contains "$out" "stopped t1 harness=claude" "exit should report the stop"
+  assert_contains "$out" "worktree=none" "exit should report that no worktree is recorded"
+  pass "fm-control: a record with no worktree refuses unless it is a scout carrying the explicit marker, which interrupt and exit honor and relaunch still refuses"
+}
+
 # A remotely placed secondmate's agent runs on another host, so none of the
 # postconditions this plane verifies could be read for it here. Endpoint
 # validation would refuse the record anyway - `window=remote:<id>` can never
@@ -1089,6 +1140,7 @@ test_window_label_is_refused_with_the_exact_id
 test_explicit_endpoint_is_refused
 test_unknown_task_is_refused
 test_record_bound_to_another_task_is_refused
+test_no_worktree_record_needs_the_explicit_scout_marker
 test_remote_secondmate_is_refused_by_placement
 test_interrupt_and_exit_lock_before_task_state_resolution
 test_verb_allowlist_is_closed

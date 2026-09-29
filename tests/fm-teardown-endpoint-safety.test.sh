@@ -983,6 +983,115 @@ test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot() {
   pass "fm-teardown: a pool slot claimed by another task is left alone while the task's own cleanup finishes"
 }
 
+# A record with no worktree= keeps refusing; the only way past it is the
+# explicit scout-only no_worktree=1 marker, and every other shape of that
+# marker refuses before any mutation or runtime call.
+test_missing_worktree_refuses_unless_explicitly_marked() {
+  local dir id=no-wt-task
+
+  dir=$(make_case no-worktree-unmarked)
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "project=$dir/project" "kind=scout"
+  assert_refused_without_mutation "$dir" "$id" "unmarked missing worktree"
+  assert_contains "$(cat "$dir/stderr")" "missing, empty, or ambiguous worktree identity" \
+    "a missing worktree= should keep today's refusal"
+
+  dir=$(make_case no-worktree-ship)
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "no_worktree=1" "project=$dir/project" "kind=ship"
+  assert_refused_without_mutation "$dir" "$id" "ship carrying the no-worktree marker"
+  assert_contains "$(cat "$dir/stderr")" "is not exactly kind=scout" \
+    "a ship should never use the no-worktree marker to skip its landed-work check"
+
+  dir=$(make_case no-worktree-kindless)
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "no_worktree=1" "project=$dir/project"
+  assert_refused_without_mutation "$dir" "$id" "kindless record carrying the no-worktree marker"
+
+  dir=$(make_case no-worktree-with-worktree)
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" "no_worktree=1" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  assert_refused_without_mutation "$dir" "$id" "no-worktree marker beside a worktree= line"
+
+  dir=$(make_case no-worktree-bad-value)
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "no_worktree=yes" "project=$dir/project" "kind=scout"
+  assert_refused_without_mutation "$dir" "$id" "no-worktree marker with a value other than 1"
+
+  dir=$(make_case no-worktree-duplicate)
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" "no_worktree=1" \
+    "no_worktree=1" "project=$dir/project" "kind=scout"
+  assert_refused_without_mutation "$dir" "$id" "duplicated no-worktree marker"
+
+  dir=$(make_case no-worktree-orca)
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "terminal=term-7" "backend=orca" \
+    "orca_worktree_id=wt-9::$dir/worktree" "no_worktree=1" \
+    "project=$dir/project" "kind=scout"
+  assert_refused_without_mutation "$dir" "$id" "Orca record carrying the no-worktree marker"
+
+  pass "fm-teardown: a missing worktree= still refuses, and only an exact no_worktree=1 on a non-Orca scout record is accepted in its place"
+}
+
+# The motivating case: a finished scout whose former pool slot another task now
+# holds, with its stale worktree= replaced by the marker. Cleanup closes its
+# endpoint and retires its record while the slot, its live worker, its claim,
+# and the scout's report are all left in place.
+test_marked_scout_cleans_up_without_touching_any_worktree() {
+  local dir id=marked-scout other=slot-holder worker rc
+  dir=$(make_case no-worktree-marked)
+  mark_case_as_treehouse_pool "$dir"
+  claim_pool_slot "$dir" "$other" "$dir/other-home"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" "no_worktree=1" \
+    "project=$dir/project" "kind=scout" "decisions_reviewed=1" "decision_keys="
+
+  # Without --force the scout report gate still applies.
+  set +e
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+  FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
+    "$TEARDOWN" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a marked scout with no report was cleaned up"
+  assert_contains "$(cat "$dir/stderr")" "has no report" "the scout report gate should still apply"
+  assert_present "$dir/home/state/$id.meta" "a refused marked scout lost its record"
+  [ ! -s "$dir/runtime.log" ] || fail "a refused marked scout reached the runtime: $(cat "$dir/runtime.log")"
+
+  mkdir -p "$dir/home/data/$id"
+  printf '# Report\n\nThe investigation finished.\n' > "$dir/home/data/$id/report.md"
+  ( cd "$dir/worktree" && exec sleep 30 ) &
+  worker=$!
+  set +e
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+  FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
+    "$TEARDOWN" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "a marked scout could not be cleaned up: $(cat "$dir/stderr")"
+  kill -0 "$worker" 2>/dev/null || fail "cleanup of a marked scout killed the worker in another task's slot"
+  kill "$worker" 2>/dev/null || true
+  wait "$worker" 2>/dev/null || true
+  assert_absent "$dir/home/state/$id.meta" "a marked scout's record was not retired"
+  assert_present "$dir/home/data/$id/report.md" "a marked scout's report was removed"
+  assert_present "$dir/worktree/sentinel" "cleanup of a marked scout touched another task's slot"
+  assert_contains "$(cat "$dir/pool/1/.fm-slot-owner")" "task=$other" \
+    "cleanup of a marked scout changed another task's slot claim"
+  ! grep -Fq "treehouse" "$dir/runtime.log" \
+    || fail "cleanup of a marked scout called Treehouse: $(cat "$dir/runtime.log")"
+  assert_contains "$(cat "$dir/runtime.log")" "tmux <kill-window> <-t> <=firstmate:=fm-$id>" \
+    "cleanup of a marked scout did not close its recorded endpoint"
+  assert_contains "$(cat "$dir/stdout")" "record marks no worktree" \
+    "the completion line should say no local copy was touched"
+  pass "fm-teardown: a scout record carrying the no-worktree marker closes its endpoint and retires its record without touching any worktree, slot, or report"
+}
+
 # The two states that must never become a false refusal: the task's own claim,
 # and no claim at all (a slot taken before claims existed, or already returned).
 test_own_and_absent_slot_claims_still_tear_down() {
@@ -1403,6 +1512,8 @@ test_reused_pool_slot_refuses_before_touching_the_other_task
 test_cross_home_pool_slot_collision_refuses
 test_sole_slot_record_still_tears_down
 test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot
+test_missing_worktree_refuses_unless_explicitly_marked
+test_marked_scout_cleans_up_without_touching_any_worktree
 test_own_and_absent_slot_claims_still_tear_down
 test_recorded_endpoint_that_changed_directory_still_tears_down
 test_project_lock_anchors_at_the_local_root_across_home_layouts
