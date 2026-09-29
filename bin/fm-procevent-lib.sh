@@ -399,7 +399,7 @@ fm_procevent_lavish_registration_publish_locked() {  # <state> <adapter> <source
   fm_procevent_source_id_valid "$id" || return 1
   if [ -n "$task" ]; then
     fm_pr_task_id_valid "$task" || return 1
-    kind=task-owned
+    kind='task-owned'
   fi
   [ "$#" -ge 1 ] || return 1
   for arg in "$@"; do

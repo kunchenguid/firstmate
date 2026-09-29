@@ -589,7 +589,7 @@ cmd_register_lavish() {
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe and at most 64 characters: $id"
   if [ -n "$task" ]; then
     fm_pr_task_id_valid "$task" || die "task id is invalid: $task"
-    kind=task-owned
+    kind='task-owned'
     owner_name="task $task"
   fi
   [ "$sep" = -- ] || usage
