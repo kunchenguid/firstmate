@@ -22,11 +22,12 @@
 # submits its Stop-hook rewake inside <task-notification>, with no other field
 # to tell it from a typed prompt (tests/fm-host-mirror-live-e2e.test.sh proves
 # it).
-# Every writer is a silent no-op unless this home opted into the supervision
-# host (config/supervision-host, checked before anything else runs), the hook
-# runs in a genuine primary checkout, and this session holds the fleet lock, so
-# a home without the file, a crewmate worktree, and a read-only second session
-# write nothing and print nothing.
+# Every writer is a silent no-op unless this home runs the supervision host
+# for the writer's primary (fm_supervision_host_enabled, checked before
+# anything else runs: by default on Claude, never with an `off` file), the
+# hook runs in a genuine primary checkout, and this session holds the fleet
+# lock, so a home that opted out or never opted in, a crewmate worktree, and a
+# read-only second session write nothing and print nothing.
 #
 # FILE. $STATE/.host-mirror.jsonl, one JSON object per line:
 #   {"seq":N,"epoch":N,"key":"<main session>","id":"<source id>",
@@ -95,6 +96,9 @@ MIRROR_CAP=4000
 MIRROR_KEEP=200
 FEED_CAP=16000
 
+# shellcheck source=bin/fm-supervision-engine-lib.sh
+. "$SCRIPT_DIR/fm-supervision-engine-lib.sh"
+
 usage() {
   sed -n '/^# Usage:/,/^# hook and commit/p' "${BASH_SOURCE[0]}" | sed '$d' | sed 's/^# \{0,1\}//' >&2
   exit 2
@@ -107,9 +111,9 @@ case "${1:-}" in
     exit 1
     ;;
   hook)
-    # The opt-in gate runs before anything is sourced or created, so a home
-    # without the file, and a crewmate worktree with no config/, stay inert.
-    [ -f "$CONFIG/supervision-host" ] || exit 0
+    # The home gate runs before anything else is sourced or created, so a
+    # home that does not run the host stays inert.
+    fm_supervision_host_enabled "$CONFIG" "${2:-}" || exit 0
     ;;
   feed|commit|check) ;;
   -h|--help) sed -n '2,/^set -u/p' "${BASH_SOURCE[0]}" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;;
@@ -123,8 +127,6 @@ fi
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
-# shellcheck source=bin/fm-supervision-engine-lib.sh
-. "$SCRIPT_DIR/fm-supervision-engine-lib.sh"
 
 umask 077
 MIRROR="$STATE/.host-mirror.jsonl"

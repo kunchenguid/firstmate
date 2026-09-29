@@ -1530,6 +1530,7 @@ spawn_refuse_if_away_spend_cap() {
   [ "$KIND" != secondmate ] || return 0
   [ -f "$STATE/.afk-contract" ] || return 0
   FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-afk-contract.sh" validate >/dev/null 2>&1 || return 0
+  [ "$(FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-afk-contract.sh" mode 2>/dev/null)" = away ] || return 0
   cap=$(FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-afk-contract.sh" field spend_max_concurrent_workers 2>/dev/null || true)
   case "$cap" in
   '' | *[!0-9]* | 0) return 0 ;;
@@ -1545,15 +1546,16 @@ spawn_refuse_if_away_spend_cap() {
     exit 1
   fi
 }
-# Spend cap (bin/fm-afk-contract.sh's spend_max_concurrent_workers): while the
-# away-posture record exists, a fresh ordinary spawn refuses for BOTH actors
-# once this home already holds that many ordinary task records, counted the
-# same way the return brief counts tasks live at return (every state/*.meta
-# whose kind is not secondmate). A relaunch replaces a worker that already
-# counts, and a secondmate is a persistent home rather than spend, so both are
-# exempt. Checked before any endpoint, worktree, or record exists, so a refusal
-# costs nothing to unwind; rechecked after the task-set lock so two fresh
-# spawns cannot both publish from a stale count.
+# Spend cap (bin/fm-afk-contract.sh's spend_max_concurrent_workers): while an
+# away record exists (never a quiet-mode one, whose captain is present and
+# spends as attended: bin/fm-afk-contract.sh mode), a fresh ordinary spawn
+# refuses for BOTH actors once this home already holds that many ordinary task
+# records, counted the same way the return brief counts tasks live at return
+# (every state/*.meta whose kind is not secondmate). A relaunch replaces a
+# worker that already counts, and a secondmate is a persistent home rather than
+# spend, so both are exempt. Checked before any endpoint, worktree, or record
+# exists, so a refusal costs nothing to unwind; rechecked after the task-set
+# lock so two fresh spawns cannot both publish from a stale count.
 spawn_refuse_if_away_spend_cap
 spawn_require_relocated_queued_work() {
   local actor
@@ -5165,6 +5167,16 @@ if [ "$LAVISH_AXI_HOST_CONFIG_PRESENT" = 1 ]; then
   LAUNCH="export LAVISH_AXI_HOST=$(shell_quote "$LAVISH_AXI_HOST"); $LAUNCH"
 fi
 LAUNCH="export COMPACT_ADVISER_DISABLE=1; $LAUNCH"
+# When the live-harness gate has exported DISABLE_AUTOUPDATER into this spawn's
+# own environment, carry it into the launch command text so Claude Code's
+# auto-updater cannot rewrite the shared binary during a live run. Embedding the
+# assignment - like COMPACT_ADVISER_DISABLE above - rather than leaning on
+# ambient inheritance is what survives a pre-existing backend daemon that
+# constructs the pane command without the gate's environment. It is gated on the
+# value being set here so ordinary spawns are unchanged.
+if [ -n "${DISABLE_AUTOUPDATER:-}" ]; then
+  LAUNCH="export DISABLE_AUTOUPDATER=$(shell_quote "$DISABLE_AUTOUPDATER"); $LAUNCH"
+fi
 if [ -z "$SPAWN_TRACEPARENT" ] && [ "$RELAUNCH" -eq 1 ]; then
   LAUNCH="unset TRACEPARENT; $LAUNCH"
 fi

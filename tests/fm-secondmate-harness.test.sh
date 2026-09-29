@@ -395,6 +395,18 @@ test_propagate_lib() {
   [ "$(cat "$d/home2/config/backlog-backend")" = manual ] || fail "backlog-backend not propagated alongside"
   [ "$(cat "$d/home2/config/backend")" = herdr ] || fail "backend not propagated alongside"
 
+  # 5b. supervision-host is each home's own posture: a primary's off opt-out
+  # never reaches a secondmate, and a secondmate's own file survives a
+  # convergence where the primary has none
+  printf 'off\n' > "$src/supervision-host"
+  propagate_inheritable_config "$src" "$d/home2/config"
+  [ -e "$d/home2/config/supervision-host" ] && fail "a primary's off supervision-host was inherited (must not be)"
+  printf 'default haiku\n' > "$d/home2/config/supervision-host"
+  rm -f "$src/supervision-host"
+  propagate_inheritable_config "$src" "$d/home2/config"
+  [ "$(cat "$d/home2/config/supervision-host" 2>/dev/null)" = 'default haiku' ] \
+    || fail "a secondmate's own supervision-host was changed by convergence"
+
   # 6. nothing to propagate -> destination dir is never created (a true no-op)
   rm -rf "$d/src3" "$d/dest3"
   mkdir -p "$d/src3"
