@@ -1285,9 +1285,14 @@ test_arm_starts_from_wedged_startup_state() {
   done
   grep -qF 'watcher: started pid=' "$armout" \
     || fail "arm did not confirm a started watcher from the wedged state: $(cat "$armout")"
-  lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
-  grep -F "watcher: started pid=$lock_pid (beacon fresh)" "$armout" >/dev/null \
-    || fail "wedged-state started line did not name the confirmed watcher (lock '$lock_pid')"
+  # The recovering watcher resurfaces on its first cycle (check: rearm-resurface)
+  # and may exit and release the lock moments after the arm confirms it, like
+  # the dead-pid row of test_arm_starts_and_self_heals - so the pid comes from
+  # the started line (which prints only after the pid-strict healthy check read
+  # it from the lock) and never from a lock the exited cycle may already have
+  # released.
+  lock_pid=$(sed -n 's/^watcher: started pid=\([0-9][0-9]*\).*/\1/p' "$armout" | head -n 1)
+  [ -n "$lock_pid" ] || fail "wedged-state started line named no pid: $(cat "$armout")"
   [ ! -e "$state/.watch.lock.steal" ] && [ ! -L "$state/.watch.lock.steal" ] \
     || fail "dangling steal mutex survived startup"
   [ ! -d "$state/.watch.lock.owner.WEDG01" ] \

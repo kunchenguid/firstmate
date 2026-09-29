@@ -485,7 +485,10 @@ writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
 await tool.execute("initial-arm", {}, undefined, undefined, {});
-await new Promise((resolve) => setTimeout(resolve, 1200));
+// The window must cover the predecessor's close sleep plus a cold login-shell
+// successor start; the ordering assertions below, not this duration, carry the
+// test's meaning, so size it like ARM_READY_TIMEOUT_MS plus the close delay.
+await new Promise((resolve) => setTimeout(resolve, 5000));
 const rows = existsSync(process.env.FM_ARM_LOG)
   ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n")
   : [];
