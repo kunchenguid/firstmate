@@ -188,6 +188,33 @@ test_destination_is_required_for_pi_entry() {
     fail "helper accepted a non-owner destination: $out"
   fi
 
+  home=$(make_home padded-destination configured " $AFK_OWNER_EMAIL ")
+  if out=$(run_contract "$home" FM_TEST_HARNESS=pi 2>&1); then
+    fail "Pi entry accepted a space-padded destination: $out"
+  fi
+  assert_contains "$out" 'FM_AFK_EMAIL_TO must be exactly johnpoyser@gmail.com' 'space-padded destination refusal is explicit'
+  assert_not_contains "$out" 'email reach active' 'space-padded destination is rejected before announcement'
+  [ ! -e "$home/state/.afk-contract" ] || fail "space-padded destination wrote an away record"
+  if out=$(run_email "$home" destination 2>&1); then
+    fail "destination helper normalized surrounding whitespace: $out"
+  fi
+  if out=$(run_email "$home" configured 2>&1); then
+    fail "configuration helper normalized surrounding whitespace: $out"
+  fi
+  python3 - "$home/.env" "$AFK_OWNER_EMAIL" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+text = path.read_text(encoding="utf-8")
+text = text.replace(f"FM_AFK_EMAIL_TO= {sys.argv[2]} ", f'FM_AFK_EMAIL_TO=" {sys.argv[2]} "')
+path.write_text(text, encoding="utf-8")
+PY
+  if out=$(run_contract "$home" FM_TEST_HARNESS=pi 2>&1); then
+    fail "Pi entry accepted a quoted space-padded destination: $out"
+  fi
+  assert_contains "$out" 'FM_AFK_EMAIL_TO must be exactly johnpoyser@gmail.com' 'quoted space-padded destination refusal is explicit'
+  [ ! -e "$home/state/.afk-contract" ] || fail "quoted space-padded destination wrote an away record"
+
   home=$(make_home stale-destination configured)
   run_contract "$home" FM_TEST_HARNESS=pi >/dev/null 2>&1 || fail "valid destination entry failed"
   cp "$home/state/.afk-contract" "$home/record.before"

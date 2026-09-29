@@ -88,8 +88,10 @@ if [ -f "$ENV_FILE" ]; then
     key="${line%%=*}"
     key="${key#"${key%%[![:space:]]*}"}"
     val="${line#*=}"
-    val="${val#"${val%%[![:space:]]*}"}"
-    val="${val%"${val##*[![:space:]]}"}"
+    if [ "$key" != FM_AFK_EMAIL_TO ]; then
+      val="${val#"${val%%[![:space:]]*}"}"
+      val="${val%"${val##*[![:space:]]}"}"
+    fi
     case "$val" in
       \"*\") val=${val#\"}; val=${val%\"} ;;
       \'*\') val=${val#\'}; val=${val%\'} ;;

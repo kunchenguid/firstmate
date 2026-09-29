@@ -64,7 +64,7 @@ def mail_configuration():
         os.environ.get("FM_SMTP_PORT", "465")
     ):
         return None
-    recipient = os.environ.get("FM_AFK_EMAIL_TO", "").strip()
+    recipient = os.environ.get("FM_AFK_EMAIL_TO", "")
     addresses = getaddresses([recipient])
     if (
         not recipient
@@ -851,7 +851,11 @@ def receive_messages(messages, posture, config):
 def main():
     command = sys.argv[1] if len(sys.argv) > 1 else ""
     if command == "destination":
-        print(os.environ.get("FM_AFK_EMAIL_TO", "").strip())
+        recipient = os.environ.get("FM_AFK_EMAIL_TO", "")
+        if recipient != OWNER_EMAIL:
+            print(f"FM_AFK_EMAIL_TO must be exactly {OWNER_EMAIL}", file=sys.stderr)
+            return 1
+        print(recipient)
         return 0
     if command == "configured":
         config = mail_configuration()
