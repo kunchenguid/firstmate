@@ -113,9 +113,11 @@ ensure_supervisor() {  # <session-id>
   . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
   # shellcheck source=bin/fm-supervision-lib.sh
   . "$SCRIPT_DIR/fm-supervision-lib.sh"
+  # shellcheck source=bin/fm-supervision-engine-lib.sh
+  . "$SCRIPT_DIR/fm-supervision-engine-lib.sh"
   fm_primary_scope_matches "$FM_ROOT" "$STATE" || return 0
   [ -e "$STATE/.afk" ] && return 0
-  [ -f "$CONFIG/supervision-host" ] && return 0
+  fm_supervision_host_enabled "$CONFIG" codex && return 0
   [ -e "$FAILURE_NOTICE" ] && return 0
   fm_supervision_needed "$STATE" || return 0
   owner=$(codex_ancestor) || return 0

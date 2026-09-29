@@ -297,6 +297,16 @@ sleep 2
 [ ! -d "$SLOCK" ] || fail "a host-opted home started an idle supervisor"
 [ "$(arms)" -eq 0 ] || fail "a host-opted home armed $(arms) times after the allowing stop"
 [ ! -s "$STUB/queue" ] || fail "a host-opted home queued text: $(cat "$STUB/queue")"
+printf 'ok - a home opted into the supervision host starts no idle supervisor\n'
+
+printf 'off\n' > "$STUB/config/supervision-host"
+printf 'handover\n' > "$STUB/mode"
+: > "$STUB/arms"
+stub_stop
+wait_until 75 at_least_arms 1 || fail "a home whose supervision-host file says off started no idle supervisor"
+FM_ROOT_OVERRIDE="$STUB" FM_HOME="$STUB" "$STUB/bin/fm-codex-idle-continuity.sh" --handover </dev/null \
+  || fail "handover of the off-home supervisor failed"
+rm -f "$STUB/config/supervision-host"
 kill "$owner" 2>/dev/null || true
 wait "$owner" 2>/dev/null || true
-printf 'ok - a home opted into the supervision host starts no idle supervisor\n'
+printf 'ok - a home whose supervision-host file says off still starts the idle supervisor\n'
