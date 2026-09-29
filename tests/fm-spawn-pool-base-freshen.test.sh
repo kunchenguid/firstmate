@@ -503,7 +503,11 @@ make_submodule_case() {  # <name> <id> [plain|slot] [init|uninit]
   git -C "$project" remote add origin "file://$origin"
   mkdir -p "$(dirname "$pool")"
   git -C "$project" worktree add --quiet --detach "$pool" HEAD
-  [ "$populate" = uninit ] || git -C "$pool" -c protocol.file.allow=always submodule --quiet update --init
+  if [ "$populate" != uninit ]; then
+    git -C "$pool" -c protocol.file.allow=always submodule --quiet update --init
+    # A submodule cloned from a branch has its remote's default branch tracked.
+    git -C "$pool/ui" remote set-head origin main
+  fi
   if [ "$layout" = slot ]; then
     printf '{"worktrees":[{"name":"1","path":"%s"}]}\n' "$pool" > "$case_dir/slots/treehouse-state.json"
   fi
@@ -739,6 +743,28 @@ test_stale_submodule_pin_of_unknown_origin_explains_itself() {
 
 # The remaining cases run in a Treehouse slot the spawn acquires, where stale-pin
 # residue would be synced, to prove real work never passes for that residue.
+test_stale_remote_tracking_ref_does_not_make_submodule_work_safe_to_move() {
+  local rec id out status unpushed
+  id='pool-sub-stale-ref-r18'
+  rec=$(make_submodule_case sub-stale-ref "$id" slot)
+  read_submodule_case "$rec"
+  strand_submodule_pin_like_treehouse
+  printf 'abandoned submodule work\n' > "$POOL_DIR/ui/abandoned.txt"
+  git -C "$POOL_DIR/ui" add abandoned.txt
+  git -C "$POOL_DIR/ui" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm abandoned-submodule-work
+  unpushed=$(git -C "$POOL_DIR/ui" rev-parse HEAD)
+  # A leftover tracking ref of a branch the remote no longer has still contains it.
+  git -C "$POOL_DIR/ui" update-ref refs/remotes/origin/abandoned "$unpushed"
+
+  out=$(run_submodule_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn launched from a slot whose submodule commit only a stale tracking ref holds"
+  [ "$(git -C "$POOL_DIR/ui" rev-parse HEAD)" = "$unpushed" ] \
+    || fail "spawn moved the submodule off a commit only a stale tracking ref holds"
+  pass "a submodule commit held only by a stale remote-tracking ref is not moved"
+}
+
 test_unpushed_submodule_commit_is_still_uncommitted_work() {
   local rec id out status unpushed before before_sub
   id='pool-sub-unpushed-r10'
@@ -939,6 +965,7 @@ test_update_none_submodule_stays_unpopulated
 test_uninitializable_submodule_warns_and_launches
 test_unfetchable_submodule_pin_refuses
 test_stale_submodule_pin_of_unknown_origin_explains_itself
+test_stale_remote_tracking_ref_does_not_make_submodule_work_safe_to_move
 test_unpushed_submodule_commit_is_still_uncommitted_work
 test_work_inside_submodule_is_still_uncommitted_work
 test_stale_pin_carrying_real_work_is_not_called_stale

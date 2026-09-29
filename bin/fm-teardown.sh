@@ -1887,7 +1887,8 @@ teardown_sync_returned_submodules() { # <worktree>
     return 0
   fi
   if fm_submodule_sync_stale_pins "$worktree" \
-     && [ -z "$(git -C "$worktree" status --porcelain 2>/dev/null)" ]; then
+     && status=$(git -C "$worktree" status --porcelain 2>/dev/null) \
+     && [ -z "$status" ]; then
     printf '%s' "$FM_SUBMODULE_STALE_PIN_LINES" | sed 's/^/teardown: synced returned worktree: /'
     return 0
   fi
@@ -3305,6 +3306,7 @@ cleanup_firstmate_home_children() {
           "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
         if [ -n "$child_proj" ] && [ -d "$child_proj" ] && command -v treehouse >/dev/null 2>&1; then
           if teardown_treehouse_return "$child_wt" "$child_proj" "child worktree"; then
+            teardown_sync_returned_submodules "$child_wt"
             fm_treehouse_slot_owner_release "$child_wt" "$child_id"
           else
             child_return_rc=$?

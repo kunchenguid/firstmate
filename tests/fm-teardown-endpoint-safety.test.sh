@@ -636,6 +636,7 @@ mark_case_as_treehouse_pool_with_submodule() {  # <case>
   git -C "$dir/project" -c user.name=test -c user.email=test@example.invalid commit -qm pool-fixture
   git -C "$dir/project" worktree add -q --detach "$dir/pool/1/project"
   git -C "$dir/pool/1/project" -c protocol.file.allow=always submodule --quiet update --init
+  git -C "$dir/pool/1/project/ui" remote set-head origin main
   git -C "$dir/project/ui" checkout -q "$SUB_PIN2"
   git -C "$dir/project" add ui
   git -C "$dir/project" -c user.name=test -c user.email=test@example.invalid commit -qm move-pin
@@ -708,6 +709,126 @@ test_returned_slot_submodules_follow_the_returned_base() {
   assert_contains "$(cat "$dir/stderr")" "was left as is" \
     "teardown did not say it left the unsyncable slot alone"
   pass "fm-teardown: a returned slot's submodules follow the returned base, and unpushed submodule work is left alone"
+
+  # A commit reachable only through a stale non-default remote-tracking ref has
+  # not landed, so it is left where the task left it.
+  dir=$(make_case slot-submodule-stale-ref)
+  mark_case_as_treehouse_pool_with_submodule "$dir"
+  add_resetting_treehouse "$dir"
+  slot="$dir/pool/1/project"
+  printf 'abandoned\n' > "$slot/ui/abandoned.txt"
+  git -C "$slot/ui" add abandoned.txt
+  git -C "$slot/ui" -c user.name=test -c user.email=test@example.invalid commit -qm abandoned
+  unpushed=$(git -C "$slot/ui" rev-parse HEAD)
+  git -C "$slot/ui" update-ref refs/remotes/origin/abandoned "$unpushed"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  FM_FAKE_RETURN_BASE=$BASE_SHA run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "a stale remote-tracking ref failed the teardown: $(cat "$dir/stderr")"
+  [ "$(git -C "$slot/ui" rev-parse HEAD)" = "$unpushed" ] \
+    || fail "teardown moved a submodule off a commit only a stale remote-tracking ref holds"
+  pass "fm-teardown: a stale remote-tracking ref does not make submodule work safe to move"
+
+  # Nested submodules are never moved by the sync: the returned base's pin moves
+  # the top-level submodule only, and the slot is left for the operator to judge.
+  dir=$(make_case slot-submodule-nested)
+  mark_case_as_treehouse_pool_with_submodule "$dir"
+  add_resetting_treehouse "$dir"
+  slot="$dir/pool/1/project"
+  local nested="$dir/nested-origin" sub="$dir/sub-origin" x1 x2 d1 d2 g=(-c user.name=test -c user.email=test@example.invalid -c protocol.file.allow=always)
+  git init -q -b main "$nested"
+  printf 'd1\n' > "$nested/n.txt"
+  git -C "$nested" add n.txt
+  git -C "$nested" "${g[@]}" commit -qm d1
+  d1=$(git -C "$nested" rev-parse HEAD)
+  printf 'd2\n' > "$nested/n.txt"
+  git -C "$nested" "${g[@]}" commit -qam d2
+  d2=$(git -C "$nested" rev-parse HEAD)
+  git -C "$nested" checkout -q "$d1"
+  git -C "$sub" checkout -q main
+  git -C "$sub" "${g[@]}" submodule --quiet add "file://$nested" deep
+  git -C "$sub" "${g[@]}" commit -qm add-deep
+  x1=$(git -C "$sub" rev-parse HEAD)
+  git -C "$sub/deep" fetch -q origin
+  git -C "$sub/deep" checkout -q "$d2"
+  git -C "$sub" "${g[@]}" commit -qam move-deep
+  x2=$(git -C "$sub" rev-parse HEAD)
+  git -C "$sub" checkout -q --detach
+  git -C "$slot/ui" "${g[@]}" fetch -q origin
+  git -C "$slot/ui" checkout -q "$x1"
+  git -C "$slot/ui" "${g[@]}" submodule --quiet update --init
+  git -C "$slot/ui/deep" fetch -q origin
+  git -C "$dir/project/ui" "${g[@]}" fetch -q origin
+  git -C "$dir/project/ui" checkout -q "$x2"
+  git -C "$dir/project" add ui
+  git -C "$dir/project" "${g[@]}" commit -qm move-pin-again
+  BASE_SHA=$(git -C "$dir/project" rev-parse HEAD)
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  FM_FAKE_RETURN_BASE=$BASE_SHA run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "a nested submodule failed the teardown: $(cat "$dir/stderr")"
+  [ "$(git -C "$slot/ui" rev-parse HEAD)" = "$x2" ] \
+    || fail "teardown did not move the top-level submodule onto the base's pin"
+  [ "$(git -C "$slot/ui/deep" rev-parse HEAD)" = "$d1" ] \
+    || fail "teardown moved a nested submodule that nothing checked"
+  pass "fm-teardown: nested submodules are not moved by the sync"
+
+  # A final status that fails must not read as a clean, synced slot.
+  dir=$(make_case slot-submodule-status-fails)
+  mark_case_as_treehouse_pool_with_submodule "$dir"
+  add_resetting_treehouse "$dir"
+  slot="$dir/pool/1/project"
+  cat > "$dir/fakebin/git" <<SH
+#!/usr/bin/env bash
+real=$(command -v git)
+case " \$* " in
+  *" submodule "*) : > "$dir/synced" ;;
+  *" status "*) [ ! -e "$dir/synced" ] || exit 1 ;;
+esac
+exec "\$real" "\$@"
+SH
+  chmod +x "$dir/fakebin/git"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  FM_FAKE_RETURN_BASE=$BASE_SHA run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "a failing final status failed the teardown: $(cat "$dir/stderr")"
+  assert_not_contains "$(cat "$dir/stdout")" "synced returned worktree" \
+    "teardown reported a slot as synced although it could not read its status"
+  assert_contains "$(cat "$dir/stderr")" "could not sync" \
+    "teardown did not warn about the slot it could not confirm clean"
+  pass "fm-teardown: a failed final status is not reported as a clean sync"
+}
+
+# Forced secondmate cleanup returns each child's pool slot, and each must go back
+# clean like a task's own slot does.
+test_child_returns_sync_submodules() {
+  local dir parent=mate-task child=child-task mate slot
+  dir=$(make_case child-slot-submodule)
+  mark_case_as_treehouse_pool_with_submodule "$dir"
+  add_resetting_treehouse "$dir"
+  slot="$dir/pool/1/project"
+  mate="$dir/mate"
+  mkdir -p "$mate/state" "$mate/data" "$mate/config"
+  printf '%s' "$parent" > "$mate/.fm-secondmate-home"
+  fm_write_meta "$dir/home/state/$parent.meta" \
+    "window=firstmate:fm-$parent" "endpoint_task_id=$parent" \
+    "worktree=$mate" "project=$mate" "home=$mate" \
+    "kind=secondmate" "mode=secondmate" "harness=echo" "yolo=off" "projects=alpha"
+  fm_write_meta "$mate/state/$child.meta" \
+    "window=firstmate:fm-$child" "endpoint_task_id=$child" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout" "harness=echo"
+  FM_FAKE_RETURN_BASE=$BASE_SHA run_case "$dir" "$parent" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "forced secondmate teardown failed: $(cat "$dir/stderr")"
+  grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "forced secondmate teardown did not return the child's slot: $(cat "$dir/runtime.log")"
+  [ "$(git -C "$slot/ui" rev-parse HEAD)" = "$SUB_PIN2" ] \
+    || fail "the child's returned slot kept its submodule on the old pin"
+  [ -z "$(git -C "$slot" status --porcelain)" ] \
+    || fail "the child's returned slot is dirty: $(git -C "$slot" status --porcelain)"
+  pass "fm-teardown: a forced secondmate teardown returns its children's slots clean"
 }
 
 test_recorded_endpoint_that_changed_directory_still_tears_down() {
@@ -1502,6 +1623,7 @@ test_sole_slot_record_still_tears_down
 test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot
 test_own_and_absent_slot_claims_still_tear_down
 test_returned_slot_submodules_follow_the_returned_base
+test_child_returns_sync_submodules
 test_recorded_endpoint_that_changed_directory_still_tears_down
 test_project_lock_anchors_at_the_local_root_across_home_layouts
 test_remote_seeded_home_returns_its_uncontested_slot
