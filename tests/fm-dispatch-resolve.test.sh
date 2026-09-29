@@ -491,7 +491,7 @@ reset_log
 write_floor_response "$RESPONSE" rule_2 0.95 0.05 0.55 0.05 0.30 0.05
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" '  status: clear' "a high answer confidence does not lift a picked rule over its own floor"
-assert_contains "$out" '  fallback: rule_4 (A simple bug fix with a stated root cause.) probability 0.30 clears its floor 0.3; rule_2 probability 0.55 is below its floor 0.9' "the runner-up clears the same floor it would need as the pick"
+assert_contains "$out" '  fallback: rule_4 (A simple bug fix with a stated root cause.) probability 0.3 clears its floor 0.3; rule_2 probability 0.55 is below its floor 0.9' "the runner-up clears the same floor it would need as the pick"
 
 reset_log
 write_floor_response "$RESPONSE" rule_2 0.55 0.05 0.55 0.05 0.25 0.10
