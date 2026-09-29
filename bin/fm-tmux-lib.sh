@@ -297,7 +297,7 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [baseline-idle
 # fm_tmux_prepare_text_input: normalize a blank pi-vim NORMAL composer to
 # INSERT before literal delivery. Positive empty proof is checked both before
 # the mode key and after Pi redraws; pending and changed screens refuse without
-# typing caller text. Non-modal composers need no preparation.
+# typing caller text. Non-modal composers still require fresh empty proof.
 fm_tmux_prepare_text_input() {  # <target> <settle>
   local target=$1 settle=$2 mode state
   if ! mode=$(fm_tmux_composer_input_mode "$target"); then
@@ -305,7 +305,13 @@ fm_tmux_prepare_text_input() {  # <target> <settle>
     return 1
   fi
   case "$mode" in
-    unknown) return 0 ;;
+    unknown)
+      state=$(fm_tmux_composer_state "$target")
+      if [ "$state" != empty ]; then
+        printf 'error: refusing unproven input preparation with composer=%s\n' "$state" >&2
+        return 1
+      fi
+      ;;
     unsupported)
       printf 'error: refusing unsupported pi-vim input mode\n' >&2
       return 1

@@ -339,6 +339,44 @@ test_pi_vim_insert_with_pending_text_refuses_without_typing() {
   pass "fm_tmux_submit_core: pi-vim INSERT requires fresh empty proof"
 }
 
+test_nonmodal_empty_composer_still_submits() {
+  local dir fakebin composer sent vfile rc=0
+  dir="$TMP_ROOT/nonmodal-empty"
+  fakebin=$(make_submit_mock "$dir")
+  composer="$dir/composer"
+  sent="$dir/sent.log"
+  vfile="$dir/verdict"
+  printf '╭─────╮\n│ >   │\n╰─────╯\n' > "$composer"
+  : > "$sent"
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
+    fm_tmux_submit_core "win" ": lifecycle doorbell" 1 0.05 0.05 > "$vfile" 2>/dev/null || rc=$?
+  expect_code 0 "$rc" "proven empty nonmodal composer should submit"
+  [ "$(cat "$vfile")" = empty ] \
+    || fail "proven empty nonmodal submit should finish empty"
+  [ "$(cat "$sent")" = $'literal:: lifecycle doorbell\nEnter' ] \
+    || fail "proven empty nonmodal composer received wrong input: $(cat "$sent")"
+  pass "fm_tmux_submit_core: proven empty nonmodal composers still submit"
+}
+
+test_unknown_preparation_refuses_without_typing() {
+  local dir fakebin composer sent vfile rc=0
+  dir="$TMP_ROOT/unknown-preparation"
+  fakebin=$(make_submit_mock "$dir")
+  composer="$dir/composer"
+  sent="$dir/sent.log"
+  vfile="$dir/verdict"
+  printf 'redrawing pane\n' > "$composer"
+  : > "$sent"
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
+    fm_tmux_submit_core "win" ": lifecycle doorbell" 1 0.05 0.05 > "$vfile" 2>/dev/null || rc=$?
+  [ "$rc" -ne 0 ] || fail "unknown preparation must refuse submission"
+  [ "$(cat "$vfile")" = send-failed ] \
+    || fail "unknown preparation refusal should report send-failed"
+  [ ! -s "$sent" ] \
+    || fail "unknown preparation received lifecycle input: $(cat "$sent")"
+  pass "fm_tmux_submit_core: unknown preparation requires fresh empty proof"
+}
+
 test_pi_vim_unsupported_mode_refuses_without_typing() {
   local dir fakebin composer sent vfile rc=0
   dir="$TMP_ROOT/pi-vim-unsupported"
@@ -458,5 +496,7 @@ test_unrecognized_state_skips_busy_conversion
 test_pi_vim_normal_mode_enters_insert_before_literal_text
 test_pi_vim_pending_normal_refuses_without_typing
 test_pi_vim_insert_with_pending_text_refuses_without_typing
+test_nonmodal_empty_composer_still_submits
+test_unknown_preparation_refuses_without_typing
 test_pi_vim_unsupported_mode_refuses_without_typing
 test_claude_busy_signature_uses_real_capture_shapes

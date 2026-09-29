@@ -3232,7 +3232,13 @@ fm_backend_herdr_prepare_text_input() {  # <target> <settle>
     return 1
   fi
   case "$mode" in
-    unknown) return 0 ;;
+    unknown)
+      state=$(fm_backend_herdr_composer_state "$target")
+      if [ "$state" != empty ]; then
+        printf 'error: refusing unproven input preparation with composer=%s\n' "$state" >&2
+        return 1
+      fi
+      ;;
     unsupported)
       printf 'error: refusing unsupported pi-vim input mode\n' >&2
       return 1
