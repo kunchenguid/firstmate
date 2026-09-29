@@ -2395,6 +2395,69 @@ SH
 
 # --- context re-emit (--reemit) ----------------------------------------------
 
+# A lock-refused session must not receive the mutating wake protocol at all.
+# The regression this pins: the read-only banner forbade draining, arming, and
+# repairing, and the very next block handed the session the full Codex
+# foreground-checkpoint protocol, whose first steps drain the wake queue and
+# run the watcher. On a foreground-checkpoint harness that is a blocking call
+# the session cannot reason through, so obeying it both broke the read-only
+# boundary and looked like a wedged, unresponsive session.
+test_read_only_session_gets_no_mutating_wake_protocol() {
+  local rec root home fakebin out status holder_pid
+  rec=$(new_world read-only-no-wake-protocol)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_harness "$fakebin" codex
+
+  sleep 300 &
+  holder_pid=$!
+  printf '%s\n' "$holder_pid" > "$home/state/.lock"
+  printf 'competing-session\n' > "$home/state/.lock-session"
+  printf 'done [at=1]: task-a finished\n' > "$home/state/.wake-queue"
+
+  status=0
+  out=$(FM_FAKE_HARNESS=codex FM_FAKE_LIVE_HOLDER_PID="$holder_pid" \
+    run_named_harness_session_start codex "$home" "$root" "$fakebin:$BASE_PATH" --source startup) \
+    || status=$?
+  kill "$holder_pid" 2>/dev/null || true
+  wait "$holder_pid" 2>/dev/null || true
+
+  # The case must actually be lock-refused, or every absence below is vacuous.
+  expect_code 0 "$status" "session start must still exit 0 on a lock refusal"
+  assert_contains "$out" "READ-ONLY SESSION" "the fixture did not enter read-only mode"
+  assert_contains "$out" "primary harness: codex" "the fixture did not select the codex run tier"
+
+  # The actionable read-only diagnostic replaces the protocol.
+  assert_contains "$out" "does not own fleet supervision" \
+    "a lock-refused session was not told it owns no supervision"
+  assert_contains "$out" "intentionally omitted here" \
+    "a lock-refused session was not told the wake protocol was withheld deliberately"
+  assert_contains "$out" "idle turn here is the correct outcome" \
+    "a lock-refused session was not told that idling is correct rather than wedged"
+
+  # The refusal boundary: no mutating wake instruction survives anywhere in it.
+  assert_not_contains "$out" "Mode: Codex foreground checkpoint." \
+    "a lock-refused codex session still received the mutating foreground-checkpoint protocol"
+  assert_not_contains "$out" "Drain first with" \
+    "a lock-refused session still received the drain-first instruction"
+  assert_not_contains "$out" "bin/fm-watch-checkpoint.sh" \
+    "a lock-refused session still received a watcher checkpoint command"
+  assert_not_contains "$out" "start the next checkpoint" \
+    "a lock-refused session still received the unbounded checkpoint loop"
+
+  # A session that owns the lock keeps the full protocol; the change is scoped
+  # to the refusal, not a removal of the contract itself.
+  out=$(FM_FAKE_HARNESS=codex run_named_harness_session_start codex "$home" "$root" "$fakebin:$BASE_PATH" --source startup)
+  assert_contains "$out" "Mode: Codex foreground checkpoint." \
+    "a lock-owning session lost its foreground-checkpoint protocol"
+  assert_contains "$out" "Lock: held by this session" \
+    "a lock-owning session no longer reports holding the lock"
+
+  pass "a lock-refused session gets an actionable read-only diagnostic instead of the mutating wake protocol"
+}
+
 test_reemit_skips_startup_sweeps_but_keeps_the_wake_drain() {
   local rec root home fakebin network_report reemit sequence generation
   rec=$(new_world reemit)
@@ -3081,6 +3144,7 @@ test_runtime_bound_leaves_a_healthy_digest_untouched
 test_runtime_bound_leaves_harness_ancestry_headroom
 test_reemit_skips_startup_sweeps_but_keeps_the_wake_drain
 test_agents_baseline_stays_at_true_start_and_reemits_on_every_drifted_pi_compact
+test_read_only_session_gets_no_mutating_wake_protocol
 test_read_only_pi_compact_refreshes_against_its_own_session_identity
 test_codex_unreachable_reset_sources_do_not_claim_instruction_refresh
 test_agents_baseline_requires_sha256_and_successful_completion

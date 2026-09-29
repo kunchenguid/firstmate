@@ -1,15 +1,12 @@
 #!/usr/bin/env bash
 # Render the primary-harness supervision operating block for session start and
-# the short repair line used by guards and turn-end hooks. On a non-Pi primary
-# with a supervision protocol (claude, cursor, opencode, omp, grok, codex) whose
-# home runs the supervision host (fm_supervision_host_enabled in
-# bin/fm-supervision-engine-lib.sh: by default on Claude, by
-# config/supervision-host elsewhere, never with config/supervision-host-off), the block
-# adds one state line and the host's main-side protocol
-# (docs/supervision-protocols/supervision-host.md, whose lines tagged
-# "{<harness>,...} " render only for the listed harnesses), and Grok's arm
-# command becomes the host; on a home that does not run it the output is
-# unchanged.
+# the short repair line used by guards and turn-end hooks.
+#
+# --read-only 1 replaces the harness wake protocol with a read-only operating
+# block instead of rendering it. The protocol is a mutating instruction set -
+# every harness snippet opens by draining the wake queue and running the watcher
+# - so a lock-refused session must not receive it. See read_only_operating_block
+# for the boundary and the reason the idle turn is the correct outcome.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -210,6 +207,26 @@ repair_line() {
   esac
 }
 
+# A lock-refused session owns no fleet state, so it must not receive the wake
+# protocol at all. The protocol is a mutating instruction set - every harness
+# snippet opens by draining the wake queue and running the watcher - so
+# rendering it here told a read-only session to perform exactly the mutations
+# the read-only boundary forbids, and on a foreground-checkpoint harness it
+# looked like a wedged session stuck in an endless blocking checkpoint.
+# This is the full-block counterpart of the read-only repair line above: it
+# states the same boundary in operating terms, and names the idle turn as the
+# correct outcome so the session reports the conflict instead of retrying.
+read_only_operating_block() {
+  printf '%s\n' 'This session does not own fleet supervision and must not perform any of it:'
+  printf '%s\n' 'another live session holds the fleet lock. The harness wake protocol that'
+  printf '%s\n' 'normally follows is intentionally omitted here. Do not drain queued wakes,'
+  printf '%s\n' 'arm or repair a watcher, spawn, steer, merge, or run a foreground watcher'
+  printf '%s\n' 'checkpoint from this session - each is a fleet mutation this session has no'
+  printf '%s\n' 'authority over. Queued wakes stay queued for the lock holder: report them'
+  printf '%s\n' 'rather than draining them. An idle turn here is the correct outcome, not a'
+  printf '%s\n' 'wedged session - say so plainly instead of waiting on work you may not do.'
+}
+
 ordinary_wake_line() {
   case "$HARNESS" in
     claude)
@@ -268,8 +285,10 @@ if [ "$X_MODE" -eq 1 ]; then
 else
   printf '%s\n' '- X mode: inactive; use the default watcher cadence.'
 fi
-if [ -n "$HOST_SNIPPET" ]; then
-  printf '%s\n' '- Supervision host: on; it takes away-posture wakes and, where the dialog mirror is verified, eligible attended wakes itself, and hands the rest to you (protocol at the end of this block).'
+if [ "$READ_ONLY" -eq 1 ]; then
+  read_only_operating_block
+  printf '\n'
+  exit 0
 fi
 ordinary_wake_line
 printf '\n'

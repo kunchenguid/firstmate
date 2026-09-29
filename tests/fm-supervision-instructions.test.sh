@@ -121,8 +121,16 @@ test_conditional_stanzas() {
   assert_contains "$out" "- Away mode: active" "afk stanza missing"
   assert_contains "$out" "- X mode: active" "x-mode stanza missing"
   assert_contains "$out" "$config/x-mode.env" "x-mode stanza did not render the effective config path"
-  assert_contains "$out" 'Mode: Codex foreground checkpoint.' "codex snippet missing"
   assert_not_contains "$out" "Source \`config/x-mode.env\`" "snippet kept the repo-relative x-mode config path"
+  # A lock-refused session owns no fleet state, so the mutating wake protocol
+  # must not reach it; the read-only operating block replaces it.
+  assert_not_contains "$out" 'Mode: Codex foreground checkpoint.' \
+    "a read-only render still emitted the mutating codex wake protocol"
+  assert_contains "$out" "does not own fleet supervision" \
+    "a read-only render did not explain the withheld supervision ownership"
+
+  out=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness codex --read-only 0 --afk 1 --x-mode 1)
+  assert_contains "$out" 'Mode: Codex foreground checkpoint.' "codex snippet missing"
   pass "renderer includes read-only, afk, and effective x-mode current-state stanzas"
 }
 
