@@ -246,6 +246,19 @@ assert_not_contains "$body" 'spendPriority' "quota never leaves the machine"
 assert_not_contains "$body" 'cursor-grok' "use profiles never leave the machine"
 pass "clear: one rule Choice request, key on the fd header only, spendPriority argmax over every candidate"
 
+# --- operator quota opt-out: listed profile order, no quota read or evidence ---
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+FM_QUOTA_ROUTING=off TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project pager
+expect_code 0 "$code" "quota opt-out exits 0"
+assert_contains "$out" '  status: clear' "quota opt-out remains clear"
+assert_contains "$out" '  note: quota consideration disabled; using configured profile order' "quota opt-out explains listed-order selection"
+assert_contains "$out" "  profile: --harness 'claude' --model 'sonnet' --effort 'high'" "quota opt-out keeps first configured profile"
+assert_not_contains "$out" 'spendPriority' "quota opt-out emits no spendPriority"
+assert_not_contains "$out" 'remaining=' "quota opt-out emits no remaining percentage"
+assert_absent "$LOG/quota-axi.calls" "quota opt-out never reads quota-axi"
+pass "quota opt-out uses listed order without reading or reporting quota"
+
 # --- never-send list: a match or a bad list withholds the request -------------
 NEVER_SEND="$HOME_DIR/config/dispatch-never-send"
 PRIVATE_BRIEF="$TMP_ROOT/private-brief.md"

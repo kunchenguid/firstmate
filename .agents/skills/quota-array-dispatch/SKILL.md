@@ -4,7 +4,8 @@ description: >-
   Agent-only decision procedure for resolving a matched crew-dispatch profile
   array from quota-axi's default TOON, ranking by spendPriority after three
   orthogonal gates.
-  Load when a dispatch rule or default resolves to more than one profile candidate.
+  Load when a dispatch rule or default resolves to more than one profile candidate
+  and the current operator preference leaves quota consideration enabled.
 user-invocable: false
 metadata:
   internal: true
@@ -14,6 +15,9 @@ metadata:
 
 This skill is the single owner of the completion-aware profile-array selection procedure.
 `AGENTS.md` section 4 owns the always-loaded intake boundary, load trigger, malformed-config refusal, every-candidate accounting, and strongest-reasoning/tie safety rules.
+The current captain preference is authoritative at that boundary.
+When it disables quota consideration, do not load or invoke this skill, run `quota-axi`, inspect quota fields, or report quota numbers.
+Use the configured profile order while quota consideration is disabled, and treat only a concrete persistent rate-limit failure as a provider recovery issue through `harness-adapters`.
 `harness-adapters` owns harness verification, model/provider discovery, and effort fallback.
 `quota-axi` remains data-only: it publishes `spendPriority` as a comparable scalar and never recommends, selects, ranks, or infers a route.
 Do not add a daemon, opaque composite score, routing wrapper, hard-coded model-specific policy, or producer-side route recommendation.
