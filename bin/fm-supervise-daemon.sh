@@ -625,8 +625,8 @@ _seen_status_path() {  # <state> <task>
 # successfully classified content, or 0 when it has no usable position.
 # A position rather than an event line prevents both a later routine append from
 # hiding earlier events and repeated event text from suppressing a new occurrence.
-# An absent, malformed, identity-mismatched, or legacy marker reads 0, so the
-# whole log is classified and uncertainty prefers a duplicate over event loss.
+# A malformed, identity-mismatched, or legacy marker reads 0, so the whole
+# log is classified and uncertainty prefers a duplicate over event loss.
 #
 # A daemon with no marker at all for a task (a fresh away session, or the first
 # run after this marker family was introduced) starts from the offset the
