@@ -390,14 +390,17 @@ fm_procevent_registration_publish_locked() {  # <state> <adapter> <source-id> <a
   return 1
 }
 
-# Publish one task-owned registration. The single source record persists across
-# rounds; the handled marker, not a second ownership record, holds the round open.
-fm_procevent_task_registration_publish_locked() {  # <state> <adapter> <source-id> <task-id> <argv...>
-  local state=$1 adapter=$2 id=$3 task=$4 reg dest tmp arg identity
+# Publish one Lavish registration owned by Firstmate or a task. The single
+# source record persists across rounds; the handled marker holds each round open.
+fm_procevent_lavish_registration_publish_locked() {  # <state> <adapter> <source-id> <task-id-or-empty> <argv...>
+  local state=$1 adapter=$2 id=$3 task=$4 reg dest tmp arg identity kind=firstmate-owned
   shift 4
   fm_procevent_adapter_valid "$adapter" || return 1
   fm_procevent_source_id_valid "$id" || return 1
-  fm_pr_task_id_valid "$task" || return 1
+  if [ -n "$task" ]; then
+    fm_pr_task_id_valid "$task" || return 1
+    kind='task-owned'
+  fi
   [ "$#" -ge 1 ] || return 1
   for arg in "$@"; do
     case "$arg" in *$'\n'*) return 1 ;; esac
@@ -409,8 +412,8 @@ fm_procevent_task_registration_publish_locked() {  # <state> <adapter> <source-i
   tmp=$(umask 077; mktemp "$reg/.source.XXXXXX") || return 1
   if {
     printf 'adapter=%s\n' "$adapter"
-    printf 'kind=task-owned\n'
-    printf 'owner_task=%s\n' "$task"
+    printf 'kind=%s\n' "$kind"
+    [ -z "$task" ] || printf 'owner_task=%s\n' "$task"
     printf 'argc=%s\n' "$#"
     printf 'argv:\n'
     printf '%s\n' "$@"

@@ -1840,7 +1840,7 @@ A long-polling external process is registered as a *source* through its adapter,
 
 **Open the Lavish artifact first**
 
-Before arming any Lavish source, open its artifact with `lavish-axi` so the saved session identifies the board's server; each poll attempt derives its host and port from that session and refuses missing or invalid session evidence before consuming a staged worker reply.
+Before arming any Lavish source, open its artifact with `lavish-axi` so the saved session identifies the board's server; each poll attempt derives its host and port from that session and refuses missing or invalid session evidence before consuming a staged reply.
 
 **Retry interrupted Lavish polls**
 
@@ -1849,6 +1849,18 @@ This start-to-start governor is a no-op after a normally blocking poll but caps 
 
 Real feedback, ended and missing sessions, any other `SERVER_ERROR`, and that same interruption still standing once the bound is spent are all captured and announced normally; `FM_LAVISH_POLL_RETRY_DELAY` is a bounded 1 to 60 second test override for the interval only, and the runner itself stays adapter-agnostic.
 An already-armed Lavish source keeps its registered listener command until it is retired and armed again, so retire the source, then arm it again to adopt this retry policy.
+
+### Firstmate-hosted Lavish review boards
+
+Firstmate arms a board with `bin/fm-procevent-lavish.sh arm <artifact.html>`.
+An initial arm carrying `--agent-reply-file`, or any repeated arm before a round is captured, is refused without creating or replacing a listener.
+After a nonterminal capture, the source remains registered but no new poll starts while that round is open.
+Firstmate reads the capture, writes its response to a file, and runs `bin/fm-procevent-lavish.sh arm <artifact.html> --agent-reply-file <path>`.
+A reply-bearing re-arm that reports `armed` acknowledges exactly that captured round and starts the next poll carrying the response to the same saved Lavish session.
+The shared staged-reply behavior and its best-effort loss boundary are described in the **Stage an agent reply** paragraph below.
+A terminal Firstmate-owned source retires itself; when its capture is announced, Firstmate acknowledges it with `bin/fm-procevent.sh handled <source-id> <sequence>` and does not re-arm it.
+When a board still has the matching plain Firstmate registration from before this lifecycle, the first reply-bearing re-arm stops any live legacy listener and migrates only if exactly one unacknowledged nonterminal round can still be proven.
+Otherwise migration is refused without marking any captured round handled.
 
 ### Crew-hosted Lavish review boards
 

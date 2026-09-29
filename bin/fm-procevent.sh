@@ -5,6 +5,7 @@
 #
 # Usage:
 #   fm-procevent.sh register <adapter> <source-id> -- <argv>...
+#   fm-procevent.sh register-firstmate <adapter> <source-id> -- <argv>...
 #   fm-procevent.sh register-task <adapter> <source-id> <task-id> -- <argv>...
 #   fm-procevent.sh register-extension <adapter> <source-id> --config-ref <reference>
 #   fm-procevent.sh start <source-id>
@@ -25,11 +26,15 @@
 #            executed directly, so there is no shell surface and no argument
 #            splitting. Built-in adapters register sources; nothing here parses
 #            user text.
+# register-firstmate
 # register-task
-#            Record a worker-owned built-in source. Its one source record
-#            persists across rounds, and re-registration by the same task
-#            acknowledges nonterminal captured rounds without touching the
-#            source claim. Terminal rounds are concluded with `handled`.
+#            Record a Firstmate- or worker-owned Lavish source. Its one source
+#            record persists across rounds. Once that owned record exists,
+#            re-registration by the same owner acknowledges a nonterminal round
+#            without touching the source claim. A matching plain Firstmate
+#            registration from the legacy lifecycle is first quiesced for its
+#            one-round migration. Terminal captures use `handled` instead of
+#            re-registration; for a task-owned board that also retires it.
 # register-extension
 #            Resolve an explicitly enabled home-local process-event-adapter/1
 #            binding, verify its package and handshake, and record the source
@@ -65,9 +70,9 @@
 #            republish every durably captured result with no handled
 #            acknowledgement yet - regardless of any earlier publication - and
 #            start a runner for any registered source that has no live owner and
-#            no open task-owned round. This is liveness repair only - it never
-#            discovers results by
-#            polling the source, because the child blocks on the source itself.
+#            no open Firstmate- or task-owned Lavish round. This is liveness
+#            repair only - it never discovers results by polling the source,
+#            because the child blocks on the source itself.
 #            A start is REPORTED only once it is confirmed: starting a runner is
 #            detached and its errors reach no caller, so a source that cannot
 #            start would otherwise be counted exactly like one that is
@@ -411,6 +416,12 @@ source_field() {  # <source-id> <field>
 }
 source_kind() { source_field "$1" kind; }
 source_owner_task() { source_field "$1" owner_task; }
+source_is_round_owned() {  # <source-id>
+  case "$(source_kind "$1" 2>/dev/null || true)" in
+    firstmate-owned|task-owned) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 # Every captured round of one source with no handled acknowledgement yet.
 source_pending() {  # <source-id>
   fm_procevent_pending "$STATE" | awk -v id="$1" 'index($0, "/" id ".") { print }'
@@ -530,11 +541,17 @@ cmd_register() {
   [ -f "$(adapter_script "$adapter")" ] || die "no installed adapter for: $adapter"
   state_root_bind create || die "cannot safely prepare the process-event state root"
   fm_procevent_source_lock_acquire "$id" || die "cannot lock the source"
-  if [ "$(source_kind "$id" 2>/dev/null || true)" = task-owned ]; then
-    owner_task=$(source_owner_task "$id")
-    fm_procevent_source_lock_release "$id"
-    die "cannot arm task-owned Lavish source $id owned by task $owner_task; steer that task to re-arm its board"
-  fi
+  case "$(source_kind "$id" 2>/dev/null || true)" in
+    task-owned)
+      owner_task=$(source_owner_task "$id")
+      fm_procevent_source_lock_release "$id"
+      die "cannot arm task-owned Lavish source $id owned by task $owner_task; steer that task to re-arm its board"
+      ;;
+    firstmate-owned)
+      fm_procevent_source_lock_release "$id"
+      die "cannot replace Firstmate-owned Lavish source $id outside its reply lifecycle"
+      ;;
+  esac
   if ! extension_registration_replacement_safe_locked "$id"; then
     fm_procevent_source_lock_release "$id"
     die "cannot replace extension registration while its prior runner remains active: $id"
@@ -548,34 +565,64 @@ cmd_register() {
   printf 'registered: %s (%s)\n' "$id" "$adapter"
 }
 
-cmd_register_task() {
+legacy_firstmate_lavish_registration_locked() {
+  local id=$1 expected
+  shift
+  [ "$#" -eq 5 ] || return 1
+  [ "$1" = "$SCRIPT_DIR/fm-procevent-lavish.sh" ] || return 1
+  [ "$2" = poll ] && [ "$4" = --agent-reply-file ] || return 1
+  expected=$("$SCRIPT_DIR/fm-procevent-lavish.sh" source-id "$3" 2>/dev/null) || return 1
+  [ "$expected" = "$id" ] || return 1
+  fm_procevent_registration_matches_locked "$STATE" lavish "$id" "$1" "$2" "$3"
+}
+
+cmd_register_lavish() {
   local adapter=${1-} id=${2-} task=${3-} sep=${4-} result pending pending_adapter
-  local reply_source='' reply_dest='' stale arg i adopting=0 pending_owner prior_record=''
-  local pending_rounds=0
+  local reply_source='' reply_dest='' stale arg i adopting=0 migrating=0 pending_owner prior_record=''
+  local pending_rounds=0 kind=firstmate-owned current_kind owner_name=Firstmate has_reply=0
+  local owner pid token identity stop_state migration_result='' migration_sequence='' migration_identity=''
+  local recheck='' recheck_count=0 recheck_identity=''
   local -a argv=()
   shift 4 2>/dev/null || usage
-  [ "$adapter" = lavish ] || die "register-task is reserved for the Lavish adapter"
+  [ "$adapter" = lavish ] || die "Lavish ownership registration is reserved for the Lavish adapter"
   fm_procevent_adapter_valid "$adapter" || die "adapter name must be lowercase alphanumeric or dash: $adapter"
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe and at most 64 characters: $id"
-  fm_pr_task_id_valid "$task" || die "task id is invalid: $task"
+  if [ -n "$task" ]; then
+    fm_pr_task_id_valid "$task" || die "task id is invalid: $task"
+    kind='task-owned'
+    owner_name="task $task"
+  fi
   [ "$sep" = -- ] || usage
-  [ "$#" -ge 1 ] || die "register-task needs at least one argv element after --"
+  [ "$#" -ge 1 ] || die "Lavish registration needs at least one argv element after --"
   argv=("$@")
   for arg in "${argv[@]}"; do
     case "$arg" in *$'\n'*) die "argv elements cannot contain newlines" ;; esac
+    [ "$arg" != --agent-reply-file ] || has_reply=1
   done
   [ -f "$(adapter_script "$adapter")" ] || die "no installed adapter for: $adapter"
   state_root_bind create || die "cannot safely prepare the process-event state root"
-  fm_backend_validate_task_endpoint "$STATE/$task.meta" "$task" >/dev/null \
-    || die "cannot own a board for task $task; its captured feedback would reach no endpoint"
+  if [ -n "$task" ]; then
+    fm_backend_validate_task_endpoint "$STATE/$task.meta" "$task" >/dev/null \
+      || die "cannot own a board for task $task; its captured feedback would reach no endpoint"
+  fi
   (umask 077; mkdir -p "$REG") || die "cannot prepare the process-event registry"
   fm_procevent_source_lock_acquire "$id" || die "cannot lock the source"
   if [ -e "$(source_file "$id")" ] || [ -L "$(source_file "$id")" ]; then
-    if [ "$(source_kind "$id" 2>/dev/null || true)" != task-owned ]; then
-      fm_procevent_source_lock_release "$id"
-      die "cannot task-own firstmate-registered source $id; firstmate is the holder"
+    current_kind=$(source_kind "$id" 2>/dev/null || true)
+    if [ "$current_kind" != "$kind" ]; then
+      if [ -z "$task" ] && [ -z "$current_kind" ] \
+          && legacy_firstmate_lavish_registration_locked "$id" "${argv[@]}"; then
+        migrating=1
+      else
+        fm_procevent_source_lock_release "$id"
+        if [ "$current_kind" = task-owned ]; then
+          reply_source=$(source_owner_task "$id")
+          die "cannot replace task-owned source $id owned by task $reply_source; steer that task to re-arm its board"
+        fi
+        die "cannot replace Firstmate-owned source $id; Firstmate is the holder"
+      fi
     fi
-    if [ "$(source_owner_task "$id")" != "$task" ]; then
+    if [ "$kind" = task-owned ] && [ "$(source_owner_task "$id")" != "$task" ]; then
       reply_source=$(source_owner_task "$id")
       fm_procevent_source_lock_release "$id"
       die "cannot replace task-owned source $id owned by task $reply_source; steer that task to re-arm its board"
@@ -583,10 +630,30 @@ cmd_register_task() {
   else
     adopting=1
   fi
+  if [ "$migrating" -eq 1 ] \
+      && { [ -e "$(fm_procevent_claim_path "$id")" ] || [ -L "$(fm_procevent_claim_path "$id")" ]; }; then
+    if ! fm_procevent_claim_load_locked "$id" 2>/dev/null \
+        || ! fm_procevent_claim_owned_by_state "$STATE" "$FM_HOME"; then
+      fm_procevent_source_lock_release "$id"
+      die "cannot quiesce legacy Firstmate source ownership: $id"
+    fi
+    owner=$FM_PROCEVENT_CLAIM_HOME
+    pid=$FM_PROCEVENT_CLAIM_PID
+    token=$FM_PROCEVENT_CLAIM_TOKEN
+    identity=$FM_PROCEVENT_CLAIM_IDENTITY
+    stop_runner_pid "$pid" "$identity"
+    stop_state=$?
+    if [ "$stop_state" -eq 2 ] \
+        || ! fm_procevent_claim_reclaim_locked "$id" "$owner" "$pid" "$token"; then
+      fm_procevent_source_lock_release "$id"
+      die "cannot quiesce legacy Firstmate listener: $id"
+    fi
+    rm -f -- "$(staging_file "$id" "$token")" "$(runner_file "$id")"
+  fi
   while IFS= read -r pending; do
     [ -n "$pending" ] || continue
     pending_rounds=$((pending_rounds + 1))
-    if [ "$adopting" -eq 1 ]; then
+    if [ "$adopting" -eq 1 ] || [ "$migrating" -eq 1 ]; then
       pending_owner=$(fm_procevent_result_owner_task "$pending" 2>/dev/null || true)
       if [ "$pending_owner" != "$task" ]; then
         fm_procevent_source_lock_release "$id"
@@ -598,13 +665,34 @@ cmd_register_task() {
       fm_procevent_source_lock_release "$id"
       die "cannot re-arm terminal Lavish result $pending; stop and conclude the review"
     fi
+    if [ "$migrating" -eq 1 ]; then
+      migration_result=$pending
+      migration_sequence=$(fm_procevent_result_sequence "$pending" 2>/dev/null || true)
+      migration_identity=$(fm_pr_file_identity "$pending" 2>/dev/null || true)
+      case "$migration_sequence" in
+        ''|*[!0-9]*)
+          fm_procevent_source_lock_release "$id"
+          die "cannot identify legacy Firstmate captured round: $pending"
+          ;;
+      esac
+      if [ -z "$migration_identity" ]; then
+        fm_procevent_source_lock_release "$id"
+        die "cannot identify legacy Firstmate captured round: $pending"
+      fi
+    fi
   done < <(source_pending "$id")
   if [ "$adopting" -eq 0 ] && [ "$pending_rounds" -eq 0 ]; then
     fm_procevent_source_lock_release "$id"
-    die "cannot re-arm source $id: task $task already holds this board and no captured round is waiting to be acknowledged"
+    die "cannot re-arm source $id: $owner_name already holds this board and no captured round is waiting to be acknowledged"
   fi
-  # Each generation stages its reply under its own path, so nothing a failed
-  # re-arm does can reach the reply the prior registration still references.
+  if [ -z "$task" ] && [ "$has_reply" -eq 1 ] && [ "$pending_rounds" -ne 1 ]; then
+    fm_procevent_source_lock_release "$id"
+    die "cannot post a Firstmate reply unless exactly one captured round is waiting"
+  fi
+  if [ -z "$task" ] && [ "$pending_rounds" -gt 0 ] && [ "$has_reply" -eq 0 ]; then
+    fm_procevent_source_lock_release "$id"
+    die "cannot re-arm Firstmate-owned source $id without its reply"
+  fi
   i=0
   while [ "$i" -lt "${#argv[@]}" ]; do
     if [ "${argv[$i]}" = --agent-reply-file ]; then
@@ -643,24 +731,45 @@ cmd_register_task() {
       die "cannot read the registration this re-arm replaces: $id"
     fi
   fi
-  if ! fm_procevent_task_registration_publish_locked "$STATE" "$adapter" "$id" "$task" "${argv[@]}"; then
+  if [ "$migrating" -eq 1 ]; then
+    while IFS= read -r recheck; do
+      [ -n "$recheck" ] || continue
+      recheck_count=$((recheck_count + 1))
+      recheck_identity=$(fm_pr_file_identity "$recheck" 2>/dev/null || true)
+      [ "$recheck" = "$migration_result" ] \
+        && [ "$recheck_identity" = "$migration_identity" ] || recheck_count=2
+    done < <(source_pending "$id")
+    if [ "$recheck_count" -ne 1 ]; then
+      rm -f -- "$prior_record" "$reply_dest"
+      fm_procevent_source_lock_release "$id"
+      die "cannot prove one legacy Firstmate captured round for migration: $id"
+    fi
+  fi
+  if ! fm_procevent_lavish_registration_publish_locked "$STATE" "$adapter" "$id" "$task" "${argv[@]}"; then
     [ -z "$prior_record" ] || rm -f -- "$prior_record"
     [ -z "$reply_dest" ] || rm -f -- "$reply_dest"
     fm_procevent_source_lock_release "$id"
-    die "cannot publish task-owned registration"
+    die "cannot publish $owner_name Lavish registration"
   fi
-  # Re-arm is the worker's acknowledgement of every open nonterminal round.
-  # It deliberately does not inspect, acquire, release, or replace the claim.
-  while IFS= read -r pending; do
-    [ -n "$pending" ] || continue
-    result=$pending
-    fm_procevent_mark_handled "$STATE" "$id" "$(fm_procevent_result_sequence "$result")" >/dev/null 2>&1 || {
+  if [ "$migrating" -eq 1 ]; then
+    fm_procevent_mark_handled "$STATE" "$id" "$migration_sequence" >/dev/null 2>&1 || {
       [ -z "$prior_record" ] || mv -f -- "$prior_record" "$(source_file "$id")"
       [ -z "$reply_dest" ] || rm -f -- "$reply_dest"
       fm_procevent_source_lock_release "$id"
-      die "cannot acknowledge captured round: $result"
+      die "cannot acknowledge captured round: $migration_result"
     }
-  done < <(source_pending "$id")
+  else
+    while IFS= read -r pending; do
+      [ -n "$pending" ] || continue
+      result=$pending
+      fm_procevent_mark_handled "$STATE" "$id" "$(fm_procevent_result_sequence "$result")" >/dev/null 2>&1 || {
+        [ -z "$prior_record" ] || mv -f -- "$prior_record" "$(source_file "$id")"
+        [ -z "$reply_dest" ] || rm -f -- "$reply_dest"
+        fm_procevent_source_lock_release "$id"
+        die "cannot acknowledge captured round: $result"
+      }
+    done < <(source_pending "$id")
+  fi
   [ -z "$prior_record" ] || rm -f -- "$prior_record"
   for stale in "$REG/.$id.reply."*; do
     [ -e "$stale" ] || continue
@@ -669,8 +778,20 @@ cmd_register_task() {
   done
   fm_procevent_source_lock_release "$id"
   owner_lease_refresh
-  printf 'registered: %s (%s, task=%s)\n' "$id" "$adapter" "$task"
+  if [ -n "$task" ]; then
+    printf 'registered: %s (%s, task=%s)\n' "$id" "$adapter" "$task"
+  else
+    printf 'registered: %s (%s, Firstmate)\n' "$id" "$adapter"
+  fi
 }
+
+cmd_register_firstmate() {
+  local adapter=${1-} id=${2-} sep=${3-}
+  shift 3 2>/dev/null || usage
+  cmd_register_lavish "$adapter" "$id" '' "$sep" "$@"
+}
+
+cmd_register_task() { cmd_register_lavish "$@"; }
 
 new_extension_registration_token() {
   local hex
@@ -753,11 +874,17 @@ cmd_register_extension() {
     register_extension_locks_release "$id"
     die "cannot create an extension registration identity"
   fi
-  if [ "$(source_kind "$id" 2>/dev/null || true)" = task-owned ]; then
-    owner_task=$(source_owner_task "$id")
-    register_extension_locks_release "$id"
-    die "cannot replace task-owned source $id owned by task $owner_task; steer that task to re-arm its board"
-  fi
+  case "$(source_kind "$id" 2>/dev/null || true)" in
+    task-owned)
+      owner_task=$(source_owner_task "$id")
+      register_extension_locks_release "$id"
+      die "cannot replace task-owned source $id owned by task $owner_task; steer that task to re-arm its board"
+      ;;
+    firstmate-owned)
+      register_extension_locks_release "$id"
+      die "cannot replace Firstmate-owned Lavish source $id outside its reply lifecycle"
+      ;;
+  esac
   if ! extension_registration_replacement_safe_locked "$id"; then
     register_extension_locks_release "$id"
     die "cannot replace extension registration while its prior runner remains active: $id"
@@ -969,7 +1096,7 @@ cmd_start_public() {
 }
 
 cmd_start() {
-  local id=${1-} adapter out rc claimed bound_rc published_capture=0 handled_capture=0 self_announcing=0 task_owner='' task_pending
+  local id=${1-} adapter out rc claimed bound_rc published_capture=0 handled_capture=0 self_announcing=0 task_owner='' pending
   local extension_owner=0 extension_load_state extension_sequence='' extension_request_id=''
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
   require_runner_group
@@ -986,10 +1113,11 @@ cmd_start() {
     fm_procevent_source_lock_release "$id"
     die "registration names an invalid adapter"
   fi
-  if [ "$(source_kind "$id" 2>/dev/null || true)" = task-owned ]; then
-    task_owner=$(source_owner_task "$id" 2>/dev/null || true)
-    task_pending=$(source_pending "$id" | head -1)
-    if [ -n "$task_pending" ]; then
+  if source_is_round_owned "$id"; then
+    [ "$(source_kind "$id" 2>/dev/null || true)" != task-owned ] \
+      || task_owner=$(source_owner_task "$id" 2>/dev/null || true)
+    pending=$(source_pending "$id" | head -1)
+    if [ -n "$pending" ]; then
       fm_procevent_source_lock_release "$id"
       printf 'round-open: %s\n' "$id"
       exit 0
@@ -1661,7 +1789,7 @@ stranded_leaderless_detail() {  # <source-id>
 }
 
 cmd_reconcile() {
-  local rec id published started=0 stopped=0 uncertain=0 failed=0 claim owner pid token identity claim_state stop_state task_pending
+  local rec id published started=0 stopped=0 uncertain=0 failed=0 claim owner pid token identity claim_state stop_state pending
   local launch_identity launch_stamp launch_mark unconfirmed entry
   local -a launched=()
   # Rejected before anything is launched, and by name. A window this command
@@ -1723,9 +1851,9 @@ cmd_reconcile() {
       if [ -f "$(source_file "$id")" ] && [ ! -L "$(source_file "$id")" ]; then
         fm_procevent_claim_state_locked "$id"
         claim_state=$?
-        if [ "$(source_kind "$id" 2>/dev/null || true)" = task-owned ]; then
-          task_pending=$(source_pending "$id" | head -1)
-          if [ -n "$task_pending" ]; then
+        if source_is_round_owned "$id"; then
+          pending=$(source_pending "$id" | head -1)
+          if [ -n "$pending" ]; then
             fm_procevent_source_lock_release "$id"
             continue
           fi
@@ -2522,6 +2650,7 @@ unset FM_PROCEVENT_CAPTURE_PINNED_INBOX FM_PROCEVENT_CAPTURE_ABSOLUTE_INBOX \
 
 case "${1-}" in
   register)           shift; cmd_register "$@" ;;
+  register-firstmate) shift; cmd_register_firstmate "$@" ;;
   register-task)      shift; cmd_register_task "$@" ;;
   register-extension) shift; cmd_register_extension "$@" ;;
   start)              shift; cmd_start_public "$@" ;;
