@@ -1219,8 +1219,17 @@ test_forge_gerrit_changes_what_no_mistakes_means() {
   assert_grep 'pipeline changes: none' "$brief" \
     "the gerrit worker was not told what to report when the pipeline fixed nothing"
   # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
-  assert_grep 'run `gerrit-axi message <change> --file <path> --json`' "$brief" \
-    "the gerrit worker was not told to post the pipeline summary on the change"
+  assert_grep 'pipe it on standard input to `gerrit-axi message <change> --json`' "$brief" \
+    "the gerrit worker was not told to post the pipeline summary on the change from stdin"
+  assert_no_grep 'gerrit-axi message <change> --file' "$brief" \
+    "the gerrit worker was told to write the pipeline summary to a file"
+  assert_no_grep 'mktemp' "$brief" \
+    "the gerrit worker was told to create a summary file outside its worktree"
+  assert_grep 'If you publish again after posting, post a fresh summary the same way on the new patch set' "$brief" \
+    "a republish after the summary leaves the final patch set without its own summary"
+  # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
+  assert_grep 'with `{patch_set}` from the message posted on the final patch set' "$brief" \
+    "the gerrit ready report does not name the final patch set's summary"
   assert_grep 'the same content a GitHub pull request'"'"'s pipeline section carries' "$brief" \
     "the gerrit summary message was not tied to what a pull request's pipeline section shows"
   # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
@@ -1229,7 +1238,7 @@ test_forge_gerrit_changes_what_no_mistakes_means() {
   assert_grep 'done [at=<epoch>]: PR {change url} published for review; pipeline summary posted on patch set {patch_set}' "$brief" \
     "the gerrit ready report does not name the summary message"
   # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
-  assert_grep 'The one exception is the single `gerrit-axi message <change> --file <path>`' "$brief" \
+  assert_grep 'The one exception is the `gerrit-axi message <change>` your Definition of done names, which posts the pipeline summary with no label or vote, once on each patch set you publish' "$brief" \
     "rule 1 still forbids the one summary message the contract requires"
   assert_grep 'post no other message on any change' "$brief" \
     "the summary-message carve-out lets the worker post other messages"
