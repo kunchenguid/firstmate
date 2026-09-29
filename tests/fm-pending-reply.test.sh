@@ -207,6 +207,9 @@ test_recovery_waits_while_the_mate_has_an_open_decision() {
   hook_log="$TMP_ROOT/decision-wait-hook.log"
   : > "$hook_log"
   export FM_PENDING_REPLY_NOW=2500
+  mkdir -p "$home/config"
+  : > "$home/config/wait-no-turns"
+  FM_CONFIG_OVERRIDE="$home/config"
   # Invoked indirectly through FM_PENDING_REPLY_SEND_HOOK.
   # shellcheck disable=SC2329
   decision_wait_hook() {
@@ -231,7 +234,37 @@ test_recovery_waits_while_the_mate_has_an_open_decision() {
   fm_pending_reply_send_recovery "$state" "$corr" || fail "recovery should send once the decision closes"
   [ "$(wc -l < "$hook_log" | tr -d ' ')" = 1 ] || fail "expected exactly one recovery send"
   unset FM_PENDING_REPLY_SEND_HOOK
+  unset FM_CONFIG_OVERRIDE
   pass "recovery never pokes a mate waiting on its own decision, and runs once it closes"
+}
+
+# Without the flag, an open decision does not hold the recovery.
+test_recovery_sends_during_an_open_decision_without_the_flag() {
+  local home state corr hook_log
+  home=$(setup_parent decision-wait-off)
+  state="$home/state"
+  hook_log="$TMP_ROOT/decision-wait-off-hook.log"
+  : > "$hook_log"
+  mkdir -p "$home/config"
+  FM_CONFIG_OVERRIDE="$home/config"
+  export FM_PENDING_REPLY_NOW=2500
+  # shellcheck disable=SC2329
+  decision_wait_off_hook() {
+    printf '%s\n' "$1" >> "$hook_log"
+  }
+  export -f decision_wait_off_hook
+  export FM_PENDING_REPLY_SEND_HOOK=decision_wait_off_hook
+  corr=$(fm_pending_reply_create "$home" "$state" "hibit" "status of phase 8")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  fm_pending_reply_observe_busy "$state" "$corr" busy
+  fm_pending_reply_observe_busy "$state" "$corr" idle
+  printf 'needs-decision [key=scope]: narrow or wide?\n' >> "$state/hibit.status"
+  fm_pending_reply_send_recovery "$state" "$corr" \
+    || fail "recovery should send while a decision is open when the flag is absent"
+  [ "$(wc -l < "$hook_log" | tr -d ' ')" = 1 ] || fail "expected the recovery to send"
+  unset FM_PENDING_REPLY_SEND_HOOK
+  unset FM_CONFIG_OVERRIDE
+  pass "recovery sends during an open decision when config/wait-no-turns is absent"
 }
 
 test_recovery_attempt_is_never_reinjected() {
@@ -1641,6 +1674,7 @@ test_escalated_undelivered_correlation_stays_retryable() {
 test_normal_correlated_reply_resolves_once
 test_completed_turn_no_report_triggers_one_recovery
 test_recovery_waits_while_the_mate_has_an_open_decision
+test_recovery_sends_during_an_open_decision_without_the_flag
 test_recovery_attempt_is_never_reinjected
 test_recovery_reply_resolves_original
 test_second_missed_turn_escalates_once_and_stays_durable

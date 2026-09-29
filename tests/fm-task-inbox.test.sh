@@ -551,7 +551,9 @@ test_fire_and_forget_records_never_enter_the_ladder() {
 
 test_fire_and_forget_retry_is_owed_once() {
   local state fire tracked action
-  state="$TMP_ROOT/faf-retry/state"; mkdir -p "$state"
+  state="$TMP_ROOT/faf-retry/state"; mkdir -p "$state" "$TMP_ROOT/faf-retry/config"
+  : > "$TMP_ROOT/faf-retry/config/wait-no-turns"
+  export FM_CONFIG_OVERRIDE="$TMP_ROOT/faf-retry/config"
   fire=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "one-shot steer" fire-and-forget)
   age_path "$fire"
   inbox_lib "$state" fm_task_inbox_mark_retry "$state" t1 "$fire"
@@ -580,7 +582,24 @@ test_fire_and_forget_retry_is_owed_once() {
   action=$(FM_TASK_INBOX_GRACE_SECS=60 inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
   [ "$action" = quiet ] || fail "an acknowledged record's retry should be dropped, got: $action"
   [ ! -e "$state/t1.inbox/.retry-ring" ] || fail "an acknowledged record kept its retry mark"
+  unset FM_CONFIG_OVERRIDE
   pass "inbox: a fire-and-forget record whose ring did not land is owed exactly one retry"
+}
+
+# A retry mark is ignored while config/wait-no-turns is absent.
+test_fire_and_forget_retry_is_quiet_without_the_flag() {
+  local state fire action
+  state="$TMP_ROOT/faf-retry-off/state"; mkdir -p "$state" "$TMP_ROOT/faf-retry-off/config"
+  export FM_CONFIG_OVERRIDE="$TMP_ROOT/faf-retry-off/config"
+  fire=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "one-shot steer" fire-and-forget)
+  age_path "$fire"
+  inbox_lib "$state" fm_task_inbox_mark_retry "$state" t1 "$fire"
+  age_path "$state/t1.inbox/.retry-ring"
+  action=$(FM_TASK_INBOX_GRACE_SECS=60 inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  [ "$action" = quiet ] || fail "an absent flag still owed a retry ring, got: $action"
+  [ -e "$state/t1.inbox/.retry-ring" ] || fail "an absent flag removed a retry mark it should have left"
+  unset FM_CONFIG_OVERRIDE
+  pass "inbox: without config/wait-no-turns a fire-and-forget retry mark stays quiet"
 }
 
 test_ring_ladder_policy() {
@@ -763,12 +782,15 @@ test_watcher_surfaces_unwritable_ladder() {
 test_watcher_pays_fire_and_forget_retry_once() {
   local dir state out log pid fire rings i=0
   dir=$(setup_watch_case faf-retry)
+  mkdir -p "$dir/config"
+  : > "$dir/config/wait-no-turns"
   state="$dir/state"; out="$dir/watch.out"; log="$dir/send.log"; : > "$log"
   fire=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "one-shot steer" fire-and-forget)
   age_path "$fire"
   inbox_lib "$state" fm_task_inbox_mark_retry "$state" t1 "$fire"
   age_path "$state/t1.inbox/.retry-ring"
   watch_bg "$state" "$dir/fakebin" "$out" \
+    FM_CONFIG_OVERRIDE="$dir/config" \
     FM_SEND_LOG="$log" FM_FAKE_TMUX_CAPTURE="$(idle_capture "$dir")" \
     FM_TASK_INBOX_RING_MAX=1
   pid=$!
@@ -802,6 +824,9 @@ steer_check_once() {  # <case-dir>
 test_watcher_holds_retry_while_the_worker_decides() {
   local dir state log fire rings
   dir=$(setup_watch_case faf-retry-decision)
+  mkdir -p "$dir/config"
+  : > "$dir/config/wait-no-turns"
+  export FM_CONFIG_OVERRIDE="$dir/config"
   state="$dir/state"; log="$dir/send.log"; : > "$log"
   fire=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "one-shot steer" fire-and-forget)
   age_path "$fire"
@@ -819,6 +844,7 @@ test_watcher_holds_retry_while_the_worker_decides() {
   rings=$(grep -cF 'Firstmate instruction waiting' "$log" || true)
   [ "$rings" = 1 ] || fail "expected exactly one retry ring once the decision closed, got $rings:"$'\n'"$(cat "$log")"
   [ ! -e "$state/t1.inbox/.retry-ring" ] || fail "the watcher did not spend the retry mark"
+  unset FM_CONFIG_OVERRIDE
   pass "watcher: a fire-and-forget retry waits out the worker's own decision, then rings once"
 }
 
@@ -910,6 +936,7 @@ test_writer_retries_after_a_vanished_lock_collision
 test_ladder_writes_ignore_vanished_inbox
 test_fire_and_forget_records_never_enter_the_ladder
 test_fire_and_forget_retry_is_owed_once
+test_fire_and_forget_retry_is_quiet_without_the_flag
 test_ring_ladder_policy
 test_watcher_rerings_idle_pane_quietly
 test_watcher_waits_on_busy_pane
