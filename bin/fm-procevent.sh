@@ -37,7 +37,8 @@
 #            carries `--agent-reply-file`, one reply answering every round
 #            still pending. It stages the reply and acknowledges each open
 #            nonterminal round exactly as register-task does, and is refused
-#            when no captured round is waiting or a waiting round is terminal.
+#            when the board is not registered, when no captured round is
+#            waiting, or when a waiting round is terminal.
 #            A firstmate board keeps listening between rounds, so it also
 #            stops this home's listener from the earlier generation the way
 #            `retire` does, making the next poll the one that posts the reply.
@@ -700,10 +701,11 @@ reply_stage_locked() {  # <source-id>
 
 # Acknowledge every open captured round of a just-published re-arm and sweep
 # earlier generations' staged replies. REARM_ACKNOWLEDGED lists the sequences
-# acknowledged. When an acknowledgement cannot be recorded, the prior
+# acknowledged. The acknowledgement is all or nothing: when one round cannot be
+# recorded, the rounds this call already recorded are pending again, the prior
 # registration is restored, this generation's reply is removed, REARM_ACK_FAILED
 # names the round, and the caller refuses the re-arm. The caller holds the
-# source lock.
+# source lock, which every handled marker is recorded under.
 rearm_acknowledge_locked() {  # <source-id> <prior-record-or-empty> <staged-reply-or-empty>
   local id=$1 prior=$2 reply=$3 pending seq stale
   REARM_ACK_FAILED=''
@@ -712,6 +714,10 @@ rearm_acknowledge_locked() {  # <source-id> <prior-record-or-empty> <staged-repl
     [ -n "$pending" ] || continue
     seq=$(fm_procevent_result_sequence "$pending")
     fm_procevent_mark_handled "$STATE" "$id" "$seq" >/dev/null 2>&1 || {
+      for seq in "${REARM_ACKNOWLEDGED[@]+"${REARM_ACKNOWLEDGED[@]}"}"; do
+        rm -f -- "$(fm_procevent_handled_marker "$STATE" "$id" "$seq")"
+      done
+      REARM_ACKNOWLEDGED=()
       [ -z "$prior" ] || mv -f -- "$prior" "$(source_file "$id")"
       [ -z "$reply" ] || rm -f -- "$reply"
       REARM_ACK_FAILED=$pending
@@ -730,7 +736,7 @@ rearm_acknowledge_locked() {  # <source-id> <prior-record-or-empty> <staged-repl
 
 # A firstmate-owned board answers a round the way a worker-owned one does: the
 # re-arm that carries the reply is the acknowledgement, so it needs a round to
-# answer, and the reply rides the same staging and one-shot consumption. Rounds
+# answer and a registration to re-arm, and the reply rides the same staging and one-shot consumption. Rounds
 # can stack on a firstmate board, so one reply answers and acknowledges every
 # round still pending when it re-arms. The
 # one difference is the listener. A worker's board is not relaunched while its
@@ -790,6 +796,10 @@ cmd_register_reply() {
     fm_procevent_source_lock_release "$id"
     die "cannot re-arm source $id with a reply: no captured round is waiting to be acknowledged"
   fi
+  if [ "$registered" -eq 0 ]; then
+    fm_procevent_source_lock_release "$id"
+    die "cannot re-arm source $id with a reply: the board is not armed, so its waiting round is acknowledged with bin/fm-procevent.sh handled"
+  fi
   owner=''
   fm_procevent_claim_state_locked "$id"
   claim_state=$?
@@ -822,33 +832,29 @@ cmd_register_reply() {
     *) fm_procevent_source_lock_release "$id"; die "$REPLY_STAGE_ERROR" ;;
   esac
   reply_dest=$REPLY_STAGED
-  if [ "$registered" -eq 1 ]; then
-    prior_record=$(umask 077; mktemp "$REG/.$id.prior.XXXXXX") || {
-      rm -f -- "$reply_dest"
-      fm_procevent_source_lock_release "$id"
-      die "cannot stage the registration this re-arm replaces: $id"
-    }
-    if ! cat -- "$(source_file "$id")" > "$prior_record"; then
-      rm -f -- "$prior_record" "$reply_dest"
-      fm_procevent_source_lock_release "$id"
-      die "cannot read the registration this re-arm replaces: $id"
-    fi
+  prior_record=$(umask 077; mktemp "$REG/.$id.prior.XXXXXX") || {
+    rm -f -- "$reply_dest"
+    fm_procevent_source_lock_release "$id"
+    die "cannot stage the registration this re-arm replaces: $id"
+  }
+  if ! cat -- "$(source_file "$id")" > "$prior_record"; then
+    rm -f -- "$prior_record" "$reply_dest"
+    fm_procevent_source_lock_release "$id"
+    die "cannot read the registration this re-arm replaces: $id"
   fi
   if [ -n "$owner" ]; then
     stop_runner_pid "$pid" "$identity"
     stop_state=$?
     if [ "$stop_state" -eq 2 ] \
       || ! fm_procevent_claim_reclaim_locked "$id" "$owner" "$pid" "$token" 2>/dev/null; then
-      [ -z "$prior_record" ] || rm -f -- "$prior_record"
-      rm -f -- "$reply_dest"
+      rm -f -- "$prior_record" "$reply_dest"
       fm_procevent_source_lock_release "$id"
       die "cannot stop the earlier listener; the board keeps its current registration: $id"
     fi
     rm -f -- "$(staging_file "$id" "$token")" "$(runner_file "$id")"
   fi
   if ! fm_procevent_registration_publish_locked "$STATE" "$adapter" "$id" "${argv[@]}"; then
-    [ -z "$prior_record" ] || rm -f -- "$prior_record"
-    rm -f -- "$reply_dest"
+    rm -f -- "$prior_record" "$reply_dest"
     fm_procevent_source_lock_release "$id"
     die "cannot publish the registration"
   fi

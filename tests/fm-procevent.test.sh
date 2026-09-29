@@ -1588,6 +1588,27 @@ assert_contains "$(wake_payloads "$HFMSTACK")" "procevent lavish $fmstack_id 2" 
   "the captain's second stacked round did not wake firstmate"
 PATH="$FMSTACK_BIN:$PATH" pe "$HFMSTACK" reconcile >/dev/null 2>&1 || true
 fmstack_wait_polls 3 || fail "the stacked-rounds listener was not relaunched after round two"
+# The consolidated acknowledgement is all or nothing: when the second round's
+# marker cannot be recorded (a dangling link where it belongs), the first
+# round's marker is withdrawn too, so both rounds stay pending.
+fmstack_inbox="$HFMSTACK/state/procevent-inbox"
+cp "$HFMSTACK/state/procevent/$fmstack_id.source" "$FMSTACK_ROOT/before-failed.source"
+ln -s "$FMSTACK_ROOT/nowhere" "$fmstack_inbox/$fmstack_id.2.handled"
+if fmstack_arm --agent-reply-file "$FMSTACK_ROOT/reply" >/dev/null 2>"$FMSTACK_ROOT/partial.err"; then
+  fail "a reply re-arm succeeded although one of its rounds could not be acknowledged"
+fi
+rm -f -- "$fmstack_inbox/$fmstack_id.2.handled"
+assert_contains "$(cat "$FMSTACK_ROOT/partial.err")" "cannot acknowledge captured round: $fmstack_inbox/$fmstack_id.2.result" \
+  "the failed reply re-arm did not name the round it could not acknowledge"
+[ ! -e "$fmstack_inbox/$fmstack_id.1.handled" ] \
+  || fail "a failed reply re-arm left the first stacked round acknowledged"
+[ ! -e "$fmstack_inbox/$fmstack_id.2.handled" ] \
+  || fail "a failed reply re-arm left the second stacked round acknowledged"
+cmp -s "$FMSTACK_ROOT/before-failed.source" "$HFMSTACK/state/procevent/$fmstack_id.source" \
+  || fail "a failed reply re-arm did not restore the board's registration"
+[ -z "$(find "$HFMSTACK/state/procevent" -name ".$fmstack_id.reply.*" -print)" ] \
+  || fail "a failed reply re-arm left its reply staged"
+[ ! -s "$FMSTACK_ROOT/replies" ] || fail "a failed reply re-arm still posted its reply"
 fmstack_arm --agent-reply-file "$FMSTACK_ROOT/reply" > "$FMSTACK_ROOT/arm.out" \
   || fail "firstmate could not re-arm the stacked-rounds board with its reply"
 assert_contains "$(cat "$FMSTACK_ROOT/arm.out")" "acknowledged: $fmstack_id 1" \
@@ -1608,6 +1629,23 @@ fi
 assert_contains "$(cat "$FMSTACK_ROOT/again.err")" "no captured round is waiting" \
   "the refused second reply did not say no round was waiting"
 pass "one firstmate reply re-arm answers and acknowledges every stacked round"
+
+# A board firstmate retired takes no reply even while a nonterminal round is
+# still waiting on it: the reply re-arm must not register the board again.
+touch "$FMSTACK_ROOT/trigger4"
+fmstack_wait_round 3 || fail "the captain's third round on the stacked-rounds board was never captured"
+pe "$HFMSTACK" retire "$fmstack_id" >/dev/null || fail "firstmate could not retire its own board"
+if fmstack_arm --agent-reply-file "$FMSTACK_ROOT/reply" >/dev/null 2>"$FMSTACK_ROOT/retired.err"; then
+  fail "a firstmate reply re-armed a board it had retired"
+fi
+assert_contains "$(cat "$FMSTACK_ROOT/retired.err")" "the board is not armed" \
+  "the refused reply to a retired board did not say the board is not armed"
+[ ! -e "$HFMSTACK/state/procevent/$fmstack_id.source" ] \
+  || fail "a reply to a retired board registered it again"
+[ ! -e "$fmstack_inbox/$fmstack_id.3.handled" ] \
+  || fail "a refused reply to a retired board acknowledged its waiting round"
+[ "$(fmstack_polls)" = 4 ] || fail "a refused reply to a retired board started a listener: $(fmstack_polls) polls"
+pass "a firstmate reply is refused on a board it retired while a round waits"
 
 # A reply re-arm has already stopped the earlier listener, acknowledged its
 # rounds, and staged the reply by the time arm confirms the new listener, so a

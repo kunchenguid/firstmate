@@ -48,9 +48,9 @@
 #            <sequence>` for it. docs/configuration.md "Reply to a Lavish round"
 #            owns what the owner checks before and after. Without `--for` it
 #            registers through the runner's `register-reply`, which is refused
-#            when no captured round is waiting, so an ended or never-armed board
-#            takes no reply, and stops the board's earlier listener so the reply
-#            is posted by the next poll.
+#            unless the board is registered and a captured round is waiting, so
+#            a retired, ended, or never-armed board takes no reply, and stops
+#            the board's earlier listener so the reply is posted by the next poll.
 # terminal   Exit 0 when the captured result means this Lavish source will never
 #            produce another result, so the runner may retire it; any other exit
 #            keeps it armed. This is the generic adapter contract bin/fm-procevent.sh

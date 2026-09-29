@@ -41,7 +41,7 @@ bin/fm-procevent-lavish.sh arm <artifact.html> --agent-reply-file <reply.md>
 ```
 
 That one reply answers and acknowledges every round still pending on the board, printing `acknowledged: <source-id> <sequence>` for each; follow the [round reply contract](../../../docs/configuration.md#process-to-event-sources-stateprocevent) for checking pending rounds right before the re-arm and for any acknowledged sequence you never read, since its `already-handled` does not mean you read it.
-It is refused when no unacknowledged round is waiting, including on an ended or never-armed board, and when a waiting round is terminal.
+It is refused on a board that is not armed, including a retired, ended, or never-armed one, when no unacknowledged round is waiting, and when a waiting round is terminal.
 A worker-owned board uses `bin/fm-procevent-lavish.sh arm <artifact.html> --for <task-id>` and re-arms with its reply after each nonterminal round; the existing handled marker is the acknowledgement.
 Arm it once, then re-arm only when a round is actually waiting: arming again with nothing to acknowledge is refused, because it would discard the reply your listener is still holding.
 The [round reply contract](../../../docs/configuration.md#process-to-event-sources-stateprocevent) owns reply staging, the refusals, and why posting the reply is best effort.

@@ -1862,9 +1862,12 @@ Immediately before a reply re-arm, firstmate therefore checks the board's pendin
 After the re-arm, firstmate compares the printed `acknowledged` sequences with the rounds it actually read.
 Any acknowledged sequence it did not read must still be read and applied, with its answer given in chat, because a further reply re-arm is refused with no round waiting.
 A later wake for an acknowledged sequence reports `already-handled` from `handled`: that records only that the re-arm acknowledged it, not that its feedback was read.
-A reply re-arm is refused when no unacknowledged nonterminal round is waiting, so a generation already carrying a reply is never replaced before its listener posts it, and an ended or never-armed board takes no reply.
+A reply re-arm needs both an existing registration and at least one unacknowledged nonterminal round.
+Without a waiting round it is refused, so a generation already carrying a reply is never replaced before its listener posts it.
+Without a registration it is refused, so an explicitly retired, ended, or never-armed board takes no reply, even with a round still waiting.
 It is also refused for a terminal round, because no later poll could show the reply.
 A failed re-arm leaves the prior registration and its referenced reply unchanged, including when its required acknowledgement cannot be recorded.
+That acknowledgement is all or nothing: if any round's cannot be recorded, every round the re-arm covered stays pending and eligible for re-announcement.
 A reply re-arm whose new listener cannot be confirmed exits non-zero but keeps the new registration, because its rounds are already acknowledged and its reply staged, so the next `reconcile` relaunches it and that poll posts the reply.
 
 A worker's board is not relaunched while its round is open, but a firstmate board keeps listening between rounds, so by the time firstmate replies the supervision cycle has usually relaunched a listener that carries no reply.
