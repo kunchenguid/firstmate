@@ -25,7 +25,10 @@
 # (https://github.com/kunchenguid/firstmate/issues/5899): it never starts a
 # supervisor, and its in-turn checkpoint is unchanged.
 #
-# An idle home, away mode, a child worktree, or a stop that is still the
+# Only the session that owns state/.lock, as bin/fm-session-lock-lib.sh
+# decides it, starts or repairs a supervisor; a dead recorded owner is
+# reclaimed through bin/fm-lock.sh first, as bin/fm-claude-stop-autoarm.sh
+# does. An idle home, away mode, a child worktree, or a stop that is still the
 # first one in the turn does not start a supervisor. A live supervisor is
 # left in place. This script never prints on the spawn path: the guard's
 # stdout and stderr are the hook output.
@@ -108,18 +111,32 @@ stop_home_supervisor() {
 }
 
 ensure_supervisor() {  # <session-id>
-  local owner session=$1
+  local owner session=$1 lock_pid recover_session_lock=0
   # shellcheck source=bin/fm-primary-scope-lib.sh
   . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
   # shellcheck source=bin/fm-supervision-lib.sh
   . "$SCRIPT_DIR/fm-supervision-lib.sh"
   # shellcheck source=bin/fm-supervision-engine-lib.sh
   . "$SCRIPT_DIR/fm-supervision-engine-lib.sh"
+  # shellcheck source=bin/fm-session-lock-lib.sh
+  . "$SCRIPT_DIR/fm-session-lock-lib.sh"
   fm_primary_scope_matches "$FM_ROOT" "$STATE" || return 0
+  if ! fm_session_lock_owned_by_self "$STATE"; then
+    lock_pid=$(cat "$STATE/.lock" 2>/dev/null || true)
+    case "$lock_pid" in
+      ''|*[!0-9]*) return 0 ;;
+    esac
+    fm_harness_pid_alive "$lock_pid" && return 0
+    recover_session_lock=1
+  fi
   [ -e "$STATE/.afk" ] && return 0
   fm_supervision_host_enabled "$CONFIG" codex && return 0
   [ -e "$FAILURE_NOTICE" ] && return 0
   fm_supervision_needed "$STATE" || return 0
+  if [ "$recover_session_lock" -eq 1 ]; then
+    "$SCRIPT_DIR/fm-lock.sh" >/dev/null 2>&1 || return 0
+    fm_session_lock_owned_by_self "$STATE" || return 0
+  fi
   owner=$(codex_ancestor) || return 0
   if supervisor_live; then
     return 0

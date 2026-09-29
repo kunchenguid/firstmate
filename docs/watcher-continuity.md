@@ -196,6 +196,7 @@ It enters its poll loop immediately and keeps scanning signals, stale panes, and
 - Terminal arm-output classification (`started`, `attached`, or `FAILED`) remains defense in depth for the manual recovery path.
 - Codex keeps bounded foreground checkpoints during a turn, and `bin/fm-codex-idle-continuity.sh` owns reconciliation after the allowing stop.
   That supervisor backgrounds one arm and waits on it so it can stop the arm when Codex exits.
+  Only the session that owns `state/.lock` starts it, reclaiming a dead recorded owner first as the Claude auto-arm does.
   Codex homes that opted into `config/supervision-host` are not covered yet ([#5899](https://github.com/kunchenguid/firstmate/issues/5899)) and start no idle supervisor.
 - Grok retains its tracked background-task notification protocol.
 

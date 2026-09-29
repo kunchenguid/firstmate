@@ -2,6 +2,7 @@
 # Codex idle continuity: a single-shot process-event source stays ownerless
 # after reconciliation stops, and the allowing Stop starts a detached
 # supervisor that runs it again.
+# shellcheck disable=SC2016 # single quotes are deliberate: positional args expand inside the fake Codex child
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -35,6 +36,15 @@ fm_test_track_procevent_home "$HOME_DIR"
 
 hits() { wc -l < "$LOG" | tr -d ' '; }
 
+# A bash named codex stands in for the Codex session: it records itself as the
+# home's session-lock owner and runs the hook as its child.
+FAKE_CODEX="$TMP_ROOT/fakebin/codex"
+mkdir -p "$TMP_ROOT/fakebin"
+ln -s "$(command -v bash)" "$FAKE_CODEX"
+as_lock_owner() {  # <home> <command...>
+  "$FAKE_CODEX" -c 'printf "%s\n" "$$" > "$1/state/.lock"; shift; "$@"; rc=$?; exit "$rc"' _ "$@"
+}
+
 FM_HOME="$HOME_DIR" "$ROOT/bin/fm-procevent.sh" register lavish shot -- "$SRC" >/dev/null \
   || fail "could not register the single-shot source"
 FM_HOME="$HOME_DIR" "$ROOT/bin/fm-procevent.sh" reconcile >/dev/null \
@@ -65,7 +75,7 @@ sleep 60 &
 owner=$!
 printf '%s' "$payload" | FM_ROOT_OVERRIDE="$HOME_DIR" FM_HOME="$HOME_DIR" \
   FM_CODEX_IDLE_OWNER_PID="$owner" FM_CODEX_IDLE_QUEUE="$QUEUE_BIN" FM_POLL=1 \
-  "$CONT" >/dev/null || fail "allowing stop with a Codex owner failed"
+  as_lock_owner "$HOME_DIR" "$CONT" >/dev/null || fail "allowing stop with a Codex owner failed"
 for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do
   [ -f "$LOG" ] && [ "$(hits)" -ge 2 ] && [ -s "$QUEUE" ] && break
   sleep 0.5
@@ -104,8 +114,8 @@ PS
 chmod +x "$FAKE_PS/ps"
 hits_before=$(hits)
 PATH="$FAKE_PS:$PATH" FM_ROOT_OVERRIDE="$HOME_DIR" FM_HOME="$HOME_DIR" FM_CODEX_IDLE_QUEUE="$QUEUE_BIN" FM_POLL=1 \
-  bash -c 'printf "%s\n" "$$" > "$1"; printf "%s" "$2" | "$3" >/dev/null; exec sleep 60' \
-  _ "$TMP_ROOT/fake-codex-pid" "$payload" "$CONT" &
+  bash -c 'printf "%s\n" "$$" > "$1"; printf "%s\n" "$$" > "$4/state/.lock"; printf "%s" "$2" | "$3" >/dev/null; exec sleep 60' \
+  _ "$TMP_ROOT/fake-codex-pid" "$payload" "$CONT" "$HOME_DIR" &
 owner=$!
 for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
   [ "$(cat "$HOME_DIR/state/.codex-idle-continuity.lock/owner" 2>/dev/null)" = "$owner" ] && break
@@ -165,7 +175,7 @@ supervisor_owns_watcher() {
 allowing_stop() {
   printf '%s' "$payload" | FM_ROOT_OVERRIDE="$TURNS" FM_HOME="$TURNS" \
     FM_CODEX_IDLE_OWNER_PID="$owner" FM_CODEX_IDLE_QUEUE="$QUEUE_BIN" \
-    "$CONT" >/dev/null || fail "allowing stop failed"
+    as_lock_owner "$TURNS" "$CONT" >/dev/null || fail "allowing stop failed"
 }
 checkpoint() {  # <seconds>; sets CP_RC
   CP_RC=0
@@ -231,7 +241,7 @@ arms() { wc -l < "$STUB/arms" 2>/dev/null | tr -d ' ' || printf '0\n'; }
 stub_stop() {
   printf '%s' "$payload" | FM_ROOT_OVERRIDE="$STUB" FM_HOME="$STUB" \
     FM_CODEX_IDLE_OWNER_PID="$owner" FM_CODEX_IDLE_QUEUE="$STUB/queue.sh" \
-    "$STUB/bin/fm-codex-idle-continuity.sh" >/dev/null 2>&1 || true
+    as_lock_owner "$STUB" "$STUB/bin/fm-codex-idle-continuity.sh" >/dev/null 2>&1 || true
 }
 at_least_arms() { [ "$(arms)" -ge "$1" ]; }
 
@@ -307,6 +317,33 @@ wait_until 75 at_least_arms 1 || fail "a home whose supervision-host file says o
 FM_ROOT_OVERRIDE="$STUB" FM_HOME="$STUB" "$STUB/bin/fm-codex-idle-continuity.sh" --handover </dev/null \
   || fail "handover of the off-home supervisor failed"
 rm -f "$STUB/config/supervision-host"
+printf 'ok - a home whose supervision-host file says off still starts the idle supervisor\n'
+
+foreign_stop() {
+  printf '%s' "$payload" | FM_ROOT_OVERRIDE="$STUB" FM_HOME="$STUB" \
+    FM_CODEX_IDLE_OWNER_PID="$owner" FM_CODEX_IDLE_QUEUE="$STUB/queue.sh" \
+    "$FAKE_CODEX" -c '"$1"; rc=$?; exit "$rc"' _ "$STUB/bin/fm-codex-idle-continuity.sh" >/dev/null 2>&1 || true
+}
+"$FAKE_CODEX" -c 'sleep 600; :' &
+other=$!
+printf '%s\n' "$other" > "$SSTATE/.lock"
+: > "$STUB/arms"
+: > "$STUB/queue"
+foreign_stop
+sleep 2
+[ ! -d "$SLOCK" ] || fail "a session that does not own the home lock started an idle supervisor"
+[ "$(arms)" -eq 0 ] || fail "a session that does not own the home lock armed $(arms) times"
+[ "$(cat "$SSTATE/.lock")" = "$other" ] || fail "a non-owning session replaced the live session lock"
+kill "$other" 2>/dev/null || true
+wait "$other" 2>/dev/null || true
+printf 'ok - a session that does not own the home lock starts no idle supervisor\n'
+
+printf '9999999\n' > "$SSTATE/.lock"
+foreign_stop
+wait_until 75 at_least_arms 1 || fail "a stop after the recorded lock owner died started no idle supervisor"
+[ "$(cat "$SSTATE/.lock")" != 9999999 ] || fail "the dead session-lock owner was not reclaimed"
+FM_ROOT_OVERRIDE="$STUB" FM_HOME="$STUB" "$STUB/bin/fm-codex-idle-continuity.sh" --handover </dev/null \
+  || fail "handover of the reclaimed-lock supervisor failed"
 kill "$owner" 2>/dev/null || true
 wait "$owner" 2>/dev/null || true
-printf 'ok - a home whose supervision-host file says off still starts the idle supervisor\n'
+printf 'ok - a dead recorded session owner is reclaimed before the idle supervisor starts\n'
