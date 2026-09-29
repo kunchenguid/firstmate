@@ -34,7 +34,7 @@
 #   (k) no-mistakes + merged PR but HEAD moved afterward        -> REFUSE (stale PR)
 #   (l) no-mistakes + stale origin/main but fetched content     -> ALLOW  (fresh fetch)
 #   (m) no-mistakes + local HEAD ancestor of merged PR head     -> ALLOW  (lagging local)
-#   (n) no-mistakes + replayed unpushed patch in merged PR head -> ALLOW  (replayed local)
+#   (n) no-mistakes + replayed patch and parent both landed -> ALLOW; a missing parent -> REFUSE
 #   (o) fm-pr-check rerun after HEAD moved                      -> no stale pr_head
 #   (p) fm-pr-check when local HEAD lags                        -> record remote PR head
 #   (q) no-mistakes + NO pr= recorded, PR discovered by branch  -> ALLOW  (yolo/no-CI merge)
@@ -1345,27 +1345,40 @@ test_merged_pr_refuses_unlanded_submodule_gitlink_update_despite_ignore_settings
   pass "merged PR containment preserves unlanded gitlink updates despite ignore settings"
 }
 
-test_squash_merged_pr_allows_replayed_unpushed_patch() {
-  local case_dir rc parent_head pr_head
-  case_dir=$(make_case squash-replayed-patch)
-  write_meta "$case_dir" no-mistakes ship
-  wt_commit_file "$case_dir" local-parent.txt parent "local parent"
-  parent_head=$(git -C "$case_dir/wt" rev-parse HEAD)
-  git -C "$case_dir/wt" push -q origin "$parent_head:refs/heads/fm/task-x1"
-  git -C "$case_dir/project" fetch -q origin fm/task-x1
-  wt_commit_file "$case_dir" feature.txt hello "add feature"
-  append_pr_meta_url "$case_dir"
-  pr_head=$(land_equivalent_patch_on_origin_branch "$case_dir" pr-head feature.txt hello "add feature")
-  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+test_squash_merged_pr_contains_the_replayed_patch_and_parent() {
+  local case_dir rc parent_head pr_head local_head parent_landed
+  for parent_landed in no yes; do
+    case_dir=$(make_case "squash-replayed-patch-parent-$parent_landed")
+    write_meta "$case_dir" no-mistakes ship
+    wt_commit_file "$case_dir" local-parent.txt parent "local parent"
+    parent_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+    git -C "$case_dir/wt" push -q origin "$parent_head:refs/heads/fm/task-x1"
+    git -C "$case_dir/project" fetch -q origin fm/task-x1
+    # Merely publishing a parent on the source branch does not establish that
+    # its content landed. Only this control puts it in the merged result's base.
+    if [ "$parent_landed" = yes ]; then
+      git -C "$case_dir/wt" push -q origin "$parent_head:refs/heads/main"
+    fi
+    wt_commit_file "$case_dir" feature.txt hello "add feature"
+    local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+    append_pr_meta_url "$case_dir"
+    pr_head=$(land_equivalent_patch_on_origin_branch "$case_dir" pr-head feature.txt hello "replay feature in merged result")
+    [ "$local_head" != "$pr_head" ] || fail "replayed-patch fixture did not rewrite the local commit"
+    add_gh_pr_merged_for_head "$case_dir" "$pr_head"
 
-  set +e
-  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
-  rc=$?
-  set -e
-
-  expect_code 0 "$rc" "squash-replayed-patch: teardown should succeed when unpushed local patch is in the merged PR head"
-  ! grep -q REFUSED "$case_dir/stderr" || fail "squash-replayed-patch: teardown printed a REFUSED line"
-  pass "squash-merged PR accepts replayed unpushed local patches contained in the PR head"
+    rc=0
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    if [ "$parent_landed" = yes ]; then
+      expect_code 0 "$rc" "replayed patch and parent are both landed: $(cat "$case_dir/stderr")"
+      [ ! -e "$case_dir/state/task-x1.meta" ] || fail "landed replay kept the task record"
+    else
+      expect_code 1 "$rc" "replayed patch cannot cover its published but unlanded parent"
+      assert_refusal_retained_task_state "$case_dir" unlanded-replayed-parent "$local_head"
+      [ "$(git -C "$case_dir/wt" show HEAD:local-parent.txt)" = parent ] \
+        || fail "refusal lost the unlanded parent contents"
+    fi
+  done
+  pass "replayed local patches permit cleanup only when their parent changes also landed"
 }
 
 test_merged_pr_with_later_local_commit_refuses() {
@@ -5082,7 +5095,7 @@ test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
 test_no_pr_recorded_discovers_merged_pr_by_branch_allows
 test_merged_pr_refuses_unicode_merge_only_adjustment
 test_merged_pr_refuses_unlanded_submodule_gitlink_update_despite_ignore_settings
-test_squash_merged_pr_allows_replayed_unpushed_patch
+test_squash_merged_pr_contains_the_replayed_patch_and_parent
 test_merged_pr_with_later_local_commit_refuses
 test_merged_pr_history_with_reapplied_local_change_refuses
 test_squash_merged_rebased_branch_allows
