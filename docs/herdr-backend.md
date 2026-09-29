@@ -691,6 +691,13 @@ The first agent or shell sample in that window decides.
 No registered status outranks the process view, because an agent killed mid-turn leaves `working` behind just as a quit one leaves `idle`.
 The native busy verdict is verified the same way, so a shell-only pane never reads busy.
 
+The mirror case holds too: an absent registration never disproves an agent.
+Herdr can lose a pane's agent binding while its harness keeps running, and `agent get` then answers `agent_not_found` for a pane whose worker is demonstrably working, so the probe below reads `dead` for a live agent.
+`dead` therefore means no registration this classifier can back with process evidence, not that the pane is agent-free.
+A caller that must not act on the registration alone settles such a read through the pane's own processes: `fm_backend_agent_process_state` (`bin/fm-backend.sh`) prints the process view above, plus `unverified` for a backend that cannot answer.
+Its current consumer is the steering doorbell's endpoint decision (`fm_task_inbox_endpoint_verdict` in `bin/fm-task-inbox-lib.sh`), because typing into a pane whose agent really exited is destructive while withholding the line from a live one strands the steer.
+The recovery-grade consumers keep acting on the probe's verdict unchanged.
+
 ### Process-view version support
 
 The `pane process-info` subcommand that this process-level proof depends on is present in every supported release client from the 0.7.1 floor upward (measured 2026-09-10 on the pinned 0.7.1, 0.7.3, 0.7.4, and 0.7.5 release clients - [verification](verification/runtime-backends.md) "Stale agent registration").

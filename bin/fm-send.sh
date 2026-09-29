@@ -49,8 +49,9 @@
 # "was the message acted on" is, and that is answered asynchronously for an
 # ordinary record by the worker's acknowledgement move into handled/. The
 # watcher re-rings an unacknowledged message while its endpoint remains
-# available, escalates after the bounded ladder, and instead routes a positively
-# dead or missing endpoint directly to recovery without typing. An explicit
+# available, escalates after the bounded ladder, and instead routes an endpoint
+# the doorbell cannot reach (fm_task_inbox_endpoint_verdict) directly to
+# recovery without typing. An explicit
 # fire-and-forget record is excluded from that ladder.
 # bin/fm-task-inbox-lib.sh owns the record format, the doorbell line, and the
 # re-ring ladder. The composer pre-check before the ring is ADVISORY only: when
@@ -1089,6 +1090,7 @@ else
     1) echo "fm-send: doorbell skipped (composer visibly holds pending text); the steer is durably recorded at $INBOX_RECORD and the watcher will re-ring" >&2 ;;
     2) echo "fm-send: doorbell did not reach $T; the steer is durably recorded at $INBOX_RECORD and the watcher will re-ring" >&2 ;;
     3) echo "fm-send: doorbell not typed because the agent in $T has exited; the steer is durably recorded at $INBOX_RECORD for recovery (stuck-crewmate-recovery), and the watcher will not re-ring a dead pane" >&2 ;;
+    4) echo "fm-send: doorbell not typed because it could not tell whether the agent in $T is still running (the runtime reports no agent in the pane and its processes could not show one); the steer is durably recorded at $INBOX_RECORD and the watcher surfaces it once for recovery (stuck-crewmate-recovery) instead of typing into a pane that may have no agent" >&2 ;;
     esac
     exit 0
   fi

@@ -969,7 +969,7 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
 # contract. It is deliberately richer than fm_backend_target_exists's cheap
 # pane-presence read and prints exactly one of:
 #   alive      - a verified harness agent is running.
-#   dead       - the endpoint exists but confidently has no agent.
+#   dead       - the endpoint exists with no agent this classifier can see.
 #   missing    - the recorded endpoint is authoritatively absent.
 #   ambiguous  - the endpoint exists but its process cannot be attributed.
 #   unreadable - a target or inventory read failed or contradicted itself.
@@ -982,9 +982,13 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
 # which verifies a registered agent against `pane process-info` and the real
 # process table, so a registration Herdr kept over a shell-only pane reads
 # `dead` here (issue #4115) - then maps a positively stopped session server to
-# `missing` only in this recovery-grade view. Zellij remains unverified because
-# its secondmate ghost-tab and agent-process recovery path has not been
-# empirically validated. Orca and cmux do not support secondmate spawns.
+# `missing` only in this recovery-grade view. A Herdr pane with no registration
+# at all reads `dead` too, which Herdr also produces for a live agent whose
+# binding it lost, so a caller that needs proof the agent is gone rather than
+# recovery grade reads fm_backend_agent_process_state below. Zellij remains
+# unverified because its secondmate ghost-tab and agent-process recovery path
+# has not been empirically validated. Orca and cmux do not support secondmate
+# spawns.
 fm_backend_agent_state() {  # <backend> <target>
   local backend=$1 target=$2
   fm_backend_source "$backend" || { printf 'unverified'; return 0; }
@@ -1003,6 +1007,29 @@ fm_backend_agent_alive() {  # <backend> <target>
     alive) printf 'alive' ;;
     dead|missing) printf 'dead' ;;
     *) printf 'unknown' ;;
+  esac
+}
+
+# fm_backend_agent_process_state: the process-level half of the agent read,
+# for a caller that must not act on a runtime's registration alone. Prints
+# exactly one of agent|shell|other|unreadable|unverified - whether a verified
+# harness process runs in the endpoint, a shell-only pane, something else, or
+# no answer. `dead` from fm_backend_agent_state is not always process evidence:
+# Herdr also reads `dead` when `agent get` finds no registration, and Herdr can
+# lose that registration while the agent keeps running, so the Herdr answer is
+# its pane process view (fm_backend_herdr_pane_process_state). Tmux's `dead`
+# is already read from the pane's foreground process group, so a tmux endpoint
+# the caller asks about is process-proven agent-free already.
+fm_backend_agent_process_state() {  # <backend> <target>
+  local backend=$1 target=$2
+  fm_backend_source "$backend" || { printf 'unverified'; return 0; }
+  case "$backend" in
+    herdr)
+      fm_backend_herdr_parse_target "$target" || { printf 'unreadable'; return 0; }
+      fm_backend_herdr_pane_process_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE"
+      ;;
+    tmux) printf 'shell' ;;
+    *) printf 'unverified' ;;
   esac
 }
 

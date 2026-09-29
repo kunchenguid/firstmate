@@ -25,6 +25,12 @@
 #  10. An empty or whitespace-only text steer is refused before anything is
 #      marked, recorded, or typed - on the marked secondmate path that means
 #      no marker-only record and no pending-reply expectation.
+#  11. The doorbell decision on a Herdr pane with no agent registration reads
+#      the pane's processes: a live harness process is rung - including one
+#      sitting under the pane shell behind a tool that holds the foreground
+#      process group - a shell-only pane is still never typed into, and a
+#      process view that cannot tell refuses with wording that says so; the
+#      record is identical in every case.
 # Every case below that passes a literal `$...` message quotes it on purpose
 # (the point is sending an unexpanded `$` line), so SC2016 is disabled.
 # shellcheck disable=SC2016
@@ -411,8 +417,141 @@ test_empty_message_refused() {
   pass "fm-send: an empty or whitespace-only text steer refuses before marking, recording, or typing"
 }
 
+# A stateful fake herdr modeling one pane (session fmtest, pane w1:p2) whose
+# agent registration is gone: `agent get` answers agent_not_found, as Herdr
+# does when it loses a pane's binding. FM_FAKE_HERDR_PROC picks what the pane's
+# own process view shows: agent (a Pi foreground process), shell (only the
+# shell FM_FAKE_HERDR_SHELL_PID, a real process), other (a non-shell tool), or
+# unreadable (process-info fails). Typed doorbell text is logged to
+# FM_SEND_LOG.
+setup_herdr_case() { # <name> -> echoes case dir with a herdr-backed t1 meta
+  local dir
+  dir="$TMP_ROOT/$1"
+  mkdir -p "$dir/home/state"
+  make_stubs "$dir" >/dev/null
+  cat >"$dir/fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+sp=${FM_FAKE_HERDR_SHELL_PID:-4242}
+case "${1:-} ${2:-}" in
+  'status --json') printf '{"client":{"version":"0.9.1","protocol":22},"server":{"running":true}}\n' ;;
+  'pane get') printf '{"result":{"pane":{"pane_id":"%s"}}}\n' "$3" ;;
+  'agent get') printf '{"error":{"code":"agent_not_found","message":"agent target %s not found"}}\n' "$3" ;;
+  'pane process-info')
+    case "${FM_FAKE_HERDR_PROC:?}" in
+      agent) fg='{"pid":4243,"name":"node","argv0":"pi","argv":["pi"],"cmdline":"pi"}' ;;
+      shell) fg="{\"pid\":$sp,\"name\":\"zsh\",\"argv0\":\"zsh\",\"argv\":[\"-zsh\"],\"cmdline\":\"-zsh\"}" ;;
+      other) fg='{"pid":4250,"name":"less","argv0":"less","argv":["less"],"cmdline":"less"}' ;;
+      *) exit 1 ;;
+    esac
+    printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":%s,"foreground_processes":[%s]}}}\n' "$sp" "$fg" ;;
+  'pane read') printf 'output\n\n> \n' ;;
+  'pane send-text') printf '%s\n' "$4" >>"$FM_SEND_LOG" ;;
+esac
+exit 0
+SH
+  chmod +x "$dir/fakebin/herdr"
+  fm_write_meta "$dir/home/state/t1.meta" "window=fmtest:w1:p2" "backend=herdr" "kind=ship" "harness=pi"
+  printf '%s\n' "$dir"
+}
+
+# Sends two steers to the herdr case and asserts the durable records are the
+# ordinary ones - same schema, sequence, and exact bodies - whatever the
+# doorbell decided. Leaves the second send's stderr in <dir>/send.err.
+send_two_and_check_records() { # <dir> <proc> <shell-pid>
+  local dir=$1 proc=$2 sp=$3 n body rc
+  for n in 1 2; do
+    run_send "$dir" "$dir/send.err" FM_FAKE_HERDR_PROC="$proc" FM_FAKE_HERDR_SHELL_PID="$sp" \
+      FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 -- t1 "steer $n"$'\n'"second line"
+    rc=$?
+    expect_code 0 "$rc" "a durably recorded steer must exit 0 ($proc process view)"
+    [ -f "$dir/home/state/t1.inbox/00$n.msg" ] || fail "steer $n was not recorded as 00$n.msg ($proc process view)"
+    body=$(record_body _ "$dir/home/state/t1.inbox/00$n.msg")
+    [ "$body" = "steer $n"$'\n'"second line" ] || fail "record 00$n.msg body changed ($proc process view): $body"
+    [ "$(head -n 1 "$dir/home/state/t1.inbox/00$n.msg")" = schema=fm-task-inbox.v1 ] \
+      || fail "record 00$n.msg lost its schema line ($proc process view)"
+  done
+}
+
+test_herdr_lost_binding_live_agent_is_rung() {
+  local dir typed
+  dir=$(setup_herdr_case herdr-lost-binding-live)
+  send_two_and_check_records "$dir" agent 4242
+  typed=$(cat "$dir/send.log")
+  assert_contains "$typed" "Firstmate instruction waiting: list '$dir/home/state/t1.inbox'/*.msg" \
+    "a live Pi process with no Herdr registration must still be rung"
+  assert_not_contains "$(cat "$dir/send.err")" "doorbell not typed" \
+    "a live agent with a lost registration must not be reported as unreached"
+  pass "fm-send inbox: a live agent whose Herdr registration is missing is rung"
+}
+
+test_herdr_lost_binding_foreground_tool_is_rung() {
+  local dir sleep_bin shell_pid harness_pid waited typed
+  dir=$(setup_herdr_case herdr-lost-binding-foreground-tool)
+  # A real process tree standing in for the live worker: the pane shell with a
+  # harness child, while the pane's foreground process group holds a tool the
+  # worker is running (`less`), so only the descendant walk can see the harness.
+  sleep_bin=$(command -v sleep) || fail "sleep not found"
+  bash -c 'exec -a pi "$1" 300 & printf "%s\n" "$!" >"$2"; exec "$1" 300' \
+    _ "$sleep_bin" "$dir/harness.pid" &
+  shell_pid=$!
+  waited=0
+  while [ ! -s "$dir/harness.pid" ]; do
+    [ "$waited" -lt 100 ] || fail "the fake harness child never reported its pid"
+    "$sleep_bin" 0.05
+    waited=$((waited + 1))
+  done
+  harness_pid=$(cat "$dir/harness.pid")
+  send_two_and_check_records "$dir" other "$shell_pid"
+  kill "$harness_pid" "$shell_pid" 2>/dev/null || true
+  typed=$(cat "$dir/send.log")
+  assert_contains "$typed" "Firstmate instruction waiting: list '$dir/home/state/t1.inbox'/*.msg" \
+    "a live harness under the pane shell must be rung even while a tool holds the foreground group"
+  assert_not_contains "$(cat "$dir/send.err")" "doorbell not typed" \
+    "a live worker running a tool must not be reported as unreached"
+  pass "fm-send inbox: a live agent behind a foreground tool with a lost Herdr registration is rung"
+}
+
+test_herdr_exited_agent_is_not_typed() {
+  local dir sleep_bin shell_pid err
+  dir=$(setup_herdr_case herdr-lost-binding-exited)
+  # A real, childless process stands in for the pane's shell, so the
+  # descendant walk proves the pane shell-only against the real process table.
+  sleep_bin=$(command -v sleep) || fail "sleep not found"
+  "$sleep_bin" 300 &
+  shell_pid=$!
+  send_two_and_check_records "$dir" shell "$shell_pid"
+  kill "$shell_pid" 2>/dev/null || true
+  [ ! -s "$dir/send.log" ] || fail "a shell-only pane was typed into:"$'\n'"$(cat "$dir/send.log")"
+  err=$(cat "$dir/send.err")
+  assert_contains "$err" "doorbell not typed because the agent in fmtest:w1:p2 has exited" \
+    "an exited agent should keep the exited refusal"
+  assert_contains "$err" "t1.inbox/002.msg" "the refusal should name the durable record"
+  pass "fm-send inbox: an agent proven exited is still never typed into and keeps its durable record"
+}
+
+test_herdr_indeterminate_refuses_honestly() {
+  local dir proc err
+  for proc in unreadable other; do
+    dir=$(setup_herdr_case "herdr-lost-binding-$proc")
+    send_two_and_check_records "$dir" "$proc" 4242
+    [ ! -s "$dir/send.log" ] || fail "an indeterminate ($proc) pane was typed into:"$'\n'"$(cat "$dir/send.log")"
+    err=$(cat "$dir/send.err")
+    assert_contains "$err" "could not tell whether the agent in fmtest:w1:p2 is still running" \
+      "an indeterminate ($proc) refusal should say it could not tell"
+    assert_not_contains "$err" "has exited" \
+      "an indeterminate ($proc) refusal must not assert the agent exited"
+    assert_contains "$err" "t1.inbox/002.msg" "the refusal should name the durable record"
+  done
+  pass "fm-send inbox: an indeterminate process view refuses without claiming the agent exited"
+}
+
 test_text_steer_rides_inbox
 test_multiline_steer_is_legal
+test_herdr_lost_binding_live_agent_is_rung
+test_herdr_lost_binding_foreground_tool_is_rung
+test_herdr_exited_agent_is_not_typed
+test_herdr_indeterminate_refuses_honestly
 test_resend_enqueues_new_sequence
 test_pending_composer_skips_ring_advisorily
 test_failed_ring_is_still_sent

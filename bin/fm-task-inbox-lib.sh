@@ -18,9 +18,10 @@
 # duplicated doorbell is a no-op by construction (the worker finds the inbox
 # empty or already handled), and a swallowed doorbell is detected by the
 # absence of the worker's acknowledgement and re-rung on a bounded schedule.
-# A positively dead or missing endpoint bypasses that schedule without being
+# An endpoint the doorbell cannot reach bypasses that schedule without being
 # typed into, and its unhandled record surfaces through the ordinary stale wake
-# into stuck-crewmate-recovery.
+# into stuck-crewmate-recovery; see fm_task_inbox_endpoint_verdict for what
+# counts as unreachable.
 #
 # Layout under <state-dir>:
 #   <task>.inbox/NNN.msg       one durable steer, numeric sequence, atomic rename
@@ -49,9 +50,10 @@
 # attempt may ring or be skipped to protect another draft in a proven pending
 # composer; an unsubmitted copy of this doorbell is retried. After
 # FM_TASK_INBOX_RING_MAX attempts without an acknowledgement it escalates. The
-# caller owns the busy and recovery-grade endpoint checks: a busy pane waits,
-# while a positively dead or missing endpoint skips delivery and the ladder and
-# escalates directly. This library owns only the schedule and escalation marker.
+# caller owns the busy and endpoint checks: a busy pane waits, while an
+# endpoint the doorbell cannot reach (fm_task_inbox_endpoint_verdict) skips
+# delivery and the ladder and escalates directly, exactly once. This library
+# owns only the schedule and escalation marker.
 # If attempt bookkeeping cannot be persisted while the record remains unhandled,
 # the caller surfaces that failure instead of retrying silently; a concurrently
 # removed inbox is a quiet no-op. Escalation deliberately queues the wake before
@@ -270,13 +272,44 @@ fm_task_inbox_doorbell_line() {  # <record-path>
     "$quoted" "$quoted"
 }
 
-# Ring the doorbell, best-effort: one endpoint-liveness pre-check, one advisory
-# composer pre-check, then the backend's submit machinery with a minimal retry
-# budget, verdict discarded.
+# The doorbell's endpoint decision: would typing into <target> reach an agent?
+# Prints exactly one of:
+#   ring           no positive exit evidence. This includes an endpoint whose
+#                  classifier cannot see it (ambiguous, unreadable, unverified),
+#                  which still rings so a blind classifier never starves a live
+#                  worker; the `: ` doorbell prefix keeps a stray line inert.
+#   exited         the endpoint is authoritatively missing, or its processes
+#                  prove it is agent-free (a shell-only pane).
+#   indeterminate  the runtime reports no agent, but the pane's processes can
+#                  neither confirm nor refute one.
+# Only process evidence settles a `dead` endpoint. The runtime's registration
+# is bookkeeping: Herdr's `agent get` can answer agent_not_found for a pane
+# whose agent is running, and typed input reaches whatever process runs in the
+# pane, not the registration. So a `dead` read is settled through
+# fm_backend_agent_process_state and a verified harness process rings.
+fm_task_inbox_endpoint_verdict() {  # <backend> <target>
+  case "$(fm_backend_agent_state "$1" "$2" 2>/dev/null || true)" in
+    missing) printf 'exited' ;;
+    dead)
+      case "$(fm_backend_agent_process_state "$1" "$2" 2>/dev/null || true)" in
+        agent) printf 'ring' ;;
+        shell) printf 'exited' ;;
+        *) printf 'indeterminate' ;;
+      esac
+      ;;
+    *) printf 'ring' ;;
+  esac
+}
+
+# Ring the doorbell, best-effort: one endpoint pre-check
+# (fm_task_inbox_endpoint_verdict), one advisory composer pre-check, then the
+# backend's submit machinery with a minimal retry budget, verdict discarded.
 # Returns 0 rang, 1 skipped because the composer PROVENLY holds pending text
 # other than our own doorbell (the watcher re-rings later), 2 the backend send
-# failed, 3 skipped because the endpoint is positively dead or missing (nothing
-# typed; recovery owns the record). No return value is delivery proof; the
+# failed, 3 skipped because the agent has exited or the endpoint is missing,
+# 4 skipped because the endpoint reports no agent and its processes could not
+# tell whether one is running. Nothing is typed on 3 or 4; the record surfaces
+# once for recovery instead. No return value is delivery proof; the
 # acknowledgement move is the only delivery signal.
 # The skip is deliberately narrow: only an exact `pending` verdict can defer,
 # because there our Enter could submit someone's real half-typed content.
@@ -290,8 +323,9 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 # a lost first Enter gets one confirmed retry.
 fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   local backend=$1 target=$2 rec=$3 label=${4:-} line cstate verdict
-  case "$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)" in
-    dead|missing) return 3 ;;
+  case "$(fm_task_inbox_endpoint_verdict "$backend" "$target")" in
+    exited) return 3 ;;
+    indeterminate) return 4 ;;
   esac
   if ! line=$(fm_task_inbox_doorbell_line "$rec"); then
     return 2
@@ -418,8 +452,9 @@ EOF
 
 # Advance the ladder after a delivery attempt. A failed ring or a composer-
 # protected skip still consumes budget so neither an unreadable pane nor a
-# permanently blocked composer can retry silently forever. A positively dead or
-# missing endpoint never enters the ladder: the watcher escalates it directly.
+# permanently blocked composer can retry silently forever. An endpoint the
+# doorbell cannot reach never enters the ladder: the watcher escalates it
+# directly.
 # A concurrently removed inbox is a successful no-op; otherwise failure means
 # the caller must surface the unwritable ladder while the record remains
 # unhandled.

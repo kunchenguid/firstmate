@@ -84,8 +84,34 @@ test_scratchpad2_does_not_dirty_porcelain() {
   pass "scratchpad2/ does not make git status --porcelain dirty"
 }
 
+test_omc_dir_ignored_as_category() {
+  # A gated run writes harness session state under .omc/ (session ids, a
+  # home-absolute transcript path). Left unignored it both dirties the working
+  # tree and lets a publish step commit that machine-local metadata into a
+  # change, where no other clone can resolve the paths it names.
+  local sample nested
+  nested=".omc/$(random_leaf state-sessions)/$(random_leaf deep-file)"
+  for sample in .omc/handoffs/last-session-end.md "$nested"; do
+    git -C "$ROOT" check-ignore -q "$sample" \
+      || fail "git does not ignore $sample (.omc/ must be ignored as a directory)"
+  done
+  git -C "$ROOT" check-ignore -q .omc-workspace \
+    && fail "git unexpectedly ignores .omc-workspace (.omc/ must match only the directory)"
+  pass ".omc/ is ignored as a directory, covering nested harness state"
+}
+
+test_omc_ignores_no_tracked_path() {
+  local tracked
+  tracked=$(git -C "$ROOT" ls-files | grep -E '(^|/)\.omc/' || true)
+  [ -z "$tracked" ] \
+    || fail "a tracked path under .omc/ would publish machine-local state: $tracked"
+  pass "no tracked path lives under .omc/"
+}
+
 test_config_dir_ignored_as_category
 test_unrelated_path_stays_visible
 test_scratchpad_prefix_is_ignored
 test_scratchpad_prefix_ignores_no_tracked_path
 test_scratchpad2_does_not_dirty_porcelain
+test_omc_dir_ignored_as_category
+test_omc_ignores_no_tracked_path

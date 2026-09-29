@@ -2085,15 +2085,16 @@ fm_backend_herdr_explicit_close_pane_confirmed() {  # <session> <pane_id>
 #   agent      - a foreground process is a verified harness (any identity
 #                surface: kernel name, argv[0], or a node-bundle argument), or
 #                a verified harness is still a descendant of the pane shell
-#                outside the foreground group (suspended or backgrounded). A
+#                outside the foreground group - suspended, backgrounded, or
+#                behind a tool the agent runs in its own process group. A
 #                registered agent whose process still exists is never demoted.
 #   shell      - every foreground process is a recognized shell AND no
 #                descendant of the pane shell is a verified harness: positive
 #                proof the pane is shell-only. The descendant walk is what makes
 #                this safe for the crew shape, where a nested `treehouse get`
 #                shell sits under the pane's top shell.
-#   other      - the foreground group holds something that is neither: a tool
-#                the agent is running in its own process group, a pager, a
+#   other      - the foreground group holds something that is neither and no
+#                harness is a descendant of the pane shell either: a pager, a
 #                stranger's process. Not a shell-only pane. An idle shell
 #                transiently hosts prompt helpers such as starship in its
 #                foreground group (the same shape the idle-shell proof settles
@@ -2131,7 +2132,7 @@ fm_backend_herdr_pane_process_state() {  # <session> <pane_id>
 # the settle retry.
 fm_backend_herdr_pane_process_state_sample() {  # <session> <pane_id>
   local session=$1 pane_id=$2 info shell_pid count i pid name argv0 args verdict
-  local others=0 ps_bin rows
+  local others=0 ps_bin rows unfound=shell blind=unreadable
   info=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane_id" 2>/dev/null) \
     || { printf 'unreadable'; return 0; }
   printf '%s' "$info" | jq -e --arg pane "$pane_id" '
@@ -2165,17 +2166,21 @@ fm_backend_herdr_pane_process_state_sample() {  # <session> <pane_id>
     i=$((i + 1))
   done
 
-  # Nothing in the foreground is a harness. A foreground that is not purely
-  # shells is already `other`, whatever else the pane holds. Before calling a
-  # shells-only foreground a shell-only PANE, look for a harness that is still a
-  # descendant of the pane shell outside the foreground group; only its
-  # absence, read from the real process table, is proof of an agent-free pane.
-  [ "$others" -eq 0 ] || { printf 'other'; return 0; }
+  # Nothing in the foreground is a harness. Before settling, look for one that
+  # is still a descendant of the pane shell outside the foreground group,
+  # whatever the foreground holds: a live worker whose registration Herdr lost
+  # can be running a tool in its own foreground process group, which is `other`
+  # there and still an agent here. Only that walk's completed absence settles
+  # the pane - `shell`, the shell-only PANE it then proves, for a shells-only
+  # foreground, `other` for anything else. Without the walk the foreground's
+  # own reading stands: `unreadable` for shells-only, which cannot claim that
+  # absence, and `other` for a foreground that is `other` either way.
+  [ "$others" -eq 0 ] || { unfound=other; blind=other; }
   ps_bin=${FM_HERDR_PS_BIN:-ps}
-  command -v "$ps_bin" >/dev/null 2>&1 || { printf 'unreadable'; return 0; }
-  rows=$(LC_ALL=C "$ps_bin" -axo pid=,ppid=,comm= 2>/dev/null) || { printf 'unreadable'; return 0; }
+  command -v "$ps_bin" >/dev/null 2>&1 || { printf '%s' "$blind"; return 0; }
+  rows=$(LC_ALL=C "$ps_bin" -axo pid=,ppid=,comm= 2>/dev/null) || { printf '%s' "$blind"; return 0; }
   printf '%s\n' "$rows" | awk -v shell="$shell_pid" '$1 == shell { found = 1 } END { exit(found ? 0 : 1) }' \
-    || { printf 'unreadable'; return 0; }
+    || { printf '%s' "$blind"; return 0; }
   while IFS=$'\t' read -r pid name; do
     [ -n "$pid" ] || continue
     args=$(LC_ALL=C "$ps_bin" -p "$pid" -o args= 2>/dev/null) || continue
@@ -2207,7 +2212,7 @@ $(printf '%s\n' "$rows" | awk -v shell="$shell_pid" '
     }
   }')
 EOF
-  printf 'shell'
+  printf '%s' "$unfound"
 }
 
 # fm_backend_herdr_pane_agent_state: classify <pane_id> in <session> as one of
