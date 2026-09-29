@@ -217,6 +217,27 @@ kill "$owner" 2>/dev/null || true
 wait_until 50 test ! -d "$TLOCK" || fail "supervisor survived its Codex owner"
 wait "$owner" 2>/dev/null || true
 
+# A wake the primary has not drained yet keeps an announced downtime episode
+# open, so the first supervised watcher resurfaces it once. The arm after that
+# queued close is a handling successor and must not resurface it again.
+sleep 600 &
+owner=$!
+: > "$QUEUE"
+checkpoint 2
+case "$CP_RC" in 0|124) ;; *) fail "the downtime checkpoint failed (rc=$CP_RC): $(cat "$TMP_ROOT/cp.out" "$TMP_ROOT/cp.err")" ;; esac
+printf '1700000000\t1\tcheck\tundrained\tcheck: undrained\n' >> "$TSTATE/.wake-queue"
+allowing_stop
+wait_until 50 grep -q '^check: rearm-resurface' "$QUEUE" \
+  || fail "the idle supervisor did not resurface the undrained downtime: $(cat "$QUEUE")"
+sleep 8
+resurfaced=$(grep -c '^check: rearm-resurface' "$QUEUE")
+[ "$resurfaced" -eq 1 ] || fail "the idle supervisor re-queued rearm-resurface $resurfaced times"
+supervisor_owns_watcher || fail "the idle supervisor did not keep a watcher after the resurface"
+kill "$owner" 2>/dev/null || true
+wait_until 50 test ! -d "$TLOCK" || fail "supervisor survived its Codex owner"
+wait "$owner" 2>/dev/null || true
+printf 'ok - the idle supervisor queues pending downtime once and re-arms as a handling successor\n'
+
 # The failure budget, against an arm that reports only the documented status
 # lines: closes of a watcher another owner held never end continuity, while
 # closes with no watcher at all still do after three tries.

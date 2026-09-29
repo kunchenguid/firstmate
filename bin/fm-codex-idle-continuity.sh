@@ -52,6 +52,11 @@
 # attached is following a watcher someone else started, and a home-wide
 # `--stop` would take that watcher down with the owner.
 #
+# The arm after a queued close is a handling successor
+# (FM_WATCH_PREDECESSOR_ARM_PID, as bin/fm-claude-stop-autoarm.sh passes): the
+# queued wake is already on its way, so that watcher does not resurface
+# watcher downtime the primary has not drained yet.
+#
 # After three failed arms the supervisor queues one `check:` line and records
 # the episode in state/.codex-idle-continuity-failure-notified. While that
 # record stands no allowing stop starts a supervisor, so a watcher that stays
@@ -275,7 +280,7 @@ leave_watcher() {
 }
 
 supervise() {
-  local owner arm_pid='' text fails=0
+  local owner arm_pid='' closed_arm text fails=0 predecessor=''
   IFS= read -r owner < "$LOCK/owner" || exit 0
   case "$owner" in ''|*[!0-9]*) exit 0 ;; esac
   # shellcheck source=bin/fm-wake-lib.sh
@@ -289,8 +294,9 @@ supervise() {
   while kill -0 "$owner" 2>/dev/null; do
     [ -e "$STATE/.afk" ] && leave_watcher
     fm_supervision_needed "$STATE" || break
-    "$ARM" >"$LOCK/arm.out" 2>&1 &
+    FM_WATCH_PREDECESSOR_ARM_PID=$predecessor "$ARM" >"$LOCK/arm.out" 2>&1 &
     arm_pid=$!
+    predecessor=
     while kill -0 "$arm_pid" 2>/dev/null; do
       if ! kill -0 "$owner" 2>/dev/null; then
         owner_left
@@ -298,6 +304,7 @@ supervise() {
       sleep 0.5
     done
     wait "$arm_pid" || true
+    closed_arm=$arm_pid
     arm_pid=
     [ -e "$STATE/.afk" ] && leave_watcher
     text=$(actionable_text < "$LOCK/arm.out" || true)
@@ -305,6 +312,7 @@ supervise() {
       fails=0
       rm -f "$FAILURE_NOTICE"
       queue_text "$text" || true
+      predecessor=$closed_arm
       continue
     fi
     if ! handed_over < "$LOCK/arm.out"; then
