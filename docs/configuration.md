@@ -1840,7 +1840,7 @@ A long-polling external process is registered as a *source* through its adapter,
 
 **Open the Lavish artifact first**
 
-Before arming any Lavish source, open its artifact with `lavish-axi` so the saved session identifies the board's server; each poll attempt derives its host and port from that session and refuses missing or invalid session evidence before consuming a staged worker reply.
+Before arming any Lavish source, open its artifact with `lavish-axi` so the saved session identifies the board's server; each poll attempt derives its host and port from that session and refuses missing or invalid session evidence before consuming a staged reply.
 
 **Retry interrupted Lavish polls**
 
@@ -1849,6 +1849,27 @@ This start-to-start governor is a no-op after a normally blocking poll but caps 
 
 Real feedback, ended and missing sessions, any other `SERVER_ERROR`, and that same interruption still standing once the bound is spent are all captured and announced normally; `FM_LAVISH_POLL_RETRY_DELAY` is a bounded 1 to 60 second test override for the interval only, and the runner itself stays adapter-agnostic.
 An already-armed Lavish source keeps its registered listener command until it is retired and armed again, so retire the source, then arm it again to adopt this retry policy.
+
+**Reply to a Lavish round**
+
+An owner that has applied a captured nonterminal round answers it in the board's Conversation panel by re-arming the board with `--agent-reply-file <path>`, and that re-arm is the round's acknowledgement.
+Firstmate re-arms its own board with `bin/fm-procevent-lavish.sh arm <artifact.html> --agent-reply-file <path>`, and a worker adds `--for <task-id>` as the crew-hosted contract below requires.
+The file's contents are copied into that generation's private staging file and passed once to the published `--agent-reply` argument, leaving the caller's file in place.
+A reply re-arm is refused while the board is registered with no unacknowledged nonterminal round waiting, so a generation already carrying a reply is never replaced before its listener posts it.
+It is also refused for a terminal round, because no later poll could show the reply.
+A failed re-arm leaves the prior registration and its referenced reply unchanged, including when its required acknowledgement cannot be recorded.
+
+A worker's board is not relaunched while its round is open, but a firstmate board keeps listening between rounds, so by the time firstmate replies the supervision cycle has usually relaunched a listener that carries no reply.
+A firstmate reply re-arm therefore stops that earlier listener the way `retire` does and starts the reply generation's listener, so the next poll posts the reply.
+It refuses instead when another home owns that listener or when it cannot prove the listener stopped.
+The published poll keeps feedback queued when a waiting poll is stopped before feedback arrives; the Lavish limit in the durability guarantees below still covers a result the stopped poll had already returned.
+
+Reply posting is best effort by design.
+The listener consumes the staged file only after validating its own setup and the board artifact.
+The one loss window is a rare crash between consuming the file and making the call, which drops that round's reply rather than posting it twice.
+
+This path keeps no receipt, retry, or idempotency record.
+Robust reply delivery waits on lavish-axi's exclusive listener.
 
 ### Crew-hosted Lavish review boards
 
@@ -1871,17 +1892,8 @@ Re-arm is that acknowledgement and nothing else: the board is armed once while n
 
 **Stage an agent reply**
 
-Re-arm never acquires, releases, or hands off the source claim.
-It may carry `--agent-reply-file <path>`.
-The file's contents are copied into that generation's private staging file and passed once to the published `--agent-reply` argument.
-
-A failed re-arm leaves the prior registration and its referenced reply unchanged, including when its required acknowledgement cannot be recorded.
-Reply posting is best effort by design.
-The listener consumes the staged file only after validating its own setup and the board artifact.
-The one loss window is a rare crash between consuming the file and making the call, which drops that round's reply rather than posting it twice.
-
-This path keeps no receipt, retry, or idempotency record.
-Robust reply delivery waits on lavish-axi's exclusive listener.
+A worker's re-arm never acquires, releases, or hands off the source claim.
+It may carry `--agent-reply-file <path>`, which follows the [Lavish round reply contract](#process-to-event-sources-stateprocevent) above.
 
 **Deliver feedback to the worker**
 

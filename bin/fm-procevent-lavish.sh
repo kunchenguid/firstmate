@@ -34,12 +34,20 @@
 # poll       The registered listener command `arm` publishes, not a command to
 #            run in a conversational turn. It runs the published blocking poll
 #            and prints its response verbatim, absorbing only the one exact
-#            transient interruption described below. A task-owned arm consumes
-#            its staged reply file once - reading and removing it before the
+#            transient interruption described below. An arm that carries a
+#            reply, task-owned or firstmate-owned, stages it for the listener,
+#            which consumes that file once - reading and removing it before the
 #            poll - and hands the contents to the published `--agent-reply`
 #            argument; later retries poll without that reply. That post is best
 #            effort: a crash while consuming drops that one round's reply
 #            instead of posting it twice. See the note at the consume site.
+# arm        Register the board's listener and wait until it is running.
+#            `--for <task-id>` makes the board worker-owned. `--agent-reply-file`
+#            answers the round the owner just handled and is that round's
+#            acknowledgement: without `--for` it registers through the runner's
+#            `register-reply`, which is refused while the board is armed with no
+#            captured round waiting and stops the board's earlier listener so
+#            the reply is posted by the next poll.
 # terminal   Exit 0 when the captured result means this Lavish source will never
 #            produce another result, so the runner may retire it; any other exit
 #            keeps it armed. This is the generic adapter contract bin/fm-procevent.sh
@@ -221,7 +229,6 @@ cmd_arm() {
     esac
   done
   [ -n "$artifact" ] || usage
-  [ -z "$reply_file" ] || [ -n "$task" ] || usage
   command -v lavish-axi >/dev/null 2>&1 || die "lavish-axi is not installed"
   poll_retry_delay >/dev/null
   id=$(cmd_source_id "$artifact") || exit 1
@@ -231,6 +238,9 @@ cmd_arm() {
   [ -z "$reply_file" ] || listener+=(--agent-reply-file "$reply_file")
   if [ -n "$task" ]; then
     FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" register-task lavish "$id" "$task" -- \
+      "${listener[@]}" || exit 1
+  elif [ -n "$reply_file" ]; then
+    FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" register-reply lavish "$id" -- \
       "${listener[@]}" || exit 1
   else
     # This adapter's own listener command, which runs the plain blocking form
