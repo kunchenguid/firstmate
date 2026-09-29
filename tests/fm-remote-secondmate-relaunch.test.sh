@@ -276,6 +276,28 @@ expect_code 0 "$RC" "a worker after confirmed replacement launch failure: $OUT"
 pass "a confirmed replacement launch failure releases the relaunch seat"
 
 reset_meta
+perl -pi -e 's/^model=.*/model=pool-model-a/' "$HOME_DIR/state/ios.meta"
+seed_pool
+FM_FAKE_RELAUNCH_MODE=launch-failure
+OUT=$(run_relaunch ios claude pool-model-a medium); RC=$?
+unset FM_FAKE_RELAUNCH_MODE
+[ "$RC" -ne 0 ] || fail "a failed replacement of a pooled supervisor succeeded"
+assert_grep 'fleet_seat_state=dead' "$HOME_DIR/state/ios.meta" \
+  "the confirmed dead supervisor did not retain a durable dead state"
+assert_grep 'remote_host=remote-mac' "$HOME_DIR/state/ios.meta" \
+  "the confirmed dead supervisor lost its recovery route"
+OUT=$(probe_pool); RC=$?
+expect_code 0 "$RC" "a worker after the old pooled supervisor was confirmed dead: $OUT"
+rm -f "$HOME_DIR/state/fleet-seats/shared/"*.seat
+OUT=$(run_relaunch ios claude pool-model-a medium); RC=$?
+expect_code 0 "$RC" "a recovery launch after confirmed death: $OUT"
+assert_no_grep 'fleet_seat_state=dead' "$HOME_DIR/state/ios.meta" \
+  "the recovered supervisor retained its dead state"
+OUT=$(probe_pool); RC=$?
+expect_code 4 "$RC" "a worker after the supervisor recovered"
+pass "confirmed supervisor death releases its seat and recovery restores it"
+
+reset_meta
 seed_pool
 FM_FAKE_RELAUNCH_MODE=uncertain-failure
 OUT=$(run_relaunch ios claude pool-model-a medium); RC=$?
@@ -297,8 +319,11 @@ assert_grep 'model=openai-codex/gpt-5.6-sol' "$HOME_DIR/state/ios.meta" \
 OUT=$(probe_pool); RC=$?
 expect_code 4 "$RC" "a worker after host launch and parent publication failure"
 OUT=$(run_relaunch ios claude pool-model-a medium); RC=$?
-[ "$RC" -ne 0 ] || fail "a later relaunch replaced the unresolved seat"
-assert_contains "$OUT" "earlier remote relaunch" "the unresolved seat did not block another relaunch"
-pass "a publication failure retains the remote relaunch seat"
+expect_code 0 "$RC" "a matching-model retry should reconcile the unresolved seat: $OUT"
+assert_grep 'model=pool-model-a' "$HOME_DIR/state/ios.meta" \
+  "the retry did not publish the confirmed pooled model"
+OUT=$(probe_pool); RC=$?
+expect_code 4 "$RC" "a worker after the matching-model retry"
+pass "a publication failure retains the seat until a matching retry reconciles it"
 
 echo "ALL TESTS PASSED"
