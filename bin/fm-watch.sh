@@ -551,7 +551,7 @@ inbox_steer_check() {  # <window> <task>
   case "$agent_state" in
     dead|missing)
       if [ "$verb" = retry ]; then
-        fm_task_inbox_clear_retry "$STATE" "$task" || true
+        fm_task_inbox_clear_retry "$STATE" "$task" "$rec" || true
       else
         inbox_steer_escalate_unavailable "$w" "$task" "$rec"
       fi
@@ -586,7 +586,7 @@ inbox_steer_check() {  # <window> <task>
     retry)
       ring_rc=0
       fm_task_inbox_ring "$backend" "$w" "$rec" "$(window_label "$w")" || ring_rc=$?
-      if ! fm_task_inbox_clear_retry "$STATE" "$task" && [ -f "$rec" ]; then
+      if ! fm_task_inbox_clear_retry "$STATE" "$task" "$rec" && [ -f "$rec" ]; then
         reason="stale: $w (steering-inbox retry mark unremovable: ${rec%/*}/.retry-ring cannot be removed, so $rec would ring on every poll - inspect the inbox directory)"
         fm_wake_append stale "$w" "$reason" || exit 1
         wake "$reason"

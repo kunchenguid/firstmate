@@ -82,6 +82,10 @@ case "${1:-}" in
       if [ -n "${FM_ACK_RECORD:-}" ] && [ -f "$FM_ACK_RECORD" ]; then
         mv "$FM_ACK_RECORD" "${FM_ACK_RECORD%/*}/handled/"
       fi
+      # A concurrent fire-and-forget send marking its newer record mid-ring.
+      if [ -n "${FM_RING_MARKS_RETRY:-}" ]; then
+        printf '%s\n' "${FM_RING_MARKS_RETRY##*/}" > "${FM_RING_MARKS_RETRY%/*}/.retry-ring"
+      fi
     fi
     exit 0 ;;
   display-message)
@@ -571,7 +575,7 @@ test_fire_and_forget_retry_is_owed_once() {
   action=$(FM_TASK_INBOX_GRACE_SECS=60 inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
   [ "$action" = "retry $fire" ] || fail "the retry should resume once the ordinary record is handled, got: $action"
   # Once spent, the record is quiet for good: no second retry and no escalation.
-  inbox_lib "$state" fm_task_inbox_clear_retry "$state" t1
+  inbox_lib "$state" fm_task_inbox_clear_retry "$state" t1 "$fire"
   action=$(FM_TASK_INBOX_GRACE_SECS=0 FM_TASK_INBOX_RING_MAX=0 \
     inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
   [ "$action" = quiet ] || fail "a spent retry rang or escalated again: $action"
@@ -848,6 +852,32 @@ test_watcher_holds_retry_while_the_worker_decides() {
   pass "watcher: a fire-and-forget retry waits out the worker's own decision, then rings once"
 }
 
+test_watcher_retry_keeps_a_newer_mark() {
+  local dir state log fire newer rings
+  dir=$(setup_watch_case faf-retry-newer)
+  mkdir -p "$dir/config"
+  : > "$dir/config/wait-no-turns"
+  export FM_CONFIG_OVERRIDE="$dir/config"
+  state="$dir/state"; log="$dir/send.log"; : > "$log"
+  fire=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "one-shot steer" fire-and-forget)
+  age_path "$fire"
+  inbox_lib "$state" fm_task_inbox_mark_retry "$state" t1 "$fire"
+  age_path "$state/t1.inbox/.retry-ring"
+  newer=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "newer steer" fire-and-forget)
+  FM_RING_MARKS_RETRY="$newer" steer_check_once "$dir"
+  rings=$(grep -cF 'Firstmate instruction waiting' "$log" || true)
+  [ "$rings" = 1 ] || fail "expected the owed retry to ring once, got $rings:"$'\n'"$(cat "$log")"
+  [ "$(cat "$state/t1.inbox/.retry-ring" 2>/dev/null)" = "${newer##*/}" ] \
+    || fail "the spent retry removed a newer record's mark written during its ring"
+  age_path "$state/t1.inbox/.retry-ring"
+  steer_check_once "$dir"
+  rings=$(grep -cF 'Firstmate instruction waiting' "$log" || true)
+  [ "$rings" = 2 ] || fail "the newer record's retry did not ring, got $rings:"$'\n'"$(cat "$log")"
+  [ ! -e "$state/t1.inbox/.retry-ring" ] || fail "the watcher did not spend the newer retry mark"
+  unset FM_CONFIG_OVERRIDE
+  pass "watcher: spending a retry keeps a newer record's mark written during its ring"
+}
+
 test_watcher_escalates_once_after_budget() {
   local dir state out log pid rec rings
   dir=$(setup_watch_case escalate)
@@ -945,6 +975,7 @@ test_watcher_ack_silences_unwritable_ladder
 test_watcher_surfaces_unwritable_ladder
 test_watcher_pays_fire_and_forget_retry_once
 test_watcher_holds_retry_while_the_worker_decides
+test_watcher_retry_keeps_a_newer_mark
 test_watcher_escalates_once_after_budget
 test_watcher_dead_pane_escalates_once_without_ringing
 test_watcher_dead_pane_ignores_stale_busy_state

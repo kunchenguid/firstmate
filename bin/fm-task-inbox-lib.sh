@@ -385,10 +385,13 @@ fm_task_inbox_mark_retry() {  # <state-dir> <task-id> <record-path>
   { printf '%s\n' "${3##*/}" > "$dir/.retry-ring"; } 2>/dev/null
 }
 
-# Spend the retry mark after its ring. Fails only when the mark stays behind.
-fm_task_inbox_clear_retry() {  # <state-dir> <task-id>
+# Spend the retry mark after its ring, only while it still names that record:
+# a newer mark written meanwhile is owed its own retry and survives. Fails only
+# when the processed record's mark stays behind.
+fm_task_inbox_clear_retry() {  # <state-dir> <task-id> <record-path>
   local dir
   dir=$(fm_task_inbox_dir "$1" "$2")
+  [ "$(cat "$dir/.retry-ring" 2>/dev/null)" = "${3##*/}" ] || return 0
   rm -f "$dir/.retry-ring" 2>/dev/null
 }
 
