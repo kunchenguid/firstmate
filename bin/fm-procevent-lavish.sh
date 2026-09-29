@@ -498,7 +498,7 @@ cmd_terminal() {
 
 # Whether a completed result carries any queued content block at all. The
 # published response frames content as a top-level `prompts[N]{...}:`,
-# `prompts[N]:`, or `feedback[N]{...}:` header whose rows are INDENTED (see
+# `prompts[N]:`, `prompts: []`, or `feedback[N]{...}:` header whose rows are INDENTED (see
 # LAVISH_PROMPT_BLOCK_PERL for the two forms), so this anchors on column
 # zero: an indented payload line is captain-supplied text and must never be able
 # to forge - or, here, to hide behind - a content header. Any recognized block
@@ -510,7 +510,7 @@ cmd_terminal() {
 # failed" is never proof that nothing was said.
 result_has_queued_content() {  # <result-file>
   awk '
-    /^(prompts|feedback)\[[0-9]+\](\{[^}]*\})?:[[:space:]]*$/ {
+    /^(prompts|feedback)(\[[0-9]+\](\{[^}]*\})?:|: \[\])[[:space:]]*$/ {
       verdict = "present"
       exit
     }
@@ -561,6 +561,7 @@ cmd_silent() {
 #       target:                                   `attachments`
 #         type: text-range
 #
+# An empty array is written `prompts: []` and reads as a declared-empty list.
 # read_prompt_block returns the first column-zero block whose name matches the
 # given alternation. Tabular rows stay raw so each caller keeps its own
 # historical row splitting; list items arrive parsed, with the five primitive
@@ -648,6 +649,8 @@ sub read_prompt_block {
         $block{fields} = [split /,/, $2];
       } elsif ($header =~ /^(?:$names)\[(\d+)\]:\s*\z/) {
         @block{qw(form want)} = ("list", $1);
+      } elsif ($header =~ /^(?:$names): \[\]\s*\z/) {
+        @block{qw(form want)} = ("list", 0);
       } else {
         @block{qw(form header)} = ("unrecognized", $header);
         last;
