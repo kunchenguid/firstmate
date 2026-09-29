@@ -18,6 +18,11 @@
 # automatic backend without compatible tasks-axi refuses before cleanup.
 # None of this loosens the landed-work gates below: the transition runs only on
 # the paths that already proceed to remove the record.
+# An enrolled goal must be accepted or explicitly archived before cleanup.
+# A partial report, completed decision inventory, --force, or --endpoint-only
+# cannot retire an open goal's resources. This is checked under the meta lock
+# before endpoint, directory, slot or task-record effects; legacy records keep
+# their existing completion and ownership checks.
 # The close - and only the close - is replaced by `tasks-axi reopen` with the
 # deliverable recorded while the backlog item is still an open captain call
 # (bin/fm-captain-hold.sh `open` owns that predicate), because the policy holds
@@ -400,6 +405,7 @@ fm_control_require_recoverable_harness "$(fm_meta_get "$META" harness)" || exit 
 . "$SCRIPT_DIR/fm-task-lifecycle-lib.sh"
 TEARDOWN_LIFECYCLE_MODE=$(fm_task_lifecycle mode "$ID") || exit 1
 case "$TEARDOWN_LIFECYCLE_MODE" in
+  open) echo 'REFUSED: task goal is still open; reconcile completion or explicit archive before cleanup' >&2; exit 1 ;;
   unknown) echo 'REFUSED: task goal state is unknown; no cleanup performed' >&2; exit 1 ;;
 esac
 ENDPOINT_PHASE_DONE=0

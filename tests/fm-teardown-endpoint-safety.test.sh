@@ -616,6 +616,48 @@ test_historical_secondmate_record_refuses_without_mutation() {
   pass "fm-teardown: historical secondmate records and homes are preserved by refusal"
 }
 
+test_open_goal_preserves_resources_before_cleanup() {
+  local dir id=open-goal variant rc
+  local -a args=()
+  for variant in normal forced endpoint-only; do
+    dir=$(make_case "open-goal-$variant")
+    mark_case_as_treehouse_pool "$dir"
+    write_herdr_meta "$dir/home/state/$id.meta" \
+      "window=isolated:fm-$id" "worktree=$dir/worktree" \
+      "project=$dir/project" "kind=scout"
+    claim_pool_slot "$dir" "$id"
+    mkdir -p "$dir/home/data/$id"
+    printf 'Deliver the complete requested result\n' > "$dir/home/data/$id/brief.md"
+    printf 'Only a partial milestone is complete\n' > "$dir/home/data/$id/report.md"
+    # No user decision remains, but the requested result is still unfinished.
+    FM_HOME="$dir/home" "$ROOT/bin/fm-captain-hold.sh" complete "$id" --none >/dev/null
+    FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" init "$id" >/dev/null
+    cp "$dir/home/state/$id.meta" "$dir/meta-before"
+    cp "$dir/home/data/$id/lifecycle.json" "$dir/goal-before"
+    cp "$dir/pool/1/.fm-slot-owner" "$dir/claim-before"
+    args=()
+    case "$variant" in
+      forced) args=(--force) ;;
+      endpoint-only) args=(--endpoint-only --expect-spawn-gen "s-$id") ;;
+    esac
+    rc=0
+    FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+      FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
+      "$TEARDOWN" "$id" "${args[@]}" > "$dir/stdout" 2> "$dir/stderr" || rc=$?
+    [ "$rc" -ne 0 ] || fail "$variant teardown accepted an unfinished goal"
+    assert_contains "$(cat "$dir/stderr")" 'task goal is still open' \
+      "$variant teardown did not refuse for the unfinished goal"
+    cmp -s "$dir/meta-before" "$dir/home/state/$id.meta" || fail "$variant changed task metadata"
+    cmp -s "$dir/goal-before" "$dir/home/data/$id/lifecycle.json" || fail "$variant changed the goal"
+    cmp -s "$dir/claim-before" "$dir/pool/1/.fm-slot-owner" || fail "$variant changed the slot claim"
+    assert_present "$dir/worktree/sentinel" "$variant removed unfinished work"
+    assert_present "$dir/home/data/$id/report.md" "$variant removed the partial report"
+    [ ! -s "$dir/runtime.log" ] || fail "$variant reached endpoint or slot cleanup for an open goal"
+  done
+  pass 'fm-teardown: open goals retain endpoint, slot, worktree and records even with a partial report or force'
+}
+
+test_open_goal_preserves_resources_before_cleanup
 test_invalid_endpoint_records_refuse_before_mutation
 test_control_lock_contention_refuses_before_mutation
 test_non_pool_teardown_ignores_task_set_lock
