@@ -628,6 +628,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 # shellcheck source=bin/fm-worker-account-lib.sh
 . "$SCRIPT_DIR/fm-worker-account-lib.sh"
+# shellcheck source=bin/fm-secondmate-parent-lib.sh
+. "$SCRIPT_DIR/fm-secondmate-parent-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -2927,6 +2929,20 @@ if [ "$KIND" = secondmate ]; then
       exit 1
     fi
     SECONDMATE_PROJECTS=$SECONDMATE_REGISTRY_MATCH_PROJECTS
+    # This home's registry lists the mate, so this home means to supervise it.
+    # Its durable parent binding is what actually decides where its replies land,
+    # and a primary on the other side of the route can have moved that binding to
+    # itself. Claiming the mate anyway would put two primaries on it, each reading
+    # only its own channel, so refuse and name the parent that holds it.
+    # bin/fm-secondmate-takeover.sh is the one command that moves the binding.
+    # A remote registry entry never reaches here: its launch is the host-local leg
+    # in bin/fm-remote-secondmate-control.sh, which applies the same refusal on the
+    # mate's own host, and this path then runs there with no registry at all.
+    if [ "$SECONDMATE_REGISTRY_MATCH_REMOTE" = 0 ] \
+       && ! fm_secondmate_parent_binding_names "$PROJ_ABS" local "$FM_HOME"; then
+      echo "error: $FM_SECONDMATE_PARENT_ERROR; refusing to claim it in parallel. Take it over with bin/fm-secondmate-takeover.sh claim $ID, or leave it with the parent named above" >&2
+      exit 1
+    fi
   fi
   WT="$PROJ_ABS"
   # Local-HEAD sync: before launch, fast-forward this secondmate's worktree to the

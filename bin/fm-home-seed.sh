@@ -310,17 +310,10 @@ validate_seed_leaf_files() {
 }
 
 validate_existing_parent_binding() {
-  local home=$1 record recorded_parent requested_parent
-  record="$home/$SUB_HOME_PARENT_MARKER"
-  [ -f "$record" ] && [ ! -L "$record" ] || return 0
-  fm_secondmate_parent_record_parse "$record" || return 0
-  [ "$FM_SECONDMATE_PARENT_ROUTE" = local ] || return 0
-
-  recorded_parent=$(resolved_path "$FM_SECONDMATE_PARENT_HOME")
-  requested_parent=$(resolved_path "$FM_HOME")
-  [ "$recorded_parent" = "$requested_parent" ] && return 0
-  printf 'error: secondmate home is bound to parent %s, not requested parent %s\n' \
-    "$recorded_parent" "$requested_parent" >&2
+  local home=$1
+  fm_secondmate_parent_binding_names "$home" local "$FM_HOME" && return 0
+  printf 'error: %s; seeding does not move a parent binding, use bin/fm-secondmate-takeover.sh claim <id>\n' \
+    "$FM_SECONDMATE_PARENT_ERROR" >&2
   return 1
 }
 
@@ -970,11 +963,11 @@ seed_home() {
   # restart that drops the launch-time FM_PUBLIC_FOLLOWUP_PRIMARY_HOME prefix
   # can still resolve the real parent instead of silently treating its relay
   # as inactive.
-  {
-    printf 'schema=fm-secondmate-parent.v1\n'
-    printf 'route=local\n'
-    printf 'parent_home=%s\n' "$(resolved_path "$FM_HOME")"
-  } > "$home/$SUB_HOME_PARENT_MARKER.tmp.$$"
+  fm_secondmate_parent_record_render local "$(resolved_path "$FM_HOME")" \
+    > "$home/$SUB_HOME_PARENT_MARKER.tmp.$$" || {
+    echo "error: could not render the durable parent binding for $home" >&2
+    return 1
+  }
   mv -f -- "$home/$SUB_HOME_PARENT_MARKER.tmp.$$" "$home/$SUB_HOME_PARENT_MARKER"
   printf '%s\n' "$id" > "$home/$SUB_HOME_MARKER.tmp.$$"
   mv -f -- "$home/$SUB_HOME_MARKER.tmp.$$" "$home/$SUB_HOME_MARKER"

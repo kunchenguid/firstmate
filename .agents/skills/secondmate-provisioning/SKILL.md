@@ -2,8 +2,8 @@
 name: secondmate-provisioning
 description: >-
   Agent-only reference for persistent secondmate setup and retirement.
-  Use when creating, seeding, validating, launching, recovering, handing backlog to, pushing inherited local material into, or retiring a secondmate home, or when editing data/secondmates.md.
-  Covers local leases, whole-home remote routes, transactional seeding, record intake for an existing or inherited domain, project clone restrictions, secondmate harness pins, inherited local-material push, idle charter, handoff helper, and teardown safety.
+  Use when creating, seeding, validating, launching, recovering, handing backlog to, pushing inherited local material into, moving between parents, or retiring a secondmate home, or when editing data/secondmates.md.
+  Covers local leases, whole-home remote routes, transactional seeding, record intake for an existing or inherited domain, project clone restrictions, secondmate harness pins, inherited local-material push, idle charter, handoff helper, parent take-over, and teardown safety.
 user-invocable: false
 metadata:
   internal: true
@@ -11,7 +11,7 @@ metadata:
 
 # secondmate-provisioning
 
-Use this reference before creating, seeding, validating, launching, handing backlog to, recovering, pushing inherited local material into, or retiring a persistent secondmate, and before editing `data/secondmates.md`.
+Use this reference before creating, seeding, validating, launching, handing backlog to, recovering, pushing inherited local material into, moving between parents, or retiring a persistent secondmate, and before editing `data/secondmates.md`.
 
 Keep the always-inline routing rules in `AGENTS.md` authoritative: route by natural-language `scope:`, local-only projects stay with the main firstmate, and secondmates are idle by default.
 
@@ -237,6 +237,18 @@ The main firstmate reconciles only direct reports.
 Each secondmate is a firstmate in its own home, so it runs recovery on startup and reconciles its own crewmates.
 A secondmate's recovery reconciles only work that is already its own and then idles.
 It never initiates a survey or audit during recovery.
+
+## Moving a secondmate between parents
+
+A secondmate can be reached by this primary and by a primary on the mate's own host, and only the mate home's `.fm-secondmate-parent` record decides where its replies land.
+So whichever primary last wrote that record owns the return channel, while the other keeps steering and waiting on expectations that can never arrive.
+Move it only with `bin/fm-secondmate-takeover.sh claim <id>`, run from the primary that should own the mate, and hand it back with `restore <id>`; `show <id>` reads the current and preserved owner without changing anything.
+Never hand-write the record, and never work around a refusal by editing it: the refusal is the split being reported rather than a broken command.
+
+While the record names the other parent, `bin/fm-send.sh` and `bin/fm-spawn.sh` here, and the host-local leg on the mate's host, refuse to steer or claim it and name the primary that holds it.
+Treat that refusal as a captain-facing fact when the captain expected this primary to own the mate: report which machine currently supervises it and what one command moves it.
+A take-over does not move the replies the displaced parent was already waiting on, and its report names them when that parent's home is readable from here.
+[`docs/remote-secondmates.md`](../../../docs/remote-secondmates.md) owns the operator procedure, the absent-record case, and the limit that two remote primaries are indistinguishable in this record.
 
 ## Retirement and teardown
 

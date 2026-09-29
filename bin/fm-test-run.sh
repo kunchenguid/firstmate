@@ -333,6 +333,7 @@ family_for_basename() {
     fm-secondmate-harness.test.sh|fm-secondmate-lifecycle-e2e.test.sh|\
     fm-secondmate-liveness.test.sh|fm-secondmate-reconcile.test.sh|\
     fm-secondmate-restart.test.sh|fm-remote-secondmate-relaunch.test.sh|\
+    fm-secondmate-parent-takeover.test.sh|\
     fm-secondmate-safety.test.sh|fm-secondmate-sync.test.sh|\
     fm-startup-memory-budget.test.sh|fm-stow-cascade.test.sh|\
     fm-send-secondmate-marker.test.sh|fm-shared-captain-inheritance.test.sh)
@@ -803,6 +804,7 @@ tests/fm-secondmate-lifecycle-e2e.test.sh 9633
 tests/fm-secondmate-liveness.test.sh 10402
 tests/fm-secondmate-reconcile.test.sh 97544
 tests/fm-secondmate-restart.test.sh 44488
+tests/fm-secondmate-parent-takeover.test.sh 63000
 tests/fm-secondmate-safety.test.sh 127260
 tests/fm-secondmate-sync.test.sh 54502
 tests/fm-send-agy-confirm.test.sh 3983

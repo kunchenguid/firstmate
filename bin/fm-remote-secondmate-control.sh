@@ -6,6 +6,9 @@
 #   fm-remote-secondmate-control.sh relaunch <id> <harness> <model|default|-> <effort|default|->
 #   fm-remote-secondmate-control.sh state <id>
 #   fm-remote-secondmate-control.sh route <id>
+#   fm-remote-secondmate-control.sh parent <id>
+#   fm-remote-secondmate-control.sh takeover <id> [parent-host]
+#   fm-remote-secondmate-control.sh takeover-restore <id>
 #   fm-remote-secondmate-control.sh send <id> <message> [fire-and-forget]
 #   fm-remote-secondmate-control.sh key <id> <key>
 #   fm-remote-secondmate-control.sh capture <id> [lines]
@@ -22,6 +25,16 @@
 # The home's own workers keep their ordinary backend selection.
 # bin/fm-remote-doctor.sh owns that host's readiness for Herdr.
 # docs/remote-secondmates.md owns why.
+#
+# Parent binding. This home can also be supervised by a primary running on this
+# same host, and only the durable .fm-secondmate-parent record decides where the
+# mate's replies land. So the verbs that steer or claim the mate - launch,
+# relaunch, send, key - refuse when that record does not currently name a parent
+# on the remote route, instead of supervising in parallel with the host-local
+# primary that took it over. takeover and takeover-restore are the host-local leg
+# of bin/fm-secondmate-takeover.sh and are exempt, because they are what moves the
+# binding; parent prints it, and the read-only and maintenance verbs stay usable
+# from either side so a displaced parent can still diagnose the split.
 #
 # With <parent-commit>, sync follows the PARENT PRIMARY's default-branch commit,
 # which the parent resolves on its own checkout and passes in, so a remote home
@@ -60,6 +73,10 @@ TARGET_HOME=${FM_HOME:?FM_HOME is required}
 CONTROL_STATE="$TARGET_HOME/state/parent-route"
 CONTROL_DATA="$TARGET_HOME/data/.parent-route"
 REMOTE_HERDR_SESSION=fm-remote
+# Only the verbs that steer or claim the mate arm the parent-binding refusal; the
+# dispatch below sets this, so a read-only, maintenance, or binding-moving verb
+# stays usable while the mate is bound to a parent on this host.
+PARENT_ROUTE_GUARD=0
 
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
@@ -69,9 +86,11 @@ REMOTE_HERDR_SESSION=fm-remote
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-task-inbox-lib.sh
 . "$SCRIPT_DIR/fm-task-inbox-lib.sh"
+# shellcheck source=bin/fm-secondmate-parent-lib.sh
+. "$SCRIPT_DIR/fm-secondmate-parent-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 validate_id() { case "$1" in ''|*[!A-Za-z0-9._-]*) die "invalid secondmate id: $1" ;; esac; }
 
 validate_home() { # <id> [allow-absent]
@@ -83,6 +102,10 @@ validate_home() { # <id> [allow-absent]
   marker=$(cat "$TARGET_HOME/.fm-secondmate-home")
   [ "$marker" = "$id" ] || die "remote home belongs to $marker, not $id"
   [ -f "$TARGET_HOME/AGENTS.md" ] && [ -d "$TARGET_HOME/bin" ] || die "remote home is not a Firstmate checkout"
+  if [ "$PARENT_ROUTE_GUARD" = 1 ] \
+     && ! fm_secondmate_parent_binding_names "$TARGET_HOME" remote; then
+    die "$FM_SECONDMATE_PARENT_ERROR; refusing to steer or claim it from a remote parent. Take it over with bin/fm-secondmate-takeover.sh claim $id from the parent that should own it"
+  fi
 }
 
 meta_path() { printf '%s/%s.meta\n' "$CONTROL_STATE" "$1"; }
@@ -409,6 +432,63 @@ cmd_update() {
   cmd_sync "$id"
 }
 
+# Print this home's live parent binding and the one a take-over preserved, so a
+# parent that has been displaced can see which primary now owns the mate.
+cmd_parent() {
+  local id=$1 record prior
+  validate_id "$id"
+  validate_home "$id"
+  record=$(fm_secondmate_parent_path "$TARGET_HOME")
+  prior=$(fm_secondmate_parent_prior_path "$TARGET_HOME")
+  printf 'schema=fm-remote-secondmate-parent.v1\n'
+  if fm_secondmate_parent_record_parse "$record"; then
+    printf 'route=%s\n' "$FM_SECONDMATE_PARENT_ROUTE"
+    [ -z "$FM_SECONDMATE_PARENT_HOME" ] || printf 'parent_home=%s\n' "$FM_SECONDMATE_PARENT_HOME"
+    [ -z "$FM_SECONDMATE_PARENT_HOST" ] || printf 'parent_host=%s\n' "$FM_SECONDMATE_PARENT_HOST"
+  else
+    printf 'route=unreadable\n'
+  fi
+  if fm_secondmate_parent_record_parse "$prior"; then
+    printf 'prior_route=%s\n' "$FM_SECONDMATE_PARENT_ROUTE"
+    [ -z "$FM_SECONDMATE_PARENT_HOME" ] || printf 'prior_parent_home=%s\n' "$FM_SECONDMATE_PARENT_HOME"
+    [ -z "$FM_SECONDMATE_PARENT_HOST" ] || printf 'prior_parent_host=%s\n' "$FM_SECONDMATE_PARENT_HOST"
+  else
+    printf 'prior_route=none\n'
+  fi
+}
+
+# The host-local leg of bin/fm-secondmate-takeover.sh claim for a remote parent:
+# bind this home to the remote route and preserve the binding it displaces. The
+# parent supplies its own SSH alias for this host, which the record carries as
+# diagnostic-only parent_host exactly as provisioning writes it.
+cmd_takeover() {
+  local id=$1 parent_host=${2:-}
+  validate_id "$id"
+  validate_home "$id"
+  case "$parent_host" in ''|*[!A-Za-z0-9._-]*) [ -z "$parent_host" ] || die "invalid parent host alias: $parent_host" ;; esac
+  fm_secondmate_parent_locked "$TARGET_HOME" fm_secondmate_parent_rebind "$TARGET_HOME" remote '' "$parent_host" \
+    || die "$FM_SECONDMATE_PARENT_ERROR"
+  if [ "$FM_SECONDMATE_PARENT_DISPLACED" = 1 ]; then
+    printf 'takeover: %s is now bound to its remote parent\n' "$id"
+    printf 'displaced=yes\n'
+  else
+    printf 'takeover: %s is already bound to its remote parent; nothing was displaced\n' "$id"
+    printf 'displaced=no\n'
+  fi
+  cmd_parent "$id"
+}
+
+# The host-local leg of bin/fm-secondmate-takeover.sh restore: put back the
+# binding the last take-over displaced, keeping the current one in its place.
+cmd_takeover_restore() {
+  local id=$1
+  validate_id "$id"
+  validate_home "$id"
+  fm_secondmate_parent_locked "$TARGET_HOME" fm_secondmate_parent_restore "$TARGET_HOME" || die "$FM_SECONDMATE_PARENT_ERROR"
+  printf 'takeover-restore: %s is now bound to its previous parent\n' "$id"
+  cmd_parent "$id"
+}
+
 cmd_retire() {
   local id=$1 force=${2:-} rc
   validate_id "$id"
@@ -435,12 +515,15 @@ cmd_retire() {
 }
 
 case "${1:-}" in
-  launch) shift; [ "$#" -ge 5 ] && [ "$#" -le 6 ] || usage; cmd_launch "$@" ;;
-  relaunch) shift; [ "$#" -eq 4 ] || usage; cmd_relaunch "$@" ;;
+  launch) shift; [ "$#" -ge 5 ] && [ "$#" -le 6 ] || usage; PARENT_ROUTE_GUARD=1; cmd_launch "$@" ;;
+  relaunch) shift; [ "$#" -eq 4 ] || usage; PARENT_ROUTE_GUARD=1; cmd_relaunch "$@" ;;
   state) shift; [ "$#" -eq 1 ] || usage; validate_id "$1"; validate_home "$1"; state_value "$1" ;;
   route) shift; [ "$#" -eq 1 ] || usage; cmd_route "$1" ;;
-  send) shift; [ "$#" -ge 2 ] && [ "$#" -le 3 ] || usage; cmd_send "$@" ;;
-  key) shift; [ "$#" -eq 2 ] || usage; cmd_key "$@" ;;
+  parent) shift; [ "$#" -eq 1 ] || usage; cmd_parent "$1" ;;
+  takeover) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_takeover "$@" ;;
+  takeover-restore) shift; [ "$#" -eq 1 ] || usage; cmd_takeover_restore "$1" ;;
+  send) shift; [ "$#" -ge 2 ] && [ "$#" -le 3 ] || usage; PARENT_ROUTE_GUARD=1; cmd_send "$@" ;;
+  key) shift; [ "$#" -eq 2 ] || usage; PARENT_ROUTE_GUARD=1; cmd_key "$@" ;;
   capture) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_capture "$@" ;;
   observe) shift; [ "$#" -eq 1 ] || usage; cmd_observe "$@" ;;
   sync) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_sync "$@" ;;

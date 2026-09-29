@@ -40,6 +40,10 @@ The pending-reply guard may restate only the correlated line from a local mate's
 Other correlated mate-home status lines remain wrong-home evidence, while a remote home's routed `state/parent-replies.status` is already the parent channel and is not classified as wrong-home.
 A missed-reply escalation includes the complete first sighting path and line number in readable shell-escaped form.
 
+The channel resolver reads the mate home's own `.fm-secondmate-parent` record, so that record alone decides which primary receives the mate's outcomes.
+A second primary that rewrote it to name itself would silently take the channel while the first kept sending and waiting, so moving it is owned by one command and the boundaries that steer or claim a mate refuse when it names the other parent: [`remote-secondmates.md`](remote-secondmates.md#move-a-second-mate-between-parents) owns that procedure and its limits.
+A take-over does not move the expectations the displaced parent already held, so it reports them instead.
+
 ## What is deliberately not built
 
 - No mirror of the mate's chat: chat can mix outcomes with other conversation, so choosing which sentence is an outcome would itself be model behavior, and every harness exposes turn text differently.
@@ -55,6 +59,7 @@ A missed-reply escalation includes the complete first sighting path and line num
 `tests/fm-teardown.test.sh` covers teardown delivering a child's final line and refusing when the channel cannot be written.
 `tests/fm-brief.test.sh` pins the charter's channel rule.
 `tests/fm-pending-reply.test.sh` covers helper-selected local routing, remote-channel classification, same-basename restatement before false escalation, readable wrong-home diagnostics, and the rule that arbitrary mate-home sightings never acknowledge a reply.
+`tests/fm-secondmate-parent-takeover.test.sh` covers moving the binding in both directions against real files and the repo's deterministic SSH boundary, the reverse move restoring the exact displaced record, the displaced primary refusing to steer or claim, the unanswered expectations it names, a malformed or symlinked record failing closed on every one of those paths, a repeated claim keeping the binding restore returns to, re-seeding refusing to move a binding, and the host-local leg waiting on the binding lock.
 
 ## Live verification
 

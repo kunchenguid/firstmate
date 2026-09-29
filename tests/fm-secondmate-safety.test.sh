@@ -1370,7 +1370,7 @@ test_home_seed_preserves_existing_parent_binding() {
     "$ROOT/bin/fm-home-seed.sh" mate "$child" --no-projects > /dev/null 2>"$err"; then
     fail "reseed replaced a valid durable parent binding"
   fi
-  grep -F "bound to parent $parent_a_abs, not requested parent $parent_b_abs" "$err" >/dev/null \
+  grep -F "bound to the firstmate home $parent_a_abs, not to this home $parent_b_abs" "$err" >/dev/null \
     || fail "mismatched-parent reseed did not name both parent identities"
   for leaf in data/projects.md data/charter.md .fm-secondmate-home .fm-secondmate-parent; do
     cmp -s "$before/$leaf" "$child/$leaf" \

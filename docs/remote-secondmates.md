@@ -17,6 +17,7 @@ Firstmate does not support placing an individual worker remotely or failing a re
 | Launch, recover, message, and read a remote second mate | [Normal operation](#normal-operation) |
 | Move queued work to the remote home | [Backlog handoff](#backlog-handoff) |
 | Push configuration, relaunch, update, or retire | [Sync, update, and retirement](#sync-update-and-retirement) |
+| Move a second mate between this primary and one on its own host | [Move a second mate between parents](#move-a-second-mate-between-parents) |
 | Run the tests or a real-host smoke test | [Verification](#verification) |
 
 ## Where the remote agent runs
@@ -393,6 +394,8 @@ Seeding also writes a durable `.fm-secondmate-parent` record next to the home's 
 That record names this home's route to its parent as `local` or `remote`.
 The promised-public-reply subsystem is same-filesystem by construction, so a remote route can never carry a delegated public-reply promise.
 `bin/fm-teardown.sh`'s cleanup gate reads this record to treat a remote parent as out of scope rather than an unresolved binding.
+It is also what decides where the mate's replies land, so it is the only thing that decides which primary supervises the mate.
+[Move a second mate between parents](#move-a-second-mate-between-parents) owns changing it; never hand-write it.
 
 ### Local and remote routes together
 
@@ -635,6 +638,41 @@ An unsafe or unavailable target is reported and left untouched.
 A completed sync reports which watched instruction paths its advance changed.
 The primary needs that fact because it cannot diff a checkout it cannot read.
 It uses the fact to decide whether the running remote agent must be replaced to actually reload.
+
+### Move a second mate between parents
+
+A persistent second mate can be reached by two primaries: this one, over the remote route, and one running on the mate's own host.
+Only the mate's `.fm-secondmate-parent` record decides where its replies land, so whichever primary last wrote that record owns the return channel while the other keeps sending and waiting.
+Move it with one command, run from the primary that should own the mate:
+
+```sh
+bin/fm-secondmate-takeover.sh claim <id>
+```
+
+From this primary that writes the remote route through the host-local leg on the mate's host; from a primary on that host it writes the local route naming that home.
+Either way the binding it displaces is preserved beside the live one, so handing the mate back is the same command in reverse:
+
+```sh
+bin/fm-secondmate-takeover.sh restore <id>
+```
+
+A repeated or retried claim keeps the preserved binding, so `restore` still returns the parent the first claim displaced.
+Read the current owner and the preserved one, changing nothing, with `bin/fm-secondmate-takeover.sh show <id>`.
+The script's own header owns the exact verbs and their output.
+
+While a mate is bound to the other parent, this primary refuses to steer or claim it instead of supervising it in parallel.
+That refusal names the primary that currently holds it, and the read-only and maintenance verbs stay available from either side so the split can be diagnosed.
+A binding that exists but cannot be trusted - malformed, symlinked, or corrupt - refuses on every one of those paths rather than being overwritten.
+Re-seeding never moves the binding either: `bin/fm-home-seed.sh` refuses a home whose record names any other parent, remote included, or cannot be parsed, and names `claim` as the way to move it.
+Remote re-seeding refuses the same way: `bin/fm-remote-home-provision.sh` converges an existing home only while its record is absent or already names the remote route.
+A home seeded before that record existed has none, which names no parent: such a mate is still steerable, and a claim simply establishes its record.
+
+A take-over does not move the replies the displaced parent was already waiting on.
+Those expectations live in that parent's own home, so a claim reports them by name when that home is readable from here and otherwise states that they will now arrive here instead.
+From this side the displaced parent's records are on the mate's host, so read them there with `bin/fm-secondmate-takeover.sh show <id>` and that home's own records.
+
+Two distinct remote primaries cannot be told apart by this record, because a remote route carries no parent home by schema.
+The record's `parent_host` is the SSH alias by which the parent reaches the host and remains diagnostic only.
 
 ### Retire a remote second mate
 
