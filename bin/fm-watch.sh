@@ -12,10 +12,13 @@
 # separate idle absorb case and re-surfaces only on its long bounded cadence,
 # although its initial no-verb status signal still surfaces in normal mode.
 # That cadence is hours long and condition-aware: a paused: line naming
-# `until <UTC ISO 8601>` is rechecked when that time passes, a declared time
-# further out extends the cadence up to the FM_PAUSE_UNTIL_MAX_SECS ceiling, and
-# while an away record (state/.afk-contract, never quiet mode's) exists an
-# item held for the captain is never rechecked at all, in either posture.
+# `until <UTC ISO 8601>` is rechecked when that time passes, and a declared time
+# further out extends the cadence up to the FM_PAUSE_UNTIL_MAX_SECS ceiling.
+# An item held for the captain is never rechecked at all while an away record
+# (state/.afk-contract, never quiet mode's) exists, and with a present captain -
+# attended or in quiet mode - it is rechecked only once its unanswered hold ages
+# past the far longer FM_CAPTAIN_HOLD_RESURFACE_SECS ceiling, because until the
+# captain answers a recheck can only restate their own question.
 # While state/.afk exists, the daemon owns triage and this watcher queues and exits
 # on every wake. Printed reason lines:
 #   signal: <file>...      status/turn-end signals, surfaced when a listed status
@@ -379,9 +382,17 @@ case "$SECONDMATE_LIVENESS_WINDOW_SECS" in ''|*[!0-9]*|0) SECONDMATE_LIVENESS_WI
 # (pause_state_class owns that split).
 # These cases re-surface once for a recheck every PAUSE_RESURFACE_SECS - far
 # longer than the wedge threshold, but finite so a forgotten wait cannot rot
-# invisibly - except an item held for the captain while the away-posture record
-# exists, which is never rechecked (away_record_present below).
+# invisibly - except an item held for the captain, which is never rechecked
+# while an away record exists (away_record_present below) and otherwise takes
+# the far longer ceiling below instead of this cadence.
 PAUSE_RESURFACE_SECS=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
+# The separate, far longer ceiling an UNANSWERED captain call is silent for,
+# attended as well as away. A recheck inside it can only restate the captain's
+# own open question back at them, so it is absorbed; past it the hold rejoins
+# the PAUSE_RESURFACE_SECS cadence above so a forgotten one cannot rot
+# invisibly. 0 disables the silence and leaves that cadence alone.
+CAPTAIN_HOLD_RESURFACE_SECS=${FM_CAPTAIN_HOLD_RESURFACE_SECS:-86400}
+case "$CAPTAIN_HOLD_RESURFACE_SECS" in ''|*[!0-9]*) CAPTAIN_HOLD_RESURFACE_SECS=86400 ;; esac
 # A declared wait that names WHEN it clears (`paused: ... until <UTC ISO 8601>`,
 # status_paused_until in fm-classify-lib.sh) is condition-aware: it is not
 # rechecked before that time, and it is rechecked once as soon as that time
@@ -425,6 +436,31 @@ away_record_present() { fm_afk_contract_away_present "$STATE"; }
 # silently instead of rechecking it.
 captain_held_silenced() {  # <status-line>
   status_is_captain_held "$1" && away_record_present
+}
+
+# captain_hold_within_ceiling <age-secs>: 0 while an unanswered captain call
+# that old is still inside CAPTAIN_HOLD_RESURFACE_SECS. An age that is not plain
+# digits - a record this watcher could not read - is never inside it, so an
+# unreadable hold keeps the ordinary cadence rather than buying open-ended
+# silence.
+captain_hold_within_ceiling() {  # <age-secs>
+  case "${1-}" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$1" -lt "$CAPTAIN_HOLD_RESURFACE_SECS" ]
+}
+
+# captain_hold_age <call-identity>: seconds since the hold-set stamp inside the
+# lifecycle identity fm-captain-hold.sh prints, which dates the CALL rather than
+# the status log that may predate or outlive it. Prints nothing and returns 1
+# when the stamp is absent or malformed.
+captain_hold_age() {  # <call-identity>
+  local stamp=${1%%#*} epoch now
+  case "$stamp" in
+    [0-9][0-9][0-9][0-9]-[0-1][0-9]-[0-3][0-9]) stamp="${stamp}T00:00:00Z" ;;
+  esac
+  epoch=$(fm_utc_iso_to_epoch "$stamp") || return 1
+  now=$(date +%s)
+  [ "$epoch" -le "$now" ] || return 1
+  printf '%s' "$(( now - epoch ))"
 }
 
 hash_pane() {
@@ -1902,12 +1938,21 @@ stale_wait_record() {  # <window-key>
 # While the away-posture record exists the bound is absolute: an open captain
 # call is never rechecked, whatever the throttle says, because nobody is there
 # to answer it and the return brief lists it.
+# Attended it is the same silence, bounded by a ceiling rather than lifted by a
+# posture: `open` is already the answered test - an answered or released call
+# leaves by the line above - so while it holds, a recheck has nothing to tell the
+# captain but their own unanswered question. Only once the hold ages past
+# CAPTAIN_HOLD_RESURFACE_SECS does it rejoin the ordinary cadence, so a forgotten
+# hold still shows; a hold whose own stamp cannot be read rejoins it immediately,
+# because an unreadable record must not buy open-ended silence.
 captain_call_stale_bound() {  # <window-key> <task>
-  local key=$1 task=$2
+  local key=$1 task=$2 age
   STALE_WAIT_DECLARATION=
   task_captain_call_open "$task" || return 1
   STALE_WAIT_DECLARATION=$(captain_call_declaration "$task" "$CAPTAIN_CALL_IDENTITY")
   away_record_present && return 0
+  age=$(captain_hold_age "$CAPTAIN_CALL_IDENTITY") || age=
+  captain_hold_within_ceiling "$age" && return 0
   stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION"
 }
 
@@ -1956,6 +2001,12 @@ surface_nonterminal_stale() {  # <window> <hash>
     bounded=0
     STALE_WAIT_DECLARATION=$(stale_wait_declaration "$task")
     if captain_held_silenced "$last"; then
+      throttled=0
+    elif captain_hold_within_ceiling "$(age_of "$STATE/$task.status")"; then
+      # Attended, the same silence the away record buys: the declared transfer
+      # IS the unanswered test here - an answer replaces the line with a
+      # `resolved` one and leaves this branch - so the log's own age dates the
+      # wait, and a recheck inside the ceiling only restates it.
       throttled=0
     else
       stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION" && throttled=0

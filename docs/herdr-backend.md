@@ -752,7 +752,7 @@ The watcher maps the pane back to the task and skips these:
 - Declared `paused:` waits, because the worker's declared wait already accounts for its quiet.
   It is left to the watcher's own bounded pause cadence.
 - Verified `captain-held` transfers.
-  A captain-held transfer remains silent without rechecks while the away-posture record exists.
+  A captain-held transfer remains silent without rechecks while the away-posture record exists, and with a present captain until its hold ages past `FM_CAPTAIN_HOLD_RESURFACE_SECS`.
 
 ### Polling fallback
 
