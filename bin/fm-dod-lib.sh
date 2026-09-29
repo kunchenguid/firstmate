@@ -54,11 +54,14 @@
 # branch, because a passed run whose fixes stayed in the gate looks exactly like
 # one whose fixes arrived and publishing it ships the unfixed code. Either mode's
 # ready report is `done: PR <change url> published for review`; under
-# no-mistakes a `note:` line listing each pipeline finding and its fix comes
-# first, because the squash's description never shows the fix commits. A stack of
+# no-mistakes the worker first posts one change-level `gerrit-axi message`
+# summarizing each pipeline finding and its fix, then a `note:` line listing
+# them, and its done names the patch set that message landed on, because the
+# squash's description never shows the fix commits. A stack of
 # changes is refused until it can be watched by its membership pinned when its
 # watch is armed, because the merge poll watches one change. No contract here
-# lets a worker submit, vote on, or abandon a change.
+# lets a worker submit, vote on, or abandon a change, and that summary is the
+# only message one may post.
 # The two PR-based blocks require a non-draft pull request before the done
 # report, read back from the forge; a lane that deliberately holds a draft
 # declares a paused wait instead. bin/fm-pr-check.sh refuses to arm merge
@@ -146,6 +149,8 @@ fm_ship_rule_one() {  # <no-mistakes|direct-PR|local-only> <task-id> [branch] [<
   fm_forge_valid_for_mode "$forge" "$mode" fm_ship_rule_one || return 1
   if [ "$forge" = gerrit ]; then
     printf '%s\n' "1. Never push with git and never create a change except through the one \`gerrit-axi publish --squash\` your Definition of done names. Never run \`gerrit-axi submit\`, never vote or review a change by any path, including \`gerrit review\` or a label option on a push, and never abandon one: a human reviewer approves and submits it on the server."
+    [ "$mode" != no-mistakes ] \
+      || printf '%s\n' "   The one exception is the single \`gerrit-axi message <change> --file <path>\` your Definition of done names, which posts the pipeline summary with no label or vote; post no other message on any change."
     return 0
   fi
   case "$mode" in
@@ -318,9 +323,10 @@ EOF
 
 # How a worker on a forge=gerrit project publishes, shared by both publishing
 # modes so the one push, the Change-Id rule, and the ready report are written
-# once. gerrit-axi owns the squash mechanics; this names the one call and what
-# to read back from it.
-fm_gerrit_publish_block() {
+# once. gerrit-axi owns the squash and message mechanics; this names the calls
+# and what to read back from them. Only no-mistakes posts the pipeline summary
+# message, because only it has a pipeline whose fix commits the squash hides.
+fm_gerrit_publish_block() {  # <mode>
   cat <<EOF
 Publish from this copy with \`gerrit-axi\`, never with \`git push\`:
 1. Run \`git fetch origin\` so the server's branch tip is in this repository; \`gerrit-axi\` reads its base off the server and refuses when that tip is not here.
@@ -331,7 +337,21 @@ Publish from this copy with \`gerrit-axi\`, never with \`git push\`:
    Never pass \`--stack\`: a stack of changes is not published from this fleet until it can be watched by its membership pinned when its watch is armed, and the watch follows exactly one change.
 3. Read the record it prints: \`ok\` must be \`true\`, and the one row of its \`changes\` table is your change. Its \`url\` is the change URL; when \`url\` is null, write \`https://<host>/c/<project>/+/<change>\` from your \`origin\` remote's host and that row's \`project\` and \`change\`.
    A failure prints a typed error record instead; fix what it names and publish again, which updates the same change rather than creating another.
+EOF
+  if [ "$1" = no-mistakes ]; then
+    cat <<EOF
+4. Post the pipeline summary you wrote as exactly one change-level message: run \`gerrit-axi message <change> --file <path> --json\` with that row's \`change\` number and the summary file, and no other option.
+   It posts on the change's current patch set with no label or vote; its record must show \`ok\` \`true\`, and its \`patch_set\` names the patch set the message landed on.
+   Post it once, after the last publish; a failure prints a typed error record, so fix what it names and post again.
+5. Append the \`note [at=<epoch>]: pipeline changes: ...\` line described above.
+Then append \`done [at=<epoch>]: PR {change url} published for review; pipeline summary posted on patch set {patch_set}\` to the status file and stop. You are finished.
+EOF
+  else
+    cat <<EOF
 Then append \`done [at=<epoch>]: PR {change url} published for review\` to the status file and stop. You are finished.
+EOF
+  fi
+  cat <<EOF
 That \`done:\` is accepted only when the change's current patch set on the server carries this copy's HEAD tree, so commit nothing after publishing; if you must change the work, commit it and publish again before reporting done.
 A \`done:\` whose URL is not the canonical \`https://<host>/c/<project>/+/<number>\` change URL is refused.
 There is no pull request, no \`gh-axi\` call, and no forge CI result to report: a human reviewer approves and submits the change on the server, and firstmate relays that outcome.
@@ -353,7 +373,7 @@ Gerrit has no pull requests, so there is nothing to open; publishing creates the
 The task is complete only when committed on your branch.
 When it is implemented and committed, publish it.
 EOF
-      fm_gerrit_publish_block
+      fm_gerrit_publish_block "$mode"
       cat <<EOF
 Do NOT run /no-mistakes.
 EOF
@@ -385,10 +405,11 @@ An unrecovered fix round is an unfinished task, never housekeeping: publishing w
 Your ready report is refused while the run still holds your branch, while its outcome is missing or not passing, or while your HEAD's tree differs from the run's result.
 
 When the run's outcome is passed, passed-with-skips, or passed-with-override and step 3 holds, publish.
-The squashed change carries only the oldest commit's message, so the pipeline's own fix commits never reach the reviewer's description; your report is how they reach the captain.
-After publishing and immediately before your ready report, append one line \`note [at=<epoch>]: pipeline changes: {finding} - {fix it made}; {finding} - {fix it made}\` to the status file, one short clause per finding the run fixed, taken from the run's \`fixes\` table and the gate findings its drive calls returned (\`no-mistakes axi logs --step <step> --full\` has the detail); write \`note [at=<epoch>]: pipeline changes: none\` when it fixed nothing.
+The squashed change carries only the oldest commit's message, so the pipeline's own fix commits never reach the reviewer's description; a change-level message on the change is how they reach the reviewer, and your report is how they reach the captain.
+Before publishing, write the summary that message carries to a new file outside this copy, such as one \`mktemp\` creates, so your tree stays clean: the same content a GitHub pull request's pipeline section carries, one entry per pipeline step that reported findings, naming each finding and the fix the run made or that it was left unfixed, taken from the run's \`fixes\` table and the gate findings its drive calls returned (\`no-mistakes axi logs --step <step> --full\` has the detail); when the run reported no findings, the summary says \`no findings\`.
+After posting that message and immediately before your ready report, append one line \`note [at=<epoch>]: pipeline changes: {finding} - {fix it made}; {finding} - {fix it made}\` to the status file, one short clause per finding the run fixed, taken from the run's \`fixes\` table and the gate findings its drive calls returned (\`no-mistakes axi logs --step <step> --full\` has the detail); write \`note [at=<epoch>]: pipeline changes: none\` when it fixed nothing.
 EOF
-      fm_gerrit_publish_block
+      fm_gerrit_publish_block "$mode"
       ;;
     direct-PR:*)
       cat <<EOF

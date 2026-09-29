@@ -1949,6 +1949,17 @@ test_gerrit_nm_ready_gate_requires_recovered_custody() {
   rc=$?
   set -e
   [ "$rc" -eq 0 ] || fail "the done gate refused a recovered, published copy: $out"
+  # The no-mistakes contract's ready report also names the summary message's
+  # patch set after the published line; that suffix must not hide the change.
+  set +e
+  out=$(FM_TEST_GERRIT_REVISION=$squash FM_TEST_NM_PIPELINE_HEAD=$fixed \
+    FM_TEST_GERRIT_AXI_LOG="$dir/gerrit-axi.log" PATH="$dir/fakebin:$BASE_PATH" \
+    bash -c '. "$1/bin/fm-timeout-lib.sh"; . "$1/bin/fm-dod-lib.sh"
+      fm_dod_accept_ship_done ship no-mistakes "$2" "$3" "$4"' \
+    _ "$ROOT" "$dir/wt" "$dir/project" "$line; pipeline summary posted on patch set 2" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "the done gate refused a ready report naming its pipeline summary message: $out"
 
   write_task_meta "$dir" task-recovered
   FM_TEST_GERRIT_REVISION=$squash FM_TEST_NM_PIPELINE_HEAD=$fixed run_check_entry "$dir" task-recovered "$url" >/dev/null \

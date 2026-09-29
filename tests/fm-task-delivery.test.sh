@@ -1218,6 +1218,21 @@ test_forge_gerrit_changes_what_no_mistakes_means() {
     "the gerrit worker was not told to report each pipeline fix the squash hides"
   assert_grep 'pipeline changes: none' "$brief" \
     "the gerrit worker was not told what to report when the pipeline fixed nothing"
+  # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
+  assert_grep 'run `gerrit-axi message <change> --file <path> --json`' "$brief" \
+    "the gerrit worker was not told to post the pipeline summary on the change"
+  assert_grep 'the same content a GitHub pull request'"'"'s pipeline section carries' "$brief" \
+    "the gerrit summary message was not tied to what a pull request's pipeline section shows"
+  # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
+  assert_grep 'the summary says `no findings`' "$brief" \
+    "the gerrit worker was not told what the summary says when the pipeline found nothing"
+  assert_grep 'done [at=<epoch>]: PR {change url} published for review; pipeline summary posted on patch set {patch_set}' "$brief" \
+    "the gerrit ready report does not name the summary message"
+  # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
+  assert_grep 'The one exception is the single `gerrit-axi message <change> --file <path>`' "$brief" \
+    "rule 1 still forbids the one summary message the contract requires"
+  assert_grep 'post no other message on any change' "$brief" \
+    "the summary-message carve-out lets the worker post other messages"
   assert_no_grep 'done [at=<epoch>]: PR {url} checks green' "$brief" \
     "the gerrit contract still demands a PR with green checks this forge cannot produce"
   # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
@@ -1237,6 +1252,8 @@ test_forge_gerrit_changes_what_no_mistakes_means() {
   FM_HOME="$home" "$BRIEF" forge-dod-n1 other-project --mode no-mistakes >/dev/null \
     || fail "a default-forge no-mistakes brief should scaffold"
   plain="$home/data/forge-dod-n1/brief.md"
+  assert_no_grep 'gerrit-axi message' "$plain" \
+    "a default-forge no-mistakes worker was told to post a Gerrit message"
   awk '/^You drive no-mistakes by responding to its gates/ { emit = 1 }
        emit { print }
        emit && /hard rule violation\.$/ { exit }' "$brief" > "$TMP_ROOT/forge-dod/gerrit-middle"
@@ -1537,6 +1554,8 @@ test_forge_gerrit_direct_pr_publishes_one_change() {
   assert_grep 'Do NOT run /no-mistakes.' "$brief" "the direct-PR worker was not kept off the pipeline"
   assert_no_grep 'pipeline changes:' "$brief" \
     "the direct-PR worker was asked to report pipeline fixes from a pipeline it never runs"
+  assert_no_grep 'gerrit-axi message' "$brief" \
+    "the direct-PR worker was told to post a pipeline summary from a pipeline it never runs"
 
   # A stack is several changes and the merge watch follows one, so the shape is
   # refused with that reason until pinned-membership watching exists.
