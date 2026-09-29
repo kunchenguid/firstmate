@@ -666,21 +666,17 @@ add_git_status_lock_failure() {
 #!/usr/bin/env bash
 real=${REAL_GIT_FOR_TEST:?}
 dir=
-args=()
+args=("$@")
+# Locate the subcommand after Git's global options, retaining all original
+# arguments for the real Git call, including explicit submodule-ignore guards.
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    -C)
-      dir=$2
-      args+=("$1" "$2")
-      shift 2
-      ;;
-    *)
-      args+=("$1")
-      shift
-      ;;
+    -C) dir=$2; shift 2 ;;
+    -c) shift 2 ;;
+    *) break ;;
   esac
 done
-if [ -n "$dir" ] && [ "${args[2]:-}" = status ] && [ "${args[3]:-}" = --porcelain ]; then
+if [ -n "$dir" ] && [ "${1:-}" = status ] && [ "${2:-}" = --porcelain ]; then
   lock=$("$real" -C "$dir" rev-parse --git-path index.lock 2>/dev/null || true)
   case "$lock" in
     /*|'') ;;
