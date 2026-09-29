@@ -13,6 +13,15 @@ metadata:
 This skill is the single owner of Firstmate's project-verification procedure: turning "verify it in the app" into a step any agent can execute in a project repo with no setup conversation.
 It adapts the create-and-maintain verification practices of Cursor's Pstack plugin and consumes Firstmate's existing evidence contracts by reference rather than restating them.
 Firstmate applies it when dispatching or supervising ships that touch a user-facing app surface, and the implementation worker uses it to build and prove the project's verification slice.
+Instance isolation here means separate instances and cleanup, not filesystem or network confinement; sandbox and Orca runtime integration stay separate work.
+
+## Choose reuse, create, or maintain
+
+Reuse an existing recipe for ordinary change validation, create one only when the task needs it inside the accepted scope, and run a full upkeep pass only when Firstmate commissions one or a stale recipe must be repaired.
+A documentation-only or unrelated internal change never triggers app verification merely because the repository contains an app.
+When the work needs project verification, Firstmate states it in the ship brief: the verify skill path, the project target, the operation (drive, create, or maintain), the coverage boundary, and the evidence destination.
+The worker performs that slice directly and never spawns per-feature subagents; any parallel source work is Firstmate's to assign through its normal authority.
+Generated content must be discoverable without an oral handoff: a `SKILL.md` with `name` and `description` frontmatter at the repo's skill location, one invocation route that actually resolves, and no unexplained placeholders.
 
 ## Create the project-local verify skill
 
@@ -28,7 +37,9 @@ Give it six sections, each grounded in what the interview found:
 - **Helpers** are executable helpers whose invocation is shown in the skill body.
 
 Add a feature map beside the skill: a `features/README.md` plus one file per user-facing feature with four required H2s (Sub-features, How to get to it (user POV), Driving it with <harness>, Gotchas).
+Every entry point pairs its action with the observable result that proves it worked, so coverage is checkable rather than asserted.
 The map is the repo's maintained verification source, and a proof that drives one convenient entry point is incomplete when the map lists others.
+The map states its own coverage boundary and any unreachable prerequisite instead of quietly narrowing the denominator.
 
 ## Prove it end to end before handoff
 
@@ -46,12 +57,13 @@ Match the check to the change: a CLI change runs the real command, a UI change w
 - Hand-run evidence names its execution environment: which local copy, which virtual environment, and what was installed in it, so the count is verifiable and comparable (issue #5590).
 - A green check whose path filter matched nothing is stated as such in the same sentence as the count (issue #5590).
 - Completion claims are made only after reading the evidence that proves them in the current turn, and unverified facts are labeled unverified in the same sentence (issue #5689); `captain-hold-lifecycle` owns the completion gate for Firstmate-originated work.
+- Each mapped path leaves a retained outcome record naming its action or command, observed result, revision and environment, artifact link, and any unmet prerequisite, written to a durable destination outside the instance being cleaned up and confirmed by a read after that cleanup.
 
 Firstmate's own repo records dated per-environment runtime evidence in `docs/verification/runtime-backends.md`; this skill extends that discipline to project work.
 
 ## Integrate with delivery, not beside it
 
-The verify skill supplies what the pipeline cannot: real-app drive evidence attached to the ship's done claim.
+The project recipe supplies app-specific driving instructions and artifacts to the selected validation path, which attaches real-app drive evidence to the ship's done claim.
 `no-mistakes` owns review, tests, lint, docs, push, PR, and CI, and `validation-supervision` owns the validation run's drive contract.
 Never configure a deterministic suite-walk `commands.test`; `firstmate-coding-guidelines` owns that rule and the harness-dependent check policy for vendor-emitted verdicts.
 Generated verify content is per-project and rots with the app, so additions to a project's committed `AGENTS.md` remain a deliberate human choice.
@@ -59,11 +71,13 @@ Generated verify content is per-project and rots with the app, so additions to a
 ## Maintain the verify skill
 
 The unit of rigor is the feature, not every sentence.
-A source wave of one read-only subagent per feature is followed by a required live pass driving every mapped feature, holding three invariants: doctor before the first drive and again after any failed drive, evidence captured so far survives every cleanup, and nothing a drive started outlives that drive's usefulness.
-Refuse to double-drive a shared instance another agent may be using.
-Triage separates doc drift (fix the map), a harness gap (fix the harness), and a product gap (report the regression, never paper over it in docs).
+One worker performs the source pass across the mapped features without nested delegation, then a required live pass drives every mapped feature, holding three invariants: doctor before the first drive and again after any failed drive, evidence captured so far survives every cleanup, and nothing a drive started outlives that drive's usefulness.
+Keep source inspection separate from live driving so two agents never drive one instance, and refuse to double-drive an instance another agent may be using.
+Reconcile the index against its feature files, and scan the changed routes, commands, and menus for a user surface the map omits, citing the source that proves each addition; a map that lists only what it already knew is not full coverage.
+Carry a failed drive past its diagnosis: clean up the failed iteration, reset or relaunch when the instance's health does not explain the bad state, correct the harness, and re-drive it live to prove the correction.
+Triage separates doc drift (fix the map), a harness gap (fix the harness), and a product gap (record the regression separately, never paper over it in docs).
 The upkeep pass ends in exactly one outcome:
 
-- **clean** means full source and live coverage with nothing to ship and no PR.
-- **changed** means one PR of proven corrections confined to the verify skill's own directory.
-- **blocked** names what blocked coverage.
+- **clean** means full source and live coverage with nothing to ship.
+- **changed** means proven corrections confined to the verify skill's own directory, delivered through the mode already selected for the task: `local-only` stops at the ready branch, while `direct-PR` and `no-mistakes` open at most one PR and never a second one.
+- **blocked** names the path, the route attempted, and the unmet prerequisite, rather than counting another path as success.
