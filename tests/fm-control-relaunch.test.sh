@@ -92,7 +92,7 @@ case "$1 ${2:-}" in
     case "$(cat "$D/command")" in
       zsh|bash) echo '{"error":{"code":"agent_not_found"}}' ;;
       some-unrelated-process) echo '{}' ;;
-      *) echo '{"result":{"agent":{"agent_status":"idle"}}}' ;;
+      *) jq -n --arg pane "$3" '{result:{agent:{agent:"pi",pane_id:$pane,agent_status:"idle"}}}' ;;
     esac ;;
   'pane process-info')
     jq -n --arg p "$4" --arg cmd "$(cat "$D/command")" '{result:{type:"pane_process_info",process_info:{pane_id:$p,shell_pid:999999,foreground_processes:[{pid:999998,name:$cmd}]}}}' ;;

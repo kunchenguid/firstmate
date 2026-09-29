@@ -182,7 +182,7 @@ case "$cmd $sub" in
     pane=${3:-}
     status=$(jq_state -r --arg p "$pane" '.agent_status[$p] // empty')
     if [ -n "$status" ]; then
-      printf '{"result":{"agent":{"agent_status":"%s"}}}\n' "$status"
+      printf '{"result":{"agent":{"agent":"pi","pane_id":"%s","agent_status":"%s"}}}\n' "$3" "$status"
     else
       printf '{"error":{"code":"agent_not_found","message":"agent target %s not found"}}\n' "$pane"
     fi
@@ -207,7 +207,7 @@ case "$1 ${2:-}" in
   'status --json') echo '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}' ;;
   'pane get') jq -n --arg p "$3" '{result:{pane:{pane_id:$p}}}' ;;
   'pane process-info') jq -n --arg p "${4:-}" '{result:{type:"pane_process_info",process_info:{pane_id:$p,shell_pid:101,foreground_processes:[{pid:102,name:"codex",argv0:"codex"}]}}}';;
-  'agent get') echo '{"result":{"agent":{"agent_status":"idle"}}}' ;;
+  'agent get') jq -n --arg pane "$3" '{result:{agent:{agent:"pi",pane_id:$pane,agent_status:"idle"}}}' ;;
   'pane read')
     if [ "${FM_FAKE_HERDR_COMPOSER:-}" = pending ]; then
       printf '╭──────────────╮\n│ leftover txt │\n╰──────────────╯\n'

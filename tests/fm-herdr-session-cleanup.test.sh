@@ -164,7 +164,7 @@ fm_backend_herdr_cli() {
     "agent get")
       case "$(cat "$FIXTURE_DIR/agent")" in
         absent) printf '%s\n' '{"error":{"code":"agent_not_found"}}' >&2; return 1 ;;
-        live) printf '%s\n' '{"result":{"agent":{"agent_status":"idle"}}}' ;;
+        live) jq -n --arg pane "$3" '{result:{agent:{agent:"pi",pane_id:$pane,agent_status:"idle"}}}' ;;
         unknown) printf '%s\n' '{"error":{"code":"internal_error"}}' >&2; return 1 ;;
       esac
       ;;
