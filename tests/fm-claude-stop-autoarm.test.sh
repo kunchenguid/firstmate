@@ -1748,6 +1748,7 @@ write_arm_fixture "$dir" actionable
 status=0
 output=$(run_autoarm "$dir") || status=$?
 expect_code 2 "$status" "subscribed no-task owner should issue a native rewake"
+assert_contains "$output" "firstmate watcher wake" "subscribed input should present the native wake"
 assert_present "$dir/state/.input-handoff/input-1" "input is bound to the winning generation"
 assert_contains "$(cat "$dir/state/.input-handoff/input-1")" fixture-generation "receipt shares recovery generation"
 for posture in away quiet; do
@@ -1756,6 +1757,7 @@ for posture in away quiet; do
   status=0
   output=$(run_autoarm "$dir") || status=$?
   expect_code 0 "$status" "$posture retains daemon ownership"
+  assert_equals "" "$output" "$posture must not present a competing input wake"
   assert_equals "$before" "$(cat "$dir/state/.claude-autoarm-epoch")" "$posture must not take a new generation"
   assert_equals "$posture" "$(cat "$dir/state/.afk")" "$posture remains unchanged"
 done
