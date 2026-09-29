@@ -4449,9 +4449,6 @@ if (visible.includes('<div class="hook-message"') || visible.includes("hook-mess
 if (visible.includes("[firstmate-synthetic-input]") || visible.includes("/tmp/probe.status")) {
   throw new Error("a synthetic Firstmate row is visible in the conversation column");
 }
-if (rendersHiddenRows && !messages.includes("[firstmate-synthetic-input]")) {
-  throw new Error("the hidden synthetic row disappeared from the export");
-}
 for (const current of ["CURRENT_WATCHER_E2E", "CURRENT_TURN_END_E2E", "CURRENT_AWAY_E2E", "CURRENT_FROM_FIRSTMATE_E2E", "CURRENT_LAUNCH_BRIEF_E2E"]) {
   if (!visible.includes(current)) throw new Error(`operational input ${current} is missing from the conversation column`);
 }

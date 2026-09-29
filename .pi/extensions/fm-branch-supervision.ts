@@ -94,6 +94,7 @@ import {
   type ModelRegistry,
   SessionManager,
   ToolExecutionComponent,
+  VERSION,
   type AgentSession,
   type ExtensionAPI,
   type ExtensionCommandContext,
@@ -2175,10 +2176,13 @@ ${context.command}
   };
 
   // Pi's stock call header (formatToolCallWithArgs) is not a public export.
-  // Since Pi 0.99 a collapsed call is `title key=json` on the title line, cut
-  // at 100 characters, and an expanded call puts one muted `key: value` line
-  // under the title. Calm-off rendering has to match that or the stock
-  // comparison fails. Keep this in step with that function.
+  // Before Pi 0.99 it is the bold title alone. Since Pi 0.99 a collapsed call
+  // is `title key=json` on the title line, cut at 100 characters, and an
+  // expanded call puts one muted `key: value` line under the title. Calm-off
+  // rendering has to match the installed Pi or the stock comparison fails.
+  // Keep this in step with that function.
+  const [stockMajor = 0, stockMinor = 0] = VERSION.split(".").map((part) => Number.parseInt(part, 10) || 0);
+  const stockCallHeaderShowsArgs = stockMajor > 0 || stockMinor >= 99;
   const stockCollapsedArgsChars = 100;
   const stockToolCallHeader = (
     title: string,
@@ -2187,7 +2191,7 @@ ${context.command}
     expanded: boolean,
   ): string => {
     const header = theme.fg("toolTitle", theme.bold(title));
-    if (args == null) return header;
+    if (!stockCallHeaderShowsArgs || args == null) return header;
     const entries = typeof args === "object" && !Array.isArray(args)
       ? Object.entries(args)
       : [["args", args] as [string, unknown]];

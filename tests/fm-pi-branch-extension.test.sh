@@ -68,6 +68,8 @@ JSON
   cat > "$repo/node_modules/@earendil-works/pi-coding-agent/index.js" <<'JS'
 import { writeFileSync } from "node:fs";
 
+export const VERSION = "0.99.0";
+
 export function getAgentDir() {
   return "/stub-agent-dir";
 }
@@ -5119,6 +5121,28 @@ if (JSON.stringify(expandedActual) !== JSON.stringify(expandedStock)) {
 }
 if (!expandedStock.join("\n").includes("OUTCOME_TWELVE") || JSON.stringify(expandedStock) === JSON.stringify(collapsedStock)) {
   throw new Error("stock rendering fixture did not exercise expanded output");
+}
+const processedDefinition = tools.find((tool) => tool.name === "fm_branch_processed");
+if (!processedDefinition) throw new Error("fm_branch_processed was not registered");
+const stockProcessedDefinition = { ...processedDefinition };
+delete stockProcessedDefinition.renderShell;
+delete stockProcessedDefinition.renderCall;
+delete stockProcessedDefinition.renderResult;
+const processedArgs = { through: 1 };
+const processedResult = { content: [{ type: "text", text: "acknowledged through 1" }], details: undefined, isError: false };
+const stockProcessed = new ToolExecutionComponent("fm_branch_processed", "stock-processed", processedArgs, { showImages: false }, stockProcessedDefinition, ui, process.cwd());
+const actualProcessed = new ToolExecutionComponent("fm_branch_processed", "actual-processed", processedArgs, { showImages: false }, processedDefinition, ui, process.cwd());
+for (const row of [stockProcessed, actualProcessed]) {
+  row.markExecutionStarted();
+  row.setArgsComplete();
+  row.updateResult(processedResult);
+}
+for (const expanded of [false, true]) {
+  stockProcessed.setExpanded(expanded);
+  actualProcessed.setExpanded(expanded);
+  if (JSON.stringify(actualProcessed.render(100)) !== JSON.stringify(stockProcessed.render(100))) {
+    throw new Error(`${expanded ? "expanded" : "collapsed"} Calm-off fm_branch_processed rendering differs from Pi stock`);
+  }
 }
 pi.events.emit("firstmate:calm-presentation", { active: true, stockExportRendering: false });
 actualRow.invalidate();
