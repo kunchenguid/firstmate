@@ -184,7 +184,11 @@ else
   # inside it instead of publishing, so rollback must remove only that stage.
   STAGE_HOME=$(mktemp -d "$HOME_PARENT/.fm-home-provisioning.XXXXXX") \
     || die "cannot create remote home staging directory"
-  git clone --quiet -- "$FM_ROOT" "$STAGE_HOME" || die "could not clone the remote Firstmate home"
+  # A local clone copies loose objects into the new repo. Git 2.55 on the CI
+  # image does that copy before the destination shard directory exists, so the
+  # clone dies intermittently with "failed to copy file to .../objects/xx/hash".
+  # --no-local uses the normal transport and writes a pack instead.
+  git clone --no-local --quiet -- "$FM_ROOT" "$STAGE_HOME" || die "could not clone the remote Firstmate home"
   STAGE_SENTINEL="${STAGE_HOME##*/}.owner"
   : > "$STAGE_HOME/$STAGE_SENTINEL" || die "cannot mark the remote home staging directory"
   mv -- "$STAGE_HOME" "$FM_HOME" || die "cannot install the remote home"
