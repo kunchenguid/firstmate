@@ -2885,10 +2885,8 @@ EOF
     and .state == "unknown"
     and .invalidity.kind == "unowned_current"
     and .invalidity.ids == ["unowned-ship"]
-    and .invalidities == [{kind:"unowned_current",ids:["unowned-ship"]},
-                          {kind:"child_current_unavailable",ids:["unverified-scout"]}]
-    and (.reason | contains("child current state unavailable: unverified-scout"))
-    and (.reason | contains("unowned-ship=working"))
+    and has("invalidities") == false
+    and (.reason | test("unowned-ship=working.*; child current state unavailable: unverified-scout$"))
     and ([.active_children[].id] | sort) == ["owned-ship","unowned-ship"]
     and (.active_children[] | select(.id == "unowned-ship") | .owned == false)
     and (.active_children[] | select(.id == "owned-ship") | has("owned") | not)
