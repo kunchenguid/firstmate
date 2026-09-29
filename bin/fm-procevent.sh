@@ -563,9 +563,20 @@ cmd_register() {
   printf 'registered: %s (%s)\n' "$id" "$adapter"
 }
 
+legacy_firstmate_lavish_registration_locked() {
+  local id=$1 expected
+  shift
+  [ "$#" -eq 5 ] || return 1
+  [ "$1" = "$SCRIPT_DIR/fm-procevent-lavish.sh" ] || return 1
+  [ "$2" = poll ] && [ "$4" = --agent-reply-file ] || return 1
+  expected=$("$SCRIPT_DIR/fm-procevent-lavish.sh" source-id "$3" 2>/dev/null) || return 1
+  [ "$expected" = "$id" ] || return 1
+  fm_procevent_registration_matches_locked "$STATE" lavish "$id" "$1" "$2" "$3"
+}
+
 cmd_register_lavish() {
   local adapter=${1-} id=${2-} task=${3-} sep=${4-} result pending pending_adapter
-  local reply_source='' reply_dest='' stale arg i adopting=0 pending_owner prior_record=''
+  local reply_source='' reply_dest='' stale arg i adopting=0 migrating=0 pending_owner prior_record=''
   local pending_rounds=0 kind=firstmate-owned current_kind owner_name=Firstmate has_reply=0
   local -a argv=()
   shift 4 2>/dev/null || usage
@@ -595,12 +606,17 @@ cmd_register_lavish() {
   if [ -e "$(source_file "$id")" ] || [ -L "$(source_file "$id")" ]; then
     current_kind=$(source_kind "$id" 2>/dev/null || true)
     if [ "$current_kind" != "$kind" ]; then
-      fm_procevent_source_lock_release "$id"
-      if [ "$current_kind" = task-owned ]; then
-        reply_source=$(source_owner_task "$id")
-        die "cannot replace task-owned source $id owned by task $reply_source; steer that task to re-arm its board"
+      if [ -z "$task" ] && [ -z "$current_kind" ] \
+          && legacy_firstmate_lavish_registration_locked "$id" "${argv[@]}"; then
+        migrating=1
+      else
+        fm_procevent_source_lock_release "$id"
+        if [ "$current_kind" = task-owned ]; then
+          reply_source=$(source_owner_task "$id")
+          die "cannot replace task-owned source $id owned by task $reply_source; steer that task to re-arm its board"
+        fi
+        die "cannot replace Firstmate-owned source $id; Firstmate is the holder"
       fi
-      die "cannot replace Firstmate-owned source $id; Firstmate is the holder"
     fi
     if [ "$kind" = task-owned ] && [ "$(source_owner_task "$id")" != "$task" ]; then
       reply_source=$(source_owner_task "$id")
@@ -613,7 +629,7 @@ cmd_register_lavish() {
   while IFS= read -r pending; do
     [ -n "$pending" ] || continue
     pending_rounds=$((pending_rounds + 1))
-    if [ "$adopting" -eq 1 ]; then
+    if [ "$adopting" -eq 1 ] || [ "$migrating" -eq 1 ]; then
       pending_owner=$(fm_procevent_result_owner_task "$pending" 2>/dev/null || true)
       if [ "$pending_owner" != "$task" ]; then
         fm_procevent_source_lock_release "$id"
@@ -626,10 +642,13 @@ cmd_register_lavish() {
       die "cannot re-arm terminal Lavish result $pending; stop and conclude the review"
     fi
   done < <(source_pending "$id")
-  if [ "$adopting" -eq 0 ] && [ "$pending_rounds" -eq 0 ] \
-      && { [ -n "$task" ] || [ "$has_reply" -eq 1 ]; }; then
+  if [ "$adopting" -eq 0 ] && [ "$pending_rounds" -eq 0 ]; then
     fm_procevent_source_lock_release "$id"
     die "cannot re-arm source $id: $owner_name already holds this board and no captured round is waiting to be acknowledged"
+  fi
+  if [ -z "$task" ] && [ "$adopting" -eq 0 ] && [ "$has_reply" -eq 0 ]; then
+    fm_procevent_source_lock_release "$id"
+    die "cannot re-arm Firstmate-owned source $id without its reply"
   fi
   i=0
   while [ "$i" -lt "${#argv[@]}" ]; do
