@@ -17,7 +17,11 @@ FM_LOCK_STALE_AFTER="${FM_LOCK_STALE_AFTER:-2}"
 # produces no output, never beats, and the arm's confirmation timeout TERMs it
 # mid-critical-section with no cleanup trap installed yet.
 FM_RECOVERY_LOCK_BOUND="${FM_RECOVERY_LOCK_BOUND:-10}"
-case "$FM_RECOVERY_LOCK_BOUND" in ''|*[!0-9]*|0) FM_RECOVERY_LOCK_BOUND=10 ;; esac
+case "$FM_RECOVERY_LOCK_BOUND" in
+  ''|*[!0-9]*) FM_RECOVERY_LOCK_BOUND=10 ;;
+  *) FM_RECOVERY_LOCK_BOUND=$((10#$FM_RECOVERY_LOCK_BOUND)) ;;
+esac
+[ "$FM_RECOVERY_LOCK_BOUND" -gt 0 ] || FM_RECOVERY_LOCK_BOUND=10
 # shellcheck source=bin/fm-path-lib.sh
 . "$FM_WAKE_LIB_DIR/fm-path-lib.sh"
 # Resolved once at source time: fm_pid_identity and fm_path_mtime run inside 0.2s
@@ -1160,7 +1164,11 @@ fm_lock_sweep_dead_owners() {
 # FM_RECOVERY_TMP_STALE_AFTER is provably abandoned by a dead writer; the
 # default leaves room for a process frozen mid-write for a full hour.
 FM_RECOVERY_TMP_STALE_AFTER="${FM_RECOVERY_TMP_STALE_AFTER:-3600}"
-case "$FM_RECOVERY_TMP_STALE_AFTER" in ''|*[!0-9]*|0) FM_RECOVERY_TMP_STALE_AFTER=3600 ;; esac
+case "$FM_RECOVERY_TMP_STALE_AFTER" in
+  ''|*[!0-9]*) FM_RECOVERY_TMP_STALE_AFTER=3600 ;;
+  *) FM_RECOVERY_TMP_STALE_AFTER=$((10#$FM_RECOVERY_TMP_STALE_AFTER)) ;;
+esac
+[ "$FM_RECOVERY_TMP_STALE_AFTER" -gt 0 ] || FM_RECOVERY_TMP_STALE_AFTER=3600
 fm_recovery_marker_sweep_stale() {
   local marker=$1 scratch
   for scratch in "${marker}.tmp."* "${marker}.invalid."*; do
