@@ -76,15 +76,23 @@ case "$COMMAND" in
     # A committed build declaration is intentionally exact, so ordinary
     # progress prose cannot dispatch a review of an uncommitted tree.
     STATUS="$STATE/$ID.status"
+    STATUS_HEAD=
     if [ -f "$STATUS" ] && [ ! -L "$STATUS" ]; then
-      HEAD=$(sed -nE 's/^working( \[[^]]+\])?: build done commit=([0-9a-fA-F]{40})( |$).*/\2/p; s/^needs-decision( \[[^]]+\])?:.*ready for independent review at ([0-9a-fA-F]{40})( |$).*/\2/p' "$STATUS" | tail -1)
+      STATUS_HEAD=$(sed -nE 's/^working( \[[^]]+\])?: build done commit=([0-9a-fA-F]{40})( |$).*/\2/p; s/^needs-decision( \[[^]]+\])?:.*ready for independent review at ([0-9a-fA-F]{40})( |$).*/\2/p' "$STATUS" | tail -1)
     fi
     PR=$(meta_value "$META" pr)
-    if [ -n "$PR" ]; then
-      HEAD=$(meta_value "$META" pr_head)
-    fi
-    [ -n "$HEAD" ] || exit 0
     [ -n "$PR" ] || PR=-
+    # The worker's build declaration and the forge head recorded at PR
+    # registration can each be the newer head, so route whichever is unrouted.
+    for CANDIDATE in "$STATUS_HEAD" "$(meta_value "$META" pr_head)"; do
+      [ -n "$CANDIDATE" ] || continue
+      [ -n "$HEAD" ] || HEAD=$CANDIDATE
+      if ! awk -F '\t' -v h="$CANDIDATE" -v c="$CLASS" '$1==h && $3==c {found=1} END {exit !found}' "$STATE/$ID.review-rounds" 2>/dev/null; then
+        HEAD=$CANDIDATE
+        break
+      fi
+    done
+    [ -n "$HEAD" ] || exit 0
     ;;
   request)
     { [ "$#" -eq 6 ] || [ "$#" -eq 8 ]; } || die 'invalid request arguments'
@@ -98,7 +106,6 @@ valid_head "$HEAD" || die 'review needs an exact 40-hex commit'
 if [ "$PR" != - ]; then
   fm_pr_url_parse "$PR" || die 'invalid PR URL'
   [ "$(meta_value "$META" pr)" = "$FM_PR_URL" ] || die 'PR is not owned by this task'
-  [ "$(meta_value "$META" pr_head)" = "$HEAD" ] || die 'review head differs from recorded PR head'
   PR=$FM_PR_URL
 fi
 if [ -n "$FINDING" ]; then

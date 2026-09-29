@@ -141,6 +141,7 @@ SH
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case " $* " in
   *"default_branch"*) printf '%s\n' "${FM_TEST_GH_DEFAULT_BRANCH:-main}"; exit 0 ;;
+  *"base.repo.full_name"*) [ "${FM_TEST_GH_IDENTITY_FAIL:-0}" = 0 ] || exit 1 ;;
 esac
 case "${1:-} ${2:-}" in
   api\ /repos/*/pulls/*)
@@ -903,14 +904,25 @@ test_pr_ready_carries_merge_authority() {
   local dir
   dir=$(make_case ready-merge-authority)
   write_task_meta "$dir"
-  printf 'yolo=on\nyolo_source=project-record\n' >> "$dir/home/state/task-a.meta"
+  printf 'yolo=on\n' >> "$dir/home/state/task-a.meta"
   run_check_entry "$dir" task-a https://github.com/o/r/pull/7 > "$dir/stdout" 2> "$dir/stderr" \
     || fail 'ready PR with recorded merge authority was refused'
-  grep -qxF 'merge_authority=firstmate' "$dir/home/state/task-a.meta" || fail 'PR lost firstmate merge authority'
-  grep -qxF 'pr_yolo_source=project-record' "$dir/home/state/task-a.meta" || fail 'PR lost yolo source'
-  assert_grep 'merge_authority=firstmate yolo_source=project-record' "$dir/stdout" \
+  grep -qxF 'merge_owner=firstmate' "$dir/home/state/task-a.meta" || fail 'PR lost firstmate merge owner'
+  assert_grep 'merge_owner=firstmate' "$dir/stdout" \
     'ready outcome repeated a merge question by dropping recorded authority'
-  pass 'ready PR carries task merge authority and its source'
+  pass 'ready PR carries task merge authority'
+}
+
+test_unreadable_pr_identity_still_arms() {
+  local dir
+  dir=$(make_case unreadable-identity)
+  write_task_meta "$dir"
+  FM_TEST_GH_IDENTITY_FAIL=1 run_check_entry "$dir" task-a https://github.com/o/r/pull/7 \
+    > "$dir/stdout" 2> "$dir/stderr" || fail 'unreadable PR identity blocked arming'
+  [ -f "$dir/home/state/task-a.check.sh" ] || fail 'unreadable PR identity left no armed poll'
+  grep -qxF 'base_ref=unknown' "$dir/home/state/task-a.meta" || fail 'unreadable base was not recorded as unknown'
+  grep -qxF 'stacked=unknown' "$dir/home/state/task-a.meta" || fail 'unreadable stacking was not recorded as unknown'
+  pass 'unreadable PR identity records unknown facts and still arms'
 }
 
 # Runs one watcher under a hang guard that TERMs it and returns 124 once it has
@@ -3516,6 +3528,7 @@ test_direct_pr_unpushed_commit_refuses_registration
 test_valid_recording_and_merge_derivation
 test_stacked_pr_base_is_flagged
 test_pr_ready_carries_merge_authority
+test_unreadable_pr_identity_still_arms
 test_rejected_metacharacter_bytes_are_inert
 test_static_poll_contract
 test_atomic_interruption_leaves_no_partial_artifact

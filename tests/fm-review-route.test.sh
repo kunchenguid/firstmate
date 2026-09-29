@@ -49,4 +49,25 @@ route request build "$PR" "$HEAD_C" security codex correctness-17 'blocking corr
 route request build "$PR" "$HEAD_C" security codex correctness-17 'blocking correctness regression in settlement' >/dev/null \
   || fail 'repeated exception was refused'
 [ "$(wc -l < "$SEND_LOG")" -eq 3 ] || fail 'repeated exception sent again'
+printf 'kind=ship\nyolo=on\n' > "$STATE/fix.meta"
+chmod 600 "$STATE/fix.meta"
+: > "$SEND_LOG"
+route configure fix security reviewer codex >/dev/null || fail 'could not configure fix review'
+printf 'pr=%s\npr_head=%s\n' "$PR" "$HEAD_A" >> "$STATE/fix.meta"
+route scan fix >/dev/null || fail 'registered PR head did not route review'
+printf 'working [at=2]: build done commit=%s\n' "$HEAD_B" > "$STATE/fix.status"
+route scan fix >/dev/null || fail 'pushed fix commit after PR registration did not route'
+[ "$(wc -l < "$SEND_LOG")" -eq 2 ] || fail 'stale recorded PR head suppressed the fix commit review'
+grep -q "$HEAD_B" "$SEND_LOG" || fail 'fix commit review did not name its exact head'
+route scan fix >/dev/null || fail 'routed fix head was refused on rescan'
+[ "$(wc -l < "$SEND_LOG")" -eq 2 ] || fail 'rescan routed an already reviewed head'
+
+printf 'kind=ship\npr=%s\npr_head=%s\n' "$PR" "$HEAD_A" > "$STATE/manual.meta"
+chmod 600 "$STATE/manual.meta"
+: > "$SEND_LOG"
+route configure manual security reviewer codex >/dev/null || fail 'could not configure manual review'
+route request manual "$PR" "$HEAD_C" security codex >/dev/null \
+  || fail 'manual request for a head newer than the recorded PR head was refused'
+grep -q "$HEAD_C" "$SEND_LOG" || fail 'manual request did not route its exact head'
+
 pass 'review dispatch binds exact heads, deduplicates receipts, and caps ordinary rounds at two'

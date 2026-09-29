@@ -82,14 +82,14 @@ test_identity_names_stacked_merge_target() {
   local out state_dir
   state_dir="$TMP_ROOT/identity-state"
   mkdir -p "$state_dir"
-  printf 'kind=ship\npr=https://github.com/o/r/pull/7\nmerge_authority=firstmate\npr_yolo_source=project-record\n' > "$state_dir/task-7.meta"
+  printf 'kind=ship\npr=https://github.com/o/r/pull/7\nmerge_owner=firstmate\n' > "$state_dir/task-7.meta"
   out=$(FM_STATE_OVERRIDE="$state_dir" FM_TEST_BASE_REF=feature/base PATH="$FAKEBIN:$PATH" "$SCRIPT" https://github.com/o/r/pull/7 task-7) \
     || fail 'stacked PR identity was refused'
   assert_contains "$out" 'task_owner=task-7 head_repo=o/r base_repo=o/r base_ref=feature/base' \
     'PR outcome lost task ownership or stacked base'
   assert_contains "$out" 'merge_target=o/r:feature/base' 'PR outcome lost merge target'
   assert_contains "$out" 'stacked=yes' 'stacked PR was not flagged'
-  assert_contains "$out" 'merge_authority=firstmate yolo_source=project-record' 'PR outcome lost merge authority'
+  assert_contains "$out" 'merge_owner=firstmate' 'PR outcome lost merge owner'
   pass 'PR identity names task owner and stacked merge target'
 }
 

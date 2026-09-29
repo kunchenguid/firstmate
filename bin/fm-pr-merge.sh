@@ -370,7 +370,6 @@ fm_backlog_directory_present "$STATE" "state directory" || {
   exit 1
 }
 META="$STATE/$ID.meta"
-RECORDED_BASE_REF=
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
@@ -390,7 +389,6 @@ if [ ! -f "$META" ] || [ -L "$META" ]; then
   echo "error: task metadata is unavailable" >&2
   exit 1
 fi
-RECORDED_BASE_REF=$(grep '^base_ref=' "$META" | tail -1 | cut -d= -f2- || true)
 if ! fm_backlog_meta_spawn_gen_optional "$META" "$STATE"; then
   echo "error: PR merge refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
   exit 1
@@ -761,11 +759,6 @@ FIELDS
     echo "error: could not read the GitHub pull request state before merging" >&2
     return 1
   fi
-  if [ -n "$RECORDED_BASE_REF" ] && [ "$RECORDED_BASE_REF" != unknown ] \
-    && [ "$RECORDED_BASE_REF" != "$base" ]; then
-    echo "error: PR base changed from $RECORDED_BASE_REF to $base; reconcile its merge target before merging" >&2
-    return 1
-  fi
 
   draft=$(fm_pr_json_draft_state "$json")
   if ! fm_pr_head_valid "$live_head"; then
@@ -1126,18 +1119,6 @@ hold_away_record_for_merge() {
 
 require_current_away_authority() {
   FM_PR_AWAY_POSTURE=false
-  # A recorded standing yolo choice is only a presentation hint until this
-  # merge re-reads the current project registration.
-  local yolo_source recorded_yolo project_path live_posture
-  yolo_source=$(grep '^yolo_source=' "$META" | tail -1 | cut -d= -f2- || true)
-  recorded_yolo=$(grep '^yolo=' "$META" | tail -1 | cut -d= -f2- || true)
-  if [ "$yolo_source" = project-record ] && [ "$recorded_yolo" = on ]; then
-    project_path=$(grep '^project=' "$META" | tail -1 | cut -d= -f2- || true)
-    [ -n "$project_path" ] || { echo 'error: project merge posture cannot be re-read' >&2; return 1; }
-    live_posture=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-project-mode.sh" "${project_path##*/}") \
-      || { echo 'error: current project merge posture is unavailable' >&2; return 1; }
-    case "$live_posture" in *' on') ;; *) echo 'error: recorded standing yolo no longer matches project registration' >&2; return 1 ;; esac
-  fi
   if fm_afk_contract_away_present "$STATE"; then
     FM_PR_AWAY_POSTURE=true
     if [ "$PROVIDER" = github ] && [ "$FM_PR_GITHUB_AUTO_REQUESTED" = true ]; then

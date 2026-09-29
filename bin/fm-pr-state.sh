@@ -57,17 +57,14 @@ PATH_PART=$FM_PR_PATH
 NUMBER=$FM_PR_NUMBER
 ENDPOINT="/repos/$PATH_PART/pulls/$NUMBER"
 TASK_OWNER=${2:-unknown}
-MERGE_AUTHORITY=unknown
-YOLO_SOURCE=unknown
+MERGE_OWNER=unknown
 if [ "$TASK_OWNER" != unknown ]; then
   fm_pr_task_id_valid "$TASK_OWNER" || die 'invalid task owner'
   TASK_META="$STATE_DIR/$TASK_OWNER.meta"
   [ -f "$TASK_META" ] && [ ! -L "$TASK_META" ] || die 'task owner metadata unavailable'
   [ "$(sed -n 's/^pr=//p' "$TASK_META" | tail -1)" = "$URL" ] || die 'task owner does not own PR'
-  MERGE_AUTHORITY=$(sed -n 's/^merge_authority=//p' "$TASK_META" | tail -1)
-  YOLO_SOURCE=$(sed -n 's/^pr_yolo_source=//p' "$TASK_META" | tail -1)
-  [ -n "$MERGE_AUTHORITY" ] || MERGE_AUTHORITY=unknown
-  [ -n "$YOLO_SOURCE" ] || YOLO_SOURCE=unknown
+  MERGE_OWNER=$(sed -n 's/^merge_owner=//p' "$TASK_META" | tail -1)
+  [ -n "$MERGE_OWNER" ] || MERGE_OWNER=unknown
 fi
 IDENTITY=$(gh api "$ENDPOINT" --jq '[.head.repo.full_name, .base.repo.full_name, .base.ref, .base.sha] | @tsv') \
   || die "could not read PR ownership and base for $URL"
@@ -81,8 +78,8 @@ DEFAULT_REF=$(gh api "/repos/$BASE_REPO" --jq '.default_branch') || die "could n
 [ -n "$DEFAULT_REF" ] || die "default branch is empty for $BASE_REPO"
 STACKED=no
 [ "$BASE_REF" = "$DEFAULT_REF" ] || STACKED=yes
-printf 'PR: %s task_owner=%s head_repo=%s base_repo=%s base_ref=%s base_sha=%s merge_target=%s:%s stacked=%s merge_authority=%s yolo_source=%s\n' \
-  "$URL" "$TASK_OWNER" "$HEAD_REPO" "$BASE_REPO" "$BASE_REF" "$BASE_SHA" "$BASE_REPO" "$BASE_REF" "$STACKED" "$MERGE_AUTHORITY" "$YOLO_SOURCE"
+printf 'PR: %s task_owner=%s head_repo=%s base_repo=%s base_ref=%s base_sha=%s merge_target=%s:%s stacked=%s merge_owner=%s\n' \
+  "$URL" "$TASK_OWNER" "$HEAD_REPO" "$BASE_REPO" "$BASE_REF" "$BASE_SHA" "$BASE_REPO" "$BASE_REF" "$STACKED" "$MERGE_OWNER"
 
 CORE=$(gh pr view "$URL" \
   --json state,mergedAt,isDraft,headRefOid,author,mergeable,reviewDecision --jq '

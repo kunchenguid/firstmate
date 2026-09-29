@@ -878,8 +878,7 @@ task_json_lines() {
       --arg base_sha "$(meta_value "$meta" base_sha)" \
       --arg merge_target "$(meta_value "$meta" merge_target)" \
       --arg stacked "$(meta_value "$meta" stacked)" \
-      --arg pr_merge_authority "$(meta_value "$meta" merge_authority)" \
-      --arg pr_yolo_source "$(meta_value "$meta" pr_yolo_source)" \
+      --arg merge_owner "$(meta_value "$meta" merge_owner)" \
       --arg agent_alive "$agent_alive" \
       --arg observed_at "$SNAPSHOT_NOW" \
       --arg last_event_raw "$last_event_raw" \
@@ -927,8 +926,7 @@ task_json_lines() {
           base_sha:($base_sha | if . == "" then null else . end),
           merge_target:($merge_target | if . == "" then null else . end),
           stacked:($stacked | if . == "" then null else . end),
-          merge_authority:($pr_merge_authority | if . == "" then null else . end),
-          yolo_source:($pr_yolo_source | if . == "" then null else . end)},
+          merge_owner:($merge_owner | if . == "" then null else . end)},
         hints:{
           pending_decision:$pending_decision,
           blocked_event:$blocked_event,

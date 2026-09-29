@@ -2857,9 +2857,13 @@ EOF
         continue
       fi
       review_route_rc=0
-      "$SCRIPT_DIR/fm-review-route.sh" scan "$review_id" >/dev/null || review_route_rc=$?
-      if [ "$review_route_rc" -ne 0 ] && [ "$review_route_rc" -ne 3 ]; then
+      review_attention="$STATE/$review_id.review-route-attention"
+      ( run_check_process "$SCRIPT_DIR/fm-review-route.sh" scan "$review_id" ) >/dev/null 2>&1 || review_route_rc=$?
+      if [ "$review_route_rc" -eq 0 ] || [ "$review_route_rc" -eq 3 ]; then
+        rm -f "$review_attention"
+      elif [ ! -e "$review_attention" ]; then
         fm_wake_append check "review-route-$review_id" "review routing needs attention: task=$review_id" || exit 1
+        : > "$review_attention"
       fi
     done <<EOF_REVIEW_SIGNALS
 $pending
