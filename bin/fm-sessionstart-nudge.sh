@@ -16,9 +16,12 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
 # shellcheck source=bin/fm-operational-input.sh
 . "$SCRIPT_DIR/fm-operational-input.sh"
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
 
 fm_is_gate_agent "$FM_ROOT" && exit 0
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
+fm_codex_desktop_lease_touch "$STATE" "$SCRIPT_DIR/fm-lock.sh"
 
 lock_is_in_ancestry() {
   local lock_pid pid=$$ _
@@ -45,7 +48,11 @@ lock_is_in_ancestry() {
   return 1
 }
 
-lock_is_in_ancestry && exit 0
+if fm_codex_desktop_session_id >/dev/null 2>&1; then
+  fm_session_lock_owned_by_self "$STATE" && exit 0
+else
+  lock_is_in_ancestry && exit 0
+fi
 nudge=
 fm_operational_input_encode session-start \
   "Run \`bin/fm-session-start.sh\` now, exactly once, before executing any other instructions." \

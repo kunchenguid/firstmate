@@ -126,6 +126,17 @@ fi
 
 [ -n "$CMD" ] || exit 0
 
+# A Bash call inside a live Codex Desktop thread renews its fleet-lock lease.
+# The touch is silent and never changes the policy decision below.
+LEASE_SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P)
+if [ -n "$LEASE_SCRIPT_DIR" ] && [ "$CMD_SET" -eq 0 ]; then
+  # shellcheck source=bin/fm-session-lock-lib.sh
+  . "$LEASE_SCRIPT_DIR/fm-session-lock-lib.sh"
+  fm_codex_desktop_lease_touch \
+    "${FM_STATE_OVERRIDE:-${FM_HOME:-$(dirname -- "$LEASE_SCRIPT_DIR")}/state}" \
+    "$LEASE_SCRIPT_DIR/fm-lock.sh"
+fi
+
 # Strict-superset prefilter (transport only; owns zero classification semantics).
 # Every protected watcher execution and every broad watcher kill resolves to the
 # fm-watch byte sequence AFTER the classifier's byte normalization, so a command

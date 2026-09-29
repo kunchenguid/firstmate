@@ -123,7 +123,8 @@
 # with a "supervision-host:" line and leaves the decision to its owner; a
 # host that stands down before activation leaves the owner's host record,
 # processes, arms, and leases alone. The engine runs with
-# FM_SUPERVISION_ACTOR=branch, the session-lock holder as FM_LEASE_HOLDER_PID,
+# FM_SUPERVISION_ACTOR=branch, the session-lock holder as FM_LEASE_HOLDER_PID
+# (with its Desktop lock generation as FM_LEASE_HOLDER_GENERATION),
 # the primary's harness pin, and this turn's report id, so every guarded
 # script applies the same partition, leases, and away relocation it applies to
 # the Pi branch. At activation the host stops anything a crashed predecessor
@@ -207,6 +208,9 @@ COOLDOWN=300
 COOLDOWN_MAX=3600
 AUTOARM_GEN=${FM_SUPERVISION_HOST_AUTOARM_GEN:-}
 AUTOARM_OWNER=${FM_SUPERVISION_HOST_OWNER_PID:-}
+# The Codex Desktop lock generation this host started under, set once the host
+# proves ownership; empty for every other harness.
+HOST_LOCK_GENERATION=
 PRIMARY=${FM_SUPERVISION_HOST_PRIMARY:-}
 [ -n "$PRIMARY" ] || PRIMARY=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 # The owner's predecessor arm belongs to the first cycle only.
@@ -417,8 +421,14 @@ retire_arm() {  # <pid> <output-file>
   [ -z "$out" ] || rm -f "$out" 2>/dev/null || true
 }
 
+# Ownership also requires the Desktop lock generation the host started under,
+# so a reclaimed lease under the same app-server never passes as this host's.
 host_still_owner() {
   fm_session_lock_owned_by_self "$STATE" || return 1
+  if [ -n "$HOST_LOCK_GENERATION" ]; then
+    fm_codex_desktop_lease_live "$STATE" "$(sed -n '1p' "$STATE/.lock" 2>/dev/null)" || return 1
+    [ "$FM_CODEX_LEASE_GENERATION" = "$HOST_LOCK_GENERATION" ] || return 1
+  fi
   [ -n "$AUTOARM_GEN" ] || return 0
   fm_autoarm_ledger_read "$STATE" || return 1
   [ "$FM_AUTOARM_GEN" = "$AUTOARM_GEN" ] && [ "$FM_AUTOARM_OWNER" = "$AUTOARM_OWNER" ] \
@@ -487,10 +497,13 @@ stream_ready_line() {
 }
 
 # Wait for the current arm to close. Returns 0 with ARM_TEXT set,
-# or 1 when the park boundary arrives first.
+# or 1 when the park boundary arrives first. A park blocks the Codex Desktop
+# thread's own hooks, so each poll renews that thread's fleet-lock lease once
+# it has aged past the touch interval; other sessions have no lease to renew.
 await_close() {
   while fm_pid_alive "$ARM_PID"; do
     refresh_process "$ARM_PID"
+    fm_codex_desktop_lease_touch "$STATE" "$SCRIPT_DIR/fm-lock.sh"
     [ "$READY_PENDING" -eq 0 ] || stream_ready_line
     boundary_reached && return 1
     sleep "$POLL"
@@ -883,8 +896,10 @@ handle_wake() {  # <reason-lines>
   TURN_RESULT=$result
   TURN_ERRORS=$errors
   ENGINE_RUNNING=1
-  # Backgrounded and waited, so a signal to the host is handled at once
-  # instead of after the whole turn; the cleanup stops the engine.
+  # Backgrounded and polled, so a signal to the host is handled within one
+  # poll instead of after the whole turn; the cleanup stops the engine. The
+  # engine binds its task leases to the Desktop lock generation this host
+  # started under, so an engine that outlives it never claims for a successor.
   (
     export FM_HOME STATE
     [ -z "${FM_STATE_OVERRIDE:-}" ] || export FM_STATE_OVERRIDE
@@ -892,6 +907,7 @@ handle_wake() {  # <reason-lines>
     export FM_SUPERVISION_ACTOR=branch
     FM_LEASE_HOLDER_PID=$(sed -n '1p' "$STATE/.lock" 2>/dev/null | tr -cd '0-9')
     export FM_LEASE_HOLDER_PID
+    export FM_LEASE_HOLDER_GENERATION="$HOST_LOCK_GENERATION"
     export FM_SUPERVISION_PRIMARY_HARNESS="$PRIMARY"
     export FM_BRANCH_REPORT_TURN="$turn"
     fm_supervision_engine_turn "$FM_SUPERVISION_ENGINE" "$FM_SUPERVISION_ENGINE_MODEL" \
@@ -899,6 +915,12 @@ handle_wake() {  # <reason-lines>
       "$result" "$errors" "$ENGINE_PID_FILE"
   ) &
   ENGINE_SUBSHELL=$!
+  # An engine turn also blocks the Desktop thread's hooks, so the host keeps
+  # renewing that thread's lease while the turn runs, exactly as a park does.
+  while fm_pid_alive "$ENGINE_SUBSHELL"; do
+    fm_codex_desktop_lease_touch "$STATE" "$SCRIPT_DIR/fm-lock.sh"
+    sleep "$POLL"
+  done
   wait "$ENGINE_SUBSHELL"
   rc=$?
   ENGINE_SUBSHELL=
@@ -979,6 +1001,11 @@ attended_acceptor() {  # <first-reason-line>
 # host, processes, arms, and leases alone.
 if ! host_still_owner; then
   stand_down "this session does not own supervision"
+fi
+# Bind this host to the Desktop lock generation it owns now; a later session
+# sharing the app-server gets a new generation and never passes as this host.
+if fm_codex_desktop_lease_live "$STATE" "$(sed -n '1p' "$STATE/.lock" 2>/dev/null)"; then
+  HOST_LOCK_GENERATION=$FM_CODEX_LEASE_GENERATION
 fi
 trap cleanup EXIT
 trap 'exit 129' HUP

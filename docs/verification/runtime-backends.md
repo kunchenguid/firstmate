@@ -1905,6 +1905,24 @@ Observed guarantee: a Desktop-owned thread can write Firstmate lifecycle files w
 The missing guarantee remains a supported shell-callable bridge that lets Firstmate perform those operations against the same visible Desktop endpoint.
 App-server partial methods and raw socket experiments do not satisfy that bridge contract.
 
+## Codex app-server lock identity
+
+On 2026-09-26, the token-free guard ran on macOS arm64 with Codex CLI 0.157.0.
+It started a separate foreground `codex app-server --stdio`, read the real process table, and verified that a legacy lock naming that live server is stale without a Desktop session lease.
+The portable lease and competing-session regression is `tests/fm-session-lock-ancestry.test.sh`.
+The current live refresh command and observed result were:
+
+```sh
+bash tests/fm-codex-app-server-lock-live.test.sh
+ok - Codex codex-cli 0.157.0: the real app-server is stale without a session lease
+```
+
+This guard proves the installed server's process shape and its legacy-lock classification.
+The portable regression proves Desktop lease acquisition, renewal through a foreground checkpoint and the Bash hook, foreign-session refusal, expiry, and a new generation on replacement under the same app-server pid.
+It proves a supervision host park that outlives the lease renews it from the park loop, so the host still owns the lock when the close arrives.
+It proves the host also renews the lease while an engine turn runs, and that a branch claim bound to a replaced session's generation is refused.
+It also proves a checkpoint reclaims a free lock after its own lease expired, after the shared app-server restarted, and over a pre-lease daemon lock.
+
 ## Cursor Agent CLI
 
 Cursor runs crewmate, scout, secondmate, and primary work; [`supervision.md`](supervision.md#cursor-primary-park-2026-08-13) owns the primary evidence.

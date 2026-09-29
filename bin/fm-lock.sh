@@ -8,8 +8,11 @@
 # which is dead moments after it is written. For a Claude session that proves a
 # trusted session id the anchor is CLAUDE_PID, the model-loop process, so a
 # shared transient daemon or a front-end that outlives the session never keeps
-# a dead session's lock alive. Line 1 keeps its whole-line pid format because
-# every other reader takes the first line as the pid.
+# a dead session's lock alive. Codex Desktop has no per-thread process: line 1
+# carries its shared app-server pid only as a compatibility marker, while
+# state/.lock-desktop-lease binds that marker to a session id, generation, and expiry. A
+# daemon pid without a matching fresh lease is stale. Line 1 keeps its
+# whole-line pid format because every other reader takes the first line as pid.
 #
 # The trusted id itself is recorded beside the lock in state/.lock-session, a
 # sidecar written only here and only under the claim lock: refreshed on every
@@ -43,17 +46,29 @@ mkdir -p "$STATE" 2>/dev/null || {
 # Stop auto-arm applies the exact same identity contract.
 # shellcheck source=bin/fm-session-lock-lib.sh
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
+DESKTOP_ID=$(fm_codex_desktop_session_id 2>/dev/null || true)
 
 if [ "${1:-}" = "status" ]; then
   fm_session_lock_inspect "$STATE"
   case "$FM_LOCK_INSPECT_STATE" in
     free) echo "lock: free" ;;
     unreadable) echo "lock: unreadable" ;;
-    held) echo "lock: held by live harness pid $FM_LOCK_INSPECT_PID" ;;
+    held)
+      if [ "$FM_LOCK_INSPECT_KIND" = desktop ]; then
+        echo "lock: held by live Codex Desktop session (lease; app-server pid $FM_LOCK_INSPECT_PID)"
+      else
+        echo "lock: held by live harness pid $FM_LOCK_INSPECT_PID"
+      fi
+      ;;
     *) echo "lock: stale (pid $FM_LOCK_INSPECT_PID dead or not a harness)" ;;
   esac
   exit 0
 fi
+
+case "${1:-} ${2:-}" in
+  ' '|'renew '|'renew --if-owned') ;;
+  *) echo "error: unknown lock action: $*" >&2; exit 2 ;;
+esac
 
 me=$(fm_session_lock_anchor_pid) || { echo "error: cannot locate harness process in ancestry" >&2; exit 1; }
 probe=$(mktemp "$STATE/.lock-write.XXXXXX" 2>/dev/null) || {
@@ -149,6 +164,47 @@ publish_lock_session_or_die() {
   exit 1
 }
 
+# Only the live Desktop session renews this lease. Publication is atomic and
+# bound to the lock's current line-1 marker, so an interrupted takeover cannot
+# make an older lease vouch for a newly published lock.
+publish_desktop_lease() {  # <recorded-pid> <new|refresh>
+  local lease="$STATE/.lock-desktop-lease" now expiry generation tmp
+  if [ -z "$DESKTOP_ID" ]; then
+    [ ! -e "$lease" ] && [ ! -L "$lease" ] && return 0
+    rm -f "$lease"
+    return
+  fi
+  now=$(date +%s) || return 1
+  expiry=$((now + FM_CODEX_DESKTOP_LEASE_SECONDS))
+  generation=
+  if [ "$2" = refresh ] \
+    && fm_codex_desktop_lease_matches "$STATE" "$1" \
+    && [ "$FM_CODEX_LEASE_ID" = "$DESKTOP_ID" ]; then
+    generation=$FM_CODEX_LEASE_GENERATION
+  fi
+  [ -n "$generation" ] || generation="$now.$$.$RANDOM"
+  tmp=$(mktemp "$STATE/.lock-desktop-lease.XXXXXX" 2>/dev/null) || return 1
+  if ! { printf 'v1 %s %s %s %s\n' "$1" "$DESKTOP_ID" "$generation" "$expiry" > "$tmp" \
+    && mv -f "$tmp" "$lease"; } 2>/dev/null; then
+    rm -f "$tmp" 2>/dev/null
+    return 1
+  fi
+}
+
+publish_desktop_lease_or_die() {  # <recorded-pid> <new|refresh>
+  publish_desktop_lease "$1" "$2" && return 0
+  echo "error: cannot record Codex Desktop session lease; operate read-only until resolved" >&2
+  exit 1
+}
+
+current_owns_lock() {  # <recorded-pid>
+  if [ -n "$DESKTOP_ID" ]; then
+    fm_session_lock_owned_by_self "$STATE"
+  else
+    [ "$1" = "$me" ] || fm_session_lock_owned_by_self "$STATE"
+  fi
+}
+
 # This session already holds the lock, recorded as pid $1. Line 1 stays exactly
 # as recorded while that pid is alive; only the sidecar is refreshed, under the
 # claim lock, so a /clear re-key inside the same process replaces the old id.
@@ -166,8 +222,9 @@ confirm_own_lock() {  # <recorded-pid>
     waited=1
   fi
   recorded=$(cat "$LOCK" 2>/dev/null || true)
-  if [ "$recorded" = "$me" ] || fm_session_lock_owned_by_self "$STATE"; then
+  if current_owns_lock "$recorded"; then
     publish_lock_session_or_die
+    publish_desktop_lease_or_die "$recorded" refresh
     commit_lock_session
     release_claim_lock
     echo "lock acquired: harness pid $recorded"
@@ -178,6 +235,29 @@ confirm_own_lock() {  # <recorded-pid>
   fi
   return 1
 }
+
+# A foreground Codex checkpoint uses renew to keep a Desktop lease fresh. When
+# the recorded owner is no longer live (expired lease, restarted app-server, or
+# a pre-lease lock) renew takes the ordinary stale-owner claim path below, which
+# still refuses a foreign live owner. Hooks pass --if-owned and never claim.
+if [ "${1:-}" = renew ]; then
+  if [ -f "$LOCK" ] && [ ! -L "$LOCK" ] && fm_session_lock_owned_by_self "$STATE"; then
+    fm_lock_acquire_wait "$CLAIM_LOCK"
+    CLAIM_LOCK_HELD=1
+    recorded=$(cat "$LOCK" 2>/dev/null || true)
+    if fm_session_lock_owned_by_self "$STATE"; then
+      publish_desktop_lease_or_die "$recorded" refresh
+      release_claim_lock
+      echo "lock renewed: session marker $recorded"
+      exit 0
+    fi
+    release_claim_lock
+  fi
+  if [ "${2:-}" = --if-owned ]; then
+    echo "error: this session does not own the fleet lock" >&2
+    exit 1
+  fi
+fi
 
 refuse_live_owner() {  # <recorded-pid>
   local recorded
@@ -191,11 +271,11 @@ refuse_live_owner() {  # <recorded-pid>
 
 if [ -f "$LOCK" ] && [ ! -L "$LOCK" ]; then
   old=$(cat "$LOCK" 2>/dev/null || true)
-  if [ "$old" = "$me" ] || fm_session_lock_owned_by_self "$STATE"; then
+  if current_owns_lock "$old"; then
     confirm_own_lock "$old"
     old=$(cat "$LOCK" 2>/dev/null || true)
   fi
-  if fm_harness_pid_alive "$old"; then
+  if fm_session_lock_owner_live "$STATE" "$old"; then
     refuse_live_owner "$old"
   fi
 fi
@@ -219,10 +299,12 @@ if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
     echo "error: session lock is unreadable; operate read-only until resolved" >&2
     exit 1
   }
-  if [ "$old" != "$me" ] && fm_harness_pid_alive "$old"; then
+  if { [ "$old" != "$me" ] || [ -n "$DESKTOP_ID" ]; } \
+    && fm_session_lock_owner_live "$STATE" "$old"; then
     fm_session_lock_owned_by_self "$STATE" && confirm_own_lock "$old"
     old=$(cat "$LOCK" 2>/dev/null || true)
-    if [ "$old" != "$me" ] && fm_harness_pid_alive "$old"; then
+    if { [ "$old" != "$me" ] || [ -n "$DESKTOP_ID" ]; } \
+      && fm_session_lock_owner_live "$STATE" "$old"; then
       refuse_live_owner "$old"
     fi
   fi
@@ -270,6 +352,7 @@ if [ ! -f "$LOCK" ] || [ -L "$LOCK" ] || [ "$written" != "$me" ]; then
   echo "error: session lock ownership verification failed; operate read-only until resolved" >&2
   exit 1
 fi
+publish_desktop_lease_or_die "$me" new
 commit_lock_session
 release_claim_lock
 echo "lock acquired: harness pid $me"

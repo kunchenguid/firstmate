@@ -62,6 +62,15 @@ case "$SECONDS_ARG" in
   0) echo "error: --seconds must be greater than zero" >&2; exit 2 ;;
 esac
 
+# A Desktop session has no process whose death releases its fleet lock. This
+# foreground call is issued by the live Codex thread on every supervision
+# cycle, so it renews that thread's lease before starting a bounded wait.
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
+if fm_codex_desktop_session_id >/dev/null; then
+  "$SCRIPT_DIR/fm-lock.sh" renew >/dev/null || exit 1
+fi
+
 OUT=$(mktemp "${TMPDIR:-/tmp}/fm-watch-checkpoint.out.XXXXXX") || exit 1
 ERR=$(mktemp "${TMPDIR:-/tmp}/fm-watch-checkpoint.err.XXXXXX") || {
   rm -f "$OUT"

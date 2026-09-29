@@ -94,6 +94,9 @@
 #              persistent supervisor's environment cannot chain its unrelated
 #              routed tasks into one trace.
 
+# shellcheck source=/dev/null # Analyzed separately as a canonical lint root.
+. "$(dirname -- "${BASH_SOURCE[0]}")/fm-session-lock-lib.sh"
+
 # Strict W3C traceparent validator: version 00, 32-hex trace id, 16-hex span id,
 # 2-hex flags, with neither id all-zero. The regex lives in a variable because
 # bash 3.2 only honors an unquoted right-hand side for =~.
@@ -142,7 +145,7 @@ fm_trace_context_enabled() {  # <config-dir>
 # token makes a prior session's record inactive even if publication cannot
 # replace or remove that stale file.
 fm_trace_context_session_lock() {  # <effective-state-file>
-  local effective_file=$1 state_dir lock_pid
+  local effective_file=$1 state_dir lock_pid identity
   state_dir=${effective_file%/*}
   [ "$state_dir" = "$effective_file" ] && state_dir=.
   # Grouped so the stderr redirect is in place BEFORE the input redirect is
@@ -153,7 +156,8 @@ fm_trace_context_session_lock() {  # <effective-state-file>
     '' | *[!0-9]*) return 1 ;;
   esac
   [ "$lock_pid" -gt 1 ] || return 1
-  printf '%s' "$lock_pid"
+  identity=$(fm_session_lock_generation "$state_dir") || return 1
+  printf '%s' "$identity"
 }
 
 fm_trace_context_session_start() {  # <config-dir> <effective-state-file>

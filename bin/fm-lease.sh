@@ -13,7 +13,9 @@
 #       Take the lease for the calling actor. Idempotent for the holder (the
 #       claim refreshes its own lease). Refuses with exit 6 while the other
 #       actor holds a live lease. A stale lease (dead pid, or a torn record)
-#       is cleared and re-claimed.
+#       is cleared and re-claimed. With FM_LEASE_HOLDER_GENERATION set, the
+#       claim is refused unless that is still the live Desktop lock generation;
+#       a branch claim under a live Desktop lock must set it.
 #   fm-lease.sh release <task> [--actor main|branch]
 #       Drop the calling actor's lease. Releasing a lease the actor does not
 #       hold is a silent no-op, so a retry after a partial failure is safe.
@@ -127,8 +129,25 @@ case "$CMD" in
       HOLDER_PID=$(head -n 1 "$STATE/.lock" 2>/dev/null | tr -cd '0-9' || true)
     fi
     [ -n "$HOLDER_PID" ] || HOLDER_PID=$$
+    HOLDER_GENERATION=
+    if fm_codex_desktop_lease_live "$STATE" "$HOLDER_PID"; then
+      HOLDER_GENERATION=$FM_CODEX_LEASE_GENERATION
+    fi
+    # A caller bound to one Desktop lock generation (the supervision host's
+    # engine) never claims under a later session sharing the same app-server.
+    # A branch under a Desktop holder must carry that binding, since nothing
+    # else proves which session's host started it.
+    if { [ -n "${FM_LEASE_HOLDER_GENERATION:-}" ] || { [ "$ACTOR" = branch ] && [ -n "$HOLDER_GENERATION" ]; }; } \
+      && [ "$HOLDER_GENERATION" != "${FM_LEASE_HOLDER_GENERATION:-}" ]; then
+      echo "error: claim refused - the session lock generation this $ACTOR actor served has ended (state/.lock-desktop-lease)" >&2
+      exit "$FM_LEASE_REFUSE_EXIT"
+    fi
     TMP=$(mktemp "$STATE/.fm-lease-tmp.XXXXXX")
-    printf '%s\t%s\t%s\n' "$ACTOR" "$HOLDER_PID" "$(date +%s)" > "$TMP"
+    if [ -n "$HOLDER_GENERATION" ]; then
+      printf '%s\t%s\t%s\t%s\n' "$ACTOR" "$HOLDER_PID" "$(date +%s)" "$HOLDER_GENERATION" > "$TMP"
+    else
+      printf '%s\t%s\t%s\n' "$ACTOR" "$HOLDER_PID" "$(date +%s)" > "$TMP"
+    fi
     if [ -e "$LEASE" ]; then
       # Same-actor refresh, or a stale/torn record: replace atomically.
       mv -f -- "$TMP" "$LEASE"
@@ -140,7 +159,11 @@ case "$CMD" in
         exit "$FM_LEASE_REFUSE_EXIT"
       fi
       TMP=$(mktemp "$STATE/.fm-lease-tmp.XXXXXX")
-      printf '%s\t%s\t%s\n' "$ACTOR" "$HOLDER_PID" "$(date +%s)" > "$TMP"
+      if [ -n "$HOLDER_GENERATION" ]; then
+        printf '%s\t%s\t%s\t%s\n' "$ACTOR" "$HOLDER_PID" "$(date +%s)" "$HOLDER_GENERATION" > "$TMP"
+      else
+        printf '%s\t%s\t%s\n' "$ACTOR" "$HOLDER_PID" "$(date +%s)" > "$TMP"
+      fi
       mv -f -- "$TMP" "$LEASE"
     else
       rm -f -- "$TMP"

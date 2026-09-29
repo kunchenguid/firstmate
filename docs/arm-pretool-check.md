@@ -17,6 +17,7 @@ This policy is not a post-arm liveness guarantee.
 
 The classifier never executes, sources, evaluates, or expands any part of the submitted command.
 It tokenizes the bytes and classifies lexical execution positions only.
+Inside a Codex Desktop thread the checker also renews that thread's fleet-lock lease through `bin/fm-lock.sh renew --if-owned`; that touch is silent and never changes the policy decision.
 
 ## Transport and fail-open behavior
 

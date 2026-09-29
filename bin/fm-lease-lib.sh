@@ -15,7 +15,8 @@
 # while it exists.
 #
 # CONTRACT.
-#   - Lease file: $STATE/.lease-<task>, one line "<actor>\t<pid>\t<epoch>".
+#   - Lease file: $STATE/.lease-<task>, one line "<actor>\t<pid>\t<epoch>"
+#     plus a fourth Desktop lock generation field when the holder is shared.
 #     Written atomically (temp + ln for claim, temp + mv for a same-actor
 #     refresh), with inspection and mutation serialized by the home-local
 #     lease-command lock; leases never coordinate across firstmate homes.
@@ -26,13 +27,13 @@
 #     supervision host's engine environment), not by agent memory. Any other
 #     value is refused loudly - an unknown actor is a wiring bug, not a third
 #     role.
-#   - Staleness: the recorded pid is the long-lived supervising process (the
-#     session-lock holder, or FM_LEASE_HOLDER_PID - see bin/fm-lease.sh), so a
-#     dead recorded pid means the supervising session died; the lease is
-#     cleared at the next claim, guard, or sweep. Liveness is the pure record
-#     test, identical in every calling context: the recorded pid is alive and
-#     IS the current state/.lock holder. So a lease left by an exited session
-#     goes stale for every reader, whichever harness now owns the home, and an
+#   - Staleness: the recorded pid is the supervising session-lock marker (or
+#     FM_LEASE_HOLDER_PID - see bin/fm-lease.sh). For a Codex Desktop holder,
+#     the fourth field binds the lease to the current Desktop lock generation;
+#     elsewhere the pid must be alive. A stale lease is cleared at the next
+#     claim, guard, or sweep. The recorded pid must also be the current
+#     state/.lock marker. So a lease left by an exited session goes stale for
+#     every reader, whichever harness now owns the home, and an
 #     unmarked main honors a live branch lease exactly as a Pi main does. The
 #     one residual is a recorded pid recycled onto the next session-lock holder
 #     itself; the host that owns a branch conversation releases that actor's
@@ -103,6 +104,8 @@
 FM_LEASE_REFUSE_EXIT=6
 FM_LEASE_LIB_DIR="$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd "${d:-/}" && pwd)"
 FM_LEASE_GUARD_LOCK=
+# shellcheck source=/dev/null # Analyzed separately as a canonical lint root.
+. "$FM_LEASE_LIB_DIR/fm-session-lock-lib.sh"
 
 fm_lease_lock_helpers() {
   command -v fm_lock_acquire_wait >/dev/null 2>&1 && return 0
@@ -141,7 +144,7 @@ fm_lease_path() {
 }
 
 # fm_lease_read <task>: read the lease into FM_LEASE_ACTOR/FM_LEASE_PID/
-# FM_LEASE_EPOCH. Returns 1 when no lease file exists. A malformed lease
+# FM_LEASE_EPOCH/FM_LEASE_GENERATION. Returns 1 when no lease file exists. A malformed lease
 # (unreadable actor or pid) reads as actor "" so callers treat it as stale
 # rather than blocking forever on a torn record.
 fm_lease_read() {
@@ -150,12 +153,14 @@ fm_lease_read() {
   FM_LEASE_ACTOR=
   FM_LEASE_PID=
   FM_LEASE_EPOCH=
+  FM_LEASE_GENERATION=
   [ -e "$file" ] || return 1
   IFS= read -r line < "$file" 2>/dev/null || line=
   FM_LEASE_ACTOR=$(printf '%s' "$line" | cut -f1)
   FM_LEASE_PID=$(printf '%s' "$line" | cut -f2)
   # shellcheck disable=SC2034 # Consumed by sourcing callers (bin/fm-lease.sh check).
   FM_LEASE_EPOCH=$(printf '%s' "$line" | cut -f3)
+  FM_LEASE_GENERATION=$(printf '%s' "$line" | cut -f4)
   case "$FM_LEASE_ACTOR" in
     main|branch) ;;
     *) FM_LEASE_ACTOR= ;;
@@ -166,18 +171,24 @@ fm_lease_read() {
   return 0
 }
 
-# fm_lease_live <task>: 0 iff a well-formed lease exists, its recorded pid is
-# alive, and that pid IS the current session-lock holder (the staleness
-# contract above). The calling context never enters the verdict.
+# fm_lease_live <task>: 0 iff a well-formed lease belongs to the current
+# session-lock holder and its liveness proof matches the contract above.
+# The calling context never enters the verdict.
 fm_lease_live() {
   local lock_pid
   fm_lease_read "$1" || return 1
   [ -n "$FM_LEASE_ACTOR" ] || return 1
   [ -n "$FM_LEASE_PID" ] || return 1
-  kill -0 "$FM_LEASE_PID" 2>/dev/null || return 1
   lock_pid=$(head -n 1 "$STATE/.lock" 2>/dev/null || true)
   case "$lock_pid" in ''|0|1|*[!0-9]*) return 1 ;; esac
-  [ "$FM_LEASE_PID" = "$lock_pid" ]
+  [ "$FM_LEASE_PID" = "$lock_pid" ] || return 1
+  if fm_codex_desktop_lease_matches "$STATE" "$lock_pid"; then
+    fm_codex_desktop_lease_live "$STATE" "$lock_pid" || return 1
+    [ -n "$FM_LEASE_GENERATION" ] \
+      && [ "$FM_LEASE_GENERATION" = "$FM_CODEX_LEASE_GENERATION" ]
+  else
+    [ -z "$FM_LEASE_GENERATION" ] && kill -0 "$FM_LEASE_PID" 2>/dev/null
+  fi
 }
 
 # fm_lease_clear_stale <task>: remove the lease file when it exists but is not
