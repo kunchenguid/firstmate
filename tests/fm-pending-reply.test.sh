@@ -808,7 +808,10 @@ test_undelivered_records_are_scan_immutable() {
       || fail "undelivered wrong-home check should be inert"
     fm_pending_reply_tick_one "$state" "$corr" busy "$sm_home" \
       || fail "undelivered direct tick should be inert"
+    # Runtime overrides called indirectly by the pending-reply tick.
+    # shellcheck disable=SC2329
     fm_backend_busy_state() { fail "undelivered watcher tick must not probe the backend"; }
+    # shellcheck disable=SC2329
     fm_backend_capture() { fail "undelivered watcher tick must not capture the backend"; }
     fm_pending_reply_tick "$state" || fail "undelivered watcher tick should succeed"
     after=$(cat "$rec")
