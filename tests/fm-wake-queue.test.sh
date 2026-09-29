@@ -255,6 +255,34 @@ test_drain_suppresses_terminal_bot_notice_for_merged_task() {
   pass "merged terminal bot notices collapse to one summary and remain acknowledgeable"
 }
 
+test_drain_keeps_terminal_notice_loud_without_proof() {
+  local dir state out
+  dir=$(make_case terminal-notice-unproven)
+  state="$dir/state"
+  out="$dir/drain.out"
+  printf 'done: PR merged\nworking: fix nightly\n' > "$state/task-resumed.status"
+  printf '%s\n' fm-pr-poll-merge-notified-v1 github github.com o/r 7 \
+    > "$state/task-resumed.pr-poll-merge-notified"
+  append_wake "$state" check "$state/task-resumed.check.sh" \
+    'check: task-resumed.check.sh: scheduled workflow failed' \
+    || fail "resumed task notice append failed"
+  printf 'done: PR merged\n' > "$state/task-badmark.status"
+  printf 'stale leftover\n' > "$state/task-badmark.pr-poll-merge-notified"
+  append_wake "$state" check "$state/task-badmark.check.sh" \
+    'check: task-badmark.check.sh: scheduled workflow failed' \
+    || fail "malformed marker notice append failed"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2>/dev/null || fail "unproven terminal notice drain failed"
+  grep -F 'task-resumed.check.sh: scheduled workflow failed' "$out" >/dev/null \
+    || fail "a notice for a task resumed after done was suppressed"
+  grep -F 'task-badmark.check.sh: scheduled workflow failed' "$out" >/dev/null \
+    || fail "a malformed merge marker suppressed a notice"
+  if grep -F 'WAKE TERMINAL NOTICES SUPPRESSED' "$out" >/dev/null; then
+    fail "unproven terminal notices were counted as suppressed"
+  fi
+  pass "terminal notices stay loud when current status is nonterminal or the merge receipt is invalid"
+}
+
 # Run one watcher leg of the foreign-stall case at fake time <now>. Each leg
 # waits on what the watcher observably did, never on a wall-clock budget: a
 # loaded machine can take seconds to reach the first poll, and a leg cut off
@@ -3428,6 +3456,7 @@ test_check_output_is_queued
 test_atomic_double_drain
 test_drain_dedupes_obvious_duplicates
 test_drain_suppresses_terminal_bot_notice_for_merged_task
+test_drain_keeps_terminal_notice_loud_without_proof
 test_drain_asserts_watcher_liveness
 test_structural_signal_enrichment_preserves_raw_rows
 test_enrichment_preserves_all_unread_lines_and_status_file_failures

@@ -48,8 +48,7 @@ ACK_REMOVED=0
 PRESENTED_MAX=0
 ACK_FINGERPRINTS=
 ACK_NOTICE_FINGERPRINTS=
-OPEN_PAGE_NEXT=
-OPEN_PAGE_FP=
+OPEN_PAGE_CURSOR=
 SUPPRESSED_TERMINAL_SEQS=
 SUPPRESSED_TERMINAL_COUNT=0
 PRESENTATION_LOCK_TIMEOUT=${FM_STATUS_PRESENTATION_LOCK_TIMEOUT:-10}
@@ -471,40 +470,47 @@ EOF
 # common case.
 print_open_decisions_section() {
   local snapshot=${1:-} open task key verb note line item_bytes=220 global_bytes=4000
-  local output='' used=0 shown=0 total=0 bytes page_file page_data page_fp page_start next_start
-  local -a lines=()
+  local output='' used=0 shown=0 total=0 bytes page_file page_data page_start
+  local saved_task='' saved_key=''
+  local -a lines=() idents=()
 
+  OPEN_PAGE_CURSOR=
   if [ -n "$snapshot" ]; then
     open=$(scan_open_decisions_snapshot "$STATE" "$snapshot") || return 1
   else
     open=$(scan_open_decisions_incremental "$STATE") || return 1
   fi
-  [ -n "$open" ] || {
-    OPEN_PAGE_NEXT=0
-    rm -f -- "$STATE/.open-decisions-page" 2>/dev/null || true
-    return 0
-  }
+  [ -n "$open" ] || return 0
+  open=$(printf '%s\n' "$open" | LC_ALL=C sort -t "$(printf '\t')" -k1,1 -k2,2) || return 1
 
   # OPEN DECISIONS is a fleet-wide current set rather than an append-only
-  # stream. Keep a tiny durable page cursor so a large fleet is walked over
-  # successive drains instead of advancing the status cursor past omitted rows.
-  page_fp=$(printf '%s\n' "$open" | cksum | awk '{print $1 ":" $2}') || return 1
-  OPEN_PAGE_FP=$page_fp
+  # stream. Keep a tiny durable cursor naming the last task/key shown so a large
+  # fleet is walked over successive drains in task/key order, even while other
+  # decisions open or close between drains.
   page_file="$STATE/.open-decisions-page"
-  page_start=0
   if [ -f "$page_file" ] && [ ! -L "$page_file" ] \
     && page_data=$(LC_ALL=C command cat "$page_file" 2>/dev/null); then
-    while IFS=$(printf '\t') read -r version saved_fp saved_start extra; do
-      [ "$version" = v1 ] && [ -z "$extra" ] || continue
-      case "$saved_start" in ''|*[!0-9]*) continue ;; esac
-      [ "$saved_fp" = "$page_fp" ] && page_start=$saved_start
+    while IFS=$(printf '\t') read -r version task key extra; do
+      [ "$version" = v2 ] && [ -n "$task" ] && [ -n "$key" ] && [ -z "$extra" ] || continue
+      saved_task=$task
+      saved_key=$key
     done <<EOF
 $page_data
 EOF
   fi
+  page_start=0
+  if [ -n "$saved_task" ]; then
+    page_start=$(printf '%s\n' "$open" | LC_ALL=C awk -F '\t' -v t="$saved_task" -v k="$saved_key" '
+      $1 == "" { next }
+      { n++ }
+      ($1 "") > (t "") || (($1 "") == (t "") && ($2 "") > (k "")) { print n - 1; found=1; exit }
+      END { if (!found) print 0 }
+    ') || return 1
+  fi
 
   while IFS=$(printf '\t') read -r task key verb note; do
     [ -n "$task" ] || continue
+    idents+=("$task"$'\t'"$key")
     line="$task"
     [ "$key" = default ] || line="$line [key=$key]"
     line="$line $verb: $note"
@@ -531,13 +537,13 @@ EOF
     shown=$((shown + 1))
   done
   [ "$shown" -gt 0 ] || return 1
-  next_start=$((page_start + shown))
-  [ "$next_start" -lt "$total" ] || next_start=0
-  OPEN_PAGE_NEXT=$next_start
+  if [ $((page_start + shown)) -lt "$total" ]; then
+    OPEN_PAGE_CURSOR=${idents[page_start + shown - 1]}
+  fi
   printf 'OPEN DECISIONS (still open, folded from the durable status logs - page %d-%d of %d):\n' \
     "$((page_start + 1))" "$((page_start + shown))" "$total" || return 1
   printf '%s' "$output" || return 1
-  if [ "$next_start" -ne 0 ]; then
+  if [ -n "$OPEN_PAGE_CURSOR" ]; then
     printf 'OPEN DECISIONS: page continues on the next drain.\n' || return 1
   fi
   printf "OPEN DECISIONS: close one by answering it: bin/fm-send.sh <task> --resolve-key <key> '<answer>'\n" || return 1
@@ -545,12 +551,12 @@ EOF
 
 commit_open_decisions_page() {
   local page_file="$STATE/.open-decisions-page" tmp
-  if [ "${OPEN_PAGE_NEXT:-0}" -eq 0 ]; then
+  if [ -z "${OPEN_PAGE_CURSOR:-}" ]; then
     rm -f -- "$page_file" 2>/dev/null || true
     return 0
   fi
   tmp=$(mktemp "$STATE/.open-decisions-page.tmp.XXXXXX") || return 1
-  printf 'v1\t%s\t%s\n' "$OPEN_PAGE_FP" "$OPEN_PAGE_NEXT" > "$tmp" || { rm -f "$tmp"; return 1; }
+  printf 'v2\t%s\n' "$OPEN_PAGE_CURSOR" > "$tmp" || { rm -f "$tmp"; return 1; }
   mv -f -- "$tmp" "$page_file"
 }
 
@@ -1112,17 +1118,14 @@ while IFS=$(printf '\t') read -r _epoch seq kind key payload; do
     *) continue ;;
   esac
   printf '%s' "$payload" | grep -Eiq '(scheduled[[:space:]_-]*workflow.*(fail|red)|bot.*approv|approv.*bot|approval.*(already|merged)|approved.*(already|merged))' || continue
-  [ -e "$STATE/$task.pr-poll-merge-notified" ] || continue
+  marker="$STATE/$task.pr-poll-merge-notified"
+  [ -f "$marker" ] && [ ! -L "$marker" ] || continue
+  marker_version=
+  IFS= read -r marker_version < "$marker" 2>/dev/null || continue
+  [ "$marker_version" = fm-pr-poll-merge-notified-v1 ] || continue
   [ -f "$STATE/$task.status" ] && [ ! -L "$STATE/$task.status" ] || continue
-  terminal=$(awk '
-    $0 ~ /^(done|failed)([[:space:]]|\[|:)/ {
-      sub(/[[:space:]]*\[key=[^]]+\]/, "")
-      sub(/[[:space:]]*:.*/, "")
-      last=$1
-    }
-    END { print last }
-  ' "$STATE/$task.status" 2>/dev/null)
-  [ -n "$terminal" ] || continue
+  last_status=$(awk 'NF { last=$0 } END { print last }' "$STATE/$task.status" 2>/dev/null) || continue
+  case "$(status_line_verb "$last_status")" in done|failed) ;; *) continue ;; esac
   SUPPRESSED_TERMINAL_SEQS="${SUPPRESSED_TERMINAL_SEQS}${seq}"$'\n'
   SUPPRESSED_TERMINAL_COUNT=$((SUPPRESSED_TERMINAL_COUNT + 1))
 done <<EOF
