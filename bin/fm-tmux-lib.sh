@@ -175,17 +175,6 @@ fm_tmux_composer_state() {  # <target> [cursor-row captured-screen] -> empty|pen
   printf '%s' "$verdict"
 }
 
-# fm_tmux_composer_input_mode: thin tmux capture adapter over pi-vim's shared
-# structural mode parser. This does not prove emptiness or agent identity.
-fm_tmux_composer_input_mode() {  # <target> -> insert|normal|ambiguous|unknown
-  local target=$1 cy pane
-  cy=$(fm_tmux_composer_cursor_row "$target") || return 1
-  case "$cy" in ''|*[!0-9]*) return 1 ;; esac
-  pane=$(fm_tmux_composer_capture "$target") || return 1
-  [ -n "$pane" ] || return 1
-  fm_composer_pi_input_mode "$pane" "$cy"
-}
-
 fm_tmux_composer_input_snapshot() {  # <target> -> "<mode>\t<state>"
   local target=$1 cy pane mode state
   cy=$(fm_tmux_composer_cursor_row "$target") || return 1
@@ -335,11 +324,13 @@ fm_tmux_prepare_text_input() {  # <target> <settle> [require-empty]
       fi
       ;;
     ambiguous)
+      [ "$require_empty" = require-empty ] || return 0
       printf 'error: refusing ambiguous pi-vim input mode\n' >&2
       return 1
       ;;
     insert)
       if [ "$state" != empty ]; then
+        [ "$require_empty" = require-empty ] || return 0
         printf 'error: refusing pi-vim INSERT delivery with composer=%s\n' "$state" >&2
         return 1
       fi

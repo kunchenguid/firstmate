@@ -4436,6 +4436,29 @@ test_send_text_submit_pi_vim_plain_mode_refuses() {
   pass "fm_backend_herdr_send_text_submit: ambiguous plain Pi composers refuse lifecycle input"
 }
 
+test_send_text_submit_generic_pi_unproven_modes_still_submit() {
+  local name dir log resp fb out screen
+  for name in plain insert-pending; do
+    dir="$TMP_ROOT/submit-generic-pi-$name"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+    case "$name" in
+      plain) screen=$'transcript\n────────────────────────\n\n────────────────────────\n' ;;
+      insert-pending) screen=$'transcript\n────────────────────────\nkeep this draft\n────────────── INSERT\n' ;;
+    esac
+    printf '{"result":{"agent":{"agent":"pi","agent_status":"idle"}}}\n' > "$resp/1.out"
+    printf '%s' "$screen" > "$resp/2.out"
+    printf '{"result":{"agent":{"agent":"pi","agent_status":"idle"}}}\n' > "$resp/3.out"
+    printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/5.out"
+    printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/7.out"
+    fb=$(make_herdr_fakebin "$dir")
+    out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit lab:w1:p2 "typed steer" 1 0.01 0' "$ROOT" )
+    [ "$out" = empty ] || fail "generic $name Pi submission should succeed on Herdr, got '$out'"
+    assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''send-text'$'\x1f''w1:p2'$'\x1f''typed steer' \
+      "generic $name Pi preparation blocked typed text"
+  done
+  pass "fm_backend_herdr_send_text_submit: generic Pi composers retain typed-plane behavior"
+}
+
 test_send_text_submit_refuses_when_pi_identity_recheck_fails() {
   local dir log resp fb out
   dir="$TMP_ROOT/submit-pi-vim-identity-fail"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -6065,6 +6088,7 @@ test_send_text_submit_pi_vim_normal_enters_insert_before_text
 test_send_text_submit_pi_vim_pending_normal_preserves_text
 test_send_text_submit_pi_vim_insert_requires_fresh_empty_proof
 test_send_text_submit_pi_vim_plain_mode_refuses
+test_send_text_submit_generic_pi_unproven_modes_still_submit
 test_send_text_submit_refuses_when_pi_identity_recheck_fails
 test_send_text_submit_refuses_when_mode_capture_fails
 test_send_text_submit_refuses_unproven_unknown_preparation

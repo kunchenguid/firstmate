@@ -395,6 +395,31 @@ test_generic_unknown_composer_still_submits() {
   pass "fm_tmux_submit_core: generic Agy-style composers still submit"
 }
 
+test_generic_pi_unproven_modes_still_submit() {
+  local name dir fakebin composer sent vfile screen rc
+  for name in plain insert-pending; do
+    dir="$TMP_ROOT/generic-pi-$name"
+    fakebin=$(make_submit_mock "$dir")
+    composer="$dir/composer"
+    sent="$dir/sent.log"
+    vfile="$dir/verdict"
+    case "$name" in
+      plain) screen=$'────────────────────────\n\n────────────────────────\n' ;;
+      insert-pending) screen=$'────────────────────────\nkeep this draft\n────────────── INSERT\n' ;;
+    esac
+    printf '%s' "$screen" > "$composer"
+    : > "$sent"
+    rc=0
+    PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
+      fm_tmux_submit_core "win" "typed steer" 1 0.05 0.05 > "$vfile" 2>/dev/null || rc=$?
+    expect_code 0 "$rc" "generic $name Pi composer should retain submit behavior"
+    [ "$(cat "$vfile")" = empty ] || fail "generic $name Pi submit should finish empty"
+    [ "$(cat "$sent")" = $'literal:typed steer\nEnter' ] \
+      || fail "generic $name Pi composer received wrong input: $(cat "$sent")"
+  done
+  pass "fm_tmux_submit_core: generic Pi composers retain typed-plane behavior"
+}
+
 test_pi_vim_plain_mode_refuses_without_typing() {
   local dir fakebin composer sent vfile rc=0
   dir="$TMP_ROOT/pi-vim-plain"
@@ -405,7 +430,7 @@ test_pi_vim_plain_mode_refuses_without_typing() {
   printf '────────────────────────\n\n────────────────────────\n' > "$composer"
   : > "$sent"
   PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
-    fm_tmux_submit_core "win" ": lifecycle doorbell" 1 0.05 0.05 > "$vfile" 2>/dev/null || rc=$?
+    fm_tmux_submit_core "win" ": lifecycle doorbell" 1 0.05 0.05 "" require-empty > "$vfile" 2>/dev/null || rc=$?
   [ "$rc" -ne 0 ] || fail "plain Pi separators must refuse submission"
   [ "$(cat "$vfile")" = send-failed ] \
     || fail "plain Pi separator refusal should report send-failed"
@@ -517,5 +542,6 @@ test_pi_vim_insert_with_pending_text_refuses_without_typing
 test_nonmodal_empty_composer_still_submits
 test_unknown_preparation_refuses_without_typing
 test_generic_unknown_composer_still_submits
+test_generic_pi_unproven_modes_still_submit
 test_pi_vim_plain_mode_refuses_without_typing
 test_claude_busy_signature_uses_real_capture_shapes

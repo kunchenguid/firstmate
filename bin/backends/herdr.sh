@@ -3216,18 +3216,6 @@ fm_backend_herdr_composer_state() {  # <target> [caps captured-screen] -> empty|
   printf '%s' "$verdict"
 }
 
-fm_backend_herdr_composer_input_mode() {  # <target> -> insert|normal|ambiguous|unknown
-  local target=$1 cap
-  if cap=$(fm_backend_herdr_visible_capture_ansi "$target" 2>/dev/null) && [ -n "$cap" ]; then
-    :
-  elif cap=$(fm_backend_herdr_visible_capture "$target") && [ -n "$cap" ]; then
-    :
-  else
-    return 1
-  fi
-  fm_composer_pi_input_mode "$cap"
-}
-
 fm_backend_herdr_composer_input_snapshot() {  # <target> -> "<mode>\t<state>"
   local target=$1 cap caps mode state
   if cap=$(fm_backend_herdr_visible_capture_ansi "$target" 2>/dev/null) && [ -n "$cap" ]; then
@@ -3262,11 +3250,13 @@ fm_backend_herdr_prepare_text_input() {  # <target> <settle> [require-empty]
       fi
       ;;
     ambiguous)
+      [ "$require_empty" = require-empty ] || return 0
       printf 'error: refusing ambiguous pi-vim input mode\n' >&2
       return 1
       ;;
     insert)
       if [ "$state" != empty ]; then
+        [ "$require_empty" = require-empty ] || return 0
         printf 'error: refusing pi-vim INSERT delivery with composer=%s\n' "$state" >&2
         return 1
       fi
