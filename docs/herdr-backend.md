@@ -631,6 +631,8 @@ It hands the visible pane's ANSI viewport plus Herdr's capability facts to the f
 A blocked Pi is parked on an interactive prompt, so its blank composer region is a menu's and not a free composer's.
 That state defers instead of proving emptiness.
 A working Pi, pending middle row, missing identity, incomplete separator pair, or over-tall candidate remains unknown or pending.
+A pair whose opening rule carries an embedded title also defers: that geometry is claude's own composer border, and a human can type a row wearing it, while this path proves its region from identity and structure alone with no glyph row inside the pair to tell a rule from a draft.
+Dated measurement: docs/verification/runtime-backends.md "claude 2.1.259 title-bearing composer rule through Herdr".
 Identity stays a lazy second read, consulted only when a separator pair could change the verdict.
 
 ### Placeholder and ghost text
