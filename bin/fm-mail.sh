@@ -186,7 +186,7 @@ TURN="$STATE_DIR/.mail-turn"
 # Invoke the python engine with the resolved endpoints, cursor, and cap in the
 # environment so credentials never reach argv.
 run_py() {
-  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE_DIR" FM_MAIL_USER="$FM_MAIL_USER" FM_MAIL_PASS="$FM_MAIL_PASS" \
+  env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE_DIR" FM_MAIL_USER="$FM_MAIL_USER" FM_MAIL_PASS="$FM_MAIL_PASS" \
 
 
 
