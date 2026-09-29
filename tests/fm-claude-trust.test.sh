@@ -447,6 +447,66 @@ test_foreign_project_worktree_is_refused() {
   pass "fm-claude-trust.sh: refuses a worktree belonging to another project"
 }
 
+# A Treehouse pool serves separate clones of one origin, so a pooled slot
+# created from one clone is launched from another with a different common dir.
+# Both clones resolve to the same origin here, so the registration must succeed
+# - against the clone that actually owns the worktree, which is exactly the
+# path Claude Code's own git-root canonicalization collapses the worktree to.
+# The passed clone is never recorded: nothing the worker touches reads it.
+test_shared_pool_worktree_from_another_clone_of_the_same_origin_is_trusted_against_its_owner() {
+  local case_dir origin clone_a clone_b wt config store out
+  case_dir="$TMP_ROOT/shared-pool"
+  origin="$case_dir/origin.git"
+  clone_a="$case_dir/clone-a"
+  clone_b="$case_dir/clone-b"
+  wt="$case_dir/pool/slot/repo"
+  config="$case_dir/claude-config"
+  store="$config/.claude.json"
+  mkdir -p "$config"
+  fm_git_init_commit "$case_dir/seed"
+  git clone --quiet --bare "$case_dir/seed" "$origin"
+  git clone --quiet "file://$origin" "$clone_a"
+  git clone --quiet "file://$origin" "$clone_b"
+  git -C "$clone_a" worktree add --quiet -b wt-shared-pool "$wt"
+  out=$(run_trust "$config" "$wt" "$clone_b")
+  expect_code 0 $? "a pooled worktree owned by another clone of the same origin must be trusted: $out"
+  assert_contains "$out" "$clone_a" "the registration did not name the clone that actually owns the worktree"
+  assert_trusted "$store" "$wt" "the pooled worktree was not recorded as trusted"
+  assert_trust_only_no_import_consent "$store" "$clone_a" \
+    "the owning clone entry either lost trust or gained unearned import consent"
+  assert_not_trusted "$store" "$clone_b" "the passed clone was recorded although the worker never reads it for this worktree"
+  pass "fm-claude-trust.sh: a shared-pool worktree is trusted against the clone that owns it"
+}
+
+# The same mismatch with a genuinely foreign repository on the other side must
+# keep refusing: the origin comparison above is what separates a shared pool
+# from caller confusion, so both sides carry an origin here and they differ.
+test_shared_pool_worktree_of_a_foreign_origin_is_still_refused() {
+  local case_dir origin other_origin clone_a clone_b wt config out
+  case_dir="$TMP_ROOT/shared-pool-foreign"
+  origin="$case_dir/origin.git"
+  other_origin="$case_dir/other.git"
+  clone_a="$case_dir/clone-a"
+  clone_b="$case_dir/clone-b"
+  wt="$case_dir/pool/slot/repo"
+  config="$case_dir/claude-config"
+  mkdir -p "$config"
+  fm_git_init_commit "$case_dir/seed"
+  fm_git_init_commit "$case_dir/other-seed"
+  git clone --quiet --bare "$case_dir/seed" "$origin"
+  git clone --quiet --bare "$case_dir/other-seed" "$other_origin"
+  git clone --quiet "file://$origin" "$clone_a"
+  git clone --quiet "file://$origin" "$clone_b"
+  git -C "$clone_a" worktree add --quiet -b wt-shared-pool "$wt"
+  git -C "$clone_b" remote set-url origin "file://$other_origin"
+  out=$(run_trust "$config" "$wt" "$clone_b")
+  expect_code 1 $? "a worktree of a genuinely foreign origin must be refused: $out"
+  assert_contains "$out" "is not a worktree of project" "the refusal did not name the project mismatch"
+  assert_not_trusted "$config/.claude.json" "$wt" "a foreign origin's worktree was trusted"
+  assert_not_trusted "$config/.claude.json" "$clone_a" "the owning clone was recorded despite the refusal"
+  pass "fm-claude-trust.sh: a shared-pool-shaped worktree of a foreign origin is still refused"
+}
+
 test_worktree_subdirectory_is_refused() {
   local rec out sub
   rec=$(make_case subdir)
@@ -856,6 +916,8 @@ test_relative_config_dir_is_refused
 test_non_git_directory_is_refused
 test_missing_directory_is_refused
 test_foreign_project_worktree_is_refused
+test_shared_pool_worktree_from_another_clone_of_the_same_origin_is_trusted_against_its_owner
+test_shared_pool_worktree_of_a_foreign_origin_is_still_refused
 test_worktree_subdirectory_is_refused
 test_project_argument_that_is_itself_a_worktree_resolves_to_the_primary_checkout
 test_unrelated_store_content_is_preserved

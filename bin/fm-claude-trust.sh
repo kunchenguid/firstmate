@@ -86,9 +86,13 @@
 #
 # WORKTREE MODE. <worktree> must be a LINKED git worktree - its own git dir,
 # sharing <project>'s common dir - whose top level is exactly the resolved
-# argument. Git is the ground truth, so the argument is never trusted on its
-# own word: a primary checkout (git dir == common dir), a worktree of an
-# unrelated repo, a subdirectory of a worktree, a plain directory, and a home
+# argument. One Treehouse pool serves separate clones of one origin, so a
+# pooled slot created from another clone shares the origin but not the common
+# dir: when both sides resolve to the same origin the registration proceeds
+# against the worktree's true owning checkout instead of refusing. Git is the
+# ground truth, so the argument is never trusted on its own word: a primary
+# checkout (git dir == common dir), a worktree of a genuinely foreign repo, a
+# subdirectory of a worktree, a plain directory, and a home
 # directory are each refused. Refusal is a non-zero exit, never a warning and
 # never a silent skip. When <project> is itself a linked worktree (a
 # secondmate home spawned from, rather than as, the primary checkout),
@@ -244,6 +248,46 @@ common_dir_of() {
   (cd -P -- "$dir" && real_dir "$common")
 }
 
+# The verified primary checkout owning a common dir, or empty. Its parent
+# directory in the standard non-bare, non-GIT_DIR-overridden layout, verified
+# never assumed: the candidate's own resolved git dir must equal that common
+# dir, the same primary-checkout definition used throughout.
+primary_checkout_of() {
+  local common=$1 canon canon_git
+  canon=$(real_dir "$(dirname -- "$common")") || return 1
+  [ -n "$canon" ] || return 1
+  canon_git=$(git -C "$canon" rev-parse --absolute-git-dir 2>/dev/null) || return 1
+  canon_git=$(real_dir "${canon_git:-}") || return 1
+  [ -n "$canon_git" ] && [ "$canon_git" = "$common" ] || return 1
+  printf '%s\n' "$canon"
+}
+
+# The repository identity shared by separate clones of one origin: the resolved
+# remote origin URL, normalized the same way bin/fm-wake-lib.sh's
+# fm_treehouse_project_lock_path derives the lock identity that lets separate
+# clones of one origin share a single Treehouse pool. Prints nothing when the
+# checkout names no origin: without one, two different checkouts cannot be
+# proven to be one repository, so the caller refuses.
+repo_identity_of() {
+  local dir=$1 origin
+  origin=$(git -C "$dir" remote get-url origin 2>/dev/null || true)
+  [ -n "$origin" ] || return 1
+  case "$origin" in
+    /*)
+      [ -d "$origin" ] || return 1
+      origin=$(real_dir "$origin") || return 1
+      [ -n "$origin" ] || return 1
+      ;;
+    *://*|*:* ) ;;
+    *)
+      [ -d "$dir/$origin" ] || return 1
+      origin=$(real_dir "$dir/$origin") || return 1
+      [ -n "$origin" ] || return 1
+      ;;
+  esac
+  printf '%s\n' "$origin"
+}
+
 TARGET_REAL=$(real_dir "$TARGET_ARG") || true
 [ -n "$TARGET_REAL" ] || refuse "$SCOPE_NOUN '$TARGET_ARG' is not an accessible directory"
 if [ "$MODE" = worktree ]; then
@@ -298,7 +342,26 @@ if [ "$MODE" = worktree ]; then
 
   PROJ_COMMON=$(common_dir_of "$PROJ_REAL") || true
   [ -n "$PROJ_COMMON" ] || refuse "project '$PROJ_REAL' is not inside a git repository"
-  [ "$WT_COMMON" = "$PROJ_COMMON" ] || refuse "'$TARGET_REAL' is not a worktree of project '$PROJ_REAL'"
+  if [ "$WT_COMMON" != "$PROJ_COMMON" ]; then
+    # A Treehouse pool is shared by separate clones of one origin, so a pooled
+    # slot created from one clone is launched from another with a different
+    # common dir, and the equality above would refuse it. When the worktree's
+    # true owning checkout and the passed project are provably one repository
+    # - the same resolved origin on both sides - the registration proceeds
+    # against the clone that actually owns the worktree (its real common dir's
+    # primary checkout, from primary_checkout_of above), because that is
+    # exactly the path Claude Code's own git-root canonicalization collapses
+    # the worktree to. Anything else - a genuinely foreign repository, or
+    # either side without an origin to prove sameness by - keeps the refusal.
+    WT_OWNER=$(primary_checkout_of "$WT_COMMON") || true
+    [ -n "${WT_OWNER:-}" ] || refuse "'$TARGET_REAL' is not a worktree of project '$PROJ_REAL'"
+    WT_IDENTITY=$(repo_identity_of "$TARGET_REAL") || true
+    PROJ_IDENTITY=$(repo_identity_of "$PROJ_REAL") || true
+    { [ -n "${WT_IDENTITY:-}" ] && [ -n "${PROJ_IDENTITY:-}" ] && [ "$WT_IDENTITY" = "$PROJ_IDENTITY" ]; } \
+      || refuse "'$TARGET_REAL' is not a worktree of project '$PROJ_REAL'"
+    PROJ_REAL=$WT_OWNER
+    PROJ_COMMON=$WT_COMMON
+  fi
 
   # The external-imports flags must land on the primary checkout - its own git
   # dir equals the common dir - because that is exactly the path Claude Code's
