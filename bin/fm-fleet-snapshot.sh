@@ -90,8 +90,9 @@
 #     freshness is "cached" only for the cache source, and observed_at/age_seconds
 #     come from the selected summary's generation. Every successfully sampled home also carries
 #     reconcile_inventory independently of projection trust.
-#     Actionable captain holds appear in decisions_open; every captain hold remains
-#     in the bounded queued inventory with its structured classification metadata.
+#     Actionable captain holds appear in decisions_open, each carrying its backlog
+#     repo; every captain hold remains in the bounded queued inventory with its
+#     structured classification metadata.
 #     Before that queued bound is applied, non-captain-actionable rows are selected
 #     ahead of captain-actionable rows so separately projected live decisions cannot
 #     crowd Charted-Next-eligible work out of the summary. Each group is ordered by
@@ -1007,7 +1008,8 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
             reason:(.hold_reason | trunc(160)),
             hold_until:(.hold_until // null),
             hold_bucket:(.hold_bucket // null),
-            hold_age_days:(.hold_age_days // null),source:"backlog"} ]) as $captain_holds_all
+            hold_age_days:(.hold_age_days // null),
+            repo:((.repo // null) | if . == null then null else trunc(120) end),source:"backlog"} ]) as $captain_holds_all
     | ([ $backlog.records[]? | select(landed_record)
          | {id:(.id | trunc(120)),title:(.title | trunc(120)),
             kind:((.kind // null) | if . == null then null else trunc(40) end),

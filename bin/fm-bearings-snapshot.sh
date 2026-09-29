@@ -46,6 +46,17 @@
 # Aging is a projection safety net only; the durable
 # deferral remains re-holding with --until.
 #
+# Every decisions_open and gates row carries `repo`, the project it belongs to,
+# read only from structured records: the backlog row's `repo:` metadata, else,
+# for a main-home row, the final path component of the same task's meta
+# `project=`, else, for a secondmate row whose home summary predates the field,
+# the same task's queued row in that home. A row with no structured project
+# carries repo null and is never dropped. After the
+# decisions_open bound is applied, rows are grouped by repo: groups appear in the
+# order of their first row, rows inside a group keep their existing order, and the
+# null group is a group like any other. Grouping reorders only; it never removes a
+# row, so the first row is always the one the ungrouped order put first.
+#
 # Ordinary Charted Next gates are ordered by durable filed date, newest first,
 # before the FM_BEARINGS_GATES bound is applied. Gates without a comparable filed
 # date keep their input order after dated gates. The synthetic (return-catchup)
@@ -88,6 +99,13 @@
 #   --all-unhealthy  include every unhealthy endpoint
 #   --all-pr-repos   query every discovered repository under --include-prs
 #   -h,--help        usage
+#
+# The captain's focus window (bin/fm-focus.sh) adds a `focus` object only while
+# a window is set, has ended, is unreadable, or has undelivered held outcomes:
+# {state, projects, until, held[{seq,task,project,class,summary}]}, with held
+# grouped by project the same way decisions_open is. Held outcomes stay listed
+# there, and their decisions stay in decisions_open, so a window never hides a
+# captain-facing item from Bearings.
 #
 # Output contract: `fm-bearings.v1`. No locks or reports; the underlying snapshot's
 # parent-side remote-ledger cache refresh is the only default fleet-state mutation.
@@ -148,11 +166,16 @@ remote homes under one shared snapshot budget and may refresh the parent-side ca
 Default fields: schema, home, generated, prs, in_flight{id,kind,state,repo,name,doing},
   secondmates{id,state,doing,provenance,freshness,age_seconds,contradiction,reason},
   secondmate_reconcile{id,spawn_gen,host,kind,ids},
-  decisions_open{id,key,verb,summary,owner}, landed{id,what,artifact,owner},
-  gates{id,title,blocked_by,reason,owner,filed}, reports{id,path}, recorded_prs{id,url},
-  unhealthy_endpoints{...} (only when non-empty), omitted{surface,reveal}.
+  decisions_open{id,key,verb,summary,owner,repo}, landed{id,what,artifact,owner},
+  gates{id,title,blocked_by,reason,owner,filed,repo}, reports{id,path}, recorded_prs{id,url},
+  unhealthy_endpoints{...} (only when non-empty), omitted{surface,reveal},
+  focus{state,projects,until,held[...]} (only while a focus window or its held
+  outcomes exist).
 Default gates are selected newest filed first before their bound; undated gates
   retain input order after dated gates.
+decisions_open and gates rows carry repo (null when no structured project is
+  recorded). decisions_open is grouped by repo after its bound: groups in order of
+  their first row, rows keeping their order inside each group, none dropped.
 landed merges this home's Done with registered secondmate homes' Done, bounded by
   a per-home cap (FM_BEARINGS_LANDED_PER_HOME) and an overall cap (FM_BEARINGS_LANDED),
   with omitted[] disclosure. Default selection is balanced across deterministic home
@@ -345,6 +368,26 @@ EOF
   fi
 fi
 
+# --- the captain's opt-in focus window (bin/fm-focus.sh owns it) ------------
+# Reported only when a window is set or held outcomes are undelivered, so a home
+# that never opted in sees no change. Held outcomes are listed here in full
+# while the window is set: holding changes only when the captain is told.
+FOCUS=null
+if FOCUS_RAW=$("$SCRIPT_DIR/fm-focus.sh" status --json 2>/dev/null); then
+  FOCUS=$(printf '%s' "$FOCUS_RAW" | jq -c '
+    if .active or .ended or .damaged or ((.held | length) > 0) then
+      {state:(if .active then "active" elif .ended then "ended" elif .damaged then "damaged" else "off" end),
+       projects:(.projects | join(", ")), until:.until,
+       held:(.held as $held
+             | (reduce ($held[] | .project) as $p ([]; if any(.[]; . == $p) then . else . + [$p] end)) as $order
+             | [$order[] as $p | $held[] | select(.project == $p)
+                | {seq, task, project, class, summary:(.summary | gsub("\\s+"; " ")
+                                                       | if length > 120 then .[:119] + "…" else . end)}])}
+    else null end') || FOCUS='{"state":"unreadable","projects":"","until":null,"held":[]}'
+else
+  FOCUS='{"state":"unreadable","projects":"","until":null,"held":[]}'
+fi
+
 # --- projection: canonical snapshot -> fm-bearings.v1 model (JSON) ----------
 BEARINGS_TODAY=${NOW%%T*}
 case "$BEARINGS_TODAY" in
@@ -380,6 +423,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   --argjson pr_rows_capped "$PR_ROWS_CAPPED" \
   --argjson pr_rows_min_total "$PR_ROWS_MIN_TOTAL" \
   --argjson return_catchup "$RETURN_CATCHUP" \
+  --argjson focus "$FOCUS" \
   --argjson candidate_prs "$CANDIDATE_PRS" "$FM_LANDED_JQ_DEFS"'
   def trunc($n): if . == null then null else
     (tostring | gsub("\\s+"; " ") | if (length > $n) then (.[:$n] + "…") else . end) end;
@@ -389,6 +433,11 @@ MODEL=$(printf '%s' "$SNAP" | jq \
       elif length > $n then (if $n == 1 then "…" else (.[:($n - 1)] + "…") end)
       else . end;
   def live_captain_call: .hold_bucket == "live";
+  def known_repo: if type == "string" and test("[^[:space:]]") then trunc(120) else null end;
+  def group_by_first_seen_repo:
+    . as $rows
+    | (reduce ($rows[] | .repo) as $k ([]; if any(.[]; . == $k) then . else . + [$k] end)) as $order
+    | [ $order[] as $k | $rows[] | select(.repo == $k) ];
   def projected_deferred_hold:
     .hold_bucket != null and .hold_bucket != "live";
   def bounded_blocker_note($n):
@@ -427,11 +476,12 @@ MODEL=$(printf '%s' "$SNAP" | jq \
            + ($base | fit($context_n - $title_n)))
         end
       end;
-  def as_gate($owner):
+  def as_gate($owner; $repo):
     {id, title:(.title | trunc(60)),
      blocked_by:((.unresolved_blocker_ids // []) | if length > 0 then join(",") else "-" end | trunc(120)),
      reason:(hold_gate_reason | trunc(40)), owner:$owner,
-     filed:((.since // null) | trunc(40))};
+     filed:((.since // null) | trunc(40)),
+     repo:($repo | known_repo)};
   def round_robin_landed($n):
     . as $groups
     | [range(0; (($groups | map(length) | max) // 0)) as $i
@@ -443,6 +493,11 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   | (($fl | index("paths")) != null) as $f_paths
   | (($fl | index("actions")) != null) as $f_actions
   | (($fl | index("endpoints")) != null) as $f_endpoints
+  | ([ .tasks[] | select(.kind != "secondmate" and (.id | type) == "string")
+       | {key:.id, value:((.project // null)
+                          | if type == "string" then (split("/") | map(select(length > 0)) | last) else null end
+                          | known_repo)}
+       | select(.value != null) ] | from_entries) as $task_repo
   | ([ .backlog.records[] | select(landed_record)
        | {id, title, kind, hold_kind, pr_url, report_path, local_note, completion,
           home:"(main)", home_id:"(main)"} ]) as $main_done
@@ -527,14 +582,19 @@ MODEL=$(printf '%s' "$SNAP" | jq \
          | select(.structured and .hold_bucket != null)
          | select(($all_decisions == 1) or live_captain_call)
          | {id,key:.id,verb:"captain-hold",
-            summary:hold_summary(.title; .hold_reason),owner:"(main)"} ]
+            summary:hold_summary(.title; .hold_reason),owner:"(main)",
+            repo:(((.repo | known_repo) // $task_repo[.id]) | known_repo)} ]
      + [ (.secondmate_current.records // [])[] as $m
          | ([ $m.decisions_open[]?
               | select(.source == "backlog" and .verb == "captain-hold")
               | select(($all_decisions == 1) or live_captain_call)
+              | . as $row
               | {id:($m.id + "/" + .id),key,verb,
                  summary:hold_summary((.summary // .id);
-                                      (.reason // "captain decision pending")),owner:$m.id} ]
+                                      (.reason // "captain decision pending")),owner:$m.id,
+                 repo:(((.repo | known_repo)
+                        // ([$m.queued[]? | select(.id == $row.id) | .repo | known_repo] | .[0]))
+                       | known_repo)} ]
             + [ $m.queued[]?
                 | select($all_decisions == 1 and .hold_kind == "captain")
                 | select(.id as $id
@@ -544,7 +604,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
                          | index($id) | not)
                 | {id:($m.id + "/" + .id),key:.id,verb:"captain-hold",
                    summary:hold_summary((.title // .id);
-                                        (.hold_reason // "captain decision pending")),owner:$m.id} ])[] ]) as $decisions_all
+                                        (.hold_reason // "captain decision pending")),owner:$m.id,
+                   repo:(.repo | known_repo)} ])[] ]) as $decisions_all
   | ([ .backlog.records[]
          | . as $record
          | select(.structured and projected_deferred_hold) ]
@@ -562,7 +623,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
          blocked_by:"-",
          reason:"away-return catch-up",
          owner:"(main)",
-         filed:null}]
+         filed:null,
+         repo:null}]
      else [] end) as $return_catchup_gate
   | ((if (.main_inventory.valid == false) then
         [{id:"(main-inventory)",
@@ -570,7 +632,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
           blocked_by:"-",
           reason:"main inventory",
           owner:"(main)",
-          filed:null}]
+          filed:null,
+          repo:null}]
       else [] end)
      + [ .backlog.records[]
          | . as $record
@@ -579,13 +642,13 @@ MODEL=$(printf '%s' "$SNAP" | jq \
               (.state == "in_flight" and .current_role == "held" and ($working_ids | index($record.id) | not))))
          | select(.captain_actionable != true)
          | select((.hold_bucket == null) or ($all_decisions == 0))
-         | as_gate("(main)") ]
+         | as_gate("(main)"; ((.repo | known_repo) // $task_repo[.id])) ]
      + [ (.secondmate_current.records // [])[] as $m
          | select($m.provenance.selected == "structured-home")
          | $m.queued[]?
          | select(.captain_actionable != true)
          | select((.hold_bucket == null) or ($all_decisions == 0))
-         | as_gate($m.id) ]) as $gates_all
+         | as_gate($m.id; .repo) ]) as $gates_all
   | ([ .scout_reports[]
        | . as $r
        | select(($all_reports == 1) or (($rel_ids | index($r.id)) != null))
@@ -640,7 +703,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
       secondmate_reconcile: [ (.secondmate_current.records // [])[]
         | select(.reconcile_inventory != null)
         | {id, spawn_gen:(.spawn_gen // null), host:(.host // null), kind:(.reconcile_inventory.kind // null), ids:((.reconcile_inventory.ids // []) | map(select(type == "string")) | sort)} ],
-      decisions_open: (if $all_decisions == 1 then $decisions_all else $decisions_all[:$decisions_n] end),
+      decisions_open: ((if $all_decisions == 1 then $decisions_all else $decisions_all[:$decisions_n] end)
+                       | group_by_first_seen_repo),
       landed: ($done | map({id, what:(.title | trunc(70)),
                             artifact:(landed_artifact // "-"),owner:.home_id})),
       gates: ($return_catchup_gate
@@ -653,6 +717,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
            {unhealthy_endpoints:(if $all_unhealthy == 1 then $unhealthy_all else $unhealthy_all[:$unhealthy_n] end)}
          else {} end)
   | . + (if $include_prs == 1 then {candidate_prs:$candidate_prs} else {} end)
+  | . + (if $focus != null then {focus:$focus} else {} end)
   | . + (if $f_bodies then {bodies:[ $snap.backlog.records[] | select(.structured and (.state == "queued" or .state == "done")) | {id, body:((.body_excerpt // .raw // "-") | trunc(200))} ]} else {} end)
   | . + (if $f_paths then {paths:[ $snap.tasks[] | {id, worktree:(.paths.worktree.path // "-"), home:(.paths.home.path // "-"), status:.paths.status_log.path, report:.paths.report.path} ]} else {} end)
   | . + (if $f_actions then {actions:[ $snap.tasks[] | {id, watch:(.actions.watch // .actions.send // "-"), steer:(.actions.steer // .actions.send // "-")} ]} else {} end)

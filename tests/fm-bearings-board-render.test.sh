@@ -266,6 +266,75 @@ test_charted_rows_without_a_filed_date_follow_the_dated_rows_in_payload_order() 
   pass "charted rows with no filed date follow the dated rows in payload order"
 }
 
+# Build the board from a Captain's Call list plus an optional focus object.
+render_call() {  # <home> <captains-call-json> [<focus-json>]
+  local home=$1 calls=$2 focus=${3:-null} data="$1/payload.json"
+  jq -n --argjson calls "$calls" --argjson focus "$focus" '{
+    schema:"fm-bearings-board.v1", home:"render-home", generated:"2026-09-29T00:00Z",
+    prs_live:false, captains_call:$calls, underway:[], landed:[], charted:[]}
+    + (if $focus == null then {} else {focus:$focus} end)' > "$data"
+  PATH="$home/fakebin:$PATH" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
+    LAVISH_AXI_STATE_DIR="$home/lavish-state" \
+    "$BOARD" build "$data" >/dev/null || fail "the board did not build"
+  require_listener_reached_poll "$home"
+  node "$HARNESS" "$home/.lavish/bearings-board.html" \
+    || fail "the built board could not be rendered"
+}
+
+decision_card() {  # <key> <repo-json> <title>
+  jq -cn --arg key "$1" --argjson repo "$2" --arg title "$3" \
+    '{key:$key, type:"decision", repo:$repo, title:$title, options:[{value:"a", label:"A"}]}'
+}
+
+test_captains_call_is_grouped_by_project_without_dropping_a_card() {
+  local home out calls
+  home=$(make_home call-grouped)
+  calls=$(jq -sc . <<EOF
+$(decision_card first-alpha '"alpha"' "Alpha one")
+$(decision_card first-beta '"beta"' "Beta one")
+$(decision_card no-repo null "No project")
+$(decision_card second-alpha '"alpha"' "Alpha two")
+$(decision_card second-beta '"beta"' "Beta two")
+EOF
+)
+  out=$(render_call "$home" "$calls")
+  printf '%s' "$out" | jq -e '.error == ""' >/dev/null \
+    || fail "the grouped board rendered its error instead of the fleet: $out"
+  printf '%s' "$out" | jq -e '
+    [.call[] | .title] == ["Alpha one", "Alpha two", "Beta one", "Beta two", "No project"]
+      and (.stats[] | select(.label == "need you") | .n) == 5
+      and (.stack | test("card 1 of 5 · alpha 1 of 2"))
+  ' >/dev/null || fail "Captain's Call was not grouped by project in order: $out"
+  pass "Captain's Call groups cards by project, keeps each group's order, and drops none"
+}
+
+test_the_focus_window_lists_every_held_outcome_on_the_board() {
+  local home out calls
+  home=$(make_home call-focus)
+  calls=$(jq -sc . <<EOF
+$(decision_card beta-call '"beta"' "Beta call")
+EOF
+)
+  out=$(render_call "$home" "$calls" '{"projects":["alpha"],"until":null,
+    "held":[{"repo":"beta","class":"decision","summary":"beta needs a call"},
+            {"repo":"gamma","class":"review-ready","summary":"gamma PR ready"}]}')
+  printf '%s' "$out" | jq -e '
+    (.focus.hidden == false)
+      and (.focus.lines[0] | test("Focus: alpha") and test("2 held"))
+      and (.focus.lines[1] | test("beta") and test("beta needs a call"))
+      and (.focus.lines[2] | test("gamma") and test("gamma PR ready"))
+      and ([.call[] | .title] == ["Beta call"])
+  ' >/dev/null || fail "the focus banner hid a held outcome or its held decision card: $out"
+  out=$(render_call "$(make_home call-nofocus)" "$calls")
+  printf '%s' "$out" | jq -e '(.focus.lines | length) == 0' >/dev/null \
+    || fail "a board without a focus window rendered a focus banner: $out"
+  pass "the focus banner lists every held outcome and leaves held decisions answerable"
+}
+
+test_captains_call_is_grouped_by_project_without_dropping_a_card
+test_the_focus_window_lists_every_held_outcome_on_the_board
 test_an_underway_row_leads_with_the_task_name_and_keeps_its_run_status
 test_an_underway_identifier_label_is_not_replaced_by_run_status
 test_charted_next_reads_newest_filed_first

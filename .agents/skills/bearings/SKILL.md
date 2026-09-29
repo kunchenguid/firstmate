@@ -112,6 +112,8 @@ Compose the payload from the same snapshot with the same ranking judgment as the
 - Every Charted Next row copies the snapshot gate's durable filed date into `filed`, and the board orders the section by it, newest filed first.
   Follow `bin/fm-bearings-board.sh`'s payload contract for the accepted format.
   Omit it or pass null for a row with no durable filed date - the main-inventory or return-catchup warning, an unavailable secondmate home, or a queued row filed before dates were recorded - and the board keeps those rows in payload order after every dated row.
+- `build` groups Captain's Call cards by `repo` after its hygiene pass, so give every card, merge and credential cards included, its structured project.
+- When the snapshot carries `focus`, copy it into the payload's `focus` (the focus projects as an array, `until`, and every held outcome as `{repo, class, summary}`); the board lists every held outcome above Captain's Call while held decisions stay ordinary cards.
 - Every Captain's Call item and every Underway, Recently Landed, and Charted Next row carries an explicit `repo` field. Fill it from the snapshot and task records wherever known; use null or an empty string only as the deliberate genuinely-no-repo marker, in which case the template may show the internal id. Ids otherwise stay in the payload only as the routing channel, and composed reasons name blockers in plain words.
 
 Run `build` once after composing the payload.
@@ -150,6 +152,9 @@ Every `/bearings` chat response renders EXACTLY these four sections, in THIS ord
 1. **Captain's Call** - ONLY unsuppressed items that need the captain's own action now: a decision to make, a PR to approve or merge, a credential or login to provide, or a blocker only the captain can clear.
    Deferred or aged holds follow the presentation safety rule above instead.
    Include `contributions.captain` rows in this section, deduplicating any row already represented by its live captain hold or merge call.
+   Group the section by project so one project's items are read and answered together: a short project heading, then that project's items, with groups in the order the snapshot's `decisions_open` rows arrive (the command's header owns that grouping) and items keeping their order inside each group.
+   A merge, credential, or contribution item joins its project's group when its task's structured record names the project, and otherwise the one group for items with no recorded project, like a row whose `repo` is null; grouping never drops or hides an item.
+   When the snapshot carries `focus`, open the section by naming the focus projects and when the window ends, and list every `focus.held` outcome under its project marked as held for the focus window; the `focus` skill owns what holding means, and a held item is never left out of the digest.
    Show the other contribution actors only as counts beside the checked/known coverage, and disclose `captain_omitted`, `unmeasured_homes`, stale verdicts and checks with no verdict when nonzero.
    Empty-state: "Nothing needs your action right now" is allowed only when `contributions.proven_clear` is true and the existing decision set is empty.
    When the section is empty but coverage is incomplete, say that no decision is recorded and give the checked/known count; a missing coverage field is also unverified.

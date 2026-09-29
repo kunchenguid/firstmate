@@ -164,7 +164,7 @@ test_return_gate_owns_remediation_and_reports_catchup_to_bearings() {
   toon=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" "$ROOT/bin/fm-bearings-snapshot.sh" 2>&1) \
     || fail "default Bearings should render behind the return catch-up gate: $toon"
   gate_header=$(printf '%s\n' "$toon" | awk '/^gates\[[0-9]+\]\{/ { print; exit }')
-  assert_contains "$gate_header" '{id,title,blocked_by,reason,owner,filed}' "catch-up removed filed from the TOON gate schema"
+  assert_contains "$gate_header" '{id,title,blocked_by,reason,owner,filed,repo}' "catch-up removed filed from the TOON gate schema"
   assert_contains "$toon" '2026-06-20' "catch-up removed durable gate dates from default Bearings output"
 
   # The guard itself still separates its two branches by exit status, so an

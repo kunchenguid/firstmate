@@ -79,6 +79,20 @@
 # first; a row with no comparable date keeps its payload order after every dated
 # row. Anything else in that field refuses rather than sorting on garbage.
 #
+# CAPTAIN'S CALL IS GROUPED BY PROJECT. After hygiene, build reorders the
+# surviving cards by `repo`: groups in the order of their first card, cards
+# keeping their payload order inside each group, and every card without a repo
+# forming one group of its own. Grouping never drops a card, and the first card
+# stays the one the composer put first.
+#
+# THE FOCUS WINDOW. The payload MAY carry `focus`, copied from the Bearings
+# snapshot while the captain's focus window (bin/fm-focus.sh) is set or has
+# undelivered held outcomes: {projects:[<name>...], until:<string>|null,
+# held:[{repo, summary, class?}]}. build groups held by repo the same way, and
+# the template shows it above Captain's Call listing every held outcome, so a
+# window never hides one from the board; held decisions stay ordinary
+# answerable cards.
+#
 # The board path is stable - $FM_HOME/.lavish/bearings-board.html - so a
 # re-invocation rebuilds the same file in place, which keeps the same Lavish
 # session URL and the same canonical process-event source id. Injection escapes
@@ -177,6 +191,18 @@ validate_payload() {  # <data.json>
       and (.what | nonempty_string) and (.owner | nonempty_string)
       and optional_https_url("pr_url")
       and optional_subject;
+    def focus_held_item:
+      type == "object" and repo_marker and (.summary | nonempty_string)
+      and optional_string("class");
+    def optional_focus:
+      (has("focus") | not) or (.focus == null)
+      or (.focus
+        | type == "object"
+          and (.projects | type == "array") and ((.projects | length) > 0)
+          and ([.projects[] | nonempty_string] | all)
+          and ((has("until") | not) or (.until == null) or (.until | type == "string"))
+          and (.held | type == "array")
+          and ([.held[] | focus_held_item] | all));
     def charted_item:
       type == "object" and repo_marker and (.id | slug(128))
       and (.title | nonempty_string) and (.reason | type == "string")
@@ -201,6 +227,7 @@ validate_payload() {  # <data.json>
     and ([.underway[] | underway_item] | all)
     and ([.landed[] | landed_item] | all)
     and ([.charted[] | charted_item] | all)
+    and optional_focus
   ' "$1" >/dev/null
 }
 
@@ -289,8 +316,8 @@ decision_card_is_stale() {  # <task-id> <landed-0-or-1>
   return 1
 }
 
-# Drop every stale decision card, then give every surviving decision card the
-# standard reconcile choice. Injecting it here is what makes "every decision
+# Drop every stale decision card, give every surviving decision card the
+# standard reconcile choice, then group Captain's Call by project. Injecting it here is what makes "every decision
 # card offers reconcile" a property of the board rather than of the composer's
 # memory; the validator prevents duplicate decision options.
 effective_payload() {  # <data.json> <dest.json>
@@ -334,7 +361,17 @@ effective_payload() {  # <data.json> <dest.json>
           hint: "Re-check the latest state, then close this with evidence or keep it open with a note"
         }]
         else . end
-    ]' "$data" > "$dest" || return 1
+    ]
+    | .captains_call as $cards
+    | ([$cards[] | (.repo // "")]
+       | reduce .[] as $r ([]; if any(.[]; . == $r) then . else . + [$r] end)) as $order
+    | .captains_call = [$order[] as $r | $cards[] | select((.repo // "") == $r)]
+    | if (.focus | type) == "object" then
+        .focus.held as $held
+        | ([$held[] | (.repo // "")]
+           | reduce .[] as $r ([]; if any(.[]; . == $r) then . else . + [$r] end)) as $horder
+        | .focus.held = [$horder[] as $r | $held[] | select((.repo // "") == $r)]
+      else . end' "$data" > "$dest" || return 1
 }
 
 # The OWNER column bin/fm-procevent.sh already publishes: live, none,
