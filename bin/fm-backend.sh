@@ -814,7 +814,6 @@ fm_backend_prepare_text_input() {  # <backend> <target> <settle> <requirement>
   case "$backend" in
     tmux) fm_tmux_prepare_text_input "$@" ;;
     herdr) fm_backend_herdr_prepare_text_input "$@" ;;
-    zellij|orca|cmux) return 0 ;;
     *) echo "error: no input-preparation implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
