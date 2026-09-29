@@ -196,6 +196,10 @@ test_unknown_composer_skips_ring() {
   [ -f "$dir/home/state/t1.inbox/001.msg" ] || fail "the steer was not recorded"
   [ ! -s "$dir/send.log" ] \
     || fail "an unknown composer must not receive an inbox doorbell:"$'\n'"$(cat "$dir/send.log")"
+  assert_contains "$(cat "$err")" "composer emptiness was not proven" \
+    "the unknown-composer skip should accurately describe the failed proof"
+  assert_not_contains "$(cat "$err")" "visibly holds pending text" \
+    "an unknown composer must not be reported as visibly pending"
   assert_contains "$(cat "$err")" "watcher will re-ring" \
     "the unknown-composer skip should point at the re-ring"
   pass "fm-send inbox: unreadable composers never receive doorbell command text"
