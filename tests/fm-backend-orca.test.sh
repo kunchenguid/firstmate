@@ -248,6 +248,18 @@ test_composer_state_bare_shell_prompt_is_unknown() {
   pass "fm_backend_orca_composer_state: a bare dead-shell prompt reads unknown (unsafe-for-injection), never empty"
 }
 
+test_send_text_submit_lifecycle_refuses_pending_composer() {
+  local out
+  orca_case send-lifecycle-pending
+  printf '{"ok":true,"result":{"terminal":{"tail":["╭─────────────────╮","│ > keep this draft │","╰─────────────────╯"]}}}\n' > "$RESP/1.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_send_text_submit term-123 "/exit" 2 0.01 0.01 "" require-empty' "$ROOT" )
+  [ "$out" = send-failed ] || fail "lifecycle input should refuse a pending Orca composer, got '$out'"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''send' \
+    "lifecycle input was sent into a pending Orca composer"
+  pass "fm_backend_orca_send_text_submit: lifecycle input requires fresh emptiness"
+}
+
 test_send_text_submit_popup_autocomplete_requires_second_enter() {
   local out log_text enter_count
   orca_case send-submit-popup-autocomplete
@@ -1359,6 +1371,7 @@ test_send_text_submit_borderless_claude_confirms
 test_composer_state_stale_banner_never_wins
 test_send_text_submit_retries_when_composer_stays_pending
 test_composer_state_popup_placeholder_fill_is_pending
+test_send_text_submit_lifecycle_refuses_pending_composer
 test_composer_state_bare_shell_prompt_is_unknown
 test_send_text_submit_popup_autocomplete_requires_second_enter
 test_send_literal_constructs_non_enter_send

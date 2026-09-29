@@ -621,10 +621,11 @@ test_matrix_pi_separated_needs_identity() {
 
 # Pi-vim replaces the lower composer rule's right edge with its mode label.
 # Both exact ordinary modes preserve the same empty/pending verdicts. Other
-# labels remain unknown to the classifier and unsupported for input.
+# labels remain unknown to the classifier and input-mode parser.
 test_matrix_pi_vim_modes() {
-  local insert normal pending_normal ex typed pi_idle
+  local plain insert normal pending_normal ex typed pi_idle
   pi_idle=$(printf 'pi\tidle')
+  plain=$'transcript\n────────────────────────\n\n────────────────────────'
   insert=$'transcript\n────────────────────────\n\n────────────── INSERT'
   normal=$'transcript\n────────────────────────\n\n────────────── NORMAL'
   pending_normal=$'transcript\n────────────────────────\n\n────────────── NORMAL d_'
@@ -641,6 +642,8 @@ test_matrix_pi_vim_modes() {
     || fail "pi-vim NORMAL mode was not recognized"
   [ "$(fm_composer_pi_input_mode "$normal")" = normal ] \
     || fail "cursorless pi-vim NORMAL mode was not recognized"
+  [ "$(fm_composer_pi_input_mode "$plain" 2)" = ambiguous ] \
+    || fail "a plain Pi separator pair must remain mode-ambiguous"
 
   typed=$'transcript\n────────────────────────\nkeep this draft\n────────────── NORMAL'
   assert_screen "pi-vim NORMAL pending text" pending "$CAPS_TMUX" "$typed" 2 "$pi_idle"
@@ -649,10 +652,10 @@ test_matrix_pi_vim_modes() {
 
   assert_screen "pi-vim pending command is unknown" unknown "$CAPS_TMUX" "$pending_normal" 2 "$pi_idle"
   assert_screen "pi-vim Ex mode is unknown" unknown "$CAPS_TMUX" "$ex" 2 "$pi_idle"
-  [ "$(fm_composer_pi_input_mode "$pending_normal" 2)" = unsupported ] \
-    || fail "pi-vim pending NORMAL command must refuse input"
-  [ "$(fm_composer_pi_input_mode "$ex" 2)" = unsupported ] \
-    || fail "pi-vim Ex mode must refuse input"
+  [ "$(fm_composer_pi_input_mode "$pending_normal" 2)" = unknown ] \
+    || fail "pi-vim pending NORMAL command must remain unknown"
+  [ "$(fm_composer_pi_input_mode "$ex" 2)" = unknown ] \
+    || fail "pi-vim Ex mode must remain unknown"
   pass "matrix: pi-vim NORMAL and INSERT classify safely without losing pending text"
 }
 

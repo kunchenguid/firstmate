@@ -275,9 +275,13 @@ fm_backend_orca_send_key() {  # <terminal-id> <key>
 # fm_composer_submit_retry_core) against the shared composer verdict, so a
 # slash-command popup placeholder fill gets the required second Enter without
 # duplicating text.
-fm_backend_orca_send_text_submit() {  # <terminal-id> <text> <retries> <enter-sleep> <settle>
-  local terminal=$1 text=$2 retries=$3 sleep_s=$4 settle=$5
+fm_backend_orca_send_text_submit() {  # <terminal-id> <text> <retries> <enter-sleep> <settle> [expected-label] [require-empty]
+  local terminal=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 require_empty=${7:-} state
   fm_backend_orca_tool_check || { printf 'send-failed'; return 0; }
+  if [ "$require_empty" = require-empty ]; then
+    state=$(fm_backend_orca_composer_state "$terminal")
+    [ "$state" = empty ] || { printf 'send-failed'; return 0; }
+  fi
   fm_backend_orca_send_literal "$terminal" "$text" || { printf 'send-failed'; return 0; }
   sleep "$settle"
   fm_composer_submit_retry_core fm_backend_orca_send_key fm_backend_orca_composer_state \

@@ -1134,6 +1134,21 @@ test_send_text_submit_preserves_agent_glyph_within_wrapped_content() {
   pass "fm_backend_zellij_send_text_submit: preserves agent glyphs within wrapped content"
 }
 
+test_send_text_submit_lifecycle_refuses_pending_composer() {
+  local dir fb out
+  dir="$TMP_ROOT/submit-lifecycle-pending"; mkdir -p "$dir/responses"
+  zellij_pane_response "$dir" 1 7 3
+  printf '%s' $'transcript line\n❯ keep this draft' > "$dir/responses/2.out"
+  fb=$(make_zellij_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="firstmate" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_send_text_submit firstmate:7 "/exit" 2 0.01 0.01 "" require-empty' "$ROOT" )
+  [ "$out" = send-failed ] || fail "lifecycle input should refuse a pending zellij composer, got '$out'"
+  assert_not_contains "$(cat "$dir/log")" $'\x1f''paste' \
+    "lifecycle input was pasted into a pending zellij composer"
+  pass "fm_backend_zellij_send_text_submit: lifecycle input requires fresh emptiness"
+}
+
 test_send_text_submit_rejects_stale_composer_above_live_shell() {
   local dir fb out
   dir="$TMP_ROOT/submit-live-shell"; mkdir -p "$dir/responses"
@@ -1350,6 +1365,7 @@ test_send_text_submit_rejects_furniture_match_after_noop_paste
 test_send_text_submit_accepts_wrapped_boxed_text
 test_send_text_submit_accepts_wrapped_bare_text
 test_send_text_submit_preserves_agent_glyph_within_wrapped_content
+test_send_text_submit_lifecycle_refuses_pending_composer
 test_send_text_submit_rejects_stale_composer_above_live_shell
 test_composer_state_reads_styled_dump
 test_composer_state_dead_pane_is_unknown

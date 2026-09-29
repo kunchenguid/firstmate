@@ -3191,10 +3191,13 @@ fm_backend_herdr_composer_identity() {  # <target> -> "<agent>\t<status>"
 # equally defeat this state read's pre-submit concat guard. The composer is
 # by definition inside the viewport, and `--source visible` needs none of the
 # small-N --lines workaround.
-fm_backend_herdr_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
+fm_backend_herdr_composer_state() {  # <target> [caps captured-screen] -> empty|pending|pending-unproven|unknown
   local target=$1 cap caps verdict identity
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
-  if cap=$(fm_backend_herdr_visible_capture_ansi "$target" 2>/dev/null); then
+  if [ "$#" -ge 3 ]; then
+    caps=$2
+    cap=$3
+  elif cap=$(fm_backend_herdr_visible_capture_ansi "$target" 2>/dev/null); then
     caps=$(printf 'styled=1\ncursor=0\nidentity=1\nnormalize=1')
   elif cap=$(fm_backend_herdr_visible_capture "$target"); then
     caps=$(printf 'styled=0\ncursor=0\nidentity=1\nnormalize=1')
@@ -3213,7 +3216,7 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|pending-unprove
   printf '%s' "$verdict"
 }
 
-fm_backend_herdr_composer_input_mode() {  # <target> -> insert|normal|unsupported|unknown
+fm_backend_herdr_composer_input_mode() {  # <target> -> insert|normal|ambiguous|unknown
   local target=$1 cap
   if cap=$(fm_backend_herdr_visible_capture_ansi "$target" 2>/dev/null) && [ -n "$cap" ]; then
     :
@@ -3225,45 +3228,59 @@ fm_backend_herdr_composer_input_mode() {  # <target> -> insert|normal|unsupporte
   fm_composer_pi_input_mode "$cap"
 }
 
+fm_backend_herdr_composer_input_snapshot() {  # <target> -> "<mode>\t<state>"
+  local target=$1 cap caps mode state
+  if cap=$(fm_backend_herdr_visible_capture_ansi "$target" 2>/dev/null) && [ -n "$cap" ]; then
+    caps=$(printf 'styled=1\ncursor=0\nidentity=1\nnormalize=1')
+  elif cap=$(fm_backend_herdr_visible_capture "$target") && [ -n "$cap" ]; then
+    caps=$(printf 'styled=0\ncursor=0\nidentity=1\nnormalize=1')
+  else
+    return 1
+  fi
+  mode=$(fm_composer_pi_input_mode "$cap")
+  state=$(fm_backend_herdr_composer_state "$target" "$caps" "$cap")
+  printf '%s\t%s' "$mode" "$state"
+}
+
 fm_backend_herdr_prepare_text_input() {  # <target> <settle> [require-empty]
-  local target=$1 settle=$2 require_empty=${3:-} mode state
-  if ! mode=$(fm_backend_herdr_composer_input_mode "$target"); then
+  local target=$1 settle=$2 require_empty=${3:-} snapshot mode state
+  if ! snapshot=$(fm_backend_herdr_composer_input_snapshot "$target"); then
     if [ "$require_empty" = require-empty ]; then
       printf 'error: cannot verify pi-vim input mode\n' >&2
       return 1
     fi
     return 0
   fi
+  mode=${snapshot%%$'\t'*}
+  state=${snapshot#*$'\t'}
   case "$mode" in
     unknown)
       [ "$require_empty" = require-empty ] || return 0
-      state=$(fm_backend_herdr_composer_state "$target")
       if [ "$state" != empty ]; then
         printf 'error: refusing unproven input preparation with composer=%s\n' "$state" >&2
         return 1
       fi
       ;;
-    unsupported)
-      printf 'error: refusing unsupported pi-vim input mode\n' >&2
+    ambiguous)
+      printf 'error: refusing ambiguous pi-vim input mode\n' >&2
       return 1
       ;;
     insert)
-      state=$(fm_backend_herdr_composer_state "$target")
       if [ "$state" != empty ]; then
         printf 'error: refusing pi-vim INSERT delivery with composer=%s\n' "$state" >&2
         return 1
       fi
       ;;
     normal)
-      state=$(fm_backend_herdr_composer_state "$target")
       if [ "$state" != empty ]; then
         printf 'error: refusing pi-vim NORMAL recovery with composer=%s\n' "$state" >&2
         return 1
       fi
       fm_backend_herdr_send_key "$target" i || return 1
       sleep "$settle"
-      mode=$(fm_backend_herdr_composer_input_mode "$target")
-      state=$(fm_backend_herdr_composer_state "$target")
+      snapshot=$(fm_backend_herdr_composer_input_snapshot "$target") || snapshot=$'unknown\tunknown'
+      mode=${snapshot%%$'\t'*}
+      state=${snapshot#*$'\t'}
       if [ "$mode" != insert ] || [ "$state" != empty ]; then
         printf 'error: pi-vim did not reach a proven empty INSERT composer (mode=%s composer=%s)\n' \
           "$mode" "$state" >&2

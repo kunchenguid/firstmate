@@ -395,23 +395,23 @@ test_generic_unknown_composer_still_submits() {
   pass "fm_tmux_submit_core: generic Agy-style composers still submit"
 }
 
-test_pi_vim_unsupported_mode_refuses_without_typing() {
+test_pi_vim_plain_mode_refuses_without_typing() {
   local dir fakebin composer sent vfile rc=0
-  dir="$TMP_ROOT/pi-vim-unsupported"
+  dir="$TMP_ROOT/pi-vim-plain"
   fakebin=$(make_submit_mock "$dir")
   composer="$dir/composer"
   sent="$dir/sent.log"
   vfile="$dir/verdict"
-  printf '────────────────────────\n\n────────────── NORMAL d_\n' > "$composer"
+  printf '────────────────────────\n\n────────────────────────\n' > "$composer"
   : > "$sent"
   PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
     fm_tmux_submit_core "win" ": lifecycle doorbell" 1 0.05 0.05 > "$vfile" 2>/dev/null || rc=$?
-  [ "$rc" -ne 0 ] || fail "unsupported pi-vim mode must refuse submission"
+  [ "$rc" -ne 0 ] || fail "plain Pi separators must refuse submission"
   [ "$(cat "$vfile")" = send-failed ] \
-    || fail "unsupported pi-vim mode refusal should report send-failed"
+    || fail "plain Pi separator refusal should report send-failed"
   [ ! -s "$sent" ] \
-    || fail "unsupported pi-vim mode received lifecycle input: $(cat "$sent")"
-  pass "fm_tmux_submit_core: unsupported pi-vim modes refuse lifecycle input"
+    || fail "plain Pi separators received lifecycle input: $(cat "$sent")"
+  pass "fm_tmux_submit_core: ambiguous plain Pi composers refuse lifecycle input"
 }
 
 test_claude_busy_signature_uses_real_capture_shapes() {
@@ -517,5 +517,5 @@ test_pi_vim_insert_with_pending_text_refuses_without_typing
 test_nonmodal_empty_composer_still_submits
 test_unknown_preparation_refuses_without_typing
 test_generic_unknown_composer_still_submits
-test_pi_vim_unsupported_mode_refuses_without_typing
+test_pi_vim_plain_mode_refuses_without_typing
 test_claude_busy_signature_uses_real_capture_shapes

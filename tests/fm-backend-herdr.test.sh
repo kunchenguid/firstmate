@@ -4372,13 +4372,11 @@ test_send_text_submit_pi_vim_normal_enters_insert_before_text() {
   dir="$TMP_ROOT/submit-pi-vim-normal"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '{"result":{"agent":{"agent":"pi","agent_status":"idle"}}}\n' > "$resp/1.out"
   printf 'transcript\n────────────────────────\n\n────────────── NORMAL\n' > "$resp/2.out"
-  printf 'transcript\n────────────────────────\n\n────────────── NORMAL\n' > "$resp/3.out"
-  printf '{"result":{"agent":{"agent":"pi","agent_status":"idle"}}}\n' > "$resp/4.out"
-  printf 'transcript\n────────────────────────\n\n────────────── INSERT\n' > "$resp/6.out"
-  printf 'transcript\n────────────────────────\n\n────────────── INSERT\n' > "$resp/7.out"
-  printf '{"result":{"agent":{"agent":"pi","agent_status":"idle"}}}\n' > "$resp/8.out"
-  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/10.out"
-  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/12.out"
+  printf '{"result":{"agent":{"agent":"pi","agent_status":"idle"}}}\n' > "$resp/3.out"
+  printf 'transcript\n────────────────────────\n\n────────────── INSERT\n' > "$resp/5.out"
+  printf '{"result":{"agent":{"agent":"pi","agent_status":"idle"}}}\n' > "$resp/6.out"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/8.out"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/10.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit lab:w1:p2 ": lifecycle doorbell" 1 0.01 0 "" require-empty' "$ROOT" )
@@ -4388,8 +4386,8 @@ test_send_text_submit_pi_vim_normal_enters_insert_before_text() {
   enter_line=$(grep -n $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log" | cut -d: -f1)
   [ -n "$i_line" ] && [ "$i_line" -lt "$text_line" ] && [ "$text_line" -lt "$enter_line" ] \
     || fail "Herdr must switch NORMAL to INSERT before literal text and Enter: $(cat "$log")"
-  [ "$(grep -c $'\x1f''pane'$'\x1f''read' "$log")" -eq 4 ] \
-    || fail "Pi NORMAL recovery must capture mode and emptiness before and after switching"
+  [ "$(grep -c $'\x1f''pane'$'\x1f''read' "$log")" -eq 2 ] \
+    || fail "Pi NORMAL recovery must use one snapshot before and after switching"
   pass "fm_backend_herdr_send_text_submit: blank Pi NORMAL reaches INSERT before text"
 }
 
@@ -4398,8 +4396,7 @@ test_send_text_submit_pi_vim_pending_normal_preserves_text() {
   dir="$TMP_ROOT/submit-pi-vim-pending"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '{"result":{"agent":{"agent":"pi","agent_status":"idle"}}}\n' > "$resp/1.out"
   printf 'transcript\n────────────────────────\nkeep this draft\n────────────── NORMAL\n' > "$resp/2.out"
-  printf 'transcript\n────────────────────────\nkeep this draft\n────────────── NORMAL\n' > "$resp/3.out"
-  printf '{"result":{"agent":{"agent":"pi","agent_status":"idle"}}}\n' > "$resp/4.out"
+  printf '{"result":{"agent":{"agent":"pi","agent_status":"idle"}}}\n' > "$resp/3.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit lab:w1:p2 ": lifecycle doorbell" 1 0.01 0 "" require-empty' "$ROOT" 2>/dev/null )
@@ -4414,8 +4411,7 @@ test_send_text_submit_pi_vim_insert_requires_fresh_empty_proof() {
   dir="$TMP_ROOT/submit-pi-vim-pending-insert"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '{"result":{"agent":{"agent":"pi","agent_status":"idle"}}}\n' > "$resp/1.out"
   printf 'transcript\n────────────────────────\nkeep this draft\n────────────── INSERT\n' > "$resp/2.out"
-  printf 'transcript\n────────────────────────\nkeep this draft\n────────────── INSERT\n' > "$resp/3.out"
-  printf '{"result":{"agent":{"agent":"pi","agent_status":"idle"}}}\n' > "$resp/4.out"
+  printf '{"result":{"agent":{"agent":"pi","agent_status":"idle"}}}\n' > "$resp/3.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit lab:w1:p2 ": lifecycle doorbell" 1 0.01 0 "" require-empty' "$ROOT" 2>/dev/null )
@@ -4425,18 +4421,19 @@ test_send_text_submit_pi_vim_insert_requires_fresh_empty_proof() {
   pass "fm_backend_herdr_send_text_submit: Pi INSERT requires fresh empty proof"
 }
 
-test_send_text_submit_pi_vim_unsupported_mode_refuses() {
+test_send_text_submit_pi_vim_plain_mode_refuses() {
   local dir log resp fb out
-  dir="$TMP_ROOT/submit-pi-vim-unsupported"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  dir="$TMP_ROOT/submit-pi-vim-plain"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '{"result":{"agent":{"agent":"pi","agent_status":"idle"}}}\n' > "$resp/1.out"
-  printf 'transcript\n────────────────────────\n\n────────────── NORMAL d_\n' > "$resp/2.out"
+  printf 'transcript\n────────────────────────\n\n────────────────────────\n' > "$resp/2.out"
+  printf '{"result":{"agent":{"agent":"pi","agent_status":"idle"}}}\n' > "$resp/3.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit lab:w1:p2 ": lifecycle doorbell" 1 0.01 0 "" require-empty' "$ROOT" 2>/dev/null )
-  [ "$out" = send-failed ] || fail "unsupported Pi mode should refuse on Herdr, got '$out'"
+  [ "$out" = send-failed ] || fail "plain Pi separators should refuse on Herdr, got '$out'"
   [ "$(grep -c $'\x1f''pane'$'\x1f''send-' "$log" || true)" -eq 0 ] \
-    || fail "unsupported Pi mode received lifecycle input: $(cat "$log")"
-  pass "fm_backend_herdr_send_text_submit: unsupported Pi modes refuse input"
+    || fail "plain Pi separators received lifecycle input: $(cat "$log")"
+  pass "fm_backend_herdr_send_text_submit: ambiguous plain Pi composers refuse lifecycle input"
 }
 
 test_send_text_submit_refuses_when_pi_identity_recheck_fails() {
@@ -4444,8 +4441,7 @@ test_send_text_submit_refuses_when_pi_identity_recheck_fails() {
   dir="$TMP_ROOT/submit-pi-vim-identity-fail"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '1\n' > "$resp/1.exit"
   printf 'transcript\n────────────────────────\n\n────────────── NORMAL\n' > "$resp/2.out"
-  printf 'transcript\n────────────────────────\n\n────────────── NORMAL\n' > "$resp/3.out"
-  printf '1\n' > "$resp/4.exit"
+  printf '1\n' > "$resp/3.exit"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit lab:w1:p2 ": lifecycle doorbell" 1 0.01 0 "" require-empty' "$ROOT" 2>/dev/null )
@@ -6068,7 +6064,7 @@ test_send_text_submit_detects_landed_send
 test_send_text_submit_pi_vim_normal_enters_insert_before_text
 test_send_text_submit_pi_vim_pending_normal_preserves_text
 test_send_text_submit_pi_vim_insert_requires_fresh_empty_proof
-test_send_text_submit_pi_vim_unsupported_mode_refuses
+test_send_text_submit_pi_vim_plain_mode_refuses
 test_send_text_submit_refuses_when_pi_identity_recheck_fails
 test_send_text_submit_refuses_when_mode_capture_fails
 test_send_text_submit_refuses_unproven_unknown_preparation
