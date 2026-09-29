@@ -11,18 +11,18 @@ metadata:
 # focus
 
 The focus window lets the captain work one project at a time without losing sight of the rest.
-While it is set, non-urgent outcomes from other projects wait and then arrive together, grouped by project, when the window ends.
+While it is set, non-urgent outcomes from other projects wait and then arrive together, grouped by project, when the captain explicitly clears the window.
 It is off until the captain sets it, and it changes only when the captain is told, never whether: held items stay listed in Bearings and on its board the whole time.
 `bin/fm-focus.sh` owns the durable window record, the held-delivery ledger, the routing verdict, and the exact commands; read its header before first use.
 
 ## Invocations
 
-- `/focus <project> [<project>...]` sets or replaces the window; `for <N> minutes|hours` or `until <UTC time>` bounds it with `--until`.
+- `/focus <project> [<project>...]` sets or replaces the window, which stays set until explicit clear.
   Use the project names the registry and backlog `repo:` fields use; when the captain's words name no registered project, ask which one before setting anything.
-  Confirm in one line which projects are in focus, until when, and that failures, security-sensitive items, credential needs, and anything blocking all work still come through at once.
+  Confirm in one line which projects are in focus and that failures, security-sensitive items, credential needs, and anything blocking all work still come through at once.
 - `/focus` with no project reports `bin/fm-focus.sh status` in plain words, including how many outcomes are waiting.
 - `/focus off` runs `bin/fm-focus.sh clear` and delivers everything it prints in the same reply (see Delivering held outcomes).
-- Only the captain sets or clears the window; never set, widen, or extend one on your own judgment.
+- Only the captain sets or clears the window; never set or widen one on your own judgment.
 
 ## Before telling the captain about an outcome while a window is set
 
@@ -47,6 +47,5 @@ The window never changes authority: merges, answers, and escalations follow thei
 ## Delivering held outcomes
 
 When the window is cleared, `clear` lists every held outcome grouped by project.
-At timed expiry, the existing watcher queues a durable wake on its next cycle, and the drain's `FOCUS HELD` section lists them.
 Tell the captain all of them in one reply, one project at a time, after checking current state so an outcome that has since settled is described as settled.
 Then run the printed `bin/fm-focus.sh delivered --through <seq>`; until then every drain presents them again, so an interrupted reply loses nothing.

@@ -27,15 +27,11 @@
 #                                version: 1
 #                                set: <UTC ISO 8601>
 #                                set_epoch: <seconds>
-#                                until: <UTC ISO 8601> | -
-#                                until_epoch: <seconds> | -
 #                                projects: <name> [<name>...]
-#                              A window whose until has passed has ENDED: it
-#                              holds nothing more and its obligations are due.
 #                              A record that cannot be parsed reads as no window
 #                              (deliver everything) and is reported, never
 #                              silently obeyed.
-#   state/focus-windows/       records archived on clear or timed expiry.
+#   state/focus-windows/       records archived on explicit clear.
 #   state/focus-held.jsonl     append-only held-delivery obligations, one JSON
 #                              object per line: {"seq":N,"epoch":N,"task":"...",
 #                              "project":"...","class":"...","summary":"..."}.
@@ -51,27 +47,22 @@
 # component of state/<task>.meta project=, else the task's backlog row
 # `(repo: <name>)` metadata. Project names are compared exactly.
 #
-# DELIVERY. Obligations become due when the window is cleared or its until
-# passes. The existing watcher calls `expire` each cycle to queue a durable
-# wake before archiving a timed-out window. `clear` prints obligations at once,
-# grouped by project; while they remain
+# DELIVERY. A window ends only on explicit clear, which prints obligations
+# at once, grouped by project; while they remain
 # undelivered, every bin/fm-wake-drain.sh presentation (and so the session-start
 # digest) prints the same FOCUS HELD section, so a restart or a lost reply
 # cannot drop them. Main delivers them to the captain together, then runs the
 # printed `delivered --through <seq>` acknowledgement.
 #
 # Usage:
-#   fm-focus.sh set <project> [<project>...] [--until <UTC ISO 8601>|<N>m|<N>h]
+#   fm-focus.sh set <project> [<project>...]
 #       Start or replace the window. Obligations already held stay held.
 #   fm-focus.sh clear
 #       End the window (archive its record) and print every undelivered
 #       obligation grouped by project with the acknowledgement command.
-#   fm-focus.sh expire
-#       Watcher entry point: queue an expiry wake and archive an ended window.
-#       Print the wake reason only when a window expired.
 #   fm-focus.sh status [--json]
-#       `off`, `on ...`, or `ended ...`, with the undelivered count; --json
-#       prints {active,ended,projects,set,until,held:[...]} for the snapshot.
+#       `off` or `on ...`, with the undelivered count; --json
+#       prints {active,projects,set,held:[...]} for the snapshot.
 #   fm-focus.sh route --task <id> --class <class> --summary <text> [--project <name>]
 #       Classes: failure|security|credential|blocking (urgent, always
 #       delivered) and review-ready|completion|decision (held when outside an
@@ -127,7 +118,7 @@ valid_project() {
 
 # Read the record into REC_* variables; return 1 when absent, 3 when damaged.
 read_record() {
-  REC_SET='' REC_SET_EPOCH='' REC_UNTIL='-' REC_UNTIL_EPOCH='-' REC_PROJECTS=''
+  REC_SET='' REC_SET_EPOCH='' REC_PROJECTS=''
   [ -f "$RECORD" ] || return 1
   local key value version='' line
   while IFS= read -r line || [ -n "$line" ]; do
@@ -138,22 +129,19 @@ read_record() {
       version) version=$value ;;
       set) REC_SET=$value ;;
       set_epoch) REC_SET_EPOCH=$value ;;
-      until) REC_UNTIL=$value ;;
-      until_epoch) REC_UNTIL_EPOCH=$value ;;
       projects) REC_PROJECTS=$value ;;
       *) return 3 ;;
     esac
   done < "$RECORD"
   [ "$version" = 1 ] || return 3
   case "$REC_SET_EPOCH" in ''|*[!0-9]*) return 3 ;; esac
-  case "$REC_UNTIL_EPOCH" in -) ;; ''|*[!0-9]*) return 3 ;; esac
   [ -n "$REC_PROJECTS" ] || return 3
   local p
   for p in $REC_PROJECTS; do valid_project "$p" || return 3; done
   return 0
 }
 
-# WINDOW_STATE: off | active | ended | damaged
+# WINDOW_STATE: off | active | damaged
 window_state() {
   local rc=0
   read_record || rc=$?
@@ -161,16 +149,13 @@ window_state() {
     1) WINDOW_STATE=off; return 0 ;;
     3) WINDOW_STATE=damaged; return 0 ;;
   esac
-  if [ "$REC_UNTIL_EPOCH" != - ] && [ "$(now_epoch)" -ge "$REC_UNTIL_EPOCH" ]; then
-    WINDOW_STATE=ended
-  else
-    WINDOW_STATE=active
-  fi
+  WINDOW_STATE=active
 }
 
 delivered_through() {
   local value
-  [ -f "$DELIVERED" ] || { printf '0\n'; return 0; }
+  if [ ! -e "$DELIVERED" ] && [ ! -L "$DELIVERED" ]; then printf '0\n'; return 0; fi
+  [ -f "$DELIVERED" ] && [ -r "$DELIVERED" ] || return 1
   value=$(cat "$DELIVERED" 2>/dev/null) || return 1
   case "$value" in ''|*[!0-9]*) return 1 ;; esac
   printf '%s\n' "$value"
@@ -180,7 +165,8 @@ delivered_through() {
 pending_json() {
   local through
   through=$(delivered_through) || { echo "fm-focus: the delivered marker is unreadable" >&2; return 1; }
-  if [ ! -s "$LEDGER" ]; then printf '[]\n'; return 0; fi
+  if [ ! -e "$LEDGER" ] && [ ! -L "$LEDGER" ]; then printf '[]\n'; return 0; fi
+  [ -f "$LEDGER" ] && [ -r "$LEDGER" ] || { echo "fm-focus: the held ledger $LEDGER is unreadable" >&2; return 1; }
   jq -sc --argjson through "$through" '
     if all(.[]; (type == "object") and (.seq | type == "number") and (.task | type == "string")
                  and (.project | type == "string") and (.class | type == "string")
@@ -219,11 +205,9 @@ print_held_block() {  # <json-array> <heading>
 projects_csv() { printf '%s' "$REC_PROJECTS" | tr ' ' '\n' | paste -sd, - | sed 's/,/, /g'; }
 
 cmd_set() {
-  local until_arg='' projects='' p until_epoch=- until_iso=- now tmp
+  local projects='' now tmp
   while [ $# -gt 0 ]; do
     case "$1" in
-      --until) shift; until_arg=${1:-}; [ -n "$until_arg" ] || usage ;;
-      --until=*) until_arg=${1#--until=} ;;
       -*) usage ;;
       *) valid_project "$1" || die "invalid project name: $1"
          case " $projects " in *" $1 "*) ;; *) projects="${projects:+$projects }$1" ;; esac ;;
@@ -232,50 +216,17 @@ cmd_set() {
   done
   [ -n "$projects" ] || usage
   now=$(now_epoch)
-  if [ -n "$until_arg" ]; then
-    case "$until_arg" in
-      *[0-9]m) p=${until_arg%m}; case "$p" in ''|*[!0-9]*) die "invalid --until: $until_arg" ;; esac
-               until_epoch=$((now + p * 60)) ;;
-      *[0-9]h) p=${until_arg%h}; case "$p" in ''|*[!0-9]*) die "invalid --until: $until_arg" ;; esac
-               until_epoch=$((now + p * 3600)) ;;
-      *) until_epoch=$(jq -nr --arg t "$until_arg" '
-             $t | if test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}Z$") then sub("Z$"; ":00Z") else . end
-             | fromdateiso8601' 2>/dev/null) || die "invalid --until (UTC ISO 8601, <N>m, or <N>h): $until_arg" ;;
-    esac
-    [ "$until_epoch" -gt "$now" ] || die "--until must be in the future: $until_arg"
-    until_iso=$(iso_of "$until_epoch")
-  fi
   fm_lock_acquire_wait "$LOCK"
   tmp=$(mktemp "$STATE/.focus-window.XXXXXX") || { fm_lock_release "$LOCK"; die "cannot write the focus record"; }
-  if ! printf 'version: 1\nset: %s\nset_epoch: %s\nuntil: %s\nuntil_epoch: %s\nprojects: %s\n' \
-      "$(iso_of "$now")" "$now" "$until_iso" "$until_epoch" "$projects" > "$tmp" \
+  if ! printf 'version: 1\nset: %s\nset_epoch: %s\nprojects: %s\n' \
+      "$(iso_of "$now")" "$now" "$projects" > "$tmp" \
     || ! mv -f "$tmp" "$RECORD"; then
     rm -f "$tmp"; fm_lock_release "$LOCK"; die "cannot write the focus record"
   fi
   fm_lock_release "$LOCK"
   read_record || true
   printf 'focus: on for %s' "$(projects_csv)"
-  [ "$until_iso" = - ] || printf ' until %s' "$until_iso"
   printf '\n'
-}
-
-cmd_expire() {
-  local reason="check: focus-window-ended" now
-  fm_lock_acquire_wait "$LOCK"
-  window_state
-  if [ "$WINDOW_STATE" != ended ]; then
-    fm_lock_release "$LOCK"
-    return 0
-  fi
-  fm_wake_append check focus-window-ended "$reason" || {
-    fm_lock_release "$LOCK"; die "cannot queue the focus expiry"
-  }
-  now=$(now_epoch)
-  if ! { mkdir -p "$ARCHIVE_DIR" && mv -f "$RECORD" "$ARCHIVE_DIR/window-$now"; }; then
-    fm_lock_release "$LOCK"; die "cannot archive the focus record"
-  fi
-  fm_lock_release "$LOCK"
-  printf '%s\n' "$reason"
 }
 
 cmd_clear() {
@@ -302,19 +253,17 @@ cmd_status() {
   rows=$(pending_json) || exit 1
   if [ "$json" = 1 ]; then
     jq -nc --arg state "$WINDOW_STATE" --arg projects "$REC_PROJECTS" --arg set "$REC_SET" \
-      --arg until "$REC_UNTIL" --argjson held "$rows" '
-      {active:($state == "active"), ended:($state == "ended"), damaged:($state == "damaged"),
-       projects:(if $state == "active" or $state == "ended" then ($projects | split(" ")) else [] end),
+      --argjson held "$rows" '
+      {active:($state == "active"), damaged:($state == "damaged"),
+       projects:(if $state == "active" then ($projects | split(" ")) else [] end),
        set:(if $set == "" then null else $set end),
-       until:(if $until == "-" or $until == "" then null else $until end),
        held:$held}'
     return 0
   fi
   case "$WINDOW_STATE" in
     off) printf 'off' ;;
     damaged) printf 'damaged (record unreadable; outcomes are delivered as if no window were set; run bin/fm-focus.sh clear)' ;;
-    active) printf 'on for %s' "$(projects_csv)"; [ "$REC_UNTIL" = - ] || printf ' until %s' "$REC_UNTIL" ;;
-    ended) printf 'ended (for %s, until %s passed)' "$(projects_csv)" "$REC_UNTIL" ;;
+    active) printf 'on for %s' "$(projects_csv)" ;;
   esac
   printf '; held undelivered: %s\n' "$(printf '%s' "$rows" | jq 'length')"
 }
@@ -363,7 +312,6 @@ cmd_route() {
   window_state
   case "$WINDOW_STATE" in
     off) printf 'deliver no-focus-window\n'; return 0 ;;
-    ended) printf 'deliver focus-window-ended\n'; return 0 ;;
     damaged) printf 'deliver focus-record-unreadable\n'
              echo "fm-focus: the focus record is unreadable; run bin/fm-focus.sh clear" >&2; return 0 ;;
   esac
@@ -425,7 +373,6 @@ cmd_drain_section() {
   case "$WINDOW_STATE" in
     active)
       printf 'FOCUS WINDOW: on for %s' "$(projects_csv)"
-      [ "$REC_UNTIL" = - ] || printf ' until %s' "$REC_UNTIL"
       printf ' (%s outcome(s) held); before telling the captain about any outcome, run bin/fm-focus.sh route --task <id> --class <class> --summary <text> and report it now only when it prints deliver - failures, security-sensitive items, credential needs, and anything blocking all work always come through\n' "$count"
       ;;
     damaged)
@@ -443,7 +390,6 @@ sub=${1:-}
 case "$sub" in
   set) cmd_set "$@" ;;
   clear) cmd_clear ;;
-  expire) cmd_expire ;;
   status) cmd_status "$@" ;;
   route) cmd_route "$@" ;;
   held) cmd_held ;;

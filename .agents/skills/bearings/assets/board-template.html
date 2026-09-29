@@ -485,12 +485,13 @@ __FM_BEARINGS_BOARD_DATA__
 
   /* focus window banner: present only while the captain's focus is set or
      held outcomes wait; every held outcome is listed by project */
-  if (data.focus && (data.focus.projects.length || data.focus.held.length)) {
+  if (data.focus && (data.focus.state === "unreadable" || data.focus.projects.length || data.focus.held.length)) {
     var fb = document.getElementById("bb-focus");
     var held = data.focus.held || [];
     fb.appendChild(el("div", "bb-focus__head",
-      (data.focus.projects.length ? "Focus: " + data.focus.projects.join(", ") : "Focus ended") +
-      (data.focus.until ? " until " + data.focus.until : "") +
+      data.focus.state === "unreadable"
+        ? "Held outcomes may be awaiting delivery: the held ledger or delivery marker is unreadable."
+        : (data.focus.projects.length ? "Focus: " + data.focus.projects.join(", ") : "Focus ended") +
       " · " + held.length + " held from other projects"));
     held.forEach(function (h) {
       fb.appendChild(el("div", "bb-focus__row",

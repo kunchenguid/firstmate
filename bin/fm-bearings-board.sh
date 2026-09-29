@@ -87,7 +87,7 @@
 #
 # THE FOCUS WINDOW. The payload MAY carry `focus`, copied from the Bearings
 # snapshot while the captain's focus window (bin/fm-focus.sh) is set or has
-# undelivered held outcomes: {projects:[<name>...], until:<string>|null,
+# undelivered held outcomes: {state:<string>, projects:[<name>...],
 # held:[{repo, summary, class?}]}. build groups held by repo the same way, and
 # the template shows it above Captain's Call listing every held outcome, so a
 # window never hides one from the board; held decisions stay ordinary
@@ -200,7 +200,7 @@ validate_payload() {  # <data.json>
         | type == "object"
           and (.projects | type == "array")
           and ([.projects[] | nonempty_string] | all)
-          and ((has("until") | not) or (.until == null) or (.until | type == "string"))
+          and ((has("state") | not) or (.state | IN("active", "off", "damaged", "unreadable")))
           and (.held | type == "array")
           and ([.held[] | focus_held_item] | all));
     def charted_item:

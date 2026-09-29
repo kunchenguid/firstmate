@@ -317,7 +317,7 @@ test_the_focus_window_lists_every_held_outcome_on_the_board() {
 $(decision_card beta-call '"beta"' "Beta call")
 EOF
 )
-  out=$(render_call "$home" "$calls" '{"projects":["alpha"],"until":null,
+  out=$(render_call "$home" "$calls" '{"projects":["alpha"],
     "held":[{"repo":"beta","class":"decision","summary":"beta needs a call"},
             {"repo":"gamma","class":"review-ready","summary":"gamma PR ready"}]}')
   printf '%s' "$out" | jq -e '
@@ -341,7 +341,7 @@ test_cleared_focus_keeps_pending_obligations_visible() {
     --class decision --summary "beta still needs a call" >/dev/null
   FM_HOME="$home" "$ROOT/bin/fm-focus.sh" clear >/dev/null
   focus_json=$(FM_HOME="$home" "$ROOT/bin/fm-focus.sh" status --json | jq '
-    {projects, until, held:[.held[] | {repo:.project, class, summary}]}')
+    {projects, held:[.held[] | {repo:.project, class, summary}]}')
   out=$(render_call "$home" "[$(decision_card beta-call '"beta"' 'Beta call')]" "$focus_json")
   printf '%s' "$out" | jq -e '
     .error == "" and .focus.hidden == false
@@ -352,6 +352,44 @@ test_cleared_focus_keeps_pending_obligations_visible() {
   pass "cleared focus accepts empty projects and renders every pending obligation"
 }
 
+test_unreadable_focus_delivery_records_warn_on_the_board() {
+  local home record mode damage snapshot focus_json out
+  for record in focus-held.jsonl .focus-held-delivered; do
+    for mode in active cleared; do
+      for damage in malformed directory; do
+        home=$(make_home "unreadable-$record-$mode-$damage")
+        FM_HOME="$home" "$ROOT/bin/fm-focus.sh" set alpha >/dev/null
+        FM_HOME="$home" "$ROOT/bin/fm-focus.sh" route --task beta-call --project beta \
+          --class completion --summary "beta completed" >/dev/null
+        if [ "$mode" = cleared ]; then
+          FM_HOME="$home" "$ROOT/bin/fm-focus.sh" clear >/dev/null
+        fi
+        if [ "$damage" = malformed ]; then
+          printf 'unreadable record\n' > "$home/state/$record"
+        else
+          rm -f "$home/state/$record"
+          mkdir "$home/state/$record"
+        fi
+        snapshot=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+          "$ROOT/bin/fm-bearings-snapshot.sh" --json) || fail "snapshot failed"
+        printf '%s' "$snapshot" | jq -e '.focus.state == "unreadable"' >/dev/null \
+          || fail "snapshot lost the unreadable delivery state: $snapshot"
+        focus_json=$(printf '%s' "$snapshot" | jq '.focus |
+          {state, projects:(if .projects == "" then [] else (.projects | split(", ")) end),
+           held:[.held[] | {repo:.project, class, summary}]}')
+        out=$(render_call "$home" '[]' "$focus_json")
+        printf '%s' "$out" | jq -e '
+          .error == "" and .focus.hidden == false
+          and (.focus.lines | join(" ") | contains("Held outcomes may be awaiting delivery"))
+          and (.focus.lines | join(" ") | contains("0 held") | not)
+        ' >/dev/null || fail "unreadable $record ($mode, $damage) hid pending delivery: $out"
+      done
+    done
+  done
+  pass "unreadable ledger and delivery marker warn on active and cleared focus boards"
+}
+
+test_unreadable_focus_delivery_records_warn_on_the_board
 test_captains_call_is_grouped_by_project_without_dropping_a_card
 test_the_focus_window_lists_every_held_outcome_on_the_board
 test_cleared_focus_keeps_pending_obligations_visible

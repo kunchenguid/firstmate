@@ -101,8 +101,8 @@
 #   -h,--help        usage
 #
 # The captain's focus window (bin/fm-focus.sh) adds a `focus` object only while
-# a window is set, has ended, is unreadable, or has undelivered held outcomes:
-# {state, projects, until, held[{seq,task,project,class,summary}]}, with held
+# a window is set, is unreadable, or has undelivered held outcomes:
+# {state, projects, held[{seq,task,project,class,summary}]}, with held
 # grouped by project the same way decisions_open is. Held outcomes stay listed
 # there, and their decisions stay in decisions_open, so a window never hides a
 # captain-facing item from Bearings.
@@ -169,7 +169,7 @@ Default fields: schema, home, generated, prs, in_flight{id,kind,state,repo,name,
   decisions_open{id,key,verb,summary,owner,repo}, landed{id,what,artifact,owner},
   gates{id,title,blocked_by,reason,owner,filed,repo}, reports{id,path}, recorded_prs{id,url},
   unhealthy_endpoints{...} (only when non-empty), omitted{surface,reveal},
-  focus{state,projects,until,held[...]} (only while a focus window or its held
+  focus{state,projects,held[...]} (only while a focus window or its held
   outcomes exist).
 Default gates are selected newest filed first before their bound; undated gates
   retain input order after dated gates.
@@ -375,17 +375,17 @@ fi
 FOCUS=null
 if FOCUS_RAW=$("$SCRIPT_DIR/fm-focus.sh" status --json 2>/dev/null); then
   FOCUS=$(printf '%s' "$FOCUS_RAW" | jq -c '
-    if .active or .ended or .damaged or ((.held | length) > 0) then
-      {state:(if .active then "active" elif .ended then "ended" elif .damaged then "damaged" else "off" end),
-       projects:(.projects | join(", ")), until:.until,
+    if .active or .damaged or ((.held | length) > 0) then
+      {state:(if .active then "active" elif .damaged then "damaged" else "off" end),
+       projects:(.projects | join(", ")),
        held:(.held as $held
              | (reduce ($held[] | .project) as $p ([]; if any(.[]; . == $p) then . else . + [$p] end)) as $order
              | [$order[] as $p | $held[] | select(.project == $p)
                 | {seq, task, project, class, summary:(.summary | gsub("\\s+"; " ")
                                                        | if length > 120 then .[:119] + "…" else . end)}])}
-    else null end') || FOCUS='{"state":"unreadable","projects":"","until":null,"held":[]}'
+    else null end') || FOCUS='{"state":"unreadable","projects":"","held":[]}'
 else
-  FOCUS='{"state":"unreadable","projects":"","until":null,"held":[]}'
+  FOCUS='{"state":"unreadable","projects":"","held":[]}'
 fi
 
 # --- projection: canonical snapshot -> fm-bearings.v1 model (JSON) ----------
