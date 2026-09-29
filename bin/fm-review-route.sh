@@ -138,7 +138,13 @@ if [ "$ROUNDS" -ge 2 ] && [ -z "$FINDING" ]; then
   exit 3
 fi
 
-DELIVERY_ID=$(printf '%s\n' "$ID" "$PR" "$HEAD" "$CLASS" "$FAMILY" | shasum -a 256 | cut -c1-16)
+if command -v shasum >/dev/null 2>&1; then
+  DELIVERY_ID=$(printf '%s\n' "$ID" "$PR" "$HEAD" "$CLASS" "$FAMILY" | shasum -a 256 | cut -c1-16)
+elif command -v sha256sum >/dev/null 2>&1; then
+  DELIVERY_ID=$(printf '%s\n' "$ID" "$PR" "$HEAD" "$CLASS" "$FAMILY" | sha256sum | cut -c1-16)
+else
+  die 'shasum or sha256sum is required'
+fi
 MESSAGE="Independent $CLASS review requested for task $ID. Review exact head $HEAD, PR $PR. Use a different model family from the implementer; target family $FAMILY. Report the verdict and finding keys to firstmate. Review request id $DELIVERY_ID."
 [ -z "$FINDING" ] || MESSAGE="$MESSAGE Blocking $FINDING: $RATIONALE"
 FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-send.sh" "$OWNER" --fire-and-forget "$DELIVERY_ID" "$MESSAGE" \
