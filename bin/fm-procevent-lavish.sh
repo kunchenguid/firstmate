@@ -34,7 +34,7 @@
 # poll       The registered listener command `arm` publishes, not a command to
 #            run in a conversational turn. It runs the published blocking poll
 #            and prints its response verbatim, absorbing only the one exact
-#            transient interruption described below. A task-owned arm consumes
+#            transient interruption described below. A reply-bearing arm consumes
 #            its staged reply file once - reading and removing it before the
 #            poll - and hands the contents to the published `--agent-reply`
 #            argument; later retries poll without that reply. That post is best
@@ -221,7 +221,6 @@ cmd_arm() {
     esac
   done
   [ -n "$artifact" ] || usage
-  [ -z "$reply_file" ] || [ -n "$task" ] || usage
   command -v lavish-axi >/dev/null 2>&1 || die "lavish-axi is not installed"
   poll_retry_delay >/dev/null
   id=$(cmd_source_id "$artifact") || exit 1
@@ -233,10 +232,7 @@ cmd_arm() {
     FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" register-task lavish "$id" "$task" -- \
       "${listener[@]}" || exit 1
   else
-    # This adapter's own listener command, which runs the plain blocking form
-    # with no --timeout-ms so completion is a server event, and absorbs only
-    # the exact transient interruption.
-    FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" register lavish "$id" \
+    FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" register-firstmate lavish "$id" \
       -- "${listener[@]}" || exit 1
   fi
   # Registration is not a running listener. Readiness is the process-event
@@ -244,22 +240,18 @@ cmd_arm() {
   # started so arm does not leave it registered.
   listening=0
   FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" ensure-listening "$id" || listening=$?
-  if [ "$listening" -eq 3 ] && [ -z "$task" ]; then
+  if [ "$listening" -eq 3 ]; then
     printf 'still-listening: %s\n' "$id"
     printf 'artifact: %s\n' "$real"
     [ -z "$task" ] || printf 'owner-task: %s\n' "$task"
     printf 'note: an earlier listener is still live and serving this board; this registration takes effect only after the source is retired and armed again\n'
     exit 0
   fi
-  if [ "$listening" -eq 4 ]; then
-    printf 'error: the Lavish session ended while its reply was being delivered; stop and conclude the review\n' >&2
-    exit 4
-  fi
   if [ "$listening" -ne 0 ]; then
     owner=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" list 2>/dev/null \
       | awk -v id="$id" '$1 == id { print $3; exit }')
     case "$owner" in
-      live|orphaned|task:*/listening|task:*/round-open) ;;
+      live|orphaned|firstmate/listening|firstmate/round-open|task:*/listening|task:*/round-open) ;;
       *) FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" retire "$id" >/dev/null 2>&1 || true ;;
     esac
     exit 1
@@ -366,26 +358,6 @@ poll_iteration_floor_wait() {
   ' "$1" "$2"
 }
 
-accept_runner_launch() {
-  local ready=${FM_PROCEVENT_LAUNCH_READY_FILE-} go_fd=${FM_PROCEVENT_LAUNCH_GO_FD-} signal state reg name
-  [ -n "$ready$go_fd" ] || return 0
-  [ "$go_fd" = 3 ] || die "invalid process-event launch boundary"
-  state=$(fm_procevent_state_root_resolve "$FM_HOME/state") \
-    || die "cannot resolve process-event state"
-  reg=$(fm_procevent_registry_dir "$state") || die "cannot resolve process-event registry"
-  name=${ready##*/}
-  [ "${ready%/*}" = "$reg" ] || die "invalid process-event readiness path"
-  case "$name" in .*.adapter-ready) ;; *) die "invalid process-event readiness path" ;; esac
-  [ -f "$ready" ] && [ ! -L "$ready" ] \
-    && [ "$(fm_pr_file_mode "$ready" 2>/dev/null || true)" = 600 ] \
-    || die "unsafe process-event readiness path"
-  printf 'ready\n' > "$ready" || die "cannot accept process-event launch"
-  IFS= read -r signal <&3 || die "process-event launch boundary closed"
-  exec 3<&-
-  unset FM_PROCEVENT_LAUNCH_READY_FILE FM_PROCEVENT_LAUNCH_GO_FD
-  [ "$signal" = go ] || exit 125
-}
-
 cmd_poll() {
   local artifact=${1-} delay attempt=0 response cleanup_command rc filter_rc iteration_started
   local pipeline_status reply_file=''
@@ -416,7 +388,6 @@ cmd_poll() {
     [ -f "$artifact" ] && [ ! -L "$artifact" ] && [ -r "$artifact" ] \
       || die "artifact is no longer a readable file: $artifact"
     apply_session_host "$artifact"
-    accept_runner_launch
     # Posting a round's reply is BEST EFFORT and deliberately carries no delivery
     # machinery. The staged file is the only record that a reply is owed, so it is
     # consumed HERE - after every non-posting step that could abort this poll has

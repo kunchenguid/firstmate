@@ -763,9 +763,64 @@ assert_absent "$HEMPTY/state/procevent/$quiet_id.source" \
   "an empty board close still retires its ended source"
 pass "an empty board close is captured and recorded handled without ever waking the captain"
 
-# --- end-user regression: one task-owned Lavish session end to end -----------
-# Initial arm proves its listener, same-session re-arms post each reply once,
-# and the terminal round stays owned until acknowledgement concludes the board.
+# --- Firstmate replies stay in the active Lavish session ----------------------
+HFIRSTMATE="$TMP_ROOT/hfirstmate"; new_home "$HFIRSTMATE"
+FIRSTMATE_BIN=$(fm_fakebin "$TMP_ROOT/lavish-firstmate-stub")
+FIRSTMATE_ROOT="$TMP_ROOT/lavish-firstmate-root"; mkdir -p "$FIRSTMATE_ROOT"; export FIRSTMATE_ROOT
+cat > "$FIRSTMATE_BIN/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+set -eu
+n=$(cat "$FIRSTMATE_ROOT/count" 2>/dev/null || echo 0)
+n=$((n + 1))
+printf '%s\n' "$n" > "$FIRSTMATE_ROOT/count"
+if [ "${3-}" = --agent-reply ]; then
+  printf '%s\n' "$4" >> "$FIRSTMATE_ROOT/replies"
+fi
+while [ ! -e "$FIRSTMATE_ROOT/trigger$n" ]; do sleep 0.02; done
+if [ "$n" = 1 ]; then
+  printf 'session:\n  status: feedback\nprompts[1]{uid,prompt,selector,tag,text}:\n  "","please revise","","message",""\n'
+else
+  printf 'session:\n  status: ended\n  session_ended: true\n'
+fi
+SH
+chmod +x "$FIRSTMATE_BIN/lavish-axi"
+FIRSTMATE_ART="$FIRSTMATE_ROOT/board.html"
+printf '<h1>Firstmate review</h1>\n' > "$FIRSTMATE_ART"
+lavish_session "$FIRSTMATE_ART"
+firstmate_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$FIRSTMATE_ART")
+fm_test_track_procevent_home "$HFIRSTMATE"
+PATH="$FIRSTMATE_BIN:$PATH" FM_HOME="$HFIRSTMATE" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$FIRSTMATE_ART" >/dev/null
+touch "$FIRSTMATE_ROOT/trigger1"
+wait_capture "$HFIRSTMATE" "$firstmate_id" \
+  || fail "Firstmate's Lavish feedback was not durably captured"
+PATH="$FIRSTMATE_BIN:$PATH" pe "$HFIRSTMATE" reconcile >/dev/null
+[ "$(cat "$FIRSTMATE_ROOT/count")" = 1 ] \
+  || fail "an open Firstmate round started another reply-less poll"
+printf 'revision complete\n' > "$FIRSTMATE_ROOT/reply"
+PATH="$FIRSTMATE_BIN:$PATH" FM_HOME="$HFIRSTMATE" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$FIRSTMATE_ART" \
+    --agent-reply-file "$FIRSTMATE_ROOT/reply" >/dev/null
+[ -f "$HFIRSTMATE/state/procevent-inbox/$firstmate_id.1.handled" ] \
+  || fail "Firstmate's reply did not acknowledge the captured round"
+wait_for "$FIRSTMATE_ROOT/replies" \
+  || fail "Firstmate's reply never reached the active Lavish session"
+[ "$(cat "$FIRSTMATE_ROOT/replies")" = "revision complete" ] \
+  || fail "the active Lavish session received the wrong reply"
+PATH="$FIRSTMATE_BIN:$PATH" pe "$HFIRSTMATE" reconcile >/dev/null
+[ "$(wc -l < "$FIRSTMATE_ROOT/replies" | tr -d ' ')" = 1 ] \
+  || fail "listener recovery posted Firstmate's reply more than once"
+touch "$FIRSTMATE_ROOT/trigger2"
+wait_capture "$HFIRSTMATE" "$firstmate_id" \
+  || fail "Firstmate's terminal Lavish round did not settle"
+assert_absent "$HFIRSTMATE/state/procevent/$firstmate_id.source" \
+  "Firstmate's terminal Lavish session remained armed"
+pass "Firstmate replies return once to the active Lavish session"
+
+# --- end-user-aligned regression: worker-owned rounds stay open until re-arm -
+# One worker-owned board runs three rounds: feedback reaches only the worker's
+# inbox, each re-arm acknowledges the prior capture and posts its reply once,
+# and a terminal session ends without another automatic poll.
 HMULTI="$TMP_ROOT/hmulti"; new_home "$HMULTI"
 MULTI_BIN=$(fm_fakebin "$TMP_ROOT/lavish-multi-stub")
 MULTI_ROOT="$TMP_ROOT/lavish-multi-root"
@@ -813,11 +868,9 @@ new_task_endpoint "$HMULTI" worker-1
 new_task_endpoint "$HMULTI" worker-2
 mkdir -p "$HMULTI/config"
 printf 'wrong-server.example\n' > "$HMULTI/config/lavish-axi-host"
-multi_arm_out=$(PATH="$MULTI_BIN:$PATH" LAVISH_AXI_HOST=arming.example LAVISH_AXI_PORT=24387 FM_HOME="$HMULTI" \
+PATH="$MULTI_BIN:$PATH" LAVISH_AXI_HOST=arming.example LAVISH_AXI_PORT=24387 FM_HOME="$HMULTI" \
   "$ROOT/bin/fm-procevent-lavish.sh" arm "$MULTI_ART" --for worker-1 \
-  --agent-reply-file "$MULTI_ROOT/reply1")
-assert_contains "$multi_arm_out" "armed: $multi_id" \
-  "initial task-owned arm reported success without proving its listener"
+  --agent-reply-file "$MULTI_ROOT/reply1" >/dev/null
 if PATH="$MULTI_BIN:$PATH" FM_HOME="$HMULTI" \
   "$ROOT/bin/fm-procevent-lavish.sh" arm "$MULTI_ART" >/dev/null 2>"$MULTI_ROOT/firstmate-arm.err"; then
   fail "firstmate arm replaced a worker-owned board"
@@ -961,7 +1014,7 @@ PATH="$MULTI_BIN:$PATH" pe "$HMULTI" reconcile >/dev/null 2>&1 || true
   || fail "the concluded board was polled again: $(cat "$MULTI_ROOT/count") polls"
 [ -z "$(wake_payloads "$HMULTI")" ] \
   || fail "worker-owned rounds produced a firstmate wake: $(wake_payloads "$HMULTI")"
-pass "task-owned Lavish proves initial readiness, posts same-session replies, and reconciles terminal state"
+pass "worker-owned Lavish rounds deliver to the worker, acknowledge on re-arm, and stop at session end"
 
 # --- end-user-aligned regression: a half-written capture does not wedge -----
 # The result file is a capture's commit marker, so an owner sidecar left behind
@@ -1247,9 +1300,10 @@ assert_contains "$intr_out" "handled: $intr_id 1" \
   || fail "the interrupted conclude was never finished by the repeated acknowledgement"
 pass "an interrupted conclude leaves the ended board unpollable and finishes on retry"
 
-# --- end-user-aligned regression: a failed re-arm keeps its round open --------
-# Re-arm may publish the next generation, but it acknowledges the replaced round
-# only after that generation's child accepts the reply handoff.
+# --- end-user-aligned regression: a failed re-arm keeps the last generation ---
+# Re-arm publishes the next generation and acknowledges the round it replaces.
+# When that acknowledgement cannot be recorded the whole re-arm has to be off,
+# leaving the generation the board is actually running untouched.
 HROLL="$TMP_ROOT/hrollback"; new_home "$HROLL"
 ROLL_ROOT="$TMP_ROOT/lavish-rollback-root"; mkdir -p "$ROLL_ROOT"; export ROLL_ROOT
 ROLL_BIN=$(fm_fakebin "$TMP_ROOT/lavish-rollback-stub")
@@ -1280,6 +1334,7 @@ wait_for "$ROLL_ROOT/replies" \
 # re-arm's acknowledgement, leaving no round for the retried re-arm.
 wait_capture "$HROLL" "$roll_id" \
   || fail "the first generation's round was never captured"
+cp "$HROLL/state/procevent/$roll_id.source" "$ROLL_ROOT/generation-one.source"
 chmod 0500 "$HROLL/state/procevent-inbox"
 rollback_status=0
 PATH="$ROLL_BIN:$PATH" FM_HOME="$HROLL" \
@@ -1288,6 +1343,8 @@ PATH="$ROLL_BIN:$PATH" FM_HOME="$HROLL" \
 chmod 0700 "$HROLL/state/procevent-inbox"
 [ "$rollback_status" -ne 0 ] \
   || fail "a re-arm that could not acknowledge its round still reported success"
+cmp -s "$ROLL_ROOT/generation-one.source" "$HROLL/state/procevent/$roll_id.source" \
+  || fail "a failed re-arm replaced the generation the board is still running"
 [ ! -f "$HROLL/state/procevent-inbox/$roll_id.1.handled" ] \
   || fail "a failed re-arm still acknowledged the round it could not close"
 PATH="$ROLL_BIN:$PATH" FM_HOME="$HROLL" \
@@ -1297,7 +1354,7 @@ wait_for_lines "$ROLL_ROOT/replies" 2 \
   || fail "the retried re-arm did not hand the board its generation's reply exactly once"
 [ "$(grep -c 'generation two' "$ROLL_ROOT/replies" 2>/dev/null || true)" = 1 ] \
   || fail "the retried re-arm did not hand the board its generation's reply exactly once"
-pass "a re-arm that cannot launch its reply leaves the captured round open"
+pass "a re-arm that cannot acknowledge its round leaves the running generation alone"
 
 # --- end-user-aligned regression: re-arm is acknowledgement, nothing else -----
 # The board is armed once and re-armed only to acknowledge a captured round. A
@@ -3679,10 +3736,9 @@ SH
 chmod +x "$REUSED_GROUP_BIN/ps"
 pe_register "$HREUSED_GROUP" lavish reused-runner-group-src -- \
   "$BLOCKER" "$REUSED_GROUP_TRIGGER" "reused group payload" >/dev/null
-reused_group_reconcile=$(PATH="$REUSED_GROUP_BIN:$PATH" FM_PROC_ROOT_OVERRIDE="$TMP_ROOT/no-reused-group-proc" \
+PATH="$REUSED_GROUP_BIN:$PATH" FM_PROC_ROOT_OVERRIDE="$TMP_ROOT/no-reused-group-proc" \
   FM_PROCEVENT_OWNER_LEASE_SECONDS=30 FM_PROCEVENT_OWNER_CHECK_SECONDS=1 \
-  pe "$HREUSED_GROUP" reconcile 2>&1) \
-  || fail "the reused-group fixture did not start: $reused_group_reconcile"
+  pe "$HREUSED_GROUP" reconcile >/dev/null
 wait_for "$HREUSED_GROUP/state/procevent/reused-runner-group-src.runner" \
   || fail "the reused-group fixture runner did not start"
 REUSED_GROUP_RUNNER=$(cat "$HREUSED_GROUP/state/procevent/reused-runner-group-src.runner")
