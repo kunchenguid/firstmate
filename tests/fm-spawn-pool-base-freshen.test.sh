@@ -453,19 +453,23 @@ test_unresolved_remote_default_refuses_pool() {
   pass "an unresolved remote default branch refuses the pooled worktree"
 }
 
-# A slot left on a stale submodule pin is the field failure this diagnosis exists
-# for: a refresh moved the superproject and left the submodule behind, so the
-# refusal fires a spawn later, on a slot whose own `git status` looks clean to the
-# operator. Nothing here is converged - the gate only has to say why. The fixture
-# only builds the repositories; the residue itself is produced by a real spawn, so
-# these tests cover the reset that actually strands the submodule.
-make_submodule_case() {  # <name> <id>
-  local name=$1 id=$2 case_dir home project origin pool publisher fakebin sub subpin1 subpin2 advanced
+# Submodule pins. Treehouse moves a reused slot's superproject with a reset that
+# never touches submodules, so a slot crossing a moved gitlink keeps its
+# submodule on the pin the previous base recorded; Treehouse then treats the slot
+# as dirty for good, which is how a pool fills up. Spawn therefore syncs
+# submodules after its own refresh, and converges that residue only on a
+# Treehouse slot it has just acquired. Residue of unknown origin, and any real
+# work, is still refused. The fixtures only build the repositories; the residue
+# itself comes from the same reset Treehouse runs.
+make_submodule_case() {  # <name> <id> [plain|slot] [init|uninit]
+  local name=$1 id=$2 layout=${3:-plain} populate=${4:-init}
+  local case_dir home project origin pool publisher fakebin sub subpin1 subpin2 advanced
   case_dir="$TMP_ROOT/$name"
   home="$case_dir/home"
   project="$case_dir/project"
   origin="$case_dir/origin.git"
   pool="$case_dir/pool"
+  [ "$layout" = plain ] || pool="$case_dir/slots/1/project"
   publisher="$case_dir/publisher"
   sub="$case_dir/sub-origin"
   fakebin=$(make_spawn_fakebin "$case_dir/fake")
@@ -474,6 +478,10 @@ make_submodule_case() {  # <name> <id>
   printf 'codex\n' > "$home/config/crew-harness"
   fm_test_spawn_brief "$home" "$id"
   touch "$home/state/.last-watcher-beat"
+  # Git refuses file:// submodule transport unless configured to allow it; see
+  # run_submodule_spawn for how spawn's own submodule fetches get this file.
+  mkdir -p "$case_dir"
+  printf '[protocol "file"]\n\tallow = always\n' > "$case_dir/gitconfig"
 
   git init --quiet -b main "$sub"
   printf 'pin one\n' > "$sub/lib.txt"
@@ -493,8 +501,12 @@ make_submodule_case() {  # <name> <id>
   git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
   git clone --quiet --bare "$project" "$origin"
   git -C "$project" remote add origin "file://$origin"
+  mkdir -p "$(dirname "$pool")"
   git -C "$project" worktree add --quiet --detach "$pool" HEAD
-  git -C "$pool" -c protocol.file.allow=always submodule --quiet update --init
+  [ "$populate" = uninit ] || git -C "$pool" -c protocol.file.allow=always submodule --quiet update --init
+  if [ "$layout" = slot ]; then
+    printf '{"worktrees":[{"name":"1","path":"%s"}]}\n' "$pool" > "$case_dir/slots/treehouse-state.json"
+  fi
 
   # Advance origin and move the submodule pin, exactly as the field incident did.
   git clone --quiet "file://$origin" "$publisher"
@@ -511,38 +523,198 @@ read_submodule_case() {
   IFS='|' read -r CASE_DIR HOME_DIR PROJECT_DIR POOL_DIR FAKEBIN_DIR SUBPIN1 SUBPIN2 ADVANCED_SHA <<EOF
 $1
 EOF
+  SLOT_CLAIM="$(dirname "$POOL_DIR")/.fm-slot-owner"
 }
 
-# The first of two consecutive spawns: it succeeds, resets the superproject onto
-# the base that moved the pin, and leaves the submodule checkout on the pin the
-# old base recorded. That reset is what strands the slot, so every case below
-# starts from residue this code path actually produced rather than a hand-built one.
-strand_submodule_pin_via_spawn() {  # <seed-id>
-  local id=$1 out status
-  fm_test_spawn_brief "$HOME_DIR" "$id"
-  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
-  status=$?
-  expect_code 0 "$status" "the spawn that moves the submodule pin should succeed"
-  assert_contains "$out" "spawned $id" "the spawn that moves the submodule pin did not report success"
-  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$ADVANCED_SHA" ] \
-    || fail "the first spawn did not move the pooled base across the moved submodule pin"
+# The suite pins GIT_CONFIG_GLOBAL to /dev/null (tests/git-config-helpers.sh); a
+# caller-supplied one stays authoritative, so spawn's submodule fetches get the
+# case's file:// allowance here without touching any real configuration.
+run_submodule_spawn() {
+  GIT_CONFIG_GLOBAL="$CASE_DIR/gitconfig" run_spawn "$@"
+}
+
+# Leave the slot exactly as Treehouse's own get or return does once the pin has
+# moved: the superproject reset onto the advanced base with `git read-tree --reset
+# -u` and HEAD written directly, while the submodule stays on the old pin.
+strand_submodule_pin_like_treehouse() {
+  git -C "$POOL_DIR" fetch --quiet origin
+  git -C "$POOL_DIR" read-tree --reset -u "$ADVANCED_SHA"
+  git -C "$POOL_DIR" update-ref --no-deref HEAD "$ADVANCED_SHA"
   [ "$(git -C "$POOL_DIR/ui" rev-parse HEAD)" = "$SUBPIN1" ] \
-    || fail "the first spawn did not strand the submodule on the pin the old base recorded"
+    || fail "the Treehouse-style reset moved the submodule; the fixture needs the residue it leaves"
+  [ "$(git -C "$POOL_DIR" status --porcelain)" = " M ui" ] \
+    || fail "the Treehouse-style reset did not leave a stale-pin residue: $(git -C "$POOL_DIR" status --porcelain)"
 }
 
-test_stale_submodule_pin_explains_itself() {
+# Publish one more submodule commit and move the base's pin onto it, as another
+# landed task would. Echoes the new pin.
+advance_submodule_pin() {  # <label>
+  local sub="$CASE_DIR/sub-origin" publisher="$CASE_DIR/publisher" pin
+  git -C "$sub" checkout --quiet main
+  printf '%s\n' "$1" > "$sub/lib.txt"
+  git -C "$sub" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qam "$1"
+  pin=$(git -C "$sub" rev-parse HEAD)
+  git -C "$sub" checkout --quiet --detach
+  git -C "$publisher/ui" -c protocol.file.allow=always fetch --quiet origin
+  git -C "$publisher/ui" checkout --quiet "$pin"
+  git -C "$publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qam "move pin to $1"
+  git -C "$publisher" push --quiet origin main
+  printf '%s\n' "$pin"
+}
+
+test_spawns_across_moving_submodule_pins_sync_them() {
+  local rec id out status pin3
+  id='pool-sub-sync-r12'
+  rec=$(make_submodule_case sub-sync "$id")
+  read_submodule_case "$rec"
+
+  out=$(run_submodule_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "a spawn across a moved submodule pin should launch"$'\n'"$out"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$ADVANCED_SHA" ] \
+    || fail "the spawn did not refresh the pooled base across the moved pin"
+  [ "$(git -C "$POOL_DIR/ui" rev-parse HEAD)" = "$SUBPIN2" ] \
+    || fail "the spawn left the submodule on the pin the old base recorded"
+  [ -z "$(git -C "$POOL_DIR" status --porcelain)" ] \
+    || fail "the spawn left its worker a stale submodule checkout: $(git -C "$POOL_DIR" status --porcelain)"
+
+  pin3=$(advance_submodule_pin 'pin three')
+  id='pool-sub-sync-again-r12'
+  fm_test_spawn_brief "$HOME_DIR" "$id"
+  out=$(run_submodule_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "the next spawn across a second pin move should launch too"$'\n'"$out"
+  [ "$(git -C "$POOL_DIR/ui" rev-parse HEAD)" = "$pin3" ] \
+    || fail "the second spawn left the submodule behind the base's pin"
+  [ -z "$(git -C "$POOL_DIR" status --porcelain)" ] \
+    || fail "the second spawn left a stale submodule checkout: $(git -C "$POOL_DIR" status --porcelain)"
+  pass "consecutive spawns across moving submodule pins launch with the submodule on the base's pin"
+}
+
+test_treehouse_residue_in_an_acquired_slot_is_synced() {
+  local rec id out status
+  id='pool-sub-residue-r13'
+  rec=$(make_submodule_case sub-residue "$id" slot)
+  read_submodule_case "$rec"
+  # Workers often leave the submodule on a local branch; syncing must keep it,
+  # even where the project asks `git submodule update` to rebase that branch.
+  git -C "$POOL_DIR/ui" checkout --quiet -b worker-left-this
+  git -C "$PROJECT_DIR" config submodule.ui.update rebase
+  strand_submodule_pin_like_treehouse
+
+  out=$(run_submodule_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "Treehouse's own residue in a slot this spawn acquired should be synced, not refused"$'\n'"$out"
+  assert_contains "$out" "submodule 'ui' is checked out at $SUBPIN1, but this base records $SUBPIN2" \
+    "the spawn did not name the residue it synced"
+  assert_contains "$out" "syncing them with the refreshed base" \
+    "the spawn did not say it synced Treehouse's residue"
+  assert_not_contains "$out" "refusing" "the spawn refused Treehouse's own residue"
+  [ "$(git -C "$POOL_DIR/ui" rev-parse HEAD)" = "$SUBPIN2" ] \
+    || fail "the spawn did not move the submodule onto the base's pin"
+  [ -z "$(git -C "$POOL_DIR" status --porcelain)" ] \
+    || fail "the synced slot is not clean: $(git -C "$POOL_DIR" status --porcelain)"
+  [ "$(git -C "$POOL_DIR/ui" rev-parse refs/heads/worker-left-this)" = "$SUBPIN1" ] \
+    || fail "syncing the submodule moved or removed a branch inside it"
+  grep -Fxq -- "task=$id" "$SLOT_CLAIM" || fail "the launched task did not claim its slot"
+  pass "Treehouse's stale-pin residue in a slot this spawn acquired is synced, keeping the submodule's branches"
+}
+
+test_new_slot_starts_with_its_submodules_initialized() {
+  local rec id out status
+  id='pool-sub-uninit-r14'
+  rec=$(make_submodule_case sub-uninit "$id" slot uninit)
+  read_submodule_case "$rec"
+  case $(git -C "$POOL_DIR" submodule status ui) in
+    -*) ;;
+    *) fail "fixture did not leave the new slot's submodule uninitialized" ;;
+  esac
+
+  out=$(run_submodule_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "a spawn into a new slot should launch"$'\n'"$out"
+  case $(git -C "$POOL_DIR" submodule status ui) in
+    " $SUBPIN2 ui"*) ;;
+    *) fail "the new slot's submodule is not checked out at the base's pin: $(git -C "$POOL_DIR" submodule status ui)" ;;
+  esac
+  [ -z "$(git -C "$POOL_DIR" status --porcelain)" ] \
+    || fail "the new slot is not clean after its submodules were initialized"
+  pass "a new slot starts with its submodules initialized at the base's pins"
+}
+
+test_update_none_submodule_stays_unpopulated() {
+  local rec id out status
+  id='pool-sub-update-none-r17'
+  rec=$(make_submodule_case sub-update-none "$id" slot uninit)
+  read_submodule_case "$rec"
+  git -C "$PROJECT_DIR" config submodule.ui.update none
+
+  out=$(run_submodule_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "a spawn into a slot with an update=none submodule should launch"$'\n'"$out"
+  case $(git -C "$POOL_DIR" submodule status ui) in
+    -*) ;;
+    *) fail "the spawn populated a submodule the project marks update = none" ;;
+  esac
+  assert_not_contains "$out" "could not initialize" \
+    "the spawn warned about a submodule the project asked it not to populate"
+  pass "a submodule the project marks update = none is left unpopulated"
+}
+
+test_uninitializable_submodule_warns_and_launches() {
+  local rec id out status
+  id='pool-sub-uninit-unreachable-r15'
+  rec=$(make_submodule_case sub-uninit-unreachable "$id" slot uninit)
+  read_submodule_case "$rec"
+  git -C "$PROJECT_DIR" config submodule.ui.url "file://$CASE_DIR/missing-sub"
+
+  out=$(run_submodule_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "a submodule that cannot be initialized should not block the launch"$'\n'"$out"
+  assert_contains "$out" "could not initialize every submodule" \
+    "the spawn did not warn about the submodule it could not initialize"
+  case $(git -C "$POOL_DIR" submodule status ui) in
+    -*) ;;
+    *) fail "the uninitializable submodule unexpectedly reads as initialized" ;;
+  esac
+  pass "a submodule that cannot be initialized warns and leaves it to the worker, as before"
+}
+
+test_unfetchable_submodule_pin_refuses() {
+  local rec id out status pin3
+  id='pool-sub-unfetchable-r16'
+  rec=$(make_submodule_case sub-unfetchable "$id")
+  read_submodule_case "$rec"
+  pin3=$(advance_submodule_pin 'pin three')
+  # The new base is already fetched, as a fetch without submodule recursion (such
+  # as Treehouse's own) leaves it, so only the submodule's missing pin is at stake.
+  git -C "$POOL_DIR" fetch --quiet --no-recurse-submodules origin
+  mv "$CASE_DIR/sub-origin" "$CASE_DIR/sub-origin-gone"
+
+  out=$(run_submodule_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "the spawn launched although the base's submodule pin could not be fetched"
+  assert_contains "$out" "is not clean after syncing its submodules" \
+    "the spawn did not explain that it could not put the submodule on the base's pin"
+  assert_contains "$out" "this base records $pin3" \
+    "the refusal did not name the pin the base records"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "the refused spawn published task metadata"
+  pass "a submodule pin that cannot be fetched refuses instead of launching a stale checkout"
+}
+
+test_stale_submodule_pin_of_unknown_origin_explains_itself() {
   local rec id out status before before_sub
   id='pool-stale-pin-r7'
   rec=$(make_submodule_case stale-pin "$id")
   read_submodule_case "$rec"
-  strand_submodule_pin_via_spawn 'pool-stale-pin-seed-r7'
+  strand_submodule_pin_like_treehouse
   git -C "$POOL_DIR" remote remove origin
   before=$(git -C "$POOL_DIR" rev-parse HEAD)
   before_sub=$(git -C "$POOL_DIR/ui" rev-parse HEAD)
 
-  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  out=$(run_submodule_spawn "$id" --mode no-mistakes --yolo off)
   status=$?
-  [ "$status" -ne 0 ] || fail "the second spawn launched from a slot carrying a stale submodule pin"
+  [ "$status" -ne 0 ] || fail "the spawn launched from a non-Treehouse copy carrying a stale submodule pin"
   assert_contains "$out" "stale submodule checkout" \
     "refusal did not name the cause as a stale submodule checkout"
   assert_contains "$out" "submodule 'ui'" "refusal did not name the submodule"
@@ -558,19 +730,21 @@ test_stale_submodule_pin_explains_itself() {
   [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
     || fail "spawn moved HEAD while refusing a stale submodule pin"
   [ "$(git -C "$POOL_DIR/ui" rev-parse HEAD)" = "$before_sub" ] \
-    || fail "spawn converged the submodule; this gate must never touch the slot"
+    || fail "spawn converged a stale pin whose origin it cannot know"
   if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
     printf '# observed stale-pin refusal: %s\n' "$(printf '%s\n' "$out" | grep 'submodule' | head -n 1)"
   fi
-  pass "an origin-less pool with a stale submodule pin refuses while naming both pins and no remedy"
+  pass "a stale submodule pin of unknown origin refuses while naming both pins and no remedy"
 }
 
+# The remaining cases run in a Treehouse slot the spawn acquires, where stale-pin
+# residue would be synced, to prove real work never passes for that residue.
 test_unpushed_submodule_commit_is_still_uncommitted_work() {
   local rec id out status unpushed before before_sub
   id='pool-sub-unpushed-r10'
-  rec=$(make_submodule_case sub-unpushed "$id")
+  rec=$(make_submodule_case sub-unpushed "$id" slot)
   read_submodule_case "$rec"
-  strand_submodule_pin_via_spawn 'pool-sub-unpushed-seed-r10'
+  strand_submodule_pin_like_treehouse
   # A commit made inside the submodule and never pushed leaves the submodule work
   # tree clean and the pins different - the same two facts a stale pin shows. Any
   # checkout of the recorded pin would move HEAD off this commit and leave it
@@ -587,7 +761,7 @@ test_unpushed_submodule_commit_is_still_uncommitted_work() {
   before=$(git -C "$POOL_DIR" rev-parse HEAD)
   before_sub=$unpushed
 
-  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  out=$(run_submodule_spawn "$id" --mode no-mistakes --yolo off)
   status=$?
   [ "$status" -ne 0 ] || fail "spawn launched from a slot holding an unpushed submodule commit"
   assert_contains "$out" "refusing to discard uncommitted work" \
@@ -610,15 +784,15 @@ test_unpushed_submodule_commit_is_still_uncommitted_work() {
 test_work_inside_submodule_is_still_uncommitted_work() {
   local rec id out status
   id='pool-sub-work-r8'
-  rec=$(make_submodule_case sub-work "$id")
+  rec=$(make_submodule_case sub-work "$id" slot)
   read_submodule_case "$rec"
-  strand_submodule_pin_via_spawn 'pool-sub-work-seed-r8'
+  strand_submodule_pin_like_treehouse
   # Put the submodule back on the pin the base records, so the ONLY deviation is
   # real work inside it. This must never be softened into a stale-pin diagnosis.
   git -C "$POOL_DIR/ui" checkout --quiet "$SUBPIN2"
   printf 'work that must survive\n' > "$POOL_DIR/ui/keep-me.txt"
 
-  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  out=$(run_submodule_spawn "$id" --mode no-mistakes --yolo off)
   status=$?
   [ "$status" -ne 0 ] || fail "spawn launched from a slot holding work inside a submodule"
   assert_contains "$out" "refusing to discard uncommitted work" \
@@ -633,14 +807,14 @@ test_work_inside_submodule_is_still_uncommitted_work() {
 test_stale_pin_carrying_real_work_is_not_called_stale() {
   local rec id out status
   id='pool-sub-both-r9'
-  rec=$(make_submodule_case sub-both "$id")
+  rec=$(make_submodule_case sub-both "$id" slot)
   read_submodule_case "$rec"
-  strand_submodule_pin_via_spawn 'pool-sub-both-seed-r9'
+  strand_submodule_pin_like_treehouse
   # Stale pin AND real work inside it: calling this merely stale would be wrong, so
   # the refusal must stay the conservative one.
   printf 'work that must survive\n' > "$POOL_DIR/ui/keep-me.txt"
 
-  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  out=$(run_submodule_spawn "$id" --mode no-mistakes --yolo off)
   status=$?
   [ "$status" -ne 0 ] || fail "spawn launched from a slot with a stale pin and work inside it"
   assert_contains "$out" "refusing to discard uncommitted work" \
@@ -655,14 +829,14 @@ test_stale_pin_carrying_real_work_is_not_called_stale() {
 test_stale_pin_beside_other_dirt_reports_one_verdict() {
   local rec id out status
   id='pool-sub-mixed-r11'
-  rec=$(make_submodule_case sub-mixed "$id")
+  rec=$(make_submodule_case sub-mixed "$id" slot)
   read_submodule_case "$rec"
-  strand_submodule_pin_via_spawn 'pool-sub-mixed-seed-r11'
+  strand_submodule_pin_like_treehouse
   # Git sorts status paths, so the stale 'ui' entry is scanned before this file.
   # The conservative verdict must not arrive contradicted by a stale-pin line.
   printf 'notes the operator still wants\n' > "$POOL_DIR/zz-notes.txt"
 
-  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  out=$(run_submodule_spawn "$id" --mode no-mistakes --yolo off)
   status=$?
   [ "$status" -ne 0 ] || fail "spawn launched from a slot with a stale pin beside an untracked file"
   assert_contains "$out" "refusing to discard uncommitted work" \
@@ -758,7 +932,13 @@ test_origin_config_without_url_refuses_pool
 test_empty_origin_config_section_refuses_pool
 test_empty_only_included_origin_config_section_launches_pool
 test_inactive_conditional_origin_include_launches_pool
-test_stale_submodule_pin_explains_itself
+test_spawns_across_moving_submodule_pins_sync_them
+test_treehouse_residue_in_an_acquired_slot_is_synced
+test_new_slot_starts_with_its_submodules_initialized
+test_update_none_submodule_stays_unpopulated
+test_uninitializable_submodule_warns_and_launches
+test_unfetchable_submodule_pin_refuses
+test_stale_submodule_pin_of_unknown_origin_explains_itself
 test_unpushed_submodule_commit_is_still_uncommitted_work
 test_work_inside_submodule_is_still_uncommitted_work
 test_stale_pin_carrying_real_work_is_not_called_stale

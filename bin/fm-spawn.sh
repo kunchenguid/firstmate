@@ -250,15 +250,23 @@
 #   fetching or resetting its base. An unreachable detected origin, unresolved
 #   default branch, or non-clean worktree refuses a fresh spawn rather than
 #   risking a PR based on stale history or discarding local work.
-#   A slot whose only deviation is a stale submodule gitlink is refused by that
-#   same clean check, but is reported as a stale checkout naming each submodule
-#   and both pins; nothing is converged or removed, and no remedy is suggested.
-#   That report is only reached when each submodule's checked-out commit is
-#   already contained in one of its remotes, so a submodule carrying an unpushed
-#   commit keeps the conservative uncommitted-work refusal instead. That
-#   containment test reads local refs only and never fetches, so this gate stays
-#   usable offline; a stale remote-tracking ref can therefore make an unpushed
-#   commit look contained, which is exactly why no remedy command is printed.
+#   After that refresh, or in place of it when no origin is detected, submodules
+#   are put on the pins the base records: each stale pin is checked out at the
+#   recorded commit on a detached HEAD, and each submodule not yet populated is
+#   initialized as the project configures it (`update = none` stays
+#   unpopulated), so the worker starts on the base's current submodule state.
+#   The spawn refuses unless the worktree is clean afterwards. A failed
+#   initialization that leaves it clean only warns, because the worker then
+#   starts exactly as it did before this step existed.
+#   A slot whose only deviation is stale submodule pins (bin/fm-wake-lib.sh's
+#   fm_submodule_stale_pins owns that test) is judged by where it came from. A
+#   Treehouse slot this spawn has just acquired and claimed was clean before
+#   Treehouse's own reset moved its superproject, so those pins are that reset's
+#   residue: they are synced with the refreshed base instead of refused. Any
+#   other stale pin has an unknown origin and is still refused, naming each
+#   submodule and both pins, with nothing converged or removed and no remedy
+#   suggested. A submodule carrying an unpushed commit, work inside a submodule,
+#   or any other dirt keeps the conservative uncommitted-work refusal either way.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -3255,45 +3263,63 @@ validate_spawn_worktree() { # <source> <inspect-target>
   fi
 }
 
-# A pooled slot whose only deviation is a submodule gitlink is stale, not dirty:
-# an earlier refresh moved the superproject and left the submodule checkout on
-# the pin the previous base recorded. The refusal still stands and this gate
-# never touches the slot; it only names the cause, because "is not clean" while
-# the operator's own `git status` reads clean gives neither a cause nor a remedy.
-# A pin is only reported as stale when the commit the slot holds is already
-# contained in one of the submodule's remotes. Anything that cannot be proven
-# contained - an unpushed commit, a submodule with no remote, a git error - falls
-# through to the conservative uncommitted-work refusal, as does any entry that is
-# not exactly a clean submodule sitting on a different pin. The diagnosis is
-# buffered and only emitted once every entry qualifies, so it can never
-# contradict the verdict.
-#
-# No remedy command is printed, deliberately. That containment check reads local
-# refs only and never fetches, because this gate has to stay usable offline. A
-# remote-tracking ref that has gone stale - its upstream branch deleted or
-# force-pushed, and never pruned - therefore still reads as containment, so a
-# commit that is really unpushed can look contained. Naming the submodule and both
-# pins is what the operator actually needs; printing a checkout command on a
-# judgement that can be fooled could cost them that commit, so the remedy is left
-# to the operator, who can see the whole picture.
-describe_stale_submodule_pins() { # <worktree> <status>
-  local worktree=$1 status=$2 line path want have unpushed lines=
+# A stale submodule pin is reported, never acted on, unless its origin is known.
+# The pin test itself (clean submodule, different commit, contained in one of its
+# remotes) is owned by bin/fm-wake-lib.sh's fm_submodule_stale_pins. Only a
+# Treehouse slot this spawn has just acquired and claimed has a known origin:
+# Treehouse hands out a reused slot only when it is clean, then moves its
+# superproject with a reset that leaves submodules alone, so a pin that passes
+# the test there is that reset's residue and is synced with the refreshed base.
+# Everywhere else the refusal stands and names the submodule and both pins,
+# because "is not clean" while the operator's own `git status` reads clean gives
+# neither a cause nor a remedy. No remedy command is printed: the containment
+# check reads local refs only, so a remote-tracking ref whose upstream branch was
+# deleted or force-pushed still reads as containment, and a checkout command on a
+# judgement that can be fooled could cost the operator a commit.
+report_stale_submodule_pins() { # <severity>
+  printf '%s' "$FM_SUBMODULE_STALE_PIN_LINES" | sed "s/^/$1: /" >&2
+}
+
+# Put the worktree's submodules on the pins its base records, so the worker
+# starts on the base's current submodule state. Stale pins that pass
+# fm_submodule_stale_pins are checked out at the recorded commits; submodules
+# not yet populated are initialized the way the project configures them, so one
+# marked `update = none` stays unpopulated. The worktree must be clean
+# afterwards. A failed initialization that leaves it clean only warns, because
+# the worker then starts exactly as it would have without this step.
+sync_spawn_worktree_submodules() { # <worktree>
+  local worktree=$1 status line init_failed=0
+  local -a unpopulated=()
+  [ -f "$worktree/.gitmodules" ] || return 0
+  status=$(git -C "$worktree" -c core.quotePath=false status --porcelain) || {
+    echo "error: could not inspect pooled worktree '$worktree' before syncing its submodules" >&2
+    return 1
+  }
+  if [ -n "$status" ] && fm_submodule_stale_pins "$worktree" "$status"; then
+    # The status read below is the verdict, so a failed sync is not fatal here.
+    fm_submodule_sync_stale_pins "$worktree" || true
+  fi
   while IFS= read -r line; do
-    [ -n "$line" ] || continue
-    case $line in ' M '*) path=${line#' M '} ;; *) return 1 ;; esac
-    [ "$(git -C "$worktree" ls-files --stage -- "$path" 2>/dev/null | cut -c1-6)" = 160000 ] || return 1
-    [ -z "$(git -C "$worktree/$path" status --porcelain 2>/dev/null)" ] || return 1
-    want=$(git -C "$worktree" rev-parse --verify --quiet "HEAD:$path" 2>/dev/null) || return 1
-    have=$(git -C "$worktree/$path" rev-parse --verify --quiet HEAD 2>/dev/null) || return 1
-    [ "$want" != "$have" ] || return 1
-    unpushed=$(git -C "$worktree/$path" log --format=%H --max-count=1 "$have" --not --remotes -- 2>/dev/null) || return 1
-    [ -z "$unpushed" ] || return 1
-    lines+="error: submodule '$path' is checked out at $have, but this base records $want"$'\n'
-  done <<EOF
-$status
-EOF
-  [ -n "$lines" ] || return 1
-  printf '%s' "$lines" >&2
+    case $line in -*) line=${line#-}; unpopulated+=("${line#* }") ;; esac
+  done < <(git -C "$worktree" submodule status 2>/dev/null)
+  if [ "${#unpopulated[@]}" -gt 0 ]; then
+    git -C "$worktree" submodule --quiet update --init --recursive -- "${unpopulated[@]}" >/dev/null ||
+      init_failed=1
+  fi
+  status=$(git -C "$worktree" -c core.quotePath=false status --porcelain) || {
+    echo "error: could not inspect pooled worktree '$worktree' after syncing its submodules" >&2
+    return 1
+  }
+  if [ -n "$status" ]; then
+    if fm_submodule_stale_pins "$worktree" "$status"; then
+      report_stale_submodule_pins error
+    fi
+    echo "error: pooled worktree '$worktree' is not clean after syncing its submodules with its base; refusing to launch a worker on a stale submodule checkout" >&2
+    return 1
+  fi
+  if [ "$init_failed" = 1 ]; then
+    echo "warning: could not initialize every submodule of pooled worktree '$worktree'; launching with the uninitialized ones left for the worker" >&2
+  fi
 }
 
 spawn_worktree_has_origin_config() { # <worktree>
@@ -3317,15 +3343,21 @@ freshen_spawn_worktree_base() { # <worktree>
     return 1
   }
   if [ -n "$status" ]; then
-    if describe_stale_submodule_pins "$worktree" "$status"; then
-      echo "error: pooled worktree '$worktree' has a stale submodule checkout, not uncommitted work; refusing to launch and leaving it untouched" >&2
-    else
+    if ! fm_submodule_stale_pins "$worktree" "$status"; then
       echo "error: pooled worktree '$worktree' is not clean; refusing to discard uncommitted work while refreshing its base" >&2
+      return 1
     fi
-    return 1
+    if [ "$SPAWN_SLOT_CLAIMED" != 1 ]; then
+      report_stale_submodule_pins error
+      echo "error: pooled worktree '$worktree' has a stale submodule checkout, not uncommitted work; refusing to launch and leaving it untouched" >&2
+      return 1
+    fi
+    report_stale_submodule_pins note
+    echo "note: pooled worktree '$worktree' carries only the submodule pins Treehouse's reset left behind; syncing them with the refreshed base" >&2
   fi
   if ! spawn_worktree_has_origin_config "$worktree"; then
-    return 0
+    sync_spawn_worktree_submodules "$worktree"
+    return
   fi
   if ! git -C "$worktree" fetch --quiet origin; then
     echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
@@ -3357,6 +3389,7 @@ freshen_spawn_worktree_base() { # <worktree>
     echo "error: pooled worktree '$worktree' is at '${actual:-unknown}', not current '$target' ('$expected'); refusing to launch" >&2
     return 1
   fi
+  sync_spawn_worktree_submodules "$worktree"
 }
 
 herdr_projection_meta_field_exact() { # <meta> <key>
