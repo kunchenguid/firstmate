@@ -569,6 +569,8 @@ function makeSession({ missing = [], rejectPrompt = false } = {}) {
 }
 
 function makeHost(session) {
+  // Pi's InteractiveMode.agent getter reads session.agent on older installs.
+  session.agent = session;
   const host = Object.create(InteractiveMode.prototype);
   const children = [];
   Object.assign(host, {
@@ -2506,11 +2508,19 @@ test_queued_operational_escape_e2e() {
   printf '%s\n' '{"followUpMode":"all"}' >"$config/settings.json"
 
   cat >"$project/queued-escape-e2e.ts" <<'TS'
-import { writeFileSync } from "node:fs";
+import { appendFileSync, writeFileSync } from "node:fs";
 import { createFauxCore, fauxAssistantMessage, fauxText, fauxToolCall } from "@earendil-works/pi-ai";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { InteractiveMode, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { encodeFirstmateOperationalInput } from "./.pi/extensions/lib/fm-operational-input.ts";
+
+// The status may disappear on Pi's next repaint; observe the live call without
+// changing its display behavior.
+const showStatus = InteractiveMode.prototype.showStatus;
+InteractiveMode.prototype.showStatus = function (message: string) {
+  appendFileSync(process.env.QUEUED_ESCAPE_STATUS_LOG as string, `${message}\n`);
+  return showStatus.call(this, message);
+};
 
 let label = "";
 
@@ -2589,7 +2599,7 @@ TS
     printf '%s\n' "$calm_state" >"$home/config/calm"
     mkdir -p "$sessions/$label"
     tmux -L "$TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" -x 160 -y 36 \
-      "cd '$project' && env FM_HOME='$home' PI_CODING_AGENT_DIR='$config' FM_OPERATIONAL_INPUT_SCRIPT='$OPERATIONAL_INPUT' QUEUED_ESCAPE_HELD='$held' PI_OFFLINE=1 pi --approve --no-context-files --no-skills --no-prompt-templates --no-extensions -e ./.pi/extensions/fm-calm.ts -e ./queued-escape-e2e.ts --session-dir '$sessions/$label'; rc=\$?; printf '\nPI_EXIT=%s\n' \"\$rc\"; sleep 20"
+      "cd '$project' && env FM_HOME='$home' PI_CODING_AGENT_DIR='$config' FM_OPERATIONAL_INPUT_SCRIPT='$OPERATIONAL_INPUT' QUEUED_ESCAPE_HELD='$held' QUEUED_ESCAPE_STATUS_LOG='$sessions/$label/status.log' PI_OFFLINE=1 pi --approve --no-context-files --no-skills --no-prompt-templates --no-extensions -e ./.pi/extensions/fm-calm.ts -e ./queued-escape-e2e.ts --session-dir '$sessions/$label'; rc=\$?; printf '\nPI_EXIT=%s\n' \"\$rc\"; sleep 20"
     wait_for_text "$TMP_ROOT/queued-escape-pane" 'queued-escape-e2e.ts' \
       || fail "Pi queued-row $label case did not reach the ready composer"
     tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/queued-escape-e2e $label"
@@ -2634,7 +2644,12 @@ TS
       pane=$(cat "$TMP_ROOT/queued-escape-pane")
       assert_not_contains "$pane" "MONITOR_${label}_ONE" "Pi Calm exposed a hidden notification after Escape"
       assert_not_contains "$pane" "FIRSTMATE_OP" "Pi Calm exposed operational text after Escape"
-      assert_contains "$pane" "Firstmate supervision continues in a new turn." "Pi Calm restarted a turn silently after Escape"
+      # Pi before 0.87 drains the retained queue in its own aborted-run loop;
+      # only newer Pi needs Calm to start and announce a replacement turn.
+      if node -e 'const v=process.argv[1].match(/(\d+)\.(\d+)\.(\d+)/); process.exit(v && (+v[1]>0 || +v[2]>87 || (+v[2]===87 && +v[3]>=1)) ? 0 : 1)' "$version"; then
+        grep -Fxq 'Firstmate supervision continues in a new turn.' "$sessions/$label/status.log" \
+          || fail "Pi Calm restarted a turn without announcing it after Escape"
+      fi
       if [ "$captain_queued" = yes ]; then
         [ "$(tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" | grep -c "^CAPTAIN_QUEUED_$label *\$")" -eq 1 ] \
           || fail "Pi Calm did not return the captain's queued text to the editor on Escape"
@@ -2670,7 +2685,7 @@ JS
   run_queued_escape_case on queued_on no
   run_queued_escape_case on queued_mixed yes
   run_queued_escape_case off queued_off no
-  pass "Pi $version with Calm on keeps a queued Firstmate notification unlisted, out of the editor on Escape, and delivers it once in a new announced turn, while Calm off stays stock"
+  pass "Pi $version with Calm on hides and retains queued Firstmate input through Escape, delivers it once, and leaves Calm off stock"
 }
 
 test_hidden_block_geometry_e2e() {
