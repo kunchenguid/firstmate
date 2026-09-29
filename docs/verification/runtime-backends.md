@@ -1164,12 +1164,7 @@ Missing directories do not prevent positively identified dedicated workspace rem
 The helper verifies that the default session is unchanged after teardown.
 No model harness or remote research provider participates in this test.
 
-The endpoint safety boundary is independently sufficient structural identity, not a journal version string.
-A complete launch identity remains the strongest path.
-For an older exact-endpoint journal without launch fields, cleanup additionally proves that the current owned Herdr session predates the unchanged journal, captures the current terminal and shell identities, and applies the same final identity readback immediately before close.
-For a correlator-only journal, exact endpoint authority comes only from this task's independently validated meta, whose standard spawn generation must match lifecycle and whose current owned session must predate the unchanged journal; this recovers old tasks without inventing historical launch fields.
-Correlator-only journals without that generation/session proof, partial or conflicting identity groups, replaced sessions and unverified terminals remain cleanup obligations with concrete refusal reasons.
-Future version labels and unknown additive fields do not block otherwise sufficient evidence.
+The [endpoint cleanup contract](../task-lifecycle.md#remote-results-and-resource-cleanup) owns the independently sufficient identity paths and retained cases exercised here.
 Directory return is a separate phase and remains subject to the [positive slot-ownership proof](../architecture.md#delivery-modes-are-explicit-per-task).
 Herdr has no atomic compare-and-close transaction, so concurrent external mutations can be detected and retained but cannot be excluded by a Firstmate lock alone.
 

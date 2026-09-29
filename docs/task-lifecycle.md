@@ -85,7 +85,7 @@ AIME's existing lifecycle remains compatible; iDA followup support grants no new
 An enrolled open goal retains its endpoint, directory, slot and task records; cleanup begins only after semantic acceptance or a separately authorized archive, and discard authority does not bypass that boundary.
 Herdr presentation-journal versions are diagnostic rather than cleanup permission gates.
 A journal with the complete launch-identity field group binds the execution generation, server instance, terminal identity and shell identity directly.
-An older journal with the complete exact-endpoint field group can also authorize cleanup when the current owned Herdr session demonstrably predates the unchanged journal and cleanup re-reads matching workspace, tab, pane, terminal and shell identity before mutation.
+A journal without launch fields but with the complete exact-endpoint field group can also authorize cleanup when the current owned Herdr session demonstrably predates the unchanged journal and cleanup re-reads matching workspace, tab, pane, terminal and shell identity before mutation.
 For a correlator-only journal, the task's independently validated meta endpoint can supply the exact session, workspace, tab and pane only when meta and lifecycle agree on a standard spawn generation and the current owned Herdr session demonstrably predates the unchanged journal.
 Partial or conflicting identity groups, replaced sessions, malformed generations, labels alone and shared-directory membership do not acquire deletion authority.
 Endpoint cleanup closes only an exact idle task pane, preserves focused user tabs and active siblings, verifies workspace absence separately, and leaves directory safety checks in place.
