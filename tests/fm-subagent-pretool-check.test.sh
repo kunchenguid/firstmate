@@ -56,19 +56,19 @@ expect_allow() {
   shift 2
   run_tool "$tool" "$@" || rc=$?
   [ "$rc" -eq 0 ] || fail "$label ($tool) must allow, got exit $rc: $(cat "$ERR")"
-  [ ! -s "$OUT" ] || fail "$label ($tool) allow wrote stdout: $(cat "$OUT")"
+  jq -e '. == {}' "$OUT" >/dev/null 2>&1 || fail "$label ($tool) allow must print {}: $(cat "$OUT")"
   [ ! -s "$ERR" ] || fail "$label ($tool) allow wrote stderr: $(cat "$ERR")"
 }
 
 expect_deny() {
   local label=$1 tool=$2 rc=0
   run_tool "$tool" || rc=$?
-  [ "$rc" -eq 2 ] || fail "$label ($tool) must deny with exit 2, got $rc"
-  [ ! -s "$OUT" ] || fail "$label ($tool) deny wrote stdout: $(cat "$OUT")"
-  jq -e '.hookSpecificOutput.hookEventName == "PreToolUse" and .hookSpecificOutput.permissionDecision == "deny"' "$ERR" >/dev/null 2>&1 \
-    || fail "$label ($tool) deny omitted Claude's permission decision: $(cat "$ERR")"
-  jq -e --arg tool "$tool" '.systemMessage | startswith("[subagent-dispatch]") and contains("blocked tool: " + $tool)' "$ERR" >/dev/null 2>&1 \
-    || fail "$label ($tool) deny message lost its code or tool name: $(jq -r '.systemMessage' "$ERR")"
+  [ "$rc" -eq 0 ] || fail "$label ($tool) must deny with exit 0, got $rc: $(cat "$ERR")"
+  [ ! -s "$ERR" ] || fail "$label ($tool) deny wrote stderr: $(cat "$ERR")"
+  jq -e '.hookSpecificOutput.hookEventName == "PreToolUse" and .hookSpecificOutput.permissionDecision == "deny" and (.hookSpecificOutput.permissionDecisionReason | startswith("[subagent-dispatch]"))' "$OUT" >/dev/null 2>&1 \
+    || fail "$label ($tool) deny omitted Claude's permission decision: $(cat "$OUT")"
+  jq -e --arg tool "$tool" '.systemMessage | startswith("[subagent-dispatch]") and contains("blocked tool: " + $tool)' "$OUT" >/dev/null 2>&1 \
+    || fail "$label ($tool) deny message lost its code or tool name: $(jq -r '.systemMessage' "$OUT")"
 }
 
 # ---------------------------------------------------------------------------
@@ -148,8 +148,10 @@ test_guard_never_classifies_mcp_tools() {
 test_deny_message_defers_to_intake_classification() {
   local actual
   printf '#!/usr/bin/env bash\n' > "$PRIMARY/bin/fm-scout.sh"
-  run_tool Agent && fail "scout-present case must still deny"
-  actual=$(jq -r '.systemMessage' "$ERR")
+  run_tool Agent || fail "scout-present case must exit 0"
+  jq -e '.hookSpecificOutput.permissionDecision == "deny"' "$OUT" >/dev/null 2>&1 \
+    || fail "scout-present case must still deny: $(cat "$OUT")"
+  actual=$(jq -r '.systemMessage' "$OUT")
   case "$actual" in
     *"$SCOUT_ROUTE"*) ;;
     *) fail "deny must reserve bin/fm-scout.sh for classified scout work: $actual" ;;
@@ -158,8 +160,10 @@ test_deny_message_defers_to_intake_classification() {
     *'investigation or diagnosis goes to bin/fm-scout.sh'*) fail "deny must not classify all investigation or diagnosis as scout work: $actual" ;;
   esac
   rm -f "$PRIMARY/bin/fm-scout.sh"
-  run_tool Agent && fail "scout-absent case must still deny"
-  actual=$(jq -r '.systemMessage' "$ERR")
+  run_tool Agent || fail "scout-absent case must exit 0"
+  jq -e '.hookSpecificOutput.permissionDecision == "deny"' "$OUT" >/dev/null 2>&1 \
+    || fail "scout-absent case must still deny: $(cat "$OUT")"
+  actual=$(jq -r '.systemMessage' "$OUT")
   case "$actual" in
     *"$BRIEF_ONLY_ROUTE"*) ;;
     *) fail "deny must degrade to brief-then-spawn when fm-scout.sh is absent: $actual" ;;
@@ -174,7 +178,9 @@ test_escape_hatch_allows_deliberate_use() {
   for value in '' 0 yes true 11; do
     rc=0
     run_tool Agent "FM_ALLOW_SUBAGENT=$value" || rc=$?
-    [ "$rc" -eq 2 ] || fail "FM_ALLOW_SUBAGENT='$value' must not release the guard, got exit $rc"
+    [ "$rc" -eq 0 ] || fail "FM_ALLOW_SUBAGENT='$value' must exit 0, got exit $rc"
+    jq -e '.hookSpecificOutput.permissionDecision == "deny"' "$OUT" >/dev/null 2>&1 \
+      || fail "FM_ALLOW_SUBAGENT='$value' must not release the guard: $(cat "$OUT")"
   done
   pass "the single documented escape hatch releases the guard only on the exact opt-in value"
 }
@@ -193,7 +199,7 @@ test_task_worktree_and_non_firstmate_repo_are_inert() {
   FM_ROOT_OVERRIDE="$child" FM_HOME="$child" FM_STATE_OVERRIDE="$child/state" \
     "$CHECK" --claude --tool Agent > "$OUT" 2> "$ERR" || rc=$?
   [ "$rc" -eq 0 ] || fail "a crewmate task worktree must be out of scope, got exit $rc: $(cat "$ERR")"
-  [ ! -s "$OUT" ] || fail "task-worktree no-op wrote stdout: $(cat "$OUT")"
+  jq -e '. == {}' "$OUT" >/dev/null 2>&1 || fail "task-worktree no-op must print {}: $(cat "$OUT")"
   [ ! -s "$ERR" ] || fail "task-worktree no-op wrote stderr: $(cat "$ERR")"
 
   mkdir -p "$plain/bin"
@@ -213,7 +219,9 @@ test_secondmate_home_is_in_scope() {
   printf 'sm-fixture\n' > "$second/.fm-secondmate-home"
   FM_ROOT_OVERRIDE="$second" FM_HOME="$second" FM_STATE_OVERRIDE="$second/state" \
     "$CHECK" --claude --tool Agent > "$OUT" 2> "$ERR" || rc=$?
-  [ "$rc" -eq 2 ] || fail "a marked secondmate home operates a fleet and must be guarded, got exit $rc"
+  [ "$rc" -eq 0 ] || fail "a marked secondmate home operates a fleet and must be guarded, got exit $rc: $(cat "$ERR")"
+  jq -e '.hookSpecificOutput.permissionDecision == "deny"' "$OUT" >/dev/null 2>&1 \
+    || fail "a marked secondmate home must still deny: $(cat "$OUT")"
   pass "a marked secondmate home is guarded even though it is a linked worktree"
 }
 
@@ -223,8 +231,10 @@ test_stdin_transports_and_output_shapes() {
   printf '%s' '{"tool_name":"Agent","tool_input":{"prompt":"go"}}' \
     | FM_ROOT_OVERRIDE="$PRIMARY" FM_HOME="$PRIMARY" FM_STATE_OVERRIDE="$STATE" \
       "$CHECK" --claude > "$OUT" 2> "$ERR" || rc=$?
-  [ "$rc" -eq 2 ] || fail "Claude-shaped stdin must deny, got exit $rc"
-  [ ! -s "$OUT" ] || fail "Claude deny wrote stdout, which makes Claude ignore the deny: $(cat "$OUT")"
+  [ "$rc" -eq 0 ] || fail "Claude-shaped stdin must deny with exit 0, got exit $rc: $(cat "$ERR")"
+  jq -e '.hookSpecificOutput.permissionDecision == "deny" and (.hookSpecificOutput.permissionDecisionReason | startswith("[subagent-dispatch]"))' "$OUT" >/dev/null 2>&1 \
+    || fail "Claude deny must print the decision document on stdout: $(cat "$OUT")"
+  [ ! -s "$ERR" ] || fail "Claude deny wrote stderr: $(cat "$ERR")"
 
   rc=0
   : > "$OUT"; : > "$ERR"
@@ -241,8 +251,9 @@ test_stdin_transports_and_output_shapes() {
     | FM_ROOT_OVERRIDE="$PRIMARY" FM_HOME="$PRIMARY" FM_STATE_OVERRIDE="$STATE" \
       "$CHECK" --claude > "$OUT" 2> "$ERR" || rc=$?
   [ "$rc" -eq 0 ] || fail "Bash through stdin must allow, got exit $rc"
-  [ ! -s "$OUT" ] && [ ! -s "$ERR" ] || fail "stdin allow wrote output"
-  pass "both stdin transports classify correctly and Claude's deny keeps stdout empty"
+  jq -e '. == {}' "$OUT" >/dev/null 2>&1 || fail "stdin allow must print {}: $(cat "$OUT")"
+  [ ! -s "$ERR" ] || fail "stdin allow wrote stderr: $(cat "$ERR")"
+  pass "both stdin transports classify correctly and Claude's deny prints its decision document"
 }
 
 test_malformed_transport_fails_open() {
@@ -254,7 +265,8 @@ test_malformed_transport_fails_open() {
       | FM_ROOT_OVERRIDE="$PRIMARY" FM_HOME="$PRIMARY" FM_STATE_OVERRIDE="$STATE" \
         "$CHECK" --claude > "$OUT" 2> "$ERR" || rc=$?
     [ "$rc" -eq 0 ] || fail "malformed transport must fail open, payload '$payload' gave exit $rc"
-    [ ! -s "$OUT" ] || fail "fail-open path wrote stdout for payload '$payload'"
+    jq -e '. == {}' "$OUT" >/dev/null 2>&1 \
+      || fail "fail-open path must print {} for payload '$payload', got: $(cat "$OUT")"
   done
   pass "malformed, empty, and tool-name-less payloads fail open rather than blocking every tool call"
 }
@@ -271,7 +283,7 @@ test_missing_jq_stdin_transport_fails_open() {
     | env PATH="$fakebin" FM_ROOT_OVERRIDE="$PRIMARY" FM_HOME="$PRIMARY" FM_STATE_OVERRIDE="$STATE" \
       "$CHECK" --claude > "$OUT" 2> "$ERR" || rc=$?
   [ "$rc" -eq 0 ] || fail "missing jq transport must fail open, got exit $rc: $(cat "$ERR")"
-  [ ! -s "$OUT" ] || fail "missing jq fail-open path wrote stdout: $(cat "$OUT")"
+  jq -e '. == {}' "$OUT" >/dev/null 2>&1 || fail "missing jq fail-open path must print {}: $(cat "$OUT")"
   [ ! -s "$ERR" ] || fail "missing jq fail-open path wrote stderr: $(cat "$ERR")"
   pass "missing jq for stdin transport fails open rather than denying every tool call"
 }

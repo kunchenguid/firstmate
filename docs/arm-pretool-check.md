@@ -26,7 +26,8 @@ It tokenizes the bytes and classifies lexical execution positions only.
 - Stdin JSON at `.toolInput.command` for Grok.
 - `--command <exact string>` for OpenCode, Pi, pi-signed, and omp.
 - `--background` as a compatibility-only field that never changes the decision.
-- `--claude` to preserve Claude's stderr-only deny requirement.
+- `--claude` selects the Claude decision document in the output contract below.
+- `--cursor` selects the Cursor decision document in the output contract below.
 
 The wrapper discovers the code root from its own location.
 The active firstmate home is `${FM_HOME:-<code-root>}`.
@@ -49,7 +50,7 @@ The marker guard closes the static gap anyway because it is cheap and provable p
 Tripwire: if a third strict-superset gap is ever found after this marker generalization, that falsifies the "provable per encoding class" claim and the decision flips to Option B - drop the prefilter and always invoke the classifier.
 Deeper decode-required obfuscation beyond the coupled marker set stays the classifier's and the post-arm liveness guards' responsibility.
 
-Malformed or empty stdin, invalid JSON, missing `jq` for stdin transport, missing Node, a missing classifier, or an invalid classifier response fail open with exit 0 and no output.
+Malformed or empty stdin, invalid JSON, missing `jq` for stdin transport, missing Node, a missing classifier, or an invalid classifier response fail open through the allow rendering in the output contract below.
 This transport behavior prevents a broken hook from denying every shell tool call.
 Malformed or unsupported shell syntax that contains a protected command is a semantic classification result and fails closed.
 
@@ -148,27 +149,38 @@ Prose may improve without changing adapter behavior.
 
 ## Output contract
 
-- Allow returns exit 0 with both streams empty.
-- Deny returns exit 2 and writes `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny"},"systemMessage":"[code] reason"}` to stderr.
+`bin/fm-hook-host-lib.sh` renders this contract for the arm, cd, and subagent checkers.
+No-flag mode is what Codex, Grok, OpenCode, Pi, pi-signed, and omp consume.
+
+- Allow with no flag returns exit 0 with both streams empty.
+- Deny with no flag returns exit 2 and writes `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny"},"systemMessage":"[code] reason"}` to stderr.
 - Default deny mode also writes `{"decision":"deny","reason":"[code] reason"}` to stdout for Grok.
-- `--claude` suppresses stdout completely because Claude ignores a PreToolUse deny when stdout is nonempty.
+- `--claude` allow, including a Cursor-payload stand-down and every fail-open, returns exit 0 and writes `{}` to stdout.
+- `--claude` deny returns exit 0 and writes `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"[code] reason"},"systemMessage":"[code] reason"}` to stdout.
+- `--cursor` allow returns exit 0 and writes `{"permission":"allow"}` to stdout.
+- `--cursor` deny returns exit 0 and writes `{"permission":"deny","user_message":"[code] reason","agent_message":"[code] reason"}` to stdout.
 - Codex blocks on exit 2 and displays stderr.
 - OpenCode throws only when the checker exits 2.
 - Pi, pi-signed, and omp return `{block: true}` only when the checker exits 2.
+- Cursor blocks a permission hook whose stdout is not one JSON document, so both `--cursor` and `--claude` always print one.
 
 ## Harness wiring
 
-| Harness | Exact command field | Adapter behavior on checker exit 2 |
+| Harness | Exact command field | What the adapter does with the checker result |
 | --- | --- | --- |
 | Codex | `.tool_input.command` | The `.codex/hooks.json` command forwards the complete stdin payload and Codex blocks on exit 2. |
-| Claude | `.tool_input.command` | `.claude/settings.json` forwards stdin with `--claude`, leaving stdout empty and returning the stderr deny object. |
+| Claude | `.tool_input.command` | `.claude/settings.json` forwards stdin with `--claude` and consumes the output contract above. |
 | Grok | `.toolInput.command` | `.grok/hooks/fm-primary-pretool-check.json` forwards stdin and Grok consumes the stdout `decision=deny` object. |
 | OpenCode | `output.args.command` | `.opencode/plugins/fm-primary-pretool-check.js` passes one `--command` argument and throws only for exit 2. |
 | Pi / pi-signed | `event.input.command` | `.pi/extensions/fm-primary-turnend-guard.ts` passes one `--command` argument and returns `{block: true}` only for exit 2. |
 | omp | `event.input.command` | `.omp/extensions/fm-primary-turnend-guard.ts` passes one `--command` argument and returns `{block: true, reason}` only for exit 2; omp surfaces the reason verbatim to the model (verified 18.1.2). |
-| Cursor | `.tool_input.command` | `.cursor/hooks.json` matches `tool_name` `Shell` and forwards stdin with `--cursor`. Cursor reads the RETURNED object rather than the exit status, so `--cursor` prints `{"permission":"deny","user_message":"[code] reason"}` on stdout and exits 0; only that rendering is verified to block the command and surface the reason. |
+| Cursor | `.tool_input.command` | `.cursor/hooks.json` matches `tool_name` `Shell` and forwards stdin with `--cursor`, and Cursor reads the output contract's returned object rather than the exit status. |
 
-Cursor also loads `<project>/.claude/settings.json`, so the tracked Claude entry receives the same event. Without `--cursor` a Cursor-delivered payload is that duplicate and allows without re-classifying, decided from the payload's own `cursor_version` by `bin/fm-hook-host-lib.sh`; [`turnend-guard.md`](turnend-guard.md#harness-integrations) owns why that predicate reads the payload rather than the environment.
+Cursor also loads `<project>/.claude/settings.json`, so the tracked Claude entry receives the same event.
+Without `--cursor` a Cursor-delivered payload is that duplicate and allows without re-classifying, decided from the payload's own `cursor_version` by `bin/fm-hook-host-lib.sh`.
+That duplicate is started with `--claude`, so the allow is the `--claude` document above.
+[`turnend-guard.md`](turnend-guard.md#harness-integrations) owns why that predicate reads the payload rather than the environment.
+pi-code loads the same `--claude` entries, so it sees this stdout document, while Pi's own extension still calls the checker with no flag and still blocks on exit 2.
 
 Grok project hooks require folder trust.
 Cursor project hooks require the workspace to be launched with `--trust`.

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Shared "which harness delivered this hook payload?" predicate for the tracked
-# Claude-shaped hook entries.
+# Shared host predicate and PreToolUse decision rendering for the tracked
+# hook checkers.
 # This file is sourced by hook entrypoints and has no side effects on source.
+# docs/arm-pretool-check.md owns the JSON documents these functions print.
 #
 # Why it exists: Cursor Agent CLI loads `<project>/.claude/settings.json` in
 # addition to its own `<project>/.cursor/hooks.json` (verified live, cursor-agent
@@ -33,4 +34,33 @@ fm_hook_payload_is_foreign_host() {  # <payload>
   printf '%s' "$payload" | jq -e '
     type == "object" and has("cursor_version") and (.cursor_version | type) == "string"
   ' >/dev/null 2>&1
+}
+
+# Print the allow or deny for the sourcing checker's mode, then exit.
+# Unset CURSOR_MODE and CLAUDE_MODE select no-flag rendering: silent allow, and
+# a deny that exits 2 with the stderr object plus the Grok stdout object.
+# --cursor and --claude always print one JSON document on stdout and exit 0.
+# Cursor blocks a permission hook whose stdout is not that document.
+fm_hook_allow() {
+  if [ "${CURSOR_MODE:-0}" -eq 1 ]; then
+    printf '%s\n' '{"permission":"allow"}'
+  elif [ "${CLAUDE_MODE:-0}" -eq 1 ]; then
+    printf '%s\n' '{}'
+  fi
+  exit 0
+}
+
+fm_hook_deny() { # <json-escaped reason>
+  local escaped=$1
+  if [ "${CURSOR_MODE:-0}" -eq 1 ]; then
+    printf '{"permission":"deny","user_message":"%s","agent_message":"%s"}\n' "$escaped" "$escaped"
+    exit 0
+  fi
+  if [ "${CLAUDE_MODE:-0}" -eq 1 ]; then
+    printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"%s"},"systemMessage":"%s"}\n' "$escaped" "$escaped"
+    exit 0
+  fi
+  printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny"},"systemMessage":"%s"}\n' "$escaped" >&2
+  printf '{"decision":"deny","reason":"%s"}\n' "$escaped"
+  exit 2
 }

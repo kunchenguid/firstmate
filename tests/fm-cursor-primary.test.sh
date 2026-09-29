@@ -240,16 +240,26 @@ test_pretool_guards_deduplicate_and_render_cursor_deny() {
   dir=$(make_primary_dir "$TMP_ROOT/host-pretool")
   payload='{"tool_name":"Shell","tool_input":{"command":"bin/fm-watch-arm.sh &"},"cursor_version":"2026.08.11-e8db854"}'
   out=$(printf '%s' "$payload" | bash "$dir/bin/fm-arm-pretool-check.sh" 2>&1); status=$?
-  expect_code 0 "$status" "the Claude-settings duplicate must allow under Cursor"
-  [ -z "$out" ] || fail "duplicate pretool entry produced output: $out"
+  expect_code 0 "$status" "the no-flag duplicate must allow under Cursor"
+  [ -z "$out" ] || fail "no-flag duplicate pretool entry produced output: $out"
+
+  out=$(printf '%s' "$payload" | bash "$dir/bin/fm-arm-pretool-check.sh" --claude 2>&1); status=$?
+  expect_code 0 "$status" "the --claude duplicate must allow under Cursor"
+  printf '%s' "$out" | jq -e '. == {}' >/dev/null 2>&1 \
+    || fail "the --claude duplicate must print {}, got: $out"
+
+  out=$(printf '%s' '{"tool_name":"Shell","tool_input":{"command":"echo hello"},"cursor_version":"2026.08.11-e8db854"}' | bash "$dir/bin/fm-arm-pretool-check.sh" --cursor 2>/dev/null); status=$?
+  expect_code 0 "$status" "Cursor allow exits 0"
+  printf '%s' "$out" | jq -e '.permission == "allow"' >/dev/null 2>&1 \
+    || fail "Cursor allow must print permission allow, got: $out"
 
   out=$(printf '%s' "$payload" | bash "$dir/bin/fm-arm-pretool-check.sh" --cursor 2>/dev/null); status=$?
   expect_code 0 "$status" "Cursor reads the decision object, so the deny path exits 0"
   decision=$(printf '%s' "$out" | jq -r '.permission // empty' 2>/dev/null)
   [ "$decision" = deny ] || fail "expected a Cursor deny object on stdout, got: $out"
-  printf '%s' "$out" | jq -e '.user_message | type == "string" and length > 0' >/dev/null 2>&1 \
-    || fail "Cursor's deny object must carry a user_message reason, got: $out"
-  pass "fm-arm-pretool-check: Cursor duplicate allows, --cursor denies in Cursor's own shape"
+  printf '%s' "$out" | jq -e '(.user_message | type == "string" and length > 0) and .agent_message == .user_message' >/dev/null 2>&1 \
+    || fail "Cursor's deny object must carry user_message and agent_message, got: $out"
+  pass "fm-arm-pretool-check: no-flag duplicate is silent, --claude duplicate prints {}, --cursor renders its own shape"
 }
 
 test_cd_guard_renders_cursor_deny() {
@@ -259,9 +269,17 @@ test_cd_guard_renders_cursor_deny() {
   out=$(printf '%s' "$payload" | FM_HOME="$dir" bash "$dir/bin/fm-cd-pretool-check.sh" --cursor 2>/dev/null)
   decision=$(printf '%s' "$out" | jq -r '.permission // empty' 2>/dev/null)
   [ "$decision" = deny ] || fail "expected a Cursor deny object from the cd guard, got: $out"
+  printf '%s' "$out" | jq -e '(.user_message | type == "string" and length > 0) and .agent_message == .user_message' >/dev/null 2>&1 \
+    || fail "Cursor's cd deny object must carry user_message and agent_message, got: $out"
+  out=$(printf '%s' "$payload" | FM_HOME="$dir" bash "$dir/bin/fm-cd-pretool-check.sh" --claude 2>&1)
+  printf '%s' "$out" | jq -e '. == {}' >/dev/null 2>&1 \
+    || fail "the cd guard's --claude duplicate must print {}, got: $out"
   out=$(printf '%s' "$payload" | FM_HOME="$dir" bash "$dir/bin/fm-cd-pretool-check.sh" 2>&1)
-  [ -z "$out" ] || fail "the cd guard's Claude-settings duplicate produced output under Cursor: $out"
-  pass "fm-cd-pretool-check: Cursor duplicate allows, --cursor denies in Cursor's own shape"
+  [ -z "$out" ] || fail "the cd guard's no-flag duplicate produced output under Cursor: $out"
+  out=$(printf '%s' '{"tool_name":"Shell","tool_input":{"command":"echo hello"},"cursor_version":"2026.08.11-e8db854"}' | FM_HOME="$dir" bash "$dir/bin/fm-cd-pretool-check.sh" --cursor 2>/dev/null)
+  printf '%s' "$out" | jq -e '.permission == "allow"' >/dev/null 2>&1 \
+    || fail "Cursor cd allow must print permission allow, got: $out"
+  pass "fm-cd-pretool-check: no-flag duplicate is silent, --claude duplicate prints {}, --cursor renders its own shape"
 }
 
 # --- PARK --------------------------------------------------------------------

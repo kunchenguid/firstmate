@@ -178,17 +178,28 @@ run_matrix_entry() {
 
   if [ "$expected" = allow ]; then
     [ "$rc" -eq 0 ] || fail "$id via $entry must allow, got exit $rc: $(cat "$err_file")"
-    [ ! -s "$out_file" ] || fail "$id via $entry allow must leave stdout empty: $(cat "$out_file")"
     [ ! -s "$err_file" ] || fail "$id via $entry allow must leave stderr empty: $(cat "$err_file")"
+    if [ "$entry" = claude ]; then
+      jq -e '. == {}' "$out_file" >/dev/null 2>&1 \
+        || fail "$id via claude allow must print {}: $(cat "$out_file")"
+    else
+      [ ! -s "$out_file" ] || fail "$id via $entry allow must leave stdout empty: $(cat "$out_file")"
+    fi
+    return
+  fi
+
+  if [ "$entry" = claude ]; then
+    [ "$rc" -eq 0 ] || fail "$id via claude must deny with exit 0, got exit $rc: $(cat "$err_file")"
+    [ ! -s "$err_file" ] || fail "$id via claude deny must leave stderr empty: $(cat "$err_file")"
+    jq -e '.hookSpecificOutput.permissionDecision == "deny" and (.hookSpecificOutput.permissionDecisionReason | test("\\[persistent-cd\\]")) and (.systemMessage | test("\\[persistent-cd\\]"))' "$out_file" >/dev/null 2>&1 \
+      || fail "$id via claude deny must carry the persistent-cd reason code on stdout: $(cat "$out_file")"
     return
   fi
 
   [ "$rc" -eq 2 ] || fail "$id via $entry must deny, got exit $rc"
   jq -e '.hookSpecificOutput.permissionDecision == "deny" and (.systemMessage | test("\\[persistent-cd\\]"))' "$err_file" >/dev/null 2>&1 \
     || fail "$id via $entry deny must carry the persistent-cd reason code on stderr: $(cat "$err_file")"
-  if [ "$entry" = claude ]; then
-    [ ! -s "$out_file" ] || fail "$id via claude deny must leave stdout empty: $(cat "$out_file")"
-  elif [ "$entry" = grok ]; then
+  if [ "$entry" = grok ]; then
     jq -e '.decision == "deny"' "$out_file" >/dev/null 2>&1 \
       || fail "$id via grok deny must carry decision=deny on stdout: $(cat "$out_file")"
   fi
@@ -210,7 +221,7 @@ test_fires_in_secondmate_home() {
   local dir out rc
   dir=$(make_secondmate_fixture "$TMP_ROOT/secondmate")
   out=$("$dir/bin/fm-cd-pretool-check.sh" --claude --command 'cd projects/foo' 2>&1); rc=$?
-  expect_code 2 "$rc" "cd-guard must fire in a secondmate's own primary session (unlike the turn-end guard)"
+  expect_code 0 "$rc" "cd-guard must fire in a secondmate's own primary session (unlike the turn-end guard)"
   assert_contains "$out" '[persistent-cd]' "secondmate-home block must carry the reason code"
   pass "cd-guard: fires in a secondmate home (its own primary session is a primary)"
 }
@@ -222,7 +233,8 @@ test_inert_in_child_worktree() {
   make_child_worktree_fixture "$base" "$dir" >/dev/null
   out=$("$dir/bin/fm-cd-pretool-check.sh" --claude --command 'cd projects/foo' 2>&1); rc=$?
   expect_code 0 "$rc" "cd-guard must be inert in a crewmate/scout linked worktree"
-  [ -z "$out" ] || fail "cd-guard produced output in a child worktree: $out"
+  printf '%s' "$out" | jq -e '. == {}' >/dev/null 2>&1 \
+    || fail "cd-guard must print {} when inert under --claude in a child worktree, got: $out"
   pass "cd-guard: inert in a crewmate/scout task worktree (linked git worktree)"
 }
 
@@ -234,7 +246,8 @@ test_inert_when_not_firstmate_repo() {
   install_cd_scripts "$dir"   # bin/ present but no AGENTS.md
   out=$("$dir/bin/fm-cd-pretool-check.sh" --claude --command 'cd projects/foo' 2>&1); rc=$?
   expect_code 0 "$rc" "cd-guard must be inert without AGENTS.md (not a firstmate checkout)"
-  [ -z "$out" ] || fail "cd-guard produced output outside a firstmate checkout: $out"
+  printf '%s' "$out" | jq -e '. == {}' >/dev/null 2>&1 \
+    || fail "cd-guard must print {} when inert under --claude outside a firstmate checkout, got: $out"
   pass "cd-guard: inert in a non-firstmate repo (no AGENTS.md)"
 }
 
@@ -246,7 +259,8 @@ test_inert_when_not_a_git_repo() {
   install_cd_scripts "$dir"   # AGENTS.md + bin/ but no git repo
   out=$("$dir/bin/fm-cd-pretool-check.sh" --claude --command 'cd projects/foo' 2>&1); rc=$?
   expect_code 0 "$rc" "cd-guard must be inert when the checkout is not a git repo"
-  [ -z "$out" ] || fail "cd-guard produced output in a non-git dir: $out"
+  printf '%s' "$out" | jq -e '. == {}' >/dev/null 2>&1 \
+    || fail "cd-guard must print {} when inert under --claude outside a git repo, got: $out"
   pass "cd-guard: inert when not inside a git repo"
 }
 
@@ -277,7 +291,7 @@ test_e2e_cwd_leak_regression() {
   # With the guard, the exact stray command is denied before it can run, so the
   # real harness never lets cwd leave the home.
   out=$("$CHECK" --claude --command 'cd projects/clone' 2>&1); rc=$?
-  expect_code 2 "$rc" "guard must deny the stray persistent cd that caused the leak"
+  expect_code 0 "$rc" "guard must deny the stray persistent cd that caused the leak"
   assert_contains "$out" '[persistent-cd]' "leak-preventing block must carry the reason code"
   pass "cd-guard: reproduces the cwd leak and denies the exact command that causes it"
 }

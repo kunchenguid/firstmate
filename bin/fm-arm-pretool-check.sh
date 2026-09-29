@@ -25,21 +25,17 @@
 # --background remains accepted for compatibility, but harness-native tracked
 # background execution is not itself a policy signal.
 #
-# Exit/output contract:
-#   ALLOW - exit 0 and no output.
-#   DENY - exit 2, a Claude-shaped deny object on stderr, and a Grok-shaped
-#          deny object on stdout unless --claude was supplied.
-#   DENY, --cursor - exit 0 and Cursor's own decision object on stdout. Cursor
-#          reads the returned object rather than the exit status, and only that
-#          rendering is verified to block the command and surface the reason.
-#   FAIL OPEN - malformed or empty stdin, missing jq for stdin transport,
-#               missing Node or policy owner, or an invalid policy response.
+# Exit/output contract (docs/arm-pretool-check.md owns the JSON documents):
+#   ALLOW, no flag - exit 0 and no output.
+#   ALLOW, --cursor or --claude - exit 0 and one JSON document on stdout.
+#   DENY, no flag - exit 2, the stderr deny object, and the Grok stdout object.
+#   DENY, --cursor or --claude - exit 0 and one JSON document on stdout.
+#   FAIL OPEN - the allow rendering for the selected mode.
 #
-# Claude requires stdout to remain empty on deny.
 # Codex blocks on exit 2 and displays stderr.
 # Grok consumes the stdout decision object.
 # OpenCode and Pi consume exit 2 plus stderr.
-# Cursor consumes the stdout decision object.
+# Cursor blocks a permission hook whose stdout is not JSON.
 set -u
 
 CMD=""
@@ -48,18 +44,26 @@ BACKGROUND=""
 CLAUDE_MODE=0
 CURSOR_MODE=0
 
+# Resolve beside this file with builtins only. A missing-jq fail-open must
+# still reach fm_hook_allow when the hook PATH has no dirname.
+_fm_hook_dir=${BASH_SOURCE[0]%/*}
+[ "$_fm_hook_dir" != "${BASH_SOURCE[0]}" ] || _fm_hook_dir=.
+# shellcheck source=bin/fm-hook-host-lib.sh
+. "$_fm_hook_dir/fm-hook-host-lib.sh"
+
 usage() {
   cat <<'EOF'
 Usage: fm-arm-pretool-check.sh [--command <cmd>] [--background true|false] [--claude|--cursor]
 
 With no --command, reads a PreToolUse-style JSON payload on stdin (Grok
 toolInput.command, or Claude/Codex/Cursor tool_input.command).
-Exits 0 to allow and 2 to deny.
-The deny reason is written to stderr, with a Grok decision object on stdout
-unless --claude is supplied.
-With --cursor, a deny is Cursor's own decision object on stdout and exit 0,
-because Cursor reads the returned object rather than the exit status.
-Malformed transport and an unavailable classifier runtime fail open.
+Exits 0 to allow.
+With no mode flag, a deny exits 2: the reason is on stderr and a Grok
+decision object is on stdout.
+With --claude or --cursor, allow and deny both exit 0 and print one JSON
+document on stdout. docs/arm-pretool-check.md owns those documents.
+Malformed transport and an unavailable classifier runtime fail open through
+the same allow rendering.
 EOF
 }
 
@@ -107,24 +111,22 @@ done
 
 if [ "$CMD_SET" -eq 0 ]; then
   PAYLOAD=$(cat 2>/dev/null || true)
-  [ -n "$PAYLOAD" ] || exit 0
-  command -v jq >/dev/null 2>&1 || exit 0
-  # shellcheck source=bin/fm-hook-host-lib.sh
-  . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/fm-hook-host-lib.sh"
+  [ -n "$PAYLOAD" ] || fm_hook_allow
+  command -v jq >/dev/null 2>&1 || fm_hook_allow
   # Cursor's own registration passes --cursor. Without it a Cursor-delivered
   # payload is the Claude-settings duplicate Cursor also loads, already
   # evaluated by that registration, so this copy allows without re-classifying.
   if [ "$CURSOR_MODE" -eq 0 ] && fm_hook_payload_is_foreign_host "$PAYLOAD"; then
-    exit 0
+    fm_hook_allow
   fi
-  CMD=$(printf '%s' "$PAYLOAD" | jq -r '(.toolInput.command // .tool_input.command // empty)' 2>/dev/null) || exit 0
-  [ -n "$CMD" ] || exit 0
+  CMD=$(printf '%s' "$PAYLOAD" | jq -r '(.toolInput.command // .tool_input.command // empty)' 2>/dev/null) || fm_hook_allow
+  [ -n "$CMD" ] || fm_hook_allow
   # Kept for transport parity only.
   # shellcheck disable=SC2034
   BACKGROUND=$(printf '%s' "$PAYLOAD" | jq -r '(.toolInput.background // .tool_input.background // false)' 2>/dev/null) || BACKGROUND=false
 fi
 
-[ -n "$CMD" ] || exit 0
+[ -n "$CMD" ] || fm_hook_allow
 
 # Strict-superset prefilter (transport only; owns zero classification semantics).
 # Every protected watcher execution and every broad watcher kill resolves to the
@@ -160,30 +162,30 @@ case "$CMD" in
   *)
     case "$PREFILTER" in
       *fm-watch*) ;;
-      *) exit 0 ;;
+      *) fm_hook_allow ;;
     esac
     ;;
 esac
 
-SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P) || exit 0
-ROOT=$(CDPATH='' cd -- "$SCRIPT_DIR/.." 2>/dev/null && pwd -P) || exit 0
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P) || fm_hook_allow
+ROOT=$(CDPATH='' cd -- "$SCRIPT_DIR/.." 2>/dev/null && pwd -P) || fm_hook_allow
 ACTIVE_HOME=${FM_HOME:-$ROOT}
 POLICY="$ROOT/bin/fm-arm-command-policy.mjs"
 
-command -v node >/dev/null 2>&1 || exit 0
-[ -f "$POLICY" ] || exit 0
+command -v node >/dev/null 2>&1 || fm_hook_allow
+[ -f "$POLICY" ] || fm_hook_allow
 
-POLICY_OUTPUT=$(node "$POLICY" --command "$CMD" --root "$ROOT" --home "$ACTIVE_HOME" 2>/dev/null) || exit 0
-[ -n "$POLICY_OUTPUT" ] || exit 0
+POLICY_OUTPUT=$(node "$POLICY" --command "$CMD" --root "$ROOT" --home "$ACTIVE_HOME" 2>/dev/null) || fm_hook_allow
+[ -n "$POLICY_OUTPUT" ] || fm_hook_allow
 
 TAB=$(printf '\t')
 DECISION=${POLICY_OUTPUT%%"$TAB"*}
-[ "$DECISION" = "deny" ] || exit 0
+[ "$DECISION" = "deny" ] || fm_hook_allow
 REST=${POLICY_OUTPUT#*"$TAB"}
-[ "$REST" != "$POLICY_OUTPUT" ] || exit 0
+[ "$REST" != "$POLICY_OUTPUT" ] || fm_hook_allow
 CODE=${REST%%"$TAB"*}
 REASON=${REST#*"$TAB"}
-[ -n "$CODE" ] && [ -n "$REASON" ] && [ "$REASON" != "$REST" ] || exit 0
+[ -n "$CODE" ] && [ -n "$REASON" ] && [ "$REASON" != "$REST" ] || fm_hook_allow
 
 json_escape() {
   printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr '\n' ' '
@@ -191,10 +193,4 @@ json_escape() {
 
 DETAIL="[$CODE] $REASON"
 ESCAPED=$(json_escape "$DETAIL")
-if [ "$CURSOR_MODE" -eq 1 ]; then
-  printf '{"permission":"deny","user_message":"%s"}\n' "$ESCAPED"
-  exit 0
-fi
-printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny"},"systemMessage":"%s"}\n' "$ESCAPED" >&2
-[ "$CLAUDE_MODE" -eq 1 ] || printf '{"decision":"deny","reason":"%s"}\n' "$ESCAPED"
-exit 2
+fm_hook_deny "$ESCAPED"
