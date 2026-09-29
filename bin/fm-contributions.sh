@@ -17,8 +17,9 @@
 # GitHub PRs and issues are supported; other forges remain visibly unmeasured.
 #
 # This script owns fm-contributions.v1: one atomic file per durable task with
-# task and records[]. Each record contains url, kind, checked_at, error,
-# observation, verdict, seen event tokens, pending events, and notified tokens.
+# task and records[]. Each record contains url, kind, checked_at, error, an
+# optional failure_streak, observation, verdict, seen event tokens, pending
+# events, and notified tokens.
 # observation is one coherent forge read (a PR head is rechecked after fetching
 # checks/reviews). Checks are normalized by name, id, started_at, status and
 # conclusion; projection picks the newest attempt per distinct name. The last
@@ -57,8 +58,12 @@
 # silence. FM_CONTRIBUTIONS_MAX_AGE (default 900 seconds) bounds freshness.
 # A URL whose last good observation is merged or closed is final: it is
 # never re-read, stays fresh, and a stale error beside it is cleared once.
-# A genuine failure prints its unavailable line only when it starts an episode
-# (no prior owner has an error); a successful read ends the episode.
+# The first genuine failure in an episode records failure_streak=1 without
+# printing. A consecutive failure advances the streak to 2 and prints the
+# unavailable line once; later failures stay at 2 and remain quiet. Owners of
+# a shared URL continue from their highest streak, and an error recorded
+# without failure_streak counts as already reported. A successful read ends
+# the episode.
 # FM_CONTRIBUTIONS_NOW supplies an ISO UTC clock for tests, otherwise UTC now.
 # FM_CONTRIBUTIONS_READY_LABEL selects the equivalent triage label, default
 # ready-for-pr. Labels are matched case-insensitively and exactly.
@@ -336,17 +341,17 @@ settle_final() { # canonical-url task... : copy the URL's final observation to e
       [$saved[0][] | select(.task == $task) | .records[] | select(.url == $url)] | first' > "$TMP/old.json"
     if jq -e '. == null' "$TMP/old.json" >/dev/null; then
       jq -n --slurpfile final "$TMP/final.json" '
-        $final[0] + {error:null,pending:[],notified:[]}' > "$TMP/row.json"
+        $final[0] + {error:null,pending:[],notified:[]} | del(.failure_streak)' > "$TMP/row.json"
       write_record "$task" "$TMP/row.json"
     elif jq -e '.error != null' "$TMP/old.json" >/dev/null; then
-      jq '.error = null' "$TMP/old.json" > "$TMP/row.json"
+      jq '.error = null | del(.failure_streak)' "$TMP/old.json" > "$TMP/row.json"
       write_record "$task" "$TMP/row.json"
     fi
   done
 }
 
 poll() {
-  local task url old kind error observed
+  local task url old kind error observed prior_failure_streak failure_streak
   local -a row
   acquire
   get_input
@@ -381,11 +386,17 @@ poll() {
     observed=0
     observe "$url" || observed=$?
     [ "$BUDGET_EXHAUSTED" -eq 0 ] || continue
-    # Wake once per failure episode: only when no owner has a prior error.
-    if [ "$observed" -ne 0 ] && jq -ne --slurpfile saved "$TMP/saved.json" --arg url "$url" --args \
-      'all($ARGS.positional[] as $task | [$saved[0][] | select(.task == $task) | .records[] | select(.url == $url)] | first;
-        .error == null)' "${row[@]:1}" >/dev/null; then
-      printf 'contributions: observation unavailable for %s\n' "$url"
+    failure_streak=0
+    if [ "$observed" -ne 0 ]; then
+      prior_failure_streak=$(jq -nr --slurpfile saved "$TMP/saved.json" --arg url "$url" --args '
+        [$ARGS.positional[] as $task
+          | [$saved[0][] | select(.task == $task) | .records[] | select(.url == $url)] | first
+          | if .error == null then 0 else (.failure_streak // 2) end]
+        | max // 0' "${row[@]:1}")
+      failure_streak=$((prior_failure_streak < 2 ? prior_failure_streak + 1 : 2))
+      if [ "$prior_failure_streak" -eq 1 ]; then
+        printf 'contributions: observation unavailable for %s\n' "$url"
+      fi
     fi
     case "$url" in */issues/*) kind=issue ;; *) kind="pr" ;; esac
     for task in "${row[@]:1}"; do
@@ -403,10 +414,12 @@ poll() {
           | $old + {checked_at:$now,error:null,
             observation:($o + {absent_checks:((($old.observation.absent_checks // []) + [($old.observation.checks // [])[] | .name]) - [$o.checks[].name] | unique)}),
             seen:($events | map(.token)),
-            pending:(($old.pending // []) + [$events[] | select(.token as $t | ($old.seen // [] | index($t)) == null)] | unique_by(.token))}' > "$TMP/row.json"
+            pending:(($old.pending // []) + [$events[] | select(.token as $t | ($old.seen // [] | index($t)) == null)] | unique_by(.token))}
+          | del(.failure_streak)' > "$TMP/row.json"
       else
         error='forge observation unavailable or changed during read'
-        jq --arg now "$NOW" --arg error "$error" '.checked_at=$now | .error=$error' "$old" > "$TMP/row.json"
+        jq --arg now "$NOW" --arg error "$error" --argjson failure_streak "$failure_streak" \
+          '.checked_at=$now | .error=$error | .failure_streak=$failure_streak' "$old" > "$TMP/row.json"
       fi
       write_record "$task" "$TMP/row.json"
       publish_pending "$task" "$url" "$TMP/row.json"
