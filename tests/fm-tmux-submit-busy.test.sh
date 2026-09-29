@@ -36,7 +36,8 @@ case "${1:-}" in
       [ ! -f "$FM_FAKE_CAPTURE_COUNT" ] || count=$(cat "$FM_FAKE_CAPTURE_COUNT")
       count=$((count + 1))
       printf '%s\n' "$count" > "$FM_FAKE_CAPTURE_COUNT"
-      if [ "${FM_FAKE_FAIL_FIRST_CAPTURE:-0}" = 1 ] && [ "$count" -eq 1 ]; then
+      if { [ "${FM_FAKE_FAIL_FIRST_CAPTURE:-0}" = 1 ] && [ "$count" -eq 1 ]; } \
+         || [ "${FM_FAKE_FAIL_CAPTURE_N:-0}" = "$count" ]; then
         exit 1
       fi
     fi
@@ -214,7 +215,7 @@ test_failed_mode_capture_refuses_before_literal_text() {
   printf '────────────────────────\n\n────────────── NORMAL\n' > "$composer"
   : > "$sent"
   PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
-    FM_FAKE_CAPTURE_COUNT="$dir/captures" FM_FAKE_FAIL_FIRST_CAPTURE=1 \
+    FM_FAKE_CAPTURE_COUNT="$dir/captures" FM_FAKE_FAIL_CAPTURE_N=2 \
     fm_tmux_submit_core "win" ": lifecycle doorbell" 3 0.05 0.05 > "$vfile" 2>/dev/null || rc=$?
   [ "$rc" -ne 0 ] || fail "a failed mode capture must refuse submission"
   [ "$(cat "$vfile")" = send-failed ] \
@@ -316,6 +317,47 @@ test_pi_vim_pending_normal_refuses_without_typing() {
   pass "fm_tmux_submit_core: pi-vim NORMAL preserves pending text"
 }
 
+test_pi_vim_insert_with_pending_text_refuses_without_typing() {
+  local dir fakebin composer sent vfile rc=0
+  dir="$TMP_ROOT/pi-vim-pending-insert"
+  fakebin=$(make_submit_mock "$dir")
+  composer="$dir/composer"
+  sent="$dir/sent.log"
+  vfile="$dir/verdict"
+  printf '────────────────────────\nkeep this draft\n────────────── INSERT\n' > "$composer"
+  : > "$sent"
+  (
+    fm_tmux_composer_state() { printf 'pending'; }
+    PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
+      fm_tmux_submit_core "win" ": lifecycle doorbell" 1 0.05 0.05 > "$vfile" 2>/dev/null
+  ) || rc=$?
+  [ "$rc" -ne 0 ] || fail "pending pi-vim INSERT must refuse submission"
+  [ "$(cat "$vfile")" = send-failed ] \
+    || fail "pending pi-vim INSERT refusal should report send-failed"
+  [ ! -s "$sent" ] \
+    || fail "pending pi-vim INSERT must preserve draft without keys: $(cat "$sent")"
+  pass "fm_tmux_submit_core: pi-vim INSERT requires fresh empty proof"
+}
+
+test_pi_vim_unsupported_mode_refuses_without_typing() {
+  local dir fakebin composer sent vfile rc=0
+  dir="$TMP_ROOT/pi-vim-unsupported"
+  fakebin=$(make_submit_mock "$dir")
+  composer="$dir/composer"
+  sent="$dir/sent.log"
+  vfile="$dir/verdict"
+  printf '────────────────────────\n\n────────────── NORMAL d_\n' > "$composer"
+  : > "$sent"
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
+    fm_tmux_submit_core "win" ": lifecycle doorbell" 1 0.05 0.05 > "$vfile" 2>/dev/null || rc=$?
+  [ "$rc" -ne 0 ] || fail "unsupported pi-vim mode must refuse submission"
+  [ "$(cat "$vfile")" = send-failed ] \
+    || fail "unsupported pi-vim mode refusal should report send-failed"
+  [ ! -s "$sent" ] \
+    || fail "unsupported pi-vim mode received lifecycle input: $(cat "$sent")"
+  pass "fm_tmux_submit_core: unsupported pi-vim modes refuse lifecycle input"
+}
+
 test_claude_busy_signature_uses_real_capture_shapes() {
   local dir fakebin composer
   dir="$TMP_ROOT/claude-signature"
@@ -415,4 +457,6 @@ test_busy_pane_ambiguous_pending_retries_without_conversion
 test_unrecognized_state_skips_busy_conversion
 test_pi_vim_normal_mode_enters_insert_before_literal_text
 test_pi_vim_pending_normal_refuses_without_typing
+test_pi_vim_insert_with_pending_text_refuses_without_typing
+test_pi_vim_unsupported_mode_refuses_without_typing
 test_claude_busy_signature_uses_real_capture_shapes

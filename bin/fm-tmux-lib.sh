@@ -172,7 +172,7 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
 
 # fm_tmux_composer_input_mode: thin tmux capture adapter over pi-vim's shared
 # structural mode parser. This does not prove emptiness or agent identity.
-fm_tmux_composer_input_mode() {  # <target> -> insert|normal|unknown
+fm_tmux_composer_input_mode() {  # <target> -> insert|normal|unsupported|unknown
   local target=$1 cy pane
   cy=$(fm_tmux_composer_cursor_row "$target") || return 1
   case "$cy" in ''|*[!0-9]*) return 1 ;; esac
@@ -305,7 +305,18 @@ fm_tmux_prepare_text_input() {  # <target> <settle>
     return 1
   fi
   case "$mode" in
-    insert|unknown) return 0 ;;
+    unknown) return 0 ;;
+    unsupported)
+      printf 'error: refusing unsupported pi-vim input mode\n' >&2
+      return 1
+      ;;
+    insert)
+      state=$(fm_tmux_composer_state "$target")
+      if [ "$state" != empty ]; then
+        printf 'error: refusing pi-vim INSERT delivery with composer=%s\n' "$state" >&2
+        return 1
+      fi
+      ;;
     normal)
       state=$(fm_tmux_composer_state "$target")
       if [ "$state" != empty ]; then
@@ -327,15 +338,15 @@ fm_tmux_prepare_text_input() {  # <target> <settle>
 
 fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle>
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 baseline_idle='' baseline_state err
-  if ! fm_tmux_prepare_text_input "$target" "$settle"; then
-    printf 'send-failed'
-    return 1
-  fi
   # The turn-started baseline must predate our own typing: a pane already
   # busy before the text lands can turn "busy" for reasons unrelated to our
   # Enter, so only a clean idle-to-busy transition may confirm a submit.
   baseline_state=$(fm_pane_busy_state "$target")
   [ "$baseline_state" = idle ] && baseline_idle=1
+  if ! fm_tmux_prepare_text_input "$target" "$settle"; then
+    printf 'send-failed'
+    return 1
+  fi
   # A failed literal send replays tmux's stderr (for example "command too
   # long") so the caller can log why nothing was typed.
   if ! err=$(tmux send-keys -t "$target" -l "$text" 2>&1 >/dev/null); then

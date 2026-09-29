@@ -3213,7 +3213,7 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|pending-unprove
   printf '%s' "$verdict"
 }
 
-fm_backend_herdr_composer_input_mode() {  # <target> -> insert|normal|unknown
+fm_backend_herdr_composer_input_mode() {  # <target> -> insert|normal|unsupported|unknown
   local target=$1 cap
   if cap=$(fm_backend_herdr_visible_capture_ansi "$target" 2>/dev/null) && [ -n "$cap" ]; then
     :
@@ -3232,7 +3232,18 @@ fm_backend_herdr_prepare_text_input() {  # <target> <settle>
     return 1
   fi
   case "$mode" in
-    insert|unknown) return 0 ;;
+    unknown) return 0 ;;
+    unsupported)
+      printf 'error: refusing unsupported pi-vim input mode\n' >&2
+      return 1
+      ;;
+    insert)
+      state=$(fm_backend_herdr_composer_state "$target")
+      if [ "$state" != empty ]; then
+        printf 'error: refusing pi-vim INSERT delivery with composer=%s\n' "$state" >&2
+        return 1
+      fi
+      ;;
     normal)
       state=$(fm_backend_herdr_composer_state "$target")
       if [ "$state" != empty ]; then

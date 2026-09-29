@@ -621,7 +621,7 @@ test_matrix_pi_separated_needs_identity() {
 
 # Pi-vim replaces the lower composer rule's right edge with its mode label.
 # Both exact ordinary modes preserve the same empty/pending verdicts. Other
-# labels are not recognized as separator rows.
+# labels remain unknown to the classifier and unsupported for input.
 test_matrix_pi_vim_modes() {
   local insert normal pending_normal ex typed pi_idle
   pi_idle=$(printf 'pi\tidle')
@@ -649,10 +649,10 @@ test_matrix_pi_vim_modes() {
 
   assert_screen "pi-vim pending command is unknown" unknown "$CAPS_TMUX" "$pending_normal" 2 "$pi_idle"
   assert_screen "pi-vim Ex mode is unknown" unknown "$CAPS_TMUX" "$ex" 2 "$pi_idle"
-  [ "$(fm_composer_pi_input_mode "$pending_normal" 2)" = unknown ] \
-    || fail "pi-vim pending NORMAL command must stay unknown"
-  [ "$(fm_composer_pi_input_mode "$ex" 2)" = unknown ] \
-    || fail "pi-vim Ex mode must stay unknown"
+  [ "$(fm_composer_pi_input_mode "$pending_normal" 2)" = unsupported ] \
+    || fail "pi-vim pending NORMAL command must refuse input"
+  [ "$(fm_composer_pi_input_mode "$ex" 2)" = unsupported ] \
+    || fail "pi-vim Ex mode must refuse input"
   pass "matrix: pi-vim NORMAL and INSERT classify safely without losing pending text"
 }
 

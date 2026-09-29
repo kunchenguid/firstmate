@@ -752,8 +752,8 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
 # fail safe by default.
 
 # _fm_composer_pi_separator_mode_var: recognize Pi's lower separator with or
-# without an exact pi-vim INSERT or NORMAL label. The rendered label replaces
-# the rule's right edge. Every other label stays unrecognized.
+# without an exact pi-vim INSERT or NORMAL label. Other labels remain an
+# unsupported mode that cannot authorize input.
 _fm_composer_pi_separator_mode_var() {  # <out-var> <trimmed-row>
   local __fmpm_out=$1 __fmpm_row=$2 __fmpm_rule __fmpm_mode=plain
   [ -n "$__fmpm_row" ] || return 1
@@ -761,6 +761,7 @@ _fm_composer_pi_separator_mode_var() {  # <out-var> <trimmed-row>
   case "$__fmpm_row" in
     *' INSERT') __fmpm_rule=${__fmpm_row%' INSERT'}; __fmpm_mode=insert ;;
     *' NORMAL') __fmpm_rule=${__fmpm_row%' NORMAL'}; __fmpm_mode=normal ;;
+    *' '*) __fmpm_rule=${__fmpm_row%%' '*}; __fmpm_mode=unsupported ;;
   esac
   [ -z "${__fmpm_rule//─/}" ] || return 1
   case "$__fmpm_rule" in
@@ -1625,7 +1626,7 @@ EOF
 # selected separated composer. Identity is intentionally not required: this
 # answer selects keyboard normalization, while the ordinary classifier remains
 # the emptiness owner.
-fm_composer_pi_input_mode() {  # <screen> [cursor-row] -> insert|normal|unknown
+fm_composer_pi_input_mode() {  # <screen> [cursor-row] -> insert|normal|unsupported|unknown
   local screen=$1 cy=${2:-} plain
   case "$cy" in *[!0-9]*) printf 'unknown'; return 0 ;; esac
   plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
@@ -1647,7 +1648,7 @@ fm_composer_pi_input_mode() {  # <screen> [cursor-row] -> insert|normal|unknown
     return 0
   fi
   case "$FM_COMPOSER_SCAN_PI_MODE" in
-    insert|normal) printf '%s' "$FM_COMPOSER_SCAN_PI_MODE" ;;
+    insert|normal|unsupported) printf '%s' "$FM_COMPOSER_SCAN_PI_MODE" ;;
     *) printf 'unknown' ;;
   esac
 }
@@ -1879,7 +1880,8 @@ _fm_composer_pi_verdict() {  # <screen> <styled> <has_identity> <identity> <can-
     printf 'pending'
     return 0
   fi
-  if [ "$FM_COMPOSER_SCAN_PI_MODE" = normal ] && [ "$can_normalize" != 1 ]; then
+  if [ "$FM_COMPOSER_SCAN_PI_MODE" = unsupported ] \
+     || { [ "$FM_COMPOSER_SCAN_PI_MODE" = normal ] && [ "$can_normalize" != 1 ]; }; then
     printf 'unknown'
     return 0
   fi

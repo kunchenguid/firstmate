@@ -4409,6 +4409,36 @@ test_send_text_submit_pi_vim_pending_normal_preserves_text() {
   pass "fm_backend_herdr_send_text_submit: pending Pi NORMAL remains untouched"
 }
 
+test_send_text_submit_pi_vim_insert_requires_fresh_empty_proof() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/submit-pi-vim-pending-insert"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"agent":{"agent":"pi","agent_status":"idle"}}}\n' > "$resp/1.out"
+  printf 'transcript\n────────────────────────\nkeep this draft\n────────────── INSERT\n' > "$resp/2.out"
+  printf 'transcript\n────────────────────────\nkeep this draft\n────────────── INSERT\n' > "$resp/3.out"
+  printf '{"result":{"agent":{"agent":"pi","agent_status":"idle"}}}\n' > "$resp/4.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit lab:w1:p2 ": lifecycle doorbell" 1 0.01 0' "$ROOT" 2>/dev/null )
+  [ "$out" = send-failed ] || fail "pending Pi INSERT should refuse on Herdr, got '$out'"
+  [ "$(grep -c $'\x1f''pane'$'\x1f''send-' "$log" || true)" -eq 0 ] \
+    || fail "pending Pi INSERT received lifecycle input: $(cat "$log")"
+  pass "fm_backend_herdr_send_text_submit: Pi INSERT requires fresh empty proof"
+}
+
+test_send_text_submit_pi_vim_unsupported_mode_refuses() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/submit-pi-vim-unsupported"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"agent":{"agent":"pi","agent_status":"idle"}}}\n' > "$resp/1.out"
+  printf 'transcript\n────────────────────────\n\n────────────── NORMAL d_\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit lab:w1:p2 ": lifecycle doorbell" 1 0.01 0' "$ROOT" 2>/dev/null )
+  [ "$out" = send-failed ] || fail "unsupported Pi mode should refuse on Herdr, got '$out'"
+  [ "$(grep -c $'\x1f''pane'$'\x1f''send-' "$log" || true)" -eq 0 ] \
+    || fail "unsupported Pi mode received lifecycle input: $(cat "$log")"
+  pass "fm_backend_herdr_send_text_submit: unsupported Pi modes refuse input"
+}
+
 test_send_text_submit_refuses_when_pi_identity_recheck_fails() {
   local dir log resp fb out
   dir="$TMP_ROOT/submit-pi-vim-identity-fail"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -6006,6 +6036,8 @@ test_wait_for_working_treats_blocked_as_submit_active
 test_send_text_submit_detects_landed_send
 test_send_text_submit_pi_vim_normal_enters_insert_before_text
 test_send_text_submit_pi_vim_pending_normal_preserves_text
+test_send_text_submit_pi_vim_insert_requires_fresh_empty_proof
+test_send_text_submit_pi_vim_unsupported_mode_refuses
 test_send_text_submit_refuses_when_pi_identity_recheck_fails
 test_send_text_submit_refuses_when_mode_capture_fails
 test_send_text_submit_detects_swallowed_enter
