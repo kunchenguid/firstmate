@@ -74,13 +74,15 @@
 # actual model and refuses before dispatch.
 #
 # Usage:
-#   fm-fleet-seats.sh reserve <id> --harness <harness> --model <model|default> --holder-pid <pid> [--raw-launch]
+#   fm-fleet-seats.sh reserve <id> --harness <harness> --model <model|default> --holder-pid <pid> [--raw-launch] [--relaunch-hold <token>]
 #       Reserve a seat for this home's <id> when <model> belongs to a pool.
 #       Prints nothing and exits 0 when no pool names the model (or no pool is
 #       configured locally); prints "fleet-seats: reserved ..." on success.
 #       An id that already holds a seat keeps it even when the pool is full.
 #       <holder-pid> is the long-lived reserving process
 #       (bin/fm-spawn.sh passes its own pid) and must be alive.
+#   fm-fleet-seats.sh cancel-relaunch <id> --token <token>
+#       Root only; withdraw a relaunch hold after a confirmed prelaunch refusal.
 #   fm-fleet-seats.sh serve-remotes
 #       Root only (a no-op anywhere else): serve every registered remote
 #       secondmate and print one "served <id> ..." or "unreachable <id>" line
@@ -130,7 +132,7 @@ SERVE_TIMEOUT=20
 SERVE_BACKOFF=${FM_FLEET_SEATS_TEST_BACKOFF:-120}
 
 usage() {
-  echo "usage: fm-fleet-seats.sh reserve <id> --harness <harness> --model <model|default> --holder-pid <pid> [--raw-launch] | serve-remotes | serve --digest <digest> [--allowance <pool>=<n>]..." >&2
+  echo "usage: fm-fleet-seats.sh reserve <id> --harness <harness> --model <model|default> --holder-pid <pid> [--raw-launch] [--relaunch-hold <token>] | cancel-relaunch <id> --token <token> | serve-remotes | serve --digest <digest> [--allowance <pool>=<n>]..." >&2
   exit 2
 }
 
@@ -247,6 +249,7 @@ write_record() {
     printf 'pid_identity=%s\n' "$identity"
     echo "nonce=${6:-}"
     echo "policy=${7:-}"
+    echo "hold=${8:-}"
     echo "at=$(date +%s)"
   } > "$path.tmp.$$" && mv -f "$path.tmp.$$" "$path"
 }
@@ -277,6 +280,13 @@ seat_records() {
       continue
     fi
     verdict=$(meta_state "$st/$task.meta" "$models")
+    if [ "$(record_field "$f" hold)" = relaunch ]; then
+      if [ "$verdict" != pooled ] || [ "$(record_field "$st/$task.meta" model)" != "$model" ]; then
+        printf '%s\t%s\n' "$st" "$task"
+        continue
+      fi
+      [ "$remove_stale" -eq 0 ] || rm -f "$f"
+    fi
     case "$verdict" in
       pooled|unreadable) printf '%s\t%s\n' "$st" "$task" ;;
       *)
@@ -414,7 +424,7 @@ require_explicit_model() {
 
 CMD=${1:-}
 shift 2>/dev/null || true
-TASK='' MODEL='' HOLDER='' HARNESS='' DIGEST_ARG='' RAW_LAUNCH=0
+TASK='' MODEL='' HOLDER='' HARNESS='' DIGEST_ARG='' RAW_LAUNCH=0 RELAUNCH_TOKEN=''
 ALLOWANCES=''
 case "$CMD" in
   reserve)
@@ -427,10 +437,20 @@ case "$CMD" in
         --harness) HARNESS=${2:-}; shift 2 || usage ;;
         --holder-pid) HOLDER=${2:-}; shift 2 || usage ;;
         --raw-launch) RAW_LAUNCH=1; shift ;;
+        --relaunch-hold) RELAUNCH_TOKEN=${2:-}; shift 2 || usage ;;
         *) usage ;;
       esac
     done
     [ -n "$HOLDER" ] || usage
+    case "$RELAUNCH_TOKEN" in *[!A-Za-z0-9._-]*) usage ;; esac
+    ;;
+  cancel-relaunch)
+    TASK=${1:-}
+    shift 2>/dev/null || true
+    id_ok "$TASK" || usage
+    [ "${1:-}" = --token ] && [ "$#" -eq 2 ] || usage
+    RELAUNCH_TOKEN=$2
+    case "$RELAUNCH_TOKEN" in ''|*[!A-Za-z0-9._-]*) usage ;; esac
     ;;
   serve-remotes) [ "$#" -eq 0 ] || usage ;;
   serve)
@@ -457,6 +477,8 @@ if ! resolve_authority; then
   case "$CMD" in serve-remotes) exit 0 ;; esac
   unavailable "this home's fleet root cannot be resolved from its secondmate parent binding"
 fi
+[ -z "$RELAUNCH_TOKEN" ] || [ "$ROOT_SELF" -eq 1 ] \
+  || unavailable "only the fleet root can hold a remote relaunch seat"
 
 if [ "$CMD" = reserve ]; then
   if [ "$ROOT_REMOTE" -eq 0 ]; then
@@ -476,7 +498,7 @@ elif [ "$CMD" = serve-remotes ] && [ "$ROOT_SELF" -eq 1 ] \
   exit 0
 fi
 
-command -v jq >/dev/null 2>&1 || unavailable "jq is not installed"
+[ "$CMD" = cancel-relaunch ] || command -v jq >/dev/null 2>&1 || unavailable "jq is not installed"
 TMPD=$(mktemp -d "${TMPDIR:-/tmp}/fm-fleet-seats.XXXXXX") || unavailable "cannot create a scratch directory"
 LOCK_HELD=
 REGISTRY_ERROR=
@@ -485,6 +507,23 @@ cleanup() {
   rm -rf "$TMPD"
 }
 trap cleanup EXIT
+
+if [ "$CMD" = cancel-relaunch ]; then
+  [ "$ROOT_SELF" -eq 1 ] || unavailable "only the fleet root can cancel a remote relaunch seat"
+  SEATROOT=$ROOT_STATE/fleet-seats
+  [ -d "$SEATROOT" ] || exit 0
+  CALLER_STATE=$(canon_dir "$STATE") || unavailable "this home's state directory $STATE is missing"
+  lock_or_refuse "$ROOT_STATE/.fleet-seats.lock"
+  for f in "$SEATROOT"/*/"$(seat_name "$CALLER_STATE" "$TASK")".seat; do
+    [ -f "$f" ] || continue
+    [ "$(record_field "$f" state)" = "$CALLER_STATE" ] || continue
+    [ "$(record_field "$f" task)" = "$TASK" ] || continue
+    [ "$(record_field "$f" hold)" = relaunch ] || continue
+    [ "$(record_field "$f" nonce)" = "$RELAUNCH_TOKEN" ] || continue
+    rm -f "$f" || unavailable "cannot cancel the confirmed failed relaunch seat for $TASK"
+  done
+  exit 0
+fi
 
 # --- remote home -------------------------------------------------------------
 
@@ -744,6 +783,21 @@ elif [ "$?" -eq 3 ]; then
 else
   unavailable "${REGISTRY_ERROR:-a fleet task record cannot be read}"
 fi
+if [ -n "$RELAUNCH_TOKEN" ]; then
+  for f in "$SEATROOT"/*/"$(seat_name "$CALLER_STATE" "$TASK")".seat; do
+    [ -f "$f" ] || continue
+    [ "$(record_field "$f" state)" = "$CALLER_STATE" ] || continue
+    [ "$(record_field "$f" task)" = "$TASK" ] || continue
+    [ "$(record_field "$f" hold)" = relaunch ] || continue
+    [ "$(record_field "$f" nonce)" = "$RELAUNCH_TOKEN" ] && continue
+    if [ "$(record_field "$CALLER_STATE/$TASK.meta" model)" = "$(record_field "$f" model)" ] \
+      && [ -n "$(record_field "$CALLER_STATE/$TASK.meta" remote_host)" ]; then
+      rm -f "$f" || unavailable "cannot retire the published relaunch seat for $TASK"
+    else
+      unavailable "an earlier remote relaunch for $TASK has no confirmed parent record"
+    fi
+  done
+fi
 USED=$(wc -l < "$TMPD/holders" | tr -d ' ')
 KEY=$(printf '%s\t%s' "$CALLER_STATE" "$TASK")
 if ! grep -Fxq -- "$KEY" "$TMPD/holders" && [ "$USED" -ge "$CAP" ]; then
@@ -752,7 +806,8 @@ if ! grep -Fxq -- "$KEY" "$TMPD/holders" && [ "$USED" -ge "$CAP" ]; then
 fi
 
 SEAT=$SEATROOT/$POOL/$(seat_name "$CALLER_STATE" "$TASK").seat
-write_record "$SEAT" "$CALLER_STATE" "$TASK" "$MODEL" "$HOLDER" || unavailable "cannot write $SEAT"
+write_record "$SEAT" "$CALLER_STATE" "$TASK" "$MODEL" "$HOLDER" "$RELAUNCH_TOKEN" '' "${RELAUNCH_TOKEN:+relaunch}" \
+  || unavailable "cannot write $SEAT"
 if grep -Fxq -- "$KEY" "$TMPD/holders"; then
   echo "fleet-seats: reserved pool=$POOL id=$TASK (already held) used=$USED capacity=$CAP"
 else

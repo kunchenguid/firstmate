@@ -29,6 +29,7 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+. "$SCRIPT_DIR/fm-timeout-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 usage() { sed -n '2,4p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
@@ -45,11 +46,22 @@ META="$STATE/$ID.meta"
 REMOTE_HOST=$(fm_meta_get "$META" remote_host)
 [ -n "$REMOTE_HOST" ] \
   || die "task $ID is not a remotely placed secondmate; use bin/fm-control.sh $ID relaunch instead"
+META_LOCK=$(fm_meta_lock_path "$META") || die "metadata lock path is invalid for $ID"
+fm_lock_acquire_wait_max "$META_LOCK" 30 || die "metadata for $ID stayed locked"
+trap 'fm_lock_release "$META_LOCK" || true' EXIT
 
-RELAUNCH_OUT=$("$SCRIPT_DIR/fm-on.sh" "$ID" fm-remote-secondmate-control.sh \
+RELAUNCH_TOKEN="$(date +%s).$$.$RANDOM"
+"$SCRIPT_DIR/fm-fleet-seats.sh" reserve "$ID" --harness "$HARNESS" --model "$MODEL" \
+  --holder-pid "$$" --relaunch-hold "$RELAUNCH_TOKEN" || die "remote secondmate $ID has no fleet seat for model $MODEL"
+
+RELAUNCH_OUT=$(fm_run_timed 300 "$SCRIPT_DIR/fm-on.sh" "$ID" fm-remote-secondmate-control.sh \
   relaunch "$ID" "$HARNESS" "$MODEL" "$EFFORT" </dev/null 2>&1) || {
   rc=$?
   printf '%s\n' "$RELAUNCH_OUT" >&2
+  if printf '%s\n' "$RELAUNCH_OUT" | grep -Fxq 'relaunch_failure=prelaunch'; then
+    "$SCRIPT_DIR/fm-fleet-seats.sh" cancel-relaunch "$ID" --token "$RELAUNCH_TOKEN" \
+      || die "the confirmed failed relaunch seat for $ID could not be released"
+  fi
   exit "$rc"
 }
 printf '%s\n' "$RELAUNCH_OUT"
@@ -67,10 +79,7 @@ NEW_MODEL=$(printf '%s\n' "$RELAUNCH_OUT" | sed -n 's/^model=//p' | tail -1)
 NEW_EFFORT=$(printf '%s\n' "$RELAUNCH_OUT" | sed -n 's/^effort=//p' | tail -1)
 [ -n "$NEW_HARNESS" ] || die "the host's route confirmation carried no harness to record"
 
-META_LOCK=$(fm_meta_lock_path "$META") || die "metadata lock path is invalid for $ID"
-fm_lock_acquire_wait "$META_LOCK"
 META_TMP=$(mktemp "$STATE/.fm-remote-relaunch-meta.XXXXXX") || {
-  fm_lock_release "$META_LOCK"
   die "cannot stage the updated record"
 }
 {
@@ -93,3 +102,4 @@ done < "$META"
 chmod 0600 "$META_TMP"
 mv -f -- "$META_TMP" "$META"
 fm_lock_release "$META_LOCK"
+trap - EXIT

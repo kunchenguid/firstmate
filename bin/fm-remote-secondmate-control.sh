@@ -86,8 +86,11 @@ fi
 # shellcheck source=bin/fm-task-inbox-lib.sh
 . "$SCRIPT_DIR/fm-task-inbox-lib.sh"
 
-validate_home() { # <id>
-  local id=$1 marker
+prelaunch_die() { printf 'relaunch_failure=prelaunch\n' >&2; die "$1"; }
+
+validate_home() { # <id> [allow-absent]
+  local id=$1 allow_absent=${2:-no} marker
+  if [ ! -e "$TARGET_HOME" ] && [ ! -L "$TARGET_HOME" ] && [ "$allow_absent" = yes ]; then return 2; fi
   [ -d "$TARGET_HOME" ] && [ ! -L "$TARGET_HOME" ] || die "remote secondmate home is unavailable or unsafe"
   [ -f "$TARGET_HOME/.fm-secondmate-home" ] && [ ! -L "$TARGET_HOME/.fm-secondmate-home" ] \
     || die "remote home is not a seeded secondmate home"
@@ -250,10 +253,10 @@ cmd_relaunch() {
   validate_home "$id"
   case "$harness" in
     claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|omp) ;;
-    *) die "unverified remote secondmate harness: $harness" ;;
+    *) prelaunch_die "unverified remote secondmate harness: $harness" ;;
   esac
-  case "$effort" in -|default|low|medium|high|xhigh|max|ultra) ;; *) die "invalid remote secondmate effort: $effort" ;; esac
-  case "$model" in *[[:space:]]*) die "invalid remote secondmate model: $model" ;; esac
+  case "$effort" in -|default|low|medium|high|xhigh|max|ultra) ;; *) prelaunch_die "invalid remote secondmate effort: $effort" ;; esac
+  case "$model" in *[[:space:]]*) prelaunch_die "invalid remote secondmate model: $model" ;; esac
   if [ "$effort" = ultra ]; then
     "$SCRIPT_DIR/fm-harness.sh" validate-native-effort "$harness" "$model" "$effort" || return 1
   fi
