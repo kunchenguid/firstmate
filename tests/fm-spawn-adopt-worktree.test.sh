@@ -440,6 +440,121 @@ test_unusable_adopted_paths_are_refused_with_their_condition() {
   pass "missing, foreign, subdirectory, pool-slot, recorded, dirty, and unlanded adopted paths are refused by name"
 }
 
+# A copy that already carries commits is the ticket this adoption exists to
+# resume. Without an explicit assertion the dispatch still cannot tell that
+# work from a fresh start, so it refuses and leaves the commits untouched.
+# With the assertion it launches into that same copy and still never rewrites
+# the branch. The assertion does not loosen a refusal that is unsafe on its own.
+test_resume_unlanded_launches_without_rewriting_the_branch() {
+  local id out status before branch tracked origin_main path
+  id='adopt-resume-unlanded-b4'
+  make_case resume-unlanded "$id"
+  printf 'earlier work\n' > "$CLAIM_DIR/earlier.txt"
+  git -C "$CLAIM_DIR" add earlier.txt
+  git -C "$CLAIM_DIR" -c user.name=t -c user.email=t@t commit -qm earlier
+  before=$(git -C "$CLAIM_DIR" rev-parse HEAD)
+  branch=$(git -C "$CLAIM_DIR" symbolic-ref --short HEAD)
+  origin_main=$(git -C "$CASE_DIR/origin.git" rev-parse main)
+  [ "$before" != "$origin_main" ] \
+    || fail "the fixture's earlier commit is already origin/main, so this test proves nothing"
+
+  out=$(run_spawn "$CLAIM_DIR" "$id" --mode no-mistakes --yolo off --adopt-worktree "$CLAIM_DIR")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn adopted a copy carrying unlanded commits without the resume assertion"$'\n'"$out"
+  assert_contains "$out" "carries commits not on 'origin/main'" \
+    "the refusal without the resume assertion did not keep its message"
+  assert_contains "$out" "a first dispatch cannot tell earlier work from a fresh start, so it refuses rather than reset them away" \
+    "the refusal without the resume assertion changed its reason"
+  [ "$(git -C "$CLAIM_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "the refusal without the resume assertion rewrote the claimed copy"
+  [ "$(git -C "$CLAIM_DIR" symbolic-ref --short HEAD)" = "$branch" ] \
+    || fail "the refusal without the resume assertion left the claimed copy's branch"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "the refusal without the resume assertion published task metadata"
+
+  : > "$PANE_LOG"
+  tracked=$(git -C "$CLAIM_DIR" rev-parse origin/main)
+  out=$(run_spawn "$CLAIM_DIR" "$id" --mode no-mistakes --yolo off --adopt-worktree "$CLAIM_DIR" --resume-unlanded)
+  status=$?
+  expect_code 0 "$status" "spawn should launch into an adopted copy whose unlanded commits were asserted as work to resume"$'\n'"$out"
+  assert_contains "$out" "spawned $id" "the resumed adoption did not report success"
+  assert_grep "worktree=$CLAIM_DIR" "$HOME_DIR/state/$id.meta" \
+    "the resumed adoption did not record the adopted copy"
+  assert_grep "worktree_source=adopted" "$HOME_DIR/state/$id.meta" \
+    "the resumed adoption was not recorded as adopted"
+  ! grep -Fq 'treehouse get' "$PANE_LOG" \
+    || fail "the resumed adoption asked Treehouse for a pool slot"$'\n'"$(cat "$PANE_LOG")"
+  assert_grep "cd -- '$CLAIM_DIR'" "$PANE_LOG" \
+    "the resumed adoption did not enter the adopted copy before launch"
+  [ "$(git -C "$CLAIM_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "the resumed adoption rewrote the claimed copy's commits"
+  [ "$(git -C "$CLAIM_DIR" symbolic-ref --short HEAD)" = "$branch" ] \
+    || fail "the resumed adoption left the claimed copy's branch"
+  [ -f "$CLAIM_DIR/earlier.txt" ] || fail "the resumed adoption discarded the claimed copy's commit"
+  [ "$(git -C "$CLAIM_DIR" rev-parse origin/main)" = "$tracked" ] \
+    || fail "the resumed adoption refreshed the claimed copy's base"
+  [ "$(git -C "$CLAIM_DIR" rev-parse HEAD)" != "$origin_main" ] \
+    || fail "the resumed adoption moved the claimed copy onto origin/main"
+
+  # The same assertion on a copy that is merely behind the default branch
+  # still must not reset it forward. The assertion launches as the copy stands.
+  id='adopt-resume-behind-b4'
+  make_case resume-behind "$id"
+  before=$(git -C "$CLAIM_DIR" rev-parse HEAD)
+  origin_main=$(git -C "$CASE_DIR/origin.git" rev-parse main)
+  [ "$before" != "$origin_main" ] || fail "the behind-main fixture did not diverge from origin/main"
+  out=$(run_spawn "$CLAIM_DIR" "$id" --mode no-mistakes --yolo off --adopt-worktree "$CLAIM_DIR" --resume-unlanded)
+  status=$?
+  expect_code 0 "$status" "spawn should launch into an adopted copy left as it stands when resume is asserted"$'\n'"$out"
+  [ "$(git -C "$CLAIM_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "the resume assertion reset a copy that was merely behind origin/main"
+
+  id='adopt-resume-dirty-b4'
+  make_case resume-dirty "$id"
+  printf 'claimed-session work\n' > "$CLAIM_DIR/uncommitted.txt"
+  out=$(run_spawn "$CLAIM_DIR" "$id" --mode no-mistakes --yolo off --adopt-worktree "$CLAIM_DIR" --resume-unlanded)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn adopted a dirty copy because resume was asserted"$'\n'"$out"
+  assert_contains "$out" "has uncommitted changes" \
+    "the dirty refusal did not keep its message when resume was asserted"
+  assert_grep 'claimed-session work' "$CLAIM_DIR/uncommitted.txt" \
+    "the dirty refusal discarded the claimed copy's work when resume was asserted"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "the dirty refusal published task metadata"
+
+  id='adopt-resume-missing-b4'
+  make_case resume-missing "$id"
+  out=$(run_spawn "$CASE_DIR/no-such-copy" "$id" --mode no-mistakes --yolo off --adopt-worktree "$CASE_DIR/no-such-copy" --resume-unlanded)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn adopted a missing path because resume was asserted"$'\n'"$out"
+  assert_contains "$out" "does not exist" \
+    "the missing-path refusal did not keep its message when resume was asserted"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "the missing-path refusal published task metadata"
+
+  id='adopt-resume-pool-b4'
+  make_case resume-pool "$id"
+  mkdir -p "$CASE_DIR/pool/1"
+  printf '{}\n' > "$CASE_DIR/pool/treehouse-state.json"
+  git -C "$PROJECT_DIR" worktree add --quiet --detach "$CASE_DIR/pool/1/project" HEAD
+  path=$(cd "$CASE_DIR/pool/1/project" && pwd -P)
+  out=$(run_spawn "$path" "$id" --mode no-mistakes --yolo off --adopt-worktree "$path" --resume-unlanded)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn adopted a pool slot because resume was asserted"$'\n'"$out"
+  assert_contains "$out" "is a Treehouse pool slot" \
+    "the pool-slot refusal did not keep its message when resume was asserted"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "the pool-slot refusal published task metadata"
+
+  id='adopt-resume-alone-b4'
+  make_case resume-alone "$id"
+  : > "$PANE_LOG"
+  out=$(run_spawn "$CLAIM_DIR" "$id" --mode no-mistakes --yolo off --resume-unlanded)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted --resume-unlanded without --adopt-worktree"$'\n'"$out"
+  assert_contains "$out" "--resume-unlanded applies only with --adopt-worktree" \
+    "the bare resume flag was not refused as an adoption-only assertion"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "a bare resume flag published task metadata"
+  [ ! -s "$PANE_LOG" ] || fail "a bare resume flag drove a pane"$'\n'"$(cat "$PANE_LOG")"
+  pass "an explicit resume assertion launches into unlanded commits without rewriting them, and unsafe copies still refuse"
+}
+
 test_adopt_worktree_is_refused_outside_a_first_ship_or_scout_dispatch() {
   local id out status
   id='adopt-combination-a4'
@@ -471,6 +586,7 @@ test_refused_adoption_leaves_the_copys_own_wiring_file
 test_redispatch_refuses_rather_than_replacing_preserved_originals
 test_stale_submodule_pin_is_not_reported_as_uncommitted_work
 test_unusable_adopted_paths_are_refused_with_their_condition
+test_resume_unlanded_launches_without_rewriting_the_branch
 test_adopt_worktree_is_refused_outside_a_first_ship_or_scout_dispatch
 
 echo "# all fm-spawn-adopt-worktree tests passed"

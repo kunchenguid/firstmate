@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--adopt-worktree <path>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--adopt-worktree <path>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--adopt-worktree <path>] [--resume-unlanded] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--adopt-worktree <path>] [--resume-unlanded] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
@@ -61,7 +61,12 @@
 #   both put those originals back, remove only the wiring firstmate itself
 #   wrote, and release only this task's own claim. The ordinary base refresh below then
 #   refuses a copy carrying commits the origin default branch lacks rather than
-#   resetting them away. The task record carries worktree_source=adopted, which relaunch
+#   resetting them away. --resume-unlanded, only together with --adopt-worktree,
+#   is the caller's explicit assertion that those commits are work to resume:
+#   the launch then proceeds on the copy as it stands and never fetches, resets,
+#   discards, or rewrites its branch. Without that assertion the refusal is
+#   unchanged, and the assertion never authorises a reset or a discard.
+#   The task record carries worktree_source=adopted, which relaunch
 #   preserves and bin/fm-teardown.sh reads to leave the copy and its branch to
 #   their creator instead of returning them to a pool. The flag is refused with
 #   --relaunch, --secondmate, batch pairs, and the orca backend, which creates
@@ -682,6 +687,7 @@ YOLO_SET=0
 BRANCH_PREFIX_SET=0
 TRACEPARENT_SET=0
 ADOPT_SET=0
+ADOPT_RESUME=0
 RELAUNCH=0
 POS=()
 want_value=
@@ -793,6 +799,7 @@ for a in "$@"; do
     ADOPT_WT=${a#--adopt-worktree=}
     ADOPT_SET=1
     ;;
+  --resume-unlanded) ADOPT_RESUME=1 ;;
   *) POS+=("$a") ;;
   esac
 done
@@ -834,6 +841,10 @@ done
 }
 if [ "$ADOPT_SET" -eq 1 ] && { [ "$RELAUNCH" -eq 1 ] || [ "$KIND" = secondmate ]; }; then
   echo "error: --adopt-worktree applies only to a first ship or scout dispatch; a relaunch reuses the task's recorded worktree and a secondmate runs in its own home" >&2
+  exit 1
+fi
+if [ "$ADOPT_RESUME" -eq 1 ] && [ "$ADOPT_SET" -eq 0 ]; then
+  echo "error: --resume-unlanded applies only with --adopt-worktree; it asserts that adopted copy's existing commits are work to resume and never resets or rewrites the branch" >&2
   exit 1
 fi
 # A parent-delivered carrier replaces this home's own resolution, so it is
@@ -3411,6 +3422,13 @@ freshen_spawn_worktree_base() { # <worktree>
   local worktree=$1 default target expected actual label=pooled
   [ "$SPAWN_WORKTREE_ADOPTED" = 0 ] || label=adopted
   spawn_worktree_clean_or_refuse "$worktree" "$label" || return 1
+  # --resume-unlanded asserts this adopted copy's commits are the work to
+  # continue. That assertion never fetches or rewrites the branch: the launch
+  # uses the copy exactly as it stands. Without it, commits the default branch
+  # lacks still refuse below rather than being reset away.
+  if [ "$label" = adopted ] && [ "$ADOPT_RESUME" -eq 1 ]; then
+    return 0
+  fi
   if ! spawn_worktree_has_origin_config "$worktree"; then
     return 0
   fi
