@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Route an explicitly configured independent review when a ship records a build
-# commit or a reviewable PR. The task metadata supplies review_class,
+# commit or a reviewable PR. A scan routes only the worker's latest committed
+# build head; PR registration requests the exact forge head it just recorded. The task metadata supplies review_class,
 # review_owner (a secondmate in this home), and review_family. A successful
 # fm-send inbox delivery is the receipt; the deterministic delivery id makes a
 # crash between delivery and receipt publication safe to retry.
@@ -76,22 +77,11 @@ case "$COMMAND" in
     # A committed build declaration is intentionally exact, so ordinary
     # progress prose cannot dispatch a review of an uncommitted tree.
     STATUS="$STATE/$ID.status"
-    STATUS_HEAD=
     if [ -f "$STATUS" ] && [ ! -L "$STATUS" ]; then
-      STATUS_HEAD=$(sed -nE 's/^working( \[[^]]+\])?: build done commit=([0-9a-fA-F]{40})( |$).*/\2/p; s/^needs-decision( \[[^]]+\])?:.*ready for independent review at ([0-9a-fA-F]{40})( |$).*/\2/p' "$STATUS" | tail -1)
+      HEAD=$(sed -nE 's/^working( \[[^]]+\])?: build done commit=([0-9a-fA-F]{40})( |$).*/\2/p; s/^needs-decision( \[[^]]+\])?:.*ready for independent review at ([0-9a-fA-F]{40})( |$).*/\2/p' "$STATUS" | tail -1)
     fi
     PR=$(meta_value "$META" pr)
     [ -n "$PR" ] || PR=-
-    # The worker's build declaration and the forge head recorded at PR
-    # registration can each be the newer head, so route whichever is unrouted.
-    for CANDIDATE in "$STATUS_HEAD" "$(meta_value "$META" pr_head)"; do
-      [ -n "$CANDIDATE" ] || continue
-      [ -n "$HEAD" ] || HEAD=$CANDIDATE
-      if ! awk -F '\t' -v h="$CANDIDATE" -v c="$CLASS" '$1==h && $3==c {found=1} END {exit !found}' "$STATE/$ID.review-rounds" 2>/dev/null; then
-        HEAD=$CANDIDATE
-        break
-      fi
-    done
     [ -n "$HEAD" ] || exit 0
     ;;
   request)

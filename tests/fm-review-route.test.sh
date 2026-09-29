@@ -36,11 +36,9 @@ route scan build >/dev/null || fail 'identical head was refused'
 [ "$(wc -l < "$SEND_LOG")" -eq 1 ] || fail 'identical head sent another request'
 
 printf 'pr=%s\npr_head=%s\n' "$PR" "$HEAD_B" >> "$STATE/build.meta"
-route scan build >/dev/null || fail 'new PR head did not route a review'
+route request build "$PR" "$HEAD_B" security codex >/dev/null || fail 'new PR head did not route a review'
 [ "$(wc -l < "$SEND_LOG")" -eq 2 ] || fail 'changed head did not cause exactly one new request'
-sed "s/pr_head=$HEAD_B/pr_head=$HEAD_C/" "$STATE/build.meta" > "$STATE/build.meta.tmp"
-mv "$STATE/build.meta.tmp" "$STATE/build.meta"
-if route scan build > "$TMP_ROOT/cap.out" 2>&1; then fail 'third review without a finding was accepted'; fi
+if route request build "$PR" "$HEAD_C" security codex > "$TMP_ROOT/cap.out" 2>&1; then fail 'third review without a finding was accepted'; fi
 [ "$(wc -l < "$SEND_LOG")" -eq 2 ] || fail 'review cap sent a third request'
 [ -f "$STATE/build.review-cap-escalated" ] || fail 'review cap did not escalate'
 route request build "$PR" "$HEAD_C" security codex correctness-17 'blocking correctness regression in settlement' >/dev/null \
@@ -54,13 +52,23 @@ chmod 600 "$STATE/fix.meta"
 : > "$SEND_LOG"
 route configure fix security reviewer codex >/dev/null || fail 'could not configure fix review'
 printf 'pr=%s\npr_head=%s\n' "$PR" "$HEAD_A" >> "$STATE/fix.meta"
-route scan fix >/dev/null || fail 'registered PR head did not route review'
+route request fix "$PR" "$HEAD_A" security codex >/dev/null || fail 'registered PR head did not route review'
 printf 'working [at=2]: build done commit=%s\n' "$HEAD_B" > "$STATE/fix.status"
 route scan fix >/dev/null || fail 'pushed fix commit after PR registration did not route'
 [ "$(wc -l < "$SEND_LOG")" -eq 2 ] || fail 'stale recorded PR head suppressed the fix commit review'
 grep -q "$HEAD_B" "$SEND_LOG" || fail 'fix commit review did not name its exact head'
 route scan fix >/dev/null || fail 'routed fix head was refused on rescan'
 [ "$(wc -l < "$SEND_LOG")" -eq 2 ] || fail 'rescan routed an already reviewed head'
+
+printf 'kind=ship\npr=%s\npr_head=%s\n' "$PR" "$HEAD_A" > "$STATE/older.meta"
+chmod 600 "$STATE/older.meta"
+: > "$SEND_LOG"
+route configure older security reviewer codex >/dev/null || fail 'could not configure older-head review'
+printf 'working [at=3]: build done commit=%s\n' "$HEAD_B" > "$STATE/older.status"
+route scan older >/dev/null || fail 'newer build head did not route'
+route scan older >/dev/null || fail 'rescan after newer build head failed'
+[ "$(wc -l < "$SEND_LOG")" -eq 1 ] || fail 'scan spent a round on an older unrouted PR head'
+grep -q "$HEAD_A" "$SEND_LOG" && fail 'scan routed the superseded PR head'
 
 printf 'kind=ship\npr=%s\npr_head=%s\n' "$PR" "$HEAD_A" > "$STATE/manual.meta"
 chmod 600 "$STATE/manual.meta"

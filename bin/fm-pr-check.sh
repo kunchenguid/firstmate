@@ -268,12 +268,14 @@ case "$READY_RC" in
   0|1) ;;
   *) printf 'actionable: PR %s is registered but its ready line did not reach the parent channel (rc=%s)\n' "$URL" "$READY_RC" >&2 ;;
 esac
-if [ "${FM_PR_CHECK_MERGE:-}" != 1 ] && grep -q '^review_class=' "$META"; then
+REVIEW_CLASS=$(grep '^review_class=' "$META" | tail -1 | cut -d= -f2- || true)
+REVIEW_FAMILY=$(grep '^review_family=' "$META" | tail -1 | cut -d= -f2- || true)
+if [ "${FM_PR_CHECK_MERGE:-}" != 1 ] && [ -n "$REVIEW_CLASS" ] && [ -n "$PR_HEAD" ]; then
   REVIEW_ROUTE_RC=0
-  "$SCRIPT_DIR/fm-review-route.sh" scan "$ID" || REVIEW_ROUTE_RC=$?
+  "$SCRIPT_DIR/fm-review-route.sh" request "$ID" "$URL" "$PR_HEAD" "$REVIEW_CLASS" "$REVIEW_FAMILY" || REVIEW_ROUTE_RC=$?
   case "$REVIEW_ROUTE_RC" in
     0|3) ;;
-    *) printf 'actionable: PR %s is registered but its independent review was not routed (rc=%s); retry bin/fm-review-route.sh scan %s\n' "$URL" "$REVIEW_ROUTE_RC" "$ID" >&2 ;;
+    *) printf 'actionable: PR %s is registered but its independent review was not routed (rc=%s); retry bin/fm-review-route.sh request %s %s %s %s %s\n' "$URL" "$REVIEW_ROUTE_RC" "$ID" "$URL" "$PR_HEAD" "$REVIEW_CLASS" "$REVIEW_FAMILY" >&2 ;;
   esac
 fi
 printf 'armed: state/%s.check.sh pr=%s task_owner=%s head_repo=%s base_repo=%s base_ref=%s base_sha=%s merge_target=%s stacked=%s merge_owner=%s\n' \
