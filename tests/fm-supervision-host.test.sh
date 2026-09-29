@@ -139,6 +139,8 @@ export FM_REPO="$ROOT"
 export FM_SUPERVISION_ENGINE_CLAUDE_BIN="$STUB"
 export FM_SUPERVISION_HOST_PRIMARY=claude
 export FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999
+# Keep the real engine watchdog/reaping path, but not its production grace in fixtures.
+export FM_SUPERVISION_ENGINE_GRACE=1
 export FM_ARM_CONFIRM_TIMEOUT=30
 unset FM_SUPERVISION_ACTOR FM_BRANCH_REPORT_TURN FM_LEASE_HOLDER_PID PI_CODING_AGENT
 
@@ -1511,12 +1513,13 @@ test_undelivered_dialog_is_fed_again_on_the_next_turn() {
   real_node=$(command -v node)
   cat > "$home/fakebin/node" <<SH
 #!/usr/bin/env bash
-if [ "\${2:-}" = wake-prompt ] && [ -e "\$FM_HOME/slow-render" ]; then sleep 25; fi
+if [ "\${2:-}" = wake-prompt ] && [ -e "\$FM_HOME/slow-render" ]; then echo 40 > "\$FM_HOME/park-clock"; fi
 exec "$real_node" "\$@"
 SH
   chmod +x "$home/fakebin/node"
   printf '{"hook_event_name":"UserPromptSubmit","prompt_id":"p1","prompt":"first ask"}' > "$home/mirror-seed.1"
-  FM_SUPERVISION_HOST_PARK_SECONDS=40 FM_SUPERVISION_HOST_TURN_TIMEOUT=20 FM_SUPERVISION_ENGINE_GRACE=1 start_session "$home"
+  echo 0 > "$home/park-clock"
+  FM_TEST_SUPERVISION_HOST_CLOCK="$home/park-clock" FM_SUPERVISION_HOST_PARK_SECONDS=40 FM_SUPERVISION_HOST_TURN_TIMEOUT=20 FM_SUPERVISION_ENGINE_GRACE=1 start_session "$home"
   park_again "$home"
   append_status "$home" 'first'
   wait_until 250 handled_at_least "$home" 1 || fail "mirror boundary: the first wake was not handled: $(cat "$home/state/.supervision-host.log")"
@@ -1526,6 +1529,7 @@ SH
 
   printf '{"hook_event_name":"UserPromptSubmit","prompt_id":"p2","prompt":"second ask, never handed over"}' > "$home/mirror-seed.2"
   : > "$home/slow-render"
+  echo 0 > "$home/park-clock"
   park_after_stop "$home"
   append_status "$home" 'reaches the boundary'
   wait_until 400 host_exited "$home" || fail "mirror boundary: the host did not end its park"
@@ -1534,6 +1538,7 @@ SH
   main_drain_and_ack "$home"
 
   rm -f "$home/slow-render"
+  echo 0 > "$home/park-clock"
   park_again "$home"
   append_status "$home" 'handled after the boundary'
   wait_until 250 handled_at_least "$home" 2 || fail "mirror boundary: the next wake was not handled: $(cat "$home/state/.supervision-host.log")"
