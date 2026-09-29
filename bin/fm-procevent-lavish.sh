@@ -28,9 +28,12 @@
 #            is printed as its own field even when a selector is also present
 #            and even when that comment matches the element text, so typed
 #            words are never dropped. Choice Context data is not a comment.
+#            Any other captured prompt field, such as a `target`, follows as an
+#            `extra_field: <name>` with its raw lines as the body.
 #            Captain-supplied body lines are visibly prefixed so they cannot
 #            forge structural labels. Empty message and annotation sections
-#            are reported explicitly.
+#            are reported explicitly. A prompt block in a shape it cannot read
+#            is printed as UNRECOGNIZED CONTENT and is never marked complete.
 # poll       The registered listener command `arm` publishes, not a command to
 #            run in a conversational turn. It runs the published blocking poll
 #            and prints its response verbatim, absorbing only the one exact
@@ -494,8 +497,9 @@ cmd_terminal() {
 }
 
 # Whether a completed result carries any queued content block at all. The
-# published response frames content as a top-level `prompts[N]{...}:` or
-# `feedback[N]{...}:` header whose rows are INDENTED, so this anchors on column
+# published response frames content as a top-level `prompts[N]{...}:`,
+# `prompts[N]:`, or `feedback[N]{...}:` header whose rows are INDENTED (see
+# LAVISH_PROMPT_BLOCK_PERL for the two forms), so this anchors on column
 # zero: an indented payload line is captain-supplied text and must never be able
 # to forge - or, here, to hide behind - a content header. Any recognized block
 # is content regardless of its declared count, while a malformed top-level
@@ -506,7 +510,7 @@ cmd_terminal() {
 # failed" is never proof that nothing was said.
 result_has_queued_content() {  # <result-file>
   awk '
-    /^(prompts|feedback)\[[0-9]+\]\{[^}]*\}:[[:space:]]*$/ {
+    /^(prompts|feedback)\[[0-9]+\](\{[^}]*\})?:[[:space:]]*$/ {
       verdict = "present"
       exit
     }
@@ -542,14 +546,166 @@ cmd_silent() {
   [ "$content_rc" -eq 1 ]
 }
 
+# The one locator and list-form reader for a captured result's top-level prompt
+# block, shared as a Perl prelude by `answers`, `reconciles`, and `read`.
+# lavish-axi encodes the poll response as TOON, so one array of prompts arrives
+# in either of two forms (verified against 0.1.79):
+#
+#   prompts[N]{uid,prompt,selector,tag,text}:   tabular, one indented CSV row
+#     e1,"Fix this, please",main > h1,h1,Title    per prompt; chosen only when
+#                                                 every prompt has the same
+#                                                 all-primitive fields
+#   prompts[N]:                                 list, used as soon as any one
+#     - uid: e1                                   prompt carries a nested field
+#       prompt: "Fix this, please"                such as `target` or
+#       target:                                   `attachments`
+#         type: text-range
+#
+# read_prompt_block returns the first column-zero block whose name matches the
+# given alternation. Tabular rows stay raw so each caller keeps its own
+# historical row splitting; list items arrive parsed, with the five primitive
+# prompt fields decoded and every other field kept as `[key, [raw lines]]`.
+# A column-zero line naming the block in any other shape is `unrecognized`,
+# never an absent block, and a list line that cannot be attributed to exactly
+# one item marks that item broken rather than being skipped. Items or rows past
+# the declared count are counted as overflow instead of being read.
+# shellcheck disable=SC2016 # Perl source: its sigils are not shell expansions.
+LAVISH_PROMPT_BLOCK_PERL='
+use strict;
+use warnings;
+
+sub toon_unescape {
+  my ($v) = @_;
+  $v =~ s/\\(.)/$1 eq "n" ? "\n" : $1 eq "t" ? "\t" : $1 eq "r" ? "\r" : $1/ge;
+  return $v;
+}
+
+# One list-item field line: (key, "value", decoded) for `key: value`, or
+# (key, "nested", header-rest) for `key:` or `key[N]...:`; empty on anything else.
+sub toon_field {
+  my ($s) = @_;
+  my $key;
+  if ($s =~ s/^"((?:[^"\\]|\\.)*)"//) {
+    $key = toon_unescape($1);
+  } elsif ($s =~ s/^([A-Za-z_][A-Za-z0-9_.]*)//) {
+    $key = $1;
+  } else {
+    return;
+  }
+  return ($key, "nested", $1) if $s =~ /^(\[[^\]]*\](?:\{[^}]*\})?:.*)\z/;
+  return ($key, "nested", "") if $s eq ":";
+  return unless $s =~ /^: (.*)\z/;
+  my $value = $1;
+  return ($key, "value", toon_unescape($1)) if $value =~ /^"((?:[^"\\]|\\.)*)"\z/;
+  return if $value =~ /^"/;
+  return ($key, "value", $value);
+}
+
+# Record one field line on a list item; returns the body a nested field
+# collects its deeper lines into, or undef.
+sub prompt_item_field {
+  my ($item, $text) = @_;
+  my ($key, $kind, $value) = toon_field($text);
+  if (!defined $key || exists $item->{seen}{$key}) {
+    $item->{broken} = 1;
+    return;
+  }
+  $item->{seen}{$key} = 1;
+  if ($key =~ /\A(?:uid|prompt|selector|tag|text)\z/) {
+    $item->{broken} = 1 if $kind ne "value";
+    $item->{fields}{$key} = $value if $kind eq "value";
+    return;
+  }
+  my @body = length $value ? ($value) : ();
+  push @{$item->{extras}}, [$key, \@body];
+  return $kind eq "nested" ? \@body : undef;
+}
+
+sub finish_prompt_item {
+  my ($block, $item) = @_;
+  return unless $item;
+  if ($item->{overflow}) {
+    $block->{overflow}++;
+  } elsif ($item->{broken} || !%{$item->{seen}}) {
+    $block->{broken}++;
+  } else {
+    push @{$block->{items}}, $item;
+  }
+}
+
+sub read_prompt_block {
+  my ($path, $names) = @_;
+  open my $fh, "<", $path or return;
+  my %block = (form => "none", want => 0, fields => [], rows => [], items => [],
+    broken => 0, overflow => 0, header => "");
+  my ($indent, $item, $nested, $pad);
+  while (my $line = <$fh>) {
+    if ($block{form} eq "none") {
+      next unless $line =~ /^(?:$names)(?![A-Za-z0-9_])/;
+      chomp(my $header = $line);
+      if ($header =~ /^(?:$names)\[(\d+)\]\{([^}]*)\}:\s*\z/) {
+        @block{qw(form want)} = ("tabular", $1);
+        $block{fields} = [split /,/, $2];
+      } elsif ($header =~ /^(?:$names)\[(\d+)\]:\s*\z/) {
+        @block{qw(form want)} = ("list", $1);
+      } else {
+        @block{qw(form header)} = ("unrecognized", $header);
+        last;
+      }
+      next;
+    }
+    last unless $line =~ /^\s/;
+    chomp $line;
+    if ($block{form} eq "tabular") {
+      if (@{$block{rows}} >= $block{want}) {
+        $block{overflow}++;
+      } else {
+        push @{$block{rows}}, $line;
+      }
+      next;
+    }
+    my $depth = length(($line =~ /^( *)/)[0]);
+    $indent = $depth if !defined $indent && $line =~ /^ +-(?: |\z)/;
+    if (defined $indent && $depth == $indent && $line =~ /^ *-(?: (.*))?\z/) {
+      my $first = $1;
+      finish_prompt_item(\%block, $item);
+      my $seen = @{$block{items}} + $block{broken} + $block{overflow};
+      $item = { seen => {}, fields => {}, extras => [], broken => 0,
+        overflow => $seen >= $block{want} };
+      $nested = undef;
+      if (defined $first) {
+        $nested = prompt_item_field($item, $first);
+      } else {
+        $item->{broken} = 1;
+      }
+    } elsif ($item && $depth == $indent + 2 && $line =~ /^ *\S/) {
+      $nested = prompt_item_field($item, substr($line, $depth));
+    } elsif ($item && $nested && $depth >= $indent + 4) {
+      push @$nested, $pad . substr($line, $indent + 4);
+      next;
+    } elsif ($item) {
+      $item->{broken} = 1;
+    } else {
+      $block{broken}++;
+    }
+    # A nested array keeps its header as the first body line, so its rows
+    # stay indented beneath it; a nested object has no header line.
+    $pad = $nested && @$nested ? "  " : "";
+  }
+  close $fh;
+  finish_prompt_item(\%block, $item);
+  return \%block;
+}
+'
+
 # Print `key<TAB>answer<TAB>label[<TAB>mode]` for each non-reconcile structured choice the
 # captain submitted in a captured result; the optional mode column relays the
-# card's declared close mode (`done` or `release`) to the keyed-answer intake. The published response frames queued feedback as
-# a `prompts[N]{field,...}:` header followed by exactly N indented CSV rows whose
-# quoted fields carry JSON-style escapes, so this reads the declared field ORDER
-# rather than assuming a fixed column, and takes only rows whose `tag` field is
-# `choice`. A freeform `message` row is captain prose and is deliberately never a
-# source of decision keys. A row that does not carry both a slug-shaped `question`
+# card's declared close mode (`done` or `release`) to the keyed-answer intake.
+# It reads the `prompts` block in either form LAVISH_PROMPT_BLOCK_PERL describes;
+# a tabular row's quoted fields carry JSON-style escapes, so this reads the
+# declared field ORDER rather than assuming a fixed column, and takes only
+# prompts whose `tag` field is `choice`. A freeform `message` row is captain
+# prose and is deliberately never a source of decision keys. A row that does not carry both a slug-shaped `question`
 # and the versioned `selection` and `note` fields inside its `Context data:` block
 # is skipped. A time-limited rollout branch accepts the old question/answer
 # shape only for ordinary answers and rejects its bare or annotated reconcile
@@ -561,33 +717,20 @@ cmd_choice_rows() {
   local selection=$1 file=${2-}
   [ -n "$file" ] || usage
   [ -f "$file" ] && [ ! -L "$file" ] || die "result file does not exist: $file"
-  perl -MJSON::PP -e '
-    use strict; use warnings;
+  perl -MJSON::PP -e "$LAVISH_PROMPT_BLOCK_PERL"'
     my ($selection, $path) = @ARGV;
-    open my $fh, "<", $path or exit 1;
-    my (@fields, $want, @rows);
-    while (my $line = <$fh>) {
-      if (!@fields) {
-        next unless $line =~ /^prompts\[(\d+)\]\{([^}]*)\}:\s*$/;
-        ($want, @fields) = ($1, split /,/, $2);
-        next;
-      }
-      last unless $line =~ /^\s/;
-      last if @rows >= $want;
-      chomp $line;
-      push @rows, $line;
+    my $block = read_prompt_block($path, "prompts") or exit 1;
+    my @records;
+    if ($block->{form} eq "list") {
+      push @records, $_->{fields} for @{$block->{items}};
     }
-    close $fh;
-    my %seen;
-    my @choices;
-    for my $row (@rows) {
+    my @fields = @{$block->{fields}};
+    for my $row (@{$block->{rows}}) {
       $row =~ s/^\s+//;
       my @vals;
       while (length $row) {
         if ($row =~ s/^"((?:[^"\\]|\\.)*)"//) {
-          my $v = $1;
-          $v =~ s/\\(.)/$1 eq "n" ? "\n" : $1 eq "t" ? "\t" : $1 eq "r" ? "\r" : $1/ge;
-          push @vals, $v;
+          push @vals, toon_unescape($1);
         } else {
           $row =~ s/^([^,]*)//;
           push @vals, $1;
@@ -596,6 +739,12 @@ cmd_choice_rows() {
       }
       my %f;
       $f{$fields[$_]} = $vals[$_] for 0 .. $#fields;
+      push @records, \%f;
+    }
+    my %seen;
+    my @choices;
+    for my $record (@records) {
+      my %f = %$record;
       next unless defined $f{tag} && $f{tag} eq "choice";
       my $prompt = $f{prompt};
       next unless defined $prompt && $prompt =~ /Context data:\s*(\{.*\})/s;
@@ -682,27 +831,20 @@ cmd_read() {
   [ -f "$file" ] && [ ! -L "$file" ] || die "result file does not exist: $file"
   lifecycle=$(cmd_classify "$file")
   session_ended=$(session_field "$file" session_ended)
-  perl -e '
-    use strict; use warnings;
+  perl -e "$LAVISH_PROMPT_BLOCK_PERL"'
     my ($path, $lifecycle, $session_ended) = @ARGV;
-    open my $fh, "<", $path or exit 1;
-    my (@fields, $want, @rows);
-    while (my $line = <$fh>) {
-      if (!@fields) {
-        next unless $line =~ /^(?:prompts|feedback)\[(\d+)\]\{([^}]*)\}:\s*$/;
-        ($want, @fields) = ($1, split /,/, $2);
-        next;
-      }
-      last unless $line =~ /^\s/;
-      last if defined($want) && @rows >= $want;
-      chomp $line;
-      push @rows, $line;
-    }
-    close $fh;
-    $want = 0 unless defined $want;
+    my $block = read_prompt_block($path, "prompts|feedback") or exit 1;
+    my $want = $block->{want};
+    my $unrecognized = $block->{form} eq "unrecognized";
+    my @fields = @{$block->{fields}};
     my @parsed;
-    my $malformed = 0;
-    for my $row (@rows) {
+    my %extras;
+    my $malformed = $block->{broken} + $block->{overflow};
+    for my $item (@{$block->{items}}) {
+      push @parsed, $item->{fields};
+      $extras{$item->{fields}} = $item->{extras};
+    }
+    for my $row (@{$block->{rows}}) {
       $row =~ s/^\s+//;
       my @vals;
       while (length $row) {
@@ -727,13 +869,14 @@ cmd_read() {
         $malformed++;
         next;
       }
-      s/\\(.)/$1 eq "n" ? "\n" : $1 eq "t" ? "\t" : $1 eq "r" ? "\r" : $1/ge for @vals;
+      $_ = toon_unescape($_) for @vals;
       my %f;
       $f{$fields[$_]} = $vals[$_] for 0 .. $#fields;
       push @parsed, \%f;
     }
     my $presented = scalar @parsed;
-    my $complete = ($presented == $want && !$malformed) ? "yes" : "no";
+    my $complete = ($presented == $want && !$malformed && !$unrecognized) ? "yes" : "no";
+    my $declared = $unrecognized ? "unknown" : $want;
     my @messages;
     my @annotations;
     for my $f (@parsed) {
@@ -754,6 +897,14 @@ cmd_read() {
       return if !@lines || (@lines == 1 && $lines[0] eq "");
       print "| $_\n" for @lines;
     }
+    sub emit_extras {
+      my ($extras) = @_;
+      for my $extra (@{$extras || []}) {
+        (my $key = $extra->[0]) =~ s/[\x00-\x1f\x7f]/ /g;
+        print "extra_field: $key\n";
+        emit_body(join "\n", @{$extra->[1]});
+      }
+    }
     if (@messages) {
       my $message_label = $session_ended =~ /^(?:true|True|TRUE)$/
         ? "SESSION-ENDING MESSAGE" : "CAPTAIN MESSAGE";
@@ -764,13 +915,14 @@ cmd_read() {
           ? $messages[$i]{prompt}
           : (defined $messages[$i]{text} ? $messages[$i]{text} : "");
         emit_body($body);
+        emit_extras($extras{$messages[$i]});
       }
       print "END $message_label\n";
     } else {
       print "SESSION-ENDING MESSAGE: (none)\n";
     }
     print "\n";
-    print "declared_items: $want\n";
+    print "declared_items: $declared\n";
     print "presented_items: $presented\n";
     print "malformed_items: $malformed\n";
     print "complete: $complete\n";
@@ -779,6 +931,12 @@ cmd_read() {
     print "annotation_count: ", scalar(@annotations), "\n";
     print "session_ending_message_count: ", scalar(@messages), "\n";
     print "\n";
+    if ($unrecognized) {
+      print "UNRECOGNIZED CONTENT\n";
+      emit_body($block->{header});
+      print "END UNRECOGNIZED CONTENT\n";
+      print "\n";
+    }
     if (@annotations) {
       print "ANNOTATIONS\n";
       my $n = 0;
@@ -800,12 +958,13 @@ cmd_read() {
           print "prompt:\n";
           emit_body($comment);
         }
+        emit_extras($extras{$f});
       }
       print "END ANNOTATIONS\n";
     } else {
       print "ANNOTATIONS: (none)\n";
     }
-    print "END LAVISH RESULT ($presented of $want)\n";
+    print "END LAVISH RESULT ($presented of $declared)\n";
   ' "$file" "$lifecycle" "$session_ended"
 }
 
