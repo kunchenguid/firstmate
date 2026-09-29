@@ -299,15 +299,19 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [baseline-idle
   fm_composer_queued_enter_verdict "$state" "$busy_state"
 }
 
-# fm_tmux_prepare_text_input: normalize a blank pi-vim NORMAL composer to
-# INSERT before literal delivery. Positive empty proof is checked both before
-# the mode key and after Pi redraws; pending and changed screens refuse without
-# typing caller text. Lifecycle callers additionally require fresh empty proof
-# for structurally unknown, non-modal composers.
-fm_tmux_prepare_text_input() {  # <target> <settle> [require-empty]
-  local target=$1 settle=$2 require_empty=${3:-} snapshot mode state
+# fm_tmux_prepare_text_input: normalize a proven pi-vim NORMAL composer to
+# INSERT before delivery. The required composer state is checked both before
+# the mode key and after Pi redraws; changed screens refuse without typing
+# caller text. Lifecycle callers require fresh empty or pending proof for
+# structurally unknown, non-modal composers.
+fm_tmux_prepare_text_input() {  # <target> <settle> [require-empty|require-pending]
+  local target=$1 settle=$2 requirement=${3:-} required_state='' snapshot mode state
+  case "$requirement" in
+    require-empty) required_state=empty ;;
+    require-pending) required_state=pending ;;
+  esac
   if ! snapshot=$(fm_tmux_composer_input_snapshot "$target"); then
-    if [ "$require_empty" = require-empty ]; then
+    if [ -n "$required_state" ]; then
       printf 'error: cannot verify pi-vim input mode\n' >&2
       return 1
     fi
@@ -317,26 +321,25 @@ fm_tmux_prepare_text_input() {  # <target> <settle> [require-empty]
   state=${snapshot#*$'\t'}
   case "$mode" in
     unknown)
-      [ "$require_empty" = require-empty ] || return 0
-      if [ "$state" != empty ]; then
+      [ -n "$required_state" ] || return 0
+      if [ "$state" != "$required_state" ]; then
         printf 'error: refusing unproven input preparation with composer=%s\n' "$state" >&2
         return 1
       fi
       ;;
     ambiguous)
-      [ "$require_empty" = require-empty ] || return 0
+      [ -n "$required_state" ] || return 0
       printf 'error: refusing ambiguous pi-vim input mode\n' >&2
       return 1
       ;;
     insert)
-      if [ "$state" != empty ]; then
-        [ "$require_empty" = require-empty ] || return 0
+      if [ -n "$required_state" ] && [ "$state" != "$required_state" ]; then
         printf 'error: refusing pi-vim INSERT delivery with composer=%s\n' "$state" >&2
         return 1
       fi
       ;;
     normal)
-      if [ "$state" != empty ]; then
+      if [ "$state" != "${required_state:-empty}" ]; then
         printf 'error: refusing pi-vim NORMAL recovery with composer=%s\n' "$state" >&2
         return 1
       fi
@@ -345,8 +348,8 @@ fm_tmux_prepare_text_input() {  # <target> <settle> [require-empty]
       snapshot=$(fm_tmux_composer_input_snapshot "$target") || snapshot=$'unknown\tunknown'
       mode=${snapshot%%$'\t'*}
       state=${snapshot#*$'\t'}
-      if [ "$mode" != insert ] || [ "$state" != empty ]; then
-        printf 'error: pi-vim did not reach a proven empty INSERT composer (mode=%s composer=%s)\n' \
+      if [ "$mode" != insert ] || [ "$state" != "${required_state:-empty}" ]; then
+        printf 'error: pi-vim did not reach a proven INSERT composer (mode=%s composer=%s)\n' \
           "$mode" "$state" >&2
         return 1
       fi

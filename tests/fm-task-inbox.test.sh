@@ -284,10 +284,9 @@ test_ring_skips_dead_agent() {
   pass "inbox: the ring skips dead or missing endpoints and still rings live or unclassifiable endpoints"
 }
 
-# A fake tmux whose pane is a Claude-style composer that keeps its content in
-# FM_FAKE_COMPOSER: literal input appends to it, capture renders it wrapped
-# between rules, and Enter submits it (logged as SUBMIT) unless
-# FM_FAKE_DROP_ENTERS still holds a count of Enters to swallow.
+# A fake tmux whose pane keeps its content in FM_FAKE_COMPOSER: literal input
+# appends to it, capture renders it between Pi separators, and Enter submits it
+# in INSERT mode unless FM_FAKE_DROP_ENTERS still holds a count to swallow.
 make_composer_stub() {  # <dir>
   mkdir -p "$1/fakebin"
   cat > "$1/fakebin/tmux" <<'SH'
@@ -306,7 +305,11 @@ case "${1:-}" in
     done
     if [ "$literal" = 1 ]; then
       printf '%s' "$1" >> "$FM_FAKE_COMPOSER"
+    elif [ "${1:-}" = i ]; then
+      printf 'INSERT\n' > "$FM_FAKE_MODE_FILE"
     elif [ "${1:-}" = Enter ]; then
+      mode=$(cat "$FM_FAKE_MODE_FILE" 2>/dev/null || printf 'INSERT')
+      [ "$mode" = INSERT ] || exit 0
       drops=$(cat "$FM_FAKE_DROP_ENTERS" 2>/dev/null || echo 0)
       if [ "$drops" -gt 0 ]; then
         echo $((drops - 1)) > "$FM_FAKE_DROP_ENTERS"
@@ -327,7 +330,12 @@ case "${1:-}" in
     else
       printf '❯ \n'
     fi
-    printf '%s\n  ? for shortcuts\n' "$rule"
+    mode=$(cat "$FM_FAKE_MODE_FILE" 2>/dev/null || printf 'INSERT')
+    case "$mode" in
+      PLAIN) printf '%s\n' "$rule" ;;
+      *) printf '%s %s\n' "$rule" "$mode" ;;
+    esac
+    printf '  ? for shortcuts\n'
     exit 0 ;;
   list-windows) printf 'fm-t1\n'; exit 0 ;;
 esac
@@ -341,19 +349,21 @@ SH
 # rings. Our own exact doorbell is submitted instead; any other pending text
 # still skips untouched; and a lost Enter after typing gets one retry.
 test_ring_submits_its_own_stuck_doorbell() {
-  local dir state rec doorbell log composer drops rc other
+  local dir state rec doorbell log composer drops mode rc other
   dir="$TMP_ROOT/ring-stuck"
   state="$dir/state"
   mkdir -p "$state"
   make_composer_stub "$dir"
   rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
   doorbell=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$rec")
-  log="$dir/send.log"; composer="$dir/composer"; drops="$dir/drops"
+  log="$dir/send.log"; composer="$dir/composer"; drops="$dir/drops"; mode="$dir/mode"
   ring() {
     PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_FAKE_COMPOSER="$composer" \
-      FM_FAKE_DROP_ENTERS="$drops" inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1
+      FM_FAKE_DROP_ENTERS="$drops" FM_FAKE_MODE_FILE="$mode" \
+      inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1
   }
 
+  printf 'INSERT\n' > "$mode"
   : > "$log"; printf '%s' "$doorbell" > "$composer"
   rc=0; ring || rc=$?
   [ "$rc" = 0 ] || fail "a composer holding our own stuck doorbell should be submitted, got rc $rc"
@@ -368,6 +378,21 @@ test_ring_submits_its_own_stuck_doorbell() {
     || fail "the retry Enter should submit the stuck doorbell once, not retype it:"$'\n'"$(cat "$log")"
   [ ! -s "$composer" ] || fail "a lost Enter left the stuck doorbell unsubmitted"
 
+  : > "$log"; printf '%s' "$doorbell" > "$composer"; printf 'NORMAL\n' > "$mode"
+  rc=0; ring || rc=$?
+  [ "$rc" = 0 ] || fail "a stuck doorbell retried from NORMAL mode should be submitted, got rc $rc"
+  [ "$(cat "$log")" = "SUBMIT: $doorbell" ] \
+    || fail "NORMAL recovery should preserve and submit the stuck doorbell once:"$'\n'"$(cat "$log")"
+  [ ! -s "$composer" ] || fail "NORMAL recovery left the stuck doorbell in the composer"
+  [ "$(cat "$mode")" = INSERT ] || fail "NORMAL recovery did not return the composer to INSERT mode"
+
+  : > "$log"; printf '%s' "$doorbell" > "$composer"; printf 'PLAIN\n' > "$mode"
+  rc=0; ring || rc=$?
+  [ "$rc" = 1 ] || fail "an ambiguous mode should defer a stuck doorbell, got rc $rc"
+  [ ! -s "$log" ] || fail "an ambiguous mode submitted the stuck doorbell:"$'\n'"$(cat "$log")"
+  [ "$(cat "$composer")" = "$doorbell" ] || fail "an ambiguous-mode refusal changed the stuck doorbell"
+
+  printf 'INSERT\n' > "$mode"
   for other in 'a half-typed draft' "$doorbell and a draft"; do
     : > "$log"; printf '%s' "$other" > "$composer"
     rc=0; ring || rc=$?

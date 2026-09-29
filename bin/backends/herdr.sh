@@ -3230,10 +3230,14 @@ fm_backend_herdr_composer_input_snapshot() {  # <target> -> "<mode>\t<state>"
   printf '%s\t%s' "$mode" "$state"
 }
 
-fm_backend_herdr_prepare_text_input() {  # <target> <settle> [require-empty]
-  local target=$1 settle=$2 require_empty=${3:-} snapshot mode state
+fm_backend_herdr_prepare_text_input() {  # <target> <settle> [require-empty|require-pending]
+  local target=$1 settle=$2 requirement=${3:-} required_state='' snapshot mode state
+  case "$requirement" in
+    require-empty) required_state=empty ;;
+    require-pending) required_state=pending ;;
+  esac
   if ! snapshot=$(fm_backend_herdr_composer_input_snapshot "$target"); then
-    if [ "$require_empty" = require-empty ]; then
+    if [ -n "$required_state" ]; then
       printf 'error: cannot verify pi-vim input mode\n' >&2
       return 1
     fi
@@ -3243,26 +3247,25 @@ fm_backend_herdr_prepare_text_input() {  # <target> <settle> [require-empty]
   state=${snapshot#*$'\t'}
   case "$mode" in
     unknown)
-      [ "$require_empty" = require-empty ] || return 0
-      if [ "$state" != empty ]; then
+      [ -n "$required_state" ] || return 0
+      if [ "$state" != "$required_state" ]; then
         printf 'error: refusing unproven input preparation with composer=%s\n' "$state" >&2
         return 1
       fi
       ;;
     ambiguous)
-      [ "$require_empty" = require-empty ] || return 0
+      [ -n "$required_state" ] || return 0
       printf 'error: refusing ambiguous pi-vim input mode\n' >&2
       return 1
       ;;
     insert)
-      if [ "$state" != empty ]; then
-        [ "$require_empty" = require-empty ] || return 0
+      if [ -n "$required_state" ] && [ "$state" != "$required_state" ]; then
         printf 'error: refusing pi-vim INSERT delivery with composer=%s\n' "$state" >&2
         return 1
       fi
       ;;
     normal)
-      if [ "$state" != empty ]; then
+      if [ "$state" != "${required_state:-empty}" ]; then
         printf 'error: refusing pi-vim NORMAL recovery with composer=%s\n' "$state" >&2
         return 1
       fi
@@ -3271,8 +3274,8 @@ fm_backend_herdr_prepare_text_input() {  # <target> <settle> [require-empty]
       snapshot=$(fm_backend_herdr_composer_input_snapshot "$target") || snapshot=$'unknown\tunknown'
       mode=${snapshot%%$'\t'*}
       state=${snapshot#*$'\t'}
-      if [ "$mode" != insert ] || [ "$state" != empty ]; then
-        printf 'error: pi-vim did not reach a proven empty INSERT composer (mode=%s composer=%s)\n' \
+      if [ "$mode" != insert ] || [ "$state" != "${required_state:-empty}" ]; then
+        printf 'error: pi-vim did not reach a proven INSERT composer (mode=%s composer=%s)\n' \
           "$mode" "$state" >&2
         return 1
       fi
