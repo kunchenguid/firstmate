@@ -34,13 +34,15 @@ For a Lavish review artifact firstmate owns:
 bin/fm-procevent-lavish.sh arm <artifact.html>
 ```
 
-After applying a nonterminal round on a board you own, answer the captain in its Conversation panel by re-arming it with your reply before you acknowledge the round:
+After applying the nonterminal feedback on a board you own, answer the captain in its Conversation panel by re-arming it with your reply before you acknowledge the rounds:
 
 ```sh
 bin/fm-procevent-lavish.sh arm <artifact.html> --agent-reply-file <reply.md>
 ```
 
-That re-arm records the round's acknowledgement, so the `handled` call below then reports `already-handled`; it is refused when no unacknowledged round is waiting or the round is terminal.
+That one reply answers every round still pending on the board, so read and handle all of them before re-arming, not only the round that woke you.
+The re-arm acknowledges each of those rounds and prints `acknowledged: <source-id> <sequence>` for every one it covered, so a later wake or `handled` call for a covered sequence reports `already-handled` because the consolidated reply answered it.
+It is refused when no unacknowledged round is waiting, including on an ended or never-armed board, and when a waiting round is terminal.
 A worker-owned board uses `bin/fm-procevent-lavish.sh arm <artifact.html> --for <task-id>` and re-arms with its reply after each nonterminal round; the existing handled marker is the acknowledgement.
 Arm it once, then re-arm only when a round is actually waiting: arming again with nothing to acknowledge is refused, because it would discard the reply your listener is still holding.
 The [round reply contract](../../../docs/configuration.md#process-to-event-sources-stateprocevent) owns reply staging, the refusals, and why posting the reply is best effort.

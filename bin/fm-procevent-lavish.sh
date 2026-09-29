@@ -43,11 +43,15 @@
 #            instead of posting it twice. See the note at the consume site.
 # arm        Register the board's listener and wait until it is running.
 #            `--for <task-id>` makes the board worker-owned. `--agent-reply-file`
-#            answers the round the owner just handled and is that round's
-#            acknowledgement: without `--for` it registers through the runner's
-#            `register-reply`, which is refused while the board is armed with no
-#            captured round waiting and stops the board's earlier listener so
-#            the reply is posted by the next poll.
+#            is one reply answering every round still pending on the board, so
+#            the owner reads and handles all of them first; the re-arm
+#            acknowledges each and prints `acknowledged: <source-id> <sequence>`
+#            for it, and a later wake for a covered sequence reports
+#            already-handled because that reply answered it. Without `--for` it
+#            registers through the runner's `register-reply`, which is refused
+#            when no captured round is waiting, so an ended or never-armed board
+#            takes no reply, and stops the board's earlier listener so the reply
+#            is posted by the next poll.
 # terminal   Exit 0 when the captured result means this Lavish source will never
 #            produce another result, so the runner may retire it; any other exit
 #            keeps it armed. This is the generic adapter contract bin/fm-procevent.sh

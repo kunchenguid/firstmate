@@ -1852,10 +1852,13 @@ An already-armed Lavish source keeps its registered listener command until it is
 
 **Reply to a Lavish round**
 
-An owner that has applied a captured nonterminal round answers it in the board's Conversation panel by re-arming the board with `--agent-reply-file <path>`, and that re-arm is the round's acknowledgement.
+An owner that has applied captured nonterminal feedback answers it in the board's Conversation panel by re-arming the board with `--agent-reply-file <path>`, and that re-arm is the acknowledgement.
 Firstmate re-arms its own board with `bin/fm-procevent-lavish.sh arm <artifact.html> --agent-reply-file <path>`, and a worker adds `--for <task-id>` as the crew-hosted contract below requires.
 The file's contents are copied into that generation's private staging file and passed once to the published `--agent-reply` argument, leaving the caller's file in place.
-A reply re-arm is refused while the board is registered with no unacknowledged nonterminal round waiting, so a generation already carrying a reply is never replaced before its listener posts it.
+
+One reply answers every round still pending when the reply re-arm runs, so the owner reads and handles all of them before re-arming.
+The re-arm acknowledges each of those rounds and prints `acknowledged: <source-id> <sequence>` for every one, and a later wake for a covered sequence reports `already-handled` from `handled` because the consolidated reply answered it.
+A reply re-arm is refused when no unacknowledged nonterminal round is waiting, so a generation already carrying a reply is never replaced before its listener posts it, and an ended or never-armed board takes no reply.
 It is also refused for a terminal round, because no later poll could show the reply.
 A failed re-arm leaves the prior registration and its referenced reply unchanged, including when its required acknowledgement cannot be recorded.
 

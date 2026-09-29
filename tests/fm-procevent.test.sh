@@ -1503,8 +1503,111 @@ assert_contains "$(cat "$FMREPLY_ROOT/terminal-reply.err")" "terminal" \
   || fail "a refused reply to an ended review registered the board again"
 assert_contains "$(pe "$HFMREPLY" handled "$fmreply_id" 3)" "handled: $fmreply_id 3" \
   "the ended round could not be acknowledged"
+if fmreply_arm --agent-reply-file "$FMREPLY_ROOT/reply2" \
+  >/dev/null 2>"$FMREPLY_ROOT/ended-reply.err"; then
+  fail "a firstmate reply re-armed an ended review after its final round was acknowledged"
+fi
+assert_contains "$(cat "$FMREPLY_ROOT/ended-reply.err")" "no captured round is waiting" \
+  "the refused reply to an acknowledged ended review did not say no round was waiting"
+[ ! -e "$HFMREPLY/state/procevent/$fmreply_id.source" ] \
+  || fail "a reply to an acknowledged ended review registered the board again"
 [ "$(fmreply_polls)" = 5 ] || fail "the ended firstmate board was polled again: $(fmreply_polls) polls"
-pass "a firstmate reply is refused once the review has ended"
+FMREPLY_FRESH="$FMREPLY_ROOT/fresh.html"
+printf '<h1>never armed</h1>\n' > "$FMREPLY_FRESH"
+lavish_session "$FMREPLY_FRESH"
+fmreply_fresh_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$FMREPLY_FRESH")
+if PATH="$FMREPLY_BIN:$PATH" FM_HOME="$HFMREPLY" "$ROOT/bin/fm-procevent-lavish.sh" arm \
+  "$FMREPLY_FRESH" --agent-reply-file "$FMREPLY_ROOT/reply1" >/dev/null 2>"$FMREPLY_ROOT/fresh-reply.err"; then
+  fail "a firstmate reply armed a board that was never armed"
+fi
+assert_contains "$(cat "$FMREPLY_ROOT/fresh-reply.err")" "no captured round is waiting" \
+  "the refused reply to a never-armed board did not say no round was waiting"
+[ ! -e "$HFMREPLY/state/procevent/$fmreply_fresh_id.source" ] \
+  || fail "a reply to a never-armed board registered it"
+[ "$(fmreply_polls)" = 5 ] || fail "a refused reply to a never-armed board started a listener"
+pass "a firstmate reply is refused once the review has ended or before it was ever armed"
+
+# Rounds can stack on a firstmate board: its listener is relaunched while a
+# round waits, so the captain can send another before firstmate replies. One
+# reply re-arm answers every pending round, acknowledges each, and says so; a
+# later wake for a covered round is already handled, and a second reply with
+# nothing left to answer is refused. Polls 1 and 2 deliver the two rounds,
+# poll 3 is the relaunched listener that carries no reply, and poll 4 is the
+# reply generation.
+HFMSTACK="$TMP_ROOT/hfmstack"; new_home "$HFMSTACK"
+FMSTACK_ROOT="$TMP_ROOT/lavish-fmstack-root"; mkdir -p "$FMSTACK_ROOT"; export FMSTACK_ROOT
+FMSTACK_BIN=$(fm_fakebin "$TMP_ROOT/lavish-fmstack-stub")
+cat > "$FMSTACK_BIN/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+set -eu
+n=$(cat "$FMSTACK_ROOT/count" 2>/dev/null || echo 0)
+n=$((n + 1))
+printf '%s\n' "$n" > "$FMSTACK_ROOT/count"
+if [ "${1-}" = poll ] && [ "${3-}" = --agent-reply ]; then
+  printf 'poll%s reply: %s\n' "$n" "$4" >> "$FMSTACK_ROOT/replies"
+fi
+while [ ! -e "$FMSTACK_ROOT/trigger$n" ]; do
+  [ "$SECONDS" -lt "${FM_TEST_STUB_MAX_BLOCK_SECONDS:-120}" ] || exit 75
+  sleep 0.02
+done
+printf 'session:\n  status: feedback\nprompts[1]{uid,prompt,selector,tag,text}:\n  "","round %s","","message",""\n' "$n"
+SH
+chmod +x "$FMSTACK_BIN/lavish-axi"
+FMSTACK_ART="$FMSTACK_ROOT/board.html"
+printf '<h1>stacked rounds</h1>\n' > "$FMSTACK_ART"
+lavish_session "$FMSTACK_ART"
+fmstack_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$FMSTACK_ART")
+fm_test_track_procevent_home "$HFMSTACK"
+printf 'Applied both rounds.\n' > "$FMSTACK_ROOT/reply"
+fmstack_arm() {  # [arm arguments...]
+  PATH="$FMSTACK_BIN:$PATH" FM_HOME="$HFMSTACK" \
+    "$ROOT/bin/fm-procevent-lavish.sh" arm "$FMSTACK_ART" "$@"
+}
+fmstack_polls() { cat "$FMSTACK_ROOT/count" 2>/dev/null || echo 0; }
+fmstack_wait_polls() {  # <count>
+  for _ in $(seq 1 200); do [ "$(fmstack_polls)" = "$1" ] && return 0; sleep 0.03; done
+  return 1
+}
+fmstack_wait_round() {  # <sequence>
+  for _ in $(seq 1 100); do
+    [ -e "$HFMSTACK/state/procevent-inbox/$fmstack_id.$1.result" ] \
+      && [ ! -e "$FM_PROCEVENT_CLAIM_ROOT/$fmstack_id.claim" ] && return 0
+    sleep 0.05
+  done
+  return 1
+}
+fmstack_arm >/dev/null || fail "firstmate could not arm the stacked-rounds board"
+fmstack_wait_polls 1 || fail "the stacked-rounds board's first listener never polled"
+touch "$FMSTACK_ROOT/trigger1"
+fmstack_wait_round 1 || fail "the captain's first stacked round was never captured"
+PATH="$FMSTACK_BIN:$PATH" pe "$HFMSTACK" reconcile >/dev/null 2>&1 || true
+fmstack_wait_polls 2 || fail "the stacked-rounds listener was not relaunched after round one"
+touch "$FMSTACK_ROOT/trigger2"
+fmstack_wait_round 2 || fail "the captain's second stacked round was never captured"
+assert_contains "$(wake_payloads "$HFMSTACK")" "procevent lavish $fmstack_id 2" \
+  "the captain's second stacked round did not wake firstmate"
+PATH="$FMSTACK_BIN:$PATH" pe "$HFMSTACK" reconcile >/dev/null 2>&1 || true
+fmstack_wait_polls 3 || fail "the stacked-rounds listener was not relaunched after round two"
+fmstack_arm --agent-reply-file "$FMSTACK_ROOT/reply" > "$FMSTACK_ROOT/arm.out" \
+  || fail "firstmate could not re-arm the stacked-rounds board with its reply"
+assert_contains "$(cat "$FMSTACK_ROOT/arm.out")" "acknowledged: $fmstack_id 1" \
+  "the reply re-arm did not report acknowledging the first stacked round"
+assert_contains "$(cat "$FMSTACK_ROOT/arm.out")" "acknowledged: $fmstack_id 2" \
+  "the reply re-arm did not report acknowledging the second stacked round"
+assert_contains "$(cat "$FMSTACK_ROOT/arm.out")" "armed: $fmstack_id" \
+  "the stacked-rounds reply re-arm was not reported listening"
+fmstack_wait_polls 4 || fail "the stacked-rounds reply generation's listener never polled"
+wait_for_lines "$FMSTACK_ROOT/replies" 1 || fail "the consolidated reply never reached the board"
+[ "$(cat "$FMSTACK_ROOT/replies")" = "poll4 reply: Applied both rounds." ] \
+  || fail "the consolidated reply was not posted once by the next poll: $(cat "$FMSTACK_ROOT/replies")"
+assert_contains "$(pe "$HFMSTACK" handled "$fmstack_id" 2)" "already-handled: $fmstack_id 2" \
+  "a later wake for a round the consolidated reply answered was not already handled"
+if fmstack_arm --agent-reply-file "$FMSTACK_ROOT/reply" >/dev/null 2>"$FMSTACK_ROOT/again.err"; then
+  fail "a second reply re-arm was accepted after the consolidated reply answered every round"
+fi
+assert_contains "$(cat "$FMSTACK_ROOT/again.err")" "no captured round is waiting" \
+  "the refused second reply did not say no round was waiting"
+pass "one firstmate reply re-arm answers and acknowledges every stacked round"
 
 # The other half of the same contract, on the same real path: a close that
 # carries what the captain actually said must still reach him. Same runner, same
@@ -4811,7 +4914,7 @@ done
 [ ! -e "$drain_claim" ] || fail "the first generation of the draining fixture never exited"
 # Stand the first generation's claim back up on a live process so the re-arm
 # meets it still held, then release it partway through the confirm window.
-setsid sleep 60 &
+perl -MPOSIX=setsid -e 'setsid() >= 0 or exit 1; exec @ARGV' sleep 60 &
 drain_holder=$!
 # Read the identity only once the holder has exec'd sleep: mid-exec its cmdline
 # can read empty, and a pre-exec identity would never match the live holder.

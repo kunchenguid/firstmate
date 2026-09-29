@@ -30,17 +30,17 @@
 #            Record a worker-owned built-in source. Its one source record
 #            persists across rounds, and re-registration by the same task
 #            acknowledges nonterminal captured rounds without touching the
-#            source claim. Terminal rounds are concluded with `handled`.
+#            source claim, printing `acknowledged: <id> <seq>` for each.
+#            Terminal rounds are concluded with `handled`.
 # register-reply
 #            Record a firstmate-owned built-in source generation whose argv
-#            carries `--agent-reply-file`, answering the round firstmate just
-#            handled. It stages the reply and acknowledges open nonterminal
-#            rounds exactly as register-task does, and is refused while the
-#            source is registered with no captured round waiting or when a
-#            waiting round is terminal. A firstmate
-#            board keeps listening between rounds, so it also stops this
-#            home's listener from the earlier generation the way `retire`
-#            does, making the next poll the one that posts the reply.
+#            carries `--agent-reply-file`, one reply answering every round
+#            still pending. It stages the reply and acknowledges each open
+#            nonterminal round exactly as register-task does, and is refused
+#            when no captured round is waiting or a waiting round is terminal.
+#            A firstmate board keeps listening between rounds, so it also
+#            stops this home's listener from the earlier generation the way
+#            `retire` does, making the next poll the one that posts the reply.
 # register-extension
 #            Resolve an explicitly enabled home-local process-event-adapter/1
 #            binding, verify its package and handshake, and record the source
@@ -562,7 +562,7 @@ cmd_register() {
 cmd_register_task() {
   local adapter=${1-} id=${2-} task=${3-} sep=${4-} pending pending_adapter
   local reply_source='' reply_dest='' arg adopting=0 pending_owner prior_record=''
-  local pending_rounds=0
+  local pending_rounds=0 seq
   local -a argv=()
   shift 4 2>/dev/null || usage
   [ "$adapter" = lavish ] || die "register-task is reserved for the Lavish adapter"
@@ -649,6 +649,7 @@ cmd_register_task() {
   fm_procevent_source_lock_release "$id"
   owner_lease_refresh
   printf 'registered: %s (%s, task=%s)\n' "$id" "$adapter" "$task"
+  for seq in "${REARM_ACKNOWLEDGED[@]+"${REARM_ACKNOWLEDGED[@]}"}"; do printf 'acknowledged: %s %s\n' "$id" "$seq"; done
 }
 
 # The reply half of re-arm, shared by every owner that can answer a round so
@@ -698,21 +699,25 @@ reply_stage_locked() {  # <source-id>
 }
 
 # Acknowledge every open captured round of a just-published re-arm and sweep
-# earlier generations' staged replies. When an acknowledgement cannot be
-# recorded, the prior registration is restored, this generation's reply is
-# removed, REARM_ACK_FAILED names the round, and the caller refuses the re-arm.
-# The caller holds the source lock.
+# earlier generations' staged replies. REARM_ACKNOWLEDGED lists the sequences
+# acknowledged. When an acknowledgement cannot be recorded, the prior
+# registration is restored, this generation's reply is removed, REARM_ACK_FAILED
+# names the round, and the caller refuses the re-arm. The caller holds the
+# source lock.
 rearm_acknowledge_locked() {  # <source-id> <prior-record-or-empty> <staged-reply-or-empty>
-  local id=$1 prior=$2 reply=$3 pending stale
+  local id=$1 prior=$2 reply=$3 pending seq stale
   REARM_ACK_FAILED=''
+  REARM_ACKNOWLEDGED=()
   while IFS= read -r pending; do
     [ -n "$pending" ] || continue
-    fm_procevent_mark_handled "$STATE" "$id" "$(fm_procevent_result_sequence "$pending")" >/dev/null 2>&1 || {
+    seq=$(fm_procevent_result_sequence "$pending")
+    fm_procevent_mark_handled "$STATE" "$id" "$seq" >/dev/null 2>&1 || {
       [ -z "$prior" ] || mv -f -- "$prior" "$(source_file "$id")"
       [ -z "$reply" ] || rm -f -- "$reply"
       REARM_ACK_FAILED=$pending
       return 1
     }
+    REARM_ACKNOWLEDGED+=("$seq")
   done < <(source_pending "$id")
   [ -z "$prior" ] || rm -f -- "$prior"
   for stale in "$REG/.$id.reply."*; do
@@ -725,7 +730,9 @@ rearm_acknowledge_locked() {  # <source-id> <prior-record-or-empty> <staged-repl
 
 # A firstmate-owned board answers a round the way a worker-owned one does: the
 # re-arm that carries the reply is the acknowledgement, so it needs a round to
-# answer, and the reply rides the same staging and one-shot consumption. The
+# answer, and the reply rides the same staging and one-shot consumption. Rounds
+# can stack on a firstmate board, so one reply answers and acknowledges every
+# round still pending when it re-arms. The
 # one difference is the listener. A worker's board is not relaunched while its
 # round is open, but a firstmate board is, within one supervision cycle, and
 # that listener holds no reply. It is stopped here the way `retire` stops one,
@@ -735,7 +742,7 @@ rearm_acknowledge_locked() {  # <source-id> <prior-record-or-empty> <staged-repl
 cmd_register_reply() {
   local adapter=${1-} id=${2-} sep=${3-} pending pending_adapter pending_owner arg
   local registered=0 pending_rounds=0 has_reply=0 claim_state stop_state
-  local reply_dest='' prior_record='' owner pid token identity
+  local reply_dest='' prior_record='' owner pid token identity seq
   local -a argv=()
   shift 3 2>/dev/null || usage
   [ "$adapter" = lavish ] || die "register-reply is reserved for the Lavish adapter"
@@ -779,9 +786,9 @@ cmd_register_reply() {
       die "cannot reply to terminal Lavish result $pending; the review has ended, so acknowledge it with bin/fm-procevent.sh handled"
     fi
   done < <(source_pending "$id")
-  if [ "$registered" -eq 1 ] && [ "$pending_rounds" -eq 0 ]; then
+  if [ "$pending_rounds" -eq 0 ]; then
     fm_procevent_source_lock_release "$id"
-    die "cannot re-arm source $id with a reply: no captured round is waiting to be acknowledged, so its listener may still be carrying an earlier reply"
+    die "cannot re-arm source $id with a reply: no captured round is waiting to be acknowledged"
   fi
   owner=''
   fm_procevent_claim_state_locked "$id"
@@ -852,6 +859,7 @@ cmd_register_reply() {
   fm_procevent_source_lock_release "$id"
   owner_lease_refresh
   printf 'registered: %s (%s, reply)\n' "$id" "$adapter"
+  for seq in "${REARM_ACKNOWLEDGED[@]+"${REARM_ACKNOWLEDGED[@]}"}"; do printf 'acknowledged: %s %s\n' "$id" "$seq"; done
 }
 
 new_extension_registration_token() {
