@@ -15,7 +15,9 @@
 # Pass --isolated-xdg before the command to give the lab its own
 # XDG_CONFIG_HOME, XDG_DATA_HOME, and XDG_STATE_HOME under the lab state
 # directory, so plugin install/link inside the lab never reads or writes the
-# live user's Herdr plugin registry. Without the flag every Herdr call
+# live user's Herdr plugin registry. The fleet-state tripwire still reads
+# with the caller's XDG environment so it observes the live default session.
+# Without the flag every Herdr call
 # inherits the caller's XDG environment unchanged. Use the flag on every
 # command for one lab session (FM_HERDR_LAB_ISOLATED_XDG=1 is equivalent).
 # Session names must begin with "fm-lab-" and can never be "default".
@@ -111,9 +113,23 @@ fm_herdr_lab_session_list() { # <session>
   fm_herdr_lab_raw "$1" session list --json
 }
 
+# Lists sessions with the caller's original XDG environment even in isolated
+# mode. Real Herdr derives the default session's socket from the config dir,
+# so the fleet-state tripwire must observe the live tree; under the lab XDG
+# the live default always reads not-running and provision refuses every time.
+fm_herdr_lab_fleet_session_list() { # <session>
+  local saved=${FM_HERDR_LAB_ISOLATED_XDG:-0} out status
+  FM_HERDR_LAB_ISOLATED_XDG=0
+  out=$(fm_herdr_lab_session_list "$1" 2>/dev/null)
+  status=$?
+  FM_HERDR_LAB_ISOLATED_XDG=$saved
+  [ "$status" -eq 0 ] || return 1
+  printf '%s' "$out"
+}
+
 fm_herdr_lab_fleet_state() { # <session>
   local name=$1 sessions snapshot
-  sessions=$(fm_herdr_lab_session_list "$name" 2>/dev/null) || {
+  sessions=$(fm_herdr_lab_fleet_session_list "$name" 2>/dev/null) || {
     fm_herdr_lab_error "cannot read Herdr sessions for the fleet-state tripwire"
     return 1
   }
