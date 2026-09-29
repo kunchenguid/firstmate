@@ -2896,6 +2896,50 @@ EOF
   pass "an unavailable child state keeps independently live children and every invalidity cause visible"
 }
 
+# The home summary marks a secondmate's working child with no In flight backlog
+# item owned:false. Underway must keep that row visible and carry the flag in
+# both representations, so unowned live work never reads as owned In-flight work.
+test_unowned_secondmate_child_projects_as_unowned_in_flight() {
+  local home mate fakebin json toon
+  home=$(make_home unowned-child-projection)
+  : > "$home/data/secondmates.md"
+  mate="$TMP_ROOT/unowned-child-projection-mate"
+  make_valid_secondmate_home mixed "$mate"
+  append_secondmate_registry "$home" mixed "$mate"
+  mkdir -p "$mate/projects/owned-ship" "$mate/projects/unowned-ship"
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+- [ ] owned-ship - Fix the review edges (repo: sample) (kind: ship)
+
+## Queued
+
+## Done
+EOF
+  fm_write_meta "$mate/state/owned-ship.meta" \
+    "window=firstmate:fm-owned-ship" "worktree=$mate/projects/owned-ship" "project=sample" \
+    "harness=claude" "kind=ship" "mode=direct-PR"
+  record_claude_state "$mate/state" owned-ship busy
+  fm_write_meta "$mate/state/unowned-ship.meta" \
+    "window=firstmate:fm-unowned-ship" "worktree=$mate/projects/unowned-ship" "project=sample" \
+    "harness=claude" "kind=ship" "mode=direct-PR"
+  record_claude_state "$mate/state" unowned-ship busy
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    ([.in_flight[].id] | sort) == ["mixed/owned-ship", "mixed/unowned-ship"]
+      and (.in_flight[] | select(.id == "mixed/owned-ship") | .owned == true)
+      and (.in_flight[] | select(.id == "mixed/unowned-ship") | .owned == false)
+  ' >/dev/null || fail "unowned secondmate child lost its ownership flag in Underway: $json"
+  toon=$(run "$home" "$fakebin")
+  printf '%s\n' "$toon" | grep -Eq '^in_flight\[2\]\{id,kind,state,repo,name,doing,owned\}:$' \
+    || fail "TOON Underway header does not carry owned: $toon"
+  printf '%s\n' "$toon" | grep -Eq '^  mixed/unowned-ship,.*,false$' \
+    || fail "TOON Underway row does not mark the unowned child: $toon"
+  printf '%s\n' "$toon" | grep -Eq '^  mixed/owned-ship,.*,true$' \
+    || fail "TOON Underway row does not mark the owned child: $toon"
+  pass "an unowned secondmate child stays in Underway and is marked owned=false"
+}
+
 test_main_captain_readiness_matches_secondmate_projection() {
   local home fakebin json
   home=$(make_home main-captain-readiness)
@@ -3449,6 +3493,7 @@ test_newest_filed_gates_are_selected_before_snapshot_bounds
 test_underway_and_gate_rows_carry_the_durable_name_and_filed_date
 test_mixed_secondmate_roles_partial_state_and_captain_readiness
 test_unknown_child_keeps_independent_live_children_visible
+test_unowned_secondmate_child_projects_as_unowned_in_flight
 test_main_captain_readiness_matches_secondmate_projection
 test_completed_scout_report_not_pending
 test_open_decision_surfaces_end_to_end
