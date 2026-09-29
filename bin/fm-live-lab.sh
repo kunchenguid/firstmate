@@ -723,7 +723,7 @@ NODE
 
 cmd_down() {
   load_lab "${1:-}"
-  local rc=0 pids pairs pid start survivors n removed added id meta dir home_hash groups pgid own_group caller_group
+  local rc=0 pids pairs pid start survivors n removed added id meta dir home_hash groups pgid own_group caller_group details
   local -a ids=()
   pids=$(lab_pids)
   pairs='' groups=''
@@ -748,15 +748,21 @@ cmd_down() {
     refresh_pairs
     survivors=$(live_pids "$pairs")
     [ -n "$survivors" ] || break
-    if [ "$n" -eq 20 ]; then
-      # shellcheck disable=SC2086 # One pid per word.
+    if [ "$n" -ge 20 ]; then
+      # shellcheck disable=SC2086 # One identity-checked pid per word.
       kill -9 $survivors 2>/dev/null || true
     fi
     sleep 0.5
   done
   refresh_pairs
   survivors=$(live_pids "$pairs")
-  [ -z "$survivors" ] || die "refusing to remove the lab: its processes did not exit: $(echo "$survivors" | tr '\n' ' ')"
+  if [ -n "$survivors" ]; then
+    details=''
+    for pid in $survivors; do
+      details+="$(ps -o pid=,ppid=,pgid=,stat=,command= -p "$pid" 2>/dev/null)"$'\n'
+    done
+    die "refusing to remove the lab: its processes did not exit (pid ppid pgid state command): $details"
+  fi
   echo "stopped: lab tmux server and lab processes"
   # A spawn keeps /tmp/fm-<id> and /tmp/fm-<id>+<sha256 of the spawning home>.
   # The second is scoped to this lab home for any task it spawned; the first is

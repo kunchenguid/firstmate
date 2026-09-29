@@ -432,11 +432,17 @@ LATE=$(make_lab late claude)
 cat > "$TMP_ROOT/late-rewriter.sh" <<'SH'
 store=$1 key=$2 marker=$3
 trap 'bash -c '\''sleep 1; node -e "const fs=require(\"node:fs\");const [s,k]=process.argv.slice(1);const j=JSON.parse(fs.readFileSync(s,\"utf8\"));j.projects[k]={hasTrustDialogAccepted:true};fs.writeFileSync(s,JSON.stringify(j))" "$1" "$2"'\'' _ "$store" "$key" >/dev/null 2>&1 & echo $! > "$marker"; exit 0' TERM
+echo ready > "$marker.ready"
 while :; do sleep 0.1; done
 SH
 start_group bash "$TMP_ROOT/late-rewriter.sh" "$HOME/.claude.json" "$LATE/home" "$TMP_ROOT/late-child"
 LATE_ROOT=$!
 printf '%s\n' "$LATE_ROOT" >> "$TMP_ROOT/pids"
+for n in {1..50}; do
+  [ -s "$TMP_ROOT/late-child.ready" ] && break
+  sleep 0.1
+done
+assert_present "$TMP_ROOT/late-child.ready" "TERM fixture installed its handler before down"
 record_pid "$LATE" "$LATE_ROOT"
 out=$("$LIVE_LAB" down "$LATE" 2>&1)
 expect_code 0 "$?" "down waits for a child born during TERM: $out"
