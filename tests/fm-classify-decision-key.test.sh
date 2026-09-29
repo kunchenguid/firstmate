@@ -687,6 +687,22 @@ test_done_past_standing_mirror_and_later_hold_after_settled_transfer() {
   pass "a worker done stays current under a standing mirror, and a later hold survives an earlier settled transfer"
 }
 
+test_paused_past_standing_mirror_under_unrelated_resolved() {
+  local dir f current
+  dir=$(case_dir paused-past-mirror-resolved)
+  f="$dir/lane-1.status"
+  {
+    printf 'working: start\n'
+    printf 'paused: waiting on vendor\n'
+    printf 'captain-held [key=captain-hold-lane-1-1]: operator review\n'
+    printf 'resolved [key=api-shape]: use v2\n'
+  } > "$f"
+  current=$(status_current_line "$f" scout)
+  [ "$current" = 'paused: waiting on vendor' ] \
+    || fail "a standing mirror under an unrelated answer hid the worker's pause: '$current'"
+  pass "a held paused lane stays paused when an unrelated answer lands on the mirror"
+}
+
 test_keyless_wait_survives_stated_default_retraction
 test_declared_wait_survives_answers_past_the_event_window
 test_declared_wait_survives_settled_hold_mirror
@@ -695,4 +711,5 @@ test_declared_wait_survives_settled_hold_then_answer
 test_hold_settled_only_without_worker_event_between
 test_worker_event_after_standing_hold_mirror_replaces_it
 test_done_past_standing_mirror_and_later_hold_after_settled_transfer
+test_paused_past_standing_mirror_under_unrelated_resolved
 test_bare_prose_cannot_open_or_close_a_decision

@@ -501,7 +501,7 @@ status_is_paused_or_captain_held() {  # <status-line>
 # hold: only a tail window made wholly of resolved events widens the read to the
 # whole file.
 status_declared_wait_line() {  # <status-file>
-  local f=$1 last verb resolve legacy_re hold mirror
+  local f=$1 last verb resolve
   last=$(last_status_line "$f")
   if status_is_paused_or_captain_held "$last"; then
     printf '%s\n' "$last"
@@ -510,22 +510,32 @@ status_declared_wait_line() {  # <status-file>
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
   status_line_verb "$last" verb
   [ "$verb" = "$resolve" ] || return 0
+  _fm_status_wait_scan_file "$f" "$(_fm_hold_mirror_line_ere "$f" 'captain-held')"
+}
+
+# _fm_status_declared_wait_scan over the settled-drop read of <status-file>,
+# bounded like last_status_line: a tail window made wholly of resolved events
+# widens the read to the whole file.
+_fm_status_wait_scan_file() {  # <status-file> <mirror-ere> [<skip-ere>]
+  local f=$1 resolve legacy_re hold
+  resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
   legacy_re="^[[:space:]]*(${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT})"
   hold=$(_fm_hold_line_ere "$f")
-  mirror=$(_fm_hold_mirror_line_ere "$f" 'captain-held')
   tail -n "$FM_CLASSIFY_EVENT_WINDOW_LINES" "$f" 2>/dev/null | _fm_hold_settled_drop "$hold" \
-    | _fm_status_declared_wait_scan "$resolve" "$legacy_re" "$mirror" \
+    | _fm_status_declared_wait_scan "$resolve" "$legacy_re" "$2" "${3-}" \
     || _fm_hold_settled_drop "$hold" < "$f" \
-    | _fm_status_declared_wait_scan "$resolve" "$legacy_re" "$mirror" || :
+    | _fm_status_declared_wait_scan "$resolve" "$legacy_re" "$2" "${3-}" || :
 }
 
 # Walk the status lines on stdin back from the newest event past resolved lines
 # to the first other event, and print it when it is a hold mirror (matching
 # <mirror-ere>) or a pause none of those resolved lines share a phase key with.
+# Lines matching <skip-ere> are read past, and with one given any other event
+# it stops at is printed too, which is the worker's own view under a hold.
 # Returns 1 when every event is a resolved line, so a caller reading a bounded
 # window knows to widen it.
-_fm_status_declared_wait_scan() {  # <resolve-verb> <legacy-captain-re> <mirror-ere>
-  local resolve=$1 legacy_re=$2 mirror=$3 line verb key keys=$'\n' i=0
+_fm_status_declared_wait_scan() {  # <resolve-verb> <legacy-captain-re> <mirror-ere> [<skip-ere>]
+  local resolve=$1 legacy_re=$2 mirror=$3 skip=${4-} line verb key keys=$'\n' i=0
   local -a lines=()
   while IFS= read -r line || [ -n "$line" ]; do
     lines[i]=$line
@@ -536,7 +546,8 @@ _fm_status_declared_wait_scan() {  # <resolve-verb> <legacy-captain-re> <mirror-
     line=${lines[i]}
     case "$line" in *[![:space:]]*) ;; *) continue ;; esac
     _fm_status_line_is_event "$line" "$legacy_re" || continue
-    if _fm_hold_unstamped_match "$line" "$mirror"; then
+    [ -z "$skip" ] || ! _fm_hold_unstamped_match "$line" "$skip" || continue
+    if [ -n "$mirror" ] && _fm_hold_unstamped_match "$line" "$mirror"; then
       printf '%s\n' "$line"
       return 0
     fi
@@ -544,7 +555,10 @@ _fm_status_declared_wait_scan() {  # <resolve-verb> <legacy-captain-re> <mirror-
     case "$verb" in
       "$resolve") ;;
       "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}") ;;
-      *) return 0 ;;
+      *)
+        [ -z "$skip" ] || printf '%s\n' "$line"
+        return 0
+        ;;
     esac
     key=$(_fm_decision_key "$line" "$_FM_CLASSIFY_KEYLESS_PHASE") || key=
     if [ "$verb" = "$resolve" ]; then
@@ -1051,6 +1065,8 @@ status_open_decisions() {  # <status-file> [<kind>]
 # Any decision the fold still holds open wins over unrelated events, and the
 # fold's most recently opened record supplies it; a standing declared wait, then
 # the worker's own latest event (last_worker_status_line), stands when nothing is open.
+# A standing hold mirror gives way to the worker's own view read past the mirror
+# and resolved lines: its standing pause or latest other event, never a resolved line.
 # Actual run/pane evidence is still reconciled by fm-crew-state.sh.
 status_current_line() {  # <status-file> <kind>
   local open key verb note current='' worker mirror
@@ -1065,7 +1081,8 @@ EOF
     mirror=$(_fm_hold_mirror_line_ere "$1" 'captain-held')
     if status_is_captain_held "$current" \
       && _fm_hold_unstamped_match "$current" "$mirror"; then
-      worker=$(last_worker_status_line "$1")
+      worker=$(_fm_status_wait_scan_file "$1" '' \
+        "$(_fm_hold_mirror_line_ere "$1" 'captain-held|resolved')")
       [ -z "$worker" ] || current=$worker
     fi
   fi
