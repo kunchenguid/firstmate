@@ -454,6 +454,7 @@ They also prove that a legacy or handoff-phase watcher marker from an absent rep
 - A handling successor that must surface a real crew event instead of going blind.
 - A handling successor that must surface a foreign queue append, such as a captain inbox note, exactly once and leave it to the daemon while away mode owns triage.
 - A handling successor that must surface, once, a captain inbox note queued just before a signal close, never name the watcher's own queued signal row, and never surface a note main's last drain already claimed.
+- A check close that reads an empty, mid-append queue counter and must not lower the handover record, so a successor never re-surfaces a row its predecessor handed over.
 
 `tests/fm-watch-triage.test.sh` proves TERM stops a watcher blocked inside a poll's pane capture and still releases its lock and records an acknowledgeable stop.
 It also exercises a single TERM with a live foreign downtime-marker lock holder, retained stale singleton and subsequent arm-style recovery, including decimal `08` and zero `00` cleanup bounds.
