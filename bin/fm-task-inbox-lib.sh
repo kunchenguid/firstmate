@@ -45,11 +45,13 @@
 # on .seq.lock; the worst racing outcome is ordering, never loss.
 #
 # Re-ring ladder (fm_task_inbox_due_action): an unhandled message older than
-# FM_TASK_INBOX_GRACE_SECS is due one delivery attempt per grace period; an
-# attempt may ring or be skipped to protect another draft in a proven pending
-# composer; an unsubmitted copy of this doorbell is retried. After
-# FM_TASK_INBOX_RING_MAX attempts without an acknowledgement it escalates. The
-# caller owns the busy and recovery-grade endpoint checks: a busy pane waits,
+# FM_TASK_INBOX_GRACE_SECS is due one delivery attempt per grace period. A new
+# doorbell rings only after composer emptiness is proven; an unsubmitted copy
+# of this exact doorbell may retry Enter only after its content is re-proven
+# and any available modal preparation succeeds. Every failed proof skips that
+# attempt. The ladder escalates after FM_TASK_INBOX_RING_MAX attempts without
+# an acknowledgement. The caller owns the busy and recovery-grade endpoint
+# checks: a busy pane waits,
 # while a positively dead or missing endpoint skips delivery and the ladder and
 # escalates directly. This library owns only the schedule and escalation marker.
 # If attempt bookkeeping cannot be persisted while the record remains unhandled,
@@ -283,9 +285,10 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 # interprets the constant doorbell as commands.
 # A pending composer holding exactly our own doorbell line is a previous ring
 # whose Enter never landed, so on an agent not reported busy it is submitted
-# rather than skipped; skipping it would block every later ring. Its input mode
-# and exact content are rechecked before each Enter. On both paths a lost first
-# Enter gets one confirmed retry.
+# rather than skipped; skipping it would block every later ring. Its exact
+# content is rechecked before each Enter; tmux and Herdr additionally require a
+# proven mode and pending state before modal preparation. On both paths a lost
+# first Enter gets one confirmed retry.
 fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   local backend=$1 target=$2 rec=$3 label=${4:-} line cstate verdict
   case "$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)" in

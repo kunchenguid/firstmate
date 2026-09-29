@@ -623,7 +623,7 @@ test_matrix_pi_separated_needs_identity() {
 # Both exact ordinary modes preserve the same empty/pending verdicts. Other
 # labels remain unknown to the classifier and input-mode parser.
 test_matrix_pi_vim_modes() {
-  local plain insert normal pending_normal ex typed pi_idle
+  local plain insert normal startup_normal pending_normal ex typed pi_idle
   pi_idle=$(printf 'pi\tidle')
   plain=$'transcript\n────────────────────────\n\n────────────────────────'
   insert=$'transcript\n────────────────────────\n\n────────────── INSERT'
@@ -636,6 +636,11 @@ test_matrix_pi_vim_modes() {
   assert_screen "cursorless pi-vim INSERT empty" empty "$CAPS_STYLED" "$insert" '' "$pi_idle"
   assert_screen "cursorless pi-vim NORMAL empty with adapter normalization" empty \
     "$CAPS_STYLED" "$normal" '' "$pi_idle"
+  startup_normal=$'╭──── startup banner ────╮\nunclosed startup content\n────────────────────────\n\n────────────── NORMAL'
+  assert_screen "cursorless pi-vim NORMAL below stale incomplete startup output" empty \
+    "$CAPS_STYLED" "$startup_normal" '' "$pi_idle"
+  [ "$(fm_composer_pi_input_mode "$startup_normal")" = normal ] \
+    || fail "stale incomplete startup output hid the live pi-vim NORMAL mode"
   [ "$(fm_composer_pi_input_mode "$insert" 2)" = insert ] \
     || fail "pi-vim INSERT mode was not recognized"
   [ "$(fm_composer_pi_input_mode "$normal" 2)" = normal ] \

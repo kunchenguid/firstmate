@@ -532,6 +532,7 @@ Explicit named-session routing and unrelated launch environment remain intact.
 
 Literal text and Enter are separate operations on `fm-send.sh`'s typed plane.
 Ordinary local text steers instead use the durable steering inbox and send only its best-effort constant doorbell through this adapter.
+Doorbells and control-plane exits follow the shared [lifecycle input preparation](architecture.md#lifecycle-input-preparation).
 Spawn-time fixed commands may use Herdr's atomic run primitive.
 Enter, Escape, and Ctrl-C are supported.
 
@@ -632,6 +633,10 @@ A blocked Pi is parked on an interactive prompt, so its blank composer region is
 That state defers instead of proving emptiness.
 A working Pi, pending middle row, missing identity, incomplete separator pair, or over-tall candidate remains unknown or pending.
 Identity stays a lazy second read, consulted only when a separator pair could change the verdict.
+For a valid Pi separator pair, exact lower-rule `INSERT` and `NORMAL` labels are recognized; plain separators and every other label remain ambiguous or unknown.
+Herdr is one of the two backends that can change a proven required-state `NORMAL` composer to `INSERT`, and it re-proves both mode and composer state from one post-change viewport before lifecycle delivery.
+A nonblank draft, failed read, or changed state therefore receives no literal lifecycle text.
+Ambiguous Pi separators and pending `INSERT` do not acquire this lifecycle-only refusal on generic typed-plane submissions.
 
 ### Placeholder and ghost text
 
