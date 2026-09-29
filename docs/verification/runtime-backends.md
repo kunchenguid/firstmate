@@ -712,6 +712,50 @@ Cursor is deliberately outside this cursor-anchored empty-composer matrix becaus
 
 `zellij action dump-screen --pane-id <id> --ansi` was verified at zellij 0.44.0 to preserve ANSI styling (real Claude Code rendered inside a zellij pane dumped `ESC[m` `❯` U+00A0 for its idle composer row), which is the capability the zellij composer classifier reads.
 
+### 2026-09-29 claude 2.1.259 title-bearing composer rule through Herdr
+
+Verified on 2026-09-29 on macOS arm64 (Darwin 25.6.0) against Claude Code 2.1.259 running in a Herdr 0.8.0 pane, read through Herdr's ANSI capture with the exact descriptor `fm_backend_herdr_composer_state` uses (`styled=1`, `cursor=0`, `identity=1`).
+Claude 2.1.x writes the session title INTO the composer's opening rule rather than beside it, so that row is no longer nothing but `─`:
+
+```text
+──────────────────────────────────────── readme typo correction ─
+❯<U+00A0>
+─────────────────────────────────────────────────────────────────
+  → firstmate git:(main) | Opus 5 (1M context) | ctx [█░░░░░░] 27% | …
+  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents
+```
+
+`_fm_composer_pi_separator_row` rejected that row, so the separated pair went unfound and the composer lost its only container proof; the cursorless "bottom-most shape wins" rule then selected the `→` statusLine below it as a bare composer and answered `pending` on a visibly empty composer.
+This is the [2026-09-20 statusLine footer](#2026-09-20-claude-21236-statusline-footer-through-herdr) defect reached from the other side: that entry's footer zone only demotes rows beneath an envelope a glyph row PROVES, and a titled opening rule removes the envelope.
+Every caller that requires a proven-empty composer refuses on `pending`, so the steering-inbox doorbell skipped its ring and `bin/fm-control.sh` refused to type an exit command, leaving workers that had fallen over on an API failure with no supported recovery path.
+
+The capture is a read-only `herdr pane read <pane> --source visible --format ansi`, classified through the shared owner:
+
+```sh
+bash -c '. bin/fm-composer-lib.sh
+  caps=$(printf "styled=1\ncursor=0\nidentity=1")
+  cap=$(cat tests/captures/claude-2.1.259-herdr-0.8.0/titled-composer-border.ansi)
+  v=$(fm_composer_classify_screen "$caps" "$cap")
+  [ "$v" != need-identity ] || v=$(fm_composer_classify_screen "$caps" "$cap" "" "$(printf "claude\tdone")")
+  printf "%s %s\n" "$v" "[$(fm_composer_extract_selected_content "$caps" "$cap")]"'
+```
+
+Before the fix that printed `pending [firstmate git:(main) | Opus 5 (1M context) | ctx [█░░░░░░] 27% | … ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents]`; after it, `empty []`.
+The extracted content is the disconfirming measurement, exactly as in the 2026-09-20 entry: the "unsubmitted text" was never anything from the composer row.
+Four further live panes on the same host, whose opening rule carried no title, read `empty` both before and after the change, so the fix moved only the shape it names.
+
+The rule colour `38;2;136;136;136` and the title share one SGR run, so the title survives ghost stripping exactly as the rule glyphs do; this is a structural miss, not a styling miss.
+The accepted geometry is claude's own border builder: `"─" × (columns − titleWidth − 3)`, then the title padded with ONE space on each side, then exactly ONE closing `─`, so the row still starts and ends with the rule glyph and the title is embedded IN the rule - the same proof `_fm_composer_titled_bottom_ok` requires of Grok's titled bordered border.
+The shared eight-column floor is unchanged, so a title wide enough to leave fewer than eight leading rule columns still refuses rather than widening the floor for one harness.
+
+`tests/captures/claude-2.1.259-herdr-0.8.0/` holds the recorded pane and its README owns provenance and the one transformation (the capture's transcript rows were captain-facing chat and are replaced by a neutral placeholder; the seven composer rows are unchanged bytes).
+`test_captured_claude_titled_composer_border` in `tests/fm-composer-lib.test.sh` replays it on every capability profile under both a UTF-8 locale and `LC_ALL=C`, and fails on the unmodified library.
+`test_titled_composer_border_keeps_refusing_real_input` pins the protection on that same recorded pane with only its composer row substituted: a typed draft, a one-character draft, a draft shaped like claude's own `/clear` hint, a draft shaped like the mode hint, a draft shaped like the statusLine, and a wrapped draft all still read `pending`, and the extracted content is the draft rather than the statusLine.
+`test_titled_composer_border_geometry_is_bounded` pins the geometry through the verdict rather than the predicate: eight near-miss rows - no closing rule glyph, two closing glyphs, doubled padding on either side, too few leading columns, a rule glyph inside the title, an empty title, and a leading title - all leave the statusLine winning and must never read `empty`.
+
+Coverage is one recorded pane on one harness/backend pair; the geometry's own bounds are counterfactuals, not live captures.
+The live refresh remains `FM_COMPOSER_MATRIX_LIVE=1 tests/fm-composer-matrix-live-e2e.test.sh`, which owes the claude-arm repair the 2026-09-20 entry already records.
+
 ### 2026-09-20 claude 2.1.236 statusLine footer through Herdr
 
 Verified on 2026-09-20 on macOS arm64 (Darwin 25.6.0) against Claude Code 2.1.236 running as Firstmate workers in Herdr 0.8.0 panes, read through Herdr's ANSI capture with its exact capability descriptor (`styled=1`, `cursor=0`, `identity=1`, `rows=20`).

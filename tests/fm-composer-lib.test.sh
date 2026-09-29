@@ -219,6 +219,93 @@ test_matrix_claude_arrow_statusline_footer() {
   pass "matrix: claude's arrow statusline is footer furniture, not a composer holding text"
 }
 
+test_captured_claude_titled_composer_border() {
+  # The recorded pane from tests/captures/claude-2.1.259-herdr-0.8.0 (its
+  # README owns provenance and the one transformation): claude 2.1.x writes
+  # the session title INTO the composer's opening rule, so that rule is not
+  # nothing-but-`─`, the separated pair went unfound, the composer lost its
+  # only container proof, and the arrow statusLine below it was selected as a
+  # bare composer again - `pending` on a visibly empty composer, which made
+  # the doorbell skip its ring and made fm-control refuse to type an exit
+  # command, leaving a fallen-over worker with no supported recovery path.
+  local capture out claude_done
+  claude_done=$(printf 'claude\tdone')
+  capture=$(cat "$ROOT/tests/captures/claude-2.1.259-herdr-0.8.0/titled-composer-border.ansi")
+  assert_screen "captured titled border on herdr" empty "$CAPS_STYLED" "$capture" '' "$claude_done"
+  assert_screen "captured titled border, no identity probe" empty "$CAPS_STYLED" "$capture" '' probe-absent
+  assert_screen "captured titled border on zellij" empty "$CAPS_STYLED_NOID" "$capture"
+  assert_screen "captured titled border on cmux/orca" empty "$CAPS_PLAIN" "$capture"
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$capture")
+  [ -z "$out" ] \
+    || fail "the captured empty composer must extract no content, got '$out'"
+  pass "captured: claude's title-bearing composer rule reads empty, not pending"
+}
+
+test_titled_composer_border_keeps_refusing_real_input() {
+  # The protection this must NOT weaken, asserted on the same recorded pane
+  # with only its composer row substituted: text a human actually typed stays
+  # `pending`, and the extracted content is that draft rather than the
+  # statusLine the defect used to return. Short input and input shaped like
+  # claude's own furniture are included, because "the fix just got less
+  # strict" would show up exactly there.
+  local capture head tail screen out draft
+  capture=$(cat "$ROOT/tests/captures/claude-2.1.259-herdr-0.8.0/titled-composer-border.ansi")
+  # Rows 1-4 are the placeholder, the turn-completion line, the version
+  # banner and the title-bearing opening rule; row 5 is the composer row this
+  # case substitutes; rows 6-8 are the closing rule, the statusLine and the
+  # permission-mode hint.
+  head=$(printf '%s\n' "$capture" | sed -n '1,4p')
+  tail=$(printf '%s\n' "$capture" | sed -n '6,$p')
+  for draft in 'fix the login bug' 'a' 'new task? /clear to save 289.2k tokens' \
+    '⏵⏵ bypass permissions on' '→ repo git:(main)'; do
+    screen="$head"$'\n❯ '"$draft"$'\n'"$tail"
+    assert_screen "typed '$draft' under a titled border" pending "$CAPS_STYLED" "$screen" '' probe-absent
+    out=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$screen")
+    [ "$out" = "$draft" ] \
+      || fail "the typed draft must be the extracted content, got '$out' for '$draft'"
+  done
+  # A wrapped draft still ends at the closing rule, never at the statusLine.
+  screen="$head"$'\n❯ fix the login bug\nand also the logout bug\n'"$tail"
+  assert_screen "wrapped draft under a titled border" pending "$CAPS_STYLED" "$screen" '' probe-absent
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$screen")
+  [ "$out" = 'fix the login bug and also the logout bug' ] \
+    || fail "a wrapped draft must extract exactly its own rows, got '$out'"
+  pass "a titled composer rule never turns real typed input into empty"
+}
+
+test_titled_composer_border_geometry_is_bounded() {
+  # `empty` is the one verdict that authorizes typing into a pane, so the
+  # widening is held to claude's exact border geometry: a run of rule glyphs,
+  # ONE space, the title, ONE space, exactly ONE closing rule glyph. Each row
+  # below misses that shape by one property and must keep refusing. The bound
+  # is asserted through the verdict, not the predicate: an accepted opening
+  # rule proves the pair and reads `empty`, a rejected one leaves the arrow
+  # statusLine winning and reads `pending`.
+  local opening screen out
+  local rest=$'\n❯'"$NBSP"$'\n────────────────\n  → repo git:(main) | Opus 5\n  ⏵⏵ bypass permissions on'
+  screen=$'transcript line\n──────────── readme typo correction ─'"$rest"
+  assert_screen "claude's own titled opening rule" empty "$CAPS_STYLED_NOID" "$screen"
+  for opening in \
+    $'──────────── readme typo correction' \
+    $'──────────── readme typo correction ──' \
+    $'──────────── readme typo correction  ─' \
+    $'────────────  readme typo correction ─' \
+    $'─── readme typo correction ─' \
+    $'──────────── readme ─ typo ─' \
+    $'────────────  ─' \
+    $'readme typo correction ─'
+  do
+    screen=$'transcript line\n'"$opening$rest"
+    out=$(fm_composer_classify_screen "$CAPS_STYLED_NOID" "$screen")
+    [ "$out" != empty ] \
+      || fail "a row that is not claude's titled rule must not prove a composer: '$opening'"
+    out=$(LC_ALL=C fm_composer_classify_screen "$CAPS_STYLED_NOID" "$screen")
+    [ "$out" != empty ] \
+      || fail "a row that is not claude's titled rule must not prove a composer under LC_ALL=C: '$opening'"
+  done
+  pass "the titled composer rule is bounded to claude's own border geometry"
+}
+
 test_composer_footer_demotion_needs_a_proven_pair() {
   # The demotion is bounded in three directions, and each bound is a case
   # where a lower glyph row IS the live composer.
@@ -969,6 +1056,9 @@ test_idle_placeholder_case_mode_is_explicit
 test_real_text_is_pending
 test_matrix_claude_bare_nbsp_row
 test_matrix_claude_arrow_statusline_footer
+test_captured_claude_titled_composer_border
+test_titled_composer_border_keeps_refusing_real_input
+test_titled_composer_border_geometry_is_bounded
 test_composer_footer_demotion_needs_a_proven_pair
 test_composer_footer_zone_is_shape_independent
 test_composer_footer_zone_refuses_rather_than_allows

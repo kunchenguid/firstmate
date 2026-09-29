@@ -77,6 +77,11 @@
 #                different, self-proving thing: real claude 2.x draws exactly
 #                that (`─` rule, `❯`+NBSP, `─` rule), so the glyph inside the
 #                pair carries the shape and no identity is needed.
+#                Either rule may carry a TITLE embedded in it: claude 2.1.x
+#                writes its session title into the OPENING rule
+#                (`─…─ readme typo correction ─`), which is why a rule is not
+#                required to be nothing but `─`
+#                (_fm_composer_titled_separator_row owns that exact geometry).
 #
 # THE COMPOSER FOOTER ZONE (task firstmate-doorbell-vals-pending-p1): a
 # harness draws its own furniture BELOW the composer - a user statusLine, a
@@ -749,17 +754,64 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
 # exact positive proof they require (`empty`), so unrecognized future verdicts
 # fail safe by default.
 
-# _fm_composer_pi_separator_row: a solid pi separator - nothing but `─`, at
-# least 8 columns wide. The width floor is a literal substring test so it is
-# byte-exact in every locale.
+# _fm_composer_titled_separator_row: claude's TITLE-BEARING composer rule.
+# Claude Code 2.1.x draws its session title INSIDE the composer's top rule
+# rather than beside it, so that rule is no longer nothing-but-`─` and the
+# solid test below rejected it. The pair then went unfound, the composer lost
+# its only container proof, and the cursorless bottom-most rule selected the
+# user's statusLine row (which opens with `→`, Cursor's glyph) as the composer
+# and answered `pending` on a visibly empty composer - the same false refusal
+# THE COMPOSER FOOTER ZONE records, reached from the other side. Measured live
+# on 2026-09-29 through Herdr 0.8.0 on claude 2.1.259; the recorded pane is
+# tests/captures/claude-2.1.259-herdr-0.8.0/.
+# The accepted shape is exactly what claude's own border builder emits:
+# `"─" x (columns - titleWidth - 3)`, then the title padded with ONE space on
+# each side, then exactly ONE closing `─`. So the row still starts and ends
+# with the rule glyph and the title is embedded IN the rule rather than
+# replacing it - the same proof _fm_composer_titled_bottom_ok requires of a
+# titled bordered border, applied to this family's rule.
+# Every byte test is a literal substring or literal-string removal, never a
+# character class over `─`, so the answer is identical under LC_ALL=C.
+# The shared 8-column floor stays in force, so a title wide enough to leave
+# fewer than eight leading rule columns (claude truncates a title at
+# `columns - 7`, leaving at least four) falls back to a refusal rather than
+# widening the floor for one harness.
+_fm_composer_titled_separator_row() {  # <trimmed-row>
+  local row=$1 rest dashes title
+  case "$row" in
+    *' ─') rest=${row%' ─'} ;;
+    *) return 1 ;;
+  esac
+  dashes=${rest%% *}
+  [ -n "$dashes" ] || return 1
+  [ -z "${dashes//─/}" ] || return 1
+  case "$dashes" in
+    *────────*) ;;
+    *) return 1 ;;
+  esac
+  title=${rest#* }
+  [ -n "$title" ] || return 1
+  [ "$title" = "${title//─/}" ] || return 1
+  case "$title" in
+    ' '*|*' ') return 1 ;;
+  esac
+  return 0
+}
+
+# _fm_composer_pi_separator_row: THE separator rule of the `separated` shape -
+# a solid rule of nothing but `─`, at least 8 columns wide, or the
+# title-bearing form above. The width floor is a literal substring test so it
+# is byte-exact in every locale.
 _fm_composer_pi_separator_row() {  # <trimmed-row>
   local row=$1
   [ -n "$row" ] || return 1
-  [ -z "${row//─/}" ] || return 1
-  case "$row" in
-    *────────*) return 0 ;;
-  esac
-  return 1
+  if [ -z "${row//─/}" ]; then
+    case "$row" in
+      *────────*) return 0 ;;
+    esac
+    return 1
+  fi
+  _fm_composer_titled_separator_row "$row"
 }
 
 # Row-scan results are returned through FM_COMPOSER_SCAN_* globals (bash 3.2
