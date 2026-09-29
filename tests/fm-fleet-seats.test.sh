@@ -139,6 +139,24 @@ test_no_pool_configured_is_off() {
   pass "without config/fleet-seats a reservation is a silent no-op"
 }
 
+test_pool_names_do_not_escape_the_seat_directory() {
+  local home="$TMP_ROOT/pool-names/primary" out name
+  make_home "$home"
+  new_holder
+  for name in . ..; do
+    printf '{"pools":[{"name":"%s","capacity":1,"models":["pool-model-a"]}]}\n' "$name" \
+      > "$home/config/fleet-seats"
+    out=$(reserve "$home" named pool-model-a 2>&1)
+    expect_code 5 "$?" "pool name $name"
+    assert_contains "$out" "malformed" "pool name $name was accepted"
+  done
+  printf '{"pools":[{"name":"team.a","capacity":1,"models":["pool-model-a"]}]}\n' \
+    > "$home/config/fleet-seats"
+  out=$(reserve "$home" named pool-model-a 2>&1) || fail "an ordinary dotted pool name was refused: $out"
+  assert_contains "$out" "pool=team.a" "the dotted pool did not reserve its own directory"
+  pass "path-like pool names refuse while ordinary dotted names reserve"
+}
+
 test_legacy_unresolved_models_count_in_every_pool() {
   local root="$TMP_ROOT/legacy-default/primary" out shape model
   make_home "$root"
@@ -832,6 +850,7 @@ test_secondmate_spawn_takes_a_seat() {
 }
 
 test_no_pool_configured_is_off
+test_pool_names_do_not_escape_the_seat_directory
 test_legacy_unresolved_models_count_in_every_pool
 test_one_capacity_across_homes
 test_live_supervisors_hold_seats_even_while_idle

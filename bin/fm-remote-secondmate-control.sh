@@ -240,9 +240,9 @@ cmd_launch() {
   validate_home "$id"
   case "$harness" in
     claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|omp) ;;
-    *) die "unverified remote secondmate harness: $harness" ;;
+    *) prelaunch_die "unverified remote secondmate harness: $harness" ;;
   esac
-  case "$effort" in -|low|medium|high|xhigh|max|ultra) ;; *) die "invalid remote secondmate effort: $effort" ;; esac
+  case "$effort" in -|low|medium|high|xhigh|max|ultra) ;; *) prelaunch_die "invalid remote secondmate effort: $effort" ;; esac
   if [ "$effort" = ultra ]; then
     "$SCRIPT_DIR/fm-harness.sh" validate-native-effort "$harness" "$model" "$effort" || return 1
   fi
@@ -250,8 +250,9 @@ cmd_launch() {
   # disconnection a remote route depends on: the herdr server belongs to the
   # GUI login session, and a persistent `rex server start` server is a
   # detached daemon no SSH session owns. bin/fm-remote-doctor.sh is the
-  # readiness owner for whichever backend the parent selected.
-  case "$selected_backend" in herdr|rex) ;; *) die "a remote secondmate runs only on the herdr or rex backend, not '$selected_backend'" ;; esac
+  # readiness owner for whichever backend the parent selected. A refusal here
+  # is reported as a prelaunch failure so the caller releases the seat it held.
+  case "$selected_backend" in herdr|rex) ;; *) prelaunch_die "a remote secondmate runs only on the herdr or rex backend, not '$selected_backend'" ;; esac
   mkdir -p "$CONTROL_STATE" "$CONTROL_DATA"
   meta=$(meta_path "$id")
   if [ -f "$meta" ]; then

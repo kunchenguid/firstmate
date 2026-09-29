@@ -153,7 +153,7 @@ validate_pools() {
   jq -e '
     (.pools | type == "array")
     and all(.pools[];
-      (.name | type == "string" and test("^[A-Za-z0-9._-]+$"))
+      (.name | type == "string" and test("^[A-Za-z0-9._-]+$") and . != "." and . != "..")
       and (.capacity | type == "number" and . >= 0 and . == floor)
       and (.models | type == "array" and length > 0
            and all(.[]; type == "string" and length > 0)))
