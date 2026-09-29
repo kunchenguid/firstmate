@@ -688,7 +688,13 @@ export default function (pi: ExtensionAPI) {
       "watcher",
       "Firstmate supervision continues in a new turn: Firstmate watcher wakes are still queued, and they follow this message. Run bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.",
     );
-    await pi.sendUserMessage(steer, { deliverAs: "steer" });
+    try {
+      await pi.sendUserMessage(steer, { deliverAs: "steer" });
+    } catch (error) {
+      // A rejected steer started nothing, so a later settled run may try again.
+      for (const token of stranded) owner.steeredWakes.delete(token);
+      throw error;
+    }
   }
 
   function confirmHandlingDelivery(recovery: { generation: string; watcherPid: string }): {

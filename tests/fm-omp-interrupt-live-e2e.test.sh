@@ -76,6 +76,9 @@ fm_herdr_lab_validate_name "$SESSION" || fail "refusing Herdr lab session '$SESS
 LAB="$ROOT/.omp-interrupt-live.$$"
 FAKEBIN="$LAB/fakebin"
 CHECKED=0
+# Set once provision succeeds; teardown never touches a session this run did
+# not provision, such as a running HERDR_LAB_SESSION provision refused.
+OWNED=0
 
 # Every process a case starts names its lab path on its command line.
 reap_lab() {
@@ -88,7 +91,7 @@ reap_lab() {
 cleanup() {
   local rc=$?
   trap - EXIT
-  if ! PATH="$ORIGINAL_PATH" "$LAB_HELPER" teardown "$SESSION"; then
+  if [ "$OWNED" = 1 ] && ! PATH="$ORIGINAL_PATH" "$LAB_HELPER" teardown "$SESSION"; then
     rc=1
   fi
   reap_lab
@@ -121,6 +124,7 @@ EOF
 chmod +x "$FAKEBIN/herdr"
 
 "$LAB_HELPER" provision "$SESSION" || fail "could not provision the isolated Herdr lab"
+OWNED=1
 export PATH="$FAKEBIN:$ORIGINAL_PATH"
 
 # shellcheck source=bin/fm-backend.sh

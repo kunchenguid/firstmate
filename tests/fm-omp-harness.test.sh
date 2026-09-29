@@ -34,7 +34,8 @@
 #      After a plain agent_end it recovers a wake an interrupted run left
 #      unsent: a wake an Escape restored into the editor leaves the editor
 #      exactly and is delivered again once, and wakes an empty Enter stranded
-#      in omp's queue earn one distinct steer. A fake host cannot reproduce
+#      in omp's queue earn one distinct steer, tried again after a later
+#      settled run if omp rejects it. A fake host cannot reproduce
 #      omp's queue, restore, or advisor, so only this policy is pinned here;
 #      FM_OMP_INTERRUPT_LIVE_E2E=1 tests/fm-omp-interrupt-live-e2e.test.sh
 #      re-checks the omp behavior it assumes.
@@ -777,6 +778,62 @@ EOF
   pass ".omp watch extension: wakes an empty Enter stranded earn one distinct steer and are consumed once"
 }
 
+# A continuation steer omp rejects started nothing, so the stranded wake it was
+# for earns a steer again after the next settled run.
+test_watch_extension_retries_a_rejected_steer() {
+  local repo home log out status
+  repo="$TMP_ROOT/watch-steer-reject/repo"; home="$TMP_ROOT/watch-steer-reject/home"; log="$TMP_ROOT/watch-steer-reject/arm.log"
+  install_omp_extension_fixture "$repo"
+  install_interrupt_arm_fixture "$repo"
+  mkdir -p "$home/state"
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_OMP_INTERRUPT_SETTLE_MS=20 FM_OMP_ARM_READY_TIMEOUT_MS=3000 \
+    FM_WATCH_REARM_RETRY_LIMIT=1 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 \
+    EXT="$repo/.omp/extensions/fm-primary-omp-watch.ts" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+import { writeFileSync } from "node:fs";
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const handlers = new Map(); let tool = null; const sent = []; let rejections = 1;
+let idle = false;
+const ctx = {
+  isIdle: () => idle,
+  hasPendingMessages: () => true,
+  ui: { getEditorText: () => "", setEditorText: () => {} },
+};
+const pi = {
+  on(e, h) { handlers.set(e, h); },
+  registerCommand() {},
+  registerTool(t) { tool = t; },
+  sendUserMessage(m, o) {
+    if (o?.deliverAs === "steer" && rejections > 0) { rejections -= 1; throw new Error("omp rejected the steer"); }
+    sent.push({ m, o });
+    return undefined;
+  },
+};
+const steers = () => sent.filter((item) => item.o?.deliverAs === "steer");
+const end = () => handlers.get("agent_end")({ type: "agent_end" }, ctx);
+const mod = await import(pathToFileURL(process.env.EXT).href);
+mod.default(pi);
+await tool.execute();
+for (let i = 0; i < 60 && sent.length < 1; i += 1) await new Promise((r) => setTimeout(r, 100));
+if (sent.length !== 1) throw new Error(`expected the first wake, saw ${JSON.stringify(sent)}`);
+idle = true;
+await end();
+for (let i = 0; i < 40 && rejections > 0; i += 1) await new Promise((r) => setTimeout(r, 50));
+await new Promise((r) => setTimeout(r, 200));
+if (rejections !== 0 || steers().length !== 0) throw new Error(`expected one rejected steer attempt, saw ${JSON.stringify(sent.slice(1))}`);
+await end();
+for (let i = 0; i < 40 && steers().length < 1; i += 1) await new Promise((r) => setTimeout(r, 50));
+if (steers().length !== 1) throw new Error(`a rejected steer must be retried after the next settled run: ${JSON.stringify(sent.slice(1))}`);
+await handlers.get("session_shutdown")({}, {});
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "omp watch extension rejected steer: $out"
+  [ -z "$out" ] || fail "omp watch extension rejected steer test printed output: $out"
+  pass ".omp watch extension: a stranded wake whose steer omp rejected earns a steer after the next settled run"
+}
+
 # omp starts a turn for a follow-up queued while it is idle only when the
 # conversation ends in an assistant reply or a tool result, and its advisor
 # appends a note after a final answer, so an idle main once kept every wake
@@ -1145,6 +1202,7 @@ test_turnend_guard_extension_compels_one_continuation
 test_watch_extension_arms_and_delivers
 test_watch_extension_recovers_a_wake_an_escape_restored
 test_watch_extension_steers_past_a_wake_an_empty_enter_stranded
+test_watch_extension_retries_a_rejected_steer
 test_watch_extension_starts_a_turn_for_an_idle_wake
 test_watch_extension_runs_the_supervision_host
 test_watch_extension_replays_a_host_only_boundary_across_replacement
