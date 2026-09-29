@@ -697,11 +697,30 @@ fm_backend_herdr_projection_journal_snapshot() {  # <journal> <task-id>
 # Only the launch owner may bind a freshly created/replaced endpoint; ordinary
 # cleanup must never upgrade a legacy journal from present-day labels or cwd.
 # Socket inode/timestamps bind one server instance, not a restart-stable UUID.
-fm_backend_herdr_session_instance() { # <session>
-  local session=$1 status socket
+fm_backend_herdr_session_status_socket() { # <session>
+  local session=$1 status socket listed
   status=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null) || return 1
   socket=$(printf '%s' "$status" | jq -er --arg session "$session" \
-    'select(.server.running == true and .server.session == $session) | .server.socket | select(type == "string" and startswith("/"))') || return 1
+    'select(.server.running == true) | .server.socket | select(type == "string" and startswith("/"))') || return 1
+  if ! printf '%s' "$status" | jq -e --arg session "$session" \
+    '.server.session == $session' >/dev/null; then
+    # Installed Herdr represents an explicitly selected default session as
+    # null, not "default". Missing fields or null on a named session are not
+    # this representation. Bind it independently through the session owner.
+    [ "$session" = default ] || return 1
+    printf '%s' "$status" | jq -e '
+      (.client | has("session")) and .client.session == null and
+      (.server | has("session")) and .server.session == null' >/dev/null || return 1
+    listed=$(fm_backend_herdr_presentation_session_socket_path "$session") || return 1
+    socket=$(fm_backend_herdr_canonical_socket_path "$socket") || return 1
+    [ "$socket" = "$listed" ] || return 1
+  fi
+  printf '%s' "$socket"
+}
+
+fm_backend_herdr_session_instance() { # <session>
+  local socket
+  socket=$(fm_backend_herdr_session_status_socket "$1") || return 1
   python3 - "$socket" <<'PY'
 import hashlib,os,stat,sys
 s=os.lstat(sys.argv[1])
@@ -714,10 +733,8 @@ PY
 # the current owned session socket already existed when that journal was
 # published. This proves continuity without inventing absent launch fields.
 fm_backend_herdr_session_predates_file() { # <session> <regular-file>
-  local session=$1 file=$2 status socket
-  status=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null) || return 1
-  socket=$(printf '%s' "$status" | jq -er --arg session "$session" \
-    'select(.server.running == true and .server.session == $session) | .server.socket | select(type == "string" and startswith("/"))') || return 1
+  local file=$2 socket
+  socket=$(fm_backend_herdr_session_status_socket "$1") || return 1
   python3 - "$socket" "$file" <<'PY'
 import os, stat, sys
 s = os.lstat(sys.argv[1])
@@ -918,12 +935,9 @@ fm_backend_herdr_presentation_session_socket_path() {  # <session>
   [ -n "$session" ] || return 1
   sessions=$(fm_backend_herdr_cli "$session" session list --json 2>/dev/null) || return 1
   socket=$(printf '%s' "$sessions" | jq -er --arg want "$session" '
-    [.sessions[]?
-      | select(.name == $want and .running == true)
-      | select((.socket_path | type) == "string")
-      | select((.socket_path | length) > 0)
-      | .socket_path]
-    | if length == 1 then .[0] else empty end
+    [.sessions[]? | select(.name == $want)]
+    | select(length == 1) | .[0] | select(.running == true)
+    | .socket_path | select(type == "string" and length > 0)
   ' 2>/dev/null) || return 1
   fm_backend_herdr_canonical_socket_path "$socket"
 }

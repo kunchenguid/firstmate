@@ -42,8 +42,8 @@ printf 'herdr' >> "${FM_RUNTIME_LOG:?}"
 printf ' <%s>' "$@" >> "${FM_RUNTIME_LOG:?}"
 printf '\n' >> "${FM_RUNTIME_LOG:?}"
 case "$1 ${2:-}" in
-  'session list') jq -n --arg socket "${FM_RUNTIME_LOG}.sock" '{sessions:[{name:"isolated",running:true,socket_path:$socket}]}' ;;
-  'status --json') jq -n --arg socket "${FM_RUNTIME_LOG}.sock" '{client:{version:"0.7.1",protocol:14},server:{running:true,session:"isolated",socket:$socket,version:"0.7.1",protocol:14}}' ;;
+  'session list') if [ -f "${FM_RUNTIME_LOG}.sessions" ]; then cat "${FM_RUNTIME_LOG}.sessions"; exit; fi; jq -n --arg socket "${FM_RUNTIME_LOG}.sock" '{sessions:[{name:"isolated",running:true,socket_path:$socket}]}' ;;
+  'status --json') if [ -f "${FM_RUNTIME_LOG}.status" ]; then cat "${FM_RUNTIME_LOG}.status"; exit; fi; jq -n --arg socket "${FM_RUNTIME_LOG}.sock" '{client:{version:"0.7.1",protocol:14},server:{running:true,session:"isolated",socket:$socket,version:"0.7.1",protocol:14}}' ;;
   'pane get')
     if [ -e "${FM_RUNTIME_LOG}.$3.closed" ]; then
       echo '{"error":{"code":"pane_not_found"}}'
@@ -903,6 +903,68 @@ PY
 
   pass 'fm-teardown: v1 meta proof and v2/future journals use structural identity while missing or partial essential evidence stays retained'
 }
+
+# The installed client emits explicit null identities for default. The public
+# cleanup owner must bind that spelling through the independent session list.
+test_cleanup_default_status_identity() {
+  local variant dir id rc expected
+  for variant in legacy launch additive canonical missing-server missing-client foreign-client named-null foreign-socket duplicate stopped malformed replaced; do
+    id="default-$variant"
+    dir=$(make_case "$id")
+    write_herdr_meta "$dir/home/state/$id.meta" "window=isolated:fm-$id" \
+      "worktree=$dir/worktree" "project=$dir/project" "kind=ship"
+    stage_archived_action "$dir" "$id" steer attempted
+    stage_absent_bound_endpoint "$dir" "$id"
+    python3 - "$dir" "$id" "$variant" <<'PYDEFAULT'
+import json, os, pathlib, sys
+root, task, variant = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+for path in [root/'home/state'/f'{task}.meta',root/'home/state'/f'{task}.herdr-presentation']:
+    path.write_text(path.read_text().replace('isolated', 'default'))
+journal=root/'home/state'/f'{task}.herdr-presentation'
+if variant != 'launch':
+    fields=('spawn_gen=','terminal_id=','session_instance=','shell_pid=','shell_start=')
+    journal.write_text('\n'.join(line.replace('version=3','version=2') for line in journal.read_text().splitlines() if not line.startswith(fields))+'\n')
+socket=str(root/'runtime.log.sock')
+status={'client':{'session':None,'protocol':20},'server':{'running':True,'session':None,'socket':socket,'protocol':20}}
+sessions={'sessions':[{'name':'default','default':True,'running':True,'socket_path':socket}]}
+if variant=='additive': status['diagnostic']={'future':True}; sessions['sessions'][0]['future']='metadata'
+if variant=='canonical': status['client']['session']=status['server']['session']='default'
+if variant=='missing-server': del status['server']['session']
+if variant=='missing-client': del status['client']['session']
+if variant=='foreign-client': status['client']['session']='foreign'
+if variant=='named-null':
+    for path in [root/'home/state'/f'{task}.meta',journal]: path.write_text(path.read_text().replace('session=default','session=isolated').replace('window=default:', 'window=isolated:'))
+    sessions['sessions'][0]['name']='isolated'
+if variant=='foreign-socket': sessions['sessions'][0]['socket_path']=socket+'.other'
+if variant=='duplicate': sessions['sessions'].append({'name':'default','running':False,'socket_path':None})
+if variant=='stopped': sessions['sessions'][0]['running']=False
+if variant=='malformed': sessions['sessions'][0]['socket_path']=None
+if variant=='replaced':
+    stamp=os.lstat(socket).st_ctime_ns-1
+    os.utime(journal,ns=(stamp,stamp))
+(root/'runtime.log.status').write_text(json.dumps(status))
+(root/'runtime.log.sessions').write_text(json.dumps(sessions))
+PYDEFAULT
+    rc=0
+    FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" \
+      PATH="$dir/fakebin:$PATH" "$TEARDOWN" "$id" --endpoint-only --expect-spawn-gen "s-$id" \
+      > "$dir/stdout" 2> "$dir/stderr" || rc=$?
+    case "$variant" in legacy|launch|additive|canonical) expected=0 ;; *) expected=1 ;; esac
+    if [ "$expected" = 0 ]; then
+      [ "$rc" = 0 ] || fail "$variant default representation rejected: $(cat "$dir/stderr")"
+      jq -e '.phases.pane_close.state=="confirmed"' "$dir/home/state/$id.cleanup.json" >/dev/null || fail 'default absence not confirmed'
+    else
+      [ "$rc" != 0 ] || fail "$variant default identity accepted"
+      assert_contains "$(cat "$dir/stderr")" legacy-session-continuity-unproven "$variant refused for a different reason"
+      ! grep -Fq 'pane <close>' "$dir/runtime.log" || fail 'invalid default identity caused close'
+    fi
+    assert_present "$dir/home/state/$id.meta" 'endpoint-only probe removed task record'
+    assert_present "$dir/worktree/sentinel" 'default probe removed task copy'
+  done
+  pass 'fm-teardown: explicit null default requires unique running session/socket identity; missing, foreign, named-null and replaced identities refuse'
+}
+
+test_cleanup_default_status_identity
 
 test_open_goal_preserves_resources_before_cleanup
 test_archived_business_action_allows_only_independent_endpoint_cleanup

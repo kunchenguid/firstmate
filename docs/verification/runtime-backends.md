@@ -37,6 +37,13 @@ This is deterministic routing evidence, not a guarantee about model-generated ta
 The same candidate also passed the installed cleanup lifecycle guard described under [independent task workspace cleanup](#independent-task-workspace-cleanup).
 The portable lifecycle suite verifies that identical additive cleanup receipts replay idempotently while removing even a diagnostic field from an already recorded receipt remains an evidence collision.
 
+Herdr 0.8.0 protocol 20 reports explicit JSON null in both session fields for `status --json --session default`, while `session list --json` identifies that same running socket as `name: "default"`.
+The default status was captured read-only by the session owner; the independent session-list observation used the authorized named lab helper and passed its default-session tripwire.
+`tests/fm-teardown-endpoint-safety.test.sh` exercises the public cleanup owner with this representation for legacy and launch-bound journals, an additive response, and the literal default spelling.
+Missing identities, null named-session identities, foreign client/socket identities, duplicate session entries, stopped sessions and newer socket timestamps remain refused before effects.
+The same candidate passed `FM_HERDR_LIFECYCLE_E2E=1 bin/fm-test-run.sh tests/fm-teardown-lifecycle-herdr-e2e.test.sh` through the authorized named lab helper, reporting `FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=45340`.
+No live default cleanup was performed; the real default representation and the executable cleanup fixtures are distinct evidence.
+
 ## Delegated continuation on Pi
 
 The installed Pi 0.87.1 SDK and CLI passed the isolated delegated-continuation guard on 2026-09-28.
