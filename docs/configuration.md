@@ -1899,6 +1899,11 @@ The Lavish version floors and feature probe are owned by `bin/fm-bootstrap.sh`.
 - An interruption between those two durable steps leaves the board unregistered with its terminal round still open, which nothing relaunches and the same `handled` call finishes.
 - It concludes only a round that is still open, so a repeated acknowledgement of an already-closed round reports `already-handled` and never touches whatever registration holds the board by then.
 
+**End the boards at teardown**
+
+- Task teardown ends the task's still-open Lavish sessions and retires the sources that listened on them, after every refusal gate has passed and before the worktree is returned, so finished boards do not accumulate in the machine-wide session list; `bin/fm-procevent-lavish.sh end-task` owns the mechanics and the path-only attribution.
+- A task that still carries an open captain call keeps its boards and sources, and a failure to end one session is reported without blocking teardown.
+
 **Ownership and recovery**
 
 - A second armer is refused with the current owner named, and the source list derives `listening`, `round-open`, or `dead` from the claim and handled captures without a second ownership record.
