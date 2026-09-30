@@ -963,6 +963,27 @@ test_scout_and_secondmate_load_decision_hold_policy() {
   pass "fm-brief.sh: investigation and visual-review completions load the shared decision policy"
 }
 
+# A scout brief invites an optional friction section and keeps its routing with
+# firstmate; a ship brief carries no such invitation.
+test_scout_invites_optional_friction_section() {
+  local home scout ship
+  home="$TMP_ROOT/friction-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" friction-scout firstmate --scout >/dev/null 2>&1
+  scout="$home/data/friction-scout/brief.md"
+  assert_grep "Optionally, end the report with a \`## Friction\` section" "$scout" \
+    "scout brief did not invite an optional friction section"
+  assert_grep "omit the section when nothing was missing" "$scout" \
+    "scout brief made the friction section mandatory"
+  assert_grep "Firstmate routes each friction item after reading the report" "$scout" \
+    "scout brief did not leave friction routing to firstmate"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" friction-ship firstmate --mode no-mistakes >/dev/null 2>&1
+  ship="$home/data/friction-ship/brief.md"
+  assert_no_grep '## Friction' "$ship" \
+    "ship brief received the scout-only friction invitation"
+  pass "fm-brief.sh: scout scaffold invites an optional friction section"
+}
+
 # A scout brief offers the Lavish review loop for every compatible board version,
 # including older builds that use the legacy reply path.
 test_scout_lavish_line_follows_presentation_floor() {
@@ -1350,6 +1371,7 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_ship_and_scout_teach_validation_round_pause
 test_scout_and_secondmate_load_decision_hold_policy
+test_scout_invites_optional_friction_section
 test_scout_and_secondmate_scaffold
 test_scout_lavish_line_follows_presentation_floor
 test_home_brief_include_is_appended_last

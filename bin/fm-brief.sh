@@ -582,6 +582,8 @@ $INBOX_SECTION
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
 The report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references), and what you recommend.
+Optionally, end the report with a \`## Friction\` section listing what you lacked while doing the task - a missing boot or setup command, an undocumented test entry point, an invariant you had to discover the hard way - one item per line with what it cost you; omit the section when nothing was missing.
+Firstmate routes each friction item after reading the report, so never add the missing knowledge to a project's \`AGENTS.md\` or \`CLAUDE.md\` yourself.
 $LAVISH_LINE
 Before reporting done, read and follow \`$FM_ROOT/.agents/skills/captain-hold-lifecycle/SKILL.md\` and pass its shared completion gate for the report and any visual review.
 When the report is complete, append \`done [at=<epoch>]: {one-line conclusion}\` to the status file and stop.

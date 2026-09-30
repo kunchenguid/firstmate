@@ -10,6 +10,10 @@ metadata:
 
 A completed scout must leave a self-contained report before its scratch worktree can be discarded; read and relay its findings, record the report as the Done artifact, and re-evaluate the queue.
 A report may recommend implementation but does not authorize it.
+When the report has a `## Friction` section, route each item by `AGENTS.md` section 6's knowledge placement rather than leaving it to memory:
+- a fact about this home's own fleet or tooling goes to `data/learnings.md`;
+- a gap in firstmate itself becomes an ordinary backlog task;
+- a proposed addition to a project's `AGENTS.md` becomes one held captain decision for that project through `bin/fm-captain-hold.sh hold`, never an agent edit.
 Before treating the investigation or any visual review as complete, load `captain-hold-lifecycle`; teardown enforces that shared completion gate.
 When a scout's deliverable is a visual artifact the captain will iterate on, keep it alive and follow the crew-hosted Lavish board contract in `docs/configuration.md` rather than arming or polling the board from firstmate.
 When implementation is separately authorized, promote the existing scout through `bin/fm-promote.sh` rather than creating a duplicate task.
