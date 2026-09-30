@@ -13,7 +13,7 @@ Every other tool is a read of status, readiness, receipts, the home summary, the
 The script header lists each tool and the command or file it wraps.
 
 A note is idempotent per `request_id`, so a client retrying a failed call with the same id still produces exactly one note.
-Replies arrive asynchronously through `fm-inbox.sh reply` and are read back with `firstmate_note_replies`.; without a `note_id` or `after` cursor it returns the newest 20 replies, and each call's `reply_cursor` passed back as `after` returns only newer ones.
+Replies arrive asynchronously through `fm-inbox.sh reply` and are read back with `firstmate_note_replies`; without a `note_id` or `after` cursor it returns the newest 20 replies, and each call's `reply_cursor` passed back as `after` returns only newer ones.
 
 ## Setup
 
