@@ -90,6 +90,10 @@
 # relative link resolves on the same server; a Lavish page cannot read local
 # files or render raw markdown itself. Each rebuild replaces the whole preview
 # directory, so a preview shows the report as it was at the last build.
+# Builds in one home serialize on $FM_HOME/.lavish/.bearings-board.lock from
+# staging through publish, so overlapping builds cannot interleave their preview
+# swaps; a build that cannot take the lock within BOARD_LOCK_SECONDS fails
+# without publishing.
 #
 # The board path is stable - $FM_HOME/.lavish/bearings-board.html - so a
 # re-invocation rebuilds the same file in place, which keeps the same Lavish
@@ -113,6 +117,8 @@ PREVIEW_DIR_NAME=bearings-board-reports
 # the text or follows whitespace or an opening bracket or quote.
 REPORT_PATH_RE='(?:^|[\s(\["'"'"'`])(/[^\s"'"'"'<>()\[\]`]+\.md)(?![A-Za-z0-9_])'
 BOARD_SCHEMA=fm-bearings-board.v1
+BOARD_LOCK_SECONDS=60
+BOARD_LOCK_HELD=
 
 usage() {
   awk '
@@ -125,6 +131,35 @@ usage() {
 fail() {
   printf 'fm-bearings-board: %s\n' "$*" >&2
   exit 1
+}
+
+# The lock primitive lives in bin/fm-wake-lib.sh, loaded only when a build needs
+# it, the same way bin/fm-afk-contract.sh reaches it.
+board_lock_hold() {  # <lockdir>
+  local rc=0
+  if ! command -v fm_lock_acquire_wait_bounded >/dev/null 2>&1; then
+    # shellcheck source=/dev/null
+    . "$SCRIPT_DIR/fm-wake-lib.sh" || { printf 'fm-bearings-board: cannot load the lock helpers\n' >&2; return 1; }
+  fi
+  fm_lock_acquire_wait_bounded "$1" "$BOARD_LOCK_SECONDS" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    if [ "$rc" -eq 124 ] && [ -n "${FM_LOCK_HELD_PID:-}" ]; then
+      printf 'fm-bearings-board: another board build (pid %s) still holds %s after %ss; nothing was published\n' \
+        "$FM_LOCK_HELD_PID" "$1" "$BOARD_LOCK_SECONDS" >&2
+    else
+      printf 'fm-bearings-board: cannot take the board build lock %s; nothing was published\n' "$1" >&2
+    fi
+    return 1
+  fi
+  BOARD_LOCK_HELD=$1
+  trap board_lock_release EXIT
+}
+
+board_lock_release() {
+  local lock=$BOARD_LOCK_HELD
+  [ -n "$lock" ] || return 0
+  BOARD_LOCK_HELD=
+  fm_lock_release "$lock" || true
 }
 
 board_path() { printf '%s/.lavish/bearings-board.html\n' "$FM_HOME"; }
@@ -446,6 +481,7 @@ command_build() {
   fi
   board=$(board_path)
   (umask 077; mkdir -p "${board%/*}") || { rm -f -- "$effective"; fail "cannot create ${board%/*}"; }
+  board_lock_hold "${board%/*}/.bearings-board.lock" || { rm -f -- "$effective"; exit 1; }
   previews=$(umask 077; mktemp -d "${board%/*}/.reports.XXXXXX") \
     || { rm -f -- "$effective"; fail "cannot stage the report previews"; }
   if ! stage_report_previews "$effective" "$previews"; then
@@ -506,6 +542,7 @@ command_build() {
     fail "cannot publish the board"
   fi
   [ -z "$aside" ] || rm -rf -- "$aside"
+  board_lock_release
   printf 'board: %s\n' "$board"
 
   command -v lavish-axi >/dev/null 2>&1 || fail "lavish-axi is not installed"
