@@ -14,9 +14,11 @@
 # escalation rule and --yes ban. The instructions also carry `# Task` with
 # `## Captain's intent` preserved from the scout brief and promotion's ship-time
 # instructions under `## Firstmate spec`; the scout-time spec remains context but
-# is not relabeled as the ship spec. The same instructions replace any scout
-# `## CLEAR` block with bin/fm-dod-lib.sh's ship block, whose Role is a careful
-# builder, and write that block into the brief a later relaunch reads.
+# is not relabeled as the ship spec. The same instructions carry the CLEAR
+# block bin/fm-dod-lib.sh chooses for the job. A client page, proposal, or
+# statement of work keeps its reader and voice. A code change uses a careful
+# builder when the scout block does not already. That block is also what a
+# later relaunch reads.
 # Promotion refuses leftover `{TASK}` /
 # `{FIRSTMATE_SPEC}` placeholders and a `## Captain's intent` line opening with
 # a Captain label or address (bin/fm-dod-lib.sh). A pre-subsection scout
@@ -225,6 +227,7 @@ if [ -z "$(printf '%s' "$INTENT_BODY" | tr -d '[:space:]')" ]; then
   echo "error: $SCOUT_BRIEF has no provenance-marked Captain's intent; add the captain's actual words before promotion" >&2
   exit 1
 fi
+PROMO_CLEAR=$(fm_brief_promotion_clear "$SCOUT_BRIEF" "$INTENT_BODY")
 
 # The promoted worker must receive the same delivery contract an ordinary ship
 # brief carries, so the mode-specific Definition of done is rendered from its
@@ -283,7 +286,7 @@ $PROMOTION_SHIP_SPEC
 
 ## CLEAR
 EOF
-  fm_brief_ship_clear_block
+  printf '%s\n' "$PROMO_CLEAR"
   printf '\n'
   promote_delivery_contract
 } > "$TMP" || { echo "error: could not render ship instructions for mode=$MODE" >&2; exit 1; }
@@ -296,7 +299,7 @@ TMP=
 # there so a later relaunch cannot revive the original scout delivery rules.
 BRIEF_REPLACEMENT="$DATA/$ID/.brief.md.promote.${BASHPID:-$$}"
 {
-  fm_brief_apply_ship_clear "$SCOUT_BRIEF"
+  printf '%s\n' "$PROMO_CLEAR" | fm_brief_apply_clear_block "$SCOUT_BRIEF"
   printf '\n\n'
   printf '# Current ship Firstmate spec\n%s\n\n' "$PROMOTION_SHIP_SPEC"
   promote_delivery_contract

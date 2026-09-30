@@ -186,10 +186,13 @@ fm_brief_task_placeholders_present() {  # <file>
 # unfilled. Return 1 when the heading is absent or all seven lines hold real
 # text. A field whose only text is `{CLEAR}`, `{TASK}`, or `{FIRSTMATE_SPEC}`
 # is unfilled. A line of real text may mention those tokens.
-# fm_brief_ship_clear_block is the ship block promotion installs in place of a
-# scout CLEAR block. Its Role is a careful builder because promotion turns the
-# investigation into a code change. fm_brief_apply_ship_clear rewrites a brief
-# so the first CLEAR block is that ship block, including a brief that had none.
+# fm_brief_promotion_clear chooses the CLEAR block promotion delivers.
+# A client page, proposal, or statement of work keeps a filled block whose Role
+# is a writer, including its reader and voice. Any other filled block keeps its
+# lines, and a code-change Role that is not already a builder becomes one.
+# A missing block is regenerated for that same choice. fm_brief_ship_clear_block
+# is only the code-change fallback. fm_brief_apply_clear_block rewrites a brief
+# so its first CLEAR block is the text on stdin.
 fm_brief_clear_missing() {  # <file>
   local file=$1 body compact missing
   [ -f "$file" ] || return 1
@@ -249,7 +252,7 @@ fm_brief_clear_missing() {  # <file>
   return 0
 }
 
-# The CLEAR block a promoted scout receives for the ship job.
+# The CLEAR block used when a code-change promotion has no filled CLEAR yet.
 fm_brief_ship_clear_block() {
   cat <<'EOF'
 Context: The investigation is now a code change, and the original ask stays the success test.
@@ -262,12 +265,121 @@ Evidence: The change follows the original ask, and the review can check the clai
 EOF
 }
 
-# Print the brief with its CLEAR block replaced by the ship promotion block.
+# The CLEAR block used when a writing promotion has no filled CLEAR yet.
+# It names the job and tells the worker to flag a missing reader or voice.
+fm_brief_writing_clear_block() {
+  cat <<'EOF'
+Context: This ship delivers the writing job named in the original ask.
+Layout: The client page, proposal, or statement of work that ask describes.
+Examples: Use the voice example in the original ask. Flag it if the ask has none.
+Audience: Write for the reader named in the original ask. Flag it if the ask names none.
+Role: Writer for this client page, proposal, or statement of work.
+Fallback: Flag a missing reader or voice instead of inventing one.
+Evidence: The result is for that reader and in that voice.
+EOF
+}
+
+# Return 0 when the text names a client page, proposal, or statement of work.
+fm_brief_text_is_writing_job() {  # <text>
+  local blob
+  blob=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+  case "$blob" in
+    *"client page"*|*"proposal"*|*"statement of work"*) return 0 ;;
+  esac
+  return 1
+}
+
+# Print the value of one CLEAR field, or nothing when it is absent.
+fm_brief_clear_field() {  # <body> <Context|Layout|Examples|Audience|Role|Fallback|Evidence>
+  printf '%s\n' "$1" | awk -v want="$2" '
+    function trim(s) {
+      sub(/^[[:space:]]+/, "", s)
+      sub(/[[:space:]]+$/, "", s)
+      return s
+    }
+    function canon(label, low) {
+      low = tolower(label)
+      if (low == "context") return "Context"
+      if (low == "layout") return "Layout"
+      if (low == "examples") return "Examples"
+      if (low == "audience") return "Audience"
+      if (low == "role") return "Role"
+      if (low == "fallback") return "Fallback"
+      if (low == "evidence") return "Evidence"
+      return ""
+    }
+    {
+      colon = index($0, ":")
+      if (colon == 0) next
+      if (canon(trim(substr($0, 1, colon - 1))) != want) next
+      value = trim(substr($0, colon + 1))
+      if (value != "" && value != "{CLEAR}" && value != "{TASK}" && value != "{FIRSTMATE_SPEC}") print value
+      exit
+    }
+  '
+}
+
+# Print the body with its Role line set to the given text.
+fm_brief_clear_with_role() {  # <body> <role text>
+  printf '%s\n' "$1" | awk -v role="$2" '
+    function trim(s) {
+      sub(/^[[:space:]]+/, "", s)
+      sub(/[[:space:]]+$/, "", s)
+      return s
+    }
+    {
+      if (!done && tolower(trim($0)) ~ /^role[[:space:]]*:/) {
+        print "Role: " role
+        done = 1
+        next
+      }
+      print
+    }
+    END {
+      if (!done) print "Role: " role
+    }
+  '
+}
+
+# Print the CLEAR block promotion should deliver for this scout brief.
+fm_brief_promotion_clear() {  # <file> <captain-intent>
+  local file=$1 intent=$2 body role kind blob
+  body=
+  if fm_brief_heading_present "$file" "## CLEAR" && ! fm_brief_clear_missing "$file" >/dev/null; then
+    body=$(fm_brief_heading_body "$file" "## CLEAR")
+  fi
+  blob=$(printf '%s\n%s\n' "$intent" "$body")
+  if fm_brief_text_is_writing_job "$blob"; then
+    if [ -n "$body" ]; then
+      role=$(fm_brief_clear_field "$body" Role)
+      kind=$(printf '%s' "$role" | tr '[:upper:]' '[:lower:]')
+      case "$kind" in
+        *writer*) printf '%s\n' "$body" ;;
+        *) fm_brief_clear_with_role "$body" "Writer for this client page, proposal, or statement of work." ;;
+      esac
+    else
+      fm_brief_writing_clear_block
+    fi
+    return 0
+  fi
+  if [ -n "$body" ]; then
+    role=$(fm_brief_clear_field "$body" Role)
+    kind=$(printf '%s' "$role" | tr '[:upper:]' '[:lower:]')
+    case "$kind" in
+      *builder*) printf '%s\n' "$body" ;;
+      *) fm_brief_clear_with_role "$body" "Careful builder of this code change." ;;
+    esac
+    return 0
+  fi
+  fm_brief_ship_clear_block
+}
+
+# Print the brief with its CLEAR block replaced by the block on stdin.
 # A brief with no CLEAR heading gains one after ## Firstmate spec, or at the
 # end when that subsection is absent. Fenced heading examples are left alone.
-fm_brief_apply_ship_clear() {  # <file>
+fm_brief_apply_clear_block() {  # <file>
   local file=$1
-  fm_brief_ship_clear_block | awk '
+  awk '
     function heading_level(line,    scan, spaces, level) {
       scan = line
       spaces = 0

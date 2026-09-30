@@ -20,7 +20,9 @@ Replace `{CLEAR}` with seven lines.
 Each line is one of Context, Layout, Examples, Audience, Role, Fallback, and Evidence, then a colon, then real text for this job.
 Do not leave the scaffold token as a field's only text.
 A field whose only text is `{CLEAR}`, `{TASK}`, or `{FIRSTMATE_SPEC}` is unfilled.
-Promotion replaces a scout CLEAR block with a ship block whose Role is a careful builder, and that block is part of the instructions the worker receives.
+Promotion keeps a filled CLEAR block when its Role already matches the job, and that block is part of the instructions the worker receives.
+A client page, a proposal, or a statement of work keeps its reader and its voice.
+A code change whose Role is not already a builder becomes a careful builder without dropping the other lines.
 Do not paste the blank Helix Craft sheet.
 The practice note to read, not copy, is `practice/clear-prompt.md` in the helix-craft repo.
 

@@ -1701,8 +1701,8 @@ EOF
   pass "fm-spawn: a present CLEAR block must be filled, and a brief with no CLEAR heading still launches"
 }
 
-# Promotion turns investigation into a code change, so the worker must receive
-# a ship CLEAR block even when the scout block named a different role.
+# Promotion keeps a writing job's reader and voice, and uses a careful builder
+# only when the job is a code change whose Role is not already one.
 test_promotion_delivers_a_ship_clear_block() {
   local rec home id content out brief
   rec=$(make_home clear-promote)
@@ -1723,14 +1723,37 @@ EOF
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode direct-PR --yolo off 2>&1)
   expect_code 0 "$?" "promotion of a scout with a writer CLEAR block should succeed: $out"
   brief="$home/data/$id/ship-instructions.md"
+  assert_grep 'Role: Proposal writer for the client page.' "$brief" \
+    "promotion replaced the client-page writer Role"
+  assert_grep 'Audience: The client who buys the work.' "$brief" \
+    "promotion dropped the client-page reader"
+  assert_grep 'Examples: Match the client voice.' "$brief" \
+    "promotion dropped the client-page voice"
+  assert_not_contains "$(cat "$brief")" "Careful builder of this code change." \
+    "promotion assigned a builder Role to a client page"
+  assert_grep 'Role: Proposal writer for the client page.' "$home/data/$id/brief.md" \
+    "promotion replaced the writer Role in the brief a relaunch would read"
+  assert_grep 'Examples: Match the client voice.' "$home/data/$id/brief.md" \
+    "promotion dropped the voice from the brief a relaunch would read"
+
+  id="clear-promote-code"
+  printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\n' "$id" > "$home/state/$id.meta"
+  FM_HOME="$home" "$BRIEF" "$id" proj --scout >/dev/null 2>&1 \
+    || fail "code-change scout brief should scaffold"
+  content=$(cat "$home/data/$id/brief.md")
+  content=${content//'{TASK}'/Fix the identity check in the parser.}
+  content=${content//'{FIRSTMATE_SPEC}'/Turn the reproduction into a regression test.}
+  content=${content//'{CLEAR}'/$'Context: The identity check rejects a valid session.\nLayout: A code change with a regression test.\nExamples: Match the existing parser tests.\nAudience: The maintainer who reviews the fix.\nRole: Investigator of the failure.\nFallback: Flag a missing reproduction instead of inventing one.\nEvidence: The fix keeps the successful session behavior.'}
+  printf '%s\n' "$content" > "$home/data/$id/brief.md"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode direct-PR --yolo off 2>&1)
+  expect_code 0 "$?" "promotion of a code-change scout should succeed: $out"
+  brief="$home/data/$id/ship-instructions.md"
   assert_grep 'Role: Careful builder of this code change.' "$brief" \
-    "promotion did not deliver a ship Role in the instructions the worker receives"
-  assert_not_contains "$(cat "$brief")" "Proposal writer for the client page." \
-    "promotion left the scout writer Role in the instructions sent to the worker"
-  assert_not_contains "$(cat "$home/data/$id/brief.md")" "Proposal writer for the client page." \
-    "promotion left the scout writer Role in the brief a relaunch would read"
-  assert_grep 'Role: Careful builder of this code change.' "$home/data/$id/brief.md" \
-    "promotion did not put the ship Role in the brief a relaunch would read"
+    "promotion left an investigator Role on a code change"
+  assert_grep 'Examples: Match the existing parser tests.' "$brief" \
+    "promotion dropped the code change example while fixing the Role"
+  assert_not_contains "$(cat "$brief")" "Investigator of the failure." \
+    "promotion kept the investigator Role in the instructions sent to the worker"
 
   id="clear-promote-legacy"
   printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\n' "$id" > "$home/state/$id.meta"
@@ -1748,7 +1771,7 @@ EOF
     "promotion of a legacy scout did not deliver a ship CLEAR block"
   assert_grep 'Role: Careful builder of this code change.' "$home/data/$id/brief.md" \
     "promotion of a legacy scout did not record the ship CLEAR block for relaunch"
-  pass "fm-promote: a promoted scout receives a ship CLEAR block instead of the investigation role"
+  pass "fm-promote: writing work keeps its reader and voice, and a code change gets a builder Role"
 }
 
 test_project_mode_resolves_branch_prefix() {
