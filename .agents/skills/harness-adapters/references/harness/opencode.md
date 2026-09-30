@@ -1,12 +1,13 @@
 # OpenCode
 
-Verified on 2026-06-11 across versions 1.15.7 through 1.17.6, with busy-queue behavior re-verified on 2026-07-20 using 1.18.4.
+Harness behavior was verified on 2026-06-11 across versions 1.15.7 through 1.17.6, with busy-queue behavior re-verified on 2026-07-20 using 1.18.4.
+The worker busy-state lifecycle below describes the generated OpenCode 2 plugin.
 
 ## Operating facts
 
 | Fact | Value |
 |---|---|
-| Busy state | The Firstmate-owned plugin's semantic `session.status`: `busy` and `retry` are active, `idle` is inactive, latched to the worker's own session. |
+| Busy state | The generated OpenCode 2 worker plugin uses `session.execution.started` as active and `session.execution.succeeded`, `.failed`, or `.interrupted` as inactive, latched to the worker's own session. |
 | Exit command | `/exit`. |
 | Interrupt | Double Escape; it is known to be flaky while a long shell command runs, so use `../../../bin/fm-control.sh <task-id> relaunch` for a wedged pane. |
 | Skill invocation | No separate verified form beyond normal slash-command behavior; use natural language when the exact command is uncertain. |

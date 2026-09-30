@@ -4615,14 +4615,21 @@ EOF
     cat >"$WT/.opencode/plugins/fm-busy-state.js" <<EOF
 // Firstmate semantic busy-state events + turn-end notification; written by
 // fm-spawn under the contract owned by bin/fm-busy-lib.sh.
-// Semantic state comes from OpenCode's session.status events: busy and retry
-// are active, idle is inactive. Scoping latches the first session that
-// reports activity (the worker's main session - a subagent child session can
-// only start while the main session is already busy) and ignores other
-// sessions' status until the latched session settles, so a child's idle can
-// never clear the worker's busy state. The session.idle touch stays the
+// OpenCode 2 publishes no session.status event, so semantic state is derived
+// from the execution lifecycle: session.execution.started is active, and the
+// three session.execution.* end events are inactive. Scoping latches the first
+// session that reports activity (the worker's main session - a subagent child
+// session can only start while the main session is already busy) and ignores
+// other sessions' events until the latched session settles, so a child's end
+// can never clear the worker's busy state. The end-event touch stays the
 // watcher's wake NOTIFICATION, never current-state truth.
 import { execFile } from "node:child_process";
+const EXECUTION_STARTED = "session.execution.started";
+const EXECUTION_ENDED = [
+  "session.execution.succeeded",
+  "session.execution.failed",
+  "session.execution.interrupted",
+];
 const busyEvent = (state, event) =>
   new Promise((resolve) => {
     execFile("$FM_ROOT/bin/fm-busy-event.sh", [
@@ -4630,35 +4637,37 @@ const busyEvent = (state, event) =>
       "--gen", "$BUSY_GEN", "--source", "opencode-plugin", "--event", event,
     ], () => resolve());
   });
-export const FmBusyState = async () => {
-  let activeSession = null;
-  return {
-    event: async ({ event }) => {
-      if (event.type === "session.status") {
-        const sessionID = event.properties.sessionID;
-        const statusType = event.properties.status && event.properties.status.type;
-        if (statusType === "busy" || statusType === "retry") {
-          if (activeSession === null) activeSession = sessionID;
-          if (sessionID === activeSession) await busyEvent("busy", "session-" + statusType);
-          return;
+export default {
+  id: "fm-busy-state",
+  setup(ctx) {
+    const wanted = new Set([EXECUTION_STARTED, ...EXECUTION_ENDED]);
+    const controller = new AbortController();
+    let activeSession = null;
+    void (async () => {
+      try {
+        for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
+          const type = event?.type;
+          if (!wanted.has(type)) continue;
+          const sessionID = event.data?.sessionID;
+          if (!sessionID) continue;
+          if (type === EXECUTION_STARTED) {
+            if (activeSession === null) activeSession = sessionID;
+            if (sessionID === activeSession) await busyEvent("busy", "execution-started");
+            continue;
+          }
+          if (sessionID === activeSession) {
+            activeSession = null;
+            await busyEvent("idle", "execution-ended");
+          }
+          await new Promise((resolve) => {
+            execFile("touch", ["$TURNEND"], () => resolve());
+          });
         }
-        if (statusType === "idle" && sessionID === activeSession) {
-          activeSession = null;
-          await busyEvent("idle", "session-status-idle");
-        }
-        return;
+      } catch {
       }
-      if (event.type === "session.idle") {
-        if (event.properties.sessionID === activeSession) {
-          activeSession = null;
-          await busyEvent("idle", "session-idle");
-        }
-        await new Promise((resolve) => {
-          execFile("touch", ["$TURNEND"], () => resolve());
-        });
-      }
-    },
-  };
+    })();
+    return () => controller.abort();
+  },
 };
 EOF
     exclude_path '.opencode/plugins/fm-busy-state.js'
