@@ -164,7 +164,7 @@ class Scan:
         try:
             resolved = path.resolve(strict=False)
             return resolved == self.root or self.root in resolved.parents
-        except (OSError, RuntimeError):
+        except (OSError, RuntimeError, ValueError):
             return False
 
     def is_git_work_tree(self) -> bool:
@@ -361,23 +361,35 @@ class Scan:
         quote = ""
         escaped = False
         kept = []
-        for char in text:
+        index = 0
+        while index < len(text):
+            char = text[index]
             if escaped:
                 escaped = False
                 kept.append(" " if quote else char)
+                index += 1
                 continue
             if quote:
                 if char == "\\":
                     escaped = True
                 elif char == quote:
                     quote = ""
+                elif style == "hash" and quote == '"' and text.startswith("$(", index):
+                    end = text.find(")", index + 2)
+                    if end != -1:
+                        kept.append(" " + text[index + 2:end] + " ")
+                        index = end + 1
+                        continue
                 kept.append(" ")
+                index += 1
                 continue
             if char in quote_chars:
                 quote = char
                 kept.append(" ")
+                index += 1
                 continue
             kept.append(char)
+            index += 1
         return "".join(kept)
 
     def comment_delimiters(self, style: str):
@@ -543,6 +555,9 @@ def collect_stale_docs(scan: Scan, findings: list[Finding]) -> None:
                     continue
                 clean = unquote(target.split("#", 1)[0])
                 if not clean:
+                    continue
+                if "\0" in clean:
+                    scan.notes.append(f"malformed Markdown target skipped: {rel}:{index}")
                     continue
                 path = Path(clean)
                 target_path = path if path.is_absolute() else (scan.root / rel).parent.joinpath(path)

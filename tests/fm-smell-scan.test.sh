@@ -7,12 +7,6 @@
 # scanned tree.
 set -u
 
-export TMPDIR=${TMPDIR:-/sloth/fm-smell-scan-test-tmp}
-mkdir -p "$TMPDIR" || {
-  printf 'not ok - failed to create TMPDIR %s\n' "$TMPDIR" >&2
-  exit 1
-}
-
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
@@ -350,6 +344,34 @@ print(",".join(f["evidence"] for f in d["findings"]))
 ')" "percent-encoded local links must compare against decoded tracked paths"
 }
 
+test_stale_docs_skip_malformed_decoded_targets() {
+  local fix json
+  fix=$(fm_test_tmproot fm-smell-doc-malformed-links) || fail "tmproot"
+  fm_git_init_commit "$fix"
+  mkdir -p "$fix/docs"
+  cat > "$fix/docs/links.md" <<'EOF'
+# Links
+
+[bad](file%00.md)
+[missing](missing.md)
+EOF
+  git -C "$fix" add -A
+  git -C "$fix" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm "malformed encoded link"
+
+  json=$(bash "$CHECK" --root "$fix" --json --category stale-doc)
+  assert_equals "missing.md" "$(printf '%s' "$json" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+print(",".join(f["evidence"] for f in d["findings"]))
+')" "a malformed decoded target must not abort or hide ordinary stale-doc findings"
+  assert_equals 1 "$(printf '%s' "$json" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+print(sum(1 for note in d["notes"] if note.startswith("malformed Markdown target skipped: docs/links.md:")))
+')" "malformed decoded targets must be reported as skipped"
+}
+
 test_stale_comment_detects_inline_comments_without_quoted_markers() {
   local fix json
   fix=$(fm_test_tmproot fm-smell-inline-comments) || fail "tmproot"
@@ -440,6 +462,31 @@ d = json.load(sys.stdin)
 print(",".join(f["evidence"] for f in d["findings"]))
 ')" "quoted strings must not count as dead-code references"
   assert_not_contains "$json" "called()" "real executable callers must still count"
+}
+
+test_dead_code_keeps_quoted_command_substitution_references() {
+  local fix json
+  fix=$(fm_test_tmproot fm-smell-dead-quoted-command-substitution) || fail "tmproot"
+  fm_git_init_commit "$fix"
+  mkdir -p "$fix/src"
+  cat > "$fix/src/functions.sh" <<'EOF'
+#!/usr/bin/env bash
+called() { :; }
+unused() { :; }
+echo "$(called)"
+echo "unused appears only in quoted prose."
+EOF
+  git -C "$fix" add -A
+  git -C "$fix" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm "quoted command substitution"
+
+  json=$(bash "$CHECK" --root "$fix" --json --category dead-code)
+  assert_equals "unused()" "$(printf '%s' "$json" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+print(",".join(f["evidence"] for f in d["findings"]))
+')" "quoted command substitutions must count as executable shell references"
+  assert_not_contains "$json" "called()" "a function called through quoted command substitution must stay live"
 }
 
 test_duplicate_comments_anchor_after_filtered_license_lines() {
@@ -559,9 +606,11 @@ test_stale_docs_skip_outside_root_targets
 test_tracked_symlink_to_untracked_target_stays_outside_evidence
 test_stale_docs_use_tracked_targets_only
 test_stale_docs_decode_local_url_paths
+test_stale_docs_skip_malformed_decoded_targets
 test_stale_comment_detects_inline_comments_without_quoted_markers
 test_dead_code_ignores_inline_comment_references
 test_dead_code_ignores_quoted_string_references
+test_dead_code_keeps_quoted_command_substitution_references
 test_duplicate_comments_anchor_after_filtered_license_lines
 test_output_is_deterministic_json
 test_scan_is_read_only_and_guards_out_path
