@@ -95,7 +95,7 @@ teardown_endpoint_directory_observation() {
 }
 
 teardown_endpoint_identity() {
-  local info process start other count=0
+  local other count=0
   ENDPOINT_IDENTITY_REASON=terminal-identity-changed
   [ "$(fm_meta_get "$META" spawn_gen)" = "$ENDPOINT_GENERATION" ] || return 1
   # Another durable claimant is ambiguity, even if its task label is stale.
@@ -113,6 +113,12 @@ teardown_endpoint_identity() {
   done
   [ "$(fm_task_lifecycle cleanup-binding "$ID")" = "$ENDPOINT_JOURNAL_HASH" ] || return 1
   [ "$(fm_backend_herdr_session_instance "$ENDPOINT_SESSION")" = "$ENDPOINT_INSTANCE" ] || return 1
+  teardown_endpoint_process_identity
+}
+
+# Compare the launch-owner structural terminal and kernel shell identity.
+teardown_endpoint_process_identity() {
+  local info process start
   info=$(fm_backend_herdr_cli "$ENDPOINT_SESSION" pane get "$ENDPOINT_PANE" 2>/dev/null) || return 1
   printf '%s' "$info" | jq -e --arg pane "$ENDPOINT_PANE" --arg ws "$ENDPOINT_WORKSPACE" \
     --arg tab "$ENDPOINT_TAB" --arg terminal "$ENDPOINT_TERMINAL" \

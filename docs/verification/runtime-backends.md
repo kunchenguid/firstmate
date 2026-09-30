@@ -1249,6 +1249,15 @@ No production task or remote research provider participates; the ShortTask model
 `tests/fm-teardown-endpoint-safety.test.sh` also exercises the public endpoint-only form: obsolete, missing and malformed journals do not block completed window cleanup, while a foreign task identity, stale explicit generation or shared endpoint refuses without closing the target.
 Its open-goal and legacy preservation checks remain separate.
 
+On 2026-09-30 the separately judged current-retention candidate passed the same public recovery fixture on Herdr 0.8.0 / protocol 20 in a named non-default lab.
+Refresh with `FM_SHORT_HERDR_E2E=1 bin/fm-test-run.sh tests/fm-short-operations-herdr.test.sh`; its portable public-interface cases run in `tests/fm-short-operations.test.sh`.
+It starts with the original generation `s1790772537.1906761.31007` and a metadata-digest refusal, then supplies independent current MAIN acceptance through `settle-cleanup --current-judgment`.
+The candidate retains the original unsuccessful request/result/intent/effect/output and all dirty/shared/unmerged copy content and directory/Git identity, while publishing a distinct current-retention receipt with `originalAttempt: uncertain`.
+It observes exact launch/session/terminal/kernel ownership before retiring a present endpoint, performs no close for an already absent endpoint, and resumes interrupted bookkeeping without another close or copy disposal.
+Wrong task/home/job/index/nonce/generation, changed intent/candidate/authority/evidence, a replaced copy, an identity-ambiguous journal, live executor/child and concurrent owner refuse.
+The portable fixture also refuses replay of a pending current close while the endpoint remains present; only independently verified absence permits bookkeeping convergence.
+The lab helper's teardown verifies unchanged default fleet state. No original operational home is mutated or used as a test fixture.
+
 The [endpoint cleanup contract](../task-lifecycle.md#remote-results-and-resource-cleanup) owns current endpoint routing and copy preservation.
 Earlier `fm-teardown-lifecycle-herdr-e2e.test.sh` results tested the former journal/process/focus admission rules and do not establish those rules for the current completed path.
 Herdr has no atomic compare-and-close transaction, so concurrent external mutations can be detected and retained but cannot be excluded by a Firstmate lock alone.

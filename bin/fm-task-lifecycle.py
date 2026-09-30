@@ -33,7 +33,8 @@ owner_receipts holds exact generation-bound observed facts, never permissions.
 completion-read validates retained-resource business closure: terminal judgment,
 assessed report and captain-call inventory for scouts, guarded merge facts for
 accepted ships. Explicit archive is stop authority, never invented delivery.
-cleanup-copy-bind captures the original metadata's canonical copy/project
+cleanup-copy-inspect reads the current metadata directory/Git identity without
+writing; current MAIN judgments bind that snapshot. cleanup-copy-bind captures the original metadata's canonical copy/project
 paths, directory and Git owner identities in the existing cleanup receipt before
 metadata removal. cleanup-copy-read verifies this immutable home/task/generation
 binding for the teardown owner's copy-only path; it never recreates metadata.
@@ -1765,9 +1766,14 @@ class Task:
                 if receipt.get('copy_binding'):
                     receipt = self.cleanup_read()
                     if receipt['phases'].get('directory_return', {}).get('state') != 'confirmed':
-                        if receipt['phases'].get('directory_return') != dict(state='retained', reason_code='copy-preserved-after-uncertain-return'):
+                        if receipt['phases'].get('directory_return') not in (dict(state='retained', reason_code='copy-preserved-after-uncertain-return'),
+                                dict(state='retained', reason_code='copy-preserved-current-recovery')):
                             return False
-                        self.cleanup_preservation_read(receipt)
+                        proof = self.cleanup_preservation_read(receipt)
+                        if proof.get('schema') == 'fm-cleanup-current-retention.v1' and (
+                                receipt['phases'].get('pane_close', {}).get('state') != 'confirmed' or
+                                receipt['phases'].get('record_close', {}).get('state') != 'confirmed'):
+                            return False
             except (Refusal, OSError, ValueError, TypeError, KeyError, AttributeError):
                 return False
         if any(proof['execution_generation'] == record['execution_generation'] and
@@ -1834,8 +1840,8 @@ class Task:
         require(isinstance(result.get('phases'), dict), 'invalid cleanup phases')
         return result
 
-    def cleanup_copy_bind(self):
-        """Capture exact copy identity in the existing cleanup receipt before retirement."""
+    def cleanup_copy_inspect(self):
+        """Read current metadata directory/Git identity without publishing a receipt."""
         record = self.read()
         require(record and record['disposition'] in ('accepted', 'archived'), 'copy binding needs terminal task')
         fields = unique_object([line.split('=', 1) for line in regular(self.state / (self.id + '.meta')).decode().splitlines() if '=' in line])
@@ -1855,6 +1861,12 @@ class Task:
             return result
         binding = {'home': str(self.home.resolve()), 'task': self.id, 'spawn_gen': record['execution_generation'],
                    'copy': identity(fields.get('worktree', '')), 'project': identity(fields.get('project', ''))}
+        return binding
+
+    def cleanup_copy_bind(self):
+        """Capture exact copy identity in the existing cleanup receipt before retirement."""
+        record = self.read()
+        binding = self.cleanup_copy_inspect()
         receipt_path = self.state / (self.id + '.cleanup.json')
         if receipt_path.exists() or receipt_path.is_symlink():
             receipt = self.cleanup_read()
@@ -1908,6 +1920,55 @@ class Task:
                         common_stat.st_ino == git_identity['inode'], 'copy Git owner changed')
         return dict(binding=binding, phase=phase, absent=False)
 
+    def cleanup_current_retention_read(self, receipt, proof, ref):
+        """A current MAIN judgment preserves historical uncertainty, never no-effect."""
+        require(proof.get('schema') == 'fm-cleanup-current-retention.v1' and
+                proof.get('home') == str(self.home.resolve()) and proof.get('task') == self.id and
+                proof.get('spawn_gen') == receipt['spawn_gen'] and proof.get('goal_revision') == receipt['goal_revision'] and
+                proof.get('id') == ref.parent.name and proof.get('originalAttempt') == 'uncertain',
+                'current cleanup retention identity conflict')
+        index = proof.get('index')
+        require(type(index) is int and index >= 0 and ref.name == f'operation-{index}.preservation.json',
+                'current cleanup retention index conflict')
+        names = {'request.json', 'result.json', f'operation-{index}.intent.json',
+                 f'operation-{index}.effect.json', f'operation-{index}.output.json'}
+        require(set(proof.get('hashes', {})) == names, 'incomplete current cleanup evidence')
+        for name in names:
+            require(digest(regular(ref.parent / name, True)) == proof['hashes'][name], 'cleanup original failure evidence changed')
+        judgment_ref = Path(proof.get('judgment_ref', ''))
+        require(judgment_ref.is_absolute() and judgment_ref.is_relative_to(self.home / 'data') and
+                judgment_ref.resolve(strict=True) == judgment_ref and
+                digest(regular(judgment_ref, True)) == proof.get('judgment_sha256'), 'current cleanup judgment changed')
+        q = load(judgment_ref)
+        request = load(ref.parent / 'request.json')
+        require(q.get('home') == proof['home'] and q.get('id') == request.get('id') == proof['id'] and
+                q.get('index') == index and q.get('nonce') == request.get('nonce') == proof.get('nonce') and
+                q.get('task') == self.id and q.get('spawn_gen') == receipt['spawn_gen'] and
+                q.get('goal_revision') == receipt['goal_revision'] and q.get('hashes') == proof['hashes'] and
+                request['input']['operations']['steps'][index] == dict(action='cleanup', task=self.id) and
+                request['operationBindings'][index].get('spawn_gen') == receipt['spawn_gen'], 'current cleanup grant conflict')
+        record = self.read()
+        require(q.get('brief_sha256') == record['brief_sha256'] == digest(regular(self.directory / 'brief.md')),
+                'current cleanup intent changed')
+        merges = [p['facts'] for p in record.get('owner_receipts', {}).get('merge', [])
+                  if p['execution_generation'] == receipt['spawn_gen']]
+        require(merges == [q.get('candidate')], 'current cleanup candidate changed')
+        judgment = q['judgment']
+        require(record['disposition'] == judgment['disposition'] == 'accepted' and
+                record['assessment']['outcome'] == judgment['outcome'] and record['assessment']['remaining_gap'] == '' and
+                record['assessment']['authority_ref'] == judgment['authority_ref'], 'current cleanup assessment changed')
+        for item in q['evidence']:
+            if (self.home / item['ref']).resolve() == self.state / (self.id + '.meta'):
+                require(digest(proof['metadata'].encode()) == item['sha256'], 'current cleanup saved metadata changed')
+                if (self.state / (self.id + '.meta')).exists():
+                    self.reference(item['ref'], item['sha256'])
+            else:
+                self.reference(item['ref'], item['sha256'])
+            require(item in record['assessment']['evidence'], 'current cleanup assessment evidence changed')
+        require(proof.get('copy_binding') == receipt.get('copy_binding'), 'current cleanup copy binding changed')
+        require(not self.cleanup_copy_read()['absent'], 'current cleanup surviving copy is missing')
+        return proof
+
     def cleanup_preservation_read(self, receipt):
         """Bind acknowledgement of an uncertain return to its unchanged failure."""
         ref = Path(receipt.get('preservation_ref', ''))
@@ -1917,6 +1978,8 @@ class Task:
         require(ref.resolve(strict=True) == ref, 'unsafe cleanup preservation path')
         proof = load(ref)
         require(digest(regular(ref, True)) == receipt.get('preservation_sha256'), 'cleanup preservation evidence changed')
+        if proof.get('schema') == 'fm-cleanup-current-retention.v1':
+            return self.cleanup_current_retention_read(receipt, proof, ref)
         index = proof.get('index')
         require(proof.get('schema') == 'fm-cleanup-preservation.v1' and proof.get('home') == str(self.home.resolve()) and
                 proof.get('task') == self.id and proof.get('spawn_gen') == receipt['spawn_gen'] and
@@ -1945,15 +2008,19 @@ class Task:
         receipt = self.cleanup_read()
         ref = Path(args.record)
         candidate = dict(receipt, preservation_ref=str(ref), preservation_sha256=digest(regular(ref, True)))
-        self.cleanup_preservation_read(candidate)
+        proof = self.cleanup_preservation_read(candidate)
         if receipt.get('preservation_ref'):
             require(receipt.get('preservation_ref') == str(ref) and
                     receipt.get('preservation_sha256') == candidate['preservation_sha256'], 'cleanup preservation binding changed')
         readback = self.cleanup_copy_read()
         require(not readback['absent'], 'cleanup preservation requires the surviving bound copy')
-        require(readback['phase'] in (dict(state='pending', reason_code='copy-disposal-attempt'),
-                dict(state='retained', reason_code='copy-preserved-after-uncertain-return')), 'cleanup preservation phase conflict')
-        candidate['phases'] = dict(candidate['phases'], directory_return=dict(state='retained', reason_code='copy-preserved-after-uncertain-return'))
+        if proof.get('schema') == 'fm-cleanup-current-retention.v1':
+            reason = 'copy-preserved-current-recovery'
+        else:
+            require(readback['phase'] in (dict(state='pending', reason_code='copy-disposal-attempt'),
+                    dict(state='retained', reason_code='copy-preserved-after-uncertain-return')), 'cleanup preservation phase conflict')
+            reason = 'copy-preserved-after-uncertain-return'
+        candidate['phases'] = dict(candidate['phases'], directory_return=dict(state='retained', reason_code=reason))
         if candidate != receipt:
             self.write_cleanup_receipt(self.state / (self.id + '.cleanup.json'), candidate)
         return self.link_cleanup()
@@ -2044,7 +2111,7 @@ class Task:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('operation', choices=('read', 'inspect', 'assess', 'update-brief', 'refresh', 'owner-receipt', 'init', 'reconcile', 'action', 'observe', 'coordinate', 'branch-patch', 'effect', 'bind-inbox', 'handoff-binding', 'handoff-effect', 'readback', 'mode', 'modes', 'due', 'authorize', 'link-cleanup', 'cleanup-read', 'completion-read', 'cleanup-copy-bind', 'cleanup-copy-read', 'cleanup-preserve', 'cleanup-binding', 'bind-execution', 'refresh-brief'))
+    parser.add_argument('operation', choices=('read', 'inspect', 'assess', 'update-brief', 'refresh', 'owner-receipt', 'init', 'reconcile', 'action', 'observe', 'coordinate', 'branch-patch', 'effect', 'bind-inbox', 'handoff-binding', 'handoff-effect', 'readback', 'mode', 'modes', 'due', 'authorize', 'link-cleanup', 'cleanup-read', 'completion-read', 'cleanup-copy-inspect', 'cleanup-copy-bind', 'cleanup-copy-read', 'cleanup-preserve', 'cleanup-binding', 'bind-execution', 'refresh-brief'))
     parser.add_argument('task')
     parser.add_argument('--expected-revision', type=int)
     parser.add_argument('--record')
@@ -2118,6 +2185,8 @@ def main():
             result = task.authorize(args)
         elif args.operation == 'link-cleanup':
             result = task.link_cleanup()
+        elif args.operation == 'cleanup-copy-inspect':
+            result = task.cleanup_copy_inspect()
         elif args.operation == 'cleanup-copy-bind':
             result = task.cleanup_copy_bind()
         elif args.operation == 'cleanup-copy-read':

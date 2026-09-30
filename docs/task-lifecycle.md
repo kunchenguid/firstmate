@@ -124,7 +124,7 @@ The endpoint-only form retains metadata and the copy and records exact-pane abse
 Completed retirement captures exact retained-copy identity in that same receipt before metadata removal.
 Its copy-only follow-through in `fm-teardown.sh` verifies this binding and current preservation checks without recreating task records or repeating endpoint/business effects.
 Pending disposal requires exact readback; absent copy can be confirmed without replay, while a changed directory/Git identity or missing historical binding refuses.
-The narrow ShortTask unmanaged-path recovery is documented by its [existing operation owner](short-agents.md#access-limits-and-uncertain-effects).
+The narrow ShortTask retained-copy recoveries, including separately authorized current retirement with original uncertainty preserved, are documented by its [existing operation owner](short-agents.md#access-limits-and-uncertain-effects).
 The retained phase records the verified current reason; an old generic unverified disposition does not establish its cause.
 Legacy records without an accepted or archived lifecycle retain the detailed ordinary teardown contract in `fm-teardown.sh`.
 Herdr's separate inspection and close operations cannot exclude concurrent external mutations atomically.
