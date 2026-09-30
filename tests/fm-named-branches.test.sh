@@ -332,7 +332,7 @@ test_promote_rejects_base_changes_and_branch_collisions() {
     "promotion of an unfetched remote base did not publish ship metadata"
   assert_grep 'refs/remotes/origin/release' "$home/data/$id/ship-instructions.md" \
     "promotion of an unfetched remote base omitted the qualified base ref"
-  git -C "$scout" rev-parse --verify --quiet refs/remotes/origin/release^{commit} >/dev/null \
+  git -C "$scout" rev-parse --verify --quiet 'refs/remotes/origin/release^{commit}' >/dev/null \
     || fail "promotion did not refresh the scout worktree remote-tracking base"
 
   git -C "$project" branch office main
