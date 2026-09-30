@@ -2306,6 +2306,53 @@ export function findInboundByDeliveryRef(home, deliveryRef) {
   });
 }
 
+export function nativeIngressContentDigest(content) {
+  const hash = createHash("sha256");
+  const field = (value) => {
+    const bytes = Buffer.from(value, "utf8");
+    hash.update(`${bytes.length}:`);
+    hash.update(bytes);
+  };
+  if (typeof content === "string") {
+    hash.update("s;");
+    field(content);
+    return `sha256:${hash.digest("hex")}`;
+  }
+  if (!Array.isArray(content) || content.length === 0) return undefined;
+  hash.update(`p${content.length};`);
+  for (const part of content) {
+    if (!part || typeof part !== "object") return undefined;
+    if (part.type === "text") {
+      if (typeof part.text !== "string") return undefined;
+      hash.update("t;");
+      field(part.text);
+    } else if (part.type === "image") {
+      if (typeof part.data !== "string" || typeof part.mimeType !== "string") return undefined;
+      hash.update("i;");
+      field(part.mimeType);
+      field(part.data);
+    } else {
+      return undefined;
+    }
+  }
+  return `sha256:${hash.digest("hex")}`;
+}
+
+
+// Historical session routing uses the same immutable delivery/content proof as
+// dispatch. This verifies authority only; it never offers or replays delivery.
+export function verifyFeishuSessionMessage(home, message) {
+  if (message?.type !== "custom_message" || message.customType !== "firstmate-feishu-inbound" ||
+      message.details?.schema !== "fm-feishu-pi-message.v1") return false;
+  const { deliveryRef, bindingGeneration } = message.details;
+  if (!/^in_[a-f0-9]{24}$/.test(deliveryRef ?? "") || !Number.isSafeInteger(bindingGeneration) || bindingGeneration < 1) return false;
+  const contentDigest = nativeIngressContentDigest(message.content);
+  if (!contentDigest) return false;
+  const evidence = findInboundDeliveryEvidence(home, deliveryRef);
+  return Boolean(evidence?.bodyAvailable && evidence.event.delivery_ref === deliveryRef &&
+    evidence.event.binding_generation === bindingGeneration && evidence.contentDigest === contentDigest);
+}
+
 export function recordInboundContentDigest(home, deliveryRef, contentDigest) {
   const paths = ensurePrivateLayout(home);
   requireString(deliveryRef, "inbound delivery ref", DELIVERY_REF);

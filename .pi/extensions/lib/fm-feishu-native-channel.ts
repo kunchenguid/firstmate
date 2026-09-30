@@ -22,6 +22,7 @@ import {
   completeAssistantOutboundIntent,
   findInboundByDeliveryRef,
   findInboundDeliveryEvidence,
+  nativeIngressContentDigest as ingressContentDigest,
   liveSessionOwnsBinding,
   loadFeishuIngressContent,
   offerFeishuIngress,
@@ -192,37 +193,6 @@ export function parseFeishuMessage(message: unknown): FeishuMarker | undefined {
   return feishuDetails(candidate.details);
 }
 
-function ingressContentDigest(content: unknown): string | undefined {
-  const hash = createHash("sha256");
-  const field = (value: string) => {
-    const bytes = Buffer.from(value, "utf8");
-    hash.update(`${bytes.length}:`);
-    hash.update(bytes);
-  };
-  if (typeof content === "string") {
-    hash.update("s;");
-    field(content);
-    return `sha256:${hash.digest("hex")}`;
-  }
-  if (!Array.isArray(content) || content.length === 0) return undefined;
-  hash.update(`p${content.length};`);
-  for (const part of content) {
-    if (!part || typeof part !== "object") return undefined;
-    if (part.type === "text") {
-      if (typeof part.text !== "string") return undefined;
-      hash.update("t;");
-      field(part.text);
-    } else if (part.type === "image") {
-      if (typeof part.data !== "string" || typeof part.mimeType !== "string") return undefined;
-      hash.update("i;");
-      field(part.mimeType);
-      field(part.data);
-    } else {
-      return undefined;
-    }
-  }
-  return `sha256:${hash.digest("hex")}`;
-}
 
 const verifiedClassifications = new Map<string, { marker: FeishuMarker; contentDigest: string }>();
 const processedDeliveryRefs = new Set<string>();

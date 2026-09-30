@@ -81,8 +81,15 @@ async function tool(params, ok = true) {
   return ok ? JSON.parse(result.content[0].text) : result.content[0].text;
 }
 await tool({ action: 'enroll', task: 'task' });
-const a = owner.capture('Add condition A.', 'a');
-const b = owner.capture('Add condition B.', 'b');
+const beforeChat = session.getBranch().length;
+for (const text of ['你好', '怎样配置工作目录？', '谢谢', '继续', '批准合并', '停止这个任务']) owner.capture(text);
+assert.equal(session.getBranch().length, beforeChat, 'chat capture created durable message goals');
+session.appendMessage({ role: 'user', content: [{ type: 'text', text: 'Add condition A.' }], timestamp: Date.now() });
+const a = session.getLeafId();
+session.appendMessage({ role: 'user', content: [{ type: 'text', text: 'Add condition B.' }], timestamp: Date.now() });
+const b = session.getLeafId();
+assert.match(await tool({ action: 'route', input: a, update_brief: true }, false), /explicit existing task/);
+assert.deepEqual((await tool({ action: 'list' })).pending_updates, []);
 writeFileSync(home + '/state/task.status', 'working: routine progress\n');
 writeFileSync(home + '/state/.wake-queue', '1\t1\tsignal\ttask.status\tsignal: routine progress\n2\t2\tcheck\tpermission\tcheck: MAIN-only permission decision\n');
 await tool({ action: 'route', task: 'task', input: a, update_brief: true });
@@ -95,15 +102,54 @@ await fire('session_shutdown', { reason: 'reload' });
 session = SessionManager.open(session.getSessionFile());
 owner = await install();
 await tool({ action: 'route', task: 'task', input: a, update_brief: true });
+// A prepared observation can become stale after handled task instructions.
+// Reconcile it explicitly with new authority; no effect is executed or replayed.
+const waitEvidence = 'data/task/wait.txt';
+writeFileSync(home + '/' + waitEvidence, 'Previous delivery wait; read exact current delivery before continuing.');
+let current = await tool({ action: 'inspect', task: 'task', evidence: [waitEvidence, 'data/task/brief.md'] });
+await tool({ action: 'assess', task: 'task', basis: current.basis, judgment: {
+  disposition: 'open', outcome: 'Waiting on previous delivery', remaining_gap: 'Corrected work still required; previously persisted input ' + a, 
+  authority_ref: 'data/task/brief.md', evidence: [waitEvidence, 'data/task/brief.md'],
+  next_action: { kind: 'wait', payload_ref: waitEvidence, recheck_at: '2000-01-01T00:00:00Z', deadline: '2099-01-01T00:00:00Z' }
+} });
+assert.match(await tool({ action: 'route', task: 'task', input: b, update_brief: true }, false), /outstanding action/);
+writeFileSync(home + '/data/task/correction.txt', 'The old wait is superseded by the acknowledged correction; continue the same task.');
+current = await tool({ action: 'inspect', task: 'task', evidence: [waitEvidence, 'data/task/correction.txt'] });
+await tool({ action: 'assess', task: 'task', basis: current.basis, judgment: {
+  disposition: 'open', outcome: 'Old prepared wait reconciled', remaining_gap: 'Corrected work still required; previously persisted input ' + a, 
+  authority_ref: 'data/task/correction.txt', evidence: [waitEvidence, 'data/task/correction.txt'],
+  next_action: null, supersede_prepared: true
+} });
+assert.equal((await tool({ action: 'inspect', task: 'task' })).next_action, null);
+// An unrelated large output transcript used to make all routing fail at 16 MiB.
+session.appendMessage({ role: 'user', content: [{ type: 'text', text: 'X'.repeat(9 * 1024 * 1024) }], timestamp: Date.now() });
+session.appendMessage({ role: 'user', content: [{ type: 'text', text: 'Y'.repeat(9 * 1024 * 1024) }], timestamp: Date.now() });
+// Crash after canonical commit but before native presentation acknowledges it.
+const append = session.appendCustomEntry.bind(session);
+let failPresentation = true;
+session.appendCustomEntry = (name, value) => {
+  if (name === 'fm-continuation-input' && value.pending === false && failPresentation) {
+    failPresentation = false; throw Error('fixture: interrupted after canonical commit');
+  }
+  return append(name, value);
+};
+assert.match(await tool({ action: 'route', task: 'task', input: b, update_brief: true }, false), /interrupted/);
+await fire('session_shutdown', { reason: 'reload' });
+session = SessionManager.open(session.getSessionFile());
+owner = await install();
+assert.deepEqual((await tool({ action: 'list' })).pending_updates, []);
+const stable = session.getBranch().length;
+await tool({ action: 'list' });
 await tool({ action: 'route', task: 'task', input: b, update_brief: true });
+assert.equal(session.getBranch().length, stable, 'confirmed retry accumulated presentation evidence');
 const brief = readFileSync(home + '/data/task/brief.md', 'utf8');
 assert.equal(brief.split('Add condition A.').length, 2);
 assert.equal(brief.split('Add condition B.').length, 2);
 assert.equal(owner.inputBarrier(), false);
 const evidence = 'data/task/brief.md';
 const inspected = await tool({ action: 'inspect', task: 'task', evidence: [evidence] });
-assert.match(inspected.assessment.remaining_gap, /a/);
-assert.match(inspected.assessment.remaining_gap, /b/);
+assert.ok(inspected.assessment.remaining_gap.includes(a));
+assert.ok(inspected.assessment.remaining_gap.includes(b));
 const judgment = { disposition: 'accepted', outcome: 'Verified both conditions', remaining_gap: '',
   authority_ref: evidence, evidence: [evidence] };
 const accepted = await tool({ action: 'assess', task: 'task', basis: inspected.basis, judgment });
