@@ -237,14 +237,17 @@ case "$ACTION" in
     ;;
   stop)
     [ -s "$PIDFILE" ] || { echo "nothing to stop: no $PIDFILE"; exit 0; }
+    [ -s "$PORTFILE" ] || { echo "refusing to signal recorded pid: no $PORTFILE" >&2; exit 1; }
     pid=$(cat "$PIDFILE")
-    port=$(cat "$PORTFILE" 2>/dev/null || true)
-    if [ -n "$port" ]; then
-      owner=$(port_owner "$port")
-      if [ "$owner" != "$pid" ] && [ "$owner" != free ]; then
-        echo "refusing to signal pid $pid: port $port is served by $owner" >&2
-        exit 1
-      fi
+    port=$(cat "$PORTFILE")
+    if ! kill -0 "$pid" 2>/dev/null; then
+      echo "refusing to signal pid $pid: recorded process is not running" >&2
+      exit 1
+    fi
+    owner=$(port_owner "$port")
+    if [ "$owner" != "$pid" ]; then
+      echo "refusing to signal pid $pid: port $port is served by $owner" >&2
+      exit 1
     fi
     kill "$pid" 2>/dev/null || true
     for _ in $(seq 1 50); do
@@ -263,7 +266,7 @@ HELPER_EOF
 chmod +x ledgerbox-exercise/generated/helpers/ledgerbox-instance.sh
 ```
 
-Fixture sha256 `88c401c243ceaba3e9fc20d91bf2cfd875a66b39a16ec07293d58a9bcd272c43`; helper sha256 `ac64ff2b5e3ad035d60dee04ebdc7bf86af808daa9d7b7c6752b46aaddeb8bdb`.
+Fixture sha256 `88c401c243ceaba3e9fc20d91bf2cfd875a66b39a16ec07293d58a9bcd272c43`; helper sha256 `c58e15232827602c6b85f4dbcc1573690a9f6050b456327687f2413fc4ad26cf`.
 The entry-point drives below ran with the earlier helper revision `00d3c2e4677c848b`, before the ownership defects recorded further down were found; every ownership claim made here is re-proven against this helper revision.
 
 ## Entry-point outcomes
@@ -297,9 +300,15 @@ After the fix `start` also persists `service.port`, and the same sequence report
 **Defect: an occupied port was accepted as readiness.** With an unrelated service already answering on 8791, `start <instance-dir> 8791` exited 0 printing `ready port=8791 pid=1601976`. The launched process died within about half a second with `OSError: [Errno 98] Address already in use`, the recorded PID owned nothing, and port 8791 was owned by the unrelated PID 1601794; a later `stop` merely signalled the dead recorded PID. The unrelated service was neither adopted nor killed, but the helper's ownership claim and the stop expectation were both wrong.
 After the fix the same command exits 2 with `port 8791 is already served by pid 1605151; refusing to start`, records nothing, and leaves the unrelated service answering.
 
-**Fixed behaviour, re-proven in the same lab.** `start` refuses an occupied port before launching anything; it reports ready only once the listening socket on that port belongs to the process it launched; `doctor` reads the persisted port and reports `health=degraded` when a live PID does not own it; `stop` signals the recorded PID only while that PID owns the port. Two instances then ran at once on 8781 and 8782 with separate state (`{"balance": 40}` and `{"balance": 0}`), both reported `health=ok`, and both were stopped by their recorded PIDs with both ports closed afterwards.
+**Defect: `stop` signalled when the recorded port was free.** With an instance started on 18982, the service was killed outside the helper, a separate `sleep` process was written into `service.pid` to simulate a stale record whose PID had been reused, and the recorded port was left free.
+Before the fix, `stop` would pass the free-port guard and signal the unrelated live PID.
+After the fix `stop` exits 1 with `refusing to signal pid 1775034: port 18982 is served by free`, and the unrelated process remains alive.
 
-The commands to repeat these cases, in order, are: create the fixture above; start an unrelated `ledgerbox serve 8791` yourself; run `ledgerbox-instance.sh start <dir> 8791` and observe the refusal; run `start <dir> 8782` then `doctor <dir>` and observe `health=ok ... port=8782`; run a second `start <other-dir> 8781` and confirm both report `health=ok`; then `stop` each instance and confirm both ports refuse connections.
+**Fixed behaviour, re-proven in the same lab.** `start` refuses an occupied port before launching anything; it reports ready only once the listening socket on that port belongs to the process it launched; `doctor` reads the persisted port and reports `health=degraded` when a live PID does not own it; `stop` signals the recorded PID only while that PID owns the port.
+Two instances then ran at once on 8781 and 8782 with separate state (`{"balance": 40}` and `{"balance": 0}`), both reported `health=ok`, and both were stopped by their recorded PIDs with both ports closed afterwards.
+A stale stop run against the current helper started on 18982, killed the service outside the helper, rewrote `service.pid` to the unrelated live PID 1775034, observed `refusing to signal pid 1775034: port 18982 is served by free`, and left that unrelated process alive.
+
+The commands to repeat these cases, in order, are: create the fixture above; start an unrelated `ledgerbox serve 8791` yourself; run `ledgerbox-instance.sh start <dir> 8791` and observe the refusal; run `start <dir> 8782` then `doctor <dir>` and observe `health=ok ... port=8782`; run a second `start <other-dir> 8781` and confirm both report `health=ok`; kill one recorded service outside the helper, write an unrelated live PID into its `service.pid`, and observe `stop` refuse because the recorded port is `free`; then `stop` each healthy instance and confirm both ports refuse connections.
 
 ## Limits
 
