@@ -1524,7 +1524,7 @@ test_opt_out_records_only_existing_holder_successors() {
 }
 
 test_terminal_holders_survive_opt_out_readmission() {
-  local home route model n=0 out gen file digest cert
+  local home route model pool_model n=0 out gen file digest cert
   new_holder
   for route in local remote; do
     for model in default - ''; do
@@ -1558,9 +1558,9 @@ test_terminal_holders_survive_opt_out_readmission() {
         cert=$(seats "$home" serve --digest "$digest" --epoch optout.1 --allowance one=1 --allowance two=1 < "$home/config/fleet-seats") || fail "restored remote certificate"
         assert_equals true "$(printf '%s\n' "$cert" | jq --arg g "$gen" 'any(.holders[]; .generation == $g and .model == null)')" "remote certificate hid its opt-out generation"
       else
-        for model in pool-model-a pool-model-b; do
-          out=$(reserve_gen "$home" contender other - "$model" 2>&1)
-          expect_code 4 "$?" "unresolved successor did not consume $model: $out"
+        for pool_model in pool-model-a pool-model-b; do
+          out=$(reserve_gen "$home" contender other - "$pool_model" 2>&1)
+          expect_code 4 "$?" "unresolved successor did not consume $pool_model: $out"
         done
       fi
       for file in "$home/state/fleet-seats/holders/"*.json; do

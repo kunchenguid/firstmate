@@ -3206,6 +3206,7 @@ test_unconfirmed_predecessor_prevents_control_launch() {
   dir=$(new_case unconfirmed-control sm61)
   sm_case "$dir" sm61
   printf 'bash' > "$dir/fake/command"
+  # shellcheck disable=SC2016 # Variables expand in the child shell.
   env PATH="$dir/fakebin:$PATH" FM_FAKE_DIR="$dir/fake" FM_HOME="$dir/home" SEATS="$ROOT/bin/fm-fleet-seats.sh" bash -c '
     "$SEATS" reserve sm61 --generation g-sm-old --kind secondmate --harness claude --model pool-model-a --holder-pid "$$" >/dev/null || exit 1
     route="$FM_HOME/state/submitted-route"
@@ -3282,6 +3283,7 @@ test_standalone_relaunch_completes_the_predecessor_handoff() {
     pool_case "$dir" rl64 || fail "standalone pool fixture"
     perl -pi -e "s/^spawn_gen=.*/spawn_gen=$old/" "$dir/home/state/rl64.meta"
     route="$dir/home/state/old-route"
+    # shellcheck disable=SC2016 # Variables expand in the child shell.
     env -u FM_STATE_OVERRIDE -u FM_CONFIG_OVERRIDE -u FM_DATA_OVERRIDE -u FM_ROOT_OVERRIDE \
       PATH="$dir/fakebin:$PATH" FM_FAKE_DIR="$dir/fake" FM_HOME="$dir/home" SEATS="$ROOT/bin/fm-fleet-seats.sh" bash -c '
       "$SEATS" reserve rl64 --generation "$1" --kind "$2" --harness claude --model pool-model-a --holder-pid "$$" >/dev/null || exit 1

@@ -800,6 +800,7 @@ for VERB in launch relaunch; do
 done
 
 for VERB in launch relaunch disposition; do
+  # shellcheck disable=SC2016 # Variables expand in the child shell.
   env ROOT="$ROOT" HOST_HOME="$HOST_HOME" VERB="$VERB" bash -c '
     . "$ROOT/bin/fm-secondmate-liveness-lib.sh"
     fm_supervisor_lifecycle_acquire "$HOST_HOME/state/parent-route" ios 0 || exit 1
