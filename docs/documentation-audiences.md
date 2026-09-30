@@ -1,7 +1,7 @@
 # Documentation audiences
 
 [`documentation-audiences.json`](documentation-audiences.json) is the machine-consumed classification owner for every maintained prose surface.
-`bin/fm-doc-audience-check.sh` validates exact inventory coverage, README setup routing, required owner pointers, and local link targets.
+`bin/fm-doc-audience-check.sh` validates exact inventory coverage, README setup routing, required owner pointers, local link targets, and always-loaded byte ceilings.
 Audience metadata is centralized there rather than copied into front matter on every page.
 
 The audience classes have one placement purpose each:
@@ -26,3 +26,11 @@ bin/fm-doc-audience-check.sh
 The check intentionally does not lint dates, versions, commands, paths, incident language, or transcript-like prose.
 Those forms are legitimate in maintainer verification and require semantic review rather than keyword heuristics.
 For every changed prose surface, review its audience, authoritative owner, current relevance, evidence destination, and unique safety facts, then repeat that review over the complete branch diff after all fixes.
+
+## Always-loaded byte ceilings
+
+The inventory's `alwaysLoadedByteBudgets` caps the byte size of an always-loaded agent contract, and the check fails naming the size, the ceiling, and the remediation.
+`AGENTS.md` is capped at 45,000 bytes, which the startup-memory estimate `ceil(UTF-8 bytes / 3)` ([`configuration.md`](configuration.md#startup-memory-budget-configstartup-memory-budget)) puts at 15,000 tokens: twice the default 7,500-token budget for the three startup memory files combined.
+Every primary, secondmate, and firstmate-repo worker session pays that contract in full, so it gets a fixed multiple of the memory budget rather than an unbounded allowance.
+The ceiling leaves little headroom on purpose: an addition beyond a few lines is paid for by moving conditional detail out under the knowledge-placement tree in [`firstmate-coding-guidelines`](../.agents/skills/firstmate-coding-guidelines/SKILL.md), not by raising the number.
+Raise a ceiling only with a stated reason in the same change.

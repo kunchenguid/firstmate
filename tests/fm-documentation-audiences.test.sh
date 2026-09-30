@@ -45,6 +45,19 @@ elif mode.name == "missing-owner-pointer":
     }
 elif mode.name == "shrink-scope":
     data["scope"]["trackedPatterns"] = ["README.md"]
+elif mode.name == "tight-agents-budget":
+    for budget in data["alwaysLoadedByteBudgets"]:
+        if budget["path"] == "AGENTS.md":
+            budget["maxBytes"] = 1
+            break
+    else:
+        raise SystemExit("inventory has no AGENTS.md byte budget")
+elif mode.name == "drop-budgets":
+    del data["alwaysLoadedByteBudgets"]
+elif mode.name == "bad-budget-value":
+    data["alwaysLoadedByteBudgets"][0]["maxBytes"] = "45000"
+elif mode.name == "unclassified-budget":
+    data["alwaysLoadedByteBudgets"].append({"path": "missing.md", "maxBytes": 10})
 else:
     raise SystemExit(f"unknown mode: {mode.name}")
 destination.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
@@ -58,6 +71,8 @@ test_repository_inventory_passes() {
     "audience check did not report exact surface coverage"
   assert_contains "$out" "local_links=" \
     "audience check did not report local-link validation"
+  assert_contains "$out" "byte_budgets=" \
+    "audience check did not report always-loaded byte budgets"
   pass "documentation inventory classifies every maintained prose surface exactly once"
 }
 
@@ -85,6 +100,28 @@ test_required_pointer_fails() {
   pass "required documentation owner pointers cannot silently disappear"
 }
 
+test_always_loaded_byte_budget_fails_with_remediation() {
+  local tight="$TMP_ROOT/tight-agents-budget.json"
+  local dropped="$TMP_ROOT/drop-budgets.json"
+  local bad_value="$TMP_ROOT/bad-budget-value.json"
+  local unclassified="$TMP_ROOT/unclassified-budget.json"
+  mutate_inventory "$INVENTORY" "$tight" tight-agents-budget
+  mutate_inventory "$INVENTORY" "$dropped" drop-budgets
+  mutate_inventory "$INVENTORY" "$bad_value" bad-budget-value
+  mutate_inventory "$INVENTORY" "$unclassified" unclassified-budget
+  run_expect_failure "over its always-loaded ceiling of 1 bytes" \
+    "$CHECK" --inventory "$tight"
+  run_expect_failure "apply the knowledge-placement tree in firstmate-coding-guidelines; move conditional detail to a skill" \
+    "$CHECK" --inventory "$tight"
+  run_expect_failure "alwaysLoadedByteBudgets must be a non-empty array" \
+    "$CHECK" --inventory "$dropped"
+  run_expect_failure "maxBytes must be a positive integer" \
+    "$CHECK" --inventory "$bad_value"
+  run_expect_failure "always-loaded byte budget names an unclassified surface: missing.md" \
+    "$CHECK" --inventory "$unclassified"
+  pass "an always-loaded contract over its byte ceiling fails with the placement remediation, and the ceiling cannot silently disappear"
+}
+
 write_fixture_inventory() {
   local repo=$1
   cat > "$repo/docs/documentation-audiences.json" <<'JSON'
@@ -94,6 +131,9 @@ write_fixture_inventory() {
   "allowedAudiences": ["public-product", "operator-current", "maintainer-verification"],
   "setupAudiences": ["public-product", "operator-current"],
   "readmeSetupTargets": ["docs/setup.md"],
+  "alwaysLoadedByteBudgets": [
+    {"path": "README.md", "maxBytes": 4096}
+  ],
   "requiredOwnerPointers": [
     {"source": "README.md", "target": "docs/policy.md"}
   ],
@@ -138,4 +178,5 @@ MD
 test_repository_inventory_passes
 test_duplicate_and_setup_classification_fail
 test_required_pointer_fails
+test_always_loaded_byte_budget_fails_with_remediation
 test_local_links_and_no_keyword_heuristic

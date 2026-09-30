@@ -33,6 +33,12 @@
     "docs/cmux-backend.md",
     "docs/remote-secondmates.md"
   ],
+  "alwaysLoadedByteBudgets": [
+    {
+      "path": "AGENTS.md",
+      "maxBytes": 45000
+    }
+  ],
   "requiredOwnerPointers": [
     {
       "source": ".agents/skills/firstmate-coding-guidelines/SKILL.md",
@@ -126,6 +132,10 @@
     },
     {
       "path": ".agents/skills/bootstrap-diagnostics/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/captain-facing-translation/SKILL.md",
       "audience": "agent-runtime"
     },
     {

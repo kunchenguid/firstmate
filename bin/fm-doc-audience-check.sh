@@ -5,8 +5,10 @@
 #   bin/fm-doc-audience-check.sh
 #   bin/fm-doc-audience-check.sh --root <repo> [--inventory <path>]
 #
-# The inventory owns classification and setup routing.
-# This check validates structure only and does not keyword-lint prose.
+# The inventory owns classification, setup routing, and the byte ceilings on
+# always-loaded agent contracts (docs/documentation-audiences.md owns why each
+# ceiling has its value). This check validates structure and size only and does
+# not keyword-lint prose.
 set -eu
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -27,6 +29,10 @@ from urllib.parse import unquote, urlsplit
 MARKDOWN_LINK_RE = re.compile(r"!?\[[^\]]*\]\(([^)]+)\)")
 HTML_LINK_RE = re.compile(r"\b(?:href|src)=[\"']([^\"']+)[\"']", re.IGNORECASE)
 REQUIRED_TRACKED_PATTERNS = ["*.md", "*.mdx", "*.rst", "*.txt", "docs/examples/*"]
+BUDGET_REMEDIATION = (
+    "apply the knowledge-placement tree in firstmate-coding-guidelines; "
+    "move conditional detail to a skill"
+)
 
 
 class CheckError(Exception):
@@ -137,7 +143,45 @@ def markdown_anchors(path: Path) -> set[str]:
     return anchors
 
 
-def validate(root: Path, inventory_path: Path) -> tuple[int, int]:
+def estimated_tokens(size: int) -> int:
+    # The same conservative ceil(UTF-8 bytes / 3) estimate the startup-memory
+    # budget uses (docs/configuration.md "Startup memory budget").
+    return -(-size // 3)
+
+
+def validate_byte_budgets(root: Path, data: dict, classifications: dict[str, str]) -> int:
+    budgets = data.get("alwaysLoadedByteBudgets")
+    if not isinstance(budgets, list) or not budgets:
+        fail("alwaysLoadedByteBudgets must be a non-empty array")
+    seen: set[str] = set()
+    for index, budget in enumerate(budgets):
+        if not isinstance(budget, dict):
+            fail(f"alwaysLoadedByteBudgets[{index}] must be an object")
+        path = budget.get("path")
+        max_bytes = budget.get("maxBytes")
+        if not isinstance(path, str) or not path:
+            fail(f"alwaysLoadedByteBudgets[{index}].path must be a non-empty string")
+        if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes <= 0:
+            fail(f"alwaysLoadedByteBudgets[{index}].maxBytes must be a positive integer")
+        if path in seen:
+            fail(f"always-loaded byte budget declared more than once: {path}")
+        seen.add(path)
+        if path not in classifications:
+            fail(f"always-loaded byte budget names an unclassified surface: {path}")
+        try:
+            size = (root / path).stat().st_size
+        except OSError as exc:
+            fail(f"always-loaded surface is unreadable {path}: {exc}")
+        if size > max_bytes:
+            fail(
+                f"{path} is {size} bytes (~{estimated_tokens(size)} estimated tokens), "
+                f"over its always-loaded ceiling of {max_bytes} bytes "
+                f"(~{estimated_tokens(max_bytes)} estimated tokens); {BUDGET_REMEDIATION}"
+            )
+    return len(budgets)
+
+
+def validate(root: Path, inventory_path: Path) -> tuple[int, int, int]:
     data = load_inventory(inventory_path)
     scope = data.get("scope")
     if not isinstance(scope, dict):
@@ -227,6 +271,8 @@ def validate(root: Path, inventory_path: Path) -> tuple[int, int]:
         if target not in source_text and target not in linked_targets:
             fail(f"required owner pointer missing: {source} -> {target}")
 
+    budgets = validate_byte_budgets(root, data, classifications)
+
     checked_links = 0
     anchor_cache: dict[Path, set[str]] = {}
     for path in sorted(tracked):
@@ -243,11 +289,13 @@ def validate(root: Path, inventory_path: Path) -> tuple[int, int]:
                 if fragment not in anchors:
                     fail(f"unresolved local anchor in {path}: {raw}")
 
-    return len(tracked), checked_links
+    return len(tracked), checked_links, budgets
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Validate Firstmate documentation audiences and local links.")
+    parser = argparse.ArgumentParser(
+        description="Validate Firstmate documentation audiences, local links, and always-loaded byte ceilings."
+    )
     parser.add_argument("--root", type=Path, default=Path.cwd())
     parser.add_argument("--inventory", type=Path)
     args = parser.parse_args()
@@ -256,11 +304,11 @@ def main() -> int:
     if not inventory_path.is_absolute():
         inventory_path = root / inventory_path
     try:
-        surfaces, links = validate(root, inventory_path)
+        surfaces, links, budgets = validate(root, inventory_path)
     except CheckError as exc:
         print(f"fm-doc-audience-check: {exc}", file=sys.stderr)
         return 1
-    print(f"fm-doc-audience-check: ok surfaces={surfaces} local_links={links}")
+    print(f"fm-doc-audience-check: ok surfaces={surfaces} local_links={links} byte_budgets={budgets}")
     return 0
 
 
