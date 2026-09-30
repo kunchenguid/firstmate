@@ -267,6 +267,38 @@ print(sum(1 for note in d["notes"] if note.startswith("outside-root Markdown tar
   assert_not_contains "$json" "$outside/private.md" "outside absolute paths must not be finding evidence"
 }
 
+test_stale_docs_use_tracked_targets_only() {
+  local fix json
+  fix=$(fm_test_tmproot fm-smell-doc-tracked-targets) || fail "tmproot"
+  fm_git_init_commit "$fix"
+  mkdir -p "$fix/docs" "$fix/targets"
+  printf 'docs/ignored.md\n' > "$fix/.gitignore"
+  printf 'tracked\n' > "$fix/targets/tracked.md"
+  cat > "$fix/docs/links.md" <<'EOF'
+# Links
+
+[untracked](draft.md)
+[ignored](ignored.md)
+[tracked file outside scope](../targets/tracked.md)
+[tracked dir outside scope](../targets)
+[missing](missing.md)
+EOF
+  git -C "$fix" add -A
+  git -C "$fix" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm "tracked link targets"
+  printf 'untracked\n' > "$fix/docs/draft.md"
+  printf 'ignored\n' > "$fix/docs/ignored.md"
+
+  json=$(bash "$CHECK" --root "$fix" --json --category stale-doc --paths docs)
+  assert_equals "draft.md,ignored.md,missing.md" "$(printf '%s' "$json" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+print(",".join(f["evidence"] for f in d["findings"]))
+')" "stale-doc must ignore untracked and ignored local targets"
+  assert_not_contains "$json" "../targets/tracked.md" "tracked files outside the selected scan scope must stay valid"
+  assert_not_contains "$json" "../targets" "tracked directories outside the selected scan scope must stay valid"
+}
+
 test_stale_comment_detects_inline_comments_without_quoted_markers() {
   local fix json
   fix=$(fm_test_tmproot fm-smell-inline-comments) || fail "tmproot"
@@ -416,6 +448,7 @@ test_stale_days_threshold_gates_markers
 test_scope_and_excludes_bound_the_scan
 test_paths_and_symlinks_stay_inside_root
 test_stale_docs_skip_outside_root_targets
+test_stale_docs_use_tracked_targets_only
 test_stale_comment_detects_inline_comments_without_quoted_markers
 test_dead_code_ignores_inline_comment_references
 test_output_is_deterministic_json

@@ -153,6 +153,7 @@ class Scan:
         self.max_bytes = max_bytes
         self.text_cache: dict[str, list[str] | None] = {}
         self.notes: list[str] = []
+        self.tracked_files: set[str] | None = None
 
     # --- scope -------------------------------------------------------------
 
@@ -177,6 +178,31 @@ class Scan:
             if not self.path_inside_root(target):
                 raise UsageError(f"--paths entry resolves outside --root: {rel}")
 
+    def git_ls_files(self, paths) -> list[str]:
+        args = ["git", "-C", str(self.root), "ls-files", "-z", "--"]
+        args.extend(paths)
+        proc = subprocess.run(args, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if proc.returncode != 0:
+            raise UsageError("git ls-files failed: " + proc.stderr.decode("utf-8", "replace").strip())
+        return [p for p in proc.stdout.decode("utf-8", "replace").split("\0") if p]
+
+    def tracked_file_set(self) -> set[str]:
+        if self.tracked_files is None:
+            self.tracked_files = {
+                rel for rel in self.git_ls_files([])
+                if self.path_inside_root(self.root / rel)
+            }
+        return self.tracked_files
+
+    def tracked_dir_set(self) -> set[str]:
+        dirs = set()
+        for rel in self.tracked_file_set():
+            path = Path(rel).parent
+            while str(path) != ".":
+                dirs.add(str(path).replace(os.sep, "/"))
+                path = path.parent
+        return dirs
+
     def excluded(self, rel: str) -> bool:
         parts = rel.split("/")
         for name in parts[:-1]:
@@ -191,12 +217,7 @@ class Scan:
         if not self.is_git_work_tree():
             raise UsageError("--root must be a git work tree")
         self.validate_paths()
-        args = ["git", "-C", str(self.root), "ls-files", "-z", "--"]
-        args.extend(self.paths)
-        proc = subprocess.run(args, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        if proc.returncode != 0:
-            raise UsageError("git ls-files failed: " + proc.stderr.decode("utf-8", "replace").strip())
-        found = [p for p in proc.stdout.decode("utf-8", "replace").split("\0") if p]
+        found = self.git_ls_files(self.paths)
         files = []
         for rel in found:
             path = self.root / rel
@@ -230,6 +251,9 @@ class Scan:
             result = raw.decode("utf-8", "replace").splitlines()
         self.text_cache[rel] = result
         return result
+
+    def root_rel(self, path: Path) -> str:
+        return str(path.resolve(strict=False).relative_to(self.root)).replace(os.sep, "/")
 
     def comment_style(self, rel: str) -> str | None:
         name = os.path.basename(rel)
@@ -471,7 +495,8 @@ def collect_stale_docs(scan: Scan, findings: list[Finding]) -> None:
                 if not scan.path_inside_root(target_path):
                     scan.notes.append(f"outside-root Markdown target skipped: {rel}:{index}")
                     continue
-                if target_path.exists():
+                target_rel = scan.root_rel(target_path)
+                if target_rel in scan.tracked_file_set() or target_rel in scan.tracked_dir_set():
                     continue
                 findings.append(Finding(
                     "stale-doc", "medium", "confirmed", rel, index, clean,
