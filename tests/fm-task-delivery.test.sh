@@ -1238,8 +1238,11 @@ test_forge_gerrit_changes_what_no_mistakes_means() {
   assert_grep 'done [at=<epoch>]: PR {change url} published for review; pipeline summary posted on patch set {patch_set}' "$brief" \
     "the gerrit ready report does not name the summary message"
   # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
-  assert_grep 'Its first line is exactly `no-mistakes pipeline summary`' "$brief" \
+  assert_grep 'Its first line is exactly `no-mistakes pipeline summary for run <run id>`' "$brief" \
     "the gerrit worker was not given the summary line its ready report is checked for"
+  # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
+  assert_grep 'each step'"'"'s entry is a line starting with that step'"'"'s name and a colon (`review: ...`)' "$brief" \
+    "the gerrit worker was not given the entry shape its ready report is checked for"
   assert_grep 'so a skipped or failed post cannot pass' "$brief" \
     "the gerrit worker was not told its ready report is checked against the posted summary"
   # shellcheck disable=SC2016 # Backticks are literal generated Markdown.

@@ -114,9 +114,10 @@
 # shellcheck source=bin/fm-brief-heading-lib.sh
 . "$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd "${d:-/}" && pwd)/fm-brief-heading-lib.sh"
 
-# The first line a no-mistakes Gerrit worker gives its pipeline summary message:
-# the contract names it and fm_dod_gerrit_summary_posted looks for it on the
-# published patch set, so the two cannot drift.
+# The first line a no-mistakes Gerrit worker gives its pipeline summary message,
+# followed by " for run <run id>": the contract names it and
+# fm_dod_gerrit_summary_posted looks for it on the published patch set, so the
+# two cannot drift.
 FM_DOD_GERRIT_SUMMARY_MARKER='no-mistakes pipeline summary'
 
 fm_brief_worker_role() {  # <state-dir> <task-id>
@@ -419,7 +420,8 @@ Your ready report is refused while the run still holds your branch, while its ou
 When the run's outcome is passed, passed-with-skips, or passed-with-override and step 3 holds, publish.
 The squashed change carries only the oldest commit's message, so the pipeline's own fix commits never reach the reviewer's description; a change-level message on the change is how they reach the reviewer, and your report is how they reach the captain.
 Compose the summary that message carries without writing it to any file: the same content a GitHub pull request's pipeline section carries, one entry per pipeline step that reported findings, naming each finding and the fix the run made or that it was left unfixed, taken from the run's \`fixes\` table and the gate findings its drive calls returned (\`no-mistakes axi logs --step <step> --full\` has the detail); when the run reported no findings, the summary says \`no findings\`.
-Its first line is exactly \`$FM_DOD_GERRIT_SUMMARY_MARKER\`: that line is how your ready report proves the post.
+Its first line is exactly \`$FM_DOD_GERRIT_SUMMARY_MARKER for run <run id>\`, with the run's \`id\` from \`no-mistakes axi status\`, and each step's entry is a line starting with that step's name and a colon (\`review: ...\`); the \`no findings\` summary is that line alone.
+Your ready report is refused unless the message carries that first line and an entry for every step the run's \`steps\` table reports findings on.
 After posting that message and immediately before your ready report, append one line \`note [at=<epoch>]: pipeline changes: {finding} - {fix it made}; {finding} - {fix it made}\` to the status file, one short clause per finding the run fixed, taken from the run's \`fixes\` table and the gate findings its drive calls returned (\`no-mistakes axi logs --step <step> --full\` has the detail); write \`note [at=<epoch>]: pipeline changes: none\` when it fixed nothing.
 EOF
       fm_gerrit_publish_block "$mode"
@@ -576,25 +578,25 @@ fm_dod_recorded_pr_on_forge() {  # <state> <id> <meta> <mode> <url>
 }
 
 # <url>'s current patch set, read live and bounded, because the server is the
-# only place a refs/for/ push leaves it: "<revision>", or with <marker> - the
+# only place a refs/for/ push leaves it: "<revision>", or with <first> - the
 # no-mistakes gate - "<revision> <patch_set> <posted>" from the one read that
 # also lists its cover messages, so the tree and the summary are checked
 # against the same patch set.
-fm_dod_gerrit_read_current() {  # <url> [<marker>]
-  local url=$1 marker=${2:-} lib
+fm_dod_gerrit_read_current() {  # <url> [<first> <steps>]
+  local url=$1 first=${2:-} steps=${3:-} lib
   fm_pr_url_parse "$url" && [ "$FM_PR_PROVIDER" = gerrit ] || return 1
   lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-pr-lib.sh"
   # shellcheck disable=SC2016  # The inner script expands after bash -c receives positional args.
   fm_run_timed 10 bash -c '
     . "$1"
     if [ -n "$4" ]; then
-      fm_pr_gerrit_read_summary "$2" "$3" "$4" || exit 1
+      fm_pr_gerrit_read_summary "$2" "$3" "$4" "$5" || exit 1
       printf "%s %s %s\n" "$FM_PR_RECORD_REVISION" "$FM_PR_RECORD_PATCH_SET" "$FM_PR_RECORD_SUMMARY_POSTED"
     else
       fm_pr_gerrit_read_revision "$2" "$3" || exit 1
       printf "%s\n" "$FM_PR_RECORD_REVISION"
     fi
-  ' _ "$lib" "$FM_PR_HOST" "$FM_PR_NUMBER" "$marker" 2>/dev/null
+  ' _ "$lib" "$FM_PR_HOST" "$FM_PR_NUMBER" "$first" "$steps" 2>/dev/null
 }
 
 # 0 when <revision>, a Gerrit change's current patch set, carries the tree of
@@ -611,15 +613,21 @@ fm_dod_gerrit_revision_carries_head() {  # <worktree> <revision>
 
 # 0 when the no-mistakes pipeline summary was posted on the published patch
 # set: <posted> is the live reading of whether a cover message on the change's
-# current patch set <patch_set> contains FM_DOD_GERRIT_SUMMARY_MARKER, the first
-# line the contract gives the summary, and the done <note> names that current
-# patch set. The worker's own record of the post is not evidence, because a
+# current patch set <patch_set> carries this run's summary - the first line
+# <first> the contract gives it and an entry for each of the newline-separated
+# <steps> that reported findings - and the done <note> names that current patch
+# set. The worker's own record of the post is not evidence, because a
 # skipped or failed post leaves a worker free to claim one; the server's message
 # list is. 1 when refused; stdout then holds a one-line reason.
-fm_dod_gerrit_summary_posted() {  # <url> <patch_set> <posted> <note>
-  local url=$1 ps=$2 posted=$3 note=$4 named
+fm_dod_gerrit_summary_posted() {  # <url> <patch_set> <posted> <note> <first> <steps>
+  local url=$1 ps=$2 posted=$3 note=$4 first=$5 steps=$6 entries named
   if [ "$posted" != true ]; then
-    printf '%s\n' "no pipeline summary message is on patch set $ps of $url: no change message on the current patch set contains '$FM_DOD_GERRIT_SUMMARY_MARKER'"
+    if [ -n "$steps" ]; then
+      entries="an entry line for each step that reported findings: $(printf '%s' "$steps" | tr '\n' ' ' | sed 's/ *$//; s/ /, /g')"
+    else
+      entries="the line 'no findings'"
+    fi
+    printf '%s\n' "no pipeline summary message is on patch set $ps of $url: no change message on the current patch set carries the first line '$first' and $entries"
     return 1
   fi
   named=$(printf '%s\n' "$note" | sed -n 's/.*pipeline summary posted on patch set \([0-9][0-9]*\).*/\1/p' | head -n 1)
@@ -696,7 +704,35 @@ fm_dod_nm_custody_returned() {  # <worktree>
     printf '%s\n' "this copy's HEAD does not carry the no-mistakes run's result ${pipeline_head:-(unknown head)}, so the pipeline's fixes are not in the published work"
     return 1
   fi
+  FM_DOD_NM_RUN_ID=$(fm_nm_strip_quotes "$(fm_nm_field "$out" id)")
+  if [ -z "$FM_DOD_NM_RUN_ID" ]; then
+    printf '%s\n' "the no-mistakes run for this copy names no run id, so its pipeline summary cannot be identified"
+    return 1
+  fi
+  FM_DOD_NM_FINDING_STEPS=$(fm_dod_nm_finding_steps "$out")
   return 0
+}
+
+# The steps of captured \`axi status\` output <out> whose row in its
+# \`steps[N]{step,...,findings,...}:\` table reports findings, one per line,
+# read by column name so the column order is not assumed.
+fm_dod_nm_finding_steps() {  # <out>
+  printf '%s\n' "$1" | awk '
+    /^[[:space:]]*steps\[[0-9]+\]\{/ {
+      hdr = index($0, "steps"); cols = $0
+      sub(/^[^{]*\{/, "", cols); sub(/\}.*/, "", cols)
+      n = split(cols, name, ","); sc = fc = 0
+      for (i = 1; i <= n; i++) { if (name[i] == "step") sc = i; if (name[i] == "findings") fc = i }
+      inblock = 1; next
+    }
+    inblock {
+      if ($0 ~ /^[[:space:]]*$/) { inblock = 0; next }
+      match($0, /[^ \t]/)
+      if (RSTART <= hdr) { inblock = 0; next }
+      row = $0; sub(/^[[:space:]]+/, "", row); split(row, f, ",")
+      if (sc && fc && f[fc] ~ /^[0-9]+$/ && f[fc] + 0 > 0) print f[sc]
+    }
+  '
 }
 
 # 0 when <sha> is reachable from a ref that survives the disposable worktree:
@@ -721,7 +757,7 @@ fm_dod_named_head_reachable_outside_worktree() {  # <worktree> <project> <mode> 
 # (bin/fm-fleet-snapshot.sh), so the marker is read from <state>.
 fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state> <id> <meta>]
   local kind=$1 mode=$2 wt=$3 project=$4 line=$5 state=${6:-} id=${7:-} meta=${8:-} url sha gerrit
-  local marker reading
+  local first steps reading
   fm_dod_should_gate_ship_done "$kind" "$mode" "$line" || return 0
   if url=$(fm_dod_pr_url_from_done_note "$(status_line_note "$line")") \
     && fm_dod_recorded_pr_on_forge "$state" "$id" "$meta" "$mode" "$url"; then
@@ -746,13 +782,15 @@ fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state
     return 1
   fi
   if [ "$gerrit" = 1 ]; then
-    marker=
+    first=
+    steps=
     case "$mode" in
       no-mistakes|'')
         fm_dod_nm_custody_returned "$wt" || return 1
-        marker=$FM_DOD_GERRIT_SUMMARY_MARKER ;;
+        first="$FM_DOD_GERRIT_SUMMARY_MARKER for run $FM_DOD_NM_RUN_ID"
+        steps=$FM_DOD_NM_FINDING_STEPS ;;
     esac
-    if ! reading=$(fm_dod_gerrit_read_current "$url" "$marker"); then
+    if ! reading=$(fm_dod_gerrit_read_current "$url" "$first" "$steps"); then
       printf '%s\n' "the current patch set of $url could not be read, so its published content cannot be checked"
       return 1
     fi
@@ -760,9 +798,9 @@ fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state
       printf '%s\n' "named head $sha is not the published content of $url: the change's current patch set does not carry this copy's HEAD tree"
       return 1
     fi
-    [ -n "$marker" ] || return 0
+    [ -n "$first" ] || return 0
     reading=${reading#* }
-    fm_dod_gerrit_summary_posted "$url" "${reading%% *}" "${reading#* }" "$(status_line_note "$line")" || return 1
+    fm_dod_gerrit_summary_posted "$url" "${reading%% *}" "${reading#* }" "$(status_line_note "$line")" "$first" "$steps" || return 1
     return 0
   fi
   if fm_dod_named_head_reachable_outside_worktree "$wt" "$project" "$mode" "$sha"; then

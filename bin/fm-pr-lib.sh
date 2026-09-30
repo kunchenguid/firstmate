@@ -1123,7 +1123,9 @@ fm_pr_gerrit_read_revision() {  # <host> <number>
 }
 
 # The current patch set of one Gerrit change, its revision, and whether a
-# change message on that patch set contains <marker>, all from one live read
+# change message on that patch set carries a run's summary - the line <first>,
+# plus a line starting "<step>:" for each step in the newline-separated <steps>
+# or, when <steps> is empty, the line "no findings" - all from one live read
 # with every cover message, so the tree and the summary are checked against the
 # same patch set. Gerrit names a message's patch set in its own first line
 # ("Patch Set 3:"), which is the patch_set gerrit-axi reports for the row.
@@ -1131,8 +1133,8 @@ fm_pr_gerrit_read_revision() {  # <host> <number>
 # published change only when that revision carries the worker copy's HEAD tree
 # and the pipeline summary was posted on that patch set. Fails on any reading
 # that does not name exactly this change and its current patch set.
-fm_pr_gerrit_read_summary() {  # <host> <number> <marker>
-  local host=$1 number=$2 marker=$3 json reading ps posted revision
+fm_pr_gerrit_read_summary() {  # <host> <number> <first> <steps>
+  local host=$1 number=$2 first=$3 steps=$4 json reading ps posted revision
   FM_PR_RECORD_PATCH_SET=
   FM_PR_RECORD_SUMMARY_POSTED=
   FM_PR_RECORD_REVISION=
@@ -1145,7 +1147,7 @@ fm_pr_gerrit_read_summary() {  # <host> <number> <marker>
     || [ -z "$json" ]; then
     return 1
   fi
-  reading=$(printf '%s' "$json" | jq -r --argjson change "$number" --arg marker "$marker" '
+  reading=$(printf '%s' "$json" | jq -r --argjson change "$number" --arg first "$first" --arg steps "$steps" '
     . as $root
     | if type == "object" and .ok == true and (.changes | type) == "array" then . else error("invalid gerrit record") end
     | [.changes[] | select((.change | type) == "number" and .change == $change)] as $match
@@ -1158,8 +1160,15 @@ fm_pr_gerrit_read_summary() {  # <host> <number> <marker>
     | .revision as $revision
     | ($root.messages // []) as $messages
     | if ($messages | type) != "array" then error("invalid messages") else . end
+    | [$steps | split("\n")[] | select(test("^[a-z0-9_-]+$"))] as $required
     | [$messages[] | select(type == "object" and .change == $change and .patch_set == $ps
-        and (.message | type) == "string" and (.message | contains($marker)))] as $posted
+        and (.message | type) == "string"
+        and (.message | split("\n") as $lines
+          | ($lines | index([$first])) != null
+          and if ($required | length) == 0
+            then ($lines | index(["no findings"])) != null
+            else all($required[]; . as $step | any($lines[]; startswith($step + ":")))
+            end))] as $posted
     | "\($ps) \(($posted | length) > 0) \($revision)"' 2>/dev/null) || return 1
   ps=${reading%% *}
   posted=${reading#* }

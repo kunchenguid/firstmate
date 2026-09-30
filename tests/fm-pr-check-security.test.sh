@@ -239,7 +239,7 @@ change=${FM_TEST_GERRIT_CHANGE:-${2:-0}}
 patch_set=${FM_TEST_GERRIT_PATCH_SET:-1}
 # Cover messages, as `show --messages all` reports them: by default the
 # no-mistakes pipeline summary a worker posted on the current patch set.
-messages=${FM_TEST_GERRIT_MESSAGES-"[{\"change\":$change,\"patch_set\":$patch_set,\"author\":\"worker\",\"message\":\"Patch Set $patch_set:\\n\\nno-mistakes pipeline summary\\n\\nno findings\"}]"}
+messages=${FM_TEST_GERRIT_MESSAGES-"[{\"change\":$change,\"patch_set\":$patch_set,\"author\":\"worker\",\"message\":\"Patch Set $patch_set:\\n\\nno-mistakes pipeline summary for run RUNFIXTURE\\n\\nno findings\"}]"}
 printf '{"ok":true,"op":"show","count":1,"missing":[],"changes":[{"change":%s,"subject":%s,"project":"p","status":"%s","wip":false,"submit":"%s","submittable":%s,"blocked_on":"%s","patch_set":%s,"revision":"%s","url":"%s"}],"messages":%s}\n' \
   "$change" \
   "${FM_TEST_GERRIT_SUBJECT:-\"fixture change\"}" \
@@ -255,8 +255,8 @@ SH
   # no-mistakes, answering only `axi status` the way the real CLI does from a
   # worker copy: a run object, then its branch_sync block. By default the run's
   # result is the copy's own passed HEAD and custody is returned; a case
-  # overrides the outcome, the pipeline head, the next action, or makes the read
-  # fail.
+  # overrides the outcome, the pipeline head, the next action, the run's steps
+  # table rows, or makes the read fail.
   cat > "$fakebin/no-mistakes" <<'SH'
 #!/usr/bin/env bash
 [ -z "${FM_TEST_NM_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_TEST_NM_LOG"
@@ -264,8 +264,12 @@ SH
 [ "${FM_TEST_NM_FAIL:-0}" = 0 ] || exit 1
 head=$(git rev-parse HEAD 2>/dev/null) || exit 1
 pipeline=${FM_TEST_NM_PIPELINE_HEAD:-$head}
-printf 'run:\n  id: "RUNFIXTURE"\n  branch: fm/task\n  status: completed\n  head_sha: %s\noutcome: %s\n' \
-  "$pipeline" "${FM_TEST_NM_OUTCOME-passed}"
+printf 'run:\n  id: "RUNFIXTURE"\n  branch: fm/task\n  status: completed\n  head_sha: %s\n' "$pipeline"
+if [ -n "${FM_TEST_NM_STEPS:-}" ]; then
+  printf '  steps[%s]{step,status,findings,duration_ms}:\n' "$(printf '%s\n' "$FM_TEST_NM_STEPS" | wc -l | tr -d ' ')"
+  printf '%s\n' "$FM_TEST_NM_STEPS" | sed 's/^/    /'
+fi
+printf 'outcome: %s\n' "${FM_TEST_NM_OUTCOME-passed}"
 printf 'branch_sync:\n  state: %s\n  local:\n    head: %s\n  pipeline:\n    current_head: %s\n' \
   "${FM_TEST_NM_SYNC_STATE:-synchronized}" "$head" "$pipeline"
 if [ -n "${FM_TEST_NM_NEXT_ACTION:-}" ]; then
@@ -2004,7 +2008,7 @@ test_gerrit_nm_ready_gate_requires_recovered_custody() {
   esac
   set +e
   out=$(FM_TEST_GERRIT_REVISION=$squash FM_TEST_NM_PIPELINE_HEAD=$fixed FM_TEST_GERRIT_PATCH_SET=2 \
-    FM_TEST_GERRIT_MESSAGES='[{"change":4201,"patch_set":1,"author":"worker","message":"Patch Set 1:\n\nno-mistakes pipeline summary\n\nno findings"}]' \
+    FM_TEST_GERRIT_MESSAGES='[{"change":4201,"patch_set":1,"author":"worker","message":"Patch Set 1:\n\nno-mistakes pipeline summary for run RUNFIXTURE\n\nno findings"}]' \
     PATH="$dir/fakebin:$BASE_PATH" \
     bash -c '. "$1/bin/fm-timeout-lib.sh"; . "$1/bin/fm-dod-lib.sh"
       fm_dod_accept_ship_done ship no-mistakes "$2" "$3" "$4"' \
@@ -2031,6 +2035,60 @@ test_gerrit_nm_ready_gate_requires_recovered_custody() {
     *"names the pipeline summary on patch set 3"*) ;;
     *) fail "the refusal did not name the mismatched patch set: $out" ;;
   esac
+
+  # The message must carry this run's summary, not just its marker: a
+  # marker-only message, one naming another run, and one missing a step the
+  # run reported findings on are refused; one with every entry is accepted.
+  set +e
+  out=$(FM_TEST_GERRIT_REVISION=$squash FM_TEST_NM_PIPELINE_HEAD=$fixed \
+    FM_TEST_GERRIT_MESSAGES='[{"change":4201,"patch_set":1,"author":"worker","message":"Patch Set 1:\n\nno-mistakes pipeline summary"}]' \
+    PATH="$dir/fakebin:$BASE_PATH" \
+    bash -c '. "$1/bin/fm-timeout-lib.sh"; . "$1/bin/fm-dod-lib.sh"
+      fm_dod_accept_ship_done ship no-mistakes "$2" "$3" "$4"' \
+    _ "$ROOT" "$dir/wt" "$dir/project" "$line; pipeline summary posted on patch set 1" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "the done gate accepted a marker-only summary message"
+  case "$out" in
+    *"no pipeline summary message is on patch set 1"*"'no-mistakes pipeline summary for run RUNFIXTURE' and the line 'no findings'"*) ;;
+    *) fail "the marker-only refusal did not name the run's summary lines: $out" ;;
+  esac
+  set +e
+  out=$(FM_TEST_GERRIT_REVISION=$squash FM_TEST_NM_PIPELINE_HEAD=$fixed \
+    FM_TEST_GERRIT_MESSAGES='[{"change":4201,"patch_set":1,"author":"worker","message":"Patch Set 1:\n\nno-mistakes pipeline summary for run OTHERRUN\n\nno findings"}]' \
+    PATH="$dir/fakebin:$BASE_PATH" \
+    bash -c '. "$1/bin/fm-timeout-lib.sh"; . "$1/bin/fm-dod-lib.sh"
+      fm_dod_accept_ship_done ship no-mistakes "$2" "$3" "$4"' \
+    _ "$ROOT" "$dir/wt" "$dir/project" "$line; pipeline summary posted on patch set 1" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "the done gate accepted another run's summary message"
+  set +e
+  out=$(FM_TEST_GERRIT_REVISION=$squash FM_TEST_NM_PIPELINE_HEAD=$fixed \
+    FM_TEST_NM_STEPS=$'review,completed,2,100\ntest,completed,0,100\nlint,completed,1,100' \
+    FM_TEST_GERRIT_MESSAGES='[{"change":4201,"patch_set":1,"author":"worker","message":"Patch Set 1:\n\nno-mistakes pipeline summary for run RUNFIXTURE\n\nreview: stale value - corrected"}]' \
+    PATH="$dir/fakebin:$BASE_PATH" \
+    bash -c '. "$1/bin/fm-timeout-lib.sh"; . "$1/bin/fm-dod-lib.sh"
+      fm_dod_accept_ship_done ship no-mistakes "$2" "$3" "$4"' \
+    _ "$ROOT" "$dir/wt" "$dir/project" "$line; pipeline summary posted on patch set 1" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "the done gate accepted a summary missing a step that reported findings"
+  case "$out" in
+    *"an entry line for each step that reported findings: review, lint"*) ;;
+    *) fail "the refusal did not name the steps whose entries are required: $out" ;;
+  esac
+  set +e
+  out=$(FM_TEST_GERRIT_REVISION=$squash FM_TEST_NM_PIPELINE_HEAD=$fixed \
+    FM_TEST_NM_STEPS=$'review,completed,2,100\ntest,completed,0,100\nlint,completed,1,100' \
+    FM_TEST_GERRIT_MESSAGES='[{"change":4201,"patch_set":1,"author":"worker","message":"Patch Set 1:\n\nno-mistakes pipeline summary for run RUNFIXTURE\n\nreview: stale value - corrected\nlint: trailing space - removed"}]' \
+    PATH="$dir/fakebin:$BASE_PATH" \
+    bash -c '. "$1/bin/fm-timeout-lib.sh"; . "$1/bin/fm-dod-lib.sh"
+      fm_dod_accept_ship_done ship no-mistakes "$2" "$3" "$4"' \
+    _ "$ROOT" "$dir/wt" "$dir/project" "$line; pipeline summary posted on patch set 1" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "the done gate refused a summary carrying every step's entry: $out"
 
   # Arming asks the gate about the task's own done: line, since only the worker
   # knows the summary's patch set; with none, or one without the suffix, it is
