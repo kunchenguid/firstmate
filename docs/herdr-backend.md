@@ -120,10 +120,12 @@ Ordering failure never fails the task spawn.
 Firstmate does not retry, adopt, reuse, close, delete, or rename anything in response to an unavailable method, lock contention, ambiguous socket, lost response, failed move, or verification mismatch.
 The worker remains on the ordinary flat or Herdr-current-order path.
 
-Normal task metadata remains required endpoint authority after creation; independent cleanup additionally applies the structural journal evidence and continuity rules owned by [`docs/task-lifecycle.md`](task-lifecycle.md#remote-results-and-resource-cleanup).
+Normal task metadata remains required endpoint authority after creation.
+For accepted or archived lifecycle tasks, the [resource cleanup contract](task-lifecycle.md#remote-results-and-resource-cleanup) owns the completed path; presentation journals, process activity, focus and composer state are not additional admission gates.
+The detailed structural-journal and continuity rules below apply to legacy task records without that terminal lifecycle disposition.
 Cleanup closes only the exact recorded task pane and never calls `workspace close`.
 Herdr 0.7.5's explicit close moves focus to a neighbor whenever it empties a non-focused workspace, while its pane-death removal preserves the focused workspace whenever the dying workspace sits behind it or the focused workspace is last; both behaviors are fixed in Herdr 0.8.0, and the exact rules live in the adapter header of `bin/backends/herdr.sh`.
-Projected cleanup therefore runs under the same session lock, refuses to delete the tab a live foreground client is viewing, and treats a workspace-emptying close as a focus-safe removal: it verifies the close would empty the workspace, repositions the doomed workspace behind the focused one through the verified `workspace.move` transport when needed, proves the pane holds one lone idle shell, and ends that shell so Herdr removes the emptied workspace through its focus-preserving pane-death path.
+Projected legacy cleanup therefore runs under the same session lock, refuses to delete the tab a live foreground client is viewing, and treats a workspace-emptying close as a focus-safe removal: it verifies the close would empty the workspace, repositions the doomed workspace behind the focused one through the verified `workspace.move` transport when needed, proves the pane holds one lone idle shell, and ends that shell so Herdr removes the emptied workspace through its focus-preserving pane-death path.
 The persisted `.focused` pointer is not a live viewer: when `herdr terminal title clear` reports `no_foreground_client`, cleanup proceeds on that tab because no human is attached and skips restoration of the tab it destroys.
 Herdr currently has no atomic client-aware mutation, so a fresh target-focus and foreground-client checkpoint runs immediately before each move, signal, or explicit close; when a live viewer has switched to another tab, that fresh tab becomes the restore target.
 A client can still attach or switch focus in the residual checkpoint-to-mutation window, and a durable atomic close is deferred until Herdr exposes that primitive.
@@ -131,11 +133,11 @@ The repositioning move-to-last preserves every surviving workspace's relative or
 If that rollback cannot restore the verified original order, cleanup warns loudly and leaves the retained records for inspection rather than retrying the shared-layout mutation.
 The pane-death signals are pid-exact: the escalation re-reads the pane's process information and refuses unless the same shell pid still passes the strict bare-idle ownership proof, so an exited and reused pid is never signaled.
 A move-plan ambiguity, unsupported or failed move, or unproved shell falls back to the plain explicit close, and exact tab restoration remains the backstop whenever a surviving tab must be preserved, so degraded behavior is never worse than the pre-mitigation sub-second restore.
-Ordinary non-projected task removal serializes through the same session lock, applies the same focus-safe plan when its close would empty a non-focused workspace, keeps the legitimate plain close when the target is the active tab, and refuses an unlocked close if the lock cannot be acquired.
-Task cleanup acquires that session lock before the task's isolated copy is returned, so a contended lock refuses up front while the copy, every durable record, and the endpoint are all intact for a plain rerun.
+Ordinary non-projected legacy task removal serializes through the same session lock, applies the same focus-safe plan when its close would empty a non-focused workspace, keeps the legitimate plain close when the target is the active tab, and refuses an unlocked close if the lock cannot be acquired.
+Legacy task cleanup acquires that session lock before the task's isolated copy is returned, so a contended lock refuses up front while the copy, every durable record, and the endpoint are all intact for a plain rerun.
 Durable task records are erased only once the exact pane is confirmed gone through its structured presence: after every close path, only a structured not-found response counts as gone, while a present or unknown result retains every record with a visible, retryable error.
 Missing or malformed endpoint identity and missing confirmation machinery are ambiguity, never proof of a gone pane, and refuse record removal the same way.
-If lock, snapshot, pane identity, or restoration is ambiguous, cleanup warns and preserves the journal for manual inspection.
+If lock, snapshot, pane identity, or restoration is ambiguous on that legacy path, cleanup warns and preserves the journal for manual inspection.
 
 Recovery is deliberately conservative and presentation-only.
 An existing journal suppresses another projected create.

@@ -114,7 +114,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-promote.sh`          | Promote a scout task in place to a protected ship task with an explicit delivery mode, and write the ship instructions carrying that mode's definition of done |
 | `fm-task-retire.sh`      | Retire a local or AIME/iDA remote task through its executor-specific safety path     |
 | `fm-promote.sh`          | Promote a scout task in place to a protected ship task with an explicit delivery mode, write the ship instructions carrying that mode's definition of done, and supersede the task's brief so a later relaunch cannot revive stale scout delivery text |
-| `fm-teardown.sh`         | Fail-closed teardown: return landed ship worktrees and require completed scout deliverables |
+| `fm-teardown.sh`         | Retire accepted/archived task panes and records while preserving unsafe copies; keep landed-work gates for legacy teardown |
 | `fm-harness.sh`          | Detect the running harness, resolve worker harness, model, and effort, and validate the native-only `ultra` effort |
 | `fm-lock.sh`             | Per-home firstmate session lock                                                      |
 | `fm-x-lib.sh`            | Shared Relay config, relay, and reply-threading helpers                              |

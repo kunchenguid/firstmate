@@ -619,14 +619,14 @@ The rules match the v0.7.5 tag source (`close_selected_workspace` reassigns focu
 
 The full projection and restored-shell suites were re-run on 2026-07-28 on Herdr 0.7.5 with the updated close path; the presentation suite completed with `real Herdr lab validation completed on Herdr 0.7.5 with the default-session tripwire intact`, and the restored-shell cleanup guarantee above was unchanged.
 
-The teardown-level record-retention gate was verified on 2026-07-28 with metadata fixtures and a live contending lock holder:
+The legacy teardown-level record-retention gate was verified on 2026-07-28 with metadata fixtures and a live contending lock holder:
 
 ```sh
 tests/fm-teardown.test.sh
 tests/fm-backend-herdr.test.sh
 ```
 
-Observed guarantees: a contended presentation lock refused the teardown before the isolated copy was returned, with the task branch, every durable record, and the endpoint intact and no pane close attempted; the retry after the contention cleared returned the copy, closed the pane under the lock, and removed the records; an unknown structured-presence result after an attempted projected close retained the journal and every record with a nonzero exit; and every presence-gate mode accepted only a structured not-found as gone.
+Observed legacy-path guarantees: a contended presentation lock refused the teardown before the isolated copy was returned, with the task branch, every durable record, and the endpoint intact and no pane close attempted; the retry after the contention cleared returned the copy, closed the pane under the lock, and removed the records; an unknown structured-presence result after an attempted projected close retained the journal and every record with a nonzero exit; and every presence-gate mode accepted only a structured not-found as gone.
 
 The same fixtures verified three further boundaries on 2026-07-29: missing or malformed endpoint identity and an unparseable pane presence refused record removal with everything retained; the SIGKILL escalation re-read the exact pane's process information and refused to signal when a different shell pid owned the pane, falling back to the plain close with the original process untouched; and a reposition whose removal then failed on every path restored the exact original workspace order through a second verified move and reported the close as failed.
 
@@ -780,7 +780,7 @@ The guard waits for that loading phase before observing the real vendor state an
 TraeX and Codex exited through `fm-control.sh`, retained their panes until endpoint teardown, and preserved reports.
 On this installed Pi configuration, the existing composer owner treated the `$0.000` cost footer as a shell row; the guard proves liveness and the unchanged refusal to send an exit command, not successful Pi exit or cleanup.
 No new Pi composer compatibility claim is made by this measurement.
-The same guard verifies live sibling and focused-resource preservation, dirty/shared directory retention, conflicting ownership and generation refusals, and interrupted cleanup bookkeeping.
+The same guard's legacy cleanup arm verifies live sibling and focused-resource preservation, dirty/shared directory retention, conflicting ownership and generation refusals, and interrupted cleanup bookkeeping.
 `tests/fm-backend-herdr.test.sh` supplies portable real-process regressions for unrecognized presentation states, a harness descendant behind a foreground tool, stale registrations, and missing or foreign registration identity.
 `tests/fm-busy-state.test.sh` retains managed-input refusal for conflicting terminal, cwd, generation and replacement-process evidence.
 

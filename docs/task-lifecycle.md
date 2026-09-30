@@ -110,6 +110,6 @@ A result summary alone cannot retire a cleanup obligation; incomplete, conflicti
 
 [`tests/fm-task-lifecycle.test.sh`](../tests/fm-task-lifecycle.test.sh) covers revision conflicts, pending effects, explicit stop, generation mismatch, lost wake recovery, unassigned requests, unknown-record acknowledgement, terminal cleanup receipts and exact outcome replay.
 The existing send, control, remote-agent and backlog suites exercise their respective effect owners.
-[`tests/fm-teardown-endpoint-safety.test.sh`](../tests/fm-teardown-endpoint-safety.test.sh) covers the open-goal cleanup barrier, archived business-action retention and uncertain cleanup readback.
-[`tests/fm-teardown-lifecycle-herdr-e2e.test.sh`](../tests/fm-teardown-lifecycle-herdr-e2e.test.sh) requires an explicitly authorized named-session helper and verifies real mixed/focused workspace behavior, active sibling preservation and interrupted bookkeeping.
-Its helper is the only route to Herdr and verifies the default-session tripwire on teardown.
+[`tests/fm-teardown-endpoint-safety.test.sh`](../tests/fm-teardown-endpoint-safety.test.sh) covers the open-goal barrier, completed exact-pane cleanup without historical admission gates, foreign or shared endpoint refusal, and dirty, unlanded or uncertain-owner copy retention.
+[`tests/fm-short-operations-herdr.test.sh`](../tests/fm-short-operations-herdr.test.sh) is the current real-Herdr completed-cleanup guard; the [runtime evidence](verification/runtime-backends.md#independent-task-workspace-cleanup) owns its environment, observed results and limits.
+[`tests/fm-teardown-lifecycle-herdr-e2e.test.sh`](../tests/fm-teardown-lifecycle-herdr-e2e.test.sh) continues to cover the legacy structural-journal and focus-preserving path.
