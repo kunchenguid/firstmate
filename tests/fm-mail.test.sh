@@ -676,21 +676,26 @@ os.environ.update({
     'FM_IMAP_HOST': 'imap.gmail.com', 'FM_IMAP_PORT': '993',
     'FM_SMTP_HOST': 'smtp.test', 'FM_SMTP_PORT': '465',
     'FM_MAIL_CURSOR': sys.argv[1], 'FM_MAIL_RETRY': sys.argv[2],
-    'FM_MAIL_POLL_MAX_WAKES': '1', 'FM_AFK_POSTURE': '1',
+    'FM_MAIL_POLL_MAX_WAKES': '200', 'FM_AFK_POSTURE': '1',
 })
 owner = 'johnpoyser@gmail.com'
 body = b'From: johnpoyser@gmail.com\r\nSubject: reply\r\n\r\nFM-AFK-REPLY test answer'
 class FakeConn:
     untagged_responses = {'UIDVALIDITY': [b'90009']}
+    header_fetches = []
     def login(self, *args): pass
     def select(self, *args): return ('OK', [])
-    def uid(self, command, uid=None, spec=None):
+    def uid(self, command, *args):
         if command == 'search':
-            return ('OK', [b'1 2 3 4'])
+            if 'FROM' in args:
+                return ('OK', [b'101'])
+            return ('OK', [b' '.join(str(uid).encode() for uid in range(1, 102))])
+        uid, spec = args
         number = uid.decode()
         if 'HEADER' in spec:
-            sender = owner if number == '4' else 'intruder@example.net'
-            auth = 'Authentication-Results: mx.google.com; dkim=pass header.d=gmail.com\r\n' if number == '4' else ''
+            self.header_fetches.append(number)
+            sender = owner if number == '101' else 'intruder@example.net'
+            auth = 'Authentication-Results: mx.google.com; dkim=pass header.d=gmail.com\r\n' if number == '101' else ''
             header = f'From: {sender}\r\n{auth}Subject: mail {number}\r\n\r\n'.encode()
             return ('OK', [(f'RFC822.SIZE {len(body)}'.encode(), header)])
         return ('OK', [(f'RFC822.SIZE {len(body)}'.encode(), body)])
@@ -710,15 +715,18 @@ with redirect_stdout(output):
     result = mail.cmd_poll_list()
 assert result == 0
 print(output.getvalue(), end='')
+print(f'header_fetches={len(FakeConn.header_fetches)}')
 PYEOF
   printf 'uidvalidity=90009\n' > "$HOME_DIR/state/.mail-seen"
   : > "$HOME_DIR/state/.mail-retry"
   out=$(python3 "$harness" "$HOME_DIR/state/.mail-seen" "$HOME_DIR/state/.mail-retry" "$ROOT/bin/fm-mail.py" 2>&1)
-  assert_contains "$out" $'4\t\tjohnpoyser@gmail.com\tmail 4\tok' \
-    "owner reply beyond ignored mail remains within the poll's delivery budget"
+  assert_contains "$out" $'101\t\tjohnpoyser@gmail.com\tmail 101\tok' \
+    "authenticated owner reply is searched before a large ignored backlog"
   assert_contains "$out" $'1\t\tintruder@example.net\tmail 1\tignored' \
     "ignored messages remain reported for the attended return path"
-  pass "fm-mail: ignored away mail does not consume the bounded owner-reply budget"
+  assert_contains "$out" 'header_fetches=20' \
+    "a large backlog is limited to twenty header fetches per poll"
+  pass "fm-mail: owner replies are prioritized within a bounded header scan"
 }
 
 test_poll_retry_surfaces_under_new_mail_flood() {

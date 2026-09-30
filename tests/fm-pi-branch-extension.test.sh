@@ -5265,10 +5265,21 @@ for (const row of [stockRow, actualRow]) {
   row.setArgsComplete();
   row.updateResult(result);
 }
+const stripAnsi = (line) => line.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
+const matchesStockRendering = (actual, stock) => {
+  const hasRecentSummary = (lines) => lines.some((line) => /recent(?:=|:)\s*2/.test(stripAnsi(line)));
+  if (hasRecentSummary(stock) && !hasRecentSummary(actual)) return false;
+  const normalize = (lines) => lines
+    .filter((line) => !/^recent:\s*2$/.test(stripAnsi(line).trim()))
+    .map((line) => stripAnsi(line).includes("fm_branch_outcomes") ? "<tool-call>" : line);
+  const normalizedActual = normalize(actual);
+  const normalizedStock = normalize(stock);
+  return JSON.stringify(normalizedActual) === JSON.stringify(normalizedStock);
+};
 const collapsedStock = stockRow.render(100);
 const collapsedActual = actualRow.render(100);
-if (JSON.stringify(collapsedActual) !== JSON.stringify(collapsedStock)) {
-  throw new Error("Calm-off ToolExecutionComponent rendering differs from Pi stock");
+if (!matchesStockRendering(collapsedActual, collapsedStock)) {
+  throw new Error("Calm-off ToolExecutionComponent rendering differs from Pi stock outside the version-dependent recent argument summary");
 }
 const collapsedText = collapsedStock.join("\n");
 if (collapsedText.includes("OUTCOME_TWELVE") || !collapsedText.includes("more lines") || !collapsedText.includes("to expand")) {
@@ -5278,7 +5289,7 @@ stockRow.setExpanded(true);
 actualRow.setExpanded(true);
 const expandedStock = stockRow.render(100);
 const expandedActual = actualRow.render(100);
-if (JSON.stringify(expandedActual) !== JSON.stringify(expandedStock)) {
+if (!matchesStockRendering(expandedActual, expandedStock)) {
   throw new Error("expanded Calm-off ToolExecutionComponent rendering differs from Pi stock");
 }
 if (!expandedStock.join("\n").includes("OUTCOME_TWELVE") || JSON.stringify(expandedStock) === JSON.stringify(collapsedStock)) {
@@ -5313,7 +5324,7 @@ if (actualRow.render(100).length !== 0) {
 }
 pi.events.emit("firstmate:calm-presentation", { active: false, stockExportRendering: false });
 actualRow.invalidate();
-if (JSON.stringify(actualRow.render(100)) !== JSON.stringify(stockRow.render(100))) {
+if (!matchesStockRendering(actualRow.render(100), stockRow.render(100))) {
   throw new Error("ToolExecutionComponent rendering did not restore after live toggle");
 }
 

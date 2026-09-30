@@ -542,12 +542,38 @@ def cmd_poll_list():
             new_uids = list(unseen)
             retry = set()
             retry_order = []
-        # Bound the expensive fetch work with a window, applied to each class
-        # separately so a large new-mail backlog cannot slice retry candidates
-        # out of the scan. The retry scan starts at a durable position; the
+        # Bound expensive header work to at most twenty fetches per poll,
+        # including retries. The retry scan starts at a durable position; the
         # persist block below owns when that position advances.
-        window = max(cap * 4, cap + 10)
-        new_candidates = new_uids[:window]
+        window = min(max(cap * 4, cap + 10), 20)
+        retry_window = retry_scan_window(retry_order, retry_pos, window)
+        retry_candidates = [u for u in retry_window if u in seen]
+        recipient, afk_email_active, invalid_posture = afk_email_context()
+
+        # While away, ask IMAP to identify messages whose From header names the
+        # configured owner and scan those first; fetched headers still undergo
+        # strict Gmail-authentication checks below. Unsupported search falls
+        # back to ordinary ordering without weakening authentication.
+        owner_priority = set()
+        if afk_email_active:
+            try:
+                owner_type, owner_data = m.uid(
+                    'search', None, 'UNSEEN', 'FROM', f'"{OWNER_EMAIL}"')
+                if owner_type == 'OK' and owner_data:
+                    owner_priority = {
+                        item.decode() if isinstance(item, bytes) else str(item)
+                        for item in (owner_data[0] or b'').split()
+                    }
+            except Exception:
+                owner_priority = set()
+        retry_header_reserve = min(len(retry_candidates), 5) if afk_email_active else 0
+        if afk_email_active:
+            retry_candidates = retry_candidates[:retry_header_reserve]
+        new_window = max(0, window - retry_header_reserve)
+        priority_new = [u for u in new_uids if u in owner_priority]
+        new_candidates = (
+            priority_new + [u for u in new_uids if u not in owner_priority]
+        )[:new_window]
         # Only a retry uid that is already surfaced (in the cursor) is a pure
         # retry re-fetch. A retry-set uid that is not yet in the cursor is a
         # degraded wake that failed to record - it stays a new candidate so
@@ -556,10 +582,6 @@ def cmd_poll_list():
         # kept so a scan window of only unseen uids can still advance the
         # durable cursor past itself, never stalling the march over the whole
         # retry set.
-        retry_window = retry_scan_window(retry_order, retry_pos, window)
-        retry_candidates = [u for u in retry_window if u in seen]
-        recipient, afk_email_active, invalid_posture = afk_email_context()
-
         afk_enabled = recipient is not None
 
         afk_messages = []
@@ -589,6 +611,7 @@ def cmd_poll_list():
         retry_examined = 0
         retry_idx = -1
         first_retry_emitted_index = -1
+        header_fetches = 0
         for u in new_candidates + retry_candidates:
             is_retry = u in retry and u in seen
             if is_retry:
@@ -616,6 +639,9 @@ def cmd_poll_list():
                     new_emitted += 1
                 continue
 
+            if header_fetches >= 20:
+                break
+            header_fetches += 1
             # A raised or empty header FETCH is treated as a failure for THIS uid only,
             # so one bad message can never abort the bounded scan: a new uid is
             # surfaced degraded, a retry uid is left for a later scan step, and
