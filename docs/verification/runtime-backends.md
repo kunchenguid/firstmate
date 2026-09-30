@@ -153,21 +153,28 @@ The current guard reports the actual rendered surface rather than assuming every
 
 ## Steering-inbox doorbell
 
-The steering channel's one behavioral assumption - a real worker agent follows the constant self-describing doorbell line (list the inbox, read and act on its records in numeric order, then `mv` each into `handled/`) - was verified on 2026-08-23 against every installed verified harness, on tmux 3.6a, macOS arm64, on an isolated private socket, driving the REAL `bin/fm-send.sh` end to end (durable record plus doorbell, with one mid-wait re-ring playing the watcher's role).
+The steering channel's behavioral assumption is that a real worker follows the constant doorbell, acts on the durable inbox records and moves each into `handled/`.
+On 2026-09-30, the Codex guard passed with Codex 0.159.1 and Herdr 0.8.0 protocol 20 on Linux x86_64, using a disposable Codex home, no shared daemon and the real `bin/fm-send.sh` in a guarded named session.
+Suspending only that fixture's input consumer accumulated notification text and Enter together; native mode-gated paste input produced exactly one submitted user notification and its actual processing acknowledgement, without a re-ring or recovery Enter.
 
 ```sh
-FM_SEND_INBOX_LIVE_E2E=1 tests/fm-send-inbox-doorbell-live-e2e.test.sh
+FM_SEND_INBOX_LIVE_E2E=1 FM_SEND_INBOX_LIVE_HARNESSES=codex bin/fm-test-run.sh tests/fm-send-inbox-doorbell-live-e2e.test.sh
 ```
 
 The retained observed outputs were:
 
 ```text
-ok - codex (codex-cli 0.147.0): the doorbell reached a real worker, which acted and acked with the mv
-ok - pi (0.84.1): the doorbell reached a real worker, which acted and acked with the mv
+ok - codex (codex-cli 0.159.1): the doorbell reached a real worker, which acted and acked with the mv
+ok - codex (codex-cli 0.159.1): coalesced input submitted once without re-ring or recovery Enter
 ```
 
 The doorbell pre-check skips only proven pending text; an ambiguous composer does not indefinitely suppress a recoverable constant notification.
 Portable ladder and enqueue regressions remain in `tests/fm-task-inbox.test.sh` and `tests/fm-send-inbox.test.sh`.
+`tests/fm-backend-herdr.test.sh` exercises the native insertion transport, independent real-process identity signals, default-session socket reconciliation, schema-backed and schema-less capability gates, literal newlines, foreign targets and ambiguous write responses without another text send or Enter.
+The live guard proves the reproduced input-coalescing mechanism, not the initiating trigger of an earlier production recurrence.
+Pi and TraeX retain literal insertion; this correction adds no paste framing to their paths.
+The same guard also passed on Pi 0.87.1 in that Linux Herdr lab; its idle composer remained unclassified, so the existing advisory path proceeded and the real worker acted and acknowledged after the guard's one allowed mid-wait re-ring.
+TraeX was inspected as an unaffected non-Codex integration but was not submitted a live prompt in this verification.
 
 ## Herdr
 

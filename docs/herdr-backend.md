@@ -212,7 +212,8 @@ Workspace and tab ids support verification and cleanup but are not inferred from
 ## Current transport behavior
 
 The adapter starts and polls a named server before workspace, tab, pane, or agent calls.
-Every Herdr invocation goes through `fm_backend_herdr_cli`, which sets the environment and passes an explicit trailing `--session <name>`.
+Shell adapter calls go through `fm_backend_herdr_cli`, which sets the environment and passes an explicit trailing `--session <name>`.
+The native Codex input transport uses that same session's selected client and explicit session flag for its probes, and only its verified named socket for the text-only API request.
 An environment variable alone is not reliable when another Herdr server is running.
 When the selected named server is not running, the adapter launches it without inherited Firstmate home and directory overrides, harness identity markers, or the supervision-model override.
 Herdr passes its server startup environment to every later pane, so retaining those values could misroute panes for another Firstmate home or harness.
@@ -224,6 +225,14 @@ Spawn-time fixed commands may use Herdr's atomic run primitive.
 Enter, Escape, and Ctrl-C are supported.
 Typed-plane slash input, and dollar-prefixed skill input for Codex, uses the shared harness-aware settle before the first Enter so a completion popup cannot consume it.
 Typed-plane text is typed once; only Enter is retried.
+
+For a structurally verified foreground Codex, program input uses the native `pane.send_input` capability with no keys, through `bin/backends/herdr-codex-input.py`.
+Herdr checks that exact pane's live bracketed-paste mode when encoding the text, so paste framing separates notification text from the existing external Enter even when both arrive in one input read.
+The transport binds the socket to the requested named session, verifies foreground process identity, and capability-gates the method from the schema or, when schema discovery is unavailable, from an empty-pane error response that cannot write to a target.
+Targets conclusively outside the native Codex path retain literal insertion; ambiguous identity or capability evidence and unconfirmed write responses stop before Enter without retrying or falling back to raw input.
+Shell launch commands retain their separate run primitive.
+The composer pre-check and submission-key budget are unchanged.
+The coalesced-input regression is part of `tests/fm-send-inbox-doorbell-live-e2e.test.sh`; [runtime verification](verification/runtime-backends.md#steering-inbox-doorbell) records the current empirical boundary.
 
 On an idle or done native baseline, submit confirmation first waits for `working` or `blocked` across a bounded polling window.
 If native status stays idle, the shared composer verdict is the next positive signal: a cleared composer is delivery, and proven pending text retries Enter.
