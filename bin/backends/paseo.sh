@@ -69,9 +69,11 @@
 #      below are ours.
 #   5. One workspace holds many terminals; `terminal kill <id>` closes one
 #      tab and leaves its siblings and the workspace alive (verified live).
-#      The shared workspace is never archived by this adapter: it outlives
-#      every task, and an operator archiving it by hand simply makes the next
-#      spawn create a fresh one.
+#      Archiving a workspace leaves its project in the sidebar; only
+#      `project delete` removes it (verified live on 0.9.2). Task tabs go into
+#      the workspace Firstmate itself runs in when it can be identified, so
+#      nothing new appears; otherwise the per-project shared workspace is
+#      retired once its last task tab closes (fm_backend_paseo_retire_workspace).
 #
 # Requires: paseo (CLI, bundled inside Paseo.app - not guaranteed to be on
 # PATH; see fm_backend_paseo_bin), jq (JSON parsing). Bootstrap detects these
@@ -276,14 +278,31 @@ fm_backend_paseo_workspace_label() {
   printf '%s' "${tag%-*}"
 }
 
-# fm_backend_paseo_workspace_ensure: the ONE shared workspace for <cwd>.
-# Adopted, in order: the workspace firstmate itself is running in when a
-# Paseo tab exported PASEO_WORKSPACE_ID and that live workspace's cwd is the
-# project (herdr's launcher-identity rule, minus the pane ancestry Paseo
-# does not expose); else a live workspace with this cwd and label (first
-# match wins; Paseo allows duplicates); else created once. Never creates or
-# deletes a project: `workspace create --path` reuses the project registered
-# for <cwd> (finding #4). Echoes the workspace id.
+# fm_backend_paseo_own_workspace: the live workspace Firstmate itself runs
+# in, from a `workspace ls --json` list, or empty. A Paseo terminal tab
+# exports PASEO_WORKSPACE_ID. A Paseo agent exports only PASEO_AGENT_ID, so
+# its workspace is the one live workspace whose cwd is this home; two or
+# more matches are ambiguous and yield nothing.
+fm_backend_paseo_own_workspace() { # <workspace-ls-json>
+  local list=$1 logical real
+  if [ -n "${PASEO_WORKSPACE_ID:-}" ]; then
+    printf '%s' "$list" | jq -r --arg id "$PASEO_WORKSPACE_ID" '.[] | select(.workspaceId == $id) | .workspaceId' | head -1
+    return 0
+  fi
+  [ -n "${PASEO_AGENT_ID:-}" ] || return 0
+  logical=$(cd "$FM_HOME" 2>/dev/null && pwd) || logical=$FM_HOME
+  real=$(cd "$FM_HOME" 2>/dev/null && pwd -P) || real=$FM_HOME
+  printf '%s' "$list" | jq -r --arg a "$FM_HOME" --arg b "$logical" --arg c "$real" \
+    '[.[] | select(.cwd == $a or .cwd == $b or .cwd == $c) | .workspaceId] | if length == 1 then .[0] else empty end'
+}
+
+# fm_backend_paseo_workspace_ensure: the workspace a task tab for <cwd> goes
+# into. Firstmate's own workspace comes first, whatever the project, so
+# tasks appear as tabs beside the captain's session and nothing new is added
+# to the sidebar. Otherwise the ONE shared workspace for <cwd>: a live
+# workspace with this cwd and label (first match wins; Paseo allows
+# duplicates), else created once. `workspace create --path` reuses the
+# project registered for <cwd> (finding #4). Echoes the workspace id.
 fm_backend_paseo_workspace_ensure() { # <cwd>
   local cwd=$1 logical real label list out wsid
   # Paseo reports the workspace cwd normalized (no doubled slashes) but NOT
@@ -301,12 +320,7 @@ fm_backend_paseo_workspace_ensure() { # <cwd>
     echo "error: could not read the paseo workspace inventory; refusing to create a workspace for '$cwd'" >&2
     return 1
   fi
-  wsid=""
-  if [ -n "${PASEO_WORKSPACE_ID:-}" ]; then
-    wsid=$(printf '%s' "$list" |
-      jq -r --arg id "$PASEO_WORKSPACE_ID" --arg cwd "$cwd" --arg logical "$logical" --arg real "$real" \
-        '.[]? | select(.workspaceId == $id and (.cwd == $cwd or .cwd == $logical or .cwd == $real)) | .workspaceId' 2>/dev/null | head -1)
-  fi
+  wsid=$(fm_backend_paseo_own_workspace "$list")
   [ -n "$wsid" ] || wsid=$(printf '%s' "$list" |
     jq -r --arg want "$label" --arg cwd "$cwd" --arg logical "$logical" --arg real "$real" \
       '.[]? | select(.name == $want and (.cwd == $cwd or .cwd == $logical or .cwd == $real)) | .workspaceId' 2>/dev/null | head -1)
@@ -327,7 +341,7 @@ fm_backend_paseo_workspace_ensure() { # <cwd>
 }
 
 # fm_backend_paseo_create_task: open the task's terminal TAB inside the
-# project's shared workspace, refusing an existing live terminal NAME (ours;
+# workspace chosen by fm_backend_paseo_workspace_ensure, refusing an existing live terminal NAME (ours;
 # Paseo itself does not enforce uniqueness). The terminal name is the
 # routing authority (see the header's routing rule). Echoes
 # "<terminal_id> <workspace_id>" on success.
@@ -548,6 +562,44 @@ fm_backend_paseo_kill() { # <target> [unused] [expected-label]
     fm_backend_paseo_parse_target "$1" || return 0
   fi
   fm_backend_paseo_cli terminal kill "$FM_BACKEND_PASEO_TERMINAL" >/dev/null 2>&1 || true
+  fm_backend_paseo_retire_workspace "$FM_BACKEND_PASEO_WORKSPACE"
+}
+
+# fm_backend_paseo_retire_workspace: after a task tab closes, archive the
+# per-project shared workspace Firstmate created once it holds no tab and no
+# Paseo agent works in its folder, then delete its project when that folder
+# is one of this home's own clones and no other workspace uses it, so
+# finished work leaves nothing in the sidebar. Firstmate's own workspace and
+# any workspace titled by someone else are never touched, and an unreadable
+# inventory skips the cleanup. A spawn racing this archive fails its
+# terminal create loudly and can simply be retried.
+fm_backend_paseo_retire_workspace() { # <workspace_id>
+  local wsid=$1 label list cwd terminals agents projects pid logical real
+  [ -n "$wsid" ] || return 0
+  label=$(fm_backend_paseo_workspace_label)
+  list=$(fm_backend_paseo_cli workspace ls --json 2>/dev/null) || return 0
+  printf '%s' "$list" | jq -e 'type == "array"' >/dev/null 2>&1 || return 0
+  [ "$(fm_backend_paseo_own_workspace "$list")" != "$wsid" ] || return 0
+  cwd=$(printf '%s' "$list" | jq -r --arg id "$wsid" --arg label "$label" \
+    '.[] | select(.workspaceId == $id and .name == $label) | .cwd' | head -1)
+  [ -n "$cwd" ] || return 0
+  terminals=$(fm_backend_paseo_cli terminal ls --all --json 2>/dev/null) || return 0
+  printf '%s' "$terminals" | jq -e --arg id "$wsid" 'type == "array" and all(.[]; .workspaceId != $id)' >/dev/null 2>&1 || return 0
+  agents=$(fm_backend_paseo_cli ls --json 2>/dev/null) || return 0
+  printf '%s' "$agents" | jq -e --arg cwd "$cwd" --arg home "$HOME" \
+    'type == "array" and all(.[]; ((.cwd // "") | sub("^~"; $home)) != $cwd)' >/dev/null 2>&1 || return 0
+  fm_backend_paseo_cli workspace archive "$wsid" >/dev/null 2>&1 || return 0
+  logical=$(cd "$FM_HOME" 2>/dev/null && pwd) || logical=$FM_HOME
+  real=$(cd "$FM_HOME" 2>/dev/null && pwd -P) || real=$FM_HOME
+  case "$cwd" in
+  "$FM_HOME"/projects/* | "$logical"/projects/* | "$real"/projects/*) ;;
+  *) return 0 ;;
+  esac
+  printf '%s' "$list" | jq -e --arg id "$wsid" --arg cwd "$cwd" 'all(.[]; .workspaceId == $id or .cwd != $cwd)' >/dev/null 2>&1 || return 0
+  projects=$(fm_backend_paseo_cli project ls --json 2>/dev/null) || return 0
+  pid=$(printf '%s' "$projects" | jq -r --arg cwd "$cwd" '.[]? | select(.path == $cwd) | .projectId' 2>/dev/null | head -1)
+  [ -n "$pid" ] || return 0
+  fm_backend_paseo_cli project delete "$pid" >/dev/null 2>&1 || true
 }
 
 # fm_backend_paseo_list_live: recovery/orphan discovery. Lists every terminal

@@ -471,24 +471,51 @@ test_create_task_adopts_own_paseo_workspace_first() {
   pass "fm_backend_paseo_create_task: adopts the workspace firstmate itself runs in (PASEO_WORKSPACE_ID) when its cwd is the project, ahead of the title lookup"
 }
 
-test_create_task_ignores_own_workspace_for_another_project() {
+test_create_task_adopts_own_workspace_for_any_project() {
   local dir fb out
   dir="$TMP_ROOT/create-task-own-ws-other"
   mkdir -p "$dir/responses"
   printf '[]' >"$dir/responses/1.out"
-  # 2: the tab's own workspace belongs to ANOTHER project; no firstmate
-  #    workspace exists for /tmp/proj yet -> create one.
-  jq -n '[{workspaceId:"wks_own0000000000000",name:"firstmate",cwd:"/tmp/other"}]' >"$dir/responses/2.out"
-  jq -n '{workspaceId:"wks_new0000000000000"}' >"$dir/responses/3.out"
-  jq -n '{id:"ffffffff-5555-5555-5555-555555555555"}' >"$dir/responses/4.out"
+  # 2: the tab's own workspace sits in ANOTHER folder; it still wins, so the
+  #    task becomes a tab beside the captain's session and nothing is created.
+  jq -n '[{workspaceId:"wks_own0000000000000",name:"My Mate",cwd:"/tmp/other"}]' >"$dir/responses/2.out"
+  jq -n '{id:"ffffffff-5555-5555-5555-555555555555"}' >"$dir/responses/3.out"
   fb=$(make_paseo_fakebin "$dir")
   out=$(PATH="$fb:$PATH" FM_PASEO_LOG="$dir/log" FM_PASEO_RESPONSES="$dir/responses" PASEO_WORKSPACE_ID=wks_own0000000000000 \
     bash -c '. "$0/bin/backends/paseo.sh"; fm_backend_paseo_create_task fm-other /tmp/proj' "$ROOT")
-  [ "$out" = "ffffffff-5555-5555-5555-555555555555 wks_new0000000000000" ] \
-    || fail "create_task must not adopt PASEO_WORKSPACE_ID when that workspace's cwd is another project, got '$out'"
-  assert_contains "$(cat "$dir/log")" $'\x1f''workspace'$'\x1f''create'$'\x1f''--path'$'\x1f''/tmp/proj' \
-    "create_task should create the project's own shared workspace instead"
-  pass "fm_backend_paseo_create_task: PASEO_WORKSPACE_ID for another project is ignored; the project's own shared workspace is created"
+  [ "$out" = "ffffffff-5555-5555-5555-555555555555 wks_own0000000000000" ] \
+    || fail "create_task should put the tab in firstmate's own workspace whatever the project, got '$out'"
+  case "$(cat "$dir/log")" in
+  *$'\x1f''workspace'$'\x1f''create'*) fail "create_task must not create a workspace when firstmate's own workspace is known" ;;
+  esac
+  pass "fm_backend_paseo_create_task: a task for any project becomes a tab in firstmate's own workspace (PASEO_WORKSPACE_ID)"
+}
+
+test_create_task_finds_agent_home_workspace() {
+  local dir fb out home case_name want
+  for case_name in unique ambiguous; do
+    dir="$TMP_ROOT/create-task-agent-$case_name"
+    home="$dir/home"
+    mkdir -p "$dir/responses" "$home"
+    printf '[]' >"$dir/responses/1.out"
+    if [ "$case_name" = unique ]; then
+      jq -n --arg home "$home" '[{workspaceId:"wks_titled0000000000",name:"firstmate",cwd:"/tmp/proj"},
+            {workspaceId:"wks_home000000000000",name:"My Mate",cwd:$home}]' >"$dir/responses/2.out"
+      want=wks_home000000000000
+    else
+      jq -n --arg home "$home" '[{workspaceId:"wks_titled0000000000",name:"firstmate",cwd:"/tmp/proj"},
+            {workspaceId:"wks_home000000000000",name:"My Mate",cwd:$home},
+            {workspaceId:"wks_home111111111111",name:"Other",cwd:$home}]' >"$dir/responses/2.out"
+      want=wks_titled0000000000
+    fi
+    jq -n '{id:"abababab-6666-6666-6666-666666666666"}' >"$dir/responses/3.out"
+    fb=$(make_paseo_fakebin "$dir")
+    out=$(PATH="$fb:$PATH" FM_PASEO_LOG="$dir/log" FM_PASEO_RESPONSES="$dir/responses" FM_HOME="$home" PASEO_AGENT_ID=agent-1 \
+      bash -c 'unset PASEO_WORKSPACE_ID; . "$0/bin/backends/paseo.sh"; fm_backend_paseo_create_task fm-agent /tmp/proj' "$ROOT")
+    [ "$out" = "abababab-6666-6666-6666-666666666666 $want" ] \
+      || fail "create_task from a Paseo agent ($case_name home workspace) should use $want, got '$out'"
+  done
+  pass "fm_backend_paseo_create_task: a Paseo agent uses the one workspace whose folder is its home, and falls back when that is ambiguous"
 }
 
 test_workspace_label_uses_secondmate_prefix() {
@@ -804,6 +831,60 @@ test_kill_closes_terminal_and_keeps_workspace() {
   pass "fm_backend_paseo_kill: closes only the task's terminal tab and leaves the shared workspace alive"
 }
 
+# paseo_retire_case: run fm_backend_paseo_kill on "tt:wks_ff" in a home at
+# <dir>/home with canned workspace, terminal, agent, and project inventories.
+paseo_retire_case() { # <dir> <workspace-ls-json> <terminal-ls-json> <agents-json> [PASEO_WORKSPACE_ID]
+  local dir=$1 fb
+  mkdir -p "$dir/responses" "$dir/home"
+  # 1: terminal kill (silent)
+  printf '%s' "$2" >"$dir/responses/2.out"
+  printf '%s' "$3" >"$dir/responses/3.out"
+  printf '%s' "$4" >"$dir/responses/4.out"
+  # 5: workspace archive (silent); 6: project ls; 7: project delete (silent)
+  jq -n --arg path "$dir/home/projects/demo" '[{projectId:"prj_demo",name:"demo",path:$path}]' >"$dir/responses/6.out"
+  fb=$(make_paseo_fakebin "$dir")
+  PATH="$fb:$PATH" FM_PASEO_LOG="$dir/log" FM_PASEO_RESPONSES="$dir/responses" FM_HOME="$dir/home" PASEO_WORKSPACE_ID="${5:-}" \
+    bash -c 'unset PASEO_AGENT_ID; [ -n "$PASEO_WORKSPACE_ID" ] || unset PASEO_WORKSPACE_ID; . "$0/bin/backends/paseo.sh"; fm_backend_paseo_kill "tttttttt-0000-0000-0000-000000000000:wks_ff"' "$ROOT"
+}
+
+test_kill_retires_empty_firstmate_workspace_and_project() {
+  local dir ws
+  dir="$TMP_ROOT/retire-full"
+  ws=$(jq -n --arg cwd "$dir/home/projects/demo" '[{workspaceId:"wks_ff",name:"firstmate",cwd:$cwd}]')
+  paseo_retire_case "$dir" "$ws" '[]' '[]'
+  assert_contains "$(cat "$dir/log")" $'\x1f''workspace'$'\x1f''archive'$'\x1f''wks_ff' \
+    "kill should archive the emptied firstmate workspace"
+  assert_contains "$(cat "$dir/log")" $'\x1f''project'$'\x1f''delete'$'\x1f''prj_demo' \
+    "kill should delete the project of this home's own clone once no workspace uses it"
+  pass "fm_backend_paseo_kill: the last task tab retires firstmate's shared workspace and its own clone's project"
+}
+
+test_kill_retire_holds_back() {
+  local dir ws case_name
+  for case_name in sibling-tab human-title agent-in-folder own-workspace; do
+    dir="$TMP_ROOT/retire-hold-$case_name"
+    ws=$(jq -n --arg cwd "$dir/home/projects/demo" --arg name "$([ "$case_name" = human-title ] && echo 'Evidence Room' || echo firstmate)" \
+      '[{workspaceId:"wks_ff",name:$name,cwd:$cwd}]')
+    case "$case_name" in
+    sibling-tab) paseo_retire_case "$dir" "$ws" '[{"id":"sib","workspaceId":"wks_ff","name":"fm-x"}]' '[]' ;;
+    agent-in-folder) paseo_retire_case "$dir" "$ws" '[]' "$(jq -n --arg cwd "$dir/home/projects/demo" '[{id:"a1",cwd:$cwd}]')" ;;
+    own-workspace) paseo_retire_case "$dir" "$ws" '[]' '[]' wks_ff ;;
+    *) paseo_retire_case "$dir" "$ws" '[]' '[]' ;;
+    esac
+    case "$(cat "$dir/log")" in
+    *$'\x1f''archive'* | *$'\x1f''delete'*) fail "kill must not archive or delete anything ($case_name)" ;;
+    esac
+  done
+  dir="$TMP_ROOT/retire-outside-home"
+  paseo_retire_case "$dir" '[{"workspaceId":"wks_ff","name":"firstmate","cwd":"/tmp/elsewhere"}]' '[]' '[]'
+  assert_contains "$(cat "$dir/log")" $'\x1f''workspace'$'\x1f''archive'$'\x1f''wks_ff' \
+    "kill should still archive an emptied firstmate workspace outside this home"
+  case "$(cat "$dir/log")" in
+  *$'\x1f''project'*) fail "kill must never touch a project outside this home's own clones" ;;
+  esac
+  pass "fm_backend_paseo_kill: keeps the workspace while a tab, agent, other title, or firstmate itself uses it, and never deletes a project outside this home"
+}
+
 test_kill_is_best_effort_when_terminal_kill_fails() {
   local dir fb status
   dir="$TMP_ROOT/kill-fail"
@@ -926,7 +1007,8 @@ test_create_task_creates_and_parses_ids
 test_create_task_refuses_unreadable_inventory
 test_create_task_adopts_existing_shared_workspace
 test_create_task_adopts_own_paseo_workspace_first
-test_create_task_ignores_own_workspace_for_another_project
+test_create_task_adopts_own_workspace_for_any_project
+test_create_task_finds_agent_home_workspace
 test_workspace_ensure_adopts_logical_and_physical_cwd
 test_cli_json_keeps_stderr_out_of_parsed_output
 test_workspace_label_uses_secondmate_prefix
@@ -947,6 +1029,8 @@ test_composer_state_unknown_on_capture_failure
 test_send_text_submit_detects_landed_send
 test_send_text_submit_send_failed_when_target_absent
 test_kill_closes_terminal_and_keeps_workspace
+test_kill_retires_empty_firstmate_workspace_and_project
+test_kill_retire_holds_back
 test_kill_is_best_effort_when_terminal_kill_fails
 test_list_live_filters_by_name_prefix
 test_secondmate_spawn_refuses_explicit_paseo_only

@@ -38,14 +38,16 @@ A tmux server started from a Paseo tab inherits all of them, so their presence p
 Reading them as a selection would make Paseo an ambient default, which "Authority is explicit and never inferred" rules out; `fm_backend_detect` therefore ignores them.
 
 The markers are still useful once Paseo has been selected explicitly.
-When Firstmate itself runs inside a Paseo tab, `PASEO_WORKSPACE_ID` names that tab's workspace, and the adapter adopts it as the project's shared workspace when its cwd is the project, before falling back to the title lookup.
+When Firstmate itself runs inside Paseo, the adapter uses them to find Firstmate's own workspace and puts task tabs there (see "Task shape and metadata").
 
 ## Task shape and metadata
 
-Paseo's sidebar is project > workspace > terminal tab, and Firstmate uses one shared workspace per project with one tab per task, the same container shape as Herdr.
-The shared workspace is titled `firstmate` (or `2ndmate-<id>` for a secondmate home), created once with `workspace create --path <project> --isolation local --title <label>` and adopted on later spawns by matching that cwd and title in `workspace ls`, unless Firstmate's own Paseo tab workspace is adopted first (see "Selection is explicit").
+Paseo's sidebar is project > workspace > terminal tab, and each task is one terminal tab.
+When Firstmate itself runs inside Paseo, every task tab goes into Firstmate's own workspace, whatever the task's project, so work appears beside the captain's session and nothing new is added to the sidebar.
+A Paseo terminal tab names its workspace through `PASEO_WORKSPACE_ID`; a Paseo agent exports only `PASEO_AGENT_ID`, so its workspace is the one live workspace whose cwd is the Firstmate home, and two or more such workspaces count as unknown.
+Otherwise the adapter uses one shared workspace per project, the same container shape as Herdr: titled `firstmate` (or `2ndmate-<id>` for a secondmate home), created once with `workspace create --path <project> --isolation local --title <label>`, and adopted on later spawns by matching that cwd and title in `workspace ls`.
+Paseo registers or reuses the project by path when that workspace is created.
 Paseo allows duplicate workspaces and terminal names, so a spawn whose `workspace ls` or `terminal ls` inventory cannot be read refuses and creates nothing rather than treating the failed read as empty.
-The adapter never runs a `paseo project` command: Paseo registers or reuses the project by path when the workspace is created, so a fleet of tasks appears as tabs under one sidebar entry rather than as one workspace or one project per task.
 Agents running inside a task tab may open further tabs or workspaces of their own; nothing in the adapter depends on them.
 
 Each task owns one terminal tab in that workspace.
@@ -79,9 +81,11 @@ Because capture strips styling, the capability descriptor declares `styled=0`, a
 A terminal's `cwd` field in `terminal ls` is creation-time-frozen and never follows the foreground subshell opened by `treehouse get`.
 Spawn-time worktree discovery therefore sends begin and end markers around `pwd`, captures the marked block, and joins wrapped path lines, exactly like cmux and zellij.
 
-Cleanup closes only the task's tab with `terminal kill`; sibling task tabs and the shared workspace stay alive.
+Cleanup closes only the task's tab with `terminal kill`; sibling task tabs stay alive.
 It is best-effort like every backend's kill, so an already-gone target stays quiet.
-The adapter never archives the shared workspace; an operator who archives it by hand simply makes the next spawn create a fresh one.
+When the closed tab was the last one in a per-project shared workspace, cleanup archives that workspace, provided it carries Firstmate's own title, is not Firstmate's own workspace, and no Paseo agent works in its folder, because archiving a workspace also archives the agents it owns.
+Archiving leaves the project in the sidebar, so cleanup then deletes the project when its folder is one of the home's own clones under `projects/` and no other workspace uses it; a project the captain registered elsewhere is never touched.
+Any inventory read that fails skips this cleanup, and a spawn racing the archive fails its terminal create and can be retried.
 Mutating `--json` calls keep stderr out of the parsed output, because the CLI prints an Electron warning on stderr when Firstmate itself runs inside a Paseo agent.
 Paseo exposes no native generic agent busy signal, so supervision uses capture/hash polling for screen changes and each harness adapter's semantic lifecycle for worker state.
 
