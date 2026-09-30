@@ -4107,7 +4107,7 @@ hold_stale_wakes() {  # <state>
 # 11.7 hours, 14 wakes over 14 days, each one a supervision turn spent telling
 # the captain their own question was still unanswered.
 test_unanswered_captain_call_is_silent_while_it_stands() {
-  local spec name line dir state out capture wakes
+  local spec name line dir state out capture wakes throttle
   command -v tasks-axi >/dev/null 2>&1 \
     || { echo "skip: tasks-axi not found (captain-hold silence)"; return 0; }
   for spec in \
@@ -4118,18 +4118,45 @@ test_unanswered_captain_call_is_silent_while_it_stands() {
     dir=$(make_hold_home "$name" "$line" hold) \
       || fail "[$name] could not build a captain-held backlog fixture"
     state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
+    throttle="$state/.paused-resurfaced-$(hold_key)"
 
-    # Every sight, the first included: the captain already holds this work and
-    # has not answered, so there is nothing a stale alarm could add.
+    # The first sight still reaches the captain: the pane is inconclusive and
+    # the hold has not been looked at once yet.
+    hold_watch_surface "$dir" "$out" "$capture" 'idle, elapsed 1s' \
+      || fail "[$name] first sight of an unanswered hold did not surface"
+    wakes=$(hold_stale_wakes "$state")
+    [ "$wakes" -eq 1 ] \
+      || fail "[$name] first sight of an unanswered hold produced $wakes wakes instead of one"
+    [ -e "$throttle" ] || fail "[$name] the first surface recorded no re-surface throttle"
+    ack_stopped_cycle "$state" || fail "[$name] could not acknowledge the first surface"
+
+    # Every later sight is absorbed while the call stands unanswered: a recheck
+    # could only restate the captain's own open question back at them.
     hold_watch_churn "$dir" "$out" "$capture" 'idle, tick' 3 \
-      || fail "[$name] watcher exited on a fresh unanswered hold instead of supervising through it"
+      || fail "[$name] watcher exited inside the hold's silence instead of supervising through it"
     wakes=$(hold_stale_wakes "$state")
     [ "$wakes" -eq 0 ] \
       || fail "[$name] an unanswered captain call alarmed $wakes time(s) inside its ceiling"
-    [ -e "$state/.paused-resurfaced-$(hold_key)" ] \
-      && fail "[$name] an absorbed-by-ceiling sighting advanced the re-surface cadence"
+
+    # The point of the ceiling: the silence outlasts the ordinary declared-wait
+    # cadence, which an unanswered hold used to rejoin every window.
+    set_mtime "$(( $(date +%s) - 5000 ))" "$throttle"
+    hold_watch_churn "$dir" "$out" "$capture" 'idle, later tick' 1 \
+      || fail "[$name] watcher exited past the ordinary cadence instead of supervising through it"
+    wakes=$(hold_stale_wakes "$state")
+    [ "$wakes" -eq 0 ] \
+      || fail "[$name] an unanswered hold rejoined the ordinary cadence after $wakes wake(s)"
+
+    # Finite, so a forgotten hold cannot rot invisibly: past the ceiling it
+    # rejoins the ordinary cadence and surfaces once.
+    set_mtime "$(( $(date +%s) - 90000 ))" "$throttle"
+    hold_watch_surface "$dir" "$out" "$capture" 'idle, elapsed 9s' \
+      || fail "[$name] an unanswered hold never re-surfaced once its ceiling elapsed"
+    wakes=$(hold_stale_wakes "$state")
+    [ "$wakes" -eq 1 ] \
+      || fail "[$name] the elapsed ceiling produced $wakes wakes instead of one"
   done
-  pass "an open, unanswered captain call is never rechecked while it stands"
+  pass "an unanswered captain call surfaces once, then stays silent past the ordinary cadence until its ceiling elapses"
 }
 
 # The escape hatch, on the same fixtures: a hold nobody ever answers must not
