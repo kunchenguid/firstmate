@@ -196,6 +196,101 @@ test_real_host_checkpoint_ends_quietly_at_its_bound() {
   pass "checkpoint: the real host ends its park at the checkpoint bound as a quiet checkpoint"
 }
 
+# An unchanged, live-owned lock is left byte-identical, and an absent lock is
+# never claimed: a transport reconnect that leaves ownership intact must not
+# cause a takeover, and uncertainty stays uncertain.
+# shellcheck disable=SC2016 # the fake harness's script expands in its own shell
+test_checkpoint_leaves_an_owned_or_absent_lock_alone() {
+  local home home2 fakebin status
+  home=$(make_home reclaim-no-takeover)
+  : > "$home/config/supervision-host"
+  printf 'task=lab\n' > "$home/state/lab-task.meta"
+  fakebin="$TMP_ROOT/reclaim-owned-bin"
+  mkdir -p "$fakebin"
+  ln -s /bin/bash "$fakebin/codex"
+  status=0
+  FM_HOME="$home" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$fakebin/codex" -c '
+    "$0/bin/fm-lock.sh" >/dev/null
+    before=$(cat "$FM_HOME/state/.lock")
+    "$0/bin/fm-watch-checkpoint.sh" --seconds 3 >/dev/null 2>&1
+    "$0/bin/fm-watch-checkpoint.sh" --seconds 3 >/dev/null 2>&1
+    after=$(cat "$FM_HOME/state/.lock")
+    [ "$before" = "$after" ] || { printf "lock changed: %s -> %s\n" "$before" "$after"; exit 7; }
+    [ "$before" = "$$" ] || { printf "lock is not this session: %s\n" "$before"; exit 8; }
+  ' "$ROOT" || status=$?
+  expect_code 0 "$status" "two checkpoints in the owning session must leave the owner record byte-identical"
+  status=0
+  home2="$TMP_ROOT/reclaim-absent"; mkdir -p "$home2/state" "$home2/config" "$home2/data"
+  : > "$home2/config/supervision-host"
+  printf 'task=lab\n' > "$home2/state/lab-task.meta"
+  FM_HOME="$home2" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$fakebin/codex" -c '
+    "$0" --seconds 3 >/dev/null 2>&1
+  ' "$CHECKPOINT" || status=$?
+  assert_absent "$home2/state/.lock" "a checkpoint must never claim a home with no session lock"
+  pass "checkpoint: an owned or absent session lock is never rewritten or claimed"
+}
+
+# A replacement Codex session whose predecessor's recorded anchor pid is dead
+# must reclaim the home through the checkpoint, exactly as the Claude Stop
+# auto-arm (bin/fm-claude-stop-autoarm.sh) and the Cursor stop hook
+# (bin/fm-turnend-guard-cursor.sh) do, instead of standing down on it forever.
+# shellcheck disable=SC2016 # the fake harness's script expands in its own shell
+test_checkpoint_reclaims_a_dead_session_lock_owner() {
+  local home fakebin status
+  home=$(make_home reclaim-dead-owner)
+  : > "$home/config/supervision-host"
+  printf 'task=lab\n' > "$home/state/lab-task.meta"
+  fakebin="$TMP_ROOT/reclaim-dead-bin"
+  mkdir -p "$fakebin"
+  ln -s /bin/bash "$fakebin/codex"
+  # The predecessor harness is gone; its recorded anchor pid is what it left.
+  printf '999999\n' > "$home/state/.lock"
+  status=0
+  FM_HOME="$home" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$fakebin/codex" -c '
+    printf "%s\n" "$$" > "$FM_HOME/me"
+    "$0" --seconds 3
+  ' "$CHECKPOINT" >"$home/out.txt" 2>"$home/err.txt" || status=$?
+  expect_code 124 "$status" "a replaced session must reclaim the dead owner and park quietly: $(cat "$home/out.txt" "$home/err.txt")"
+  [ "$(cat "$home/state/.lock" 2>/dev/null)" = "$(cat "$home/me" 2>/dev/null)" ] \
+    || fail "the checkpoint did not reclaim the dead session-lock owner onto this harness"
+  assert_not_contains "$(cat "$home/out.txt")" "stood down" "a reclaimable dead owner must not stand the host down"
+  assert_grep '	boundary	' "$home/state/.supervision-host.log" "the reclaimed home must have run a real park"
+  pass "checkpoint: a replacement session reclaims a provably dead session-lock owner"
+}
+
+# The reclaim never crosses a live owner: another session's harness holding the
+# lock keeps the checkpoint's stand-down and leaves the lock byte-identical.
+# shellcheck disable=SC2016 # the fake harness's script expands in its own shell
+test_checkpoint_never_steals_a_live_session_lock_owner() {
+  local home fakebin other i status
+  home=$(make_home reclaim-live-owner)
+  : > "$home/config/supervision-host"
+  printf 'task=lab\n' > "$home/state/lab-task.meta"
+  fakebin="$TMP_ROOT/reclaim-live-bin"
+  mkdir -p "$fakebin"
+  ln -s /bin/bash "$fakebin/codex"
+  "$fakebin/codex" -c 'sleep 20; :' &
+  other=$!
+  i=0
+  while [ "$i" -lt 50 ] && ! kill -0 "$other" 2>/dev/null; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill -0 "$other" 2>/dev/null || fail "fixture: the foreign harness did not start"
+  printf '%s\n' "$other" > "$home/state/.lock"
+  status=0
+  FM_HOME="$home" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$fakebin/codex" -c '
+    "$0" --seconds 3
+  ' "$CHECKPOINT" >"$home/out.txt" 2>"$home/err.txt" || status=$?
+  expect_code 1 "$status" "a live foreign owner must still stand the host down"
+  [ "$(cat "$home/state/.lock" 2>/dev/null)" = "$other" ] \
+    || fail "the checkpoint stole a live session-lock owner"
+  assert_contains "$(cat "$home/out.txt")" "supervision-host stood down" "the stand-down must still say why"
+  kill -TERM "$other" 2>/dev/null || true
+  wait "$other" 2>/dev/null || true
+  pass "checkpoint: a live session-lock owner is never reclaimed by the checkpoint"
+}
+
 test_quiet_checkpoint_exits_124_cleanly
 test_signal_passes_through_and_exits_zero
 test_registered_check_uses_preserved_watcher_environment
@@ -204,3 +299,6 @@ test_host_checkpoint_bounds_the_park_by_posture
 test_host_checkpoint_passes_a_handback_and_reports_a_stand_down
 test_host_checkpoint_needs_the_file_and_honors_off
 test_real_host_checkpoint_ends_quietly_at_its_bound
+test_checkpoint_reclaims_a_dead_session_lock_owner
+test_checkpoint_never_steals_a_live_session_lock_owner
+test_checkpoint_leaves_an_owned_or_absent_lock_alone

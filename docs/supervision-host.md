@@ -77,6 +77,8 @@ Hook, plugin, extension, and checkpoint owners pass their harness as the primary
 Grok's model-owned call relies on primary detection.
 The host pins dispatched work to the primary's crew harness rather than the engine's.
 
+The Claude auto-arm, the Cursor stop hook, and the Codex checkpoint own a home the way `bin/fm-lock.sh` records it, so before they run the host they reclaim a lock whose recorded number is not a live verified harness through that same writer; a lock recorded by a live harness the session does not own is left untouched, and the OpenCode, omp, and Pi adapters instead refuse to arm a home with no live owner and name the recovery.
+
 Grok's arm command is fixed when the session-start block renders.
 So adding or removing the file on a Grok home takes effect at the next session start.
 The other owners read the file at every arm.
@@ -261,6 +263,10 @@ The latch belongs to one main session, engine, and model, so a new main session 
 When the host loses session-lock ownership or its auto-arm generation, it stands down silently and leaves continuity to whoever owns it now.
 A host that starts without that ownership stands down before activation.
 So it never stops the owner's host or watcher or releases its leases.
+
+The stand-down is only for a live owner.
+The Claude auto-arm, the Cursor stop hook, and the Codex checkpoint reclaim a recorded owner that is a number no longer backed by a live verified harness through `bin/fm-lock.sh` before they run the host, so a replacement session whose predecessor's anchor pid died keeps supervision instead of standing down on the dead record every turn.
+A missing or malformed lock, and a live owner the session does not own, are never touched.
 
 ### A host that dies without a close
 
