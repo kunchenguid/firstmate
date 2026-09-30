@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Opt-in real landed-copy and endpoint cleanup/refusal guard. Every Herdr invocation goes
+# Opt-in real completed-window cleanup and copy-preservation guard. Every Herdr invocation goes
 # through the named-lab helper, including backend probes. No live fleet tasks.
 set -eu
 # shellcheck source=tests/lib.sh
@@ -51,4 +51,4 @@ cat "$LAB/result.log"
 "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane list --workspace "$WS" > "$LAB/after.json"
 jq -e --arg pane "$PANE" 'all(.result.panes[]; .pane_id != $pane)' "$LAB/after.json"
 printf 'cleanup-evidence=%s\n' "$LAB"
-pass 'short cleanup returns a landed Treehouse copy, removes its endpoint, preserves unrelated resources and refuses unsafe copies'
+pass 'short cleanup closes completed windows, releases landed copies and retains unsafe copies and unrelated resources'

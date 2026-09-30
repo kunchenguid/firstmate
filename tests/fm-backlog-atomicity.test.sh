@@ -209,7 +209,9 @@ make_tasks_axi_incompatible() {  # <case-dir>
   real=$(command -v tasks-axi)
   cat > "$case_dir/fakebin/tasks-axi" <<SH
 #!/usr/bin/env bash
-[ "\${1:-}" != --version ] || exit 1
+if { [ "\${1:-}" = update ] || [ "\${1:-}" = mv ]; } && [ "\${2:-}" = --help ]; then
+  exit 1
+fi
 exec "$real" "\$@"
 SH
   chmod +x "$case_dir/fakebin/tasks-axi"
@@ -1847,10 +1849,10 @@ test_completion_records_a_codebase_mr_without_fabricating_a_pr_link() {
   pass "ordinary teardown records an exact Codebase MR through tasks-axi's supported note channel"
 }
 
-test_interrupted_destructive_cleanup_leaves_a_recoverable_close() {
-  local case_dir home id marker out rc=0
-  id=atomic-close-destructive-interrupt-b8
-  case_dir=$(make_home close-destructive-interrupt "$id")
+test_completed_cleanup_bookkeeping_retry_preserves_resources() {
+  local case_dir home id marker out rc=0 close_count pane
+  id=atomic-completed-close-retry-b8
+  case_dir=$(make_home completed-close-retry "$id")
   home=$(home_of "$case_dir")
   add_item "$case_dir" "$id"
   out=$(run_ship_spawn "$case_dir" "$id") || fail "spawn failed: $out"
@@ -1858,29 +1860,33 @@ test_interrupted_destructive_cleanup_leaves_a_recoverable_close() {
   jq '.disposition="accepted" | .assessment.remaining_gap=""' "$home/data/$id/lifecycle.json" > "$assessment"
   chmod 600 "$assessment"
   FM_HOME="$home" "$ROOT/bin/fm-task-state.sh" reconcile "$id" --expected-revision 1 --record "$assessment" >/dev/null || fail 'fixture acceptance failed'
+  printf 'preserve completed local changes\n' > "$case_dir/wt/retained.txt"
+  printf 'pr=https://github.com/example/firstmate/pull/42\n' >> "$home/state/$id.meta"
+  pane=$(sed -n 's/^herdr_pane_id=//p' "$home/state/$id.meta")
   marker="$home/state/$id.backlog-close"
-  interrupt_teardown_during_treehouse_return "$case_dir"
-
-  fixture_closed_endpoint "$case_dir" "$id"
+  break_verb "$case_dir" "done"
   out=$(run_teardown "$case_dir" "$id") || rc=$?
-  [ "$rc" -ne 0 ] || fail "interrupted destructive cleanup reported success"
-  assert_present "$marker" \
-    "destructive cleanup began before recording its authoritative close"
-  assert_present "$home/state/$id.meta" \
-    "interrupted destructive cleanup lost the task incarnation"
-  [ "$(row_state "$case_dir" "$id")" = "done" ] \
-    || fail "accepted goal was reopened by interrupted directory cleanup"
-  jq -e '.phases.pane_close.state=="confirmed" and .phases.directory_return.state=="retained"' \
-    "$home/state/$id.cleanup.json" >/dev/null || fail 'interrupted directory cleanup lost its independent receipt'
-
+  [ "$rc" -ne 0 ] || fail "completed cleanup reported success while bookkeeping failed"
+  assert_present "$marker" "completed cleanup lost its replayable backlog close"
+  assert_absent "$home/state/$id.meta" "failed backlog close restored retired resource metadata"
+  assert_present "$case_dir/wt/retained.txt" "bookkeeping failure deleted the retained copy"
+  [ "$(row_state "$case_dir" "$id")" = in_flight ] \
+    || fail "failed bookkeeping unexpectedly closed the backlog row"
+  close_count=$(grep -c $'\x1fpane\x1fclose\x1f'"$pane"$'\x1f' "$case_dir/fakebin/herdr.log" || true)
+  [ "$close_count" = 1 ] \
+    || fail "completed cleanup closed the exact endpoint $close_count times: $(cat "$case_dir/fakebin/herdr.log")"
+  rm -f "$case_dir/fakebin/tasks-axi"
   out=$(run_bootstrap "$case_dir")
   [ "$(row_state "$case_dir" "$id")" = "done" ] \
-    || fail "restart left interrupted cleanup In flight: $out"
+    || fail "restart left completed cleanup In flight: $out"
   assert_absent "$marker" "restart retained the recovered close marker"
-  assert_absent "$home/state/$id.meta" "restart retained the interrupted task record"
-  assert_contains "$out" "endpoint or local copy may remain" \
-    "restart silently hid potentially incomplete physical cleanup"
-  pass "restart recovers closes recorded before destructive cleanup"
+  assert_present "$case_dir/wt/retained.txt" "bookkeeping retry deleted the retained copy"
+  close_count=$(grep -c $'\x1fpane\x1fclose\x1f'"$pane"$'\x1f' "$case_dir/fakebin/herdr.log" || true)
+  [ "$close_count" = 1 ] \
+    || fail "bookkeeping retry left $close_count endpoint closes: $(cat "$case_dir/fakebin/herdr.log")"
+  assert_grep 'https://github.com/example/firstmate/pull/42' "$(backlog_of "$case_dir")" \
+    "bookkeeping retry lost the recorded completion artifact"
+  pass "completed cleanup bookkeeping retries without repeating resource effects"
 }
 
 test_completion_refuses_a_close_target_symlinked_to_a_directory() {
@@ -3041,8 +3047,8 @@ test_dispatch_and_completion_are_structural() {
   pass "dispatch and completion transition structurally with evidence"
 }
 
-test_refused_directory_cleanup_keeps_the_goal_closed() {
-  local case_dir home id out rc=0
+test_unlanded_copy_is_retained_while_completed_cleanup_finishes() {
+  local case_dir home id out
   id=fm-structural-refusal-b15
   case_dir=$(make_home structural-refusal "$id")
   home=$(home_of "$case_dir")
@@ -3056,19 +3062,19 @@ test_refused_directory_cleanup_keeps_the_goal_closed() {
     commit -q -m "unlanded fixture work"
   fm_test_archive_goal "$home" "$id"
   fixture_closed_endpoint "$case_dir" "$id"
-  out=$(run_teardown "$case_dir" "$id") || rc=$?
+  out=$(run_teardown "$case_dir" "$id") \
+    || fail "completed cleanup was blocked by unlanded work: $out"
 
-  [ "$rc" -ne 0 ] || fail "teardown accepted unlanded work"
   [ "$(row_state "$case_dir" "$id")" = "done" ] \
-    || fail "refused directory cleanup reopened an explicitly archived goal"
+    || fail "completed cleanup reopened an explicitly archived goal"
   jq -e '.disposition=="archived"' "$home/data/$id/lifecycle.json" >/dev/null \
-    || fail 'refused directory cleanup changed explicit archive'
-  jq -e '.phases.pane_close.state=="confirmed" and .phases.directory_return.state=="retained"' \
-    "$home/state/$id.cleanup.json" >/dev/null || fail 'unlanded directory cleanup obligation was lost'
-  assert_present "$case_dir/wt/unlanded.txt" 'refused cleanup discarded unlanded content'
-  assert_present "$home/state/$id.meta" \
-    "refused teardown removed the live task record"
-  pass "refused directory cleanup retains unlanded work and cleanup receipts without reopening the archived goal"
+    || fail 'completed cleanup changed explicit archive'
+  jq -e '.owner_receipts.cleanup[-1].facts.copyDisposition=="retained-unlanded"' \
+    "$home/data/$id/lifecycle.json" >/dev/null || fail 'completed cleanup lost the retained-unlanded disposition'
+  assert_present "$case_dir/wt/unlanded.txt" 'completed cleanup discarded unlanded content'
+  assert_absent "$home/state/$id.meta" \
+    "completed cleanup retained the retired task record"
+  pass "completed cleanup retains unlanded work while retiring its window and task record"
 }
 
 test_environment_selected_adapter_is_not_forced_to_markdown() {
@@ -3117,11 +3123,11 @@ test_manual_backend_home_dispatches_and_completes_without_touching_the_backlog()
 if [ "${FM_BACKLOG_ENROLLED_ONLY:-0}" = 1 ]; then
   test_immediate_child_absolute_data_dispatches_and_completes
   test_bare_relative_data_dispatches_and_completes
-  test_interrupted_destructive_cleanup_leaves_a_recoverable_close
+  test_completed_cleanup_bookkeeping_retry_preserves_resources
   test_failed_launch_delivery_does_not_confirm_goal_action
   test_home_without_a_backlog_dispatches_and_completes
   test_dispatch_and_completion_are_structural
-  test_refused_directory_cleanup_keeps_the_goal_closed
+  test_unlanded_copy_is_retained_while_completed_cleanup_finishes
   test_manual_backend_home_dispatches_and_completes_without_touching_the_backlog
   exit 0
 fi
@@ -3177,7 +3183,7 @@ test_control_character_data_path_is_refused_before_cleanup
 test_completion_preserves_records_when_meta_removal_fails
 test_completion_fails_loudly_and_records_the_close_it_still_owes
 test_completion_records_a_codebase_mr_without_fabricating_a_pr_link
-test_interrupted_destructive_cleanup_leaves_a_recoverable_close
+test_completed_cleanup_bookkeeping_retry_preserves_resources
 test_completion_refuses_a_close_target_symlinked_to_a_directory
 test_completion_fails_when_its_close_marker_cannot_be_removed
 test_recovery_retries_when_a_close_marker_cannot_be_removed
@@ -3225,6 +3231,6 @@ test_spawn_refuses_an_unsafe_tasks_config_before_exempting_a_missing_backlog
 test_spawn_refuses_a_data_directory_symlinked_outside_the_home
 test_configured_adapter_refuses_a_data_directory_outside_the_home
 test_dispatch_and_completion_are_structural
-test_refused_directory_cleanup_keeps_the_goal_closed
+test_unlanded_copy_is_retained_while_completed_cleanup_finishes
 test_environment_selected_adapter_is_not_forced_to_markdown
 test_manual_backend_home_dispatches_and_completes_without_touching_the_backlog

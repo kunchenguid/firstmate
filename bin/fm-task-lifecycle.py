@@ -180,7 +180,7 @@ def complete_cleanup_facts(facts):
     """Known postconditions, not incidental extra diagnostic fields, prove completion."""
     return (isinstance(facts, dict) and facts.get('taskRecordRemoved') is True and
             facts.get('endpointConfirmedGone') is True and facts.get('bookkeepingComplete') is True and
-            facts.get('copyDisposition') == 'returned-or-already-absent')
+            facts.get('copyDisposition') in ('returned-or-already-absent', 'retained-shared', 'retained-primary', 'retained-dirty', 'retained-unlanded', 'retained-unverified'))
 
 
 def stamp(value):

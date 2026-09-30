@@ -35,6 +35,8 @@ const read = file => JSON.parse(fs.readFileSync(file, 'utf8'));
 const exists = file => fs.existsSync(file);
 const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const fail = message => { throw Error(message); };
+const cleanupDispositions = new Set(['returned-or-already-absent','retained-shared','retained-primary','retained-dirty','retained-unlanded','retained-unverified']);
+const completeCleanupEvidence = evidence => evidence?.taskRecordRemoved===true && evidence.endpointConfirmedGone===true && evidence.bookkeepingComplete===true && cleanupDispositions.has(evidence.copyDisposition);
 function fields(value, names) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(k => !names.includes(k))) fail('unsupported operation fields');
 }
@@ -95,7 +97,7 @@ export function validateOperations(value) {
   return {expiresAt:value.expiresAt,authority:value.authority,steps};
 }
 function git(project,...args) {return execFileSync('git',['-C',project,...args],{encoding:'utf8',timeout:10000,stdio:['ignore','pipe','pipe']}).trim();}
-function metadata(home,task) {
+function metadata(home,task,cleanup=false) {
   const file=path.join(home,'state',task+'.meta');
   if(fs.lstatSync(file).isSymbolicLink()) fail('symlink task metadata refused');
   const text=fs.readFileSync(file,'utf8'), data=Object.create(null), audit=[];
@@ -103,6 +105,7 @@ function metadata(home,task) {
     if(line.startsWith('#')) continue;
     const at=line.indexOf('='); if(at<1) continue;
     const key=line.slice(0,at);
+    if(cleanup && !['spawn_gen','kind','worktree','project','backend','window','herdr_session','herdr_pane_id','herdr_workspace_id','herdr_tab_id','endpoint_task_id'].includes(key)) continue;
     if(key==='decisions_reviewed' || key==='decision_keys') audit.push([key,line.slice(at+1)]);
     else if(Object.hasOwn(data,key)) fail('duplicate task metadata field');
     data[key]=line.slice(at+1);
@@ -120,10 +123,10 @@ function metadata(home,task) {
       previous=keys;
     }
   } else if(new Set(audit.map(([key])=>key)).size!==audit.length) fail('duplicate task metadata field');
-  if(!data.spawn_gen) fail('operation requires an existing task generation; legacy identity refused');
-  // Bind the entire record, including historical audit lines and comments, so
-  // even an edit that preserves the effective latest values refuses execution.
-  return {sha256:createHash('sha256').update(text).digest('hex'),...Object.fromEntries(['pr','pr_head','spawn_gen','kind','worktree','project','backend','window','herdr_session','herdr_pane_id','herdr_workspace_id','herdr_tab_id','endpoint_task_id','harness','tmux_pane_id'].map(k=>[k,data[k]??'']))};
+  if(!cleanup && !data.spawn_gen) fail('operation requires an existing task generation; legacy identity refused');
+  // Merge binds the entire audit record. Cleanup binds structural ownership;
+  // unrelated completion history cannot invalidate an exact cleanup target.
+  return {...(cleanup?{}:{sha256:createHash('sha256').update(text).digest('hex')}),...Object.fromEntries(['pr','pr_head','spawn_gen','kind','worktree','project','backend','window','herdr_session','herdr_pane_id','herdr_workspace_id','herdr_tab_id','endpoint_task_id','harness','tmux_pane_id'].map(k=>[k,data[k]??'']))};
 }
 function binaryIdentity(destination) {
   const file=path.join(destination,'shellcheck');
@@ -161,9 +164,8 @@ export function bindOperations(home,operations) {
       const canonicalUrl=execFileSync('bash',['-c','. "$1"; fm_pr_url_parse "$2" || exit 1; printf "%s" "$FM_PR_URL"','short-url',library,step.url],{encoding:'utf8',timeout:10000});
       if(canonicalUrl!==step.url) fail('merge requires the canonical owner URL');
     }
-    const identity=metadata(home,step.task);
+    const identity=metadata(home,step.task,step.action==='cleanup');
     if(step.action==='merge' && (identity.pr!==step.url || !/^[a-f0-9]{40,64}$/.test(identity.pr_head))) fail('merge requires the exact registered URL and candidate head before granting authority');
-    if(step.action==='cleanup' && exists(identity.worktree) && fs.realpathSync(identity.worktree)===fs.realpathSync(identity.project)) fail('cleanup cannot target the project clone');
     if(step.action==='cleanup' && identity.backend!=='herdr') fail('short cleanup requires the Herdr owner with confirmed endpoint removal; this backend is unsupported');
     if(identity.kind==='secondmate') fail('short operations do not retire secondmate homes');
     return identity;
@@ -205,7 +207,7 @@ export function operationCurrent(home,request,index,{terminal=false}={}) {
     }
     if(git(step.project,'remote','get-url','origin')!==binding.origin || fs.realpathSync(git(step.project,'rev-parse','--absolute-git-dir'))!==binding.gitDir) fail('operation project identity changed');
   } else if(step.destination) {canonical(step.destination);if(!equal(binaryIdentity(step.destination),binding.previous)) fail('install target identity changed');}
-  else if(!equal(metadata(home,step.task),binding)) fail('operation task/process/generation identity changed');
+  else if(!equal(metadata(home,step.task,step.action==='cleanup'),binding)) fail('operation task/process/generation identity changed');
   return step;
 }
 
@@ -217,12 +219,12 @@ export function operationReceipts(dir) {
     const receipt=read(path.join(dir,x)), step=request.input.operations?.steps[receipt.index];
     if(!step || x!==`operation-${receipt.index}.receipt.json` || receipt.id!==request.id || receipt.nonce!==request.nonce || !['completed','refused'].includes(receipt.state) || receipt.action!==commandFor(step).action) fail('malformed operation receipt');
     if(receipt.settlement!==undefined) {
-      if(receipt.settlement!=='dead-owner-codebase-readback'||receipt.action!=='merge') fail('malformed operation settlement');
-      recordedProcessIdentity(receipt.effectExecutor,'settled merge executor');
+      if(!((receipt.settlement==='dead-owner-codebase-readback'&&receipt.action==='merge')||(receipt.settlement==='dead-owner-cleanup-readback'&&receipt.action==='cleanup'))) fail('malformed operation settlement');
+      recordedProcessIdentity(receipt.effectExecutor,`settled ${receipt.action} executor`);
     }
     if(receipt.state==='completed') {
       const e=receipt.evidence;
-      if(!e || ((receipt.action==='sync'||receipt.action==='merge') && !/^[a-f0-9]{40,64}$/.test(e.head)) || (receipt.action==='install-shellcheck' && (!/^[a-f0-9]{64}$/.test(e.sha256)||typeof e.version!=='string')) || (receipt.action==='cleanup' && (e.taskRecordRemoved!==true || e.endpointConfirmedGone!==true || e.bookkeepingComplete!==true || e.copyDisposition!=='returned-or-already-absent'))) fail('malformed operation postcondition');
+      if(!e || ((receipt.action==='sync'||receipt.action==='merge') && !/^[a-f0-9]{40,64}$/.test(e.head)) || (receipt.action==='install-shellcheck' && (!/^[a-f0-9]{64}$/.test(e.sha256)||typeof e.version!=='string')) || (receipt.action==='cleanup' && !completeCleanupEvidence(e))) fail('malformed operation postcondition');
     }
     return receipt;
   });
@@ -254,6 +256,54 @@ function codebaseMergeReadback(root,url,head) {
   const parts=output.split('\t');
   if(parts.length!==2||parts[0]!==head||!(/^[a-f0-9]{40}$|^[a-f0-9]{64}$/).test(parts[1])) fail('Codebase merge readback returned invalid evidence');
   return {head:parts[0],mergeCommit:parts[1]};
+}
+
+function cleanupLifecycleReadback(home,root,step,binding) {
+  if(binding.backend!=='herdr'||!binding.spawn_gen||(binding.endpoint_task_id&&binding.endpoint_task_id!==step.task)) fail('cleanup settlement task binding is invalid');
+  const meta=path.join(home,'state',step.task+'.meta');
+  try {fs.lstatSync(meta);return null;}
+  catch(error) {if(error.code!=='ENOENT') throw error;}
+  const data=fs.realpathSync(process.env.FM_DATA_OVERRIDE??path.join(home,'data'));
+  const lifecycleFile=path.join(data,step.task,'lifecycle.json');
+  if(!exists(lifecycleFile)) return null;
+  const lifecycleBytes=fs.readFileSync(lifecycleFile,'utf8');
+  let record;
+  try {
+    record=JSON.parse(execFileSync('python3',[path.join(root,'bin/fm-task-lifecycle.py'),'read',step.task],{encoding:'utf8',env:{...process.env,FM_HOME:home,FM_STATE_OVERRIDE:path.join(home,'state'),FM_DATA_OVERRIDE:data},stdio:['ignore','pipe','pipe']}));
+  } catch(error) {
+    const detail=String(error.stderr??'').trim();
+    fail(detail?`cleanup lifecycle readback refused: ${detail}`:'cleanup lifecycle readback refused');
+  }
+  if(record?.execution_generation!==binding.spawn_gen||!['accepted','archived'].includes(record.disposition)) fail('cleanup lifecycle generation or disposition changed');
+  const proofs=(record.owner_receipts?.cleanup??[]).filter(proof=>proof?.execution_generation===binding.spawn_gen&&completeCleanupEvidence(proof.facts));
+  if(proofs.length===0) return null;
+  if(proofs.length!==1) fail('cleanup lifecycle has no unique completed owner receipt');
+  return {evidence:proofs[0].facts,lifecycleFile,lifecycleBytes};
+}
+
+function settleCleanupLocked(home,request,started,index,step) {
+  const root=path.dirname(path.dirname(fileURLToPath(import.meta.url))),dir=path.join(home,'state/short-agents',request.id);
+  const requestFile=path.join(dir,'request.json'),resultFile=path.join(dir,'result.json'),intentFile=path.join(dir,`operation-${index}.intent.json`),effectFile=path.join(dir,`operation-${index}.effect.json`),receiptFile=path.join(dir,`operation-${index}.receipt.json`);
+  if(!exists(resultFile)) return null;
+  const resultBytes=fs.readFileSync(resultFile,'utf8'),result=JSON.parse(resultBytes),binding=request.operationBindings?.[index];
+  if(result.id!==request.id||!['blocked','cancelled','timeout','interrupted','budget'].includes(result.state)||result.evidence!==dir||!Number.isSafeInteger(result.finishedAt)) fail('cleanup settlement requires the preserved unsuccessful terminal result');
+  if(!binding||step.action!=='cleanup') return null;
+  recordedProcessIdentity(started.identity,'short runner');
+  const intent=read(intentFile),effect=read(effectFile);
+  fields(intent,['nonce','index','step','at']);fields(effect,['id','nonce','index','owner','at']);
+  if(intent.nonce!==request.nonce||intent.index!==index||!equal(intent.step,step)||!Number.isSafeInteger(intent.at)) fail('operation intent identity changed');
+  if(effect.id!==request.id||effect.nonce!==request.nonce||effect.index!==index||!Number.isSafeInteger(effect.at)) fail('operation effect identity changed');
+  recordedProcessIdentity(effect.owner,'cleanup executor');
+  if(!equal(effect.owner,started.identity)||sameLiveProcess(effect.owner)) fail('cleanup settlement requires the original runner to be dead');
+  if(!(request.acceptedAt<=started.at&&started.at<=intent.at&&intent.at<=effect.at&&effect.at<=result.finishedAt)) fail('short cleanup settlement chronology is invalid');
+  const expectedMarkers=resources(home,step).map(({file,target})=>({file,record:{home,id:request.id,nonce:request.nonce,index,target}}));
+  for(const marker of expectedMarkers) if(!equal(read(marker.file),marker.record)) fail('operation reservation identity changed');
+  const readback=cleanupLifecycleReadback(home,root,step,binding);
+  if(!readback) return null;
+  if(!equal(read(requestFile),request)||fs.readFileSync(resultFile,'utf8')!==resultBytes||!equal(read(intentFile),intent)||!equal(read(effectFile),effect)||fs.readFileSync(readback.lifecycleFile,'utf8')!==readback.lifecycleBytes) fail('short cleanup settlement evidence changed during readback');
+  for(const marker of expectedMarkers) if(!equal(read(marker.file),marker.record)) fail('operation reservation identity changed during readback');
+  if(!publish(receiptFile,{id:request.id,nonce:request.nonce,index,action:'cleanup',state:'completed',at:Date.now(),executor:processIdentity(process.pid),settlement:'dead-owner-cleanup-readback',effectExecutor:effect.owner,evidence:readback.evidence})) fail('operation completion receipt changed during settlement');
+  return operationReceipts(dir).find(value=>value.index===index);
 }
 
 function settleMergeLocked(home,root,id,index,expectedMergeCommit) {
@@ -331,11 +381,13 @@ function reconcileLocked(home,request) {
   if(sameLiveProcess(started.identity)) return;
   const receipts=operationReceipts(dir);
   for(const [index,step] of request.input.operations.steps.entries()) {
-    const receipt=receipts.find(r=>r.index===index),intentFile=path.join(dir,`operation-${index}.intent.json`);
+    let receipt=receipts.find(r=>r.index===index);
+    const intentFile=path.join(dir,`operation-${index}.intent.json`),effectFile=path.join(dir,`operation-${index}.effect.json`);
+    if(!receipt&&step.action==='cleanup'&&exists(effectFile)) receipt=settleCleanupLocked(home,request,started,index,step);
     if(receipt?.state==='completed') {
-      if(sameLiveProcess(receipt.executor)) continue;
+      if(receipt.settlement===undefined&&sameLiveProcess(receipt.executor)) continue;
     } else {
-      if(exists(path.join(dir,`operation-${index}.effect.json`))) continue;
+      if(exists(effectFile)) continue;
       if(exists(intentFile)) {
         const intent=read(intentFile);
         if(receipt?.state!=='refused' || intent.nonce!==request.nonce || intent.index!==index || !equal(intent.step,step)) continue;
@@ -416,6 +468,9 @@ export async function executeOperations(service,request,check) {
       }
       operationCurrent(service.home,request,index);
       if(!publish(intentFile,{nonce:request.nonce,index,step,at:Date.now()})) fail('operation intent already exists');
+      // Completed cleanup does not use actor-binding admission inside teardown.
+      // Preserve uncertainty before handing the exact request to that owner.
+      if(step.action==='cleanup') publish(path.join(dir,`operation-${index}.effect.json`),{id:request.id,nonce:request.nonce,index,owner:processIdentity(process.pid),at:Date.now()});
       const env={...process.env,FM_HOME:service.home,FM_ROOT_OVERRIDE:service.root,FM_STATE_OVERRIDE:path.join(service.home,'state'),FM_CONFIG_OVERRIDE:path.join(service.home,'config'),FM_SUPERVISION_ACTOR:'short',FM_SHORT_TASK:request.id,FM_SHORT_STEP:String(index),FM_FLEET_PRUNE:'0'};
       // Never inherit caller overrides that could redirect a guarded owner.
       for(const key of ['FM_DATA_OVERRIDE','FM_PROJECTS_OVERRIDE','FM_LEASE_HOLDER_PID']) delete env[key];

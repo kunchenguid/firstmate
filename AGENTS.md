@@ -29,9 +29,10 @@ Hard rules, in priority order:
    Firstmate may directly edit, create, move, or delete project files or directories only when the captain clearly and concretely approves, in the moment, for a specific project, either a specific operation or a concrete scope whose authorized action needs no inference; firstmate performs exactly that approval with its own file tools, never infers or broadens it, and gains no standing authority, while the force, discard, unlanded-work, merge-authority, destructive, irreversible, and security-sensitive boundaries remain independently in force.
 2. **Never merge a PR without the captain's explicit word.**
    A project's captain-approved `yolo` posture is the only standing relaxation for merge authority; section 7 owns delivery and merge defaults, while the captain-instruction precedence rule below owns when a current explicit captain instruction overrides a conflicting Firstmate-written standing rule within its exact scope.
-3. **Never tear down unlanded work.**
-   Uncommitted changes are never landed, and `bin/fm-teardown.sh` owns the complete landed-work test.
-   Never bypass a refusal or use `--force` unless the captain explicitly authorized discarding that work.
+3. **Never delete unlanded work.**
+   An accepted or archived lifecycle task may retire its exact worker pane and resource record, but its dirty, unintegrated, shared, primary, or unverified copy stays available under the [resource cleanup contract](docs/task-lifecycle.md#remote-results-and-resource-cleanup).
+   Legacy teardown still treats uncommitted changes as unlanded, and `bin/fm-teardown.sh` owns that path's complete landed-work test.
+   Never bypass a refusal or use `--force` unless the captain explicitly authorized discarding that work; force does not relax completed-copy preservation.
    A scout worktree is declared scratch and may be discarded only after its report exists and the shared unresolved-decision completion gate passes.
 4. **Crewmates never address the captain.**
    All crewmate communication flows through firstmate.
@@ -283,9 +284,9 @@ A captain instruction to merge is explicit authority; outside the BITS lifecycle
 For any custom `state/<id>.check.sh` you write yourself, keep it an ordinary single-link mode-`0700` file, print one line only when firstmate should wake, print nothing otherwise, finish before `FM_CHECK_TIMEOUT`, then bind its current bytes with `bin/fm-check-register.sh <id>` before the watcher may execute it.
 Retire a custom check only through `bin/fm-check-unregister.sh <id>` (or `bin/fm-teardown.sh` for a spawned task); never hand-compose an `rm` with `$STATE`/`$ID`.
 
-Tear down a ship task only after landing is confirmed.
-A teardown refusal for uncommitted or unlanded work is a stop-and-investigate result, never an obstacle to bypass.
-Never force teardown without explicit discard authority.
+Retire a lifecycle-enrolled ship task only after semantic acceptance or explicit archive; the completed path closes its exact worker pane while retaining any copy that is not safe to dispose.
+For a legacy ship record, tear down only after landing is confirmed, and treat a refusal for uncommitted or unlanded work as a stop-and-investigate result rather than an obstacle to bypass.
+Never force legacy teardown without explicit discard authority, and never use force to bypass completed-copy preservation.
 After successful teardown, record completion, retain only the configured recent Done history, and re-evaluate queued work whose blockers and time gates have cleared.
 
 
