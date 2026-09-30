@@ -1682,7 +1682,7 @@ fm_treehouse_slot_owner_claim() {  # <worktree> <task-id> <home>
   mv -f "$tmp" "$marker" 2>/dev/null || { rm -f "$tmp"; return 1; }
 }
 
-# Read the claim on a pool slot and compare it with a task id.
+# Read the claim on a pool slot and compare its physical home/task identity.
 # Sets FM_TREEHOUSE_SLOT_OWNER to one of:
 #   mine   - the claim names this physical home and task id
 #   other  - the claim names a different home/task pair

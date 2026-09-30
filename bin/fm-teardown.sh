@@ -131,11 +131,14 @@
 # endpoint, slot, claim, tasktmp, and backlog mutations. Preserve every other
 # artifact and backlog item for operator reconciliation; this does not declare
 # the work complete. The archive must not already exist and state must resolve
-# outside the slot. Unsupported or ambiguous endpoint probes refuse. Inspect the
+# outside the entire pool-slot directory, including the checkout's siblings.
+# Unsupported or ambiguous endpoint probes refuse. Inspect the
 # archive and retained task data before reconciling the backlog or reusing the id;
 # do not restore the stale worktree assignment over a successor's live claim.
 # Forced whole-home retirement refuses reassigned child slots: recover the child
-# individually first, because deleting its home cannot preserve these artifacts.
+# individually first. A retained state/*.reassigned-record also blocks ordinary
+# and forced removal of its home or an ancestor home; reconcile the retained
+# unlanded work before retiring the home, because deletion loses its evidence.
 # Identical task ids in different homes refuse rather than closing a possibly
 # shared endpoint; home aliases are compared physically.
 # A claim that cannot be read proves nothing either way and refuses; inspect or
