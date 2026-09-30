@@ -5401,14 +5401,14 @@ EOF
 
 test_prune_seeded_tab_label_reverification() {
   local dir log state fb label agent expected remaining i=0
-  for label in '1' '1 · firstmate' 'my shell' '1-other'; do
+  for label in '1' '1 · firstmate' '1 · my shell' 'my shell' '1-other'; do
     for agent in idle working; do
       i=$((i + 1))
       dir="$TMP_ROOT/prune-label-$i"; mkdir -p "$dir"; log="$dir/log"; state="$dir/state.json"; : > "$log"
       fb=$(make_herdr_statefake "$dir")
       jq -n --arg label "$label" --arg agent "$agent" '{next:3,workspaces:[{workspace_id:"w1",label:"firstmate"}],tabs:[{tab_id:"w1:t1",label:$label,workspace_id:"w1",pane_id:"w1:p1"},{tab_id:"w1:t2",label:"1",workspace_id:"w1",pane_id:"w1:p2"}],agent_status:{"w1:p1":$agent}}' > "$state"
       PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" HERDR_SESSION=fmtest \
-        bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_prune_seeded_default_tab fmtest w1 w1:t1' "$ROOT" \
+        bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_prune_seeded_default_tab fmtest w1 w1:t1 direct /work/firstmate' "$ROOT" \
         || fail "seeded prune failed for label '$label', agent '$agent'"
       expected=1
       if [ "$agent" = idle ]; then
@@ -5423,7 +5423,7 @@ test_prune_seeded_tab_label_reverification() {
       fi
     done
   done
-  pass "seeded prune accepts default and cwd-derived labels, preserves renamed and working tabs, and closes only the captured id"
+  pass "seeded prune accepts default and exact creation-cwd-derived labels, preserves renamed and working tabs, and closes only the captured id"
 }
 
 test_prune_refuses_a_working_agent_pane_defense_in_depth() {
