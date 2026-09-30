@@ -987,6 +987,36 @@ w = { tokens: [],
   pass "T17 a T3 mate is routed to the re-read message by both passes, never restarted"
 }
 
+# --- T12: a persistence answer is bound to the generation it was asked of ---
+test_persist_answer_from_an_earlier_generation_nudges() {
+  local dir out rc
+  dir=$(new_case earlier-generation)
+  add_local_mate "$dir" sm1
+  printf 'spawn_gen=g1\n' >> "$dir/home/state/sm1.meta"
+  # Automatic recovery replaces the mate after the persist request went out
+  # and before its answer releases the restart.
+  cat > "$dir/fake/on-doorbell" <<SH
+#!/usr/bin/env bash
+perl -pi -e 's/^spawn_gen=.*/spawn_gen=g2/' "$dir/home/state/sm1.meta"
+SH
+  chmod +x "$dir/fake/on-doorbell"
+  arm_answer "$dir" sm1
+  out=$(run_restart "$dir" sm1); rc=$?
+  expect_code 3 "$rc" "a restart whose persistence belonged to an earlier generation"$'\n'"$out"
+  assert_contains "$out" "nudged: sm1:" "the newer incarnation was not nudged"
+  assert_contains "$out" "belonged to generation g1" "the nudge did not name the earlier generation"
+  assert_no_grep '^/exit$' "$dir/fake/literal" "the newer incarnation was stopped on an old acknowledgement"
+
+  dir=$(new_case matching-generation)
+  add_local_mate "$dir" sm1
+  printf 'spawn_gen=g1\n' >> "$dir/home/state/sm1.meta"
+  arm_answer "$dir" sm1
+  out=$(run_restart "$dir" sm1); rc=$?
+  expect_code 0 "$rc" "a generation-matching persistence answer"$'\n'"$out"
+  assert_equals 1 "$(grep -c '^/exit$' "$dir/fake/literal")" "a matching answer did not permit exactly one restart"
+  pass "T12 a persistence answer from an earlier generation nudges instead of stopping its successor"
+}
+
 test_persist_gates_and_asks_only_for_open_records
 test_persist_precedes_restart
 test_arrived_answer_precedes_deadline_check
@@ -1012,4 +1042,5 @@ test_already_current_mate_restarts_end_to_end
 test_already_current_unprovable_mate_stays_on_the_nudge_path
 test_t3_mate_stays_on_the_nudge_path
 
+test_persist_answer_from_an_earlier_generation_nudges
 echo "# all fm-secondmate-restart tests passed"

@@ -65,24 +65,56 @@ argv_b64=$4
 command_fields=$(perl -MMIME::Base64=decode_base64 -e '
   my $data=decode_base64($ARGV[0]);
   my @args=split(/\0/, $data);
-  print join("\t", map { defined $_ ? $_ : "" } @args[0..5]);
+  my ($op, $prev) = ("-", "-");
+  for (my $i = 0; $i < @args; $i++) {
+    $op = $args[$i + 1] if $args[$i] eq "--operation";
+    $prev = $args[$i + 1] if $args[$i] eq "--previous";
+  }
+  print join("\t", (map { defined $_ && $_ ne "" ? $_ : "-" } @args[0..5]), $op, $prev);
 ' "$argv_b64")
-IFS=$'\t' read -r cmd action id harness model effort <<EOF
+IFS=$'\t' read -r cmd action id harness model effort op prev <<FIELDS
 $command_fields
-EOF
+FIELDS
 [ "$cmd" = fm-remote-secondmate-control.sh ] || exit 93
+[ "$op" != - ] || op=
+# disposition <disposition> <startup> <old-stopped> [actual] [requested]
+disposition() {
+  local actual=${4:-} requested=${5:-$op} prevj=null route=null actualj=null
+  [ "$prev" = - ] || prevj="\"$prev\""
+  if [ -n "$actual" ]; then
+    actualj="\"$actual\""
+    route='{"placement":"remote","backend":"herdr","target":"fm-remote:w1:p1","home":"/srv/fm-home","host":null,"remote_root":null,"spawn_gen":null}'
+  fi
+  printf 'seat_disposition={"schema":"fm-remote-seat-operation.v2","task":"%s","operation":"%s","requested_generation":"%s","actual_generation":%s,"previous_generation":%s,"disposition":"%s","startup_confirmed":%s,"old_stopped":%s,"route":%s,"actual_model":"%s","complete":true}\n' \
+    "$id" "$op" "$requested" "$actualj" "$prevj" "$1" "$2" "$3" "$route" "$model"
+}
+if [ "$action" = disposition ]; then
+  # argv: disposition <id> --operation <op>
+  op=$model
+  model=pool-model-a
+  case "$FM_FAKE_DISPOSITION" in
+    dead) disposition dead-after-start true false "$op" ;;
+    dead-other) disposition dead-after-start true false other-generation other-generation ;;
+    *) disposition unknown false false ;;
+  esac
+  exit 0
+fi
 [ "$action" = relaunch ] || exit 94
+old_stopped=false
+[ "$prev" = - ] || old_stopped=true
 case "$FM_FAKE_RELAUNCH_MODE" in
   refuse)
     printf 'error: unverified remote secondmate harness: %s\n' "$harness" >&2
     exit 1
     ;;
   confirmed-failure)
+    [ -z "$op" ] || disposition prelaunch false false >&2
     printf 'relaunch_failure=prelaunch\n' >&2
     printf 'error: unverified remote secondmate harness: %s\n' "$harness" >&2
     exit 1
     ;;
   launch-failure)
+    [ -z "$op" ] || disposition cancelled false "$old_stopped" >&2
     printf 'relaunch_failure=launch\n' >&2
     printf 'error: replacement launch failed; no agent is running\n' >&2
     exit 1
@@ -91,8 +123,21 @@ case "$FM_FAKE_RELAUNCH_MODE" in
     printf 'error: remote relaunch result is unknown\n' >&2
     exit 255
     ;;
+  unmarked-failure)
+    printf 'relaunch_failure=prelaunch\n' >&2
+    printf 'error: a refusal that carries no operation-bound disposition\n' >&2
+    exit 1
+    ;;
+  wrong-token)
+    op=some-other-operation
+    disposition prelaunch false false >&2
+    exit 1
+    ;;
   publication-failure)
-    chmod 0500 "$FM_FAKE_RELAUNCH_STATE"
+    # The host starts the candidate, but the parent cannot publish it: the
+    # route block it would republish from never arrives.
+    disposition started true "$old_stopped" "$op"
+    exit 0
     ;;
   confirm-other)
     harness=claude
@@ -109,29 +154,54 @@ printf 'herdr_session=fm-remote\n'
 printf 'harness=%s\n' "$harness"
 printf 'model=%s\n' "$model"
 printf 'effort=%s\n' "$effort"
+if [ -n "$op" ]; then
+  printf 'spawn_gen=%s\n' "$op"
+  disposition started true "$old_stopped" "$op"
+fi
 SH
 chmod +x "$FAKEBIN/fake-ssh"
 
 run_relaunch() {  # <args...>
   env FM_HOME="$HOME_DIR" FM_SSH_BIN="$FAKEBIN/fake-ssh" \
-    FM_FAKE_RELAUNCH_MODE="${FM_FAKE_RELAUNCH_MODE:-}" \
-    FM_FAKE_RELAUNCH_STATE="$HOME_DIR/state" \
+    FM_FAKE_RELAUNCH_MODE="${FM_FAKE_RELAUNCH_MODE:-}" FM_FAKE_DISPOSITION="${FM_FAKE_DISPOSITION:-}" \
     "$ROOT/bin/fm-remote-secondmate-relaunch.sh" "$@" 2>&1
 }
 
-seed_pool() {
+seed_pool() {  # a primary pool of one whose only remote has a complete, empty certificate
   local digest
   rm -rf "$HOME_DIR/state/fleet-seats"
   mkdir -p "$HOME_DIR/state/fleet-seats"
   printf '{"pools":[{"name":"shared","capacity":1,"models":["pool-model-a"]}]}\n' > "$HOME_DIR/config/fleet-seats"
   digest=$(jq -cS . "$HOME_DIR/config/fleet-seats" | cksum | tr -s ' ' '-' | cut -d- -f1-2)
-  printf '%s\n' "$digest" > "$HOME_DIR/state/fleet-seats/remote-ios.policy"
-  : > "$HOME_DIR/state/fleet-seats/remote-ios.holders"
+  printf '{"schema":"fm-fleet-seats-serve.v2","policy_digest":"%s","epoch":"rtest.1","complete":true,"holders":[]}\n' \
+    "$digest" > "$HOME_DIR/state/fleet-seats/remote-ios.cert"
 }
 
-probe_pool() {
-  FM_HOME="$HOME_DIR" "$ROOT/bin/fm-fleet-seats.sh" reserve probe \
-    --harness pi --model pool-model-a --holder-pid "$$" 2>&1
+seats() {
+  env FM_HOME="$HOME_DIR" FM_SSH_BIN="$FAKEBIN/fake-ssh" FM_FAKE_DISPOSITION="${FM_FAKE_DISPOSITION:-}" \
+    "$ROOT/bin/fm-fleet-seats.sh" "$@"
+}
+
+probe_pool() {  # reserve for another worker, then give the probe back
+  local out rc gen
+  gen="probe$(date +%s)$RANDOM$RANDOM"
+  out=$(seats reserve probe --generation "$gen" --harness pi --model pool-model-a --holder-pid "$$" 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || seats release probe --generation "$gen" --reason prelaunch >/dev/null 2>&1
+  printf '%s\n' "$out"
+  return "$rc"
+}
+
+ios_generation() {  # the generation the parent record names
+  sed -n 's/^fleet_seat_generation=//p' "$HOME_DIR/state/ios.meta" | tail -1
+}
+
+ios_lifecycle() {  # <generation>
+  seats show ios | jq -r --arg g "$1" '.incarnations[] | select(.generation == $g) | .lifecycle'
+}
+
+ios_candidate() {  # the newest incarnation in the ledger
+  seats show ios | jq -r '.incarnations | last | .generation'
 }
 
 # --- a successful relaunch republishes the parent's own route record --------
@@ -158,7 +228,7 @@ pass "a successful remote relaunch republishes the parent's harness, model, and 
 
 # --- the parent records what the host confirmed, not what it was asked ------
 reset_meta
-FM_FAKE_RELAUNCH_MODE=confirm-other
+FM_FAKE_RELAUNCH_MODE='confirm-other'
 OUT=$(run_relaunch ios default default default); RC=$?
 unset FM_FAKE_RELAUNCH_MODE
 expect_code 0 "$RC" "a relaunch whose host resolves a different identity should succeed"$'\n'"$OUT"
@@ -173,7 +243,7 @@ pass "a remote relaunch records the identity the host confirmed"
 # --- a refused relaunch leaves the parent's record untouched -----------------
 reset_meta
 cp "$HOME_DIR/state/ios.meta" "$TMP/ios-before-refusal.meta"
-FM_FAKE_RELAUNCH_MODE=refuse
+FM_FAKE_RELAUNCH_MODE='refuse'
 OUT=$(run_relaunch ios notaharness - -); RC=$?
 unset FM_FAKE_RELAUNCH_MODE
 [ "$RC" -ne 0 ] || fail "a refused host relaunch must not be reported as successful"
@@ -240,90 +310,203 @@ OUT=$(run_relaunch ios claude pool-model-a medium); RC=$?
 expect_code 0 "$RC" "a seated remote relaunch should succeed: $OUT"
 assert_grep 'model=pool-model-a' "$HOME_DIR/state/ios.meta" \
   "the successful relaunch did not publish its pooled model"
+G1=$(ios_generation)
+[ -n "$G1" ] || fail "the successful relaunch did not publish its seat generation"
+assert_equals confirmed "$(ios_lifecycle "$G1")" "the host's started disposition did not confirm the seat"
 OUT=$(probe_pool); RC=$?
 expect_code 4 "$RC" "a worker after a successful pooled remote relaunch"
-pass "a successful remote relaunch keeps its fleet seat"
+pass "a successful remote relaunch confirms and keeps its fleet seat"
 
-reset_meta
-perl -pi -e 's/^model=.*/model=pool-model-a/' "$HOME_DIR/state/ios.meta"
-seed_pool
+# Same pool at full capacity: the replacement is the same holder, so it needs
+# no second seat, and the old generation is released only because the host
+# proved it stopped.
 OUT=$(run_relaunch ios claude pool-model-a medium); RC=$?
 expect_code 0 "$RC" "an existing pooled supervisor should keep its full-pool seat: $OUT"
+G2=$(ios_generation)
+[ "$G2" != "$G1" ] || fail "a same-pool relaunch reused the old generation"
+assert_equals released "$(ios_lifecycle "$G1")" "the proven-stopped predecessor was not released"
+assert_equals confirmed "$(ios_lifecycle "$G2")" "the replacement was not confirmed"
 OUT=$(probe_pool); RC=$?
 expect_code 4 "$RC" "a worker after a same-model remote relaunch"
-pass "a same-model remote relaunch keeps its existing seat"
+pass "a same-pool remote relaunch replaces one seat without dropping the count"
 
-reset_meta
-seed_pool
-FM_FAKE_RELAUNCH_MODE=confirmed-failure
+# A token-scoped prelaunch refusal releases only the candidate.
+FM_FAKE_RELAUNCH_MODE='confirmed-failure'
 OUT=$(run_relaunch ios notaharness pool-model-a medium); RC=$?
 unset FM_FAKE_RELAUNCH_MODE
 [ "$RC" -ne 0 ] || fail "a confirmed host refusal succeeded"
 assert_contains "$OUT" "unverified remote secondmate harness" "the confirmed host refusal was lost"
+assert_equals released "$(ios_lifecycle "$(ios_candidate)")" "the refused candidate kept its seat"
+assert_equals confirmed "$(ios_lifecycle "$G2")" "a prelaunch refusal disturbed the running generation"
+assert_equals "$G2" "$(ios_generation)" "a prelaunch refusal changed the parent record"
 OUT=$(probe_pool); RC=$?
-expect_code 0 "$RC" "a worker after a confirmed host refusal: $OUT"
-pass "a confirmed prelaunch failure releases the relaunch seat"
+expect_code 4 "$RC" "a worker while the untouched old supervisor still runs"
+pass "a prelaunch refusal releases only its own candidate and keeps the old seat"
 
-reset_meta
-seed_pool
-FM_FAKE_RELAUNCH_MODE=launch-failure
-OUT=$(run_relaunch ios claude pool-model-a medium); RC=$?
-unset FM_FAKE_RELAUNCH_MODE
-[ "$RC" -ne 0 ] || fail "a confirmed replacement launch failure succeeded"
-assert_contains "$OUT" "replacement launch failed" "the host's confirmed launch failure was lost"
-OUT=$(probe_pool); RC=$?
-expect_code 0 "$RC" "a worker after confirmed replacement launch failure: $OUT"
-pass "a confirmed replacement launch failure releases the relaunch seat"
+# Unmarked, wrong-token, and transport failures never free a candidate.
+for mode in unmarked-failure wrong-token uncertain-failure; do
+  FM_FAKE_RELAUNCH_MODE=$mode
+  OUT=$(run_relaunch ios claude pool-model-a medium); RC=$?
+  unset FM_FAKE_RELAUNCH_MODE
+  [ "$RC" -ne 0 ] || fail "a $mode relaunch was reported as successful"
+  CAND=$(ios_candidate)
+  assert_equals reserved "$(ios_lifecycle "$CAND")" "a $mode outcome released its candidate"
+  OUT=$(run_relaunch ios claude pool-model-a medium); RC=$?
+  [ "$RC" -ne 0 ] || fail "a new relaunch started beside the unresolved $mode candidate"
+  assert_contains "$OUT" "still unresolved" "the unresolved $mode candidate did not block another launch"
+  # The host later proves the candidate never ran.
+  printf '{"schema":"fm-remote-seat-operation.v2","task":"ios","operation":"%s","requested_generation":"%s","actual_generation":null,"previous_generation":"%s","disposition":"prelaunch","startup_confirmed":false,"old_stopped":false,"route":null,"actual_model":null,"complete":true}\n' \
+    "$CAND" "$CAND" "$G2" > "$TMP/resolve.json"
+  chmod 0600 "$TMP/resolve.json"
+  seats reconcile-remote ios --generation "$CAND" --response-file "$TMP/resolve.json" >/dev/null \
+    || fail "the matching host refusal did not resolve the $mode candidate"
+done
+pass "unmarked, wrong-token, and unknown outcomes keep the candidate counted until its own disposition arrives"
 
-reset_meta
-perl -pi -e 's/^model=.*/model=pool-model-a/' "$HOME_DIR/state/ios.meta"
-seed_pool
-FM_FAKE_RELAUNCH_MODE=launch-failure
+# Old stopped, candidate proven never launched: both terminal, route kept.
+FM_FAKE_RELAUNCH_MODE='launch-failure'
 OUT=$(run_relaunch ios claude pool-model-a medium); RC=$?
 unset FM_FAKE_RELAUNCH_MODE
 [ "$RC" -ne 0 ] || fail "a failed replacement of a pooled supervisor succeeded"
-assert_grep 'fleet_seat_state=dead' "$HOME_DIR/state/ios.meta" \
-  "the confirmed dead supervisor did not retain a durable dead state"
+assert_contains "$OUT" "replacement launch failed" "the host's launch failure was lost"
+assert_equals released "$(ios_lifecycle "$G2")" "the proven-stopped old generation kept its seat"
+assert_equals released "$(ios_lifecycle "$(ios_candidate)")" "the cancelled candidate kept its seat"
 assert_grep 'remote_host=remote-mac' "$HOME_DIR/state/ios.meta" \
-  "the confirmed dead supervisor lost its recovery route"
+  "the failed replacement lost its recovery route"
 OUT=$(probe_pool); RC=$?
-expect_code 0 "$RC" "a worker after the old pooled supervisor was confirmed dead: $OUT"
-rm -f "$HOME_DIR/state/fleet-seats/shared/"*.seat
+expect_code 0 "$RC" "a worker after the failed replacement: $OUT"
 OUT=$(run_relaunch ios claude pool-model-a medium); RC=$?
-expect_code 0 "$RC" "a recovery launch after confirmed death: $OUT"
-assert_no_grep 'fleet_seat_state=dead' "$HOME_DIR/state/ios.meta" \
-  "the recovered supervisor retained its dead state"
+expect_code 0 "$RC" "a recovery launch after the failed replacement: $OUT"
 OUT=$(probe_pool); RC=$?
-expect_code 4 "$RC" "a worker after the supervisor recovered"
-pass "confirmed supervisor death releases its seat and recovery restores it"
+expect_code 4 "$RC" "a worker after the supervisor recovered: $OUT"
+pass "a failed replacement frees both proven generations and recovery restores the seat"
 
+# Stale existing parent: the host starts B but publication fails, so the
+# parent still names the unpooled model A.
 reset_meta
 seed_pool
-FM_FAKE_RELAUNCH_MODE=uncertain-failure
+FM_FAKE_RELAUNCH_MODE='publication-failure'
 OUT=$(run_relaunch ios claude pool-model-a medium); RC=$?
 unset FM_FAKE_RELAUNCH_MODE
-[ "$RC" -ne 0 ] || fail "an uncertain remote completion succeeded"
-OUT=$(probe_pool); RC=$?
-expect_code 4 "$RC" "a worker after uncertain remote completion"
-pass "an uncertain remote result keeps its relaunch seat"
-
-reset_meta
-seed_pool
-FM_FAKE_RELAUNCH_MODE=publication-failure
-OUT=$(run_relaunch ios claude pool-model-a medium); RC=$?
-unset FM_FAKE_RELAUNCH_MODE
-chmod 0700 "$HOME_DIR/state"
 [ "$RC" -ne 0 ] || fail "a failed parent publication was reported as successful"
 assert_grep 'model=openai-codex/gpt-5.6-sol' "$HOME_DIR/state/ios.meta" \
   "the parent record unexpectedly published after its write failed"
+B=$(ios_candidate)
+assert_equals confirmed "$(ios_lifecycle "$B")" "the started generation was not confirmed despite the stale parent"
 OUT=$(probe_pool); RC=$?
-expect_code 4 "$RC" "a worker after host launch and parent publication failure"
+expect_code 4 "$RC" "a worker while B runs behind a stale parent record"
+# A death report for a different generation never reclaims B.
+FM_FAKE_DISPOSITION=dead-other
+OUT=$(seats reclaim ios --generation "$B" 2>&1); RC=$?
+unset FM_FAKE_DISPOSITION
+[ "$RC" -ne 0 ] || fail "another generation's death receipt reclaimed B: $OUT"
+assert_equals confirmed "$(ios_lifecycle "$B")" "another generation's death receipt changed B"
+# B's own death, reported for its exact operation, reclaims it.
+FM_FAKE_DISPOSITION=dead
+OUT=$(seats reclaim ios --generation "$B" 2>&1); RC=$?
+unset FM_FAKE_DISPOSITION
+expect_code 0 "$RC" "B's own death report: $OUT"
+assert_equals reclaimed "$(ios_lifecycle "$B")" "B's exact death report did not reclaim it"
+assert_grep 'remote_host=remote-mac' "$HOME_DIR/state/ios.meta" "reclaiming B lost the recovery route"
+OUT=$(probe_pool); RC=$?
+expect_code 0 "$RC" "a worker after B's death: $OUT"
 OUT=$(run_relaunch ios claude pool-model-a medium); RC=$?
-expect_code 0 "$RC" "a matching-model retry should reconcile the unresolved seat: $OUT"
+expect_code 0 "$RC" "a retry after B's death should succeed: $OUT"
 assert_grep 'model=pool-model-a' "$HOME_DIR/state/ios.meta" \
   "the retry did not publish the confirmed pooled model"
-OUT=$(probe_pool); RC=$?
-expect_code 4 "$RC" "a worker after the matching-model retry"
-pass "a publication failure retains the seat until a matching retry reconciles it"
+pass "a stale parent record neither hides a started generation nor resurrects it after its exact death"
+
+# A restart whose persistence belonged to an earlier generation touches nothing.
+OUT=$(run_relaunch ios claude pool-model-a medium --expect-generation stale-generation); RC=$?
+expect_code 6 "$RC" "a stale expected generation: $OUT"
+assert_contains "$OUT" "generation-mismatch" "the stale generation refusal was not named"
+pass "an expected-generation mismatch refuses before any seat or host effect"
+
+# --- host side: token-scoped operation receipts and dispositions --------------
+# bin/fm-remote-secondmate-control.sh answers for exactly one operation token
+# from its durable receipt and control journal; an absent or foreign receipt
+# or a busy episode is unknown, never a refusal.
+HOST_HOME="$TMP/host-home"
+mkdir -p "$HOST_HOME/state/parent-route" "$HOST_HOME/bin" "$HOST_HOME/data" "$HOST_HOME/config"
+printf 'ios\n' > "$HOST_HOME/.fm-secondmate-home"
+: > "$HOST_HOME/AGENTS.md"
+
+host_control() {  # <args...>
+  env -u FM_STATE_OVERRIDE -u FM_CONFIG_OVERRIDE -u FM_DATA_OVERRIDE -u FM_ROOT_OVERRIDE \
+    FM_HOME="$HOST_HOME" "$ROOT/bin/fm-remote-secondmate-control.sh" "$@" 2>&1
+}
+
+host_disposition() {  # <operation>: the disposition word the host reports
+  host_control disposition ios --operation "$1" | sed -n 's/^seat_disposition=//p' | tail -1 | jq -r '.disposition + " " + (.old_stopped | tostring)'
+}
+
+host_receipt() {  # <operation> <verb> <phase> [previous]
+  printf 'schema=fm-remote-seat-receipt.v1\noperation=%s\nverb=%s\nrequested_generation=%s\nprevious_generation=%s\nphase=%s\n' \
+    "$1" "$2" "$1" "${4:--}" "$3" > "$HOST_HOME/state/parent-route/ios.seat-operation.$1"
+}
+
+host_journal() {  # <operation> <phase> [rollback]
+  { printf 'v1\ntask=ios\nphase=%s\nseat_operation=%s\n' "$2" "$1"
+    [ -z "${3:-}" ] || printf 'rollback=%s\n' "$3"; } > "$HOST_HOME/state/parent-route/ios.control-relaunch"
+}
+
+assert_equals "unknown false" "$(host_disposition op1)" "an absent receipt was not unknown"
+host_receipt op2 relaunch received
+assert_equals "unknown false" "$(host_disposition op1)" "a foreign receipt answered for another operation"
+assert_equals "prelaunch false" "$(host_disposition op2)" "an episode that never reached control was not a prelaunch refusal"
+host_journal op2 failed:checkpoint instructions-restored
+assert_equals "prelaunch false" "$(host_disposition op2)" "a refusal before the stop was not prelaunch"
+host_journal op2 failed:exited prior-record-kept
+assert_equals "cancelled true" "$(host_disposition op2)" "a stopped predecessor with an unsubmitted candidate was not cancelled"
+host_journal op2 failed:stopping
+assert_equals "unknown false" "$(host_disposition op2)" "an interrupted stop was not left unknown"
+host_receipt op3 launch existing
+printf 'actual_generation=s-older\nroute_backend=herdr\nroute_target=fm-remote:w1:p1\nactual_model=pool-model-a\n' \
+  >> "$HOST_HOME/state/parent-route/ios.seat-operation.op3"
+assert_equals "existing false" "$(host_disposition op3)" "a reused live endpoint was not reported as existing"
+# A busy episode may be running this very token: unknown, never a refusal.
+bash -c '. "$1/bin/fm-secondmate-liveness-lib.sh" && fm_supervisor_lifecycle_acquire "$2" ios 0 && : > "$3" && exec sleep 600' \
+  _ "$ROOT" "$HOST_HOME/state/parent-route" "$TMP/host-episode" &
+HOST_BLOCKER=$!
+for _ in $(seq 1 50); do [ -e "$TMP/host-episode" ] && break; sleep 0.1; done
+assert_equals "unknown false" "$(host_disposition op3)" "a busy host episode was reported as settled"
+kill "$HOST_BLOCKER"
+wait "$HOST_BLOCKER" 2>/dev/null
+pass "the host answers each operation from its own receipt and journal, and uncertainty stays unknown"
+
+# While this home has pools, an unaccounted supervisor relaunch refuses before
+# touching anything; an operation-bound home refusal names its operation.
+mkdir -p "$HOST_HOME/state/fleet-seats"
+printf '{"pools":[{"name":"shared","capacity":1,"models":["pool-model-a"]}]}\n' > "$HOST_HOME/state/fleet-seats/policy.json"
+OUT=$(host_control relaunch ios claude pool-model-a medium); RC=$?
+[ "$RC" -ne 0 ] || fail "a pooled host relaunch without a parent operation succeeded"
+assert_contains "$OUT" "relaunch_failure=prelaunch" "the unaccounted relaunch was not a prelaunch refusal"
+assert_contains "$OUT" "parent's seat operation" "the refusal did not name the required path"
+printf 'other\n' > "$HOST_HOME/.fm-secondmate-home"
+OUT=$(host_control relaunch ios claude pool-model-a medium --operation op9 --previous op3); RC=$?
+[ "$RC" -ne 0 ] || fail "a relaunch into a foreign home succeeded"
+DISP=$(printf '%s\n' "$OUT" | sed -n 's/^seat_disposition=//p' | tail -1)
+assert_equals "op9 prelaunch" "$(printf '%s\n' "$DISP" | jq -r '.operation + " " + .disposition')" \
+  "a home validation refusal was not bound to its operation"
+printf 'ios\n' > "$HOST_HOME/.fm-secondmate-home"
+pass "a pooled host refuses unaccounted relaunches and binds its refusals to the operation"
+
+# The parent wrapper joins the mate's one lifecycle episode: while a recovery
+# episode holds it, a manual relaunch neither reserves nor reaches the host.
+reset_meta
+seed_pool
+cp "$HOME_DIR/state/ios.meta" "$TMP/ios-before-episode.meta"
+bash -c '. "$1/bin/fm-secondmate-liveness-lib.sh" && fm_supervisor_lifecycle_acquire "$2" ios 0 && : > "$3" && exec sleep 600' \
+  _ "$ROOT" "$HOME_DIR/state" "$TMP/parent-episode" &
+PARENT_BLOCKER=$!
+for _ in $(seq 1 50); do [ -e "$TMP/parent-episode" ] && break; sleep 0.1; done
+OUT=$(run_relaunch ios claude pool-model-a medium); RC=$?
+kill "$PARENT_BLOCKER"
+wait "$PARENT_BLOCKER" 2>/dev/null
+[ "$RC" -ne 0 ] || fail "a manual relaunch ran inside another lifecycle episode"
+assert_contains "$OUT" "another lifecycle episode" "the episode refusal was not named"
+cmp -s "$TMP/ios-before-episode.meta" "$HOME_DIR/state/ios.meta" || fail "a refused relaunch touched the parent record"
+[ -z "$(seats show ios)" ] || fail "a relaunch refused by the episode still reserved a seat"
+pass "a manual remote relaunch waits out, then refuses, a running recovery episode"
 
 echo "ALL TESTS PASSED"

@@ -79,13 +79,78 @@ seats() {  # <home> <args...>: run the script as that home
     FM_HOME="$home" "$SEATS" "$@"
 }
 
-reserve() {  # <home> <id> <model> [harness]: reserve for the most recent holder
-  seats "$1" reserve "$2" --harness "${4:-pi}" --model "$3" --holder-pid "$LAST_HOLDER"
+reserve() {  # <home> <id> <model> [harness]: reserve generation g-<id> for the most recent holder
+  seats "$1" reserve "$2" --generation "g-$2" --harness "${4:-pi}" --model "$3" --holder-pid "$LAST_HOLDER"
+}
+
+reserve_gen() {  # <home> <id> <generation> <previous|-> <model> [kind]
+  seats "$1" reserve "$2" --generation "$3" --previous-generation "$4" --harness pi \
+    --model "$5" --kind "${6:-ship}" --holder-pid "$LAST_HOLDER"
+}
+
+lifecycle_of() {  # <home> <id> <generation>
+  seats "$1" show "$2" | jq -r --arg g "$3" '.incarnations[] | select(.generation == $g) | .lifecycle'
+}
+
+# A fake tmux whose one server holds the windows listed in <dir>/windows, each
+# running the foreground command in <dir>/command (a shell reads dead, an
+# agent name reads alive); <dir>/inventory-broken makes every read unreadable.
+endpoint_fakebin() {  # <dir>: prints the fakebin
+  local fakebin
+  fakebin=$(fm_fakebin "$1")
+  mkdir -p "$1/endpoint"
+  : > "$1/endpoint/windows"
+  printf 'bash\n' > "$1/endpoint/command"
+  cat > "$fakebin/tmux" <<SH
+#!/usr/bin/env bash
+D="$1/endpoint"
+case "\$1" in
+  list-windows)
+    [ ! -e "\$D/inventory-broken" ] || { echo 'lost server' >&2; exit 1; }
+    cat "\$D/windows" ;;
+  display-message)
+    case "\$*" in *pane_current_command*) cat "\$D/command" ;; *) printf 'fakepane\\n' ;; esac ;;
+  kill-window) : > "\$D/windows" ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  printf '%s\n' "$fakebin"
+}
+
+# owner_launch <home> <id> <generation> <previous|-> <kind> <target> <ready-file>
+# A background launch owner: reserves, dispatches a local tmux route, touches
+# <ready-file>, then waits to be killed or released through <ready-file>.stop,
+# where it runs the commands in <ready-file>.then (as the owner) and exits.
+owner_launch() {
+  local home=$1 id=$2 gen=$3 prev=$4 kind=$5 target=$6 ready=$7
+  # shellcheck disable=SC2016 # the child shell or fixture expands these.
+  env -u FM_STATE_OVERRIDE -u FM_CONFIG_OVERRIDE -u FM_DATA_OVERRIDE -u FM_ROOT_OVERRIDE \
+    FM_HOME="$home" SEATS="$SEATS" bash -c '
+      id=$1 gen=$2 prev=$3 kind=$4 target=$5 ready=$6
+      "$SEATS" reserve "$id" --generation "$gen" --previous-generation "$prev" --kind "$kind" \
+        --harness pi --model pool-model-a --holder-pid "$$" > "$ready.out" 2>&1 || { echo "reserve=$?" > "$ready"; exit 1; }
+      route="$ready.route"
+      (umask 077 && printf "{\"placement\":\"local\",\"backend\":\"tmux\",\"target\":\"%s\",\"home\":null,\"host\":null,\"remote_root\":null,\"spawn_gen\":\"%s\",\"operation\":null}\n" "$target" "$gen" > "$route")
+      "$SEATS" dispatch "$id" --generation "$gen" --route-file "$route" >> "$ready.out" 2>&1 || { echo "dispatch=$?" > "$ready"; exit 1; }
+      echo ok > "$ready"
+      while [ ! -e "$ready.stop" ]; do sleep 0.1; done
+      [ ! -f "$ready.then" ] || . "$ready.then" >> "$ready.out" 2>&1
+      echo done > "$ready.done"
+    ' _ "$id" "$gen" "$prev" "$kind" "$target" "$ready" &
+  OWNER_PID=$!
+  HOLDER_PIDS="$HOLDER_PIDS $OWNER_PID"
+  for _ in $(seq 1 100); do
+    [ -s "$ready" ] && break
+    sleep 0.1
+  done
+  [ "$(cat "$ready" 2>/dev/null)" = ok ] || fail "launch owner for $id did not dispatch: $(cat "$ready" "$ready.out" 2>/dev/null)"
 }
 
 reserve_without_jq() {
   local home=$1
   shift
+  # shellcheck disable=SC2016 # the child shell or fixture expands these.
   env -u FM_STATE_OVERRIDE -u FM_CONFIG_OVERRIDE -u FM_DATA_OVERRIDE -u FM_ROOT_OVERRIDE \
     FM_HOME="$home" SEATS="$SEATS" bash -c '
     command() {
@@ -98,12 +163,14 @@ reserve_without_jq() {
 }
 
 # used_seats <home>: the pool's current holder count, measured by a probe
-# reservation whose holder is then stopped so its seat reclaims itself.
+# reservation that is then released before it could ever have launched.
 used_seats() {
-  local out rc
+  local out rc gen
   new_holder
-  out=$(reserve "$1" zz-probe pool-model-a 2>&1)
+  gen="probe$(date +%s)$RANDOM$RANDOM"
+  out=$(reserve_gen "$1" zz-probe "$gen" - pool-model-a 2>&1)
   rc=$?
+  [ "$rc" -ne 0 ] || seats "$1" release zz-probe --generation "$gen" --reason prelaunch >/dev/null 2>&1
   kill "$LAST_HOLDER" 2>/dev/null
   wait "$LAST_HOLDER" 2>/dev/null
   case "$rc" in
@@ -122,10 +189,10 @@ test_no_pool_configured_is_off() {
   expect_code 0 "$status" "reserve with no pool"
   assert_equals "" "$out" "reserve with no pool should print nothing"
   out=$(reserve "$home" t2 default 2>&1) || fail "a harness default was refused with no pool: $out"
-  out=$(seats "$home" reserve raw-off --harness claude --model default --holder-pid "$LAST_HOLDER" --raw-launch 2>&1)
+  out=$(seats "$home" reserve raw-off --generation g-raw-off --harness claude --model default --holder-pid "$LAST_HOLDER" --raw-launch 2>&1)
   expect_code 0 "$?" "a raw launch without a declaration"
   assert_equals "" "$out" "an undeclared raw launch printed a seat refusal"
-  out=$(reserve_without_jq "$home" reserve t3 --harness pi --model pool-model-a --holder-pid "$LAST_HOLDER" 2>&1)
+  out=$(reserve_without_jq "$home" reserve t3 --generation g-t3 --harness pi --model pool-model-a --holder-pid "$LAST_HOLDER" 2>&1)
   expect_code 0 "$?" "an undeclared primary without jq"
   assert_equals "" "$out" "an undeclared primary without jq printed a reservation"
   task_record "$home" legacy-default default
@@ -133,7 +200,7 @@ test_no_pool_configured_is_off() {
   expect_code 0 "$?" "a legacy default record without a declaration"
   assert_equals "" "$out" "an undeclared home counted a legacy default record"
   pools "$home" 1
-  out=$(reserve_without_jq "$home" reserve t4 --harness pi --model pool-model-a --holder-pid "$LAST_HOLDER" 2>&1)
+  out=$(reserve_without_jq "$home" reserve t4 --generation g-t4 --harness pi --model pool-model-a --holder-pid "$LAST_HOLDER" 2>&1)
   expect_code 5 "$?" "a declared pool without jq"
   assert_contains "$out" "jq is not installed" "the missing-jq fixture did not disable jq"
   pass "without config/fleet-seats a reservation is a silent no-op"
@@ -205,10 +272,13 @@ test_one_capacity_across_homes() {
   assert_contains "$out" "legacy-r1" "the refusal did not name the holders"
 
   new_holder
-  out=$(reserve "$mate" a1 pool-model-a 2>&1) || fail "a holder's own relaunch was refused: $out"
-  assert_contains "$out" "already held" "a relaunch did not keep its seat"
+  out=$(reserve "$mate" a1 pool-model-a 2>&1) || fail "a holder's own retry was refused: $out"
+  assert_contains "$out" "already reserved" "a same-generation retry did not keep its seat"
+  new_holder
+  out=$(reserve_gen "$mate" a1 g-a1-next g-a1 pool-model-b 2>&1) || fail "a same-pool replacement was refused at full capacity: $out"
+  assert_contains "$out" "already held" "a same-pool replacement took a second seat"
   out=$(reserve "$mate" a3 some-other-model 2>&1) || fail "an unpooled model was refused: $out"
-  assert_equals "" "$out" "an unpooled model should reserve nothing"
+  assert_contains "$out" "is in no pool" "an unpooled model should hold no pool seat"
   pass "the primary and a local secondmate share one capacity and pre-existing agents count"
 }
 
@@ -295,9 +365,16 @@ test_live_supervisors_hold_seats_even_while_idle() {
   task_record "$root" mate-idle some-other-model secondmate
   assert_equals 3 "$(used_seats "$root")" "a supervisor's model exit did not release its seat"
   task_record "$root" mate-idle pool-model-a secondmate "home=$mate"
+  printf 'window=firstmate:fm-mate-idle\nworktree=%s\nproject=%s\n' "$mate" "$mate" >> "$root/state/mate-idle.meta"
   kill "$mateholder"
   wait "$mateholder" 2>/dev/null
-  assert_equals 3 "$(used_seats "$root")" "a dead secondmate supervisor retained a seat"
+  # An unmanaged record frees only on a backend-proven dead or missing endpoint.
+  local fakebin
+  fakebin=$(fm_fakebin "$TMP_ROOT/supervisors/dead-backend")
+  # shellcheck disable=SC2016 # the child shell or fixture expands these.
+  printf '#!/usr/bin/env bash\n[ "$1" != list-windows ] || printf "main\\n"\n' > "$fakebin/tmux"
+  chmod +x "$fakebin/tmux"
+  assert_equals 3 "$(PATH="$fakebin:$PATH" used_seats "$root")" "a dead secondmate supervisor retained a seat"
   pass "live pooled supervisors keep seats while idle and release them on death or model exit"
 }
 
@@ -316,14 +393,14 @@ test_explicit_model_required_while_pooled() {
   expect_code 5 "$?" "a Claude default while pooled"
   out=$(reserve "$root" d4 default codex 2>&1)
   expect_code 5 "$?" "a Codex default while pooled"
-  out=$(seats "$root" reserve raw --harness claude --model pool-model-a --holder-pid "$LAST_HOLDER" --raw-launch 2>&1)
+  out=$(seats "$root" reserve raw --generation g-raw --harness claude --model pool-model-a --holder-pid "$LAST_HOLDER" --raw-launch 2>&1)
   expect_code 5 "$?" "a raw launch with an explicit claimed model"
   assert_contains "$out" "raw launch command cannot verify" "raw-command refusal reason"
   pass "declared pools reject harness defaults and raw launch commands"
 }
 
 test_stale_reservations_recover_without_preempting_live_work() {
-  local root="$TMP_ROOT/stale/primary" out status crashed live
+  local root="$TMP_ROOT/stale/primary" out crashed live
   make_home "$root"
   pools "$root" 2
   new_holder
@@ -333,22 +410,26 @@ test_stale_reservations_recover_without_preempting_live_work() {
   out=$(reserve "$root" running pool-model-a 2>&1) || fail "reserve running: $out"
   live=$LAST_HOLDER
   # The running task published its record; its spawner then exited.
-  task_record "$root" running pool-model-a
+  task_record "$root" running pool-model-a ship "spawn_gen=g-running"
   kill "$live" "$crashed"
   wait "$live" "$crashed" 2>/dev/null
 
+  # A dead owner alone frees nothing: counting never reclaims.
+  new_holder
+  out=$(reserve "$root" next pool-model-a 2>&1)
+  expect_code 4 "$?" "a reservation before maintenance proved anything"
+  # Maintenance proves the crashed spawn never dispatched and reclaims it; the
+  # running task's seat stays with its record until cleanup.
+  out=$(seats "$root" reconcile --limit 8 2>&1) || fail "reconcile failed: $out"
+  assert_contains "$out" "reclaimed id=crashed" "the undispatched crashed reservation was not reclaimed"
+  assert_equals reserved "$(lifecycle_of "$root" running g-running)" "maintenance preempted the running task's seat"
   new_holder
   out=$(reserve "$root" next pool-model-a 2>&1) || fail "a crashed spawn's seat was not recovered: $out"
   assert_contains "$out" "used=2 capacity=2" "recovery count"
   new_holder
   out=$(reserve "$root" extra pool-model-a 2>&1)
   expect_code 4 "$?" "the running worker's seat was preempted"
-
-  # A relaunch onto another route releases the seat through its record.
-  task_record "$root" running gpt-other
-  new_holder
-  out=$(reserve "$root" extra pool-model-a 2>&1) || fail "a relaunch onto another route kept its seat: $out"
-  pass "dead reservations are reclaimed while a live task record keeps its seat"
+  pass "maintenance reclaims a proven-undispatched reservation while a live task record keeps its seat"
 }
 
 test_simultaneous_reservations_never_overbook() {
@@ -395,7 +476,7 @@ test_unreachable_or_malformed_authority_refuses() {
   kill "$blocker" 2>/dev/null
   wait "$blocker" 2>/dev/null
 
-  out=$(seats "$root" reserve l2 --harness pi --model pool-model-a --holder-pid 999999 2>&1)
+  out=$(seats "$root" reserve l2 --generation g-l2 --harness pi --model pool-model-a --holder-pid 999999 2>&1)
   expect_code 5 "$?" "a dead holder pid"
 
   mate="$base/mate"
@@ -450,6 +531,14 @@ done
 [ "$1" = shop-host ] || exit 91
 [ "$2" = fm-remote-entrypoint.sh ] || exit 92
 shift 2
+if [ -e "${FM_TEST_SSH_LOSE_REPLY:-/nonexistent}" ]; then
+  "$FM_FAKE_REMOTE_ENTRYPOINT" "$@" > "$FM_TEST_SSH_LOSE_REPLY.reply"
+  exit 255
+fi
+if [ -e "${FM_TEST_SSH_TRUNCATE:-/nonexistent}" ]; then
+  "$FM_FAKE_REMOTE_ENTRYPOINT" "$@" | head -c 40
+  exit 0
+fi
 exec "$FM_FAKE_REMOTE_ENTRYPOINT" "$@"
 SH
   chmod +x "$1/fake-ssh"
@@ -473,11 +562,14 @@ make_remote_fleet() {  # <name> <capacity>
   make_fake_ssh "$fakebin"
   R_SSH="$fakebin/fake-ssh"
   R_SSH_DOWN="$base/ssh-down"
+  R_SSH_LOSE_REPLY="$base/ssh-lose-reply"
+  R_SSH_TRUNCATE="$base/ssh-truncate"
 }
 
 serve_remotes() {  # run the root's serve pass with the fake transport
   env -u FM_STATE_OVERRIDE -u FM_CONFIG_OVERRIDE -u FM_DATA_OVERRIDE -u FM_ROOT_OVERRIDE \
     FM_HOME="$R_ROOT" FM_SSH_BIN="$R_SSH" FM_TEST_SSH_DOWN="$R_SSH_DOWN" \
+    FM_TEST_SSH_LOSE_REPLY="$R_SSH_LOSE_REPLY" FM_TEST_SSH_TRUNCATE="$R_SSH_TRUNCATE" \
     FM_FAKE_REMOTE_ENTRYPOINT="$ROOT/bin/fm-remote-entrypoint.sh" \
     FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux FM_REMOTE_JOB_STATE_ROOT="$REMOTE_JOBS" \
     FM_FLEET_SEATS_TEST_BACKOFF=0 "$SEATS" serve-remotes
@@ -512,10 +604,10 @@ test_remote_policy_must_be_confirmed_before_any_grant() {
   assert_contains "$out" "holders=1" "the already-running remote agent was not reported"
   out=$(used_seats "$R_ROOT")
   assert_equals 1 "$out" "the already-running remote agent is counted at the primary"
-  rm -f "$R_ROOT/state/fleet-seats/remote-theshop.holders"
+  rm -f "$R_ROOT/state/fleet-seats/remote-theshop.cert"
   new_holder
   out=$(reserve "$R_ROOT" absent-snapshot pool-model-a 2>&1)
-  expect_code 5 "$?" "a confirmed remote with no holder snapshot"
+  expect_code 5 "$?" "a remote with no certificate"
   serve_remotes >/dev/null 2>&1 || fail "snapshot recovery serve failed"
 
   # A changed policy is unconfirmed again until the next serve.
@@ -557,21 +649,26 @@ test_remote_home_shares_the_fleet_capacity() {
   expect_code 4 "$(cat "$dir/shop-2.rc")" "a remote reservation into a full fleet: $(cat "$dir/shop-2.out")"
   assert_contains "$(cat "$dir/shop-2.out")" "pool shared is full (3 of 3" "remote denial reason"
 
-  # A relaunch of a seated remote id keeps its seat with no round trip.
-  remote_reserve_bg shop-1 pool-model-a "$dir/shop-1-relaunch"
-  r1_holder=$LAST_HOLDER
-  serve_remotes >/dev/null 2>&1 || fail "remote relaunch serve failed"
-  wait "$BG_PID"
-  expect_code 0 "$(cat "$dir/shop-1-relaunch.rc")" "a seated remote relaunch"
+  # A retry of a seated remote generation keeps its seat with no round trip.
+  new_holder
+  out=$(reserve "$R_REMOTE" shop-1 pool-model-a 2>&1) || fail "a seated remote retry was refused: $out"
+  assert_contains "$out" "already granted" "a seated remote retry needed another grant"
 
-  # The remote spawn dies before publishing its record: the next serve frees
-  # its seat, which becomes usable locally.
+  # The remote spawner dies: its seat stays counted, because the launch it
+  # reserved may still run.
   kill "$r1_holder"
   wait "$r1_holder" 2>/dev/null
   serve_remotes >/dev/null 2>&1 || fail "recovery serve failed"
   new_holder
-  out=$(reserve "$R_LOCAL" a2 pool-model-a 2>&1) || fail "the freed remote seat was not reusable locally: $out"
-  pass "primary, local, and remote homes share one capacity; remote grants, denials, relaunches, and recovery hold"
+  out=$(reserve "$R_LOCAL" a2 pool-model-a 2>&1)
+  expect_code 4 "$?" "a local launch after the remote spawner died"
+  # Its own rollback proves the launch never dispatched: the next serve frees it.
+  seats "$R_REMOTE" release shop-1 --generation g-shop-1 --reason prelaunch >/dev/null \
+    || fail "the remote candidate that never dispatched could not be released"
+  serve_remotes >/dev/null 2>&1 || fail "release serve failed"
+  new_holder
+  out=$(reserve "$R_LOCAL" a2 pool-model-a 2>&1) || fail "the released remote seat was not reusable locally: $out"
+  pass "primary, local, and remote homes share one capacity; remote grants, denials, retries, and proven release hold"
 }
 
 test_unreachable_remote_is_never_free() {
@@ -584,11 +681,14 @@ test_unreachable_remote_is_never_free() {
   wait "$BG_PID"
   expect_code 0 "$(cat "$dir/shop-1.rc")" "first remote grant: $(cat "$dir/shop-1.out")"
 
-  # The link drops: the primary keeps counting the remote's last snapshot.
+  # The link drops: admission stays refused rather than trusting old counts.
   : > "$R_SSH_DOWN"
   out=$(serve_remotes 2>&1)
   assert_contains "$out" "unreachable theshop" "a dropped link was not reported"
-  assert_equals 1 "$(used_seats "$R_ROOT")" "an unreachable remote's seat became free"
+  new_holder
+  out=$(reserve "$R_ROOT" next pool-model-a 2>&1)
+  expect_code 5 "$?" "a reservation after an incomplete serve"
+  assert_contains "$out" "have not confirmed" "a failed serve kept its confirmation"
 
   # A remote request the primary never answers is withdrawn and refused.
   new_holder
@@ -654,8 +754,7 @@ test_stale_remote_requests_refuse_before_launch() {
   wait "$BG_PID"
   expect_code 5 "$(cat "$dir/waiting.rc")" "a request waiting in its former pool"
   assert_contains "$(cat "$dir/waiting.out")" "policy changed" "wrong-pool request refusal"
-  [ -z "$(find "$R_REMOTE/state/fleet-seats/shared" -name '*.seat' 2>/dev/null)" ] \
-    || fail "a wrong-pool request left a granted seat"
+  [ -z "$(seats "$R_REMOTE" show waiting)" ] || fail "a wrong-pool request left a granted seat"
 
   remote_reserve_bg moved pool-model-a "$dir/moved"
   serve_remotes >/dev/null 2>&1 || fail "current pool grant failed"
@@ -689,10 +788,16 @@ test_inflight_remote_seat_follows_model_between_pools() {
 
   kill "$inflight"
   wait "$inflight" 2>/dev/null
-  serve_remotes >/dev/null 2>&1 || fail "dead in-flight seat recovery failed"
+  serve_remotes >/dev/null 2>&1 || fail "serve after the spawner died failed"
   new_holder
-  out=$(reserve "$R_ROOT" local pool-model-a 2>&1) || fail "the dead in-flight seat stayed held: $out"
-  pass "a live in-flight remote seat follows its model across pools and frees on death"
+  out=$(reserve "$R_ROOT" local pool-model-a 2>&1)
+  expect_code 4 "$?" "a local launch while the dead spawner's reservation is unresolved"
+  seats "$R_REMOTE" release inflight --generation g-inflight --reason prelaunch >/dev/null \
+    || fail "the undispatched in-flight seat could not be released"
+  serve_remotes >/dev/null 2>&1 || fail "serve after release failed"
+  new_holder
+  out=$(reserve "$R_ROOT" local pool-model-a 2>&1) || fail "the released in-flight seat stayed held: $out"
+  pass "an in-flight remote seat follows its model across pools and frees only on proven release"
 }
 
 test_remote_without_pools_confirms_unpooled_models() {
@@ -700,14 +805,14 @@ test_remote_without_pools_confirms_unpooled_models() {
   make_remote_fleet remote-off 3
   rm -f "$R_ROOT/config/fleet-seats"
   new_holder
-  out=$(reserve_without_jq "$R_REMOTE" reserve unpooled --harness pi --model unrelated-model --holder-pid "$LAST_HOLDER" 2>&1)
+  out=$(reserve_without_jq "$R_REMOTE" reserve unpooled --generation g-unpooled --harness pi --model unrelated-model --holder-pid "$LAST_HOLDER" 2>&1)
   expect_code 0 "$?" "an undeclared remote without jq or delivery"
   assert_equals "" "$out" "an undeclared remote printed a seat grant"
   pools "$R_ROOT" 3
   serve_remotes >/dev/null 2>&1 || fail "active policy delivery failed"
   rm -f "$R_ROOT/config/fleet-seats"
   serve_remotes >/dev/null 2>&1 || fail "empty policy delivery failed"
-  out=$(reserve_without_jq "$R_REMOTE" reserve cleared --harness pi --model pool-model-a --holder-pid "$LAST_HOLDER" 2>&1)
+  out=$(reserve_without_jq "$R_REMOTE" reserve cleared --generation g-cleared --harness pi --model pool-model-a --holder-pid "$LAST_HOLDER" 2>&1)
   expect_code 0 "$?" "a cleared remote without jq"
   assert_equals "" "$out" "a cleared remote printed a seat grant"
   pass "undeclared and cleared remote policies leave launches unchanged"
@@ -863,14 +968,14 @@ test_spawn_holds_a_seat_until_cleanup() {
   out=$(in_home "$ROOT/bin/fm-spawn.sh" "$TASK" "$PROJ_DIR" --mode local-only --yolo off \
     --harness claude --model pool-model-a 2>&1) || fail "pooled spawn failed: $out"
   new_holder
-  out=$(in_home "$SEATS" reserve other --harness claude --model pool-model-a --holder-pid "$LAST_HOLDER" 2>&1)
+  out=$(in_home "$SEATS" reserve other --generation g-other --harness claude --model pool-model-a --holder-pid "$LAST_HOLDER" 2>&1)
   expect_code 4 "$?" "a second seat while the spawned worker holds the only one"
   assert_contains "$out" "$TASK" "the seat does not name the spawned task"
   out=$(in_home "$ROOT/bin/fm-teardown.sh" "$TASK" 2>&1) || fail "cleanup failed: $out"
   new_holder
-  out=$(in_home "$SEATS" reserve other --harness claude --model pool-model-a --holder-pid "$LAST_HOLDER" 2>&1) \
+  out=$(in_home "$SEATS" reserve other --generation g-other --harness claude --model pool-model-a --holder-pid "$LAST_HOLDER" 2>&1) \
     || fail "cleanup did not release the seat: $out"
-  pass "a spawned pooled worker holds its seat until cleanup removes its record"
+  pass "a spawned pooled worker holds its seat until cleanup releases its generation"
 }
 
 test_secondmate_spawn_takes_a_seat() {
@@ -890,6 +995,344 @@ test_secondmate_spawn_takes_a_seat() {
   assert_contains "$out" "pool shared is full" "secondmate spawn refusal reason"
   assert_absent "$HOME_DIR/state/mate1.meta" "a refused secondmate spawn published a record"
   pass "a secondmate supervisor on a pooled model needs a seat to launch"
+}
+
+# --- generation-fenced lifecycle ---------------------------------------------
+
+# Both startup findings: a submitted launch whose spawner died and whose
+# endpoint still shows only a shell may yet run its buffered source line, so its
+# seat stays counted whatever the session lock or task record says.
+test_buffered_supervisor_launch_keeps_its_seat() {
+  local base="$TMP_ROOT/buffered" root mate fakebin ep out rc
+  root="$base/primary"
+  mate="$base/mate"
+  make_home "$root"
+  pools "$root" 1
+  make_local_secondmate "$mate" "$root" sm
+  fakebin=$(endpoint_fakebin "$base/tmux")
+  ep="$base/tmux/endpoint"
+  printf 'fm-sm\n' > "$ep/windows"
+  PATH="$fakebin:$PATH" owner_launch "$root" sm g1 - secondmate firstmate:fm-sm "$base/ready"
+  task_record "$root" sm pool-model-a secondmate "home=$mate
+spawn_gen=g1
+window=firstmate:fm-sm
+worktree=$mate
+project=$mate"
+  kill "$OWNER_PID"
+  wait "$OWNER_PID" 2>/dev/null
+  new_holder
+  for lock in free stale; do
+    [ "$lock" != stale ] || printf '99999999\n' > "$mate/state/.lock"
+    out=$(PATH="$fakebin:$PATH" reserve "$root" other pool-model-a 2>&1)
+    expect_code 4 "$?" "a second holder beside a shell-only buffered launch with a $lock session lock: $out"
+    out=$(PATH="$fakebin:$PATH" seats "$root" reclaim sm --generation g1 2>&1); rc=$?
+    expect_code 3 "$rc" "reclaiming a shell-only submitted launch: $out"
+    out=$(PATH="$fakebin:$PATH" seats "$root" reconcile --limit 8 2>&1) || fail "reconcile failed: $out"
+    assert_equals reserved "$(lifecycle_of "$root" sm g1)" "maintenance freed a shell-only submitted launch"
+  done
+  rm -f "$root/state/sm.meta"
+  out=$(PATH="$fakebin:$PATH" reserve "$root" other pool-model-a 2>&1)
+  expect_code 4 "$?" "a second holder after the task record was rolled back: $out"
+  # The buffered line runs: the same generation is confirmed, still one holder.
+  printf 'claude\n' > "$ep/command"
+  out=$(PATH="$fakebin:$PATH" seats "$root" reclaim sm --generation g1 2>&1) || fail "confirming the started launch failed: $out"
+  assert_contains "$out" "confirmed id=sm generation=g1" "the started launch was not confirmed"
+  out=$(PATH="$fakebin:$PATH" reserve "$root" other pool-model-a 2>&1)
+  expect_code 4 "$?" "a second holder beside the confirmed supervisor"
+  assert_contains "$out" "(1 of 1" "the confirmed supervisor counted more than once"
+  # Only a started generation's later death frees it.
+  printf 'bash\n' > "$ep/command"
+  out=$(PATH="$fakebin:$PATH" seats "$root" reclaim sm --generation g1 2>&1) || fail "reclaiming the dead started generation failed: $out"
+  assert_equals reclaimed "$(lifecycle_of "$root" sm g1)" "the dead started generation kept its seat"
+  out=$(PATH="$fakebin:$PATH" reserve "$root" other pool-model-a 2>&1) || fail "the reclaimed seat was not reusable: $out"
+  pass "a buffered supervisor launch keeps its seat until it starts and later dies"
+}
+
+test_proven_cancellation_frees_a_buffered_launch() {
+  local base="$TMP_ROOT/cancel" root fakebin ep out rc
+  root="$base/primary"
+  make_home "$root"
+  pools "$root" 1
+  fakebin=$(endpoint_fakebin "$base/tmux")
+  ep="$base/tmux/endpoint"
+  printf 'fm-c1\nfm-c2\n' > "$ep/windows"
+  # The launch owner's authorized rollback closes its own endpoint, sees it
+  # gone from the server it created it on, and releases exactly its candidate.
+  # shellcheck disable=SC2016 # the child shell or fixture expands these.
+  printf 'tmux kill-window -t firstmate:fm-c1\n"$SEATS" release c1 --generation g1 --reason cancelled\n' > "$base/ready1.then"
+  PATH="$fakebin:$PATH" owner_launch "$root" c1 g1 - ship firstmate:fm-c1 "$base/ready1"
+  : > "$base/ready1.stop"
+  for _ in $(seq 1 100); do [ -e "$base/ready1.done" ] && break; sleep 0.1; done
+  assert_equals released "$(lifecycle_of "$root" c1 g1)" "the owner's proven cancellation did not release its candidate: $(cat "$base/ready1.out")"
+  printf 'fm-c2\n' > "$ep/windows"
+  PATH="$fakebin:$PATH" owner_launch "$root" c2 g2 - ship firstmate:fm-c2 "$base/ready2"
+  kill "$OWNER_PID"
+  wait "$OWNER_PID" 2>/dev/null
+  # Anyone else needs the backend's absence proof: a shell-only endpoint, an
+  # absence tmux cannot prove, or an unreadable inventory all keep the seat.
+  out=$(PATH="$fakebin:$PATH" seats "$root" release c2 --generation g2 --reason cancelled 2>&1); rc=$?
+  expect_code 3 "$rc" "a shell-only verdict as cancellation proof: $out"
+  : > "$ep/windows"
+  out=$(PATH="$fakebin:$PATH" seats "$root" release c2 --generation g2 --reason cancelled 2>&1); rc=$?
+  expect_code 3 "$rc" "an unprovable absence as cancellation proof: $out"
+  : > "$ep/inventory-broken"
+  out=$(PATH="$fakebin:$PATH" seats "$root" release c2 --generation g2 --reason cancelled 2>&1); rc=$?
+  expect_code 3 "$rc" "an unreadable inventory as cancellation proof: $out"
+  out=$(PATH="$fakebin:$PATH" seats "$root" release c2 --generation g2 --reason prelaunch 2>&1); rc=$?
+  expect_code 5 "$rc" "a prelaunch release after dispatch: $out"
+  new_holder
+  out=$(PATH="$fakebin:$PATH" reserve "$root" other pool-model-a 2>&1)
+  expect_code 4 "$?" "a second holder beside an unproven cancellation"
+  pass "only a proven endpoint cancellation frees a submitted launch"
+}
+
+# The stale-death schedule: an episode holds the mutex, so no other supervisor
+# mutation for that task can run, and an old generation's evidence can never
+# free a newer generation afterward.
+test_lifecycle_episode_excludes_stale_mutations() {
+  local base="$TMP_ROOT/episode" root lock carrier out rc blocker
+  root="$base/primary"
+  make_home "$root"
+  pools "$root" 1
+  new_holder
+  out=$(reserve_gen "$root" sm g1 - pool-model-a secondmate 2>&1) || fail "initial supervisor reservation: $out"
+  bash -c '. "$1/bin/fm-secondmate-liveness-lib.sh" && fm_supervisor_lifecycle_acquire "$2" sm 0 \
+      && printf "%s\n" "$FM_SUPERVISOR_LIFECYCLE_CARRIER" > "$3" && exec sleep 600' \
+    _ "$ROOT" "$root/state" "$base/carrier" &
+  blocker=$!
+  HOLDER_PIDS="$HOLDER_PIDS $blocker"
+  for _ in $(seq 1 50); do [ -s "$base/carrier" ] && break; sleep 0.1; done
+  [ -s "$base/carrier" ] || fail "the episode holder never started"
+  out=$(reserve_gen "$root" sm g2 g1 pool-model-a secondmate 2>&1); rc=$?
+  expect_code 5 "$rc" "a relaunch reservation during another episode"
+  assert_contains "$out" "another lifecycle episode" "the episode refusal was not named"
+  out=$(seats "$root" release sm --generation g1 --reason prelaunch 2>&1); rc=$?
+  expect_code 5 "$rc" "a release during another episode"
+  carrier=$(cat "$base/carrier")
+  lock=${carrier%%|*}
+  out=$(FM_SUPERVISOR_LIFECYCLE_CARRIER="$carrier" reserve_gen "$root" sm g2 g1 pool-model-a secondmate 2>&1); rc=$?
+  expect_code 5 "$rc" "a valid carrier from a process that is not an ancestor"
+  out=$(FM_SUPERVISOR_LIFECYCLE_CARRIER="$lock|$blocker|forged|forged" reserve_gen "$root" sm g2 g1 pool-model-a secondmate 2>&1); rc=$?
+  expect_code 5 "$rc" "a forged carrier"
+  assert_contains "$out" "does not verify" "the forged carrier was not rejected"
+  kill "$blocker"
+  wait "$blocker" 2>/dev/null
+  # The episode ends; a new generation replaces g1, which ends through its own
+  # proven release. Replaying the old evidence changes nothing.
+  out=$(seats "$root" release sm --generation g1 --reason prelaunch 2>&1) || fail "releasing g1: $out"
+  out=$(reserve_gen "$root" sm g2 g1 pool-model-a secondmate 2>&1) || fail "the new generation was refused: $out"
+  out=$(seats "$root" reclaim sm --generation g1 2>&1) || fail "replaying old evidence failed loudly: $out"
+  assert_contains "$out" "already terminal" "the stale reclaim did not report a no-op"
+  out=$(seats "$root" release sm --generation g1 --reason teardown 2>&1) || fail "a stale teardown failed loudly: $out"
+  assert_equals reserved "$(lifecycle_of "$root" sm g2)" "stale evidence changed the newer generation"
+  new_holder
+  out=$(reserve "$root" other pool-model-a 2>&1)
+  expect_code 4 "$?" "another holder beside the newer generation"
+  pass "one lifecycle episode excludes other supervisor mutations and stale evidence never frees a newer generation"
+}
+
+test_collection_never_waits_on_task_locks() {
+  local base="$TMP_ROOT/lock-order" root out rc blocker
+  root="$base/primary"
+  make_home "$root"
+  pools "$root" 2
+  task_record "$root" busy pool-model-a
+  bash -c '. "$1/bin/fm-wake-lib.sh" && fm_lock_try_acquire "$2" && : > "$3" && exec sleep 600' \
+    _ "$ROOT" "$root/state/.meta-busy.lock" "$base/locked" &
+  blocker=$!
+  HOLDER_PIDS="$HOLDER_PIDS $blocker"
+  for _ in $(seq 1 50); do [ -e "$base/locked" ] && break; sleep 0.1; done
+  new_holder
+  out=$(. "$ROOT/bin/fm-timeout-lib.sh" && fm_run_timed 20 env -u FM_STATE_OVERRIDE FM_HOME="$root" "$SEATS" \
+    reserve next --generation g-next --harness pi --model pool-model-a --holder-pid "$LAST_HOLDER" 2>&1); rc=$?
+  kill "$blocker"
+  wait "$blocker" 2>/dev/null
+  expect_code 0 "$rc" "a reservation while another process holds a task metadata lock: $out"
+  assert_contains "$out" "used=2" "the locked task record was not counted"
+  pass "seat collection completes without waiting on task metadata locks"
+}
+
+test_serve_epochs_fence_lost_and_late_responses() {
+  local dir="$TMP_ROOT/epochs-out" out rc served seq issuer digest
+  make_remote_fleet epochs 1
+  mkdir -p "$dir"
+  out=$(serve_remotes 2>&1) || fail "initial empty serve failed: $out"
+  assert_contains "$out" "served theshop" "initial empty serve was not confirmed"
+  remote_reserve_bg granted pool-model-a "$dir/granted"
+  : > "$R_SSH_LOSE_REPLY"
+  out=$(serve_remotes 2>&1)
+  assert_contains "$out" "unreachable theshop" "the lost serve response was not reported"
+  wait "$BG_PID"
+  expect_code 0 "$(cat "$dir/granted.rc")" "the remote grant before losing the serve response"
+  assert_present "$R_ROOT/state/fleet-seats/remote-theshop.pending" "the lost serve left no pending marker"
+  new_holder
+  out=$(reserve "$R_ROOT" next pool-model-a 2>&1)
+  expect_code 5 "$?" "a primary launch after the serve granted remotely but lost its reply"
+  rm -f "$R_SSH_LOSE_REPLY"
+  serve_remotes >/dev/null 2>&1 || fail "serve reconciliation failed"
+  assert_absent "$R_ROOT/state/fleet-seats/remote-theshop.pending" "a complete serve left the pending marker"
+  out=$(reserve "$R_ROOT" next pool-model-a 2>&1)
+  expect_code 4 "$?" "the confirmed remote grant occupies the sole seat"
+
+  # A delayed older epoch reaching the remote grants nothing and is refused.
+  served="$R_REMOTE/state/fleet-seats/served.json"
+  issuer=$(jq -r .issuer "$served")
+  seq=$(jq -r .seq "$served")
+  digest=$(jq -r .digest "$served")
+  remote_reserve_bg late pool-model-a "$dir/late"
+  out=$(seats "$R_REMOTE" serve --digest "$digest" --epoch "$issuer.$((seq - 1))" --allowance shared=1 \
+    < "$R_ROOT/config/fleet-seats" 2>&1); rc=$?
+  expect_code 5 "$rc" "an older serve epoch: $out"
+  out=$(seats "$R_REMOTE" serve --digest "$digest" --epoch "$issuer.$seq" --allowance shared=1 \
+    < "$R_ROOT/config/fleet-seats" 2>&1) || fail "an exact same-epoch replay failed: $out"
+  assert_equals 1 "$(printf '%s\n' "$out" | jq '.holders | length')" "the same-epoch replay changed the certificate"
+  [ -z "$(seats "$R_REMOTE" show late)" ] || fail "a replayed or older epoch granted a waiting request"
+  out=$(seats "$R_REMOTE" serve --digest "0-0" --epoch "$issuer.$seq" < "$R_ROOT/config/fleet-seats" 2>&1); rc=$?
+  expect_code 5 "$rc" "a conflicting same-epoch serve: $out"
+
+  # A truncated answer never certifies.
+  : > "$R_SSH_TRUNCATE"
+  out=$(serve_remotes 2>&1)
+  assert_contains "$out" "unreachable theshop" "a truncated serve answer was accepted"
+  rm -f "$R_SSH_TRUNCATE"
+  new_holder
+  out=$(reserve "$R_ROOT" next pool-model-a 2>&1)
+  expect_code 5 "$?" "a primary launch after a truncated serve"
+  serve_remotes >/dev/null 2>&1 || fail "serve after truncation failed"
+  wait "$BG_PID"
+  expect_code 4 "$(cat "$dir/late.rc")" "the late request was granted beyond capacity: $(cat "$dir/late.out")"
+  pass "serve epochs fence lost, late, replayed, and truncated responses"
+}
+
+test_pool_grammar_is_uniform() {
+  local home="$TMP_ROOT/grammar/primary" out name dir="$TMP_ROOT/grammar-out"
+  make_home "$home"
+  for name in '' 'a/b' 'a b' "$(printf 'a\tb')"; do
+    jq -n --arg n "$name" '{pools: [{name: $n, capacity: 1, models: ["pool-model-a"]}]}' > "$home/config/fleet-seats"
+    new_holder
+    out=$(reserve "$home" named pool-model-a 2>&1)
+    expect_code 5 "$?" "pool name '$name'"
+  done
+  printf '{"pools":[{"name":".shared","capacity":1,"models":["pool-model-a"]},{"name":"..other","capacity":1,"models":["pool-model-b"]}]}\n' \
+    > "$home/config/fleet-seats"
+  new_holder
+  out=$(reserve "$home" x pool-model-a 2>&1) || fail "a .shared reservation: $out"
+  assert_contains "$out" "pool=.shared" "the .shared pool did not reserve"
+  out=$(reserve "$home" y pool-model-b 2>&1) || fail "a ..other reservation: $out"
+  assert_contains "$out" "pool=..other" "the ..other pool did not reserve"
+  out=$(reserve "$home" z pool-model-b 2>&1)
+  expect_code 4 "$?" "a second ..other holder"
+  seats "$home" release y --generation g-y --reason prelaunch >/dev/null || fail "releasing a ..other seat"
+  out=$(reserve "$home" z pool-model-b 2>&1) || fail "a released ..other seat was not reusable: $out"
+  out=$(seats "$home" reconcile --limit 4 2>&1) || fail "reconcile over hidden pools: $out"
+  out=$(seats "$home" serve --digest 1-1 --epoch r1.1 --allowance ./bad=1 < /dev/null 2>&1)
+  expect_code 2 "$?" "a path-like allowance pool name on the wire"
+
+  make_remote_fleet grammar-remote 1
+  jq '.pools[0].name = ".shared"' "$R_ROOT/config/fleet-seats" > "$TMP_ROOT/dot-policy"
+  mv "$TMP_ROOT/dot-policy" "$R_ROOT/config/fleet-seats"
+  mkdir -p "$dir"
+  serve_remotes >/dev/null 2>&1 || fail "dot-prefixed allowance delivery failed"
+  remote_reserve_bg dot-agent pool-model-a "$dir/agent"
+  serve_remotes >/dev/null 2>&1 || fail "dot-prefixed remote grant failed"
+  wait "$BG_PID"
+  expect_code 0 "$(cat "$dir/agent.rc")" "dot-prefixed remote admission: $(cat "$dir/agent.out")"
+  new_holder
+  out=$(reserve "$R_ROOT" next pool-model-a 2>&1)
+  expect_code 4 "$?" "dot-prefixed remote occupancy: $out"
+  pass "hidden pool names reach every path and invalid names refuse before any write"
+}
+
+test_exact_counting_across_route_changes() {
+  local home="$TMP_ROOT/routes/primary" out
+  make_home "$home"
+  printf '{"pools":[{"name":"one","capacity":1,"models":["pool-model-a"]},{"name":"two","capacity":1,"models":["pool-model-b"]}]}\n' \
+    > "$home/config/fleet-seats"
+  new_holder
+  out=$(reserve_gen "$home" h g1 - pool-model-a) || fail "initial holder: $out"
+  out=$(reserve_gen "$home" h g2 g1 pool-model-a) || fail "a same-pool replacement at full capacity: $out"
+  assert_contains "$out" "already held" "the same-pool replacement took a second seat"
+  out=$(reserve "$home" o1 pool-model-a 2>&1)
+  expect_code 4 "$?" "another holder during a same-pool handoff"
+  seats "$home" release h --generation g1 --reason prelaunch >/dev/null || fail "releasing the replaced generation"
+  out=$(reserve "$home" o1 pool-model-a 2>&1)
+  expect_code 4 "$?" "the count dropped to zero during the handoff"
+  out=$(reserve "$home" o2 pool-model-b 2>&1) || fail "filling the second pool: $out"
+  out=$(reserve_gen "$home" h g3 g2 pool-model-b 2>&1)
+  expect_code 4 "$?" "a cross-pool replacement into a full pool"
+  assert_equals reserved "$(lifecycle_of "$home" h g2)" "a refused cross-pool replacement touched the old generation"
+  seats "$home" release o2 --generation g-o2 --reason prelaunch >/dev/null || fail "freeing the second pool"
+  out=$(reserve_gen "$home" h g3 g2 pool-model-b 2>&1) || fail "a cross-pool replacement with room: $out"
+  out=$(reserve "$home" o1 pool-model-a 2>&1)
+  expect_code 4 "$?" "the old pool freed before its generation ended"
+  out=$(reserve "$home" o5 pool-model-b 2>&1)
+  expect_code 4 "$?" "the destination seat was not counted"
+  # Counting follows the CURRENT policy: moving model a into pool two makes
+  # both of h's generations one holder there and frees pool one.
+  printf '{"pools":[{"name":"one","capacity":1,"models":["pool-model-c"]},{"name":"two","capacity":1,"models":["pool-model-a","pool-model-b"]}]}\n' \
+    > "$home/config/fleet-seats"
+  out=$(reserve "$home" o3 pool-model-c 2>&1) || fail "a remapped policy kept counting the moved model in its old pool: $out"
+  out=$(reserve "$home" o4 pool-model-a 2>&1)
+  expect_code 4 "$?" "a remapped pool ignored the moved generations"
+  assert_contains "$out" "(1 of 1" "one holder's two generations counted twice in one pool"
+  pass "same-pool handoffs keep one seat, cross-pool candidates need destination capacity, and counting follows the current policy"
+}
+
+test_managed_records_and_legacy_import() {
+  local home="$TMP_ROOT/managed/primary" out st name
+  make_home "$home"
+  pools "$home" 1
+  st=$(cd "$home/state" && pwd -P)
+  new_holder
+  out=$(reserve "$home" t pool-model-a 2>&1) || fail "initial reservation: $out"
+  seats "$home" release t --generation g-t --reason prelaunch >/dev/null || fail "release"
+  task_record "$home" t pool-model-a ship "spawn_gen=g-t"
+  out=$(reserve "$home" other pool-model-a 2>&1) || fail "a terminal generation's stale record re-counted it: $out"
+  seats "$home" release other --generation g-other --reason prelaunch >/dev/null
+  task_record "$home" t pool-model-a ship "spawn_gen=g-unknown"
+  out=$(reserve "$home" other2 pool-model-a 2>&1)
+  expect_code 5 "$?" "a task record whose generation its holder never issued"
+  assert_contains "$out" "never issued" "the conflicting generation was not named"
+  rm -f "$home/state/t.meta"
+  printf 'not json\n' > "$home/state/fleet-seats/holders/broken.json"
+  out=$(reserve "$home" other2 pool-model-a 2>&1)
+  expect_code 5 "$?" "a malformed holder record"
+  rm -f "$home/state/fleet-seats/holders/broken.json"
+
+  # A v1 reservation imports once, conservatively, and counts exactly once
+  # beside its own task record.
+  name=$(printf '%s\t%s' "$st" legacy | cksum | tr -s ' ' '-' | cut -d- -f1-2)
+  mkdir -p "$home/state/fleet-seats/.shared"
+  printf 'state=%s\ntask=legacy\nmodel=pool-model-a\npid=999999\npid_identity=\nnonce=\npolicy=\nhold=\nat=1\n' "$st" \
+    > "$home/state/fleet-seats/.shared/$name.seat"
+  task_record "$home" legacy pool-model-a ship "spawn_gen=g-legacy"
+  out=$(reserve "$home" other3 pool-model-a 2>&1)
+  expect_code 4 "$?" "a new holder beside an imported legacy reservation"
+  assert_contains "$out" "(1 of 1" "the legacy reservation and its record counted twice"
+  assert_absent "$home/state/fleet-seats/.shared/$name.seat" "the imported v1 record was not retired"
+  assert_equals v1 "$(seats "$home" show legacy | jq -r '.incarnations[0].legacy.source')" "the import lost its provenance"
+  pass "managed records follow the ledger, conflicts and malformed ledgers refuse, and v1 reservations import once"
+}
+
+test_cleanup_releases_only_its_generation() {
+  local home="$TMP_ROOT/cleanup/primary" out rc
+  make_home "$home"
+  pools "$home" 1
+  new_holder
+  out=$(reserve "$home" s pool-model-a 2>&1) || fail "initial reservation: $out"
+  task_record "$home" s pool-model-a ship "spawn_gen=g-s"
+  out=$(seats "$home" release s --generation g-s --reason teardown 2>&1); rc=$?
+  expect_code 5 "$rc" "a cleanup release while the record still names the generation: $out"
+  rm -f "$home/state/s.meta"
+  out=$(seats "$home" release s --generation g-s --reason teardown 2>&1) || fail "a finished cleanup release: $out"
+  out=$(reserve_gen "$home" s g-s2 - pool-model-a 2>&1) || fail "a new episode after cleanup: $out"
+  out=$(seats "$home" release s --generation g-s --reason teardown 2>&1) || fail "a late stale cleanup failed loudly: $out"
+  assert_contains "$out" "already terminal" "a late stale cleanup was not a no-op"
+  assert_equals reserved "$(lifecycle_of "$home" s g-s2)" "a late stale cleanup released the successor"
+  new_holder
+  out=$(reserve "$home" other pool-model-a 2>&1)
+  expect_code 4 "$?" "another holder beside the successor"
+  pass "cleanup releases exactly its own generation and stale cleanup never frees a successor"
 }
 
 test_no_pool_configured_is_off
@@ -915,3 +1358,12 @@ test_spawn_refuses_a_full_pool_before_any_record
 test_spawn_rejects_unverified_models
 test_spawn_holds_a_seat_until_cleanup
 test_secondmate_spawn_takes_a_seat
+test_buffered_supervisor_launch_keeps_its_seat
+test_proven_cancellation_frees_a_buffered_launch
+test_lifecycle_episode_excludes_stale_mutations
+test_collection_never_waits_on_task_locks
+test_serve_epochs_fence_lost_and_late_responses
+test_pool_grammar_is_uniform
+test_exact_counting_across_route_changes
+test_managed_records_and_legacy_import
+test_cleanup_releases_only_its_generation

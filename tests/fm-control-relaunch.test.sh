@@ -1792,12 +1792,14 @@ test_missing_instructions_refuse_before_stopping_anything() {
 }
 
 test_checkpoint_refusal_leaves_the_record_byte_identical() {
-  local dir before after
+  local dir before after out rc
   dir=$(new_case bytes rl12)
   add_ship_task "$dir" rl12 claude
   before=$(cat "$dir/home/state/rl12.meta")
   rm -rf "$dir/wt/.git"
-  run_control "$dir" rl12 relaunch --note "x" >/dev/null 2>&1
+  out=$(run_control "$dir" rl12 relaunch --note "x"); rc=$?
+  expect_code 1 "$rc" "a checkpoint refusal"
+  assert_contains "$out" "relaunch_failure=prelaunch" "checkpoint refusal did not classify the untouched agent"
   after=$(cat "$dir/home/state/rl12.meta")
   [ "$before" = "$after" ] || fail "a refused relaunch must leave the durable record byte-identical"
   pass "fm-control relaunch: a refusal before the agent is stopped leaves the durable record untouched"
@@ -1813,6 +1815,7 @@ test_checkpoint_refuses_uninspectable_head_and_status() {
   out=$(FM_REAL_GIT="$real_git" FM_FAKE_GIT_FAILURE=head \
     run_control "$dir" rl22 relaunch --note "x"); rc=$?
   expect_code 1 "$rc" "an uninspectable HEAD should refuse"
+  assert_contains "$out" "relaunch_failure=prelaunch" "HEAD refusal did not classify prelaunch failure"
   assert_contains "$out" "HEAD cannot be inspected" "the refusal should name the failed HEAD proof"
   [ "$(cat "$dir/fake/command")" = claude ] || fail "HEAD inspection failure must not stop the agent"
 
@@ -1822,6 +1825,7 @@ test_checkpoint_refuses_uninspectable_head_and_status() {
   out=$(FM_REAL_GIT="$real_git" FM_FAKE_GIT_FAILURE=status \
     run_control "$dir" rl23 relaunch --note "x"); rc=$?
   expect_code 1 "$rc" "an uninspectable worktree status should refuse"
+  assert_contains "$out" "relaunch_failure=prelaunch" "status refusal did not classify prelaunch failure"
   assert_contains "$out" "status cannot be inspected" "the refusal should name the failed dirty-state proof"
   [ "$(cat "$dir/fake/command")" = claude ] || fail "status inspection failure must not stop the agent"
   pass "fm-control relaunch: checkpoint inspection failures refuse before stopping"
@@ -3018,6 +3022,161 @@ SH
 test_relaunch_off_opencode_removes_tracked_wiring
 test_exit_and_relaunch_remove_the_dialog_file
 test_exit_removes_the_dialog_file_before_releasing_the_lock
+# --- fleet seats across the relaunch transaction ----------------------------
+# bin/fm-fleet-seats.sh owns the transitions; these drive them through the
+# real control plane and launch owner.
+
+pool_case() {  # <case-dir> <id>: two one-seat pools and a pooled ship record
+  printf '{"pools":[{"name":"one","capacity":1,"models":["pool-model-a"]},{"name":"two","capacity":1,"models":["pool-model-b"]}]}\n' \
+    > "$1/home/config/fleet-seats"
+  perl -pi -e 's/^model=.*/model=pool-model-a/' "$1/home/state/$2.meta"
+  printf 'spawn_gen=g-old\n' >> "$1/home/state/$2.meta"
+}
+
+case_seats() {  # <case-dir> <args...>
+  local dir=$1; shift
+  env -u FM_STATE_OVERRIDE -u FM_CONFIG_OVERRIDE -u FM_DATA_OVERRIDE -u FM_ROOT_OVERRIDE \
+    PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" "$ROOT/bin/fm-fleet-seats.sh" "$@"
+}
+
+probe_seat() {  # <case-dir> <model>: another holder's reservation, given back
+  local out rc gen
+  gen="probe$(date +%s)$RANDOM$RANDOM"
+  out=$(case_seats "$1" reserve probe --generation "$gen" --harness pi --model "$2" --holder-pid "$$" 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || case_seats "$1" release probe --generation "$gen" --reason prelaunch >/dev/null 2>&1
+  printf '%s\n' "$out"
+  return "$rc"
+}
+
+test_pooled_relaunch_reserves_its_destination_before_stopping() {
+  local dir out rc
+  dir=$(new_case pooldest rl50)
+  mkdir -p "$dir/home/config"
+  add_ship_task "$dir" rl50 claude
+  pool_case "$dir" rl50
+  printf 'kind=ship\nmodel=pool-model-b\nharness=pi\n' > "$dir/home/state/busy.meta"
+  out=$(run_control "$dir" rl50 relaunch --model pool-model-b --note "move pools"); rc=$?
+  expect_code 1 "$rc" "a cross-pool relaunch into a full pool"$'\n'"$out"
+  assert_contains "$out" "pool two is full" "the destination seat was not checked first"
+  assert_contains "$out" "relaunch_failure=prelaunch" "the refusal did not classify the untouched agent"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "a full destination pool stopped the agent"
+  assert_no_grep "/exit" "$dir/fake/literal" "a full destination pool sent the exit command"
+  [ "$(meta_field "$dir" rl50 model)" = pool-model-a ] || fail "a refused relaunch changed the record"
+  pass "fm-control relaunch: a full destination pool refuses before the old agent is touched"
+}
+
+test_same_pool_relaunch_keeps_one_seat_through_the_handoff() {
+  local dir out rc gen
+  dir=$(new_case poolsame rl51)
+  mkdir -p "$dir/home/config"
+  add_ship_task "$dir" rl51 claude
+  pool_case "$dir" rl51
+  out=$(run_control "$dir" rl51 relaunch --model pool-model-a --note "same pool"); rc=$?
+  expect_code 0 "$rc" "a same-pool relaunch at full capacity"$'\n'"$out"
+  gen=$(meta_field "$dir" rl51 spawn_gen)
+  [ "$(journal_field "$dir" rl51 seat_generation)" = "$gen" ] \
+    || fail "the journal did not record the replacement's seat generation"
+  [ "$(journal_field "$dir" rl51 seat_previous_generation)" = g-old ] \
+    || fail "the journal did not record the replaced generation"
+  [ "$(case_seats "$dir" show rl51 | jq -r --arg g "$gen" '.incarnations[] | select(.generation == $g) | .launch_phase')" = dispatching ] \
+    || fail "the replacement's seat was not dispatched with its endpoint"
+  out=$(probe_seat "$dir" pool-model-a); rc=$?
+  expect_code 4 "$rc" "another holder after the same-pool relaunch: $out"
+  pass "fm-control relaunch: a same-pool replacement keeps exactly one counted seat"
+}
+
+test_relaunch_rollback_releases_only_an_undelivered_candidate() {
+  local dir out rc real_mv meta gen
+  dir=$(new_case poolrollback rl52)
+  mkdir -p "$dir/home/config"
+  add_ship_task "$dir" rl52 claude
+  pool_case "$dir" rl52
+  meta="$dir/home/state/rl52.meta"
+  real_mv=$(command -v mv)
+  make_mv_failure_stub "$dir"
+  out=$(FM_REAL_MV="$real_mv" FM_FAKE_META_PUBLISH_MV_FAIL="$meta" \
+    run_control "$dir" rl52 relaunch --model pool-model-a --note "rollback"); rc=$?
+  expect_code 1 "$rc" "a failed publication before delivery"$'\n'"$out"
+  gen=$(journal_field "$dir" rl52 seat_generation)
+  [ "$(case_seats "$dir" show rl52 | jq -r --arg g "$gen" '.incarnations[] | select(.generation == $g) | .lifecycle')" = released ] \
+    || fail "a candidate that never reached delivery kept its seat"
+  out=$(probe_seat "$dir" pool-model-a); rc=$?
+  expect_code 4 "$rc" "the stopped task's record still counts until recovery or cleanup: $out"
+
+  dir=$(new_case pooldelivered rl53)
+  mkdir -p "$dir/home/config"
+  add_ship_task "$dir" rl53 claude
+  pool_case "$dir" rl53
+  out=$(FM_FAKE_LAUNCH_TRANSPORT_FAIL_AFTER_START=1 \
+    run_control "$dir" rl53 relaunch --model pool-model-a --note "delivered"); rc=$?
+  expect_code 1 "$rc" "a failure after launch delivery"$'\n'"$out"
+  gen=$(journal_field "$dir" rl53 seat_generation)
+  [ "$(case_seats "$dir" show rl53 | jq -r --arg g "$gen" '.incarnations[] | select(.generation == $g) | .lifecycle')" = reserved ] \
+    || fail "a delivered candidate lost its seat on rollback"
+  pass "fm-control relaunch: rollback releases an undelivered candidate and keeps a delivered one counted"
+}
+
+sm_case() {  # <case-dir> <id>: a local secondmate record on a pooled model
+  local dir=$1 id=$2 home="$1/home"
+  mkdir -p "$home/config" "$home/data/$id"
+  printf '{"pools":[{"name":"one","capacity":1,"models":["pool-model-a"]}]}\n' > "$home/config/fleet-seats"
+  printf '# secondmate brief\n' > "$home/data/$id/brief.md"
+  fm_git_worktree "$dir/proj" "$dir/smhome" sm-branch
+  mkdir -p "$dir/smhome/state" "$dir/smhome/data" "$dir/smhome/bin"
+  printf '%s\n' "$id" > "$dir/smhome/.fm-secondmate-home"
+  printf '# agents\n' > "$dir/smhome/AGENTS.md"
+  {
+    echo "window=fmses:fm-$id"
+    echo "endpoint_task_id=$id"
+    echo "worktree=$dir/smhome"
+    echo "project=$dir/smhome"
+    echo "harness=claude"
+    echo "kind=secondmate"
+    echo "mode=secondmate"
+    echo "yolo=off"
+    echo "model=pool-model-a"
+    echo "effort=default"
+    echo "home=$dir/smhome"
+    echo "spawn_gen=g-sm-old"
+  } > "$home/state/$id.meta"
+  printf '%s\n' "fm-$id" > "$dir/fake/windows"
+  printf '%s' "$dir/smhome" > "$dir/fake/cwd"
+}
+
+test_secondmate_relaunch_confirms_its_seat_inside_one_episode() {
+  local dir out rc gen blocker
+  dir=$(new_case smseat sm50)
+  sm_case "$dir" sm50
+  bash -c '. "$1/bin/fm-secondmate-liveness-lib.sh" && fm_supervisor_lifecycle_acquire "$2" sm50 0 && : > "$3" && exec sleep 600' \
+    _ "$ROOT" "$dir/home/state" "$dir/episode-held" &
+  blocker=$!
+  for _ in $(seq 1 50); do [ -e "$dir/episode-held" ] && break; sleep 0.1; done
+  out=$(FM_CONTROL_LIFECYCLE_WAIT=1 run_control "$dir" sm50 relaunch --model pool-model-a); rc=$?
+  kill "$blocker"
+  wait "$blocker" 2>/dev/null
+  expect_code 1 "$rc" "a relaunch during another lifecycle episode"$'\n'"$out"
+  assert_contains "$out" "another lifecycle episode" "the episode refusal was not named"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "a relaunch during another episode stopped the agent"
+
+  out=$(run_control "$dir" sm50 relaunch --model pool-model-a --expect-generation g-other); rc=$?
+  expect_code 6 "$rc" "a relaunch whose expected generation is stale"$'\n'"$out"
+  assert_contains "$out" "generation-mismatch" "the stale generation was not named"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "a stale expected generation stopped the agent"
+
+  out=$(run_control "$dir" sm50 relaunch --model pool-model-a --expect-generation g-sm-old); rc=$?
+  expect_code 0 "$rc" "a pooled secondmate relaunch"$'\n'"$out"
+  gen=$(meta_field "$dir" sm50 spawn_gen)
+  [ "$(case_seats "$dir" show sm50 | jq -r --arg g "$gen" '.incarnations[] | select(.generation == $g) | .lifecycle')" = confirmed ] \
+    || fail "the started secondmate's seat was not confirmed: $(case_seats "$dir" show sm50)"
+  out=$(probe_seat "$dir" pool-model-a); rc=$?
+  expect_code 4 "$rc" "another holder beside the relaunched supervisor: $out"
+  pass "fm-control relaunch: a secondmate relaunch runs in one episode, honors its expected generation, and confirms its seat"
+}
+
+test_pooled_relaunch_reserves_its_destination_before_stopping
+test_same_pool_relaunch_keeps_one_seat_through_the_handoff
+test_relaunch_rollback_releases_only_an_undelivered_candidate
+test_secondmate_relaunch_confirms_its_seat_inside_one_episode
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven

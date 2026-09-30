@@ -6,6 +6,7 @@
 #        fm-control.sh <task-id> exit
 #        fm-control.sh <task-id> relaunch [--harness <name>] [--model <name>]
 #                                         [--effort <level>]
+#                                         [--expect-generation <gen>]
 #                                         (--note <text> | --note-file <path>)
 #
 # Why this exists, and how it differs from fm-send.sh. bin/fm-send.sh is the
@@ -105,6 +106,20 @@
 #              the prior durable record in place and reports the concrete
 #              state; it never leaves a half-transitioned task claiming to be
 #              running.
+#              Fleet seats (bin/fm-fleet-seats.sh): the replacement's generation
+#              is reserved BEFORE the old agent is touched, naming the
+#              incarnation it replaces, so a full destination pool refuses
+#              with nothing changed; the old generation is released only after
+#              its stop is proven, and a secondmate replacement is confirmed
+#              only once its endpoint reads alive. The journal records the
+#              seat generations. A candidate that never reached launch
+#              delivery is released on rollback; one that did stays counted.
+#              --expect-generation refuses (exit 6, nothing touched) when the
+#              task now records another incarnation.
+#              A secondmate's exit and relaunch run inside its supervisor
+#              lifecycle episode (bin/fm-secondmate-liveness-lib.sh), adopted
+#              from a verified carrier or acquired with a bounded wait before
+#              the control lock.
 #
 # Teardown and discard are NOT verbs here and never will be. `exit` stops an
 # agent and preserves everything else; removing a worktree, killing an
@@ -150,6 +165,7 @@
 #   FM_CONTROL_EXIT_WAIT         alive->dead wait after the exit command (30)
 #   FM_CONTROL_LAUNCH_WAIT       dead->alive wait after a relaunch (90)
 #   FM_CONTROL_EXIT_RETRIES      Enter retries for the exit command (3)
+#   FM_CONTROL_LIFECYCLE_WAIT    wait for a secondmate's lifecycle episode (30)
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -203,6 +219,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-omp-profile-lib.sh"
 # shellcheck source=bin/fm-exclude-tools-lib.sh
 . "$SCRIPT_DIR/fm-exclude-tools-lib.sh"
+# shellcheck source=bin/fm-secondmate-liveness-lib.sh
+. "$SCRIPT_DIR/fm-secondmate-liveness-lib.sh"
 
 POLL=${FM_CONTROL_POLL:-0.5}
 SETTLE_WAIT=${FM_CONTROL_SETTLE_WAIT:-5}
@@ -218,11 +236,15 @@ die() {  # <message>
 
 CONTROL_LOCK=
 CONTROL_LOCK_HELD=0
+CONTROL_LIFECYCLE_JOINED=0
 RELAUNCH_ACTIVE=0
 RELAUNCH_PHASE=start
 
 control_cleanup() {
   local status=$?
+  if [ "$status" -ne 0 ] && [ "${VERB:-}" = relaunch ] && [ "$RELAUNCH_PHASE" = start ]; then
+    echo 'relaunch_failure=prelaunch' >&2
+  fi
   if [ "$RELAUNCH_ACTIVE" = 1 ] \
      && declare -F relaunch_rollback >/dev/null 2>&1; then
     relaunch_rollback || true
@@ -235,6 +257,10 @@ control_cleanup() {
   if [ "$CONTROL_LOCK_HELD" = 1 ]; then
     CONTROL_LOCK_HELD=0
     fm_lock_release "$CONTROL_LOCK" || true
+  fi
+  if [ "$CONTROL_LIFECYCLE_JOINED" = 1 ]; then
+    CONTROL_LIFECYCLE_JOINED=0
+    fm_supervisor_lifecycle_release "$STATE" "$ID" || true
   fi
   if declare -F fm_lease_guard_release >/dev/null 2>&1; then
     fm_lease_guard_release || true
@@ -270,6 +296,7 @@ MODEL_SET=0
 EFFORT_SET=0
 NOTE=
 NOTE_SET=0
+EXPECT_GENERATION=
 control_want_value=
 for control_arg in "$@"; do
   if [ -n "$control_want_value" ]; then
@@ -281,6 +308,7 @@ for control_arg in "$@"; do
       model) NEW_MODEL=$control_arg; MODEL_SET=1 ;;
       effort) NEW_EFFORT=$control_arg; EFFORT_SET=1 ;;
       note) NOTE=$control_arg; NOTE_SET=1 ;;
+      expect_generation) EXPECT_GENERATION=$control_arg ;;
       note_file)
         [ -f "$control_arg" ] || die "--note-file '$control_arg' is not a readable file"
         NOTE=$(cat "$control_arg")
@@ -299,6 +327,8 @@ for control_arg in "$@"; do
     --effort=*) NEW_EFFORT=${control_arg#--effort=}; EFFORT_SET=1 ;;
     --note) control_want_value=note ;;
     --note=*) NOTE=${control_arg#--note=}; NOTE_SET=1 ;;
+    --expect-generation) control_want_value=expect_generation ;;
+    --expect-generation=*) EXPECT_GENERATION=${control_arg#--expect-generation=} ;;
     --note-file) control_want_value=note_file ;;
     --note-file=*)
       [ -f "${control_arg#--note-file=}" ] || die "--note-file '${control_arg#--note-file=}' is not a readable file"
@@ -315,8 +345,12 @@ fi
 
 if [ "$VERB" != relaunch ]; then
   [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] && [ "$NOTE_SET" = 0 ] \
-    || die "--harness, --model, --effort, and --note apply to 'relaunch' only"
+    && [ -z "$EXPECT_GENERATION" ] \
+    || die "--harness, --model, --effort, --expect-generation, and --note apply to 'relaunch' only"
 fi
+case "$EXPECT_GENERATION" in
+  *[!A-Za-z0-9._-]*) die "--expect-generation must be a generation token" ;;
+esac
 [ "$HARNESS_SET" = 0 ] || [ -n "$NEW_HARNESS" ] || die "--harness requires a non-empty value"
 [ "$MODEL_SET" = 0 ] || [ -n "$NEW_MODEL" ] || die "--model requires a non-empty value"
 [ "$EFFORT_SET" = 0 ] || [ -n "$NEW_EFFORT" ] || die "--effort requires a non-empty value"
@@ -342,6 +376,24 @@ ID=$RAW_ID
 fm_lease_guard "$ID" "lifecycle control (fm-control)"
 CONTROL_LOCK="$STATE/.control-$ID.lock"
 trap control_cleanup EXIT
+# A secondmate's exit or relaunch joins its supervisor lifecycle episode first
+# (acquisition order: episode, then this control lock), so it can never
+# interleave with a liveness probe, recovery spawn, or another relaunch.
+if [ "$VERB" != interrupt ] && [ -f "$STATE/$ID.meta" ] \
+  && [ "$(fm_meta_get "$STATE/$ID.meta" kind 2>/dev/null || true)" = secondmate ] \
+  && [ -z "$(fm_meta_get "$STATE/$ID.meta" remote_host 2>/dev/null || true)" ]; then
+  control_lifecycle_rc=0
+  fm_supervisor_lifecycle_adopt "$STATE" "$ID" || control_lifecycle_rc=$?
+  case "$control_lifecycle_rc" in
+    0) ;;
+    1)
+      fm_supervisor_lifecycle_acquire "$STATE" "$ID" "${FM_CONTROL_LIFECYCLE_WAIT:-30}" \
+        || die "another lifecycle episode for secondmate $ID is running (pid ${FM_LOCK_HELD_PID:-unknown}); nothing was changed"
+      CONTROL_LIFECYCLE_JOINED=1
+      ;;
+    *) die "the inherited lifecycle carrier for secondmate $ID does not verify against its live episode; nothing was changed" ;;
+  esac
+fi
 fm_lock_try_acquire "$CONTROL_LOCK" \
   || die "another lifecycle action is already running for task $ID"
 CONTROL_LOCK_HELD=1
@@ -871,6 +923,19 @@ PRIOR_EFFORT=
 TARGET_HARNESS=$HARNESS
 TARGET_MODEL=
 TARGET_EFFORT=
+# Seat custody for this transaction (bin/fm-fleet-seats.sh owns transitions).
+# SEAT_OPERATION is set when a host transaction for a remote parent's seat
+# runs this relaunch: the parent owns the seat, so nothing is reserved here and
+# the generation comes from that transaction.
+SEAT_GEN=
+SEAT_PREV_GEN=
+SEAT_TRACKED=0
+SEAT_OPERATION=${FM_REMOTE_SEAT_OPERATION:-}
+
+control_seats() {  # <verb> <args...>
+  FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_DATA_OVERRIDE=$DATA \
+    "$SCRIPT_DIR/fm-fleet-seats.sh" "$@"
+}
 
 journal_write() {  # <phase> [extra-line]...
   local phase=$1
@@ -890,6 +955,9 @@ journal_write() {  # <phase> [extra-line]...
     echo "to_harness=$TARGET_HARNESS"
     echo "to_model=$TARGET_MODEL"
     echo "to_effort=$TARGET_EFFORT"
+    [ -z "$SEAT_GEN" ] || echo "seat_generation=$SEAT_GEN"
+    [ -z "$SEAT_PREV_GEN" ] || echo "seat_previous_generation=$SEAT_PREV_GEN"
+    [ -z "$SEAT_OPERATION" ] || echo "seat_operation=$SEAT_OPERATION"
     local line
     for line in "$@"; do
       echo "$line"
@@ -901,11 +969,22 @@ journal_write() {  # <phase> [extra-line]...
   return 1
 }
 
+# A candidate that never reached launch delivery is released; the seat owner
+# refuses the release once delivery was dispatched, so that candidate stays
+# counted for recovery instead.
+relaunch_seat_rollback() {
+  [ "$SEAT_TRACKED" = 1 ] || return 0
+  if ! control_seats release "$ID" --generation "$SEAT_GEN" --reason prelaunch >/dev/null 2>&1; then
+    echo "warning: $ID's replacement fleet seat (generation $SEAT_GEN) stays counted: its launch may have been delivered; reconcile it with bin/fm-fleet-seats.sh reclaim $ID --generation $SEAT_GEN" >&2
+  fi
+}
+
 relaunch_rollback() {
   local state
   [ "$RELAUNCH_ACTIVE" = 1 ] || return 0
   [ "$RELAUNCH_PHASE" != complete ] || return 0
   RELAUNCH_ACTIVE=0
+  relaunch_seat_rollback || true
   case "$RELAUNCH_PHASE" in
     checkpoint|noted)
       # The old agent was never touched. Restore the instructions byte-exact so
@@ -1220,9 +1299,35 @@ do_relaunch() {
     note_line="note=none"
   fi
   safe_checkpoint
+  if [ -n "$EXPECT_GENERATION" ] && [ "$(fm_meta_get "$META" spawn_gen)" != "$EXPECT_GENERATION" ]; then
+    echo "error: generation-mismatch: task $ID now records generation '$(fm_meta_get "$META" spawn_gen)', not the expected $EXPECT_GENERATION; nothing was changed" >&2
+    RELAUNCH_PHASE=mismatch
+    exit 6
+  fi
   cp -p "$META" "$META_PRIOR" || die "could not preserve task $ID's durable record before relaunching"
+  SEAT_PREV_GEN=$(fm_meta_get "$META" spawn_gen)
+  if [ -n "$SEAT_OPERATION" ]; then
+    SEAT_GEN=${FM_SPAWN_SEAT_GENERATION:-}
+    case "$SEAT_GEN" in
+      ''|*[!A-Za-z0-9.]*) die "a relaunch for a parent seat operation needs the parent's seat generation" ;;
+    esac
+  else
+    SEAT_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
+  fi
   RELAUNCH_ACTIVE=1
   journal_write checkpoint "${CHECKPOINT_LINES[@]}" "$note_line"
+  # Reserve the replacement before the old agent is touched: a full
+  # destination pool or an unavailable authority refuses here with nothing
+  # changed. Same-pool replacement is one seat; cross-pool needs its seat first.
+  if [ -z "$SEAT_OPERATION" ]; then
+    local seat_out seat_model=$TARGET_MODEL
+    seat_out=$(control_seats reserve "$ID" --generation "$SEAT_GEN" \
+      --previous-generation "${SEAT_PREV_GEN:--}" --kind "$KIND" \
+      --harness "$TARGET_HARNESS" --model "$seat_model" --holder-pid "$$") \
+      || die "relaunch of $ID refused: no fleet seat for model $seat_model (see the fleet-seats line above); nothing was changed"
+    case "$seat_out" in 'fleet-seats: reserved '*|'fleet-seats: recorded '*) SEAT_TRACKED=1 ;; esac
+    [ -z "$seat_out" ] || printf '%s\n' "$seat_out" >&2
+  fi
 
   record_note
   journal_write noted "${CHECKPOINT_LINES[@]}" "$note_line"
@@ -1230,6 +1335,12 @@ do_relaunch() {
   journal_write stopping "${CHECKPOINT_LINES[@]}" "$note_line"
   exit_result=$(do_exit)
   journal_write exited "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
+  # The old incarnation's stop is proven, and its replacement already counts:
+  # free the old generation exactly. An unprovable release keeps it counted.
+  if [ "$SEAT_TRACKED" = 1 ] && [ -n "$SEAT_PREV_GEN" ]; then
+    control_seats release "$ID" --generation "$SEAT_PREV_GEN" --reason replaced >/dev/null \
+      || echo "warning: $ID's previous fleet seat (generation $SEAT_PREV_GEN) stays counted until reconciliation" >&2
+  fi
 
   # The launch owner (fm-spawn --relaunch) clears the previous incarnation's
   # per-task harness wiring before arming the new one, so nothing to do here.
@@ -1238,7 +1349,7 @@ do_relaunch() {
   spawn_args=("$ID" --relaunch --harness "$TARGET_HARNESS")
   [ "$TARGET_MODEL" = default ] || spawn_args+=(--model "$TARGET_MODEL")
   [ "$TARGET_EFFORT" = default ] || spawn_args+=(--effort "$TARGET_EFFORT")
-  if FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" \
+  if FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" FM_SPAWN_SEAT_GENERATION="$SEAT_GEN" \
       "$SCRIPT_DIR/fm-spawn.sh" "${spawn_args[@]}" >/dev/null; then
     RELAUNCH_META_PUBLISHED=1
     # $T was resolved from the record before the launch. When the recorded
@@ -1268,6 +1379,12 @@ do_relaunch() {
     die "the replacement agent for $ID did not come up within ${LAUNCH_WAIT}s (endpoint reads '$state')"
   }
   RELAUNCH_AGENT_CONFIRMED=1
+  # A supervisor's seat is confirmed by the launch owner's startup handoff;
+  # replaying it here is idempotent and closes a lost confirmation.
+  if [ "$SEAT_TRACKED" = 1 ] && [ "$KIND" = secondmate ]; then
+    control_seats confirm "$ID" --generation "$SEAT_GEN" >/dev/null \
+      || echo "warning: $ID's replacement is running, but its fleet seat confirmation could not be recorded; it stays counted" >&2
+  fi
 
   journal_write complete "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
   RELAUNCH_ACTIVE=0
