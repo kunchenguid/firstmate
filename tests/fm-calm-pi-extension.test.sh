@@ -569,7 +569,7 @@ function makeSession({ missing = [], rejectPrompt = false } = {}) {
 }
 
 function makeHost(session) {
-  // Pi's InteractiveMode.agent getter reads session.agent on older installs.
+  // The InteractiveMode.agent getter reads session.agent on older Pi installs.
   session.agent = session;
   const host = Object.create(InteractiveMode.prototype);
   const children = [];
