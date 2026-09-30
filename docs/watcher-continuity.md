@@ -186,8 +186,8 @@ So a finished, hung, or identity-mismatched claim cannot suppress that recovery 
 
 The recovery-episode contract below owns once-per-generation announcement.
 A handling successor does not re-announce the generation handed off at its start.
-A later generation, such as an `fm-inbox.sh` note appended after the handoff was acknowledged, is announced once like any other.
 It enters its poll loop immediately and keeps scanning signals, stale panes, and checks.
+A later generation, such as an `fm-inbox.sh` note appended after the handoff was acknowledged, is announced once like any other.
 
 ### Manual recovery and other harnesses
 
