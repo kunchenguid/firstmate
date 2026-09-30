@@ -3,21 +3,22 @@
 #
 # Design: modeled on bin/backends/cmux.sh (the closest shared-namespace,
 # session-provider-only GUI adapter) for CLI mechanics, with Herdr's
-# container UX (ONE shared firstmate workspace per project, one tab per
-# task, plain send-keys literal-then-Enter delivery, JSON capture). Paseo is
+# container UX (one tab per task in a shared firstmate workspace, plain
+# send-keys literal-then-Enter delivery, JSON capture). Paseo is
 # a session provider ONLY: the worktree provider stays treehouse. Sourced
 # only through bin/fm-backend.sh's fm_backend_source in normal operation;
 # the unit tests source it directly.
 #
 # Container shape (Paseo's hierarchy is project > workspace > terminal tab):
-# ONE Paseo workspace PER PROJECT, labeled `firstmate` (or `2ndmate-<id>`),
-# adopted (fm_backend_paseo_workspace_ensure owns the order) or created
-# once, holding ONE terminal tab PER TASK. The adapter never runs a
-# `paseo project ...` command: Paseo registers or reuses the project by
-# path when the workspace is created, so a fleet of tasks shows up as tabs
-# under one sidebar entry instead of one workspace (or project) per task.
-# The daemon (127.0.0.1:6767 by default, `paseo status`) is the shared
-# container.
+# ONE terminal tab PER TASK. When Firstmate itself runs inside Paseo and its
+# own workspace is known, every task tab goes there whatever the project.
+# Otherwise each project gets ONE shared workspace labeled `firstmate` (or
+# `2ndmate-<id>`), adopted (fm_backend_paseo_workspace_ensure owns the order)
+# or created once; Paseo registers or reuses the project by path. Cleanup
+# archives that shared workspace once its last task tab closes and deletes
+# its project when the folder is one of this home's own clones
+# (fm_backend_paseo_retire_workspace). The daemon (127.0.0.1:6767 by
+# default, `paseo status`) is the shared container.
 #
 # Target string shape: "<terminal_id>:<workspace_id>" - the terminal's UUID
 # plus the workspace's `wks_...` id, neither of which contains a colon, so
@@ -551,13 +552,17 @@ fm_backend_paseo_send_text_submit() { # <target> <text> <retries> <enter-sleep> 
 }
 
 # fm_backend_paseo_kill: close the task's terminal TAB, best-effort (mirrors
-# every other backend's `kill` `|| true` contract). The shared per-project
-# workspace is never archived here: sibling task tabs live in it (finding
-# #5). An already-gone target stays quiet.
+# every other backend's `kill` `|| true` contract), then retire the shared
+# per-project workspace if that was its last tab. An already-gone tab stays
+# quiet but still retires its recorded workspace; retire holds back while
+# any tab, agent, other title, or Firstmate itself uses it.
 fm_backend_paseo_kill() { # <target> [unused] [expected-label]
   local expected_label=${3:-}
   if [ -n "$expected_label" ]; then
-    fm_backend_paseo_target_ready "$1" "$expected_label" || return 0
+    if ! fm_backend_paseo_target_ready "$1" "$expected_label"; then
+      fm_backend_paseo_parse_target "$1" && fm_backend_paseo_retire_workspace "$FM_BACKEND_PASEO_WORKSPACE"
+      return 0
+    fi
   else
     fm_backend_paseo_parse_target "$1" || return 0
   fi

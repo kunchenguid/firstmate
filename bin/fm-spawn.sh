@@ -3793,14 +3793,14 @@ EOF
   paseo)
     fm_backend_paseo_container_ensure || exit 1
     PASEO_TASK_IDS=$(fm_backend_paseo_create_task "$W" "$PROJ_ABS") || exit 1
-    read -r PASEO_TERMINAL_ID PASEO_WORKSPACE_ID <<EOF
+    read -r FM_PASEO_TASK_TERMINAL_ID FM_PASEO_TASK_WORKSPACE_ID <<EOF
 $PASEO_TASK_IDS
 EOF
-    if [ -z "$PASEO_TERMINAL_ID" ] || [ -z "$PASEO_WORKSPACE_ID" ]; then
+    if [ -z "$FM_PASEO_TASK_TERMINAL_ID" ] || [ -z "$FM_PASEO_TASK_WORKSPACE_ID" ]; then
       echo "error: paseo did not return a terminal/workspace id for $W" >&2
       exit 1
     fi
-    T="$PASEO_TERMINAL_ID:$PASEO_WORKSPACE_ID"
+    T="$FM_PASEO_TASK_TERMINAL_ID:$FM_PASEO_TASK_WORKSPACE_ID"
     ;;
   orca)
     set +e
@@ -4933,8 +4933,8 @@ preserve_relaunch_meta() {
     echo "cmux_surface_id=$CMUX_SURFACE_ID"
   fi
   if [ "$BACKEND" = paseo ]; then
-    echo "paseo_terminal_id=$PASEO_TERMINAL_ID"
-    echo "paseo_workspace_id=$PASEO_WORKSPACE_ID"
+    echo "paseo_terminal_id=$FM_PASEO_TASK_TERMINAL_ID"
+    echo "paseo_workspace_id=$FM_PASEO_TASK_WORKSPACE_ID"
   fi
   if [ "$KIND" = secondmate ]; then
     echo "home=$PROJ_ABS"

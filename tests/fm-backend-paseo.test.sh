@@ -816,7 +816,7 @@ test_send_text_submit_send_failed_when_target_absent() {
 
 # --- kill: best-effort whole-endpoint reclaim ---------------------------------
 
-test_kill_closes_terminal_and_keeps_workspace() {
+test_kill_keeps_workspace_when_inventory_unreadable() {
   local dir fb
   dir="$TMP_ROOT/kill"
   mkdir -p "$dir/responses"
@@ -826,9 +826,9 @@ test_kill_closes_terminal_and_keeps_workspace() {
   assert_contains "$(cat "$dir/log")" $'\x1f''terminal'$'\x1f''kill'$'\x1f''aaaaaaaa-0000-0000-0000-000000000000' \
     "kill did not close the terminal"
   case "$(cat "$dir/log")" in
-  *$'\x1f''workspace'$'\x1f''archive'$'\x1f'*) fail "kill must not archive the shared per-project workspace (sibling task tabs live in it)" ;;
+  *$'\x1f''workspace'$'\x1f''archive'$'\x1f'*) fail "kill must not archive a workspace when its inventory is unreadable" ;;
   esac
-  pass "fm_backend_paseo_kill: closes only the task's terminal tab and leaves the shared workspace alive"
+  pass "fm_backend_paseo_kill: closes the task's terminal tab and leaves the workspace alive when its inventory is unreadable"
 }
 
 # paseo_retire_case: run fm_backend_paseo_kill on "tt:wks_ff" in a home at
@@ -857,6 +857,31 @@ test_kill_retires_empty_firstmate_workspace_and_project() {
   assert_contains "$(cat "$dir/log")" $'\x1f''project'$'\x1f''delete'$'\x1f''prj_demo' \
     "kill should delete the project of this home's own clone once no workspace uses it"
   pass "fm_backend_paseo_kill: the last task tab retires firstmate's shared workspace and its own clone's project"
+}
+
+test_kill_retires_workspace_when_tab_already_gone() {
+  local dir fb
+  dir="$TMP_ROOT/retire-tab-gone"
+  mkdir -p "$dir/responses" "$dir/home"
+  # 1-2: terminal ls for the recorded id and the expected name (tab closed)
+  printf '[]' >"$dir/responses/1.out"
+  printf '[]' >"$dir/responses/2.out"
+  jq -n --arg cwd "$dir/home/projects/demo" '[{workspaceId:"wks_ff",name:"firstmate",cwd:$cwd}]' >"$dir/responses/3.out"
+  printf '[]' >"$dir/responses/4.out"
+  printf '[]' >"$dir/responses/5.out"
+  # 6: workspace archive (silent); 7: project ls; 8: project delete (silent)
+  jq -n --arg path "$dir/home/projects/demo" '[{projectId:"prj_demo",name:"demo",path:$path}]' >"$dir/responses/7.out"
+  fb=$(make_paseo_fakebin "$dir")
+  PATH="$fb:$PATH" FM_PASEO_LOG="$dir/log" FM_PASEO_RESPONSES="$dir/responses" FM_HOME="$dir/home" \
+    bash -c 'unset PASEO_AGENT_ID PASEO_WORKSPACE_ID; . "$0/bin/backends/paseo.sh"; fm_backend_paseo_kill "tttttttt-0000-0000-0000-000000000000:wks_ff" "" fm-gone' "$ROOT"
+  case "$(cat "$dir/log")" in
+  *$'\x1f''terminal'$'\x1f''kill'*) fail "kill must not close a terminal it could not verify" ;;
+  esac
+  assert_contains "$(cat "$dir/log")" $'\x1f''workspace'$'\x1f''archive'$'\x1f''wks_ff' \
+    "kill should still archive the recorded workspace when the task tab is already gone"
+  assert_contains "$(cat "$dir/log")" $'\x1f''project'$'\x1f''delete'$'\x1f''prj_demo' \
+    "kill should still delete the home clone's project when the task tab is already gone"
+  pass "fm_backend_paseo_kill: retires the recorded workspace and project when the task tab was already closed"
 }
 
 test_kill_retire_holds_back() {
@@ -1028,8 +1053,9 @@ test_composer_state_real_text_is_pending
 test_composer_state_unknown_on_capture_failure
 test_send_text_submit_detects_landed_send
 test_send_text_submit_send_failed_when_target_absent
-test_kill_closes_terminal_and_keeps_workspace
+test_kill_keeps_workspace_when_inventory_unreadable
 test_kill_retires_empty_firstmate_workspace_and_project
+test_kill_retires_workspace_when_tab_already_gone
 test_kill_retire_holds_back
 test_kill_is_best_effort_when_terminal_kill_fails
 test_list_live_filters_by_name_prefix
