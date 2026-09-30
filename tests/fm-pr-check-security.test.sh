@@ -1794,11 +1794,18 @@ test_gerrit_ready_gate_reads_the_published_tree() {
 
   write_task_meta "$dir" task-unread
   set +e
-  FM_TEST_GERRIT_FAIL=1 run_check_entry "$dir" task-unread \
-    https://gerrit.example/c/group/apps/console/+/4201 >/dev/null 2>&1
+  out=$(FM_TEST_GERRIT_FAIL=1 run_check_entry "$dir" task-unread \
+    https://gerrit.example/c/group/apps/console/+/4201 2>&1)
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "arming accepted a change it could not read"
+  case "$out" in
+    *"could not be read, so its published content cannot be checked"*) ;;
+    *) fail "the refusal did not say the change could not be read: $out" ;;
+  esac
+  case "$out" in
+    *"not the published content"*) fail "an unreadable change was reported as a published-tree mismatch: $out" ;;
+  esac
 
   : > "$dir/gerrit-axi.log"
   write_task_meta "$dir" task-published
@@ -2038,6 +2045,17 @@ test_gerrit_nm_ready_gate_requires_recovered_custody() {
     *"does not name the patch set its pipeline summary was posted on"*) ;;
     *) fail "the arming refusal did not say no summary patch set was named: $out" ;;
   esac
+  printf '%s\n' "done: PR $url" > "$state/task-recovered.status"
+  set +e
+  out=$(FM_TEST_GERRIT_REVISION=$squash FM_TEST_NM_PIPELINE_HEAD=$fixed run_check_entry "$dir" task-recovered "$url" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "arming accepted a worker done line the ready gate does not gate"
+  case "$out" in
+    *"does not name the patch set its pipeline summary was posted on"*) ;;
+    *) fail "arming on an ungated worker line did not fall back to the gated published line: $out" ;;
+  esac
+  grep -q '^pr=' "$state/task-recovered.meta" && fail "arming on an ungated worker line recorded pr="
   printf '%s\n' "$line" > "$state/task-recovered.status"
   set +e
   FM_TEST_GERRIT_REVISION=$squash FM_TEST_NM_PIPELINE_HEAD=$fixed run_check_entry "$dir" task-recovered "$url" >/dev/null 2>&1

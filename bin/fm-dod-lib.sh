@@ -752,9 +752,12 @@ fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state
         fm_dod_nm_custody_returned "$wt" || return 1
         marker=$FM_DOD_GERRIT_SUMMARY_MARKER ;;
     esac
-    reading=$(fm_dod_gerrit_read_current "$url" "$marker") || reading=
+    if ! reading=$(fm_dod_gerrit_read_current "$url" "$marker"); then
+      printf '%s\n' "the current patch set of $url could not be read, so its published content cannot be checked"
+      return 1
+    fi
     if ! fm_dod_gerrit_revision_carries_head "$wt" "${reading%% *}"; then
-      printf '%s\n' "named head $sha is not the published content of $url: the change's current patch set does not carry this copy's HEAD tree, or it could not be read"
+      printf '%s\n' "named head $sha is not the published content of $url: the change's current patch set does not carry this copy's HEAD tree"
       return 1
     fi
     [ -n "$marker" ] || return 0

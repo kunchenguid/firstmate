@@ -139,7 +139,8 @@ PROJECT=$(grep '^project=' "$META" | tail -1 | cut -d= -f2- || true)
 # on a Gerrit change both publishing modes report the same published line.
 # A no-mistakes Gerrit report also names the patch set its pipeline summary was
 # posted on, which only the worker knows, so the gate is asked about the task's
-# own latest done: line naming this change when its status file has one.
+# own latest done: line naming this change when that line is itself a
+# published-for-review report, so arming never passes a line the gate skips.
 case "$PROVIDER:$MODE" in
   gerrit:*) DONE_LINE="done: PR $URL published for review" ;;
   *:no-mistakes|*:) DONE_LINE="done: PR $URL checks green" ;;
@@ -148,13 +149,18 @@ esac
 case "$PROVIDER:$MODE" in
   gerrit:no-mistakes|gerrit:)
     STATUS_FILE="$STATE/$ID.status"
+    WORKER_DONE_LINE=
     if [ -f "$STATUS_FILE" ] && [ ! -L "$STATUS_FILE" ]; then
       while IFS= read -r STATUS_LINE || [ -n "$STATUS_LINE" ]; do
         status_line_verb "$STATUS_LINE" STATUS_VERB
         [ "$STATUS_VERB" = "done" ] || continue
         [ "$(fm_dod_pr_url_from_done_note "$(status_line_note "$STATUS_LINE")")" = "$URL" ] || continue
-        DONE_LINE=$STATUS_LINE
+        WORKER_DONE_LINE=$STATUS_LINE
       done < "$STATUS_FILE"
+    fi
+    if [ -n "$WORKER_DONE_LINE" ] \
+      && fm_dod_note_reports_published_change "$(status_line_note "$WORKER_DONE_LINE")"; then
+      DONE_LINE=$WORKER_DONE_LINE
     fi
     ;;
 esac
