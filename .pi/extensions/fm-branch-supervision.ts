@@ -2166,6 +2166,66 @@ ${context.command}
     return stockOutcomesPreviewLines ?? undefined;
   };
 
+  // Pi 0.99.0 changed the header it draws for a tool that supplies no call
+  // renderer: the title now carries the call's arguments, as `key=value`
+  // pairs when collapsed and one `key: value` line per argument when
+  // expanded. These tools draw their own header, so reading the title alone
+  // silently diverged from stock once that landed. Pi ships the formatter as
+  // an internal `formatToolCallWithArgs` that its exports map does not
+  // publish, so ask a stock `ToolExecutionComponent` for the header it builds
+  // instead of restating the format here. That definition takes
+  // `renderShell: "self"` and no `renderCall`, so the header lands in a plain
+  // container with no box framing or background, and the public
+  // constructor/updateArgs/setExpanded/render surface returns it verbatim on
+  // every Pi version. Fall back to the bare title if that ever throws, so a
+  // future Pi cannot cost the captain the whole row.
+  const stockCallHeaderProbes = new Map<string, ToolExecutionComponent>();
+  const stockCallHeader = (
+    toolName: string,
+    args: unknown,
+    expanded: boolean,
+    theme: Parameters<NonNullable<ToolDefinition["renderCall"]>>[1],
+  ): string => {
+    const titleOnly = () => theme.fg("toolTitle", theme.bold(toolName));
+    try {
+      let probe = stockCallHeaderProbes.get(toolName);
+      if (!probe) {
+        const probeDefinition: ToolDefinition = {
+          name: toolName,
+          label: toolName,
+          description: "Stock call header probe",
+          parameters: Type.Object({}),
+          renderShell: "self",
+          execute: async () => ({ content: [], details: undefined }),
+        };
+        probe = new ToolExecutionComponent(
+          toolName,
+          `fm-call-header-probe-${toolName}`,
+          args,
+          { showImages: false },
+          probeDefinition,
+          { requestRender() {} } as ConstructorParameters<typeof ToolExecutionComponent>[5],
+          root,
+        );
+        stockCallHeaderProbes.set(toolName, probe);
+      }
+      probe.updateArgs(args);
+      probe.setExpanded(expanded);
+      // render() on a self-shell row leads with one blank line, and Text pads
+      // each line to the render width; drop both so what remains is the header
+      // text Pi itself composed.
+      const header = probe
+        .render(4096)
+        .slice(1)
+        .map((line) => line.trimEnd())
+        .filter((line) => line !== "")
+        .join("\n");
+      return header || titleOnly();
+    } catch {
+      return titleOnly();
+    }
+  };
+
   type OutcomesToolShellState = {
     shell?: Box;
     call?: Text;
@@ -2239,7 +2299,7 @@ ${context.command}
       if (calmPresentation.stockExportRendering) throw new Error("Use Pi stock export rendering");
       if (calmHides("assistant-tool-call")) return new Container();
       const shellState = context.state as OutcomesToolShellState;
-      shellState.call = new Text(stockToolCallHeader("fm_branch_outcomes", args, theme, context.expanded), 0, 0);
+      shellState.call = new Text(stockCallHeader("fm_branch_outcomes", args, context.expanded, theme), 0, 0);
       return refreshOutcomesToolShell(shellState, theme, context);
     },
     renderResult: (result, options, theme, context) => {
@@ -2301,7 +2361,7 @@ ${context.command}
       if (calmPresentation.stockExportRendering) throw new Error("Use Pi stock export rendering");
       if (calmHides("assistant-tool-call")) return new Container();
       const shellState = context.state as OutcomesToolShellState;
-      shellState.call = new Text(stockToolCallHeader("fm_branch_processed", args, theme, context.expanded), 0, 0);
+      shellState.call = new Text(stockCallHeader("fm_branch_processed", args, context.expanded, theme), 0, 0);
       return refreshOutcomesToolShell(shellState, theme, context);
     },
     renderResult: (result, _options, theme, context) => {

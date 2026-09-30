@@ -5251,6 +5251,156 @@ JS
   pass "fm_branch_outcomes hides through ToolExecutionComponent while Calm-off and HTML export stay stock"
 }
 
+# Pi 0.99.0 changed the header Pi draws for a tool that supplies no call
+# renderer: the title now carries the call's arguments, as `key=value` pairs
+# when collapsed and one `key: value` line per argument when expanded. The two
+# branch supervision tools draw their own header, so a title-only literal
+# matched stock on 0.87.1 and diverged on 0.99.1. The comparison above only
+# proves parity against whichever release happens to be installed, so this case
+# holds both sides of that change at once: it installs each pinned release side
+# by side and requires byte-exact stock parity on every one of them, so the
+# extension cannot pin itself to a single release's header shape again. Each
+# release is compared through the real package, because only the real
+# renderer knows what stock emits.
+PI_STOCK_HEADER_COMPAT_VERSIONS="0.87.1 0.99.1"
+
+# Materialize one Pi release into its own prefix so several can be compared in
+# one run. The package is public and needs no credential.
+pi_install_pinned_version() {  # <version> <prefix>
+  local version=$1 prefix=$2
+  [ -f "$prefix/node_modules/@earendil-works/pi-coding-agent/package.json" ] && return 0
+  mkdir -p "$prefix" || return 1
+  npm install --prefix "$prefix" --no-audit --no-fund --silent \
+    "@earendil-works/pi-coding-agent@$version" >/dev/null 2>&1
+}
+
+# Build an extension fixture wired to one package dir, mirroring what Pi itself
+# hands an extension at load time.
+pi_stock_header_fixture() {  # <package-dir> <fixture>
+  local package_dir=$1 fixture=$2
+  mkdir -p "$fixture/.pi/extensions/lib" "$fixture/node_modules/@earendil-works" || return 1
+  cp "$EXT" "$fixture/.pi/extensions/fm-branch-supervision.ts" || return 1
+  local lib
+  for lib in fm-branch-dispatch fm-native-contract fm-async-exec fm-branch-model-picker \
+    fm-calm-visibility fm-operational-input; do
+    cp "$ROOT/.pi/extensions/lib/$lib.ts" "$fixture/.pi/extensions/lib/$lib.ts" || return 1
+  done
+  ln -sfn "$package_dir" "$fixture/node_modules/@earendil-works/pi-coding-agent" || return 1
+  ln -sfn "$package_dir/node_modules/@earendil-works/pi-tui" "$fixture/node_modules/@earendil-works/pi-tui" || return 1
+  ln -sfn "$package_dir/node_modules/@earendil-works/pi-ai" "$fixture/node_modules/@earendil-works/pi-ai" || return 1
+  ln -sfn "$package_dir/node_modules/typebox" "$fixture/node_modules/typebox" || return 1
+}
+
+test_outcomes_tools_match_stock_call_header_across_pi_releases() {
+  if ! command -v node >/dev/null 2>&1; then
+    echo "skip: node not found for the Pi stock call header compatibility test"
+    return
+  fi
+  local installed_package_dir='' checked=0 version prefix package_dir fixture out status
+  if [ -n "${FM_PI_PACKAGE_DIR:-}" ]; then
+    installed_package_dir=$FM_PI_PACKAGE_DIR
+  elif command -v npm >/dev/null 2>&1; then
+    installed_package_dir="$(npm root -g 2>/dev/null)/@earendil-works/pi-coding-agent"
+  fi
+  for version in $PI_STOCK_HEADER_COMPAT_VERSIONS; do
+    prefix="$TMP_ROOT/pi-$version"
+    if [ -n "$installed_package_dir" ] && [ -f "$installed_package_dir/package.json" ] \
+      && [ "$(node -p 'require(process.argv[1]).version || ""' \
+        "$installed_package_dir/package.json" 2>/dev/null || printf '')" = "$version" ]; then
+      package_dir=$installed_package_dir
+    elif ! command -v npm >/dev/null 2>&1; then
+      echo "skip: pinned Pi $version is not installed and npm is not found, so its stock call header stays unverified"
+      continue
+    elif ! pi_install_pinned_version "$version" "$prefix"; then
+      echo "skip: pinned Pi $version could not be installed, so its stock call header stays unverified"
+      continue
+    else
+      package_dir="$prefix/node_modules/@earendil-works/pi-coding-agent"
+    fi
+    fixture="$TMP_ROOT/stock-header-$version"
+    pi_stock_header_fixture "$package_dir" "$fixture" \
+      || fail "could not build the Pi stock call header fixture for $version"
+    out=$(cd "$fixture" && EXT="$fixture/.pi/extensions/fm-branch-supervision.ts" \
+      PI_PACKAGE_DIR="$package_dir" node --input-type=module 2>&1 <<'JS'
+import { pathToFileURL } from "node:url";
+
+const packageRoot = process.env.PI_PACKAGE_DIR;
+const [{ ToolExecutionComponent }, { initTheme }] = await Promise.all([
+  import(pathToFileURL(`${packageRoot}/dist/modes/interactive/components/tool-execution.js`).href),
+  import(pathToFileURL(`${packageRoot}/dist/modes/interactive/theme/theme.js`).href),
+]);
+initTheme("dark");
+
+const tools = [];
+const pi = {
+  events: { on() {}, emit() {} },
+  on() {},
+  registerCommand() {},
+  registerMessageRenderer() {},
+  registerTool(tool) { tools.push(tool); },
+  sendMessage() {},
+  sendUserMessage() {},
+};
+const extension = await import(`${pathToFileURL(process.env.EXT).href}?consumer=${Date.now()}`);
+extension.default(pi);
+
+const ui = { requestRender() {} };
+// Both branch supervision tools take arguments, which is exactly what a
+// title-only header cannot express once stock starts showing them.
+const cases = [
+  { name: "fm_branch_outcomes", args: { recent: 2 } },
+  { name: "fm_branch_processed", args: { through: 7 } },
+];
+for (const { name, args } of cases) {
+  const actualDefinition = tools.find((tool) => tool.name === name);
+  if (!actualDefinition) throw new Error(`${name} was not registered`);
+  const stockDefinition = { ...actualDefinition };
+  delete stockDefinition.renderShell;
+  delete stockDefinition.renderCall;
+  delete stockDefinition.renderResult;
+  const result = { content: [{ type: "text", text: "OK" }], details: undefined, isError: false };
+  const build = (definition, id) => {
+    const row = new ToolExecutionComponent(name, id, args, { showImages: false }, definition, ui, process.cwd());
+    row.markExecutionStarted();
+    row.setArgsComplete();
+    row.updateResult(result);
+    return row;
+  };
+  const stockRow = build(stockDefinition, `${name}-stock`);
+  const actualRow = build(actualDefinition, `${name}-actual`);
+  for (const expanded of [false, true]) {
+    stockRow.setExpanded(expanded);
+    actualRow.setExpanded(expanded);
+    const stock = stockRow.render(100);
+    const actual = actualRow.render(100);
+    if (JSON.stringify(actual) !== JSON.stringify(stock)) {
+      throw new Error(`${name} expanded=${expanded} rendering differs from Pi stock:\n`
+        + `  stock: ${JSON.stringify(stock)}\n  actual: ${JSON.stringify(actual)}`);
+    }
+  }
+  // A stock header that rendered nothing would make the comparison above pass
+  // without ever comparing a header, so require the fixture to have produced a
+  // real one on this release.
+  const stockHeader = build(stockDefinition, `${name}-header`).render(100).join("\n");
+  if (!stockHeader.includes(name)) {
+    throw new Error(`${name} stock header fixture produced no header on this Pi release`);
+  }
+}
+JS
+    )
+    status=$?
+    expect_code 0 "$status" "$version must render both branch supervision tools exactly as Pi stock does: $out"
+    [ -z "$out" ] || fail "Pi $version stock call header test printed output: $out"
+    checked=$((checked + 1))
+    pass "both branch supervision tools match Pi $version stock call header, collapsed and expanded"
+  done
+  # The installed-release case above already proves parity whenever npm is
+  # absent, so a run that materialized nothing has not checked the release
+  # matrix and must not report success as if it had.
+  [ "$checked" -gt 0 ] \
+    || fail "no pinned Pi release could be checked, so the stock call header compatibility is unverified"
+}
+
 # The delivery path runs on Pi's single JS thread, so a delivery that blocks
 # it is a delivery the captain sees as a frozen TUI. These three cover what
 # moving that work off the thread must not cost: responsiveness during a
@@ -5866,3 +6016,4 @@ test_delivery_keeps_the_event_loop_live_and_ordered
 test_session_replacement_during_delivery_neither_loses_nor_duplicates
 test_store_failure_during_delivery_neither_loses_nor_duplicates
 test_mark_read_failure_keeps_routine_redelivery_and_captain_deduplication
+test_outcomes_tools_match_stock_call_header_across_pi_releases
