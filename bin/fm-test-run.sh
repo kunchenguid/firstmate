@@ -71,9 +71,9 @@
 #   --per-script-timeout-secs N
 #                   terminate a script that runs longer than N seconds and
 #                   record it as exit 124 (0 disables, the default). The
-#                   --changed applies 1500s automatically: no measured script
-#                   approaches it, so it only converts a HUNG
-#                   script into a bounded failure. --max-wall-ms is checked
+#                   --changed applies 1500s automatically, above the current
+#                   slowest CI hint with margin; exceeding it becomes a bounded
+#                   failure, not proof of a hang. --max-wall-ms is checked
 #                   after the run and so cannot catch a hang on its own.
 #                   External interruption cleanup is outside this runner's
 #                   guarantee; configured per-script bounds remain authoritative.
@@ -190,8 +190,8 @@ PER_SCRIPT_TIMEOUT_SECS=0
 # script is tests/fm-watch-triage.test.sh at about 1075s under CI load (the hint
 # table below records that loaded figure). 1500s keeps every measured script
 # under the bound with roughly 1.4x headroom over the slowest loaded measurement,
-# and it stays under the 30-minute normal
-# CI tier so a wedged script fails here, with its output, before the job cap
+# and it stays under the 30-minute normal CI tier so a wedged script fails here,
+# with its output, before the job cap
 # cancels the lane. It is a guard, not a speed control: a HUNG script becomes a
 # bounded failure instead of an unbounded suite, which is the shape that
 # silently outruns a caller's invocation budget.
@@ -679,7 +679,8 @@ list_portable_serial() {
 # Measured portable-serial script durations in milliseconds, from the CI timing
 # artifacts recorded in docs/fm-test-portable-shards.md. Each value is the
 # slowest successful sample in the referenced complete/partial CI runs, with
-# the version-specific host and native-Windows exceptions documented there. These are balance hints only: the shard
+# the version-specific host and native-Windows exceptions documented there.
+# These are balance hints only: the shard
 # partition stays complete and disjoint whatever they say, so a stale hint costs
 # balance rather than coverage. That doc owns the refresh procedure.
 portable_serial_weight_hints() {
