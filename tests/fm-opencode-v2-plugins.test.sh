@@ -331,12 +331,32 @@ const ran = `${fixture}/state/guard-ran`;
   delete globalThis.__firstmateOpenCodeWatchArm;
 }
 
+// Case 3: an unexpected failure while handling one turn end must not end the
+// subscription. The error is surfaced rather than swallowed as teardown, the
+// failing turn changes nothing, and the next turn end is still guarded.
+{
+  globalThis.__firstmateOpenCodeWatchArm = { ensureArmed: async () => { throw new Error("coordinator exploded"); } };
+  const mod = await import(pathToFileURL(fixture + "/plugins/fm-primary-turnend-guard.js").href + "?case=3");
+  const { ctx, promptCalls, pushEvent } = createFakeCtx(fixture);
+  await mod.default.setup(ctx);
+  pushEvent({ type: "session.execution.succeeded", data: { sessionID: "s1" } });
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  if (existsSync(ran)) throw new Error("the guard script ran for a turn whose watch-arm check threw");
+  if (promptCalls.length !== 0) throw new Error("a watch-arm failure must not prompt through the guard");
+  delete globalThis.__firstmateOpenCodeWatchArm;
+  pushEvent({ type: "session.execution.succeeded", data: { sessionID: "s1" } });
+  await waitFor(() => promptCalls.length === 1);
+  if (!existsSync(ran)) throw new Error("the guard did not run on the turn end after an unexpected error");
+  unlinkSync(ran);
+}
+
 console.log("turnend-guard-ok");
 JS
   } >"$TMP_ROOT/turnend-guard.mjs"
   out=$(FIXTURE="$fixture" run_node "$TMP_ROOT/turnend-guard.mjs" 2>&1) || fail "turnend-guard: $out"
   assert_contains "$out" "turnend-guard-ok" "the turnend-guard check did not complete"
-  pass "fm-primary-turnend-guard triggers on session.execution.succeeded/.failed/.interrupted (never .started), reads v2 event.data.sessionID, defers to an armed watch-arm coordinator, and otherwise runs the guard script and injects the encoded blind-turn follow-up exactly once per firing, skipping its own forced turn end"
+  assert_contains "$out" "fm-primary-turnend-guard: unexpected error" "the guard did not surface an unexpected error instead of ending its event loop"
+  pass "fm-primary-turnend-guard triggers on session.execution.succeeded/.failed/.interrupted (never .started), reads v2 event.data.sessionID, defers to an armed watch-arm coordinator, and otherwise runs the guard script and injects the encoded blind-turn follow-up exactly once per firing, skipping its own forced turn end while surviving and surfacing an unexpected error"
 }
 
 # --- fm-primary-watch-arm.js (wiring only; continuity spawning is covered by
@@ -375,7 +395,72 @@ JS
   } >"$TMP_ROOT/watch-arm.mjs"
   out=$(FIXTURE="$fixture" run_node "$TMP_ROOT/watch-arm.mjs" 2>&1) || fail "watch-arm wiring: $out"
   assert_contains "$out" "watch-arm-wiring-ok" "the watch-arm wiring check did not complete"
-  pass "fm-primary-watch-arm subscribes through ctx.event.subscribe, reads session.execution.*'s v2 event.data.sessionID, and publishes a working ensureArmed coordinator without crashing outside a primary root"
+
+  # A primary root that owns its lock and has work is where a turn end is
+  # supposed to launch the arm, so each turn-ending type gets its own primary
+  # fixture and its own fake arm script: the script records the launch attempt
+  # and then stays alive the way a real arm owns continuity, which keeps the
+  # assertion about the event-driven launch and not about a retry.
+  local type primary out
+  for type in succeeded failed interrupted; do
+    primary="$TMP_ROOT/watch-arm-primary-$type"
+    install_plugins_fixture "$primary"
+    : >"$primary/AGENTS.md"
+    mkdir -p "$primary/config"
+    cat >"$primary/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm-attempt args=%s\n' "$*" >>"${FM_ARM_LOG:?}"
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture\n' "$$"
+trap 'exit 0' TERM INT
+i=0
+while [ "$i" -lt 200 ]; do
+  [ -e "${FM_ARM_STOP:?}" ] && exit 0
+  sleep 0.05
+  i=$((i + 1))
+done
+SH
+    chmod +x "$primary/bin/fm-watch-arm.sh"
+    {
+      printf '%s\n' "$FAKE_CTX_HARNESS"
+      cat <<'JS'
+import { pathToFileURL } from "node:url";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+const fixture = process.env.FIXTURE;
+const type = process.env.CASE_TYPE;
+const log = process.env.FM_ARM_LOG;
+const stop = process.env.FM_ARM_STOP;
+const mod = await import(pathToFileURL(`${fixture}/plugins/fm-primary-watch-arm.js`).href + `?case=${type}`);
+const { ctx, promptCalls, pushEvent } = createFakeCtx(fixture);
+// A primary root owns its lock and has work to supervise: that is the state a
+// turn end must launch the arm from, so this fixture is the real decision path.
+writeFileSync(`${fixture}/state/.lock`, `${process.pid}\n`);
+writeFileSync(`${fixture}/state/worker.meta`, "");
+await mod.default.setup(ctx);
+if (typeof globalThis.__firstmateOpenCodeWatchArm?.ensureArmed !== "function") {
+  throw new Error("a primary setup did not publish the watch-arm coordinator");
+}
+pushEvent({ type: "session.execution.started", data: { sessionID: "s1" } });
+await new Promise((resolve) => setTimeout(resolve, 250));
+if (existsSync(log)) throw new Error("session.execution.started must never launch the watcher arm");
+pushEvent({ type: `session.execution.${type}`, data: { sessionID: "s1" } });
+await waitFor(() => existsSync(log) && readFileSync(log, "utf8").includes("arm-attempt"));
+const rows = readFileSync(log, "utf8").trim().split("\n");
+if (!rows.every((row) => row === "arm-attempt args=--restart")) {
+  throw new Error(`the arm launch did not carry --restart for ${type}: ${rows.join(" | ")}`);
+}
+if (promptCalls.length !== 0) throw new Error("launching the watcher arm must not prompt");
+writeFileSync(stop, "stop\n");
+await new Promise((resolve) => setTimeout(resolve, 250));
+if (readFileSync(log, "utf8").trim().split("\n").length !== 1) {
+  throw new Error(`one turn end must launch exactly one arm: ${readFileSync(log, "utf8")}`);
+}
+console.log(`watch-arm-primary-${type}-ok`);
+JS
+    } >"$TMP_ROOT/watch-arm-primary-$type.mjs"
+    out=$(FIXTURE="$primary" CASE_TYPE="$type" FM_ARM_LOG="$TMP_ROOT/watch-arm-primary-$type.log" FM_ARM_STOP="$TMP_ROOT/watch-arm-primary-$type.stop" run_node "$TMP_ROOT/watch-arm-primary-$type.mjs" 2>&1) || fail "watch-arm primary ($type): $out"
+    assert_contains "$out" "watch-arm-primary-$type-ok" "the primary watch-arm check for $type did not complete"
+  done
+  pass "fm-primary-watch-arm subscribes through ctx.event.subscribe, reads session.execution.*'s v2 event.data.sessionID, publishes a working ensureArmed coordinator, and on a primary root launches the arm with --restart for session.execution.succeeded, .failed, and .interrupted while .started launches nothing, without crashing outside a primary root"
 }
 
 test_default_export_shape

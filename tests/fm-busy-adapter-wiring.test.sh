@@ -195,8 +195,8 @@ oc_started() {  # <sessionID>
   printf '{"type":"session.execution.started","data":{"sessionID":"%s"}}' "$1"
 }
 
-oc_ended() {  # <sessionID>
-  printf '{"type":"session.execution.succeeded","data":{"sessionID":"%s"}}' "$1"
+oc_ended() {  # <sessionID> [terminal-event-type]
+  printf '{"type":"session.execution.%s","data":{"sessionID":"%s"}}' "${2:-succeeded}" "$1"
 }
 
 test_opencode_plugin_semantic_lifecycle() {
@@ -216,26 +216,27 @@ test_opencode_plugin_semantic_lifecycle() {
   out=$(classify opencode "$id" "$state")
   [ "$out" = "busy opencode-plugin" ] || fail "session.execution.started must classify 'busy opencode-plugin', got '$out'"
 
-  out=$(drive_oc_plugin "$plugin" \
-    "$(oc_started ses_main)" \
-    "$(oc_started ses_child)" \
-    "$(oc_ended ses_child)") || fail "child-session drive failed: $out"
-  out=$(classify opencode "$id" "$state")
-  [ "$out" = "busy opencode-plugin" ] || fail "a child session's terminal event must not clear the worker, got '$out'"
+  # succeeded, failed, and interrupted are all terminal: a child session's
+  # event of any of them must leave the latched worker busy, and each one must
+  # clear it for the latched session, so a cancelled or errored turn cannot
+  # leave the worker latched busy forever.
+  local terminal
+  for terminal in succeeded failed interrupted; do
+    out=$(drive_oc_plugin "$plugin" \
+      "$(oc_started ses_main)" \
+      "$(oc_started ses_child)" \
+      "$(oc_ended ses_child "$terminal")") || fail "child-session $terminal drive failed: $out"
+    out=$(classify opencode "$id" "$state")
+    [ "$out" = "busy opencode-plugin" ] || fail "a child session's $terminal event must not clear the worker, got '$out'"
 
-  out=$(drive_oc_plugin "$plugin" \
-    "$(oc_started ses_main)" \
-    "$(oc_ended ses_main)") || fail "started/ended drive failed: $out"
-  out=$(classify opencode "$id" "$state")
-  [ "$out" = "idle opencode-plugin" ] || fail "the latched session's terminal event must classify idle, got '$out'"
-
-  rm -f "$state/$id.turn-ended"
-  out=$(drive_oc_plugin "$plugin" \
-    "$(oc_started ses_main)" \
-    "$(oc_ended ses_main)") || fail "terminal-marker drive failed: $out"
-  [ -f "$state/$id.turn-ended" ] || fail "a terminal session event no longer touches the notification marker"
-  out=$(classify opencode "$id" "$state")
-  [ "$out" = "idle opencode-plugin" ] || fail "the latched session's terminal event must classify idle, got '$out'"
+    rm -f "$state/$id.turn-ended"
+    out=$(drive_oc_plugin "$plugin" \
+      "$(oc_started ses_main)" \
+      "$(oc_ended ses_main "$terminal")") || fail "$terminal terminal drive failed: $out"
+    out=$(classify opencode "$id" "$state")
+    [ "$out" = "idle opencode-plugin" ] || fail "session.execution.$terminal must classify idle, got '$out'"
+    [ -f "$state/$id.turn-ended" ] || fail "a session.execution.$terminal event no longer touches the notification marker"
+  done
 
   rm -f "$state/$id.turn-ended"
   out=$(drive_oc_plugin "$plugin" \
@@ -244,7 +245,7 @@ test_opencode_plugin_semantic_lifecycle() {
   [ -f "$state/$id.turn-ended" ] || fail "the marker touch must stay a notification for every terminal session event"
   out=$(classify opencode "$id" "$state")
   [ "$out" = "busy opencode-plugin" ] || fail "another session's terminal event must not clear the latched busy, got '$out'"
-  pass "opencode plugin classifies from the session.execution.* lifecycle, scoped to the latched worker session"
+  pass "opencode plugin classifies from the session.execution.* lifecycle across succeeded, failed, and interrupted, scoped to the latched worker session"
 }
 
 run_claude_hook() {  # <settings.json> <hook-event>

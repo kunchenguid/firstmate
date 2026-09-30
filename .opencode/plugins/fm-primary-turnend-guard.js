@@ -62,46 +62,68 @@ async function letWatchArmRun(sessionID) {
   return status === "armed" || status === "wake" || status === "failed";
 }
 
+// An unexpected failure while handling one turn end must stay visible: the
+// server's stderr is the only channel this plugin owns, and swallowing the
+// error as if it were teardown is what lets later turns go unguarded with no
+// trace. The subscription itself is kept alive by the caller.
+function surfaceGuardError(error) {
+  const detail = error?.stack || String(error?.message ?? error);
+  process.stderr.write(
+    `fm-primary-turnend-guard: unexpected error while processing a turn end; later turns are still guarded\n${detail}\n`,
+  );
+}
+
 export default {
   id: "fm-primary-turnend-guard",
   async setup(ctx) {
     const root = await resolveRoot(ctx.location?.directory);
     const controller = new AbortController();
 
+    async function handleTurnEnd(event) {
+      if (!TURN_END_EVENT_TYPES.has(event.type)) return;
+
+      if (skipNextTurnEnd) {
+        skipNextTurnEnd = false;
+        return;
+      }
+
+      const sessionID = event.data?.sessionID;
+      if (!sessionID) return;
+
+      if (await letWatchArmRun(sessionID)) return;
+
+      const result = await runGuard(root);
+      if (result.code !== 2) return;
+
+      // Cleared before the awaits so a failed encode or prompt leaves the next
+      // turn end guarded again instead of skipped.
+      skipNextTurnEnd = false;
+      const text = await encodeFirstmateOperationalInput(
+        root,
+        "turn-end-guard",
+        "TURN WOULD END BLIND - supervision is off. " +
+          "The watcher cycle is missing, failed, or unhealthy. Follow the harness recovery instruction below before ending the turn.\n\n" +
+          result.stderr,
+      );
+      await ctx.session.prompt({ sessionID, text, delivery: "queue" });
+      skipNextTurnEnd = true;
+    }
+
     void (async () => {
       try {
         for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
-          if (!TURN_END_EVENT_TYPES.has(event.type)) continue;
-
-          if (skipNextTurnEnd) {
-            skipNextTurnEnd = false;
-            continue;
-          }
-
-          const sessionID = event.data?.sessionID;
-          if (!sessionID) continue;
-
-          if (await letWatchArmRun(sessionID)) continue;
-
-          const result = await runGuard(root);
-          if (result.code !== 2) continue;
-
           try {
-            const text = await encodeFirstmateOperationalInput(
-              root,
-              "turn-end-guard",
-              "TURN WOULD END BLIND - supervision is off. " +
-                "The watcher cycle is missing, failed, or unhealthy. Follow the harness recovery instruction below before ending the turn.\n\n" +
-                result.stderr,
-            );
-            await ctx.session.prompt({ sessionID, text, delivery: "queue" });
-            skipNextTurnEnd = true;
-          } catch {
-            skipNextTurnEnd = false;
+            await handleTurnEnd(event);
+          } catch (error) {
+            // One turn's failure never ends the subscription: later turns still
+            // need their guard check.
+            if (!controller.signal.aborted) surfaceGuardError(error);
           }
         }
-      } catch {
-        // The event stream ends when the abort signal fires at teardown.
+      } catch (error) {
+        // The event stream ends when the abort signal fires at teardown; any
+        // other stream failure is unexpected and must stay visible.
+        if (!controller.signal.aborted) surfaceGuardError(error);
       }
     })();
 
