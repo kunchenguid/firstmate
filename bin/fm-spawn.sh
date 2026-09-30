@@ -2631,12 +2631,12 @@ effort_flag_for_harness() {
     # model's own variant list. Those lists are per-provider (anthropic/* expose
     # high|max, openai/* expose low|medium|high|xhigh), so emit the variant only
     # when the resolved model's provider is known to expose that effort; any
-    # other provider, or an effort outside its family's list, keeps the
-    # permission-only launch and omits the variant (record-and-omit, as codex
-    # and grok do). Without a resolved model the variant has nothing to key to
-    # and is likewise omitted. The fragment lands inside the launch's
-    # single-quoted assignment, so a literal quote in the model id must close and
-    # reopen that quoting.
+    # other provider, or an effort outside its family's list, omits the variant
+    # and leaves the launch with only its permission grant and resolved model
+    # (record-and-omit, as codex and grok do). Without a resolved model the
+    # variant has nothing to key to and is likewise omitted. The fragment lands
+    # inside the launch's single-quoted assignment, so a literal quote in the
+    # model id must close and reopen that quoting.
     [ -n "$model" ] && [ "$model" != default ] || return 0
     case "${model%%/*}:$effort" in
     anthropic:high | anthropic:max) ;;
