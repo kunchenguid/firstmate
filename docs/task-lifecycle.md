@@ -32,7 +32,8 @@ When ordinary dispatch has no prepared lifecycle action, observation can still p
 A synthetic launch busy marker cannot supply that proof, and observation never creates an action or accepts the goal.
 
 Save the semantic assessment and any prepared action before acknowledging its wake.
-An inactive-goal wake with a known lifecycle revision refuses acknowledgement until that revision advances, while an unknown lifecycle record refuses acknowledgement until it is repaired.
+An inactive-goal wake with a known lifecycle revision refuses acknowledgement until that revision advances.
+A historical inactive-goal wake recorded with unknown lifecycle state refuses acknowledgement while the current lifecycle remains unreadable; after repair makes the exact current lifecycle readable, acknowledgement retires only that historical presentation and leaves the current goal, pending effect and newer current wake unchanged.
 A lease refusal therefore cannot consume the task's only recovery trigger.
 A confirmed action still leaves an unaccepted goal open.
 A future bounded wait defers the next review; expiry asks for reconciliation and does not itself restart a healthy worker or cancel a query.
@@ -104,7 +105,7 @@ A result summary alone cannot retire a cleanup obligation; incomplete, conflicti
 
 ## Verification
 
-[`tests/fm-task-lifecycle.test.sh`](../tests/fm-task-lifecycle.test.sh) covers revision conflicts, pending effects, explicit stop, generation mismatch, lost wake recovery, unassigned requests, unknown-record acknowledgement, terminal cleanup receipts and exact outcome replay.
+[`tests/fm-task-lifecycle.test.sh`](../tests/fm-task-lifecycle.test.sh) covers revision conflicts, pending effects, explicit stop, generation mismatch, lost wake recovery, unassigned requests, unreadable unknown-record refusal, guarded acknowledgement after repair, current-wake preservation, terminal cleanup receipts and exact outcome replay.
 The existing send, control, remote-agent and backlog suites exercise their respective effect owners.
 [`tests/fm-teardown-endpoint-safety.test.sh`](../tests/fm-teardown-endpoint-safety.test.sh) covers the open-goal cleanup barrier, archived business-action retention and uncertain cleanup readback.
 [`tests/fm-teardown-lifecycle-herdr-e2e.test.sh`](../tests/fm-teardown-lifecycle-herdr-e2e.test.sh) requires an explicitly authorized named-session helper and verifies real mixed/focused workspace behavior, active sibling preservation and interrupted bookkeeping.
