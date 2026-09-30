@@ -126,6 +126,9 @@ Scout teardown calls the read-only `verify` subcommand after checking for the re
 - Every recorded inventory entry still passes the [completion inventory checks](#recording-a-reviewed-inventory-complete).
 - No keyed status decision opened after the last `complete`.
 
+An inventory entry absent from the active home's backlog is still durable when a local secondmate home registered in `data/secondmates.md` holds that exact task id for the captain or records its captain answer, because a call handed to a secondmate stays in that authoritative home.
+`complete` applies the same check and names the secondmate home beside each such entry in its completion line.
+A remote route has no local backlog to read and is never consulted, so an entry held nowhere readable still refuses.
 A keyed status decision opened after the last `complete` makes `verify` fail, and re-running `complete` is the repair.
 The `--force` path remains the explicit captain-approved discard escape hatch.
 

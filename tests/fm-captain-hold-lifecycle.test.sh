@@ -1383,6 +1383,67 @@ EOF
   pass "main-home and secondmate-home captain calls remain correctly routed"
 }
 
+# A scout's captain call can be handed to a registered secondmate home and held
+# there, so the main home's completion gate accepts an attested entry that is
+# durably held or answered in a registered secondmate home's backlog, and still
+# refuses one held nowhere or in a home the registry does not name.
+test_completion_gate_accepts_a_call_held_in_a_registered_secondmate_home() {
+  local parent mate origin err out rc
+  parent=$(make_home main-cross-home)
+  mate=$(make_home mate-cross-home)
+  origin=sample-cross-home-proposal
+  tasks_in "$parent" add "$origin" "Investigate the sample proposal" --kind scout --repo sample --start >/dev/null
+  write_scout_with_attested_inventory "$parent" "$origin" sample-provider-call
+  run_captain "$mate" hold sample-provider-call --title "Choose the sample provider" \
+    --reason "captain provider choice pending" --repo sample --until 2099-12-31 >/dev/null \
+    || fail "secondmate-home hold creation failed"
+
+  rc=0
+  err=$(run_captain "$parent" verify "$origin" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "verify accepted a call held only in a home the registry does not name"
+  assert_contains "$err" "sample-provider-call" "the unregistered refusal did not name the entry"
+
+  printf -- '- sample-mate - synthetic scope (host: somewhere; root: /opt/fm; home: %s; scope: sample work; projects: sample; added 2026-09-30)\n' \
+    "$mate" > "$parent/data/secondmates.md"
+  if run_captain "$parent" verify "$origin" >/dev/null 2>&1; then
+    fail "verify read a remote secondmate route as a local backlog"
+  fi
+
+  printf -- '- sample-mate - synthetic scope (home: %s; scope: sample work; projects: sample; added 2026-09-30)\n' \
+    "$mate" > "$parent/data/secondmates.md"
+  run_captain "$parent" verify "$origin" >/dev/null \
+    || fail "verify refused a call durably held in a registered secondmate home"
+  out=$(run_captain "$parent" complete "$origin" sample-provider-call) \
+    || fail "complete refused a call durably held in a registered secondmate home"
+  assert_contains "$out" "sample-provider-call=sample-mate" \
+    "complete did not name the secondmate home that carries the call"
+  run_teardown "$parent" "$origin" >/dev/null 2> "$parent/cross-home-teardown.err" \
+    || fail "scout cleanup refused a call held in a registered secondmate home: $(cat "$parent/cross-home-teardown.err")"
+  assert_no_grep "sample-provider-call" "$parent/data/backlog.md" \
+    "the secondmate-held call leaked into the main backlog"
+
+  printf 'Use the sample provider.\n' > "$mate/provider-decision.txt"
+  run_captain "$mate" answer sample-provider-call --decision-file "$mate/provider-decision.txt" >/dev/null \
+    || fail "answering the secondmate-held call failed"
+  write_scout_with_attested_inventory "$parent" "$origin" sample-provider-call
+  run_captain "$parent" verify "$origin" >/dev/null \
+    || fail "verify refused a call answered in a registered secondmate home"
+
+  write_scout_with_attested_inventory "$parent" "$origin" sample-provider-call,sample-ghost-call
+  rc=0
+  err=$(run_captain "$parent" verify "$origin" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "verify accepted an entry held in no home"
+  assert_contains "$err" "sample-ghost-call" "the held-nowhere refusal did not name the entry"
+
+  tasks_in "$mate" add sample-plain-work "Finish plain work" --repo sample >/dev/null
+  tasks_in "$mate" "done" sample-plain-work >/dev/null
+  write_scout_with_attested_inventory "$parent" "$origin" sample-plain-work
+  if run_captain "$parent" verify "$origin" >/dev/null 2>&1; then
+    fail "verify accepted a secondmate task closed without a recorded captain answer"
+  fi
+  pass "the completion gate accepts a call held or answered in a registered secondmate home only"
+}
+
 # Inside a secondmate home a hold and its answer reach the parent channel from
 # the script itself, keyed per hold occurrence, so a re-held task opens and
 # closes a distinct parent decision and a retry never duplicates a line. A main
@@ -4649,6 +4710,7 @@ test_visual_review_uses_shared_completion_owner
 test_none_inventory_and_resolved_prose_do_not_create_holds
 test_terminal_single_owner_status_decision_does_not_block_empty_inventory
 test_secondmate_hold_stays_in_authoritative_home
+test_completion_gate_accepts_a_call_held_in_a_registered_secondmate_home
 test_secondmate_home_publishes_holds_and_answers
 test_secondmate_reconcile_publishes_before_request_retirement
 test_bound_channel_answers_close_at_answer_time
