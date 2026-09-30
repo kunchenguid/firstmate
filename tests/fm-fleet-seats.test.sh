@@ -1169,7 +1169,7 @@ test_collection_never_waits_on_task_locks() {
 }
 
 test_serve_epochs_fence_lost_and_late_responses() {
-  local dir="$TMP_ROOT/epochs-out" out rc served seq issuer digest
+  local dir="$TMP_ROOT/epochs-out" out rc served seq issuer digest out_allowance
   make_remote_fleet epochs 1
   mkdir -p "$dir"
   out=$(serve_remotes 2>&1) || fail "initial empty serve failed: $out"
@@ -1199,10 +1199,22 @@ test_serve_epochs_fence_lost_and_late_responses() {
   out=$(seats "$R_REMOTE" serve --digest "$digest" --epoch "$issuer.$((seq - 1))" --allowance shared=1 \
     < "$R_ROOT/config/fleet-seats" 2>&1); rc=$?
   expect_code 5 "$rc" "an older serve epoch: $out"
-  out=$(seats "$R_REMOTE" serve --digest "$digest" --epoch "$issuer.$seq" --allowance shared=1 \
+  out=$(seats "$R_REMOTE" serve --digest "$digest" --epoch "$issuer.$seq" --allowance shared=0 --allowance shared=1 \
     < "$R_ROOT/config/fleet-seats" 2>&1) || fail "an exact same-epoch replay failed: $out"
   assert_equals 1 "$(printf '%s\n' "$out" | jq '.holders | length')" "the same-epoch replay changed the certificate"
   [ -z "$(seats "$R_REMOTE" show late)" ] || fail "a replayed or older epoch granted a waiting request"
+  cp "$served" "$dir/before-conflict.json"
+  for out_allowance in shared=0 shared=2; do
+    out=$(seats "$R_REMOTE" serve --digest "$digest" --epoch "$issuer.$seq" --allowance "$out_allowance" \
+      < "$R_ROOT/config/fleet-seats" 2>&1); rc=$?
+    expect_code 5 "$rc" "conflicting same-epoch allowance $out_allowance: $out"
+    assert_contains "$out" 'different allowances' "the allowance conflict was not named"
+    cmp -s "$served" "$dir/before-conflict.json" || fail "the allowance conflict replaced its committed serve record"
+    [ -z "$(seats "$R_REMOTE" show late)" ] || fail "a conflicting allowance granted a waiting request"
+  done
+  out=$(seats "$R_REMOTE" serve --digest "$digest" --epoch "$issuer.$seq" \
+    < "$R_ROOT/config/fleet-seats" 2>&1); rc=$?
+  expect_code 5 "$rc" "an omitted nonzero allowance on a same-epoch serve: $out"
   out=$(seats "$R_REMOTE" serve --digest "0-0" --epoch "$issuer.$seq" < "$R_ROOT/config/fleet-seats" 2>&1); rc=$?
   expect_code 5 "$rc" "a conflicting same-epoch serve: $out"
 

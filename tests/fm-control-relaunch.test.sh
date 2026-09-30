@@ -2191,7 +2191,6 @@ test_concurrent_relaunch_is_refused() {
   pass "fm-control relaunch: two control actions on one task serialize instead of interleaving"
 }
 
-# shellcheck disable=SC2031
 test_direct_spawn_relaunch_participates_in_the_lifecycle_lock() {
   local dir out rc lock holder i=0
   dir=$(new_case spawnlock rl26)
@@ -2199,6 +2198,7 @@ test_direct_spawn_relaunch_participates_in_the_lifecycle_lock() {
   printf 'zsh' > "$dir/fake/command"
   lock="$dir/home/state/.control-rl26.lock"
   (
+    # shellcheck source=/dev/null
     . "$ROOT/bin/fm-wake-lib.sh"
     fm_lock_try_acquire "$lock" || exit 1
     sleep 30
@@ -2219,13 +2219,13 @@ test_direct_spawn_relaunch_participates_in_the_lifecycle_lock() {
   pass "fm-spawn relaunch: direct entry participates in lifecycle serialization"
 }
 
-# shellcheck disable=SC2031
 test_promotion_participates_in_the_lifecycle_lock_before_metadata_resolution() {
   local dir out rc lock holder i=0
   dir=$(new_case promotelock rl29)
   add_ship_task "$dir" rl29 claude
   lock="$dir/home/state/.control-rl29.lock"
   (
+    # shellcheck source=/dev/null
     . "$ROOT/bin/fm-wake-lib.sh"
     fm_lock_try_acquire "$lock" || exit 1
     sleep 30
@@ -3119,6 +3119,7 @@ test_relaunch_rollback_releases_only_an_undelivered_candidate() {
 sm_case() {  # <case-dir> <id>: a local secondmate record on a pooled model
   local dir=$1 id=$2 home="$1/home"
   mkdir -p "$home/config" "$home/data/$id"
+  printf 'claude\n' > "$home/config/secondmate-harness"
   printf '{"pools":[{"name":"one","capacity":1,"models":["pool-model-a"]}]}\n' > "$home/config/fleet-seats"
   printf '# secondmate brief\n' > "$home/data/$id/brief.md"
   fm_git_worktree "$dir/proj" "$dir/smhome" sm-branch
@@ -3412,19 +3413,55 @@ test_existing_host_generations_recover_through_observing_operations() {
     assert_equals 'dead-after-start actual.old' "$(printf '%s\n' "$disp" | jq -r '.disposition + " " + .actual_generation')" "endpoint reuse revived the observing operation"
     disp=$(run_existing_host "$dir" disposition sm67 --operation "$generation" | sed -n 's/^seat_disposition=//p' | tail -1)
     assert_equals started "$(printf '%s\n' "$disp" | jq -r .disposition)" "the ordinary replacement did not confirm startup"
+    # Lose or replace the delivered operation's receipt, then retry the exact
+    # relaunch token against a real fixture endpoint. Neither case may stop it.
+    cp "$st/sm67.meta" "$dir/before-damaged-retry.meta"
+    cp "$dir/herdr-log" "$dir/before-damaged-retry.log"
+    receipt="$st/sm67.seat-operation.$generation"
+    if [ "$verb" = launch ]; then
+      rm "$receipt"
+    else
+      perl -pi -e 's/^operation=.*/operation=foreign.operation/' "$receipt"
+      cp "$receipt" "$dir/foreign-receipt"
+    fi
+    out=$(run_existing_host "$dir" relaunch sm67 claude pool-model-a medium --operation "$generation" --previous actual.old); rc=$?
+    expect_code 1 "$rc" "retrying a delivered token after receipt damage: $out"
+    cmp -s "$dir/before-damaged-retry.meta" "$st/sm67.meta" || fail "a damaged receipt retry changed its live generation"
+    cmp -s "$dir/before-damaged-retry.log" "$dir/herdr-log" || fail "a damaged receipt retry touched its live endpoint"
+    if [ "$verb" = launch ]; then
+      assert_absent "$receipt" "a delivered token recreated its lost receipt"
+    else
+      cmp -s "$receipt" "$dir/foreign-receipt" || fail "a delivered token overwrote its foreign receipt"
+    fi
+    disp=$(printf '%s\n' "$out" | sed -n 's/^seat_disposition=//p' | tail -1)
+    assert_equals unknown "$(printf '%s\n' "$disp" | jq -r .disposition)" "receipt damage was reported as a settled outcome"
   done
-  pass "host launch and relaunch recover imported generations through their observing receipts"
+  pass "host launch and relaunch recover imported generations and refuse damaged-receipt retries without endpoint effects"
 }
 
 run_existing_host() {
-  local dir=$1
+  local dir=$1 operation='' previous=- arg prior='' record=''
   shift
+  case "$1" in
+    launch|relaunch)
+      for arg in "$@"; do
+        case "$prior" in --operation) operation=$arg ;; --previous) previous=$arg ;; esac
+        prior=$arg
+      done
+      record=$(jq -cn --arg t "$2" --arg g "$operation" --arg p "$previous" \
+        --arg m "$4" --arg home "$dir/smhome" --arg state "$dir/home/state" '
+        {schema:"fm-fleet-seat-holder.v2", state_dir:$state, task:$t, revision:2,
+         incarnations:[{generation:$g, previous_generation:(if $p == "-" then null else $p end),
+           kind:"secondmate", model:$m, lifecycle:"reserved", launch_phase:"dispatching",
+           route:{placement:"remote", operation:$g, home:$home}}]}')
+      ;;
+  esac
   env -u FM_STATE_OVERRIDE -u FM_CONFIG_OVERRIDE -u FM_DATA_OVERRIDE -u FM_ROOT_OVERRIDE \
     -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SESSION -u HERDR_SOCKET_PATH -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID \
     PATH="$dir/herdr/bin:$dir/fakebin:$PATH" FM_HOME="$dir/smhome" FM_FAKE_DIR="$dir/fake" \
     HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' FM_SPAWN_NO_GUARD=1 \
     FM_CONTROL_LAUNCH_WAIT=0.05 FM_CONTROL_EXIT_WAIT=0.05 FM_CONTROL_POLL=0.01 \
-    "$ROOT/bin/fm-remote-secondmate-control.sh" "$@" 2>&1
+    "$ROOT/bin/fm-remote-secondmate-control.sh" "$@" <<< "$record" 2>&1
 }
 
 test_control_terminalizes_all_observing_predecessor_receipts() {
