@@ -689,7 +689,13 @@ body = b'From: johnpoyser@gmail.com\r\nSubject: reply\r\n\r\nFM-AFK-REPLY test a
 slow = {}
 search_delay = 0
 body_failures = {}
-if scenario in ('transient', 'permanent', 'handoff-timeout', 'handoff-fails', 'config-outage'):
+header_failures = {}
+if scenario == 'header-fail':
+    uids = ['1', '2']
+    authentic = {'2'}
+    header_failures = {'1': 99}
+    os.environ['FM_MAIL_POLL_BUDGET'] = '1'
+elif scenario in ('transient', 'permanent', 'handoff-timeout', 'handoff-fails', 'config-outage'):
     uids = ['1', '2', '3']
     authentic = {'1', '2'}
     body_failures = {'1': 1 if scenario == 'transient' else (99 if scenario == 'permanent' else 0)}
@@ -743,6 +749,9 @@ class FakeConn:
         number = uid.decode()
         if 'HEADER' in spec:
             self.header_fetches.append(number)
+            if header_failures.get(number, 0) > 0:
+                header_failures[number] -= 1
+                return ('NO', [])
             if slow.get(number):
                 time.sleep(slow[number])
             extra = auth if number in authentic else ''
@@ -821,6 +830,23 @@ elif scenario == 'config-outage':
     print(f'outage rows={status(rows)} handoffs={handoffs}')
     rc, rows, second, _, _ = poll(True)
     print(f'restored fetched={",".join(second)} handoffs={handoffs}')
+elif scenario == 'header-fail':
+    fetched_total = []
+    for _ in range(4):
+        rc, rows, fetched, _, _ = poll(True)
+        assert rc == 0, rc
+        fetched_total += fetched
+    print(f'header_fetches={fetched_total.count("1")} alerts={len(alerts)}')
+    print('alert_says_check_gmail=%s' % (
+        len(alerts) == 1 and 'one message could not be read' in alerts[0][1].lower()
+        and 'check gmail' in alerts[0][2].lower()
+    ))
+    print('alert_content_safe=%s' % all(
+        secret not in value
+        for _, subject, text in alerts
+        for value in (subject, text)
+        for secret in (owner, 'mail 1', 'FM-AFK-REPLY', 'test answer')
+    ))
 elif scenario == 'permanent':
     fetched_total = []
     for _ in range(4):
@@ -904,6 +930,13 @@ test_away_owner_read_failures_retry_then_alert() {
     "a failed owner read does not block later mail"
   assert_contains "$out" "second rc=0 fetched=1 handoffs=['2', '1'] alerts=0" \
     "a transient owner read failure is retried and delivered"
+  out=$(run_away_poll_harness header-fail)
+  assert_contains "$out" 'header_fetches=3 alerts=1' \
+    "three failed header reads stop retrying and produce exactly one alert"
+  assert_contains "$out" 'alert_says_check_gmail=True' \
+    "the one alert tells the captain to check Gmail"
+  assert_contains "$out" 'alert_content_safe=True' \
+    "the alert contains no sender, subject, or message body"
   out=$(run_away_poll_harness permanent)
   assert_contains "$out" "handoffs=['2'] owner_fetches=3 spoof_fetches=1" \
     "a permanently unreadable owner reply is tried three times while later mail is processed"

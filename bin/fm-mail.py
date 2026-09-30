@@ -568,16 +568,15 @@ def save_away_scan(path, identity, high, pending):
             f.write('%s %d %d\n' % (uid, attempts, 1 if owner else 0))
     os.replace(tmp, path + '.next')
 
-def send_unreadable_reply_alert(recipient, uid, seconds):
-    """Tell the owner one reply could not be read, without any message content."""
+def send_unreadable_message_alert(recipient, seconds):
+    """Tell the owner one message could not be read, without message content."""
     try:
         arm_poll_deadline(seconds)
         send_message(
             recipient,
-            'Firstmate away alert: one reply could not be read',
-            'Firstmate could not read one of your email replies (mail UID %s) after %d attempts '
-            'and stopped retrying it. It remains unread in the inbox; please resend your answer.'
-            % (uid, AWAY_READ_ATTEMPTS),
+            'Firstmate away alert: one message could not be read',
+            'Firstmate could not read one message after %d attempts and stopped retrying it. '
+            'Please check Gmail.' % AWAY_READ_ATTEMPTS,
             timeout=max(0.5, min(MAIL_TIMEOUT, seconds)),
         )
         return True
@@ -748,6 +747,7 @@ def cmd_poll_list():
                 if sock is not None:
                     sock.settimeout(min(MAIL_TIMEOUT, remaining))
                 header_fetches += 1
+                header_loaded = False
                 # A raised or empty header FETCH is treated as a failure for THIS uid only,
                 # so one bad message can never abort the bounded scan: a new uid is
                 # surfaced degraded, a retry uid is left for a later scan step, and
@@ -761,6 +761,7 @@ def cmd_poll_list():
                     if not header_bytes:
                         raise ValueError('no header data')
                     mi = email.message_from_bytes(header_bytes)
+                    header_loaded = True
 
                     uid = clean(u)
                     idate = clean(dec(mi.get('Date')))
@@ -807,10 +808,15 @@ def cmd_poll_list():
                     new_emitted += 1
                     continue
                 except (socket.timeout, TimeoutError):
+                    if away_mode and not header_loaded:
+                        away_held.add(u)
+                        away_owner_failed.add(u)
                     break
                 except Exception:
                     if afk_email_active:
-                        away_held.add(u)
+                        if away_mode:
+                            away_held.add(u)
+                            away_owner_failed.add(u)
                         out.append((clean(u), '', '(unverified sender)', '', 'deferred'))
                         if is_retry:
                             retry_emitted += 1
@@ -992,8 +998,8 @@ def cmd_poll_list():
                 save_away_scan(away_scan_path, away_scan_identity, high, pending)
             alerted = [
                 u for u in exhausted if u in pending
-                and send_unreadable_reply_alert(
-                    recipient, u, deadline + 0.9 * budget - time.monotonic())
+                and send_unreadable_message_alert(
+                    recipient, deadline + 0.9 * budget - time.monotonic())
             ]
             if alerted:
                 for u in alerted:
