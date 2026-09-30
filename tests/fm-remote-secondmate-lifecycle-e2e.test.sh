@@ -653,6 +653,16 @@ fi
 assert_grep 'invalid project name: foo bar' "$TMP_ROOT/seed-spaced.out" \
   "the spaced-name refusal did not name the whole project"
 assert_absent "$TMP_ROOT/seed-spaced-home" "the spaced project name still provisioned a remote home"
+printf '%s\n' '- Acme - Site [direct-PR] - dashed project (added 2026-09-30)' >> "$TMP_ROOT/seed-parent/data/projects.md"
+if FM_SECONDMATE_CHARTER='Dashed charter.' FM_SECONDMATE_SCOPE='dashed' \
+  seed_env "$ROOT/bin/fm-remote-home-seed.sh" seed-dashed remote-mac "$REMOTE_ROOT" \
+  "$TMP_ROOT/seed-dashed-home" "Acme - Site=$BETA_ORIGIN" \
+  > "$TMP_ROOT/seed-dashed.out" 2>&1; then
+  fail "remote seeding accepted a project name containing ' - '"
+fi
+assert_grep 'invalid project name: Acme - Site' "$TMP_ROOT/seed-dashed.out" \
+  "the dashed-name refusal did not name the whole project"
+assert_absent "$TMP_ROOT/seed-dashed-home" "the dashed project name still provisioned a remote home"
 
 out=$(FM_SECONDMATE_CHARTER='Own beta delivery on the build Mac.' \
   FM_SECONDMATE_SCOPE='beta delivery and validation' \

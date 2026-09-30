@@ -959,75 +959,86 @@ test_home_seed_preserves_spaced_project_posture() {
   pass "home seeding carries a spaced project's registry entry and posture into the secondmate home"
 }
 
-# A registered name may itself contain " - " (the lookup is anchored on the
-# queried name, bin/fm-project-registry-lib.sh). Seeding must still carry that
-# project's own registry entry and posture into the secondmate home.
-test_home_seed_preserves_dashed_project_posture() {
-  local home subhome parent_line
-  home="$TMP_ROOT/dashed-posture-home"
-  subhome="$TMP_ROOT/dashed-posture-subhome"
-  mkdir -p "$home/projects" "$home/data" "$home/state"
-  fm_git_init_commit "$home/projects/Acme - Site"
-  fm_git_add_origin "$home/projects/Acme - Site" "$TMP_ROOT/remotes/dashed-acme-site.git"
-  parent_line='- Acme - Site [direct-PR +yolo branch=me/] - dashed project (added 2026-09-30)'
-  printf '%s\n' "$parent_line" > "$home/data/projects.md"
-
-  FM_HOME="$home" FM_SECONDMATE_CHARTER='design for Acme - Site' FM_SECONDMATE_SCOPE='design for Acme - Site' \
-    "$ROOT/bin/fm-home-seed.sh" design "$subhome" 'Acme - Site' >/dev/null 2>&1 \
-    || fail "seed refused a registered project whose name contains ' - '"
-  [ "$(cat "$subhome/data/projects.md")" = "$parent_line" ] \
-    || fail "seed did not copy the dashed project's own registry entry: $(cat "$subhome/data/projects.md")"
-  [ "$(FM_HOME="$subhome" "$ROOT/bin/fm-project-mode.sh" 'Acme - Site' 2>/dev/null)" = "direct-PR on" ] \
-    || fail "the seeded home lost the dashed project's registered posture"
-  [ "$(FM_HOME="$subhome" "$ROOT/bin/fm-project-mode.sh" --branch-prefix 'Acme - Site' 2>/dev/null)" = "me/" ] \
-    || fail "the seeded home lost the dashed project's registered branch prefix"
-  pass "home seeding carries a dashed project's registry entry and posture into the secondmate home"
-}
-
-# A registered name may be a leading prefix of another registered name followed
-# by " - " ("foo bar" and "foo bar - baz"). Reseeding one must never drop the
-# other's entry or posture (bin/fm-project-registry-lib.sh removal rule).
-test_home_seed_reseed_keeps_dashed_prefix_sibling_entry() {
-  local home subhome short_line long_line err out
-  home="$TMP_ROOT/dashed-sibling-home"
-  subhome="$TMP_ROOT/dashed-sibling-subhome"
-  err="$TMP_ROOT/dashed-sibling.err"
+# A name containing " - " or " [" cannot be told apart from a description or
+# annotation in a registry line (bin/fm-project-registry-lib.sh), so seeding and
+# reseeding refuse it before touching the home, its registry, clones or charter.
+test_home_seed_refuses_unrepresentable_project_name() {
+  local home subhome err name before_reg before_charter before_clones
+  home="$TMP_ROOT/unrepresentable-home"
+  subhome="$TMP_ROOT/unrepresentable-subhome"
+  err="$TMP_ROOT/unrepresentable.err"
   mkdir -p "$home/projects" "$home/data" "$home/state"
   fm_git_init_commit "$home/projects/foo bar"
-  fm_git_add_origin "$home/projects/foo bar" "$TMP_ROOT/remotes/dashed-sibling-short.git"
-  fm_git_init_commit "$home/projects/foo bar - baz"
-  fm_git_add_origin "$home/projects/foo bar - baz" "$TMP_ROOT/remotes/dashed-sibling-long.git"
-  short_line='- foo bar [direct-PR branch=me/] - short project (added 2026-09-30)'
-  long_line='- foo bar - baz [direct-PR +yolo branch=baz/] - long project (added 2026-09-30)'
-  printf '%s\n' "$short_line" "$long_line" > "$home/data/projects.md"
+  fm_git_add_origin "$home/projects/foo bar" "$TMP_ROOT/remotes/unrepresentable-foo-bar.git"
+  printf '%s\n' '- foo bar [direct-PR] - spaced project (added 2026-09-30)' > "$home/data/projects.md"
+  for name in 'Acme - Site' 'foo [x]'; do
+    fm_git_init_commit "$home/projects/$name"
+    fm_git_add_origin "$home/projects/$name" "$TMP_ROOT/remotes/unrepresentable-${name%% *}.git"
+    printf '%s\n' "- $name [direct-PR] - unrepresentable project (added 2026-09-30)" >> "$home/data/projects.md"
+    if FM_HOME="$home" FM_SECONDMATE_CHARTER='design' FM_SECONDMATE_SCOPE='design' \
+      "$ROOT/bin/fm-home-seed.sh" design "$subhome" "$name" >/dev/null 2>"$err"; then
+      fail "seed accepted the unrepresentable project name $name"
+    fi
+    assert_grep "project $name contains \" - \" or \" [\", which the project registry cannot tell apart" "$err" \
+      "seed refusal for $name did not explain the rule"
+    assert_absent "$subhome" "seed refusal for $name still created the secondmate home"
+    assert_absent "$home/data/secondmates.md" "seed refusal for $name still wrote the parent registry"
+  done
 
-  FM_HOME="$home" FM_SECONDMATE_CHARTER='design for foo bar' FM_SECONDMATE_SCOPE='design for foo bar' \
-    "$ROOT/bin/fm-home-seed.sh" design "$subhome" 'foo bar' 'foo bar - baz' >/dev/null 2>&1 \
-    || fail "seed refused two projects whose names share a dashed prefix"
-  FM_HOME="$home" FM_SECONDMATE_CHARTER='design for foo bar' FM_SECONDMATE_SCOPE='design for foo bar' \
-    "$ROOT/bin/fm-home-seed.sh" design "$subhome" 'foo bar - baz' >/dev/null 2>&1 \
-    || fail "reseeding the longer project failed"
-  [ "$(cat "$subhome/data/projects.md")" = "$(printf '%s\n' "$short_line" "$long_line")" ] \
-    || fail "reseeding foo bar - baz did not keep the foo bar entry and replace its own: $(cat "$subhome/data/projects.md")"
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='design' FM_SECONDMATE_SCOPE='design' \
+    "$ROOT/bin/fm-home-seed.sh" design "$subhome" 'foo bar' >/dev/null 2>&1 \
+    || fail "seed refused a spaced project name"
+  before_reg=$(cat "$subhome/data/projects.md")
+  before_charter=$(cat "$subhome/data/charter.md")
+  before_clones=$(ls "$subhome/projects")
+  for name in 'Acme - Site' 'foo [x]'; do
+    if FM_HOME="$home" FM_SECONDMATE_CHARTER='design' FM_SECONDMATE_SCOPE='design' \
+      "$ROOT/bin/fm-home-seed.sh" design "$subhome" 'foo bar' "$name" >/dev/null 2>"$err"; then
+      fail "reseed accepted the unrepresentable project name $name"
+    fi
+    assert_grep "project $name contains" "$err" "reseed refusal for $name did not explain the rule"
+    [ "$(cat "$subhome/data/projects.md")" = "$before_reg" ] || fail "reseed refusal for $name changed the registry"
+    [ "$(cat "$subhome/data/charter.md")" = "$before_charter" ] || fail "reseed refusal for $name changed the charter"
+    [ "$(ls "$subhome/projects")" = "$before_clones" ] || fail "reseed refusal for $name changed the clones"
+  done
+  pass "home seeding refuses a project name the registry cannot represent, before touching anything"
+}
+
+# Reseeding one project replaces only its own registry entries: sibling entries
+# whose names share a prefix stay byte-for-byte, and an entry whose description
+# contains " [" is replaced rather than duplicated.
+test_home_seed_reseed_keeps_sibling_entries() {
+  local home subhome project foo_line bar_line baz_line
+  home="$TMP_ROOT/reseed-sibling-home"
+  subhome="$TMP_ROOT/reseed-sibling-subhome"
+  mkdir -p "$home/projects" "$home/data" "$home/state"
+  for project in foo 'foo bar' 'foo baz'; do
+    fm_git_init_commit "$home/projects/$project"
+    fm_git_add_origin "$home/projects/$project" "$TMP_ROOT/remotes/reseed-sibling-${project// /-}.git"
+  done
+  foo_line='- foo [direct-PR +yolo branch=f/] - short project (added 2026-09-30)'
+  bar_line='- foo bar [direct-PR branch=me/] - cloned [archived] project (added 2026-09-30)'
+  baz_line='- foo baz [direct-PR +yolo] - sibling project (added 2026-09-30)'
+  printf '%s\n' "$foo_line" "$bar_line" "$baz_line" > "$home/data/projects.md"
+
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='design' FM_SECONDMATE_SCOPE='design' \
+    "$ROOT/bin/fm-home-seed.sh" design "$subhome" foo 'foo bar' 'foo baz' >/dev/null 2>&1 \
+    || fail "seed refused three prefix-sharing projects"
+  printf '%s\n' '- foo bar - cloned [archived] project (added 2026-01-01)' >> "$subhome/data/projects.md"
+  for project in 1 2; do
+    FM_HOME="$home" FM_SECONDMATE_CHARTER='design' FM_SECONDMATE_SCOPE='design' \
+      "$ROOT/bin/fm-home-seed.sh" design "$subhome" 'foo bar' >/dev/null 2>&1 \
+      || fail "reseeding foo bar failed"
+  done
+  [ "$(cat "$subhome/data/projects.md")" = "$(printf '%s\n' "$foo_line" "$baz_line" "$bar_line")" ] \
+    || fail "reseeding foo bar did not keep its siblings and replace its own entries: $(cat "$subhome/data/projects.md")"
+  [ "$(FM_HOME="$subhome" "$ROOT/bin/fm-project-mode.sh" foo 2>/dev/null)" = "direct-PR on" ] \
+    || fail "reseeding foo bar changed the foo posture"
   [ "$(FM_HOME="$subhome" "$ROOT/bin/fm-project-mode.sh" 'foo bar' 2>/dev/null)" = "direct-PR off" ] \
-    || fail "reseeding foo bar - baz lost the foo bar posture"
-  [ "$(FM_HOME="$subhome" "$ROOT/bin/fm-project-mode.sh" 'foo bar - baz' 2>/dev/null)" = "direct-PR on" ] \
-    || fail "reseeding foo bar - baz lost its own posture"
-
-  # Removing "foo bar" keeps the "foo bar - baz" line: silently when that longer
-  # name is known, with a warning naming the line when it is not.
-  # shellcheck source=bin/fm-project-registry-lib.sh
-  . "$ROOT/bin/fm-project-registry-lib.sh"
-  out=$(printf '%s\n' "$short_line" "$long_line" | fm_project_registry_without - 'foo bar - baz' 'foo bar' 2>"$err")
-  [ "$out" = "$long_line" ] || fail "removing foo bar did not keep the known foo bar - baz entry: $out"
-  [ ! -s "$err" ] || fail "removing foo bar warned about a line owned by a known name: $(cat "$err")"
-  out=$(printf '%s\n' "$short_line" "$long_line" | fm_project_registry_without - '' 'foo bar' 2>"$err")
-  [ "$out" = "$long_line" ] || fail "removing foo bar dropped an ambiguous foo bar - baz entry: $out"
-  grep -F "warning: keeping registry line" "$err" | grep -F -- "$long_line" >/dev/null \
-    || fail "removal kept an ambiguous line without naming it: $(cat "$err")"
-  out=$(printf '%s\n' '- foo bar - cloned project (added 2026-09-30)' | fm_project_registry_without - '' 'foo bar' 2>"$err")
-  [ -z "$out" ] || fail "removing foo bar kept its default dashed entry: $out"
-  pass "reseeding a project keeps a dashed-prefix sibling's registry entry and posture"
+    || fail "reseeding foo bar lost its own posture"
+  [ "$(FM_HOME="$subhome" "$ROOT/bin/fm-project-mode.sh" 'foo baz' 2>/dev/null)" = "direct-PR on" ] \
+    || fail "reseeding foo bar changed the foo baz posture"
+  pass "reseeding a project keeps sibling registry entries and replaces its own"
 }
 
 test_home_seed_projectless_refusal_names_spaced_registry_entry() {
@@ -3182,8 +3193,8 @@ test_home_seed_refuses_missing_projects_without_signal
 test_home_seed_refuses_local_only_project
 test_home_seed_refuses_an_unresolvable_registry_posture
 test_home_seed_preserves_spaced_project_posture
-test_home_seed_preserves_dashed_project_posture
-test_home_seed_reseed_keeps_dashed_prefix_sibling_entry
+test_home_seed_refuses_unrepresentable_project_name
+test_home_seed_reseed_keeps_sibling_entries
 test_home_seed_projectless_refusal_names_spaced_registry_entry
 test_home_seed_refuses_registry_delimiter_home
 test_home_seed_refuses_active_home_and_root

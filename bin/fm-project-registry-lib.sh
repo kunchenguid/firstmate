@@ -4,7 +4,7 @@
 # on which line belongs to which project, including a name that contains spaces.
 #
 # bin/fm-project-mode.sh's header owns the rest of the line format and the
-# bracketed annotation tokens. This file owns only the name, with two rules:
+# bracketed annotation tokens. This file owns only the name, with these rules:
 #
 #   Lookup (a queried name n): a line belongs to n when it starts with "- " n,
 #   compared literally (never as a regex or a whitespace-split field), and the
@@ -20,17 +20,14 @@
 #   ...") matches that longer row, and the enumeration lists such a name only up
 #   to its first " - " ("Acme").
 #
-#   Removal (a reseed dropping the entries for selected names): removal never
-#   deletes a line that may belong to another project, because a duplicate line
-#   is recoverable and a lost registration or posture is not. A line matching a
-#   selected name n under the lookup rule is kept when (1) a longer known name
-#   (the caller passes the home's clone names and the names being seeded) also
-#   matches it, since the line is that name's entry; or (2) the text after n
-#   starts with " - " and a " [" follows later ("- foo bar - baz [local-only]
-#   ..." for n "foo bar"), since the dashed part may belong to a longer name;
-#   that line is kept with a warning on stderr. Otherwise (the text after n is
-#   empty, starts with " [", or starts with " - " with no later " [") the line
-#   is removed.
+#   Seeding (a name copied into a secondmate home's registry): a name that
+#   contains " - " or " [" cannot be told apart from a description or an
+#   annotation, so fm_project_registry_name_ok refuses it and bin/fm-home-seed.sh
+#   calls it before it touches anything. A name with plain spaces is fine. The
+#   remote seed and provisioner already accept only names without spaces.
+#   Removal (a reseed dropping the entries for the seeded names): every line
+#   that belongs to a seeded name under the lookup rule is removed, so the
+#   reseed replaces that entry instead of duplicating it.
 #
 # Sourced, not executed. It defines:
 #   FM_PROJECT_REGISTRY_AWK   awk source to prepend to an awk program:
@@ -43,12 +40,12 @@
 #                                               status 1 when there is none
 #   fm_project_registry_names <file|->          print every registered name, one
 #                                               per line
-#   fm_project_registry_without <file|-> <known> <name>...
+#   fm_project_registry_name_ok <name>          status 0 when <name> can be
+#                                               seeded; otherwise print why to
+#                                               stderr and return 1
+#   fm_project_registry_without <file|-> <name>...
 #                                               print the input minus the entries
-#                                               for the given names under the
-#                                               removal rule; <known> is a
-#                                               newline-separated list of other
-#                                               known project names
+#                                               for the given names
 
 # shellcheck disable=SC2016 # awk source, expanded by awk rather than the shell
 FM_PROJECT_REGISTRY_AWK='
@@ -84,23 +81,20 @@ fm_project_registry_names() {  # <file|->
   ' "$1"
 }
 
-fm_project_registry_without() {  # <file|-> <known> <name>...
-  local file=$1 known=$2 names
-  shift 2
+fm_project_registry_name_ok() {  # <name>
+  case "$1" in
+    *' - '*|*' ['*)
+      echo "error: project $1 contains \" - \" or \" [\", which the project registry cannot tell apart from a description or annotation; rename the project (directory and registry entry) without that sequence and seed again" >&2
+      return 1 ;;
+  esac
+}
+
+fm_project_registry_without() {  # <file|-> <name>...
+  local file=$1 names
+  shift
   names=$(printf '%s\n' "$@" | awk '{ printf "%s%s", sep, $0; sep="\034" }')
-  known=$(printf '%s\n' "$known" | awk 'NF { printf "%s%s", sep, $0; sep="\034" }')
-  awk -v names="$names" -v known="$known" "$FM_PROJECT_REGISTRY_AWK"'
-    BEGIN { k = split(names, a, "\034"); kk = split(known, m, "\034"); for (i = 1; i <= k; i++) m[++kk] = a[i] }
-    function fm_registry_owned(line, n,   after, j) {
-      if (!fm_registry_match(line, n)) return 0;
-      after = FM_REG_AFTER;
-      if (substr(after, 1, 3) != " - ") return 1;
-      for (j = 1; j <= kk; j++)
-        if (length(m[j]) > length(n) && fm_registry_match(line, m[j])) return 0;
-      if (!index(substr(after, 4), " [")) return 1;
-      print "warning: keeping registry line that may belong to a longer project name than " n ": " line > "/dev/stderr";
-      return 0;
-    }
-    { for (i = 1; i <= k; i++) if (fm_registry_owned($0, a[i])) next; print }
+  awk -v names="$names" "$FM_PROJECT_REGISTRY_AWK"'
+    BEGIN { k = split(names, a, "\034") }
+    { for (i = 1; i <= k; i++) if (fm_registry_match($0, a[i])) next; print }
   ' "$file"
 }

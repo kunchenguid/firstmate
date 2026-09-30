@@ -502,6 +502,7 @@ EOF
 
 validate_seed_project() {
   local project=$1 src mode url mode_line
+  fm_project_registry_name_ok "$project" || return 1
   src="$PROJECTS/$project"
   [ -d "$src" ] || { echo "error: project $project not found at $src" >&2; return 1; }
   git -C "$src" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "error: project $project is not a git repo" >&2; return 1; }
@@ -697,16 +698,12 @@ EOF
 }
 
 sync_project_registry() {
-  local home=$1 sub_reg tmp project project_path known='' line today
+  local home=$1 sub_reg tmp project line today
   shift
   sub_reg="$home/data/projects.md"
   tmp="$sub_reg.tmp.$$"
   if [ -f "$sub_reg" ]; then
-    for project_path in "$home/projects"/* "$home/projects"/.[!.]* "$home/projects"/..?*; do
-      [ -e "$project_path" ] || [ -L "$project_path" ] || continue
-      known="$known${project_path##*/}"$'\n'
-    done
-    fm_project_registry_without "$sub_reg" "$known" "$@" > "$tmp"
+    fm_project_registry_without "$sub_reg" "$@" > "$tmp"
   else
     : > "$tmp"
   fi
