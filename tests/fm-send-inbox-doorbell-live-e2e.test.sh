@@ -23,9 +23,11 @@
 # Record the dated per-harness result in
 # docs/verification/runtime-backends.md ("Steering-inbox doorbell").
 #
-# Folder trust: harnesses launch with the repo root as cwd, which the
-# operator's machine has normally already trusted; a trust dialog is a real
-# unready state and correctly fails that harness's check.
+# Codex uses a disposable authenticated home with no shared daemon or hooks.
+# Its input consumer is briefly suspended during the real fm-send, so text
+# and Enter accumulate together. Only the isolated, identity-checked Codex
+# process may be signalled; a finally clause always resumes it. No re-ring or
+# recovery Enter is allowed for this regression.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -72,9 +74,10 @@ harness_version() {  # <binary>
 # Launch <name> idle with its unattended-autonomy flags (the same posture
 # bin/fm-spawn.sh uses), so the doorbell-triggered shell actions need no
 # interactive approval.
-launch_cmd() {  # <name>
+launch_cmd() {  # <name> <home> <play>
   case "$1" in
-    codex) printf '%s' 'codex --dangerously-bypass-approvals-and-sandbox' ;;
+    codex)
+      printf 'env CODEX_HOME=%q codex --no-daemon --dangerously-bypass-approvals-and-sandbox -c features.hooks=false -C %q' "$2/codex-home" "$3" ;;
     pi) printf '%s' "$1" ;;
     *) return 1 ;;
   esac
@@ -111,14 +114,26 @@ wait_ready() {  # <window>
 }
 
 check_harness_doorbell() {  # <name>
-  local name=$1 version cmd win home task acted rec handled i ready_rc ids tab workspace
+  local name=$1 version cmd win home task acted rec handled i ready_rc ids tab workspace play info body
   version=$(harness_version "$name")
-  cmd=$(launch_cmd "$name") || { note "no launch recipe for $name"; return 0; }
   home="$LAB/$name-home"
-  mkdir -p "$home/state"
+  play="$home/play"
+  mkdir -p "$home/state" "$play"
+  git -C "$home" init -q -b main || { FAILED=1; return 0; }
+  printf '%s\n' 'You are an isolated input fixture. Only act on the harmless local inbox, then move its messages into handled/. Never inspect production, supervise, or delegate.' > "$play/AGENTS.md"
+  if [ "$name" = codex ]; then
+    mkdir -p "$home/codex-home"
+    if [ ! -f "${CODEX_HOME:-$HOME/.codex}/auth.json" ]; then
+      FAILED=1; printf 'not ok - codex (%s): local authentication unavailable\n' "$version" >&2; return 0
+    fi
+    cp "${CODEX_HOME:-$HOME/.codex}/auth.json" "$home/codex-home/auth.json"
+    chmod 600 "$home/codex-home/auth.json"
+    printf 'model = "gpt-6.1-sol"\nmodel_reasoning_effort = "high"\n[projects."%s"]\ntrust_level = "trusted"\n' "$play" > "$home/codex-home/config.toml"
+  fi
+  cmd=$(launch_cmd "$name" "$home" "$play") || { note "no launch recipe for $name"; return 0; }
   task="live-$name"
   acted="$LAB/acted-$name"
-  ids=$(fm_backend_herdr_create_task "$CONTAINER" "fm-$task" "$ROOT") || { FAILED=1; return 0; }
+  ids=$(fm_backend_herdr_create_task "$CONTAINER" "fm-$task" "$play") || { FAILED=1; return 0; }
   read -r tab win <<< "$ids"
   workspace=${win%%:*}
   fm_backend_herdr_send_text_line "$SESSION:$win" "exec $cmd" \
@@ -133,10 +148,34 @@ check_harness_doorbell() {  # <name>
   fi
   [ "$ready_rc" -eq 0 ] || note "$name ($version): idle composer never classified empty; proceeding as production does (advisory check skips only on pending)"
   printf 'window=%s:%s\nkind=ship\nharness=%s\nbackend=herdr\nendpoint_task_id=%s\nherdr_session=%s\nherdr_workspace_id=%s\nherdr_tab_id=%s\nherdr_pane_id=%s\nworktree=%s\nproject=%s\n' \
-    "$SESSION" "$win" "$name" "$task" "$SESSION" "$workspace" "$tab" "$win" "$ROOT" "$ROOT" > "$home/state/$task.meta"
-  if ! FM_HOME="$home" FM_ROOT_OVERRIDE="$home" "$ROOT/bin/fm-send.sh" "$task" \
-    "Firstmate live check: run exactly this shell command now: touch $acted - then follow the mv instruction you were given for this message. Reply with one short line." \
-    >/dev/null 2>&1; then
+    "$SESSION" "$win" "$name" "$task" "$SESSION" "$workspace" "$tab" "$win" "$play" "$play" > "$home/state/$task.meta"
+  body="Firstmate live check: run exactly this shell command now: touch $acted - then follow the mv instruction you were given for this message. Reply with one short line."
+  if [ "$name" = codex ]; then
+    info=$(fm_backend_herdr_cli "$SESSION" pane process-info --pane "$win") || { FAILED=1; return 0; }
+    if ! FM_HOME="$home" FM_ROOT_OVERRIDE="$home" python3 - "$info" "$play" "$home/codex-home" "$ROOT/bin/fm-send.sh" "$task" "$body" <<'PY'
+import json, os, pathlib, signal, subprocess, sys
+info, play, codex_home, send, task, body = sys.argv[1:]
+processes = json.loads(info)['result']['process_info']['foreground_processes']
+matches = [p for p in processes if p['name'] == 'codex' and p['argv'][0].split('/')[-1] == 'codex' and p['cwd'] == play]
+assert len(matches) == 1, 'expected one foreground lab Codex'
+pid = matches[0]['pid']
+proc = pathlib.Path('/proc') / str(pid)
+if proc.exists():
+    assert b'CODEX_HOME=' + codex_home.encode() in (proc/'environ').read_bytes().split(b'\0')
+    start = (proc/'stat').read_text().split()[21]
+os.kill(pid, signal.SIGSTOP)
+try:
+    result = subprocess.run([send, task, body], timeout=45)
+finally:
+    if proc.exists():
+        assert (proc/'stat').read_text().split()[21] == start, 'lab PID identity changed'
+    os.kill(pid, signal.SIGCONT)
+sys.exit(result.returncode)
+PY
+    then
+      FAILED=1; printf 'not ok - codex (%s): coalesced fm-send failed\n' "$version" >&2; return 0
+    fi
+  elif ! FM_HOME="$home" FM_ROOT_OVERRIDE="$home" "$ROOT/bin/fm-send.sh" "$task" "$body" >/dev/null 2>&1; then
     FAILED=1
     printf 'not ok - %s (%s): fm-send refused the live steer\n' "$name" "$version" >&2
     fm_backend_kill herdr "$SESSION:$win" 2>/dev/null || true
@@ -156,7 +195,7 @@ check_harness_doorbell() {  # <name>
     # Halfway through, play the watcher's role once: re-ring an unacknowledged
     # message so a doorbell swallowed by a startup or update modal recovers
     # exactly as the production re-ring ladder recovers it.
-    if [ "$i" -eq $((TIMEOUT / 2)) ] && [ -f "$rec" ]; then
+    if [ "$name" != codex ] && [ "$i" -eq $((TIMEOUT / 2)) ] && [ -f "$rec" ]; then
       fm_task_inbox_ring herdr "$SESSION:$win" "$rec" || true
       note "$name ($version): re-rang the doorbell once (watcher's role) at ${i}s"
     fi
@@ -164,8 +203,23 @@ check_harness_doorbell() {  # <name>
     i=$((i + 1))
   done
   if [ -f "$handled" ] && [ -e "$acted" ]; then
+    if [ "$name" = codex ] && ! python3 - "$home/codex-home" <<'PY'
+import json, pathlib, sys
+messages = []
+for path in pathlib.Path(sys.argv[1]).glob('sessions/**/*.jsonl'):
+    for line in path.read_text().splitlines():
+        event = json.loads(line)
+        p = event.get('payload', {})
+        if event['type'] == 'response_item' and p.get('role') == 'user':
+            messages.extend(c.get('text', '') for c in p.get('content', []) if c.get('type') == 'input_text')
+assert sum(t.startswith(': Firstmate instruction waiting:') for t in messages) == 1, 'notification must become exactly one Codex user message'
+PY
+    then
+      FAILED=1; printf 'not ok - codex (%s): submission count is not one\n' "$version" >&2; return 0
+    fi
     CHECKED=$((CHECKED + 1))
     pass "$name ($version): the doorbell reached a real worker, which acted and acked with the mv"
+    [ "$name" != codex ] || pass "$name ($version): coalesced input submitted once without re-ring or recovery Enter"
   else
     FAILED=1
     printf 'not ok - %s (%s): doorbell not honored within %ss (acted=%s acked=%s)\n' \

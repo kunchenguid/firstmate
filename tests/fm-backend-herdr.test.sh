@@ -5316,3 +5316,116 @@ PYSCHEMA
 }
 
 test_workspace_move_schema_semantics
+
+# Native Codex input transport, exercised against real process identity.
+python3 - "$ROOT" "$TMP_ROOT" <<'PY'
+import json, os, pathlib, shutil, socket, subprocess, sys, tempfile, threading, time
+root, temporary = map(pathlib.Path, sys.argv[1:])
+shim = temporary / 'shim'; shim.mkdir()
+cli = shim / 'herdr'
+cli.write_text('''#!/usr/bin/env python3
+import json,os,sys
+args=sys.argv[1:]
+assert args[-2:]==['--session','input-test']
+with open(os.environ['PROBE_LOG'],'a') as f:f.write(json.dumps(args)+'\\n')
+fixture=json.load(open(os.environ['PROBE_FIXTURE']))
+key='status' if args[0]=='status' else 'process' if args[:2]==['pane','process-info'] else 'schema'
+print(json.dumps(fixture[key]))
+'''); cli.chmod(0o700)
+fixture_path = temporary / 'fixture.json'; log = temporary / 'cli.jsonl'
+# Unix socket paths have a small fixed bound even when TMPDIR is a deep worktree.
+short = tempfile.TemporaryDirectory(prefix='fm-input-', dir='/tmp')
+request_path = pathlib.Path(short.name) / 'native.sock'
+params={'required':['pane_id'],'properties':{'pane_id':{'type':'string'},'text':{'type':'string'},'keys':{'type':'array','items':{'type':'string'}}}}
+schema={'schemas':{'request':{'oneOf':[{'properties':{'method':{'const':'pane.send_input'},'params':{'$ref':'#/schemas/request/$defs/PaneSendInputParams'}}}], '$defs':{'PaneSendInputParams':params}}}}
+# The executable's real kernel name and argv0 deliberately disagree.
+versioned = temporary / 'codex' / '2.1.220'; versioned.parent.mkdir()
+shutil.copyfile(shutil.which('sleep'), versioned); versioned.chmod(0o700)
+process=subprocess.Popen([str(versioned),'120'])
+renamed = None
+try:
+    kernel=subprocess.check_output(['ps','-p',str(process.pid),'-o','comm='],text=True).strip()
+    argv0=subprocess.check_output(['ps','-p',str(process.pid),'-o','args='],text=True).split()[0]
+    assert pathlib.Path(kernel).name=='2.1.220' and 'codex' in argv0.split('/'), (kernel,argv0)
+    foreground={'pid':process.pid,'name':kernel,'argv':[argv0,'120']}
+    fixture={'status':{'server':{'session':'input-test','running':True,'socket':str(request_path)}},'process':{'result':{'type':'pane_process_info','process_info':{'pane_id':'w1:p2','foreground_processes':[foreground]}}},'schema':schema}
+    env=dict(os.environ,PATH=str(shim)+':'+os.environ['PATH'],PROBE_FIXTURE=str(fixture_path),PROBE_LOG=str(log))
+    def run(expected, text='literal\nsecond line $() `quoted`', response=None, backend=False):
+        fixture_path.write_text(json.dumps(fixture))
+        calls=[]
+        with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as server:
+            server.bind(str(request_path));server.listen();server.settimeout(0.5)
+            def serve():
+                try: conn,_=server.accept()
+                except socket.timeout:return
+                with conn:
+                    data=b''
+                    while b'\n' not in data:data+=conn.recv(65536)
+                    calls.append(json.loads(data))
+                    conn.sendall((json.dumps(response or {'id':'fm-codex-input','result':{'type':'ok'}})+'\n').encode())
+            thread=threading.Thread(target=serve);thread.start()
+            command=['python3',str(root/'bin/backends/herdr-codex-input.py'),'input-test','w1:p2']
+            if backend:
+                command=['bash','-c','. "$1/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit input-test:w1:p2 "$2" 1 0.4 0','_',str(root),text]
+            result=subprocess.run(command,input=text,text=True,capture_output=True,env=env)
+            thread.join()
+        request_path.unlink()
+        assert result.returncode==expected,(result.returncode,result.stderr,expected)
+        if backend:assert result.stdout=='send-failed',result.stdout
+        return calls
+    calls=run(0)
+    assert calls==[{'id':'fm-codex-input','method':'pane.send_input','params':{'pane_id':'w1:p2','text':'literal\nsecond line $() `quoted`','keys':[]}}],calls
+    print('ok - real argv0 identity survives a version-named kernel process; one literal native insertion has no submission key')
+    compiler=shutil.which('cc')
+    if compiler:
+        binary=pathlib.Path(short.name)/'codex'
+        subprocess.run([compiler,'-x','c','-o',str(binary),'-'],input='#include <string.h>\n#include <unistd.h>\nint main(int argc, char **argv) { (void)argc; strcpy(argv[0], "decoy"); for (;;) pause(); }\n',text=True,check=True)
+        renamed=subprocess.Popen([str(binary)])
+        for _ in range(40):
+            args=subprocess.check_output(['ps','-p',str(renamed.pid),'-o','args='],text=True).split()[0]
+            if args=='decoy':break
+            time.sleep(.05)
+        kernel2=subprocess.check_output(['ps','-p',str(renamed.pid),'-o','comm='],text=True).strip()
+        assert pathlib.Path(kernel2).name=='codex' and args=='decoy',(kernel2,args)
+        foreground.update(pid=renamed.pid,name=kernel2,argv=[args])
+        assert len(run(0))==1
+        print('ok - real kernel identity survives an independently renamed argv0')
+    else:
+        print('# C compiler absent: kernel-only divergence not verified')
+    foreground.update(name='pi',argv=['pi'])
+    assert run(10)==[]
+    print('ok - a non-Codex foreground cannot receive framed native input')
+    foreground.update(name='codex',argv=['codex','app-server'])
+    assert run(10)==[]
+    print('ok - an app-server does not establish a Codex composer')
+    foreground.update(name='codex',argv=['codex'])
+    params['required']=['keys','text','pane_id']
+    assert len(run(0))==1
+    params['required'].append('unknown_permission')
+    assert run(1)==[]
+    params['required']=['pane_id']
+    print('ok - native capability accepts supplied required fields but refuses unknown requirements')
+    fixture['process']['result']['process_info']['pane_id']='w9:p9'
+    assert run(1)==[]
+    fixture['process']['result']['process_info']['pane_id']='w1:p2'
+    fixture['status']['server']['session']='foreign'
+    assert run(1)==[]
+    fixture['status']['server']['session']='input-test'
+    print('ok - foreign pane and session identities stop without insertion')
+    fixture['schema']={}
+    assert run(1)==[]
+    fixture['schema']=schema
+    assert run(1,text='literal\x1b[201~injection')==[]
+    print('ok - missing native capability and embedded paste delimiters fail closed')
+    calls=run(1,response={'id':'foreign','result':{'type':'ok'}})
+    assert len(calls)==1
+    calls=run(0,response={'id':'foreign','result':{'type':'ok'}},backend=True)
+    assert len(calls)==1
+    assert not any(a[:2] in (['pane','send-text'],['pane','send-keys']) for a in map(json.loads,log.read_text().splitlines()))
+    print('ok - ambiguous post-write response is a failure, with no retry')
+    for args in map(json.loads,log.read_text().splitlines()):assert args[-2:]==['--session','input-test']
+finally:
+    process.terminate();process.wait()
+    if renamed is not None:renamed.terminate();renamed.wait()
+    short.cleanup()
+PY

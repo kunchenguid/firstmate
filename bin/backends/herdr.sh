@@ -3057,6 +3057,22 @@ fm_backend_herdr_send_literal() {  # <target> <text>
   fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane send-text "$FM_BACKEND_HERDR_PANE" "$2" >/dev/null 2>&1
 }
 
+# Program input uses Herdr's native, live-mode-gated paste encoder only for a
+# verified foreground Codex. Exit 10 is inapplicable; all other failures stop
+# before Enter, without a raw-text fallback that could duplicate an insertion.
+# Bare literal insertion and shell launch commands retain their own paths.
+fm_backend_herdr_send_program_text() {  # <target> <text>
+  local rc=0
+  fm_backend_herdr_target_ready "$1" || return 1
+  printf '%s' "$2" | python3 "$FM_BACKEND_HERDR_ROOT/bin/backends/herdr-codex-input.py" \
+    "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" || rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    10) fm_backend_herdr_send_literal "$1" "$2" ;;
+    *) return "$rc" ;;
+  esac
+}
+
 # fm_backend_herdr_normalize_key: map firstmate's key vocabulary (Enter,
 # Escape, C-c, as used by fm-send.sh --key and stuck-crewmate-recovery) onto
 # herdr's `pane send-keys` names. Verified empirically: enter, escape/esc, and
@@ -3314,8 +3330,8 @@ fm_backend_herdr_rendered_busy_state() {  # <target> [harness] -> busy|idle|unkn
   fi
 }
 
-# fm_backend_herdr_send_text_submit: type <text> into <target> once (raw,
-# unsubmitted, via send_literal), then submit with a named Enter key, retried
+# fm_backend_herdr_send_text_submit: insert <text> into <target> once via the
+# program-input path, then submit with a named Enter key, retried
 # (Enter only, never retyped) until native agent-state, a cleared composer, or
 # fm_composer_queued_enter_verdict confirms delivery. Verified hazard
 # (herdr-verification-p2.md "slash/$ autocomplete popup"): a `/`- or
@@ -3409,7 +3425,7 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 i=0 verdict baseline confirm_sleep
   local raw_status footer_baseline='' allow_rendered=0 enter_sent=0
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
-  fm_backend_herdr_send_literal "$target" "$text" || { printf 'send-failed'; return 0; }
+  fm_backend_herdr_send_program_text "$target" "$text" || { printf 'send-failed'; return 0; }
   sleep "$settle"
   raw_status=$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")
   baseline=$(fm_backend_herdr_classify_submit_agent_status "$raw_status")
