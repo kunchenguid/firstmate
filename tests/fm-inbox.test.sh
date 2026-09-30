@@ -588,9 +588,6 @@ owned bash -c '"$1" drain --ack "$2" & a=$!; "$1" drain --ack "$2" & b=$!; wait 
   ack "$INBOX_BIN" "$id" > "$home/note-ack"
 owned "$INBOX_BIN" drain --ack "$id" >> "$home/note-ack"
 assert_equals 1 "$(grep -c '^acked ' "$home/note-ack")" "one note-handling receipt on repeated acknowledgement"
-if FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-wake-drain.sh" --ack-through "$seq" --recovery-generation "$gen" >/dev/null 2>&1; then
-  fail "read-only session must not acknowledge a subscribed input wake"
-fi
 owned "$ROOT/bin/fm-wake-drain.sh" --ack-through "$seq" --recovery-generation "$gen"
 assert_equals 1 "$(run_inbox "$home" input-receipts | json_get records | python3 -c 'import ast,sys; print(len(ast.literal_eval(sys.stdin.read())))')" "one shared receipt"
 assert_equals 0 "$(count_wakes "$home")" "post-handling ack retires the original wake"
@@ -599,6 +596,24 @@ assert_equals 0 "$(count_wakes "$home")" "retry after handling has no redundant 
 owned "$INBOX_BIN" unsubscribe
 if needed; then fail "unsubscription should remove idle demand"; fi
 pass "idle demand, owner refusal, body-free notification, and one shared acknowledgement"
+
+# A non-session actor (the away/quiet daemon) retires a batch holding an
+# unhandled input row exactly as before, without writing an input receipt.
+home=$(make_home subscribed-daemon)
+owned "$INBOX_BIN" subscribe
+id=$(run_inbox "$home" note --request-id away-1 --json 'while away' | json_get id)
+FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" bash -c '. "$1/bin/fm-wake-lib.sh"; fm_wake_append check ordinary "check: ordinary"' check "$ROOT"
+FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-wake-drain.sh" > "$home/daemon.out" 2> "$home/daemon.err" \
+  || fail "daemon-style drain of subscribed input failed"
+assert_contains "$(cat "$home/daemon.out")" "inbox:$id" "daemon drain presents the input row"
+seq=$(awk -F '\t' 'NF == 5 {print $2}' "$home/daemon.out" | tail -1)
+gen=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--recovery-generation //p' "$home/daemon.err")
+FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-wake-drain.sh" --ack-through "$seq" --recovery-generation "$gen" \
+  || fail "daemon-style ack of a batch with subscribed input must succeed"
+assert_equals 0 "$(count_wakes "$home")" "daemon-style ack retires the whole batch"
+assert_equals 0 "$(run_inbox "$home" input-receipts | json_get records | python3 -c 'import ast,sys; print(len(ast.literal_eval(sys.stdin.read())))')" "non-session ack writes no input receipt"
+[ -f "$home/state/inbox/$id.note" ] || fail "daemon-style ack must leave the note for the session owner"
+pass "non-session drain actors retire subscribed input rows without a receipt"
 
 # Real watcher, no fake fleet tasks: a thirty-second poll is interrupted by
 # input; simultaneous ordinary events stay durable for the same drain.

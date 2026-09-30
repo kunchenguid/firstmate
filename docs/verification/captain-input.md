@@ -44,7 +44,8 @@ The attached-arm optimization requires the exact watcher PID/identity delivery r
 The CLI and receipt fields do not claim exactly-once external actions or that a committed hook request reached the model.
 A process death between commit and exit retains the existing durable replay behavior.
 
-Input ownership checks apply to note and input-wake acknowledgement; ordinary event and branch drain authority is unchanged.
+Input ownership checks apply to note handling and to input receipts written by the owning session's wake acknowledgement.
+A non-session drain actor, such as the away/quiet daemon, retires input rows exactly as before and writes no input receipt; ordinary event and branch drain authority is unchanged.
 Registration does not authenticate an external human, end away mode, clear quiet, or change daemon/branch ownership.
 The native proof covers attended Claude; other supported harnesses and backend event waits were inspected at their shared integration surfaces but were not revalidated live.
 As in the existing Stop owner, a vendor hook timeout retains queued input and requires a subsequent Stop/session event to re-arm; this does not add an independent timeout-repair service.

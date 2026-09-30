@@ -2078,7 +2078,7 @@ fm_input_handoff() { # <state> <generation> <session-pid> <recovery-generation>
   local state=$1 gen=$2 session=$3 recovery=$4 epoch seq kind key payload id tmp rc=0
   [ -f "$state/.captain-input" ] || return 0
   [ -f "$state/.wake-queue" ] || return 0
-  fm_lock_try_acquire "$state/.wake-queue.lock" || return 1
+  fm_lock_acquire_wait_max "$state/.wake-queue.lock" 2 || return 1
   mkdir -p "$state/.input-handoff" || rc=1
   while IFS=$'\t' read -r epoch seq kind key payload; do
     [ "$kind" = check ] || continue
@@ -2098,17 +2098,14 @@ fm_input_ack_locked() { # <cutoff> <owned-sequence-file> <recovery-generation>
   while IFS=$'\t' read -r epoch seq kind key payload; do
     [ "$kind" = check ] || continue
     case "$key" in inbox:*) id=${key#inbox:} ;; *) continue ;; esac
-    case "$id" in ''|*..*|*[!A-Za-z0-9._-]*) return 1 ;; esac
     [ "$seq" -le "$cutoff" ] || continue
     grep -qx "$seq" "$rows" || continue
     # Scope ownership to input acknowledgement: branch/daemon drains of other
     # event kinds keep their existing authority and presentation contract.
     # shellcheck source=bin/fm-session-lock-lib.sh
     . "${BASH_SOURCE[0]%/*}/fm-session-lock-lib.sh"
-    fm_session_lock_owned_by_self "$STATE" || {
-      printf 'wake drain: only the owning session may acknowledge subscribed input\n' >&2
-      return 1
-    }
+    fm_session_lock_owned_by_self "$STATE" || return 0
+    case "$id" in ''|*..*|*[!A-Za-z0-9._-]*) return 1 ;; esac
     if [ ! -f "$STATE/inbox/handled/$id.note" ]; then
       printf 'wake drain: handle inbox note %s before acknowledging its wake\n' "$id" >&2
       return 1

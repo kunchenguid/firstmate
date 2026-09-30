@@ -1126,8 +1126,8 @@ cmd_drain() {
     shift
     [ "$#" -gt 0 ] || die "usage: fm-inbox.sh drain --ack <id>..."
     local input_locked=0 id
-    for id in "$@"; do valid_note_id "$id" || die "invalid note id"; done
     if [ -f "$STATE/.captain-input" ]; then
+      for id in "$@"; do valid_note_id "$id" || die "invalid note id"; done
       # shellcheck source=bin/fm-session-lock-lib.sh
       . "$SELF_DIR/fm-session-lock-lib.sh"
       fm_session_lock_owned_by_self "$STATE" || die "only the owning session may handle subscribed input"
