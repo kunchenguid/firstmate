@@ -97,6 +97,7 @@ pass "stale, unreadable, and shared copy claims are reported"
 HOME_DIRTY=$(make_home dirty)
 REPO=$HOME_DIRTY/projects/alpha
 git -C "$REPO" worktree add --quiet --detach "$TMP_ROOT/dirty-pool/1/alpha"
+git -C "$TMP_ROOT/dirty-pool/1/alpha" checkout -q -b cleanup-dirty
 git -C "$REPO" worktree add --quiet --detach "$TMP_ROOT/dirty-pool/2/alpha"
 git -C "$REPO" worktree add --quiet --detach "$TMP_ROOT/dirty-pool/3/alpha"
 printf 'edit\n' >> "$TMP_ROOT/dirty-pool/1/alpha/README.md"
@@ -283,6 +284,11 @@ assert_contains "$view" "| action | unlanded-branch | alpha | fm/lost | lost | 1
 assert_contains "$view" "backlog lost is queued" "the row names the owning backlog item"
 assert_contains "$view" "3 unowned local branch(es) already landed" "landed leftovers collapse to one count line"
 assert_not_contains "$view" "| info |" "landed leftovers are not rows"
+view=$(FM_HOME="$HOME_DIRTY" FM_ROOT_OVERRIDE='' "$VIEW")
+assert_contains "$view" "| action | dirty-orphan-copy | alpha | $TMP_ROOT/dirty-pool/1/alpha (cleanup-dirty) |" \
+  "a dirty copy on a branch shows both its path and branch"
+assert_contains "$view" "| action | dirty-orphan-copy | alpha | $TMP_ROOT/loose-slot/1/alpha |" \
+  "a detached dirty copy keeps its path-only location"
 view=$(FM_HOME="$HOME_CLEAN" FM_ROOT_OVERRIDE='' "$VIEW")
 assert_contains "$view" "No leftover state needs cleanup." "a clean fleet says so"
 snap=$(FM_HOME="$HOME_BR" FM_ROOT_OVERRIDE='' FM_HYGIENE_BRANCH_LIMIT=abc "$SNAPSHOT" --json)

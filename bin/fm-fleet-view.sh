@@ -57,7 +57,10 @@ printf '%s\n' "$SNAPSHOT" | jq -r '
     elif ($r.blocked_reason // "") == "" then $r.blocked_by
     else "\($r.blocked_by) - \($r.blocked_reason)" end;
   def cleanup_row($f):
-    "| \($f.severity) | \($f.class) | \(dash($f.repo)) | \(dash($f.branch // $f.path)) | \(dash($f.task)) | \(if $f.commits == null then "-" else $f.commits end) | \($f.detail)\(if $f.backlog != null then "; backlog \($f.backlog.id) is \($f.backlog.state)" else "" end)\(if $f.evidence != null then " (\($f.evidence))" else "" end) |";
+    (if ($f.path // "") != "" and ($f.branch // "") != "" then "\($f.path) (\($f.branch))"
+     elif ($f.path // "") != "" then $f.path
+     else dash($f.branch) end) as $location
+    | "| \($f.severity) | \($f.class) | \(dash($f.repo)) | \($location) | \(dash($f.task)) | \(if $f.commits == null then "-" else $f.commits end) | \($f.detail)\(if $f.backlog != null then "; backlog \($f.backlog.id) is \($f.backlog.state)" else "" end)\(if $f.evidence != null then " (\($f.evidence))" else "" end) |";
   def backlog_row($r):
     "| \($r.id // "-") | \(dash($r.title // $r.raw)) | \(dash($r.repo)) | \(dash($r.kind)) | \(blocker($r)) | \(dash($r.pr_url // $r.report_path // $r.local_note)) |";
 
