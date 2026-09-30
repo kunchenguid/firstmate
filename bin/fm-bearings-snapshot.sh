@@ -63,6 +63,18 @@
 # suppresses the digest; an ACTIVE away window still refuses, because the right
 # answer there is to run the return first. bin/fm-afk-return.sh owns the gate.
 #
+# Two further projections come from live state only, never from prose or prior
+# reports. servers[] rows {project,port,pid,uptime,dir} cover TCP listeners and
+# UDP endpoints whose process cwd sits under a fleet project path (a fleet clone
+# or a live task worktree), listeners on a launchd preview port, and every
+# com.firstmate.preview-* launchd service from FM_BEARINGS_PREVIEW_DIR (default
+# ~/Library/LaunchAgents). project_branches[] rows {project,branch,clean} cover
+# every git-backed fleet clone plus registered projects with no clone (branch
+# "-", clean null). Both are additive fm-bearings.v1 fields bounded by
+# FM_BEARINGS_SERVERS and FM_BEARINGS_BRANCHES with omitted[] disclosure; any
+# collection failure degrades to [] with a disclosure, never a hard error, and
+# the whole live-state collection shares FM_BEARINGS_COLLECT_TIMEOUT.
+#
 # The landed section merges this home's Done with the canonical snapshot's
 # secondmate_landed roll-up (fm-fleet-snapshot.sh), so merges a secondmate managed -
 # recorded in ITS OWN backlog, never the main one - are visible. It stays bounded by
@@ -114,6 +126,10 @@ FM_BEARINGS_RECORDED_PRS=${FM_BEARINGS_RECORDED_PRS:-20}
 FM_BEARINGS_UNHEALTHY=${FM_BEARINGS_UNHEALTHY:-20}
 FM_BEARINGS_PR_REPOS=${FM_BEARINGS_PR_REPOS:-10}
 FM_BEARINGS_PR_LIMIT=${FM_BEARINGS_PR_LIMIT:-20}
+FM_BEARINGS_SERVERS=${FM_BEARINGS_SERVERS:-30}
+FM_BEARINGS_BRANCHES=${FM_BEARINGS_BRANCHES:-60}
+FM_BEARINGS_COLLECT_TIMEOUT=${FM_BEARINGS_COLLECT_TIMEOUT:-15}
+FM_BEARINGS_PREVIEW_DIR=${FM_BEARINGS_PREVIEW_DIR:-$HOME/Library/LaunchAgents}
 FM_BEARINGS_PR_TIMEOUT=${FM_BEARINGS_PR_TIMEOUT:-20}
 case "$FM_BEARINGS_PR_TIMEOUT" in ''|*[!0-9]*|0) FM_BEARINGS_PR_TIMEOUT=20 ;; esac
 validate_bound() {  # <name> <value>
@@ -130,6 +146,9 @@ validate_bound FM_BEARINGS_RECORDED_PRS "$FM_BEARINGS_RECORDED_PRS"
 validate_bound FM_BEARINGS_UNHEALTHY "$FM_BEARINGS_UNHEALTHY"
 validate_bound FM_BEARINGS_PR_REPOS "$FM_BEARINGS_PR_REPOS"
 validate_bound FM_BEARINGS_PR_LIMIT "$FM_BEARINGS_PR_LIMIT"
+validate_bound FM_BEARINGS_SERVERS "$FM_BEARINGS_SERVERS"
+validate_bound FM_BEARINGS_BRANCHES "$FM_BEARINGS_BRANCHES"
+validate_bound FM_BEARINGS_COLLECT_TIMEOUT "$FM_BEARINGS_COLLECT_TIMEOUT"
 
 usage() {
   cat <<'EOF'
@@ -150,6 +169,7 @@ Default fields: schema, home, generated, prs, in_flight{id,kind,state,repo,name,
   secondmate_reconcile{id,spawn_gen,host,kind,ids},
   decisions_open{id,key,verb,summary,owner}, landed{id,what,artifact,owner},
   gates{id,title,blocked_by,reason,owner,filed}, reports{id,path}, recorded_prs{id,url},
+  servers{project,port,pid,uptime,dir}, project_branches{project,branch,clean},
   unhealthy_endpoints{...} (only when non-empty), omitted{surface,reveal}.
 Default gates are selected newest filed first before their bound; undated gates
   retain input order after dated gates.
@@ -345,6 +365,189 @@ EOF
   fi
 fi
 
+# --- live servers + fleet-clone branches (live state only, best effort) ------
+# Every failure below degrades to [] with an omitted[] disclosure; none is fatal.
+SERVERS_ALL_JSON='[]'
+SERVERS_NOTE=""
+BRANCHES_ALL_JSON='[]'
+BRANCHES_NOTE=""
+PROJECTS_DIR=$(printf '%s' "$SNAP" | jq -r '.roots.projects // empty')
+DATA_DIR=$(printf '%s' "$SNAP" | jq -r '.roots.data // empty')
+live_cands=$(mktemp "${TMPDIR:-/tmp}/fm-bearings-cands.XXXXXX") \
+  || { echo "fm-bearings-snapshot: cannot create a temporary candidates file" >&2; exit 1; }
+{
+  if [ -n "$PROJECTS_DIR" ] && [ -d "$PROJECTS_DIR" ]; then
+    for _cand_dir in "$PROJECTS_DIR"/*/; do
+      [ -d "$_cand_dir" ] || continue
+      _cand_dir=${_cand_dir%/}
+      jq -n --arg dir "$_cand_dir" --arg project "${_cand_dir##*/}" \
+        '{dir:$dir,project:$project}'
+    done
+  fi
+  printf '%s' "$SNAP" | jq -c '.tasks[] | select(.kind != "secondmate")
+    | (.paths.worktree.path // empty) as $wt
+    | select($wt != "")
+    | {dir:$wt, project:(.backlog.repo // .project // ($wt | split("/") | last))}'
+} | jq -s '.' > "$live_cands" 2>/dev/null || printf '[]' > "$live_cands"
+
+# Listener table: proto<TAB>port<TAB>pid, deduped. -F keeps this parseable.
+parse_lsof_listeners() {  # <proto>
+  awk -v proto="$1" '
+    /^p[0-9]+$/ { pid = substr($0, 2) }
+    /^n/ { name = substr($0, 2); sub(/ \(.*\)$/, "", name); port = name; sub(/^.*:/, "", port);
+      if (port ~ /^[0-9]+$/) print proto "\t" port "\t" pid }'
+}
+live_listeners=$(mktemp "${TMPDIR:-/tmp}/fm-bearings-listeners.XXXXXX") \
+  || { echo "fm-bearings-snapshot: cannot create a temporary listeners file" >&2; exit 1; }
+: > "$live_listeners"
+if command -v lsof >/dev/null 2>&1; then
+  fm_run_timed "$FM_BEARINGS_COLLECT_TIMEOUT" lsof -nP -iTCP -sTCP:LISTEN -F pcn 2>/dev/null \
+    | parse_lsof_listeners TCP >> "$live_listeners" || true
+  fm_run_timed "$FM_BEARINGS_COLLECT_TIMEOUT" lsof -nP -iUDP -F pcn 2>/dev/null \
+    | parse_lsof_listeners UDP >> "$live_listeners" || true
+  _dedup=$(sort -u "$live_listeners" 2>/dev/null) || _dedup=""
+  printf '%s\n' "$_dedup" | sed '/^[[:space:]]*$/d' > "$live_listeners"
+else
+  SERVERS_NOTE="listener table unavailable (lsof not found)"
+fi
+
+# Per-pid cwd + uptime for the distinct listener pids (bounded count).
+live_pids=$(mktemp "${TMPDIR:-/tmp}/fm-bearings-pids.XXXXXX") \
+  || { echo "fm-bearings-snapshot: cannot create a temporary pid file" >&2; exit 1; }
+: > "$live_pids"
+if [ -s "$live_listeners" ]; then
+  _pid_list=$(awk -F'\t' '{print $3}' "$live_listeners" | sort -u | head -n 64 | tr '\n' ',' | sed 's/,$//')
+  if [ -n "$_pid_list" ]; then
+    _uptimes=$(fm_run_timed "$FM_BEARINGS_COLLECT_TIMEOUT" ps -o pid=,etime= -p "$_pid_list" 2>/dev/null) || _uptimes=""
+    for _pid in $(printf '%s' "$_pid_list" | tr ',' ' '); do
+      _cwd=$(fm_run_timed 5 lsof -a -p "$_pid" -d cwd -F n 2>/dev/null | sed -n 's/^n//p' | head -n 1) || _cwd=""
+      _up=$(printf '%s\n' "$_uptimes" | awk -v pid="$_pid" '$1 == pid { $1 = ""; sub(/^ +/, ""); gsub(/ /, ""); print; exit }')
+      [ -n "$_up" ] || _up="-"
+      printf '%s\t%s\t%s\n' "$_pid" "${_cwd:-}" "$_up" >> "$live_pids"
+    done
+  fi
+fi
+
+# Launchd preview services: label, project, port, dir, pid-or-empty, uptime-or--.
+live_previews=$(mktemp "${TMPDIR:-/tmp}/fm-bearings-previews.XXXXXX") \
+  || { echo "fm-bearings-snapshot: cannot create a temporary previews file" >&2; exit 1; }
+: > "$live_previews"
+if [ -n "${FM_BEARINGS_PREVIEW_DIR:-}" ] && [ -d "$FM_BEARINGS_PREVIEW_DIR" ]; then
+  _launch_list=""
+  if command -v launchctl >/dev/null 2>&1; then
+    _launch_list=$(fm_run_timed "$FM_BEARINGS_COLLECT_TIMEOUT" launchctl list 2>/dev/null) || _launch_list=""
+  fi
+  for _plist in "$FM_BEARINGS_PREVIEW_DIR"/com.firstmate.preview-*.plist; do
+    [ -f "$_plist" ] || continue
+    _label=$(basename "$_plist" .plist)
+    _workdir=$(sed -n '/<key>WorkingDirectory<\/key>/{n;s/.*<string>\(.*\)<\/string>.*/\1/p;}' "$_plist" | head -n 1)
+    _port=$(grep -A1 '<string>--port</string>' "$_plist" | sed -n 's/.*<string>\([0-9][0-9]*\)<\/string>.*/\1/p' | head -n 1)
+    [ -n "$_port" ] || _port="-"
+    _spid=$(printf '%s\n' "$_launch_list" | awk -v label="$_label" '$3 == label {print $1; exit}')
+    case "$_spid" in ''|-) _spid="" ;; esac
+    _sup="-"
+    if [ -n "$_spid" ]; then
+      _sup=$(printf '%s\n' "$_uptimes" 2>/dev/null | awk -v pid="$_spid" '$1 == pid { $1 = ""; sub(/^ +/, ""); gsub(/ /, ""); print; exit }')
+      if [ -z "$_sup" ] && command -v ps >/dev/null 2>&1; then
+        _sup=$(fm_run_timed 5 ps -o etime= -p "$_spid" 2>/dev/null | tr -d ' ') || _sup=""
+      fi
+      [ -n "$_sup" ] || _sup="-"
+    fi
+    printf '%s\t%s\t%s\t%s\t%s\n' "$_label" "${_workdir:-}" "$_port" "$_spid" "$_sup" >> "$live_previews"
+  done
+fi
+
+# Assemble servers[]: matched listeners, listeners on preview ports, then every
+# preview service whose port is not already covered. jq owns the matching so
+# the shell never compares paths itself.
+if [ -s "$live_listeners" ] || [ -s "$live_previews" ]; then
+  SERVERS_ALL_JSON=$(jq -Rs --slurpfile cands "$live_cands" '
+      split("\n") | map(select(. != "") | split("\t")
+        | select(length == 3) | {proto:.[0], port:.[1], pid:.[2]})' "$live_listeners" \
+    | jq --slurpfile cands "$live_cands" --slurpfile pids <(jq -Rs '
+        split("\n") | map(select(. != "") | split("\t")
+          | select(length == 3) | {(.[0]): {cwd:.[1], uptime:.[2]}})
+        | add // {}' "$live_pids") --slurpfile previews <(jq -Rs '
+        split("\n") | map(select(. != "") | split("\t")
+          | select(length == 5)
+          | {label:.[0], dir:.[1], port:.[2], pid:.[3], uptime:.[4]})' "$live_previews") '
+      def match_project($cands; $dir):
+          ($cands | map(.dir as $cd
+              | select($dir != "" and ($dir == $cd or ($dir | startswith($cd + "/"))))
+              | {dir:$cd, project:.project})
+            | sort_by(.dir | length) | last | .project // null);
+      ($cands[0] // []) as $cands
+      | ($pids[0] // {}) as $pids
+      | ($previews[0] // []) as $previews
+      | ($previews | map(select(.port != "-" and .port != "") | .port)) as $preview_ports
+      | ([ .[]
+          | (.pid | tostring) as $pid
+          | ($pids[$pid] // {cwd:"", uptime:"-"}) as $info
+          | (match_project($cands; $info.cwd)) as $proj
+          | (.port) as $lport
+          | select($proj != null or ($preview_ports | index($lport) != null))
+          | {project:($proj // ($info.cwd | split("/") | last | select(. != "") // "-" )),
+             port:(.port | tonumber), pid:(.pid | tonumber? // null),
+             uptime:$info.uptime, dir:$info.cwd} ]
+        | sort_by([.project, .port]) | unique) as $rows
+      | ($rows | map(.port | tostring)) as $seen_ports
+      | ($rows + [ $previews[]
+          | select((.port | tostring) as $p | ($seen_ports | index($p) == null))
+          | (match_project($cands; .dir)) as $proj
+          | {project:($proj // (.label | sub("^com\\.firstmate\\.preview-"; ""))),
+             port:(.port | tonumber? // null), pid:(.pid | tonumber? // null),
+             uptime:.uptime, dir:.dir} ]
+        | map(select(.port != null))
+        | sort_by([.project, .port]))
+    ') || SERVERS_ALL_JSON='[]'
+fi
+rm -f "$live_listeners" "$live_pids" "$live_previews"
+
+# Fleet-clone branches: branch + clean/dirty per git-backed clone, plus
+# registered projects with no clone (branch "-", clean null).
+live_branches=$(mktemp "${TMPDIR:-/tmp}/fm-bearings-branches.XXXXXX") \
+  || { echo "fm-bearings-snapshot: cannot create a temporary branches file" >&2; exit 1; }
+: > "$live_branches"
+if ! command -v git >/dev/null 2>&1; then
+  BRANCHES_NOTE="branch state unavailable (git not found)"
+elif [ -n "$PROJECTS_DIR" ] && [ -d "$PROJECTS_DIR" ]; then
+  for _clone in "$PROJECTS_DIR"/*/; do
+    [ -d "$_clone" ] || continue
+    _clone=${_clone%/}
+    _proj=${_clone##*/}
+    fm_run_timed 5 git -C "$_clone" rev-parse --git-dir >/dev/null 2>&1 || continue
+    _branch=$(fm_run_timed 5 git -C "$_clone" branch --show-current 2>/dev/null) || _branch=""
+    if [ -z "$_branch" ]; then
+      _sha=$(fm_run_timed 5 git -C "$_clone" rev-parse --short HEAD 2>/dev/null) || _sha=""
+      _branch="(detached ${_sha:-unknown})"
+    fi
+    if fm_run_timed 10 git -C "$_clone" status --porcelain 2>/dev/null | grep -q '[^[:space:]]'; then
+      _clean=false
+    else
+      _clean=true
+    fi
+    printf '%s\t%s\t%s\n' "$_proj" "$_branch" "$_clean" >> "$live_branches"
+  done
+  if [ -n "$DATA_DIR" ] && [ -f "$DATA_DIR/projects.md" ]; then
+    while IFS= read -r _reg; do
+      [ -n "$_reg" ] || continue
+      grep -q -F -x "$_reg" "$live_branches" 2>/dev/null && continue
+      if ! awk -F'\t' -v proj="$_reg" '$1 == proj {found=1; exit} END {exit !found}' "$live_branches"; then
+        printf '%s\t-\tnull\n' "$_reg" >> "$live_branches"
+      fi
+    done <<EOF
+$(sed -n 's/^-[[:space:]][[:space:]]*//p' "$DATA_DIR/projects.md" \
+  | sed 's/[[:space:]]\[.*//; s/[[:space:]]-[[:space:]].*//' \
+  | sed '/^[[:space:]]*$/d')
+EOF
+  fi
+  BRANCHES_ALL_JSON=$(jq -Rs '
+      split("\n") | map(select(. != "") | split("\t") | select(length == 3))
+      | map({project:.[0], branch:.[1], clean:(.[2] | if . == "true" then true elif . == "false" then false else null end)})
+      | sort_by(.project)' "$live_branches") || BRANCHES_ALL_JSON='[]'
+fi
+rm -f "$live_branches" "$live_cands"
+
 # --- projection: canonical snapshot -> fm-bearings.v1 model (JSON) ----------
 BEARINGS_TODAY=${NOW%%T*}
 case "$BEARINGS_TODAY" in
@@ -380,7 +583,13 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   --argjson pr_rows_capped "$PR_ROWS_CAPPED" \
   --argjson pr_rows_min_total "$PR_ROWS_MIN_TOTAL" \
   --argjson return_catchup "$RETURN_CATCHUP" \
-  --argjson candidate_prs "$CANDIDATE_PRS" "$FM_LANDED_JQ_DEFS"'
+  --argjson candidate_prs "$CANDIDATE_PRS" \
+  --argjson servers_all "$SERVERS_ALL_JSON" \
+  --argjson servers_n "$FM_BEARINGS_SERVERS" \
+  --arg servers_unavailable "$SERVERS_NOTE" \
+  --argjson branches_all "$BRANCHES_ALL_JSON" \
+  --argjson branches_n "$FM_BEARINGS_BRANCHES" \
+  --arg branches_unavailable "$BRANCHES_NOTE" "$FM_LANDED_JQ_DEFS"'
   def trunc($n): if . == null then null else
     (tostring | gsub("\\s+"; " ") | if (length > $n) then (.[:$n] + "…") else . end) end;
   def fit($n):
@@ -647,7 +856,9 @@ MODEL=$(printf '%s' "$SNAP" | jq \
               + ($gates_all | newest_filed_first
                  | if $all_queued == 1 then . else .[:$gates_n] end)),
       reports: (if $all_reports == 1 then $reports_all else $reports_all[:$reports_n] end),
-      recorded_prs: (if $all_recorded_prs == 1 then $recorded_prs_all else $recorded_prs_all[:$recorded_prs_n] end)
+      recorded_prs: (if $all_recorded_prs == 1 then $recorded_prs_all else $recorded_prs_all[:$recorded_prs_n] end),
+      servers: ($servers_all[:$servers_n]),
+      project_branches: ($branches_all[:$branches_n])
     }
   | . + (if ($unhealthy_all | length) > 0 then
            {unhealthy_endpoints:(if $all_unhealthy == 1 then $unhealthy_all else $unhealthy_all[:$unhealthy_n] end)}
@@ -693,6 +904,10 @@ MODEL=$(printf '%s' "$SNAP" | jq \
         (if $all_unhealthy == 0 and ($unhealthy_all | length) > $unhealthy_n then {surface:("unhealthy_endpoints showing \($unhealthy_n) of \($unhealthy_all | length)"), reveal:"--all-unhealthy"} else empty end),
         (if $include_prs == 1 and $pr_repos_total > $pr_repos_shown then {surface:("PR repositories showing \($pr_repos_shown) of \($pr_repos_total)"), reveal:"--all-pr-repos"} else empty end),
         (if $include_prs == 1 and $pr_rows_capped > 0 then {surface:("candidate_prs showing \($candidate_prs | length) of at least \($pr_rows_min_total); capped in \($pr_rows_capped) repo(s)"), reveal:"raise FM_BEARINGS_PR_LIMIT"} else empty end),
+        (if ($servers_all | length) > ($servers_all[:$servers_n] | length) then {surface:("servers showing \($servers_n) of \($servers_all | length)"), reveal:"raise FM_BEARINGS_SERVERS"} else empty end),
+        (if ($branches_all | length) > ($branches_all[:$branches_n] | length) then {surface:("project_branches showing \($branches_n) of \($branches_all | length)"), reveal:"raise FM_BEARINGS_BRANCHES"} else empty end),
+        (if $servers_unavailable != "" then {surface:$servers_unavailable, reveal:"install lsof for the listener table"} else empty end),
+        (if $branches_unavailable != "" then {surface:$branches_unavailable, reveal:"install git for clone branch state"} else empty end),
         (if $include_prs == 1 then empty else {surface:"live PR discovery + checks", reveal:"--include-prs"} end) ]) }
 ') || { echo "fm-bearings-snapshot: projection failed" >&2; exit 1; }
 
