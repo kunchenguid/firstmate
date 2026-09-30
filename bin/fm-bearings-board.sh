@@ -360,8 +360,8 @@ effective_payload() {  # <data.json> <dest.json>
 render_report_preview() {  # <report.md> <generated> <dest.html>
   local json
   json=$(jq -cn --rawfile md "$1" --arg path "$1" --arg generated "$2" \
-    '{schema: "fm-bearings-report-preview.v1", path: $path, generated: $generated, markdown: $md}' \
-    | sed 's/</\\u003c/g') || return 1
+    '{schema: "fm-bearings-report-preview.v1", path: $path, generated: $generated, markdown: $md}') || return 1
+  json=${json//</\\u003c}
   printf '%s\n' "$json" | perl -e '
     my ($tpl, $ph) = @ARGV;
     my $json = do { local $/; <STDIN> };
@@ -373,6 +373,22 @@ render_report_preview() {  # <report.md> <generated> <dest.html>
   ' "$PREVIEW_TEMPLATE" "$PREVIEW_PLACEHOLDER" > "$3"
 }
 
+# First 16 hex chars of the path's SHA-256: the preview page's stable name.
+report_preview_digest() {  # <path>
+  local sum
+  if command -v shasum >/dev/null 2>&1; then
+    sum=$(printf '%s' "$1" | shasum -a 256) || return 1
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sum=$(printf '%s' "$1" | sha256sum) || return 1
+  else
+    printf 'fm-bearings-board: shasum or sha256sum is required\n' >&2
+    return 1
+  fi
+  sum=${sum:0:16}
+  [[ $sum =~ ^[0-9a-f]{16}$ ]] || { printf 'fm-bearings-board: cannot hash report path: %s\n' "$1" >&2; return 1; }
+  printf '%s\n' "$sum"
+}
+
 # Snapshot every existing absolute markdown path the payload names into a
 # staged preview directory and record the path-to-page map in the payload.
 stage_report_previews() {  # <payload.json> <stage-dir>
@@ -382,7 +398,8 @@ stage_report_previews() {  # <payload.json> <stage-dir>
   generated=$(jq -r '.generated' "$payload") || return 1
   while IFS= read -r path; do
     [ -f "$path" ] && [ -r "$path" ] || continue
-    name=$(printf '%s' "$path" | shasum -a 256 | cut -c1-16).html
+    name=$(report_preview_digest "$path") || return 1
+    name=$name.html
     render_report_preview "$path" "$generated" "$stage/$name" || return 1
     map=$(jq -c --arg path "$path" --arg href "$PREVIEW_DIR_NAME/$name" '.[$path] = $href' <<< "$map") || return 1
   done < <(jq -r --arg re "$REPORT_PATH_RE" '[.. | strings | scan($re) | .[0]] | unique | .[]' "$payload")
