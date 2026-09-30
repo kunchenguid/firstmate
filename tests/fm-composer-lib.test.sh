@@ -1053,6 +1053,10 @@ test_gemini_halfblock_identity() {
   done
   candidate=${screen%$'\n'*}
   assert_screen "Gemini incomplete footer" unknown "$CAPS_STYLED" "$candidate" '' $'gemini\tdone'
+  candidate=${candidate%$'\n'*}
+  assert_screen "Gemini done without footer" unknown "$CAPS_STYLED" "$candidate" '' $'gemini\tdone'
+  assert_screen "Gemini idle without footer" unknown "$CAPS_STYLED" "$candidate" '' $'gemini\tidle'
+  assert_screen "Gemini missing footer before identity probe" unknown "$CAPS_STYLED" "$candidate"
   candidate=${screen/workspace (\/directory)   branch   sandbox   \/model/workspace (\/directory) arbitrary sandbox \/model}
   assert_screen "Gemini unproven footer header" unknown "$CAPS_STYLED" "$candidate" '' $'gemini\tdone'
   pass "Gemini halfblock composer binds geometry, styling and native idle identity"

@@ -1655,7 +1655,7 @@ _fm_composer_gemini_halfblock() {  # <screen> <plain> <styled> <has-identity> <i
 $plain
 EOF
   [ "$input" -ge 0 ] && [ "$bottom" -ge 0 ] && [ "$((row - bottom))" -le 3 ] || return 1
-  [ "$footer" != 1 ] || { printf unknown; return 0; }
+  [ "$footer" = 2 ] || { printf unknown; return 0; }
   [ -z "$cy" ] || [ "$cy" = "$input" ] || return 1
   [ "$has_identity" = 1 ] || { printf unknown; return 0; }
   [ -n "$identity" ] || { printf need-identity; return 0; }
