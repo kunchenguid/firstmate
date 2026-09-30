@@ -502,11 +502,12 @@ test_backend_validate_refuses_unknown() {
 }
 
 test_backend_source_shell_portable() {
-  local shell backend funcs out stub probe
+  local shell backend funcs out stub probe test_bash
+  test_bash=${FM_TEST_BASH:-${BASH:-bash}}
   # zsh neither word-splits unquoted expansions nor sets BASH_SOURCE; sourcing
   # fm-backend.sh from an interactive zsh session must still load every
   # adapter and the sibling libs it sources, without a single sourcing error.
-  for shell in zsh bash; do
+  for shell in zsh "$test_bash"; do
     if ! command -v "$shell" >/dev/null 2>&1; then
       pass "$shell: shell-portable backend sourcing skipped ($shell not found)"
       continue

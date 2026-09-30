@@ -503,6 +503,16 @@ jobs:
             exit 1
           }
 
+          portable_output=$(FM_TEST_ONLY=test_backend_source_shell_portable \
+            FM_TEST_BASH=/bin/bash \
+            /bin/bash tests/fm-backend.test.sh)
+          printf '%s\n' "$portable_output"
+          portable_count=$(printf '%s\n' "$portable_output" | grep -c '^ok - ')
+          [ "$portable_count" -eq 2 ] || {
+            echo "::error::expected 2 backend shell-portable sourcing bash 3.2 regressions, got $portable_count"
+            exit 1
+          }
+
   invariants:
     name: Repo invariants
     runs-on: ubuntu-latest
