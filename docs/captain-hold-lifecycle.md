@@ -25,7 +25,7 @@ This document records the deterministic mechanism, structured surfaces, compatib
 A decision is not a separate thing in this system.
 It is an ordinary backlog task held for the captain, and the task id is the identity every surface and channel uses.
 `bin/fm-captain-hold.sh` is the only lifecycle command layered on that primitive.
-The command addresses the active home's configured data directory.
+The command addresses the active home's configured data directory for every mutation and for every read except the completion gate's [registered-secondmate lookup](#checking-before-scout-teardown-verify).
 As a result, the existing backlog remains the only durable work database, and a secondmate-owned captain call stays in the secondmate home.
 It never reads report bodies, review artifacts, terminal output, or chat.
 
@@ -528,6 +528,8 @@ The suite does not test the accepted merge-to-cleanup re-hold window or asynchro
 - A report-only unresolved captain call refuses `--none` completion before teardown can erase the source.
 - Non-forced scout teardown always requires the durable inventory verification.
 - The recorded-answer guard holds: a bare `tasks-axi done` close fails `verify` until `answer` records the captain's word, and an ordinary finished task cannot be dressed up as an answered call.
+- A call held or answered in a registered local secondmate home passes `verify`, `complete`, and scout teardown without entering the main backlog.
+  An unregistered home, a remote route, an entry held nowhere, and a secondmate task closed without a recorded answer still fail `verify`.
 
 ### Answers, stamps, and deferral
 
