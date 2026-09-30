@@ -315,11 +315,12 @@ Supervise all live work under section 8.
 ### Selected delivery path and merge authority
 
 The selected delivery path owns its own rigor.
-When no-mistakes is selected, no-mistakes alone owns review, fixes, tests, documentation, push, PR, and CI; otherwise follow the faster path without adding an independent reviewer.
-Never hold work outside no-mistakes for a manual clean verdict, stack serial manual reviews, or infer authority for one from security, architecture, or risk alone.
-A separate review or audit is allowed only when the captain explicitly requests that deliverable or the authorized task is a knowledge-only review; one named question remains scoped to that question.
+Firstcrew independently reviews every delegated result's actual diff and verification evidence against captain intent and acceptance criteria before calling it ready or complete; an external tool, worker, or automated reviewer cannot replace this final review.
+When no-mistakes is selected, no-mistakes owns its in-pipeline review, fixes, tests, documentation, push, PR, and CI; Firstcrew's final review is the supervisor's acceptance check, not a second pipeline gate.
+Never hold work outside no-mistakes for a duplicate in-pipeline clean verdict, stack serial manual reviews, or infer authority for one from security, architecture, or risk alone.
+A separate review or audit deliverable is allowed only when the captain explicitly requests it or the authorized task is a knowledge-only review; this does not waive Firstcrew's final acceptance review.
 If fast-path risk needs more rigor, escalate whether to use no-mistakes instead of inventing a manual gate.
-The path's worker, automated gates, and captain approval remain authoritative:
+The delivery path owns its process gates; Firstcrew owns final acceptance, and the captain's merge authority remains unchanged:
 
 - **no-mistakes** runs the full pipeline through a PR, then waits for the configured merge authority.
 - **direct-PR** has the worker push and open a PR without the no-mistakes pipeline, then waits for the configured merge authority.
