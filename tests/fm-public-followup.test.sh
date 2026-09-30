@@ -1106,15 +1106,20 @@ test_secondmate_teardown_rejects_nul_bearing_durable_parent_record() {
 }
 
 test_relay_disabled_unmarked_teardown_skips_public_path() {
-  local home tasks_log out rc
+  local home tasks_log out rc real_tasks
   home=$(make_home teardown-disabled-unmarked relay-off)
   fm_git_init_commit "$home/projects/worktree"
   tasks_log="$home/tasks-axi.log"; : > "$tasks_log"
   printf 'manual\n' > "$home/config/backlog-backend"
+  real_tasks=$(command -v tasks-axi)
+  # Teardown also reads captain holds for Lavish, independently of Relay.
   cat > "$home/fakebin/tasks-axi" <<'SH'
 #!/usr/bin/env bash
-echo "$*" >> "$FAKE_TASKS_AXI_LOG"
-exit 99
+if [ "${1:-}" = public-followup ]; then
+  echo "$*" >> "$FAKE_TASKS_AXI_LOG"
+  exit 99
+fi
+exec "$REAL_TASKS_AXI" "$@"
 SH
   chmod +x "$home/fakebin/tasks-axi"
   fm_write_meta "$home/state/work-disabled.meta" \
@@ -1125,10 +1130,10 @@ SH
   rc=0
   out=$(PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    FM_CONFIG_OVERRIDE="$home/config" FAKE_TASKS_AXI_LOG="$tasks_log" \
+    FM_CONFIG_OVERRIDE="$home/config" FAKE_TASKS_AXI_LOG="$tasks_log" REAL_TASKS_AXI="$real_tasks" \
     "$TEARDOWN" work-disabled 2>&1) || rc=$?
   [ "$rc" -eq 0 ] || fail "relay-disabled unmarked teardown must not refuse public-followup cleanup (rc=$rc): $out"
-  [ ! -s "$tasks_log" ] || fail "relay-disabled unmarked teardown must not invoke tasks-axi: $(tr '\n' ';' < "$tasks_log")"
+  [ ! -s "$tasks_log" ] || fail "relay-disabled unmarked teardown must not invoke tasks-axi public-followup: $(tr '\n' ';' < "$tasks_log")"
   assert_not_contains "$out" "still owes a public reply" \
     "relay-disabled unmarked teardown must not run the public commitment guard"
   assert_absent "$home/state/public-followup" \
@@ -1137,7 +1142,7 @@ SH
 }
 
 test_relay_disabled_parent_allows_marked_child_teardown() {
-  local parent child tasks_log out rc
+  local parent child tasks_log out rc real_tasks
   parent=$(make_home teardown-disabled-parent relay-off)
   child=$(make_home teardown-disabled-child relay-off)
   fm_git_init_commit "$child/projects/worktree"
@@ -1147,10 +1152,15 @@ test_relay_disabled_parent_allows_marked_child_teardown() {
   fm_write_meta "$parent/state/disabled-mate.meta" "kind=secondmate" "home=$child"
   tasks_log="$child/tasks-axi.log"; : > "$tasks_log"
   printf 'manual\n' > "$child/config/backlog-backend"
+  real_tasks=$(command -v tasks-axi)
+  # The child's captain-hold reads remain independent of its parent's Relay.
   cat > "$child/fakebin/tasks-axi" <<'SH'
 #!/usr/bin/env bash
-echo "$*" >> "$FAKE_TASKS_AXI_LOG"
-exit 99
+if [ "${1:-}" = public-followup ]; then
+  echo "$*" >> "$FAKE_TASKS_AXI_LOG"
+  exit 99
+fi
+exec "$REAL_TASKS_AXI" "$@"
 SH
   chmod +x "$child/fakebin/tasks-axi"
   fm_write_meta "$child/state/work-disabled.meta" \
@@ -1162,15 +1172,15 @@ SH
   out=$(PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
     FM_STATE_OVERRIDE="$child/state" FM_DATA_OVERRIDE="$child/data" \
     FM_CONFIG_OVERRIDE="$child/config" \
-    FM_PUBLIC_FOLLOWUP_PRIMARY_HOME="$parent" FAKE_TASKS_AXI_LOG="$tasks_log" \
+    FM_PUBLIC_FOLLOWUP_PRIMARY_HOME="$parent" FAKE_TASKS_AXI_LOG="$tasks_log" REAL_TASKS_AXI="$real_tasks" \
     "$TEARDOWN" work-disabled 2>&1) || rc=$?
   [ "$rc" -eq 0 ] || fail "relay-disabled parent must allow marked-child teardown (rc=$rc): $out"
-  [ ! -s "$tasks_log" ] || fail "relay-disabled parent must not invoke tasks-axi for a marked child"
+  [ ! -s "$tasks_log" ] || fail "relay-disabled parent must not invoke tasks-axi public-followup for a marked child"
   assert_not_contains "$out" "still owes a public reply" \
     "relay-disabled parent must not run the public commitment guard"
   assert_absent "$child/state/public-followup" \
     "relay-disabled parent must not create a public-followup artifact"
-  pass "a marked child proceeds without tasks-axi when its parent relay is disabled"
+  pass "a marked child proceeds without public-followup work when its parent relay is disabled"
 }
 
 test_secondmate_parent_binding_matches_literal_id() {
