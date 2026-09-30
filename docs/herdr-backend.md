@@ -228,8 +228,9 @@ Typed-plane text is typed once; only Enter is retried.
 
 For a structurally verified foreground Codex, program input uses the native `pane.send_input` capability with no keys, through `bin/backends/herdr-codex-input.py`.
 Herdr checks that exact pane's live bracketed-paste mode when encoding the text, so paste framing separates notification text from the existing external Enter even when both arrive in one input read.
-The transport verifies the named-session socket, foreground process identity and method schema; it refuses an ambiguous write response without retrying or falling back to raw input.
-Unverified and non-Codex targets retain literal insertion, and shell launch commands retain their separate run primitive.
+The transport binds the socket to the requested named session, verifies foreground process identity, and capability-gates the method from the schema or, when schema discovery is unavailable, from an empty-pane error response that cannot write to a target.
+Targets conclusively outside the native Codex path retain literal insertion; ambiguous identity or capability evidence and unconfirmed write responses stop before Enter without retrying or falling back to raw input.
+Shell launch commands retain their separate run primitive.
 The composer pre-check and submission-key budget are unchanged.
 The coalesced-input regression is part of `tests/fm-send-inbox-doorbell-live-e2e.test.sh`; [runtime verification](verification/runtime-backends.md#steering-inbox-doorbell) records the current empirical boundary.
 

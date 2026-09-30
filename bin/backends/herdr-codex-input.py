@@ -6,7 +6,8 @@ Only pane.send_input with an empty keys array is writable. Herdr's native
 encoder checks this pane's live bracketed-paste mode before adding framing;
 Firstmate never infers mode enablement from a version, title, or registration.
 The caller retains its ordinary single external Enter and composer guard.
-The socket comes from the exact named-session status, not an ambient endpoint.
+The socket is bound to the requested named session, not an ambient endpoint;
+legacy null identity for the default session is cross-checked by session list.
 Exit 10 means not applicable (no verified Codex); other errors must not fall
 back to raw text after a request might have been written.
 """

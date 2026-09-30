@@ -170,7 +170,7 @@ ok - codex (codex-cli 0.159.1): coalesced input submitted once without re-ring o
 
 The doorbell pre-check skips only proven pending text; an ambiguous composer does not indefinitely suppress a recoverable constant notification.
 Portable ladder and enqueue regressions remain in `tests/fm-task-inbox.test.sh` and `tests/fm-send-inbox.test.sh`.
-`tests/fm-backend-herdr.test.sh` exercises the native insertion transport, independent real-process identity signals, literal newlines, unsupported schemas, foreign targets and ambiguous write responses without another text send or Enter.
+`tests/fm-backend-herdr.test.sh` exercises the native insertion transport, independent real-process identity signals, default-session socket reconciliation, schema-backed and schema-less capability gates, literal newlines, foreign targets and ambiguous write responses without another text send or Enter.
 The live guard proves the reproduced input-coalescing mechanism, not the initiating trigger of an earlier production recurrence.
 Pi and TraeX retain literal insertion; this correction adds no paste framing to their paths.
 The same guard also passed on Pi 0.87.1 in that Linux Herdr lab; its idle composer remained unclassified, so the existing advisory path proceeded and the real worker acted and acknowledged after the guard's one allowed mid-wait re-ring.
