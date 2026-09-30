@@ -232,6 +232,32 @@ test_an_owner_that_dies_during_startup_ends_the_command() {
   pass "fm_exec_timed ends the command when its owner dies during watchdog startup"
 }
 
+test_owner_detection_swaps_to_ppid_when_bashpid_absent() {
+  local out rc=0
+  out=$(bash -c '
+    set -u
+    unset BASHPID
+    owner=$$
+    self=${BASHPID:-$(exec /bin/sh -c '\''echo "$PPID"'\'')}
+    [ "$owner" = "$self" ] || { echo "top-level self mismatch bash: owner=$owner self=$self"; exit 1; }
+    [ "$owner" != "$self" ] || owner=$PPID
+    [ "$owner" = "$PPID" ] || { echo "swap failed bash top-level: owner=$owner PPID=$PPID self=$self"; exit 1; }
+    ( owner=$$; self=${BASHPID:-$(exec /bin/sh -c '\''echo "$PPID"'\'')}; [ "$owner" != "$self" ] || { echo "subshell not detected bash"; exit 1; }; echo ok )
+  ') || rc=$?
+  [ "$rc" -eq 0 ] || fail "owner swap failed with unset BASHPID (bash): $out rc=$rc"
+  out=$(/bin/bash -c '
+    set -u
+    owner=$$
+    self=${BASHPID:-$(exec /bin/sh -c '\''echo "$PPID"'\'')}
+    [ "$owner" = "$self" ] || { echo "top-level mismatch bash3.2: owner=$owner self=$self"; exit 1; }
+    [ "$owner" != "$self" ] || owner=$PPID
+    [ "$owner" = "$PPID" ] || { echo "swap failed bash3.2 top-level: owner=$owner PPID=$PPID self=$self"; exit 1; }
+    ( owner=$$; self=${BASHPID:-$(exec /bin/sh -c '\''echo "$PPID"'\'')}; [ "$owner" != "$self" ] || { echo "subshell fail bash3.2"; exit 1; }; echo ok )
+  ') || rc=$?
+  [ "$rc" -eq 0 ] || fail "owner swap failed on bash 3.2: $out rc=$rc"
+  pass "owner detection swaps to PPID when BASHPID is absent"
+}
+
 # perl is preferred whenever it exists, because only its watchdog can reap a
 # leftover descendant after replacing the caller.
 test_perl_is_preferred_over_timeout() {
@@ -339,6 +365,7 @@ test_a_descendant_holding_the_output_cannot_outlast_the_bound
 test_a_signal_to_the_bounding_process_reaches_the_command
 test_a_named_owner_that_is_gone_ends_the_command
 test_an_owner_that_dies_during_startup_ends_the_command
+test_owner_detection_swaps_to_ppid_when_bashpid_absent
 test_perl_is_preferred_over_timeout
 test_refuses_rather_than_running_unbounded
 test_rejects_malformed_bounds_before_running_anything
