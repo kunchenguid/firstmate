@@ -16,7 +16,7 @@ Run it as a scout when the question is what is wrong or stale in a tree, and as 
 ## What it reports
 
 - `dead-code`: shell functions defined once and never referenced in the scanned scope.
-- `stale-doc`: Markdown links whose local target no longer exists.
+- `stale-doc`: Markdown links whose local target is not a tracked file or tracked directory.
 - `duplicated-comment`: the same multi-line comment block repeated in two or more places.
 - `commented-out-code`: consecutive comment lines whose text reads as code.
 - `stale-comment`: `TODO`, `FIXME`, `HACK`, `XXX`, or `DEPRECATED` markers older than the staleness window.
@@ -29,7 +29,7 @@ The scan decides only the five mechanical categories above, and never publishes 
 1. Resolve the scope from the request: the repository root, and the subtree the audit covers.
    Say so in the report, because reachability and duplication are only meaningful within the scope actually scanned.
 2. Run `bin/fm-smell-scan.sh --root <repo>` for a Markdown review queue, or add `--json` for a machine-readable one.
-   The scanner reads git-tracked files only; ignored and untracked files are outside its evidence boundary.
+   The scanner reads git-tracked files only and checks local Markdown links against tracked files and directories; ignored and untracked files are outside its evidence boundary.
    Read its coverage and note lines before summarizing: they state which categories ran, whether ages came from git, and anything the scan could not parse.
    Useful flags: `--paths` to bound the subtree, `--stale-days` for the marker window, `--exclude` for deliberately mirrored trees such as per-harness copies, `--out` to write the report outside the scanned tree, `--check` to fail a gate on findings.
 3. Read the tree for the judgement categories the scan cannot decide, and record each one with the same fields.

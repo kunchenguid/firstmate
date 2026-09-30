@@ -9,7 +9,7 @@
 #
 # Categories:
 #   dead-code           shell functions defined but never referenced in scope
-#   stale-doc           Markdown links whose local target does not exist
+#   stale-doc           Markdown links whose local target is not tracked evidence
 #   duplicated-comment  identical multi-line comment blocks in two or more places
 #   commented-out-code  consecutive comment lines whose text reads as code
 #   stale-comment       TODO/FIXME/HACK/XXX/DEPRECATED markers older than --stale-days
@@ -29,9 +29,10 @@
 #   1  --check was passed and at least one finding was reported
 #   2  usage or configuration error
 #
-# The scanned tree is read through git's tracked file list, so ignored,
-# untracked, generated, and vendored paths are skipped. Generated and vendored
-# directories named in DEFAULT_EXCLUDES are skipped, and --exclude adds more.
+# The scanned tree and local Markdown link targets are checked through git's
+# tracked file list, so ignored, untracked, generated, and vendored paths are
+# skipped. Generated and vendored directories named in DEFAULT_EXCLUDES are
+# skipped, and --exclude adds more.
 set -eu
 
 exec python3 - "$@" <<'PY'
