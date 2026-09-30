@@ -28,11 +28,11 @@
 # result, a durable report, and acknowledgement before counting a wake handled.
 # The turn is bounded by fm_exec_timed
 # (bin/fm-timeout-lib.sh), and the engine's descendants are snapshotted once a
-# second while it runs (FM_SUPERVISION_ENGINE_SNAPSHOT_SECONDS; positive
-# seconds, a decimal fraction allowed), because an engine CLI runs every tool
-# command in a process group of its own that the bound's group signal cannot
-# reach: once the turn ends, any snapshotted descendant still alive under the
-# same identity is reaped (TERM, then KILL). The reap is best-effort for the
+# second by default while it runs (FM_SUPERVISION_ENGINE_SNAPSHOT_SECONDS
+# sets positive seconds, a decimal fraction allowed), because an engine CLI
+# runs every tool command in a process group of its own that the bound's group
+# signal cannot reach: once the turn ends, any snapshotted descendant still
+# alive under the same identity is reaped (TERM, then KILL). The reap is best-effort for the
 # descendants observed while the turn ran, not a bound: a process that a tool
 # detaches into a process group of its own and that loses its ancestry to the
 # engine between two snapshots is never recorded and survives the turn, the
