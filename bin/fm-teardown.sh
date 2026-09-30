@@ -141,6 +141,12 @@
 # Historical secondmate records are unsupported and refuse before any cleanup,
 # preserving their homes and records for manual inspection.
 # Usage: fm-teardown.sh <task-id> [--force] [--legacy-record]
+#   fm-teardown.sh <task-id> --copy-only --expect-spawn-gen <generation>
+# Copy-only is MAIN-owned post-retirement follow-through from the existing
+# cleanup receipt. Exact canonical path/device/inode, home/task/generation and
+# current sharing/pool ownership/content checks precede disposal. It never
+# recreates metadata or repeats endpoint/business effects. Missing historical
+# bindings and uncertain attempts require readback; no path override or force.
 #   --force skips ordinary-task dirty and landed-work checks and skips scout
 #   report checks. Only use it when the captain has explicitly said to discard
 #   the work.
@@ -278,6 +284,7 @@ ID=$1
 FORCE=
 LEGACY_RECORD_GIVEN=0
 ENDPOINT_ONLY=0
+COPY_ONLY=0
 ENDPOINT_EXPECTED_GEN=
 shift
 while [ "$#" -gt 0 ]; do
@@ -285,6 +292,7 @@ while [ "$#" -gt 0 ]; do
     --force) FORCE=--force ;;
     --legacy-record) LEGACY_RECORD_GIVEN=1 ;;
     --endpoint-only) ENDPOINT_ONLY=1 ;;
+    --copy-only) COPY_ONLY=1 ;;
     --expect-spawn-gen) [ "$#" -ge 2 ] || exit 2; ENDPOINT_EXPECTED_GEN=$2; shift ;;
     *)
       echo "error: invalid teardown request" >&2
@@ -294,6 +302,7 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 [ "$ENDPOINT_ONLY" != 1 ] || { [ -n "$ENDPOINT_EXPECTED_GEN" ] && [ -z "$FORCE" ] && [ "$LEGACY_RECORD_GIVEN" = 0 ]; } || exit 2
+[ "$COPY_ONLY" != 1 ] || { [ -n "$ENDPOINT_EXPECTED_GEN" ] && [ "$ENDPOINT_ONLY" = 0 ] && [ -z "$FORCE" ] && [ "$LEGACY_RECORD_GIVEN" = 0 ]; } || exit 2
 fm_backlog_directory_present "$STATE" "state directory" || {
   echo "error: teardown refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
   exit 1
@@ -357,7 +366,8 @@ backlog_refresh_reminder() {
 # shellcheck source=bin/fm-task-lifecycle-lib.sh
 . "$SCRIPT_DIR/fm-task-lifecycle-lib.sh"
 teardown_completed_task() (
-  local meta="$STATE/$ID.meta" lock copy project session pane other field candidate shared=0 disposition=returned-or-already-absent facts
+  local meta="$STATE/$ID.meta" lock copy project session pane other disposition=returned-or-already-absent facts
+  local COPY_DISPOSITION COPY_REASON binding
   local WT PROJ KIND MODE PR_URL dirty generation backlog_status=0 captain_status=0 captain_out marker
   local copy_lock='' copy_lock_held=0
   local BACKLOG_CLOSED=0 BACKLOG_TRANSITION=close BACKLOG_SKIP_REASON=''
@@ -406,63 +416,35 @@ teardown_completed_task() (
     printf 'completed task pane removed: %s; copy and report retained\n' "$ID"
     exit 0
   fi
+  local lifecycle ENDPOINT_GENERATION ENDPOINT_GOAL ENDPOINT_RECEIPT
+  lifecycle=$(fm_task_lifecycle read "$ID") || exit 1
+  ENDPOINT_GENERATION=$generation
+  ENDPOINT_GOAL=$(printf '%s' "$lifecycle" | jq -r '.goal_revision')
+  ENDPOINT_RECEIPT="$STATE/$ID.cleanup.json"
+  # shellcheck source=bin/fm-teardown-endpoint-lib.sh
+  . "$SCRIPT_DIR/fm-teardown-endpoint-lib.sh"
+  teardown_endpoint_receipt pane_close confirmed exact-pane-absent || exit 1
   if [ -d "$copy" ]; then
-    copy=$(cd "$copy" && pwd -P) || exit 1
-    # Serialize the non-sharing observation with the existing spawn/return
-    # lock. Contention retains only the copy; window/record retirement proceeds.
-    copy_lock=$(fm_treehouse_project_lock_path "$project") || copy_lock=
-    if [ -n "$copy_lock" ] && fm_lock_try_acquire "$copy_lock"; then copy_lock_held=1
-    else shared=1; disposition=retained-unverified
-    fi
-    # Primary copies and directories containing them are never disposable.
-    for candidate in "$project" "$FM_HOME" "$FM_ROOT"; do
-      [ -d "$candidate" ] || continue
-      candidate=$(cd "$candidate" && pwd -P) || exit 1
-      case "$candidate/" in "$copy/"*) shared=1; disposition=retained-primary ;; esac
-    done
-    # A subdirectory of a checkout is part of that checkout, not a disposable
-    # copy. An independent nested worktree (including a pool) has its own root.
-    candidate=$(git -C "$copy" rev-parse --show-toplevel 2>/dev/null) || candidate=
-    if [ -d "$candidate" ] && [ ! "$candidate" -ef "$copy" ]; then
-      shared=1; disposition=retained-primary
-    fi
-    for other in "$STATE"/*.meta; do
-      [ "$other" != "$meta" ] && [ -f "$other" ] && [ ! -L "$other" ] || continue
-      for field in worktree home; do
-        candidate=$(fm_meta_get "$other" "$field")
-        if [ -d "$candidate" ] && [ "$candidate" -ef "$copy" ]; then shared=1; disposition=retained-shared; fi
-      done
-    done
-    if fm_treehouse_pool_slot "$project" "$copy"; then
-      fm_treehouse_slot_owner_state "$copy" "$ID" "$generation"
-      if [ "$FM_TREEHOUSE_SLOT_OWNER" = other ] || \
-         { [ -n "$FM_TREEHOUSE_SLOT_OWNER_HOME" ] && [ "$FM_TREEHOUSE_SLOT_OWNER_HOME" != "$FM_HOME" ]; }; then
-        shared=1; disposition=retained-shared
-      elif [ "$FM_TREEHOUSE_SLOT_OWNER" != mine ] || [ -z "$generation" ] || \
-           [ "$FM_TREEHOUSE_SLOT_OWNER_HOME" != "$FM_HOME" ]; then
-        shared=1; disposition=retained-unverified
-      fi
-    fi
-    WT=$copy
-    PROJ=$project
-    if [ "$shared" = 0 ]; then
-      dirty=$(git -C "$copy" status --porcelain 2>/dev/null) || { shared=1; disposition=retained-unverified; }
-      if [ -n "$dirty" ]; then shared=1; disposition=retained-dirty
-      elif [ "$shared" = 0 ] && ! validate_worktree_teardown_safety completed; then shared=1; disposition=retained-unlanded
-      fi
-    fi
-    if [ "$shared" = 0 ]; then
-      if fm_treehouse_pool_slot "$project" "$copy"; then
-        if (cd "$project" && treehouse return --force "$copy"); then
-          fm_treehouse_slot_owner_release "$copy" "$ID" "$generation"
-        else disposition=retained-unverified
+    if binding=$(fm_task_lifecycle cleanup-copy-bind "$ID"); then
+      copy=$(printf '%s' "$binding" | jq -r '.copy.path')
+      project=$(printf '%s' "$binding" | jq -r '.project.path')
+      if teardown_completed_copy "$copy" "$project" "$generation"; then
+        disposition=$COPY_DISPOSITION
+        if [ "$disposition" = returned-or-already-absent ]; then
+          teardown_endpoint_receipt directory_return confirmed "$COPY_REASON" || exit 1
+        else
+          teardown_endpoint_receipt directory_return retained "$COPY_REASON" || exit 1
         fi
-      elif git -C "$project" worktree list --porcelain | sed -n 's/^worktree //p' | grep -Fxq "$copy"; then
-        git -C "$project" worktree remove --force "$copy" || disposition=retained-unverified
       else
-        rm -rf -- "$copy" || disposition=retained-unverified
+        echo 'REFUSED: copy disposal may have happened; exact readback required, endpoint remains confirmed absent' >&2
+        exit 1
       fi
+    else
+      disposition=retained-unverified
+      teardown_endpoint_receipt directory_return retained copy-identity-unreadable || exit 1
     fi
+  else
+    teardown_endpoint_receipt directory_return confirmed copy-already-absent || exit 1
   fi
   if fm_backlog_transition_applies "$CONFIG" "$DATA" "$KIND"; then
     if ! fm_backlog_meta_spawn_gen "$meta" "$STATE"; then
@@ -511,7 +493,8 @@ teardown_completed_task() (
     BACKLOG_SKIP_REASON=$FM_BACKLOG_TRANSITION_SKIP
     fm_backlog_atomic_transition remove "$meta" 'completed resource record' "$STATE" || exit 1
   fi
-  facts=$(jq -cn --arg disposition "$disposition" '{taskRecordRemoved:true,endpointConfirmedGone:true,copyDisposition:$disposition,bookkeepingComplete:true}')
+  teardown_endpoint_receipt record_close confirmed completed-record-retired || exit 1
+  facts=$(jq -cn --arg disposition "$disposition" --arg reason "${COPY_REASON:-copy-identity-unreadable}" '{taskRecordRemoved:true,endpointConfirmedGone:true,copyDisposition:$disposition,copyReason:$reason,bookkeepingComplete:true}')
   fm_task_lifecycle_owner_receipt "$ID" "$generation" cleanup "$facts" locked || \
     echo 'warning: cleanup completed; lifecycle evidence could not be recorded' >&2
   printf 'teardown %s complete (exact pane absent; copy=%s; report retained)\n' "$ID" "$disposition"
@@ -525,6 +508,49 @@ teardown_completed_task() (
     fm_short_owner_receipt "$facts"
   fi
 )
+teardown_retained_copy() (
+  local lock copy project generation lifecycle readback phase absent
+  local ENDPOINT_GENERATION ENDPOINT_GOAL ENDPOINT_RECEIPT COPY_DISPOSITION COPY_REASON
+  local copy_lock='' copy_lock_held=0 WT PROJ KIND=ship MODE=no-mistakes PR_URL=''
+  # shellcheck source=bin/fm-lease-lib.sh
+  . "$SCRIPT_DIR/fm-lease-lib.sh"
+  fm_refuse_if_gate_agent
+  [ "$(fm_lease_actor)" = main ] || { echo 'REFUSED: retained copy cleanup belongs to MAIN' >&2; exit 6; }
+  fm_lease_guard "$ID" 'retained copy cleanup' || exit $?
+  lock=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
+  trap 'fm_lock_release "$lock"; if [ "$copy_lock_held" = 1 ]; then fm_lock_release "$copy_lock"; fi; fm_lease_guard_release' EXIT
+  fm_lock_acquire_wait "$lock" || exit 1
+  [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ] || { echo 'REFUSED: retire execution metadata before copy-only follow-through' >&2; exit 1; }
+  fm_task_lifecycle_forbid_delegated_control "$ID" || exit 6
+  fm_task_lifecycle_receipt_preflight "$ID" cleanup || exit 6
+  lifecycle=$(fm_task_lifecycle read "$ID") || exit 1
+  generation=$(printf '%s' "$lifecycle" | jq -r '.execution_generation')
+  [ "$generation" = "$ENDPOINT_EXPECTED_GEN" ] || { echo 'REFUSED: retained copy generation conflict' >&2; exit 1; }
+  readback=$(fm_task_lifecycle cleanup-copy-read "$ID") || exit 1
+  phase=$(printf '%s' "$readback" | jq -r '.phase.state')
+  [ "$phase" != confirmed ] || { echo 'retained copy already disposed; no effects repeated'; exit 0; }
+  absent=$(printf '%s' "$readback" | jq -r '.absent')
+  ENDPOINT_GENERATION=$generation
+  ENDPOINT_GOAL=$(printf '%s' "$lifecycle" | jq -r '.goal_revision')
+  ENDPOINT_RECEIPT="$STATE/$ID.cleanup.json"
+  # shellcheck source=bin/fm-teardown-endpoint-lib.sh
+  . "$SCRIPT_DIR/fm-teardown-endpoint-lib.sh"
+  if [ "$absent" = true ]; then
+    teardown_endpoint_receipt directory_return confirmed copy-already-absent || exit 1
+    echo 'retained copy confirmed absent; no effects repeated'; exit 0
+  fi
+  [ "$phase" != pending ] || { echo 'REFUSED: copy disposal may have happened; exact effect readback required' >&2; exit 1; }
+  copy=$(printf '%s' "$readback" | jq -r '.binding.copy.path')
+  project=$(printf '%s' "$readback" | jq -r '.binding.project.path')
+  teardown_completed_copy "$copy" "$project" "$generation" || exit 1
+  if [ "$COPY_DISPOSITION" = returned-or-already-absent ]; then
+    teardown_endpoint_receipt directory_return confirmed "$COPY_REASON" || exit 1
+  else
+    teardown_endpoint_receipt directory_return retained "$COPY_REASON" || exit 1
+  fi
+  printf 'copy-only %s: %s (%s); business disposition and endpoint unchanged\n' "$ID" "$COPY_DISPOSITION" "$COPY_REASON"
+)
+if [ "$COPY_ONLY" = 1 ]; then teardown_retained_copy; exit $?; fi
 case "$(fm_task_lifecycle mode "$ID")" in
   accepted|archived) teardown_completed_task; exit $? ;;
 esac

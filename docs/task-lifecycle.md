@@ -25,18 +25,26 @@ The Pi adapter batches record reads off the UI thread with a bounded subprocess 
 
 Finalize the brief and create the ordinary backlog item, then initialize its lifecycle assessment before deferring an accepted request without an executor.
 Local, iDA and AIME dispatch initialize records for new executions as well.
-Use the task-state header's read and reconciliation interface to submit a private candidate with the expected revision.
+Use the task-state header's inspect/assess interface to bind evidence and submit the semantic judgment; the owner derives revisions and fingerprints.
 An unassigned task is valid.
 For a local launch, the launch owner binds its execution generation only after launch delivery and the backlog commit both succeed; metadata left by an attempted but unconfirmed launch remains unknown for reconciliation.
 When ordinary dispatch has no prepared lifecycle action, observation can still prove execution from the bound brief, matching generation, confirmed launch publication and actual harness activity.
 A synthetic launch busy marker cannot supply that proof, and observation never creates an action or accepts the goal.
 
 Save the semantic assessment and any prepared action before acknowledging its wake.
-An inactive-goal wake with a known lifecycle revision refuses acknowledgement until that revision advances.
+An open-goal wake with a known lifecycle revision refuses acknowledgement until that revision advances.
+For terminal work, the scan binds the current retained resource and release facts; acknowledging that exact observation does not require a new semantic assessment.
 A historical inactive-goal wake recorded with unknown lifecycle state refuses acknowledgement while the current lifecycle remains unreadable; after repair makes the exact current lifecycle readable, acknowledgement retires only that historical presentation and leaves the current goal, pending effect and newer current wake unchanged.
 A lease refusal therefore cannot consume the task's only recovery trigger.
 A confirmed action still leaves an unaccepted goal open.
 A future bounded wait defers the next review; expiry asks for reconciliation and does not itself restart a healthy worker or cancel a query.
+
+Ordinary conversation remains in the native transcript and requires no separate answer or route record.
+New actual work uses ordinary task intake; follow-ups, corrections, approvals and stops are reconciled against an explicitly selected existing task.
+The native intent-update path takes the original current-session message as authority, and preserves its exact words in that task's brief under the existing lock.
+It retains only the task-bound prepared append transaction, so interruption is recovered by retrying the same route; a successful append never proves an effect or task acceptance.
+Ambiguous task identity requires clarification before routing.
+A prepared, unattempted observation can be explicitly superseded with new authority and exact old-payload readback through the assessment owner; attempted or uncertain effects retain their existing readback requirement.
 
 The next action binds exact payload bytes, authority evidence, execution generation and a monotonic action identity.
 Use that identity with the existing automatic send, spawn, relaunch or iDA followup owner.
@@ -62,9 +70,16 @@ An attempted or uncertain cleanup action still requires exact readback before cl
 Concrete cleanup metadata keeps a terminal goal due for reconciliation until the cleanup owner records the complete generation-bound receipt; that supervision does not authorize business execution to resume.
 A complete cleanup receipt makes the terminal goal quiet without erasing its retained evidence.
 The due reader evaluates the required cleanup postconditions semantically: additive diagnostics and historical ShortTask request version labels do not change the verdict, while persisted receipt bytes remain immutable evidence.
+Business completion is independent of physical cleanup.
+The retained-resource completion path in [`fm-task-retire.sh`](../bin/fm-task-retire.sh) closes an accepted delivered ship or completed scout through the existing backlog-close marker and cleanup receipt; explicit archive retains uncertain effects separately.
+Open goals, unmerged required delivery and incomplete scout decision inventories refuse that closure.
+If tasks-axi has already pruned the exact Done row, the existing backlog-close owner can acknowledge bookkeeping from the configured Done archive only with matching terminal execution generation and preserved delivery reference.
+A missing, ambiguous, conflicting or unapplied archive reference keeps the close marker pending; recovery neither recreates the business task nor repeats endpoint/copy effects.
 Main can retain an accepted or archived disposition while recording a prepared, unattempted cleanup wait with an evidence-bound dependency.
 That wait defers cleanup reconciliation only until its recheck or deadline; changed or missing release evidence requests readback immediately.
 It cannot replace an unresolved effect or authorize business execution.
+A terminal lifecycle dependency is observed through its task, intent, disposition and relevant delivery facts; assessment notes, coordination timestamps, receipt presentation and unrelated task changes do not release the wait.
+Unchanged scans remain quiet; relevant release facts or the first reached time bound produce one readback observation.
 A temporary parked or externally waiting task stays open.
 
 Absent lifecycle records retain legacy behavior until explicitly reconciled.
@@ -102,6 +117,10 @@ The existing project allocation/return lock protects the sharing observation and
 Pool copies whose current task/home/generation claim cannot establish exclusive ownership are also retained; primary checkout subdirectories are preserved, while independent nested worktrees remain eligible.
 [`fm-teardown-worktree-lib.sh`](../bin/fm-teardown-worktree-lib.sh) owns the shared content-preservation checks; historical slot-claim or journal bookkeeping is not an additional completed-cleanup admission gate.
 The endpoint-only form retains metadata and the copy and records exact-pane absence through the existing phase receipt.
+Completed retirement captures exact retained-copy identity in that same receipt before metadata removal.
+Its copy-only follow-through in `fm-teardown.sh` verifies this binding and current preservation checks without recreating task records or repeating endpoint/business effects.
+Pending disposal requires exact readback; absent copy can be confirmed without replay, while a changed directory/Git identity or missing historical binding refuses.
+The retained phase records the verified current reason; an old generic unverified disposition does not establish its cause.
 Legacy records without an accepted or archived lifecycle retain the detailed ordinary teardown contract in `fm-teardown.sh`.
 Herdr's separate inspection and close operations cannot exclude concurrent external mutations atomically.
 The due reader recognizes current cleanup-owner facts and assessed historical ShortTask completion chains through the read-only contract in [`fm-task-lifecycle.py`](../bin/fm-task-lifecycle.py).

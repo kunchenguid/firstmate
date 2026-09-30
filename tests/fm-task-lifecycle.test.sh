@@ -431,3 +431,6 @@ fm_treehouse_slot_owner_state "$SLOT" same s-new
 [ "$FM_TREEHOUSE_SLOT_OWNER" = unsafe ]
 SHSLOT
 pass 'missing or old generation cannot release a reused same-task slot; duplicate claim remains unsafe'
+
+# Terminal release/ack semantics exercise the real scan and receipt owners.
+python3 "$ROOT/tests/retirement-observations.py" "$ROOT" "$TMP_ROOT/retirement-observations"

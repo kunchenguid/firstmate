@@ -41,6 +41,8 @@ command -v tasks-axi >/dev/null 2>&1 || {
   exit 0
 }
 
+python3 "$ROOT/tests/retirement-business.py" "$ROOT" "$TMP_ROOT/retirement-business" || exit $?
+
 # --- fixture ----------------------------------------------------------------
 
 # fm_tasks_axi_backend reads <addressing-root>/.tasks.toml and otherwise falls

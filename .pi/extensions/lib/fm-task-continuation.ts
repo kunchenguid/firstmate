@@ -8,7 +8,7 @@ import { Type } from "typebox";
 import { runCommandAsync } from "./fm-async-exec.ts";
 import { registerFirstmateTool } from "./fm-native-contract.ts";
 import { classifyFirstmateOperationalText, encodeFirstmateOperationalInputWith } from "./fm-operational-input.ts";
-import { verifyFeishuSessionMessage } from "../../../bin/fm-feishu-state.mjs";
+import { NATIVE_FEISHU_CUSTOM_TYPE, verifyFeishuSessionMessage } from "../../../bin/fm-feishu-state.mjs";
 
 type Observation = { task_id: string; state: string; reason: string; key: string; revision?: number; delegated?: boolean };
 type Reconciliation = { task_id: string; reason: string; key: string };
@@ -111,11 +111,19 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
   function originalInput(ctx: ExtensionContext, id?: string): InputReceipt {
     const entries = ctx.sessionManager.getBranch();
     for (const entry of [...entries].reverse()) {
-      if (id && entry.id !== id) continue;
+      if (id && entry.id !== id && !(entry.type === "custom" && entry.customType === INPUT_ENTRY && (entry.data as InputReceipt)?.id === id)) continue;
+      // Historical unassigned capture is selectable only by exact receipt id
+      // after ordinary intake has supplied the task. It gains no clock or goal.
+      if (id && entry.type === "custom" && entry.customType === INPUT_ENTRY) {
+        const value = entry.data as InputReceipt;
+        if (value.id === id && !value.task && !value.answer && value.text?.trim()) return { id, text: value.text };
+      }
       let content: unknown;
       if (entry.type === "message" && entry.message.role === "user") content = entry.message.content;
-      else if (entry.type === "custom_message" && verifyFeishuSessionMessage(home, entry)) content = entry.content;
-      else continue;
+      else if (entry.type === "custom_message" && entry.customType === NATIVE_FEISHU_CUSTOM_TYPE) {
+        if (!verifyFeishuSessionMessage(home, entry)) throw new Error("original Feishu message needs immutable delivery proof; retain the task update for exact readback");
+        content = entry.content;
+      } else continue;
       const text = typeof content === "string" ? content : Array.isArray(content)
         ? content.filter(part => part?.type === "text" && typeof part.text === "string").map(part => part.text).join("") : "";
       if (!text.trim() || classifyFirstmateOperationalText(text)) continue;
@@ -489,7 +497,16 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
               }
             } catch { /* Exact recovery stays pending until its owner can read it. */ }
           }
-          result = { pending_updates: [...inputs.values()].filter(value => value.task && value.pending), tasks: existsSync(data) ? readdirSync(data).filter((id) => atom(id) && existsSync(join(data, id, "lifecycle.json"))) : [], instructions: "Use inspect with evidence paths, then assess with its basis and semantic judgment. New work uses ordinary task intake. Use route with task, update_brief:true and the original session entry id for task changes; omitted input selects the latest original user message. Chat needs no bookkeeping. A report or provider terminal state is not acceptance." };
+          const historical = new Map<string, InputReceipt>();
+          for (const entry of _ctx.sessionManager.getBranch()) {
+            if (entry.type === "custom" && entry.customType === INPUT_ENTRY) {
+              const value = entry.data as InputReceipt;
+              if (value?.id && value.text) historical.set(value.id, value);
+            }
+          }
+          const unassigned = [...historical.values()].filter(value => !value.task && !value.answer);
+          result = { historical_intake_evidence: unassigned.slice(-BATCH).map(({ id, text }) => ({ id, text })),
+            historical_intake_total: unassigned.length, historical_intake_truncated: unassigned.length > BATCH, pending_updates: [...inputs.values()].filter(value => value.task && value.pending), tasks: existsSync(data) ? readdirSync(data).filter((id) => atom(id) && existsSync(join(data, id, "lifecycle.json"))) : [], instructions: "Use inspect with evidence paths, then assess with its basis and semantic judgment. New work uses ordinary task intake. Use route with task, update_brief:true and the original session entry id for task changes; omitted input selects the latest original user message. Chat needs no bookkeeping. Historical unassigned receipts are read-only intake evidence; classify real work through ordinary intake before an explicit task route. A report or provider terminal state is not acceptance." };
         } else if (params.action === "enroll") {
           await enroll(params.task || "");
           result = await command(["inspect", params.task || ""]);

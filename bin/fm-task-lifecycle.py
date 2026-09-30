@@ -12,13 +12,18 @@ every specified file. Include authority, action payload and blocker release path
 in that inspection. assess takes semantic fields only; stale bytes or revisions
 refuse. next_action optionally supplies kind, payload_ref, recheck_at, deadline,
 attempt_limit (default 1), and blocker {owner,dependency,release_ref}; null clears
-only a resolved action. The owner derives identity, hashes, timestamps and counters.
+only a resolved action. supersede_prepared explicitly clears/replaces an
+unattempted wait/readback/decision with new authority and exact old-payload
+evidence; attempted/uncertain effects still require readback.
+The owner derives identity, hashes, timestamps and counters.
 intent_changed is explicit MAIN reconciliation for unexplained brief/execution
 changes with new authority; revoke_delegation revokes a v2 grant separately first.
 The native fm_task_continuation route action with update_brief:true appends exact
 authenticated input words to the intent subsection and synchronizes this record.
 Its internal update-brief takes --session-file, --entry-id and --input, verifying
-the original capture and explicit route under the native home owner and task lock.
+the original current-branch user message (or verified Feishu delivery) and explicit
+task route under the native home owner and task lock. Historical task-assigned
+capture proofs remain recoverable; chat is not an independently supervised goal.
 The bounded intent_updates field retains before/after hashes and a prepared
 transaction until atomic brief replacement and record commit converge. Retry
 the same route after interruption; a different unexplained byte sequence refuses.
@@ -28,6 +33,11 @@ owner_receipts holds exact generation-bound observed facts, never permissions.
 completion-read validates retained-resource business closure: terminal judgment,
 assessed report and captain-call inventory for scouts, guarded merge facts for
 accepted ships. Explicit archive is stop authority, never invented delivery.
+cleanup-copy-bind captures the original metadata's canonical copy/project
+paths, directory and Git owner identities in the existing cleanup receipt before
+metadata removal. cleanup-copy-read verifies this immutable home/task/generation
+binding for the teardown owner's copy-only path; it never recreates metadata.
+Missing historical identity and attempted disposal require exact readback.
 link-cleanup owns cleanup_observation_key in this same record: phase state/reason
 and identity bindings, excluding presentation clocks and additive diagnostics.
 The due reader also recognizes assessed historical ShortTask results through
@@ -250,7 +260,7 @@ def complete_cleanup_facts(facts):
 def cleanup_observation(receipt):
     """Retained resource facts, excluding business close and presentation data."""
     result = {key: receipt.get(key) for key in
-              ('task_id', 'spawn_gen', 'goal_revision', 'journal_sha256', 'launch_binding')}
+              ('task_id', 'spawn_gen', 'goal_revision', 'journal_sha256', 'launch_binding', 'copy_binding')}
     phases = receipt.get('phases', {})
     require(isinstance(phases, dict), 'invalid cleanup phases')
     require(all(isinstance(phase, dict) for phase in phases.values()), 'invalid cleanup phase')
@@ -1597,6 +1607,16 @@ class Task:
         meta = self.state / (self.id + '.meta')
         if meta.exists() or meta.is_symlink():
             return False
+        receipt_path = self.state / (self.id + '.cleanup.json')
+        if receipt_path.exists() or receipt_path.is_symlink():
+            try:
+                receipt = load(receipt_path)
+                if receipt.get('copy_binding'):
+                    receipt = self.cleanup_read()
+                    if receipt['phases'].get('directory_return', {}).get('state') != 'confirmed':
+                        return False
+            except (Refusal, OSError, ValueError):
+                return False
         if any(proof['execution_generation'] == record['execution_generation'] and
                complete_cleanup_facts(proof['facts'])
                for proof in record.get('owner_receipts', {}).get('cleanup', [])):
@@ -1655,6 +1675,80 @@ class Task:
                 result.get('goal_revision') == record['goal_revision'], 'cleanup receipt identity conflict')
         require(isinstance(result.get('phases'), dict), 'invalid cleanup phases')
         return result
+
+    def cleanup_copy_bind(self):
+        """Capture exact copy identity in the existing cleanup receipt before retirement."""
+        record = self.read()
+        require(record and record['disposition'] in ('accepted', 'archived'), 'copy binding needs terminal task')
+        fields = unique_object([line.split('=', 1) for line in regular(self.state / (self.id + '.meta')).decode().splitlines() if '=' in line])
+        require(fields.get('spawn_gen') == record['execution_generation'], 'copy execution generation conflict')
+        def identity(raw):
+            path = Path(raw)
+            require(path.is_absolute() and path.is_dir(), 'copy/project needs an existing absolute directory')
+            canonical = path.resolve(strict=True)
+            st = canonical.stat()
+            result = {'path': str(canonical), 'device': st.st_dev, 'inode': st.st_ino}
+            git = subprocess.run(['git', '-C', str(canonical), 'rev-parse', '--path-format=absolute', '--git-common-dir'],
+                capture_output=True, text=True, check=False, timeout=10)
+            if git.returncode == 0:
+                common = Path(git.stdout.strip()).resolve(strict=True)
+                common_stat = common.stat()
+                result['git'] = dict(path=str(common), device=common_stat.st_dev, inode=common_stat.st_ino)
+            return result
+        binding = {'home': str(self.home.resolve()), 'task': self.id, 'spawn_gen': record['execution_generation'],
+                   'copy': identity(fields.get('worktree', '')), 'project': identity(fields.get('project', ''))}
+        receipt_path = self.state / (self.id + '.cleanup.json')
+        if receipt_path.exists() or receipt_path.is_symlink():
+            receipt = self.cleanup_read()
+        else:
+            receipt = dict(schema='fm-task-cleanup.v1', task_id=self.id, spawn_gen=record['execution_generation'],
+                           goal_revision=record['goal_revision'], phases={})
+        require(not receipt.get('copy_binding') or receipt['copy_binding'] == binding, 'copy binding changed')
+        if receipt.get('copy_binding') != binding:
+            receipt['copy_binding'] = binding
+            self.write_cleanup_receipt(receipt_path, receipt)
+        return binding
+
+    def write_cleanup_receipt(self, path, receipt):
+        raw = (json.dumps(receipt, ensure_ascii=False, sort_keys=True, indent=2) + '\n').encode()
+        require(len(raw) <= MAX_BYTES, 'cleanup receipt too large')
+        fd, temporary = tempfile.mkstemp(prefix='.cleanup.', dir=self.state)
+        try:
+            with os.fdopen(fd, 'wb') as stream:
+                stream.write(raw); stream.flush(); os.fsync(stream.fileno())
+            os.replace(temporary, path)
+        finally:
+            if os.path.exists(temporary): os.unlink(temporary)
+
+    def cleanup_copy_read(self):
+        receipt = self.cleanup_read()
+        binding = receipt.get('copy_binding')
+        require(isinstance(binding, dict) and binding.get('home') == str(self.home.resolve()) and
+                binding.get('task') == self.id and binding.get('spawn_gen') == receipt['spawn_gen'],
+                'missing exact retained copy binding; recover original owner evidence, never recreate metadata')
+        phase = receipt['phases'].get('directory_return', {})
+        require(isinstance(phase, dict), 'invalid retained copy phase')
+        if phase.get('state') == 'confirmed':
+            return dict(binding=binding, phase=phase, absent=False)
+        for kind in ('project', 'copy'):
+            identity = binding.get(kind, {})
+            path = Path(identity.get('path', ''))
+            require(path.is_absolute(), 'invalid copy binding path')
+            if kind == 'copy' and not path.exists() and not path.is_symlink():
+                return dict(binding=binding, phase=phase, absent=True)
+            require(path.is_dir() and not path.is_symlink() and str(path.resolve()) == identity['path'], 'copy/project path changed')
+            st = path.stat()
+            require(st.st_dev == identity.get('device') and st.st_ino == identity.get('inode'), 'copy/project identity changed')
+            git_identity = identity.get('git')
+            if git_identity:
+                git = subprocess.run(['git', '-C', str(path), 'rev-parse', '--path-format=absolute', '--git-common-dir'],
+                    capture_output=True, text=True, check=False, timeout=10)
+                require(git.returncode == 0, 'copy Git owner unreadable')
+                common = Path(git.stdout.strip()).resolve(strict=True)
+                common_stat = common.stat()
+                require(str(common) == git_identity['path'] and common_stat.st_dev == git_identity['device'] and
+                        common_stat.st_ino == git_identity['inode'], 'copy Git owner changed')
+        return dict(binding=binding, phase=phase, absent=False)
 
     def cleanup_binding(self, args):
         """Validate or persist an immutable binding before endpoint effects.
@@ -1742,7 +1836,7 @@ class Task:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('operation', choices=('read', 'inspect', 'assess', 'update-brief', 'refresh', 'owner-receipt', 'init', 'reconcile', 'action', 'observe', 'coordinate', 'branch-patch', 'effect', 'bind-inbox', 'handoff-binding', 'handoff-effect', 'readback', 'mode', 'modes', 'due', 'authorize', 'link-cleanup', 'cleanup-read', 'completion-read', 'cleanup-binding', 'bind-execution', 'refresh-brief'))
+    parser.add_argument('operation', choices=('read', 'inspect', 'assess', 'update-brief', 'refresh', 'owner-receipt', 'init', 'reconcile', 'action', 'observe', 'coordinate', 'branch-patch', 'effect', 'bind-inbox', 'handoff-binding', 'handoff-effect', 'readback', 'mode', 'modes', 'due', 'authorize', 'link-cleanup', 'cleanup-read', 'completion-read', 'cleanup-copy-bind', 'cleanup-copy-read', 'cleanup-binding', 'bind-execution', 'refresh-brief'))
     parser.add_argument('task')
     parser.add_argument('--expected-revision', type=int)
     parser.add_argument('--record')
@@ -1816,6 +1910,10 @@ def main():
             result = task.authorize(args)
         elif args.operation == 'link-cleanup':
             result = task.link_cleanup()
+        elif args.operation == 'cleanup-copy-bind':
+            result = task.cleanup_copy_bind()
+        elif args.operation == 'cleanup-copy-read':
+            result = task.cleanup_copy_read()
         elif args.operation == 'cleanup-binding':
             task.cleanup_binding(args)
             return

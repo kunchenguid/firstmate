@@ -4,7 +4,7 @@
 // Accepted Feishu events are offered to Pi's own steering queue after
 // exact binding, generation, transport, and live-session checks.
 import { execFile, spawn, spawnSync } from "node:child_process";
-import { createHash, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { lstatSync, realpathSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -23,6 +23,9 @@ import {
   findInboundByDeliveryRef,
   findInboundDeliveryEvidence,
   nativeIngressContentDigest as ingressContentDigest,
+  nativeFeishuMessageMarker,
+  NATIVE_FEISHU_CUSTOM_TYPE,
+  NATIVE_FEISHU_DETAILS_SCHEMA,
   liveSessionOwnsBinding,
   loadFeishuIngressContent,
   offerFeishuIngress,
@@ -52,8 +55,8 @@ export interface FeishuMarker {
   bindingGeneration: number;
 }
 
-export const FEISHU_INBOUND_CUSTOM_TYPE = "firstmate-feishu-inbound";
-export const FEISHU_INBOUND_DETAILS_SCHEMA = "fm-feishu-pi-message.v1";
+export const FEISHU_INBOUND_CUSTOM_TYPE = NATIVE_FEISHU_CUSTOM_TYPE;
+export const FEISHU_INBOUND_DETAILS_SCHEMA = NATIVE_FEISHU_DETAILS_SCHEMA;
 
 export interface FeishuInboundDetails {
   schema: typeof FEISHU_INBOUND_DETAILS_SCHEMA;
@@ -178,21 +181,9 @@ export function parseFeishuMarker(text: unknown): FeishuMarker | undefined {
   return { deliveryRef: match[1], bindingGeneration };
 }
 
-function feishuDetails(value: unknown): FeishuMarker | undefined {
-  if (!value || typeof value !== "object") return undefined;
-  const details = value as { schema?: unknown; deliveryRef?: unknown; bindingGeneration?: unknown };
-  if (details.schema !== FEISHU_INBOUND_DETAILS_SCHEMA || typeof details.deliveryRef !== "string" || !/^in_[a-f0-9]{24}$/.test(details.deliveryRef)) return undefined;
-  if (!Number.isSafeInteger(details.bindingGeneration) || Number(details.bindingGeneration) <= 0) return undefined;
-  return { deliveryRef: details.deliveryRef, bindingGeneration: Number(details.bindingGeneration) };
-}
-
 export function parseFeishuMessage(message: unknown): FeishuMarker | undefined {
-  if (!message || typeof message !== "object") return undefined;
-  const candidate = message as { role?: unknown; customType?: unknown; details?: unknown };
-  if (candidate.role !== "custom" || candidate.customType !== FEISHU_INBOUND_CUSTOM_TYPE) return undefined;
-  return feishuDetails(candidate.details);
+  return nativeFeishuMessageMarker(message);
 }
-
 
 const verifiedClassifications = new Map<string, { marker: FeishuMarker; contentDigest: string }>();
 const processedDeliveryRefs = new Set<string>();
@@ -380,7 +371,7 @@ function sessionMarkers(ctx: ExtensionContext, identity: SessionIdentity): Array
   const markers: Array<FeishuMarker & { sessionId: string }> = [];
   for (const entry of ctx.sessionManager.getEntries()) {
     const marker = entry.type === "custom_message"
-      ? (entry.customType === FEISHU_INBOUND_CUSTOM_TYPE ? feishuDetails(entry.details) : undefined)
+      ? parseFeishuMessage({ ...entry, role: "custom" })
       : entry.type === "message" && entry.message.role === "user"
         ? parseFeishuMarker(messageText(entry.message))
         : undefined;

@@ -2339,18 +2339,29 @@ export function nativeIngressContentDigest(content) {
 }
 
 
-// Historical session routing uses the same immutable delivery/content proof as
-// dispatch. This verifies authority only; it never offers or replays delivery.
-export function verifyFeishuSessionMessage(home, message) {
-  if (message?.type !== "custom_message" || message.customType !== "firstmate-feishu-inbound" ||
-      message.details?.schema !== "fm-feishu-pi-message.v1") return false;
+export const NATIVE_FEISHU_CUSTOM_TYPE = "firstmate-feishu-inbound";
+export const NATIVE_FEISHU_DETAILS_SCHEMA = "fm-feishu-pi-message.v1";
+
+export function nativeFeishuMessageMarker(message) {
+  if (message?.role !== "custom" || message.customType !== NATIVE_FEISHU_CUSTOM_TYPE ||
+      message.details?.schema !== NATIVE_FEISHU_DETAILS_SCHEMA) return undefined;
   const { deliveryRef, bindingGeneration } = message.details;
-  if (!/^in_[a-f0-9]{24}$/.test(deliveryRef ?? "") || !Number.isSafeInteger(bindingGeneration) || bindingGeneration < 1) return false;
+  if (typeof deliveryRef !== "string" || !/^in_[a-f0-9]{24}$/.test(deliveryRef) ||
+      !Number.isSafeInteger(bindingGeneration) || bindingGeneration < 1) return undefined;
+  return { deliveryRef, bindingGeneration };
+}
+
+// Session routing uses the dispatch owner's immutable delivery/content proof.
+// This verifies authority only; it never offers or replays a delivery.
+export function verifyFeishuSessionMessage(home, message) {
+  if (message?.type !== "custom_message") return false;
+  const marker = nativeFeishuMessageMarker({ ...message, role: "custom" });
+  if (!marker) return false;
   const contentDigest = nativeIngressContentDigest(message.content);
   if (!contentDigest) return false;
-  const evidence = findInboundDeliveryEvidence(home, deliveryRef);
-  return Boolean(evidence?.bodyAvailable && evidence.event.delivery_ref === deliveryRef &&
-    evidence.event.binding_generation === bindingGeneration && evidence.contentDigest === contentDigest);
+  const evidence = findInboundDeliveryEvidence(home, marker.deliveryRef);
+  return Boolean(evidence?.bodyAvailable && evidence.event.delivery_ref === marker.deliveryRef &&
+    evidence.event.binding_generation === marker.bindingGeneration && evidence.contentDigest === contentDigest);
 }
 
 export function recordInboundContentDigest(home, deliveryRef, contentDigest) {

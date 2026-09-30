@@ -146,6 +146,78 @@ const brief = readFileSync(home + '/data/task/brief.md', 'utf8');
 assert.equal(brief.split('Add condition A.').length, 2);
 assert.equal(brief.split('Add condition B.').length, 2);
 assert.equal(owner.inputBarrier(), false);
+// Task intake and explicit updates use one ordinary task identity.
+mkdirSync(home + '/data/separate-work', { recursive: true });
+writeFileSync(home + '/data/separate-work/brief.md', "# Task\n## Captain's intent\nExplain the cause and implement the bounded change\n\n## Firstmate spec\nVerify the same task\n");
+writeFileSync(home + '/.tasks.toml', 'backend="markdown"\n[markdown]\npath="data/backlog.md"\n');
+const intake = spawnSync('tasks-axi', ['add', 'separate-work', 'Separate actual work', '--kind', 'scout', '--file', home + '/data/backlog.md'], {
+  cwd: home, encoding: 'utf8', env: { ...process.env, TASKS_AXI_FILE: home + '/data/backlog.md', TASKS_AXI_BACKEND: 'markdown' }
+});
+assert.equal(intake.status, 0, intake.stderr);
+await tool({ action: 'enroll', task: 'separate-work' });
+for (const text of ['Approve the bounded task scope.', 'Stop this task and preserve the report.']) {
+  session.appendMessage({ role: 'user', content: [{ type: 'text', text }], timestamp: Date.now() });
+  await tool({ action: 'route', task: 'separate-work', input: session.getLeafId(), update_brief: true });
+}
+const stopped = 'data/separate-work/stop.txt';
+writeFileSync(home + '/' + stopped, 'Stop this task and preserve the report.');
+const stopBasis = await tool({ action: 'inspect', task: 'separate-work', evidence: [stopped, 'data/separate-work/brief.md'] });
+await tool({ action: 'assess', task: 'separate-work', basis: stopBasis.basis, judgment: {
+  disposition: 'archived', outcome: 'Explicitly stopped', remaining_gap: 'Earlier requested implementation remains unfinished',
+  authority_ref: stopped, evidence: [stopped, 'data/separate-work/brief.md']
+} });
+await fire('session_shutdown', { reason: 'reload' });
+session = SessionManager.open(session.getSessionFile());
+owner = await install();
+const stoppedAgain = await tool({ action: 'inspect', task: 'separate-work' });
+assert.equal(stoppedAgain.disposition, 'archived');
+assert.match(stoppedAgain.assessment.remaining_gap, /unfinished/);
+assert.equal(readFileSync(home + '/data/backlog.md', 'utf8').split('Separate actual work').length, 2);
+// Four legacy assigned receipts may outlive their already confirmed appends.
+// Recover their exact proofs without rewriting a private store or accepting work.
+mkdirSync(home + '/data/legacy', { recursive: true });
+writeFileSync(home + '/data/legacy/brief.md', "# Task\n## Captain's intent\nExisting legacy work\n\n## Firstmate spec\nKeep unfinished work\n");
+await tool({ action: 'enroll', task: 'legacy' });
+for (let index = 0; index < 4; index++) {
+  const id = 'legacy-input-' + index, text = 'Exact original requirement ' + index;
+  session.appendCustomEntry('fm-continuation-input', { id, text });
+  const entryId = session.appendCustomEntry('fm-continuation-input', { id, text, task: 'legacy', pending: true, update_brief: true });
+  command('fm-task-state.sh', ['update-brief', 'legacy', '--session-file', session.getSessionFile(), '--entry-id', entryId, '--input', id]);
+}
+await fire('session_shutdown', { reason: 'reload' });
+session = SessionManager.open(session.getSessionFile());
+owner = await install();
+assert.deepEqual((await tool({ action: 'list' })).pending_updates, []);
+const recoveredEntries = session.getBranch().length;
+await tool({ action: 'list' });
+await tool({ action: 'route', task: 'legacy', input: 'legacy-input-3', update_brief: true });
+assert.equal(session.getBranch().length, recoveredEntries);
+assert.equal((await tool({ action: 'inspect', task: 'legacy' })).disposition, 'open');
+// A historical unassigned real ask remains selectable after ordinary task intake.
+session.appendCustomEntry('fm-continuation-input', { id: 'old-unassigned', text: 'Also preserve the report summary.' });
+await fire('session_tree');
+assert.equal((await tool({ action: 'list' })).historical_intake_evidence.at(-1).id, 'old-unassigned');
+await tool({ action: 'route', task: 'legacy', input: 'old-unassigned', update_brief: true });
+assert.equal((await tool({ action: 'list' })).historical_intake_evidence.length, 0);
+// Invalid Feishu authority must not silently select an earlier local request.
+session.appendCustomMessageEntry('firstmate-feishu-inbound', 'Unverifiable latest message.', true,
+  { schema: 'fm-feishu-pi-message.v1', deliveryRef: 'in_' + 'a'.repeat(24), bindingGeneration: 1 });
+const beforeUntrusted = session.getBranch().length;
+assert.match(await tool({ action: 'route', task: 'legacy', update_brief: true }, false), /immutable delivery proof/);
+assert.equal(session.getBranch().length, beforeUntrusted);
+// Original-message words, not just a selected receipt id, authenticate an update.
+mkdirSync(home + '/data/auth-guard', { recursive: true });
+writeFileSync(home + '/data/auth-guard/brief.md', "# Task\n## Captain's intent\nPreserve authority\n\n## Firstmate spec\nReject altered original words\n");
+await tool({ action: 'enroll', task: 'auth-guard' });
+session.appendMessage({ role: 'user', content: [{ type: 'text', text: 'Actual original words.' }], timestamp: Date.now() });
+const original = session.getLeafId();
+const bad = session.appendCustomEntry('fm-continuation-input', { id: original, source_entry_id: original,
+  text: 'Different substituted words.', task: 'auth-guard', pending: true, update_brief: true });
+const rejected = spawnSync(process.env.REAL_ROOT + '/bin/fm-task-state.sh', ['update-brief', 'auth-guard',
+  '--session-file', session.getSessionFile(), '--entry-id', bad, '--input', original], { encoding: 'utf8', env: process.env });
+assert.notEqual(rejected.status, 0);
+assert.match(rejected.stderr, /differ from original/);
+assert.equal(readFileSync(home + '/data/auth-guard/brief.md', 'utf8').includes('substituted'), false);
 const evidence = 'data/task/brief.md';
 const inspected = await tool({ action: 'inspect', task: 'task', evidence: [evidence] });
 assert.ok(inspected.assessment.remaining_gap.includes(a));

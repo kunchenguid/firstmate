@@ -1553,7 +1553,7 @@ export default function (pi: ExtensionAPI) {
           // accidental in-shell reassignment fails loudly instead of silently
           // impersonating main. Confused-agent-grade by design; the threat
           // model lives in bin/fm-lease-lib.sh.
-          command: `readonly FM_SUPERVISION_ACTOR FM_LEASE_HOLDER_PID FM_BRANCH_INPUT_BARRIER FM_BRANCH_MAIN_SESSION_FILE FM_BRANCH_GENERATION FM_BRANCH_TASK_SCOPE FM_BRANCH_TASK_BINDINGS
+          command: `readonly FM_SUPERVISION_ACTOR FM_LEASE_HOLDER_PID FM_BRANCH_MAIN_SESSION_FILE FM_BRANCH_GENERATION FM_BRANCH_TASK_SCOPE FM_BRANCH_TASK_BINDINGS
 (
 ${context.command}
 )`,
@@ -1565,7 +1565,6 @@ ${context.command}
             FM_BRANCH_TASK_BINDINGS: JSON.stringify(branchTaskBindings),
             FM_BRANCH_TASK_SCOPE: JSON.stringify(wakeTaskScope ? [...wakeTaskScope.tasks] : ["*"]),
             FM_BRANCH_MAIN_SESSION_FILE: continuation.sessionFile() || "",
-            FM_BRANCH_INPUT_BARRIER: continuation.inputBarrier() ? "1" : "0",
             FM_LEASE_HOLDER_PID: leaseHolderPid,
           },
         };
@@ -2088,7 +2087,6 @@ ${context.command}
     const prompt = event.prompt.trim();
     if (!prompt || isOperationalUserText(prompt)) return;
     const file = currentMainSession.getSessionFile() ?? "";
-    continuation.capture(prompt);
     const index = currentMainSession.getEntries().length;
     pendingMirror.push({ tag: "captain", text: prompt });
     mirrorCollection.stagedCaptain = { file, index, text: prompt };
@@ -2110,7 +2108,6 @@ ${context.command}
     // Context-only custom delivery may already be persisted before its event.
     if (last?.feishuKey === item.feishuKey && last.text === item.text) return;
     if (mirrorCollection.stagedFeishu.has(item.feishuKey)) return;
-    continuation.capture(item.text, item.feishuKey);
     pendingMirror.push({ tag: "captain", text: item.text });
     mirrorCollection.stagedFeishu.set(item.feishuKey, { file: currentMainSession.getSessionFile() ?? "", text: item.text });
   });

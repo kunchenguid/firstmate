@@ -360,3 +360,9 @@ export function readTransportHealth(home: string): Record<string, unknown> | und
 export function transportHealthAllowsDispatch(home: string, binding: BindingRecord): boolean;
 export function statusSummary(home: string): Record<string, unknown>;
 export function publicStatusSummary(home: string): Record<string, unknown>;
+
+export const NATIVE_FEISHU_CUSTOM_TYPE: string;
+export const NATIVE_FEISHU_DETAILS_SCHEMA: string;
+export function nativeIngressContentDigest(content: unknown): string | undefined;
+export function nativeFeishuMessageMarker(message: unknown): { deliveryRef: string; bindingGeneration: number } | undefined;
+export function verifyFeishuSessionMessage(home: string, message: unknown): boolean;

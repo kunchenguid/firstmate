@@ -271,3 +271,79 @@ validate_worktree_teardown_safety() {
     fi
   fi
 }
+
+# One completed-copy owner for initial retirement and the exact later copy-only
+# retry. The caller holds the task lock, has bound copy identity in the existing
+# cleanup receipt, and records phase postconditions through the endpoint receipt
+# owner. No endpoint, process, backlog, metadata or business effects occur here.
+teardown_completed_copy() { # <canonical-copy> <project> <generation>
+  local copy=$1 project=$2 generation=$3 candidate other field dirty copy_readback
+  copy_readback=$(fm_task_lifecycle cleanup-copy-read "$ID") || return 1
+  if [ "$(printf '%s' "$copy_readback" | jq -r '.phase.state')" = pending ]; then
+    echo 'REFUSED: copy disposal may have happened; exact effect readback required' >&2; return 1
+  fi
+  COPY_DISPOSITION=returned-or-already-absent
+  COPY_REASON="copy-already-absent"
+  [ -d "$copy" ] || return 0
+  COPY_DISPOSITION=retained-unverified
+  COPY_REASON="project-lock-unavailable"
+  copy_lock=$(fm_treehouse_project_lock_path "$project") || return 0
+  if fm_lock_try_acquire "$copy_lock"; then copy_lock_held=1
+  else COPY_REASON="project-lock-busy"; return 0
+  fi
+  for candidate in "$project" "$FM_HOME" "$FM_ROOT"; do
+    [ -d "$candidate" ] || continue
+    candidate=$(cd "$candidate" && pwd -P) || return 0
+    case "$candidate/" in "$copy/"*) COPY_DISPOSITION=retained-primary; COPY_REASON="primary-checkout"; return 0 ;; esac
+  done
+  candidate=$(git -C "$copy" rev-parse --show-toplevel 2>/dev/null) || candidate=
+  if [ -d "$candidate" ] && [ ! "$candidate" -ef "$copy" ]; then
+    COPY_DISPOSITION=retained-primary; COPY_REASON="primary-checkout-subdirectory"; return 0
+  fi
+  for other in "$STATE"/*.meta; do
+    [ "$other" != "$STATE/$ID.meta" ] && [ -f "$other" ] && [ ! -L "$other" ] || continue
+    for field in worktree home; do
+      candidate=$(fm_meta_get "$other" "$field")
+      if [ -d "$candidate" ] && [ "$candidate" -ef "$copy" ]; then
+        COPY_DISPOSITION=retained-shared; COPY_REASON="another-task-record"; return 0
+      fi
+    done
+  done
+  if fm_treehouse_pool_slot "$project" "$copy"; then
+    fm_treehouse_slot_owner_state "$copy" "$ID" "$generation"
+    if [ "$FM_TREEHOUSE_SLOT_OWNER" = other ] || \
+       { [ -n "$FM_TREEHOUSE_SLOT_OWNER_HOME" ] && [ "$FM_TREEHOUSE_SLOT_OWNER_HOME" != "$FM_HOME" ]; }; then
+      COPY_DISPOSITION=retained-shared; COPY_REASON="pool-slot-claimed-elsewhere"; return 0
+    elif [ "$FM_TREEHOUSE_SLOT_OWNER" != mine ] || [ -z "$generation" ] || \
+         [ "$FM_TREEHOUSE_SLOT_OWNER_HOME" != "$FM_HOME" ]; then
+      COPY_REASON="pool-slot-owner-unproved"; return 0
+    fi
+  fi
+  WT=$copy
+  PROJ=$project
+  COPY_REASON="original-git-owner-unproved"
+  printf '%s' "$copy_readback" | jq -e '.binding.copy.git!=null and .binding.project.git!=null' >/dev/null || return 0
+  COPY_REASON="git-status-unreadable"
+  dirty=$(git -C "$copy" status --porcelain 2>/dev/null) || return 0
+  if [ -n "$dirty" ]; then COPY_DISPOSITION=retained-dirty; COPY_REASON="uncommitted-content"; return 0; fi
+  if ! validate_worktree_teardown_safety completed; then
+    COPY_DISPOSITION=retained-unlanded; COPY_REASON="content-not-proved-in-default"; return 0
+  fi
+  # Revalidate inode/path identity immediately before the first disposal effect.
+  fm_task_lifecycle cleanup-copy-read "$ID" >/dev/null || { COPY_REASON="copy-identity-changed"; return 0; }
+  teardown_endpoint_receipt directory_return pending copy-disposal-attempt || return 1
+  COPY_REASON="copy-disposal-uncertain"
+  if fm_treehouse_pool_slot "$project" "$copy"; then
+    if (cd "$project" && treehouse return --force "$copy"); then
+      fm_treehouse_slot_owner_release "$copy" "$ID" "$generation"
+    else return 1
+    fi
+  elif git -C "$project" worktree list --porcelain | sed -n 's/^worktree //p' | grep -Fxq "$copy"; then
+    git -C "$project" worktree remove --force "$copy" || return 1
+  else
+    rm -rf -- "$copy" || return 1
+    [ ! -e "$copy" ] && [ ! -L "$copy" ] || return 1
+  fi
+  COPY_DISPOSITION=returned-or-already-absent
+  COPY_REASON="copy-disposal-confirmed"
+}

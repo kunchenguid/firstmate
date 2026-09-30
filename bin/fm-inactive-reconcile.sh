@@ -22,11 +22,13 @@
 # an unbounded wait (for example a live-held wake-queue lock), so the clean
 # deadline path is not racing its own backstop.
 #
-# Structured task goals additionally use their disposition, assessment revision,
-# bounded next-action due time and fresh artifact fingerprint. They remain
-# supervised without an executor; terminal goals publish only cleanup/evidence
-# obligations, never permission to resume execution. Their pending receipts add
-# lifecycle_revision and cannot be acknowledged before durable reconciliation.
+# Structured open goals use assessment revisions and fresh artifact fingerprints.
+# Terminal goals use stable resource/release facts and the first reached time
+# bound, never unrelated assessment or presentation bookkeeping. They publish
+# cleanup/evidence observations, never permission to resume business execution.
+# Pending lifecycle_revision binds open-goal acknowledgement to reconciliation;
+# terminal reconciliation_key permits exact validated readback without rewriting
+# an unchanged assessment. Presentation never confirms an unfinished effect.
 # Legacy records consider only a direct ordinary crewmate whose newest meta, status, or
 # turn-ended mtime is older than that interval and whose last status is not
 # captain-held. It then uses
@@ -138,6 +140,7 @@ record_value() {
 record_phase_set() {
   local record=$1 phase=$2 tmp line
   [ -f "$record" ] && [ ! -L "$record" ] || return 1
+  [ "$(record_value "$record" phase)" != "$phase" ] || return 0
   tmp=$(mktemp "$OUTCOME_DIR/.record.XXXXXX") || return 1
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in phase=*) continue ;; esac
@@ -151,6 +154,7 @@ record_phase_set() {
 record_field_set() {
   local record=$1 key=$2 value=$3 tmp line
   [ -f "$record" ] && [ ! -L "$record" ] || return 1
+  [ "$(record_value "$record" "$key")" != "$value" ] || return 0
   tmp=$(mktemp "$OUTCOME_DIR/.record.XXXXXX") || return 1
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in "${key}="*) continue ;; esac
@@ -303,7 +307,7 @@ reconcile_direct_child_locked() { # <id> <meta> <timeout>
   [ "$kind" = secondmate ] && return 0
   # Lifecycle obligations share this scan's cursor, deadline, durable queue
   # and post-handling acknowledgement. They never execute actions here.
-  local lifecycle_mode lifecycle_due lifecycle_revision lifecycle_expired
+  local lifecycle_mode lifecycle_due lifecycle_revision lifecycle_expired reconciliation_key
   lifecycle_mode=$(fm_task_lifecycle mode "$id" 2>/dev/null) || lifecycle_mode=unknown
   if [ "$lifecycle_mode" != legacy ]; then
     lifecycle_due=$(fm_task_lifecycle due "$id" 2>/dev/null) || lifecycle_due='{"due":true,"record":null}'
@@ -311,11 +315,19 @@ reconcile_direct_child_locked() { # <id> <meta> <timeout>
     lifecycle_revision=$(printf '%s' "$lifecycle_due" | jq -r '.record.revision // "unknown"')
     lifecycle_expired=$(printf '%s' "$lifecycle_due" | jq -r '.expired // false')
     if [ -f "$meta" ]; then incarnation=$(meta_incarnation "$meta"); else incarnation=unassigned; fi
-    fingerprint=$(sha256_text "$incarnation|$id|lifecycle|$lifecycle_revision|$lifecycle_expired|$(printf '%s' "$lifecycle_due" | jq -r '.observed_evidence_key // "unknown"')")
+    reconciliation_key=$(printf '%s' "$lifecycle_due" | jq -r '.reconciliation_key // empty')
+    if [ -n "$reconciliation_key" ]; then
+      fingerprint=$(sha256_text "$incarnation|$id|cleanup|$reconciliation_key")
+    else
+      fingerprint=$(sha256_text "$incarnation|$id|lifecycle|$lifecycle_revision|$lifecycle_expired|$(printf '%s' "$lifecycle_due" | jq -r '.observed_evidence_key // "unknown"')")
+    fi
     outcome_key="inactive-outcome-lifecycle-$id"
     ensure_record "$fingerprint" "$id" "$incarnation" lifecycle "$outcome_key" direct upstream '' '' || return 1
     [ -n "$RECORD_PENDING" ] || return 0
-    record_field_set "$RECORD_PENDING" lifecycle_revision "$lifecycle_revision" || return 1
+    if [ -z "$(record_value "$RECORD_PENDING" lifecycle_revision)" ]; then
+      record_field_set "$RECORD_PENDING" lifecycle_revision "$lifecycle_revision" || return 1
+    fi
+    [ -z "$reconciliation_key" ] || record_field_set "$RECORD_PENDING" reconciliation_key "$reconciliation_key" || return 1
     record_phase_set "$RECORD_PENDING" presentation || return 1
     queue_presentation "$RECORD_PENDING" "$fingerprint" \
       "task goal requires reconciliation: child=$id disposition=$lifecycle_mode revision=$lifecycle_revision deadline_reached=$lifecycle_expired; read fm-task-state.sh lifecycle; preserve unconfirmed actions" || true
@@ -444,7 +456,7 @@ scan() {
 }
 
 acknowledge() { # <fingerprint>
-  local fingerprint=$1 pending presented phase observed current task
+  local fingerprint=$1 pending presented phase observed current task key readback
   case "$fingerprint" in ''|*[!A-Fa-f0-9]*) return 2 ;; esac
   [ -d "$OUTCOME_DIR" ] && [ ! -L "$OUTCOME_DIR" ] || return 1
   pending=$(record_path "$fingerprint" pending)
@@ -465,6 +477,17 @@ acknowledge() { # <fingerprint>
       ;;
     *)
       task=$(record_value "$pending" task_id)
+      key=$(record_value "$pending" reconciliation_key)
+      if [ -n "$key" ]; then
+        readback=$(fm_task_lifecycle due "$task") || return 1
+        if printf '%s' "$readback" | jq -e --arg key "$key" \
+          '(.record.disposition=="accepted" or .record.disposition=="archived") and .reconciliation_key==$key' >/dev/null; then
+          # Presentation acknowledges this exact retained observation, not an
+          # effect or acceptance. Its receipt stays independently unfinished.
+          mv -f "$pending" "$presented"
+          return $?
+        fi
+      fi
       current=$(fm_task_lifecycle read "$task" 2>/dev/null | jq -r '.revision // 0') || return 1
       if [ "$current" -le "$observed" ]; then
         printf 'REFUSED: reconcile task %s revision %s before acknowledging its goal wake\n' "$task" "$observed" >&2
