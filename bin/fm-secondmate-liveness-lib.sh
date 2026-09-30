@@ -235,6 +235,27 @@ EOF_HELD
   return 0
 }
 
+fm_remote_seat_receipts_for_generation() {
+  local state=$1 id=$2 gen=$3 receipt op
+  [ -n "$gen" ] || return 0
+  for receipt in "$state/$id.seat-operation."*; do
+    [ -f "$receipt" ] && [ ! -L "$receipt" ] || continue
+    op=${receipt##*.seat-operation.}
+    awk -F= -v op="$op" -v gen="$gen" -v receipt="$receipt" '
+      { count[$1]++; value[$1] = substr($0, length($1) + 2) }
+      END {
+        if (count["schema"] != 1 || value["schema"] != "fm-remote-seat-receipt.v1" ||
+            count["operation"] != 1 || value["operation"] != op ||
+            count["requested_generation"] != 1 || value["requested_generation"] != op ||
+            count["actual_generation"] > 1 || count["phase"] != 1) exit
+        actual = value["actual_generation"]
+        if (actual == "") actual = op
+        if (actual == gen) printf "%s\t%s\t%s\n", receipt, op, value["phase"]
+      }
+    ' "$receipt"
+  done
+}
+
 # fm_remote_seat_receipt_update <receipt> <operation> <generation> <key=value>...
 #
 # The host operation receipt (<host-state>/parent-route/<id>.seat-operation.<gen>) is

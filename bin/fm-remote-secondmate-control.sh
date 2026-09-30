@@ -246,7 +246,7 @@ seat_endpoint_state() {
 # endpoint observation. The caller holds the host lifecycle mutex. Sets
 # SEAT_DECIDED to the disposition.
 seat_decide() {
-  local id=$1 receipt meta journal phase verb gen meta_gen backend target model state jphase jop rollback exit_result previous_phase old_stopped=false
+  local id=$1 receipt meta journal phase verb gen meta_gen backend target model state jphase jop rollback exit_result previous_phase prior_receipt prior_op prior_phase old_stopped=false
   receipt=$(receipt_path "$id")
   meta=$(meta_path "$id")
   SEAT_DECIDED=unknown
@@ -276,7 +276,10 @@ seat_decide() {
     jphase=$(sed -n 's/^phase=//p' "$journal" 2>/dev/null | tail -1)
     rollback=$(sed -n 's/^rollback=//p' "$journal" 2>/dev/null | tail -1)
     exit_result=$(sed -n 's/^exit_result=//p' "$journal" 2>/dev/null | tail -1)
-    previous_phase=$(receipt_field "$(receipt_path "$id" "$SEAT_PREV")" phase)
+    previous_phase=
+    while IFS=$'\t' read -r prior_receipt prior_op prior_phase; do
+      case "$prior_phase" in existing|started|dead-after-start) previous_phase=started ;; esac
+    done < <(fm_remote_seat_receipts_for_generation "$CONTROL_STATE" "$id" "$SEAT_PREV")
     if [ "$jop" = "$SEAT_OP" ]; then
       case "${jphase#failed:}" in
         exited|launching|complete)
@@ -408,25 +411,26 @@ remote_endpoint_load() {
 }
 
 seat_predecessor_ready() {
-  local gen state phase
+  local gen state phase receipt op confirmed=0 terminal_phase
   [ -n "$SEAT_OP" ] || return 0
   gen=$(fm_meta_get "$REMOTE_ENDPOINT_META" spawn_gen)
-  phase=$(receipt_field "$(receipt_path "$SEAT_LIFECYCLE_ID" "$gen")" phase)
+  while IFS=$'\t' read -r receipt op phase; do
+    case "$phase" in existing|started|dead-after-start) confirmed=1 ;; esac
+  done < <(fm_remote_seat_receipts_for_generation "$CONTROL_STATE" "$SEAT_LIFECYCLE_ID" "$gen")
   state=$(seat_endpoint_state "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET")
   case "$state" in
     alive) ;;
     dead|gone)
-      if [ "$phase" = started ] || [ "$phase" = dead-after-start ]; then
-        fm_remote_seat_receipt_update "$(receipt_path "$SEAT_LIFECYCLE_ID" "$gen")" "$gen" "$gen" phase=dead-after-start \
-          || prelaunch_die "could not retain the predecessor's terminal receipt"
-      elif [ "$state" = gone ]; then
-        if [ -f "$(receipt_path "$SEAT_LIFECYCLE_ID" "$gen")" ]; then
-          fm_remote_seat_receipt_update "$(receipt_path "$SEAT_LIFECYCLE_ID" "$gen")" "$gen" "$gen" phase=cancelled \
-            || prelaunch_die "could not retain the destroyed predecessor's receipt"
-        fi
-      else
+      if [ "$confirmed" != 1 ] && [ "$state" != gone ]; then
         prelaunch_die "the predecessor generation ${gen:-unknown} has no confirmed startup or proven endpoint destruction; refusing replacement"
       fi
+      while IFS=$'\t' read -r receipt op phase; do
+        case "$phase" in dead-after-start|cancelled|prelaunch) continue ;; esac
+        terminal_phase=cancelled
+        case "$phase" in existing|started) terminal_phase=dead-after-start ;; esac
+        fm_remote_seat_receipt_update "$receipt" "$op" "$op" "phase=$terminal_phase" "actual_generation=$gen" \
+          || prelaunch_die "could not retain the predecessor's terminal receipt"
+      done < <(fm_remote_seat_receipts_for_generation "$CONTROL_STATE" "$SEAT_LIFECYCLE_ID" "$gen")
       ;;
     *) prelaunch_die "the predecessor generation ${gen:-unknown} has no confirmed startup or proven endpoint destruction; refusing replacement" ;;
   esac

@@ -659,7 +659,8 @@ The wrapper forwards that expected generation into host control, which compares 
 Host-local launch, relaunch, and disposition acquire or adopt the same episode even when no seat pools or parent operation are present.
 A missing binding or newer incarnation takes the re-read nudge path.
 When a launch reuses an existing generation, its receipt binds the request token to that actual generation.
-Later disposition reads probe that generation’s endpoint again, and a terminal outcome preserves the binding for delayed retries.
+Later disposition reads probe that generation’s endpoint again, and host replacement resolves predecessor evidence through the same binding.
+A terminal outcome preserves every matching receipt’s request identity for delayed retries.
 The wrapper's header and [`bin/fm-remote-secondmate-control.sh`](../bin/fm-remote-secondmate-control.sh)'s header own the operation token and host outcome mechanics.
 
 ### Firstmate code convergence

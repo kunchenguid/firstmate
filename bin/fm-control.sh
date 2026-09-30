@@ -1345,20 +1345,19 @@ do_relaunch() {
   exit_result=$(do_exit)
   journal_write exited "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
   if [ -n "$SEAT_OPERATION" ]; then
-    local old_destroyed=false prior_receipt prior_phase terminal_phase
+    local old_destroyed=false prior_receipt prior_operation prior_phase terminal_phase
     [ "$exit_result" != endpoint-gone ] || old_destroyed=true
     fm_remote_seat_receipt_update "$STATE/$ID.seat-operation.$SEAT_OPERATION" "$SEAT_OPERATION" "$SEAT_GEN" \
       old_stopped=true "old_destroyed=$old_destroyed" || die "could not record the predecessor stop for $ID"
-    prior_receipt="$STATE/$ID.seat-operation.$SEAT_PREV_GEN"
-    if [ -n "$SEAT_PREV_GEN" ] && [ -f "$prior_receipt" ] && [ ! -L "$prior_receipt" ]; then
-      prior_phase=$(sed -n 's/^phase=//p' "$prior_receipt" | head -1)
+    while IFS=$'\t' read -r prior_receipt prior_operation prior_phase; do
+      case "$prior_phase" in dead-after-start|cancelled|prelaunch) continue ;; esac
       terminal_phase=cancelled
-      if [ "$exit_result" = stopped ] || [ "$prior_phase" = started ] || [ "$prior_phase" = dead-after-start ]; then
+      if [ "$exit_result" = stopped ] || [ "$prior_phase" = started ] || [ "$prior_phase" = existing ]; then
         terminal_phase=dead-after-start
       fi
-      fm_remote_seat_receipt_update "$prior_receipt" "$SEAT_PREV_GEN" "$SEAT_PREV_GEN" \
+      fm_remote_seat_receipt_update "$prior_receipt" "$prior_operation" "$prior_operation" \
         "phase=$terminal_phase" "actual_generation=$SEAT_PREV_GEN" || die "could not record the terminal predecessor receipt for $ID"
-    fi
+    done < <(fm_remote_seat_receipts_for_generation "$STATE" "$ID" "$SEAT_PREV_GEN")
   fi
   # The old incarnation's stop is proven, and its replacement already counts:
   # free the old generation exactly. An unprovable release keeps it counted.

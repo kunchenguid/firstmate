@@ -635,6 +635,14 @@ OUT=$(host_control launch ios claude pool-model-a medium herdr --operation op3);
 [ "$RC" -ne 0 ] || fail "a delayed existing token launched again"
 assert_contains "$OUT" "already handled" "a delayed existing token was treated as a fresh launch"
 assert_grep 'spawn_gen=s-newer' "$HOST_HOME/state/parent-route/ios.meta" "a delayed token changed the newer incarnation"
+host_receipt replacement.journal relaunch received s-older
+host_journal replacement.journal exited
+printf 'exit_result=already-stopped\n' >> "$HOST_HOME/state/parent-route/ios.control-relaunch"
+assert_equals "cancelled true" "$(host_disposition replacement.journal)" "the journal did not recognize the imported predecessor's confirmed terminal receipt"
+host_receipt foreign.journal relaunch received another-generation
+host_journal foreign.journal exited
+printf 'exit_result=already-stopped\n' >> "$HOST_HOME/state/parent-route/ios.control-relaunch"
+assert_equals "prelaunch false" "$(host_disposition foreign.journal)" "the journal used another generation's predecessor evidence"
 pass "existing host receipts re-probe their actual generation and preserve its terminal outcome"
 # A busy episode may be running this very token: unknown, never a refusal.
 bash -c '. "$1/bin/fm-secondmate-liveness-lib.sh" && fm_supervisor_lifecycle_acquire "$2" ios 0 && : > "$3" && exec sleep 600' \
