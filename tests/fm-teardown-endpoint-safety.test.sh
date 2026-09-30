@@ -72,6 +72,21 @@ assert_refused_without_mutation() {  # <case> <id> <description>
   [ ! -s "$dir/runtime.log" ] || fail "$description: runtime command ran before refusal: $(cat "$dir/runtime.log")"
 }
 
+# The same refusal with no override on the command line, so a case proves the
+# gate refuses by default rather than only under --force. Output goes to its own
+# files so a caller can still assert on run_case's --force output afterwards.
+assert_refused_unforced() {  # <case> <id> <description>
+  local dir=$1 id=$2 description=$3 rc
+  set +e
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" \
+    PATH="$dir/fakebin:$PATH" "$TEARDOWN" "$id" > "$dir/unforced.out" 2> "$dir/unforced.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "$description: teardown unexpectedly succeeded without --force"
+  assert_present "$dir/home/state/$id.meta" "$description: metadata changed before the unforced refusal"
+  [ ! -s "$dir/runtime.log" ] || fail "$description: runtime command ran before the unforced refusal: $(cat "$dir/runtime.log")"
+}
+
 test_invalid_endpoint_records_refuse_before_mutation() {
   local dir id=endpoint-a
 
@@ -1017,6 +1032,171 @@ test_own_and_absent_slot_claims_still_tear_down() {
   pass "fm-teardown: a task's own slot claim, and an unclaimed slot, both still tear down"
 }
 
+# The interlock behind this regression (observed 2026-09-23): a finished task's
+# record still named a pool slot, the pool had handed that slot to a live task,
+# and the slot's own claim named the live task.
+# The record scan saw two records on one live path and refused, so the stale
+# record could not finish its own cleanup AND the live task on the slot was
+# blocked by the same refusal - neither task could be closed.
+# A readable claim resolves a collision instead: it names the record that
+# actually took the slot, so the colliding record is proven stale, the stale task
+# finishes its own cleanup without touching the slot, and the live task can still
+# return its own slot while the stale record is still on disk.
+test_slot_claim_resolves_a_record_collision_without_an_interlock() {
+  local dir id=stale-task other=live-task worker rc
+
+  dir=$(make_case slot-claim-collision)
+  mark_case_as_treehouse_pool "$dir"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  claim_pool_slot "$dir" "$other" "$dir/other-home"
+  # The stale record's own volatile artifacts, so this case proves the record's
+  # cleanup - endpoint, check artifacts, record, backlog close - is what ran.
+  : > "$dir/home/state/$id.check.sh"
+  : > "$dir/home/state/$id.check-trust"
+  # Staged in this shell, not a command substitution: a background child of a
+  # $(...) subshell does not outlive it, and the point of this worker is to be
+  # alive in the slot while the stale record is torn down.
+  ( cd "$dir/worktree" && exec sleep 30 ) &
+  worker=$!
+
+  # Teardown of the stale record: its own cleanup completes and the slot the
+  # live task holds is left exactly as it was found.
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] \
+    || fail "a stale record could not finish its own cleanup on a slot another task holds: $(cat "$dir/stderr")"
+  kill -0 "$worker" 2>/dev/null || fail "the stale record's cleanup killed the live task's worker"
+  assert_reassigned_slot_left_alone "$dir" "$id" "$other" "stale record on a claimed slot"
+  assert_present "$dir/home/state/$other.meta" "the stale record's cleanup removed the live task's record"
+  grep -Fq "fm-$id" "$dir/runtime.log" \
+    || fail "the stale record's cleanup skipped its own endpoint: $(cat "$dir/runtime.log")"
+  assert_absent "$dir/home/state/$id.check.sh" "the stale record's cleanup left its own custom check"
+  assert_absent "$dir/home/state/$id.check-trust" "the stale record's cleanup left its own check binding"
+  assert_absent "$dir/home/state/$id.backlog-close" \
+    "the stale record's cleanup left an unfinished backlog transition behind"
+  ! grep -Fq "REFUSED" "$dir/stderr" \
+    || fail "the stale record's cleanup refused a state it should complete: $(cat "$dir/stderr")"
+
+  # Teardown of the live task on that slot: still completes while the stale
+  # record is on disk, which is the other half of the interlock.
+  set +e
+  run_case "$dir" "$other" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] \
+    || fail "a live task on a slot could not be cleaned up while a stale record named that slot: $(cat "$dir/stderr")"
+  assert_absent "$dir/home/state/$other.meta" "the live task's cleanup left its own record"
+  assert_absent "$dir/pool/1/.fm-slot-owner" "the live task's cleanup left its own spent slot claim"
+  grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "the live task's cleanup did not return its own pool slot: $(cat "$dir/runtime.log")"
+  kill "$worker" 2>/dev/null || true
+  wait "$worker" 2>/dev/null || true
+
+  # Nothing readable proves which record is stale, so the same collision refuses
+  # for both records exactly as it did before, and --force does not widen that.
+  dir=$(make_case slot-claim-collision-unclaimed)
+  mark_case_as_treehouse_pool "$dir"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  assert_refused_without_mutation "$dir" "$id" "an unclaimed collision must refuse the stale record"
+  assert_refused_without_mutation "$dir" "$other" "an unclaimed collision must refuse the live record"
+  assert_refused_unforced "$dir" "$id" "an unclaimed collision must refuse the stale record by default"
+  assert_present "$dir/home/state/$other.meta" "an unclaimed collision removed the live task's record"
+  assert_contains "$(cat "$dir/stderr")" "$other" \
+    "an unclaimed collision's refusal should name the other record on the slot"
+
+  # A claim file that cannot be read as a claim proves nothing either way, so the
+  # collision refuses for both records too.
+  dir=$(make_case slot-claim-collision-unreadable)
+  mark_case_as_treehouse_pool "$dir"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  printf 'not-a-claim\n' > "$dir/pool/1/.fm-slot-owner"
+  assert_refused_without_mutation "$dir" "$id" "an unreadable claim must refuse the stale record"
+  assert_refused_without_mutation "$dir" "$other" "an unreadable claim must refuse the live record"
+  assert_refused_unforced "$dir" "$id" "an unreadable claim must refuse the stale record by default"
+  assert_refused_unforced "$dir" "$other" "an unreadable claim must refuse the live record by default"
+  assert_contains "$(cat "$dir/stderr")" "$other" \
+    "an unreadable claim's collision refusal should name the other record on the slot"
+  assert_contains "$(cat "$dir/stderr")" "$dir/pool/1/.fm-slot-owner" \
+    "an unreadable collision claim's refusal should name the claim file to inspect"
+
+  pass "fm-teardown: a slot claim resolves a record collision, while an absent or unreadable claim still refuses it"
+}
+
+# A crewmate spawn is the only writer of the slot claim. A home= owner takes its
+# slot through Treehouse's own durable lease, which leaves that claim alone, so a
+# leftover claim naming a task can sit on a slot a home has since taken. A home=
+# collision therefore follows the claim only when the claim names another task,
+# which proves this record's slot was reassigned; this record's own claim proves
+# nothing about the home and keeps refusing.
+test_home_slot_collision_still_refuses_under_this_records_own_claim() {
+  local dir id=claimed-task other=home-holder third=next-task worker rc
+
+  dir=$(make_case slot-claim-home-collision)
+  mark_case_as_treehouse_pool "$dir"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$dir/worktree" "home=$dir/worktree" \
+    "project=$dir/project" "kind=secondmate"
+  claim_pool_slot "$dir" "$id"
+  assert_refused_without_mutation "$dir" "$id" \
+    "a home record on the slot must refuse under this record's own claim"
+  assert_present "$dir/home/state/$other.meta" \
+    "a home record on the slot was removed by this record's refusal"
+  assert_contains "$(cat "$dir/stderr")" "$other" \
+    "the home-collision refusal should name the record whose home is the slot"
+
+  # The same home= collision does follow a claim naming another task: that claim
+  # proves this record's slot was reassigned after it was written, so this
+  # record finishes only its own cleanup and every slot step is skipped.
+  dir=$(make_case slot-claim-home-collision-reassigned)
+  mark_case_as_treehouse_pool "$dir"
+  mkdir -p "$dir/second-worktree"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$dir/second-worktree" "home=$dir/worktree" \
+    "project=$dir/project" "kind=secondmate"
+  claim_pool_slot "$dir" "$third" "$dir/third-home"
+  ( cd "$dir/worktree" && exec sleep 30 ) &
+  worker=$!
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] \
+    || fail "a home= collision blocked the cleanup of a record whose slot was reassigned: $(cat "$dir/stderr")"
+  kill -0 "$worker" 2>/dev/null || fail "the reassigned slot's worker was killed over a home= record"
+  assert_reassigned_slot_left_alone "$dir" "$id" "$third" "home= collision with a reassigned slot"
+  assert_present "$dir/home/state/$other.meta" \
+    "the reassigned record's cleanup removed the record whose home is the slot"
+  kill "$worker" 2>/dev/null || true
+  wait "$worker" 2>/dev/null || true
+
+  pass "fm-teardown: a home record on a slot refuses under this record's own claim and follows a reassignment claim"
+}
+
 # The tmux shim used by the endpoint-close tests below: every subcommand
 # reaches the real isolated server, so presence is always read from real tmux.
 # When FM_TEST_BLOCK_KILL is set, `kill-window` alone fails without forwarding,
@@ -1404,6 +1584,8 @@ test_cross_home_pool_slot_collision_refuses
 test_sole_slot_record_still_tears_down
 test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot
 test_own_and_absent_slot_claims_still_tear_down
+test_slot_claim_resolves_a_record_collision_without_an_interlock
+test_home_slot_collision_still_refuses_under_this_records_own_claim
 test_recorded_endpoint_that_changed_directory_still_tears_down
 test_project_lock_anchors_at_the_local_root_across_home_layouts
 test_remote_seeded_home_returns_its_uncontested_slot
