@@ -35,7 +35,7 @@ The synthetic listener driver and its raw evidence are not tracked; the portable
 Run `bin/fm-lint.sh` and `bin/fm-doc-audience-check.sh`.
 Run `bin/fm-test-run.sh tests/fm-inbox.test.sh tests/fm-claude-stop-autoarm.test.sh tests/fm-wake-queue.test.sh tests/fm-watch-arm.test.sh tests/fm-watch-recovery-loop.test.sh`.
 
-The new cases cover idle demand without tasks, refusal by an unowned session, simultaneous ordinary input, shared queue acknowledgement, concurrent note acknowledgement, a busy bounded check batch, attached-arm delivery, repeated Stop, interrupted arm and re-arm, supersession, and away/quiet ownership.
+The new cases cover idle demand without tasks, refusal by an unowned session, simultaneous ordinary input, shared queue acknowledgement, non-session daemon acknowledgement without a receipt, concurrent note acknowledgement, a busy bounded check batch, attached-arm delivery, repeated Stop, interrupted arm and re-arm, supersession, and away/quiet ownership.
 Default-off regression behavior remains covered by the existing suites.
 The arm suite has a timing-sensitive three-second teardown assertion that can fail under heavy concurrent load and pass alone, including the new input delivery bound.
 
