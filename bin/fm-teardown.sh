@@ -470,8 +470,9 @@ teardown_completed_task() (
         exit 1
       }
     BACKLOG_CLOSED=1
-    fm_backlog_atomic_transition "$BACKLOG_TRANSITION" "$meta" "$marker" \
-      "$DATA" "$ID" "$STATE" "${BACKLOG_DONE_ARGS[@]+"${BACKLOG_DONE_ARGS[@]}"}" || {
+    fm_backlog_atomic_transition remove "$meta" 'completed resource record' "$STATE" || exit 1
+    fm_backlog_replay_transition "$BACKLOG_TRANSITION" "$marker" "$DATA" "$ID" "$STATE" \
+      "$generation" "$disposition" "${BACKLOG_DONE_ARGS[@]+"${BACKLOG_DONE_ARGS[@]}"}" || {
         echo "error: completed cleanup finished endpoint and copy handling, but its backlog $BACKLOG_TRANSITION remains pending ($FM_BACKLOG_TRANSITION_ERROR)" >&2
         exit 1
       }
