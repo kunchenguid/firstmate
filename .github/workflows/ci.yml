@@ -9,6 +9,20 @@ on:
 permissions:
   contents: read
 
+# Pinned Pi version for the jobs that install the package the Pi extension
+# tests read at runtime and typecheck against.
+# Those tests compare firstmate's extension against Pi's own internals, so an
+# unpinned `npm install -g` let a lane's verdict depend on whichever version
+# published most recently rather than on a reviewed one.
+# 0.87.1 is a known-green baseline for these lanes. Against 0.99.1
+# tests/fm-pi-branch-extension.test.sh fails its stock ToolExecutionComponent
+# rendering comparison; this pin records that measured baseline, not a claim
+# about other releases.
+# Raising the pin is its own change: re-verify every Pi lane against the
+# candidate version before moving it.
+env:
+  FM_PI_CODING_AGENT_VERSION: "0.87.1"
+
 # Per-PR supersession: a new push to the same PR replaces that PR's in-flight
 # CI instead of letting superseded heads keep the full hosted-runner fan-out.
 # The group uses the PR number for pull_request events, so every run of one PR
@@ -115,7 +129,7 @@ jobs:
       - name: Install the Pi package for the Pi extension tests
         run: |
           set -eu
-          npm install -g @earendil-works/pi-coding-agent
+          npm install -g "@earendil-works/pi-coding-agent@$FM_PI_CODING_AGENT_VERSION"
           npm ls -g --depth 0 @earendil-works/pi-coding-agent
       - name: Run portable parallel shard 1
         run: |
@@ -221,7 +235,7 @@ jobs:
       - name: Install the Pi package for the Pi extension tests
         run: |
           set -eu
-          npm install -g @earendil-works/pi-coding-agent
+          npm install -g "@earendil-works/pi-coding-agent@$FM_PI_CODING_AGENT_VERSION"
           npm ls -g --depth 0 @earendil-works/pi-coding-agent
       - name: Run portable serial shard ${{ matrix.shard }}
         env:

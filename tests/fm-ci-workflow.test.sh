@@ -249,7 +249,37 @@ RUBY
   pass "CI matrices cover every executable serial lane and canonical lint root exactly once"
 }
 
+# The Pi extension tests read and typecheck against Pi's own installed package,
+# so an unpinned `npm install -g` let a lane's verdict depend on whichever
+# version published most recently rather than on one that was reviewed. One
+# workflow-level pin keeps every install site on the same version, and this test
+# holds both halves of that: the pin is one reviewed exact version, and no
+# install site drifts off it. Bumping the pin is a deliberate edit here too,
+# because the reviewed baseline is what this repository has actually verified.
+test_every_pi_install_uses_the_shared_pin() {
+  local pin
+  pin=$(ruby -ryaml - "$CI_WORKFLOW" <<'RUBY'
+workflow = YAML.load_file(ARGV[0])
+pin = workflow.fetch("env", {}).fetch("FM_PI_CODING_AGENT_VERSION", "").to_s
+raise "ci.yml must define env.FM_PI_CODING_AGENT_VERSION" if pin.empty?
+raise "the Pi pin must be one exact version, got #{pin.inspect}" unless pin =~ /\A\d+\.\d+\.\d+\z/
+raise "the reviewed Pi pin is 0.87.1, got #{pin.inspect}" unless pin == "0.87.1"
+installs = workflow.fetch("jobs").flat_map do |name, job|
+  job.fetch("steps", []).map do |step|
+    "#{name}: #{step["run"]}"
+  end.select { |entry| entry =~ /npm install -g\b[^\n]*@earendil-works\/pi-coding-agent/ }
+end
+raise "no Pi install site found in ci.yml" if installs.empty?
+unpinned = installs.reject { |entry| entry.include?("$FM_PI_CODING_AGENT_VERSION") }
+raise "every Pi install must use the shared pin:" + "\n" + unpinned.join("\n") unless unpinned.empty?
+puts pin
+RUBY
+) || fail "Pi install pin contract"
+  pass "every Pi install site uses the shared $pin pin"
+}
+
 test_ci_matrices_match_executable_partitions
+test_every_pi_install_uses_the_shared_pin
 test_pr_pushes_supersede_within_one_pr
 test_separate_prs_do_not_cancel_each_other
 test_main_pushes_are_never_cancelled
