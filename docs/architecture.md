@@ -214,15 +214,25 @@ Captain-held transfers remain silent until return while the away record exists.
 Its supervisor injection path supports tmux and herdr panes, with `FM_SUPERVISOR_BACKEND` and `FM_SUPERVISOR_TARGET` resolved independently from the task-spawn backend.
 Pane existence, busy checks, composer checks, capture, and verified submit route through `bin/fm-backend.sh`: tmux keeps the same submit core used by the tmux send backend, while herdr, for a Claude pane, types only into an empty composer and withholds Enter until that composer shows the typed payload, and then uses native agent-state submit confirmation on idle baselines, a composer empty fallback when native stays idle, and a pre-Enter rendered-footer transition when that baseline is unavailable.
 The retries-exhausted queued-Enter decision is owned by `fm_composer_queued_enter_verdict` in `bin/fm-composer-lib.sh`; tmux and herdr provide only their backend-specific busy signals.
-Composer classification has one shared owner, `bin/fm-composer-lib.sh`: tmux, herdr, Zellij, Orca, and cmux contribute only a screen capture plus declarative styled, cursor, identity, and row capabilities, while the shared classifier owns every shape and the `empty`/`pending`/`pending-unproven`/`unknown` verdict.
+Composer classification has one shared owner, `bin/fm-composer-lib.sh`: tmux, herdr, Zellij, Orca, and cmux contribute only a screen capture plus declarative styled, cursor, identity, normalization, and row capabilities, while the shared classifier owns every shape and the `empty`/`pending`/`pending-unproven`/`unknown` verdict.
 `fm-spawn.sh` also routes Kimi launch readiness through that classifier instead of carrying another shape copy.
 The daemon injects only into an affirmatively `empty` composer, so every other or future verdict defers; positive container proof is required, and a blank unidentified row or bare dead-shell prompt cannot receive an escalation.
 The current operator boundary is in [Composer and injection safety](herdr-backend.md#composer-and-injection-safety).
 Unsupported supervisor backends refuse at daemon startup.
 Stalled escalation delivery writes `state/.subsuper-inject-wedged` and attempts a configured backend-independent active alert after `FM_MAX_DEFER_SECS` instead of silently deferring forever.
 On an unmarked return, `bin/fm-afk-return.sh` owns ordered shutdown, the record archive, durable catch-up evidence, the return brief, and the fail-closed gate that keeps ordinary work behind every live firstmate-actionable blocker the away session could not fix.
+
+### Lifecycle input preparation
+
 `fm-send.sh` delivers every remote text steer and ordinary local text steer as a durable steering-inbox record plus a best-effort constant doorbell line (`bin/fm-task-inbox-lib.sh`).
 The doorbell line is a shell no-op and is never typed into an endpoint classified as dead or missing; that record surfaces once for recovery instead of walking the re-ring ladder (`bin/fm-task-inbox-lib.sh` header).
+A new doorbell and a control-plane exit opt into strict backend preparation immediately before literal delivery.
+Generic typed-plane sends do not acquire the fresh-empty requirement, although tmux and Herdr still normalize an exact Pi `NORMAL` composer before generic text when its emptiness is proven.
+Every backend requires a fresh `empty` verdict for that new lifecycle line.
+tmux and Herdr derive Pi mode and composer state from the same capture; within a Pi separator composer they recognize only exact `INSERT` or `NORMAL` labels, and change a proven required-state `NORMAL` composer to `INSERT` only when a second capture re-proves both mode and state.
+Plain Pi separators, other mode labels, failed capture or Pi identity probes, and changed composer state refuse without literal text; Zellij, Orca, and cmux enforce the fresh empty proof but do not gain Pi mode normalization.
+An already-pending copy of the exact owned doorbell is the exception to new literal delivery: `bin/fm-task-inbox-lib.sh` re-proves its exact content before each Enter, and tmux or Herdr additionally proves the required `pending` state around any `NORMAL` preparation, so the buffer is preserved rather than retyped.
+`tests/fm-tmux-submit-busy.test.sh`, `tests/fm-backend-herdr.test.sh`, and `tests/fm-task-inbox.test.sh` pin this preparation boundary.
 Its local-only typed plane - harness-native invocations and explicit backend targets - selects a pre-Enter popup-settle for slash commands and for codex `$...` skill invocations using metadata-routed target `harness=` values, then adds its own `FM_SEND_SETTLE` pause after successful typed sends so immediate peeks catch the receiving turn starting; the sub-supervisor uses only the shared submit core and does not pay that post-submit pause.
 
 Text for a worker to read and commands that drive a worker's process are separate planes.

@@ -50,6 +50,7 @@ muse is the one verified adapter that restores the cancelled prompt back into it
 The clear is refused before anything is sent when the recorded backend cannot deliver it.
 
 `exit` reads the composer's state before typing the exit command and requires the exact `empty` verdict; a `pending` verdict refuses by naming the pending text, and any other verdict (`unknown`, `pending-unproven`, or an unreadable read) refuses as not proven empty, matching the fail-safe contract every other consumer that can overwrite composer input follows.
+Its submit then applies the shared [lifecycle input preparation](architecture.md#lifecycle-input-preparation) immediately before literal delivery, so a blank Pi composer in exact `NORMAL` mode can recover safely on tmux or Herdr while pending, ambiguous, changed, or unreadable state remains untouched.
 
 **Teardown and discard are not verbs and will not become verbs.**
 `exit` stops an agent and preserves everything else.

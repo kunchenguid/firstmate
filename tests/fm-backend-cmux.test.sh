@@ -928,6 +928,20 @@ test_send_text_submit_popup_autocomplete_requires_second_enter() {
   pass "fm_backend_cmux_send_text_submit: retries past a popup-placeholder-fill Enter and lands the real second Enter (the incident fix)"
 }
 
+test_send_text_submit_lifecycle_refuses_pending_composer() {
+  local dir fb out
+  dir="$TMP_ROOT/submit-lifecycle-pending"; mkdir -p "$dir/responses"
+  cmux_panes_response "$dir" 1 "bbbbbbbb-1111-1111-1111-111111111111"
+  cmux_read_screen_response "$dir" 2 $'  ╭────────────────────────╮\n  │ ❯ keep this draft      │\n  ╰──────── Composer ──────╯'
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_send_text_submit "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111" "/exit" 2 0.01 0.01 "" require-empty' "$ROOT" )
+  [ "$out" = send-failed ] || fail "lifecycle input should refuse a pending cmux composer, got '$out'"
+  assert_not_contains "$(cat "$dir/log")" $'\x1f''send'$'\x1f''--workspace' \
+    "lifecycle input was sent into a pending cmux composer"
+  pass "fm_backend_cmux_send_text_submit: lifecycle input requires fresh emptiness"
+}
+
 test_send_text_submit_send_failed_when_target_absent() {
   local dir fb out
   dir="$TMP_ROOT/submit-no-target"; mkdir -p "$dir/responses"
@@ -1155,6 +1169,7 @@ test_composer_state_unknown_when_no_composer_row_found
 test_send_text_submit_detects_landed_send
 test_send_text_submit_detects_swallowed_enter
 test_send_text_submit_popup_autocomplete_requires_second_enter
+test_send_text_submit_lifecycle_refuses_pending_composer
 test_send_text_submit_send_failed_when_target_absent
 test_window_of_workspace_finds_window_and_count
 test_window_of_workspace_empty_when_not_found

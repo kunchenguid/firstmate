@@ -155,8 +155,8 @@ test_real_text_is_pending() {
 
 ESC=$(printf '\033')
 NBSP=$(printf '\302\240')
-CAPS_TMUX=$'styled=1\ncursor=1\nidentity=1\nrows=0'
-CAPS_STYLED=$'styled=1\ncursor=0\nidentity=1\nrows=20'      # herdr
+CAPS_TMUX=$'styled=1\ncursor=1\nidentity=1\nnormalize=1\nrows=0'
+CAPS_STYLED=$'styled=1\ncursor=0\nidentity=1\nnormalize=1\nrows=20' # herdr
 CAPS_STYLED_NOID=$'styled=1\ncursor=0\nidentity=0\nrows=20' # zellij
 CAPS_PLAIN=$'styled=0\ncursor=0\nidentity=0\nrows=20'       # cmux, orca
 
@@ -619,6 +619,51 @@ test_matrix_pi_separated_needs_identity() {
   pass "matrix: pi's separated composer needs identity + structure; the blank row alone never proves it"
 }
 
+# Pi-vim replaces the lower composer rule's right edge with its mode label.
+# Both exact ordinary modes preserve the same empty/pending verdicts. Other
+# labels remain unknown to the classifier and input-mode parser.
+test_matrix_pi_vim_modes() {
+  local plain insert normal startup_normal pending_normal ex typed pi_idle
+  pi_idle=$(printf 'pi\tidle')
+  plain=$'transcript\n────────────────────────\n\n────────────────────────'
+  insert=$'transcript\n────────────────────────\n\n────────────── INSERT'
+  normal=$'transcript\n────────────────────────\n\n────────────── NORMAL'
+  pending_normal=$'transcript\n────────────────────────\n\n────────────── NORMAL d_'
+  ex=$'transcript\n────────────────────────\n\n────────────── EX :_'
+
+  assert_screen "pi-vim INSERT empty" empty "$CAPS_TMUX" "$insert" 2 "$pi_idle"
+  assert_screen "pi-vim NORMAL empty" empty "$CAPS_TMUX" "$normal" 2 "$pi_idle"
+  assert_screen "cursorless pi-vim INSERT empty" empty "$CAPS_STYLED" "$insert" '' "$pi_idle"
+  assert_screen "cursorless pi-vim NORMAL empty with adapter normalization" empty \
+    "$CAPS_STYLED" "$normal" '' "$pi_idle"
+  startup_normal=$'╭──── startup banner ────╮\nunclosed startup content\n────────────────────────\n\n────────────── NORMAL'
+  assert_screen "cursorless pi-vim NORMAL below stale incomplete startup output" empty \
+    "$CAPS_STYLED" "$startup_normal" '' "$pi_idle"
+  [ "$(fm_composer_pi_input_mode "$startup_normal")" = normal ] \
+    || fail "stale incomplete startup output hid the live pi-vim NORMAL mode"
+  [ "$(fm_composer_pi_input_mode "$insert" 2)" = insert ] \
+    || fail "pi-vim INSERT mode was not recognized"
+  [ "$(fm_composer_pi_input_mode "$normal" 2)" = normal ] \
+    || fail "pi-vim NORMAL mode was not recognized"
+  [ "$(fm_composer_pi_input_mode "$normal")" = normal ] \
+    || fail "cursorless pi-vim NORMAL mode was not recognized"
+  [ "$(fm_composer_pi_input_mode "$plain" 2)" = ambiguous ] \
+    || fail "a plain Pi separator pair must remain mode-ambiguous"
+
+  typed=$'transcript\n────────────────────────\nkeep this draft\n────────────── NORMAL'
+  assert_screen "pi-vim NORMAL pending text" pending "$CAPS_TMUX" "$typed" 2 "$pi_idle"
+  [ "$(fm_composer_pi_input_mode "$typed" 2)" = normal ] \
+    || fail "pending text must not hide pi-vim NORMAL mode"
+
+  assert_screen "pi-vim pending command is unknown" unknown "$CAPS_TMUX" "$pending_normal" 2 "$pi_idle"
+  assert_screen "pi-vim Ex mode is unknown" unknown "$CAPS_TMUX" "$ex" 2 "$pi_idle"
+  [ "$(fm_composer_pi_input_mode "$pending_normal" 2)" = unknown ] \
+    || fail "pi-vim pending NORMAL command must remain unknown"
+  [ "$(fm_composer_pi_input_mode "$ex" 2)" = unknown ] \
+    || fail "pi-vim Ex mode must remain unknown"
+  pass "matrix: pi-vim NORMAL and INSERT classify safely without losing pending text"
+}
+
 test_matrix_pi_dollar_status_footer_is_empty() {
   # Pi's status row `$0.000 (sub) 5.4%/272k (auto)` at column 0 used to read
   # as a dead-shell prompt, so an idle separated composer classified unknown.
@@ -979,6 +1024,7 @@ test_matrix_herdr_halfblock_rule_bounds_bare_wrap
 test_matrix_omp_status_row_bounds_bare_composer
 test_matrix_codex_idle_starfield_furniture
 test_matrix_pi_separated_needs_identity
+test_matrix_pi_vim_modes
 test_matrix_pi_dollar_status_footer_is_empty
 test_matrix_opencode_leftbar_signals
 test_matrix_grok_titled_bottom_border

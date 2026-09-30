@@ -89,6 +89,9 @@ It types a message once and retries Enter only until the composer clears.
 Only a proven empty composer is a positive delivery acknowledgement.
 Text left in established structure remains `pending`, text in ambiguous structure remains unproven, and unreadable or unsafe state remains unknown.
 An ordinary local `fm-send.sh` text steer and every remote text steer no longer ride this verified submit at all: they become durable steering-inbox records plus best-effort constant doorbell lines (`bin/fm-task-inbox-lib.sh`).
+Doorbells and control-plane exits follow the shared [lifecycle input preparation](architecture.md#lifecycle-input-preparation).
+tmux is one of the two backends that can recover a Pi composer carrying the exact `NORMAL` label: it changes mode only after proving the required empty or owned-doorbell-pending state, then re-proves exact `INSERT` and the same state before continuing; pending drafts and ambiguous modes remain untouched.
+The ambiguous-Pi and pending-`INSERT` refusals are scoped to lifecycle calls, so those shapes keep their established generic typed-plane behavior.
 The verdicts above are delivery-critical only for the local typed plane - harness-native invocations and explicit backend targets - where `fm-send.sh` still never retypes or assumes a confirmed submit for an unconfirmed verdict; its header owns the distinct delivered-unconfirmed exit status and operator response.
 
 OpenCode 1.18.4 has one busy-queue exception.

@@ -92,6 +92,27 @@ esac
 exit 0
 SH
   chmod +x "$fb/tmux"
+  cat > "$fb/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${FM_FAKE_HERDR_UNKNOWN:-0}" != 1 ]; then
+  case "${1:-} ${2:-}" in
+    "status --json") printf '{"server":{"running":false}}\n'; exit 0 ;;
+  esac
+  exit 1
+fi
+case "${1:-} ${2:-}" in
+  "pane get") printf '{"result":{"pane":{"pane_id":"p1"}}}\n' ;;
+  "agent get") printf '{"result":{"agent":{"agent_status":"idle"}}}\n' ;;
+  "pane process-info")
+    printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"p1","shell_pid":2,"foreground_processes":[{"pid":2,"name":"worker","argv":["worker"]}]}}}\n'
+    ;;
+  "pane read") printf 'unclassifiable pane output\n' ;;
+  "status --json") printf '{"server":{"running":true}}\n' ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fb/herdr"
   cat > "$fb/sleep" <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -225,7 +246,7 @@ test_remote_steer_lands_in_remote_inbox() {
   home=$(setup_remote_parent_home remote-inbox "$rhome")
 
   rc=0
-  send_env "$fb" "$home" "$ssh_log" \
+  send_env "$fb" "$home" "$ssh_log" FM_FAKE_HERDR_UNKNOWN=1 \
     "$SEND" rsm "please rename the metric" >"$dir/out" 2>"$dir/err" || rc=$?
   err=$(cat "$dir/err")
   expect_code 0 "$rc" "a durably recorded remote steer must exit 0: $err"
@@ -248,6 +269,10 @@ test_remote_steer_lands_in_remote_inbox() {
   # never fails the send, and the notice still names the durable record.
   assert_contains "$err" "durably recorded" \
     "a failed doorbell must be reported as a notice on a durably sent steer"
+  assert_contains "$err" "composer emptiness was not proven" \
+    "an unproven remote composer should accurately describe the failed proof"
+  assert_not_contains "$err" "visibly holds pending text" \
+    "an unproven remote composer must not be reported as visibly pending"
   assert_not_contains "$err" "error:" "a durably recorded steer must not carry an error report"
   pend=$(pending_record "$home")
   [ -n "$pend" ] || fail "the marked remote steer must keep its pending-reply expectation"

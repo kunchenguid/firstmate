@@ -3191,13 +3191,16 @@ fm_backend_herdr_composer_identity() {  # <target> -> "<agent>\t<status>"
 # equally defeat this state read's pre-submit concat guard. The composer is
 # by definition inside the viewport, and `--source visible` needs none of the
 # small-N --lines workaround.
-fm_backend_herdr_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
+fm_backend_herdr_composer_state() {  # <target> [caps captured-screen] -> empty|pending|pending-unproven|unknown
   local target=$1 cap caps verdict identity
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
-  if cap=$(fm_backend_herdr_visible_capture_ansi "$target" 2>/dev/null); then
-    caps=$(printf 'styled=1\ncursor=0\nidentity=1')
+  if [ "$#" -ge 3 ]; then
+    caps=$2
+    cap=$3
+  elif cap=$(fm_backend_herdr_visible_capture_ansi "$target" 2>/dev/null); then
+    caps=$(printf 'styled=1\ncursor=0\nidentity=1\nnormalize=1')
   elif cap=$(fm_backend_herdr_visible_capture "$target"); then
-    caps=$(printf 'styled=0\ncursor=0\nidentity=1')
+    caps=$(printf 'styled=0\ncursor=0\nidentity=1\nnormalize=1')
   else
     printf 'unknown'
     return 0
@@ -3211,6 +3214,73 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|pending-unprove
     [ "$verdict" != need-identity ] || verdict=unknown
   fi
   printf '%s' "$verdict"
+}
+
+fm_backend_herdr_composer_input_snapshot() {  # <target> -> "<mode>\t<state>"
+  local target=$1 cap caps mode state
+  if cap=$(fm_backend_herdr_visible_capture_ansi "$target" 2>/dev/null) && [ -n "$cap" ]; then
+    caps=$(printf 'styled=1\ncursor=0\nidentity=1\nnormalize=1')
+  elif cap=$(fm_backend_herdr_visible_capture "$target") && [ -n "$cap" ]; then
+    caps=$(printf 'styled=0\ncursor=0\nidentity=1\nnormalize=1')
+  else
+    return 1
+  fi
+  mode=$(fm_composer_pi_input_mode "$cap")
+  state=$(fm_backend_herdr_composer_state "$target" "$caps" "$cap")
+  printf '%s\t%s' "$mode" "$state"
+}
+
+fm_backend_herdr_prepare_text_input() {  # <target> <settle> [require-empty|require-pending]
+  local target=$1 settle=$2 requirement=${3:-} required_state='' snapshot mode state
+  case "$requirement" in
+    require-empty) required_state=empty ;;
+    require-pending) required_state=pending ;;
+  esac
+  if ! snapshot=$(fm_backend_herdr_composer_input_snapshot "$target"); then
+    if [ -n "$required_state" ]; then
+      printf 'error: cannot verify pi-vim input mode\n' >&2
+      return 1
+    fi
+    return 0
+  fi
+  mode=${snapshot%%$'\t'*}
+  state=${snapshot#*$'\t'}
+  case "$mode" in
+    unknown)
+      [ -n "$required_state" ] || return 0
+      if [ "$state" != "$required_state" ]; then
+        printf 'error: refusing unproven input preparation with composer=%s\n' "$state" >&2
+        return 1
+      fi
+      ;;
+    ambiguous)
+      [ -n "$required_state" ] || return 0
+      printf 'error: refusing ambiguous pi-vim input mode\n' >&2
+      return 1
+      ;;
+    insert)
+      if [ -n "$required_state" ] && [ "$state" != "$required_state" ]; then
+        printf 'error: refusing pi-vim INSERT delivery with composer=%s\n' "$state" >&2
+        return 1
+      fi
+      ;;
+    normal)
+      if [ "$state" != "${required_state:-empty}" ]; then
+        printf 'error: refusing pi-vim NORMAL recovery with composer=%s\n' "$state" >&2
+        return 1
+      fi
+      fm_backend_herdr_send_key "$target" i || return 1
+      sleep "$settle"
+      snapshot=$(fm_backend_herdr_composer_input_snapshot "$target") || snapshot=$'unknown\tunknown'
+      mode=${snapshot%%$'\t'*}
+      state=${snapshot#*$'\t'}
+      if [ "$mode" != insert ] || [ "$state" != "${required_state:-empty}" ]; then
+        printf 'error: pi-vim did not reach a proven INSERT composer (mode=%s composer=%s)\n' \
+          "$mode" "$state" >&2
+        return 1
+      fi
+      ;;
+  esac
 }
 
 # fm_backend_herdr_rendered_busy_state: busy|idle|unknown from the pane's
@@ -3423,8 +3493,9 @@ fm_backend_herdr_composer_clear() {  # <target> <text>
   return 1
 }
 
-fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle>
-  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 i=0 verdict baseline confirm_sleep
+fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label] [require-empty]
+  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 require_empty=${7:-}
+  local i=0 verdict baseline confirm_sleep
   local raw_status footer_baseline='' allow_rendered=0 enter_sent=0 identity proof=0 content
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   # Claude on Herdr is the live-verified truncation shape: Enter is withheld
@@ -3434,9 +3505,17 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
   identity=$(fm_backend_herdr_agent_identity_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE") || identity=
   if [ "${identity%%$'\t'*}" = claude ]; then
     proof=1
-    content=$(fm_backend_herdr_composer_content "$target") \
-      || { printf 'send-failed'; return 0; }
-    [ -z "${content//[$' \t\r\n\v\f']/}" ] || { printf 'send-failed'; return 0; }
+    if [ "$require_empty" = require-empty ]; then
+      [ "$(fm_backend_herdr_composer_state "$target")" = empty ] \
+        || { printf 'send-failed'; return 0; }
+    else
+      content=$(fm_backend_herdr_composer_content "$target") \
+        || { printf 'send-failed'; return 0; }
+      [ -z "${content//[$' \t\r\n\v\f']/}" ] || { printf 'send-failed'; return 0; }
+    fi
+  elif ! fm_backend_herdr_prepare_text_input "$target" "$settle" "$require_empty"; then
+    printf 'send-failed'
+    return 0
   fi
   fm_backend_herdr_send_literal "$target" "$text" || { printf 'send-failed'; return 0; }
   sleep "$settle"

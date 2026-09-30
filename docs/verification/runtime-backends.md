@@ -807,7 +807,7 @@ The steering channel's one behavioral assumption - a real worker agent follows t
 FM_SEND_INBOX_LIVE_E2E=1 tests/fm-send-inbox-doorbell-live-e2e.test.sh
 ```
 
-Observed output (combined across the full run and the grok rerun after the advisory-skip narrowing landed):
+Observed historical output (combined across the full run and the Grok rerun after the then-current advisory-skip narrowing landed):
 
 ```text
 ok - claude (2.1.241 (Claude Code)): the doorbell reached a real worker, which acted and acked with the mv
@@ -820,11 +820,13 @@ ok - grok (grok 1.0.5 (5115b46bc909) [stable]): the doorbell reached a real work
 ok - muse (Muse Code 0.2.1 (0.2.1-R1215.1)): the doorbell reached a real worker, which acted and acked with the mv
 ```
 
-All six installed harnesses honored the doorbell contract with real model turns: each listed the inbox named by the doorbell, read its record, executed the instruction inside it, and acknowledged with the atomic `mv`.
-Two findings from the run shaped the shipped behavior: an OpenCode vendor update modal swallowed the first doorbell and the single re-ring recovered it, which is exactly the watcher ladder's job; and grok 1.0.5's idle composer never classifies `empty` (a classifier drift owned by the [Composer classification matrix](#composer-classification-matrix) guard, whose refresh for grok 1.0.5 is still owed), which motivated the ring's advisory pre-check not to skip on ambiguity - a doorbell into an ambiguous composer is a recoverable constant line, while skipping on ambiguity would starve steering for any harness the classifier cannot positively identify.
-The current pending-composer ring contract is owned by `bin/fm-task-inbox-lib.sh`.
+At that revision, all six installed harnesses honored the doorbell contract with real model turns: each listed the inbox named by the doorbell, read its record, executed the instruction inside it, and acknowledged with the atomic `mv`.
+Two findings shaped the then-shipped advisory gate: an OpenCode vendor update modal swallowed the first doorbell and the single re-ring recovered it, while Grok 1.0.5's idle composer never classified `empty` and was allowed to proceed on ambiguity.
+That ambiguity bypass is no longer current behavior.
+The strict ring contract is owned by `bin/fm-task-inbox-lib.sh`: a new doorbell requires proven emptiness immediately before any literal typing, while an exact already-pending owned doorbell may retry only Enter after fresh content proof and any available modal preparation.
+The Grok line above therefore preserves historical worker-response evidence, not current lifecycle-delivery evidence.
 Kimi was not installed on the verification machine; its receive path is the same one-line-plus-shell contract, and the portable ladder and enqueue regressions in `tests/fm-task-inbox.test.sh` and `tests/fm-send-inbox.test.sh` cover every harness-independent half.
-This guard is the refresh command after any harness upgrade; it spends a small number of real tokens per installed harness, reports an absent harness explicitly, and refuses a run that verified nothing.
+The live guard still describes and permits the former advisory readiness path, so it is not a refresh command for the current strict gate until that readiness logic is updated; `tests/fm-task-inbox.test.sh`, `tests/fm-send-inbox.test.sh`, `tests/fm-tmux-submit-busy.test.sh`, and `tests/fm-backend-herdr.test.sh` are the current portable regression entry points.
 
 ## Gemini
 

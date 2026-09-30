@@ -86,7 +86,7 @@ fm_tmux_composer_cursor_row() {  # <target>
 # fm_tmux_composer_caps: the tmux capability descriptor - static data, not
 # logic (see the capability model in bin/fm-composer-lib.sh).
 fm_tmux_composer_caps() {
-  printf 'styled=1\ncursor=1\nidentity=1\nrows=0\n'
+  printf 'styled=1\ncursor=1\nidentity=1\nnormalize=1\nrows=0\n'
 }
 
 # fm_tmux_composer_identity: the tmux agent-identity probe backing the
@@ -142,11 +142,16 @@ EOF
 # is fetched lazily, only when the classifier reports the verdict depends on
 # it (a pi separator pair under the cursor), so the common read never pays
 # for the process probe.
-fm_tmux_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
+fm_tmux_composer_state() {  # <target> [cursor-row captured-screen] -> empty|pending|pending-unproven|unknown
   local target=$1 cy pane verdict identity
-  cy=$(fm_tmux_composer_cursor_row "$target") || { printf 'unknown'; return 0; }
-  case "$cy" in ''|*[!0-9]*) printf 'unknown'; return 0 ;; esac
-  pane=$(fm_tmux_composer_capture "$target") || { printf 'unknown'; return 0; }
+  if [ "$#" -ge 3 ]; then
+    cy=$2
+    pane=$3
+  else
+    cy=$(fm_tmux_composer_cursor_row "$target") || { printf 'unknown'; return 0; }
+    case "$cy" in ''|*[!0-9]*) printf 'unknown'; return 0 ;; esac
+    pane=$(fm_tmux_composer_capture "$target") || { printf 'unknown'; return 0; }
+  fi
   verdict=$(fm_composer_classify_screen "$(fm_tmux_composer_caps)" "$pane" "$cy")
   if [ "$verdict" = need-identity ]; then
     if ! identity=$(fm_tmux_composer_identity "$target") || [ -z "$identity" ]; then
@@ -168,6 +173,17 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
     verdict=$(fm_composer_classify_screen "$(fm_tmux_composer_caps)" "$pane" '')
   fi
   printf '%s' "$verdict"
+}
+
+fm_tmux_composer_input_snapshot() {  # <target> -> "<mode>\t<state>"
+  local target=$1 cy pane mode state
+  cy=$(fm_tmux_composer_cursor_row "$target") || return 1
+  case "$cy" in ''|*[!0-9]*) return 1 ;; esac
+  pane=$(fm_tmux_composer_capture "$target") || return 1
+  [ -n "$pane" ] || return 1
+  mode=$(fm_composer_pi_input_mode "$pane" "$cy")
+  state=$(fm_tmux_composer_state "$target" "$cy" "$pane")
+  printf '%s\t%s' "$mode" "$state"
 }
 
 # fm_tmux_pane_is_cursor: true when the pane's FOREGROUND process group contains
@@ -283,13 +299,76 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [baseline-idle
   fm_composer_queued_enter_verdict "$state" "$busy_state"
 }
 
-fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle>
-  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 baseline_idle='' baseline_state err
+# fm_tmux_prepare_text_input: normalize a proven pi-vim NORMAL composer to
+# INSERT before delivery. The required composer state is checked both before
+# the mode key and after Pi redraws; changed screens refuse without typing
+# caller text. Lifecycle callers require fresh empty or pending proof for
+# structurally unknown, non-modal composers.
+fm_tmux_prepare_text_input() {  # <target> <settle> [require-empty|require-pending]
+  local target=$1 settle=$2 requirement=${3:-} required_state='' snapshot mode state
+  case "$requirement" in
+    require-empty) required_state=empty ;;
+    require-pending) required_state=pending ;;
+  esac
+  if ! snapshot=$(fm_tmux_composer_input_snapshot "$target"); then
+    if [ -n "$required_state" ]; then
+      printf 'error: cannot verify pi-vim input mode\n' >&2
+      return 1
+    fi
+    return 0
+  fi
+  mode=${snapshot%%$'\t'*}
+  state=${snapshot#*$'\t'}
+  case "$mode" in
+    unknown)
+      [ -n "$required_state" ] || return 0
+      if [ "$state" != "$required_state" ]; then
+        printf 'error: refusing unproven input preparation with composer=%s\n' "$state" >&2
+        return 1
+      fi
+      ;;
+    ambiguous)
+      [ -n "$required_state" ] || return 0
+      printf 'error: refusing ambiguous pi-vim input mode\n' >&2
+      return 1
+      ;;
+    insert)
+      if [ -n "$required_state" ] && [ "$state" != "$required_state" ]; then
+        printf 'error: refusing pi-vim INSERT delivery with composer=%s\n' "$state" >&2
+        return 1
+      fi
+      ;;
+    normal)
+      if [ "$state" != "${required_state:-empty}" ]; then
+        printf 'error: refusing pi-vim NORMAL recovery with composer=%s\n' "$state" >&2
+        return 1
+      fi
+      tmux send-keys -t "$target" i 2>/dev/null || return 1
+      sleep "$settle"
+      snapshot=$(fm_tmux_composer_input_snapshot "$target") || snapshot=$'unknown\tunknown'
+      mode=${snapshot%%$'\t'*}
+      state=${snapshot#*$'\t'}
+      if [ "$mode" != insert ] || [ "$state" != "${required_state:-empty}" ]; then
+        printf 'error: pi-vim did not reach a proven INSERT composer (mode=%s composer=%s)\n' \
+          "$mode" "$state" >&2
+        return 1
+      fi
+      ;;
+  esac
+}
+
+fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label] [require-empty]
+  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 require_empty=${7:-}
+  local baseline_idle='' baseline_state err
   # The turn-started baseline must predate our own typing: a pane already
   # busy before the text lands can turn "busy" for reasons unrelated to our
   # Enter, so only a clean idle-to-busy transition may confirm a submit.
   baseline_state=$(fm_pane_busy_state "$target")
   [ "$baseline_state" = idle ] && baseline_idle=1
+  if ! fm_tmux_prepare_text_input "$target" "$settle" "$require_empty"; then
+    printf 'send-failed'
+    return 1
+  fi
   # A failed literal send replays tmux's stderr (for example "command too
   # long") so the caller can log why nothing was typed.
   if ! err=$(tmux send-keys -t "$target" -l "$text" 2>&1 >/dev/null); then

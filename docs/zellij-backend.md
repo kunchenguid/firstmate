@@ -74,7 +74,7 @@ This active probe is scoped to spawn-time worktree discovery and is not advertis
 The adapter records the previously active tab and immediately restores it with `go-to-tab-by-id`.
 There is a narrow visible race between those calls that no current Zellij flag can remove.
 
-An ordinary metadata-routed `fm-send.sh` text steer becomes a durable steering-inbox record, and only its best-effort constant doorbell passes through Zellij's submit machinery.
+An ordinary metadata-routed `fm-send.sh` text steer becomes a durable steering-inbox record, and only its best-effort constant doorbell passes through Zellij's submit machinery and the shared [lifecycle input preparation](architecture.md#lifecycle-input-preparation).
 On the typed plane, literal send uses bracketed paste followed by a separate explicit Enter.
 Before sending Enter, the adapter proves that the selected composer's normalized content changed by exactly the pasted text; an unreadable composer, a paste that lands elsewhere, or unrelated pane output fails without submitting.
 The adapter supports `Enter`, `Esc`, and the one-argument key expression `Ctrl c` through the shared key vocabulary.

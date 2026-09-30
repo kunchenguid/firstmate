@@ -35,6 +35,8 @@
 #               the tmux pi foreground-process probe). Identity is what makes
 #               Pi's blank separated composer provable; with identity=0 that
 #               shape stays `unknown`.
+#   normalize=1 the adapter can switch a proven blank pi-vim NORMAL composer
+#               to INSERT before text delivery (tmux and herdr).
 #   rows=<n>    the capture's bounded row count (informational).
 #
 # THE STRICT BLANK-ROW RULE (captain decision blank-row-injection-posture,
@@ -749,15 +751,19 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
 # exact positive proof they require (`empty`), so unrecognized future verdicts
 # fail safe by default.
 
-# _fm_composer_pi_separator_row: a solid pi separator - nothing but `─`, at
-# least 8 columns wide. The width floor is a literal substring test so it is
-# byte-exact in every locale.
-_fm_composer_pi_separator_row() {  # <trimmed-row>
-  local row=$1
-  [ -n "$row" ] || return 1
-  [ -z "${row//─/}" ] || return 1
-  case "$row" in
-    *────────*) return 0 ;;
+# _fm_composer_pi_separator_mode_var: recognize Pi's lower separator with or
+# without an exact pi-vim INSERT or NORMAL label.
+_fm_composer_pi_separator_mode_var() {  # <out-var> <trimmed-row>
+  local __fmpm_out=$1 __fmpm_row=$2 __fmpm_rule __fmpm_mode=plain
+  [ -n "$__fmpm_row" ] || return 1
+  __fmpm_rule=$__fmpm_row
+  case "$__fmpm_row" in
+    *' INSERT') __fmpm_rule=${__fmpm_row%' INSERT'}; __fmpm_mode=insert ;;
+    *' NORMAL') __fmpm_rule=${__fmpm_row%' NORMAL'}; __fmpm_mode=normal ;;
+  esac
+  [ -z "${__fmpm_rule//─/}" ] || return 1
+  case "$__fmpm_rule" in
+    *────────*) printf -v "$__fmpm_out" '%s' "$__fmpm_mode"; return 0 ;;
   esac
   return 1
 }
@@ -787,6 +793,7 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
   FM_COMPOSER_SCAN_PI_OPEN=-1
   FM_COMPOSER_SCAN_PI_CLOSE=-1
   FM_COMPOSER_SCAN_PI_LAST_SEPARATOR=-1
+  FM_COMPOSER_SCAN_PI_MODE=unknown
   # The glyph PROOF of each envelope: the first row strictly inside it whose
   # content leads with an agent prompt glyph once its side borders are
   # stripped, and that glyph. This is what tells a composer container from a
@@ -799,7 +806,7 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
   FM_COMPOSER_SCAN_LEFTBAR_GLYPH_ROW=-1
   FM_COMPOSER_SCAN_LEFTBAR_GLYPH=
   local leftbar_start=-1 pi_open=-1 pi_lines=0 pi_max
-  local probe row_glyph row_glyph_row
+  local probe row_glyph row_glyph_row separator_mode
   local box_glyph_row=-1 box_glyph='' pi_glyph_row=-1 pi_glyph=''
   pi_max=$FM_COMPOSER_PI_MAX_LINES
   case "$pi_max" in ''|*[!0-9]*|0) pi_max=8 ;; esac
@@ -844,12 +851,13 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
     # Pi separator rows: a solid `─` rule at least 8 columns wide. A separator
     # closes the preceding candidate and immediately opens the next, so an
     # earlier transcript rule can never outrank the live bottom composer pair.
-    if _fm_composer_pi_separator_row "$trimmed"; then
+    if _fm_composer_pi_separator_mode_var separator_mode "$trimmed"; then
       FM_COMPOSER_SCAN_PI_LAST_SEPARATOR=$row
       if [ "$pi_open" -ge 0 ]; then
         FM_COMPOSER_SCAN_PI_PAIR_FOUND=1
         FM_COMPOSER_SCAN_PI_OPEN=$pi_open
         FM_COMPOSER_SCAN_PI_CLOSE=$row
+        FM_COMPOSER_SCAN_PI_MODE=$separator_mode
         if [ "$pi_lines" -le "$pi_max" ]; then
           FM_COMPOSER_SCAN_PI_PAIR_VALID=1
         else
@@ -1469,10 +1477,6 @@ _fm_composer_select_cursorless() {
     FM_COMPOSER_SELECTED_FIRST=$FM_COMPOSER_SCAN_LEFTBAR_START
     FM_COMPOSER_SELECTED_LAST=$FM_COMPOSER_SCAN_LEFTBAR_END
   fi
-  if [ "$FM_COMPOSER_SCAN_INCOMPLETE_BOX_FROM" -gt "$generic" ]; then
-    FM_COMPOSER_SELECTED_KIND=
-    return 1
-  fi
   if [ "$FM_COMPOSER_SCAN_PI_PAIR_FOUND" = 1 ] \
      && [ "$FM_COMPOSER_SCAN_PI_CLOSE" -gt "$generic" ] \
      && [ "$generic" -lt "$FM_COMPOSER_SCAN_PI_OPEN" ]; then
@@ -1480,6 +1484,10 @@ _fm_composer_select_cursorless() {
     FM_COMPOSER_SELECTED_KIND=pi
     FM_COMPOSER_SELECTED_FIRST=$((FM_COMPOSER_SCAN_PI_OPEN + 1))
     FM_COMPOSER_SELECTED_LAST=$((FM_COMPOSER_SCAN_PI_CLOSE - 1))
+  fi
+  if [ "$FM_COMPOSER_SCAN_INCOMPLETE_BOX_FROM" -gt "$generic" ]; then
+    FM_COMPOSER_SELECTED_KIND=
+    return 1
   fi
   if [ "$FM_COMPOSER_SCAN_PI_PAIR_FOUND" = 0 ] \
      && [ "$FM_COMPOSER_SCAN_PI_LAST_SEPARATOR" -gt "$generic" ]; then
@@ -1612,14 +1620,47 @@ EOF
   printf '%s\n' "$joined" | LC_ALL=C awk '{$1=$1; printf "%s", $0}'
 }
 
+# fm_composer_pi_input_mode: report pi-vim's structurally proven mode for the
+# selected separated composer. Identity is intentionally not required: this
+# answer selects keyboard normalization, while the ordinary classifier remains
+# the emptiness owner.
+fm_composer_pi_input_mode() {  # <screen> [cursor-row] -> insert|normal|ambiguous|unknown
+  local screen=$1 cy=${2:-} plain
+  case "$cy" in *[!0-9]*) printf 'unknown'; return 0 ;; esac
+  plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
+  _fm_composer_scan_screen "$plain" "$cy"
+  if [ "$FM_COMPOSER_SCAN_PI_PAIR_FOUND" != 1 ] \
+     || [ "$FM_COMPOSER_SCAN_PI_PAIR_VALID" != 1 ]; then
+    printf 'unknown'
+    return 0
+  fi
+  if [ -n "$cy" ]; then
+    if [ "$cy" -le "$FM_COMPOSER_SCAN_PI_OPEN" ] \
+       || [ "$cy" -ge "$FM_COMPOSER_SCAN_PI_CLOSE" ]; then
+      printf 'unknown'
+      return 0
+    fi
+  elif ! _fm_composer_select_cursorless "$plain" \
+       || [ "$FM_COMPOSER_SELECTED_KIND" != pi ]; then
+    printf 'unknown'
+    return 0
+  fi
+  case "$FM_COMPOSER_SCAN_PI_MODE" in
+    insert|normal) printf '%s' "$FM_COMPOSER_SCAN_PI_MODE" ;;
+    plain) printf 'ambiguous' ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
 fm_composer_classify_screen() {  # <caps> <screen> [cursor_row] [identity]
   local caps=$1 screen=$2 cy=${3:-} identity=${4:-}
-  local styled=0 cursor=0 has_identity=0 kv plain
+  local styled=0 cursor=0 has_identity=0 can_normalize=0 kv plain
   while IFS= read -r kv; do
     case "$kv" in
       styled=1) styled=1 ;;
       cursor=1) cursor=1 ;;
       identity=1) has_identity=1 ;;
+      normalize=1) can_normalize=1 ;;
     esac
   done <<EOF
 $caps
@@ -1651,7 +1692,7 @@ EOF
       if [ "$FM_COMPOSER_SCAN_PI_PAIR_FOUND" = 1 ] \
          && [ "$cy" -gt "$FM_COMPOSER_SCAN_PI_OPEN" ] \
          && [ "$cy" -lt "$FM_COMPOSER_SCAN_PI_CLOSE" ]; then
-        _fm_composer_classify_bare_pi_overlap "$screen" "$styled" "$has_identity" "$identity" "$cy"
+        _fm_composer_classify_bare_pi_overlap "$screen" "$styled" "$has_identity" "$identity" "$cy" "$can_normalize"
       else
         _fm_composer_classify_bare_row "$screen" "$styled" "$cy"
       fi
@@ -1672,7 +1713,7 @@ EOF
     if [ "$FM_COMPOSER_SCAN_PI_PAIR_FOUND" = 1 ] \
        && [ "$cy" -gt "$FM_COMPOSER_SCAN_PI_OPEN" ] \
        && [ "$cy" -lt "$FM_COMPOSER_SCAN_PI_CLOSE" ]; then
-      _fm_composer_pi_verdict "$screen" "$styled" "$has_identity" "$identity"
+      _fm_composer_pi_verdict "$screen" "$styled" "$has_identity" "$identity" "$can_normalize"
       return 0
     fi
     if [ "$FM_COMPOSER_SCAN_CURSOR_EDGE" = 1 ]; then
@@ -1693,7 +1734,7 @@ EOF
   fi
   case "$FM_COMPOSER_SELECTED_KIND" in
     pi)
-      _fm_composer_pi_verdict "$screen" "$styled" "$has_identity" "$identity"
+      _fm_composer_pi_verdict "$screen" "$styled" "$has_identity" "$identity" "$can_normalize"
       ;;
     box)
       _fm_composer_classify_rows "$screen" "$styled" "$FM_COMPOSER_SELECTED_AMBIG" \
@@ -1707,7 +1748,7 @@ EOF
          && [ "$FM_COMPOSER_SELECTED_FIRST" -gt "$FM_COMPOSER_SCAN_PI_OPEN" ] \
          && [ "$FM_COMPOSER_SELECTED_FIRST" -lt "$FM_COMPOSER_SCAN_PI_CLOSE" ]; then
         _fm_composer_classify_bare_pi_overlap "$screen" "$styled" "$has_identity" "$identity" \
-          "$FM_COMPOSER_SELECTED_FIRST"
+          "$FM_COMPOSER_SELECTED_FIRST" "$can_normalize"
       else
         _fm_composer_classify_bare_row "$screen" "$styled" "$FM_COMPOSER_SELECTED_FIRST"
       fi
@@ -1782,8 +1823,8 @@ _fm_composer_classify_pi_rows() {  # <screen> <styled>
   printf 'empty'
 }
 
-_fm_composer_classify_bare_pi_overlap() {  # <screen> <styled> <has-identity> <identity> <bare-row>
-  local screen=$1 styled=$2 has_identity=$3 identity=$4 row=$5 agent
+_fm_composer_classify_bare_pi_overlap() {  # <screen> <styled> <has-identity> <identity> <bare-row> <can-normalize>
+  local screen=$1 styled=$2 has_identity=$3 identity=$4 row=$5 can_normalize=$6 agent
   if [ "$has_identity" != 1 ]; then
     _fm_composer_classify_bare_row "$screen" "$styled" "$row"
     return 0
@@ -1798,7 +1839,7 @@ _fm_composer_classify_bare_pi_overlap() {  # <screen> <styled> <has-identity> <i
   fi
   agent=${identity%%$'\t'*}
   if [ "$agent" = pi ]; then
-    _fm_composer_pi_verdict "$screen" "$styled" "$has_identity" "$identity"
+    _fm_composer_pi_verdict "$screen" "$styled" "$has_identity" "$identity" "$can_normalize"
   else
     _fm_composer_classify_bare_row "$screen" "$styled" "$row"
   fi
@@ -1813,8 +1854,8 @@ _fm_composer_classify_bare_pi_overlap() {  # <screen> <styled> <has-identity> <i
 # is drawn above the separator pair, so the composer region looks free while the
 # keys would answer the prompt instead of composing (issue #2797). Structure
 # cannot disprove that, so a blocked pi defers rather than claiming empty.
-_fm_composer_pi_verdict() {  # <screen> <styled> <has_identity> <identity>
-  local screen=$1 styled=$2 has_identity=$3 identity=$4 agent agent_status state
+_fm_composer_pi_verdict() {  # <screen> <styled> <has_identity> <identity> <can-normalize>
+  local screen=$1 styled=$2 has_identity=$3 identity=$4 can_normalize=$5 agent agent_status state
   if [ "$has_identity" != 1 ]; then
     printf 'unknown'
     return 0
@@ -1836,6 +1877,10 @@ _fm_composer_pi_verdict() {  # <screen> <styled> <has_identity> <identity>
   state=$(_fm_composer_classify_pi_rows "$screen" "$styled")
   if [ "$state" = pending ]; then
     printf 'pending'
+    return 0
+  fi
+  if [ "$FM_COMPOSER_SCAN_PI_MODE" = normal ] && [ "$can_normalize" != 1 ]; then
+    printf 'unknown'
     return 0
   fi
   case "$agent_status" in

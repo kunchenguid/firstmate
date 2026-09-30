@@ -568,9 +568,14 @@ fm_backend_cmux_composer_state() {  # <target> [expected-label] -> empty|pending
 # loop (bin/fm-composer-lib.sh: fm_composer_submit_retry_core) against the
 # shared composer verdict. Echoes empty|pending|unknown|send-failed, a subset
 # of the proof-carrying submit vocabulary.
-fm_backend_cmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label]
+fm_backend_cmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label] [require-empty]
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 expected_label=${6:-}
+  local require_empty=${7:-} state
   fm_backend_cmux_parse_target "$target" || { printf 'unknown'; return 0; }
+  if [ "$require_empty" = require-empty ]; then
+    state=$(fm_backend_cmux_composer_state "$target" "$expected_label")
+    [ "$state" = empty ] || { printf 'send-failed'; return 0; }
+  fi
   fm_backend_cmux_send_literal "$target" "$text" "$expected_label" || { printf 'send-failed'; return 0; }
   sleep "$settle"
   fm_composer_submit_retry_core fm_backend_cmux_send_key fm_backend_cmux_composer_state \

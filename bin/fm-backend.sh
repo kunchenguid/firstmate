@@ -807,10 +807,22 @@ fm_backend_send_key() {  # <backend> <target> <key> [expected-label]
   esac
 }
 
+fm_backend_prepare_text_input() {  # <backend> <target> <settle> <requirement>
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    tmux) fm_tmux_prepare_text_input "$@" ;;
+    herdr) fm_backend_herdr_prepare_text_input "$@" ;;
+    zellij|orca|cmux) return 0 ;;
+    *) echo "error: no input-preparation implementation for backend '$backend'" >&2; return 1 ;;
+  esac
+}
+
 # fm_backend_send_text_submit: type text once, then submit and verify,
 # retrying only the submission (never retyping). Echoes the backend's
 # proof-carrying verdict; callers require exact empty for confirmed delivery.
-fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sleep> <settle> [expected-label]
+fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sleep> <settle> [expected-label] [require-empty]
   local backend=$1
   shift
   fm_backend_source "$backend" || return 1
