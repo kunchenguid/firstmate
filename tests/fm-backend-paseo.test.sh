@@ -902,12 +902,48 @@ test_kill_retire_holds_back() {
   done
   dir="$TMP_ROOT/retire-outside-home"
   paseo_retire_case "$dir" '[{"workspaceId":"wks_ff","name":"firstmate","cwd":"/tmp/elsewhere"}]' '[]' '[]'
-  assert_contains "$(cat "$dir/log")" $'\x1f''workspace'$'\x1f''archive'$'\x1f''wks_ff' \
-    "kill should still archive an emptied firstmate workspace outside this home"
   case "$(cat "$dir/log")" in
-  *$'\x1f''project'*) fail "kill must never touch a project outside this home's own clones" ;;
+  *$'\x1f''archive'* | *$'\x1f''project'*) fail "kill must never archive a workspace or touch a project outside this home's own clones" ;;
   esac
-  pass "fm_backend_paseo_kill: keeps the workspace while a tab, agent, other title, or firstmate itself uses it, and never deletes a project outside this home"
+  pass "fm_backend_paseo_kill: keeps the workspace while a tab, agent, other title, or firstmate itself uses it, and never retires anything outside this home's clones"
+}
+
+# paseo_hold_workspace_lock: hold <home>'s paseo workspace lock from another
+# live process until the returned pid is killed.
+paseo_hold_workspace_lock() { # <home>
+  local home=$1
+  mkdir -p "$home/state"
+  FM_HOME="$home" bash -c '. "$0/bin/fm-wake-lib.sh"; fm_lock_try_acquire "$FM_HOME/state/.paseo-workspace.lock" || exit 1; touch "$FM_HOME/state/.held"; sleep 30' "$ROOT" >/dev/null 2>&1 &
+  local holder=$! i=0
+  while [ ! -e "$home/state/.held" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+  [ -e "$home/state/.held" ] || fail "could not take the paseo workspace lock for the test"
+  printf '%s' "$holder"
+}
+
+test_workspace_lock_serializes_spawn_and_retire() {
+  local dir ws holder fb status
+  dir="$TMP_ROOT/retire-locked"
+  mkdir -p "$dir/home"
+  holder=$(paseo_hold_workspace_lock "$dir/home")
+  ws=$(jq -n --arg cwd "$dir/home/projects/demo" '[{workspaceId:"wks_ff",name:"firstmate",cwd:$cwd}]')
+  FM_BACKEND_PASEO_LOCK_ATTEMPTS=3 paseo_retire_case "$dir" "$ws" '[]' '[]'
+  case "$(cat "$dir/log")" in
+  *$'\x1f''archive'* | *$'\x1f''delete'*) fail "cleanup must not archive while another process holds the workspace lock" ;;
+  esac
+  dir="$TMP_ROOT/create-task-locked"
+  mkdir -p "$dir/responses"
+  printf '[]' >"$dir/responses/1.out"
+  fb=$(make_paseo_fakebin "$dir")
+  PATH="$fb:$PATH" FM_PASEO_LOG="$dir/log" FM_PASEO_RESPONSES="$dir/responses" FM_HOME="$TMP_ROOT/retire-locked/home" FM_BACKEND_PASEO_LOCK_ATTEMPTS=3 \
+    bash -c 'unset PASEO_WORKSPACE_ID PASEO_AGENT_ID; . "$0/bin/backends/paseo.sh"; fm_backend_paseo_create_task fm-locked /tmp/proj' "$ROOT" >/dev/null 2>&1
+  status=$?
+  kill "$holder" 2>/dev/null
+  wait "$holder" 2>/dev/null
+  [ "$status" -ne 0 ] || fail "create_task must refuse while another process holds the workspace lock"
+  case "$(cat "$dir/log")" in
+  *$'\x1f''create'*) fail "create_task must not create anything without the workspace lock" ;;
+  esac
+  pass "fm_backend_paseo: spawn and workspace retirement share one lock; neither acts while another process holds it"
 }
 
 test_kill_is_best_effort_when_terminal_kill_fails() {
@@ -1057,6 +1093,7 @@ test_kill_keeps_workspace_when_inventory_unreadable
 test_kill_retires_empty_firstmate_workspace_and_project
 test_kill_retires_workspace_when_tab_already_gone
 test_kill_retire_holds_back
+test_workspace_lock_serializes_spawn_and_retire
 test_kill_is_best_effort_when_terminal_kill_fails
 test_list_live_filters_by_name_prefix
 test_secondmate_spawn_refuses_explicit_paseo_only

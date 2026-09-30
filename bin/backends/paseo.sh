@@ -14,10 +14,10 @@
 # own workspace is known, every task tab goes there whatever the project.
 # Otherwise each project gets ONE shared workspace labeled `firstmate` (or
 # `2ndmate-<id>`), adopted (fm_backend_paseo_workspace_ensure owns the order)
-# or created once; Paseo registers or reuses the project by path. Cleanup
-# archives that shared workspace once its last task tab closes and deletes
-# its project when the folder is one of this home's own clones
-# (fm_backend_paseo_retire_workspace). The daemon (127.0.0.1:6767 by
+# or created once; Paseo registers or reuses the project by path. When the
+# folder is one of this home's own clones, cleanup archives that workspace
+# once its last task tab closes and deletes its project, under a lock shared
+# with spawn (fm_backend_paseo_retire_workspace). The daemon (127.0.0.1:6767 by
 # default, `paseo status`) is the shared container.
 #
 # Target string shape: "<terminal_id>:<workspace_id>" - the terminal's UUID
@@ -341,6 +341,36 @@ fm_backend_paseo_workspace_ensure() { # <cwd>
   printf '%s' "$wsid"
 }
 
+# fm_backend_paseo_workspace_lock / _unlock: one home-wide lock (the shared
+# stale-owner lock from bin/fm-wake-lib.sh, loaded on demand like herdr's
+# presentation lock) that serializes choosing or creating a workspace plus
+# opening a tab against retiring an emptied workspace, so an archive can never
+# take a tab a concurrent spawn has just opened. Retirement touches only this
+# home's own clones, which only this home spawns into, so a per-home lock is
+# enough. Bounded: a spawn that cannot get it refuses, cleanup skips.
+FM_BACKEND_PASEO_LOCK_ATTEMPTS="${FM_BACKEND_PASEO_LOCK_ATTEMPTS:-300}"
+fm_backend_paseo_workspace_lock_path() {
+  printf '%s/.paseo-workspace.lock' "${STATE:-$FM_HOME/state}"
+}
+fm_backend_paseo_workspace_lock() {
+  local attempt=0 lock
+  if ! declare -F fm_lock_try_acquire >/dev/null 2>&1; then
+    # shellcheck source=bin/fm-wake-lib.sh
+    . "$FM_BACKEND_PASEO_ROOT/bin/fm-wake-lib.sh"
+  fi
+  lock=$(fm_backend_paseo_workspace_lock_path)
+  mkdir -p "${lock%/*}" 2>/dev/null || return 1
+  while [ "$attempt" -lt "$FM_BACKEND_PASEO_LOCK_ATTEMPTS" ]; do
+    fm_lock_try_acquire "$lock" && return 0
+    sleep 0.1
+    attempt=$((attempt + 1))
+  done
+  return 1
+}
+fm_backend_paseo_workspace_unlock() {
+  fm_lock_release "$(fm_backend_paseo_workspace_lock_path)" || true
+}
+
 # fm_backend_paseo_create_task: open the task's terminal TAB inside the
 # workspace chosen by fm_backend_paseo_workspace_ensure, refusing an existing live terminal NAME (ours;
 # Paseo itself does not enforce uniqueness). The terminal name is the
@@ -357,11 +387,17 @@ fm_backend_paseo_create_task() { # <label> <cwd>
     echo "error: paseo terminal '$name' already exists" >&2
     return 1
   fi
-  wsid=$(fm_backend_paseo_workspace_ensure "$cwd") || return 1
-  out=$(fm_backend_paseo_cli_json terminal create --workspace "$wsid" --cwd "$cwd" --name "$name" --json) || {
-    echo "error: paseo terminal create failed for '$name'" >&2
+  fm_backend_paseo_workspace_lock || {
+    echo "error: could not take the paseo workspace lock; refusing to create '$name'" >&2
     return 1
   }
+  if ! wsid=$(fm_backend_paseo_workspace_ensure "$cwd") ||
+    ! out=$(fm_backend_paseo_cli_json terminal create --workspace "$wsid" --cwd "$cwd" --name "$name" --json); then
+    fm_backend_paseo_workspace_unlock
+    [ -z "${wsid:-}" ] || echo "error: paseo terminal create failed for '$name'" >&2
+    return 1
+  fi
+  fm_backend_paseo_workspace_unlock
   tid=$(printf '%s' "$out" | jq -r '.id // empty' 2>/dev/null)
   [ -n "$tid" ] || {
     echo "error: could not parse a terminal id from paseo terminal create output: $out" >&2
@@ -574,13 +610,20 @@ fm_backend_paseo_kill() { # <target> [unused] [expected-label]
 # per-project shared workspace Firstmate created once it holds no tab and no
 # Paseo agent works in its folder, then delete its project when that folder
 # is one of this home's own clones and no other workspace uses it, so
-# finished work leaves nothing in the sidebar. Firstmate's own workspace and
-# any workspace titled by someone else are never touched, and an unreadable
-# inventory skips the cleanup. A spawn racing this archive fails its
-# terminal create loudly and can simply be retried.
+# finished work leaves nothing in the sidebar. Only a workspace for one of
+# this home's own clones is archived; Firstmate's own workspace and any
+# workspace titled by someone else are never touched, and an unreadable
+# inventory skips the cleanup. Runs under the workspace lock so a concurrent
+# spawn cannot open a tab between the empty check and the archive.
 fm_backend_paseo_retire_workspace() { # <workspace_id>
+  [ -n "${1:-}" ] || return 0
+  fm_backend_paseo_workspace_lock || return 0
+  fm_backend_paseo_retire_workspace_locked "$1"
+  fm_backend_paseo_workspace_unlock
+  return 0
+}
+fm_backend_paseo_retire_workspace_locked() { # <workspace_id>
   local wsid=$1 label list cwd terminals agents projects pid logical real
-  [ -n "$wsid" ] || return 0
   label=$(fm_backend_paseo_workspace_label)
   list=$(fm_backend_paseo_cli workspace ls --json 2>/dev/null) || return 0
   printf '%s' "$list" | jq -e 'type == "array"' >/dev/null 2>&1 || return 0
@@ -588,18 +631,18 @@ fm_backend_paseo_retire_workspace() { # <workspace_id>
   cwd=$(printf '%s' "$list" | jq -r --arg id "$wsid" --arg label "$label" \
     '.[] | select(.workspaceId == $id and .name == $label) | .cwd' | head -1)
   [ -n "$cwd" ] || return 0
-  terminals=$(fm_backend_paseo_cli terminal ls --all --json 2>/dev/null) || return 0
-  printf '%s' "$terminals" | jq -e --arg id "$wsid" 'type == "array" and all(.[]; .workspaceId != $id)' >/dev/null 2>&1 || return 0
-  agents=$(fm_backend_paseo_cli ls --json 2>/dev/null) || return 0
-  printf '%s' "$agents" | jq -e --arg cwd "$cwd" --arg home "$HOME" \
-    'type == "array" and all(.[]; ((.cwd // "") | sub("^~"; $home)) != $cwd)' >/dev/null 2>&1 || return 0
-  fm_backend_paseo_cli workspace archive "$wsid" >/dev/null 2>&1 || return 0
   logical=$(cd "$FM_HOME" 2>/dev/null && pwd) || logical=$FM_HOME
   real=$(cd "$FM_HOME" 2>/dev/null && pwd -P) || real=$FM_HOME
   case "$cwd" in
   "$FM_HOME"/projects/* | "$logical"/projects/* | "$real"/projects/*) ;;
   *) return 0 ;;
   esac
+  terminals=$(fm_backend_paseo_cli terminal ls --all --json 2>/dev/null) || return 0
+  printf '%s' "$terminals" | jq -e --arg id "$wsid" 'type == "array" and all(.[]; .workspaceId != $id)' >/dev/null 2>&1 || return 0
+  agents=$(fm_backend_paseo_cli ls --json 2>/dev/null) || return 0
+  printf '%s' "$agents" | jq -e --arg cwd "$cwd" --arg home "$HOME" \
+    'type == "array" and all(.[]; ((.cwd // "") | sub("^~"; $home)) != $cwd)' >/dev/null 2>&1 || return 0
+  fm_backend_paseo_cli workspace archive "$wsid" >/dev/null 2>&1 || return 0
   printf '%s' "$list" | jq -e --arg id "$wsid" --arg cwd "$cwd" 'all(.[]; .workspaceId == $id or .cwd != $cwd)' >/dev/null 2>&1 || return 0
   projects=$(fm_backend_paseo_cli project ls --json 2>/dev/null) || return 0
   pid=$(printf '%s' "$projects" | jq -r --arg cwd "$cwd" '.[]? | select(.path == $cwd) | .projectId' 2>/dev/null | head -1)
