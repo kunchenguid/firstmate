@@ -239,8 +239,20 @@ function paginate(text: string): string[] {
   const buffer = Buffer.from(text, "utf8");
   if (buffer.length === 0) return [""];
   const pages: string[] = [];
-  for (let offset = 0; offset < buffer.length; offset += DRAIN_PAGE_BYTES) {
-    pages.push(buffer.subarray(offset, Math.min(offset + DRAIN_PAGE_BYTES, buffer.length)).toString("utf8"));
+  let offset = 0;
+  while (offset < buffer.length) {
+    let end = Math.min(offset + DRAIN_PAGE_BYTES, buffer.length);
+    // Do not cut in the middle of a UTF-8 multibyte character: back the end up
+    // to the start of the character that straddles the boundary so each page
+    // decodes losslessly. A continuation byte has top bits 10xxxxxx.
+    if (end < buffer.length) {
+      while (end > offset && (buffer[end] & 0xc0) === 0x80) end--;
+    }
+    // A single character wider than DRAIN_PAGE_BYTES would leave end === offset;
+    // in that case fall back to the raw cut so pages always advance.
+    if (end === offset) end = Math.min(offset + DRAIN_PAGE_BYTES, buffer.length);
+    pages.push(buffer.subarray(offset, end).toString("utf8"));
+    offset = end;
   }
   return pages;
 }

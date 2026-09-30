@@ -62,6 +62,20 @@ if [ -e "$FM_HOME/drain-large" ]; then
   # spans several 64 KiB pages. Every marker must reach the model whole.
   awk 'BEGIN { for (i = 0; i < 19; i += 1) { printf "marker-%02d ", i; for (j = 0; j < 8100; j += 1) printf "y"; printf "\n" } }'
 fi
+if [ -e "$FM_HOME/drain-boundary" ]; then
+  # Place a 4-byte UTF-8 emoji so its bytes straddle the 64 KiB page cut.
+  # The header line before this block is exactly 37 bytes, so we pad to make
+  # the emoji begin at byte 65535: the first page cut at byte 65536 would
+  # otherwise land inside its continuation bytes.
+  python3 -c "import sys, os
+head_len = 37
+boundary = 64 * 1024
+pad = boundary - 1 - head_len
+sys.stdout.buffer.write(b'x' * pad)
+sys.stdout.buffer.write('\U0001F600'.encode('utf-8'))
+sys.stdout.buffer.write(b'tail-after-emoji\n')
+"
+fi
 echo 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 42 --recovery-generation gen-7' >&2
 SH
   cat > "$repo/bin/fm-deliver-cycle.sh" <<'SH'
@@ -229,6 +243,37 @@ console.log('ack-invocations=' + ackInvocations);
   pass "a presentation over 64 KiB reaches the model whole across paged calls before it is acknowledged"
 }
 
+test_paged_pages_split_on_utf8_character_boundaries() {
+  local repo out
+  repo=$(make_root paged-utf8)
+  : > "$repo/home/drain-boundary"
+  out=$(run_pi "$repo" 1 "
+await emit('session_start', { reason: 'startup' });
+const pages = [];
+let page = await call('fm_drain');
+pages.push(page);
+let guard = 0;
+while (/more page/.test(pages[pages.length - 1])) {
+  page = await call('fm_drain');
+  pages.push(page);
+  if (guard++ > 20) throw new Error('too many pages');
+}
+// Strip the framing (header/footer notes wrapped around each page body) by
+// joining everything and locating the drain payload between the known head
+// line and the trailing tail marker: what matters here is that the emoji
+// spanning the 64 KiB boundary is preserved losslessly across pages.
+const joined = pages.join('');
+console.log('has-emoji=' + joined.includes('\u{1F600}'));
+console.log('has-replacement=' + joined.includes('\uFFFD'));
+console.log('has-tail=' + joined.includes('tail-after-emoji'));
+console.log('pages=' + pages.length);
+") || fail "utf-8 boundary paging case failed: $out"
+  assert_contains "$out" "has-emoji=true" "the 4-byte emoji straddling the 64 KiB cut survives paging"
+  assert_contains "$out" "has-replacement=false" "no U+FFFD replacement character is introduced at the page boundary"
+  assert_contains "$out" "has-tail=true" "content after the boundary is still delivered"
+  pass "pages are split on UTF-8 character boundaries so multibyte characters are never corrupted"
+}
+
 test_lock_held_by_a_short_lived_child_is_not_ownership() {
   local repo out
   repo=$(make_root child-anchor)
@@ -299,6 +344,7 @@ test_tool_inputs_are_closed
 test_unrestricted_session_refuses_everything
 test_restricted_session_locks_drains_and_acknowledges
 test_large_presentation_is_paged_across_calls
+test_paged_pages_split_on_utf8_character_boundaries
 test_lock_held_by_a_short_lived_child_is_not_ownership
 test_delivery_passes_are_serialized_and_follow_each_run
 test_interval_runs_passes_until_shutdown
