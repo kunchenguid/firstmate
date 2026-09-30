@@ -69,6 +69,9 @@
 #                           close of this escalation; once set, the record is
 #                           neither reminded nor rescanned. Cleared when the
 #                           record escalates
+#   escalation_dismiss_scan=
+#                           file signature and open|dismissed from the last
+#                           dismissal scan; a matching signature is not read again
 #   escalation_closed_epoch=
 #                           when the durable status decision opened by that
 #                           escalation was closed again (see the escalation
@@ -373,6 +376,7 @@ recovery_turn_completed_epoch=
 escalated_epoch=
 surfaced_session=
 escalation_dismissed_epoch=
+escalation_dismiss_scan=
 resolved_epoch=
 resolved_via=
 wrong_home_hits=0
@@ -1196,17 +1200,9 @@ fm_pending_reply_close_escalation() {  # <state-dir> <corr_id>
   return "$rc"
 }
 
-# 0 when the operator dismissed this record's escalation: the parent channel
-# holds the resolved [key=pending-reply-<corr>] close fm-send --resolve-key
-# writes, after the escalation opened under that key. Nothing else dismisses,
-# so a legacy unkeyed escalation, any other resolved line, or a terminal line
-# that clears the whole fold leaves it unresolved and visible.
-fm_pending_reply_escalation_dismissed() {  # <record-path>
-  local rec=$1 parent_status key line untimed seen=''
-  [ -z "$(fm_pending_reply_get "$rec" escalation_dismissed_epoch)" ] || return 0
-  parent_status=$(fm_pending_reply_get "$rec" parent_status)
-  [ -n "$parent_status" ] && [ -f "$parent_status" ] || return 1
-  key=$(fm_pending_reply_escalation_key "$(fm_pending_reply_get "$rec" corr_id)")
+# Read the parent status log once and print open or dismissed.
+_fm_pending_reply_scan_dismissal() {  # <status-file> <key>
+  local parent_status=$1 key=$2 line untimed seen=''
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in *"[key=$key]"*) ;; *) continue ;; esac
     _fm_status_untimed "$line" untimed
@@ -1215,6 +1211,43 @@ fm_pending_reply_escalation_dismissed() {  # <record-path>
       "resolved [key=$key]: pending-reply-resolved: "*) [ -z "$seen" ] || seen=dismissed ;;
     esac
   done < "$parent_status"
+  # The resolved line only dismisses after the escalation opened.
+  if [ "$seen" = dismissed ]; then
+    printf 'dismissed'
+  else
+    printf 'open'
+  fi
+}
+
+# 0 when the operator dismissed this record's escalation: the parent channel
+# holds the resolved [key=pending-reply-<corr>] close fm-send --resolve-key
+# writes, after the escalation opened under that key. Nothing else dismisses,
+# so a legacy unkeyed escalation, any other resolved line, or a terminal line
+# that clears the whole fold leaves it unresolved and visible. An unchanged
+# log keeps the previous answer, so a later poll does not read it again.
+fm_pending_reply_escalation_dismissed() {  # <record-path>
+  local rec=$1 parent_status key signature cached seen
+  [ -z "$(fm_pending_reply_get "$rec" escalation_dismissed_epoch)" ] || return 0
+  parent_status=$(fm_pending_reply_get "$rec" parent_status)
+  [ -n "$parent_status" ] && [ -f "$parent_status" ] || return 1
+  key=$(fm_pending_reply_escalation_key "$(fm_pending_reply_get "$rec" corr_id)")
+  # An unchanged file signature means the log has not changed.
+  signature=$(fm_pending_reply_file_signature "$parent_status")
+  cached=$(fm_pending_reply_get "$rec" escalation_dismiss_scan)
+  case "$signature" in
+    missing|unreadable) ;;
+    *)
+      case "$cached" in
+        "$signature open") return 1 ;;
+        "$signature dismissed") return 0 ;;
+      esac
+      ;;
+  esac
+  seen=$(_fm_pending_reply_scan_dismissal "$parent_status" "$key")
+  case "$signature" in
+    missing|unreadable) ;;
+    *) fm_pending_reply_set "$rec" escalation_dismiss_scan "$signature $seen" || return 1 ;;
+  esac
   [ "$seen" = dismissed ]
 }
 

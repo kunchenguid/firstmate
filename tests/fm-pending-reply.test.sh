@@ -2238,6 +2238,40 @@ test_new_session_in_same_harness_process_is_reminded() {
   pass "a new session in the same harness process is reminded once"
 }
 
+# An unchanged parent status log is not read again. A changed log is.
+test_unchanged_status_log_is_not_reread_for_dismissal() {
+  local home state corr rec status
+  home=$(setup_parent unchanged-log)
+  state="$home/state"
+  export FM_PENDING_REPLY_NOW=1000
+  export FM_PENDING_REPLY_SEND_HOOK='true'
+  corr=$(escalate_new "$home" "$state" "still open")
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  status=$(fm_pending_reply_get "$rec" parent_status)
+  fm_pending_reply_set "$rec" escalation_dismiss_scan ""
+  (
+    local scan_log reads
+    scan_log="$TMP_ROOT/dismiss-scan-$RANDOM"
+    : > "$scan_log"
+    eval "$(declare -f _fm_pending_reply_scan_dismissal | sed '1s/_fm_pending_reply_scan_dismissal/_fm_pending_reply_scan_dismissal_real/')"
+    # Called indirectly by fm_pending_reply_escalation_dismissed.
+    # shellcheck disable=SC2329
+    _fm_pending_reply_scan_dismissal() {
+      printf 'x\n' >> "$scan_log"
+      _fm_pending_reply_scan_dismissal_real "$@"
+    }
+    fm_pending_reply_escalation_dismissed "$rec" && { echo "an open escalation was dismissed" >&2; exit 1; }
+    fm_pending_reply_escalation_dismissed "$rec" && { echo "the cached open result dismissed the escalation" >&2; exit 1; }
+    reads=$(wc -l < "$scan_log" | tr -d ' ')
+    [ "$reads" = 1 ] || { echo "an unchanged status log was read ${reads} times" >&2; exit 1; }
+    printf 'resolved [key=pending-reply-%s]: pending-reply-resolved: ack\n' "$corr" >> "$status"
+    fm_pending_reply_escalation_dismissed "$rec" || { echo "a changed status log was not re-read" >&2; exit 1; }
+    reads=$(wc -l < "$scan_log" | tr -d ' ')
+    [ "$reads" = 2 ] || { echo "a changed status log was read ${reads} times" >&2; exit 1; }
+  ) || fail "unchanged status log was re-read"
+  pass "an unchanged status log is not re-read for dismissal"
+}
+
 # --- run --------------------------------------------------------------------
 
 test_normal_correlated_reply_resolves_once
@@ -2253,6 +2287,7 @@ test_escalated_record_is_reminded_once_per_later_session
 test_operator_closed_escalation_is_not_reminded
 test_other_closes_do_not_dismiss_escalation
 test_same_session_operator_close_is_recorded
+test_unchanged_status_log_is_not_reread_for_dismissal
 test_queued_reminder_does_not_mark_unnamed_record
 test_reminder_leaves_state_alone_without_escalations
 test_tick_starts_reminder_only_for_escalated_records
