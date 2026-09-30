@@ -362,12 +362,26 @@ print_status_outcome_backstop_section() {  # <task-and-endpoint-snapshot>
     fi
 
     line="$task $event"
-    fm_cap_line_var "$line" $((item_bytes - 1))
+    # A needs-decision/blocked event reaching here has a malformed key (the
+    # OPEN DECISIONS fold already owns every parseable one, per the `case`
+    # above), so this is its only presentation path - the routine per-line cut
+    # never applies to it, same rule as OPEN DECISIONS (issue #19).
+    fm_cap_status_line_var "$line" "$verb" $((item_bytes - 1))
     line=$FM_LINE_CAP_LINE
     bytes=$(( ${#line} + 1 ))
     if [ $((used + bytes)) -gt "$global_bytes" ]; then
-      omitted=$((omitted + 1))
-      continue
+      case "$verb" in
+        needs-decision|blocked)
+          # Never drop a decision or blocker silently: point at its durable
+          # source instead of the plain omission count routine events get.
+          line="$task $verb: too long to print in full here - read it in full at $STATE/$task.status"
+          bytes=$(( ${#line} + 1 ))
+          ;;
+        *)
+          omitted=$((omitted + 1))
+          continue
+          ;;
+      esac
     fi
     output="$output$line
 "
@@ -443,7 +457,7 @@ EOF
 # common case.
 print_open_decisions_section() {
   local snapshot=${1:-} open task key verb note line item_bytes=220 global_bytes=4000
-  local output='' used=0 shown=0 omitted=0 bytes
+  local output='' used=0 shown=0 bytes pointer
 
   if [ -n "$snapshot" ]; then
     open=$(scan_open_decisions_snapshot "$STATE" "$snapshot") || return 1
@@ -457,15 +471,23 @@ print_open_decisions_section() {
     line="$task"
     [ "$key" = default ] || line="$line [key=$key]"
     line="$line $verb: $note"
-    # The shared cut counts the item's own characters; the trailing newline this
-    # section's global budget also pays for is this caller's, so the per-item
-    # allowance passed down is one short of the cap.
-    fm_cap_line_var "$line" $((item_bytes - 1))
+    # Every row here is needs-decision or blocked by construction (this fold's
+    # whole contract): the captain needs the full context, options, and
+    # recommendation to relay onward, so the routine per-line cut never
+    # applies here (issue #19). The section's own byte budget is unchanged -
+    # an item that cannot fit it is never silently dropped, though: it falls
+    # back to a short pointer at its durable source instead of the previous
+    # bare "N more omitted" count, so every decision stays findable from the
+    # drain output alone.
+    fm_cap_status_line_var "$line" "$verb" $((item_bytes - 1))
     line=$FM_LINE_CAP_LINE
     bytes=$(( ${#line} + 1 ))
     if [ $((used + bytes)) -gt "$global_bytes" ]; then
-      omitted=$((omitted + 1))
-      continue
+      pointer="$task"
+      [ "$key" = default ] || pointer="$pointer [key=$key]"
+      pointer="$pointer $verb: too long to print in full here (${#note} bytes) - read it in full at $STATE/$task.status"
+      line=$pointer
+      bytes=$(( ${#line} + 1 ))
     fi
     output="$output$line
 "
@@ -475,12 +497,9 @@ print_open_decisions_section() {
 $open
 EOF
 
-  [ "$shown" -gt 0 ] || [ "$omitted" -gt 0 ] || return 0
+  [ "$shown" -gt 0 ] || return 0
   printf 'OPEN DECISIONS (still open, folded from the durable status logs - not just the latest line):\n' || return 1
   printf '%s' "$output" || return 1
-  if [ "$omitted" -gt 0 ]; then
-    printf 'OPEN DECISIONS: %d more omitted (byte cap)\n' "$omitted" || return 1
-  fi
   # Answerer-closes hint, printed at exactly the moment an answer gets written:
   # the send that answers a listed decision also closes it, so closure never
   # depends on the busy worker writing a matching resolved line (contract:

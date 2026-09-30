@@ -21,6 +21,13 @@
 # Truncation stays recoverable because the session-start digest prints each
 # task's full status log path, while every OPEN DECISIONS entry begins with the
 # task id that identifies its durable state/<id>.status source.
+#
+# needs-decision and blocked lines are exempt from the cut (fm_cap_status_line_var
+# below): they carry the context, options, and recommendation a captain must
+# relay onward verbatim, so cutting them at the routine bound only forces a grep
+# of the raw status file back out every time. A caller still owns its own global
+# byte budget for the section and falls back to a pointer at that source file
+# when even an uncapped decision line cannot fit it.
 
 FM_LINE_CAP_DEFAULT=220
 FM_LINE_CAP_SUFFIX=' [truncated]'
@@ -48,4 +55,31 @@ fm_cap_line_var() {
 fm_cap_line() {
   fm_cap_line_var "$@"
   printf '%s\n' "$FM_LINE_CAP_LINE"
+}
+
+# A needs-decision or blocked line carries the context, options, and
+# recommendation the captain has to relay onward verbatim; cutting it at the
+# same 220-character bound as a routine progress line forces a grep of the raw
+# state/<id>.status file back out every time (issue #19). Every other verb -
+# working, done, paused, signal annotations, etc. - keeps the routine cut.
+fm_line_cap_is_decision_verb() {  # <verb>
+  case "$1" in
+    needs-decision | blocked) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# fm_cap_status_line_var <line> <verb> [<max>]: the routine per-line cut for
+# every verb except needs-decision/blocked, which are left byte-for-byte
+# untouched here. A decision line that is too long even for a section's own
+# global byte budget is not this function's problem - the caller still owns
+# that budget and prints a pointer to the source file instead, exactly as it
+# already prints "N more omitted" for a budget it cannot fit.
+fm_cap_status_line_var() {
+  local line=$1 verb=$2 max=${3:-$FM_LINE_CAP_DEFAULT}
+  if fm_line_cap_is_decision_verb "$verb"; then
+    FM_LINE_CAP_LINE=$line
+    return 0
+  fi
+  fm_cap_line_var "$line" "$max"
 }

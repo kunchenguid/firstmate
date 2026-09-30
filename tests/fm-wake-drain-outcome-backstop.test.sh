@@ -303,6 +303,32 @@ test_rejected_decision_line_surfaces_once_through_backstop() {
   pass "captain-facing decisions rejected by the fold surface once"
 }
 
+test_rejected_decision_line_prints_in_full() {
+  local dir state out line
+  dir=$(make_case rejected-decision-long)
+  state="$dir/state"
+  out="$dir/drain.out"
+
+  {
+    printf 'blocked [key=bad/value]: credential missing'
+    awk 'BEGIN { while (i++ < 200) printf " and-then-some" }'
+    printf '\n'
+  } > "$state/rejected-long.status"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "rejected-decision drain failed"
+  line=$(backstop_body "$out" | grep -F 'rejected-long')
+  [ -n "$line" ] || fail "a long rejected decision was lost: $(cat "$out")"
+  # A malformed-key blocked/needs-decision line has no OPEN DECISIONS
+  # representation, so this backstop is its only presentation path; it must
+  # not be cut to the routine per-item budget (issue #19).
+  case "$line" in
+    *' [truncated]') fail "a long rejected decision was truncated: $line" ;;
+  esac
+  grep -F 'and-then-some and-then-some and-then-some' <<<"$line" >/dev/null \
+    || fail "a long rejected decision lost its tail instead of printing in full: $line"
+  pass "a rejected decision line prints in full through the backstop instead of being cut"
+}
+
 test_missing_index_self_heals_on_first_drain() {
   local dir state out old
   dir=$(make_case index-selfheal-covered)
@@ -515,6 +541,7 @@ test_successful_backstop_is_idempotent_without_consuming_delayed_annotation
 test_output_failure_does_not_commit_the_backstop_receipt
 test_receipt_commit_failure_repeats_the_already_presented_backstop
 test_rejected_decision_line_surfaces_once_through_backstop
+test_rejected_decision_line_prints_in_full
 test_missing_index_self_heals_on_first_drain
 test_uncovered_event_surfaces_on_first_drain_without_index
 test_malformed_outcome_store_fails_closed_without_pi_advice

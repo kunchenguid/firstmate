@@ -178,13 +178,15 @@ test_status_symlink_is_not_followed() {
   pass "the fleet-wide decision scan does not follow status symlinks"
 }
 
-# The per-item cut now comes from bin/fm-line-cap-lib.sh, shared with the
-# session-start digest's status tails so one truncation marker means the same
-# thing wherever an agent meets it. This pins the drain's own end of that
-# contract: the lede survives, the marker appears, and the item still fits the
-# section's per-item budget including the newline it is charged for.
-test_over_long_decision_note_is_capped_with_a_marker() {
-  local dir state out line longest
+# The per-item cut (and its exemption for needs-decision/blocked verbs) comes
+# from bin/fm-line-cap-lib.sh's fm_cap_status_line_var, shared with
+# bin/fm-session-start.sh's status tails so one truncation marker means the
+# same thing wherever an agent meets it. These two tests pin the drain's own
+# end of that contract (issue #19): a decision line past the routine bound
+# still prints whole, and one too large for the section's own byte budget
+# falls back to a pointer instead of being silently dropped.
+test_over_long_decision_note_prints_in_full() {
+  local dir state out line
   dir=$(make_case long-note)
   state="$dir/state"
   out="$dir/drain.out"
@@ -196,13 +198,17 @@ test_over_long_decision_note_is_capped_with_a_marker() {
 
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on an over-long decision note"
 
+  # A needs-decision line carries the context, options, and recommendation the
+  # captain must relay onward verbatim, so it is exempt from the routine
+  # per-line cut - past the old 220-character bound but nowhere near the
+  # section's own byte budget, it prints whole with no truncation marker
+  # (issue #19).
   line=$(grep -F 'task-long' "$out")
   case "$line" in
-    'task-long [key=api-shape] needs-decision: pick REST or RPC'*' [truncated]') : ;;
-    *) fail "an over-long decision note was not capped with its lede intact: $line" ;;
+    *' [truncated]') fail "a needs-decision note was truncated: $line" ;;
   esac
-  longest=${#line}
-  [ "$longest" -le 219 ] || fail "a capped decision item ran $longest characters past its per-item budget"
+  grep -F 'and-then-some and-then-some and-then-some' <<<"$line" >/dev/null \
+    || fail "an over-long decision note lost its tail instead of printing in full: $line"
 
   printf 'needs-decision [key=short]: brief enough to keep whole\n' > "$state/task-short.status"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on a short decision note"
@@ -212,11 +218,37 @@ test_over_long_decision_note_is_capped_with_a_marker() {
     fail "a decision note already under the cap was marked truncated"
   fi
 
-  pass "an over-long open decision is cut to its per-item budget with the shared truncation marker"
+  pass "an over-long open decision prints in full instead of being cut to the routine per-item budget"
+}
+
+test_decision_note_too_large_for_the_section_budget_points_at_its_source() {
+  local dir state out line
+  dir=$(make_case huge-note)
+  state="$dir/state"
+  out="$dir/drain.out"
+  # 5000 'x' characters clears the section's whole 4000-byte budget on its
+  # own, so it cannot be printed in full without starving every other
+  # section item; the acceptance bar is "readable in full, or via one
+  # printed pointer" (issue #19), so this is the pointer path.
+  awk 'BEGIN { printf "needs-decision [key=huge]: "; while (i++ < 5000) printf "x"; printf "\n" }' \
+    > "$state/task-huge.status"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on a section-busting decision note"
+
+  line=$(grep -F 'task-huge' "$out")
+  [ -n "$line" ] || fail "a section-busting decision note produced no OPEN DECISIONS line at all: $(cat "$out")"
+  case "$line" in
+    *xxxxxxxxxx*) fail "a section-busting decision note printed inline instead of falling back to a pointer: $line" ;;
+  esac
+  grep -F "$state/task-huge.status" <<<"$line" >/dev/null \
+    || fail "a section-busting decision note's pointer did not name its durable source: $line"
+
+  pass "a decision note too large for the section budget points at its status file instead of being dropped"
 }
 
 test_buried_decision_still_surfaces
-test_over_long_decision_note_is_capped_with_a_marker
+test_over_long_decision_note_prints_in_full
+test_decision_note_too_large_for_the_section_budget_points_at_its_source
 test_explicit_resolution_closes_it
 test_later_unrelated_terminal_line_does_not_close_it
 test_reserved_key_namespace_is_owned_by_its_library
