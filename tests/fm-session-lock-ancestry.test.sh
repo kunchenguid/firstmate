@@ -275,8 +275,9 @@ SH
 
 # omp 18.4.4 runs every tool shell of an interactive session under the
 # session's own `omp __omp_worker_daemon_broker` helper (36954), whose parent is
-# the omp session (26445). The session's argv quotes the helper name inside its
-# prompt, exactly as a launch brief can, so only argv[1] may identify a helper.
+# the omp session (26445). The session's argv quotes a full helper command line
+# (`/opt/omp __omp_worker_daemon_broker`) inside its prompt, exactly as a launch
+# brief can, so only argv[1] may identify a helper.
 # FM_TEST_BROKER_PARENT reparents the broker: 1 is the orphaned shape, 500 a
 # broker under a process that is a harness but not an omp session.
 test_omp_worker_broker_is_crossed_to_its_session() {
@@ -303,7 +304,7 @@ case "$pid:$field" in
   36954:args=) printf '%s\n' "$omp __omp_worker_daemon_broker" ;;
   36954:ppid=) printf '%s\n' "${FM_TEST_BROKER_PARENT:-26445}" ;;
   26445:comm=) printf '%s\n' "$comm" ;;
-  26445:args=) printf '%s\n' "$omp --continue brief: the lock recorded omp __omp_worker_daemon_broker" ;;
+  26445:args=) printf '%s\n' "$omp --continue brief: the lock recorded /opt/omp __omp_worker_daemon_broker" ;;
   26445:ppid=) printf '%s\n' 67011 ;;
   67011:comm=) printf '%s\n' zsh ;;
   67011:args=) printf '%s\n' -zsh ;;
@@ -330,7 +331,7 @@ SH
     [ "$(FM_TEST_OMP_SHAPE="$shape" lib_eval "$fakebin" 'fm_session_lock_anchor_pid')" = 26445 ] \
       || fail "$shape: the lock anchor is not the omp session"
     FM_TEST_OMP_SHAPE="$shape" lib_eval "$fakebin" 'fm_harness_pid_alive 26445' \
-      || fail "$shape: an omp session quoting the helper name in its prompt was not a live harness"
+      || fail "$shape: an omp session whose prompt contains /opt/omp __omp_worker_daemon_broker was not a live harness"
     if FM_TEST_OMP_SHAPE="$shape" lib_eval "$fakebin" 'fm_harness_pid_alive 36954'; then
       fail "$shape: a bare omp broker passed the live-session-owner predicate"
     fi
@@ -340,8 +341,9 @@ SH
   # the full executable path, including spaces.
   sed -i.bak "s|^omp='/Users/u/.local/bin/omp'$|omp='/Users/u/Install With Spaces/omp'|" "$fakebin/ps"
   rm -f "$fakebin/ps.bak"
-  FM_TEST_OMP_SHAPE=linux lib_eval "$fakebin" 'fm_harness_ancestry_pids' >/dev/null \
-    || fail "a spaced omp install path hid the worker broker"
+  got=$(FM_TEST_OMP_SHAPE=linux lib_eval "$fakebin" 'fm_harness_ancestry_pids') \
+    || fail "a spaced omp install path found no session in its ancestry"
+  [ "$got" = 26445 ] || fail "a spaced omp install path resolved '$got', expected only the omp session 26445"
 
   printf '26445\n' > "$dir/state/.lock"
   lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \

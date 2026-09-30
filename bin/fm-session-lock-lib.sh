@@ -64,7 +64,7 @@ fm_harness_path_name() {  # <path>
 # it reparented to pid 1. The marker is argv[1] exactly, never a substring,
 # because a session's own argv can quote a helper name inside its prompt.
 fm_harness_is_omp_worker_helper() {  # <comm> <args> [<pid>]
-  local comm=$1 args=$2 pid=${3:-} argv0 argv1
+  local comm=$1 args=$2 pid=${3:-} argv0 argv1 rest
   [ "${comm##*/}" = omp ] || return 1
   if [ "$(uname -s 2>/dev/null)" = Linux ] && [ -r "/proc/$pid/cmdline" ]; then
     exec 9<"/proc/$pid/cmdline" || return 1
@@ -76,11 +76,23 @@ fm_harness_is_omp_worker_helper() {  # <comm> <args> [<pid>]
     esac
     return 1
   fi
-  # macOS ps reports the full executable path in comm. Require that exact
-  # path, one space, and argv[1]'s helper marker at the start of args.
-  case "$args" in
-    "$comm __omp_worker_"*|*/omp\ __omp_worker_*) return 0 ;;
+  # Without /proc, args is argv joined by spaces, so only the text right after
+  # argv[0] may identify a helper. macOS ps reports argv[0]'s full path in comm,
+  # so args must begin with exactly that path, one space, and the marker. A bare
+  # comm (Linux procps without a readable /proc entry) locates the end of argv[0]
+  # at the FIRST `omp ` token instead; text later in a session prompt, such as
+  # `/opt/omp __omp_worker_daemon_broker`, never reaches either test.
+  case "$comm" in
+    */*) rest=${args#"$comm "}; [ "$rest" != "$args" ] || return 1 ;;
+    *)
+      case "$args" in
+        'omp '*) rest=${args#omp } ;;
+        */omp\ *) rest=${args#*/omp } ;;
+        *) return 1 ;;
+      esac
+      ;;
   esac
+  case "$rest" in __omp_worker_*) return 0 ;; esac
   return 1
 }
 
