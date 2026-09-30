@@ -2386,6 +2386,76 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
   pass "relaunch heals an item that drifted out of In flight while the task stayed live"
 }
 
+# Execute the emitted replacement command, rather than inspecting its source.
+# The provider models an existing daemon pane; the probe observes its final env.
+test_gemini_relaunch_refreshes_vertex_environment() {
+  local dir out launch result expected before
+  dir=$(new_case gemini-vertex rlgemvertex)
+  add_ship_task "$dir" rlgemvertex gemini
+  mkdir -p "$dir/home/config"
+  : > "$dir/home/config/launch-env-allowlist"
+  : > "$dir/home/config/keep-ai-trailers"
+  printf zsh > "$dir/fake/command"
+  printf gemini > "$dir/fake/becomes"
+  cat > "$dir/fakebin/gemini" <<'PROBE'
+#!/bin/sh
+printf 'adc=%s\nproject=%s\nlocation=%s\nvertex=%s\ncwd=%s\n' \
+  "${GOOGLE_APPLICATION_CREDENTIALS-unset}" "${GOOGLE_CLOUD_PROJECT-unset}" \
+  "${GOOGLE_CLOUD_LOCATION-unset}" "${GOOGLE_GENAI_USE_VERTEXAI-unset}" "$PWD"
+PROBE
+  chmod +x "$dir/fakebin/gemini"
+  out=$(GOOGLE_APPLICATION_CREDENTIALS="$dir/adc-file" GOOGLE_CLOUD_PROJECT=current-project \
+    GOOGLE_CLOUD_LOCATION=us-central1 GOOGLE_GENAI_USE_VERTEXAI=true \
+    run_spawn "$dir" rlgemvertex --relaunch)
+  expect_code 0 "$?" "Gemini relaunch failed: $out"
+  launch=$(tail -1 "$dir/fake/literal")
+  result=$(cd "$dir/wt" && env -i HOME="$dir/user-home" PATH="$dir/fakebin:$PATH" \
+    GOOGLE_APPLICATION_CREDENTIALS=stale GOOGLE_CLOUD_PROJECT=stale \
+    GOOGLE_CLOUD_LOCATION=stale GOOGLE_GENAI_USE_VERTEXAI=false /bin/sh -c "$launch") \
+    || fail "Gemini replacement launch did not execute"
+  expected=$(printf 'adc=%s\nproject=current-project\nlocation=us-central1\nvertex=true\ncwd=%s' "$dir/adc-file" "$dir/wt")
+  [ "$result" = "$expected" ] || fail "Gemini replacement lost current task environment: $result"
+  [ "$(meta_field "$dir" rlgemvertex window)" = fmses:fm-rlgemvertex ] \
+    || fail "Gemini relaunch replaced the daemon endpoint"
+  [ "$(meta_field "$dir" rlgemvertex worktree)" = "$dir/wt" ] \
+    || fail "Gemini relaunch changed worktree"
+  [ ! -e "$dir/fake/created-sessions" ] || fail "Gemini relaunch created a daemon session"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf 'Gemini replacement in existing pane with empty allowlist receives:\n%s\n' "$result"
+  fi
+
+  # Even an explicitly empty value is owned by the invoking environment.
+  printf zsh > "$dir/fake/command"
+  out=$(unset GOOGLE_CLOUD_PROJECT GOOGLE_CLOUD_LOCATION GOOGLE_GENAI_USE_VERTEXAI
+    GOOGLE_APPLICATION_CREDENTIALS='' run_spawn "$dir" rlgemvertex --relaunch)
+  expect_code 0 "$?" "Gemini relaunch without Vertex settings failed: $out"
+  launch=$(tail -1 "$dir/fake/literal")
+  result=$(cd "$dir/wt" && env -i HOME="$dir/user-home" PATH="$dir/fakebin:$PATH" \
+    GOOGLE_APPLICATION_CREDENTIALS=stale GOOGLE_CLOUD_PROJECT=stale \
+    GOOGLE_CLOUD_LOCATION=stale GOOGLE_GENAI_USE_VERTEXAI=true /bin/sh -c "$launch") \
+    || fail "Gemini replacement without Vertex settings did not execute"
+  expected=$(printf 'adc=\nproject=unset\nlocation=unset\nvertex=unset\ncwd=%s' "$dir/wt")
+  [ "$result" = "$expected" ] || fail "Gemini relaunch retained stale values: $result"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf 'Next Gemini replacement clears removed settings and preserves explicit empty ADC:\n%s\n' "$result"
+  fi
+
+  printf gemini > "$dir/fake/command"
+  cp "$dir/home/state/rlgemvertex.meta" "$dir/meta-before"
+  before=$(cat "$dir/fake/literal")
+  out=$(run_spawn "$dir" rlgemvertex --relaunch)
+  [ "$?" -ne 0 ] || fail "Gemini relaunch must refuse an active worker"
+  cmp -s "$dir/meta-before" "$dir/home/state/rlgemvertex.meta" \
+    || fail "Gemini refused relaunch changed the active task record"
+  [ "$(cat "$dir/fake/literal")" = "$before" ] \
+    || fail "Gemini refused relaunch sent commands to the active worker"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf 'Active Gemini worker: relaunch refused; task record and pane command stream unchanged.\n'
+  fi
+  pass "Gemini relaunch refreshes task Vertex settings without touching an active worker or daemon"
+}
+
+
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
@@ -2458,3 +2528,5 @@ test_herdr_reclaim_of_a_secondmate_names_its_own_owner
 test_herdr_rebind_failure_from_a_plain_shell_names_the_real_cause
 test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it
 test_relaunch_moves_a_drifted_item_back_in_flight
+
+test_gemini_relaunch_refreshes_vertex_environment
