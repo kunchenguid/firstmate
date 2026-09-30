@@ -61,28 +61,30 @@
 # end-task   Task teardown's half of a board's lifecycle: end the Lavish review
 #            sessions a finished task left open and retire the sources that
 #            listened on them, so boards from torn-down tasks stop accumulating
-#            in the machine-wide session list. A board belongs to the task by
-#            PATH only: its file lies under one of the `--root` directories
-#            (teardown passes the task's data directory, its recorded worktree,
-#            and its task scratch), or it is the artifact of a source this home
-#            registered for that task. Nothing is matched by name, and a board
-#            whose source belongs to another task is never touched.
-#            For each board the source is retired FIRST
-#            through bin/fm-procevent.sh, so the end is never delivered as a
+#            in the machine-wide session list. Candidates are selected by
+#            artifact path: an open session's file lies under a `--root`
+#            directory, or the artifact is registered for this task in this
+#            home, even outside those roots. Nothing is matched by name;
+#            bin/fm-teardown.sh owns which roots it supplies.
+#            For each candidate, bin/fm-procevent.sh retire --if-task checks
+#            the machine-wide claim and local registration before mutation;
+#            its ownership contract preserves another home's claim or another
+#            task's registration. Only eligible sources are retired FIRST,
+#            so the end is never delivered as a
 #            `session_ended` wake for a task that no longer exists, and then
 #            `lavish-axi end` closes the session on the server its saved URL
-#            names; ending never deletes the file and a plain `lavish-axi
-#            <file>` reopens it. A source that cannot be retired (for example an
+#            names. The source lock guards the final ownership check and end:
+#            any claim or registration acquired again keeps the session open.
+#            Already-ended or unlisted registered artifacts only retire their
+#            sources. Ending never deletes the file; a retained artifact can
+#            be reopened with `lavish-axi <file>` after teardown.
+#            A source that cannot be retired (for example an
 #            unacknowledged captured round, the only place a captain's answer
 #            still lives) keeps its board open and is reported. Prints one
 #            `ended:`, `retired:`, `kept:` or `warning:` line per finding and
 #            exits nonzero when any board could not be fully concluded. The
-#            caller decides whether that blocks; bin/fm-teardown.sh reports it
-#            and continues, because ending a session is hygiene that must not
-#            strand a finished task's cleanup. Whether the task still carries an
-#            open captain call is the caller's question, asked before this
-#            command runs: the captain-hold records tie a call to a task, not to
-#            a board file.
+#            caller owns failure handling and the captain-call guard; see
+#            bin/fm-teardown.sh's Lavish review boards contract.
 #
 # AN EMPTY BOARD CLOSE IS NOT NEWS, and that is what `silent` exists to say.
 # Closing a review surface that carried nothing is the single most common Lavish

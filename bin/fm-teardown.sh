@@ -94,17 +94,20 @@
 # isolated copy is returned, teardown ends the task's still-open Lavish
 # sessions and retires the process-event sources that listened on them, so
 # finished boards do not accumulate in the machine-wide session list.
-# bin/fm-procevent-lavish.sh end-task owns the mechanics and the path-only
-# attribution (this home's data/<id>/, the recorded worktree, the task scratch,
-# and the artifacts of sources registered for this task); only data/<id>/ is
-# a root for a secondmate, which adds no child-tree traversal. A task that
+# bin/fm-procevent-lavish.sh end-task owns artifact attribution, source retirement,
+# and session ownership checks. Teardown supplies this home's data/<id>/ and,
+# for a worker, its owned worktree and task scratch as roots; a secondmate's
+# home is never a root. Existing forced child cleanup applies the same step
+# using each child's owning home before returning or removing its worktree;
+# this adds no child-tree traversal. A task that
 # still carries an open captain call - its own backlog item held for the
 # captain, or an entry of its recorded captain-call inventory - keeps all its
 # boards and sources, "cannot tell" counting as open, because the hold records
-# tie a call to a task and not to a board file. A board that cannot be ended
-# is reported on stderr and never blocks or discards anything: ending is
-# hygiene, the file is untouched, and `lavish-axi end <file>` finishes it by
-# hand.
+# tie a call to a task and not to a board file. This check is independent of
+# automatic backlog mutations and uses bin/fm-captain-hold.sh open --origin
+# for inventory identity resolution, including migrated entries.
+# A source-retirement or session-end failure is reported on stderr and does
+# not block teardown; normal worktree and scratch cleanup still proceeds.
 # Worktree-slot ownership (teardown-slot-collision): a treehouse pool slot is
 # reused across tasks, so a stale, duplicated, or drifted worktree= record can
 # name a slot a DIFFERENT live task now holds. Cleanup kills every process under
@@ -3207,13 +3210,7 @@ endpoint_close_refusal() {  # <subject> <backend> <target> <honors-force>
   return 1
 }
 
-# Whether the task still carries an open captain call: its own backlog item is
-# held for the captain (the retained close), or an entry of the captain-call
-# inventory recorded in its metadata is. bin/fm-captain-hold.sh `open` owns the
-# predicate, and "cannot tell" counts as open, because ending a board the
-# captain may still answer on is the mistake this guards against. The hold
-# records tie a call to a task, not to a board file, so the whole task's boards
-# are kept together.
+# Apply the captain-call guard described in this script's Lavish contract.
 teardown_has_open_captain_call() {
   local entry status keys
   status=0
@@ -3235,12 +3232,8 @@ EOF
   return 1
 }
 
-# End the Lavish review sessions this task leaves behind and retire the sources
-# that listened on them; bin/fm-procevent-lavish.sh end-task owns the mechanics
-# and the path-only attribution. A secondmate's boards under its own home belong
-# to that home's tasks, so only its data directory in this home is a root.
-# Failing to end a session never blocks or discards anything: it is reported
-# and teardown continues, because the boards stay reopenable and endable by hand.
+# Apply the header's Lavish contract in the task's owning home, including when
+# existing forced child cleanup calls from a different home.
 teardown_end_lavish_boards() {
   local FM_HOME=$1 STATE=$2 DATA=$3 CONFIG=$4 ID=$5 META=$6
   shift 6

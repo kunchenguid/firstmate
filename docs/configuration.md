@@ -1901,8 +1901,9 @@ The Lavish version floors and feature probe are owned by `bin/fm-bootstrap.sh`.
 
 **End the boards at teardown**
 
-- Task teardown ends the task's still-open Lavish sessions and retires the sources that listened on them, after every refusal gate has passed and before the worktree is returned, so finished boards do not accumulate in the machine-wide session list; `bin/fm-procevent-lavish.sh end-task` owns the mechanics and the path-only attribution.
-- A task that still carries an open captain call keeps its boards and sources, and a failure to end one session is reported without blocking teardown.
+- Task teardown concludes eligible Lavish reviews before returning the worktree, including children removed by an authorized forced secondmate cleanup; [`bin/fm-teardown.sh`](../bin/fm-teardown.sh) owns the timing, task roots, and captain-call guard.
+- Boards protected by an open or unverifiable captain call or another owner's source remain open; [`bin/fm-procevent-lavish.sh end-task`](../bin/fm-procevent-lavish.sh) owns artifact attribution, source retirement, cross-home ownership protection, and reopening retained artifacts.
+- Source-retirement or session-end failures are reported without blocking normal teardown cleanup.
 
 **Ownership and recovery**
 
