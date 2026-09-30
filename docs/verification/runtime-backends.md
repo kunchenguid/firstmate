@@ -39,9 +39,8 @@ The portable lifecycle suite verifies that identical additive cleanup receipts r
 
 Herdr 0.8.0 protocol 20 reports explicit JSON null in both session fields for `status --json --session default`, while `session list --json` identifies that same running socket as `name: "default"`.
 The default status was captured read-only by the session owner; the independent session-list observation used the authorized named lab helper and passed its default-session tripwire.
-`tests/fm-teardown-endpoint-safety.test.sh` exercises the public cleanup owner with this representation for legacy and launch-bound journals, an additive response, and the literal default spelling.
-Missing identities, null named-session identities, foreign client/socket identities, duplicate session entries, stopped sessions and newer socket timestamps remain refused before effects.
-The same candidate passed `FM_HERDR_LIFECYCLE_E2E=1 bin/fm-test-run.sh tests/fm-teardown-lifecycle-herdr-e2e.test.sh` through the authorized named lab helper, reporting `FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=45340`.
+These session-identity classifier observations remain distinct from completed-task cleanup admission: accepted/archived task retirement uses exact home-local endpoint metadata and confirmed pane absence, as described below.
+The earlier journal-based candidate passed `FM_HERDR_LIFECYCLE_E2E=1 bin/fm-test-run.sh tests/fm-teardown-lifecycle-herdr-e2e.test.sh` through the authorized named lab helper, reporting `FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=45340`; this is historical evidence for that stricter path.
 No live default cleanup was performed; the real default representation and the executable cleanup fixtures are distinct evidence.
 
 ## Delegated continuation on Pi
@@ -1226,16 +1225,16 @@ Structural liveness permits the task-bound transcript read but does not itself i
 
 ## Independent task workspace cleanup
 
-Verified again on 2026-09-30 with Herdr 0.8.0 / protocol 20, a named non-default session, and the candidate cleanup implementation.
-`tests/fm-teardown-lifecycle-herdr-e2e.test.sh` routes every actual backend operation through an explicitly configured isolation helper.
-It closes exact non-focused task panes from both a correlator-only version 1 journal with independent meta/lifecycle proof and a version 2 journal, accepts a structurally compatible future label with an additive field, preserves an active sibling process and mixed workspace, refuses focused or active targets and stale generations, and replays failed backlog bookkeeping after a real close.
-`tests/fm-backend-autodetect-smoke.test.sh` additionally launches through the ordinary spawn owner, verifies that the new journal retains the complete launch-identity capability, then completes the ordinary accepted-task teardown path.
-Missing directories do not prevent positively identified dedicated workspace removal; reports remain byte-identical.
-The helper verifies that the default session is unchanged after teardown.
-No model harness or remote research provider participates in this test.
+The 2026-09-30 completed-task candidate was exercised through the real ShortTask cleanup owner using `FM_SHORT_HERDR_E2E=1 bin/fm-test-run.sh tests/fm-short-operations-herdr.test.sh`, Herdr 0.8.0 / protocol 20 and the required named non-default lab helper.
+The same accepted-task fixture with a live TraeX window reproduces the old `short actor lacks a current bound operation` refusal before effects; the candidate closes that exact window, retires resource metadata and preserves the report with an owner receipt.
+The installed guard retains dirty, unmerged, pushed-but-unmerged, shared and primary copies while closing their completed windows; it removes an exclusive clean integrated linked worktree and returns a clean landed Treehouse copy.
+Its helper verifies the default fleet session is unchanged after teardown.
+No production task or remote research provider participates; the ShortTask model is a deterministic fixture and the worker window runs a real TraeX process.
+`tests/fm-teardown-endpoint-safety.test.sh` also exercises the public endpoint-only form: obsolete, missing and malformed journals do not block completed window cleanup, while a foreign task identity, stale explicit generation or shared endpoint refuses without closing the target.
+Its open-goal and legacy preservation checks remain separate.
 
-The [endpoint cleanup contract](../task-lifecycle.md#remote-results-and-resource-cleanup) owns the independently sufficient identity paths and retained cases exercised here.
-Directory return is a separate phase and remains subject to the [positive slot-ownership proof](../architecture.md#delivery-modes-are-explicit-per-task).
+The [endpoint cleanup contract](../task-lifecycle.md#remote-results-and-resource-cleanup) owns current endpoint routing and copy preservation.
+Earlier `fm-teardown-lifecycle-herdr-e2e.test.sh` results tested the former journal/process/focus admission rules and do not establish those rules for the current completed path.
 Herdr has no atomic compare-and-close transaction, so concurrent external mutations can be detected and retained but cannot be excluded by a Firstmate lock alone.
 
 ## Pi headless short tasks
@@ -1280,16 +1279,16 @@ This guard does not perform a primary `/compact`.
 It also proves that a lost merge response is reconciled by owner readback and that an owner killed after a possible effect is not replayed after restart.
 The recovery cases release exact pre-intent and refused no-effect reservations only after the bound runner dies, while retaining reservations owned by a live runner, a possible effect, or another generation.
 `FM_SHORT_INSTALL_LIVE=1` adds an actual verified ShellCheck 0.11.0 install into a temporary directory, without a global install.
-`FM_SHORT_HERDR_E2E=1 bash tests/fm-short-operations-herdr.test.sh` adds real endpoint cleanup through a generated named lab and the guarded helper; the installed Herdr 0.8.0 run confirmed endpoint removal, refused dirty/unlanded/shared copies, and preserved the default-session tripwire.
+`FM_SHORT_HERDR_E2E=1 bash tests/fm-short-operations-herdr.test.sh` adds real endpoint cleanup through a generated named lab and the guarded helper; the installed Herdr 0.8.0 run confirmed completed endpoint removal while retaining dirty/unlanded/shared/primary copies and preserving the default-session tripwire.
 The cleanup guard covers both an already absent copy and a real existing clean landed Treehouse 2.1.1 worktree.
 The existing-copy case starts with a durable lease and a commit reachable from the disposable remote default branch, then observes the real owner return the slot from `leased` to `available`, clear its lease, and remove the exact endpoint and task record.
 It verifies the returned copy remains clean at the landed head, another slot retains its lease identity, head, untracked sentinel and task metadata, and every unrelated pane remains present.
 The saved `landed-cleanup-evidence.json` combines pre/post Treehouse and Herdr readbacks with the bound child-owner receipt; MAIN executes zero cleanup commands.
 On 2026-09-27, the same Herdr guard also passed a real `fm-captain-hold.sh complete` update followed by short-task scout cleanup, with a doubled model and real completion/cleanup owners.
 It first records an empty reviewed inventory, then records the source task's pending choice, and verifies one effective audit pair with the superseded assignments retained.
-A second completion update after short-task binding refuses execution before any guarded effect.
+A conflicting endpoint task identity after short-task binding refuses execution before any guarded effect; unrelated completion audit updates do not invalidate cleanup.
 A freshly bound request then removes only the synthetic scout's endpoint and metadata, preserving its report and both pending captain-held choices; `audit-cleanup-evidence.json` retains the before/after metadata, refusal and completed receipt.
-The portable operation suite separately accepts only monotone legacy completion audit pairs, refuses repeated identity fields and malformed audit history, and refuses post-bind edits even when the final effective inventory is unchanged.
+The portable operation suite separately keeps whole-record audit binding for merge and rejects expired/revoked grants, foreign home identity, conflicting targets and possible-effect replay.
 The fixture chains use one model fixture invocation and one operation tool per chain; fixture responses are not real-provider token evidence.
 The optional install also repeats the tool call to prove receipt reuse without reinstalling.
 The portable read-only companion is `tests/fm-short-agent.test.sh`; [the operator guide](../short-agents.md) owns current use, compatibility, and provider-limit distinctions.

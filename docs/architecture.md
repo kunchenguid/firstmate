@@ -314,11 +314,12 @@ The same emitter handles a merge firstmate performed and one its poll detected, 
 After the forge accepts firstmate's merge request, the merge path persists the resolved yolo, away-grant, or attended authority bound to the task's canonical PR identity.
 A later merged poll consumes only that matching persisted value; with no match it records the landing as external rather than consulting a live away-posture record that may have been archived or replaced.
 [`bin/fm-merge-authority-lib.sh`](../bin/fm-merge-authority-lib.sh)'s header owns resolution, private atomic persistence, identity-checked consumption, and retirement, while only the merge path gates on the answer.
-Teardown is fail-closed for ship worktrees: dirty worktrees refuse, and committed work must be landed before the worktree is returned.
+Completed-task window retirement and copy disposal are independent; the [resource cleanup contract](task-lifecycle.md#remote-results-and-resource-cleanup) owns accepted/archived routing and retained-copy outcomes.
+For ordinary legacy ship teardown, dirty worktrees refuse, and committed work must be landed before the worktree is returned.
 A pool worktree is returned only when its owner claim matches the exact task and execution generation, no other task record names the same live path, and no supported live endpoint claims it; an absent, malformed, duplicate, or otherwise unprovable claim retains the directory and task cleanup obligation, and no discard authority relaxes that.
 A slot's own owner claim, written by the spawn that takes it under the allocation lock and owned by [`bin/fm-wake-lib.sh`](../bin/fm-wake-lib.sh), covers a slot reassigned to a task that left no record the scan could reach: a claim naming a different task releases nothing - teardown warns, names the claimant, and finishes only the task's own cleanup - because Treehouse's own live process lease cannot answer ownership once the worker's exit releases it.
 Allocation and return serialize on one shared Treehouse project lock per project in the current Firstmate home.
-Before the worktree is returned, teardown concludes the task's own no-mistakes run when it is parked at a gate, including a run whose head the task copy cannot resolve - the shared runs-ledger continuation proof is the only recognition for that case, so cleanup never orphans a parked run the pipeline advanced past the submitted head.
+Before ordinary legacy worktree return, teardown concludes the task's own no-mistakes run when it is parked at a gate, including a run whose head the task copy cannot resolve - the shared runs-ledger continuation proof is the only recognition for that case.
 
 ## Optional Relay
 

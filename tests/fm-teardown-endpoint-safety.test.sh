@@ -722,253 +722,76 @@ test_open_goal_preserves_resources_before_cleanup() {
   pass 'fm-teardown: open goals retain endpoint, slot, worktree and records even with a partial report or force'
 }
 
-test_archived_business_action_allows_only_independent_endpoint_cleanup() {
-  local dir id=archived-business retained=shared-owner rc=0
-  dir=$(make_case archived-business-action)
-  write_herdr_meta "$dir/home/state/$id.meta" \
-    "window=isolated:fm-$id" "worktree=$dir/worktree" \
-    "project=$dir/project" "kind=ship"
-  write_herdr_meta "$dir/home/state/$retained.meta" \
-    "window=isolated:fm-$retained" "worktree=$dir/worktree" \
-    "project=$dir/project" "kind=ship"
-  stage_archived_action "$dir" "$id" steer attempted
-  stage_absent_bound_endpoint "$dir" "$id"
-
-  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
-    FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
-    "$TEARDOWN" "$id" --endpoint-only --expect-spawn-gen "s-$id" \
-    > "$dir/stdout" 2> "$dir/stderr" || rc=$?
-  [ "$rc" -eq 0 ] || fail "archived business action blocked endpoint cleanup: $(cat "$dir/stderr")"
-  jq -e '.phases.pane_close.state=="confirmed" and .phases.directory_return.reason_code=="retained-shared-reference"' \
-    "$dir/home/state/$id.cleanup.json" >/dev/null || fail 'endpoint and directory cleanup were not accounted independently'
-  FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" lifecycle "$id" \
-    | jq -e '.disposition=="archived" and .next_action.kind=="steer" and .next_action.phase=="attempted"' >/dev/null \
-    || fail 'archived business action evidence was changed by endpoint cleanup'
-  assert_present "$dir/home/state/$id.meta" 'endpoint-only cleanup removed the task record'
-  assert_present "$dir/worktree/sentinel" 'endpoint cleanup removed a shared directory'
-  ! grep -Fq 'pane <close>' "$dir/runtime.log" || fail 'already-absent endpoint was closed again'
-
-  id=archived-cleanup
-  dir=$(make_case archived-cleanup-action)
-  write_herdr_meta "$dir/home/state/$id.meta" \
-    "window=isolated:fm-$id" "worktree=$dir/worktree" \
-    "project=$dir/project" "kind=ship"
-  stage_archived_action "$dir" "$id" cleanup uncertain
-  stage_absent_bound_endpoint "$dir" "$id"
-  : > "$dir/runtime.log"
-  rc=0
-  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
-    FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
-    "$TEARDOWN" "$id" --endpoint-only --expect-spawn-gen "s-$id" \
-    > "$dir/stdout" 2> "$dir/stderr" || rc=$?
-  [ "$rc" -ne 0 ] || fail 'uncertain archived cleanup effect was retried without readback'
-  assert_contains "$(cat "$dir/stderr")" 'requires exact readback' \
-    'uncertain cleanup refusal did not require readback'
-  [ ! -s "$dir/runtime.log" ] || fail 'uncertain cleanup reached the endpoint before readback'
-  assert_present "$dir/home/state/$id.meta" 'uncertain cleanup removed the task record'
-  pass 'fm-teardown: archived business effects permit independent endpoint cleanup while uncertain cleanup still requires readback'
-}
-
-test_cleanup_uses_structural_identity_across_journal_versions() {
-  local dir id rc
-
-  for version in 2 future-9; do
-    id="compatible-$version"
+test_completed_endpoint_ignores_historical_admission_gates() {
+  local dir id variant rc
+  for variant in uncertain missing-journal malformed-journal wrong-task wrong-generation shared-endpoint; do
+    id="completed-$variant"
     dir=$(make_case "$id")
     write_herdr_meta "$dir/home/state/$id.meta" \
-      "window=isolated:fm-$id" "worktree=$dir/worktree" \
-      "project=$dir/project" "kind=ship"
-    stage_archived_action "$dir" "$id" steer attempted
-    stage_absent_bound_endpoint "$dir" "$id"
-    sed -i "s/^version=3$/version=$version/; /^spawn_gen=/d; /^terminal_id=/d; /^session_instance=/d; /^shell_pid=/d; /^shell_start=/d" \
-      "$dir/home/state/$id.herdr-presentation"
-    [ "$version" = 2 ] || printf 'future_optional=value\n' >> "$dir/home/state/$id.herdr-presentation"
+      "window=isolated:fm-$id" "worktree=$dir/worktree" "project=$dir/project" "kind=ship"
+    stage_archived_action "$dir" "$id" cleanup uncertain
+    mkdir -p "$dir/home/data/$id"
+    printf 'Retained completed report\n' > "$dir/home/data/$id/report.md"
+    case "$variant" in
+      malformed-journal) printf 'unreadable historical journal\n' > "$dir/home/state/$id.herdr-presentation" ;;
+      wrong-task) sed -i "s/^endpoint_task_id=$id$/endpoint_task_id=another-task/" "$dir/home/state/$id.meta" ;;
+      shared-endpoint) cp "$dir/home/state/$id.meta" "$dir/home/state/another-task.meta" ;;
+    esac
     rc=0
-    FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
-      FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
-      "$TEARDOWN" "$id" --endpoint-only --expect-spawn-gen "s-$id" \
-      > "$dir/stdout" 2> "$dir/stderr" || rc=$?
-    [ "$rc" -eq 0 ] || fail "$version exact-endpoint journal was rejected: $(cat "$dir/stderr")"
-    jq -e '.phases.pane_close.state=="confirmed" and .phases.pane_close.reason_code=="already-absent"' \
-      "$dir/home/state/$id.cleanup.json" >/dev/null || fail "$version compatible cleanup did not record exact absence"
-  done
-
-  id=v1-independent-meta
-  dir=$(make_case "$id")
-  create_fixture_socket "$dir/runtime.log.sock"
-  local v1_generation
-  v1_generation="s$(date +%s).$$.123"
-  write_herdr_meta "$dir/home/state/$id.meta" \
-    "window=isolated:fm-$id" "worktree=$dir/worktree" \
-    "project=$dir/project" "kind=ship" "spawn_gen=$v1_generation"
-  stage_archived_action "$dir" "$id" steer attempted
-  stage_absent_bound_endpoint "$dir" "$id"
-  sed -n '1,3p' "$dir/home/state/$id.herdr-presentation" > "$dir/v1"
-  mv "$dir/v1" "$dir/home/state/$id.herdr-presentation"
-  rc=0
-  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
-    FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
-      "$TEARDOWN" "$id" --endpoint-only --expect-spawn-gen "$v1_generation" \
-    > "$dir/stdout" 2> "$dir/stderr" || rc=$?
-  [ "$rc" -eq 0 ] || fail "v1 journal with independent endpoint and generation proof was rejected: $(cat "$dir/stderr")"
-  jq -e '.phases.pane_close.state=="confirmed" and .phases.pane_close.reason_code=="already-absent"' \
-    "$dir/home/state/$id.cleanup.json" >/dev/null || fail 'v1 compatible cleanup did not record exact absence'
-
-  id=v1-unprovable-generation
-  dir=$(make_case "$id")
-  write_herdr_meta "$dir/home/state/$id.meta" \
-    "window=isolated:fm-$id" "worktree=$dir/worktree" \
-    "project=$dir/project" "kind=ship"
-  stage_archived_action "$dir" "$id" steer attempted
-  stage_absent_bound_endpoint "$dir" "$id"
-  sed -n '1,3p' "$dir/home/state/$id.herdr-presentation" > "$dir/v1"
-  mv "$dir/v1" "$dir/home/state/$id.herdr-presentation"
-  rc=0
-  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
-    FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
-      "$TEARDOWN" "$id" --endpoint-only --expect-spawn-gen "s-$id" \
-      > "$dir/stdout" 2> "$dir/stderr" || rc=$?
-  [ "$rc" -ne 0 ] || fail 'v1 journal with unprovable generation gained cleanup authority'
-  assert_contains "$(cat "$dir/stderr")" 'legacy-session-continuity-unproven' \
-    'v1 refusal did not name the missing generation/session continuity evidence'
-
-  id=partial-launch
-  dir=$(make_case "$id")
-  write_herdr_meta "$dir/home/state/$id.meta" \
-    "window=isolated:fm-$id" "worktree=$dir/worktree" \
-    "project=$dir/project" "kind=ship"
-  stage_archived_action "$dir" "$id" steer attempted
-  stage_absent_bound_endpoint "$dir" "$id"
-  sed -i '/^terminal_id=/d; /^session_instance=/d; /^shell_pid=/d; /^shell_start=/d' \
-    "$dir/home/state/$id.herdr-presentation"
-  rc=0
-  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
-    FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
-    "$TEARDOWN" "$id" --endpoint-only --expect-spawn-gen "s-$id" \
-    > "$dir/stdout" 2> "$dir/stderr" || rc=$?
-  [ "$rc" -ne 0 ] || fail 'partial launch identity was accepted'
-  assert_contains "$(cat "$dir/stderr")" 'malformed-or-conflicting-launch-identity' \
-    'partial launch identity refusal was not concrete'
-
-  id=stale-session
-  dir=$(make_case "$id")
-  create_fixture_socket "$dir/runtime.log.sock"
-  rm -f "$dir/runtime.log.sock"
-  local stale_generation stale_second
-  stale_second=$(python3 - "$dir/runtime.log.sock" <<'PY'
-import os, socket, sys
-path = sys.argv[1]
-while True:
-    sock = socket.socket(socket.AF_UNIX)
-    sock.bind(path)
-    ctime_ns = os.lstat(path).st_ctime_ns
-    sock.close()
-    if ctime_ns % 1_000_000_000:
-        print(ctime_ns // 1_000_000_000)
-        break
-    os.unlink(path)
-PY
-  ) || fail 'cannot create replacement fixture socket'
-  stale_generation="s${stale_second}.$$.456"
-  write_herdr_meta "$dir/home/state/$id.meta" \
-    "window=isolated:fm-$id" "worktree=$dir/worktree" \
-    "project=$dir/project" "kind=ship" "spawn_gen=$stale_generation"
-  stage_archived_action "$dir" "$id" steer attempted
-  stage_absent_bound_endpoint "$dir" "$id"
-  sed -n '1,3p' "$dir/home/state/$id.herdr-presentation" > "$dir/v1"
-  mv "$dir/v1" "$dir/home/state/$id.herdr-presentation"
-  python3 - "$dir/runtime.log.sock" "$dir/home/state/$id.herdr-presentation" "$stale_second" <<'PY'
-import os, sys
-socket_stat = os.lstat(sys.argv[1])
-journal = sys.argv[2]
-second = int(sys.argv[3])
-journal_stat = os.lstat(journal)
-os.utime(journal, ns=(journal_stat.st_atime_ns, second * 1_000_000_000))
-journal_stat = os.lstat(journal)
-if socket_stat.st_ctime_ns // 1_000_000_000 != second:
-    sys.exit(1)
-if journal_stat.st_mtime_ns // 1_000_000_000 != second:
-    sys.exit(1)
-if journal_stat.st_mtime_ns >= socket_stat.st_ctime_ns:
-    sys.exit(1)
-PY
-  rc=0
-  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
-    FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
-      "$TEARDOWN" "$id" --endpoint-only --expect-spawn-gen "$stale_generation" \
-    > "$dir/stdout" 2> "$dir/stderr" || rc=$?
-  [ "$rc" -ne 0 ] || fail 'legacy endpoint from a replaced Herdr session was accepted'
-  assert_contains "$(cat "$dir/stderr")" 'legacy-session-continuity-unproven' \
-    'stale session refusal did not name the missing continuity evidence'
-
-  pass 'fm-teardown: v1 meta proof and v2/future journals use structural identity while missing or partial essential evidence stays retained'
-}
-
-# The installed client emits explicit null identities for default. The public
-# cleanup owner must bind that spelling through the independent session list.
-test_cleanup_default_status_identity() {
-  local variant dir id rc expected
-  for variant in legacy launch additive canonical missing-server missing-client foreign-client named-null foreign-socket duplicate stopped malformed replaced; do
-    id="default-$variant"
-    dir=$(make_case "$id")
-    write_herdr_meta "$dir/home/state/$id.meta" "window=isolated:fm-$id" \
-      "worktree=$dir/worktree" "project=$dir/project" "kind=ship"
-    stage_archived_action "$dir" "$id" steer attempted
-    stage_absent_bound_endpoint "$dir" "$id"
-    python3 - "$dir" "$id" "$variant" <<'PYDEFAULT'
-import json, os, pathlib, sys
-root, task, variant = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
-for path in [root/'home/state'/f'{task}.meta',root/'home/state'/f'{task}.herdr-presentation']:
-    path.write_text(path.read_text().replace('isolated', 'default'))
-journal=root/'home/state'/f'{task}.herdr-presentation'
-if variant != 'launch':
-    fields=('spawn_gen=','terminal_id=','session_instance=','shell_pid=','shell_start=')
-    journal.write_text('\n'.join(line.replace('version=3','version=2') for line in journal.read_text().splitlines() if not line.startswith(fields))+'\n')
-socket=str(root/'runtime.log.sock')
-status={'client':{'session':None,'protocol':20},'server':{'running':True,'session':None,'socket':socket,'protocol':20}}
-sessions={'sessions':[{'name':'default','default':True,'running':True,'socket_path':socket}]}
-if variant=='additive': status['diagnostic']={'future':True}; sessions['sessions'][0]['future']='metadata'
-if variant=='canonical': status['client']['session']=status['server']['session']='default'
-if variant=='missing-server': del status['server']['session']
-if variant=='missing-client': del status['client']['session']
-if variant=='foreign-client': status['client']['session']='foreign'
-if variant=='named-null':
-    for path in [root/'home/state'/f'{task}.meta',journal]: path.write_text(path.read_text().replace('session=default','session=isolated').replace('window=default:', 'window=isolated:'))
-    sessions['sessions'][0]['name']='isolated'
-if variant=='foreign-socket': sessions['sessions'][0]['socket_path']=socket+'.other'
-if variant=='duplicate': sessions['sessions'].append({'name':'default','running':False,'socket_path':None})
-if variant=='stopped': sessions['sessions'][0]['running']=False
-if variant=='malformed': sessions['sessions'][0]['socket_path']=None
-if variant=='replaced':
-    stamp=os.lstat(socket).st_ctime_ns-1
-    os.utime(journal,ns=(stamp,stamp))
-(root/'runtime.log.status').write_text(json.dumps(status))
-(root/'runtime.log.sessions').write_text(json.dumps(sessions))
-PYDEFAULT
-    rc=0
+    local expected="s-$id"
+    [ "$variant" != wrong-generation ] || expected=another-generation
     FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" \
-      PATH="$dir/fakebin:$PATH" "$TEARDOWN" "$id" --endpoint-only --expect-spawn-gen "s-$id" \
+      FM_SUPERVISION_ACTOR=short PATH="$dir/fakebin:$PATH" \
+      "$TEARDOWN" "$id" --endpoint-only --expect-spawn-gen "$expected" \
       > "$dir/stdout" 2> "$dir/stderr" || rc=$?
-    case "$variant" in legacy|launch|additive|canonical) expected=0 ;; *) expected=1 ;; esac
-    if [ "$expected" = 0 ]; then
-      [ "$rc" = 0 ] || fail "$variant default representation rejected: $(cat "$dir/stderr")"
-      jq -e '.phases.pane_close.state=="confirmed"' "$dir/home/state/$id.cleanup.json" >/dev/null || fail 'default absence not confirmed'
-    else
-      [ "$rc" != 0 ] || fail "$variant default identity accepted"
-      assert_contains "$(cat "$dir/stderr")" legacy-session-continuity-unproven "$variant refused for a different reason"
-      ! grep -Fq 'pane <close>' "$dir/runtime.log" || fail 'invalid default identity caused close'
-    fi
-    assert_present "$dir/home/state/$id.meta" 'endpoint-only probe removed task record'
-    assert_present "$dir/worktree/sentinel" 'default probe removed task copy'
+    case "$variant" in
+      wrong-task|wrong-generation|shared-endpoint)
+        [ "$rc" -ne 0 ] || fail "$variant changed a different resolved target"
+        ! grep -Fq 'pane <close>' "$dir/runtime.log" || fail "$variant closed an unrelated target"
+        ;;
+      *)
+        [ "$rc" = 0 ] || fail "$variant historical evidence blocked completed window closure: $(cat "$dir/stderr")"
+        assert_present "$dir/runtime.log.w1:p-$id.closed" 'exact completed pane was not closed'
+        jq -e '.phases.pane_close.state=="confirmed"' "$dir/home/state/$id.cleanup.json" >/dev/null || fail 'endpoint absence was not recorded'
+        FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" lifecycle "$id" | \
+          jq -e '.disposition=="archived" and .next_action.phase=="uncertain"' >/dev/null || fail 'closure changed historical business evidence'
+        ;;
+    esac
+    assert_present "$dir/home/state/$id.meta" 'endpoint-only cleanup erased the task record'
+    assert_present "$dir/worktree/sentinel" 'endpoint-only cleanup touched the copy'
+    assert_present "$dir/home/data/$id/report.md" 'endpoint-only cleanup removed the report'
   done
-  pass 'fm-teardown: explicit null default requires unique running session/socket identity; missing, foreign, named-null and replaced identities refuse'
+  pass 'completed exact windows close without short binding, journal or continuation admission; wrong task/generation and shared endpoints stay intact'
 }
 
-test_cleanup_default_status_identity
+test_completed_copy_preservation_ignores_force() {
+  local dir id variant
+  for variant in dirty unlanded; do
+    id="completed-force-$variant"
+    dir=$(make_case "$id")
+    write_herdr_meta "$dir/home/state/$id.meta" \
+      "window=isolated:fm-$id" "worktree=$dir/worktree" "project=$dir/project" "kind=ship"
+    git -C "$dir/project" -c user.name=test -c user.email=test@example.invalid commit --allow-empty -qm base
+    rm -rf "$dir/worktree"
+    git -C "$dir/project" worktree add -q -b "$id" "$dir/worktree"
+    printf 'Preserve completed task content\n' > "$dir/worktree/sentinel"
+    if [ "$variant" = unlanded ]; then
+      git -C "$dir/worktree" add sentinel
+      git -C "$dir/worktree" -c user.name=test -c user.email=test@example.invalid commit -qm unlanded
+    fi
+    stage_archived_action "$dir" "$id" cleanup uncertain
+    run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" || fail "completed $variant window was blocked: $(cat "$dir/stderr")"
+    assert_present "$dir/runtime.log.w1:p-$id.closed" 'completed pane was not closed'
+    assert_present "$dir/worktree/sentinel" 'force bypassed completed-copy preservation'
+    assert_absent "$dir/home/state/$id.meta" 'completed resource record was not archived'
+  done
+  pass 'completed dirty and unlanded copies remain even when the legacy force flag is supplied'
+}
+
+test_completed_copy_preservation_ignores_force
+test_completed_endpoint_ignores_historical_admission_gates
 
 test_open_goal_preserves_resources_before_cleanup
-test_archived_business_action_allows_only_independent_endpoint_cleanup
-test_cleanup_uses_structural_identity_across_journal_versions
 test_invalid_endpoint_records_refuse_before_mutation
 test_control_lock_contention_refuses_before_mutation
 test_non_pool_teardown_ignores_task_set_lock

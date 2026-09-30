@@ -336,20 +336,82 @@ if(process.env.FM_SHORT_CLEANUP_TARGET) {
   assert.ok(/^fm-lab-/.test(target.session) && target.session===process.env.HERDR_LAB_SESSION,'cleanup requires the generated named lab');
   fs.writeFileSync(path.join(home,'state/cleanup-one.meta'),`kind=ship\nmode=local-only\nspawn_gen=g-lab\nwindow=${target.session}:${target.pane}\nendpoint_task_id=cleanup-one\nworktree=${tmp}/absent-cleaned-worktree\nproject=${project}\nbackend=herdr\nherdr_session=${target.session}\nherdr_workspace_id=${target.workspace}\nherdr_tab_id=${target.tab}\nherdr_pane_id=${target.pane}\n`);
   const cleanMeta=fs.readFileSync(path.join(home,'state/cleanup-one.meta'),'utf8');
-  const dirtyCopy=path.join(tmp,'dirty-copy');git('-C',project,'worktree','add','-b','unlanded-lab',dirtyCopy);
-  fs.writeFileSync(path.join(dirtyCopy,'unlanded'),'preserve');
-  for(const [label,copy] of [['dirty',dirtyCopy],['unlanded',dirtyCopy],['shared',dirtyCopy]]) {
-    if(label==='unlanded') {git('-C',dirtyCopy,'add','.');git('-C',dirtyCopy,'commit','-m','unlanded fixture');}
-    if(label==='shared') fs.writeFileSync(path.join(home,'state/other-task.meta'),`worktree=${copy}\n`);
-    const task='cleanup-'+label;
-    fs.writeFileSync(path.join(home,'state',task+'.meta'),cleanMeta.replace('cleanup-one',task).replace(`${tmp}/absent-cleaned-worktree`,copy));
-    const negative=service.submit(req(task,[{action:'cleanup',task}]));
-    const refused=await terminal(negative.id);assert.equal(refused.state,'blocked',JSON.stringify(refused));
-    assert.ok(fs.existsSync(path.join(home,'state',task+'.meta')));
-    assert.ok(fs.existsSync(path.join(dirtyCopy,'unlanded')));
-    assert.ok(!fs.existsSync(path.join(service.dir(negative.id),'operation-0.effect.json')),'cleanup preflight refused before effects');
-    if(label==='shared') fs.unlinkSync(path.join(home,'state/other-task.meta'));
-    fs.unlinkSync(path.join(home,'state',task+'.meta')); // isolated rejected fixture only
+  const herdrLive=(...args)=>{const output=execFileSync(process.env.HERDR_LAB_HELPER,['run',target.session,...args],{encoding:'utf8',env:{...process.env,PATH:process.env.FM_SHORT_TEST_BASE_PATH}});return output.trim()?JSON.parse(output):{};};
+  const liveTask='cleanup-live',liveGeneration='s-live-cleanup';
+  const livePane=herdrLive('tab','create','--workspace',target.workspace,'--cwd',path.join(tmp,'idle'),'--label','fm-cleanup-live','--no-focus').result;
+  const livePaneId=livePane.root_pane.pane_id,liveTabId=livePane.tab.tab_id;
+  fs.writeFileSync(path.join(home,'state',liveTask+'.meta'),cleanMeta.replaceAll('cleanup-one',liveTask).replaceAll(target.pane,livePaneId).replaceAll(target.tab,liveTabId).replace('spawn_gen=g-lab',`spawn_gen=${liveGeneration}`)+'harness=traex\n');
+  fs.mkdirSync(path.join(home,'data',liveTask),{recursive:true});
+  fs.writeFileSync(path.join(home,'data',liveTask,'brief.md'),'Disposable completed live cleanup fixture\n');
+  fs.writeFileSync(path.join(home,'data',liveTask,'report.md'),'Retained completed-task report\n');
+  const liveEnv={...process.env,FM_HOME:home,FM_ROOT_OVERRIDE:root,FM_STATE_OVERRIDE:path.join(home,'state'),FM_DATA_OVERRIDE:path.join(home,'data'),FM_SUPERVISION_ACTOR:'main'};
+  fs.writeFileSync(path.join(home,'state',liveTask+'.herdr-presentation'),`version=1\ntask_id=${liveTask}\nprojection_id=abcdefghijklmnopqrstuv\n`);
+  execFileSync('bash',['-c',`. "$1/bin/backends/herdr.sh"; journal="$FM_HOME/state/$2.herdr-presentation"; fm_backend_herdr_projection_journal_write_v2 "$journal" "$2" abcdefghijklmnopqrstuv "$FM_HOME" "$3" "$4" "$5" "$6" "$4" anchor "$(fm_backend_herdr_projection_workspace_label "$2" abcdefghijklmnopqrstuv)" "fm-$2"; fm_backend_herdr_projection_bind_execution "$journal" "$2" "$7"`,'fixture',root,liveTask,target.session,target.workspace,liveTabId,livePaneId,liveGeneration],{env:liveEnv});
+  const initial=JSON.parse(execFileSync('python3',[path.join(root,'bin/fm-task-lifecycle.py'),'init',liveTask],{env:liveEnv,encoding:'utf8'}));
+  initial.disposition='accepted';initial.assessment.remaining_gap='';
+  const acceptedFile=path.join(tmp,'accepted-live.json');fs.writeFileSync(acceptedFile,JSON.stringify(initial),{mode:0o600});
+  execFileSync('bash',[path.join(root,'bin/fm-task-state.sh'),'reconcile',liveTask,'--expected-revision','1','--record',acceptedFile],{env:liveEnv});
+  herdrLive('pane','run',livePaneId,'traex -y');
+  const probe=()=>execFileSync('bash',['-c','. "$1/bin/backends/herdr.sh"; fm_backend_herdr_agent_state "$2:$3"; fm_backend_herdr_composer_state "$2:$3"','fixture',root,target.session,livePaneId],{env:liveEnv,encoding:'utf8'}).trim();
+  let liveState;
+  for(let n=0;n<120;n++){liveState=probe();if(liveState==='aliveempty')break;await wait(250);}
+  assert.equal(liveState,'aliveempty','real TraeX reached a structurally live agent with an empty composer');
+  const liveInput=req('cleanup-live',[{action:'cleanup',task:liveTask}]);liveInput.operations.expiresAt=Date.now()+180000;
+  const liveCleanup=service.submit(liveInput),liveResult=await terminal(liveCleanup.id);
+  const liveDir=service.dir(liveCleanup.id);
+  const liveOutput=JSON.parse(fs.readFileSync(path.join(liveDir,'operation-0.output.json')));
+  fs.writeFileSync(path.join(tmp,'live-cleanup-evidence.json'),JSON.stringify({liveState,result:liveResult,output:liveOutput,receipt:JSON.parse(fs.readFileSync(path.join(liveDir,'operation-0.receipt.json')))},null,2));
+  assert.equal(liveResult.state,'completed',JSON.stringify(liveOutput));
+  assert.ok(!fs.existsSync(path.join(home,'state',liveTask+'.meta')));
+  assert.ok(!herdrLive('pane','list','--workspace',target.workspace).result.panes.some(p=>p.pane_id===livePaneId));
+  assert.equal(fs.readFileSync(path.join(home,'data',liveTask,'report.md'),'utf8'),'Retained completed-task report\n');
+  const liveReceipt=fs.readFileSync(path.join(liveDir,'operation-0.receipt.json'),'utf8');
+  assert.equal(service.submit(liveInput).finishedAt,liveResult.finishedAt,'completed cleanup is not replayed');
+  assert.equal(fs.readFileSync(path.join(liveDir,'operation-0.receipt.json'),'utf8'),liveReceipt);
+  const completedFixture=(task,meta)=>{
+    fs.writeFileSync(path.join(home,'state',task+'.meta'),meta);
+    fs.mkdirSync(path.join(home,'data',task),{recursive:true});
+    fs.writeFileSync(path.join(home,'data',task,'brief.md'),'Disposable completed cleanup fixture\n');
+    fs.writeFileSync(path.join(home,'data',task,'report.md'),'Preserved report\n');
+    const record=JSON.parse(execFileSync('python3',[path.join(root,'bin/fm-task-lifecycle.py'),'init',task],{env:liveEnv,encoding:'utf8'}));
+    record.disposition='accepted';record.assessment.remaining_gap='';
+    const file=path.join(tmp,task+'-accepted.json');fs.writeFileSync(file,JSON.stringify(record),{mode:0o600});
+    execFileSync('bash',[path.join(root,'bin/fm-task-state.sh'),'reconcile',task,'--expected-revision','1','--record',file],{env:liveEnv});
+  };
+  const copySnapshot=copy=>({
+    head:git('-C',copy,'rev-parse','HEAD'),branch:git('-C',copy,'rev-parse','--abbrev-ref','HEAD'),status:git('-C',copy,'status','--porcelain'),
+    files:Object.fromEntries(git('-C',copy,'ls-files','--cached','--others','--exclude-standard','-z').split('\0').filter(Boolean).map(file=>[file,fs.readFileSync(path.join(copy,file)).toString('base64')]))
+  });
+  for(const label of ['dirty','unlanded','pushed-unmerged','shared','primary','contended','clean']) {
+    const task='cleanup-'+label,copy=label==='primary'?project:path.join(tmp,label+'-copy');
+    if(label!=='primary') {
+      git('-C',project,'worktree','add','-b',label+'-fixture',copy);
+      if(!['clean','contended'].includes(label))fs.writeFileSync(path.join(copy,'unlanded'),'retained task content');
+      if(label==='unlanded'||label==='pushed-unmerged') {git('-C',copy,'add','.');git('-C',copy,'commit','-m','unmerged task content');if(label==='pushed-unmerged')git('-C',copy,'push','origin','HEAD');}
+    }
+    if(label==='shared')fs.writeFileSync(path.join(home,'state/other-task.meta'),`worktree=${copy}\n`);
+    const pane=herdrLive('tab','create','--workspace',target.workspace,'--cwd',path.join(tmp,'idle'),'--label',task,'--no-focus').result;
+    const meta=cleanMeta.replaceAll('cleanup-one',task).replace(`${tmp}/absent-cleaned-worktree`,copy).replaceAll(target.pane,pane.root_pane.pane_id).replaceAll(target.tab,pane.tab.tab_id);
+    completedFixture(task,meta);
+    const beforeCopy=copySnapshot(copy);
+    let copyLock;
+    if(label==='contended') {
+      copyLock=execFileSync('bash',['-c','. "$1/bin/fm-wake-lib.sh"; fm_treehouse_project_lock_path "$2"','fixture',root,project],{env:liveEnv,encoding:'utf8'}).trim();
+      fs.mkdirSync(copyLock);fs.writeFileSync(path.join(copyLock,'pid'),String(process.pid)+'\n');
+    }
+    const input=req(task,[{action:'cleanup',task}]),operation=service.submit(input),result=await terminal(operation.id);
+    if(copyLock)fs.rmSync(copyLock,{recursive:true});
+    const dir=service.dir(operation.id),output=JSON.parse(fs.readFileSync(path.join(dir,'operation-0.output.json')));
+    assert.equal(result.state,'completed',JSON.stringify(output));
+    assert.ok(!fs.existsSync(path.join(home,'state',task+'.meta')));
+    assert.ok(!herdrLive('pane','list','--workspace',target.workspace).result.panes.some(p=>p.pane_id===pane.root_pane.pane_id));
+    assert.equal(fs.readFileSync(path.join(home,'data',task,'report.md'),'utf8'),'Preserved report\n');
+    const receipt=JSON.parse(fs.readFileSync(path.join(dir,'operation-0.receipt.json')));
+    if(label!=='clean') {
+      assert.ok(fs.existsSync(copy));assert.equal(receipt.evidence.copyDisposition,'retained-'+(label==='pushed-unmerged'?'unlanded':label==='contended'?'unverified':label));
+      assert.deepEqual(copySnapshot(copy),beforeCopy,'retained working files, head, branch and status are unchanged');
+    } else assert.ok(!fs.existsSync(copy),'exclusive clean integrated copy was actually removed');
+    fs.writeFileSync(path.join(tmp,label+'-cleanup-evidence.json'),JSON.stringify({copy,beforeCopy,afterCopy:label==='clean'?null:copySnapshot(copy),result,receipt,output},null,2));
   }
   const cleanup=service.submit(req('cleanup',[{action:'cleanup',task:'cleanup-one'}]));
   const result=await terminal(cleanup.id);
@@ -380,7 +442,7 @@ if(process.env.FM_SHORT_CLEANUP_TARGET) {
   assert.equal(git('-C',lease.path,'status','--porcelain'),'');
   const unrelatedHead=git('-C',unrelated.path,'rev-parse','HEAD');
   fs.writeFileSync(path.join(unrelated.path,'keep.txt'),'unrelated content must survive');
-  execFileSync('bash',['-c','. "$1/bin/fm-wake-lib.sh"; fm_treehouse_slot_owner_claim "$2" cleanup-landed "$3"','fixture',root,lease.path,home]);
+  execFileSync('bash',['-c','. "$1/bin/fm-wake-lib.sh"; fm_treehouse_slot_owner_claim "$2" cleanup-landed "$3" g-lab','fixture',root,lease.path,home]);
   const herdr=(...args)=>JSON.parse(execFileSync(process.env.HERDR_LAB_HELPER,['run',target.session,...args],{encoding:'utf8',env:{...process.env,PATH:process.env.FM_SHORT_TEST_BASE_PATH}}));
   const pane=herdr('tab','create','--workspace',target.workspace,'--cwd',path.join(tmp,'idle'),'--label','fm-cleanup-landed','--no-focus').result;
   const beforePanes=herdr('pane','list','--workspace',target.workspace).result.panes.map(p=>p.pane_id);
@@ -453,9 +515,11 @@ if(process.env.FM_SHORT_CLEANUP_TARGET) {
   const drift=auditService.submit(cleanupInput('audit-owner-drift'),false);
   completion('hold','audit-second-choice','--title','Second synthetic choice','--reason','Unanswered synthetic choice','--origin',auditTask);
   completion('complete',auditTask,auditTask,'audit-second-choice');
+  fs.appendFileSync(auditMeta,'endpoint_task_id=another-task\n');
   execFileSync(process.execPath,[path.join(root,'bin/fm-short-agent.mjs'),'_run',auditHome,drift.id],{env:auditEnv,timeout:30000});
   assert.equal(auditService.status(drift.id).state,'blocked');assert.ok(fs.existsSync(auditMeta));
   assert.ok(!fs.existsSync(path.join(auditService.dir(drift.id),'operation-0.effect.json')));
+  fs.writeFileSync(auditMeta,fs.readFileSync(auditMeta,'utf8').replace('endpoint_task_id=another-task\n',''));
   const currentReview=fs.readFileSync(auditMeta,'utf8');
   assert.ok(currentReview.includes('# previous completion: decision_keys='+auditTask+'\n'));
   completion('verify',auditTask);completion('open',auditTask);completion('open','audit-second-choice');

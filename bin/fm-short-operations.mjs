@@ -95,7 +95,7 @@ export function validateOperations(value) {
   return {expiresAt:value.expiresAt,authority:value.authority,steps};
 }
 function git(project,...args) {return execFileSync('git',['-C',project,...args],{encoding:'utf8',timeout:10000,stdio:['ignore','pipe','pipe']}).trim();}
-function metadata(home,task) {
+function metadata(home,task,cleanup=false) {
   const file=path.join(home,'state',task+'.meta');
   if(fs.lstatSync(file).isSymbolicLink()) fail('symlink task metadata refused');
   const text=fs.readFileSync(file,'utf8'), data=Object.create(null), audit=[];
@@ -103,6 +103,7 @@ function metadata(home,task) {
     if(line.startsWith('#')) continue;
     const at=line.indexOf('='); if(at<1) continue;
     const key=line.slice(0,at);
+    if(cleanup && !['spawn_gen','kind','worktree','project','backend','window','herdr_session','herdr_pane_id','herdr_workspace_id','herdr_tab_id','endpoint_task_id'].includes(key)) continue;
     if(key==='decisions_reviewed' || key==='decision_keys') audit.push([key,line.slice(at+1)]);
     else if(Object.hasOwn(data,key)) fail('duplicate task metadata field');
     data[key]=line.slice(at+1);
@@ -120,10 +121,10 @@ function metadata(home,task) {
       previous=keys;
     }
   } else if(new Set(audit.map(([key])=>key)).size!==audit.length) fail('duplicate task metadata field');
-  if(!data.spawn_gen) fail('operation requires an existing task generation; legacy identity refused');
-  // Bind the entire record, including historical audit lines and comments, so
-  // even an edit that preserves the effective latest values refuses execution.
-  return {sha256:createHash('sha256').update(text).digest('hex'),...Object.fromEntries(['pr','pr_head','spawn_gen','kind','worktree','project','backend','window','herdr_session','herdr_pane_id','herdr_workspace_id','herdr_tab_id','endpoint_task_id','harness','tmux_pane_id'].map(k=>[k,data[k]??'']))};
+  if(!cleanup && !data.spawn_gen) fail('operation requires an existing task generation; legacy identity refused');
+  // Merge binds the entire audit record. Cleanup binds structural ownership;
+  // unrelated completion history cannot invalidate an exact cleanup target.
+  return {...(cleanup?{}:{sha256:createHash('sha256').update(text).digest('hex')}),...Object.fromEntries(['pr','pr_head','spawn_gen','kind','worktree','project','backend','window','herdr_session','herdr_pane_id','herdr_workspace_id','herdr_tab_id','endpoint_task_id','harness','tmux_pane_id'].map(k=>[k,data[k]??'']))};
 }
 function binaryIdentity(destination) {
   const file=path.join(destination,'shellcheck');
@@ -161,9 +162,8 @@ export function bindOperations(home,operations) {
       const canonicalUrl=execFileSync('bash',['-c','. "$1"; fm_pr_url_parse "$2" || exit 1; printf "%s" "$FM_PR_URL"','short-url',library,step.url],{encoding:'utf8',timeout:10000});
       if(canonicalUrl!==step.url) fail('merge requires the canonical owner URL');
     }
-    const identity=metadata(home,step.task);
+    const identity=metadata(home,step.task,step.action==='cleanup');
     if(step.action==='merge' && (identity.pr!==step.url || !/^[a-f0-9]{40,64}$/.test(identity.pr_head))) fail('merge requires the exact registered URL and candidate head before granting authority');
-    if(step.action==='cleanup' && exists(identity.worktree) && fs.realpathSync(identity.worktree)===fs.realpathSync(identity.project)) fail('cleanup cannot target the project clone');
     if(step.action==='cleanup' && identity.backend!=='herdr') fail('short cleanup requires the Herdr owner with confirmed endpoint removal; this backend is unsupported');
     if(identity.kind==='secondmate') fail('short operations do not retire secondmate homes');
     return identity;
@@ -205,7 +205,7 @@ export function operationCurrent(home,request,index,{terminal=false}={}) {
     }
     if(git(step.project,'remote','get-url','origin')!==binding.origin || fs.realpathSync(git(step.project,'rev-parse','--absolute-git-dir'))!==binding.gitDir) fail('operation project identity changed');
   } else if(step.destination) {canonical(step.destination);if(!equal(binaryIdentity(step.destination),binding.previous)) fail('install target identity changed');}
-  else if(!equal(metadata(home,step.task),binding)) fail('operation task/process/generation identity changed');
+  else if(!equal(metadata(home,step.task,step.action==='cleanup'),binding)) fail('operation task/process/generation identity changed');
   return step;
 }
 
@@ -222,7 +222,7 @@ export function operationReceipts(dir) {
     }
     if(receipt.state==='completed') {
       const e=receipt.evidence;
-      if(!e || ((receipt.action==='sync'||receipt.action==='merge') && !/^[a-f0-9]{40,64}$/.test(e.head)) || (receipt.action==='install-shellcheck' && (!/^[a-f0-9]{64}$/.test(e.sha256)||typeof e.version!=='string')) || (receipt.action==='cleanup' && (e.taskRecordRemoved!==true || e.endpointConfirmedGone!==true || e.bookkeepingComplete!==true || e.copyDisposition!=='returned-or-already-absent'))) fail('malformed operation postcondition');
+      if(!e || ((receipt.action==='sync'||receipt.action==='merge') && !/^[a-f0-9]{40,64}$/.test(e.head)) || (receipt.action==='install-shellcheck' && (!/^[a-f0-9]{64}$/.test(e.sha256)||typeof e.version!=='string')) || (receipt.action==='cleanup' && (e.taskRecordRemoved!==true || e.endpointConfirmedGone!==true || e.bookkeepingComplete!==true || !['returned-or-already-absent','retained-shared','retained-primary','retained-dirty','retained-unlanded','retained-unverified'].includes(e.copyDisposition)))) fail('malformed operation postcondition');
     }
     return receipt;
   });
@@ -416,6 +416,9 @@ export async function executeOperations(service,request,check) {
       }
       operationCurrent(service.home,request,index);
       if(!publish(intentFile,{nonce:request.nonce,index,step,at:Date.now()})) fail('operation intent already exists');
+      // Completed cleanup does not use actor-binding admission inside teardown.
+      // Preserve uncertainty before handing the exact request to that owner.
+      if(step.action==='cleanup') publish(path.join(dir,`operation-${index}.effect.json`),{id:request.id,nonce:request.nonce,index,owner:processIdentity(process.pid),at:Date.now()});
       const env={...process.env,FM_HOME:service.home,FM_ROOT_OVERRIDE:service.root,FM_STATE_OVERRIDE:path.join(service.home,'state'),FM_CONFIG_OVERRIDE:path.join(service.home,'config'),FM_SUPERVISION_ACTOR:'short',FM_SHORT_TASK:request.id,FM_SHORT_STEP:String(index),FM_FLEET_PRUNE:'0'};
       // Never inherit caller overrides that could redirect a guarded owner.
       for(const key of ['FM_DATA_OVERRIDE','FM_PROJECTS_OVERRIDE','FM_LEASE_HOLDER_PID']) delete env[key];
