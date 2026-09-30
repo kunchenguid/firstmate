@@ -49,7 +49,7 @@ _fm_pending_reply_stamp_escalated() {  # <state-dir> <record-path> <field> <valu
 
 # Remind unresolved escalations once per later live session.
 fm_pending_reply_remind_escalated() {  # <state-dir>
-  local state=$1 token dir rec corr task summary payload key queued appended=0 rc=0
+  local state=$1 token dir rec corr task summary payload key queued scan appended=0 rc=0
   local -a open=() recs=()
   local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
   dir=$(fm_pending_reply_dir "$state")
@@ -66,10 +66,11 @@ fm_pending_reply_remind_escalated() {  # <state-dir>
   [ -n "$token" ] || return 0
   STATE=$state
   for rec in "${open[@]}"; do
-    if fm_pending_reply_escalation_dismissed "$rec"; then
+    if fm_pending_reply_escalation_dismissed "$rec" scan; then
       _fm_pending_reply_stamp_escalated "$state" "$rec" escalation_dismissed_epoch "$(fm_pending_reply_now)" || return 1
       continue
     fi
+    [ -z "$scan" ] || _fm_pending_reply_stamp_escalated "$state" "$rec" escalation_dismiss_scan "$scan" || return 1
     [ "$(fm_pending_reply_get "$rec" surfaced_session)" != "$token" ] || continue
     recs+=("$rec")
   done

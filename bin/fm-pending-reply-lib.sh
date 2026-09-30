@@ -1224,9 +1224,13 @@ _fm_pending_reply_scan_dismissal() {  # <status-file> <key>
 # writes, after the escalation opened under that key. Nothing else dismisses,
 # so a legacy unkeyed escalation, any other resolved line, or a terminal line
 # that clears the whole fold leaves it unresolved and visible. An unchanged
-# log keeps the previous answer, so a later poll does not read it again.
-fm_pending_reply_escalation_dismissed() {  # <record-path>
+# log keeps the previous escalation_dismiss_scan answer, so a later poll does
+# not read it again. Never writes the record: after a fresh scan it stores the
+# value for escalation_dismiss_scan in <scan-var>, for a caller holding the
+# record's lock to save.
+fm_pending_reply_escalation_dismissed() {  # <record-path> [<scan-var>]
   local rec=$1 parent_status key signature cached seen
+  [ -z "${2:-}" ] || printf -v "$2" '%s' ''
   [ -z "$(fm_pending_reply_get "$rec" escalation_dismissed_epoch)" ] || return 0
   parent_status=$(fm_pending_reply_get "$rec" parent_status)
   [ -n "$parent_status" ] && [ -f "$parent_status" ] || return 1
@@ -1246,7 +1250,7 @@ fm_pending_reply_escalation_dismissed() {  # <record-path>
   seen=$(_fm_pending_reply_scan_dismissal "$parent_status" "$key")
   case "$signature" in
     missing|unreadable) ;;
-    *) fm_pending_reply_set "$rec" escalation_dismiss_scan "$signature $seen" || return 1 ;;
+    *) [ -z "${2:-}" ] || printf -v "$2" '%s' "$signature $seen" ;;
   esac
   [ "$seen" = dismissed ]
 }

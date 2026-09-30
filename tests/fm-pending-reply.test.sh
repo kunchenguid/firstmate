@@ -2260,8 +2260,14 @@ test_unchanged_status_log_is_not_reread_for_dismissal() {
       printf 'x\n' >> "$scan_log"
       _fm_pending_reply_scan_dismissal_real "$@"
     }
-    fm_pending_reply_escalation_dismissed "$rec" && { echo "an open escalation was dismissed" >&2; exit 1; }
-    fm_pending_reply_escalation_dismissed "$rec" && { echo "the cached open result dismissed the escalation" >&2; exit 1; }
+    local before scan
+    before=$(cat "$rec")
+    fm_pending_reply_escalation_dismissed "$rec" scan && { echo "an open escalation was dismissed" >&2; exit 1; }
+    [ "$(cat "$rec")" = "$before" ] || { echo "the dismissal check wrote the record" >&2; exit 1; }
+    [ -n "$scan" ] || { echo "a fresh scan returned no cache value" >&2; exit 1; }
+    fm_pending_reply_set "$rec" escalation_dismiss_scan "$scan"
+    fm_pending_reply_escalation_dismissed "$rec" scan && { echo "the cached open result dismissed the escalation" >&2; exit 1; }
+    [ -z "$scan" ] || { echo "a cached answer asked to be saved again" >&2; exit 1; }
     reads=$(wc -l < "$scan_log" | tr -d ' ')
     [ "$reads" = 1 ] || { echo "an unchanged status log was read ${reads} times" >&2; exit 1; }
     printf 'resolved [key=pending-reply-%s]: pending-reply-resolved: ack\n' "$corr" >> "$status"
@@ -2270,6 +2276,45 @@ test_unchanged_status_log_is_not_reread_for_dismissal() {
     [ "$reads" = 2 ] || { echo "a changed status log was read ${reads} times" >&2; exit 1; }
   ) || fail "unchanged status log was re-read"
   pass "an unchanged status log is not re-read for dismissal"
+}
+
+# The reminder saves the dismissal scan only while holding the record's lock,
+# and Bearings' read-only decisions view never writes the record.
+test_dismissal_scan_is_saved_under_record_lock() {
+  local home state corr rec before holder remind_pid lib
+  home=$(setup_parent scan-lock)
+  state="$home/state"
+  export FM_PENDING_REPLY_NOW=1000
+  export FM_PENDING_REPLY_SEND_HOOK='true'
+  corr=$(FM_PENDING_REPLY_SESSION=s1 escalate_new "$home" "$state" "still open")
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  fm_pending_reply_set "$rec" escalation_dismiss_scan ""
+  before=$(cat "$rec")
+  fm_pending_reply_escalated_decisions_json "$state" > /dev/null || fail "decisions view failed"
+  [ "$(cat "$rec")" = "$before" ] || fail "the read-only decisions view wrote the record"
+
+  lib="$ROOT/bin/fm-wake-lib.sh"
+  bash -c '. "$1"; fm_lock_acquire_wait "$2" && : > "$3"; exec sleep 300' _ \
+    "$lib" "$state/.pending-reply-$corr.lock" "$home/held" &
+  holder=$!
+  for _ in $(seq 1 100); do [ -e "$home/held" ] && break; sleep 0.1; done
+  [ -e "$home/held" ] || { kill "$holder" 2>/dev/null; fail "foreign holder never took the lock"; }
+  FM_PENDING_REPLY_SESSION=s2 "$ROOT/bin/fm-pending-reply-remind.sh" "$state" &
+  remind_pid=$!
+  sleep 1
+  if [ -n "$(fm_pending_reply_get "$rec" escalation_dismiss_scan)" ]; then
+    kill -TERM "$holder" "$remind_pid" 2>/dev/null
+    fail "the dismissal scan was saved while another process held the record lock"
+  fi
+  kill -TERM "$holder" 2>/dev/null
+  wait "$holder" 2>/dev/null || true
+  rm -rf "$state/.pending-reply-$corr.lock"
+  wait "$remind_pid" || fail "remind failed after the lock was released"
+  case "$(fm_pending_reply_get "$rec" escalation_dismiss_scan)" in
+    *" open") ;;
+    *) fail "the dismissal scan was not saved once the lock was free" ;;
+  esac
+  pass "the dismissal scan is saved only under the record lock"
 }
 
 # --- run --------------------------------------------------------------------
@@ -2288,6 +2333,7 @@ test_operator_closed_escalation_is_not_reminded
 test_other_closes_do_not_dismiss_escalation
 test_same_session_operator_close_is_recorded
 test_unchanged_status_log_is_not_reread_for_dismissal
+test_dismissal_scan_is_saved_under_record_lock
 test_queued_reminder_does_not_mark_unnamed_record
 test_reminder_leaves_state_alone_without_escalations
 test_tick_starts_reminder_only_for_escalated_records
