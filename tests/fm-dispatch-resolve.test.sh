@@ -512,16 +512,20 @@ assert_contains "$out" 'candidate: gemini:gemini-3.8-flash-high  provider=google
 assert_contains "$out" "  profile: --harness 'gemini' --model 'gemini-3.8-flash-high'" "Gemini is a typed verified dispatch harness"
 
 cp "$ROOT/docs/examples/crew-dispatch.json" "$RULES"
+OPENCODE_QUOTA="$TMP_ROOT/opencode-quota.json"
+jq 'del(.providers[] | select(.provider == "codex")) | del(.exhaustion[] | select(.provider == "codex")) | .providers += [{"provider":"opencode-go","state":{"status":"fresh"},"quotaSemantics":{"status":"known","effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":100,"runway":{"status":"through_reset"},"selection":{"spendPriority":0.5}}]}}]' "$QUOTA" > "$OPENCODE_QUOTA"
 cat > "$RESPONSE" <<'JSON'
-{"model":"jev-1.13.0","answers":{"rule":{"type":"choice","choice":"default","confidence":0.9,"probabilities":{"rule_1":0.02,"rule_2":0.02,"rule_3":0.02,"default":0.94}}},"usage":{"input_tokens":812,"output_tokens":60}}
+{"model":"jev-1.13.0","answers":{"rule":{"type":"choice","choice":"default","confidence":0.9,"probabilities":{"rule_1":0.02,"default":0.98}}},"usage":{"input_tokens":812,"output_tokens":60}}
 JSON
 reset_log
-TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$OPENCODE_QUOTA" run code out err "$BRIEF"
 assert_contains "$out" '  status: clear' "the documented example passes opted-in resolution"
-assert_contains "$out" 'candidate: pi:anthropic/claude-sonnet-5  provider=claude' "the documented Pi default uses its declared Claude provider"
+assert_contains "$out" 'candidate: opencode:opencode-go/space-bunny-free  provider=opencode-go' "the documented default uses the approved OpenCode model"
+assert_contains "$out" "  profile: --harness 'opencode' --model 'opencode-go/space-bunny-free'" "default code work selects the approved model"
 assert_not_contains "$err" 'malformed rules file' "the documented example reaches resolution"
+
 cp "$BASE_RULES" "$RULES"
-pass "no-rule fallback, Agy, Gemini, and documented configurations resolve"
+pass "no-rule fallback, Agy, Gemini, and documented default resolve"
 
 # --- ambiguous: fixed confidence floor -----------------------------------------
 reset_log

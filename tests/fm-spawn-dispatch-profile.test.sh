@@ -50,7 +50,34 @@ if [ "${1:-}" = --list-models ]; then
 fi
 exit 0
 SH
-  chmod +x "$fakebin/timeout" "$fakebin/cursor-agent"
+  cat > "$fakebin/opencode" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = models ]; then
+  # OpenCode v2 refuses a provider positional argument ("Unexpected positional
+  # argument") and prints usage text instead of a catalog, so this stub does
+  # the same. A regression to the legacy `opencode models <provider>` form
+  # therefore fails here rather than passing against a permissive stub.
+  if [ -n "${2:-}" ]; then
+    printf '%s\n' 'error: unexpected positional argument' >&2
+    exit 1
+  fi
+  [ -n "${FM_FAKE_OPENCODE_MODELS_ARGS:-}" ] && printf '%s\n' "$@" > "$FM_FAKE_OPENCODE_MODELS_ARGS"
+  [ "${FM_FAKE_OPENCODE_MODELS_STATUS:-0}" -eq 0 ] || exit "${FM_FAKE_OPENCODE_MODELS_STATUS}"
+  printf '%b\n' "${FM_FAKE_OPENCODE_MODELS:-anthropic/claude-sonnet-4-5\\nopencode-go/space-bunny-free}"
+fi
+exit 0
+SH
+  chmod +x "$fakebin/timeout" "$fakebin/cursor-agent" "$fakebin/opencode"
+  cat > "$fakebin/curl" <<'SH'
+#!/usr/bin/env bash
+[ "${FM_FAKE_MODELS_DEV_STATUS:-0}" -eq 0 ] || exit "${FM_FAKE_MODELS_DEV_STATUS}"
+if [ -n "${FM_FAKE_MODELS_DEV_JSON:-}" ]; then
+  printf '%s\n' "$FM_FAKE_MODELS_DEV_JSON"
+else
+  printf '%s\n' '{"opencode-go":{"models":{"space-bunny-free":{"cost":{"input":0,"output":0}},"longcat-2.5-preview-free":{"cost":{"input":0,"output":0}},"claude-sonnet-4-5":{"cost":{"input":3,"output":15}}}}}'
+fi
+SH
+  chmod +x "$fakebin/curl"
   make_spawn_pi_probe "$fakebin" pi
   make_spawn_pi_probe "$fakebin" pi-signed
   printf '%s\n' "$fakebin"
@@ -114,6 +141,11 @@ run_spawn() {
     FM_FAKE_PI_VERSION="${FM_TEST_PI_VERSION:-0.84.0}" \
     FM_FAKE_CURSOR_MODELS="${FM_TEST_CURSOR_MODELS:-}" \
     FM_FAKE_CURSOR_LIST_STATUS="${FM_TEST_CURSOR_LIST_STATUS:-0}" \
+    FM_FAKE_OPENCODE_MODELS="${FM_TEST_OPENCODE_MODELS:-}" \
+    FM_FAKE_OPENCODE_MODELS_STATUS="${FM_TEST_OPENCODE_MODELS_STATUS:-0}" \
+    FM_FAKE_OPENCODE_MODELS_ARGS="${FM_TEST_OPENCODE_MODELS_ARGS:-}" \
+    FM_FAKE_MODELS_DEV_JSON="${FM_TEST_MODELS_DEV_JSON:-}" \
+    FM_FAKE_MODELS_DEV_STATUS="${FM_TEST_MODELS_DEV_STATUS:-0}" \
     GROK_HOME="$home/grok-home" \
     fm_test_run_spawn "$home" "$wt" "$fakebin" "$@"
 }
@@ -381,6 +413,28 @@ test_active_dispatch_profile_allows_explicit_harness() {
   assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
     "explicit harness launch did not thread model and effort"
   pass "active crew-dispatch profile allows an explicit resolved harness"
+}
+
+test_explicit_opencode_task_model_overrides_configured_fallback() {
+  local rec id out status launch
+  id=profile-opencode-task-override-z13a
+  rec=$(make_spawn_case profile-opencode-task-override opencode "$id")
+  read_case_record "$rec"
+  printf '%s\n' '{"default":{"harness":"opencode","model":"opencode-go/space-bunny-free","provider":"opencode-go"}}' \
+    > "$HOME_DIR/config/crew-dispatch.json"
+
+  out=$(FM_TEST_OPENCODE_MODELS=$'opencode-go/space-bunny-free\nopencode-go/longcat-2.5-preview-free' \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" --harness opencode --model opencode-go/longcat-2.5-preview-free)
+  status=$?
+  expect_code 0 "$status" "listed task-specific OpenCode model should override the configured fallback: $out"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" opencode opencode-go/longcat-2.5-preview-free default
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "opencode --model 'opencode-go/longcat-2.5-preview-free' --prompt" \
+    "task-specific OpenCode model was not passed to the worker"
+  assert_not_contains "$launch" "--model 'opencode-go/space-bunny-free'" \
+    "configured fallback replaced the explicitly designated task model"
+  pass "explicit task OpenCode models override the configured fallback"
 }
 
 test_active_dispatch_profile_allows_positional_harness() {
@@ -686,6 +740,10 @@ test_opencode_threads_model_and_ignores_effort_axis() {
     args_file="$CASE_DIR/opencode-args"
     cat > "$FAKEBIN_DIR/opencode" <<'SH'
 #!/usr/bin/env bash
+if [ "${1:-}" = models ]; then
+  printf '%s\n' 'opencode-go/space-bunny-free'
+  exit 0
+fi
 if [ "${1:-}" = mini ] && [ "${2:-}" = --help ]; then
   if [ "${FM_FAKE_OPENCODE_MINI:-1}" = 1 ]; then
     printf '%s\n' 'Usage: opencode mini [options]'
@@ -702,10 +760,10 @@ SH
     chmod +x "$FAKEBIN_DIR/opencode"
     out=$(FM_FAKE_OPENCODE_MINI="$mini_mode" \
       run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
-        --model anthropic/claude-sonnet-4-5 --effort high)
+        --model opencode-go/space-bunny-free --effort high)
     status=$?
     expect_code 0 "$status" "OpenCode spawn with mini-supported=$mini_mode should succeed: $out"
-    assert_meta_profile "$HOME_DIR/state/$id.meta" opencode anthropic/claude-sonnet-4-5 high
+    assert_meta_profile "$HOME_DIR/state/$id.meta" opencode opencode-go/space-bunny-free high
     launch=$(cat "$LAUNCH_LOG")
     FM_FAKE_OPENCODE_MINI="$mini_mode" FM_FAKE_OPENCODE_ARGS="$args_file" \
       PATH="$FAKEBIN_DIR:$PATH" bash -c "$launch" \
@@ -717,7 +775,7 @@ SH
       [ "$(sed -n '1p' "$args_file")" = --model ] \
         || fail "legacy OpenCode launch did not retain its top-level interface"
     fi
-    grep -Fxq 'anthropic/claude-sonnet-4-5' "$args_file" \
+    grep -Fxq 'opencode-go/space-bunny-free' "$args_file" \
       || fail "OpenCode launch did not pass the requested model"
     grep -Fxq -- '--prompt' "$args_file" \
       || fail "OpenCode launch did not pass its worker prompt"
@@ -728,6 +786,145 @@ SH
     assert_not_contains "$launch" "--thinking" "OpenCode launch must not pass pi thinking flag"
   done
   pass "OpenCode v2 and legacy interactive launch forms preserve model and prompt while omitting effort"
+}
+
+test_opencode_refuses_model_absent_from_live_catalog() {
+  local rec id out status
+  id=profile-opencode-unsupported-z7a
+  rec=$(make_spawn_case profile-opencode-unsupported opencode "$id")
+  read_case_record "$rec"
+
+  out=$(FM_TEST_OPENCODE_MODELS='opencode-go/longcat-2.5-preview-free' \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+      --model opencode-go/space-bunny-free)
+  status=$?
+  expect_code 1 "$status" "OpenCode must refuse a model absent from a successful catalog"
+  assert_contains "$out" "OpenCode model 'opencode-go/space-bunny-free' is not available" \
+    "OpenCode model refusal did not identify the unavailable model"
+  assert_contains "$out" "opencode models" "OpenCode model refusal did not name the catalog command"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "unavailable OpenCode model published metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "unavailable OpenCode model launched an agent"
+  pass "OpenCode refuses model ids absent from its live catalog"
+}
+
+test_opencode_refuses_unreadable_live_catalog() {
+  local rec id out status
+  id=profile-opencode-catalog-error-z7b
+  rec=$(make_spawn_case profile-opencode-catalog-error opencode "$id")
+  read_case_record "$rec"
+
+  out=$(FM_TEST_OPENCODE_MODELS_STATUS=1 \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+      --model opencode-go/space-bunny-free)
+  status=$?
+  expect_code 1 "$status" "OpenCode must refuse when its catalog cannot be read"
+  assert_contains "$out" "OpenCode model 'opencode-go/space-bunny-free'" \
+    "unreadable OpenCode catalog refusal did not identify the requested model"
+  assert_contains "$out" "opencode models" "unreadable OpenCode catalog refusal did not name the recovery command"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "unreadable OpenCode catalog published metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "unreadable OpenCode catalog launched an agent"
+  pass "OpenCode refuses dispatch when its live catalog is unreadable"
+}
+
+test_opencode_refuses_paid_catalog_model() {
+  local rec id out status
+  id=profile-opencode-paid-z7f
+  rec=$(make_spawn_case profile-opencode-paid opencode "$id")
+  read_case_record "$rec"
+
+  out=$(FM_TEST_OPENCODE_MODELS='opencode-go/paid-candidate' \
+    FM_TEST_MODELS_DEV_JSON='{"opencode-go":{"models":{"paid-candidate":{"cost":{"input":0.15,"output":0.6}}}}}' \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+      --model opencode-go/paid-candidate)
+  status=$?
+  expect_code 1 "$status" "catalog-listed paid OpenCode model must be refused"
+  assert_contains "$out" "is not classified as free by models.dev" \
+    "paid model refusal did not name the metadata classification"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "paid OpenCode model published metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "paid OpenCode model launched an agent"
+  pass "OpenCode refuses catalog-listed models with nonzero pricing metadata"
+}
+
+test_opencode_refuses_when_free_pricing_metadata_is_unavailable() {
+  local rec id out status
+  id=profile-opencode-pricing-error-z7g
+  rec=$(make_spawn_case profile-opencode-pricing-error opencode "$id")
+  read_case_record "$rec"
+
+  out=$(FM_TEST_MODELS_DEV_STATUS=1 \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+      --model opencode-go/space-bunny-free)
+  status=$?
+  expect_code 1 "$status" "OpenCode must refuse when pricing metadata cannot be fetched"
+  assert_contains "$out" "could not verify OpenCode model 'opencode-go/space-bunny-free' free pricing metadata" \
+    "pricing metadata failure did not identify the selected model"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "missing OpenCode pricing metadata published metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "missing OpenCode pricing metadata launched an agent"
+  pass "OpenCode refuses dispatch when free pricing metadata is unavailable"
+}
+
+test_opencode_catalog_probe_uses_no_provider_argument() {
+  local rec id out status args_file
+  id=profile-opencode-catalog-args-z7e
+  rec=$(make_spawn_case profile-opencode-catalog-args opencode "$id")
+  read_case_record "$rec"
+  args_file="$CASE_DIR/models-args"
+
+  # OpenCode v2 rejects `opencode models <provider>`, so dispatch must read the
+  # whole catalog with no argument and match the exact provider/model id. The
+  # stub refuses a positional argument, so a legacy-form regression refuses.
+  out=$(FM_TEST_OPENCODE_MODELS_ARGS="$args_file" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+      --model opencode-go/space-bunny-free)
+  status=$?
+  expect_code 0 "$status" "OpenCode spawn should accept an exact catalog id: $out"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" opencode opencode-go/space-bunny-free default
+  [ -s "$args_file" ] || fail "OpenCode dispatch never probed the model catalog"
+  [ "$(wc -l < "$args_file" | tr -d ' ')" = 1 ] \
+    || fail "OpenCode catalog probe passed a provider argument: $(tr '\n' ' ' < "$args_file")"
+  [ "$(sed -n '1p' "$args_file")" = models ] \
+    || fail "OpenCode catalog probe did not call the models subcommand"
+  pass "OpenCode reads the whole model catalog without a provider argument"
+}
+
+test_opencode_secondmate_config_model_uses_live_catalog() {
+  local rec id sm out status launch
+  id=profile-opencode-secondmate-config-z7c
+  rec=$(make_spawn_case profile-opencode-secondmate-config opencode "$id")
+  read_case_record "$rec"
+  printf '%s\n' 'opencode opencode-go/space-bunny-free' > "$HOME_DIR/config/secondmate-harness"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "configured OpenCode secondmate model should pass when listed"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" opencode opencode-go/space-bunny-free default
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "opencode --model 'opencode-go/space-bunny-free' --prompt" \
+    "configured OpenCode secondmate model was not launched"
+  pass "configured OpenCode secondmate models are checked and launched"
+}
+
+test_opencode_secondmate_config_refuses_model_absent_from_live_catalog() {
+  local rec id sm out status
+  id=profile-opencode-secondmate-unsupported-z7d
+  rec=$(make_spawn_case profile-opencode-secondmate-unsupported opencode "$id")
+  read_case_record "$rec"
+  printf '%s\n' 'opencode opencode-go/space-bunny-free' > "$HOME_DIR/config/secondmate-harness"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+
+  out=$(FM_TEST_OPENCODE_MODELS='opencode-go/longcat-2.5-preview-free' \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 1 "$status" "configured OpenCode secondmate model absent from catalog must refuse"
+  assert_contains "$out" "OpenCode model 'opencode-go/space-bunny-free' is not available" \
+    "configured OpenCode secondmate refusal did not name the pinned model"
+  assert_contains "$out" "opencode models" "configured OpenCode secondmate refusal did not name the catalog command"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "unavailable configured secondmate model published metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "unavailable configured secondmate model launched an agent"
+  pass "configured OpenCode secondmate models cannot bypass the live catalog"
 }
 
 test_native_effort_validator_keeps_axes_separate() {
@@ -1814,6 +2011,7 @@ test_unresolvable_relative_overrides_fail_loudly
 test_active_dispatch_profile_requires_explicit_harness_for_ship
 test_active_dispatch_profile_requires_explicit_harness_for_scout
 test_active_dispatch_profile_allows_explicit_harness
+test_explicit_opencode_task_model_overrides_configured_fallback
 test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
 test_chained_raw_launch_strips_ai_trailer_in_every_step
@@ -1829,10 +2027,14 @@ test_grok_omits_invalid_xhigh_reasoning_effort
 test_cursor_threads_model_workspace_and_omits_effort_axis
 test_cursor_refuses_model_absent_from_live_catalog
 test_cursor_failed_catalog_probe_does_not_block_spawn
-test_opencode_threads_model_and_effort_variant
-test_opencode_without_effort_keeps_launch_config_unchanged
-test_opencode_emits_variant_for_openai_family_effort
-test_opencode_omits_variant_when_model_family_lacks_effort
+test_opencode_threads_model_and_ignores_effort_axis
+test_opencode_refuses_model_absent_from_live_catalog
+test_opencode_refuses_unreadable_live_catalog
+test_opencode_refuses_paid_catalog_model
+test_opencode_refuses_when_free_pricing_metadata_is_unavailable
+test_opencode_catalog_probe_uses_no_provider_argument
+test_opencode_secondmate_config_model_uses_live_catalog
+test_opencode_secondmate_config_refuses_model_absent_from_live_catalog
 test_native_effort_validator_keeps_axes_separate
 test_native_pi_ultra_is_explicit_and_model_scoped
 test_batch_preserves_native_ultra

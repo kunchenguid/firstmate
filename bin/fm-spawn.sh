@@ -2413,6 +2413,39 @@ if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
     fi
   fi
 fi
+if [ "$HARNESS" = opencode ]; then
+  OPENCODE_BIN=$(command -v opencode) || {
+    echo "error: opencode executable not found on PATH; install it or select a different verified harness" >&2
+    exit 1
+  }
+  if [ -n "$MODEL" ] && [ "$MODEL" != default ]; then
+    if ! OPENCODE_MODELS=$("$OPENCODE_BIN" models); then
+      echo "error: could not verify OpenCode model '$MODEL' because '$OPENCODE_BIN models' failed; rerun 'opencode models' and choose a listed id" >&2
+      exit 1
+    fi
+    if ! printf '%s\n' "$OPENCODE_MODELS" | grep -F -x -- "$MODEL" >/dev/null; then
+      echo "error: OpenCode model '$MODEL' is not available from 'opencode models'; choose an id listed by that command or omit --model" >&2
+      exit 1
+    fi
+    OPENCODE_MODEL_PROVIDER=${MODEL%%/*}
+    OPENCODE_MODEL_ID=${MODEL#*/}
+    if [ "$OPENCODE_MODEL_PROVIDER" = "$MODEL" ] || [ -z "$OPENCODE_MODEL_ID" ] \
+      || ! OPENCODE_MODEL_METADATA=$(curl --fail --silent --show-error --location --max-time 10 https://models.dev/api.json); then
+      echo "error: could not verify OpenCode model '$MODEL' free pricing metadata; refusing dispatch" >&2
+      exit 1
+    fi
+    if ! printf '%s\n' "$OPENCODE_MODEL_METADATA" | jq -e --arg provider "$OPENCODE_MODEL_PROVIDER" --arg model "$OPENCODE_MODEL_ID" '
+      .[$provider].models[$model].cost as $cost
+      | ($cost | type == "object")
+        and ($cost.input == 0)
+        and ($cost.output == 0)
+        and ([$cost[]] | all(. == 0))
+    ' >/dev/null; then
+      echo "error: OpenCode model '$MODEL' is not classified as free by models.dev; choose a zero-cost model" >&2
+      exit 1
+    fi
+  fi
+fi
 # Ultra is an explicit native capability, never a Pi thinking-level alias.
 # Validate the fully resolved profile before worktree or endpoint provisioning.
 if [ "$EFFORT" = ultra ]; then

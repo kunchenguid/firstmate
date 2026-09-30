@@ -1241,6 +1241,15 @@ ROWS
   child_env=$(cat "$case_dir/child-env.log")
   [ -n "$child_env" ] || fail "bootstrap child environment probe did not run"
   assert_not_contains "$child_env" 'secret-present' "bootstrap children never inherit the typesafe key"
+
+  # The tracked example is the file operators copy, so it is the one dispatch
+  # config whose every axis this gate must accept. Validate the shipped bytes
+  # themselves, because provider, rule floor, and profile floor are checked
+  # only here, and an example that trips them teaches a config that cannot boot.
+  cp "$ROOT/docs/examples/crew-dispatch.json" "$case_dir/home/config/crew-dispatch.json"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    TYPESAFE_API_KEY=test-key FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "the shipped crew-dispatch example must stay valid under typed resolution, got: $out"
   pass "bootstrap gates resolver fields and additive harnesses on the typed key"
 }
 
