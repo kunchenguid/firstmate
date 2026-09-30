@@ -57,6 +57,9 @@ const asText = (value: unknown, fallback: string): string =>
 const asPort = (value: unknown): number | null =>
   typeof value === "number" && Number.isInteger(value) ? value : null;
 
+const escapeMarkdown = (value: string): string =>
+  value.replace(/\n/g, " ").replace(/([`*_{}[\]()#+\-.!|])/g, "\\$1");
+
 function runSnapshot(): Promise<FleetSnapshot> {
   return new Promise((resolveSnapshot, rejectSnapshot) => {
     execFile(
@@ -100,12 +103,14 @@ function renderPanel(snapshot: FleetSnapshot): string {
   for (const row of branches) {
     const project = asText(row.project, "-");
     const branch = asText(row.branch, "-");
+    const projectLabel = escapeMarkdown(project);
+    const branchLabel = escapeMarkdown(branch);
     const dirty = row.clean === false ? " dirty" : "";
     const projectServers = (byProject.get(project) ?? [])
       .filter((server) => asPort(server.port) !== null)
       .sort((a, b) => (asPort(a.port) ?? 0) - (asPort(b.port) ?? 0));
     if (projectServers.length === 0) {
-      lines.push(`- **${project}** @ ${branch}${dirty}`);
+      lines.push(`- **${projectLabel}** @ ${branchLabel}${dirty}`);
       continue;
     }
     const links = projectServers.map((server) => {
@@ -115,7 +120,7 @@ function renderPanel(snapshot: FleetSnapshot): string {
         typeof server.pid === "number" ? ` (pid ${server.pid})` : "";
       return `[${port}](${url})${pid}`;
     });
-    lines.push(`- **${project}** @ ${branch}${dirty} - ${links.join(" ")}`);
+    lines.push(`- **${projectLabel}** @ ${branchLabel}${dirty} - ${links.join(" ")}`);
   }
   const orphaned = servers.filter(
     (server) =>
@@ -127,7 +132,7 @@ function renderPanel(snapshot: FleetSnapshot): string {
   for (const server of orphaned) {
     const port = asPort(server.port) ?? 0;
     lines.push(
-      `- **${asText(server.project, "-")}** - [${port}](http://localhost:${port})`,
+      `- **${escapeMarkdown(asText(server.project, "-"))}** - [${port}](http://localhost:${port})`,
     );
   }
   return lines.join("\n");
@@ -175,10 +180,14 @@ export default function fleetPanelExtension(pi: ExtensionAPI): void {
   const refresh = async (ui: ExtensionUIContext): Promise<void> => {
     if (fetching || panel === null) return;
     fetching = true;
+    const active = panel;
     try {
-      panel.setText(renderPanel(await runSnapshot()));
+      const text = renderPanel(await runSnapshot());
+      if (panel !== active) return;
+      active.setText(text);
     } catch {
-      panel.setText("## Fleet\nSnapshot refresh failed; showing last good read.");
+      if (panel !== active) return;
+      active.setText("## Fleet\nSnapshot refresh failed; showing last good read.");
     } finally {
       fetching = false;
     }
@@ -188,13 +197,17 @@ export default function fleetPanelExtension(pi: ExtensionAPI): void {
     const component = new FleetPanelComponent("## Fleet\nLoading fleet state...");
     panel = component;
     ui.setWidget(FLEET_PANEL_WIDGET_KEY, () => component);
+    let text: string;
     try {
-      component.setText(renderPanel(await runSnapshot()));
+      text = renderPanel(await runSnapshot());
     } catch {
+      if (panel !== component) return;
       hide(ui);
       ui.notify("Fleet panel: the fleet snapshot failed to run.", "error");
       return;
     }
+    if (panel !== component) return;
+    component.setText(text);
     stopRefresh();
     refreshTimer = setInterval(() => {
       void refresh(ui);

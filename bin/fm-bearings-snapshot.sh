@@ -415,6 +415,7 @@ fi
 live_pids=$(mktemp "${TMPDIR:-/tmp}/fm-bearings-pids.XXXXXX") \
   || { echo "fm-bearings-snapshot: cannot create a temporary pid file" >&2; exit 1; }
 : > "$live_pids"
+_uptimes=""
 if [ -s "$live_listeners" ]; then
   _pid_list=$(awk -F'\t' '{print $3}' "$live_listeners" | sort -u | head -n 64 | tr '\n' ',' | sed 's/,$//')
   if [ -n "$_pid_list" ]; then
