@@ -1764,3 +1764,69 @@ SH
 }
 
 test_reassigned_slot_after_repository_or_pool_change
+
+test_retained_child_records_block_home_removal() {
+  local dir mate retained_home scope mode rc
+  for scope in direct recursive; do
+    dir=$(make_case "retained-home-$scope")
+    mate="$dir/mate"
+    mkdir -p "$mate/state" "$mate/data" "$mate/config"
+    printf 'mate-task' > "$mate/.fm-secondmate-home"
+    fm_write_meta "$dir/home/state/mate-task.meta" \
+      "window=firstmate:fm-mate-task" "endpoint_task_id=mate-task" \
+      "worktree=$mate" "project=$mate" "home=$mate" "kind=secondmate"
+    retained_home=$mate
+    if [ "$scope" = recursive ]; then
+      retained_home="$dir/nested"
+      mkdir -p "$retained_home/state" "$retained_home/data" "$retained_home/config"
+      printf 'nested-task' > "$retained_home/.fm-secondmate-home"
+      fm_write_meta "$mate/state/nested-task.meta" \
+        "window=firstmate:fm-nested-task" "endpoint_task_id=nested-task" \
+        "worktree=$retained_home" "project=$retained_home" \
+        "home=$retained_home" "kind=secondmate"
+    fi
+    fm_write_meta "$retained_home/state/old-task.reassigned-record" \
+      "worktree=$dir/worktree" "project=$dir/project" "kind=ship"
+    mkdir -p "$retained_home/data/old-task"
+    printf 'unlanded evidence\n' > "$retained_home/data/old-task/report.md"
+    printf 'unresolved backlog\n' > "$retained_home/data/backlog.md"
+    cp "$retained_home/state/old-task.reassigned-record" "$dir/expected-record"
+    for mode in ordinary forced; do
+      [ "$scope/$mode" != recursive/ordinary ] || continue
+      set +e
+      if [ "$mode" = forced ]; then
+        run_case "$dir" mate-task > "$dir/stdout" 2> "$dir/stderr"
+      else
+        FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+          FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
+          "$TEARDOWN" mate-task > "$dir/stdout" 2> "$dir/stderr"
+      fi
+      rc=$?
+      set -e
+      [ "$rc" -ne 0 ] || fail "$scope/$mode deleted a home with retained work"
+      assert_contains "$(cat "$dir/stderr")" 'retained reassignment record' "$scope/$mode missed retained-record preflight"
+      cmp "$dir/expected-record" "$retained_home/state/old-task.reassigned-record" \
+        || fail "$scope/$mode changed retained metadata"
+      [ "$(cat "$retained_home/data/old-task/report.md")" = 'unlanded evidence' ] \
+        || fail "$scope/$mode lost task evidence"
+      [ "$(cat "$retained_home/data/backlog.md")" = 'unresolved backlog' ] \
+        || fail "$scope/$mode changed unresolved backlog"
+      assert_present "$dir/home/state/mate-task.meta" "$scope/$mode lost parent metadata"
+      [ ! -s "$dir/runtime.log" ] || fail "$scope/$mode mutated runtime before refusal"
+    done
+    mv "$retained_home/state/old-task.reassigned-record" "$dir/reconciled-record"
+    if [ "$scope" = recursive ]; then
+      run_case "$dir" mate-task > "$dir/stdout" 2> "$dir/stderr"
+    else
+      FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+        FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
+        "$TEARDOWN" mate-task > "$dir/stdout" 2> "$dir/stderr"
+    fi || fail "$scope resolved cleanup refused: $(cat "$dir/stderr")"
+    assert_absent "$mate" "$scope resolved cleanup retained the home"
+    assert_absent "$retained_home" "$scope resolved cleanup retained the nested home"
+    assert_absent "$dir/home/state/mate-task.meta" "$scope resolved cleanup retained parent metadata"
+  done
+  pass "retained child records block direct and recursive home removal until reconciliation"
+}
+
+test_retained_child_records_block_home_removal

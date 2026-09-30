@@ -2537,7 +2537,7 @@ safe_rm_rf_child_worktree() {
 }
 
 validate_firstmate_home_for_removal() {
-  local home=$1 label=$2 expected_id=${3:-} abs_home_path marker_id conflict child_id child_home
+  local home=$1 label=$2 expected_id=${3:-} abs_home_path marker_id conflict child_id child_home retained_record
   [ -n "$home" ] || return 0
   [ -e "$home" ] || return 0
   abs_home_path=$(validate_removal_target "$home" "$label") || return 1
@@ -2564,6 +2564,11 @@ validate_firstmate_home_for_removal() {
     fi
   fi
   validate_firstmate_operational_dirs_for_removal "$abs_home_path" "$label" || return 1
+  for retained_record in "$abs_home_path/state"/*.reassigned-record; do
+    [ -e "$retained_record" ] || [ -L "$retained_record" ] || continue
+    echo "REFUSED: $label $home contains retained reassignment record $retained_record; reconcile its unlanded work before removing the home." >&2
+    return 1
+  done
   conflict=
   if conflict=$(registered_descendant_home_for_removal "$SECONDMATE_REG" "$abs_home_path"); then
     :
