@@ -60,9 +60,9 @@
 #          The AXI-family floor policy is owned beside GH_AXI_MIN and
 #          LAVISH_AXI_MIN below; the per-tool owners point there. An installed
 #          essential build below its floor reports MISSING like no-mistakes.
-#          Missing or incompatible lavish-axi reports PRESENTATION_UNAVAILABLE:
-#          nonvisual dispatch continues with plain-text decisions and reports,
-#          but Lavish use still requires a compatible build at or above its floor.
+#          Missing or incompatible lavish-axi reports PRESENTATION_UNAVAILABLE;
+#          a compatible older build keeps legacy boards and reports a BOOTSTRAP_INFO
+#          upgrade recommendation for synchronous reply acceptance.
 #          tasks-axi feature probes remain a separate defense-in-depth check.
 #          tasks-axi and quota-axi are essential bootstrap tools.
 #          A compatible tasks-axi default backend is silent.
@@ -152,8 +152,14 @@
 #        fm-bootstrap.sh install <tool>...
 #          Install the named tools (only ones the captain approved).
 #        fm-bootstrap.sh lavish-compatible
-#          Exit 0 when lavish-axi meets LAVISH_AXI_MIN, 1 otherwise, printing
-#          nothing; bin/fm-brief.sh uses it to gate scout Lavish hosting.
+#          Exit 0 when lavish-axi meets LAVISH_AXI_BOARD_MIN, 1 otherwise,
+#          printing nothing; bin/fm-brief.sh uses it to gate scout Lavish hosting.
+#        fm-bootstrap.sh lavish-reply-compatible
+#          Exit 0 when lavish-axi meets LAVISH_AXI_MIN and supports synchronous
+#          reply acceptance, 1 when one version probe confirms an older release
+#          meeting LAVISH_AXI_BOARD_MIN, and 2 when lavish-axi is absent, its
+#          version cannot be read, or it is below LAVISH_AXI_BOARD_MIN, printing
+#          nothing.
 set -u
 
 TYPESAFE_API_KEY_PRIVATE=${TYPESAFE_API_KEY:-}
@@ -842,7 +848,8 @@ NO_MISTAKES_MIN=1.46.0
 # tasks-axi feature probes are an independent defense-in-depth concern, not part
 # of its floor.
 GH_AXI_MIN=0.1.29
-LAVISH_AXI_MIN=0.1.77
+LAVISH_AXI_MIN=0.1.80
+LAVISH_AXI_BOARD_MIN=0.1.77
 
 treehouse_supports_lease() {
   treehouse get --help 2>&1 | grep -Eq '(^|[^[:alnum:]_-])--lease([^[:alnum:]_-]|$)'
@@ -852,14 +859,19 @@ treehouse_supports_lease() {
 # cannot be parsed into exactly one major.minor.patch triple is incompatible,
 # never assumed current, so a development or vendored build cannot pass a floor
 # it was never checked against.
-tool_version_at_least() {  # <tool> <min-version>
-  local tool=$1 min=$2 output parts major minor patch extra
-  local min_major min_minor min_patch min_extra
+tool_version_parts() {  # <tool>
+  local tool=$1 output parts major minor patch extra
   command -v "$tool" >/dev/null 2>&1 || return 1
   output=$("$tool" --version 2>/dev/null) || return 1
   parts=$(printf '%s\n' "$output" | sed -nE 's/.*[vV]?([0-9]+)\.([0-9]+)\.([0-9]+).*/\1 \2 \3/p' | head -n 1)
   IFS=' ' read -r major minor patch extra <<< "$parts"
   [ -n "$major" ] && [ -n "$minor" ] && [ -n "$patch" ] && [ -z "$extra" ] || return 1
+  printf '%s %s %s\n' "$major" "$minor" "$patch"
+}
+
+version_parts_at_least() {  # <major minor patch> <min-version>
+  local major minor patch min=$2 min_major min_minor min_patch min_extra
+  IFS=' ' read -r major minor patch <<< "$1"
   IFS='.' read -r min_major min_minor min_patch min_extra <<< "$min"
   [ -n "$min_major" ] && [ -n "$min_minor" ] && [ -n "$min_patch" ] && [ -z "$min_extra" ] || return 1
   [ "$major" -gt "$min_major" ] && return 0
@@ -867,6 +879,12 @@ tool_version_at_least() {  # <tool> <min-version>
   [ "$minor" -gt "$min_minor" ] && return 0
   [ "$minor" -eq "$min_minor" ] || return 1
   [ "$patch" -ge "$min_patch" ]
+}
+
+tool_version_at_least() {  # <tool> <min-version>
+  local parts
+  parts=$(tool_version_parts "$1") || return 1
+  version_parts_at_least "$parts" "$2"
 }
 
 x_mode_write_if_changed() {
@@ -1302,8 +1320,15 @@ startup_memory_budget_setup() {
 }
 
 if [ "${1:-}" = "lavish-compatible" ]; then
-  tool_version_at_least lavish-axi "$LAVISH_AXI_MIN"
+  tool_version_at_least lavish-axi "$LAVISH_AXI_BOARD_MIN"
   exit
+fi
+
+if [ "${1:-}" = "lavish-reply-compatible" ]; then
+  lavish_parts=$(tool_version_parts lavish-axi) || exit 2
+  version_parts_at_least "$lavish_parts" "$LAVISH_AXI_MIN" && exit 0
+  version_parts_at_least "$lavish_parts" "$LAVISH_AXI_BOARD_MIN" && exit 1
+  exit 2
 fi
 
 if [ "${1:-}" = "install" ]; then
@@ -1402,8 +1427,10 @@ detect_local_tools() {
   if command -v gh-axi >/dev/null 2>&1 && ! tool_version_at_least gh-axi "$GH_AXI_MIN"; then
     echo "MISSING: gh-axi (install: $(install_cmd gh-axi))"
   fi
-  if ! tool_version_at_least lavish-axi "$LAVISH_AXI_MIN"; then
-    echo "PRESENTATION_UNAVAILABLE: lavish-axi (requires >=$LAVISH_AXI_MIN; install: $(install_cmd lavish-axi)) - nonvisual work may proceed with plain-text decisions and reports; install or upgrade before using Lavish"
+  if ! tool_version_at_least lavish-axi "$LAVISH_AXI_BOARD_MIN"; then
+    echo "PRESENTATION_UNAVAILABLE: lavish-axi (requires >=$LAVISH_AXI_BOARD_MIN; install: $(install_cmd lavish-axi)) - nonvisual work may proceed with plain-text decisions and reports; install or upgrade before using Lavish"
+  elif ! tool_version_at_least lavish-axi "$LAVISH_AXI_MIN"; then
+    echo "BOOTSTRAP_INFO: lavish-axi >=$LAVISH_AXI_MIN enables confirmed board replies; this older compatible version retains the legacy reply path, but upgrade to prevent handing back a board before its reply is accepted"
   fi
   if command -v quota-axi >/dev/null 2>&1 && ! fm_quota_axi_compatible; then
     echo "MISSING: quota-axi (install: $(install_cmd quota-axi))"

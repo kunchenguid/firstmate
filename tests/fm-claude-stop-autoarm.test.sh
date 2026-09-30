@@ -38,15 +38,20 @@ install_autoarm_scripts() {
   cp "$ROOT/bin/fm-afk-contract.sh" "$dir/bin/fm-afk-contract.sh"
   cp "$ROOT/bin/fm-classify-lib.sh" "$dir/bin/fm-classify-lib.sh"
   cp "$ROOT/bin/fm-timeout-lib.sh" "$dir/bin/fm-timeout-lib.sh"
+  cp "$ROOT/bin/fm-supervision-engine-lib.sh" "$dir/bin/fm-supervision-engine-lib.sh"
   chmod +x "$dir/bin/fm-claude-stop-autoarm.sh" "$dir/bin/fm-lock.sh" "$dir/bin/fm-afk-contract.sh"
 }
 
+# A Claude home runs the supervision host unless config/supervision-host-off
+# opts it out, so the fixture home opts out: most cases exercise the plain arm,
+# and the supervision-host cases below remove the opt-out.
 make_primary_dir() {
   local dir=$1
-  mkdir -p "$dir/state"
+  mkdir -p "$dir/state" "$dir/config"
   git init -q "$dir"
   git -C "$dir" commit -q --allow-empty -m init
   : > "$dir/AGENTS.md"
+  : > "$dir/config/supervision-host-off"
   install_autoarm_scripts "$dir"
   printf '%s\n' "$dir"
 }
@@ -1424,25 +1429,44 @@ SH
   chmod +x "$dir/bin/fm-supervision-host.sh"
 }
 
-test_host_absent_flag_keeps_the_arm() {
+test_host_off_flag_keeps_the_arm() {
   local dir out status
-  dir=$(make_primary_dir "$TMP_ROOT/host-flag-absent")
+  dir=$(make_primary_dir "$TMP_ROOT/host-flag-off")
+  : > "$dir/config/supervision-host-off"
   : > "$dir/state/task.meta"
   write_arm_fixture "$dir" actionable
   write_host_fixture "$dir" boundary
   out=$(run_autoarm "$dir" 2>/dev/null); status=$?
-  expect_code 2 "$status" "a home without config/supervision-host must still rewake from the arm"
-  assert_present "$dir/state/arm-ran" "a home without config/supervision-host did not run the arm"
-  [ ! -e "$dir/state/host-ran" ] || fail "a home without config/supervision-host ran the supervision host"
+  expect_code 2 "$status" "a home opted out by config/supervision-host-off must still rewake from the arm"
+  assert_present "$dir/state/arm-ran" "a home opted out by config/supervision-host-off did not run the arm"
+  [ ! -e "$dir/state/host-ran" ] || fail "a home opted out by config/supervision-host-off ran the supervision host"
   assert_contains "$out" "stale: fixture-win actionable" "the arm's reason must still reach the rewake"
-  pass "auto-arm: without config/supervision-host the hook runs the arm exactly as before"
+  assert_not_contains "$out" "supervision-host" "an opted-out home's rewake must carry no host line"
+  pass "auto-arm: config/supervision-host-off keeps the hook on the arm exactly as before"
+}
+
+test_host_absent_flag_runs_the_host() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/host-flag-absent")
+  rm -f "$dir/config/supervision-host-off"
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  write_host_fixture "$dir" boundary
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a host cycle boundary on a Claude home without the file must rewake main"
+  assert_present "$dir/state/host-ran" "a Claude home without config/supervision-host did not run the supervision host"
+  [ ! -e "$dir/state/arm-ran" ] || fail "a Claude home without config/supervision-host ran the plain arm instead of the host"
+  assert_contains "$out" "supervision-host: cycle boundary - fixture" "the rewake must carry the host's line"
+  [ "$(sed -n 's/^.* primary=\([a-z]*\) .*$/\1/p' "$dir/state/host-env")" = claude ] \
+    || fail "the host was not told its primary harness: $(cat "$dir/state/host-env")"
+  pass "auto-arm: a Claude home without config/supervision-host runs the host by default"
 }
 
 test_host_boundary_rewakes_with_the_host_line() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/host-boundary")
   mkdir -p "$dir/config"
-  : > "$dir/config/supervision-host"
+  rm -f "$dir/config/supervision-host-off"
   : > "$dir/state/task.meta"
   write_arm_fixture "$dir" actionable
   write_host_fixture "$dir" boundary
@@ -1466,7 +1490,7 @@ test_host_handback_under_away_record_is_not_a_return() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/host-handback")
   mkdir -p "$dir/config"
-  : > "$dir/config/supervision-host"
+  rm -f "$dir/config/supervision-host-off"
   : > "$dir/state/task.meta"
   : > "$dir/state/.afk-contract"
   write_host_fixture "$dir" handed-back
@@ -1484,7 +1508,7 @@ test_host_handback_beside_a_quiet_record_carries_no_away_note() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/host-handback-quiet")
   mkdir -p "$dir/config"
-  : > "$dir/config/supervision-host"
+  rm -f "$dir/config/supervision-host-off"
   : > "$dir/state/task.meta"
   FM_HOME="$dir" FM_AFK_MODE=quiet "$ROOT/bin/fm-afk-contract.sh" enter --words 'keep routine wakes off my main' >/dev/null 2>&1 \
     || fail "fixture: could not record quiet mode"
@@ -1515,7 +1539,7 @@ test_host_handback_carries_every_host_line() {
   local dir out status expected
   dir=$(make_primary_dir "$TMP_ROOT/host-many")
   mkdir -p "$dir/config"
-  : > "$dir/config/supervision-host"
+  rm -f "$dir/config/supervision-host-off"
   : > "$dir/state/task.meta"
   write_host_fixture "$dir" handed-back-many
   out=$(run_autoarm "$dir" 2>/dev/null); status=$?
@@ -1535,7 +1559,7 @@ test_host_stand_down_is_silent() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/host-stand-down")
   mkdir -p "$dir/config"
-  : > "$dir/config/supervision-host"
+  rm -f "$dir/config/supervision-host-off"
   : > "$dir/state/task.meta"
   write_host_fixture "$dir" stood-down
   out=$(run_autoarm "$dir" 2>/dev/null); status=$?
@@ -1550,7 +1574,7 @@ test_host_crash_is_retried_then_reported() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/host-crash")
   mkdir -p "$dir/config"
-  : > "$dir/config/supervision-host"
+  rm -f "$dir/config/supervision-host-off"
   : > "$dir/state/task.meta"
   write_host_fixture "$dir" crash
   # A live watcher with a fresh beacon would pass the plain arm's benign-close
@@ -1560,7 +1584,7 @@ test_host_crash_is_retried_then_reported() {
   expect_code 2 "$status" "an exhausted host crash must notify"
   [ "$(wc -l < "$dir/state/host-ran" | tr -d ' ')" -eq 2 ] || fail "a crashed host was not retried within the attempt bound"
   assert_contains "$out" "auto-arm FAILED" "an exhausted host crash must deliver the failure notice"
-  assert_contains "$out" "The supervision host (config/supervision-host) ran these cycles; its last one exited 137 without a wake." \
+  assert_contains "$out" "The supervision host (docs/supervision-host.md) ran these cycles; its last one exited 137 without a wake." \
     "the failure notice must name the host and its exit"
   pass "auto-arm: a host that died without a close is retried, then reported as a failure"
 }
@@ -1573,7 +1597,7 @@ test_arguments_never_arm() {
   local dir arg rc out before after before_contents after_contents status
   dir=$(make_primary_dir "$TMP_ROOT/help-mode")
   mkdir -p "$dir/config"
-  : > "$dir/config/supervision-host"
+  rm -f "$dir/config/supervision-host-off"
   : > "$dir/state/task.meta"
   write_arm_fixture "$dir" actionable
   write_host_fixture "$dir" boundary
@@ -1660,7 +1684,8 @@ test_need_vanished_mid_cycle_closes_quietly
 test_afk_mid_cycle_suppresses_rewake
 test_active_in_marked_secondmate_home
 test_long_poll_grace_reaches_arm_wrapper
-test_host_absent_flag_keeps_the_arm
+test_host_off_flag_keeps_the_arm
+test_host_absent_flag_runs_the_host
 test_host_boundary_rewakes_with_the_host_line
 test_host_handback_under_away_record_is_not_a_return
 test_host_handback_beside_a_quiet_record_carries_no_away_note
