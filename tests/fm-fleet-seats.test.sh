@@ -531,6 +531,13 @@ done
 [ "$1" = shop-host ] || exit 91
 [ "$2" = fm-remote-entrypoint.sh ] || exit 92
 shift 2
+if [ -n "${FM_TEST_SERVE_PROBE_HOME:-}" ]; then
+  . "$FM_TEST_CODE_ROOT/bin/fm-timeout-lib.sh"
+  probe_rc=0
+  fm_run_timed 2 env -u FM_STATE_OVERRIDE -u FM_CONFIG_OVERRIDE -u FM_DATA_OVERRIDE -u FM_ROOT_OVERRIDE \
+    FM_HOME="$FM_TEST_SERVE_PROBE_HOME" "$FM_TEST_CODE_ROOT/bin/fm-fleet-seats.sh" release lockprobe --generation g-lockprobe --reason prelaunch >/dev/null 2>&1 || probe_rc=$?
+  printf '%s\n' "$probe_rc" > "$FM_TEST_SERVE_PROBE_RESULT"
+fi
 if [ -e "${FM_TEST_SSH_LOSE_REPLY:-/nonexistent}" ]; then
   "$FM_FAKE_REMOTE_ENTRYPOINT" "$@" > "$FM_TEST_SSH_LOSE_REPLY.reply"
   exit 255
@@ -570,7 +577,7 @@ serve_remotes() {  # run the root's serve pass with the fake transport
   env -u FM_STATE_OVERRIDE -u FM_CONFIG_OVERRIDE -u FM_DATA_OVERRIDE -u FM_ROOT_OVERRIDE \
     FM_HOME="$R_ROOT" FM_SSH_BIN="$R_SSH" FM_TEST_SSH_DOWN="$R_SSH_DOWN" \
     FM_TEST_SSH_LOSE_REPLY="$R_SSH_LOSE_REPLY" FM_TEST_SSH_TRUNCATE="$R_SSH_TRUNCATE" \
-    FM_FAKE_REMOTE_ENTRYPOINT="$ROOT/bin/fm-remote-entrypoint.sh" \
+    FM_FAKE_REMOTE_ENTRYPOINT="$ROOT/bin/fm-remote-entrypoint.sh" FM_TEST_CODE_ROOT="$ROOT" \
     FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux FM_REMOTE_JOB_STATE_ROOT="$REMOTE_JOBS" \
     FM_FLEET_SEATS_TEST_BACKOFF=0 "$SEATS" serve-remotes
 }
@@ -847,7 +854,11 @@ test_remote_and_local_contention_never_overbooks() {
   wait $racers
   granted=$(grep -lx 0 "$dir"/*.rc | wc -l | tr -d ' ')
   assert_equals 3 "$granted" "seats granted across remote and local contention"
-  assert_equals 3 "$(grep -lx 4 "$dir"/*.rc | wc -l | tr -d ' ')" "refusals across remote and local contention"
+  assert_equals 3 "$(grep -lxE '4|5' "$dir"/*.rc | wc -l | tr -d ' ')" "refusals across remote and local contention"
+  for result in "$dir"/*.rc; do
+    [ "$(cat "$result")" != 5 ] || assert_contains "$(cat "${result%.rc}.out")" "have not confirmed the current seat policy" "contention refused for an unrelated authority error"
+  done
+  assert_equals 3 "$(used_seats "$R_ROOT")" "contention granted more than the fleet capacity"
   pass "simultaneous remote and local reservations grant exactly the fleet capacity"
 }
 
@@ -862,7 +873,7 @@ test_primary_watcher_serves_remote_requests() {
   watch_once() {
     env -u FM_STATE_OVERRIDE -u FM_CONFIG_OVERRIDE -u FM_DATA_OVERRIDE -u FM_ROOT_OVERRIDE -u FM_TRACE_CONTEXT \
       FM_BACKEND=tmux TMUX="fake,1,0" PATH="$fakebin:$PATH" \
-      FM_HOME="$R_ROOT" FM_SSH_BIN="$R_SSH" FM_FAKE_REMOTE_ENTRYPOINT="$ROOT/bin/fm-remote-entrypoint.sh" \
+      FM_HOME="$R_ROOT" FM_SSH_BIN="$R_SSH" FM_FAKE_REMOTE_ENTRYPOINT="$ROOT/bin/fm-remote-entrypoint.sh" FM_TEST_CODE_ROOT="$ROOT" \
       FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux FM_REMOTE_JOB_STATE_ROOT="$REMOTE_JOBS" \
       FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 \
       "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 15 2>&1
@@ -1335,6 +1346,98 @@ test_cleanup_releases_only_its_generation() {
   pass "cleanup releases exactly its own generation and stale cleanup never frees a successor"
 }
 
+test_confirmed_missing_and_policy_removal() {
+  local base="$TMP_ROOT/confirmed-missing" home fakebin ep out
+  home="$base/home"
+  make_home "$home"
+  pools "$home" 1
+  fakebin=$(endpoint_fakebin "$base/tmux")
+  ep="$base/tmux/endpoint"
+  printf 'fm-sm\n' > "$ep/windows"
+  PATH="$fakebin:$PATH" owner_launch "$home" sm g1 - secondmate firstmate:fm-sm "$base/ready"
+  printf 'claude\n' > "$ep/command"
+  PATH="$fakebin:$PATH" seats "$home" confirm sm --generation g1 >/dev/null || fail "confirming g1"
+  kill "$OWNER_PID"
+  wait "$OWNER_PID" 2>/dev/null
+  : > "$ep/windows"
+  out=$(PATH="$fakebin:$PATH" seats "$home" reclaim sm --generation g1 2>&1)
+  expect_code 3 "$?" "a confirmed endpoint missing from another tmux server: $out"
+  assert_equals confirmed "$(lifecycle_of "$home" sm g1)" "unproven absence reclaimed a confirmed launch"
+  new_holder
+  out=$(reserve "$home" other pool-model-a 2>&1)
+  expect_code 4 "$?" "unproven confirmed absence must keep capacity: $out"
+  rm "$home/config/fleet-seats"
+  assert_equals confirmed "$(lifecycle_of "$home" sm g1)" "policy removal hid the surviving ledger"
+  seats "$home" release sm --generation g1 --reason teardown >/dev/null || fail "teardown after policy removal"
+  pools "$home" 1
+  assert_equals released "$(lifecycle_of "$home" sm g1)" "policy removal skipped teardown"
+  reserve "$home" other pool-model-a >/dev/null || fail "a released seat remained occupied after policy restoration"
+  pass "confirmed absence needs destruction proof and policy removal preserves cleanup"
+}
+
+test_unconfirmed_replacement_retains_predecessor() {
+  local base="$TMP_ROOT/unconfirmed-replaced" home fakebin out
+  home="$base/home"
+  make_home "$home"
+  pools "$home" 1
+  fakebin=$(endpoint_fakebin "$base/tmux")
+  printf 'fm-sm\n' > "$base/tmux/endpoint/windows"
+  PATH="$fakebin:$PATH" owner_launch "$home" sm g1 - secondmate firstmate:fm-sm "$base/ready"
+  kill "$OWNER_PID"
+  wait "$OWNER_PID" 2>/dev/null
+  new_holder
+  reserve_gen "$home" sm g2 g1 pool-model-a secondmate >/dev/null || fail "reserving replacement"
+  out=$(PATH="$fakebin:$PATH" seats "$home" release sm --generation g1 --reason replaced 2>&1)
+  expect_code 3 "$?" "shell-only unconfirmed predecessor: $out"
+  assert_equals reserved "$(lifecycle_of "$home" sm g1)" "replacement released a buffered launch"
+  printf 'claude\n' > "$base/tmux/endpoint/command"
+  PATH="$fakebin:$PATH" seats "$home" confirm sm --generation g1 >/dev/null || fail "confirming predecessor"
+  printf 'bash\n' > "$base/tmux/endpoint/command"
+  PATH="$fakebin:$PATH" seats "$home" release sm --generation g1 --reason replaced >/dev/null || fail "releasing a confirmed dead predecessor"
+  assert_equals released "$(lifecycle_of "$home" sm g1)" "confirmed predecessor's later death did not release it"
+  pass "replacement retains buffered predecessors until confirmed startup and subsequent death"
+}
+
+test_terminal_generations_and_removed_aliases() {
+  local base="$TMP_ROOT/terminal-history" home fakebin out n
+  home="$base/home"
+  make_home "$home"
+  pools "$home" 1
+  fakebin=$(endpoint_fakebin "$base/tmux")
+  printf 'fm-sm\n' > "$base/tmux/endpoint/windows"
+  for n in 1 2 3 4 5; do
+    PATH="$fakebin:$PATH" owner_launch "$home" sm "g$n" - secondmate firstmate:fm-sm "$base/ready$n"
+    printf 'claude\n' > "$base/tmux/endpoint/command"
+    PATH="$fakebin:$PATH" seats "$home" confirm sm --generation "g$n" >/dev/null || fail "confirming generation $n"
+    kill "$OWNER_PID"
+    wait "$OWNER_PID" 2>/dev/null
+    printf 'bash\n' > "$base/tmux/endpoint/command"
+    PATH="$fakebin:$PATH" seats "$home" reclaim sm --generation "g$n" >/dev/null || fail "reclaiming generation $n"
+  done
+  new_holder
+  out=$(reserve_gen "$home" sm g1 - pool-model-a secondmate 2>&1)
+  expect_code 5 "$?" "replaying the oldest terminal generation: $out"
+  assert_equals reclaimed "$(lifecycle_of "$home" sm g1)" "terminal history forgot g1"
+  out=$(seats "$home" cancel-relaunch sm --token g1 2>&1)
+  expect_code 2 "$?" "removed cancellation command"
+  out=$(seats "$home" release sm --token g1 --reason prelaunch 2>&1)
+  expect_code 2 "$?" "removed token alias"
+  pass "terminal generations never revive and removed aliases refuse"
+}
+
+test_serve_delivery_releases_fleet_lock() {
+  local base="$TMP_ROOT/serve-lock" out
+  make_remote_fleet serve-lock 2
+  serve_remotes >/dev/null || fail "initial serve"
+  new_holder
+  reserve "$R_ROOT" lockprobe pool-model-a >/dev/null || fail "probe reservation"
+  out=$(FM_TEST_SERVE_PROBE_HOME="$R_ROOT" FM_TEST_SERVE_PROBE_RESULT="$base/probe-result" serve_remotes 2>&1)
+  assert_equals 0 "$(cat "$base/probe-result")" "the serve RPC prevented a concurrent fleet transition: $out"
+  assert_equals released "$(lifecycle_of "$R_ROOT" lockprobe g-lockprobe)" "concurrent release did not take effect"
+  assert_contains "$out" "served theshop" "serve failed after concurrent transition"
+  pass "serve delivery permits concurrent fleet transitions and publishes its fenced certificate"
+}
+
 test_no_pool_configured_is_off
 test_pool_names_do_not_escape_the_seat_directory
 test_legacy_unresolved_models_count_in_every_pool
@@ -1367,3 +1470,8 @@ test_pool_grammar_is_uniform
 test_exact_counting_across_route_changes
 test_managed_records_and_legacy_import
 test_cleanup_releases_only_its_generation
+
+test_confirmed_missing_and_policy_removal
+test_unconfirmed_replacement_retains_predecessor
+test_terminal_generations_and_removed_aliases
+test_serve_delivery_releases_fleet_lock

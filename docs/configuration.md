@@ -2111,7 +2111,7 @@ The pool names, capacities, and models are the operator's own choice; nothing is
 - A relaunch reserves the replacement before the old agent is touched: on the same pool it keeps one seat even when the pool is full, and onto another pool it needs a destination seat first and frees the old seat only after the old agent's stop is proven.
 - Every live secondmate supervisor on a pooled model holds a seat, even when its busy record says idle.
 - This strict capacity choice reserves room for its next turn.
-- A secondmate spawn succeeds only once its exact endpoint reads alive, within the control launch wait (90 seconds by default); an unconfirmed startup fails the spawn and keeps the seat counted with its endpoint recorded for recovery.
+- A pooled secondmate spawn succeeds only once its exact endpoint reads alive, within the control launch wait (90 seconds by default); an unconfirmed startup fails the spawn and keeps the seat counted with its endpoint recorded for recovery.
 - A submitted launch keeps its seat through the spawner's death and through an endpoint that shows only a shell, because a buffered launch line can still start an agent there.
 - Its seat frees only when startup is confirmed and the agent later dies, or when that exact endpoint is proven destroyed; nothing is ever stopped to free a seat.
 - Supervisor recovery reclaims only the exact generation it probed, inside that mate's single lifecycle episode, so a stale death reading can never free a newer replacement.
@@ -2124,7 +2124,7 @@ The pool names, capacities, and models are the operator's own choice; nothing is
 - The primary home and every local secondmate whose parent binding leads to it share the primary's pools and one lock, so simultaneous launches cannot both take the last seat.
 - The count includes every pooled agent recorded in the primary and in local secondmates reached through each home's `data/secondmates.md`, including nested homes and agents launched before the pool was declared.
 - A live legacy ship, scout, or secondmate record with a default, empty, or missing model occupies a seat in every declared pool until its model is resolved or the record is retired. A record with a resolved unpooled model occupies none.
-- A remote secondmate shares the same capacity through the existing primary-to-remote transport: while a declaration exists or needs clearing, the primary's watcher delivers the current pool declaration to each remote about every 30 seconds while holding the fleet lock, and a pooled remote launch files a seat request in its own home and waits for that answer.
+- A remote secondmate shares the same capacity through the existing primary-to-remote transport: while a declaration exists or needs clearing, the primary's watcher delivers the current pool declaration to each remote about every 30 seconds outside the fleet lock, with certificate publication fenced by the pending epoch, and a pooled remote launch files a seat request in its own home and waits for that answer.
 - A remote secondmate's own seat belongs to the primary: an initial launch or relaunch reserves its generation at the primary before the host is asked anything, and the host reports one outcome bound to that generation.
 - A host refusal before launch releases only the new candidate and leaves the old agent's seat alone.
 - A confirmed start counts the model the host actually runs, reports any mismatch with the requested model, and survives a failed update of the primary's own record.

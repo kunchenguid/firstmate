@@ -3151,7 +3151,7 @@ test_secondmate_relaunch_confirms_its_seat_inside_one_episode() {
     _ "$ROOT" "$dir/home/state" "$dir/episode-held" &
   blocker=$!
   for _ in $(seq 1 50); do [ -e "$dir/episode-held" ] && break; sleep 0.1; done
-  out=$(FM_CONTROL_LIFECYCLE_WAIT=1 run_control "$dir" sm50 relaunch --model pool-model-a); rc=$?
+  out=$(run_control "$dir" sm50 relaunch --model pool-model-a); rc=$?
   kill "$blocker"
   wait "$blocker" 2>/dev/null
   expect_code 1 "$rc" "a relaunch during another lifecycle episode"$'\n'"$out"
@@ -3171,6 +3171,52 @@ test_secondmate_relaunch_confirms_its_seat_inside_one_episode() {
   out=$(probe_seat "$dir" pool-model-a); rc=$?
   expect_code 4 "$rc" "another holder beside the relaunched supervisor: $out"
   pass "fm-control relaunch: a secondmate relaunch runs in one episode, honors its expected generation, and confirms its seat"
+}
+
+test_host_relaunch_records_terminal_predecessor() {
+  local dir out rc
+  dir=$(new_case host-receipt sm62)
+  sm_case "$dir" sm62
+  for gen in g-sm-old s.test.new; do
+    printf 'schema=fm-remote-seat-receipt.v1\noperation=%s\nrequested_generation=%s\nphase=started\n' "$gen" "$gen" > "$dir/home/state/sm62.seat-operation.$gen"
+  done
+  out=$(FM_REMOTE_SEAT_OPERATION=s.test.new FM_SPAWN_SEAT_GENERATION=s.test.new run_control "$dir" sm62 relaunch --model pool-model-a); rc=$?
+  expect_code 0 "$rc" "host relaunch with retained predecessor receipt: $out"
+  assert_equals dead-after-start "$(sed -n 's/^phase=//p' "$dir/home/state/sm62.seat-operation.g-sm-old")" "the host forgot its predecessor's terminal outcome"
+  assert_equals s.test.new "$(meta_field "$dir" sm62 spawn_gen)" "host relaunch did not publish the replacement"
+  pass "host relaunch persists the predecessor's terminal outcome before endpoint reuse"
+}
+
+test_unpooled_supervisor_spawn_keeps_prior_success_semantics() {
+  local dir out rc
+  dir=$(new_case unpooled-supervisor sm60)
+  sm_case "$dir" sm60
+  printf '{"pools":[{"name":"unrelated","capacity":1,"models":["another-model"]}]}\n' > "$dir/home/config/fleet-seats"
+  printf 'bash' > "$dir/fake/command"
+  printf 'bash' > "$dir/fake/becomes"
+  out=$(FM_CONTROL_LAUNCH_WAIT=0 run_spawn "$dir" sm60 --relaunch --harness claude --model pool-model-a); rc=$?
+  expect_code 0 "$rc" "unpooled supervisor spawn with a shell-only endpoint: $out"
+  [ "$(meta_field "$dir" sm60 spawn_gen)" != g-sm-old ] || fail "unpooled launch did not publish its generation"
+  pass "unpooled local supervisors preserve ordinary spawn success semantics"
+}
+
+test_unconfirmed_predecessor_prevents_control_launch() {
+  local dir out rc
+  dir=$(new_case unconfirmed-control sm61)
+  sm_case "$dir" sm61
+  printf 'bash' > "$dir/fake/command"
+  env PATH="$dir/fakebin:$PATH" FM_FAKE_DIR="$dir/fake" FM_HOME="$dir/home" SEATS="$ROOT/bin/fm-fleet-seats.sh" bash -c '
+    "$SEATS" reserve sm61 --generation g-sm-old --kind secondmate --harness claude --model pool-model-a --holder-pid "$$" >/dev/null || exit 1
+    route="$FM_HOME/state/submitted-route"
+    (umask 077 && printf "{\"placement\":\"local\",\"backend\":\"tmux\",\"target\":\"fmses:fm-sm61\",\"home\":null,\"host\":null,\"remote_root\":null,\"spawn_gen\":\"g-sm-old\"}\n" > "$route")
+    "$SEATS" dispatch sm61 --generation g-sm-old --route-file "$route" >/dev/null
+  ' || fail "submitting the predecessor"
+  out=$(run_control "$dir" sm61 relaunch --model pool-model-a); rc=$?
+  expect_code 1 "$rc" "a manual relaunch beside an executable buffered predecessor: $out"
+  assert_contains "$out" "no replacement was launched" "control did not stop at the predecessor-release refusal"
+  assert_equals reserved "$(case_seats "$dir" show sm61 | jq -r '.incarnations[] | select(.generation=="g-sm-old") | .lifecycle')" "control released the buffered predecessor"
+  assert_no_grep 'encode launch-brief' "$dir/fake/literal" "control delivered a replacement over the buffered predecessor"
+  pass "manual control refuses to launch while its unconfirmed predecessor remains executable"
 }
 
 test_pooled_relaunch_reserves_its_destination_before_stopping
@@ -3263,3 +3309,8 @@ test_herdr_rebind_failure_from_a_plain_shell_names_the_real_cause
 test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it
 test_relaunch_moves_a_drifted_item_back_in_flight
 test_away_branch_relaunch_accepts_existing_dispatchable_items
+
+test_unpooled_supervisor_spawn_keeps_prior_success_semantics
+test_unconfirmed_predecessor_prevents_control_launch
+
+test_host_relaunch_records_terminal_predecessor

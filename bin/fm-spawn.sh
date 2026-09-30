@@ -1480,8 +1480,17 @@ spawn_remote_secondmate() {
     [ -n "$seat_prev" ] || seat_prev=-
   fi
   seat_ledger_gen=$(spawn_seats show "$id" 2>/dev/null |
-    jq -r '[.incarnations[] | select(.lifecycle == "confirmed")] | last | .generation // empty' 2>/dev/null || true)
-  [ -z "$seat_ledger_gen" ] || seat_prev=$seat_ledger_gen
+    jq -r '[.incarnations[] | select(.lifecycle == "reserved" or .lifecycle == "confirmed")] | ((map(select(.lifecycle == "confirmed")) | last) // last) | .generation // empty' 2>/dev/null || true)
+  if [ -n "$seat_ledger_gen" ]; then
+    seat_prev=$seat_ledger_gen
+    if ! spawn_seats reclaim "$id" --generation "$seat_ledger_gen"; then
+      fm_lock_release "$remote_lock" || true
+      fm_lock_release "$registry_lock" || true
+      fm_lock_release "$SPAWN_TASK_LOCK" || true
+      echo "error: remote secondmate $id's ledger predecessor is unresolved; no replacement was reserved" >&2
+      return 1
+    fi
+  fi
   if ! seat_out=$(spawn_seats reserve "$id" --generation "$SPAWN_GEN" --previous-generation "$seat_prev" \
     --kind secondmate --harness "$harness" --model "${model#-}" --holder-pid "$$"); then
     fm_lock_release "$remote_lock" || true
@@ -1515,7 +1524,7 @@ spawn_remote_secondmate() {
   fi
   seat_disposition=
   accounting_gen=
-  remote_spawn_gen=
+  remote_spawn_gen=$(printf '%s\n' "$out" | sed -n 's/^spawn_gen=//p' | tail -1)
   if [ "$seat_tracked" -eq 1 ]; then
     seat_response=$(printf '%s\n' "$out" | sed -n 's/^seat_disposition=//p' | tail -1)
     if [ -n "$seat_response" ] && printf '%s\n' "$seat_response" >"$SPAWN_SEAT_ROUTE_FILE"; then
@@ -1526,7 +1535,6 @@ spawn_remote_secondmate() {
       started) accounting_gen=$SPAWN_GEN ;;
       existing) accounting_gen=$(printf '%s\n' "$seat_response" | jq -r '.actual_generation') ;;
       esac
-      remote_spawn_gen=$accounting_gen
     fi
     if [ -z "$accounting_gen" ]; then
       fm_lock_release "$remote_lock" || true
@@ -1711,6 +1719,7 @@ SPAWN_STAGED_LAUNCH_FILE=
 # delivery, CONFIRMED once it accepted startup, ADOPTED when the owning control
 # or host transaction reserved the generation and passed it down.
 SPAWN_SEAT_TRACKED=0
+SPAWN_SEAT_POOLED=0
 SPAWN_SEAT_DISPATCHED=0
 SPAWN_SEAT_CONFIRMED=0
 SPAWN_SEAT_ADOPTED=0
@@ -3562,7 +3571,10 @@ if [ -z "$SPAWN_REMOTE_OPERATION" ]; then
     exit 1
   }
   [ -z "$FLEET_SEAT_OUT" ] || printf '%s\n' "$FLEET_SEAT_OUT"
-  case "$FLEET_SEAT_OUT" in 'fleet-seats: reserved '* | 'fleet-seats: recorded '*) SPAWN_SEAT_TRACKED=1 ;; esac
+  case "$FLEET_SEAT_OUT" in
+    'fleet-seats: reserved '*) SPAWN_SEAT_TRACKED=1; SPAWN_SEAT_POOLED=1 ;;
+    'fleet-seats: recorded '*) SPAWN_SEAT_TRACKED=1 ;;
+  esac
 fi
 
 secondmate_registry_value() {
@@ -8123,7 +8135,7 @@ fi
 # classifier reads this generation's exact endpoint `alive`. A timeout or an
 # unprovable backend fails the spawn with the seat still counted and its route
 # recorded; it never reports success, and never frees the seat.
-if [ "$KIND" = secondmate ] && { [ "$SPAWN_SEAT_TRACKED" = 1 ] || [ -n "$SPAWN_REMOTE_OPERATION" ]; }; then
+if [ "$KIND" = secondmate ] && { [ "$SPAWN_SEAT_POOLED" = 1 ] || [ -n "$SPAWN_REMOTE_OPERATION" ]; }; then
   spawn_startup_state=unverified
   if fm_control_backend_state_verified "$BACKEND"; then
     spawn_startup_deadline=$((SECONDS + ${FM_CONTROL_LAUNCH_WAIT:-90}))

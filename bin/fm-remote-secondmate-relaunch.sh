@@ -29,7 +29,7 @@
 # id alone.
 #
 # --expect-generation refuses (exit 6, nothing touched) when this record now
-# names another seat generation, so a restart whose persistence belonged to an
+# names another launch generation, so a restart whose persistence belonged to an
 # earlier incarnation never stops a newer one.
 set -eu
 
@@ -101,13 +101,18 @@ seats() {
 # running: after a failed publication the record can still name an older one,
 # and a later relaunch must replace the confirmed generation, not that stale
 # projection.
-PREV_GEN=$(fm_meta_get "$META" fleet_seat_generation)
+PREV_GEN=$(fm_meta_get "$META" remote_spawn_gen)
+[ -n "$PREV_GEN" ] || PREV_GEN=$(fm_meta_get "$META" fleet_seat_generation)
 LEDGER_GEN=$(seats show "$ID" 2>/dev/null \
-  | jq -r '[.incarnations[] | select(.lifecycle == "confirmed")] | last | .generation // empty' 2>/dev/null || true)
+  | jq -r '[.incarnations[] | select(.lifecycle == "reserved" or .lifecycle == "confirmed")] | ((map(select(.lifecycle == "confirmed")) | last) // last) | .generation // empty' 2>/dev/null || true)
 [ -z "$LEDGER_GEN" ] || PREV_GEN=$LEDGER_GEN
 if [ -n "$EXPECT_GENERATION" ] && [ "$PREV_GEN" != "$EXPECT_GENERATION" ]; then
   echo "error: generation-mismatch: remote secondmate $ID now records generation '${PREV_GEN:-none}', not the expected $EXPECT_GENERATION; nothing was changed" >&2
   exit 6
+fi
+if [ -n "$LEDGER_GEN" ]; then
+  seats reclaim "$ID" --generation "$LEDGER_GEN" >&2 \
+    || die "remote secondmate $ID's ledger predecessor is unresolved; nothing was changed"
 fi
 [ -n "$PREV_GEN" ] || PREV_GEN=-
 NEW_GEN="s$(date +%s).$$.$RANDOM"
@@ -183,8 +188,8 @@ META_TMP=$(mktemp "$STATE/.fm-remote-relaunch-meta.XXXXXX") || {
   printf 'effort=%s\n' "$NEW_EFFORT"
   if [ "$SEAT_TRACKED" -eq 1 ]; then
     printf 'fleet_seat_generation=%s\n' "$NEW_GEN"
-    [ -z "$NEW_REMOTE_GEN" ] || printf 'remote_spawn_gen=%s\n' "$NEW_REMOTE_GEN"
   fi
+  [ -z "$NEW_REMOTE_GEN" ] || printf 'remote_spawn_gen=%s\n' "$NEW_REMOTE_GEN"
 } >> "$META_TMP"
 # Every other line is preserved in its original relative order after the
 # refreshed harness/model/effort. A pr= line's own identity block (pr_head=
@@ -195,7 +200,8 @@ META_TMP=$(mktemp "$STATE/.fm-remote-relaunch-meta.XXXXXX") || {
 while IFS= read -r line || [ -n "$line" ]; do
   case "$line" in
     harness=*|model=*|effort=*|fleet_seat_state=*|fleet_seat_dead_token=*) ;;
-    fleet_seat_generation=*|remote_spawn_gen=*) [ "$SEAT_TRACKED" -eq 1 ] || printf '%s\n' "$line" >> "$META_TMP" ;;
+    remote_spawn_gen=*) ;;
+    fleet_seat_generation=*) [ "$SEAT_TRACKED" -eq 1 ] || printf '%s\n' "$line" >> "$META_TMP" ;;
     *) printf '%s\n' "$line" >> "$META_TMP" ;;
   esac
 done < "$META"

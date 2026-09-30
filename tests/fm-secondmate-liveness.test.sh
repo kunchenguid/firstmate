@@ -974,7 +974,7 @@ test_recovery_abandons_a_verdict_whose_generation_changed() {
   pooled_seats confirm sm1 --generation g1 >/dev/null || fail "confirming the started generation failed"
   printf 'bash\n' > "$W/endpoint/command"
   # Between the probe and the mutation the record names another incarnation.
-  out=$(pooled_recover "sed -i.bak 's/^spawn_gen=.*/spawn_gen=g2/' \"\$STATE/sm1.meta\"")
+  out=$(pooled_recover "\"$ROOT/bin/fm-fleet-seats.sh\" reserve sm1 --generation g2 --previous-generation g1 --kind secondmate --harness claude --model pool-model-a --holder-pid \"\$\$\" >/dev/null; sed -i.bak 's/^spawn_gen=.*/spawn_gen=g2/' \"\$STATE/sm1.meta\"")
   case "$out" in
     1\|skipped\|*"changed since it was probed"*) ;;
     *) fail "recovery acted on a stale verdict: $out" ;;
@@ -982,6 +982,41 @@ test_recovery_abandons_a_verdict_whose_generation_changed() {
   assert_absent "$W/spawn.log" "a stale verdict launched a replacement"
   assert_equals confirmed "$(pooled_lifecycle g1)" "a stale verdict changed the seat"
   pass "recovery abandons a death verdict once the recorded generation changed"
+}
+
+test_recovery_adopts_current_ledger_generation() {
+  local out
+  make_pooled_world pooled-stale-parent
+  pooled_meta g1
+  pooled_dispatch g1
+  printf 'claude\n' > "$W/endpoint/command"
+  pooled_seats confirm sm1 --generation g1 >/dev/null || fail "confirming g1"
+  printf 'bash\n' > "$W/endpoint/command"
+  pooled_seats reclaim sm1 --generation g1 >/dev/null || fail "reclaiming g1"
+  pooled_dispatch g2
+  printf 'claude\n' > "$W/endpoint/command"
+  pooled_seats confirm sm1 --generation g2 >/dev/null || fail "confirming g2"
+  printf 'bash\n' > "$W/endpoint/command"
+  out=$(pooled_recover)
+  assert_equals '0|relaunchable|' "$out" "stale parent did not reconcile the current ledger generation"
+  assert_equals reclaimed "$(pooled_lifecycle g2)" "the authoritative generation remained counted"
+  assert_present "$W/spawn.log" "recovery did not launch after exact-generation reclamation"
+  pass "recovery adopts the current ledger generation when the parent names a terminal predecessor"
+}
+
+test_recovery_retains_confirmed_missing_generation() {
+  local out
+  make_pooled_world pooled-confirmed-missing
+  pooled_meta g1
+  pooled_dispatch g1
+  printf 'claude\n' > "$W/endpoint/command"
+  pooled_seats confirm sm1 --generation g1 >/dev/null || fail "confirming g1"
+  : > "$W/endpoint/windows"
+  out=$(pooled_recover)
+  assert_contains "$out" '1|skipped|' "unproven confirmed absence did not skip recovery"
+  assert_equals confirmed "$(pooled_lifecycle g1)" "unproven absence freed capacity"
+  assert_absent "$W/spawn.log" "unproven absence launched a replacement"
+  pass "liveness recovery consumes the absence-proof refusal before any replacement"
 }
 
 test_tmux_agent_state_classifies
@@ -1012,3 +1047,6 @@ test_recovery_reclaims_exactly_the_probed_dead_generation
 test_recovery_abandons_a_verdict_whose_generation_changed
 
 echo "# all fm-secondmate-liveness tests passed"
+
+test_recovery_adopts_current_ledger_generation
+test_recovery_retains_confirmed_missing_generation

@@ -165,7 +165,6 @@
 #   FM_CONTROL_EXIT_WAIT         alive->dead wait after the exit command (30)
 #   FM_CONTROL_LAUNCH_WAIT       dead->alive wait after a relaunch (90)
 #   FM_CONTROL_EXIT_RETRIES      Enter retries for the exit command (3)
-#   FM_CONTROL_LIFECYCLE_WAIT    wait for a secondmate's lifecycle episode (30)
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -387,7 +386,7 @@ if [ "$VERB" != interrupt ] && [ -f "$STATE/$ID.meta" ] \
   case "$control_lifecycle_rc" in
     0) ;;
     1)
-      fm_supervisor_lifecycle_acquire "$STATE" "$ID" "${FM_CONTROL_LIFECYCLE_WAIT:-30}" \
+      fm_supervisor_lifecycle_acquire "$STATE" "$ID" 30 \
         || die "another lifecycle episode for secondmate $ID is running (pid ${FM_LOCK_HELD_PID:-unknown}); nothing was changed"
       CONTROL_LIFECYCLE_JOINED=1
       ;;
@@ -1335,11 +1334,27 @@ do_relaunch() {
   journal_write stopping "${CHECKPOINT_LINES[@]}" "$note_line"
   exit_result=$(do_exit)
   journal_write exited "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
+  if [ -n "$SEAT_OPERATION" ]; then
+    local old_destroyed=false prior_receipt prior_phase terminal_phase
+    [ "$exit_result" != endpoint-gone ] || old_destroyed=true
+    fm_remote_seat_receipt_update "$STATE/$ID.seat-operation.$SEAT_OPERATION" "$SEAT_OPERATION" "$SEAT_GEN" \
+      old_stopped=true "old_destroyed=$old_destroyed" || die "could not record the predecessor stop for $ID"
+    prior_receipt="$STATE/$ID.seat-operation.$SEAT_PREV_GEN"
+    if [ -n "$SEAT_PREV_GEN" ] && [ -f "$prior_receipt" ] && [ ! -L "$prior_receipt" ]; then
+      prior_phase=$(sed -n 's/^phase=//p' "$prior_receipt" | head -1)
+      terminal_phase=cancelled
+      if [ "$exit_result" = stopped ] || [ "$prior_phase" = started ] || [ "$prior_phase" = dead-after-start ]; then
+        terminal_phase=dead-after-start
+      fi
+      fm_remote_seat_receipt_update "$prior_receipt" "$SEAT_PREV_GEN" "$SEAT_PREV_GEN" \
+        "phase=$terminal_phase" "actual_generation=$SEAT_PREV_GEN" || die "could not record the terminal predecessor receipt for $ID"
+    fi
+  fi
   # The old incarnation's stop is proven, and its replacement already counts:
   # free the old generation exactly. An unprovable release keeps it counted.
   if [ "$SEAT_TRACKED" = 1 ] && [ -n "$SEAT_PREV_GEN" ]; then
     control_seats release "$ID" --generation "$SEAT_PREV_GEN" --reason replaced >/dev/null \
-      || echo "warning: $ID's previous fleet seat (generation $SEAT_PREV_GEN) stays counted until reconciliation" >&2
+      || die "$ID's previous fleet seat (generation $SEAT_PREV_GEN) is not proven stopped; no replacement was launched"
   fi
 
   # The launch owner (fm-spawn --relaunch) clears the previous incarnation's

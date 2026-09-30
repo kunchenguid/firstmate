@@ -322,18 +322,44 @@ fm_secondmate_liveness_probe() {  # <meta> <id> <full|poll>
   local meta=$1 id=$2 mode=$3
   FM_SM_LIVE_STATUS=skipped FM_SM_LIVE_STATE=unknown FM_SM_LIVE_KILL=0 FM_SM_LIVE_RESUME=0
   FM_SM_LIVE_CAUSE='' FM_SM_LIVE_WHERE='' FM_SM_LIVE_REASON='' FM_SM_LIVE_LINE=''
-  FM_SM_LIVE_GENERATION='' FM_SM_LIVE_ROUTE=''
-  local window harness remote_host remote_rc out agent_state readiness_reason route_out remote_backend
+  FM_SM_LIVE_GENERATION='' FM_SM_LIVE_ROUTE='' FM_SM_LIVE_BACKEND='' FM_SM_LIVE_TARGET=''
+  local window harness remote_host remote_rc out agent_state readiness_reason route_out remote_backend seat_record incarnation backend target
   window=$(fm_meta_get "$meta" window)
   [ -n "$window" ] || { FM_SM_LIVE_STATUS=silent; return 0; }
   harness=$(fm_meta_get "$meta" harness)
   remote_host=$(fm_meta_get "$meta" remote_host)
   FM_SM_LIVE_GENERATION=$(fm_meta_get "$meta" fleet_seat_generation)
+  [ -n "$FM_SM_LIVE_GENERATION" ] || FM_SM_LIVE_GENERATION=$(fm_meta_get "$meta" remote_spawn_gen)
   [ -n "$FM_SM_LIVE_GENERATION" ] || FM_SM_LIVE_GENERATION=$(fm_meta_get "$meta" spawn_gen)
+  backend=$(fm_backend_of_meta "$meta")
+  target=$(fm_backend_target_of_meta "$meta")
+  [ -n "$target" ] || target="$window"
+  if ! seat_record=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$FM_SM_LIVE_LIB_DIR/fm-fleet-seats.sh" show "$id" 2>/dev/null); then
+    FM_SM_LIVE_REASON="the fleet seat ledger could not be read; recovery is refused"
+    return 0
+  fi
+  if [ -n "$seat_record" ]; then
+    incarnation=$(printf '%s\n' "$seat_record" | jq -c --arg g "$FM_SM_LIVE_GENERATION" '
+      [.incarnations[] | select(.lifecycle == "reserved" or .lifecycle == "confirmed")]
+      | (map(select(.generation == $g)) | last) // (map(select(.lifecycle == "confirmed")) | last) // last // empty')
+    if [ -n "$incarnation" ]; then
+      FM_SM_LIVE_GENERATION=$(printf '%s\n' "$incarnation" | jq -r .generation)
+      if [ "$(printf '%s\n' "$incarnation" | jq -r '.route.placement // empty')" = local ]; then
+        backend=$(printf '%s\n' "$incarnation" | jq -r .route.backend)
+        target=$(printf '%s\n' "$incarnation" | jq -r .route.target)
+      fi
+    fi
+  fi
+  FM_SM_LIVE_BACKEND=$backend FM_SM_LIVE_TARGET=$target
   if [ -n "$remote_host" ]; then
-    FM_SM_LIVE_ROUTE="remote:$remote_host:$(fm_meta_get "$meta" remote_target)"
+    target=$(fm_meta_get "$meta" remote_target)
+    if [ -n "${incarnation:-}" ]; then
+      route_out=$(printf '%s\n' "$incarnation" | jq -r '.route.target // empty')
+      [ -z "$route_out" ] || target=$route_out
+    fi
+    FM_SM_LIVE_ROUTE="remote:$remote_host:$target"
   else
-    FM_SM_LIVE_ROUTE="$(fm_backend_of_meta "$meta"):$(fm_backend_target_of_meta "$meta"):$window"
+    FM_SM_LIVE_ROUTE="$backend:$target"
   fi
   if [ -n "$remote_host" ]; then
     if [ "$mode" = full ]; then
@@ -407,10 +433,6 @@ fm_secondmate_liveness_probe() {  # <meta> <id> <full|poll>
     return 0
   fi
 
-  local backend target
-  backend=$(fm_backend_of_meta "$meta")
-  target=$(fm_backend_target_of_meta "$meta")
-  [ -n "$target" ] || target="$window"
   agent_state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null) || agent_state=unreadable
   case "$harness" in
     claude|codex|opencode|pi|pi-signed|grok|kimi|omp) ;;

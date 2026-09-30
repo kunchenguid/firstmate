@@ -52,7 +52,7 @@
 # computed here in the primary and are identical for both.
 #
 # Each persist request is bound to the incarnation it was sent to: the mate's
-# recorded generation (its fleet seat generation for a remote route, else its
+# recorded generation (its host spawn generation for a remote route, else its
 # spawn_gen) is captured with the request and passed to the relaunch entry
 # point as --expect-generation. That entry point compares it inside the mate's
 # lifecycle episode before stopping anything, so if automatic recovery already
@@ -175,18 +175,16 @@ report_unreached() {  # <id> <reason>
 
 restart_mate() {  # <array-index>
   local i=$1 id restart_out restart_rc restart_reason ran_on
-  local -a expect=()
   id=${IDS[$i]}
-  [ -z "${GENERATION[i]}" ] || expect=(--expect-generation "${GENERATION[i]}")
   if [ "${PLACEMENT[i]}" = remote ]; then
     restart_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
       "$SCRIPT_DIR/fm-remote-secondmate-relaunch.sh" \
       "$id" "${HARNESS[i]}" "${MODEL[i]:-default}" "${EFFORT[i]:-default}" \
-      ${expect[@]+"${expect[@]}"} < /dev/null 2>&1)
+      --expect-generation "${GENERATION[i]}" < /dev/null 2>&1)
     restart_rc=$?
   else
     restart_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
-      "$SCRIPT_DIR/fm-control.sh" "$id" relaunch ${expect[@]+"${expect[@]}"} 2>&1)
+      "$SCRIPT_DIR/fm-control.sh" "$id" relaunch --expect-generation "${GENERATION[i]}" 2>&1)
     restart_rc=$?
   fi
   if [ "$restart_rc" -eq 6 ]; then
@@ -325,9 +323,14 @@ while [ "$i" -lt "${#IDS[@]}" ]; do
     fi
   fi
 
-  GENERATION[i]=$(sed -n 's/^fleet_seat_generation=//p' "$STATE/$id.meta" 2>/dev/null | tail -1)
+  GENERATION[i]=$(sed -n 's/^remote_spawn_gen=//p' "$STATE/$id.meta" 2>/dev/null | tail -1)
   if [ "${PLACEMENT[i]}" != remote ]; then
     GENERATION[i]=$(sed -n 's/^spawn_gen=//p' "$STATE/$id.meta" 2>/dev/null | tail -1)
+  fi
+  if [ -z "${GENERATION[i]}" ]; then
+    REASON[i]="its launch generation is missing, so an answer cannot safely authorize a restart"
+    i=$((i + 1))
+    continue
   fi
   if ! corr=$(fm_pending_reply_create "$FM_HOME" "$STATE" "$id" \
     "$FM_SECONDMATE_PERSIST_REQUEST"); then

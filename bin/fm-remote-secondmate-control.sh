@@ -186,18 +186,8 @@ seat_parse_operation() {
 # seat_receipt_open <id> <verb>: persist the token-scoped receipt before any
 # endpoint effect. Must run inside the host lifecycle episode.
 seat_receipt_open() {
-  local id=$1 receipt tmp running old
+  local id=$1 receipt tmp
   receipt=$(receipt_path "$id")
-  running=$(fm_meta_get "$(meta_path "$id")" spawn_gen 2>/dev/null || true)
-  for old in "$CONTROL_STATE/$id.seat-operation."*; do
-    [ -f "$old" ] || continue
-    case "$old" in *.tmp.*) continue ;; esac
-    [ "$old" != "$receipt" ] || continue
-    if [ -n "$running" ] && [ "$old" = "$(receipt_path "$id" "$running")" ]; then
-      continue
-    fi
-    rm -f "$old"
-  done
   tmp="$receipt.tmp.$$"
   (umask 077 && {
     echo "schema=fm-remote-seat-receipt.v1"
@@ -221,9 +211,9 @@ seat_emit() {
   fi
   local prev=null
   [ "$SEAT_PREV" = - ] || prev=$(json_str "$SEAT_PREV")
-  printf 'seat_disposition={"schema":"fm-remote-seat-operation.v2","task":%s,"operation":%s,"requested_generation":%s,"actual_generation":%s,"previous_generation":%s,"disposition":%s,"startup_confirmed":%s,"old_stopped":%s,"route":%s,"actual_model":%s,"complete":true}\n' \
+  printf 'seat_disposition={"schema":"fm-remote-seat-operation.v2","task":%s,"operation":%s,"requested_generation":%s,"actual_generation":%s,"previous_generation":%s,"disposition":%s,"startup_confirmed":%s,"old_stopped":%s,"old_destroyed":%s,"route":%s,"actual_model":%s,"complete":true}\n' \
     "$(json_str "$SEAT_LIFECYCLE_ID")" "$(json_str "$SEAT_OP")" "$(json_str "$SEAT_OP")" \
-    "$(json_str "${4:-}")" "$prev" "$(json_str "$1")" "$2" "$3" "$route" "$(json_str "${7:-}")"
+    "$(json_str "${4:-}")" "$prev" "$(json_str "$1")" "$2" "$3" "${SEAT_OLD_DESTROYED:-false}" "$route" "$(json_str "${7:-}")"
 }
 
 # seat_endpoint_state <backend> <target>: recovery-grade state, with a
@@ -249,10 +239,11 @@ seat_endpoint_state() {
 # endpoint observation. The caller holds the host lifecycle mutex. Sets
 # SEAT_DECIDED to the disposition.
 seat_decide() {
-  local id=$1 receipt meta journal phase verb gen meta_gen backend target model state jphase jop rollback old_stopped=false
+  local id=$1 receipt meta journal phase verb gen meta_gen backend target model state jphase jop rollback exit_result previous_phase old_stopped=false
   receipt=$(receipt_path "$id")
   meta=$(meta_path "$id")
   SEAT_DECIDED=unknown
+  SEAT_OLD_DESTROYED=false
   if [ ! -f "$receipt" ] || [ -L "$receipt" ] || [ "$(receipt_field "$receipt" operation)" != "$SEAT_OP" ]; then
     seat_emit unknown false false
     return 0
@@ -260,6 +251,8 @@ seat_decide() {
   [ -n "$(receipt_field "$receipt" previous_generation)" ] && SEAT_PREV=$(receipt_field "$receipt" previous_generation)
   phase=$(receipt_field "$receipt" phase)
   verb=$(receipt_field "$receipt" verb)
+  [ "$(receipt_field "$receipt" old_stopped)" != true ] || old_stopped=true
+  [ "$(receipt_field "$receipt" old_destroyed)" != true ] || SEAT_OLD_DESTROYED=true
   gen=$SEAT_OP
   meta_gen=
   model=
@@ -279,12 +272,21 @@ seat_decide() {
     jop=$(sed -n 's/^seat_operation=//p' "$journal" 2>/dev/null | tail -1)
     jphase=$(sed -n 's/^phase=//p' "$journal" 2>/dev/null | tail -1)
     rollback=$(sed -n 's/^rollback=//p' "$journal" 2>/dev/null | tail -1)
+    exit_result=$(sed -n 's/^exit_result=//p' "$journal" 2>/dev/null | tail -1)
+    previous_phase=$(receipt_field "$(receipt_path "$id" "$SEAT_PREV")" phase)
     if [ "$jop" = "$SEAT_OP" ]; then
       case "${jphase#failed:}" in
-        exited|launching|complete) old_stopped=true ;;
+        exited|launching|complete)
+          if [ "$exit_result" = endpoint-gone ]; then
+            old_stopped=true
+            SEAT_OLD_DESTROYED=true
+          elif [ "$exit_result" = stopped ] || [ "$previous_phase" = started ]; then
+            old_stopped=true
+          fi
+          ;;
         stopping)
           case "$rollback" in
-            prior-record-kept-agent-dead) old_stopped=true ;;
+            prior-record-kept-agent-dead) [ "$previous_phase" != started ] || old_stopped=true ;;
             instructions-restored-agent-alive) ;;
             *)
               if [ "$phase" = received ] || [ "$phase" = prelaunch ]; then
@@ -299,6 +301,14 @@ seat_decide() {
     fi
   fi
   case "$phase" in
+    dead-after-start)
+      SEAT_DECIDED=dead-after-start
+      seat_emit dead-after-start true "$old_stopped" "$gen" "$backend" "$target" "$(receipt_field "$receipt" actual_model)"
+      ;;
+    cancelled)
+      SEAT_DECIDED=cancelled
+      seat_emit cancelled false "$old_stopped" "" "$backend" "$target"
+      ;;
     prelaunch|received)
       if [ "$old_stopped" = true ]; then
         # The old agent stopped but the candidate was never submitted.
@@ -312,7 +322,7 @@ seat_decide() {
     dispatched|started)
       state=$(seat_endpoint_state "$backend" "$target")
       if [ "$state" = alive ] && [ "$meta_gen" = "$gen" ]; then
-        seat_receipt_set phase=started "actual_generation=$gen" 2>/dev/null || true
+        seat_receipt_set phase=started "actual_generation=$gen" "actual_model=$model" 2>/dev/null || true
         SEAT_DECIDED=started
         seat_emit started true "$old_stopped" "$gen" "$backend" "$target" "$model"
       elif [ "$phase" = started ] && { [ "$state" = dead ] || [ "$state" = gone ]; }; then
@@ -386,6 +396,31 @@ remote_endpoint_load() {
       REMOTE_ENDPOINT_ERROR="remote secondmate $id endpoint target '$REMOTE_ENDPOINT_TARGET' is outside Herdr session '$REMOTE_HERDR_SESSION'; refusing access until it is explicitly migrated"
       return 1
       ;;
+  esac
+}
+
+seat_predecessor_ready() {
+  local gen state phase
+  [ -n "$SEAT_OP" ] || return 0
+  gen=$(fm_meta_get "$REMOTE_ENDPOINT_META" spawn_gen)
+  phase=$(receipt_field "$(receipt_path "$SEAT_LIFECYCLE_ID" "$gen")" phase)
+  state=$(seat_endpoint_state "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET")
+  case "$state" in
+    alive) ;;
+    dead|gone)
+      if [ "$phase" = started ] || [ "$phase" = dead-after-start ]; then
+        fm_remote_seat_receipt_update "$(receipt_path "$SEAT_LIFECYCLE_ID" "$gen")" "$gen" "$gen" phase=dead-after-start \
+          || prelaunch_die "could not retain the predecessor's terminal receipt"
+      elif [ "$state" = gone ]; then
+        if [ -f "$(receipt_path "$SEAT_LIFECYCLE_ID" "$gen")" ]; then
+          fm_remote_seat_receipt_update "$(receipt_path "$SEAT_LIFECYCLE_ID" "$gen")" "$gen" "$gen" phase=cancelled \
+            || prelaunch_die "could not retain the destroyed predecessor's receipt"
+        fi
+      else
+        prelaunch_die "the predecessor generation ${gen:-unknown} has no confirmed startup or proven endpoint destruction; refusing replacement"
+      fi
+      ;;
+    *) prelaunch_die "the predecessor generation ${gen:-unknown} has no confirmed startup or proven endpoint destruction; refusing replacement" ;;
   esac
 }
 
@@ -466,6 +501,7 @@ cmd_launch() {
   meta=$(meta_path "$id")
   if [ -f "$meta" ]; then
     remote_endpoint_load "$id" || prelaunch_die "$REMOTE_ENDPOINT_ERROR"
+    seat_predecessor_ready
     current=$(fm_backend_agent_state "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" 2>/dev/null || printf 'unreadable\n')
     case "$current" in
       alive)
@@ -549,6 +585,7 @@ cmd_relaunch() {
       || prelaunch_die "remote secondmate native effort validation failed"
   fi
   remote_endpoint_load "$id" || prelaunch_die "$REMOTE_ENDPOINT_ERROR"
+  seat_predecessor_ready
   [ "$model" != - ] || model=default
   [ "$effort" != - ] || effort=default
   control_args=("$id" relaunch --harness "$harness" --model "$model" --effort "$effort")
