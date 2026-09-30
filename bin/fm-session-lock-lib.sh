@@ -63,12 +63,23 @@ fm_harness_path_name() {  # <path>
 # session is a child of its broker. A helper is never the session: it can outlive
 # it reparented to pid 1. The marker is argv[1] exactly, never a substring,
 # because a session's own argv can quote a helper name inside its prompt.
-fm_harness_is_omp_worker_helper() {  # <comm> <args>
-  local comm=$1 args=$2
+fm_harness_is_omp_worker_helper() {  # <comm> <args> [<pid>]
+  local comm=$1 args=$2 pid=${3:-} argv0 argv1
   [ "${comm##*/}" = omp ] || return 1
+  if [ "$(uname -s 2>/dev/null)" = Linux ] && [ -r "/proc/$pid/cmdline" ]; then
+    exec 9<"/proc/$pid/cmdline" || return 1
+    IFS= read -r -d '' argv0 <&9 || true
+    IFS= read -r -d '' argv1 <&9 || true
+    exec 9<&-
+    case "$argv1" in
+      __omp_worker_*) return 0 ;;
+    esac
+    return 1
+  fi
+  # macOS ps reports the full executable path in comm. Require that exact
+  # path, one space, and argv[1]'s helper marker at the start of args.
   case "$args" in
-    "$comm __omp_worker_"*) return 0 ;;
-    */omp\ __omp_worker_*) return 0 ;;
+    "$comm __omp_worker_"*|*/omp\ __omp_worker_*) return 0 ;;
   esac
   return 1
 }
@@ -87,10 +98,10 @@ fm_harness_is_omp_worker_helper() {  # <comm> <args>
 #   3. a bare interpreter (node, python) running a harness script path.
 #   4. Cursor's own structural identity, owned by bin/fm-cursor-lib.sh.
 FM_HARNESS_IS_CLAUDE=0
-fm_harness_process_matches() {  # <comm> <args>
-  local comm=$1 args=$2 base argv0 name
+fm_harness_process_matches() {  # <comm> <args> [<pid>]
+  local comm=$1 args=$2 pid=${3:-} base argv0 name
   FM_HARNESS_IS_CLAUDE=0
-  fm_harness_is_omp_worker_helper "$comm" "$args" && return 1
+  fm_harness_is_omp_worker_helper "$comm" "$args" "$pid" && return 1
   base=$(basename -- "$comm")
   if printf '%s' "$base" | grep -qE "$FM_HARNESS_RE"; then
     case "$base" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
@@ -147,10 +158,10 @@ fm_harness_ancestry_pids() {
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
     args=$(ps -o args= -p "$pid" 2>/dev/null)
-    if fm_harness_is_omp_worker_helper "$comm" "$args"; then
+    if fm_harness_is_omp_worker_helper "$comm" "$args" "$pid"; then
       [ "$extending" -eq 0 ] || break
       helper=1
-    elif fm_harness_process_matches "$comm" "$args"; then
+    elif fm_harness_process_matches "$comm" "$args" "$pid"; then
       [ "$helper" -eq 0 ] || [ "${comm##*/}" = omp ] || break
       printf '%s\n' "$pid"
       printed=1
@@ -199,7 +210,7 @@ fm_harness_pid_alive() {
   kill -0 "$pid" 2>/dev/null || return 1
   comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
   args=$(ps -o args= -p "$pid" 2>/dev/null)
-  fm_harness_process_matches "$comm" "$args"
+  fm_harness_process_matches "$comm" "$args" "$pid"
 }
 
 # --- trusted same-session identity -------------------------------------------
@@ -240,7 +251,7 @@ fm_session_lock_trusted_session_id() {  # [<ancestry-pids>]
     [ "$pid" = "$claude_pid" ] || continue
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
     args=$(ps -o args= -p "$pid" 2>/dev/null)
-    fm_harness_process_matches "$comm" "$args" || return 1
+    fm_harness_process_matches "$comm" "$args" "$pid" || return 1
     [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || return 1
     printf '%s\n' "$id"
     return 0
@@ -339,7 +350,7 @@ fm_session_lock_foreign_owner_live() {
   else
     owner_comm=$(ps -o comm= -p "$lock_pid" 2>/dev/null) || return 1
     owner_args=$(ps -o args= -p "$lock_pid" 2>/dev/null)
-    fm_harness_is_omp_worker_helper "$owner_comm" "$owner_args" || return 1
+    fm_harness_is_omp_worker_helper "$owner_comm" "$owner_args" "$lock_pid" || return 1
     owner_pid=$(ps -o ppid= -p "$lock_pid" 2>/dev/null | tr -d ' ')
     case "$owner_pid" in ''|*[!0-9]*) return 1 ;; esac
     parent_comm=$(ps -o comm= -p "$owner_pid" 2>/dev/null) || return 1

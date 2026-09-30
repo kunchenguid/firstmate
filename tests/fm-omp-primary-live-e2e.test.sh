@@ -91,18 +91,17 @@ reap_lab() {
 # __omp_worker_daemon_broker`, never the lab path, so stage 4 records its pid and
 # cleanup reaps it only while that pid still names a broker.
 LAB_BROKER_PID_FILE="$PROJECT/state/tool-shell-parent-pid"
+LAB_BROKER_START_FILE="$PROJECT/state/tool-shell-parent-start"
 reap_lab_broker() {
-  local pid ancestor
+  local pid recorded_start current_start command
   pid=$(tr -d '[:space:]' < "$LAB_BROKER_PID_FILE" 2>/dev/null || true)
   case "$pid" in ''|*[!0-9]*) return 0 ;; esac
-  ancestor=$pid
-  for _ in 1 2 3 4 5 6 7 8; do
-    [ "$ancestor" = "$OMP_PID" ] && break
-    ancestor=$(ps -o ppid= -p "$ancestor" 2>/dev/null | tr -d ' ')
-    case "$ancestor" in ''|*[!0-9]*) return 0 ;; esac
-  done
-  [ "$ancestor" = "$OMP_PID" ] || return 0
-  case "$(ps -o args= -p "$pid" 2>/dev/null)" in
+  recorded_start=$(tr -d '\n' < "$LAB_BROKER_START_FILE" 2>/dev/null || true)
+  [ -n "$recorded_start" ] || return 0
+  current_start=$(ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//')
+  [ "$current_start" = "$recorded_start" ] || return 0
+  command=$(ps -o args= -p "$pid" 2>/dev/null || true)
+  case "$command" in
     *' __omp_worker_daemon_broker') kill -TERM "$pid" 2>/dev/null || true ;;
   esac
 }
@@ -331,6 +330,9 @@ case "$tool_parent" in
   *) fail "omp $OMP_VERSION ran the bash service under '$tool_parent', not its daemon broker; re-verify the broker shape in bin/fm-session-lock-lib.sh" ;;
 esac
 tool_lock=$(cat "$PROJECT/state/tool-lock.out" 2>/dev/null || true)
+tool_broker_pid=$(cat "$PROJECT/state/tool-shell-parent-pid")
+ps -o lstart= -p "$tool_broker_pid" 2>/dev/null | sed 's/^[[:space:]]*//' > "$PROJECT/state/tool-shell-parent-start"
+[ -s "$PROJECT/state/tool-shell-parent-start" ] || fail "could not record the omp broker start time"
 [ "$tool_lock" = "lock acquired: harness pid $omp_real_pid" ] \
   || fail "fm-lock.sh under the omp daemon broker did not confirm the omp session $omp_real_pid as owner: $tool_lock"
 [ "$(sed -n '1p' "$PROJECT/state/.lock")" = "$omp_real_pid" ] || fail "the broker-parented lock call rewrote the lock away from the omp session"

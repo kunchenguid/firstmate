@@ -68,7 +68,15 @@ function ompWorkerHelper(pid: string): boolean {
   const comm = psField(pid, "comm=");
   const args = psField(pid, "args=");
   if (comm.split("/").pop() !== "omp") return false;
-  return /(?:^|\/)omp __omp_worker_/.test(args);
+  if (process.platform === "linux") {
+    try {
+      const argv = readFileSync(`/proc/${pid}/cmdline`).toString().split("\0");
+      return (argv[1] || "").startsWith("__omp_worker_");
+    } catch {
+      return false;
+    }
+  }
+  return args.startsWith(`${comm} __omp_worker_`);
 }
 
 function pidAlive(pid: string): boolean {
