@@ -1578,6 +1578,7 @@ test_worker_launch_delivers_role_scope() {
       content=$(cat "$brief")
       content=${content//'{TASK}'/brief for $id}
       content=${content//'{FIRSTMATE_SPEC}'/Exercise the spawn behavior under test.}
+      content=${content//'{CLEAR}'/$'Context: The job and why it matters now.\nLayout: The shape of the result.\nExamples: Match the existing refusal pattern.\nAudience: The next session that dispatches a worker.\nRole: Careful builder of this change.\nFallback: Flag a missing fact instead of inventing one.\nEvidence: The spawn refusal and the filled-line acceptance.'}
       printf '%s\n' "$content" > "$brief"
     fi
     cp "$HOME_DIR/data/$id/brief.md" "$CASE_DIR/brief-before"
