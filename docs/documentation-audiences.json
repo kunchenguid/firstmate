@@ -477,6 +477,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/contributions-pagination.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/dispatch-auth.md",
       "audience": "maintainer-verification"
     },
