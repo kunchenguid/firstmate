@@ -170,8 +170,8 @@
 # unbounded digest is no longer merely slow - it can strand a whole session or
 # first turn behind one hung subprocess. Every remaining step is local, but
 # local is not the same as bounded: tool version probes, the backlog listing,
-# and the per-task endpoint reads are all unbounded subprocesses. So the whole
-# digest still runs as ONE bounded child of this script
+# local-task endpoint reads, and remote-task durable-state reads are all
+# unbounded subprocesses. So the whole digest still runs as ONE bounded child of this script
 # (FM_SESSION_START_TIMEOUT, default 120s). The deferred network stage
 # deliberately sits OUTSIDE that bound,
 # in its own process group under its own aggregate deadline, so a truncated
@@ -182,6 +182,11 @@
 # sections that were therefore never emitted, and still exits 0. The child
 # records its progress in FM_SESSION_START_STAGE_FILE, which is also the flag
 # that tells a child it is the child - the parent never recurses.
+# When FM_SESSION_START_TIMING_FILE names an existing regular non-symlink file,
+# the child appends one `v1<TAB>stage<TAB>name<TAB>monotonic-ms` duration row for
+# every completed digest stage.
+# Timing is opt-in, records no digest bodies, and never changes startup success
+# or failure when the clock or destination is unavailable.
 # Hosts without timeout, gtimeout, or perl use the shared pure-Bash watchdog, so
 # the digest never runs without the same hard bound and process-group cleanup.
 #
