@@ -22,7 +22,7 @@ Do not infer this guard's scope, loop safety, or compatibility tradeoffs for tho
 | Away and quiet mode | [Away and quiet mode daemon ownership](#away-and-quiet-mode-daemon-ownership) |
 | How long a beacon stays fresh | [Guard grace and the poll cadence](#guard-grace-and-the-poll-cadence) |
 | How each harness blocks or follows up | [Harness integrations](#harness-integrations) |
-| Claude's Stop auto-arm cooperation, block budget, and fail-open | [Claude cooperative mode](#claude-cooperative-mode) |
+| The cooperative Stop auto-arm modes, block budget, and fail-open | [Cooperative mode](#cooperative-mode-claude-and-codex) |
 | Cursor's parked hook | [Cursor park](#cursor-park) |
 | Known gaps | [Compatibility limits](#compatibility-limits) |
 | Tests and live evidence | [Regression coverage](#regression-coverage) |
@@ -256,7 +256,7 @@ Each enabled primary harness adapts its own turn-end mechanism to the shared gua
 | Harness | Turn-end hook | How it enforces the guard |
 | --- | --- | --- |
 | Claude | Two `Stop` hooks in `.claude/settings.json` | Blocks with exit status 2, cooperating with the Stop auto-arm |
-| Codex | `Stop` hook in `.codex/hooks.json` | Blocks with exit status 2 |
+| Codex | Two `Stop` hooks in `.codex/hooks.json` | Blocks with exit status 2, cooperating with the Codex Stop auto-arm |
 | OpenCode | `session.idle` in `.opencode/plugins/fm-primary-turnend-guard.js` | Passive callback that schedules one follow-up |
 | Pi | `agent_settled` in `.pi/extensions/fm-primary-turnend-guard.ts` | Passive callback that schedules one follow-up |
 | omp | `session_stop` in `.omp/extensions/fm-primary-turnend-guard.ts` | Blocking hook that compels one continuation |
@@ -266,7 +266,7 @@ Each enabled primary harness adapts its own turn-end mechanism to the shared gua
 The registrations in detail:
 
 - Claude registers two `Stop` hooks in `.claude/settings.json`, both anchored through `CLAUDE_PROJECT_DIR`: `bin/fm-turnend-guard.sh --claude`, and `bin/fm-claude-stop-autoarm.sh` with `asyncRewake: true` and `timeout: 28800`.
-- Codex registers a `Stop` hook in `.codex/hooks.json`, anchors the executable to the hook process working directory, verifies a Firstmate-shaped hook-bearing root, and passes the original payload to the shared guard.
+- Codex registers two `Stop` hooks in `.codex/hooks.json`, each anchored to the verified hook-bearing root through the hook process working directory: `bin/fm-turnend-guard.sh --codex` (30s), and `bin/fm-codex-stop-autoarm.sh` with `async: true` and `timeout: 28800`.
 - OpenCode listens for `session.idle` in `.opencode/plugins/fm-primary-turnend-guard.js`, lets the watcher coordinator act first, and calls `client.session.promptAsync` once when the guard returns 2.
 - Pi listens for `agent_settled` in `.pi/extensions/fm-primary-turnend-guard.ts`, runs once per logical agent run, and calls `pi.sendUserMessage(..., { deliverAs: "followUp" })` once when the guard returns 2.
 - omp answers its blocking `session_stop` hook in `.omp/extensions/fm-primary-turnend-guard.ts`, passing the payload's own `stop_hook_active` to the shared guard.
@@ -301,18 +301,21 @@ The registrations in detail:
 ### Claude and Codex blocking
 
 Claude and Codex can block a Stop directly with exit status 2 and stderr.
-Both payloads carry `stop_hook_active`.
-In the default Codex mode, a true value lets the second stop finish after one forced continuation.
+Both payloads carry `stop_hook_active`, and both harnesses mark every stop after a stop-hook continuation with it (Codex verified in its own suite: `false, true, true`).
+Both run cooperatively with their Stop-owned auto-arm, so the guarded `--claude` and `--codex` registrations ignore `stop_hook_active` and share the block budget and attended fail-open described below.
 
-### Claude cooperative mode
+Codex's auto-arm cannot rewake through its hook exit, because Codex has no `asyncRewake` (verified live on codex-cli 0.159.0 and 0.159.2: an async Stop hook's exit 2 and stderr are never delivered).
+`bin/fm-codex-stop-autoarm.sh` delivers its actionable close instead as a queued user turn through `codex queue --thread <session id> --message <envelope>`, which wakes an idle interactive session into a real handling turn; its header owns the delivery contract, including the failed-delivery epoch rewrite that keeps the ledger from claiming a handling turn nothing started.
+A queued message that arrives while the captain's turn is still running is delivered at the next turn boundary without loss.
 
-Claude runs the guard with `--claude`, which ignores `stop_hook_active` and cooperates with the Stop-owned auto-arm.
-Claude Code sets `stop_hook_active=true` on every stop after any stop-hook continuation, including `asyncRewake` rewakes.
-Under the default one-shot behavior, that re-opened the 2026-07-21 blind window.
+### Cooperative mode (Claude and Codex)
 
-Before the Claude cooperative budget can re-block a Stop, the guard checks for a live foreign session-lock owner and takes the same safe diagnostic exit described under "Guard predicates" ([foreign session-lock owner](#foreign-session-lock-owner)).
+Claude runs the guard with `--claude` and Codex with `--codex`; both select the same cooperative mode, which ignores `stop_hook_active` and cooperates with that harness's Stop-owned auto-arm.
+Claude Code sets `stop_hook_active=true` on every stop after any stop-hook continuation, including `asyncRewake` rewakes, and Codex marks its blocked-stop continuations the same way, so the default one-shot behavior re-opened the 2026-07-21 blind window on Claude and would re-open the same window on Codex after a handover.
 
-The Claude mode waits up to `FM_CLAUDE_AUTOARM_SYNC_WAIT_MS` (default 800 milliseconds).
+Before the cooperative budget can re-block a Stop, the guard checks for a live foreign session-lock owner and takes the same safe diagnostic exit described under "Guard predicates" ([foreign session-lock owner](#foreign-session-lock-owner)).
+
+The cooperative mode waits up to `FM_CLAUDE_AUTOARM_SYNC_WAIT_MS` (default 800 milliseconds on Claude, 4000 on Codex through `FM_CODEX_AUTOARM_SYNC_WAIT_MS`, because Codex schedules an async Stop hook on its own clock and its first firing lands 1-3s after the turn end in the live labs).
 It allows the stop when any of these holds:
 
 - The watcher is healthy.
@@ -389,7 +392,7 @@ Claude drops that exit 2 when it terminated the hook at the configured timeout i
 The first fresh exhausted-failure epoch preserves its handoff without consuming a blocked-stop count.
 Later fresh failed epochs advance the same monotonic progression instead of resetting it.
 When none of those proofs appears, the guard re-blocks up to `FM_CLAUDE_TURNEND_BLOCK_BUDGET` times (default 3, below Claude's 8-block override).
-In Claude mode, positive watcher recovery clears the block budget, failure notice, and attended alarm together under the existing budget lock before either hook reports ordinary recovery.
+In cooperative mode, positive watcher recovery clears the block budget, failure notice, and attended alarm together under the existing budget lock before either hook reports ordinary recovery.
 
 The block budget is charged by two rules:
 
@@ -414,7 +417,7 @@ The one loud attended fail-open is available only when all of these hold:
 After that alarm, the Stop auto-arm suppresses further exit-2 continuations until positive watcher recovery, so the final fail-open remains reachable.
 The alarm cannot repeat during that failure episode, and a later unhealthy stop blocks again.
 A positively verified healthy watcher clears the failure notice, alarm, and block budget for a future independent episode.
-A Claude failure notice describes the automatic mechanism as broken and does not direct a routine manual background arm.
+A failure notice describes the automatic mechanism as broken and does not direct a routine manual background arm.
 
 ### Passive adapters
 
@@ -556,11 +559,24 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 - The away-mode beacon's poll-derived grace widening for a live daemon still mid-cycle and its bound against a dead daemon, a beacon older than that wider grace, and FM_POLL's inapplicability with away mode off.
 - Pi logical-run latching.
 - Missing-`jq` behavior.
-- All five primary registrations.
+- All six primary registrations, including the Codex Stop pair's cooperative guard flag, async auto-arm entry, multi-hour timeout, and self-verifying hooks.json checks.
+- The `--codex` cooperative mode: the handover re-block of a loop-guarded stop, open-claim and fresh-rewake allows, the stale-rewake block, the integrated frozen-epoch budget reaching one attended fail-open, and the delivery-miss epoch blocking bounded without an alarm.
 - Grok native and legacy selection.
 - Typed field precedence.
 - Malformed input.
 - Exactly-one-path safety.
+
+`tests/fm-codex-stop-autoarm.test.sh` covers the Codex Stop auto-arm end to end over real processes with no harness installed:
+
+- The actionable close that starts a handling successor, commits the rewake epoch, and delivers exactly one `FIRSTMATE_OP: v1 watcher:` envelope to the payload's session id through the queue seam.
+- The quiet close that records clean and delivers nothing beside a recorded live watcher.
+- One failure notice per episode, later failed generations still delivering their retry, and the alarm-suppressed path.
+- The failed delivery that rewrites its own epoch from rewake to plain failed, keeps the successor, and creates no notice marker.
+- Inertness in child worktrees, without a session lock, under a live foreign lock owner, under an away record, in an idle home, and on Cursor- or pi-code-delivered payloads.
+- Single-flight under concurrent and rapid-sequential Stop firings, and one delivery per repeated idle-to-wake cycle.
+- A mid-arm signal that records the durable failure episode without delivering.
+- The `codex exec` launcher-argv stand-down, including the wrapper-above-the-launcher negative control.
+- Secondmate-home inclusion and argument refusal.
 
 `tests/fm-turnend-foreign-owner-arm-fix.test.sh` runs the extracted isolated executable reproduction against real auto-arm and turn-end guard scripts.
 It proves that a live foreign owner still prevents arming while repeated non-owner Stops receive a diagnostic and exit safely.

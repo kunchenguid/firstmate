@@ -57,13 +57,18 @@
 # never a wedged, un-endable session - while still nagging again on a later turn
 # if the problem persists.
 #
-# Loop-guard, --claude mode (Stop-owned auto-arm cooperation): Claude Code
-# marks EVERY stop after ANY stop-hook-driven continuation stop_hook_active=true,
-# including turns started by the asyncRewake auto-arm, so the one-shot allow
-# would re-open the exact blind window this guard exists to close
-# (docs/turnend-guard.md records the 2026-07-21 incident). In --claude mode this
-# guard ignores stop_hook_active and instead cooperates with the Stop-owned
-# auto-arm (bin/fm-claude-stop-autoarm.sh), which fires on the same Stop event:
+# Loop-guard, cooperative mode (--claude or --codex, Stop-owned auto-arm
+# cooperation): Claude Code marks EVERY stop after ANY stop-hook-driven
+# continuation stop_hook_active=true, including turns started by the asyncRewake
+# auto-arm, so the one-shot allow would re-open the exact blind window this
+# guard exists to close (docs/turnend-guard.md records the 2026-07-21 incident).
+# Codex is registered the same cooperative way: its tracked Stop hook passes
+# --codex and its tracked auto-arm (bin/fm-codex-stop-autoarm.sh) fires on the
+# same Stop event through the same epoch ledger, while Codex itself also marks
+# blocked-stop continuations stop_hook_active=true. In cooperative mode this
+# guard ignores stop_hook_active and cooperates with the Stop-owned auto-arm
+# (bin/fm-claude-stop-autoarm.sh for --claude, bin/fm-codex-stop-autoarm.sh for
+# --codex), which fires on the same Stop event:
 #   1. a live identity-matched watcher with a fresh beacon - or, in away mode, a
 #      live identity-matched daemon with a fresh beacon - allows immediately;
 #   2. an unhealthy session with a verified live session-lock owner it does not
@@ -98,9 +103,21 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 GRACE=${FM_GUARD_GRACE:-300}
 WATCH="$SCRIPT_DIR/fm-watch.sh"
-CLAUDE_MODE=0
+COOP_MODE=0
 CURSOR_MODE=0
-SYNC_WAIT_MS=${FM_CLAUDE_AUTOARM_SYNC_WAIT_MS:-800}
+# The cooperative wait must cover the auto-arm's claim latency for the
+# harness at hand. Claude delivers both Stop hooks together, so 800ms is
+# generous there. Codex schedules an async Stop hook on its own clock - the
+# first firing landed 1-3s after the turn end in the live labs recorded in
+# docs/verification/supervision.md - so the --codex default waits longer
+# before concluding the arm did not claim; the sync hook timeout stays 30s.
+SYNC_WAIT_MS=${FM_CLAUDE_AUTOARM_SYNC_WAIT_MS:-}
+if [ -z "$SYNC_WAIT_MS" ]; then
+  case "${1:-} ${2:-}" in
+    *--codex*) SYNC_WAIT_MS=${FM_CODEX_AUTOARM_SYNC_WAIT_MS:-4000} ;;
+    *) SYNC_WAIT_MS=800 ;;
+  esac
+fi
 EPOCH_FRESH=${FM_CLAUDE_AUTOARM_EPOCH_FRESH:-15}
 BLOCK_BUDGET=${FM_CLAUDE_TURNEND_BLOCK_BUDGET:-3}
 case "$SYNC_WAIT_MS" in ''|*[!0-9]*) SYNC_WAIT_MS=800 ;; esac
@@ -109,9 +126,10 @@ case "$BLOCK_BUDGET" in ''|*[!0-9]*|0) BLOCK_BUDGET=3 ;; esac
 
 for arg in "$@"; do
   case "$arg" in
-    --claude) CLAUDE_MODE=1 ;;
+    --claude) COOP_MODE=1 ;;
+    --codex) COOP_MODE=1 ;;
     --cursor) CURSOR_MODE=1 ;;
-    *) echo "usage: $(basename "$0") [--claude|--cursor]" >&2; exit 2 ;;
+    *) echo "usage: $(basename "$0") [--claude|--codex|--cursor]" >&2; exit 2 ;;
   esac
 done
 
@@ -150,7 +168,7 @@ STOP_HOOK_ACTIVE=$(printf '%s' "$PAYLOAD" | jq -r '
   else false
   end
 ' 2>/dev/null) || exit 0
-if [ "$CLAUDE_MODE" -eq 0 ] && [ "$STOP_HOOK_ACTIVE" = "true" ]; then
+if [ "$COOP_MODE" -eq 0 ] && [ "$STOP_HOOK_ACTIVE" = "true" ]; then
   exit 0
 fi
 
@@ -171,7 +189,7 @@ fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 # --- the actual predicate ----------------------------------------------------
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
-if [ "$CLAUDE_MODE" -eq 1 ]; then
+if [ "$COOP_MODE" -eq 1 ]; then
   # shellcheck source=bin/fm-session-lock-lib.sh
   . "$SCRIPT_DIR/fm-session-lock-lib.sh"
 fi
@@ -183,7 +201,7 @@ FAILURE_NOTICE="$STATE/.claude-autoarm-failure-notified"
 FAILURE_ALARM="$STATE/.claude-autoarm-failure-alarmed"
 SESSION_ID=$(printf '%s' "$PAYLOAD" | jq -r '.session_id // "unknown"' 2>/dev/null || printf 'unknown')
 budget_reset() {
-  [ "$CLAUDE_MODE" -eq 1 ] || return 0
+  [ "$COOP_MODE" -eq 1 ] || return 0
   fm_lock_try_acquire "$BUDGET_LOCK" || return 0
   rm -f "$BUDGET_FILE" 2>/dev/null || true
   fm_lock_release "$BUDGET_LOCK"
@@ -197,7 +215,7 @@ fi
 # One owner of the "supervision is on, let this turn end" exit contract, shared
 # by every proof of supervision below.
 allow_supervised_stop() {
-  [ "$CLAUDE_MODE" -eq 1 ] || exit 0
+  [ "$COOP_MODE" -eq 1 ] || exit 0
   fm_failure_episode_reset "$STATE" && exit 0
   exit 2
 }
@@ -245,7 +263,7 @@ block_stop() {
     else
       printf '●  X-mode relay polling needs supervision, but no live watcher holds this home lock (last beat: %s).\n' "$FM_SUP_BEACON_DESC"
     fi
-    if [ "$CLAUDE_MODE" -eq 1 ]; then
+    if [ "$COOP_MODE" -eq 1 ]; then
       printf '●  The Stop-owned auto-arm did not claim this home either, so recovery is NOT already under way.\n'
     fi
     printf '●  %s\n' "$reason"
@@ -260,17 +278,17 @@ block_stop() {
 # stealing ownership, so blocking its Stop would create an impossible loop.
 # Report the ownership conflict as a diagnostic and let this turn end safely;
 # the owning session remains responsible for restoring the watcher.
-if [ "$CLAUDE_MODE" -eq 1 ] && fm_session_lock_foreign_owner_live "$STATE"; then
+if [ "$COOP_MODE" -eq 1 ] && fm_session_lock_foreign_owner_live "$STATE"; then
   printf '{"systemMessage":"FIRSTMATE SUPERVISION IS OWNED BY ANOTHER LIVE SESSION: this read-only session cannot and should not arm or repair the watcher (lock owner pid %s). Allowing this turn to end safely; the owning session must restore supervision."}\n' \
     "$FM_SESSION_LOCK_FOREIGN_OWNER_PID"
   exit 0
 fi
 
-if [ "$CLAUDE_MODE" -eq 0 ]; then
+if [ "$COOP_MODE" -eq 0 ]; then
   block_stop
 fi
 
-# --- --claude cooperative path -----------------------------------------------
+# --- cooperative path (--claude / --codex) ---------------------------------------------
 # The Stop-owned auto-arm fires on the same Stop event. Give it a brief bounded
 # window to prove it owns recovery for this event epoch before consuming one of
 # Claude's bounded continuations.
