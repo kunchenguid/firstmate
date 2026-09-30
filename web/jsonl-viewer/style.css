@@ -1,0 +1,61 @@
+:root {
+  color-scheme: dark;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: #08111f;
+  color: #dce8f7;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; min-height: 100vh; background: radial-gradient(circle at 20% 0%, #173258 0, #08111f 38rem); }
+button, input, select { font: inherit; }
+button, select, input { border: 1px solid #304965; border-radius: 0.55rem; background: #0d1a2b; color: #dce8f7; padding: 0.6rem 0.75rem; }
+button { cursor: pointer; background: #1d5ca3; border-color: #3177c7; font-weight: 650; }
+button:disabled { cursor: default; opacity: 0.45; }
+header { display: flex; align-items: end; justify-content: space-between; gap: 2rem; padding: 1.3rem 1.7rem; border-bottom: 1px solid #27405e; background: rgba(5, 13, 24, 0.82); backdrop-filter: blur(12px); }
+h1 { margin: 0; font-size: 1.45rem; letter-spacing: -0.025em; }
+.eyebrow { margin: 0 0 0.25rem; color: #64b8ff; font-size: 0.72rem; font-weight: 800; letter-spacing: 0.16em; }
+.connection { display: flex; align-items: center; gap: 0.6rem; }
+.connection label { color: #9eb3cb; font-size: 0.8rem; }
+main { display: grid; grid-template-columns: minmax(16rem, 22rem) 1fr; min-height: calc(100vh - 5.2rem); }
+aside { padding: 1.1rem; border-right: 1px solid #27405e; background: rgba(7, 17, 31, 0.76); }
+aside > label { display: block; margin: 0.65rem 0 0.35rem; color: #9eb3cb; font-size: 0.78rem; font-weight: 700; }
+aside input, aside select { width: 100%; }
+.sessions { display: grid; gap: 0.5rem; margin-top: 1rem; max-height: calc(100vh - 15rem); overflow: auto; }
+.session-button { width: 100%; text-align: left; background: #101f33; border-color: #233c5a; font-weight: 500; }
+.session-button.active { border-color: #70baff; box-shadow: 0 0 0 1px #70baff inset; }
+.session-button span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-button small { display: block; margin-top: 0.25rem; color: #8fa7c1; }
+.journal { min-width: 0; padding: 1.2rem 1.5rem 3rem; }
+.toolbar { display: flex; justify-content: space-between; gap: 1rem; align-items: end; }
+.filters { display: flex; gap: 0.5rem; flex-wrap: wrap; justify-content: end; }
+.session-title { margin: 0; font-weight: 750; }
+.status { margin: 0.25rem 0 0; color: #8fa7c1; font-size: 0.82rem; }
+.status.error { color: #ef8c94; }
+.actions { display: flex; align-items: center; gap: 0.7rem; margin: 1rem 0; }
+.actions label { color: #a9bdd3; font-size: 0.85rem; }
+.notice { padding: 0.75rem 0.9rem; margin-bottom: 0.8rem; border: 1px solid #765e28; border-radius: 0.55rem; background: #2b2514; color: #f4d88a; }
+.events { display: grid; gap: 0.75rem; }
+.event-card { padding: 0.9rem 1rem; border: 1px solid #263e5b; border-left: 3px solid #3b82c4; border-radius: 0.65rem; background: rgba(12, 25, 43, 0.9); overflow: hidden; }
+.event-card[data-role="user"] { border-left-color: #61d095; }
+.event-card[data-role="assistant"] { border-left-color: #72a7ff; }
+.event-card[data-role="toolResult"] { border-left-color: #e0a14c; }
+.event-card.error { border-left-color: #ef6a74; }
+.event-meta { display: flex; align-items: center; gap: 0.45rem; color: #8fa7c1; font-size: 0.75rem; }
+.badge { padding: 0.14rem 0.42rem; border: 1px solid #36516f; border-radius: 999px; color: #b8cbe0; }
+.event-summary { margin: 0.65rem 0 0; color: #f2f7fd; font-weight: 650; white-space: pre-wrap; overflow-wrap: anywhere; }
+.event-content { display: grid; gap: 0.55rem; margin-top: 0.55rem; }
+.block { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5; }
+details { margin-top: 0.55rem; }
+summary { cursor: pointer; color: #9ec7ef; }
+pre { max-height: 30rem; overflow: auto; padding: 0.75rem; border-radius: 0.45rem; background: #050b14; color: #c8d7e8; white-space: pre-wrap; overflow-wrap: anywhere; }
+.boundary { padding: 0.7rem; border: 1px dashed #745b25; border-radius: 0.55rem; color: #f2d17b; background: rgba(61, 48, 20, 0.72); }
+.empty { color: #8fa7c1; padding: 2rem 0; text-align: center; }
+
+@media (max-width: 850px) {
+  header, .toolbar { align-items: stretch; flex-direction: column; }
+  .connection, .filters { justify-content: stretch; }
+  .connection input, .filters input { min-width: 0; flex: 1; }
+  main { grid-template-columns: 1fr; }
+  aside { border-right: 0; border-bottom: 1px solid #27405e; }
+  .sessions { max-height: 15rem; }
+}

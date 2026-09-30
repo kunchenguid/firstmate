@@ -332,6 +332,7 @@ family_for_basename() {
     fm-traex-harness-live-e2e.test.sh|\
     fm-herdr-version-floor-live-e2e.test.sh|\
     fm-herdr-pi-stale-registration-live-e2e.test.sh|fm-teardown-lifecycle-herdr-e2e.test.sh|\
+    fm-jsonl-viewer-browser-live-e2e.test.sh|\
     fm-short-agent-live-e2e.test.sh|fm-short-operations-herdr.test.sh|fm-pi-branch-live-e2e.test.sh|fm-pi-branch-status-live.test.sh|\
     fm-calm-pi-herdr-live-e2e.test.sh|fm-pi-branch-responsiveness-live-e2e.test.sh|\
     fm-pi-primary-live-e2e.test.sh|fm-pi-codex-native.test.sh|\
@@ -655,6 +656,8 @@ tests/fm-herdr-attached-viewer-live-e2e.test.sh 19000
 tests/fm-herdr-session-cleanup.test.sh 6704
 tests/fm-herdr-version-floor-live-e2e.test.sh 23
 tests/fm-inactive-reconcile.test.sh 74399
+tests/fm-jsonl-viewer-browser-live-e2e.test.sh 3539
+tests/fm-jsonl-viewer.test.sh 682
 tests/fm-lint-workflows.test.sh 855
 tests/fm-live-gate.test.sh 6000
 tests/fm-no-mistakes-required.test.sh 370
