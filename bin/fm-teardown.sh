@@ -310,7 +310,7 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-task-lifecycle-lib.sh"
 teardown_completed_task() (
   local meta="$STATE/$ID.meta" lock copy project session pane other field candidate shared=0 disposition=returned-or-already-absent facts
-  local WT PROJ KIND=ship MODE PR_URL dirty
+  local WT PROJ KIND=ship MODE PR_URL dirty generation
   local copy_lock='' copy_lock_held=0
   lock=$(fm_meta_lock_path "$meta") || exit 1
   fm_lock_acquire_wait "$lock"
@@ -321,6 +321,7 @@ teardown_completed_task() (
   [ "$(fm_meta_get "$meta" kind)" != secondmate ] || exit 1
   copy=$(fm_backend_meta_exact_value "$meta" worktree) || exit 1
   project=$(fm_backend_meta_exact_value "$meta" project) || exit 1
+  generation=$(fm_meta_get "$meta" spawn_gen)
   session=$(fm_backend_meta_exact_value "$meta" herdr_session) || exit 1
   pane=$(fm_backend_meta_exact_value "$meta" herdr_pane_id) || exit 1
   for other in "$STATE"/*.meta; do
@@ -364,6 +365,12 @@ teardown_completed_task() (
       candidate=$(cd "$candidate" && pwd -P) || exit 1
       case "$candidate/" in "$copy/"*) shared=1; disposition=retained-primary ;; esac
     done
+    # A subdirectory of a checkout is part of that checkout, not a disposable
+    # copy. An independent nested worktree (including a pool) has its own root.
+    candidate=$(git -C "$copy" rev-parse --show-toplevel 2>/dev/null) || candidate=
+    if [ -d "$candidate" ] && [ ! "$candidate" -ef "$copy" ]; then
+      shared=1; disposition=retained-primary
+    fi
     for other in "$STATE"/*.meta; do
       [ "$other" != "$meta" ] && [ -f "$other" ] && [ ! -L "$other" ] || continue
       for field in worktree home; do
@@ -372,10 +379,13 @@ teardown_completed_task() (
       done
     done
     if fm_treehouse_pool_slot "$project" "$copy"; then
-      fm_treehouse_slot_owner_state "$copy" "$ID"
+      fm_treehouse_slot_owner_state "$copy" "$ID" "$generation"
       if [ "$FM_TREEHOUSE_SLOT_OWNER" = other ] || \
          { [ -n "$FM_TREEHOUSE_SLOT_OWNER_HOME" ] && [ "$FM_TREEHOUSE_SLOT_OWNER_HOME" != "$FM_HOME" ]; }; then
         shared=1; disposition=retained-shared
+      elif [ "$FM_TREEHOUSE_SLOT_OWNER" != mine ] || [ -z "$generation" ] || \
+           [ "$FM_TREEHOUSE_SLOT_OWNER_HOME" != "$FM_HOME" ]; then
+        shared=1; disposition=retained-unverified
       fi
     fi
     WT=$copy
@@ -392,7 +402,7 @@ teardown_completed_task() (
     if [ "$shared" = 0 ]; then
       if fm_treehouse_pool_slot "$project" "$copy"; then
         if (cd "$project" && treehouse return --force "$copy"); then
-          fm_treehouse_slot_owner_release "$copy" "$ID"
+          fm_treehouse_slot_owner_release "$copy" "$ID" "$generation"
         else disposition=retained-unverified
         fi
       elif git -C "$project" worktree list --porcelain | sed -n 's/^worktree //p' | grep -Fxq "$copy"; then
@@ -404,8 +414,6 @@ teardown_completed_task() (
   fi
   # Only resource metadata is retired. Reports, status and outcome evidence
   # outside the disposable copy remain, including captain-held backlog rows.
-  local generation
-  generation=$(fm_meta_get "$meta" spawn_gen)
   fm_backlog_atomic_transition remove "$meta" 'completed resource record' "$STATE" || exit 1
   facts=$(jq -cn --arg disposition "$disposition" '{taskRecordRemoved:true,endpointConfirmedGone:true,copyDisposition:$disposition,bookkeepingComplete:true}')
   fm_task_lifecycle_owner_receipt "$ID" "$generation" cleanup "$facts" locked || \

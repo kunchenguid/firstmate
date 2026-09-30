@@ -382,9 +382,12 @@ if(process.env.FM_SHORT_CLEANUP_TARGET) {
     head:git('-C',copy,'rev-parse','HEAD'),branch:git('-C',copy,'rev-parse','--abbrev-ref','HEAD'),status:git('-C',copy,'status','--porcelain'),
     files:Object.fromEntries(git('-C',copy,'ls-files','--cached','--others','--exclude-standard','-z').split('\0').filter(Boolean).map(file=>[file,fs.readFileSync(path.join(copy,file)).toString('base64')]))
   });
-  for(const label of ['dirty','unlanded','pushed-unmerged','shared','primary','contended','clean']) {
-    const task='cleanup-'+label,copy=label==='primary'?project:path.join(tmp,label+'-copy');
-    if(label!=='primary') {
+  for(const label of ['dirty','unlanded','pushed-unmerged','shared','primary','primary-child','contended','clean']) {
+    const task='cleanup-'+label,copy=label==='primary'?project:label==='primary-child'?path.join(project,'protected-child'):path.join(tmp,label+'-copy');
+    if(label==='primary-child') {
+      fs.mkdirSync(copy);fs.writeFileSync(path.join(copy,'retained.txt'),'primary checkout content');
+      git('-C',project,'add','.');git('-C',project,'commit','-m','primary subtree fixture');git('-C',project,'push','origin','HEAD');
+    } else if(label!=='primary') {
       git('-C',project,'worktree','add','-b',label+'-fixture',copy);
       if(!['clean','contended'].includes(label))fs.writeFileSync(path.join(copy,'unlanded'),'retained task content');
       if(label==='unlanded'||label==='pushed-unmerged') {git('-C',copy,'add','.');git('-C',copy,'commit','-m','unmerged task content');if(label==='pushed-unmerged')git('-C',copy,'push','origin','HEAD');}
@@ -408,7 +411,7 @@ if(process.env.FM_SHORT_CLEANUP_TARGET) {
     assert.equal(fs.readFileSync(path.join(home,'data',task,'report.md'),'utf8'),'Preserved report\n');
     const receipt=JSON.parse(fs.readFileSync(path.join(dir,'operation-0.receipt.json')));
     if(label!=='clean') {
-      assert.ok(fs.existsSync(copy));assert.equal(receipt.evidence.copyDisposition,'retained-'+(label==='pushed-unmerged'?'unlanded':label==='contended'?'unverified':label));
+      assert.ok(fs.existsSync(copy));assert.equal(receipt.evidence.copyDisposition,'retained-'+(label==='pushed-unmerged'?'unlanded':label==='contended'?'unverified':label==='primary-child'?'primary':label));
       assert.deepEqual(copySnapshot(copy),beforeCopy,'retained working files, head, branch and status are unchanged');
     } else assert.ok(!fs.existsSync(copy),'exclusive clean integrated copy was actually removed');
     fs.writeFileSync(path.join(tmp,label+'-cleanup-evidence.json'),JSON.stringify({copy,beforeCopy,afterCopy:label==='clean'?null:copySnapshot(copy),result,receipt,output},null,2));
@@ -449,7 +452,7 @@ if(process.env.FM_SHORT_CLEANUP_TARGET) {
   const beforePool=JSON.parse(treehouse('status','--json'));
   const beforeCopy={path:lease.path,exists:fs.existsSync(lease.path),head:git('-C',lease.path,'rev-parse','HEAD'),status:git('-C',lease.path,'status','--porcelain')};
   const landedMeta=cleanMeta.replaceAll('cleanup-one','cleanup-landed').replace(`${tmp}/absent-cleaned-worktree`,lease.path).replace(`project=${project}`,`project=${cleanupProject}`).replaceAll(target.pane,pane.root_pane.pane_id).replaceAll(target.tab,pane.tab.tab_id);
-  fs.writeFileSync(path.join(home,'state/cleanup-landed.meta'),landedMeta);
+  completedFixture('cleanup-landed',landedMeta);
   const unrelatedMeta=`kind=ship\nspawn_gen=g-other\nworktree=${unrelated.path}\nproject=${cleanupProject}\n`;
   fs.writeFileSync(path.join(home,'state/unrelated-lab.meta'),unrelatedMeta);
   const landedRequest=req('cleanup-landed',[{action:'cleanup',task:'cleanup-landed'}]);landedRequest.operations.expiresAt=Date.now()+120000;

@@ -98,6 +98,7 @@ Copy disposal is independent. For example, an accepted task with an uncommitted 
 Primary, shared, dirty, unintegrated or unverified copies are retained with an explicit disposition in the cleanup receipt.
 Only an exclusive clean copy whose content is proved integrated in the default branch is removed or returned to its Treehouse pool; a merely pushed feature branch is retained.
 The existing project allocation/return lock protects the sharing observation and disposal; contention retains the copy without blocking window retirement.
+Pool copies whose current task/home/generation claim cannot establish exclusive ownership are also retained; primary checkout subdirectories are preserved, while independent nested worktrees remain eligible.
 [`fm-teardown-worktree-lib.sh`](../bin/fm-teardown-worktree-lib.sh) owns the shared content-preservation checks; historical slot-claim or journal bookkeeping is not an additional completed-cleanup admission gate.
 The endpoint-only form retains metadata and the copy and records exact-pane absence through the existing phase receipt.
 Legacy records without an accepted or archived lifecycle retain the detailed ordinary teardown contract in `fm-teardown.sh`.

@@ -788,6 +788,31 @@ test_completed_copy_preservation_ignores_force() {
   pass 'completed dirty and unlanded copies remain even when the legacy force flag is supplied'
 }
 
+test_completed_pool_uncertain_ownership_retains_copy() {
+  local dir id variant
+  for variant in absent malformed stale-generation foreign-home; do
+    id="completed-slot-$variant"
+    dir=$(make_case "$id")
+    mark_case_as_treehouse_pool "$dir"
+    rm "$dir/worktree/sentinel"
+    write_herdr_meta "$dir/home/state/$id.meta" \
+      "window=isolated:fm-$id" "worktree=$dir/worktree" "project=$dir/project" "kind=ship"
+    case "$variant" in
+      malformed) printf 'task=\n' > "$dir/pool/1/.fm-slot-owner" ;;
+      stale-generation) claim_pool_slot "$dir" "$id"; sed -i 's/^spawn_gen=.*/spawn_gen=another-generation/' "$dir/pool/1/.fm-slot-owner" ;;
+      foreign-home) claim_pool_slot "$dir" "$id" "$dir/another-home" ;;
+    esac
+    stage_archived_action "$dir" "$id" cleanup uncertain
+    run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" || fail "slot $variant blocked completed window closure: $(cat "$dir/stderr")"
+    assert_present "$dir/runtime.log.w1:p-$id.closed" 'completed window was not actually closed'
+    assert_present "$dir/pool/1/project/.git" 'unproved copy ownership allowed deletion'
+    assert_absent "$dir/home/state/$id.meta" 'completed resource record was not archived'
+    ! grep -Fq 'treehouse <return>' "$dir/runtime.log" || fail 'unproved pool ownership allowed return'
+  done
+  pass 'uncertain or foreign pool ownership retains the copy while completed windows and records retire'
+}
+
+test_completed_pool_uncertain_ownership_retains_copy
 test_completed_copy_preservation_ignores_force
 test_completed_endpoint_ignores_historical_admission_gates
 
