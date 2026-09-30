@@ -592,8 +592,8 @@ fm_afk_contract_cmd_enter() {
   FM_AFK_CONTRACT_REACH_ANNOUNCED='No phone channel is configured; anything that needs you waits for your return.'
   case "$harness" in
     pi|pi-signed)
-      if [ -x "$FM_AFK_CONTRACT_DIR/fm-mail.sh" ] && "$FM_AFK_CONTRACT_DIR/fm-mail.sh" afk-email configured >/dev/null 2>&1; then
-
+      if [ "$FM_AFK_CONTRACT_ENTRY_MODE" = away ] && [ -x "$FM_AFK_CONTRACT_DIR/fm-mail.sh" ] \
+        && "$FM_AFK_CONTRACT_DIR/fm-mail.sh" afk-email configured >/dev/null 2>&1; then
         FM_AFK_CONTRACT_REACH_CHANNELS=email
         FM_AFK_CONTRACT_REACH_ANNOUNCED='Captain-facing outcomes are emailed to the configured address; replies with a current item code reach the away session.'
       fi

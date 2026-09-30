@@ -695,7 +695,7 @@ if scenario in ('header-fail', 'header-outage'):
     authentic = {'2'}
     header_failures = {'1': 99}
     os.environ['FM_MAIL_POLL_BUDGET'] = '1'
-elif scenario in ('transient', 'permanent', 'handoff-timeout', 'handoff-fails', 'config-outage'):
+elif scenario in ('transient', 'permanent', 'handoff-timeout', 'handoff-fails', 'config-outage', 'posture-repair'):
     uids = ['1', '2', '3']
     authentic = {'1', '2'}
     body_failures = {'1': 1 if scenario == 'transient' else (99 if scenario == 'permanent' else 0)}
@@ -792,9 +792,12 @@ mail.afk_record_field = lambda name: 'email' if name == 'reach_channels' else '1
 alerts = []
 mail.send_message = lambda to, subj, text, timeout=None: alerts.append((to, subj, text))
 
-def poll(away, recipient=owner):
-    """Run one poll and, like fm-mail.sh, record surfaced non-ignored rows in the cursor."""
-    mail.afk_email_context = (lambda: (recipient, True, False)) if away else (lambda: (None, False, False))
+def poll(away, recipient=owner, invalid=False):
+    """Run one poll and, like fm-mail.sh, record surfaced rows in the cursor and retry set."""
+    if invalid:
+        mail.afk_email_context = lambda: (None, True, True)
+    else:
+        mail.afk_email_context = (lambda: (recipient, True, False)) if away else (lambda: (None, False, False))
     FakeConn.header_fetches.clear()
     output, error = StringIO(), StringIO()
     started = time.monotonic()
@@ -806,6 +809,15 @@ def poll(away, recipient=owner):
         for row in rows:
             if row[4] not in ('ignored', 'retry'):
                 cursor.write(row[0] + '\n')
+    with open(os.environ['FM_MAIL_RETRY']) as retry_file:
+        retry_uids = [line.strip() for line in retry_file if line.strip()]
+    for row in rows:
+        if row[4] in ('deferred', 'degraded') and row[0] not in retry_uids:
+            retry_uids.append(row[0])
+        elif row[4] in ('ok', 'retry') and row[0] in retry_uids:
+            retry_uids.remove(row[0])
+    with open(os.environ['FM_MAIL_RETRY'], 'w') as retry_file:
+        retry_file.writelines(uid + '\n' for uid in retry_uids)
     staged = os.environ['FM_MAIL_AWAY_SCAN'] + '.next'
     if os.path.exists(staged):
         os.replace(staged, os.environ['FM_MAIL_AWAY_SCAN'])
@@ -820,6 +832,11 @@ if scenario in ('transient', 'handoff-timeout'):
     rc, rows, second, _, _ = poll(True)
     print(f'second rc={rc} fetched={",".join(second)} handoffs={handoffs} alerts={len(alerts)}')
     print('handoff_timeouts_bounded=%s' % all(0 < t <= 2 for t in handoff_timeouts))
+elif scenario == 'posture-repair':
+    rc, rows, first, _, _ = poll(True, invalid=True)
+    print(f'invalid rc={rc} rows={status(rows)} fetched={len(first)} handoffs={handoffs}')
+    rc, rows, second, _, _ = poll(True)
+    print(f'repaired rc={rc} rows={status(rows)} handoffs={handoffs}')
 elif scenario == 'handoff-fails':
     for _ in range(5):
         rc, rows, fetched, _, _ = poll(True)
@@ -962,6 +979,11 @@ test_away_owner_read_failures_retry_then_alert() {
   assert_contains "$out" "second rc=0 fetched=1,2 handoffs=['1', '2']" \
     "a timed-out handoff retains the reply for the next poll"
   assert_contains "$out" 'handoff_timeouts_bounded=True' "the reply handoff is bounded by the poll budget"
+  out=$(run_away_poll_harness posture-repair)
+  assert_contains "$out" "invalid rc=0 rows=1:deferred,2:deferred,3:deferred fetched=0 handoffs=[]" \
+    "a malformed away record defers owner replies without reading them"
+  assert_contains "$out" "repaired rc=0 rows=1:retry,2:retry,3:ignored handoffs=['1', '2']" \
+    "deferred owner replies are read once the away record is repaired"
   out=$(run_away_poll_harness handoff-fails)
   assert_contains "$out" "handoffs=['1', '2'] alerts=0" \
     "repeated handoff failures stay retryable and never count as unreadable replies"

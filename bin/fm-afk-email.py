@@ -93,7 +93,7 @@ def contract_value(command, field=None):
     return result.stdout.strip() if result.returncode == 0 else None
 
 def live_record():
-    if contract_value("validate") is None:
+    if contract_value("validate") is None or contract_value("mode") != "away":
         return None
     try:
         entered = int(contract_value("field", "entered_epoch") or "")

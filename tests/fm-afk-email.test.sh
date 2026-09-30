@@ -608,6 +608,26 @@ test_processed_marker_cannot_suppress_outcomes() {
   pass "processed markers cannot suppress or invent outcome progress"
 }
 
+test_quiet_mode_never_sends_away_email() {
+  local home out entered before
+  home=$(make_home quiet-email configured)
+  out=$(run_contract "$home" FM_TEST_HARNESS=pi FM_AFK_MODE=quiet 2>&1) || fail "configured Pi quiet entry failed: $out"
+  [ "$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$REPO/bin/fm-afk-contract.sh" field reach_channels)" = none ] \
+    || fail "quiet posture recorded email reach"
+  entered=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$REPO/bin/fm-afk-contract.sh" field entered_epoch)
+  write_outcomes "$home" "$entered"
+  before=$(count_sends)
+  sed 's/^reach_channels: none$/reach_channels: email/' "$home/state/.afk-contract" > "$home/state/.afk-contract.tmp"
+  mv "$home/state/.afk-contract.tmp" "$home/state/.afk-contract"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$REPO/bin/fm-afk-contract.sh" validate >/dev/null 2>&1 \
+    || fail "quiet record with email reach did not validate"
+  out=$(run_email "$home" queue-unprocessed 2>&1) || fail "quiet queue check failed: $out"
+  out=$(run_email "$home" flush 2>&1) || fail "quiet flush check failed: $out"
+  [ ! -e "$home/state/afk-email/pending" ] || fail "quiet mode queued captain outcomes for email"
+  [ "$(count_sends)" = "$before" ] || fail "quiet mode sent captain outcomes to Gmail"
+  pass "quiet mode never queues or sends captain outcomes by email"
+}
+
 test_invalid_away_record_does_not_enable_email() {
   local home out
   home=$(make_home invalid-record configured)
@@ -1604,6 +1624,7 @@ test_live_email_posture_requires_runtime_config
 test_missing_outcome_store_is_empty_but_invalid_store_fails
 test_processed_marker_cannot_suppress_outcomes
 
+test_quiet_mode_never_sends_away_email
 test_invalid_away_record_does_not_enable_email
 test_invalid_or_unreadable_posture_suppresses_mail
 test_read_gates_unauthenticated_bodies_during_away
