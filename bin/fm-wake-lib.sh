@@ -1408,6 +1408,7 @@ fm_project_origin_identity() {  # <project-dir>
       host=${origin#git@}
       path=${host#*:}
       host=${host%%:*}
+      path=${path#/}
       origin="https://$host/$path"
       ;;
     /*)
@@ -1420,6 +1421,14 @@ fm_project_origin_identity() {  # <project-dir>
       if [ -d "$project/$origin" ]; then
         origin=$(CDPATH='' cd -- "$project/$origin" 2>/dev/null && pwd -P) || return 2
       fi
+      ;;
+  esac
+  case "$origin" in
+    https://*)
+      origin=${origin%/}
+      case "$origin" in
+        *.git) origin=${origin%.git} ;;
+      esac
       ;;
   esac
   printf '%s\n' "$origin"

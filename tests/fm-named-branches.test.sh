@@ -321,18 +321,19 @@ test_promote_rejects_base_changes_and_branch_collisions() {
   git clone -q "$remote" "$scout"
   git -C "$scout" fetch -q origin refs/heads/release:refs/remotes/origin/release
   git -C "$scout" update-ref -d refs/remotes/origin/release
-  id=named-promote-missing-local-remote-base
+  id=named-promote-unfetched-remote-base
   printf 'window=fm-%s\nkind=scout\nworktree=%s\nproject=%s\nbase_branch=release\n' "$id" "$scout" "$project" > "$home/state/$id.meta"
   FM_HOME="$home" "$BRIEF" "$id" proj --scout --base-branch release >/dev/null
   fill_brief "$home/data/$id/brief.md"
-  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" \
-    --mode direct-PR --yolo off --branch-name feature/missing-local-remote-base 2>&1); status=$?
-  expect_code 1 "$status" "promotion accepted a missing local remote-tracking base"
-  assert_contains "$out" "not available in the scout worktree" \
-    "missing local remote-tracking base was not refused"
-  assert_grep 'kind=scout' "$home/state/$id.meta" "missing local remote-tracking base published ship metadata"
-  assert_absent "$home/data/$id/ship-instructions.md" \
-    "missing local remote-tracking base published ship instructions"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" \
+    --mode direct-PR --yolo off --branch-name feature/unfetched-remote-base >/dev/null \
+    || fail "promotion did not refresh an unfetched remote-tracking base"
+  assert_grep 'kind=ship' "$home/state/$id.meta" \
+    "promotion of an unfetched remote base did not publish ship metadata"
+  assert_grep 'refs/remotes/origin/release' "$home/data/$id/ship-instructions.md" \
+    "promotion of an unfetched remote base omitted the qualified base ref"
+  git -C "$scout" rev-parse --verify --quiet refs/remotes/origin/release^{commit} >/dev/null \
+    || fail "promotion did not refresh the scout worktree remote-tracking base"
 
   git -C "$project" branch office main
   id=named-promote-remote-base-local-only
@@ -639,7 +640,7 @@ test_reservations_cover_clones_of_one_origin() {
   assert_grep 'kind=scout' "$home/state/$id.meta" "cross-clone promotion collision published ship metadata"
   assert_absent "$home/data/$id/ship-instructions.md" "cross-clone promotion collision published ship instructions"
 
-  git -C "$left" remote set-url origin https://github.com/kunchenguid/firstmate.git
+  git -C "$left" remote set-url origin https://github.com/kunchenguid/firstmate
   git -C "$right" remote set-url origin git@github.com:kunchenguid/firstmate.git
   if ! FM_HOME="$home" bash -c '. "$1"; fm_project_reservations_overlap "$2" "$3"' _ \
     "$ROOT/bin/fm-wake-lib.sh" "$left" "$right"; then

@@ -210,6 +210,15 @@ promote_cleanup() {
   return "$status"
 }
 trap promote_cleanup EXIT
+
+refresh_promote_remote_base() {
+  local worktree=$1 branch=$2
+  git -C "$worktree" fetch --quiet origin "+refs/heads/$branch:refs/remotes/origin/$branch" || {
+    echo "error: could not refresh remote base '$branch' in the scout worktree; refusing promotion" >&2
+    return 1
+  }
+}
+
 fm_lock_try_acquire "$CONTROL_LOCK" || {
   echo "error: another lifecycle action is already running for task $ID; nothing was changed" >&2
   exit 1
@@ -280,6 +289,7 @@ if [ -n "$BASE_BRANCH" ] && [ "$MODE" != local-only ]; then
     echo "error: cannot verify remote base '$BASE_BRANCH' without the scout's recorded worktree; refusing promotion" >&2
     exit 1
   }
+  refresh_promote_remote_base "$PROMOTE_WORKTREE" "$BASE_BRANCH" || exit 1
   git -C "$PROMOTE_WORKTREE" rev-parse --verify --quiet "refs/remotes/origin/$BASE_BRANCH^{commit}" >/dev/null || {
     echo "error: remote base '$BASE_BRANCH' is not available in the scout worktree; refusing promotion" >&2
     exit 1
@@ -498,6 +508,7 @@ if [ "$PROMOTE_BASE_REMOTE" = 1 ]; then
     echo "error: cannot verify remote base '$BASE_BRANCH' without the scout's recorded worktree; refusing promotion" >&2
     exit 1
   }
+  refresh_promote_remote_base "$PROMOTE_WORKTREE" "$BASE_BRANCH" || exit 1
   git -C "$PROMOTE_WORKTREE" rev-parse --verify --quiet "refs/remotes/origin/$BASE_BRANCH^{commit}" >/dev/null || {
     echo "error: remote base '$BASE_BRANCH' is no longer available in the scout worktree; refusing promotion" >&2
     exit 1
