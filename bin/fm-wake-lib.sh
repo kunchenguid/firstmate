@@ -2094,11 +2094,13 @@ fm_input_handoff() { # <state> <generation> <session-pid> <recovery-generation>
 
 fm_input_ack_locked() { # <cutoff> <owned-sequence-file> <recovery-generation>
   local cutoff=$1 rows=$2 recovery=$3 epoch seq kind key payload id tmp
-  [ -f "$STATE/.captain-input" ] || return 0
+  [ -f "$STATE/.captain-input" ] || [ -d "$STATE/.input-handoff" ] || return 0
   while IFS=$'\t' read -r epoch seq kind key payload; do
     [ "$kind" = check ] || continue
     case "$key" in inbox:*) id=${key#inbox:} ;; *) continue ;; esac
     [ "$seq" -le "$cutoff" ] || continue
+    # A note handed off while subscribed keeps its receipt after unsubscribe.
+    [ -f "$STATE/.captain-input" ] || [ -f "$STATE/.input-handoff/$id" ] || continue
     grep -qx "$seq" "$rows" || continue
     # Scope ownership to input acknowledgement: branch/daemon drains of other
     # event kinds keep their existing authority and presentation contract.

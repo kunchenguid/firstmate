@@ -36,6 +36,7 @@ On a non-Pi primary, a home that runs the supervision host also changes what the
 
 Continuous input demand is default-off and explicitly registered by the session owner through `bin/fm-inbox.sh subscribe`; that script owns registration and the body-free `input-receipts` interface.
 While registered, supervision stays armed with no work in flight, and a new inbox note wakes an idle watcher at its next checkpoint instead of after the routine poll interval.
+That prompt wake applies to the polling watcher: on a backend blocked in its native event wait (for example Herdr), the doorbell is only seen when that wait returns.
 Registered notes use the existing wake queue, handling acknowledgement, and harness owner; the adapter must not run a second waiter.
 The subscription does not authenticate an external human or change away/quiet ownership.
 See [input verification](verification/captain-input.md) for measured limits.

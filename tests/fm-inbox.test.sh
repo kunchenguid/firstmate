@@ -615,6 +615,23 @@ assert_equals 0 "$(run_inbox "$home" input-receipts | json_get records | python3
 [ -f "$home/state/inbox/$id.note" ] || fail "daemon-style ack must leave the note for the session owner"
 pass "non-session drain actors retire subscribed input rows without a receipt"
 
+# Input handed off while subscribed keeps its receipt after unsubscription.
+home=$(make_home subscribed-then-off)
+owned "$INBOX_BIN" subscribe
+id=$(run_inbox "$home" note --request-id late-1 --json 'handed off' | json_get id)
+FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" bash -c '. "$1/bin/fm-wake-lib.sh"; fm_input_handoff "$2/state" gen-1 1 rec-1' check "$ROOT" "$home" \
+  || fail "input handoff failed"
+owned "$INBOX_BIN" unsubscribe
+owned "$ROOT/bin/fm-wake-drain.sh" > "$home/drain.out" 2> "$home/drain.err"
+seq=$(awk -F '\t' 'NF == 5 {print $2}' "$home/drain.out" | tail -1)
+gen=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--recovery-generation //p' "$home/drain.err")
+owned "$INBOX_BIN" drain --ack "$id" >/dev/null || fail "owner handling after unsubscribe failed"
+owned "$ROOT/bin/fm-wake-drain.sh" --ack-through "$seq" --recovery-generation "$gen" \
+  || fail "owner ack after unsubscribe failed"
+assert_equals 0 "$(count_wakes "$home")" "ack after unsubscribe retires the wake"
+assert_equals 1 "$(run_inbox "$home" input-receipts | json_get records | python3 -c 'import ast,sys; print(sum(1 for r in ast.literal_eval(sys.stdin.read()) if "ack" in r))')" "handed-off input keeps one receipt"
+pass "input handed off while subscribed keeps its receipt after unsubscription"
+
 # Real watcher, no fake fleet tasks: a thirty-second poll is interrupted by
 # input; simultaneous ordinary events stay durable for the same drain.
 home=$(make_home input-watch)
