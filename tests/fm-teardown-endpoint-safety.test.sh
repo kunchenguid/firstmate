@@ -1449,6 +1449,65 @@ write_worktreeless_scout_meta() {  # <case-dir> <id>
     "spawn_gen=s1.42.1" "decisions_reviewed=1" "decision_keys="
 }
 
+# The ship shape of the same allocator leftover, matching the real Forge Design
+# record: a ship has no report or captain-call gate, and its teardown runs the
+# ship-only steps (post-removal fleet sync) this path must survive.
+write_worktreeless_ship_meta() {  # <case-dir> <id>
+  fm_write_meta "$1/home/state/$2.meta" \
+    "window=firstmate:fm-$2" "endpoint_task_id=$2" \
+    "project=$1/project" "kind=ship" "mode=no-mistakes" "yolo=off" \
+    "spawn_gen=s1.42.1"
+}
+
+# run_worktreeless_terminal_success_case <case-name> <id> <kind> <status-verb>:
+# the full success contract for one accepted carve-out shape. The pool slot is
+# held by a live owner with its own record, a claim, and a live worker cd-ed
+# inside the slot, and unforced teardown must finish only the closed task's own
+# cleanup: the carve-out completion line, an endpoint close on the exact
+# recorded identity, the task's own records gone, and the live owner's tree,
+# record, claim, and worker exactly as found, with no pool command at all.
+run_worktreeless_terminal_success_case() {  # <case-name> <id> <kind> <status-verb>
+  local name=$1 id=$2 kind=$3 verb=$4 dir owner worker
+  owner=live-owner-$id
+  dir=$(make_case "$name")
+  mark_case_as_treehouse_pool "$dir"
+  fm_write_meta "$dir/home/state/$owner.meta" \
+    "window=firstmate:fm-$owner" "endpoint_task_id=$owner" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=ship" "spawn_gen=s1.100.1"
+  claim_pool_slot "$dir" "$owner" "$dir/home"
+  ( cd "$dir/worktree" && exec sleep 30 ) &
+  worker=$!
+  mkdir -p "$dir/home/data/$id"
+  printf 'delivered\n' > "$dir/home/data/$id/report.md"
+  if [ "$kind" = scout ]; then
+    write_worktreeless_scout_meta "$dir" "$id"
+  else
+    write_worktreeless_ship_meta "$dir" "$id"
+  fi
+  printf '%s\n' "$verb: work concluded" > "$dir/home/state/$id.status"
+
+  run_case_unforced "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "worktreeless $kind/$verb teardown failed: $(cat "$dir/stderr")"
+
+  assert_grep "no worktree identity" "$dir/stdout" \
+    "the $kind/$verb carve-out completion line was not reported"
+  assert_grep "tmux <kill-window> <-t> <=firstmate:=fm-$id>" "$dir/runtime.log" \
+    "the $kind/$verb teardown did not close the exact recorded endpoint"
+  assert_absent "$dir/home/state/$id.meta" "the $kind/$verb teardown left the task record"
+  assert_absent "$dir/home/state/$id.status" "the $kind/$verb teardown left the status log"
+  assert_absent "$dir/home/state/$id.inbox" "the $kind/$verb teardown left the task inbox"
+  assert_present "$dir/home/data/$id/report.md" "the $kind/$verb teardown removed the task's data files"
+  assert_present "$dir/worktree/sentinel" "the $kind/$verb teardown disturbed the live slot's tree"
+  assert_present "$dir/home/state/$owner.meta" "the $kind/$verb teardown removed the slot owner's record"
+  grep -Fqx "task=$owner" "$dir/pool/1/.fm-slot-owner" \
+    || fail "the $kind/$verb teardown rewrote the slot owner's claim: $(cat "$dir/pool/1/.fm-slot-owner")"
+  kill -0 "$worker" 2>/dev/null || fail "the $kind/$verb teardown killed the slot owner's worker"
+  assert_no_grep "treehouse" "$dir/runtime.log" \
+    "the $kind/$verb teardown ran a pool command: $(cat "$dir/runtime.log")"
+  kill "$worker" 2>/dev/null || true
+  wait "$worker" 2>/dev/null || true
+}
+
 # A worktreeless record the carve-out declines must fall through to the shared
 # validator's refusal and change nothing but probe reads.
 assert_worktreeless_refused_untouched() {  # <case> <id> <description> [expect-empty-log]
@@ -1512,6 +1571,26 @@ test_worktreeless_terminal_record_finishes_cleanup_without_touching_the_slot() {
   kill "$worker" 2>/dev/null || true
   wait "$worker" 2>/dev/null || true
   pass "fm-teardown: a terminal record with no worktree identity finishes its own cleanup without touching the slot"
+}
+
+# The Forge Design incident's own kind: a terminal SHIP record is the one whose
+# worktree= line the allocator moved onto the slot's next owner. Ship teardown
+# runs the ship-only steps around the carve-out (post-removal fleet sync, no
+# scout deliverable gate), so the success contract must hold for a ship too,
+# not just the scout shape above.
+test_worktreeless_ship_record_finishes_cleanup_without_touching_the_slot() {
+  run_worktreeless_terminal_success_case worktreeless-terminal-ship workless-ship-1 ship 'done'
+  pass "fm-teardown: a terminal ship record with no worktree identity finishes its own cleanup without touching the slot"
+}
+
+# A failed task is exactly as terminal as a done one, and the carve-out's verb
+# gate accepts both: cover failed for a ship (the give-up shape an operator
+# actually tears down) and for a scout, completing the accepted kind/status
+# matrix on the success path.
+test_worktreeless_failed_status_finishes_cleanup_without_touching_the_slot() {
+  run_worktreeless_terminal_success_case worktreeless-terminal-ship-failed workless-ship-2 ship 'failed'
+  run_worktreeless_terminal_success_case worktreeless-terminal-scout-failed workless-scout-1 scout 'failed'
+  pass "fm-teardown: a failed terminal record with no worktree identity finishes its own cleanup without touching the slot"
 }
 
 test_worktreeless_record_with_a_living_endpoint_refuses() {
@@ -1643,6 +1722,8 @@ test_remote_seeded_home_returns_its_uncontested_slot
 test_remote_seeded_home_still_refuses_a_slot_its_child_holds
 test_remote_layout_homes_serialize_on_one_project_lock
 test_worktreeless_terminal_record_finishes_cleanup_without_touching_the_slot
+test_worktreeless_ship_record_finishes_cleanup_without_touching_the_slot
+test_worktreeless_failed_status_finishes_cleanup_without_touching_the_slot
 test_worktreeless_record_with_a_living_endpoint_refuses
 test_worktreeless_record_without_terminal_status_refuses
 test_worktreeless_kind_gates_and_ambiguity_still_refuse
