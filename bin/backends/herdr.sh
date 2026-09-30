@@ -1869,6 +1869,16 @@ fm_backend_herdr_launcher_identity() {  # <session>
 # against any other unforeseen path landing a live agent in a tab this function
 # was about to close.
 #
+# Settle-then-verify: Herdr relabels the seeded tab from its pane's foreground
+# process cwd, and live 0.9.1 briefly shows a transient label such as
+# "1 · path_helper" (a login-shell helper) before settling on the creation
+# cwd's basename about a second after `workspace create`. So the label check
+# re-polls `tab list` every 0.25s for up to FM_BACKEND_HERDR_SEEDED_LABEL_POLLS
+# (default 12, about 3s) samples: long enough to cover the observed ~1s
+# relabel with margin, short enough that a genuinely renamed tab delays the
+# spawn by at most ~3s. It only waits for an accepted label; it never widens
+# what is accepted. A label that never settles leaves the tab alone.
+#
 # Verified real-herdr behavior (not modeled by the canned-response fake-CLI
 # unit tests; modeled by make_herdr_statefake): closing a workspace's LAST
 # remaining tab deletes the whole workspace, not just the tab. So this must
@@ -1878,14 +1888,20 @@ fm_backend_herdr_launcher_identity() {  # <session>
 # function independently re-checks the tab count as a second layer.
 fm_backend_herdr_workspace_prune_seeded_default_tab() {  # <session> <workspace_id> <seeded_tab_id> [direct|focus-preserving] [<created_cwd>]
   local session=$1 wsid=$2 tab_id=$3 close_mode=${4:-direct} created_cwd=${5:-} tabs tab_count current_label pane_id agent_out agent_status
+  local attempt=0 max_attempts=${FM_BACKEND_HERDR_SEEDED_LABEL_POLLS:-12}
   [ -n "$tab_id" ] || return 0
-  tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 0
-  tab_count=$(printf '%s' "$tabs" | jq -r '.result.tabs? // [] | length' 2>/dev/null)
-  case "$tab_count" in ''|*[!0-9]*|0|1) return 0 ;; esac
-  current_label=$(printf '%s' "$tabs" | jq -r --arg t "$tab_id" '.result.tabs[]? | select(.tab_id == $t) | .label' 2>/dev/null)
-  if [ "$current_label" != 1 ]; then
-    [ -n "$created_cwd" ] && [ "$current_label" = "1 · $(basename -- "$created_cwd")" ] || return 0
-  fi
+  while :; do
+    tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 0
+    tab_count=$(printf '%s' "$tabs" | jq -r '.result.tabs? // [] | length' 2>/dev/null)
+    case "$tab_count" in ''|*[!0-9]*|0|1) return 0 ;; esac
+    current_label=$(printf '%s' "$tabs" | jq -r --arg t "$tab_id" '.result.tabs[]? | select(.tab_id == $t) | .label' 2>/dev/null)
+    [ -n "$current_label" ] || return 0
+    [ "$current_label" = 1 ] && break
+    [ -n "$created_cwd" ] && [ "$current_label" = "1 · $(basename -- "$created_cwd")" ] && break
+    attempt=$((attempt + 1))
+    [ "$attempt" -lt "$max_attempts" ] || return 0
+    sleep 0.25
+  done
   pane_id=$(fm_backend_herdr_pane_for_tab "$session" "$wsid" "$tab_id") || return 0
   [ -n "$pane_id" ] || return 0
   agent_out=$(fm_backend_herdr_cli "$session" agent get "$pane_id" 2>/dev/null)
