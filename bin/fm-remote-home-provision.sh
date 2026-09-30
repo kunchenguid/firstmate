@@ -246,7 +246,9 @@ EOF
   [ -n "$ORIGIN" ] || die "project $NAME has no origin"
   fm_project_origin_safe "$ORIGIN" || die "project $NAME origin is not an accepted clone URL: $ORIGIN"
   case "$MODE" in no-mistakes|direct-PR) ;; *) die "project $NAME has unsupported remote mode: $MODE" ;; esac
-  fm_project_registry_line - "$NAME" <<< "$REGISTRY_LINE" >/dev/null || die "project $NAME registry line is malformed"
+  if [[ "$REGISTRY_LINE" == *$'\n'* ]] || ! fm_project_registry_line - "$NAME" <<< "$REGISTRY_LINE" >/dev/null; then
+    die "project $NAME registry line is malformed"
+  fi
   DEST="$FM_HOME/projects/$NAME"
   if [ -e "$DEST" ] || [ -L "$DEST" ]; then
     [ -d "$DEST" ] && [ ! -L "$DEST" ] && [ -d "$DEST/.git" ] \
