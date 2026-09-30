@@ -223,7 +223,8 @@ fm_exec_timed() {  # <seconds> <grace-seconds> <command...>
   if [ -n "${BASHPID+x}" ]; then
     current_pid=$BASHPID
   else
-    current_pid=$(exec sh -c 'printf "%s\n" "$PPID"') || return 1
+    # Bash 3.2 has no BASHPID: an exec'd child's parent is this process.
+    current_pid=$(exec /bin/sh -c 'printf "%s\n" "$PPID"' 2>/dev/null) || current_pid=$$
   fi
   owner=${FM_EXEC_TIMED_OWNER_PID:-$$}
   [ "$owner" != "$current_pid" ] || owner=$PPID
