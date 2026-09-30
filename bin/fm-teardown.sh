@@ -27,6 +27,11 @@
 # automatic backend without compatible tasks-axi refuses before cleanup.
 # None of this loosens the landed-work gates below: the transition runs only on
 # the paths that already proceed to remove the record.
+# Just before that removal, the closing quota reading and the delta against the
+# dispatch reading are written into the record and restated on the completion
+# line, since the record does not outlive this run. bin/fm-quota-accounting-lib.sh
+# owns those quota_* fields, what makes a delta valid, and the bound on the read;
+# a reading it cannot take is recorded as unavailable and never blocks a cleanup.
 # The close - and only the close - is replaced by `tasks-axi reopen` with the
 # deliverable recorded while the backlog item is still an open captain call
 # (bin/fm-captain-hold.sh `open` owns that predicate), because the policy holds
@@ -343,13 +348,19 @@ for _teardown_source in \
   fm-nm-run-lib.sh \
   fm-wake-lib.sh \
   fm-path-lib.sh \
-  fm-lease-lib.sh
+  fm-lease-lib.sh \
+  fm-quota-axi-lib.sh \
+  fm-quota-accounting-lib.sh
 do
   teardown_require_source "$SCRIPT_DIR/$_teardown_source"
 done
 unset _teardown_source
 # shellcheck source=bin/fm-tasks-axi-lib.sh
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+# shellcheck source=bin/fm-quota-axi-lib.sh
+. "$SCRIPT_DIR/fm-quota-axi-lib.sh"
+# shellcheck source=bin/fm-quota-accounting-lib.sh
+. "$SCRIPT_DIR/fm-quota-accounting-lib.sh"
 # shellcheck source=bin/fm-backlog-transition-lib.sh
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
 # shellcheck source=bin/fm-backend.sh
@@ -3805,6 +3816,20 @@ if [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ];
     echo "warning: retaining herdr presentation journal for $ID; it still names a projected workspace the session-start sweep owns, not the closed endpoint" >&2
   fi
 fi
+# The closing quota reading, taken now that the worker has stopped, written into
+# the record it is about while that record still exists and this task's meta lock
+# is still held. bin/fm-quota-accounting-lib.sh owns the fields, the delta's
+# same-window validity test, and the bound on the read; it records an unavailable
+# reading rather than letting a missing, outdated, or failing quota-axi block a
+# cleanup, and a failed write leaves the record untouched. The summary is carried
+# out to the completion line below because the record itself is retired moments
+# from here, and the attribution is the whole point of having taken the readings.
+TEARDOWN_QUOTA_SUMMARY=
+if [ -f "$META" ] && [ ! -L "$META" ]; then
+  if fm_quota_accounting_end_lines "$META" | fm_quota_accounting_meta_write "$META"; then
+    TEARDOWN_QUOTA_SUMMARY=$(fm_quota_accounting_summary "$META")
+  fi
+fi
 # The record is gone, so the backlog must not still show this task in flight
 # when teardown reports success. Still under this task's meta lock, so a steer
 # racing the same id stays serialized exactly as it was before. A captain-held
@@ -3853,4 +3878,5 @@ elif teardown_owns_worktree; then
 else
   echo "teardown $ID complete (window ${T:-none}; pool slot $WT left to task $TEARDOWN_SLOT_REASSIGNED_TO${TEARDOWN_SLOT_REASSIGNED_HOME:+ (home $TEARDOWN_SLOT_REASSIGNED_HOME)}, which it was reassigned to)"
 fi
+[ -z "$TEARDOWN_QUOTA_SUMMARY" ] || echo "$TEARDOWN_QUOTA_SUMMARY"
 backlog_refresh_reminder

@@ -64,6 +64,13 @@
 #     fm-classify-lib.sh's authoritative status_open_decisions fold and reconciled
 #     against current_state; hints.pending_decision and hints.blocked_event are
 #     booleans derived from that set.
+#     quota is the task's own quota accounting, or null when its record carries
+#     none. bin/fm-quota-accounting-lib.sh owns the fields and their meaning.
+#     Every value is a percentage of one provider quota window, in percentage
+#     points - never a token count, a request count, or a cost. A delta observes
+#     the whole account, so with more than one worker live it is an upper bound
+#     on this task, not its isolated consumption, and it is published only when
+#     both readings came from the same window (delta_status).
 #     endpoint.exists is the cheap local backend endpoint-presence read.
 #     endpoint.agent_alive is populated for local secondmates only, where it is
 #     useful return-channel supervision data; remote secondmates use "unknown"
@@ -310,6 +317,55 @@ path_present_json() {  # <contract-path> [<observed-path>]
 
 meta_value() {  # <meta-file> <key>
   fm_meta_get "$1" "$2"
+}
+
+# The task's quota accounting, or null when its record carries none.
+# bin/fm-quota-accounting-lib.sh owns these fields and what they mean; this
+# projection only reshapes them, converting the recorded percentages to numbers
+# and leaving every absent field null. Every value is a percentage of one
+# provider quota window, never a token count, and a delta observes the whole
+# account, so with more than one worker live it is an upper bound on this task
+# rather than its isolated consumption.
+task_quota_json() {  # <meta-file>
+  local meta=$1
+  if [ -z "$(meta_value "$meta" quota_start_status)" ] &&
+    [ -z "$(meta_value "$meta" quota_end_status)" ]; then
+    printf 'null'
+    return 0
+  fi
+  jq -n \
+    --arg unit "$(meta_value "$meta" quota_unit)" \
+    --arg provider "$(meta_value "$meta" quota_provider)" \
+    --arg account "$(meta_value "$meta" quota_account)" \
+    --arg window "$(meta_value "$meta" quota_window)" \
+    --arg window_resets_at "$(meta_value "$meta" quota_window_resets_at)" \
+    --arg start_status "$(meta_value "$meta" quota_start_status)" \
+    --arg start_at "$(meta_value "$meta" quota_start_at)" \
+    --arg start_percent_remaining "$(meta_value "$meta" quota_start_percent_remaining)" \
+    --arg start_reason "$(meta_value "$meta" quota_start_reason)" \
+    --arg end_status "$(meta_value "$meta" quota_end_status)" \
+    --arg end_at "$(meta_value "$meta" quota_end_at)" \
+    --arg end_percent_remaining "$(meta_value "$meta" quota_end_percent_remaining)" \
+    --arg end_reason "$(meta_value "$meta" quota_end_reason)" \
+    --arg delta_status "$(meta_value "$meta" quota_delta_status)" \
+    --arg delta_percent_points "$(meta_value "$meta" quota_delta_percent_points)" \
+    'def text: if . == "" then null else . end;
+     def num: if . == "" then null else (tonumber? // null) end;
+     {unit:($unit | text),
+      provider:($provider | text),
+      account:($account | text),
+      window:($window | text),
+      window_resets_at:($window_resets_at | text),
+      start_status:($start_status | text),
+      start_at:($start_at | num),
+      start_percent_remaining:($start_percent_remaining | num),
+      start_reason:($start_reason | text),
+      end_status:($end_status | text),
+      end_at:($end_at | num),
+      end_percent_remaining:($end_percent_remaining | num),
+      end_reason:($end_reason | text),
+      delta_status:($delta_status | text),
+      delta_percent_points:($delta_percent_points | num)}'
 }
 
 last_nonempty_line() {  # <file>
@@ -885,6 +941,7 @@ task_json_lines() {
       --argjson pending_decision "$(bool_json "$pending_decision")" \
       --argjson blocked_event "$(bool_json "$blocked_event")" \
       --argjson report_present "$(bool_json "$report_present")" \
+      --argjson quota "$(task_quota_json "$meta")" \
       '{
         id:$id,
         kind:$kind,
@@ -911,6 +968,7 @@ task_json_lines() {
                   else "unknown" end),
           observed_at:$observed_at,freshness:"fresh"},
         pr:{url:($pr | if . == "" then null else . end),source:$pr_source,head:($pr_head | if . == "" then null else . end)},
+        quota:$quota,
         hints:{
           pending_decision:$pending_decision,
           blocked_event:$blocked_event,

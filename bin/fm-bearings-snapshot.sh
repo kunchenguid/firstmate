@@ -22,6 +22,16 @@
 #
 # This wrapper consumes canonical status decisions plus canonically normalized
 # backlog roles, unresolved blockers, and captain actionability.
+# Each main-home Underway row carries the quota accounting the canonical snapshot
+# read from that task's own record, so a supervisor can see which quota window a
+# worker is drawing on and how much of it was left when that worker was
+# dispatched, without a second source. quota_window_pct_left_at_dispatch is a
+# percentage of that window in percentage points, never a token count, and it is
+# the level at dispatch, not this task's own consumption: every worker live in
+# that window shares it. bin/fm-quota-accounting-lib.sh owns the readings, and a
+# task whose record carries none projects null in both columns. A secondmate's
+# child rows come from that home's ledger rather than a task record, so they
+# project null too.
 # Contributions project cached coverage and required actors from fm-contributions.sh;
 # only captain rows are exposed, with counts for the other actors and unmeasured homes. It never infers
 # decisions from report or visual-review prose or reimplements snapshot semantics.
@@ -145,7 +155,9 @@ Default collection performs bounded concurrent remote-ledger reads for registere
 remote homes under one shared snapshot budget and may refresh the parent-side cache.
 --include-prs additionally performs live GitHub discovery and checks.
 
-Default fields: schema, home, generated, prs, in_flight{id,kind,state,repo,name,doing},
+Default fields: schema, home, generated, prs,
+  in_flight{id,kind,state,repo,name,doing,quota_window,
+            quota_window_pct_left_at_dispatch},
   secondmates{id,state,doing,provenance,freshness,age_seconds,contradiction,reason},
   secondmate_reconcile{id,spawn_gen,host,kind,ids},
   decisions_open{id,key,verb,summary,owner}, landed{id,what,artifact,owner},
@@ -510,7 +522,10 @@ MODEL=$(printf '%s' "$SNAP" | jq \
         name:((.backlog.title // "") as $name
               | (if ($name | test("[^[:space:]]")) then $name else .id end) | trunc(70)),
         doing: ((.current_state.detail // "") as $d
-                | (if $d != "" then $d else (.hints.last_event_text // "") end) | trunc(90))
+                | (if $d != "" then $d else (.hints.last_event_text // "") end) | trunc(90)),
+        quota_window:(if (.quota.provider // null) != null and (.quota.window // null) != null
+                      then "\(.quota.provider)/\(.quota.window)" else null end),
+        quota_window_pct_left_at_dispatch:(.quota.start_percent_remaining // null)
       } ]
      + [ $secondmate_views[] as $m
          | $m.active_children[]?
@@ -521,7 +536,9 @@ MODEL=$(printf '%s' "$SNAP" | jq \
             name:((.name // "") as $name
                   | (if (($name | type) == "string" and ($name | test("[^[:space:]]")))
                      then $name else ($m.id + "/" + .id) end) | trunc(70)),
-            doing:((.doing // .state) | trunc(90))} ]) as $in_flight_all
+            doing:((.doing // .state) | trunc(90)),
+            quota_window:null,
+            quota_window_pct_left_at_dispatch:null} ]) as $in_flight_all
   | ([ .backlog.records[]
          | . as $record
          | select(.structured and .hold_bucket != null)

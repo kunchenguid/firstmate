@@ -453,6 +453,12 @@
 # success line and state/<id>.meta omit them.
 # Every fresh spawn or relaunch records a new spawn_gen= incarnation token so durable
 # consumers can distinguish a replacement worker that reuses the same task id.
+# A fresh local spawn also records the opening quota reading for the window this
+# worker's harness consumes, so the task can later be asked what that window went
+# to; bin/fm-quota-accounting-lib.sh owns those quota_* fields and the bound on the
+# read, and records the reading as unavailable rather than letting a missing,
+# outdated, or failing quota-axi block a dispatch. A relaunch keeps the original
+# dispatch reading instead of taking a new one.
 # When the home session's frozen trace-context decision is enabled (see
 # docs/configuration.md and bin/fm-trace-context-lib.sh), the meta also records
 # one W3C traceparent= carrier, the same value injected into the pane as
@@ -630,6 +636,10 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 # shellcheck source=bin/fm-worker-account-lib.sh
 . "$SCRIPT_DIR/fm-worker-account-lib.sh"
+# shellcheck source=bin/fm-quota-axi-lib.sh
+. "$SCRIPT_DIR/fm-quota-axi-lib.sh"
+# shellcheck source=bin/fm-quota-accounting-lib.sh
+. "$SCRIPT_DIR/fm-quota-accounting-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -4844,6 +4854,15 @@ fi
 
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
+# The opening quota reading, taken as this worker starts so its task record can
+# later be asked what the window went to. bin/fm-quota-accounting-lib.sh owns the
+# fields and the bounded read; it records an unavailable reading rather than
+# failing, so no dispatch can be blocked by quota-axi. A relaunch keeps the
+# original dispatch reading, which preserve_relaunch_meta carries forward.
+SPAWN_QUOTA_LINES=
+if [ "$RELAUNCH" -eq 0 ]; then
+  SPAWN_QUOTA_LINES=$(fm_quota_accounting_start_lines "$HARNESS" "${MODEL:-}")
+fi
 SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
 SPAWN_META_PATH="$STATE/$ID.meta"
 if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
@@ -4886,6 +4905,7 @@ preserve_relaunch_meta() {
   [ -z "$WORKER_ACCOUNT_PROVIDER" ] || echo "account_provider=$WORKER_ACCOUNT_PROVIDER"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
+  [ -z "$SPAWN_QUOTA_LINES" ] || printf '%s\n' "$SPAWN_QUOTA_LINES"
   # Default-off writes no traceparent= line.
   # backend= is written only for a non-default (non-tmux) backend, so the
   # default path's meta stays byte-identical (absent backend= means tmux;
