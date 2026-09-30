@@ -983,6 +983,67 @@ test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot() {
   pass "fm-teardown: a pool slot claimed by another task is left alone while the task's own cleanup finishes"
 }
 
+# Two records in one home naming the same live pool slot after it was
+# reassigned: the slot's owner claim names the task that holds it now. The
+# stale record's teardown must reach the reassignment branch instead of the
+# record-collision refusal, and once it is gone the claimant tears down too.
+# The claimant torn down first still refuses, naming the stale record to clear.
+test_reassigned_slot_with_two_records_tears_down_each() {
+  local dir id=stale-task other=claimant-task worker rc
+
+  dir=$(make_case slot-reassigned-two-records)
+  mark_case_as_treehouse_pool "$dir"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  claim_pool_slot "$dir" "$other"
+  ( cd "$dir/worktree" && exec sleep 30 ) &
+  worker=$!
+
+  # Claimant first: the other record still names the slot, so it refuses and
+  # points at the stale record rather than returning the slot under it.
+  set +e
+  run_case "$dir" "$other" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "claimant teardown returned a slot a stale record still names"
+  kill -0 "$worker" 2>/dev/null || fail "claimant refusal killed the worker in the slot"
+  assert_present "$dir/home/state/$other.meta" "claimant refusal removed its own record"
+  assert_present "$dir/home/state/$id.meta" "claimant refusal removed the stale record"
+  [ ! -s "$dir/runtime.log" ] \
+    || fail "claimant refusal reached the runtime: $(cat "$dir/runtime.log")"
+  assert_contains "$(cat "$dir/stderr")" "tear down $id first" \
+    "claimant refusal should name the stale record to tear down first"
+
+  # Stale record: the claim names another task, so its own cleanup finishes and
+  # the slot, its worker, the claimant's record, and the claim are untouched.
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "stale-record teardown of a reassigned, doubly recorded slot failed: $(cat "$dir/stderr")"
+  kill -0 "$worker" 2>/dev/null || fail "stale-record teardown killed the claimant's worker"
+  assert_present "$dir/worktree/sentinel" "stale-record teardown reset the claimant's slot"
+  assert_present "$dir/home/state/$other.meta" "stale-record teardown removed the claimant's record"
+  assert_reassigned_slot_left_alone "$dir" "$id" "$other" "doubly recorded reassigned slot"
+  kill "$worker" 2>/dev/null || true
+  wait "$worker" 2>/dev/null || true
+
+  # Claimant after: now the sole record, it returns its own slot and claim.
+  : > "$dir/runtime.log"
+  run_case "$dir" "$other" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "claimant teardown after the stale record was cleared failed: $(cat "$dir/stderr")"
+  assert_absent "$dir/home/state/$other.meta" "claimant teardown left its record"
+  assert_absent "$dir/pool/1/.fm-slot-owner" "claimant teardown left its spent slot claim"
+  grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "claimant teardown did not return its pool slot: $(cat "$dir/runtime.log")"
+
+  pass "fm-teardown: a reassigned slot named by two records tears down each, stale record first"
+}
+
 # The two states that must never become a false refusal: the task's own claim,
 # and no claim at all (a slot taken before claims existed, or already returned).
 test_own_and_absent_slot_claims_still_tear_down() {
@@ -1404,6 +1465,7 @@ test_cross_home_pool_slot_collision_refuses
 test_sole_slot_record_still_tears_down
 test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot
 test_own_and_absent_slot_claims_still_tear_down
+test_reassigned_slot_with_two_records_tears_down_each
 test_recorded_endpoint_that_changed_directory_still_tears_down
 test_project_lock_anchors_at_the_local_root_across_home_layouts
 test_remote_seeded_home_returns_its_uncontested_slot

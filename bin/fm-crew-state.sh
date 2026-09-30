@@ -912,6 +912,23 @@ nm_run_head_matches_worktree() {
   fm_nm_head_matches_worktree "$WT" "$run_head"
 }
 
+# 0 when this record's worktree is a Treehouse pool slot whose owner claim names
+# another task: the slot was reassigned after this record was written, so its
+# branch, HEAD, and runs are that task's, and a run matching them is not this
+# record's outcome. bin/fm-wake-lib.sh owns the claim; it is loaded only here so
+# every other read keeps its narrower dependency set. An absent or unreadable
+# claim proves nothing and keeps the ordinary lookup.
+crew_slot_reassigned() {
+  local project
+  project=$(meta_value project)
+  [ -n "$project" ] || return 1
+  # shellcheck source=bin/fm-wake-lib.sh
+  command -v fm_treehouse_slot_owner_state >/dev/null 2>&1 || . "$SCRIPT_DIR/fm-wake-lib.sh"
+  fm_treehouse_pool_slot "$project" "$WT" || return 1
+  fm_treehouse_slot_owner_state "$WT" "$ID"
+  [ "$FM_TREEHOUSE_SLOT_OWNER" = other ]
+}
+
 HAVE_RUN=0
 # RUN_SOURCE distinguishes the two ways HAVE_RUN=1 can happen: "full" means
 # $RUN_OUT is real `axi status` TOON with step/gate detail (including a
@@ -926,7 +943,10 @@ COARSE_STATUS=""
 SELECTED_RUN_ID=""
 # Scouts and secondmates never drive a no-mistakes validation of their own
 # worktree, so skip the lookup for them and read state from pane/log directly.
-if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/null 2>&1; then
+# A record whose slot was reassigned skips it too: any run found there is the
+# claimant's.
+if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/null 2>&1 \
+  && ! crew_slot_reassigned; then
   RUN_OUT=$(nm_run axi status)
   if [ "$(strip_quotes "$(printf '%s\n' "$RUN_OUT" | sed -n 's/^error: //p')")" = "repo not initialized (run 'no-mistakes init' first)" ]; then
     RUN_OUT=""

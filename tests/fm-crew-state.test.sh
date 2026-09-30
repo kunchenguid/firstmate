@@ -1690,6 +1690,41 @@ test_terminal_failed() {
   pass "terminal failed run is authoritative"
 }
 
+# Two records naming one Treehouse pool slot after it was reassigned: the slot's
+# owner claim names the task that holds it now, and that task's run matches the
+# slot's branch and HEAD. The stale record must not report the claimant's run as
+# its own outcome, while the claimant still does.
+test_reassigned_slot_run_is_not_the_stale_records_outcome() {
+  reset_fakes
+  local d out
+  d=$(new_case slot-reassigned-run)
+  make_repo_on_branch "$d/project" main
+  mkdir -p "$d/pool/1"
+  git -C "$d/project" worktree add -q -b fm/claimant "$d/pool/1/project"
+  printf '{"worktrees":[{"name":"1","path":"%s"}]}\n' "$d/pool/1/project" \
+    > "$d/pool/treehouse-state.json"
+  printf 'task=claimant\nhome=%s\n' "$d" > "$d/pool/1/.fm-slot-owner"
+  FM_FAKE_RUN_HEAD=$(git -C "$d/pool/1/project" rev-parse HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/stale.meta" "window=fm:fm-stale" \
+    "worktree=$d/pool/1/project" "project=$d/project" "kind=ship"
+  fm_write_meta "$d/state/claimant.meta" "window=fm:fm-claimant" \
+    "worktree=$d/pool/1/project" "project=$d/project" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_failed fm/claimant)"
+  FM_FAKE_AXI_STATUS=${FM_FAKE_AXI_STATUS/status: completed/status: failed}
+
+  out=$(run_crew_state "$d" stale)
+  assert_not_contains "$out" "source: run-step" \
+    "a reassigned slot's run must not be reported as the stale record's outcome"
+  assert_not_contains "$out" "state: failed" \
+    "a reassigned slot's failed run must not read as the stale record failing"
+
+  out=$(run_crew_state "$d" claimant)
+  assert_contains "$out" "state: failed" "the claimant's own run still answers for it"
+  assert_contains "$out" "source: run-step" "the claimant still reads from its run"
+  pass "a reassigned pool slot's run is not attributed to the stale record"
+}
+
 # Recovered delivery cases, varying only the terminal route and the optional
 # rebase step. The already-fixed passed-run case remains a control.
 test_cancelled_delivery_and_skipped_rebase() {
@@ -5558,6 +5593,7 @@ test_terminal_passed_with_open_gerrit_change_does_not_claim_merged
 test_terminal_passed_with_merged_gerrit_change_reports_merged
 test_terminal_passed_with_unreadable_gerrit_change_reports_unknown
 test_terminal_failed
+test_reassigned_slot_run_is_not_the_stale_records_outcome
 test_terminal_failed_ci_orphan_after_green_reads_done
 test_terminal_failed_ci_orphan_status_only_reads_done
 test_terminal_failed_ci_genuine_red_stays_failed

@@ -98,7 +98,10 @@
 # cleanup step, teardown verifies record exclusivity: no OTHER task record in
 # this home or any locally registered Firstmate home may name the same live path
 # in its worktree= or home=. One live path with two task records is the reuse
-# collision itself, whichever record is stale.
+# collision itself, whichever record is stale - unless the slot's owner claim
+# (below) names another task, which proves this record is the stale one and
+# hands the collision to the reassignment branch instead of refusing. A claim
+# naming this task still refuses and names the other record to tear down first.
 # That scan alone cannot prove THIS record is the current owner, because the task
 # that took the slot next may leave no record it can reach - its own worker may
 # have exited and its record been cleaned up, or it may live in a home this
@@ -2372,9 +2375,22 @@ require_exclusive_worktree_slot_record() {
         [ -n "$other_path" ] || continue
         other_slot=$(canonical_existing_dir "$other_path") || continue
         [ "$other_slot" = "$slot" ] || continue
+        # The slot's own owner claim settles which record is stale. A claim
+        # naming another task proves THIS record is the stale one, so defer to
+        # the reassignment branch (require_owned_worktree_slot_record), which
+        # skips every step that touches the slot. Any other claim state keeps
+        # the collision a refusal: an absent or unreadable claim proves nothing,
+        # and a claim naming this task still leaves the other record to clean
+        # up first so its own teardown takes the reassignment branch.
+        fm_treehouse_slot_owner_state "$slot" "$record_id"
+        [ "$FM_TREEHOUSE_SLOT_OWNER" != other ] || return 0
         echo "REFUSED: task $record_id's recorded worktree $slot is also task $other_id's recorded $field." >&2
         echo "Returning that pool slot would kill $other_id's processes and reset its copy, so nothing was changed - not even with --force." >&2
-        echo "Reconcile whichever record is wrong (bin/fm-crew-state.sh $record_id; bin/fm-crew-state.sh $other_id), then re-run teardown." >&2
+        if [ "$FM_TREEHOUSE_SLOT_OWNER" = mine ]; then
+          echo "The slot's owner claim names $record_id, so $other_id's record is the stale one: tear down $other_id first, then re-run teardown." >&2
+        else
+          echo "Reconcile whichever record is wrong (bin/fm-crew-state.sh $record_id; bin/fm-crew-state.sh $other_id), then re-run teardown." >&2
+        fi
         return 1
       done
     done
