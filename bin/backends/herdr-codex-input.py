@@ -24,13 +24,17 @@ TIMEOUT = 5.0
 MAX_RESPONSE = 4 * 1024 * 1024
 
 
-def cli(session, *args):
+def cli_result(session, *args):
     binary = "herdr"
     if os.environ.get("FM_BACKEND_HERDR_CLIENT_SESSION") == session:
         binary = os.environ.get("FM_BACKEND_HERDR_BIN", "herdr")
-    result = subprocess.run(
+    return subprocess.run(
         [binary, *args, "--session", session], capture_output=True, timeout=TIMEOUT
     )
+
+
+def cli(session, *args):
+    result = cli_result(session, *args)
     if result.returncode:
         raise ValueError("Herdr probe failed")
     return json.loads(result.stdout)
@@ -67,13 +71,47 @@ def supported(schema):
     )
 
 
-def insert(socket_path, pane, text):
-    request = {"id": "fm-codex-input", "method": "pane.send_input",
-               "params": {"pane_id": pane, "text": text, "keys": []}}
+def canonical_socket_path(socket_path):
+    if not isinstance(socket_path, str) or not os.path.isabs(socket_path):
+        raise ValueError("Herdr named-session socket identity is ambiguous")
+    parent, name = os.path.split(socket_path)
+    if not parent or not name:
+        raise ValueError("Herdr named-session socket identity is ambiguous")
+    if os.path.isdir(parent):
+        parent = os.path.realpath(parent)
+    return os.path.join(parent, name)
+
+
+def session_socket(session, status):
+    server = status.get("server", {})
+    socket_path = server.get("socket")
+    if not socket_path:
+        return None
+    if (server.get("running") is not True or not isinstance(socket_path, str)
+            or not os.path.isabs(socket_path)):
+        raise ValueError("Herdr named-session socket identity is ambiguous")
+    if server.get("session") == session:
+        return socket_path
+    client = status.get("client", {})
+    if (session != "default" or "session" not in client or client["session"] is not None
+            or "session" not in server or server["session"] is not None):
+        raise ValueError("Herdr named-session socket identity is ambiguous")
+    sessions = cli(session, "session", "list", "--json").get("sessions")
+    matches = [item for item in sessions or [] if item.get("name") == session]
+    if (len(matches) != 1 or matches[0].get("running") is not True
+            or not isinstance(matches[0].get("socket_path"), str)
+            or not matches[0]["socket_path"]):
+        raise ValueError("Herdr default-session socket identity is ambiguous")
+    if canonical_socket_path(socket_path) != canonical_socket_path(matches[0]["socket_path"]):
+        raise ValueError("Herdr default-session socket identity is ambiguous")
+    return canonical_socket_path(socket_path)
+
+
+def request(socket_path, body):
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
         sock.settimeout(TIMEOUT)
         sock.connect(socket_path)
-        sock.sendall((json.dumps(request, separators=(",", ":")) + "\n").encode())
+        sock.sendall((json.dumps(body, separators=(",", ":")) + "\n").encode())
         deadline = time.monotonic() + TIMEOUT
         data = b""
         while b"\n" not in data:
@@ -87,10 +125,31 @@ def insert(socket_path, pane, text):
             data += chunk
             if len(data) > MAX_RESPONSE:
                 raise ValueError("Herdr input response exceeded its bound")
-        response = json.loads(data.split(b"\n", 1)[0])
-        if (not isinstance(response, dict) or response.get("id") != request["id"] or response.get("error") is not None
-                or response.get("result", {}).get("type") != "ok"):
-            raise ValueError("Herdr input response was not confirmed")
+        return json.loads(data.split(b"\n", 1)[0])
+
+
+def legacy_supported(socket_path):
+    probe = {"id": "fm-codex-input-capability", "method": "pane.send_input",
+             "params": {"pane_id": "", "text": "", "keys": []}}
+    response = request(socket_path, probe)
+    return (isinstance(response, dict) and response.get("id") == probe["id"]
+            and response.get("error", {}).get("code") == "pane_not_found")
+
+
+def capability_supported(session, socket_path):
+    result = cli_result(session, "api", "schema", "--json")
+    if result.returncode == 0:
+        return supported(json.loads(result.stdout))
+    return legacy_supported(socket_path)
+
+
+def insert(socket_path, pane, text):
+    body = {"id": "fm-codex-input", "method": "pane.send_input",
+            "params": {"pane_id": pane, "text": text, "keys": []}}
+    response = request(socket_path, body)
+    if (not isinstance(response, dict) or response.get("id") != body["id"] or response.get("error") is not None
+            or response.get("result", {}).get("type") != "ok"):
+        raise ValueError("Herdr input response was not confirmed")
 
 
 def main():
@@ -100,13 +159,9 @@ def main():
     if not session or not pane or any(c in session + pane for c in "\r\n\t"):
         return 2
     status = cli(session, "status", "--json")
-    server = status.get("server", {})
-    # Older transports without a named socket cannot establish applicability.
-    if not server.get("socket"):
+    socket_path = session_socket(session, status)
+    if socket_path is None:
         return NOT_APPLICABLE
-    if (server.get("session") != session or server.get("running") is not True
-            or not isinstance(server["socket"], str) or not os.path.isabs(server["socket"])):
-        raise ValueError("Herdr named-session socket identity is ambiguous")
     info = cli(session, "pane", "process-info", "--pane", pane).get("result", {})
     processes = info.get("process_info", {})
     if info.get("type") != "pane_process_info" or processes.get("pane_id") != pane:
@@ -116,13 +171,13 @@ def main():
         raise ValueError("Herdr foreground process list is unavailable")
     if not any(codex_process(p) for p in foreground):
         return NOT_APPLICABLE
-    if not supported(cli(session, "api", "schema", "--json")):
+    if not capability_supported(session, socket_path):
         raise ValueError("Herdr lacks capability-gated Codex input")
     text = sys.stdin.read()
     # A literal terminator would escape the native paste boundary.
     if "\x1b[201~" in text or "\x1b[200~" in text:
         raise ValueError("program input contains a bracketed-paste delimiter")
-    insert(server["socket"], pane, text)
+    insert(socket_path, pane, text)
     return 0
 
 
