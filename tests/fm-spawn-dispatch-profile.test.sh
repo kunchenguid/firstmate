@@ -39,6 +39,7 @@ make_spawn_fakebin() {
   fakebin=$(fm_test_make_spawn_fakebin "$dir")
   cat > "$fakebin/timeout" <<'SH'
 #!/usr/bin/env bash
+[ "${1:-}" != -k ] || shift 2
 shift
 exec "$@"
 SH
@@ -775,7 +776,7 @@ test_opencode_without_effort_keeps_launch_config_unchanged() {
   rec=$(make_spawn_case profile-opencode-noeffort opencode "$id")
   read_case_record "$rec"
 
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model anthropic/claude-sonnet-4-5)
+  out=$(OPENCODE_V2=1 run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model anthropic/claude-sonnet-4-5)
   status=$?
   expect_code 0 "$status" "opencode spawn without effort should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" opencode anthropic/claude-sonnet-4-5 default
@@ -820,6 +821,74 @@ test_opencode_omits_variant_when_model_family_lacks_effort() {
     "opencode must keep the permission-only config when the model family lacks the effort"
   assert_not_contains "$launch" '"variant"' "opencode must omit the variant when the model family lacks the effort"
   pass "opencode omits the variant for an effort outside the model family's list"
+}
+
+test_opencode_v2_launch_pins_model_and_submits_pointer() {
+  local rec id out status launch
+  id=profile-opencode-v2
+  rec=$(make_spawn_case profile-opencode-v2 opencode "$id")
+  read_case_record "$rec"
+  out=$(FM_FAKE_OPENCODE_VERSION='opencode v2.0.18' run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model nvidia/z-ai/glm-5.3 --effort xhigh)
+  status=$?
+  expect_code 0 "$status" "OpenCode v2 native worker spawn should succeed: $out"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" opencode nvidia/z-ai/glm-5.3 xhigh
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" '"model":"nvidia/z-ai/glm-5.3"' "v2 config did not pin the exact requested model"
+  assert_contains "$launch" 'opencode --standalone --auto' "v2 did not isolate its server and approve permissions"
+  assert_not_contains "$launch" '--model' "v2 root cannot accept --model"
+  assert_not_contains "$launch" '--prompt' "v2 root only prefills --prompt"
+  assert_not_contains "$launch" '"variant"' "Nvidia effort must follow record-and-omit"
+  assert_contains "$launch" "Read the brief at $HOME_DIR/data/$id/launch-brief.md and follow it exactly." "v2 brief pointer was not delivered"
+  cat > "$FAKEBIN_DIR/opencode" <<SH
+#!/usr/bin/env bash
+printf '%s\\n' "\$OPENCODE_CONFIG_CONTENT" > '$CASE_DIR/config.json'
+SH
+  chmod +x "$FAKEBIN_DIR/opencode"
+  launch=$(rg -m1 'OPENCODE_CONFIG_CONTENT=' "$LAUNCH_LOG")
+  PATH="$FAKEBIN_DIR:$PATH" bash -c "$launch"
+  jq -e '.model == "nvidia/z-ai/glm-5.3" and .agent.build.model == .model' "$CASE_DIR/config.json" >/dev/null \
+    || fail "executed v2 launch did not retain exact root and agent model selection"
+  if command -v node >/dev/null 2>&1; then
+    node --input-type=module - "$WT_DIR/.opencode/plugins/fm-busy-state.js" "$ROOT" "$HOME_DIR/state" "$id" <<'JS'
+import { pathToFileURL } from "node:url";
+import { execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
+const [pluginPath, root, state, id] = process.argv.slice(2);
+const plugin = (await import(pathToFileURL(pluginPath))).default;
+const record = () => execFileSync("bash", ["-c", '. "$1/bin/fm-busy-lib.sh"; fm_busy_record_read "$2" "$3"', "fixture", root, state, id], {encoding:"utf8"});
+let complete = false;
+const cleanup = plugin.setup({event: {async *subscribe() {
+  yield {type:"session.execution.started", data:{sessionID:"main"}};
+  yield {type:"session.execution.started", data:{sessionID:"child"}};
+  yield {type:"session.execution.succeeded", data:{sessionID:"child"}};
+  if (!record().startsWith("busy opencode-plugin session.execution.started ")) throw new Error("child terminal cleared main busy state");
+  if (existsSync(`${state}/${id}.turn-ended`)) throw new Error("child terminal emitted main completion");
+  yield {type:"session.execution.succeeded", data:{sessionID:"main"}};
+  if (!record().startsWith("idle opencode-plugin session.execution.succeeded ")) throw new Error("main terminal did not settle busy state");
+  if (!existsSync(`${state}/${id}.turn-ended`)) throw new Error("main terminal did not notify completion");
+  complete = true;
+}}});
+for (let i=0; i<100 && !complete; i++) await new Promise(resolve => setTimeout(resolve, 100));
+cleanup();
+if (!complete) throw new Error("v2 plugin did not process the native execution stream");
+JS
+    expect_code 0 "$?" "v2 plugin must scope child execution and notify main completion"
+  fi
+  pass "OpenCode v2 pins the exact model and submits a durable brief pointer"
+}
+
+test_opencode_unverified_version_refuses_before_publication() {
+  local rec id out status
+  id=profile-opencode-unknown
+  rec=$(make_spawn_case profile-opencode-unknown opencode "$id")
+  read_case_record "$rec"
+  out=$(FM_FAKE_OPENCODE_VERSION='opencode v3.0.0' run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model nvidia/z-ai/glm-5.3)
+  status=$?
+  expect_code 1 "$status" "unknown OpenCode major must refuse"
+  assert_contains "$out" 'unsupported OpenCode version' "refusal must explain the incompatible CLI"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "unknown OpenCode major published a task"
+  [ ! -s "$LAUNCH_LOG" ] || fail "unknown OpenCode major delivered a launch"
+  pass "unknown OpenCode versions fail before endpoint and task publication"
 }
 
 test_native_effort_validator_keeps_axes_separate() {
@@ -1917,6 +1986,8 @@ test_opencode_threads_model_and_effort_variant
 test_opencode_without_effort_keeps_launch_config_unchanged
 test_opencode_emits_variant_for_openai_family_effort
 test_opencode_omits_variant_when_model_family_lacks_effort
+test_opencode_v2_launch_pins_model_and_submits_pointer
+test_opencode_unverified_version_refuses_before_publication
 test_native_effort_validator_keeps_axes_separate
 test_native_pi_ultra_is_explicit_and_model_scoped
 test_batch_preserves_native_ultra

@@ -87,6 +87,12 @@
 #   build agent's variant, keyed to the resolved model, inside the
 #   OPENCODE_CONFIG_CONTENT JSON its launch already carries (config schema
 #   verified on opencode 1.18.32); without a model the axis is recorded but omitted.
+#   OpenCode v1 retains its --model/--prompt launch. V2 workers select the exact
+#   model through root model plus agent.build.model in inline config, start with
+#   --standalone --auto so no shared service must reload, then submit a durable
+#   brief pointer after the backend proves an empty composer.
+#   V2 primary/secondmate hooks are not verified and
+#   secondmate launches refuse before endpoint publication.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
@@ -2048,7 +2054,13 @@ launch_template() {
       printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox --disable hooks -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     fi
     ;;
-  opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}__EFFORTFLAG__}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+  opencode)
+    if [ "${OPENCODE_V2:-0}" = 1 ]; then
+      printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}__OPENCODEMODEL____EFFORTFLAG__}'\'' opencode --standalone --auto'
+    else
+      printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}__EFFORTFLAG__}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+    fi
+    ;;
   pi | pi-signed)
     printf '%s' '__PIBIN____PITUIMODE____PIAPPROVE____PIRESUME__'
     if [ "$kind" = secondmate ]; then
@@ -2224,6 +2236,7 @@ launch_template() {
   esac
 }
 
+OPENCODE_V2=0
 case "$ARG3" in
 *' '*) # raw launch command (unverified-adapter escape hatch)
   RAW_LAUNCH=1
@@ -2270,6 +2283,31 @@ case "$ARG3" in
   }
   ;;
 esac
+
+# OpenCode v2 removed the root --model flag and stopped auto-submitting
+# --prompt. Resolve the installed CLI before staging any launch; never select a
+# different model or a legacy command after a failed version probe.
+if [ "$HARNESS" = opencode ]; then
+  OPENCODE_VERSION=$(opencode --version) || {
+    echo "error: could not query OpenCode version; refusing an unverified launch" >&2
+    exit 1
+  }
+  case "$OPENCODE_VERSION" in
+  1.* | 'opencode v1.'*) ;;
+  2.* | 'opencode v2.'*) OPENCODE_V2=1 ;;
+  *)
+    echo "error: unsupported OpenCode version '$OPENCODE_VERSION'; verified launch majors are 1 and 2" >&2
+    exit 1
+    ;;
+  esac
+  if [ "$OPENCODE_V2" = 1 ] && [ "$KIND" = secondmate ]; then
+    echo "error: OpenCode v2 primary hooks are not verified; worker launch support does not authorize a secondmate" >&2
+    exit 1
+  fi
+fi
+if [ "$OPENCODE_V2" = 1 ]; then
+  LAUNCH=$(launch_template "$HARNESS" "$KIND") || exit 1
+fi
 
 # muse, gemini, agy, and devin are verified as CREWMATE/SCOUT adapters only. A secondmate is
 # a firstmate instance, so it needs a primary supervision protocol.
@@ -4599,6 +4637,42 @@ export const FmBusyState = async () => {
   };
 };
 EOF
+    if [ "$OPENCODE_V2" = 1 ]; then
+      cat >"$WT/.opencode/plugins/fm-busy-state.js" <<EOF
+// Native OpenCode v2 worker execution events; v1 uses its separate plugin above.
+import { execFile } from "node:child_process";
+const apply = (state, event) => new Promise((resolve) => {
+  execFile("$FM_ROOT/bin/fm-busy-event.sh", [
+    "apply", "$STATE_REAL", "$ID", state, "--gen", "$BUSY_GEN",
+    "--source", "opencode-plugin", "--event", event,
+  ], () => resolve());
+});
+export default {
+  id: "firstmate.worker.busy",
+  setup(ctx) {
+    const controller = new AbortController();
+    let session = null;
+    void (async () => {
+      for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
+        const id = event.data && event.data.sessionID;
+        if (event.type === "session.execution.started") {
+          if (session === null) session = id;
+          if (id === session) await apply("busy", event.type);
+        } else if (id === session && [
+          "session.execution.succeeded", "session.execution.failed",
+          "session.execution.interrupted",
+        ].includes(event.type)) {
+          session = null;
+          await apply("idle", event.type);
+          await new Promise((resolve) => execFile("touch", ["$TURNEND"], () => resolve()));
+        }
+      }
+    })().catch((error) => { if (!controller.signal.aborted) console.error(error); });
+    return () => controller.abort();
+  },
+};
+EOF
+    fi
     exclude_path '.opencode/plugins/fm-busy-state.js'
     ;;
   pi | pi-signed)
@@ -5054,6 +5128,16 @@ MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT" "$MODEL") || exit 1
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
+OPENCODE_MODEL_CONFIG=
+if [ "$OPENCODE_V2" = 1 ] && [ -n "$MODEL" ] && [ "$MODEL" != default ]; then
+  OPENCODE_MODEL_JSON=$(json_escape "$MODEL")
+  OPENCODE_MODEL_JSON=${OPENCODE_MODEL_JSON//\'/\'\\\'\'}
+  OPENCODE_MODEL_CONFIG=",\"model\":\"$OPENCODE_MODEL_JSON\""
+  if [ -z "$EFFORTFLAG" ]; then
+    OPENCODE_MODEL_CONFIG+=",\"agent\":{\"build\":{\"model\":\"$OPENCODE_MODEL_JSON\"}}"
+  fi
+fi
+LAUNCH=${LAUNCH//__OPENCODEMODEL__/$OPENCODE_MODEL_CONFIG}
 # Relaunch session continuity. Computed here, where the adopted endpoint (T) is
 # known, and substituted only into the Pi-family template's `__PIRESUME__`
 # placeholder; an empty value leaves every other launch byte-identical.
@@ -5369,6 +5453,26 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   spawn_herdr_presentation_order_lock_release
 fi
 spawn_send_key "$T" Enter
+if [ "$OPENCODE_V2" = 1 ]; then
+  OPENCODE_READY=0
+  for ((opencode_poll = 0; opencode_poll < 120; opencode_poll++)); do
+    if [ "$(fm_backend_composer_state "$BACKEND" "$T" "$W" 2>/dev/null)" = empty ]; then
+      OPENCODE_READY=1
+      break
+    fi
+    sleep 0.5
+  done
+  if [ "$OPENCODE_READY" != 1 ]; then
+    echo "error: OpenCode $OPENCODE_VERSION did not show a verified empty composer; brief was not sent to $T" >&2
+    exit 1
+  fi
+  OPENCODE_POINTER="Read the brief at $BRIEF_REAL and follow it exactly."
+  OPENCODE_SUBMIT=$(fm_backend_send_text_submit "$BACKEND" "$T" "$OPENCODE_POINTER" 3 0.5 0 "$W") || OPENCODE_SUBMIT=send-failed
+  if [ "$OPENCODE_SUBMIT" != empty ]; then
+    echo "error: OpenCode $OPENCODE_VERSION brief submission was not confirmed ($OPENCODE_SUBMIT); inspect $T" >&2
+    exit 1
+  fi
+fi
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
     kimi_spawn_fail "$KIMI_READY_FAILURE_DETAIL"

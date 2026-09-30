@@ -2440,3 +2440,24 @@ A throwaway scout was spawned through `bin/fm-spawn.sh --scout --harness omp --m
 6. `bin/fm-control.sh <id> exit` stopped the agent and `bin/fm-teardown.sh` returned the worktree and closed the item.
 
 `FM_OMP_LIVE_E2E=1 tests/fm-omp-primary-live-e2e.test.sh` refreshes the primary evidence; the worker path above is refreshed by repeating the scout dispatch after any omp upgrade.
+
+## OpenCode v2 worker launch
+
+Verified 2026-09-30 with OpenCode `opencode v2.0.18` on Linux using a private tmux socket, disposable Git project/worktree and FM_HOME, isolated XDG roots/database, and a local OpenAI-compatible fixture endpoint.
+The guard uses the native installed executable and exact `nvidia/z-ai/glm-5.3` model identifier, with a dummy fixture credential; it verifies configuration selection and transport rather than external Nvidia authentication or model reasoning.
+It neither copies managed credentials nor restarts the shared OpenCode service.
+`bin/fm-spawn.sh` owns version selection, worker launch, brief submission, and emitted busy-state plugin mechanics.
+V1 retains its existing launch path, covered by `tests/fm-spawn-dispatch-profile.test.sh`; v2 primary and secondmate integrations remain unverified and secondmate launch refuses.
+
+Refresh with:
+
+```sh
+TMPDIR=/sloth FM_OPENCODE_WORKER_LIVE=1 bash bin/fm-test-run.sh tests/fm-opencode-worker-live-e2e.test.sh
+# ok - opencode v2.0.18: exact GLM model, one brief pointer per launch, native completion and relaunch preserve worktree
+```
+
+The guard checks one admitted user message per launch, each session's exact provider/model, the model ID sent to the local endpoint, its native response, and the plugin's execution completion notification.
+It exercises `fm-control relaunch` on that fixture and proves the worktree HEAD and an uncommitted sentinel file survive.
+The portable regression executes generated v2 plugin wiring and proves a child session's terminal event cannot clear the main session's busy state or emit its completion notification.
+The shared composer classifier recognizes v2's `Build auto ·` footer as furniture only in the footer position, preserving pending text above it.
+Its portable regression is `tests/fm-composer-lib.test.sh`; all runtime backends consume that classifier, and the native launch guard exercises its tmux path.
