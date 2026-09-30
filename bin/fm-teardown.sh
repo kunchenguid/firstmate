@@ -302,6 +302,29 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-teardown-worktree-lib.sh
 . "$SCRIPT_DIR/fm-teardown-worktree-lib.sh"
+
+BACKLOG_DONE_ARGS=()
+# The completion links this teardown already holds locally. A scout's
+# deliverable is its report, a local-only ship lands on local main, and every
+# other ship carries the PR recorded on its own record.
+backlog_done_args() {
+  local data_relative
+  BACKLOG_DONE_ARGS=()
+  case "$KIND" in
+    scout)
+      data_relative=$(fm_backlog_data_relative "$DATA") || return 1
+      BACKLOG_DONE_ARGS=(--report "$data_relative/$ID/report.md")
+      ;;
+    *)
+      if [ "$MODE" = local-only ]; then
+        BACKLOG_DONE_ARGS=(--note "local main")
+      elif [ -n "$PR_URL" ]; then
+        BACKLOG_DONE_ARGS=(--pr "$PR_URL")
+      fi
+      ;;
+  esac
+}
+
 # Completed goals retire their recorded endpoint independently of disposable
 # copy removal. No historical journal, agent UI, continuation or operation
 # binding is an admission gate here. Shared, dirty or unlanded copies stay.
@@ -310,18 +333,25 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-task-lifecycle-lib.sh"
 teardown_completed_task() (
   local meta="$STATE/$ID.meta" lock copy project session pane other field candidate shared=0 disposition=returned-or-already-absent facts
-  local WT PROJ KIND=ship MODE PR_URL dirty generation
+  local WT PROJ KIND MODE PR_URL dirty generation backlog_status=0 captain_status=0 captain_out marker
   local copy_lock='' copy_lock_held=0
+  local BACKLOG_CLOSED=0 BACKLOG_TRANSITION=close BACKLOG_SKIP_REASON=''
+  local -a BACKLOG_DONE_ARGS=() BACKLOG_TRANSITION_FLAGS=()
   lock=$(fm_meta_lock_path "$meta") || exit 1
   fm_lock_acquire_wait "$lock"
   trap 'fm_lock_release "$lock"; if [ "$copy_lock_held" = 1 ]; then fm_lock_release "$copy_lock"; fi' EXIT
   fm_backend_validate_task_endpoint "$meta" "$ID" || exit 1
   case "$(fm_task_lifecycle mode "$ID")" in accepted|archived) ;; *) exit 1 ;; esac
   [ -z "$ENDPOINT_EXPECTED_GEN" ] || [ "$(fm_meta_get "$meta" spawn_gen)" = "$ENDPOINT_EXPECTED_GEN" ] || exit 1
-  [ "$(fm_meta_get "$meta" kind)" != secondmate ] || exit 1
+  KIND=$(fm_meta_get "$meta" kind)
+  [ -n "$KIND" ] || KIND=ship
+  [ "$KIND" != secondmate ] || exit 1
   copy=$(fm_backend_meta_exact_value "$meta" worktree) || exit 1
   project=$(fm_backend_meta_exact_value "$meta" project) || exit 1
   generation=$(fm_meta_get "$meta" spawn_gen)
+  MODE=$(fm_meta_get "$meta" mode)
+  PR_URL=$(fm_meta_get "$meta" pr)
+  [ -n "$MODE" ] || MODE=no-mistakes
   session=$(fm_backend_meta_exact_value "$meta" herdr_session) || exit 1
   pane=$(fm_backend_meta_exact_value "$meta" herdr_pane_id) || exit 1
   for other in "$STATE"/*.meta; do
@@ -390,9 +420,6 @@ teardown_completed_task() (
     fi
     WT=$copy
     PROJ=$project
-    MODE=$(fm_meta_get "$meta" mode)
-    PR_URL=$(fm_meta_get "$meta" pr)
-    [ -n "$MODE" ] || MODE=no-mistakes
     if [ "$shared" = 0 ]; then
       dirty=$(git -C "$copy" status --porcelain 2>/dev/null) || { shared=1; disposition=retained-unverified; }
       if [ -n "$dirty" ]; then shared=1; disposition=retained-dirty
@@ -412,9 +439,50 @@ teardown_completed_task() (
       fi
     fi
   fi
-  # Only resource metadata is retired. Reports, status and outcome evidence
-  # outside the disposable copy remain, including captain-held backlog rows.
-  fm_backlog_atomic_transition remove "$meta" 'completed resource record' "$STATE" || exit 1
+  if fm_backlog_transition_applies "$CONFIG" "$DATA" "$KIND"; then
+    if ! fm_backlog_meta_spawn_gen "$meta" "$STATE"; then
+      echo "error: completed cleanup could not bind $ID's backlog transition to its task generation ($FM_BACKLOG_TRANSITION_ERROR)" >&2
+      exit 1
+    fi
+    generation=$FM_BACKLOG_META_SPAWN_GEN
+    captain_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      FM_DATA_OVERRIDE="$DATA" FM_CONFIG_OVERRIDE="$CONFIG" \
+      "$SCRIPT_DIR/fm-captain-hold.sh" open "$ID" 2>&1) || captain_status=$?
+    case "$captain_status" in
+      0) BACKLOG_TRANSITION=retain; BACKLOG_TRANSITION_FLAGS=(--retain) ;;
+      1) ;;
+      *)
+        echo "error: completed cleanup could not determine whether $ID's backlog item is held for the captain" >&2
+        [ -z "$captain_out" ] || printf '%s\n' "$captain_out" >&2
+        exit 1
+        ;;
+    esac
+    backlog_done_args || {
+      echo "error: completed cleanup could not record $ID's deliverable" >&2
+      exit 1
+    }
+    marker=$(fm_backlog_close_marker_path "$STATE" "$ID") || exit 1
+    fm_backlog_close_marker_write "$STATE" "$ID" "$DATA" "$generation" \
+      "${BACKLOG_TRANSITION_FLAGS[@]+"${BACKLOG_TRANSITION_FLAGS[@]}"}" \
+      "${BACKLOG_DONE_ARGS[@]+"${BACKLOG_DONE_ARGS[@]}"}" || {
+        echo "error: completed cleanup could not record its pending backlog $BACKLOG_TRANSITION ($FM_BACKLOG_TRANSITION_ERROR)" >&2
+        exit 1
+      }
+    BACKLOG_CLOSED=1
+    fm_backlog_atomic_transition "$BACKLOG_TRANSITION" "$meta" "$marker" \
+      "$DATA" "$ID" "$STATE" "${BACKLOG_DONE_ARGS[@]+"${BACKLOG_DONE_ARGS[@]}"}" || {
+        echo "error: completed cleanup finished endpoint and copy handling, but its backlog $BACKLOG_TRANSITION remains pending ($FM_BACKLOG_TRANSITION_ERROR)" >&2
+        exit 1
+      }
+  else
+    backlog_status=$?
+    if [ "$backlog_status" -eq 2 ]; then
+      echo "error: completed cleanup could not access $ID's backlog ($FM_BACKLOG_TRANSITION_ERROR)" >&2
+      exit 1
+    fi
+    BACKLOG_SKIP_REASON=$FM_BACKLOG_TRANSITION_SKIP
+    fm_backlog_atomic_transition remove "$meta" 'completed resource record' "$STATE" || exit 1
+  fi
   facts=$(jq -cn --arg disposition "$disposition" '{taskRecordRemoved:true,endpointConfirmedGone:true,copyDisposition:$disposition,bookkeepingComplete:true}')
   fm_task_lifecycle_owner_receipt "$ID" "$generation" cleanup "$facts" locked || \
     echo 'warning: cleanup completed; lifecycle evidence could not be recorded' >&2
@@ -783,28 +851,6 @@ remove_pr_poll_artifacts() {
   rm -f "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
     "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
     "$state_dir/$id.merge-authority" "$state_dir/$id.check-trust" || return 1
-}
-
-# The completion links this teardown already holds locally. A scout's
-# deliverable is its report, a local-only ship lands on local main, and every
-# other ship carries the PR recorded on its own record.
-BACKLOG_DONE_ARGS=()
-backlog_done_args() {
-  local data_relative
-  BACKLOG_DONE_ARGS=()
-  case "$KIND" in
-    scout)
-      data_relative=$(fm_backlog_data_relative "$DATA") || return 1
-      BACKLOG_DONE_ARGS=(--report "$data_relative/$ID/report.md")
-      ;;
-    *)
-      if [ "$MODE" = local-only ]; then
-        BACKLOG_DONE_ARGS=(--note "local main")
-      elif [ -n "$PR_URL" ]; then
-        BACKLOG_DONE_ARGS=(--pr "$PR_URL")
-      fi
-      ;;
-  esac
 }
 
 # Closing the backlog item is this script's own last act on the record, not a
