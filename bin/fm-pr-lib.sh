@@ -1122,6 +1122,57 @@ fm_pr_gerrit_read_revision() {  # <host> <number>
   FM_PR_RECORD_REVISION=$revision
 }
 
+# The current patch set of one Gerrit change and whether a change message on
+# that patch set contains <marker>, read live with every cover message. Gerrit
+# names a message's patch set in its own first line ("Patch Set 3:"), which is
+# the patch_set gerrit-axi reports for the row. Consumed by bin/fm-dod-lib.sh's
+# no-mistakes ready gate, which accepts a published change only when the
+# pipeline summary was posted on the patch set it publishes. Fails on any
+# reading that does not name exactly this change and its current patch set.
+fm_pr_gerrit_read_summary() {  # <host> <number> <marker>
+  local host=$1 number=$2 marker=$3 json reading ps posted
+  FM_PR_RECORD_PATCH_SET=
+  FM_PR_RECORD_SUMMARY_POSTED=
+  command -v gerrit-axi >/dev/null 2>&1 || return 1
+  command -v jq >/dev/null 2>&1 || return 1
+  case "$number" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  if ! json=$(gerrit-axi show "$number" --host "$host" --messages all --json 2>/dev/null) \
+    || [ -z "$json" ]; then
+    return 1
+  fi
+  reading=$(printf '%s' "$json" | jq -r --argjson change "$number" --arg marker "$marker" '
+    . as $root
+    | if type == "object" and .ok == true and (.changes | type) == "array" then . else error("invalid gerrit record") end
+    | [.changes[] | select((.change | type) == "number" and .change == $change)] as $match
+    | if ($match | length) == 1 and ($match[0].patch_set | type) == "number"
+      then $match[0].patch_set
+      else error("no exact change record")
+      end
+    | . as $ps
+    | ($root.messages // []) as $messages
+    | if ($messages | type) != "array" then error("invalid messages") else . end
+    | [$messages[] | select(type == "object" and .change == $change and .patch_set == $ps
+        and (.message | type) == "string" and (.message | contains($marker)))] as $posted
+    | "\($ps) \(($posted | length) > 0)"' 2>/dev/null) || return 1
+  ps=${reading%% *}
+  posted=${reading#* }
+  case "$ps" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  case "$posted" in
+    true|false) ;;
+    *) return 1 ;;
+  esac
+  # Consumed by bin/fm-dod-lib.sh fm_dod_gerrit_summary_posted.
+  # shellcheck disable=SC2034
+  FM_PR_RECORD_PATCH_SET=$ps
+  # Consumed by bin/fm-dod-lib.sh fm_dod_gerrit_summary_posted.
+  # shellcheck disable=SC2034
+  FM_PR_RECORD_SUMMARY_POSTED=$posted
+}
+
 fm_pr_poll_retirement_data_valid() {
   local state=$1 id=$2 state_device data data_hash data_identity
   state_device=$(fm_pr_file_device "$state") || return 1

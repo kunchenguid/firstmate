@@ -236,15 +236,21 @@ if [ -n "${FM_TEST_GERRIT_RAW:-}" ]; then
   exit 0
 fi
 change=${FM_TEST_GERRIT_CHANGE:-${2:-0}}
-printf '{"ok":true,"op":"show","count":1,"missing":[],"changes":[{"change":%s,"subject":%s,"project":"p","status":"%s","wip":false,"submit":"%s","submittable":%s,"blocked_on":"%s","patch_set":1,"revision":"%s","url":"%s"}]}\n' \
+patch_set=${FM_TEST_GERRIT_PATCH_SET:-1}
+# Cover messages, as `show --messages all` reports them: by default the
+# no-mistakes pipeline summary a worker posted on the current patch set.
+messages=${FM_TEST_GERRIT_MESSAGES-"[{\"change\":$change,\"patch_set\":$patch_set,\"author\":\"worker\",\"message\":\"Patch Set $patch_set:\\n\\nno-mistakes pipeline summary\\n\\nno findings\"}]"}
+printf '{"ok":true,"op":"show","count":1,"missing":[],"changes":[{"change":%s,"subject":%s,"project":"p","status":"%s","wip":false,"submit":"%s","submittable":%s,"blocked_on":"%s","patch_set":%s,"revision":"%s","url":"%s"}],"messages":%s}\n' \
   "$change" \
   "${FM_TEST_GERRIT_SUBJECT:-\"fixture change\"}" \
   "${FM_TEST_GERRIT_STATUS:-NEW}" \
   "${FM_TEST_GERRIT_SUBMIT:-NOT_READY}" \
   "${FM_TEST_GERRIT_SUBMITTABLE:-false}" \
   "${FM_TEST_GERRIT_BLOCKED_ON:-Code-Review}" \
+  "$patch_set" \
   "${FM_TEST_GERRIT_REVISION:-5f07a68436929a527ddc7abadc8ef1abceae40ed}" \
-  "${FM_TEST_GERRIT_URL:-https://gerrit.example/c/group/apps/console/+/4201}"
+  "${FM_TEST_GERRIT_URL:-https://gerrit.example/c/group/apps/console/+/4201}" \
+  "$messages"
 SH
   # no-mistakes, answering only `axi status` the way the real CLI does from a
   # worker copy: a run object, then its branch_sync block. By default the run's
@@ -1952,7 +1958,7 @@ test_gerrit_nm_ready_gate_requires_recovered_custody() {
   # The no-mistakes contract's ready report also names the summary message's
   # patch set after the published line; that suffix must not hide the change.
   set +e
-  out=$(FM_TEST_GERRIT_REVISION=$squash FM_TEST_NM_PIPELINE_HEAD=$fixed \
+  out=$(FM_TEST_GERRIT_REVISION=$squash FM_TEST_NM_PIPELINE_HEAD=$fixed FM_TEST_GERRIT_PATCH_SET=2 \
     FM_TEST_GERRIT_AXI_LOG="$dir/gerrit-axi.log" PATH="$dir/fakebin:$BASE_PATH" \
     bash -c '. "$1/bin/fm-timeout-lib.sh"; . "$1/bin/fm-dod-lib.sh"
       fm_dod_accept_ship_done ship no-mistakes "$2" "$3" "$4"' \
@@ -1960,6 +1966,54 @@ test_gerrit_nm_ready_gate_requires_recovered_custody() {
   rc=$?
   set -e
   [ "$rc" -eq 0 ] || fail "the done gate refused a ready report naming its pipeline summary message: $out"
+  grep -qF -- "show 4201 --host gerrit.example --messages all --json" "$dir/gerrit-axi.log" \
+    || fail "the gate did not read the change's cover messages from its own server"
+
+  # A skipped post leaves no summary on the published patch set, and a summary
+  # posted before a republish sits on a patch set the reviewer no longer sees:
+  # both are refused though the published tree is right.
+  set +e
+  out=$(FM_TEST_GERRIT_REVISION=$squash FM_TEST_NM_PIPELINE_HEAD=$fixed FM_TEST_GERRIT_MESSAGES='[]' \
+    PATH="$dir/fakebin:$BASE_PATH" \
+    bash -c '. "$1/bin/fm-timeout-lib.sh"; . "$1/bin/fm-dod-lib.sh"
+      fm_dod_accept_ship_done ship no-mistakes "$2" "$3" "$4"' \
+    _ "$ROOT" "$dir/wt" "$dir/project" "$line; pipeline summary posted on patch set 1" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "the done gate accepted a ready report whose summary was never posted"
+  case "$out" in
+    *"no pipeline summary message is on patch set 1"*) ;;
+    *) fail "the refusal did not say the summary is missing from the published patch set: $out" ;;
+  esac
+  set +e
+  out=$(FM_TEST_GERRIT_REVISION=$squash FM_TEST_NM_PIPELINE_HEAD=$fixed FM_TEST_GERRIT_PATCH_SET=2 \
+    FM_TEST_GERRIT_MESSAGES='[{"change":4201,"patch_set":1,"author":"worker","message":"Patch Set 1:\n\nno-mistakes pipeline summary\n\nno findings"}]' \
+    PATH="$dir/fakebin:$BASE_PATH" \
+    bash -c '. "$1/bin/fm-timeout-lib.sh"; . "$1/bin/fm-dod-lib.sh"
+      fm_dod_accept_ship_done ship no-mistakes "$2" "$3" "$4"' \
+    _ "$ROOT" "$dir/wt" "$dir/project" "$line; pipeline summary posted on patch set 1" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "the done gate accepted a summary left on a superseded patch set"
+  case "$out" in
+    *"no pipeline summary message is on patch set 2"*) ;;
+    *) fail "the refusal did not say the current patch set lacks the summary: $out" ;;
+  esac
+  # A report naming a patch set other than the one that carries the summary is
+  # refused too, since it names a message the reviewer is not looking at.
+  set +e
+  out=$(FM_TEST_GERRIT_REVISION=$squash FM_TEST_NM_PIPELINE_HEAD=$fixed \
+    PATH="$dir/fakebin:$BASE_PATH" \
+    bash -c '. "$1/bin/fm-timeout-lib.sh"; . "$1/bin/fm-dod-lib.sh"
+      fm_dod_accept_ship_done ship no-mistakes "$2" "$3" "$4"' \
+    _ "$ROOT" "$dir/wt" "$dir/project" "$line; pipeline summary posted on patch set 3" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "the done gate accepted a ready report naming the wrong patch set"
+  case "$out" in
+    *"names the pipeline summary on patch set 3"*) ;;
+    *) fail "the refusal did not name the mismatched patch set: $out" ;;
+  esac
 
   write_task_meta "$dir" task-recovered
   FM_TEST_GERRIT_REVISION=$squash FM_TEST_NM_PIPELINE_HEAD=$fixed run_check_entry "$dir" task-recovered "$url" >/dev/null \
@@ -1970,9 +2024,9 @@ test_gerrit_nm_ready_gate_requires_recovered_custody() {
   : > "$dir/nm.log"
   write_task_meta "$dir" task-direct
   sed -i.bak 's/^mode=no-mistakes$/mode=direct-PR/' "$state/task-direct.meta" && rm -f "$state/task-direct.meta.bak"
-  FM_TEST_GERRIT_REVISION=$squash FM_TEST_NM_FAIL=1 FM_TEST_NM_LOG="$dir/nm.log" \
+  FM_TEST_GERRIT_REVISION=$squash FM_TEST_NM_FAIL=1 FM_TEST_NM_LOG="$dir/nm.log" FM_TEST_GERRIT_MESSAGES='[]' \
     run_check_entry "$dir" task-direct "$url" >/dev/null \
-    || fail "a direct-PR Gerrit publish was refused over a pipeline it never runs"
+    || fail "a direct-PR Gerrit publish was refused over a pipeline it never runs or a summary it never posts"
   [ ! -s "$dir/nm.log" ] || fail "a direct-PR Gerrit publish consulted no-mistakes"
   pass "a no-mistakes Gerrit ready report requires the pipeline's fixes recovered into the published copy"
 }
