@@ -467,6 +467,29 @@ test_sandbox_verification_is_explicit_and_stays_disabled() {
   pass "sandbox verification requires explicit authority, reads back one disposable session, and stays disabled"
 }
 
+test_durable_state_skips_provider_readback() {
+  local home fakebin id=durable-state out sha
+  home=$(new_home durable-state)
+  fakebin=$(make_fake_bytedcli "$home")
+  new_task "$home" "$id"
+  sha=$(file_sha256 "$home/data/$id/instructions.txt")
+  FM_HOME="$home" STATE="$home/state" DATA="$home/data" bash -c '
+    . "$1/bin/fm-aime-cloud-lib.sh"
+    fm_aime_state_initialize "$2" cn "$3" research "$4" "$5" 0.124.0
+    fm_aime_state_transition "$2" submitted "" "" "$6" "$7" "" send-accepted "" "" not-armed ""
+  ' _ "$ROOT" "$id" "$SPACE_ID" "$home/data/$id/instructions.txt" "$sha" \
+    "$SESSION_ID" "$MESSAGE_ID" || fail "durable AIME state fixture failed"
+  : >"$home/bytedcli.log"
+
+  out=$(run_aime "$home" "$fakebin" state "$id" --durable-only) \
+    || fail "durable-only AIME state read failed"
+  assert_contains "$out" \
+    "state: working · source: cloud-state · provider=aime phase=submitted outcome=none freshness=durable-local remote-readback=deferred" \
+    "durable-only AIME state omitted its freshness gap"
+  [ ! -s "$home/bytedcli.log" ] || fail "durable-only AIME state reached the provider"
+  pass "durable-only AIME state is local and labels deferred provider freshness"
+}
+
 test_dispatch_completion_and_duplicate_replay() {
   local home fakebin trigger out status_count result sequence
   home=$(new_home dispatch-success)
@@ -1448,6 +1471,7 @@ SH
 test_probe_and_disabled_gate
 test_probe_failures_are_distinct
 test_sandbox_verification_is_explicit_and_stays_disabled
+test_durable_state_skips_provider_readback
 test_dispatch_completion_and_duplicate_replay
 test_oversized_replay_stays_valid_through_runner_capture
 test_stopped_terminal_unavailable_retires_generations_and_report

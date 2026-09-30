@@ -878,7 +878,7 @@ test_terminal_outcomes_with_visible_answer() {
 }
 
 test_provider_states_and_zero_result() {
-  local home fakebin id out observation
+  local home fakebin id out observation provider_calls
   home=$(new_home states); fakebin=$(make_fake_bytedcli "$home"); write_ida_config "$home"
   id=ida-zero; new_task "$home" "$id"; : >"$home/sessions.tsv"
   FM_IDA_FAKE_MODE=zero dispatch_ida "$home" "$fakebin" "$id" >/dev/null || fail "zero-result dispatch failed"
@@ -901,6 +901,13 @@ test_provider_states_and_zero_result() {
   staged="$home/state-$id.json"
   jq '.phase="running" | .provider_checkpoint="provider-running"' "$(state_file "$home" "$id")" >"$staged"
   chmod 0600 "$staged"; mv "$staged" "$(state_file "$home" "$id")"
+  provider_calls=$(wc -l < "$home/bytedcli.log" | tr -d ' ')
+  FM_IDA_FAKE_MODE=list-unavailable out=$(run_ida "$home" "$fakebin" state "$id" --durable-only)
+  assert_contains "$out" \
+    "state: working · source: remote-state · provider=ida phase=running outcome=none freshness=durable-local remote-readback=deferred" \
+    "durable-only iDA state omitted its freshness gap"
+  [ "$(wc -l < "$home/bytedcli.log" | tr -d ' ')" -eq "$provider_calls" ] \
+    || fail "durable-only iDA state reached the provider"
   FM_IDA_FAKE_MODE=running out=$(run_ida "$home" "$fakebin" state "$id")
   assert_contains "$out" 'state: working' "running iDA state was not healthy"
   FM_IDA_FAKE_MODE=failed out=$(run_ida "$home" "$fakebin" state "$id")

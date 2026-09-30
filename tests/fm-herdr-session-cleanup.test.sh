@@ -71,6 +71,19 @@ fm_backend_herdr_session() { printf test; }
 fm_backend_herdr_presentation_session_lock_path() { printf '%s/presentation.lock' "$TMP_ROOT"; }
 fm_lock_try_acquire() {
   printf '%s\n' "$1" >> "$LOCK_LOG"
+  if [ "$1" = "$TMP_ROOT/presentation.lock" ] && [ -e "$FIXTURE_DIR/inject-duplicate-on-lock" ]; then
+    write_v1 fm-task
+    rm -f "$FIXTURE_DIR/inject-duplicate-on-lock"
+  fi
+  if [ "$1" = "$TMP_ROOT/presentation.lock" ] && [ -e "$FIXTURE_DIR/rewrite-journal-on-lock" ]; then
+    write_v1 "$ID" ZzYyXxWwVvUuTtSsRrQqPp
+    rm -f "$FIXTURE_DIR/rewrite-journal-on-lock"
+  fi
+  if [ "$1" = "$TMP_ROOT/presentation.lock" ] && [ -e "$FIXTURE_DIR/rewrite-v3-home-on-lock" ]; then
+    mkdir -p "$TMP_ROOT/other-home"
+    write_v3 "$TMP_ROOT/other-home" "$WS" "$TAB" "$PANE"
+    rm -f "$FIXTURE_DIR/rewrite-v3-home-on-lock"
+  fi
   mkdir "$1" 2>/dev/null
 }
 fm_lock_release() { rm -rf -- "$1"; }
@@ -214,6 +227,18 @@ write_v2() { # <home> <workspace> <tab> <pane>
   } > "$FM_STATE_OVERRIDE/$ID.herdr-presentation"
 }
 
+write_v3() { # <home> <workspace> <tab> <pane>
+  write_v2 "$@"
+  sed -i 's/^version=2$/version=3/' "$FM_STATE_OVERRIDE/$ID.herdr-presentation"
+  {
+    printf 'spawn_gen=1\n'
+    printf 'terminal_id=terminal-1\n'
+    printf 'session_instance=session-1\n'
+    printf 'shell_pid=67\n'
+    printf 'shell_start=Wed Sep 30 08:00:00 2026\n'
+  } >> "$FM_STATE_OVERRIDE/$ID.herdr-presentation"
+}
+
 write_cross_home_v2() {
   mkdir -p "$TMP_ROOT/other-home"
   write_v2 "$TMP_ROOT/other-home" "$WS" "$TAB" "$PANE"
@@ -242,6 +267,62 @@ assert_preserved() { # <case>
   pass "$name preserves the candidate"
 }
 
+run_index_matrix_case_isolated() (
+  local journals=$1 workspaces=$2 matrix_root=$3 count_file snapshot n task token workspace_snapshot
+  count_file="$matrix_root/snapshots.log"
+  : > "$count_file"
+  for n in $(seq -w 1 "$journals"); do
+    task="indexed-$n"
+    token=$(printf 'A%021d' "$((10#$n))")
+    printf 'version=1\ntask_id=%s\nprojection_id=%s\n' "$task" "$token" \
+      > "$STATE/$task.herdr-presentation"
+    printf 'kind=scout\n' > "$STATE/$task.meta"
+  done
+  workspace_snapshot=$(
+    for n in $(seq -w 1 "$workspaces"); do
+      task="indexed-$n"
+      token=$(printf 'A%021d' "$((10#$n))")
+      jq -cn --arg id "w$n" --arg lbl "└ $task · p:$token" \
+        '{workspace_id:$id,label:$lbl}'
+    done | jq -sc '{result:{workspaces:.}}'
+  )
+  fm_backend_herdr_session() { printf 'test\n'; }
+  fm_backend_herdr_cli() {
+    [ "${2:-} ${3:-}" = 'workspace list' ] || return 1
+    printf '%s\n' "$workspace_snapshot"
+  }
+  fm_backend_herdr_projection_journal_snapshot() {
+    local journal=$1 expected_id=$2 actual_id actual_token
+    printf 'snapshot\n' >> "$count_file"
+    actual_id=$(sed -n 's/^task_id=//p' "$journal")
+    actual_token=$(sed -n 's/^projection_id=//p' "$journal")
+    [ "$actual_id" = "$expected_id" ] && [ -n "$actual_token" ] || return 1
+    FM_BACKEND_HERDR_JOURNAL_VERSION=1
+    FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID=$actual_token
+  }
+  fm_backend_herdr_projection_close_pane_focus_preserving() {
+    : > "$matrix_root/unexpected-close"
+    return 1
+  }
+  fm_herdr_session_cleanup >/dev/null 2>&1
+  [ ! -e "$matrix_root/unexpected-close" ] || return 1
+  snapshot=$(wc -l < "$count_file" | tr -d ' ')
+  [ "$snapshot" = "$journals" ] || {
+    printf 'indexed discovery parsed %s journal snapshots for %s journals and %s workspaces\n' \
+      "$snapshot" "$journals" "$workspaces" >&2
+    return 1
+  }
+)
+
+run_index_matrix_case() {
+  local journals=$1 workspaces=$2 matrix_root home
+  matrix_root="$TMP_ROOT/index-$journals-$workspaces"
+  home="$matrix_root/home"
+  mkdir -p "$home/state"
+  FM_HOME="$home" STATE="$home/state" \
+    run_index_matrix_case_isolated "$journals" "$workspaces" "$matrix_root"
+}
+
 reset_fixture
 fm_herdr_session_cleanup >/dev/null 2>&1
 [ ! -e "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] || fail "positive cleanup kept the journal"
@@ -253,6 +334,14 @@ fm_herdr_session_cleanup >/dev/null 2>&1
 [ "$(wc -l < "$CLOSE_LOG" | tr -d ' ')" = 1 ] || fail "repeat cleanup closed again"
 pass "successful cleanup is idempotent on repeat"
 
+for matrix in 5:5 10:10 15:15 85:1 85:3 85:5; do
+  journals=${matrix%:*}
+  workspaces=${matrix#*:}
+  run_index_matrix_case "$journals" "$workspaces" \
+    || fail "indexed discovery failed for matrix $journals journals / $workspaces workspaces"
+done
+pass "journal discovery parses each journal once across the 5/10/15/85 matrix"
+
 reset_fixture; printf '%s\n' '└ malformed p:AbCdEfGhIjKlMnOpQrStUv' > "$FIXTURE_DIR/title"; assert_preserved "malformed title"
 reset_fixture; printf '%s\n' '└ missing-token' > "$FIXTURE_DIR/title"; assert_preserved "missing token"
 reset_fixture; printf 'version=1\ntask_id=%s\nprojection_id=short\n' "$ID" > "$FM_STATE_OVERRIDE/$ID.herdr-presentation"; assert_preserved "malformed journal"
@@ -260,6 +349,11 @@ reset_fixture; : > "$FIXTURE_DIR/duplicate-token"; assert_preserved "duplicate t
 reset_fixture; printf '%s\n' "└ task · p:$TOKEN p:$TOKEN" > "$FIXTURE_DIR/title"; assert_preserved "duplicate title token"
 reset_fixture; rm -f "$FM_STATE_OVERRIDE/$ID.herdr-presentation"; assert_preserved "zero journal match"
 reset_fixture; write_v1 fm-task; assert_preserved "multiple journal matches"
+reset_fixture; : > "$FIXTURE_DIR/inject-duplicate-on-lock"; assert_preserved "new conflicting journal under lock"
+reset_fixture; : > "$FIXTURE_DIR/rewrite-journal-on-lock"; assert_preserved "changed journal bytes under lock"
+reset_fixture; write_v3 "$FM_HOME" "$WS" "$TAB" "$PANE"
+: > "$FIXTURE_DIR/rewrite-v3-home-on-lock"
+assert_preserved "changed v3 home under lock"
 reset_fixture; rm -f "$FM_STATE_OVERRIDE/$ID.herdr-presentation"; write_cross_home_v2; assert_preserved "cross-home journal"
 reset_fixture; write_v2 "$FM_HOME" w9 "$TAB" "$PANE"; assert_preserved "v2 workspace binding mismatch"
 reset_fixture; write_v2 "$FM_HOME" "$WS" w9:t1 "$PANE"; assert_preserved "v2 tab binding mismatch"
@@ -269,6 +363,14 @@ fm_herdr_session_cleanup >/dev/null 2>&1
 [ ! -e "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] || fail "matching v2 cleanup kept the journal"
 [ "$(wc -l < "$CLOSE_LOG" | tr -d ' ')" = 1 ] || fail "matching v2 cleanup did not close exactly once"
 pass "v2 cleanup requires and accepts the exact journal endpoint binding"
+reset_fixture; write_v3 "$FM_HOME" "$WS" "$TAB" "$PANE"
+fm_herdr_session_cleanup >/dev/null 2>&1
+[ ! -e "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] || fail "matching v3 cleanup kept the journal"
+[ "$(wc -l < "$CLOSE_LOG" | tr -d ' ')" = 1 ] || fail "matching v3 cleanup did not close exactly once"
+pass "v3 cleanup requires and accepts the exact journal endpoint binding"
+reset_fixture; mkdir -p "$TMP_ROOT/other-home"
+write_v3 "$TMP_ROOT/other-home" "$WS" "$TAB" "$PANE"
+assert_preserved "cross-home v3 journal"
 reset_fixture; : > "$FM_STATE_OVERRIDE/$ID.meta"; assert_preserved "current task metadata"
 reset_fixture; printf 'live\n' > "$FIXTURE_DIR/agent"; assert_preserved "registered agent"
 reset_fixture; printf 'unknown\n' > "$FIXTURE_DIR/agent"; assert_preserved "unknown agent"

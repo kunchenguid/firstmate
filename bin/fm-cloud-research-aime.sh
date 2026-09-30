@@ -5,7 +5,7 @@
 #   fm-cloud-research-aime.sh probe [--site <site>] [--space-id <uuid>]
 #   fm-cloud-research-aime.sh dispatch <task-id> --instructions <private-file> [--document]
 #   fm-cloud-research-aime.sh adopt <task-id>
-#   fm-cloud-research-aime.sh state <task-id>
+#   fm-cloud-research-aime.sh state <task-id> [--durable-only]
 #   fm-cloud-research-aime.sh interrupt-wait <task-id>
 #   fm-cloud-research-aime.sh cancel <task-id>
 #   fm-cloud-research-aime.sh retire <task-id>
@@ -642,14 +642,29 @@ state_from_phase() { # <phase>
 }
 
 cmd_state() {
-  local id=${1-} root observation live_class state provider_status terminal output_ready
-  [ "$#" -eq 1 ] || usage
+  local id=${1-} root observation live_class state provider_status terminal output_ready durable_only=0
+  if [ "$#" -eq 2 ] && [ "$2" = --durable-only ]; then durable_only=1
+  elif [ "$#" -ne 1 ]; then usage
+  fi
   fm_aime_task_id_valid "$id" || die "invalid task id"
   if ! fm_aime_state_load "$id"; then
     printf 'state: unknown · source: none · invalid or missing AIME task state\n'
     return 0
   fi
   state=$(state_from_phase "$AIME_STATE_PHASE")
+  if [ "$durable_only" -eq 1 ]; then
+    case "$AIME_STATE_PHASE" in
+      submitted|running|result-unavailable)
+        printf 'state: %s · source: cloud-state · provider=aime phase=%s outcome=%s freshness=durable-local remote-readback=deferred\n' \
+          "$state" "$AIME_STATE_PHASE" "${AIME_STATE_OUTCOME:-none}"
+        ;;
+      *)
+        printf 'state: %s · source: cloud-state · provider=aime phase=%s outcome=%s freshness=durable-local\n' \
+          "$state" "$AIME_STATE_PHASE" "${AIME_STATE_OUTCOME:-none}"
+        ;;
+    esac
+    return 0
+  fi
   case "$AIME_STATE_PHASE" in
     terminal-success|terminal-failure)
       printf 'state: %s · source: cloud-state · phase=%s outcome=%s\n' \

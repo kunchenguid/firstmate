@@ -46,9 +46,10 @@
 #   6. fleet digest   - one de-duplicated compact backlog inventory, one
 #                       identity-complete summary for every state/*.meta, the
 #                       newest state/*.status event with a direct full-log
-#                       pointer, provider-aware current task state, the away
-#                       posture, and a cheap endpoint-liveness read for local
-#                       tasks: read-only, always runs.
+#                       pointer, durable provider state with explicit freshness
+#                       gaps for remote tasks, the away posture, and a cheap
+#                       endpoint-liveness read for local tasks: read-only,
+#                       always runs.
 #   7. network checks - the result of the deferred network stage started back at
 #                       step 1, harvested WITHOUT waiting for it.
 #   8. context digest - data/projects.md, data/captain.md, and
@@ -169,8 +170,8 @@
 # unbounded digest is no longer merely slow - it can strand a whole session or
 # first turn behind one hung subprocess. Every remaining step is local, but
 # local is not the same as bounded: tool version probes, the backlog listing,
-# and the per-task endpoint reads are all unbounded subprocesses. So the whole
-# digest still runs as ONE bounded child of this script
+# local-task endpoint reads, and remote-task durable-state reads are all
+# unbounded subprocesses. So the whole digest still runs as ONE bounded child of this script
 # (FM_SESSION_START_TIMEOUT, default 120s). The deferred network stage
 # deliberately sits OUTSIDE that bound,
 # in its own process group under its own aggregate deadline, so a truncated
@@ -181,6 +182,11 @@
 # sections that were therefore never emitted, and still exits 0. The child
 # records its progress in FM_SESSION_START_STAGE_FILE, which is also the flag
 # that tells a child it is the child - the parent never recurses.
+# When FM_SESSION_START_TIMING_FILE names an existing regular non-symlink file,
+# the child appends one `v1<TAB>stage<TAB>name<TAB>monotonic-ms` duration row for
+# every completed digest stage.
+# Timing is opt-in, records no digest bodies, and never changes startup success
+# or failure when the clock or destination is unavailable.
 # Hosts without timeout, gtimeout, or perl use the shared pure-Bash watchdog, so
 # the digest never runs without the same hard bound and process-group cleanup.
 #
@@ -260,10 +266,37 @@ done
 # names the stage it is entering, and the parent reports every stage at or after
 # that one as never emitted. Keep it in the exact order the digest prints.
 SESSION_START_STAGES='lock bootstrap wake-queue supervision-instructions read-once fleet-state network-checks context next-step'
+SESSION_START_TIMING_STAGE=
+SESSION_START_TIMING_STARTED_MS=
+
+monotonic_ms() {
+  if command -v perl >/dev/null 2>&1; then
+    perl -MTime::HiRes=clock_gettime,CLOCK_MONOTONIC -e \
+      'printf "%.0f\n", 1000 * clock_gettime(CLOCK_MONOTONIC)'
+  elif command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import time; print(time.monotonic_ns() // 1000000)'
+  else
+    return 1
+  fi
+}
+
+record_stage_duration() { # <next-stage-or-complete>
+  local next=$1 now duration timing=${FM_SESSION_START_TIMING_FILE:-}
+  [ -n "$timing" ] && [ -f "$timing" ] && [ ! -L "$timing" ] || return 0
+  now=$(monotonic_ms 2>/dev/null) || return 0
+  case "$now" in ''|*[!0-9]*) return 0 ;; esac
+  if [ -n "$SESSION_START_TIMING_STAGE" ] && [ -n "$SESSION_START_TIMING_STARTED_MS" ]; then
+    duration=$((now - SESSION_START_TIMING_STARTED_MS))
+    printf 'v1\tstage\t%s\t%s\n' "$SESSION_START_TIMING_STAGE" "$duration" >> "$timing" 2>/dev/null || true
+  fi
+  SESSION_START_TIMING_STAGE=$next
+  SESSION_START_TIMING_STARTED_MS=$now
+}
 
 stage() {  # <stage-name>: breadcrumb for the parent's truncation banner
   [ -n "${FM_SESSION_START_STAGE_FILE:-}" ] || return 0
   printf '%s\n' "$1" > "$FM_SESSION_START_STAGE_FILE" 2>/dev/null || true
+  record_stage_duration "$1"
 }
 
 # shellcheck source=bin/fm-timeout-lib.sh
@@ -610,8 +643,8 @@ print_meta_summary() { # <meta-file> <task-id>
     printf 'endpoint: not applicable (executor=%s provider=%s)\n' "$executor" "${provider:-unknown}"
     FM_ROOT_OVERRIDE="$FM_ROOT" FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
       FM_DATA_OVERRIDE="$DATA" FM_CONFIG_OVERRIDE="$CONFIG" \
-      "$SCRIPT_DIR/fm-task-state.sh" "$id" 2>/dev/null \
-      || printf 'state: unknown · source: cloud-readback · provider-aware state read failed\n'
+      "$SCRIPT_DIR/fm-task-state.sh" --durable-only "$id" 2>/dev/null \
+      || printf 'state: unknown · source: durable-state · local provider state read failed\n'
   elif [ -n "$window" ]; then
     if fm_backend_target_exists "$backend" "${target:-$window}" "fm-$id"; then
       printf 'endpoint: alive (backend=%s window=%s)\n' "$backend" "$window"
@@ -1097,6 +1130,8 @@ cat <<'EOF'
 The digest above is complete for this session start. The READ-ONCE CONTRACT
 section near the top of it governs what may still be read from disk.
 EOF
+
+record_stage_duration complete
 
 if [ "$READ_ONLY" -eq 0 ] && [ "$REEMIT" -eq 0 ]; then
   COMPLETION_RECORDED=0

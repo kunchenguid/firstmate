@@ -110,7 +110,8 @@ The shared runner's changed-file coverage maps both suites to the remote-agent o
 ## State and recovery boundary
 
 New native tasks publish `executor=remote-agent` and `provider=aime|ida`.
-`fm-task-state.sh`, session start, and fleet snapshot use provider-aware reads and report no local endpoint.
+Ordinary `fm-task-state.sh` calls and fleet snapshots use provider-aware reads and report no local endpoint.
+Session start instead reads the validated durable provider record, labels deferred freshness when remote readback could change the answer, and never reaches the provider from its blocking path.
 The process-event source remains the existing durable notification and restart boundary; iDA adds no second notification control plane, and its retry delay stays inside the registered source waiter.
 An idle or processing provider session maps to healthy working state, while unavailable observation remains distinct from terminal failure.
 Repeated identical nonterminal transient read failures remain inside the adapter's current waiter after the first applied generation and therefore do not create a second notification identity.
