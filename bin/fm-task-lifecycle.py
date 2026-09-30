@@ -205,6 +205,12 @@ def native_session(path, index_directory, selected_entry=None, input_id=None):
     with os.fdopen(fd, 'rb') as stream:
         st = os.fstat(stream.fileno())
         require(stat.S_ISREG(st.st_mode) and st.st_nlink == 1 and st.st_uid == os.getuid(), 'unsafe native input session file identity')
+        probe = os.environ.get('FM_TASK_SESSION_READ_PROBE')
+        def emit_probe(session_bytes, records, status):
+            if probe:
+                with open(probe, 'a', encoding='utf-8') as output:
+                    output.write(json.dumps({'bytes': session_bytes, 'records': records, 'status': status}) + '\n')
+        emit_probe(0, 0, 'start')
         index_directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         index_st = index_directory.lstat()
         require(stat.S_ISDIR(index_st.st_mode) and index_st.st_uid == os.getuid() and not index_directory.is_symlink(),
@@ -244,18 +250,25 @@ def native_session(path, index_directory, selected_entry=None, input_id=None):
         index = cached or {'schema': SESSION_INDEX_SCHEMA, 'path': str(path), 'device': st.st_dev,
                            'inode': st.st_ino, 'indexed_size': 0, 'header': None, 'entries': [], 'leaf_id': None}
         offsets = {item['id']: item for item in index['entries']}
-        stream.seek(index['indexed_size'])
+        starting_offset = index['indexed_size']
+        checkpoint = starting_offset
+        stream.seek(starting_offset)
         scanned_bytes = 0
         scanned_records = 0
-        while True:
-            require(time.monotonic() - started < 10, 'native session bounded readback deadline exceeded')
+        while stream.tell() < st.st_size and time.monotonic() - started < 10:
             offset = stream.tell()
-            raw = stream.readline(SESSION_RECORD_BYTES + 1)
+            remaining = min(SESSION_SCAN_BYTES - scanned_bytes, st.st_size - offset)
+            if remaining <= 0:
+                break
+            raw = stream.readline(min(SESSION_RECORD_BYTES + 1, remaining))
             if not raw:
                 break
             scanned_bytes += len(raw)
-            require(scanned_bytes <= SESSION_SCAN_BYTES, 'native session incremental readback exceeds byte bound')
             require(len(raw) <= SESSION_RECORD_BYTES, 'native session record exceeds bounded readback')
+            if not raw.endswith(b'\n') and stream.tell() < st.st_size:
+                stream.seek(offset)
+                break
+            checkpoint = stream.tell()
             if not raw.strip():
                 continue
             entry = json.loads(raw, object_pairs_hook=unique_object)
@@ -279,11 +292,12 @@ def native_session(path, index_directory, selected_entry=None, input_id=None):
             offsets[entry_id] = item
             index['leaf_id'] = entry_id
         require(index['header'] is not None, 'missing session identity')
-        index['indexed_size'] = st.st_size
+        index['indexed_size'] = checkpoint
         index['mtime_ns'] = st.st_mtime_ns
-        boundary_length = min(4096, st.st_size)
-        index['boundary_sha256'] = digest(os.pread(stream.fileno(), boundary_length, st.st_size - boundary_length))
-        if scanned_bytes or cached is None:
+        boundary_length = min(4096, checkpoint)
+        index['boundary_sha256'] = digest(os.pread(stream.fileno(), boundary_length, checkpoint - boundary_length))
+        changed_index = bool(scanned_bytes or cached is None)
+        def persist_index():
             raw_index = (json.dumps(index, ensure_ascii=False, separators=(',', ':')) + '\n').encode()
             require(len(raw_index) <= SESSION_INDEX_BYTES, 'native session index exceeds byte bound')
             temporary_fd, temporary = tempfile.mkstemp(prefix='.session-index.', dir=index_directory)
@@ -293,6 +307,17 @@ def native_session(path, index_directory, selected_entry=None, input_id=None):
                 os.replace(temporary, index_path)
             finally:
                 if os.path.exists(temporary): os.unlink(temporary)
+        after_scan = os.fstat(stream.fileno())
+        if (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns) != \
+                (after_scan.st_dev, after_scan.st_ino, after_scan.st_size, after_scan.st_mtime_ns):
+            emit_probe(scanned_bytes, scanned_records, 'changed')
+            raise Refusal('native session changed during readback')
+        if checkpoint < st.st_size:
+            require(checkpoint > starting_offset, 'native session bounded readback made no complete-record progress')
+            if changed_index:
+                persist_index()
+            emit_probe(scanned_bytes, scanned_records, 'checkpoint')
+            raise Refusal('native session index catch-up incomplete; retry the same operation')
 
         chain, seen = [], set()
         entry_id = index['leaf_id']
@@ -340,10 +365,9 @@ def native_session(path, index_directory, selected_entry=None, input_id=None):
         final = os.fstat(stream.fileno())
         require((st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns) ==
                 (final.st_dev, final.st_ino, final.st_size, final.st_mtime_ns), 'native session changed during readback')
-        probe = os.environ.get('FM_TASK_SESSION_READ_PROBE')
-        if probe:
-            with open(probe, 'a', encoding='utf-8') as output:
-                output.write(json.dumps({'bytes': session_bytes, 'records': scanned_records}) + '\n')
+        if changed_index:
+            persist_index()
+        emit_probe(session_bytes, scanned_records, 'success')
         return entries
 
 

@@ -1,6 +1,6 @@
 // Real installed SessionManager, isolated home, and public native tool callbacks.
 import assert from 'node:assert/strict';
-import { chmodSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { EventEmitter } from 'node:events';
 import { spawnSync } from 'node:child_process';
@@ -75,10 +75,31 @@ async function install() {
 }
 let owner = await install();
 async function tool(params, ok = true) {
-  await fire('tool_call', { type: 'tool_call', toolName: 'fm_task_continuation', input: params });
-  const result = await tools.get('fm_task_continuation').execute('call', params, undefined, undefined, ctx());
+  const result = await rawTool(params);
   assert.equal(Boolean(result.isError), !ok, JSON.stringify(result));
   return ok ? JSON.parse(result.content[0].text) : result.content[0].text;
+}
+async function rawTool(params) {
+  await fire('tool_call', { type: 'tool_call', toolName: 'fm_task_continuation', input: params });
+  return tools.get('fm_task_continuation').execute('call', params, undefined, undefined, ctx());
+}
+async function convergeRoute(params, limit = 6) {
+  for (let attempt = 1; attempt <= limit; attempt += 1) {
+    const result = await rawTool(params);
+    if (!result.isError) return { attempts: attempt, value: JSON.parse(result.content[0].text) };
+    assert.match(result.content[0].text, /index catch-up incomplete/);
+  }
+  assert.fail('bounded session index did not converge');
+}
+async function waitForProbeStatus(status) {
+  for (let attempt = 0; attempt < 500; attempt += 1) {
+    if (existsSync(readProbe)) {
+      const rows = readFileSync(readProbe, 'utf8').trim().split(/\n/).filter(Boolean).map(JSON.parse);
+      if (rows.some((row) => row.status === status)) return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+  assert.fail(`session read probe did not report ${status}`);
 }
 await tool({ action: 'enroll', task: 'task' });
 const beforeChat = session.getBranch().length;
@@ -144,13 +165,47 @@ const stable = session.getBranch().length;
 await tool({ action: 'list' });
 await tool({ action: 'route', task: 'task', input: b, update_brief: true });
 assert.equal(session.getBranch().length, stable, 'confirmed retry accumulated presentation evidence');
-const reads = readFileSync(readProbe, 'utf8').trim().split(/\n/).map(JSON.parse);
+const reads = readFileSync(readProbe, 'utf8').trim().split(/\n/).map(JSON.parse).filter(({ status }) => status !== 'start');
 assert(reads.some(({ bytes }) => bytes > 18 * 1024 * 1024 && bytes <= 32 * 1024 * 1024), 'large transcript delta was not read within its byte bound');
 assert(reads.at(-1).bytes < 64 * 1024, `indexed retry reread ${reads.at(-1).bytes} session bytes`);
 const brief = readFileSync(home + '/data/task/brief.md', 'utf8');
 assert.equal(brief.split('Add condition A.').length, 2);
 assert.equal(brief.split('Add condition B.').length, 2);
 assert.equal(owner.inputBarrier(), false);
+rmSync(home + '/state/task-session-index', { recursive: true, force: true });
+writeFileSync(readProbe, '');
+for (const value of ['L', 'M', 'N']) {
+  session.appendMessage({ role: 'user', content: [{ type: 'text', text: value.repeat(15 * 1024 * 1024) }], timestamp: Date.now() });
+}
+const coldText = 'Preserve the cold-session requirement exactly.';
+session.appendMessage({ role: 'user', content: [{ type: 'text', text: coldText }], timestamp: Date.now() });
+const coldInput = session.getLeafId();
+assert(statSync(session.getSessionFile()).size > 43 * 1024 * 1024, 'cold session fixture did not exceed 43 MiB');
+const cold = await convergeRoute({ action: 'route', task: 'task', input: coldInput, update_brief: true });
+assert(cold.attempts > 1, 'cold session did not exercise resumable catch-up');
+await tool({ action: 'route', task: 'task', input: coldInput, update_brief: true });
+const coldReads = readFileSync(readProbe, 'utf8').trim().split(/\n/).map(JSON.parse).filter(({ status }) => status !== 'start');
+assert(coldReads.some(({ status }) => status === 'checkpoint'), 'cold session did not persist a bounded checkpoint');
+assert(coldReads.every(({ bytes }) => bytes <= 33 * 1024 * 1024), `cold recovery exceeded its measured read bound: ${JSON.stringify(coldReads)}`);
+assert(coldReads.filter(({ status }) => status === 'checkpoint').every(({ records }) => records > 0), 'cold recovery checkpoint made no complete-record progress');
+assert(coldReads.at(-1).status === 'success' && coldReads.at(-1).bytes < 64 * 1024, 'cold session repeat did not use indexed readback');
+assert.equal(readFileSync(home + '/data/task/brief.md', 'utf8').split(coldText).length, 2);
+
+rmSync(home + '/state/task-session-index', { recursive: true, force: true });
+writeFileSync(readProbe, '');
+const concurrentText = 'Preserve the concurrent-append requirement exactly.';
+session.appendMessage({ role: 'user', content: [{ type: 'text', text: concurrentText }], timestamp: Date.now() });
+const concurrentInput = session.getLeafId();
+const raced = rawTool({ action: 'route', task: 'task', input: concurrentInput, update_brief: true });
+await waitForProbeStatus('start');
+session.appendMessage({ role: 'user', content: [{ type: 'text', text: 'Unrelated message appended during session indexing.' }], timestamp: Date.now() });
+const racedResult = await raced;
+assert.equal(Boolean(racedResult.isError), true, JSON.stringify(racedResult));
+assert.match(racedResult.content[0].text, /session changed during readback/);
+assert.equal(readdirSync(home + '/state/task-session-index').length, 0, 'changed snapshot published a session index');
+const recoveredRace = await convergeRoute({ action: 'route', task: 'task', input: concurrentInput, update_brief: true });
+assert(recoveredRace.attempts > 1, 'clean concurrent-append retry did not exercise bounded catch-up');
+assert.equal(readFileSync(home + '/data/task/brief.md', 'utf8').split(concurrentText).length, 2);
 // Task intake and explicit updates use one ordinary task identity.
 mkdirSync(home + '/data/separate-work', { recursive: true });
 writeFileSync(home + '/data/separate-work/brief.md', "# Task\n## Captain's intent\nExplain the cause and implement the bounded change\n\n## Firstmate spec\nVerify the same task\n");
