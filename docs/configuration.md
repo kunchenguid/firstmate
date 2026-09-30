@@ -12,6 +12,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | Worker permissions, accounts, or environment | [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), and [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist) |
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), and [Calm preference](#calm-preference-configcalm) |
+| Required GitHub checks beyond branch protection | [Required checks](#required-checks-configrequired-checks) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
 | Per-run overrides and tuning | [Environment variables](#environment-variables) |
 
@@ -609,6 +610,35 @@ With the flag absent the wedge timer spends no fold or current-state read for it
 The flag is a home-local supervision-noise preference and is not inherited by secondmate homes, which supervise their own crew and own that trade separately.
 
 [`architecture.md`](architecture.md) owns the wait-evidence contract and which records may take the ladder away; `bin/fm-watch.sh`'s `wedge_wait_evidence` owns the exact derivation and its fail-closed boundaries.
+
+## Required checks (config/required-checks)
+
+The optional local, gitignored `config/required-checks` declares additional required GitHub check or commit-status names per repository for [`bin/fm-pr-merge.sh`](../bin/fm-pr-merge.sh).
+It lives under the effective `FM_HOME`; `FM_CONFIG_OVERRIDE` selects a different config directory for tests or specialized setup.
+It is home-local and is not inherited into secondmate homes.
+
+Each declaration is one `<owner>/<repo> <check-or-status-name>` line:
+
+```text
+example/private-project validate
+example/private-project local-ci/mac-gate
+example/another-project Build and test
+```
+
+- Owner and repository are non-empty tokens containing only ASCII letters, digits, `.`, `_`, or `-`, separated by exactly one `/`; matching is case-insensitive.
+- One or more spaces or tabs separate the repository selector from the check name.
+- Leading and trailing spaces or tabs are trimmed from each line; spaces inside the check name are preserved and the name matches case-sensitively.
+- Blank lines and lines whose first non-space/tab character is `#` are ignored.
+- The check name is non-empty and contains no control characters; quotes and inline comments have no special meaning and become part of the name.
+- Multiple declarations for a repository add requirements, and duplicate names are coalesced.
+- An absent or empty file adds no requirements and preserves the existing merge behavior.
+- An unreadable file or malformed declaration anywhere in the file refuses the merge; a malformed-line diagnostic names the file and line number, even for another repository's declaration.
+
+Declarations supplement rather than replace branch-protection and ruleset requirements, including when GitHub exposes no requirements or its plan cannot expose branch rules.
+Each declared context must have reported and be green on the verified PR head, whether it is a commit status or a check run; declarations add no producer-app binding and cannot weaken a forge requirement.
+The existing attended `--allow-missing` and `--allow-red` waivers apply unchanged; the [merge script header](../bin/fm-pr-merge.sh) owns their mechanics and the exact green-check rules.
+Declarations never excuse an otherwise unreadable forge requirement source and do not apply to GitLab merges.
+[`tests/fm-pr-merge.test.sh`](../tests/fm-pr-merge.test.sh) covers plan-unavailable rules, missing and reported local CI, declaration parsing, and the existing waiver and app-binding behavior.
 
 ## Gate defaults (.no-mistakes.yaml)
 

@@ -3550,6 +3550,186 @@ test_app_bound_required_status_context_matches_by_name() {
   pass "fm-pr-merge matches an app-bound required commit status by name"
 }
 
+# Local declarations supplement forge requirements even when GitHub's plan
+# cannot expose rules. The declared Mac CI context is a commit status, not an
+# Actions check run, and must appear in the rollup for the verified head.
+test_declared_required_check_on_plan_unavailable() {
+  local case_dir head variant
+  head=d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1
+  for variant in absent success; do
+    case_dir=$(make_case "declared-required-plan-$variant")
+    add_gh_mocks "$case_dir" "$head"
+    printf 'example/repo autofirma/local-mac-gate\n' > "$case_dir/home/config/required-checks"
+    printf 'gh: Upgrade to GitHub Pro or make this repository public to enable this feature. (HTTP 403)\n' \
+      > "$case_dir/github-required-rules-fail"
+    if [ "$variant" = success ]; then
+      write_github_rollup_json "$case_dir" "$head" \
+        "$(check_run validate COMPLETED SUCCESS)" \
+        "$(status_context autofirma/local-mac-gate SUCCESS)"
+    else
+      write_github_rollup_json "$case_dir" "$head" "$(check_run validate COMPLETED SUCCESS)"
+    fi
+    run_required_case "$case_dir" 112
+    if [ "$variant" = success ]; then
+      expect_code 0 "$RC" "declared-plan-success: a green declared status must merge: $(cat "$case_dir/stderr")"
+      assert_logged_gh_merge "$case_dir" 112 example/repo --squash
+    else
+      expect_code 1 "$RC" "declared-plan-absent: an unreported declared status must refuse"
+      assert_grep "required check 'autofirma/local-mac-gate' has not reported at head $head" \
+        "$case_dir/stderr" "declared-plan-absent: the missing status and exact head were not named"
+      assert_no_grep 'pr merge' "$case_dir/gh.log" "declared-plan-absent: merge ran without local CI"
+    fi
+  done
+  pass "fm-pr-merge enforces declared Mac CI on a plan-unavailable rules response"
+}
+
+test_declared_required_checks_supplement_forge_requirements() {
+  local case_dir head kind
+  head=d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2
+  for kind in empty classic ruleset unreadable; do
+    case_dir=$(make_case "declared-required-$kind")
+    add_gh_mocks "$case_dir" "$head"
+    printf 'example/repo autofirma/local-mac-gate\n' > "$case_dir/home/config/required-checks"
+    case "$kind" in
+      classic|ruleset) write_github_required "$case_dir" "$kind:validate" ;;
+      unreadable) printf 'gh: Not Found (HTTP 404)\n' > "$case_dir/github-required-rules-fail" ;;
+    esac
+    run_required_case "$case_dir" 113
+    expect_code 1 "$RC" "declared-$kind: the missing declared context must refuse"
+    assert_grep "required check 'autofirma/local-mac-gate' has not reported at head $head" \
+      "$case_dir/stderr" "declared-$kind: the declared context was lost"
+    case "$kind" in
+      classic|ruleset)
+        assert_grep "required check 'validate' has not reported" "$case_dir/stderr" \
+          "declared-$kind: declarations replaced the forge requirements" ;;
+      unreadable)
+        assert_grep 'branch rules for base branch main could not be read' "$case_dir/stderr" \
+          "declared-unreadable: declarations hid a forge read error" ;;
+    esac
+    assert_no_grep 'pr merge' "$case_dir/gh.log" "declared-$kind: missing context reached merge"
+  done
+  pass "fm-pr-merge combines declared and forge requirements across readable, empty and unreadable rules"
+}
+
+test_declared_required_checks_use_existing_waivers() {
+  local case_dir head variant expected
+  head=d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3
+  for variant in missing-waived missing-wrong-name red red-waived red-missing-waiver pending; do
+    case_dir=$(make_case "declared-required-$variant")
+    add_gh_mocks "$case_dir" "$head"
+    printf 'example/repo autofirma/local-mac-gate\n' > "$case_dir/home/config/required-checks"
+    expected=1
+    case "$variant" in
+      missing-waived) run_required_case "$case_dir" 114 --allow-missing autofirma/local-mac-gate; expected=0 ;;
+      missing-wrong-name) run_required_case "$case_dir" 114 --allow-missing validate ;;
+      red|red-waived|red-missing-waiver)
+        write_github_rollup_json "$case_dir" "$head" "$(status_context autofirma/local-mac-gate FAILURE)"
+        case "$variant" in
+          red-waived) run_required_case "$case_dir" 114 --allow-red autofirma/local-mac-gate; expected=0 ;;
+          red-missing-waiver) run_required_case "$case_dir" 114 --allow-missing autofirma/local-mac-gate ;;
+          red) run_required_case "$case_dir" 114 ;;
+        esac
+        ;;
+      pending)
+        write_github_rollup_json "$case_dir" "$head" "$(status_context autofirma/local-mac-gate PENDING)"
+        run_required_case "$case_dir" 114
+        ;;
+    esac
+    expect_code "$expected" "$RC" "declared-$variant: $(cat "$case_dir/stderr")"
+    if [ "$expected" -eq 0 ]; then
+      assert_logged_gh_merge "$case_dir" 114 example/repo --squash
+    else
+      assert_no_grep 'pr merge' "$case_dir/gh.log" "declared-$variant: an unwaived check reached merge"
+    fi
+  done
+  pass "fm-pr-merge applies existing named missing/red waivers to declared contexts"
+}
+
+test_declared_required_checks_format_and_config_override() {
+  local case_dir head
+  head=d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4
+  case_dir=$(make_case declared-required-format)
+  add_gh_mocks "$case_dir" "$head"
+  mkdir -p "$case_dir/custom-config"
+  printf 'invalid home config\n' > "$case_dir/home/config/required-checks"
+  printf '  # local requirements\n\nother/repo not-for-this-repo\n\tEXAMPLE/REPO\tBuild and test 1  \nexample/repo Build and test 1' \
+    > "$case_dir/custom-config/required-checks"
+  write_github_rollup_json "$case_dir" "$head" "$(check_run 'Build and test 1' COMPLETED SUCCESS)"
+  FM_CONFIG_OVERRIDE="$case_dir/custom-config" run_required_case "$case_dir" 115
+  expect_code 0 "$RC" "declared-format: a declared check run must merge: $(cat "$case_dir/stderr")"
+  assert_logged_gh_merge "$case_dir" 115 example/repo --squash
+  assert_no_grep '/check-runs' "$case_dir/gh.log" "declared-format: name-only declaration requested producer binding"
+  pass "fm-pr-merge reads declarations from the config override with comments, spaces, duplicates and repo scoping"
+}
+
+test_declared_required_checks_do_not_weaken_app_binding() {
+  local case_dir head
+  head=d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5
+  case_dir=$(make_case declared-required-app-binding)
+  add_gh_mocks "$case_dir" "$head"
+  printf 'example/repo ci\n' > "$case_dir/home/config/required-checks"
+  write_github_required "$case_dir" classic:ci
+  jq '.protection.required_status_checks.checks[0].app_id = 15368' \
+    "$case_dir/github-branch.json" > "$case_dir/updated.json"
+  mv "$case_dir/updated.json" "$case_dir/github-branch.json"
+  printf '{"check_runs":[{"name":"ci","app":{"id":42},"head_sha":"%s"}]}\n' \
+    "$head" > "$case_dir/github-runs.json"
+  run_required_case "$case_dir" 116
+  expect_code 1 "$RC" "declared-app-binding: name-only declaration must not weaken app binding"
+  assert_grep "required check 'ci' has not reported" "$case_dir/stderr" "declared-app-binding: wrong app was accepted"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" "declared-app-binding: wrong app reached merge"
+  pass "fm-pr-merge keeps forge app bindings when a local declaration names the same check"
+}
+
+test_declared_required_checks_file_states() {
+  local case_dir head variant expected
+  head=d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7
+  for variant in empty comments directory dangling; do
+    case_dir=$(make_case "declared-required-file-$variant")
+    add_gh_mocks "$case_dir" "$head"
+    expected=0
+    case "$variant" in
+      empty) : > "$case_dir/home/config/required-checks" ;;
+      comments) printf ' # local checks\n\t\n' > "$case_dir/home/config/required-checks" ;;
+      directory) mkdir "$case_dir/home/config/required-checks"; expected=1 ;;
+      dangling) ln -s "$case_dir/absent" "$case_dir/home/config/required-checks"; expected=1 ;;
+    esac
+    run_required_case "$case_dir" 118
+    expect_code "$expected" "$RC" "declared-file-$variant: $(cat "$case_dir/stderr")"
+    if [ "$expected" -eq 0 ]; then
+      assert_logged_gh_merge "$case_dir" 118 example/repo --squash
+    else
+      assert_grep "required-check declarations in $case_dir/home/config/required-checks could not be read" \
+        "$case_dir/stderr" "declared-file-$variant: the unreadable declaration file was not named"
+      assert_no_grep 'pr merge' "$case_dir/gh.log" "declared-file-$variant: unreadable file reached merge"
+    fi
+  done
+  pass "fm-pr-merge accepts empty declarations and refuses unreadable declaration files"
+}
+
+test_malformed_required_check_declaration_refuses() {
+  local case_dir head variant line
+  head=d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6
+  for variant in missing-name bad-repo extra-slash control; do
+    case_dir=$(make_case "declared-required-malformed-$variant")
+    add_gh_mocks "$case_dir" "$head"
+    case "$variant" in
+      missing-name) line='example/repo' ;;
+      bad-repo) line='example ci' ;;
+      extra-slash) line='other/repo/extra ci' ;;
+      control) line=$'other/repo ci\r' ;;
+    esac
+    printf '# required checks\n%s\n' "$line" > "$case_dir/home/config/required-checks"
+    run_required_case "$case_dir" 117 --allow-missing ci --allow-red ci
+    expect_code 1 "$RC" "declared-malformed-$variant: malformed declaration must refuse even with waivers"
+    assert_grep 'malformed required-check declaration' "$case_dir/stderr" "declared-malformed-$variant: missing diagnostic"
+    assert_grep "$case_dir/home/config/required-checks" "$case_dir/stderr" "declared-malformed-$variant: missing config path"
+    assert_grep 'line 2' "$case_dir/stderr" "declared-malformed-$variant: missing line number"
+    assert_no_grep 'pr merge' "$case_dir/gh.log" "declared-malformed-$variant: invalid declaration reached merge"
+  done
+  pass "fm-pr-merge refuses malformed required-check declarations with the file and line number"
+}
+
 test_required_partial_reads_report_all_failures() {
   local case_dir head variant
   head=a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1
@@ -3886,3 +4066,10 @@ test_allow_missing_follows_the_allow_red_rules
 test_required_producer_identity
 test_app_bound_required_status_context_matches_by_name
 test_required_partial_reads_report_all_failures
+test_declared_required_check_on_plan_unavailable
+test_declared_required_checks_supplement_forge_requirements
+test_declared_required_checks_use_existing_waivers
+test_declared_required_checks_format_and_config_override
+test_declared_required_checks_do_not_weaken_app_binding
+test_declared_required_checks_file_states
+test_malformed_required_check_declaration_refuses
