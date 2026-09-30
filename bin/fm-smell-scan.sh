@@ -294,14 +294,33 @@ class Scan:
         full_line = self.strip_comment(line, style)
         if full_line is not None:
             return full_line
-        if style == "html":
+        index = self.inline_comment_index(line, style)
+        if index is None:
             return None
-        delimiters = {
+        delimiters = self.comment_delimiters(style)
+        for delimiter in delimiters:
+            if line.startswith(delimiter, index):
+                return line[index + len(delimiter):].strip()
+        return None
+
+    def code_text(self, line: str, style: str) -> str | None:
+        if self.strip_comment(line, style) is not None:
+            return None
+        index = self.inline_comment_index(line, style)
+        return line if index is None else line[:index]
+
+    def comment_delimiters(self, style: str):
+        if style == "html":
+            return ()
+        return {
             "hash": ("#",),
             "slash": ("//", "/*"),
             "dashline": ("--",),
             "semi": (";",),
-        }.get(style)
+        }.get(style, ())
+
+    def inline_comment_index(self, line: str, style: str) -> int | None:
+        delimiters = self.comment_delimiters(style)
         if not delimiters:
             return None
         quote_chars = {"'", '"'}
@@ -324,7 +343,7 @@ class Scan:
                 continue
             for delimiter in delimiters:
                 if line.startswith(delimiter, index):
-                    return line[index + len(delimiter):].strip()
+                    return index
         return None
 
     def blame_times(self, rel: str) -> dict[int, int] | None:
@@ -503,7 +522,7 @@ def collect_dead_code(scan: Scan, files, findings: list[Finding]) -> None:
         style = scan.comment_style(rel)
         if style is None:
             continue
-        code = [raw for raw in lines if scan.strip_comment(raw, style) is None]
+        code = [text for raw in lines for text in [scan.code_text(raw, style)] if text is not None]
         identifiers.update(IDENT_RE.findall("\n".join(code)))
     for rel in files:
         if not scan.is_shell(rel):

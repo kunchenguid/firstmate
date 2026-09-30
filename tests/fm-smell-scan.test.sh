@@ -308,6 +308,31 @@ print(d["summary"]["total"])
   assert_not_contains "$json" "quoted semi marker" "quoted semi markers must not be reported"
 }
 
+test_dead_code_ignores_inline_comment_references() {
+  local fix json
+  fix=$(fm_test_tmproot fm-smell-dead-inline-comment) || fail "tmproot"
+  fm_git_init_commit "$fix"
+  mkdir -p "$fix/src"
+  cat > "$fix/src/functions.sh" <<'EOF'
+#!/usr/bin/env bash
+unused() { :; }
+called() { :; }
+echo ok # unused is mentioned only in this comment.
+called
+EOF
+  git -C "$fix" add -A
+  git -C "$fix" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm "dead code inline comment"
+
+  json=$(bash "$CHECK" --root "$fix" --json --category dead-code)
+  assert_equals "unused()" "$(printf '%s' "$json" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+print(",".join(f["evidence"] for f in d["findings"]))
+')" "inline comments must not count as dead-code references"
+  assert_not_contains "$json" "called()" "real executable callers must still suppress dead-code findings"
+}
+
 test_output_is_deterministic_json() {
   local fix
   fix=$(fm_test_tmproot fm-smell-determinism) || fail "tmproot"
@@ -392,6 +417,7 @@ test_scope_and_excludes_bound_the_scan
 test_paths_and_symlinks_stay_inside_root
 test_stale_docs_skip_outside_root_targets
 test_stale_comment_detects_inline_comments_without_quoted_markers
+test_dead_code_ignores_inline_comment_references
 test_output_is_deterministic_json
 test_scan_is_read_only_and_guards_out_path
 test_exit_codes_and_usage_refusals
