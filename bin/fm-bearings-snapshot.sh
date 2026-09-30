@@ -45,8 +45,8 @@
 # and drops its gate, so a hold is never in both Captain's Call and Charted Next.
 # decisions_open also leads with every unresolved, undismissed escalated
 # pending reply (verb blocked, key pending-reply-<corr>, owner "(main)"); it is
-# not a captain hold, takes no bucket, and is listed with or without
-# --all-decisions.
+# not a captain hold, takes no bucket, is listed with or without
+# --all-decisions, and does not count against FM_BEARINGS_DECISIONS.
 # Aging is a projection safety net only; the durable
 # deferral remains re-holding with --until.
 #
@@ -655,7 +655,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
       secondmate_reconcile: [ (.secondmate_current.records // [])[]
         | select(.reconcile_inventory != null)
         | {id, spawn_gen:(.spawn_gen // null), host:(.host // null), kind:(.reconcile_inventory.kind // null), ids:((.reconcile_inventory.ids // []) | map(select(type == "string")) | sort)} ],
-      decisions_open: (if $all_decisions == 1 then $decisions_all else $decisions_all[:$decisions_n] end),
+      decisions_open: (if $all_decisions == 1 then $decisions_all else $decisions_all[:(($escalated_replies | length) + $decisions_n)] end),
       landed: ($done | map({id, what:(.title | trunc(70)),
                             artifact:(landed_artifact // "-"),owner:.home_id})),
       gates: ($return_catchup_gate
@@ -700,7 +700,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
          | {surface:("secondmate " + .id + " served from cached home ledger"),reveal:"inspect the home ledger publication and remote route"}),
         (([($snap.secondmate_current.records // [])[] | select(.parent_event.activity_scan.input_truncated == true or .parent_event.activity_scan.retained_truncated == true)] | length) as $n | if $n > 0 then {surface:("secondmate parent activity evidence truncated for \($n) record(s)"), reveal:"raise FM_SNAPSHOT_PARENT_ACTIVITY_LINES, FM_SNAPSHOT_PARENT_ACTIVITY_BYTES, or FM_SNAPSHOT_PARENT_ACTIVITIES"} else empty end),
         (([($snap.secondmate_current.records // [])[] | select(.parent_event.activity_scan.available == false)] | length) as $n | if $n > 0 then {surface:("secondmate parent activity evidence unavailable for \($n) record(s)"), reveal:"inspect the parent status logs"} else empty end),
-        (if $all_decisions == 0 and ($decisions_all | length) > $decisions_n then {surface:("decisions_open showing \($decisions_n) of \($decisions_all | length)"), reveal:"--all-decisions"} else empty end),
+        ((($escalated_replies | length) + $decisions_n) as $n | if $all_decisions == 0 and ($decisions_all | length) > $n then {surface:("decisions_open showing \($n) of \($decisions_all | length)"), reveal:"--all-decisions"} else empty end),
         (if $all_decisions == 0 and $decisions_marked_deferred > 0 then {surface:("captain holds bucketed blocked, dated, or aged: \($decisions_marked_deferred)"), reveal:"--all-decisions"} else empty end),
         (if $all_queued == 0 and ($gates_all | length) > $gates_n then {surface:("gates showing \($gates_n) of \($gates_all | length)"), reveal:"--all-queued"} else empty end),
         (if $all_reports == 0 and ($reports_all | length) > $reports_n then {surface:("reports showing \($reports_n) of \($reports_all | length)"), reveal:"--all-reports"} else empty end),

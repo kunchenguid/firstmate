@@ -49,7 +49,7 @@ _fm_pending_reply_stamp_escalated() {  # <state-dir> <record-path> <field> <valu
 
 # Remind unresolved escalations once per later live session.
 fm_pending_reply_remind_escalated() {  # <state-dir>
-  local state=$1 token dir rec corr task summary payload key queued rc=0
+  local state=$1 token dir rec corr task summary payload key queued appended=0 rc=0
   local -a open=() recs=()
   local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
   dir=$(fm_pending_reply_dir "$state")
@@ -66,11 +66,11 @@ fm_pending_reply_remind_escalated() {  # <state-dir>
   [ -n "$token" ] || return 0
   STATE=$state
   for rec in "${open[@]}"; do
-    [ "$(fm_pending_reply_get "$rec" surfaced_session)" != "$token" ] || continue
     if fm_pending_reply_escalation_dismissed "$rec"; then
       _fm_pending_reply_stamp_escalated "$state" "$rec" escalation_dismissed_epoch "$(fm_pending_reply_now)" || return 1
       continue
     fi
+    [ "$(fm_pending_reply_get "$rec" surfaced_session)" != "$token" ] || continue
     recs+=("$rec")
   done
   [ "${#recs[@]}" -gt 0 ] || return 0
@@ -92,10 +92,12 @@ $queued
     *"
 $key
 "*) ;;
-    *) fm_wake_append_locked check "$key" "$payload" || rc=$? ;;
+    *) fm_wake_append_locked check "$key" "$payload" && appended=1 || rc=$? ;;
   esac
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   [ "$rc" -eq 0 ] || return "$rc"
+  # A still-queued reminder does not name these records; remind them on a later pass.
+  [ "$appended" -eq 1 ] || return 0
   for rec in "${recs[@]}"; do
     _fm_pending_reply_stamp_escalated "$state" "$rec" surfaced_session "$token" || return 1
   done

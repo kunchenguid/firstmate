@@ -2095,6 +2095,66 @@ test_other_closes_do_not_dismiss_escalation() {
   pass "only the operator's keyed close dismisses an escalation"
 }
 
+# An operator close in the session that received the escalation is recorded
+# on the record, so the watcher stops starting the reminder for it.
+test_same_session_operator_close_is_recorded() {
+  local dir fb log home state corr rc stub
+  dir="$TMP_ROOT/same-session-close"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"
+  home=$(setup_parent same-session-close)
+  state="$home/state"
+  fm_write_meta "$state/mate.meta" "window=sess:fm-mate" "kind=ship"
+  export FM_PENDING_REPLY_NOW=1000
+  export FM_PENDING_REPLY_SESSION=s1
+  export FM_PENDING_REPLY_SEND_HOOK='true'
+  corr=$(escalate_new "$home" "$state" "closed right away")
+  run_send "$fb" "$home" "$log" mate --resolve-key "pending-reply-$corr" "ack, handled"; rc=$?
+  expect_code 0 "$rc" "operator close of the escalation key should succeed"
+  "$ROOT/bin/fm-pending-reply-remind.sh" "$state" || fail "same-session remind failed"
+  [ -n "$(fm_pending_reply_get "$(fm_pending_reply_path "$state" "$corr")" escalation_dismissed_epoch)" ] \
+    || fail "a same-session operator close was not recorded"
+  stub="$TMP_ROOT/remind-stub-$RANDOM"
+  mkdir -p "$stub"
+  printf '#!/usr/bin/env bash\ntouch "%s/started"\n' "$stub" > "$stub/fm-pending-reply-remind.sh"
+  chmod +x "$stub/fm-pending-reply-remind.sh"
+  ( _FM_PENDING_REPLY_LIB_DIR=$stub; fm_pending_reply_tick "$state" ) || fail "tick failed"
+  [ ! -e "$stub/started" ] || fail "the tick kept starting the reminder for a closed escalation"
+  unset FM_PENDING_REPLY_SESSION
+  pass "a same-session operator close is recorded and stops the reminder"
+}
+
+# While an older reminder row is still queued, a newly eligible escalation is
+# not marked reminded; it is reminded once that row drains.
+test_queued_reminder_does_not_mark_unnamed_record() {
+  local home state first second rec
+  home=$(setup_parent queued-reminder)
+  state="$home/state"
+  export FM_PENDING_REPLY_NOW=1000
+  export FM_PENDING_REPLY_SEND_HOOK='true'
+  export FM_PENDING_REPLY_SESSION=s1
+  first=$(escalate_new "$home" "$state" "first request")
+  export FM_PENDING_REPLY_SESSION=s2
+  "$ROOT/bin/fm-pending-reply-remind.sh" "$state" || fail "first remind failed"
+  grep -F "pending-reply-id=$first" "$state/.wake-queue" >/dev/null \
+    || fail "precondition: the first escalation should be reminded"
+  FM_PENDING_REPLY_SESSION=s1 escalate_new "$home" "$state" "second request" > "$TMP_ROOT/second-corr"
+  second=$(cat "$TMP_ROOT/second-corr")
+  rec=$(fm_pending_reply_path "$state" "$second")
+  "$ROOT/bin/fm-pending-reply-remind.sh" "$state" || fail "remind with a queued row failed"
+  [ "$(fm_pending_reply_get "$rec" surfaced_session)" = s1 ] \
+    || fail "a record the queued row does not name was marked reminded"
+  : > "$state/.wake-queue"
+  "$ROOT/bin/fm-pending-reply-remind.sh" "$state" || fail "remind after drain failed"
+  grep -F "pending-reply-id=$second" "$state/.wake-queue" >/dev/null \
+    || fail "the unmarked escalation was not reminded after the row drained"
+  grep -F "pending-reply-id=$first" "$state/.wake-queue" >/dev/null \
+    && fail "the already reminded escalation was reminded again"
+  [ "$(fm_pending_reply_get "$rec" surfaced_session)" = s2 ] \
+    || fail "the reminded escalation was not marked for this session"
+  unset FM_PENDING_REPLY_SESSION
+  pass "a queued reminder does not mark an escalation it does not name"
+}
+
 # With nothing escalated, or only dismissed escalations, a live session gets
 # no reminder row and the record is left as it was.
 test_reminder_leaves_state_alone_without_escalations() {
@@ -2192,6 +2252,8 @@ test_second_missed_turn_escalates_once_and_stays_durable
 test_escalated_record_is_reminded_once_per_later_session
 test_operator_closed_escalation_is_not_reminded
 test_other_closes_do_not_dismiss_escalation
+test_same_session_operator_close_is_recorded
+test_queued_reminder_does_not_mark_unnamed_record
 test_reminder_leaves_state_alone_without_escalations
 test_tick_starts_reminder_only_for_escalated_records
 test_new_session_in_same_harness_process_is_reminded
