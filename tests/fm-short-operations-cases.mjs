@@ -331,6 +331,53 @@ assert.equal((await terminal(concurrent2.id)).state,'blocked');
 assert.equal((await terminal(concurrent1.id)).state,'completed');assert.equal((await terminal(independent.id)).state,'completed');
 const fetchEvents=fs.readFileSync(fetchLog,'utf8').trim().split('\n');assert.equal(fetchEvents.length,4);assert.ok(fetchEvents[0].startsWith('start ')&&fetchEvents[1].startsWith('start '),'independent resources overlap');
 fs.unlinkSync(path.join(fakebin,'git'));
+const replayHome=path.join(tmp,'cleanup-replay-home'),replayState=path.join(replayHome,'state'),replayData=path.join(replayHome,'data'),replayTask='cleanup-backlog-replay',replayGeneration='g-cleanup-replay';
+for(const directory of [replayHome,replayState,replayData,path.join(replayHome,'config'),path.join(replayData,replayTask),path.join(replayHome,'user-home')])fs.mkdirSync(directory,{recursive:true});
+fs.writeFileSync(path.join(replayHome,'.tasks.toml'),'backend = "markdown"\n\n[markdown]\npath = "data/backlog.md"\n');
+fs.writeFileSync(path.join(replayData,'backlog.md'),'## In flight\n\n## Queued\n\n## Done\n');
+fs.writeFileSync(path.join(replayState,'.lock'),String(process.pid));
+fs.writeFileSync(path.join(replayData,replayTask,'brief.md'),'Completed cleanup backlog replay fixture\n');
+fs.writeFileSync(path.join(replayData,replayTask,'report.md'),'Preserved replay report\n');
+const replayProject=path.join(tmp,'cleanup-replay-project'),replayRemote=path.join(tmp,'cleanup-replay-remote.git'),replayCopy=path.join(tmp,'cleanup-replay-copy');
+git('init','--bare','--initial-branch=main',replayRemote);git('clone',replayRemote,replayProject);
+fs.writeFileSync(path.join(replayProject,'base.txt'),'base\n');git('-C',replayProject,'add','.');git('-C',replayProject,'commit','-m','cleanup replay base');git('-C',replayProject,'push','origin','main');
+git('-C',replayProject,'worktree','add','-b','cleanup-replay-fixture',replayCopy);fs.writeFileSync(path.join(replayCopy,'retained.txt'),'retain cleanup replay changes\n');
+const replayCopySnapshot=()=>({head:git('-C',replayCopy,'rev-parse','HEAD'),status:git('-C',replayCopy,'status','--porcelain'),content:fs.readFileSync(path.join(replayCopy,'retained.txt'),'utf8')});
+const replayCopyBefore=replayCopySnapshot(),recoveryRoot=path.join(tmp,'cleanup-replay-runtime'),recoveryBin=path.join(recoveryRoot,'bin');
+execFileSync('bash',['-c','. "$1/tests/fixtures.sh"; fm_test_fake_herdr_spawn "$2"','fixture',root,recoveryBin]);
+const replayEnv={...process.env,FM_HOME:replayHome,FM_ROOT_OVERRIDE:root,FM_STATE_OVERRIDE:replayState,FM_DATA_OVERRIDE:replayData,FM_CONFIG_OVERRIDE:path.join(replayHome,'config'),FM_FAKE_HERDR_STATE:path.join(recoveryRoot,'state.json'),FM_HERDR_LOG:path.join(recoveryRoot,'herdr.log'),HERDR_SESSION:'fixture'};
+const replayEndpoint=JSON.parse(execFileSync(path.join(recoveryBin,'herdr'),['workspace','create','--cwd',path.join(tmp,'idle'),'--label','cleanup-replay'],{env:replayEnv,encoding:'utf8'})).result;
+fs.writeFileSync(path.join(replayState,replayTask+'.meta'),`kind=ship\nmode=local-only\nspawn_gen=${replayGeneration}\nwindow=fixture:${replayEndpoint.root_pane.pane_id}\nendpoint_task_id=${replayTask}\nworktree=${replayCopy}\nproject=${replayProject}\nbackend=herdr\nherdr_session=fixture\nherdr_workspace_id=${replayEndpoint.workspace.workspace_id}\nherdr_tab_id=${replayEndpoint.tab.tab_id}\nherdr_pane_id=${replayEndpoint.root_pane.pane_id}\n`);
+const realTasksAxi=execFileSync('which',['tasks-axi'],{env:replayEnv,encoding:'utf8'}).trim(),tasksFailure=path.join(recoveryRoot,'done-failed'),tasksLog=path.join(recoveryRoot,'tasks.log');
+execFileSync(realTasksAxi,['add',replayTask,'Cleanup backlog replay','--kind','ship','--repo','sample','--start','--file',path.join(replayData,'backlog.md')],{env:replayEnv});
+const replayLifecycle=JSON.parse(execFileSync('python3',[path.join(root,'bin/fm-task-lifecycle.py'),'init',replayTask],{env:replayEnv,encoding:'utf8'}));
+replayLifecycle.disposition='accepted';replayLifecycle.assessment.remaining_gap='';
+const replayAccepted=path.join(recoveryRoot,'accepted.json');fs.writeFileSync(replayAccepted,JSON.stringify(replayLifecycle),{mode:0o600});
+execFileSync('bash',[path.join(root,'bin/fm-task-state.sh'),'reconcile',replayTask,'--expected-revision','1','--record',replayAccepted],{env:replayEnv});
+fs.writeFileSync(path.join(recoveryBin,'tasks-axi'),`#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> ${JSON.stringify(tasksLog)}\nif [ "\${1:-}" = done ] && [ ! -e ${JSON.stringify(tasksFailure)} ]; then : > ${JSON.stringify(tasksFailure)}; exit 1; fi\nexec ${JSON.stringify(realTasksAxi)} "$@"\n`,{mode:0o755});
+const replayService=new ShortAgents(replayHome,root),replayInput=req('cleanup-backlog-replay',[{action:'cleanup',task:replayTask}]),priorPath=process.env.PATH;
+process.env.PATH=recoveryBin+path.delimiter+priorPath;
+try {
+  const replayOperation=replayService.submit(replayInput);let replayResult;
+  for(let n=0;n<12000;n++){replayResult=replayService.status(replayOperation.id);if(replayResult.finishedAt)break;await wait(25);}
+  assert.equal(replayResult.state,'blocked');
+  const replayDir=replayService.dir(replayOperation.id),replayMarker=path.join(replayState,replayTask+'.backlog-close'),reservation=resource(replayHome,replayInput.operations.steps[0]).file;
+  assert.ok(fs.existsSync(replayMarker));assert.ok(!fs.existsSync(path.join(replayState,replayTask+'.meta')));assert.ok(fs.existsSync(reservation));assert.ok(!fs.existsSync(path.join(replayDir,'operation-0.receipt.json')));
+  assert.deepEqual(replayCopySnapshot(),replayCopyBefore);
+  const replayStarted=JSON.parse(fs.readFileSync(path.join(replayDir,'started.json'))).identity;
+  for(let n=0;n<400;n++){try{if(processIdentity(replayStarted.pid).start!==replayStarted.start)break;}catch{break;}if(n===399)throw Error('cleanup replay fixture runner did not exit');await wait(25);}
+  const closeCount=()=>fs.readFileSync(path.join(recoveryBin,'herdr.log'),'utf8').split('\n').filter(line=>line.includes(`\x1fpane\x1fclose\x1f${replayEndpoint.root_pane.pane_id}\x1f`)).length;
+  const closeCallsBefore=closeCount();assert.equal(closeCallsBefore,1);
+  execFileSync('bash',[path.join(root,'bin/fm-bootstrap.sh')],{env:{...replayEnv,PATH:process.env.PATH,FM_BOOTSTRAP_NETWORK:'skip',HOME:path.join(replayHome,'user-home')},encoding:'utf8',timeout:30000});
+  assert.ok(!fs.existsSync(replayMarker));
+  assert.match(execFileSync(realTasksAxi,['show',replayTask,'--file',path.join(replayData,'backlog.md')],{env:replayEnv,encoding:'utf8'}),/state:\s+done/);
+  const lifecycleAfterReplay=JSON.parse(fs.readFileSync(path.join(replayData,replayTask,'lifecycle.json'))),lifecycleReceipt=lifecycleAfterReplay.owner_receipts.cleanup.at(-1);
+  assert.equal(lifecycleReceipt.execution_generation,replayGeneration);assert.equal(lifecycleReceipt.facts.copyDisposition,'retained-dirty');
+  await replayService.reconcile();
+  const replayReceipt=JSON.parse(fs.readFileSync(path.join(replayDir,'operation-0.receipt.json')));
+  assert.equal(replayReceipt.state,'completed');assert.equal(replayReceipt.settlement,'dead-owner-cleanup-readback');assert.deepEqual(replayReceipt.evidence,lifecycleReceipt.facts);
+  assert.ok(!fs.existsSync(reservation));assert.deepEqual(replayCopySnapshot(),replayCopyBefore);assert.equal(closeCount(),closeCallsBefore);
+} finally {process.env.PATH=priorPath;}
 if(process.env.FM_SHORT_CLEANUP_TARGET) {
   const target=JSON.parse(fs.readFileSync(process.env.FM_SHORT_CLEANUP_TARGET));
   assert.ok(/^fm-lab-/.test(target.session) && target.session===process.env.HERDR_LAB_SESSION,'cleanup requires the generated named lab');

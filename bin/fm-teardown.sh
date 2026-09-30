@@ -463,6 +463,7 @@ teardown_completed_task() (
     }
     marker=$(fm_backlog_close_marker_path "$STATE" "$ID") || exit 1
     fm_backlog_close_marker_write "$STATE" "$ID" "$DATA" "$generation" \
+      --cleanup-disposition "$disposition" \
       "${BACKLOG_TRANSITION_FLAGS[@]+"${BACKLOG_TRANSITION_FLAGS[@]}"}" \
       "${BACKLOG_DONE_ARGS[@]+"${BACKLOG_DONE_ARGS[@]}"}" || {
         echo "error: completed cleanup could not record its pending backlog $BACKLOG_TRANSITION ($FM_BACKLOG_TRANSITION_ERROR)" >&2
