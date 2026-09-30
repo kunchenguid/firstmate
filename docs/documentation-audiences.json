@@ -245,6 +245,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/selective-parallelism/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/quota-array-dispatch/SKILL.md",
       "audience": "agent-runtime"
     },

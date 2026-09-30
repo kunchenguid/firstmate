@@ -1030,7 +1030,6 @@ Firstmate resolves the rule's profile object or array under `AGENTS.md` section 
 
 This section is the single owner of the canonical schema and its per-field semantics.
 `AGENTS.md` section 4 owns the always-loaded dispatch intake boundary, and `quota-array-dispatch` owns the completion-aware profile-array selection procedure.
-
 ```json
 {
   "rules": [
