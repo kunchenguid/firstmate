@@ -331,25 +331,168 @@ assert.equal((await terminal(concurrent2.id)).state,'blocked');
 assert.equal((await terminal(concurrent1.id)).state,'completed');assert.equal((await terminal(independent.id)).state,'completed');
 const fetchEvents=fs.readFileSync(fetchLog,'utf8').trim().split('\n');assert.equal(fetchEvents.length,4);assert.ok(fetchEvents[0].startsWith('start ')&&fetchEvents[1].startsWith('start '),'independent resources overlap');
 fs.unlinkSync(path.join(fakebin,'git'));
+const replayHome=path.join(tmp,'cleanup-replay-home'),replayState=path.join(replayHome,'state'),replayData=path.join(replayHome,'data'),replayTask='cleanup-backlog-replay',replayGeneration='g-cleanup-replay';
+for(const directory of [replayHome,replayState,replayData,path.join(replayHome,'config'),path.join(replayData,replayTask),path.join(replayHome,'user-home')])fs.mkdirSync(directory,{recursive:true});
+fs.writeFileSync(path.join(replayHome,'.tasks.toml'),'backend = "markdown"\n\n[markdown]\npath = "data/backlog.md"\n');
+fs.writeFileSync(path.join(replayData,'backlog.md'),'## In flight\n\n## Queued\n\n## Done\n');
+fs.writeFileSync(path.join(replayState,'.lock'),String(process.pid));
+fs.writeFileSync(path.join(replayData,replayTask,'brief.md'),'Completed cleanup backlog replay fixture\n');
+fs.writeFileSync(path.join(replayData,replayTask,'report.md'),'Preserved replay report\n');
+const replayProject=path.join(tmp,'cleanup-replay-project'),replayRemote=path.join(tmp,'cleanup-replay-remote.git'),replayCopy=path.join(tmp,'cleanup-replay-copy');
+git('init','--bare','--initial-branch=main',replayRemote);git('clone',replayRemote,replayProject);
+fs.writeFileSync(path.join(replayProject,'base.txt'),'base\n');git('-C',replayProject,'add','.');git('-C',replayProject,'commit','-m','cleanup replay base');git('-C',replayProject,'push','origin','main');
+git('-C',replayProject,'worktree','add','-b','cleanup-replay-fixture',replayCopy);fs.writeFileSync(path.join(replayCopy,'retained.txt'),'retain cleanup replay changes\n');
+const replayCopySnapshot=()=>({head:git('-C',replayCopy,'rev-parse','HEAD'),status:git('-C',replayCopy,'status','--porcelain'),content:fs.readFileSync(path.join(replayCopy,'retained.txt'),'utf8')});
+const replayCopyBefore=replayCopySnapshot(),recoveryRoot=path.join(tmp,'cleanup-replay-runtime'),recoveryBin=path.join(recoveryRoot,'bin');
+execFileSync('bash',['-c','. "$1/tests/fixtures.sh"; fm_test_fake_herdr_spawn "$2"','fixture',root,recoveryBin]);
+const replayEnv={...process.env,FM_HOME:replayHome,FM_ROOT_OVERRIDE:root,FM_STATE_OVERRIDE:replayState,FM_DATA_OVERRIDE:replayData,FM_CONFIG_OVERRIDE:path.join(replayHome,'config'),FM_FAKE_HERDR_STATE:path.join(recoveryRoot,'state.json'),FM_HERDR_LOG:path.join(recoveryRoot,'herdr.log'),HERDR_SESSION:'fixture'};
+const replayEndpoint=JSON.parse(execFileSync(path.join(recoveryBin,'herdr'),['workspace','create','--cwd',path.join(tmp,'idle'),'--label','cleanup-replay'],{env:replayEnv,encoding:'utf8'})).result;
+fs.writeFileSync(path.join(replayState,replayTask+'.meta'),`kind=ship\nmode=local-only\nspawn_gen=${replayGeneration}\nwindow=fixture:${replayEndpoint.root_pane.pane_id}\nendpoint_task_id=${replayTask}\nworktree=${replayCopy}\nproject=${replayProject}\nbackend=herdr\nherdr_session=fixture\nherdr_workspace_id=${replayEndpoint.workspace.workspace_id}\nherdr_tab_id=${replayEndpoint.tab.tab_id}\nherdr_pane_id=${replayEndpoint.root_pane.pane_id}\n`);
+const realTasksAxi=execFileSync('which',['tasks-axi'],{env:replayEnv,encoding:'utf8'}).trim(),tasksFailure=path.join(recoveryRoot,'done-failed'),tasksLog=path.join(recoveryRoot,'tasks.log');
+execFileSync(realTasksAxi,['add',replayTask,'Cleanup backlog replay','--kind','ship','--repo','sample','--start','--file',path.join(replayData,'backlog.md')],{env:replayEnv});
+const replayLifecycle=JSON.parse(execFileSync('python3',[path.join(root,'bin/fm-task-lifecycle.py'),'init',replayTask],{env:replayEnv,encoding:'utf8'}));
+replayLifecycle.disposition='accepted';replayLifecycle.assessment.remaining_gap='';
+const replayAccepted=path.join(recoveryRoot,'accepted.json');fs.writeFileSync(replayAccepted,JSON.stringify(replayLifecycle),{mode:0o600});
+execFileSync('bash',[path.join(root,'bin/fm-task-state.sh'),'reconcile',replayTask,'--expected-revision','1','--record',replayAccepted],{env:replayEnv});
+fs.writeFileSync(path.join(recoveryBin,'tasks-axi'),`#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> ${JSON.stringify(tasksLog)}\nif [ "\${1:-}" = done ] && [ ! -e ${JSON.stringify(tasksFailure)} ]; then : > ${JSON.stringify(tasksFailure)}; exit 1; fi\nexec ${JSON.stringify(realTasksAxi)} "$@"\n`,{mode:0o755});
+const replayService=new ShortAgents(replayHome,root),replayInput=req('cleanup-backlog-replay',[{action:'cleanup',task:replayTask}]),priorPath=process.env.PATH;
+process.env.PATH=recoveryBin+path.delimiter+priorPath;
+try {
+  const replayOperation=replayService.submit(replayInput);let replayResult;
+  for(let n=0;n<12000;n++){replayResult=replayService.status(replayOperation.id);if(replayResult.finishedAt)break;await wait(25);}
+  assert.equal(replayResult.state,'blocked');
+  const replayDir=replayService.dir(replayOperation.id),replayMarker=path.join(replayState,replayTask+'.backlog-close'),reservation=resource(replayHome,replayInput.operations.steps[0]).file;
+  assert.ok(fs.existsSync(replayMarker));assert.ok(!fs.existsSync(path.join(replayState,replayTask+'.meta')));assert.ok(fs.existsSync(reservation));assert.ok(!fs.existsSync(path.join(replayDir,'operation-0.receipt.json')));
+  assert.deepEqual(replayCopySnapshot(),replayCopyBefore);
+  const replayStarted=JSON.parse(fs.readFileSync(path.join(replayDir,'started.json'))).identity;
+  for(let n=0;n<400;n++){try{if(processIdentity(replayStarted.pid).start!==replayStarted.start)break;}catch{break;}if(n===399)throw Error('cleanup replay fixture runner did not exit');await wait(25);}
+  const closeCount=pane=>fs.readFileSync(path.join(recoveryBin,'herdr.log'),'utf8').split('\n').filter(line=>line.includes(`\x1fpane\x1fclose\x1f${pane}\x1f`)).length;
+  const closeCallsBefore=closeCount(replayEndpoint.root_pane.pane_id);assert.equal(closeCallsBefore,1);
+  execFileSync('bash',[path.join(root,'bin/fm-bootstrap.sh')],{env:{...replayEnv,PATH:process.env.PATH,FM_BOOTSTRAP_NETWORK:'skip',HOME:path.join(replayHome,'user-home')},encoding:'utf8',timeout:30000});
+  assert.ok(!fs.existsSync(replayMarker));
+  assert.match(execFileSync(realTasksAxi,['show',replayTask,'--file',path.join(replayData,'backlog.md')],{env:replayEnv,encoding:'utf8'}),/state:\s+done/);
+  const lifecycleAfterReplay=JSON.parse(fs.readFileSync(path.join(replayData,replayTask,'lifecycle.json'))),lifecycleReceipt=lifecycleAfterReplay.owner_receipts.cleanup.at(-1);
+  assert.equal(lifecycleReceipt.execution_generation,replayGeneration);assert.equal(lifecycleReceipt.facts.copyDisposition,'retained-dirty');
+  await replayService.reconcile();
+  const replayReceipt=JSON.parse(fs.readFileSync(path.join(replayDir,'operation-0.receipt.json')));
+  assert.equal(replayReceipt.state,'completed');assert.equal(replayReceipt.settlement,'dead-owner-cleanup-readback');assert.deepEqual(replayReceipt.evidence,lifecycleReceipt.facts);
+  assert.ok(!fs.existsSync(reservation));assert.deepEqual(replayCopySnapshot(),replayCopyBefore);assert.equal(closeCount(replayEndpoint.root_pane.pane_id),closeCallsBefore);
+  const boundaryTask='cleanup-success-boundary',boundaryGeneration='g-cleanup-success-boundary',boundaryCopy=path.join(tmp,'cleanup-success-boundary-copy');
+  git('-C',replayProject,'worktree','add','-b','cleanup-success-boundary-fixture',boundaryCopy);fs.writeFileSync(path.join(boundaryCopy,'retained.txt'),'retain success-boundary changes\n');
+  const boundaryCopySnapshot=()=>({head:git('-C',boundaryCopy,'rev-parse','HEAD'),status:git('-C',boundaryCopy,'status','--porcelain'),content:fs.readFileSync(path.join(boundaryCopy,'retained.txt'),'utf8')}),boundaryCopyBefore=boundaryCopySnapshot();
+  fs.mkdirSync(path.join(replayData,boundaryTask));fs.writeFileSync(path.join(replayData,boundaryTask,'brief.md'),'Completed cleanup success-boundary fixture\n');fs.writeFileSync(path.join(replayData,boundaryTask,'report.md'),'Preserved success-boundary report\n');
+  const boundaryEndpoint=JSON.parse(execFileSync(path.join(recoveryBin,'herdr'),['workspace','create','--cwd',path.join(tmp,'idle'),'--label','cleanup-success-boundary'],{env:replayEnv,encoding:'utf8'})).result;
+  fs.writeFileSync(path.join(replayState,boundaryTask+'.meta'),`kind=ship\nmode=local-only\nspawn_gen=${boundaryGeneration}\nwindow=fixture:${boundaryEndpoint.root_pane.pane_id}\nendpoint_task_id=${boundaryTask}\nworktree=${boundaryCopy}\nproject=${replayProject}\nbackend=herdr\nherdr_session=fixture\nherdr_workspace_id=${boundaryEndpoint.workspace.workspace_id}\nherdr_tab_id=${boundaryEndpoint.tab.tab_id}\nherdr_pane_id=${boundaryEndpoint.root_pane.pane_id}\n`);
+  execFileSync(realTasksAxi,['add',boundaryTask,'Cleanup success boundary','--kind','ship','--repo','sample','--start','--file',path.join(replayData,'backlog.md')],{env:replayEnv});
+  const boundaryLifecycle=JSON.parse(execFileSync('python3',[path.join(root,'bin/fm-task-lifecycle.py'),'init',boundaryTask],{env:replayEnv,encoding:'utf8'}));
+  boundaryLifecycle.disposition='accepted';boundaryLifecycle.assessment.remaining_gap='';
+  const boundaryAccepted=path.join(recoveryRoot,'boundary-accepted.json');fs.writeFileSync(boundaryAccepted,JSON.stringify(boundaryLifecycle),{mode:0o600});
+  execFileSync('bash',[path.join(root,'bin/fm-task-state.sh'),'reconcile',boundaryTask,'--expected-revision','1','--record',boundaryAccepted],{env:replayEnv});
+  const realPython=execFileSync('which',['python3'],{env:{...replayEnv,PATH:priorPath},encoding:'utf8'}).trim(),receiptFailure=path.join(recoveryRoot,'receipt-failed');
+  fs.writeFileSync(path.join(recoveryBin,'python3'),`#!/usr/bin/env bash\nif [ "\${2:-}" = owner-receipt ] && [ ! -e ${JSON.stringify(receiptFailure)} ]; then : > ${JSON.stringify(receiptFailure)}; kill -KILL "\$\$"; fi\nexec ${JSON.stringify(realPython)} "$@"\n`,{mode:0o755});
+  const boundaryInput=req('cleanup-success-boundary',[{action:'cleanup',task:boundaryTask}]),boundaryOperation=replayService.submit(boundaryInput);let boundaryResult;
+  for(let n=0;n<12000;n++){boundaryResult=replayService.status(boundaryOperation.id);if(boundaryResult.finishedAt)break;await wait(25);}
+  assert.equal(boundaryResult.state,'blocked');
+  const boundaryDir=replayService.dir(boundaryOperation.id),boundaryMarker=path.join(replayState,boundaryTask+'.backlog-close'),boundaryReservation=resource(replayHome,boundaryInput.operations.steps[0]).file;
+  assert.ok(fs.existsSync(boundaryMarker));assert.ok(!fs.existsSync(path.join(replayState,boundaryTask+'.meta')));assert.ok(fs.existsSync(boundaryReservation));assert.ok(!fs.existsSync(path.join(boundaryDir,'operation-0.receipt.json')));
+  assert.match(execFileSync(realTasksAxi,['show',boundaryTask,'--file',path.join(replayData,'backlog.md')],{env:replayEnv,encoding:'utf8'}),/state:\s+done/);
+  const boundaryBeforeReplay=JSON.parse(fs.readFileSync(path.join(replayData,boundaryTask,'lifecycle.json')));assert.equal((boundaryBeforeReplay.owner_receipts?.cleanup??[]).length,0);
+  const boundaryStarted=JSON.parse(fs.readFileSync(path.join(boundaryDir,'started.json'))).identity;
+  for(let n=0;n<400;n++){try{if(processIdentity(boundaryStarted.pid).start!==boundaryStarted.start)break;}catch{break;}if(n===399)throw Error('cleanup success-boundary fixture runner did not exit');await wait(25);}
+  const boundaryCloseCalls=closeCount(boundaryEndpoint.root_pane.pane_id);assert.equal(boundaryCloseCalls,1);assert.deepEqual(boundaryCopySnapshot(),boundaryCopyBefore);
+  execFileSync('bash',[path.join(root,'bin/fm-bootstrap.sh')],{env:{...replayEnv,PATH:process.env.PATH,FM_BOOTSTRAP_NETWORK:'skip',HOME:path.join(replayHome,'user-home')},encoding:'utf8',timeout:30000});
+  assert.ok(!fs.existsSync(boundaryMarker));
+  const boundaryAfterReplay=JSON.parse(fs.readFileSync(path.join(replayData,boundaryTask,'lifecycle.json'))),boundaryLifecycleReceipt=boundaryAfterReplay.owner_receipts.cleanup.at(-1);
+  assert.equal(boundaryLifecycleReceipt.execution_generation,boundaryGeneration);assert.equal(boundaryLifecycleReceipt.facts.copyDisposition,'retained-dirty');
+  await replayService.reconcile();
+  const boundaryReceipt=JSON.parse(fs.readFileSync(path.join(boundaryDir,'operation-0.receipt.json')));
+  assert.equal(boundaryReceipt.state,'completed');assert.equal(boundaryReceipt.settlement,'dead-owner-cleanup-readback');assert.deepEqual(boundaryReceipt.evidence,boundaryLifecycleReceipt.facts);
+  assert.ok(!fs.existsSync(boundaryReservation));assert.deepEqual(boundaryCopySnapshot(),boundaryCopyBefore);assert.equal(closeCount(boundaryEndpoint.root_pane.pane_id),boundaryCloseCalls);
+} finally {process.env.PATH=priorPath;}
 if(process.env.FM_SHORT_CLEANUP_TARGET) {
   const target=JSON.parse(fs.readFileSync(process.env.FM_SHORT_CLEANUP_TARGET));
   assert.ok(/^fm-lab-/.test(target.session) && target.session===process.env.HERDR_LAB_SESSION,'cleanup requires the generated named lab');
   fs.writeFileSync(path.join(home,'state/cleanup-one.meta'),`kind=ship\nmode=local-only\nspawn_gen=g-lab\nwindow=${target.session}:${target.pane}\nendpoint_task_id=cleanup-one\nworktree=${tmp}/absent-cleaned-worktree\nproject=${project}\nbackend=herdr\nherdr_session=${target.session}\nherdr_workspace_id=${target.workspace}\nherdr_tab_id=${target.tab}\nherdr_pane_id=${target.pane}\n`);
   const cleanMeta=fs.readFileSync(path.join(home,'state/cleanup-one.meta'),'utf8');
-  const dirtyCopy=path.join(tmp,'dirty-copy');git('-C',project,'worktree','add','-b','unlanded-lab',dirtyCopy);
-  fs.writeFileSync(path.join(dirtyCopy,'unlanded'),'preserve');
-  for(const [label,copy] of [['dirty',dirtyCopy],['unlanded',dirtyCopy],['shared',dirtyCopy]]) {
-    if(label==='unlanded') {git('-C',dirtyCopy,'add','.');git('-C',dirtyCopy,'commit','-m','unlanded fixture');}
-    if(label==='shared') fs.writeFileSync(path.join(home,'state/other-task.meta'),`worktree=${copy}\n`);
-    const task='cleanup-'+label;
-    fs.writeFileSync(path.join(home,'state',task+'.meta'),cleanMeta.replace('cleanup-one',task).replace(`${tmp}/absent-cleaned-worktree`,copy));
-    const negative=service.submit(req(task,[{action:'cleanup',task}]));
-    const refused=await terminal(negative.id);assert.equal(refused.state,'blocked',JSON.stringify(refused));
-    assert.ok(fs.existsSync(path.join(home,'state',task+'.meta')));
-    assert.ok(fs.existsSync(path.join(dirtyCopy,'unlanded')));
-    assert.ok(!fs.existsSync(path.join(service.dir(negative.id),'operation-0.effect.json')),'cleanup preflight refused before effects');
-    if(label==='shared') fs.unlinkSync(path.join(home,'state/other-task.meta'));
-    fs.unlinkSync(path.join(home,'state',task+'.meta')); // isolated rejected fixture only
+  const herdrLive=(...args)=>{const output=execFileSync(process.env.HERDR_LAB_HELPER,['run',target.session,...args],{encoding:'utf8',env:{...process.env,PATH:process.env.FM_SHORT_TEST_BASE_PATH}});return output.trim()?JSON.parse(output):{};};
+  const liveTask='cleanup-live',liveGeneration='s-live-cleanup';
+  const livePane=herdrLive('tab','create','--workspace',target.workspace,'--cwd',path.join(tmp,'idle'),'--label','fm-cleanup-live','--no-focus').result;
+  const livePaneId=livePane.root_pane.pane_id,liveTabId=livePane.tab.tab_id;
+  fs.writeFileSync(path.join(home,'state',liveTask+'.meta'),cleanMeta.replaceAll('cleanup-one',liveTask).replaceAll(target.pane,livePaneId).replaceAll(target.tab,liveTabId).replace('spawn_gen=g-lab',`spawn_gen=${liveGeneration}`)+'harness=traex\n');
+  fs.mkdirSync(path.join(home,'data',liveTask),{recursive:true});
+  fs.writeFileSync(path.join(home,'data',liveTask,'brief.md'),'Disposable completed live cleanup fixture\n');
+  fs.writeFileSync(path.join(home,'data',liveTask,'report.md'),'Retained completed-task report\n');
+  const liveEnv={...process.env,FM_HOME:home,FM_ROOT_OVERRIDE:root,FM_STATE_OVERRIDE:path.join(home,'state'),FM_DATA_OVERRIDE:path.join(home,'data'),FM_SUPERVISION_ACTOR:'main'};
+  fs.writeFileSync(path.join(home,'state',liveTask+'.herdr-presentation'),`version=1\ntask_id=${liveTask}\nprojection_id=abcdefghijklmnopqrstuv\n`);
+  execFileSync('bash',['-c',`. "$1/bin/backends/herdr.sh"; journal="$FM_HOME/state/$2.herdr-presentation"; fm_backend_herdr_projection_journal_write_v2 "$journal" "$2" abcdefghijklmnopqrstuv "$FM_HOME" "$3" "$4" "$5" "$6" "$4" anchor "$(fm_backend_herdr_projection_workspace_label "$2" abcdefghijklmnopqrstuv)" "fm-$2"; fm_backend_herdr_projection_bind_execution "$journal" "$2" "$7"`,'fixture',root,liveTask,target.session,target.workspace,liveTabId,livePaneId,liveGeneration],{env:liveEnv});
+  const initial=JSON.parse(execFileSync('python3',[path.join(root,'bin/fm-task-lifecycle.py'),'init',liveTask],{env:liveEnv,encoding:'utf8'}));
+  initial.disposition='accepted';initial.assessment.remaining_gap='';
+  const acceptedFile=path.join(tmp,'accepted-live.json');fs.writeFileSync(acceptedFile,JSON.stringify(initial),{mode:0o600});
+  execFileSync('bash',[path.join(root,'bin/fm-task-state.sh'),'reconcile',liveTask,'--expected-revision','1','--record',acceptedFile],{env:liveEnv});
+  herdrLive('pane','run',livePaneId,'traex -y');
+  const probe=()=>execFileSync('bash',['-c','. "$1/bin/backends/herdr.sh"; fm_backend_herdr_agent_state "$2:$3"; fm_backend_herdr_composer_state "$2:$3"','fixture',root,target.session,livePaneId],{env:liveEnv,encoding:'utf8'}).trim();
+  let liveState;
+  for(let n=0;n<120;n++){liveState=probe();if(['aliveempty','alivepending'].includes(liveState))break;await wait(250);}
+  assert.ok(['aliveempty','alivepending'].includes(liveState),'real TraeX reached a structurally live agent in the exact named-lab pane');
+  const liveInput=req('cleanup-live',[{action:'cleanup',task:liveTask}]);liveInput.operations.expiresAt=Date.now()+180000;
+  const liveCleanup=service.submit(liveInput),liveResult=await terminal(liveCleanup.id);
+  const liveDir=service.dir(liveCleanup.id);
+  const liveOutput=JSON.parse(fs.readFileSync(path.join(liveDir,'operation-0.output.json')));
+  fs.writeFileSync(path.join(tmp,'live-cleanup-evidence.json'),JSON.stringify({liveState,result:liveResult,output:liveOutput,receipt:JSON.parse(fs.readFileSync(path.join(liveDir,'operation-0.receipt.json')))},null,2));
+  assert.equal(liveResult.state,'completed',JSON.stringify(liveOutput));
+  assert.ok(!fs.existsSync(path.join(home,'state',liveTask+'.meta')));
+  assert.ok(!herdrLive('pane','list','--workspace',target.workspace).result.panes.some(p=>p.pane_id===livePaneId));
+  assert.equal(fs.readFileSync(path.join(home,'data',liveTask,'report.md'),'utf8'),'Retained completed-task report\n');
+  const liveReceipt=fs.readFileSync(path.join(liveDir,'operation-0.receipt.json'),'utf8');
+  assert.equal(service.submit(liveInput).finishedAt,liveResult.finishedAt,'completed cleanup is not replayed');
+  assert.equal(fs.readFileSync(path.join(liveDir,'operation-0.receipt.json'),'utf8'),liveReceipt);
+  const completedFixture=(task,meta)=>{
+    fs.writeFileSync(path.join(home,'state',task+'.meta'),meta);
+    fs.mkdirSync(path.join(home,'data',task),{recursive:true});
+    fs.writeFileSync(path.join(home,'data',task,'brief.md'),'Disposable completed cleanup fixture\n');
+    fs.writeFileSync(path.join(home,'data',task,'report.md'),'Preserved report\n');
+    const record=JSON.parse(execFileSync('python3',[path.join(root,'bin/fm-task-lifecycle.py'),'init',task],{env:liveEnv,encoding:'utf8'}));
+    record.disposition='accepted';record.assessment.remaining_gap='';
+    const file=path.join(tmp,task+'-accepted.json');fs.writeFileSync(file,JSON.stringify(record),{mode:0o600});
+    execFileSync('bash',[path.join(root,'bin/fm-task-state.sh'),'reconcile',task,'--expected-revision','1','--record',file],{env:liveEnv});
+  };
+  const copySnapshot=copy=>({
+    head:git('-C',copy,'rev-parse','HEAD'),branch:git('-C',copy,'rev-parse','--abbrev-ref','HEAD'),status:git('-C',copy,'status','--porcelain'),
+    files:Object.fromEntries(git('-C',copy,'ls-files','--cached','--others','--exclude-standard','-z').split('\0').filter(Boolean).map(file=>[file,fs.readFileSync(path.join(copy,file)).toString('base64')]))
+  });
+  for(const label of ['dirty','unlanded','pushed-unmerged','shared','primary','primary-child','contended','clean']) {
+    const task='cleanup-'+label,copy=label==='primary'?project:label==='primary-child'?path.join(project,'protected-child'):path.join(tmp,label+'-copy');
+    if(label==='primary-child') {
+      fs.mkdirSync(copy);fs.writeFileSync(path.join(copy,'retained.txt'),'primary checkout content');
+      git('-C',project,'add','.');git('-C',project,'commit','-m','primary subtree fixture');git('-C',project,'push','origin','HEAD');
+    } else if(label!=='primary') {
+      git('-C',project,'worktree','add','-b',label+'-fixture',copy);
+      if(!['clean','contended'].includes(label))fs.writeFileSync(path.join(copy,'unlanded'),'retained task content');
+      if(label==='unlanded'||label==='pushed-unmerged') {git('-C',copy,'add','.');git('-C',copy,'commit','-m','unmerged task content');if(label==='pushed-unmerged')git('-C',copy,'push','origin','HEAD');}
+    }
+    if(label==='shared')fs.writeFileSync(path.join(home,'state/other-task.meta'),`worktree=${copy}\n`);
+    const pane=herdrLive('tab','create','--workspace',target.workspace,'--cwd',path.join(tmp,'idle'),'--label',task,'--no-focus').result;
+    const meta=cleanMeta.replaceAll('cleanup-one',task).replace(`${tmp}/absent-cleaned-worktree`,copy).replaceAll(target.pane,pane.root_pane.pane_id).replaceAll(target.tab,pane.tab.tab_id);
+    completedFixture(task,meta);
+    const beforeCopy=copySnapshot(copy);
+    let copyLock;
+    if(label==='contended') {
+      copyLock=execFileSync('bash',['-c','. "$1/bin/fm-wake-lib.sh"; fm_treehouse_project_lock_path "$2"','fixture',root,project],{env:liveEnv,encoding:'utf8'}).trim();
+      fs.mkdirSync(copyLock);fs.writeFileSync(path.join(copyLock,'pid'),String(process.pid)+'\n');
+    }
+    const input=req(task,[{action:'cleanup',task}]),operation=service.submit(input),result=await terminal(operation.id);
+    if(copyLock)fs.rmSync(copyLock,{recursive:true});
+    const dir=service.dir(operation.id),output=JSON.parse(fs.readFileSync(path.join(dir,'operation-0.output.json')));
+    assert.equal(result.state,'completed',JSON.stringify(output));
+    assert.ok(!fs.existsSync(path.join(home,'state',task+'.meta')));
+    assert.ok(!herdrLive('pane','list','--workspace',target.workspace).result.panes.some(p=>p.pane_id===pane.root_pane.pane_id));
+    assert.equal(fs.readFileSync(path.join(home,'data',task,'report.md'),'utf8'),'Preserved report\n');
+    const receipt=JSON.parse(fs.readFileSync(path.join(dir,'operation-0.receipt.json')));
+    if(label!=='clean') {
+      assert.ok(fs.existsSync(copy));assert.equal(receipt.evidence.copyDisposition,'retained-'+(label==='pushed-unmerged'?'unlanded':label==='contended'?'unverified':label==='primary-child'?'primary':label));
+      assert.deepEqual(copySnapshot(copy),beforeCopy,'retained working files, head, branch and status are unchanged');
+    } else assert.ok(!fs.existsSync(copy),'exclusive clean integrated copy was actually removed');
+    fs.writeFileSync(path.join(tmp,label+'-cleanup-evidence.json'),JSON.stringify({copy,beforeCopy,afterCopy:label==='clean'?null:copySnapshot(copy),result,receipt,output},null,2));
   }
   const cleanup=service.submit(req('cleanup',[{action:'cleanup',task:'cleanup-one'}]));
   const result=await terminal(cleanup.id);
@@ -380,14 +523,14 @@ if(process.env.FM_SHORT_CLEANUP_TARGET) {
   assert.equal(git('-C',lease.path,'status','--porcelain'),'');
   const unrelatedHead=git('-C',unrelated.path,'rev-parse','HEAD');
   fs.writeFileSync(path.join(unrelated.path,'keep.txt'),'unrelated content must survive');
-  execFileSync('bash',['-c','. "$1/bin/fm-wake-lib.sh"; fm_treehouse_slot_owner_claim "$2" cleanup-landed "$3"','fixture',root,lease.path,home]);
+  execFileSync('bash',['-c','. "$1/bin/fm-wake-lib.sh"; fm_treehouse_slot_owner_claim "$2" cleanup-landed "$3" g-lab','fixture',root,lease.path,home]);
   const herdr=(...args)=>JSON.parse(execFileSync(process.env.HERDR_LAB_HELPER,['run',target.session,...args],{encoding:'utf8',env:{...process.env,PATH:process.env.FM_SHORT_TEST_BASE_PATH}}));
   const pane=herdr('tab','create','--workspace',target.workspace,'--cwd',path.join(tmp,'idle'),'--label','fm-cleanup-landed','--no-focus').result;
   const beforePanes=herdr('pane','list','--workspace',target.workspace).result.panes.map(p=>p.pane_id);
   const beforePool=JSON.parse(treehouse('status','--json'));
   const beforeCopy={path:lease.path,exists:fs.existsSync(lease.path),head:git('-C',lease.path,'rev-parse','HEAD'),status:git('-C',lease.path,'status','--porcelain')};
   const landedMeta=cleanMeta.replaceAll('cleanup-one','cleanup-landed').replace(`${tmp}/absent-cleaned-worktree`,lease.path).replace(`project=${project}`,`project=${cleanupProject}`).replaceAll(target.pane,pane.root_pane.pane_id).replaceAll(target.tab,pane.tab.tab_id);
-  fs.writeFileSync(path.join(home,'state/cleanup-landed.meta'),landedMeta);
+  completedFixture('cleanup-landed',landedMeta);
   const unrelatedMeta=`kind=ship\nspawn_gen=g-other\nworktree=${unrelated.path}\nproject=${cleanupProject}\n`;
   fs.writeFileSync(path.join(home,'state/unrelated-lab.meta'),unrelatedMeta);
   const landedRequest=req('cleanup-landed',[{action:'cleanup',task:'cleanup-landed'}]);landedRequest.operations.expiresAt=Date.now()+120000;
@@ -453,9 +596,11 @@ if(process.env.FM_SHORT_CLEANUP_TARGET) {
   const drift=auditService.submit(cleanupInput('audit-owner-drift'),false);
   completion('hold','audit-second-choice','--title','Second synthetic choice','--reason','Unanswered synthetic choice','--origin',auditTask);
   completion('complete',auditTask,auditTask,'audit-second-choice');
+  fs.appendFileSync(auditMeta,'endpoint_task_id=another-task\n');
   execFileSync(process.execPath,[path.join(root,'bin/fm-short-agent.mjs'),'_run',auditHome,drift.id],{env:auditEnv,timeout:30000});
   assert.equal(auditService.status(drift.id).state,'blocked');assert.ok(fs.existsSync(auditMeta));
   assert.ok(!fs.existsSync(path.join(auditService.dir(drift.id),'operation-0.effect.json')));
+  fs.writeFileSync(auditMeta,fs.readFileSync(auditMeta,'utf8').replace('endpoint_task_id=another-task\n',''));
   const currentReview=fs.readFileSync(auditMeta,'utf8');
   assert.ok(currentReview.includes('# previous completion: decision_keys='+auditTask+'\n'));
   completion('verify',auditTask);completion('open',auditTask);completion('open','audit-second-choice');

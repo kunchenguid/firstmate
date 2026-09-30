@@ -43,7 +43,7 @@ The clear is refused before anything is sent when the recorded backend cannot de
 
 **Teardown and discard are not verbs and will not become verbs.**
 `exit` stops an agent and preserves everything else.
-Removing a worktree, closing an endpoint, or discarding work stays with [`bin/fm-teardown.sh`](../bin/fm-teardown.sh), which owns the landed-work test.
+Removing a worktree, closing an endpoint, or discarding work stays with [`bin/fm-teardown.sh`](../bin/fm-teardown.sh); the [resource cleanup contract](task-lifecycle.md#remote-results-and-resource-cleanup) owns completed-task copy preservation, and the script header owns legacy landed-work mechanics.
 
 **`resume` is not a verb.**
 Native resume depends on harness-private session identity and is not a portable lifecycle contract.

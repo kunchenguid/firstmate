@@ -3,6 +3,12 @@
 # Herdr endpoint, clear volatile state, and transition this home's backlog item
 # for ship and scout tasks before reporting success, then refresh/prune the
 # project's clone for PR-based ship tasks.
+# Accepted/archived tasks close only the exact recorded pane and archive their
+# resource record independently of copy disposal. Shared, primary, dirty,
+# unintegrated or unverified copies stay; reports/status/outcomes stay outside
+# the disposable copy. Historical journal/UI/continuation/short binding checks
+# do not admit this completed path. The detailed legacy contract below applies
+# to records without an accepted/archived goal.
 # Removing state/<id>.meta and landing the backlog transition are one step, not
 # two: bin/fm-backlog-transition-lib.sh owns that invariant, and both halves run
 # under the task's own meta lock before this script reports success. Because the
@@ -294,6 +300,234 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 }
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-teardown-worktree-lib.sh
+. "$SCRIPT_DIR/fm-teardown-worktree-lib.sh"
+
+BACKLOG_DONE_ARGS=()
+# The completion links this teardown already holds locally. A scout's
+# deliverable is its report, a local-only ship lands on local main, and every
+# other ship carries the PR recorded on its own record.
+backlog_done_args() {
+  local data_relative
+  BACKLOG_DONE_ARGS=()
+  case "$KIND" in
+    scout)
+      data_relative=$(fm_backlog_data_relative "$DATA") || return 1
+      BACKLOG_DONE_ARGS=(--report "$data_relative/$ID/report.md")
+      ;;
+    *)
+      if [ "$MODE" = local-only ]; then
+        BACKLOG_DONE_ARGS=(--note "local main")
+      elif [ -n "$PR_URL" ]; then
+        BACKLOG_DONE_ARGS=(--pr "$PR_URL")
+      fi
+      ;;
+  esac
+}
+
+# Closing the backlog item is this script's own last act on the record, not a
+# printed instruction for a later turn (bin/fm-backlog-transition-lib.sh owns the
+# invariant). This prints what already happened, so the follow-up wording stays
+# only where a human still owes the edit.
+backlog_refresh_reminder() {
+  local backlog_display root backend=markdown
+  if root=$(fm_backlog_root "$DATA"); then
+    backend=$(fm_tasks_axi_backend "$root") || return 2
+  fi
+  if [ "$backend" != markdown ]; then
+    backlog_display="this home's configured tasks-axi backend (data directory $DATA)"
+  elif backlog_display=$(fm_backlog_file "$DATA"); then
+    :
+  else
+    backlog_display="${DATA%/}/backlog.md"
+  fi
+  if [ "$BACKLOG_CLOSED" = 1 ] && [ "$BACKLOG_TRANSITION" = retain ]; then
+    printf '%s\n' "Backlog: $ID stays open in $backlog_display, still held for the captain with its deliverable recorded. Relay the question and close it only with bin/fm-captain-hold.sh answer."
+  elif [ "$BACKLOG_CLOSED" = 1 ]; then
+    printf '%s\n' "Backlog: $ID is closed in $backlog_display. Run bin/fm-tasks-axi.sh ready for dependency-cleared candidates, check date gates, and dispatch only work whose blockers are gone and date is due."
+  else
+    printf '%s\n' "Backlog: $ID just finished ($BACKLOG_SKIP_REASON). Update $backlog_display - move $ID to Done, keep Done to the 10 most recent, then re-scan Queued and dispatch only work whose blockers are gone and date is due."
+  fi
+}
+
+# Completed goals retire their recorded endpoint independently of disposable
+# copy removal. No historical journal, agent UI, continuation or operation
+# binding is an admission gate here. Shared, dirty or unlanded copies stay.
+# Active/legacy tasks retain the ordinary teardown contract below.
+# shellcheck source=bin/fm-task-lifecycle-lib.sh
+. "$SCRIPT_DIR/fm-task-lifecycle-lib.sh"
+teardown_completed_task() (
+  local meta="$STATE/$ID.meta" lock copy project session pane other field candidate shared=0 disposition=returned-or-already-absent facts
+  local WT PROJ KIND MODE PR_URL dirty generation backlog_status=0 captain_status=0 captain_out marker
+  local copy_lock='' copy_lock_held=0
+  local BACKLOG_CLOSED=0 BACKLOG_TRANSITION=close BACKLOG_SKIP_REASON=''
+  local -a TASK_COMPLETED_DONE_ARGS=() TASK_COMPLETED_TRANSITION_FLAGS=()
+  lock=$(fm_meta_lock_path "$meta") || exit 1
+  fm_lock_acquire_wait "$lock"
+  trap 'fm_lock_release "$lock"; if [ "$copy_lock_held" = 1 ]; then fm_lock_release "$copy_lock"; fi' EXIT
+  fm_backend_validate_task_endpoint "$meta" "$ID" || exit 1
+  case "$(fm_task_lifecycle mode "$ID")" in accepted|archived) ;; *) exit 1 ;; esac
+  [ -z "$ENDPOINT_EXPECTED_GEN" ] || [ "$(fm_meta_get "$meta" spawn_gen)" = "$ENDPOINT_EXPECTED_GEN" ] || exit 1
+  KIND=$(fm_meta_get "$meta" kind)
+  [ -n "$KIND" ] || KIND=ship
+  [ "$KIND" != secondmate ] || exit 1
+  copy=$(fm_backend_meta_exact_value "$meta" worktree) || exit 1
+  project=$(fm_backend_meta_exact_value "$meta" project) || exit 1
+  generation=$(fm_meta_get "$meta" spawn_gen)
+  MODE=$(fm_meta_get "$meta" mode)
+  PR_URL=$(fm_meta_get "$meta" pr)
+  [ -n "$MODE" ] || MODE=no-mistakes
+  session=$(fm_backend_meta_exact_value "$meta" herdr_session) || exit 1
+  pane=$(fm_backend_meta_exact_value "$meta" herdr_pane_id) || exit 1
+  for other in "$STATE"/*.meta; do
+    [ "$other" != "$meta" ] && [ -f "$other" ] && [ ! -L "$other" ] || continue
+    if [ "$(fm_meta_get "$other" herdr_session)" = "$session" ] && \
+       [ "$(fm_meta_get "$other" herdr_pane_id)" = "$pane" ]; then
+      echo 'REFUSED: recorded endpoint is claimed by another task' >&2; exit 1
+    fi
+  done
+  fm_backend_source herdr || exit 1
+  case "$(fm_backend_herdr_pane_presence_state "$session" "$pane")" in
+    present) fm_backend_herdr_explicit_close_pane_confirmed "$session" "$pane" || exit 1 ;;
+    dead) ;;
+    *) echo 'REFUSED: exact endpoint cannot be resolved' >&2; exit 1 ;;
+  esac
+  if [ "$ENDPOINT_ONLY" = 1 ]; then
+    local lifecycle ENDPOINT_GENERATION ENDPOINT_GOAL ENDPOINT_RECEIPT META=$meta
+    lifecycle=$(fm_task_lifecycle read "$ID") || exit 1
+    ENDPOINT_GENERATION=$(printf '%s' "$lifecycle" | jq -r '.execution_generation')
+    ENDPOINT_GOAL=$(printf '%s' "$lifecycle" | jq -r '.goal_revision')
+    ENDPOINT_RECEIPT="$STATE/$ID.cleanup.json"
+    # Existing phase receipts are observations, not admission checks.
+    # shellcheck source=bin/fm-teardown-endpoint-lib.sh
+    . "$SCRIPT_DIR/fm-teardown-endpoint-lib.sh"
+    teardown_endpoint_receipt pane_close confirmed exact-pane-absent && \
+      teardown_endpoint_directory_observation || echo 'warning: endpoint closed; phase evidence unavailable' >&2
+    printf 'completed task pane removed: %s; copy and report retained\n' "$ID"
+    exit 0
+  fi
+  if [ -d "$copy" ]; then
+    copy=$(cd "$copy" && pwd -P) || exit 1
+    # Serialize the non-sharing observation with the existing spawn/return
+    # lock. Contention retains only the copy; window/record retirement proceeds.
+    copy_lock=$(fm_treehouse_project_lock_path "$project") || copy_lock=
+    if [ -n "$copy_lock" ] && fm_lock_try_acquire "$copy_lock"; then copy_lock_held=1
+    else shared=1; disposition=retained-unverified
+    fi
+    # Primary copies and directories containing them are never disposable.
+    for candidate in "$project" "$FM_HOME" "$FM_ROOT"; do
+      [ -d "$candidate" ] || continue
+      candidate=$(cd "$candidate" && pwd -P) || exit 1
+      case "$candidate/" in "$copy/"*) shared=1; disposition=retained-primary ;; esac
+    done
+    # A subdirectory of a checkout is part of that checkout, not a disposable
+    # copy. An independent nested worktree (including a pool) has its own root.
+    candidate=$(git -C "$copy" rev-parse --show-toplevel 2>/dev/null) || candidate=
+    if [ -d "$candidate" ] && [ ! "$candidate" -ef "$copy" ]; then
+      shared=1; disposition=retained-primary
+    fi
+    for other in "$STATE"/*.meta; do
+      [ "$other" != "$meta" ] && [ -f "$other" ] && [ ! -L "$other" ] || continue
+      for field in worktree home; do
+        candidate=$(fm_meta_get "$other" "$field")
+        if [ -d "$candidate" ] && [ "$candidate" -ef "$copy" ]; then shared=1; disposition=retained-shared; fi
+      done
+    done
+    if fm_treehouse_pool_slot "$project" "$copy"; then
+      fm_treehouse_slot_owner_state "$copy" "$ID" "$generation"
+      if [ "$FM_TREEHOUSE_SLOT_OWNER" = other ] || \
+         { [ -n "$FM_TREEHOUSE_SLOT_OWNER_HOME" ] && [ "$FM_TREEHOUSE_SLOT_OWNER_HOME" != "$FM_HOME" ]; }; then
+        shared=1; disposition=retained-shared
+      elif [ "$FM_TREEHOUSE_SLOT_OWNER" != mine ] || [ -z "$generation" ] || \
+           [ "$FM_TREEHOUSE_SLOT_OWNER_HOME" != "$FM_HOME" ]; then
+        shared=1; disposition=retained-unverified
+      fi
+    fi
+    WT=$copy
+    PROJ=$project
+    if [ "$shared" = 0 ]; then
+      dirty=$(git -C "$copy" status --porcelain 2>/dev/null) || { shared=1; disposition=retained-unverified; }
+      if [ -n "$dirty" ]; then shared=1; disposition=retained-dirty
+      elif [ "$shared" = 0 ] && ! validate_worktree_teardown_safety completed; then shared=1; disposition=retained-unlanded
+      fi
+    fi
+    if [ "$shared" = 0 ]; then
+      if fm_treehouse_pool_slot "$project" "$copy"; then
+        if (cd "$project" && treehouse return --force "$copy"); then
+          fm_treehouse_slot_owner_release "$copy" "$ID" "$generation"
+        else disposition=retained-unverified
+        fi
+      elif git -C "$project" worktree list --porcelain | sed -n 's/^worktree //p' | grep -Fxq "$copy"; then
+        git -C "$project" worktree remove --force "$copy" || disposition=retained-unverified
+      else
+        rm -rf -- "$copy" || disposition=retained-unverified
+      fi
+    fi
+  fi
+  if fm_backlog_transition_applies "$CONFIG" "$DATA" "$KIND"; then
+    if ! fm_backlog_meta_spawn_gen "$meta" "$STATE"; then
+      echo "error: completed cleanup could not bind $ID's backlog transition to its task generation ($FM_BACKLOG_TRANSITION_ERROR)" >&2
+      exit 1
+    fi
+    generation=$FM_BACKLOG_META_SPAWN_GEN
+    captain_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      FM_DATA_OVERRIDE="$DATA" FM_CONFIG_OVERRIDE="$CONFIG" \
+      "$SCRIPT_DIR/fm-captain-hold.sh" open "$ID" 2>&1) || captain_status=$?
+    case "$captain_status" in
+      0) BACKLOG_TRANSITION=retain; TASK_COMPLETED_TRANSITION_FLAGS=(--retain) ;;
+      1) ;;
+      *)
+        echo "error: completed cleanup could not determine whether $ID's backlog item is held for the captain" >&2
+        [ -z "$captain_out" ] || printf '%s\n' "$captain_out" >&2
+        exit 1
+        ;;
+    esac
+    backlog_done_args || {
+      echo "error: completed cleanup could not record $ID's deliverable" >&2
+      exit 1
+    }
+    TASK_COMPLETED_DONE_ARGS=("${BACKLOG_DONE_ARGS[@]+"${BACKLOG_DONE_ARGS[@]}"}")
+    marker=$(fm_backlog_close_marker_path "$STATE" "$ID") || exit 1
+    fm_backlog_close_marker_write "$STATE" "$ID" "$DATA" "$generation" \
+      --cleanup-disposition "$disposition" \
+      "${TASK_COMPLETED_TRANSITION_FLAGS[@]+"${TASK_COMPLETED_TRANSITION_FLAGS[@]}"}" \
+      "${TASK_COMPLETED_DONE_ARGS[@]+"${TASK_COMPLETED_DONE_ARGS[@]}"}" || {
+        echo "error: completed cleanup could not record its pending backlog $BACKLOG_TRANSITION ($FM_BACKLOG_TRANSITION_ERROR)" >&2
+        exit 1
+      }
+    BACKLOG_CLOSED=1
+    fm_backlog_atomic_transition remove "$meta" 'completed resource record' "$STATE" || exit 1
+    fm_backlog_replay_transition "$BACKLOG_TRANSITION" "$marker" "$DATA" "$ID" "$STATE" \
+      "$generation" "$disposition" "${TASK_COMPLETED_DONE_ARGS[@]+"${TASK_COMPLETED_DONE_ARGS[@]}"}" || {
+        echo "error: completed cleanup finished endpoint and copy handling, but its backlog $BACKLOG_TRANSITION remains pending ($FM_BACKLOG_TRANSITION_ERROR)" >&2
+        exit 1
+      }
+  else
+    backlog_status=$?
+    if [ "$backlog_status" -eq 2 ]; then
+      echo "error: completed cleanup could not access $ID's backlog ($FM_BACKLOG_TRANSITION_ERROR)" >&2
+      exit 1
+    fi
+    BACKLOG_SKIP_REASON=$FM_BACKLOG_TRANSITION_SKIP
+    fm_backlog_atomic_transition remove "$meta" 'completed resource record' "$STATE" || exit 1
+  fi
+  facts=$(jq -cn --arg disposition "$disposition" '{taskRecordRemoved:true,endpointConfirmedGone:true,copyDisposition:$disposition,bookkeepingComplete:true}')
+  fm_task_lifecycle_owner_receipt "$ID" "$generation" cleanup "$facts" locked || \
+    echo 'warning: cleanup completed; lifecycle evidence could not be recorded' >&2
+  printf 'teardown %s complete (exact pane absent; copy=%s; report retained)\n' "$ID" "$disposition"
+  backlog_refresh_reminder
+  if [ "${FM_SUPERVISION_ACTOR:-}" = short ]; then
+    # Postcondition evidence only: no pre-effect short-actor admission check.
+    # shellcheck source=bin/fm-short-owner-lib.sh
+    . "$SCRIPT_DIR/fm-short-owner-lib.sh"
+    FM_SHORT_OWNER_ACTION=cleanup
+    FM_SHORT_OWNER_ARGS=("$ID")
+    fm_short_owner_receipt "$facts"
+  fi
+)
+case "$(fm_task_lifecycle mode "$ID")" in
+  accepted|archived) teardown_completed_task; exit $? ;;
+esac
 # Supervision lease guard: post-landing cleanup is overlap territory between
 # the two Pi supervision actors; refuse while the OTHER actor holds this
 # task's live lease (contract: bin/fm-lease-lib.sh; no-op in homes without
@@ -585,22 +819,6 @@ if [ "$FORCE" != "--force" ] && fm_pf_relay_active "$FM_HOME"; then
   PUBLIC_FOLLOWUP_RELAY_ACTIVE=1
 fi
 
-default_branch() {
-  local ref branch
-  ref=$(git -C "$PROJ" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
-  if [ -n "$ref" ]; then
-    echo "${ref#origin/}"
-    return 0
-  fi
-  for branch in main master; do
-    if git -C "$PROJ" show-ref --verify --quiet "refs/heads/$branch"; then
-      echo "$branch"
-      return 0
-    fi
-  done
-  return 1
-}
-
 meta_value() {
   local meta=$1 key=$2
   fm_meta_get "$meta" "$key"
@@ -664,199 +882,6 @@ remove_pr_poll_artifacts() {
     "$state_dir/$id.merge-authority" "$state_dir/$id.check-trust" || return 1
 }
 
-# Resolve the PR number for a worktree branch via gh-axi. Echoes the number on a
-# single match and returns 0; returns non-zero on no match or any lookup failure,
-# so the caller treats it as "no PR found" (fail-safe).
-pr_number_from_branch() {
-  local branch=$1 out n
-  [ -n "$branch" ] && [ "$branch" != HEAD ] || return 1
-  out=$( cd "$WT" && gh-axi pr list --state all --head "$branch" --limit 1 2>/dev/null ) || return 1
-  n=$(printf '%s\n' "$out" | sed -n 's/^[[:space:]]*\([0-9][0-9]*\),.*/\1/p' | head -1)
-  [ -n "$n" ] || return 1
-  printf '%s' "$n"
-}
-
-pr_number_from_target() {
-  local target=$1 n
-  case "$target" in
-    '' ) return 1 ;;
-    *"/pull/"*)
-      n=${target##*/pull/}
-      n=${n%%[!0-9]*}
-      ;;
-    [0-9]*)
-      n=${target%%[!0-9]*}
-      ;;
-    *) return 1 ;;
-  esac
-  [ -n "$n" ] || return 1
-  printf '%s' "$n"
-}
-
-ensure_commit_object() {
-  local target=$1 commit=$2 n
-  git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null && return 0
-  n=$(pr_number_from_target "$target") || return 1
-  git -C "$WT" remote get-url origin >/dev/null 2>&1 || return 1
-  git -C "$WT" fetch --quiet origin "refs/pull/$n/head" >/dev/null 2>&1 || return 1
-  git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null
-}
-
-patch_id_for_commit() {
-  local commit=$1
-  git -C "$WT" show --pretty=medium --no-ext-diff "$commit" 2>/dev/null \
-    | git patch-id --stable 2>/dev/null \
-    | awk 'NR == 1 { print $1 }'
-}
-
-unpushed_patches_are_in_pr_head() {
-  local pr_head=$1 current base pr_patch_ids commit patch_id unpushed
-  current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
-  base=$(git -C "$WT" merge-base "$current" "$pr_head" 2>/dev/null) || return 1
-  pr_patch_ids=$(
-    git -C "$WT" log --format=%H "$base..$pr_head" -- 2>/dev/null \
-      | while IFS= read -r commit; do
-          patch_id_for_commit "$commit"
-        done \
-      | sed '/^$/d' \
-      | sort -u
-  ) || return 1
-  [ -n "$pr_patch_ids" ] || return 1
-  unpushed=$(git -C "$WT" log --format=%H HEAD --not --remotes -- 2>/dev/null) || return 1
-  [ -n "$unpushed" ] || return 1
-  while IFS= read -r commit; do
-    [ -n "$commit" ] || continue
-    patch_id=$(patch_id_for_commit "$commit") || return 1
-    [ -n "$patch_id" ] || return 1
-    printf '%s\n' "$pr_patch_ids" | grep -qxF "$patch_id" || return 1
-  done <<EOF
-$unpushed
-EOF
-}
-
-# Is the worktree's PR merged for local work contained in that PR? Resolves the
-# PR from the recorded pr= URL first, then from the branch name, and asks GitHub
-# for both the PR state and head. Returns non-zero when the PR is not merged, the
-# current work is not contained in the PR head, no PR is found, or any gh error
-# occurs - the caller then falls back to the content check.
-pr_is_merged() {
-  local branch=$1 target view state remainder head resolved_url current landed=0
-  if [ -n "$PR_URL" ]; then
-    target=$PR_URL
-  else
-    target=$(pr_number_from_branch "$branch") || return 1
-  fi
-  [ -n "$target" ] || return 1
-  view=$(cd "$WT" && gh pr view "$target" --json state,headRefOid,url -q '.state + "\t" + .headRefOid + "\t" + .url' 2>/dev/null) || return 1
-  state=${view%%$'\t'*}
-  remainder=${view#*$'\t'}
-  [ "$state" != "$view" ] || return 1
-  head=${remainder%%$'\t'*}
-  resolved_url=${remainder#*$'\t'}
-  [ "$head" != "$remainder" ] || return 1
-  case "$state" in
-    MERGED|merged) ;;
-    *) return 1 ;;
-  esac
-  [ -n "$head" ] || return 1
-  ensure_commit_object "$target" "$head" || return 1
-  current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
-  if git -C "$WT" merge-base --is-ancestor "$current" "$head" 2>/dev/null; then
-    landed=1
-  elif unpushed_patches_are_in_pr_head "$head"; then
-    landed=1
-  fi
-  [ "$landed" = 1 ] || return 1
-  if [ -z "$PR_URL" ]; then
-    [ -n "$resolved_url" ] || return 1
-    PR_URL=$resolved_url
-  fi
-  return 0
-}
-
-# Is the branch's content already present in the up-to-date default branch? Fetches
-# first, then 3-way merges the default branch with HEAD: when HEAD introduces nothing
-# the default branch does not already contain (e.g. its change landed via squash) the
-# merged tree equals the default branch's tree. This isolates branch-only changes, so
-# unrelated commits the default branch gained past the merge-base do not count as
-# "added". Returns non-zero when inconclusive (no default ref, or a merge conflict),
-# so the caller refuses rather than guesses.
-content_in_default() {
-  local name ref default_tree merged_tree
-  name=$(default_branch) || return 1
-  if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
-    git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
-    ref="refs/remotes/origin/$name"
-  elif git -C "$WT" rev-parse --quiet --verify "refs/heads/$name" >/dev/null 2>&1; then
-    ref="refs/heads/$name"
-  else
-    return 1
-  fi
-  default_tree=$(git -C "$WT" rev-parse --quiet --verify "$ref^{tree}" 2>/dev/null) || return 1
-  [ -n "$default_tree" ] || return 1
-  merged_tree=$(git -C "$WT" merge-tree --write-tree "$ref" HEAD 2>/dev/null) || return 1
-  merged_tree=$(printf '%s\n' "$merged_tree" | head -1)
-  [ "$merged_tree" = "$default_tree" ]
-}
-
-# Has the worktree's committed work actually LANDED, though its commits are not
-# reachable from any remote-tracking branch? True when a merged PR proves the
-# current local work is contained in the PR head, OR the content is already in the
-# default branch (fallback, which also covers the no-PR and gh-error paths). False
-# only for genuinely unlanded work.
-work_is_landed() {
-  local branch=$1
-  pr_is_merged "$branch" && return 0
-  content_in_default
-}
-
-# The completion links this teardown already holds locally. A scout's
-# deliverable is its report, a local-only ship lands on local main, and every
-# other ship carries the PR recorded on its own record.
-BACKLOG_DONE_ARGS=()
-backlog_done_args() {
-  local data_relative
-  BACKLOG_DONE_ARGS=()
-  case "$KIND" in
-    scout)
-      data_relative=$(fm_backlog_data_relative "$DATA") || return 1
-      BACKLOG_DONE_ARGS=(--report "$data_relative/$ID/report.md")
-      ;;
-    *)
-      if [ "$MODE" = local-only ]; then
-        BACKLOG_DONE_ARGS=(--note "local main")
-      elif [ -n "$PR_URL" ]; then
-        BACKLOG_DONE_ARGS=(--pr "$PR_URL")
-      fi
-      ;;
-  esac
-}
-
-# Closing the backlog item is this script's own last act on the record, not a
-# printed instruction for a later turn (bin/fm-backlog-transition-lib.sh owns the
-# invariant). This prints what already happened, so the follow-up wording stays
-# only where a human still owes the edit.
-backlog_refresh_reminder() {
-  local backlog_display root backend=markdown
-  if root=$(fm_backlog_root "$DATA"); then
-    backend=$(fm_tasks_axi_backend "$root") || return 2
-  fi
-  if [ "$backend" != markdown ]; then
-    backlog_display="this home's configured tasks-axi backend (data directory $DATA)"
-  elif backlog_display=$(fm_backlog_file "$DATA"); then
-    :
-  else
-    backlog_display="${DATA%/}/backlog.md"
-  fi
-  if [ "$BACKLOG_CLOSED" = 1 ] && [ "$BACKLOG_TRANSITION" = retain ]; then
-    printf '%s\n' "Backlog: $ID stays open in $backlog_display, still held for the captain with its deliverable recorded. Relay the question and close it only with bin/fm-captain-hold.sh answer."
-  elif [ "$BACKLOG_CLOSED" = 1 ]; then
-    printf '%s\n' "Backlog: $ID is closed in $backlog_display. Run bin/fm-tasks-axi.sh ready for dependency-cleared candidates, check date gates, and dispatch only work whose blockers are gone and date is due."
-  else
-    printf '%s\n' "Backlog: $ID just finished ($BACKLOG_SKIP_REASON). Update $backlog_display - move $ID to Done, keep Done to the 10 most recent, then re-scan Queued and dispatch only work whose blockers are gone and date is due."
-  fi
-}
-
 inspectable_git_worktree() {
   local target=$1 top
   [ -n "$target" ] || return 1
@@ -865,13 +890,6 @@ inspectable_git_worktree() {
   [ -n "$top" ] || return 1
   [ -d "$top" ] || return 1
   git -C "$top" rev-parse --git-dir >/dev/null 2>&1
-}
-
-canonical_existing_dir() {
-  local target=$1
-  [ -n "$target" ] || return 1
-  [ -d "$target" ] || return 1
-  ( cd "$target" && pwd -P )
 }
 
 retry_wait_secs_is_valid() {
@@ -891,7 +909,6 @@ fi
 # Compatibility alias used by the safety-check wait path and older call sites.
 STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=$TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS
 TEARDOWN_TREEHOUSE_LOCK_REFUSED=2
-TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED=3
 TEARDOWN_PROCEVENT_RESTORE_FAILED=4
 
 # True when treehouse/git stderr shows the transient index.lock "File exists" race.
@@ -945,34 +962,10 @@ EOF
   TREEHOUSE_MANAGED_RETURN_PATH=$matched
 }
 
-# Absolute path to the git index lock for a worktree/repo dir, or empty when it
-# cannot be resolved (dir missing or not a git worktree at all).
-worktree_git_lock_path() {
-  local dir=$1 lock abs_dir
-  [ -n "$dir" ] && [ -d "$dir" ] || return 1
-  lock=$(git -C "$dir" rev-parse --git-path index.lock 2>/dev/null) || return 1
-  [ -n "$lock" ] || return 1
-  case "$lock" in
-    /*) printf '%s\n' "$lock" ;;
-    *)
-      abs_dir=$(canonical_existing_dir "$dir") || return 1
-      printf '%s/%s\n' "$abs_dir" "$lock"
-      ;;
-  esac
-}
-
 # The lock-staleness proof (lsof holder check, mtime age, fail-safe defaults)
 # is owned by bin/fm-lock-lib.sh's fm_lock_is_provably_stale, sourced above.
 # Teardown passes the worktree dir as the companion directory and its own
 # STALE_WORKTREE_LOCK_AGE_SECS threshold.
-
-worktree_safety_blocked_by_lock() {
-  local reason=$1 lock
-  lock=$(worktree_git_lock_path "$WT") || lock=""
-  [ -n "$lock" ] && [ -e "$lock" ] || return 1
-  echo "teardown: cannot inspect worktree $WT for $reason while git lock $lock is present; checking whether the lock is stale" >&2
-  return 0
-}
 
 cleanup_stale_lock_for_safety_check() {
   local dir=$1 lock
@@ -1092,70 +1085,6 @@ teardown_treehouse_return() {
 
   echo "teardown: $label return failed: git index.lock signature persisted across ${max_retries} retries (waiting ${TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS}s each) even after the lock file disappeared" >&2
   return 1
-}
-
-validate_worktree_teardown_safety() {
-  local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
-  [ -d "$WT" ] || return 0
-  [ "$FORCE" != "--force" ] || return 0
-  [ "$KIND" != scout ] || return 0
-
-  if ! dirty_raw=$(git -C "$WT" status --porcelain 2>/dev/null); then
-    if worktree_safety_blocked_by_lock "uncommitted changes"; then
-      return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
-    fi
-    echo "REFUSED: cannot inspect worktree $WT for uncommitted changes." >&2
-    echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
-    return 1
-  fi
-  dirty=$(printf '%s\n' "$dirty_raw" | head -1 || true)
-
-  if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --remotes -- 2>/dev/null); then
-    if worktree_safety_blocked_by_lock "commits not on a remote"; then
-      return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
-    fi
-    echo "REFUSED: cannot inspect worktree $WT for commits not on a remote." >&2
-    echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
-    return 1
-  fi
-  unpushed=$(printf '%s\n' "$unpushed_raw" | head -5)
-
-  if [ -n "$unpushed" ] && [ "$MODE" = local-only ]; then
-    DEFAULT=$(default_branch) || { echo "REFUSED: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master." >&2; return 1; }
-    if ! unmerged_raw=$(git -C "$WT" log --oneline HEAD --not "$DEFAULT" -- 2>/dev/null); then
-      if worktree_safety_blocked_by_lock "commits not on $DEFAULT"; then
-        return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
-      fi
-      echo "REFUSED: cannot inspect worktree $WT for commits not on $DEFAULT." >&2
-      echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
-      return 1
-    fi
-    unmerged=$(printf '%s\n' "$unmerged_raw" | head -5)
-    if [ -n "$dirty" ] || [ -n "$unmerged" ]; then
-      echo "REFUSED: local-only worktree $WT has work not yet merged into $DEFAULT and not on any remote." >&2
-      [ -n "$dirty" ] && echo "uncommitted changes present" >&2
-      [ -n "$unmerged" ] && printf 'commits not yet on %s:\n%s\n' "$DEFAULT" "$unmerged" >&2
-      echo "Merge the branch into local $DEFAULT first (bin/fm-merge-local.sh after the captain approves), or push to a fork/remote, or get the captain's explicit OK to discard, then --force." >&2
-      return 1
-    fi
-  elif [ -n "$dirty" ]; then
-    echo "REFUSED: worktree $WT has uncommitted changes." >&2
-    echo "uncommitted changes present" >&2
-    echo "Commit them (or get the captain's explicit OK to discard, then --force)." >&2
-    return 1
-  elif [ -n "$unpushed" ]; then
-    branch=${TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY:-}
-    if [ -z "$branch" ]; then
-      branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
-      TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY=$branch
-    fi
-    if ! work_is_landed "$branch"; then
-      echo "REFUSED: worktree $WT has work not on any remote and not landed." >&2
-      printf 'unpushed commits:\n%s\n' "$unpushed" >&2
-      echo "Push the branch, land its PR, or get the captain's explicit OK to discard, then --force." >&2
-      return 1
-    fi
-  fi
 }
 
 # Fix 1 (see script header): does the active-or-most-recent no-mistakes run in

@@ -70,7 +70,7 @@ The child calls `run_operations` once; deterministic scripts perform the ordered
 | `sync` | Canonical clone root | `fm-fleet-sync.sh`; clean current default branch, fast-forward only, no branch pruning. |
 | `recover-sync` | Canonical clone root | The same sync owner, including its supported safe detached-checkout recovery. |
 | `install-shellcheck` | Existing canonical destination directory | `fm-install-shellcheck.sh`; its fixed artifact and hash verification, no arbitrary installer. |
-| `cleanup` | Recorded completed task | `fm-teardown.sh`; Herdr endpoint confirmation, landed-work and ownership checks, no force or legacy identity override. |
+| `cleanup` | Recorded completed task | `fm-teardown.sh`; exact Herdr pane closure and resource-record retirement; unsafe copies are retained independently. |
 
 A chain has one to four steps and requires Linux `/proc` process identity.
 Cleanup refuses secondmate retirement and other backends; recovery does not include arbitrary restart, discard, or repair commands.
@@ -78,8 +78,12 @@ Installation, merge, sync, cleanup, and recovery are distinct grants.
 Cleanup does not imply a later clone sync; include that separately when authorized.
 Unsupported actions refuse explicitly.
 
-Before effects, the guarded owners revalidate the immutable task, generation, grant expiry, exact arguments, bound child process, and resource ownership.
-Legacy completion audit history is accepted only under the narrow metadata compatibility checks in [`bin/fm-short-operations.mjs`](../bin/fm-short-operations.mjs); repeated identity fields still refuse, and the entire metadata record remains bound against changes after submission.
+Before handing off effects, the operation runner revalidates the request, grant expiry, revocation, exact arguments and structural target identity.
+Completed cleanup then uses the ordinary exact-pane owner without another ShortTask actor-binding admission check; its receipt records the actual window and copy outcomes.
+For example, cleanup of an accepted task with an uncommitted copy closes its recorded pane and archives its resource metadata while retaining that copy and its report.
+The [completed cleanup contract](task-lifecycle.md#remote-results-and-resource-cleanup) owns copy preservation and endpoint identity requirements.
+Merge still binds the entire metadata audit record under the compatibility checks in [`bin/fm-short-operations.mjs`](../bin/fm-short-operations.mjs).
+Cleanup binds structural ownership fields instead: conflicting or repeated target fields refuse, while unrelated completion history and diagnostic metadata do not independently veto cleanup.
 Per-resource reservations and the existing owner locks coordinate MAIN, BRANCH, and short executors without serializing independent clones.
 Task and merge reservations are home-local; they do not provide cross-host forge locking.
 No actor string alone grants execution.

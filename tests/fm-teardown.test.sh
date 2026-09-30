@@ -750,10 +750,16 @@ test_teardown_closes_the_backlog_item_itself() {
   printf 'Check the requested outcome independently of cleanup.\n' > "$case_dir/data/task-x1/brief.md"
   FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" FM_STATE_OVERRIDE="$case_dir/state" \
     "$ROOT/bin/fm-task-state.sh" enroll task-x1 >/dev/null || fail "cleanup lifecycle enrollment failed"
-
-  out=$(run_teardown "$case_dir") || fail "teardown failed with a real backlog"
-  jq -e '.disposition == "open" and .owner_receipts.cleanup[-1].facts.bookkeepingComplete == true' \
-    "$case_dir/data/task-x1/lifecycle.json" >/dev/null || fail "cleanup receipt missing or auto-accepted the goal"
+  if run_teardown "$case_dir" > "$case_dir/open.out" 2>&1; then
+    fail "cleanup admitted an enrolled open goal"
+  fi
+  [ "$(backlog_row_state "$case_dir")" = in_flight ] || fail "open goal changed the backlog"
+  assert_present "$case_dir/state/task-x1.meta" "open goal lost its resource record"
+  jq -e '.disposition == "open"' "$case_dir/data/task-x1/lifecycle.json" >/dev/null || fail "cleanup auto-accepted the goal"
+  # Reset only this fixture to an unenrolled legacy record, whose ordinary
+  # teardown still owns the backlog transition exercised by this test.
+  mv "$case_dir/data/task-x1/lifecycle.json" "$case_dir/open-lifecycle-evidence.json"
+  out=$(run_teardown "$case_dir") || fail "legacy teardown failed with a real backlog"
   [ "$(backlog_row_state "$case_dir")" = "done" ] \
     || fail "teardown returned success while its backlog item was still open: $(backlog_row_state "$case_dir")"
   assert_grep 'https://github.com/example/repo/pull/7' "$case_dir/data/backlog.md" \
@@ -1444,7 +1450,7 @@ test_retained_legacy_stamp_still_faces_the_endpoint_gate() {
   rc=$?
   set -e
   expect_code 1 "$rc" \
-    "legacy-stamp-retained: the retry must re-run the endpoint gate on the retained stamp"
+    "legacy-stamp-retained: the retry must re-run the endpoint gate on the retained stamp: $(cat "$case_dir/stderr2")"
   grep -q "not confidently dead or agent-less" "$case_dir/stderr2" \
     || fail "legacy-stamp-retained: the retry skipped the dead-or-agent-less endpoint gate"
   [ "$(legacy_meta_gen_count "$case_dir")" = 1 ] \

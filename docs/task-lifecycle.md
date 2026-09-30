@@ -90,16 +90,20 @@ AIME's existing lifecycle remains compatible; iDA followup support grants no new
 
 [`fm-teardown.sh`](../bin/fm-teardown.sh) owns independent endpoint cleanup and [`fm-teardown-endpoint-lib.sh`](../bin/fm-teardown-endpoint-lib.sh) owns its receipt stages and retained reasons.
 An enrolled open goal retains its endpoint, directory, slot and task records; cleanup begins only after semantic acceptance or a separately authorized archive, and discard authority does not bypass that boundary.
-Herdr presentation-journal versions are diagnostic rather than cleanup permission gates.
-A journal with the complete launch-identity field group binds the execution generation, server instance, terminal identity and shell identity directly.
-A journal without launch fields but with the complete exact-endpoint field group can also authorize cleanup when the current owned Herdr session demonstrably predates the unchanged journal and cleanup re-reads matching workspace, tab, pane, terminal and shell identity before mutation.
-For a correlator-only journal, the task's independently validated meta endpoint can supply the exact session, workspace, tab and pane only when meta and lifecycle agree on a standard spawn generation and the current owned Herdr session demonstrably predates the unchanged journal.
-Partial or conflicting identity groups, replaced sessions, malformed generations, labels alone and shared-directory membership do not acquire deletion authority.
-Herdr's explicit null client/server session representation is accepted only for a requested `default` session whose status socket matches the unique running session-list entry; missing fields and null named-session identities remain unverified.
-Endpoint cleanup closes only an exact idle task pane, preserves focused user tabs and active siblings, verifies workspace absence separately, and leaves directory safety checks in place.
-Its cleanup-only backlog transition can recover bookkeeping after an actual close without deleting resource metadata or repeating endpoint/directory effects.
-Pool-directory return still follows the [existing teardown safety contract](architecture.md#delivery-modes-are-explicit-per-task): only an exact task-and-generation slot claim authorizes return, while a missing or ambiguous claim retains the cleanup obligation.
-Whole-session snapshots can detect concurrent resource changes but cannot make Herdr's separate inspection and close operations atomic.
+For an accepted or archived goal, cleanup validates the exact task's home-local metadata and recorded Herdr session/pane, refuses an endpoint claimed by another task, and confirms that exact pane is absent after closing it.
+An explicit expected generation must still match; missing, conflicting or uncertain endpoint routing refuses before effects.
+The worker may still be running or its tab may be focused: completed-task window retirement does not depend on composer state, presentation journals, continuation receipts, historical process identities or a ShortTask actor-binding gate.
+Closing the recorded pane leaves sibling panes and reports intact; it does not close a whole workspace.
+
+Copy disposal is independent. For example, an accepted task with an uncommitted copy loses its completed worker window and resource metadata, while that copy stays available for recovery.
+Primary, shared, dirty, unintegrated or unverified copies are retained with an explicit disposition in the cleanup receipt.
+Only an exclusive clean copy whose content is proved integrated in the default branch is removed or returned to its Treehouse pool; a merely pushed feature branch is retained.
+The existing project allocation/return lock protects the sharing observation and disposal; contention retains the copy without blocking window retirement.
+Pool copies whose current task/home/generation claim cannot establish exclusive ownership are also retained; primary checkout subdirectories are preserved, while independent nested worktrees remain eligible.
+[`fm-teardown-worktree-lib.sh`](../bin/fm-teardown-worktree-lib.sh) owns the shared content-preservation checks; historical slot-claim or journal bookkeeping is not an additional completed-cleanup admission gate.
+The endpoint-only form retains metadata and the copy and records exact-pane absence through the existing phase receipt.
+Legacy records without an accepted or archived lifecycle retain the detailed ordinary teardown contract in `fm-teardown.sh`.
+Herdr's separate inspection and close operations cannot exclude concurrent external mutations atomically.
 The due reader recognizes current cleanup-owner facts and assessed historical ShortTask completion chains through the read-only contract in [`fm-task-lifecycle.py`](../bin/fm-task-lifecycle.py).
 A result summary alone cannot retire a cleanup obligation; incomplete, conflicting, or unbound evidence remains due for readback without replay.
 
@@ -107,6 +111,6 @@ A result summary alone cannot retire a cleanup obligation; incomplete, conflicti
 
 [`tests/fm-task-lifecycle.test.sh`](../tests/fm-task-lifecycle.test.sh) covers revision conflicts, pending effects, explicit stop, generation mismatch, lost wake recovery, unassigned requests, unreadable unknown-record refusal, guarded acknowledgement after repair, current-wake preservation, terminal cleanup receipts and exact outcome replay.
 The existing send, control, remote-agent and backlog suites exercise their respective effect owners.
-[`tests/fm-teardown-endpoint-safety.test.sh`](../tests/fm-teardown-endpoint-safety.test.sh) covers the open-goal cleanup barrier, archived business-action retention and uncertain cleanup readback.
-[`tests/fm-teardown-lifecycle-herdr-e2e.test.sh`](../tests/fm-teardown-lifecycle-herdr-e2e.test.sh) requires an explicitly authorized named-session helper and verifies real mixed/focused workspace behavior, active sibling preservation and interrupted bookkeeping.
-Its helper is the only route to Herdr and verifies the default-session tripwire on teardown.
+[`tests/fm-teardown-endpoint-safety.test.sh`](../tests/fm-teardown-endpoint-safety.test.sh) covers the open-goal barrier, completed exact-pane cleanup without historical admission gates, foreign or shared endpoint refusal, and dirty, unlanded or uncertain-owner copy retention.
+[`tests/fm-short-operations-herdr.test.sh`](../tests/fm-short-operations-herdr.test.sh) is the current real-Herdr completed-cleanup guard; the [runtime evidence](verification/runtime-backends.md#independent-task-workspace-cleanup) owns its environment, observed results and limits.
+[`tests/fm-teardown-lifecycle-herdr-e2e.test.sh`](../tests/fm-teardown-lifecycle-herdr-e2e.test.sh) continues to cover the legacy structural-journal and focus-preserving path.
