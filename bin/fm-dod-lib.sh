@@ -184,8 +184,12 @@ fm_brief_task_placeholders_present() {  # <file>
 
 # Print the missing CLEAR piece and return 0 when ## CLEAR is present but
 # unfilled. Return 1 when the heading is absent or all seven lines hold real
-# text. The scaffold token is `{CLEAR}`. A line of real text may mention that
-# token; only a body or a field that is the token itself is unfilled.
+# text. A field whose only text is `{CLEAR}`, `{TASK}`, or `{FIRSTMATE_SPEC}`
+# is unfilled. A line of real text may mention those tokens.
+# fm_brief_ship_clear_block is the ship block promotion installs in place of a
+# scout CLEAR block. Its Role is a careful builder because promotion turns the
+# investigation into a code change. fm_brief_apply_ship_clear rewrites a brief
+# so the first CLEAR block is that ship block, including a brief that had none.
 fm_brief_clear_missing() {  # <file>
   local file=$1 body compact missing
   [ -f "$file" ] || return 1
@@ -224,7 +228,7 @@ fm_brief_clear_missing() {  # <file>
       key = canon(trim(substr(line, 1, colon - 1)))
       if (key == "") next
       value = trim(substr(line, colon + 1))
-      if (value != "" && value != "{CLEAR}" && text[key] == "") text[key] = value
+      if (value != "" && value != "{CLEAR}" && value != "{TASK}" && value != "{FIRSTMATE_SPEC}" && text[key] == "") text[key] = value
     }
     END {
       if (token) {
@@ -243,6 +247,93 @@ fm_brief_clear_missing() {  # <file>
   [ -n "$missing" ] || return 1
   printf '%s\n' "$missing"
   return 0
+}
+
+# The CLEAR block a promoted scout receives for the ship job.
+fm_brief_ship_clear_block() {
+  cat <<'EOF'
+Context: The investigation is now a code change, and the original ask stays the success test.
+Layout: Ship the change on the delivery path in the current instructions.
+Examples: Match the pattern the investigation found in the existing code.
+Audience: The reviewer who checks the change against the original ask.
+Role: Careful builder of this code change.
+Fallback: Flag a missing fact from the investigation instead of inventing it.
+Evidence: The change follows the original ask, and the review can check the claims recorded in the investigation.
+EOF
+}
+
+# Print the brief with its CLEAR block replaced by the ship promotion block.
+# A brief with no CLEAR heading gains one after ## Firstmate spec, or at the
+# end when that subsection is absent. Fenced heading examples are left alone.
+fm_brief_apply_ship_clear() {  # <file>
+  local file=$1
+  fm_brief_ship_clear_block | awk '
+    function heading_level(line,    scan, spaces, level) {
+      scan = line
+      spaces = 0
+      while (spaces < 3 && substr(scan, 1, 1) == " ") {
+        scan = substr(scan, 2)
+        spaces++
+      }
+      level = 0
+      while (substr(scan, level + 1, 1) == "#") level++
+      if (level > 0 && substr(scan, level + 1, 1) !~ /^[[:space:]]?$/) level = 0
+      return level
+    }
+    NR == FNR {
+      block = block $0 "\n"
+      next
+    }
+    {
+      line = $0
+      scan = line
+      spaces = 0
+      while (spaces < 3 && substr(scan, 1, 1) == " ") {
+        scan = substr(scan, 2)
+        spaces++
+      }
+      marker = substr(scan, 1, 1)
+      marker_len = 0
+      if (marker == "`" || marker == "~") {
+        while (substr(scan, marker_len + 1, 1) == marker) marker_len++
+      }
+      is_fence = marker_len >= 3
+      was_fenced = fenced
+      if (is_fence) {
+        rest = substr(scan, marker_len + 1)
+        if (!fenced) {
+          fenced = 1
+          fence_marker = marker
+          fence_len = marker_len
+        } else if (marker == fence_marker && marker_len >= fence_len && rest ~ /^[[:space:]]*$/) {
+          fenced = 0
+        }
+      }
+      unfenced = !fenced && !was_fenced
+      level = unfenced ? heading_level(line) : 0
+      if (in_clear) {
+        if (!(unfenced && level > 0 && level <= 2)) next
+        in_clear = 0
+      }
+      if (unfenced && line == "## CLEAR" && !replaced) {
+        printf "## CLEAR\n%s", block
+        replaced = 1
+        in_clear = 1
+        waiting = 0
+        next
+      }
+      if (waiting && unfenced && level > 0 && level <= 2) {
+        printf "## CLEAR\n%s\n", block
+        replaced = 1
+        waiting = 0
+      }
+      if (unfenced && line == "## Firstmate spec") waiting = 1
+      print line
+    }
+    END {
+      if (!replaced) printf "\n## CLEAR\n%s", block
+    }
+  ' - "$file"
 }
 
 # Print the words of every provenance-marked line in a legacy `# Task` body.

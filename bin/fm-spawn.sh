@@ -3021,7 +3021,7 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
     if [ "$CLEAR_MISSING" = '{CLEAR}' ]; then
       echo "error: $BRIEF still contains {CLEAR}; fill ## CLEAR with Context, Layout, Examples, Audience, Role, Fallback, and Evidence before spawn" >&2
     else
-      echo "error: $BRIEF CLEAR block is missing $CLEAR_MISSING; each of Context, Layout, Examples, Audience, Role, Fallback, and Evidence needs real text before spawn" >&2
+      echo "error: $BRIEF CLEAR block is missing $CLEAR_MISSING; each of Context, Layout, Examples, Audience, Role, Fallback, and Evidence needs real text, not a placeholder token, before spawn" >&2
     fi
     exit 1
   fi

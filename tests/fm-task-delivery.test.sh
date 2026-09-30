@@ -1641,6 +1641,49 @@ EOF
   assert_present "$home/data/$id/launch-brief.md" \
     "a legacy brief with no CLEAR heading did not get past the brief gate"
 
+  id="clear-role-task-token"
+  FM_HOME="$home" "$BRIEF" "$id" proj --mode direct-PR >/dev/null 2>&1 \
+    || fail "placeholder-role brief should still scaffold"
+  content=$(cat "$home/data/$id/brief.md")
+  content=${content//'{TASK}'/Ship the CLEAR gate.}
+  content=${content//'{FIRSTMATE_SPEC}'/Reject a role that is only a placeholder.}
+  content=${content//'{CLEAR}'/$'Context: The job and why it matters now.\nLayout: The shape of the result.\nExamples: Match the existing refusal pattern.\nAudience: The next session that dispatches a worker.\nRole: {TASK}\nFallback: Flag a missing fact instead of inventing one.\nEvidence: The spawn refusal and the filled-line acceptance.'}
+  printf '%s\n' "$content" > "$home/data/$id/brief.md"
+  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode direct-PR --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn should refuse a CLEAR Role whose only text is {TASK}"
+  assert_contains "$out" "CLEAR block is missing Role" \
+    "a CLEAR Role that is only {TASK} was treated as filled"
+  assert_absent "$home/data/$id/launch-brief.md" "placeholder Role spawn wrote a launch brief"
+
+  id="clear-examples-spec-token"
+  FM_HOME="$home" "$BRIEF" "$id" proj --mode direct-PR >/dev/null 2>&1 \
+    || fail "placeholder-examples brief should still scaffold"
+  content=$(cat "$home/data/$id/brief.md")
+  content=${content//'{TASK}'/Ship the CLEAR gate.}
+  content=${content//'{FIRSTMATE_SPEC}'/Reject an examples line that is only a placeholder.}
+  content=${content//'{CLEAR}'/$'Context: The job and why it matters now.\nLayout: The shape of the result.\nExamples: {FIRSTMATE_SPEC}\nAudience: The next session that dispatches a worker.\nRole: Careful builder of this change.\nFallback: Flag a missing fact instead of inventing one.\nEvidence: The spawn refusal and the filled-line acceptance.'}
+  printf '%s\n' "$content" > "$home/data/$id/brief.md"
+  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode direct-PR --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn should refuse a CLEAR Examples line whose only text is {FIRSTMATE_SPEC}"
+  assert_contains "$out" "CLEAR block is missing Examples" \
+    "a CLEAR Examples line that is only {FIRSTMATE_SPEC} was treated as filled"
+
+  id="clear-mention-task-token"
+  FM_HOME="$home" "$BRIEF" "$id" proj --mode direct-PR >/dev/null 2>&1 \
+    || fail "token-mention brief should scaffold"
+  content=$(cat "$home/data/$id/brief.md")
+  content=${content//'{TASK}'/Ship the CLEAR gate.}
+  content=${content//'{FIRSTMATE_SPEC}'/Allow a sentence that mentions a placeholder.}
+  content=${content//'{CLEAR}'/$'Context: The job and why it matters now.\nLayout: The shape of the result.\nExamples: Match the existing refusal pattern.\nAudience: The reader who already knows {TASK} is a fill-in token.\nRole: Careful builder of this change.\nFallback: Flag a missing fact instead of inventing one.\nEvidence: A mention of {FIRSTMATE_SPEC} inside a sentence is still real text.'}
+  printf '%s\n' "$content" > "$home/data/$id/brief.md"
+  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode direct-PR --yolo off)
+  assert_not_contains "$out" "CLEAR block is missing" \
+    "a CLEAR line that mentions a placeholder token was refused as unfilled"
+  assert_present "$home/data/$id/launch-brief.md" \
+    "a CLEAR block that mentions placeholder tokens did not get past the brief gate"
+
   id="clear-unfilled-scout"
   FM_HOME="$home" "$BRIEF" "$id" proj --scout >/dev/null 2>&1 \
     || fail "unfilled CLEAR scout brief should still scaffold"
@@ -1656,6 +1699,56 @@ EOF
   assert_absent "$home/state/$id.meta" "unfilled CLEAR scout spawn wrote task metadata"
 
   pass "fm-spawn: a present CLEAR block must be filled, and a brief with no CLEAR heading still launches"
+}
+
+# Promotion turns investigation into a code change, so the worker must receive
+# a ship CLEAR block even when the scout block named a different role.
+test_promotion_delivers_a_ship_clear_block() {
+  local rec home id content out brief
+  rec=$(make_home clear-promote)
+  IFS='|' read -r home _ _ <<EOF
+$rec
+EOF
+
+  id="clear-promote-writer"
+  mkdir -p "$home/state"
+  printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\n' "$id" > "$home/state/$id.meta"
+  FM_HOME="$home" "$BRIEF" "$id" proj --scout >/dev/null 2>&1 \
+    || fail "writer-role scout brief should scaffold"
+  content=$(cat "$home/data/$id/brief.md")
+  content=${content//'{TASK}'/Investigate the client page.}
+  content=${content//'{FIRSTMATE_SPEC}'/Report the voice, and do not change code yet.}
+  content=${content//'{CLEAR}'/$'Context: The client needs a page.\nLayout: A short page.\nExamples: Match the client voice.\nAudience: The client who buys the work.\nRole: Proposal writer for the client page.\nFallback: Flag a missing client fact.\nEvidence: The page uses the client voice.'}
+  printf '%s\n' "$content" > "$home/data/$id/brief.md"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode direct-PR --yolo off 2>&1)
+  expect_code 0 "$?" "promotion of a scout with a writer CLEAR block should succeed: $out"
+  brief="$home/data/$id/ship-instructions.md"
+  assert_grep 'Role: Careful builder of this code change.' "$brief" \
+    "promotion did not deliver a ship Role in the instructions the worker receives"
+  assert_not_contains "$(cat "$brief")" "Proposal writer for the client page." \
+    "promotion left the scout writer Role in the instructions sent to the worker"
+  assert_not_contains "$(cat "$home/data/$id/brief.md")" "Proposal writer for the client page." \
+    "promotion left the scout writer Role in the brief a relaunch would read"
+  assert_grep 'Role: Careful builder of this code change.' "$home/data/$id/brief.md" \
+    "promotion did not put the ship Role in the brief a relaunch would read"
+
+  id="clear-promote-legacy"
+  printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\n' "$id" > "$home/state/$id.meta"
+  mkdir -p "$home/data/$id"
+  cat > "$home/data/$id/brief.md" <<'EOF'
+# Task
+[captain] Investigate the session-floor refusal.
+
+# Setup
+This is a SCOUT task: the deliverable is a written report, not a PR.
+EOF
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode direct-PR --yolo off 2>&1)
+  expect_code 0 "$?" "promotion of a legacy scout without CLEAR should succeed: $out"
+  assert_grep 'Role: Careful builder of this code change.' "$home/data/$id/ship-instructions.md" \
+    "promotion of a legacy scout did not deliver a ship CLEAR block"
+  assert_grep 'Role: Careful builder of this code change.' "$home/data/$id/brief.md" \
+    "promotion of a legacy scout did not record the ship CLEAR block for relaunch"
+  pass "fm-promote: a promoted scout receives a ship CLEAR block instead of the investigation role"
 }
 
 test_project_mode_resolves_branch_prefix() {
@@ -1733,5 +1826,6 @@ test_spawn_refuses_a_registry_forge_it_cannot_read
 test_promotion_carries_the_forge_binding
 test_spawn_and_promote_require_filled_task_subsections
 test_spawn_requires_a_filled_clear_block
+test_promotion_delivers_a_ship_clear_block
 test_project_mode_resolves_branch_prefix
 echo "# all fm-task-delivery tests passed"
