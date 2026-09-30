@@ -1559,3 +1559,75 @@ SH
 }
 
 test_changed_pool_selection_refuses_before_mutation
+
+# A reassignment claim is the durable ownership contract when the successor's
+# task record is outside the homes visible to this cleanup.
+test_reassigned_slot_after_repository_or_pool_change() {
+  local dir id=stale-task other=successor-task drift scope project worker rc before claim mate
+  for scope in task child; do
+    for drift in repository pool; do
+      # Child removal independently validates repository identity before slot
+      # preflight; exercise its pool-selection drift with matching Git identity.
+      [ "$scope/$drift" != child/repository ] || continue
+      dir=$(make_case "reassigned-$scope-$drift")
+      mark_case_as_treehouse_pool "$dir"
+      project="$dir/project"
+      if [ "$drift" = repository ]; then
+        git clone -q "$project" "$dir/old-project"
+        project="$dir/old-project"
+      else
+        cat > "$dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf 'unexpected Treehouse call\n' >> "${FM_RUNTIME_LOG:?}"
+if [ "${1:-}" = status ]; then printf '[]\n'; exit 0; fi
+exit 1
+SH
+      fi
+      fm_write_meta "$dir/home/state/$id.meta" \
+        "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+        "worktree=$dir/worktree" "project=$project" "kind=ship"
+      if [ "$scope" = child ]; then
+        mate="$dir/mate"
+        mkdir -p "$mate/state" "$mate/data" "$mate/config"
+        printf 'mate-task' > "$mate/.fm-secondmate-home"
+        mv "$dir/home/state/$id.meta" "$mate/state/$id.meta"
+        fm_write_meta "$dir/home/state/mate-task.meta" \
+          "window=firstmate:fm-mate-task" "endpoint_task_id=mate-task" \
+          "worktree=$mate" "project=$mate" "home=$mate" "kind=secondmate"
+      fi
+      claim_pool_slot "$dir" "$other" "$dir/other-home"
+      printf 'successor unlanded output\n' > "$dir/worktree/sentinel"
+      before=$(git -C "$dir/worktree" rev-parse HEAD)
+      claim=$(cat "$dir/pool/1/.fm-slot-owner")
+      ( cd "$dir/worktree" && exec sleep 30 ) &
+      worker=$!
+      set +e
+      if [ "$scope" = child ]; then
+        run_case "$dir" mate-task > "$dir/stdout" 2> "$dir/stderr"
+      else
+        FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+        FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
+          "$TEARDOWN" "$id" > "$dir/stdout" 2> "$dir/stderr"
+      fi
+      rc=$?
+      set -e
+      kill -0 "$worker" 2>/dev/null || fail "$scope/$drift cleanup killed the successor"
+      kill "$worker" 2>/dev/null || true
+      wait "$worker" 2>/dev/null || true
+      [ "$rc" -eq 0 ] || fail "$scope/$drift reassigned cleanup refused: $(cat "$dir/stderr")"
+      assert_reassigned_slot_left_alone "$dir" "$id" "$other" "$scope/$drift cleanup"
+      [ "$(cat "$dir/pool/1/.fm-slot-owner")" = "$claim" ] || fail "cleanup changed the successor claim"
+      [ "$(git -C "$dir/worktree" rev-parse HEAD)" = "$before" ] || fail "cleanup moved successor HEAD"
+      [ "$(cat "$dir/worktree/sentinel")" = 'successor unlanded output' ] || fail "cleanup changed successor work"
+      assert_contains "$(cat "$dir/runtime.log")" "<=firstmate:=fm-$id>" "cleanup did not close the old endpoint"
+      assert_no_grep 'unexpected Treehouse call' "$dir/runtime.log" "cleanup inspected the reassigned pool"
+      if [ "$scope" = child ]; then
+        assert_absent "$mate" "forced cleanup retained the old secondmate home"
+        assert_absent "$dir/home/state/mate-task.meta" "forced cleanup retained the parent record"
+      fi
+    done
+  done
+  pass "reassigned slots survive repository and pool changes while old task and child endpoints and records finish cleanup"
+}
+
+test_reassigned_slot_after_repository_or_pool_change

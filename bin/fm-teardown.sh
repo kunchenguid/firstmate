@@ -2929,9 +2929,9 @@ preflight_descendant_treehouse_slots() {
     fm_treehouse_require_exclusive_record "$meta" "$task_id" "$state" "$worktree" || return 1
     owner_rc=0
     require_owned_worktree_slot_record "$task_id" "$worktree" "${state%/state}" || owner_rc=$?
-    fm_treehouse_return_preflight "$project" "$worktree" || return 1
     case "$owner_rc" in
-      0|"$TEARDOWN_SLOT_REASSIGNED_RC") ;;
+      0) fm_treehouse_return_preflight "$project" "$worktree" || return 1 ;;
+      "$TEARDOWN_SLOT_REASSIGNED_RC") ;;
       *) return 1 ;;
     esac
   done
@@ -3279,7 +3279,7 @@ remove_secondmate_registry_entry() {
 
 require_exclusive_task_worktree_slot || exit 1
 require_owned_task_worktree_slot || exit 1
-if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ -d "$WT" ]; then
+if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ -d "$WT" ] && teardown_owns_worktree; then
   fm_treehouse_return_preflight "$PROJ" "$WT" || exit 1
 fi
 
