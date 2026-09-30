@@ -138,7 +138,12 @@ chmod +x "$STUB"
 export FM_REPO="$ROOT"
 export FM_SUPERVISION_ENGINE_CLAUDE_BIN="$STUB"
 export FM_SUPERVISION_HOST_PRIMARY=claude
-export FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999
+export FM_POLL=0.5 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999
+# Fractional poll cadences keep the real poll loops while cutting the fixed
+# wait each park pays to notice its arm's close and each turn's descendant
+# snapshot pays to notice the engine's exit.
+export FM_SUPERVISION_HOST_POLL=0.2 FM_SUPERVISION_ENGINE_SNAPSHOT_SECONDS=0.2
+export FM_ARM_ATTACH_POLL=0.2
 # Keep the real engine watchdog/reaping path, but not its production grace in fixtures.
 export FM_SUPERVISION_ENGINE_GRACE=1
 export FM_ARM_CONFIRM_TIMEOUT=30
@@ -149,12 +154,15 @@ unset FM_SUPERVISION_ACTOR FM_BRANCH_REPORT_TURN FM_LEASE_HOLDER_PID PI_CODING_A
 HOMES_FILE="$TMP_ROOT/homes"
 # Stop whatever a case left running, by the exact pids its home recorded.
 stop_home_processes() {  # <home>
-  local home=$1 pid arms=
+  local home=$1 pid arms='' i=0
   if [ -f "$home/state/.supervision-host" ]; then
     arms=$(awk -F '\t' '$1 == "arm" { print $2 }' "$home/state/.supervision-host")
     pid=$(awk -F '\t' '$1 == "host" { print $2; exit }' "$home/state/.supervision-host")
     [ -z "$pid" ] || kill -TERM "$pid" 2>/dev/null || true
-    sleep 1
+    while [ "$i" -lt 50 ] && [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; do
+      sleep 0.1
+      i=$((i + 1))
+    done
   fi
   for pid in $arms; do
     kill -TERM "$pid" 2>/dev/null || true
@@ -1026,7 +1034,7 @@ test_main_only_pass_through_leaves_the_successor_watcher_running() {
   [ "$(marker_kind "$home")" = downtime ] \
     || fail "successor: the pass-through claimed the close was being handled, so main's re-arm owner would not deliver it: $(cat "$home/state/.watcher-down")"
   pid=$(cat "$home/state/.watch.lock/pid")
-  sleep 2
+  sleep 1
   kill -0 "$pid" 2>/dev/null || fail "successor: the watcher exited after the pass-through (pid $pid)"
   [ "$(cat "$home/state/.watch.lock/pid" 2>/dev/null)" = "$pid" ] || fail "successor: the watcher lock moved after the pass-through"
   pass "host: a main-only pass-through leaves the successor watcher running and the close undelivered for main"
@@ -1706,7 +1714,7 @@ test_attended_latch_keeps_closes_on_main_and_records_recovery_off_main() {
   wait_until 250 handled_at_least "$home" $((handled + 1)) \
     || fail "latch: the successful probe was not handled: $(cat "$home/host.out"; tail -n 5 "$home/state/.supervision-host.log")"
   assert_re '	recovered	after a successful probe$' "$home/state/.supervision-host.log" "the ledger must record the recovery"
-  ! wait_until 20 host_exited "$home" || fail "a routine probe's recovery reached main: $(cat "$home/host.out")"
+  ! wait_until 10 host_exited "$home" || fail "a routine probe's recovery reached main: $(cat "$home/host.out")"
   assert_no_re '^supervision-host' "$home/host.out" "a recovery must stay off main"
   assert_grep 'cooldown=0' "$home/state/.supervision-host-health" "a successful probe must clear the latch"
   assert_grep 'errors=0' "$home/state/.supervision-host-health" "a successful probe must clear the error streak"
@@ -2035,8 +2043,9 @@ test_restarted_host_stops_what_a_killed_predecessor_left() {
 test_park_boundary_ends_the_park_before_the_hook_timeout() {
   local home token
   home=$(make_home boundary attended)
-  FM_SUPERVISION_HOST_PARK_SECONDS=3 start_host "$home"
+  FM_SUPERVISION_HOST_PARK_SECONDS=3 FM_TEST_SUPERVISION_HOST_CLOCK="$home/park-clock" start_host "$home"
   wait_until 150 watcher_live "$home" || fail "boundary: the host never started a watcher cycle"
+  echo 3 > "$home/park-clock"
   wait_until 150 host_exited "$home" || fail "boundary: the host did not end its park"
   assert_re '^supervision-host: cycle boundary - ' "$home/host.out" "the park boundary must reach main as a host line"
   watcher_live "$home" && fail "the park boundary left the watcher running"
@@ -2273,7 +2282,7 @@ test_first_cycle_status_streams_and_owner_options_reach_it() {
   wait_until 150 grep -qs '^watcher: started pid=' "$home/host.out" || fail "stream: the successor host never reported its cycle"
   assert_re "^watcher: started pid=[0-9]+ \\(beacon fresh\\) recovery-generation=$generation\$" "$home/host.out" \
     "the owner's predecessor must make the first cycle a handling successor of the pending generation"
-  sleep 3
+  sleep 1
   host_exited "$home" && fail "a handling successor re-announced the pending episode: $(cat "$home/host.out")"
   kill -TERM "$(awk -F '\t' '$1 == "host" { print $2 }' "$home/state/.supervision-host")"
   wait_until 200 host_exited "$home" || fail "stream: the successor host did not stop on TERM"
@@ -2488,7 +2497,7 @@ test_unchanged_held_outcome_reaches_the_captain_once_until_a_new_event() {
     perl -e 'my $t = shift; utime $t, $t, @ARGV or exit 1' "$old" "$home/state/.inactive-outcome-reconcile" \
       || fail "held: could not age the scan marker before cadence $cycle"
     wait_until 150 scan_ran "$home" || fail "held: cadence $cycle never rescanned"
-    ! wait_until 30 flood_signal "$home" \
+    ! wait_until 10 flood_signal "$home" \
       || fail "held: cadence $cycle re-escalated the unchanged held outcome: $(cat "$home/state/branch-outcomes.jsonl")"
   done
   [ "$(captain_rows "$home")" -eq 1 ] || fail "held: the unchanged situation reached the captain $(captain_rows "$home") times"

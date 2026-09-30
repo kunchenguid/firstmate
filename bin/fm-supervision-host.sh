@@ -154,7 +154,9 @@
 # the boundary), FM_SUPERVISION_HOST_TURN_TIMEOUT (1200), FM_SUPERVISION_HOST_ROTATE_TURNS (20:
 # a new engine conversation after this many turns; every main session start
 # also opens a new one), FM_SUPERVISION_HOST_READY_TIMEOUT (25: how long a
-# successor cycle may take to verify), FM_SUPERVISION_HOST_POLL (1).
+# successor cycle may take to verify), FM_SUPERVISION_HOST_POLL (1; positive
+# seconds, a decimal fraction allowed: a shorter poll notices an arm's close
+# sooner at a proportionally busier loop).
 # FM_TEST_SUPERVISION_HOST_CLOCK names a file holding the park's elapsed
 # seconds, which the park and turn boundary checks read in place of the wall
 # clock only when FM_TEST_SEAM=1; tests/lib.sh arms the marker for isolated
@@ -195,6 +197,13 @@ numeric_or() {  # <value> <default>
   case "$1" in ''|0*|*[!0-9]*) printf '%s\n' "$2" ;; *) printf '%s\n' "$1" ;; esac
 }
 
+seconds_or() {  # <value> <default>: positive seconds, a decimal fraction allowed
+  case "$1" in
+    ''|*[!0-9.]*|.*|*.|*.*.*) printf '%s\n' "$2" ;;
+    *) case ${1//[0.]/} in '') printf '%s\n' "$2" ;; *) printf '%s\n' "$1" ;; esac ;;
+  esac
+}
+
 GRACE=${FM_GUARD_GRACE:-$(fm_poll_derived_grace)}
 ENGINE_GRACE=$(numeric_or "${FM_SUPERVISION_ENGINE_GRACE:-}" 30)
 PARK_SECONDS=$(numeric_or "${FM_SUPERVISION_HOST_PARK_SECONDS:-}" 27000)
@@ -204,7 +213,7 @@ PARK_LIMIT=$(numeric_or "${FM_SUPERVISION_HOST_PARK_LIMIT:-}" "$PARK_SECONDS")
 TURN_TIMEOUT=$(numeric_or "${FM_SUPERVISION_HOST_TURN_TIMEOUT:-}" 1200)
 ROTATE_TURNS=$(numeric_or "${FM_SUPERVISION_HOST_ROTATE_TURNS:-}" 20)
 READY_TIMEOUT=$(numeric_or "${FM_SUPERVISION_HOST_READY_TIMEOUT:-}" 25)
-POLL=$(numeric_or "${FM_SUPERVISION_HOST_POLL:-}" 1)
+POLL=$(seconds_or "${FM_SUPERVISION_HOST_POLL:-}" 1)
 COOLDOWN=$FM_SUPERVISION_HOST_COOLDOWN
 COOLDOWN_MAX=3600
 AUTOARM_GEN=${FM_SUPERVISION_HOST_AUTOARM_GEN:-}
