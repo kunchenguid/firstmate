@@ -299,7 +299,20 @@ fm_test_make_spawn_fakebin() {
   shift
   fakebin=$(fm_fakebin "$dir")
   fm_test_fake_tmux_spawn "$fakebin"
-  fm_fake_exit0 "$fakebin" treehouse "$@"
+  local tools=() t
+  for t in "$@"; do
+    tools+=("$t")
+  done
+  fm_fake_exit0 "$fakebin" treehouse "${tools[@]}"
+  cat > "$fakebin/opencode" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' "${FM_FAKE_OPENCODE_VERSION:-opencode v2.0.19}"
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$fakebin/opencode"
   printf '%s\n' "$fakebin"
 }
 

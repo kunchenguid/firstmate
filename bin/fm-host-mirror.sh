@@ -178,7 +178,7 @@ append_entry() {  # <captain|main> <text> [<id>]
   # sequence numbers ahead of both so a later commit cannot skip new dialog.
   for tmp in "$CURSOR" "$STAGED"; do
     if [ -f "$tmp" ]; then
-      IFS="$(printf '\t')" read -r seq _ < "$tmp" || true
+      IFS=$'\t' read -r seq _ < "$tmp" || true
       case "$seq" in ''|*[!0-9]*) seq=0 ;; esac
       [ "$seq" -le "$last" ] || last=$seq
     fi
@@ -284,7 +284,7 @@ fm_lock_acquire_wait "$LOCK" || exit 1
 CURSOR_SEQ=0
 CURSOR_SESSION=
 if [ -f "$CURSOR" ]; then
-  IFS="$(printf '\t')" read -r CURSOR_SEQ CURSOR_SESSION < "$CURSOR" || true
+  IFS=$'\t' read -r CURSOR_SEQ CURSOR_SESSION < "$CURSOR" || true
   case "$CURSOR_SEQ" in ''|*[!0-9]*) CURSOR_SEQ=0 ;; esac
 fi
 # A cursor that belongs to another conversation proves nothing about this one.

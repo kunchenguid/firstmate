@@ -136,6 +136,20 @@ printf '%s' "$screen" | grep -v '^[[:space:]]*$' | tail -12 | fm_busy_lines_matc
 printf '%s' "$screen" | fm_busy_agy_tail_busy \
   && fail "the settled agy footer still matches the busy signature" || true
 
+# The control plane's exit path types `/quit` only on a composer the shared
+# classifier proves empty, and agy's bare `>` row reads `unknown` on shape alone.
+# This guard pins the identity-gated refinement against the REAL idle pane: a
+# live agy identity proves it empty, while its absence keeps the dead-shell rule
+# (issue fm-agy-exit-composer-gap). Token-free - it reuses the settled capture.
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-tmux-lib.sh"
+AGY_CAPS=$(fm_tmux_composer_caps)
+[ "$(fm_composer_classify_screen "$AGY_CAPS" "$screen" '' "$(printf 'agy\tidle')")" = empty ] \
+  || fail "the real idle agy composer must classify empty with a live agy identity"
+[ "$(fm_composer_classify_screen "$AGY_CAPS" "$screen" '' probe-absent)" = unknown ] \
+  || fail "without a live agy identity the real bare '>' row must stay unknown (dead-shell rule)"
+pass "the shared classifier reads the real agy composer empty only with a live agy identity"
+
 # The dialog can outlive the turn it gated, so a still-rendered dialog must be
 # dismissed before steering anything: typed text would land in it instead of
 # the composer.

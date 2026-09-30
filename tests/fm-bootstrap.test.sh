@@ -1158,6 +1158,8 @@ kimi model profile is accepted^{"rules":[{"when":"kimi work","use":{"harness":"k
 unsupported kimi effort is flagged^{"rules":[{"when":"kimi work","use":{"harness":"kimi","model":"kimi-code/k3","effort":"high"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: kimi:high
 cursor model profile is accepted^{"rules":[{"when":"cursor work","use":{"harness":"cursor","model":"cursor-grok-4.5-high"}}]}^empty^
 unsupported cursor effort is flagged^{"rules":[{"when":"cursor work","use":{"harness":"cursor","model":"cursor-grok-4.5-high","effort":"high"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: cursor:high
+openhands model profile is accepted^{"rules":[{"when":"openhands work","use":{"harness":"openhands","model":"fireworks_ai/accounts/fireworks/models/deepseek-v4p1-flash"}}]}^empty^
+unsupported openhands effort is flagged^{"rules":[{"when":"openhands work","use":{"harness":"openhands","model":"fireworks_ai/accounts/fireworks/models/deepseek-v4p1-flash","effort":"high"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: openhands:high
 array use with quota-balanced is accepted^{"rules":[{"when":"big feature","use":[{"harness":"claude","model":"claude-sonnet-5","effort":"high"},{"harness":"codex","model":"gpt-5.5","effort":"high"}],"select":"quota-balanced"}]}^empty^
 array use without select is accepted^{"rules":[{"when":"big feature","use":[{"harness":"claude"},{"harness":"codex"}]}]}^empty^
 one-element array use is accepted^{"rules":[{"when":"focused feature","use":[{"harness":"claude"}]}]}^empty^
@@ -1187,6 +1189,11 @@ default array profile without harness is flagged^{"default":[{"model":"gpt-5.5"}
 default array malformed effort is flagged^{"default":[{"harness":"codex","effort":3}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - default profile model and effort must be non-empty strings, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\z when present
 default profile floor without min_percent is flagged^{"default":[{"harness":"codex","floor":{"scope":"all_models"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - default profile floor needs scope and min_percent 0..100
 default profile floor provider override is flagged^{"default":{"harness":"codex","floor":{"scope":"all_models","min_percent":50,"provider":"claude"}}}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - default profile floor needs scope and min_percent 0..100
+provider caps are accepted^{"rules":[],"providerCaps":{"default":4,"fireworks":3}}^empty^
+provider caps zero is flagged^{"rules":[],"providerCaps":{"fireworks":0}}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - providerCaps must map each provider id (or default) to a positive integer
+provider caps fractional is flagged^{"rules":[],"providerCaps":{"fireworks":2.5}}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - providerCaps must map each provider id (or default) to a positive integer
+provider caps non-object is flagged^{"rules":[],"providerCaps":4}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - providerCaps must map each provider id (or default) to a positive integer
+provider caps bad key is flagged^{"rules":[],"providerCaps":{"Fireworks":2}}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - providerCaps must map each provider id (or default) to a positive integer
 ROWS
 
   case_dir="$TMP_ROOT/dispatch-opt-in-gate"

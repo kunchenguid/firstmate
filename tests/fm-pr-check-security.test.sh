@@ -545,7 +545,8 @@ test_invalid_entrypoints_have_zero_side_effects() {
   write_task_meta "$dir"
   printf 'existing-check\n' > "$dir/home/state/task-a.check.sh"
   printf 'existing-data\n' > "$dir/home/state/task-a.pr-poll"
-  chmod 0600 "$dir/home/state/task-a.check.sh" "$dir/home/state/task-a.pr-poll"
+  chmod 0700 "$dir/home/state/task-a.check.sh"
+  chmod 0600 "$dir/home/state/task-a.pr-poll"
 
   for value in "${INVALID_URLS[@]}"; do
     before=$(state_snapshot "$dir/home/state")
@@ -747,7 +748,7 @@ test_valid_recording_and_merge_derivation() {
     || fail "canonical pr metadata was not exact"
   grep -qxF "pr_head=$expected" "$dir/home/state/task-a.meta" || fail "PR head metadata was not exact"
   cmp -s "$POLL" "$dir/home/state/task-a.check.sh" || fail "published check was not byte-for-byte static"
-  [ "$(file_mode "$dir/home/state/task-a.check.sh")" = 600 ] || fail "published check mode was not 0600"
+  [ "$(file_mode "$dir/home/state/task-a.check.sh")" = 700 ] || fail "published check mode was not 0700"
   [ "$(file_mode "$dir/home/state/task-a.pr-poll")" = 600 ] || fail "published sidecar mode was not 0600"
   [ "$(file_mode "$dir/home/state/task-a.pr-poll-registration")" = 600 ] \
     || fail "published registration mode was not 0600"
@@ -938,7 +939,8 @@ make_poll_fixture() {
   cp "$POLL" "$dir/home/state/task-a.check.sh"
   printf '%s\n%s\n%s\n%s\n%s\n' \
     github https://github.com/o/r/pull/1 github.com o/r 1 > "$dir/home/state/task-a.pr-poll"
-  chmod 0600 "$dir/home/state/task-a.check.sh" "$dir/home/state/task-a.pr-poll"
+  chmod 0700 "$dir/home/state/task-a.check.sh"
+  chmod 0600 "$dir/home/state/task-a.pr-poll"
 }
 
 run_poll() {

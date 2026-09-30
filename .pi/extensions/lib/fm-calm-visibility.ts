@@ -83,7 +83,12 @@ export function calmPresentationIsActive(): boolean {
 }
 
 export function calmPresentationHides(itemClass: CalmTranscriptClass): boolean {
-  return calm && !stockExportRendering && !calmTranscriptClassIsVisible(itemClass);
+  if (!calm || calmTranscriptClassIsVisible(itemClass)) return false;
+  // /export briefly forces stock tool rendering for data fidelity, but Firstmate
+  // operational rows must stay out of the conversation surface (messages pane).
+  // They remain in session/tree data; only the transcript presentation is hidden.
+  if (itemClass === "synthetic-user" || itemClass === "synthetic-assistant") return true;
+  return !stockExportRendering;
 }
 
 export function registerFirstmateSyntheticPresentation(pi: ExtensionAPI): void {

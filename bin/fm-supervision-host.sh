@@ -331,19 +331,19 @@ activate() {
   if [ -f "$HOST_RECORD" ]; then
     # The predecessor host first, with room for its own cleanup (which stops
     # its engine and arms), before anything it left is stopped individually.
-    while IFS="$(printf '\t')" read -r role pid identity; do
+    while IFS=$'\t' read -r role pid identity; do
       [ "$role" = host ] || continue
       [ "$pid" != "$HOST_PID" ] || continue
       stop_recorded "$pid" "$identity" $((ENGINE_GRACE + 20))
     done < "$HOST_RECORD"
   fi
   if [ -f "$ENGINE_PID_FILE" ]; then
-    IFS="$(printf '\t')" read -r pid identity < "$ENGINE_PID_FILE" || true
+    IFS=$'\t' read -r pid identity < "$ENGINE_PID_FILE" || true
     stop_recorded "${pid:-}" "${identity:-}" $((ENGINE_GRACE + 5))
     rm -f "$ENGINE_PID_FILE"
   fi
   if [ -f "$HOST_RECORD" ]; then
-    while IFS="$(printf '\t')" read -r role pid identity; do
+    while IFS=$'\t' read -r role pid identity; do
       [ "$role" = arm ] && stop_recorded "$pid" "$identity" 10
     done < "$HOST_RECORD"
   fi
@@ -365,7 +365,7 @@ activate() {
 # engine's descendants before giving up on it.
 stop_engine_turn() {
   local pid='' identity='' i limit
-  [ -f "$ENGINE_PID_FILE" ] && IFS="$(printf '\t')" read -r pid identity < "$ENGINE_PID_FILE"
+  [ -f "$ENGINE_PID_FILE" ] && IFS=$'\t' read -r pid identity < "$ENGINE_PID_FILE"
   if [ -n "$pid" ] && fm_pid_alive "$pid" && [ "$(identity_of "$pid")" = "$identity" ]; then
     kill -TERM "$pid" 2>/dev/null || true
   fi

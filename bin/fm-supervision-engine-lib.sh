@@ -310,7 +310,7 @@ _fm_engine_reap() {
   [ -s "$ledger" ] || return 0
   for signal in TERM KILL; do
     survivors=0
-    while IFS="$(printf '\t')" read -r pid identity; do
+    while IFS=$'\t' read -r pid identity; do
       fm_pid_alive "$pid" || continue
       current=$(_fm_engine_identity "$pid") || continue
       [ "$current" = "$identity" ] || continue

@@ -737,15 +737,39 @@ test_cursor_failed_catalog_probe_does_not_block_spawn() {
   pass "cursor preserves the requested model when its live catalog is unreachable"
 }
 
-test_opencode_threads_model_and_effort_variant() {
+# OpenCode 2.x (the fake opencode's default version) has no top-level --model:
+# the launch writes the model as a top-level config field and adds --standalone,
+# and the effort is recorded in metadata but omitted from the launch.
+test_opencode_v2_threads_top_level_model_and_omits_effort_from_launch() {
   local rec id out status launch
   id=profile-opencode-z7
   rec=$(make_spawn_case profile-opencode opencode "$id")
   read_case_record "$rec"
 
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model anthropic/claude-sonnet-4-5 --effort high)
+  out=$(FM_FAKE_OPENCODE_VERSION='opencode v2.0.19' run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model anthropic/claude-sonnet-4-5 --effort high)
   status=$?
-  expect_code 0 "$status" "opencode spawn with model and effort should succeed"
+  expect_code 0 "$status" "opencode v2 spawn with model and effort should succeed"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" opencode anthropic/claude-sonnet-4-5 high
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" \
+    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"},\"model\":\"anthropic/claude-sonnet-4-5\"}' opencode --standalone --prompt" \
+    "opencode v2 launch must always write the top-level model, including when effort is set"
+  assert_not_contains "$launch" '"variant"' "opencode v2 must not write unverified agent.build variant JSON"
+  assert_not_contains "$launch" '--model' "opencode v2 must not pass removed top-level --model"
+  assert_not_contains "$launch" "--effort" "opencode launch must not pass unsupported --effort"
+  pass "opencode v2 carries the model in OPENCODE_CONFIG_CONTENT with --standalone"
+}
+
+# OpenCode 1.x keeps --model and carries the effort as the build agent's variant.
+test_opencode_v1_threads_model_and_effort_variant() {
+  local rec id out status launch
+  id=profile-opencode-v1-z7e
+  rec=$(make_spawn_case profile-opencode-v1 opencode "$id")
+  read_case_record "$rec"
+
+  out=$(FM_FAKE_OPENCODE_VERSION='opencode v1.18.32' run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model anthropic/claude-sonnet-4-5 --effort high)
+  status=$?
+  expect_code 0 "$status" "opencode v1 spawn with model and effort should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" opencode anthropic/claude-sonnet-4-5 high
   launch=$(cat "$LAUNCH_LOG")
   # opencode 1.18.32's config schema carries per-model reasoning effort as
@@ -754,11 +778,12 @@ test_opencode_threads_model_and_effort_variant() {
   # build agent, never as a launch flag.
   assert_contains "$launch" \
     "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"},\"agent\":{\"build\":{\"model\":\"anthropic/claude-sonnet-4-5\",\"variant\":\"high\"}}}' opencode --model 'anthropic/claude-sonnet-4-5' --prompt" \
-    "opencode launch did not write the effort as the build agent's variant in its config"
+    "opencode v1 launch did not write the effort as the build agent's variant in its config"
+  assert_not_contains "$launch" '--standalone' "opencode v1 must not pass --standalone"
   assert_not_contains "$launch" "--effort" "opencode launch must not pass unsupported --effort"
   assert_not_contains "$launch" "--variant" "opencode launch must not pass run-only --variant"
   assert_not_contains "$launch" "--thinking" "opencode launch must not pass pi thinking flag"
-  pass "opencode receives --model and the effort as its config's agent variant"
+  pass "opencode v1 receives --model and the effort as its config's agent variant"
 }
 
 test_opencode_without_effort_keeps_launch_config_unchanged() {
@@ -767,51 +792,104 @@ test_opencode_without_effort_keeps_launch_config_unchanged() {
   rec=$(make_spawn_case profile-opencode-noeffort opencode "$id")
   read_case_record "$rec"
 
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model anthropic/claude-sonnet-4-5)
+  out=$(FM_FAKE_OPENCODE_VERSION='opencode v2.0.19' run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model anthropic/claude-sonnet-4-5)
   status=$?
   expect_code 0 "$status" "opencode spawn without effort should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" opencode anthropic/claude-sonnet-4-5 default
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" \
-    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"}}' opencode --model 'anthropic/claude-sonnet-4-5' --prompt" \
-    "opencode launch without effort must keep the permission-only config byte-identical"
+    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"},\"model\":\"anthropic/claude-sonnet-4-5\"}' opencode --standalone --prompt" \
+    "opencode launch without effort must write the model in OPENCODE_CONFIG_CONTENT"
   assert_not_contains "$launch" '"variant"' "opencode launch without effort must not write a variant"
   pass "opencode without an effort keeps its launch config unchanged"
 }
 
-test_opencode_emits_variant_for_openai_family_effort() {
+test_opencode_v1_without_effort_keeps_permission_only_config() {
+  local rec id out status launch
+  id=profile-opencode-v1-noeffort-z7f
+  rec=$(make_spawn_case profile-opencode-v1-noeffort opencode "$id")
+  read_case_record "$rec"
+
+  out=$(FM_FAKE_OPENCODE_VERSION='opencode v1.18.32' run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model anthropic/claude-sonnet-4-5)
+  status=$?
+  expect_code 0 "$status" "opencode v1 spawn without effort should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" \
+    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"}}' opencode --model 'anthropic/claude-sonnet-4-5' --prompt" \
+    "opencode v1 launch without effort must keep the permission-only config byte-identical"
+  assert_not_contains "$launch" '"variant"' "opencode v1 launch without effort must not write a variant"
+  pass "opencode v1 without an effort keeps the permission-only config"
+}
+
+test_opencode_v2_records_effort_without_variant_json() {
   local rec id out status launch
   id=profile-opencode-openai-z7c
   rec=$(make_spawn_case profile-opencode-openai opencode "$id")
   read_case_record "$rec"
 
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model openai/gpt-5.6-sol --effort xhigh)
+  out=$(FM_FAKE_OPENCODE_VERSION='opencode v2.0.19' run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model openai/gpt-5.6-sol --effort xhigh)
   status=$?
   expect_code 0 "$status" "opencode spawn with an openai model and effort should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" opencode openai/gpt-5.6-sol xhigh
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" \
-    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"},\"agent\":{\"build\":{\"model\":\"openai/gpt-5.6-sol\",\"variant\":\"xhigh\"}}}' opencode --model 'openai/gpt-5.6-sol' --prompt" \
-    "opencode launch did not write the openai family effort as the build agent's variant"
-  pass "opencode emits the variant for an effort the openai family exposes"
+    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"},\"model\":\"openai/gpt-5.6-sol\"}' opencode --standalone --prompt" \
+    "opencode v2 must write top-level model even when effort is set"
+  assert_not_contains "$launch" '"variant"' "opencode v2 must omit unverified variant JSON"
+  pass "opencode v2 records effort in metadata without variant JSON"
 }
 
-test_opencode_omits_variant_when_model_family_lacks_effort() {
+test_opencode_v1_emits_variant_for_openai_family_effort() {
+  local rec id out status launch
+  id=profile-opencode-v1-openai-z7g
+  rec=$(make_spawn_case profile-opencode-v1-openai opencode "$id")
+  read_case_record "$rec"
+
+  out=$(FM_FAKE_OPENCODE_VERSION='opencode v1.18.32' run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model openai/gpt-5.6-sol --effort xhigh)
+  status=$?
+  expect_code 0 "$status" "opencode v1 spawn with an openai model and effort should succeed"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" opencode openai/gpt-5.6-sol xhigh
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" \
+    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"},\"agent\":{\"build\":{\"model\":\"openai/gpt-5.6-sol\",\"variant\":\"xhigh\"}}}' opencode --model 'openai/gpt-5.6-sol' --prompt" \
+    "opencode v1 launch did not write the openai family effort as the build agent's variant"
+  pass "opencode v1 emits the variant for an effort the openai family exposes"
+}
+
+test_opencode_v2_omits_variant_when_model_family_lacks_effort() {
   local rec id out status launch
   id=profile-opencode-omit-z7d
   rec=$(make_spawn_case profile-opencode-omit opencode "$id")
   read_case_record "$rec"
 
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model anthropic/claude-sonnet-4-5 --effort medium)
+  out=$(FM_FAKE_OPENCODE_VERSION='opencode v2.0.19' run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model anthropic/claude-sonnet-4-5 --effort medium)
   status=$?
   expect_code 0 "$status" "opencode spawn with an unsupported family effort should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" opencode anthropic/claude-sonnet-4-5 medium
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" \
-    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"}}' opencode --model 'anthropic/claude-sonnet-4-5' --prompt" \
-    "opencode must keep the permission-only config when the model family lacks the effort"
+    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"},\"model\":\"anthropic/claude-sonnet-4-5\"}' opencode --standalone --prompt" \
+    "opencode must write top-level model when the model family lacks a verified variant"
   assert_not_contains "$launch" '"variant"' "opencode must omit the variant when the model family lacks the effort"
-  pass "opencode omits the variant for an effort outside the model family's list"
+  pass "opencode v2 still writes top-level model for unsupported effort levels"
+}
+
+test_opencode_v1_omits_variant_when_model_family_lacks_effort() {
+  local rec id out status launch
+  id=profile-opencode-v1-omit-z7h
+  rec=$(make_spawn_case profile-opencode-v1-omit opencode "$id")
+  read_case_record "$rec"
+
+  out=$(FM_FAKE_OPENCODE_VERSION='opencode v1.18.32' run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model anthropic/claude-sonnet-4-5 --effort medium)
+  status=$?
+  expect_code 0 "$status" "opencode v1 spawn with an unsupported family effort should succeed"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" opencode anthropic/claude-sonnet-4-5 medium
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" \
+    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"}}' opencode --model 'anthropic/claude-sonnet-4-5' --prompt" \
+    "opencode v1 must keep the permission-only config when the model family lacks the effort"
+  assert_not_contains "$launch" '"variant"' "opencode v1 must omit the variant when the model family lacks the effort"
+  pass "opencode v1 omits the variant for an effort outside the model family's list"
 }
 
 test_native_effort_validator_keeps_axes_separate() {
@@ -1154,6 +1232,200 @@ test_non_claude_harness_ignores_config_dir() {
   pass "non-claude harnesses do not receive the claude CLAUDE_CONFIG_DIR prefix"
 }
 
+# --- --claude-config-dir (per-spawn seat) -----------------------------------
+
+# A usable Claude config store, for --claude-config-dir validation to accept.
+# Only the directory's existence and the presence of .claude.json are ever
+# inspected by the code under test - never its content - so an empty object is
+# enough to exercise every path.
+make_claude_seat() {  # <dir>
+  mkdir -p "$1"
+  printf '{}' > "$1/.claude.json"
+  (cd "$1" && pwd -P)
+}
+
+test_claude_config_dir_flag_records_meta_and_launch() {
+  local rec id out status launch seat
+  id=profile-claude-seat-z24
+  rec=$(make_spawn_case profile-claude-seat claude "$id")
+  read_case_record "$rec"
+  seat=$(make_claude_seat "$CASE_DIR/seat")
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --claude-config-dir "$seat")
+  status=$?
+  expect_code 0 "$status" "a seated claude spawn should succeed"$'\n'"$out"
+  assert_grep "claude_config_dir=$seat" "$HOME_DIR/state/$id.meta" \
+    "meta did not record the task's own --claude-config-dir"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "CLAUDE_CONFIG_DIR='$seat' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI" \
+    "the launch did not use the named seat's config directory"
+  pass "--claude-config-dir is recorded in the task's own meta and reaches the launched process"
+}
+
+test_claude_config_dir_flag_overrides_firstmates_ambient_store() {
+  local rec id out status launch seat
+  id=profile-claude-seat-override-z25
+  rec=$(make_spawn_case profile-claude-seat-override claude "$id")
+  read_case_record "$rec"
+  seat=$(make_claude_seat "$CASE_DIR/seat")
+
+  # Firstmate's own ambient CLAUDE_CONFIG_DIR names a DIFFERENT store than the
+  # task's seat, exactly the "two accounts at once" scenario this flag exists
+  # for: the seat must win, never firstmate's own environment.
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$CASE_DIR/firstmates-own-store" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --claude-config-dir "$seat")
+  status=$?
+  expect_code 0 "$status" "a seated claude spawn under a different ambient store should still succeed"$'\n'"$out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "CLAUDE_CONFIG_DIR='$seat'" \
+    "the task's own seat did not win over firstmate's ambient CLAUDE_CONFIG_DIR"
+  assert_not_contains "$launch" "firstmates-own-store" \
+    "the launch leaked firstmate's own ambient CLAUDE_CONFIG_DIR instead of the task's seat"
+  pass "--claude-config-dir takes priority over firstmate's own ambient CLAUDE_CONFIG_DIR"
+}
+
+test_two_claude_spawns_resolve_to_different_config_dirs() {
+  local rec id1 out1 status1 launch1 seat_a
+  local proj2 wt2 id2 out2 status2 launch2 seat_b
+  id1=profile-claude-seat-a-z26
+  rec=$(make_spawn_case profile-claude-seat-a claude "$id1")
+  read_case_record "$rec"
+  seat_a=$(make_claude_seat "$CASE_DIR/seat-a")
+
+  out1=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id1" "$PROJ_DIR" --claude-config-dir "$seat_a")
+  status1=$?
+  expect_code 0 "$status1" "first seated claude spawn should succeed"$'\n'"$out1"
+  launch1=$(cat "$LAUNCH_LOG")
+
+  # A second task, same firstmate home, its OWN worktree (fm_git_worktree
+  # cannot reuse PROJ_DIR - it registers an origin remote that would collide),
+  # and a different seat: this is the concurrent-lanes scenario the flag
+  # exists for, not two sequential reads of one shared value.
+  id2=profile-claude-seat-b-z27
+  proj2="$CASE_DIR/project-b"
+  wt2="$CASE_DIR/wt-b"
+  fm_git_worktree "$proj2" "$wt2" "wt-profile-claude-seat-b"
+  fm_test_spawn_brief "$HOME_DIR" "$id2"
+  seat_b=$(make_claude_seat "$CASE_DIR/seat-b")
+
+  out2=$(run_ship_spawn "$HOME_DIR" "$wt2" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id2" "$proj2" --claude-config-dir "$seat_b")
+  status2=$?
+  expect_code 0 "$status2" "second seated claude spawn should succeed"$'\n'"$out2"
+  launch2=$(cat "$LAUNCH_LOG")
+
+  assert_contains "$launch1" "CLAUDE_CONFIG_DIR='$seat_a'" "the first task's launch did not use its own seat"
+  assert_contains "$launch2" "CLAUDE_CONFIG_DIR='$seat_b'" "the second task's launch did not use its own seat"
+  assert_not_contains "$launch1" "$seat_b" "the first task's launch leaked the second task's seat"
+  assert_not_contains "$launch2" "$seat_a" "the second task's launch leaked the first task's seat"
+  assert_grep "claude_config_dir=$seat_a" "$HOME_DIR/state/$id1.meta" "the first task's meta did not record its own seat"
+  assert_grep "claude_config_dir=$seat_b" "$HOME_DIR/state/$id2.meta" "the second task's meta did not record its own seat"
+  pass "two claude spawns in the same home with distinct --claude-config-dir values resolve to different config stores"
+}
+
+test_claude_config_dir_missing_directory_refuses_before_endpoint_or_metadata() {
+  local rec id out status
+  id=profile-claude-seat-missing-z28
+  rec=$(make_spawn_case profile-claude-seat-missing claude "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --claude-config-dir "$CASE_DIR/no-such-seat")
+  status=$?
+  expect_code 1 "$status" "a nonexistent --claude-config-dir must refuse the spawn"
+  assert_contains "$out" "--claude-config-dir '$CASE_DIR/no-such-seat' is not an accessible directory" \
+    "refusal must name the missing directory"
+  [ ! -s "$LAUNCH_LOG" ] || fail "an invalid seat must launch nothing (got: $(cat "$LAUNCH_LOG"))"
+  assert_absent "$HOME_DIR/state/$id.meta" "refusal must happen before meta is written"
+  pass "a nonexistent --claude-config-dir refuses before any endpoint or metadata"
+}
+
+test_claude_config_dir_not_a_directory_refuses() {
+  local rec id out status
+  id=profile-claude-seat-notdir-z29
+  rec=$(make_spawn_case profile-claude-seat-notdir claude "$id")
+  read_case_record "$rec"
+  : > "$CASE_DIR/seat-file"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --claude-config-dir "$CASE_DIR/seat-file")
+  status=$?
+  expect_code 1 "$status" "a --claude-config-dir that is a file must refuse the spawn"
+  assert_contains "$out" "is not an accessible directory" "refusal must name the file as not an accessible directory"
+  assert_absent "$HOME_DIR/state/$id.meta" "refusal must happen before meta is written"
+  pass "a --claude-config-dir naming a plain file refuses before any endpoint or metadata"
+}
+
+test_claude_config_dir_without_config_refuses() {
+  local rec id out status
+  id=profile-claude-seat-empty-z30
+  rec=$(make_spawn_case profile-claude-seat-empty claude "$id")
+  read_case_record "$rec"
+  mkdir -p "$CASE_DIR/seat-empty"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --claude-config-dir "$CASE_DIR/seat-empty")
+  status=$?
+  expect_code 1 "$status" "a --claude-config-dir with no .claude.json must refuse the spawn"
+  # This check proves one thing - that no configuration exists there at all -
+  # so the refusal says that and names the document that owns what preparing a
+  # seat requires, rather than restating it at spawn time.
+  assert_contains "$out" "--claude-config-dir '$CASE_DIR/seat-empty' holds no Claude configuration at all" \
+    "refusal must name the flag the caller passed and the missing configuration"
+  assert_contains "$out" "harness-adapters/references/harness/claude.md" \
+    "refusal must point at the document that owns seat preparation"
+  assert_absent "$HOME_DIR/state/$id.meta" "refusal must happen before meta is written"
+  pass "a --claude-config-dir with no Claude configuration refuses before any endpoint or metadata"
+}
+
+test_claude_config_dir_refused_for_non_claude_harness() {
+  local rec id out status seat
+  id=profile-codex-seat-refused-z31
+  rec=$(make_spawn_case profile-codex-seat-refused codex "$id")
+  read_case_record "$rec"
+  seat=$(make_claude_seat "$CASE_DIR/seat")
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness codex --claude-config-dir "$seat")
+  status=$?
+  expect_code 1 "$status" "--claude-config-dir on a non-claude spawn must refuse"
+  assert_contains "$out" "--claude-config-dir applies only to claude spawns" "refusal must name the claude-only rule"
+  assert_absent "$HOME_DIR/state/$id.meta" "refusal must happen before meta is written"
+  pass "--claude-config-dir is refused for a spawn that does not resolve to the claude harness"
+}
+
+# A remote secondmate launches on another host, where a config directory named
+# on this machine means nothing. That route leaves fm-spawn before the seat is
+# resolved, so without an early refusal the flag is accepted and dropped and
+# the lane silently runs on firstmate's own account.
+test_claude_config_dir_refused_for_a_remote_secondmate() {
+  local rec id out status seat ssh_log
+  id=profile-claude-seat-remote-z32
+  rec=$(make_spawn_case profile-claude-seat-remote claude "$id")
+  read_case_record "$rec"
+  seat=$(make_claude_seat "$CASE_DIR/seat")
+  mkdir -p "$CASE_DIR/remote-home" "$CASE_DIR/remote-root"
+  printf -- '- %s - remote lane (host: remote-host; root: %s; home: %s; scope: remote work; projects: none; added 2026-09-19)\n' \
+    "$id" "$CASE_DIR/remote-root" "$CASE_DIR/remote-home" > "$HOME_DIR/data/secondmates.md"
+  # The transport itself, so "no dispatch happened" is observable rather than
+  # inferred: any contact with the remote host would leave a line here.
+  ssh_log="$CASE_DIR/ssh.log"
+  cat > "$CASE_DIR/recording-ssh" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> '$ssh_log'
+exit 0
+SH
+  chmod +x "$CASE_DIR/recording-ssh"
+
+  export FM_SSH_BIN="$CASE_DIR/recording-ssh"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" --secondmate --claude-config-dir "$seat")
+  status=$?
+  unset FM_SSH_BIN
+
+  [ "$status" -ne 0 ] || fail "--claude-config-dir on a remote secondmate must refuse the spawn"$'\n'"$out"
+  assert_contains "$out" "--claude-config-dir" "refusal must name the flag that cannot be honored"
+  assert_contains "$out" "remote secondmates" "refusal must name the route that cannot honor it"
+  assert_absent "$ssh_log" "the refusal must fire before any remote dispatch"
+  assert_absent "$HOME_DIR/state/$id.meta" "refusal must happen before meta is written"
+  [ ! -s "$LAUNCH_LOG" ] || fail "a refused remote seat must launch nothing (got: $(cat "$LAUNCH_LOG"))"
+  pass "--claude-config-dir is refused for a remote secondmate before any remote dispatch"
+}
+
 # The captain's attribution policy lives in the `user` settings scope, which a
 # spawned worker's settings sources are not guaranteed to load. Every claude
 # launch must therefore carry the policy itself, or a spawned worker writes
@@ -1170,6 +1442,61 @@ assert_attribution_policy_absent() {  # <launch-command> <what>
   settings=$(claude_settings_json_arg "$launch")
   printf '%s' "$settings" | jq -e '.feedbackDrafts == "off" and (has("attribution") | not)' >/dev/null \
     || fail "$what launch settings JSON still disables Claude attribution: $settings"
+}
+
+# bin/fm-bootstrap.sh's liveness sweep recovers a dead secondmate with a bare
+# `fm-spawn.sh <id> --secondmate` - no --relaunch, no flag, home and identity
+# taken from the existing record. The seat has to survive that the way the home
+# does, or the recovery moves a seated lane onto firstmate's own account and
+# erases the record, leaving a later relaunch nothing to restore.
+test_bare_secondmate_respawn_keeps_the_recorded_claude_seat() {
+  local rec id sm seat out status launch
+  id=profile-secondmate-seat-respawn-z33
+  rec=$(make_spawn_case profile-secondmate-seat-respawn claude "$id")
+  read_case_record "$rec"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+  seat=$(make_claude_seat "$CASE_DIR/seat")
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate --claude-config-dir "$seat")
+  status=$?
+  expect_code 0 "$status" "the seated secondmate's first spawn should succeed"$'\n'"$out"
+  assert_grep "claude_config_dir=$seat" "$HOME_DIR/state/$id.meta" \
+    "the seated secondmate's first spawn did not record its seat"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" --secondmate)
+  status=$?
+  expect_code 0 "$status" "the bare recovery respawn should succeed"$'\n'"$out"
+  assert_grep "claude_config_dir=$seat" "$HOME_DIR/state/$id.meta" \
+    "the bare respawn dropped the secondmate's recorded seat from its meta"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "CLAUDE_CONFIG_DIR='$seat'" \
+    "the bare respawn launched on the single-store default instead of the recorded seat"
+  pass "a bare secondmate respawn keeps the seat recorded at creation, in its meta and its launch"
+}
+
+test_bare_secondmate_respawn_refuses_a_recorded_seat_that_vanished() {
+  local rec id sm seat out status
+  id=profile-secondmate-seat-gone-z34
+  rec=$(make_spawn_case profile-secondmate-seat-gone claude "$id")
+  read_case_record "$rec"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+  seat=$(make_claude_seat "$CASE_DIR/seat")
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate --claude-config-dir "$seat")
+  status=$?
+  expect_code 0 "$status" "the seated secondmate's first spawn should succeed"$'\n'"$out"
+  # The operator removed the seat between the creation and the recovery.
+  rm -f "$seat/.claude.json"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" --secondmate)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a respawn whose recorded seat is unusable must refuse"$'\n'"$out"
+  assert_contains "$out" "this secondmate's recorded Claude config directory '$seat'" \
+    "the refusal should name the record the seat came from, not a flag the caller never passed"
+  [ ! -s "$LAUNCH_LOG" ] || fail "an unusable recorded seat must launch nothing (got: $(cat "$LAUNCH_LOG"))"
+  pass "a bare secondmate respawn refuses when its recorded seat is no longer usable"
 }
 
 test_claude_task_launch_carries_control_channel_authority() {
@@ -1837,10 +2164,14 @@ test_grok_omits_invalid_xhigh_reasoning_effort
 test_cursor_threads_model_workspace_and_omits_effort_axis
 test_cursor_refuses_model_absent_from_live_catalog
 test_cursor_failed_catalog_probe_does_not_block_spawn
-test_opencode_threads_model_and_effort_variant
+test_opencode_v2_threads_top_level_model_and_omits_effort_from_launch
+test_opencode_v1_threads_model_and_effort_variant
 test_opencode_without_effort_keeps_launch_config_unchanged
-test_opencode_emits_variant_for_openai_family_effort
-test_opencode_omits_variant_when_model_family_lacks_effort
+test_opencode_v1_without_effort_keeps_permission_only_config
+test_opencode_v2_records_effort_without_variant_json
+test_opencode_v1_emits_variant_for_openai_family_effort
+test_opencode_v2_omits_variant_when_model_family_lacks_effort
+test_opencode_v1_omits_variant_when_model_family_lacks_effort
 test_native_effort_validator_keeps_axes_separate
 test_native_pi_ultra_is_explicit_and_model_scoped
 test_batch_preserves_native_ultra
@@ -1862,6 +2193,16 @@ test_claude_worker_launch_covers_task_channel_dirs
 test_claude_permission_mode_invalid_refuses_before_endpoint_or_metadata
 test_non_claude_harness_ignores_claude_permission_mode
 test_non_claude_harness_ignores_config_dir
+test_claude_config_dir_flag_records_meta_and_launch
+test_claude_config_dir_flag_overrides_firstmates_ambient_store
+test_two_claude_spawns_resolve_to_different_config_dirs
+test_claude_config_dir_missing_directory_refuses_before_endpoint_or_metadata
+test_claude_config_dir_not_a_directory_refuses
+test_claude_config_dir_without_config_refuses
+test_claude_config_dir_refused_for_non_claude_harness
+test_claude_config_dir_refused_for_a_remote_secondmate
+test_bare_secondmate_respawn_keeps_the_recorded_claude_seat
+test_bare_secondmate_respawn_refuses_a_recorded_seat_that_vanished
 test_claude_task_launch_carries_control_channel_authority
 test_claude_secondmate_launch_omits_task_control_channel_authority
 test_claude_long_launch_is_delivered_intact

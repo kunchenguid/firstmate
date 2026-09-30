@@ -740,7 +740,7 @@ out=$(FM_SECONDMATE_CHARTER='Own delivery for projects hosted anywhere.' \
   'scp-app=git@host.internal:group/scp-app.git' 2>&1) \
   || fail "seeding refused origins hosted outside GitHub"$'\n'"$out"
 
-while IFS="$(printf '\t')" read -r forge_origin _; do
+while IFS=$'\t' read -r forge_origin _; do
   [ -n "$forge_origin" ] || continue
   assert_grep "$forge_origin" "$FORGE_CLONE_LOG" \
     "the remote host did not clone from the supplied origin $forge_origin"

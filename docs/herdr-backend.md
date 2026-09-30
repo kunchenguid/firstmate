@@ -295,6 +295,8 @@ The worker remains on the ordinary flat or Herdr-current-order path.
 
 Normal task metadata remains the sole endpoint authority after creation.
 Cleanup closes only the exact recorded task pane and never calls `workspace close`.
+A projected teardown additionally removes any panes that disposable projected workspace still holds through that same focus-preserving pane close.
+It retires the journal only once the workspace itself is confirmed gone, because a recorded pane that vanished before its close would otherwise leave the workspace for a Herdr restart to restore as a live agent in the wrong directory.
 
 Herdr 0.7.5's explicit close moves focus to a neighbor whenever it empties a non-focused workspace.
 Its pane-death removal preserves the focused workspace whenever the dying workspace sits behind it or the focused workspace is last.
@@ -527,6 +529,12 @@ When the selected named server is not running, the adapter launches it without t
 Herdr passes its server startup environment to every later pane, so retaining those values could misroute panes for another Firstmate home or harness.
 An already-running server is reused without restart or environment changes.
 Explicit named-session routing and unrelated launch environment remain intact.
+
+Every synchronous Herdr CLI read or write runs under a hard per-call bound (`FM_BACKEND_HERDR_CLI_TIMEOUT`, default 10 seconds) through the repo-wide bounded runner in `bin/fm-timeout-lib.sh`.
+A wedged server or a hung pane read therefore cannot block a supervisor indefinitely or leak the shell that made the call.
+The bound kills the whole child process group and reports Herdr timeout as exit 124.
+The long-lived `herdr server` launch is the one exemption, because its purpose is to outlive the call and a bound would kill the server.
+`tests/fm-backend-herdr-probe-timeout.test.sh` pins the bound, the process reaping, and the server exemption against a TERM-ignoring fake herdr.
 
 ### Sending text and keys
 

@@ -486,6 +486,7 @@ test_reused_pool_slot_refuses_before_touching_the_other_task() {
   fm_write_meta "$dir/home/state/$other.meta" \
     "window=firstmate:fm-$other" "endpoint_task_id=$other" \
     "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  claim_pool_slot "$dir" "$id"
   # Staged in this shell, not a command substitution: a background child of a
   # $(...) subshell does not outlive it, and the point of this worker is to be
   # alive in the slot while teardown runs.
@@ -502,6 +503,9 @@ test_reused_pool_slot_refuses_before_touching_the_other_task() {
   assert_present "$dir/worktree/sentinel" "teardown reset a pool slot a second task record still holds"
   assert_present "$dir/home/state/$other.meta" "teardown removed the live task's record"
   assert_present "$dir/home/state/$id.meta" "teardown removed the stale task's record before refusing"
+  assert_present "$dir/pool/1/.fm-slot-owner" "teardown removed its own claim before refusing"
+  assert_contains "$(cat "$dir/pool/1/.fm-slot-owner")" "task=$id" \
+    "teardown rewrote its own claim before refusing"
   [ ! -s "$dir/runtime.log" ] \
     || fail "teardown reached the runtime on a contested pool slot: $(cat "$dir/runtime.log")"
   assert_contains "$(cat "$dir/stderr")" "$other" \
@@ -898,7 +902,7 @@ assert_reassigned_slot_left_alone() {  # <case> <id> <other> <description>
 }
 
 test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot() {
-  local dir id=stale-task other=reassigned-task worker rc
+  local dir id=stale-task other=reassigned-task worker rc owner_head
 
   # Dirty slot, --force, and a live worker inside it: --force authorizes
   # discarding this task's unlanded work, which is already gone with the slot,
@@ -907,6 +911,9 @@ test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot() {
   mark_case_as_treehouse_pool "$dir"
   fm_write_meta "$dir/home/state/$id.meta" \
     "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
     "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
   claim_pool_slot "$dir" "$other" "$dir/other-home"
   # Staged in this shell, not a command substitution: a background child of a
@@ -923,26 +930,37 @@ test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot() {
   [ "$rc" -eq 0 ] || fail "teardown of a task whose slot was reassigned failed: $(cat "$dir/stderr")"
   kill -0 "$worker" 2>/dev/null || fail "teardown killed the worker holding the reassigned pool slot"
   assert_present "$dir/worktree/sentinel" "teardown reset a pool slot another task had claimed"
+  assert_present "$dir/home/state/$other.meta" "teardown removed the slot owner's record"
   assert_reassigned_slot_left_alone "$dir" "$id" "$other" "dirty reassigned slot with --force"
   assert_contains "$(cat "$dir/stderr")" "$dir/other-home" \
     "the warning should name the claimant's home"
   kill "$worker" 2>/dev/null || true
   wait "$worker" 2>/dev/null || true
 
-  # The same reassignment on a CLEAN slot: a landed ship task torn down without
-  # --force, which is the shape of the real incident. A clean, fully landed copy
-  # passes every unlanded-work check, so only the ownership determination can
-  # keep this slot out of the pool; a guard keyed off dirtiness would return it
-  # and destroy the live task's copy.
+  # The reported collision: a finished ship record and another ship record
+  # name one clean slot. The claimant's committed work is not landed, so its
+  # record cannot be torn down just to unblock the finished task. The finished
+  # task must complete without --force or touching the claimant's copy.
   dir=$(make_case slot-reassigned-clean)
   mark_case_as_treehouse_pool "$dir"
   rm -f "$dir/worktree/sentinel"
+  git -C "$dir/worktree" -c user.name=test -c user.email=test@example.invalid \
+    commit --allow-empty -qm claimant-unlanded-work
+  owner_head=$(git -C "$dir/worktree" rev-parse HEAD)
+  ! git -C "$dir/worktree" merge-base --is-ancestor "$owner_head" \
+    "$(git -C "$dir/project" rev-parse HEAD)" \
+    || fail "claimant fixture unexpectedly landed its work"
   [ -z "$(git -C "$dir/worktree" status --porcelain)" ] \
     || fail "clean-slot fixture is not clean: $(git -C "$dir/worktree" status --porcelain)"
   fm_write_meta "$dir/home/state/$id.meta" \
     "window=firstmate:fm-$id" "endpoint_task_id=$id" \
     "worktree=$dir/worktree" "project=$dir/project" "kind=ship"
+  fm_write_meta "$dir/home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=ship"
   claim_pool_slot "$dir" "$other" "$dir/other-home"
+  cp "$dir/home/state/$other.meta" "$dir/claimant-meta-before"
+  cp "$dir/pool/1/.fm-slot-owner" "$dir/claimant-claim-before"
   ( cd "$dir/worktree" && exec sleep 30 ) &
   worker=$!
 
@@ -954,7 +972,30 @@ test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot() {
   set -e
   [ "$rc" -eq 0 ] || fail "teardown of a clean ship task whose slot was reassigned failed: $(cat "$dir/stderr")"
   kill -0 "$worker" 2>/dev/null || fail "teardown killed the worker holding the clean reassigned pool slot"
+  assert_present "$dir/home/state/$other.meta" "teardown removed the claimant's unlanded task record"
+  cmp -s "$dir/claimant-meta-before" "$dir/home/state/$other.meta" \
+    || fail "teardown changed the claimant's task record"
+  cmp -s "$dir/claimant-claim-before" "$dir/pool/1/.fm-slot-owner" \
+    || fail "teardown changed the claimant's slot claim"
+  [ "$(git -C "$dir/worktree" rev-parse HEAD)" = "$owner_head" ] \
+    || fail "teardown changed the claimant's unlanded checkout"
+  [ -z "$(git -C "$dir/worktree" status --porcelain)" ] \
+    || fail "teardown changed the claimant's clean checkout"
   assert_reassigned_slot_left_alone "$dir" "$id" "$other" "clean reassigned slot without --force"
+  if [ -n "${FM_TEARDOWN_EVIDENCE_FILE:-}" ]; then
+    {
+      printf '$ fm-teardown.sh %s\n' "$id"
+      cat "$dir/stderr" "$dir/stdout"
+      printf 'finished record removed: %s\n' "$([ ! -e "$dir/home/state/$id.meta" ] && echo yes || echo no)"
+      printf 'claimant record retained: %s\n' "$([ -f "$dir/home/state/$other.meta" ] && echo yes || echo no)"
+      printf 'claimant process alive: %s\n' "$(kill -0 "$worker" 2>/dev/null && echo yes || echo no)"
+      printf 'claimant checkout HEAD unchanged: %s\n' "$([ "$(git -C "$dir/worktree" rev-parse HEAD)" = "$owner_head" ] && echo yes || echo no)"
+      printf 'claimant unlanded work retained: %s\n' "$(! git -C "$dir/worktree" merge-base --is-ancestor "$owner_head" "$(git -C "$dir/project" rev-parse HEAD)" && echo yes || echo no)"
+      printf 'claimant checkout clean: %s\n' "$([ -z "$(git -C "$dir/worktree" status --porcelain)" ] && echo yes || echo no)"
+      printf 'claimant slot claim: %s\n' "$(sed -n '1p' "$dir/pool/1/.fm-slot-owner")"
+      printf 'treehouse return invoked: %s\n' "$(grep -Fq 'treehouse <return>' "$dir/runtime.log" && echo yes || echo no)"
+    } > "$FM_TEARDOWN_EVIDENCE_FILE"
+  fi
   kill "$worker" 2>/dev/null || true
   wait "$worker" 2>/dev/null || true
 

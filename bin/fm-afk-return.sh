@@ -193,7 +193,7 @@ scan_open_blockers() {  # -> tab-separated blocker rows
       STATUS_SCAN_ERROR=$status
       return 1
     fi
-    while IFS="$(printf '\t')" read -r key verb summary; do
+    while IFS=$'\t' read -r key verb summary; do
       [ "$verb" = blocked ] || continue
       clean_summary=$(printf '%s' "$summary" | clean_field)
       printf 'blocker\t%s\t%s\t%s\n' "$id" "$key" "$clean_summary"
@@ -241,7 +241,7 @@ write_gate() {  # <evidence-file> <blockers-file>
 
 print_evidence() {  # <file>
   local file=$1 kind text
-  while IFS="$(printf '\t')" read -r tag kind text; do
+  while IFS=$'\t' read -r tag kind text; do
     [ "$tag" = evidence ] || continue
     printf 'catch-up %s: %s\n' "$kind" "$text"
   done < "$file"
@@ -249,7 +249,7 @@ print_evidence() {  # <file>
 
 print_blockers() {  # <file>
   local file=$1 tag id key summary
-  while IFS="$(printf '\t')" read -r tag id key summary; do
+  while IFS=$'\t' read -r tag id key summary; do
     [ "$tag" = blocker ] || continue
     printf 'firstmate-actionable blocker: %s [key=%s] %s\n' "$id" "$key" "$summary"
   done < "$file"
@@ -267,7 +267,7 @@ clear_delivery_artifacts() {
 # gate was retained for open blockers alone.
 gate_retention_reasons() {  # <file>
   local file=$1 tag kind text
-  while IFS="$(printf '\t')" read -r tag kind text; do
+  while IFS=$'\t' read -r tag kind text; do
     [ "$tag" = evidence ] && [ "$kind" = lifecycle ] || continue
     printf '%s\n' "$text"
   done < "$file"
@@ -604,7 +604,7 @@ render_return_brief() {  # <evidence-file> <blockers-file> <since-epoch> <drain-
     task=$(basename "$meta"); task=${task%.meta}
     status="$STATE/$task.status"
     status_path_readable "$status" || continue
-    while IFS="$(printf '\t')" read -r key verb summary; do
+    while IFS=$'\t' read -r key verb summary; do
       [ "$verb" = needs-decision ] || continue
       count=$((count + 1))
       printf '  - %s [key=%s] needs your decision: %s\n' "$task" "$key" "$(printf '%s' "$summary" | clean_field)"
@@ -627,12 +627,12 @@ EOF
   # 4. tried and failed, or could not be fixed.
   printf 'Tried and failed, or could not be fixed:\n'
   count=0
-  while IFS="$(printf '\t')" read -r tag kind text; do
+  while IFS=$'\t' read -r tag kind text; do
     [ "$tag" = evidence ] && [ "$kind" = engine ] || continue
     count=$((count + 1))
     printf '  - %s\n' "$text"
   done < "$evidence"
-  while IFS="$(printf '\t')" read -r tag task key summary; do
+  while IFS=$'\t' read -r tag task key summary; do
     [ "$tag" = blocker ] || continue
     count=$((count + 1))
     printf '  - %s [key=%s] still blocked, firstmate remediates before ordinary work: %s\n' "$task" "$key" "$summary"
@@ -654,7 +654,7 @@ EOF
   # overlooked. The cleanup itself is ordinary fleet work and waits for the gate.
   printf 'Landed, cleanup due:\n'
   count=0
-  while IFS="$(printf '\t')" read -r task url; do
+  while IFS=$'\t' read -r task url; do
     [ -n "$task" ] || continue
     count=$((count + 1))
     printf '  - %s: %s is merged and the worker is still up; close it with bin/fm-teardown.sh %s once catch-up clears\n' "$task" "$url" "$task"
@@ -711,7 +711,7 @@ return_reconcile() {
     engine_snapshot "$evidence" "$since"
   fi
 
-  while IFS="$(printf '\t')" read -r tag kind text; do
+  while IFS=$'\t' read -r tag kind text; do
     [ "$tag" = evidence ] && [ "$kind" = lifecycle ] || continue
     case "$text" in
       'away-posture record unreadable: '*'; catch-up stays gated')
@@ -795,7 +795,7 @@ EOF
       remove_evidence_prefix lifecycle 'archived away-posture record unreadable' "$evidence" || lifecycle_ok=0
     fi
 
-    while IFS="$(printf '\t')" read -r tag retained_record; do
+    while IFS=$'\t' read -r tag retained_record; do
       [ "$tag" = superseded ] || continue
       if [ ! -f "$retained_record" ]; then
         remove_evidence lifecycle "superseded away-posture record unreadable: $retained_record; catch-up stays gated" "$evidence" || lifecycle_ok=0

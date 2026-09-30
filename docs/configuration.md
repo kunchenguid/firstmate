@@ -667,6 +667,36 @@ Only the file's presence is read, so its contents are ignored; remove it to retu
 
 The skill text owns the marker spelling, the tick order, and the reinforcement rule.
 
+## Cross-home work claims (FM_CLAIM_ROOT)
+
+`bin/fm-claim.sh` records which firstmate home is working a shared external target - a pull request, an issue id, or a declared file area - so a second home refuses to claim the same target instead of racing it.
+The primary home and every local secondmate share one filesystem, so the store is a machine-wide directory rather than any single home's `state/`, exactly as the process-event source claim root is machine-wide.
+A remote secondmate is a separate host by construction ([remote-secondmates.md](remote-secondmates.md)), so this mechanism coordinates local homes only and never claims to span machines.
+
+`FM_CLAIM_ROOT` overrides the store root, defaulting to `${XDG_STATE_HOME:-$HOME/.local/state}/firstmate/claims`.
+The root must be a real directory, not a symlink, with mode `0700`; the CLI refuses a group- or world-accessible root.
+`FM_CLAIM_PENDING_GRACE` (default `300` seconds) bounds the window in which a claim whose task record is not yet visible is treated as live rather than stale.
+
+`bin/fm-claim.sh` owns the command surface (`acquire`, `release`, `release-task`, `reclaim`, `status`, `list`, `key`), and its own header owns the exact usage and exit codes; `bin/fm-claim-lib.sh` owns the atomic mechanism.
+Each claim file holds one `fm-claim.v1` record of `key=value` lines:
+
+- `schema` - always `fm-claim.v1`.
+- `key` - the canonical target key.
+- `kind` - `pr`, `issue`, or `area`.
+- `target` - the raw target as supplied, for human readability.
+- `home` - the absolute `FM_HOME` of the claiming home.
+- `task` - the claiming task id.
+- `created` - claim creation time in epoch seconds.
+- `pid` and `host` - the creating process and host, for diagnostics.
+
+The canonical keys are `pr:<host>/<owner>/<repo>#<n>`, `issue:<host>/<owner>/<repo>#<n>`, `issue:<TICKET-ID>`, and `area:<project>:<normalized-path>`, so two homes naming the same target in different spellings produce one key.
+A bare `owner/repo#N` resolves to `--kind pr`, because GitHub numbers issues and pull requests in one space.
+
+A claim is released explicitly (`release`, or `release-task` on cleanup), or reclaimed only when its holder is provably gone: its recorded home directory is absent, or its task record is absent past `FM_CLAIM_PENDING_GRACE`.
+Any uncertainty keeps the claim, so a live home is never dispossessed.
+
+Firstmate claims a target before dispatching a lane against it: `bin/fm-spawn.sh --claim <target>` records the claim before any endpoint or task record exists and refuses the spawn when another live home holds it, and the canonical keys are recorded on the task as `claims=`.
+
 ## Secondmate routes (data/secondmates.md)
 
 Persistent secondmate routes live locally in `data/secondmates.md`.
@@ -716,10 +746,9 @@ A local standalone-clone home cannot receive a primary-local commit through that
 
 ## Harness support
 
-claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, and omp are empirically verified for crewmate and secondmate launches; gemini is verified for crewmate and scout launches only, and [README requirements](../README.md#requirements) own the set supported for the primary session.
+claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, and omp are empirically verified for crewmate and secondmate launches; gemini and cline are verified for crewmate and scout launches only, and [README requirements](../README.md#requirements) own the set supported for the primary session.
 
 ### Harness restrictions and credentials
-
 `fm-spawn.sh` refuses kimi on cmux and Orca at preflight, because answering Kimi's folder-trust dialog needs a verified viewport-only capture those backends lack; [its adapter reference](../.agents/skills/harness-adapters/references/harness/kimi.md#readiness-gated-start) owns the trust-dialog handling.
 A cursor secondmate or primary runs the tracked project-scope `.cursor/hooks.json` in its own home and must be launched with `--trust`, or no project hook loads; [`docs/supervision-protocols/cursor.md`](supervision-protocols/cursor.md) owns its supervision protocol.
 
@@ -735,10 +764,13 @@ rovo is likewise verified for crewmate and scout launches ONLY, refused for a se
 agy is likewise verified for crewmate and scout launches ONLY, refused for a secondmate for the same reason - no hook surface and no primary supervision protocol; [`docs/verification/agy.md`](verification/agy.md) owns that evidence, including the spawn-time worktree trust pre-registration through `bin/fm-agy-trust.sh` and Herdr's native agy pane recognition.
 devin is verified for crewmate and scout launches only; a secondmate is refused because Devin has no verified primary supervision protocol.
 
+cline is likewise verified for crewmate and scout launches ONLY, refused for a secondmate because `docs/supervision-protocols/` carries no cline wake protocol and only the crewmate-side launch, busy state, interrupt, and exit were verified; [`docs/verification/cline.md`](verification/cline.md) owns that evidence, including the ClinePass credential precondition and the composer-empty ghost-luma gap shared with rovo.
+openhands is likewise verified for crewmate and scout launches ONLY, refused for a secondmate for the same reason - no hook surface and no primary supervision protocol; [`docs/verification/openhands.md`](verification/openhands.md) owns that evidence, including the per-task HOME required because the SDK profile store is hardcoded under `~/.openhands/profiles`.
+openhands also needs `LLM_API_KEY` before spawning, taken from the environment or from the optional gitignored `config/openhands-llm.env`, and `LLM_MODEL` from `--model` (a LiteLLM id such as `fireworks_ai/accounts/fireworks/models/deepseek-v4p1-flash`).
+
 Its private worker config disables Claude Code imports (including the captain's hooks) and, unless the home sets `config/keep-ai-trailers` (see "Commit attribution"), Devin commit attribution without editing user or project config; [`fm-devin-config.sh`](../bin/fm-devin-config.sh) owns these enforced settings and [Devin verification](verification/devin.md) owns the live evidence and observed model availability.
 
 ### Verification and primary supervision
-
 New harnesses get verified through a supervised trial task before joining the set.
 The verified adapter evidence - each harness's busy-state source, interrupt and exit behavior, skill-invocation syntax, and per-harness quirks - lives in the skill tree rooted at [`.agents/skills/harness-adapters/SKILL.md`](../.agents/skills/harness-adapters/SKILL.md).
 
@@ -1021,7 +1053,8 @@ This section is the single owner of the canonical schema and its per-field seman
   ],
   "default": [
     { "harness": "<adapter>", "model": "<optional model>", "effort": "<optional effort>" }
-  ]
+  ],
+  "providerCaps": { "default": 4, "fireworks": 4 }
 }
 ```
 
@@ -1056,6 +1089,15 @@ Set it high when a wrong pick is costly and low when the rule is a safe runner-u
 **Provider identifiers and mappings**
 
 A profile `provider` optionally names the quota-axi provider family whose rows apply to that profile; when present, profile and rule-floor provider IDs must match the strict whole-string pattern `^[a-z0-9]+(-[a-z0-9]+)*\z`.
+**Provider lane caps**
+
+- `providerCaps` is optional and bounds how many live lanes one billing provider may carry.
+- `providerCaps.<provider>` sets that one provider's cap and `providerCaps.default` sets the cap for every provider without its own entry; an absent entry, or a value below one, falls back to a cap of 4.
+- The provider a lane is counted against comes from the lane's recorded harness and model, with the model string deciding the identity, so two models on one pool count together even across harnesses while a different pool stays separate.
+- A lane whose recorded endpoint is provably dead or missing no longer occupies a seat, while a lane whose endpoint cannot be proven gone keeps it.
+- `bin/fm-provider-load.sh` prints the current per-provider `used/cap` for dispatch intake, and `bin/fm-spawn.sh` refuses a crewmate, scout, or local secondmate spawn that would push a provider past its cap (`bin/fm-provider-lib.sh` is the single owner of both rules).
+- The cap is per home: a remote secondmate's own lanes are recorded on its host and are not counted here.
+- Bootstrap rejects a malformed `providerCaps` - a non-object, a key that is neither a provider id nor `default`, or a value that is not a whole number of at least one - with the usual `CREW_DISPATCH:` diagnostic.
 Bootstrap validates resolver-only `approval`, `min_confidence`, `floor`, and present `provider` values only while typed resolution is active; without the key those inert fields and the pre-existing verified-harness baseline preserve bootstrap behavior.
 
 Typed resolution additively recognizes `gemini` because AGENTS.md section 4 verifies it for crewmate and scout dispatch.
@@ -1077,12 +1119,14 @@ This single-provider table is separate from the frozen legacy mapping used by `f
 - `ultra` is native-only: the model-aware validation contract and launch mapping are owned by `bin/fm-harness.sh validate-native-effort` and `bin/fm-spawn.sh` respectively.
 - Codex `max` is valid when the profile selects `gpt-5.6-luna`, whose installed catalog entry supports that reasoning level.
 - An omitted model or effort means the selected harness uses its own default for that axis.
-- OpenCode receives the effort as its default `build` agent's `variant`, keyed to the resolved model, inside the `OPENCODE_CONFIG_CONTENT` JSON its launch already writes (the per-model reasoning-effort field of the config schema, verified on opencode 1.18.32); with no model resolved, the effort is recorded in task metadata but omitted from the launch.
+- OpenCode 1.x receives the effort as its default `build` agent's `variant`, keyed to the resolved model, inside the `OPENCODE_CONFIG_CONTENT` JSON its launch already writes (the per-model reasoning-effort field of the config schema, verified on opencode 1.18.32); with no model resolved, the effort is recorded in task metadata but omitted from the launch.
+- OpenCode 2.x has no top-level `--model`: its launch writes the resolved model as the top-level `model` field of `OPENCODE_CONFIG_CONTENT` and adds `--standalone`, and its effort is recorded in task metadata but omitted from the launch.
+- A `cline` profile's `model` is the full `<provider>/<model>` id cline expects (for example `cline-pass/deepseek-v4-flash` or `cline-pass/glm-5.3`), and cline derives its launch provider from that prefix.
+- Typed resolution still needs that profile's `provider` (`cline-pass` for a ClinePass model), because cline is not in the single-provider table above and the resolver's `provider` names the quota-axi provider family rather than the launch prefix.
 - Every profile array is an implicit quota-aware choice resolved through `quota-array-dispatch`.
 - If no dispatch rule fits, firstmate resolves `default` through the same object-or-array path before falling back to `config/crew-harness`.
 - Except for `ultra`, which refuses unsupported profiles under the native-effort contract above, an effort value the chosen harness does not accept is recorded as `effort=` in task meta for traceability but omitted from the launch flags.
 - Bootstrap reports unsupported harness/model/effort combinations as a `CREW_DISPATCH` diagnostic when they are visible in the file.
-
 See [`docs/examples/crew-dispatch.json`](examples/crew-dispatch.json) for a starting point to copy into local `config/crew-dispatch.json`; its Pi default declares the `claude` provider required for typed resolution of that Anthropic model.
 
 **Validation and diagnostics**
@@ -1300,10 +1344,10 @@ Local routes use direct guarded filesystem operations, while remote routes deleg
 - It emits `SECONDMATE_SYNC:` only when a home was skipped for an actionable sync reason, inheritance failed, or a divergent shared captain-preference copy was quarantined.
 - When a running home advances and its loaded instruction surface (`AGENTS.md`, `bin/`, or `.agents/skills/`) changed, bootstrap sends the re-read nudge itself through the stable `fm-<id>` selector and reports the exact completed send as `BOOTSTRAP_INFO:`.
 - If that send fails, bootstrap keeps an idempotent retry marker and emits `NUDGE_SECONDMATES:` with the failure reason.
-- The same bootstrap run emits `SECONDMATE_LIVENESS:` only when a registered secondmate is skipped or its relaunch fails; already-live and successfully relaunched secondmates are handled silently.
+- The same bootstrap run accounts for every secondmate registered in `data/secondmates.md`, not only those with a `state/<id>.meta` record, and relaunches one whose record is missing or has no endpoint from its registry entry and persistent home.
+- It emits `SECONDMATE_LIVENESS:` only when a registered secondmate is skipped, its relaunch fails, or it cannot be relaunched from the registry at all (a `gap:` line); already-live and successfully relaunched secondmates are handled silently.
 
 **Push inherited configuration during a session**
-
 For a mid-session inherited local-material edit where tracked-file sync is not needed, run `bin/fm-config-push.sh`.
 It uses the same live secondmate discovery and propagation helper as bootstrap; its [help](../bin/fm-config-push.sh) owns reporting and exit semantics, and [`fm_config_inherit_items`](../bin/fm-config-inherit-lib.sh) declares the inherited items.
 
@@ -1390,6 +1434,29 @@ Arm the check once per home with `bin/fm-tool-update-check.sh arm`.
 - The sweep must finish inside `FM_CHECK_TIMEOUT` (default 30), because a run the watcher kills prints nothing and records nothing and would then repeat that silence on every poll.
 - So a budget larger than that timeout allows is cut down to what fits instead of being refused, and the cut is reported in the report line.
 - A budget that is not a whole number from 1 to 120 is still refused outright.
+
+## Captain-hold re-verification
+
+A captain call is an ordinary backlog task held for the captain, and its list rots with age: hundreds of holds had never been re-checked, so the captain's list was mostly ghosts and every count of remaining work was wrong.
+`bin/fm-hold-reverify.sh` re-checks each aged hold against shipped reality and reports it with one of four verdicts: `dead`, `still_live`, `not_a_decision`, or `unestablishable`.
+It reports only.
+It never calls `answer` and never closes or annotates a call, so only the captain's own words or an explicit evidence-backed reconciliation - the seam the `captain-hold-lifecycle` skill owns - can resolve one.
+A hold is `dead` when shipped reality resolves the subject - its recorded pull request is merged, or its row records a merged completion.
+It is `still_live` when the recorded pull request is open, `not_a_decision` when the row carries no live captain question (already Done, or no hold reason), and `unestablishable` otherwise.
+`dead` is never inferred from absence or from an unreadable source, and a closed-unmerged pull request stays `unestablishable` rather than reading as dead.
+Aged holds come from the canonical local backlog projection (`fm-fleet-snapshot.sh --backlog-json`, which omits task metadata and merge-authority resolution), and a recorded pull request is read through `bin/fm-pr-lib.sh`; no second backlog parser and no redundant `origin/main` clone fetch are involved.
+
+`check` is a plain custom watcher check, so it stays in the check-fires-then-firstmate-decides flow that the process-event `when` adapter explicitly excludes for an action whose right form depends on what the condition finds.
+Arm it once per home with `bin/fm-hold-reverify.sh arm`, which writes `state/hold-reverify.check.sh` and binds its bytes with `bin/fm-check-register.sh` so the watcher dispatches it on its normal cadence and turns its one line into a `check:` wake.
+`disarm` removes the shim, its trust binding, and the report record.
+Each sweep writes `state/hold-reverify/docket.json` (schema `fm-hold-reverify-docket.v1`) with every examined hold's verdict and the structured evidence it was decided from, and prints one line only when the finding set changes.
+`state/.hold-reverify` records the sweep epoch and a digest of the `{id: verdict}` set, so a new or changed finding is reported once while an unchanged sweep stays silent.
+A sweep the watcher kills writes no record and is retried.
+
+`FM_HOLD_REVERIFY_AGE_DAYS` (default 14, matching `FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS`) sets the age at which a hold is re-verified.
+`FM_HOLD_REVERIFY_INTERVAL` (default 21600 seconds, `0` to sweep on every watcher cycle) gates how often a sweep actually runs.
+`FM_HOLD_REVERIFY_BUDGET_SECS` (default 20) bounds a whole sweep and is cut to fit `FM_CHECK_TIMEOUT`, with the cut reported in the wake line.
+`FM_HOLD_REVERIFY_PROBE_SECS` (default 8) bounds one forge read, and `FM_HOLD_REVERIFY_MAX_HOLDS` (default 12) caps the holds examined per sweep, deferring the rest and disclosing the count.
 
 ## Mail plane (.env)
 
@@ -2257,6 +2324,7 @@ FM_TASK_ID=             # internal task-worker marker fm-spawn.sh exports into s
 HERDR_SESSION=default  # herdr-only: named session for normal backend ops; not enough for destructive cleanup (docs/herdr-backend.md)
 FM_BACKEND_HERDR_SUBMIT_POLLS=6  # herdr-only: agent-state samples spread across each Enter attempt's budget when confirming a submit (docs/herdr-backend.md "Current transport behavior")
 FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0.6  # herdr-only: minimum per-Enter confirmation budget before polling agent-state after an idle baseline
+FM_BACKEND_HERDR_CLI_TIMEOUT=10  # herdr-only: whole-second hard bound on every synchronous herdr CLI read/write, so a hung probe cannot block a supervisor or leak its shell; invalid or zero values fall back to 10, and the long-lived `herdr server` launch is exempt (docs/herdr-backend.md "Current transport behavior")
 FM_ZELLIJ_SESSION=firstmate  # zellij-only: named session for normal backend ops and test isolation (docs/zellij-backend.md)
 CMUX_SOCKET_PASSWORD=   # cmux-only: socket password fallback when config/cmux-socket-password is absent (docs/cmux-backend.md)
 FM_SESSION_START_STATUS_TAIL=5   # state/*.status lines printed per task in the session-start digest; each line is capped by bin/fm-line-cap-lib.sh
@@ -2295,6 +2363,12 @@ FM_TOOL_UPDATE_INTERVAL=900   # seconds between watched-tool probe sweeps; 0 pro
 FM_TOOL_UPDATE_PROBE_SECS=5   # 1..30 seconds allowed for one version or git probe
 FM_TOOL_UPDATE_BUDGET_SECS=20   # 1..120 seconds allowed for a whole watched-tool sweep; cut to fit FM_CHECK_TIMEOUT, and the cut is reported
 FM_TOOL_UPDATE_NOW=     # test override for the watched-tool sweep clock; the sweep budget still uses real time
+FM_HOLD_REVERIFY_AGE_DAYS=14   # floored elapsed-day age at which a captain hold is re-verified against shipped reality; 0 re-verifies every hold with a non-negative age
+FM_HOLD_REVERIFY_INTERVAL=21600   # seconds between re-verification sweeps; 0 sweeps every watcher cycle, other values must be 60..604800
+FM_HOLD_REVERIFY_BUDGET_SECS=20   # 1..120 seconds allowed for a whole sweep; cut to fit FM_CHECK_TIMEOUT, and the cut is reported
+FM_HOLD_REVERIFY_PROBE_SECS=8   # 1..30 seconds allowed for one forge read
+FM_HOLD_REVERIFY_MAX_HOLDS=12   # whole holds examined per sweep; the remainder is deferred and its count disclosed
+FM_HOLD_REVERIFY_NOW=   # test override for the re-verification cadence clock; the sweep budget still uses real time
 FM_PROCEVENT_MAX_OUTPUT_BYTES=1048576   # bound on one captured process-to-event result
 FM_PROCEVENT_CLAIM_ROOT=                # machine-wide source claim root; default $XDG_STATE_HOME/firstmate/procevent-claims
 FM_PROCEVENT_OWNER_LEASE_SECONDS=600    # how long a source runner keeps going with no activity in its owning home; 1..86400

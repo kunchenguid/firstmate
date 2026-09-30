@@ -524,8 +524,16 @@ make_fake_herdr_deadly_read() {
 set -u
 if [ "\${1:-}" = pane ] && [ "\${2:-}" = get ]; then
   if [ "\${3:-}" = "$killpane" ]; then
-    read_shell=\$(sed 's/^[^)]*) //' /proc/\$PPID/stat 2>/dev/null | awk '{print \$2}')
-    kill -KILL "\$read_shell" 2>/dev/null
+    # Walk up to the endpoint read's own shell (the \`bash -c\` that sourced
+    # fm-backend.sh); the bounded-CLI wrappers add a variable number of hops.
+    read_shell=\$PPID
+    while [ -n "\$read_shell" ] && [ "\$read_shell" -gt 1 ]; do
+      if tr '\\0' ' ' < /proc/\$read_shell/cmdline 2>/dev/null | grep -q 'fm-backend\\.sh'; then
+        kill -KILL "\$read_shell" 2>/dev/null
+        break
+      fi
+      read_shell=\$(sed 's/^[^)]*) //' /proc/\$read_shell/stat 2>/dev/null | awk '{print \$2}')
+    done
     exit 0
   fi
   [ "\${3:-}" = "$live" ] && exit 0
@@ -545,7 +553,11 @@ make_fake_herdr_hanging_read() {
 #!/usr/bin/env bash
 set -u
 if [ "\${1:-}" = pane ] && [ "\${2:-}" = get ]; then
-  [ "\${3:-}" = "$hangpane" ] && sleep 300
+  if [ "\${3:-}" = "$hangpane" ]; then
+    trap 'kill \$! 2>/dev/null; exit 0' TERM INT HUP
+    sleep 300 &
+    wait \$!
+  fi
   [ "\${3:-}" = "$live" ] && exit 0
   exit 1
 fi
@@ -785,6 +797,11 @@ EOF
   # secondmates.md, captain-shared.md, and learnings.md deliberately absent
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  for _ in $(seq 1 600); do
+    [ -f "$home/state/home-summary.json" ] && break
+    sleep 0.1
+  done
 
   jq -e --arg home "$home" '
     .schema == "fm-secondmate-home-summary.v1"
@@ -1487,7 +1504,11 @@ EOF
   assert_not_contains "$out" "STARTUP TRUNCATED - SESSION START" \
     "a bounded endpoint-read hang raised the whole-digest truncation banner"
 
-  stray=$(pgrep -f "$fakebin/herdr" 2>/dev/null | wc -l | tr -d ' ')
+  for _ in $(seq 1 300); do
+    stray=$(pgrep -f "$fakebin/herdr" 2>/dev/null | wc -l | tr -d ' ')
+    [ "$stray" -eq 0 ] && break
+    sleep 0.1
+  done
   [ "$stray" -eq 0 ] || fail "the per-task read bound left $stray hung herdr process(es) behind"
 
   pass "a hung per-task endpoint read hits its configured bound, reports the task, and leaves nothing stuck"
@@ -1515,7 +1536,11 @@ EOF
   assert_contains "$out" "$(printf '\nCONTEXT\n')" \
     "a padded-zero bound cost the digest its context section"
 
-  stray=$(pgrep -f "$fakebin/herdr" 2>/dev/null | wc -l | tr -d ' ')
+  for _ in $(seq 1 300); do
+    stray=$(pgrep -f "$fakebin/herdr" 2>/dev/null | wc -l | tr -d ' ')
+    [ "$stray" -eq 0 ] && break
+    sleep 0.1
+  done
   [ "$stray" -eq 0 ] || fail "the fallback bound left $stray hung herdr process(es) behind"
 
   pass "a padded-zero per-read bound falls back to the 10s default instead of removing the bound"

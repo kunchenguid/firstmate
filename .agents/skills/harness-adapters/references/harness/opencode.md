@@ -1,6 +1,7 @@
 # OpenCode
 
 Verified on 2026-06-11 across versions 1.15.7 through 1.17.6, with busy-queue behavior re-verified on 2026-07-20 using 1.18.4.
+OpenCode 2.0.19 launch shape re-verified 2026-09-29 on this host (`fm-spawn.sh` + one live scout).
 
 ## Operating facts
 
@@ -11,8 +12,8 @@ Verified on 2026-06-11 across versions 1.15.7 through 1.17.6, with busy-queue be
 | Interrupt | Double Escape; it is known to be flaky while a long shell command runs, so use `../../../bin/fm-control.sh <task-id> relaunch` for a wedged pane. |
 | Skill invocation | No separate verified form beyond normal slash-command behavior; use natural language when the exact command is uncertain. |
 | Resume | Relaunch with `--continue` to resume the most recent session for the current directory, then send the next instruction after the TUI is ready because `--prompt` does not auto-submit alongside `--continue`. |
-| Model flag | `--model <provider/model>`. |
-| Effort flag | None for Firstmate's interactive `opencode --prompt` launch; `opencode run` has `--variant`, but that is not this path. The effort instead rides the launch's `OPENCODE_CONFIG_CONTENT` JSON as the `build` agent's `variant` keyed to the resolved model, the config schema's per-model reasoning-effort field verified on 1.18.32. It is emitted only when the resolved model's provider is known to expose that effort as a variant (`anthropic/*`: high, max; `openai/*`: low, medium, high, xhigh); with no model resolved, another provider, or an effort outside its family's list, the variant is omitted and the permission-only launch is unchanged. |
+| Model flag | OpenCode 1.x: `--model <provider/model>` on the interactive `opencode --prompt` launch. OpenCode 2.x: no top-level `--model`; the resolved model is written as a top-level `"model"` field in `OPENCODE_CONFIG_CONTENT`, and the launch adds `--standalone` so that JSON is honored off the shared background service (verified 2.0.19; `agent.build.model` is ignored on 2.0.19). |
+| Effort flag | None for Firstmate's interactive `opencode --prompt` launch; `opencode run` has `--variant`, but that is not this path. On OpenCode 1.x the effort instead rides the launch's `OPENCODE_CONFIG_CONTENT` JSON as the `build` agent's `variant` keyed to the resolved model, the config schema's per-model reasoning-effort field verified on 1.18.32. It is emitted only when the resolved model's provider is known to expose that effort as a variant (`anthropic/*`: high, max; `openai/*`: low, medium, high, xhigh); with no model resolved, another provider, or an effort outside its family's list, the variant is omitted and the permission-only launch is unchanged. On OpenCode 2.x the effort is recorded in task metadata but omitted from the launch, because `agent.build.model` is ignored there and variant honor on the interactive TUI path is unproved. |
 | Model discovery | Run `opencode models [provider]` to list available provider/model identifiers. |
 | Trust dialog | None. |
 | Marker | None; OpenCode publishes no identity marker, so `../../../bin/fm-harness.sh` identifies it from process ancestry. |
@@ -43,3 +44,15 @@ On native Windows, the operational-input adapter runs its Bash helper through `b
 
 The companion `.opencode/plugins/fm-primary-watch-arm.js` owns normal TUI watcher supervision, wakes it with `client.session.promptAsync`, and coordinates with the guard before a blind-turn follow-up.
 The PreToolUse-equivalent watcher-arm seatbelt blocks by throwing from `tool.execute.before`.
+
+## OpenCode 2.x launch verification (2026-09-29)
+
+Environment: `opencode v2.0.19`, `bin/fm-spawn.sh` on the task host.
+
+Before: `opencode --model '…' --prompt '…'` fails with `Unrecognized flag: --model in command opencode`.
+
+After: `OPENCODE_CONFIG_CONTENT='{"permission":{"*":"allow"},"model":"openrouter/stealth/space-bunny-alpha"}' opencode --standalone --prompt '…'` via `fm-spawn.sh`; one supervised scout completed a trivial brief on that model.
+
+Permission block: the same JSON with `"permission":{"*":"allow"}` auto-approves tools under `--standalone`.
+
+Version gate: when `opencode --version` reports major 1, fm-spawn keeps the 1.x shape (`--model`, no `--standalone`).

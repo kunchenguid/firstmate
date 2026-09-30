@@ -63,6 +63,8 @@
 # report, read back from the forge; a lane that deliberately holds a draft
 # declares a paused wait instead. bin/fm-pr-check.sh refuses to arm merge
 # monitoring on a draft through the same reading bin/fm-pr-merge.sh uses.
+# This file is also the one owner of the definition of done's before/after
+# evidence-pair requirement (fm_dod_evidence_pair).
 # This file is the one owner of the no-mistakes `--intent` contract: only the
 # brief's `## Captain's intent` subsection plus later captain words, never
 # `## Firstmate spec` and never the worker's own tradeoffs.
@@ -338,7 +340,7 @@ There is no pull request, no \`gh-axi\` call, and no forge CI result to report: 
 EOF
 }
 
-fm_dod_block() {  # <mode> <task-id> [branch] [<forge>]
+fm_dod_block_body() {  # <mode> <task-id> [branch] [<forge>]
   local mode=$1 id=$2 forge=${4:-none}
   local branch=${3:-fm/$id}
   fm_forge_valid_for_mode "$forge" "$mode" fm_dod_block || return 1
@@ -444,6 +446,39 @@ EOF
       echo "error: fm_dod_block: unknown delivery mode '$mode'" >&2
       return 1 ;;
   esac
+}
+
+# The before/after evidence-pair requirement of the definition of done, rendered
+# into every mode's block by fm_dod_block: any change with an observable surface
+# needs a before/after pair taken with one stated methodology, and the before is
+# captured at reproduction time. This file is its one owner.
+fm_dod_evidence_pair() {
+  cat <<'EOF'
+
+## Evidence pair (capture the before at reproduction)
+Any change with an observable surface requires a before/after pair captured with one stated methodology, and the before is captured while reproducing the defect, before any fix, when it is cheapest.
+The surface is observable when a person could see it or a number could move: a UI or rendered artifact, an API response, a measured value, or an output pair.
+State the methodology once - the tool, the exact command or URL, the data set, the environment, and any device or viewport - and apply that same methodology to both captures, so they are comparable and a measurement that is wrong in both directions cannot pass unnoticed.
+A change with no visible surface uses the same discipline with measured numbers or before/after output instead of screenshots; when nothing observable can move, say so and name what you verified instead.
+Keep the pair with the task's own deliverable - in the PR body, the delivery path's evidence location, or the task report - and never upload it to a public host.
+
+EOF
+}
+
+# fm_dod_block: the mode's block from fm_dod_block_body with the evidence pair
+# placed right under its machine-readable "Delivery contract:" line (and the
+# "Ship branch:" line that follows it, when present).
+fm_dod_block() {  # <mode> <task-id> [branch] [<forge>]
+  local body pair
+  body=$(fm_dod_block_body "$@") || return 1
+  pair=$(fm_dod_evidence_pair)
+  printf '%s\n' "$body" | awk -v pair="$pair" '
+    pending && /^Ship branch: / { print; print pair; print ""; pending = 0; next }
+    pending { print pair; print ""; pending = 0 }
+    { print }
+    /^Delivery contract: / { pending = 1 }
+    END { if (pending) { print pair; print "" } }
+  '
 }
 
 # 0 when <sha> is contained in a ref under <namespace> in <repo>.

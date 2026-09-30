@@ -185,6 +185,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/harness-adapters/references/harness/cline.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/harness-adapters/references/harness/codex.md",
       "audience": "agent-runtime"
     },
@@ -217,6 +221,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/harness-adapters/references/harness/openhands.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/harness-adapters/references/harness/opencode.md",
       "audience": "agent-runtime"
     },
@@ -226,6 +234,10 @@
     },
     {
       "path": ".agents/skills/harness-adapters/references/harness/rovo.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/human-text-discipline/SKILL.md",
       "audience": "agent-runtime"
     },
     {
@@ -473,6 +485,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/cline.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/devin.md",
       "audience": "maintainer-verification"
     },
@@ -490,6 +506,10 @@
     },
     {
       "path": "docs/verification/muse.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/openhands.md",
       "audience": "maintainer-verification"
     },
     {

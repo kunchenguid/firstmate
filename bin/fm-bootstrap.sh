@@ -20,7 +20,7 @@
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
-#                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>",
+#                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>|gap: <reason>",
 #                 "SECONDMATE_HANDOFF: secondmate <id>: pending delivery: <n> item(s)",
 #                 "FMX: X mode on ..." or "FMX: X mode off ...".
 #          When a RUNNING secondmate home is fast-forwarded, its target is
@@ -48,6 +48,11 @@
 #          fm_backend_agent_state: skipped distinguishes an existing ambiguous
 #          process, an unreadable target, and an unverified backend; respawn
 #          failed names whether the endpoint was missing or agent-less.
+#          The sweep accounts for every secondmate registered in
+#          data/secondmates.md, not only those with a state/<id>.meta record: a
+#          registered secondmate with no record, or a record with no endpoint,
+#          is relaunched from the registry, and one that cannot be recovered is
+#          named with an explicit `gap:` line rather than omitted.
 #          Already-live and successfully relaunched secondmates are silent
 #          unless FM_BOOTSTRAP_VERBOSE_FACTS=1 requests BOOTSTRAP_INFO facts.
 #          A TANGLE line means the firstmate primary checkout (FM_ROOT) is stranded
@@ -694,6 +699,39 @@ report_relaunch() {  # <id> <cause> <where>
   echo "BOOTSTRAP_INFO: secondmate $1 relaunched after $2 ($3)"
 }
 
+# Registered secondmate ids from data/secondmates.md, in file order. The
+# registry is the durable authority for WHICH secondmates exist; state/<id>.meta
+# is only the endpoint record for one that is currently running.
+secondmate_registered_ids() {  # <registry>
+  local reg=$1 line id
+  [ -f "$reg" ] && [ ! -L "$reg" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      '- '*) ;;
+      *) continue ;;
+    esac
+    id=${line#- }
+    id=${id%% *}
+    case "$id" in '' | *[!A-Za-z0-9._-]*) continue ;; esac
+    printf '%s\n' "$id"
+  done < "$reg"
+}
+
+# Every id the sweep must account for: registered secondmates first, then any
+# kind=secondmate endpoint record not already covered. The caller deduplicates,
+# so a running registered secondmate is probed exactly once.
+secondmate_liveness_ids() {  # <state> <registry>
+  local state=$1 registry=$2 meta id
+  secondmate_registered_ids "$registry"
+  [ -d "$state" ] || return 0
+  for meta in "$state"/*.meta; do
+    [ -f "$meta" ] || continue
+    grep -q '^kind=secondmate$' "$meta" 2>/dev/null || continue
+    id=$(basename "$meta" .meta)
+    printf '%s\n' "$id"
+  done
+}
+
 secondmate_liveness_sweep() {
   # Idempotent secondmate liveness guarantee at session start; the watcher's
   # secondmate_liveness_tick owns the same guarantee mid-session. The detailed
@@ -703,40 +741,65 @@ secondmate_liveness_sweep() {
   # existing ambiguous processes and every transiently unreadable target while
   # adding the missing-session path the original bare-shell and Herdr-husk sweep
   # lacked.
-  # A meta with no window remains owned by secondmate-provisioning recovery.
-  # Secondmate homes never contain kind=secondmate meta, so this is naturally a
-  # primary-only no-op there. The probe/relaunch mechanics live in
-  # bin/fm-secondmate-liveness-lib.sh; this sweep keeps the reporting.
+  # Every REGISTERED secondmate is accounted for: the walk covers
+  # data/secondmates.md plus state/<id>.meta, so a secondmate whose record is
+  # missing or has no endpoint is relaunched from its registry entry
+  # (secondmate_liveness_recover_from_registry); one that cannot be recovered
+  # is named as an explicit `gap:` line rather than omitted.
+  # Secondmate homes never contain kind=secondmate meta AND never register
+  # secondmates, so this is naturally a primary-only no-op there. The
+  # probe/relaunch mechanics live in bin/fm-secondmate-liveness-lib.sh; this
+  # sweep keeps the reporting.
   [ -d "$STATE" ] || return 0
-  local meta id remote_host label __fm_timing_stamp parallel=0
+  local meta id remote_host label parallel=0
   SECONDMATE_RESPAWNED_IDS=""
   if bootstrap_parallel_begin; then
     parallel=1
   fi
-  for meta in "$STATE"/*.meta; do
-    [ -f "$meta" ] || continue
-    grep -q '^kind=secondmate$' "$meta" 2>/dev/null || continue
-    # Identity for the timing record is read here, in the loop, so the per-meta
-    # body below keeps its single-exit-per-outcome shape.
-    id=$(basename "$meta" .meta)
-    remote_host=$(fm_meta_get "$meta" remote_host)
-    label=$id
-    [ -z "$remote_host" ] || label="$id@$remote_host"
-    if [ "$parallel" -eq 1 ]; then
-      bootstrap_parallel_spawn secondmate_liveness_one_timed "$meta" "$id" "$label"
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    meta="$STATE/$id.meta"
+    if [ -f "$meta" ]; then
+      grep -q '^kind=secondmate$' "$meta" 2>/dev/null || meta=
     else
-      secondmate_liveness_one_timed "$meta" "$id" "$label"
+      meta=
     fi
-  done
+    label=$id
+    if [ -n "$meta" ]; then
+      remote_host=$(fm_meta_get "$meta" remote_host)
+      [ -z "$remote_host" ] || label="$id@$remote_host"
+    fi
+    if [ "$parallel" -eq 1 ]; then
+      bootstrap_parallel_spawn secondmate_liveness_one_timed "$id" "$meta" "$label"
+    else
+      secondmate_liveness_one_timed "$id" "$meta" "$label"
+    fi
+  done < <(secondmate_liveness_ids "$STATE" "$DATA/secondmates.md" | awk '!seen[$0]++')
   [ "$parallel" -eq 0 ] || bootstrap_parallel_finish
   return 0
 }
 
-secondmate_liveness_one_timed() {  # <meta> <id> <label>
-  local meta=$1 id=$2 label=$3 __fm_timing_stamp
+secondmate_liveness_one_timed() {  # <id> <meta|empty> <label>
+  local id=$1 meta=$2 label=$3 __fm_timing_stamp
   __fm_timing_stamp=$(fm_timing_now_ms)
   secondmate_liveness_one "$meta" "$id"
   fm_timing_record secondmate liveness "$__fm_timing_stamp" "$label"
+}
+
+# Relaunch a registered secondmate whose endpoint record is missing or
+# incomplete, from the durable registry entry and its persistent home. Success is
+# silent by default (a BOOTSTRAP_INFO fact under FM_BOOTSTRAP_VERBOSE_FACTS); a
+# refusal is an explicit named gap so the secondmate is never quietly omitted.
+secondmate_liveness_recover_from_registry() {  # <id> <cause>
+  local id=$1 cause=$2 out reason
+  if out=$(FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "$id" --secondmate 2>&1); then
+    secondmate_note_respawned "$id"
+    report_relaunch "$id" "$cause" "registry"
+  else
+    reason=$(printf '%s\n' "$out" | awk '/error:/ { print; exit }')
+    [ -n "$reason" ] || reason=$(first_line "$out")
+    echo "SECONDMATE_LIVENESS: secondmate $id: gap: $cause and relaunch from registry failed: $reason"
+  fi
 }
 
 # One secondmate's liveness check. Split out of the sweep so each is individually
@@ -745,10 +808,23 @@ secondmate_liveness_one_timed() {  # <meta> <id> <label>
 # secondmate_note_respawned so a concurrent sweep can collect them after wait.
 # Probe classification, kill, and spawn live in fm-secondmate-liveness-lib.sh;
 # this function keeps this sweep's exact reporting.
-secondmate_liveness_one() {  # <meta> <id>
+secondmate_liveness_one() {  # <meta|empty> <id>
   local meta=$1 id=$2
   if ! fm_secondmate_liveness_lock "$id"; then
     echo "SECONDMATE_LIVENESS: secondmate $id: skipped: another liveness check is already in progress"
+    return 0
+  fi
+  # A registered secondmate with no record, or a local record with no endpoint,
+  # has nothing for the probe to classify; it is relaunched from its registry
+  # entry rather than passed over.
+  if [ -z "$meta" ]; then
+    secondmate_liveness_recover_from_registry "$id" "no task record"
+    fm_secondmate_liveness_unlock "$id"
+    return 0
+  fi
+  if [ -z "$(fm_meta_get "$meta" window)" ] && [ -z "$(fm_meta_get "$meta" remote_host)" ]; then
+    secondmate_liveness_recover_from_registry "$id" "task record has no recorded endpoint"
+    fm_secondmate_liveness_unlock "$id"
     return 0
   fi
   fm_secondmate_liveness_probe "$meta" "$id" full
@@ -1064,11 +1140,23 @@ crew_dispatch_validate() {
   if $typed_active; then
     verified_harnesses=$(fm_control_harnesses | jq -Rsc 'split("\n") | map(select(length > 0))')
   else
-    verified_harnesses='["claude","codex","opencode","pi","pi-signed","grok","kimi","cursor","agy","muse","rovo","omp","devin"]'
+    verified_harnesses='["claude","codex","opencode","pi","pi-signed","grok","kimi","cursor","agy","muse","rovo","omp","devin","cline","openhands"]'
   fi
   err=$(jq -r --argjson typed "$typed_active" --argjson verified_harnesses "$verified_harnesses" --arg provider_re "$FM_QUOTA_PROVIDER_ID_RE" '
     def verified($h): $verified_harnesses | index($h);
     def provider_id($p): ($p | type) == "string" and ($p | test($provider_re));
+    # providerCaps (docs/configuration.md "Crew dispatch profiles") bounds the
+    # live lanes one billing provider may carry; fm-provider-lib.sh enforces it
+    # at spawn. An invalid declaration must fail loudly here rather than be
+    # silently ignored, so every value must be a whole number of at least one
+    # and every key a provider id or the reserved `default`.
+    def provider_caps_bad:
+      (.providerCaps // null) as $c
+      | $c != null and (
+          ($c | type) != "object"
+          or ([$c | keys[] | select(. != "default") | select(test($provider_re) | not)] | length > 0)
+          or ([$c[] | select((type != "number") or (. < 1) or (. != (. | floor)))] | length > 0)
+        );
     def effort_ok($h; $m; $e):
       if $e == null then true
       elif ($e | type) != "string" then false
@@ -1077,10 +1165,11 @@ crew_dispatch_validate() {
       elif $h == "codex" then ((["low","medium","high","xhigh"] | index($e)) != null or ($e == "max" and $m == "gpt-5.6-luna"))
       elif $h == "grok" then (["low","medium","high"] | index($e))
       elif $h == "agy" then (["low","medium","high"] | index($e))
+      elif $h == "cline" then (["low","medium","high","xhigh"] | index($e))
       elif $h == "pi" or $h == "pi-signed" or $h == "omp" then (["low","medium","high","xhigh","max"] | index($e))
       elif $h == "muse" then (["low","medium","high","xhigh","max"] | index($e))
       elif $h == "rovo" then (["low","medium","high","max"] | index($e))
-      elif $h == "opencode" or $h == "kimi" or $h == "cursor" then false
+      elif $h == "opencode" or $h == "kimi" or $h == "cursor" or $h == "openhands" then false
       else true
       end;
     def profiles($value):
@@ -1118,6 +1207,7 @@ crew_dispatch_validate() {
       | unique;
     if type != "object" then "top-level value must be an object"
     elif has("rules") and (.rules | type) != "array" then "rules must be an array"
+    elif provider_caps_bad then "providerCaps must map each provider id (or default) to a positive integer"
     elif [(.rules // [])[]? | select(type != "object")] | length > 0 then "each rule must be an object"
     elif [(.rules // [])[]? | select((.when? | type) != "string" or (.when | length) == 0)] | length > 0 then "each rule needs non-empty when"
     elif [(.rules // [])[]? | select((.use? | type) != "object" and (.use? | type) != "array")] | length > 0 then "each rule needs use"

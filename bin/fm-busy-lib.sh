@@ -36,6 +36,9 @@
 #                    cancellation emits no Stop, so control invalidates to unknown.
 #   gemini-hook      Gemini agent hooks (BeforeAgent opens; AfterAgent and
 #                    SessionEnd close)
+#   cline-hook       Cline workspace hook config files (.cline/hooks):
+#                    TaskStart opens a turn; TaskComplete, TaskCancel,
+#                    TaskError, and SessionShutdown all close it
 #   codex-hook, codex-appserver  reserved: Codex, gated by
 #                    fm_busy_codex_semantic_source
 #   kimi-wire, kimi-hook  reserved: standalone Kimi, gated by fm_busy_kimi_verified
@@ -45,11 +48,11 @@
 #                    unknown invalidation fm-control writes after a Devin interrupt
 #   fm-recovery      a documented recovery reset after relaunch
 # Classifier-only sources (never written into a record):
-#   endpoint-gone, herdr-native, grok-regex, rovo-regex, agy-regex, muse-session-log,
-#   cursor-transcript, missing, malformed, gen-mismatch, source-mismatch,
+#   endpoint-gone, herdr-native, grok-regex, rovo-regex, agy-regex, openhands-regex, muse-session-log,
+#   cursor-transcript, quota-wall, missing, malformed, gen-mismatch, source-mismatch,
 #   kimi-unverified, codex-unverified, capture-failed, no-target, launch-prompt
 #
-# Classification (fm_busy_classify): busy | idle | unknown | dead, always
+# Classification (fm_busy_classify): busy | idle | unknown | dead | quota, always
 # with the producing source as the second token. Precedence:
 #   1. dead endpoint (fm_busy_classify_live only) -> dead endpoint-gone
 #   2. standalone Kimi before verification       -> unknown kimi-unverified
@@ -69,9 +72,11 @@
 #   4. no record at all: herdr's native busy verdict is trusted as busy
 #      (generation state is sufficient for busy, not for idle), then the
 #      muse session-log and cursor transcript pull sources, then the
-#      Grok/Rovo/AGY temporary regex fallbacks classify a grok, rovo, or agy
-#      task from its rendered tail, then unknown missing
+#      Grok/Rovo/AGY/OpenHands temporary regex fallbacks classify a grok, rovo,
+#      agy, or openhands task from its rendered tail, then unknown missing
 #   5. malformed, stale, or untrusted records -> unknown, never a fallback
+#   6. any busy verdict over a rendered provider quota wall -> quota quota-wall
+#      (the wall section below owns the two-signal rule)
 #
 # fm_busy_launch_prompt_parked (the launch-prompt classifier-only source): a
 # launch whose busy record never advanced past the fm-spawn seed is
@@ -89,13 +94,18 @@
 # a real busy verdict once any hook has posted, and it defers to whatever
 # harness-specific trust pre-registration already exists (fm-claude-trust.sh,
 # GEMINI_CLI_TRUST_WORKSPACE) to stop the dialog from appearing at all.
-# Apart from the launch-prompt backstop above, Grok, Rovo, and AGY are the ONLY
-# rendered-text busy fallbacks that survive the redesign, because none of their
-# structured lifecycles was credited-live-verified
+# Apart from the launch-prompt backstop above, Grok, Rovo, AGY, and OpenHands are
+# the ONLY per-harness rendered-text busy sources that survive the redesign,
+# because none of their structured lifecycles was credited-live-verified
 # in the approved audit (Rovo's clean ACP stopReason lives outside the TUI
 # path firstmate drives, see references/harness/rovo.md; agy 1.2.0 exposes no
-# hook surface at all, see references/harness/agy.md); each is scoped to
-# its own harness= and can never classify another adapter. The delivery
+# hook surface at all, see references/harness/agy.md; OpenHands CLI 1.16.0
+# exposes none firstmate can write, see references/harness/openhands.md); each
+# is scoped to its own harness= and can never classify another adapter.
+# The quota wall is the one cross-harness rendered override: it never invents a
+# verdict from a rendered surface alone, it only DOWNGRADES an already-busy
+# semantic verdict to quota, so a missing or misread signal leaves the semantic
+# verdict intact. The delivery
 # guards in bin/fm-composer-lib.sh match rendered footers for submit
 # acknowledgement and away-mode supervisor injection only; neither is a
 # recorded worker state source.
@@ -231,6 +241,7 @@ fm_busy_sources_for_harness() {  # <harness>
       ;;
     opencode*) adapter=opencode-plugin ;;
     gemini*) adapter=gemini-hook ;;
+    cline*) adapter=cline-hook ;;
     devin) adapter=devin-hook ;;
     pi|pi-signed) adapter=pi-ext ;;
     omp) adapter=omp-ext ;;
@@ -901,6 +912,67 @@ fm_busy_agy_tail_busy() {
     | grep -qiE 'esc[[:space:]]+to[[:space:]]+cancel'
 }
 
+# ---------------------------------------------------------------------------
+# Provider quota / usage wall
+#
+# A worker parked on a provider quota wall is the one case where a live,
+# painting harness is NOT advancing: the retry modal keeps the process and the
+# TUI busy while the submitted turn cannot run. The measured fleet incident
+# (workers on one provider, all stopped at the same weekly limit) had every one
+# of them classified busy from its semantic record and reported working, so the
+# wall must override the semantic busy verdict.
+#
+# The signal is rendered and provider-specific, so it is deliberately built
+# from TWO independent wall-phrase families and requires both:
+#   limit - the wall names a spent usage/rate/quota limit
+#   wait  - the wall names a scheduled retry or reset/backoff
+# A single vendor string therefore cannot carry the verdict, and the phrases are
+# wall-shaped rather than bare words (`quota`, `retry`) so a worker writing or
+# discussing a quota-retry feature does not match. The check is scoped to the
+# last few non-empty lines, where a blocking modal renders in the harness
+# chrome the composer otherwise occupies, so scrollback output is never
+# mistaken for a wall.
+FM_BUSY_QUOTA_LIMIT_RE='(usage|rate)[ -]?limit|quota (exceed|exhaust|reached|limit)|exhausted (your )?(capacity|quota)|too many requests|out of (credits|quota)'
+FM_BUSY_QUOTA_WAIT_RE='retry(ing)? (in|after)|will reset|resets? (in|at|after)|try again|attempt #[0-9]|get more access|upgrade your plan'
+
+# fm_busy_quota_tail_wall: consumes a rendered tail on stdin; 0 when the tail
+# shows a provider quota wall (both families present within the bounded tail).
+fm_busy_quota_tail_wall() {
+  local tail
+  tail=$(grep -v '^[[:space:]]*$' | tail -6)
+  [ -n "$tail" ] || return 1
+  printf '%s\n' "$tail" | grep -qiE "$FM_BUSY_QUOTA_LIMIT_RE" || return 1
+  printf '%s\n' "$tail" | grep -qiE "$FM_BUSY_QUOTA_WAIT_RE" || return 1
+  return 0
+}
+
+# fm_busy_quota_wall_verdict: 0 when a busy pane's captured tail shows a quota
+# wall. Captures the pane itself when the caller passed no tail, bounded by
+# fm_backend_capture; every other outcome is a no, never a false wall.
+fm_busy_quota_wall_verdict() {  # <backend> <target> [tail]
+  local backend=$1 target=$2 tail=${3-}
+  if [ -z "$tail" ]; then
+    command -v fm_backend_capture >/dev/null 2>&1 || return 1
+    tail=$(fm_backend_capture "$backend" "$target" 40 2>/dev/null) || return 1
+  fi
+  [ -n "$tail" ] || return 1
+  printf '%s' "$tail" | fm_busy_quota_tail_wall
+}
+
+# fm_busy_openhands_tail_busy: the OpenHands-only temporary rendered-tail
+# fallback. Consumes the tail on stdin; 0 when OpenHands's verified busy
+# signature matches: the `ESC: pause` token in the working status line the TUI
+# pins above the composer while a turn runs (verified live on CLI 1.16.0; the
+# idle status line is blank). The word `Working` beside it is deliberately
+# NOT matched: Pi already owns that word. openhands exposes no firstmate-owned
+# hook writer, so this fallback is the only pane-side source; it is never
+# armed as a semantic writer (fm_busy_sources_for_harness trusts nothing for
+# openhands).
+fm_busy_openhands_tail_busy() {
+  grep -v '^[[:space:]]*$' | tail -12 \
+    | grep -qE 'ESC: pause'
+}
+
 # --- launch-prompt signatures (fm_busy_launch_prompt_parked) ----------------
 #
 # Each function consumes a captured pane tail on stdin (the caller's whole
@@ -1008,16 +1080,17 @@ fm_busy_launch_prompt_parked() {  # <harness>
   esac
 }
 
-# fm_busy_classify: semantic classification for a task whose endpoint the
+# fm_busy_classify_raw: semantic classification for a task whose endpoint the
 # caller has already established as present. Prints "<verdict> <source>":
-# busy|idle|unknown plus the producing source (see header). Never probes
+# busy|idle|unknown|quota plus the producing source (see header). Never probes
 # process state. <tail40> is optional pre-captured plain output: the grok,
-# rovo, and agy arms capture it themselves through fm_backend_capture when it
-# is absent (or report unknown capture-failed if that is unavailable too),
-# while the launch-prompt backstop below has no capture fallback of its own -
-# without a supplied tail40 it is skipped entirely and a record still pinned
-# at the fm-spawn seed keeps reading busy fm-spawn, unchanged.
-fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
+# rovo, agy, and openhands arms capture it themselves through fm_backend_capture
+# when it is absent (or report unknown capture-failed if that is unavailable
+# too), while the launch-prompt backstop below has no capture fallback of its
+# own - without a supplied tail40 it is skipped entirely and a record still
+# pinned at the fm-spawn seed keeps reading busy fm-spawn, unchanged. The public
+# fm_busy_classify wrapper below adds the quota-wall override to this verdict.
+fm_busy_classify_raw() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
   local backend=$1 target=$2 harness=$3 id=$4 state=$5 tail40=${6-}
   local out rc r_state r_source native log
   case "$harness" in
@@ -1165,8 +1238,42 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
       fi
       return 0
       ;;
+    openhands)
+      if [ -z "$tail40" ]; then
+        if command -v fm_backend_capture >/dev/null 2>&1; then
+          tail40=$(fm_backend_capture "$backend" "$target" 40 2>/dev/null) || {
+            printf 'unknown capture-failed'
+            return 0
+          }
+        else
+          printf 'unknown capture-failed'
+          return 0
+        fi
+      fi
+      if printf '%s' "$tail40" | fm_busy_openhands_tail_busy; then
+        printf 'busy openhands-regex'
+      else
+        printf 'unknown openhands-regex'
+      fi
+      return 0
+      ;;
   esac
   printf 'unknown missing'
+}
+
+# fm_busy_classify (public): fm_busy_classify_raw plus the one rendered
+# override - a semantic busy verdict over a provider quota retry modal is not
+# advancing, so it reports `quota` instead of busy. Every other verdict passes
+# through unchanged.
+fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
+  local backend=$1 target=$2 verdict tail40=${6-}
+  verdict=$(fm_busy_classify_raw "$@")
+  if [ "${verdict%% *}" = busy ] \
+    && fm_busy_quota_wall_verdict "$backend" "$target" "$tail40"; then
+    printf 'quota quota-wall'
+    return 0
+  fi
+  printf '%s' "$verdict"
 }
 
 # fm_busy_classify_live: fm_busy_classify behind the one process-level
@@ -1205,9 +1312,9 @@ fm_busy_classify_meta() {  # <meta-file> <id> <state-dir> [tail40]
 
 # fm_busy_is_busy: boolean view for callers that only gate on provable
 # activity. 0 iff the classification verdict is exactly busy; idle, unknown,
-# and dead all return 1, so an unknown can never be silently promoted to
-# either boolean pole - callers that must distinguish idle from unknown read
-# the full classification instead.
+# dead, and quota all return 1, so an unknown or a quota-parked worker can
+# never be silently promoted to working - callers that must distinguish idle
+# from unknown or quota read the full classification instead.
 fm_busy_is_busy() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
   local verdict
   verdict=$(fm_busy_classify "$@")

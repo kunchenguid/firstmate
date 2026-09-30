@@ -385,7 +385,7 @@ fm_task_inbox_due_action() {  # <state-dir> <task-id>
   count=0
   last=0
   ladder=$(cat "$dir/.ring-state" 2>/dev/null || true)
-  IFS=$(printf '\t') read -r rec_base count last <<EOF
+  IFS=$'\t' read -r rec_base count last <<EOF
 $ladder
 EOF
   if [ -n "$rec_base" ] && [ "$rec_base" != "$base" ]; then
@@ -429,7 +429,7 @@ fm_task_inbox_record_ring() {  # <state-dir> <task-id> <record-path>
   base=${3##*/}
   count=0
   ladder=$(cat "$dir/.ring-state" 2>/dev/null || true)
-  IFS=$(printf '\t') read -r rec_base count last <<EOF
+  IFS=$'\t' read -r rec_base count last <<EOF
 $ladder
 EOF
   [ "$rec_base" = "$base" ] || count=0

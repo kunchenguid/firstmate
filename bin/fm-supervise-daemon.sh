@@ -647,7 +647,7 @@ mark_status_seen() {  # <state> <task> <captured-end-offset> <captured-identity>
 mark_escalated_seen() {  # <state> <captured-endpoint-file>
   local state=$1 capture=$2 task endpoint ident rc=0
   [ -f "$capture" ] || return 1
-  while IFS=$(printf '\t') read -r task endpoint ident; do
+  while IFS=$'\t' read -r task endpoint ident; do
     [ -n "$task" ] || continue
     if [ "$task" = ERROR ]; then
       status_presentation_marker_report "$(_seen_status_path "$state" "$endpoint")" "$ident" || rc=1

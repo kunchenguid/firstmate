@@ -391,6 +391,13 @@ case "$QUEUED_LIMIT" in ''|*[!0-9]*|0) QUEUED_LIMIT=20 ;; esac
 ENDPOINT_TIMEOUT=${FM_SESSION_START_ENDPOINT_TIMEOUT:-10}
 case "$ENDPOINT_TIMEOUT" in ''|*[!0-9]*) ENDPOINT_TIMEOUT=10 ;; esac
 [ "$ENDPOINT_TIMEOUT" -gt 0 ] 2>/dev/null || ENDPOINT_TIMEOUT=10
+ENDPOINT_HERDR_TIMEOUT=$ENDPOINT_TIMEOUT
+case "${FM_BACKEND_HERDR_CLI_TIMEOUT:-}" in
+  ''|*[!0-9]*) ;;
+  *) if [ "$FM_BACKEND_HERDR_CLI_TIMEOUT" -gt 0 ] && [ "$FM_BACKEND_HERDR_CLI_TIMEOUT" -lt "$ENDPOINT_TIMEOUT" ]; then
+       ENDPOINT_HERDR_TIMEOUT=$FM_BACKEND_HERDR_CLI_TIMEOUT
+     fi ;;
+esac
 BACKLOG_FIELDS=blocked_by,hold_kind,hold_reason
 
 RULE='================================================================================'
@@ -581,7 +588,10 @@ print_status_tail() {
 fm_session_start_endpoint_read() {  # <backend> <target> [expected-label]
   local backend=$1 target=$2 label=${3:-}
   # shellcheck disable=SC2016  # Positional parameters expand inside the child bash, not here.
-  fm_run_timed "$ENDPOINT_TIMEOUT" bash -c '
+  # The backend CLI keeps its own process group under its own bound; cap it at
+  # this read's bound so the outer kill cannot strand a hung CLI for the
+  # adapter's default 10s.
+  FM_BACKEND_HERDR_CLI_TIMEOUT=$ENDPOINT_HERDR_TIMEOUT fm_run_timed "$ENDPOINT_TIMEOUT" bash -c '
     . "$1"
     fm_backend_target_exists "$2" "$3" "$4"
   ' _ "$SCRIPT_DIR/fm-backend.sh" "$backend" "$target" "$label"
@@ -708,9 +718,18 @@ if [ "$READ_ONLY" -eq 0 ]; then
   fm_trace_context_session_start "$CONFIG" "$STATE/.trace-context-effective"
   # A full locked start publishes this home's current structured summary.
   # Publication is side-band and best-effort, so it can never change the
-  # session-start result. A context re-emit is not another session start.
+  # session-start result. The refresh is a fleet-wide per-task read, so it is
+  # detached the way the deferred network stage is (stdio off the digest's
+  # pipe, nohup, its own process group): neither the harness reading this
+  # output nor the digest's runtime bound waits on it, and a digest truncated
+  # by that bound still publishes. A context re-emit is not another session
+  # start.
   if [ "$REEMIT" -eq 0 ]; then
-    "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
+    (
+      set -m 2>/dev/null || true
+      nohup "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort \
+        >/dev/null 2>&1 </dev/null &
+    ) || true
   fi
   # Every network call and the potentially slow inactive-outcome startup scan
   # are launched HERE, detached and bounded, so they run concurrently with the

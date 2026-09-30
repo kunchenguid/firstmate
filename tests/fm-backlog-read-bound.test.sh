@@ -369,7 +369,11 @@ E2E_HOME="$E2E/home"
 E2E_FAKEBIN="$E2E/fakebin"
 mkdir -p "$E2E_HOME/state" "$E2E_HOME/data" "$E2E_HOME/config" "$E2E_FAKEBIN"
 git init -q -b main "$E2E_ROOT"
-git -C "$E2E_ROOT" commit -q --allow-empty -m init
+# A CI runner carries no global git identity, so an unconfigured commit there
+# dies with "empty ident name" and the digest this half asserts on never runs.
+# Pin the identity the same way tests/fm-backlog-atomicity.test.sh does.
+git -C "$E2E_ROOT" -c user.name=fmtest -c user.email=fmtest@example.invalid \
+  commit -q --allow-empty -m init
 
 make_hanging_tasks_axi "$E2E_FAKEBIN"
 # The reconcile sweep this half asserts on runs only under a verified fleet

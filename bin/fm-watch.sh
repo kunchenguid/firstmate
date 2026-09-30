@@ -57,7 +57,11 @@
 #                          not a wedge and is reported ONCE instead of escalating
 #                          on that cadence forever (wedge_dead_record); only the
 #                          two recovery-grade verdicts license it, and every other
-#                          verdict escalates unchanged.
+#                          verdict escalates unchanged. A later redrawn dead
+#                          display is absorbed against that once-record
+#                          (dead_endpoint_absorb), so a husk cannot re-alarm on
+#                          pane churn, while a relaunched agent re-arms the
+#                          incarnation and is probed and reported afresh.
 #                          A genuinely busy pane
 #                          (window_is_busy true) is exempt from the above, but
 #                          only up to BUSY_TURN_MAX_SECS with no completed turn
@@ -960,7 +964,7 @@ secondmate_wake_stall_tick() {
       fi
       continue
     fi
-    IFS=$(printf '\t') read -r epoch seq _row_kind _row_key _row_payload <<EOF
+    IFS=$'\t' read -r epoch seq _row_kind _row_key _row_payload <<EOF
 $row
 EOF
     case "$epoch" in ''|*[!0-9]*) continue ;; esac
@@ -1475,6 +1479,41 @@ wedge_dead_record() {  # <window> <since-file> <triage-label> <idle-age> <pane-h
   printf '%s %s' "$agent_state" "$id" > "$marker"
   clear_write_tracking "$key"
   wake "$reason"
+}
+
+# A pane whose endpoint a prior threshold already reported dead must not wake
+# again just because its dead display changed. wedge_dead_record writes
+# .dead-reported-<key> only from the wedge timer, which runs on a STABLE hash;
+# a husk whose display redraws (a shell prompt, a process-exited banner) enters
+# surface_nonterminal_stale on the next stable hash instead, re-alarming
+# firstmate for a record already known dead. This consults that marker and
+# absorbs the new display, comparing the SAME incarnation discriminator
+# wedge_dead_record wrote: the task's busy gen when readable, else the pane hash.
+# A relaunched agent re-arms the gen, so the marker no longer matches and the
+# normal path re-probes and re-reports; a hash-fallback marker never matches a
+# changed hash, so an incarnation that cannot be named keeps the unchanged
+# behavior. No backend probe is added: the marker already records a threshold
+# read, and an agent that resumed makes itself known through the busy verdict
+# the caller checks before calling this. Returns 0 to absorb, 1 otherwise.
+dead_endpoint_absorb() {  # <window> <task> <hash> <label>
+  local win=$1 task=$2 hash=$3 label=$4 key marker recorded verdict id gen
+  key=$(window_key "$win")
+  marker="$STATE/.dead-reported-$key"
+  [ -s "$marker" ] || return 1
+  recorded=$(cat "$marker" 2>/dev/null || true)
+  verdict=${recorded%% *}
+  id=${recorded#* }
+  case "$verdict" in
+    dead|missing) ;;
+    *) rm -f "$marker"; return 1 ;;
+  esac
+  if gen=$(fm_busy_current_gen "$STATE" "$task"); then
+    [ "$id" = "$gen" ] || return 1
+  else
+    [ "$id" = "$hash" ] || return 1
+  fi
+  triage_log "absorbed $label (endpoint $verdict already reported, incarnation $id): $win"
+  return 0
 }
 
 # Repeat-poll wedge-timer bookkeeping for an already-classified stale hash
@@ -2211,7 +2250,7 @@ signal_files_actionable() {  # <status-file> ...
 # re-surfaced by the next heartbeat.
 mark_all_captain_relevant_surfaced() {
   local f endpoint ident rc=0
-  while IFS=$(printf '\t') read -r f endpoint ident; do
+  while IFS=$'\t' read -r f endpoint ident; do
     [ -n "$f" ] || continue
     if [ "$endpoint" = ERROR ]; then
       mark_surface_reported "$f" "$ident" || rc=1
@@ -2854,7 +2893,7 @@ EOF
     # path. Publication failure stays side-band.
     home_summary_refresh_detached
     files=""
-    while IFS=$(printf '\t') read -r sf sig f; do
+    while IFS=$'\t' read -r sf sig f; do
       [ -n "$sf" ] || continue
       case " $files " in *" $f "*) ;; *) files="$files $f" ;; esac
     done <<EOF
@@ -2902,7 +2941,7 @@ EOF
     # shellcheck disable=SC2086  # same space-separated status-path list
     if afk_present || [ "$signal_actionable" -eq 0 ] \
       || { ! signal_crew_provably_working $files && ! signal_turnend_panes_churned $files; }; then
-      while IFS=$(printf '\t') read -r sf sig f; do
+      while IFS=$'\t' read -r sf sig f; do
         [ -n "$sf" ] || continue
         file_reason="$reason"
         case " $FM_SIGNAL_NEEDS_DECISION_FILES " in *" $f "*) file_reason="needs-decision:$files" ;; esac
@@ -2915,7 +2954,7 @@ EOF
       # what bounds an unreadable log to one report per distinct file state. Only
       # a SUCCESSFULLY classified log commits a classification position below, so
       # an unreadable log's content is still classified once it becomes readable.
-      while IFS=$(printf '\t') read -r sf sig f; do
+      while IFS=$'\t' read -r sf sig f; do
         [ -n "$sf" ] || continue
         case "$f" in
           *.status)
@@ -2927,7 +2966,7 @@ EOF
       done <<EOF
 $pending
 EOF
-      while IFS=$(printf '\t') read -r f surface_end surface_ident; do
+      while IFS=$'\t' read -r f surface_end surface_ident; do
         [ -n "$f" ] || continue
         fm_wake_status_seen_commit "$STATE" "$f" "$surface_end" "$surface_ident" || true
         mark_surfaced "$f" "$surface_end" "$surface_ident"
@@ -2936,14 +2975,14 @@ $FM_SIGNAL_SURFACE_ENDPOINTS
 EOF
       wake "$reason"
     else
-      while IFS=$(printf '\t') read -r sf sig f; do
+      while IFS=$'\t' read -r sf sig f; do
         [ -n "$sf" ] || continue
         case "$f" in *.status) ;; *) printf '%s' "$sig" > "$sf" ;; esac
       done <<EOF
 $pending
 EOF
       signal_commit_error=0
-      while IFS=$(printf '\t') read -r f surface_end surface_ident; do
+      while IFS=$'\t' read -r f surface_end surface_ident; do
         [ -n "$f" ] || continue
         fm_wake_status_seen_commit "$STATE" "$f" "$surface_end" "$surface_ident" \
           || signal_commit_error=1
@@ -2951,7 +2990,7 @@ EOF
 $FM_SIGNAL_SURFACE_ENDPOINTS
 EOF
       if [ "$signal_commit_error" -ne 0 ]; then
-        while IFS=$(printf '\t') read -r sf sig f; do
+        while IFS=$'\t' read -r sf sig f; do
           [ -n "$sf" ] || continue
           fm_wake_append signal "$(basename "$f")" "$reason" || exit 1
         done <<EOF
@@ -3004,6 +3043,20 @@ EOF
     # content cannot suppress stale detection. Read once per window per poll and
     # reused below so a busy verdict is consistent within one cycle.
     if window_is_busy "$w" "$tail40"; then busy_now=0; else busy_now=1; fi
+    # A window already reported dead absorbs a CHANGED display before any
+    # downstream surface path (surface_nonterminal_stale, paused, wedge) can
+    # re-alarm on the new hash, but only while it reads idle: a busy pane is a
+    # worker that came back, never a dead husk. An unchanged hash keeps the
+    # ordinary path, which already owns the dead-record once-report.
+    if [ "$h" != "$prev" ] && [ "$busy_now" -ne 0 ] \
+       && dead_endpoint_absorb "$w" "$task" "$h" "stale (endpoint already reported dead)"; then
+      printf '%s' "$h" > "$hf"
+      echo 0 > "$cf"
+      printf '%s' "$h" > "$sf"
+      rm -f "$ssf" "$ewf"
+      clear_write_tracking "$key"
+      continue
+    fi
     if [ "$h" = "$prev" ]; then
       n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
       echo "$n" > "$cf"

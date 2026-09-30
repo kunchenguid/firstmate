@@ -95,17 +95,19 @@
 # name a slot a DIFFERENT live task now holds. Cleanup kills every process under
 # that path and hard-resets it before returning it, so releasing a slot that is
 # not genuinely this task's destroys another worker's live work. Before the first
-# cleanup step, teardown verifies record exclusivity: no OTHER task record in
-# this home or any locally registered Firstmate home may name the same live path
-# in its worktree= or home=. One live path with two task records is the reuse
-# collision itself, whichever record is stale.
+# cleanup step, teardown reads the slot's owner claim. A claim naming
+# another task proves reassignment and skips every slot step. Otherwise teardown
+# verifies record exclusivity: no OTHER task record in this home or any locally
+# registered Firstmate home may name the same live path in its worktree= or
+# home=. For a slot with this task's claim or no claim, two records naming one
+# live path remain a refusal, whichever record is stale.
 # That scan alone cannot prove THIS record is the current owner, because the task
 # that took the slot next may leave no record it can reach - its own worker may
 # have exited and its record been cleaned up, or it may live in a home this
 # machine does not register - which is how a released-then-reassigned slot was
-# returned out from under a live worker (observed 2026-09-07). So teardown also
-# reads the slot's own owner claim, written by bin/fm-spawn.sh at the moment the
-# slot is taken and dropped here once it is genuinely returned; bin/fm-wake-lib.sh
+# returned out from under a live worker (observed 2026-09-07). Bin/fm-spawn.sh
+# writes the slot's owner claim when the slot is taken, and teardown drops it
+# once the slot is genuinely returned; bin/fm-wake-lib.sh
 # owns the claim, its location, and its states. A claim naming another task is
 # proof of reassignment: the slot is no longer this task's, so teardown warns,
 # names the claimant, and then finishes only this task's own cleanup - endpoint,
@@ -203,6 +205,13 @@
 #   landed-work checks. Every other windowless record, including one with a
 #   spawn_gen, a non-tmux backend, or an ambiguous field, still faces the
 #   validator and refuses.
+# An explicit endpoint_cleared=<reason> stamp on a record with no window= line
+# is accepted as stronger agent-less evidence than a dead window: it records a
+# close already performed, so teardown proceeds with no flag and no --force,
+# and no endpoint command is issued. bin/fm-backend.sh's
+# fm_backend_validate_task_endpoint owns the stamp's shape and is the only
+# reader that accepts it (--allow-cleared). The stamp never relaxes the
+# unlanded-work refusal, which only --force can authorize.
 #
 # Transient / stale worktree git lock recovery (teardown-lock-race): a crew process
 # killed mid-git-operation can leave a .git/worktrees/<wt>/index.lock (or, for a
@@ -512,6 +521,15 @@ fm_backlog_record_present "$META" "task record" "$STATE" || {
 }
 TEARDOWN_META_KIND=$(fm_meta_get "$META" kind)
 [ -n "$TEARDOWN_META_KIND" ] || TEARDOWN_META_KIND=ship
+# An explicit endpoint_cleared stamp on a record with no window means the
+# endpoint was already closed, so there is no live incarnation left to identify
+# and neither the spawn_gen gate below nor the endpoint probe needs to run. Read
+# it here, ahead of the incarnation gate; the endpoint validator re-affirms the
+# same value later.
+TEARDOWN_ENDPOINT_CLEARED=
+if [ -z "$(fm_backend_meta_exact_value "$META" window 2>/dev/null || true)" ]; then
+  TEARDOWN_ENDPOINT_CLEARED=$(fm_backend_meta_endpoint_cleared_value "$META" 2>/dev/null || true)
+fi
 # Retiring a persistent secondmate is main's alone in both postures; the kind
 # is read under the metadata lock (role partition: bin/fm-lease-lib.sh).
 [ "$TEARDOWN_META_KIND" != secondmate ] || fm_lease_forbid_branch "secondmate retirement (fm-teardown)"
@@ -584,10 +602,11 @@ if [ "$TEARDOWN_BACKLOG_APPLIES" = 1 ]; then
       # checks below.
       TEARDOWN_WINDOWLESS=1
       TEARDOWN_LEGACY_PENDING=1
-    elif [ "$TEARDOWN_LEGACY_GEN_COUNT" = 0 ] && [ "$LEGACY_RECORD_GIVEN" = 1 ]; then
-      # A record that predates the incarnation field: acceptance is gated later,
-      # once the recorded endpoint is known, so its state can be confirmed dead
-      # or agent-less before any cleanup decision is made.
+    elif [ "$TEARDOWN_LEGACY_GEN_COUNT" = 0 ] \
+         && { [ "$LEGACY_RECORD_GIVEN" = 1 ] || [ -n "$TEARDOWN_ENDPOINT_CLEARED" ]; }; then
+      # A record that predates the incarnation field, or one whose endpoint was
+      # already cleared: acceptance is gated later, once the recorded endpoint is
+      # known cleared or confirmed dead or agent-less, before any cleanup decision.
       TEARDOWN_LEGACY_PENDING=1
     elif [ "$TEARDOWN_LEGACY_GEN_COUNT" = 0 ]; then
       echo "error: task $ID's record has no spawn_gen that identifies one exact incarnation ($FM_BACKLOG_TRANSITION_ERROR); refusing automatic teardown - relaunch the task to publish an unambiguous incarnation, then retry teardown, or pass --legacy-record once its recorded endpoint is confirmed dead or agent-less" >&2
@@ -1110,11 +1129,14 @@ if [ "$TEARDOWN_WINDOWLESS" = 1 ]; then
   BACKEND=tmux
   T=
 else
-  fm_backend_validate_task_endpoint "$META" "$ID" || exit 1
+  fm_backend_validate_task_endpoint "$META" "$ID" --allow-cleared || exit 1
   BACKEND=$FM_BACKEND_VALIDATED_BACKEND
   T=$FM_BACKEND_VALIDATED_TARGET
-  [ "$BACKEND" != orca ] || T_ORCA=$T
+  TEARDOWN_ENDPOINT_CLEARED=$FM_BACKEND_VALIDATED_ENDPOINT_CLEARED
+  if [ "$BACKEND" = orca ] && [ -z "$TEARDOWN_ENDPOINT_CLEARED" ]; then T_ORCA=$T; fi
 fi
+TEARDOWN_WINDOW_DISPLAY=${T:-none}
+[ -z "$TEARDOWN_ENDPOINT_CLEARED" ] || TEARDOWN_WINDOW_DISPLAY="cleared:$TEARDOWN_ENDPOINT_CLEARED"
 # The recorded backend, including every sibling its adapter sources, has to
 # be readable before the first destructive step. --force does not override
 # this. A forced descendant is proved in validate_firstmate_home_children_removal.
@@ -1166,7 +1188,11 @@ MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 # passed, immediately before the close marker binds to it, so any refusal
 # leaves the record byte-identical.
 if [ "$TEARDOWN_LEGACY_PENDING" = 1 ]; then
-  if [ "$TEARDOWN_WINDOWLESS" = 1 ]; then
+  if [ -n "$TEARDOWN_ENDPOINT_CLEARED" ]; then
+    # The record's own explicit cleared stamp is stronger agent-less evidence
+    # than a dead window, so no endpoint probe is needed or possible.
+    TEARDOWN_LEGACY_ENDPOINT=cleared
+  elif [ "$TEARDOWN_WINDOWLESS" = 1 ]; then
     TEARDOWN_LEGACY_ENDPOINT=missing
   else
     TEARDOWN_LEGACY_ENDPOINT=$(fm_backend_agent_state "$BACKEND" "$T")
@@ -2390,11 +2416,12 @@ require_exclusive_task_worktree_slot() {
 # Positive slot ownership, read from the claim the task that took the slot wrote
 # into the slot itself (bin/fm-wake-lib.sh owns the claim and its states).
 #
-# The record scan above proves that no OTHER task record names this slot. It
-# cannot prove that THIS record is not the stale one, because the task that took
-# the slot next may leave no record this scan can reach: its own worker may have
-# exited and its record been cleaned up, or it may belong to a home this machine
-# does not register. The claim closes that gap from the other side - it names the
+# For a claim naming this task, or an absent claim, the record scan proves that
+# no OTHER task record names this slot. That scan cannot prove this record still
+# owns it, because the task that took the slot next may leave no record this
+# scan can reach: its own worker may have exited and its record been cleaned up,
+# or it may belong to a home this machine does not register. The claim closes
+# that gap from the other side - it names the
 # task that actually took the slot, and it is written under the same project lock
 # that allocates it - so a claim naming another task is proof the slot was
 # reassigned after this record was written.
@@ -2972,12 +2999,15 @@ preflight_descendant_treehouse_slots() {
     if ! fm_treehouse_pool_slot "$project" "$worktree"; then
       continue
     fi
-    fm_backend_validate_task_endpoint "$meta" "$task_id" || return 1
-    require_exclusive_worktree_slot_record "$meta" "$task_id" "$state" "$worktree" || return 1
+    fm_backend_validate_task_endpoint "$meta" "$task_id" --allow-cleared || return 1
     owner_rc=0
     require_owned_worktree_slot_record "$task_id" "$worktree" || owner_rc=$?
     case "$owner_rc" in
-      0|"$TEARDOWN_SLOT_REASSIGNED_RC") ;;
+      0)
+        require_exclusive_worktree_slot_record \
+          "$meta" "$task_id" "$state" "$worktree" || return 1
+        ;;
+      "$TEARDOWN_SLOT_REASSIGNED_RC") ;;
       *) return 1 ;;
     esac
   done
@@ -2990,7 +3020,7 @@ validate_firstmate_home_children_removal() {
   for child_meta in "$sub_state"/*.meta; do
     [ -e "$child_meta" ] || continue
     child_id=$(basename "$child_meta" .meta)
-    fm_backend_validate_task_endpoint "$child_meta" "$child_id" || return 1
+    fm_backend_validate_task_endpoint "$child_meta" "$child_id" --allow-cleared || return 1
     validate_pr_poll_cleanup "$sub_state" "$child_id" || return 1
     child_wt=$(meta_value "$child_meta" worktree)
     child_kind=$(meta_value "$child_meta" kind)
@@ -3131,10 +3161,10 @@ preflight_firstmate_home_herdr_children() {  # <home>
   for child_meta in "$sub_state"/*.meta; do
     [ -e "$child_meta" ] || continue
     child_id=$(basename "$child_meta" .meta)
-    fm_backend_validate_task_endpoint "$child_meta" "$child_id" || return 1
+    fm_backend_validate_task_endpoint "$child_meta" "$child_id" --allow-cleared || return 1
     child_backend=$FM_BACKEND_VALIDATED_BACKEND
     child_target=$FM_BACKEND_VALIDATED_TARGET
-    if [ "$child_backend" = herdr ]; then
+    if [ "$child_backend" = herdr ] && [ -z "$FM_BACKEND_VALIDATED_ENDPOINT_CLEARED" ]; then
       teardown_herdr_preflight_target "$child_target" "$child_id" || return 1
     fi
     child_kind=$(meta_value "$child_meta" kind)
@@ -3323,8 +3353,10 @@ remove_secondmate_registry_entry() {
   return "$rc"
 }
 
-require_exclusive_task_worktree_slot || exit 1
 require_owned_task_worktree_slot || exit 1
+if teardown_owns_worktree; then
+  require_exclusive_task_worktree_slot || exit 1
+fi
 
 validate_pr_poll_cleanup "$STATE" "$ID" || exit 1
 
@@ -3343,7 +3375,7 @@ if [ "$KIND" = secondmate ]; then
     preflight_descendant_task_locks "$HOME_PATH" || exit 1
     validate_firstmate_home_children_removal "$HOME_PATH" || exit 1
     preflight_descendant_treehouse_slots || exit 1
-    if [ "$BACKEND" = herdr ]; then
+    if [ "$BACKEND" = herdr ] && [ -z "$TEARDOWN_ENDPOINT_CLEARED" ]; then
       teardown_herdr_preflight_target "$T" "$ID" || exit 1
     fi
     preflight_firstmate_home_herdr_children "$HOME_PATH" || exit 1
@@ -3457,11 +3489,29 @@ fi
 # refuses before any destructive step.
 TEARDOWN_HERDR_SESSION=
 TEARDOWN_HERDR_PANE=
-if [ "$BACKEND" = herdr ]; then
-  teardown_herdr_preflight_target "$T" "$ID" || exit 1
-  fm_backend_herdr_parse_target "$T" || exit 1
-  TEARDOWN_HERDR_SESSION=$FM_BACKEND_HERDR_SESSION
-  TEARDOWN_HERDR_PANE=$FM_BACKEND_HERDR_PANE
+TEARDOWN_HERDR_REASSIGNED_DEAD=0
+if [ "$BACKEND" = herdr ] && [ -z "$TEARDOWN_ENDPOINT_CLEARED" ]; then
+  fm_backend_source herdr || true
+  if fm_backend_herdr_parse_target "$T"; then
+    TEARDOWN_HERDR_SESSION=$FM_BACKEND_HERDR_SESSION
+    TEARDOWN_HERDR_PANE=$FM_BACKEND_HERDR_PANE
+    if [ "$TEARDOWN_SLOT_REASSIGNED" = 1 ] \
+       && [ "$(fm_backend_herdr_pane_presence_state "$TEARDOWN_HERDR_SESSION" "$TEARDOWN_HERDR_PANE")" = dead ]; then
+      # A reassigned slot is no longer this task's to kill or return; when its
+      # Herdr pane is already a dead husk, record and journal cleanup need no
+      # presentation-order lock. Claim-first teardown used to refuse at the
+      # exclusive scan before ever acquiring this lock; finishing reassigned
+      # cleanup without it keeps concurrent cross-home recovery from losing a
+      # 5s presentation-lock race to stale-record teardown.
+      TEARDOWN_HERDR_REASSIGNED_DEAD=1
+    fi
+  fi
+  if [ "$TEARDOWN_HERDR_REASSIGNED_DEAD" != 1 ]; then
+    teardown_herdr_preflight_target "$T" "$ID" || exit 1
+    fm_backend_herdr_parse_target "$T" || exit 1
+    TEARDOWN_HERDR_SESSION=$FM_BACKEND_HERDR_SESSION
+    TEARDOWN_HERDR_PANE=$FM_BACKEND_HERDR_PANE
+  fi
 fi
 
 BACKLOG_CLOSED=0
@@ -3667,6 +3717,14 @@ if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
   else
     echo "warning: herdr presentation focus lock unavailable; refusing a concurrent focus-unsafe pane close" >&2
   fi
+elif [ -n "$TEARDOWN_ENDPOINT_CLEARED" ]; then
+  # The record already carries an explicit cleared stamp, so there is no live
+  # endpoint left to close; the cleared contract is the whole endpoint proof.
+  # Any leftover presentation journal is stale for the same reason.
+  rm -f "$HERDR_PRESENTATION_JOURNAL"
+  :
+elif [ "$TEARDOWN_HERDR_REASSIGNED_DEAD" = 1 ]; then
+  rm -f "$HERDR_PRESENTATION_JOURNAL"
 elif [ "$BACKEND" = herdr ]; then
   if teardown_herdr_session_lock_held "$TEARDOWN_HERDR_SESSION"; then
     fm_backend_herdr_kill_serialized "$TEARDOWN_HERDR_SESSION" "$TEARDOWN_HERDR_PANE" 2>/dev/null || true
@@ -3679,11 +3737,18 @@ elif [ "$BACKEND" != orca ] && [ "$TEARDOWN_WINDOWLESS" != 1 ]; then
 fi
 if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
   if [ "$(fm_backend_herdr_pane_agent_state "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE")" = dead ]; then
-    rm -f "$HERDR_PRESENTATION_JOURNAL"
+    fm_backend_source herdr || true
+    if fm_backend_herdr_projection_workspace_remove_focus_preserving \
+        "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_WORKSPACE"; then
+      rm -f "$HERDR_PRESENTATION_JOURNAL"
+    else
+      echo "error: herdr projection workspace $HERDR_PRESENTATION_WORKSPACE for $ID is not confirmed gone although its task pane is; retaining every durable task record and the presentation journal so a rerun can remove the workspace before it is restored" >&2
+      exit 1
+    fi
   else
     echo "warning: exact herdr task-pane close could not be confirmed for $ID; retaining the presentation journal and attempting no workspace cleanup" >&2
   fi
-elif [ "$BACKEND" = herdr ] \
+elif [ "$BACKEND" = herdr ] && [ -z "$TEARDOWN_ENDPOINT_CLEARED" ] \
      && { [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; }; then
   echo "warning: herdr presentation journal for $ID was not retired by its close; no workspace cleanup was attempted" >&2
 fi
@@ -3693,7 +3758,7 @@ fi
 # the locked close. Only a structured not-found proves the pane gone; unknown
 # presence, missing or malformed endpoint identity, and missing confirmation
 # machinery all refuse.
-if [ "$BACKEND" = herdr ]; then
+if [ "$BACKEND" = herdr ] && [ -z "$TEARDOWN_ENDPOINT_CLEARED" ]; then
   fm_backend_source herdr || true
   if ! declare -F fm_backend_herdr_endpoint_confirmed_gone >/dev/null 2>&1; then
     echo "error: herdr endpoint confirmation is unavailable for $ID; retaining every durable task record" >&2
@@ -3735,7 +3800,9 @@ if [ "$KIND" = secondmate ]; then
 fi
 remove_grok_turnend_auth "$STATE" "$ID" || exit 1
 remove_kimi_turnend_auth "$STATE" "$ID" || exit 1
-fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
+if [ -z "$TEARDOWN_ENDPOINT_CLEARED" ]; then
+  fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
+fi
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
@@ -3775,6 +3842,7 @@ rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
   "$STATE/$ID.control-relaunch" "$STATE/$ID.control-relaunch.meta-prior" \
   "$STATE/$ID.control-relaunch.brief-prior" "$STATE/$ID.control-relaunch.note" \
   "$STATE/$ID.reconcile-nudged" "$STATE/$ID.gemini-settings.json" "$STATE/$ID.devin-config.json" \
+  "$STATE/$ID.openhands-env" \
   "$STATE/.$ID.branch-outcome-index" \
   "$STATE/.secondmate-relaunch-$ID" "$STATE/.secondmate-relaunch-bound-$ID"
 # The steering inbox (bin/fm-task-inbox-lib.sh) is runtime state for the
@@ -3783,7 +3851,7 @@ rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
 # state/<id>.git-hooks is the spawn-owned commit-msg strip directory, left
 # read-only by its installer.
 chmod u+w "$STATE/$ID.git-hooks" 2>/dev/null || true
-rm -rf "$STATE/$ID.inbox" "$STATE/$ID.git-hooks"
+rm -rf "$STATE/$ID.inbox" "$STATE/$ID.git-hooks" "$STATE/$ID.openhands" "$STATE/$ID.openhands-home"
 # A presentation journal the close path left behind is orphaned once the
 # recorded pane is proven gone (the Herdr gate above) unless it still names a
 # live projected workspace - a version 2 binding of some other pane, or a
@@ -3829,6 +3897,12 @@ else
 fi
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
+# Free this task's cross-home claims now that its work is landed and its record
+# is gone (bin/fm-claim.sh owns the claim contract). Best-effort: the claim
+# store is machine-wide, so a failure here must not turn a confirmed cleanup
+# into a false failure - a leaked claim self-heals through the next acquire's
+# stale reclaim.
+"$SCRIPT_DIR/fm-claim.sh" release-task "$ID" --home "$FM_HOME" >/dev/null 2>&1 || true
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi
@@ -3838,10 +3912,10 @@ if [ -d "$STATE" ]; then
   "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
 fi
 if [ "$TEARDOWN_LEGACY_ACCEPTED" = 1 ]; then
-  echo "teardown $ID complete (window ${T:-none}, worktree $WT, legacy record accepted without spawn_gen: endpoint $TEARDOWN_LEGACY_ENDPOINT, incarnation $TEARDOWN_META_SPAWN_GEN)"
+  echo "teardown $ID complete (window $TEARDOWN_WINDOW_DISPLAY, worktree $WT, legacy record accepted without spawn_gen: endpoint $TEARDOWN_LEGACY_ENDPOINT, incarnation $TEARDOWN_META_SPAWN_GEN)"
 elif teardown_owns_worktree; then
-  echo "teardown $ID complete (window ${T:-none}, worktree $WT)"
+  echo "teardown $ID complete (window $TEARDOWN_WINDOW_DISPLAY, worktree $WT)"
 else
-  echo "teardown $ID complete (window ${T:-none}; pool slot $WT left to task $TEARDOWN_SLOT_REASSIGNED_TO${TEARDOWN_SLOT_REASSIGNED_HOME:+ (home $TEARDOWN_SLOT_REASSIGNED_HOME)}, which it was reassigned to)"
+  echo "teardown $ID complete (window $TEARDOWN_WINDOW_DISPLAY; pool slot $WT left to task $TEARDOWN_SLOT_REASSIGNED_TO${TEARDOWN_SLOT_REASSIGNED_HOME:+ (home $TEARDOWN_SLOT_REASSIGNED_HOME)}, which it was reassigned to)"
 fi
 backlog_refresh_reminder

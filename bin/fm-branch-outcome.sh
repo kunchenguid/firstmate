@@ -323,7 +323,7 @@ rebuild_outcome_indexes() {
        ((.statusEndpoint // "") | tostring), (.statusIdent // "")]
     | @tsv
   ' "$STORE") || return 1
-  while IFS=$(printf '\t') read -r task seq epoch endpoint ident; do
+  while IFS=$'\t' read -r task seq epoch endpoint ident; do
     [ -n "$task" ] || continue
     if [ -z "$endpoint" ] || [ -z "$ident" ]; then
       f="$STATE/$task.status"

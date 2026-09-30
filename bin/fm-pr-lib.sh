@@ -566,8 +566,8 @@ fm_pr_poll_prepare() {
     || [ "$FM_PR_DATA_PATH" != "$path" ] \
     || [ "$FM_PR_DATA_NUMBER" != "$number" ] \
     || ! cp "$template" "$FM_PR_POLL_CHECK_TMP" \
-    || ! chmod 0600 "$FM_PR_POLL_CHECK_TMP" \
-    || ! fm_pr_private_file_valid "$FM_PR_POLL_CHECK_TMP" 600 "$FM_PR_POLL_STATE_DEVICE" \
+    || ! chmod 0700 "$FM_PR_POLL_CHECK_TMP" \
+    || ! fm_pr_private_file_valid "$FM_PR_POLL_CHECK_TMP" 700 "$FM_PR_POLL_STATE_DEVICE" \
     || ! cmp -s "$template" "$FM_PR_POLL_CHECK_TMP"; then
     fm_pr_poll_cleanup
     return 1
@@ -678,7 +678,7 @@ fm_pr_poll_artifacts_content_valid() {
   data="$state/$id.pr-poll"
   registration="$state/$id.pr-poll-registration"
   meta="$state/$id.meta"
-  fm_pr_private_file_valid "$check" 600 "$state_device" || return 1
+  fm_pr_private_file_valid "$check" 700 "$state_device" || return 1
   fm_pr_private_file_valid "$data" 600 "$state_device" || return 1
   fm_pr_private_file_valid "$registration" 600 "$state_device" || return 1
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
@@ -1165,7 +1165,7 @@ fm_pr_poll_retirement_check_valid() {
   local state=$1 id=$2 state_device check check_hash check_identity
   state_device=$(fm_pr_file_device "$state") || return 1
   check="$state/$id.check.sh"
-  fm_pr_private_file_valid "$check" 600 "$state_device" || return 1
+  fm_pr_private_file_valid "$check" 700 "$state_device" || return 1
   check_hash=$(fm_pr_sha256 "$check") || return 1
   check_identity=$(fm_pr_file_identity "$check") || return 1
   [ "$check_hash" = "$FM_PR_RETIRE_TEMPLATE_HASH" ] || return 1
@@ -1197,9 +1197,9 @@ fm_pr_poll_retirement_state_valid() {
   [ "$has_data" -eq 0 ] || fm_pr_poll_retirement_data_valid "$state" "$id"
 }
 
-fm_pr_poll_retirement_remove_exact() {
-  local path=$1 state_device=$2 expected_identity=$3 expected_hash=$4
-  fm_pr_private_file_valid "$path" 600 "$state_device" || return 1
+fm_pr_poll_retirement_remove_exact() {  # <path> <state-device> <expected-identity> <expected-hash> [<mode>, default 600; the executable poll check is 700]
+  local path=$1 state_device=$2 expected_identity=$3 expected_hash=$4 mode=${5:-600}
+  fm_pr_private_file_valid "$path" "$mode" "$state_device" || return 1
   [ "$(fm_pr_file_identity "$path")" = "$expected_identity" ] || return 1
   [ "$(fm_pr_sha256 "$path")" = "$expected_hash" ] || return 1
   rm -f -- "$path" || return 1
@@ -1291,7 +1291,7 @@ fm_pr_poll_retirement_recover_one() {
   receipt_identity=$FM_PR_RETIRE_RECEIPT_IDENTITY
   if [ -e "$check" ] || [ -L "$check" ]; then
     fm_pr_poll_retirement_remove_exact "$check" "$state_device" \
-      "$FM_PR_RETIRE_CHECK_IDENTITY" "$FM_PR_RETIRE_TEMPLATE_HASH" || return 1
+      "$FM_PR_RETIRE_CHECK_IDENTITY" "$FM_PR_RETIRE_TEMPLATE_HASH" 700 || return 1
   fi
   if [ -e "$registration" ] || [ -L "$registration" ]; then
     fm_pr_poll_retirement_remove_exact "$registration" "$state_device" \

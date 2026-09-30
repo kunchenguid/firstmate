@@ -14,13 +14,25 @@
       "when": "The task is a big or ambiguous multi-file feature, a risky refactor, or work that requires holding many moving parts in mind.",
       "use": [
         { "harness": "claude", "model": "claude-sonnet-5", "effort": "high" },
-        { "harness": "codex", "model": "gpt-5.5", "effort": "high" }
+        { "harness": "codex", "model": "gpt-5.5", "effort": "high" },
+        { "harness": "cline", "model": "cline-pass/deepseek-v4-pro", "effort": "high", "provider": "cline-pass" }
       ],
-      "why": "Use a strong coding profile for big, ambiguous work; resolve the alternatives through quota-array-dispatch."
+      "why": "Use a strong coding profile for big, ambiguous work; resolve the alternatives through quota-array-dispatch. The ClinePass open-weights seat keeps a parallel lane open when a subscription quota dies."
+    },
+    {
+      "when": "The task is a medium-sized coding ship that can run in parallel with others and a ClinePass open-weights coding model is a cheaper seat than a frontier subscription.",
+      "use": [
+        { "harness": "cline", "model": "cline-pass/glm-5.3", "effort": "high", "provider": "cline-pass" },
+        { "harness": "cline", "model": "cline-pass/kimi-k2.7-code", "effort": "high", "provider": "cline-pass" },
+        { "harness": "cline", "model": "cline-pass/deepseek-v4-flash", "effort": "xhigh", "provider": "cline-pass" }
+      ],
+      "why": "Use the ClinePass pool as a third coding lane for medium ships so a scarce frontier or Gemini seat is not overloaded."
     }
   ],
   "default": [
     { "harness": "codex", "model": "gpt-5.5", "effort": "medium" },
-    { "harness": "pi", "model": "anthropic/claude-sonnet-5", "effort": "medium", "provider": "claude" }
-  ]
+    { "harness": "pi", "model": "anthropic/claude-sonnet-5", "effort": "medium", "provider": "claude" },
+    { "harness": "cline", "model": "cline-pass/deepseek-v4-flash", "effort": "high", "provider": "cline-pass" }
+  ],
+  "providerCaps": { "default": 4 }
 }

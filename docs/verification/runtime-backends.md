@@ -460,7 +460,8 @@ That verification is point-in-time rather than a durable guarantee, because a co
 One limitation belongs beside that result.
 An intermediate arm run against an isolated `CLAUDE_CONFIG_DIR` holding only a copied `.claude.json` cleared the trust dialog but then surfaced the separate machine-scoped Bypass Permissions warning.
 That warning rendered in the same shape as the trust dialog, with the selection cursor on `No, exit` and the footer `Enter to confirm . Esc to cancel`, so a sent Enter would end that worker too.
-That gate is not a production blocker, because a normal environment has already accepted it and the treatment arm above ran against the real config and saw neither dialog.
+That gate is not a production blocker for a launch against the ambient store, because a normal environment has already accepted it and the treatment arm above ran against the real config and saw neither dialog.
+It does reach production for a spawn seated on its own store with `bin/fm-spawn.sh --claude-config-dir`, whose preparation `.agents/skills/harness-adapters/references/harness/claude.md` owns under "Preparing a config seat".
 This change does not address that warning and does not claim to.
 
 ### Secondmate homes
@@ -798,6 +799,30 @@ tests/fm-composer-codex-idle-live-e2e.test.sh
 
 The verification machine runs its fleet on Herdr and has no tmux installed, so on 2026-09-15 that guard reported `skip: live: tmux absent` there, and the Herdr capture above is this entry's live evidence.
 The guard also notes whether the starfield and the placeholder were actually drawn during its read, because codex need not animate them under every model or mode; a refresh on a tmux host should record that note beside the verdict rather than assume the starfield was exercised.
+
+### 2026-09-20 agy identity-gated composer, and the exit path's empty proof
+
+agy draws its composer as a bare `>` row above a full-width `─` rule; the dead-shell rule read that `unknown`, which made `bin/fm-control.sh exit` unable to type `/quit` into a wedged or quota-dead agy worker (issue fm-agy-exit-composer-gap).
+The shared classifier (`bin/fm-composer-lib.sh`) now learns the agy shape, gated on a live agy identity exactly like pi's separated pair: a live agy identity (tmux foreground process, herdr `agent get`) reads the row `empty` when nothing follows the glyph and `pending` when styled text does, while `probe-absent` and any non-agy identity keep the `unknown` dead-shell verdict.
+`tests/fm-composer-lib.test.sh` pins the byte-capture matrix (live identity, `probe-absent`, non-agy identity, typed pending, plain `styled=0` degradation, an unanchored transcript quote, the trust-dialog option, and the pane-floor fallback), and `tests/fm-control.test.sh` drives a real `exit` and a real pending-refusal through a live-agy tmux pane.
+
+The live half was verified on 2026-09-20 against real `agy 1.2.7` on `tmux 3.4`, Linux x64, through the agy live guard:
+
+```sh
+FM_AGY_SIGNALS_LIVE=1 FM_LIVE=1 bin/fm-test-run.sh tests/fm-agy-signals-live-e2e.test.sh
+```
+
+Observed output (the guard also answered the workspace-trust dialog and did a real steer/interrupt/exit cycle):
+
+```text
+ok - the real agy busy footer matches fm_busy_agy_tail_busy in flight
+ok - the real agy worker processed its launch prompt
+ok - the shared classifier reads the real agy composer empty only with a live agy identity
+ok - a single Escape cancels the real agy turn
+ok - /quit stops the real agy process
+```
+
+The identity-gated assertion reuses the settled idle capture, so it is token-free and runs whenever the opt-in guard runs; its `probe-absent` companion is the negative that keeps the dead-shell rule honest for every non-agy pane.
 
 ## Steering-inbox doorbell
 
@@ -2364,3 +2389,41 @@ A throwaway scout was spawned through `bin/fm-spawn.sh --scout --harness omp --m
 6. `bin/fm-control.sh <id> exit` stopped the agent and `bin/fm-teardown.sh` returned the worktree and closed the item.
 
 `FM_OMP_LIVE_E2E=1 tests/fm-omp-primary-live-e2e.test.sh` refreshes the primary evidence; the worker path above is refreshed by repeating the scout dispatch after any omp upgrade.
+
+## Provider quota-wall classification
+
+A worker parked on a provider quota wall must not read as working: the harness is alive and painting a retry modal while the submitted turn cannot advance.
+`bin/fm-busy-lib.sh` classifies that rendered wall as `quota` over an otherwise-busy task, and `bin/fm-crew-state.sh` surfaces it as `state: quota` (source `pane`) instead of `working`, so supervision sees a stalled worker rather than a healthy one.
+The signal is built from two independent rendered families - a limit phrase and a retry/reset phrase - within the last few non-empty lines, so no single vendor string is load-bearing and ordinary worker output does not match.
+
+Verified on 2026-09-20 with opencode 1.18.31 on Linux, driving the real installed OpenCode TUI against a local 429 stub provider so its own retry modal renders with no model tokens spent:
+
+```sh
+bin/fm-test-run.sh tests/fm-quota-wall-live-e2e.test.sh
+```
+
+Observed output:
+
+```text
+ok - a busy OpenCode worker without a rendered wall reads working
+ok - OpenCode 1.18.31 real 429 quota retry modal classifies as quota, not working
+```
+
+The real modal OpenCode painted for the stub's quota error, captured from the pane:
+
+```text
+⬝⬝⬝⬝■■■■ weekly usage limit reached. It will reset in 1 day 14 hours [retrying attempt #1]            esc interrupt
+```
+
+`tests/fm-crew-state.test.sh` pins the logic portably over a synthetic pane transcript, including the divergence cases where only one family, or ordinary worker prose, never reads `quota`.
+
+## OpenHands CLI
+
+Crewmate and scout adapter only, verified 2026-09-20 with OpenHands CLI 1.16.0 / SDK v1.21.0 on Linux through tmux.
+The dedicated record at [`docs/verification/openhands.md`](openhands.md) owns the dated commands, pane captures, and remaining gaps.
+Refresh with:
+
+```sh
+bin/fm-test-run.sh tests/fm-openhands-harness.test.sh
+FM_OPENHANDS_SIGNALS_LIVE=1 bin/fm-test-run.sh tests/fm-openhands-signals-live-e2e.test.sh
+```

@@ -174,6 +174,13 @@ fm_quota_provider_for_harness() {
     kimi)         printf 'kimi\n' ;;
     cursor)       printf 'cursor\n' ;;
     muse)         printf 'meta\n' ;;
+    # ClinePass (provider cline-pass, harness cline) is a subscription the
+    # current quota-axi snapshot does not model, so this maps to its own family
+    # name and quota-axi reports it as unknown. Unmodeled provider quota is
+    # disclosed uncertainty, not a refusal: the agent-driven quota-array-dispatch
+    # procedure keeps an unmodeled candidate eligible, while this helper's
+    # known-positive-only rule skips it rather than dying on an unknown harness.
+    cline)        printf 'cline-pass\n' ;;
     *)            return 1 ;;
   esac
 }

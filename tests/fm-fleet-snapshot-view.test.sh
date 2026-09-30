@@ -1152,8 +1152,52 @@ EOF
   pass "home-summary excludes kind=secondmate from unowned_current and terminal_in_flight"
 }
 
+test_large_payloads_compose_through_files() {
+  # Regression: jq payloads rode kernel argv, and one argument string is capped
+  # at 128KB (MAX_ARG_STRLEN) regardless of ARG_MAX, so a big backlog or a long
+  # status fold crashed the snapshot with "Argument list too long".
+  local home fakebin out big
+  home=$(make_home large-payloads)
+  big=$(printf 'x%.0s' $(seq 1 200000))
+  {
+    printf '## In flight\n'
+    printf -- '- [ ] big-task - Big Task (repo: alpha) (kind: ship) (since 2026-07-07)\n'
+    printf '  %s\n' "$big"
+  } > "$home/data/backlog.md"
+  # kind=secondmate keeps the keyed fold exempt from lifecycle clearing, so
+  # this test asserts payload transport, not the reconciliation contract.
+  mkdir -p "$home/big-secondmate-home"
+  fm_write_meta "$home/state/big-task.meta" \
+    "window=firstmate:fm-big-task" \
+    "worktree=$home/big-secondmate-home" \
+    "project=$home/big-secondmate-home" \
+    "harness=codex" \
+    "kind=secondmate" \
+    "mode=secondmate" \
+    "home=$home/big-secondmate-home" \
+    "projects=alpha"
+  # A keyed decision whose summary alone exceeds the single-argument cap.
+  printf 'needs-decision [key=big]: %s\n' "$big" > "$home/state/big-task.status"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json) \
+    || fail "snapshot must compose a >128KB status fold through files"
+  printf '%s' "$out" | jq -e '
+    .tasks[] | select(.id == "big-task")
+    | (.hints.open_decisions[0].summary | length) >= 200000
+      and (.hints.last_event_text | length) > 200000
+  ' >/dev/null || fail "oversized per-task payloads must survive composition"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --contribution-input) \
+    || fail "contribution-input must compose a >128KB backlog through files"
+  printf '%s' "$out" | jq -e '
+    .backlog.present == true
+      and ([.backlog.records[] | select(.id == "big-task")] | length) == 1
+  ' >/dev/null || fail "oversized backlog must survive contribution-input composition"
+  pass "snapshot composes >128KB payloads through files, not argv"
+}
+
 test_empty_fleet_json
 test_fixture_snapshot_json
+test_large_payloads_compose_through_files
 test_home_summary_excludes_secondmate_from_child_inventory
 test_undated_captain_hold_phrasing_and_aging
 test_hold_buckets_are_total_and_text_blind
