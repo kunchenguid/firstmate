@@ -28,11 +28,10 @@
 # result, a durable report, and acknowledgement before counting a wake handled.
 # The turn is bounded by fm_exec_timed
 # (bin/fm-timeout-lib.sh), and the engine's descendants are snapshotted once a
-# second by default while it runs (FM_SUPERVISION_ENGINE_SNAPSHOT_SECONDS
-# sets positive seconds, a decimal fraction allowed), because an engine CLI
-# runs every tool command in a process group of its own that the bound's group
-# signal cannot reach: once the turn ends, any snapshotted descendant still
-# alive under the same identity is reaped (TERM, then KILL). The reap is best-effort for the
+# second while it runs, because an engine CLI runs every tool command in a
+# process group of its own that the bound's group signal cannot reach: once
+# the turn ends, any snapshotted descendant still alive under the same
+# identity is reaped (TERM, then KILL). The reap is best-effort for the
 # descendants observed while the turn ran, not a bound: a process that a tool
 # detaches into a process group of its own and that loses its ancestry to the
 # engine between two snapshots is never recorded and survives the turn, the
@@ -342,15 +341,12 @@ _fm_engine_reap() {
 # an engine its crashed predecessor left running.
 fm_supervision_engine_turn() {
   local engine=$1 model=$2 prompt=$3 message=$4 session=$5 mode=$6 timeout=$7 result=$8 errors=$9
-  local pid_file=${10:-} bin grace snapshot_seconds ledger watched rc home_phys root_phys state_phys identity recorded
+  local pid_file=${10:-} bin grace i ledger watched rc home_phys root_phys state_phys identity recorded
   local -a args
   bin=$(fm_supervision_engine_bin "$engine" 2>"$errors") || return 127
   case "$timeout" in ''|0*|*[!0-9]*) timeout=1200 ;; esac
   grace=${FM_SUPERVISION_ENGINE_GRACE:-30}
   case "$grace" in ''|0*|*[!0-9]*) grace=30 ;; esac
-  snapshot_seconds=${FM_SUPERVISION_ENGINE_SNAPSHOT_SECONDS:-1}
-  case "$snapshot_seconds" in ''|*[!0-9.]*|.*|*.|*.*.*) snapshot_seconds=1 ;; esac
-  case ${snapshot_seconds//[0.]/} in '') snapshot_seconds=1 ;; esac
   case "$engine" in
     claude)
       # The prompt is the first positional argument, ahead of the variadic
@@ -399,7 +395,14 @@ fm_supervision_engine_turn() {
       fi
     fi
     _fm_engine_snapshot_descendants "$watched" "$ledger"
-    sleep "$snapshot_seconds"
+    # Between the one-second snapshots the engine's exit is probed at a tenth
+    # of a second: the turn closes promptly when the engine dies while the
+    # process-table scans keep their one-second cadence.
+    i=0
+    while [ "$i" -lt 10 ] && fm_pid_alive "$watched"; do
+      sleep 0.1
+      i=$((i + 1))
+    done
   done
   wait "$watched"
   rc=$?

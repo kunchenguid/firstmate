@@ -138,12 +138,7 @@ chmod +x "$STUB"
 export FM_REPO="$ROOT"
 export FM_SUPERVISION_ENGINE_CLAUDE_BIN="$STUB"
 export FM_SUPERVISION_HOST_PRIMARY=claude
-export FM_POLL=0.5 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999
-# Fractional poll cadences keep the real poll loops while cutting the fixed
-# wait each park pays to notice its arm's close and each turn's descendant
-# snapshot pays to notice the engine's exit.
-export FM_SUPERVISION_HOST_POLL=0.2 FM_SUPERVISION_ENGINE_SNAPSHOT_SECONDS=0.2
-export FM_ARM_ATTACH_POLL=0.2
+export FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999
 # Keep the real engine watchdog/reaping path, but not its production grace in fixtures.
 export FM_SUPERVISION_ENGINE_GRACE=1
 export FM_ARM_CONFIRM_TIMEOUT=30
@@ -1034,7 +1029,7 @@ test_main_only_pass_through_leaves_the_successor_watcher_running() {
   [ "$(marker_kind "$home")" = downtime ] \
     || fail "successor: the pass-through claimed the close was being handled, so main's re-arm owner would not deliver it: $(cat "$home/state/.watcher-down")"
   pid=$(cat "$home/state/.watch.lock/pid")
-  sleep 1
+  sleep 2
   kill -0 "$pid" 2>/dev/null || fail "successor: the watcher exited after the pass-through (pid $pid)"
   [ "$(cat "$home/state/.watch.lock/pid" 2>/dev/null)" = "$pid" ] || fail "successor: the watcher lock moved after the pass-through"
   pass "host: a main-only pass-through leaves the successor watcher running and the close undelivered for main"
@@ -1521,13 +1516,15 @@ test_undelivered_dialog_is_fed_again_on_the_next_turn() {
   real_node=$(command -v node)
   cat > "$home/fakebin/node" <<SH
 #!/usr/bin/env bash
-if [ "\${2:-}" = wake-prompt ] && [ -e "\$FM_HOME/slow-render" ]; then echo 40 > "\$FM_HOME/park-clock"; fi
+if [ "\${2:-}" = wake-prompt ] && [ -e "\$FM_HOME/slow-render" ]; then echo 120 > "\$FM_HOME/park-clock"; fi
 exec "$real_node" "\$@"
 SH
   chmod +x "$home/fakebin/node"
   printf '{"hook_event_name":"UserPromptSubmit","prompt_id":"p1","prompt":"first ask"}' > "$home/mirror-seed.1"
   echo 0 > "$home/park-clock"
-  FM_TEST_SUPERVISION_HOST_CLOCK="$home/park-clock" FM_SUPERVISION_HOST_PARK_SECONDS=40 FM_SUPERVISION_HOST_TURN_TIMEOUT=20 FM_SUPERVISION_ENGINE_GRACE=1 start_session "$home"
+  # The park bound sits past every wall-clock check below, so a host that
+  # ignored the test clock could never reach a boundary inside this case.
+  FM_TEST_SUPERVISION_HOST_CLOCK="$home/park-clock" FM_SUPERVISION_HOST_PARK_SECONDS=120 FM_SUPERVISION_HOST_TURN_TIMEOUT=20 FM_SUPERVISION_ENGINE_GRACE=1 start_session "$home"
   park_again "$home"
   append_status "$home" 'first'
   wait_until 250 handled_at_least "$home" 1 || fail "mirror boundary: the first wake was not handled: $(cat "$home/state/.supervision-host.log")"
@@ -1714,7 +1711,7 @@ test_attended_latch_keeps_closes_on_main_and_records_recovery_off_main() {
   wait_until 250 handled_at_least "$home" $((handled + 1)) \
     || fail "latch: the successful probe was not handled: $(cat "$home/host.out"; tail -n 5 "$home/state/.supervision-host.log")"
   assert_re '	recovered	after a successful probe$' "$home/state/.supervision-host.log" "the ledger must record the recovery"
-  ! wait_until 10 host_exited "$home" || fail "a routine probe's recovery reached main: $(cat "$home/host.out")"
+  ! wait_until 20 host_exited "$home" || fail "a routine probe's recovery reached main: $(cat "$home/host.out")"
   assert_no_re '^supervision-host' "$home/host.out" "a recovery must stay off main"
   assert_grep 'cooldown=0' "$home/state/.supervision-host-health" "a successful probe must clear the latch"
   assert_grep 'errors=0' "$home/state/.supervision-host-health" "a successful probe must clear the error streak"
@@ -2043,9 +2040,12 @@ test_restarted_host_stops_what_a_killed_predecessor_left() {
 test_park_boundary_ends_the_park_before_the_hook_timeout() {
   local home token
   home=$(make_home boundary attended)
-  FM_SUPERVISION_HOST_PARK_SECONDS=3 FM_TEST_SUPERVISION_HOST_CLOCK="$home/park-clock" start_host "$home"
+  # The wall-clock bound must sit past the exit check: only the injected clock
+  # can reach the boundary in time, so a host ignoring it fails instead of
+  # passing on real elapsed seconds.
+  FM_SUPERVISION_HOST_PARK_SECONDS=60 FM_TEST_SUPERVISION_HOST_CLOCK="$home/park-clock" start_host "$home"
   wait_until 150 watcher_live "$home" || fail "boundary: the host never started a watcher cycle"
-  echo 3 > "$home/park-clock"
+  echo 60 > "$home/park-clock"
   wait_until 150 host_exited "$home" || fail "boundary: the host did not end its park"
   assert_re '^supervision-host: cycle boundary - ' "$home/host.out" "the park boundary must reach main as a host line"
   watcher_live "$home" && fail "the park boundary left the watcher running"
@@ -2062,11 +2062,13 @@ test_park_boundary_ends_the_park_before_the_hook_timeout() {
 # park runs on the test clock (FM_TEST_SUPERVISION_HOST_CLOCK), which the test
 # moves to the refusal window's opening (park bound minus the turn bound and
 # grace) before it releases the held turn, so the second close can never take
-# a turn of its own on any machine speed.
+# a turn of its own on any machine speed. The bound also stays well past every
+# wall-clock check in the case: a host that ignored the test clock would start
+# the second turn instead of silently passing at a wall-clock boundary.
 test_park_boundary_holds_under_back_to_back_closes() {
   # The turn bound is the one wall-clock bound left: it must cover the stub's
   # report work after release, so the product never kills the held turn.
-  local home park=36 turn=19 grace=1
+  local home park=300 turn=19 grace=1
   home=$(make_home boundary-busy away)
   echo held > "$home/stub-mode"
   mkfifo "$home/stub-release"
@@ -2102,9 +2104,11 @@ test_park_boundary_holds_under_back_to_back_closes() {
 # shim holds the render on a FIFO, and the test moves the park's test clock to
 # the refusal window's opening before releasing it, so the close passes the
 # arrival check and the pre-turn recheck must refuse on any machine speed. The
-# snapshot proves the successor arm it started can be checked afterwards.
+# snapshot proves the successor arm it started can be checked afterwards. The
+# park bound stays past the case's wall-clock checks, so an ignored test clock
+# would let the turn run and the engine-call assertions catch it.
 test_park_boundary_rechecked_just_before_the_engine_turn() {
-  local home real_node pid park=14 turn=3 grace=1
+  local home real_node pid park=120 turn=3 grace=1
   home=$(make_home boundary-late away)
   real_node=$(command -v node)
   mkfifo "$home/render-release"
@@ -2282,7 +2286,7 @@ test_first_cycle_status_streams_and_owner_options_reach_it() {
   wait_until 150 grep -qs '^watcher: started pid=' "$home/host.out" || fail "stream: the successor host never reported its cycle"
   assert_re "^watcher: started pid=[0-9]+ \\(beacon fresh\\) recovery-generation=$generation\$" "$home/host.out" \
     "the owner's predecessor must make the first cycle a handling successor of the pending generation"
-  sleep 1
+  sleep 3
   host_exited "$home" && fail "a handling successor re-announced the pending episode: $(cat "$home/host.out")"
   kill -TERM "$(awk -F '\t' '$1 == "host" { print $2 }' "$home/state/.supervision-host")"
   wait_until 200 host_exited "$home" || fail "stream: the successor host did not stop on TERM"
