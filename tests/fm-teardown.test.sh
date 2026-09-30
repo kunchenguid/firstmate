@@ -3738,6 +3738,119 @@ test_leaked_tasktmp_process_is_reaped() {
   pass "a leaked descendant process rooted under the task's per-task tasktmp is reaped by teardown too"
 }
 
+# Launch <script> the way chrome-devtools-axi launches its bridge: a detached
+# (new session) node child with ignored stdio that inherits the caller's
+# environment, here carrying the given task markers and session name (empty
+# leaves CHROME_DEVTOOLS_AXI_SESSION unset). Node rather than a system binary,
+# because macOS hides a platform binary's environment from `ps -E`. Echoes the
+# child pid.
+launch_detached_node() {  # <script> <cwd> <task-id> <home-tag> <session> [arg...]
+  local script=$1 cwd=$2 task_id=$3 home_tag=$4 session=$5
+  shift 5
+  if [ -n "$session" ]; then
+    export CHROME_DEVTOOLS_AXI_SESSION=$session
+  else
+    unset CHROME_DEVTOOLS_AXI_SESSION
+  fi
+  FM_TASK_ID=$task_id FM_TASK_HOME=$home_tag node -e '
+    const [script, cwd, ...rest] = process.argv.slice(1);
+    const child = require("child_process").spawn(process.execPath, [script, ...rest],
+      { detached: true, stdio: "ignore", cwd, env: process.env });
+    child.unref();
+    console.log(child.pid);' "$script" "$cwd" "$@"
+}
+
+test_task_browser_bridge_outside_roots_is_stopped() {
+  local case_dir rc outside bridge daemon stubborn tag other_marker own other_task other_home
+  local marked_daemon unset_session default_session stubborn_bridge stubborn_child stopping p
+  command -v node >/dev/null 2>&1 || fail "browser-bridge-outside-roots: test needs node"
+  case_dir=$(make_case browser-bridge-outside-roots)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  # A worker that ran `cd "$TMPDIR/x" && chrome-devtools-axi open ...` leaves a
+  # bridge whose working directory is outside both of Fix 2's roots.
+  outside="$case_dir/outside-tmp"
+  mkdir -p "$outside" "$case_dir/fake" "$case_dir/stubborn" "$case_dir/second-home"
+  bridge="$case_dir/fake/chrome-devtools-axi-bridge.js"
+  daemon="$case_dir/fake/shared-daemon.js"
+  printf '%s\n' 'setTimeout(() => {}, 300000);' > "$bridge"
+  cp "$bridge" "$daemon"
+  # A bridge that ignores TERM and holds a child in its own process group, so
+  # only the force-kill path can stop them; it writes the child pid to argv[2].
+  stubborn="$case_dir/stubborn/chrome-devtools-axi-bridge.js"
+  cat > "$stubborn" <<'JS'
+process.on("SIGTERM", () => {});
+const child = require("child_process").spawn(process.execPath,
+  ["-e", "process.on('SIGTERM', () => {}); setTimeout(() => {}, 300000);"], { stdio: "ignore" });
+require("fs").writeFileSync(process.argv[2], String(child.pid));
+setTimeout(() => {}, 300000);
+JS
+  tag=$(FM_ROOT="$ROOT" FM_HOME="${FM_HOME:-$ROOT}" bash -c \
+    '. "$FM_ROOT/bin/fm-backend-hometag-lib.sh" && fm_task_home_marker')
+  [ -n "$tag" ] || fail "browser-bridge-outside-roots: could not derive this home's marker"
+  # Another real home that runs from this same code root: its marker must differ,
+  # or the "another home" control below would prove nothing.
+  other_marker=$(FM_ROOT="$ROOT" FM_HOME="$case_dir/second-home" bash -c \
+    '. "$FM_ROOT/bin/fm-backend-hometag-lib.sh" && fm_task_home_marker')
+  [ -n "$other_marker" ] && [ "$other_marker" != "$tag" ] \
+    || fail "browser-bridge-outside-roots: two homes sharing one code root got the same marker ($tag)"
+
+  own=$(launch_detached_node "$bridge" "$outside" task-x1 "$tag" task-x1-session)
+  other_task=$(launch_detached_node "$bridge" "$outside" task-other "$tag" task-other-session)
+  other_home=$(launch_detached_node "$bridge" "$outside" task-x1 "$other_marker" task-x1-session)
+  # A shared daemon the worker happened to start carries the same markers, and
+  # its command line quotes the bridge path in a later argument; it is not a
+  # bridge and must survive.
+  marked_daemon=$(launch_detached_node "$daemon" "$outside" task-x1 "$tag" task-x1-session "$bridge")
+  # A default-session bridge carries this task's markers too, but another
+  # worker or the captain may share it, so it must survive.
+  unset_session=$(launch_detached_node "$bridge" "$outside" task-x1 "$tag" "")
+  default_session=$(launch_detached_node "$bridge" "$outside" task-x1 "$tag" default)
+  stubborn_bridge=$(launch_detached_node "$stubborn" "$outside" task-x1 "$tag" task-x1-stubborn \
+    "$case_dir/stubborn/child.pid")
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    [ -s "$case_dir/stubborn/child.pid" ] && break
+    sleep 0.2
+  done
+  stubborn_child=$(cat "$case_dir/stubborn/child.pid" 2>/dev/null || true)
+  for p in "$own" "$other_task" "$other_home" "$marked_daemon" "$unset_session" \
+    "$default_session" "$stubborn_bridge" "$stubborn_child"; do
+    case "$p" in ''|*[!0-9]*) fail "browser-bridge-outside-roots: a fixture process did not report its pid" ;; esac
+    kill -0 "$p" 2>/dev/null || fail "browser-bridge-outside-roots: fixture process $p did not start"
+  done
+  [ "$(ps -o pgid= -p "$stubborn_child" | tr -d '[:space:]')" = "$stubborn_bridge" ] \
+    || fail "browser-bridge-outside-roots: the stubborn bridge's child is not in the bridge's process group"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  for p in "$other_task" "$other_home" "$marked_daemon" "$unset_session" "$default_session"; do
+    if kill -0 "$p" 2>/dev/null; then
+      kill -KILL "$p" 2>/dev/null || true
+    else
+      kill -KILL "$own" "$stubborn_bridge" "$stubborn_child" 2>/dev/null || true
+      fail "browser-bridge-outside-roots: teardown stopped process $p, which is not this task's bridge"
+    fi
+  done
+  for p in "$own" "$stubborn_bridge" "$stubborn_child"; do
+    if kill -0 "$p" 2>/dev/null; then
+      kill -KILL "$own" "$stubborn_bridge" "$stubborn_child" 2>/dev/null || true
+      fail "browser-bridge-outside-roots: process $p of the task's own bridges survived teardown"
+    fi
+  done
+  expect_code 0 "$rc" "browser-bridge-outside-roots: teardown should still succeed"
+  stopping=$(grep -F "stopping browser bridge(s) started by task-x1:" "$case_dir/stderr" || true)
+  for p in "$own" "$stubborn_bridge"; do
+    case " $stopping " in
+      *" $p "*) ;;
+      *) fail "browser-bridge-outside-roots: teardown did not report stopping bridge $p: $stopping" ;;
+    esac
+  done
+  assert_grep "force-killing browser bridge $stubborn_bridge for task-x1" "$case_dir/stderr" \
+    "browser-bridge-outside-roots: the TERM-ignoring bridge was not force-killed"
+  pass "a task's named-session browser bridges started outside its roots are stopped by its task markers, a TERM-ignoring one with its process group; other tasks, another home sharing this code root, default-session bridges, and non-bridge processes are untouched"
+}
+
 test_lsof_absent_reaps_tmux_process_group() {
   local case_dir rc pid path_without_lsof
   case_dir=$(make_case lsof-absent-process-group-reap)
@@ -4338,6 +4451,7 @@ test_another_branchs_parked_run_is_never_touched
 test_own_autonomous_run_is_left_alone
 test_leaked_worktree_process_is_reaped
 test_leaked_tasktmp_process_is_reaped
+test_task_browser_bridge_outside_roots_is_stopped
 test_lsof_absent_reaps_tmux_process_group
 test_lsof_error_refuses_before_removal
 test_reused_pid_identity_is_not_force_killed

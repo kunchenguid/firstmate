@@ -1382,6 +1382,45 @@ SH
   done
 }
 
+# A ship worker's environment must carry both task markers, FM_TASK_ID and this
+# home's FM_TASK_HOME marker, because bin/fm-teardown.sh attributes a browser
+# bridge the task started by exactly that pair; an empty allowlist is where the
+# launch floor either holds them or loses them. The pane exports the fake pane
+# received are replayed before the emitted launch, as the real pane shell runs
+# them, and a probe harness prints what the agent would have started with.
+test_task_markers_reach_the_worker() {
+  local setting rec id out status probe launch preamble result expected tag
+  for setting in absent empty; do
+    id="markers-$setting"
+    rec=$(make_spawn_case "$id" codex "$id")
+    read_case_record "$rec"
+    [ "$setting" = empty ] && : > "$HOME_DIR/config/launch-env-allowlist"
+    probe="$CASE_DIR/probe.sh"
+    cat > "$probe" <<'SH'
+#!/bin/sh
+printf '%s\n' "${FM_TASK_ID-unset}" "${FM_TASK_HOME-unset}"
+SH
+    FM_TEST_PANE_LOG="$CASE_DIR/pane.log"
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" --harness "/bin/sh '$probe'")
+    status=$?
+    unset FM_TEST_PANE_LOG
+    expect_code 0 "$status" "allowlist=$setting spawn should succeed: $out"
+    tag=$(FM_HOME="$HOME_DIR" FM_ROOT="$ROOT" bash -c \
+      '. "$FM_ROOT/bin/fm-backend-hometag-lib.sh" && fm_task_home_marker')
+    [ -n "$tag" ] || fail "allowlist=$setting: could not derive the test home's marker"
+    preamble=$(grep '^export ' "$CASE_DIR/pane.log")
+    launch=$(cat "$LAUNCH_LOG")
+    result=$(env -i HOME="$HOME_DIR/user-home" PATH=/usr/bin:/bin TERM=xterm \
+      TMUX=synthetic-pane /bin/sh -c "$preamble
+$launch") || fail "allowlist=$setting emitted launch failed"
+    expected=$(printf '%s\n' "$id" "$tag")
+    [ "$result" = "$expected" ] \
+      || fail "allowlist=$setting worker task markers mismatch: expected $(printf '%s' "$expected" | tr '\n' ' '), got $(printf '%s' "$result" | tr '\n' ' ')"
+    pass "allowlist=$setting ship worker starts with FM_TASK_ID and this home's FM_TASK_HOME"
+  done
+}
+
 test_launch_environment_invalid_config_refuses() {
   local rec id bad out status
   id=env-invalid
@@ -1550,6 +1589,7 @@ SH
 }
 
 test_launch_environment_allowlist
+test_task_markers_reach_the_worker
 test_launch_environment_invalid_config_refuses
 test_launch_environment_inaccessible_config_refuses
 test_launch_environment_inherited_by_secondmate
